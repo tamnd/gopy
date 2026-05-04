@@ -108,6 +108,11 @@ linters:
           - gocognit
           - unparam
           - revive
+      # PyExc_* singletons keep CPython's exact spelling for source-shape
+      # parity; the underscore is part of the public API contract.
+      - path: errors/builtins\.go
+        linters:
+          - revive
 
 formatters:
   enable:

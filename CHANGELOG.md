@@ -11,6 +11,28 @@ folder; this file is the aggregated index.
 
 ## Unreleased
 
+## v0.3.0 - 2026-05-04
+
+See [`changelog/v0.3.0.md`](changelog/v0.3.0.md).
+
+* feat(errors): port `cpython/Python/errors.c` and the gating subset of
+  `cpython/Objects/exceptions.c`. Set, SetString, Format, Occurred,
+  Clear, Fetch, Restore, Raise, RaiseFrom, NormalizeException, Print,
+  AttachTraceback. BaseException class hierarchy with KeyError __str__
+  override.
+* feat(traceback): port `cpython/Python/traceback.c` data shape and
+  formatting. Entry, Push, Format, FormatException.
+* feat(errors/suggest): port `cpython/Python/suggestions.c`. SuggestAttr,
+  SuggestKey backed by bounded Levenshtein distance.
+* feat(gc): refcount-only path of `cpython/Python/gc.c`. Track, Untrack,
+  RegisterFinalizer, Finalize. Cycle collection deferred to v0.10.
+* feat(brc): field layout from `cpython/Python/brc.c`. Operations are
+  no-ops in the GIL build; the queue drains land in v0.14.
+* feat(state): skeleton of `cpython/Python/pystate.c`. Runtime,
+  Interpreter, Thread with the per-thread exception slot.
+* feat(objects): v0.3 placeholder str so exception args round-trip
+  through the protocol. Replaced by the unicodeobject port in v0.4.
+
 ## v0.2.0 - 2026-05-04
 
 See [`changelog/v0.2.0.md`](changelog/v0.2.0.md).
