@@ -46,7 +46,8 @@ func TestValidatePosEndColBeforeStartCol(t *testing.T) {
 }
 
 func TestValidateImportFromNegativeLevel(t *testing.T) {
-	imp := &ImportFrom{Level: -1}
+	neg := -1
+	imp := &ImportFrom{Level: &neg}
 	err := validateStmt(imp)
 	if err == nil || !strings.Contains(err.Error(), "Negative ImportFrom level") {
 		t.Fatalf("err = %v, want Negative ImportFrom level", err)
@@ -54,7 +55,8 @@ func TestValidateImportFromNegativeLevel(t *testing.T) {
 }
 
 func TestValidateImportFromZeroLevel(t *testing.T) {
-	imp := &ImportFrom{Level: 0, Names: Seq[*Alias]{{Name: "x"}}}
+	zero := 0
+	imp := &ImportFrom{Level: &zero, Names: Seq[*Alias]{{Name: "x"}}}
 	if err := validateStmt(imp); err != nil {
 		t.Fatalf("level=0: %v", err)
 	}
@@ -136,7 +138,7 @@ func TestValidateNilExprRejected(t *testing.T) {
 
 func TestValidateFunctionType(t *testing.T) {
 	ft := &FunctionType{
-		ArgTypes: Seq[Expr]{&Constant{Value: "int"}},
+		Argtypes: Seq[Expr]{&Constant{Value: "int"}},
 		Returns:  &Constant{Value: "None"},
 	}
 	if err := Validate(ft); err != nil {

@@ -14,9 +14,9 @@ func mkImport(names []string, level int, module string) *ast.ImportFrom {
 		aliases.Set(i, &ast.Alias{Name: n, Pos: ast.Pos{Lineno: 1}})
 	}
 	return &ast.ImportFrom{
-		Module: module,
+		Module: &module,
 		Names:  aliases,
-		Level:  level,
+		Level:  &level,
 		Pos:    ast.Pos{Lineno: 1},
 	}
 }

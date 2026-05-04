@@ -300,11 +300,34 @@ func emit(mod *module) ([]byte, error) {
 	// the interface a ctor satisfies (e.g. FunctionDef -> stmt).
 	sumOf := map[string]string{}
 	sumKind := map[string]bool{} // sum names
+	allTypes := map[string]bool{}
 	for _, d := range mod.Defs {
+		allTypes[d.Name] = true
 		if len(d.Sum) > 0 {
 			sumKind[d.Name] = true
 			for _, c := range d.Sum {
 				sumOf[c.Name] = d.Name
+			}
+		}
+	}
+	// Resolve ctor-vs-other-type Go-name collisions. The asdl has two
+	// kinds of clash:
+	//   1. stmt.Expr collides with the expr sum: rename to ExprStmt.
+	//   2. type_ignore.TypeIgnore collides with its own sum interface
+	//      (single-ctor sum): rename ctor to TypeIgnoreNode.
+	goNames := map[string]string{} // goName -> origin ("sum"/"ctor:<sumname>")
+	for _, d := range mod.Defs {
+		goNames[goName(d.Name)] = "sum"
+	}
+	for _, d := range mod.Defs {
+		for _, c := range d.Sum {
+			gn := goName(c.Name)
+			if owner, ok := goNames[gn]; ok && owner == "sum" {
+				if goName(d.Name) == gn {
+					c.Name += "Node"
+				} else {
+					c.Name += titleASCII(d.Name)
+				}
 			}
 		}
 	}
@@ -474,6 +497,15 @@ func primGo(name string) string { return primTypes[name] }
 
 // readIfExists is a small helper used by the test suite.
 func readIfExists(path string) ([]byte, error) { return os.ReadFile(path) }
+
+func titleASCII(s string) string {
+	if s == "" {
+		return s
+	}
+	r := []rune(s)
+	r[0] = unicode.ToUpper(r[0])
+	return string(r)
+}
 
 func goName(s string) string {
 	// asdl uses CamelCase for ctors and snake_case for sums and

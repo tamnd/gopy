@@ -114,7 +114,7 @@ func parse(ff *Features, body ast.Seq[ast.Stmt], filename string) error {
 		if !ok {
 			return nil
 		}
-		if imp.Level != 0 || imp.Module != "__future__" {
+		if (imp.Level != nil && *imp.Level != 0) || imp.Module == nil || *imp.Module != "__future__" {
 			return nil
 		}
 		if err := checkFeatures(ff, imp, filename); err != nil {

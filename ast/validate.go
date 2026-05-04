@@ -26,8 +26,8 @@ func Validate(mod Mod) error {
 	case *Expression:
 		return validateExpr(m.Body)
 	case *FunctionType:
-		for i := 0; i < m.ArgTypes.Len(); i++ {
-			if err := validateExpr(m.ArgTypes.Get(i)); err != nil {
+		for i := 0; i < m.Argtypes.Len(); i++ {
+			if err := validateExpr(m.Argtypes.Get(i)); err != nil {
 				return err
 			}
 		}
@@ -107,7 +107,7 @@ func validatePos(p Pos) error {
 //
 // CPython: Python/ast.c:L916
 func validateImportFrom(imp *ImportFrom) error {
-	if imp.Level < 0 {
+	if imp.Level != nil && *imp.Level < 0 {
 		return errors.New("Negative ImportFrom level") //nolint:staticcheck // ST1005: mirrors CPython's exact error text in Python/ast.c.
 	}
 	for i := 0; i < imp.Names.Len(); i++ {
