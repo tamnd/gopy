@@ -21,6 +21,12 @@ const (
 	intrinsicPrint int32 = 1
 )
 
+// Intrinsic ids for CALL_INTRINSIC_2. CPython:
+// Include/internal/pycore_intrinsics.h INTRINSIC_2_*.
+const (
+	intrinsicPrepReraiseStar int32 = 1
+)
+
 // Operands for LOAD_SPECIAL. CPython:
 // Include/internal/pycore_ceval.h:L380 SPECIAL___ENTER__ etc.
 const (

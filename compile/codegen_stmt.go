@@ -159,6 +159,10 @@ func (c *Compiler) visitStmtBlock(s ast.Stmt) (bool, error) {
 		return true, c.visitWith(n)
 	case *ast.AsyncWith:
 		return true, c.visitAsyncWith(n)
+	case *ast.Try:
+		return true, c.visitTry(n)
+	case *ast.TryStar:
+		return true, c.visitTryStar(n)
 	}
 	return false, nil
 }

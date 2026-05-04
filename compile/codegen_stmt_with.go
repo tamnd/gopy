@@ -204,20 +204,21 @@ func (c *Compiler) withExceptFinish(cleanup JumpTargetLabel) error {
 	c.addOpJump(JUMP_NO_INTERRUPT, exit, ast.Pos{})
 
 	c.useLabel(cleanup)
-	c.popExceptAndReraise(ast.Pos{})
+	c.popExceptAndReraise()
 
 	c.useLabel(exit)
 	return nil
 }
 
 // popExceptAndReraise emits the COPY 3 / POP_EXCEPT / RERAISE 1
-// preamble used by exception cleanup blocks.
+// preamble used by exception cleanup blocks. CPython attaches no
+// location info to these ops, so we always emit them at zero Pos.
 //
 // CPython: Python/codegen.c:L496 codegen_pop_except_and_reraise
-func (c *Compiler) popExceptAndReraise(l ast.Pos) {
-	c.addOpI(COPY, 3, l)
-	c.addOp(POP_EXCEPT, l)
-	c.addOpI(RERAISE, 1, l)
+func (c *Compiler) popExceptAndReraise() {
+	c.addOpI(COPY, 3, ast.Pos{})
+	c.addOp(POP_EXCEPT, ast.Pos{})
+	c.addOpI(RERAISE, 1, ast.Pos{})
 }
 
 // addYieldFromLoop emits the SEND / YIELD / RESUME / JUMP_BACKWARD
