@@ -1,0 +1,49 @@
+name: Bug report
+description: Report unexpected behaviour in gopy
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to file a bug. Please fill out the
+        fields below so we can reproduce it. For security issues, do
+        not file a public issue. Use the private advisory link in
+        SECURITY.md instead.
+  - type: input
+    id: version
+    attributes:
+      label: gopy version
+      description: Output of `gopy --version`
+      placeholder: gopy 0.0.0 (3.14.0+) [go1.26 darwin/arm64]
+    validations:
+      required: true
+  - type: input
+    id: go-version
+    attributes:
+      label: Go version
+      description: Output of `go version`
+      placeholder: go version go1.26 darwin/arm64
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Reproduction
+      description: The smallest input or command sequence that triggers the bug.
+      render: shell
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behaviour
+      description: What did you expect to happen?
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behaviour
+      description: What happened instead? Include full output where useful.
+    validations:
+      required: true

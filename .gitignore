@@ -1,0 +1,21 @@
+# Build output
+/bin/
+/dist/
+/gopy
+
+# Go test/cover artifacts
+*.test
+*.out
+*.prof
+coverage.txt
+coverage.html
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*~
+
+# Local research notes that are not part of the public repo
+TECHNICAL_BRIEF.md

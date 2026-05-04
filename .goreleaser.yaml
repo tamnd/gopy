@@ -1,0 +1,60 @@
+version: 2
+
+project_name: gopy
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: gopy
+    main: ./cmd/gopy
+    binary: gopy
+    env:
+      - CGO_ENABLED=0
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w
+    targets:
+      - linux_amd64
+      - linux_arm64
+      - darwin_amd64
+      - darwin_arm64
+      - windows_amd64
+      - windows_arm64
+
+archives:
+  - id: default
+    name_template: >-
+      {{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}
+    formats: [tar.gz]
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+    files:
+      - LICENSE
+      - README.md
+      - CHANGELOG.md
+      - changelog/**/*
+
+checksum:
+  name_template: checksums.txt
+  algorithm: sha256
+
+snapshot:
+  version_template: "{{ incpatch .Version }}-next"
+
+changelog:
+  use: github-native
+
+release:
+  prerelease: auto
+  draft: false
+  mode: replace
+  name_template: "gopy {{ .Tag }}"
+  footer: |
+    ## Verification
+
+    Each archive ships with an SHA-256 checksum in `checksums.txt`.
+    Build provenance is published via GitHub artifact attestations.

@@ -1,0 +1,13 @@
+* text=auto eol=lf
+
+*.go      text diff=golang
+*.md      text
+*.yml     text
+*.yaml    text
+*.toml    text
+Makefile  text
+LICENSE   text
+
+*.png binary
+*.jpg binary
+*.gif binary

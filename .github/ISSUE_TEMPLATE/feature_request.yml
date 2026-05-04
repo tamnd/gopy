@@ -1,0 +1,38 @@
+name: Feature request
+description: Suggest an improvement or new capability
+labels: [enhancement]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the suggestion. Please describe the use case before
+        the proposed implementation; the project favours solutions that
+        match CPython behaviour over novel designs.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What is the user-visible problem you are trying to solve?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposal
+      description: How might gopy solve it?
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Other approaches you weighed and why they fall short.
+    validations:
+      required: false
+  - type: textarea
+    id: cpython
+    attributes:
+      label: CPython behaviour
+      description: Does CPython already do this? Include version and a link if so.
+    validations:
+      required: false
