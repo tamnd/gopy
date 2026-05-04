@@ -24,6 +24,11 @@ folder; this file is the aggregated index.
   to the `pysync` package. Address-keyed parking lot, byte-flag
   `Mutex`, `Event`, `OnceFlag`, `RecursiveMutex`, `SeqLock`, and
   PEP 703 `CriticalSection` stack.
+* feat(pysync): add `RWMutex` and `RawMutex` so the `lock.c` port is
+  complete.
+* feat(hash): port the seed-init half of `cpython/Python/bootstrap_hash.c`.
+  PYTHONHASHSEED parsing, the LCG matching `lcg_urandom`, and an OS
+  entropy fallback through `crypto/rand`.
 
 ## v0.0.0 - 2026-05-04
 
