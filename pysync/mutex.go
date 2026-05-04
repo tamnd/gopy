@@ -32,8 +32,12 @@ const (
 type LockStatus int
 
 const (
+	// LockFailure means the lock could not be acquired.
 	LockFailure LockStatus = iota
+	// LockAcquired means the lock is now held by the caller.
 	LockAcquired
+	// LockIntr means the wait was interrupted by a signal. v0.1 has
+	// no signal plumbing, so this value is reserved.
 	LockIntr
 )
 
@@ -130,11 +134,12 @@ func (m *Mutex) LockTimed(timeout time.Duration, flags LockFlags) LockStatus {
 			return uint8(m.bits.Load()) == expected
 		}, timeout, entry, flags&LockDetach != 0)
 
-		if ret == ParkOK {
+		switch ret {
+		case ParkOK:
 			if entry.handedOff {
 				return LockAcquired
 			}
-		} else if ret == ParkTimeout {
+		case ParkTimeout:
 			if timeout >= 0 {
 				return LockFailure
 			}

@@ -42,9 +42,9 @@ type waiter struct {
 }
 
 type bucket struct {
-	mu          sync.Mutex
-	head        *waiter // doubly-linked list sentinel sentinel.next == first
-	numWaiters  int
+	mu         sync.Mutex
+	head       *waiter // doubly-linked list sentinel sentinel.next == first
+	numWaiters int
 }
 
 func (b *bucket) enqueue(w *waiter) {

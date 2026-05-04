@@ -41,6 +41,14 @@ linters:
         - name: errorf
     misspell:
       locale: US
+    gosec:
+      excludes:
+        # uint32 -> uint8 narrowing is intentional in the pysync
+        # byte-flag mutex words; sync/atomic has no Uint8.
+        - G115
+        # unsafe.Pointer is required for address-keyed parking and
+        # for the byte-flag mutex word identity.
+        - G103
   exclusions:
     rules:
       - path: _test\.go
