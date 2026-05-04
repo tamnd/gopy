@@ -99,6 +99,37 @@ func TestIndentDedent(t *testing.T) {
 	}
 }
 
+func TestLineContinuation(t *testing.T) {
+	got := kinds(tokenize_(t, "a + \\\n  b\n"))
+	want := []tokenize.Type{
+		tokenize.NAME, tokenize.OP, tokenize.NAME, tokenize.NEWLINE, tokenize.ENDMARKER,
+	}
+	if len(got) != len(want) {
+		t.Fatalf("got %v, want %v", got, want)
+	}
+	for i := range got {
+		if got[i] != want[i] {
+			t.Errorf("token %d: got %v, want %v", i, got[i], want[i])
+		}
+	}
+}
+
+func TestParenContinuation(t *testing.T) {
+	got := kinds(tokenize_(t, "(a +\n b)\n"))
+	want := []tokenize.Type{
+		tokenize.OP, tokenize.NAME, tokenize.OP, tokenize.NL,
+		tokenize.NAME, tokenize.OP, tokenize.NEWLINE, tokenize.ENDMARKER,
+	}
+	if len(got) != len(want) {
+		t.Fatalf("got %v, want %v", got, want)
+	}
+	for i := range got {
+		if got[i] != want[i] {
+			t.Errorf("token %d: got %v, want %v", i, got[i], want[i])
+		}
+	}
+}
+
 func TestNumberKinds(t *testing.T) {
 	cases := []string{"0", "0x1f", "0o77", "0b101", "1.5", "1.5e10", "10j"}
 	for _, src := range cases {

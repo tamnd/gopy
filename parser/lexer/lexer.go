@@ -108,6 +108,22 @@ func (s *State) tokGetNormalMode() Tok {
 		c = s.nextC()
 	}
 
+	// Line continuation: a backslash at end of line joins the next
+	// line into the current one without emitting NEWLINE.
+	//
+	// CPython: Parser/lexer/lexer.c:1205 (continuation branch)
+	for c == '\\' && s.peek() == '\n' {
+		s.nextC()
+		s.lineno++
+		s.col = 0
+		s.lineStart = s.cur
+		s.contLine = true
+		c = s.nextC()
+		for c == ' ' || c == '\t' || c == '\014' {
+			c = s.nextC()
+		}
+	}
+
 	s.start = s.cur - 1
 	s.startCol = s.col - 1
 
