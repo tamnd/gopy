@@ -2,7 +2,7 @@
 // covers the object protocol, the type slot table, and the concrete
 // builtins needed to construct a dict, hash a tuple, and iterate a
 // list. Strings, bytes, set, exceptions, and the cycle collector
-// arrive in later phases (see notes/Spec/1600/).
+// arrive in later phases (see notes/Spec/1700/).
 package objects
 
 import "sync/atomic"

@@ -11,6 +11,29 @@ folder; this file is the aggregated index.
 
 ## Unreleased
 
+## v0.4.0 - 2026-05-04
+
+See [`changelog/v0.4.0.md`](changelog/v0.4.0.md).
+
+* feat(pystrconv): port `cpython/Python/pyctype.c`, `pystrcmp.c`,
+  `mystrtoul.c`, `pystrhex.c`, plus a Go-strconv-backed wrapper for
+  `pystrtod.c` and `dtoa.c`. ASCII classification, case-insensitive
+  compare, hex encoding with separators, integer parsing with base
+  autodetect, IEEE-754 ParseFloat, and FormatFloat covering the
+  `r/s/g/G/e/E/f/F/%` codes with FloatFormatFlag.
+* feat(pymath): port `pymath.c` and `pyfpe.c`. CopySign, IsNaN, IsInf,
+  IsFinite, Log1p, Hypot plus the FPE legacy sentinels.
+* feat(hash): full port of `pyhash.c`. SipHash-1-3 Buffer, FNV-1a
+  BufferFNV, KeyedHash, Pointer, Double, GetFuncDef, plus the numeric
+  hash constants. Reference vectors against CPython under
+  PYTHONHASHSEED=0.
+* feat(format): port `formatter_unicode.c`. Spec parser plus
+  FormatString, FormatInt, and FormatFloat covering the full
+  `[[fill]align][sign][z][#][0][width][,_][.precision][type]`
+  mini-language.
+* test(v04test): cross-cut gate that pins hash.Buffer, ParseFloat,
+  FormatFloat, and format.FormatInt to CPython 3.14 reference values.
+
 ## v0.3.0 - 2026-05-04
 
 See [`changelog/v0.3.0.md`](changelog/v0.3.0.md).

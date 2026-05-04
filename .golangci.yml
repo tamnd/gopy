@@ -113,6 +113,26 @@ linters:
       - path: errors/builtins\.go
         linters:
           - revive
+      # format.FormatString/FormatInt/FormatFloat mirror CPython's
+      # format_*_internal entry points; the parity is part of the spec
+      # so the "name stutters" advice does not apply.
+      - path: format/format\.go
+        text: "format\\.Format(String|Int|Float).*stutters"
+        linters:
+          - revive
+      # ParseUint mirrors mystrtoul.c line-for-line; collapsing the
+      # nested switches would diverge from the source shape.
+      - path: pystrconv/strtoul\.go
+        linters:
+          - gocognit
+          - gocyclo
+      # FormatInt and ParseSpec mirror format_long_internal /
+      # parse_internal_render_format_spec; the branch tree matches
+      # CPython's switch and is the unit of parity.
+      - path: format/format\.go
+        linters:
+          - gocognit
+          - gocyclo
 
 formatters:
   enable:
