@@ -1,10 +1,8 @@
 // Port of cpython/Python/codegen.c statement visitors (L2991-L3166).
-// Spec: notes/Spec/1600/1626_gopy_codegen.md
 //
 // Per-kind visitors live alongside in codegen_stmt_*.go. This file
 // holds the dispatch and the simple stmts (Pass, ExprStmt, Return,
-// Assign, etc.). Larger constructs (functions, classes, control
-// flow, with, match, try) get their own files in later steps.
+// Assign, etc.).
 
 package compile
 
@@ -97,7 +95,10 @@ func (c *Compiler) visitStmt(s ast.Stmt) error {
 
 // visitStmtSimple handles the leaf statements: Pass, ExprStmt,
 // Return, Assign, AugAssign, AnnAssign, Delete, Raise, Assert,
-// Import, ImportFrom, Global, Nonlocal.
+// Import, ImportFrom, Global, Nonlocal. Split out of the dispatch
+// switch to keep cyclomatic complexity below the threshold.
+//
+// CPython: Python/codegen.c codegen_visit_stmt (leaf cases)
 func (c *Compiler) visitStmtSimple(s ast.Stmt) (bool, error) {
 	switch n := s.(type) {
 	case *ast.Pass:
@@ -132,7 +133,10 @@ func (c *Compiler) visitStmtSimple(s ast.Stmt) (bool, error) {
 
 // visitStmtBlock handles compound statements: control flow (If, For,
 // While, Break, Continue) and the def-like nodes (FunctionDef,
-// AsyncFunctionDef, ClassDef).
+// AsyncFunctionDef, ClassDef). Split out of the dispatch switch to
+// keep cyclomatic complexity below the threshold.
+//
+// CPython: Python/codegen.c codegen_visit_stmt (compound cases)
 func (c *Compiler) visitStmtBlock(s ast.Stmt) (bool, error) {
 	switch n := s.(type) {
 	case *ast.If:

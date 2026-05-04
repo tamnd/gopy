@@ -1,5 +1,4 @@
 // Port of cpython/Python/codegen.c codegen_nameop (L3186-L3287).
-// Spec: notes/Spec/1600/1626_gopy_codegen.md
 //
 // nameOp{Load,Store,Delete} pick the right opcode family based on
 // the name's resolved scope in the symtable: LOAD_FAST for function
@@ -86,6 +85,9 @@ func (c *Compiler) nameOp(name string, mode nameMode, l ast.Pos) error {
 
 // emitFastLocal emits LOAD_FAST / STORE_FAST / DELETE_FAST against
 // the per-unit varnames pool. Used inside FunctionBlock only.
+//
+// CPython: Python/codegen.c LOAD_FAST/STORE_FAST/DELETE_FAST branch
+// in codegen_nameop
 func (c *Compiler) emitFastLocal(name string, mode nameMode, l ast.Pos) error {
 	pool := poolVarNames
 	switch mode {
@@ -101,6 +103,9 @@ func (c *Compiler) emitFastLocal(name string, mode nameMode, l ast.Pos) error {
 
 // emitNamed emits LOAD_NAME / STORE_NAME / DELETE_NAME against the
 // per-unit names pool. Used at module and class scope.
+//
+// CPython: Python/codegen.c LOAD_NAME/STORE_NAME/DELETE_NAME branch
+// in codegen_nameop
 func (c *Compiler) emitNamed(name string, mode nameMode, l ast.Pos) error {
 	pool := poolNames
 	switch mode {
@@ -114,6 +119,10 @@ func (c *Compiler) emitNamed(name string, mode nameMode, l ast.Pos) error {
 	return nil
 }
 
+// emitDeref emits LOAD_DEREF / STORE_DEREF / DELETE_DEREF for cells
+// and free variables.
+//
+// CPython: Python/codegen.c Cell/Free branch in codegen_nameop
 func (c *Compiler) emitDeref(name string, mode nameMode, l ast.Pos) error {
 	scope := c.scope.GetScope(name)
 	pool := poolCellVars
@@ -131,6 +140,10 @@ func (c *Compiler) emitDeref(name string, mode nameMode, l ast.Pos) error {
 	return nil
 }
 
+// emitGlobal emits LOAD_GLOBAL / STORE_GLOBAL / DELETE_GLOBAL.
+//
+// CPython: Python/codegen.c GlobalExplicit/GlobalImplicit branch in
+// codegen_nameop
 func (c *Compiler) emitGlobal(name string, mode nameMode, l ast.Pos) error {
 	pool := poolNames
 	switch mode {

@@ -1,7 +1,5 @@
 // Port of cpython/Python/codegen.c control-flow statement visitors
 // (L2043-L2289). If / For / While / Break / Continue.
-//
-// Spec: notes/Spec/1600/1626_gopy_codegen.md
 
 package compile
 
@@ -124,9 +122,9 @@ func (c *Compiler) visitFor(s *ast.For) error {
 }
 
 // visitBreak emits a JUMP to the enclosing loop's exit. The unwind
-// of intermediate fblocks (try-finally cleanup, with __exit__) lands
-// alongside try and with in the next step; for now reject break
-// inside any non-loop frame so we never silently drop unwinds.
+// of intermediate fblocks (try-finally cleanup, with __exit__) is
+// pending; for now reject break inside any non-loop frame so we
+// never silently drop unwinds.
 //
 // CPython: Python/codegen.c:L2232 codegen_break
 func (c *Compiler) visitBreak(s *ast.Break) error {
@@ -160,13 +158,9 @@ func (c *Compiler) visitContinue(s *ast.Continue) error {
 //
 // CPython: Python/codegen.c:L622 codegen_unwind_fblock_stack
 func (c *Compiler) unwindToLoop(loop *fblock, _ ast.Pos) {
-	// Walk from top down to (but not including) the loop frame.
 	for i := len(c.fblocks) - 1; i >= 0; i-- {
-		f := &c.fblocks[i]
-		if f == loop {
+		if &c.fblocks[i] == loop {
 			return
 		}
-		// Only loops on the stack so far in v0.5.0 step 3.
-		// try/with land in step 7 with full unwind support.
 	}
 }

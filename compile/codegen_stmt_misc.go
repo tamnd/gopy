@@ -1,8 +1,6 @@
 // Port of cpython/Python/codegen.c statement visitors for the
 // remaining simple kinds: Delete, AugAssign, AnnAssign, Raise,
 // Assert, Import, ImportFrom.
-//
-// Spec: notes/Spec/1600/1626_gopy_codegen.md
 
 package compile
 
@@ -28,6 +26,10 @@ func (c *Compiler) visitDelete(s *ast.Delete) error {
 	return nil
 }
 
+// deleteTarget routes a single `del` target to nameOpDelete /
+// visitAttribute / visitSubscript based on its concrete type.
+//
+// CPython: Python/codegen.c codegen_delete_targets per-target dispatch
 func (c *Compiler) deleteTarget(t ast.Expr, l ast.Pos) error {
 	switch tt := t.(type) {
 	case *ast.Name:
@@ -156,9 +158,8 @@ func (c *Compiler) visitAnnAssign(s *ast.AnnAssign) error {
 		}
 	}
 	// Annotation: deferred at module / class scope. The full PEP 649
-	// hookup lands alongside the deferred-annotation panel in 1626;
-	// for now we record the annotation expression on the unit so the
-	// later step can drain them at end-of-block.
+	// hookup is pending; for now we record the annotation expression
+	// on the unit so a later pass can drain them at end-of-block.
 	if c.scope.Type != symtable.FunctionBlock {
 		if name, ok := s.Target.(*ast.Name); ok {
 			c.unit().DeferredAnnotations = append(
@@ -319,6 +320,8 @@ func (c *Compiler) visitImportFrom(s *ast.ImportFrom) error {
 const intrinsicImportStar int32 = 2
 
 // splitDotted splits a dotted name `a.b.c` into ["a","b","c"].
+//
+// CPython: Python/codegen.c forbidden_name dotted-name split (analog)
 func splitDotted(name string) []string {
 	var out []string
 	start := 0

@@ -3,16 +3,17 @@ package symtable
 import "fmt"
 
 // nameSet is a small set-of-strings helper so the analyze pass reads
-// the way CPython's PySet_*-driven version does.
+// the way CPython's PySet_*-driven version does. add/discard/contains/
+// clone/union port PySet_Add / PySet_Discard / PySet_Contains /
+// PySet_New / _PySet_Update respectively.
+//
+// CPython: Python/symtable.c PySet_* calls in analyze_block
 type nameSet map[string]struct{}
 
-func newNameSet() nameSet                  { return nameSet{} }
-func (s nameSet) add(name string)          { s[name] = struct{}{} }
-func (s nameSet) discard(name string) bool { _, ok := s[name]; delete(s, name); return ok }
-func (s nameSet) contains(name string) bool {
-	_, ok := s[name]
-	return ok
-}
+func newNameSet() nameSet                   { return nameSet{} }
+func (s nameSet) add(name string)           { s[name] = struct{}{} }
+func (s nameSet) discard(name string) bool  { _, ok := s[name]; delete(s, name); return ok }
+func (s nameSet) contains(name string) bool { _, ok := s[name]; return ok }
 
 func (s nameSet) clone() nameSet {
 	out := make(nameSet, len(s))
@@ -82,6 +83,8 @@ func analyzeBlock(t *Table, ste *Entry, bound, free, global, typeParams nameSet,
 // prepareClassPreambleSets seeds the class block's child-visible
 // bound/global sets before name analysis. Mirrors the early
 // "ClassBlock pre-population" branch in analyze_block.
+//
+// CPython: Python/symtable.c:L1131 analyze_block ClassBlock prologue
 func prepareClassPreambleSets(ste *Entry, bound, global, newbound, newglobal nameSet) {
 	if ste.Type != ClassBlock {
 		return
@@ -94,6 +97,8 @@ func prepareClassPreambleSets(ste *Entry, bound, global, newbound, newglobal nam
 
 // finalizeChildSets fills the bound/global sets passed to children
 // after name analysis runs.
+//
+// CPython: Python/symtable.c analyze_block child-set finalize step
 func finalizeChildSets(ste *Entry, bound, global, local, newbound, newglobal nameSet) {
 	if ste.Type == ClassBlock {
 		newbound.add("__class__")
@@ -112,6 +117,8 @@ func finalizeChildSets(ste *Entry, bound, global, local, newbound, newglobal nam
 
 // analyzeChildren recurses into each child block, propagating free
 // variables back to the parent and inlining eligible comprehensions.
+//
+// CPython: Python/symtable.c analyze_block children-loop body
 func analyzeChildren(t *Table, ste *Entry, classEntry *Entry, scopes map[string]Scope,
 	newbound, newglobal, newfree, typeParams, inlinedCells nameSet,
 ) error {
@@ -136,6 +143,8 @@ func analyzeChildren(t *Table, ste *Entry, classEntry *Entry, scopes map[string]
 
 // pickClassEntry chooses the class scope (if any) that the child
 // block can see, honoring CPython's CanSeeClassScope cascade.
+//
+// CPython: Python/symtable.c CanSeeClassScope cascade in analyze_block
 func pickClassEntry(ste, child *Entry, classEntry *Entry) *Entry {
 	if !child.CanSeeClassScope {
 		return nil
@@ -149,6 +158,8 @@ func pickClassEntry(ste, child *Entry, classEntry *Entry) *Entry {
 // spliceInlinedChildren rewrites ste.Children so that inlined
 // comprehensions are replaced by their own Children. Mirrors the
 // PyList_SetSlice loop in analyze_block.
+//
+// CPython: Python/symtable.c PyList_SetSlice splice in analyze_block
 func spliceInlinedChildren(ste *Entry) {
 	if !anyInlined(ste.Children) {
 		return
@@ -399,6 +410,8 @@ func isFreeInAnyChild(entry *Entry, name string) bool {
 }
 
 // anyInlined reports whether any child has been marked CompInlined.
+//
+// CPython: Python/symtable.c CompInlined check in analyze_block splice
 func anyInlined(children []*Entry) bool {
 	for _, c := range children {
 		if c.CompInlined {

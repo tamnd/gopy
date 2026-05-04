@@ -1,9 +1,7 @@
 // Port of cpython/Python/codegen.c function-like visitors
 // (L1311-L1727). FunctionDef / AsyncFunctionDef / Lambda. ClassDef
-// and TypeAlias share the same enter / leave scope shape; they land
-// in the next step.
-//
-// Spec: notes/Spec/1600/1626_gopy_codegen.md
+// and TypeAlias share the same enter / leave scope shape; they live
+// in sibling files.
 
 package compile
 
@@ -161,12 +159,9 @@ func (c *Compiler) emitInnerFunctionCode(innerScope *symtable.Entry,
 	c.fblocks = outerFblocks
 	c.restoreCaches(outerCaches)
 
-	// In v0.5.0 step 4 the codegen does not yet emit a real
-	// LOAD_CONST referencing the inner code object. The inner Unit
-	// is appended to the outer unit's Consts pool and a LOAD_CONST
-	// of that index is emitted. Marshal (1623) and the assembler
-	// (1628) are responsible for translating Unit -> code-object on
-	// disk.
+	// The inner Unit is appended to the outer unit's Consts pool
+	// and a LOAD_CONST of that index is emitted. The assembler
+	// translates Unit to a real code object during marshal.
 	c.addLoadConst(innerUnit, loc(key))
 
 	return nil
@@ -196,6 +191,9 @@ func (c *Compiler) declareArgs(args *ast.Arguments) error {
 	return nil
 }
 
+// declareArg adds name to the per-unit varnames pool.
+//
+// CPython: Python/compile.c compiler_arguments per-arg slot
 func (c *Compiler) declareArg(name string) {
 	pool := poolVarNames
 	c.poolIndex(&pool, name)
@@ -309,6 +307,8 @@ func (c *Compiler) emitMakeCellAndCopyFree(sc *symtable.Entry, l ast.Pos) error 
 // freeVarsOf returns the free-variable names of the inner scope in
 // stable order. CPython uses dictbytype on ste->ste_symbols filtered
 // by FREE; we mirror that by iterating the explicit Symbols map.
+//
+// CPython: Python/compile.c dictbytype(symbols, FREE, ...)
 func freeVarsOf(sc *symtable.Entry) []string {
 	var out []string
 	for name, flags := range sc.Symbols {
@@ -324,6 +324,8 @@ func freeVarsOf(sc *symtable.Entry) []string {
 
 // visitExprs evaluates a sequence of expressions in order, leaving
 // each result on the stack.
+//
+// CPython: Python/codegen.c VISIT_SEQ(c, expr, seq) macro expansion
 func (c *Compiler) visitExprs(es ast.Seq[ast.Expr]) error {
 	for _, e := range es {
 		if err := c.visitExpr(e); err != nil {
@@ -344,6 +346,10 @@ type savedCaches struct {
 	cell     map[string]int
 }
 
+// savedCaches snapshots the dedup caches before entering an inner
+// scope so the outer scope can resume with its own pools intact.
+//
+// CPython: Python/compile.c compiler_enter_scope save side
 func (c *Compiler) savedCaches() savedCaches {
 	return savedCaches{
 		consts:   c.constCache,
@@ -354,6 +360,10 @@ func (c *Compiler) savedCaches() savedCaches {
 	}
 }
 
+// restoreCaches puts back the outer-scope dedup caches captured by
+// savedCaches.
+//
+// CPython: Python/compile.c compiler_exit_scope restore side
 func (c *Compiler) restoreCaches(s savedCaches) {
 	c.constCache = s.consts
 	c.nameCache = s.names
@@ -363,7 +373,7 @@ func (c *Compiler) restoreCaches(s savedCaches) {
 }
 
 // funcLikeKind returns "function" / "async function" / "lambda" for
-// error messages.
+// error messages. Go-only helper.
 func funcLikeKind(s any) string {
 	switch s.(type) {
 	case *ast.FunctionDef:
@@ -378,7 +388,7 @@ func funcLikeKind(s any) string {
 
 // sortStrings is a tiny insertion sort to avoid the sort import.
 // Callers use this only on small slices (free var lists, kwonly
-// names) so O(n^2) is fine.
+// names) so O(n^2) is fine. Go-only helper.
 func sortStrings(xs []string) {
 	for i := 1; i < len(xs); i++ {
 		for j := i; j > 0 && xs[j-1] > xs[j]; j-- {

@@ -6,8 +6,6 @@
 //
 // where <body fn> is a parameterless function whose locals become the
 // class namespace.
-//
-// Spec: notes/Spec/1600/1626_gopy_codegen.md
 
 package compile
 
@@ -103,7 +101,7 @@ func (c *Compiler) visitClassDef(s *ast.ClassDef) error {
 
 // emitInnerClassCode pushes a fresh unit, emits the class body, then
 // pops. The inner code object is left on the outer stack as a *Unit
-// const; the assembler in 1628 translates it to a real PyCodeObject.
+// const; the assembler translates it to a real PyCodeObject.
 //
 // CPython: Python/codegen.c:L1515 codegen_class_body
 func (c *Compiler) emitInnerClassCode(innerScope *symtable.Entry, s *ast.ClassDef) error {
@@ -123,8 +121,8 @@ func (c *Compiler) emitInnerClassCode(innerScope *symtable.Entry, s *ast.ClassDe
 
 	// __qualname__: the dotted path to the class. For top-level
 	// classes this is just the class name; nested classes get a path
-	// like "Outer.Inner". 1626 marks the qualname-resolution panel as
-	// pending; for now the bare name is correct for the unnested case.
+	// like "Outer.Inner". Full qualname resolution is pending; for now
+	// the bare name is correct for the unnested case.
 	c.addLoadConst(s.Name, loc(s))
 	c.addOpName(STORE_NAME, &pool, "__qualname__", loc(s))
 

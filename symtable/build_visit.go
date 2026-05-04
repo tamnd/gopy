@@ -22,6 +22,8 @@ func (b *builder) visitStmt(s ast.Stmt) error {
 // visitStmtDef handles statements that introduce a new binding or
 // scope: def, async def, class, type alias, plain Assign / AnnAssign,
 // import / global / nonlocal.
+//
+// CPython: Python/symtable.c symtable_visit_stmt (binding cases)
 func (b *builder) visitStmtDef(s ast.Stmt) (bool, error) {
 	switch n := s.(type) {
 	case *ast.FunctionDef, *ast.AsyncFunctionDef:
@@ -57,6 +59,8 @@ func (b *builder) visitStmtDef(s ast.Stmt) (bool, error) {
 }
 
 // visitStmtControl handles control-flow statements.
+//
+// CPython: Python/symtable.c symtable_visit_stmt (control-flow cases)
 func (b *builder) visitStmtControl(s ast.Stmt) (bool, error) {
 	switch n := s.(type) {
 	case *ast.For:
@@ -87,6 +91,8 @@ func (b *builder) visitStmtControl(s ast.Stmt) (bool, error) {
 
 // visitStmtSimple handles leaf statements that recurse only into
 // expressions.
+//
+// CPython: Python/symtable.c symtable_visit_stmt (leaf cases)
 func (b *builder) visitStmtSimple(s ast.Stmt) error {
 	switch n := s.(type) {
 	case *ast.Delete:
@@ -118,6 +124,10 @@ type funcLike struct {
 	isAsync    bool
 }
 
+// unpackFuncLike normalizes FunctionDef / AsyncFunctionDef into a
+// shared funcLike record so visitFunctionLike can run once.
+//
+// CPython: Python/symtable.c FunctionDef + AsyncFunctionDef share path
 func unpackFuncLike(s ast.Stmt) funcLike {
 	switch n := s.(type) {
 	case *ast.FunctionDef:
@@ -184,6 +194,8 @@ func (b *builder) visitFunctionLike(s ast.Stmt) error {
 // makeFunctionEntry builds the Entry for a function body. Mirrors the
 // ste_new + nested/method/docstring bookkeeping that runs immediately
 // before symtable_visit_annotations in CPython.
+//
+// CPython: Python/symtable.c ste_new + nested/method/doc setup
 func (b *builder) makeFunctionEntry(f *funcLike, key any) *Entry {
 	b.nextID++
 	ste := &Entry{
@@ -434,6 +446,8 @@ func (b *builder) visitForLike(target, iter ast.Expr, body, orelse ast.Seq[ast.S
 }
 
 // visitWhile walks a while loop body.
+//
+// CPython: Python/symtable.c While_kind branch in symtable_visit_stmt
 func (b *builder) visitWhile(w *ast.While) error {
 	if err := b.visitExpr(w.Test); err != nil {
 		return err
@@ -448,6 +462,8 @@ func (b *builder) visitWhile(w *ast.While) error {
 }
 
 // visitIf walks an if statement.
+//
+// CPython: Python/symtable.c If_kind branch in symtable_visit_stmt
 func (b *builder) visitIf(s *ast.If) error {
 	if err := b.visitExpr(s.Test); err != nil {
 		return err
@@ -462,6 +478,8 @@ func (b *builder) visitIf(s *ast.If) error {
 }
 
 // visitMatch walks `match subject:` cases.
+//
+// CPython: Python/symtable.c Match_kind branch in symtable_visit_stmt
 func (b *builder) visitMatch(m *ast.Match) error {
 	if err := b.visitExpr(m.Subject); err != nil {
 		return err
@@ -478,6 +496,8 @@ func (b *builder) visitMatch(m *ast.Match) error {
 }
 
 // visitRaise walks `raise exc from cause`.
+//
+// CPython: Python/symtable.c Raise_kind branch in symtable_visit_stmt
 func (b *builder) visitRaise(r *ast.Raise) error {
 	if r.Exc == nil {
 		return nil
@@ -493,6 +513,8 @@ func (b *builder) visitRaise(r *ast.Raise) error {
 
 // visitTryLike covers both Try and TryStar. The body, handlers,
 // else, and finally clauses share the same structure.
+//
+// CPython: Python/symtable.c Try_kind / TryStar_kind shared body
 func (b *builder) visitTryLike(body ast.Seq[ast.Stmt], handlers ast.Seq[ast.Excepthandler], orelse, finalbody ast.Seq[ast.Stmt]) error {
 	prev := b.cur.InConditionalBlock
 	b.cur.InConditionalBlock = true
@@ -512,6 +534,8 @@ func (b *builder) visitTryLike(body ast.Seq[ast.Stmt], handlers ast.Seq[ast.Exce
 }
 
 // visitAssert walks `assert test, msg`.
+//
+// CPython: Python/symtable.c Assert_kind branch in symtable_visit_stmt
 func (b *builder) visitAssert(a *ast.Assert) error {
 	if err := b.visitExpr(a.Test); err != nil {
 		return err
@@ -523,6 +547,8 @@ func (b *builder) visitAssert(a *ast.Assert) error {
 }
 
 // visitWithLike covers With and AsyncWith.
+//
+// CPython: Python/symtable.c With_kind / AsyncWith_kind shared body
 func (b *builder) visitWithLike(items ast.Seq[*ast.Withitem], body ast.Seq[ast.Stmt], isAsync bool, loc ast.Pos) error {
 	if isAsync {
 		b.maybeSetCoroutineForModule()
@@ -637,6 +663,8 @@ func (b *builder) maybeSetCoroutineForModule() {
 
 // visitStmtSeq walks a sequence of statements, exiting early on the
 // first error. Used in body / orelse / finally / handlers.
+//
+// CPython: Python/symtable.c VISIT_SEQ(c, stmt, body)
 func (b *builder) visitStmtSeq(seq ast.Seq[ast.Stmt]) error {
 	for _, s := range seq {
 		if err := b.visitStmt(s); err != nil {
@@ -647,6 +675,8 @@ func (b *builder) visitStmtSeq(seq ast.Seq[ast.Stmt]) error {
 }
 
 // visitExprSeq walks a sequence of expressions.
+//
+// CPython: Python/symtable.c VISIT_SEQ(c, expr, seq)
 func (b *builder) visitExprSeq(seq ast.Seq[ast.Expr]) error {
 	for _, e := range seq {
 		if err := b.visitExpr(e); err != nil {
@@ -658,6 +688,8 @@ func (b *builder) visitExprSeq(seq ast.Seq[ast.Expr]) error {
 
 // visitExprSeqMaybeNull walks a sequence where individual entries may
 // be nil (kw_defaults paired with kwonlyargs).
+//
+// CPython: Python/symtable.c VISIT_SEQ_WITH_NULL(c, expr, seq)
 func (b *builder) visitExprSeqMaybeNull(seq ast.Seq[ast.Expr]) error {
 	for _, e := range seq {
 		if e == nil {
@@ -681,6 +713,9 @@ type annotationKey struct {
 
 // futureAnnotations reports whether `from __future__ import
 // annotations` is in effect.
+//
+// CPython: Python/symtable.c st->st_future->ff_features &
+// CO_FUTURE_ANNOTATIONS check
 func (b *builder) futureAnnotations() bool {
 	return b.future != nil && b.future.Bits&future.Annotations != 0
 }

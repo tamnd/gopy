@@ -1,9 +1,8 @@
 // Port of cpython/Python/codegen.c expression visitors (L5172+).
-// Spec: notes/Spec/1600/1626_gopy_codegen.md
 //
 // This file holds the dispatch and the leaf cases (Constant, Name).
 // Other expression kinds (BoolOp, BinOp, Compare, Call, Lambda,
-// comprehensions, etc.) get their own files in later steps.
+// comprehensions, etc.) live in sibling files.
 
 package compile
 
@@ -33,7 +32,10 @@ func (c *Compiler) visitExpr(e ast.Expr) error {
 // visitExprPrimary handles leaves (Constant, Name), operators
 // (BoolOp / BinOp / UnaryOp / Compare / IfExp), Lambda, container
 // builders (List / Tuple / Set / Dict), member access (Attribute /
-// Subscript / Slice), and Call.
+// Subscript / Slice), and Call. Split out of the dispatch switch to
+// keep cyclomatic complexity below the project threshold.
+//
+// CPython: Python/codegen.c:L5172 codegen_visit_expr (first half)
 func (c *Compiler) visitExprPrimary(e ast.Expr) (bool, error) {
 	switch n := e.(type) {
 	case *ast.Constant:
@@ -74,7 +76,10 @@ func (c *Compiler) visitExprPrimary(e ast.Expr) (bool, error) {
 }
 
 // visitExprMisc handles walrus, yield / yield from, await, and the
-// f-string nodes (JoinedStr / FormattedValue).
+// f-string nodes (JoinedStr / FormattedValue). Split out of the
+// dispatch switch to keep cyclomatic complexity below the threshold.
+//
+// CPython: Python/codegen.c:L5172 codegen_visit_expr (second half)
 func (c *Compiler) visitExprMisc(e ast.Expr) (bool, error) {
 	switch n := e.(type) {
 	case *ast.NamedExpr:

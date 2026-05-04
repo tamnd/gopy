@@ -1,8 +1,6 @@
 // Port of cpython/Python/codegen.c container display visitors:
 // List, Tuple, Set, Dict, plus the Starred-in-list helper. Also the
 // Subscript / Attribute load paths.
-//
-// Spec: notes/Spec/1600/1626_gopy_codegen.md
 
 package compile
 
@@ -108,6 +106,8 @@ func (c *Compiler) emitListOrSet(elts ast.Seq[ast.Expr], op Opcode, l ast.Pos) e
 
 // emitExtend emits LIST_EXTEND or SET_UPDATE depending on whether the
 // container we are building is a list or a set.
+//
+// CPython: Python/codegen.c codegen_subkind in starunpack_helper
 func (c *Compiler) emitExtend(op Opcode, l ast.Pos) {
 	if op == BUILD_SET {
 		c.addOpI(SET_UPDATE, 1, l)
@@ -117,6 +117,8 @@ func (c *Compiler) emitExtend(op Opcode, l ast.Pos) {
 }
 
 // hasStarred reports whether any expression in elts is a Starred node.
+//
+// CPython: Python/codegen.c starred check in starunpack_helper
 func hasStarred(elts ast.Seq[ast.Expr]) bool {
 	for _, e := range elts {
 		if _, ok := e.(*ast.Starred); ok {
@@ -269,6 +271,8 @@ func (c *Compiler) visitSlice(e *ast.Slice) error {
 
 // visitOptExpr visits an optional expression, emitting LOAD_CONST None
 // if it is missing.
+//
+// CPython: Python/codegen.c optional-arg helper used by codegen_slice
 func (c *Compiler) visitOptExpr(e ast.Expr, l ast.Pos) error {
 	if e == nil {
 		c.addLoadConst(nil, l)

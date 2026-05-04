@@ -37,6 +37,8 @@ const (
 )
 
 // String returns the CPython enum name.
+//
+// CPython: Include/internal/pycore_symtable.h _Py_block_ty enum names
 func (b Block) String() string {
 	switch b {
 	case FunctionBlock:
@@ -100,6 +102,8 @@ const (
 )
 
 // String returns the CPython enum name.
+//
+// CPython: Include/internal/pycore_symtable.h scope-tag macro names
 func (s Scope) String() string {
 	switch s {
 	case Local:
@@ -175,11 +179,15 @@ const ScopeMask SymbolFlags = DefGlobal | DefLocal | DefParam | DefNonlocal
 
 // Scope returns the resolved Scope packed into f, or zero if the
 // analyze pass has not yet stamped a value.
+//
+// CPython: Include/internal/pycore_symtable.h SCOPE_MASK extract
 func (f SymbolFlags) Scope() Scope {
 	return Scope((f >> ScopeOffset) & ScopeMask)
 }
 
 // Defs returns just the DEF_* / USE bits, stripping the packed Scope.
+//
+// CPython: Include/internal/pycore_symtable.h DEF_BOUND mask
 func (f SymbolFlags) Defs() SymbolFlags {
 	return f & ((1 << ScopeOffset) - 1)
 }

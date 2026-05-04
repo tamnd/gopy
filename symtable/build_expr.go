@@ -20,6 +20,8 @@ func (b *builder) visitExpr(e ast.Expr) error {
 // visitExprComp covers the comprehension family, lambda, walrus,
 // generator/await constructs that introduce a new scope or have
 // side-effects beyond pure operand walking.
+//
+// CPython: Python/symtable.c:L2435 symtable_visit_expr (scope-introducing cases)
 func (b *builder) visitExprComp(e ast.Expr) (bool, error) {
 	switch n := e.(type) {
 	case *ast.NamedExpr:
@@ -51,6 +53,8 @@ func (b *builder) visitExprComp(e ast.Expr) (bool, error) {
 
 // visitExprUnary covers operator-style nodes that recurse into a
 // fixed set of operand expressions.
+//
+// CPython: Python/symtable.c:L2435 symtable_visit_expr (operator cases)
 func (b *builder) visitExprUnary(e ast.Expr) (bool, error) {
 	switch n := e.(type) {
 	case *ast.BoolOp:
@@ -96,6 +100,8 @@ func (b *builder) visitExprUnary(e ast.Expr) (bool, error) {
 
 // visitExprLeaf covers terminal name / attribute / index / slice and
 // the literal forms.
+//
+// CPython: Python/symtable.c:L2435 symtable_visit_expr (leaf cases)
 func (b *builder) visitExprLeaf(e ast.Expr) error {
 	switch n := e.(type) {
 	case *ast.Constant:
@@ -126,6 +132,8 @@ func (b *builder) visitExprLeaf(e ast.Expr) error {
 
 // visitFormattedValue walks the value-plus-optional-format-spec form
 // shared by FormattedValue and Interpolation.
+//
+// CPython: Python/symtable.c FormattedValue branch in symtable_visit_expr
 func (b *builder) visitFormattedValue(value, formatSpec ast.Expr) error {
 	if err := b.visitExpr(value); err != nil {
 		return err
@@ -137,6 +145,8 @@ func (b *builder) visitFormattedValue(value, formatSpec ast.Expr) error {
 }
 
 // visitSliceParts walks lower / upper / step of a Slice node.
+//
+// CPython: Python/symtable.c Slice branch in symtable_visit_expr
 func (b *builder) visitSliceParts(n *ast.Slice) error {
 	if n.Lower != nil {
 		if err := b.visitExpr(n.Lower); err != nil {
@@ -307,6 +317,8 @@ func (b *builder) raiseIfComprehensionBlock(e ast.Expr) error {
 }
 
 // exprPos returns the position of an expression, or NoPos.
+//
+// CPython: Python/symtable.c LOCATION(node) macro for Expr
 func exprPos(e ast.Expr) ast.Pos {
 	if e == nil {
 		return ast.NoPos

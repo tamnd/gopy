@@ -1,5 +1,4 @@
 // Port of cpython/Python/codegen.c frame block stack (L518-L647).
-// Spec: notes/Spec/1600/1626_gopy_codegen.md
 //
 // The fblock stack tracks unwinding for break / continue / return /
 // raise / generator close through nested loops, try-finally, with,
@@ -9,6 +8,7 @@ package compile
 
 import (
 	"fmt"
+	"slices"
 
 	"github.com/tamnd/gopy/ast"
 )
@@ -81,10 +81,8 @@ func (c *Compiler) popFblock(kind fblockKind) error {
 // codegen_break and codegen_continue.
 func (c *Compiler) topFblock(kinds ...fblockKind) *fblock {
 	for i := len(c.fblocks) - 1; i >= 0; i-- {
-		for _, k := range kinds {
-			if c.fblocks[i].Kind == k {
-				return &c.fblocks[i]
-			}
+		if slices.Contains(kinds, c.fblocks[i].Kind) {
+			return &c.fblocks[i]
 		}
 	}
 	return nil
@@ -106,7 +104,7 @@ func (c *Compiler) newLabel() JumpTargetLabel {
 }
 
 // addOpJump emits a jump opcode whose oparg is a label id. The
-// flowgraph (1627) resolves the label to a real instruction offset.
+// flowgraph resolves the label to a real instruction offset.
 //
 // CPython: Python/codegen.c:L400 codegen_addop_j
 func (c *Compiler) addOpJump(op Opcode, target JumpTargetLabel, l ast.Pos) {

@@ -1,5 +1,4 @@
 // Port of cpython/Python/codegen.c addop helpers (L254-L461).
-// Spec: notes/Spec/1600/1626_gopy_codegen.md
 //
 // These wrap Sequence.Addop with the dedup-into-pool semantics the
 // CPython macros encode (ADDOP_LOAD_CONST, ADDOP_NAME, ADDOP_O,
@@ -57,6 +56,8 @@ const (
 
 // poolIndex returns the dedup index for name in the requested pool,
 // allocating a fresh slot if needed.
+//
+// CPython: Python/compile.c dict_add_o (per-pool dedup helper)
 func (c *Compiler) poolIndex(kind *poolKind, name string) int {
 	u := c.unit()
 	switch *kind {
@@ -101,8 +102,8 @@ func (c *Compiler) poolIndex(kind *poolKind, name string) int {
 // the same concrete type share an index. NaN floats compare by bits;
 // for now we lean on Go map equality, which uses ==. This handles
 // every constant kind codegen emits except floats with NaN bits and
-// nested tuples; those land alongside the const-fold panel in the
-// flowgraph (1627) which has stricter dedup needs.
+// nested tuples; those need stricter dedup which the flowgraph
+// const-fold pass provides.
 //
 // CPython: Python/codegen.c:L290 codegen_addop_load_const ->
 //

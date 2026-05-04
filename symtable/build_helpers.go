@@ -176,6 +176,8 @@ func (b *builder) visitAlias(a *ast.Alias) error {
 }
 
 // indexDot returns the offset of the first `.` in s, or -1.
+//
+// CPython: Python/symtable.c PyUnicode_FindChar(str, '.', ...)
 func indexDot(s string) int {
 	for i := 0; i < len(s); i++ {
 		if s[i] == '.' {
@@ -289,6 +291,8 @@ func (b *builder) visitPattern(p ast.Pattern) error {
 }
 
 // visitPatternSeq walks a sequence of patterns.
+//
+// CPython: Python/symtable.c VISIT_SEQ(c, pattern, seq)
 func (b *builder) visitPatternSeq(seq ast.Seq[ast.Pattern]) error {
 	for _, p := range seq {
 		if err := b.visitPattern(p); err != nil {
@@ -440,6 +444,8 @@ func (b *builder) enterTypeParamBlock(name string, key any, _ ast.Seq[ast.TypePa
 }
 
 // stmtPos returns the source location of a statement, or NoPos.
+//
+// CPython: Python/symtable.c LOCATION(node) macro for Stmt
 func stmtPos(s ast.Stmt) ast.Pos {
 	if s == nil {
 		return ast.NoPos

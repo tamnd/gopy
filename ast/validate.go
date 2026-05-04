@@ -11,9 +11,9 @@ import (
 // returns nil if the tree is well-formed, or an error matching
 // CPython's ValueError/TypeError text.
 //
-// This is the v0.5 foundation pass: covers Module/Interactive/
-// Expression/FunctionType plus the node kinds emitted by future and
-// other early-stage code (ImportFrom, ExprStmt, Constant). The full
+// This is the foundation pass: covers Module/Interactive/Expression/
+// FunctionType plus the node kinds emitted by future and other early
+// pipeline stages (ImportFrom, ExprStmt, Constant). The full
 // validator grows as the asdl-generated nodes land in nodes_gen.go.
 //
 // CPython: Python/ast.c:L1047 _PyAST_Validate
@@ -39,6 +39,9 @@ func Validate(mod Mod) error {
 	}
 }
 
+// validateBody walks a statement sequence, validating each entry.
+//
+// CPython: Python/ast.c VISIT_SEQ(state, stmt, body)
 func validateBody(body Seq[Stmt]) error {
 	for i := 0; i < body.Len(); i++ {
 		if err := validateStmt(body.Get(i)); err != nil {
@@ -48,6 +51,9 @@ func validateBody(body Seq[Stmt]) error {
 	return nil
 }
 
+// validateStmt validates one statement.
+//
+// CPython: Python/ast.c:L686 validate_stmt
 func validateStmt(s Stmt) error {
 	if s == nil {
 		return errors.New("validate: nil statement")
@@ -66,6 +72,9 @@ func validateStmt(s Stmt) error {
 	return nil
 }
 
+// validateExpr validates one expression.
+//
+// CPython: Python/ast.c:L379 validate_expr
 func validateExpr(e Expr) error {
 	if e == nil {
 		return errors.New("validate: nil expression")

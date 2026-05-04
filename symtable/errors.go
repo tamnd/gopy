@@ -20,6 +20,8 @@ type SyntaxError struct {
 }
 
 // Error implements the error interface.
+//
+// CPython: Python/symtable.c PyErr_Format(PyExc_SyntaxError, ...) message body
 func (e *SyntaxError) Error() string { return e.Msg }
 
 // Error message formats. Each constant is the printf template from
@@ -65,6 +67,8 @@ const (
 )
 
 // errorf builds a *SyntaxError with the given location.
+//
+// CPython: Python/symtable.c PyErr_Format + PyErr_RangedSyntaxLocationObject
 func errorf(filename string, loc ast.Pos, format string, args ...any) *SyntaxError {
 	return &SyntaxError{
 		Msg:      fmt.Sprintf(format, args...),

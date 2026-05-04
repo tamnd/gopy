@@ -6,8 +6,6 @@
 // generated node structs live in nodes_gen.go (produced by
 // tools/asdl_go from that .asdl file). This file ports the runtime
 // helpers.
-//
-// Spec: notes/Spec/1600/1620_gopy_compile_pipeline.md
 package ast
 
 // Seq is the asdl_seq* equivalent. CPython stores sequence length and

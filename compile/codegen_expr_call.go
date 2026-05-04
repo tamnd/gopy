@@ -5,8 +5,6 @@
 //	kwargs only    ->  CALL_KW nargs            (oparg includes kw count;
 //	                                              tuple of names follows)
 //	stars or **    ->  CALL_FUNCTION_EX flags   (collect args / kwargs)
-//
-// Spec: notes/Spec/1600/1626_gopy_codegen.md
 
 package compile
 
@@ -143,6 +141,8 @@ func (c *Compiler) emitCallEx(e *ast.Call) error {
 }
 
 // hasStarArg reports whether any positional arg is `*expr`.
+//
+// CPython: Python/codegen.c has_star (call-args inspection helper)
 func hasStarArg(args ast.Seq[ast.Expr]) bool {
 	for _, a := range args {
 		if _, ok := a.(*ast.Starred); ok {
@@ -153,6 +153,8 @@ func hasStarArg(args ast.Seq[ast.Expr]) bool {
 }
 
 // hasStarStar reports whether any keyword is `**expr`.
+//
+// CPython: Python/codegen.c has_kwargs (call-kwargs inspection helper)
 func hasStarStar(kws ast.Seq[*ast.Keyword]) bool {
 	for _, k := range kws {
 		if k.Arg == nil {
@@ -164,16 +166,20 @@ func hasStarStar(kws ast.Seq[*ast.Keyword]) bool {
 
 // hasKeyword reports whether any explicit keyword (name=value or
 // **expr) is present.
+//
+// CPython: Python/codegen.c keywords nonempty check in codegen_call
 func hasKeyword(kws ast.Seq[*ast.Keyword]) bool {
 	return len(kws) > 0
 }
 
 // tupleOf returns a *ConstTuple holding items. The pointer is what
-// goes into the unit's Consts pool; the assembler in 1628 unwraps it
-// into a real tuple at marshal time. Pointer identity makes the value
+// goes into the unit's Consts pool; the assembler unwraps it into a
+// real tuple at marshal time. Pointer identity makes the value
 // hashable for the per-unit dedup cache; the flowgraph's const-cache
-// pass in 1627 collapses identical tuples emitted at different call
-// sites.
+// pass collapses identical tuples emitted at different call sites.
+//
+// CPython: Python/codegen.c PyTuple_New + PyTuple_SET_ITEM construction
+// in codegen_call_helper_impl
 func tupleOf(items []any) any {
 	out := make([]any, len(items))
 	copy(out, items)

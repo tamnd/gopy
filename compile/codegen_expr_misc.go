@@ -1,8 +1,6 @@
 // Port of cpython/Python/codegen.c expression visitors for the
 // remaining kinds: NamedExpr, Yield, YieldFrom, Await, JoinedStr,
 // FormattedValue, Starred (load context errors).
-//
-// Spec: notes/Spec/1600/1626_gopy_codegen.md
 
 package compile
 

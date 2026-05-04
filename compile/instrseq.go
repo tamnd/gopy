@@ -1,8 +1,6 @@
 // Package compile holds the AST-to-bytecode pipeline. Mirrors
 // cpython/Python/instruction_sequence.c, codegen.c, flowgraph.c,
 // assemble.c, and compile.c.
-//
-// Spec: notes/Spec/1600/1620_gopy_compile_pipeline.md
 package compile
 
 import "github.com/tamnd/gopy/ast"
@@ -18,8 +16,7 @@ const MaxOpcode = 511
 const MaxOparg = 1 << 30
 
 // Opcode is a single bytecode opcode. The numeric values match
-// cpython/Lib/opcode.py and are filled in by compile/opcodes_gen.go
-// (generated, lands in a later commit).
+// cpython/Lib/opcode.py and are filled in by compile/opcodes_gen.go.
 type Opcode int32
 
 // JumpTargetLabel is an opaque label id created by NewLabel and bound
@@ -30,6 +27,8 @@ type JumpTargetLabel struct{ id int }
 
 // ID returns the underlying label id. CPython exposes the same
 // integer to Python via `InstructionSequence.new_label`.
+//
+// CPython: Include/internal/pycore_compile.h _PyJumpTargetLabel.id
 func (l JumpTargetLabel) ID() int { return l.id }
 
 // ExceptHandlerInfo is the per-instruction exception handler slot.
@@ -96,6 +95,9 @@ func (s *Sequence) UseLabel(lbl JumpTargetLabel) {
 
 // ensureLabelmap grows s.labelmap so that lbl is a valid index. New
 // slots are filled with labelUnbound. Index 0 is reserved.
+//
+// CPython: Python/instruction_sequence.c labelmap resize in
+// _PyInstructionSequence_UseLabel
 func (s *Sequence) ensureLabelmap(lbl int) {
 	for len(s.labelmap) <= lbl {
 		s.labelmap = append(s.labelmap, labelUnbound)

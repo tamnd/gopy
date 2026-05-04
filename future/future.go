@@ -1,8 +1,6 @@
 // Package future ports cpython/Python/future.c. It walks a Module AST
 // past its docstring and collects __future__ imports into a Features
 // bitmask plus the location of the last __future__ statement.
-//
-// Spec: notes/Spec/1600/1620_gopy_compile_pipeline.md
 package future
 
 import (
@@ -61,6 +59,9 @@ type SyntaxError struct {
 	Pos      ast.Pos
 }
 
+// Error formats the syntax error as a plain string.
+//
+// CPython: Python/future.c PyErr_RangedSyntaxLocationObject message
 func (e *SyntaxError) Error() string {
 	return e.Msg
 }
@@ -85,6 +86,8 @@ func FromAST(mod ast.Mod, filename string) (*Features, error) {
 // moduleBody returns the body slice for Module/Interactive forms.
 // For Expression and FunctionType (the eval/typing forms) the C code
 // short-circuits: there can be no __future__ statement there.
+//
+// CPython: Python/future.c:L109 _PyFuture_FromAST top dispatch
 func moduleBody(mod ast.Mod) (ast.Seq[ast.Stmt], bool) {
 	switch m := mod.(type) {
 	case *ast.Module:

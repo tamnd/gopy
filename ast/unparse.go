@@ -1,3 +1,9 @@
+// Port of cpython/Python/ast_unparse.c. All visitor methods on
+// `*unparser` correspond to the matching `append_ast_*` routine in
+// the C file (e.g. `(*unparser).binop` ports `append_ast_binop`).
+// The `ws/wc/wcond/sep` helpers are Go-only string-builder shims with
+// no individual CPython analog.
+
 package ast
 
 import (
@@ -64,6 +70,9 @@ func (u *unparser) wcond(b bool, s string) {
 	}
 }
 
+// expr is the top-level dispatch over expression node kinds.
+//
+// CPython: Python/ast_unparse.c append_ast_expr
 func (u *unparser) expr(e Expr, level int) error {
 	if handled, err := u.exprOps(e, level); handled {
 		return err

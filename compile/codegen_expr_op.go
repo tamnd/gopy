@@ -1,7 +1,5 @@
 // Port of cpython/Python/codegen.c BoolOp / BinOp / UnaryOp / Compare
 // visitors and the IfExp short-circuit.
-//
-// Spec: notes/Spec/1600/1626_gopy_codegen.md
 
 package compile
 

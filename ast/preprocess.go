@@ -1,3 +1,10 @@
+// Port of cpython/Python/ast_preprocess.c. The walker (`*preprocessor`)
+// mirrors `astfold_*` and `fold_*` in the C file; helper functions
+// such as `parseFormatSpec`, `negateConst`, `combineConst` and
+// `toComplex` port the small constant-folding utilities in the same
+// file. Pure-Go helpers (`hasStarred`, fmt-cursor primitives) have no
+// individual CPython counterpart and live alongside the ports.
+
 package ast
 
 import (
@@ -17,6 +24,9 @@ type Warning struct {
 	Pos      Pos
 }
 
+// Error formats the warning as a SyntaxWarning-style message.
+//
+// CPython: Python/ast_preprocess.c PyErr_FormatSyntaxWarningObject
 func (w Warning) Error() string {
 	return fmt.Sprintf("%s:%d:%d: SyntaxWarning: %s",
 		w.Filename, w.Pos.Lineno, w.Pos.ColOffset+1, w.Msg)

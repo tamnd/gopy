@@ -130,6 +130,8 @@ func (b *builder) handleComprehension(e ast.Expr, scopeName string, generators a
 // must execute inside the new FunctionBlock: implicit .0 parameter,
 // the outermost target / ifs, the trailing generator clauses, and
 // finally the value / element expressions.
+//
+// CPython: Python/symtable.c symtable_handle_comprehension body half
 func (b *builder) runComprehensionBody(outermost *ast.Comprehension, generators ast.Seq[*ast.Comprehension], elt, value ast.Expr) error {
 	if err := b.implicitArg(0); err != nil {
 		return err
@@ -158,6 +160,9 @@ func (b *builder) runComprehensionBody(outermost *ast.Comprehension, generators 
 
 // comprehensionTypeFor maps an AST comprehension node to the matching
 // ComprehensionType tag.
+//
+// CPython: Python/symtable.c comprehension-kind switch in
+// symtable_handle_comprehension
 func comprehensionTypeFor(e ast.Expr) ComprehensionType {
 	switch e.(type) {
 	case *ast.ListComp:

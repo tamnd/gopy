@@ -1,9 +1,6 @@
 // Port of cpython/Python/codegen.c. Walks each scope's AST and emits
-// instructions into an instruction Sequence. The driver
-// (compile/compiler.go, task #50) walks the symtable top-down and
-// invokes Codegen once per scope.
-//
-// Spec: notes/Spec/1600/1626_gopy_codegen.md
+// instructions into an instruction Sequence. The driver walks the
+// symtable top-down and invokes Codegen once per scope.
 //
 // CPython: Python/codegen.c
 
@@ -40,8 +37,8 @@ const (
 )
 
 // Unit is the per-scope handoff codegen produces. The flowgraph
-// (1627) optimizes Seq in place and the assembler (1628) packs the
-// result into a Code object.
+// optimizes Seq in place and the assembler packs the result into a
+// Code object.
 //
 // CPython: Python/compile.c compiler_unit
 type Unit struct {
@@ -110,7 +107,7 @@ type Compiler struct {
 }
 
 // NewCompiler builds a fresh driver. Symtable must already be built
-// over mod (1620 section 5).
+// over mod.
 //
 // CPython: Python/compile.c new_compiler
 func NewCompiler(filename string, optimize int, ff *future.Features, st *symtable.Table) *Compiler {
@@ -211,6 +208,8 @@ func (c *Compiler) leaveScope() {
 }
 
 // unit returns the unit on top of the stack.
+//
+// CPython: Python/compile.c c->u (top-of-stack accessor)
 func (c *Compiler) unit() *Unit {
 	if len(c.units) == 0 {
 		return nil
@@ -219,11 +218,15 @@ func (c *Compiler) unit() *Unit {
 }
 
 // seq returns the active instruction sequence.
+//
+// CPython: Python/compile.c INSTR_SEQUENCE(c)
 func (c *Compiler) seq() *Sequence {
 	return c.unit().Seq
 }
 
 // loc returns the position of any AST node, or the zero Pos.
+//
+// CPython: Python/codegen.c LOC macro
 func loc(n any) ast.Pos {
 	if n == nil {
 		return ast.Pos{}
