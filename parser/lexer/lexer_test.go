@@ -1,6 +1,7 @@
 package lexer
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/tamnd/gopy/tokenize"
@@ -172,6 +173,57 @@ func TestFStringEmpty(t *testing.T) {
 	}
 	if len(got) != len(want) {
 		t.Fatalf("got %v, want %v", got, want)
+	}
+}
+
+func TestTypeComment(t *testing.T) {
+	s := FromString("x = 1  # type: int\n", ModeFile)
+	s.SetTypeComments(true)
+	var got []tokenize.Type
+	for i := 0; i < 50; i++ {
+		tk := s.Get()
+		got = append(got, tk.Kind)
+		if tk.Kind == tokenize.ENDMARKER {
+			break
+		}
+	}
+	saw := false
+	for _, k := range got {
+		if k == tokenize.TYPE_COMMENT {
+			saw = true
+		}
+	}
+	if !saw {
+		t.Errorf("expected TYPE_COMMENT in stream, got %v", got)
+	}
+}
+
+func TestReaderDriver(t *testing.T) {
+	s := FromReader(strings.NewReader("a = 1\nb = 2\n"), ModeFile)
+	var got []tokenize.Type
+	for i := 0; i < 50; i++ {
+		tk := s.Get()
+		got = append(got, tk.Kind)
+		if tk.Kind == tokenize.ENDMARKER || tk.Kind == tokenize.ERRORTOKEN {
+			break
+		}
+	}
+	if len(got) < 5 {
+		t.Fatalf("expected non-trivial token stream, got %v", got)
+	}
+}
+
+func TestBOMStripped(t *testing.T) {
+	src := "\xef\xbb\xbfx = 1\n"
+	got := kinds(tokenize_(t, src))
+	want := []tokenize.Type{tokenize.NAME, tokenize.OP, tokenize.NUMBER, tokenize.NEWLINE, tokenize.ENDMARKER}
+	if len(got) != len(want) {
+		t.Fatalf("got %v, want %v", got, want)
+	}
+	for i := range got {
+		if got[i] != want[i] {
+			t.Errorf("token %d: got %v, want %v", i, got[i], want[i])
+		}
 	}
 }
 

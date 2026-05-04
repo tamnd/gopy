@@ -27,6 +27,13 @@ func FromString(src string, mode Mode) *State {
 // CPython: Parser/tokenizer/utf8_tokenizer.c:11 _PyTokenizer_FromUTF8
 func FromBytes(src []byte, mode Mode) *State {
 	s := newState()
+	// Strip a UTF-8 BOM. PEP 263 says the BOM signature is treated as
+	// declaring UTF-8 encoding; conflicting `coding:` cookies are
+	// flagged by the action_helpers layer, not here.
+	if len(src) >= 3 && src[0] == 0xef && src[1] == 0xbb && src[2] == 0xbf {
+		src = src[3:]
+		s.encoding = "utf-8"
+	}
 	s.buf = src
 	s.cur = 0
 	s.inp = len(src)

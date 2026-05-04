@@ -128,8 +128,31 @@ func (s *State) tokGetNormalMode() Tok {
 	s.startCol = s.col - 1
 
 	if c == '#' {
+		commentStart := s.cur - 1
 		for c != '\n' && c != eof {
 			c = s.nextC()
+		}
+		// Type comment recognition (`# type: ...`).
+		//
+		// CPython: Parser/lexer/lexer.c:830 type-comment branch
+		if s.typeComments {
+			if t, ok := s.maybeTypeComment(commentStart, s.cur); ok {
+				return t
+			}
+		}
+		if s.tokExtraTokens {
+			end := s.cur
+			if c == '\n' {
+				end = s.cur - 1
+			}
+			tok := s.tokenSetup(tokenize.COMMENT, commentStart, end)
+			if c == '\n' {
+				s.commentNewline = true
+			}
+			if c == eof {
+				s.done = eEOF
+			}
+			return tok
 		}
 		if c == eof {
 			return s.endmarker()
@@ -504,6 +527,28 @@ func (s *State) endmarker() Tok {
 	}
 	s.done = eEOF
 	return s.tokenSetup(tokenize.ENDMARKER, s.cur, s.cur)
+}
+
+// maybeTypeComment inspects a comment span and emits a TYPE_COMMENT
+// token if it matches the `# type: ` prefix. Returns the token and
+// true if matched, zero/false otherwise.
+//
+// CPython: Parser/lexer/lexer.c:50 type_comment_prefix
+func (s *State) maybeTypeComment(start, end int) (Tok, bool) {
+	const prefix = "# type:"
+	if end-start < len(prefix) {
+		return Tok{}, false
+	}
+	for i := 0; i < len(prefix); i++ {
+		if s.buf[start+i] != prefix[i] {
+			return Tok{}, false
+		}
+	}
+	body := start + len(prefix)
+	for body < end && (s.buf[body] == ' ' || s.buf[body] == '\t') {
+		body++
+	}
+	return s.typeCommentTokenSetup(tokenize.TYPE_COMMENT, s.startCol, s.col, body, end), true
 }
 
 // tokGetFStringMode scans inside an f-string or t-string body. Stub:

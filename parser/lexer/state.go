@@ -305,6 +305,26 @@ func (e *SyntaxError) Error() string {
 	return e.Message
 }
 
+// SetExtraTokens enables COMMENT, NL, and ENCODING token emission.
+// Mirrors tokenize.tokenize()'s extra_tokens flag.
+//
+// CPython: Parser/lexer/state.h:133 tok_extra_tokens
+func (s *State) SetExtraTokens(v bool) { s.tokExtraTokens = v }
+
+// SetTypeComments enables type-comment emission (`# type: ...`).
+//
+// CPython: Parser/lexer/state.h:122 type_comments
+func (s *State) SetTypeComments(v bool) { s.typeComments = v }
+
+// Filename returns the configured filename. Used by error formatters.
+func (s *State) Filename() string { return s.filename }
+
+// SetFilename pins a name for error messages.
+func (s *State) SetFilename(name string) { s.filename = name }
+
+// Err returns the first SyntaxError recorded, or nil.
+func (s *State) Err() *SyntaxError { return s.err }
+
 // recordError pins the first error we hit. CPython overwrites; we
 // preserve the first because PEG callers retry tokenization for
 // diagnostics.
