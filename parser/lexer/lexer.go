@@ -229,15 +229,25 @@ func (s *State) indentNL() (Tok, bool) {
 // into c. ASCII-only for now; non-ASCII bytes are accepted but the
 // PEP 3131 normalisation pass lives in helpers.go.
 //
-// CPython: Parser/lexer/lexer.c:1100 (identifier branch in tok_get_normal_mode)
+// CPython: Parser/lexer/lexer.c:743 (identifier branch in tok_get_normal_mode)
 func (s *State) scanName(c int) Tok {
 	for {
 		c = s.nextC()
 		if !isPotentialIdentifierChar(c) {
-			s.backup(c)
 			break
 		}
 	}
+	// String-prefix detection: f", t", rf", rt", fr", tr", b", u", r".
+	if c == '"' || c == '\'' {
+		if _, _, ok := s.detectStringPrefix(s.start, s.cur-1); ok {
+			return s.startFString(s.start, s.cur-1, c)
+		}
+		// Plain b/u/r prefix: rewind the quote and let scanString do it.
+		s.backup(c)
+		c = s.nextC()
+		return s.scanString(c)
+	}
+	s.backup(c)
 	return s.tokenSetup(tokenize.NAME, s.start, s.cur)
 }
 
@@ -377,9 +387,33 @@ func (s *State) scanOperator(c int) Tok {
 	switch c {
 	case '(', '[', '{':
 		s.pushParen(byte(c))
+		if s.insideFString() {
+			m := s.curMode()
+			if c == '{' {
+				m.curlyBracketDepth++
+			}
+		}
 		return s.tokenSetup(tokenize.OP, s.start, s.cur)
 	case ')', ']', '}':
 		s.popParen(byte(c))
+		// Inside an f-string expression, after popping, a `}` that
+		// brings curlyBracketDepth back down to exprStartDepth closes
+		// the expression and re-enters f-string mode.
+		//
+		// CPython: Parser/lexer/lexer.c:1360 INSIDE_FSTRING decrement
+		if s.insideFString() {
+			m := s.curMode()
+			m.curlyBracketDepth--
+			if m.curlyBracketDepth < 0 {
+				m.curlyBracketDepth = 0
+			}
+			if c == '}' && m.curlyBracketDepth == m.curlyBracketExprStartDepth {
+				m.curlyBracketExprStartDepth--
+				m.kind = tokFStringMode
+				m.inFormatSpec = false
+				m.inDebug = false
+			}
+		}
 		return s.tokenSetup(tokenize.OP, s.start, s.cur)
 	case '*', '/', '<', '>', '=', '!':
 		if s.peek() == '=' {
@@ -478,7 +512,5 @@ func (s *State) endmarker() Tok {
 //
 // CPython: Parser/lexer/lexer.c:1393 tok_get_fstring_mode
 func (s *State) tokGetFStringMode() Tok {
-	s.done = eToken
-	s.recordError("f-string scanning not yet implemented")
-	return s.tokenSetup(tokenize.ERRORTOKEN, s.cur, s.cur)
+	return s.tokGetFStringModeImpl()
 }

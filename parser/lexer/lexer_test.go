@@ -130,6 +130,51 @@ func TestParenContinuation(t *testing.T) {
 	}
 }
 
+func TestFStringSimple(t *testing.T) {
+	got := kinds(tokenize_(t, `f"hi {name}!"` + "\n"))
+	want := []tokenize.Type{
+		tokenize.FSTRING_START, tokenize.FSTRING_MIDDLE,
+		tokenize.OP, tokenize.NAME, tokenize.OP,
+		tokenize.FSTRING_MIDDLE, tokenize.FSTRING_END,
+		tokenize.NEWLINE, tokenize.ENDMARKER,
+	}
+	if len(got) != len(want) {
+		t.Fatalf("got %v, want %v", got, want)
+	}
+	for i := range got {
+		if got[i] != want[i] {
+			t.Errorf("token %d: got %v, want %v", i, got[i], want[i])
+		}
+	}
+}
+
+func TestTStringSimple(t *testing.T) {
+	got := kinds(tokenize_(t, `t"x={x}"` + "\n"))
+	if got[0] != tokenize.TSTRING_START {
+		t.Fatalf("expected TSTRING_START first, got %v", got)
+	}
+	saw := false
+	for _, k := range got {
+		if k == tokenize.TSTRING_END {
+			saw = true
+		}
+	}
+	if !saw {
+		t.Fatalf("expected TSTRING_END in stream, got %v", got)
+	}
+}
+
+func TestFStringEmpty(t *testing.T) {
+	got := kinds(tokenize_(t, `f""` + "\n"))
+	want := []tokenize.Type{
+		tokenize.FSTRING_START, tokenize.FSTRING_END,
+		tokenize.NEWLINE, tokenize.ENDMARKER,
+	}
+	if len(got) != len(want) {
+		t.Fatalf("got %v, want %v", got, want)
+	}
+}
+
 func TestNumberKinds(t *testing.T) {
 	cases := []string{"0", "0x1f", "0o77", "0b101", "1.5", "1.5e10", "10j"}
 	for _, src := range cases {
