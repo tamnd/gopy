@@ -165,6 +165,8 @@ func (c *Compiler) visitStmtBlock(s ast.Stmt) (bool, error) {
 		return true, c.visitTryStar(n)
 	case *ast.Match:
 		return true, c.visitMatch(n)
+	case *ast.TypeAlias:
+		return true, c.visitTypeAlias(n)
 	}
 	return false, nil
 }
