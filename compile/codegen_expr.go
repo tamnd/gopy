@@ -14,45 +14,83 @@ import (
 )
 
 // visitExpr dispatches on the concrete Expr type. Every kind must be
-// handled or rejected with a clear error.
+// handled or rejected with a clear error. The dispatch is split across
+// two helpers (visitExprPrimary covers leaves + operators + containers
+// + calls; visitExprMisc covers walrus / yield / await / f-strings) to
+// keep each switch under the cyclomatic complexity threshold.
 //
 // CPython: Python/codegen.c:L5172 codegen_visit_expr
 func (c *Compiler) visitExpr(e ast.Expr) error {
-	switch n := e.(type) {
-	case *ast.Constant:
-		return c.visitConstant(n)
-	case *ast.Name:
-		return c.visitName(n)
-	case *ast.Lambda:
-		return c.visitLambda(n)
-	case *ast.BoolOp:
-		return c.visitBoolOp(n)
-	case *ast.BinOp:
-		return c.visitBinOp(n)
-	case *ast.UnaryOp:
-		return c.visitUnaryOp(n)
-	case *ast.Compare:
-		return c.visitCompare(n)
-	case *ast.IfExp:
-		return c.visitIfExp(n)
-	case *ast.List:
-		return c.visitList(n)
-	case *ast.Tuple:
-		return c.visitTuple(n)
-	case *ast.Set:
-		return c.visitSet(n)
-	case *ast.Dict:
-		return c.visitDict(n)
-	case *ast.Attribute:
-		return c.visitAttribute(n)
-	case *ast.Subscript:
-		return c.visitSubscript(n)
-	case *ast.Slice:
-		return c.visitSlice(n)
-	case *ast.Call:
-		return c.visitCall(n)
+	if handled, err := c.visitExprPrimary(e); handled {
+		return err
+	}
+	if handled, err := c.visitExprMisc(e); handled {
+		return err
 	}
 	return fmt.Errorf("compile: expr kind %T not yet supported", e)
+}
+
+// visitExprPrimary handles leaves (Constant, Name), operators
+// (BoolOp / BinOp / UnaryOp / Compare / IfExp), Lambda, container
+// builders (List / Tuple / Set / Dict), member access (Attribute /
+// Subscript / Slice), and Call.
+func (c *Compiler) visitExprPrimary(e ast.Expr) (bool, error) {
+	switch n := e.(type) {
+	case *ast.Constant:
+		c.visitConstant(n)
+		return true, nil
+	case *ast.Name:
+		return true, c.visitName(n)
+	case *ast.Lambda:
+		return true, c.visitLambda(n)
+	case *ast.BoolOp:
+		return true, c.visitBoolOp(n)
+	case *ast.BinOp:
+		return true, c.visitBinOp(n)
+	case *ast.UnaryOp:
+		return true, c.visitUnaryOp(n)
+	case *ast.Compare:
+		return true, c.visitCompare(n)
+	case *ast.IfExp:
+		return true, c.visitIfExp(n)
+	case *ast.List:
+		return true, c.visitList(n)
+	case *ast.Tuple:
+		return true, c.visitTuple(n)
+	case *ast.Set:
+		return true, c.visitSet(n)
+	case *ast.Dict:
+		return true, c.visitDict(n)
+	case *ast.Attribute:
+		return true, c.visitAttribute(n)
+	case *ast.Subscript:
+		return true, c.visitSubscript(n)
+	case *ast.Slice:
+		return true, c.visitSlice(n)
+	case *ast.Call:
+		return true, c.visitCall(n)
+	}
+	return false, nil
+}
+
+// visitExprMisc handles walrus, yield / yield from, await, and the
+// f-string nodes (JoinedStr / FormattedValue).
+func (c *Compiler) visitExprMisc(e ast.Expr) (bool, error) {
+	switch n := e.(type) {
+	case *ast.NamedExpr:
+		return true, c.visitNamedExpr(n)
+	case *ast.Yield:
+		return true, c.visitYield(n)
+	case *ast.YieldFrom:
+		return true, c.visitYieldFrom(n)
+	case *ast.Await:
+		return true, c.visitAwait(n)
+	case *ast.JoinedStr:
+		return true, c.visitJoinedStr(n)
+	case *ast.FormattedValue:
+		return true, c.visitFormattedValue(n)
+	}
+	return false, nil
 }
 
 // visitConstant emits LOAD_CONST. CPython's constant folding has
@@ -60,9 +98,8 @@ func (c *Compiler) visitExpr(e ast.Expr) error {
 // remaining work is the dedup + LOAD_CONST emit.
 //
 // CPython: Python/codegen.c codegen_visit_expr Constant case
-func (c *Compiler) visitConstant(e *ast.Constant) error {
+func (c *Compiler) visitConstant(e *ast.Constant) {
 	c.addLoadConst(e.Value, loc(e))
-	return nil
 }
 
 // visitName routes Load context to nameOpLoad. Store and Del
