@@ -12,6 +12,9 @@ folder; this file is the aggregated index.
 ## Unreleased
 
 * build: bump minimum Go to 1.26.
+* feat(arena): port `cpython/Python/pyarena.c` to the `arena` package.
+  Bump allocator with linked fixed-size blocks for the compiler
+  pipeline.
 
 ## v0.0.0 - 2026-05-04
 
