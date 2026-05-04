@@ -14,6 +14,8 @@ import (
 )
 
 // ParkStatus is the result of a Park call.
+//
+// CPython: Include/internal/pycore_parking_lot.h:L22 Py_PARK_OK enum (adapted from)
 type ParkStatus int
 
 const (
@@ -31,8 +33,14 @@ const (
 // numBuckets is the prime from cpython/Python/parking_lot.c. It is
 // chosen to avoid correlations with memory addresses while keeping
 // memory use bounded.
+//
+// CPython: Python/parking_lot.c:L35 NUM_BUCKETS
 const numBuckets = 257
 
+// waiter is one parked goroutine. Mirrors struct wait_entry in C
+// with the OS semaphore replaced by a Go channel.
+//
+// CPython: Python/parking_lot.c:L23 wait_entry
 type waiter struct {
 	addr        uintptr
 	parkArg     any
@@ -41,12 +49,18 @@ type waiter struct {
 	isUnparking bool
 }
 
+// bucket holds the waiter list for a slice of the address space.
+//
+// CPython: Python/parking_lot.c:L12 Bucket
 type bucket struct {
 	mu         sync.Mutex
 	head       *waiter // doubly-linked list sentinel sentinel.next == first
 	numWaiters int
 }
 
+// enqueue links w at the tail of the bucket's circular waiter list.
+//
+// CPython: Python/parking_lot.c:L23 wait_entry (adapted from)
 func (b *bucket) enqueue(w *waiter) {
 	if b.head == nil {
 		b.head = &waiter{}
@@ -61,6 +75,9 @@ func (b *bucket) enqueue(w *waiter) {
 	b.numWaiters++
 }
 
+// remove unlinks w from the bucket's waiter list.
+//
+// CPython: Python/parking_lot.c:L329 _PyParkingLot_Park (adapted from)
 func (b *bucket) remove(w *waiter) {
 	w.prev.next = w.next
 	w.next.prev = w.prev
@@ -68,6 +85,11 @@ func (b *bucket) remove(w *waiter) {
 	b.numWaiters--
 }
 
+// dequeue removes and returns the first waiter parked on addr, or
+// nil. The waiter is marked as unparking so a concurrent timeout
+// path knows to wait for the wakeup channel.
+//
+// CPython: Python/parking_lot.c:L393 _PyParkingLot_Unpark (adapted from)
 func (b *bucket) dequeue(addr uintptr) *waiter {
 	if b.head == nil {
 		return nil
@@ -82,6 +104,9 @@ func (b *bucket) dequeue(addr uintptr) *waiter {
 	return nil
 }
 
+// dequeueAll removes every waiter parked on addr.
+//
+// CPython: Python/parking_lot.c:L416 _PyParkingLot_UnparkAll (adapted from)
 func (b *bucket) dequeueAll(addr uintptr) []*waiter {
 	var out []*waiter
 	if b.head == nil {
@@ -102,6 +127,10 @@ func (b *bucket) dequeueAll(addr uintptr) []*waiter {
 
 var buckets [numBuckets]bucket
 
+// bucketFor maps an address to its bucket using the same modulo
+// scheme as the C parking lot.
+//
+// CPython: Python/parking_lot.c:L338 _PyParkingLot_Park (adapted from)
 func bucketFor(addr uintptr) *bucket {
 	return &buckets[addr%numBuckets]
 }
@@ -124,6 +153,8 @@ func bucketFor(addr uintptr) *bucket {
 //
 // detach is plumbed through for the PEP 703 attach/detach protocol;
 // it has no effect in v0.1.
+//
+// CPython: Python/parking_lot.c:L329 _PyParkingLot_Park
 func Park(addr unsafe.Pointer, check func() bool, timeout time.Duration,
 	parkArg any, detach bool,
 ) ParkStatus {
@@ -181,11 +212,15 @@ func Park(addr unsafe.Pointer, check func() bool, timeout time.Duration,
 // waiter (or with parkArg == nil if no waiter was queued). hasMore
 // reports whether the bucket still has waiters on the same addr
 // after the dequeue.
+//
+// CPython: Include/internal/pycore_parking_lot.h _Py_unpark_fn_t (adapted from)
 type UnparkFn func(parkArg any, hasMore bool)
 
 // Unpark wakes one waiter parked on addr. fn is called while the
 // bucket lock is held; the waiter is signaled after the lock is
 // released. If no waiter is queued, fn is called with (nil, false).
+//
+// CPython: Python/parking_lot.c:L393 _PyParkingLot_Unpark
 func Unpark(addr unsafe.Pointer, fn UnparkFn) {
 	key := uintptr(addr)
 	b := bucketFor(key)
@@ -219,6 +254,8 @@ func Unpark(addr unsafe.Pointer, fn UnparkFn) {
 }
 
 // UnparkAll wakes every waiter parked on addr.
+//
+// CPython: Python/parking_lot.c:L416 _PyParkingLot_UnparkAll
 func UnparkAll(addr unsafe.Pointer) {
 	key := uintptr(addr)
 	b := bucketFor(key)
@@ -238,6 +275,8 @@ func UnparkAll(addr unsafe.Pointer) {
 // the function is preserved for source-shape parity but is a no-op
 // in practice. Calling it on a live process would deadlock waiters;
 // only call it when the program is single-threaded.
+//
+// CPython: Python/parking_lot.c:L434 _PyParkingLot_AfterFork
 func AfterFork() {
 	for i := range buckets {
 		buckets[i].mu.Lock()

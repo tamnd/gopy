@@ -14,6 +14,8 @@ import (
 // only useful when callers have an explicit ident to pass. v0.1's
 // usage is bounded; v0.7 (state) wires it up to the per-thread
 // state.
+//
+// CPython: Include/internal/pycore_lock.h:L149 _PyRecursiveMutex
 type RecursiveMutex struct {
 	mu     Mutex
 	thread atomic.Uint64 // pythread.Ident; 0 means unowned
@@ -22,12 +24,16 @@ type RecursiveMutex struct {
 
 // IsLockedBy reports whether the recursive mutex is currently held
 // by the given ident.
+//
+// CPython: Python/lock.c:L375 _PyRecursiveMutex_IsLockedByCurrentThread
 func (r *RecursiveMutex) IsLockedBy(id pythread.Ident) bool {
 	return pythread.Ident(r.thread.Load()) == id
 }
 
 // Lock acquires the mutex on behalf of id. If id already holds it,
 // the recursion depth is incremented.
+//
+// CPython: Python/lock.c:L381 _PyRecursiveMutex_Lock
 func (r *RecursiveMutex) Lock(id pythread.Ident) {
 	if pythread.Ident(r.thread.Load()) == id {
 		r.level++
@@ -39,6 +45,8 @@ func (r *RecursiveMutex) Lock(id pythread.Ident) {
 
 // Unlock releases one level. It panics if id does not hold the
 // mutex.
+//
+// CPython: Python/lock.c:L410 _PyRecursiveMutex_Unlock
 func (r *RecursiveMutex) Unlock(id pythread.Ident) {
 	if pythread.Ident(r.thread.Load()) != id {
 		panic("pysync: unlocking a recursive mutex not owned by the current thread")

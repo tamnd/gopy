@@ -10,12 +10,16 @@ import (
 //
 //	bit 0 (locked)     1 if owned by some goroutine
 //	bit 1 (hasParked)  1 if at least one goroutine is parked waiting
+//
+// CPython: Include/internal/pycore_lock.h:L17 _Py_HAS_PARKED
 const (
 	flagLocked    uint8 = 1 << 0
 	flagHasParked uint8 = 1 << 1
 )
 
 // LockFlags bitset for LockTimed.
+//
+// CPython: Include/internal/pycore_lock.h:L35 _PyLockFlags
 type LockFlags uint32
 
 const (
@@ -29,6 +33,8 @@ const (
 )
 
 // LockStatus mirrors PyLockStatus.
+//
+// CPython: Include/pythread.h:L12 PyLockStatus
 type LockStatus int
 
 const (
@@ -43,8 +49,13 @@ const (
 
 // timeToBeFairNs is the fair-handoff window, mirroring lock.c
 // (TIME_TO_BE_FAIR_NS = 1 ms).
+//
+// CPython: Python/lock.c:L22 TIME_TO_BE_FAIR_NS
 const timeToBeFairNs = 1 * time.Millisecond
 
+// mutexEntry is the parkArg payload for PyMutex waiters.
+//
+// CPython: Python/lock.c:L33 mutex_entry
 type mutexEntry struct {
 	timeToBeFair time.Time
 	handedOff    bool
@@ -54,17 +65,23 @@ type mutexEntry struct {
 //
 // The zero value is an unlocked mutex. Mutex must not be copied
 // after first use, the same as Go's sync.Mutex.
+//
+// CPython: Include/cpython/lock.h:L29 PyMutex
 type Mutex struct {
 	bits atomic.Uint32 // only the low byte is used; widened so atomic ops work
 }
 
 // Lock blocks until the mutex is acquired.
+//
+// CPython: Python/lock.c:L618 PyMutex_Lock
 func (m *Mutex) Lock() {
 	m.LockTimed(-1, LockDetach)
 }
 
 // Unlock releases the mutex. It panics if the mutex is not locked,
 // matching the Py_FatalError in PyMutex_Unlock.
+//
+// CPython: Python/lock.c:L625 PyMutex_Unlock
 func (m *Mutex) Unlock() {
 	if m.tryUnlock() < 0 {
 		panic("pysync: unlocking mutex that is not locked")
@@ -72,18 +89,24 @@ func (m *Mutex) Unlock() {
 }
 
 // IsLocked reports whether the mutex is currently held.
+//
+// CPython: Python/lock.c:L635 PyMutex_IsLocked
 func (m *Mutex) IsLocked() bool {
 	return uint8(m.bits.Load())&flagLocked != 0
 }
 
 // TryLock acquires the mutex without blocking. It returns true on
 // success.
+//
+// CPython: Include/internal/pycore_lock.h:L21 PyMutex_LockFast (adapted from)
 func (m *Mutex) TryLock() bool {
 	return m.LockTimed(0, 0) == LockAcquired
 }
 
 // LockTimed acquires the mutex with a timeout. timeout < 0 means
 // block forever; timeout == 0 is a non-blocking try.
+//
+// CPython: Python/lock.c:L53 _PyMutex_LockTimed
 func (m *Mutex) LockTimed(timeout time.Duration, flags LockFlags) LockStatus {
 	v := uint8(m.bits.Load())
 	if v&flagLocked == 0 {
@@ -153,6 +176,8 @@ func (m *Mutex) LockTimed(timeout time.Duration, flags LockFlags) LockStatus {
 }
 
 // tryUnlock returns 0 on success and -1 if the mutex was not locked.
+//
+// CPython: Python/lock.c:L163 _PyMutex_TryUnlock
 func (m *Mutex) tryUnlock() int {
 	for {
 		v := uint8(m.bits.Load())

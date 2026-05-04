@@ -14,12 +14,16 @@ import "sync"
 // uintptr trick that lock.c uses cannot be expressed without
 // triggering go vet's unsafeptr check; if a future caller needs the
 // exact CPython memory layout we will revisit.
+//
+// CPython: Include/internal/pycore_lock.h:L97 _PyRawMutex
 type RawMutex struct {
 	mu     sync.Mutex
 	locked bool // protected by mu
 }
 
 // Lock acquires the mutex.
+//
+// CPython: Python/lock.c:L191 _PyRawMutex_LockSlow
 func (r *RawMutex) Lock() {
 	r.mu.Lock()
 	r.locked = true
@@ -27,6 +31,8 @@ func (r *RawMutex) Lock() {
 
 // Unlock releases the mutex. It panics if the mutex was not locked,
 // matching the Py_FatalError in _PyRawMutex_UnlockSlow.
+//
+// CPython: Python/lock.c:L231 _PyRawMutex_UnlockSlow
 func (r *RawMutex) Unlock() {
 	if !r.locked {
 		panic("pysync: unlocking RawMutex that is not locked")

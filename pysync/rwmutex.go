@@ -17,10 +17,16 @@ import (
 //
 // The zero value is an unlocked RWMutex. Like the other pysync
 // primitives, it must not be copied after first use.
+//
+// CPython: Include/internal/pycore_lock.h:L187 _PyRWMutex
 type RWMutex struct {
 	bits atomic.Uintptr
 }
 
+// Bit packing for the RWMutex word, matching the layout described
+// in pycore_lock.h.
+//
+// CPython: Include/internal/pycore_lock.h:L169 _PyRWMutex bit layout
 const (
 	rwWriteLocked uintptr = 1 << 0
 	rwHasParked   uintptr = 1 << 1
@@ -28,10 +34,15 @@ const (
 	rwReaderUnit  uintptr = 1 << rwReaderShift
 )
 
+// rwReaderCount extracts the reader count from the packed bits word.
+//
+// CPython: Python/lock.c:L464 _PyRWMutex_RLock (adapted from)
 func rwReaderCount(bits uintptr) uintptr { return bits >> rwReaderShift }
 
 // RLock acquires a read lock, parking until both the writer slot is
 // free and no writer is waiting.
+//
+// CPython: Python/lock.c:L464 _PyRWMutex_RLock
 func (r *RWMutex) RLock() {
 	bits := r.bits.Load()
 	for {
@@ -48,6 +59,8 @@ func (r *RWMutex) RLock() {
 }
 
 // RUnlock releases a read lock. It panics if no read lock is held.
+//
+// CPython: Python/lock.c:L495 _PyRWMutex_RUnlock
 func (r *RWMutex) RUnlock() {
 	bits := r.bits.Add(^(rwReaderUnit - 1)) // subtract one reader unit
 	if rwReaderCount(bits+rwReaderUnit) == 0 {
@@ -60,6 +73,8 @@ func (r *RWMutex) RUnlock() {
 
 // Lock acquires the write lock, parking until both readers and any
 // other writer have released.
+//
+// CPython: Python/lock.c:L508 _PyRWMutex_Lock
 func (r *RWMutex) Lock() {
 	bits := r.bits.Load()
 	for {
@@ -76,6 +91,8 @@ func (r *RWMutex) Lock() {
 
 // Unlock releases the write lock. It panics if the lock was not
 // write-locked.
+//
+// CPython: Python/lock.c:L529 _PyRWMutex_Unlock
 func (r *RWMutex) Unlock() {
 	old := r.bits.Swap(0)
 	if old&rwWriteLocked == 0 {
@@ -89,6 +106,10 @@ func (r *RWMutex) Unlock() {
 	}
 }
 
+// parkAndWait sets the parked-waiters flag and parks the caller
+// until a wakeup arrives, returning the latest bits word.
+//
+// CPython: Python/lock.c:L464 _PyRWMutex_RLock (adapted from)
 func (r *RWMutex) parkAndWait(bits uintptr) uintptr {
 	if bits&rwHasParked == 0 {
 		newval := bits | rwHasParked

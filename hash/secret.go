@@ -17,13 +17,19 @@ import (
 // SecretSize is the size of the hash secret. Matches
 // sizeof(_Py_HashSecret_t) in CPython 3.14: 16 bytes of SipHash key
 // followed by 8 bytes of FNV salt.
+//
+// CPython: Include/internal/pycore_pyhash.h:L42 _Py_HashSecret_t
 const SecretSize = 24
 
 // Secret is the per-process hash secret. v0.4 will read it from the
 // hashers; until then, callers only seed it.
+//
+// CPython: Include/internal/pycore_pyhash.h:L67 _Py_HashSecret
 var Secret [SecretSize]byte
 
 // SecretMode classifies how Init resolved the hash secret.
+//
+// CPython: Python/bootstrap_hash.c:L553 _Py_HashRandomization_Init (adapted from)
 type SecretMode int
 
 const (
@@ -39,6 +45,8 @@ const (
 
 // Config carries the subset of PyConfig that bootstrap_hash.c reads.
 // The full PyConfig lands in v0.7 (initconfig).
+//
+// CPython: Python/bootstrap_hash.c:L553 _Py_HashRandomization_Init (adapted from)
 type Config struct {
 	UseHashSeed bool
 	HashSeed    uint32
@@ -58,6 +66,8 @@ var (
 // variable is consulted. Init is safe to call concurrently; only the
 // first call performs work, matching CPython's
 // _Py_HashSecret_Initialized guard.
+//
+// CPython: Python/bootstrap_hash.c:L553 _Py_HashRandomization_Init
 func Init(cfg *Config) (SecretMode, error) {
 	var firstErr error
 	initOnce.Do(func() {
@@ -88,6 +98,8 @@ func Init(cfg *Config) (SecretMode, error) {
 
 // Reset clears the init guard. Tests use this to re-seed the secret;
 // production code must not call it.
+//
+// CPython: Python/bootstrap_hash.c:L593 _Py_HashRandomization_Fini (adapted from)
 func Reset() {
 	initOnce = sync.Once{}
 	for i := range Secret {
@@ -98,6 +110,8 @@ func Reset() {
 
 // resolveConfig derives a Config from cfg if non-nil, otherwise from
 // the PYTHONHASHSEED environment variable.
+//
+// CPython: Python/bootstrap_hash.c:L553 _Py_HashRandomization_Init (adapted from)
 func resolveConfig(cfg *Config) (Config, error) {
 	if cfg != nil {
 		return *cfg, nil
@@ -118,6 +132,8 @@ func resolveConfig(cfg *Config) (Config, error) {
 // linear congruential generator using the Microsoft-CRT constants
 // 214013 and 2531011, taking bits 16..23 of each step. The output
 // is byte-identical to CPython's for every seed.
+//
+// CPython: Python/bootstrap_hash.c:L420 lcg_urandom
 func lcgURandom(x0 uint32, out []byte) {
 	x := x0
 	for i := range out {
