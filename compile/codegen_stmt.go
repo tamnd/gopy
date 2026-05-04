@@ -95,6 +95,16 @@ func (c *Compiler) visitStmt(s ast.Stmt) error {
 		return c.visitReturn(n)
 	case *ast.Assign:
 		return c.visitAssign(n)
+	case *ast.If:
+		return c.visitIf(n)
+	case *ast.While:
+		return c.visitWhile(n)
+	case *ast.For:
+		return c.visitFor(n)
+	case *ast.Break:
+		return c.visitBreak(n)
+	case *ast.Continue:
+		return c.visitContinue(n)
 	case *ast.Global, *ast.Nonlocal:
 		// Already lifted by symtable.
 		return nil

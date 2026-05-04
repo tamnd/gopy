@@ -103,6 +103,10 @@ type Compiler struct {
 	// scope is the symtable Entry for the unit on top of units. Set
 	// by enterScope and used by every visitor for name resolution.
 	scope *symtable.Entry
+
+	// fblocks is the per-unit frame block stack. Cleared on each
+	// enterScope.
+	fblocks []fblock
 }
 
 // NewCompiler builds a fresh driver. Symtable must already be built
@@ -181,6 +185,7 @@ func (c *Compiler) enterScope(sc *symtable.Entry) {
 	}
 	c.units = append(c.units, u)
 	c.scope = sc
+	c.fblocks = nil
 	c.constCache = map[any]int{}
 	c.nameCache = map[string]int{}
 	c.varnameCache = map[string]int{}

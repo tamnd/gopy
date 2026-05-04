@@ -52,47 +52,66 @@ const (
 func (c *Compiler) nameOp(name string, mode nameMode, l ast.Pos) error {
 	mangled := symtable.MaybeMangle(c.scope.Name, c.scope, name)
 	scope := c.scope.GetScope(mangled)
+	inFunc := c.scope.Type == symtable.FunctionBlock
 
 	switch scope {
 	case symtable.Local:
-		return c.emitLocal(mangled, mode, l)
+		if inFunc {
+			return c.emitFastLocal(mangled, mode, l)
+		}
+		return c.emitNamed(mangled, mode, l)
 	case symtable.Cell, symtable.Free:
 		return c.emitDeref(mangled, mode, l)
-	case symtable.GlobalExplicit, symtable.GlobalImplicit:
+	case symtable.GlobalExplicit:
 		return c.emitGlobal(mangled, mode, l)
+	case symtable.GlobalImplicit:
+		// At function scope, GlobalImplicit prints LOAD_GLOBAL; at
+		// module/class scope, the same scope value resolves to
+		// LOAD_NAME because the namespace is the module dict.
+		if inFunc {
+			return c.emitGlobal(mangled, mode, l)
+		}
+		return c.emitNamed(mangled, mode, l)
 	case 0:
-		// 0 means the analyze pass left no scope; treat as global.
-		return c.emitGlobal(mangled, mode, l)
+		// 0 means the analyze pass left no scope. CPython treats
+		// this as implicit global, so apply the same module / class
+		// distinction.
+		if inFunc {
+			return c.emitGlobal(mangled, mode, l)
+		}
+		return c.emitNamed(mangled, mode, l)
 	}
 	return fmt.Errorf("compile: name %q has unknown scope %v", name, scope)
 }
 
-func (c *Compiler) emitLocal(name string, mode nameMode, l ast.Pos) error {
+// emitFastLocal emits LOAD_FAST / STORE_FAST / DELETE_FAST against
+// the per-unit varnames pool. Used inside FunctionBlock only.
+func (c *Compiler) emitFastLocal(name string, mode nameMode, l ast.Pos) error {
 	pool := poolVarNames
-	switch c.scope.Type {
-	case symtable.FunctionBlock:
-		switch mode {
-		case opLoad:
-			c.addOpName(LOAD_FAST, &pool, name, l)
-		case opStore:
-			c.addOpName(STORE_FAST, &pool, name, l)
-		case opDelete:
-			c.addOpName(DELETE_FAST, &pool, name, l)
-		}
-		return nil
-	case symtable.ModuleBlock, symtable.ClassBlock:
-		pool := poolNames
-		switch mode {
-		case opLoad:
-			c.addOpName(LOAD_NAME, &pool, name, l)
-		case opStore:
-			c.addOpName(STORE_NAME, &pool, name, l)
-		case opDelete:
-			c.addOpName(DELETE_NAME, &pool, name, l)
-		}
-		return nil
+	switch mode {
+	case opLoad:
+		c.addOpName(LOAD_FAST, &pool, name, l)
+	case opStore:
+		c.addOpName(STORE_FAST, &pool, name, l)
+	case opDelete:
+		c.addOpName(DELETE_FAST, &pool, name, l)
 	}
-	return fmt.Errorf("compile: emitLocal in scope kind %v", c.scope.Type)
+	return nil
+}
+
+// emitNamed emits LOAD_NAME / STORE_NAME / DELETE_NAME against the
+// per-unit names pool. Used at module and class scope.
+func (c *Compiler) emitNamed(name string, mode nameMode, l ast.Pos) error {
+	pool := poolNames
+	switch mode {
+	case opLoad:
+		c.addOpName(LOAD_NAME, &pool, name, l)
+	case opStore:
+		c.addOpName(STORE_NAME, &pool, name, l)
+	case opDelete:
+		c.addOpName(DELETE_NAME, &pool, name, l)
+	}
+	return nil
 }
 
 func (c *Compiler) emitDeref(name string, mode nameMode, l ast.Pos) error {

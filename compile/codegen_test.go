@@ -19,16 +19,22 @@ func module(body ...ast.Stmt) *ast.Module {
 
 func compileMod(t *testing.T, m ast.Mod) *Unit {
 	t.Helper()
-	st, err := symtable.Build(m, "<test>", nil)
-	if err != nil {
-		t.Fatalf("symtable.Build: %v", err)
-	}
+	st := mustBuildSym(t, m)
 	c := NewCompiler("<test>", 0, nil, st)
 	u, err := c.Codegen(st.Top, m)
 	if err != nil {
 		t.Fatalf("Codegen: %v", err)
 	}
 	return u
+}
+
+func mustBuildSym(t *testing.T, m ast.Mod) *symtable.Table {
+	t.Helper()
+	st, err := symtable.Build(m, "<test>", nil)
+	if err != nil {
+		t.Fatalf("symtable.Build: %v", err)
+	}
+	return st
 }
 
 func opNames(u *Unit) []string {
