@@ -11,10 +11,10 @@ package lexer
 // reserveBuf ensures buf has room for size more bytes past inp.
 //
 // CPython: Parser/lexer/buffer.c:50 _PyLexer_tok_reserve_buf
-func (s *State) reserveBuf(size int) bool {
+func (s *State) reserveBuf(size int) {
 	have := s.end - s.inp
 	if have >= size {
-		return true
+		return
 	}
 	need := s.inp + size
 	if grow := s.inp + (s.inp >> 1); grow > need {
@@ -28,7 +28,6 @@ func (s *State) reserveBuf(size int) bool {
 		s.buf = nb
 	}
 	s.end = need
-	return true
 }
 
 // rememberFStringBuffers is a no-op in gopy since the f-string mode

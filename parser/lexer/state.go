@@ -28,6 +28,10 @@ const (
 // CPython: Parser/lexer/state.h:14 start mode constants
 type Mode int
 
+// Mode constants. ModeFile is the default for `python script.py`,
+// ModeSingle drives the REPL, ModeEval handles `eval(...)`,
+// ModeFunctionType backs `inspect.signature` style annotation parsing,
+// and ModeFString is reserved for direct f-string parsing.
 const (
 	ModeFile Mode = iota
 	ModeSingle
@@ -69,7 +73,7 @@ const (
 	decodeNormal
 )
 
-// interactiveUnderflow controls REPL refill behaviour.
+// interactiveUnderflow controls REPL refill behavior.
 //
 // CPython: Parser/lexer/state.h:21 interactive_underflow_t
 type interactiveUnderflow int
@@ -164,10 +168,10 @@ type State struct {
 	startCol int
 	col      int
 
-	level         int
-	parenStack    [maxLevel]byte
-	parenLineno   [maxLevel]int
-	parenCol      [maxLevel]int
+	level       int
+	parenStack  [maxLevel]byte
+	parenLineno [maxLevel]int
+	parenCol    [maxLevel]int
 
 	filename string
 
@@ -224,7 +228,7 @@ const (
 	eColumnOverflow
 )
 
-// newState allocates and initialises a fresh State with CPython's
+// newState allocates and initializes a fresh State with CPython's
 // default field values.
 //
 // CPython: Parser/lexer/state.c:13 _PyTokenizer_tok_new

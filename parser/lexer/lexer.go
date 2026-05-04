@@ -199,20 +199,22 @@ func (s *State) indentNL() (Tok, bool) {
 	altcol := 0
 	for {
 		c := s.nextC()
-		if c == ' ' {
+		switch c {
+		case ' ':
 			col++
 			altcol++
-		} else if c == '\t' {
+		case '\t':
 			col = (col/s.tabSize + 1) * s.tabSize
 			altcol = (altcol/altTabSize + 1) * altTabSize
-		} else if c == '\014' {
+		case '\014':
 			col = 0
 			altcol = 0
-		} else {
+		default:
 			s.backup(c)
-			break
+			goto done
 		}
 	}
+done:
 
 	// Blank line, comment-only line, or in-paren continuation: do not
 	// adjust indent stack.
@@ -250,10 +252,11 @@ func (s *State) indentNL() (Tok, bool) {
 
 // scanName scans an identifier starting at the byte already consumed
 // into c. ASCII-only for now; non-ASCII bytes are accepted but the
-// PEP 3131 normalisation pass lives in helpers.go.
+// PEP 3131 normalization pass lives in helpers.go.
 //
 // CPython: Parser/lexer/lexer.c:743 (identifier branch in tok_get_normal_mode)
-func (s *State) scanName(c int) Tok {
+func (s *State) scanName(_ int) Tok {
+	var c int
 	for {
 		c = s.nextC()
 		if !isPotentialIdentifierChar(c) {

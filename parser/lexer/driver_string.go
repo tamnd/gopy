@@ -10,7 +10,7 @@ package lexer
 // FromString builds a State that tokenises the given source. The
 // driver loads the whole buffer up front; underflow returns false on
 // the next refill request, matching the C source's
-// _PyTokenizer_FromUTF8 / _PyTokenizer_FromString behaviour after the
+// _PyTokenizer_FromUTF8 / _PyTokenizer_FromString behavior after the
 // final line lands.
 //
 // CPython: Parser/tokenizer/utf8_tokenizer.c:11 _PyTokenizer_FromUTF8

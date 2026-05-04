@@ -1,6 +1,6 @@
 // CPython: Parser/lexer/lexer.c f-string and t-string scanning. Two
 // halves: the prefix branch in tok_get_normal_mode (around
-// Parser/lexer/lexer.c:1051) recognises the f"/t"/rf"/rt"/fr"/tr" lead-in
+// Parser/lexer/lexer.c:1051) recognizes the f"/t"/rf"/rt"/fr"/tr" lead-in
 // and pushes a tokenizer_mode entry, then the body scanner at
 // Parser/lexer/lexer.c:1393 emits FSTRING_START / FSTRING_MIDDLE /
 // FSTRING_END (or the TSTRING variants) and re-enters regular mode for

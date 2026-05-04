@@ -51,7 +51,7 @@ func (s *State) indentError() Tok {
 }
 
 // warnInvalidEscape mirrors the deprecation warning the C tokenizer
-// raises for unrecognised \X escapes inside string literals. The gopy
+// raises for unrecognized \X escapes inside string literals. The gopy
 // surface just stashes the offender for the parser to surface.
 //
 // CPython: Parser/tokenizer/helpers.c:110 _PyTokenizer_warn_invalid_escape_sequence

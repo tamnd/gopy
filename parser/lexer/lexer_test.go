@@ -66,7 +66,7 @@ func TestComment(t *testing.T) {
 }
 
 func TestStringLiteral(t *testing.T) {
-	got := kinds(tokenize_(t, `"hello" + 'world'` + "\n"))
+	got := kinds(tokenize_(t, `"hello" + 'world'`+"\n"))
 	want := []tokenize.Type{
 		tokenize.STRING, tokenize.OP, tokenize.STRING, tokenize.NEWLINE, tokenize.ENDMARKER,
 	}
@@ -132,7 +132,7 @@ func TestParenContinuation(t *testing.T) {
 }
 
 func TestFStringSimple(t *testing.T) {
-	got := kinds(tokenize_(t, `f"hi {name}!"` + "\n"))
+	got := kinds(tokenize_(t, `f"hi {name}!"`+"\n"))
 	want := []tokenize.Type{
 		tokenize.FSTRING_START, tokenize.FSTRING_MIDDLE,
 		tokenize.OP, tokenize.NAME, tokenize.OP,
@@ -150,7 +150,7 @@ func TestFStringSimple(t *testing.T) {
 }
 
 func TestTStringSimple(t *testing.T) {
-	got := kinds(tokenize_(t, `t"x={x}"` + "\n"))
+	got := kinds(tokenize_(t, `t"x={x}"`+"\n"))
 	if got[0] != tokenize.TSTRING_START {
 		t.Fatalf("expected TSTRING_START first, got %v", got)
 	}
@@ -166,7 +166,7 @@ func TestTStringSimple(t *testing.T) {
 }
 
 func TestFStringEmpty(t *testing.T) {
-	got := kinds(tokenize_(t, `f""` + "\n"))
+	got := kinds(tokenize_(t, `f""`+"\n"))
 	want := []tokenize.Type{
 		tokenize.FSTRING_START, tokenize.FSTRING_END,
 		tokenize.NEWLINE, tokenize.ENDMARKER,

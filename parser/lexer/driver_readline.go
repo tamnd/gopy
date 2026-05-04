@@ -4,7 +4,10 @@
 
 package lexer
 
-import "io"
+import (
+	"errors"
+	"io"
+)
 
 // ReadlineFunc is the shape of the readline callback. Returning io.EOF
 // signals end of input; any other error stops tokenisation.
@@ -23,7 +26,7 @@ func FromReadline(rl ReadlineFunc, mode Mode) *State {
 	s.readline = rl
 	s.underflow = func(st *State) bool {
 		line, err := rl()
-		if err == io.EOF || len(line) == 0 {
+		if errors.Is(err, io.EOF) || len(line) == 0 {
 			st.done = eEOF
 			return false
 		}
