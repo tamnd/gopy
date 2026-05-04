@@ -194,17 +194,71 @@ func (c *Compiler) visitAssign(s *ast.Assign) error {
 }
 
 // assignTo emits the store side of an assignment for one target.
-// Only Name targets are supported in the skeleton; tuple/list/star
-// unpack and attribute/subscript stores land alongside the
-// per-visitor work in later steps.
+// The value to store must already be on top of the stack; the helper
+// picks the right opcode by target kind:
+//
+//	Name       -> STORE_FAST / STORE_NAME / STORE_DEREF / STORE_GLOBAL
+//	Attribute  -> evaluate object; STORE_ATTR
+//	Subscript  -> evaluate object + index; STORE_SUBSCR
+//	Tuple/List -> UNPACK_SEQUENCE n (or UNPACK_EX before|after) then
+//	              recurse into the elements
+//	Starred    -> unwrap to inner target (only legal inside Tuple/List
+//	              unpack)
 //
 // CPython: Python/codegen.c codegen_nameop with ctx=Store, plus the
 // per-target Tuple / List / Starred / Attribute / Subscript paths.
 func (c *Compiler) assignTo(target ast.Expr, l ast.Pos) error {
-	if t, ok := target.(*ast.Name); ok {
+	switch t := target.(type) {
+	case *ast.Name:
 		return c.nameOpStore(t.Id, l)
+	case *ast.Attribute:
+		return c.visitAttribute(t)
+	case *ast.Subscript:
+		return c.visitSubscript(t)
+	case *ast.Tuple:
+		return c.assignToSequence(t.Elts, l)
+	case *ast.List:
+		return c.assignToSequence(t.Elts, l)
+	case *ast.Starred:
+		// A bare Starred outside a Tuple/List target is a syntax
+		// error caught earlier; if we get here we just store into the
+		// inner target.
+		return c.assignTo(t.Value, l)
 	}
-	return fmt.Errorf("compile: assign target %T not yet supported", target)
+	return fmt.Errorf("compile: assign target %T not supported", target)
+}
+
+// assignToSequence emits UNPACK_SEQUENCE / UNPACK_EX for tuple- or
+// list-target assignments, then walks the elements and emits each
+// element's store sequence in order (UNPACK pushes the elements with
+// the first one on top of the stack).
+//
+// CPython: Python/codegen.c codegen_unpack_helper
+func (c *Compiler) assignToSequence(elts ast.Seq[ast.Expr], l ast.Pos) error {
+	n := len(elts)
+	starIdx := -1
+	for i, e := range elts {
+		if _, ok := e.(*ast.Starred); ok {
+			if starIdx >= 0 {
+				return fmt.Errorf("compile: multiple starred expressions in assignment")
+			}
+			starIdx = i
+		}
+	}
+	if starIdx < 0 {
+		c.addOpI(UNPACK_SEQUENCE, int32(n), l)
+	} else {
+		countBefore := starIdx
+		countAfter := n - starIdx - 1
+		// CPython packs (after << 8) | before into the oparg.
+		c.addOpI(UNPACK_EX, int32((countAfter<<8)|countBefore), l)
+	}
+	for _, e := range elts {
+		if err := c.assignTo(e, l); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // addReturnNoneIfMissing emits LOAD_CONST None / RETURN_VALUE if the
