@@ -25,6 +25,32 @@ func (c *Compiler) visitExpr(e ast.Expr) error {
 		return c.visitName(n)
 	case *ast.Lambda:
 		return c.visitLambda(n)
+	case *ast.BoolOp:
+		return c.visitBoolOp(n)
+	case *ast.BinOp:
+		return c.visitBinOp(n)
+	case *ast.UnaryOp:
+		return c.visitUnaryOp(n)
+	case *ast.Compare:
+		return c.visitCompare(n)
+	case *ast.IfExp:
+		return c.visitIfExp(n)
+	case *ast.List:
+		return c.visitList(n)
+	case *ast.Tuple:
+		return c.visitTuple(n)
+	case *ast.Set:
+		return c.visitSet(n)
+	case *ast.Dict:
+		return c.visitDict(n)
+	case *ast.Attribute:
+		return c.visitAttribute(n)
+	case *ast.Subscript:
+		return c.visitSubscript(n)
+	case *ast.Slice:
+		return c.visitSlice(n)
+	case *ast.Call:
+		return c.visitCall(n)
 	}
 	return fmt.Errorf("compile: expr kind %T not yet supported", e)
 }
