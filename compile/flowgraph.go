@@ -95,20 +95,33 @@ func Optimize(seq *Sequence, consts *[]any, nlocals, _ int) (*Info, error) {
 		empty := []any{}
 		consts = &empty
 	}
-	// PASS 0: fold int-int BINARY_OP triples into a single LOAD_CONST.
-	// Length-preserving (replaces two of the three instructions with
-	// NOPs); the const pool grows in place if a new value is needed.
-	foldBinaryIntConst(seq, consts)
-
-	// PASS 1: kill instructions after an unconditional terminator
-	// that are not jump or handler targets. Length-preserving so the
-	// labelmap stays valid.
-	eliminateDeadCodeAfterTerminator(seq)
+	// PASS 0: fold int-int BINARY_OP triples into a single LOAD_CONST,
+	// then drop instructions after an unconditional terminator. Run to
+	// a fixed point so a fold that exposes a new dead tail (or a new
+	// foldable triple from an exposed const) gets caught in the same
+	// optimisation pass.
+	for {
+		folded := foldBinaryIntConst(seq, consts)
+		dead := eliminateDeadCodeAfterTerminator(seq)
+		if folded == 0 && dead == 0 {
+			break
+		}
+	}
 
 	// PASS 2: resolve symbolic jump labels to instruction offsets.
 	// CPython does this on the CFG; we exploit instrseq's existing
 	// ApplyLabelMap so the post-pass Sequence has resolved opargs.
 	seq.ApplyLabelMap(HasTarget)
+
+	// PASS 3a: thread chains of unconditional jumps and re-target any
+	// POP_JUMP_IF_X that lands on a trampoline. CPython runs these on
+	// the CFG; on the resolved sequence the same rewrites are local.
+	threadJumps(seq)
+	propagateConditionalJumps(seq)
+
+	// PASS 3b: NOP-out blocks no reachable path lands on. Length-
+	// preserving so jump opargs and the handler table stay valid.
+	removeUnreachableBlocks(seq)
 
 	// PASS 3: compact NOP runs. ApplyLabelMap has baked indices into
 	// jump opargs, so removeRedundantNops can reindex safely.

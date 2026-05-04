@@ -1,0 +1,181 @@
+// Jump-related optimisation passes that run after ApplyLabelMap has
+// resolved every jump oparg to an absolute instruction index. These
+// passes operate on the flat sequence; the CFG-shaped variants in
+// CPython produce the same results, and the linear forms are simpler
+// when the label table is already baked.
+//
+// CPython: Python/flowgraph.c jump_thread / propagate_conditional /
+//          remove_unreachable
+
+package compile
+
+// threadJumps follows chains of unconditional jumps. After this pass,
+// every jump oparg points at a non-jump instruction (or, in the loop
+// case, at a back-edge target that does not itself unconditionally
+// branch elsewhere).
+//
+// CPython: Python/flowgraph.c:L998 thread_unconditional_jumps
+func threadJumps(seq *Sequence) int {
+	rewritten := 0
+	for i := range seq.Instrs {
+		ins := &seq.Instrs[i]
+		if !isUnconditionalJump(ins.Op) {
+			continue
+		}
+		final := chaseJumpTarget(seq, int(ins.Oparg), i)
+		if final != int(ins.Oparg) {
+			ins.Oparg = int32(final)
+			rewritten++
+		}
+	}
+	return rewritten
+}
+
+// propagateConditionalJumps re-targets `POP_JUMP_IF_X label` when
+// `label` itself is an unconditional jump, skipping over the trampoline
+// in one hop.
+//
+// CPython: Python/flowgraph.c:L1051 propagate_conditional_branches
+func propagateConditionalJumps(seq *Sequence) int {
+	rewritten := 0
+	for i := range seq.Instrs {
+		ins := &seq.Instrs[i]
+		if !isConditionalJump(ins.Op) {
+			continue
+		}
+		final := chaseJumpTarget(seq, int(ins.Oparg), i)
+		if final != int(ins.Oparg) {
+			ins.Oparg = int32(final)
+			rewritten++
+		}
+	}
+	return rewritten
+}
+
+// chaseJumpTarget walks past any consecutive unconditional jumps
+// starting at idx, returning the final landing index. The visited set
+// guards against degenerate cycles (a jump to itself or a tight loop
+// of jumps).
+//
+// CPython: Python/flowgraph.c jump_thread_helper
+func chaseJumpTarget(seq *Sequence, idx, origin int) int {
+	visited := map[int]bool{origin: true}
+	cur := idx
+	for {
+		if cur < 0 || cur >= len(seq.Instrs) {
+			return idx
+		}
+		// Skip over NOPs while threading; they're inert and the NOP
+		// compaction pass drops them later. If the run pushes us past
+		// the end, leave the oparg alone — there's nothing to retarget
+		// to.
+		for cur < len(seq.Instrs) && seq.Instrs[cur].Op == NOP {
+			cur++
+		}
+		if cur >= len(seq.Instrs) {
+			return idx
+		}
+		if !isUnconditionalJump(seq.Instrs[cur].Op) {
+			return cur
+		}
+		if visited[cur] {
+			return cur
+		}
+		visited[cur] = true
+		cur = int(seq.Instrs[cur].Oparg)
+	}
+}
+
+// isUnconditionalJump reports whether op is one of the unconditional
+// jump opcodes (real or pseudo). The pseudo-op `JUMP` is treated as
+// unconditional too because pseudo-op lowering still hands it to the
+// jump panel.
+//
+// CPython: Python/flowgraph.c IS_UNCONDITIONAL_JUMP_OPCODE
+func isUnconditionalJump(op Opcode) bool {
+	switch op {
+	case JUMP, JUMP_FORWARD, JUMP_BACKWARD, JUMP_BACKWARD_NO_INTERRUPT:
+		return true
+	}
+	return false
+}
+
+// isConditionalJump reports whether op is one of the POP_JUMP_IF_*
+// family.
+//
+// CPython: Python/flowgraph.c IS_CONDITIONAL_JUMP_OPCODE
+func isConditionalJump(op Opcode) bool {
+	switch op {
+	case POP_JUMP_IF_FALSE, POP_JUMP_IF_TRUE,
+		POP_JUMP_IF_NONE, POP_JUMP_IF_NOT_NONE:
+		return true
+	}
+	return false
+}
+
+// removeUnreachableBlocks sweeps the flat sequence by following
+// successor edges from index 0 and NOPs out every instruction that no
+// reachable path lands on. The pass is length-preserving so the label
+// map and jump opargs stay valid; the next NOP-compaction pass deletes
+// the dead slots.
+//
+// CPython: Python/flowgraph.c:L1453 remove_unreachable (CFG variant)
+func removeUnreachableBlocks(seq *Sequence) int {
+	if len(seq.Instrs) == 0 {
+		return 0
+	}
+	reachable := make([]bool, len(seq.Instrs))
+	// Pin handler targets as roots; the runtime can land on them via
+	// an exception edge that the linear walk does not see.
+	roots := []int{0}
+	for i, ins := range seq.Instrs {
+		if ins.Handler.Label >= 0 && ins.Handler.Label < len(seq.Instrs) {
+			roots = append(roots, ins.Handler.Label)
+		}
+		_ = i
+	}
+	for _, r := range roots {
+		walkReachable(seq, r, reachable)
+	}
+	dropped := 0
+	for i := range seq.Instrs {
+		if reachable[i] || seq.Instrs[i].Op == NOP {
+			continue
+		}
+		seq.Instrs[i].Op = NOP
+		seq.Instrs[i].Oparg = 0
+		dropped++
+	}
+	return dropped
+}
+
+// walkReachable does a DFS from start, marking each reachable index
+// in marks. Successors are: fall-through (i+1) for non-terminators
+// and non-unconditional-jumps; the jump target for any HasTarget op;
+// nothing for terminators (RETURN_VALUE / RAISE_VARARGS / RERAISE /
+// INTERPRETER_EXIT).
+//
+// CPython: Python/flowgraph.c mark_reachable
+func walkReachable(seq *Sequence, start int, marks []bool) {
+	stack := []int{start}
+	for len(stack) > 0 {
+		i := stack[len(stack)-1]
+		stack = stack[:len(stack)-1]
+		if i < 0 || i >= len(seq.Instrs) || marks[i] {
+			continue
+		}
+		marks[i] = true
+		ins := seq.Instrs[i]
+		if HasTarget(ins.Op) {
+			stack = append(stack, int(ins.Oparg))
+		}
+		if isTerminator(ins.Op) {
+			continue
+		}
+		if isUnconditionalJump(ins.Op) {
+			// no fall-through
+			continue
+		}
+		stack = append(stack, i+1)
+	}
+}

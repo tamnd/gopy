@@ -66,6 +66,74 @@ func validateStmt(s Stmt) error {
 		return validateExpr(n.Value)
 	case *ImportFrom:
 		return validateImportFrom(n)
+	case *Assign:
+		for i := 0; i < n.Targets.Len(); i++ {
+			if err := validateExprCtx(n.Targets.Get(i), Store); err != nil {
+				return err
+			}
+		}
+		return validateExpr(n.Value)
+	case *AugAssign:
+		if err := validateExprCtx(n.Target, Store); err != nil {
+			return err
+		}
+		return validateExpr(n.Value)
+	case *AnnAssign:
+		if err := validateExprCtx(n.Target, Store); err != nil {
+			return err
+		}
+		if err := validateExpr(n.Annotation); err != nil {
+			return err
+		}
+		if n.Value != nil {
+			return validateExpr(n.Value)
+		}
+		return nil
+	case *Delete:
+		for i := 0; i < n.Targets.Len(); i++ {
+			if err := validateExprCtx(n.Targets.Get(i), Del); err != nil {
+				return err
+			}
+		}
+		return nil
+	case *For:
+		if err := validateExprCtx(n.Target, Store); err != nil {
+			return err
+		}
+		return validateExpr(n.Iter)
+	case *AsyncFor:
+		if err := validateExprCtx(n.Target, Store); err != nil {
+			return err
+		}
+		return validateExpr(n.Iter)
+	case *FunctionDef:
+		return validateTypeParams(n.TypeParams)
+	case *AsyncFunctionDef:
+		return validateTypeParams(n.TypeParams)
+	case *ClassDef:
+		return validateTypeParams(n.TypeParams)
+	case *TypeAlias:
+		if err := validateExprCtx(n.Name, Store); err != nil {
+			return err
+		}
+		if err := validateTypeParams(n.TypeParams); err != nil {
+			return err
+		}
+		return validateExpr(n.Value)
+	case *Match:
+		if err := validateExpr(n.Subject); err != nil {
+			return err
+		}
+		for i := 0; i < n.Cases.Len(); i++ {
+			cs := n.Cases.Get(i)
+			if cs == nil {
+				return errors.New("validate: nil match case")
+			}
+			if err := validatePattern(cs.Pattern); err != nil {
+				return err
+			}
+		}
+		return nil
 	}
 	// Other statement kinds are accepted by this v0.5 foundation
 	// pass; the full visitor expands as nodes_gen.go lands.
@@ -82,8 +150,82 @@ func validateExpr(e Expr) error {
 	if err := validatePos(e.Position()); err != nil {
 		return err
 	}
-	if c, ok := e.(*Constant); ok {
-		return validateConstant(c.Value)
+	switch n := e.(type) {
+	case *Constant:
+		return validateConstant(n.Value)
+	case *Name:
+		return validateName(n.Id)
+	case *Starred:
+		return errors.New("can't use starred expression here")
+	case *ListComp:
+		if err := validateExpr(n.Elt); err != nil {
+			return err
+		}
+		return validateComprehension(n.Generators)
+	case *SetComp:
+		if err := validateExpr(n.Elt); err != nil {
+			return err
+		}
+		return validateComprehension(n.Generators)
+	case *DictComp:
+		if err := validateExpr(n.Key); err != nil {
+			return err
+		}
+		if err := validateExpr(n.Value); err != nil {
+			return err
+		}
+		return validateComprehension(n.Generators)
+	case *GeneratorExp:
+		if err := validateExpr(n.Elt); err != nil {
+			return err
+		}
+		return validateComprehension(n.Generators)
+	case *Call:
+		// Starred is allowed inside Call args; List/Tuple/Set already
+		// allow starred elts via their own validators when reachable.
+		if err := validateExpr(n.Func); err != nil {
+			return err
+		}
+		for i := 0; i < n.Args.Len(); i++ {
+			arg := n.Args.Get(i)
+			if _, ok := arg.(*Starred); ok {
+				if err := validateExprCtx(arg, Load); err != nil {
+					return err
+				}
+				continue
+			}
+			if err := validateExpr(arg); err != nil {
+				return err
+			}
+		}
+		return nil
+	case *List:
+		return validateLoadElts(n.Elts)
+	case *Tuple:
+		return validateLoadElts(n.Elts)
+	case *Set:
+		return validateLoadElts(n.Elts)
+	}
+	return nil
+}
+
+// validateLoadElts walks a List/Tuple/Set element sequence in Load
+// context, allowing Starred entries (CPython parity for iterable
+// unpacking inside a display).
+//
+// CPython: Python/ast.c validate_expr List/Tuple/Set arms
+func validateLoadElts(elts Seq[Expr]) error {
+	for i := 0; i < elts.Len(); i++ {
+		el := elts.Get(i)
+		if _, ok := el.(*Starred); ok {
+			if err := validateExprCtx(el, Load); err != nil {
+				return err
+			}
+			continue
+		}
+		if err := validateExpr(el); err != nil {
+			return err
+		}
 	}
 	return nil
 }
