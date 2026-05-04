@@ -11,6 +11,23 @@ folder; this file is the aggregated index.
 
 ## Unreleased
 
+## v0.2.0 - 2026-05-04
+
+See [`changelog/v0.2.0.md`](changelog/v0.2.0.md).
+
+* feat(objects): land the v0.2 object protocol foundation. Header,
+  VarHeader, Object interface, atomic refcount, Type with the v0.2
+  slot subset, C3 MRO.
+* feat(objects): concrete builtins for the gate. int (with -5..256
+  cache), float, bool, None, NotImplemented, tuple (empty-tuple
+  singleton, CPython-compatible tuplehash), list, dict (open-addressed
+  with the CPython probing sequence), slice, range.
+* feat(abstract): subset of `cpython/Objects/abstract.c`. Length,
+  GetItem, SetItem, Add, Subtract, Multiply, Iter, IterNext.
+* test(objtest): v0.2 gate harness. Build a dict, hash a tuple,
+  iterate a list, plus smoke tests for caching, MRO, repr, range
+  iteration.
+
 ## v0.1.0 - 2026-05-04
 
 See [`changelog/v0.1.0.md`](changelog/v0.1.0.md).

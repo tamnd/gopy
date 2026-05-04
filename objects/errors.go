@@ -1,0 +1,30 @@
+package objects
+
+import "errors"
+
+// v0.2 has no Python-level exception machinery (that lands in v0.3).
+// Until then, the runtime uses sentinel Go errors that the abstract
+// layer maps to placeholder strings; v0.3 rewires these to real
+// PyExc_* singletons.
+
+// ErrStopIteration signals end of iteration. Mirrors PyExc_StopIteration.
+//
+// CPython: Objects/exceptions.c:L1937 PyExc_StopIteration
+var ErrStopIteration = errors.New("StopIteration")
+
+// errIndexOutOfRange signals out-of-range sequence access. Mirrors
+// PyExc_IndexError.
+//
+// CPython: Objects/exceptions.c:L2229 PyExc_IndexError
+var errIndexOutOfRange = errors.New("IndexError: index out of range")
+
+// errKeyNotFound signals a missing dict key. Mirrors PyExc_KeyError.
+//
+// CPython: Objects/exceptions.c:L2261 PyExc_KeyError
+var errKeyNotFound = errors.New("KeyError")
+
+// errUnhashable signals __hash__ is None or missing. Mirrors
+// PyExc_TypeError raised from PyObject_Hash.
+//
+// CPython: Objects/object.c:L869 PyObject_Hash
+var errUnhashable = errors.New("TypeError: unhashable type")
