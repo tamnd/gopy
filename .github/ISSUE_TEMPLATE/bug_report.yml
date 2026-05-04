@@ -14,7 +14,7 @@ body:
     attributes:
       label: gopy version
       description: Output of `gopy --version`
-      placeholder: gopy 0.0.0 (3.14.0+) [go1.26 darwin/arm64]
+      placeholder: gopy 0.1.0 (3.14.0+) [go1.26 darwin/arm64]
     validations:
       required: true
   - type: input

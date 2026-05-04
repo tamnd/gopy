@@ -11,24 +11,19 @@ folder; this file is the aggregated index.
 
 ## Unreleased
 
+## v0.1.0 - 2026-05-04
+
+See [`changelog/v0.1.0.md`](changelog/v0.1.0.md).
+
 * build: bump minimum Go to 1.26.
 * feat(arena): port `cpython/Python/pyarena.c` to the `arena` package.
-  Bump allocator with linked fixed-size blocks for the compiler
-  pipeline.
 * feat(pythread): port the cross-platform half of
-  `cpython/Python/thread.c` to the `pythread` package. Goroutine-backed
-  Start/Join handles, ident allocation, stacksize stubs, and the
-  `TimeoutMax` constant.
+  `cpython/Python/thread.c` to the `pythread` package.
 * feat(pysync): port `cpython/Python/lock.c`,
   `cpython/Python/parking_lot.c`, and `cpython/Python/critical_section.c`
-  to the `pysync` package. Address-keyed parking lot, byte-flag
-  `Mutex`, `Event`, `OnceFlag`, `RecursiveMutex`, `SeqLock`, and
-  PEP 703 `CriticalSection` stack.
-* feat(pysync): add `RWMutex` and `RawMutex` so the `lock.c` port is
-  complete.
-* feat(hash): port the seed-init half of `cpython/Python/bootstrap_hash.c`.
-  PYTHONHASHSEED parsing, the LCG matching `lcg_urandom`, and an OS
-  entropy fallback through `crypto/rand`.
+  to the `pysync` package.
+* feat(hash): port the seed-init half of `cpython/Python/bootstrap_hash.c`
+  to the `hash` package.
 
 ## v0.0.0 - 2026-05-04
 
