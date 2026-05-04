@@ -37,7 +37,7 @@ Or grab a prebuilt binary from the [releases page](https://github.com/tamnd/gopy
 
 ```sh
 $ gopy --version
-gopy 0.0.0 (3.14.0+) [go1.26 darwin/arm64]
+gopy 0.1.0 (3.14.0+) [go1.26 darwin/arm64]
 
 $ gopy --copyright
 Copyright (c) 2026 The gopy Authors. All Rights Reserved.

@@ -11,7 +11,19 @@ folder; this file is the aggregated index.
 
 ## Unreleased
 
+## v0.1.0 - 2026-05-04
+
+See [`changelog/v0.1.0.md`](changelog/v0.1.0.md).
+
 * build: bump minimum Go to 1.26.
+* feat(arena): port `cpython/Python/pyarena.c` to the `arena` package.
+* feat(pythread): port the cross-platform half of
+  `cpython/Python/thread.c` to the `pythread` package.
+* feat(pysync): port `cpython/Python/lock.c`,
+  `cpython/Python/parking_lot.c`, and `cpython/Python/critical_section.c`
+  to the `pysync` package.
+* feat(hash): port the seed-init half of `cpython/Python/bootstrap_hash.c`
+  to the `hash` package.
 
 ## v0.0.0 - 2026-05-04
 
