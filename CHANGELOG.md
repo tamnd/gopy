@@ -19,6 +19,11 @@ folder; this file is the aggregated index.
   `cpython/Python/thread.c` to the `pythread` package. Goroutine-backed
   Start/Join handles, ident allocation, stacksize stubs, and the
   `TimeoutMax` constant.
+* feat(pysync): port `cpython/Python/lock.c`,
+  `cpython/Python/parking_lot.c`, and `cpython/Python/critical_section.c`
+  to the `pysync` package. Address-keyed parking lot, byte-flag
+  `Mutex`, `Event`, `OnceFlag`, `RecursiveMutex`, `SeqLock`, and
+  PEP 703 `CriticalSection` stack.
 
 ## v0.0.0 - 2026-05-04
 
