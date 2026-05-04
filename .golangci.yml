@@ -6,17 +6,34 @@ run:
 linters:
   default: none
   enable:
+    # Correctness.
     - errcheck
     - govet
     - ineffassign
     - staticcheck
     - unused
-    - misspell
-    - revive
-    - gosec
     - bodyclose
-    - unconvert
+    - copyloopvar
+    - errorlint
+    - nilerr
+    - noctx
+    - rowserrcheck
+    - sqlclosecheck
+    # Style and clarity.
+    - gocritic
+    - gocyclo
+    - gocognit
+    - misspell
+    - nakedret
+    - nolintlint
     - prealloc
+    - revive
+    - unconvert
+    - unparam
+    - whitespace
+    - usestdlibvars
+    # Security.
+    - gosec
   settings:
     errcheck:
       exclude-functions:
@@ -24,6 +41,22 @@ linters:
         - fmt.Fprintf
         - fmt.Fprintln
         - (*os.File).Close
+    gocyclo:
+      min-complexity: 20
+    gocognit:
+      min-complexity: 30
+    gocritic:
+      enabled-tags:
+        - diagnostic
+        - performance
+        - style
+      disabled-checks:
+        # Comments without leading space are common in C-mirrored
+        # code.
+        - commentFormatting
+        # We carry deliberate var-name parity with CPython where it
+        # helps readability of the port.
+        - paramTypeCombine
     revive:
       rules:
         - name: var-naming
@@ -39,26 +72,47 @@ linters:
         - name: unexported-return
         - name: indent-error-flow
         - name: errorf
+        - name: blank-imports
+        - name: context-as-argument
+        - name: context-keys-type
+        - name: dot-imports
+        - name: empty-block
+        - name: redefines-builtin-id
+        - name: superfluous-else
+        - name: unreachable-code
+        - name: unused-parameter
+        - name: var-declaration
     misspell:
       locale: US
     gosec:
       excludes:
-        # uint32 -> uint8 narrowing is intentional in the pysync
-        # byte-flag mutex words; sync/atomic has no Uint8.
+        # uint32 -> uint8 narrowing is intentional in pysync byte-flag
+        # mutex words; sync/atomic has no Uint8.
         - G115
         # unsafe.Pointer is required for address-keyed parking and
-        # for the byte-flag mutex word identity.
+        # the byte-flag mutex word identity.
         - G103
+    nakedret:
+      max-func-lines: 1
+    nolintlint:
+      require-explanation: true
+      require-specific: true
+      allow-unused: false
   exclusions:
     rules:
       - path: _test\.go
         linters:
           - gosec
           - errcheck
+          - gocyclo
+          - gocognit
+          - unparam
+          - revive
 
 formatters:
   enable:
     - gofmt
+    - gofumpt
     - goimports
   settings:
     goimports:

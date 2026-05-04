@@ -125,7 +125,8 @@ func bucketFor(addr uintptr) *bucket {
 // detach is plumbed through for the PEP 703 attach/detach protocol;
 // it has no effect in v0.1.
 func Park(addr unsafe.Pointer, check func() bool, timeout time.Duration,
-	parkArg any, detach bool) ParkStatus {
+	parkArg any, detach bool,
+) ParkStatus {
 	_ = detach
 	key := uintptr(addr)
 	b := bucketFor(key)

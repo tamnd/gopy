@@ -21,7 +21,7 @@ type Event struct {
 
 // IsSet reports whether the event has been notified.
 func (e *Event) IsSet() bool {
-	return uint8(e.v.Load()) == flagLocked
+	return e.v.Load() == uint32(flagLocked)
 }
 
 // Notify sets the event. If waiters are parked, all are woken.
@@ -44,7 +44,7 @@ func (e *Event) Notify() {
 
 // Wait blocks until the event is set.
 func (e *Event) Wait() {
-	for !e.WaitTimed(-1, true) {
+	for !e.WaitTimed(-1, true) { //nolint:revive // poll until WaitTimed returns true on a real wakeup
 	}
 }
 
@@ -65,11 +65,11 @@ func (e *Event) WaitTimed(timeout time.Duration, detach bool) bool {
 			}
 		}
 
-		expected := flagHasParked
+		expected := uint32(flagHasParked)
 		_ = Park(unsafe.Pointer(&e.v), func() bool {
-			return uint8(e.v.Load()) == expected
+			return e.v.Load() == expected
 		}, timeout, nil, detach)
 
-		return uint8(e.v.Load()) == flagLocked
+		return e.v.Load() == uint32(flagLocked)
 	}
 }

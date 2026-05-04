@@ -30,14 +30,14 @@ type OnceFlag struct {
 
 // Done reports whether the flag has reached the initialized state.
 func (o *OnceFlag) Done() bool {
-	return uint8(o.v.Load()) == flagOnceInitialized
+	return o.v.Load() == uint32(flagOnceInitialized)
 }
 
 // Do invokes fn exactly once. Concurrent callers block until the
 // runner finishes. If fn returns an error, the flag is reset and a
 // later Do call can retry.
 func (o *OnceFlag) Do(fn OnceFn) error {
-	if uint8(o.v.Load()) == flagOnceInitialized {
+	if o.v.Load() == uint32(flagOnceInitialized) {
 		return nil
 	}
 	for {
@@ -60,9 +60,9 @@ func (o *OnceFlag) Do(fn OnceFn) error {
 			}
 			v = newv
 		}
-		expected := v
+		expected := uint32(v)
 		_ = Park(unsafe.Pointer(&o.v), func() bool {
-			return uint8(o.v.Load()) == expected
+			return o.v.Load() == expected
 		}, -1, nil, true)
 	}
 }

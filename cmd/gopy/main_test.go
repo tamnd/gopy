@@ -61,7 +61,7 @@ func TestRunUnknownFlag(t *testing.T) {
 	}
 }
 
-func captureFile(t *testing.T) (*os.File, func()) {
+func captureFile(t *testing.T) (file *os.File, cleanup func()) {
 	t.Helper()
 	f, err := os.CreateTemp(t.TempDir(), "gopy-*.out")
 	if err != nil {

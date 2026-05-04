@@ -129,9 +129,9 @@ func (m *Mutex) LockTimed(timeout time.Duration, flags LockFlags) LockStatus {
 			}
 		}
 
-		expected := newv
+		expected := uint32(newv)
 		ret := Park(unsafe.Pointer(&m.bits), func() bool {
-			return uint8(m.bits.Load()) == expected
+			return m.bits.Load() == expected
 		}, timeout, entry, flags&LockDetach != 0)
 
 		switch ret {
