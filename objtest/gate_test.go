@@ -1,5 +1,5 @@
 // Package objtest exercises the v0.2 gate from
-// notes/Spec/1700/1700_gopy_objects_overview.md: build a dict, hash a
+// notes/Spec/1600/1608_gopy_objects_overview.md: build a dict, hash a
 // tuple, iterate a list. The harness doubles as a smoke test for
 // every concrete type that v0.2 ships.
 package objtest

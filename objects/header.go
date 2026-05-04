@@ -2,7 +2,7 @@
 // covers the object protocol, the type slot table, and the concrete
 // builtins needed to construct a dict, hash a tuple, and iterate a
 // list. Strings, bytes, set, exceptions, and the cycle collector
-// arrive in later phases (see notes/Spec/1700/).
+// arrive in later phases (see notes/Spec/1600/).
 package objects
 
 import "sync/atomic"
@@ -61,6 +61,15 @@ func (h *Header) Hdr() *Header {
 func (h *Header) init(t *Type) {
 	h.typ = t
 	h.refcnt.Store(1)
+}
+
+// Init is the cross-package entry point to init. Out-of-package types
+// such as the exception in errors/ embed Header and need to bind their
+// Header.typ to a *Type without re-implementing the refcount dance.
+//
+// CPython: Objects/object.c:L184 _PyObject_Init
+func (h *Header) Init(t *Type) {
+	h.init(t)
 }
 
 // Refcnt returns the current refcount. Test-only; production code
