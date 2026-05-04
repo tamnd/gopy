@@ -1,0 +1,7 @@
+   0 LOAD_CONST                     0
+   2 LOAD_CONST                     1
+   4 LOAD_NAME                      0
+   6 CALL_INTRINSIC_1               12
+   8 STORE_NAME                     1
+  10 LOAD_CONST                     1
+  12 RETURN_VALUE                   0

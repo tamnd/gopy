@@ -1,0 +1,18 @@
+   0 LOAD_BUILD_CLASS               0
+   2 PUSH_NULL                      0
+   4 LOAD_CONST                     0
+   6 MAKE_FUNCTION                  0
+   8 LOAD_CONST                     1
+  10 CALL                           2
+  12 STORE_NAME                     0
+  14 LOAD_CONST                     2
+  16 RETURN_VALUE                   0
+
+Disassembly of C:
+     0 RESUME                         0
+     2 LOAD_NAME                      0
+     4 STORE_NAME                     1
+     6 LOAD_CONST                     0
+     8 STORE_NAME                     2
+    10 LOAD_CONST                     1
+    12 RETURN_VALUE                   0
