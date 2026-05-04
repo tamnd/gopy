@@ -86,48 +86,73 @@ func (c *Compiler) visitStmts(stmts ast.Seq[ast.Stmt]) error {
 //
 // CPython: Python/codegen.c:L2991 codegen_visit_stmt
 func (c *Compiler) visitStmt(s ast.Stmt) error {
-	switch n := s.(type) {
-	case *ast.Pass:
-		return c.visitPass(n)
-	case *ast.ExprStmt:
-		return c.visitExprStmt(n)
-	case *ast.Return:
-		return c.visitReturn(n)
-	case *ast.Assign:
-		return c.visitAssign(n)
-	case *ast.If:
-		return c.visitIf(n)
-	case *ast.While:
-		return c.visitWhile(n)
-	case *ast.For:
-		return c.visitFor(n)
-	case *ast.Break:
-		return c.visitBreak(n)
-	case *ast.Continue:
-		return c.visitContinue(n)
-	case *ast.FunctionDef:
-		return c.visitFunctionDef(n)
-	case *ast.AsyncFunctionDef:
-		return c.visitAsyncFunctionDef(n)
-	case *ast.Delete:
-		return c.visitDelete(n)
-	case *ast.AugAssign:
-		return c.visitAugAssign(n)
-	case *ast.AnnAssign:
-		return c.visitAnnAssign(n)
-	case *ast.Raise:
-		return c.visitRaise(n)
-	case *ast.Assert:
-		return c.visitAssert(n)
-	case *ast.Import:
-		return c.visitImport(n)
-	case *ast.ImportFrom:
-		return c.visitImportFrom(n)
-	case *ast.Global, *ast.Nonlocal:
-		// Already lifted by symtable.
-		return nil
+	if handled, err := c.visitStmtSimple(s); handled {
+		return err
+	}
+	if handled, err := c.visitStmtBlock(s); handled {
+		return err
 	}
 	return fmt.Errorf("compile: stmt kind %T not yet supported", s)
+}
+
+// visitStmtSimple handles the leaf statements: Pass, ExprStmt,
+// Return, Assign, AugAssign, AnnAssign, Delete, Raise, Assert,
+// Import, ImportFrom, Global, Nonlocal.
+func (c *Compiler) visitStmtSimple(s ast.Stmt) (bool, error) {
+	switch n := s.(type) {
+	case *ast.Pass:
+		c.visitPass(n)
+		return true, nil
+	case *ast.ExprStmt:
+		return true, c.visitExprStmt(n)
+	case *ast.Return:
+		return true, c.visitReturn(n)
+	case *ast.Assign:
+		return true, c.visitAssign(n)
+	case *ast.AugAssign:
+		return true, c.visitAugAssign(n)
+	case *ast.AnnAssign:
+		return true, c.visitAnnAssign(n)
+	case *ast.Delete:
+		return true, c.visitDelete(n)
+	case *ast.Raise:
+		return true, c.visitRaise(n)
+	case *ast.Assert:
+		return true, c.visitAssert(n)
+	case *ast.Import:
+		return true, c.visitImport(n)
+	case *ast.ImportFrom:
+		return true, c.visitImportFrom(n)
+	case *ast.Global, *ast.Nonlocal:
+		// Already lifted by symtable.
+		return true, nil
+	}
+	return false, nil
+}
+
+// visitStmtBlock handles compound statements: control flow (If, For,
+// While, Break, Continue) and the def-like nodes (FunctionDef,
+// AsyncFunctionDef, ClassDef).
+func (c *Compiler) visitStmtBlock(s ast.Stmt) (bool, error) {
+	switch n := s.(type) {
+	case *ast.If:
+		return true, c.visitIf(n)
+	case *ast.While:
+		return true, c.visitWhile(n)
+	case *ast.For:
+		return true, c.visitFor(n)
+	case *ast.Break:
+		return true, c.visitBreak(n)
+	case *ast.Continue:
+		return true, c.visitContinue(n)
+	case *ast.FunctionDef:
+		return true, c.visitFunctionDef(n)
+	case *ast.AsyncFunctionDef:
+		return true, c.visitAsyncFunctionDef(n)
+	case *ast.ClassDef:
+		return true, c.visitClassDef(n)
+	}
+	return false, nil
 }
 
 // visitPass emits nothing. CPython does emit a NOP if the optimisation
@@ -135,9 +160,8 @@ func (c *Compiler) visitStmt(s ast.Stmt) error {
 // removes redundant NOPs in pass-1.
 //
 // CPython: Python/codegen.c codegen_visit_stmt Pass case
-func (c *Compiler) visitPass(s *ast.Pass) error {
+func (c *Compiler) visitPass(s *ast.Pass) {
 	c.addOp(NOP, loc(s))
-	return nil
 }
 
 // visitExprStmt evaluates the expression and discards the result.
