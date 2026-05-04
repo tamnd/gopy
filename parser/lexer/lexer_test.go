@@ -1,0 +1,111 @@
+package lexer
+
+import (
+	"testing"
+
+	"github.com/tamnd/gopy/tokenize"
+)
+
+func tokenize_(t *testing.T, src string) []Tok {
+	t.Helper()
+	s := FromString(src, ModeFile)
+	var out []Tok
+	for i := 0; i < 200; i++ {
+		tk := s.Get()
+		out = append(out, tk)
+		if tk.Kind == tokenize.ENDMARKER || tk.Kind == tokenize.ERRORTOKEN {
+			return out
+		}
+	}
+	t.Fatalf("token stream did not terminate after 200 tokens")
+	return out
+}
+
+func kinds(toks []Tok) []tokenize.Type {
+	out := make([]tokenize.Type, len(toks))
+	for i, t := range toks {
+		out[i] = t.Kind
+	}
+	return out
+}
+
+func TestSimpleAssignment(t *testing.T) {
+	got := kinds(tokenize_(t, "x = 1\n"))
+	want := []tokenize.Type{
+		tokenize.NAME, tokenize.OP, tokenize.NUMBER, tokenize.NEWLINE, tokenize.ENDMARKER,
+	}
+	if len(got) != len(want) {
+		t.Fatalf("got %v, want %v", got, want)
+	}
+	for i := range got {
+		if got[i] != want[i] {
+			t.Errorf("token %d: got %v, want %v", i, got[i], want[i])
+		}
+	}
+}
+
+func TestEmpty(t *testing.T) {
+	got := kinds(tokenize_(t, ""))
+	if len(got) != 1 || got[0] != tokenize.ENDMARKER {
+		t.Fatalf("empty input should yield only ENDMARKER, got %v", got)
+	}
+}
+
+func TestComment(t *testing.T) {
+	got := kinds(tokenize_(t, "# hello\n"))
+	want := []tokenize.Type{tokenize.NEWLINE, tokenize.ENDMARKER}
+	if len(got) != len(want) {
+		t.Fatalf("got %v, want %v", got, want)
+	}
+	for i := range got {
+		if got[i] != want[i] {
+			t.Errorf("token %d: got %v, want %v", i, got[i], want[i])
+		}
+	}
+}
+
+func TestStringLiteral(t *testing.T) {
+	got := kinds(tokenize_(t, `"hello" + 'world'` + "\n"))
+	want := []tokenize.Type{
+		tokenize.STRING, tokenize.OP, tokenize.STRING, tokenize.NEWLINE, tokenize.ENDMARKER,
+	}
+	if len(got) != len(want) {
+		t.Fatalf("got %v, want %v", got, want)
+	}
+	for i := range got {
+		if got[i] != want[i] {
+			t.Errorf("token %d: got %v, want %v", i, got[i], want[i])
+		}
+	}
+}
+
+func TestIndentDedent(t *testing.T) {
+	src := "if x:\n    a\n    b\nc\n"
+	toks := tokenize_(t, src)
+	var hasIndent, hasDedent bool
+	for _, tk := range toks {
+		if tk.Kind == tokenize.INDENT {
+			hasIndent = true
+		}
+		if tk.Kind == tokenize.DEDENT {
+			hasDedent = true
+		}
+	}
+	if !hasIndent {
+		t.Errorf("expected INDENT in stream, got %v", kinds(toks))
+	}
+	if !hasDedent {
+		t.Errorf("expected DEDENT in stream, got %v", kinds(toks))
+	}
+}
+
+func TestNumberKinds(t *testing.T) {
+	cases := []string{"0", "0x1f", "0o77", "0b101", "1.5", "1.5e10", "10j"}
+	for _, src := range cases {
+		got := kinds(tokenize_(t, src+"\n"))
+		want := []tokenize.Type{tokenize.NUMBER, tokenize.NEWLINE, tokenize.ENDMARKER}
+		if len(got) != len(want) || got[0] != tokenize.NUMBER {
+			t.Errorf("src %q: got %v", src, got)
+		}
+	}
+}
