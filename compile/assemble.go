@@ -42,6 +42,13 @@ func Assemble(seq *Sequence, info *Info, unit *Unit, filename string) (*Code, er
 	for i := range seq.Instrs {
 		a.emitInstr(&seq.Instrs[i])
 	}
+	a.LineTable = assembleLineTable(seq, unit.FirstLineno)
+	a.ExceptionTable = assembleExceptionTable(seq)
+	flags := finalizeFlags(unit)
+	qualname := unit.Qualname
+	if qualname == "" {
+		qualname = unit.Name
+	}
 	stacksize := 0
 	if info != nil {
 		stacksize = info.MaxStackDepth
@@ -53,7 +60,7 @@ func Assemble(seq *Sequence, info *Info, unit *Unit, filename string) (*Code, er
 		KwOnlyArgCount:  unit.KwOnlyArgCount,
 		NLocals:         len(unit.VarNames),
 		Stacksize:       stacksize,
-		Flags:           unit.Flags,
+		Flags:           flags,
 		Code:            a.Code,
 		Consts:          unit.Consts,
 		Names:           unit.Names,
@@ -64,7 +71,7 @@ func Assemble(seq *Sequence, info *Info, unit *Unit, filename string) (*Code, er
 		LocalsPlusKinds: localsplusKinds,
 		Filename:        filename,
 		Name:            unit.Name,
-		Qualname:        unit.Qualname,
+		Qualname:        qualname,
 		Firstlineno:     unit.FirstLineno,
 		Linetable:       a.LineTable,
 		ExceptionTable:  a.ExceptionTable,
@@ -100,6 +107,28 @@ func (a *Assembler) emitInstr(ins *Instr) {
 		}
 	}
 	a.Code = append(a.Code, byte(ins.Op), byte(arg&0xff))
+}
+
+// CoNoFree is set when a code object captures no free variables and
+// has no cell variables. CPython sets it in compute_code_flags after
+// flowgraph + symtable agree no closure cells are needed.
+//
+// CPython: Include/cpython/code.h CO_NOFREE
+const CoNoFree uint32 = 0x0040
+
+// finalizeFlags computes the assemble-side bits that depend on data
+// only available after codegen finishes: CO_NOFREE (no free or cell
+// variables) and a stable signature subset (CO_VARARGS, CO_VARKEYWORDS,
+// CO_GENERATOR, CO_COROUTINE, CO_ASYNC_GENERATOR were already set by
+// codegen; we leave them alone). Mirrors CPython's compute_code_flags.
+//
+// CPython: Python/compile.c:L8061 compute_code_flags
+func finalizeFlags(unit *Unit) uint32 {
+	flags := unit.Flags
+	if len(unit.FreeVars) == 0 && len(unit.CellVars) == 0 {
+		flags |= CoNoFree
+	}
+	return flags
 }
 
 // buildLocalsPlus materializes the flat 3.11+ co_localsplus layout.

@@ -7,6 +7,9 @@
 package compile
 
 import (
+	"fmt"
+	"math"
+
 	"github.com/tamnd/gopy/ast"
 )
 
@@ -110,11 +113,45 @@ func (c *Compiler) poolIndex(kind *poolKind, name string) int {
 //	Python/compile.c compiler_add_const
 func (c *Compiler) constIndex(value any) int {
 	u := c.unit()
-	if i, ok := c.constCache[value]; ok {
+	key := constCacheKey(value)
+	if i, ok := c.constCache[key]; ok {
 		return i
 	}
 	i := len(u.Consts)
 	u.Consts = append(u.Consts, value)
-	c.constCache[value] = i
+	c.constCache[key] = i
 	return i
+}
+
+// constCacheKey returns a hashable key that distinguishes constants
+// by both Go type and value. CPython keys its const_cache on
+// (type(v), v) so that 1 (int) and 1.0 (float) get separate slots
+// even though their values compare equal in Python; the same applies
+// here for int vs int64, float64 vs string-of-digits, etc. Floats
+// route through math.Float64bits so NaN payloads do not collide and
+// -0.0 stays distinct from 0.0.
+//
+// CPython: Python/compile.c compiler_add_const cache key
+func constCacheKey(value any) any {
+	type tagged struct {
+		t string
+		v any
+	}
+	switch x := value.(type) {
+	case nil:
+		return tagged{"nil", nil}
+	case float64:
+		return tagged{"float64", math.Float64bits(x)}
+	case float32:
+		return tagged{"float32", math.Float32bits(x)}
+	case complex128:
+		return tagged{"complex128", [2]uint64{math.Float64bits(real(x)), math.Float64bits(imag(x))}}
+	}
+	// Fall back to a type-tagged pair for everything else; Go == on
+	// the struct uses == on both fields, which gives the same
+	// type-aware dedup CPython implements.
+	return struct {
+		t string
+		v any
+	}{fmt.Sprintf("%T", value), value}
 }

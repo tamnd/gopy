@@ -15,13 +15,6 @@ package tokenize
 
 import "io"
 
-// Type is the token kind. Numeric values match cpython 3.14
-// Grammar/Tokens; the full set is generated from that file by
-// tools/tokens_go and emitted into types_gen.go alongside this file.
-//
-// CPython: Include/internal/pycore_token.h Token enum
-type Type int
-
 // Pos is the (line, column) source position of a token boundary. Both
 // fields are 1-based, matching CPython's tokenize.TokenInfo.
 //

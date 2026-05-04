@@ -87,14 +87,32 @@ type Builder struct {
 // spec.
 //
 // CPython: Python/flowgraph.c:L3659 _PyCfg_OptimizeCodeUnit
-func Optimize(seq *Sequence, consts []any, nlocals, _ int) (*Info, error) {
+func Optimize(seq *Sequence, consts *[]any, nlocals, _ int) (*Info, error) {
 	if seq == nil {
 		return nil, fmt.Errorf("compile: Optimize called with nil sequence")
 	}
-	// PASS 1: resolve symbolic jump labels to instruction offsets.
+	if consts == nil {
+		empty := []any{}
+		consts = &empty
+	}
+	// PASS 0: fold int-int BINARY_OP triples into a single LOAD_CONST.
+	// Length-preserving (replaces two of the three instructions with
+	// NOPs); the const pool grows in place if a new value is needed.
+	foldBinaryIntConst(seq, consts)
+
+	// PASS 1: kill instructions after an unconditional terminator
+	// that are not jump or handler targets. Length-preserving so the
+	// labelmap stays valid.
+	eliminateDeadCodeAfterTerminator(seq)
+
+	// PASS 2: resolve symbolic jump labels to instruction offsets.
 	// CPython does this on the CFG; we exploit instrseq's existing
 	// ApplyLabelMap so the post-pass Sequence has resolved opargs.
 	seq.ApplyLabelMap(HasTarget)
+
+	// PASS 3: compact NOP runs. ApplyLabelMap has baked indices into
+	// jump opargs, so removeRedundantNops can reindex safely.
+	removeRedundantNops(seq)
 
 	// PASS 11: stack-depth analysis. Forward dataflow over the flat
 	// sequence is sufficient while the optimiser is minimal: every
@@ -107,7 +125,7 @@ func Optimize(seq *Sequence, consts []any, nlocals, _ int) (*Info, error) {
 
 	info := &Info{
 		MaxStackDepth: depth,
-		Consts:        consts,
+		Consts:        *consts,
 		NLocals:       nlocals,
 		LocalsPlus:    nlocals,
 	}

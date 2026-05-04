@@ -18,7 +18,8 @@ func TestOptimizeResolvesLabels(t *testing.T) {
 	seq.UseLabel(end)
 	seq.Addop(NOP, 0, ast.Pos{})
 
-	info, err := Optimize(seq, []any{nil}, 0, 1)
+	consts := []any{nil}
+	info, err := Optimize(seq, &consts, 0, 1)
 	if err != nil {
 		t.Fatalf("Optimize: %v", err)
 	}

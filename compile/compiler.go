@@ -68,21 +68,29 @@ func (c *Compiler) compileMod(mod ast.Mod, filename string) (*Code, error) {
 // CPython: Python/compile.c:L1843 compile_make_closure / inner-unit
 // assembly inside compile_function
 func assembleUnit(unit *Unit, filename string) (*Code, error) {
-	info, err := Optimize(unit.Seq, unit.Consts, len(unit.VarNames), unit.FirstLineno)
+	// Recurse into nested Units before flowgraph runs on the parent:
+	// codegen embedded each inner *Unit as a const-pool entry, and the
+	// assembler must hand back a *Code in that slot so the marshal
+	// stage sees a uniform shape. After recursion, the parent's
+	// Consts holds *Code (not *Unit) for every nested scope.
+	for i, c := range unit.Consts {
+		child, ok := c.(*Unit)
+		if !ok {
+			continue
+		}
+		childCo, err := assembleUnit(child, filename)
+		if err != nil {
+			return nil, err
+		}
+		unit.Consts[i] = childCo
+	}
+	info, err := Optimize(unit.Seq, &unit.Consts, len(unit.VarNames), unit.FirstLineno)
 	if err != nil {
 		return nil, fmt.Errorf("compile: %s: flowgraph: %w", unit.Name, err)
 	}
 	co, err := Assemble(unit.Seq, info, unit, filename)
 	if err != nil {
 		return nil, fmt.Errorf("compile: %s: assemble: %w", unit.Name, err)
-	}
-	for _, child := range unit.Seq.Nested {
-		// Nested *Sequence objects do not carry full Unit metadata in
-		// the current pipeline. Skip them for v0.5; nested codegen
-		// already wired its closure via the parent's MAKE_FUNCTION
-		// path. The upcoming compile_function spec port will switch
-		// to per-scope Unit recursion here.
-		_ = child
 	}
 	return co, nil
 }

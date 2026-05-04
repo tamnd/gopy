@@ -183,6 +183,7 @@ func (c *Compiler) Codegen(sc *symtable.Entry, mod ast.Mod) (*Unit, error) {
 func (c *Compiler) enterScope(sc *symtable.Entry) {
 	u := &Unit{
 		Name:        sc.Name,
+		Qualname:    buildQualname(c.units, sc),
 		ScopeType:   sc.Type,
 		FirstLineno: sc.Loc.Lineno,
 		Seq:         &Sequence{},
@@ -205,6 +206,11 @@ func (c *Compiler) enterScope(sc *symtable.Entry) {
 	case symtable.ClassBlock:
 		u.Flags = 0
 	}
+	// CoNested: any scope nested inside a non-module scope. Mirrors
+	// CPython's compute_code_flags COMPILER_FLAGS_NESTED check.
+	if len(c.units) > 0 && c.units[len(c.units)-1].ScopeType != symtable.ModuleBlock {
+		u.Flags |= CoNested
+	}
 	c.units = append(c.units, u)
 	c.scope = sc
 	c.fblocks = nil
@@ -213,6 +219,27 @@ func (c *Compiler) enterScope(sc *symtable.Entry) {
 	c.varnameCache = map[string]int{}
 	c.freeCache = map[string]int{}
 	c.cellCache = map[string]int{}
+}
+
+// buildQualname assembles co_qualname from the parent unit stack and
+// the new scope's name. Top-level scopes get just the name; scopes
+// nested inside a class get "Outer.Name"; scopes nested inside a
+// function get "Outer.<locals>.Name". Mirrors CPython's
+// compiler_set_qualname.
+//
+// CPython: Python/compile.c:L644 compiler_set_qualname
+func buildQualname(stack []*Unit, sc *symtable.Entry) string {
+	if len(stack) == 0 {
+		return sc.Name
+	}
+	parent := stack[len(stack)-1]
+	if parent.ScopeType == symtable.ModuleBlock {
+		return sc.Name
+	}
+	if parent.ScopeType == symtable.ClassBlock {
+		return parent.Qualname + "." + sc.Name
+	}
+	return parent.Qualname + ".<locals>." + sc.Name
 }
 
 // leaveScope pops the top unit. The unit is still reachable through

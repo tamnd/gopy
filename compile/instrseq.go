@@ -36,9 +36,9 @@ func (l JumpTargetLabel) ID() int { return l.id }
 //
 // CPython: Include/internal/pycore_compile.h _PyExceptHandlerInfo
 type ExceptHandlerInfo struct {
-	Label      int
-	StartDepth int
-	PrevExc    int
+	Label         int
+	StartDepth    int
+	PreserveLasti int
 }
 
 // Instr is one entry in a Sequence. Mirrors _PyInstruction.
