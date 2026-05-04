@@ -145,6 +145,12 @@ linters:
         linters:
           - gocognit
           - gocyclo
+      # The string-literal parser mirrors string_parser.c's branch
+      # tree on the prefix and escape decoding paths.
+      - path: parser/string/
+        linters:
+          - gocognit
+          - gocyclo
       # Pegen scaffolding has many helpers held for the generated
       # parser table; flagging them as unused now would force ugly
       # nolint stamps everywhere. Re-enabled once parser_gen lands.
