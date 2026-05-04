@@ -1,3 +1,3 @@
 module github.com/tamnd/gopy
 
-go 1.24
+go 1.26

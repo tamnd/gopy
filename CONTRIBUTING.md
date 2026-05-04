@@ -19,7 +19,7 @@ get a change merged.
 
 ## Development environment
 
-You need Go 1.24 or newer. Most checks run from the Makefile:
+You need Go 1.26 or newer. Most checks run from the Makefile:
 
 ```sh
 make build     # build ./bin/gopy

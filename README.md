@@ -25,7 +25,7 @@ adopts Go idioms modelled on the Go standard library.
 
 ## Install
 
-Requires Go 1.24 or newer.
+Requires Go 1.26 or newer.
 
 ```sh
 go install github.com/tamnd/gopy/cmd/gopy@latest

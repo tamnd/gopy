@@ -11,7 +11,7 @@ folder; this file is the aggregated index.
 
 ## Unreleased
 
-(no changes yet)
+* build: bump minimum Go to 1.26.
 
 ## v0.0.0 - 2026-05-04
 
