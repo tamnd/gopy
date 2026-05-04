@@ -94,6 +94,14 @@ func (c *Compiler) visitExprMisc(e ast.Expr) (bool, error) {
 		return true, c.visitJoinedStr(n)
 	case *ast.FormattedValue:
 		return true, c.visitFormattedValue(n)
+	case *ast.ListComp:
+		return true, c.visitListComp(n)
+	case *ast.SetComp:
+		return true, c.visitSetComp(n)
+	case *ast.DictComp:
+		return true, c.visitDictComp(n)
+	case *ast.GeneratorExp:
+		return true, c.visitGeneratorExp(n)
 	}
 	return false, nil
 }

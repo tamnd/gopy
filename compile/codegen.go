@@ -18,7 +18,8 @@ import (
 // Include/internal/pycore_intrinsics.h INTRINSIC_*. Add more as the
 // visitors that emit them land.
 const (
-	intrinsicPrint int32 = 1
+	intrinsicPrint              int32 = 1
+	intrinsicStopIterationError int32 = 3
 )
 
 // Intrinsic ids for CALL_INTRINSIC_2. CPython:

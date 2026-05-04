@@ -116,7 +116,7 @@ func (c *Compiler) visitAsyncWithInner(s *ast.AsyncWith, pos int) error {
 	c.addOpI(CALL, 0, l)
 	c.addOpI(GET_AWAITABLE, 1, l)
 	c.addLoadConst(nil, l)
-	c.addYieldFromLoop(l, resumeAfterAwait)
+	c.addYieldFromLoop(l)
 
 	c.addOpJump(SETUP_WITH, final, l)
 
@@ -152,7 +152,7 @@ func (c *Compiler) visitAsyncWithInner(s *ast.AsyncWith, pos int) error {
 	}
 	c.addOpI(GET_AWAITABLE, 2, l)
 	c.addLoadConst(nil, l)
-	c.addYieldFromLoop(l, resumeAfterAwait)
+	c.addYieldFromLoop(l)
 	c.addOp(POP_TOP, l)
 	c.addOpJump(JUMP, exit, l)
 
@@ -162,7 +162,7 @@ func (c *Compiler) visitAsyncWithInner(s *ast.AsyncWith, pos int) error {
 	c.addOp(WITH_EXCEPT_START, l)
 	c.addOpI(GET_AWAITABLE, 2, l)
 	c.addLoadConst(nil, l)
-	c.addYieldFromLoop(l, resumeAfterAwait)
+	c.addYieldFromLoop(l)
 	if err := c.withExceptFinish(cleanup); err != nil {
 		return err
 	}
@@ -222,17 +222,20 @@ func (c *Compiler) popExceptAndReraise() {
 }
 
 // addYieldFromLoop emits the SEND / YIELD / RESUME / JUMP_BACKWARD
-// loop shared by yield-from and await sites. The resume oparg
-// distinguishes the two flavors.
+// loop used by await sites. CPython's codegen_add_yield_from takes a
+// resume oparg to distinguish yield-from (RESUME_AFTER_YIELD_FROM)
+// from await (RESUME_AFTER_AWAIT); right now every caller is an
+// await, so the value is hardcoded. Yield-from at the statement
+// level emits its loop inline.
 //
 // CPython: Python/codegen.c:L471 codegen_add_yield_from
-func (c *Compiler) addYieldFromLoop(l ast.Pos, resume int32) {
+func (c *Compiler) addYieldFromLoop(l ast.Pos) {
 	loop := c.newLabel()
 	end := c.newLabel()
 	c.useLabel(loop)
 	c.addOpJump(SEND, end, l)
 	c.addOpI(YIELD_VALUE, 1, l)
-	c.addOpI(RESUME, resume, l)
+	c.addOpI(RESUME, resumeAfterAwait, l)
 	c.addOpJump(JUMP_BACKWARD, loop, l)
 	c.useLabel(end)
 	c.addOp(END_SEND, l)
