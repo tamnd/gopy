@@ -18,6 +18,12 @@ linters:
     - unconvert
     - prealloc
   settings:
+    errcheck:
+      exclude-functions:
+        - fmt.Fprint
+        - fmt.Fprintf
+        - fmt.Fprintln
+        - (*os.File).Close
     revive:
       rules:
         - name: var-naming
