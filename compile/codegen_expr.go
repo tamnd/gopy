@@ -23,6 +23,8 @@ func (c *Compiler) visitExpr(e ast.Expr) error {
 		return c.visitConstant(n)
 	case *ast.Name:
 		return c.visitName(n)
+	case *ast.Lambda:
+		return c.visitLambda(n)
 	}
 	return fmt.Errorf("compile: expr kind %T not yet supported", e)
 }

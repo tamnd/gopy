@@ -105,6 +105,10 @@ func (c *Compiler) visitStmt(s ast.Stmt) error {
 		return c.visitBreak(n)
 	case *ast.Continue:
 		return c.visitContinue(n)
+	case *ast.FunctionDef:
+		return c.visitFunctionDef(n)
+	case *ast.AsyncFunctionDef:
+		return c.visitAsyncFunctionDef(n)
 	case *ast.Global, *ast.Nonlocal:
 		// Already lifted by symtable.
 		return nil
