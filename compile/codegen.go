@@ -21,6 +21,24 @@ const (
 	intrinsicPrint int32 = 1
 )
 
+// Operands for LOAD_SPECIAL. CPython:
+// Include/internal/pycore_ceval.h:L380 SPECIAL___ENTER__ etc.
+const (
+	specialEnter  int32 = 0
+	specialExit   int32 = 1
+	specialAEnter int32 = 2
+	specialAExit  int32 = 3
+)
+
+// Operands for RESUME. CPython:
+// Include/internal/pycore_compile.h RESUME_AT_FUNC_START etc.
+const (
+	resumeAtFuncStart    int32 = 0
+	resumeAfterYield     int32 = 1
+	resumeAfterYieldFrom int32 = 2
+	resumeAfterAwait     int32 = 3
+)
+
 // CO_* flags. CPython: Include/cpython/code.h.
 const (
 	CoOptimized         uint32 = 0x0001
