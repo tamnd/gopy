@@ -11,6 +11,51 @@ folder; this file is the aggregated index.
 
 ## Unreleased
 
+## v0.5.0 - 2026-05-05
+
+See [`changelog/v0.5.0.md`](changelog/v0.5.0.md).
+
+* feat(ast): port `Python-ast.c`, `ast.c`, `ast_preprocess.c`, and
+  `ast_unparse.c`. Generated nodes from `Python.asdl`, the full
+  Validate panel (forbidden names, comprehension shape, expr_context,
+  Starred placement, match-pattern shape, PEP 695 type-param), the
+  3.14 preprocess folds, and source round-trip.
+* feat(future): port `future.c`. Detects `from __future__` imports
+  and surfaces feature flags to the rest of the pipeline.
+* feat(symtable): full port of `symtable.c`. Build, analyse, errors
+  panel, class name mangling.
+* feat(compile/instrseq): port `instruction_sequence.c`. Sequence,
+  Instr, label model, ApplyLabelMap.
+* feat(compile/codegen): port `codegen.c`. Every statement and
+  expression visitor needed for the v0.5 gate, including the eight
+  match patterns, four comprehension kinds, with / async with, try /
+  try*, the assignment-target panel, and TypeAlias via
+  INTRINSIC_TYPEALIAS.
+* feat(compile/flowgraph): port of `flowgraph.c`. CFG-driven pass
+  driver, int-int BINARY_OP folding, jump threading, conditional-jump
+  propagation, unreachable-block elimination, post-terminator dead
+  code, redundant-NOP compaction. CFG-based stackdepth, swaptimize,
+  super-instructions, LOAD_FAST ref-stack, and cold-block hoist
+  remain for follow-on.
+* feat(compile/assemble): port of `assemble.c`. EXTENDED_ARG widening,
+  PEP 626 line table, PEP 657 exception table, type-keyed const
+  dedup, `co_qualname` walk, full `co_flags` assembly.
+* feat(compile/compiler): top-level `Compile` entry point that walks
+  symtable, codegen, flowgraph, and assemble per scope.
+* feat(compile/dis): port of `dis.dis`. Listings recombine
+  EXTENDED_ARG prefixes and recurse into nested Code objects.
+* feat(marshal): version-5 wire format skeleton plus roundtrip test.
+  Code-object marshal arm and CPython byte-parity land in v0.8.
+* feat(tokenize): skeleton wrapper around `Python-tokenize.c`. Type
+  table generated from `Grammar/Tokens` and `pycore_token.h`. The
+  Iter / Token surface plus the lexer state machine arrive in v0.9.
+* test(v05test): cross-cut gate. Structural panel (empty, assign,
+  binary fold, load-after-store, if/while, def, async def). Ten
+  disassembly goldens (1629) under `testdata/golden/` covering
+  `empty_module`, `simple_assign`, `binary_add`, `load_after_store`,
+  `if_pass`, `while_pass`, `def_add_one`, `async_def_pass`,
+  `class_pass`, `type_alias`. Refresh via `go test -update`.
+
 ## v0.4.0 - 2026-05-04
 
 See [`changelog/v0.4.0.md`](changelog/v0.4.0.md).

@@ -1,0 +1,4 @@
+   0 LOAD_CONST                     3
+   2 STORE_NAME                     0
+   4 LOAD_CONST                     2
+   6 RETURN_VALUE                   0

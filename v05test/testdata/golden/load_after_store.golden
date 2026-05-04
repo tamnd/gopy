@@ -1,0 +1,6 @@
+   0 LOAD_CONST                     0
+   2 STORE_NAME                     0
+   4 LOAD_NAME                      0
+   6 POP_TOP                        0
+   8 LOAD_CONST                     1
+  10 RETURN_VALUE                   0

@@ -126,6 +126,12 @@ linters:
         linters:
           - gocognit
           - gocyclo
+      # Code generators read CPython source paths from CLI flags and
+      # write to checked-in output files; standard gosec heuristics
+      # for file inclusion / permissions do not apply.
+      - path: tools/
+        linters:
+          - gosec
       # FormatInt and ParseSpec mirror format_long_internal /
       # parse_internal_render_format_spec; the branch tree matches
       # CPython's switch and is the unit of parity.
