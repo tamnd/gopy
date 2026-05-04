@@ -15,6 +15,10 @@ folder; this file is the aggregated index.
 * feat(arena): port `cpython/Python/pyarena.c` to the `arena` package.
   Bump allocator with linked fixed-size blocks for the compiler
   pipeline.
+* feat(pythread): port the cross-platform half of
+  `cpython/Python/thread.c` to the `pythread` package. Goroutine-backed
+  Start/Join handles, ident allocation, stacksize stubs, and the
+  `TimeoutMax` constant.
 
 ## v0.0.0 - 2026-05-04
 
