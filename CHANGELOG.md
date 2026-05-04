@@ -11,6 +11,40 @@ folder; this file is the aggregated index.
 
 ## Unreleased
 
+## v0.5.0 - 2026-05-04
+
+See [`changelog/v0.5.0.md`](changelog/v0.5.0.md).
+
+* feat(ast): port `Python-ast.c`, `ast.c`, `ast_preprocess.c`, and
+  `ast_unparse.c`. Generated nodes from `Python.asdl`, validation,
+  literal constant folding, and source round-trip.
+* feat(future): port `future.c`. Detects `from __future__` imports
+  and surfaces feature flags to the rest of the pipeline.
+* feat(symtable): full port of `symtable.c`. Build, analyse, and the
+  errors panel. Class name mangling included.
+* feat(compile/instrseq): port `instruction_sequence.c`. Sequence,
+  Instr, label model, ApplyLabelMap.
+* feat(compile/codegen): port `codegen.c`. Every statement and
+  expression visitor needed for the v0.5 gate, including the eight
+  match patterns, four comprehension kinds, with / async with, try /
+  try*, and the assignment-target panel.
+* feat(compile/flowgraph): skeleton port of `flowgraph.c`. Public
+  Optimize entry point, label resolution, forward stackdepth analysis
+  on a hand-written effect table. The full optimisation panel lands
+  incrementally per the 1627 spec.
+* feat(compile/assemble): port of `assemble.c` for the code stream.
+  EXTENDED_ARG widening and flat 3.11+ localsplus layout. Line and
+  exception table writers land alongside the optimisation panel.
+* feat(compile/compiler): top-level `Compile` entry point that walks
+  symtable, codegen, flowgraph, and assemble.
+* feat(compile/dis): port of `dis.dis`. Listings recombine
+  EXTENDED_ARG prefixes and recurse into nested Code objects.
+* feat(tokenize): skeleton wrapper around `Python-tokenize.c`. The
+  public Iter / Token surface is stable; the lexer state machine
+  arrives with the parser port.
+* test(v05test): cross-cut gate that pins the end-to-end pipeline on
+  empty modules, simple assignments, and binary operations.
+
 ## v0.4.0 - 2026-05-04
 
 See [`changelog/v0.4.0.md`](changelog/v0.4.0.md).
