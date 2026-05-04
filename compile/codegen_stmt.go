@@ -109,6 +109,20 @@ func (c *Compiler) visitStmt(s ast.Stmt) error {
 		return c.visitFunctionDef(n)
 	case *ast.AsyncFunctionDef:
 		return c.visitAsyncFunctionDef(n)
+	case *ast.Delete:
+		return c.visitDelete(n)
+	case *ast.AugAssign:
+		return c.visitAugAssign(n)
+	case *ast.AnnAssign:
+		return c.visitAnnAssign(n)
+	case *ast.Raise:
+		return c.visitRaise(n)
+	case *ast.Assert:
+		return c.visitAssert(n)
+	case *ast.Import:
+		return c.visitImport(n)
+	case *ast.ImportFrom:
+		return c.visitImportFrom(n)
 	case *ast.Global, *ast.Nonlocal:
 		// Already lifted by symtable.
 		return nil
