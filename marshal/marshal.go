@@ -32,41 +32,38 @@ const Version = 5
 //
 // CPython: Python/marshal.c TYPE_*
 const (
-	typeNull       = '0'
-	typeNone       = 'N'
-	typeFalse      = 'F'
-	typeTrue       = 'T'
-	typeStopIter   = 'S'
-	typeEllipsis   = '.'
-	typeInt        = 'i'
-	typeInt64      = 'I'
-	typeFloat      = 'f'
+	typeNull        = '0'
+	typeNone        = 'N'
+	typeFalse       = 'F'
+	typeTrue        = 'T'
+	typeStopIter    = 'S'
+	typeEllipsis    = '.'
+	typeInt         = 'i'
+	typeInt64       = 'I'
+	typeFloat       = 'f'
 	typeBinaryFloat = 'g'
-	typeLong       = 'l'
-	typeString     = 's'
-	typeTuple      = '('
-	typeSmallTuple = ')'
-	typeList       = '['
-	typeDict       = '{'
-	typeCode       = 'c'
-	typeUnicode    = 'u'
-	typeShortAscii = 'z'
+	typeLong        = 'l'
+	typeString      = 's'
+	typeTuple       = '('
+	typeSmallTuple  = ')'
+	typeList        = '['
+	typeDict        = '{'
+	typeCode        = 'c'
+	typeUnicode     = 'u'
+	typeShortASCII  = 'z'
 )
 
 // ErrUnmarshallable matches CPython's WFERR_UNMARSHALLABLE.
 //
 // CPython: Python/marshal.c WFERR_UNMARSHALLABLE
-var ErrUnmarshallable = errors.New("marshal: object cannot be marshalled")
+var ErrUnmarshallable = errors.New("marshal: object cannot be marshaled")
 
 // Dump writes v to w in the version-5 wire format.
 //
 // CPython: Python/marshal.c PyMarshal_WriteObjectToFile
 func Dump(w io.Writer, v any) error {
 	enc := encoder{w: w}
-	if err := enc.write(v); err != nil {
-		return err
-	}
-	return nil
+	return enc.write(v)
 }
 
 // Load reads one object from r in the version-5 wire format.
@@ -104,6 +101,8 @@ func (e *encoder) writeInt64(v int64) error {
 // documented in the package doc; anything else is a marshal error.
 //
 // CPython: Python/marshal.c w_object
+//
+//nolint:gocyclo // mirrors CPython's per-type wire dispatch.
 func (e *encoder) write(v any) error {
 	switch x := v.(type) {
 	case nil:
@@ -184,8 +183,8 @@ func (e *encoder) writeIntLike(v int64) error {
 //
 // CPython: Python/marshal.c w_PyUnicode arm
 func (e *encoder) writeUnicode(s string) error {
-	if len(s) < 256 && isAscii(s) {
-		if err := e.writeByte(typeShortAscii); err != nil {
+	if len(s) < 256 && isASCII(s) {
+		if err := e.writeByte(typeShortASCII); err != nil {
 			return err
 		}
 		if err := e.writeByte(byte(len(s))); err != nil {
@@ -204,7 +203,7 @@ func (e *encoder) writeUnicode(s string) error {
 	return err
 }
 
-func isAscii(s string) bool {
+func isASCII(s string) bool {
 	for i := 0; i < len(s); i++ {
 		if s[i] >= 0x80 {
 			return false
@@ -270,12 +269,14 @@ func (d *decoder) readInt64() (int64, error) {
 // arms; unknown tags return an error.
 //
 // CPython: Python/marshal.c r_object
+//
+//nolint:gocyclo // mirrors CPython's per-tag wire dispatch.
 func (d *decoder) read() (any, error) {
 	tag, err := d.readByte()
 	if err != nil {
 		return nil, err
 	}
-	// Strip FLAG_REF; v0.5 does not honour the back-reference table.
+	// Strip FLAG_REF; v0.5 does not honor the back-reference table.
 	tag &^= 0x80
 	switch tag {
 	case typeNone:
@@ -295,7 +296,7 @@ func (d *decoder) read() (any, error) {
 			return nil, err
 		}
 		return math.Float64frombits(uint64(bits)), nil
-	case typeShortAscii:
+	case typeShortASCII:
 		n, err := d.readByte()
 		if err != nil {
 			return nil, err

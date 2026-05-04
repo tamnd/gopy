@@ -6,6 +6,11 @@
 
 package tokenize
 
+// Token kinds, numeric values pinned to CPython's token.h. The
+// ALL_CAPS spellings preserve parity with `token.tok_name` so
+// fixture comparisons line up byte-for-byte.
+//
+//nolint:revive // ALL_CAPS names mirror CPython token.h.
 const (
 	ENDMARKER        Type = 0
 	NAME             Type = 1

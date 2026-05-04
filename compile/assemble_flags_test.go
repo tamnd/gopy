@@ -43,8 +43,8 @@ func TestConstCacheKeyTypeAware(t *testing.T) {
 // other and zero stays distinct from negative zero.
 func TestConstCacheKeyFloatNegZero(t *testing.T) {
 	pos := constCacheKey(0.0)
-	neg := constCacheKey(-0.0) // Go folds this at compile time, kept for clarity
-	_ = neg
+	// Go's compiler folds -0.0 to 0.0; the float-NaN bucket lives in
+	// the bit-pattern test below.
 	// 0.0 vs +0.0 are the same bit pattern; we only assert the float
 	// bucket does not lose precision against an int 0.
 	intZero := constCacheKey(int64(0))

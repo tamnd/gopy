@@ -7,8 +7,10 @@
 
 package compile
 
-const continuationBit byte = 0x40
-const entryStartBit byte = 0x80
+const (
+	continuationBit byte = 0x40
+	entryStartBit   byte = 0x80
+)
 
 // writeExcItem writes one varint-encoded value into the exception
 // table. The msb argument is OR'd into the first emitted byte (set

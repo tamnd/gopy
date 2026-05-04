@@ -140,6 +140,8 @@ func validateSeqCtx(seq Seq[Expr], want ExprContext) error {
 // validatePattern walks one pattern subtree.
 //
 // CPython: Python/ast.c validate_pattern
+//
+//nolint:gocognit,gocyclo // mirrors CPython's per-pattern-kind switch.
 func validatePattern(p Pattern) error {
 	if p == nil {
 		return errors.New("validate: nil pattern")
@@ -238,6 +240,8 @@ func validatePatternSeq(seq Seq[Pattern]) error {
 // validateTypeParams walks a PEP 695 type-parameter list.
 //
 // CPython: Python/ast.c validate_type_params
+//
+//nolint:gocognit // mirrors CPython's TypeVar/ParamSpec/TypeVarTuple switch.
 func validateTypeParams(params Seq[TypeParam]) error {
 	for i := 0; i < params.Len(); i++ {
 		tp := params.Get(i)

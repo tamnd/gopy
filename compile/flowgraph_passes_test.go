@@ -1,8 +1,9 @@
 package compile
 
 import (
-	"github.com/tamnd/gopy/ast"
 	"testing"
+
+	"github.com/tamnd/gopy/ast"
 )
 
 // TestFoldBinaryIntConstAdd: a 1+2 triple folds to a single LOAD_CONST

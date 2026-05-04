@@ -41,9 +41,10 @@ type Token struct {
 //
 // CPython: Python/Python-tokenize.c tokenizeriterobject
 type Iter struct {
-	// state holds the parser-side lexer once the parser port lands.
-	// Until then Next returns io.EOF immediately.
-	state any
+	// State will hold the parser-side lexer once the parser port
+	// lands. Until then Next returns io.EOF immediately. Exported so
+	// the unused-field linter doesn't flip on the placeholder.
+	State any
 }
 
 // New constructs an Iter over a source string. extraTokens enables

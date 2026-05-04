@@ -1,8 +1,10 @@
-// Token type declaration. Numeric values for the constants live in
-// types_gen.go, generated from cpython/Grammar/Tokens via
-// tools/tokens_go. Keeping the type itself in a hand-written file lets
-// other files in the package depend on `Type` without requiring the
-// generator to have run yet.
+// Package tokenize declares the token kind constants and the public
+// iterator surface.
+//
+// Numeric values for the constants live in types_gen.go, generated
+// from cpython/Grammar/Tokens via tools/tokens_go. Keeping the type
+// itself in a hand-written file lets other files in the package
+// depend on `Type` without requiring the generator to have run yet.
 //
 // CPython: Include/internal/pycore_token.h Token enum
 package tokenize

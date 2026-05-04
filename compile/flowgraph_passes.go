@@ -2,7 +2,7 @@
 // the v0.5 port keeps them on the flat instruction sequence so the
 // rest of the pipeline can stay simple. Each pass is conservative
 // enough that running it on a hand-built sequence cannot change
-// observable behaviour.
+// observable behavior.
 //
 // CPython: Python/flowgraph.c:L3659 _PyCfg_OptimizeCodeUnit panel
 
@@ -193,7 +193,7 @@ func removeRedundantNops(seq *Sequence) int {
 		if ins.Op == NOP && !pinned[i] {
 			// Map the dropped NOP onto the next surviving slot so that
 			// any pre-existing reference (none should remain after the
-			// pinned check, but defence in depth) lands somewhere
+			// pinned check, but defense in depth) lands somewhere
 			// reasonable.
 			newIdx[i] = len(out)
 			continue

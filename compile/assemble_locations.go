@@ -98,7 +98,7 @@ func writeLocNoColumn(buf []byte, length, lineDelta int) []byte {
 // none).
 //
 // CPython: Python/assemble.c:L285 write_location_info_entry
-func writeLocEntry(buf []byte, loc ast.Pos, lineCursor, length int) ([]byte, int) {
+func writeLocEntry(buf []byte, loc ast.Pos, lineCursor, length int) (out []byte, newCursor int) {
 	if loc.Lineno == noLineno {
 		return writeLocNone(buf, length), lineCursor
 	}
@@ -126,7 +126,7 @@ func writeLocEntry(buf []byte, loc ast.Pos, lineCursor, length int) ([]byte, int
 // bits.
 //
 // CPython: Python/assemble.c:L323 assemble_emit_location
-func emitLocation(buf []byte, loc ast.Pos, lineCursor, length int) ([]byte, int) {
+func emitLocation(buf []byte, loc ast.Pos, lineCursor, length int) (out []byte, newCursor int) {
 	if length == 0 {
 		return buf, lineCursor
 	}

@@ -111,7 +111,7 @@ func parseTokenPy(path string) (map[string]int, error) {
 	out := map[string]int{}
 	for line := range strings.SplitSeq(string(data), "\n") {
 		m := re.FindStringSubmatch(line)
-		if m == nil || skip[m[1]] {
+		if len(m) < 3 || skip[m[1]] {
 			continue
 		}
 		v, err := strconv.Atoi(m[2])
@@ -143,6 +143,11 @@ func emit(values map[string]int) ([]byte, error) {
 	fmt.Fprintln(&buf)
 	fmt.Fprintln(&buf, "package tokenize")
 	fmt.Fprintln(&buf)
+	fmt.Fprintln(&buf, "// Token kinds, numeric values pinned to CPython's token.h. The")
+	fmt.Fprintln(&buf, "// ALL_CAPS spellings preserve parity with `token.tok_name` so")
+	fmt.Fprintln(&buf, "// fixture comparisons line up byte-for-byte.")
+	fmt.Fprintln(&buf, "//")
+	fmt.Fprintln(&buf, "//nolint:revive // ALL_CAPS names mirror CPython token.h.")
 	fmt.Fprintln(&buf, "const (")
 	maxVal := 0
 	for _, e := range entries {

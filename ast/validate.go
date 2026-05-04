@@ -54,6 +54,8 @@ func validateBody(body Seq[Stmt]) error {
 // validateStmt validates one statement.
 //
 // CPython: Python/ast.c:L686 validate_stmt
+//
+//nolint:gocognit,gocyclo // mirrors CPython's per-kind switch.
 func validateStmt(s Stmt) error {
 	if s == nil {
 		return errors.New("validate: nil statement")
@@ -143,6 +145,8 @@ func validateStmt(s Stmt) error {
 // validateExpr validates one expression.
 //
 // CPython: Python/ast.c:L379 validate_expr
+//
+//nolint:gocognit,gocyclo // mirrors CPython's per-kind switch.
 func validateExpr(e Expr) error {
 	if e == nil {
 		return errors.New("validate: nil expression")
