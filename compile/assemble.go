@@ -40,9 +40,7 @@ func Assemble(seq *Sequence, info *Info, unit *Unit, filename string) (*Code, er
 		lineCursor:  unit.FirstLineno,
 	}
 	for i := range seq.Instrs {
-		if err := a.emitInstr(&seq.Instrs[i]); err != nil {
-			return nil, err
-		}
+		a.emitInstr(&seq.Instrs[i])
 	}
 	stacksize := 0
 	if info != nil {
@@ -81,12 +79,12 @@ func Assemble(seq *Sequence, info *Info, unit *Unit, filename string) (*Code, er
 // time.
 //
 // CPython: Python/assemble.c:L369 write_instr
-func (a *Assembler) emitInstr(ins *Instr) error {
+func (a *Assembler) emitInstr(ins *Instr) {
 	arg := uint32(ins.Oparg)
 	// Drop pseudo opcodes that lower to nothing (POP_BLOCK is a
 	// flowgraph-only marker).
 	if ins.Op == POP_BLOCK {
-		return nil
+		return
 	}
 	// Emit EXTENDED_ARG prefixes from highest to lowest byte.
 	if arg > 0xff {
@@ -102,10 +100,9 @@ func (a *Assembler) emitInstr(ins *Instr) error {
 		}
 	}
 	a.Code = append(a.Code, byte(ins.Op), byte(arg&0xff))
-	return nil
 }
 
-// buildLocalsPlus materialises the flat 3.11+ co_localsplus layout.
+// buildLocalsPlus materializes the flat 3.11+ co_localsplus layout.
 // Order: positional/kwonly args, then ordinary locals, then cells,
 // then frees. Args and ordinary locals share the FastLocal kind; the
 // cell/free split comes from the unit's CellVars / FreeVars lists.
@@ -113,9 +110,9 @@ func (a *Assembler) emitInstr(ins *Instr) error {
 // comprehension `.0`).
 //
 // CPython: Python/assemble.c:L483 compute_localsplus_info
-func buildLocalsPlus(unit *Unit) ([]string, []uint8) {
-	names := make([]string, 0, len(unit.VarNames)+len(unit.CellVars)+len(unit.FreeVars))
-	kinds := make([]uint8, 0, cap(names))
+func buildLocalsPlus(unit *Unit) (names []string, kinds []uint8) {
+	names = make([]string, 0, len(unit.VarNames)+len(unit.CellVars)+len(unit.FreeVars))
+	kinds = make([]uint8, 0, cap(names))
 	for _, n := range unit.VarNames {
 		k := FastLocal
 		if unit.FastHidden[n] {

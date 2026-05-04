@@ -24,10 +24,13 @@ func writeVarint(buf []byte, v uint32) []byte {
 }
 
 // writeSignedVarint zig-zag encodes a signed value: bit 0 is the sign,
+//
 // bits 1+ are the magnitude. Mirrors CPython's
 // write_signed_varint.
 //
 // CPython: Python/assemble.c:L222 write_signed_varint
+//
+//nolint:unused // consumed by the line-table writer that lands next.
 func writeSignedVarint(buf []byte, v int32) []byte {
 	var u uint32
 	if v < 0 {
