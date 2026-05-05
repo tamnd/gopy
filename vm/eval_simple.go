@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
+	"strings"
 
 	"github.com/tamnd/gopy/compile"
 	"github.com/tamnd/gopy/frame"
@@ -286,6 +287,177 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, retVal
 		}
 		return e.advance(), nil, nil, false, true, nil
 
+	case compile.GET_ITER:
+		obj := e.popObject()
+		t := obj.Type()
+		if t.Iter == nil {
+			return 0, nil, nil, false, true, fmt.Errorf("vm: TypeError: '%s' object is not iterable", t.Name)
+		}
+		it, ierr := t.Iter(obj)
+		if ierr != nil {
+			return 0, nil, nil, false, true, ierr
+		}
+		e.pushObject(it)
+		return e.advance(), nil, nil, false, true, nil
+
+	case compile.FOR_ITER:
+		// Stack: [iter]. Pop iter, peek by re-pushing. CPython peeks
+		// directly to avoid the dup but the FOR_ITER arm in 3.14 keeps
+		// the iterator on the stack across iterations.
+		it := e.peek(0).AsObject()
+		t := it.Type()
+		if t.IterNext == nil {
+			return 0, nil, nil, false, true, fmt.Errorf("vm: TypeError: '%s' object is not an iterator", t.Name)
+		}
+		v, nerr := t.IterNext(it)
+		if nerr != nil {
+			if errors.Is(nerr, objects.ErrStopIteration) {
+				// Skip past the loop body; oparg is the jump distance to
+				// END_FOR (in code units, not instruction words).
+				return e.jumpBy(int(oparg) + 1), nil, nil, false, true, nil
+			}
+			return 0, nil, nil, false, true, nerr
+		}
+		e.pushObject(v)
+		return e.advance(), nil, nil, false, true, nil
+
+	case compile.END_FOR:
+		// END_FOR pops the exhausted iterator left by FOR_ITER's
+		// fallthrough path.
+		ref := e.pop()
+		ref.Close()
+		return e.advance(), nil, nil, false, true, nil
+
+	case compile.CALL:
+		// Stack layout (3.14): [callable, NULL_or_self, arg0, ..., argN].
+		// oparg is N (positional arg count).
+		argc := int(oparg)
+		args := make([]objects.Object, argc)
+		for i := argc - 1; i >= 0; i-- {
+			args[i] = e.popObject()
+		}
+		selfOrNull := e.popObject()
+		callable := e.popObject()
+		if selfOrNull != nil {
+			// Method-style call: self_or_null is the bound instance.
+			// Prepend it to the positional args.
+			args = append([]objects.Object{selfOrNull}, args...)
+		}
+		out, cerr := objects.Call(callable, args, nil)
+		if cerr != nil {
+			return 0, nil, nil, false, true, cerr
+		}
+		e.pushObject(out)
+		return e.advance(), nil, nil, false, true, nil
+
+	case compile.UNPACK_SEQUENCE:
+		seq := e.popObject()
+		n := int(oparg)
+		items, uerr := unpackSeq(seq, n)
+		if uerr != nil {
+			return 0, nil, nil, false, true, uerr
+		}
+		// Push in reverse so items[0] ends up at the top, matching
+		// the assignment order CPython documents.
+		for i := n - 1; i >= 0; i-- {
+			e.pushObject(items[i])
+		}
+		return e.advance(), nil, nil, false, true, nil
+
+	case compile.BUILD_SLICE:
+		// oparg is 2 (start:stop) or 3 (start:stop:step).
+		var step objects.Object
+		if oparg == 3 {
+			step = e.popObject()
+		}
+		stop := e.popObject()
+		start := e.popObject()
+		e.pushObject(objects.NewSlice(start, stop, step))
+		return e.advance(), nil, nil, false, true, nil
+
+	case compile.STORE_SUBSCR:
+		key := e.popObject()
+		container := e.popObject()
+		v := e.popObject()
+		if serr := setItem(container, key, v); serr != nil {
+			return 0, nil, nil, false, true, serr
+		}
+		return e.advance(), nil, nil, false, true, nil
+
+	case compile.RAISE_VARARGS:
+		// oparg: 0 = re-raise, 1 = raise exc, 2 = raise exc from cause.
+		// v0.6 has no exception object hierarchy yet, so we surface the
+		// raised value as a Go error with its repr; the eval loop's
+		// exception table walker handles the unwind.
+		switch oparg {
+		case 0:
+			return 0, nil, nil, false, true, errors.New("RuntimeError: No active exception to re-raise")
+		case 1:
+			exc := e.popObject()
+			return 0, nil, nil, false, true, fmt.Errorf("%s", objectRepr(exc))
+		case 2:
+			cause := e.popObject()
+			exc := e.popObject()
+			return 0, nil, nil, false, true, fmt.Errorf("%s (from %s)", objectRepr(exc), objectRepr(cause))
+		}
+		return 0, nil, nil, false, true, fmt.Errorf("vm: RAISE_VARARGS: invalid oparg %d", oparg)
+
+	case compile.PUSH_EXC_INFO:
+		// Pushes the current exception under the value just pushed.
+		// v0.6 has no per-frame exc info stack yet, so push a None
+		// placeholder under the top.
+		top := e.pop()
+		e.pushObject(objects.None())
+		e.push(top)
+		return e.advance(), nil, nil, false, true, nil
+
+	case compile.POP_EXCEPT:
+		ref := e.pop()
+		ref.Close()
+		return e.advance(), nil, nil, false, true, nil
+
+	case compile.CHECK_EXC_MATCH:
+		// Stack: [exc, type]. Push True if isinstance(exc, type), else
+		// False. v0.6 doesn't have exception class hierarchy, so use a
+		// best-effort string compare.
+		typeObj := e.popObject()
+		exc := e.peek(0).AsObject()
+		match := exceptionMatches(exc, typeObj)
+		e.pushObject(objects.NewBool(match))
+		return e.advance(), nil, nil, false, true, nil
+
+	case compile.FORMAT_SIMPLE:
+		v := e.popObject()
+		s, serr := objects.Str(v)
+		if serr != nil {
+			return 0, nil, nil, false, true, serr
+		}
+		e.pushObject(objects.NewStr(s))
+		return e.advance(), nil, nil, false, true, nil
+
+	case compile.CONVERT_VALUE:
+		v := e.popObject()
+		out, cerr := convertValue(v, oparg)
+		if cerr != nil {
+			return 0, nil, nil, false, true, cerr
+		}
+		e.pushObject(out)
+		return e.advance(), nil, nil, false, true, nil
+
+	case compile.BUILD_STRING:
+		n := int(oparg)
+		pieces := make([]string, n)
+		for i := n - 1; i >= 0; i-- {
+			v := e.popObject()
+			s, serr := objects.Str(v)
+			if serr != nil {
+				return 0, nil, nil, false, true, serr
+			}
+			pieces[i] = s
+		}
+		e.pushObject(objects.NewStr(strings.Join(pieces, "")))
+		return e.advance(), nil, nil, false, true, nil
+
 	case compile.LOAD_NAME, compile.LOAD_GLOBAL, compile.STORE_NAME,
 		compile.STORE_GLOBAL, compile.DELETE_NAME, compile.DELETE_GLOBAL:
 		v, perr := e.execNameOp(op, oparg)
@@ -440,6 +612,141 @@ func storeIn(scope objects.Object, key, value objects.Object) error {
 		return d.SetItem(key, value)
 	}
 	return fmt.Errorf("vm: store against unsupported scope type %T", scope)
+}
+
+// unpackSeq unpacks seq into exactly n items, mirroring CPython's
+// UNPACK_SEQUENCE error texts on length mismatch.
+//
+// CPython: Python/bytecodes.c UNPACK_SEQUENCE
+func unpackSeq(seq objects.Object, n int) ([]objects.Object, error) {
+	if t, ok := seq.(*objects.Tuple); ok {
+		if t.Len() != n {
+			return nil, fmt.Errorf("ValueError: not enough values to unpack (expected %d, got %d)", n, t.Len())
+		}
+		out := make([]objects.Object, n)
+		for i := 0; i < n; i++ {
+			out[i] = t.Item(i)
+		}
+		return out, nil
+	}
+	if l, ok := seq.(*objects.List); ok {
+		if l.Len() != n {
+			return nil, fmt.Errorf("ValueError: not enough values to unpack (expected %d, got %d)", n, l.Len())
+		}
+		out := make([]objects.Object, n)
+		seq := l.Type().Sequence
+		for i := 0; i < n; i++ {
+			v, gerr := seq.GetItem(l, i)
+			if gerr != nil {
+				return nil, gerr
+			}
+			out[i] = v
+		}
+		return out, nil
+	}
+	// Fall back to the iterator protocol for arbitrary iterables.
+	t := seq.Type()
+	if t.Iter == nil {
+		return nil, fmt.Errorf("TypeError: cannot unpack non-iterable '%s' object", t.Name)
+	}
+	it, ierr := t.Iter(seq)
+	if ierr != nil {
+		return nil, ierr
+	}
+	itType := it.Type()
+	if itType.IterNext == nil {
+		return nil, fmt.Errorf("TypeError: '%s' object is not an iterator", itType.Name)
+	}
+	out := make([]objects.Object, 0, n)
+	for {
+		v, nerr := itType.IterNext(it)
+		if errors.Is(nerr, objects.ErrStopIteration) {
+			break
+		}
+		if nerr != nil {
+			return nil, nerr
+		}
+		out = append(out, v)
+	}
+	if len(out) != n {
+		return nil, fmt.Errorf("ValueError: not enough values to unpack (expected %d, got %d)", n, len(out))
+	}
+	return out, nil
+}
+
+// setItem mirrors PyObject_SetItem against the v0.6 container surface.
+//
+// CPython: Objects/abstract.c PyObject_SetItem
+func setItem(container, key, value objects.Object) error {
+	if d, ok := container.(*objects.Dict); ok {
+		return d.SetItem(key, value)
+	}
+	if l, ok := container.(*objects.List); ok {
+		idx, ok := key.(*objects.Int)
+		if !ok {
+			return fmt.Errorf("TypeError: list indices must be integers, not %s", key.Type().Name)
+		}
+		i, _ := idx.Int64()
+		if i < 0 || int(i) >= l.Len() {
+			return errors.New("IndexError: list assignment index out of range")
+		}
+		// objects.List doesn't expose a SetItem; route through SequenceMethods.
+		if l.Type().Sequence != nil && l.Type().Sequence.SetItem != nil {
+			return l.Type().Sequence.SetItem(l, int(i), value)
+		}
+	}
+	return fmt.Errorf("TypeError: '%s' object does not support item assignment", container.Type().Name)
+}
+
+// objectRepr returns repr(o), falling back to a placeholder so error
+// messages from RAISE_VARARGS don't double-fault.
+func objectRepr(o objects.Object) string {
+	s, err := objects.Repr(o)
+	if err != nil {
+		return "<unrepresentable>"
+	}
+	return s
+}
+
+// exceptionMatches tests whether exc matches the type-or-tuple-of-types
+// in match. v0.6 has no exception class hierarchy, so the test is a
+// best-effort comparison: same type identity, or same type name when
+// the match value is a Type.
+func exceptionMatches(exc, match objects.Object) bool {
+	if t, ok := match.(*objects.Type); ok {
+		return exc.Type() == t || exc.Type().Name == t.Name
+	}
+	if tup, ok := match.(*objects.Tuple); ok {
+		for i := 0; i < tup.Len(); i++ {
+			if exceptionMatches(exc, tup.Item(i)) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// convertValue mirrors CPython's CONVERT_VALUE oparg encoding:
+// 1=str, 2=repr, 3=ascii. v0.6 maps str/repr to objects.Str/Repr; ascii
+// is treated as repr until the abstract layer ports ascii() proper.
+//
+// CPython: Python/bytecodes.c CONVERT_VALUE
+func convertValue(v objects.Object, oparg uint32) (objects.Object, error) {
+	switch oparg {
+	case 1: // FVC_STR
+		s, err := objects.Str(v)
+		if err != nil {
+			return nil, err
+		}
+		return objects.NewStr(s), nil
+	case 2, 3: // FVC_REPR / FVC_ASCII
+		s, err := objects.Repr(v)
+		if err != nil {
+			return nil, err
+		}
+		return objects.NewStr(s), nil
+	}
+	return nil, fmt.Errorf("vm: CONVERT_VALUE: unknown oparg %d", oparg)
 }
 
 func deleteIn(scope objects.Object, key objects.Object, name string) error {

@@ -80,6 +80,60 @@ func TestEvalExtendedArgFetch(t *testing.T) {
 	// fetch must not have looped past the end.
 }
 
+func TestEvalCall(t *testing.T) {
+	ts := state.NewThread()
+	doubled := objects.NewBuiltinFunction("doubled", func(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+		x, _ := args[0].(*objects.Int).Int64()
+		return objects.NewInt(x * 2), nil
+	})
+	co := &objects.Code{
+		// LOAD_CONST 0 (callable), PUSH_NULL, LOAD_CONST 1 (5), CALL 1, RETURN_VALUE
+		Code: append(append(append(append(
+			instr(compile.LOAD_CONST, 0),
+			instr(compile.PUSH_NULL, 0)...),
+			instr(compile.LOAD_CONST, 1)...),
+			instr(compile.CALL, 1)...),
+			instr(compile.RETURN_VALUE, 0)...),
+		Consts:    []any{doubled, int64(5)},
+		Stacksize: 8,
+	}
+	v, err := EvalCode(ts, co, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, _ := v.(*objects.Int).Int64()
+	if got != 10 {
+		t.Errorf("got %d, want 10", got)
+	}
+}
+
+func TestEvalUnpackSequence(t *testing.T) {
+	ts := state.NewThread()
+	// Build tuple (1, 2), UNPACK_SEQUENCE 2, BUILD_TUPLE 2, RETURN_VALUE.
+	co := &objects.Code{
+		Code: append(append(append(append(append(
+			instr(compile.LOAD_CONST, 0),
+			instr(compile.UNPACK_SEQUENCE, 2)...),
+			instr(compile.BUILD_TUPLE, 2)...),
+			instr(compile.RETURN_VALUE, 0)...),
+			[]byte{}...),
+			[]byte{}...),
+		Consts:    []any{objects.NewTuple([]objects.Object{objects.NewInt(1), objects.NewInt(2)})},
+		Stacksize: 4,
+	}
+	v, err := EvalCode(ts, co, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tup, ok := v.(*objects.Tuple)
+	if !ok {
+		t.Fatalf("got %T, want *objects.Tuple", v)
+	}
+	if tup.Len() != 2 {
+		t.Errorf("got len %d, want 2", tup.Len())
+	}
+}
+
 func contains(s, sub string) bool {
 	return sub == "" || (len(s) >= len(sub) && (s == sub || indexOf(s, sub) >= 0))
 }

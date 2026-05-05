@@ -126,3 +126,33 @@ func TestGateEvalIfElse(t *testing.T) {
 		t.Errorf("got %d, want 1", n)
 	}
 }
+
+func TestGateEvalListBuild(t *testing.T) {
+	v, err := runSource(t, "[1, 2, 3]", parser.ModeEval)
+	if shouldSkipUnimplemented(err) {
+		t.Skipf("dispatch panel incomplete: %v", err)
+	}
+	if err != nil {
+		t.Fatalf("Eval err: %v", err)
+	}
+	if _, ok := v.(*objects.List); !ok {
+		t.Fatalf("got %T, want *objects.List", v)
+	}
+}
+
+func TestGateEvalFString(t *testing.T) {
+	v, err := runSource(t, `f"x={1+2}"`, parser.ModeEval)
+	if shouldSkipUnimplemented(err) {
+		t.Skipf("dispatch panel incomplete: %v", err)
+	}
+	if err != nil {
+		t.Fatalf("Eval err: %v", err)
+	}
+	got, gerr := objects.Str(v)
+	if gerr != nil {
+		t.Fatalf("Str: %v", gerr)
+	}
+	if got != "x=3" {
+		t.Errorf("got %q, want %q", got, "x=3")
+	}
+}

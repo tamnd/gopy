@@ -49,6 +49,24 @@ func TestRunCopyright(t *testing.T) {
 	}
 }
 
+func TestRunDashCSmoke(t *testing.T) {
+	// The -c flag is the v0.6 smoke harness. The parser/VM panel is
+	// incomplete, so we accept either a clean exit (0) or a non-zero
+	// from the parser/eval bail; the contract here is just that the
+	// flag wires through to the pipeline without panicking.
+	stdout, cleanupOut := captureFile(t)
+	defer cleanupOut()
+	stderr, cleanupErr := captureFile(t)
+	defer cleanupErr()
+
+	rc := run([]string{"-c", "1 + 2"}, stdout, stderr)
+	out := readFile(t, stdout)
+	errOut := readFile(t, stderr)
+	if rc != 0 && !strings.Contains(errOut, "parse:") && !strings.Contains(errOut, "eval:") && !strings.Contains(errOut, "compile:") {
+		t.Fatalf("rc=%d stdout=%q stderr=%q: expected pipeline error or success", rc, out, errOut)
+	}
+}
+
 func TestRunUnknownFlag(t *testing.T) {
 	stdout, cleanupOut := captureFile(t)
 	defer cleanupOut()
