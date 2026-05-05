@@ -1127,8 +1127,88 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, retVal
 		}
 		_ = v
 		return e.advance(), nil, nil, false, true, nil
+
+	case compile.LOAD_ATTR:
+		if perr := e.execLoadAttr(oparg); perr != nil {
+			return 0, nil, nil, false, true, perr
+		}
+		return e.advance(), nil, nil, false, true, nil
+
+	case compile.STORE_ATTR:
+		if perr := e.execStoreAttr(oparg); perr != nil {
+			return 0, nil, nil, false, true, perr
+		}
+		return e.advance(), nil, nil, false, true, nil
+
+	case compile.DELETE_ATTR:
+		if perr := e.execDeleteAttr(oparg); perr != nil {
+			return 0, nil, nil, false, true, perr
+		}
+		return e.advance(), nil, nil, false, true, nil
 	}
 	return 0, nil, nil, false, false, nil
+}
+
+// execLoadAttr implements the LOAD_ATTR macro: pop owner, look up
+// co.Names[oparg>>1] via PyObject_GetAttr, push attr (and a NULL
+// self slot when oparg&1 is set so a following CALL sees the
+// (callable, NULL) shape that matches the unbound-method specialize
+// path in CPython).
+//
+// CPython: Python/bytecodes.c:2296 _LOAD_ATTR
+func (e *evalState) execLoadAttr(oparg uint32) error {
+	co := e.f.Code
+	idx := int(oparg >> 1)
+	if idx < 0 || idx >= len(co.Names) {
+		return fmt.Errorf("vm: LOAD_ATTR: name index %d out of range", idx)
+	}
+	owner := e.popObject()
+	name := objects.NewStr(co.Names[idx])
+	attr, err := objects.GetAttr(owner, name)
+	if err != nil {
+		return err
+	}
+	if oparg&1 != 0 {
+		// Unbound-method shape: push attr first, then the NULL self
+		// slot. CPython's CALL trampoline reads SELF below CALLABLE,
+		// so the second push goes on top.
+		e.pushObject(attr)
+		e.push(stackref.Null)
+		return nil
+	}
+	e.pushObject(attr)
+	return nil
+}
+
+// execStoreAttr implements STORE_ATTR: pop owner, then value, write
+// owner.name = value via PyObject_SetAttr.
+//
+// CPython: Python/bytecodes.c:1652 _STORE_ATTR
+func (e *evalState) execStoreAttr(oparg uint32) error {
+	co := e.f.Code
+	idx := int(oparg)
+	if idx < 0 || idx >= len(co.Names) {
+		return fmt.Errorf("vm: STORE_ATTR: name index %d out of range", idx)
+	}
+	owner := e.popObject()
+	value := e.popObject()
+	name := objects.NewStr(co.Names[idx])
+	return objects.SetAttr(owner, name, value)
+}
+
+// execDeleteAttr implements DELETE_ATTR: pop owner, delete
+// owner.name via PyObject_DelAttr.
+//
+// CPython: Python/bytecodes.c:1662 DELETE_ATTR
+func (e *evalState) execDeleteAttr(oparg uint32) error {
+	co := e.f.Code
+	idx := int(oparg)
+	if idx < 0 || idx >= len(co.Names) {
+		return fmt.Errorf("vm: DELETE_ATTR: name index %d out of range", idx)
+	}
+	owner := e.popObject()
+	name := objects.NewStr(co.Names[idx])
+	return objects.DelAttr(owner, name)
 }
 
 // execNameOp handles LOAD_NAME / LOAD_GLOBAL / STORE_NAME etc. Looks
