@@ -59,6 +59,12 @@ func writeExcEntry(buf []byte, start, end, target int, h *ExceptHandlerInfo) []b
 	return buf
 }
 
+// AssembleExceptionTable is the exported wrapper for assembleExceptionTable.
+// External tests use it to build exception-table bytes from a curated
+// Sequence and round-trip them through the vm reader without going
+// through the full compile pipeline.
+func AssembleExceptionTable(seq *Sequence) []byte { return assembleExceptionTable(seq) }
+
 // assembleExceptionTable walks the post-flowgraph instruction stream,
 // groups runs that share a handler, and emits one varint record per
 // run. The byte-offset cursor mirrors how the code stream is packed

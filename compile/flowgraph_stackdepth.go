@@ -233,6 +233,7 @@ var opcodeArity = map[Opcode]arityEntry{
 	SETUP_WITH:                 arity(0, 0),
 	SETUP_FINALLY:              arity(0, 0),
 	SETUP_CLEANUP:              arity(0, 0),
+	POP_BLOCK:                  arity(0, 0),
 	CALL:                       arityFunc(func(a int32) int { return 2 + int(a) }, constI(1)),
 	CALL_KW:                    arityFunc(func(a int32) int { return 3 + int(a) }, constI(1)),
 	CALL_FUNCTION_EX:           arityFunc(func(a int32) int { return 3 + int(a&1) }, constI(1)),

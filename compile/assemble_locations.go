@@ -137,6 +137,14 @@ func emitLocation(buf []byte, loc ast.Pos, lineCursor, length int) (out []byte, 
 	return writeLocEntry(buf, loc, lineCursor, length)
 }
 
+// AssembleLineTable is the exported wrapper for assembleLineTable.
+// External tests use it to build location-table bytes from a curated
+// Sequence and round-trip them through the vm reader without going
+// through the full compile pipeline.
+func AssembleLineTable(seq *Sequence, firstLineno int) []byte {
+	return assembleLineTable(seq, firstLineno)
+}
+
 // assembleLineTable walks the post-flowgraph instruction stream,
 // coalesces adjacent same-location runs, and emits the location table
 // in the post-PEP-626 4-bit-code format. Returns the encoded bytes.
