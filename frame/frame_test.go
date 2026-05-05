@@ -148,3 +148,80 @@ func TestOwnerKindValues(t *testing.T) {
 		t.Error("OwnerKind values must be distinct")
 	}
 }
+
+func TestFrameClearReleasesRefs(t *testing.T) {
+	co := mkCode(2, 0, 0, 2)
+	f := &Frame{}
+	f.Init(co, nil, nil, nil, nil)
+	f.SetLocal(0, stackref.FromObject(objects.NewInt(7)))
+	f.PushStack(stackref.FromObject(objects.NewInt(8)))
+	f.Clear()
+	if f.Code != nil {
+		t.Error("Clear should null Code")
+	}
+	if f.StackTop != 0 {
+		t.Errorf("StackTop = %d, want 0", f.StackTop)
+	}
+	for i, r := range f.LocalsPlus {
+		if !r.IsNull() {
+			t.Errorf("slot %d not cleared: %v", i, r)
+		}
+	}
+}
+
+func TestFrameSuspendResume(t *testing.T) {
+	co := mkCode(0, 0, 0, 1)
+	f := &Frame{}
+	f.Init(co, nil, nil, nil, nil)
+	f.InstrPtr = 100
+	f.Suspend(42)
+	if f.Owner != OwnedByGenerator {
+		t.Errorf("Owner = %v, want OwnedByGenerator", f.Owner)
+	}
+	if f.YieldOffset != 42 {
+		t.Errorf("YieldOffset = %d, want 42", f.YieldOffset)
+	}
+	f.Resume()
+	if f.Owner != OwnedByEval {
+		t.Errorf("Owner = %v, want OwnedByEval", f.Owner)
+	}
+	if f.InstrPtr != 42 {
+		t.Errorf("InstrPtr = %d, want 42", f.InstrPtr)
+	}
+}
+
+func TestFrameStackDetach(t *testing.T) {
+	s := New()
+	co := mkCode(1, 0, 0, 1)
+	f := s.Push(co, nil, nil, nil, nil)
+	f.SetLocal(0, stackref.FromObject(objects.NewInt(99)))
+	det := s.Detach()
+	if det == nil {
+		t.Fatal("Detach returned nil")
+	}
+	if det.Owner != OwnedByGenerator {
+		t.Errorf("Detach owner = %v, want OwnedByGenerator", det.Owner)
+	}
+	if s.Depth() != 0 {
+		t.Errorf("stack depth = %d, want 0 after detach", s.Depth())
+	}
+	if det.LocalAt(0).IsNull() {
+		t.Error("detached local should still hold the ref")
+	}
+}
+
+func TestFrameStackPopGeneratorOwnedSkipsClear(t *testing.T) {
+	s := New()
+	co := mkCode(1, 0, 0, 1)
+	f := s.Push(co, nil, nil, nil, nil)
+	f.SetLocal(0, stackref.FromObject(objects.NewInt(5)))
+	// Mark as generator-owned and copy the Frame state out before Pop
+	// nukes the slot. This mirrors what Detach + Pop would do, just
+	// keeps the assertion target alive.
+	f.Owner = OwnedByGenerator
+	saved := *f
+	s.Pop()
+	if saved.LocalAt(0).IsNull() {
+		t.Error("saved generator-owned frame lost its locals on Pop")
+	}
+}

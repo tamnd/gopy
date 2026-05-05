@@ -187,6 +187,48 @@ func (f *Frame) PeekStack(depth int) stackref.Ref {
 	return f.LocalsPlus[base+f.StackTop-1-depth]
 }
 
+// Clear closes every live stackref (locals, cells, frees, stack)
+// and resets Code/Globals/Builtins/Locals to nil. Used both on normal
+// frame teardown (eval loop unwinding the call) and on the path that
+// detaches a frame to a Generator object before resume.
+//
+// CPython: Python/frame.c _PyFrame_ClearExceptCode + _PyFrame_Clear
+func (f *Frame) Clear() {
+	for i := range f.LocalsPlus {
+		f.LocalsPlus[i].Close()
+		f.LocalsPlus[i] = stackref.Null
+	}
+	f.StackTop = 0
+	f.Code = nil
+	f.Globals = nil
+	f.Builtins = nil
+	f.Locals = nil
+	f.Func = nil
+	f.Previous = nil
+}
+
+// Suspend prepares the frame for ownership transfer to a Generator
+// object on YIELD_VALUE. Marks the owner so a subsequent FrameStack.Pop
+// knows not to zero the slot, and records the offset where Resume
+// should pick up. The caller is responsible for splicing the frame
+// out of the chunk arena and into the generator.
+//
+// CPython: Python/ceval.c YIELD_VALUE handler
+func (f *Frame) Suspend(yieldOffset int) {
+	f.Owner = OwnedByGenerator
+	f.YieldOffset = yieldOffset
+}
+
+// Resume re-marks a generator-owned frame as eval-owned and restores
+// the instruction pointer to YieldOffset so the next dispatch tick
+// picks up after the suspending YIELD_VALUE.
+//
+// CPython: Python/ceval.c SEND / SEND_GEN handler
+func (f *Frame) Resume() {
+	f.Owner = OwnedByEval
+	f.InstrPtr = f.YieldOffset
+}
+
 // LocalAt returns the fast local at index i.
 func (f *Frame) LocalAt(i int) stackref.Ref { return f.LocalsPlus[i] }
 

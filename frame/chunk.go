@@ -61,11 +61,41 @@ func (s *FrameStack) Pop() {
 	}
 	s.current.top--
 	s.depth--
-	// Clear the slot so the next Push doesn't see stale refs.
-	s.current.frames[s.current.top] = Frame{}
+	f := &s.current.frames[s.current.top]
+	if f.Owner == OwnedByGenerator {
+		// The frame's been handed off to a Generator object; the
+		// generator owns the storage now, so just unwire the slot.
+		s.current.frames[s.current.top] = Frame{}
+	} else {
+		f.Clear()
+		s.current.frames[s.current.top] = Frame{}
+	}
 	if s.current.top == 0 {
 		s.current = s.current.prev
 	}
+}
+
+// Detach removes the top frame from the chunk arena and returns it.
+// Caller takes ownership. Used by Generator on first YIELD_VALUE so
+// the suspended state survives past the eval loop's natural unwind.
+//
+// CPython: Python/ceval.c YIELD_VALUE -> _PyFrame_MakeAndSetFrameObject
+func (s *FrameStack) Detach() *Frame {
+	if s.current == nil || s.current.top == 0 {
+		return nil
+	}
+	idx := s.current.top - 1
+	src := s.current.frames[idx]
+	s.current.frames[idx] = Frame{}
+	s.current.top--
+	s.depth--
+	if s.current.top == 0 {
+		s.current = s.current.prev
+	}
+	out := &Frame{}
+	*out = src
+	out.Owner = OwnedByGenerator
+	return out
 }
 
 // Depth returns the number of live frames.
