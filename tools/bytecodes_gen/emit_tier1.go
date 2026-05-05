@@ -41,9 +41,22 @@ func EmitTier1Arm(a *SignatureAnalysis) string {
 		fmt.Fprintf(&b, "\t\t// cache %q size=%d offset=%d\n", c.Name, c.Size, c.Offset)
 	}
 
-	// Action body placeholder. B6 will replace this with the
-	// translated body.
-	fmt.Fprintf(&b, "\t\treturn 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)\n")
+	// Action body. The translator handles the shapes it understands;
+	// anything else falls back to a panic-stub return so the file
+	// always compiles.
+	if body, ok, note := TranslateBody(a.Body, a); ok {
+		if body != "" {
+			for line := range strings.SplitSeq(strings.TrimRight(body, "\n"), "\n") {
+				fmt.Fprintf(&b, "\t\t%s\n", line)
+			}
+		}
+		fmt.Fprintf(&b, "\t\treturn e.advance(), nil, nil, false, nil\n")
+	} else {
+		if note != "" {
+			fmt.Fprintf(&b, "\t\t// body bail: %s\n", note)
+		}
+		fmt.Fprintf(&b, "\t\treturn 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)\n")
+	}
 
 	// Output pushes are unreachable until B6 fills the body, but emit
 	// them in a dead block so the analysis stays visible to readers.

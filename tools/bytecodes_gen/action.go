@@ -24,6 +24,13 @@ import (
 // The output is a Go statement block (no surrounding braces); the
 // caller indents and wraps it.
 func TranslateBody(body []dslTok, sig *SignatureAnalysis) (goSrc string, ok bool, note string) {
+	if len(sig.Outputs) > 0 {
+		// The current panel only understands control macros that do
+		// not push. Anything that produces outputs needs the typed
+		// helper layer that the action translator does not yet drive,
+		// so bail and let the emitter use a panic-stub.
+		return "", false, "outputs not yet handled by action translator"
+	}
 	t := &actionTranslator{
 		sig:    sig,
 		bound:  bindNames(sig),

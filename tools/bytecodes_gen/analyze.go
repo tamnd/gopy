@@ -37,15 +37,16 @@ type SignatureAnalysis struct {
 	Inputs    []StackBinding // in stack-bottom-first order (so Inputs[0] is the lowest popped slot)
 	Outputs   []StackBinding // in stack-bottom-first order (so Outputs[0] is pushed first)
 	Caches    []CacheBinding
-	Variadic  bool // any input or output is sized
-	OpargUsed bool // body refers to oparg
+	Variadic  bool     // any input or output is sized
+	OpargUsed bool     // body refers to oparg
+	Body      []dslTok // raw body tokens, handed to the action translator
 }
 
 // AnalyzeInst walks one InstDef and returns its SignatureAnalysis.
 // Returns an error when names collide between inputs and outputs in a
 // way the action translator can't disambiguate.
 func AnalyzeInst(inst *InstDef) (*SignatureAnalysis, error) {
-	a := &SignatureAnalysis{Name: inst.Name, OpargUsed: hasOparg(inst.Body)}
+	a := &SignatureAnalysis{Name: inst.Name, OpargUsed: hasOparg(inst.Body), Body: inst.Body}
 
 	// Inputs: walk in source order (lowest stack slot first). The
 	// emitter pops them in reverse so the first listed slot ends up

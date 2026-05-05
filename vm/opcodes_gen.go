@@ -20,31 +20,37 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 		_ = str
 		value := e.pop()
 		_ = value
+		// body bail: outputs not yet handled by action translator
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 		// outputs: interpolation
 	case compile.BUILD_LIST:
 		// sized input values, size=oparg
 		for i := 0; i < int(oparg); i++ { _ = e.pop() }
+		// body bail: outputs not yet handled by action translator
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 		// outputs: list
 	case compile.BUILD_MAP:
 		// sized input values, size=oparg * 2
 		for i := 0; i < int(oparg * 2); i++ { _ = e.pop() }
+		// body bail: outputs not yet handled by action translator
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 		// outputs: map_v
 	case compile.BUILD_SET:
 		// sized input values, size=oparg
 		for i := 0; i < int(oparg); i++ { _ = e.pop() }
+		// body bail: outputs not yet handled by action translator
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 		// outputs: set
 	case compile.BUILD_SLICE:
 		// sized input args, size=oparg
 		for i := 0; i < int(oparg); i++ { _ = e.pop() }
+		// body bail: outputs not yet handled by action translator
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 		// outputs: slice
 	case compile.BUILD_STRING:
 		// sized input pieces, size=oparg
 		for i := 0; i < int(oparg); i++ { _ = e.pop() }
+		// body bail: outputs not yet handled by action translator
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 		// outputs: str
 	case compile.BUILD_TEMPLATE:
@@ -52,18 +58,22 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 		_ = interpolations
 		strings := e.pop()
 		_ = strings
+		// body bail: outputs not yet handled by action translator
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 		// outputs: template
 	case compile.BUILD_TUPLE:
 		// sized input values, size=oparg
 		for i := 0; i < int(oparg); i++ { _ = e.pop() }
+		// body bail: outputs not yet handled by action translator
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 		// outputs: tup
 	case compile.CACHE:
+		// body bail: unrecognized token at action body start: "assert"
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 	case compile.CALL_INTRINSIC_1:
 		value := e.pop()
 		_ = value
+		// body bail: outputs not yet handled by action translator
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 		// outputs: res
 	case compile.CALL_INTRINSIC_2:
@@ -71,6 +81,7 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 		_ = value1_st
 		value2_st := e.pop()
 		_ = value2_st
+		// body bail: outputs not yet handled by action translator
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 		// outputs: res
 	case compile.CHECK_EG_MATCH:
@@ -78,6 +89,7 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 		_ = match_type_st
 		exc_value_st := e.pop()
 		_ = exc_value_st
+		// body bail: outputs not yet handled by action translator
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 		// outputs: rest match
 	case compile.CHECK_EXC_MATCH:
@@ -85,6 +97,7 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 		_ = right
 		left := e.pop()
 		_ = left
+		// body bail: outputs not yet handled by action translator
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 		// outputs: left b
 	case compile.CLEANUP_THROW:
@@ -94,11 +107,13 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 		_ = last_sent_val
 		sub_iter := e.pop()
 		_ = sub_iter
+		// body bail: outputs not yet handled by action translator
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 		// outputs: none value
 	case compile.CONVERT_VALUE:
 		value := e.pop()
 		_ = value
+		// body bail: outputs not yet handled by action translator
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 		// outputs: result
 	case compile.COPY:
@@ -106,27 +121,35 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 		for i := 0; i < int(oparg - 1); i++ { _ = e.pop() }
 		bottom := e.pop()
 		_ = bottom
+		// body bail: outputs not yet handled by action translator
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 		// outputs: bottom _out1[oparg - 1] top
 	case compile.COPY_FREE_VARS:
+		// body bail: unrecognized token at action body start: "PyCodeObject"
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 	case compile.DELETE_ATTR:
 		owner := e.pop()
 		_ = owner
+		// body bail: unrecognized token at action body start: "PyObject"
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 	case compile.DELETE_DEREF:
+		// body bail: unrecognized token at action body start: "PyObject"
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 	case compile.DELETE_FAST:
+		// body bail: unrecognized token at action body start: "_PyStackRef"
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 	case compile.DELETE_GLOBAL:
+		// body bail: unrecognized token at action body start: "PyObject"
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 	case compile.DELETE_NAME:
+		// body bail: unrecognized token at action body start: "PyObject"
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 	case compile.DELETE_SUBSCR:
 		sub := e.pop()
 		_ = sub
 		container := e.pop()
 		_ = container
+		// body bail: unrecognized token at action body start: "int"
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 	case compile.DICT_MERGE:
 		update := e.pop()
@@ -141,6 +164,7 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 		_ = _in1
 		callable := e.pop()
 		_ = callable
+		// body bail: outputs not yet handled by action translator
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 		// outputs: callable _out1 _out2 dict _out4[oparg - 1]
 	case compile.DICT_UPDATE:
@@ -150,30 +174,37 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 		for i := 0; i < int(oparg - 1); i++ { _ = e.pop() }
 		dict := e.pop()
 		_ = dict
+		// body bail: outputs not yet handled by action translator
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 		// outputs: dict _out1[oparg - 1]
 	case compile.END_FOR:
 		value := e.pop()
 		_ = value
+		// body bail: unrecognized token at action body start: "PyStackRef_CLOSE"
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 	case compile.END_SEND:
 		value := e.pop()
 		_ = value
 		receiver := e.pop()
 		_ = receiver
+		// body bail: outputs not yet handled by action translator
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 		// outputs: val
 	case compile.ENTER_EXECUTOR:
+		// body bail: unrecognized token at action body start: "PyCodeObject"
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 	case compile.EXIT_INIT_CHECK:
 		should_be_none := e.pop()
 		_ = should_be_none
+		// body bail: unrecognized token at action body start: "if"
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 	case compile.EXTENDED_ARG:
+		// body bail: unrecognized token at action body start: "assert"
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 	case compile.FORMAT_SIMPLE:
 		value := e.pop()
 		_ = value
+		// body bail: outputs not yet handled by action translator
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 		// outputs: res
 	case compile.FORMAT_WITH_SPEC:
@@ -181,41 +212,49 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 		_ = fmt_spec
 		value := e.pop()
 		_ = value
+		// body bail: outputs not yet handled by action translator
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 		// outputs: res
 	case compile.GET_AITER:
 		obj := e.pop()
 		_ = obj
+		// body bail: outputs not yet handled by action translator
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 		// outputs: iter
 	case compile.GET_ANEXT:
 		aiter := e.pop()
 		_ = aiter
+		// body bail: outputs not yet handled by action translator
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 		// outputs: aiter awaitable
 	case compile.GET_AWAITABLE:
 		iterable := e.pop()
 		_ = iterable
+		// body bail: outputs not yet handled by action translator
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 		// outputs: iter
 	case compile.GET_ITER:
 		iterable := e.pop()
 		_ = iterable
+		// body bail: outputs not yet handled by action translator
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 		// outputs: iter
 	case compile.GET_LEN:
 		obj := e.pop()
 		_ = obj
+		// body bail: outputs not yet handled by action translator
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 		// outputs: obj len
 	case compile.GET_YIELD_FROM_ITER:
 		iterable := e.pop()
 		_ = iterable
+		// body bail: outputs not yet handled by action translator
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 		// outputs: iter
 	case compile.IMPORT_FROM:
 		from := e.pop()
 		_ = from
+		// body bail: outputs not yet handled by action translator
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 		// outputs: from res
 	case compile.IMPORT_NAME:
@@ -223,6 +262,7 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 		_ = fromlist
 		level := e.pop()
 		_ = level
+		// body bail: outputs not yet handled by action translator
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 		// outputs: res
 	case compile.INSTRUMENTED_END_FOR:
@@ -230,6 +270,7 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 		_ = value
 		receiver := e.pop()
 		_ = receiver
+		// body bail: outputs not yet handled by action translator
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 		// outputs: receiver
 	case compile.INSTRUMENTED_END_SEND:
@@ -237,60 +278,75 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 		_ = value
 		receiver := e.pop()
 		_ = receiver
+		// body bail: outputs not yet handled by action translator
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 		// outputs: val
 	case compile.INSTRUMENTED_FOR_ITER:
 		iter := e.pop()
 		_ = iter
 		// cache "unused" size=1 offset=0
+		// body bail: outputs not yet handled by action translator
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 		// outputs: iter next
 	case compile.INSTRUMENTED_INSTRUCTION:
+		// body bail: unrecognized token at action body start: "int"
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 	case compile.INSTRUMENTED_JUMP_FORWARD:
+		// body bail: unrecognized token at action body start: "INSTRUMENTED_JUMP"
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 	case compile.INSTRUMENTED_LINE:
+		// body bail: unrecognized token at action body start: "int"
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 	case compile.INSTRUMENTED_NOT_TAKEN:
+		// body bail: unrecognized token at action body start: "("
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 	case compile.INSTRUMENTED_POP_ITER:
 		iter := e.pop()
 		_ = iter
+		// body bail: unrecognized token at action body start: "INSTRUMENTED_JUMP"
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 	case compile.INSTRUMENTED_POP_JUMP_IF_FALSE:
 		cond := e.pop()
 		_ = cond
 		// cache "unused" size=1 offset=0
+		// body bail: unrecognized token at action body start: "assert"
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 	case compile.INSTRUMENTED_POP_JUMP_IF_NONE:
 		value := e.pop()
 		_ = value
 		// cache "unused" size=1 offset=0
+		// body bail: unrecognized token at action body start: "int"
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 	case compile.INSTRUMENTED_POP_JUMP_IF_NOT_NONE:
 		value := e.pop()
 		_ = value
 		// cache "unused" size=1 offset=0
+		// body bail: unrecognized token at action body start: "int"
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 	case compile.INSTRUMENTED_POP_JUMP_IF_TRUE:
 		cond := e.pop()
 		_ = cond
 		// cache "unused" size=1 offset=0
+		// body bail: unrecognized token at action body start: "assert"
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 	case compile.INTERPRETER_EXIT:
 		retval := e.pop()
 		_ = retval
+		// body bail: unrecognized token at action body start: "assert"
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 	case compile.IS_OP:
 		right := e.pop()
 		_ = right
 		left := e.pop()
 		_ = left
+		// body bail: outputs not yet handled by action translator
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 		// outputs: b
 	case compile.JUMP_BACKWARD_NO_INTERRUPT:
+		// body bail: unrecognized token at action body start: "assert"
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 	case compile.JUMP_FORWARD:
+		// body bail: unrecognized token at action body start: "JUMPBY"
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 	case compile.LIST_APPEND:
 		v := e.pop()
@@ -299,6 +355,7 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 		for i := 0; i < int(oparg - 1); i++ { _ = e.pop() }
 		list := e.pop()
 		_ = list
+		// body bail: outputs not yet handled by action translator
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 		// outputs: list _out1[oparg - 1]
 	case compile.LIST_EXTEND:
@@ -308,62 +365,80 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 		for i := 0; i < int(oparg - 1); i++ { _ = e.pop() }
 		list_st := e.pop()
 		_ = list_st
+		// body bail: outputs not yet handled by action translator
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 		// outputs: list_st _out1[oparg - 1]
 	case compile.LOAD_BUILD_CLASS:
+		// body bail: outputs not yet handled by action translator
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 		// outputs: bc
 	case compile.LOAD_COMMON_CONSTANT:
+		// body bail: outputs not yet handled by action translator
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 		// outputs: value
 	case compile.LOAD_CONST:
+		// body bail: outputs not yet handled by action translator
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 		// outputs: value
 	case compile.LOAD_DEREF:
+		// body bail: outputs not yet handled by action translator
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 		// outputs: value
 	case compile.LOAD_FAST:
+		// body bail: outputs not yet handled by action translator
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 		// outputs: value
 	case compile.LOAD_FAST_AND_CLEAR:
+		// body bail: outputs not yet handled by action translator
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 		// outputs: value
 	case compile.LOAD_FAST_BORROW:
+		// body bail: outputs not yet handled by action translator
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 		// outputs: value
 	case compile.LOAD_FAST_BORROW_LOAD_FAST_BORROW:
+		// body bail: outputs not yet handled by action translator
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 		// outputs: value1 value2
 	case compile.LOAD_FAST_CHECK:
+		// body bail: outputs not yet handled by action translator
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 		// outputs: value
 	case compile.LOAD_FAST_LOAD_FAST:
+		// body bail: outputs not yet handled by action translator
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 		// outputs: value1 value2
 	case compile.LOAD_FROM_DICT_OR_DEREF:
 		class_dict_st := e.pop()
 		_ = class_dict_st
+		// body bail: outputs not yet handled by action translator
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 		// outputs: value
 	case compile.LOAD_FROM_DICT_OR_GLOBALS:
 		mod_or_class_dict := e.pop()
 		_ = mod_or_class_dict
+		// body bail: outputs not yet handled by action translator
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 		// outputs: v
 	case compile.LOAD_LOCALS:
+		// body bail: outputs not yet handled by action translator
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 		// outputs: locals
 	case compile.LOAD_NAME:
+		// body bail: outputs not yet handled by action translator
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 		// outputs: v
 	case compile.LOAD_SMALL_INT:
+		// body bail: outputs not yet handled by action translator
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 		// outputs: value
 	case compile.MAKE_CELL:
+		// body bail: unrecognized token at action body start: "PyObject"
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 	case compile.MAKE_FUNCTION:
 		codeobj_st := e.pop()
 		_ = codeobj_st
+		// body bail: outputs not yet handled by action translator
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 		// outputs: func_v
 	case compile.MAP_ADD:
@@ -375,6 +450,7 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 		for i := 0; i < int(oparg - 1); i++ { _ = e.pop() }
 		dict_st := e.pop()
 		_ = dict_st
+		// body bail: outputs not yet handled by action translator
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 		// outputs: dict_st _out1[oparg - 1]
 	case compile.MATCH_CLASS:
@@ -384,6 +460,7 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 		_ = type_v
 		subject := e.pop()
 		_ = subject
+		// body bail: outputs not yet handled by action translator
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 		// outputs: attrs
 	case compile.MATCH_KEYS:
@@ -391,58 +468,71 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 		_ = keys
 		subject := e.pop()
 		_ = subject
+		// body bail: outputs not yet handled by action translator
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 		// outputs: subject keys values_or_none
 	case compile.MATCH_MAPPING:
 		subject := e.pop()
 		_ = subject
+		// body bail: outputs not yet handled by action translator
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 		// outputs: subject res
 	case compile.MATCH_SEQUENCE:
 		subject := e.pop()
 		_ = subject
+		// body bail: outputs not yet handled by action translator
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 		// outputs: subject res
 	case compile.NOP:
-		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
+		return e.advance(), nil, nil, false, nil
 	case compile.POP_EXCEPT:
 		exc_value := e.pop()
 		_ = exc_value
+		// body bail: unrecognized token at action body start: "_PyErr_StackItem"
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 	case compile.POP_TOP:
 		value := e.pop()
 		_ = value
+		// body bail: unrecognized token at action body start: "PyStackRef_CLOSE"
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 	case compile.PUSH_EXC_INFO:
 		exc := e.pop()
 		_ = exc
+		// body bail: outputs not yet handled by action translator
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 		// outputs: prev_exc new_exc
 	case compile.PUSH_NULL:
+		// body bail: outputs not yet handled by action translator
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 		// outputs: res
 	case compile.RAISE_VARARGS:
 		// sized input args, size=oparg
 		for i := 0; i < int(oparg); i++ { _ = e.pop() }
+		// body bail: unrecognized token at action body start: "assert"
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 	case compile.RERAISE:
 		exc_st := e.pop()
 		_ = exc_st
 		// sized input values, size=oparg
 		for i := 0; i < int(oparg); i++ { _ = e.pop() }
+		// body bail: outputs not yet handled by action translator
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 		// outputs: values[oparg]
 	case compile.RESERVED:
+		// body bail: unrecognized token at action body start: "assert"
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 	case compile.RETURN_GENERATOR:
+		// body bail: outputs not yet handled by action translator
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 		// outputs: res
 	case compile.RETURN_VALUE:
 		retval := e.pop()
 		_ = retval
+		// body bail: outputs not yet handled by action translator
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 		// outputs: res
 	case compile.SETUP_ANNOTATIONS:
+		// body bail: unrecognized token at action body start: "PyObject"
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 	case compile.SET_ADD:
 		v := e.pop()
@@ -451,6 +541,7 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 		for i := 0; i < int(oparg - 1); i++ { _ = e.pop() }
 		set := e.pop()
 		_ = set
+		// body bail: outputs not yet handled by action translator
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 		// outputs: set _out1[oparg - 1]
 	case compile.SET_FUNCTION_ATTRIBUTE:
@@ -458,6 +549,7 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 		_ = func_in
 		attr_st := e.pop()
 		_ = attr_st
+		// body bail: outputs not yet handled by action translator
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 		// outputs: func_out
 	case compile.SET_UPDATE:
@@ -467,19 +559,23 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 		for i := 0; i < int(oparg - 1); i++ { _ = e.pop() }
 		set := e.pop()
 		_ = set
+		// body bail: outputs not yet handled by action translator
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 		// outputs: set _out1[oparg - 1]
 	case compile.STORE_DEREF:
 		v := e.pop()
 		_ = v
+		// body bail: unrecognized token at action body start: "PyCellObject"
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 	case compile.STORE_FAST:
 		value := e.pop()
 		_ = value
+		// body bail: unrecognized token at action body start: "assert"
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 	case compile.STORE_FAST_LOAD_FAST:
 		value1 := e.pop()
 		_ = value1
+		// body bail: outputs not yet handled by action translator
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 		// outputs: value2
 	case compile.STORE_FAST_STORE_FAST:
@@ -487,14 +583,17 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 		_ = value1
 		value2 := e.pop()
 		_ = value2
+		// body bail: unrecognized token at action body start: "assert"
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 	case compile.STORE_GLOBAL:
 		v := e.pop()
 		_ = v
+		// body bail: unrecognized token at action body start: "PyObject"
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 	case compile.STORE_NAME:
 		v := e.pop()
 		_ = v
+		// body bail: unrecognized token at action body start: "PyObject"
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 	case compile.SWAP:
 		top := e.pop()
@@ -503,26 +602,31 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 		for i := 0; i < int(oparg - 2); i++ { _ = e.pop() }
 		bottom := e.pop()
 		_ = bottom
+		// body bail: outputs not yet handled by action translator
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 		// outputs: bottom _out1[oparg - 2] top
 	case compile.UNARY_INVERT:
 		value := e.pop()
 		_ = value
+		// body bail: outputs not yet handled by action translator
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 		// outputs: res
 	case compile.UNARY_NEGATIVE:
 		value := e.pop()
 		_ = value
+		// body bail: outputs not yet handled by action translator
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 		// outputs: res
 	case compile.UNARY_NOT:
 		value := e.pop()
 		_ = value
+		// body bail: outputs not yet handled by action translator
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 		// outputs: res
 	case compile.UNPACK_EX:
 		seq := e.pop()
 		_ = seq
+		// body bail: outputs not yet handled by action translator
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 		// outputs: _out0[oparg & 0xFF] _out1 _out2[oparg >> 8] top[0]
 	case compile.WITH_EXCEPT_START:
@@ -536,11 +640,13 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 		_ = exit_self
 		exit_func := e.pop()
 		_ = exit_func
+		// body bail: outputs not yet handled by action translator
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 		// outputs: exit_func exit_self lasti _out3 val res
 	case compile.YIELD_VALUE:
 		retval := e.pop()
 		_ = retval
+		// body bail: outputs not yet handled by action translator
 		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
 		// outputs: value
 	}
