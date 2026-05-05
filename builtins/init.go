@@ -58,8 +58,34 @@ func Init(defaultFile io.Writer) (*objects.Dict, error) {
 			return nil, err
 		}
 	}
+	for _, fn := range aggregationPanel() {
+		if err := setBuiltin(dict, fn.name, objects.NewBuiltinFunction(fn.name, fn.impl)); err != nil {
+			return nil, err
+		}
+	}
 
 	return dict, nil
+}
+
+// aggregationPanel returns the v0.7 aggregation builtins (1651-builtins-D).
+//
+// CPython: Python/bltinmodule.c builtin_methods sum / min / max / any
+// / all / sorted
+func aggregationPanel() []struct {
+	name string
+	impl func(args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error)
+} {
+	return []struct {
+		name string
+		impl func(args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error)
+	}{
+		{"sum", Sum},
+		{"min", MinOf},
+		{"max", MaxOf},
+		{"any", Any},
+		{"all", All},
+		{"sorted", Sorted},
+	}
 }
 
 // attributePanel returns the v0.7 attribute builtins (1651-builtins-C).
