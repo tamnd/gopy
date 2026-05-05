@@ -1294,11 +1294,21 @@ func binaryOp(sub int32, a, b objects.Object) (objects.Object, error) {
 	return nil, fmt.Errorf("vm: BINARY_OP suboperator %d not implemented in v0.6", sub)
 }
 
+// numericForward walks a's number slot first, then b's, returning
+// the first concrete result. A slot that returns the NotImplemented
+// singleton signals "try the other operand" and is treated as a
+// fall-through, matching how CPython's abstract layer steps through
+// the forward / reflected pair.
+//
+// CPython: Objects/abstract.c binary_op1
 func numericForward(a, b objects.Object, sym string, pick func(*objects.NumberMethods) func(a, b objects.Object) (objects.Object, error)) (objects.Object, error) {
 	if n := a.Type().Number; n != nil {
 		if fn := pick(n); fn != nil {
 			out, err := fn(a, b)
-			if err == nil {
+			if err != nil {
+				return nil, err
+			}
+			if !objects.IsNotImplemented(out) {
 				return out, nil
 			}
 		}
@@ -1306,12 +1316,15 @@ func numericForward(a, b objects.Object, sym string, pick func(*objects.NumberMe
 	if n := b.Type().Number; n != nil {
 		if fn := pick(n); fn != nil {
 			out, err := fn(a, b)
-			if err == nil {
+			if err != nil {
+				return nil, err
+			}
+			if !objects.IsNotImplemented(out) {
 				return out, nil
 			}
 		}
 	}
-	return nil, fmt.Errorf("vm: unsupported operand types for %s: %s and %s", sym, a.Type().Name, b.Type().Name)
+	return nil, fmt.Errorf("TypeError: unsupported operand type(s) for %s: '%s' and '%s'", sym, a.Type().Name, b.Type().Name)
 }
 
 func lookupIn(scope objects.Object, key objects.Object) (objects.Object, bool, error) {

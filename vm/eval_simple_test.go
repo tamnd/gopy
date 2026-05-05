@@ -176,6 +176,30 @@ func TestEvalBinaryOpIntArith(t *testing.T) {
 	}
 }
 
+// TestEvalBinaryOpMixedNumeric pins the abstract-layer fall-through:
+// when int's slot returns NotImplemented for an int + float pair,
+// the dispatcher must try float's slot instead of treating the
+// sentinel as a successful result.
+func TestEvalBinaryOpMixedNumeric(t *testing.T) {
+	ts := state.NewThread()
+	const nbAdd = 0
+	bc := append(instr(compile.LOAD_CONST, 0), instr(compile.LOAD_CONST, 1)...)
+	bc = append(bc, instr(compile.BINARY_OP, nbAdd)...)
+	bc = append(bc, instr(compile.RETURN_VALUE, 0)...)
+	co := &objects.Code{Code: bc, Stacksize: 4, Consts: []any{int64(1), 2.5}}
+	v, err := EvalCode(ts, co, nil, nil)
+	if err != nil {
+		t.Fatalf("Eval err: %v", err)
+	}
+	f, ok := v.(*objects.Float)
+	if !ok {
+		t.Fatalf("got %T, want *objects.Float", v)
+	}
+	if f.Float64() != 3.5 {
+		t.Errorf("got %v, want 3.5", f.Float64())
+	}
+}
+
 func TestEvalUnaryNot(t *testing.T) {
 	ts := state.NewThread()
 	bc := append(instr(compile.LOAD_CONST, 0), instr(compile.UNARY_NOT, 0)...)
