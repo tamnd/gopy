@@ -1032,6 +1032,26 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, retVal
 		// NO_INTERRUPT variant skips the eval breaker poll.
 		return e.jumpBy(int(oparg) + 1), nil, nil, false, true, nil
 
+	case compile.END_SEND:
+		// `yield from` cleanup. Stack is (receiver, value); we want
+		// the value on top and the receiver dropped.
+		// CPython: Python/bytecodes.c END_SEND
+		val := e.pop()
+		recv := e.pop()
+		recv.Close()
+		e.push(val)
+		return e.advance(), nil, nil, false, true, nil
+
+	case compile.EXIT_INIT_CHECK:
+		// `__init__` must return None. Pop the return value and raise
+		// TypeError if it's something else.
+		// CPython: Python/bytecodes.c EXIT_INIT_CHECK
+		v := e.popObject()
+		if v != objects.None() {
+			return 0, nil, nil, false, true, fmt.Errorf("TypeError: __init__() should return None, not '%s'", v.Type().Name)
+		}
+		return e.advance(), nil, nil, false, true, nil
+
 	case compile.LOAD_FROM_DICT_OR_GLOBALS:
 		// PEP 695 helper: lookup name in the dict at TOS first; if
 		// absent, fall back to LOAD_GLOBAL semantics (globals -> builtins).
