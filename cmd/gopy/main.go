@@ -52,6 +52,8 @@ func run(args []string, stdout, stderr *os.File) int {
 		return 0
 	case evalSrc != "":
 		return runSource(evalSrc, stdout, stderr)
+	case fs.NArg() > 0:
+		return runFile(fs.Arg(0), stdout, stderr)
 	}
 
 	fmt.Fprintln(stdout, build.VersionString())
@@ -74,6 +76,23 @@ func runSource(src string, stdout, stderr *os.File) int {
 	}
 	ts := state.NewThread()
 	if pythonrun.RunSimpleString(ts, src, g, stderr) != 0 {
+		return 1
+	}
+	return 0
+}
+
+// runFile is the gopy <script.py> entry. Mirrors pymain_run_file in
+// the file-positional branch.
+//
+// CPython: Modules/main.c:373 pymain_run_file
+func runFile(path string, stdout, stderr *os.File) int {
+	g, err := builtins.Init(stdout)
+	if err != nil {
+		fmt.Fprintln(stderr, "builtins:", err)
+		return 1
+	}
+	ts := state.NewThread()
+	if pythonrun.RunAnyFile(ts, path, g, stderr) != 0 {
 		return 1
 	}
 	return 0
