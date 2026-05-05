@@ -455,6 +455,27 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, retVal
 		e.pushObject(objects.NewStr(s))
 		return e.advance(), nil, nil, false, true, nil
 
+	case compile.FORMAT_WITH_SPEC:
+		// Stack: [value, spec]. v0.6 has no PyObject_Format protocol
+		// yet, so an empty spec routes through Str and a non-empty spec
+		// is reported as unsupported. Ports of __format__ + format()
+		// land with the abstract layer.
+		spec := e.popObject()
+		v := e.popObject()
+		specStr, serr := objects.Str(spec)
+		if serr != nil {
+			return 0, nil, nil, false, true, serr
+		}
+		if specStr != "" {
+			return 0, nil, nil, false, true, fmt.Errorf("vm: FORMAT_WITH_SPEC: non-empty spec %q not supported in v0.6", specStr)
+		}
+		s, serr2 := objects.Str(v)
+		if serr2 != nil {
+			return 0, nil, nil, false, true, serr2
+		}
+		e.pushObject(objects.NewStr(s))
+		return e.advance(), nil, nil, false, true, nil
+
 	case compile.CONVERT_VALUE:
 		v := e.popObject()
 		out, cerr := convertValue(v, oparg)
@@ -988,6 +1009,22 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, retVal
 		}
 		return e.advance(), nil, nil, false, true, nil
 
+	case compile.LOAD_COMMON_CONSTANT:
+		// 3.14 fast load for a small set of compiler-emitted constants.
+		// Index 0 is AssertionError, used by `assert`. Without an
+		// exception class hierarchy yet (1686), we surface a Type object
+		// whose name RAISE_VARARGS can format into a runtime error.
+		// CPython: Python/bytecodes.c LOAD_COMMON_CONSTANT.
+		switch oparg {
+		case 0:
+			e.pushObject(commonConstant("AssertionError"))
+		case 1:
+			e.pushObject(commonConstant("NotImplementedError"))
+		default:
+			return 0, nil, nil, false, true, fmt.Errorf("LOAD_COMMON_CONSTANT: unknown index %d", oparg)
+		}
+		return e.advance(), nil, nil, false, true, nil
+
 	case compile.LOAD_LOCALS:
 		// Push the f_locals dict. Class-body frames keep an explicit
 		// Locals dict; fast-locals frames synthesize one from the
@@ -1344,6 +1381,20 @@ func setItem(container, key, value objects.Object) error {
 		}
 	}
 	return fmt.Errorf("TypeError: '%s' object does not support item assignment", container.Type().Name)
+}
+
+// commonConstantsCache memoises the placeholder Type objects
+// LOAD_COMMON_CONSTANT pushes. Real exception classes arrive with the
+// exceptions module port (1686).
+var commonConstantsCache = map[string]*objects.Type{}
+
+func commonConstant(name string) *objects.Type {
+	if t, ok := commonConstantsCache[name]; ok {
+		return t
+	}
+	t := objects.NewType(name, nil)
+	commonConstantsCache[name] = t
+	return t
 }
 
 // objectRepr returns repr(o), falling back to a placeholder so error
