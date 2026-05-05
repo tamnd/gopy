@@ -27,10 +27,11 @@ import (
 //
 // CPython: Python/ceval.c switch over op
 func (e *evalState) dispatch(op compile.Opcode, oparg uint32) (next int, retVal objects.Object, retErr error, retDone bool, err error) {
-	// The generated table from 1621/B2-B5 will replace this body.
-	// Until then, every opcode reports not-implemented so the loop
-	// driver can be exercised by tests with synthetic codes.
-	_ = oparg
+	// Hand-written panel for the smallest core opcodes so trivial
+	// programs run end-to-end before 1621 codegen lands.
+	if next, retVal, retErr, retDone, ok, err := e.trySimple(op, oparg); ok {
+		return next, retVal, retErr, retDone, err
+	}
 	return 0, nil, nil, false, opcodeNotImplemented(op)
 }
 
