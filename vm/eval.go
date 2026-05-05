@@ -42,6 +42,9 @@ type evalState struct {
 //
 // CPython: Python/ceval.c _PyEval_EvalFrameDefault
 func Eval(ts *state.Thread, f *frame.Frame) (objects.Object, error) {
+	prev := activeThread
+	activeThread = ts
+	defer func() { activeThread = prev }()
 	e := &evalState{ts: ts, f: f, breaker: breakerFor(ts)}
 	return e.run()
 }

@@ -134,6 +134,42 @@ func TestEvalUnpackSequence(t *testing.T) {
 	}
 }
 
+func TestEvalMakeFunctionAndCall(t *testing.T) {
+	ts := state.NewThread()
+	// Inner code: takes one arg "x", returns x.
+	// LOAD_FAST 0, RETURN_VALUE.
+	inner := &objects.Code{
+		Code: append(
+			instr(compile.LOAD_FAST, 0),
+			instr(compile.RETURN_VALUE, 0)...),
+		Varnames:  []string{"x"},
+		Stacksize: 4,
+		Name:      "id",
+	}
+	inner.Init(objects.CodeType)
+	// Outer: LOAD_CONST 0 (inner code), MAKE_FUNCTION,
+	// PUSH_NULL, LOAD_CONST 1 (7), CALL 1, RETURN_VALUE.
+	outer := &objects.Code{
+		Code: append(append(append(append(append(
+			instr(compile.LOAD_CONST, 0),
+			instr(compile.MAKE_FUNCTION, 0)...),
+			instr(compile.PUSH_NULL, 0)...),
+			instr(compile.LOAD_CONST, 1)...),
+			instr(compile.CALL, 1)...),
+			instr(compile.RETURN_VALUE, 0)...),
+		Consts:    []any{inner, int64(7)},
+		Stacksize: 8,
+	}
+	v, err := EvalCode(ts, outer, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, _ := v.(*objects.Int).Int64()
+	if got != 7 {
+		t.Errorf("got %d, want 7", got)
+	}
+}
+
 func contains(s, sub string) bool {
 	return sub == "" || (len(s) >= len(sub) && (s == sub || indexOf(s, sub) >= 0))
 }

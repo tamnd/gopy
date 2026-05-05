@@ -458,6 +458,20 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, retVal
 		e.pushObject(objects.NewStr(strings.Join(pieces, "")))
 		return e.advance(), nil, nil, false, true, nil
 
+	case compile.MAKE_FUNCTION:
+		// TOS is a code object; build a Function bound to the current
+		// frame's globals. v0.6 ignores defaults / closure flags.
+		//
+		// CPython: Python/bytecodes.c MAKE_FUNCTION
+		v := e.popObject()
+		code, ok := v.(*objects.Code)
+		if !ok {
+			return 0, nil, nil, false, true, fmt.Errorf("MAKE_FUNCTION: TOS not a code object, got %T", v)
+		}
+		fn := objects.NewFunction(code.Name, code, e.f.Globals)
+		e.pushObject(fn)
+		return e.advance(), nil, nil, false, true, nil
+
 	case compile.LOAD_NAME, compile.LOAD_GLOBAL, compile.STORE_NAME,
 		compile.STORE_GLOBAL, compile.DELETE_NAME, compile.DELETE_GLOBAL:
 		v, perr := e.execNameOp(op, oparg)
