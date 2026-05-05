@@ -1,6 +1,8 @@
 // Command gopy is the gopy interpreter entry point. It mirrors the
 // scaffolding role of CPython's Programs/python.c at this stage of the
 // port. Subsequent milestones plug in the parser, compiler, and VM.
+//
+// CPython: Programs/python.c:13 main
 package main
 
 import (

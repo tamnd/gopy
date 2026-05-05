@@ -4,7 +4,7 @@
 package build
 
 // Version is the gopy release version. Bumped per release tag.
-const Version = "0.5.5"
+const Version = "0.6.0"
 
 // PythonCompatVersion is the upstream CPython version this port tracks.
 const PythonCompatVersion = "3.14.0+"
@@ -12,6 +12,8 @@ const PythonCompatVersion = "3.14.0+"
 // VersionString returns the full version banner.
 //
 //	gopy 0.1.0 (3.14.0+) [go1.26 darwin/arm64]
+//
+// CPython: Python/getversion.c:27 Py_GetVersion
 func VersionString() string {
 	return "gopy " + Version + " (" + PythonCompatVersion + ") [" +
 		Compiler() + " " + Platform() + "]"
