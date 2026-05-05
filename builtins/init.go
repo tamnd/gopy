@@ -43,7 +43,37 @@ func Init(defaultFile io.Writer) (*objects.Dict, error) {
 		return nil, err
 	}
 
+	for _, fn := range iterationPanel() {
+		if err := setBuiltin(dict, fn.name, objects.NewBuiltinFunction(fn.name, fn.impl)); err != nil {
+			return nil, err
+		}
+	}
+
 	return dict, nil
+}
+
+// iterationPanel returns the v0.7 iteration builtins (1651-builtins-A).
+// Listed here so init.go stays the single registration point without
+// growing one entry per builtin.
+//
+// CPython: Python/bltinmodule.c builtin_methods iter / next / len /
+// reversed / enumerate / zip / range
+func iterationPanel() []struct {
+	name string
+	impl func(args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error)
+} {
+	return []struct {
+		name string
+		impl func(args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error)
+	}{
+		{"len", Len},
+		{"iter", Iter},
+		{"next", Next},
+		{"reversed", Reversed},
+		{"enumerate", Enumerate},
+		{"zip", Zip},
+		{"range", Range},
+	}
 }
 
 // setBuiltin is the SETBUILTIN macro from _PyBuiltin_Init: stash
