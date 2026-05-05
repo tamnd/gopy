@@ -219,6 +219,39 @@ func TestEvalCallIntrinsic1ListToTuple(t *testing.T) {
 	}
 }
 
+func TestEvalBinarySlice(t *testing.T) {
+	ts := state.NewThread()
+	src := objects.NewList([]objects.Object{
+		objects.NewInt(10), objects.NewInt(20),
+		objects.NewInt(30), objects.NewInt(40),
+	})
+	// LOAD_CONST 0 (list); LOAD_CONST 1 (1); LOAD_CONST 2 (3);
+	// BINARY_SLICE; RETURN_VALUE.
+	co := &objects.Code{
+		Code: append(append(append(append(
+			instr(compile.LOAD_CONST, 0),
+			instr(compile.LOAD_CONST, 1)...),
+			instr(compile.LOAD_CONST, 2)...),
+			instr(compile.BINARY_SLICE, 0)...),
+			instr(compile.RETURN_VALUE, 0)...),
+		Consts:    []any{src, int64(1), int64(3)},
+		Stacksize: 8,
+	}
+	v, err := EvalCode(ts, co, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	l, ok := v.(*objects.List)
+	if !ok || l.Len() != 2 {
+		t.Fatalf("got %T len? want list len 2", v)
+	}
+	a, _ := l.Item(0).(*objects.Int).Int64()
+	b, _ := l.Item(1).(*objects.Int).Int64()
+	if a != 20 || b != 30 {
+		t.Errorf("got [%d,%d], want [20,30]", a, b)
+	}
+}
+
 func TestEvalCallKw(t *testing.T) {
 	ts := state.NewThread()
 	// Builtin that takes one positional + one keyword.

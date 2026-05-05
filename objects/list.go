@@ -55,6 +55,17 @@ func (l *List) Append(v Object) {
 // CPython: Objects/listobject.c:L308 PyList_GetItem
 func (l *List) Item(i int) Object { return l.items[i] }
 
+// SetSlice replaces items[start:stop] with values. CPython implements
+// this through PyList_SetSlice; the gopy port keeps the contract
+// (start and stop already clamped/normalized by the caller).
+//
+// CPython: Objects/listobject.c PyList_SetSlice
+func (l *List) SetSlice(start, stop int, values []Object) {
+	tail := append([]Object(nil), l.items[stop:]...)
+	l.items = append(append(l.items[:start], values...), tail...)
+	l.size = int64(len(l.items))
+}
+
 func listLen(o Object) (int, error) {
 	return o.(*List).Len(), nil
 }

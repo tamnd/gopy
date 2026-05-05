@@ -16,7 +16,6 @@ import (
 
 	"github.com/tamnd/gopy/compile"
 	"github.com/tamnd/gopy/frame"
-	"github.com/tamnd/gopy/gil"
 	"github.com/tamnd/gopy/objects"
 	"github.com/tamnd/gopy/stackref"
 )
@@ -60,16 +59,11 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, retVal
 		return e.advance(), nil, nil, false, true, nil
 
 	case compile.RESUME:
-		// RESUME is the eval-breaker poll point. The breaker check
-		// at the top of run() already runs every loop tick, so we
-		// just clear any breaker bits the dispatcher knows how to
-		// drain and advance.
-		if e.breaker != nil && e.breaker.Load()&gil.BreakerEventsMask != 0 {
-			if berr := e.handleEvalBreaker(); berr != nil {
-				return 0, nil, nil, false, true, berr
-			}
+		next, rerr := e.handleResume(op, oparg)
+		if rerr != nil {
+			return 0, nil, nil, false, true, rerr
 		}
-		return e.advance(), nil, nil, false, true, nil
+		return next, nil, nil, false, true, nil
 
 	case compile.POP_TOP:
 		ref := e.pop()
@@ -807,6 +801,80 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, retVal
 			return 0, nil, nil, false, true, cerr
 		}
 		e.pushObject(out)
+		return e.advance(), nil, nil, false, true, nil
+
+	case compile.BINARY_SLICE:
+		// Stack: [container, start, stop]. Push container[start:stop].
+		stop := e.popObject()
+		start := e.popObject()
+		container := e.popObject()
+		out, serr := sliceContainer(container, start, stop)
+		if serr != nil {
+			return 0, nil, nil, false, true, serr
+		}
+		e.pushObject(out)
+		return e.advance(), nil, nil, false, true, nil
+
+	case compile.STORE_SLICE:
+		// Stack: [value, container, start, stop]. Replace container[start:stop] with value.
+		stop := e.popObject()
+		start := e.popObject()
+		container := e.popObject()
+		value := e.popObject()
+		if serr := storeSlice(container, start, stop, value); serr != nil {
+			return 0, nil, nil, false, true, serr
+		}
+		return e.advance(), nil, nil, false, true, nil
+
+	case compile.GET_LEN:
+		// Push len(TOS) without consuming TOS.
+		v := e.peek(0).AsObject()
+		t := v.Type()
+		var n int
+		switch {
+		case t.Sequence != nil && t.Sequence.Length != nil:
+			x, lerr := t.Sequence.Length(v)
+			if lerr != nil {
+				return 0, nil, nil, false, true, lerr
+			}
+			n = x
+		case t.Mapping != nil && t.Mapping.Length != nil:
+			x, lerr := t.Mapping.Length(v)
+			if lerr != nil {
+				return 0, nil, nil, false, true, lerr
+			}
+			n = x
+		default:
+			return 0, nil, nil, false, true, fmt.Errorf("TypeError: object of type '%s' has no len()", t.Name)
+		}
+		e.pushObject(objects.NewInt(int64(n)))
+		return e.advance(), nil, nil, false, true, nil
+
+	case compile.LOAD_FAST_LOAD_FAST:
+		// Two local indexes packed: high nibble first, low nibble second.
+		hi := int(oparg >> 4)
+		lo := int(oparg & 0xF)
+		r1 := e.localAt(hi)
+		r2 := e.localAt(lo)
+		if r1.IsNull() || r2.IsNull() {
+			return 0, nil, nil, false, true, fmt.Errorf("LOAD_FAST_LOAD_FAST: unbound local")
+		}
+		e.push(r1.Dup())
+		e.push(r2.Dup())
+		return e.advance(), nil, nil, false, true, nil
+
+	case compile.LOAD_FROM_DICT_OR_DEREF:
+		// PEP 695 helper: look up name in the dict at TOS first; if absent,
+		// fall back to LOAD_DEREF semantics. v0.6 doesn't have class
+		// namespace machinery, so the dict path stays a stub and we
+		// dispatch through to LOAD_DEREF.
+		_ = e.popObject() // discard the class dict TOS
+		ref := e.f.LocalsPlus[frame.NLocalsOf(e.f.Code)+int(oparg)]
+		cell, ok := ref.AsObject().(*objects.Cell)
+		if !ok || cell.Contents == nil {
+			return 0, nil, nil, false, true, fmt.Errorf("NameError: free variable referenced before assignment")
+		}
+		e.pushObject(cell.Contents)
 		return e.advance(), nil, nil, false, true, nil
 
 	case compile.LOAD_NAME, compile.LOAD_GLOBAL, compile.STORE_NAME,
