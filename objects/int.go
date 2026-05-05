@@ -55,8 +55,10 @@ func init() {
 		Lshift:      intLshift,
 		Rshift:      intRshift,
 		Power:       intPower,
+		Divmod:      intDivmod,
 		Negative:    intNeg,
 		Positive:    intPos,
+		Absolute:    intAbs,
 		Invert:      intInvert,
 		Bool:        intBool,
 		Int:         func(o Object) (Object, error) { return o, nil },
@@ -353,6 +355,38 @@ func intNeg(o Object) (Object, error) {
 	i := o.(*Int)
 	out := new(big.Int).Neg(&i.v)
 	return NewIntFromBig(out), nil
+}
+
+// intAbs returns |x|, matching long_abs.
+//
+// CPython: Objects/longobject.c long_abs
+func intAbs(o Object) (Object, error) {
+	i := o.(*Int)
+	out := new(big.Int).Abs(&i.v)
+	return NewIntFromBig(out), nil
+}
+
+// intDivmod returns (a // b, a % b) as a tuple, matching long_divmod.
+// The quotient and remainder follow Python's floor / sign-of-divisor
+// semantics already encoded by intFloorDiv and intMod.
+//
+// CPython: Objects/longobject.c long_divmod
+func intDivmod(a, b Object) (Object, error) {
+	q, err := intFloorDiv(a, b)
+	if err != nil {
+		return nil, err
+	}
+	if IsNotImplemented(q) {
+		return q, nil
+	}
+	r, err := intMod(a, b)
+	if err != nil {
+		return nil, err
+	}
+	if IsNotImplemented(r) {
+		return r, nil
+	}
+	return NewTuple([]Object{q, r}), nil
 }
 
 // intPos returns the int unchanged. CPython returns the same object

@@ -101,6 +101,69 @@ func Multiply(a, b objects.Object) (objects.Object, error) {
 	})
 }
 
+// Absolute dispatches abs(o) through nb_absolute.
+//
+// CPython: Objects/abstract.c:1213 PyNumber_Absolute
+func Absolute(o objects.Object) (objects.Object, error) {
+	if n := o.Type().Number; n != nil && n.Absolute != nil {
+		return n.Absolute(o)
+	}
+	return nil, fmt.Errorf("%w: bad operand type for abs(): %q", ErrTypeError, o.Type().Name)
+}
+
+// Divmod dispatches divmod(a, b) through nb_divmod, mirroring the
+// fallback path PyNumber_Divmod uses when both operands share a type.
+//
+// CPython: Objects/abstract.c:1129 PyNumber_Divmod
+func Divmod(a, b objects.Object) (objects.Object, error) {
+	if n := a.Type().Number; n != nil && n.Divmod != nil {
+		out, err := n.Divmod(a, b)
+		if err != nil {
+			return nil, err
+		}
+		if !objects.IsNotImplemented(out) {
+			return out, nil
+		}
+	}
+	if n := b.Type().Number; n != nil && n.Divmod != nil {
+		out, err := n.Divmod(a, b)
+		if err != nil {
+			return nil, err
+		}
+		if !objects.IsNotImplemented(out) {
+			return out, nil
+		}
+	}
+	return nil, fmt.Errorf("%w: unsupported operand type(s) for divmod(): %q and %q",
+		ErrTypeError, a.Type().Name, b.Type().Name)
+}
+
+// Power dispatches pow(a, b, mod) through nb_power.
+//
+// CPython: Objects/abstract.c:1107 PyNumber_Power
+func Power(a, b, mod objects.Object) (objects.Object, error) {
+	if n := a.Type().Number; n != nil && n.Power != nil {
+		out, err := n.Power(a, b, mod)
+		if err != nil {
+			return nil, err
+		}
+		if !objects.IsNotImplemented(out) {
+			return out, nil
+		}
+	}
+	if n := b.Type().Number; n != nil && n.Power != nil {
+		out, err := n.Power(a, b, mod)
+		if err != nil {
+			return nil, err
+		}
+		if !objects.IsNotImplemented(out) {
+			return out, nil
+		}
+	}
+	return nil, fmt.Errorf("%w: unsupported operand type(s) for pow(): %q and %q",
+		ErrTypeError, a.Type().Name, b.Type().Name)
+}
+
 // IterNext advances an iterator. Returns ErrStopIteration when the
 // iterator is exhausted, mirroring PyIter_Next.
 //

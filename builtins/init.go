@@ -63,8 +63,39 @@ func Init(defaultFile io.Writer) (*objects.Dict, error) {
 			return nil, err
 		}
 	}
+	for _, fn := range numericPanel() {
+		if err := setBuiltin(dict, fn.name, objects.NewBuiltinFunction(fn.name, fn.impl)); err != nil {
+			return nil, err
+		}
+	}
 
 	return dict, nil
+}
+
+// numericPanel returns the v0.7 numeric / formatting builtins
+// (1651-builtins-E).
+//
+// CPython: Python/bltinmodule.c builtin_methods abs / divmod / pow /
+// chr / ord / bin / oct / hex / ascii / format
+func numericPanel() []struct {
+	name string
+	impl func(args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error)
+} {
+	return []struct {
+		name string
+		impl func(args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error)
+	}{
+		{"abs", Abs},
+		{"divmod", Divmod},
+		{"pow", Pow},
+		{"chr", Chr},
+		{"ord", Ord},
+		{"bin", Bin},
+		{"oct", Oct},
+		{"hex", Hex},
+		{"ascii", Ascii},
+		{"format", Format},
+	}
 }
 
 // aggregationPanel returns the v0.7 aggregation builtins (1651-builtins-D).
