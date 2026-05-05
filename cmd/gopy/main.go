@@ -12,11 +12,8 @@ import (
 
 	"github.com/tamnd/gopy/build"
 	"github.com/tamnd/gopy/builtins"
-	"github.com/tamnd/gopy/compile"
-	"github.com/tamnd/gopy/objects"
-	"github.com/tamnd/gopy/parser"
+	"github.com/tamnd/gopy/pythonrun"
 	"github.com/tamnd/gopy/state"
-	"github.com/tamnd/gopy/vm"
 )
 
 func main() {
@@ -62,58 +59,22 @@ func run(args []string, stdout, stderr *os.File) int {
 	return 0
 }
 
-// runSource pipes src through parser -> compile -> vm.EvalCode and
-// reports failures on stderr. The v0.6 -c flag is the smoke harness:
-// the parser/VM panel is incomplete, so most non-trivial programs will
-// surface ErrNotImplemented or a parser bail; report and exit 1.
+// runSource is the gopy -c entry. It dispatches to
+// pythonrun.RunSimpleString, the port of CPython's
+// PyRun_SimpleStringFlags. The globals dict comes from builtins.Init
+// for now; once 1623 lands the import system, lifecycle.Main will
+// build __main__ and pythonrun will read the dict from there.
+//
+// CPython: Modules/main.c:289 pymain_run_command
 func runSource(src string, stdout, stderr *os.File) int {
-	if src == "" || src[len(src)-1] != '\n' {
-		src += "\n"
-	}
-	mod, err := parser.ParseString(src, "<string>", parser.ModeFile)
-	if err != nil {
-		fmt.Fprintln(stderr, "parse:", err)
-		return 1
-	}
-	cco, err := compile.Compile(mod, "<string>", 0)
-	if err != nil {
-		fmt.Fprintln(stderr, "compile:", err)
-		return 1
-	}
-	co := liftCode(cco)
-	ts := state.NewThread()
 	g, err := builtins.Init(stdout)
 	if err != nil {
 		fmt.Fprintln(stderr, "builtins:", err)
 		return 1
 	}
-	v, err := vm.EvalCode(ts, co, g, nil)
-	if err != nil {
-		fmt.Fprintln(stderr, "eval:", err)
+	ts := state.NewThread()
+	if pythonrun.RunSimpleString(ts, src, g, stderr) != 0 {
 		return 1
 	}
-	if v != nil && v != objects.None() {
-		s, serr := objects.Str(v)
-		if serr != nil {
-			fmt.Fprintln(stderr, "str:", serr)
-			return 1
-		}
-		fmt.Fprintln(stdout, s)
-	}
 	return 0
-}
-
-// liftCode adapts compile.Code into objects.Code (same shape, two
-// type names today). Collapses once spec 1687 retires compile.Code.
-func liftCode(c *compile.Code) *objects.Code {
-	return &objects.Code{
-		Code:           c.Code,
-		Consts:         c.Consts,
-		Names:          c.Names,
-		Varnames:       c.VarNames,
-		Freevars:       c.FreeVars,
-		Cellvars:       c.CellVars,
-		Stacksize:      c.Stacksize,
-		ExceptionTable: c.ExceptionTable,
-	}
 }
