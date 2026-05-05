@@ -11,6 +11,26 @@ folder; this file is the aggregated index.
 
 ## Unreleased
 
+## v0.5.5 - 2026-05-05
+
+See [`changelog/v0.5.5.md`](changelog/v0.5.5.md).
+
+* feat(parser/lexer): port `Parser/lexer/state.[ch]`,
+  `Parser/lexer/buffer.[ch]`, and `Parser/lexer/lexer.c`. Regular
+  mode FSM, INDENT / DEDENT, line continuation, PEP 701 f-strings,
+  PEP 750 t-strings, COMMENT / NL / type-comment emission, plus
+  string / file / readline drivers.
+* feat(parser/pegen): scaffold of `Parser/pegen.[ch]`. Parser
+  struct, fillToken, mark / reset / peek, Expect / ExpectName.
+  Action helper shape ops (sequence, dotted-name, expr-context,
+  expr-name table) from `Parser/action_helpers.c`.
+* feat(parser/errors): port of the SyntaxError text panel from
+  `Parser/pegen_errors.c` plus a small Build / Raise / RaiseRange
+  surface and the lexer-errcode dispatch.
+* feat(parser/string): port of `Parser/string_parser.c`. Prefix
+  and quote stripping, escape decoding for unicode and bytes
+  literals, raw / no-backslash fast paths.
+
 ## v0.5.0 - 2026-05-05
 
 See [`changelog/v0.5.0.md`](changelog/v0.5.0.md).

@@ -139,6 +139,38 @@ linters:
         linters:
           - gocognit
           - gocyclo
+      # The lexer FSM mirrors tok_get_normal_mode and tok_get_fstring_mode
+      # branch-for-branch. Refactoring would diverge from the source.
+      - path: parser/lexer/
+        linters:
+          - gocognit
+          - gocyclo
+      # The string-literal parser mirrors string_parser.c's branch
+      # tree on the prefix and escape decoding paths.
+      - path: parser/string/
+        linters:
+          - gocognit
+          - gocyclo
+      # Pegen scaffolding has many helpers held for the generated
+      # parser table; flagging them as unused now would force ugly
+      # nolint stamps everywhere. Re-enabled once parser_gen lands.
+      - path: parser/pegen/
+        linters:
+          - unused
+      # Lexer scaffolding holds helpers consumed once the file driver
+      # and action_helpers ports land.
+      - path: parser/lexer/buffer\.go
+        linters:
+          - unused
+      - path: parser/lexer/helpers\.go
+        linters:
+          - unused
+      - path: parser/lexer/state\.go
+        linters:
+          - unused
+      - path: parser/lexer/token\.go
+        linters:
+          - unused
 
 formatters:
   enable:
