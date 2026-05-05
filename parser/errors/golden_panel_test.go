@@ -79,6 +79,13 @@ func TestGoldenMessagePanel(t *testing.T) {
 		{"MsgUnexpectedIndent", MsgUnexpectedIndent, "unexpected indent"},
 		{"MsgUnexpectedUnindent", MsgUnexpectedUnindent, "unexpected unindent"},
 		{"MsgUnknownParseError", MsgUnknownParseError, "unknown parsing error"},
+		{"MsgUnterminatedFString", MsgUnterminatedFString, "unterminated %c-string literal (detected at line %d)"},
+		{"MsgUnterminatedString", MsgUnterminatedString, "unterminated string literal (detected at line %d)"},
+		{"MsgUnterminatedTripleFStr", MsgUnterminatedTripleFStr, "unterminated triple-quoted %c-string literal (detected at line %d)"},
+		{"MsgUnterminatedTripleString", MsgUnterminatedTripleString, "unterminated triple-quoted string literal (detected at line %d)"},
+		{"MsgTypeParamsEmpty", MsgTypeParamsEmpty, "Type parameter list cannot be empty"},
+		{"MsgTypeVarTupleBound", MsgTypeVarTupleBound, "cannot use bound with TypeVarTuple"},
+		{"MsgTypeVarTupleConstrain", MsgTypeVarTupleConstrain, "cannot use constraints with TypeVarTuple"},
 		{"MsgWalrusInComp", MsgWalrusInComp, "assignment expression cannot be used in a comprehension iterable expression"},
 		{"MsgYieldOutsideFunction", MsgYieldOutsideFunction, "'yield' outside function"},
 	}

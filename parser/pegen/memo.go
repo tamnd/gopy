@@ -6,6 +6,7 @@
 package pegen
 
 import (
+	perrors "github.com/tamnd/gopy/parser/errors"
 	"github.com/tamnd/gopy/tokenize"
 )
 
@@ -107,10 +108,9 @@ func (p *Parser) ExpectForced(kind tokenize.Type, expected string) *Token {
 	}
 	t := p.Peek()
 	if t == nil || t.Type != kind {
-		p.errorIndicator = true
+		p.RaiseSyntaxError(perrors.MsgExpectedTok, expected)
 		return nil
 	}
-	_ = expected // surfaced via the errors panel once builder.go is wired into the parser
 	p.mark++
 	return t
 }

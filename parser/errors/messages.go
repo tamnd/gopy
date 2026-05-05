@@ -208,3 +208,26 @@ const (
 	MsgImportFromStarLevel = "from __future__ imports must occur at the beginning of the file"
 	MsgImportTrailingComma = "trailing comma not allowed without surrounding parentheses"
 )
+
+// Unterminated string literal diagnostics. The single %d slot is the
+// line on which the literal opened. The %c slot in the f / t variants
+// is 'f' or 't'.
+//
+// CPython: Parser/lexer/lexer.c:1196 / :1207 / :1213 / :1502 / :1512
+const (
+	MsgUnterminatedString       = "unterminated string literal (detected at line %d)"
+	MsgUnterminatedTripleString = "unterminated triple-quoted string literal (detected at line %d)"
+	MsgUnterminatedFString      = "unterminated %c-string literal (detected at line %d)"
+	MsgUnterminatedTripleFStr   = "unterminated triple-quoted %c-string literal (detected at line %d)"
+)
+
+// PEP 695 type-parameter diagnostics. Surfaced from the
+// invalid_type_params / type_param_bound second-pass rules.
+//
+// CPython: Parser/parser.c:21222 invalid_type_param,
+// Parser/parser.c:27250 invalid_type_params
+const (
+	MsgTypeParamsEmpty       = "Type parameter list cannot be empty"
+	MsgTypeVarTupleConstrain = "cannot use constraints with TypeVarTuple"
+	MsgTypeVarTupleBound     = "cannot use bound with TypeVarTuple"
+)
