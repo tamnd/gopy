@@ -105,6 +105,53 @@ func TestEvalLoadGlobal(t *testing.T) {
 	}
 }
 
+func TestEvalBinaryOpAdd(t *testing.T) {
+	ts := state.NewThread()
+	// LOAD_CONST 0 (3); LOAD_CONST 1 (4); BINARY_OP nbAdd; RETURN_VALUE -> 7
+	const nbAdd = 0
+	bc := append(instr(compile.LOAD_CONST, 0), instr(compile.LOAD_CONST, 1)...)
+	bc = append(bc, instr(compile.BINARY_OP, nbAdd)...)
+	bc = append(bc, instr(compile.RETURN_VALUE, 0)...)
+	co := &objects.Code{Code: bc, Stacksize: 4, Consts: []any{int64(3), int64(4)}}
+	v, err := EvalCode(ts, co, nil, nil)
+	if err != nil {
+		t.Fatalf("Eval err: %v", err)
+	}
+	if got, ok := v.(*objects.Int); !ok || intVal(got) != 7 {
+		t.Errorf("got %v, want 7", v)
+	}
+}
+
+func TestEvalUnaryNot(t *testing.T) {
+	ts := state.NewThread()
+	bc := append(instr(compile.LOAD_CONST, 0), instr(compile.UNARY_NOT, 0)...)
+	bc = append(bc, instr(compile.RETURN_VALUE, 0)...)
+	co := &objects.Code{Code: bc, Stacksize: 4, Consts: []any{int64(0)}}
+	v, err := EvalCode(ts, co, nil, nil)
+	if err != nil {
+		t.Fatalf("Eval err: %v", err)
+	}
+	if v != objects.True() {
+		t.Errorf("got %v, want True", v)
+	}
+}
+
+func TestEvalIsOp(t *testing.T) {
+	ts := state.NewThread()
+	// LOAD_CONST 0 (None); LOAD_CONST 0 (None); IS_OP 0 -> True
+	bc := append(instr(compile.LOAD_CONST, 0), instr(compile.LOAD_CONST, 0)...)
+	bc = append(bc, instr(compile.IS_OP, 0)...)
+	bc = append(bc, instr(compile.RETURN_VALUE, 0)...)
+	co := &objects.Code{Code: bc, Stacksize: 4, Consts: []any{nil}}
+	v, err := EvalCode(ts, co, nil, nil)
+	if err != nil {
+		t.Fatalf("Eval err: %v", err)
+	}
+	if v != objects.True() {
+		t.Errorf("got %v, want True", v)
+	}
+}
+
 func TestEvalJumpForward(t *testing.T) {
 	ts := state.NewThread()
 	// LOAD_CONST 0 (1); JUMP_FORWARD 1 (skip next instr); LOAD_CONST 1 (2); RETURN_VALUE

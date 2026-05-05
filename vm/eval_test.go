@@ -21,7 +21,7 @@ func TestEvalNotImplementedSurface(t *testing.T) {
 	ts := state.NewThread()
 	// BINARY_OP is not in the hand-written panel, so dispatch should
 	// fall through to ErrNotImplemented.
-	co := codeWithBytecode(instr(compile.BINARY_OP, 0))
+	co := codeWithBytecode(instr(compile.LOAD_DEREF, 0))
 	_, err := EvalCode(ts, co, nil, nil)
 	if err == nil {
 		t.Fatal("expected ErrNotImplemented for ungenerated dispatch")
@@ -33,12 +33,12 @@ func TestEvalNotImplementedSurface(t *testing.T) {
 
 func TestEvalErrorMentionsOpcodeName(t *testing.T) {
 	ts := state.NewThread()
-	co := codeWithBytecode(instr(compile.BINARY_OP, 0))
+	co := codeWithBytecode(instr(compile.LOAD_DEREF, 0))
 	_, err := EvalCode(ts, co, nil, nil)
 	if err == nil {
 		t.Fatal("expected error")
 	}
-	if got := err.Error(); !contains(got, "BINARY_OP") {
+	if got := err.Error(); !contains(got, "LOAD_DEREF") {
 		t.Errorf("error %q should mention BINARY_OP", got)
 	}
 }
@@ -69,7 +69,7 @@ func TestEvalExtendedArgFetch(t *testing.T) {
 	ts := state.NewThread()
 	// EXTENDED_ARG 0x01, then BINARY_OP 0x02 -> oparg should be 0x0102.
 	// BINARY_OP is unimplemented so we expect ErrNotImplemented to bubble.
-	bc := append(instr(compile.EXTENDED_ARG, 1), instr(compile.BINARY_OP, 2)...)
+	bc := append(instr(compile.EXTENDED_ARG, 1), instr(compile.LOAD_DEREF, 2)...)
 	co := codeWithBytecode(bc)
 
 	_, err := EvalCode(ts, co, nil, nil)

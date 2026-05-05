@@ -165,6 +165,62 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, retVal
 		}
 		return e.jumpBy(-int(oparg) + 1), nil, nil, false, true, nil
 
+	case compile.BINARY_OP:
+		b := e.popObject()
+		a := e.popObject()
+		out, berr := binaryOp(int32(oparg), a, b)
+		if berr != nil {
+			return 0, nil, nil, false, true, berr
+		}
+		e.pushObject(out)
+		return e.advance(1), nil, nil, false, true, nil
+
+	case compile.UNARY_NEGATIVE:
+		a := e.popObject()
+		neg := a.Type().Number
+		if neg == nil || neg.Negative == nil {
+			return 0, nil, nil, false, true, fmt.Errorf("vm: bad operand type for unary -: %s", a.Type().Name)
+		}
+		out, nerr := neg.Negative(a)
+		if nerr != nil {
+			return 0, nil, nil, false, true, nerr
+		}
+		e.pushObject(out)
+		return e.advance(1), nil, nil, false, true, nil
+
+	case compile.UNARY_NOT:
+		a := e.popObject()
+		truthy, terr := objects.IsTruthy(a)
+		if terr != nil {
+			return 0, nil, nil, false, true, terr
+		}
+		e.pushObject(objects.NewBool(!truthy))
+		return e.advance(1), nil, nil, false, true, nil
+
+	case compile.COMPARE_OP:
+		b := e.popObject()
+		a := e.popObject()
+		// CPython packs the CompareOp into the high 4 bits of oparg
+		// and a "convert-to-bool" flag in bit 4. The low bits are
+		// reserved for adaptive specialization.
+		cmpOp := objects.CompareOp((oparg >> 5) & 0xf)
+		out, cerr := objects.RichCmp(a, b, cmpOp)
+		if cerr != nil {
+			return 0, nil, nil, false, true, cerr
+		}
+		e.pushObject(out)
+		return e.advance(1), nil, nil, false, true, nil
+
+	case compile.IS_OP:
+		b := e.popObject()
+		a := e.popObject()
+		eq := (a == b)
+		if oparg == 1 {
+			eq = !eq
+		}
+		e.pushObject(objects.NewBool(eq))
+		return e.advance(1), nil, nil, false, true, nil
+
 	case compile.POP_JUMP_IF_TRUE, compile.POP_JUMP_IF_FALSE,
 		compile.POP_JUMP_IF_NONE, compile.POP_JUMP_IF_NOT_NONE:
 		v := e.popObject()
@@ -270,6 +326,55 @@ func (e *evalState) execNameOp(op compile.Opcode, oparg uint32) (objects.Object,
 		return nil, deleteIn(e.f.Globals, keyObj, name)
 	}
 	return nil, fmt.Errorf("vm: unhandled name op %s", op.Name())
+}
+
+// binaryOp dispatches one BINARY_OP suboperator. Mirrors the NB_*
+// constants the compiler emits in compile/codegen_expr_op.go. Only the
+// arithmetic forms tied to slots in NumberMethods are handled in v0.6;
+// the rest return an error until the abstract layer fills in.
+//
+// CPython: Python/bytecodes.c BINARY_OP_GENERIC
+func binaryOp(sub int32, a, b objects.Object) (objects.Object, error) {
+	const (
+		nbAdd      = 0
+		nbMult     = 5
+		nbSubtract = 10
+	)
+	switch sub {
+	case nbAdd:
+		return numericForward(a, b, "+", func(n *objects.NumberMethods) func(a, b objects.Object) (objects.Object, error) {
+			return n.Add
+		})
+	case nbSubtract:
+		return numericForward(a, b, "-", func(n *objects.NumberMethods) func(a, b objects.Object) (objects.Object, error) {
+			return n.Subtract
+		})
+	case nbMult:
+		return numericForward(a, b, "*", func(n *objects.NumberMethods) func(a, b objects.Object) (objects.Object, error) {
+			return n.Multiply
+		})
+	}
+	return nil, fmt.Errorf("vm: BINARY_OP suboperator %d not implemented in v0.6", sub)
+}
+
+func numericForward(a, b objects.Object, sym string, pick func(*objects.NumberMethods) func(a, b objects.Object) (objects.Object, error)) (objects.Object, error) {
+	if n := a.Type().Number; n != nil {
+		if fn := pick(n); fn != nil {
+			out, err := fn(a, b)
+			if err == nil {
+				return out, nil
+			}
+		}
+	}
+	if n := b.Type().Number; n != nil {
+		if fn := pick(n); fn != nil {
+			out, err := fn(a, b)
+			if err == nil {
+				return out, nil
+			}
+		}
+	}
+	return nil, fmt.Errorf("vm: unsupported operand types for %s: %s and %s", sym, a.Type().Name, b.Type().Name)
 }
 
 func lookupIn(scope objects.Object, key objects.Object) (objects.Object, bool, error) {
