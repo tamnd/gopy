@@ -522,6 +522,14 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, retVal
 		e.pushObject(fn)
 		return e.advance(), nil, nil, false, true, nil
 
+	case compile.LOAD_CLOSURE:
+		// Same as LOAD_DEREF but pushes the cell itself, not its
+		// contents. Used by MAKE_FUNCTION when constructing the
+		// closure tuple. CPython: Python/bytecodes.c LOAD_CLOSURE.
+		ref := e.f.LocalsPlus[frame.NLocalsOf(e.f.Code)+int(oparg)]
+		e.push(ref.Dup())
+		return e.advance(), nil, nil, false, true, nil
+
 	case compile.LOAD_DEREF:
 		// oparg indexes the cell+free slots (cells first, then frees).
 		//
@@ -957,6 +965,49 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, retVal
 		// optimized forms. We treat them as forward jumps; the
 		// NO_INTERRUPT variant skips the eval breaker poll.
 		return e.jumpBy(int(oparg) + 1), nil, nil, false, true, nil
+
+	case compile.LOAD_FROM_DICT_OR_GLOBALS:
+		// PEP 695 helper: lookup name in the dict at TOS first; if
+		// absent, fall back to LOAD_GLOBAL semantics (globals -> builtins).
+		// CPython: Python/bytecodes.c LOAD_FROM_DICT_OR_GLOBALS.
+		dictTOS := e.popObject()
+		nameObj := e.f.Code.Names[oparg]
+		nameKey := objects.NewStr(nameObj)
+		if d, ok := dictTOS.(*objects.Dict); ok {
+			if v, derr := d.GetItem(nameKey); derr == nil && v != nil {
+				e.pushObject(v)
+				return e.advance(), nil, nil, false, true, nil
+			}
+		}
+		v, perr := e.execNameOp(compile.LOAD_GLOBAL, oparg)
+		if perr != nil {
+			return 0, nil, nil, false, true, perr
+		}
+		if v != nil {
+			e.pushObject(v)
+		}
+		return e.advance(), nil, nil, false, true, nil
+
+	case compile.LOAD_LOCALS:
+		// Push the f_locals dict. Class-body frames keep an explicit
+		// Locals dict; fast-locals frames synthesize one from the
+		// current LocalsPlus values keyed by Code.Varnames.
+		if e.f.Locals != nil {
+			e.pushObject(e.f.Locals)
+			return e.advance(), nil, nil, false, true, nil
+		}
+		d := objects.NewDict()
+		for i, name := range e.f.Code.Varnames {
+			ref := e.localAt(i)
+			if ref.IsNull() {
+				continue
+			}
+			if serr := d.SetItem(objects.NewStr(name), ref.AsObject()); serr != nil {
+				return 0, nil, nil, false, true, serr
+			}
+		}
+		e.pushObject(d)
+		return e.advance(), nil, nil, false, true, nil
 
 	case compile.LOAD_FROM_DICT_OR_DEREF:
 		// PEP 695 helper: look up name in the dict at TOS first; if absent,
