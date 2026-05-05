@@ -95,11 +95,9 @@ func (s *State) tokGetNormalMode() Tok {
 	if s.pendin != 0 {
 		if s.pendin < 0 {
 			s.pendin++
-			s.indent--
 			return s.tokenSetup(tokenize.DEDENT, s.cur, s.cur)
 		}
 		s.pendin--
-		s.indent++
 		return s.tokenSetup(tokenize.INDENT, s.cur, s.cur)
 	}
 
@@ -234,8 +232,9 @@ done:
 			return s.tokenSetup(tokenize.ERRORTOKEN, s.cur, s.cur), true
 		}
 		s.pendin++
-		s.indstack[s.indent+1] = col
-		s.altstack[s.indent+1] = altcol
+		s.indent++
+		s.indstack[s.indent] = col
+		s.altstack[s.indent] = altcol
 		return Tok{}, false
 	}
 	for s.indent > 0 && col < s.indstack[s.indent] {
