@@ -122,6 +122,60 @@ func TestEvalBinaryOpAdd(t *testing.T) {
 	}
 }
 
+// TestEvalBinaryOpIntArith pins the new NB_ sub-ops in one place so a
+// regression flips one assertion at a time. Each row drives the
+// dispatch through binaryOp with the chosen sub-op constant and
+// checks the int (or float, for true division) result.
+func TestEvalBinaryOpIntArith(t *testing.T) {
+	cases := []struct {
+		name     string
+		sub      byte
+		a, b     int64
+		want     int64
+		isFloat  bool
+		wantFlt  float64
+		wantsErr bool
+	}{
+		{name: "floordiv_pos", sub: 2, a: 7, b: 2, want: 3},
+		{name: "floordiv_neg", sub: 2, a: -7, b: 2, want: -4},
+		{name: "mod_pos", sub: 6, a: 7, b: 3, want: 1},
+		{name: "mod_neg", sub: 6, a: -7, b: 3, want: 2},
+		{name: "and", sub: 1, a: 0xF0, b: 0x33, want: 0x30},
+		{name: "or", sub: 7, a: 0xF0, b: 0x0F, want: 0xFF},
+		{name: "xor", sub: 12, a: 0xF0, b: 0x33, want: 0xC3},
+		{name: "lshift", sub: 3, a: 1, b: 4, want: 16},
+		{name: "rshift", sub: 9, a: 32, b: 2, want: 8},
+		{name: "truediv", sub: 11, a: 7, b: 2, isFloat: true, wantFlt: 3.5},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ts := state.NewThread()
+			bc := append(instr(compile.LOAD_CONST, 0), instr(compile.LOAD_CONST, 1)...)
+			bc = append(bc, instr(compile.BINARY_OP, tc.sub)...)
+			bc = append(bc, instr(compile.RETURN_VALUE, 0)...)
+			co := &objects.Code{Code: bc, Stacksize: 4, Consts: []any{tc.a, tc.b}}
+			v, err := EvalCode(ts, co, nil, nil)
+			if err != nil {
+				t.Fatalf("Eval err: %v", err)
+			}
+			if tc.isFloat {
+				f, ok := v.(*objects.Float)
+				if !ok {
+					t.Fatalf("got %T, want *objects.Float", v)
+				}
+				if f.Float64() != tc.wantFlt {
+					t.Errorf("got %v, want %v", f.Float64(), tc.wantFlt)
+				}
+				return
+			}
+			i, ok := v.(*objects.Int)
+			if !ok || intVal(i) != tc.want {
+				t.Errorf("got %v, want %d", v, tc.want)
+			}
+		})
+	}
+}
+
 func TestEvalUnaryNot(t *testing.T) {
 	ts := state.NewThread()
 	bc := append(instr(compile.LOAD_CONST, 0), instr(compile.UNARY_NOT, 0)...)

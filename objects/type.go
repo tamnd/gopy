@@ -58,15 +58,23 @@ type Type struct {
 //
 // CPython: Include/cpython/object.h:L195 PyNumberMethods
 type NumberMethods struct {
-	Add      func(a, b Object) (Object, error)
-	Subtract func(a, b Object) (Object, error)
-	Multiply func(a, b Object) (Object, error)
-	Negative func(o Object) (Object, error)
-	Positive func(o Object) (Object, error)
-	Invert   func(o Object) (Object, error)
-	Bool     func(o Object) (bool, error)
-	Int      func(o Object) (Object, error)
-	Float    func(o Object) (Object, error)
+	Add         func(a, b Object) (Object, error)
+	Subtract    func(a, b Object) (Object, error)
+	Multiply    func(a, b Object) (Object, error)
+	TrueDivide  func(a, b Object) (Object, error)
+	FloorDivide func(a, b Object) (Object, error)
+	Remainder   func(a, b Object) (Object, error)
+	And         func(a, b Object) (Object, error)
+	Or          func(a, b Object) (Object, error)
+	Xor         func(a, b Object) (Object, error)
+	Lshift      func(a, b Object) (Object, error)
+	Rshift      func(a, b Object) (Object, error)
+	Negative    func(o Object) (Object, error)
+	Positive    func(o Object) (Object, error)
+	Invert      func(o Object) (Object, error)
+	Bool        func(o Object) (bool, error)
+	Int         func(o Object) (Object, error)
+	Float       func(o Object) (Object, error)
 }
 
 // SequenceMethods is the v0.2 subset of tp_as_sequence.

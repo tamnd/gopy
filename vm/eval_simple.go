@@ -1208,30 +1208,85 @@ func (e *evalState) execNameOp(op compile.Opcode, oparg uint32) (objects.Object,
 }
 
 // binaryOp dispatches one BINARY_OP suboperator. Mirrors the NB_*
-// constants the compiler emits in compile/codegen_expr_op.go. Only the
-// arithmetic forms tied to slots in NumberMethods are handled in v0.6;
-// the rest return an error until the abstract layer fills in.
+// constants the compiler emits in compile/codegen_expr_op.go. The
+// inplace variants share the non-inplace slot for ints because Int is
+// immutable; once mutable container ops land they take their own
+// slots.
 //
 // CPython: Python/bytecodes.c BINARY_OP_GENERIC
 func binaryOp(sub int32, a, b objects.Object) (objects.Object, error) {
 	const (
-		nbAdd      = 0
-		nbMult     = 5
-		nbSubtract = 10
-		nbSubscr   = 26
+		nbAdd         = 0
+		nbAnd         = 1
+		nbFloorDivide = 2
+		nbLshift      = 3
+		nbMult        = 5
+		nbRemainder   = 6
+		nbOr          = 7
+		nbRshift      = 9
+		nbSubtract    = 10
+		nbTrueDivide  = 11
+		nbXor         = 12
+		// Inplace forms (13..25) re-use the non-inplace slot for
+		// immutable types; the mapping mirrors CPython's NB_INPLACE_*
+		// alphabetical numbering.
+		nbInplaceAdd         = 13
+		nbInplaceAnd         = 14
+		nbInplaceFloorDivide = 15
+		nbInplaceLshift      = 16
+		nbInplaceMult        = 18
+		nbInplaceRemainder   = 19
+		nbInplaceOr          = 20
+		nbInplaceRshift      = 22
+		nbInplaceSubtract    = 23
+		nbInplaceTrueDivide  = 24
+		nbInplaceXor         = 25
+		nbSubscr             = 26
 	)
 	switch sub {
-	case nbAdd:
+	case nbAdd, nbInplaceAdd:
 		return numericForward(a, b, "+", func(n *objects.NumberMethods) func(a, b objects.Object) (objects.Object, error) {
 			return n.Add
 		})
-	case nbSubtract:
+	case nbSubtract, nbInplaceSubtract:
 		return numericForward(a, b, "-", func(n *objects.NumberMethods) func(a, b objects.Object) (objects.Object, error) {
 			return n.Subtract
 		})
-	case nbMult:
+	case nbMult, nbInplaceMult:
 		return numericForward(a, b, "*", func(n *objects.NumberMethods) func(a, b objects.Object) (objects.Object, error) {
 			return n.Multiply
+		})
+	case nbTrueDivide, nbInplaceTrueDivide:
+		return numericForward(a, b, "/", func(n *objects.NumberMethods) func(a, b objects.Object) (objects.Object, error) {
+			return n.TrueDivide
+		})
+	case nbFloorDivide, nbInplaceFloorDivide:
+		return numericForward(a, b, "//", func(n *objects.NumberMethods) func(a, b objects.Object) (objects.Object, error) {
+			return n.FloorDivide
+		})
+	case nbRemainder, nbInplaceRemainder:
+		return numericForward(a, b, "%", func(n *objects.NumberMethods) func(a, b objects.Object) (objects.Object, error) {
+			return n.Remainder
+		})
+	case nbAnd, nbInplaceAnd:
+		return numericForward(a, b, "&", func(n *objects.NumberMethods) func(a, b objects.Object) (objects.Object, error) {
+			return n.And
+		})
+	case nbOr, nbInplaceOr:
+		return numericForward(a, b, "|", func(n *objects.NumberMethods) func(a, b objects.Object) (objects.Object, error) {
+			return n.Or
+		})
+	case nbXor, nbInplaceXor:
+		return numericForward(a, b, "^", func(n *objects.NumberMethods) func(a, b objects.Object) (objects.Object, error) {
+			return n.Xor
+		})
+	case nbLshift, nbInplaceLshift:
+		return numericForward(a, b, "<<", func(n *objects.NumberMethods) func(a, b objects.Object) (objects.Object, error) {
+			return n.Lshift
+		})
+	case nbRshift, nbInplaceRshift:
+		return numericForward(a, b, ">>", func(n *objects.NumberMethods) func(a, b objects.Object) (objects.Object, error) {
+			return n.Rshift
 		})
 	case nbSubscr:
 		return getItem(a, b)
