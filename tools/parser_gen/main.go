@@ -56,7 +56,6 @@ func main() {
 
 type rule struct {
 	Name string
-	Body string
 }
 
 func readGrammar(path string) ([]rule, error) {
@@ -64,72 +63,15 @@ func readGrammar(path string) ([]rule, error) {
 	if err != nil {
 		return nil, err
 	}
-	return splitRules(data), nil
-}
-
-func splitRules(src []byte) []rule {
-	var rules []rule
-	var cur rule
-	flush := func() {
-		if cur.Name != "" {
-			rules = append(rules, cur)
-			cur = rule{}
-		}
+	g, err := ParseGrammar(data)
+	if err != nil {
+		return nil, err
 	}
-	for _, line := range splitLines(src) {
-		if len(line) == 0 || line[0] == '#' {
-			continue
-		}
-		if line[0] != ' ' && line[0] != '\t' {
-			flush()
-			i := 0
-			for i < len(line) && line[i] != ':' && line[i] != ' ' && line[i] != '[' {
-				i++
-			}
-			name := string(line[:i])
-			if !isRuleName(name) {
-				continue
-			}
-			cur.Name = name
-			cur.Body = string(line)
-			continue
-		}
-		cur.Body += "\n" + string(line)
+	out := make([]rule, len(g.Rules))
+	for i, r := range g.Rules {
+		out[i] = rule{Name: r.Name}
 	}
-	flush()
-	return rules
-}
-
-func isRuleName(s string) bool {
-	if s == "" {
-		return false
-	}
-	for i, c := range s {
-		switch {
-		case c >= 'a' && c <= 'z':
-		case c >= 'A' && c <= 'Z':
-		case c == '_':
-		case (c >= '0' && c <= '9') && i > 0:
-		default:
-			return false
-		}
-	}
-	return true
-}
-
-func splitLines(src []byte) [][]byte {
-	var out [][]byte
-	start := 0
-	for i, b := range src {
-		if b == '\n' {
-			out = append(out, src[start:i])
-			start = i + 1
-		}
-	}
-	if start < len(src) {
-		out = append(out, src[start:])
-	}
-	return out
+	return out, nil
 }
 
 func writeStub(path string, rules []rule) error {
