@@ -53,8 +53,32 @@ func Init(defaultFile io.Writer) (*objects.Dict, error) {
 			return nil, err
 		}
 	}
+	for _, fn := range attributePanel() {
+		if err := setBuiltin(dict, fn.name, objects.NewBuiltinFunction(fn.name, fn.impl)); err != nil {
+			return nil, err
+		}
+	}
 
 	return dict, nil
+}
+
+// attributePanel returns the v0.7 attribute builtins (1651-builtins-C).
+//
+// CPython: Python/bltinmodule.c builtin_methods getattr / hasattr /
+// setattr / delattr
+func attributePanel() []struct {
+	name string
+	impl func(args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error)
+} {
+	return []struct {
+		name string
+		impl func(args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error)
+	}{
+		{"getattr", GetAttr},
+		{"hasattr", HasAttr},
+		{"setattr", SetAttr},
+		{"delattr", DelAttr},
+	}
 }
 
 // reflectionPanel returns the v0.7 reflection builtins (1651-builtins-B).
