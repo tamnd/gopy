@@ -158,10 +158,11 @@ func SetFilters(rules []Filter) {
 	ResetRegistry()
 }
 
-// Reset restores the default filter list. The user-facing
-// resetwarnings() forwards here.
+// Reset restores the seeded default filter list. Tests use it to
+// undo filter mutations; the user-facing resetwarnings() lives in
+// api.go and clears the list outright instead of restoring defaults.
 //
-// CPython: Python/_warnings.c warnings_resetwarnings
+// CPython: Python/_warnings.c _PyWarnings_InitState seeded defaults
 func Reset() {
 	filterMu.Lock()
 	filters = defaultFilters()
