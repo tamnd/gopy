@@ -148,18 +148,34 @@ func versionInfo() *objects.Tuple {
 	})
 }
 
+// ImplementationName is the gopy fingerprint sys.implementation.name
+// reports. Pinned per spec 1622 so consumers (importlib, third-party
+// runners) can branch off "gopy" cleanly.
+//
+// CPython: Python/sysmodule.c:3920 make_impl_info "name" entry
+const ImplementationName = "gopy"
+
+// CacheTag is the bytecode-cache-file tag CPython reports through
+// sys.implementation.cache_tag. Encoded as "gopy-MMNNP" where MM is
+// the upstream major, NN the minor, P the micro. The trailing zero
+// is the third digit so .pyc files do not collide with cpython-NNN
+// nor with future bumps to PY_MICRO_VERSION.
+//
+// CPython: Python/sysmodule.c:3920 make_impl_info "cache_tag" entry
+var CacheTag = "gopy-" + strconv.Itoa(build.PythonMajorVersion) +
+	strconv.Itoa(build.PythonMinorVersion) + "0"
+
 // implementation returns sys.implementation as a 4-element tuple
 // (name, version, hexversion, cache_tag). CPython uses a SimpleNamespace
-// here; 1651-sys-E lifts that once SimpleNamespace lands.
+// here; the named-attribute facade lands once SimpleNamespace does.
 //
 // CPython: Python/sysmodule.c:3889 make_impl_info
 func implementation() *objects.Tuple {
 	return objects.NewTuple([]objects.Object{
-		objects.NewStr("gopy"),
+		objects.NewStr(ImplementationName),
 		versionInfo(),
 		objects.NewInt(hexVersion()),
-		objects.NewStr("gopy-" + strconv.Itoa(build.PythonMajorVersion) +
-			strconv.Itoa(build.PythonMinorVersion)),
+		objects.NewStr(CacheTag),
 	})
 }
 
