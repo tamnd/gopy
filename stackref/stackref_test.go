@@ -2,9 +2,28 @@ package stackref
 
 import (
 	"testing"
+	"unsafe"
 
 	"github.com/tamnd/gopy/objects"
 )
+
+// TestRefSize pins the in-memory width of Ref so an accidental field
+// addition (an extra tag, a debug string, a parent pointer) trips a
+// test instead of silently doubling the per-stack-slot footprint.
+//
+// CPython's _PyStackRef is one uintptr in the GIL build (a tagged
+// pointer). gopy stores objects.Object directly, which is a Go
+// interface header (typeptr + dataptr = two pointer-words). The
+// guarantee here is "no wider than one interface header", not the
+// 1-word C shape; the wrapper exists so v0.14 can swap in a packed
+// representation without touching dispatch arms.
+func TestRefSize(t *testing.T) {
+	got := unsafe.Sizeof(Ref{})
+	want := unsafe.Sizeof(objects.Object(nil))
+	if got != want {
+		t.Errorf("Ref size = %d, want %d (one interface header)", got, want)
+	}
+}
 
 func TestNullSentinel(t *testing.T) {
 	if !Null.IsNull() {
