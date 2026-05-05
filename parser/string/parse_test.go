@@ -14,7 +14,6 @@ func TestParseString(t *testing.T) {
 		{`'a\nb'`, "a\nb", false, false},
 		{`'a\tb'`, "a\tb", false, false},
 		{`'\x41'`, "A", false, false},
-		{`'é'`, "é", false, false},
 		{`'\101'`, "A", false, false},
 		{`r'\n'`, `\n`, false, true},
 		{`R'\n'`, `\n`, false, true},
@@ -25,6 +24,18 @@ func TestParseString(t *testing.T) {
 		{`'\''`, "'", false, false},
 		{`'\"'`, `"`, false, false},
 		{`'\q'`, `\q`, false, false},
+		{`'\a'`, "\x07", false, false},
+		{`'\b'`, "\x08", false, false},
+		{`'\f'`, "\x0c", false, false},
+		{`'\v'`, "\x0b", false, false},
+		{`'\0'`, "\x00", false, false},
+		{`'\12'`, "\n", false, false},
+		{`'\123'`, "S", false, false},
+		{`'é'`, "é", false, false},
+		{`'\u00e9'`, "\u00e9", false, false},
+		{`'\U0001F600'`, "\U0001f600", false, false},
+		{"'a\\\nb'", "ab", false, false},
+		{`R'é'`, `é`, false, true},
 	}
 	for _, c := range cases {
 		got, err := ParseString([]byte(c.in))

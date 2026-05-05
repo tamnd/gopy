@@ -25,10 +25,22 @@ func Concat(parts []Result) (Result, error) {
 		return parts[0], nil
 	}
 	bytesMode := parts[0].IsBytes
-	for _, p := range parts[1:] {
+	var sawF, sawT bool
+	for _, p := range parts {
 		if p.IsBytes != bytesMode {
 			return Result{}, fmt.Errorf("cannot mix bytes and nonbytes literals")
 		}
+		if p.IsFString {
+			sawF = true
+		}
+		if p.IsTString {
+			sawT = true
+		}
+	}
+	if sawF && sawT {
+		// CPython: Parser/string_parser.c:60 rejects adjacent f
+		// and t literals with the message below.
+		return Result{}, fmt.Errorf("cannot mix t-string literals with f-string literals")
 	}
 	if bytesMode {
 		var out []byte
@@ -41,5 +53,5 @@ func Concat(parts []Result) (Result, error) {
 	for _, p := range parts {
 		sb.WriteString(p.Text)
 	}
-	return Result{Text: sb.String()}, nil
+	return Result{Text: sb.String(), IsFString: sawF, IsTString: sawT}, nil
 }

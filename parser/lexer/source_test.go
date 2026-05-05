@@ -24,6 +24,35 @@ func TestDetectEncodingCookie(t *testing.T) {
 	}
 }
 
+func TestBOMOnly(t *testing.T) {
+	st := FromBytes([]byte("\xef\xbb\xbfx = 1\n"), ModeFile)
+	if st.Encoding() != "utf-8" {
+		t.Errorf("BOM-only Encoding = %q, want utf-8", st.Encoding())
+	}
+}
+
+func TestBOMWithUTF8Cookie(t *testing.T) {
+	src := []byte("\xef\xbb\xbf# coding: utf-8\nx = 1\n")
+	if msg := CheckBOMCookieConflict(src); msg != "" {
+		t.Errorf("CheckBOMCookieConflict = %q, want empty for utf-8", msg)
+	}
+}
+
+func TestBOMConflictsWithLatin1Cookie(t *testing.T) {
+	src := []byte("\xef\xbb\xbf# coding: latin-1\nx = 1\n")
+	msg := CheckBOMCookieConflict(src)
+	if msg == "" {
+		t.Errorf("CheckBOMCookieConflict = empty, want conflict text")
+	}
+}
+
+func TestBOMConflictNoneWithoutCookie(t *testing.T) {
+	src := []byte("\xef\xbb\xbfx = 1\n")
+	if msg := CheckBOMCookieConflict(src); msg != "" {
+		t.Errorf("CheckBOMCookieConflict = %q, want empty", msg)
+	}
+}
+
 func TestNormalizeNewlines(t *testing.T) {
 	cases := []struct{ in, want string }{
 		{"", ""},

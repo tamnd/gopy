@@ -30,6 +30,13 @@ type Result struct {
 	Bytes   []byte
 	IsBytes bool
 	IsRaw   bool
+	// IsFString is set on the per-segment result the f-string
+	// scanner emits, and on the folded result when at least one
+	// part was an f-string. IsTString is the matching flag for
+	// t-strings. Concat uses these to enforce the
+	// no-implicit-mixing rule in CPython 3.14.
+	IsFString bool
+	IsTString bool
 	// Warnings carries SyntaxWarning text (one per unknown escape)
 	// that the caller should surface separately. Empty when the
 	// literal contained no flagged escapes.

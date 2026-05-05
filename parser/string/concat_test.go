@@ -44,6 +44,28 @@ func TestConcatRejectsMixed(t *testing.T) {
 	}
 }
 
+func TestConcatRejectsFTMix(t *testing.T) {
+	parts := []Result{
+		{Text: "f", IsFString: true},
+		{Text: "t", IsTString: true},
+	}
+	_, err := Concat(parts)
+	if err == nil || !strings.Contains(err.Error(), "cannot mix t-string literals with f-string literals") {
+		t.Errorf("err = %v, want f/t mix error", err)
+	}
+}
+
+func TestConcatPropagatesFlags(t *testing.T) {
+	parts := []Result{{Text: "a"}, {Text: "b", IsFString: true}}
+	r, err := Concat(parts)
+	if err != nil {
+		t.Fatalf("err = %v", err)
+	}
+	if !r.IsFString {
+		t.Errorf("IsFString lost on fold: %+v", r)
+	}
+}
+
 func TestConcatSingleton(t *testing.T) {
 	r, err := Concat([]Result{{Text: "only"}})
 	if err != nil || r.Text != "only" {

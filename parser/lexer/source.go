@@ -114,6 +114,46 @@ func skipNewline(src []byte, at int) []byte {
 	return src[at+1:]
 }
 
+// CheckBOMCookieConflict reports the CPython error text when the
+// source begins with a UTF-8 BOM but the PEP 263 cookie names a
+// non-utf-8 encoding. Returns the empty string when there is no
+// conflict (no BOM, no cookie, or cookie says utf-8 / utf8 / U8).
+//
+// CPython: Parser/tokenizer/helpers.c:223 check_bom
+func CheckBOMCookieConflict(src []byte) string {
+	if len(src) < 3 || src[0] != 0xef || src[1] != 0xbb || src[2] != 0xbf {
+		return ""
+	}
+	name := DetectEncodingCookie(src[3:])
+	if name == "" {
+		return ""
+	}
+	if isUTF8Name(name) {
+		return ""
+	}
+	return "encoding declaration in Unicode string"
+}
+
+func isUTF8Name(name string) bool {
+	switch normalizeEncodingName(name) {
+	case "utf8", "utf-8", "u8":
+		return true
+	}
+	return false
+}
+
+func normalizeEncodingName(name string) string {
+	out := make([]byte, 0, len(name))
+	for i := 0; i < len(name); i++ {
+		c := name[i]
+		if c >= 'A' && c <= 'Z' {
+			c += 'a' - 'A'
+		}
+		out = append(out, c)
+	}
+	return string(out)
+}
+
 // NormalizeNewlines folds \r\n and bare \r into \n so the FSM can
 // treat newline as a single byte. CPython does the same fold in
 // the file driver before handing lines to the scanner.
