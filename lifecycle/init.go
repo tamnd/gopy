@@ -7,6 +7,7 @@ package lifecycle
 
 import (
 	"github.com/tamnd/gopy/initconfig"
+	"github.com/tamnd/gopy/pathconfig"
 	"github.com/tamnd/gopy/state"
 )
 
@@ -156,12 +157,18 @@ func pyinitMainReconfigure(tstate *state.Thread) initconfig.Status {
 }
 
 // initInterpMain is the per-phase fan-out called once the runtime is
-// up. The v0.7 skeleton is intentionally empty: the next subtasks
-// (signal init, sys module, builtins, codecs, site) attach here as
-// they land.
+// up. The v0.7 skeleton lands path-config resolution; the next
+// subtasks (signal init, sys module, builtins, codecs, site) attach
+// here as they land.
 //
 // CPython: Python/pylifecycle.c:1177 init_interp_main
 func initInterpMain(tstate *state.Thread) initconfig.Status {
-	_ = tstate
+	cfg, _ := tstate.Interp().Config.(*initconfig.PyConfig)
+	if cfg == nil {
+		return initconfig.StatusErr("interpreter has no config")
+	}
+	if status := pathconfig.Resolve(cfg); status.IsException() {
+		return status
+	}
 	return initconfig.StatusOk()
 }

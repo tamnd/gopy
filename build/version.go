@@ -9,6 +9,14 @@ const Version = "0.7.0-dev"
 // PythonCompatVersion is the upstream CPython version this port tracks.
 const PythonCompatVersion = "3.14.0+"
 
+// PythonMajorVersion is the major component of the CPython version
+// gopy tracks. Mirrors Include/patchlevel.h:20 PY_MAJOR_VERSION.
+const PythonMajorVersion = 3
+
+// PythonMinorVersion is the minor component of the CPython version
+// gopy tracks. Mirrors Include/patchlevel.h:21 PY_MINOR_VERSION.
+const PythonMinorVersion = 14
+
 // VersionString returns the full version banner.
 //
 //	gopy 0.1.0 (3.14.0+) [go1.26 darwin/arm64]

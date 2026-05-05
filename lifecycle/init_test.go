@@ -133,6 +133,29 @@ func TestInitializeReentryUsesReconfigureBranch(t *testing.T) {
 	}
 }
 
+// TestInitializeRunsPathConfigInMainPhase confirms init_interp_main
+// pipes the resolved config through pathconfig.Resolve so callers
+// see ModuleSearchPaths after Py_InitializeFromConfig.
+func TestInitializeRunsPathConfigInMainPhase(t *testing.T) {
+	cfg := &initconfig.PyConfig{}
+	cfg.InitPythonConfig()
+	cfg.ParseArgv = 0
+	cfg.UseEnvironment = 0
+	cfg.Home = "/synthetic/prefix"
+
+	tstate, status := Initialize(nil, cfg)
+	if status.IsException() {
+		t.Fatalf("Initialize: %+v", status)
+	}
+	resolved := tstate.Interp().Config.(*initconfig.PyConfig)
+	if resolved.Prefix != "/synthetic/prefix" {
+		t.Errorf("Prefix = %q, want /synthetic/prefix", resolved.Prefix)
+	}
+	if len(resolved.ModuleSearchPaths) == 0 {
+		t.Error("ModuleSearchPaths empty after Initialize")
+	}
+}
+
 // TestInitializeSkipsMainWhenInitMainZero confirms the InitMain flag
 // gating: a config with _init_main=0 stops after pyinit_core.
 func TestInitializeSkipsMainWhenInitMainZero(t *testing.T) {
