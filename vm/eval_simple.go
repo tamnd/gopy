@@ -520,7 +520,8 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, retVal
 
 	case compile.MAKE_FUNCTION:
 		// TOS is a code object; build a Function bound to the current
-		// frame's globals. v0.6 ignores defaults / closure flags.
+		// frame's globals. Defaults, kwdefaults, annotations, and the
+		// closure tuple are wired separately by SET_FUNCTION_ATTRIBUTE.
 		//
 		// CPython: Python/bytecodes.c MAKE_FUNCTION
 		v := e.popObject()
