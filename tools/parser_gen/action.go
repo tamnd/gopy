@@ -336,15 +336,26 @@ func goIdent(s string) string {
 	return s
 }
 
+// capName turns a C-style snake_case identifier into Go CamelCase.
+// `make_module` becomes `MakeModule`, `seq_flatten` becomes
+// `SeqFlatten`. Leading underscore is dropped.
 func capName(s string) string {
 	if s == "" {
 		return s
 	}
-	r := []rune(s)
-	if unicode.IsLower(r[0]) {
-		r[0] = unicode.ToUpper(r[0])
+	parts := strings.Split(s, "_")
+	var b strings.Builder
+	for _, p := range parts {
+		if p == "" {
+			continue
+		}
+		r := []rune(p)
+		if unicode.IsLower(r[0]) {
+			r[0] = unicode.ToUpper(r[0])
+		}
+		b.WriteString(string(r))
 	}
-	return string(r)
+	return b.String()
 }
 
 // goString rewraps a C-style string literal as a Go raw string.

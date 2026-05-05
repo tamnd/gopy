@@ -774,8 +774,17 @@ func itemKey(it Item) string {
 func (e *emitter) writeActionHelperStubs() {
 	body := e.bodies.String()
 	re := regexp.MustCompile(`\b(actionAst[A-Za-z0-9_]+|actionPgen[A-Za-z0-9_]+|raiseAction)\b`)
+	// Names that have hand-written implementations elsewhere in the
+	// pegen package. Keep this list small; each entry is a place
+	// where the typed AST surface meets the untyped any boundary.
+	excluded := map[string]bool{
+		"actionPgenMakeModule": true,
+	}
 	seen := map[string]bool{}
 	for _, m := range re.FindAllString(body, -1) {
+		if excluded[m] {
+			continue
+		}
 		seen[m] = true
 	}
 	if len(seen) == 0 {
@@ -812,9 +821,10 @@ func (e *emitter) writeDispatch() {
 	e.buf.WriteString("// Dispatch picks the entry-point rule for m and runs it.\n")
 	e.buf.WriteString("// Mirrors CPython's _PyPegen_run_parser: try once with\n")
 	e.buf.WriteString("// call_invalid_rules off, retry once with it on if the\n")
-	e.buf.WriteString("// first pass missed, then surface either the placeholder\n")
-	e.buf.WriteString("// tree or ErrParserNotImplemented (until M6/M7 wire real\n")
-	e.buf.WriteString("// AST construction and error propagation).\n")
+	e.buf.WriteString("// first pass missed, then surface the rule result. If\n")
+	e.buf.WriteString("// the second pass also misses, ErrParserNotImplemented\n")
+	e.buf.WriteString("// rides through so callers can fall back to the fixture\n")
+	e.buf.WriteString("// path until the action surface fully types up.\n")
 	e.buf.WriteString("//\n")
 	e.buf.WriteString("// CPython: Parser/pegen.c:946 _PyPegen_run_parser\n")
 	e.buf.WriteString("func Dispatch(p *Parser, m StartRule) (any, error) {\n")
@@ -831,14 +841,14 @@ func (e *emitter) writeDispatch() {
 	e.buf.WriteString("\t\tp.SetCallInvalid(true)\n")
 	e.buf.WriteString("\t\tp.Reset(0)\n")
 	e.buf.WriteString("\t\tswitch m {\n")
-	e.buf.WriteString("\t\tcase StartFile:\n\t\t\t_ = parseRule_file(p)\n")
-	e.buf.WriteString("\t\tcase StartSingle:\n\t\t\t_ = parseRule_interactive(p)\n")
-	e.buf.WriteString("\t\tcase StartEval:\n\t\t\t_ = parseRule_eval(p)\n")
-	e.buf.WriteString("\t\tcase StartFunctionType:\n\t\t\t_ = parseRule_func_type(p)\n")
+	e.buf.WriteString("\t\tcase StartFile:\n\t\t\tresult = parseRule_file(p)\n")
+	e.buf.WriteString("\t\tcase StartSingle:\n\t\t\tresult = parseRule_interactive(p)\n")
+	e.buf.WriteString("\t\tcase StartEval:\n\t\t\tresult = parseRule_eval(p)\n")
+	e.buf.WriteString("\t\tcase StartFunctionType:\n\t\t\tresult = parseRule_func_type(p)\n")
 	e.buf.WriteString("\t\t}\n")
-	e.buf.WriteString("\t\treturn nil, ErrParserNotImplemented\n")
+	e.buf.WriteString("\t\tif result == nil { return nil, ErrParserNotImplemented }\n")
 	e.buf.WriteString("\t}\n")
-	e.buf.WriteString("\treturn nil, ErrParserNotImplemented\n")
+	e.buf.WriteString("\treturn result, nil\n")
 	e.buf.WriteString("}\n")
 }
 
