@@ -11,6 +11,49 @@ folder; this file is the aggregated index.
 
 ## Unreleased
 
+## v0.7.0 - 2026-05-06
+
+See [`changelog/v0.7.0.md`](changelog/v0.7.0.md).
+
+* feat(initconfig): port `Python/preconfig.c`, `Python/getenv.c`, and
+  the `PyConfig` subset of `Python/initconfig.c`. PyPreConfig and
+  PyConfig with the three named initializers, env-var merge,
+  `_PyOS_GetOpt` plus `config_parse_cmdline`, and `_PyConfig_Read`
+  walking the precedence chain.
+* feat(pathconfig): port `Python/getpath.c` for darwin and linux.
+  Resolves prefix / exec_prefix / `sys.path` from the executable's
+  location with the documented fallbacks.
+* feat(lifecycle): port `pylifecycle.c` `pyinit_core` / `pyinit_main`
+  / `Py_FinalizeEx`, plus `Modules/main.c` `Py_Main` as the unified
+  entry that reads argv into PyConfig, inits, dispatches, finalizes.
+* feat(pythonrun): port `pythonrun.c` `PyRun_SimpleStringFlags`,
+  `PyRun_AnyFileExFlags`, `PyRun_InteractiveLoopFlags`, and the
+  three-arm dispatch panel. The v0.6 `cmd/gopy -c` smoke fixtures
+  re-root onto `pythonrun.RunString`.
+* feat(errors): port `_PyErr_Print` with SystemExit short-circuit.
+* feat(sys): port the `_PySys_Create` static attribute slice, the
+  PyConfig-driven `sys.argv` / `sys.path` / `sys.flags` panel, the
+  runtime helpers (`exit`, `getrecursionlimit`, `setrecursionlimit`,
+  `getrefcount`, `intern`, `gettrace`, `settrace`,
+  `getfilesystemencoding`), and `sys.implementation` with the gopy
+  `cache_tag = "gopy-3140"`.
+* feat(builtins): port the iteration panel (`iter`, `next`,
+  `enumerate`, `zip`, `range`, `reversed`, `map`, `filter`), the
+  reflection panel (`type`, `isinstance`, `issubclass`, `id`,
+  `hash`, `repr`, `len`, `callable`), the attribute panel
+  (`getattr`, `hasattr`, `setattr`, `delattr`), the aggregation
+  panel (`sum`, `min`, `max`, `any`, `all`, `sorted`), the numeric
+  / format panel (`abs`, `divmod`, `pow`, `chr`, `ord`, `bin`,
+  `oct`, `hex`, `ascii`, `format`), and the constructor wrappers
+  (`int`, `float`, `bool`, `list`, `tuple`, `dict`). PEP 515
+  underscore stripping in `int(...)` parsing.
+* feat(warnings): port `_warnings.c`. Action / Category / Filter
+  model, `_PyWarnings_InitState` seeded defaults, `_Py_Warn`
+  dispatch, the per-module `__warningregistry__` dedup with the
+  `__once__` bucket for `ActionOnce`, and the user-facing
+  `simplefilter` / `filterwarnings` / `resetwarnings` from
+  `Lib/_py_warnings.py`.
+
 ## v0.5.5 - 2026-05-05
 
 See [`changelog/v0.5.5.md`](changelog/v0.5.5.md).
