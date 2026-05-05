@@ -84,7 +84,15 @@ func UnaryUnaryPositive(ts *state.Thread, v objects.Object) (objects.Object, err
 //
 // CPython: Python/intrinsics.c list_to_tuple
 func UnaryListToTuple(ts *state.Thread, v objects.Object) (objects.Object, error) {
-	return nil, notImplemented("UnaryListToTuple", "list-to-tuple needs list+tuple iteration helpers")
+	l, ok := v.(*objects.List)
+	if !ok {
+		return nil, errors.New("TypeError: LIST_TO_TUPLE expected list, got " + v.Type().Name)
+	}
+	items := make([]objects.Object, l.Len())
+	for i := range items {
+		items[i] = l.Item(i)
+	}
+	return objects.NewTuple(items), nil
 }
 
 // UnaryTypevar builds a PEP 695 TypeVar(name) runtime object.

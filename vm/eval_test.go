@@ -21,7 +21,7 @@ func TestEvalNotImplementedSurface(t *testing.T) {
 	ts := state.NewThread()
 	// BINARY_OP is not in the hand-written panel, so dispatch should
 	// fall through to ErrNotImplemented.
-	co := codeWithBytecode(instr(compile.LOAD_DEREF, 0))
+	co := codeWithBytecode(instr(compile.YIELD_VALUE, 0))
 	_, err := EvalCode(ts, co, nil, nil)
 	if err == nil {
 		t.Fatal("expected ErrNotImplemented for ungenerated dispatch")
@@ -33,13 +33,13 @@ func TestEvalNotImplementedSurface(t *testing.T) {
 
 func TestEvalErrorMentionsOpcodeName(t *testing.T) {
 	ts := state.NewThread()
-	co := codeWithBytecode(instr(compile.LOAD_DEREF, 0))
+	co := codeWithBytecode(instr(compile.YIELD_VALUE, 0))
 	_, err := EvalCode(ts, co, nil, nil)
 	if err == nil {
 		t.Fatal("expected error")
 	}
-	if got := err.Error(); !contains(got, "LOAD_DEREF") {
-		t.Errorf("error %q should mention BINARY_OP", got)
+	if got := err.Error(); !contains(got, "YIELD_VALUE") {
+		t.Errorf("error %q should mention YIELD_VALUE", got)
 	}
 }
 
@@ -69,7 +69,7 @@ func TestEvalExtendedArgFetch(t *testing.T) {
 	ts := state.NewThread()
 	// EXTENDED_ARG 0x01, then BINARY_OP 0x02 -> oparg should be 0x0102.
 	// BINARY_OP is unimplemented so we expect ErrNotImplemented to bubble.
-	bc := append(instr(compile.EXTENDED_ARG, 1), instr(compile.LOAD_DEREF, 2)...)
+	bc := append(instr(compile.EXTENDED_ARG, 1), instr(compile.YIELD_VALUE, 2)...)
 	co := codeWithBytecode(bc)
 
 	_, err := EvalCode(ts, co, nil, nil)
@@ -167,6 +167,88 @@ func TestEvalMakeFunctionAndCall(t *testing.T) {
 	got, _ := v.(*objects.Int).Int64()
 	if got != 7 {
 		t.Errorf("got %d, want 7", got)
+	}
+}
+
+func TestEvalListAppendAndExtend(t *testing.T) {
+	ts := state.NewThread()
+	// BUILD_LIST 0; LOAD_CONST 0; LIST_APPEND 1; RETURN_VALUE.
+	co := &objects.Code{
+		Code: append(append(append(
+			instr(compile.BUILD_LIST, 0),
+			instr(compile.LOAD_CONST, 0)...),
+			instr(compile.LIST_APPEND, 1)...),
+			instr(compile.RETURN_VALUE, 0)...),
+		Consts:    []any{int64(42)},
+		Stacksize: 4,
+	}
+	v, err := EvalCode(ts, co, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	l, ok := v.(*objects.List)
+	if !ok || l.Len() != 1 {
+		t.Fatalf("got %T len? want list len 1", v)
+	}
+	got, _ := l.Item(0).(*objects.Int).Int64()
+	if got != 42 {
+		t.Errorf("appended value = %d, want 42", got)
+	}
+}
+
+func TestEvalCallIntrinsic1ListToTuple(t *testing.T) {
+	ts := state.NewThread()
+	// LOAD_CONST 0 (list[1,2]); CALL_INTRINSIC_1 6 (UnaryListToTupleID);
+	// RETURN_VALUE.
+	src := objects.NewList([]objects.Object{objects.NewInt(1), objects.NewInt(2)})
+	co := &objects.Code{
+		Code: append(append(
+			instr(compile.LOAD_CONST, 0),
+			instr(compile.CALL_INTRINSIC_1, 6)...),
+			instr(compile.RETURN_VALUE, 0)...),
+		Consts:    []any{src},
+		Stacksize: 4,
+	}
+	v, err := EvalCode(ts, co, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tup, ok := v.(*objects.Tuple)
+	if !ok || tup.Len() != 2 {
+		t.Fatalf("got %T, want *Tuple len 2", v)
+	}
+}
+
+func TestEvalCallKw(t *testing.T) {
+	ts := state.NewThread()
+	// Builtin that takes one positional + one keyword.
+	greet := objects.NewBuiltinFunction("greet", func(args []objects.Object, kw map[string]objects.Object) (objects.Object, error) {
+		name, _ := objects.Str(args[0])
+		excl, _ := objects.Str(kw["excl"])
+		return objects.NewStr(name + excl), nil
+	})
+	kwnames := objects.NewTuple([]objects.Object{objects.NewStr("excl")})
+	co := &objects.Code{
+		// LOAD_CONST 0 (greet); PUSH_NULL; LOAD_CONST 1 ("hi"); LOAD_CONST 2 ("!");
+		// LOAD_CONST 3 (kwnames tuple); CALL_KW 2; RETURN_VALUE.
+		Code: append(append(append(append(append(append(
+			instr(compile.LOAD_CONST, 0),
+			instr(compile.PUSH_NULL, 0)...),
+			instr(compile.LOAD_CONST, 1)...),
+			instr(compile.LOAD_CONST, 2)...),
+			instr(compile.LOAD_CONST, 3)...),
+			instr(compile.CALL_KW, 2)...),
+			instr(compile.RETURN_VALUE, 0)...),
+		Consts:    []any{greet, "hi", "!", kwnames},
+		Stacksize: 8,
+	}
+	v, err := EvalCode(ts, co, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, _ := objects.Str(v)
+	if s != "hi!" {
+		t.Errorf("got %q, want %q", s, "hi!")
 	}
 }
 

@@ -88,7 +88,14 @@ func TestBinaryInvalidErrors(t *testing.T) {
 }
 
 func TestStubHelpersReturnNotImplemented(t *testing.T) {
+	// Implemented helpers, skip them in the stub sweep.
+	implementedUnary := map[int]bool{
+		UnaryListToTupleID: true,
+	}
 	for i := 1; i <= MaxUnary; i++ {
+		if implementedUnary[i] {
+			continue
+		}
 		_, err := UnaryTable[i](nil, nil)
 		var nie *notImplementedError
 		if !errors.As(err, &nie) {

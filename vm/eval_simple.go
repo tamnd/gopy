@@ -472,6 +472,343 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, retVal
 		e.pushObject(fn)
 		return e.advance(), nil, nil, false, true, nil
 
+	case compile.SET_FUNCTION_ATTRIBUTE:
+		// Stack: [func, attr]. oparg's bit identifies the attribute:
+		// 0x01 = defaults tuple, 0x02 = kwdefaults dict, 0x04 = annotations,
+		// 0x08 = closure tuple. v0.6 stores the ones we know about and
+		// ignores the rest.
+		//
+		// CPython: Python/bytecodes.c SET_FUNCTION_ATTRIBUTE
+		fnObj := e.popObject()
+		attr := e.popObject()
+		fn, ok := fnObj.(*objects.Function)
+		if !ok {
+			return 0, nil, nil, false, true, fmt.Errorf("SET_FUNCTION_ATTRIBUTE: TOS not a function, got %T", fnObj)
+		}
+		switch oparg {
+		case 0x01:
+			if t, ok := attr.(*objects.Tuple); ok {
+				fn.Defaults = t
+			}
+		case 0x02:
+			if d, ok := attr.(*objects.Dict); ok {
+				fn.KwDefaults = d
+			}
+		case 0x08:
+			if t, ok := attr.(*objects.Tuple); ok {
+				fn.Closure = t
+			}
+		}
+		e.pushObject(fn)
+		return e.advance(), nil, nil, false, true, nil
+
+	case compile.LOAD_DEREF:
+		// oparg indexes the cell+free slots (cells first, then frees).
+		//
+		// CPython: Python/bytecodes.c LOAD_DEREF
+		ref := e.f.LocalsPlus[frame.NLocalsOf(e.f.Code)+int(oparg)]
+		cellObj := ref.AsObject()
+		cell, ok := cellObj.(*objects.Cell)
+		if !ok || cell == nil {
+			return 0, nil, nil, false, true, fmt.Errorf("LOAD_DEREF: slot %d not a cell, got %T", oparg, cellObj)
+		}
+		if cell.Contents == nil {
+			return 0, nil, nil, false, true, fmt.Errorf("NameError: free variable referenced before assignment")
+		}
+		e.pushObject(cell.Contents)
+		return e.advance(), nil, nil, false, true, nil
+
+	case compile.STORE_DEREF:
+		v := e.popObject()
+		ref := e.f.LocalsPlus[frame.NLocalsOf(e.f.Code)+int(oparg)]
+		cellObj := ref.AsObject()
+		cell, ok := cellObj.(*objects.Cell)
+		if !ok {
+			cell = objects.NewCell(nil)
+			e.f.LocalsPlus[frame.NLocalsOf(e.f.Code)+int(oparg)] = stackref.FromObject(cell)
+		}
+		cell.Contents = v
+		return e.advance(), nil, nil, false, true, nil
+
+	case compile.DELETE_DEREF:
+		ref := e.f.LocalsPlus[frame.NLocalsOf(e.f.Code)+int(oparg)]
+		cell, ok := ref.AsObject().(*objects.Cell)
+		if !ok || cell.Contents == nil {
+			return 0, nil, nil, false, true, fmt.Errorf("NameError: free variable referenced before assignment")
+		}
+		cell.Contents = nil
+		return e.advance(), nil, nil, false, true, nil
+
+	case compile.MAKE_CELL:
+		// Promote fast-local oparg to a fresh cell slot at the cells
+		// region. The slot indexes are aligned: cell variable i lives at
+		// CellsStart + i and shadows local oparg.
+		//
+		// CPython: Python/bytecodes.c MAKE_CELL
+		base := frame.NLocalsOf(e.f.Code)
+		idx := base + int(oparg)
+		var contents objects.Object
+		if idx < base+frame.NCellsOf(e.f.Code) {
+			ref := e.f.LocalsPlus[idx]
+			if !ref.IsNull() {
+				if existing, ok := ref.AsObject().(*objects.Cell); ok {
+					contents = existing.Contents
+				} else {
+					contents = ref.AsObject()
+				}
+			}
+		}
+		cell := objects.NewCell(contents)
+		e.f.LocalsPlus[idx] = stackref.FromObject(cell)
+		return e.advance(), nil, nil, false, true, nil
+
+	case compile.COPY_FREE_VARS:
+		// oparg = number of free vars. Source: f.Func's Closure tuple.
+		// Target: free-var slots, which start at NLocals + NCells.
+		//
+		// CPython: Python/bytecodes.c COPY_FREE_VARS
+		n := int(oparg)
+		fn, ok := e.f.Func.(*objects.Function)
+		if !ok || fn.Closure == nil {
+			return 0, nil, nil, false, true, fmt.Errorf("COPY_FREE_VARS: frame has no closure")
+		}
+		dst := frame.FreesStart(e.f.Code)
+		for i := 0; i < n; i++ {
+			cell := fn.Closure.Item(i)
+			e.f.LocalsPlus[dst+i] = stackref.FromObject(cell)
+		}
+		return e.advance(), nil, nil, false, true, nil
+
+	case compile.LIST_APPEND:
+		// Stack: ..., list, ..., value (oparg slots above list).
+		// Pops value, appends to the list at depth oparg.
+		//
+		// CPython: Python/bytecodes.c LIST_APPEND
+		v := e.popObject()
+		l, ok := e.peek(int(oparg) - 1).AsObject().(*objects.List)
+		if !ok {
+			return 0, nil, nil, false, true, fmt.Errorf("LIST_APPEND: target not a list")
+		}
+		l.Append(v)
+		return e.advance(), nil, nil, false, true, nil
+
+	case compile.LIST_EXTEND:
+		// Pops iter, extends list at depth oparg with all its items.
+		v := e.popObject()
+		l, ok := e.peek(int(oparg) - 1).AsObject().(*objects.List)
+		if !ok {
+			return 0, nil, nil, false, true, fmt.Errorf("LIST_EXTEND: target not a list")
+		}
+		items, eerr := iterToSlice(v)
+		if eerr != nil {
+			return 0, nil, nil, false, true, eerr
+		}
+		for _, it := range items {
+			l.Append(it)
+		}
+		return e.advance(), nil, nil, false, true, nil
+
+	case compile.MAP_ADD:
+		// Stack: ..., dict, ..., key, value. Pops key+value, sets in
+		// the dict at depth oparg.
+		//
+		// CPython: Python/bytecodes.c MAP_ADD
+		val := e.popObject()
+		key := e.popObject()
+		d, ok := e.peek(int(oparg) - 1).AsObject().(*objects.Dict)
+		if !ok {
+			return 0, nil, nil, false, true, fmt.Errorf("MAP_ADD: target not a dict")
+		}
+		if serr := d.SetItem(key, val); serr != nil {
+			return 0, nil, nil, false, true, serr
+		}
+		return e.advance(), nil, nil, false, true, nil
+
+	case compile.DICT_UPDATE, compile.DICT_MERGE:
+		// Pop dict-like and merge into the dict at depth oparg.
+		// DICT_MERGE additionally errors on duplicate keys; v0.6 treats
+		// both as "last write wins".
+		src := e.popObject()
+		d, ok := e.peek(int(oparg) - 1).AsObject().(*objects.Dict)
+		if !ok {
+			return 0, nil, nil, false, true, fmt.Errorf("%s: target not a dict", opcodeName(op))
+		}
+		srcDict, ok := src.(*objects.Dict)
+		if !ok {
+			return 0, nil, nil, false, true, fmt.Errorf("%s: source not a dict", opcodeName(op))
+		}
+		for _, k := range srcDict.Keys() {
+			v, gerr := srcDict.GetItem(k)
+			if gerr != nil {
+				return 0, nil, nil, false, true, gerr
+			}
+			if serr := d.SetItem(k, v); serr != nil {
+				return 0, nil, nil, false, true, serr
+			}
+		}
+		return e.advance(), nil, nil, false, true, nil
+
+	case compile.BUILD_SET:
+		// v0.6 has no Set type yet; surface as TypeError so the
+		// dispatch table is wired and tests can detect the gap.
+		return 0, nil, nil, false, true, fmt.Errorf("BUILD_SET: set type not yet implemented in v0.6")
+
+	case compile.CALL_INTRINSIC_1:
+		v := e.popObject()
+		if int(oparg) >= len(intrinsicsUnary) {
+			return 0, nil, nil, false, true, fmt.Errorf("CALL_INTRINSIC_1: oparg %d out of range", oparg)
+		}
+		fn := intrinsicsUnary[oparg]
+		if fn == nil {
+			return 0, nil, nil, false, true, fmt.Errorf("CALL_INTRINSIC_1: id %d unbound", oparg)
+		}
+		out, cerr := fn(e.ts, v)
+		if cerr != nil {
+			return 0, nil, nil, false, true, cerr
+		}
+		e.pushObject(out)
+		return e.advance(), nil, nil, false, true, nil
+
+	case compile.CALL_INTRINSIC_2:
+		rhs := e.popObject()
+		lhs := e.popObject()
+		if int(oparg) >= len(intrinsicsBinary) {
+			return 0, nil, nil, false, true, fmt.Errorf("CALL_INTRINSIC_2: oparg %d out of range", oparg)
+		}
+		fn := intrinsicsBinary[oparg]
+		if fn == nil {
+			return 0, nil, nil, false, true, fmt.Errorf("CALL_INTRINSIC_2: id %d unbound", oparg)
+		}
+		out, cerr := fn(e.ts, lhs, rhs)
+		if cerr != nil {
+			return 0, nil, nil, false, true, cerr
+		}
+		e.pushObject(out)
+		return e.advance(), nil, nil, false, true, nil
+
+	case compile.RERAISE:
+		// oparg n: stack contains [..., exc, n_other]. Pop the exception
+		// (top after dropping n) and re-raise. v0.6 keeps it simple:
+		// pop top, raise.
+		exc := e.popObject()
+		return 0, nil, nil, false, true, fmt.Errorf("%s", objectRepr(exc))
+
+	case compile.INTERPRETER_EXIT:
+		// CPython uses this to mark the implicit module-end return; for
+		// our purposes it terminates the eval loop with the value at TOS.
+		v := e.popObject()
+		return 0, v, nil, true, true, nil
+
+	case compile.LOAD_BUILD_CLASS:
+		// __build_class__ isn't ported until objects/class lands. Surface
+		// a clear error so a class def fails loudly instead of silently
+		// running the body as a free expression.
+		return 0, nil, nil, false, true, fmt.Errorf("LOAD_BUILD_CLASS: classes not yet implemented in v0.6")
+
+	case compile.UNPACK_EX:
+		// oparg low byte: items before *rest. high byte: items after.
+		// Stack pre: [seq]. Stack post: [item_after_n], ..., [rest_list],
+		// ..., [item_before_0]. v0.6 surfaces only the simple case.
+		before := int(oparg & 0xFF)
+		after := int(oparg >> 8)
+		seq := e.popObject()
+		items, ierr := iterToSlice(seq)
+		if ierr != nil {
+			return 0, nil, nil, false, true, ierr
+		}
+		if len(items) < before+after {
+			return 0, nil, nil, false, true, fmt.Errorf("ValueError: not enough values to unpack (expected at least %d, got %d)", before+after, len(items))
+		}
+		rest := items[before : len(items)-after]
+		// Push: tail items, then rest, then head items, in reverse so
+		// head[0] ends up at TOS.
+		for i := len(items) - 1; i >= len(items)-after; i-- {
+			e.pushObject(items[i])
+		}
+		e.pushObject(objects.NewList(rest))
+		for i := before - 1; i >= 0; i-- {
+			e.pushObject(items[i])
+		}
+		return e.advance(), nil, nil, false, true, nil
+
+	case compile.CALL_KW:
+		// Stack: [callable, NULL_or_self, arg0, ..., argN, kwnames_tuple].
+		// oparg is total positional+keyword count; kwnames tuple length is
+		// the keyword count.
+		//
+		// CPython: Python/bytecodes.c CALL_KW
+		kwnamesObj := e.popObject()
+		kwnames, ok := kwnamesObj.(*objects.Tuple)
+		if !ok {
+			return 0, nil, nil, false, true, fmt.Errorf("CALL_KW: kwnames not a tuple")
+		}
+		nkw := kwnames.Len()
+		total := int(oparg)
+		npos := total - nkw
+		kwargs := make(map[string]objects.Object, nkw)
+		for i := nkw - 1; i >= 0; i-- {
+			v := e.popObject()
+			k, kerr := objects.Str(kwnames.Item(i))
+			if kerr != nil {
+				return 0, nil, nil, false, true, kerr
+			}
+			kwargs[k] = v
+		}
+		args := make([]objects.Object, npos)
+		for i := npos - 1; i >= 0; i-- {
+			args[i] = e.popObject()
+		}
+		selfOrNull := e.popObject()
+		callable := e.popObject()
+		if selfOrNull != nil {
+			args = append([]objects.Object{selfOrNull}, args...)
+		}
+		out, cerr := objects.Call(callable, args, kwargs)
+		if cerr != nil {
+			return 0, nil, nil, false, true, cerr
+		}
+		e.pushObject(out)
+		return e.advance(), nil, nil, false, true, nil
+
+	case compile.CALL_FUNCTION_EX:
+		// Stack: [callable, NULL, args_iterable, kwargs_dict_or_NULL].
+		// oparg bit 0: kwargs present.
+		//
+		// CPython: Python/bytecodes.c CALL_FUNCTION_EX
+		var kwargs map[string]objects.Object
+		if oparg&1 != 0 {
+			kwObj := e.popObject()
+			d, ok := kwObj.(*objects.Dict)
+			if !ok {
+				return 0, nil, nil, false, true, fmt.Errorf("CALL_FUNCTION_EX: kwargs not a dict")
+			}
+			kwargs = make(map[string]objects.Object, d.Len())
+			for _, k := range d.Keys() {
+				ks, kerr := objects.Str(k)
+				if kerr != nil {
+					return 0, nil, nil, false, true, kerr
+				}
+				v, gerr := d.GetItem(k)
+				if gerr != nil {
+					return 0, nil, nil, false, true, gerr
+				}
+				kwargs[ks] = v
+			}
+		}
+		argsObj := e.popObject()
+		args, ierr := iterToSlice(argsObj)
+		if ierr != nil {
+			return 0, nil, nil, false, true, ierr
+		}
+		_ = e.popObject() // NULL_or_self placeholder
+		callable := e.popObject()
+		out, cerr := objects.Call(callable, args, kwargs)
+		if cerr != nil {
+			return 0, nil, nil, false, true, cerr
+		}
+		e.pushObject(out)
+		return e.advance(), nil, nil, false, true, nil
+
 	case compile.LOAD_NAME, compile.LOAD_GLOBAL, compile.STORE_NAME,
 		compile.STORE_GLOBAL, compile.DELETE_NAME, compile.DELETE_GLOBAL:
 		v, perr := e.execNameOp(op, oparg)
