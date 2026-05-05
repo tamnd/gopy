@@ -1,10 +1,10 @@
 package objects
 
-import "errors"
-
-// BuiltinFunction wraps a Go function so the VM can call it through the
-// Type.Call slot. v0.6 only needs the positional-args fast path; kwargs
-// and the bound-method shortcut wait on spec 1684.
+// BuiltinFunction wraps a Go function so the VM can call it through
+// the type's Vectorcall / Call slots. The Fn closure shape mirrors
+// METH_VARARGS|METH_KEYWORDS (positional slice plus a kwargs map),
+// which is the convention CPython's cfunction_call dispatches when
+// vectorcall is unavailable.
 //
 // CPython: Include/cpython/methodobject.h PyCFunctionObject
 type BuiltinFunction struct {
@@ -15,16 +15,14 @@ type BuiltinFunction struct {
 
 // BuiltinFunctionType is the type singleton for built-in functions.
 //
-// CPython: Objects/methodobject.c PyCFunction_Type
+// CPython: Objects/methodobject.c:357 PyCFunction_Type
 var BuiltinFunctionType = NewType("builtin_function_or_method", []*Type{objectType})
 
 func init() {
 	BuiltinFunctionType.Repr = builtinFunctionRepr
 	BuiltinFunctionType.Str = builtinFunctionRepr
-	BuiltinFunctionType.Call = func(o Object, args []Object, kwargs map[string]Object) (Object, error) {
-		bf := o.(*BuiltinFunction)
-		return bf.Fn(args, kwargs)
-	}
+	BuiltinFunctionType.Call = builtinFunctionCall
+	BuiltinFunctionType.Vectorcall = builtinFunctionVectorcall
 }
 
 // NewBuiltinFunction wraps fn under name.
@@ -39,14 +37,40 @@ func builtinFunctionRepr(o Object) (string, error) {
 	return "<built-in function " + bf.Name + ">", nil
 }
 
-// Call routes through callable.Type().Call. Returns an error if the
-// type does not implement tp_call.
+// builtinFunctionCall is the tp_call slot. It mirrors cfunction_call
+// for the METH_VARARGS|METH_KEYWORDS case, since gopy's BuiltinFunction
+// always carries a (slice, map) closure.
 //
-// CPython: Objects/call.c PyObject_Call
-func Call(callable Object, args []Object, kwargs map[string]Object) (Object, error) {
-	t := callable.Type()
-	if t.Call == nil {
-		return nil, errors.New("TypeError: '" + t.Name + "' object is not callable")
+// CPython: Objects/methodobject.c:544 cfunction_call
+func builtinFunctionCall(o Object, args []Object, kwargs map[string]Object) (Object, error) {
+	bf := o.(*BuiltinFunction)
+	return bf.Fn(args, kwargs)
+}
+
+// builtinFunctionVectorcall is the Vectorcall slot for built-in
+// functions. It unpacks args[]+kwnames into the (positional, kwargs)
+// shape bf.Fn expects, the same way cfunction_vectorcall_FASTCALL_KEYWORDS
+// hands its operands to a METH_FASTCALL|METH_KEYWORDS C function.
+//
+// CPython: Objects/methodobject.c:454 cfunction_vectorcall_FASTCALL_KEYWORDS
+func builtinFunctionVectorcall(callable Object, args []Object, nargsf uint, kwnames *Tuple) (Object, error) {
+	bf := callable.(*BuiltinFunction)
+	nargs := VectorcallNargs(nargsf)
+	pos := make([]Object, nargs)
+	if nargs > 0 {
+		copy(pos, args[:nargs])
 	}
-	return t.Call(callable, args, kwargs)
+	var kwargs map[string]Object
+	if kwnames != nil && kwnames.Len() > 0 {
+		nkw := kwnames.Len()
+		kwargs = make(map[string]Object, nkw)
+		for i := 0; i < nkw; i++ {
+			name, err := Str(kwnames.Item(i))
+			if err != nil {
+				return nil, err
+			}
+			kwargs[name] = args[nargs+i]
+		}
+	}
+	return bf.Fn(pos, kwargs)
 }

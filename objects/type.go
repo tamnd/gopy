@@ -45,7 +45,16 @@ type Type struct {
 	Iter     func(o Object) (Object, error)
 	IterNext func(o Object) (Object, error)
 	Call     func(o Object, args []Object, kwargs map[string]Object) (Object, error)
-	Dealloc  func(o Object)
+	// Vectorcall is the PEP 590 fast-call slot. When non-nil, the call
+	// machinery uses this instead of going through Call. args is a flat
+	// array of positional values followed by keyword values; nargsf is
+	// the positional count optionally combined with the
+	// VectorcallArgumentsOffset flag; kwnames is a tuple of keyword
+	// name strings (or nil).
+	//
+	// CPython: Include/cpython/object.h tp_vectorcall_offset + Py_TPFLAGS_HAVE_VECTORCALL
+	Vectorcall func(callable Object, args []Object, nargsf uint, kwnames *Tuple) (Object, error)
+	Dealloc    func(o Object)
 
 	Number   *NumberMethods
 	Sequence *SequenceMethods

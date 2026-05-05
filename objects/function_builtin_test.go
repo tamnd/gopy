@@ -8,7 +8,7 @@ func TestBuiltinFunctionCall(t *testing.T) {
 		b, _ := args[1].(*Int).Int64()
 		return NewInt(a + b), nil
 	})
-	v, err := Call(add, []Object{NewInt(2), NewInt(3)}, nil)
+	v, err := Vectorcall(add, []Object{NewInt(2), NewInt(3)}, 2, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -19,7 +19,7 @@ func TestBuiltinFunctionCall(t *testing.T) {
 }
 
 func TestCallNonCallable(t *testing.T) {
-	_, err := Call(NewInt(0), nil, nil)
+	_, err := Vectorcall(NewInt(0), nil, 0, nil)
 	if err == nil {
 		t.Fatal("expected error for non-callable int")
 	}

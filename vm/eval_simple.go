@@ -359,7 +359,7 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, retVal
 			// Prepend it to the positional args.
 			args = append([]objects.Object{selfOrNull}, args...)
 		}
-		out, cerr := objects.Call(callable, args, nil)
+		out, cerr := objects.Vectorcall(callable, args, uint(len(args)), nil)
 		if cerr != nil {
 			return 0, nil, nil, false, true, cerr
 		}
@@ -840,25 +840,19 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, retVal
 		nkw := kwnames.Len()
 		total := int(oparg)
 		npos := total - nkw
-		kwargs := make(map[string]objects.Object, nkw)
-		for i := nkw - 1; i >= 0; i-- {
-			v := e.popObject()
-			k, kerr := objects.Str(kwnames.Item(i))
-			if kerr != nil {
-				return 0, nil, nil, false, true, kerr
-			}
-			kwargs[k] = v
-		}
-		args := make([]objects.Object, npos)
-		for i := npos - 1; i >= 0; i-- {
-			args[i] = e.popObject()
+		// Lay out args[] flat: positionals first, then keyword values
+		// in the same order as kwnames, matching the vectorcall ABI.
+		all := make([]objects.Object, total)
+		for i := total - 1; i >= 0; i-- {
+			all[i] = e.popObject()
 		}
 		selfOrNull := e.popObject()
 		callable := e.popObject()
 		if selfOrNull != nil {
-			args = append([]objects.Object{selfOrNull}, args...)
+			all = append([]objects.Object{selfOrNull}, all...)
+			npos++
 		}
-		out, cerr := objects.Call(callable, args, kwargs)
+		out, cerr := objects.Vectorcall(callable, all, uint(npos), kwnames)
 		if cerr != nil {
 			return 0, nil, nil, false, true, cerr
 		}
@@ -870,34 +864,23 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, retVal
 		// oparg bit 0: kwargs present.
 		//
 		// CPython: Python/bytecodes.c CALL_FUNCTION_EX
-		var kwargs map[string]objects.Object
+		var kwargs *objects.Dict
 		if oparg&1 != 0 {
 			kwObj := e.popObject()
 			d, ok := kwObj.(*objects.Dict)
 			if !ok {
 				return 0, nil, nil, false, true, fmt.Errorf("CALL_FUNCTION_EX: kwargs not a dict")
 			}
-			kwargs = make(map[string]objects.Object, d.Len())
-			for _, k := range d.Keys() {
-				ks, kerr := objects.Str(k)
-				if kerr != nil {
-					return 0, nil, nil, false, true, kerr
-				}
-				v, gerr := d.GetItem(k)
-				if gerr != nil {
-					return 0, nil, nil, false, true, gerr
-				}
-				kwargs[ks] = v
-			}
+			kwargs = d
 		}
 		argsObj := e.popObject()
-		args, ierr := iterToSlice(argsObj)
+		argsSlice, ierr := iterToSlice(argsObj)
 		if ierr != nil {
 			return 0, nil, nil, false, true, ierr
 		}
 		_ = e.popObject() // NULL_or_self placeholder
 		callable := e.popObject()
-		out, cerr := objects.Call(callable, args, kwargs)
+		out, cerr := objects.Call(callable, objects.NewTuple(argsSlice), kwargs)
 		if cerr != nil {
 			return 0, nil, nil, false, true, cerr
 		}
