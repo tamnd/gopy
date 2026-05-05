@@ -853,6 +853,63 @@ func actionPgenCollectCallSeqs(p *Parser, args ...any) any {
 	return out
 }
 
+// actionPgenSeqExtractStarredExprs lifts starred positional values out
+// of a kwargs-only args alt. The args rule's alt 1 wraps the result as
+// the args of a dummy Call carrier so the surrounding primary rule can
+// pull positional and keyword sequences off it.
+//
+// CPython: Parser/action_helpers.c:797 _PyPegen_seq_extract_starred_exprs
+func actionPgenSeqExtractStarredExprs(p *Parser, args ...any) any {
+	seq := kwargOrStarredSeqOf(argAt(args, 1))
+	return seqExtractStarredExprs(p, seq)
+}
+
+// actionPgenSeqDeleteStarredExprs returns the keyword-only entries of
+// a kwargs-only args alt, used as the keywords of the dummy Call
+// carrier produced by the args rule's alt 1.
+//
+// CPython: Parser/action_helpers.c:820 _PyPegen_seq_delete_starred_exprs
+func actionPgenSeqDeleteStarredExprs(p *Parser, args ...any) any {
+	seq := kwargOrStarredSeqOf(argAt(args, 1))
+	return seqDeleteStarredExprs(p, seq)
+}
+
+// actionAstKeyword builds an *ast.Keyword from (arg, value). arg is
+// the keyword identifier string (or nil for `**value`); value is the
+// expression on the right-hand side.
+//
+// CPython: Python/Python-ast.c _PyAST_keyword
+func actionAstKeyword(p *Parser, args ...any) any {
+	_ = p
+	value := asExpr(argAt(args, 1))
+	if value == nil {
+		return placeholderMatched
+	}
+	var arg *string
+	switch v := argAt(args, 0).(type) {
+	case nil:
+	case string:
+		if v != "" {
+			s := v
+			arg = &s
+		}
+	case *string:
+		arg = v
+	}
+	return &ast.Keyword{Arg: arg, Value: value, Pos: ast.NoPos}
+}
+
+// actionPgenDummyName surfaces the placeholder Name CPython uses as
+// the function side of the Call carrier emitted by the args rule's
+// alt 1 and by collect_call_seqs. The surrounding primary rule swaps
+// this name out for the real callee.
+//
+// CPython: Parser/action_helpers.c:11 _PyPegen_dummy_name
+func actionPgenDummyName(p *Parser, args ...any) any {
+	_ = args
+	return dummyName(p)
+}
+
 // argSeqOf walks v and collects *ast.Arg entries. The parameters
 // rules return *ast.Arg values from `param`-shaped alts; gather/loop
 // alts wrap them in []any. Returns nil when no arg is present so the
@@ -1618,6 +1675,8 @@ func keywordSeqOf(v any) ast.Seq[*ast.Keyword] {
 		case nil:
 		case *ast.Keyword:
 			out = append(out, t)
+		case ast.Seq[*ast.Keyword]:
+			out = append(out, t...)
 		case []*ast.Keyword:
 			out = append(out, t...)
 		case []any:

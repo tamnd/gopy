@@ -26,6 +26,8 @@ func TestTranslateActionShapes(t *testing.T) {
 		{"_PyAST_Constant(Py_True, NULL, EXTRA)", "actionAstConstant(p, pyTrueSentinel, nil)", true},
 		{"_PyAST_Assign(a, b, NEW_TYPE_COMMENT(p, e), EXTRA)", "actionAstAssign(p, a, b, e)", true},
 		{"_PyPegen_seq_insert_in_front(p, a, b)", "actionPgenSeqInsertInFront(p, p, a, b)", true},
+		{"CHECK_NULL_ALLOWED(asdl_expr_seq*, _PyPegen_seq_extract_starred_exprs(p, a))", "actionPgenSeqExtractStarredExprs(p, p, a)", true},
+		{"_PyAST_Call(_PyPegen_dummy_name(p), CHECK_NULL_ALLOWED(asdl_expr_seq*, _PyPegen_seq_extract_starred_exprs(p, a)), CHECK_NULL_ALLOWED(asdl_keyword_seq*, _PyPegen_seq_delete_starred_exprs(p, a)), EXTRA)", "actionAstCall(p, actionPgenDummyName(p, p), actionPgenSeqExtractStarredExprs(p, p, a), actionPgenSeqDeleteStarredExprs(p, p, a))", true},
 		{"RAISE_SYNTAX_ERROR(\"oops\")", `raiseAction(p, "RAISE_SYNTAX_ERROR", "oops")`, true},
 		{"a->lineno", "", false}, // member access on any-typed bound
 		{"unknown_ident", "", false},

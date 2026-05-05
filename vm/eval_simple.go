@@ -42,6 +42,16 @@ func wrapConst(v any) (objects.Object, error) {
 		return objects.NewFloat(x), nil
 	case string:
 		return objects.NewStr(x), nil
+	case *compile.ConstTuple:
+		items := make([]objects.Object, len(x.Values))
+		for i, raw := range x.Values {
+			item, err := wrapConst(raw)
+			if err != nil {
+				return nil, err
+			}
+			items[i] = item
+		}
+		return objects.NewTuple(items), nil
 	case objects.Object:
 		return x, nil
 	}

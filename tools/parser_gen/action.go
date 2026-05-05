@@ -434,8 +434,13 @@ func (tr *cTranslator) parseIDExpr() (string, bool) {
 	// Bare C type names show up inside CHECK(type_ty, expr) as a
 	// type tag. translateCall drops the leading args, so any string
 	// works; emit a typed-nil so the result still type-checks if a
-	// later pattern slips through.
+	// later pattern slips through. Type tags often appear with one
+	// or more `*` suffixes (`asdl_expr_seq*`, `expr_ty**`); consume
+	// them here so the surrounding parseCall sees a clean `,` next.
 	if cTypeNames[name] {
+		for tr.peek().text == "*" {
+			tr.advance()
+		}
 		return "(any)(nil)", true
 	}
 	if v, ok := astEnumConstants[name]; ok {

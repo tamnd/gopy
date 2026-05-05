@@ -1757,7 +1757,7 @@ func parseRule_augassign(p *Parser) any {
 			op := p.ExpectToken(tokenize.ATEQUAL)
 			if op == nil { return nil }
 			_ = op
-			return []any{op}
+			return actionPgenAugoperator(p, p, ast.MatMult)
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_augassign, v)
 			return v
@@ -2035,7 +2035,7 @@ func parseRule_global_stmt(p *Parser) any {
 			a := parseRule__gather_13(p)
 			if a == nil { return nil }
 			_ = a
-			return []any{kw, a}
+			return actionAstGlobal(p, actionPgenMapNamesToIds(p, p, a))
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_global_stmt, v)
 			return v
@@ -2061,7 +2061,7 @@ func parseRule_nonlocal_stmt(p *Parser) any {
 			a := parseRule__gather_13(p)
 			if a == nil { return nil }
 			_ = a
-			return []any{kw, a}
+			return actionAstNonlocal(p, actionPgenMapNamesToIds(p, p, a))
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_nonlocal_stmt, v)
 			return v
@@ -3576,7 +3576,7 @@ func parseRule_if_stmt(p *Parser) any {
 			c := parseRule_elif_stmt(p)
 			if c == nil { return nil }
 			_ = c
-			return []any{kw, a, op, b, c}
+			return actionAstIf(p, a, b, actionPgenSingletonSeq(p, p, c))
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_if_stmt, v)
 			return v
@@ -3648,7 +3648,7 @@ func parseRule_elif_stmt(p *Parser) any {
 			c := parseRule_elif_stmt(p)
 			if c == nil { return nil }
 			_ = c
-			return []any{kw, a, op, b, c}
+			return actionAstIf(p, a, b, actionPgenSingletonSeq(p, p, c))
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_elif_stmt, v)
 			return v
@@ -4549,7 +4549,7 @@ func parseRule_subject_expr(p *Parser) any {
 			_ = op
 			values := parseRule_star_named_expressions(p)
 			_ = values
-			return []any{value, op, values}
+			return actionAstTuple(p, actionPgenSeqInsertInFront(p, p, value, values), ast.Load)
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_subject_expr, v)
 			return v
@@ -5691,7 +5691,7 @@ func parseRule_mapping_pattern(p *Parser) any {
 			op_2 := p.ExpectToken(tokenize.RBRACE)
 			if op_2 == nil { return nil }
 			_ = op_2
-			return []any{op, items, op_1, rest, opt, op_2}
+			return actionAstMatchMapping(p, actionPgenGetPatternKeys(p, p, items), actionPgenGetPatterns(p, p, items), nameIdOf(rest))
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_mapping_pattern, v)
 			return v
@@ -5712,7 +5712,7 @@ func parseRule_mapping_pattern(p *Parser) any {
 			op_1 := p.ExpectToken(tokenize.RBRACE)
 			if op_1 == nil { return nil }
 			_ = op_1
-			return []any{op, items, opt, op_1}
+			return actionAstMatchMapping(p, actionPgenGetPatternKeys(p, p, items), actionPgenGetPatterns(p, p, items), nil)
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_mapping_pattern, v)
 			return v
@@ -5867,7 +5867,7 @@ func parseRule_class_pattern(p *Parser) any {
 			op_1 := p.ExpectToken(tokenize.RPAR)
 			if op_1 == nil { return nil }
 			_ = op_1
-			return []any{cls, op, keywords, opt, op_1}
+			return actionAstMatchClass(p, cls, nil, actionPgenMapNamesToIds(p, p, actionPgenGetPatternKeys(p, p, keywords)), actionPgenGetPatterns(p, p, keywords))
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_class_pattern, v)
 			return v
@@ -5897,7 +5897,7 @@ func parseRule_class_pattern(p *Parser) any {
 			op_2 := p.ExpectToken(tokenize.RPAR)
 			if op_2 == nil { return nil }
 			_ = op_2
-			return []any{cls, op, patterns, op_1, keywords, opt, op_2}
+			return actionAstMatchClass(p, cls, patterns, actionPgenMapNamesToIds(p, p, actionPgenGetPatternKeys(p, p, keywords)), actionPgenGetPatterns(p, p, keywords))
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_class_pattern, v)
 			return v
@@ -6061,7 +6061,7 @@ func parseRule_type_params(p *Parser) any {
 			op_1 := p.ExpectToken(tokenize.RSQB)
 			if op_1 == nil { return nil }
 			_ = op_1
-			return []any{op, t, op_1}
+			return t
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_type_params, v)
 			return v
@@ -6268,7 +6268,7 @@ func parseRule_expressions(p *Parser) any {
 			_ = b
 			opt := p.ExpectToken(tokenize.COMMA)
 			_ = opt
-			return []any{a, b, opt}
+			return actionAstTuple(p, actionPgenSeqInsertInFront(p, p, a, b), ast.Load)
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_expressions, v)
 			return v
@@ -6284,7 +6284,7 @@ func parseRule_expressions(p *Parser) any {
 			op := p.ExpectToken(tokenize.COMMA)
 			if op == nil { return nil }
 			_ = op
-			return []any{a, op}
+			return actionAstTuple(p, actionPgenSingletonSeq(p, p, a), ast.Load)
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_expressions, v)
 			return v
@@ -6456,7 +6456,7 @@ func parseRule_star_expressions(p *Parser) any {
 			_ = b
 			opt := p.ExpectToken(tokenize.COMMA)
 			_ = opt
-			return []any{a, b, opt}
+			return actionAstTuple(p, actionPgenSeqInsertInFront(p, p, a, b), ast.Load)
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_star_expressions, v)
 			return v
@@ -6472,7 +6472,7 @@ func parseRule_star_expressions(p *Parser) any {
 			op := p.ExpectToken(tokenize.COMMA)
 			if op == nil { return nil }
 			_ = op
-			return []any{a, op}
+			return actionAstTuple(p, actionPgenSingletonSeq(p, p, a), ast.Load)
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_star_expressions, v)
 			return v
@@ -6699,7 +6699,7 @@ func parseRule_disjunction(p *Parser) any {
 			b := parseRule__loop1_48(p)
 			if b == nil { return nil }
 			_ = b
-			return []any{a, b}
+			return actionAstBoolOp(p, ast.Or, actionPgenSeqInsertInFront(p, p, a, b))
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_disjunction, v)
 			return v
@@ -6738,7 +6738,7 @@ func parseRule_conjunction(p *Parser) any {
 			b := parseRule__loop1_49(p)
 			if b == nil { return nil }
 			_ = b
-			return []any{a, b}
+			return actionAstBoolOp(p, ast.And, actionPgenSeqInsertInFront(p, p, a, b))
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_conjunction, v)
 			return v
@@ -6816,7 +6816,7 @@ func parseRule_comparison(p *Parser) any {
 			b := parseRule__loop1_50(p)
 			if b == nil { return nil }
 			_ = b
-			return []any{a, b}
+			return actionAstCompare(p, a, actionPgenGetCmpops(p, p, b), actionPgenGetExprs(p, p, b))
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_comparison, v)
 			return v
@@ -7937,7 +7937,7 @@ func parseRule_primary_raw(p *Parser) any {
 			b := parseRule_genexp(p)
 			if b == nil { return nil }
 			_ = b
-			return []any{a, b}
+			return actionAstCall(p, a, actionPgenSingletonSeq(p, p, b), nil)
 		}(); v != nil {
 			return v
 		}
@@ -9383,7 +9383,7 @@ func parseRule_dict(p *Parser) any {
 			op_1 := p.ExpectToken(tokenize.RBRACE)
 			if op_1 == nil { return nil }
 			_ = op_1
-			return []any{op, a, op_1}
+			return actionAstDict(p, actionPgenGetKeys(p, p, a), actionPgenGetValues(p, p, a))
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_dict, v)
 			return v
@@ -9874,7 +9874,7 @@ func parseRule_args(p *Parser) any {
 			a := parseRule_kwargs(p)
 			if a == nil { return nil }
 			_ = a
-			return []any{a}
+			return actionAstCall(p, actionPgenDummyName(p, p), actionPgenSeqExtractStarredExprs(p, p, a), actionPgenSeqDeleteStarredExprs(p, p, a))
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_args, v)
 			return v
@@ -10135,7 +10135,7 @@ func parseRule_star_targets(p *Parser) any {
 			_ = b
 			opt := p.ExpectToken(tokenize.COMMA)
 			_ = opt
-			return []any{a, b, opt}
+			return actionAstTuple(p, actionPgenSeqInsertInFront(p, p, a, b), ast.Store)
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_star_targets, v)
 			return v
@@ -10583,7 +10583,7 @@ func parseRule_t_primary_raw(p *Parser) any {
 			if b == nil { return nil }
 			_ = b
 			if !p.Lookahead(true, func(p *Parser) any { return parseRule_t_lookahead(p) }) { return nil }
-			return []any{a, b}
+			return actionAstCall(p, a, actionPgenSingletonSeq(p, p, b), nil)
 		}(); v != nil {
 			return v
 		}
@@ -10874,7 +10874,7 @@ func parseRule_type_expressions(p *Parser) any {
 			c := parseRule_expression(p)
 			if c == nil { return nil }
 			_ = c
-			return []any{a, op, op_1, b, op_2, op_3, c}
+			return actionPgenSeqAppendToEnd(p, p, actionPgenSeqAppendToEnd(p, p, a, b), c)
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_type_expressions, v)
 			return v
@@ -10943,7 +10943,7 @@ func parseRule_type_expressions(p *Parser) any {
 			b := parseRule_expression(p)
 			if b == nil { return nil }
 			_ = b
-			return []any{op, a, op_1, op_2, b}
+			return actionPgenSeqAppendToEnd(p, p, actionPgenSingletonSeq(p, p, a), b)
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_type_expressions, v)
 			return v
@@ -13624,7 +13624,7 @@ func parseRule_invalid_match_stmt(p *Parser) any {
 			newline := p.ExpectToken(tokenize.NEWLINE)
 			if newline == nil { return nil }
 			_ = newline
-			return []any{kw, subject_expr, newline}
+			return raiseAction(p, "RAISE_SYNTAX_ERROR", "expected ':'")
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_invalid_match_stmt, v)
 			return v
@@ -19383,10 +19383,11 @@ func parseRule__rhs_156(p *Parser) any {
 // these names; real implementations land with the AST surface.
 func actionAstAlias(p *Parser, args ...any) any { _ = p; _ = args; return placeholderMatched }
 func actionAstClassDef(p *Parser, args ...any) any { _ = p; _ = args; return placeholderMatched }
-func actionAstKeyword(p *Parser, args ...any) any { _ = p; _ = args; return placeholderMatched }
+func actionAstGlobal(p *Parser, args ...any) any { _ = p; _ = args; return placeholderMatched }
 func actionAstLambda(p *Parser, args ...any) any { _ = p; _ = args; return placeholderMatched }
 func actionAstMatch(p *Parser, args ...any) any { _ = p; _ = args; return placeholderMatched }
 func actionAstMatchCase(p *Parser, args ...any) any { _ = p; _ = args; return placeholderMatched }
+func actionAstNonlocal(p *Parser, args ...any) any { _ = p; _ = args; return placeholderMatched }
 func actionAstParamSpec(p *Parser, args ...any) any { _ = p; _ = args; return placeholderMatched }
 func actionAstTryStar(p *Parser, args ...any) any { _ = p; _ = args; return placeholderMatched }
 func actionAstTypeAlias(p *Parser, args ...any) any { _ = p; _ = args; return placeholderMatched }
@@ -19396,6 +19397,13 @@ func actionAstWithitem(p *Parser, args ...any) any { _ = p; _ = args; return pla
 func actionPgenAliasForStar(p *Parser, args ...any) any { _ = p; _ = args; return placeholderMatched }
 func actionPgenCheckLegacyStmt(p *Parser, args ...any) any { _ = p; _ = args; return placeholderMatched }
 func actionPgenCheckedFutureImport(p *Parser, args ...any) any { _ = p; _ = args; return placeholderMatched }
+func actionPgenGetCmpops(p *Parser, args ...any) any { _ = p; _ = args; return placeholderMatched }
+func actionPgenGetExprs(p *Parser, args ...any) any { _ = p; _ = args; return placeholderMatched }
+func actionPgenGetKeys(p *Parser, args ...any) any { _ = p; _ = args; return placeholderMatched }
+func actionPgenGetPatternKeys(p *Parser, args ...any) any { _ = p; _ = args; return placeholderMatched }
+func actionPgenGetPatterns(p *Parser, args ...any) any { _ = p; _ = args; return placeholderMatched }
+func actionPgenGetValues(p *Parser, args ...any) any { _ = p; _ = args; return placeholderMatched }
+func actionPgenMapNamesToIds(p *Parser, args ...any) any { _ = p; _ = args; return placeholderMatched }
 func actionPgenTemplateStr(p *Parser, args ...any) any { _ = p; _ = args; return placeholderMatched }
 func raiseAction(p *Parser, kind string, args ...any) any {
 	_ = p
