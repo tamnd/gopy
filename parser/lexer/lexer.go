@@ -8,7 +8,11 @@
 
 package lexer
 
-import "github.com/tamnd/gopy/tokenize"
+import (
+	"fmt"
+
+	"github.com/tamnd/gopy/tokenize"
+)
 
 // eof is the sentinel returned by nextC at end of input. CPython uses
 // EOF (-1) from <stdio.h>; gopy uses -1 the same way.
@@ -498,7 +502,9 @@ func (s *State) pushParen(c byte) {
 func (s *State) popParen(c byte) {
 	if s.level == 0 {
 		s.done = eToken
-		s.recordError("unmatched closing bracket")
+		// CPython: Parser/tokenizer/helpers.c:184 surfaces "unmatched ')'"
+		// pinned to the closing-bracket location.
+		s.recordError(fmt.Sprintf("unmatched '%c'", c))
 		return
 	}
 	s.level--
@@ -514,7 +520,13 @@ func (s *State) popParen(c byte) {
 	}
 	if c != want {
 		s.done = eToken
-		s.recordError("closing bracket does not match opening")
+		// CPython: Parser/tokenizer/helpers.c:201 surfaces the long form
+		// "closing parenthesis '%c' does not match opening parenthesis
+		// '%c' on line %d".
+		s.recordError(fmt.Sprintf(
+			"closing parenthesis '%c' does not match opening parenthesis '%c' on line %d",
+			c, open, s.parenLineno[s.level],
+		))
 	}
 }
 
