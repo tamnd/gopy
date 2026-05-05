@@ -34,6 +34,10 @@ func FromBytes(src []byte, mode Mode) *State {
 		src = src[3:]
 		s.encoding = "utf-8"
 	}
+	if name := DetectEncodingCookie(src); name != "" && s.encoding == "" {
+		s.encoding = name
+	}
+	src = NormalizeNewlines(src)
 	s.buf = src
 	s.cur = 0
 	s.inp = len(src)

@@ -323,6 +323,10 @@ func (s *State) SetTypeComments(v bool) { s.typeComments = v }
 // Filename returns the configured filename. Used by error formatters.
 func (s *State) Filename() string { return s.filename }
 
+// Encoding returns the source encoding detected from a BOM or
+// PEP 263 cookie, or "" when no cookie was seen.
+func (s *State) Encoding() string { return s.encoding }
+
 // SetFilename pins a name for error messages.
 func (s *State) SetFilename(name string) { s.filename = name }
 
