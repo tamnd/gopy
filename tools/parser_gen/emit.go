@@ -270,8 +270,10 @@ func (e *emitter) writeKeywordTables() {
 	e.buf.WriteString("}\n\n")
 }
 
-// writeRule emits one parse function for r. Left-recursive rules
-// get a TODO stub until M4 lands the seed-and-grow loop. Rules whose
+// writeRule emits one parse function for r. Leaders of a
+// left-recursive cycle get a seed-and-grow wrapper plus a separate
+// `_raw` body. Non-leader members of a cycle get a non-memoized
+// body (CPython @logger). Plain rules get the M3 body. Rules whose
 // name starts with "invalid_" are skipped during the first parse
 // pass; M5 wires the second-pass invocation.
 func (e *emitter) writeRule(r *Rule) {
@@ -279,28 +281,44 @@ func (e *emitter) writeRule(r *Rule) {
 	saved := e.buf
 	e.buf = out
 	defer func() { e.buf = saved }()
-	e.printf("// parseRule_%s parses %s.\n", r.Name, r.Name)
-	if r.LeftRecursive {
-		e.printf("// TODO(M4): left-recursive seed-and-grow body.\n")
-	}
-	e.printf("func parseRule_%s(p *Parser) any {\n", r.Name)
-	if r.LeftRecursive {
-		out.WriteString("\t_ = p\n\treturn nil\n}\n\n")
-		return
-	}
 	switch r.Type {
 	case "loop_marker":
+		e.printf("// parseRule_%s parses %s.\nfunc parseRule_%s(p *Parser) any {\n", r.Name, r.Name, r.Name)
 		e.writeLoopBody(r, false)
 		return
 	case "loop1_marker":
+		e.printf("// parseRule_%s parses %s.\nfunc parseRule_%s(p *Parser) any {\n", r.Name, r.Name, r.Name)
 		e.writeLoopBody(r, true)
 		return
 	case "gather_marker":
+		e.printf("// parseRule_%s parses %s.\nfunc parseRule_%s(p *Parser) any {\n", r.Name, r.Name, r.Name)
 		e.writeGatherBody(r)
 		return
 	}
+	if r.LeftRecursive && r.Leader {
+		e.writeLeaderWrapper(r)
+		e.writeRuleBody(r, "_raw", false)
+		return
+	}
+	if r.LeftRecursive {
+		// Non-leader cycle member: no memoization.
+		e.writeRuleBody(r, "", false)
+		return
+	}
+	e.writeRuleBody(r, "", true)
+}
+
+// writeRuleBody emits the alt-by-alt body. suffix is appended to the
+// function name (so leaders use "_raw"). memoize controls whether the
+// body wraps itself in IsMemoized/InsertMemo.
+func (e *emitter) writeRuleBody(r *Rule, suffix string, memoize bool) {
+	out := e.buf
+	e.printf("// parseRule_%s%s parses %s.\n", r.Name, suffix, r.Name)
+	e.printf("func parseRule_%s%s(p *Parser) any {\n", r.Name, suffix)
 	out.WriteString("\tif p.ErrorIndicator() { return nil }\n")
-	e.printf("\tif v, ok := p.IsMemoized(Rule_%s); ok { return v }\n", r.Name)
+	if memoize {
+		e.printf("\tif v, ok := p.IsMemoized(Rule_%s); ok { return v }\n", r.Name)
+	}
 	out.WriteString("\tmark := p.Mark()\n")
 	out.WriteString("\t_ = mark\n")
 	for ai, alt := range r.RHS.Alts {
@@ -309,8 +327,37 @@ func (e *emitter) writeRule(r *Rule) {
 		out.WriteString("\n")
 		e.writeAltBlock(r, alt)
 	}
-	e.printf("\tp.InsertMemo(mark, Rule_%s, nil)\n", r.Name)
+	if memoize {
+		e.printf("\tp.InsertMemo(mark, Rule_%s, nil)\n", r.Name)
+	}
 	out.WriteString("\treturn nil\n}\n\n")
+}
+
+// writeLeaderWrapper emits the seed-and-grow wrapper for a left-
+// recursive leader. Mirrors the @memoize_left_rec decorator.
+//
+// CPython: Tools/peg_generator/pegen/parser.py memoize_left_rec
+func (e *emitter) writeLeaderWrapper(r *Rule) {
+	out := e.buf
+	e.printf("// parseRule_%s seeds and grows %s as a left-recursive rule.\n", r.Name, r.Name)
+	e.printf("func parseRule_%s(p *Parser) any {\n", r.Name)
+	out.WriteString("\tif p.ErrorIndicator() { return nil }\n")
+	out.WriteString("\tmark := p.Mark()\n")
+	e.printf("\tif v, ok := p.IsMemoized(Rule_%s); ok { return v }\n", r.Name)
+	out.WriteString("\tlastMark := mark\n")
+	out.WriteString("\tvar lastResult any\n")
+	e.printf("\tp.InsertMemo(mark, Rule_%s, nil)\n", r.Name)
+	out.WriteString("\tfor {\n")
+	out.WriteString("\t\tp.Reset(mark)\n")
+	e.printf("\t\tresult := parseRule_%s_raw(p)\n", r.Name)
+	out.WriteString("\t\tend := p.Mark()\n")
+	out.WriteString("\t\tif end <= lastMark { break }\n")
+	out.WriteString("\t\tlastResult = result\n")
+	out.WriteString("\t\tlastMark = end\n")
+	e.printf("\t\tp.UpdateMemo(mark, Rule_%s, result)\n", r.Name)
+	out.WriteString("\t}\n")
+	out.WriteString("\tp.Reset(lastMark)\n")
+	out.WriteString("\treturn lastResult\n}\n\n")
 }
 
 // writeLoopBody emits a Repeat0/Repeat1 helper body.
@@ -367,10 +414,19 @@ func (e *emitter) writeGatherBody(r *Rule) {
 // writeAltBlock emits one alt as: an inner closure that returns nil
 // on miss and the placeholder action value on match. On match the
 // outer body memoizes and returns; on miss it Reset()s and falls
-// through to the next alt.
+// through to the next alt. If the alt contains a Cut, a captured
+// `cut` flag is set when crossed; on miss the rule short-circuits
+// to a nil return (no further alts tried).
+//
+// CPython: Tools/peg_generator/pegen/c_generator.py visit_Alt cut path
 func (e *emitter) writeAltBlock(r *Rule, a *Alt) {
 	out := e.buf
-	out.WriteString("\tif v := func() any {\n")
+	hasCut := a.Icut >= 0
+	out.WriteString("\t{\n")
+	if hasCut {
+		out.WriteString("\t\tcut := false\n")
+	}
+	out.WriteString("\t\tif v := func() any {\n")
 	names := []string{}
 	dedup := map[string]int{}
 	for _, ni := range a.Items {
@@ -391,29 +447,31 @@ func (e *emitter) writeAltBlock(r *Rule, a *Alt) {
 		switch spec.shape {
 		case shapeBlocking:
 			if varName == "_skip" {
-				e.printf("\t\tif _v := %s; _v == nil { return nil }\n", spec.expr)
+				e.printf("\t\t\tif _v := %s; _v == nil { return nil }\n", spec.expr)
 			} else {
-				e.printf("\t\t%s := %s\n", varName, spec.expr)
-				e.printf("\t\tif %s == nil { return nil }\n", varName)
-				e.printf("\t\t_ = %s\n", varName)
+				e.printf("\t\t\t%s := %s\n", varName, spec.expr)
+				e.printf("\t\t\tif %s == nil { return nil }\n", varName)
+				e.printf("\t\t\t_ = %s\n", varName)
 				names = append(names, varName)
 			}
 		case shapeAlways:
-			e.printf("\t\t%s := %s\n", varName, spec.expr)
-			e.printf("\t\t_ = %s\n", varName)
+			e.printf("\t\t\t%s := %s\n", varName, spec.expr)
+			e.printf("\t\t\t_ = %s\n", varName)
 			if varName != "_skip" {
 				names = append(names, varName)
 			}
 		case shapeBoolean:
-			e.printf("\t\tif !%s { return nil }\n", spec.expr)
+			e.printf("\t\t\tif !%s { return nil }\n", spec.expr)
 		case shapeNoop:
-			out.WriteString("\t\t// cut: M4\n")
+			if hasCut {
+				out.WriteString("\t\t\tcut = true\n")
+			}
 		}
 	}
 	if len(names) == 0 {
-		out.WriteString("\t\treturn placeholderMatched\n")
+		out.WriteString("\t\t\treturn placeholderMatched\n")
 	} else {
-		out.WriteString("\t\treturn []any{")
+		out.WriteString("\t\t\treturn []any{")
 		for i, n := range names {
 			if i > 0 {
 				out.WriteString(", ")
@@ -422,10 +480,27 @@ func (e *emitter) writeAltBlock(r *Rule, a *Alt) {
 		}
 		out.WriteString("}\n")
 	}
-	out.WriteString("\t}(); v != nil {\n")
-	e.printf("\t\tp.InsertMemo(mark, Rule_%s, v)\n", r.Name)
-	out.WriteString("\t\treturn v\n\t}\n")
-	out.WriteString("\tp.Reset(mark)\n")
+	out.WriteString("\t\t}(); v != nil {\n")
+	if e.canMemoize(r) {
+		e.printf("\t\t\tp.InsertMemo(mark, Rule_%s, v)\n", r.Name)
+	}
+	out.WriteString("\t\t\treturn v\n\t\t}\n")
+	out.WriteString("\t\tp.Reset(mark)\n")
+	if hasCut {
+		out.WriteString("\t\tif cut {\n")
+		if e.canMemoize(r) {
+			e.printf("\t\t\tp.InsertMemo(mark, Rule_%s, nil)\n", r.Name)
+		}
+		out.WriteString("\t\t\treturn nil\n\t\t}\n")
+	}
+	out.WriteString("\t}\n")
+}
+
+// canMemoize reports whether the rule's body should write memo
+// entries. Leader wrappers manage their own memo; non-leader cycle
+// members never memoize.
+func (e *emitter) canMemoize(r *Rule) bool {
+	return !r.LeftRecursive
 }
 
 type callShape int

@@ -50,13 +50,11 @@ term: NAME
 	}
 
 	// Left-recursive rule must emit a stub, not a body that recurses.
-	exprStart := strings.Index(out, "// parseRule_expr parses expr.")
-	if exprStart < 0 {
-		t.Fatalf("parseRule_expr header missing")
+	if !strings.Contains(out, "func parseRule_expr_raw(") {
+		t.Errorf("expr (left-recursive leader) should emit a _raw body")
 	}
-	exprBody := out[exprStart : exprStart+300]
-	if !strings.Contains(exprBody, "TODO(M4)") {
-		t.Errorf("expr (left-recursive) should emit M4 stub, got %q", exprBody)
+	if !strings.Contains(out, "seeds and grows expr") {
+		t.Errorf("expr (left-recursive leader) should emit a seed-and-grow wrapper")
 	}
 
 	// Determinism: emitting twice must produce byte-identical output.
@@ -79,9 +77,17 @@ func TestEmitPythonGramRoundtrip(t *testing.T) {
 	if !strings.Contains(out, "func parseRule_function_def(") {
 		t.Errorf("python.gram emit missing parseRule_function_def")
 	}
-	// Verify left-recursion was detected on at least one rule.
-	if !strings.Contains(out, "TODO(M4)") {
-		t.Errorf("expected at least one TODO(M4) stub for a left-recursive rule")
+	// Verify left-recursion was detected and the seed-and-grow wrapper
+	// was emitted for at least one rule.
+	if !strings.Contains(out, "_raw(p)") {
+		t.Errorf("expected at least one _raw helper from a left-recursive leader")
+	}
+	if !strings.Contains(out, "seeds and grows") {
+		t.Errorf("expected a seed-and-grow wrapper from a left-recursive leader")
+	}
+	// Cut handling lands in M4: at least one alt must set cut = true.
+	if !strings.Contains(out, "cut = true") {
+		t.Errorf("expected at least one alt with a cut marker")
 	}
 }
 

@@ -933,18 +933,20 @@ func parseRule_file(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		a := parseRule_statements(p)
-		_ = a
-		endmarker := p.ExpectToken(tokenize.ENDMARKER)
-		if endmarker == nil { return nil }
-		_ = endmarker
-		return []any{a, endmarker}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_file, v)
-		return v
+	{
+		if v := func() any {
+			a := parseRule_statements(p)
+			_ = a
+			endmarker := p.ExpectToken(tokenize.ENDMARKER)
+			if endmarker == nil { return nil }
+			_ = endmarker
+			return []any{a, endmarker}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_file, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_file, nil)
 	return nil
 }
@@ -956,16 +958,18 @@ func parseRule_interactive(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		a := parseRule_statement_newline(p)
-		if a == nil { return nil }
-		_ = a
-		return []any{a}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_interactive, v)
-		return v
+	{
+		if v := func() any {
+			a := parseRule_statement_newline(p)
+			if a == nil { return nil }
+			_ = a
+			return []any{a}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_interactive, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_interactive, nil)
 	return nil
 }
@@ -977,21 +981,23 @@ func parseRule_eval(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		a := parseRule_expressions(p)
-		if a == nil { return nil }
-		_ = a
-		rep := parseRule__loop0_1(p)
-		_ = rep
-		endmarker := p.ExpectToken(tokenize.ENDMARKER)
-		if endmarker == nil { return nil }
-		_ = endmarker
-		return []any{a, rep, endmarker}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_eval, v)
-		return v
+	{
+		if v := func() any {
+			a := parseRule_expressions(p)
+			if a == nil { return nil }
+			_ = a
+			rep := parseRule__loop0_1(p)
+			_ = rep
+			endmarker := p.ExpectToken(tokenize.ENDMARKER)
+			if endmarker == nil { return nil }
+			_ = endmarker
+			return []any{a, rep, endmarker}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_eval, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_eval, nil)
 	return nil
 }
@@ -1003,32 +1009,34 @@ func parseRule_func_type(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		op := p.ExpectToken(tokenize.LPAR)
-		if op == nil { return nil }
-		_ = op
-		a := parseRule_type_expressions(p)
-		_ = a
-		op_1 := p.ExpectToken(tokenize.RPAR)
-		if op_1 == nil { return nil }
-		_ = op_1
-		op_2 := p.ExpectToken(tokenize.RARROW)
-		if op_2 == nil { return nil }
-		_ = op_2
-		b := parseRule_expression(p)
-		if b == nil { return nil }
-		_ = b
-		rep := parseRule__loop0_1(p)
-		_ = rep
-		endmarker := p.ExpectToken(tokenize.ENDMARKER)
-		if endmarker == nil { return nil }
-		_ = endmarker
-		return []any{op, a, op_1, op_2, b, rep, endmarker}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_func_type, v)
-		return v
+	{
+		if v := func() any {
+			op := p.ExpectToken(tokenize.LPAR)
+			if op == nil { return nil }
+			_ = op
+			a := parseRule_type_expressions(p)
+			_ = a
+			op_1 := p.ExpectToken(tokenize.RPAR)
+			if op_1 == nil { return nil }
+			_ = op_1
+			op_2 := p.ExpectToken(tokenize.RARROW)
+			if op_2 == nil { return nil }
+			_ = op_2
+			b := parseRule_expression(p)
+			if b == nil { return nil }
+			_ = b
+			rep := parseRule__loop0_1(p)
+			_ = rep
+			endmarker := p.ExpectToken(tokenize.ENDMARKER)
+			if endmarker == nil { return nil }
+			_ = endmarker
+			return []any{op, a, op_1, op_2, b, rep, endmarker}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_func_type, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_func_type, nil)
 	return nil
 }
@@ -1040,16 +1048,18 @@ func parseRule_statements(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		a := parseRule__loop1_2(p)
-		if a == nil { return nil }
-		_ = a
-		return []any{a}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_statements, v)
-		return v
+	{
+		if v := func() any {
+			a := parseRule__loop1_2(p)
+			if a == nil { return nil }
+			_ = a
+			return []any{a}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_statements, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_statements, nil)
 	return nil
 }
@@ -1061,27 +1071,31 @@ func parseRule_statement(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		a := parseRule_compound_stmt(p)
-		if a == nil { return nil }
-		_ = a
-		return []any{a}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_statement, v)
-		return v
+	{
+		if v := func() any {
+			a := parseRule_compound_stmt(p)
+			if a == nil { return nil }
+			_ = a
+			return []any{a}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_statement, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 1
-	if v := func() any {
-		a := parseRule_simple_stmts(p)
-		if a == nil { return nil }
-		_ = a
-		return []any{a}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_statement, v)
-		return v
+	{
+		if v := func() any {
+			a := parseRule_simple_stmts(p)
+			if a == nil { return nil }
+			_ = a
+			return []any{a}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_statement, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_statement, nil)
 	return nil
 }
@@ -1093,16 +1107,18 @@ func parseRule_single_compound_stmt(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		a := parseRule_compound_stmt(p)
-		if a == nil { return nil }
-		_ = a
-		return []any{a}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_single_compound_stmt, v)
-		return v
+	{
+		if v := func() any {
+			a := parseRule_compound_stmt(p)
+			if a == nil { return nil }
+			_ = a
+			return []any{a}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_single_compound_stmt, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_single_compound_stmt, nil)
 	return nil
 }
@@ -1114,52 +1130,60 @@ func parseRule_statement_newline(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		a := parseRule_single_compound_stmt(p)
-		if a == nil { return nil }
-		_ = a
-		newline := p.ExpectToken(tokenize.NEWLINE)
-		if newline == nil { return nil }
-		_ = newline
-		return []any{a, newline}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_statement_newline, v)
-		return v
+	{
+		if v := func() any {
+			a := parseRule_single_compound_stmt(p)
+			if a == nil { return nil }
+			_ = a
+			newline := p.ExpectToken(tokenize.NEWLINE)
+			if newline == nil { return nil }
+			_ = newline
+			return []any{a, newline}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_statement_newline, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 1
-	if v := func() any {
-		simple_stmts := parseRule_simple_stmts(p)
-		if simple_stmts == nil { return nil }
-		_ = simple_stmts
-		return []any{simple_stmts}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_statement_newline, v)
-		return v
+	{
+		if v := func() any {
+			simple_stmts := parseRule_simple_stmts(p)
+			if simple_stmts == nil { return nil }
+			_ = simple_stmts
+			return []any{simple_stmts}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_statement_newline, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 2
-	if v := func() any {
-		newline := p.ExpectToken(tokenize.NEWLINE)
-		if newline == nil { return nil }
-		_ = newline
-		return []any{newline}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_statement_newline, v)
-		return v
+	{
+		if v := func() any {
+			newline := p.ExpectToken(tokenize.NEWLINE)
+			if newline == nil { return nil }
+			_ = newline
+			return []any{newline}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_statement_newline, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 3
-	if v := func() any {
-		endmarker := p.ExpectToken(tokenize.ENDMARKER)
-		if endmarker == nil { return nil }
-		_ = endmarker
-		return []any{endmarker}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_statement_newline, v)
-		return v
+	{
+		if v := func() any {
+			endmarker := p.ExpectToken(tokenize.ENDMARKER)
+			if endmarker == nil { return nil }
+			_ = endmarker
+			return []any{endmarker}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_statement_newline, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_statement_newline, nil)
 	return nil
 }
@@ -1171,36 +1195,40 @@ func parseRule_simple_stmts(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		a := parseRule_simple_stmt(p)
-		if a == nil { return nil }
-		_ = a
-		if !p.Lookahead(false, func(p *Parser) any { return p.ExpectToken(tokenize.SEMI) }) { return nil }
-		newline := p.ExpectToken(tokenize.NEWLINE)
-		if newline == nil { return nil }
-		_ = newline
-		return []any{a, newline}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_simple_stmts, v)
-		return v
+	{
+		if v := func() any {
+			a := parseRule_simple_stmt(p)
+			if a == nil { return nil }
+			_ = a
+			if !p.Lookahead(false, func(p *Parser) any { return p.ExpectToken(tokenize.SEMI) }) { return nil }
+			newline := p.ExpectToken(tokenize.NEWLINE)
+			if newline == nil { return nil }
+			_ = newline
+			return []any{a, newline}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_simple_stmts, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 1
-	if v := func() any {
-		a := parseRule__gather_3(p)
-		if a == nil { return nil }
-		_ = a
-		opt := p.ExpectToken(tokenize.SEMI)
-		_ = opt
-		newline := p.ExpectToken(tokenize.NEWLINE)
-		if newline == nil { return nil }
-		_ = newline
-		return []any{a, opt, newline}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_simple_stmts, v)
-		return v
+	{
+		if v := func() any {
+			a := parseRule__gather_3(p)
+			if a == nil { return nil }
+			_ = a
+			opt := p.ExpectToken(tokenize.SEMI)
+			_ = opt
+			newline := p.ExpectToken(tokenize.NEWLINE)
+			if newline == nil { return nil }
+			_ = newline
+			return []any{a, opt, newline}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_simple_stmts, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_simple_stmts, nil)
 	return nil
 }
@@ -1212,171 +1240,199 @@ func parseRule_simple_stmt(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		assignment := parseRule_assignment(p)
-		if assignment == nil { return nil }
-		_ = assignment
-		return []any{assignment}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_simple_stmt, v)
-		return v
+	{
+		if v := func() any {
+			assignment := parseRule_assignment(p)
+			if assignment == nil { return nil }
+			_ = assignment
+			return []any{assignment}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_simple_stmt, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 1
-	if v := func() any {
-		if !p.Lookahead(true, func(p *Parser) any { return p.ExpectSoftKeyword("type") }) { return nil }
-		type_alias := parseRule_type_alias(p)
-		if type_alias == nil { return nil }
-		_ = type_alias
-		return []any{type_alias}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_simple_stmt, v)
-		return v
+	{
+		if v := func() any {
+			if !p.Lookahead(true, func(p *Parser) any { return p.ExpectSoftKeyword("type") }) { return nil }
+			type_alias := parseRule_type_alias(p)
+			if type_alias == nil { return nil }
+			_ = type_alias
+			return []any{type_alias}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_simple_stmt, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 2
-	if v := func() any {
-		e := parseRule_star_expressions(p)
-		if e == nil { return nil }
-		_ = e
-		return []any{e}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_simple_stmt, v)
-		return v
+	{
+		if v := func() any {
+			e := parseRule_star_expressions(p)
+			if e == nil { return nil }
+			_ = e
+			return []any{e}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_simple_stmt, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 3
-	if v := func() any {
-		if !p.Lookahead(true, func(p *Parser) any { return p.ExpectName("return") }) { return nil }
-		return_stmt := parseRule_return_stmt(p)
-		if return_stmt == nil { return nil }
-		_ = return_stmt
-		return []any{return_stmt}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_simple_stmt, v)
-		return v
+	{
+		if v := func() any {
+			if !p.Lookahead(true, func(p *Parser) any { return p.ExpectName("return") }) { return nil }
+			return_stmt := parseRule_return_stmt(p)
+			if return_stmt == nil { return nil }
+			_ = return_stmt
+			return []any{return_stmt}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_simple_stmt, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 4
-	if v := func() any {
-		if !p.Lookahead(true, func(p *Parser) any { return parseRule__group_4(p) }) { return nil }
-		import_stmt := parseRule_import_stmt(p)
-		if import_stmt == nil { return nil }
-		_ = import_stmt
-		return []any{import_stmt}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_simple_stmt, v)
-		return v
+	{
+		if v := func() any {
+			if !p.Lookahead(true, func(p *Parser) any { return parseRule__group_4(p) }) { return nil }
+			import_stmt := parseRule_import_stmt(p)
+			if import_stmt == nil { return nil }
+			_ = import_stmt
+			return []any{import_stmt}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_simple_stmt, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 5
-	if v := func() any {
-		if !p.Lookahead(true, func(p *Parser) any { return p.ExpectName("raise") }) { return nil }
-		raise_stmt := parseRule_raise_stmt(p)
-		if raise_stmt == nil { return nil }
-		_ = raise_stmt
-		return []any{raise_stmt}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_simple_stmt, v)
-		return v
+	{
+		if v := func() any {
+			if !p.Lookahead(true, func(p *Parser) any { return p.ExpectName("raise") }) { return nil }
+			raise_stmt := parseRule_raise_stmt(p)
+			if raise_stmt == nil { return nil }
+			_ = raise_stmt
+			return []any{raise_stmt}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_simple_stmt, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 6
-	if v := func() any {
-		if !p.Lookahead(true, func(p *Parser) any { return p.ExpectName("pass") }) { return nil }
-		pass_stmt := parseRule_pass_stmt(p)
-		if pass_stmt == nil { return nil }
-		_ = pass_stmt
-		return []any{pass_stmt}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_simple_stmt, v)
-		return v
+	{
+		if v := func() any {
+			if !p.Lookahead(true, func(p *Parser) any { return p.ExpectName("pass") }) { return nil }
+			pass_stmt := parseRule_pass_stmt(p)
+			if pass_stmt == nil { return nil }
+			_ = pass_stmt
+			return []any{pass_stmt}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_simple_stmt, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 7
-	if v := func() any {
-		if !p.Lookahead(true, func(p *Parser) any { return p.ExpectName("del") }) { return nil }
-		del_stmt := parseRule_del_stmt(p)
-		if del_stmt == nil { return nil }
-		_ = del_stmt
-		return []any{del_stmt}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_simple_stmt, v)
-		return v
+	{
+		if v := func() any {
+			if !p.Lookahead(true, func(p *Parser) any { return p.ExpectName("del") }) { return nil }
+			del_stmt := parseRule_del_stmt(p)
+			if del_stmt == nil { return nil }
+			_ = del_stmt
+			return []any{del_stmt}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_simple_stmt, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 8
-	if v := func() any {
-		if !p.Lookahead(true, func(p *Parser) any { return p.ExpectName("yield") }) { return nil }
-		yield_stmt := parseRule_yield_stmt(p)
-		if yield_stmt == nil { return nil }
-		_ = yield_stmt
-		return []any{yield_stmt}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_simple_stmt, v)
-		return v
+	{
+		if v := func() any {
+			if !p.Lookahead(true, func(p *Parser) any { return p.ExpectName("yield") }) { return nil }
+			yield_stmt := parseRule_yield_stmt(p)
+			if yield_stmt == nil { return nil }
+			_ = yield_stmt
+			return []any{yield_stmt}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_simple_stmt, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 9
-	if v := func() any {
-		if !p.Lookahead(true, func(p *Parser) any { return p.ExpectName("assert") }) { return nil }
-		assert_stmt := parseRule_assert_stmt(p)
-		if assert_stmt == nil { return nil }
-		_ = assert_stmt
-		return []any{assert_stmt}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_simple_stmt, v)
-		return v
+	{
+		if v := func() any {
+			if !p.Lookahead(true, func(p *Parser) any { return p.ExpectName("assert") }) { return nil }
+			assert_stmt := parseRule_assert_stmt(p)
+			if assert_stmt == nil { return nil }
+			_ = assert_stmt
+			return []any{assert_stmt}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_simple_stmt, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 10
-	if v := func() any {
-		if !p.Lookahead(true, func(p *Parser) any { return p.ExpectName("break") }) { return nil }
-		break_stmt := parseRule_break_stmt(p)
-		if break_stmt == nil { return nil }
-		_ = break_stmt
-		return []any{break_stmt}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_simple_stmt, v)
-		return v
+	{
+		if v := func() any {
+			if !p.Lookahead(true, func(p *Parser) any { return p.ExpectName("break") }) { return nil }
+			break_stmt := parseRule_break_stmt(p)
+			if break_stmt == nil { return nil }
+			_ = break_stmt
+			return []any{break_stmt}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_simple_stmt, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 11
-	if v := func() any {
-		if !p.Lookahead(true, func(p *Parser) any { return p.ExpectName("continue") }) { return nil }
-		continue_stmt := parseRule_continue_stmt(p)
-		if continue_stmt == nil { return nil }
-		_ = continue_stmt
-		return []any{continue_stmt}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_simple_stmt, v)
-		return v
+	{
+		if v := func() any {
+			if !p.Lookahead(true, func(p *Parser) any { return p.ExpectName("continue") }) { return nil }
+			continue_stmt := parseRule_continue_stmt(p)
+			if continue_stmt == nil { return nil }
+			_ = continue_stmt
+			return []any{continue_stmt}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_simple_stmt, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 12
-	if v := func() any {
-		if !p.Lookahead(true, func(p *Parser) any { return p.ExpectName("global") }) { return nil }
-		global_stmt := parseRule_global_stmt(p)
-		if global_stmt == nil { return nil }
-		_ = global_stmt
-		return []any{global_stmt}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_simple_stmt, v)
-		return v
+	{
+		if v := func() any {
+			if !p.Lookahead(true, func(p *Parser) any { return p.ExpectName("global") }) { return nil }
+			global_stmt := parseRule_global_stmt(p)
+			if global_stmt == nil { return nil }
+			_ = global_stmt
+			return []any{global_stmt}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_simple_stmt, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 13
-	if v := func() any {
-		if !p.Lookahead(true, func(p *Parser) any { return p.ExpectName("nonlocal") }) { return nil }
-		nonlocal_stmt := parseRule_nonlocal_stmt(p)
-		if nonlocal_stmt == nil { return nil }
-		_ = nonlocal_stmt
-		return []any{nonlocal_stmt}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_simple_stmt, v)
-		return v
+	{
+		if v := func() any {
+			if !p.Lookahead(true, func(p *Parser) any { return p.ExpectName("nonlocal") }) { return nil }
+			nonlocal_stmt := parseRule_nonlocal_stmt(p)
+			if nonlocal_stmt == nil { return nil }
+			_ = nonlocal_stmt
+			return []any{nonlocal_stmt}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_simple_stmt, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_simple_stmt, nil)
 	return nil
 }
@@ -1388,100 +1444,116 @@ func parseRule_compound_stmt(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		if !p.Lookahead(true, func(p *Parser) any { return parseRule__group_5(p) }) { return nil }
-		function_def := parseRule_function_def(p)
-		if function_def == nil { return nil }
-		_ = function_def
-		return []any{function_def}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_compound_stmt, v)
-		return v
+	{
+		if v := func() any {
+			if !p.Lookahead(true, func(p *Parser) any { return parseRule__group_5(p) }) { return nil }
+			function_def := parseRule_function_def(p)
+			if function_def == nil { return nil }
+			_ = function_def
+			return []any{function_def}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_compound_stmt, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 1
-	if v := func() any {
-		if !p.Lookahead(true, func(p *Parser) any { return p.ExpectName("if") }) { return nil }
-		if_stmt := parseRule_if_stmt(p)
-		if if_stmt == nil { return nil }
-		_ = if_stmt
-		return []any{if_stmt}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_compound_stmt, v)
-		return v
+	{
+		if v := func() any {
+			if !p.Lookahead(true, func(p *Parser) any { return p.ExpectName("if") }) { return nil }
+			if_stmt := parseRule_if_stmt(p)
+			if if_stmt == nil { return nil }
+			_ = if_stmt
+			return []any{if_stmt}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_compound_stmt, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 2
-	if v := func() any {
-		if !p.Lookahead(true, func(p *Parser) any { return parseRule__group_6(p) }) { return nil }
-		class_def := parseRule_class_def(p)
-		if class_def == nil { return nil }
-		_ = class_def
-		return []any{class_def}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_compound_stmt, v)
-		return v
+	{
+		if v := func() any {
+			if !p.Lookahead(true, func(p *Parser) any { return parseRule__group_6(p) }) { return nil }
+			class_def := parseRule_class_def(p)
+			if class_def == nil { return nil }
+			_ = class_def
+			return []any{class_def}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_compound_stmt, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 3
-	if v := func() any {
-		if !p.Lookahead(true, func(p *Parser) any { return parseRule__group_7(p) }) { return nil }
-		with_stmt := parseRule_with_stmt(p)
-		if with_stmt == nil { return nil }
-		_ = with_stmt
-		return []any{with_stmt}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_compound_stmt, v)
-		return v
+	{
+		if v := func() any {
+			if !p.Lookahead(true, func(p *Parser) any { return parseRule__group_7(p) }) { return nil }
+			with_stmt := parseRule_with_stmt(p)
+			if with_stmt == nil { return nil }
+			_ = with_stmt
+			return []any{with_stmt}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_compound_stmt, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 4
-	if v := func() any {
-		if !p.Lookahead(true, func(p *Parser) any { return parseRule__group_8(p) }) { return nil }
-		for_stmt := parseRule_for_stmt(p)
-		if for_stmt == nil { return nil }
-		_ = for_stmt
-		return []any{for_stmt}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_compound_stmt, v)
-		return v
+	{
+		if v := func() any {
+			if !p.Lookahead(true, func(p *Parser) any { return parseRule__group_8(p) }) { return nil }
+			for_stmt := parseRule_for_stmt(p)
+			if for_stmt == nil { return nil }
+			_ = for_stmt
+			return []any{for_stmt}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_compound_stmt, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 5
-	if v := func() any {
-		if !p.Lookahead(true, func(p *Parser) any { return p.ExpectName("try") }) { return nil }
-		try_stmt := parseRule_try_stmt(p)
-		if try_stmt == nil { return nil }
-		_ = try_stmt
-		return []any{try_stmt}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_compound_stmt, v)
-		return v
+	{
+		if v := func() any {
+			if !p.Lookahead(true, func(p *Parser) any { return p.ExpectName("try") }) { return nil }
+			try_stmt := parseRule_try_stmt(p)
+			if try_stmt == nil { return nil }
+			_ = try_stmt
+			return []any{try_stmt}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_compound_stmt, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 6
-	if v := func() any {
-		if !p.Lookahead(true, func(p *Parser) any { return p.ExpectName("while") }) { return nil }
-		while_stmt := parseRule_while_stmt(p)
-		if while_stmt == nil { return nil }
-		_ = while_stmt
-		return []any{while_stmt}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_compound_stmt, v)
-		return v
+	{
+		if v := func() any {
+			if !p.Lookahead(true, func(p *Parser) any { return p.ExpectName("while") }) { return nil }
+			while_stmt := parseRule_while_stmt(p)
+			if while_stmt == nil { return nil }
+			_ = while_stmt
+			return []any{while_stmt}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_compound_stmt, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 7
-	if v := func() any {
-		match_stmt := parseRule_match_stmt(p)
-		if match_stmt == nil { return nil }
-		_ = match_stmt
-		return []any{match_stmt}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_compound_stmt, v)
-		return v
+	{
+		if v := func() any {
+			match_stmt := parseRule_match_stmt(p)
+			if match_stmt == nil { return nil }
+			_ = match_stmt
+			return []any{match_stmt}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_compound_stmt, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_compound_stmt, nil)
 	return nil
 }
@@ -1493,89 +1565,104 @@ func parseRule_assignment(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		a := p.ExpectToken(tokenize.NAME)
-		if a == nil { return nil }
-		_ = a
-		op := p.ExpectToken(tokenize.COLON)
-		if op == nil { return nil }
-		_ = op
-		b := parseRule_expression(p)
-		if b == nil { return nil }
-		_ = b
-		c := parseRule__rhs_9(p)
-		_ = c
-		return []any{a, op, b, c}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_assignment, v)
-		return v
+	{
+		if v := func() any {
+			a := p.ExpectToken(tokenize.NAME)
+			if a == nil { return nil }
+			_ = a
+			op := p.ExpectToken(tokenize.COLON)
+			if op == nil { return nil }
+			_ = op
+			b := parseRule_expression(p)
+			if b == nil { return nil }
+			_ = b
+			c := parseRule__rhs_9(p)
+			_ = c
+			return []any{a, op, b, c}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_assignment, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 1
-	if v := func() any {
-		a := parseRule__group_10(p)
-		if a == nil { return nil }
-		_ = a
-		op := p.ExpectToken(tokenize.COLON)
-		if op == nil { return nil }
-		_ = op
-		b := parseRule_expression(p)
-		if b == nil { return nil }
-		_ = b
-		c := parseRule__rhs_9(p)
-		_ = c
-		return []any{a, op, b, c}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_assignment, v)
-		return v
+	{
+		if v := func() any {
+			a := parseRule__group_10(p)
+			if a == nil { return nil }
+			_ = a
+			op := p.ExpectToken(tokenize.COLON)
+			if op == nil { return nil }
+			_ = op
+			b := parseRule_expression(p)
+			if b == nil { return nil }
+			_ = b
+			c := parseRule__rhs_9(p)
+			_ = c
+			return []any{a, op, b, c}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_assignment, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 2
-	if v := func() any {
-		a := parseRule__loop1_11(p)
-		if a == nil { return nil }
-		_ = a
-		b := parseRule_annotated_rhs(p)
-		if b == nil { return nil }
-		_ = b
-		if !p.Lookahead(false, func(p *Parser) any { return p.ExpectToken(tokenize.EQUAL) }) { return nil }
-		tc := p.ExpectToken(tokenize.TYPE_COMMENT)
-		_ = tc
-		return []any{a, b, tc}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_assignment, v)
-		return v
+	{
+		if v := func() any {
+			a := parseRule__loop1_11(p)
+			if a == nil { return nil }
+			_ = a
+			b := parseRule_annotated_rhs(p)
+			if b == nil { return nil }
+			_ = b
+			if !p.Lookahead(false, func(p *Parser) any { return p.ExpectToken(tokenize.EQUAL) }) { return nil }
+			tc := p.ExpectToken(tokenize.TYPE_COMMENT)
+			_ = tc
+			return []any{a, b, tc}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_assignment, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 3
-	if v := func() any {
-		a := parseRule_single_target(p)
-		if a == nil { return nil }
-		_ = a
-		b := parseRule_augassign(p)
-		if b == nil { return nil }
-		_ = b
-		// cut: M4
-		c := parseRule_annotated_rhs(p)
-		if c == nil { return nil }
-		_ = c
-		return []any{a, b, c}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_assignment, v)
-		return v
+	{
+		cut := false
+		if v := func() any {
+			a := parseRule_single_target(p)
+			if a == nil { return nil }
+			_ = a
+			b := parseRule_augassign(p)
+			if b == nil { return nil }
+			_ = b
+			cut = true
+			c := parseRule_annotated_rhs(p)
+			if c == nil { return nil }
+			_ = c
+			return []any{a, b, c}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_assignment, v)
+			return v
+		}
+		p.Reset(mark)
+		if cut {
+			p.InsertMemo(mark, Rule_assignment, nil)
+			return nil
+		}
 	}
-	p.Reset(mark)
 	// alt 4
-	if v := func() any {
-		invalid_assignment := parseRule_invalid_assignment(p)
-		if invalid_assignment == nil { return nil }
-		_ = invalid_assignment
-		return []any{invalid_assignment}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_assignment, v)
-		return v
+	{
+		if v := func() any {
+			invalid_assignment := parseRule_invalid_assignment(p)
+			if invalid_assignment == nil { return nil }
+			_ = invalid_assignment
+			return []any{invalid_assignment}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_assignment, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_assignment, nil)
 	return nil
 }
@@ -1587,27 +1674,31 @@ func parseRule_annotated_rhs(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		yield_expr := parseRule_yield_expr(p)
-		if yield_expr == nil { return nil }
-		_ = yield_expr
-		return []any{yield_expr}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_annotated_rhs, v)
-		return v
+	{
+		if v := func() any {
+			yield_expr := parseRule_yield_expr(p)
+			if yield_expr == nil { return nil }
+			_ = yield_expr
+			return []any{yield_expr}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_annotated_rhs, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 1
-	if v := func() any {
-		star_expressions := parseRule_star_expressions(p)
-		if star_expressions == nil { return nil }
-		_ = star_expressions
-		return []any{star_expressions}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_annotated_rhs, v)
-		return v
+	{
+		if v := func() any {
+			star_expressions := parseRule_star_expressions(p)
+			if star_expressions == nil { return nil }
+			_ = star_expressions
+			return []any{star_expressions}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_annotated_rhs, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_annotated_rhs, nil)
 	return nil
 }
@@ -1619,148 +1710,174 @@ func parseRule_augassign(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		op := p.ExpectToken(tokenize.PLUSEQUAL)
-		if op == nil { return nil }
-		_ = op
-		return []any{op}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_augassign, v)
-		return v
+	{
+		if v := func() any {
+			op := p.ExpectToken(tokenize.PLUSEQUAL)
+			if op == nil { return nil }
+			_ = op
+			return []any{op}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_augassign, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 1
-	if v := func() any {
-		op := p.ExpectToken(tokenize.MINEQUAL)
-		if op == nil { return nil }
-		_ = op
-		return []any{op}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_augassign, v)
-		return v
+	{
+		if v := func() any {
+			op := p.ExpectToken(tokenize.MINEQUAL)
+			if op == nil { return nil }
+			_ = op
+			return []any{op}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_augassign, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 2
-	if v := func() any {
-		op := p.ExpectToken(tokenize.STAREQUAL)
-		if op == nil { return nil }
-		_ = op
-		return []any{op}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_augassign, v)
-		return v
+	{
+		if v := func() any {
+			op := p.ExpectToken(tokenize.STAREQUAL)
+			if op == nil { return nil }
+			_ = op
+			return []any{op}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_augassign, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 3
-	if v := func() any {
-		op := p.ExpectToken(tokenize.ATEQUAL)
-		if op == nil { return nil }
-		_ = op
-		return []any{op}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_augassign, v)
-		return v
+	{
+		if v := func() any {
+			op := p.ExpectToken(tokenize.ATEQUAL)
+			if op == nil { return nil }
+			_ = op
+			return []any{op}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_augassign, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 4
-	if v := func() any {
-		op := p.ExpectToken(tokenize.SLASHEQUAL)
-		if op == nil { return nil }
-		_ = op
-		return []any{op}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_augassign, v)
-		return v
+	{
+		if v := func() any {
+			op := p.ExpectToken(tokenize.SLASHEQUAL)
+			if op == nil { return nil }
+			_ = op
+			return []any{op}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_augassign, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 5
-	if v := func() any {
-		op := p.ExpectToken(tokenize.PERCENTEQUAL)
-		if op == nil { return nil }
-		_ = op
-		return []any{op}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_augassign, v)
-		return v
+	{
+		if v := func() any {
+			op := p.ExpectToken(tokenize.PERCENTEQUAL)
+			if op == nil { return nil }
+			_ = op
+			return []any{op}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_augassign, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 6
-	if v := func() any {
-		op := p.ExpectToken(tokenize.AMPEREQUAL)
-		if op == nil { return nil }
-		_ = op
-		return []any{op}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_augassign, v)
-		return v
+	{
+		if v := func() any {
+			op := p.ExpectToken(tokenize.AMPEREQUAL)
+			if op == nil { return nil }
+			_ = op
+			return []any{op}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_augassign, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 7
-	if v := func() any {
-		op := p.ExpectToken(tokenize.VBAREQUAL)
-		if op == nil { return nil }
-		_ = op
-		return []any{op}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_augassign, v)
-		return v
+	{
+		if v := func() any {
+			op := p.ExpectToken(tokenize.VBAREQUAL)
+			if op == nil { return nil }
+			_ = op
+			return []any{op}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_augassign, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 8
-	if v := func() any {
-		op := p.ExpectToken(tokenize.CIRCUMFLEXEQUAL)
-		if op == nil { return nil }
-		_ = op
-		return []any{op}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_augassign, v)
-		return v
+	{
+		if v := func() any {
+			op := p.ExpectToken(tokenize.CIRCUMFLEXEQUAL)
+			if op == nil { return nil }
+			_ = op
+			return []any{op}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_augassign, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 9
-	if v := func() any {
-		op := p.ExpectToken(tokenize.LEFTSHIFTEQUAL)
-		if op == nil { return nil }
-		_ = op
-		return []any{op}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_augassign, v)
-		return v
+	{
+		if v := func() any {
+			op := p.ExpectToken(tokenize.LEFTSHIFTEQUAL)
+			if op == nil { return nil }
+			_ = op
+			return []any{op}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_augassign, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 10
-	if v := func() any {
-		op := p.ExpectToken(tokenize.RIGHTSHIFTEQUAL)
-		if op == nil { return nil }
-		_ = op
-		return []any{op}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_augassign, v)
-		return v
+	{
+		if v := func() any {
+			op := p.ExpectToken(tokenize.RIGHTSHIFTEQUAL)
+			if op == nil { return nil }
+			_ = op
+			return []any{op}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_augassign, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 11
-	if v := func() any {
-		op := p.ExpectToken(tokenize.DOUBLESTAREQUAL)
-		if op == nil { return nil }
-		_ = op
-		return []any{op}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_augassign, v)
-		return v
+	{
+		if v := func() any {
+			op := p.ExpectToken(tokenize.DOUBLESTAREQUAL)
+			if op == nil { return nil }
+			_ = op
+			return []any{op}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_augassign, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 12
-	if v := func() any {
-		op := p.ExpectToken(tokenize.DOUBLESLASHEQUAL)
-		if op == nil { return nil }
-		_ = op
-		return []any{op}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_augassign, v)
-		return v
+	{
+		if v := func() any {
+			op := p.ExpectToken(tokenize.DOUBLESLASHEQUAL)
+			if op == nil { return nil }
+			_ = op
+			return []any{op}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_augassign, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_augassign, nil)
 	return nil
 }
@@ -1772,18 +1889,20 @@ func parseRule_return_stmt(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		kw := p.ExpectName("return")
-		if kw == nil { return nil }
-		_ = kw
-		a := parseRule_star_expressions(p)
-		_ = a
-		return []any{kw, a}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_return_stmt, v)
-		return v
+	{
+		if v := func() any {
+			kw := p.ExpectName("return")
+			if kw == nil { return nil }
+			_ = kw
+			a := parseRule_star_expressions(p)
+			_ = a
+			return []any{kw, a}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_return_stmt, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_return_stmt, nil)
 	return nil
 }
@@ -1795,32 +1914,36 @@ func parseRule_raise_stmt(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		kw := p.ExpectName("raise")
-		if kw == nil { return nil }
-		_ = kw
-		a := parseRule_expression(p)
-		if a == nil { return nil }
-		_ = a
-		b := parseRule__rhs_12(p)
-		_ = b
-		return []any{kw, a, b}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_raise_stmt, v)
-		return v
+	{
+		if v := func() any {
+			kw := p.ExpectName("raise")
+			if kw == nil { return nil }
+			_ = kw
+			a := parseRule_expression(p)
+			if a == nil { return nil }
+			_ = a
+			b := parseRule__rhs_12(p)
+			_ = b
+			return []any{kw, a, b}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_raise_stmt, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 1
-	if v := func() any {
-		kw := p.ExpectName("raise")
-		if kw == nil { return nil }
-		_ = kw
-		return []any{kw}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_raise_stmt, v)
-		return v
+	{
+		if v := func() any {
+			kw := p.ExpectName("raise")
+			if kw == nil { return nil }
+			_ = kw
+			return []any{kw}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_raise_stmt, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_raise_stmt, nil)
 	return nil
 }
@@ -1832,16 +1955,18 @@ func parseRule_pass_stmt(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		kw := p.ExpectName("pass")
-		if kw == nil { return nil }
-		_ = kw
-		return []any{kw}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_pass_stmt, v)
-		return v
+	{
+		if v := func() any {
+			kw := p.ExpectName("pass")
+			if kw == nil { return nil }
+			_ = kw
+			return []any{kw}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_pass_stmt, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_pass_stmt, nil)
 	return nil
 }
@@ -1853,16 +1978,18 @@ func parseRule_break_stmt(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		kw := p.ExpectName("break")
-		if kw == nil { return nil }
-		_ = kw
-		return []any{kw}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_break_stmt, v)
-		return v
+	{
+		if v := func() any {
+			kw := p.ExpectName("break")
+			if kw == nil { return nil }
+			_ = kw
+			return []any{kw}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_break_stmt, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_break_stmt, nil)
 	return nil
 }
@@ -1874,16 +2001,18 @@ func parseRule_continue_stmt(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		kw := p.ExpectName("continue")
-		if kw == nil { return nil }
-		_ = kw
-		return []any{kw}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_continue_stmt, v)
-		return v
+	{
+		if v := func() any {
+			kw := p.ExpectName("continue")
+			if kw == nil { return nil }
+			_ = kw
+			return []any{kw}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_continue_stmt, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_continue_stmt, nil)
 	return nil
 }
@@ -1895,19 +2024,21 @@ func parseRule_global_stmt(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		kw := p.ExpectName("global")
-		if kw == nil { return nil }
-		_ = kw
-		a := parseRule__gather_13(p)
-		if a == nil { return nil }
-		_ = a
-		return []any{kw, a}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_global_stmt, v)
-		return v
+	{
+		if v := func() any {
+			kw := p.ExpectName("global")
+			if kw == nil { return nil }
+			_ = kw
+			a := parseRule__gather_13(p)
+			if a == nil { return nil }
+			_ = a
+			return []any{kw, a}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_global_stmt, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_global_stmt, nil)
 	return nil
 }
@@ -1919,19 +2050,21 @@ func parseRule_nonlocal_stmt(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		kw := p.ExpectName("nonlocal")
-		if kw == nil { return nil }
-		_ = kw
-		a := parseRule__gather_13(p)
-		if a == nil { return nil }
-		_ = a
-		return []any{kw, a}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_nonlocal_stmt, v)
-		return v
+	{
+		if v := func() any {
+			kw := p.ExpectName("nonlocal")
+			if kw == nil { return nil }
+			_ = kw
+			a := parseRule__gather_13(p)
+			if a == nil { return nil }
+			_ = a
+			return []any{kw, a}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_nonlocal_stmt, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_nonlocal_stmt, nil)
 	return nil
 }
@@ -1943,31 +2076,35 @@ func parseRule_del_stmt(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		kw := p.ExpectName("del")
-		if kw == nil { return nil }
-		_ = kw
-		a := parseRule_del_targets(p)
-		if a == nil { return nil }
-		_ = a
-		if !p.Lookahead(true, func(p *Parser) any { return parseRule__group_14(p) }) { return nil }
-		return []any{kw, a}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_del_stmt, v)
-		return v
+	{
+		if v := func() any {
+			kw := p.ExpectName("del")
+			if kw == nil { return nil }
+			_ = kw
+			a := parseRule_del_targets(p)
+			if a == nil { return nil }
+			_ = a
+			if !p.Lookahead(true, func(p *Parser) any { return parseRule__group_14(p) }) { return nil }
+			return []any{kw, a}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_del_stmt, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 1
-	if v := func() any {
-		invalid_del_stmt := parseRule_invalid_del_stmt(p)
-		if invalid_del_stmt == nil { return nil }
-		_ = invalid_del_stmt
-		return []any{invalid_del_stmt}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_del_stmt, v)
-		return v
+	{
+		if v := func() any {
+			invalid_del_stmt := parseRule_invalid_del_stmt(p)
+			if invalid_del_stmt == nil { return nil }
+			_ = invalid_del_stmt
+			return []any{invalid_del_stmt}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_del_stmt, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_del_stmt, nil)
 	return nil
 }
@@ -1979,16 +2116,18 @@ func parseRule_yield_stmt(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		y := parseRule_yield_expr(p)
-		if y == nil { return nil }
-		_ = y
-		return []any{y}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_yield_stmt, v)
-		return v
+	{
+		if v := func() any {
+			y := parseRule_yield_expr(p)
+			if y == nil { return nil }
+			_ = y
+			return []any{y}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_yield_stmt, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_yield_stmt, nil)
 	return nil
 }
@@ -2000,21 +2139,23 @@ func parseRule_assert_stmt(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		kw := p.ExpectName("assert")
-		if kw == nil { return nil }
-		_ = kw
-		a := parseRule_expression(p)
-		if a == nil { return nil }
-		_ = a
-		b := parseRule__rhs_15(p)
-		_ = b
-		return []any{kw, a, b}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_assert_stmt, v)
-		return v
+	{
+		if v := func() any {
+			kw := p.ExpectName("assert")
+			if kw == nil { return nil }
+			_ = kw
+			a := parseRule_expression(p)
+			if a == nil { return nil }
+			_ = a
+			b := parseRule__rhs_15(p)
+			_ = b
+			return []any{kw, a, b}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_assert_stmt, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_assert_stmt, nil)
 	return nil
 }
@@ -2026,38 +2167,44 @@ func parseRule_import_stmt(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		invalid_import := parseRule_invalid_import(p)
-		if invalid_import == nil { return nil }
-		_ = invalid_import
-		return []any{invalid_import}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_import_stmt, v)
-		return v
+	{
+		if v := func() any {
+			invalid_import := parseRule_invalid_import(p)
+			if invalid_import == nil { return nil }
+			_ = invalid_import
+			return []any{invalid_import}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_import_stmt, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 1
-	if v := func() any {
-		import_name := parseRule_import_name(p)
-		if import_name == nil { return nil }
-		_ = import_name
-		return []any{import_name}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_import_stmt, v)
-		return v
+	{
+		if v := func() any {
+			import_name := parseRule_import_name(p)
+			if import_name == nil { return nil }
+			_ = import_name
+			return []any{import_name}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_import_stmt, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 2
-	if v := func() any {
-		import_from := parseRule_import_from(p)
-		if import_from == nil { return nil }
-		_ = import_from
-		return []any{import_from}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_import_stmt, v)
-		return v
+	{
+		if v := func() any {
+			import_from := parseRule_import_from(p)
+			if import_from == nil { return nil }
+			_ = import_from
+			return []any{import_from}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_import_stmt, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_import_stmt, nil)
 	return nil
 }
@@ -2069,19 +2216,21 @@ func parseRule_import_name(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		kw := p.ExpectName("import")
-		if kw == nil { return nil }
-		_ = kw
-		a := parseRule_dotted_as_names(p)
-		if a == nil { return nil }
-		_ = a
-		return []any{kw, a}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_import_name, v)
-		return v
+	{
+		if v := func() any {
+			kw := p.ExpectName("import")
+			if kw == nil { return nil }
+			_ = kw
+			a := parseRule_dotted_as_names(p)
+			if a == nil { return nil }
+			_ = a
+			return []any{kw, a}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_import_name, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_import_name, nil)
 	return nil
 }
@@ -2093,47 +2242,51 @@ func parseRule_import_from(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		kw := p.ExpectName("from")
-		if kw == nil { return nil }
-		_ = kw
-		a := parseRule__loop0_16(p)
-		_ = a
-		b := parseRule_dotted_name(p)
-		if b == nil { return nil }
-		_ = b
-		kw_1 := p.ExpectName("import")
-		if kw_1 == nil { return nil }
-		_ = kw_1
-		c := parseRule_import_from_targets(p)
-		if c == nil { return nil }
-		_ = c
-		return []any{kw, a, b, kw_1, c}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_import_from, v)
-		return v
+	{
+		if v := func() any {
+			kw := p.ExpectName("from")
+			if kw == nil { return nil }
+			_ = kw
+			a := parseRule__loop0_16(p)
+			_ = a
+			b := parseRule_dotted_name(p)
+			if b == nil { return nil }
+			_ = b
+			kw_1 := p.ExpectName("import")
+			if kw_1 == nil { return nil }
+			_ = kw_1
+			c := parseRule_import_from_targets(p)
+			if c == nil { return nil }
+			_ = c
+			return []any{kw, a, b, kw_1, c}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_import_from, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 1
-	if v := func() any {
-		kw := p.ExpectName("from")
-		if kw == nil { return nil }
-		_ = kw
-		a := parseRule__loop1_17(p)
-		if a == nil { return nil }
-		_ = a
-		kw_1 := p.ExpectName("import")
-		if kw_1 == nil { return nil }
-		_ = kw_1
-		b := parseRule_import_from_targets(p)
-		if b == nil { return nil }
-		_ = b
-		return []any{kw, a, kw_1, b}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_import_from, v)
-		return v
+	{
+		if v := func() any {
+			kw := p.ExpectName("from")
+			if kw == nil { return nil }
+			_ = kw
+			a := parseRule__loop1_17(p)
+			if a == nil { return nil }
+			_ = a
+			kw_1 := p.ExpectName("import")
+			if kw_1 == nil { return nil }
+			_ = kw_1
+			b := parseRule_import_from_targets(p)
+			if b == nil { return nil }
+			_ = b
+			return []any{kw, a, kw_1, b}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_import_from, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_import_from, nil)
 	return nil
 }
@@ -2145,58 +2298,66 @@ func parseRule_import_from_targets(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		op := p.ExpectToken(tokenize.LPAR)
-		if op == nil { return nil }
-		_ = op
-		a := parseRule_import_from_as_names(p)
-		if a == nil { return nil }
-		_ = a
-		opt := p.ExpectToken(tokenize.COMMA)
-		_ = opt
-		op_1 := p.ExpectToken(tokenize.RPAR)
-		if op_1 == nil { return nil }
-		_ = op_1
-		return []any{op, a, opt, op_1}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_import_from_targets, v)
-		return v
+	{
+		if v := func() any {
+			op := p.ExpectToken(tokenize.LPAR)
+			if op == nil { return nil }
+			_ = op
+			a := parseRule_import_from_as_names(p)
+			if a == nil { return nil }
+			_ = a
+			opt := p.ExpectToken(tokenize.COMMA)
+			_ = opt
+			op_1 := p.ExpectToken(tokenize.RPAR)
+			if op_1 == nil { return nil }
+			_ = op_1
+			return []any{op, a, opt, op_1}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_import_from_targets, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 1
-	if v := func() any {
-		import_from_as_names := parseRule_import_from_as_names(p)
-		if import_from_as_names == nil { return nil }
-		_ = import_from_as_names
-		if !p.Lookahead(false, func(p *Parser) any { return p.ExpectToken(tokenize.COMMA) }) { return nil }
-		return []any{import_from_as_names}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_import_from_targets, v)
-		return v
+	{
+		if v := func() any {
+			import_from_as_names := parseRule_import_from_as_names(p)
+			if import_from_as_names == nil { return nil }
+			_ = import_from_as_names
+			if !p.Lookahead(false, func(p *Parser) any { return p.ExpectToken(tokenize.COMMA) }) { return nil }
+			return []any{import_from_as_names}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_import_from_targets, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 2
-	if v := func() any {
-		op := p.ExpectToken(tokenize.STAR)
-		if op == nil { return nil }
-		_ = op
-		return []any{op}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_import_from_targets, v)
-		return v
+	{
+		if v := func() any {
+			op := p.ExpectToken(tokenize.STAR)
+			if op == nil { return nil }
+			_ = op
+			return []any{op}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_import_from_targets, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 3
-	if v := func() any {
-		invalid_import_from_targets := parseRule_invalid_import_from_targets(p)
-		if invalid_import_from_targets == nil { return nil }
-		_ = invalid_import_from_targets
-		return []any{invalid_import_from_targets}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_import_from_targets, v)
-		return v
+	{
+		if v := func() any {
+			invalid_import_from_targets := parseRule_invalid_import_from_targets(p)
+			if invalid_import_from_targets == nil { return nil }
+			_ = invalid_import_from_targets
+			return []any{invalid_import_from_targets}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_import_from_targets, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_import_from_targets, nil)
 	return nil
 }
@@ -2208,16 +2369,18 @@ func parseRule_import_from_as_names(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		a := parseRule__gather_18(p)
-		if a == nil { return nil }
-		_ = a
-		return []any{a}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_import_from_as_names, v)
-		return v
+	{
+		if v := func() any {
+			a := parseRule__gather_18(p)
+			if a == nil { return nil }
+			_ = a
+			return []any{a}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_import_from_as_names, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_import_from_as_names, nil)
 	return nil
 }
@@ -2229,29 +2392,33 @@ func parseRule_import_from_as_name(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		invalid_import_from_as_name := parseRule_invalid_import_from_as_name(p)
-		if invalid_import_from_as_name == nil { return nil }
-		_ = invalid_import_from_as_name
-		return []any{invalid_import_from_as_name}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_import_from_as_name, v)
-		return v
+	{
+		if v := func() any {
+			invalid_import_from_as_name := parseRule_invalid_import_from_as_name(p)
+			if invalid_import_from_as_name == nil { return nil }
+			_ = invalid_import_from_as_name
+			return []any{invalid_import_from_as_name}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_import_from_as_name, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 1
-	if v := func() any {
-		a := p.ExpectToken(tokenize.NAME)
-		if a == nil { return nil }
-		_ = a
-		b := parseRule__rhs_19(p)
-		_ = b
-		return []any{a, b}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_import_from_as_name, v)
-		return v
+	{
+		if v := func() any {
+			a := p.ExpectToken(tokenize.NAME)
+			if a == nil { return nil }
+			_ = a
+			b := parseRule__rhs_19(p)
+			_ = b
+			return []any{a, b}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_import_from_as_name, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_import_from_as_name, nil)
 	return nil
 }
@@ -2263,16 +2430,18 @@ func parseRule_dotted_as_names(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		a := parseRule__gather_20(p)
-		if a == nil { return nil }
-		_ = a
-		return []any{a}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_dotted_as_names, v)
-		return v
+	{
+		if v := func() any {
+			a := parseRule__gather_20(p)
+			if a == nil { return nil }
+			_ = a
+			return []any{a}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_dotted_as_names, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_dotted_as_names, nil)
 	return nil
 }
@@ -2284,37 +2453,93 @@ func parseRule_dotted_as_name(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		invalid_dotted_as_name := parseRule_invalid_dotted_as_name(p)
-		if invalid_dotted_as_name == nil { return nil }
-		_ = invalid_dotted_as_name
-		return []any{invalid_dotted_as_name}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_dotted_as_name, v)
-		return v
+	{
+		if v := func() any {
+			invalid_dotted_as_name := parseRule_invalid_dotted_as_name(p)
+			if invalid_dotted_as_name == nil { return nil }
+			_ = invalid_dotted_as_name
+			return []any{invalid_dotted_as_name}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_dotted_as_name, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 1
-	if v := func() any {
-		a := parseRule_dotted_name(p)
-		if a == nil { return nil }
-		_ = a
-		b := parseRule__rhs_19(p)
-		_ = b
-		return []any{a, b}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_dotted_as_name, v)
-		return v
+	{
+		if v := func() any {
+			a := parseRule_dotted_name(p)
+			if a == nil { return nil }
+			_ = a
+			b := parseRule__rhs_19(p)
+			_ = b
+			return []any{a, b}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_dotted_as_name, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_dotted_as_name, nil)
 	return nil
 }
 
-// parseRule_dotted_name parses dotted_name.
-// TODO(M4): left-recursive seed-and-grow body.
+// parseRule_dotted_name seeds and grows dotted_name as a left-recursive rule.
 func parseRule_dotted_name(p *Parser) any {
-	_ = p
+	if p.ErrorIndicator() { return nil }
+	mark := p.Mark()
+	if v, ok := p.IsMemoized(Rule_dotted_name); ok { return v }
+	lastMark := mark
+	var lastResult any
+	p.InsertMemo(mark, Rule_dotted_name, nil)
+	for {
+		p.Reset(mark)
+		result := parseRule_dotted_name_raw(p)
+		end := p.Mark()
+		if end <= lastMark { break }
+		lastResult = result
+		lastMark = end
+		p.UpdateMemo(mark, Rule_dotted_name, result)
+	}
+	p.Reset(lastMark)
+	return lastResult
+}
+
+// parseRule_dotted_name_raw parses dotted_name.
+func parseRule_dotted_name_raw(p *Parser) any {
+	if p.ErrorIndicator() { return nil }
+	mark := p.Mark()
+	_ = mark
+	// alt 0
+	{
+		if v := func() any {
+			a := parseRule_dotted_name(p)
+			if a == nil { return nil }
+			_ = a
+			op := p.ExpectToken(tokenize.DOT)
+			if op == nil { return nil }
+			_ = op
+			b := p.ExpectToken(tokenize.NAME)
+			if b == nil { return nil }
+			_ = b
+			return []any{a, op, b}
+		}(); v != nil {
+			return v
+		}
+		p.Reset(mark)
+	}
+	// alt 1
+	{
+		if v := func() any {
+			name := p.ExpectToken(tokenize.NAME)
+			if name == nil { return nil }
+			_ = name
+			return []any{name}
+		}(); v != nil {
+			return v
+		}
+		p.Reset(mark)
+	}
 	return nil
 }
 
@@ -2325,47 +2550,53 @@ func parseRule_block(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		newline := p.ExpectToken(tokenize.NEWLINE)
-		if newline == nil { return nil }
-		_ = newline
-		indent := p.ExpectToken(tokenize.INDENT)
-		if indent == nil { return nil }
-		_ = indent
-		a := parseRule_statements(p)
-		if a == nil { return nil }
-		_ = a
-		dedent := p.ExpectToken(tokenize.DEDENT)
-		if dedent == nil { return nil }
-		_ = dedent
-		return []any{newline, indent, a, dedent}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_block, v)
-		return v
+	{
+		if v := func() any {
+			newline := p.ExpectToken(tokenize.NEWLINE)
+			if newline == nil { return nil }
+			_ = newline
+			indent := p.ExpectToken(tokenize.INDENT)
+			if indent == nil { return nil }
+			_ = indent
+			a := parseRule_statements(p)
+			if a == nil { return nil }
+			_ = a
+			dedent := p.ExpectToken(tokenize.DEDENT)
+			if dedent == nil { return nil }
+			_ = dedent
+			return []any{newline, indent, a, dedent}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_block, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 1
-	if v := func() any {
-		simple_stmts := parseRule_simple_stmts(p)
-		if simple_stmts == nil { return nil }
-		_ = simple_stmts
-		return []any{simple_stmts}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_block, v)
-		return v
+	{
+		if v := func() any {
+			simple_stmts := parseRule_simple_stmts(p)
+			if simple_stmts == nil { return nil }
+			_ = simple_stmts
+			return []any{simple_stmts}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_block, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 2
-	if v := func() any {
-		invalid_block := parseRule_invalid_block(p)
-		if invalid_block == nil { return nil }
-		_ = invalid_block
-		return []any{invalid_block}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_block, v)
-		return v
+	{
+		if v := func() any {
+			invalid_block := parseRule_invalid_block(p)
+			if invalid_block == nil { return nil }
+			_ = invalid_block
+			return []any{invalid_block}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_block, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_block, nil)
 	return nil
 }
@@ -2377,16 +2608,18 @@ func parseRule_decorators(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		a := parseRule__loop1_21(p)
-		if a == nil { return nil }
-		_ = a
-		return []any{a}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_decorators, v)
-		return v
+	{
+		if v := func() any {
+			a := parseRule__loop1_21(p)
+			if a == nil { return nil }
+			_ = a
+			return []any{a}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_decorators, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_decorators, nil)
 	return nil
 }
@@ -2398,30 +2631,34 @@ func parseRule_class_def(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		a := parseRule_decorators(p)
-		if a == nil { return nil }
-		_ = a
-		b := parseRule_class_def_raw(p)
-		if b == nil { return nil }
-		_ = b
-		return []any{a, b}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_class_def, v)
-		return v
+	{
+		if v := func() any {
+			a := parseRule_decorators(p)
+			if a == nil { return nil }
+			_ = a
+			b := parseRule_class_def_raw(p)
+			if b == nil { return nil }
+			_ = b
+			return []any{a, b}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_class_def, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 1
-	if v := func() any {
-		class_def_raw := parseRule_class_def_raw(p)
-		if class_def_raw == nil { return nil }
-		_ = class_def_raw
-		return []any{class_def_raw}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_class_def, v)
-		return v
+	{
+		if v := func() any {
+			class_def_raw := parseRule_class_def_raw(p)
+			if class_def_raw == nil { return nil }
+			_ = class_def_raw
+			return []any{class_def_raw}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_class_def, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_class_def, nil)
 	return nil
 }
@@ -2433,40 +2670,44 @@ func parseRule_class_def_raw(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		invalid_class_def_raw := parseRule_invalid_class_def_raw(p)
-		if invalid_class_def_raw == nil { return nil }
-		_ = invalid_class_def_raw
-		return []any{invalid_class_def_raw}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_class_def_raw, v)
-		return v
+	{
+		if v := func() any {
+			invalid_class_def_raw := parseRule_invalid_class_def_raw(p)
+			if invalid_class_def_raw == nil { return nil }
+			_ = invalid_class_def_raw
+			return []any{invalid_class_def_raw}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_class_def_raw, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 1
-	if v := func() any {
-		kw := p.ExpectName("class")
-		if kw == nil { return nil }
-		_ = kw
-		a := p.ExpectToken(tokenize.NAME)
-		if a == nil { return nil }
-		_ = a
-		t := parseRule_type_params(p)
-		_ = t
-		b := parseRule__rhs_22(p)
-		_ = b
-		op := p.ExpectToken(tokenize.COLON)
-		if op == nil { return nil }
-		_ = op
-		c := parseRule_block(p)
-		if c == nil { return nil }
-		_ = c
-		return []any{kw, a, t, b, op, c}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_class_def_raw, v)
-		return v
+	{
+		if v := func() any {
+			kw := p.ExpectName("class")
+			if kw == nil { return nil }
+			_ = kw
+			a := p.ExpectToken(tokenize.NAME)
+			if a == nil { return nil }
+			_ = a
+			t := parseRule_type_params(p)
+			_ = t
+			b := parseRule__rhs_22(p)
+			_ = b
+			op := p.ExpectToken(tokenize.COLON)
+			if op == nil { return nil }
+			_ = op
+			c := parseRule_block(p)
+			if c == nil { return nil }
+			_ = c
+			return []any{kw, a, t, b, op, c}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_class_def_raw, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_class_def_raw, nil)
 	return nil
 }
@@ -2478,30 +2719,34 @@ func parseRule_function_def(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		d := parseRule_decorators(p)
-		if d == nil { return nil }
-		_ = d
-		f := parseRule_function_def_raw(p)
-		if f == nil { return nil }
-		_ = f
-		return []any{d, f}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_function_def, v)
-		return v
+	{
+		if v := func() any {
+			d := parseRule_decorators(p)
+			if d == nil { return nil }
+			_ = d
+			f := parseRule_function_def_raw(p)
+			if f == nil { return nil }
+			_ = f
+			return []any{d, f}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_function_def, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 1
-	if v := func() any {
-		function_def_raw := parseRule_function_def_raw(p)
-		if function_def_raw == nil { return nil }
-		_ = function_def_raw
-		return []any{function_def_raw}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_function_def, v)
-		return v
+	{
+		if v := func() any {
+			function_def_raw := parseRule_function_def_raw(p)
+			if function_def_raw == nil { return nil }
+			_ = function_def_raw
+			return []any{function_def_raw}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_function_def, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_function_def, nil)
 	return nil
 }
@@ -2513,87 +2758,93 @@ func parseRule_function_def_raw(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		invalid_def_raw := parseRule_invalid_def_raw(p)
-		if invalid_def_raw == nil { return nil }
-		_ = invalid_def_raw
-		return []any{invalid_def_raw}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_function_def_raw, v)
-		return v
+	{
+		if v := func() any {
+			invalid_def_raw := parseRule_invalid_def_raw(p)
+			if invalid_def_raw == nil { return nil }
+			_ = invalid_def_raw
+			return []any{invalid_def_raw}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_function_def_raw, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 1
-	if v := func() any {
-		kw := p.ExpectName("def")
-		if kw == nil { return nil }
-		_ = kw
-		n := p.ExpectToken(tokenize.NAME)
-		if n == nil { return nil }
-		_ = n
-		t := parseRule_type_params(p)
-		_ = t
-		op := p.ExpectToken(tokenize.LPAR)
-		if op == nil { return nil }
-		_ = op
-		params := parseRule_params(p)
-		_ = params
-		op_1 := p.ExpectToken(tokenize.RPAR)
-		if op_1 == nil { return nil }
-		_ = op_1
-		a := parseRule__rhs_23(p)
-		_ = a
-		op_2 := p.ExpectToken(tokenize.COLON)
-		if op_2 == nil { return nil }
-		_ = op_2
-		tc := parseRule_func_type_comment(p)
-		_ = tc
-		b := parseRule_block(p)
-		if b == nil { return nil }
-		_ = b
-		return []any{kw, n, t, op, params, op_1, a, op_2, tc, b}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_function_def_raw, v)
-		return v
+	{
+		if v := func() any {
+			kw := p.ExpectName("def")
+			if kw == nil { return nil }
+			_ = kw
+			n := p.ExpectToken(tokenize.NAME)
+			if n == nil { return nil }
+			_ = n
+			t := parseRule_type_params(p)
+			_ = t
+			op := p.ExpectToken(tokenize.LPAR)
+			if op == nil { return nil }
+			_ = op
+			params := parseRule_params(p)
+			_ = params
+			op_1 := p.ExpectToken(tokenize.RPAR)
+			if op_1 == nil { return nil }
+			_ = op_1
+			a := parseRule__rhs_23(p)
+			_ = a
+			op_2 := p.ExpectToken(tokenize.COLON)
+			if op_2 == nil { return nil }
+			_ = op_2
+			tc := parseRule_func_type_comment(p)
+			_ = tc
+			b := parseRule_block(p)
+			if b == nil { return nil }
+			_ = b
+			return []any{kw, n, t, op, params, op_1, a, op_2, tc, b}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_function_def_raw, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 2
-	if v := func() any {
-		kw := p.ExpectName("async")
-		if kw == nil { return nil }
-		_ = kw
-		kw_1 := p.ExpectName("def")
-		if kw_1 == nil { return nil }
-		_ = kw_1
-		n := p.ExpectToken(tokenize.NAME)
-		if n == nil { return nil }
-		_ = n
-		t := parseRule_type_params(p)
-		_ = t
-		op := p.ExpectToken(tokenize.LPAR)
-		if op == nil { return nil }
-		_ = op
-		params := parseRule_params(p)
-		_ = params
-		op_1 := p.ExpectToken(tokenize.RPAR)
-		if op_1 == nil { return nil }
-		_ = op_1
-		a := parseRule__rhs_23(p)
-		_ = a
-		op_2 := p.ExpectToken(tokenize.COLON)
-		if op_2 == nil { return nil }
-		_ = op_2
-		tc := parseRule_func_type_comment(p)
-		_ = tc
-		b := parseRule_block(p)
-		if b == nil { return nil }
-		_ = b
-		return []any{kw, kw_1, n, t, op, params, op_1, a, op_2, tc, b}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_function_def_raw, v)
-		return v
+	{
+		if v := func() any {
+			kw := p.ExpectName("async")
+			if kw == nil { return nil }
+			_ = kw
+			kw_1 := p.ExpectName("def")
+			if kw_1 == nil { return nil }
+			_ = kw_1
+			n := p.ExpectToken(tokenize.NAME)
+			if n == nil { return nil }
+			_ = n
+			t := parseRule_type_params(p)
+			_ = t
+			op := p.ExpectToken(tokenize.LPAR)
+			if op == nil { return nil }
+			_ = op
+			params := parseRule_params(p)
+			_ = params
+			op_1 := p.ExpectToken(tokenize.RPAR)
+			if op_1 == nil { return nil }
+			_ = op_1
+			a := parseRule__rhs_23(p)
+			_ = a
+			op_2 := p.ExpectToken(tokenize.COLON)
+			if op_2 == nil { return nil }
+			_ = op_2
+			tc := parseRule_func_type_comment(p)
+			_ = tc
+			b := parseRule_block(p)
+			if b == nil { return nil }
+			_ = b
+			return []any{kw, kw_1, n, t, op, params, op_1, a, op_2, tc, b}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_function_def_raw, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_function_def_raw, nil)
 	return nil
 }
@@ -2605,27 +2856,31 @@ func parseRule_params(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		invalid_parameters := parseRule_invalid_parameters(p)
-		if invalid_parameters == nil { return nil }
-		_ = invalid_parameters
-		return []any{invalid_parameters}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_params, v)
-		return v
+	{
+		if v := func() any {
+			invalid_parameters := parseRule_invalid_parameters(p)
+			if invalid_parameters == nil { return nil }
+			_ = invalid_parameters
+			return []any{invalid_parameters}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_params, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 1
-	if v := func() any {
-		parameters := parseRule_parameters(p)
-		if parameters == nil { return nil }
-		_ = parameters
-		return []any{parameters}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_params, v)
-		return v
+	{
+		if v := func() any {
+			parameters := parseRule_parameters(p)
+			if parameters == nil { return nil }
+			_ = parameters
+			return []any{parameters}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_params, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_params, nil)
 	return nil
 }
@@ -2637,76 +2892,86 @@ func parseRule_parameters(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		a := parseRule_slash_no_default(p)
-		if a == nil { return nil }
-		_ = a
-		b := parseRule__loop0_24(p)
-		_ = b
-		c := parseRule__loop0_25(p)
-		_ = c
-		d := parseRule_star_etc(p)
-		_ = d
-		return []any{a, b, c, d}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_parameters, v)
-		return v
+	{
+		if v := func() any {
+			a := parseRule_slash_no_default(p)
+			if a == nil { return nil }
+			_ = a
+			b := parseRule__loop0_24(p)
+			_ = b
+			c := parseRule__loop0_25(p)
+			_ = c
+			d := parseRule_star_etc(p)
+			_ = d
+			return []any{a, b, c, d}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_parameters, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 1
-	if v := func() any {
-		a := parseRule_slash_with_default(p)
-		if a == nil { return nil }
-		_ = a
-		b := parseRule__loop0_25(p)
-		_ = b
-		c := parseRule_star_etc(p)
-		_ = c
-		return []any{a, b, c}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_parameters, v)
-		return v
+	{
+		if v := func() any {
+			a := parseRule_slash_with_default(p)
+			if a == nil { return nil }
+			_ = a
+			b := parseRule__loop0_25(p)
+			_ = b
+			c := parseRule_star_etc(p)
+			_ = c
+			return []any{a, b, c}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_parameters, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 2
-	if v := func() any {
-		a := parseRule__loop1_26(p)
-		if a == nil { return nil }
-		_ = a
-		b := parseRule__loop0_25(p)
-		_ = b
-		c := parseRule_star_etc(p)
-		_ = c
-		return []any{a, b, c}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_parameters, v)
-		return v
+	{
+		if v := func() any {
+			a := parseRule__loop1_26(p)
+			if a == nil { return nil }
+			_ = a
+			b := parseRule__loop0_25(p)
+			_ = b
+			c := parseRule_star_etc(p)
+			_ = c
+			return []any{a, b, c}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_parameters, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 3
-	if v := func() any {
-		a := parseRule__loop1_27(p)
-		if a == nil { return nil }
-		_ = a
-		b := parseRule_star_etc(p)
-		_ = b
-		return []any{a, b}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_parameters, v)
-		return v
+	{
+		if v := func() any {
+			a := parseRule__loop1_27(p)
+			if a == nil { return nil }
+			_ = a
+			b := parseRule_star_etc(p)
+			_ = b
+			return []any{a, b}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_parameters, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 4
-	if v := func() any {
-		a := parseRule_star_etc(p)
-		if a == nil { return nil }
-		_ = a
-		return []any{a}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_parameters, v)
-		return v
+	{
+		if v := func() any {
+			a := parseRule_star_etc(p)
+			if a == nil { return nil }
+			_ = a
+			return []any{a}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_parameters, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_parameters, nil)
 	return nil
 }
@@ -2718,37 +2983,41 @@ func parseRule_slash_no_default(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		a := parseRule__loop1_26(p)
-		if a == nil { return nil }
-		_ = a
-		op := p.ExpectToken(tokenize.SLASH)
-		if op == nil { return nil }
-		_ = op
-		op_1 := p.ExpectToken(tokenize.COMMA)
-		if op_1 == nil { return nil }
-		_ = op_1
-		return []any{a, op, op_1}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_slash_no_default, v)
-		return v
+	{
+		if v := func() any {
+			a := parseRule__loop1_26(p)
+			if a == nil { return nil }
+			_ = a
+			op := p.ExpectToken(tokenize.SLASH)
+			if op == nil { return nil }
+			_ = op
+			op_1 := p.ExpectToken(tokenize.COMMA)
+			if op_1 == nil { return nil }
+			_ = op_1
+			return []any{a, op, op_1}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_slash_no_default, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 1
-	if v := func() any {
-		a := parseRule__loop1_26(p)
-		if a == nil { return nil }
-		_ = a
-		op := p.ExpectToken(tokenize.SLASH)
-		if op == nil { return nil }
-		_ = op
-		if !p.Lookahead(true, func(p *Parser) any { return p.ExpectToken(tokenize.RPAR) }) { return nil }
-		return []any{a, op}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_slash_no_default, v)
-		return v
+	{
+		if v := func() any {
+			a := parseRule__loop1_26(p)
+			if a == nil { return nil }
+			_ = a
+			op := p.ExpectToken(tokenize.SLASH)
+			if op == nil { return nil }
+			_ = op
+			if !p.Lookahead(true, func(p *Parser) any { return p.ExpectToken(tokenize.RPAR) }) { return nil }
+			return []any{a, op}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_slash_no_default, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_slash_no_default, nil)
 	return nil
 }
@@ -2760,41 +3029,45 @@ func parseRule_slash_with_default(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		a := parseRule__loop0_24(p)
-		_ = a
-		b := parseRule__loop1_27(p)
-		if b == nil { return nil }
-		_ = b
-		op := p.ExpectToken(tokenize.SLASH)
-		if op == nil { return nil }
-		_ = op
-		op_1 := p.ExpectToken(tokenize.COMMA)
-		if op_1 == nil { return nil }
-		_ = op_1
-		return []any{a, b, op, op_1}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_slash_with_default, v)
-		return v
+	{
+		if v := func() any {
+			a := parseRule__loop0_24(p)
+			_ = a
+			b := parseRule__loop1_27(p)
+			if b == nil { return nil }
+			_ = b
+			op := p.ExpectToken(tokenize.SLASH)
+			if op == nil { return nil }
+			_ = op
+			op_1 := p.ExpectToken(tokenize.COMMA)
+			if op_1 == nil { return nil }
+			_ = op_1
+			return []any{a, b, op, op_1}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_slash_with_default, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 1
-	if v := func() any {
-		a := parseRule__loop0_24(p)
-		_ = a
-		b := parseRule__loop1_27(p)
-		if b == nil { return nil }
-		_ = b
-		op := p.ExpectToken(tokenize.SLASH)
-		if op == nil { return nil }
-		_ = op
-		if !p.Lookahead(true, func(p *Parser) any { return p.ExpectToken(tokenize.RPAR) }) { return nil }
-		return []any{a, b, op}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_slash_with_default, v)
-		return v
+	{
+		if v := func() any {
+			a := parseRule__loop0_24(p)
+			_ = a
+			b := parseRule__loop1_27(p)
+			if b == nil { return nil }
+			_ = b
+			op := p.ExpectToken(tokenize.SLASH)
+			if op == nil { return nil }
+			_ = op
+			if !p.Lookahead(true, func(p *Parser) any { return p.ExpectToken(tokenize.RPAR) }) { return nil }
+			return []any{a, b, op}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_slash_with_default, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_slash_with_default, nil)
 	return nil
 }
@@ -2806,82 +3079,92 @@ func parseRule_star_etc(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		invalid_star_etc := parseRule_invalid_star_etc(p)
-		if invalid_star_etc == nil { return nil }
-		_ = invalid_star_etc
-		return []any{invalid_star_etc}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_star_etc, v)
-		return v
+	{
+		if v := func() any {
+			invalid_star_etc := parseRule_invalid_star_etc(p)
+			if invalid_star_etc == nil { return nil }
+			_ = invalid_star_etc
+			return []any{invalid_star_etc}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_star_etc, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 1
-	if v := func() any {
-		op := p.ExpectToken(tokenize.STAR)
-		if op == nil { return nil }
-		_ = op
-		a := parseRule_param_no_default(p)
-		if a == nil { return nil }
-		_ = a
-		b := parseRule__loop0_28(p)
-		_ = b
-		c := parseRule_kwds(p)
-		_ = c
-		return []any{op, a, b, c}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_star_etc, v)
-		return v
+	{
+		if v := func() any {
+			op := p.ExpectToken(tokenize.STAR)
+			if op == nil { return nil }
+			_ = op
+			a := parseRule_param_no_default(p)
+			if a == nil { return nil }
+			_ = a
+			b := parseRule__loop0_28(p)
+			_ = b
+			c := parseRule_kwds(p)
+			_ = c
+			return []any{op, a, b, c}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_star_etc, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 2
-	if v := func() any {
-		op := p.ExpectToken(tokenize.STAR)
-		if op == nil { return nil }
-		_ = op
-		a := parseRule_param_no_default_star_annotation(p)
-		if a == nil { return nil }
-		_ = a
-		b := parseRule__loop0_28(p)
-		_ = b
-		c := parseRule_kwds(p)
-		_ = c
-		return []any{op, a, b, c}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_star_etc, v)
-		return v
+	{
+		if v := func() any {
+			op := p.ExpectToken(tokenize.STAR)
+			if op == nil { return nil }
+			_ = op
+			a := parseRule_param_no_default_star_annotation(p)
+			if a == nil { return nil }
+			_ = a
+			b := parseRule__loop0_28(p)
+			_ = b
+			c := parseRule_kwds(p)
+			_ = c
+			return []any{op, a, b, c}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_star_etc, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 3
-	if v := func() any {
-		op := p.ExpectToken(tokenize.STAR)
-		if op == nil { return nil }
-		_ = op
-		op_1 := p.ExpectToken(tokenize.COMMA)
-		if op_1 == nil { return nil }
-		_ = op_1
-		b := parseRule__loop1_29(p)
-		if b == nil { return nil }
-		_ = b
-		c := parseRule_kwds(p)
-		_ = c
-		return []any{op, op_1, b, c}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_star_etc, v)
-		return v
+	{
+		if v := func() any {
+			op := p.ExpectToken(tokenize.STAR)
+			if op == nil { return nil }
+			_ = op
+			op_1 := p.ExpectToken(tokenize.COMMA)
+			if op_1 == nil { return nil }
+			_ = op_1
+			b := parseRule__loop1_29(p)
+			if b == nil { return nil }
+			_ = b
+			c := parseRule_kwds(p)
+			_ = c
+			return []any{op, op_1, b, c}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_star_etc, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 4
-	if v := func() any {
-		a := parseRule_kwds(p)
-		if a == nil { return nil }
-		_ = a
-		return []any{a}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_star_etc, v)
-		return v
+	{
+		if v := func() any {
+			a := parseRule_kwds(p)
+			if a == nil { return nil }
+			_ = a
+			return []any{a}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_star_etc, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_star_etc, nil)
 	return nil
 }
@@ -2893,30 +3176,34 @@ func parseRule_kwds(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		invalid_kwds := parseRule_invalid_kwds(p)
-		if invalid_kwds == nil { return nil }
-		_ = invalid_kwds
-		return []any{invalid_kwds}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_kwds, v)
-		return v
+	{
+		if v := func() any {
+			invalid_kwds := parseRule_invalid_kwds(p)
+			if invalid_kwds == nil { return nil }
+			_ = invalid_kwds
+			return []any{invalid_kwds}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_kwds, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 1
-	if v := func() any {
-		op := p.ExpectToken(tokenize.DOUBLESTAR)
-		if op == nil { return nil }
-		_ = op
-		a := parseRule_param_no_default(p)
-		if a == nil { return nil }
-		_ = a
-		return []any{op, a}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_kwds, v)
-		return v
+	{
+		if v := func() any {
+			op := p.ExpectToken(tokenize.DOUBLESTAR)
+			if op == nil { return nil }
+			_ = op
+			a := parseRule_param_no_default(p)
+			if a == nil { return nil }
+			_ = a
+			return []any{op, a}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_kwds, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_kwds, nil)
 	return nil
 }
@@ -2928,35 +3215,39 @@ func parseRule_param_no_default(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		a := parseRule_param(p)
-		if a == nil { return nil }
-		_ = a
-		op := p.ExpectToken(tokenize.COMMA)
-		if op == nil { return nil }
-		_ = op
-		tc := p.ExpectToken(tokenize.TYPE_COMMENT)
-		_ = tc
-		return []any{a, op, tc}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_param_no_default, v)
-		return v
+	{
+		if v := func() any {
+			a := parseRule_param(p)
+			if a == nil { return nil }
+			_ = a
+			op := p.ExpectToken(tokenize.COMMA)
+			if op == nil { return nil }
+			_ = op
+			tc := p.ExpectToken(tokenize.TYPE_COMMENT)
+			_ = tc
+			return []any{a, op, tc}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_param_no_default, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 1
-	if v := func() any {
-		a := parseRule_param(p)
-		if a == nil { return nil }
-		_ = a
-		tc := p.ExpectToken(tokenize.TYPE_COMMENT)
-		_ = tc
-		if !p.Lookahead(true, func(p *Parser) any { return p.ExpectToken(tokenize.RPAR) }) { return nil }
-		return []any{a, tc}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_param_no_default, v)
-		return v
+	{
+		if v := func() any {
+			a := parseRule_param(p)
+			if a == nil { return nil }
+			_ = a
+			tc := p.ExpectToken(tokenize.TYPE_COMMENT)
+			_ = tc
+			if !p.Lookahead(true, func(p *Parser) any { return p.ExpectToken(tokenize.RPAR) }) { return nil }
+			return []any{a, tc}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_param_no_default, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_param_no_default, nil)
 	return nil
 }
@@ -2968,35 +3259,39 @@ func parseRule_param_no_default_star_annotation(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		a := parseRule_param_star_annotation(p)
-		if a == nil { return nil }
-		_ = a
-		op := p.ExpectToken(tokenize.COMMA)
-		if op == nil { return nil }
-		_ = op
-		tc := p.ExpectToken(tokenize.TYPE_COMMENT)
-		_ = tc
-		return []any{a, op, tc}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_param_no_default_star_annotation, v)
-		return v
+	{
+		if v := func() any {
+			a := parseRule_param_star_annotation(p)
+			if a == nil { return nil }
+			_ = a
+			op := p.ExpectToken(tokenize.COMMA)
+			if op == nil { return nil }
+			_ = op
+			tc := p.ExpectToken(tokenize.TYPE_COMMENT)
+			_ = tc
+			return []any{a, op, tc}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_param_no_default_star_annotation, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 1
-	if v := func() any {
-		a := parseRule_param_star_annotation(p)
-		if a == nil { return nil }
-		_ = a
-		tc := p.ExpectToken(tokenize.TYPE_COMMENT)
-		_ = tc
-		if !p.Lookahead(true, func(p *Parser) any { return p.ExpectToken(tokenize.RPAR) }) { return nil }
-		return []any{a, tc}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_param_no_default_star_annotation, v)
-		return v
+	{
+		if v := func() any {
+			a := parseRule_param_star_annotation(p)
+			if a == nil { return nil }
+			_ = a
+			tc := p.ExpectToken(tokenize.TYPE_COMMENT)
+			_ = tc
+			if !p.Lookahead(true, func(p *Parser) any { return p.ExpectToken(tokenize.RPAR) }) { return nil }
+			return []any{a, tc}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_param_no_default_star_annotation, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_param_no_default_star_annotation, nil)
 	return nil
 }
@@ -3008,41 +3303,45 @@ func parseRule_param_with_default(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		a := parseRule_param(p)
-		if a == nil { return nil }
-		_ = a
-		c := parseRule_default(p)
-		if c == nil { return nil }
-		_ = c
-		op := p.ExpectToken(tokenize.COMMA)
-		if op == nil { return nil }
-		_ = op
-		tc := p.ExpectToken(tokenize.TYPE_COMMENT)
-		_ = tc
-		return []any{a, c, op, tc}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_param_with_default, v)
-		return v
+	{
+		if v := func() any {
+			a := parseRule_param(p)
+			if a == nil { return nil }
+			_ = a
+			c := parseRule_default(p)
+			if c == nil { return nil }
+			_ = c
+			op := p.ExpectToken(tokenize.COMMA)
+			if op == nil { return nil }
+			_ = op
+			tc := p.ExpectToken(tokenize.TYPE_COMMENT)
+			_ = tc
+			return []any{a, c, op, tc}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_param_with_default, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 1
-	if v := func() any {
-		a := parseRule_param(p)
-		if a == nil { return nil }
-		_ = a
-		c := parseRule_default(p)
-		if c == nil { return nil }
-		_ = c
-		tc := p.ExpectToken(tokenize.TYPE_COMMENT)
-		_ = tc
-		if !p.Lookahead(true, func(p *Parser) any { return p.ExpectToken(tokenize.RPAR) }) { return nil }
-		return []any{a, c, tc}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_param_with_default, v)
-		return v
+	{
+		if v := func() any {
+			a := parseRule_param(p)
+			if a == nil { return nil }
+			_ = a
+			c := parseRule_default(p)
+			if c == nil { return nil }
+			_ = c
+			tc := p.ExpectToken(tokenize.TYPE_COMMENT)
+			_ = tc
+			if !p.Lookahead(true, func(p *Parser) any { return p.ExpectToken(tokenize.RPAR) }) { return nil }
+			return []any{a, c, tc}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_param_with_default, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_param_with_default, nil)
 	return nil
 }
@@ -3054,39 +3353,43 @@ func parseRule_param_maybe_default(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		a := parseRule_param(p)
-		if a == nil { return nil }
-		_ = a
-		c := parseRule_default(p)
-		_ = c
-		op := p.ExpectToken(tokenize.COMMA)
-		if op == nil { return nil }
-		_ = op
-		tc := p.ExpectToken(tokenize.TYPE_COMMENT)
-		_ = tc
-		return []any{a, c, op, tc}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_param_maybe_default, v)
-		return v
+	{
+		if v := func() any {
+			a := parseRule_param(p)
+			if a == nil { return nil }
+			_ = a
+			c := parseRule_default(p)
+			_ = c
+			op := p.ExpectToken(tokenize.COMMA)
+			if op == nil { return nil }
+			_ = op
+			tc := p.ExpectToken(tokenize.TYPE_COMMENT)
+			_ = tc
+			return []any{a, c, op, tc}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_param_maybe_default, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 1
-	if v := func() any {
-		a := parseRule_param(p)
-		if a == nil { return nil }
-		_ = a
-		c := parseRule_default(p)
-		_ = c
-		tc := p.ExpectToken(tokenize.TYPE_COMMENT)
-		_ = tc
-		if !p.Lookahead(true, func(p *Parser) any { return p.ExpectToken(tokenize.RPAR) }) { return nil }
-		return []any{a, c, tc}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_param_maybe_default, v)
-		return v
+	{
+		if v := func() any {
+			a := parseRule_param(p)
+			if a == nil { return nil }
+			_ = a
+			c := parseRule_default(p)
+			_ = c
+			tc := p.ExpectToken(tokenize.TYPE_COMMENT)
+			_ = tc
+			if !p.Lookahead(true, func(p *Parser) any { return p.ExpectToken(tokenize.RPAR) }) { return nil }
+			return []any{a, c, tc}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_param_maybe_default, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_param_maybe_default, nil)
 	return nil
 }
@@ -3098,18 +3401,20 @@ func parseRule_param(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		a := p.ExpectToken(tokenize.NAME)
-		if a == nil { return nil }
-		_ = a
-		b := parseRule_annotation(p)
-		_ = b
-		return []any{a, b}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_param, v)
-		return v
+	{
+		if v := func() any {
+			a := p.ExpectToken(tokenize.NAME)
+			if a == nil { return nil }
+			_ = a
+			b := parseRule_annotation(p)
+			_ = b
+			return []any{a, b}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_param, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_param, nil)
 	return nil
 }
@@ -3121,19 +3426,21 @@ func parseRule_param_star_annotation(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		a := p.ExpectToken(tokenize.NAME)
-		if a == nil { return nil }
-		_ = a
-		b := parseRule_star_annotation(p)
-		if b == nil { return nil }
-		_ = b
-		return []any{a, b}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_param_star_annotation, v)
-		return v
+	{
+		if v := func() any {
+			a := p.ExpectToken(tokenize.NAME)
+			if a == nil { return nil }
+			_ = a
+			b := parseRule_star_annotation(p)
+			if b == nil { return nil }
+			_ = b
+			return []any{a, b}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_param_star_annotation, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_param_star_annotation, nil)
 	return nil
 }
@@ -3145,19 +3452,21 @@ func parseRule_annotation(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		op := p.ExpectToken(tokenize.COLON)
-		if op == nil { return nil }
-		_ = op
-		a := parseRule_expression(p)
-		if a == nil { return nil }
-		_ = a
-		return []any{op, a}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_annotation, v)
-		return v
+	{
+		if v := func() any {
+			op := p.ExpectToken(tokenize.COLON)
+			if op == nil { return nil }
+			_ = op
+			a := parseRule_expression(p)
+			if a == nil { return nil }
+			_ = a
+			return []any{op, a}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_annotation, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_annotation, nil)
 	return nil
 }
@@ -3169,19 +3478,21 @@ func parseRule_star_annotation(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		op := p.ExpectToken(tokenize.COLON)
-		if op == nil { return nil }
-		_ = op
-		a := parseRule_star_expression(p)
-		if a == nil { return nil }
-		_ = a
-		return []any{op, a}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_star_annotation, v)
-		return v
+	{
+		if v := func() any {
+			op := p.ExpectToken(tokenize.COLON)
+			if op == nil { return nil }
+			_ = op
+			a := parseRule_star_expression(p)
+			if a == nil { return nil }
+			_ = a
+			return []any{op, a}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_star_annotation, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_star_annotation, nil)
 	return nil
 }
@@ -3193,30 +3504,34 @@ func parseRule_default(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		op := p.ExpectToken(tokenize.EQUAL)
-		if op == nil { return nil }
-		_ = op
-		a := parseRule_expression(p)
-		if a == nil { return nil }
-		_ = a
-		return []any{op, a}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_default, v)
-		return v
+	{
+		if v := func() any {
+			op := p.ExpectToken(tokenize.EQUAL)
+			if op == nil { return nil }
+			_ = op
+			a := parseRule_expression(p)
+			if a == nil { return nil }
+			_ = a
+			return []any{op, a}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_default, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 1
-	if v := func() any {
-		invalid_default := parseRule_invalid_default(p)
-		if invalid_default == nil { return nil }
-		_ = invalid_default
-		return []any{invalid_default}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_default, v)
-		return v
+	{
+		if v := func() any {
+			invalid_default := parseRule_invalid_default(p)
+			if invalid_default == nil { return nil }
+			_ = invalid_default
+			return []any{invalid_default}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_default, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_default, nil)
 	return nil
 }
@@ -3228,61 +3543,67 @@ func parseRule_if_stmt(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		invalid_if_stmt := parseRule_invalid_if_stmt(p)
-		if invalid_if_stmt == nil { return nil }
-		_ = invalid_if_stmt
-		return []any{invalid_if_stmt}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_if_stmt, v)
-		return v
+	{
+		if v := func() any {
+			invalid_if_stmt := parseRule_invalid_if_stmt(p)
+			if invalid_if_stmt == nil { return nil }
+			_ = invalid_if_stmt
+			return []any{invalid_if_stmt}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_if_stmt, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 1
-	if v := func() any {
-		kw := p.ExpectName("if")
-		if kw == nil { return nil }
-		_ = kw
-		a := parseRule_named_expression(p)
-		if a == nil { return nil }
-		_ = a
-		op := p.ExpectToken(tokenize.COLON)
-		if op == nil { return nil }
-		_ = op
-		b := parseRule_block(p)
-		if b == nil { return nil }
-		_ = b
-		c := parseRule_elif_stmt(p)
-		if c == nil { return nil }
-		_ = c
-		return []any{kw, a, op, b, c}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_if_stmt, v)
-		return v
+	{
+		if v := func() any {
+			kw := p.ExpectName("if")
+			if kw == nil { return nil }
+			_ = kw
+			a := parseRule_named_expression(p)
+			if a == nil { return nil }
+			_ = a
+			op := p.ExpectToken(tokenize.COLON)
+			if op == nil { return nil }
+			_ = op
+			b := parseRule_block(p)
+			if b == nil { return nil }
+			_ = b
+			c := parseRule_elif_stmt(p)
+			if c == nil { return nil }
+			_ = c
+			return []any{kw, a, op, b, c}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_if_stmt, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 2
-	if v := func() any {
-		kw := p.ExpectName("if")
-		if kw == nil { return nil }
-		_ = kw
-		a := parseRule_named_expression(p)
-		if a == nil { return nil }
-		_ = a
-		op := p.ExpectToken(tokenize.COLON)
-		if op == nil { return nil }
-		_ = op
-		b := parseRule_block(p)
-		if b == nil { return nil }
-		_ = b
-		c := parseRule_else_block(p)
-		_ = c
-		return []any{kw, a, op, b, c}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_if_stmt, v)
-		return v
+	{
+		if v := func() any {
+			kw := p.ExpectName("if")
+			if kw == nil { return nil }
+			_ = kw
+			a := parseRule_named_expression(p)
+			if a == nil { return nil }
+			_ = a
+			op := p.ExpectToken(tokenize.COLON)
+			if op == nil { return nil }
+			_ = op
+			b := parseRule_block(p)
+			if b == nil { return nil }
+			_ = b
+			c := parseRule_else_block(p)
+			_ = c
+			return []any{kw, a, op, b, c}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_if_stmt, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_if_stmt, nil)
 	return nil
 }
@@ -3294,61 +3615,67 @@ func parseRule_elif_stmt(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		invalid_elif_stmt := parseRule_invalid_elif_stmt(p)
-		if invalid_elif_stmt == nil { return nil }
-		_ = invalid_elif_stmt
-		return []any{invalid_elif_stmt}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_elif_stmt, v)
-		return v
+	{
+		if v := func() any {
+			invalid_elif_stmt := parseRule_invalid_elif_stmt(p)
+			if invalid_elif_stmt == nil { return nil }
+			_ = invalid_elif_stmt
+			return []any{invalid_elif_stmt}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_elif_stmt, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 1
-	if v := func() any {
-		kw := p.ExpectName("elif")
-		if kw == nil { return nil }
-		_ = kw
-		a := parseRule_named_expression(p)
-		if a == nil { return nil }
-		_ = a
-		op := p.ExpectToken(tokenize.COLON)
-		if op == nil { return nil }
-		_ = op
-		b := parseRule_block(p)
-		if b == nil { return nil }
-		_ = b
-		c := parseRule_elif_stmt(p)
-		if c == nil { return nil }
-		_ = c
-		return []any{kw, a, op, b, c}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_elif_stmt, v)
-		return v
+	{
+		if v := func() any {
+			kw := p.ExpectName("elif")
+			if kw == nil { return nil }
+			_ = kw
+			a := parseRule_named_expression(p)
+			if a == nil { return nil }
+			_ = a
+			op := p.ExpectToken(tokenize.COLON)
+			if op == nil { return nil }
+			_ = op
+			b := parseRule_block(p)
+			if b == nil { return nil }
+			_ = b
+			c := parseRule_elif_stmt(p)
+			if c == nil { return nil }
+			_ = c
+			return []any{kw, a, op, b, c}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_elif_stmt, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 2
-	if v := func() any {
-		kw := p.ExpectName("elif")
-		if kw == nil { return nil }
-		_ = kw
-		a := parseRule_named_expression(p)
-		if a == nil { return nil }
-		_ = a
-		op := p.ExpectToken(tokenize.COLON)
-		if op == nil { return nil }
-		_ = op
-		b := parseRule_block(p)
-		if b == nil { return nil }
-		_ = b
-		c := parseRule_else_block(p)
-		_ = c
-		return []any{kw, a, op, b, c}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_elif_stmt, v)
-		return v
+	{
+		if v := func() any {
+			kw := p.ExpectName("elif")
+			if kw == nil { return nil }
+			_ = kw
+			a := parseRule_named_expression(p)
+			if a == nil { return nil }
+			_ = a
+			op := p.ExpectToken(tokenize.COLON)
+			if op == nil { return nil }
+			_ = op
+			b := parseRule_block(p)
+			if b == nil { return nil }
+			_ = b
+			c := parseRule_else_block(p)
+			_ = c
+			return []any{kw, a, op, b, c}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_elif_stmt, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_elif_stmt, nil)
 	return nil
 }
@@ -3360,33 +3687,37 @@ func parseRule_else_block(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		invalid_else_stmt := parseRule_invalid_else_stmt(p)
-		if invalid_else_stmt == nil { return nil }
-		_ = invalid_else_stmt
-		return []any{invalid_else_stmt}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_else_block, v)
-		return v
+	{
+		if v := func() any {
+			invalid_else_stmt := parseRule_invalid_else_stmt(p)
+			if invalid_else_stmt == nil { return nil }
+			_ = invalid_else_stmt
+			return []any{invalid_else_stmt}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_else_block, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 1
-	if v := func() any {
-		kw := p.ExpectName("else")
-		if kw == nil { return nil }
-		_ = kw
-		f := p.ExpectForced(tokenize.COLON, ":")
-		if f == nil { return nil }
-		_ = f
-		b := parseRule_block(p)
-		if b == nil { return nil }
-		_ = b
-		return []any{kw, f, b}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_else_block, v)
-		return v
+	{
+		if v := func() any {
+			kw := p.ExpectName("else")
+			if kw == nil { return nil }
+			_ = kw
+			f := p.ExpectForced(tokenize.COLON, ":")
+			if f == nil { return nil }
+			_ = f
+			b := parseRule_block(p)
+			if b == nil { return nil }
+			_ = b
+			return []any{kw, f, b}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_else_block, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_else_block, nil)
 	return nil
 }
@@ -3398,38 +3729,42 @@ func parseRule_while_stmt(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		invalid_while_stmt := parseRule_invalid_while_stmt(p)
-		if invalid_while_stmt == nil { return nil }
-		_ = invalid_while_stmt
-		return []any{invalid_while_stmt}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_while_stmt, v)
-		return v
+	{
+		if v := func() any {
+			invalid_while_stmt := parseRule_invalid_while_stmt(p)
+			if invalid_while_stmt == nil { return nil }
+			_ = invalid_while_stmt
+			return []any{invalid_while_stmt}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_while_stmt, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 1
-	if v := func() any {
-		kw := p.ExpectName("while")
-		if kw == nil { return nil }
-		_ = kw
-		a := parseRule_named_expression(p)
-		if a == nil { return nil }
-		_ = a
-		op := p.ExpectToken(tokenize.COLON)
-		if op == nil { return nil }
-		_ = op
-		b := parseRule_block(p)
-		if b == nil { return nil }
-		_ = b
-		c := parseRule_else_block(p)
-		_ = c
-		return []any{kw, a, op, b, c}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_while_stmt, v)
-		return v
+	{
+		if v := func() any {
+			kw := p.ExpectName("while")
+			if kw == nil { return nil }
+			_ = kw
+			a := parseRule_named_expression(p)
+			if a == nil { return nil }
+			_ = a
+			op := p.ExpectToken(tokenize.COLON)
+			if op == nil { return nil }
+			_ = op
+			b := parseRule_block(p)
+			if b == nil { return nil }
+			_ = b
+			c := parseRule_else_block(p)
+			_ = c
+			return []any{kw, a, op, b, c}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_while_stmt, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_while_stmt, nil)
 	return nil
 }
@@ -3441,92 +3776,110 @@ func parseRule_for_stmt(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		invalid_for_stmt := parseRule_invalid_for_stmt(p)
-		if invalid_for_stmt == nil { return nil }
-		_ = invalid_for_stmt
-		return []any{invalid_for_stmt}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_for_stmt, v)
-		return v
+	{
+		if v := func() any {
+			invalid_for_stmt := parseRule_invalid_for_stmt(p)
+			if invalid_for_stmt == nil { return nil }
+			_ = invalid_for_stmt
+			return []any{invalid_for_stmt}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_for_stmt, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 1
-	if v := func() any {
-		kw := p.ExpectName("for")
-		if kw == nil { return nil }
-		_ = kw
-		t := parseRule_star_targets(p)
-		if t == nil { return nil }
-		_ = t
-		kw_1 := p.ExpectName("in")
-		if kw_1 == nil { return nil }
-		_ = kw_1
-		// cut: M4
-		ex := parseRule_star_expressions(p)
-		if ex == nil { return nil }
-		_ = ex
-		op := p.ExpectToken(tokenize.COLON)
-		if op == nil { return nil }
-		_ = op
-		tc := p.ExpectToken(tokenize.TYPE_COMMENT)
-		_ = tc
-		b := parseRule_block(p)
-		if b == nil { return nil }
-		_ = b
-		el := parseRule_else_block(p)
-		_ = el
-		return []any{kw, t, kw_1, ex, op, tc, b, el}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_for_stmt, v)
-		return v
+	{
+		cut := false
+		if v := func() any {
+			kw := p.ExpectName("for")
+			if kw == nil { return nil }
+			_ = kw
+			t := parseRule_star_targets(p)
+			if t == nil { return nil }
+			_ = t
+			kw_1 := p.ExpectName("in")
+			if kw_1 == nil { return nil }
+			_ = kw_1
+			cut = true
+			ex := parseRule_star_expressions(p)
+			if ex == nil { return nil }
+			_ = ex
+			op := p.ExpectToken(tokenize.COLON)
+			if op == nil { return nil }
+			_ = op
+			tc := p.ExpectToken(tokenize.TYPE_COMMENT)
+			_ = tc
+			b := parseRule_block(p)
+			if b == nil { return nil }
+			_ = b
+			el := parseRule_else_block(p)
+			_ = el
+			return []any{kw, t, kw_1, ex, op, tc, b, el}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_for_stmt, v)
+			return v
+		}
+		p.Reset(mark)
+		if cut {
+			p.InsertMemo(mark, Rule_for_stmt, nil)
+			return nil
+		}
 	}
-	p.Reset(mark)
 	// alt 2
-	if v := func() any {
-		kw := p.ExpectName("async")
-		if kw == nil { return nil }
-		_ = kw
-		kw_1 := p.ExpectName("for")
-		if kw_1 == nil { return nil }
-		_ = kw_1
-		t := parseRule_star_targets(p)
-		if t == nil { return nil }
-		_ = t
-		kw_2 := p.ExpectName("in")
-		if kw_2 == nil { return nil }
-		_ = kw_2
-		// cut: M4
-		ex := parseRule_star_expressions(p)
-		if ex == nil { return nil }
-		_ = ex
-		op := p.ExpectToken(tokenize.COLON)
-		if op == nil { return nil }
-		_ = op
-		tc := p.ExpectToken(tokenize.TYPE_COMMENT)
-		_ = tc
-		b := parseRule_block(p)
-		if b == nil { return nil }
-		_ = b
-		el := parseRule_else_block(p)
-		_ = el
-		return []any{kw, kw_1, t, kw_2, ex, op, tc, b, el}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_for_stmt, v)
-		return v
+	{
+		cut := false
+		if v := func() any {
+			kw := p.ExpectName("async")
+			if kw == nil { return nil }
+			_ = kw
+			kw_1 := p.ExpectName("for")
+			if kw_1 == nil { return nil }
+			_ = kw_1
+			t := parseRule_star_targets(p)
+			if t == nil { return nil }
+			_ = t
+			kw_2 := p.ExpectName("in")
+			if kw_2 == nil { return nil }
+			_ = kw_2
+			cut = true
+			ex := parseRule_star_expressions(p)
+			if ex == nil { return nil }
+			_ = ex
+			op := p.ExpectToken(tokenize.COLON)
+			if op == nil { return nil }
+			_ = op
+			tc := p.ExpectToken(tokenize.TYPE_COMMENT)
+			_ = tc
+			b := parseRule_block(p)
+			if b == nil { return nil }
+			_ = b
+			el := parseRule_else_block(p)
+			_ = el
+			return []any{kw, kw_1, t, kw_2, ex, op, tc, b, el}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_for_stmt, v)
+			return v
+		}
+		p.Reset(mark)
+		if cut {
+			p.InsertMemo(mark, Rule_for_stmt, nil)
+			return nil
+		}
 	}
-	p.Reset(mark)
 	// alt 3
-	if v := func() any {
-		invalid_for_target := parseRule_invalid_for_target(p)
-		if invalid_for_target == nil { return nil }
-		_ = invalid_for_target
-		return []any{invalid_for_target}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_for_stmt, v)
-		return v
+	{
+		if v := func() any {
+			invalid_for_target := parseRule_invalid_for_target(p)
+			if invalid_for_target == nil { return nil }
+			_ = invalid_for_target
+			return []any{invalid_for_target}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_for_stmt, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_for_stmt, nil)
 	return nil
 }
@@ -3538,135 +3891,147 @@ func parseRule_with_stmt(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		invalid_with_stmt_indent := parseRule_invalid_with_stmt_indent(p)
-		if invalid_with_stmt_indent == nil { return nil }
-		_ = invalid_with_stmt_indent
-		return []any{invalid_with_stmt_indent}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_with_stmt, v)
-		return v
+	{
+		if v := func() any {
+			invalid_with_stmt_indent := parseRule_invalid_with_stmt_indent(p)
+			if invalid_with_stmt_indent == nil { return nil }
+			_ = invalid_with_stmt_indent
+			return []any{invalid_with_stmt_indent}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_with_stmt, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 1
-	if v := func() any {
-		kw := p.ExpectName("with")
-		if kw == nil { return nil }
-		_ = kw
-		op := p.ExpectToken(tokenize.LPAR)
-		if op == nil { return nil }
-		_ = op
-		a := parseRule__gather_30(p)
-		if a == nil { return nil }
-		_ = a
-		opt := p.ExpectToken(tokenize.COMMA)
-		_ = opt
-		op_1 := p.ExpectToken(tokenize.RPAR)
-		if op_1 == nil { return nil }
-		_ = op_1
-		op_2 := p.ExpectToken(tokenize.COLON)
-		if op_2 == nil { return nil }
-		_ = op_2
-		tc := p.ExpectToken(tokenize.TYPE_COMMENT)
-		_ = tc
-		b := parseRule_block(p)
-		if b == nil { return nil }
-		_ = b
-		return []any{kw, op, a, opt, op_1, op_2, tc, b}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_with_stmt, v)
-		return v
+	{
+		if v := func() any {
+			kw := p.ExpectName("with")
+			if kw == nil { return nil }
+			_ = kw
+			op := p.ExpectToken(tokenize.LPAR)
+			if op == nil { return nil }
+			_ = op
+			a := parseRule__gather_30(p)
+			if a == nil { return nil }
+			_ = a
+			opt := p.ExpectToken(tokenize.COMMA)
+			_ = opt
+			op_1 := p.ExpectToken(tokenize.RPAR)
+			if op_1 == nil { return nil }
+			_ = op_1
+			op_2 := p.ExpectToken(tokenize.COLON)
+			if op_2 == nil { return nil }
+			_ = op_2
+			tc := p.ExpectToken(tokenize.TYPE_COMMENT)
+			_ = tc
+			b := parseRule_block(p)
+			if b == nil { return nil }
+			_ = b
+			return []any{kw, op, a, opt, op_1, op_2, tc, b}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_with_stmt, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 2
-	if v := func() any {
-		kw := p.ExpectName("with")
-		if kw == nil { return nil }
-		_ = kw
-		a := parseRule__gather_30(p)
-		if a == nil { return nil }
-		_ = a
-		op := p.ExpectToken(tokenize.COLON)
-		if op == nil { return nil }
-		_ = op
-		tc := p.ExpectToken(tokenize.TYPE_COMMENT)
-		_ = tc
-		b := parseRule_block(p)
-		if b == nil { return nil }
-		_ = b
-		return []any{kw, a, op, tc, b}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_with_stmt, v)
-		return v
+	{
+		if v := func() any {
+			kw := p.ExpectName("with")
+			if kw == nil { return nil }
+			_ = kw
+			a := parseRule__gather_30(p)
+			if a == nil { return nil }
+			_ = a
+			op := p.ExpectToken(tokenize.COLON)
+			if op == nil { return nil }
+			_ = op
+			tc := p.ExpectToken(tokenize.TYPE_COMMENT)
+			_ = tc
+			b := parseRule_block(p)
+			if b == nil { return nil }
+			_ = b
+			return []any{kw, a, op, tc, b}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_with_stmt, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 3
-	if v := func() any {
-		kw := p.ExpectName("async")
-		if kw == nil { return nil }
-		_ = kw
-		kw_1 := p.ExpectName("with")
-		if kw_1 == nil { return nil }
-		_ = kw_1
-		op := p.ExpectToken(tokenize.LPAR)
-		if op == nil { return nil }
-		_ = op
-		a := parseRule__gather_30(p)
-		if a == nil { return nil }
-		_ = a
-		opt := p.ExpectToken(tokenize.COMMA)
-		_ = opt
-		op_1 := p.ExpectToken(tokenize.RPAR)
-		if op_1 == nil { return nil }
-		_ = op_1
-		op_2 := p.ExpectToken(tokenize.COLON)
-		if op_2 == nil { return nil }
-		_ = op_2
-		b := parseRule_block(p)
-		if b == nil { return nil }
-		_ = b
-		return []any{kw, kw_1, op, a, opt, op_1, op_2, b}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_with_stmt, v)
-		return v
+	{
+		if v := func() any {
+			kw := p.ExpectName("async")
+			if kw == nil { return nil }
+			_ = kw
+			kw_1 := p.ExpectName("with")
+			if kw_1 == nil { return nil }
+			_ = kw_1
+			op := p.ExpectToken(tokenize.LPAR)
+			if op == nil { return nil }
+			_ = op
+			a := parseRule__gather_30(p)
+			if a == nil { return nil }
+			_ = a
+			opt := p.ExpectToken(tokenize.COMMA)
+			_ = opt
+			op_1 := p.ExpectToken(tokenize.RPAR)
+			if op_1 == nil { return nil }
+			_ = op_1
+			op_2 := p.ExpectToken(tokenize.COLON)
+			if op_2 == nil { return nil }
+			_ = op_2
+			b := parseRule_block(p)
+			if b == nil { return nil }
+			_ = b
+			return []any{kw, kw_1, op, a, opt, op_1, op_2, b}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_with_stmt, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 4
-	if v := func() any {
-		kw := p.ExpectName("async")
-		if kw == nil { return nil }
-		_ = kw
-		kw_1 := p.ExpectName("with")
-		if kw_1 == nil { return nil }
-		_ = kw_1
-		a := parseRule__gather_30(p)
-		if a == nil { return nil }
-		_ = a
-		op := p.ExpectToken(tokenize.COLON)
-		if op == nil { return nil }
-		_ = op
-		tc := p.ExpectToken(tokenize.TYPE_COMMENT)
-		_ = tc
-		b := parseRule_block(p)
-		if b == nil { return nil }
-		_ = b
-		return []any{kw, kw_1, a, op, tc, b}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_with_stmt, v)
-		return v
+	{
+		if v := func() any {
+			kw := p.ExpectName("async")
+			if kw == nil { return nil }
+			_ = kw
+			kw_1 := p.ExpectName("with")
+			if kw_1 == nil { return nil }
+			_ = kw_1
+			a := parseRule__gather_30(p)
+			if a == nil { return nil }
+			_ = a
+			op := p.ExpectToken(tokenize.COLON)
+			if op == nil { return nil }
+			_ = op
+			tc := p.ExpectToken(tokenize.TYPE_COMMENT)
+			_ = tc
+			b := parseRule_block(p)
+			if b == nil { return nil }
+			_ = b
+			return []any{kw, kw_1, a, op, tc, b}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_with_stmt, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 5
-	if v := func() any {
-		invalid_with_stmt := parseRule_invalid_with_stmt(p)
-		if invalid_with_stmt == nil { return nil }
-		_ = invalid_with_stmt
-		return []any{invalid_with_stmt}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_with_stmt, v)
-		return v
+	{
+		if v := func() any {
+			invalid_with_stmt := parseRule_invalid_with_stmt(p)
+			if invalid_with_stmt == nil { return nil }
+			_ = invalid_with_stmt
+			return []any{invalid_with_stmt}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_with_stmt, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_with_stmt, nil)
 	return nil
 }
@@ -3678,45 +4043,51 @@ func parseRule_with_item(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		e := parseRule_expression(p)
-		if e == nil { return nil }
-		_ = e
-		kw := p.ExpectName("as")
-		if kw == nil { return nil }
-		_ = kw
-		t := parseRule_star_target(p)
-		if t == nil { return nil }
-		_ = t
-		if !p.Lookahead(true, func(p *Parser) any { return parseRule__group_31(p) }) { return nil }
-		return []any{e, kw, t}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_with_item, v)
-		return v
+	{
+		if v := func() any {
+			e := parseRule_expression(p)
+			if e == nil { return nil }
+			_ = e
+			kw := p.ExpectName("as")
+			if kw == nil { return nil }
+			_ = kw
+			t := parseRule_star_target(p)
+			if t == nil { return nil }
+			_ = t
+			if !p.Lookahead(true, func(p *Parser) any { return parseRule__group_31(p) }) { return nil }
+			return []any{e, kw, t}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_with_item, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 1
-	if v := func() any {
-		invalid_with_item := parseRule_invalid_with_item(p)
-		if invalid_with_item == nil { return nil }
-		_ = invalid_with_item
-		return []any{invalid_with_item}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_with_item, v)
-		return v
+	{
+		if v := func() any {
+			invalid_with_item := parseRule_invalid_with_item(p)
+			if invalid_with_item == nil { return nil }
+			_ = invalid_with_item
+			return []any{invalid_with_item}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_with_item, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 2
-	if v := func() any {
-		e := parseRule_expression(p)
-		if e == nil { return nil }
-		_ = e
-		return []any{e}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_with_item, v)
-		return v
+	{
+		if v := func() any {
+			e := parseRule_expression(p)
+			if e == nil { return nil }
+			_ = e
+			return []any{e}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_with_item, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_with_item, nil)
 	return nil
 }
@@ -3728,84 +4099,92 @@ func parseRule_try_stmt(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		invalid_try_stmt := parseRule_invalid_try_stmt(p)
-		if invalid_try_stmt == nil { return nil }
-		_ = invalid_try_stmt
-		return []any{invalid_try_stmt}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_try_stmt, v)
-		return v
+	{
+		if v := func() any {
+			invalid_try_stmt := parseRule_invalid_try_stmt(p)
+			if invalid_try_stmt == nil { return nil }
+			_ = invalid_try_stmt
+			return []any{invalid_try_stmt}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_try_stmt, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 1
-	if v := func() any {
-		kw := p.ExpectName("try")
-		if kw == nil { return nil }
-		_ = kw
-		f := p.ExpectForced(tokenize.COLON, ":")
-		if f == nil { return nil }
-		_ = f
-		b := parseRule_block(p)
-		if b == nil { return nil }
-		_ = b
-		f_1 := parseRule_finally_block(p)
-		if f_1 == nil { return nil }
-		_ = f_1
-		return []any{kw, f, b, f_1}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_try_stmt, v)
-		return v
+	{
+		if v := func() any {
+			kw := p.ExpectName("try")
+			if kw == nil { return nil }
+			_ = kw
+			f := p.ExpectForced(tokenize.COLON, ":")
+			if f == nil { return nil }
+			_ = f
+			b := parseRule_block(p)
+			if b == nil { return nil }
+			_ = b
+			f_1 := parseRule_finally_block(p)
+			if f_1 == nil { return nil }
+			_ = f_1
+			return []any{kw, f, b, f_1}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_try_stmt, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 2
-	if v := func() any {
-		kw := p.ExpectName("try")
-		if kw == nil { return nil }
-		_ = kw
-		f := p.ExpectForced(tokenize.COLON, ":")
-		if f == nil { return nil }
-		_ = f
-		b := parseRule_block(p)
-		if b == nil { return nil }
-		_ = b
-		ex := parseRule__loop1_32(p)
-		if ex == nil { return nil }
-		_ = ex
-		el := parseRule_else_block(p)
-		_ = el
-		f_1 := parseRule_finally_block(p)
-		_ = f_1
-		return []any{kw, f, b, ex, el, f_1}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_try_stmt, v)
-		return v
+	{
+		if v := func() any {
+			kw := p.ExpectName("try")
+			if kw == nil { return nil }
+			_ = kw
+			f := p.ExpectForced(tokenize.COLON, ":")
+			if f == nil { return nil }
+			_ = f
+			b := parseRule_block(p)
+			if b == nil { return nil }
+			_ = b
+			ex := parseRule__loop1_32(p)
+			if ex == nil { return nil }
+			_ = ex
+			el := parseRule_else_block(p)
+			_ = el
+			f_1 := parseRule_finally_block(p)
+			_ = f_1
+			return []any{kw, f, b, ex, el, f_1}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_try_stmt, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 3
-	if v := func() any {
-		kw := p.ExpectName("try")
-		if kw == nil { return nil }
-		_ = kw
-		f := p.ExpectForced(tokenize.COLON, ":")
-		if f == nil { return nil }
-		_ = f
-		b := parseRule_block(p)
-		if b == nil { return nil }
-		_ = b
-		ex := parseRule__loop1_33(p)
-		if ex == nil { return nil }
-		_ = ex
-		el := parseRule_else_block(p)
-		_ = el
-		f_1 := parseRule_finally_block(p)
-		_ = f_1
-		return []any{kw, f, b, ex, el, f_1}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_try_stmt, v)
-		return v
+	{
+		if v := func() any {
+			kw := p.ExpectName("try")
+			if kw == nil { return nil }
+			_ = kw
+			f := p.ExpectForced(tokenize.COLON, ":")
+			if f == nil { return nil }
+			_ = f
+			b := parseRule_block(p)
+			if b == nil { return nil }
+			_ = b
+			ex := parseRule__loop1_33(p)
+			if ex == nil { return nil }
+			_ = ex
+			el := parseRule_else_block(p)
+			_ = el
+			f_1 := parseRule_finally_block(p)
+			_ = f_1
+			return []any{kw, f, b, ex, el, f_1}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_try_stmt, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_try_stmt, nil)
 	return nil
 }
@@ -3817,110 +4196,122 @@ func parseRule_except_block(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		invalid_except_stmt_indent := parseRule_invalid_except_stmt_indent(p)
-		if invalid_except_stmt_indent == nil { return nil }
-		_ = invalid_except_stmt_indent
-		return []any{invalid_except_stmt_indent}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_except_block, v)
-		return v
+	{
+		if v := func() any {
+			invalid_except_stmt_indent := parseRule_invalid_except_stmt_indent(p)
+			if invalid_except_stmt_indent == nil { return nil }
+			_ = invalid_except_stmt_indent
+			return []any{invalid_except_stmt_indent}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_except_block, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 1
-	if v := func() any {
-		kw := p.ExpectName("except")
-		if kw == nil { return nil }
-		_ = kw
-		e := parseRule_expression(p)
-		if e == nil { return nil }
-		_ = e
-		op := p.ExpectToken(tokenize.COLON)
-		if op == nil { return nil }
-		_ = op
-		b := parseRule_block(p)
-		if b == nil { return nil }
-		_ = b
-		return []any{kw, e, op, b}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_except_block, v)
-		return v
+	{
+		if v := func() any {
+			kw := p.ExpectName("except")
+			if kw == nil { return nil }
+			_ = kw
+			e := parseRule_expression(p)
+			if e == nil { return nil }
+			_ = e
+			op := p.ExpectToken(tokenize.COLON)
+			if op == nil { return nil }
+			_ = op
+			b := parseRule_block(p)
+			if b == nil { return nil }
+			_ = b
+			return []any{kw, e, op, b}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_except_block, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 2
-	if v := func() any {
-		kw := p.ExpectName("except")
-		if kw == nil { return nil }
-		_ = kw
-		e := parseRule_expression(p)
-		if e == nil { return nil }
-		_ = e
-		kw_1 := p.ExpectName("as")
-		if kw_1 == nil { return nil }
-		_ = kw_1
-		t := p.ExpectToken(tokenize.NAME)
-		if t == nil { return nil }
-		_ = t
-		op := p.ExpectToken(tokenize.COLON)
-		if op == nil { return nil }
-		_ = op
-		b := parseRule_block(p)
-		if b == nil { return nil }
-		_ = b
-		return []any{kw, e, kw_1, t, op, b}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_except_block, v)
-		return v
+	{
+		if v := func() any {
+			kw := p.ExpectName("except")
+			if kw == nil { return nil }
+			_ = kw
+			e := parseRule_expression(p)
+			if e == nil { return nil }
+			_ = e
+			kw_1 := p.ExpectName("as")
+			if kw_1 == nil { return nil }
+			_ = kw_1
+			t := p.ExpectToken(tokenize.NAME)
+			if t == nil { return nil }
+			_ = t
+			op := p.ExpectToken(tokenize.COLON)
+			if op == nil { return nil }
+			_ = op
+			b := parseRule_block(p)
+			if b == nil { return nil }
+			_ = b
+			return []any{kw, e, kw_1, t, op, b}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_except_block, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 3
-	if v := func() any {
-		kw := p.ExpectName("except")
-		if kw == nil { return nil }
-		_ = kw
-		e := parseRule_expressions(p)
-		if e == nil { return nil }
-		_ = e
-		op := p.ExpectToken(tokenize.COLON)
-		if op == nil { return nil }
-		_ = op
-		b := parseRule_block(p)
-		if b == nil { return nil }
-		_ = b
-		return []any{kw, e, op, b}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_except_block, v)
-		return v
+	{
+		if v := func() any {
+			kw := p.ExpectName("except")
+			if kw == nil { return nil }
+			_ = kw
+			e := parseRule_expressions(p)
+			if e == nil { return nil }
+			_ = e
+			op := p.ExpectToken(tokenize.COLON)
+			if op == nil { return nil }
+			_ = op
+			b := parseRule_block(p)
+			if b == nil { return nil }
+			_ = b
+			return []any{kw, e, op, b}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_except_block, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 4
-	if v := func() any {
-		kw := p.ExpectName("except")
-		if kw == nil { return nil }
-		_ = kw
-		op := p.ExpectToken(tokenize.COLON)
-		if op == nil { return nil }
-		_ = op
-		b := parseRule_block(p)
-		if b == nil { return nil }
-		_ = b
-		return []any{kw, op, b}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_except_block, v)
-		return v
+	{
+		if v := func() any {
+			kw := p.ExpectName("except")
+			if kw == nil { return nil }
+			_ = kw
+			op := p.ExpectToken(tokenize.COLON)
+			if op == nil { return nil }
+			_ = op
+			b := parseRule_block(p)
+			if b == nil { return nil }
+			_ = b
+			return []any{kw, op, b}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_except_block, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 5
-	if v := func() any {
-		invalid_except_stmt := parseRule_invalid_except_stmt(p)
-		if invalid_except_stmt == nil { return nil }
-		_ = invalid_except_stmt
-		return []any{invalid_except_stmt}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_except_block, v)
-		return v
+	{
+		if v := func() any {
+			invalid_except_stmt := parseRule_invalid_except_stmt(p)
+			if invalid_except_stmt == nil { return nil }
+			_ = invalid_except_stmt
+			return []any{invalid_except_stmt}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_except_block, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_except_block, nil)
 	return nil
 }
@@ -3932,102 +4323,112 @@ func parseRule_except_star_block(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		invalid_except_star_stmt_indent := parseRule_invalid_except_star_stmt_indent(p)
-		if invalid_except_star_stmt_indent == nil { return nil }
-		_ = invalid_except_star_stmt_indent
-		return []any{invalid_except_star_stmt_indent}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_except_star_block, v)
-		return v
+	{
+		if v := func() any {
+			invalid_except_star_stmt_indent := parseRule_invalid_except_star_stmt_indent(p)
+			if invalid_except_star_stmt_indent == nil { return nil }
+			_ = invalid_except_star_stmt_indent
+			return []any{invalid_except_star_stmt_indent}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_except_star_block, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 1
-	if v := func() any {
-		kw := p.ExpectName("except")
-		if kw == nil { return nil }
-		_ = kw
-		op := p.ExpectToken(tokenize.STAR)
-		if op == nil { return nil }
-		_ = op
-		e := parseRule_expression(p)
-		if e == nil { return nil }
-		_ = e
-		op_1 := p.ExpectToken(tokenize.COLON)
-		if op_1 == nil { return nil }
-		_ = op_1
-		b := parseRule_block(p)
-		if b == nil { return nil }
-		_ = b
-		return []any{kw, op, e, op_1, b}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_except_star_block, v)
-		return v
+	{
+		if v := func() any {
+			kw := p.ExpectName("except")
+			if kw == nil { return nil }
+			_ = kw
+			op := p.ExpectToken(tokenize.STAR)
+			if op == nil { return nil }
+			_ = op
+			e := parseRule_expression(p)
+			if e == nil { return nil }
+			_ = e
+			op_1 := p.ExpectToken(tokenize.COLON)
+			if op_1 == nil { return nil }
+			_ = op_1
+			b := parseRule_block(p)
+			if b == nil { return nil }
+			_ = b
+			return []any{kw, op, e, op_1, b}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_except_star_block, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 2
-	if v := func() any {
-		kw := p.ExpectName("except")
-		if kw == nil { return nil }
-		_ = kw
-		op := p.ExpectToken(tokenize.STAR)
-		if op == nil { return nil }
-		_ = op
-		e := parseRule_expression(p)
-		if e == nil { return nil }
-		_ = e
-		kw_1 := p.ExpectName("as")
-		if kw_1 == nil { return nil }
-		_ = kw_1
-		t := p.ExpectToken(tokenize.NAME)
-		if t == nil { return nil }
-		_ = t
-		op_1 := p.ExpectToken(tokenize.COLON)
-		if op_1 == nil { return nil }
-		_ = op_1
-		b := parseRule_block(p)
-		if b == nil { return nil }
-		_ = b
-		return []any{kw, op, e, kw_1, t, op_1, b}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_except_star_block, v)
-		return v
+	{
+		if v := func() any {
+			kw := p.ExpectName("except")
+			if kw == nil { return nil }
+			_ = kw
+			op := p.ExpectToken(tokenize.STAR)
+			if op == nil { return nil }
+			_ = op
+			e := parseRule_expression(p)
+			if e == nil { return nil }
+			_ = e
+			kw_1 := p.ExpectName("as")
+			if kw_1 == nil { return nil }
+			_ = kw_1
+			t := p.ExpectToken(tokenize.NAME)
+			if t == nil { return nil }
+			_ = t
+			op_1 := p.ExpectToken(tokenize.COLON)
+			if op_1 == nil { return nil }
+			_ = op_1
+			b := parseRule_block(p)
+			if b == nil { return nil }
+			_ = b
+			return []any{kw, op, e, kw_1, t, op_1, b}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_except_star_block, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 3
-	if v := func() any {
-		kw := p.ExpectName("except")
-		if kw == nil { return nil }
-		_ = kw
-		op := p.ExpectToken(tokenize.STAR)
-		if op == nil { return nil }
-		_ = op
-		e := parseRule_expressions(p)
-		if e == nil { return nil }
-		_ = e
-		op_1 := p.ExpectToken(tokenize.COLON)
-		if op_1 == nil { return nil }
-		_ = op_1
-		b := parseRule_block(p)
-		if b == nil { return nil }
-		_ = b
-		return []any{kw, op, e, op_1, b}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_except_star_block, v)
-		return v
+	{
+		if v := func() any {
+			kw := p.ExpectName("except")
+			if kw == nil { return nil }
+			_ = kw
+			op := p.ExpectToken(tokenize.STAR)
+			if op == nil { return nil }
+			_ = op
+			e := parseRule_expressions(p)
+			if e == nil { return nil }
+			_ = e
+			op_1 := p.ExpectToken(tokenize.COLON)
+			if op_1 == nil { return nil }
+			_ = op_1
+			b := parseRule_block(p)
+			if b == nil { return nil }
+			_ = b
+			return []any{kw, op, e, op_1, b}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_except_star_block, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 4
-	if v := func() any {
-		invalid_except_star_stmt := parseRule_invalid_except_star_stmt(p)
-		if invalid_except_star_stmt == nil { return nil }
-		_ = invalid_except_star_stmt
-		return []any{invalid_except_star_stmt}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_except_star_block, v)
-		return v
+	{
+		if v := func() any {
+			invalid_except_star_stmt := parseRule_invalid_except_star_stmt(p)
+			if invalid_except_star_stmt == nil { return nil }
+			_ = invalid_except_star_stmt
+			return []any{invalid_except_star_stmt}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_except_star_block, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_except_star_block, nil)
 	return nil
 }
@@ -4039,33 +4440,37 @@ func parseRule_finally_block(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		invalid_finally_stmt := parseRule_invalid_finally_stmt(p)
-		if invalid_finally_stmt == nil { return nil }
-		_ = invalid_finally_stmt
-		return []any{invalid_finally_stmt}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_finally_block, v)
-		return v
+	{
+		if v := func() any {
+			invalid_finally_stmt := parseRule_invalid_finally_stmt(p)
+			if invalid_finally_stmt == nil { return nil }
+			_ = invalid_finally_stmt
+			return []any{invalid_finally_stmt}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_finally_block, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 1
-	if v := func() any {
-		kw := p.ExpectName("finally")
-		if kw == nil { return nil }
-		_ = kw
-		f := p.ExpectForced(tokenize.COLON, ":")
-		if f == nil { return nil }
-		_ = f
-		a := parseRule_block(p)
-		if a == nil { return nil }
-		_ = a
-		return []any{kw, f, a}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_finally_block, v)
-		return v
+	{
+		if v := func() any {
+			kw := p.ExpectName("finally")
+			if kw == nil { return nil }
+			_ = kw
+			f := p.ExpectForced(tokenize.COLON, ":")
+			if f == nil { return nil }
+			_ = f
+			a := parseRule_block(p)
+			if a == nil { return nil }
+			_ = a
+			return []any{kw, f, a}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_finally_block, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_finally_block, nil)
 	return nil
 }
@@ -4077,45 +4482,49 @@ func parseRule_match_stmt(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		kw := p.ExpectSoftKeyword("match")
-		if kw == nil { return nil }
-		_ = kw
-		subject := parseRule_subject_expr(p)
-		if subject == nil { return nil }
-		_ = subject
-		op := p.ExpectToken(tokenize.COLON)
-		if op == nil { return nil }
-		_ = op
-		newline := p.ExpectToken(tokenize.NEWLINE)
-		if newline == nil { return nil }
-		_ = newline
-		indent := p.ExpectToken(tokenize.INDENT)
-		if indent == nil { return nil }
-		_ = indent
-		cases := parseRule__loop1_34(p)
-		if cases == nil { return nil }
-		_ = cases
-		dedent := p.ExpectToken(tokenize.DEDENT)
-		if dedent == nil { return nil }
-		_ = dedent
-		return []any{kw, subject, op, newline, indent, cases, dedent}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_match_stmt, v)
-		return v
+	{
+		if v := func() any {
+			kw := p.ExpectSoftKeyword("match")
+			if kw == nil { return nil }
+			_ = kw
+			subject := parseRule_subject_expr(p)
+			if subject == nil { return nil }
+			_ = subject
+			op := p.ExpectToken(tokenize.COLON)
+			if op == nil { return nil }
+			_ = op
+			newline := p.ExpectToken(tokenize.NEWLINE)
+			if newline == nil { return nil }
+			_ = newline
+			indent := p.ExpectToken(tokenize.INDENT)
+			if indent == nil { return nil }
+			_ = indent
+			cases := parseRule__loop1_34(p)
+			if cases == nil { return nil }
+			_ = cases
+			dedent := p.ExpectToken(tokenize.DEDENT)
+			if dedent == nil { return nil }
+			_ = dedent
+			return []any{kw, subject, op, newline, indent, cases, dedent}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_match_stmt, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 1
-	if v := func() any {
-		invalid_match_stmt := parseRule_invalid_match_stmt(p)
-		if invalid_match_stmt == nil { return nil }
-		_ = invalid_match_stmt
-		return []any{invalid_match_stmt}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_match_stmt, v)
-		return v
+	{
+		if v := func() any {
+			invalid_match_stmt := parseRule_invalid_match_stmt(p)
+			if invalid_match_stmt == nil { return nil }
+			_ = invalid_match_stmt
+			return []any{invalid_match_stmt}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_match_stmt, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_match_stmt, nil)
 	return nil
 }
@@ -4127,32 +4536,36 @@ func parseRule_subject_expr(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		value := parseRule_star_named_expression(p)
-		if value == nil { return nil }
-		_ = value
-		op := p.ExpectToken(tokenize.COMMA)
-		if op == nil { return nil }
-		_ = op
-		values := parseRule_star_named_expressions(p)
-		_ = values
-		return []any{value, op, values}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_subject_expr, v)
-		return v
+	{
+		if v := func() any {
+			value := parseRule_star_named_expression(p)
+			if value == nil { return nil }
+			_ = value
+			op := p.ExpectToken(tokenize.COMMA)
+			if op == nil { return nil }
+			_ = op
+			values := parseRule_star_named_expressions(p)
+			_ = values
+			return []any{value, op, values}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_subject_expr, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 1
-	if v := func() any {
-		named_expression := parseRule_named_expression(p)
-		if named_expression == nil { return nil }
-		_ = named_expression
-		return []any{named_expression}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_subject_expr, v)
-		return v
+	{
+		if v := func() any {
+			named_expression := parseRule_named_expression(p)
+			if named_expression == nil { return nil }
+			_ = named_expression
+			return []any{named_expression}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_subject_expr, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_subject_expr, nil)
 	return nil
 }
@@ -4164,38 +4577,42 @@ func parseRule_case_block(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		invalid_case_block := parseRule_invalid_case_block(p)
-		if invalid_case_block == nil { return nil }
-		_ = invalid_case_block
-		return []any{invalid_case_block}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_case_block, v)
-		return v
+	{
+		if v := func() any {
+			invalid_case_block := parseRule_invalid_case_block(p)
+			if invalid_case_block == nil { return nil }
+			_ = invalid_case_block
+			return []any{invalid_case_block}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_case_block, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 1
-	if v := func() any {
-		kw := p.ExpectSoftKeyword("case")
-		if kw == nil { return nil }
-		_ = kw
-		pattern := parseRule_patterns(p)
-		if pattern == nil { return nil }
-		_ = pattern
-		guard := parseRule_guard(p)
-		_ = guard
-		op := p.ExpectToken(tokenize.COLON)
-		if op == nil { return nil }
-		_ = op
-		body := parseRule_block(p)
-		if body == nil { return nil }
-		_ = body
-		return []any{kw, pattern, guard, op, body}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_case_block, v)
-		return v
+	{
+		if v := func() any {
+			kw := p.ExpectSoftKeyword("case")
+			if kw == nil { return nil }
+			_ = kw
+			pattern := parseRule_patterns(p)
+			if pattern == nil { return nil }
+			_ = pattern
+			guard := parseRule_guard(p)
+			_ = guard
+			op := p.ExpectToken(tokenize.COLON)
+			if op == nil { return nil }
+			_ = op
+			body := parseRule_block(p)
+			if body == nil { return nil }
+			_ = body
+			return []any{kw, pattern, guard, op, body}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_case_block, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_case_block, nil)
 	return nil
 }
@@ -4207,19 +4624,21 @@ func parseRule_guard(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		kw := p.ExpectName("if")
-		if kw == nil { return nil }
-		_ = kw
-		guard := parseRule_named_expression(p)
-		if guard == nil { return nil }
-		_ = guard
-		return []any{kw, guard}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_guard, v)
-		return v
+	{
+		if v := func() any {
+			kw := p.ExpectName("if")
+			if kw == nil { return nil }
+			_ = kw
+			guard := parseRule_named_expression(p)
+			if guard == nil { return nil }
+			_ = guard
+			return []any{kw, guard}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_guard, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_guard, nil)
 	return nil
 }
@@ -4231,27 +4650,31 @@ func parseRule_patterns(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		patterns := parseRule_open_sequence_pattern(p)
-		if patterns == nil { return nil }
-		_ = patterns
-		return []any{patterns}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_patterns, v)
-		return v
+	{
+		if v := func() any {
+			patterns := parseRule_open_sequence_pattern(p)
+			if patterns == nil { return nil }
+			_ = patterns
+			return []any{patterns}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_patterns, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 1
-	if v := func() any {
-		pattern := parseRule_pattern(p)
-		if pattern == nil { return nil }
-		_ = pattern
-		return []any{pattern}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_patterns, v)
-		return v
+	{
+		if v := func() any {
+			pattern := parseRule_pattern(p)
+			if pattern == nil { return nil }
+			_ = pattern
+			return []any{pattern}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_patterns, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_patterns, nil)
 	return nil
 }
@@ -4263,27 +4686,31 @@ func parseRule_pattern(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		as_pattern := parseRule_as_pattern(p)
-		if as_pattern == nil { return nil }
-		_ = as_pattern
-		return []any{as_pattern}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_pattern, v)
-		return v
+	{
+		if v := func() any {
+			as_pattern := parseRule_as_pattern(p)
+			if as_pattern == nil { return nil }
+			_ = as_pattern
+			return []any{as_pattern}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_pattern, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 1
-	if v := func() any {
-		or_pattern := parseRule_or_pattern(p)
-		if or_pattern == nil { return nil }
-		_ = or_pattern
-		return []any{or_pattern}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_pattern, v)
-		return v
+	{
+		if v := func() any {
+			or_pattern := parseRule_or_pattern(p)
+			if or_pattern == nil { return nil }
+			_ = or_pattern
+			return []any{or_pattern}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_pattern, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_pattern, nil)
 	return nil
 }
@@ -4295,33 +4722,37 @@ func parseRule_as_pattern(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		pattern := parseRule_or_pattern(p)
-		if pattern == nil { return nil }
-		_ = pattern
-		kw := p.ExpectName("as")
-		if kw == nil { return nil }
-		_ = kw
-		target := parseRule_pattern_capture_target(p)
-		if target == nil { return nil }
-		_ = target
-		return []any{pattern, kw, target}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_as_pattern, v)
-		return v
+	{
+		if v := func() any {
+			pattern := parseRule_or_pattern(p)
+			if pattern == nil { return nil }
+			_ = pattern
+			kw := p.ExpectName("as")
+			if kw == nil { return nil }
+			_ = kw
+			target := parseRule_pattern_capture_target(p)
+			if target == nil { return nil }
+			_ = target
+			return []any{pattern, kw, target}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_as_pattern, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 1
-	if v := func() any {
-		invalid_as_pattern := parseRule_invalid_as_pattern(p)
-		if invalid_as_pattern == nil { return nil }
-		_ = invalid_as_pattern
-		return []any{invalid_as_pattern}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_as_pattern, v)
-		return v
+	{
+		if v := func() any {
+			invalid_as_pattern := parseRule_invalid_as_pattern(p)
+			if invalid_as_pattern == nil { return nil }
+			_ = invalid_as_pattern
+			return []any{invalid_as_pattern}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_as_pattern, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_as_pattern, nil)
 	return nil
 }
@@ -4333,16 +4764,18 @@ func parseRule_or_pattern(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		patterns := parseRule__gather_35(p)
-		if patterns == nil { return nil }
-		_ = patterns
-		return []any{patterns}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_or_pattern, v)
-		return v
+	{
+		if v := func() any {
+			patterns := parseRule__gather_35(p)
+			if patterns == nil { return nil }
+			_ = patterns
+			return []any{patterns}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_or_pattern, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_or_pattern, nil)
 	return nil
 }
@@ -4354,93 +4787,109 @@ func parseRule_closed_pattern(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		literal_pattern := parseRule_literal_pattern(p)
-		if literal_pattern == nil { return nil }
-		_ = literal_pattern
-		return []any{literal_pattern}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_closed_pattern, v)
-		return v
+	{
+		if v := func() any {
+			literal_pattern := parseRule_literal_pattern(p)
+			if literal_pattern == nil { return nil }
+			_ = literal_pattern
+			return []any{literal_pattern}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_closed_pattern, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 1
-	if v := func() any {
-		capture_pattern := parseRule_capture_pattern(p)
-		if capture_pattern == nil { return nil }
-		_ = capture_pattern
-		return []any{capture_pattern}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_closed_pattern, v)
-		return v
+	{
+		if v := func() any {
+			capture_pattern := parseRule_capture_pattern(p)
+			if capture_pattern == nil { return nil }
+			_ = capture_pattern
+			return []any{capture_pattern}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_closed_pattern, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 2
-	if v := func() any {
-		wildcard_pattern := parseRule_wildcard_pattern(p)
-		if wildcard_pattern == nil { return nil }
-		_ = wildcard_pattern
-		return []any{wildcard_pattern}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_closed_pattern, v)
-		return v
+	{
+		if v := func() any {
+			wildcard_pattern := parseRule_wildcard_pattern(p)
+			if wildcard_pattern == nil { return nil }
+			_ = wildcard_pattern
+			return []any{wildcard_pattern}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_closed_pattern, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 3
-	if v := func() any {
-		value_pattern := parseRule_value_pattern(p)
-		if value_pattern == nil { return nil }
-		_ = value_pattern
-		return []any{value_pattern}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_closed_pattern, v)
-		return v
+	{
+		if v := func() any {
+			value_pattern := parseRule_value_pattern(p)
+			if value_pattern == nil { return nil }
+			_ = value_pattern
+			return []any{value_pattern}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_closed_pattern, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 4
-	if v := func() any {
-		group_pattern := parseRule_group_pattern(p)
-		if group_pattern == nil { return nil }
-		_ = group_pattern
-		return []any{group_pattern}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_closed_pattern, v)
-		return v
+	{
+		if v := func() any {
+			group_pattern := parseRule_group_pattern(p)
+			if group_pattern == nil { return nil }
+			_ = group_pattern
+			return []any{group_pattern}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_closed_pattern, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 5
-	if v := func() any {
-		sequence_pattern := parseRule_sequence_pattern(p)
-		if sequence_pattern == nil { return nil }
-		_ = sequence_pattern
-		return []any{sequence_pattern}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_closed_pattern, v)
-		return v
+	{
+		if v := func() any {
+			sequence_pattern := parseRule_sequence_pattern(p)
+			if sequence_pattern == nil { return nil }
+			_ = sequence_pattern
+			return []any{sequence_pattern}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_closed_pattern, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 6
-	if v := func() any {
-		mapping_pattern := parseRule_mapping_pattern(p)
-		if mapping_pattern == nil { return nil }
-		_ = mapping_pattern
-		return []any{mapping_pattern}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_closed_pattern, v)
-		return v
+	{
+		if v := func() any {
+			mapping_pattern := parseRule_mapping_pattern(p)
+			if mapping_pattern == nil { return nil }
+			_ = mapping_pattern
+			return []any{mapping_pattern}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_closed_pattern, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 7
-	if v := func() any {
-		class_pattern := parseRule_class_pattern(p)
-		if class_pattern == nil { return nil }
-		_ = class_pattern
-		return []any{class_pattern}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_closed_pattern, v)
-		return v
+	{
+		if v := func() any {
+			class_pattern := parseRule_class_pattern(p)
+			if class_pattern == nil { return nil }
+			_ = class_pattern
+			return []any{class_pattern}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_closed_pattern, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_closed_pattern, nil)
 	return nil
 }
@@ -4452,72 +4901,84 @@ func parseRule_literal_pattern(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		value := parseRule_signed_number(p)
-		if value == nil { return nil }
-		_ = value
-		if !p.Lookahead(false, func(p *Parser) any { return parseRule__group_36(p) }) { return nil }
-		return []any{value}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_literal_pattern, v)
-		return v
+	{
+		if v := func() any {
+			value := parseRule_signed_number(p)
+			if value == nil { return nil }
+			_ = value
+			if !p.Lookahead(false, func(p *Parser) any { return parseRule__group_36(p) }) { return nil }
+			return []any{value}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_literal_pattern, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 1
-	if v := func() any {
-		value := parseRule_complex_number(p)
-		if value == nil { return nil }
-		_ = value
-		return []any{value}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_literal_pattern, v)
-		return v
+	{
+		if v := func() any {
+			value := parseRule_complex_number(p)
+			if value == nil { return nil }
+			_ = value
+			return []any{value}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_literal_pattern, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 2
-	if v := func() any {
-		value := parseRule_strings(p)
-		if value == nil { return nil }
-		_ = value
-		return []any{value}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_literal_pattern, v)
-		return v
+	{
+		if v := func() any {
+			value := parseRule_strings(p)
+			if value == nil { return nil }
+			_ = value
+			return []any{value}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_literal_pattern, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 3
-	if v := func() any {
-		kw := p.ExpectName("None")
-		if kw == nil { return nil }
-		_ = kw
-		return []any{kw}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_literal_pattern, v)
-		return v
+	{
+		if v := func() any {
+			kw := p.ExpectName("None")
+			if kw == nil { return nil }
+			_ = kw
+			return []any{kw}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_literal_pattern, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 4
-	if v := func() any {
-		kw := p.ExpectName("True")
-		if kw == nil { return nil }
-		_ = kw
-		return []any{kw}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_literal_pattern, v)
-		return v
+	{
+		if v := func() any {
+			kw := p.ExpectName("True")
+			if kw == nil { return nil }
+			_ = kw
+			return []any{kw}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_literal_pattern, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 5
-	if v := func() any {
-		kw := p.ExpectName("False")
-		if kw == nil { return nil }
-		_ = kw
-		return []any{kw}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_literal_pattern, v)
-		return v
+	{
+		if v := func() any {
+			kw := p.ExpectName("False")
+			if kw == nil { return nil }
+			_ = kw
+			return []any{kw}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_literal_pattern, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_literal_pattern, nil)
 	return nil
 }
@@ -4529,73 +4990,85 @@ func parseRule_literal_expr(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		signed_number := parseRule_signed_number(p)
-		if signed_number == nil { return nil }
-		_ = signed_number
-		if !p.Lookahead(false, func(p *Parser) any { return parseRule__group_36(p) }) { return nil }
-		return []any{signed_number}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_literal_expr, v)
-		return v
+	{
+		if v := func() any {
+			signed_number := parseRule_signed_number(p)
+			if signed_number == nil { return nil }
+			_ = signed_number
+			if !p.Lookahead(false, func(p *Parser) any { return parseRule__group_36(p) }) { return nil }
+			return []any{signed_number}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_literal_expr, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 1
-	if v := func() any {
-		complex_number := parseRule_complex_number(p)
-		if complex_number == nil { return nil }
-		_ = complex_number
-		return []any{complex_number}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_literal_expr, v)
-		return v
+	{
+		if v := func() any {
+			complex_number := parseRule_complex_number(p)
+			if complex_number == nil { return nil }
+			_ = complex_number
+			return []any{complex_number}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_literal_expr, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 2
-	if v := func() any {
-		if !p.Lookahead(true, func(p *Parser) any { return parseRule__group_37(p) }) { return nil }
-		strings := parseRule_strings(p)
-		if strings == nil { return nil }
-		_ = strings
-		return []any{strings}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_literal_expr, v)
-		return v
+	{
+		if v := func() any {
+			if !p.Lookahead(true, func(p *Parser) any { return parseRule__group_37(p) }) { return nil }
+			strings := parseRule_strings(p)
+			if strings == nil { return nil }
+			_ = strings
+			return []any{strings}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_literal_expr, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 3
-	if v := func() any {
-		kw := p.ExpectName("None")
-		if kw == nil { return nil }
-		_ = kw
-		return []any{kw}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_literal_expr, v)
-		return v
+	{
+		if v := func() any {
+			kw := p.ExpectName("None")
+			if kw == nil { return nil }
+			_ = kw
+			return []any{kw}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_literal_expr, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 4
-	if v := func() any {
-		kw := p.ExpectName("True")
-		if kw == nil { return nil }
-		_ = kw
-		return []any{kw}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_literal_expr, v)
-		return v
+	{
+		if v := func() any {
+			kw := p.ExpectName("True")
+			if kw == nil { return nil }
+			_ = kw
+			return []any{kw}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_literal_expr, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 5
-	if v := func() any {
-		kw := p.ExpectName("False")
-		if kw == nil { return nil }
-		_ = kw
-		return []any{kw}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_literal_expr, v)
-		return v
+	{
+		if v := func() any {
+			kw := p.ExpectName("False")
+			if kw == nil { return nil }
+			_ = kw
+			return []any{kw}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_literal_expr, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_literal_expr, nil)
 	return nil
 }
@@ -4607,39 +5080,43 @@ func parseRule_complex_number(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		real := parseRule_signed_real_number(p)
-		if real == nil { return nil }
-		_ = real
-		op := p.ExpectToken(tokenize.PLUS)
-		if op == nil { return nil }
-		_ = op
-		imag := parseRule_imaginary_number(p)
-		if imag == nil { return nil }
-		_ = imag
-		return []any{real, op, imag}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_complex_number, v)
-		return v
+	{
+		if v := func() any {
+			real := parseRule_signed_real_number(p)
+			if real == nil { return nil }
+			_ = real
+			op := p.ExpectToken(tokenize.PLUS)
+			if op == nil { return nil }
+			_ = op
+			imag := parseRule_imaginary_number(p)
+			if imag == nil { return nil }
+			_ = imag
+			return []any{real, op, imag}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_complex_number, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 1
-	if v := func() any {
-		real := parseRule_signed_real_number(p)
-		if real == nil { return nil }
-		_ = real
-		op := p.ExpectToken(tokenize.MINUS)
-		if op == nil { return nil }
-		_ = op
-		imag := parseRule_imaginary_number(p)
-		if imag == nil { return nil }
-		_ = imag
-		return []any{real, op, imag}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_complex_number, v)
-		return v
+	{
+		if v := func() any {
+			real := parseRule_signed_real_number(p)
+			if real == nil { return nil }
+			_ = real
+			op := p.ExpectToken(tokenize.MINUS)
+			if op == nil { return nil }
+			_ = op
+			imag := parseRule_imaginary_number(p)
+			if imag == nil { return nil }
+			_ = imag
+			return []any{real, op, imag}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_complex_number, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_complex_number, nil)
 	return nil
 }
@@ -4651,30 +5128,34 @@ func parseRule_signed_number(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		number := p.ExpectToken(tokenize.NUMBER)
-		if number == nil { return nil }
-		_ = number
-		return []any{number}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_signed_number, v)
-		return v
+	{
+		if v := func() any {
+			number := p.ExpectToken(tokenize.NUMBER)
+			if number == nil { return nil }
+			_ = number
+			return []any{number}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_signed_number, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 1
-	if v := func() any {
-		op := p.ExpectToken(tokenize.MINUS)
-		if op == nil { return nil }
-		_ = op
-		number := p.ExpectToken(tokenize.NUMBER)
-		if number == nil { return nil }
-		_ = number
-		return []any{op, number}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_signed_number, v)
-		return v
+	{
+		if v := func() any {
+			op := p.ExpectToken(tokenize.MINUS)
+			if op == nil { return nil }
+			_ = op
+			number := p.ExpectToken(tokenize.NUMBER)
+			if number == nil { return nil }
+			_ = number
+			return []any{op, number}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_signed_number, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_signed_number, nil)
 	return nil
 }
@@ -4686,30 +5167,34 @@ func parseRule_signed_real_number(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		real_number := parseRule_real_number(p)
-		if real_number == nil { return nil }
-		_ = real_number
-		return []any{real_number}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_signed_real_number, v)
-		return v
+	{
+		if v := func() any {
+			real_number := parseRule_real_number(p)
+			if real_number == nil { return nil }
+			_ = real_number
+			return []any{real_number}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_signed_real_number, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 1
-	if v := func() any {
-		op := p.ExpectToken(tokenize.MINUS)
-		if op == nil { return nil }
-		_ = op
-		real := parseRule_real_number(p)
-		if real == nil { return nil }
-		_ = real
-		return []any{op, real}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_signed_real_number, v)
-		return v
+	{
+		if v := func() any {
+			op := p.ExpectToken(tokenize.MINUS)
+			if op == nil { return nil }
+			_ = op
+			real := parseRule_real_number(p)
+			if real == nil { return nil }
+			_ = real
+			return []any{op, real}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_signed_real_number, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_signed_real_number, nil)
 	return nil
 }
@@ -4721,16 +5206,18 @@ func parseRule_real_number(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		real := p.ExpectToken(tokenize.NUMBER)
-		if real == nil { return nil }
-		_ = real
-		return []any{real}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_real_number, v)
-		return v
+	{
+		if v := func() any {
+			real := p.ExpectToken(tokenize.NUMBER)
+			if real == nil { return nil }
+			_ = real
+			return []any{real}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_real_number, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_real_number, nil)
 	return nil
 }
@@ -4742,16 +5229,18 @@ func parseRule_imaginary_number(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		imag := p.ExpectToken(tokenize.NUMBER)
-		if imag == nil { return nil }
-		_ = imag
-		return []any{imag}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_imaginary_number, v)
-		return v
+	{
+		if v := func() any {
+			imag := p.ExpectToken(tokenize.NUMBER)
+			if imag == nil { return nil }
+			_ = imag
+			return []any{imag}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_imaginary_number, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_imaginary_number, nil)
 	return nil
 }
@@ -4763,16 +5252,18 @@ func parseRule_capture_pattern(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		target := parseRule_pattern_capture_target(p)
-		if target == nil { return nil }
-		_ = target
-		return []any{target}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_capture_pattern, v)
-		return v
+	{
+		if v := func() any {
+			target := parseRule_pattern_capture_target(p)
+			if target == nil { return nil }
+			_ = target
+			return []any{target}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_capture_pattern, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_capture_pattern, nil)
 	return nil
 }
@@ -4784,18 +5275,20 @@ func parseRule_pattern_capture_target(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		if !p.Lookahead(false, func(p *Parser) any { return p.ExpectSoftKeyword("_") }) { return nil }
-		name := p.ExpectToken(tokenize.NAME)
-		if name == nil { return nil }
-		_ = name
-		if !p.Lookahead(false, func(p *Parser) any { return parseRule__group_38(p) }) { return nil }
-		return []any{name}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_pattern_capture_target, v)
-		return v
+	{
+		if v := func() any {
+			if !p.Lookahead(false, func(p *Parser) any { return p.ExpectSoftKeyword("_") }) { return nil }
+			name := p.ExpectToken(tokenize.NAME)
+			if name == nil { return nil }
+			_ = name
+			if !p.Lookahead(false, func(p *Parser) any { return parseRule__group_38(p) }) { return nil }
+			return []any{name}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_pattern_capture_target, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_pattern_capture_target, nil)
 	return nil
 }
@@ -4807,16 +5300,18 @@ func parseRule_wildcard_pattern(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		kw := p.ExpectSoftKeyword("_")
-		if kw == nil { return nil }
-		_ = kw
-		return []any{kw}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_wildcard_pattern, v)
-		return v
+	{
+		if v := func() any {
+			kw := p.ExpectSoftKeyword("_")
+			if kw == nil { return nil }
+			_ = kw
+			return []any{kw}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_wildcard_pattern, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_wildcard_pattern, nil)
 	return nil
 }
@@ -4828,32 +5323,99 @@ func parseRule_value_pattern(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		attr := parseRule_attr(p)
-		if attr == nil { return nil }
-		_ = attr
-		if !p.Lookahead(false, func(p *Parser) any { return parseRule__group_38(p) }) { return nil }
-		return []any{attr}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_value_pattern, v)
-		return v
+	{
+		if v := func() any {
+			attr := parseRule_attr(p)
+			if attr == nil { return nil }
+			_ = attr
+			if !p.Lookahead(false, func(p *Parser) any { return parseRule__group_38(p) }) { return nil }
+			return []any{attr}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_value_pattern, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_value_pattern, nil)
 	return nil
 }
 
-// parseRule_attr parses attr.
-// TODO(M4): left-recursive seed-and-grow body.
+// parseRule_attr seeds and grows attr as a left-recursive rule.
 func parseRule_attr(p *Parser) any {
-	_ = p
+	if p.ErrorIndicator() { return nil }
+	mark := p.Mark()
+	if v, ok := p.IsMemoized(Rule_attr); ok { return v }
+	lastMark := mark
+	var lastResult any
+	p.InsertMemo(mark, Rule_attr, nil)
+	for {
+		p.Reset(mark)
+		result := parseRule_attr_raw(p)
+		end := p.Mark()
+		if end <= lastMark { break }
+		lastResult = result
+		lastMark = end
+		p.UpdateMemo(mark, Rule_attr, result)
+	}
+	p.Reset(lastMark)
+	return lastResult
+}
+
+// parseRule_attr_raw parses attr.
+func parseRule_attr_raw(p *Parser) any {
+	if p.ErrorIndicator() { return nil }
+	mark := p.Mark()
+	_ = mark
+	// alt 0
+	{
+		if v := func() any {
+			value := parseRule_name_or_attr(p)
+			if value == nil { return nil }
+			_ = value
+			op := p.ExpectToken(tokenize.DOT)
+			if op == nil { return nil }
+			_ = op
+			attr := p.ExpectToken(tokenize.NAME)
+			if attr == nil { return nil }
+			_ = attr
+			return []any{value, op, attr}
+		}(); v != nil {
+			return v
+		}
+		p.Reset(mark)
+	}
 	return nil
 }
 
 // parseRule_name_or_attr parses name_or_attr.
-// TODO(M4): left-recursive seed-and-grow body.
 func parseRule_name_or_attr(p *Parser) any {
-	_ = p
+	if p.ErrorIndicator() { return nil }
+	mark := p.Mark()
+	_ = mark
+	// alt 0
+	{
+		if v := func() any {
+			attr := parseRule_attr(p)
+			if attr == nil { return nil }
+			_ = attr
+			return []any{attr}
+		}(); v != nil {
+			return v
+		}
+		p.Reset(mark)
+	}
+	// alt 1
+	{
+		if v := func() any {
+			name := p.ExpectToken(tokenize.NAME)
+			if name == nil { return nil }
+			_ = name
+			return []any{name}
+		}(); v != nil {
+			return v
+		}
+		p.Reset(mark)
+	}
 	return nil
 }
 
@@ -4864,22 +5426,24 @@ func parseRule_group_pattern(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		op := p.ExpectToken(tokenize.LPAR)
-		if op == nil { return nil }
-		_ = op
-		pattern := parseRule_pattern(p)
-		if pattern == nil { return nil }
-		_ = pattern
-		op_1 := p.ExpectToken(tokenize.RPAR)
-		if op_1 == nil { return nil }
-		_ = op_1
-		return []any{op, pattern, op_1}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_group_pattern, v)
-		return v
+	{
+		if v := func() any {
+			op := p.ExpectToken(tokenize.LPAR)
+			if op == nil { return nil }
+			_ = op
+			pattern := parseRule_pattern(p)
+			if pattern == nil { return nil }
+			_ = pattern
+			op_1 := p.ExpectToken(tokenize.RPAR)
+			if op_1 == nil { return nil }
+			_ = op_1
+			return []any{op, pattern, op_1}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_group_pattern, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_group_pattern, nil)
 	return nil
 }
@@ -4891,37 +5455,41 @@ func parseRule_sequence_pattern(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		op := p.ExpectToken(tokenize.LSQB)
-		if op == nil { return nil }
-		_ = op
-		patterns := parseRule_maybe_sequence_pattern(p)
-		_ = patterns
-		op_1 := p.ExpectToken(tokenize.RSQB)
-		if op_1 == nil { return nil }
-		_ = op_1
-		return []any{op, patterns, op_1}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_sequence_pattern, v)
-		return v
+	{
+		if v := func() any {
+			op := p.ExpectToken(tokenize.LSQB)
+			if op == nil { return nil }
+			_ = op
+			patterns := parseRule_maybe_sequence_pattern(p)
+			_ = patterns
+			op_1 := p.ExpectToken(tokenize.RSQB)
+			if op_1 == nil { return nil }
+			_ = op_1
+			return []any{op, patterns, op_1}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_sequence_pattern, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 1
-	if v := func() any {
-		op := p.ExpectToken(tokenize.LPAR)
-		if op == nil { return nil }
-		_ = op
-		patterns := parseRule_open_sequence_pattern(p)
-		_ = patterns
-		op_1 := p.ExpectToken(tokenize.RPAR)
-		if op_1 == nil { return nil }
-		_ = op_1
-		return []any{op, patterns, op_1}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_sequence_pattern, v)
-		return v
+	{
+		if v := func() any {
+			op := p.ExpectToken(tokenize.LPAR)
+			if op == nil { return nil }
+			_ = op
+			patterns := parseRule_open_sequence_pattern(p)
+			_ = patterns
+			op_1 := p.ExpectToken(tokenize.RPAR)
+			if op_1 == nil { return nil }
+			_ = op_1
+			return []any{op, patterns, op_1}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_sequence_pattern, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_sequence_pattern, nil)
 	return nil
 }
@@ -4933,21 +5501,23 @@ func parseRule_open_sequence_pattern(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		pattern := parseRule_maybe_star_pattern(p)
-		if pattern == nil { return nil }
-		_ = pattern
-		op := p.ExpectToken(tokenize.COMMA)
-		if op == nil { return nil }
-		_ = op
-		patterns := parseRule_maybe_sequence_pattern(p)
-		_ = patterns
-		return []any{pattern, op, patterns}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_open_sequence_pattern, v)
-		return v
+	{
+		if v := func() any {
+			pattern := parseRule_maybe_star_pattern(p)
+			if pattern == nil { return nil }
+			_ = pattern
+			op := p.ExpectToken(tokenize.COMMA)
+			if op == nil { return nil }
+			_ = op
+			patterns := parseRule_maybe_sequence_pattern(p)
+			_ = patterns
+			return []any{pattern, op, patterns}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_open_sequence_pattern, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_open_sequence_pattern, nil)
 	return nil
 }
@@ -4959,18 +5529,20 @@ func parseRule_maybe_sequence_pattern(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		patterns := parseRule__gather_39(p)
-		if patterns == nil { return nil }
-		_ = patterns
-		opt := p.ExpectToken(tokenize.COMMA)
-		_ = opt
-		return []any{patterns, opt}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_maybe_sequence_pattern, v)
-		return v
+	{
+		if v := func() any {
+			patterns := parseRule__gather_39(p)
+			if patterns == nil { return nil }
+			_ = patterns
+			opt := p.ExpectToken(tokenize.COMMA)
+			_ = opt
+			return []any{patterns, opt}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_maybe_sequence_pattern, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_maybe_sequence_pattern, nil)
 	return nil
 }
@@ -4982,27 +5554,31 @@ func parseRule_maybe_star_pattern(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		star_pattern := parseRule_star_pattern(p)
-		if star_pattern == nil { return nil }
-		_ = star_pattern
-		return []any{star_pattern}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_maybe_star_pattern, v)
-		return v
+	{
+		if v := func() any {
+			star_pattern := parseRule_star_pattern(p)
+			if star_pattern == nil { return nil }
+			_ = star_pattern
+			return []any{star_pattern}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_maybe_star_pattern, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 1
-	if v := func() any {
-		pattern := parseRule_pattern(p)
-		if pattern == nil { return nil }
-		_ = pattern
-		return []any{pattern}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_maybe_star_pattern, v)
-		return v
+	{
+		if v := func() any {
+			pattern := parseRule_pattern(p)
+			if pattern == nil { return nil }
+			_ = pattern
+			return []any{pattern}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_maybe_star_pattern, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_maybe_star_pattern, nil)
 	return nil
 }
@@ -5014,33 +5590,37 @@ func parseRule_star_pattern(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		op := p.ExpectToken(tokenize.STAR)
-		if op == nil { return nil }
-		_ = op
-		target := parseRule_pattern_capture_target(p)
-		if target == nil { return nil }
-		_ = target
-		return []any{op, target}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_star_pattern, v)
-		return v
+	{
+		if v := func() any {
+			op := p.ExpectToken(tokenize.STAR)
+			if op == nil { return nil }
+			_ = op
+			target := parseRule_pattern_capture_target(p)
+			if target == nil { return nil }
+			_ = target
+			return []any{op, target}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_star_pattern, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 1
-	if v := func() any {
-		op := p.ExpectToken(tokenize.STAR)
-		if op == nil { return nil }
-		_ = op
-		wildcard_pattern := parseRule_wildcard_pattern(p)
-		if wildcard_pattern == nil { return nil }
-		_ = wildcard_pattern
-		return []any{op, wildcard_pattern}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_star_pattern, v)
-		return v
+	{
+		if v := func() any {
+			op := p.ExpectToken(tokenize.STAR)
+			if op == nil { return nil }
+			_ = op
+			wildcard_pattern := parseRule_wildcard_pattern(p)
+			if wildcard_pattern == nil { return nil }
+			_ = wildcard_pattern
+			return []any{op, wildcard_pattern}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_star_pattern, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_star_pattern, nil)
 	return nil
 }
@@ -5052,82 +5632,90 @@ func parseRule_mapping_pattern(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		op := p.ExpectToken(tokenize.LBRACE)
-		if op == nil { return nil }
-		_ = op
-		op_1 := p.ExpectToken(tokenize.RBRACE)
-		if op_1 == nil { return nil }
-		_ = op_1
-		return []any{op, op_1}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_mapping_pattern, v)
-		return v
+	{
+		if v := func() any {
+			op := p.ExpectToken(tokenize.LBRACE)
+			if op == nil { return nil }
+			_ = op
+			op_1 := p.ExpectToken(tokenize.RBRACE)
+			if op_1 == nil { return nil }
+			_ = op_1
+			return []any{op, op_1}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_mapping_pattern, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 1
-	if v := func() any {
-		op := p.ExpectToken(tokenize.LBRACE)
-		if op == nil { return nil }
-		_ = op
-		rest := parseRule_double_star_pattern(p)
-		if rest == nil { return nil }
-		_ = rest
-		opt := p.ExpectToken(tokenize.COMMA)
-		_ = opt
-		op_1 := p.ExpectToken(tokenize.RBRACE)
-		if op_1 == nil { return nil }
-		_ = op_1
-		return []any{op, rest, opt, op_1}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_mapping_pattern, v)
-		return v
+	{
+		if v := func() any {
+			op := p.ExpectToken(tokenize.LBRACE)
+			if op == nil { return nil }
+			_ = op
+			rest := parseRule_double_star_pattern(p)
+			if rest == nil { return nil }
+			_ = rest
+			opt := p.ExpectToken(tokenize.COMMA)
+			_ = opt
+			op_1 := p.ExpectToken(tokenize.RBRACE)
+			if op_1 == nil { return nil }
+			_ = op_1
+			return []any{op, rest, opt, op_1}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_mapping_pattern, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 2
-	if v := func() any {
-		op := p.ExpectToken(tokenize.LBRACE)
-		if op == nil { return nil }
-		_ = op
-		items := parseRule_items_pattern(p)
-		if items == nil { return nil }
-		_ = items
-		op_1 := p.ExpectToken(tokenize.COMMA)
-		if op_1 == nil { return nil }
-		_ = op_1
-		rest := parseRule_double_star_pattern(p)
-		if rest == nil { return nil }
-		_ = rest
-		opt := p.ExpectToken(tokenize.COMMA)
-		_ = opt
-		op_2 := p.ExpectToken(tokenize.RBRACE)
-		if op_2 == nil { return nil }
-		_ = op_2
-		return []any{op, items, op_1, rest, opt, op_2}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_mapping_pattern, v)
-		return v
+	{
+		if v := func() any {
+			op := p.ExpectToken(tokenize.LBRACE)
+			if op == nil { return nil }
+			_ = op
+			items := parseRule_items_pattern(p)
+			if items == nil { return nil }
+			_ = items
+			op_1 := p.ExpectToken(tokenize.COMMA)
+			if op_1 == nil { return nil }
+			_ = op_1
+			rest := parseRule_double_star_pattern(p)
+			if rest == nil { return nil }
+			_ = rest
+			opt := p.ExpectToken(tokenize.COMMA)
+			_ = opt
+			op_2 := p.ExpectToken(tokenize.RBRACE)
+			if op_2 == nil { return nil }
+			_ = op_2
+			return []any{op, items, op_1, rest, opt, op_2}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_mapping_pattern, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 3
-	if v := func() any {
-		op := p.ExpectToken(tokenize.LBRACE)
-		if op == nil { return nil }
-		_ = op
-		items := parseRule_items_pattern(p)
-		if items == nil { return nil }
-		_ = items
-		opt := p.ExpectToken(tokenize.COMMA)
-		_ = opt
-		op_1 := p.ExpectToken(tokenize.RBRACE)
-		if op_1 == nil { return nil }
-		_ = op_1
-		return []any{op, items, opt, op_1}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_mapping_pattern, v)
-		return v
+	{
+		if v := func() any {
+			op := p.ExpectToken(tokenize.LBRACE)
+			if op == nil { return nil }
+			_ = op
+			items := parseRule_items_pattern(p)
+			if items == nil { return nil }
+			_ = items
+			opt := p.ExpectToken(tokenize.COMMA)
+			_ = opt
+			op_1 := p.ExpectToken(tokenize.RBRACE)
+			if op_1 == nil { return nil }
+			_ = op_1
+			return []any{op, items, opt, op_1}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_mapping_pattern, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_mapping_pattern, nil)
 	return nil
 }
@@ -5139,16 +5727,18 @@ func parseRule_items_pattern(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		gat := parseRule__gather_40(p)
-		if gat == nil { return nil }
-		_ = gat
-		return []any{gat}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_items_pattern, v)
-		return v
+	{
+		if v := func() any {
+			gat := parseRule__gather_40(p)
+			if gat == nil { return nil }
+			_ = gat
+			return []any{gat}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_items_pattern, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_items_pattern, nil)
 	return nil
 }
@@ -5160,22 +5750,24 @@ func parseRule_key_value_pattern(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		key := parseRule__group_41(p)
-		if key == nil { return nil }
-		_ = key
-		op := p.ExpectToken(tokenize.COLON)
-		if op == nil { return nil }
-		_ = op
-		pattern := parseRule_pattern(p)
-		if pattern == nil { return nil }
-		_ = pattern
-		return []any{key, op, pattern}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_key_value_pattern, v)
-		return v
+	{
+		if v := func() any {
+			key := parseRule__group_41(p)
+			if key == nil { return nil }
+			_ = key
+			op := p.ExpectToken(tokenize.COLON)
+			if op == nil { return nil }
+			_ = op
+			pattern := parseRule_pattern(p)
+			if pattern == nil { return nil }
+			_ = pattern
+			return []any{key, op, pattern}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_key_value_pattern, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_key_value_pattern, nil)
 	return nil
 }
@@ -5187,19 +5779,21 @@ func parseRule_double_star_pattern(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		op := p.ExpectToken(tokenize.DOUBLESTAR)
-		if op == nil { return nil }
-		_ = op
-		target := parseRule_pattern_capture_target(p)
-		if target == nil { return nil }
-		_ = target
-		return []any{op, target}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_double_star_pattern, v)
-		return v
+	{
+		if v := func() any {
+			op := p.ExpectToken(tokenize.DOUBLESTAR)
+			if op == nil { return nil }
+			_ = op
+			target := parseRule_pattern_capture_target(p)
+			if target == nil { return nil }
+			_ = target
+			return []any{op, target}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_double_star_pattern, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_double_star_pattern, nil)
 	return nil
 }
@@ -5211,105 +5805,115 @@ func parseRule_class_pattern(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		cls := parseRule_name_or_attr(p)
-		if cls == nil { return nil }
-		_ = cls
-		op := p.ExpectToken(tokenize.LPAR)
-		if op == nil { return nil }
-		_ = op
-		op_1 := p.ExpectToken(tokenize.RPAR)
-		if op_1 == nil { return nil }
-		_ = op_1
-		return []any{cls, op, op_1}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_class_pattern, v)
-		return v
+	{
+		if v := func() any {
+			cls := parseRule_name_or_attr(p)
+			if cls == nil { return nil }
+			_ = cls
+			op := p.ExpectToken(tokenize.LPAR)
+			if op == nil { return nil }
+			_ = op
+			op_1 := p.ExpectToken(tokenize.RPAR)
+			if op_1 == nil { return nil }
+			_ = op_1
+			return []any{cls, op, op_1}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_class_pattern, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 1
-	if v := func() any {
-		cls := parseRule_name_or_attr(p)
-		if cls == nil { return nil }
-		_ = cls
-		op := p.ExpectToken(tokenize.LPAR)
-		if op == nil { return nil }
-		_ = op
-		patterns := parseRule_positional_patterns(p)
-		if patterns == nil { return nil }
-		_ = patterns
-		opt := p.ExpectToken(tokenize.COMMA)
-		_ = opt
-		op_1 := p.ExpectToken(tokenize.RPAR)
-		if op_1 == nil { return nil }
-		_ = op_1
-		return []any{cls, op, patterns, opt, op_1}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_class_pattern, v)
-		return v
+	{
+		if v := func() any {
+			cls := parseRule_name_or_attr(p)
+			if cls == nil { return nil }
+			_ = cls
+			op := p.ExpectToken(tokenize.LPAR)
+			if op == nil { return nil }
+			_ = op
+			patterns := parseRule_positional_patterns(p)
+			if patterns == nil { return nil }
+			_ = patterns
+			opt := p.ExpectToken(tokenize.COMMA)
+			_ = opt
+			op_1 := p.ExpectToken(tokenize.RPAR)
+			if op_1 == nil { return nil }
+			_ = op_1
+			return []any{cls, op, patterns, opt, op_1}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_class_pattern, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 2
-	if v := func() any {
-		cls := parseRule_name_or_attr(p)
-		if cls == nil { return nil }
-		_ = cls
-		op := p.ExpectToken(tokenize.LPAR)
-		if op == nil { return nil }
-		_ = op
-		keywords := parseRule_keyword_patterns(p)
-		if keywords == nil { return nil }
-		_ = keywords
-		opt := p.ExpectToken(tokenize.COMMA)
-		_ = opt
-		op_1 := p.ExpectToken(tokenize.RPAR)
-		if op_1 == nil { return nil }
-		_ = op_1
-		return []any{cls, op, keywords, opt, op_1}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_class_pattern, v)
-		return v
+	{
+		if v := func() any {
+			cls := parseRule_name_or_attr(p)
+			if cls == nil { return nil }
+			_ = cls
+			op := p.ExpectToken(tokenize.LPAR)
+			if op == nil { return nil }
+			_ = op
+			keywords := parseRule_keyword_patterns(p)
+			if keywords == nil { return nil }
+			_ = keywords
+			opt := p.ExpectToken(tokenize.COMMA)
+			_ = opt
+			op_1 := p.ExpectToken(tokenize.RPAR)
+			if op_1 == nil { return nil }
+			_ = op_1
+			return []any{cls, op, keywords, opt, op_1}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_class_pattern, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 3
-	if v := func() any {
-		cls := parseRule_name_or_attr(p)
-		if cls == nil { return nil }
-		_ = cls
-		op := p.ExpectToken(tokenize.LPAR)
-		if op == nil { return nil }
-		_ = op
-		patterns := parseRule_positional_patterns(p)
-		if patterns == nil { return nil }
-		_ = patterns
-		op_1 := p.ExpectToken(tokenize.COMMA)
-		if op_1 == nil { return nil }
-		_ = op_1
-		keywords := parseRule_keyword_patterns(p)
-		if keywords == nil { return nil }
-		_ = keywords
-		opt := p.ExpectToken(tokenize.COMMA)
-		_ = opt
-		op_2 := p.ExpectToken(tokenize.RPAR)
-		if op_2 == nil { return nil }
-		_ = op_2
-		return []any{cls, op, patterns, op_1, keywords, opt, op_2}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_class_pattern, v)
-		return v
+	{
+		if v := func() any {
+			cls := parseRule_name_or_attr(p)
+			if cls == nil { return nil }
+			_ = cls
+			op := p.ExpectToken(tokenize.LPAR)
+			if op == nil { return nil }
+			_ = op
+			patterns := parseRule_positional_patterns(p)
+			if patterns == nil { return nil }
+			_ = patterns
+			op_1 := p.ExpectToken(tokenize.COMMA)
+			if op_1 == nil { return nil }
+			_ = op_1
+			keywords := parseRule_keyword_patterns(p)
+			if keywords == nil { return nil }
+			_ = keywords
+			opt := p.ExpectToken(tokenize.COMMA)
+			_ = opt
+			op_2 := p.ExpectToken(tokenize.RPAR)
+			if op_2 == nil { return nil }
+			_ = op_2
+			return []any{cls, op, patterns, op_1, keywords, opt, op_2}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_class_pattern, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 4
-	if v := func() any {
-		invalid_class_pattern := parseRule_invalid_class_pattern(p)
-		if invalid_class_pattern == nil { return nil }
-		_ = invalid_class_pattern
-		return []any{invalid_class_pattern}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_class_pattern, v)
-		return v
+	{
+		if v := func() any {
+			invalid_class_pattern := parseRule_invalid_class_pattern(p)
+			if invalid_class_pattern == nil { return nil }
+			_ = invalid_class_pattern
+			return []any{invalid_class_pattern}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_class_pattern, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_class_pattern, nil)
 	return nil
 }
@@ -5321,16 +5925,18 @@ func parseRule_positional_patterns(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		args := parseRule__gather_42(p)
-		if args == nil { return nil }
-		_ = args
-		return []any{args}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_positional_patterns, v)
-		return v
+	{
+		if v := func() any {
+			args := parseRule__gather_42(p)
+			if args == nil { return nil }
+			_ = args
+			return []any{args}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_positional_patterns, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_positional_patterns, nil)
 	return nil
 }
@@ -5342,16 +5948,18 @@ func parseRule_keyword_patterns(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		gat := parseRule__gather_43(p)
-		if gat == nil { return nil }
-		_ = gat
-		return []any{gat}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_keyword_patterns, v)
-		return v
+	{
+		if v := func() any {
+			gat := parseRule__gather_43(p)
+			if gat == nil { return nil }
+			_ = gat
+			return []any{gat}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_keyword_patterns, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_keyword_patterns, nil)
 	return nil
 }
@@ -5363,22 +5971,24 @@ func parseRule_keyword_pattern(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		arg := p.ExpectToken(tokenize.NAME)
-		if arg == nil { return nil }
-		_ = arg
-		op := p.ExpectToken(tokenize.EQUAL)
-		if op == nil { return nil }
-		_ = op
-		value := parseRule_pattern(p)
-		if value == nil { return nil }
-		_ = value
-		return []any{arg, op, value}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_keyword_pattern, v)
-		return v
+	{
+		if v := func() any {
+			arg := p.ExpectToken(tokenize.NAME)
+			if arg == nil { return nil }
+			_ = arg
+			op := p.ExpectToken(tokenize.EQUAL)
+			if op == nil { return nil }
+			_ = op
+			value := parseRule_pattern(p)
+			if value == nil { return nil }
+			_ = value
+			return []any{arg, op, value}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_keyword_pattern, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_keyword_pattern, nil)
 	return nil
 }
@@ -5390,27 +6000,29 @@ func parseRule_type_alias(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		kw := p.ExpectSoftKeyword("type")
-		if kw == nil { return nil }
-		_ = kw
-		n := p.ExpectToken(tokenize.NAME)
-		if n == nil { return nil }
-		_ = n
-		t := parseRule_type_params(p)
-		_ = t
-		op := p.ExpectToken(tokenize.EQUAL)
-		if op == nil { return nil }
-		_ = op
-		b := parseRule_expression(p)
-		if b == nil { return nil }
-		_ = b
-		return []any{kw, n, t, op, b}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_type_alias, v)
-		return v
+	{
+		if v := func() any {
+			kw := p.ExpectSoftKeyword("type")
+			if kw == nil { return nil }
+			_ = kw
+			n := p.ExpectToken(tokenize.NAME)
+			if n == nil { return nil }
+			_ = n
+			t := parseRule_type_params(p)
+			_ = t
+			op := p.ExpectToken(tokenize.EQUAL)
+			if op == nil { return nil }
+			_ = op
+			b := parseRule_expression(p)
+			if b == nil { return nil }
+			_ = b
+			return []any{kw, n, t, op, b}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_type_alias, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_type_alias, nil)
 	return nil
 }
@@ -5422,33 +6034,37 @@ func parseRule_type_params(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		invalid_type_params := parseRule_invalid_type_params(p)
-		if invalid_type_params == nil { return nil }
-		_ = invalid_type_params
-		return []any{invalid_type_params}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_type_params, v)
-		return v
+	{
+		if v := func() any {
+			invalid_type_params := parseRule_invalid_type_params(p)
+			if invalid_type_params == nil { return nil }
+			_ = invalid_type_params
+			return []any{invalid_type_params}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_type_params, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 1
-	if v := func() any {
-		op := p.ExpectToken(tokenize.LSQB)
-		if op == nil { return nil }
-		_ = op
-		t := parseRule_type_param_seq(p)
-		if t == nil { return nil }
-		_ = t
-		op_1 := p.ExpectToken(tokenize.RSQB)
-		if op_1 == nil { return nil }
-		_ = op_1
-		return []any{op, t, op_1}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_type_params, v)
-		return v
+	{
+		if v := func() any {
+			op := p.ExpectToken(tokenize.LSQB)
+			if op == nil { return nil }
+			_ = op
+			t := parseRule_type_param_seq(p)
+			if t == nil { return nil }
+			_ = t
+			op_1 := p.ExpectToken(tokenize.RSQB)
+			if op_1 == nil { return nil }
+			_ = op_1
+			return []any{op, t, op_1}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_type_params, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_type_params, nil)
 	return nil
 }
@@ -5460,18 +6076,20 @@ func parseRule_type_param_seq(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		a := parseRule__gather_44(p)
-		if a == nil { return nil }
-		_ = a
-		opt := p.ExpectToken(tokenize.COMMA)
-		_ = opt
-		return []any{a, opt}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_type_param_seq, v)
-		return v
+	{
+		if v := func() any {
+			a := parseRule__gather_44(p)
+			if a == nil { return nil }
+			_ = a
+			opt := p.ExpectToken(tokenize.COMMA)
+			_ = opt
+			return []any{a, opt}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_type_param_seq, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_type_param_seq, nil)
 	return nil
 }
@@ -5483,63 +6101,71 @@ func parseRule_type_param(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		a := p.ExpectToken(tokenize.NAME)
-		if a == nil { return nil }
-		_ = a
-		b := parseRule_type_param_bound(p)
-		_ = b
-		c := parseRule_type_param_default(p)
-		_ = c
-		return []any{a, b, c}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_type_param, v)
-		return v
+	{
+		if v := func() any {
+			a := p.ExpectToken(tokenize.NAME)
+			if a == nil { return nil }
+			_ = a
+			b := parseRule_type_param_bound(p)
+			_ = b
+			c := parseRule_type_param_default(p)
+			_ = c
+			return []any{a, b, c}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_type_param, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 1
-	if v := func() any {
-		invalid_type_param := parseRule_invalid_type_param(p)
-		if invalid_type_param == nil { return nil }
-		_ = invalid_type_param
-		return []any{invalid_type_param}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_type_param, v)
-		return v
+	{
+		if v := func() any {
+			invalid_type_param := parseRule_invalid_type_param(p)
+			if invalid_type_param == nil { return nil }
+			_ = invalid_type_param
+			return []any{invalid_type_param}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_type_param, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 2
-	if v := func() any {
-		op := p.ExpectToken(tokenize.STAR)
-		if op == nil { return nil }
-		_ = op
-		a := p.ExpectToken(tokenize.NAME)
-		if a == nil { return nil }
-		_ = a
-		b := parseRule_type_param_starred_default(p)
-		_ = b
-		return []any{op, a, b}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_type_param, v)
-		return v
+	{
+		if v := func() any {
+			op := p.ExpectToken(tokenize.STAR)
+			if op == nil { return nil }
+			_ = op
+			a := p.ExpectToken(tokenize.NAME)
+			if a == nil { return nil }
+			_ = a
+			b := parseRule_type_param_starred_default(p)
+			_ = b
+			return []any{op, a, b}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_type_param, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 3
-	if v := func() any {
-		op := p.ExpectToken(tokenize.DOUBLESTAR)
-		if op == nil { return nil }
-		_ = op
-		a := p.ExpectToken(tokenize.NAME)
-		if a == nil { return nil }
-		_ = a
-		b := parseRule_type_param_default(p)
-		_ = b
-		return []any{op, a, b}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_type_param, v)
-		return v
+	{
+		if v := func() any {
+			op := p.ExpectToken(tokenize.DOUBLESTAR)
+			if op == nil { return nil }
+			_ = op
+			a := p.ExpectToken(tokenize.NAME)
+			if a == nil { return nil }
+			_ = a
+			b := parseRule_type_param_default(p)
+			_ = b
+			return []any{op, a, b}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_type_param, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_type_param, nil)
 	return nil
 }
@@ -5551,19 +6177,21 @@ func parseRule_type_param_bound(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		op := p.ExpectToken(tokenize.COLON)
-		if op == nil { return nil }
-		_ = op
-		e := parseRule_expression(p)
-		if e == nil { return nil }
-		_ = e
-		return []any{op, e}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_type_param_bound, v)
-		return v
+	{
+		if v := func() any {
+			op := p.ExpectToken(tokenize.COLON)
+			if op == nil { return nil }
+			_ = op
+			e := parseRule_expression(p)
+			if e == nil { return nil }
+			_ = e
+			return []any{op, e}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_type_param_bound, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_type_param_bound, nil)
 	return nil
 }
@@ -5575,19 +6203,21 @@ func parseRule_type_param_default(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		op := p.ExpectToken(tokenize.EQUAL)
-		if op == nil { return nil }
-		_ = op
-		e := parseRule_expression(p)
-		if e == nil { return nil }
-		_ = e
-		return []any{op, e}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_type_param_default, v)
-		return v
+	{
+		if v := func() any {
+			op := p.ExpectToken(tokenize.EQUAL)
+			if op == nil { return nil }
+			_ = op
+			e := parseRule_expression(p)
+			if e == nil { return nil }
+			_ = e
+			return []any{op, e}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_type_param_default, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_type_param_default, nil)
 	return nil
 }
@@ -5599,19 +6229,21 @@ func parseRule_type_param_starred_default(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		op := p.ExpectToken(tokenize.EQUAL)
-		if op == nil { return nil }
-		_ = op
-		e := parseRule_star_expression(p)
-		if e == nil { return nil }
-		_ = e
-		return []any{op, e}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_type_param_starred_default, v)
-		return v
+	{
+		if v := func() any {
+			op := p.ExpectToken(tokenize.EQUAL)
+			if op == nil { return nil }
+			_ = op
+			e := parseRule_star_expression(p)
+			if e == nil { return nil }
+			_ = e
+			return []any{op, e}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_type_param_starred_default, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_type_param_starred_default, nil)
 	return nil
 }
@@ -5623,46 +6255,52 @@ func parseRule_expressions(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		a := parseRule_expression(p)
-		if a == nil { return nil }
-		_ = a
-		b := parseRule__loop1_45(p)
-		if b == nil { return nil }
-		_ = b
-		opt := p.ExpectToken(tokenize.COMMA)
-		_ = opt
-		return []any{a, b, opt}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_expressions, v)
-		return v
+	{
+		if v := func() any {
+			a := parseRule_expression(p)
+			if a == nil { return nil }
+			_ = a
+			b := parseRule__loop1_45(p)
+			if b == nil { return nil }
+			_ = b
+			opt := p.ExpectToken(tokenize.COMMA)
+			_ = opt
+			return []any{a, b, opt}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_expressions, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 1
-	if v := func() any {
-		a := parseRule_expression(p)
-		if a == nil { return nil }
-		_ = a
-		op := p.ExpectToken(tokenize.COMMA)
-		if op == nil { return nil }
-		_ = op
-		return []any{a, op}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_expressions, v)
-		return v
+	{
+		if v := func() any {
+			a := parseRule_expression(p)
+			if a == nil { return nil }
+			_ = a
+			op := p.ExpectToken(tokenize.COMMA)
+			if op == nil { return nil }
+			_ = op
+			return []any{a, op}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_expressions, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 2
-	if v := func() any {
-		expression := parseRule_expression(p)
-		if expression == nil { return nil }
-		_ = expression
-		return []any{expression}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_expressions, v)
-		return v
+	{
+		if v := func() any {
+			expression := parseRule_expression(p)
+			if expression == nil { return nil }
+			_ = expression
+			return []any{expression}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_expressions, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_expressions, nil)
 	return nil
 }
@@ -5674,72 +6312,82 @@ func parseRule_expression(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		invalid_expression := parseRule_invalid_expression(p)
-		if invalid_expression == nil { return nil }
-		_ = invalid_expression
-		return []any{invalid_expression}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_expression, v)
-		return v
+	{
+		if v := func() any {
+			invalid_expression := parseRule_invalid_expression(p)
+			if invalid_expression == nil { return nil }
+			_ = invalid_expression
+			return []any{invalid_expression}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_expression, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 1
-	if v := func() any {
-		invalid_legacy_expression := parseRule_invalid_legacy_expression(p)
-		if invalid_legacy_expression == nil { return nil }
-		_ = invalid_legacy_expression
-		return []any{invalid_legacy_expression}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_expression, v)
-		return v
+	{
+		if v := func() any {
+			invalid_legacy_expression := parseRule_invalid_legacy_expression(p)
+			if invalid_legacy_expression == nil { return nil }
+			_ = invalid_legacy_expression
+			return []any{invalid_legacy_expression}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_expression, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 2
-	if v := func() any {
-		a := parseRule_disjunction(p)
-		if a == nil { return nil }
-		_ = a
-		kw := p.ExpectName("if")
-		if kw == nil { return nil }
-		_ = kw
-		b := parseRule_disjunction(p)
-		if b == nil { return nil }
-		_ = b
-		kw_1 := p.ExpectName("else")
-		if kw_1 == nil { return nil }
-		_ = kw_1
-		c := parseRule_expression(p)
-		if c == nil { return nil }
-		_ = c
-		return []any{a, kw, b, kw_1, c}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_expression, v)
-		return v
+	{
+		if v := func() any {
+			a := parseRule_disjunction(p)
+			if a == nil { return nil }
+			_ = a
+			kw := p.ExpectName("if")
+			if kw == nil { return nil }
+			_ = kw
+			b := parseRule_disjunction(p)
+			if b == nil { return nil }
+			_ = b
+			kw_1 := p.ExpectName("else")
+			if kw_1 == nil { return nil }
+			_ = kw_1
+			c := parseRule_expression(p)
+			if c == nil { return nil }
+			_ = c
+			return []any{a, kw, b, kw_1, c}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_expression, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 3
-	if v := func() any {
-		disjunction := parseRule_disjunction(p)
-		if disjunction == nil { return nil }
-		_ = disjunction
-		return []any{disjunction}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_expression, v)
-		return v
+	{
+		if v := func() any {
+			disjunction := parseRule_disjunction(p)
+			if disjunction == nil { return nil }
+			_ = disjunction
+			return []any{disjunction}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_expression, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 4
-	if v := func() any {
-		lambdef := parseRule_lambdef(p)
-		if lambdef == nil { return nil }
-		_ = lambdef
-		return []any{lambdef}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_expression, v)
-		return v
+	{
+		if v := func() any {
+			lambdef := parseRule_lambdef(p)
+			if lambdef == nil { return nil }
+			_ = lambdef
+			return []any{lambdef}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_expression, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_expression, nil)
 	return nil
 }
@@ -5751,35 +6399,39 @@ func parseRule_yield_expr(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		kw := p.ExpectName("yield")
-		if kw == nil { return nil }
-		_ = kw
-		kw_1 := p.ExpectName("from")
-		if kw_1 == nil { return nil }
-		_ = kw_1
-		a := parseRule_expression(p)
-		if a == nil { return nil }
-		_ = a
-		return []any{kw, kw_1, a}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_yield_expr, v)
-		return v
+	{
+		if v := func() any {
+			kw := p.ExpectName("yield")
+			if kw == nil { return nil }
+			_ = kw
+			kw_1 := p.ExpectName("from")
+			if kw_1 == nil { return nil }
+			_ = kw_1
+			a := parseRule_expression(p)
+			if a == nil { return nil }
+			_ = a
+			return []any{kw, kw_1, a}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_yield_expr, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 1
-	if v := func() any {
-		kw := p.ExpectName("yield")
-		if kw == nil { return nil }
-		_ = kw
-		a := parseRule_star_expressions(p)
-		_ = a
-		return []any{kw, a}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_yield_expr, v)
-		return v
+	{
+		if v := func() any {
+			kw := p.ExpectName("yield")
+			if kw == nil { return nil }
+			_ = kw
+			a := parseRule_star_expressions(p)
+			_ = a
+			return []any{kw, a}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_yield_expr, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_yield_expr, nil)
 	return nil
 }
@@ -5791,46 +6443,52 @@ func parseRule_star_expressions(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		a := parseRule_star_expression(p)
-		if a == nil { return nil }
-		_ = a
-		b := parseRule__loop1_46(p)
-		if b == nil { return nil }
-		_ = b
-		opt := p.ExpectToken(tokenize.COMMA)
-		_ = opt
-		return []any{a, b, opt}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_star_expressions, v)
-		return v
+	{
+		if v := func() any {
+			a := parseRule_star_expression(p)
+			if a == nil { return nil }
+			_ = a
+			b := parseRule__loop1_46(p)
+			if b == nil { return nil }
+			_ = b
+			opt := p.ExpectToken(tokenize.COMMA)
+			_ = opt
+			return []any{a, b, opt}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_star_expressions, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 1
-	if v := func() any {
-		a := parseRule_star_expression(p)
-		if a == nil { return nil }
-		_ = a
-		op := p.ExpectToken(tokenize.COMMA)
-		if op == nil { return nil }
-		_ = op
-		return []any{a, op}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_star_expressions, v)
-		return v
+	{
+		if v := func() any {
+			a := parseRule_star_expression(p)
+			if a == nil { return nil }
+			_ = a
+			op := p.ExpectToken(tokenize.COMMA)
+			if op == nil { return nil }
+			_ = op
+			return []any{a, op}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_star_expressions, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 2
-	if v := func() any {
-		star_expression := parseRule_star_expression(p)
-		if star_expression == nil { return nil }
-		_ = star_expression
-		return []any{star_expression}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_star_expressions, v)
-		return v
+	{
+		if v := func() any {
+			star_expression := parseRule_star_expression(p)
+			if star_expression == nil { return nil }
+			_ = star_expression
+			return []any{star_expression}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_star_expressions, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_star_expressions, nil)
 	return nil
 }
@@ -5842,30 +6500,34 @@ func parseRule_star_expression(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		op := p.ExpectToken(tokenize.STAR)
-		if op == nil { return nil }
-		_ = op
-		a := parseRule_bitwise_or(p)
-		if a == nil { return nil }
-		_ = a
-		return []any{op, a}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_star_expression, v)
-		return v
+	{
+		if v := func() any {
+			op := p.ExpectToken(tokenize.STAR)
+			if op == nil { return nil }
+			_ = op
+			a := parseRule_bitwise_or(p)
+			if a == nil { return nil }
+			_ = a
+			return []any{op, a}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_star_expression, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 1
-	if v := func() any {
-		expression := parseRule_expression(p)
-		if expression == nil { return nil }
-		_ = expression
-		return []any{expression}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_star_expression, v)
-		return v
+	{
+		if v := func() any {
+			expression := parseRule_expression(p)
+			if expression == nil { return nil }
+			_ = expression
+			return []any{expression}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_star_expression, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_star_expression, nil)
 	return nil
 }
@@ -5877,18 +6539,20 @@ func parseRule_star_named_expressions(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		a := parseRule__gather_47(p)
-		if a == nil { return nil }
-		_ = a
-		opt := p.ExpectToken(tokenize.COMMA)
-		_ = opt
-		return []any{a, opt}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_star_named_expressions, v)
-		return v
+	{
+		if v := func() any {
+			a := parseRule__gather_47(p)
+			if a == nil { return nil }
+			_ = a
+			opt := p.ExpectToken(tokenize.COMMA)
+			_ = opt
+			return []any{a, opt}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_star_named_expressions, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_star_named_expressions, nil)
 	return nil
 }
@@ -5900,30 +6564,34 @@ func parseRule_star_named_expression(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		op := p.ExpectToken(tokenize.STAR)
-		if op == nil { return nil }
-		_ = op
-		a := parseRule_bitwise_or(p)
-		if a == nil { return nil }
-		_ = a
-		return []any{op, a}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_star_named_expression, v)
-		return v
+	{
+		if v := func() any {
+			op := p.ExpectToken(tokenize.STAR)
+			if op == nil { return nil }
+			_ = op
+			a := parseRule_bitwise_or(p)
+			if a == nil { return nil }
+			_ = a
+			return []any{op, a}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_star_named_expression, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 1
-	if v := func() any {
-		named_expression := parseRule_named_expression(p)
-		if named_expression == nil { return nil }
-		_ = named_expression
-		return []any{named_expression}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_star_named_expression, v)
-		return v
+	{
+		if v := func() any {
+			named_expression := parseRule_named_expression(p)
+			if named_expression == nil { return nil }
+			_ = named_expression
+			return []any{named_expression}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_star_named_expression, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_star_named_expression, nil)
 	return nil
 }
@@ -5935,23 +6603,30 @@ func parseRule_assignment_expression(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		a := p.ExpectToken(tokenize.NAME)
-		if a == nil { return nil }
-		_ = a
-		op := p.ExpectToken(tokenize.COLONEQUAL)
-		if op == nil { return nil }
-		_ = op
-		// cut: M4
-		b := parseRule_expression(p)
-		if b == nil { return nil }
-		_ = b
-		return []any{a, op, b}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_assignment_expression, v)
-		return v
+	{
+		cut := false
+		if v := func() any {
+			a := p.ExpectToken(tokenize.NAME)
+			if a == nil { return nil }
+			_ = a
+			op := p.ExpectToken(tokenize.COLONEQUAL)
+			if op == nil { return nil }
+			_ = op
+			cut = true
+			b := parseRule_expression(p)
+			if b == nil { return nil }
+			_ = b
+			return []any{a, op, b}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_assignment_expression, v)
+			return v
+		}
+		p.Reset(mark)
+		if cut {
+			p.InsertMemo(mark, Rule_assignment_expression, nil)
+			return nil
+		}
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_assignment_expression, nil)
 	return nil
 }
@@ -5963,39 +6638,45 @@ func parseRule_named_expression(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		assignment_expression := parseRule_assignment_expression(p)
-		if assignment_expression == nil { return nil }
-		_ = assignment_expression
-		return []any{assignment_expression}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_named_expression, v)
-		return v
+	{
+		if v := func() any {
+			assignment_expression := parseRule_assignment_expression(p)
+			if assignment_expression == nil { return nil }
+			_ = assignment_expression
+			return []any{assignment_expression}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_named_expression, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 1
-	if v := func() any {
-		invalid_named_expression := parseRule_invalid_named_expression(p)
-		if invalid_named_expression == nil { return nil }
-		_ = invalid_named_expression
-		return []any{invalid_named_expression}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_named_expression, v)
-		return v
+	{
+		if v := func() any {
+			invalid_named_expression := parseRule_invalid_named_expression(p)
+			if invalid_named_expression == nil { return nil }
+			_ = invalid_named_expression
+			return []any{invalid_named_expression}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_named_expression, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 2
-	if v := func() any {
-		expression := parseRule_expression(p)
-		if expression == nil { return nil }
-		_ = expression
-		if !p.Lookahead(false, func(p *Parser) any { return p.ExpectToken(tokenize.COLONEQUAL) }) { return nil }
-		return []any{expression}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_named_expression, v)
-		return v
+	{
+		if v := func() any {
+			expression := parseRule_expression(p)
+			if expression == nil { return nil }
+			_ = expression
+			if !p.Lookahead(false, func(p *Parser) any { return p.ExpectToken(tokenize.COLONEQUAL) }) { return nil }
+			return []any{expression}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_named_expression, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_named_expression, nil)
 	return nil
 }
@@ -6007,30 +6688,34 @@ func parseRule_disjunction(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		a := parseRule_conjunction(p)
-		if a == nil { return nil }
-		_ = a
-		b := parseRule__loop1_48(p)
-		if b == nil { return nil }
-		_ = b
-		return []any{a, b}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_disjunction, v)
-		return v
+	{
+		if v := func() any {
+			a := parseRule_conjunction(p)
+			if a == nil { return nil }
+			_ = a
+			b := parseRule__loop1_48(p)
+			if b == nil { return nil }
+			_ = b
+			return []any{a, b}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_disjunction, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 1
-	if v := func() any {
-		conjunction := parseRule_conjunction(p)
-		if conjunction == nil { return nil }
-		_ = conjunction
-		return []any{conjunction}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_disjunction, v)
-		return v
+	{
+		if v := func() any {
+			conjunction := parseRule_conjunction(p)
+			if conjunction == nil { return nil }
+			_ = conjunction
+			return []any{conjunction}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_disjunction, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_disjunction, nil)
 	return nil
 }
@@ -6042,30 +6727,34 @@ func parseRule_conjunction(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		a := parseRule_inversion(p)
-		if a == nil { return nil }
-		_ = a
-		b := parseRule__loop1_49(p)
-		if b == nil { return nil }
-		_ = b
-		return []any{a, b}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_conjunction, v)
-		return v
+	{
+		if v := func() any {
+			a := parseRule_inversion(p)
+			if a == nil { return nil }
+			_ = a
+			b := parseRule__loop1_49(p)
+			if b == nil { return nil }
+			_ = b
+			return []any{a, b}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_conjunction, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 1
-	if v := func() any {
-		inversion := parseRule_inversion(p)
-		if inversion == nil { return nil }
-		_ = inversion
-		return []any{inversion}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_conjunction, v)
-		return v
+	{
+		if v := func() any {
+			inversion := parseRule_inversion(p)
+			if inversion == nil { return nil }
+			_ = inversion
+			return []any{inversion}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_conjunction, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_conjunction, nil)
 	return nil
 }
@@ -6077,30 +6766,34 @@ func parseRule_inversion(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		kw := p.ExpectName("not")
-		if kw == nil { return nil }
-		_ = kw
-		a := parseRule_inversion(p)
-		if a == nil { return nil }
-		_ = a
-		return []any{kw, a}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_inversion, v)
-		return v
+	{
+		if v := func() any {
+			kw := p.ExpectName("not")
+			if kw == nil { return nil }
+			_ = kw
+			a := parseRule_inversion(p)
+			if a == nil { return nil }
+			_ = a
+			return []any{kw, a}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_inversion, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 1
-	if v := func() any {
-		comparison := parseRule_comparison(p)
-		if comparison == nil { return nil }
-		_ = comparison
-		return []any{comparison}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_inversion, v)
-		return v
+	{
+		if v := func() any {
+			comparison := parseRule_comparison(p)
+			if comparison == nil { return nil }
+			_ = comparison
+			return []any{comparison}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_inversion, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_inversion, nil)
 	return nil
 }
@@ -6112,30 +6805,34 @@ func parseRule_comparison(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		a := parseRule_bitwise_or(p)
-		if a == nil { return nil }
-		_ = a
-		b := parseRule__loop1_50(p)
-		if b == nil { return nil }
-		_ = b
-		return []any{a, b}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_comparison, v)
-		return v
+	{
+		if v := func() any {
+			a := parseRule_bitwise_or(p)
+			if a == nil { return nil }
+			_ = a
+			b := parseRule__loop1_50(p)
+			if b == nil { return nil }
+			_ = b
+			return []any{a, b}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_comparison, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 1
-	if v := func() any {
-		bitwise_or := parseRule_bitwise_or(p)
-		if bitwise_or == nil { return nil }
-		_ = bitwise_or
-		return []any{bitwise_or}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_comparison, v)
-		return v
+	{
+		if v := func() any {
+			bitwise_or := parseRule_bitwise_or(p)
+			if bitwise_or == nil { return nil }
+			_ = bitwise_or
+			return []any{bitwise_or}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_comparison, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_comparison, nil)
 	return nil
 }
@@ -6147,115 +6844,135 @@ func parseRule_compare_op_bitwise_or_pair(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		eq_bitwise_or := parseRule_eq_bitwise_or(p)
-		if eq_bitwise_or == nil { return nil }
-		_ = eq_bitwise_or
-		return []any{eq_bitwise_or}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_compare_op_bitwise_or_pair, v)
-		return v
+	{
+		if v := func() any {
+			eq_bitwise_or := parseRule_eq_bitwise_or(p)
+			if eq_bitwise_or == nil { return nil }
+			_ = eq_bitwise_or
+			return []any{eq_bitwise_or}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_compare_op_bitwise_or_pair, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 1
-	if v := func() any {
-		noteq_bitwise_or := parseRule_noteq_bitwise_or(p)
-		if noteq_bitwise_or == nil { return nil }
-		_ = noteq_bitwise_or
-		return []any{noteq_bitwise_or}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_compare_op_bitwise_or_pair, v)
-		return v
+	{
+		if v := func() any {
+			noteq_bitwise_or := parseRule_noteq_bitwise_or(p)
+			if noteq_bitwise_or == nil { return nil }
+			_ = noteq_bitwise_or
+			return []any{noteq_bitwise_or}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_compare_op_bitwise_or_pair, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 2
-	if v := func() any {
-		lte_bitwise_or := parseRule_lte_bitwise_or(p)
-		if lte_bitwise_or == nil { return nil }
-		_ = lte_bitwise_or
-		return []any{lte_bitwise_or}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_compare_op_bitwise_or_pair, v)
-		return v
+	{
+		if v := func() any {
+			lte_bitwise_or := parseRule_lte_bitwise_or(p)
+			if lte_bitwise_or == nil { return nil }
+			_ = lte_bitwise_or
+			return []any{lte_bitwise_or}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_compare_op_bitwise_or_pair, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 3
-	if v := func() any {
-		lt_bitwise_or := parseRule_lt_bitwise_or(p)
-		if lt_bitwise_or == nil { return nil }
-		_ = lt_bitwise_or
-		return []any{lt_bitwise_or}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_compare_op_bitwise_or_pair, v)
-		return v
+	{
+		if v := func() any {
+			lt_bitwise_or := parseRule_lt_bitwise_or(p)
+			if lt_bitwise_or == nil { return nil }
+			_ = lt_bitwise_or
+			return []any{lt_bitwise_or}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_compare_op_bitwise_or_pair, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 4
-	if v := func() any {
-		gte_bitwise_or := parseRule_gte_bitwise_or(p)
-		if gte_bitwise_or == nil { return nil }
-		_ = gte_bitwise_or
-		return []any{gte_bitwise_or}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_compare_op_bitwise_or_pair, v)
-		return v
+	{
+		if v := func() any {
+			gte_bitwise_or := parseRule_gte_bitwise_or(p)
+			if gte_bitwise_or == nil { return nil }
+			_ = gte_bitwise_or
+			return []any{gte_bitwise_or}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_compare_op_bitwise_or_pair, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 5
-	if v := func() any {
-		gt_bitwise_or := parseRule_gt_bitwise_or(p)
-		if gt_bitwise_or == nil { return nil }
-		_ = gt_bitwise_or
-		return []any{gt_bitwise_or}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_compare_op_bitwise_or_pair, v)
-		return v
+	{
+		if v := func() any {
+			gt_bitwise_or := parseRule_gt_bitwise_or(p)
+			if gt_bitwise_or == nil { return nil }
+			_ = gt_bitwise_or
+			return []any{gt_bitwise_or}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_compare_op_bitwise_or_pair, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 6
-	if v := func() any {
-		notin_bitwise_or := parseRule_notin_bitwise_or(p)
-		if notin_bitwise_or == nil { return nil }
-		_ = notin_bitwise_or
-		return []any{notin_bitwise_or}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_compare_op_bitwise_or_pair, v)
-		return v
+	{
+		if v := func() any {
+			notin_bitwise_or := parseRule_notin_bitwise_or(p)
+			if notin_bitwise_or == nil { return nil }
+			_ = notin_bitwise_or
+			return []any{notin_bitwise_or}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_compare_op_bitwise_or_pair, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 7
-	if v := func() any {
-		in_bitwise_or := parseRule_in_bitwise_or(p)
-		if in_bitwise_or == nil { return nil }
-		_ = in_bitwise_or
-		return []any{in_bitwise_or}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_compare_op_bitwise_or_pair, v)
-		return v
+	{
+		if v := func() any {
+			in_bitwise_or := parseRule_in_bitwise_or(p)
+			if in_bitwise_or == nil { return nil }
+			_ = in_bitwise_or
+			return []any{in_bitwise_or}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_compare_op_bitwise_or_pair, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 8
-	if v := func() any {
-		isnot_bitwise_or := parseRule_isnot_bitwise_or(p)
-		if isnot_bitwise_or == nil { return nil }
-		_ = isnot_bitwise_or
-		return []any{isnot_bitwise_or}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_compare_op_bitwise_or_pair, v)
-		return v
+	{
+		if v := func() any {
+			isnot_bitwise_or := parseRule_isnot_bitwise_or(p)
+			if isnot_bitwise_or == nil { return nil }
+			_ = isnot_bitwise_or
+			return []any{isnot_bitwise_or}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_compare_op_bitwise_or_pair, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 9
-	if v := func() any {
-		is_bitwise_or := parseRule_is_bitwise_or(p)
-		if is_bitwise_or == nil { return nil }
-		_ = is_bitwise_or
-		return []any{is_bitwise_or}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_compare_op_bitwise_or_pair, v)
-		return v
+	{
+		if v := func() any {
+			is_bitwise_or := parseRule_is_bitwise_or(p)
+			if is_bitwise_or == nil { return nil }
+			_ = is_bitwise_or
+			return []any{is_bitwise_or}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_compare_op_bitwise_or_pair, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_compare_op_bitwise_or_pair, nil)
 	return nil
 }
@@ -6267,19 +6984,21 @@ func parseRule_eq_bitwise_or(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		op := p.ExpectToken(tokenize.EQEQUAL)
-		if op == nil { return nil }
-		_ = op
-		a := parseRule_bitwise_or(p)
-		if a == nil { return nil }
-		_ = a
-		return []any{op, a}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_eq_bitwise_or, v)
-		return v
+	{
+		if v := func() any {
+			op := p.ExpectToken(tokenize.EQEQUAL)
+			if op == nil { return nil }
+			_ = op
+			a := parseRule_bitwise_or(p)
+			if a == nil { return nil }
+			_ = a
+			return []any{op, a}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_eq_bitwise_or, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_eq_bitwise_or, nil)
 	return nil
 }
@@ -6291,19 +7010,21 @@ func parseRule_noteq_bitwise_or(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		op := p.ExpectToken(tokenize.NOTEQUAL)
-		if op == nil { return nil }
-		_ = op
-		a := parseRule_bitwise_or(p)
-		if a == nil { return nil }
-		_ = a
-		return []any{op, a}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_noteq_bitwise_or, v)
-		return v
+	{
+		if v := func() any {
+			op := p.ExpectToken(tokenize.NOTEQUAL)
+			if op == nil { return nil }
+			_ = op
+			a := parseRule_bitwise_or(p)
+			if a == nil { return nil }
+			_ = a
+			return []any{op, a}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_noteq_bitwise_or, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_noteq_bitwise_or, nil)
 	return nil
 }
@@ -6315,19 +7036,21 @@ func parseRule_lte_bitwise_or(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		op := p.ExpectToken(tokenize.LESSEQUAL)
-		if op == nil { return nil }
-		_ = op
-		a := parseRule_bitwise_or(p)
-		if a == nil { return nil }
-		_ = a
-		return []any{op, a}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_lte_bitwise_or, v)
-		return v
+	{
+		if v := func() any {
+			op := p.ExpectToken(tokenize.LESSEQUAL)
+			if op == nil { return nil }
+			_ = op
+			a := parseRule_bitwise_or(p)
+			if a == nil { return nil }
+			_ = a
+			return []any{op, a}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_lte_bitwise_or, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_lte_bitwise_or, nil)
 	return nil
 }
@@ -6339,19 +7062,21 @@ func parseRule_lt_bitwise_or(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		op := p.ExpectToken(tokenize.LESS)
-		if op == nil { return nil }
-		_ = op
-		a := parseRule_bitwise_or(p)
-		if a == nil { return nil }
-		_ = a
-		return []any{op, a}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_lt_bitwise_or, v)
-		return v
+	{
+		if v := func() any {
+			op := p.ExpectToken(tokenize.LESS)
+			if op == nil { return nil }
+			_ = op
+			a := parseRule_bitwise_or(p)
+			if a == nil { return nil }
+			_ = a
+			return []any{op, a}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_lt_bitwise_or, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_lt_bitwise_or, nil)
 	return nil
 }
@@ -6363,19 +7088,21 @@ func parseRule_gte_bitwise_or(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		op := p.ExpectToken(tokenize.GREATEREQUAL)
-		if op == nil { return nil }
-		_ = op
-		a := parseRule_bitwise_or(p)
-		if a == nil { return nil }
-		_ = a
-		return []any{op, a}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_gte_bitwise_or, v)
-		return v
+	{
+		if v := func() any {
+			op := p.ExpectToken(tokenize.GREATEREQUAL)
+			if op == nil { return nil }
+			_ = op
+			a := parseRule_bitwise_or(p)
+			if a == nil { return nil }
+			_ = a
+			return []any{op, a}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_gte_bitwise_or, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_gte_bitwise_or, nil)
 	return nil
 }
@@ -6387,19 +7114,21 @@ func parseRule_gt_bitwise_or(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		op := p.ExpectToken(tokenize.GREATER)
-		if op == nil { return nil }
-		_ = op
-		a := parseRule_bitwise_or(p)
-		if a == nil { return nil }
-		_ = a
-		return []any{op, a}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_gt_bitwise_or, v)
-		return v
+	{
+		if v := func() any {
+			op := p.ExpectToken(tokenize.GREATER)
+			if op == nil { return nil }
+			_ = op
+			a := parseRule_bitwise_or(p)
+			if a == nil { return nil }
+			_ = a
+			return []any{op, a}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_gt_bitwise_or, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_gt_bitwise_or, nil)
 	return nil
 }
@@ -6411,22 +7140,24 @@ func parseRule_notin_bitwise_or(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		kw := p.ExpectName("not")
-		if kw == nil { return nil }
-		_ = kw
-		kw_1 := p.ExpectName("in")
-		if kw_1 == nil { return nil }
-		_ = kw_1
-		a := parseRule_bitwise_or(p)
-		if a == nil { return nil }
-		_ = a
-		return []any{kw, kw_1, a}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_notin_bitwise_or, v)
-		return v
+	{
+		if v := func() any {
+			kw := p.ExpectName("not")
+			if kw == nil { return nil }
+			_ = kw
+			kw_1 := p.ExpectName("in")
+			if kw_1 == nil { return nil }
+			_ = kw_1
+			a := parseRule_bitwise_or(p)
+			if a == nil { return nil }
+			_ = a
+			return []any{kw, kw_1, a}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_notin_bitwise_or, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_notin_bitwise_or, nil)
 	return nil
 }
@@ -6438,19 +7169,21 @@ func parseRule_in_bitwise_or(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		kw := p.ExpectName("in")
-		if kw == nil { return nil }
-		_ = kw
-		a := parseRule_bitwise_or(p)
-		if a == nil { return nil }
-		_ = a
-		return []any{kw, a}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_in_bitwise_or, v)
-		return v
+	{
+		if v := func() any {
+			kw := p.ExpectName("in")
+			if kw == nil { return nil }
+			_ = kw
+			a := parseRule_bitwise_or(p)
+			if a == nil { return nil }
+			_ = a
+			return []any{kw, a}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_in_bitwise_or, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_in_bitwise_or, nil)
 	return nil
 }
@@ -6462,22 +7195,24 @@ func parseRule_isnot_bitwise_or(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		kw := p.ExpectName("is")
-		if kw == nil { return nil }
-		_ = kw
-		kw_1 := p.ExpectName("not")
-		if kw_1 == nil { return nil }
-		_ = kw_1
-		a := parseRule_bitwise_or(p)
-		if a == nil { return nil }
-		_ = a
-		return []any{kw, kw_1, a}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_isnot_bitwise_or, v)
-		return v
+	{
+		if v := func() any {
+			kw := p.ExpectName("is")
+			if kw == nil { return nil }
+			_ = kw
+			kw_1 := p.ExpectName("not")
+			if kw_1 == nil { return nil }
+			_ = kw_1
+			a := parseRule_bitwise_or(p)
+			if a == nil { return nil }
+			_ = a
+			return []any{kw, kw_1, a}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_isnot_bitwise_or, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_isnot_bitwise_or, nil)
 	return nil
 }
@@ -6489,62 +7224,508 @@ func parseRule_is_bitwise_or(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		kw := p.ExpectName("is")
-		if kw == nil { return nil }
-		_ = kw
-		a := parseRule_bitwise_or(p)
-		if a == nil { return nil }
-		_ = a
-		return []any{kw, a}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_is_bitwise_or, v)
-		return v
+	{
+		if v := func() any {
+			kw := p.ExpectName("is")
+			if kw == nil { return nil }
+			_ = kw
+			a := parseRule_bitwise_or(p)
+			if a == nil { return nil }
+			_ = a
+			return []any{kw, a}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_is_bitwise_or, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_is_bitwise_or, nil)
 	return nil
 }
 
-// parseRule_bitwise_or parses bitwise_or.
-// TODO(M4): left-recursive seed-and-grow body.
+// parseRule_bitwise_or seeds and grows bitwise_or as a left-recursive rule.
 func parseRule_bitwise_or(p *Parser) any {
-	_ = p
+	if p.ErrorIndicator() { return nil }
+	mark := p.Mark()
+	if v, ok := p.IsMemoized(Rule_bitwise_or); ok { return v }
+	lastMark := mark
+	var lastResult any
+	p.InsertMemo(mark, Rule_bitwise_or, nil)
+	for {
+		p.Reset(mark)
+		result := parseRule_bitwise_or_raw(p)
+		end := p.Mark()
+		if end <= lastMark { break }
+		lastResult = result
+		lastMark = end
+		p.UpdateMemo(mark, Rule_bitwise_or, result)
+	}
+	p.Reset(lastMark)
+	return lastResult
+}
+
+// parseRule_bitwise_or_raw parses bitwise_or.
+func parseRule_bitwise_or_raw(p *Parser) any {
+	if p.ErrorIndicator() { return nil }
+	mark := p.Mark()
+	_ = mark
+	// alt 0
+	{
+		if v := func() any {
+			a := parseRule_bitwise_or(p)
+			if a == nil { return nil }
+			_ = a
+			op := p.ExpectToken(tokenize.VBAR)
+			if op == nil { return nil }
+			_ = op
+			b := parseRule_bitwise_xor(p)
+			if b == nil { return nil }
+			_ = b
+			return []any{a, op, b}
+		}(); v != nil {
+			return v
+		}
+		p.Reset(mark)
+	}
+	// alt 1
+	{
+		if v := func() any {
+			bitwise_xor := parseRule_bitwise_xor(p)
+			if bitwise_xor == nil { return nil }
+			_ = bitwise_xor
+			return []any{bitwise_xor}
+		}(); v != nil {
+			return v
+		}
+		p.Reset(mark)
+	}
 	return nil
 }
 
-// parseRule_bitwise_xor parses bitwise_xor.
-// TODO(M4): left-recursive seed-and-grow body.
+// parseRule_bitwise_xor seeds and grows bitwise_xor as a left-recursive rule.
 func parseRule_bitwise_xor(p *Parser) any {
-	_ = p
+	if p.ErrorIndicator() { return nil }
+	mark := p.Mark()
+	if v, ok := p.IsMemoized(Rule_bitwise_xor); ok { return v }
+	lastMark := mark
+	var lastResult any
+	p.InsertMemo(mark, Rule_bitwise_xor, nil)
+	for {
+		p.Reset(mark)
+		result := parseRule_bitwise_xor_raw(p)
+		end := p.Mark()
+		if end <= lastMark { break }
+		lastResult = result
+		lastMark = end
+		p.UpdateMemo(mark, Rule_bitwise_xor, result)
+	}
+	p.Reset(lastMark)
+	return lastResult
+}
+
+// parseRule_bitwise_xor_raw parses bitwise_xor.
+func parseRule_bitwise_xor_raw(p *Parser) any {
+	if p.ErrorIndicator() { return nil }
+	mark := p.Mark()
+	_ = mark
+	// alt 0
+	{
+		if v := func() any {
+			a := parseRule_bitwise_xor(p)
+			if a == nil { return nil }
+			_ = a
+			op := p.ExpectToken(tokenize.CIRCUMFLEX)
+			if op == nil { return nil }
+			_ = op
+			b := parseRule_bitwise_and(p)
+			if b == nil { return nil }
+			_ = b
+			return []any{a, op, b}
+		}(); v != nil {
+			return v
+		}
+		p.Reset(mark)
+	}
+	// alt 1
+	{
+		if v := func() any {
+			bitwise_and := parseRule_bitwise_and(p)
+			if bitwise_and == nil { return nil }
+			_ = bitwise_and
+			return []any{bitwise_and}
+		}(); v != nil {
+			return v
+		}
+		p.Reset(mark)
+	}
 	return nil
 }
 
-// parseRule_bitwise_and parses bitwise_and.
-// TODO(M4): left-recursive seed-and-grow body.
+// parseRule_bitwise_and seeds and grows bitwise_and as a left-recursive rule.
 func parseRule_bitwise_and(p *Parser) any {
-	_ = p
+	if p.ErrorIndicator() { return nil }
+	mark := p.Mark()
+	if v, ok := p.IsMemoized(Rule_bitwise_and); ok { return v }
+	lastMark := mark
+	var lastResult any
+	p.InsertMemo(mark, Rule_bitwise_and, nil)
+	for {
+		p.Reset(mark)
+		result := parseRule_bitwise_and_raw(p)
+		end := p.Mark()
+		if end <= lastMark { break }
+		lastResult = result
+		lastMark = end
+		p.UpdateMemo(mark, Rule_bitwise_and, result)
+	}
+	p.Reset(lastMark)
+	return lastResult
+}
+
+// parseRule_bitwise_and_raw parses bitwise_and.
+func parseRule_bitwise_and_raw(p *Parser) any {
+	if p.ErrorIndicator() { return nil }
+	mark := p.Mark()
+	_ = mark
+	// alt 0
+	{
+		if v := func() any {
+			a := parseRule_bitwise_and(p)
+			if a == nil { return nil }
+			_ = a
+			op := p.ExpectToken(tokenize.AMPER)
+			if op == nil { return nil }
+			_ = op
+			b := parseRule_shift_expr(p)
+			if b == nil { return nil }
+			_ = b
+			return []any{a, op, b}
+		}(); v != nil {
+			return v
+		}
+		p.Reset(mark)
+	}
+	// alt 1
+	{
+		if v := func() any {
+			shift_expr := parseRule_shift_expr(p)
+			if shift_expr == nil { return nil }
+			_ = shift_expr
+			return []any{shift_expr}
+		}(); v != nil {
+			return v
+		}
+		p.Reset(mark)
+	}
 	return nil
 }
 
-// parseRule_shift_expr parses shift_expr.
-// TODO(M4): left-recursive seed-and-grow body.
+// parseRule_shift_expr seeds and grows shift_expr as a left-recursive rule.
 func parseRule_shift_expr(p *Parser) any {
-	_ = p
+	if p.ErrorIndicator() { return nil }
+	mark := p.Mark()
+	if v, ok := p.IsMemoized(Rule_shift_expr); ok { return v }
+	lastMark := mark
+	var lastResult any
+	p.InsertMemo(mark, Rule_shift_expr, nil)
+	for {
+		p.Reset(mark)
+		result := parseRule_shift_expr_raw(p)
+		end := p.Mark()
+		if end <= lastMark { break }
+		lastResult = result
+		lastMark = end
+		p.UpdateMemo(mark, Rule_shift_expr, result)
+	}
+	p.Reset(lastMark)
+	return lastResult
+}
+
+// parseRule_shift_expr_raw parses shift_expr.
+func parseRule_shift_expr_raw(p *Parser) any {
+	if p.ErrorIndicator() { return nil }
+	mark := p.Mark()
+	_ = mark
+	// alt 0
+	{
+		if v := func() any {
+			a := parseRule_shift_expr(p)
+			if a == nil { return nil }
+			_ = a
+			op := p.ExpectToken(tokenize.LEFTSHIFT)
+			if op == nil { return nil }
+			_ = op
+			b := parseRule_sum(p)
+			if b == nil { return nil }
+			_ = b
+			return []any{a, op, b}
+		}(); v != nil {
+			return v
+		}
+		p.Reset(mark)
+	}
+	// alt 1
+	{
+		if v := func() any {
+			a := parseRule_shift_expr(p)
+			if a == nil { return nil }
+			_ = a
+			op := p.ExpectToken(tokenize.RIGHTSHIFT)
+			if op == nil { return nil }
+			_ = op
+			b := parseRule_sum(p)
+			if b == nil { return nil }
+			_ = b
+			return []any{a, op, b}
+		}(); v != nil {
+			return v
+		}
+		p.Reset(mark)
+	}
+	// alt 2
+	{
+		if v := func() any {
+			invalid_arithmetic := parseRule_invalid_arithmetic(p)
+			if invalid_arithmetic == nil { return nil }
+			_ = invalid_arithmetic
+			return []any{invalid_arithmetic}
+		}(); v != nil {
+			return v
+		}
+		p.Reset(mark)
+	}
+	// alt 3
+	{
+		if v := func() any {
+			sum := parseRule_sum(p)
+			if sum == nil { return nil }
+			_ = sum
+			return []any{sum}
+		}(); v != nil {
+			return v
+		}
+		p.Reset(mark)
+	}
 	return nil
 }
 
-// parseRule_sum parses sum.
-// TODO(M4): left-recursive seed-and-grow body.
+// parseRule_sum seeds and grows sum as a left-recursive rule.
 func parseRule_sum(p *Parser) any {
-	_ = p
+	if p.ErrorIndicator() { return nil }
+	mark := p.Mark()
+	if v, ok := p.IsMemoized(Rule_sum); ok { return v }
+	lastMark := mark
+	var lastResult any
+	p.InsertMemo(mark, Rule_sum, nil)
+	for {
+		p.Reset(mark)
+		result := parseRule_sum_raw(p)
+		end := p.Mark()
+		if end <= lastMark { break }
+		lastResult = result
+		lastMark = end
+		p.UpdateMemo(mark, Rule_sum, result)
+	}
+	p.Reset(lastMark)
+	return lastResult
+}
+
+// parseRule_sum_raw parses sum.
+func parseRule_sum_raw(p *Parser) any {
+	if p.ErrorIndicator() { return nil }
+	mark := p.Mark()
+	_ = mark
+	// alt 0
+	{
+		if v := func() any {
+			a := parseRule_sum(p)
+			if a == nil { return nil }
+			_ = a
+			op := p.ExpectToken(tokenize.PLUS)
+			if op == nil { return nil }
+			_ = op
+			b := parseRule_term(p)
+			if b == nil { return nil }
+			_ = b
+			return []any{a, op, b}
+		}(); v != nil {
+			return v
+		}
+		p.Reset(mark)
+	}
+	// alt 1
+	{
+		if v := func() any {
+			a := parseRule_sum(p)
+			if a == nil { return nil }
+			_ = a
+			op := p.ExpectToken(tokenize.MINUS)
+			if op == nil { return nil }
+			_ = op
+			b := parseRule_term(p)
+			if b == nil { return nil }
+			_ = b
+			return []any{a, op, b}
+		}(); v != nil {
+			return v
+		}
+		p.Reset(mark)
+	}
+	// alt 2
+	{
+		if v := func() any {
+			term := parseRule_term(p)
+			if term == nil { return nil }
+			_ = term
+			return []any{term}
+		}(); v != nil {
+			return v
+		}
+		p.Reset(mark)
+	}
 	return nil
 }
 
-// parseRule_term parses term.
-// TODO(M4): left-recursive seed-and-grow body.
+// parseRule_term seeds and grows term as a left-recursive rule.
 func parseRule_term(p *Parser) any {
-	_ = p
+	if p.ErrorIndicator() { return nil }
+	mark := p.Mark()
+	if v, ok := p.IsMemoized(Rule_term); ok { return v }
+	lastMark := mark
+	var lastResult any
+	p.InsertMemo(mark, Rule_term, nil)
+	for {
+		p.Reset(mark)
+		result := parseRule_term_raw(p)
+		end := p.Mark()
+		if end <= lastMark { break }
+		lastResult = result
+		lastMark = end
+		p.UpdateMemo(mark, Rule_term, result)
+	}
+	p.Reset(lastMark)
+	return lastResult
+}
+
+// parseRule_term_raw parses term.
+func parseRule_term_raw(p *Parser) any {
+	if p.ErrorIndicator() { return nil }
+	mark := p.Mark()
+	_ = mark
+	// alt 0
+	{
+		if v := func() any {
+			a := parseRule_term(p)
+			if a == nil { return nil }
+			_ = a
+			op := p.ExpectToken(tokenize.STAR)
+			if op == nil { return nil }
+			_ = op
+			b := parseRule_factor(p)
+			if b == nil { return nil }
+			_ = b
+			return []any{a, op, b}
+		}(); v != nil {
+			return v
+		}
+		p.Reset(mark)
+	}
+	// alt 1
+	{
+		if v := func() any {
+			a := parseRule_term(p)
+			if a == nil { return nil }
+			_ = a
+			op := p.ExpectToken(tokenize.SLASH)
+			if op == nil { return nil }
+			_ = op
+			b := parseRule_factor(p)
+			if b == nil { return nil }
+			_ = b
+			return []any{a, op, b}
+		}(); v != nil {
+			return v
+		}
+		p.Reset(mark)
+	}
+	// alt 2
+	{
+		if v := func() any {
+			a := parseRule_term(p)
+			if a == nil { return nil }
+			_ = a
+			op := p.ExpectToken(tokenize.DOUBLESLASH)
+			if op == nil { return nil }
+			_ = op
+			b := parseRule_factor(p)
+			if b == nil { return nil }
+			_ = b
+			return []any{a, op, b}
+		}(); v != nil {
+			return v
+		}
+		p.Reset(mark)
+	}
+	// alt 3
+	{
+		if v := func() any {
+			a := parseRule_term(p)
+			if a == nil { return nil }
+			_ = a
+			op := p.ExpectToken(tokenize.PERCENT)
+			if op == nil { return nil }
+			_ = op
+			b := parseRule_factor(p)
+			if b == nil { return nil }
+			_ = b
+			return []any{a, op, b}
+		}(); v != nil {
+			return v
+		}
+		p.Reset(mark)
+	}
+	// alt 4
+	{
+		if v := func() any {
+			a := parseRule_term(p)
+			if a == nil { return nil }
+			_ = a
+			op := p.ExpectToken(tokenize.AT)
+			if op == nil { return nil }
+			_ = op
+			b := parseRule_factor(p)
+			if b == nil { return nil }
+			_ = b
+			return []any{a, op, b}
+		}(); v != nil {
+			return v
+		}
+		p.Reset(mark)
+	}
+	// alt 5
+	{
+		if v := func() any {
+			invalid_factor := parseRule_invalid_factor(p)
+			if invalid_factor == nil { return nil }
+			_ = invalid_factor
+			return []any{invalid_factor}
+		}(); v != nil {
+			return v
+		}
+		p.Reset(mark)
+	}
+	// alt 6
+	{
+		if v := func() any {
+			factor := parseRule_factor(p)
+			if factor == nil { return nil }
+			_ = factor
+			return []any{factor}
+		}(); v != nil {
+			return v
+		}
+		p.Reset(mark)
+	}
 	return nil
 }
 
@@ -6555,58 +7736,66 @@ func parseRule_factor(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		op := p.ExpectToken(tokenize.PLUS)
-		if op == nil { return nil }
-		_ = op
-		a := parseRule_factor(p)
-		if a == nil { return nil }
-		_ = a
-		return []any{op, a}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_factor, v)
-		return v
+	{
+		if v := func() any {
+			op := p.ExpectToken(tokenize.PLUS)
+			if op == nil { return nil }
+			_ = op
+			a := parseRule_factor(p)
+			if a == nil { return nil }
+			_ = a
+			return []any{op, a}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_factor, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 1
-	if v := func() any {
-		op := p.ExpectToken(tokenize.MINUS)
-		if op == nil { return nil }
-		_ = op
-		a := parseRule_factor(p)
-		if a == nil { return nil }
-		_ = a
-		return []any{op, a}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_factor, v)
-		return v
+	{
+		if v := func() any {
+			op := p.ExpectToken(tokenize.MINUS)
+			if op == nil { return nil }
+			_ = op
+			a := parseRule_factor(p)
+			if a == nil { return nil }
+			_ = a
+			return []any{op, a}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_factor, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 2
-	if v := func() any {
-		op := p.ExpectToken(tokenize.TILDE)
-		if op == nil { return nil }
-		_ = op
-		a := parseRule_factor(p)
-		if a == nil { return nil }
-		_ = a
-		return []any{op, a}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_factor, v)
-		return v
+	{
+		if v := func() any {
+			op := p.ExpectToken(tokenize.TILDE)
+			if op == nil { return nil }
+			_ = op
+			a := parseRule_factor(p)
+			if a == nil { return nil }
+			_ = a
+			return []any{op, a}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_factor, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 3
-	if v := func() any {
-		power := parseRule_power(p)
-		if power == nil { return nil }
-		_ = power
-		return []any{power}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_factor, v)
-		return v
+	{
+		if v := func() any {
+			power := parseRule_power(p)
+			if power == nil { return nil }
+			_ = power
+			return []any{power}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_factor, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_factor, nil)
 	return nil
 }
@@ -6618,33 +7807,37 @@ func parseRule_power(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		a := parseRule_await_primary(p)
-		if a == nil { return nil }
-		_ = a
-		op := p.ExpectToken(tokenize.DOUBLESTAR)
-		if op == nil { return nil }
-		_ = op
-		b := parseRule_factor(p)
-		if b == nil { return nil }
-		_ = b
-		return []any{a, op, b}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_power, v)
-		return v
+	{
+		if v := func() any {
+			a := parseRule_await_primary(p)
+			if a == nil { return nil }
+			_ = a
+			op := p.ExpectToken(tokenize.DOUBLESTAR)
+			if op == nil { return nil }
+			_ = op
+			b := parseRule_factor(p)
+			if b == nil { return nil }
+			_ = b
+			return []any{a, op, b}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_power, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 1
-	if v := func() any {
-		await_primary := parseRule_await_primary(p)
-		if await_primary == nil { return nil }
-		_ = await_primary
-		return []any{await_primary}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_power, v)
-		return v
+	{
+		if v := func() any {
+			await_primary := parseRule_await_primary(p)
+			if await_primary == nil { return nil }
+			_ = await_primary
+			return []any{await_primary}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_power, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_power, nil)
 	return nil
 }
@@ -6656,38 +7849,150 @@ func parseRule_await_primary(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		kw := p.ExpectName("await")
-		if kw == nil { return nil }
-		_ = kw
-		a := parseRule_primary(p)
-		if a == nil { return nil }
-		_ = a
-		return []any{kw, a}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_await_primary, v)
-		return v
+	{
+		if v := func() any {
+			kw := p.ExpectName("await")
+			if kw == nil { return nil }
+			_ = kw
+			a := parseRule_primary(p)
+			if a == nil { return nil }
+			_ = a
+			return []any{kw, a}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_await_primary, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 1
-	if v := func() any {
-		primary := parseRule_primary(p)
-		if primary == nil { return nil }
-		_ = primary
-		return []any{primary}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_await_primary, v)
-		return v
+	{
+		if v := func() any {
+			primary := parseRule_primary(p)
+			if primary == nil { return nil }
+			_ = primary
+			return []any{primary}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_await_primary, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_await_primary, nil)
 	return nil
 }
 
-// parseRule_primary parses primary.
-// TODO(M4): left-recursive seed-and-grow body.
+// parseRule_primary seeds and grows primary as a left-recursive rule.
 func parseRule_primary(p *Parser) any {
-	_ = p
+	if p.ErrorIndicator() { return nil }
+	mark := p.Mark()
+	if v, ok := p.IsMemoized(Rule_primary); ok { return v }
+	lastMark := mark
+	var lastResult any
+	p.InsertMemo(mark, Rule_primary, nil)
+	for {
+		p.Reset(mark)
+		result := parseRule_primary_raw(p)
+		end := p.Mark()
+		if end <= lastMark { break }
+		lastResult = result
+		lastMark = end
+		p.UpdateMemo(mark, Rule_primary, result)
+	}
+	p.Reset(lastMark)
+	return lastResult
+}
+
+// parseRule_primary_raw parses primary.
+func parseRule_primary_raw(p *Parser) any {
+	if p.ErrorIndicator() { return nil }
+	mark := p.Mark()
+	_ = mark
+	// alt 0
+	{
+		if v := func() any {
+			a := parseRule_primary(p)
+			if a == nil { return nil }
+			_ = a
+			op := p.ExpectToken(tokenize.DOT)
+			if op == nil { return nil }
+			_ = op
+			b := p.ExpectToken(tokenize.NAME)
+			if b == nil { return nil }
+			_ = b
+			return []any{a, op, b}
+		}(); v != nil {
+			return v
+		}
+		p.Reset(mark)
+	}
+	// alt 1
+	{
+		if v := func() any {
+			a := parseRule_primary(p)
+			if a == nil { return nil }
+			_ = a
+			b := parseRule_genexp(p)
+			if b == nil { return nil }
+			_ = b
+			return []any{a, b}
+		}(); v != nil {
+			return v
+		}
+		p.Reset(mark)
+	}
+	// alt 2
+	{
+		if v := func() any {
+			a := parseRule_primary(p)
+			if a == nil { return nil }
+			_ = a
+			op := p.ExpectToken(tokenize.LPAR)
+			if op == nil { return nil }
+			_ = op
+			b := parseRule_arguments(p)
+			_ = b
+			op_1 := p.ExpectToken(tokenize.RPAR)
+			if op_1 == nil { return nil }
+			_ = op_1
+			return []any{a, op, b, op_1}
+		}(); v != nil {
+			return v
+		}
+		p.Reset(mark)
+	}
+	// alt 3
+	{
+		if v := func() any {
+			a := parseRule_primary(p)
+			if a == nil { return nil }
+			_ = a
+			op := p.ExpectToken(tokenize.LSQB)
+			if op == nil { return nil }
+			_ = op
+			b := parseRule_slices(p)
+			if b == nil { return nil }
+			_ = b
+			op_1 := p.ExpectToken(tokenize.RSQB)
+			if op_1 == nil { return nil }
+			_ = op_1
+			return []any{a, op, b, op_1}
+		}(); v != nil {
+			return v
+		}
+		p.Reset(mark)
+	}
+	// alt 4
+	{
+		if v := func() any {
+			atom := parseRule_atom(p)
+			if atom == nil { return nil }
+			_ = atom
+			return []any{atom}
+		}(); v != nil {
+			return v
+		}
+		p.Reset(mark)
+	}
 	return nil
 }
 
@@ -6698,30 +8003,34 @@ func parseRule_slices(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		a := parseRule_slice(p)
-		if a == nil { return nil }
-		_ = a
-		if !p.Lookahead(false, func(p *Parser) any { return p.ExpectToken(tokenize.COMMA) }) { return nil }
-		return []any{a}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_slices, v)
-		return v
+	{
+		if v := func() any {
+			a := parseRule_slice(p)
+			if a == nil { return nil }
+			_ = a
+			if !p.Lookahead(false, func(p *Parser) any { return p.ExpectToken(tokenize.COMMA) }) { return nil }
+			return []any{a}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_slices, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 1
-	if v := func() any {
-		a := parseRule__gather_51(p)
-		if a == nil { return nil }
-		_ = a
-		opt := p.ExpectToken(tokenize.COMMA)
-		_ = opt
-		return []any{a, opt}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_slices, v)
-		return v
+	{
+		if v := func() any {
+			a := parseRule__gather_51(p)
+			if a == nil { return nil }
+			_ = a
+			opt := p.ExpectToken(tokenize.COMMA)
+			_ = opt
+			return []any{a, opt}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_slices, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_slices, nil)
 	return nil
 }
@@ -6733,33 +8042,37 @@ func parseRule_slice(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		a := parseRule_expression(p)
-		_ = a
-		op := p.ExpectToken(tokenize.COLON)
-		if op == nil { return nil }
-		_ = op
-		b := parseRule_expression(p)
-		_ = b
-		c := parseRule__rhs_52(p)
-		_ = c
-		return []any{a, op, b, c}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_slice, v)
-		return v
+	{
+		if v := func() any {
+			a := parseRule_expression(p)
+			_ = a
+			op := p.ExpectToken(tokenize.COLON)
+			if op == nil { return nil }
+			_ = op
+			b := parseRule_expression(p)
+			_ = b
+			c := parseRule__rhs_52(p)
+			_ = c
+			return []any{a, op, b, c}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_slice, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 1
-	if v := func() any {
-		a := parseRule_named_expression(p)
-		if a == nil { return nil }
-		_ = a
-		return []any{a}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_slice, v)
-		return v
+	{
+		if v := func() any {
+			a := parseRule_named_expression(p)
+			if a == nil { return nil }
+			_ = a
+			return []any{a}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_slice, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_slice, nil)
 	return nil
 }
@@ -6771,119 +8084,139 @@ func parseRule_atom(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		name := p.ExpectToken(tokenize.NAME)
-		if name == nil { return nil }
-		_ = name
-		return []any{name}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_atom, v)
-		return v
+	{
+		if v := func() any {
+			name := p.ExpectToken(tokenize.NAME)
+			if name == nil { return nil }
+			_ = name
+			return []any{name}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_atom, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 1
-	if v := func() any {
-		kw := p.ExpectName("True")
-		if kw == nil { return nil }
-		_ = kw
-		return []any{kw}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_atom, v)
-		return v
+	{
+		if v := func() any {
+			kw := p.ExpectName("True")
+			if kw == nil { return nil }
+			_ = kw
+			return []any{kw}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_atom, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 2
-	if v := func() any {
-		kw := p.ExpectName("False")
-		if kw == nil { return nil }
-		_ = kw
-		return []any{kw}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_atom, v)
-		return v
+	{
+		if v := func() any {
+			kw := p.ExpectName("False")
+			if kw == nil { return nil }
+			_ = kw
+			return []any{kw}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_atom, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 3
-	if v := func() any {
-		kw := p.ExpectName("None")
-		if kw == nil { return nil }
-		_ = kw
-		return []any{kw}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_atom, v)
-		return v
+	{
+		if v := func() any {
+			kw := p.ExpectName("None")
+			if kw == nil { return nil }
+			_ = kw
+			return []any{kw}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_atom, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 4
-	if v := func() any {
-		if !p.Lookahead(true, func(p *Parser) any { return parseRule__group_37(p) }) { return nil }
-		strings := parseRule_strings(p)
-		if strings == nil { return nil }
-		_ = strings
-		return []any{strings}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_atom, v)
-		return v
+	{
+		if v := func() any {
+			if !p.Lookahead(true, func(p *Parser) any { return parseRule__group_37(p) }) { return nil }
+			strings := parseRule_strings(p)
+			if strings == nil { return nil }
+			_ = strings
+			return []any{strings}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_atom, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 5
-	if v := func() any {
-		number := p.ExpectToken(tokenize.NUMBER)
-		if number == nil { return nil }
-		_ = number
-		return []any{number}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_atom, v)
-		return v
+	{
+		if v := func() any {
+			number := p.ExpectToken(tokenize.NUMBER)
+			if number == nil { return nil }
+			_ = number
+			return []any{number}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_atom, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 6
-	if v := func() any {
-		if !p.Lookahead(true, func(p *Parser) any { return p.ExpectToken(tokenize.LPAR) }) { return nil }
-		g := parseRule__group_53(p)
-		if g == nil { return nil }
-		_ = g
-		return []any{g}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_atom, v)
-		return v
+	{
+		if v := func() any {
+			if !p.Lookahead(true, func(p *Parser) any { return p.ExpectToken(tokenize.LPAR) }) { return nil }
+			g := parseRule__group_53(p)
+			if g == nil { return nil }
+			_ = g
+			return []any{g}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_atom, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 7
-	if v := func() any {
-		if !p.Lookahead(true, func(p *Parser) any { return p.ExpectToken(tokenize.LSQB) }) { return nil }
-		g := parseRule__group_54(p)
-		if g == nil { return nil }
-		_ = g
-		return []any{g}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_atom, v)
-		return v
+	{
+		if v := func() any {
+			if !p.Lookahead(true, func(p *Parser) any { return p.ExpectToken(tokenize.LSQB) }) { return nil }
+			g := parseRule__group_54(p)
+			if g == nil { return nil }
+			_ = g
+			return []any{g}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_atom, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 8
-	if v := func() any {
-		if !p.Lookahead(true, func(p *Parser) any { return p.ExpectToken(tokenize.LBRACE) }) { return nil }
-		g := parseRule__group_55(p)
-		if g == nil { return nil }
-		_ = g
-		return []any{g}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_atom, v)
-		return v
+	{
+		if v := func() any {
+			if !p.Lookahead(true, func(p *Parser) any { return p.ExpectToken(tokenize.LBRACE) }) { return nil }
+			g := parseRule__group_55(p)
+			if g == nil { return nil }
+			_ = g
+			return []any{g}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_atom, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 9
-	if v := func() any {
-		op := p.ExpectToken(tokenize.ELLIPSIS)
-		if op == nil { return nil }
-		_ = op
-		return []any{op}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_atom, v)
-		return v
+	{
+		if v := func() any {
+			op := p.ExpectToken(tokenize.ELLIPSIS)
+			if op == nil { return nil }
+			_ = op
+			return []any{op}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_atom, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_atom, nil)
 	return nil
 }
@@ -6895,33 +8228,37 @@ func parseRule_group(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		op := p.ExpectToken(tokenize.LPAR)
-		if op == nil { return nil }
-		_ = op
-		a := parseRule__group_56(p)
-		if a == nil { return nil }
-		_ = a
-		op_1 := p.ExpectToken(tokenize.RPAR)
-		if op_1 == nil { return nil }
-		_ = op_1
-		return []any{op, a, op_1}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_group, v)
-		return v
+	{
+		if v := func() any {
+			op := p.ExpectToken(tokenize.LPAR)
+			if op == nil { return nil }
+			_ = op
+			a := parseRule__group_56(p)
+			if a == nil { return nil }
+			_ = a
+			op_1 := p.ExpectToken(tokenize.RPAR)
+			if op_1 == nil { return nil }
+			_ = op_1
+			return []any{op, a, op_1}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_group, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 1
-	if v := func() any {
-		invalid_group := parseRule_invalid_group(p)
-		if invalid_group == nil { return nil }
-		_ = invalid_group
-		return []any{invalid_group}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_group, v)
-		return v
+	{
+		if v := func() any {
+			invalid_group := parseRule_invalid_group(p)
+			if invalid_group == nil { return nil }
+			_ = invalid_group
+			return []any{invalid_group}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_group, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_group, nil)
 	return nil
 }
@@ -6933,24 +8270,26 @@ func parseRule_lambdef(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		kw := p.ExpectName("lambda")
-		if kw == nil { return nil }
-		_ = kw
-		a := parseRule_lambda_params(p)
-		_ = a
-		op := p.ExpectToken(tokenize.COLON)
-		if op == nil { return nil }
-		_ = op
-		b := parseRule_expression(p)
-		if b == nil { return nil }
-		_ = b
-		return []any{kw, a, op, b}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_lambdef, v)
-		return v
+	{
+		if v := func() any {
+			kw := p.ExpectName("lambda")
+			if kw == nil { return nil }
+			_ = kw
+			a := parseRule_lambda_params(p)
+			_ = a
+			op := p.ExpectToken(tokenize.COLON)
+			if op == nil { return nil }
+			_ = op
+			b := parseRule_expression(p)
+			if b == nil { return nil }
+			_ = b
+			return []any{kw, a, op, b}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_lambdef, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_lambdef, nil)
 	return nil
 }
@@ -6962,27 +8301,31 @@ func parseRule_lambda_params(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		invalid_lambda_parameters := parseRule_invalid_lambda_parameters(p)
-		if invalid_lambda_parameters == nil { return nil }
-		_ = invalid_lambda_parameters
-		return []any{invalid_lambda_parameters}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_lambda_params, v)
-		return v
+	{
+		if v := func() any {
+			invalid_lambda_parameters := parseRule_invalid_lambda_parameters(p)
+			if invalid_lambda_parameters == nil { return nil }
+			_ = invalid_lambda_parameters
+			return []any{invalid_lambda_parameters}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_lambda_params, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 1
-	if v := func() any {
-		lambda_parameters := parseRule_lambda_parameters(p)
-		if lambda_parameters == nil { return nil }
-		_ = lambda_parameters
-		return []any{lambda_parameters}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_lambda_params, v)
-		return v
+	{
+		if v := func() any {
+			lambda_parameters := parseRule_lambda_parameters(p)
+			if lambda_parameters == nil { return nil }
+			_ = lambda_parameters
+			return []any{lambda_parameters}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_lambda_params, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_lambda_params, nil)
 	return nil
 }
@@ -6994,76 +8337,86 @@ func parseRule_lambda_parameters(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		a := parseRule_lambda_slash_no_default(p)
-		if a == nil { return nil }
-		_ = a
-		b := parseRule__loop0_57(p)
-		_ = b
-		c := parseRule__loop0_58(p)
-		_ = c
-		d := parseRule_lambda_star_etc(p)
-		_ = d
-		return []any{a, b, c, d}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_lambda_parameters, v)
-		return v
+	{
+		if v := func() any {
+			a := parseRule_lambda_slash_no_default(p)
+			if a == nil { return nil }
+			_ = a
+			b := parseRule__loop0_57(p)
+			_ = b
+			c := parseRule__loop0_58(p)
+			_ = c
+			d := parseRule_lambda_star_etc(p)
+			_ = d
+			return []any{a, b, c, d}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_lambda_parameters, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 1
-	if v := func() any {
-		a := parseRule_lambda_slash_with_default(p)
-		if a == nil { return nil }
-		_ = a
-		b := parseRule__loop0_58(p)
-		_ = b
-		c := parseRule_lambda_star_etc(p)
-		_ = c
-		return []any{a, b, c}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_lambda_parameters, v)
-		return v
+	{
+		if v := func() any {
+			a := parseRule_lambda_slash_with_default(p)
+			if a == nil { return nil }
+			_ = a
+			b := parseRule__loop0_58(p)
+			_ = b
+			c := parseRule_lambda_star_etc(p)
+			_ = c
+			return []any{a, b, c}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_lambda_parameters, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 2
-	if v := func() any {
-		a := parseRule__loop1_59(p)
-		if a == nil { return nil }
-		_ = a
-		b := parseRule__loop0_58(p)
-		_ = b
-		c := parseRule_lambda_star_etc(p)
-		_ = c
-		return []any{a, b, c}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_lambda_parameters, v)
-		return v
+	{
+		if v := func() any {
+			a := parseRule__loop1_59(p)
+			if a == nil { return nil }
+			_ = a
+			b := parseRule__loop0_58(p)
+			_ = b
+			c := parseRule_lambda_star_etc(p)
+			_ = c
+			return []any{a, b, c}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_lambda_parameters, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 3
-	if v := func() any {
-		a := parseRule__loop1_60(p)
-		if a == nil { return nil }
-		_ = a
-		b := parseRule_lambda_star_etc(p)
-		_ = b
-		return []any{a, b}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_lambda_parameters, v)
-		return v
+	{
+		if v := func() any {
+			a := parseRule__loop1_60(p)
+			if a == nil { return nil }
+			_ = a
+			b := parseRule_lambda_star_etc(p)
+			_ = b
+			return []any{a, b}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_lambda_parameters, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 4
-	if v := func() any {
-		a := parseRule_lambda_star_etc(p)
-		if a == nil { return nil }
-		_ = a
-		return []any{a}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_lambda_parameters, v)
-		return v
+	{
+		if v := func() any {
+			a := parseRule_lambda_star_etc(p)
+			if a == nil { return nil }
+			_ = a
+			return []any{a}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_lambda_parameters, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_lambda_parameters, nil)
 	return nil
 }
@@ -7075,37 +8428,41 @@ func parseRule_lambda_slash_no_default(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		a := parseRule__loop1_59(p)
-		if a == nil { return nil }
-		_ = a
-		op := p.ExpectToken(tokenize.SLASH)
-		if op == nil { return nil }
-		_ = op
-		op_1 := p.ExpectToken(tokenize.COMMA)
-		if op_1 == nil { return nil }
-		_ = op_1
-		return []any{a, op, op_1}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_lambda_slash_no_default, v)
-		return v
+	{
+		if v := func() any {
+			a := parseRule__loop1_59(p)
+			if a == nil { return nil }
+			_ = a
+			op := p.ExpectToken(tokenize.SLASH)
+			if op == nil { return nil }
+			_ = op
+			op_1 := p.ExpectToken(tokenize.COMMA)
+			if op_1 == nil { return nil }
+			_ = op_1
+			return []any{a, op, op_1}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_lambda_slash_no_default, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 1
-	if v := func() any {
-		a := parseRule__loop1_59(p)
-		if a == nil { return nil }
-		_ = a
-		op := p.ExpectToken(tokenize.SLASH)
-		if op == nil { return nil }
-		_ = op
-		if !p.Lookahead(true, func(p *Parser) any { return p.ExpectToken(tokenize.COLON) }) { return nil }
-		return []any{a, op}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_lambda_slash_no_default, v)
-		return v
+	{
+		if v := func() any {
+			a := parseRule__loop1_59(p)
+			if a == nil { return nil }
+			_ = a
+			op := p.ExpectToken(tokenize.SLASH)
+			if op == nil { return nil }
+			_ = op
+			if !p.Lookahead(true, func(p *Parser) any { return p.ExpectToken(tokenize.COLON) }) { return nil }
+			return []any{a, op}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_lambda_slash_no_default, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_lambda_slash_no_default, nil)
 	return nil
 }
@@ -7117,41 +8474,45 @@ func parseRule_lambda_slash_with_default(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		a := parseRule__loop0_57(p)
-		_ = a
-		b := parseRule__loop1_60(p)
-		if b == nil { return nil }
-		_ = b
-		op := p.ExpectToken(tokenize.SLASH)
-		if op == nil { return nil }
-		_ = op
-		op_1 := p.ExpectToken(tokenize.COMMA)
-		if op_1 == nil { return nil }
-		_ = op_1
-		return []any{a, b, op, op_1}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_lambda_slash_with_default, v)
-		return v
+	{
+		if v := func() any {
+			a := parseRule__loop0_57(p)
+			_ = a
+			b := parseRule__loop1_60(p)
+			if b == nil { return nil }
+			_ = b
+			op := p.ExpectToken(tokenize.SLASH)
+			if op == nil { return nil }
+			_ = op
+			op_1 := p.ExpectToken(tokenize.COMMA)
+			if op_1 == nil { return nil }
+			_ = op_1
+			return []any{a, b, op, op_1}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_lambda_slash_with_default, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 1
-	if v := func() any {
-		a := parseRule__loop0_57(p)
-		_ = a
-		b := parseRule__loop1_60(p)
-		if b == nil { return nil }
-		_ = b
-		op := p.ExpectToken(tokenize.SLASH)
-		if op == nil { return nil }
-		_ = op
-		if !p.Lookahead(true, func(p *Parser) any { return p.ExpectToken(tokenize.COLON) }) { return nil }
-		return []any{a, b, op}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_lambda_slash_with_default, v)
-		return v
+	{
+		if v := func() any {
+			a := parseRule__loop0_57(p)
+			_ = a
+			b := parseRule__loop1_60(p)
+			if b == nil { return nil }
+			_ = b
+			op := p.ExpectToken(tokenize.SLASH)
+			if op == nil { return nil }
+			_ = op
+			if !p.Lookahead(true, func(p *Parser) any { return p.ExpectToken(tokenize.COLON) }) { return nil }
+			return []any{a, b, op}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_lambda_slash_with_default, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_lambda_slash_with_default, nil)
 	return nil
 }
@@ -7163,64 +8524,72 @@ func parseRule_lambda_star_etc(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		invalid_lambda_star_etc := parseRule_invalid_lambda_star_etc(p)
-		if invalid_lambda_star_etc == nil { return nil }
-		_ = invalid_lambda_star_etc
-		return []any{invalid_lambda_star_etc}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_lambda_star_etc, v)
-		return v
+	{
+		if v := func() any {
+			invalid_lambda_star_etc := parseRule_invalid_lambda_star_etc(p)
+			if invalid_lambda_star_etc == nil { return nil }
+			_ = invalid_lambda_star_etc
+			return []any{invalid_lambda_star_etc}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_lambda_star_etc, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 1
-	if v := func() any {
-		op := p.ExpectToken(tokenize.STAR)
-		if op == nil { return nil }
-		_ = op
-		a := parseRule_lambda_param_no_default(p)
-		if a == nil { return nil }
-		_ = a
-		b := parseRule__loop0_61(p)
-		_ = b
-		c := parseRule_lambda_kwds(p)
-		_ = c
-		return []any{op, a, b, c}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_lambda_star_etc, v)
-		return v
+	{
+		if v := func() any {
+			op := p.ExpectToken(tokenize.STAR)
+			if op == nil { return nil }
+			_ = op
+			a := parseRule_lambda_param_no_default(p)
+			if a == nil { return nil }
+			_ = a
+			b := parseRule__loop0_61(p)
+			_ = b
+			c := parseRule_lambda_kwds(p)
+			_ = c
+			return []any{op, a, b, c}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_lambda_star_etc, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 2
-	if v := func() any {
-		op := p.ExpectToken(tokenize.STAR)
-		if op == nil { return nil }
-		_ = op
-		op_1 := p.ExpectToken(tokenize.COMMA)
-		if op_1 == nil { return nil }
-		_ = op_1
-		b := parseRule__loop1_62(p)
-		if b == nil { return nil }
-		_ = b
-		c := parseRule_lambda_kwds(p)
-		_ = c
-		return []any{op, op_1, b, c}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_lambda_star_etc, v)
-		return v
+	{
+		if v := func() any {
+			op := p.ExpectToken(tokenize.STAR)
+			if op == nil { return nil }
+			_ = op
+			op_1 := p.ExpectToken(tokenize.COMMA)
+			if op_1 == nil { return nil }
+			_ = op_1
+			b := parseRule__loop1_62(p)
+			if b == nil { return nil }
+			_ = b
+			c := parseRule_lambda_kwds(p)
+			_ = c
+			return []any{op, op_1, b, c}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_lambda_star_etc, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 3
-	if v := func() any {
-		a := parseRule_lambda_kwds(p)
-		if a == nil { return nil }
-		_ = a
-		return []any{a}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_lambda_star_etc, v)
-		return v
+	{
+		if v := func() any {
+			a := parseRule_lambda_kwds(p)
+			if a == nil { return nil }
+			_ = a
+			return []any{a}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_lambda_star_etc, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_lambda_star_etc, nil)
 	return nil
 }
@@ -7232,30 +8601,34 @@ func parseRule_lambda_kwds(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		invalid_lambda_kwds := parseRule_invalid_lambda_kwds(p)
-		if invalid_lambda_kwds == nil { return nil }
-		_ = invalid_lambda_kwds
-		return []any{invalid_lambda_kwds}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_lambda_kwds, v)
-		return v
+	{
+		if v := func() any {
+			invalid_lambda_kwds := parseRule_invalid_lambda_kwds(p)
+			if invalid_lambda_kwds == nil { return nil }
+			_ = invalid_lambda_kwds
+			return []any{invalid_lambda_kwds}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_lambda_kwds, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 1
-	if v := func() any {
-		op := p.ExpectToken(tokenize.DOUBLESTAR)
-		if op == nil { return nil }
-		_ = op
-		a := parseRule_lambda_param_no_default(p)
-		if a == nil { return nil }
-		_ = a
-		return []any{op, a}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_lambda_kwds, v)
-		return v
+	{
+		if v := func() any {
+			op := p.ExpectToken(tokenize.DOUBLESTAR)
+			if op == nil { return nil }
+			_ = op
+			a := parseRule_lambda_param_no_default(p)
+			if a == nil { return nil }
+			_ = a
+			return []any{op, a}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_lambda_kwds, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_lambda_kwds, nil)
 	return nil
 }
@@ -7267,31 +8640,35 @@ func parseRule_lambda_param_no_default(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		a := parseRule_lambda_param(p)
-		if a == nil { return nil }
-		_ = a
-		op := p.ExpectToken(tokenize.COMMA)
-		if op == nil { return nil }
-		_ = op
-		return []any{a, op}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_lambda_param_no_default, v)
-		return v
+	{
+		if v := func() any {
+			a := parseRule_lambda_param(p)
+			if a == nil { return nil }
+			_ = a
+			op := p.ExpectToken(tokenize.COMMA)
+			if op == nil { return nil }
+			_ = op
+			return []any{a, op}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_lambda_param_no_default, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 1
-	if v := func() any {
-		a := parseRule_lambda_param(p)
-		if a == nil { return nil }
-		_ = a
-		if !p.Lookahead(true, func(p *Parser) any { return p.ExpectToken(tokenize.COLON) }) { return nil }
-		return []any{a}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_lambda_param_no_default, v)
-		return v
+	{
+		if v := func() any {
+			a := parseRule_lambda_param(p)
+			if a == nil { return nil }
+			_ = a
+			if !p.Lookahead(true, func(p *Parser) any { return p.ExpectToken(tokenize.COLON) }) { return nil }
+			return []any{a}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_lambda_param_no_default, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_lambda_param_no_default, nil)
 	return nil
 }
@@ -7303,37 +8680,41 @@ func parseRule_lambda_param_with_default(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		a := parseRule_lambda_param(p)
-		if a == nil { return nil }
-		_ = a
-		c := parseRule_default(p)
-		if c == nil { return nil }
-		_ = c
-		op := p.ExpectToken(tokenize.COMMA)
-		if op == nil { return nil }
-		_ = op
-		return []any{a, c, op}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_lambda_param_with_default, v)
-		return v
+	{
+		if v := func() any {
+			a := parseRule_lambda_param(p)
+			if a == nil { return nil }
+			_ = a
+			c := parseRule_default(p)
+			if c == nil { return nil }
+			_ = c
+			op := p.ExpectToken(tokenize.COMMA)
+			if op == nil { return nil }
+			_ = op
+			return []any{a, c, op}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_lambda_param_with_default, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 1
-	if v := func() any {
-		a := parseRule_lambda_param(p)
-		if a == nil { return nil }
-		_ = a
-		c := parseRule_default(p)
-		if c == nil { return nil }
-		_ = c
-		if !p.Lookahead(true, func(p *Parser) any { return p.ExpectToken(tokenize.COLON) }) { return nil }
-		return []any{a, c}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_lambda_param_with_default, v)
-		return v
+	{
+		if v := func() any {
+			a := parseRule_lambda_param(p)
+			if a == nil { return nil }
+			_ = a
+			c := parseRule_default(p)
+			if c == nil { return nil }
+			_ = c
+			if !p.Lookahead(true, func(p *Parser) any { return p.ExpectToken(tokenize.COLON) }) { return nil }
+			return []any{a, c}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_lambda_param_with_default, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_lambda_param_with_default, nil)
 	return nil
 }
@@ -7345,35 +8726,39 @@ func parseRule_lambda_param_maybe_default(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		a := parseRule_lambda_param(p)
-		if a == nil { return nil }
-		_ = a
-		c := parseRule_default(p)
-		_ = c
-		op := p.ExpectToken(tokenize.COMMA)
-		if op == nil { return nil }
-		_ = op
-		return []any{a, c, op}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_lambda_param_maybe_default, v)
-		return v
+	{
+		if v := func() any {
+			a := parseRule_lambda_param(p)
+			if a == nil { return nil }
+			_ = a
+			c := parseRule_default(p)
+			_ = c
+			op := p.ExpectToken(tokenize.COMMA)
+			if op == nil { return nil }
+			_ = op
+			return []any{a, c, op}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_lambda_param_maybe_default, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 1
-	if v := func() any {
-		a := parseRule_lambda_param(p)
-		if a == nil { return nil }
-		_ = a
-		c := parseRule_default(p)
-		_ = c
-		if !p.Lookahead(true, func(p *Parser) any { return p.ExpectToken(tokenize.COLON) }) { return nil }
-		return []any{a, c}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_lambda_param_maybe_default, v)
-		return v
+	{
+		if v := func() any {
+			a := parseRule_lambda_param(p)
+			if a == nil { return nil }
+			_ = a
+			c := parseRule_default(p)
+			_ = c
+			if !p.Lookahead(true, func(p *Parser) any { return p.ExpectToken(tokenize.COLON) }) { return nil }
+			return []any{a, c}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_lambda_param_maybe_default, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_lambda_param_maybe_default, nil)
 	return nil
 }
@@ -7385,16 +8770,18 @@ func parseRule_lambda_param(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		a := p.ExpectToken(tokenize.NAME)
-		if a == nil { return nil }
-		_ = a
-		return []any{a}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_lambda_param, v)
-		return v
+	{
+		if v := func() any {
+			a := p.ExpectToken(tokenize.NAME)
+			if a == nil { return nil }
+			_ = a
+			return []any{a}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_lambda_param, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_lambda_param, nil)
 	return nil
 }
@@ -7406,27 +8793,31 @@ func parseRule_fstring_middle(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		fstring_replacement_field := parseRule_fstring_replacement_field(p)
-		if fstring_replacement_field == nil { return nil }
-		_ = fstring_replacement_field
-		return []any{fstring_replacement_field}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_fstring_middle, v)
-		return v
+	{
+		if v := func() any {
+			fstring_replacement_field := parseRule_fstring_replacement_field(p)
+			if fstring_replacement_field == nil { return nil }
+			_ = fstring_replacement_field
+			return []any{fstring_replacement_field}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_fstring_middle, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 1
-	if v := func() any {
-		t := p.ExpectToken(tokenize.FSTRING_MIDDLE)
-		if t == nil { return nil }
-		_ = t
-		return []any{t}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_fstring_middle, v)
-		return v
+	{
+		if v := func() any {
+			t := p.ExpectToken(tokenize.FSTRING_MIDDLE)
+			if t == nil { return nil }
+			_ = t
+			return []any{t}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_fstring_middle, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_fstring_middle, nil)
 	return nil
 }
@@ -7438,39 +8829,43 @@ func parseRule_fstring_replacement_field(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		op := p.ExpectToken(tokenize.LBRACE)
-		if op == nil { return nil }
-		_ = op
-		a := parseRule_annotated_rhs(p)
-		if a == nil { return nil }
-		_ = a
-		debug_expr := p.ExpectToken(tokenize.EQUAL)
-		_ = debug_expr
-		conversion := parseRule_fstring_conversion(p)
-		_ = conversion
-		format := parseRule_fstring_full_format_spec(p)
-		_ = format
-		rbrace := p.ExpectToken(tokenize.RBRACE)
-		if rbrace == nil { return nil }
-		_ = rbrace
-		return []any{op, a, debug_expr, conversion, format, rbrace}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_fstring_replacement_field, v)
-		return v
+	{
+		if v := func() any {
+			op := p.ExpectToken(tokenize.LBRACE)
+			if op == nil { return nil }
+			_ = op
+			a := parseRule_annotated_rhs(p)
+			if a == nil { return nil }
+			_ = a
+			debug_expr := p.ExpectToken(tokenize.EQUAL)
+			_ = debug_expr
+			conversion := parseRule_fstring_conversion(p)
+			_ = conversion
+			format := parseRule_fstring_full_format_spec(p)
+			_ = format
+			rbrace := p.ExpectToken(tokenize.RBRACE)
+			if rbrace == nil { return nil }
+			_ = rbrace
+			return []any{op, a, debug_expr, conversion, format, rbrace}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_fstring_replacement_field, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 1
-	if v := func() any {
-		invalid_fstring_replacement_field := parseRule_invalid_fstring_replacement_field(p)
-		if invalid_fstring_replacement_field == nil { return nil }
-		_ = invalid_fstring_replacement_field
-		return []any{invalid_fstring_replacement_field}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_fstring_replacement_field, v)
-		return v
+	{
+		if v := func() any {
+			invalid_fstring_replacement_field := parseRule_invalid_fstring_replacement_field(p)
+			if invalid_fstring_replacement_field == nil { return nil }
+			_ = invalid_fstring_replacement_field
+			return []any{invalid_fstring_replacement_field}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_fstring_replacement_field, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_fstring_replacement_field, nil)
 	return nil
 }
@@ -7482,19 +8877,21 @@ func parseRule_fstring_conversion(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		conv_token := p.ExpectSoftKeyword("!")
-		if conv_token == nil { return nil }
-		_ = conv_token
-		conv := p.ExpectToken(tokenize.NAME)
-		if conv == nil { return nil }
-		_ = conv
-		return []any{conv_token, conv}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_fstring_conversion, v)
-		return v
+	{
+		if v := func() any {
+			conv_token := p.ExpectSoftKeyword("!")
+			if conv_token == nil { return nil }
+			_ = conv_token
+			conv := p.ExpectToken(tokenize.NAME)
+			if conv == nil { return nil }
+			_ = conv
+			return []any{conv_token, conv}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_fstring_conversion, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_fstring_conversion, nil)
 	return nil
 }
@@ -7506,18 +8903,20 @@ func parseRule_fstring_full_format_spec(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		colon := p.ExpectToken(tokenize.COLON)
-		if colon == nil { return nil }
-		_ = colon
-		spec := parseRule__loop0_63(p)
-		_ = spec
-		return []any{colon, spec}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_fstring_full_format_spec, v)
-		return v
+	{
+		if v := func() any {
+			colon := p.ExpectToken(tokenize.COLON)
+			if colon == nil { return nil }
+			_ = colon
+			spec := parseRule__loop0_63(p)
+			_ = spec
+			return []any{colon, spec}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_fstring_full_format_spec, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_fstring_full_format_spec, nil)
 	return nil
 }
@@ -7529,27 +8928,31 @@ func parseRule_fstring_format_spec(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		t := p.ExpectToken(tokenize.FSTRING_MIDDLE)
-		if t == nil { return nil }
-		_ = t
-		return []any{t}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_fstring_format_spec, v)
-		return v
+	{
+		if v := func() any {
+			t := p.ExpectToken(tokenize.FSTRING_MIDDLE)
+			if t == nil { return nil }
+			_ = t
+			return []any{t}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_fstring_format_spec, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 1
-	if v := func() any {
-		fstring_replacement_field := parseRule_fstring_replacement_field(p)
-		if fstring_replacement_field == nil { return nil }
-		_ = fstring_replacement_field
-		return []any{fstring_replacement_field}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_fstring_format_spec, v)
-		return v
+	{
+		if v := func() any {
+			fstring_replacement_field := parseRule_fstring_replacement_field(p)
+			if fstring_replacement_field == nil { return nil }
+			_ = fstring_replacement_field
+			return []any{fstring_replacement_field}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_fstring_format_spec, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_fstring_format_spec, nil)
 	return nil
 }
@@ -7561,21 +8964,23 @@ func parseRule_fstring(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		a := p.ExpectToken(tokenize.FSTRING_START)
-		if a == nil { return nil }
-		_ = a
-		b := parseRule__loop0_64(p)
-		_ = b
-		c := p.ExpectToken(tokenize.FSTRING_END)
-		if c == nil { return nil }
-		_ = c
-		return []any{a, b, c}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_fstring, v)
-		return v
+	{
+		if v := func() any {
+			a := p.ExpectToken(tokenize.FSTRING_START)
+			if a == nil { return nil }
+			_ = a
+			b := parseRule__loop0_64(p)
+			_ = b
+			c := p.ExpectToken(tokenize.FSTRING_END)
+			if c == nil { return nil }
+			_ = c
+			return []any{a, b, c}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_fstring, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_fstring, nil)
 	return nil
 }
@@ -7587,39 +8992,43 @@ func parseRule_tstring_format_spec_replacement_field(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		op := p.ExpectToken(tokenize.LBRACE)
-		if op == nil { return nil }
-		_ = op
-		a := parseRule_annotated_rhs(p)
-		if a == nil { return nil }
-		_ = a
-		debug_expr := p.ExpectToken(tokenize.EQUAL)
-		_ = debug_expr
-		conversion := parseRule_fstring_conversion(p)
-		_ = conversion
-		format := parseRule_tstring_full_format_spec(p)
-		_ = format
-		rbrace := p.ExpectToken(tokenize.RBRACE)
-		if rbrace == nil { return nil }
-		_ = rbrace
-		return []any{op, a, debug_expr, conversion, format, rbrace}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_tstring_format_spec_replacement_field, v)
-		return v
+	{
+		if v := func() any {
+			op := p.ExpectToken(tokenize.LBRACE)
+			if op == nil { return nil }
+			_ = op
+			a := parseRule_annotated_rhs(p)
+			if a == nil { return nil }
+			_ = a
+			debug_expr := p.ExpectToken(tokenize.EQUAL)
+			_ = debug_expr
+			conversion := parseRule_fstring_conversion(p)
+			_ = conversion
+			format := parseRule_tstring_full_format_spec(p)
+			_ = format
+			rbrace := p.ExpectToken(tokenize.RBRACE)
+			if rbrace == nil { return nil }
+			_ = rbrace
+			return []any{op, a, debug_expr, conversion, format, rbrace}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_tstring_format_spec_replacement_field, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 1
-	if v := func() any {
-		invalid_tstring_replacement_field := parseRule_invalid_tstring_replacement_field(p)
-		if invalid_tstring_replacement_field == nil { return nil }
-		_ = invalid_tstring_replacement_field
-		return []any{invalid_tstring_replacement_field}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_tstring_format_spec_replacement_field, v)
-		return v
+	{
+		if v := func() any {
+			invalid_tstring_replacement_field := parseRule_invalid_tstring_replacement_field(p)
+			if invalid_tstring_replacement_field == nil { return nil }
+			_ = invalid_tstring_replacement_field
+			return []any{invalid_tstring_replacement_field}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_tstring_format_spec_replacement_field, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_tstring_format_spec_replacement_field, nil)
 	return nil
 }
@@ -7631,27 +9040,31 @@ func parseRule_tstring_format_spec(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		t := p.ExpectToken(tokenize.TSTRING_MIDDLE)
-		if t == nil { return nil }
-		_ = t
-		return []any{t}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_tstring_format_spec, v)
-		return v
+	{
+		if v := func() any {
+			t := p.ExpectToken(tokenize.TSTRING_MIDDLE)
+			if t == nil { return nil }
+			_ = t
+			return []any{t}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_tstring_format_spec, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 1
-	if v := func() any {
-		tstring_format_spec_replacement_field := parseRule_tstring_format_spec_replacement_field(p)
-		if tstring_format_spec_replacement_field == nil { return nil }
-		_ = tstring_format_spec_replacement_field
-		return []any{tstring_format_spec_replacement_field}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_tstring_format_spec, v)
-		return v
+	{
+		if v := func() any {
+			tstring_format_spec_replacement_field := parseRule_tstring_format_spec_replacement_field(p)
+			if tstring_format_spec_replacement_field == nil { return nil }
+			_ = tstring_format_spec_replacement_field
+			return []any{tstring_format_spec_replacement_field}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_tstring_format_spec, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_tstring_format_spec, nil)
 	return nil
 }
@@ -7663,18 +9076,20 @@ func parseRule_tstring_full_format_spec(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		colon := p.ExpectToken(tokenize.COLON)
-		if colon == nil { return nil }
-		_ = colon
-		spec := parseRule__loop0_65(p)
-		_ = spec
-		return []any{colon, spec}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_tstring_full_format_spec, v)
-		return v
+	{
+		if v := func() any {
+			colon := p.ExpectToken(tokenize.COLON)
+			if colon == nil { return nil }
+			_ = colon
+			spec := parseRule__loop0_65(p)
+			_ = spec
+			return []any{colon, spec}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_tstring_full_format_spec, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_tstring_full_format_spec, nil)
 	return nil
 }
@@ -7686,39 +9101,43 @@ func parseRule_tstring_replacement_field(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		op := p.ExpectToken(tokenize.LBRACE)
-		if op == nil { return nil }
-		_ = op
-		a := parseRule_annotated_rhs(p)
-		if a == nil { return nil }
-		_ = a
-		debug_expr := p.ExpectToken(tokenize.EQUAL)
-		_ = debug_expr
-		conversion := parseRule_fstring_conversion(p)
-		_ = conversion
-		format := parseRule_tstring_full_format_spec(p)
-		_ = format
-		rbrace := p.ExpectToken(tokenize.RBRACE)
-		if rbrace == nil { return nil }
-		_ = rbrace
-		return []any{op, a, debug_expr, conversion, format, rbrace}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_tstring_replacement_field, v)
-		return v
+	{
+		if v := func() any {
+			op := p.ExpectToken(tokenize.LBRACE)
+			if op == nil { return nil }
+			_ = op
+			a := parseRule_annotated_rhs(p)
+			if a == nil { return nil }
+			_ = a
+			debug_expr := p.ExpectToken(tokenize.EQUAL)
+			_ = debug_expr
+			conversion := parseRule_fstring_conversion(p)
+			_ = conversion
+			format := parseRule_tstring_full_format_spec(p)
+			_ = format
+			rbrace := p.ExpectToken(tokenize.RBRACE)
+			if rbrace == nil { return nil }
+			_ = rbrace
+			return []any{op, a, debug_expr, conversion, format, rbrace}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_tstring_replacement_field, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 1
-	if v := func() any {
-		invalid_tstring_replacement_field := parseRule_invalid_tstring_replacement_field(p)
-		if invalid_tstring_replacement_field == nil { return nil }
-		_ = invalid_tstring_replacement_field
-		return []any{invalid_tstring_replacement_field}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_tstring_replacement_field, v)
-		return v
+	{
+		if v := func() any {
+			invalid_tstring_replacement_field := parseRule_invalid_tstring_replacement_field(p)
+			if invalid_tstring_replacement_field == nil { return nil }
+			_ = invalid_tstring_replacement_field
+			return []any{invalid_tstring_replacement_field}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_tstring_replacement_field, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_tstring_replacement_field, nil)
 	return nil
 }
@@ -7730,27 +9149,31 @@ func parseRule_tstring_middle(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		tstring_replacement_field := parseRule_tstring_replacement_field(p)
-		if tstring_replacement_field == nil { return nil }
-		_ = tstring_replacement_field
-		return []any{tstring_replacement_field}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_tstring_middle, v)
-		return v
+	{
+		if v := func() any {
+			tstring_replacement_field := parseRule_tstring_replacement_field(p)
+			if tstring_replacement_field == nil { return nil }
+			_ = tstring_replacement_field
+			return []any{tstring_replacement_field}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_tstring_middle, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 1
-	if v := func() any {
-		t := p.ExpectToken(tokenize.TSTRING_MIDDLE)
-		if t == nil { return nil }
-		_ = t
-		return []any{t}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_tstring_middle, v)
-		return v
+	{
+		if v := func() any {
+			t := p.ExpectToken(tokenize.TSTRING_MIDDLE)
+			if t == nil { return nil }
+			_ = t
+			return []any{t}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_tstring_middle, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_tstring_middle, nil)
 	return nil
 }
@@ -7762,21 +9185,23 @@ func parseRule_tstring(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		a := p.ExpectToken(tokenize.TSTRING_START)
-		if a == nil { return nil }
-		_ = a
-		b := parseRule__loop0_66(p)
-		_ = b
-		c := p.ExpectToken(tokenize.TSTRING_END)
-		if c == nil { return nil }
-		_ = c
-		return []any{a, b, c}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_tstring, v)
-		return v
+	{
+		if v := func() any {
+			a := p.ExpectToken(tokenize.TSTRING_START)
+			if a == nil { return nil }
+			_ = a
+			b := parseRule__loop0_66(p)
+			_ = b
+			c := p.ExpectToken(tokenize.TSTRING_END)
+			if c == nil { return nil }
+			_ = c
+			return []any{a, b, c}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_tstring, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_tstring, nil)
 	return nil
 }
@@ -7788,16 +9213,18 @@ func parseRule_string(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		s := p.ExpectToken(tokenize.STRING)
-		if s == nil { return nil }
-		_ = s
-		return []any{s}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_string, v)
-		return v
+	{
+		if v := func() any {
+			s := p.ExpectToken(tokenize.STRING)
+			if s == nil { return nil }
+			_ = s
+			return []any{s}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_string, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_string, nil)
 	return nil
 }
@@ -7809,38 +9236,44 @@ func parseRule_strings(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		invalid_string_tstring_concat := parseRule_invalid_string_tstring_concat(p)
-		if invalid_string_tstring_concat == nil { return nil }
-		_ = invalid_string_tstring_concat
-		return []any{invalid_string_tstring_concat}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_strings, v)
-		return v
+	{
+		if v := func() any {
+			invalid_string_tstring_concat := parseRule_invalid_string_tstring_concat(p)
+			if invalid_string_tstring_concat == nil { return nil }
+			_ = invalid_string_tstring_concat
+			return []any{invalid_string_tstring_concat}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_strings, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 1
-	if v := func() any {
-		a := parseRule__loop1_67(p)
-		if a == nil { return nil }
-		_ = a
-		return []any{a}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_strings, v)
-		return v
+	{
+		if v := func() any {
+			a := parseRule__loop1_67(p)
+			if a == nil { return nil }
+			_ = a
+			return []any{a}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_strings, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 2
-	if v := func() any {
-		a := parseRule__loop1_68(p)
-		if a == nil { return nil }
-		_ = a
-		return []any{a}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_strings, v)
-		return v
+	{
+		if v := func() any {
+			a := parseRule__loop1_68(p)
+			if a == nil { return nil }
+			_ = a
+			return []any{a}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_strings, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_strings, nil)
 	return nil
 }
@@ -7852,21 +9285,23 @@ func parseRule_list(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		op := p.ExpectToken(tokenize.LSQB)
-		if op == nil { return nil }
-		_ = op
-		a := parseRule_star_named_expressions(p)
-		_ = a
-		op_1 := p.ExpectToken(tokenize.RSQB)
-		if op_1 == nil { return nil }
-		_ = op_1
-		return []any{op, a, op_1}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_list, v)
-		return v
+	{
+		if v := func() any {
+			op := p.ExpectToken(tokenize.LSQB)
+			if op == nil { return nil }
+			_ = op
+			a := parseRule_star_named_expressions(p)
+			_ = a
+			op_1 := p.ExpectToken(tokenize.RSQB)
+			if op_1 == nil { return nil }
+			_ = op_1
+			return []any{op, a, op_1}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_list, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_list, nil)
 	return nil
 }
@@ -7878,21 +9313,23 @@ func parseRule_tuple(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		op := p.ExpectToken(tokenize.LPAR)
-		if op == nil { return nil }
-		_ = op
-		a := parseRule__rhs_69(p)
-		_ = a
-		op_1 := p.ExpectToken(tokenize.RPAR)
-		if op_1 == nil { return nil }
-		_ = op_1
-		return []any{op, a, op_1}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_tuple, v)
-		return v
+	{
+		if v := func() any {
+			op := p.ExpectToken(tokenize.LPAR)
+			if op == nil { return nil }
+			_ = op
+			a := parseRule__rhs_69(p)
+			_ = a
+			op_1 := p.ExpectToken(tokenize.RPAR)
+			if op_1 == nil { return nil }
+			_ = op_1
+			return []any{op, a, op_1}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_tuple, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_tuple, nil)
 	return nil
 }
@@ -7904,22 +9341,24 @@ func parseRule_set(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		op := p.ExpectToken(tokenize.LBRACE)
-		if op == nil { return nil }
-		_ = op
-		a := parseRule_star_named_expressions(p)
-		if a == nil { return nil }
-		_ = a
-		op_1 := p.ExpectToken(tokenize.RBRACE)
-		if op_1 == nil { return nil }
-		_ = op_1
-		return []any{op, a, op_1}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_set, v)
-		return v
+	{
+		if v := func() any {
+			op := p.ExpectToken(tokenize.LBRACE)
+			if op == nil { return nil }
+			_ = op
+			a := parseRule_star_named_expressions(p)
+			if a == nil { return nil }
+			_ = a
+			op_1 := p.ExpectToken(tokenize.RBRACE)
+			if op_1 == nil { return nil }
+			_ = op_1
+			return []any{op, a, op_1}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_set, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_set, nil)
 	return nil
 }
@@ -7931,38 +9370,42 @@ func parseRule_dict(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		op := p.ExpectToken(tokenize.LBRACE)
-		if op == nil { return nil }
-		_ = op
-		a := parseRule_double_starred_kvpairs(p)
-		_ = a
-		op_1 := p.ExpectToken(tokenize.RBRACE)
-		if op_1 == nil { return nil }
-		_ = op_1
-		return []any{op, a, op_1}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_dict, v)
-		return v
+	{
+		if v := func() any {
+			op := p.ExpectToken(tokenize.LBRACE)
+			if op == nil { return nil }
+			_ = op
+			a := parseRule_double_starred_kvpairs(p)
+			_ = a
+			op_1 := p.ExpectToken(tokenize.RBRACE)
+			if op_1 == nil { return nil }
+			_ = op_1
+			return []any{op, a, op_1}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_dict, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 1
-	if v := func() any {
-		op := p.ExpectToken(tokenize.LBRACE)
-		if op == nil { return nil }
-		_ = op
-		invalid_double_starred_kvpairs := parseRule_invalid_double_starred_kvpairs(p)
-		if invalid_double_starred_kvpairs == nil { return nil }
-		_ = invalid_double_starred_kvpairs
-		op_1 := p.ExpectToken(tokenize.RBRACE)
-		if op_1 == nil { return nil }
-		_ = op_1
-		return []any{op, invalid_double_starred_kvpairs, op_1}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_dict, v)
-		return v
+	{
+		if v := func() any {
+			op := p.ExpectToken(tokenize.LBRACE)
+			if op == nil { return nil }
+			_ = op
+			invalid_double_starred_kvpairs := parseRule_invalid_double_starred_kvpairs(p)
+			if invalid_double_starred_kvpairs == nil { return nil }
+			_ = invalid_double_starred_kvpairs
+			op_1 := p.ExpectToken(tokenize.RBRACE)
+			if op_1 == nil { return nil }
+			_ = op_1
+			return []any{op, invalid_double_starred_kvpairs, op_1}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_dict, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_dict, nil)
 	return nil
 }
@@ -7974,18 +9417,20 @@ func parseRule_double_starred_kvpairs(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		a := parseRule__gather_70(p)
-		if a == nil { return nil }
-		_ = a
-		opt := p.ExpectToken(tokenize.COMMA)
-		_ = opt
-		return []any{a, opt}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_double_starred_kvpairs, v)
-		return v
+	{
+		if v := func() any {
+			a := parseRule__gather_70(p)
+			if a == nil { return nil }
+			_ = a
+			opt := p.ExpectToken(tokenize.COMMA)
+			_ = opt
+			return []any{a, opt}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_double_starred_kvpairs, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_double_starred_kvpairs, nil)
 	return nil
 }
@@ -7997,30 +9442,34 @@ func parseRule_double_starred_kvpair(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		op := p.ExpectToken(tokenize.DOUBLESTAR)
-		if op == nil { return nil }
-		_ = op
-		a := parseRule_bitwise_or(p)
-		if a == nil { return nil }
-		_ = a
-		return []any{op, a}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_double_starred_kvpair, v)
-		return v
+	{
+		if v := func() any {
+			op := p.ExpectToken(tokenize.DOUBLESTAR)
+			if op == nil { return nil }
+			_ = op
+			a := parseRule_bitwise_or(p)
+			if a == nil { return nil }
+			_ = a
+			return []any{op, a}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_double_starred_kvpair, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 1
-	if v := func() any {
-		kvpair := parseRule_kvpair(p)
-		if kvpair == nil { return nil }
-		_ = kvpair
-		return []any{kvpair}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_double_starred_kvpair, v)
-		return v
+	{
+		if v := func() any {
+			kvpair := parseRule_kvpair(p)
+			if kvpair == nil { return nil }
+			_ = kvpair
+			return []any{kvpair}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_double_starred_kvpair, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_double_starred_kvpair, nil)
 	return nil
 }
@@ -8032,22 +9481,24 @@ func parseRule_kvpair(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		a := parseRule_expression(p)
-		if a == nil { return nil }
-		_ = a
-		op := p.ExpectToken(tokenize.COLON)
-		if op == nil { return nil }
-		_ = op
-		b := parseRule_expression(p)
-		if b == nil { return nil }
-		_ = b
-		return []any{a, op, b}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_kvpair, v)
-		return v
+	{
+		if v := func() any {
+			a := parseRule_expression(p)
+			if a == nil { return nil }
+			_ = a
+			op := p.ExpectToken(tokenize.COLON)
+			if op == nil { return nil }
+			_ = op
+			b := parseRule_expression(p)
+			if b == nil { return nil }
+			_ = b
+			return []any{a, op, b}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_kvpair, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_kvpair, nil)
 	return nil
 }
@@ -8059,16 +9510,18 @@ func parseRule_for_if_clauses(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		a := parseRule__loop1_71(p)
-		if a == nil { return nil }
-		_ = a
-		return []any{a}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_for_if_clauses, v)
-		return v
+	{
+		if v := func() any {
+			a := parseRule__loop1_71(p)
+			if a == nil { return nil }
+			_ = a
+			return []any{a}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_for_if_clauses, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_for_if_clauses, nil)
 	return nil
 }
@@ -8080,76 +9533,94 @@ func parseRule_for_if_clause(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		kw := p.ExpectName("async")
-		if kw == nil { return nil }
-		_ = kw
-		kw_1 := p.ExpectName("for")
-		if kw_1 == nil { return nil }
-		_ = kw_1
-		a := parseRule_star_targets(p)
-		if a == nil { return nil }
-		_ = a
-		kw_2 := p.ExpectName("in")
-		if kw_2 == nil { return nil }
-		_ = kw_2
-		// cut: M4
-		b := parseRule_disjunction(p)
-		if b == nil { return nil }
-		_ = b
-		c := parseRule__loop0_72(p)
-		_ = c
-		return []any{kw, kw_1, a, kw_2, b, c}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_for_if_clause, v)
-		return v
+	{
+		cut := false
+		if v := func() any {
+			kw := p.ExpectName("async")
+			if kw == nil { return nil }
+			_ = kw
+			kw_1 := p.ExpectName("for")
+			if kw_1 == nil { return nil }
+			_ = kw_1
+			a := parseRule_star_targets(p)
+			if a == nil { return nil }
+			_ = a
+			kw_2 := p.ExpectName("in")
+			if kw_2 == nil { return nil }
+			_ = kw_2
+			cut = true
+			b := parseRule_disjunction(p)
+			if b == nil { return nil }
+			_ = b
+			c := parseRule__loop0_72(p)
+			_ = c
+			return []any{kw, kw_1, a, kw_2, b, c}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_for_if_clause, v)
+			return v
+		}
+		p.Reset(mark)
+		if cut {
+			p.InsertMemo(mark, Rule_for_if_clause, nil)
+			return nil
+		}
 	}
-	p.Reset(mark)
 	// alt 1
-	if v := func() any {
-		kw := p.ExpectName("for")
-		if kw == nil { return nil }
-		_ = kw
-		a := parseRule_star_targets(p)
-		if a == nil { return nil }
-		_ = a
-		kw_1 := p.ExpectName("in")
-		if kw_1 == nil { return nil }
-		_ = kw_1
-		// cut: M4
-		b := parseRule_disjunction(p)
-		if b == nil { return nil }
-		_ = b
-		c := parseRule__loop0_72(p)
-		_ = c
-		return []any{kw, a, kw_1, b, c}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_for_if_clause, v)
-		return v
+	{
+		cut := false
+		if v := func() any {
+			kw := p.ExpectName("for")
+			if kw == nil { return nil }
+			_ = kw
+			a := parseRule_star_targets(p)
+			if a == nil { return nil }
+			_ = a
+			kw_1 := p.ExpectName("in")
+			if kw_1 == nil { return nil }
+			_ = kw_1
+			cut = true
+			b := parseRule_disjunction(p)
+			if b == nil { return nil }
+			_ = b
+			c := parseRule__loop0_72(p)
+			_ = c
+			return []any{kw, a, kw_1, b, c}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_for_if_clause, v)
+			return v
+		}
+		p.Reset(mark)
+		if cut {
+			p.InsertMemo(mark, Rule_for_if_clause, nil)
+			return nil
+		}
 	}
-	p.Reset(mark)
 	// alt 2
-	if v := func() any {
-		invalid_for_if_clause := parseRule_invalid_for_if_clause(p)
-		if invalid_for_if_clause == nil { return nil }
-		_ = invalid_for_if_clause
-		return []any{invalid_for_if_clause}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_for_if_clause, v)
-		return v
+	{
+		if v := func() any {
+			invalid_for_if_clause := parseRule_invalid_for_if_clause(p)
+			if invalid_for_if_clause == nil { return nil }
+			_ = invalid_for_if_clause
+			return []any{invalid_for_if_clause}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_for_if_clause, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 3
-	if v := func() any {
-		invalid_for_target := parseRule_invalid_for_target(p)
-		if invalid_for_target == nil { return nil }
-		_ = invalid_for_target
-		return []any{invalid_for_target}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_for_if_clause, v)
-		return v
+	{
+		if v := func() any {
+			invalid_for_target := parseRule_invalid_for_target(p)
+			if invalid_for_target == nil { return nil }
+			_ = invalid_for_target
+			return []any{invalid_for_target}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_for_if_clause, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_for_if_clause, nil)
 	return nil
 }
@@ -8161,36 +9632,40 @@ func parseRule_listcomp(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		op := p.ExpectToken(tokenize.LSQB)
-		if op == nil { return nil }
-		_ = op
-		a := parseRule_named_expression(p)
-		if a == nil { return nil }
-		_ = a
-		b := parseRule_for_if_clauses(p)
-		if b == nil { return nil }
-		_ = b
-		op_1 := p.ExpectToken(tokenize.RSQB)
-		if op_1 == nil { return nil }
-		_ = op_1
-		return []any{op, a, b, op_1}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_listcomp, v)
-		return v
+	{
+		if v := func() any {
+			op := p.ExpectToken(tokenize.LSQB)
+			if op == nil { return nil }
+			_ = op
+			a := parseRule_named_expression(p)
+			if a == nil { return nil }
+			_ = a
+			b := parseRule_for_if_clauses(p)
+			if b == nil { return nil }
+			_ = b
+			op_1 := p.ExpectToken(tokenize.RSQB)
+			if op_1 == nil { return nil }
+			_ = op_1
+			return []any{op, a, b, op_1}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_listcomp, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 1
-	if v := func() any {
-		invalid_comprehension := parseRule_invalid_comprehension(p)
-		if invalid_comprehension == nil { return nil }
-		_ = invalid_comprehension
-		return []any{invalid_comprehension}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_listcomp, v)
-		return v
+	{
+		if v := func() any {
+			invalid_comprehension := parseRule_invalid_comprehension(p)
+			if invalid_comprehension == nil { return nil }
+			_ = invalid_comprehension
+			return []any{invalid_comprehension}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_listcomp, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_listcomp, nil)
 	return nil
 }
@@ -8202,36 +9677,40 @@ func parseRule_setcomp(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		op := p.ExpectToken(tokenize.LBRACE)
-		if op == nil { return nil }
-		_ = op
-		a := parseRule_named_expression(p)
-		if a == nil { return nil }
-		_ = a
-		b := parseRule_for_if_clauses(p)
-		if b == nil { return nil }
-		_ = b
-		op_1 := p.ExpectToken(tokenize.RBRACE)
-		if op_1 == nil { return nil }
-		_ = op_1
-		return []any{op, a, b, op_1}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_setcomp, v)
-		return v
+	{
+		if v := func() any {
+			op := p.ExpectToken(tokenize.LBRACE)
+			if op == nil { return nil }
+			_ = op
+			a := parseRule_named_expression(p)
+			if a == nil { return nil }
+			_ = a
+			b := parseRule_for_if_clauses(p)
+			if b == nil { return nil }
+			_ = b
+			op_1 := p.ExpectToken(tokenize.RBRACE)
+			if op_1 == nil { return nil }
+			_ = op_1
+			return []any{op, a, b, op_1}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_setcomp, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 1
-	if v := func() any {
-		invalid_comprehension := parseRule_invalid_comprehension(p)
-		if invalid_comprehension == nil { return nil }
-		_ = invalid_comprehension
-		return []any{invalid_comprehension}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_setcomp, v)
-		return v
+	{
+		if v := func() any {
+			invalid_comprehension := parseRule_invalid_comprehension(p)
+			if invalid_comprehension == nil { return nil }
+			_ = invalid_comprehension
+			return []any{invalid_comprehension}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_setcomp, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_setcomp, nil)
 	return nil
 }
@@ -8243,36 +9722,40 @@ func parseRule_genexp(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		op := p.ExpectToken(tokenize.LPAR)
-		if op == nil { return nil }
-		_ = op
-		a := parseRule__group_73(p)
-		if a == nil { return nil }
-		_ = a
-		b := parseRule_for_if_clauses(p)
-		if b == nil { return nil }
-		_ = b
-		op_1 := p.ExpectToken(tokenize.RPAR)
-		if op_1 == nil { return nil }
-		_ = op_1
-		return []any{op, a, b, op_1}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_genexp, v)
-		return v
+	{
+		if v := func() any {
+			op := p.ExpectToken(tokenize.LPAR)
+			if op == nil { return nil }
+			_ = op
+			a := parseRule__group_73(p)
+			if a == nil { return nil }
+			_ = a
+			b := parseRule_for_if_clauses(p)
+			if b == nil { return nil }
+			_ = b
+			op_1 := p.ExpectToken(tokenize.RPAR)
+			if op_1 == nil { return nil }
+			_ = op_1
+			return []any{op, a, b, op_1}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_genexp, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 1
-	if v := func() any {
-		invalid_comprehension := parseRule_invalid_comprehension(p)
-		if invalid_comprehension == nil { return nil }
-		_ = invalid_comprehension
-		return []any{invalid_comprehension}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_genexp, v)
-		return v
+	{
+		if v := func() any {
+			invalid_comprehension := parseRule_invalid_comprehension(p)
+			if invalid_comprehension == nil { return nil }
+			_ = invalid_comprehension
+			return []any{invalid_comprehension}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_genexp, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_genexp, nil)
 	return nil
 }
@@ -8284,36 +9767,40 @@ func parseRule_dictcomp(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		op := p.ExpectToken(tokenize.LBRACE)
-		if op == nil { return nil }
-		_ = op
-		a := parseRule_kvpair(p)
-		if a == nil { return nil }
-		_ = a
-		b := parseRule_for_if_clauses(p)
-		if b == nil { return nil }
-		_ = b
-		op_1 := p.ExpectToken(tokenize.RBRACE)
-		if op_1 == nil { return nil }
-		_ = op_1
-		return []any{op, a, b, op_1}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_dictcomp, v)
-		return v
+	{
+		if v := func() any {
+			op := p.ExpectToken(tokenize.LBRACE)
+			if op == nil { return nil }
+			_ = op
+			a := parseRule_kvpair(p)
+			if a == nil { return nil }
+			_ = a
+			b := parseRule_for_if_clauses(p)
+			if b == nil { return nil }
+			_ = b
+			op_1 := p.ExpectToken(tokenize.RBRACE)
+			if op_1 == nil { return nil }
+			_ = op_1
+			return []any{op, a, b, op_1}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_dictcomp, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 1
-	if v := func() any {
-		invalid_dict_comprehension := parseRule_invalid_dict_comprehension(p)
-		if invalid_dict_comprehension == nil { return nil }
-		_ = invalid_dict_comprehension
-		return []any{invalid_dict_comprehension}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_dictcomp, v)
-		return v
+	{
+		if v := func() any {
+			invalid_dict_comprehension := parseRule_invalid_dict_comprehension(p)
+			if invalid_dict_comprehension == nil { return nil }
+			_ = invalid_dict_comprehension
+			return []any{invalid_dict_comprehension}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_dictcomp, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_dictcomp, nil)
 	return nil
 }
@@ -8325,30 +9812,34 @@ func parseRule_arguments(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		a := parseRule_args(p)
-		if a == nil { return nil }
-		_ = a
-		opt := p.ExpectToken(tokenize.COMMA)
-		_ = opt
-		if !p.Lookahead(true, func(p *Parser) any { return p.ExpectToken(tokenize.RPAR) }) { return nil }
-		return []any{a, opt}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_arguments, v)
-		return v
+	{
+		if v := func() any {
+			a := parseRule_args(p)
+			if a == nil { return nil }
+			_ = a
+			opt := p.ExpectToken(tokenize.COMMA)
+			_ = opt
+			if !p.Lookahead(true, func(p *Parser) any { return p.ExpectToken(tokenize.RPAR) }) { return nil }
+			return []any{a, opt}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_arguments, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 1
-	if v := func() any {
-		invalid_arguments := parseRule_invalid_arguments(p)
-		if invalid_arguments == nil { return nil }
-		_ = invalid_arguments
-		return []any{invalid_arguments}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_arguments, v)
-		return v
+	{
+		if v := func() any {
+			invalid_arguments := parseRule_invalid_arguments(p)
+			if invalid_arguments == nil { return nil }
+			_ = invalid_arguments
+			return []any{invalid_arguments}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_arguments, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_arguments, nil)
 	return nil
 }
@@ -8360,29 +9851,33 @@ func parseRule_args(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		a := parseRule__gather_74(p)
-		if a == nil { return nil }
-		_ = a
-		b := parseRule__rhs_75(p)
-		_ = b
-		return []any{a, b}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_args, v)
-		return v
+	{
+		if v := func() any {
+			a := parseRule__gather_74(p)
+			if a == nil { return nil }
+			_ = a
+			b := parseRule__rhs_75(p)
+			_ = b
+			return []any{a, b}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_args, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 1
-	if v := func() any {
-		a := parseRule_kwargs(p)
-		if a == nil { return nil }
-		_ = a
-		return []any{a}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_args, v)
-		return v
+	{
+		if v := func() any {
+			a := parseRule_kwargs(p)
+			if a == nil { return nil }
+			_ = a
+			return []any{a}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_args, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_args, nil)
 	return nil
 }
@@ -8394,44 +9889,50 @@ func parseRule_kwargs(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		a := parseRule__gather_76(p)
-		if a == nil { return nil }
-		_ = a
-		op := p.ExpectToken(tokenize.COMMA)
-		if op == nil { return nil }
-		_ = op
-		b := parseRule__gather_77(p)
-		if b == nil { return nil }
-		_ = b
-		return []any{a, op, b}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_kwargs, v)
-		return v
+	{
+		if v := func() any {
+			a := parseRule__gather_76(p)
+			if a == nil { return nil }
+			_ = a
+			op := p.ExpectToken(tokenize.COMMA)
+			if op == nil { return nil }
+			_ = op
+			b := parseRule__gather_77(p)
+			if b == nil { return nil }
+			_ = b
+			return []any{a, op, b}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_kwargs, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 1
-	if v := func() any {
-		gat := parseRule__gather_76(p)
-		if gat == nil { return nil }
-		_ = gat
-		return []any{gat}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_kwargs, v)
-		return v
+	{
+		if v := func() any {
+			gat := parseRule__gather_76(p)
+			if gat == nil { return nil }
+			_ = gat
+			return []any{gat}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_kwargs, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 2
-	if v := func() any {
-		gat := parseRule__gather_77(p)
-		if gat == nil { return nil }
-		_ = gat
-		return []any{gat}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_kwargs, v)
-		return v
+	{
+		if v := func() any {
+			gat := parseRule__gather_77(p)
+			if gat == nil { return nil }
+			_ = gat
+			return []any{gat}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_kwargs, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_kwargs, nil)
 	return nil
 }
@@ -8443,41 +9944,47 @@ func parseRule_starred_expression(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		invalid_starred_expression_unpacking := parseRule_invalid_starred_expression_unpacking(p)
-		if invalid_starred_expression_unpacking == nil { return nil }
-		_ = invalid_starred_expression_unpacking
-		return []any{invalid_starred_expression_unpacking}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_starred_expression, v)
-		return v
+	{
+		if v := func() any {
+			invalid_starred_expression_unpacking := parseRule_invalid_starred_expression_unpacking(p)
+			if invalid_starred_expression_unpacking == nil { return nil }
+			_ = invalid_starred_expression_unpacking
+			return []any{invalid_starred_expression_unpacking}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_starred_expression, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 1
-	if v := func() any {
-		op := p.ExpectToken(tokenize.STAR)
-		if op == nil { return nil }
-		_ = op
-		a := parseRule_expression(p)
-		if a == nil { return nil }
-		_ = a
-		return []any{op, a}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_starred_expression, v)
-		return v
+	{
+		if v := func() any {
+			op := p.ExpectToken(tokenize.STAR)
+			if op == nil { return nil }
+			_ = op
+			a := parseRule_expression(p)
+			if a == nil { return nil }
+			_ = a
+			return []any{op, a}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_starred_expression, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 2
-	if v := func() any {
-		invalid_starred_expression := parseRule_invalid_starred_expression(p)
-		if invalid_starred_expression == nil { return nil }
-		_ = invalid_starred_expression
-		return []any{invalid_starred_expression}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_starred_expression, v)
-		return v
+	{
+		if v := func() any {
+			invalid_starred_expression := parseRule_invalid_starred_expression(p)
+			if invalid_starred_expression == nil { return nil }
+			_ = invalid_starred_expression
+			return []any{invalid_starred_expression}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_starred_expression, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_starred_expression, nil)
 	return nil
 }
@@ -8489,44 +9996,50 @@ func parseRule_kwarg_or_starred(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		invalid_kwarg := parseRule_invalid_kwarg(p)
-		if invalid_kwarg == nil { return nil }
-		_ = invalid_kwarg
-		return []any{invalid_kwarg}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_kwarg_or_starred, v)
-		return v
+	{
+		if v := func() any {
+			invalid_kwarg := parseRule_invalid_kwarg(p)
+			if invalid_kwarg == nil { return nil }
+			_ = invalid_kwarg
+			return []any{invalid_kwarg}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_kwarg_or_starred, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 1
-	if v := func() any {
-		a := p.ExpectToken(tokenize.NAME)
-		if a == nil { return nil }
-		_ = a
-		op := p.ExpectToken(tokenize.EQUAL)
-		if op == nil { return nil }
-		_ = op
-		b := parseRule_expression(p)
-		if b == nil { return nil }
-		_ = b
-		return []any{a, op, b}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_kwarg_or_starred, v)
-		return v
+	{
+		if v := func() any {
+			a := p.ExpectToken(tokenize.NAME)
+			if a == nil { return nil }
+			_ = a
+			op := p.ExpectToken(tokenize.EQUAL)
+			if op == nil { return nil }
+			_ = op
+			b := parseRule_expression(p)
+			if b == nil { return nil }
+			_ = b
+			return []any{a, op, b}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_kwarg_or_starred, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 2
-	if v := func() any {
-		a := parseRule_starred_expression(p)
-		if a == nil { return nil }
-		_ = a
-		return []any{a}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_kwarg_or_starred, v)
-		return v
+	{
+		if v := func() any {
+			a := parseRule_starred_expression(p)
+			if a == nil { return nil }
+			_ = a
+			return []any{a}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_kwarg_or_starred, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_kwarg_or_starred, nil)
 	return nil
 }
@@ -8538,47 +10051,53 @@ func parseRule_kwarg_or_double_starred(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		invalid_kwarg := parseRule_invalid_kwarg(p)
-		if invalid_kwarg == nil { return nil }
-		_ = invalid_kwarg
-		return []any{invalid_kwarg}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_kwarg_or_double_starred, v)
-		return v
+	{
+		if v := func() any {
+			invalid_kwarg := parseRule_invalid_kwarg(p)
+			if invalid_kwarg == nil { return nil }
+			_ = invalid_kwarg
+			return []any{invalid_kwarg}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_kwarg_or_double_starred, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 1
-	if v := func() any {
-		a := p.ExpectToken(tokenize.NAME)
-		if a == nil { return nil }
-		_ = a
-		op := p.ExpectToken(tokenize.EQUAL)
-		if op == nil { return nil }
-		_ = op
-		b := parseRule_expression(p)
-		if b == nil { return nil }
-		_ = b
-		return []any{a, op, b}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_kwarg_or_double_starred, v)
-		return v
+	{
+		if v := func() any {
+			a := p.ExpectToken(tokenize.NAME)
+			if a == nil { return nil }
+			_ = a
+			op := p.ExpectToken(tokenize.EQUAL)
+			if op == nil { return nil }
+			_ = op
+			b := parseRule_expression(p)
+			if b == nil { return nil }
+			_ = b
+			return []any{a, op, b}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_kwarg_or_double_starred, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 2
-	if v := func() any {
-		op := p.ExpectToken(tokenize.DOUBLESTAR)
-		if op == nil { return nil }
-		_ = op
-		a := parseRule_expression(p)
-		if a == nil { return nil }
-		_ = a
-		return []any{op, a}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_kwarg_or_double_starred, v)
-		return v
+	{
+		if v := func() any {
+			op := p.ExpectToken(tokenize.DOUBLESTAR)
+			if op == nil { return nil }
+			_ = op
+			a := parseRule_expression(p)
+			if a == nil { return nil }
+			_ = a
+			return []any{op, a}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_kwarg_or_double_starred, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_kwarg_or_double_starred, nil)
 	return nil
 }
@@ -8590,32 +10109,36 @@ func parseRule_star_targets(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		a := parseRule_star_target(p)
-		if a == nil { return nil }
-		_ = a
-		if !p.Lookahead(false, func(p *Parser) any { return p.ExpectToken(tokenize.COMMA) }) { return nil }
-		return []any{a}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_star_targets, v)
-		return v
+	{
+		if v := func() any {
+			a := parseRule_star_target(p)
+			if a == nil { return nil }
+			_ = a
+			if !p.Lookahead(false, func(p *Parser) any { return p.ExpectToken(tokenize.COMMA) }) { return nil }
+			return []any{a}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_star_targets, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 1
-	if v := func() any {
-		a := parseRule_star_target(p)
-		if a == nil { return nil }
-		_ = a
-		b := parseRule__loop0_78(p)
-		_ = b
-		opt := p.ExpectToken(tokenize.COMMA)
-		_ = opt
-		return []any{a, b, opt}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_star_targets, v)
-		return v
+	{
+		if v := func() any {
+			a := parseRule_star_target(p)
+			if a == nil { return nil }
+			_ = a
+			b := parseRule__loop0_78(p)
+			_ = b
+			opt := p.ExpectToken(tokenize.COMMA)
+			_ = opt
+			return []any{a, b, opt}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_star_targets, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_star_targets, nil)
 	return nil
 }
@@ -8627,18 +10150,20 @@ func parseRule_star_targets_list_seq(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		a := parseRule__gather_79(p)
-		if a == nil { return nil }
-		_ = a
-		opt := p.ExpectToken(tokenize.COMMA)
-		_ = opt
-		return []any{a, opt}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_star_targets_list_seq, v)
-		return v
+	{
+		if v := func() any {
+			a := parseRule__gather_79(p)
+			if a == nil { return nil }
+			_ = a
+			opt := p.ExpectToken(tokenize.COMMA)
+			_ = opt
+			return []any{a, opt}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_star_targets_list_seq, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_star_targets_list_seq, nil)
 	return nil
 }
@@ -8650,35 +10175,39 @@ func parseRule_star_targets_tuple_seq(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		a := parseRule_star_target(p)
-		if a == nil { return nil }
-		_ = a
-		b := parseRule__loop1_80(p)
-		if b == nil { return nil }
-		_ = b
-		opt := p.ExpectToken(tokenize.COMMA)
-		_ = opt
-		return []any{a, b, opt}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_star_targets_tuple_seq, v)
-		return v
+	{
+		if v := func() any {
+			a := parseRule_star_target(p)
+			if a == nil { return nil }
+			_ = a
+			b := parseRule__loop1_80(p)
+			if b == nil { return nil }
+			_ = b
+			opt := p.ExpectToken(tokenize.COMMA)
+			_ = opt
+			return []any{a, b, opt}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_star_targets_tuple_seq, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 1
-	if v := func() any {
-		a := parseRule_star_target(p)
-		if a == nil { return nil }
-		_ = a
-		op := p.ExpectToken(tokenize.COMMA)
-		if op == nil { return nil }
-		_ = op
-		return []any{a, op}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_star_targets_tuple_seq, v)
-		return v
+	{
+		if v := func() any {
+			a := parseRule_star_target(p)
+			if a == nil { return nil }
+			_ = a
+			op := p.ExpectToken(tokenize.COMMA)
+			if op == nil { return nil }
+			_ = op
+			return []any{a, op}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_star_targets_tuple_seq, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_star_targets_tuple_seq, nil)
 	return nil
 }
@@ -8690,30 +10219,34 @@ func parseRule_star_target(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		op := p.ExpectToken(tokenize.STAR)
-		if op == nil { return nil }
-		_ = op
-		a := parseRule__group_81(p)
-		if a == nil { return nil }
-		_ = a
-		return []any{op, a}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_star_target, v)
-		return v
+	{
+		if v := func() any {
+			op := p.ExpectToken(tokenize.STAR)
+			if op == nil { return nil }
+			_ = op
+			a := parseRule__group_81(p)
+			if a == nil { return nil }
+			_ = a
+			return []any{op, a}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_star_target, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 1
-	if v := func() any {
-		target_with_star_atom := parseRule_target_with_star_atom(p)
-		if target_with_star_atom == nil { return nil }
-		_ = target_with_star_atom
-		return []any{target_with_star_atom}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_star_target, v)
-		return v
+	{
+		if v := func() any {
+			target_with_star_atom := parseRule_target_with_star_atom(p)
+			if target_with_star_atom == nil { return nil }
+			_ = target_with_star_atom
+			return []any{target_with_star_atom}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_star_target, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_star_target, nil)
 	return nil
 }
@@ -8725,55 +10258,61 @@ func parseRule_target_with_star_atom(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		a := parseRule_t_primary(p)
-		if a == nil { return nil }
-		_ = a
-		op := p.ExpectToken(tokenize.DOT)
-		if op == nil { return nil }
-		_ = op
-		b := p.ExpectToken(tokenize.NAME)
-		if b == nil { return nil }
-		_ = b
-		if !p.Lookahead(false, func(p *Parser) any { return parseRule_t_lookahead(p) }) { return nil }
-		return []any{a, op, b}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_target_with_star_atom, v)
-		return v
+	{
+		if v := func() any {
+			a := parseRule_t_primary(p)
+			if a == nil { return nil }
+			_ = a
+			op := p.ExpectToken(tokenize.DOT)
+			if op == nil { return nil }
+			_ = op
+			b := p.ExpectToken(tokenize.NAME)
+			if b == nil { return nil }
+			_ = b
+			if !p.Lookahead(false, func(p *Parser) any { return parseRule_t_lookahead(p) }) { return nil }
+			return []any{a, op, b}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_target_with_star_atom, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 1
-	if v := func() any {
-		a := parseRule_t_primary(p)
-		if a == nil { return nil }
-		_ = a
-		op := p.ExpectToken(tokenize.LSQB)
-		if op == nil { return nil }
-		_ = op
-		b := parseRule_slices(p)
-		if b == nil { return nil }
-		_ = b
-		op_1 := p.ExpectToken(tokenize.RSQB)
-		if op_1 == nil { return nil }
-		_ = op_1
-		if !p.Lookahead(false, func(p *Parser) any { return parseRule_t_lookahead(p) }) { return nil }
-		return []any{a, op, b, op_1}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_target_with_star_atom, v)
-		return v
+	{
+		if v := func() any {
+			a := parseRule_t_primary(p)
+			if a == nil { return nil }
+			_ = a
+			op := p.ExpectToken(tokenize.LSQB)
+			if op == nil { return nil }
+			_ = op
+			b := parseRule_slices(p)
+			if b == nil { return nil }
+			_ = b
+			op_1 := p.ExpectToken(tokenize.RSQB)
+			if op_1 == nil { return nil }
+			_ = op_1
+			if !p.Lookahead(false, func(p *Parser) any { return parseRule_t_lookahead(p) }) { return nil }
+			return []any{a, op, b, op_1}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_target_with_star_atom, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 2
-	if v := func() any {
-		star_atom := parseRule_star_atom(p)
-		if star_atom == nil { return nil }
-		_ = star_atom
-		return []any{star_atom}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_target_with_star_atom, v)
-		return v
+	{
+		if v := func() any {
+			star_atom := parseRule_star_atom(p)
+			if star_atom == nil { return nil }
+			_ = star_atom
+			return []any{star_atom}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_target_with_star_atom, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_target_with_star_atom, nil)
 	return nil
 }
@@ -8785,65 +10324,73 @@ func parseRule_star_atom(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		a := p.ExpectToken(tokenize.NAME)
-		if a == nil { return nil }
-		_ = a
-		return []any{a}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_star_atom, v)
-		return v
+	{
+		if v := func() any {
+			a := p.ExpectToken(tokenize.NAME)
+			if a == nil { return nil }
+			_ = a
+			return []any{a}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_star_atom, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 1
-	if v := func() any {
-		op := p.ExpectToken(tokenize.LPAR)
-		if op == nil { return nil }
-		_ = op
-		a := parseRule_target_with_star_atom(p)
-		if a == nil { return nil }
-		_ = a
-		op_1 := p.ExpectToken(tokenize.RPAR)
-		if op_1 == nil { return nil }
-		_ = op_1
-		return []any{op, a, op_1}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_star_atom, v)
-		return v
+	{
+		if v := func() any {
+			op := p.ExpectToken(tokenize.LPAR)
+			if op == nil { return nil }
+			_ = op
+			a := parseRule_target_with_star_atom(p)
+			if a == nil { return nil }
+			_ = a
+			op_1 := p.ExpectToken(tokenize.RPAR)
+			if op_1 == nil { return nil }
+			_ = op_1
+			return []any{op, a, op_1}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_star_atom, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 2
-	if v := func() any {
-		op := p.ExpectToken(tokenize.LPAR)
-		if op == nil { return nil }
-		_ = op
-		a := parseRule_star_targets_tuple_seq(p)
-		_ = a
-		op_1 := p.ExpectToken(tokenize.RPAR)
-		if op_1 == nil { return nil }
-		_ = op_1
-		return []any{op, a, op_1}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_star_atom, v)
-		return v
+	{
+		if v := func() any {
+			op := p.ExpectToken(tokenize.LPAR)
+			if op == nil { return nil }
+			_ = op
+			a := parseRule_star_targets_tuple_seq(p)
+			_ = a
+			op_1 := p.ExpectToken(tokenize.RPAR)
+			if op_1 == nil { return nil }
+			_ = op_1
+			return []any{op, a, op_1}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_star_atom, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 3
-	if v := func() any {
-		op := p.ExpectToken(tokenize.LSQB)
-		if op == nil { return nil }
-		_ = op
-		a := parseRule_star_targets_list_seq(p)
-		_ = a
-		op_1 := p.ExpectToken(tokenize.RSQB)
-		if op_1 == nil { return nil }
-		_ = op_1
-		return []any{op, a, op_1}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_star_atom, v)
-		return v
+	{
+		if v := func() any {
+			op := p.ExpectToken(tokenize.LSQB)
+			if op == nil { return nil }
+			_ = op
+			a := parseRule_star_targets_list_seq(p)
+			_ = a
+			op_1 := p.ExpectToken(tokenize.RSQB)
+			if op_1 == nil { return nil }
+			_ = op_1
+			return []any{op, a, op_1}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_star_atom, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_star_atom, nil)
 	return nil
 }
@@ -8855,44 +10402,50 @@ func parseRule_single_target(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		single_subscript_attribute_target := parseRule_single_subscript_attribute_target(p)
-		if single_subscript_attribute_target == nil { return nil }
-		_ = single_subscript_attribute_target
-		return []any{single_subscript_attribute_target}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_single_target, v)
-		return v
+	{
+		if v := func() any {
+			single_subscript_attribute_target := parseRule_single_subscript_attribute_target(p)
+			if single_subscript_attribute_target == nil { return nil }
+			_ = single_subscript_attribute_target
+			return []any{single_subscript_attribute_target}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_single_target, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 1
-	if v := func() any {
-		a := p.ExpectToken(tokenize.NAME)
-		if a == nil { return nil }
-		_ = a
-		return []any{a}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_single_target, v)
-		return v
+	{
+		if v := func() any {
+			a := p.ExpectToken(tokenize.NAME)
+			if a == nil { return nil }
+			_ = a
+			return []any{a}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_single_target, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 2
-	if v := func() any {
-		op := p.ExpectToken(tokenize.LPAR)
-		if op == nil { return nil }
-		_ = op
-		a := parseRule_single_target(p)
-		if a == nil { return nil }
-		_ = a
-		op_1 := p.ExpectToken(tokenize.RPAR)
-		if op_1 == nil { return nil }
-		_ = op_1
-		return []any{op, a, op_1}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_single_target, v)
-		return v
+	{
+		if v := func() any {
+			op := p.ExpectToken(tokenize.LPAR)
+			if op == nil { return nil }
+			_ = op
+			a := parseRule_single_target(p)
+			if a == nil { return nil }
+			_ = a
+			op_1 := p.ExpectToken(tokenize.RPAR)
+			if op_1 == nil { return nil }
+			_ = op_1
+			return []any{op, a, op_1}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_single_target, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_single_target, nil)
 	return nil
 }
@@ -8904,52 +10457,169 @@ func parseRule_single_subscript_attribute_target(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		a := parseRule_t_primary(p)
-		if a == nil { return nil }
-		_ = a
-		op := p.ExpectToken(tokenize.DOT)
-		if op == nil { return nil }
-		_ = op
-		b := p.ExpectToken(tokenize.NAME)
-		if b == nil { return nil }
-		_ = b
-		if !p.Lookahead(false, func(p *Parser) any { return parseRule_t_lookahead(p) }) { return nil }
-		return []any{a, op, b}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_single_subscript_attribute_target, v)
-		return v
+	{
+		if v := func() any {
+			a := parseRule_t_primary(p)
+			if a == nil { return nil }
+			_ = a
+			op := p.ExpectToken(tokenize.DOT)
+			if op == nil { return nil }
+			_ = op
+			b := p.ExpectToken(tokenize.NAME)
+			if b == nil { return nil }
+			_ = b
+			if !p.Lookahead(false, func(p *Parser) any { return parseRule_t_lookahead(p) }) { return nil }
+			return []any{a, op, b}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_single_subscript_attribute_target, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 1
-	if v := func() any {
-		a := parseRule_t_primary(p)
-		if a == nil { return nil }
-		_ = a
-		op := p.ExpectToken(tokenize.LSQB)
-		if op == nil { return nil }
-		_ = op
-		b := parseRule_slices(p)
-		if b == nil { return nil }
-		_ = b
-		op_1 := p.ExpectToken(tokenize.RSQB)
-		if op_1 == nil { return nil }
-		_ = op_1
-		if !p.Lookahead(false, func(p *Parser) any { return parseRule_t_lookahead(p) }) { return nil }
-		return []any{a, op, b, op_1}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_single_subscript_attribute_target, v)
-		return v
+	{
+		if v := func() any {
+			a := parseRule_t_primary(p)
+			if a == nil { return nil }
+			_ = a
+			op := p.ExpectToken(tokenize.LSQB)
+			if op == nil { return nil }
+			_ = op
+			b := parseRule_slices(p)
+			if b == nil { return nil }
+			_ = b
+			op_1 := p.ExpectToken(tokenize.RSQB)
+			if op_1 == nil { return nil }
+			_ = op_1
+			if !p.Lookahead(false, func(p *Parser) any { return parseRule_t_lookahead(p) }) { return nil }
+			return []any{a, op, b, op_1}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_single_subscript_attribute_target, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_single_subscript_attribute_target, nil)
 	return nil
 }
 
-// parseRule_t_primary parses t_primary.
-// TODO(M4): left-recursive seed-and-grow body.
+// parseRule_t_primary seeds and grows t_primary as a left-recursive rule.
 func parseRule_t_primary(p *Parser) any {
-	_ = p
+	if p.ErrorIndicator() { return nil }
+	mark := p.Mark()
+	if v, ok := p.IsMemoized(Rule_t_primary); ok { return v }
+	lastMark := mark
+	var lastResult any
+	p.InsertMemo(mark, Rule_t_primary, nil)
+	for {
+		p.Reset(mark)
+		result := parseRule_t_primary_raw(p)
+		end := p.Mark()
+		if end <= lastMark { break }
+		lastResult = result
+		lastMark = end
+		p.UpdateMemo(mark, Rule_t_primary, result)
+	}
+	p.Reset(lastMark)
+	return lastResult
+}
+
+// parseRule_t_primary_raw parses t_primary.
+func parseRule_t_primary_raw(p *Parser) any {
+	if p.ErrorIndicator() { return nil }
+	mark := p.Mark()
+	_ = mark
+	// alt 0
+	{
+		if v := func() any {
+			a := parseRule_t_primary(p)
+			if a == nil { return nil }
+			_ = a
+			op := p.ExpectToken(tokenize.DOT)
+			if op == nil { return nil }
+			_ = op
+			b := p.ExpectToken(tokenize.NAME)
+			if b == nil { return nil }
+			_ = b
+			if !p.Lookahead(true, func(p *Parser) any { return parseRule_t_lookahead(p) }) { return nil }
+			return []any{a, op, b}
+		}(); v != nil {
+			return v
+		}
+		p.Reset(mark)
+	}
+	// alt 1
+	{
+		if v := func() any {
+			a := parseRule_t_primary(p)
+			if a == nil { return nil }
+			_ = a
+			op := p.ExpectToken(tokenize.LSQB)
+			if op == nil { return nil }
+			_ = op
+			b := parseRule_slices(p)
+			if b == nil { return nil }
+			_ = b
+			op_1 := p.ExpectToken(tokenize.RSQB)
+			if op_1 == nil { return nil }
+			_ = op_1
+			if !p.Lookahead(true, func(p *Parser) any { return parseRule_t_lookahead(p) }) { return nil }
+			return []any{a, op, b, op_1}
+		}(); v != nil {
+			return v
+		}
+		p.Reset(mark)
+	}
+	// alt 2
+	{
+		if v := func() any {
+			a := parseRule_t_primary(p)
+			if a == nil { return nil }
+			_ = a
+			b := parseRule_genexp(p)
+			if b == nil { return nil }
+			_ = b
+			if !p.Lookahead(true, func(p *Parser) any { return parseRule_t_lookahead(p) }) { return nil }
+			return []any{a, b}
+		}(); v != nil {
+			return v
+		}
+		p.Reset(mark)
+	}
+	// alt 3
+	{
+		if v := func() any {
+			a := parseRule_t_primary(p)
+			if a == nil { return nil }
+			_ = a
+			op := p.ExpectToken(tokenize.LPAR)
+			if op == nil { return nil }
+			_ = op
+			b := parseRule_arguments(p)
+			_ = b
+			op_1 := p.ExpectToken(tokenize.RPAR)
+			if op_1 == nil { return nil }
+			_ = op_1
+			if !p.Lookahead(true, func(p *Parser) any { return parseRule_t_lookahead(p) }) { return nil }
+			return []any{a, op, b, op_1}
+		}(); v != nil {
+			return v
+		}
+		p.Reset(mark)
+	}
+	// alt 4
+	{
+		if v := func() any {
+			a := parseRule_atom(p)
+			if a == nil { return nil }
+			_ = a
+			if !p.Lookahead(true, func(p *Parser) any { return parseRule_t_lookahead(p) }) { return nil }
+			return []any{a}
+		}(); v != nil {
+			return v
+		}
+		p.Reset(mark)
+	}
 	return nil
 }
 
@@ -8960,38 +10630,44 @@ func parseRule_t_lookahead(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		op := p.ExpectToken(tokenize.LPAR)
-		if op == nil { return nil }
-		_ = op
-		return []any{op}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_t_lookahead, v)
-		return v
+	{
+		if v := func() any {
+			op := p.ExpectToken(tokenize.LPAR)
+			if op == nil { return nil }
+			_ = op
+			return []any{op}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_t_lookahead, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 1
-	if v := func() any {
-		op := p.ExpectToken(tokenize.LSQB)
-		if op == nil { return nil }
-		_ = op
-		return []any{op}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_t_lookahead, v)
-		return v
+	{
+		if v := func() any {
+			op := p.ExpectToken(tokenize.LSQB)
+			if op == nil { return nil }
+			_ = op
+			return []any{op}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_t_lookahead, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 2
-	if v := func() any {
-		op := p.ExpectToken(tokenize.DOT)
-		if op == nil { return nil }
-		_ = op
-		return []any{op}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_t_lookahead, v)
-		return v
+	{
+		if v := func() any {
+			op := p.ExpectToken(tokenize.DOT)
+			if op == nil { return nil }
+			_ = op
+			return []any{op}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_t_lookahead, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_t_lookahead, nil)
 	return nil
 }
@@ -9003,18 +10679,20 @@ func parseRule_del_targets(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		a := parseRule__gather_82(p)
-		if a == nil { return nil }
-		_ = a
-		opt := p.ExpectToken(tokenize.COMMA)
-		_ = opt
-		return []any{a, opt}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_del_targets, v)
-		return v
+	{
+		if v := func() any {
+			a := parseRule__gather_82(p)
+			if a == nil { return nil }
+			_ = a
+			opt := p.ExpectToken(tokenize.COMMA)
+			_ = opt
+			return []any{a, opt}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_del_targets, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_del_targets, nil)
 	return nil
 }
@@ -9026,55 +10704,61 @@ func parseRule_del_target(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		a := parseRule_t_primary(p)
-		if a == nil { return nil }
-		_ = a
-		op := p.ExpectToken(tokenize.DOT)
-		if op == nil { return nil }
-		_ = op
-		b := p.ExpectToken(tokenize.NAME)
-		if b == nil { return nil }
-		_ = b
-		if !p.Lookahead(false, func(p *Parser) any { return parseRule_t_lookahead(p) }) { return nil }
-		return []any{a, op, b}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_del_target, v)
-		return v
+	{
+		if v := func() any {
+			a := parseRule_t_primary(p)
+			if a == nil { return nil }
+			_ = a
+			op := p.ExpectToken(tokenize.DOT)
+			if op == nil { return nil }
+			_ = op
+			b := p.ExpectToken(tokenize.NAME)
+			if b == nil { return nil }
+			_ = b
+			if !p.Lookahead(false, func(p *Parser) any { return parseRule_t_lookahead(p) }) { return nil }
+			return []any{a, op, b}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_del_target, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 1
-	if v := func() any {
-		a := parseRule_t_primary(p)
-		if a == nil { return nil }
-		_ = a
-		op := p.ExpectToken(tokenize.LSQB)
-		if op == nil { return nil }
-		_ = op
-		b := parseRule_slices(p)
-		if b == nil { return nil }
-		_ = b
-		op_1 := p.ExpectToken(tokenize.RSQB)
-		if op_1 == nil { return nil }
-		_ = op_1
-		if !p.Lookahead(false, func(p *Parser) any { return parseRule_t_lookahead(p) }) { return nil }
-		return []any{a, op, b, op_1}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_del_target, v)
-		return v
+	{
+		if v := func() any {
+			a := parseRule_t_primary(p)
+			if a == nil { return nil }
+			_ = a
+			op := p.ExpectToken(tokenize.LSQB)
+			if op == nil { return nil }
+			_ = op
+			b := parseRule_slices(p)
+			if b == nil { return nil }
+			_ = b
+			op_1 := p.ExpectToken(tokenize.RSQB)
+			if op_1 == nil { return nil }
+			_ = op_1
+			if !p.Lookahead(false, func(p *Parser) any { return parseRule_t_lookahead(p) }) { return nil }
+			return []any{a, op, b, op_1}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_del_target, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 2
-	if v := func() any {
-		del_t_atom := parseRule_del_t_atom(p)
-		if del_t_atom == nil { return nil }
-		_ = del_t_atom
-		return []any{del_t_atom}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_del_target, v)
-		return v
+	{
+		if v := func() any {
+			del_t_atom := parseRule_del_t_atom(p)
+			if del_t_atom == nil { return nil }
+			_ = del_t_atom
+			return []any{del_t_atom}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_del_target, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_del_target, nil)
 	return nil
 }
@@ -9086,65 +10770,73 @@ func parseRule_del_t_atom(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		a := p.ExpectToken(tokenize.NAME)
-		if a == nil { return nil }
-		_ = a
-		return []any{a}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_del_t_atom, v)
-		return v
+	{
+		if v := func() any {
+			a := p.ExpectToken(tokenize.NAME)
+			if a == nil { return nil }
+			_ = a
+			return []any{a}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_del_t_atom, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 1
-	if v := func() any {
-		op := p.ExpectToken(tokenize.LPAR)
-		if op == nil { return nil }
-		_ = op
-		a := parseRule_del_target(p)
-		if a == nil { return nil }
-		_ = a
-		op_1 := p.ExpectToken(tokenize.RPAR)
-		if op_1 == nil { return nil }
-		_ = op_1
-		return []any{op, a, op_1}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_del_t_atom, v)
-		return v
+	{
+		if v := func() any {
+			op := p.ExpectToken(tokenize.LPAR)
+			if op == nil { return nil }
+			_ = op
+			a := parseRule_del_target(p)
+			if a == nil { return nil }
+			_ = a
+			op_1 := p.ExpectToken(tokenize.RPAR)
+			if op_1 == nil { return nil }
+			_ = op_1
+			return []any{op, a, op_1}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_del_t_atom, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 2
-	if v := func() any {
-		op := p.ExpectToken(tokenize.LPAR)
-		if op == nil { return nil }
-		_ = op
-		a := parseRule_del_targets(p)
-		_ = a
-		op_1 := p.ExpectToken(tokenize.RPAR)
-		if op_1 == nil { return nil }
-		_ = op_1
-		return []any{op, a, op_1}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_del_t_atom, v)
-		return v
+	{
+		if v := func() any {
+			op := p.ExpectToken(tokenize.LPAR)
+			if op == nil { return nil }
+			_ = op
+			a := parseRule_del_targets(p)
+			_ = a
+			op_1 := p.ExpectToken(tokenize.RPAR)
+			if op_1 == nil { return nil }
+			_ = op_1
+			return []any{op, a, op_1}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_del_t_atom, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 3
-	if v := func() any {
-		op := p.ExpectToken(tokenize.LSQB)
-		if op == nil { return nil }
-		_ = op
-		a := parseRule_del_targets(p)
-		_ = a
-		op_1 := p.ExpectToken(tokenize.RSQB)
-		if op_1 == nil { return nil }
-		_ = op_1
-		return []any{op, a, op_1}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_del_t_atom, v)
-		return v
+	{
+		if v := func() any {
+			op := p.ExpectToken(tokenize.LSQB)
+			if op == nil { return nil }
+			_ = op
+			a := parseRule_del_targets(p)
+			_ = a
+			op_1 := p.ExpectToken(tokenize.RSQB)
+			if op_1 == nil { return nil }
+			_ = op_1
+			return []any{op, a, op_1}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_del_t_atom, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_del_t_atom, nil)
 	return nil
 }
@@ -9156,136 +10848,150 @@ func parseRule_type_expressions(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		a := parseRule__gather_83(p)
-		if a == nil { return nil }
-		_ = a
-		op := p.ExpectToken(tokenize.COMMA)
-		if op == nil { return nil }
-		_ = op
-		op_1 := p.ExpectToken(tokenize.STAR)
-		if op_1 == nil { return nil }
-		_ = op_1
-		b := parseRule_expression(p)
-		if b == nil { return nil }
-		_ = b
-		op_2 := p.ExpectToken(tokenize.COMMA)
-		if op_2 == nil { return nil }
-		_ = op_2
-		op_3 := p.ExpectToken(tokenize.DOUBLESTAR)
-		if op_3 == nil { return nil }
-		_ = op_3
-		c := parseRule_expression(p)
-		if c == nil { return nil }
-		_ = c
-		return []any{a, op, op_1, b, op_2, op_3, c}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_type_expressions, v)
-		return v
+	{
+		if v := func() any {
+			a := parseRule__gather_83(p)
+			if a == nil { return nil }
+			_ = a
+			op := p.ExpectToken(tokenize.COMMA)
+			if op == nil { return nil }
+			_ = op
+			op_1 := p.ExpectToken(tokenize.STAR)
+			if op_1 == nil { return nil }
+			_ = op_1
+			b := parseRule_expression(p)
+			if b == nil { return nil }
+			_ = b
+			op_2 := p.ExpectToken(tokenize.COMMA)
+			if op_2 == nil { return nil }
+			_ = op_2
+			op_3 := p.ExpectToken(tokenize.DOUBLESTAR)
+			if op_3 == nil { return nil }
+			_ = op_3
+			c := parseRule_expression(p)
+			if c == nil { return nil }
+			_ = c
+			return []any{a, op, op_1, b, op_2, op_3, c}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_type_expressions, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 1
-	if v := func() any {
-		a := parseRule__gather_83(p)
-		if a == nil { return nil }
-		_ = a
-		op := p.ExpectToken(tokenize.COMMA)
-		if op == nil { return nil }
-		_ = op
-		op_1 := p.ExpectToken(tokenize.STAR)
-		if op_1 == nil { return nil }
-		_ = op_1
-		b := parseRule_expression(p)
-		if b == nil { return nil }
-		_ = b
-		return []any{a, op, op_1, b}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_type_expressions, v)
-		return v
+	{
+		if v := func() any {
+			a := parseRule__gather_83(p)
+			if a == nil { return nil }
+			_ = a
+			op := p.ExpectToken(tokenize.COMMA)
+			if op == nil { return nil }
+			_ = op
+			op_1 := p.ExpectToken(tokenize.STAR)
+			if op_1 == nil { return nil }
+			_ = op_1
+			b := parseRule_expression(p)
+			if b == nil { return nil }
+			_ = b
+			return []any{a, op, op_1, b}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_type_expressions, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 2
-	if v := func() any {
-		a := parseRule__gather_83(p)
-		if a == nil { return nil }
-		_ = a
-		op := p.ExpectToken(tokenize.COMMA)
-		if op == nil { return nil }
-		_ = op
-		op_1 := p.ExpectToken(tokenize.DOUBLESTAR)
-		if op_1 == nil { return nil }
-		_ = op_1
-		b := parseRule_expression(p)
-		if b == nil { return nil }
-		_ = b
-		return []any{a, op, op_1, b}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_type_expressions, v)
-		return v
+	{
+		if v := func() any {
+			a := parseRule__gather_83(p)
+			if a == nil { return nil }
+			_ = a
+			op := p.ExpectToken(tokenize.COMMA)
+			if op == nil { return nil }
+			_ = op
+			op_1 := p.ExpectToken(tokenize.DOUBLESTAR)
+			if op_1 == nil { return nil }
+			_ = op_1
+			b := parseRule_expression(p)
+			if b == nil { return nil }
+			_ = b
+			return []any{a, op, op_1, b}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_type_expressions, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 3
-	if v := func() any {
-		op := p.ExpectToken(tokenize.STAR)
-		if op == nil { return nil }
-		_ = op
-		a := parseRule_expression(p)
-		if a == nil { return nil }
-		_ = a
-		op_1 := p.ExpectToken(tokenize.COMMA)
-		if op_1 == nil { return nil }
-		_ = op_1
-		op_2 := p.ExpectToken(tokenize.DOUBLESTAR)
-		if op_2 == nil { return nil }
-		_ = op_2
-		b := parseRule_expression(p)
-		if b == nil { return nil }
-		_ = b
-		return []any{op, a, op_1, op_2, b}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_type_expressions, v)
-		return v
+	{
+		if v := func() any {
+			op := p.ExpectToken(tokenize.STAR)
+			if op == nil { return nil }
+			_ = op
+			a := parseRule_expression(p)
+			if a == nil { return nil }
+			_ = a
+			op_1 := p.ExpectToken(tokenize.COMMA)
+			if op_1 == nil { return nil }
+			_ = op_1
+			op_2 := p.ExpectToken(tokenize.DOUBLESTAR)
+			if op_2 == nil { return nil }
+			_ = op_2
+			b := parseRule_expression(p)
+			if b == nil { return nil }
+			_ = b
+			return []any{op, a, op_1, op_2, b}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_type_expressions, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 4
-	if v := func() any {
-		op := p.ExpectToken(tokenize.STAR)
-		if op == nil { return nil }
-		_ = op
-		a := parseRule_expression(p)
-		if a == nil { return nil }
-		_ = a
-		return []any{op, a}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_type_expressions, v)
-		return v
+	{
+		if v := func() any {
+			op := p.ExpectToken(tokenize.STAR)
+			if op == nil { return nil }
+			_ = op
+			a := parseRule_expression(p)
+			if a == nil { return nil }
+			_ = a
+			return []any{op, a}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_type_expressions, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 5
-	if v := func() any {
-		op := p.ExpectToken(tokenize.DOUBLESTAR)
-		if op == nil { return nil }
-		_ = op
-		a := parseRule_expression(p)
-		if a == nil { return nil }
-		_ = a
-		return []any{op, a}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_type_expressions, v)
-		return v
+	{
+		if v := func() any {
+			op := p.ExpectToken(tokenize.DOUBLESTAR)
+			if op == nil { return nil }
+			_ = op
+			a := parseRule_expression(p)
+			if a == nil { return nil }
+			_ = a
+			return []any{op, a}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_type_expressions, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 6
-	if v := func() any {
-		a := parseRule__gather_83(p)
-		if a == nil { return nil }
-		_ = a
-		return []any{a}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_type_expressions, v)
-		return v
+	{
+		if v := func() any {
+			a := parseRule__gather_83(p)
+			if a == nil { return nil }
+			_ = a
+			return []any{a}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_type_expressions, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_type_expressions, nil)
 	return nil
 }
@@ -9297,42 +11003,48 @@ func parseRule_func_type_comment(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		newline := p.ExpectToken(tokenize.NEWLINE)
-		if newline == nil { return nil }
-		_ = newline
-		t := p.ExpectToken(tokenize.TYPE_COMMENT)
-		if t == nil { return nil }
-		_ = t
-		if !p.Lookahead(true, func(p *Parser) any { return parseRule__group_84(p) }) { return nil }
-		return []any{newline, t}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_func_type_comment, v)
-		return v
+	{
+		if v := func() any {
+			newline := p.ExpectToken(tokenize.NEWLINE)
+			if newline == nil { return nil }
+			_ = newline
+			t := p.ExpectToken(tokenize.TYPE_COMMENT)
+			if t == nil { return nil }
+			_ = t
+			if !p.Lookahead(true, func(p *Parser) any { return parseRule__group_84(p) }) { return nil }
+			return []any{newline, t}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_func_type_comment, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 1
-	if v := func() any {
-		invalid_double_type_comments := parseRule_invalid_double_type_comments(p)
-		if invalid_double_type_comments == nil { return nil }
-		_ = invalid_double_type_comments
-		return []any{invalid_double_type_comments}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_func_type_comment, v)
-		return v
+	{
+		if v := func() any {
+			invalid_double_type_comments := parseRule_invalid_double_type_comments(p)
+			if invalid_double_type_comments == nil { return nil }
+			_ = invalid_double_type_comments
+			return []any{invalid_double_type_comments}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_func_type_comment, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 2
-	if v := func() any {
-		type_comment := p.ExpectToken(tokenize.TYPE_COMMENT)
-		if type_comment == nil { return nil }
-		_ = type_comment
-		return []any{type_comment}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_func_type_comment, v)
-		return v
+	{
+		if v := func() any {
+			type_comment := p.ExpectToken(tokenize.TYPE_COMMENT)
+			if type_comment == nil { return nil }
+			_ = type_comment
+			return []any{type_comment}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_func_type_comment, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_func_type_comment, nil)
 	return nil
 }
@@ -9344,129 +11056,143 @@ func parseRule_invalid_arguments(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		g := parseRule__group_85(p)
-		if g == nil { return nil }
-		_ = g
-		a := p.ExpectToken(tokenize.COMMA)
-		if a == nil { return nil }
-		_ = a
-		gat := parseRule__gather_86(p)
-		if gat == nil { return nil }
-		_ = gat
-		return []any{g, a, gat}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_invalid_arguments, v)
-		return v
+	{
+		if v := func() any {
+			g := parseRule__group_85(p)
+			if g == nil { return nil }
+			_ = g
+			a := p.ExpectToken(tokenize.COMMA)
+			if a == nil { return nil }
+			_ = a
+			gat := parseRule__gather_86(p)
+			if gat == nil { return nil }
+			_ = gat
+			return []any{g, a, gat}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_invalid_arguments, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 1
-	if v := func() any {
-		a := parseRule_expression(p)
-		if a == nil { return nil }
-		_ = a
-		b := parseRule_for_if_clauses(p)
-		if b == nil { return nil }
-		_ = b
-		op := p.ExpectToken(tokenize.COMMA)
-		if op == nil { return nil }
-		_ = op
-		opt := parseRule__rhs_87(p)
-		_ = opt
-		return []any{a, b, op, opt}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_invalid_arguments, v)
-		return v
+	{
+		if v := func() any {
+			a := parseRule_expression(p)
+			if a == nil { return nil }
+			_ = a
+			b := parseRule_for_if_clauses(p)
+			if b == nil { return nil }
+			_ = b
+			op := p.ExpectToken(tokenize.COMMA)
+			if op == nil { return nil }
+			_ = op
+			opt := parseRule__rhs_87(p)
+			_ = opt
+			return []any{a, b, op, opt}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_invalid_arguments, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 2
-	if v := func() any {
-		a := p.ExpectToken(tokenize.NAME)
-		if a == nil { return nil }
-		_ = a
-		b := p.ExpectToken(tokenize.EQUAL)
-		if b == nil { return nil }
-		_ = b
-		expression := parseRule_expression(p)
-		if expression == nil { return nil }
-		_ = expression
-		for_if_clauses := parseRule_for_if_clauses(p)
-		if for_if_clauses == nil { return nil }
-		_ = for_if_clauses
-		return []any{a, b, expression, for_if_clauses}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_invalid_arguments, v)
-		return v
+	{
+		if v := func() any {
+			a := p.ExpectToken(tokenize.NAME)
+			if a == nil { return nil }
+			_ = a
+			b := p.ExpectToken(tokenize.EQUAL)
+			if b == nil { return nil }
+			_ = b
+			expression := parseRule_expression(p)
+			if expression == nil { return nil }
+			_ = expression
+			for_if_clauses := parseRule_for_if_clauses(p)
+			if for_if_clauses == nil { return nil }
+			_ = for_if_clauses
+			return []any{a, b, expression, for_if_clauses}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_invalid_arguments, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 3
-	if v := func() any {
-		opt := parseRule__group_88(p)
-		_ = opt
-		a := p.ExpectToken(tokenize.NAME)
-		if a == nil { return nil }
-		_ = a
-		b := p.ExpectToken(tokenize.EQUAL)
-		if b == nil { return nil }
-		_ = b
-		if !p.Lookahead(true, func(p *Parser) any { return parseRule__group_89(p) }) { return nil }
-		return []any{opt, a, b}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_invalid_arguments, v)
-		return v
+	{
+		if v := func() any {
+			opt := parseRule__group_88(p)
+			_ = opt
+			a := p.ExpectToken(tokenize.NAME)
+			if a == nil { return nil }
+			_ = a
+			b := p.ExpectToken(tokenize.EQUAL)
+			if b == nil { return nil }
+			_ = b
+			if !p.Lookahead(true, func(p *Parser) any { return parseRule__group_89(p) }) { return nil }
+			return []any{opt, a, b}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_invalid_arguments, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 4
-	if v := func() any {
-		a := parseRule_args(p)
-		if a == nil { return nil }
-		_ = a
-		b := parseRule_for_if_clauses(p)
-		if b == nil { return nil }
-		_ = b
-		return []any{a, b}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_invalid_arguments, v)
-		return v
+	{
+		if v := func() any {
+			a := parseRule_args(p)
+			if a == nil { return nil }
+			_ = a
+			b := parseRule_for_if_clauses(p)
+			if b == nil { return nil }
+			_ = b
+			return []any{a, b}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_invalid_arguments, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 5
-	if v := func() any {
-		args := parseRule_args(p)
-		if args == nil { return nil }
-		_ = args
-		op := p.ExpectToken(tokenize.COMMA)
-		if op == nil { return nil }
-		_ = op
-		a := parseRule_expression(p)
-		if a == nil { return nil }
-		_ = a
-		b := parseRule_for_if_clauses(p)
-		if b == nil { return nil }
-		_ = b
-		return []any{args, op, a, b}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_invalid_arguments, v)
-		return v
+	{
+		if v := func() any {
+			args := parseRule_args(p)
+			if args == nil { return nil }
+			_ = args
+			op := p.ExpectToken(tokenize.COMMA)
+			if op == nil { return nil }
+			_ = op
+			a := parseRule_expression(p)
+			if a == nil { return nil }
+			_ = a
+			b := parseRule_for_if_clauses(p)
+			if b == nil { return nil }
+			_ = b
+			return []any{args, op, a, b}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_invalid_arguments, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 6
-	if v := func() any {
-		a := parseRule_args(p)
-		if a == nil { return nil }
-		_ = a
-		op := p.ExpectToken(tokenize.COMMA)
-		if op == nil { return nil }
-		_ = op
-		args := parseRule_args(p)
-		if args == nil { return nil }
-		_ = args
-		return []any{a, op, args}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_invalid_arguments, v)
-		return v
+	{
+		if v := func() any {
+			a := parseRule_args(p)
+			if a == nil { return nil }
+			_ = a
+			op := p.ExpectToken(tokenize.COMMA)
+			if op == nil { return nil }
+			_ = op
+			args := parseRule_args(p)
+			if args == nil { return nil }
+			_ = args
+			return []any{a, op, args}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_invalid_arguments, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_invalid_arguments, nil)
 	return nil
 }
@@ -9478,74 +11204,82 @@ func parseRule_invalid_kwarg(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		a := parseRule__group_90(p)
-		if a == nil { return nil }
-		_ = a
-		b := p.ExpectToken(tokenize.EQUAL)
-		if b == nil { return nil }
-		_ = b
-		return []any{a, b}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_invalid_kwarg, v)
-		return v
+	{
+		if v := func() any {
+			a := parseRule__group_90(p)
+			if a == nil { return nil }
+			_ = a
+			b := p.ExpectToken(tokenize.EQUAL)
+			if b == nil { return nil }
+			_ = b
+			return []any{a, b}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_invalid_kwarg, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 1
-	if v := func() any {
-		a := p.ExpectToken(tokenize.NAME)
-		if a == nil { return nil }
-		_ = a
-		b := p.ExpectToken(tokenize.EQUAL)
-		if b == nil { return nil }
-		_ = b
-		expression := parseRule_expression(p)
-		if expression == nil { return nil }
-		_ = expression
-		for_if_clauses := parseRule_for_if_clauses(p)
-		if for_if_clauses == nil { return nil }
-		_ = for_if_clauses
-		return []any{a, b, expression, for_if_clauses}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_invalid_kwarg, v)
-		return v
+	{
+		if v := func() any {
+			a := p.ExpectToken(tokenize.NAME)
+			if a == nil { return nil }
+			_ = a
+			b := p.ExpectToken(tokenize.EQUAL)
+			if b == nil { return nil }
+			_ = b
+			expression := parseRule_expression(p)
+			if expression == nil { return nil }
+			_ = expression
+			for_if_clauses := parseRule_for_if_clauses(p)
+			if for_if_clauses == nil { return nil }
+			_ = for_if_clauses
+			return []any{a, b, expression, for_if_clauses}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_invalid_kwarg, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 2
-	if v := func() any {
-		if !p.Lookahead(false, func(p *Parser) any { return parseRule__group_91(p) }) { return nil }
-		a := parseRule_expression(p)
-		if a == nil { return nil }
-		_ = a
-		b := p.ExpectToken(tokenize.EQUAL)
-		if b == nil { return nil }
-		_ = b
-		return []any{a, b}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_invalid_kwarg, v)
-		return v
+	{
+		if v := func() any {
+			if !p.Lookahead(false, func(p *Parser) any { return parseRule__group_91(p) }) { return nil }
+			a := parseRule_expression(p)
+			if a == nil { return nil }
+			_ = a
+			b := p.ExpectToken(tokenize.EQUAL)
+			if b == nil { return nil }
+			_ = b
+			return []any{a, b}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_invalid_kwarg, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 3
-	if v := func() any {
-		a := p.ExpectToken(tokenize.DOUBLESTAR)
-		if a == nil { return nil }
-		_ = a
-		expression := parseRule_expression(p)
-		if expression == nil { return nil }
-		_ = expression
-		op := p.ExpectToken(tokenize.EQUAL)
-		if op == nil { return nil }
-		_ = op
-		b := parseRule_expression(p)
-		if b == nil { return nil }
-		_ = b
-		return []any{a, expression, op, b}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_invalid_kwarg, v)
-		return v
+	{
+		if v := func() any {
+			a := p.ExpectToken(tokenize.DOUBLESTAR)
+			if a == nil { return nil }
+			_ = a
+			expression := parseRule_expression(p)
+			if expression == nil { return nil }
+			_ = expression
+			op := p.ExpectToken(tokenize.EQUAL)
+			if op == nil { return nil }
+			_ = op
+			b := parseRule_expression(p)
+			if b == nil { return nil }
+			_ = b
+			return []any{a, expression, op, b}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_invalid_kwarg, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_invalid_kwarg, nil)
 	return nil
 }
@@ -9557,50 +11291,56 @@ func parseRule_expression_without_invalid(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		a := parseRule_disjunction(p)
-		if a == nil { return nil }
-		_ = a
-		kw := p.ExpectName("if")
-		if kw == nil { return nil }
-		_ = kw
-		b := parseRule_disjunction(p)
-		if b == nil { return nil }
-		_ = b
-		kw_1 := p.ExpectName("else")
-		if kw_1 == nil { return nil }
-		_ = kw_1
-		c := parseRule_expression(p)
-		if c == nil { return nil }
-		_ = c
-		return []any{a, kw, b, kw_1, c}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_expression_without_invalid, v)
-		return v
+	{
+		if v := func() any {
+			a := parseRule_disjunction(p)
+			if a == nil { return nil }
+			_ = a
+			kw := p.ExpectName("if")
+			if kw == nil { return nil }
+			_ = kw
+			b := parseRule_disjunction(p)
+			if b == nil { return nil }
+			_ = b
+			kw_1 := p.ExpectName("else")
+			if kw_1 == nil { return nil }
+			_ = kw_1
+			c := parseRule_expression(p)
+			if c == nil { return nil }
+			_ = c
+			return []any{a, kw, b, kw_1, c}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_expression_without_invalid, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 1
-	if v := func() any {
-		disjunction := parseRule_disjunction(p)
-		if disjunction == nil { return nil }
-		_ = disjunction
-		return []any{disjunction}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_expression_without_invalid, v)
-		return v
+	{
+		if v := func() any {
+			disjunction := parseRule_disjunction(p)
+			if disjunction == nil { return nil }
+			_ = disjunction
+			return []any{disjunction}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_expression_without_invalid, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 2
-	if v := func() any {
-		lambdef := parseRule_lambdef(p)
-		if lambdef == nil { return nil }
-		_ = lambdef
-		return []any{lambdef}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_expression_without_invalid, v)
-		return v
+	{
+		if v := func() any {
+			lambdef := parseRule_lambdef(p)
+			if lambdef == nil { return nil }
+			_ = lambdef
+			return []any{lambdef}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_expression_without_invalid, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_expression_without_invalid, nil)
 	return nil
 }
@@ -9612,20 +11352,22 @@ func parseRule_invalid_legacy_expression(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		a := p.ExpectToken(tokenize.NAME)
-		if a == nil { return nil }
-		_ = a
-		if !p.Lookahead(false, func(p *Parser) any { return p.ExpectToken(tokenize.LPAR) }) { return nil }
-		b := parseRule_star_expressions(p)
-		if b == nil { return nil }
-		_ = b
-		return []any{a, b}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_invalid_legacy_expression, v)
-		return v
+	{
+		if v := func() any {
+			a := p.ExpectToken(tokenize.NAME)
+			if a == nil { return nil }
+			_ = a
+			if !p.Lookahead(false, func(p *Parser) any { return p.ExpectToken(tokenize.LPAR) }) { return nil }
+			b := parseRule_star_expressions(p)
+			if b == nil { return nil }
+			_ = b
+			return []any{a, b}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_invalid_legacy_expression, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_invalid_legacy_expression, nil)
 	return nil
 }
@@ -9637,45 +11379,49 @@ func parseRule_invalid_type_param(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		op := p.ExpectToken(tokenize.STAR)
-		if op == nil { return nil }
-		_ = op
-		a := p.ExpectToken(tokenize.NAME)
-		if a == nil { return nil }
-		_ = a
-		colon := p.ExpectToken(tokenize.COLON)
-		if colon == nil { return nil }
-		_ = colon
-		e := parseRule_expression(p)
-		if e == nil { return nil }
-		_ = e
-		return []any{op, a, colon, e}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_invalid_type_param, v)
-		return v
+	{
+		if v := func() any {
+			op := p.ExpectToken(tokenize.STAR)
+			if op == nil { return nil }
+			_ = op
+			a := p.ExpectToken(tokenize.NAME)
+			if a == nil { return nil }
+			_ = a
+			colon := p.ExpectToken(tokenize.COLON)
+			if colon == nil { return nil }
+			_ = colon
+			e := parseRule_expression(p)
+			if e == nil { return nil }
+			_ = e
+			return []any{op, a, colon, e}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_invalid_type_param, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 1
-	if v := func() any {
-		op := p.ExpectToken(tokenize.DOUBLESTAR)
-		if op == nil { return nil }
-		_ = op
-		a := p.ExpectToken(tokenize.NAME)
-		if a == nil { return nil }
-		_ = a
-		colon := p.ExpectToken(tokenize.COLON)
-		if colon == nil { return nil }
-		_ = colon
-		e := parseRule_expression(p)
-		if e == nil { return nil }
-		_ = e
-		return []any{op, a, colon, e}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_invalid_type_param, v)
-		return v
+	{
+		if v := func() any {
+			op := p.ExpectToken(tokenize.DOUBLESTAR)
+			if op == nil { return nil }
+			_ = op
+			a := p.ExpectToken(tokenize.NAME)
+			if a == nil { return nil }
+			_ = a
+			colon := p.ExpectToken(tokenize.COLON)
+			if colon == nil { return nil }
+			_ = colon
+			e := parseRule_expression(p)
+			if e == nil { return nil }
+			_ = e
+			return []any{op, a, colon, e}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_invalid_type_param, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_invalid_type_param, nil)
 	return nil
 }
@@ -9687,133 +11433,147 @@ func parseRule_invalid_expression(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		string := p.ExpectToken(tokenize.STRING)
-		if string == nil { return nil }
-		_ = string
-		a := parseRule__loop1_92(p)
-		if a == nil { return nil }
-		_ = a
-		string_1 := p.ExpectToken(tokenize.STRING)
-		if string_1 == nil { return nil }
-		_ = string_1
-		return []any{string, a, string_1}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_invalid_expression, v)
-		return v
+	{
+		if v := func() any {
+			string := p.ExpectToken(tokenize.STRING)
+			if string == nil { return nil }
+			_ = string
+			a := parseRule__loop1_92(p)
+			if a == nil { return nil }
+			_ = a
+			string_1 := p.ExpectToken(tokenize.STRING)
+			if string_1 == nil { return nil }
+			_ = string_1
+			return []any{string, a, string_1}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_invalid_expression, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 1
-	if v := func() any {
-		if !p.Lookahead(false, func(p *Parser) any { return parseRule__group_93(p) }) { return nil }
-		a := parseRule_disjunction(p)
-		if a == nil { return nil }
-		_ = a
-		b := parseRule_expression_without_invalid(p)
-		if b == nil { return nil }
-		_ = b
-		return []any{a, b}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_invalid_expression, v)
-		return v
+	{
+		if v := func() any {
+			if !p.Lookahead(false, func(p *Parser) any { return parseRule__group_93(p) }) { return nil }
+			a := parseRule_disjunction(p)
+			if a == nil { return nil }
+			_ = a
+			b := parseRule_expression_without_invalid(p)
+			if b == nil { return nil }
+			_ = b
+			return []any{a, b}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_invalid_expression, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 2
-	if v := func() any {
-		a := parseRule_disjunction(p)
-		if a == nil { return nil }
-		_ = a
-		kw := p.ExpectName("if")
-		if kw == nil { return nil }
-		_ = kw
-		b := parseRule_disjunction(p)
-		if b == nil { return nil }
-		_ = b
-		if !p.Lookahead(false, func(p *Parser) any { return parseRule__group_94(p) }) { return nil }
-		return []any{a, kw, b}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_invalid_expression, v)
-		return v
+	{
+		if v := func() any {
+			a := parseRule_disjunction(p)
+			if a == nil { return nil }
+			_ = a
+			kw := p.ExpectName("if")
+			if kw == nil { return nil }
+			_ = kw
+			b := parseRule_disjunction(p)
+			if b == nil { return nil }
+			_ = b
+			if !p.Lookahead(false, func(p *Parser) any { return parseRule__group_94(p) }) { return nil }
+			return []any{a, kw, b}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_invalid_expression, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 3
-	if v := func() any {
-		a := parseRule_disjunction(p)
-		if a == nil { return nil }
-		_ = a
-		kw := p.ExpectName("if")
-		if kw == nil { return nil }
-		_ = kw
-		b := parseRule_disjunction(p)
-		if b == nil { return nil }
-		_ = b
-		kw_1 := p.ExpectName("else")
-		if kw_1 == nil { return nil }
-		_ = kw_1
-		if !p.Lookahead(false, func(p *Parser) any { return parseRule_expression(p) }) { return nil }
-		return []any{a, kw, b, kw_1}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_invalid_expression, v)
-		return v
+	{
+		if v := func() any {
+			a := parseRule_disjunction(p)
+			if a == nil { return nil }
+			_ = a
+			kw := p.ExpectName("if")
+			if kw == nil { return nil }
+			_ = kw
+			b := parseRule_disjunction(p)
+			if b == nil { return nil }
+			_ = b
+			kw_1 := p.ExpectName("else")
+			if kw_1 == nil { return nil }
+			_ = kw_1
+			if !p.Lookahead(false, func(p *Parser) any { return parseRule_expression(p) }) { return nil }
+			return []any{a, kw, b, kw_1}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_invalid_expression, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 4
-	if v := func() any {
-		a := parseRule__group_95(p)
-		if a == nil { return nil }
-		_ = a
-		kw := p.ExpectName("if")
-		if kw == nil { return nil }
-		_ = kw
-		b := parseRule_disjunction(p)
-		if b == nil { return nil }
-		_ = b
-		kw_1 := p.ExpectName("else")
-		if kw_1 == nil { return nil }
-		_ = kw_1
-		c := parseRule_simple_stmt(p)
-		if c == nil { return nil }
-		_ = c
-		return []any{a, kw, b, kw_1, c}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_invalid_expression, v)
-		return v
+	{
+		if v := func() any {
+			a := parseRule__group_95(p)
+			if a == nil { return nil }
+			_ = a
+			kw := p.ExpectName("if")
+			if kw == nil { return nil }
+			_ = kw
+			b := parseRule_disjunction(p)
+			if b == nil { return nil }
+			_ = b
+			kw_1 := p.ExpectName("else")
+			if kw_1 == nil { return nil }
+			_ = kw_1
+			c := parseRule_simple_stmt(p)
+			if c == nil { return nil }
+			_ = c
+			return []any{a, kw, b, kw_1, c}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_invalid_expression, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 5
-	if v := func() any {
-		a := p.ExpectName("lambda")
-		if a == nil { return nil }
-		_ = a
-		opt := parseRule_lambda_params(p)
-		_ = opt
-		b := p.ExpectToken(tokenize.COLON)
-		if b == nil { return nil }
-		_ = b
-		if !p.Lookahead(true, func(p *Parser) any { return p.ExpectToken(tokenize.FSTRING_MIDDLE) }) { return nil }
-		return []any{a, opt, b}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_invalid_expression, v)
-		return v
+	{
+		if v := func() any {
+			a := p.ExpectName("lambda")
+			if a == nil { return nil }
+			_ = a
+			opt := parseRule_lambda_params(p)
+			_ = opt
+			b := p.ExpectToken(tokenize.COLON)
+			if b == nil { return nil }
+			_ = b
+			if !p.Lookahead(true, func(p *Parser) any { return p.ExpectToken(tokenize.FSTRING_MIDDLE) }) { return nil }
+			return []any{a, opt, b}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_invalid_expression, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 6
-	if v := func() any {
-		a := p.ExpectName("lambda")
-		if a == nil { return nil }
-		_ = a
-		opt := parseRule_lambda_params(p)
-		_ = opt
-		b := p.ExpectToken(tokenize.COLON)
-		if b == nil { return nil }
-		_ = b
-		if !p.Lookahead(true, func(p *Parser) any { return p.ExpectToken(tokenize.TSTRING_MIDDLE) }) { return nil }
-		return []any{a, opt, b}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_invalid_expression, v)
-		return v
+	{
+		if v := func() any {
+			a := p.ExpectName("lambda")
+			if a == nil { return nil }
+			_ = a
+			opt := parseRule_lambda_params(p)
+			_ = opt
+			b := p.ExpectToken(tokenize.COLON)
+			if b == nil { return nil }
+			_ = b
+			if !p.Lookahead(true, func(p *Parser) any { return p.ExpectToken(tokenize.TSTRING_MIDDLE) }) { return nil }
+			return []any{a, opt, b}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_invalid_expression, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_invalid_expression, nil)
 	return nil
 }
@@ -9825,59 +11585,65 @@ func parseRule_invalid_named_expression(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		a := parseRule_expression(p)
-		if a == nil { return nil }
-		_ = a
-		op := p.ExpectToken(tokenize.COLONEQUAL)
-		if op == nil { return nil }
-		_ = op
-		expression := parseRule_expression(p)
-		if expression == nil { return nil }
-		_ = expression
-		return []any{a, op, expression}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_invalid_named_expression, v)
-		return v
+	{
+		if v := func() any {
+			a := parseRule_expression(p)
+			if a == nil { return nil }
+			_ = a
+			op := p.ExpectToken(tokenize.COLONEQUAL)
+			if op == nil { return nil }
+			_ = op
+			expression := parseRule_expression(p)
+			if expression == nil { return nil }
+			_ = expression
+			return []any{a, op, expression}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_invalid_named_expression, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 1
-	if v := func() any {
-		a := p.ExpectToken(tokenize.NAME)
-		if a == nil { return nil }
-		_ = a
-		op := p.ExpectToken(tokenize.EQUAL)
-		if op == nil { return nil }
-		_ = op
-		b := parseRule_bitwise_or(p)
-		if b == nil { return nil }
-		_ = b
-		if !p.Lookahead(false, func(p *Parser) any { return parseRule__group_96(p) }) { return nil }
-		return []any{a, op, b}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_invalid_named_expression, v)
-		return v
+	{
+		if v := func() any {
+			a := p.ExpectToken(tokenize.NAME)
+			if a == nil { return nil }
+			_ = a
+			op := p.ExpectToken(tokenize.EQUAL)
+			if op == nil { return nil }
+			_ = op
+			b := parseRule_bitwise_or(p)
+			if b == nil { return nil }
+			_ = b
+			if !p.Lookahead(false, func(p *Parser) any { return parseRule__group_96(p) }) { return nil }
+			return []any{a, op, b}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_invalid_named_expression, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 2
-	if v := func() any {
-		if !p.Lookahead(false, func(p *Parser) any { return parseRule__group_97(p) }) { return nil }
-		a := parseRule_bitwise_or(p)
-		if a == nil { return nil }
-		_ = a
-		b := p.ExpectToken(tokenize.EQUAL)
-		if b == nil { return nil }
-		_ = b
-		bitwise_or := parseRule_bitwise_or(p)
-		if bitwise_or == nil { return nil }
-		_ = bitwise_or
-		if !p.Lookahead(false, func(p *Parser) any { return parseRule__group_96(p) }) { return nil }
-		return []any{a, b, bitwise_or}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_invalid_named_expression, v)
-		return v
+	{
+		if v := func() any {
+			if !p.Lookahead(false, func(p *Parser) any { return parseRule__group_97(p) }) { return nil }
+			a := parseRule_bitwise_or(p)
+			if a == nil { return nil }
+			_ = a
+			b := p.ExpectToken(tokenize.EQUAL)
+			if b == nil { return nil }
+			_ = b
+			bitwise_or := parseRule_bitwise_or(p)
+			if bitwise_or == nil { return nil }
+			_ = bitwise_or
+			if !p.Lookahead(false, func(p *Parser) any { return parseRule__group_96(p) }) { return nil }
+			return []any{a, b, bitwise_or}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_invalid_named_expression, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_invalid_named_expression, nil)
 	return nil
 }
@@ -9889,110 +11655,122 @@ func parseRule_invalid_assignment(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		a := parseRule_invalid_ann_assign_target(p)
-		if a == nil { return nil }
-		_ = a
-		op := p.ExpectToken(tokenize.COLON)
-		if op == nil { return nil }
-		_ = op
-		expression := parseRule_expression(p)
-		if expression == nil { return nil }
-		_ = expression
-		return []any{a, op, expression}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_invalid_assignment, v)
-		return v
+	{
+		if v := func() any {
+			a := parseRule_invalid_ann_assign_target(p)
+			if a == nil { return nil }
+			_ = a
+			op := p.ExpectToken(tokenize.COLON)
+			if op == nil { return nil }
+			_ = op
+			expression := parseRule_expression(p)
+			if expression == nil { return nil }
+			_ = expression
+			return []any{a, op, expression}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_invalid_assignment, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 1
-	if v := func() any {
-		a := parseRule_star_named_expression(p)
-		if a == nil { return nil }
-		_ = a
-		op := p.ExpectToken(tokenize.COMMA)
-		if op == nil { return nil }
-		_ = op
-		rep := parseRule__loop0_98(p)
-		_ = rep
-		op_1 := p.ExpectToken(tokenize.COLON)
-		if op_1 == nil { return nil }
-		_ = op_1
-		expression := parseRule_expression(p)
-		if expression == nil { return nil }
-		_ = expression
-		return []any{a, op, rep, op_1, expression}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_invalid_assignment, v)
-		return v
+	{
+		if v := func() any {
+			a := parseRule_star_named_expression(p)
+			if a == nil { return nil }
+			_ = a
+			op := p.ExpectToken(tokenize.COMMA)
+			if op == nil { return nil }
+			_ = op
+			rep := parseRule__loop0_98(p)
+			_ = rep
+			op_1 := p.ExpectToken(tokenize.COLON)
+			if op_1 == nil { return nil }
+			_ = op_1
+			expression := parseRule_expression(p)
+			if expression == nil { return nil }
+			_ = expression
+			return []any{a, op, rep, op_1, expression}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_invalid_assignment, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 2
-	if v := func() any {
-		a := parseRule_expression(p)
-		if a == nil { return nil }
-		_ = a
-		op := p.ExpectToken(tokenize.COLON)
-		if op == nil { return nil }
-		_ = op
-		expression := parseRule_expression(p)
-		if expression == nil { return nil }
-		_ = expression
-		return []any{a, op, expression}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_invalid_assignment, v)
-		return v
+	{
+		if v := func() any {
+			a := parseRule_expression(p)
+			if a == nil { return nil }
+			_ = a
+			op := p.ExpectToken(tokenize.COLON)
+			if op == nil { return nil }
+			_ = op
+			expression := parseRule_expression(p)
+			if expression == nil { return nil }
+			_ = expression
+			return []any{a, op, expression}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_invalid_assignment, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 3
-	if v := func() any {
-		rep := parseRule__loop0_99(p)
-		_ = rep
-		a := parseRule_star_expressions(p)
-		if a == nil { return nil }
-		_ = a
-		op := p.ExpectToken(tokenize.EQUAL)
-		if op == nil { return nil }
-		_ = op
-		return []any{rep, a, op}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_invalid_assignment, v)
-		return v
+	{
+		if v := func() any {
+			rep := parseRule__loop0_99(p)
+			_ = rep
+			a := parseRule_star_expressions(p)
+			if a == nil { return nil }
+			_ = a
+			op := p.ExpectToken(tokenize.EQUAL)
+			if op == nil { return nil }
+			_ = op
+			return []any{rep, a, op}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_invalid_assignment, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 4
-	if v := func() any {
-		rep := parseRule__loop0_99(p)
-		_ = rep
-		a := parseRule_yield_expr(p)
-		if a == nil { return nil }
-		_ = a
-		op := p.ExpectToken(tokenize.EQUAL)
-		if op == nil { return nil }
-		_ = op
-		return []any{rep, a, op}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_invalid_assignment, v)
-		return v
+	{
+		if v := func() any {
+			rep := parseRule__loop0_99(p)
+			_ = rep
+			a := parseRule_yield_expr(p)
+			if a == nil { return nil }
+			_ = a
+			op := p.ExpectToken(tokenize.EQUAL)
+			if op == nil { return nil }
+			_ = op
+			return []any{rep, a, op}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_invalid_assignment, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 5
-	if v := func() any {
-		a := parseRule_star_expressions(p)
-		if a == nil { return nil }
-		_ = a
-		augassign := parseRule_augassign(p)
-		if augassign == nil { return nil }
-		_ = augassign
-		annotated_rhs := parseRule_annotated_rhs(p)
-		if annotated_rhs == nil { return nil }
-		_ = annotated_rhs
-		return []any{a, augassign, annotated_rhs}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_invalid_assignment, v)
-		return v
+	{
+		if v := func() any {
+			a := parseRule_star_expressions(p)
+			if a == nil { return nil }
+			_ = a
+			augassign := parseRule_augassign(p)
+			if augassign == nil { return nil }
+			_ = augassign
+			annotated_rhs := parseRule_annotated_rhs(p)
+			if annotated_rhs == nil { return nil }
+			_ = annotated_rhs
+			return []any{a, augassign, annotated_rhs}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_invalid_assignment, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_invalid_assignment, nil)
 	return nil
 }
@@ -10004,44 +11782,50 @@ func parseRule_invalid_ann_assign_target(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		list := parseRule_list(p)
-		if list == nil { return nil }
-		_ = list
-		return []any{list}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_invalid_ann_assign_target, v)
-		return v
+	{
+		if v := func() any {
+			list := parseRule_list(p)
+			if list == nil { return nil }
+			_ = list
+			return []any{list}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_invalid_ann_assign_target, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 1
-	if v := func() any {
-		tuple := parseRule_tuple(p)
-		if tuple == nil { return nil }
-		_ = tuple
-		return []any{tuple}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_invalid_ann_assign_target, v)
-		return v
+	{
+		if v := func() any {
+			tuple := parseRule_tuple(p)
+			if tuple == nil { return nil }
+			_ = tuple
+			return []any{tuple}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_invalid_ann_assign_target, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 2
-	if v := func() any {
-		op := p.ExpectToken(tokenize.LPAR)
-		if op == nil { return nil }
-		_ = op
-		a := parseRule_invalid_ann_assign_target(p)
-		if a == nil { return nil }
-		_ = a
-		op_1 := p.ExpectToken(tokenize.RPAR)
-		if op_1 == nil { return nil }
-		_ = op_1
-		return []any{op, a, op_1}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_invalid_ann_assign_target, v)
-		return v
+	{
+		if v := func() any {
+			op := p.ExpectToken(tokenize.LPAR)
+			if op == nil { return nil }
+			_ = op
+			a := parseRule_invalid_ann_assign_target(p)
+			if a == nil { return nil }
+			_ = a
+			op_1 := p.ExpectToken(tokenize.RPAR)
+			if op_1 == nil { return nil }
+			_ = op_1
+			return []any{op, a, op_1}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_invalid_ann_assign_target, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_invalid_ann_assign_target, nil)
 	return nil
 }
@@ -10053,19 +11837,21 @@ func parseRule_invalid_del_stmt(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		kw := p.ExpectName("del")
-		if kw == nil { return nil }
-		_ = kw
-		a := parseRule_star_expressions(p)
-		if a == nil { return nil }
-		_ = a
-		return []any{kw, a}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_invalid_del_stmt, v)
-		return v
+	{
+		if v := func() any {
+			kw := p.ExpectName("del")
+			if kw == nil { return nil }
+			_ = kw
+			a := parseRule_star_expressions(p)
+			if a == nil { return nil }
+			_ = a
+			return []any{kw, a}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_invalid_del_stmt, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_invalid_del_stmt, nil)
 	return nil
 }
@@ -10077,17 +11863,19 @@ func parseRule_invalid_block(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		newline := p.ExpectToken(tokenize.NEWLINE)
-		if newline == nil { return nil }
-		_ = newline
-		if !p.Lookahead(false, func(p *Parser) any { return p.ExpectToken(tokenize.INDENT) }) { return nil }
-		return []any{newline}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_invalid_block, v)
-		return v
+	{
+		if v := func() any {
+			newline := p.ExpectToken(tokenize.NEWLINE)
+			if newline == nil { return nil }
+			_ = newline
+			if !p.Lookahead(false, func(p *Parser) any { return p.ExpectToken(tokenize.INDENT) }) { return nil }
+			return []any{newline}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_invalid_block, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_invalid_block, nil)
 	return nil
 }
@@ -10099,65 +11887,71 @@ func parseRule_invalid_comprehension(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		g := parseRule__group_100(p)
-		if g == nil { return nil }
-		_ = g
-		a := parseRule_starred_expression(p)
-		if a == nil { return nil }
-		_ = a
-		for_if_clauses := parseRule_for_if_clauses(p)
-		if for_if_clauses == nil { return nil }
-		_ = for_if_clauses
-		return []any{g, a, for_if_clauses}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_invalid_comprehension, v)
-		return v
+	{
+		if v := func() any {
+			g := parseRule__group_100(p)
+			if g == nil { return nil }
+			_ = g
+			a := parseRule_starred_expression(p)
+			if a == nil { return nil }
+			_ = a
+			for_if_clauses := parseRule_for_if_clauses(p)
+			if for_if_clauses == nil { return nil }
+			_ = for_if_clauses
+			return []any{g, a, for_if_clauses}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_invalid_comprehension, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 1
-	if v := func() any {
-		g := parseRule__group_101(p)
-		if g == nil { return nil }
-		_ = g
-		a := parseRule_star_named_expression(p)
-		if a == nil { return nil }
-		_ = a
-		op := p.ExpectToken(tokenize.COMMA)
-		if op == nil { return nil }
-		_ = op
-		b := parseRule_star_named_expressions(p)
-		if b == nil { return nil }
-		_ = b
-		for_if_clauses := parseRule_for_if_clauses(p)
-		if for_if_clauses == nil { return nil }
-		_ = for_if_clauses
-		return []any{g, a, op, b, for_if_clauses}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_invalid_comprehension, v)
-		return v
+	{
+		if v := func() any {
+			g := parseRule__group_101(p)
+			if g == nil { return nil }
+			_ = g
+			a := parseRule_star_named_expression(p)
+			if a == nil { return nil }
+			_ = a
+			op := p.ExpectToken(tokenize.COMMA)
+			if op == nil { return nil }
+			_ = op
+			b := parseRule_star_named_expressions(p)
+			if b == nil { return nil }
+			_ = b
+			for_if_clauses := parseRule_for_if_clauses(p)
+			if for_if_clauses == nil { return nil }
+			_ = for_if_clauses
+			return []any{g, a, op, b, for_if_clauses}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_invalid_comprehension, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 2
-	if v := func() any {
-		g := parseRule__group_101(p)
-		if g == nil { return nil }
-		_ = g
-		a := parseRule_star_named_expression(p)
-		if a == nil { return nil }
-		_ = a
-		b := p.ExpectToken(tokenize.COMMA)
-		if b == nil { return nil }
-		_ = b
-		for_if_clauses := parseRule_for_if_clauses(p)
-		if for_if_clauses == nil { return nil }
-		_ = for_if_clauses
-		return []any{g, a, b, for_if_clauses}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_invalid_comprehension, v)
-		return v
+	{
+		if v := func() any {
+			g := parseRule__group_101(p)
+			if g == nil { return nil }
+			_ = g
+			a := parseRule_star_named_expression(p)
+			if a == nil { return nil }
+			_ = a
+			b := p.ExpectToken(tokenize.COMMA)
+			if b == nil { return nil }
+			_ = b
+			for_if_clauses := parseRule_for_if_clauses(p)
+			if for_if_clauses == nil { return nil }
+			_ = for_if_clauses
+			return []any{g, a, b, for_if_clauses}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_invalid_comprehension, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_invalid_comprehension, nil)
 	return nil
 }
@@ -10169,28 +11963,30 @@ func parseRule_invalid_dict_comprehension(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		op := p.ExpectToken(tokenize.LBRACE)
-		if op == nil { return nil }
-		_ = op
-		a := p.ExpectToken(tokenize.DOUBLESTAR)
-		if a == nil { return nil }
-		_ = a
-		bitwise_or := parseRule_bitwise_or(p)
-		if bitwise_or == nil { return nil }
-		_ = bitwise_or
-		for_if_clauses := parseRule_for_if_clauses(p)
-		if for_if_clauses == nil { return nil }
-		_ = for_if_clauses
-		op_1 := p.ExpectToken(tokenize.RBRACE)
-		if op_1 == nil { return nil }
-		_ = op_1
-		return []any{op, a, bitwise_or, for_if_clauses, op_1}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_invalid_dict_comprehension, v)
-		return v
+	{
+		if v := func() any {
+			op := p.ExpectToken(tokenize.LBRACE)
+			if op == nil { return nil }
+			_ = op
+			a := p.ExpectToken(tokenize.DOUBLESTAR)
+			if a == nil { return nil }
+			_ = a
+			bitwise_or := parseRule_bitwise_or(p)
+			if bitwise_or == nil { return nil }
+			_ = bitwise_or
+			for_if_clauses := parseRule_for_if_clauses(p)
+			if for_if_clauses == nil { return nil }
+			_ = for_if_clauses
+			op_1 := p.ExpectToken(tokenize.RBRACE)
+			if op_1 == nil { return nil }
+			_ = op_1
+			return []any{op, a, bitwise_or, for_if_clauses, op_1}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_invalid_dict_comprehension, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_invalid_dict_comprehension, nil)
 	return nil
 }
@@ -10202,114 +11998,126 @@ func parseRule_invalid_parameters(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		a := p.ExpectSoftKeyword("/")
-		if a == nil { return nil }
-		_ = a
-		op := p.ExpectToken(tokenize.COMMA)
-		if op == nil { return nil }
-		_ = op
-		return []any{a, op}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_invalid_parameters, v)
-		return v
+	{
+		if v := func() any {
+			a := p.ExpectSoftKeyword("/")
+			if a == nil { return nil }
+			_ = a
+			op := p.ExpectToken(tokenize.COMMA)
+			if op == nil { return nil }
+			_ = op
+			return []any{a, op}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_invalid_parameters, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 1
-	if v := func() any {
-		g := parseRule__group_102(p)
-		if g == nil { return nil }
-		_ = g
-		rep := parseRule__loop0_28(p)
-		_ = rep
-		a := p.ExpectToken(tokenize.SLASH)
-		if a == nil { return nil }
-		_ = a
-		return []any{g, rep, a}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_invalid_parameters, v)
-		return v
+	{
+		if v := func() any {
+			g := parseRule__group_102(p)
+			if g == nil { return nil }
+			_ = g
+			rep := parseRule__loop0_28(p)
+			_ = rep
+			a := p.ExpectToken(tokenize.SLASH)
+			if a == nil { return nil }
+			_ = a
+			return []any{g, rep, a}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_invalid_parameters, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 2
-	if v := func() any {
-		opt := parseRule_slash_no_default(p)
-		_ = opt
-		rep := parseRule__loop0_24(p)
-		_ = rep
-		invalid_parameters_helper := parseRule_invalid_parameters_helper(p)
-		if invalid_parameters_helper == nil { return nil }
-		_ = invalid_parameters_helper
-		a := parseRule_param_no_default(p)
-		if a == nil { return nil }
-		_ = a
-		return []any{opt, rep, invalid_parameters_helper, a}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_invalid_parameters, v)
-		return v
+	{
+		if v := func() any {
+			opt := parseRule_slash_no_default(p)
+			_ = opt
+			rep := parseRule__loop0_24(p)
+			_ = rep
+			invalid_parameters_helper := parseRule_invalid_parameters_helper(p)
+			if invalid_parameters_helper == nil { return nil }
+			_ = invalid_parameters_helper
+			a := parseRule_param_no_default(p)
+			if a == nil { return nil }
+			_ = a
+			return []any{opt, rep, invalid_parameters_helper, a}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_invalid_parameters, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 3
-	if v := func() any {
-		rep := parseRule__loop0_24(p)
-		_ = rep
-		a := p.ExpectToken(tokenize.LPAR)
-		if a == nil { return nil }
-		_ = a
-		rep_1 := parseRule__loop1_26(p)
-		if rep_1 == nil { return nil }
-		_ = rep_1
-		opt := p.ExpectToken(tokenize.COMMA)
-		_ = opt
-		b := p.ExpectToken(tokenize.RPAR)
-		if b == nil { return nil }
-		_ = b
-		return []any{rep, a, rep_1, opt, b}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_invalid_parameters, v)
-		return v
+	{
+		if v := func() any {
+			rep := parseRule__loop0_24(p)
+			_ = rep
+			a := p.ExpectToken(tokenize.LPAR)
+			if a == nil { return nil }
+			_ = a
+			rep_1 := parseRule__loop1_26(p)
+			if rep_1 == nil { return nil }
+			_ = rep_1
+			opt := p.ExpectToken(tokenize.COMMA)
+			_ = opt
+			b := p.ExpectToken(tokenize.RPAR)
+			if b == nil { return nil }
+			_ = b
+			return []any{rep, a, rep_1, opt, b}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_invalid_parameters, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 4
-	if v := func() any {
-		opt := parseRule__group_102(p)
-		_ = opt
-		rep := parseRule__loop0_28(p)
-		_ = rep
-		op := p.ExpectToken(tokenize.STAR)
-		if op == nil { return nil }
-		_ = op
-		g := parseRule__group_103(p)
-		if g == nil { return nil }
-		_ = g
-		rep_1 := parseRule__loop0_28(p)
-		_ = rep_1
-		a := p.ExpectToken(tokenize.SLASH)
-		if a == nil { return nil }
-		_ = a
-		return []any{opt, rep, op, g, rep_1, a}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_invalid_parameters, v)
-		return v
+	{
+		if v := func() any {
+			opt := parseRule__group_102(p)
+			_ = opt
+			rep := parseRule__loop0_28(p)
+			_ = rep
+			op := p.ExpectToken(tokenize.STAR)
+			if op == nil { return nil }
+			_ = op
+			g := parseRule__group_103(p)
+			if g == nil { return nil }
+			_ = g
+			rep_1 := parseRule__loop0_28(p)
+			_ = rep_1
+			a := p.ExpectToken(tokenize.SLASH)
+			if a == nil { return nil }
+			_ = a
+			return []any{opt, rep, op, g, rep_1, a}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_invalid_parameters, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 5
-	if v := func() any {
-		rep := parseRule__loop1_29(p)
-		if rep == nil { return nil }
-		_ = rep
-		op := p.ExpectToken(tokenize.SLASH)
-		if op == nil { return nil }
-		_ = op
-		a := p.ExpectToken(tokenize.STAR)
-		if a == nil { return nil }
-		_ = a
-		return []any{rep, op, a}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_invalid_parameters, v)
-		return v
+	{
+		if v := func() any {
+			rep := parseRule__loop1_29(p)
+			if rep == nil { return nil }
+			_ = rep
+			op := p.ExpectToken(tokenize.SLASH)
+			if op == nil { return nil }
+			_ = op
+			a := p.ExpectToken(tokenize.STAR)
+			if a == nil { return nil }
+			_ = a
+			return []any{rep, op, a}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_invalid_parameters, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_invalid_parameters, nil)
 	return nil
 }
@@ -10321,17 +12129,19 @@ func parseRule_invalid_default(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		a := p.ExpectToken(tokenize.EQUAL)
-		if a == nil { return nil }
-		_ = a
-		if !p.Lookahead(true, func(p *Parser) any { return parseRule__group_104(p) }) { return nil }
-		return []any{a}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_invalid_default, v)
-		return v
+	{
+		if v := func() any {
+			a := p.ExpectToken(tokenize.EQUAL)
+			if a == nil { return nil }
+			_ = a
+			if !p.Lookahead(true, func(p *Parser) any { return parseRule__group_104(p) }) { return nil }
+			return []any{a}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_invalid_default, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_invalid_default, nil)
 	return nil
 }
@@ -10343,75 +12153,83 @@ func parseRule_invalid_star_etc(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		a := p.ExpectToken(tokenize.STAR)
-		if a == nil { return nil }
-		_ = a
-		g := parseRule__group_105(p)
-		if g == nil { return nil }
-		_ = g
-		return []any{a, g}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_invalid_star_etc, v)
-		return v
+	{
+		if v := func() any {
+			a := p.ExpectToken(tokenize.STAR)
+			if a == nil { return nil }
+			_ = a
+			g := parseRule__group_105(p)
+			if g == nil { return nil }
+			_ = g
+			return []any{a, g}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_invalid_star_etc, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 1
-	if v := func() any {
-		op := p.ExpectToken(tokenize.STAR)
-		if op == nil { return nil }
-		_ = op
-		op_1 := p.ExpectToken(tokenize.COMMA)
-		if op_1 == nil { return nil }
-		_ = op_1
-		type_comment := p.ExpectToken(tokenize.TYPE_COMMENT)
-		if type_comment == nil { return nil }
-		_ = type_comment
-		return []any{op, op_1, type_comment}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_invalid_star_etc, v)
-		return v
+	{
+		if v := func() any {
+			op := p.ExpectToken(tokenize.STAR)
+			if op == nil { return nil }
+			_ = op
+			op_1 := p.ExpectToken(tokenize.COMMA)
+			if op_1 == nil { return nil }
+			_ = op_1
+			type_comment := p.ExpectToken(tokenize.TYPE_COMMENT)
+			if type_comment == nil { return nil }
+			_ = type_comment
+			return []any{op, op_1, type_comment}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_invalid_star_etc, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 2
-	if v := func() any {
-		op := p.ExpectToken(tokenize.STAR)
-		if op == nil { return nil }
-		_ = op
-		param := parseRule_param(p)
-		if param == nil { return nil }
-		_ = param
-		a := p.ExpectToken(tokenize.EQUAL)
-		if a == nil { return nil }
-		_ = a
-		return []any{op, param, a}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_invalid_star_etc, v)
-		return v
+	{
+		if v := func() any {
+			op := p.ExpectToken(tokenize.STAR)
+			if op == nil { return nil }
+			_ = op
+			param := parseRule_param(p)
+			if param == nil { return nil }
+			_ = param
+			a := p.ExpectToken(tokenize.EQUAL)
+			if a == nil { return nil }
+			_ = a
+			return []any{op, param, a}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_invalid_star_etc, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 3
-	if v := func() any {
-		op := p.ExpectToken(tokenize.STAR)
-		if op == nil { return nil }
-		_ = op
-		g := parseRule__group_106(p)
-		if g == nil { return nil }
-		_ = g
-		rep := parseRule__loop0_28(p)
-		_ = rep
-		a := p.ExpectToken(tokenize.STAR)
-		if a == nil { return nil }
-		_ = a
-		g_1 := parseRule__group_106(p)
-		if g_1 == nil { return nil }
-		_ = g_1
-		return []any{op, g, rep, a, g_1}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_invalid_star_etc, v)
-		return v
+	{
+		if v := func() any {
+			op := p.ExpectToken(tokenize.STAR)
+			if op == nil { return nil }
+			_ = op
+			g := parseRule__group_106(p)
+			if g == nil { return nil }
+			_ = g
+			rep := parseRule__loop0_28(p)
+			_ = rep
+			a := p.ExpectToken(tokenize.STAR)
+			if a == nil { return nil }
+			_ = a
+			g_1 := parseRule__group_106(p)
+			if g_1 == nil { return nil }
+			_ = g_1
+			return []any{op, g, rep, a, g_1}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_invalid_star_etc, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_invalid_star_etc, nil)
 	return nil
 }
@@ -10423,62 +12241,68 @@ func parseRule_invalid_kwds(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		op := p.ExpectToken(tokenize.DOUBLESTAR)
-		if op == nil { return nil }
-		_ = op
-		param := parseRule_param(p)
-		if param == nil { return nil }
-		_ = param
-		a := p.ExpectToken(tokenize.EQUAL)
-		if a == nil { return nil }
-		_ = a
-		return []any{op, param, a}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_invalid_kwds, v)
-		return v
+	{
+		if v := func() any {
+			op := p.ExpectToken(tokenize.DOUBLESTAR)
+			if op == nil { return nil }
+			_ = op
+			param := parseRule_param(p)
+			if param == nil { return nil }
+			_ = param
+			a := p.ExpectToken(tokenize.EQUAL)
+			if a == nil { return nil }
+			_ = a
+			return []any{op, param, a}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_invalid_kwds, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 1
-	if v := func() any {
-		op := p.ExpectToken(tokenize.DOUBLESTAR)
-		if op == nil { return nil }
-		_ = op
-		param := parseRule_param(p)
-		if param == nil { return nil }
-		_ = param
-		op_1 := p.ExpectToken(tokenize.COMMA)
-		if op_1 == nil { return nil }
-		_ = op_1
-		a := parseRule_param(p)
-		if a == nil { return nil }
-		_ = a
-		return []any{op, param, op_1, a}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_invalid_kwds, v)
-		return v
+	{
+		if v := func() any {
+			op := p.ExpectToken(tokenize.DOUBLESTAR)
+			if op == nil { return nil }
+			_ = op
+			param := parseRule_param(p)
+			if param == nil { return nil }
+			_ = param
+			op_1 := p.ExpectToken(tokenize.COMMA)
+			if op_1 == nil { return nil }
+			_ = op_1
+			a := parseRule_param(p)
+			if a == nil { return nil }
+			_ = a
+			return []any{op, param, op_1, a}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_invalid_kwds, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 2
-	if v := func() any {
-		op := p.ExpectToken(tokenize.DOUBLESTAR)
-		if op == nil { return nil }
-		_ = op
-		param := parseRule_param(p)
-		if param == nil { return nil }
-		_ = param
-		op_1 := p.ExpectToken(tokenize.COMMA)
-		if op_1 == nil { return nil }
-		_ = op_1
-		a := parseRule__group_107(p)
-		if a == nil { return nil }
-		_ = a
-		return []any{op, param, op_1, a}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_invalid_kwds, v)
-		return v
+	{
+		if v := func() any {
+			op := p.ExpectToken(tokenize.DOUBLESTAR)
+			if op == nil { return nil }
+			_ = op
+			param := parseRule_param(p)
+			if param == nil { return nil }
+			_ = param
+			op_1 := p.ExpectToken(tokenize.COMMA)
+			if op_1 == nil { return nil }
+			_ = op_1
+			a := parseRule__group_107(p)
+			if a == nil { return nil }
+			_ = a
+			return []any{op, param, op_1, a}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_invalid_kwds, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_invalid_kwds, nil)
 	return nil
 }
@@ -10490,27 +12314,31 @@ func parseRule_invalid_parameters_helper(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		a := parseRule_slash_with_default(p)
-		if a == nil { return nil }
-		_ = a
-		return []any{a}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_invalid_parameters_helper, v)
-		return v
+	{
+		if v := func() any {
+			a := parseRule_slash_with_default(p)
+			if a == nil { return nil }
+			_ = a
+			return []any{a}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_invalid_parameters_helper, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 1
-	if v := func() any {
-		rep := parseRule__loop1_27(p)
-		if rep == nil { return nil }
-		_ = rep
-		return []any{rep}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_invalid_parameters_helper, v)
-		return v
+	{
+		if v := func() any {
+			rep := parseRule__loop1_27(p)
+			if rep == nil { return nil }
+			_ = rep
+			return []any{rep}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_invalid_parameters_helper, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_invalid_parameters_helper, nil)
 	return nil
 }
@@ -10522,114 +12350,126 @@ func parseRule_invalid_lambda_parameters(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		a := p.ExpectSoftKeyword("/")
-		if a == nil { return nil }
-		_ = a
-		op := p.ExpectToken(tokenize.COMMA)
-		if op == nil { return nil }
-		_ = op
-		return []any{a, op}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_invalid_lambda_parameters, v)
-		return v
+	{
+		if v := func() any {
+			a := p.ExpectSoftKeyword("/")
+			if a == nil { return nil }
+			_ = a
+			op := p.ExpectToken(tokenize.COMMA)
+			if op == nil { return nil }
+			_ = op
+			return []any{a, op}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_invalid_lambda_parameters, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 1
-	if v := func() any {
-		g := parseRule__group_108(p)
-		if g == nil { return nil }
-		_ = g
-		rep := parseRule__loop0_61(p)
-		_ = rep
-		a := p.ExpectToken(tokenize.SLASH)
-		if a == nil { return nil }
-		_ = a
-		return []any{g, rep, a}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_invalid_lambda_parameters, v)
-		return v
+	{
+		if v := func() any {
+			g := parseRule__group_108(p)
+			if g == nil { return nil }
+			_ = g
+			rep := parseRule__loop0_61(p)
+			_ = rep
+			a := p.ExpectToken(tokenize.SLASH)
+			if a == nil { return nil }
+			_ = a
+			return []any{g, rep, a}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_invalid_lambda_parameters, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 2
-	if v := func() any {
-		opt := parseRule_lambda_slash_no_default(p)
-		_ = opt
-		rep := parseRule__loop0_57(p)
-		_ = rep
-		invalid_lambda_parameters_helper := parseRule_invalid_lambda_parameters_helper(p)
-		if invalid_lambda_parameters_helper == nil { return nil }
-		_ = invalid_lambda_parameters_helper
-		a := parseRule_lambda_param_no_default(p)
-		if a == nil { return nil }
-		_ = a
-		return []any{opt, rep, invalid_lambda_parameters_helper, a}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_invalid_lambda_parameters, v)
-		return v
+	{
+		if v := func() any {
+			opt := parseRule_lambda_slash_no_default(p)
+			_ = opt
+			rep := parseRule__loop0_57(p)
+			_ = rep
+			invalid_lambda_parameters_helper := parseRule_invalid_lambda_parameters_helper(p)
+			if invalid_lambda_parameters_helper == nil { return nil }
+			_ = invalid_lambda_parameters_helper
+			a := parseRule_lambda_param_no_default(p)
+			if a == nil { return nil }
+			_ = a
+			return []any{opt, rep, invalid_lambda_parameters_helper, a}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_invalid_lambda_parameters, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 3
-	if v := func() any {
-		rep := parseRule__loop0_57(p)
-		_ = rep
-		a := p.ExpectToken(tokenize.LPAR)
-		if a == nil { return nil }
-		_ = a
-		gat := parseRule__gather_109(p)
-		if gat == nil { return nil }
-		_ = gat
-		opt := p.ExpectToken(tokenize.COMMA)
-		_ = opt
-		b := p.ExpectToken(tokenize.RPAR)
-		if b == nil { return nil }
-		_ = b
-		return []any{rep, a, gat, opt, b}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_invalid_lambda_parameters, v)
-		return v
+	{
+		if v := func() any {
+			rep := parseRule__loop0_57(p)
+			_ = rep
+			a := p.ExpectToken(tokenize.LPAR)
+			if a == nil { return nil }
+			_ = a
+			gat := parseRule__gather_109(p)
+			if gat == nil { return nil }
+			_ = gat
+			opt := p.ExpectToken(tokenize.COMMA)
+			_ = opt
+			b := p.ExpectToken(tokenize.RPAR)
+			if b == nil { return nil }
+			_ = b
+			return []any{rep, a, gat, opt, b}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_invalid_lambda_parameters, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 4
-	if v := func() any {
-		opt := parseRule__group_108(p)
-		_ = opt
-		rep := parseRule__loop0_61(p)
-		_ = rep
-		op := p.ExpectToken(tokenize.STAR)
-		if op == nil { return nil }
-		_ = op
-		g := parseRule__group_110(p)
-		if g == nil { return nil }
-		_ = g
-		rep_1 := parseRule__loop0_61(p)
-		_ = rep_1
-		a := p.ExpectToken(tokenize.SLASH)
-		if a == nil { return nil }
-		_ = a
-		return []any{opt, rep, op, g, rep_1, a}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_invalid_lambda_parameters, v)
-		return v
+	{
+		if v := func() any {
+			opt := parseRule__group_108(p)
+			_ = opt
+			rep := parseRule__loop0_61(p)
+			_ = rep
+			op := p.ExpectToken(tokenize.STAR)
+			if op == nil { return nil }
+			_ = op
+			g := parseRule__group_110(p)
+			if g == nil { return nil }
+			_ = g
+			rep_1 := parseRule__loop0_61(p)
+			_ = rep_1
+			a := p.ExpectToken(tokenize.SLASH)
+			if a == nil { return nil }
+			_ = a
+			return []any{opt, rep, op, g, rep_1, a}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_invalid_lambda_parameters, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 5
-	if v := func() any {
-		rep := parseRule__loop1_62(p)
-		if rep == nil { return nil }
-		_ = rep
-		op := p.ExpectToken(tokenize.SLASH)
-		if op == nil { return nil }
-		_ = op
-		a := p.ExpectToken(tokenize.STAR)
-		if a == nil { return nil }
-		_ = a
-		return []any{rep, op, a}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_invalid_lambda_parameters, v)
-		return v
+	{
+		if v := func() any {
+			rep := parseRule__loop1_62(p)
+			if rep == nil { return nil }
+			_ = rep
+			op := p.ExpectToken(tokenize.SLASH)
+			if op == nil { return nil }
+			_ = op
+			a := p.ExpectToken(tokenize.STAR)
+			if a == nil { return nil }
+			_ = a
+			return []any{rep, op, a}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_invalid_lambda_parameters, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_invalid_lambda_parameters, nil)
 	return nil
 }
@@ -10641,27 +12481,31 @@ func parseRule_invalid_lambda_parameters_helper(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		a := parseRule_lambda_slash_with_default(p)
-		if a == nil { return nil }
-		_ = a
-		return []any{a}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_invalid_lambda_parameters_helper, v)
-		return v
+	{
+		if v := func() any {
+			a := parseRule_lambda_slash_with_default(p)
+			if a == nil { return nil }
+			_ = a
+			return []any{a}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_invalid_lambda_parameters_helper, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 1
-	if v := func() any {
-		rep := parseRule__loop1_60(p)
-		if rep == nil { return nil }
-		_ = rep
-		return []any{rep}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_invalid_lambda_parameters_helper, v)
-		return v
+	{
+		if v := func() any {
+			rep := parseRule__loop1_60(p)
+			if rep == nil { return nil }
+			_ = rep
+			return []any{rep}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_invalid_lambda_parameters_helper, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_invalid_lambda_parameters_helper, nil)
 	return nil
 }
@@ -10673,58 +12517,64 @@ func parseRule_invalid_lambda_star_etc(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		op := p.ExpectToken(tokenize.STAR)
-		if op == nil { return nil }
-		_ = op
-		g := parseRule__group_111(p)
-		if g == nil { return nil }
-		_ = g
-		return []any{op, g}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_invalid_lambda_star_etc, v)
-		return v
+	{
+		if v := func() any {
+			op := p.ExpectToken(tokenize.STAR)
+			if op == nil { return nil }
+			_ = op
+			g := parseRule__group_111(p)
+			if g == nil { return nil }
+			_ = g
+			return []any{op, g}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_invalid_lambda_star_etc, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 1
-	if v := func() any {
-		op := p.ExpectToken(tokenize.STAR)
-		if op == nil { return nil }
-		_ = op
-		lambda_param := parseRule_lambda_param(p)
-		if lambda_param == nil { return nil }
-		_ = lambda_param
-		a := p.ExpectToken(tokenize.EQUAL)
-		if a == nil { return nil }
-		_ = a
-		return []any{op, lambda_param, a}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_invalid_lambda_star_etc, v)
-		return v
+	{
+		if v := func() any {
+			op := p.ExpectToken(tokenize.STAR)
+			if op == nil { return nil }
+			_ = op
+			lambda_param := parseRule_lambda_param(p)
+			if lambda_param == nil { return nil }
+			_ = lambda_param
+			a := p.ExpectToken(tokenize.EQUAL)
+			if a == nil { return nil }
+			_ = a
+			return []any{op, lambda_param, a}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_invalid_lambda_star_etc, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 2
-	if v := func() any {
-		op := p.ExpectToken(tokenize.STAR)
-		if op == nil { return nil }
-		_ = op
-		g := parseRule__group_112(p)
-		if g == nil { return nil }
-		_ = g
-		rep := parseRule__loop0_61(p)
-		_ = rep
-		a := p.ExpectToken(tokenize.STAR)
-		if a == nil { return nil }
-		_ = a
-		g_1 := parseRule__group_112(p)
-		if g_1 == nil { return nil }
-		_ = g_1
-		return []any{op, g, rep, a, g_1}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_invalid_lambda_star_etc, v)
-		return v
+	{
+		if v := func() any {
+			op := p.ExpectToken(tokenize.STAR)
+			if op == nil { return nil }
+			_ = op
+			g := parseRule__group_112(p)
+			if g == nil { return nil }
+			_ = g
+			rep := parseRule__loop0_61(p)
+			_ = rep
+			a := p.ExpectToken(tokenize.STAR)
+			if a == nil { return nil }
+			_ = a
+			g_1 := parseRule__group_112(p)
+			if g_1 == nil { return nil }
+			_ = g_1
+			return []any{op, g, rep, a, g_1}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_invalid_lambda_star_etc, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_invalid_lambda_star_etc, nil)
 	return nil
 }
@@ -10736,62 +12586,68 @@ func parseRule_invalid_lambda_kwds(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		op := p.ExpectToken(tokenize.DOUBLESTAR)
-		if op == nil { return nil }
-		_ = op
-		lambda_param := parseRule_lambda_param(p)
-		if lambda_param == nil { return nil }
-		_ = lambda_param
-		a := p.ExpectToken(tokenize.EQUAL)
-		if a == nil { return nil }
-		_ = a
-		return []any{op, lambda_param, a}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_invalid_lambda_kwds, v)
-		return v
+	{
+		if v := func() any {
+			op := p.ExpectToken(tokenize.DOUBLESTAR)
+			if op == nil { return nil }
+			_ = op
+			lambda_param := parseRule_lambda_param(p)
+			if lambda_param == nil { return nil }
+			_ = lambda_param
+			a := p.ExpectToken(tokenize.EQUAL)
+			if a == nil { return nil }
+			_ = a
+			return []any{op, lambda_param, a}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_invalid_lambda_kwds, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 1
-	if v := func() any {
-		op := p.ExpectToken(tokenize.DOUBLESTAR)
-		if op == nil { return nil }
-		_ = op
-		lambda_param := parseRule_lambda_param(p)
-		if lambda_param == nil { return nil }
-		_ = lambda_param
-		op_1 := p.ExpectToken(tokenize.COMMA)
-		if op_1 == nil { return nil }
-		_ = op_1
-		a := parseRule_lambda_param(p)
-		if a == nil { return nil }
-		_ = a
-		return []any{op, lambda_param, op_1, a}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_invalid_lambda_kwds, v)
-		return v
+	{
+		if v := func() any {
+			op := p.ExpectToken(tokenize.DOUBLESTAR)
+			if op == nil { return nil }
+			_ = op
+			lambda_param := parseRule_lambda_param(p)
+			if lambda_param == nil { return nil }
+			_ = lambda_param
+			op_1 := p.ExpectToken(tokenize.COMMA)
+			if op_1 == nil { return nil }
+			_ = op_1
+			a := parseRule_lambda_param(p)
+			if a == nil { return nil }
+			_ = a
+			return []any{op, lambda_param, op_1, a}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_invalid_lambda_kwds, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 2
-	if v := func() any {
-		op := p.ExpectToken(tokenize.DOUBLESTAR)
-		if op == nil { return nil }
-		_ = op
-		lambda_param := parseRule_lambda_param(p)
-		if lambda_param == nil { return nil }
-		_ = lambda_param
-		op_1 := p.ExpectToken(tokenize.COMMA)
-		if op_1 == nil { return nil }
-		_ = op_1
-		a := parseRule__group_107(p)
-		if a == nil { return nil }
-		_ = a
-		return []any{op, lambda_param, op_1, a}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_invalid_lambda_kwds, v)
-		return v
+	{
+		if v := func() any {
+			op := p.ExpectToken(tokenize.DOUBLESTAR)
+			if op == nil { return nil }
+			_ = op
+			lambda_param := parseRule_lambda_param(p)
+			if lambda_param == nil { return nil }
+			_ = lambda_param
+			op_1 := p.ExpectToken(tokenize.COMMA)
+			if op_1 == nil { return nil }
+			_ = op_1
+			a := parseRule__group_107(p)
+			if a == nil { return nil }
+			_ = a
+			return []any{op, lambda_param, op_1, a}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_invalid_lambda_kwds, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_invalid_lambda_kwds, nil)
 	return nil
 }
@@ -10803,28 +12659,30 @@ func parseRule_invalid_double_type_comments(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		type_comment := p.ExpectToken(tokenize.TYPE_COMMENT)
-		if type_comment == nil { return nil }
-		_ = type_comment
-		newline := p.ExpectToken(tokenize.NEWLINE)
-		if newline == nil { return nil }
-		_ = newline
-		type_comment_1 := p.ExpectToken(tokenize.TYPE_COMMENT)
-		if type_comment_1 == nil { return nil }
-		_ = type_comment_1
-		newline_1 := p.ExpectToken(tokenize.NEWLINE)
-		if newline_1 == nil { return nil }
-		_ = newline_1
-		indent := p.ExpectToken(tokenize.INDENT)
-		if indent == nil { return nil }
-		_ = indent
-		return []any{type_comment, newline, type_comment_1, newline_1, indent}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_invalid_double_type_comments, v)
-		return v
+	{
+		if v := func() any {
+			type_comment := p.ExpectToken(tokenize.TYPE_COMMENT)
+			if type_comment == nil { return nil }
+			_ = type_comment
+			newline := p.ExpectToken(tokenize.NEWLINE)
+			if newline == nil { return nil }
+			_ = newline
+			type_comment_1 := p.ExpectToken(tokenize.TYPE_COMMENT)
+			if type_comment_1 == nil { return nil }
+			_ = type_comment_1
+			newline_1 := p.ExpectToken(tokenize.NEWLINE)
+			if newline_1 == nil { return nil }
+			_ = newline_1
+			indent := p.ExpectToken(tokenize.INDENT)
+			if indent == nil { return nil }
+			_ = indent
+			return []any{type_comment, newline, type_comment_1, newline_1, indent}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_invalid_double_type_comments, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_invalid_double_type_comments, nil)
 	return nil
 }
@@ -10836,23 +12694,25 @@ func parseRule_invalid_with_item(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		expression := parseRule_expression(p)
-		if expression == nil { return nil }
-		_ = expression
-		kw := p.ExpectName("as")
-		if kw == nil { return nil }
-		_ = kw
-		a := parseRule_expression(p)
-		if a == nil { return nil }
-		_ = a
-		if !p.Lookahead(true, func(p *Parser) any { return parseRule__group_31(p) }) { return nil }
-		return []any{expression, kw, a}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_invalid_with_item, v)
-		return v
+	{
+		if v := func() any {
+			expression := parseRule_expression(p)
+			if expression == nil { return nil }
+			_ = expression
+			kw := p.ExpectName("as")
+			if kw == nil { return nil }
+			_ = kw
+			a := parseRule_expression(p)
+			if a == nil { return nil }
+			_ = a
+			if !p.Lookahead(true, func(p *Parser) any { return parseRule__group_31(p) }) { return nil }
+			return []any{expression, kw, a}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_invalid_with_item, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_invalid_with_item, nil)
 	return nil
 }
@@ -10864,22 +12724,24 @@ func parseRule_invalid_for_if_clause(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		opt := p.ExpectName("async")
-		_ = opt
-		kw := p.ExpectName("for")
-		if kw == nil { return nil }
-		_ = kw
-		g := parseRule__group_113(p)
-		if g == nil { return nil }
-		_ = g
-		if !p.Lookahead(false, func(p *Parser) any { return p.ExpectName("in") }) { return nil }
-		return []any{opt, kw, g}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_invalid_for_if_clause, v)
-		return v
+	{
+		if v := func() any {
+			opt := p.ExpectName("async")
+			_ = opt
+			kw := p.ExpectName("for")
+			if kw == nil { return nil }
+			_ = kw
+			g := parseRule__group_113(p)
+			if g == nil { return nil }
+			_ = g
+			if !p.Lookahead(false, func(p *Parser) any { return p.ExpectName("in") }) { return nil }
+			return []any{opt, kw, g}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_invalid_for_if_clause, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_invalid_for_if_clause, nil)
 	return nil
 }
@@ -10891,21 +12753,23 @@ func parseRule_invalid_for_target(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		opt := p.ExpectName("async")
-		_ = opt
-		kw := p.ExpectName("for")
-		if kw == nil { return nil }
-		_ = kw
-		a := parseRule_star_expressions(p)
-		if a == nil { return nil }
-		_ = a
-		return []any{opt, kw, a}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_invalid_for_target, v)
-		return v
+	{
+		if v := func() any {
+			opt := p.ExpectName("async")
+			_ = opt
+			kw := p.ExpectName("for")
+			if kw == nil { return nil }
+			_ = kw
+			a := parseRule_star_expressions(p)
+			if a == nil { return nil }
+			_ = a
+			return []any{opt, kw, a}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_invalid_for_target, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_invalid_for_target, nil)
 	return nil
 }
@@ -10917,42 +12781,46 @@ func parseRule_invalid_group(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		op := p.ExpectToken(tokenize.LPAR)
-		if op == nil { return nil }
-		_ = op
-		a := parseRule_starred_expression(p)
-		if a == nil { return nil }
-		_ = a
-		op_1 := p.ExpectToken(tokenize.RPAR)
-		if op_1 == nil { return nil }
-		_ = op_1
-		return []any{op, a, op_1}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_invalid_group, v)
-		return v
+	{
+		if v := func() any {
+			op := p.ExpectToken(tokenize.LPAR)
+			if op == nil { return nil }
+			_ = op
+			a := parseRule_starred_expression(p)
+			if a == nil { return nil }
+			_ = a
+			op_1 := p.ExpectToken(tokenize.RPAR)
+			if op_1 == nil { return nil }
+			_ = op_1
+			return []any{op, a, op_1}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_invalid_group, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 1
-	if v := func() any {
-		op := p.ExpectToken(tokenize.LPAR)
-		if op == nil { return nil }
-		_ = op
-		a := p.ExpectToken(tokenize.DOUBLESTAR)
-		if a == nil { return nil }
-		_ = a
-		expression := parseRule_expression(p)
-		if expression == nil { return nil }
-		_ = expression
-		op_1 := p.ExpectToken(tokenize.RPAR)
-		if op_1 == nil { return nil }
-		_ = op_1
-		return []any{op, a, expression, op_1}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_invalid_group, v)
-		return v
+	{
+		if v := func() any {
+			op := p.ExpectToken(tokenize.LPAR)
+			if op == nil { return nil }
+			_ = op
+			a := p.ExpectToken(tokenize.DOUBLESTAR)
+			if a == nil { return nil }
+			_ = a
+			expression := parseRule_expression(p)
+			if expression == nil { return nil }
+			_ = expression
+			op_1 := p.ExpectToken(tokenize.RPAR)
+			if op_1 == nil { return nil }
+			_ = op_1
+			return []any{op, a, expression, op_1}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_invalid_group, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_invalid_group, nil)
 	return nil
 }
@@ -10964,39 +12832,43 @@ func parseRule_invalid_import(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		a := p.ExpectName("import")
-		if a == nil { return nil }
-		_ = a
-		gat := parseRule__gather_114(p)
-		if gat == nil { return nil }
-		_ = gat
-		kw := p.ExpectName("from")
-		if kw == nil { return nil }
-		_ = kw
-		dotted_name := parseRule_dotted_name(p)
-		if dotted_name == nil { return nil }
-		_ = dotted_name
-		return []any{a, gat, kw, dotted_name}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_invalid_import, v)
-		return v
+	{
+		if v := func() any {
+			a := p.ExpectName("import")
+			if a == nil { return nil }
+			_ = a
+			gat := parseRule__gather_114(p)
+			if gat == nil { return nil }
+			_ = gat
+			kw := p.ExpectName("from")
+			if kw == nil { return nil }
+			_ = kw
+			dotted_name := parseRule_dotted_name(p)
+			if dotted_name == nil { return nil }
+			_ = dotted_name
+			return []any{a, gat, kw, dotted_name}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_invalid_import, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 1
-	if v := func() any {
-		kw := p.ExpectName("import")
-		if kw == nil { return nil }
-		_ = kw
-		token := p.ExpectToken(tokenize.NEWLINE)
-		if token == nil { return nil }
-		_ = token
-		return []any{kw, token}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_invalid_import, v)
-		return v
+	{
+		if v := func() any {
+			kw := p.ExpectName("import")
+			if kw == nil { return nil }
+			_ = kw
+			token := p.ExpectToken(tokenize.NEWLINE)
+			if token == nil { return nil }
+			_ = token
+			return []any{kw, token}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_invalid_import, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_invalid_import, nil)
 	return nil
 }
@@ -11008,23 +12880,25 @@ func parseRule_invalid_dotted_as_name(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		dotted_name := parseRule_dotted_name(p)
-		if dotted_name == nil { return nil }
-		_ = dotted_name
-		kw := p.ExpectName("as")
-		if kw == nil { return nil }
-		_ = kw
-		if !p.Lookahead(false, func(p *Parser) any { return parseRule__group_115(p) }) { return nil }
-		a := parseRule_expression(p)
-		if a == nil { return nil }
-		_ = a
-		return []any{dotted_name, kw, a}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_invalid_dotted_as_name, v)
-		return v
+	{
+		if v := func() any {
+			dotted_name := parseRule_dotted_name(p)
+			if dotted_name == nil { return nil }
+			_ = dotted_name
+			kw := p.ExpectName("as")
+			if kw == nil { return nil }
+			_ = kw
+			if !p.Lookahead(false, func(p *Parser) any { return parseRule__group_115(p) }) { return nil }
+			a := parseRule_expression(p)
+			if a == nil { return nil }
+			_ = a
+			return []any{dotted_name, kw, a}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_invalid_dotted_as_name, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_invalid_dotted_as_name, nil)
 	return nil
 }
@@ -11036,23 +12910,25 @@ func parseRule_invalid_import_from_as_name(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		name := p.ExpectToken(tokenize.NAME)
-		if name == nil { return nil }
-		_ = name
-		kw := p.ExpectName("as")
-		if kw == nil { return nil }
-		_ = kw
-		if !p.Lookahead(false, func(p *Parser) any { return parseRule__group_115(p) }) { return nil }
-		a := parseRule_expression(p)
-		if a == nil { return nil }
-		_ = a
-		return []any{name, kw, a}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_invalid_import_from_as_name, v)
-		return v
+	{
+		if v := func() any {
+			name := p.ExpectToken(tokenize.NAME)
+			if name == nil { return nil }
+			_ = name
+			kw := p.ExpectName("as")
+			if kw == nil { return nil }
+			_ = kw
+			if !p.Lookahead(false, func(p *Parser) any { return parseRule__group_115(p) }) { return nil }
+			a := parseRule_expression(p)
+			if a == nil { return nil }
+			_ = a
+			return []any{name, kw, a}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_invalid_import_from_as_name, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_invalid_import_from_as_name, nil)
 	return nil
 }
@@ -11064,33 +12940,37 @@ func parseRule_invalid_import_from_targets(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		import_from_as_names := parseRule_import_from_as_names(p)
-		if import_from_as_names == nil { return nil }
-		_ = import_from_as_names
-		op := p.ExpectToken(tokenize.COMMA)
-		if op == nil { return nil }
-		_ = op
-		newline := p.ExpectToken(tokenize.NEWLINE)
-		if newline == nil { return nil }
-		_ = newline
-		return []any{import_from_as_names, op, newline}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_invalid_import_from_targets, v)
-		return v
+	{
+		if v := func() any {
+			import_from_as_names := parseRule_import_from_as_names(p)
+			if import_from_as_names == nil { return nil }
+			_ = import_from_as_names
+			op := p.ExpectToken(tokenize.COMMA)
+			if op == nil { return nil }
+			_ = op
+			newline := p.ExpectToken(tokenize.NEWLINE)
+			if newline == nil { return nil }
+			_ = newline
+			return []any{import_from_as_names, op, newline}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_invalid_import_from_targets, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 1
-	if v := func() any {
-		token := p.ExpectToken(tokenize.NEWLINE)
-		if token == nil { return nil }
-		_ = token
-		return []any{token}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_invalid_import_from_targets, v)
-		return v
+	{
+		if v := func() any {
+			token := p.ExpectToken(tokenize.NEWLINE)
+			if token == nil { return nil }
+			_ = token
+			return []any{token}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_invalid_import_from_targets, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_invalid_import_from_targets, nil)
 	return nil
 }
@@ -11102,51 +12982,55 @@ func parseRule_invalid_with_stmt(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		opt := p.ExpectName("async")
-		_ = opt
-		kw := p.ExpectName("with")
-		if kw == nil { return nil }
-		_ = kw
-		gat := parseRule__gather_116(p)
-		if gat == nil { return nil }
-		_ = gat
-		newline := p.ExpectToken(tokenize.NEWLINE)
-		if newline == nil { return nil }
-		_ = newline
-		return []any{opt, kw, gat, newline}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_invalid_with_stmt, v)
-		return v
+	{
+		if v := func() any {
+			opt := p.ExpectName("async")
+			_ = opt
+			kw := p.ExpectName("with")
+			if kw == nil { return nil }
+			_ = kw
+			gat := parseRule__gather_116(p)
+			if gat == nil { return nil }
+			_ = gat
+			newline := p.ExpectToken(tokenize.NEWLINE)
+			if newline == nil { return nil }
+			_ = newline
+			return []any{opt, kw, gat, newline}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_invalid_with_stmt, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 1
-	if v := func() any {
-		opt := p.ExpectName("async")
-		_ = opt
-		kw := p.ExpectName("with")
-		if kw == nil { return nil }
-		_ = kw
-		op := p.ExpectToken(tokenize.LPAR)
-		if op == nil { return nil }
-		_ = op
-		gat := parseRule__gather_117(p)
-		if gat == nil { return nil }
-		_ = gat
-		opt_1 := p.ExpectToken(tokenize.COMMA)
-		_ = opt_1
-		op_1 := p.ExpectToken(tokenize.RPAR)
-		if op_1 == nil { return nil }
-		_ = op_1
-		newline := p.ExpectToken(tokenize.NEWLINE)
-		if newline == nil { return nil }
-		_ = newline
-		return []any{opt, kw, op, gat, opt_1, op_1, newline}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_invalid_with_stmt, v)
-		return v
+	{
+		if v := func() any {
+			opt := p.ExpectName("async")
+			_ = opt
+			kw := p.ExpectName("with")
+			if kw == nil { return nil }
+			_ = kw
+			op := p.ExpectToken(tokenize.LPAR)
+			if op == nil { return nil }
+			_ = op
+			gat := parseRule__gather_117(p)
+			if gat == nil { return nil }
+			_ = gat
+			opt_1 := p.ExpectToken(tokenize.COMMA)
+			_ = opt_1
+			op_1 := p.ExpectToken(tokenize.RPAR)
+			if op_1 == nil { return nil }
+			_ = op_1
+			newline := p.ExpectToken(tokenize.NEWLINE)
+			if newline == nil { return nil }
+			_ = newline
+			return []any{opt, kw, op, gat, opt_1, op_1, newline}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_invalid_with_stmt, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_invalid_with_stmt, nil)
 	return nil
 }
@@ -11158,59 +13042,63 @@ func parseRule_invalid_with_stmt_indent(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		opt := p.ExpectName("async")
-		_ = opt
-		a := p.ExpectName("with")
-		if a == nil { return nil }
-		_ = a
-		gat := parseRule__gather_116(p)
-		if gat == nil { return nil }
-		_ = gat
-		op := p.ExpectToken(tokenize.COLON)
-		if op == nil { return nil }
-		_ = op
-		newline := p.ExpectToken(tokenize.NEWLINE)
-		if newline == nil { return nil }
-		_ = newline
-		if !p.Lookahead(false, func(p *Parser) any { return p.ExpectToken(tokenize.INDENT) }) { return nil }
-		return []any{opt, a, gat, op, newline}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_invalid_with_stmt_indent, v)
-		return v
+	{
+		if v := func() any {
+			opt := p.ExpectName("async")
+			_ = opt
+			a := p.ExpectName("with")
+			if a == nil { return nil }
+			_ = a
+			gat := parseRule__gather_116(p)
+			if gat == nil { return nil }
+			_ = gat
+			op := p.ExpectToken(tokenize.COLON)
+			if op == nil { return nil }
+			_ = op
+			newline := p.ExpectToken(tokenize.NEWLINE)
+			if newline == nil { return nil }
+			_ = newline
+			if !p.Lookahead(false, func(p *Parser) any { return p.ExpectToken(tokenize.INDENT) }) { return nil }
+			return []any{opt, a, gat, op, newline}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_invalid_with_stmt_indent, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 1
-	if v := func() any {
-		opt := p.ExpectName("async")
-		_ = opt
-		a := p.ExpectName("with")
-		if a == nil { return nil }
-		_ = a
-		op := p.ExpectToken(tokenize.LPAR)
-		if op == nil { return nil }
-		_ = op
-		gat := parseRule__gather_117(p)
-		if gat == nil { return nil }
-		_ = gat
-		opt_1 := p.ExpectToken(tokenize.COMMA)
-		_ = opt_1
-		op_1 := p.ExpectToken(tokenize.RPAR)
-		if op_1 == nil { return nil }
-		_ = op_1
-		op_2 := p.ExpectToken(tokenize.COLON)
-		if op_2 == nil { return nil }
-		_ = op_2
-		newline := p.ExpectToken(tokenize.NEWLINE)
-		if newline == nil { return nil }
-		_ = newline
-		if !p.Lookahead(false, func(p *Parser) any { return p.ExpectToken(tokenize.INDENT) }) { return nil }
-		return []any{opt, a, op, gat, opt_1, op_1, op_2, newline}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_invalid_with_stmt_indent, v)
-		return v
+	{
+		if v := func() any {
+			opt := p.ExpectName("async")
+			_ = opt
+			a := p.ExpectName("with")
+			if a == nil { return nil }
+			_ = a
+			op := p.ExpectToken(tokenize.LPAR)
+			if op == nil { return nil }
+			_ = op
+			gat := parseRule__gather_117(p)
+			if gat == nil { return nil }
+			_ = gat
+			opt_1 := p.ExpectToken(tokenize.COMMA)
+			_ = opt_1
+			op_1 := p.ExpectToken(tokenize.RPAR)
+			if op_1 == nil { return nil }
+			_ = op_1
+			op_2 := p.ExpectToken(tokenize.COLON)
+			if op_2 == nil { return nil }
+			_ = op_2
+			newline := p.ExpectToken(tokenize.NEWLINE)
+			if newline == nil { return nil }
+			_ = newline
+			if !p.Lookahead(false, func(p *Parser) any { return p.ExpectToken(tokenize.INDENT) }) { return nil }
+			return []any{opt, a, op, gat, opt_1, op_1, op_2, newline}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_invalid_with_stmt_indent, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_invalid_with_stmt_indent, nil)
 	return nil
 }
@@ -11222,101 +13110,109 @@ func parseRule_invalid_try_stmt(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		a := p.ExpectName("try")
-		if a == nil { return nil }
-		_ = a
-		op := p.ExpectToken(tokenize.COLON)
-		if op == nil { return nil }
-		_ = op
-		newline := p.ExpectToken(tokenize.NEWLINE)
-		if newline == nil { return nil }
-		_ = newline
-		if !p.Lookahead(false, func(p *Parser) any { return p.ExpectToken(tokenize.INDENT) }) { return nil }
-		return []any{a, op, newline}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_invalid_try_stmt, v)
-		return v
+	{
+		if v := func() any {
+			a := p.ExpectName("try")
+			if a == nil { return nil }
+			_ = a
+			op := p.ExpectToken(tokenize.COLON)
+			if op == nil { return nil }
+			_ = op
+			newline := p.ExpectToken(tokenize.NEWLINE)
+			if newline == nil { return nil }
+			_ = newline
+			if !p.Lookahead(false, func(p *Parser) any { return p.ExpectToken(tokenize.INDENT) }) { return nil }
+			return []any{a, op, newline}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_invalid_try_stmt, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 1
-	if v := func() any {
-		kw := p.ExpectName("try")
-		if kw == nil { return nil }
-		_ = kw
-		op := p.ExpectToken(tokenize.COLON)
-		if op == nil { return nil }
-		_ = op
-		block := parseRule_block(p)
-		if block == nil { return nil }
-		_ = block
-		if !p.Lookahead(false, func(p *Parser) any { return parseRule__group_118(p) }) { return nil }
-		return []any{kw, op, block}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_invalid_try_stmt, v)
-		return v
+	{
+		if v := func() any {
+			kw := p.ExpectName("try")
+			if kw == nil { return nil }
+			_ = kw
+			op := p.ExpectToken(tokenize.COLON)
+			if op == nil { return nil }
+			_ = op
+			block := parseRule_block(p)
+			if block == nil { return nil }
+			_ = block
+			if !p.Lookahead(false, func(p *Parser) any { return parseRule__group_118(p) }) { return nil }
+			return []any{kw, op, block}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_invalid_try_stmt, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 2
-	if v := func() any {
-		kw := p.ExpectName("try")
-		if kw == nil { return nil }
-		_ = kw
-		op := p.ExpectToken(tokenize.COLON)
-		if op == nil { return nil }
-		_ = op
-		rep := parseRule__loop0_119(p)
-		_ = rep
-		rep_1 := parseRule__loop1_32(p)
-		if rep_1 == nil { return nil }
-		_ = rep_1
-		a := p.ExpectName("except")
-		if a == nil { return nil }
-		_ = a
-		b := p.ExpectToken(tokenize.STAR)
-		if b == nil { return nil }
-		_ = b
-		expression := parseRule_expression(p)
-		if expression == nil { return nil }
-		_ = expression
-		opt := parseRule__rhs_120(p)
-		_ = opt
-		op_1 := p.ExpectToken(tokenize.COLON)
-		if op_1 == nil { return nil }
-		_ = op_1
-		return []any{kw, op, rep, rep_1, a, b, expression, opt, op_1}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_invalid_try_stmt, v)
-		return v
+	{
+		if v := func() any {
+			kw := p.ExpectName("try")
+			if kw == nil { return nil }
+			_ = kw
+			op := p.ExpectToken(tokenize.COLON)
+			if op == nil { return nil }
+			_ = op
+			rep := parseRule__loop0_119(p)
+			_ = rep
+			rep_1 := parseRule__loop1_32(p)
+			if rep_1 == nil { return nil }
+			_ = rep_1
+			a := p.ExpectName("except")
+			if a == nil { return nil }
+			_ = a
+			b := p.ExpectToken(tokenize.STAR)
+			if b == nil { return nil }
+			_ = b
+			expression := parseRule_expression(p)
+			if expression == nil { return nil }
+			_ = expression
+			opt := parseRule__rhs_120(p)
+			_ = opt
+			op_1 := p.ExpectToken(tokenize.COLON)
+			if op_1 == nil { return nil }
+			_ = op_1
+			return []any{kw, op, rep, rep_1, a, b, expression, opt, op_1}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_invalid_try_stmt, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 3
-	if v := func() any {
-		kw := p.ExpectName("try")
-		if kw == nil { return nil }
-		_ = kw
-		op := p.ExpectToken(tokenize.COLON)
-		if op == nil { return nil }
-		_ = op
-		rep := parseRule__loop0_119(p)
-		_ = rep
-		rep_1 := parseRule__loop1_33(p)
-		if rep_1 == nil { return nil }
-		_ = rep_1
-		a := p.ExpectName("except")
-		if a == nil { return nil }
-		_ = a
-		opt := parseRule__rhs_121(p)
-		_ = opt
-		op_1 := p.ExpectToken(tokenize.COLON)
-		if op_1 == nil { return nil }
-		_ = op_1
-		return []any{kw, op, rep, rep_1, a, opt, op_1}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_invalid_try_stmt, v)
-		return v
+	{
+		if v := func() any {
+			kw := p.ExpectName("try")
+			if kw == nil { return nil }
+			_ = kw
+			op := p.ExpectToken(tokenize.COLON)
+			if op == nil { return nil }
+			_ = op
+			rep := parseRule__loop0_119(p)
+			_ = rep
+			rep_1 := parseRule__loop1_33(p)
+			if rep_1 == nil { return nil }
+			_ = rep_1
+			a := p.ExpectName("except")
+			if a == nil { return nil }
+			_ = a
+			opt := parseRule__rhs_121(p)
+			_ = opt
+			op_1 := p.ExpectToken(tokenize.COLON)
+			if op_1 == nil { return nil }
+			_ = op_1
+			return []any{kw, op, rep, rep_1, a, opt, op_1}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_invalid_try_stmt, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_invalid_try_stmt, nil)
 	return nil
 }
@@ -11328,93 +13224,101 @@ func parseRule_invalid_except_stmt(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		kw := p.ExpectName("except")
-		if kw == nil { return nil }
-		_ = kw
-		a := parseRule_expression(p)
-		if a == nil { return nil }
-		_ = a
-		op := p.ExpectToken(tokenize.COMMA)
-		if op == nil { return nil }
-		_ = op
-		expressions := parseRule_expressions(p)
-		if expressions == nil { return nil }
-		_ = expressions
-		kw_1 := p.ExpectName("as")
-		if kw_1 == nil { return nil }
-		_ = kw_1
-		name := p.ExpectToken(tokenize.NAME)
-		if name == nil { return nil }
-		_ = name
-		op_1 := p.ExpectToken(tokenize.COLON)
-		if op_1 == nil { return nil }
-		_ = op_1
-		return []any{kw, a, op, expressions, kw_1, name, op_1}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_invalid_except_stmt, v)
-		return v
+	{
+		if v := func() any {
+			kw := p.ExpectName("except")
+			if kw == nil { return nil }
+			_ = kw
+			a := parseRule_expression(p)
+			if a == nil { return nil }
+			_ = a
+			op := p.ExpectToken(tokenize.COMMA)
+			if op == nil { return nil }
+			_ = op
+			expressions := parseRule_expressions(p)
+			if expressions == nil { return nil }
+			_ = expressions
+			kw_1 := p.ExpectName("as")
+			if kw_1 == nil { return nil }
+			_ = kw_1
+			name := p.ExpectToken(tokenize.NAME)
+			if name == nil { return nil }
+			_ = name
+			op_1 := p.ExpectToken(tokenize.COLON)
+			if op_1 == nil { return nil }
+			_ = op_1
+			return []any{kw, a, op, expressions, kw_1, name, op_1}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_invalid_except_stmt, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 1
-	if v := func() any {
-		a := p.ExpectName("except")
-		if a == nil { return nil }
-		_ = a
-		expression := parseRule_expression(p)
-		if expression == nil { return nil }
-		_ = expression
-		opt := parseRule__rhs_120(p)
-		_ = opt
-		newline := p.ExpectToken(tokenize.NEWLINE)
-		if newline == nil { return nil }
-		_ = newline
-		return []any{a, expression, opt, newline}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_invalid_except_stmt, v)
-		return v
+	{
+		if v := func() any {
+			a := p.ExpectName("except")
+			if a == nil { return nil }
+			_ = a
+			expression := parseRule_expression(p)
+			if expression == nil { return nil }
+			_ = expression
+			opt := parseRule__rhs_120(p)
+			_ = opt
+			newline := p.ExpectToken(tokenize.NEWLINE)
+			if newline == nil { return nil }
+			_ = newline
+			return []any{a, expression, opt, newline}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_invalid_except_stmt, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 2
-	if v := func() any {
-		a := p.ExpectName("except")
-		if a == nil { return nil }
-		_ = a
-		newline := p.ExpectToken(tokenize.NEWLINE)
-		if newline == nil { return nil }
-		_ = newline
-		return []any{a, newline}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_invalid_except_stmt, v)
-		return v
+	{
+		if v := func() any {
+			a := p.ExpectName("except")
+			if a == nil { return nil }
+			_ = a
+			newline := p.ExpectToken(tokenize.NEWLINE)
+			if newline == nil { return nil }
+			_ = newline
+			return []any{a, newline}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_invalid_except_stmt, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 3
-	if v := func() any {
-		kw := p.ExpectName("except")
-		if kw == nil { return nil }
-		_ = kw
-		expression := parseRule_expression(p)
-		if expression == nil { return nil }
-		_ = expression
-		kw_1 := p.ExpectName("as")
-		if kw_1 == nil { return nil }
-		_ = kw_1
-		a := parseRule_expression(p)
-		if a == nil { return nil }
-		_ = a
-		op := p.ExpectToken(tokenize.COLON)
-		if op == nil { return nil }
-		_ = op
-		block := parseRule_block(p)
-		if block == nil { return nil }
-		_ = block
-		return []any{kw, expression, kw_1, a, op, block}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_invalid_except_stmt, v)
-		return v
+	{
+		if v := func() any {
+			kw := p.ExpectName("except")
+			if kw == nil { return nil }
+			_ = kw
+			expression := parseRule_expression(p)
+			if expression == nil { return nil }
+			_ = expression
+			kw_1 := p.ExpectName("as")
+			if kw_1 == nil { return nil }
+			_ = kw_1
+			a := parseRule_expression(p)
+			if a == nil { return nil }
+			_ = a
+			op := p.ExpectToken(tokenize.COLON)
+			if op == nil { return nil }
+			_ = op
+			block := parseRule_block(p)
+			if block == nil { return nil }
+			_ = block
+			return []any{kw, expression, kw_1, a, op, block}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_invalid_except_stmt, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_invalid_except_stmt, nil)
 	return nil
 }
@@ -11426,105 +13330,113 @@ func parseRule_invalid_except_star_stmt(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		kw := p.ExpectName("except")
-		if kw == nil { return nil }
-		_ = kw
-		op := p.ExpectToken(tokenize.STAR)
-		if op == nil { return nil }
-		_ = op
-		a := parseRule_expression(p)
-		if a == nil { return nil }
-		_ = a
-		op_1 := p.ExpectToken(tokenize.COMMA)
-		if op_1 == nil { return nil }
-		_ = op_1
-		expressions := parseRule_expressions(p)
-		if expressions == nil { return nil }
-		_ = expressions
-		kw_1 := p.ExpectName("as")
-		if kw_1 == nil { return nil }
-		_ = kw_1
-		name := p.ExpectToken(tokenize.NAME)
-		if name == nil { return nil }
-		_ = name
-		op_2 := p.ExpectToken(tokenize.COLON)
-		if op_2 == nil { return nil }
-		_ = op_2
-		return []any{kw, op, a, op_1, expressions, kw_1, name, op_2}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_invalid_except_star_stmt, v)
-		return v
+	{
+		if v := func() any {
+			kw := p.ExpectName("except")
+			if kw == nil { return nil }
+			_ = kw
+			op := p.ExpectToken(tokenize.STAR)
+			if op == nil { return nil }
+			_ = op
+			a := parseRule_expression(p)
+			if a == nil { return nil }
+			_ = a
+			op_1 := p.ExpectToken(tokenize.COMMA)
+			if op_1 == nil { return nil }
+			_ = op_1
+			expressions := parseRule_expressions(p)
+			if expressions == nil { return nil }
+			_ = expressions
+			kw_1 := p.ExpectName("as")
+			if kw_1 == nil { return nil }
+			_ = kw_1
+			name := p.ExpectToken(tokenize.NAME)
+			if name == nil { return nil }
+			_ = name
+			op_2 := p.ExpectToken(tokenize.COLON)
+			if op_2 == nil { return nil }
+			_ = op_2
+			return []any{kw, op, a, op_1, expressions, kw_1, name, op_2}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_invalid_except_star_stmt, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 1
-	if v := func() any {
-		a := p.ExpectName("except")
-		if a == nil { return nil }
-		_ = a
-		op := p.ExpectToken(tokenize.STAR)
-		if op == nil { return nil }
-		_ = op
-		expression := parseRule_expression(p)
-		if expression == nil { return nil }
-		_ = expression
-		opt := parseRule__rhs_120(p)
-		_ = opt
-		newline := p.ExpectToken(tokenize.NEWLINE)
-		if newline == nil { return nil }
-		_ = newline
-		return []any{a, op, expression, opt, newline}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_invalid_except_star_stmt, v)
-		return v
+	{
+		if v := func() any {
+			a := p.ExpectName("except")
+			if a == nil { return nil }
+			_ = a
+			op := p.ExpectToken(tokenize.STAR)
+			if op == nil { return nil }
+			_ = op
+			expression := parseRule_expression(p)
+			if expression == nil { return nil }
+			_ = expression
+			opt := parseRule__rhs_120(p)
+			_ = opt
+			newline := p.ExpectToken(tokenize.NEWLINE)
+			if newline == nil { return nil }
+			_ = newline
+			return []any{a, op, expression, opt, newline}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_invalid_except_star_stmt, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 2
-	if v := func() any {
-		a := p.ExpectName("except")
-		if a == nil { return nil }
-		_ = a
-		op := p.ExpectToken(tokenize.STAR)
-		if op == nil { return nil }
-		_ = op
-		g := parseRule__group_122(p)
-		if g == nil { return nil }
-		_ = g
-		return []any{a, op, g}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_invalid_except_star_stmt, v)
-		return v
+	{
+		if v := func() any {
+			a := p.ExpectName("except")
+			if a == nil { return nil }
+			_ = a
+			op := p.ExpectToken(tokenize.STAR)
+			if op == nil { return nil }
+			_ = op
+			g := parseRule__group_122(p)
+			if g == nil { return nil }
+			_ = g
+			return []any{a, op, g}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_invalid_except_star_stmt, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 3
-	if v := func() any {
-		kw := p.ExpectName("except")
-		if kw == nil { return nil }
-		_ = kw
-		op := p.ExpectToken(tokenize.STAR)
-		if op == nil { return nil }
-		_ = op
-		expression := parseRule_expression(p)
-		if expression == nil { return nil }
-		_ = expression
-		kw_1 := p.ExpectName("as")
-		if kw_1 == nil { return nil }
-		_ = kw_1
-		a := parseRule_expression(p)
-		if a == nil { return nil }
-		_ = a
-		op_1 := p.ExpectToken(tokenize.COLON)
-		if op_1 == nil { return nil }
-		_ = op_1
-		block := parseRule_block(p)
-		if block == nil { return nil }
-		_ = block
-		return []any{kw, op, expression, kw_1, a, op_1, block}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_invalid_except_star_stmt, v)
-		return v
+	{
+		if v := func() any {
+			kw := p.ExpectName("except")
+			if kw == nil { return nil }
+			_ = kw
+			op := p.ExpectToken(tokenize.STAR)
+			if op == nil { return nil }
+			_ = op
+			expression := parseRule_expression(p)
+			if expression == nil { return nil }
+			_ = expression
+			kw_1 := p.ExpectName("as")
+			if kw_1 == nil { return nil }
+			_ = kw_1
+			a := parseRule_expression(p)
+			if a == nil { return nil }
+			_ = a
+			op_1 := p.ExpectToken(tokenize.COLON)
+			if op_1 == nil { return nil }
+			_ = op_1
+			block := parseRule_block(p)
+			if block == nil { return nil }
+			_ = block
+			return []any{kw, op, expression, kw_1, a, op_1, block}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_invalid_except_star_stmt, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_invalid_except_star_stmt, nil)
 	return nil
 }
@@ -11536,23 +13448,25 @@ func parseRule_invalid_finally_stmt(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		a := p.ExpectName("finally")
-		if a == nil { return nil }
-		_ = a
-		op := p.ExpectToken(tokenize.COLON)
-		if op == nil { return nil }
-		_ = op
-		newline := p.ExpectToken(tokenize.NEWLINE)
-		if newline == nil { return nil }
-		_ = newline
-		if !p.Lookahead(false, func(p *Parser) any { return p.ExpectToken(tokenize.INDENT) }) { return nil }
-		return []any{a, op, newline}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_invalid_finally_stmt, v)
-		return v
+	{
+		if v := func() any {
+			a := p.ExpectName("finally")
+			if a == nil { return nil }
+			_ = a
+			op := p.ExpectToken(tokenize.COLON)
+			if op == nil { return nil }
+			_ = op
+			newline := p.ExpectToken(tokenize.NEWLINE)
+			if newline == nil { return nil }
+			_ = newline
+			if !p.Lookahead(false, func(p *Parser) any { return p.ExpectToken(tokenize.INDENT) }) { return nil }
+			return []any{a, op, newline}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_invalid_finally_stmt, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_invalid_finally_stmt, nil)
 	return nil
 }
@@ -11564,46 +13478,50 @@ func parseRule_invalid_except_stmt_indent(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		a := p.ExpectName("except")
-		if a == nil { return nil }
-		_ = a
-		expression := parseRule_expression(p)
-		if expression == nil { return nil }
-		_ = expression
-		opt := parseRule__rhs_120(p)
-		_ = opt
-		op := p.ExpectToken(tokenize.COLON)
-		if op == nil { return nil }
-		_ = op
-		newline := p.ExpectToken(tokenize.NEWLINE)
-		if newline == nil { return nil }
-		_ = newline
-		if !p.Lookahead(false, func(p *Parser) any { return p.ExpectToken(tokenize.INDENT) }) { return nil }
-		return []any{a, expression, opt, op, newline}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_invalid_except_stmt_indent, v)
-		return v
+	{
+		if v := func() any {
+			a := p.ExpectName("except")
+			if a == nil { return nil }
+			_ = a
+			expression := parseRule_expression(p)
+			if expression == nil { return nil }
+			_ = expression
+			opt := parseRule__rhs_120(p)
+			_ = opt
+			op := p.ExpectToken(tokenize.COLON)
+			if op == nil { return nil }
+			_ = op
+			newline := p.ExpectToken(tokenize.NEWLINE)
+			if newline == nil { return nil }
+			_ = newline
+			if !p.Lookahead(false, func(p *Parser) any { return p.ExpectToken(tokenize.INDENT) }) { return nil }
+			return []any{a, expression, opt, op, newline}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_invalid_except_stmt_indent, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 1
-	if v := func() any {
-		a := p.ExpectName("except")
-		if a == nil { return nil }
-		_ = a
-		op := p.ExpectToken(tokenize.COLON)
-		if op == nil { return nil }
-		_ = op
-		newline := p.ExpectToken(tokenize.NEWLINE)
-		if newline == nil { return nil }
-		_ = newline
-		if !p.Lookahead(false, func(p *Parser) any { return p.ExpectToken(tokenize.INDENT) }) { return nil }
-		return []any{a, op, newline}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_invalid_except_stmt_indent, v)
-		return v
+	{
+		if v := func() any {
+			a := p.ExpectName("except")
+			if a == nil { return nil }
+			_ = a
+			op := p.ExpectToken(tokenize.COLON)
+			if op == nil { return nil }
+			_ = op
+			newline := p.ExpectToken(tokenize.NEWLINE)
+			if newline == nil { return nil }
+			_ = newline
+			if !p.Lookahead(false, func(p *Parser) any { return p.ExpectToken(tokenize.INDENT) }) { return nil }
+			return []any{a, op, newline}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_invalid_except_stmt_indent, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_invalid_except_stmt_indent, nil)
 	return nil
 }
@@ -11615,31 +13533,33 @@ func parseRule_invalid_except_star_stmt_indent(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		a := p.ExpectName("except")
-		if a == nil { return nil }
-		_ = a
-		op := p.ExpectToken(tokenize.STAR)
-		if op == nil { return nil }
-		_ = op
-		expression := parseRule_expression(p)
-		if expression == nil { return nil }
-		_ = expression
-		opt := parseRule__rhs_120(p)
-		_ = opt
-		op_1 := p.ExpectToken(tokenize.COLON)
-		if op_1 == nil { return nil }
-		_ = op_1
-		newline := p.ExpectToken(tokenize.NEWLINE)
-		if newline == nil { return nil }
-		_ = newline
-		if !p.Lookahead(false, func(p *Parser) any { return p.ExpectToken(tokenize.INDENT) }) { return nil }
-		return []any{a, op, expression, opt, op_1, newline}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_invalid_except_star_stmt_indent, v)
-		return v
+	{
+		if v := func() any {
+			a := p.ExpectName("except")
+			if a == nil { return nil }
+			_ = a
+			op := p.ExpectToken(tokenize.STAR)
+			if op == nil { return nil }
+			_ = op
+			expression := parseRule_expression(p)
+			if expression == nil { return nil }
+			_ = expression
+			opt := parseRule__rhs_120(p)
+			_ = opt
+			op_1 := p.ExpectToken(tokenize.COLON)
+			if op_1 == nil { return nil }
+			_ = op_1
+			newline := p.ExpectToken(tokenize.NEWLINE)
+			if newline == nil { return nil }
+			_ = newline
+			if !p.Lookahead(false, func(p *Parser) any { return p.ExpectToken(tokenize.INDENT) }) { return nil }
+			return []any{a, op, expression, opt, op_1, newline}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_invalid_except_star_stmt_indent, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_invalid_except_star_stmt_indent, nil)
 	return nil
 }
@@ -11651,43 +13571,47 @@ func parseRule_invalid_match_stmt(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		kw := p.ExpectSoftKeyword("match")
-		if kw == nil { return nil }
-		_ = kw
-		subject_expr := parseRule_subject_expr(p)
-		if subject_expr == nil { return nil }
-		_ = subject_expr
-		newline := p.ExpectToken(tokenize.NEWLINE)
-		if newline == nil { return nil }
-		_ = newline
-		return []any{kw, subject_expr, newline}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_invalid_match_stmt, v)
-		return v
+	{
+		if v := func() any {
+			kw := p.ExpectSoftKeyword("match")
+			if kw == nil { return nil }
+			_ = kw
+			subject_expr := parseRule_subject_expr(p)
+			if subject_expr == nil { return nil }
+			_ = subject_expr
+			newline := p.ExpectToken(tokenize.NEWLINE)
+			if newline == nil { return nil }
+			_ = newline
+			return []any{kw, subject_expr, newline}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_invalid_match_stmt, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 1
-	if v := func() any {
-		a := p.ExpectSoftKeyword("match")
-		if a == nil { return nil }
-		_ = a
-		subject := parseRule_subject_expr(p)
-		if subject == nil { return nil }
-		_ = subject
-		op := p.ExpectToken(tokenize.COLON)
-		if op == nil { return nil }
-		_ = op
-		newline := p.ExpectToken(tokenize.NEWLINE)
-		if newline == nil { return nil }
-		_ = newline
-		if !p.Lookahead(false, func(p *Parser) any { return p.ExpectToken(tokenize.INDENT) }) { return nil }
-		return []any{a, subject, op, newline}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_invalid_match_stmt, v)
-		return v
+	{
+		if v := func() any {
+			a := p.ExpectSoftKeyword("match")
+			if a == nil { return nil }
+			_ = a
+			subject := parseRule_subject_expr(p)
+			if subject == nil { return nil }
+			_ = subject
+			op := p.ExpectToken(tokenize.COLON)
+			if op == nil { return nil }
+			_ = op
+			newline := p.ExpectToken(tokenize.NEWLINE)
+			if newline == nil { return nil }
+			_ = newline
+			if !p.Lookahead(false, func(p *Parser) any { return p.ExpectToken(tokenize.INDENT) }) { return nil }
+			return []any{a, subject, op, newline}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_invalid_match_stmt, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_invalid_match_stmt, nil)
 	return nil
 }
@@ -11699,47 +13623,51 @@ func parseRule_invalid_case_block(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		kw := p.ExpectSoftKeyword("case")
-		if kw == nil { return nil }
-		_ = kw
-		patterns := parseRule_patterns(p)
-		if patterns == nil { return nil }
-		_ = patterns
-		opt := parseRule_guard(p)
-		_ = opt
-		newline := p.ExpectToken(tokenize.NEWLINE)
-		if newline == nil { return nil }
-		_ = newline
-		return []any{kw, patterns, opt, newline}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_invalid_case_block, v)
-		return v
+	{
+		if v := func() any {
+			kw := p.ExpectSoftKeyword("case")
+			if kw == nil { return nil }
+			_ = kw
+			patterns := parseRule_patterns(p)
+			if patterns == nil { return nil }
+			_ = patterns
+			opt := parseRule_guard(p)
+			_ = opt
+			newline := p.ExpectToken(tokenize.NEWLINE)
+			if newline == nil { return nil }
+			_ = newline
+			return []any{kw, patterns, opt, newline}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_invalid_case_block, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 1
-	if v := func() any {
-		a := p.ExpectSoftKeyword("case")
-		if a == nil { return nil }
-		_ = a
-		patterns := parseRule_patterns(p)
-		if patterns == nil { return nil }
-		_ = patterns
-		opt := parseRule_guard(p)
-		_ = opt
-		op := p.ExpectToken(tokenize.COLON)
-		if op == nil { return nil }
-		_ = op
-		newline := p.ExpectToken(tokenize.NEWLINE)
-		if newline == nil { return nil }
-		_ = newline
-		if !p.Lookahead(false, func(p *Parser) any { return p.ExpectToken(tokenize.INDENT) }) { return nil }
-		return []any{a, patterns, opt, op, newline}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_invalid_case_block, v)
-		return v
+	{
+		if v := func() any {
+			a := p.ExpectSoftKeyword("case")
+			if a == nil { return nil }
+			_ = a
+			patterns := parseRule_patterns(p)
+			if patterns == nil { return nil }
+			_ = patterns
+			opt := parseRule_guard(p)
+			_ = opt
+			op := p.ExpectToken(tokenize.COLON)
+			if op == nil { return nil }
+			_ = op
+			newline := p.ExpectToken(tokenize.NEWLINE)
+			if newline == nil { return nil }
+			_ = newline
+			if !p.Lookahead(false, func(p *Parser) any { return p.ExpectToken(tokenize.INDENT) }) { return nil }
+			return []any{a, patterns, opt, op, newline}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_invalid_case_block, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_invalid_case_block, nil)
 	return nil
 }
@@ -11751,39 +13679,43 @@ func parseRule_invalid_as_pattern(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		or_pattern := parseRule_or_pattern(p)
-		if or_pattern == nil { return nil }
-		_ = or_pattern
-		kw := p.ExpectName("as")
-		if kw == nil { return nil }
-		_ = kw
-		a := p.ExpectSoftKeyword("_")
-		if a == nil { return nil }
-		_ = a
-		return []any{or_pattern, kw, a}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_invalid_as_pattern, v)
-		return v
+	{
+		if v := func() any {
+			or_pattern := parseRule_or_pattern(p)
+			if or_pattern == nil { return nil }
+			_ = or_pattern
+			kw := p.ExpectName("as")
+			if kw == nil { return nil }
+			_ = kw
+			a := p.ExpectSoftKeyword("_")
+			if a == nil { return nil }
+			_ = a
+			return []any{or_pattern, kw, a}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_invalid_as_pattern, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 1
-	if v := func() any {
-		or_pattern := parseRule_or_pattern(p)
-		if or_pattern == nil { return nil }
-		_ = or_pattern
-		kw := p.ExpectName("as")
-		if kw == nil { return nil }
-		_ = kw
-		a := parseRule_expression(p)
-		if a == nil { return nil }
-		_ = a
-		return []any{or_pattern, kw, a}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_invalid_as_pattern, v)
-		return v
+	{
+		if v := func() any {
+			or_pattern := parseRule_or_pattern(p)
+			if or_pattern == nil { return nil }
+			_ = or_pattern
+			kw := p.ExpectName("as")
+			if kw == nil { return nil }
+			_ = kw
+			a := parseRule_expression(p)
+			if a == nil { return nil }
+			_ = a
+			return []any{or_pattern, kw, a}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_invalid_as_pattern, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_invalid_as_pattern, nil)
 	return nil
 }
@@ -11795,22 +13727,24 @@ func parseRule_invalid_class_pattern(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		name_or_attr := parseRule_name_or_attr(p)
-		if name_or_attr == nil { return nil }
-		_ = name_or_attr
-		op := p.ExpectToken(tokenize.LPAR)
-		if op == nil { return nil }
-		_ = op
-		a := parseRule_invalid_class_argument_pattern(p)
-		if a == nil { return nil }
-		_ = a
-		return []any{name_or_attr, op, a}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_invalid_class_pattern, v)
-		return v
+	{
+		if v := func() any {
+			name_or_attr := parseRule_name_or_attr(p)
+			if name_or_attr == nil { return nil }
+			_ = name_or_attr
+			op := p.ExpectToken(tokenize.LPAR)
+			if op == nil { return nil }
+			_ = op
+			a := parseRule_invalid_class_argument_pattern(p)
+			if a == nil { return nil }
+			_ = a
+			return []any{name_or_attr, op, a}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_invalid_class_pattern, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_invalid_class_pattern, nil)
 	return nil
 }
@@ -11822,24 +13756,26 @@ func parseRule_invalid_class_argument_pattern(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		opt := parseRule__rhs_123(p)
-		_ = opt
-		keyword_patterns := parseRule_keyword_patterns(p)
-		if keyword_patterns == nil { return nil }
-		_ = keyword_patterns
-		op := p.ExpectToken(tokenize.COMMA)
-		if op == nil { return nil }
-		_ = op
-		a := parseRule_positional_patterns(p)
-		if a == nil { return nil }
-		_ = a
-		return []any{opt, keyword_patterns, op, a}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_invalid_class_argument_pattern, v)
-		return v
+	{
+		if v := func() any {
+			opt := parseRule__rhs_123(p)
+			_ = opt
+			keyword_patterns := parseRule_keyword_patterns(p)
+			if keyword_patterns == nil { return nil }
+			_ = keyword_patterns
+			op := p.ExpectToken(tokenize.COMMA)
+			if op == nil { return nil }
+			_ = op
+			a := parseRule_positional_patterns(p)
+			if a == nil { return nil }
+			_ = a
+			return []any{opt, keyword_patterns, op, a}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_invalid_class_argument_pattern, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_invalid_class_argument_pattern, nil)
 	return nil
 }
@@ -11851,43 +13787,47 @@ func parseRule_invalid_if_stmt(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		kw := p.ExpectName("if")
-		if kw == nil { return nil }
-		_ = kw
-		named_expression := parseRule_named_expression(p)
-		if named_expression == nil { return nil }
-		_ = named_expression
-		newline := p.ExpectToken(tokenize.NEWLINE)
-		if newline == nil { return nil }
-		_ = newline
-		return []any{kw, named_expression, newline}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_invalid_if_stmt, v)
-		return v
+	{
+		if v := func() any {
+			kw := p.ExpectName("if")
+			if kw == nil { return nil }
+			_ = kw
+			named_expression := parseRule_named_expression(p)
+			if named_expression == nil { return nil }
+			_ = named_expression
+			newline := p.ExpectToken(tokenize.NEWLINE)
+			if newline == nil { return nil }
+			_ = newline
+			return []any{kw, named_expression, newline}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_invalid_if_stmt, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 1
-	if v := func() any {
-		a := p.ExpectName("if")
-		if a == nil { return nil }
-		_ = a
-		a_1 := parseRule_named_expression(p)
-		if a_1 == nil { return nil }
-		_ = a_1
-		op := p.ExpectToken(tokenize.COLON)
-		if op == nil { return nil }
-		_ = op
-		newline := p.ExpectToken(tokenize.NEWLINE)
-		if newline == nil { return nil }
-		_ = newline
-		if !p.Lookahead(false, func(p *Parser) any { return p.ExpectToken(tokenize.INDENT) }) { return nil }
-		return []any{a, a_1, op, newline}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_invalid_if_stmt, v)
-		return v
+	{
+		if v := func() any {
+			a := p.ExpectName("if")
+			if a == nil { return nil }
+			_ = a
+			a_1 := parseRule_named_expression(p)
+			if a_1 == nil { return nil }
+			_ = a_1
+			op := p.ExpectToken(tokenize.COLON)
+			if op == nil { return nil }
+			_ = op
+			newline := p.ExpectToken(tokenize.NEWLINE)
+			if newline == nil { return nil }
+			_ = newline
+			if !p.Lookahead(false, func(p *Parser) any { return p.ExpectToken(tokenize.INDENT) }) { return nil }
+			return []any{a, a_1, op, newline}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_invalid_if_stmt, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_invalid_if_stmt, nil)
 	return nil
 }
@@ -11899,43 +13839,47 @@ func parseRule_invalid_elif_stmt(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		kw := p.ExpectName("elif")
-		if kw == nil { return nil }
-		_ = kw
-		named_expression := parseRule_named_expression(p)
-		if named_expression == nil { return nil }
-		_ = named_expression
-		newline := p.ExpectToken(tokenize.NEWLINE)
-		if newline == nil { return nil }
-		_ = newline
-		return []any{kw, named_expression, newline}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_invalid_elif_stmt, v)
-		return v
+	{
+		if v := func() any {
+			kw := p.ExpectName("elif")
+			if kw == nil { return nil }
+			_ = kw
+			named_expression := parseRule_named_expression(p)
+			if named_expression == nil { return nil }
+			_ = named_expression
+			newline := p.ExpectToken(tokenize.NEWLINE)
+			if newline == nil { return nil }
+			_ = newline
+			return []any{kw, named_expression, newline}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_invalid_elif_stmt, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 1
-	if v := func() any {
-		a := p.ExpectName("elif")
-		if a == nil { return nil }
-		_ = a
-		named_expression := parseRule_named_expression(p)
-		if named_expression == nil { return nil }
-		_ = named_expression
-		op := p.ExpectToken(tokenize.COLON)
-		if op == nil { return nil }
-		_ = op
-		newline := p.ExpectToken(tokenize.NEWLINE)
-		if newline == nil { return nil }
-		_ = newline
-		if !p.Lookahead(false, func(p *Parser) any { return p.ExpectToken(tokenize.INDENT) }) { return nil }
-		return []any{a, named_expression, op, newline}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_invalid_elif_stmt, v)
-		return v
+	{
+		if v := func() any {
+			a := p.ExpectName("elif")
+			if a == nil { return nil }
+			_ = a
+			named_expression := parseRule_named_expression(p)
+			if named_expression == nil { return nil }
+			_ = named_expression
+			op := p.ExpectToken(tokenize.COLON)
+			if op == nil { return nil }
+			_ = op
+			newline := p.ExpectToken(tokenize.NEWLINE)
+			if newline == nil { return nil }
+			_ = newline
+			if !p.Lookahead(false, func(p *Parser) any { return p.ExpectToken(tokenize.INDENT) }) { return nil }
+			return []any{a, named_expression, op, newline}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_invalid_elif_stmt, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_invalid_elif_stmt, nil)
 	return nil
 }
@@ -11947,43 +13891,47 @@ func parseRule_invalid_else_stmt(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		a := p.ExpectName("else")
-		if a == nil { return nil }
-		_ = a
-		op := p.ExpectToken(tokenize.COLON)
-		if op == nil { return nil }
-		_ = op
-		newline := p.ExpectToken(tokenize.NEWLINE)
-		if newline == nil { return nil }
-		_ = newline
-		if !p.Lookahead(false, func(p *Parser) any { return p.ExpectToken(tokenize.INDENT) }) { return nil }
-		return []any{a, op, newline}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_invalid_else_stmt, v)
-		return v
+	{
+		if v := func() any {
+			a := p.ExpectName("else")
+			if a == nil { return nil }
+			_ = a
+			op := p.ExpectToken(tokenize.COLON)
+			if op == nil { return nil }
+			_ = op
+			newline := p.ExpectToken(tokenize.NEWLINE)
+			if newline == nil { return nil }
+			_ = newline
+			if !p.Lookahead(false, func(p *Parser) any { return p.ExpectToken(tokenize.INDENT) }) { return nil }
+			return []any{a, op, newline}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_invalid_else_stmt, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 1
-	if v := func() any {
-		kw := p.ExpectName("else")
-		if kw == nil { return nil }
-		_ = kw
-		op := p.ExpectToken(tokenize.COLON)
-		if op == nil { return nil }
-		_ = op
-		block := parseRule_block(p)
-		if block == nil { return nil }
-		_ = block
-		kw_1 := p.ExpectName("elif")
-		if kw_1 == nil { return nil }
-		_ = kw_1
-		return []any{kw, op, block, kw_1}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_invalid_else_stmt, v)
-		return v
+	{
+		if v := func() any {
+			kw := p.ExpectName("else")
+			if kw == nil { return nil }
+			_ = kw
+			op := p.ExpectToken(tokenize.COLON)
+			if op == nil { return nil }
+			_ = op
+			block := parseRule_block(p)
+			if block == nil { return nil }
+			_ = block
+			kw_1 := p.ExpectName("elif")
+			if kw_1 == nil { return nil }
+			_ = kw_1
+			return []any{kw, op, block, kw_1}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_invalid_else_stmt, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_invalid_else_stmt, nil)
 	return nil
 }
@@ -11995,43 +13943,47 @@ func parseRule_invalid_while_stmt(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		kw := p.ExpectName("while")
-		if kw == nil { return nil }
-		_ = kw
-		named_expression := parseRule_named_expression(p)
-		if named_expression == nil { return nil }
-		_ = named_expression
-		newline := p.ExpectToken(tokenize.NEWLINE)
-		if newline == nil { return nil }
-		_ = newline
-		return []any{kw, named_expression, newline}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_invalid_while_stmt, v)
-		return v
+	{
+		if v := func() any {
+			kw := p.ExpectName("while")
+			if kw == nil { return nil }
+			_ = kw
+			named_expression := parseRule_named_expression(p)
+			if named_expression == nil { return nil }
+			_ = named_expression
+			newline := p.ExpectToken(tokenize.NEWLINE)
+			if newline == nil { return nil }
+			_ = newline
+			return []any{kw, named_expression, newline}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_invalid_while_stmt, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 1
-	if v := func() any {
-		a := p.ExpectName("while")
-		if a == nil { return nil }
-		_ = a
-		named_expression := parseRule_named_expression(p)
-		if named_expression == nil { return nil }
-		_ = named_expression
-		op := p.ExpectToken(tokenize.COLON)
-		if op == nil { return nil }
-		_ = op
-		newline := p.ExpectToken(tokenize.NEWLINE)
-		if newline == nil { return nil }
-		_ = newline
-		if !p.Lookahead(false, func(p *Parser) any { return p.ExpectToken(tokenize.INDENT) }) { return nil }
-		return []any{a, named_expression, op, newline}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_invalid_while_stmt, v)
-		return v
+	{
+		if v := func() any {
+			a := p.ExpectName("while")
+			if a == nil { return nil }
+			_ = a
+			named_expression := parseRule_named_expression(p)
+			if named_expression == nil { return nil }
+			_ = named_expression
+			op := p.ExpectToken(tokenize.COLON)
+			if op == nil { return nil }
+			_ = op
+			newline := p.ExpectToken(tokenize.NEWLINE)
+			if newline == nil { return nil }
+			_ = newline
+			if !p.Lookahead(false, func(p *Parser) any { return p.ExpectToken(tokenize.INDENT) }) { return nil }
+			return []any{a, named_expression, op, newline}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_invalid_while_stmt, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_invalid_while_stmt, nil)
 	return nil
 }
@@ -12043,59 +13995,63 @@ func parseRule_invalid_for_stmt(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		opt := p.ExpectName("async")
-		_ = opt
-		kw := p.ExpectName("for")
-		if kw == nil { return nil }
-		_ = kw
-		star_targets := parseRule_star_targets(p)
-		if star_targets == nil { return nil }
-		_ = star_targets
-		kw_1 := p.ExpectName("in")
-		if kw_1 == nil { return nil }
-		_ = kw_1
-		star_expressions := parseRule_star_expressions(p)
-		if star_expressions == nil { return nil }
-		_ = star_expressions
-		newline := p.ExpectToken(tokenize.NEWLINE)
-		if newline == nil { return nil }
-		_ = newline
-		return []any{opt, kw, star_targets, kw_1, star_expressions, newline}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_invalid_for_stmt, v)
-		return v
+	{
+		if v := func() any {
+			opt := p.ExpectName("async")
+			_ = opt
+			kw := p.ExpectName("for")
+			if kw == nil { return nil }
+			_ = kw
+			star_targets := parseRule_star_targets(p)
+			if star_targets == nil { return nil }
+			_ = star_targets
+			kw_1 := p.ExpectName("in")
+			if kw_1 == nil { return nil }
+			_ = kw_1
+			star_expressions := parseRule_star_expressions(p)
+			if star_expressions == nil { return nil }
+			_ = star_expressions
+			newline := p.ExpectToken(tokenize.NEWLINE)
+			if newline == nil { return nil }
+			_ = newline
+			return []any{opt, kw, star_targets, kw_1, star_expressions, newline}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_invalid_for_stmt, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 1
-	if v := func() any {
-		opt := p.ExpectName("async")
-		_ = opt
-		a := p.ExpectName("for")
-		if a == nil { return nil }
-		_ = a
-		star_targets := parseRule_star_targets(p)
-		if star_targets == nil { return nil }
-		_ = star_targets
-		kw := p.ExpectName("in")
-		if kw == nil { return nil }
-		_ = kw
-		star_expressions := parseRule_star_expressions(p)
-		if star_expressions == nil { return nil }
-		_ = star_expressions
-		op := p.ExpectToken(tokenize.COLON)
-		if op == nil { return nil }
-		_ = op
-		newline := p.ExpectToken(tokenize.NEWLINE)
-		if newline == nil { return nil }
-		_ = newline
-		if !p.Lookahead(false, func(p *Parser) any { return p.ExpectToken(tokenize.INDENT) }) { return nil }
-		return []any{opt, a, star_targets, kw, star_expressions, op, newline}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_invalid_for_stmt, v)
-		return v
+	{
+		if v := func() any {
+			opt := p.ExpectName("async")
+			_ = opt
+			a := p.ExpectName("for")
+			if a == nil { return nil }
+			_ = a
+			star_targets := parseRule_star_targets(p)
+			if star_targets == nil { return nil }
+			_ = star_targets
+			kw := p.ExpectName("in")
+			if kw == nil { return nil }
+			_ = kw
+			star_expressions := parseRule_star_expressions(p)
+			if star_expressions == nil { return nil }
+			_ = star_expressions
+			op := p.ExpectToken(tokenize.COLON)
+			if op == nil { return nil }
+			_ = op
+			newline := p.ExpectToken(tokenize.NEWLINE)
+			if newline == nil { return nil }
+			_ = newline
+			if !p.Lookahead(false, func(p *Parser) any { return p.ExpectToken(tokenize.INDENT) }) { return nil }
+			return []any{opt, a, star_targets, kw, star_expressions, op, newline}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_invalid_for_stmt, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_invalid_for_stmt, nil)
 	return nil
 }
@@ -12107,76 +14063,80 @@ func parseRule_invalid_def_raw(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		opt := p.ExpectName("async")
-		_ = opt
-		a := p.ExpectName("def")
-		if a == nil { return nil }
-		_ = a
-		name := p.ExpectToken(tokenize.NAME)
-		if name == nil { return nil }
-		_ = name
-		opt_1 := parseRule_type_params(p)
-		_ = opt_1
-		op := p.ExpectToken(tokenize.LPAR)
-		if op == nil { return nil }
-		_ = op
-		opt_2 := parseRule_params(p)
-		_ = opt_2
-		op_1 := p.ExpectToken(tokenize.RPAR)
-		if op_1 == nil { return nil }
-		_ = op_1
-		opt_3 := parseRule__rhs_124(p)
-		_ = opt_3
-		op_2 := p.ExpectToken(tokenize.COLON)
-		if op_2 == nil { return nil }
-		_ = op_2
-		newline := p.ExpectToken(tokenize.NEWLINE)
-		if newline == nil { return nil }
-		_ = newline
-		if !p.Lookahead(false, func(p *Parser) any { return p.ExpectToken(tokenize.INDENT) }) { return nil }
-		return []any{opt, a, name, opt_1, op, opt_2, op_1, opt_3, op_2, newline}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_invalid_def_raw, v)
-		return v
+	{
+		if v := func() any {
+			opt := p.ExpectName("async")
+			_ = opt
+			a := p.ExpectName("def")
+			if a == nil { return nil }
+			_ = a
+			name := p.ExpectToken(tokenize.NAME)
+			if name == nil { return nil }
+			_ = name
+			opt_1 := parseRule_type_params(p)
+			_ = opt_1
+			op := p.ExpectToken(tokenize.LPAR)
+			if op == nil { return nil }
+			_ = op
+			opt_2 := parseRule_params(p)
+			_ = opt_2
+			op_1 := p.ExpectToken(tokenize.RPAR)
+			if op_1 == nil { return nil }
+			_ = op_1
+			opt_3 := parseRule__rhs_124(p)
+			_ = opt_3
+			op_2 := p.ExpectToken(tokenize.COLON)
+			if op_2 == nil { return nil }
+			_ = op_2
+			newline := p.ExpectToken(tokenize.NEWLINE)
+			if newline == nil { return nil }
+			_ = newline
+			if !p.Lookahead(false, func(p *Parser) any { return p.ExpectToken(tokenize.INDENT) }) { return nil }
+			return []any{opt, a, name, opt_1, op, opt_2, op_1, opt_3, op_2, newline}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_invalid_def_raw, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 1
-	if v := func() any {
-		opt := p.ExpectName("async")
-		_ = opt
-		kw := p.ExpectName("def")
-		if kw == nil { return nil }
-		_ = kw
-		name := p.ExpectToken(tokenize.NAME)
-		if name == nil { return nil }
-		_ = name
-		opt_1 := parseRule_type_params(p)
-		_ = opt_1
-		f := p.ExpectForced(tokenize.LPAR, "(")
-		if f == nil { return nil }
-		_ = f
-		opt_2 := parseRule_params(p)
-		_ = opt_2
-		op := p.ExpectToken(tokenize.RPAR)
-		if op == nil { return nil }
-		_ = op
-		opt_3 := parseRule__rhs_124(p)
-		_ = opt_3
-		f_1 := p.ExpectForced(tokenize.COLON, ":")
-		if f_1 == nil { return nil }
-		_ = f_1
-		opt_4 := parseRule_func_type_comment(p)
-		_ = opt_4
-		block := parseRule_block(p)
-		if block == nil { return nil }
-		_ = block
-		return []any{opt, kw, name, opt_1, f, opt_2, op, opt_3, f_1, opt_4, block}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_invalid_def_raw, v)
-		return v
+	{
+		if v := func() any {
+			opt := p.ExpectName("async")
+			_ = opt
+			kw := p.ExpectName("def")
+			if kw == nil { return nil }
+			_ = kw
+			name := p.ExpectToken(tokenize.NAME)
+			if name == nil { return nil }
+			_ = name
+			opt_1 := parseRule_type_params(p)
+			_ = opt_1
+			f := p.ExpectForced(tokenize.LPAR, "(")
+			if f == nil { return nil }
+			_ = f
+			opt_2 := parseRule_params(p)
+			_ = opt_2
+			op := p.ExpectToken(tokenize.RPAR)
+			if op == nil { return nil }
+			_ = op
+			opt_3 := parseRule__rhs_124(p)
+			_ = opt_3
+			f_1 := p.ExpectForced(tokenize.COLON, ":")
+			if f_1 == nil { return nil }
+			_ = f_1
+			opt_4 := parseRule_func_type_comment(p)
+			_ = opt_4
+			block := parseRule_block(p)
+			if block == nil { return nil }
+			_ = block
+			return []any{opt, kw, name, opt_1, f, opt_2, op, opt_3, f_1, opt_4, block}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_invalid_def_raw, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_invalid_def_raw, nil)
 	return nil
 }
@@ -12188,51 +14148,55 @@ func parseRule_invalid_class_def_raw(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		kw := p.ExpectName("class")
-		if kw == nil { return nil }
-		_ = kw
-		name := p.ExpectToken(tokenize.NAME)
-		if name == nil { return nil }
-		_ = name
-		opt := parseRule_type_params(p)
-		_ = opt
-		opt_1 := parseRule__rhs_125(p)
-		_ = opt_1
-		newline := p.ExpectToken(tokenize.NEWLINE)
-		if newline == nil { return nil }
-		_ = newline
-		return []any{kw, name, opt, opt_1, newline}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_invalid_class_def_raw, v)
-		return v
+	{
+		if v := func() any {
+			kw := p.ExpectName("class")
+			if kw == nil { return nil }
+			_ = kw
+			name := p.ExpectToken(tokenize.NAME)
+			if name == nil { return nil }
+			_ = name
+			opt := parseRule_type_params(p)
+			_ = opt
+			opt_1 := parseRule__rhs_125(p)
+			_ = opt_1
+			newline := p.ExpectToken(tokenize.NEWLINE)
+			if newline == nil { return nil }
+			_ = newline
+			return []any{kw, name, opt, opt_1, newline}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_invalid_class_def_raw, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 1
-	if v := func() any {
-		a := p.ExpectName("class")
-		if a == nil { return nil }
-		_ = a
-		name := p.ExpectToken(tokenize.NAME)
-		if name == nil { return nil }
-		_ = name
-		opt := parseRule_type_params(p)
-		_ = opt
-		opt_1 := parseRule__rhs_125(p)
-		_ = opt_1
-		op := p.ExpectToken(tokenize.COLON)
-		if op == nil { return nil }
-		_ = op
-		newline := p.ExpectToken(tokenize.NEWLINE)
-		if newline == nil { return nil }
-		_ = newline
-		if !p.Lookahead(false, func(p *Parser) any { return p.ExpectToken(tokenize.INDENT) }) { return nil }
-		return []any{a, name, opt, opt_1, op, newline}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_invalid_class_def_raw, v)
-		return v
+	{
+		if v := func() any {
+			a := p.ExpectName("class")
+			if a == nil { return nil }
+			_ = a
+			name := p.ExpectToken(tokenize.NAME)
+			if name == nil { return nil }
+			_ = name
+			opt := parseRule_type_params(p)
+			_ = opt
+			opt_1 := parseRule__rhs_125(p)
+			_ = opt_1
+			op := p.ExpectToken(tokenize.COLON)
+			if op == nil { return nil }
+			_ = op
+			newline := p.ExpectToken(tokenize.NEWLINE)
+			if newline == nil { return nil }
+			_ = newline
+			if !p.Lookahead(false, func(p *Parser) any { return p.ExpectToken(tokenize.INDENT) }) { return nil }
+			return []any{a, name, opt, opt_1, op, newline}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_invalid_class_def_raw, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_invalid_class_def_raw, nil)
 	return nil
 }
@@ -12244,57 +14208,63 @@ func parseRule_invalid_double_starred_kvpairs(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		gat := parseRule__gather_70(p)
-		if gat == nil { return nil }
-		_ = gat
-		op := p.ExpectToken(tokenize.COMMA)
-		if op == nil { return nil }
-		_ = op
-		invalid_kvpair := parseRule_invalid_kvpair(p)
-		if invalid_kvpair == nil { return nil }
-		_ = invalid_kvpair
-		return []any{gat, op, invalid_kvpair}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_invalid_double_starred_kvpairs, v)
-		return v
+	{
+		if v := func() any {
+			gat := parseRule__gather_70(p)
+			if gat == nil { return nil }
+			_ = gat
+			op := p.ExpectToken(tokenize.COMMA)
+			if op == nil { return nil }
+			_ = op
+			invalid_kvpair := parseRule_invalid_kvpair(p)
+			if invalid_kvpair == nil { return nil }
+			_ = invalid_kvpair
+			return []any{gat, op, invalid_kvpair}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_invalid_double_starred_kvpairs, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 1
-	if v := func() any {
-		expression := parseRule_expression(p)
-		if expression == nil { return nil }
-		_ = expression
-		op := p.ExpectToken(tokenize.COLON)
-		if op == nil { return nil }
-		_ = op
-		a := p.ExpectToken(tokenize.STAR)
-		if a == nil { return nil }
-		_ = a
-		bitwise_or := parseRule_bitwise_or(p)
-		if bitwise_or == nil { return nil }
-		_ = bitwise_or
-		return []any{expression, op, a, bitwise_or}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_invalid_double_starred_kvpairs, v)
-		return v
+	{
+		if v := func() any {
+			expression := parseRule_expression(p)
+			if expression == nil { return nil }
+			_ = expression
+			op := p.ExpectToken(tokenize.COLON)
+			if op == nil { return nil }
+			_ = op
+			a := p.ExpectToken(tokenize.STAR)
+			if a == nil { return nil }
+			_ = a
+			bitwise_or := parseRule_bitwise_or(p)
+			if bitwise_or == nil { return nil }
+			_ = bitwise_or
+			return []any{expression, op, a, bitwise_or}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_invalid_double_starred_kvpairs, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 2
-	if v := func() any {
-		expression := parseRule_expression(p)
-		if expression == nil { return nil }
-		_ = expression
-		a := p.ExpectToken(tokenize.COLON)
-		if a == nil { return nil }
-		_ = a
-		if !p.Lookahead(true, func(p *Parser) any { return parseRule__group_126(p) }) { return nil }
-		return []any{expression, a}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_invalid_double_starred_kvpairs, v)
-		return v
+	{
+		if v := func() any {
+			expression := parseRule_expression(p)
+			if expression == nil { return nil }
+			_ = expression
+			a := p.ExpectToken(tokenize.COLON)
+			if a == nil { return nil }
+			_ = a
+			if !p.Lookahead(true, func(p *Parser) any { return parseRule__group_126(p) }) { return nil }
+			return []any{expression, a}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_invalid_double_starred_kvpairs, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_invalid_double_starred_kvpairs, nil)
 	return nil
 }
@@ -12306,52 +14276,58 @@ func parseRule_invalid_kvpair(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		a := parseRule_expression(p)
-		if a == nil { return nil }
-		_ = a
-		if !p.Lookahead(false, func(p *Parser) any { return p.ExpectToken(tokenize.COLON) }) { return nil }
-		return []any{a}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_invalid_kvpair, v)
-		return v
+	{
+		if v := func() any {
+			a := parseRule_expression(p)
+			if a == nil { return nil }
+			_ = a
+			if !p.Lookahead(false, func(p *Parser) any { return p.ExpectToken(tokenize.COLON) }) { return nil }
+			return []any{a}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_invalid_kvpair, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 1
-	if v := func() any {
-		expression := parseRule_expression(p)
-		if expression == nil { return nil }
-		_ = expression
-		op := p.ExpectToken(tokenize.COLON)
-		if op == nil { return nil }
-		_ = op
-		a := p.ExpectToken(tokenize.STAR)
-		if a == nil { return nil }
-		_ = a
-		bitwise_or := parseRule_bitwise_or(p)
-		if bitwise_or == nil { return nil }
-		_ = bitwise_or
-		return []any{expression, op, a, bitwise_or}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_invalid_kvpair, v)
-		return v
+	{
+		if v := func() any {
+			expression := parseRule_expression(p)
+			if expression == nil { return nil }
+			_ = expression
+			op := p.ExpectToken(tokenize.COLON)
+			if op == nil { return nil }
+			_ = op
+			a := p.ExpectToken(tokenize.STAR)
+			if a == nil { return nil }
+			_ = a
+			bitwise_or := parseRule_bitwise_or(p)
+			if bitwise_or == nil { return nil }
+			_ = bitwise_or
+			return []any{expression, op, a, bitwise_or}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_invalid_kvpair, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 2
-	if v := func() any {
-		expression := parseRule_expression(p)
-		if expression == nil { return nil }
-		_ = expression
-		a := p.ExpectToken(tokenize.COLON)
-		if a == nil { return nil }
-		_ = a
-		if !p.Lookahead(true, func(p *Parser) any { return parseRule__group_126(p) }) { return nil }
-		return []any{expression, a}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_invalid_kvpair, v)
-		return v
+	{
+		if v := func() any {
+			expression := parseRule_expression(p)
+			if expression == nil { return nil }
+			_ = expression
+			a := p.ExpectToken(tokenize.COLON)
+			if a == nil { return nil }
+			_ = a
+			if !p.Lookahead(true, func(p *Parser) any { return parseRule__group_126(p) }) { return nil }
+			return []any{expression, a}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_invalid_kvpair, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_invalid_kvpair, nil)
 	return nil
 }
@@ -12363,25 +14339,27 @@ func parseRule_invalid_starred_expression_unpacking(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		a := p.ExpectToken(tokenize.STAR)
-		if a == nil { return nil }
-		_ = a
-		expression := parseRule_expression(p)
-		if expression == nil { return nil }
-		_ = expression
-		op := p.ExpectToken(tokenize.EQUAL)
-		if op == nil { return nil }
-		_ = op
-		b := parseRule_expression(p)
-		if b == nil { return nil }
-		_ = b
-		return []any{a, expression, op, b}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_invalid_starred_expression_unpacking, v)
-		return v
+	{
+		if v := func() any {
+			a := p.ExpectToken(tokenize.STAR)
+			if a == nil { return nil }
+			_ = a
+			expression := parseRule_expression(p)
+			if expression == nil { return nil }
+			_ = expression
+			op := p.ExpectToken(tokenize.EQUAL)
+			if op == nil { return nil }
+			_ = op
+			b := parseRule_expression(p)
+			if b == nil { return nil }
+			_ = b
+			return []any{a, expression, op, b}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_invalid_starred_expression_unpacking, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_invalid_starred_expression_unpacking, nil)
 	return nil
 }
@@ -12393,16 +14371,18 @@ func parseRule_invalid_starred_expression(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		op := p.ExpectToken(tokenize.STAR)
-		if op == nil { return nil }
-		_ = op
-		return []any{op}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_invalid_starred_expression, v)
-		return v
+	{
+		if v := func() any {
+			op := p.ExpectToken(tokenize.STAR)
+			if op == nil { return nil }
+			_ = op
+			return []any{op}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_invalid_starred_expression, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_invalid_starred_expression, nil)
 	return nil
 }
@@ -12414,187 +14394,209 @@ func parseRule_invalid_fstring_replacement_field(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		op := p.ExpectToken(tokenize.LBRACE)
-		if op == nil { return nil }
-		_ = op
-		a := p.ExpectToken(tokenize.EQUAL)
-		if a == nil { return nil }
-		_ = a
-		return []any{op, a}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_invalid_fstring_replacement_field, v)
-		return v
+	{
+		if v := func() any {
+			op := p.ExpectToken(tokenize.LBRACE)
+			if op == nil { return nil }
+			_ = op
+			a := p.ExpectToken(tokenize.EQUAL)
+			if a == nil { return nil }
+			_ = a
+			return []any{op, a}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_invalid_fstring_replacement_field, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 1
-	if v := func() any {
-		op := p.ExpectToken(tokenize.LBRACE)
-		if op == nil { return nil }
-		_ = op
-		a := p.ExpectToken(tokenize.EXCLAMATION)
-		if a == nil { return nil }
-		_ = a
-		return []any{op, a}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_invalid_fstring_replacement_field, v)
-		return v
+	{
+		if v := func() any {
+			op := p.ExpectToken(tokenize.LBRACE)
+			if op == nil { return nil }
+			_ = op
+			a := p.ExpectToken(tokenize.EXCLAMATION)
+			if a == nil { return nil }
+			_ = a
+			return []any{op, a}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_invalid_fstring_replacement_field, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 2
-	if v := func() any {
-		op := p.ExpectToken(tokenize.LBRACE)
-		if op == nil { return nil }
-		_ = op
-		a := p.ExpectToken(tokenize.COLON)
-		if a == nil { return nil }
-		_ = a
-		return []any{op, a}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_invalid_fstring_replacement_field, v)
-		return v
+	{
+		if v := func() any {
+			op := p.ExpectToken(tokenize.LBRACE)
+			if op == nil { return nil }
+			_ = op
+			a := p.ExpectToken(tokenize.COLON)
+			if a == nil { return nil }
+			_ = a
+			return []any{op, a}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_invalid_fstring_replacement_field, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 3
-	if v := func() any {
-		op := p.ExpectToken(tokenize.LBRACE)
-		if op == nil { return nil }
-		_ = op
-		a := p.ExpectToken(tokenize.RBRACE)
-		if a == nil { return nil }
-		_ = a
-		return []any{op, a}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_invalid_fstring_replacement_field, v)
-		return v
+	{
+		if v := func() any {
+			op := p.ExpectToken(tokenize.LBRACE)
+			if op == nil { return nil }
+			_ = op
+			a := p.ExpectToken(tokenize.RBRACE)
+			if a == nil { return nil }
+			_ = a
+			return []any{op, a}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_invalid_fstring_replacement_field, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 4
-	if v := func() any {
-		op := p.ExpectToken(tokenize.LBRACE)
-		if op == nil { return nil }
-		_ = op
-		if !p.Lookahead(false, func(p *Parser) any { return parseRule_annotated_rhs(p) }) { return nil }
-		return []any{op}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_invalid_fstring_replacement_field, v)
-		return v
+	{
+		if v := func() any {
+			op := p.ExpectToken(tokenize.LBRACE)
+			if op == nil { return nil }
+			_ = op
+			if !p.Lookahead(false, func(p *Parser) any { return parseRule_annotated_rhs(p) }) { return nil }
+			return []any{op}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_invalid_fstring_replacement_field, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 5
-	if v := func() any {
-		op := p.ExpectToken(tokenize.LBRACE)
-		if op == nil { return nil }
-		_ = op
-		annotated_rhs := parseRule_annotated_rhs(p)
-		if annotated_rhs == nil { return nil }
-		_ = annotated_rhs
-		if !p.Lookahead(false, func(p *Parser) any { return parseRule__group_127(p) }) { return nil }
-		return []any{op, annotated_rhs}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_invalid_fstring_replacement_field, v)
-		return v
+	{
+		if v := func() any {
+			op := p.ExpectToken(tokenize.LBRACE)
+			if op == nil { return nil }
+			_ = op
+			annotated_rhs := parseRule_annotated_rhs(p)
+			if annotated_rhs == nil { return nil }
+			_ = annotated_rhs
+			if !p.Lookahead(false, func(p *Parser) any { return parseRule__group_127(p) }) { return nil }
+			return []any{op, annotated_rhs}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_invalid_fstring_replacement_field, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 6
-	if v := func() any {
-		op := p.ExpectToken(tokenize.LBRACE)
-		if op == nil { return nil }
-		_ = op
-		annotated_rhs := parseRule_annotated_rhs(p)
-		if annotated_rhs == nil { return nil }
-		_ = annotated_rhs
-		op_1 := p.ExpectToken(tokenize.EQUAL)
-		if op_1 == nil { return nil }
-		_ = op_1
-		if !p.Lookahead(false, func(p *Parser) any { return parseRule__group_128(p) }) { return nil }
-		return []any{op, annotated_rhs, op_1}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_invalid_fstring_replacement_field, v)
-		return v
+	{
+		if v := func() any {
+			op := p.ExpectToken(tokenize.LBRACE)
+			if op == nil { return nil }
+			_ = op
+			annotated_rhs := parseRule_annotated_rhs(p)
+			if annotated_rhs == nil { return nil }
+			_ = annotated_rhs
+			op_1 := p.ExpectToken(tokenize.EQUAL)
+			if op_1 == nil { return nil }
+			_ = op_1
+			if !p.Lookahead(false, func(p *Parser) any { return parseRule__group_128(p) }) { return nil }
+			return []any{op, annotated_rhs, op_1}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_invalid_fstring_replacement_field, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 7
-	if v := func() any {
-		op := p.ExpectToken(tokenize.LBRACE)
-		if op == nil { return nil }
-		_ = op
-		annotated_rhs := parseRule_annotated_rhs(p)
-		if annotated_rhs == nil { return nil }
-		_ = annotated_rhs
-		opt := p.ExpectToken(tokenize.EQUAL)
-		_ = opt
-		invalid_fstring_conversion_character := parseRule_invalid_fstring_conversion_character(p)
-		if invalid_fstring_conversion_character == nil { return nil }
-		_ = invalid_fstring_conversion_character
-		return []any{op, annotated_rhs, opt, invalid_fstring_conversion_character}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_invalid_fstring_replacement_field, v)
-		return v
+	{
+		if v := func() any {
+			op := p.ExpectToken(tokenize.LBRACE)
+			if op == nil { return nil }
+			_ = op
+			annotated_rhs := parseRule_annotated_rhs(p)
+			if annotated_rhs == nil { return nil }
+			_ = annotated_rhs
+			opt := p.ExpectToken(tokenize.EQUAL)
+			_ = opt
+			invalid_fstring_conversion_character := parseRule_invalid_fstring_conversion_character(p)
+			if invalid_fstring_conversion_character == nil { return nil }
+			_ = invalid_fstring_conversion_character
+			return []any{op, annotated_rhs, opt, invalid_fstring_conversion_character}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_invalid_fstring_replacement_field, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 8
-	if v := func() any {
-		op := p.ExpectToken(tokenize.LBRACE)
-		if op == nil { return nil }
-		_ = op
-		annotated_rhs := parseRule_annotated_rhs(p)
-		if annotated_rhs == nil { return nil }
-		_ = annotated_rhs
-		opt := p.ExpectToken(tokenize.EQUAL)
-		_ = opt
-		opt_1 := parseRule__rhs_129(p)
-		_ = opt_1
-		if !p.Lookahead(false, func(p *Parser) any { return parseRule__group_130(p) }) { return nil }
-		return []any{op, annotated_rhs, opt, opt_1}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_invalid_fstring_replacement_field, v)
-		return v
+	{
+		if v := func() any {
+			op := p.ExpectToken(tokenize.LBRACE)
+			if op == nil { return nil }
+			_ = op
+			annotated_rhs := parseRule_annotated_rhs(p)
+			if annotated_rhs == nil { return nil }
+			_ = annotated_rhs
+			opt := p.ExpectToken(tokenize.EQUAL)
+			_ = opt
+			opt_1 := parseRule__rhs_129(p)
+			_ = opt_1
+			if !p.Lookahead(false, func(p *Parser) any { return parseRule__group_130(p) }) { return nil }
+			return []any{op, annotated_rhs, opt, opt_1}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_invalid_fstring_replacement_field, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 9
-	if v := func() any {
-		op := p.ExpectToken(tokenize.LBRACE)
-		if op == nil { return nil }
-		_ = op
-		annotated_rhs := parseRule_annotated_rhs(p)
-		if annotated_rhs == nil { return nil }
-		_ = annotated_rhs
-		opt := p.ExpectToken(tokenize.EQUAL)
-		_ = opt
-		opt_1 := parseRule__rhs_129(p)
-		_ = opt_1
-		op_1 := p.ExpectToken(tokenize.COLON)
-		if op_1 == nil { return nil }
-		_ = op_1
-		rep := parseRule__loop0_63(p)
-		_ = rep
-		if !p.Lookahead(false, func(p *Parser) any { return p.ExpectToken(tokenize.RBRACE) }) { return nil }
-		return []any{op, annotated_rhs, opt, opt_1, op_1, rep}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_invalid_fstring_replacement_field, v)
-		return v
+	{
+		if v := func() any {
+			op := p.ExpectToken(tokenize.LBRACE)
+			if op == nil { return nil }
+			_ = op
+			annotated_rhs := parseRule_annotated_rhs(p)
+			if annotated_rhs == nil { return nil }
+			_ = annotated_rhs
+			opt := p.ExpectToken(tokenize.EQUAL)
+			_ = opt
+			opt_1 := parseRule__rhs_129(p)
+			_ = opt_1
+			op_1 := p.ExpectToken(tokenize.COLON)
+			if op_1 == nil { return nil }
+			_ = op_1
+			rep := parseRule__loop0_63(p)
+			_ = rep
+			if !p.Lookahead(false, func(p *Parser) any { return p.ExpectToken(tokenize.RBRACE) }) { return nil }
+			return []any{op, annotated_rhs, opt, opt_1, op_1, rep}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_invalid_fstring_replacement_field, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 10
-	if v := func() any {
-		op := p.ExpectToken(tokenize.LBRACE)
-		if op == nil { return nil }
-		_ = op
-		annotated_rhs := parseRule_annotated_rhs(p)
-		if annotated_rhs == nil { return nil }
-		_ = annotated_rhs
-		opt := p.ExpectToken(tokenize.EQUAL)
-		_ = opt
-		opt_1 := parseRule__rhs_129(p)
-		_ = opt_1
-		if !p.Lookahead(false, func(p *Parser) any { return p.ExpectToken(tokenize.RBRACE) }) { return nil }
-		return []any{op, annotated_rhs, opt, opt_1}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_invalid_fstring_replacement_field, v)
-		return v
+	{
+		if v := func() any {
+			op := p.ExpectToken(tokenize.LBRACE)
+			if op == nil { return nil }
+			_ = op
+			annotated_rhs := parseRule_annotated_rhs(p)
+			if annotated_rhs == nil { return nil }
+			_ = annotated_rhs
+			opt := p.ExpectToken(tokenize.EQUAL)
+			_ = opt
+			opt_1 := parseRule__rhs_129(p)
+			_ = opt_1
+			if !p.Lookahead(false, func(p *Parser) any { return p.ExpectToken(tokenize.RBRACE) }) { return nil }
+			return []any{op, annotated_rhs, opt, opt_1}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_invalid_fstring_replacement_field, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_invalid_fstring_replacement_field, nil)
 	return nil
 }
@@ -12606,29 +14608,33 @@ func parseRule_invalid_fstring_conversion_character(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		op := p.ExpectToken(tokenize.EXCLAMATION)
-		if op == nil { return nil }
-		_ = op
-		if !p.Lookahead(true, func(p *Parser) any { return parseRule__group_130(p) }) { return nil }
-		return []any{op}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_invalid_fstring_conversion_character, v)
-		return v
+	{
+		if v := func() any {
+			op := p.ExpectToken(tokenize.EXCLAMATION)
+			if op == nil { return nil }
+			_ = op
+			if !p.Lookahead(true, func(p *Parser) any { return parseRule__group_130(p) }) { return nil }
+			return []any{op}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_invalid_fstring_conversion_character, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 1
-	if v := func() any {
-		op := p.ExpectToken(tokenize.EXCLAMATION)
-		if op == nil { return nil }
-		_ = op
-		if !p.Lookahead(false, func(p *Parser) any { return p.ExpectToken(tokenize.NAME) }) { return nil }
-		return []any{op}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_invalid_fstring_conversion_character, v)
-		return v
+	{
+		if v := func() any {
+			op := p.ExpectToken(tokenize.EXCLAMATION)
+			if op == nil { return nil }
+			_ = op
+			if !p.Lookahead(false, func(p *Parser) any { return p.ExpectToken(tokenize.NAME) }) { return nil }
+			return []any{op}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_invalid_fstring_conversion_character, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_invalid_fstring_conversion_character, nil)
 	return nil
 }
@@ -12640,187 +14646,209 @@ func parseRule_invalid_tstring_replacement_field(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		op := p.ExpectToken(tokenize.LBRACE)
-		if op == nil { return nil }
-		_ = op
-		a := p.ExpectToken(tokenize.EQUAL)
-		if a == nil { return nil }
-		_ = a
-		return []any{op, a}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_invalid_tstring_replacement_field, v)
-		return v
+	{
+		if v := func() any {
+			op := p.ExpectToken(tokenize.LBRACE)
+			if op == nil { return nil }
+			_ = op
+			a := p.ExpectToken(tokenize.EQUAL)
+			if a == nil { return nil }
+			_ = a
+			return []any{op, a}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_invalid_tstring_replacement_field, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 1
-	if v := func() any {
-		op := p.ExpectToken(tokenize.LBRACE)
-		if op == nil { return nil }
-		_ = op
-		a := p.ExpectToken(tokenize.EXCLAMATION)
-		if a == nil { return nil }
-		_ = a
-		return []any{op, a}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_invalid_tstring_replacement_field, v)
-		return v
+	{
+		if v := func() any {
+			op := p.ExpectToken(tokenize.LBRACE)
+			if op == nil { return nil }
+			_ = op
+			a := p.ExpectToken(tokenize.EXCLAMATION)
+			if a == nil { return nil }
+			_ = a
+			return []any{op, a}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_invalid_tstring_replacement_field, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 2
-	if v := func() any {
-		op := p.ExpectToken(tokenize.LBRACE)
-		if op == nil { return nil }
-		_ = op
-		a := p.ExpectToken(tokenize.COLON)
-		if a == nil { return nil }
-		_ = a
-		return []any{op, a}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_invalid_tstring_replacement_field, v)
-		return v
+	{
+		if v := func() any {
+			op := p.ExpectToken(tokenize.LBRACE)
+			if op == nil { return nil }
+			_ = op
+			a := p.ExpectToken(tokenize.COLON)
+			if a == nil { return nil }
+			_ = a
+			return []any{op, a}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_invalid_tstring_replacement_field, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 3
-	if v := func() any {
-		op := p.ExpectToken(tokenize.LBRACE)
-		if op == nil { return nil }
-		_ = op
-		a := p.ExpectToken(tokenize.RBRACE)
-		if a == nil { return nil }
-		_ = a
-		return []any{op, a}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_invalid_tstring_replacement_field, v)
-		return v
+	{
+		if v := func() any {
+			op := p.ExpectToken(tokenize.LBRACE)
+			if op == nil { return nil }
+			_ = op
+			a := p.ExpectToken(tokenize.RBRACE)
+			if a == nil { return nil }
+			_ = a
+			return []any{op, a}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_invalid_tstring_replacement_field, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 4
-	if v := func() any {
-		op := p.ExpectToken(tokenize.LBRACE)
-		if op == nil { return nil }
-		_ = op
-		if !p.Lookahead(false, func(p *Parser) any { return parseRule_annotated_rhs(p) }) { return nil }
-		return []any{op}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_invalid_tstring_replacement_field, v)
-		return v
+	{
+		if v := func() any {
+			op := p.ExpectToken(tokenize.LBRACE)
+			if op == nil { return nil }
+			_ = op
+			if !p.Lookahead(false, func(p *Parser) any { return parseRule_annotated_rhs(p) }) { return nil }
+			return []any{op}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_invalid_tstring_replacement_field, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 5
-	if v := func() any {
-		op := p.ExpectToken(tokenize.LBRACE)
-		if op == nil { return nil }
-		_ = op
-		annotated_rhs := parseRule_annotated_rhs(p)
-		if annotated_rhs == nil { return nil }
-		_ = annotated_rhs
-		if !p.Lookahead(false, func(p *Parser) any { return parseRule__group_127(p) }) { return nil }
-		return []any{op, annotated_rhs}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_invalid_tstring_replacement_field, v)
-		return v
+	{
+		if v := func() any {
+			op := p.ExpectToken(tokenize.LBRACE)
+			if op == nil { return nil }
+			_ = op
+			annotated_rhs := parseRule_annotated_rhs(p)
+			if annotated_rhs == nil { return nil }
+			_ = annotated_rhs
+			if !p.Lookahead(false, func(p *Parser) any { return parseRule__group_127(p) }) { return nil }
+			return []any{op, annotated_rhs}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_invalid_tstring_replacement_field, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 6
-	if v := func() any {
-		op := p.ExpectToken(tokenize.LBRACE)
-		if op == nil { return nil }
-		_ = op
-		annotated_rhs := parseRule_annotated_rhs(p)
-		if annotated_rhs == nil { return nil }
-		_ = annotated_rhs
-		op_1 := p.ExpectToken(tokenize.EQUAL)
-		if op_1 == nil { return nil }
-		_ = op_1
-		if !p.Lookahead(false, func(p *Parser) any { return parseRule__group_128(p) }) { return nil }
-		return []any{op, annotated_rhs, op_1}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_invalid_tstring_replacement_field, v)
-		return v
+	{
+		if v := func() any {
+			op := p.ExpectToken(tokenize.LBRACE)
+			if op == nil { return nil }
+			_ = op
+			annotated_rhs := parseRule_annotated_rhs(p)
+			if annotated_rhs == nil { return nil }
+			_ = annotated_rhs
+			op_1 := p.ExpectToken(tokenize.EQUAL)
+			if op_1 == nil { return nil }
+			_ = op_1
+			if !p.Lookahead(false, func(p *Parser) any { return parseRule__group_128(p) }) { return nil }
+			return []any{op, annotated_rhs, op_1}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_invalid_tstring_replacement_field, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 7
-	if v := func() any {
-		op := p.ExpectToken(tokenize.LBRACE)
-		if op == nil { return nil }
-		_ = op
-		annotated_rhs := parseRule_annotated_rhs(p)
-		if annotated_rhs == nil { return nil }
-		_ = annotated_rhs
-		opt := p.ExpectToken(tokenize.EQUAL)
-		_ = opt
-		invalid_tstring_conversion_character := parseRule_invalid_tstring_conversion_character(p)
-		if invalid_tstring_conversion_character == nil { return nil }
-		_ = invalid_tstring_conversion_character
-		return []any{op, annotated_rhs, opt, invalid_tstring_conversion_character}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_invalid_tstring_replacement_field, v)
-		return v
+	{
+		if v := func() any {
+			op := p.ExpectToken(tokenize.LBRACE)
+			if op == nil { return nil }
+			_ = op
+			annotated_rhs := parseRule_annotated_rhs(p)
+			if annotated_rhs == nil { return nil }
+			_ = annotated_rhs
+			opt := p.ExpectToken(tokenize.EQUAL)
+			_ = opt
+			invalid_tstring_conversion_character := parseRule_invalid_tstring_conversion_character(p)
+			if invalid_tstring_conversion_character == nil { return nil }
+			_ = invalid_tstring_conversion_character
+			return []any{op, annotated_rhs, opt, invalid_tstring_conversion_character}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_invalid_tstring_replacement_field, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 8
-	if v := func() any {
-		op := p.ExpectToken(tokenize.LBRACE)
-		if op == nil { return nil }
-		_ = op
-		annotated_rhs := parseRule_annotated_rhs(p)
-		if annotated_rhs == nil { return nil }
-		_ = annotated_rhs
-		opt := p.ExpectToken(tokenize.EQUAL)
-		_ = opt
-		opt_1 := parseRule__rhs_129(p)
-		_ = opt_1
-		if !p.Lookahead(false, func(p *Parser) any { return parseRule__group_130(p) }) { return nil }
-		return []any{op, annotated_rhs, opt, opt_1}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_invalid_tstring_replacement_field, v)
-		return v
+	{
+		if v := func() any {
+			op := p.ExpectToken(tokenize.LBRACE)
+			if op == nil { return nil }
+			_ = op
+			annotated_rhs := parseRule_annotated_rhs(p)
+			if annotated_rhs == nil { return nil }
+			_ = annotated_rhs
+			opt := p.ExpectToken(tokenize.EQUAL)
+			_ = opt
+			opt_1 := parseRule__rhs_129(p)
+			_ = opt_1
+			if !p.Lookahead(false, func(p *Parser) any { return parseRule__group_130(p) }) { return nil }
+			return []any{op, annotated_rhs, opt, opt_1}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_invalid_tstring_replacement_field, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 9
-	if v := func() any {
-		op := p.ExpectToken(tokenize.LBRACE)
-		if op == nil { return nil }
-		_ = op
-		annotated_rhs := parseRule_annotated_rhs(p)
-		if annotated_rhs == nil { return nil }
-		_ = annotated_rhs
-		opt := p.ExpectToken(tokenize.EQUAL)
-		_ = opt
-		opt_1 := parseRule__rhs_129(p)
-		_ = opt_1
-		op_1 := p.ExpectToken(tokenize.COLON)
-		if op_1 == nil { return nil }
-		_ = op_1
-		rep := parseRule__loop0_63(p)
-		_ = rep
-		if !p.Lookahead(false, func(p *Parser) any { return p.ExpectToken(tokenize.RBRACE) }) { return nil }
-		return []any{op, annotated_rhs, opt, opt_1, op_1, rep}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_invalid_tstring_replacement_field, v)
-		return v
+	{
+		if v := func() any {
+			op := p.ExpectToken(tokenize.LBRACE)
+			if op == nil { return nil }
+			_ = op
+			annotated_rhs := parseRule_annotated_rhs(p)
+			if annotated_rhs == nil { return nil }
+			_ = annotated_rhs
+			opt := p.ExpectToken(tokenize.EQUAL)
+			_ = opt
+			opt_1 := parseRule__rhs_129(p)
+			_ = opt_1
+			op_1 := p.ExpectToken(tokenize.COLON)
+			if op_1 == nil { return nil }
+			_ = op_1
+			rep := parseRule__loop0_63(p)
+			_ = rep
+			if !p.Lookahead(false, func(p *Parser) any { return p.ExpectToken(tokenize.RBRACE) }) { return nil }
+			return []any{op, annotated_rhs, opt, opt_1, op_1, rep}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_invalid_tstring_replacement_field, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 10
-	if v := func() any {
-		op := p.ExpectToken(tokenize.LBRACE)
-		if op == nil { return nil }
-		_ = op
-		annotated_rhs := parseRule_annotated_rhs(p)
-		if annotated_rhs == nil { return nil }
-		_ = annotated_rhs
-		opt := p.ExpectToken(tokenize.EQUAL)
-		_ = opt
-		opt_1 := parseRule__rhs_129(p)
-		_ = opt_1
-		if !p.Lookahead(false, func(p *Parser) any { return p.ExpectToken(tokenize.RBRACE) }) { return nil }
-		return []any{op, annotated_rhs, opt, opt_1}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_invalid_tstring_replacement_field, v)
-		return v
+	{
+		if v := func() any {
+			op := p.ExpectToken(tokenize.LBRACE)
+			if op == nil { return nil }
+			_ = op
+			annotated_rhs := parseRule_annotated_rhs(p)
+			if annotated_rhs == nil { return nil }
+			_ = annotated_rhs
+			opt := p.ExpectToken(tokenize.EQUAL)
+			_ = opt
+			opt_1 := parseRule__rhs_129(p)
+			_ = opt_1
+			if !p.Lookahead(false, func(p *Parser) any { return p.ExpectToken(tokenize.RBRACE) }) { return nil }
+			return []any{op, annotated_rhs, opt, opt_1}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_invalid_tstring_replacement_field, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_invalid_tstring_replacement_field, nil)
 	return nil
 }
@@ -12832,29 +14860,33 @@ func parseRule_invalid_tstring_conversion_character(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		op := p.ExpectToken(tokenize.EXCLAMATION)
-		if op == nil { return nil }
-		_ = op
-		if !p.Lookahead(true, func(p *Parser) any { return parseRule__group_130(p) }) { return nil }
-		return []any{op}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_invalid_tstring_conversion_character, v)
-		return v
+	{
+		if v := func() any {
+			op := p.ExpectToken(tokenize.EXCLAMATION)
+			if op == nil { return nil }
+			_ = op
+			if !p.Lookahead(true, func(p *Parser) any { return parseRule__group_130(p) }) { return nil }
+			return []any{op}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_invalid_tstring_conversion_character, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 1
-	if v := func() any {
-		op := p.ExpectToken(tokenize.EXCLAMATION)
-		if op == nil { return nil }
-		_ = op
-		if !p.Lookahead(false, func(p *Parser) any { return p.ExpectToken(tokenize.NAME) }) { return nil }
-		return []any{op}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_invalid_tstring_conversion_character, v)
-		return v
+	{
+		if v := func() any {
+			op := p.ExpectToken(tokenize.EXCLAMATION)
+			if op == nil { return nil }
+			_ = op
+			if !p.Lookahead(false, func(p *Parser) any { return p.ExpectToken(tokenize.NAME) }) { return nil }
+			return []any{op}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_invalid_tstring_conversion_character, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_invalid_tstring_conversion_character, nil)
 	return nil
 }
@@ -12866,33 +14898,37 @@ func parseRule_invalid_string_tstring_concat(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		a := parseRule__loop1_67(p)
-		if a == nil { return nil }
-		_ = a
-		b := parseRule_tstring(p)
-		if b == nil { return nil }
-		_ = b
-		return []any{a, b}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_invalid_string_tstring_concat, v)
-		return v
+	{
+		if v := func() any {
+			a := parseRule__loop1_67(p)
+			if a == nil { return nil }
+			_ = a
+			b := parseRule_tstring(p)
+			if b == nil { return nil }
+			_ = b
+			return []any{a, b}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_invalid_string_tstring_concat, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 1
-	if v := func() any {
-		a := parseRule__loop1_68(p)
-		if a == nil { return nil }
-		_ = a
-		b := parseRule__group_131(p)
-		if b == nil { return nil }
-		_ = b
-		return []any{a, b}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_invalid_string_tstring_concat, v)
-		return v
+	{
+		if v := func() any {
+			a := parseRule__loop1_68(p)
+			if a == nil { return nil }
+			_ = a
+			b := parseRule__group_131(p)
+			if b == nil { return nil }
+			_ = b
+			return []any{a, b}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_invalid_string_tstring_concat, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_invalid_string_tstring_concat, nil)
 	return nil
 }
@@ -12904,25 +14940,27 @@ func parseRule_invalid_arithmetic(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		sum := parseRule_sum(p)
-		if sum == nil { return nil }
-		_ = sum
-		g := parseRule__group_132(p)
-		if g == nil { return nil }
-		_ = g
-		a := p.ExpectName("not")
-		if a == nil { return nil }
-		_ = a
-		b := parseRule_inversion(p)
-		if b == nil { return nil }
-		_ = b
-		return []any{sum, g, a, b}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_invalid_arithmetic, v)
-		return v
+	{
+		if v := func() any {
+			sum := parseRule_sum(p)
+			if sum == nil { return nil }
+			_ = sum
+			g := parseRule__group_132(p)
+			if g == nil { return nil }
+			_ = g
+			a := p.ExpectName("not")
+			if a == nil { return nil }
+			_ = a
+			b := parseRule_inversion(p)
+			if b == nil { return nil }
+			_ = b
+			return []any{sum, g, a, b}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_invalid_arithmetic, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_invalid_arithmetic, nil)
 	return nil
 }
@@ -12934,22 +14972,24 @@ func parseRule_invalid_factor(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		g := parseRule__group_133(p)
-		if g == nil { return nil }
-		_ = g
-		a := p.ExpectName("not")
-		if a == nil { return nil }
-		_ = a
-		b := parseRule_factor(p)
-		if b == nil { return nil }
-		_ = b
-		return []any{g, a, b}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_invalid_factor, v)
-		return v
+	{
+		if v := func() any {
+			g := parseRule__group_133(p)
+			if g == nil { return nil }
+			_ = g
+			a := p.ExpectName("not")
+			if a == nil { return nil }
+			_ = a
+			b := parseRule_factor(p)
+			if b == nil { return nil }
+			_ = b
+			return []any{g, a, b}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_invalid_factor, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_invalid_factor, nil)
 	return nil
 }
@@ -12961,19 +15001,21 @@ func parseRule_invalid_type_params(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		op := p.ExpectToken(tokenize.LSQB)
-		if op == nil { return nil }
-		_ = op
-		token := p.ExpectToken(tokenize.RSQB)
-		if token == nil { return nil }
-		_ = token
-		return []any{op, token}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule_invalid_type_params, v)
-		return v
+	{
+		if v := func() any {
+			op := p.ExpectToken(tokenize.LSQB)
+			if op == nil { return nil }
+			_ = op
+			token := p.ExpectToken(tokenize.RSQB)
+			if token == nil { return nil }
+			_ = token
+			return []any{op, token}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule_invalid_type_params, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule_invalid_type_params, nil)
 	return nil
 }
@@ -13033,27 +15075,31 @@ func parseRule__group_4(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		kw := p.ExpectName("import")
-		if kw == nil { return nil }
-		_ = kw
-		return []any{kw}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule__group_4, v)
-		return v
+	{
+		if v := func() any {
+			kw := p.ExpectName("import")
+			if kw == nil { return nil }
+			_ = kw
+			return []any{kw}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule__group_4, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 1
-	if v := func() any {
-		kw := p.ExpectName("from")
-		if kw == nil { return nil }
-		_ = kw
-		return []any{kw}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule__group_4, v)
-		return v
+	{
+		if v := func() any {
+			kw := p.ExpectName("from")
+			if kw == nil { return nil }
+			_ = kw
+			return []any{kw}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule__group_4, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule__group_4, nil)
 	return nil
 }
@@ -13065,38 +15111,44 @@ func parseRule__group_5(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		kw := p.ExpectName("def")
-		if kw == nil { return nil }
-		_ = kw
-		return []any{kw}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule__group_5, v)
-		return v
+	{
+		if v := func() any {
+			kw := p.ExpectName("def")
+			if kw == nil { return nil }
+			_ = kw
+			return []any{kw}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule__group_5, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 1
-	if v := func() any {
-		op := p.ExpectToken(tokenize.AT)
-		if op == nil { return nil }
-		_ = op
-		return []any{op}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule__group_5, v)
-		return v
+	{
+		if v := func() any {
+			op := p.ExpectToken(tokenize.AT)
+			if op == nil { return nil }
+			_ = op
+			return []any{op}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule__group_5, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 2
-	if v := func() any {
-		kw := p.ExpectName("async")
-		if kw == nil { return nil }
-		_ = kw
-		return []any{kw}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule__group_5, v)
-		return v
+	{
+		if v := func() any {
+			kw := p.ExpectName("async")
+			if kw == nil { return nil }
+			_ = kw
+			return []any{kw}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule__group_5, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule__group_5, nil)
 	return nil
 }
@@ -13108,27 +15160,31 @@ func parseRule__group_6(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		kw := p.ExpectName("class")
-		if kw == nil { return nil }
-		_ = kw
-		return []any{kw}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule__group_6, v)
-		return v
+	{
+		if v := func() any {
+			kw := p.ExpectName("class")
+			if kw == nil { return nil }
+			_ = kw
+			return []any{kw}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule__group_6, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 1
-	if v := func() any {
-		op := p.ExpectToken(tokenize.AT)
-		if op == nil { return nil }
-		_ = op
-		return []any{op}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule__group_6, v)
-		return v
+	{
+		if v := func() any {
+			op := p.ExpectToken(tokenize.AT)
+			if op == nil { return nil }
+			_ = op
+			return []any{op}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule__group_6, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule__group_6, nil)
 	return nil
 }
@@ -13140,27 +15196,31 @@ func parseRule__group_7(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		kw := p.ExpectName("with")
-		if kw == nil { return nil }
-		_ = kw
-		return []any{kw}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule__group_7, v)
-		return v
+	{
+		if v := func() any {
+			kw := p.ExpectName("with")
+			if kw == nil { return nil }
+			_ = kw
+			return []any{kw}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule__group_7, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 1
-	if v := func() any {
-		kw := p.ExpectName("async")
-		if kw == nil { return nil }
-		_ = kw
-		return []any{kw}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule__group_7, v)
-		return v
+	{
+		if v := func() any {
+			kw := p.ExpectName("async")
+			if kw == nil { return nil }
+			_ = kw
+			return []any{kw}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule__group_7, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule__group_7, nil)
 	return nil
 }
@@ -13172,27 +15232,31 @@ func parseRule__group_8(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		kw := p.ExpectName("for")
-		if kw == nil { return nil }
-		_ = kw
-		return []any{kw}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule__group_8, v)
-		return v
+	{
+		if v := func() any {
+			kw := p.ExpectName("for")
+			if kw == nil { return nil }
+			_ = kw
+			return []any{kw}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule__group_8, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 1
-	if v := func() any {
-		kw := p.ExpectName("async")
-		if kw == nil { return nil }
-		_ = kw
-		return []any{kw}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule__group_8, v)
-		return v
+	{
+		if v := func() any {
+			kw := p.ExpectName("async")
+			if kw == nil { return nil }
+			_ = kw
+			return []any{kw}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule__group_8, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule__group_8, nil)
 	return nil
 }
@@ -13204,19 +15268,21 @@ func parseRule__rhs_9(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		op := p.ExpectToken(tokenize.EQUAL)
-		if op == nil { return nil }
-		_ = op
-		d := parseRule_annotated_rhs(p)
-		if d == nil { return nil }
-		_ = d
-		return []any{op, d}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule__rhs_9, v)
-		return v
+	{
+		if v := func() any {
+			op := p.ExpectToken(tokenize.EQUAL)
+			if op == nil { return nil }
+			_ = op
+			d := parseRule_annotated_rhs(p)
+			if d == nil { return nil }
+			_ = d
+			return []any{op, d}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule__rhs_9, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule__rhs_9, nil)
 	return nil
 }
@@ -13228,33 +15294,37 @@ func parseRule__group_10(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		op := p.ExpectToken(tokenize.LPAR)
-		if op == nil { return nil }
-		_ = op
-		b := parseRule_single_target(p)
-		if b == nil { return nil }
-		_ = b
-		op_1 := p.ExpectToken(tokenize.RPAR)
-		if op_1 == nil { return nil }
-		_ = op_1
-		return []any{op, b, op_1}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule__group_10, v)
-		return v
+	{
+		if v := func() any {
+			op := p.ExpectToken(tokenize.LPAR)
+			if op == nil { return nil }
+			_ = op
+			b := parseRule_single_target(p)
+			if b == nil { return nil }
+			_ = b
+			op_1 := p.ExpectToken(tokenize.RPAR)
+			if op_1 == nil { return nil }
+			_ = op_1
+			return []any{op, b, op_1}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule__group_10, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 1
-	if v := func() any {
-		single_subscript_attribute_target := parseRule_single_subscript_attribute_target(p)
-		if single_subscript_attribute_target == nil { return nil }
-		_ = single_subscript_attribute_target
-		return []any{single_subscript_attribute_target}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule__group_10, v)
-		return v
+	{
+		if v := func() any {
+			single_subscript_attribute_target := parseRule_single_subscript_attribute_target(p)
+			if single_subscript_attribute_target == nil { return nil }
+			_ = single_subscript_attribute_target
+			return []any{single_subscript_attribute_target}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule__group_10, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule__group_10, nil)
 	return nil
 }
@@ -13282,19 +15352,21 @@ func parseRule__rhs_12(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		kw := p.ExpectName("from")
-		if kw == nil { return nil }
-		_ = kw
-		z := parseRule_expression(p)
-		if z == nil { return nil }
-		_ = z
-		return []any{kw, z}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule__rhs_12, v)
-		return v
+	{
+		if v := func() any {
+			kw := p.ExpectName("from")
+			if kw == nil { return nil }
+			_ = kw
+			z := parseRule_expression(p)
+			if z == nil { return nil }
+			_ = z
+			return []any{kw, z}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule__rhs_12, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule__rhs_12, nil)
 	return nil
 }
@@ -13323,27 +15395,31 @@ func parseRule__group_14(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		op := p.ExpectToken(tokenize.SEMI)
-		if op == nil { return nil }
-		_ = op
-		return []any{op}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule__group_14, v)
-		return v
+	{
+		if v := func() any {
+			op := p.ExpectToken(tokenize.SEMI)
+			if op == nil { return nil }
+			_ = op
+			return []any{op}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule__group_14, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 1
-	if v := func() any {
-		newline := p.ExpectToken(tokenize.NEWLINE)
-		if newline == nil { return nil }
-		_ = newline
-		return []any{newline}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule__group_14, v)
-		return v
+	{
+		if v := func() any {
+			newline := p.ExpectToken(tokenize.NEWLINE)
+			if newline == nil { return nil }
+			_ = newline
+			return []any{newline}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule__group_14, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule__group_14, nil)
 	return nil
 }
@@ -13355,19 +15431,21 @@ func parseRule__rhs_15(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		op := p.ExpectToken(tokenize.COMMA)
-		if op == nil { return nil }
-		_ = op
-		z := parseRule_expression(p)
-		if z == nil { return nil }
-		_ = z
-		return []any{op, z}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule__rhs_15, v)
-		return v
+	{
+		if v := func() any {
+			op := p.ExpectToken(tokenize.COMMA)
+			if op == nil { return nil }
+			_ = op
+			z := parseRule_expression(p)
+			if z == nil { return nil }
+			_ = z
+			return []any{op, z}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule__rhs_15, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule__rhs_15, nil)
 	return nil
 }
@@ -13427,19 +15505,21 @@ func parseRule__rhs_19(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		kw := p.ExpectName("as")
-		if kw == nil { return nil }
-		_ = kw
-		z := p.ExpectToken(tokenize.NAME)
-		if z == nil { return nil }
-		_ = z
-		return []any{kw, z}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule__rhs_19, v)
-		return v
+	{
+		if v := func() any {
+			kw := p.ExpectName("as")
+			if kw == nil { return nil }
+			_ = kw
+			z := p.ExpectToken(tokenize.NAME)
+			if z == nil { return nil }
+			_ = z
+			return []any{kw, z}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule__rhs_19, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule__rhs_19, nil)
 	return nil
 }
@@ -13484,21 +15564,23 @@ func parseRule__rhs_22(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		op := p.ExpectToken(tokenize.LPAR)
-		if op == nil { return nil }
-		_ = op
-		z := parseRule_arguments(p)
-		_ = z
-		op_1 := p.ExpectToken(tokenize.RPAR)
-		if op_1 == nil { return nil }
-		_ = op_1
-		return []any{op, z, op_1}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule__rhs_22, v)
-		return v
+	{
+		if v := func() any {
+			op := p.ExpectToken(tokenize.LPAR)
+			if op == nil { return nil }
+			_ = op
+			z := parseRule_arguments(p)
+			_ = z
+			op_1 := p.ExpectToken(tokenize.RPAR)
+			if op_1 == nil { return nil }
+			_ = op_1
+			return []any{op, z, op_1}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule__rhs_22, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule__rhs_22, nil)
 	return nil
 }
@@ -13510,19 +15592,21 @@ func parseRule__rhs_23(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		op := p.ExpectToken(tokenize.RARROW)
-		if op == nil { return nil }
-		_ = op
-		z := parseRule_expression(p)
-		if z == nil { return nil }
-		_ = z
-		return []any{op, z}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule__rhs_23, v)
-		return v
+	{
+		if v := func() any {
+			op := p.ExpectToken(tokenize.RARROW)
+			if op == nil { return nil }
+			_ = op
+			z := parseRule_expression(p)
+			if z == nil { return nil }
+			_ = z
+			return []any{op, z}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule__rhs_23, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule__rhs_23, nil)
 	return nil
 }
@@ -13644,38 +15728,44 @@ func parseRule__group_31(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		op := p.ExpectToken(tokenize.COMMA)
-		if op == nil { return nil }
-		_ = op
-		return []any{op}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule__group_31, v)
-		return v
+	{
+		if v := func() any {
+			op := p.ExpectToken(tokenize.COMMA)
+			if op == nil { return nil }
+			_ = op
+			return []any{op}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule__group_31, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 1
-	if v := func() any {
-		op := p.ExpectToken(tokenize.RPAR)
-		if op == nil { return nil }
-		_ = op
-		return []any{op}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule__group_31, v)
-		return v
+	{
+		if v := func() any {
+			op := p.ExpectToken(tokenize.RPAR)
+			if op == nil { return nil }
+			_ = op
+			return []any{op}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule__group_31, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 2
-	if v := func() any {
-		op := p.ExpectToken(tokenize.COLON)
-		if op == nil { return nil }
-		_ = op
-		return []any{op}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule__group_31, v)
-		return v
+	{
+		if v := func() any {
+			op := p.ExpectToken(tokenize.COLON)
+			if op == nil { return nil }
+			_ = op
+			return []any{op}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule__group_31, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule__group_31, nil)
 	return nil
 }
@@ -13752,27 +15842,31 @@ func parseRule__group_36(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		op := p.ExpectToken(tokenize.PLUS)
-		if op == nil { return nil }
-		_ = op
-		return []any{op}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule__group_36, v)
-		return v
+	{
+		if v := func() any {
+			op := p.ExpectToken(tokenize.PLUS)
+			if op == nil { return nil }
+			_ = op
+			return []any{op}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule__group_36, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 1
-	if v := func() any {
-		op := p.ExpectToken(tokenize.MINUS)
-		if op == nil { return nil }
-		_ = op
-		return []any{op}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule__group_36, v)
-		return v
+	{
+		if v := func() any {
+			op := p.ExpectToken(tokenize.MINUS)
+			if op == nil { return nil }
+			_ = op
+			return []any{op}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule__group_36, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule__group_36, nil)
 	return nil
 }
@@ -13784,38 +15878,44 @@ func parseRule__group_37(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		string := p.ExpectToken(tokenize.STRING)
-		if string == nil { return nil }
-		_ = string
-		return []any{string}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule__group_37, v)
-		return v
+	{
+		if v := func() any {
+			string := p.ExpectToken(tokenize.STRING)
+			if string == nil { return nil }
+			_ = string
+			return []any{string}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule__group_37, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 1
-	if v := func() any {
-		fstring_start := p.ExpectToken(tokenize.FSTRING_START)
-		if fstring_start == nil { return nil }
-		_ = fstring_start
-		return []any{fstring_start}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule__group_37, v)
-		return v
+	{
+		if v := func() any {
+			fstring_start := p.ExpectToken(tokenize.FSTRING_START)
+			if fstring_start == nil { return nil }
+			_ = fstring_start
+			return []any{fstring_start}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule__group_37, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 2
-	if v := func() any {
-		tstring_start := p.ExpectToken(tokenize.TSTRING_START)
-		if tstring_start == nil { return nil }
-		_ = tstring_start
-		return []any{tstring_start}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule__group_37, v)
-		return v
+	{
+		if v := func() any {
+			tstring_start := p.ExpectToken(tokenize.TSTRING_START)
+			if tstring_start == nil { return nil }
+			_ = tstring_start
+			return []any{tstring_start}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule__group_37, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule__group_37, nil)
 	return nil
 }
@@ -13827,38 +15927,44 @@ func parseRule__group_38(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		op := p.ExpectToken(tokenize.DOT)
-		if op == nil { return nil }
-		_ = op
-		return []any{op}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule__group_38, v)
-		return v
+	{
+		if v := func() any {
+			op := p.ExpectToken(tokenize.DOT)
+			if op == nil { return nil }
+			_ = op
+			return []any{op}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule__group_38, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 1
-	if v := func() any {
-		op := p.ExpectToken(tokenize.LPAR)
-		if op == nil { return nil }
-		_ = op
-		return []any{op}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule__group_38, v)
-		return v
+	{
+		if v := func() any {
+			op := p.ExpectToken(tokenize.LPAR)
+			if op == nil { return nil }
+			_ = op
+			return []any{op}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule__group_38, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 2
-	if v := func() any {
-		op := p.ExpectToken(tokenize.EQUAL)
-		if op == nil { return nil }
-		_ = op
-		return []any{op}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule__group_38, v)
-		return v
+	{
+		if v := func() any {
+			op := p.ExpectToken(tokenize.EQUAL)
+			if op == nil { return nil }
+			_ = op
+			return []any{op}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule__group_38, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule__group_38, nil)
 	return nil
 }
@@ -13904,27 +16010,31 @@ func parseRule__group_41(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		literal_expr := parseRule_literal_expr(p)
-		if literal_expr == nil { return nil }
-		_ = literal_expr
-		return []any{literal_expr}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule__group_41, v)
-		return v
+	{
+		if v := func() any {
+			literal_expr := parseRule_literal_expr(p)
+			if literal_expr == nil { return nil }
+			_ = literal_expr
+			return []any{literal_expr}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule__group_41, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 1
-	if v := func() any {
-		attr := parseRule_attr(p)
-		if attr == nil { return nil }
-		_ = attr
-		return []any{attr}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule__group_41, v)
-		return v
+	{
+		if v := func() any {
+			attr := parseRule_attr(p)
+			if attr == nil { return nil }
+			_ = attr
+			return []any{attr}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule__group_41, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule__group_41, nil)
 	return nil
 }
@@ -14101,18 +16211,20 @@ func parseRule__rhs_52(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		op := p.ExpectToken(tokenize.COLON)
-		if op == nil { return nil }
-		_ = op
-		d := parseRule_expression(p)
-		_ = d
-		return []any{op, d}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule__rhs_52, v)
-		return v
+	{
+		if v := func() any {
+			op := p.ExpectToken(tokenize.COLON)
+			if op == nil { return nil }
+			_ = op
+			d := parseRule_expression(p)
+			_ = d
+			return []any{op, d}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule__rhs_52, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule__rhs_52, nil)
 	return nil
 }
@@ -14124,38 +16236,44 @@ func parseRule__group_53(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		tuple := parseRule_tuple(p)
-		if tuple == nil { return nil }
-		_ = tuple
-		return []any{tuple}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule__group_53, v)
-		return v
+	{
+		if v := func() any {
+			tuple := parseRule_tuple(p)
+			if tuple == nil { return nil }
+			_ = tuple
+			return []any{tuple}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule__group_53, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 1
-	if v := func() any {
-		group := parseRule_group(p)
-		if group == nil { return nil }
-		_ = group
-		return []any{group}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule__group_53, v)
-		return v
+	{
+		if v := func() any {
+			group := parseRule_group(p)
+			if group == nil { return nil }
+			_ = group
+			return []any{group}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule__group_53, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 2
-	if v := func() any {
-		genexp := parseRule_genexp(p)
-		if genexp == nil { return nil }
-		_ = genexp
-		return []any{genexp}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule__group_53, v)
-		return v
+	{
+		if v := func() any {
+			genexp := parseRule_genexp(p)
+			if genexp == nil { return nil }
+			_ = genexp
+			return []any{genexp}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule__group_53, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule__group_53, nil)
 	return nil
 }
@@ -14167,27 +16285,31 @@ func parseRule__group_54(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		list := parseRule_list(p)
-		if list == nil { return nil }
-		_ = list
-		return []any{list}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule__group_54, v)
-		return v
+	{
+		if v := func() any {
+			list := parseRule_list(p)
+			if list == nil { return nil }
+			_ = list
+			return []any{list}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule__group_54, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 1
-	if v := func() any {
-		listcomp := parseRule_listcomp(p)
-		if listcomp == nil { return nil }
-		_ = listcomp
-		return []any{listcomp}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule__group_54, v)
-		return v
+	{
+		if v := func() any {
+			listcomp := parseRule_listcomp(p)
+			if listcomp == nil { return nil }
+			_ = listcomp
+			return []any{listcomp}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule__group_54, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule__group_54, nil)
 	return nil
 }
@@ -14199,49 +16321,57 @@ func parseRule__group_55(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		dict := parseRule_dict(p)
-		if dict == nil { return nil }
-		_ = dict
-		return []any{dict}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule__group_55, v)
-		return v
+	{
+		if v := func() any {
+			dict := parseRule_dict(p)
+			if dict == nil { return nil }
+			_ = dict
+			return []any{dict}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule__group_55, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 1
-	if v := func() any {
-		set := parseRule_set(p)
-		if set == nil { return nil }
-		_ = set
-		return []any{set}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule__group_55, v)
-		return v
+	{
+		if v := func() any {
+			set := parseRule_set(p)
+			if set == nil { return nil }
+			_ = set
+			return []any{set}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule__group_55, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 2
-	if v := func() any {
-		dictcomp := parseRule_dictcomp(p)
-		if dictcomp == nil { return nil }
-		_ = dictcomp
-		return []any{dictcomp}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule__group_55, v)
-		return v
+	{
+		if v := func() any {
+			dictcomp := parseRule_dictcomp(p)
+			if dictcomp == nil { return nil }
+			_ = dictcomp
+			return []any{dictcomp}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule__group_55, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 3
-	if v := func() any {
-		setcomp := parseRule_setcomp(p)
-		if setcomp == nil { return nil }
-		_ = setcomp
-		return []any{setcomp}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule__group_55, v)
-		return v
+	{
+		if v := func() any {
+			setcomp := parseRule_setcomp(p)
+			if setcomp == nil { return nil }
+			_ = setcomp
+			return []any{setcomp}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule__group_55, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule__group_55, nil)
 	return nil
 }
@@ -14253,27 +16383,31 @@ func parseRule__group_56(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		yield_expr := parseRule_yield_expr(p)
-		if yield_expr == nil { return nil }
-		_ = yield_expr
-		return []any{yield_expr}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule__group_56, v)
-		return v
+	{
+		if v := func() any {
+			yield_expr := parseRule_yield_expr(p)
+			if yield_expr == nil { return nil }
+			_ = yield_expr
+			return []any{yield_expr}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule__group_56, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 1
-	if v := func() any {
-		named_expression := parseRule_named_expression(p)
-		if named_expression == nil { return nil }
-		_ = named_expression
-		return []any{named_expression}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule__group_56, v)
-		return v
+	{
+		if v := func() any {
+			named_expression := parseRule_named_expression(p)
+			if named_expression == nil { return nil }
+			_ = named_expression
+			return []any{named_expression}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule__group_56, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule__group_56, nil)
 	return nil
 }
@@ -14470,21 +16604,23 @@ func parseRule__rhs_69(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		y := parseRule_star_named_expression(p)
-		if y == nil { return nil }
-		_ = y
-		op := p.ExpectToken(tokenize.COMMA)
-		if op == nil { return nil }
-		_ = op
-		z := parseRule_star_named_expressions(p)
-		_ = z
-		return []any{y, op, z}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule__rhs_69, v)
-		return v
+	{
+		if v := func() any {
+			y := parseRule_star_named_expression(p)
+			if y == nil { return nil }
+			_ = y
+			op := p.ExpectToken(tokenize.COMMA)
+			if op == nil { return nil }
+			_ = op
+			z := parseRule_star_named_expressions(p)
+			_ = z
+			return []any{y, op, z}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule__rhs_69, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule__rhs_69, nil)
 	return nil
 }
@@ -14544,28 +16680,32 @@ func parseRule__group_73(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		assignment_expression := parseRule_assignment_expression(p)
-		if assignment_expression == nil { return nil }
-		_ = assignment_expression
-		return []any{assignment_expression}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule__group_73, v)
-		return v
+	{
+		if v := func() any {
+			assignment_expression := parseRule_assignment_expression(p)
+			if assignment_expression == nil { return nil }
+			_ = assignment_expression
+			return []any{assignment_expression}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule__group_73, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 1
-	if v := func() any {
-		expression := parseRule_expression(p)
-		if expression == nil { return nil }
-		_ = expression
-		if !p.Lookahead(false, func(p *Parser) any { return p.ExpectToken(tokenize.COLONEQUAL) }) { return nil }
-		return []any{expression}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule__group_73, v)
-		return v
+	{
+		if v := func() any {
+			expression := parseRule_expression(p)
+			if expression == nil { return nil }
+			_ = expression
+			if !p.Lookahead(false, func(p *Parser) any { return p.ExpectToken(tokenize.COLONEQUAL) }) { return nil }
+			return []any{expression}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule__group_73, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule__group_73, nil)
 	return nil
 }
@@ -14594,19 +16734,21 @@ func parseRule__rhs_75(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		op := p.ExpectToken(tokenize.COMMA)
-		if op == nil { return nil }
-		_ = op
-		k := parseRule_kwargs(p)
-		if k == nil { return nil }
-		_ = k
-		return []any{op, k}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule__rhs_75, v)
-		return v
+	{
+		if v := func() any {
+			op := p.ExpectToken(tokenize.COMMA)
+			if op == nil { return nil }
+			_ = op
+			k := parseRule_kwargs(p)
+			if k == nil { return nil }
+			_ = k
+			return []any{op, k}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule__rhs_75, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule__rhs_75, nil)
 	return nil
 }
@@ -14700,17 +16842,19 @@ func parseRule__group_81(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		if !p.Lookahead(false, func(p *Parser) any { return p.ExpectToken(tokenize.STAR) }) { return nil }
-		star_target := parseRule_star_target(p)
-		if star_target == nil { return nil }
-		_ = star_target
-		return []any{star_target}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule__group_81, v)
-		return v
+	{
+		if v := func() any {
+			if !p.Lookahead(false, func(p *Parser) any { return p.ExpectToken(tokenize.STAR) }) { return nil }
+			star_target := parseRule_star_target(p)
+			if star_target == nil { return nil }
+			_ = star_target
+			return []any{star_target}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule__group_81, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule__group_81, nil)
 	return nil
 }
@@ -14756,19 +16900,21 @@ func parseRule__group_84(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		newline := p.ExpectToken(tokenize.NEWLINE)
-		if newline == nil { return nil }
-		_ = newline
-		indent := p.ExpectToken(tokenize.INDENT)
-		if indent == nil { return nil }
-		_ = indent
-		return []any{newline, indent}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule__group_84, v)
-		return v
+	{
+		if v := func() any {
+			newline := p.ExpectToken(tokenize.NEWLINE)
+			if newline == nil { return nil }
+			_ = newline
+			indent := p.ExpectToken(tokenize.INDENT)
+			if indent == nil { return nil }
+			_ = indent
+			return []any{newline, indent}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule__group_84, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule__group_84, nil)
 	return nil
 }
@@ -14780,27 +16926,31 @@ func parseRule__group_85(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		g := parseRule__group_145(p)
-		if g == nil { return nil }
-		_ = g
-		return []any{g}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule__group_85, v)
-		return v
+	{
+		if v := func() any {
+			g := parseRule__group_145(p)
+			if g == nil { return nil }
+			_ = g
+			return []any{g}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule__group_85, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 1
-	if v := func() any {
-		kwargs := parseRule_kwargs(p)
-		if kwargs == nil { return nil }
-		_ = kwargs
-		return []any{kwargs}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule__group_85, v)
-		return v
+	{
+		if v := func() any {
+			kwargs := parseRule_kwargs(p)
+			if kwargs == nil { return nil }
+			_ = kwargs
+			return []any{kwargs}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule__group_85, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule__group_85, nil)
 	return nil
 }
@@ -14829,30 +16979,34 @@ func parseRule__rhs_87(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		args := parseRule_args(p)
-		if args == nil { return nil }
-		_ = args
-		return []any{args}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule__rhs_87, v)
-		return v
+	{
+		if v := func() any {
+			args := parseRule_args(p)
+			if args == nil { return nil }
+			_ = args
+			return []any{args}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule__rhs_87, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 1
-	if v := func() any {
-		expression := parseRule_expression(p)
-		if expression == nil { return nil }
-		_ = expression
-		for_if_clauses := parseRule_for_if_clauses(p)
-		if for_if_clauses == nil { return nil }
-		_ = for_if_clauses
-		return []any{expression, for_if_clauses}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule__rhs_87, v)
-		return v
+	{
+		if v := func() any {
+			expression := parseRule_expression(p)
+			if expression == nil { return nil }
+			_ = expression
+			for_if_clauses := parseRule_for_if_clauses(p)
+			if for_if_clauses == nil { return nil }
+			_ = for_if_clauses
+			return []any{expression, for_if_clauses}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule__rhs_87, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule__rhs_87, nil)
 	return nil
 }
@@ -14864,19 +17018,21 @@ func parseRule__group_88(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		args := parseRule_args(p)
-		if args == nil { return nil }
-		_ = args
-		op := p.ExpectToken(tokenize.COMMA)
-		if op == nil { return nil }
-		_ = op
-		return []any{args, op}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule__group_88, v)
-		return v
+	{
+		if v := func() any {
+			args := parseRule_args(p)
+			if args == nil { return nil }
+			_ = args
+			op := p.ExpectToken(tokenize.COMMA)
+			if op == nil { return nil }
+			_ = op
+			return []any{args, op}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule__group_88, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule__group_88, nil)
 	return nil
 }
@@ -14888,27 +17044,31 @@ func parseRule__group_89(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		op := p.ExpectToken(tokenize.COMMA)
-		if op == nil { return nil }
-		_ = op
-		return []any{op}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule__group_89, v)
-		return v
+	{
+		if v := func() any {
+			op := p.ExpectToken(tokenize.COMMA)
+			if op == nil { return nil }
+			_ = op
+			return []any{op}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule__group_89, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 1
-	if v := func() any {
-		op := p.ExpectToken(tokenize.RPAR)
-		if op == nil { return nil }
-		_ = op
-		return []any{op}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule__group_89, v)
-		return v
+	{
+		if v := func() any {
+			op := p.ExpectToken(tokenize.RPAR)
+			if op == nil { return nil }
+			_ = op
+			return []any{op}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule__group_89, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule__group_89, nil)
 	return nil
 }
@@ -14920,38 +17080,44 @@ func parseRule__group_90(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		kw := p.ExpectName("True")
-		if kw == nil { return nil }
-		_ = kw
-		return []any{kw}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule__group_90, v)
-		return v
+	{
+		if v := func() any {
+			kw := p.ExpectName("True")
+			if kw == nil { return nil }
+			_ = kw
+			return []any{kw}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule__group_90, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 1
-	if v := func() any {
-		kw := p.ExpectName("False")
-		if kw == nil { return nil }
-		_ = kw
-		return []any{kw}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule__group_90, v)
-		return v
+	{
+		if v := func() any {
+			kw := p.ExpectName("False")
+			if kw == nil { return nil }
+			_ = kw
+			return []any{kw}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule__group_90, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 2
-	if v := func() any {
-		kw := p.ExpectName("None")
-		if kw == nil { return nil }
-		_ = kw
-		return []any{kw}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule__group_90, v)
-		return v
+	{
+		if v := func() any {
+			kw := p.ExpectName("None")
+			if kw == nil { return nil }
+			_ = kw
+			return []any{kw}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule__group_90, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule__group_90, nil)
 	return nil
 }
@@ -14963,19 +17129,21 @@ func parseRule__group_91(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		name := p.ExpectToken(tokenize.NAME)
-		if name == nil { return nil }
-		_ = name
-		op := p.ExpectToken(tokenize.EQUAL)
-		if op == nil { return nil }
-		_ = op
-		return []any{name, op}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule__group_91, v)
-		return v
+	{
+		if v := func() any {
+			name := p.ExpectToken(tokenize.NAME)
+			if name == nil { return nil }
+			_ = name
+			op := p.ExpectToken(tokenize.EQUAL)
+			if op == nil { return nil }
+			_ = op
+			return []any{name, op}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule__group_91, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule__group_91, nil)
 	return nil
 }
@@ -15003,30 +17171,34 @@ func parseRule__group_93(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		name := p.ExpectToken(tokenize.NAME)
-		if name == nil { return nil }
-		_ = name
-		string := p.ExpectToken(tokenize.STRING)
-		if string == nil { return nil }
-		_ = string
-		return []any{name, string}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule__group_93, v)
-		return v
+	{
+		if v := func() any {
+			name := p.ExpectToken(tokenize.NAME)
+			if name == nil { return nil }
+			_ = name
+			string := p.ExpectToken(tokenize.STRING)
+			if string == nil { return nil }
+			_ = string
+			return []any{name, string}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule__group_93, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 1
-	if v := func() any {
-		soft_keyword := p.ExpectToken(tokenize.SOFT_KEYWORD)
-		if soft_keyword == nil { return nil }
-		_ = soft_keyword
-		return []any{soft_keyword}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule__group_93, v)
-		return v
+	{
+		if v := func() any {
+			soft_keyword := p.ExpectToken(tokenize.SOFT_KEYWORD)
+			if soft_keyword == nil { return nil }
+			_ = soft_keyword
+			return []any{soft_keyword}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule__group_93, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule__group_93, nil)
 	return nil
 }
@@ -15038,27 +17210,31 @@ func parseRule__group_94(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		kw := p.ExpectName("else")
-		if kw == nil { return nil }
-		_ = kw
-		return []any{kw}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule__group_94, v)
-		return v
+	{
+		if v := func() any {
+			kw := p.ExpectName("else")
+			if kw == nil { return nil }
+			_ = kw
+			return []any{kw}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule__group_94, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 1
-	if v := func() any {
-		op := p.ExpectToken(tokenize.COLON)
-		if op == nil { return nil }
-		_ = op
-		return []any{op}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule__group_94, v)
-		return v
+	{
+		if v := func() any {
+			op := p.ExpectToken(tokenize.COLON)
+			if op == nil { return nil }
+			_ = op
+			return []any{op}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule__group_94, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule__group_94, nil)
 	return nil
 }
@@ -15070,38 +17246,44 @@ func parseRule__group_95(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		pass_stmt := parseRule_pass_stmt(p)
-		if pass_stmt == nil { return nil }
-		_ = pass_stmt
-		return []any{pass_stmt}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule__group_95, v)
-		return v
+	{
+		if v := func() any {
+			pass_stmt := parseRule_pass_stmt(p)
+			if pass_stmt == nil { return nil }
+			_ = pass_stmt
+			return []any{pass_stmt}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule__group_95, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 1
-	if v := func() any {
-		break_stmt := parseRule_break_stmt(p)
-		if break_stmt == nil { return nil }
-		_ = break_stmt
-		return []any{break_stmt}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule__group_95, v)
-		return v
+	{
+		if v := func() any {
+			break_stmt := parseRule_break_stmt(p)
+			if break_stmt == nil { return nil }
+			_ = break_stmt
+			return []any{break_stmt}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule__group_95, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 2
-	if v := func() any {
-		continue_stmt := parseRule_continue_stmt(p)
-		if continue_stmt == nil { return nil }
-		_ = continue_stmt
-		return []any{continue_stmt}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule__group_95, v)
-		return v
+	{
+		if v := func() any {
+			continue_stmt := parseRule_continue_stmt(p)
+			if continue_stmt == nil { return nil }
+			_ = continue_stmt
+			return []any{continue_stmt}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule__group_95, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule__group_95, nil)
 	return nil
 }
@@ -15113,27 +17295,31 @@ func parseRule__group_96(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		op := p.ExpectToken(tokenize.EQUAL)
-		if op == nil { return nil }
-		_ = op
-		return []any{op}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule__group_96, v)
-		return v
+	{
+		if v := func() any {
+			op := p.ExpectToken(tokenize.EQUAL)
+			if op == nil { return nil }
+			_ = op
+			return []any{op}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule__group_96, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 1
-	if v := func() any {
-		op := p.ExpectToken(tokenize.COLONEQUAL)
-		if op == nil { return nil }
-		_ = op
-		return []any{op}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule__group_96, v)
-		return v
+	{
+		if v := func() any {
+			op := p.ExpectToken(tokenize.COLONEQUAL)
+			if op == nil { return nil }
+			_ = op
+			return []any{op}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule__group_96, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule__group_96, nil)
 	return nil
 }
@@ -15145,71 +17331,83 @@ func parseRule__group_97(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		list := parseRule_list(p)
-		if list == nil { return nil }
-		_ = list
-		return []any{list}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule__group_97, v)
-		return v
+	{
+		if v := func() any {
+			list := parseRule_list(p)
+			if list == nil { return nil }
+			_ = list
+			return []any{list}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule__group_97, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 1
-	if v := func() any {
-		tuple := parseRule_tuple(p)
-		if tuple == nil { return nil }
-		_ = tuple
-		return []any{tuple}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule__group_97, v)
-		return v
+	{
+		if v := func() any {
+			tuple := parseRule_tuple(p)
+			if tuple == nil { return nil }
+			_ = tuple
+			return []any{tuple}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule__group_97, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 2
-	if v := func() any {
-		genexp := parseRule_genexp(p)
-		if genexp == nil { return nil }
-		_ = genexp
-		return []any{genexp}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule__group_97, v)
-		return v
+	{
+		if v := func() any {
+			genexp := parseRule_genexp(p)
+			if genexp == nil { return nil }
+			_ = genexp
+			return []any{genexp}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule__group_97, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 3
-	if v := func() any {
-		kw := p.ExpectName("True")
-		if kw == nil { return nil }
-		_ = kw
-		return []any{kw}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule__group_97, v)
-		return v
+	{
+		if v := func() any {
+			kw := p.ExpectName("True")
+			if kw == nil { return nil }
+			_ = kw
+			return []any{kw}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule__group_97, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 4
-	if v := func() any {
-		kw := p.ExpectName("None")
-		if kw == nil { return nil }
-		_ = kw
-		return []any{kw}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule__group_97, v)
-		return v
+	{
+		if v := func() any {
+			kw := p.ExpectName("None")
+			if kw == nil { return nil }
+			_ = kw
+			return []any{kw}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule__group_97, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 5
-	if v := func() any {
-		kw := p.ExpectName("False")
-		if kw == nil { return nil }
-		_ = kw
-		return []any{kw}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule__group_97, v)
-		return v
+	{
+		if v := func() any {
+			kw := p.ExpectName("False")
+			if kw == nil { return nil }
+			_ = kw
+			return []any{kw}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule__group_97, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule__group_97, nil)
 	return nil
 }
@@ -15251,38 +17449,44 @@ func parseRule__group_100(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		op := p.ExpectToken(tokenize.LSQB)
-		if op == nil { return nil }
-		_ = op
-		return []any{op}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule__group_100, v)
-		return v
+	{
+		if v := func() any {
+			op := p.ExpectToken(tokenize.LSQB)
+			if op == nil { return nil }
+			_ = op
+			return []any{op}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule__group_100, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 1
-	if v := func() any {
-		op := p.ExpectToken(tokenize.LPAR)
-		if op == nil { return nil }
-		_ = op
-		return []any{op}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule__group_100, v)
-		return v
+	{
+		if v := func() any {
+			op := p.ExpectToken(tokenize.LPAR)
+			if op == nil { return nil }
+			_ = op
+			return []any{op}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule__group_100, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 2
-	if v := func() any {
-		op := p.ExpectToken(tokenize.LBRACE)
-		if op == nil { return nil }
-		_ = op
-		return []any{op}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule__group_100, v)
-		return v
+	{
+		if v := func() any {
+			op := p.ExpectToken(tokenize.LBRACE)
+			if op == nil { return nil }
+			_ = op
+			return []any{op}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule__group_100, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule__group_100, nil)
 	return nil
 }
@@ -15294,27 +17498,31 @@ func parseRule__group_101(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		op := p.ExpectToken(tokenize.LSQB)
-		if op == nil { return nil }
-		_ = op
-		return []any{op}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule__group_101, v)
-		return v
+	{
+		if v := func() any {
+			op := p.ExpectToken(tokenize.LSQB)
+			if op == nil { return nil }
+			_ = op
+			return []any{op}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule__group_101, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 1
-	if v := func() any {
-		op := p.ExpectToken(tokenize.LBRACE)
-		if op == nil { return nil }
-		_ = op
-		return []any{op}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule__group_101, v)
-		return v
+	{
+		if v := func() any {
+			op := p.ExpectToken(tokenize.LBRACE)
+			if op == nil { return nil }
+			_ = op
+			return []any{op}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule__group_101, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule__group_101, nil)
 	return nil
 }
@@ -15326,27 +17534,31 @@ func parseRule__group_102(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		slash_no_default := parseRule_slash_no_default(p)
-		if slash_no_default == nil { return nil }
-		_ = slash_no_default
-		return []any{slash_no_default}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule__group_102, v)
-		return v
+	{
+		if v := func() any {
+			slash_no_default := parseRule_slash_no_default(p)
+			if slash_no_default == nil { return nil }
+			_ = slash_no_default
+			return []any{slash_no_default}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule__group_102, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 1
-	if v := func() any {
-		slash_with_default := parseRule_slash_with_default(p)
-		if slash_with_default == nil { return nil }
-		_ = slash_with_default
-		return []any{slash_with_default}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule__group_102, v)
-		return v
+	{
+		if v := func() any {
+			slash_with_default := parseRule_slash_with_default(p)
+			if slash_with_default == nil { return nil }
+			_ = slash_with_default
+			return []any{slash_with_default}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule__group_102, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule__group_102, nil)
 	return nil
 }
@@ -15358,27 +17570,31 @@ func parseRule__group_103(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		op := p.ExpectToken(tokenize.COMMA)
-		if op == nil { return nil }
-		_ = op
-		return []any{op}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule__group_103, v)
-		return v
+	{
+		if v := func() any {
+			op := p.ExpectToken(tokenize.COMMA)
+			if op == nil { return nil }
+			_ = op
+			return []any{op}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule__group_103, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 1
-	if v := func() any {
-		param_no_default := parseRule_param_no_default(p)
-		if param_no_default == nil { return nil }
-		_ = param_no_default
-		return []any{param_no_default}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule__group_103, v)
-		return v
+	{
+		if v := func() any {
+			param_no_default := parseRule_param_no_default(p)
+			if param_no_default == nil { return nil }
+			_ = param_no_default
+			return []any{param_no_default}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule__group_103, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule__group_103, nil)
 	return nil
 }
@@ -15390,27 +17606,31 @@ func parseRule__group_104(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		op := p.ExpectToken(tokenize.RPAR)
-		if op == nil { return nil }
-		_ = op
-		return []any{op}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule__group_104, v)
-		return v
+	{
+		if v := func() any {
+			op := p.ExpectToken(tokenize.RPAR)
+			if op == nil { return nil }
+			_ = op
+			return []any{op}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule__group_104, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 1
-	if v := func() any {
-		op := p.ExpectToken(tokenize.COMMA)
-		if op == nil { return nil }
-		_ = op
-		return []any{op}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule__group_104, v)
-		return v
+	{
+		if v := func() any {
+			op := p.ExpectToken(tokenize.COMMA)
+			if op == nil { return nil }
+			_ = op
+			return []any{op}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule__group_104, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule__group_104, nil)
 	return nil
 }
@@ -15422,30 +17642,34 @@ func parseRule__group_105(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		op := p.ExpectToken(tokenize.RPAR)
-		if op == nil { return nil }
-		_ = op
-		return []any{op}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule__group_105, v)
-		return v
+	{
+		if v := func() any {
+			op := p.ExpectToken(tokenize.RPAR)
+			if op == nil { return nil }
+			_ = op
+			return []any{op}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule__group_105, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 1
-	if v := func() any {
-		op := p.ExpectToken(tokenize.COMMA)
-		if op == nil { return nil }
-		_ = op
-		g := parseRule__group_149(p)
-		if g == nil { return nil }
-		_ = g
-		return []any{op, g}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule__group_105, v)
-		return v
+	{
+		if v := func() any {
+			op := p.ExpectToken(tokenize.COMMA)
+			if op == nil { return nil }
+			_ = op
+			g := parseRule__group_149(p)
+			if g == nil { return nil }
+			_ = g
+			return []any{op, g}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule__group_105, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule__group_105, nil)
 	return nil
 }
@@ -15457,27 +17681,31 @@ func parseRule__group_106(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		param_no_default := parseRule_param_no_default(p)
-		if param_no_default == nil { return nil }
-		_ = param_no_default
-		return []any{param_no_default}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule__group_106, v)
-		return v
+	{
+		if v := func() any {
+			param_no_default := parseRule_param_no_default(p)
+			if param_no_default == nil { return nil }
+			_ = param_no_default
+			return []any{param_no_default}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule__group_106, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 1
-	if v := func() any {
-		op := p.ExpectToken(tokenize.COMMA)
-		if op == nil { return nil }
-		_ = op
-		return []any{op}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule__group_106, v)
-		return v
+	{
+		if v := func() any {
+			op := p.ExpectToken(tokenize.COMMA)
+			if op == nil { return nil }
+			_ = op
+			return []any{op}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule__group_106, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule__group_106, nil)
 	return nil
 }
@@ -15489,38 +17717,44 @@ func parseRule__group_107(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		op := p.ExpectToken(tokenize.STAR)
-		if op == nil { return nil }
-		_ = op
-		return []any{op}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule__group_107, v)
-		return v
+	{
+		if v := func() any {
+			op := p.ExpectToken(tokenize.STAR)
+			if op == nil { return nil }
+			_ = op
+			return []any{op}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule__group_107, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 1
-	if v := func() any {
-		op := p.ExpectToken(tokenize.DOUBLESTAR)
-		if op == nil { return nil }
-		_ = op
-		return []any{op}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule__group_107, v)
-		return v
+	{
+		if v := func() any {
+			op := p.ExpectToken(tokenize.DOUBLESTAR)
+			if op == nil { return nil }
+			_ = op
+			return []any{op}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule__group_107, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 2
-	if v := func() any {
-		op := p.ExpectToken(tokenize.SLASH)
-		if op == nil { return nil }
-		_ = op
-		return []any{op}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule__group_107, v)
-		return v
+	{
+		if v := func() any {
+			op := p.ExpectToken(tokenize.SLASH)
+			if op == nil { return nil }
+			_ = op
+			return []any{op}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule__group_107, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule__group_107, nil)
 	return nil
 }
@@ -15532,27 +17766,31 @@ func parseRule__group_108(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		lambda_slash_no_default := parseRule_lambda_slash_no_default(p)
-		if lambda_slash_no_default == nil { return nil }
-		_ = lambda_slash_no_default
-		return []any{lambda_slash_no_default}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule__group_108, v)
-		return v
+	{
+		if v := func() any {
+			lambda_slash_no_default := parseRule_lambda_slash_no_default(p)
+			if lambda_slash_no_default == nil { return nil }
+			_ = lambda_slash_no_default
+			return []any{lambda_slash_no_default}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule__group_108, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 1
-	if v := func() any {
-		lambda_slash_with_default := parseRule_lambda_slash_with_default(p)
-		if lambda_slash_with_default == nil { return nil }
-		_ = lambda_slash_with_default
-		return []any{lambda_slash_with_default}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule__group_108, v)
-		return v
+	{
+		if v := func() any {
+			lambda_slash_with_default := parseRule_lambda_slash_with_default(p)
+			if lambda_slash_with_default == nil { return nil }
+			_ = lambda_slash_with_default
+			return []any{lambda_slash_with_default}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule__group_108, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule__group_108, nil)
 	return nil
 }
@@ -15581,27 +17819,31 @@ func parseRule__group_110(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		op := p.ExpectToken(tokenize.COMMA)
-		if op == nil { return nil }
-		_ = op
-		return []any{op}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule__group_110, v)
-		return v
+	{
+		if v := func() any {
+			op := p.ExpectToken(tokenize.COMMA)
+			if op == nil { return nil }
+			_ = op
+			return []any{op}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule__group_110, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 1
-	if v := func() any {
-		lambda_param_no_default := parseRule_lambda_param_no_default(p)
-		if lambda_param_no_default == nil { return nil }
-		_ = lambda_param_no_default
-		return []any{lambda_param_no_default}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule__group_110, v)
-		return v
+	{
+		if v := func() any {
+			lambda_param_no_default := parseRule_lambda_param_no_default(p)
+			if lambda_param_no_default == nil { return nil }
+			_ = lambda_param_no_default
+			return []any{lambda_param_no_default}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule__group_110, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule__group_110, nil)
 	return nil
 }
@@ -15613,30 +17855,34 @@ func parseRule__group_111(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		op := p.ExpectToken(tokenize.COLON)
-		if op == nil { return nil }
-		_ = op
-		return []any{op}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule__group_111, v)
-		return v
+	{
+		if v := func() any {
+			op := p.ExpectToken(tokenize.COLON)
+			if op == nil { return nil }
+			_ = op
+			return []any{op}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule__group_111, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 1
-	if v := func() any {
-		op := p.ExpectToken(tokenize.COMMA)
-		if op == nil { return nil }
-		_ = op
-		g := parseRule__group_150(p)
-		if g == nil { return nil }
-		_ = g
-		return []any{op, g}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule__group_111, v)
-		return v
+	{
+		if v := func() any {
+			op := p.ExpectToken(tokenize.COMMA)
+			if op == nil { return nil }
+			_ = op
+			g := parseRule__group_150(p)
+			if g == nil { return nil }
+			_ = g
+			return []any{op, g}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule__group_111, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule__group_111, nil)
 	return nil
 }
@@ -15648,27 +17894,31 @@ func parseRule__group_112(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		lambda_param_no_default := parseRule_lambda_param_no_default(p)
-		if lambda_param_no_default == nil { return nil }
-		_ = lambda_param_no_default
-		return []any{lambda_param_no_default}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule__group_112, v)
-		return v
+	{
+		if v := func() any {
+			lambda_param_no_default := parseRule_lambda_param_no_default(p)
+			if lambda_param_no_default == nil { return nil }
+			_ = lambda_param_no_default
+			return []any{lambda_param_no_default}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule__group_112, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 1
-	if v := func() any {
-		op := p.ExpectToken(tokenize.COMMA)
-		if op == nil { return nil }
-		_ = op
-		return []any{op}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule__group_112, v)
-		return v
+	{
+		if v := func() any {
+			op := p.ExpectToken(tokenize.COMMA)
+			if op == nil { return nil }
+			_ = op
+			return []any{op}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule__group_112, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule__group_112, nil)
 	return nil
 }
@@ -15680,20 +17930,22 @@ func parseRule__group_113(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		bitwise_or := parseRule_bitwise_or(p)
-		if bitwise_or == nil { return nil }
-		_ = bitwise_or
-		rep := parseRule__loop0_151(p)
-		_ = rep
-		opt := p.ExpectToken(tokenize.COMMA)
-		_ = opt
-		return []any{bitwise_or, rep, opt}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule__group_113, v)
-		return v
+	{
+		if v := func() any {
+			bitwise_or := parseRule_bitwise_or(p)
+			if bitwise_or == nil { return nil }
+			_ = bitwise_or
+			rep := parseRule__loop0_151(p)
+			_ = rep
+			opt := p.ExpectToken(tokenize.COMMA)
+			_ = opt
+			return []any{bitwise_or, rep, opt}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule__group_113, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule__group_113, nil)
 	return nil
 }
@@ -15722,19 +17974,21 @@ func parseRule__group_115(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		name := p.ExpectToken(tokenize.NAME)
-		if name == nil { return nil }
-		_ = name
-		g := parseRule__group_152(p)
-		if g == nil { return nil }
-		_ = g
-		return []any{name, g}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule__group_115, v)
-		return v
+	{
+		if v := func() any {
+			name := p.ExpectToken(tokenize.NAME)
+			if name == nil { return nil }
+			_ = name
+			g := parseRule__group_152(p)
+			if g == nil { return nil }
+			_ = g
+			return []any{name, g}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule__group_115, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule__group_115, nil)
 	return nil
 }
@@ -15780,27 +18034,31 @@ func parseRule__group_118(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		kw := p.ExpectName("except")
-		if kw == nil { return nil }
-		_ = kw
-		return []any{kw}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule__group_118, v)
-		return v
+	{
+		if v := func() any {
+			kw := p.ExpectName("except")
+			if kw == nil { return nil }
+			_ = kw
+			return []any{kw}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule__group_118, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 1
-	if v := func() any {
-		kw := p.ExpectName("finally")
-		if kw == nil { return nil }
-		_ = kw
-		return []any{kw}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule__group_118, v)
-		return v
+	{
+		if v := func() any {
+			kw := p.ExpectName("finally")
+			if kw == nil { return nil }
+			_ = kw
+			return []any{kw}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule__group_118, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule__group_118, nil)
 	return nil
 }
@@ -15827,19 +18085,21 @@ func parseRule__rhs_120(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		kw := p.ExpectName("as")
-		if kw == nil { return nil }
-		_ = kw
-		name := p.ExpectToken(tokenize.NAME)
-		if name == nil { return nil }
-		_ = name
-		return []any{kw, name}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule__rhs_120, v)
-		return v
+	{
+		if v := func() any {
+			kw := p.ExpectName("as")
+			if kw == nil { return nil }
+			_ = kw
+			name := p.ExpectToken(tokenize.NAME)
+			if name == nil { return nil }
+			_ = name
+			return []any{kw, name}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule__rhs_120, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule__rhs_120, nil)
 	return nil
 }
@@ -15851,18 +18111,20 @@ func parseRule__rhs_121(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		expression := parseRule_expression(p)
-		if expression == nil { return nil }
-		_ = expression
-		opt := parseRule__rhs_120(p)
-		_ = opt
-		return []any{expression, opt}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule__rhs_121, v)
-		return v
+	{
+		if v := func() any {
+			expression := parseRule_expression(p)
+			if expression == nil { return nil }
+			_ = expression
+			opt := parseRule__rhs_120(p)
+			_ = opt
+			return []any{expression, opt}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule__rhs_121, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule__rhs_121, nil)
 	return nil
 }
@@ -15874,27 +18136,31 @@ func parseRule__group_122(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		newline := p.ExpectToken(tokenize.NEWLINE)
-		if newline == nil { return nil }
-		_ = newline
-		return []any{newline}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule__group_122, v)
-		return v
+	{
+		if v := func() any {
+			newline := p.ExpectToken(tokenize.NEWLINE)
+			if newline == nil { return nil }
+			_ = newline
+			return []any{newline}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule__group_122, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 1
-	if v := func() any {
-		op := p.ExpectToken(tokenize.COLON)
-		if op == nil { return nil }
-		_ = op
-		return []any{op}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule__group_122, v)
-		return v
+	{
+		if v := func() any {
+			op := p.ExpectToken(tokenize.COLON)
+			if op == nil { return nil }
+			_ = op
+			return []any{op}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule__group_122, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule__group_122, nil)
 	return nil
 }
@@ -15906,19 +18172,21 @@ func parseRule__rhs_123(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		positional_patterns := parseRule_positional_patterns(p)
-		if positional_patterns == nil { return nil }
-		_ = positional_patterns
-		op := p.ExpectToken(tokenize.COMMA)
-		if op == nil { return nil }
-		_ = op
-		return []any{positional_patterns, op}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule__rhs_123, v)
-		return v
+	{
+		if v := func() any {
+			positional_patterns := parseRule_positional_patterns(p)
+			if positional_patterns == nil { return nil }
+			_ = positional_patterns
+			op := p.ExpectToken(tokenize.COMMA)
+			if op == nil { return nil }
+			_ = op
+			return []any{positional_patterns, op}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule__rhs_123, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule__rhs_123, nil)
 	return nil
 }
@@ -15930,19 +18198,21 @@ func parseRule__rhs_124(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		op := p.ExpectToken(tokenize.RARROW)
-		if op == nil { return nil }
-		_ = op
-		expression := parseRule_expression(p)
-		if expression == nil { return nil }
-		_ = expression
-		return []any{op, expression}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule__rhs_124, v)
-		return v
+	{
+		if v := func() any {
+			op := p.ExpectToken(tokenize.RARROW)
+			if op == nil { return nil }
+			_ = op
+			expression := parseRule_expression(p)
+			if expression == nil { return nil }
+			_ = expression
+			return []any{op, expression}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule__rhs_124, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule__rhs_124, nil)
 	return nil
 }
@@ -15954,21 +18224,23 @@ func parseRule__rhs_125(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		op := p.ExpectToken(tokenize.LPAR)
-		if op == nil { return nil }
-		_ = op
-		opt := parseRule_arguments(p)
-		_ = opt
-		op_1 := p.ExpectToken(tokenize.RPAR)
-		if op_1 == nil { return nil }
-		_ = op_1
-		return []any{op, opt, op_1}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule__rhs_125, v)
-		return v
+	{
+		if v := func() any {
+			op := p.ExpectToken(tokenize.LPAR)
+			if op == nil { return nil }
+			_ = op
+			opt := parseRule_arguments(p)
+			_ = opt
+			op_1 := p.ExpectToken(tokenize.RPAR)
+			if op_1 == nil { return nil }
+			_ = op_1
+			return []any{op, opt, op_1}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule__rhs_125, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule__rhs_125, nil)
 	return nil
 }
@@ -15980,27 +18252,31 @@ func parseRule__group_126(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		op := p.ExpectToken(tokenize.RBRACE)
-		if op == nil { return nil }
-		_ = op
-		return []any{op}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule__group_126, v)
-		return v
+	{
+		if v := func() any {
+			op := p.ExpectToken(tokenize.RBRACE)
+			if op == nil { return nil }
+			_ = op
+			return []any{op}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule__group_126, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 1
-	if v := func() any {
-		op := p.ExpectToken(tokenize.COMMA)
-		if op == nil { return nil }
-		_ = op
-		return []any{op}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule__group_126, v)
-		return v
+	{
+		if v := func() any {
+			op := p.ExpectToken(tokenize.COMMA)
+			if op == nil { return nil }
+			_ = op
+			return []any{op}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule__group_126, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule__group_126, nil)
 	return nil
 }
@@ -16012,49 +18288,57 @@ func parseRule__group_127(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		op := p.ExpectToken(tokenize.EQUAL)
-		if op == nil { return nil }
-		_ = op
-		return []any{op}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule__group_127, v)
-		return v
+	{
+		if v := func() any {
+			op := p.ExpectToken(tokenize.EQUAL)
+			if op == nil { return nil }
+			_ = op
+			return []any{op}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule__group_127, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 1
-	if v := func() any {
-		op := p.ExpectToken(tokenize.EXCLAMATION)
-		if op == nil { return nil }
-		_ = op
-		return []any{op}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule__group_127, v)
-		return v
+	{
+		if v := func() any {
+			op := p.ExpectToken(tokenize.EXCLAMATION)
+			if op == nil { return nil }
+			_ = op
+			return []any{op}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule__group_127, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 2
-	if v := func() any {
-		op := p.ExpectToken(tokenize.COLON)
-		if op == nil { return nil }
-		_ = op
-		return []any{op}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule__group_127, v)
-		return v
+	{
+		if v := func() any {
+			op := p.ExpectToken(tokenize.COLON)
+			if op == nil { return nil }
+			_ = op
+			return []any{op}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule__group_127, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 3
-	if v := func() any {
-		op := p.ExpectToken(tokenize.RBRACE)
-		if op == nil { return nil }
-		_ = op
-		return []any{op}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule__group_127, v)
-		return v
+	{
+		if v := func() any {
+			op := p.ExpectToken(tokenize.RBRACE)
+			if op == nil { return nil }
+			_ = op
+			return []any{op}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule__group_127, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule__group_127, nil)
 	return nil
 }
@@ -16066,38 +18350,44 @@ func parseRule__group_128(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		op := p.ExpectToken(tokenize.EXCLAMATION)
-		if op == nil { return nil }
-		_ = op
-		return []any{op}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule__group_128, v)
-		return v
+	{
+		if v := func() any {
+			op := p.ExpectToken(tokenize.EXCLAMATION)
+			if op == nil { return nil }
+			_ = op
+			return []any{op}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule__group_128, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 1
-	if v := func() any {
-		op := p.ExpectToken(tokenize.COLON)
-		if op == nil { return nil }
-		_ = op
-		return []any{op}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule__group_128, v)
-		return v
+	{
+		if v := func() any {
+			op := p.ExpectToken(tokenize.COLON)
+			if op == nil { return nil }
+			_ = op
+			return []any{op}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule__group_128, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 2
-	if v := func() any {
-		op := p.ExpectToken(tokenize.RBRACE)
-		if op == nil { return nil }
-		_ = op
-		return []any{op}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule__group_128, v)
-		return v
+	{
+		if v := func() any {
+			op := p.ExpectToken(tokenize.RBRACE)
+			if op == nil { return nil }
+			_ = op
+			return []any{op}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule__group_128, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule__group_128, nil)
 	return nil
 }
@@ -16109,19 +18399,21 @@ func parseRule__rhs_129(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		op := p.ExpectToken(tokenize.EXCLAMATION)
-		if op == nil { return nil }
-		_ = op
-		name := p.ExpectToken(tokenize.NAME)
-		if name == nil { return nil }
-		_ = name
-		return []any{op, name}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule__rhs_129, v)
-		return v
+	{
+		if v := func() any {
+			op := p.ExpectToken(tokenize.EXCLAMATION)
+			if op == nil { return nil }
+			_ = op
+			name := p.ExpectToken(tokenize.NAME)
+			if name == nil { return nil }
+			_ = name
+			return []any{op, name}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule__rhs_129, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule__rhs_129, nil)
 	return nil
 }
@@ -16133,27 +18425,31 @@ func parseRule__group_130(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		op := p.ExpectToken(tokenize.COLON)
-		if op == nil { return nil }
-		_ = op
-		return []any{op}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule__group_130, v)
-		return v
+	{
+		if v := func() any {
+			op := p.ExpectToken(tokenize.COLON)
+			if op == nil { return nil }
+			_ = op
+			return []any{op}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule__group_130, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 1
-	if v := func() any {
-		op := p.ExpectToken(tokenize.RBRACE)
-		if op == nil { return nil }
-		_ = op
-		return []any{op}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule__group_130, v)
-		return v
+	{
+		if v := func() any {
+			op := p.ExpectToken(tokenize.RBRACE)
+			if op == nil { return nil }
+			_ = op
+			return []any{op}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule__group_130, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule__group_130, nil)
 	return nil
 }
@@ -16165,27 +18461,31 @@ func parseRule__group_131(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		fstring := parseRule_fstring(p)
-		if fstring == nil { return nil }
-		_ = fstring
-		return []any{fstring}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule__group_131, v)
-		return v
+	{
+		if v := func() any {
+			fstring := parseRule_fstring(p)
+			if fstring == nil { return nil }
+			_ = fstring
+			return []any{fstring}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule__group_131, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 1
-	if v := func() any {
-		string := parseRule_string(p)
-		if string == nil { return nil }
-		_ = string
-		return []any{string}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule__group_131, v)
-		return v
+	{
+		if v := func() any {
+			string := parseRule_string(p)
+			if string == nil { return nil }
+			_ = string
+			return []any{string}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule__group_131, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule__group_131, nil)
 	return nil
 }
@@ -16197,82 +18497,96 @@ func parseRule__group_132(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		op := p.ExpectToken(tokenize.PLUS)
-		if op == nil { return nil }
-		_ = op
-		return []any{op}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule__group_132, v)
-		return v
+	{
+		if v := func() any {
+			op := p.ExpectToken(tokenize.PLUS)
+			if op == nil { return nil }
+			_ = op
+			return []any{op}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule__group_132, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 1
-	if v := func() any {
-		op := p.ExpectToken(tokenize.MINUS)
-		if op == nil { return nil }
-		_ = op
-		return []any{op}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule__group_132, v)
-		return v
+	{
+		if v := func() any {
+			op := p.ExpectToken(tokenize.MINUS)
+			if op == nil { return nil }
+			_ = op
+			return []any{op}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule__group_132, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 2
-	if v := func() any {
-		op := p.ExpectToken(tokenize.STAR)
-		if op == nil { return nil }
-		_ = op
-		return []any{op}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule__group_132, v)
-		return v
+	{
+		if v := func() any {
+			op := p.ExpectToken(tokenize.STAR)
+			if op == nil { return nil }
+			_ = op
+			return []any{op}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule__group_132, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 3
-	if v := func() any {
-		op := p.ExpectToken(tokenize.SLASH)
-		if op == nil { return nil }
-		_ = op
-		return []any{op}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule__group_132, v)
-		return v
+	{
+		if v := func() any {
+			op := p.ExpectToken(tokenize.SLASH)
+			if op == nil { return nil }
+			_ = op
+			return []any{op}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule__group_132, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 4
-	if v := func() any {
-		op := p.ExpectToken(tokenize.PERCENT)
-		if op == nil { return nil }
-		_ = op
-		return []any{op}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule__group_132, v)
-		return v
+	{
+		if v := func() any {
+			op := p.ExpectToken(tokenize.PERCENT)
+			if op == nil { return nil }
+			_ = op
+			return []any{op}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule__group_132, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 5
-	if v := func() any {
-		op := p.ExpectToken(tokenize.DOUBLESLASH)
-		if op == nil { return nil }
-		_ = op
-		return []any{op}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule__group_132, v)
-		return v
+	{
+		if v := func() any {
+			op := p.ExpectToken(tokenize.DOUBLESLASH)
+			if op == nil { return nil }
+			_ = op
+			return []any{op}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule__group_132, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 6
-	if v := func() any {
-		op := p.ExpectToken(tokenize.AT)
-		if op == nil { return nil }
-		_ = op
-		return []any{op}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule__group_132, v)
-		return v
+	{
+		if v := func() any {
+			op := p.ExpectToken(tokenize.AT)
+			if op == nil { return nil }
+			_ = op
+			return []any{op}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule__group_132, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule__group_132, nil)
 	return nil
 }
@@ -16284,38 +18598,44 @@ func parseRule__group_133(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		op := p.ExpectToken(tokenize.PLUS)
-		if op == nil { return nil }
-		_ = op
-		return []any{op}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule__group_133, v)
-		return v
+	{
+		if v := func() any {
+			op := p.ExpectToken(tokenize.PLUS)
+			if op == nil { return nil }
+			_ = op
+			return []any{op}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule__group_133, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 1
-	if v := func() any {
-		op := p.ExpectToken(tokenize.MINUS)
-		if op == nil { return nil }
-		_ = op
-		return []any{op}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule__group_133, v)
-		return v
+	{
+		if v := func() any {
+			op := p.ExpectToken(tokenize.MINUS)
+			if op == nil { return nil }
+			_ = op
+			return []any{op}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule__group_133, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 2
-	if v := func() any {
-		op := p.ExpectToken(tokenize.TILDE)
-		if op == nil { return nil }
-		_ = op
-		return []any{op}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule__group_133, v)
-		return v
+	{
+		if v := func() any {
+			op := p.ExpectToken(tokenize.TILDE)
+			if op == nil { return nil }
+			_ = op
+			return []any{op}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule__group_133, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule__group_133, nil)
 	return nil
 }
@@ -16327,19 +18647,21 @@ func parseRule__group_134(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		z := parseRule_star_targets(p)
-		if z == nil { return nil }
-		_ = z
-		op := p.ExpectToken(tokenize.EQUAL)
-		if op == nil { return nil }
-		_ = op
-		return []any{z, op}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule__group_134, v)
-		return v
+	{
+		if v := func() any {
+			z := parseRule_star_targets(p)
+			if z == nil { return nil }
+			_ = z
+			op := p.ExpectToken(tokenize.EQUAL)
+			if op == nil { return nil }
+			_ = op
+			return []any{z, op}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule__group_134, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule__group_134, nil)
 	return nil
 }
@@ -16351,27 +18673,31 @@ func parseRule__group_135(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		op := p.ExpectToken(tokenize.DOT)
-		if op == nil { return nil }
-		_ = op
-		return []any{op}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule__group_135, v)
-		return v
+	{
+		if v := func() any {
+			op := p.ExpectToken(tokenize.DOT)
+			if op == nil { return nil }
+			_ = op
+			return []any{op}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule__group_135, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 1
-	if v := func() any {
-		op := p.ExpectToken(tokenize.ELLIPSIS)
-		if op == nil { return nil }
-		_ = op
-		return []any{op}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule__group_135, v)
-		return v
+	{
+		if v := func() any {
+			op := p.ExpectToken(tokenize.ELLIPSIS)
+			if op == nil { return nil }
+			_ = op
+			return []any{op}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule__group_135, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule__group_135, nil)
 	return nil
 }
@@ -16383,22 +18709,24 @@ func parseRule__group_136(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		op := p.ExpectToken(tokenize.AT)
-		if op == nil { return nil }
-		_ = op
-		f := parseRule_named_expression(p)
-		if f == nil { return nil }
-		_ = f
-		newline := p.ExpectToken(tokenize.NEWLINE)
-		if newline == nil { return nil }
-		_ = newline
-		return []any{op, f, newline}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule__group_136, v)
-		return v
+	{
+		if v := func() any {
+			op := p.ExpectToken(tokenize.AT)
+			if op == nil { return nil }
+			_ = op
+			f := parseRule_named_expression(p)
+			if f == nil { return nil }
+			_ = f
+			newline := p.ExpectToken(tokenize.NEWLINE)
+			if newline == nil { return nil }
+			_ = newline
+			return []any{op, f, newline}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule__group_136, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule__group_136, nil)
 	return nil
 }
@@ -16410,19 +18738,21 @@ func parseRule__group_137(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		op := p.ExpectToken(tokenize.COMMA)
-		if op == nil { return nil }
-		_ = op
-		c := parseRule_expression(p)
-		if c == nil { return nil }
-		_ = c
-		return []any{op, c}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule__group_137, v)
-		return v
+	{
+		if v := func() any {
+			op := p.ExpectToken(tokenize.COMMA)
+			if op == nil { return nil }
+			_ = op
+			c := parseRule_expression(p)
+			if c == nil { return nil }
+			_ = c
+			return []any{op, c}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule__group_137, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule__group_137, nil)
 	return nil
 }
@@ -16434,19 +18764,21 @@ func parseRule__group_138(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		op := p.ExpectToken(tokenize.COMMA)
-		if op == nil { return nil }
-		_ = op
-		c := parseRule_star_expression(p)
-		if c == nil { return nil }
-		_ = c
-		return []any{op, c}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule__group_138, v)
-		return v
+	{
+		if v := func() any {
+			op := p.ExpectToken(tokenize.COMMA)
+			if op == nil { return nil }
+			_ = op
+			c := parseRule_star_expression(p)
+			if c == nil { return nil }
+			_ = c
+			return []any{op, c}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule__group_138, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule__group_138, nil)
 	return nil
 }
@@ -16458,19 +18790,21 @@ func parseRule__group_139(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		kw := p.ExpectName("or")
-		if kw == nil { return nil }
-		_ = kw
-		c := parseRule_conjunction(p)
-		if c == nil { return nil }
-		_ = c
-		return []any{kw, c}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule__group_139, v)
-		return v
+	{
+		if v := func() any {
+			kw := p.ExpectName("or")
+			if kw == nil { return nil }
+			_ = kw
+			c := parseRule_conjunction(p)
+			if c == nil { return nil }
+			_ = c
+			return []any{kw, c}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule__group_139, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule__group_139, nil)
 	return nil
 }
@@ -16482,19 +18816,21 @@ func parseRule__group_140(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		kw := p.ExpectName("and")
-		if kw == nil { return nil }
-		_ = kw
-		c := parseRule_inversion(p)
-		if c == nil { return nil }
-		_ = c
-		return []any{kw, c}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule__group_140, v)
-		return v
+	{
+		if v := func() any {
+			kw := p.ExpectName("and")
+			if kw == nil { return nil }
+			_ = kw
+			c := parseRule_inversion(p)
+			if c == nil { return nil }
+			_ = c
+			return []any{kw, c}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule__group_140, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule__group_140, nil)
 	return nil
 }
@@ -16506,27 +18842,31 @@ func parseRule__group_141(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		slice := parseRule_slice(p)
-		if slice == nil { return nil }
-		_ = slice
-		return []any{slice}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule__group_141, v)
-		return v
+	{
+		if v := func() any {
+			slice := parseRule_slice(p)
+			if slice == nil { return nil }
+			_ = slice
+			return []any{slice}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule__group_141, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 1
-	if v := func() any {
-		starred_expression := parseRule_starred_expression(p)
-		if starred_expression == nil { return nil }
-		_ = starred_expression
-		return []any{starred_expression}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule__group_141, v)
-		return v
+	{
+		if v := func() any {
+			starred_expression := parseRule_starred_expression(p)
+			if starred_expression == nil { return nil }
+			_ = starred_expression
+			return []any{starred_expression}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule__group_141, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule__group_141, nil)
 	return nil
 }
@@ -16538,19 +18878,21 @@ func parseRule__group_142(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		kw := p.ExpectName("if")
-		if kw == nil { return nil }
-		_ = kw
-		z := parseRule_disjunction(p)
-		if z == nil { return nil }
-		_ = z
-		return []any{kw, z}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule__group_142, v)
-		return v
+	{
+		if v := func() any {
+			kw := p.ExpectName("if")
+			if kw == nil { return nil }
+			_ = kw
+			z := parseRule_disjunction(p)
+			if z == nil { return nil }
+			_ = z
+			return []any{kw, z}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule__group_142, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule__group_142, nil)
 	return nil
 }
@@ -16562,28 +18904,32 @@ func parseRule__group_143(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		starred_expression := parseRule_starred_expression(p)
-		if starred_expression == nil { return nil }
-		_ = starred_expression
-		return []any{starred_expression}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule__group_143, v)
-		return v
+	{
+		if v := func() any {
+			starred_expression := parseRule_starred_expression(p)
+			if starred_expression == nil { return nil }
+			_ = starred_expression
+			return []any{starred_expression}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule__group_143, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 1
-	if v := func() any {
-		g := parseRule__group_73(p)
-		if g == nil { return nil }
-		_ = g
-		if !p.Lookahead(false, func(p *Parser) any { return p.ExpectToken(tokenize.EQUAL) }) { return nil }
-		return []any{g}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule__group_143, v)
-		return v
+	{
+		if v := func() any {
+			g := parseRule__group_73(p)
+			if g == nil { return nil }
+			_ = g
+			if !p.Lookahead(false, func(p *Parser) any { return p.ExpectToken(tokenize.EQUAL) }) { return nil }
+			return []any{g}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule__group_143, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule__group_143, nil)
 	return nil
 }
@@ -16595,19 +18941,21 @@ func parseRule__group_144(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		op := p.ExpectToken(tokenize.COMMA)
-		if op == nil { return nil }
-		_ = op
-		c := parseRule_star_target(p)
-		if c == nil { return nil }
-		_ = c
-		return []any{op, c}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule__group_144, v)
-		return v
+	{
+		if v := func() any {
+			op := p.ExpectToken(tokenize.COMMA)
+			if op == nil { return nil }
+			_ = op
+			c := parseRule_star_target(p)
+			if c == nil { return nil }
+			_ = c
+			return []any{op, c}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule__group_144, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule__group_144, nil)
 	return nil
 }
@@ -16619,22 +18967,24 @@ func parseRule__group_145(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		gat := parseRule__gather_74(p)
-		if gat == nil { return nil }
-		_ = gat
-		op := p.ExpectToken(tokenize.COMMA)
-		if op == nil { return nil }
-		_ = op
-		kwargs := parseRule_kwargs(p)
-		if kwargs == nil { return nil }
-		_ = kwargs
-		return []any{gat, op, kwargs}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule__group_145, v)
-		return v
+	{
+		if v := func() any {
+			gat := parseRule__gather_74(p)
+			if gat == nil { return nil }
+			_ = gat
+			op := p.ExpectToken(tokenize.COMMA)
+			if op == nil { return nil }
+			_ = op
+			kwargs := parseRule_kwargs(p)
+			if kwargs == nil { return nil }
+			_ = kwargs
+			return []any{gat, op, kwargs}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule__group_145, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule__group_145, nil)
 	return nil
 }
@@ -16646,17 +18996,19 @@ func parseRule__group_146(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		starred_expression := parseRule_starred_expression(p)
-		if starred_expression == nil { return nil }
-		_ = starred_expression
-		if !p.Lookahead(false, func(p *Parser) any { return p.ExpectToken(tokenize.EQUAL) }) { return nil }
-		return []any{starred_expression}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule__group_146, v)
-		return v
+	{
+		if v := func() any {
+			starred_expression := parseRule_starred_expression(p)
+			if starred_expression == nil { return nil }
+			_ = starred_expression
+			if !p.Lookahead(false, func(p *Parser) any { return p.ExpectToken(tokenize.EQUAL) }) { return nil }
+			return []any{starred_expression}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule__group_146, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule__group_146, nil)
 	return nil
 }
@@ -16668,17 +19020,19 @@ func parseRule__group_147(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		if !p.Lookahead(false, func(p *Parser) any { return p.ExpectToken(tokenize.STRING) }) { return nil }
-		expression_without_invalid := parseRule_expression_without_invalid(p)
-		if expression_without_invalid == nil { return nil }
-		_ = expression_without_invalid
-		return []any{expression_without_invalid}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule__group_147, v)
-		return v
+	{
+		if v := func() any {
+			if !p.Lookahead(false, func(p *Parser) any { return p.ExpectToken(tokenize.STRING) }) { return nil }
+			expression_without_invalid := parseRule_expression_without_invalid(p)
+			if expression_without_invalid == nil { return nil }
+			_ = expression_without_invalid
+			return []any{expression_without_invalid}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule__group_147, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule__group_147, nil)
 	return nil
 }
@@ -16690,19 +19044,21 @@ func parseRule__group_148(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		star_targets := parseRule_star_targets(p)
-		if star_targets == nil { return nil }
-		_ = star_targets
-		op := p.ExpectToken(tokenize.EQUAL)
-		if op == nil { return nil }
-		_ = op
-		return []any{star_targets, op}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule__group_148, v)
-		return v
+	{
+		if v := func() any {
+			star_targets := parseRule_star_targets(p)
+			if star_targets == nil { return nil }
+			_ = star_targets
+			op := p.ExpectToken(tokenize.EQUAL)
+			if op == nil { return nil }
+			_ = op
+			return []any{star_targets, op}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule__group_148, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule__group_148, nil)
 	return nil
 }
@@ -16714,27 +19070,31 @@ func parseRule__group_149(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		op := p.ExpectToken(tokenize.RPAR)
-		if op == nil { return nil }
-		_ = op
-		return []any{op}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule__group_149, v)
-		return v
+	{
+		if v := func() any {
+			op := p.ExpectToken(tokenize.RPAR)
+			if op == nil { return nil }
+			_ = op
+			return []any{op}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule__group_149, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 1
-	if v := func() any {
-		op := p.ExpectToken(tokenize.DOUBLESTAR)
-		if op == nil { return nil }
-		_ = op
-		return []any{op}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule__group_149, v)
-		return v
+	{
+		if v := func() any {
+			op := p.ExpectToken(tokenize.DOUBLESTAR)
+			if op == nil { return nil }
+			_ = op
+			return []any{op}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule__group_149, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule__group_149, nil)
 	return nil
 }
@@ -16746,27 +19106,31 @@ func parseRule__group_150(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		op := p.ExpectToken(tokenize.COLON)
-		if op == nil { return nil }
-		_ = op
-		return []any{op}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule__group_150, v)
-		return v
+	{
+		if v := func() any {
+			op := p.ExpectToken(tokenize.COLON)
+			if op == nil { return nil }
+			_ = op
+			return []any{op}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule__group_150, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 1
-	if v := func() any {
-		op := p.ExpectToken(tokenize.DOUBLESTAR)
-		if op == nil { return nil }
-		_ = op
-		return []any{op}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule__group_150, v)
-		return v
+	{
+		if v := func() any {
+			op := p.ExpectToken(tokenize.DOUBLESTAR)
+			if op == nil { return nil }
+			_ = op
+			return []any{op}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule__group_150, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule__group_150, nil)
 	return nil
 }
@@ -16793,49 +19157,57 @@ func parseRule__group_152(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		op := p.ExpectToken(tokenize.COMMA)
-		if op == nil { return nil }
-		_ = op
-		return []any{op}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule__group_152, v)
-		return v
+	{
+		if v := func() any {
+			op := p.ExpectToken(tokenize.COMMA)
+			if op == nil { return nil }
+			_ = op
+			return []any{op}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule__group_152, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 1
-	if v := func() any {
-		op := p.ExpectToken(tokenize.RPAR)
-		if op == nil { return nil }
-		_ = op
-		return []any{op}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule__group_152, v)
-		return v
+	{
+		if v := func() any {
+			op := p.ExpectToken(tokenize.RPAR)
+			if op == nil { return nil }
+			_ = op
+			return []any{op}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule__group_152, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 2
-	if v := func() any {
-		op := p.ExpectToken(tokenize.SEMI)
-		if op == nil { return nil }
-		_ = op
-		return []any{op}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule__group_152, v)
-		return v
+	{
+		if v := func() any {
+			op := p.ExpectToken(tokenize.SEMI)
+			if op == nil { return nil }
+			_ = op
+			return []any{op}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule__group_152, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	// alt 3
-	if v := func() any {
-		newline := p.ExpectToken(tokenize.NEWLINE)
-		if newline == nil { return nil }
-		_ = newline
-		return []any{newline}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule__group_152, v)
-		return v
+	{
+		if v := func() any {
+			newline := p.ExpectToken(tokenize.NEWLINE)
+			if newline == nil { return nil }
+			_ = newline
+			return []any{newline}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule__group_152, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule__group_152, nil)
 	return nil
 }
@@ -16847,18 +19219,20 @@ func parseRule__group_153(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		expression := parseRule_expression(p)
-		if expression == nil { return nil }
-		_ = expression
-		opt := parseRule__rhs_156(p)
-		_ = opt
-		return []any{expression, opt}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule__group_153, v)
-		return v
+	{
+		if v := func() any {
+			expression := parseRule_expression(p)
+			if expression == nil { return nil }
+			_ = expression
+			opt := parseRule__rhs_156(p)
+			_ = opt
+			return []any{expression, opt}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule__group_153, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule__group_153, nil)
 	return nil
 }
@@ -16870,18 +19244,20 @@ func parseRule__group_154(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		expressions := parseRule_expressions(p)
-		if expressions == nil { return nil }
-		_ = expressions
-		opt := parseRule__rhs_156(p)
-		_ = opt
-		return []any{expressions, opt}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule__group_154, v)
-		return v
+	{
+		if v := func() any {
+			expressions := parseRule_expressions(p)
+			if expressions == nil { return nil }
+			_ = expressions
+			opt := parseRule__rhs_156(p)
+			_ = opt
+			return []any{expressions, opt}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule__group_154, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule__group_154, nil)
 	return nil
 }
@@ -16893,19 +19269,21 @@ func parseRule__group_155(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		op := p.ExpectToken(tokenize.COMMA)
-		if op == nil { return nil }
-		_ = op
-		bitwise_or := parseRule_bitwise_or(p)
-		if bitwise_or == nil { return nil }
-		_ = bitwise_or
-		return []any{op, bitwise_or}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule__group_155, v)
-		return v
+	{
+		if v := func() any {
+			op := p.ExpectToken(tokenize.COMMA)
+			if op == nil { return nil }
+			_ = op
+			bitwise_or := parseRule_bitwise_or(p)
+			if bitwise_or == nil { return nil }
+			_ = bitwise_or
+			return []any{op, bitwise_or}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule__group_155, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule__group_155, nil)
 	return nil
 }
@@ -16917,19 +19295,21 @@ func parseRule__rhs_156(p *Parser) any {
 	mark := p.Mark()
 	_ = mark
 	// alt 0
-	if v := func() any {
-		kw := p.ExpectName("as")
-		if kw == nil { return nil }
-		_ = kw
-		star_target := parseRule_star_target(p)
-		if star_target == nil { return nil }
-		_ = star_target
-		return []any{kw, star_target}
-	}(); v != nil {
-		p.InsertMemo(mark, Rule__rhs_156, v)
-		return v
+	{
+		if v := func() any {
+			kw := p.ExpectName("as")
+			if kw == nil { return nil }
+			_ = kw
+			star_target := parseRule_star_target(p)
+			if star_target == nil { return nil }
+			_ = star_target
+			return []any{kw, star_target}
+		}(); v != nil {
+			p.InsertMemo(mark, Rule__rhs_156, v)
+			return v
+		}
+		p.Reset(mark)
 	}
-	p.Reset(mark)
 	p.InsertMemo(mark, Rule__rhs_156, nil)
 	return nil
 }
