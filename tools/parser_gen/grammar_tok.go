@@ -287,11 +287,19 @@ func (g *gtokenizer) readNumber() gtok {
 	return gtok{Kind: gtNUMBER, Text: string(g.src[startOff:g.off]), Line: startLine, Col: startCol}
 }
 
-// readOp reads an operator. Action and annotation bodies between
-// '{...}' and '[...]' are not pre-tokenised here; the parser's
-// targetAtoms scanner reads raw bytes for those.
+// readOp reads an operator. `->` returns as one token so action-body
+// atoms read by targetAtoms keep `n->foo` together for member access
+// translation. Other multi-char operators (==, &&, !=, ...) stay as
+// single chars; the metagrammar parser uses `& &` for force-expect
+// and reading `&&` as one atom would break it. Action bodies that
+// need those compound ops re-tokenise inside the action translator.
 func (g *gtokenizer) readOp() gtok {
 	startLine, startCol := g.line, g.col
+	if g.hasPrefix("->") {
+		g.off += 2
+		g.col += 2
+		return gtok{Kind: gtOP, Text: "->", Line: startLine, Col: startCol}
+	}
 	c := g.src[g.off]
 	text := string(c)
 	g.off++
@@ -305,6 +313,18 @@ func (g *gtokenizer) readOp() gtok {
 		}
 	}
 	return gtok{Kind: gtOP, Text: text, Line: startLine, Col: startCol}
+}
+
+func (g *gtokenizer) hasPrefix(s string) bool {
+	if g.off+len(s) > len(g.src) {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if g.src[g.off+i] != s[i] {
+			return false
+		}
+	}
+	return true
 }
 
 func isIdentStart(r rune) bool {

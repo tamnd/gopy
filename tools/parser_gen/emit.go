@@ -607,6 +607,21 @@ func (e *emitter) callItemRaw(it Item) callSpec {
 }
 
 func (e *emitter) callNameLeaf(x *NameLeaf) callSpec {
+	// Mirror CPython's c_generator BASE_NODETYPES special-case: NAME,
+	// NUMBER, and STRING leaves resolve to typed expr_ty / Token *
+	// helpers rather than to the generic ExpectToken path. Without
+	// this, atom rules like `atom: NAME` return the raw token and
+	// downstream rules see a *Token where they expect ast.Expr.
+	//
+	// CPython: Tools/peg_generator/pegen/c_generator.py:157 visit_NameLeaf
+	switch x.Value {
+	case "NAME":
+		return callSpec{varName: "name_var", expr: "nameToken(p)", shape: shapeBlocking}
+	case "NUMBER":
+		return callSpec{varName: "number_var", expr: "numberToken(p)", shape: shapeBlocking}
+	case "STRING":
+		return callSpec{varName: "string_var", expr: "stringToken(p)", shape: shapeBlocking}
+	}
 	if tok, ok := builtinTokens[x.Value]; ok {
 		return callSpec{varName: lower(x.Value), expr: "p.ExpectToken(tokenize." + tok + ")", shape: shapeBlocking}
 	}
@@ -880,6 +895,14 @@ func (e *emitter) writeActionHelperStubs() {
 		"actionPgenSlashWithDefault":       true,
 		"actionPgenSetupFullFormatSpec":    true,
 		"actionPgenJoinedStr":              true,
+		"actionAstFunctionDef":             true,
+		"actionAstAsyncFunctionDef":        true,
+		"actionAstComprehension":           true,
+		"actionAstExpression":              true,
+		"actionAstInteractive":             true,
+		"actionAstFunctionType":            true,
+		"actionPgenEmptyArguments":         true,
+		"actionAstArg":                     true,
 	}
 	seen := map[string]bool{}
 	for _, m := range re.FindAllString(body, -1) {

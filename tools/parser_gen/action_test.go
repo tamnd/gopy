@@ -31,6 +31,45 @@ func TestTranslateActionShapes(t *testing.T) {
 		{"unknown_ident", "", false},
 	}
 
+	// extras for the patterns the def/comprehension/async_def gate
+	// cases hit: NAME-id extraction, ternary fallback, type tags
+	bound2 := map[string]bool{"n": true, "params": true, "b": true, "a": true, "tc": true, "t": true}
+	extra := []struct {
+		body string
+		want string
+	}{
+		{"n->v.Name.id", "nameIdOf(n)"},
+		{"(params) ? params : CHECK(arguments_ty, _PyPegen_empty_arguments(p))", "func() any { if truthy((params)) { return params }; return actionPgenEmptyArguments(p, p) }()"},
+	}
+	for _, c := range extra {
+		got, ok := translateAction(c.body, bound2)
+		if !ok {
+			t.Errorf("translateAction(%q): ok=false, want true", c.body)
+			continue
+		}
+		if got != c.want {
+			t.Errorf("translateAction(%q):\n got %q\nwant %q", c.body, got, c.want)
+		}
+	}
+
+	full := `_PyAST_FunctionDef(n->v.Name.id,
+		(params) ? params : CHECK(arguments_ty, _PyPegen_empty_arguments(p)),
+		b, NULL, a, NEW_TYPE_COMMENT(p, tc), t, EXTRA)`
+	got, ok := translateAction(full, bound2)
+	if !ok {
+		t.Errorf("translateAction(full FunctionDef): ok=false")
+	}
+	t.Logf("FunctionDef translation: %s", got)
+
+	// Also exercise the space-joined form the grammar parser actually
+	// produces (each atom separated by a single space).
+	joined := `_PyAST_FunctionDef ( n -> v . Name . id , ( params ) ? params : CHECK ( arguments_ty , _PyPegen_empty_arguments ( p ) ) , b , NULL , a , NEW_TYPE_COMMENT ( p , tc ) , t , EXTRA )`
+	got2, ok2 := translateAction(joined, bound2)
+	if !ok2 {
+		t.Errorf("translateAction(joined FunctionDef): ok=false")
+	}
+	t.Logf("FunctionDef joined translation: %s", got2)
+
 	for _, c := range cases {
 		got, ok := translateAction(c.body, bound)
 		if ok != c.ok {
