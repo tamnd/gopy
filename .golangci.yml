@@ -175,6 +175,18 @@ linters:
         linters:
           - gocognit
           - gocyclo
+      # ConfigParseCmdline mirrors config_parse_cmdline's switch
+      # statement from Python/initconfig.c, and the getopt iterator
+      # mirrors _PyOS_GetOpt's branch tree from Python/getopt.c.
+      # Collapsing the cases would diverge from the source shape.
+      - path: initconfig/config_cli\.go
+        linters:
+          - gocognit
+          - gocyclo
+      - path: initconfig/getopt\.go
+        linters:
+          - gocognit
+          - gocyclo
       # Pegen scaffolding has many helpers held for the generated
       # parser table; flagging them as unused now would force ugly
       # nolint stamps everywhere. Re-enabled once parser_gen lands.

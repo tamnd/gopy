@@ -92,6 +92,12 @@ type PyConfig struct {
 	// Private fields. Mirror CPython's leading-underscore names.
 	InstallImportlib int
 	InitMain         int
+
+	// checkHashPycsMode parks --check-hash-based-pycs until the
+	// marshal arm consumes it in v0.8. Lower-case so it is
+	// package-private; the v0.8 import port lifts it to a public
+	// CheckHashPycsMode field.
+	checkHashPycsMode string
 }
 
 // initCompatConfig is the shared seeding step for the three public
