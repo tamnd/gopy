@@ -1,7 +1,7 @@
 // CLI entry point for the bytecodes generator. Wires the parser, the
 // stack-effect analyzer, the metadata emitter, the Tier-1 emitter, and
 // the drift check together. Each subcommand maps to one generated
-// artefact so the tool is composable in CI.
+// artifact so the tool is composable in CI.
 
 package main
 

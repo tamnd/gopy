@@ -1,4 +1,4 @@
-// Drift check: every generated artefact carries the SHA256 of the
+// Drift check: every generated artifact carries the SHA256 of the
 // bytecodes.c it was emitted from. The `-check-drift` mode of
 // bytecodes_gen recomputes the hash against the live cpython-3.14
 // checkout and exits non-zero on mismatch, so CI can pin the
@@ -40,7 +40,7 @@ func MarkerLine(hash string) string {
 // ExtractMarker pulls the recorded hash out of generated source. The
 // scan is line-oriented and stops at the first match; returns "" if no
 // marker is present (e.g. a hand-written file). Designed to be cheap
-// since CI runs it across every generated artefact on every build.
+// since CI runs it across every generated artifact on every build.
 func ExtractMarker(src []byte) string {
 	const m = driftMarker
 	mlen := len(m)

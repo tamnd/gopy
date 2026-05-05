@@ -51,10 +51,12 @@ func wrapConst(v any) (objects.Object, error) {
 // trySimple is consulted by dispatch before falling back to
 // notImplemented. Returns ok=false if op isn't in the hand-written
 // panel. The retDone/err return shape matches dispatch.
+//
+//nolint:gocognit,gocyclo,gocritic,unparam // hand-written opcode switch; the wide return tuple matches dispatch's contract and the arm count shrinks as 1621 codegen replaces these.
 func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, retVal objects.Object, retErr error, retDone, ok bool, err error) {
 	switch op {
 	case compile.NOP:
-		return e.advance(1), nil, nil, false, true, nil
+		return e.advance(), nil, nil, false, true, nil
 
 	case compile.RESUME:
 		// RESUME is the eval-breaker poll point. The breaker check
@@ -66,16 +68,16 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, retVal
 				return 0, nil, nil, false, true, berr
 			}
 		}
-		return e.advance(1), nil, nil, false, true, nil
+		return e.advance(), nil, nil, false, true, nil
 
 	case compile.POP_TOP:
 		ref := e.pop()
 		ref.Close()
-		return e.advance(1), nil, nil, false, true, nil
+		return e.advance(), nil, nil, false, true, nil
 
 	case compile.PUSH_NULL:
 		e.push(stackref.Null)
-		return e.advance(1), nil, nil, false, true, nil
+		return e.advance(), nil, nil, false, true, nil
 
 	case compile.COPY:
 		// COPY i pushes a duplicate of stack[-i]. oparg=1 means
@@ -85,7 +87,7 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, retVal
 		}
 		ref := e.peek(int(oparg) - 1)
 		e.push(ref.Dup())
-		return e.advance(1), nil, nil, false, true, nil
+		return e.advance(), nil, nil, false, true, nil
 
 	case compile.SWAP:
 		// SWAP i swaps the top with stack[-i]. oparg=2 swaps top two.
@@ -96,7 +98,7 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, retVal
 		other := e.f.StackTop - int(oparg)
 		nlp := frame.NLocalsPlusOf(e.f.Code)
 		e.f.LocalsPlus[nlp+top], e.f.LocalsPlus[nlp+other] = e.f.LocalsPlus[nlp+other], e.f.LocalsPlus[nlp+top]
-		return e.advance(1), nil, nil, false, true, nil
+		return e.advance(), nil, nil, false, true, nil
 
 	case compile.LOAD_CONST:
 		co := e.f.Code
@@ -108,7 +110,7 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, retVal
 			return 0, nil, nil, false, true, werr
 		}
 		e.pushObject(obj)
-		return e.advance(1), nil, nil, false, true, nil
+		return e.advance(), nil, nil, false, true, nil
 
 	case compile.LOAD_FAST:
 		ref := e.localAt(int(oparg))
@@ -116,7 +118,7 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, retVal
 			return 0, nil, nil, false, true, fmt.Errorf("vm: LOAD_FAST: local %d unbound", oparg)
 		}
 		e.push(ref.Dup())
-		return e.advance(1), nil, nil, false, true, nil
+		return e.advance(), nil, nil, false, true, nil
 
 	case compile.LOAD_FAST_CHECK:
 		ref := e.localAt(int(oparg))
@@ -124,20 +126,20 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, retVal
 			return 0, nil, nil, false, true, fmt.Errorf("vm: LOAD_FAST_CHECK: local %d unbound", oparg)
 		}
 		e.push(ref.Dup())
-		return e.advance(1), nil, nil, false, true, nil
+		return e.advance(), nil, nil, false, true, nil
 
 	case compile.LOAD_FAST_AND_CLEAR:
 		ref := e.localAt(int(oparg))
 		e.setLocal(int(oparg), stackref.Null)
 		e.push(ref)
-		return e.advance(1), nil, nil, false, true, nil
+		return e.advance(), nil, nil, false, true, nil
 
 	case compile.STORE_FAST:
 		ref := e.pop()
 		old := e.localAt(int(oparg))
 		old.Close()
 		e.setLocal(int(oparg), ref)
-		return e.advance(1), nil, nil, false, true, nil
+		return e.advance(), nil, nil, false, true, nil
 
 	case compile.DELETE_FAST:
 		old := e.localAt(int(oparg))
@@ -146,7 +148,7 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, retVal
 		}
 		old.Close()
 		e.setLocal(int(oparg), stackref.Null)
-		return e.advance(1), nil, nil, false, true, nil
+		return e.advance(), nil, nil, false, true, nil
 
 	case compile.RETURN_VALUE:
 		v := e.popObject()
@@ -173,7 +175,7 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, retVal
 			return 0, nil, nil, false, true, berr
 		}
 		e.pushObject(out)
-		return e.advance(1), nil, nil, false, true, nil
+		return e.advance(), nil, nil, false, true, nil
 
 	case compile.UNARY_NEGATIVE:
 		a := e.popObject()
@@ -186,7 +188,7 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, retVal
 			return 0, nil, nil, false, true, nerr
 		}
 		e.pushObject(out)
-		return e.advance(1), nil, nil, false, true, nil
+		return e.advance(), nil, nil, false, true, nil
 
 	case compile.UNARY_NOT:
 		a := e.popObject()
@@ -195,7 +197,7 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, retVal
 			return 0, nil, nil, false, true, terr
 		}
 		e.pushObject(objects.NewBool(!truthy))
-		return e.advance(1), nil, nil, false, true, nil
+		return e.advance(), nil, nil, false, true, nil
 
 	case compile.COMPARE_OP:
 		b := e.popObject()
@@ -209,7 +211,7 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, retVal
 			return 0, nil, nil, false, true, cerr
 		}
 		e.pushObject(out)
-		return e.advance(1), nil, nil, false, true, nil
+		return e.advance(), nil, nil, false, true, nil
 
 	case compile.BUILD_LIST:
 		n := int(oparg)
@@ -218,7 +220,7 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, retVal
 			items[i] = e.popObject()
 		}
 		e.pushObject(objects.NewList(items))
-		return e.advance(1), nil, nil, false, true, nil
+		return e.advance(), nil, nil, false, true, nil
 
 	case compile.BUILD_TUPLE:
 		n := int(oparg)
@@ -227,7 +229,7 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, retVal
 			items[i] = e.popObject()
 		}
 		e.pushObject(objects.NewTuple(items))
-		return e.advance(1), nil, nil, false, true, nil
+		return e.advance(), nil, nil, false, true, nil
 
 	case compile.BUILD_MAP:
 		n := int(oparg)
@@ -247,7 +249,7 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, retVal
 			}
 		}
 		e.pushObject(d)
-		return e.advance(1), nil, nil, false, true, nil
+		return e.advance(), nil, nil, false, true, nil
 
 	case compile.IS_OP:
 		b := e.popObject()
@@ -257,7 +259,7 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, retVal
 			eq = !eq
 		}
 		e.pushObject(objects.NewBool(eq))
-		return e.advance(1), nil, nil, false, true, nil
+		return e.advance(), nil, nil, false, true, nil
 
 	case compile.POP_JUMP_IF_TRUE, compile.POP_JUMP_IF_FALSE,
 		compile.POP_JUMP_IF_NONE, compile.POP_JUMP_IF_NOT_NONE:
@@ -282,7 +284,7 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, retVal
 		if take {
 			return e.jumpBy(int(oparg) + 1), nil, nil, false, true, nil
 		}
-		return e.advance(1), nil, nil, false, true, nil
+		return e.advance(), nil, nil, false, true, nil
 
 	case compile.LOAD_NAME, compile.LOAD_GLOBAL, compile.STORE_NAME,
 		compile.STORE_GLOBAL, compile.DELETE_NAME, compile.DELETE_GLOBAL:
@@ -291,7 +293,7 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, retVal
 			return 0, nil, nil, false, true, perr
 		}
 		_ = v
-		return e.advance(1), nil, nil, false, true, nil
+		return e.advance(), nil, nil, false, true, nil
 	}
 	return 0, nil, nil, false, false, nil
 }
@@ -422,6 +424,7 @@ func lookupIn(scope objects.Object, key objects.Object) (objects.Object, bool, e
 	if d, ok := scope.(*objects.Dict); ok {
 		v, err := d.GetItem(key)
 		if err != nil {
+			//nolint:nilerr // a missing key is the not-found signal for name lookup
 			return nil, false, nil
 		}
 		return v, true, nil

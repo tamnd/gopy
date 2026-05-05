@@ -229,45 +229,45 @@ func (k tokKind) String() string {
 }
 
 var keywordKinds = map[string]tokKind{
-	"auto":      tokAuto,
-	"break":     tokBreak,
-	"case":      tokCase,
-	"char":      tokChar,
-	"const":     tokConst,
-	"continue":  tokContinue,
-	"default":   tokDefault,
-	"do":        tokDo,
-	"double":    tokDouble,
-	"else":      tokElse,
-	"enum":      tokEnum,
-	"extern":    tokExtern,
-	"float":     tokFloat,
-	"for":       tokFor,
-	"goto":      tokGoto,
-	"if":        tokIf,
-	"inline":    tokInline,
-	"int":       tokInt,
-	"long":      tokLong,
-	"offsetof":  tokOffsetof,
-	"restrict":  tokRestrict,
-	"return":    tokReturn,
-	"short":     tokShort,
-	"signed":    tokSigned,
-	"sizeof":    tokSizeof,
-	"static":    tokStatic,
-	"struct":    tokStruct,
-	"switch":    tokSwitch,
-	"typedef":   tokTypedef,
-	"union":     tokUnion,
-	"unsigned":  tokUnsigned,
-	"void":      tokVoid,
-	"volatile":  tokVolatile,
-	"while":     tokWhile,
-	"inst":      tokInst,
-	"op":        tokOp,
-	"macro":     tokMacro,
-	"label":     tokLabel,
-	"spilled":   tokSpilled,
+	"auto":     tokAuto,
+	"break":    tokBreak,
+	"case":     tokCase,
+	"char":     tokChar,
+	"const":    tokConst,
+	"continue": tokContinue,
+	"default":  tokDefault,
+	"do":       tokDo,
+	"double":   tokDouble,
+	"else":     tokElse,
+	"enum":     tokEnum,
+	"extern":   tokExtern,
+	"float":    tokFloat,
+	"for":      tokFor,
+	"goto":     tokGoto,
+	"if":       tokIf,
+	"inline":   tokInline,
+	"int":      tokInt,
+	"long":     tokLong,
+	"offsetof": tokOffsetof,
+	"restrict": tokRestrict,
+	"return":   tokReturn,
+	"short":    tokShort,
+	"signed":   tokSigned,
+	"sizeof":   tokSizeof,
+	"static":   tokStatic,
+	"struct":   tokStruct,
+	"switch":   tokSwitch,
+	"typedef":  tokTypedef,
+	"union":    tokUnion,
+	"unsigned": tokUnsigned,
+	"void":     tokVoid,
+	"volatile": tokVolatile,
+	"while":    tokWhile,
+	"inst":     tokInst,
+	"op":       tokOp,
+	"macro":    tokMacro,
+	"label":    tokLabel,
+	"spilled":  tokSpilled,
 }
 
 var annotationNames = map[string]bool{
@@ -333,7 +333,7 @@ var dslMatcher = regexp.MustCompile(strings.Join([]string{
 
 // tokenize splits src into a slice of tokens. Whitespace (other than
 // newlines) and embedded newlines inside #-prefixed macro lines are
-// dropped, mirroring the upstream behaviour.
+// dropped, mirroring the upstream behavior.
 func tokenize(src string) ([]dslTok, error) {
 	var out []dslTok
 	line := 1
@@ -374,6 +374,8 @@ func tokenize(src string) ([]dslTok, error) {
 
 // tokenizeAll returns every match including comments and macros. Used
 // by lexer round-trip tests.
+//
+//nolint:unused // kept for round-trip tests; will be exercised when the action translator (B6) starts consuming raw tokens.
 func tokenizeAll(src string) ([]dslTok, error) {
 	var out []dslTok
 	line := 1
@@ -401,6 +403,7 @@ func tokenizeAll(src string) ([]dslTok, error) {
 	return out, nil
 }
 
+//nolint:gocyclo // mirrors the upstream tok kind dispatcher; collapsing the branches would diverge from parsing.py.
 func classify(text, src string, start int) (tokKind, error) {
 	if text == "\n" {
 		return tokNewline, nil

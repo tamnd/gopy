@@ -147,7 +147,6 @@ func TestPendingFIFO(t *testing.T) {
 	var p Pending
 	var got []int
 	for i := 0; i < 5; i++ {
-		i := i
 		if err := p.Add(func() error { got = append(got, i); return nil }); err != nil {
 			t.Fatalf("Add %d: %v", i, err)
 		}

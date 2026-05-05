@@ -48,7 +48,7 @@ func TestCheckDriftMatch(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := CheckDrift(bytecodes, []string{gen}); err != nil {
-		t.Errorf("CheckDrift on matching artefacts: %v", err)
+		t.Errorf("CheckDrift on matching artifacts: %v", err)
 	}
 }
 

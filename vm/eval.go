@@ -79,11 +79,11 @@ func (e *evalState) run() (objects.Object, error) {
 			return retVal, retErr
 		}
 		if err != nil {
-			if v, handled := e.handleException(err); handled {
+			v, handled := e.handleException(err)
+			if handled {
 				continue
-			} else {
-				return v, err
 			}
+			return v, err
 		}
 		e.f.PrevInstr = e.f.InstrPtr
 		e.f.InstrPtr = next
@@ -115,7 +115,10 @@ func (e *evalState) fetch() (op compile.Opcode, oparg uint32, ok bool) {
 // advance returns the instruction offset n instructions ahead of
 // f.InstrPtr. The eval loop uses this to pin the next-pc value the
 // generated arms return.
-func (e *evalState) advance(n int) int { return e.f.InstrPtr + 2*n }
+// advance returns the next pc, one instruction word past the current
+// instr ptr. Cache-word advances will need a parameterised variant
+// once instructions with inline caches dispatch through this path.
+func (e *evalState) advance() int { return e.f.InstrPtr + 2 }
 
 // jumpBy returns the instruction offset delta instructions away.
 // Forward jumps pass a positive delta; backward jumps pass negative.

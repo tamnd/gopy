@@ -177,14 +177,14 @@ func TestTokenizeNoInvalid(t *testing.T) {
 }
 
 func TestTokenizeSplit(t *testing.T) {
-	// Make sure the tokenizer recognises the `--` stack-effect separator
+	// Make sure the tokenizer recognizes the `--` stack-effect separator
 	// distinctly from `-- ` C decrement, and from `->`.
 	src := `(a -- b)`
 	toks, err := tokenize(src)
 	if err != nil {
 		t.Fatalf("tokenize: %v", err)
 	}
-	got := []string{}
+	got := make([]string, 0, len(toks))
 	for _, tk := range toks {
 		got = append(got, tk.Text)
 	}

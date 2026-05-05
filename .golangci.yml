@@ -60,8 +60,10 @@ linters:
     revive:
       rules:
         - name: var-naming
-        - name: package-comments
-        - name: exported
+        # package-comments and exported are disabled because the
+        # CPython-parity header style (citing the upstream file at
+        # the top of every .go) does not start with "Package <name>"
+        # and the rule fires per file rather than per package.
         - name: error-return
         - name: error-naming
         - name: if-return
@@ -80,7 +82,10 @@ linters:
         - name: redefines-builtin-id
         - name: superfluous-else
         - name: unreachable-code
-        - name: unused-parameter
+        # unused-parameter is disabled because the dispatch-table
+        # function signatures carry shared shape (e.g. `ts *Thread`)
+        # for trait conformance even when a particular handler does
+        # not need the value.
         - name: var-declaration
     misspell:
       locale: US
@@ -181,6 +186,12 @@ formatters:
     goimports:
       local-prefixes:
         - github.com/tamnd/gopy
+  exclusions:
+    paths:
+      # Generated parser table; the generator emits this verbatim
+      # and gofmt-aligning it would diverge from the rule numbering
+      # in the source grammar.
+      - parser/pegen/parser_gen.go
 
 issues:
   max-same-issues: 0

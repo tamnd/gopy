@@ -191,17 +191,15 @@ func (p *parser) peek() *dslTok {
 	return &p.toks[p.pos]
 }
 
-func (p *parser) next() *dslTok {
-	t := p.peek()
-	if t != nil {
+func (p *parser) next() {
+	if p.peek() != nil {
 		p.pos++
 	}
-	return t
 }
 
-func (p *parser) save() int            { return p.pos }
-func (p *parser) restore(pos int)      { p.pos = pos }
-func (p *parser) eof() bool            { return p.pos >= len(p.toks) }
+func (p *parser) save() int       { return p.pos }
+func (p *parser) restore(pos int) { p.pos = pos }
+func (p *parser) eof() bool       { return p.pos >= len(p.toks) }
 func (p *parser) accept(k tokKind) *dslTok {
 	if t := p.peek(); t != nil && t.Kind == k {
 		p.pos++
@@ -209,6 +207,7 @@ func (p *parser) accept(k tokKind) *dslTok {
 	}
 	return nil
 }
+
 func (p *parser) acceptIdentText(text string) *dslTok {
 	if t := p.peek(); t != nil && t.Kind == tokIdentifier && t.Text == text {
 		p.pos++
@@ -599,10 +598,7 @@ func (p *parser) tryFamilyDef() (*FamilyDef, error) {
 	if _, err := p.require(tokLBrace); err != nil {
 		return nil, err
 	}
-	members, err := p.parseMemberList(tokRBrace)
-	if err != nil {
-		return nil, err
-	}
+	members := p.parseMemberList(tokRBrace)
 	if _, err := p.require(tokRBrace); err != nil {
 		return nil, err
 	}
@@ -613,21 +609,21 @@ func (p *parser) tryFamilyDef() (*FamilyDef, error) {
 	return &FamilyDef{Name: nameT.Text, Size: size, Members: members, Line: startLine}, nil
 }
 
-func (p *parser) parseMemberList(_ tokKind) ([]string, error) {
+func (p *parser) parseMemberList(_ tokKind) []string {
 	var members []string
 	idT := p.accept(tokIdentifier)
 	if idT == nil {
-		return members, nil
+		return members
 	}
 	members = append(members, idT.Text)
 	for p.accept(tokComma) != nil {
 		t := p.accept(tokIdentifier)
 		if t == nil {
-			return members, nil // trailing comma
+			return members // trailing comma
 		}
 		members = append(members, t.Text)
 	}
-	return members, nil
+	return members
 }
 
 func (p *parser) tryPseudoDef() (*PseudoDef, error) {
@@ -666,18 +662,15 @@ func (p *parser) tryPseudoDef() (*PseudoDef, error) {
 	}
 	asSequence := false
 	closing := tokRBrace
-	if p.accept(tokLBrace) != nil {
-		// {
-	} else if p.accept(tokLBracket) != nil {
+	switch {
+	case p.accept(tokLBrace) != nil:
+	case p.accept(tokLBracket) != nil:
 		asSequence = true
 		closing = tokRBracket
-	} else {
+	default:
 		return nil, fmt.Errorf("pseudo %s: expected { or [", nameT.Text)
 	}
-	targets, err := p.parseMemberList(closing)
-	if err != nil {
-		return nil, err
-	}
+	targets := p.parseMemberList(closing)
 	if _, err := p.require(closing); err != nil {
 		return nil, err
 	}
@@ -714,10 +707,7 @@ func (p *parser) parseFlags() ([]string, error) {
 
 func (p *parser) tryLabelDef() (*LabelDef, error) {
 	saved := p.save()
-	spilled := false
-	if p.accept(tokSpilled) != nil {
-		spilled = true
-	}
+	spilled := p.accept(tokSpilled) != nil
 	if p.accept(tokLabel) == nil {
 		p.restore(saved)
 		return nil, nil

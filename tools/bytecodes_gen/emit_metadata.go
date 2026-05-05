@@ -50,7 +50,7 @@ func stackCounts(inputs []Input, outputs []Output) (pops, pushes int) {
 		}
 		pushes++
 	}
-	return
+	return pops, pushes
 }
 
 // cacheCount sums the cache effects across the input list.
