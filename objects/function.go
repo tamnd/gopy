@@ -11,13 +11,13 @@ package objects
 // CPython: Include/cpython/funcobject.h PyFunctionObject
 type Function struct {
 	Header
-	Name     string
-	Qualname string
-	Code     *Code
-	Globals  Object
-	Defaults *Tuple // positional defaults, may be nil
-	KwDefaults *Dict // keyword-only defaults, may be nil
-	Closure  *Tuple // tuple of cells, may be nil
+	Name       string
+	Qualname   string
+	Code       *Code
+	Globals    Object
+	Defaults   *Tuple // positional defaults, may be nil
+	KwDefaults *Dict  // keyword-only defaults, may be nil
+	Closure    *Tuple // tuple of cells, may be nil
 }
 
 // FunctionType is the type singleton for Python-defined functions.

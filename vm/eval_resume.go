@@ -12,7 +12,7 @@ import "github.com/tamnd/gopy/compile"
 // handleResume is the hand-written RESUME arm. CPython distinguishes
 // initial resume vs yield re-entry vs awaitable re-entry via the
 // oparg low bits, plus polls the eval breaker on bits 0..1. v0.6 only
-// honours the breaker poll; the generator state machine arrives with
+// honors the breaker poll; the generator state machine arrives with
 // the rest of the async/generator port.
 //
 // CPython: Python/bytecodes.c RESUME

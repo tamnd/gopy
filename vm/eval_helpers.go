@@ -19,18 +19,11 @@ import (
 // kept so generated arms can call it without conditional emission.
 //
 // CPython: Python/ceval_macros.h DECREF_INPUTS
+//
+//nolint:unused // emitted by tools/bytecodes_gen/action.go translator output
 func (e *evalState) decrefInputs(n int) {
 	_ = n
 }
-
-// incref / decref / newref are CPython refcount macros. With Go GC
-// they reduce to identity on the Object pointer; the helpers exist so
-// generated arms compile against the same surface.
-//
-// CPython: Include/object.h Py_INCREF / Py_DECREF / Py_NewRef
-func (e *evalState) incref(o objects.Object) objects.Object   { return o }
-func (e *evalState) decref(o objects.Object)                  { _ = o }
-func (e *evalState) newref(o objects.Object) objects.Object   { return o }
 
 // iterToSlice walks any iterable and returns its items. Used by
 // LIST_EXTEND, UNPACK_EX, CALL_FUNCTION_EX, and similar arms that
