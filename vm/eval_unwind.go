@@ -8,7 +8,10 @@
 
 package vm
 
-import "github.com/tamnd/gopy/objects"
+import (
+	"github.com/tamnd/gopy/gil"
+	"github.com/tamnd/gopy/objects"
+)
 
 // handleException tries to find a handler for err in the current
 // frame. Returns (residualValue, true) on hit (caller continues
@@ -55,11 +58,17 @@ func (e *evalState) unwind(err error) (objects.Object, error) {
 //
 // CPython: Python/ceval_gil.c handle_signals + _Py_HandlePending
 func (e *evalState) handleEvalBreaker() error {
-	// v0.6 just clears the bits we know how to handle; the rest stay
-	// set so a real implementation in #158/#161 sees them.
-	//
-	// Pending-call drain and signal handling are wired through the
-	// gil package; the eval loop only needs to ask the per-thread
-	// state for them. The state plumbing lands alongside #161.
+	b := e.breaker
+	if b == nil {
+		return nil
+	}
+	if b.IsSet(gil.BreakerCallsPending) {
+		b.Clear(gil.BreakerCallsPending)
+		if p := PendingFor(e.ts); p != nil {
+			if err := p.Drain(); err != nil {
+				return err
+			}
+		}
+	}
 	return nil
 }
