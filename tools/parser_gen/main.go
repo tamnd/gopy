@@ -33,8 +33,10 @@ import (
 
 func main() {
 	var cpython, out string
+	var checkDrift bool
 	flag.StringVar(&cpython, "cpython", "", "path to a cpython 3.14 checkout")
 	flag.StringVar(&out, "out", "parser/pegen/parser_gen.go", "output Go file")
+	flag.BoolVar(&checkDrift, "check-drift", false, "exit non-zero if -out is stale relative to python.gram")
 	flag.Parse()
 	if cpython == "" {
 		log.Fatal("parser_gen: -cpython is required")
@@ -42,6 +44,13 @@ func main() {
 	gram := filepath.Join(cpython, "Grammar", "python.gram")
 	if _, err := os.Stat(gram); err != nil {
 		log.Fatalf("parser_gen: cannot read %s: %v", gram, err)
+	}
+	if checkDrift {
+		if err := CheckGrammarDrift(gram, out); err != nil {
+			log.Fatalf("parser_gen: %v", err)
+		}
+		fmt.Fprintf(os.Stderr, "parser_gen: %s in sync with %s\n", out, gram)
+		return
 	}
 	data, err := os.ReadFile(gram)
 	if err != nil {
@@ -51,7 +60,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("parser_gen: %v", err)
 	}
-	src := Emit(g)
+	src := EmitWithSource(g, data)
 	if err := os.WriteFile(out, []byte(src), 0o644); err != nil {
 		log.Fatalf("parser_gen: %v", err)
 	}
