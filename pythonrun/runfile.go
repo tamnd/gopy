@@ -47,8 +47,12 @@ func RunFile(ts *state.Thread, filename string, globals, locals objects.Object) 
 
 // RunSimpleFile parses, compiles, and runs filename as a module
 // against globals. The result is discarded; on failure the traceback
-// (or Go-level error) is rendered to stderr. Returns 0 on success,
-// -1 on failure to match the CPython int convention.
+// (or Go-level error) is rendered to stderr.
+//
+// Returns the exit code: 0 on success, 1 on a generic exception, or
+// the int the caller passed to SystemExit. See RunSimpleString for
+// the rationale on returning the exit code instead of CPython's
+// 0/-1 plus Py_Exit long jump.
 //
 // The .pyc detect-and-dispatch branch and the interactive-tty
 // fallback are deferred to 1624-C and pyc.go.
@@ -56,8 +60,7 @@ func RunFile(ts *state.Thread, filename string, globals, locals objects.Object) 
 // CPython: Python/pythonrun.c:462 _PyRun_SimpleFileObject
 func RunSimpleFile(ts *state.Thread, filename string, globals objects.Object, stderr io.Writer) int {
 	if _, err := RunFile(ts, filename, globals, nil); err != nil {
-		printRunError(ts, err, stderr)
-		return -1
+		return printRunError(ts, err, stderr)
 	}
 	return 0
 }

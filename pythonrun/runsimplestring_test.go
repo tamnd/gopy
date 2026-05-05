@@ -25,15 +25,17 @@ func TestRunSimpleStringSuccessReturnsZero(t *testing.T) {
 	}
 }
 
-// TestRunSimpleStringParseFailureReturnsMinusOne pins -1 on a parse
-// gap. The error text is rendered to stderr (the v0.7 fallback path
-// since the parser does not raise SyntaxError yet).
-func TestRunSimpleStringParseFailureReturnsMinusOne(t *testing.T) {
+// TestRunSimpleStringParseFailureReturnsOne pins exit code 1 on a
+// parse gap. The error text is rendered to stderr (the v0.7 fallback
+// path since the parser does not raise SyntaxError yet). The 1624-D
+// rewrite turned the return into the lifecycle exit code, so a
+// generic failure surfaces as 1 (CPython would Py_Exit(1) here).
+func TestRunSimpleStringParseFailureReturnsOne(t *testing.T) {
 	ts := state.NewThread()
 	var stderr bytes.Buffer
 	rc := RunSimpleString(ts, "this is not valid python !!!", objects.NewDict(), &stderr)
-	if rc != -1 {
-		t.Fatalf("rc = %d, want -1 on parse failure", rc)
+	if rc != 1 {
+		t.Fatalf("rc = %d, want 1 on parse failure", rc)
 	}
 	if stderr.Len() == 0 {
 		t.Error("parse failure produced no stderr output")

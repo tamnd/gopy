@@ -25,6 +25,8 @@ var (
 	PyExc_TypeError           = newExcType("TypeError", []*objects.Type{PyExc_Exception})
 	PyExc_ValueError          = newExcType("ValueError", []*objects.Type{PyExc_Exception})
 	PyExc_StopIteration       = newExcType("StopIteration", []*objects.Type{PyExc_Exception})
+	PyExc_SystemExit          = newExcType("SystemExit", []*objects.Type{PyExc_BaseException})
+	PyExc_KeyboardInterrupt   = newExcType("KeyboardInterrupt", []*objects.Type{PyExc_BaseException})
 )
 
 func newExcType(name string, bases []*objects.Type) *objects.Type {

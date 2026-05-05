@@ -73,10 +73,7 @@ func runSource(src string, stdout, stderr *os.File) int {
 		return 1
 	}
 	ts := state.NewThread()
-	if pythonrun.RunSimpleString(ts, src, g, stderr) != 0 {
-		return 1
-	}
-	return 0
+	return pythonrun.RunSimpleString(ts, src, g, stderr)
 }
 
 // runFile is the gopy <script.py> entry. Mirrors pymain_run_file in
@@ -90,10 +87,7 @@ func runFile(path string, stdout, stderr *os.File) int {
 		return 1
 	}
 	ts := state.NewThread()
-	if pythonrun.RunAnyFile(ts, path, g, stderr) != 0 {
-		return 1
-	}
-	return 0
+	return pythonrun.RunAnyFile(ts, path, g, stderr)
 }
 
 // runInteractive is the gopy bare-invocation entry: print the banner

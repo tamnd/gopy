@@ -45,8 +45,13 @@ func RunString(ts *state.Thread, src, filename string, mode parser.Mode, globals
 // RunSimpleString parses, compiles, and runs command as a Python
 // module against globals. The result is discarded; on failure the
 // traceback (or Go-level error from the parse/compile arm) is
-// rendered to stderr. Returns 0 on success, -1 on failure to match
-// the CPython int convention.
+// rendered to stderr.
+//
+// Returns the exit code: 0 on success, 1 on a generic exception, or
+// the int the caller passed to SystemExit. CPython's
+// PyRun_SimpleStringFlags returns -1 and Py_Exit jumps inside
+// PyErr_Print; we surface the exit code through the return so
+// lifecycle.Main propagates it without long-jumping the runtime.
 //
 // CPython owns __main__ in the import system. Once 1623 lands the
 // globals argument disappears and RunSimpleString grabs the dict
@@ -55,24 +60,24 @@ func RunString(ts *state.Thread, src, filename string, mode parser.Mode, globals
 // CPython: Python/pythonrun.c:592 PyRun_SimpleStringFlags
 func RunSimpleString(ts *state.Thread, command string, globals objects.Object, stderr io.Writer) int {
 	if _, err := RunString(ts, command, "<string>", parser.ModeFile, globals, nil); err != nil {
-		printRunError(ts, err, stderr)
-		return -1
+		return printRunError(ts, err, stderr)
 	}
 	return 0
 }
 
 // printRunError mirrors PyErr_Print: render the thread-state
-// exception's traceback. The parser and compiler still surface Go
-// errors directly (no SyntaxError yet); fall back to the error text
-// so callers in cmd/gopy and the test panel see something useful.
+// exception's traceback. SystemExit short-circuits and returns its
+// code; a generic exception returns 1; the parser/compiler still
+// surface Go errors directly (no SyntaxError yet) so we fall back
+// to the error text and exit 1.
 //
 // CPython: Python/pythonrun.c:656 PyErr_Print
-func printRunError(ts *state.Thread, err error, w io.Writer) {
+func printRunError(ts *state.Thread, err error, w io.Writer) int {
 	if errors.Occurred(ts) != nil {
-		errors.Print(ts, w)
-		return
+		return errors.PrintEx(ts, w)
 	}
 	fmt.Fprintln(w, err)
+	return 1
 }
 
 // liftCode adapts compile.Code into objects.Code. The two structs

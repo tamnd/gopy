@@ -83,18 +83,12 @@ func runPython(tstate *state.Thread, stdin io.Reader, stdout, stderr io.Writer) 
 
 	switch {
 	case cfg.RunCommand != "":
-		if pythonrun.RunSimpleString(tstate, cfg.RunCommand, g, stderr) != 0 {
-			return 1
-		}
-		return 0
+		return pythonrun.RunSimpleString(tstate, cfg.RunCommand, g, stderr)
 	case cfg.RunModule != "":
 		_, _ = io.WriteString(stderr, ErrModuleNotImplemented.Error()+"\n")
 		return 1
 	case cfg.RunFilename != "":
-		if pythonrun.RunAnyFile(tstate, cfg.RunFilename, g, stderr) != 0 {
-			return 1
-		}
-		return 0
+		return pythonrun.RunAnyFile(tstate, cfg.RunFilename, g, stderr)
 	default:
 		return pythonrun.InteractiveLoop(tstate, stdin, stdout, stderr, g)
 	}

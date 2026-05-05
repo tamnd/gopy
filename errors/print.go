@@ -49,10 +49,16 @@ func writeChain(b *strings.Builder, exc *Exception) {
 }
 
 // Print writes FormatException of the current exception to w and
-// clears the slot. Mirrors PyErr_Print.
+// clears the slot. SystemExit is intercepted: if the exception is
+// a SystemExit with an int (or None) code, the slot is cleared but
+// nothing is written. Callers that need the exit code should use
+// PrintEx instead.
 //
 // CPython: Python/pythonrun.c:L656 PyErr_Print
 func Print(ts *state.Thread, w io.Writer) {
+	if _, handled := HandleSystemExit(ts); handled {
+		return
+	}
 	exc := Occurred(ts)
 	if exc == nil {
 		return

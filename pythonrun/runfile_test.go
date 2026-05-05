@@ -104,12 +104,12 @@ func TestRunSimpleFileSuccessReturnsZero(t *testing.T) {
 	}
 }
 
-func TestRunSimpleFileMissingFileReturnsMinusOne(t *testing.T) {
+func TestRunSimpleFileMissingFileReturnsOne(t *testing.T) {
 	var stderr bytes.Buffer
 	ts := state.NewThread()
 	rc := RunSimpleFile(ts, filepath.Join(t.TempDir(), "missing.py"), objects.NewDict(), &stderr)
-	if rc != -1 {
-		t.Fatalf("rc = %d, want -1", rc)
+	if rc != 1 {
+		t.Fatalf("rc = %d, want 1", rc)
 	}
 	if !strings.Contains(stderr.String(), "missing.py") {
 		t.Errorf("stderr should mention the missing path, got %q", stderr.String())

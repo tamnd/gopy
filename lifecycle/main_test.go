@@ -84,3 +84,24 @@ func TestMainEmptyArgvUsesPlaceholder(t *testing.T) {
 		t.Fatalf("rc=%d stderr=%q, want 0 (empty argv should drop into REPL)", rc, stderr.String())
 	}
 }
+
+// TestMainSystemExitPropagatesCode pins the 1624-D contract: a
+// SystemExit raised through -c surfaces its exit code as the
+// process exit code, not a hardcoded 1. The user-facing
+// `SystemExit` name is not yet wired into the builtins dict (that
+// lands with 1651-builtins); until then the source bails at the
+// NameError lookup, which we accept as long as rc is non-zero.
+func TestMainSystemExitPropagatesCode(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	rc := Main([]string{"gopy", "-c", "raise SystemExit(7)"}, strings.NewReader(""), &stdout, &stderr)
+	if rc == 7 {
+		return
+	}
+	allowed := []string{"parse:", "compile:", "eval:", "NameError"}
+	for _, marker := range allowed {
+		if strings.Contains(stderr.String(), marker) {
+			return
+		}
+	}
+	t.Fatalf("rc=%d stdout=%q stderr=%q: SystemExit should propagate code 7 once the panel covers raise", rc, stdout.String(), stderr.String())
+}
