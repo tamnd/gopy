@@ -217,13 +217,15 @@ func (e *emitter) writePreamble() {
 	e.buf.WriteString("\npackage pegen\n\n")
 	e.buf.WriteString("import (\n")
 	e.buf.WriteString("\t\"errors\"\n\n")
+	e.buf.WriteString("\t\"github.com/tamnd/gopy/ast\"\n")
 	e.buf.WriteString("\t\"github.com/tamnd/gopy/tokenize\"\n")
 	e.buf.WriteString(")\n\n")
 	e.buf.WriteString("// ErrParserNotImplemented is returned by Dispatch while the\n")
 	e.buf.WriteString("// per-rule emitter still produces placeholder action results.\n")
 	e.buf.WriteString("// The real AST surface lands with the action translator (M6).\n")
 	e.buf.WriteString("var ErrParserNotImplemented = errors.New(\"pegen: generated rule bodies not yet emitted\")\n\n")
-	e.buf.WriteString("var _ = tokenize.NAME // keep import alive when no rule uses it.\n\n")
+	e.buf.WriteString("var _ = tokenize.NAME // keep import alive when no rule uses it.\n")
+	e.buf.WriteString("var _ = ast.Add       // keep import alive when no rule uses it.\n\n")
 }
 
 func (e *emitter) writeRuleConstants() {
@@ -846,6 +848,32 @@ func (e *emitter) writeActionHelperStubs() {
 		"actionPgenMakeArguments":          true,
 		"actionPgenNonparenGenexpInCall":   true,
 		"actionPgenStarEtc":                true,
+		"actionAstAssign":                  true,
+		"actionAstAugAssign":               true,
+		"actionAstAnnAssign":               true,
+		"actionAstBinOp":                   true,
+		"actionAstBoolOp":                  true,
+		"actionAstUnaryOp":                 true,
+		"actionAstCompare":                 true,
+		"actionAstNamedExpr":               true,
+		"actionAstAwait":                   true,
+		"actionAstName":                    true,
+		"actionAstAttribute":               true,
+		"actionAstSubscript":               true,
+		"actionAstStarred":                 true,
+		"actionAstTuple":                   true,
+		"actionAstList":                    true,
+		"actionAstDict":                    true,
+		"actionAstCall":                    true,
+		"actionAstConstant":                true,
+		"actionAstFor":                     true,
+		"actionAstAsyncFor":                true,
+		"actionAstWith":                    true,
+		"actionAstAsyncWith":               true,
+		"actionAstMatchSingleton":          true,
+		"actionPgenAugoperator":            true,
+		"actionPgenCmpopExprPair":          true,
+		"actionPgenSetExprContext":         true,
 	}
 	seen := map[string]bool{}
 	for _, m := range re.FindAllString(body, -1) {

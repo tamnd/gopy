@@ -8,6 +8,7 @@ package pegen
 import (
 	"errors"
 
+	"github.com/tamnd/gopy/ast"
 	"github.com/tamnd/gopy/tokenize"
 )
 
@@ -17,6 +18,7 @@ import (
 var ErrParserNotImplemented = errors.New("pegen: generated rule bodies not yet emitted")
 
 var _ = tokenize.NAME // keep import alive when no rule uses it.
+var _ = ast.Add       // keep import alive when no rule uses it.
 
 // Generated rule ids. Dense small ints in declaration
 // order, then artificial helper rules. Stable across
@@ -1619,7 +1621,7 @@ func parseRule_assignment(p *Parser) any {
 			if !p.Lookahead(false, func(p *Parser) any { return p.ExpectToken(tokenize.EQUAL) }) { return nil }
 			tc := p.ExpectToken(tokenize.TYPE_COMMENT)
 			_ = tc
-			return []any{a, b, tc}
+			return actionAstAssign(p, a, b, tc)
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_assignment, v)
 			return v
@@ -1716,7 +1718,7 @@ func parseRule_augassign(p *Parser) any {
 			op := p.ExpectToken(tokenize.PLUSEQUAL)
 			if op == nil { return nil }
 			_ = op
-			return []any{op}
+			return actionPgenAugoperator(p, p, ast.Add)
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_augassign, v)
 			return v
@@ -1729,7 +1731,7 @@ func parseRule_augassign(p *Parser) any {
 			op := p.ExpectToken(tokenize.MINEQUAL)
 			if op == nil { return nil }
 			_ = op
-			return []any{op}
+			return actionPgenAugoperator(p, p, ast.Sub)
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_augassign, v)
 			return v
@@ -1742,7 +1744,7 @@ func parseRule_augassign(p *Parser) any {
 			op := p.ExpectToken(tokenize.STAREQUAL)
 			if op == nil { return nil }
 			_ = op
-			return []any{op}
+			return actionPgenAugoperator(p, p, ast.Mult)
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_augassign, v)
 			return v
@@ -1768,7 +1770,7 @@ func parseRule_augassign(p *Parser) any {
 			op := p.ExpectToken(tokenize.SLASHEQUAL)
 			if op == nil { return nil }
 			_ = op
-			return []any{op}
+			return actionPgenAugoperator(p, p, ast.Div)
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_augassign, v)
 			return v
@@ -1781,7 +1783,7 @@ func parseRule_augassign(p *Parser) any {
 			op := p.ExpectToken(tokenize.PERCENTEQUAL)
 			if op == nil { return nil }
 			_ = op
-			return []any{op}
+			return actionPgenAugoperator(p, p, ast.ModOperator)
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_augassign, v)
 			return v
@@ -1794,7 +1796,7 @@ func parseRule_augassign(p *Parser) any {
 			op := p.ExpectToken(tokenize.AMPEREQUAL)
 			if op == nil { return nil }
 			_ = op
-			return []any{op}
+			return actionPgenAugoperator(p, p, ast.BitAnd)
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_augassign, v)
 			return v
@@ -1807,7 +1809,7 @@ func parseRule_augassign(p *Parser) any {
 			op := p.ExpectToken(tokenize.VBAREQUAL)
 			if op == nil { return nil }
 			_ = op
-			return []any{op}
+			return actionPgenAugoperator(p, p, ast.BitOr)
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_augassign, v)
 			return v
@@ -1820,7 +1822,7 @@ func parseRule_augassign(p *Parser) any {
 			op := p.ExpectToken(tokenize.CIRCUMFLEXEQUAL)
 			if op == nil { return nil }
 			_ = op
-			return []any{op}
+			return actionPgenAugoperator(p, p, ast.BitXor)
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_augassign, v)
 			return v
@@ -1833,7 +1835,7 @@ func parseRule_augassign(p *Parser) any {
 			op := p.ExpectToken(tokenize.LEFTSHIFTEQUAL)
 			if op == nil { return nil }
 			_ = op
-			return []any{op}
+			return actionPgenAugoperator(p, p, ast.LShift)
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_augassign, v)
 			return v
@@ -1846,7 +1848,7 @@ func parseRule_augassign(p *Parser) any {
 			op := p.ExpectToken(tokenize.RIGHTSHIFTEQUAL)
 			if op == nil { return nil }
 			_ = op
-			return []any{op}
+			return actionPgenAugoperator(p, p, ast.RShift)
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_augassign, v)
 			return v
@@ -1859,7 +1861,7 @@ func parseRule_augassign(p *Parser) any {
 			op := p.ExpectToken(tokenize.DOUBLESTAREQUAL)
 			if op == nil { return nil }
 			_ = op
-			return []any{op}
+			return actionPgenAugoperator(p, p, ast.Pow)
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_augassign, v)
 			return v
@@ -1872,7 +1874,7 @@ func parseRule_augassign(p *Parser) any {
 			op := p.ExpectToken(tokenize.DOUBLESLASHEQUAL)
 			if op == nil { return nil }
 			_ = op
-			return []any{op}
+			return actionPgenAugoperator(p, p, ast.FloorDiv)
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_augassign, v)
 			return v
@@ -3816,7 +3818,7 @@ func parseRule_for_stmt(p *Parser) any {
 			_ = b
 			el := parseRule_else_block(p)
 			_ = el
-			return []any{kw, t, kw_1, ex, op, tc, b, el}
+			return actionAstFor(p, t, ex, b, el, tc)
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_for_stmt, v)
 			return v
@@ -3929,7 +3931,7 @@ func parseRule_with_stmt(p *Parser) any {
 			b := parseRule_block(p)
 			if b == nil { return nil }
 			_ = b
-			return []any{kw, op, a, opt, op_1, op_2, tc, b}
+			return actionAstWith(p, a, b, tc)
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_with_stmt, v)
 			return v
@@ -3953,7 +3955,7 @@ func parseRule_with_stmt(p *Parser) any {
 			b := parseRule_block(p)
 			if b == nil { return nil }
 			_ = b
-			return []any{kw, a, op, tc, b}
+			return actionAstWith(p, a, b, tc)
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_with_stmt, v)
 			return v
@@ -4947,7 +4949,7 @@ func parseRule_literal_pattern(p *Parser) any {
 			kw := p.ExpectName("None")
 			if kw == nil { return nil }
 			_ = kw
-			return []any{kw}
+			return actionAstMatchSingleton(p, pyNoneSentinel)
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_literal_pattern, v)
 			return v
@@ -4960,7 +4962,7 @@ func parseRule_literal_pattern(p *Parser) any {
 			kw := p.ExpectName("True")
 			if kw == nil { return nil }
 			_ = kw
-			return []any{kw}
+			return actionAstMatchSingleton(p, pyTrueSentinel)
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_literal_pattern, v)
 			return v
@@ -4973,7 +4975,7 @@ func parseRule_literal_pattern(p *Parser) any {
 			kw := p.ExpectName("False")
 			if kw == nil { return nil }
 			_ = kw
-			return []any{kw}
+			return actionAstMatchSingleton(p, pyFalseSentinel)
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_literal_pattern, v)
 			return v
@@ -5037,7 +5039,7 @@ func parseRule_literal_expr(p *Parser) any {
 			kw := p.ExpectName("None")
 			if kw == nil { return nil }
 			_ = kw
-			return []any{kw}
+			return actionAstConstant(p, pyNoneSentinel, nil)
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_literal_expr, v)
 			return v
@@ -5050,7 +5052,7 @@ func parseRule_literal_expr(p *Parser) any {
 			kw := p.ExpectName("True")
 			if kw == nil { return nil }
 			_ = kw
-			return []any{kw}
+			return actionAstConstant(p, pyTrueSentinel, nil)
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_literal_expr, v)
 			return v
@@ -5063,7 +5065,7 @@ func parseRule_literal_expr(p *Parser) any {
 			kw := p.ExpectName("False")
 			if kw == nil { return nil }
 			_ = kw
-			return []any{kw}
+			return actionAstConstant(p, pyFalseSentinel, nil)
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_literal_expr, v)
 			return v
@@ -5092,7 +5094,7 @@ func parseRule_complex_number(p *Parser) any {
 			imag := parseRule_imaginary_number(p)
 			if imag == nil { return nil }
 			_ = imag
-			return []any{real, op, imag}
+			return actionAstBinOp(p, real, ast.Add, imag)
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_complex_number, v)
 			return v
@@ -5111,7 +5113,7 @@ func parseRule_complex_number(p *Parser) any {
 			imag := parseRule_imaginary_number(p)
 			if imag == nil { return nil }
 			_ = imag
-			return []any{real, op, imag}
+			return actionAstBinOp(p, real, ast.Sub, imag)
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_complex_number, v)
 			return v
@@ -5150,7 +5152,7 @@ func parseRule_signed_number(p *Parser) any {
 			number := p.ExpectToken(tokenize.NUMBER)
 			if number == nil { return nil }
 			_ = number
-			return []any{op, number}
+			return actionAstUnaryOp(p, ast.USub, number)
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_signed_number, v)
 			return v
@@ -5189,7 +5191,7 @@ func parseRule_signed_real_number(p *Parser) any {
 			real := parseRule_real_number(p)
 			if real == nil { return nil }
 			_ = real
-			return []any{op, real}
+			return actionAstUnaryOp(p, ast.USub, real)
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_signed_real_number, v)
 			return v
@@ -5283,7 +5285,7 @@ func parseRule_pattern_capture_target(p *Parser) any {
 			if name == nil { return nil }
 			_ = name
 			if !p.Lookahead(false, func(p *Parser) any { return parseRule__group_38(p) }) { return nil }
-			return []any{name}
+			return actionPgenSetExprContext(p, p, name, ast.Store)
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_pattern_capture_target, v)
 			return v
@@ -6509,7 +6511,7 @@ func parseRule_star_expression(p *Parser) any {
 			a := parseRule_bitwise_or(p)
 			if a == nil { return nil }
 			_ = a
-			return []any{op, a}
+			return actionAstStarred(p, a, ast.Load)
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_star_expression, v)
 			return v
@@ -6573,7 +6575,7 @@ func parseRule_star_named_expression(p *Parser) any {
 			a := parseRule_bitwise_or(p)
 			if a == nil { return nil }
 			_ = a
-			return []any{op, a}
+			return actionAstStarred(p, a, ast.Load)
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_star_named_expression, v)
 			return v
@@ -6775,7 +6777,7 @@ func parseRule_inversion(p *Parser) any {
 			a := parseRule_inversion(p)
 			if a == nil { return nil }
 			_ = a
-			return []any{kw, a}
+			return actionAstUnaryOp(p, ast.Not, a)
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_inversion, v)
 			return v
@@ -6993,7 +6995,7 @@ func parseRule_eq_bitwise_or(p *Parser) any {
 			a := parseRule_bitwise_or(p)
 			if a == nil { return nil }
 			_ = a
-			return []any{op, a}
+			return actionPgenCmpopExprPair(p, p, ast.Eq, a)
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_eq_bitwise_or, v)
 			return v
@@ -7019,7 +7021,7 @@ func parseRule_noteq_bitwise_or(p *Parser) any {
 			a := parseRule_bitwise_or(p)
 			if a == nil { return nil }
 			_ = a
-			return []any{op, a}
+			return actionPgenCmpopExprPair(p, p, ast.NotEq, a)
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_noteq_bitwise_or, v)
 			return v
@@ -7045,7 +7047,7 @@ func parseRule_lte_bitwise_or(p *Parser) any {
 			a := parseRule_bitwise_or(p)
 			if a == nil { return nil }
 			_ = a
-			return []any{op, a}
+			return actionPgenCmpopExprPair(p, p, ast.LtE, a)
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_lte_bitwise_or, v)
 			return v
@@ -7071,7 +7073,7 @@ func parseRule_lt_bitwise_or(p *Parser) any {
 			a := parseRule_bitwise_or(p)
 			if a == nil { return nil }
 			_ = a
-			return []any{op, a}
+			return actionPgenCmpopExprPair(p, p, ast.Lt, a)
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_lt_bitwise_or, v)
 			return v
@@ -7097,7 +7099,7 @@ func parseRule_gte_bitwise_or(p *Parser) any {
 			a := parseRule_bitwise_or(p)
 			if a == nil { return nil }
 			_ = a
-			return []any{op, a}
+			return actionPgenCmpopExprPair(p, p, ast.GtE, a)
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_gte_bitwise_or, v)
 			return v
@@ -7123,7 +7125,7 @@ func parseRule_gt_bitwise_or(p *Parser) any {
 			a := parseRule_bitwise_or(p)
 			if a == nil { return nil }
 			_ = a
-			return []any{op, a}
+			return actionPgenCmpopExprPair(p, p, ast.Gt, a)
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_gt_bitwise_or, v)
 			return v
@@ -7152,7 +7154,7 @@ func parseRule_notin_bitwise_or(p *Parser) any {
 			a := parseRule_bitwise_or(p)
 			if a == nil { return nil }
 			_ = a
-			return []any{kw, kw_1, a}
+			return actionPgenCmpopExprPair(p, p, ast.NotIn, a)
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_notin_bitwise_or, v)
 			return v
@@ -7178,7 +7180,7 @@ func parseRule_in_bitwise_or(p *Parser) any {
 			a := parseRule_bitwise_or(p)
 			if a == nil { return nil }
 			_ = a
-			return []any{kw, a}
+			return actionPgenCmpopExprPair(p, p, ast.In, a)
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_in_bitwise_or, v)
 			return v
@@ -7207,7 +7209,7 @@ func parseRule_isnot_bitwise_or(p *Parser) any {
 			a := parseRule_bitwise_or(p)
 			if a == nil { return nil }
 			_ = a
-			return []any{kw, kw_1, a}
+			return actionPgenCmpopExprPair(p, p, ast.IsNot, a)
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_isnot_bitwise_or, v)
 			return v
@@ -7233,7 +7235,7 @@ func parseRule_is_bitwise_or(p *Parser) any {
 			a := parseRule_bitwise_or(p)
 			if a == nil { return nil }
 			_ = a
-			return []any{kw, a}
+			return actionPgenCmpopExprPair(p, p, ast.Is, a)
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_is_bitwise_or, v)
 			return v
@@ -7282,7 +7284,7 @@ func parseRule_bitwise_or_raw(p *Parser) any {
 			b := parseRule_bitwise_xor(p)
 			if b == nil { return nil }
 			_ = b
-			return []any{a, op, b}
+			return actionAstBinOp(p, a, ast.BitOr, b)
 		}(); v != nil {
 			return v
 		}
@@ -7341,7 +7343,7 @@ func parseRule_bitwise_xor_raw(p *Parser) any {
 			b := parseRule_bitwise_and(p)
 			if b == nil { return nil }
 			_ = b
-			return []any{a, op, b}
+			return actionAstBinOp(p, a, ast.BitXor, b)
 		}(); v != nil {
 			return v
 		}
@@ -7400,7 +7402,7 @@ func parseRule_bitwise_and_raw(p *Parser) any {
 			b := parseRule_shift_expr(p)
 			if b == nil { return nil }
 			_ = b
-			return []any{a, op, b}
+			return actionAstBinOp(p, a, ast.BitAnd, b)
 		}(); v != nil {
 			return v
 		}
@@ -7459,7 +7461,7 @@ func parseRule_shift_expr_raw(p *Parser) any {
 			b := parseRule_sum(p)
 			if b == nil { return nil }
 			_ = b
-			return []any{a, op, b}
+			return actionAstBinOp(p, a, ast.LShift, b)
 		}(); v != nil {
 			return v
 		}
@@ -7477,7 +7479,7 @@ func parseRule_shift_expr_raw(p *Parser) any {
 			b := parseRule_sum(p)
 			if b == nil { return nil }
 			_ = b
-			return []any{a, op, b}
+			return actionAstBinOp(p, a, ast.RShift, b)
 		}(); v != nil {
 			return v
 		}
@@ -7548,7 +7550,7 @@ func parseRule_sum_raw(p *Parser) any {
 			b := parseRule_term(p)
 			if b == nil { return nil }
 			_ = b
-			return []any{a, op, b}
+			return actionAstBinOp(p, a, ast.Add, b)
 		}(); v != nil {
 			return v
 		}
@@ -7566,7 +7568,7 @@ func parseRule_sum_raw(p *Parser) any {
 			b := parseRule_term(p)
 			if b == nil { return nil }
 			_ = b
-			return []any{a, op, b}
+			return actionAstBinOp(p, a, ast.Sub, b)
 		}(); v != nil {
 			return v
 		}
@@ -7625,7 +7627,7 @@ func parseRule_term_raw(p *Parser) any {
 			b := parseRule_factor(p)
 			if b == nil { return nil }
 			_ = b
-			return []any{a, op, b}
+			return actionAstBinOp(p, a, ast.Mult, b)
 		}(); v != nil {
 			return v
 		}
@@ -7643,7 +7645,7 @@ func parseRule_term_raw(p *Parser) any {
 			b := parseRule_factor(p)
 			if b == nil { return nil }
 			_ = b
-			return []any{a, op, b}
+			return actionAstBinOp(p, a, ast.Div, b)
 		}(); v != nil {
 			return v
 		}
@@ -7661,7 +7663,7 @@ func parseRule_term_raw(p *Parser) any {
 			b := parseRule_factor(p)
 			if b == nil { return nil }
 			_ = b
-			return []any{a, op, b}
+			return actionAstBinOp(p, a, ast.FloorDiv, b)
 		}(); v != nil {
 			return v
 		}
@@ -7679,7 +7681,7 @@ func parseRule_term_raw(p *Parser) any {
 			b := parseRule_factor(p)
 			if b == nil { return nil }
 			_ = b
-			return []any{a, op, b}
+			return actionAstBinOp(p, a, ast.ModOperator, b)
 		}(); v != nil {
 			return v
 		}
@@ -7745,7 +7747,7 @@ func parseRule_factor(p *Parser) any {
 			a := parseRule_factor(p)
 			if a == nil { return nil }
 			_ = a
-			return []any{op, a}
+			return actionAstUnaryOp(p, ast.UAdd, a)
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_factor, v)
 			return v
@@ -7761,7 +7763,7 @@ func parseRule_factor(p *Parser) any {
 			a := parseRule_factor(p)
 			if a == nil { return nil }
 			_ = a
-			return []any{op, a}
+			return actionAstUnaryOp(p, ast.USub, a)
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_factor, v)
 			return v
@@ -7777,7 +7779,7 @@ func parseRule_factor(p *Parser) any {
 			a := parseRule_factor(p)
 			if a == nil { return nil }
 			_ = a
-			return []any{op, a}
+			return actionAstUnaryOp(p, ast.Invert, a)
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_factor, v)
 			return v
@@ -7819,7 +7821,7 @@ func parseRule_power(p *Parser) any {
 			b := parseRule_factor(p)
 			if b == nil { return nil }
 			_ = b
-			return []any{a, op, b}
+			return actionAstBinOp(p, a, ast.Pow, b)
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_power, v)
 			return v
@@ -7976,7 +7978,7 @@ func parseRule_primary_raw(p *Parser) any {
 			op_1 := p.ExpectToken(tokenize.RSQB)
 			if op_1 == nil { return nil }
 			_ = op_1
-			return []any{a, op, b, op_1}
+			return actionAstSubscript(p, a, b, ast.Load)
 		}(); v != nil {
 			return v
 		}
@@ -8025,7 +8027,7 @@ func parseRule_slices(p *Parser) any {
 			_ = a
 			opt := p.ExpectToken(tokenize.COMMA)
 			_ = opt
-			return []any{a, opt}
+			return actionAstTuple(p, a, ast.Load)
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_slices, v)
 			return v
@@ -8103,7 +8105,7 @@ func parseRule_atom(p *Parser) any {
 			kw := p.ExpectName("True")
 			if kw == nil { return nil }
 			_ = kw
-			return []any{kw}
+			return actionAstConstant(p, pyTrueSentinel, nil)
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_atom, v)
 			return v
@@ -8116,7 +8118,7 @@ func parseRule_atom(p *Parser) any {
 			kw := p.ExpectName("False")
 			if kw == nil { return nil }
 			_ = kw
-			return []any{kw}
+			return actionAstConstant(p, pyFalseSentinel, nil)
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_atom, v)
 			return v
@@ -8129,7 +8131,7 @@ func parseRule_atom(p *Parser) any {
 			kw := p.ExpectName("None")
 			if kw == nil { return nil }
 			_ = kw
-			return []any{kw}
+			return actionAstConstant(p, pyNoneSentinel, nil)
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_atom, v)
 			return v
@@ -8211,7 +8213,7 @@ func parseRule_atom(p *Parser) any {
 			op := p.ExpectToken(tokenize.ELLIPSIS)
 			if op == nil { return nil }
 			_ = op
-			return []any{op}
+			return actionAstConstant(p, pyEllipsisSentinel, nil)
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_atom, v)
 			return v
@@ -9296,7 +9298,7 @@ func parseRule_list(p *Parser) any {
 			op_1 := p.ExpectToken(tokenize.RSQB)
 			if op_1 == nil { return nil }
 			_ = op_1
-			return []any{op, a, op_1}
+			return actionAstList(p, a, ast.Load)
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_list, v)
 			return v
@@ -9324,7 +9326,7 @@ func parseRule_tuple(p *Parser) any {
 			op_1 := p.ExpectToken(tokenize.RPAR)
 			if op_1 == nil { return nil }
 			_ = op_1
-			return []any{op, a, op_1}
+			return actionAstTuple(p, a, ast.Load)
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_tuple, v)
 			return v
@@ -9966,7 +9968,7 @@ func parseRule_starred_expression(p *Parser) any {
 			a := parseRule_expression(p)
 			if a == nil { return nil }
 			_ = a
-			return []any{op, a}
+			return actionAstStarred(p, a, ast.Load)
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_starred_expression, v)
 			return v
@@ -10294,7 +10296,7 @@ func parseRule_target_with_star_atom(p *Parser) any {
 			if op_1 == nil { return nil }
 			_ = op_1
 			if !p.Lookahead(false, func(p *Parser) any { return parseRule_t_lookahead(p) }) { return nil }
-			return []any{a, op, b, op_1}
+			return actionAstSubscript(p, a, b, ast.Store)
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_target_with_star_atom, v)
 			return v
@@ -10330,7 +10332,7 @@ func parseRule_star_atom(p *Parser) any {
 			a := p.ExpectToken(tokenize.NAME)
 			if a == nil { return nil }
 			_ = a
-			return []any{a}
+			return actionPgenSetExprContext(p, p, a, ast.Store)
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_star_atom, v)
 			return v
@@ -10349,7 +10351,7 @@ func parseRule_star_atom(p *Parser) any {
 			op_1 := p.ExpectToken(tokenize.RPAR)
 			if op_1 == nil { return nil }
 			_ = op_1
-			return []any{op, a, op_1}
+			return actionPgenSetExprContext(p, p, a, ast.Store)
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_star_atom, v)
 			return v
@@ -10367,7 +10369,7 @@ func parseRule_star_atom(p *Parser) any {
 			op_1 := p.ExpectToken(tokenize.RPAR)
 			if op_1 == nil { return nil }
 			_ = op_1
-			return []any{op, a, op_1}
+			return actionAstTuple(p, a, ast.Store)
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_star_atom, v)
 			return v
@@ -10385,7 +10387,7 @@ func parseRule_star_atom(p *Parser) any {
 			op_1 := p.ExpectToken(tokenize.RSQB)
 			if op_1 == nil { return nil }
 			_ = op_1
-			return []any{op, a, op_1}
+			return actionAstList(p, a, ast.Store)
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_star_atom, v)
 			return v
@@ -10421,7 +10423,7 @@ func parseRule_single_target(p *Parser) any {
 			a := p.ExpectToken(tokenize.NAME)
 			if a == nil { return nil }
 			_ = a
-			return []any{a}
+			return actionPgenSetExprContext(p, p, a, ast.Store)
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_single_target, v)
 			return v
@@ -10493,7 +10495,7 @@ func parseRule_single_subscript_attribute_target(p *Parser) any {
 			if op_1 == nil { return nil }
 			_ = op_1
 			if !p.Lookahead(false, func(p *Parser) any { return parseRule_t_lookahead(p) }) { return nil }
-			return []any{a, op, b, op_1}
+			return actionAstSubscript(p, a, b, ast.Store)
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_single_subscript_attribute_target, v)
 			return v
@@ -10565,7 +10567,7 @@ func parseRule_t_primary_raw(p *Parser) any {
 			if op_1 == nil { return nil }
 			_ = op_1
 			if !p.Lookahead(true, func(p *Parser) any { return parseRule_t_lookahead(p) }) { return nil }
-			return []any{a, op, b, op_1}
+			return actionAstSubscript(p, a, b, ast.Load)
 		}(); v != nil {
 			return v
 		}
@@ -10740,7 +10742,7 @@ func parseRule_del_target(p *Parser) any {
 			if op_1 == nil { return nil }
 			_ = op_1
 			if !p.Lookahead(false, func(p *Parser) any { return parseRule_t_lookahead(p) }) { return nil }
-			return []any{a, op, b, op_1}
+			return actionAstSubscript(p, a, b, ast.Del)
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_del_target, v)
 			return v
@@ -10776,7 +10778,7 @@ func parseRule_del_t_atom(p *Parser) any {
 			a := p.ExpectToken(tokenize.NAME)
 			if a == nil { return nil }
 			_ = a
-			return []any{a}
+			return actionPgenSetExprContext(p, p, a, ast.Del)
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_del_t_atom, v)
 			return v
@@ -10795,7 +10797,7 @@ func parseRule_del_t_atom(p *Parser) any {
 			op_1 := p.ExpectToken(tokenize.RPAR)
 			if op_1 == nil { return nil }
 			_ = op_1
-			return []any{op, a, op_1}
+			return actionPgenSetExprContext(p, p, a, ast.Del)
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_del_t_atom, v)
 			return v
@@ -10813,7 +10815,7 @@ func parseRule_del_t_atom(p *Parser) any {
 			op_1 := p.ExpectToken(tokenize.RPAR)
 			if op_1 == nil { return nil }
 			_ = op_1
-			return []any{op, a, op_1}
+			return actionAstTuple(p, a, ast.Del)
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_del_t_atom, v)
 			return v
@@ -10831,7 +10833,7 @@ func parseRule_del_t_atom(p *Parser) any {
 			op_1 := p.ExpectToken(tokenize.RSQB)
 			if op_1 == nil { return nil }
 			_ = op_1
-			return []any{op, a, op_1}
+			return actionAstList(p, a, ast.Del)
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_del_t_atom, v)
 			return v

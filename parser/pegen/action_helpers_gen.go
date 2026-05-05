@@ -23,6 +23,19 @@ import (
 	"github.com/tamnd/gopy/tokenize"
 )
 
+// pyConstantSentinel tags Py_True / Py_False / Py_None / Py_Ellipsis
+// references in grammar actions. The translator emits one of these
+// sentinels for the bare `Py_True` etc. identifiers; actionAstConstant
+// turns the sentinel into the corresponding ast.Constant value.
+type pyConstantSentinel int
+
+const (
+	pyTrueSentinel pyConstantSentinel = iota + 1
+	pyFalseSentinel
+	pyNoneSentinel
+	pyEllipsisSentinel
+)
+
 // argAt returns args[i] or nil if i is out of range. The action
 // translator emits variadic call sites; trailing optional bindings
 // can be missing.
@@ -981,4 +994,479 @@ func decodeStringToken(s string) (string, bool) {
 		body = body[2 : len(body)-2]
 	}
 	return body, true
+}
+
+// withitemSeqOf walks v and collects the *ast.Withitem values found
+// inside any-wrappers. Used by actionAstWith.
+func withitemSeqOf(v any) ast.Seq[*ast.Withitem] {
+	var out []*ast.Withitem
+	var walk func(any)
+	walk = func(x any) {
+		switch t := x.(type) {
+		case nil:
+		case *ast.Withitem:
+			out = append(out, t)
+		case []*ast.Withitem:
+			out = append(out, t...)
+		case []any:
+			for _, e := range t {
+				walk(e)
+			}
+		}
+	}
+	walk(v)
+	if len(out) == 0 {
+		return nil
+	}
+	return ast.Seq[*ast.Withitem](out)
+}
+
+// actionAstAssign builds an Assign. Args: (targets, value, type_comment).
+//
+// CPython: Parser/Python.asdl Assign(expr* targets, expr value, ...)
+func actionAstAssign(p *Parser, args ...any) any {
+	_ = p
+	targets := exprSeqOf(argAt(args, 0))
+	value := asExpr(argAt(args, 1))
+	if len(targets) == 0 || value == nil {
+		return placeholderMatched
+	}
+	tc := decodeTypeComment(argAt(args, 2))
+	return &ast.Assign{Targets: targets, Value: value, TypeComment: tc, Pos: ast.NoPos}
+}
+
+// actionAstAugAssign builds an AugAssign. Args: (target, op, value).
+//
+// CPython: Parser/Python.asdl AugAssign(expr target, operator op, expr value)
+func actionAstAugAssign(p *Parser, args ...any) any {
+	_ = p
+	target := asExpr(argAt(args, 0))
+	op, ok := argAt(args, 1).(ast.Operator)
+	value := asExpr(argAt(args, 2))
+	if target == nil || !ok || value == nil {
+		return placeholderMatched
+	}
+	return &ast.AugAssign{Target: target, Op: op, Value: value, Pos: ast.NoPos}
+}
+
+// actionAstAnnAssign builds an AnnAssign. Args: (target, annotation, value, simple).
+//
+// CPython: Parser/Python.asdl AnnAssign(expr target, expr annotation, expr? value, int simple)
+func actionAstAnnAssign(p *Parser, args ...any) any {
+	_ = p
+	target := asExpr(argAt(args, 0))
+	annotation := asExpr(argAt(args, 1))
+	value := asExpr(argAt(args, 2))
+	simple := intOf(argAt(args, 3))
+	if target == nil || annotation == nil {
+		return placeholderMatched
+	}
+	isSimple := 0
+	if simple != nil {
+		isSimple = *simple
+	}
+	return &ast.AnnAssign{
+		Target:     target,
+		Annotation: annotation,
+		Value:      value,
+		Simple:     isSimple,
+		Pos:        ast.NoPos,
+	}
+}
+
+// actionAstBinOp builds a BinOp. Args: (left, op, right).
+func actionAstBinOp(p *Parser, args ...any) any {
+	_ = p
+	left := asExpr(argAt(args, 0))
+	op, ok := argAt(args, 1).(ast.Operator)
+	right := asExpr(argAt(args, 2))
+	if left == nil || !ok || right == nil {
+		return placeholderMatched
+	}
+	return &ast.BinOp{Left: left, Op: op, Right: right, Pos: ast.NoPos}
+}
+
+// actionAstBoolOp builds a BoolOp. Args: (op, values).
+func actionAstBoolOp(p *Parser, args ...any) any {
+	_ = p
+	op, ok := argAt(args, 0).(ast.Boolop)
+	values := exprSeqOf(argAt(args, 1))
+	if !ok || len(values) == 0 {
+		return placeholderMatched
+	}
+	return &ast.BoolOp{Op: op, Values: values, Pos: ast.NoPos}
+}
+
+// actionAstUnaryOp builds a UnaryOp. Args: (op, operand).
+func actionAstUnaryOp(p *Parser, args ...any) any {
+	_ = p
+	op, ok := argAt(args, 0).(ast.Unaryop)
+	operand := asExpr(argAt(args, 1))
+	if !ok || operand == nil {
+		return placeholderMatched
+	}
+	return &ast.UnaryOp{Op: op, Operand: operand, Pos: ast.NoPos}
+}
+
+// actionAstCompare builds a Compare. Args: (left, ops, comparators).
+func actionAstCompare(p *Parser, args ...any) any {
+	_ = p
+	left := asExpr(argAt(args, 0))
+	if left == nil {
+		return placeholderMatched
+	}
+	cmps := flattenCmpopExprPairs(argAt(args, 1))
+	if len(cmps) == 0 {
+		return placeholderMatched
+	}
+	ops := make(ast.Seq[ast.Cmpop], 0, len(cmps))
+	rhs := make(ast.Seq[ast.Expr], 0, len(cmps))
+	for _, pair := range cmps {
+		ops = append(ops, pair.Op)
+		rhs = append(rhs, pair.Expr)
+	}
+	return &ast.Compare{Left: left, Ops: ops, Comparators: rhs, Pos: ast.NoPos}
+}
+
+// actionAstNamedExpr builds a NamedExpr. Args: (target, value).
+func actionAstNamedExpr(p *Parser, args ...any) any {
+	_ = p
+	target := asExpr(argAt(args, 0))
+	value := asExpr(argAt(args, 1))
+	if target == nil || value == nil {
+		return placeholderMatched
+	}
+	return &ast.NamedExpr{Target: target, Value: value, Pos: ast.NoPos}
+}
+
+// actionAstAwait builds an Await. Args: (value).
+func actionAstAwait(p *Parser, args ...any) any {
+	_ = p
+	value := asExpr(argAt(args, 0))
+	if value == nil {
+		return placeholderMatched
+	}
+	return &ast.Await{Value: value, Pos: ast.NoPos}
+}
+
+// actionAstName builds a Name. Args: (id, ctx).
+func actionAstName(p *Parser, args ...any) any {
+	_ = p
+	id := identString(argAt(args, 0))
+	ctx, ok := argAt(args, 1).(ast.ExprContext)
+	if id == "" || !ok {
+		return placeholderMatched
+	}
+	return &ast.Name{Id: id, Ctx: ctx, Pos: ast.NoPos}
+}
+
+// actionAstAttribute builds an Attribute. Args: (value, attr, ctx).
+func actionAstAttribute(p *Parser, args ...any) any {
+	_ = p
+	value := asExpr(argAt(args, 0))
+	attr := identString(argAt(args, 1))
+	ctx, ok := argAt(args, 2).(ast.ExprContext)
+	if value == nil || attr == "" || !ok {
+		return placeholderMatched
+	}
+	return &ast.Attribute{Value: value, Attr: attr, Ctx: ctx, Pos: ast.NoPos}
+}
+
+// actionAstSubscript builds a Subscript. Args: (value, slice, ctx).
+func actionAstSubscript(p *Parser, args ...any) any {
+	_ = p
+	value := asExpr(argAt(args, 0))
+	sl := asExpr(argAt(args, 1))
+	ctx, ok := argAt(args, 2).(ast.ExprContext)
+	if value == nil || sl == nil || !ok {
+		return placeholderMatched
+	}
+	return &ast.Subscript{Value: value, Slice: sl, Ctx: ctx, Pos: ast.NoPos}
+}
+
+// actionAstStarred builds a Starred. Args: (value, ctx).
+func actionAstStarred(p *Parser, args ...any) any {
+	_ = p
+	value := asExpr(argAt(args, 0))
+	ctx, ok := argAt(args, 1).(ast.ExprContext)
+	if value == nil || !ok {
+		return placeholderMatched
+	}
+	return &ast.Starred{Value: value, Ctx: ctx, Pos: ast.NoPos}
+}
+
+// actionAstTuple builds a Tuple. Args: (elts, ctx).
+func actionAstTuple(p *Parser, args ...any) any {
+	_ = p
+	elts := exprSeqOf(argAt(args, 0))
+	ctx, ok := argAt(args, 1).(ast.ExprContext)
+	if !ok {
+		return placeholderMatched
+	}
+	return &ast.Tuple{Elts: elts, Ctx: ctx, Pos: ast.NoPos}
+}
+
+// actionAstList builds a List. Args: (elts, ctx).
+func actionAstList(p *Parser, args ...any) any {
+	_ = p
+	elts := exprSeqOf(argAt(args, 0))
+	ctx, ok := argAt(args, 1).(ast.ExprContext)
+	if !ok {
+		return placeholderMatched
+	}
+	return &ast.List{Elts: elts, Ctx: ctx, Pos: ast.NoPos}
+}
+
+// actionAstDict builds a Dict. Args: (keys, values).
+func actionAstDict(p *Parser, args ...any) any {
+	_ = p
+	keys := exprSeqOf(argAt(args, 0))
+	values := exprSeqOf(argAt(args, 1))
+	return &ast.Dict{Keys: keys, Values: values, Pos: ast.NoPos}
+}
+
+// actionAstCall builds a Call. Args: (func, args, keywords).
+func actionAstCall(p *Parser, args ...any) any {
+	_ = p
+	fn := asExpr(argAt(args, 0))
+	if fn == nil {
+		return placeholderMatched
+	}
+	callArgs := exprSeqOf(argAt(args, 1))
+	kws := keywordSeqOf(argAt(args, 2))
+	return &ast.Call{Func: fn, Args: callArgs, Keywords: kws, Pos: ast.NoPos}
+}
+
+// actionAstConstant builds a Constant. Args: (value, kind).
+func actionAstConstant(p *Parser, args ...any) any {
+	_ = p
+	v := constantValue(argAt(args, 0))
+	if v == nil && argAt(args, 0) != pyNoneSentinel {
+		return placeholderMatched
+	}
+	var kind *string
+	if k, ok := argAt(args, 1).(*string); ok {
+		kind = k
+	}
+	return &ast.Constant{Value: v, Kind: kind, Pos: ast.NoPos}
+}
+
+// constantValue maps a translated argument value (raw token, sentinel,
+// or already-typed Go value) onto the Python value the AST should
+// carry. Returns nil if the value is unrecognised; the caller treats
+// the explicit pyNoneSentinel case specially because nil is also the
+// "no value" return.
+func constantValue(v any) any {
+	switch t := v.(type) {
+	case pyConstantSentinel:
+		switch t {
+		case pyTrueSentinel:
+			return true
+		case pyFalseSentinel:
+			return false
+		case pyNoneSentinel:
+			return nil
+		case pyEllipsisSentinel:
+			return ast.Ellipsis
+		}
+	case *Token:
+		if t == nil {
+			return nil
+		}
+		switch t.Type {
+		case tokenize.NUMBER:
+			if v, ok := parseNumberLiteral(string(t.Bytes)); ok {
+				return v
+			}
+		case tokenize.STRING:
+			if s, ok := decodeStringToken(string(t.Bytes)); ok {
+				return s
+			}
+		}
+	case bool, int64, float64, complex128, string:
+		return t
+	}
+	return nil
+}
+
+// actionAstFor builds a For. Args: (target, iter, body, orelse, type_comment).
+func actionAstFor(p *Parser, args ...any) any {
+	_ = p
+	target := asExpr(argAt(args, 0))
+	iter := asExpr(argAt(args, 1))
+	body := stmtSeqOf(argAt(args, 2))
+	orelse := stmtSeqOf(argAt(args, 3))
+	if target == nil || iter == nil || len(body) == 0 {
+		return placeholderMatched
+	}
+	tc := decodeTypeComment(argAt(args, 4))
+	return &ast.For{
+		Target: target, Iter: iter, Body: body, Orelse: orelse,
+		TypeComment: tc, Pos: ast.NoPos,
+	}
+}
+
+// actionAstAsyncFor mirrors actionAstFor but returns AsyncFor.
+func actionAstAsyncFor(p *Parser, args ...any) any {
+	_ = p
+	target := asExpr(argAt(args, 0))
+	iter := asExpr(argAt(args, 1))
+	body := stmtSeqOf(argAt(args, 2))
+	orelse := stmtSeqOf(argAt(args, 3))
+	if target == nil || iter == nil || len(body) == 0 {
+		return placeholderMatched
+	}
+	tc := decodeTypeComment(argAt(args, 4))
+	return &ast.AsyncFor{
+		Target: target, Iter: iter, Body: body, Orelse: orelse,
+		TypeComment: tc, Pos: ast.NoPos,
+	}
+}
+
+// actionAstWith builds a With. Args: (items, body, type_comment).
+func actionAstWith(p *Parser, args ...any) any {
+	_ = p
+	items := withitemSeqOf(argAt(args, 0))
+	body := stmtSeqOf(argAt(args, 1))
+	if len(items) == 0 || len(body) == 0 {
+		return placeholderMatched
+	}
+	tc := decodeTypeComment(argAt(args, 2))
+	return &ast.With{Items: items, Body: body, TypeComment: tc, Pos: ast.NoPos}
+}
+
+// actionAstAsyncWith mirrors actionAstWith but returns AsyncWith.
+func actionAstAsyncWith(p *Parser, args ...any) any {
+	_ = p
+	items := withitemSeqOf(argAt(args, 0))
+	body := stmtSeqOf(argAt(args, 1))
+	if len(items) == 0 || len(body) == 0 {
+		return placeholderMatched
+	}
+	tc := decodeTypeComment(argAt(args, 2))
+	return &ast.AsyncWith{Items: items, Body: body, TypeComment: tc, Pos: ast.NoPos}
+}
+
+// actionAstMatchSingleton builds a MatchSingleton. Args: (value).
+func actionAstMatchSingleton(p *Parser, args ...any) any {
+	_ = p
+	v := constantValue(argAt(args, 0))
+	if v == nil && argAt(args, 0) != pyNoneSentinel {
+		return placeholderMatched
+	}
+	return &ast.MatchSingleton{Value: v, Pos: ast.NoPos}
+}
+
+// keywordSeqOf walks v and collects *ast.Keyword values.
+func keywordSeqOf(v any) ast.Seq[*ast.Keyword] {
+	var out []*ast.Keyword
+	var walk func(any)
+	walk = func(x any) {
+		switch t := x.(type) {
+		case nil:
+		case *ast.Keyword:
+			out = append(out, t)
+		case []*ast.Keyword:
+			out = append(out, t...)
+		case []any:
+			for _, e := range t {
+				walk(e)
+			}
+		}
+	}
+	walk(v)
+	if len(out) == 0 {
+		return nil
+	}
+	return ast.Seq[*ast.Keyword](out)
+}
+
+// cmpopExprPair pairs a comparison operator with its right-hand
+// operand. The Compare AST node stores them as parallel slices, but
+// the grammar produces them paired.
+type cmpopExprPair struct {
+	Op   ast.Cmpop
+	Expr ast.Expr
+}
+
+// flattenCmpopExprPairs walks v and collects every cmpopExprPair.
+func flattenCmpopExprPairs(v any) []cmpopExprPair {
+	var out []cmpopExprPair
+	var walk func(any)
+	walk = func(x any) {
+		switch t := x.(type) {
+		case nil:
+		case cmpopExprPair:
+			out = append(out, t)
+		case []cmpopExprPair:
+			out = append(out, t...)
+		case []any:
+			for _, e := range t {
+				walk(e)
+			}
+		}
+	}
+	walk(v)
+	return out
+}
+
+// actionPgenAugoperator wraps an ast.Operator for the augassign rule.
+// CPython returns an AugOperator helper struct so that b->kind reads
+// out the operator. The translator now drops the field selector, so
+// this helper just returns the operator unchanged.
+//
+// CPython: Parser/action_helpers.c _PyPegen_augoperator
+func actionPgenAugoperator(p *Parser, args ...any) any {
+	_ = p
+	if op, ok := argAt(args, 0).(ast.Operator); ok {
+		return op
+	}
+	return placeholderMatched
+}
+
+// actionPgenCmpopExprPair pairs a comparison operator with its
+// right-hand expression so actionAstCompare can split them apart.
+//
+// CPython: Parser/action_helpers.c _PyPegen_cmpop_expr_pair
+func actionPgenCmpopExprPair(p *Parser, args ...any) any {
+	_ = p
+	op, ok := argAt(args, 0).(ast.Cmpop)
+	expr := asExpr(argAt(args, 1))
+	if !ok || expr == nil {
+		return placeholderMatched
+	}
+	return cmpopExprPair{Op: op, Expr: expr}
+}
+
+// actionPgenSetExprContext rewrites the ctx field of an expression
+// node and returns it. Used by star_target / del_target rules.
+//
+// CPython: Parser/action_helpers.c _PyPegen_set_expr_context
+func actionPgenSetExprContext(p *Parser, args ...any) any {
+	_ = p
+	expr := asExpr(argAt(args, 0))
+	if expr == nil {
+		return placeholderMatched
+	}
+	ctx, ok := argAt(args, 1).(ast.ExprContext)
+	if !ok {
+		return expr
+	}
+	return SetExprContext(expr, ctx)
+}
+
+// decodeTypeComment turns an optional TYPE_COMMENT token into the
+// stored string pointer. Nil token → nil pointer (no comment).
+func decodeTypeComment(v any) *string {
+	if v == nil {
+		return nil
+	}
+	if t, ok := v.(*Token); ok && t != nil {
+		s := strings.TrimSpace(string(t.Bytes))
+		if s == "" {
+			return nil
+		}
+		return &s
+	}
+	return nil
 }

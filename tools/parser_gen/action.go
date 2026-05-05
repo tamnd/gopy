@@ -207,6 +207,62 @@ func (tr *cTranslator) parsePrimary() (string, bool) {
 	return "", false
 }
 
+// astEnumConstants names the C asdl enum values that the grammar uses
+// directly (Add, Sub, Eq, Load, Store, ...). The Go AST package
+// re-exports them as package-level constants, so a bare identifier in
+// the grammar maps to ast.Foo.
+//
+// CPython: Include/internal/pycore_ast.h asdl enum tags.
+var astEnumConstants = map[string]string{
+	"Load":  "ast.Load",
+	"Store": "ast.Store",
+	"Del":   "ast.Del",
+
+	"And": "ast.And",
+	"Or":  "ast.Or",
+
+	"Add":      "ast.Add",
+	"Sub":      "ast.Sub",
+	"Mult":     "ast.Mult",
+	"MatMult":  "ast.MatMult",
+	"Div":      "ast.Div",
+	"Mod":      "ast.ModOperator",
+	"Pow":      "ast.Pow",
+	"LShift":   "ast.LShift",
+	"RShift":   "ast.RShift",
+	"BitOr":    "ast.BitOr",
+	"BitXor":   "ast.BitXor",
+	"BitAnd":   "ast.BitAnd",
+	"FloorDiv": "ast.FloorDiv",
+
+	"Invert": "ast.Invert",
+	"Not":    "ast.Not",
+	"UAdd":   "ast.UAdd",
+	"USub":   "ast.USub",
+
+	"Eq":    "ast.Eq",
+	"NotEq": "ast.NotEq",
+	"Lt":    "ast.Lt",
+	"LtE":   "ast.LtE",
+	"Gt":    "ast.Gt",
+	"GtE":   "ast.GtE",
+	"Is":    "ast.Is",
+	"IsNot": "ast.IsNot",
+	"In":    "ast.In",
+	"NotIn": "ast.NotIn",
+}
+
+// pyConstants names the C global singletons (Py_True, Py_None, ...)
+// that grammar actions reach into when building Constant nodes. The
+// Go side surfaces them through helper sentinels so the action layer
+// can land them as ast.Constant values.
+var pyConstants = map[string]string{
+	"Py_True":     "pyTrueSentinel",
+	"Py_False":    "pyFalseSentinel",
+	"Py_None":     "pyNoneSentinel",
+	"Py_Ellipsis": "pyEllipsisSentinel",
+}
+
 // parseIDExpr handles identifiers that may be plain refs, calls, or
 // chains of `->` / `.` accesses.
 func (tr *cTranslator) parseIDExpr() (string, bool) {
@@ -226,20 +282,41 @@ func (tr *cTranslator) parseIDExpr() (string, bool) {
 	case "true", "false":
 		return name, true
 	}
+	if v, ok := astEnumConstants[name]; ok {
+		// Bail if a member-access chain follows an enum; not
+		// expected today and the Go form differs anyway.
+		if op := tr.peek(); op.text == "->" || op.text == "." {
+			return "", false
+		}
+		return v, true
+	}
+	if v, ok := pyConstants[name]; ok {
+		return v, true
+	}
 	// Function call?
 	if tr.peek().text == "(" {
 		return tr.parseCall(name)
 	}
-	// Member access chains drop us into typed-field territory. Bound
-	// vars in the generated closures are interface{}, so a field
-	// access cannot compile. Bail out and let the alt fall back to
-	// placeholderMatched until the runtime types are firmed up.
+	// Member access chains: bound names are interface{} so field
+	// access cannot compile directly. The one shape we recognise is
+	// `b->kind` on AugOperator helper output, where the helper now
+	// returns the Operator value directly. Drop the field selector so
+	// the bound name itself flows through.
 	if op := tr.peek(); op.text == "->" || op.text == "." {
+		if tr.bound != nil && tr.bound[name] {
+			tr.advance()                  // consume -> or .
+			if tr.peek().kind != "id" {
+				return "", false
+			}
+			field := tr.advance().text
+			if field == "kind" {
+				return goIdent(name), true
+			}
+		}
 		return "", false
 	}
 	// Only accept identifiers that are actually in scope. Anything
-	// else (AST enum constants like Store, Add, etc., free helpers,
-	// stray macros) would not compile.
+	// else (free helpers, stray macros) would not compile.
 	if tr.bound == nil || !tr.bound[name] {
 		return "", false
 	}
@@ -285,6 +362,19 @@ func translateCall(fname string, args []string) (string, bool) {
 		}
 	case "CHECK_VERSION":
 		if len(args) >= 4 {
+			return args[len(args)-1], true
+		}
+	case "NEW_TYPE_COMMENT":
+		// Macro that wraps an optional TYPE_COMMENT token into a
+		// PyObject* string. The action helpers accept the raw token
+		// and decode internally, so just pass the token through.
+		if len(args) == 2 {
+			return args[1], true
+		}
+	case "INVALID_VERSION_CHECK":
+		// Version-gate macro: emits the body when the runtime is at
+		// least the named version. Pass-through to the body arg.
+		if len(args) >= 3 {
 			return args[len(args)-1], true
 		}
 	case "RAISE_SYNTAX_ERROR", "RAISE_SYNTAX_ERROR_KNOWN_LOCATION",

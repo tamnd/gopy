@@ -22,7 +22,9 @@ func TestTranslateActionShapes(t *testing.T) {
 		{"_PyAST_Module(a, EXTRA)", "actionAstModule(p, a)", true},
 		{"_PyAST_Pass(EXTRA)", "actionAstPass(p)", true},
 		{"_PyAST_Return(a, EXTRA)", "actionAstReturn(p, a)", true},
-		{"_PyAST_BinOp(a, Add, b, EXTRA)", "", false}, // Add not bound
+		{"_PyAST_BinOp(a, Add, b, EXTRA)", "actionAstBinOp(p, a, ast.Add, b)", true},
+		{"_PyAST_Constant(Py_True, NULL, EXTRA)", "actionAstConstant(p, pyTrueSentinel, nil)", true},
+		{"_PyAST_Assign(a, b, NEW_TYPE_COMMENT(p, e), EXTRA)", "actionAstAssign(p, a, b, e)", true},
 		{"_PyPegen_seq_insert_in_front(p, a, b)", "actionPgenSeqInsertInFront(p, p, a, b)", true},
 		{"RAISE_SYNTAX_ERROR(\"oops\")", `raiseAction(p, "RAISE_SYNTAX_ERROR", "oops")`, true},
 		{"a->lineno", "", false}, // member access on any-typed bound
