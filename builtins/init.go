@@ -68,8 +68,36 @@ func Init(defaultFile io.Writer) (*objects.Dict, error) {
 			return nil, err
 		}
 	}
+	for _, fn := range constructorPanel() {
+		if err := setBuiltin(dict, fn.name, objects.NewBuiltinFunction(fn.name, fn.impl)); err != nil {
+			return nil, err
+		}
+	}
 
 	return dict, nil
+}
+
+// constructorPanel returns the v0.7 constructor wrappers
+// (1651-builtins-F): int, float, bool, list, tuple, dict. set lands
+// alongside the set / frozenset port.
+//
+// CPython: Python/bltinmodule.c the type singletons exposed as
+// builtins through _PyBuiltin_Init's SETBUILTIN macro
+func constructorPanel() []struct {
+	name string
+	impl func(args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error)
+} {
+	return []struct {
+		name string
+		impl func(args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error)
+	}{
+		{"int", IntCtor},
+		{"float", FloatCtor},
+		{"bool", BoolCtor},
+		{"list", ListCtor},
+		{"tuple", TupleCtor},
+		{"dict", DictCtor},
+	}
 }
 
 // numericPanel returns the v0.7 numeric / formatting builtins
