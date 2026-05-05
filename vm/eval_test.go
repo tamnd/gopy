@@ -335,6 +335,42 @@ func TestEvalContainsOp(t *testing.T) {
 	}
 }
 
+func TestEvalLoadSmallInt(t *testing.T) {
+	ts := state.NewThread()
+	// LOAD_SMALL_INT 42; RETURN_VALUE -> 42
+	co := codeWithBytecode(append(
+		instr(compile.LOAD_SMALL_INT, 42),
+		instr(compile.RETURN_VALUE, 0)...))
+	v, err := EvalCode(ts, co, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, _ := v.(*objects.Int).Int64()
+	if got != 42 {
+		t.Errorf("got %d, want 42", got)
+	}
+}
+
+func TestEvalToBool(t *testing.T) {
+	ts := state.NewThread()
+	// LOAD_CONST 0 (1); TO_BOOL; RETURN_VALUE -> True
+	co := &objects.Code{
+		Code: append(append(
+			instr(compile.LOAD_CONST, 0),
+			instr(compile.TO_BOOL, 0)...),
+			instr(compile.RETURN_VALUE, 0)...),
+		Consts:    []any{int64(1)},
+		Stacksize: 4,
+	}
+	v, err := EvalCode(ts, co, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v != objects.True() {
+		t.Errorf("got %v, want True", v)
+	}
+}
+
 func contains(s, sub string) bool {
 	return sub == "" || (len(s) >= len(sub) && (s == sub || indexOf(s, sub) >= 0))
 }

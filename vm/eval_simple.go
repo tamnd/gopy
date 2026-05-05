@@ -107,7 +107,10 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, retVal
 		e.pushObject(obj)
 		return e.advance(), nil, nil, false, true, nil
 
-	case compile.LOAD_FAST:
+	case compile.LOAD_FAST, compile.LOAD_FAST_BORROW:
+		// LOAD_FAST_BORROW (3.13+) is the same observable shape as
+		// LOAD_FAST under our model: Go GC handles the lifetime, so
+		// the borrow-vs-own distinction collapses.
 		ref := e.localAt(int(oparg))
 		if ref.IsNull() {
 			return 0, nil, nil, false, true, fmt.Errorf("vm: LOAD_FAST: local %d unbound", oparg)
@@ -873,8 +876,9 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, retVal
 		e.pushObject(objects.NewInt(int64(n)))
 		return e.advance(), nil, nil, false, true, nil
 
-	case compile.LOAD_FAST_LOAD_FAST:
+	case compile.LOAD_FAST_LOAD_FAST, compile.LOAD_FAST_BORROW_LOAD_FAST_BORROW:
 		// Two local indexes packed: high nibble first, low nibble second.
+		// The BORROW variant is identical under Go GC.
 		hi := int(oparg >> 4)
 		lo := int(oparg & 0xF)
 		r1 := e.localAt(hi)
@@ -885,6 +889,74 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, retVal
 		e.push(r1.Dup())
 		e.push(r2.Dup())
 		return e.advance(), nil, nil, false, true, nil
+
+	case compile.STORE_FAST_LOAD_FAST:
+		// Pop TOS into local hi, then load local lo onto the stack.
+		hi := int(oparg >> 4)
+		lo := int(oparg & 0xF)
+		ref := e.pop()
+		old := e.localAt(hi)
+		old.Close()
+		e.setLocal(hi, ref)
+		r2 := e.localAt(lo)
+		if r2.IsNull() {
+			return 0, nil, nil, false, true, fmt.Errorf("STORE_FAST_LOAD_FAST: local %d unbound", lo)
+		}
+		e.push(r2.Dup())
+		return e.advance(), nil, nil, false, true, nil
+
+	case compile.STORE_FAST_STORE_FAST:
+		// Pop TOS into local hi, then pop the new TOS into local lo.
+		hi := int(oparg >> 4)
+		lo := int(oparg & 0xF)
+		r1 := e.pop()
+		oldHi := e.localAt(hi)
+		oldHi.Close()
+		e.setLocal(hi, r1)
+		r2 := e.pop()
+		oldLo := e.localAt(lo)
+		oldLo.Close()
+		e.setLocal(lo, r2)
+		return e.advance(), nil, nil, false, true, nil
+
+	case compile.LOAD_SMALL_INT:
+		// 3.14 fast path: oparg is the literal int value (0..255). No
+		// const lookup, no indirection.
+		e.pushObject(objects.NewInt(int64(oparg)))
+		return e.advance(), nil, nil, false, true, nil
+
+	case compile.TO_BOOL:
+		// Replace TOS with bool(TOS).
+		v := e.popObject()
+		truthy, terr := objects.IsTruthy(v)
+		if terr != nil {
+			return 0, nil, nil, false, true, terr
+		}
+		e.pushObject(objects.NewBool(truthy))
+		return e.advance(), nil, nil, false, true, nil
+
+	case compile.NOT_TAKEN:
+		// 3.14 marker that flags the not-taken branch of a conditional
+		// jump. Has no runtime effect; CPython uses it for monitoring.
+		return e.advance(), nil, nil, false, true, nil
+
+	case compile.POP_BLOCK:
+		// 3.14 keeps POP_BLOCK as a pseudo for old codegen paths. No
+		// block stack in our frame model, so it's a no-op.
+		return e.advance(), nil, nil, false, true, nil
+
+	case compile.POP_ITER:
+		// Pop the exhausted iterator left on the stack by FOR_ITER's
+		// fall-through. CPython 3.14 made this an opcode of its own.
+		ref := e.pop()
+		ref.Close()
+		return e.advance(), nil, nil, false, true, nil
+
+	case compile.JUMP, compile.JUMP_NO_INTERRUPT:
+		// Unconditional pseudo-jumps emitted by 3.14 codegen for
+		// optimized forms. We treat them as forward jumps; the
+		// NO_INTERRUPT variant skips the eval breaker poll.
+		return e.jumpBy(int(oparg) + 1), nil, nil, false, true, nil
 
 	case compile.LOAD_FROM_DICT_OR_DEREF:
 		// PEP 695 helper: look up name in the dict at TOS first; if absent,
