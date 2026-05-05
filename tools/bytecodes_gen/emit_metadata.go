@@ -78,26 +78,32 @@ func hasOparg(body []dslTok) bool {
 }
 
 // CollectMetadata walks defs and emits one MetadataEntry per real
-// `inst` (skipping `op` fragments — those only exist as components of
-// macros). Family membership is filled from the FamilyDef list.
+// `inst` plus one per `macro` (expanded via ExpandMacros so the cache
+// footprint is the sum of the macro's direct cache uops and the cache
+// inputs of every fragment it references). `op` fragments are skipped
+// — they only exist as macro components. Family membership is filled
+// from the FamilyDef list.
 func CollectMetadata(defs []Def) []MetadataEntry {
 	families := map[string]string{}
+	opByName := map[string]*InstDef{}
+	var macros []*MacroDef
 	for _, d := range defs {
-		f, ok := d.(*FamilyDef)
-		if !ok {
-			continue
-		}
-		for _, m := range f.Members {
-			families[m] = f.Name
+		switch v := d.(type) {
+		case *FamilyDef:
+			for _, m := range v.Members {
+				families[m] = v.Name
+			}
+		case *InstDef:
+			if v.Kind == "op" {
+				opByName[v.Name] = v
+			}
+		case *MacroDef:
+			macros = append(macros, v)
 		}
 	}
 
 	var out []MetadataEntry
-	for _, d := range defs {
-		inst, ok := d.(*InstDef)
-		if !ok || inst.Kind != "inst" {
-			continue
-		}
+	emit := func(inst *InstDef) {
 		pops, pushes := stackCounts(inst.Inputs, inst.Outputs)
 		out = append(out, MetadataEntry{
 			Name:      inst.Name,
@@ -107,6 +113,24 @@ func CollectMetadata(defs []Def) []MetadataEntry {
 			HasOparg:  hasOparg(inst.Body),
 			Family:    families[inst.Name],
 		})
+	}
+
+	for _, d := range defs {
+		inst, ok := d.(*InstDef)
+		if !ok || inst.Kind != "inst" {
+			continue
+		}
+		emit(inst)
+	}
+	for _, m := range macros {
+		exp, err := expandMacro(m, opByName)
+		if err != nil {
+			// Skip malformed macros silently here; the dedicated
+			// ExpandMacros call site is where errors surface in the
+			// emit pipeline.
+			continue
+		}
+		emit(exp)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
 	return out

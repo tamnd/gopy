@@ -65,6 +65,15 @@ func expandMacro(m *MacroDef, ops map[string]*InstDef) (*InstDef, error) {
 		if !ok {
 			return nil, fmt.Errorf("macro %s: unknown op %s", m.Name, u.Name)
 		}
+		// Cache effects on the fragment's input list contribute to the
+		// macro's overall cache footprint. CPython's specializer reads
+		// them by walking each uop in source order, so positional order
+		// must match: emit them at the spot the fragment occupies.
+		for _, in := range frag.Inputs {
+			if in.Cache != nil {
+				out.Inputs = append(out.Inputs, Input{Cache: in.Cache})
+			}
+		}
 		fragInputs := stackOnly(frag.Inputs)
 		// The fragment consumes len(fragInputs) values from the live
 		// stack. Anything beyond that is supplied by the macro's
