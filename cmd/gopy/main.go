@@ -56,9 +56,7 @@ func run(args []string, stdout, stderr *os.File) int {
 		return runFile(fs.Arg(0), stdout, stderr)
 	}
 
-	fmt.Fprintln(stdout, build.VersionString())
-	fmt.Fprintln(stdout, "interactive interpreter not yet available; see https://github.com/tamnd/gopy")
-	return 0
+	return runInteractive(stdout, stderr)
 }
 
 // runSource is the gopy -c entry. It dispatches to
@@ -93,6 +91,25 @@ func runFile(path string, stdout, stderr *os.File) int {
 	}
 	ts := state.NewThread()
 	if pythonrun.RunAnyFile(ts, path, g, stderr) != 0 {
+		return 1
+	}
+	return 0
+}
+
+// runInteractive is the gopy bare-invocation entry: print the banner
+// and hand control to pythonrun.InteractiveLoop. Mirrors
+// pymain_run_stdin.
+//
+// CPython: Modules/main.c:469 pymain_run_stdin
+func runInteractive(stdout, stderr *os.File) int {
+	fmt.Fprintln(stdout, build.VersionString())
+	g, err := builtins.Init(stdout)
+	if err != nil {
+		fmt.Fprintln(stderr, "builtins:", err)
+		return 1
+	}
+	ts := state.NewThread()
+	if pythonrun.InteractiveLoop(ts, os.Stdin, stdout, stderr, g) != 0 {
 		return 1
 	}
 	return 0
