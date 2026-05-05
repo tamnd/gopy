@@ -171,3 +171,40 @@ const (
 	MsgPrintParens      = "Missing parentheses in call to 'print'. Did you mean print(...)?"
 	MsgExecParens       = "Missing parentheses in call to 'exec'. Did you mean exec(...)?"
 )
+
+// Function/class signature errors raised from the invalid_ rules.
+//
+// CPython: Parser/parser.c invalid_arguments / invalid_parameters
+const (
+	MsgPositionalAfterStar     = "positional argument follows keyword argument"
+	MsgPositionalAfterUnpack   = "positional argument follows keyword argument unpacking"
+	MsgIterableUnpackInComp    = "iterable unpacking cannot be used in comprehension"
+	MsgGeneratorInCallNoParens = "Generator expression must be parenthesized"
+	MsgArgsAfterStarStar       = "argument cannot follow '**' expansion"
+	MsgKeywordExpression       = "expression cannot contain assignment, perhaps you meant \"==\"?"
+	MsgDuplicateArgument       = "duplicate argument '%s' in function definition"
+	MsgNonDefaultAfterDefault  = "non-default argument follows default argument"
+	MsgStarAfterStar           = "* argument may appear only once"
+	MsgNamedExprWithoutTarget  = "named expression must be parenthesized in this context"
+)
+
+// match-statement errors. PEP 634 added the structural-pattern
+// matching diagnostics surfaced from the invalid_pattern rules.
+//
+// CPython: Parser/parser.c invalid_match_stmt
+const (
+	MsgMatchSubjectMustEnd        = "expected ':'"
+	MsgPatternCaptureClassPattern = "patterns may only match attributes (got %s)"
+	MsgMatchClassDoubleKeyword    = "attribute name repeated in class pattern: %s"
+	MsgMatchMappingDoubleKey      = "mapping pattern checks duplicate key (%s)"
+	MsgMatchStarPlacement         = "starred pattern must end the sequence"
+	MsgMatchStarMultiple          = "multiple starred names in sequence pattern"
+)
+
+// import / from-import diagnostics.
+//
+// CPython: Parser/parser.c invalid_import_from
+const (
+	MsgImportFromStarLevel = "from __future__ imports must occur at the beginning of the file"
+	MsgImportTrailingComma = "trailing comma not allowed without surrounding parentheses"
+)
