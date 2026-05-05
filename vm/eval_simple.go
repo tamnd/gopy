@@ -702,6 +702,32 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, retVal
 		// dispatch table is wired and tests can detect the gap.
 		return 0, nil, nil, false, true, fmt.Errorf("BUILD_SET: set type not yet implemented in v0.6")
 
+	case compile.SET_ADD:
+		// SET_ADD: same shape as LIST_APPEND but for the set type.
+		return 0, nil, nil, false, true, fmt.Errorf("SET_ADD: set type not yet implemented in v0.6")
+
+	case compile.SET_UPDATE:
+		// SET_UPDATE: extend a set by another iterable. Set type pending.
+		return 0, nil, nil, false, true, fmt.Errorf("SET_UPDATE: set type not yet implemented in v0.6")
+
+	case compile.SETUP_ANNOTATIONS:
+		// SETUP_ANNOTATIONS: ensure __annotations__ is a dict in the
+		// current local namespace. CPython looks up "__annotations__"
+		// in f_locals, creates it if missing, and leaves the stack
+		// untouched. v0.6 fast-locals frames don't hold a Locals dict,
+		// so we treat this as a no-op for module/function scope and
+		// only honor the dict path when an explicit Locals is present
+		// (class-body frames once 1685 lands).
+		if d, ok := e.f.Locals.(*objects.Dict); ok {
+			key := objects.NewStr("__annotations__")
+			if v, _ := d.GetItem(key); v == nil {
+				if serr := d.SetItem(key, objects.NewDict()); serr != nil {
+					return 0, nil, nil, false, true, serr
+				}
+			}
+		}
+		return e.advance(), nil, nil, false, true, nil
+
 	case compile.CALL_INTRINSIC_1:
 		v := e.popObject()
 		if int(oparg) >= len(intrinsicsUnary) {
