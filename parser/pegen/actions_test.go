@@ -39,12 +39,27 @@ func TestJoinNamesWithDot(t *testing.T) {
 }
 
 func TestSetExprContextRecurses(t *testing.T) {
+	p := &Parser{}
 	a := &ast.Name{Id: "a"}
 	b := &ast.Name{Id: "b"}
 	tup := &ast.Tuple{Elts: []ast.Expr{a, &ast.Starred{Value: b}}}
-	SetExprContext(tup, ast.Store)
-	if a.Ctx != ast.Store || b.Ctx != ast.Store || tup.Ctx != ast.Store {
-		t.Errorf("contexts not stamped: a=%v b=%v tup=%v", a.Ctx, b.Ctx, tup.Ctx)
+	out := SetExprContext(p, tup, ast.Store).(*ast.Tuple)
+	if out.Ctx != ast.Store {
+		t.Errorf("tuple ctx = %v, want Store", out.Ctx)
+	}
+	got0 := out.Elts[0].(*ast.Name)
+	if got0.Ctx != ast.Store {
+		t.Errorf("name ctx = %v, want Store", got0.Ctx)
+	}
+	got1 := out.Elts[1].(*ast.Starred)
+	if got1.Ctx != ast.Store {
+		t.Errorf("starred ctx = %v, want Store", got1.Ctx)
+	}
+	if got1.Value.(*ast.Name).Ctx != ast.Store {
+		t.Errorf("starred.value ctx = %v, want Store", got1.Value.(*ast.Name).Ctx)
+	}
+	if a.Ctx == ast.Store {
+		t.Errorf("original Name should be untouched (CPython returns fresh nodes)")
 	}
 }
 

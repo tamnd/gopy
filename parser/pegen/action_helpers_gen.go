@@ -215,6 +215,44 @@ func actionPgenInteractiveExit(p *Parser, args ...any) any {
 	return nil
 }
 
+// actionAstExpression builds the Expression mod root used by ModeEval.
+// Args: (body) where body is the single expression evaluated.
+//
+// CPython: Python/Python-ast.c:_PyAST_Expression
+func actionAstExpression(p *Parser, args ...any) any {
+	_ = p
+	body := asExpr(argAt(args, 0))
+	if body == nil {
+		return placeholderMatched
+	}
+	return &ast.Expression{Body: body}
+}
+
+// actionAstInteractive builds the Interactive mod root used by
+// ModeSingle. Args: (body) where body is the statement list.
+//
+// CPython: Python/Python-ast.c:_PyAST_Interactive
+func actionAstInteractive(p *Parser, args ...any) any {
+	_ = p
+	body := stmtSeqOf(argAt(args, 0))
+	return &ast.Interactive{Body: body}
+}
+
+// actionAstFunctionType builds the FunctionType mod root for
+// `(argtypes) -> returns` source under ModeFunctionType. Args:
+// (argtypes, returns).
+//
+// CPython: Python/Python-ast.c:_PyAST_FunctionType
+func actionAstFunctionType(p *Parser, args ...any) any {
+	_ = p
+	argtypes := exprSeqOf(argAt(args, 0))
+	returns := asExpr(argAt(args, 1))
+	if returns == nil {
+		return placeholderMatched
+	}
+	return &ast.FunctionType{Argtypes: argtypes, Returns: returns}
+}
+
 func actionAstPass(p *Parser, args ...any) any {
 	_ = p
 	_ = args
@@ -267,7 +305,7 @@ func actionAstDelete(p *Parser, args ...any) any {
 		return placeholderMatched
 	}
 	for i := range targets {
-		targets[i] = SetExprContext(targets[i], ast.Del)
+		targets[i] = SetExprContext(p, targets[i], ast.Del)
 	}
 	return &ast.Delete{Targets: targets, Pos: ast.NoPos}
 }
@@ -354,11 +392,13 @@ func actionAstWhile(p *Parser, args ...any) any {
 	return &ast.While{Test: test, Body: body, Orelse: orelse, Pos: ast.NoPos}
 }
 
-// actionAstIfExp builds IfExp. Args: (body, test, orelse).
+// actionAstIfExp builds IfExp. Args: (test, body, orelse). CPython
+// emits the call as _PyAST_IfExp(b, a, c) where the grammar binds
+// a=body 'if' b=test 'else' c=orelse.
 func actionAstIfExp(p *Parser, args ...any) any {
 	_ = p
-	body := asExpr(argAt(args, 0))
-	test := asExpr(argAt(args, 1))
+	test := asExpr(argAt(args, 0))
+	body := asExpr(argAt(args, 1))
 	orelse := asExpr(argAt(args, 2))
 	if body == nil || test == nil || orelse == nil {
 		return placeholderMatched
@@ -551,22 +591,15 @@ func actionPgenJoinNamesWithDot(p *Parser, args ...any) any {
 	return &ast.Name{Id: an + "." + bn, Ctx: ast.Load, Pos: ast.NoPos}
 }
 
+// actionPgenJoinSequences concatenates the two halves of the kwargs
+// alt 0 (kwarg_or_starred+ ',' kwarg_or_double_starred+) into one
+// flat *KeywordOrStarred sequence.
+//
+// CPython: Parser/action_helpers.c:472 _PyPegen_join_sequences
 func actionPgenJoinSequences(p *Parser, args ...any) any {
-	_ = p
-	a := argAt(args, 1)
-	b := argAt(args, 2)
-	out := []any{}
-	if x, ok := a.([]any); ok {
-		out = append(out, x...)
-	} else if a != nil {
-		out = append(out, a)
-	}
-	if x, ok := b.([]any); ok {
-		out = append(out, x...)
-	} else if b != nil {
-		out = append(out, b)
-	}
-	return out
+	a := kwargOrStarredSeqOf(argAt(args, 1))
+	b := kwargOrStarredSeqOf(argAt(args, 2))
+	return joinSequences(p, a, b)
 }
 
 func actionPgenGetExprName(p *Parser, args ...any) any {
@@ -591,18 +624,51 @@ func actionPgenKeyPatternPair(p *Parser, args ...any) any {
 	return [2]any{argAt(args, 1), argAt(args, 2)}
 }
 
-// actionPgenKeywordOrStarred wraps the (value, is_keyword) shape the
-// call-arg collector reads. The gather later splits them.
+// actionPgenKeywordOrStarred wraps the (element, is_keyword) pair the
+// kwarg_or_starred and kwarg_or_double_starred rules emit.
+//
+// CPython: Parser/action_helpers.c:769 _PyPegen_keyword_or_starred
 func actionPgenKeywordOrStarred(p *Parser, args ...any) any {
-	_ = p
-	return []any{argAt(args, 1), argAt(args, 2)}
+	element := argAt(args, 1)
+	flag := intOf(argAt(args, 2))
+	isKeyword := flag != nil && *flag != 0
+	return keywordOrStarred(p, element, isKeyword)
 }
 
-// actionPgenNameDefaultPair pairs a parameter with its default
-// expression. The function-def builder consumes the pairs.
-func actionPgenNameDefaultPair(p *Parser, args ...any) any {
+// actionAstArg builds an *ast.Arg from (name, annotation, type_comment).
+// Mirrors the C grammar's _PyAST_arg constructor invocation.
+//
+// CPython: Python/Python-ast.c:8534 _PyAST_arg
+func actionAstArg(p *Parser, args ...any) any {
 	_ = p
-	return []any{argAt(args, 1), argAt(args, 2), argAt(args, 3)}
+	name, _ := argAt(args, 0).(string)
+	if name == "" {
+		return placeholderMatched
+	}
+	var annotation ast.Expr
+	if v := argAt(args, 1); v != nil {
+		annotation = asExpr(v)
+	}
+	tc := decodeTypeComment(argAt(args, 2))
+	return &ast.Arg{Arg: name, Annotation: annotation, TypeComment: tc, Pos: ast.NoPos}
+}
+
+// actionPgenNameDefaultPair wires the param-with-default rule into the
+// name_default_pair port.
+//
+// CPython: Parser/action_helpers.c:430 _PyPegen_name_default_pair
+func actionPgenNameDefaultPair(p *Parser, args ...any) any {
+	a, _ := argAt(args, 1).(*ast.Arg)
+	value := asExpr(argAt(args, 2))
+	tc, _ := argAt(args, 3).(*Token)
+	if a == nil {
+		return placeholderMatched
+	}
+	out := nameDefaultPair(p, a, value, tc)
+	if out == nil {
+		return placeholderMatched
+	}
+	return out
 }
 
 // actionPgenConstantFromToken builds a numeric Constant.
@@ -694,10 +760,22 @@ func actionPgenInterpolation(p *Parser, args ...any) any {
 	return placeholderMatched
 }
 
+// actionPgenConcatenateStrings dispatches the `strings` rule's
+// (fstring|string)+ alt into the concatenation port. The action
+// translator emits this call as `(p, p, a)`; argAt(args, 1) is the
+// asdl_expr_seq* the loop returned.
+//
+// CPython: Parser/action_helpers.c:1860 _PyPegen_concatenate_strings
 func actionPgenConcatenateStrings(p *Parser, args ...any) any {
-	_ = p
-	_ = args
-	return placeholderMatched
+	parts := exprSeqOf(argAt(args, 1))
+	if len(parts) == 0 {
+		return placeholderMatched
+	}
+	out := ConcatenateStrings(p, []ast.Expr(parts))
+	if out == nil {
+		return placeholderMatched
+	}
+	return out
 }
 
 func actionPgenConcatenateTstrings(p *Parser, args ...any) any {
@@ -712,10 +790,21 @@ func actionPgenCheckFstringConversion(p *Parser, args ...any) any {
 	return placeholderMatched
 }
 
+// actionPgenAddTypeCommentToArg wires the param-with-type-comment alt
+// into the add_type_comment_to_arg port.
+//
+// CPython: Parser/action_helpers.c:903 _PyPegen_add_type_comment_to_arg
 func actionPgenAddTypeCommentToArg(p *Parser, args ...any) any {
-	_ = p
-	_ = args
-	return placeholderMatched
+	a, _ := argAt(args, 1).(*ast.Arg)
+	tc, _ := argAt(args, 2).(*Token)
+	if a == nil {
+		return placeholderMatched
+	}
+	out := addTypeCommentToArg(p, a, tc)
+	if out == nil {
+		return placeholderMatched
+	}
+	return out
 }
 
 func actionPgenArgumentsParsingError(p *Parser, args ...any) any {
@@ -724,28 +813,136 @@ func actionPgenArgumentsParsingError(p *Parser, args ...any) any {
 	return placeholderMatched
 }
 
+// actionPgenClassDefDecorators stamps decorators onto a ClassDef built
+// by class_def_raw.
+//
+// CPython: Parser/action_helpers.c:756 _PyPegen_class_def_decorators
 func actionPgenClassDefDecorators(p *Parser, args ...any) any {
-	_ = p
-	_ = args
-	return placeholderMatched
+	dec := exprSeqOf(argAt(args, 1))
+	cd, ok := argAt(args, 2).(ast.Stmt)
+	if !ok {
+		return placeholderMatched
+	}
+	return ClassDefDecorators(p, []ast.Expr(dec), cd)
 }
 
+// actionPgenFunctionDefDecorators stamps decorators onto a FunctionDef
+// or AsyncFunctionDef built by function_def_raw.
+//
+// CPython: Parser/action_helpers.c:727 _PyPegen_function_def_decorators
 func actionPgenFunctionDefDecorators(p *Parser, args ...any) any {
-	_ = p
-	_ = args
-	return placeholderMatched
+	dec := exprSeqOf(argAt(args, 1))
+	fn, ok := argAt(args, 2).(ast.Stmt)
+	if !ok {
+		return placeholderMatched
+	}
+	return FunctionDefDecorators(p, []ast.Expr(dec), fn)
 }
 
+// actionPgenCollectCallSeqs forwards the args rule's positional list
+// `a` and optional kwargs tail `b` into the CollectCallSeqs port.
+//
+// CPython: Parser/action_helpers.c:1129 _PyPegen_collect_call_seqs
 func actionPgenCollectCallSeqs(p *Parser, args ...any) any {
-	_ = p
-	_ = args
-	return placeholderMatched
+	pos := exprSeqOf(argAt(args, 1))
+	kw := kwargOrStarredSeqOf(argAt(args, 2))
+	out := CollectCallSeqs(p, []ast.Expr(pos), kw)
+	if out == nil {
+		return placeholderMatched
+	}
+	return out
 }
 
+// argSeqOf walks v and collects *ast.Arg entries. The parameters
+// rules return *ast.Arg values from `param`-shaped alts; gather/loop
+// alts wrap them in []any. Returns nil when no arg is present so the
+// _make_* helpers see the same NULL signal CPython relies on.
+func argSeqOf(v any) []*ast.Arg {
+	var out []*ast.Arg
+	var walk func(any)
+	walk = func(x any) {
+		switch t := x.(type) {
+		case nil:
+		case *ast.Arg:
+			out = append(out, t)
+		case []*ast.Arg:
+			out = append(out, t...)
+		case []any:
+			for _, e := range t {
+				walk(e)
+			}
+		}
+	}
+	walk(v)
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// nameDefaultPairSeqOf walks v and collects *NameDefaultPair entries.
+func nameDefaultPairSeqOf(v any) []*NameDefaultPair {
+	var out []*NameDefaultPair
+	var walk func(any)
+	walk = func(x any) {
+		switch t := x.(type) {
+		case nil:
+		case *NameDefaultPair:
+			out = append(out, t)
+		case []*NameDefaultPair:
+			out = append(out, t...)
+		case []any:
+			for _, e := range t {
+				walk(e)
+			}
+		}
+	}
+	walk(v)
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// kwargOrStarredSeqOf walks v and collects *KeywordOrStarred entries.
+// The `kwargs` rule produces a flat sequence of these via gather +
+// loop; the action_translator wraps the gather output as nested
+// []any, so a recursive flatten is required.
+func kwargOrStarredSeqOf(v any) []*KeywordOrStarred {
+	var out []*KeywordOrStarred
+	var walk func(any)
+	walk = func(x any) {
+		switch t := x.(type) {
+		case nil:
+		case *KeywordOrStarred:
+			out = append(out, t)
+		case []*KeywordOrStarred:
+			out = append(out, t...)
+		case []any:
+			for _, e := range t {
+				walk(e)
+			}
+		}
+	}
+	walk(v)
+	return out
+}
+
+// actionPgenMakeArguments folds the parameter-list bundle into a
+// single Arguments node.
+//
+// CPython: Parser/action_helpers.c:643 _PyPegen_make_arguments
 func actionPgenMakeArguments(p *Parser, args ...any) any {
-	_ = p
-	_ = args
-	return placeholderMatched
+	slashWithoutDefaultArg := argSeqOf(argAt(args, 1))
+	swd, _ := argAt(args, 2).(*SlashWithDefault)
+	plainNames := argSeqOf(argAt(args, 3))
+	namesWithDefault := nameDefaultPairSeqOf(argAt(args, 4))
+	se, _ := argAt(args, 5).(*StarEtc)
+	out := MakeArguments(p, slashWithoutDefaultArg, swd, plainNames, namesWithDefault, se)
+	if out == nil {
+		return placeholderMatched
+	}
+	return out
 }
 
 func actionPgenNonparenGenexpInCall(p *Parser, args ...any) any {
@@ -754,10 +951,19 @@ func actionPgenNonparenGenexpInCall(p *Parser, args ...any) any {
 	return placeholderMatched
 }
 
+// actionPgenStarEtc bundles the (*vararg, kwonlyargs, **kwarg) tail of
+// a parameter list.
+//
+// CPython: Parser/action_helpers.c:460 _PyPegen_star_etc
 func actionPgenStarEtc(p *Parser, args ...any) any {
-	_ = p
-	_ = args
-	return placeholderMatched
+	vararg, _ := argAt(args, 1).(*ast.Arg)
+	kwonly := nameDefaultPairSeqOf(argAt(args, 2))
+	kwarg, _ := argAt(args, 3).(*ast.Arg)
+	out := starEtc(p, vararg, kwonly, kwarg)
+	if out == nil {
+		return placeholderMatched
+	}
+	return out
 }
 
 // --- shape helpers ---
@@ -1484,21 +1690,22 @@ func actionPgenCmpopExprPair(p *Parser, args ...any) any {
 	return cmpopExprPair{Op: op, Expr: expr}
 }
 
-// actionPgenSetExprContext rewrites the ctx field of an expression
-// node and returns it. Used by star_target / del_target rules.
+// actionPgenSetExprContext is the dispatch shim the generator emits
+// for `_PyPegen_set_expr_context(p, expr, ctx)`. The action translator
+// passes (p_action, p_explicit, expr, ctx); we forward to the
+// SetExprContext port.
 //
-// CPython: Parser/action_helpers.c _PyPegen_set_expr_context
+// CPython: Parser/action_helpers.c:309 _PyPegen_set_expr_context
 func actionPgenSetExprContext(p *Parser, args ...any) any {
-	_ = p
-	expr := asExpr(argAt(args, 0))
+	expr := asExpr(argAt(args, 1))
 	if expr == nil {
 		return placeholderMatched
 	}
-	ctx, ok := argAt(args, 1).(ast.ExprContext)
+	ctx, ok := argAt(args, 2).(ast.ExprContext)
 	if !ok {
 		return expr
 	}
-	return SetExprContext(expr, ctx)
+	return SetExprContext(p, expr, ctx)
 }
 
 // actionPgenSeqFlatten flattens a nested any-shape into a single
@@ -1539,14 +1746,18 @@ func actionPgenRegisterStmts(p *Parser, args ...any) any {
 	return argAt(args, 1)
 }
 
-// actionPgenSlashWithDefault and actionPgenSetupFullFormatSpec are
-// argument-shape helpers the grammar reaches for in the parameters
-// and f-string surfaces respectively. The typed forms land with the
-// arguments / fstring panel; the placeholder returns the raw inputs.
+// actionPgenSlashWithDefault carries the (plain-names, names-with-defaults)
+// pair the slash_with_default rule emits for position-only parameters.
+//
+// CPython: Parser/action_helpers.c:447 _PyPegen_slash_with_default
 func actionPgenSlashWithDefault(p *Parser, args ...any) any {
-	_ = p
-	_ = args
-	return placeholderMatched
+	plainNames := argSeqOf(argAt(args, 1))
+	nwd := nameDefaultPairSeqOf(argAt(args, 2))
+	out := slashWithDefault(p, plainNames, nwd)
+	if out == nil {
+		return placeholderMatched
+	}
+	return out
 }
 
 func actionPgenSetupFullFormatSpec(p *Parser, args ...any) any {
@@ -1577,4 +1788,195 @@ func decodeTypeComment(v any) *string {
 		return &s
 	}
 	return nil
+}
+
+// truthy is the C-style truthiness check the action-body translator
+// emits for ternary conditions. Mirrors the implicit `!= 0` /
+// `!= NULL` check that C uses on pointers, ints, and bool-like
+// expressions inside `cond ? a : b`.
+func truthy(v any) bool {
+	if v == nil {
+		return false
+	}
+	switch x := v.(type) {
+	case bool:
+		return x
+	case *Token:
+		return x != nil
+	case []any:
+		return len(x) > 0
+	}
+	return true
+}
+
+// nameIdOf extracts the identifier text from a NAME token or a
+// Name expression. Mirrors the C grammar's `n->v.Name.id` accessor.
+// Returns "" when neither shape applies; callers route on that.
+func nameIdOf(v any) string {
+	switch x := v.(type) {
+	case *Token:
+		if x == nil {
+			return ""
+		}
+		return string(x.Bytes)
+	case *ast.Name:
+		if x == nil {
+			return ""
+		}
+		return x.Id
+	}
+	return ""
+}
+
+// callArgsOf returns the positional-arg slice on a Call expression.
+// Mirrors `n->v.Call.args`.
+func callArgsOf(v any) ast.Seq[ast.Expr] {
+	if c, ok := v.(*ast.Call); ok && c != nil {
+		return c.Args
+	}
+	return nil
+}
+
+// callKwOf returns the keyword-arg slice on a Call expression.
+// Mirrors `n->v.Call.keywords`.
+func callKwOf(v any) ast.Seq[*ast.Keyword] {
+	if c, ok := v.(*ast.Call); ok && c != nil {
+		return c.Keywords
+	}
+	return nil
+}
+
+// argumentsOf coerces an action arg into *ast.Arguments. The grammar
+// passes either a real Arguments value (when params matched) or the
+// fallback empty arguments produced by actionPgenEmptyArguments.
+func argumentsOf(v any) *ast.Arguments {
+	switch x := v.(type) {
+	case nil:
+		return &ast.Arguments{}
+	case *ast.Arguments:
+		if x == nil {
+			return &ast.Arguments{}
+		}
+		return x
+	}
+	return &ast.Arguments{}
+}
+
+// exprOptional returns nil when v is nil-shaped, else asExpr(v).
+// Used for optional return-annotation / decorator slots that the C
+// grammar passes through unchanged from a possibly-empty alt.
+func exprOptional(v any) ast.Expr {
+	if isNilResult(v) {
+		return nil
+	}
+	return asExpr(v)
+}
+
+// typeParamSeqOf coerces v into Seq[ast.TypeParam] for the optional
+// type_params slot. Today the rule chain returns []any of TypeParam
+// values when present; nil otherwise.
+func typeParamSeqOf(v any) ast.Seq[ast.TypeParam] {
+	if v == nil {
+		return nil
+	}
+	switch x := v.(type) {
+	case ast.Seq[ast.TypeParam]:
+		return x
+	case []ast.TypeParam:
+		return ast.Seq[ast.TypeParam](x)
+	case []any:
+		var out []ast.TypeParam
+		for _, e := range x {
+			if tp, ok := e.(ast.TypeParam); ok {
+				out = append(out, tp)
+			}
+		}
+		if len(out) == 0 {
+			return nil
+		}
+		return ast.Seq[ast.TypeParam](out)
+	}
+	return nil
+}
+
+// actionAstFunctionDef builds FunctionDef. Args from the translator:
+// (name, args, body, decorators, returns, type_comment, type_params).
+//
+// CPython: Parser/Python.asdl FunctionDef
+func actionAstFunctionDef(p *Parser, args ...any) any {
+	_ = p
+	name, _ := argAt(args, 0).(string)
+	if name == "" {
+		return placeholderMatched
+	}
+	body := stmtSeqOf(argAt(args, 2))
+	if len(body) == 0 {
+		return placeholderMatched
+	}
+	return &ast.FunctionDef{
+		Name:          name,
+		Args:          argumentsOf(argAt(args, 1)),
+		Body:          body,
+		DecoratorList: exprSeqOf(argAt(args, 3)),
+		Returns:       exprOptional(argAt(args, 4)),
+		TypeComment:   decodeTypeComment(argAt(args, 5)),
+		TypeParams:    typeParamSeqOf(argAt(args, 6)),
+		Pos:           ast.NoPos,
+	}
+}
+
+// actionAstAsyncFunctionDef builds AsyncFunctionDef with the same
+// arg shape as actionAstFunctionDef.
+//
+// CPython: Parser/Python.asdl AsyncFunctionDef
+func actionAstAsyncFunctionDef(p *Parser, args ...any) any {
+	_ = p
+	name, _ := argAt(args, 0).(string)
+	if name == "" {
+		return placeholderMatched
+	}
+	body := stmtSeqOf(argAt(args, 2))
+	if len(body) == 0 {
+		return placeholderMatched
+	}
+	return &ast.AsyncFunctionDef{
+		Name:          name,
+		Args:          argumentsOf(argAt(args, 1)),
+		Body:          body,
+		DecoratorList: exprSeqOf(argAt(args, 3)),
+		Returns:       exprOptional(argAt(args, 4)),
+		TypeComment:   decodeTypeComment(argAt(args, 5)),
+		TypeParams:    typeParamSeqOf(argAt(args, 6)),
+		Pos:           ast.NoPos,
+	}
+}
+
+// actionPgenEmptyArguments returns the all-empty Arguments value used
+// when a def has no parenthesised parameters.
+//
+// CPython: Parser/action_helpers.c:686 _PyPegen_empty_arguments
+func actionPgenEmptyArguments(p *Parser, args ...any) any {
+	_ = args
+	return EmptyArguments(p)
+}
+
+// actionAstComprehension builds a single comprehension clause used by
+// list/set/dict comps and generator expressions. Args after stripping
+// `p->arena`: (target, iter, ifs, is_async).
+//
+// CPython: Parser/Python.asdl comprehension; constructor in
+// Python/Python-ast.c:_PyAST_comprehension.
+func actionAstComprehension(p *Parser, args ...any) any {
+	_ = p
+	target := asExpr(argAt(args, 0))
+	iter := asExpr(argAt(args, 1))
+	ifs := exprSeqOf(argAt(args, 2))
+	isAsync := 0
+	if v, ok := argAt(args, 3).(int); ok {
+		isAsync = v
+	}
+	if target == nil || iter == nil {
+		return placeholderMatched
+	}
+	return &ast.Comprehension{Target: target, Iter: iter, Ifs: ifs, IsAsync: isAsync}
 }

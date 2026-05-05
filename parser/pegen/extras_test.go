@@ -42,32 +42,84 @@ func TestEnsureRealImaginary(t *testing.T) {
 }
 
 func TestConcatenateStringsPlain(t *testing.T) {
+	p := &Parser{}
 	parts := []ast.Expr{
 		&ast.Constant{Value: "ab"},
 		&ast.Constant{Value: "cd"},
 	}
-	got := ConcatenateStrings(parts).(*ast.Constant)
+	got := ConcatenateStrings(p, parts).(*ast.Constant)
 	if got.Value.(string) != "abcd" {
 		t.Errorf("concat = %q", got.Value)
 	}
 }
 
 func TestConcatenateStringsMixedFallsBack(t *testing.T) {
+	p := &Parser{}
 	parts := []ast.Expr{
 		&ast.Constant{Value: "ab"},
 		&ast.JoinedStr{},
 	}
-	got := ConcatenateStrings(parts)
+	got := ConcatenateStrings(p, parts)
 	if _, ok := got.(*ast.JoinedStr); !ok {
 		t.Errorf("expected JoinedStr fallback, got %T", got)
 	}
 }
 
+func TestConcatenateStringsBytes(t *testing.T) {
+	p := &Parser{}
+	parts := []ast.Expr{
+		&ast.Constant{Value: []byte("ab")},
+		&ast.Constant{Value: []byte("cd")},
+	}
+	got := ConcatenateStrings(p, parts).(*ast.Constant)
+	b, ok := got.Value.([]byte)
+	if !ok || string(b) != "abcd" {
+		t.Errorf("bytes concat = %v", got.Value)
+	}
+}
+
+func TestConcatenateStringsMixedBytesFails(t *testing.T) {
+	p := &Parser{}
+	parts := []ast.Expr{
+		&ast.Constant{Value: []byte("ab")},
+		&ast.Constant{Value: "cd"},
+	}
+	if got := ConcatenateStrings(p, parts); got != nil {
+		t.Errorf("expected nil for mixed bytes/str, got %T", got)
+	}
+	if !p.errorIndicator {
+		t.Errorf("error indicator should be set on bytes/str mix")
+	}
+}
+
 func TestFunctionDefDecorators(t *testing.T) {
+	p := &Parser{}
 	fn := &ast.FunctionDef{Name: "f"}
 	dec := []ast.Expr{&ast.Name{Id: "d"}}
-	out := FunctionDefDecorators(dec, fn).(*ast.FunctionDef)
+	out := FunctionDefDecorators(p, dec, fn).(*ast.FunctionDef)
 	if len(out.DecoratorList) != 1 {
 		t.Errorf("decorators not stamped: %v", out.DecoratorList)
+	}
+	if out == fn {
+		t.Errorf("expected fresh FunctionDef, got same pointer (CPython rebuilds the node)")
+	}
+	if len(fn.DecoratorList) != 0 {
+		t.Errorf("original fn should be untouched, got %v", fn.DecoratorList)
+	}
+}
+
+func TestClassDefDecorators(t *testing.T) {
+	p := &Parser{}
+	cd := &ast.ClassDef{Name: "C"}
+	dec := []ast.Expr{&ast.Name{Id: "d"}}
+	out := ClassDefDecorators(p, dec, cd).(*ast.ClassDef)
+	if len(out.DecoratorList) != 1 {
+		t.Errorf("decorators not stamped: %v", out.DecoratorList)
+	}
+	if out == cd {
+		t.Errorf("expected fresh ClassDef, got same pointer")
+	}
+	if len(cd.DecoratorList) != 0 {
+		t.Errorf("original cd should be untouched, got %v", cd.DecoratorList)
 	}
 }
