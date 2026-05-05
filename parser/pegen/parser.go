@@ -13,6 +13,7 @@
 package pegen
 
 import (
+	perrors "github.com/tamnd/gopy/parser/errors"
 	"github.com/tamnd/gopy/parser/lexer"
 	"github.com/tamnd/gopy/tokenize"
 )
@@ -104,6 +105,8 @@ type Parser struct {
 	debug          bool
 	knownErrToken  *Token
 	lastStmt       Location
+	farthestPos    int
+	pinnedErr      *perrors.SyntaxError
 }
 
 // Location pins a (start, end) source span. The generated parser uses

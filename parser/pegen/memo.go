@@ -78,6 +78,24 @@ func (p *Parser) Lookahead(positive bool, fn func(*Parser) any) bool {
 	return matched == positive
 }
 
+// LookaheadWithName runs fn at the current mark, restores mark, and
+// returns whether the result matches the requested polarity. The
+// helper is the named-result variant the generated parser emits when
+// a positive-lookahead block has a label; the body is identical to
+// Lookahead, the name is propagated by the generator into the
+// surrounding rule's diagnostic plumbing.
+//
+// CPython: Parser/pegen.c:402 _PyPegen_lookahead_with_name
+func (p *Parser) LookaheadWithName(positive bool, fn func(*Parser) any, _ string) bool {
+	return p.Lookahead(positive, fn)
+}
+
+// ExpectToken is the kind-only form CPython emits as expect_token.
+// Returns the token on match (advancing mark) or nil on miss.
+//
+// CPython: Parser/pegen.c:296 _PyPegen_expect_token
+func (p *Parser) ExpectToken(kind tokenize.Type) *Token { return p.Expect(kind) }
+
 // ExpectForced advances past a token of kind kind. If the next
 // token does not match, it raises a SyntaxError with the "expected
 // '%s'" template and trips the error indicator.

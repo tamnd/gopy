@@ -12,6 +12,7 @@
 package parser
 
 import (
+	"errors"
 	"fmt"
 	"io"
 
@@ -35,7 +36,7 @@ const (
 // error surfaces still work; downstream code should detect this
 // sentinel and route through a fixture-driven path until the
 // real parser lands.
-var ErrParserNotImplemented = fmt.Errorf("parser: generated table not yet linked in")
+var ErrParserNotImplemented = fmt.Errorf("parser: generated rule bodies not yet emitted")
 
 // ParseString parses src under the given mode and returns the
 // AST root. Filename is used for SyntaxError text.
@@ -59,7 +60,16 @@ func Parse(r io.Reader, filename string, mode Mode) (ast.Mod, error) {
 
 func runParse(st *lexer.State, mode Mode) (ast.Mod, error) {
 	p := pegen.New(st, pegenStartRule(mode), 0)
-	_ = p
+	node, err := pegen.Dispatch(p, pegenStartRule(mode))
+	if errors.Is(err, pegen.ErrParserNotImplemented) {
+		return nil, ErrParserNotImplemented
+	}
+	if err != nil {
+		return nil, err
+	}
+	if mod, ok := node.(ast.Mod); ok {
+		return mod, nil
+	}
 	return nil, ErrParserNotImplemented
 }
 
