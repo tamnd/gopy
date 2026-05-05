@@ -378,6 +378,29 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, retVal
 		}
 		return e.advance(), nil, nil, false, true, nil
 
+	case compile.DELETE_SUBSCR:
+		key := e.popObject()
+		container := e.popObject()
+		if derr := delItem(container, key); derr != nil {
+			return 0, nil, nil, false, true, derr
+		}
+		return e.advance(), nil, nil, false, true, nil
+
+	case compile.CONTAINS_OP:
+		// Stack layout: [..., left, right]. CPython pops right (haystack)
+		// then left (needle); oparg low bit toggles `not in`.
+		haystack := e.popObject()
+		needle := e.popObject()
+		hit, cerr := containsItem(haystack, needle)
+		if cerr != nil {
+			return 0, nil, nil, false, true, cerr
+		}
+		if oparg&1 == 1 {
+			hit = !hit
+		}
+		e.pushObject(objects.NewBool(hit))
+		return e.advance(), nil, nil, false, true, nil
+
 	case compile.RAISE_VARARGS:
 		// oparg: 0 = re-raise, 1 = raise exc, 2 = raise exc from cause.
 		// v0.6 has no exception object hierarchy yet, so we surface the
@@ -970,6 +993,7 @@ func binaryOp(sub int32, a, b objects.Object) (objects.Object, error) {
 		nbAdd      = 0
 		nbMult     = 5
 		nbSubtract = 10
+		nbSubscr   = 26
 	)
 	switch sub {
 	case nbAdd:
@@ -984,6 +1008,8 @@ func binaryOp(sub int32, a, b objects.Object) (objects.Object, error) {
 		return numericForward(a, b, "*", func(n *objects.NumberMethods) func(a, b objects.Object) (objects.Object, error) {
 			return n.Multiply
 		})
+	case nbSubscr:
+		return getItem(a, b)
 	}
 	return nil, fmt.Errorf("vm: BINARY_OP suboperator %d not implemented in v0.6", sub)
 }
@@ -1091,6 +1117,86 @@ func unpackSeq(seq objects.Object, n int) ([]objects.Object, error) {
 		return nil, fmt.Errorf("ValueError: not enough values to unpack (expected %d, got %d)", n, len(out))
 	}
 	return out, nil
+}
+
+// getItem mirrors PyObject_GetItem against the v0.6 container surface.
+// Mappings (Dict) take a key; sequences (List/Tuple/Str) take an int
+// index that may be negative (counted from the end).
+//
+// CPython: Objects/abstract.c PyObject_GetItem
+func getItem(container, key objects.Object) (objects.Object, error) {
+	t := container.Type()
+	if t.Mapping != nil && t.Mapping.GetItem != nil {
+		return t.Mapping.GetItem(container, key)
+	}
+	if t.Sequence != nil && t.Sequence.GetItem != nil {
+		idx, ok := key.(*objects.Int)
+		if !ok {
+			return nil, fmt.Errorf("TypeError: '%s' indices must be integers, not %s", t.Name, key.Type().Name)
+		}
+		i, _ := idx.Int64()
+		if t.Sequence.Length != nil {
+			n, lerr := t.Sequence.Length(container)
+			if lerr != nil {
+				return nil, lerr
+			}
+			if i < 0 {
+				i += int64(n)
+			}
+			if i < 0 || i >= int64(n) {
+				return nil, fmt.Errorf("IndexError: %s index out of range", t.Name)
+			}
+		}
+		return t.Sequence.GetItem(container, int(i))
+	}
+	return nil, fmt.Errorf("TypeError: '%s' object is not subscriptable", t.Name)
+}
+
+// delItem mirrors PyObject_DelItem.
+//
+// CPython: Objects/abstract.c PyObject_DelItem
+func delItem(container, key objects.Object) error {
+	t := container.Type()
+	if t.Mapping != nil && t.Mapping.DelItem != nil {
+		return t.Mapping.DelItem(container, key)
+	}
+	return fmt.Errorf("TypeError: '%s' object does not support item deletion", t.Name)
+}
+
+// containsItem mirrors PySequence_Contains. Falls back to walking the
+// iterator when the type provides no Contains slot.
+//
+// CPython: Objects/abstract.c PySequence_Contains
+func containsItem(haystack, needle objects.Object) (bool, error) {
+	t := haystack.Type()
+	if t.Sequence != nil && t.Sequence.Contains != nil {
+		return t.Sequence.Contains(haystack, needle)
+	}
+	if d, ok := haystack.(*objects.Dict); ok {
+		v, _ := d.GetItem(needle)
+		return v != nil, nil
+	}
+	if t.Iter == nil {
+		return false, fmt.Errorf("TypeError: argument of type '%s' is not iterable", t.Name)
+	}
+	items, ierr := iterToSlice(haystack)
+	if ierr != nil {
+		return false, ierr
+	}
+	for _, item := range items {
+		eq, eerr := objects.RichCmp(item, needle, objects.CompareEQ)
+		if eerr != nil {
+			return false, eerr
+		}
+		truthy, terr := objects.IsTruthy(eq)
+		if terr != nil {
+			return false, terr
+		}
+		if truthy {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // setItem mirrors PyObject_SetItem against the v0.6 container surface.

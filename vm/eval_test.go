@@ -285,6 +285,56 @@ func TestEvalCallKw(t *testing.T) {
 	}
 }
 
+func TestEvalBinarySubscr(t *testing.T) {
+	ts := state.NewThread()
+	src := objects.NewList([]objects.Object{
+		objects.NewInt(10), objects.NewInt(20), objects.NewInt(30),
+	})
+	// LOAD_CONST 0 (list); LOAD_CONST 1 (1); BINARY_OP nbSubscr (26); RETURN_VALUE -> 20
+	const nbSubscr = 26
+	co := &objects.Code{
+		Code: append(append(append(
+			instr(compile.LOAD_CONST, 0),
+			instr(compile.LOAD_CONST, 1)...),
+			instr(compile.BINARY_OP, nbSubscr)...),
+			instr(compile.RETURN_VALUE, 0)...),
+		Consts:    []any{src, int64(1)},
+		Stacksize: 4,
+	}
+	v, err := EvalCode(ts, co, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, _ := v.(*objects.Int).Int64()
+	if got != 20 {
+		t.Errorf("got %d, want 20", got)
+	}
+}
+
+func TestEvalContainsOp(t *testing.T) {
+	ts := state.NewThread()
+	src := objects.NewList([]objects.Object{
+		objects.NewInt(1), objects.NewInt(2), objects.NewInt(3),
+	})
+	// LOAD_CONST 0 (2); LOAD_CONST 1 (list); CONTAINS_OP 0 (`in`); RETURN_VALUE -> True
+	co := &objects.Code{
+		Code: append(append(append(
+			instr(compile.LOAD_CONST, 0),
+			instr(compile.LOAD_CONST, 1)...),
+			instr(compile.CONTAINS_OP, 0)...),
+			instr(compile.RETURN_VALUE, 0)...),
+		Consts:    []any{int64(2), src},
+		Stacksize: 4,
+	}
+	v, err := EvalCode(ts, co, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v != objects.True() {
+		t.Errorf("got %v, want True", v)
+	}
+}
+
 func contains(s, sub string) bool {
 	return sub == "" || (len(s) >= len(sub) && (s == sub || indexOf(s, sub) >= 0))
 }
