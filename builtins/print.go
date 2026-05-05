@@ -22,7 +22,7 @@ import (
 // CPython: Python/bltinmodule.c:2224 builtin_print_impl
 func Print(defaultFile io.Writer) func(args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error) {
 	return func(args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error) {
-		var file io.Writer = defaultFile
+		file := defaultFile
 		var sep, end *string
 		flush := false
 

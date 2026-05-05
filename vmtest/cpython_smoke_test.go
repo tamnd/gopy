@@ -13,10 +13,12 @@ package vmtest
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"os/exec"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/tamnd/gopy/objects"
 	"github.com/tamnd/gopy/parser"
@@ -72,14 +74,16 @@ func renderObject(o objects.Object) (string, error) {
 // captured stdout (trimmed of the trailing newline). Errors propagate;
 // callers t.Skip when python3 is not on PATH.
 func cpythonRender(src string) (string, error) {
-	cmd := exec.Command("python3", "-c", "print("+src+")")
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "python3", "-c", "print("+src+")")
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
 		return "", errors.New("python3: " + err.Error() + ": " + stderr.String())
 	}
-	return strings.TrimRight(stdout.String(), "\n"), nil
+	return strings.TrimRight(stdout.String(), "\r\n"), nil
 }
 
 func TestCPythonSmokePanel(t *testing.T) {
@@ -87,7 +91,6 @@ func TestCPythonSmokePanel(t *testing.T) {
 		t.Skip("python3 not on PATH; cpython smoke needs CPython for the parity comparison")
 	}
 	for _, tc := range cpythonSmokePanel() {
-		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			want, err := cpythonRender(tc.src)
 			if err != nil {

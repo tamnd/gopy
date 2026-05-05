@@ -67,7 +67,7 @@ func run(args []string, stdout, stderr *os.File) int {
 // the parser/VM panel is incomplete, so most non-trivial programs will
 // surface ErrNotImplemented or a parser bail; report and exit 1.
 func runSource(src string, stdout, stderr *os.File) int {
-	if len(src) == 0 || src[len(src)-1] != '\n' {
+	if src == "" || src[len(src)-1] != '\n' {
 		src += "\n"
 	}
 	mod, err := parser.ParseString(src, "<string>", parser.ModeFile)

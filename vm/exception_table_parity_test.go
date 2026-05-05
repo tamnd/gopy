@@ -80,7 +80,7 @@ func excParitySequences() []excFixture {
 			},
 		},
 		{
-			name: "large_offsets",
+			name:   "large_offsets",
 			instrs: largeOffsetSequence(),
 			want: []excEntry{
 				{start: 200, end: 400, target: 400, depth: 0, preserveLasti: false},
@@ -105,7 +105,6 @@ func largeOffsetSequence() []compile.Instr {
 
 func TestExceptionTableParityAcrossFixtures(t *testing.T) {
 	for _, fix := range excParitySequences() {
-		fix := fix
 		t.Run(fix.name, func(t *testing.T) {
 			seq := &compile.Sequence{Instrs: fix.instrs}
 			tab := compile.AssembleExceptionTable(seq)

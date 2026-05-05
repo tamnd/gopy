@@ -142,7 +142,7 @@ func parseCacheStructs(src string) (map[string]int, error) {
 }
 
 // sizeInCodeUnits walks a struct body (everything between the outer
-// braces) and returns its size in 16-bit code units. Recognises
+// braces) and returns its size in 16-bit code units. Recognizes
 // _Py_BackoffCounter, uint16_t, and unions; rejects anything else so
 // drift in the field types fails loud.
 func sizeInCodeUnits(body string) (int, error) {
@@ -185,7 +185,7 @@ func sizeInCodeUnits(body string) (int, error) {
 				j++
 			}
 			members := strings.Split(body[start:j-1], ";")
-			max := 0
+			maxSize := 0
 			for _, m := range members {
 				m = strings.TrimSpace(m)
 				if m == "" {
@@ -195,11 +195,11 @@ func sizeInCodeUnits(body string) (int, error) {
 				if err != nil {
 					return 0, err
 				}
-				if n > max {
-					max = n
+				if n > maxSize {
+					maxSize = n
 				}
 			}
-			total += max
+			total += maxSize
 			// Skip past the closing brace and the union's tag (if any) up
 			// through the trailing ';'.
 			semi := strings.IndexByte(body[j:], ';')

@@ -88,8 +88,7 @@ func isNilResult(v any) bool {
 	if v == nil {
 		return true
 	}
-	switch x := v.(type) {
-	case *Token:
+	if x, ok := v.(*Token); ok {
 		return x == nil
 	}
 	return false

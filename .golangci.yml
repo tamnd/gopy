@@ -156,6 +156,25 @@ linters:
         linters:
           - gocognit
           - gocyclo
+      # builtin_print_impl carries CPython's surface for print():
+      # file/sep/end/flush kwargs plus the per-arg loop. The branch
+      # tree mirrors Python/bltinmodule.c.
+      - path: builtins/print\.go
+        linters:
+          - gocognit
+          - gocyclo
+      # calculateStackdepth ports Python/flowgraph.c branch tree.
+      # Collapsing it would diverge from the source shape.
+      - path: compile/flowgraph_stackdepth\.go
+        linters:
+          - gocognit
+          - gocyclo
+      # buildConcatenatedStr ports the string-folding branch tree
+      # from Parser/action_helpers.c.
+      - path: parser/pegen/extras\.go
+        linters:
+          - gocognit
+          - gocyclo
       # Pegen scaffolding has many helpers held for the generated
       # parser table; flagging them as unused now would force ugly
       # nolint stamps everywhere. Re-enabled once parser_gen lands.

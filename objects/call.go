@@ -13,7 +13,7 @@ import (
 	"fmt"
 )
 
-// VectorcallArgumentsOffset is the high bit of nargsf signalling that
+// VectorcallArgumentsOffset is the high bit of nargsf signaling that
 // the caller reserved one slot at args[-1] for a self pointer; the
 // callee may overwrite that slot. Mirrors PY_VECTORCALL_ARGUMENTS_OFFSET,
 // the high bit of size_t.
@@ -34,7 +34,8 @@ func VectorcallNargs(nargsf uint) int {
 // the public PyVectorcall_Function wrapper.
 //
 // CPython: Objects/call.c:257 PyVectorcall_Function /
-//          Include/internal/pycore_call.h:124 _PyVectorcall_FunctionInline
+//
+//	Include/internal/pycore_call.h:124 _PyVectorcall_FunctionInline
 func vectorcallFunction(callable Object) func(Object, []Object, uint, *Tuple) (Object, error) {
 	if callable == nil {
 		return nil
@@ -73,7 +74,7 @@ func MakeTpCall(callable Object, args []Object, nargs int, keywords Object) (Obj
 				return nil, fmt.Errorf("MakeTpCall: kwnames tuple of size %d but args has only %d trailing slots", nkw, len(args)-nargs)
 			}
 			kwargs = make(map[string]Object, nkw)
-			for i := 0; i < nkw; i++ {
+			for i := range nkw {
 				name, err := Str(kw.Item(i))
 				if err != nil {
 					return nil, err
@@ -99,16 +100,19 @@ func MakeTpCall(callable Object, args []Object, nargs int, keywords Object) (Obj
 // CPython: Objects/call.c:263 _PyVectorcall_Call
 func vectorcallCall(fn func(Object, []Object, uint, *Tuple) (Object, error), callable Object, tuple *Tuple, kwargs *Dict) (Object, error) {
 	nargs := tuple.Len()
-	args := make([]Object, nargs)
-	for i := 0; i < nargs; i++ {
+	nkw := 0
+	if kwargs != nil {
+		nkw = kwargs.Len()
+	}
+	args := make([]Object, nargs+nkw)
+	for i := range nargs {
 		args[i] = tuple.Item(i)
 	}
-	if kwargs == nil || kwargs.Len() == 0 {
-		return fn(callable, args, uint(nargs), nil)
+	if nkw == 0 {
+		return fn(callable, args[:nargs], uint(nargs), nil)
 	}
 	keys := kwargs.Keys()
 	kwnamesItems := make([]Object, 0, len(keys))
-	args = append(args, make([]Object, len(keys))...)
 	for i, k := range keys {
 		v, err := kwargs.GetItem(k)
 		if err != nil {
@@ -210,7 +214,7 @@ func objectIsNotCallable(callable Object) error {
 
 // dictToMap copies a *Dict's entries into the map[string]Object shape
 // gopy's tp_call slot expects. Used when MakeTpCall has to bridge a
-// dict-flavoured kwargs onto the slot.
+// dict-flavored kwargs onto the slot.
 func dictToMap(d *Dict) map[string]Object {
 	out := make(map[string]Object, d.Len())
 	for _, k := range d.Keys() {

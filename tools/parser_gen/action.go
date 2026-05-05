@@ -160,7 +160,7 @@ func (tr *cTranslator) parseExpr() (string, bool) {
 	return tr.parseTernary()
 }
 
-// parseTernary recognises C's `cond ? yes : no` and translates it
+// parseTernary recognizes C's `cond ? yes : no` and translates it
 // into a Go IIFE that returns the matching branch. Both branches are
 // kept lazy by being inside the func body, so a CHECK or RAISE in
 // the alternative side does not run when the condition picks the
@@ -232,7 +232,7 @@ func (tr *cTranslator) parsePrimary() (string, bool) {
 		if t.text == "(" {
 			tr.advance()
 			// C type cast pattern: `(typename ...*)expr`. Skip the
-			// cast and parse the suffix expression. Recognised when
+			// cast and parse the suffix expression. Recognized when
 			// the first token after `(` is an identifier whose name
 			// looks like a C type and is followed by zero or more
 			// `*` then `)`.
@@ -337,44 +337,44 @@ var pyConstants = map[string]string{
 // cast expressions. The translator drops the cast: the Go side
 // already handles values as interface{}.
 var cTypeNames = map[string]bool{
-	"asdl_stmt_seq":           true,
-	"asdl_expr_seq":           true,
-	"asdl_alias_seq":           true,
-	"asdl_arg_seq":            true,
-	"asdl_excepthandler_seq":  true,
-	"asdl_keyword_seq":        true,
-	"asdl_match_case_seq":     true,
-	"asdl_pattern_seq":        true,
-	"asdl_type_param_seq":     true,
-	"asdl_withitem_seq":       true,
-	"asdl_comprehension_seq":  true,
-	"asdl_int_seq":            true,
-	"asdl_seq":                true,
-	"asdl_identifier_seq":     true,
-	"expr_ty":                 true,
-	"stmt_ty":                 true,
-	"arguments_ty":            true,
-	"arg_ty":                  true,
-	"keyword_ty":              true,
-	"comprehension_ty":        true,
-	"alias_ty":                true,
-	"withitem_ty":             true,
-	"match_case_ty":           true,
-	"pattern_ty":              true,
-	"excepthandler_ty":        true,
-	"AugOperator":             true,
-	"CmpopExprPair":           true,
-	"KeyValuePair":            true,
-	"KeyPatternPair":          true,
-	"KeywordOrStarred":        true,
-	"NameDefaultPair":         true,
-	"SlashWithDefault":        true,
-	"StarEtc":                 true,
-	"PyObject":                true,
-	"int":                     true,
-	"void":                    true,
-	"char":                    true,
-	"const":                   true,
+	"asdl_stmt_seq":          true,
+	"asdl_expr_seq":          true,
+	"asdl_alias_seq":         true,
+	"asdl_arg_seq":           true,
+	"asdl_excepthandler_seq": true,
+	"asdl_keyword_seq":       true,
+	"asdl_match_case_seq":    true,
+	"asdl_pattern_seq":       true,
+	"asdl_type_param_seq":    true,
+	"asdl_withitem_seq":      true,
+	"asdl_comprehension_seq": true,
+	"asdl_int_seq":           true,
+	"asdl_seq":               true,
+	"asdl_identifier_seq":    true,
+	"expr_ty":                true,
+	"stmt_ty":                true,
+	"arguments_ty":           true,
+	"arg_ty":                 true,
+	"keyword_ty":             true,
+	"comprehension_ty":       true,
+	"alias_ty":               true,
+	"withitem_ty":            true,
+	"match_case_ty":          true,
+	"pattern_ty":             true,
+	"excepthandler_ty":       true,
+	"AugOperator":            true,
+	"CmpopExprPair":          true,
+	"KeyValuePair":           true,
+	"KeyPatternPair":         true,
+	"KeywordOrStarred":       true,
+	"NameDefaultPair":        true,
+	"SlashWithDefault":       true,
+	"StarEtc":                true,
+	"PyObject":               true,
+	"int":                    true,
+	"void":                   true,
+	"char":                   true,
+	"const":                  true,
 }
 
 // tryParseCast checks whether the current cursor (just past an open
@@ -459,13 +459,13 @@ func (tr *cTranslator) parseIDExpr() (string, bool) {
 		return tr.parseCall(name)
 	}
 	// Member access chains: bound names are interface{} so field
-	// access cannot compile directly. We recognise three shapes:
+	// access cannot compile directly. We recognize three shapes:
 	//
 	//   <bound>->kind                 → AugOperator helper output, the
 	//                                   bound name already carries the
 	//                                   operator so drop the selector.
 	//   <bound>->v.Name.id            → identifier text from a NAME
-	//                                   token; map to nameIdOf(<bound>).
+	//                                   token; map to nameIDOf(<bound>).
 	//   <bound>->v.<Type>.<field>     → field on an expr_ty union; map
 	//                                   to a typed accessor helper.
 	if op := tr.peek(); op.text == "->" || op.text == "." {
@@ -488,12 +488,13 @@ func (tr *cTranslator) parseIDExpr() (string, bool) {
 // and `recv` carries the Go expression that names it. The cursor is
 // at the first `->` or `.`.
 //
-// We recognise:
-//   <recv>->kind             → recv (the operator/kind value flows
-//                               through the bound name unchanged)
-//   <recv>->v.Name.id        → nameIdOf(recv)
-//   <recv>->v.Call.args      → callArgsOf(recv)
-//   <recv>->v.Call.keywords  → callKwOf(recv)
+// We recognize:
+//
+//	<recv>->kind             → recv (the operator/kind value flows
+//	                            through the bound name unchanged)
+//	<recv>->v.Name.id        → nameIDOf(recv)
+//	<recv>->v.Call.args      → callArgsOf(recv)
+//	<recv>->v.Call.keywords  → callKwOf(recv)
 //
 // Anything else fails the translation and the alt falls back to the
 // raw arg-list shape.
@@ -507,7 +508,7 @@ func (tr *cTranslator) parseMemberAccess(recv string) (string, bool) {
 		return recv, true
 	}
 	if first == "arena" {
-		// `p->arena` is stripped by stripExtra; return a recognisable
+		// `p->arena` is stripped by stripExtra; return a recognizable
 		// form so the surrounding call-arg join sees an exact match.
 		return recv + ".arena", true
 	}
@@ -532,7 +533,7 @@ func (tr *cTranslator) parseMemberAccess(recv string) (string, bool) {
 	field := tr.advance().text
 	switch typeName + "." + field {
 	case "Name.id":
-		return "nameIdOf(" + recv + ")", true
+		return "nameIDOf(" + recv + ")", true
 	case "Call.args":
 		return "callArgsOf(" + recv + ")", true
 	case "Call.keywords":

@@ -130,7 +130,6 @@ func longSameLocSequence(n int, loc ast.Pos) []compile.Instr {
 
 func TestLineTableParityAcrossFixtures(t *testing.T) {
 	for _, fix := range posParityFixtures() {
-		fix := fix
 		t.Run(fix.name, func(t *testing.T) {
 			seq := &compile.Sequence{Instrs: fix.instrs}
 			tab := compile.AssembleLineTable(seq, fix.firstLineno)

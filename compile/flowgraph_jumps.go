@@ -261,16 +261,17 @@ func resolveJumpOffsets(instrs *Sequence) {
 				tgtOff = offset[tgtIdx]
 			}
 			ins.Oparg = int32(tgtOff)
-			if ins.Op == END_ASYNC_FOR {
+			switch {
+			case ins.Op == END_ASYNC_FOR:
 				// sys.monitoring needs to be able to find the matching
 				// END_SEND but the target is the SEND, so we adjust it
 				// here.
 				ins.Oparg = int32(curOffset - int(ins.Oparg) - endSendOffset)
-			} else if int(ins.Oparg) < curOffset {
+			case int(ins.Oparg) < curOffset:
 				// IS_BACKWARDS_JUMP_OPCODE assertion in CPython.
 				_ = isBackwardsJump
 				ins.Oparg = int32(curOffset - int(ins.Oparg))
-			} else {
+			default:
 				ins.Oparg = int32(int(ins.Oparg) - curOffset)
 			}
 			if instrSize(ins.Op, ins.Oparg) != isize {

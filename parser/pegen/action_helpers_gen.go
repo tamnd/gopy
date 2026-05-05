@@ -1280,7 +1280,7 @@ func decodeStringToken(s string) (string, bool) {
 	if len(s) < 2 {
 		return "", false
 	}
-	for len(s) > 0 {
+	for s != "" {
 		c := s[0]
 		if c == '\'' || c == '"' {
 			break
@@ -1562,7 +1562,7 @@ func actionAstConstant(p *Parser, args ...any) any {
 
 // constantValue maps a translated argument value (raw token, sentinel,
 // or already-typed Go value) onto the Python value the AST should
-// carry. Returns nil if the value is unrecognised; the caller treats
+// carry. Returns nil if the value is unrecognized; the caller treats
 // the explicit pyNoneSentinel case specially because nil is also the
 // "no value" return.
 func constantValue(v any) any {
@@ -1868,10 +1868,10 @@ func truthy(v any) bool {
 	return true
 }
 
-// nameIdOf extracts the identifier text from a NAME token or a
+// nameIDOf extracts the identifier text from a NAME token or a
 // Name expression. Mirrors the C grammar's `n->v.Name.id` accessor.
 // Returns "" when neither shape applies; callers route on that.
-func nameIdOf(v any) string {
+func nameIDOf(v any) string {
 	switch x := v.(type) {
 	case *Token:
 		if x == nil {

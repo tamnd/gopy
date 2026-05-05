@@ -376,7 +376,7 @@ func TestCallKwEmitsCallKw(t *testing.T) {
 	u := compileMod(t, exprMod(e))
 	got := opNames(u)
 	want := []string{
-		"LOAD_NAME",  // f
+		"LOAD_NAME", // f
 		"PUSH_NULL",
 		"LOAD_CONST", // 1
 		"LOAD_CONST", // ("x",) tuple

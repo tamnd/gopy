@@ -227,7 +227,7 @@ func buildConcatenatedStr(parts []ast.Expr) []ast.Expr {
 					c = folded
 				}
 			}
-			if s, ok := c.Value.(string); ok && len(s) == 0 {
+			if s, ok := c.Value.(string); ok && s == "" {
 				continue
 			}
 		}

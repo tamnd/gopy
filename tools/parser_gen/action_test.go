@@ -40,7 +40,7 @@ func TestTranslateActionShapes(t *testing.T) {
 		body string
 		want string
 	}{
-		{"n->v.Name.id", "nameIdOf(n)"},
+		{"n->v.Name.id", "nameIDOf(n)"},
 		{"(params) ? params : CHECK(arguments_ty, _PyPegen_empty_arguments(p))", "func() any { if truthy((params)) { return params }; return actionPgenEmptyArguments(p, p) }()"},
 	}
 	for _, c := range extra {

@@ -132,7 +132,7 @@ func TestOptimizeIntegratesPasses(t *testing.T) {
 		if ins.Op == JUMP_FORWARD {
 			target := i + 1 + int(ins.Oparg)
 			if target < 0 || target >= len(seq.Instrs) || seq.Instrs[target].Op != RETURN_VALUE {
-				op := Opcode(NOP)
+				op := NOP
 				if target >= 0 && target < len(seq.Instrs) {
 					op = seq.Instrs[target].Op
 				}
