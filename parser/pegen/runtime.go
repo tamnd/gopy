@@ -58,3 +58,16 @@ func (p *Parser) SetFeatureVersion(v int) { p.featureVersion = v }
 //
 // CPython: Parser/pegen.h:84 flags
 func (p *Parser) Flags() int { return p.flags }
+
+// hardKeywordSet is the set form of the generated HardKeywords
+// table. Built once at init; consulted by Expect to refuse NAME
+// tokens whose bytes are reserved keywords. CPython's lexer assigns
+// each hard keyword its own token type so the NAME alts never match
+// them; gopy's lexer does not, so the discrimination happens here.
+var hardKeywordSet = func() map[string]bool {
+	m := make(map[string]bool, len(HardKeywords))
+	for _, kw := range HardKeywords {
+		m[kw] = true
+	}
+	return m
+}()
