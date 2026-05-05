@@ -2,6 +2,7 @@ package vm
 
 import (
 	"errors"
+	"sync"
 	"testing"
 
 	"github.com/tamnd/gopy/compile"
@@ -368,6 +369,111 @@ func TestEvalToBool(t *testing.T) {
 	}
 	if v != objects.True() {
 		t.Errorf("got %v, want True", v)
+	}
+}
+
+// TestEvalLoadAttrMissingSurfacesError exercises the LOAD_ATTR
+// dispatch path: the int type has no Getattro slot, so PyObject_GetAttr
+// returns AttributeError and EvalCode bubbles it up.
+func TestEvalLoadAttrMissingSurfacesError(t *testing.T) {
+	ts := state.NewThread()
+	co := &objects.Code{
+		Code: append(append(
+			instr(compile.LOAD_CONST, 0),
+			instr(compile.LOAD_ATTR, 0)...),
+			instr(compile.RETURN_VALUE, 0)...),
+		Consts:    []any{int64(7)},
+		Names:     []string{"missing"},
+		Stacksize: 4,
+	}
+	_, err := EvalCode(ts, co, nil, nil)
+	if err == nil {
+		t.Fatal("expected AttributeError")
+	}
+	if !contains(err.Error(), "AttributeError") {
+		t.Errorf("err = %v, want AttributeError", err)
+	}
+}
+
+// TestEvalStoreDeleteAttrMissingSurfacesError exercises STORE_ATTR
+// (and DELETE_ATTR via the same Setattro slot) on a type that has
+// neither a getattro nor a setattro slot. Both should produce the
+// "no attributes" TypeError.
+func TestEvalStoreDeleteAttrMissingSurfacesError(t *testing.T) {
+	ts := state.NewThread()
+	storeCo := &objects.Code{
+		Code: append(append(append(
+			instr(compile.LOAD_CONST, 0),
+			instr(compile.LOAD_CONST, 1)...),
+			instr(compile.STORE_ATTR, 0)...),
+			instr(compile.RETURN_VALUE, 0)...),
+		Consts:    []any{int64(1), int64(7)},
+		Names:     []string{"x"},
+		Stacksize: 4,
+	}
+	if _, err := EvalCode(ts, storeCo, nil, nil); err == nil ||
+		!contains(err.Error(), "TypeError") {
+		t.Errorf("STORE_ATTR err = %v, want TypeError", err)
+	}
+
+	delCo := &objects.Code{
+		Code: append(append(
+			instr(compile.LOAD_CONST, 0),
+			instr(compile.DELETE_ATTR, 0)...),
+			instr(compile.RETURN_VALUE, 0)...),
+		Consts:    []any{int64(7)},
+		Names:     []string{"x"},
+		Stacksize: 4,
+	}
+	if _, err := EvalCode(ts, delCo, nil, nil); err == nil ||
+		!contains(err.Error(), "TypeError") {
+		t.Errorf("DELETE_ATTR err = %v, want TypeError", err)
+	}
+}
+
+// TestEvalCodeGoroutineSafety pins that distinct EvalCode calls from
+// different goroutines, sharing a single *objects.Code, do not race
+// on shared interpreter state. Run with `go test -race` to catch
+// regressions where someone caches per-call state on the Code object
+// or a shared map without locking.
+//
+// CPython: Doc/c-api/init.rst (PyEval_EvalCode is reentrant per thread)
+func TestEvalCodeGoroutineSafety(t *testing.T) {
+	const goroutines = 32
+	// LOAD_CONST 0 (5); LOAD_CONST 1 (7); BINARY_OP nbAdd (0);
+	// RETURN_VALUE -> 12. Same Code object shared across all goroutines.
+	co := &objects.Code{
+		Code: append(append(append(
+			instr(compile.LOAD_CONST, 0),
+			instr(compile.LOAD_CONST, 1)...),
+			instr(compile.BINARY_OP, 0)...),
+			instr(compile.RETURN_VALUE, 0)...),
+		Consts:    []any{int64(5), int64(7)},
+		Stacksize: 4,
+	}
+
+	var wg sync.WaitGroup
+	errs := make(chan error, goroutines)
+	for i := 0; i < goroutines; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			ts := state.NewThread()
+			v, err := EvalCode(ts, co, nil, nil)
+			if err != nil {
+				errs <- err
+				return
+			}
+			got, _ := v.(*objects.Int).Int64()
+			if got != 12 {
+				errs <- errors.New("unexpected result")
+			}
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		t.Errorf("goroutine: %v", err)
 	}
 }
 

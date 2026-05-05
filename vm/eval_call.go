@@ -8,21 +8,83 @@ package vm
 
 import (
 	"fmt"
+	"runtime"
+	"strconv"
+	"sync"
 
 	"github.com/tamnd/gopy/objects"
 	"github.com/tamnd/gopy/stackref"
 	"github.com/tamnd/gopy/state"
 )
 
-// activeThread is set by Eval so nested Function.Call can pick up the
-// running thread. CPython gets this from PyThreadState_GET; the gopy
-// state package doesn't expose a goroutine-local "current thread" hook
-// yet, so the VM threads it through a package var. The eval loop
-// already runs under the GIL, so the var is single-writer at any
-// instant.
+// activeThreads maps a goroutine ID to the *state.Thread Eval is
+// running on that goroutine. Mirrors what CPython gets from
+// PyThreadState_GET, just keyed off the Go scheduler instead of an
+// OS thread. The map is concurrent-safe so one goroutine entering
+// Eval cannot stomp on another goroutine's slot.
+//
+// Distinct goroutines run independent Eval calls without a lock; the
+// map's only contention is between Eval's primer and a nested
+// callPyFunction reader on the same goroutine, which never overlap.
 //
 // CPython: Include/internal/pycore_pystate.h _PyThreadState_GET
-var activeThread *state.Thread
+var activeThreads sync.Map // map[uint64]*state.Thread
+
+// goid returns the current goroutine's ID. Pulled out of
+// runtime.Stack since Go does not expose goroutine identity in its
+// public API. Cheap enough for Eval entry/exit; not called per
+// opcode.
+func goid() uint64 {
+	var buf [64]byte
+	n := runtime.Stack(buf[:], false)
+	// "goroutine N [..." — read digits after the "goroutine " prefix.
+	const prefix = "goroutine "
+	if n <= len(prefix) {
+		return 0
+	}
+	s := buf[len(prefix):n]
+	end := 0
+	for end < len(s) && s[end] >= '0' && s[end] <= '9' {
+		end++
+	}
+	id, _ := strconv.ParseUint(string(s[:end]), 10, 64)
+	return id
+}
+
+// setActiveThread primes the current goroutine's Eval slot and
+// returns the previous occupant so the caller can restore it on the
+// way out. Eval calls this on entry; callPyFunction reads through
+// currentThread.
+func setActiveThread(ts *state.Thread) *state.Thread {
+	g := goid()
+	var prev *state.Thread
+	if v, ok := activeThreads.Load(g); ok {
+		prev = v.(*state.Thread)
+	}
+	activeThreads.Store(g, ts)
+	return prev
+}
+
+// restoreActiveThread is the defer-side of setActiveThread.
+func restoreActiveThread(prev *state.Thread) {
+	g := goid()
+	if prev == nil {
+		activeThreads.Delete(g)
+		return
+	}
+	activeThreads.Store(g, prev)
+}
+
+// currentThread returns the Eval thread on the current goroutine, or
+// nil if the goroutine is not currently inside Eval (in which case
+// callPyFunction allocates a fresh Thread).
+func currentThread() *state.Thread {
+	g := goid()
+	if v, ok := activeThreads.Load(g); ok {
+		return v.(*state.Thread)
+	}
+	return nil
+}
 
 func init() {
 	objects.FunctionType.Call = callPyFunction
@@ -51,7 +113,7 @@ func callPyFunction(o objects.Object, args []objects.Object, kwargs map[string]o
 		return nil, fmt.Errorf("TypeError: %s() takes %d positional arguments but %d were given",
 			fn.Name, npos, len(args))
 	}
-	ts := activeThread
+	ts := currentThread()
 	if ts == nil {
 		ts = state.NewThread()
 	}
