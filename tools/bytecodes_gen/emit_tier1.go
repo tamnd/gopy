@@ -19,7 +19,7 @@ import (
 // panic-stub until B6 fills it in.
 func EmitTier1Arm(a *SignatureAnalysis) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "\tcase opcode.%s:\n", a.Name)
+	fmt.Fprintf(&b, "\tcase compile.%s:\n", a.Name)
 
 	// Pop inputs in reverse so source-order Inputs[0] ends up bound
 	// to the deepest popped slot (matches CPython's stack-bottom-first
@@ -28,7 +28,7 @@ func EmitTier1Arm(a *SignatureAnalysis) string {
 		in := a.Inputs[i]
 		name := bindName(in.Name, "in", in.Index)
 		if in.Sized {
-			fmt.Fprintf(&b, "\t\t_ = %s // sized input, size=%s\n", name, in.SizeExpr)
+			fmt.Fprintf(&b, "\t\t// sized input %s, size=%s\n", name, in.SizeExpr)
 			fmt.Fprintf(&b, "\t\tfor i := 0; i < int(%s); i++ { _ = e.pop() }\n", in.SizeExpr)
 			continue
 		}
@@ -62,20 +62,45 @@ func EmitTier1Arm(a *SignatureAnalysis) string {
 
 // bindName picks a stable Go identifier for a slot. Empty/unused names
 // get a synthetic `_in0` / `_out1` so collisions across slots can't
-// happen; otherwise we use the source name directly.
+// happen; Go keywords clash with the language and get a `_v` suffix;
+// otherwise we use the source name directly.
 func bindName(name, dir string, idx int) string {
 	if name == "" || name == "unused" {
 		return fmt.Sprintf("_%s%d", dir, idx)
 	}
+	if goKeywords[name] {
+		return name + "_v"
+	}
 	return name
+}
+
+// goKeywords are the reserved identifiers we have to rename around.
+// CPython names like `type`, `func`, `default`, `range` collide with
+// Go's grammar and would not parse as variable names.
+var goKeywords = map[string]bool{
+	"break": true, "case": true, "chan": true, "const": true,
+	"continue": true, "default": true, "defer": true, "else": true,
+	"fallthrough": true, "for": true, "func": true, "go": true,
+	"goto": true, "if": true, "import": true, "interface": true,
+	"map": true, "package": true, "range": true, "return": true,
+	"select": true, "struct": true, "switch": true, "type": true,
+	"var": true,
 }
 
 // EmitTier1File renders a Go source file containing dispatchGen, which
 // the hand-written dispatch falls back to once codegen takes over.
 // `pkg` is the target package, `hash` is the bytecodes.c sha256 stamped
-// in the drift marker.
-func EmitTier1File(pkg, hash string, analyses []*SignatureAnalysis) string {
-	sorted := append([]*SignatureAnalysis(nil), analyses...)
+// in the drift marker. Adaptive variants in fm are skipped, since v0.6
+// has no specializer; their base instruction handles dispatch and the
+// adaptive opcode constants don't exist in compile/ yet.
+func EmitTier1File(pkg, hash string, analyses []*SignatureAnalysis, fm FamilyMap) string {
+	sorted := make([]*SignatureAnalysis, 0, len(analyses))
+	for _, a := range analyses {
+		if _, isVariant := fm[a.Name]; isVariant {
+			continue
+		}
+		sorted = append(sorted, a)
+	}
 	sort.Slice(sorted, func(i, j int) bool { return sorted[i].Name < sorted[j].Name })
 
 	var b strings.Builder
@@ -84,7 +109,6 @@ func EmitTier1File(pkg, hash string, analyses []*SignatureAnalysis) string {
 	b.WriteString("\npackage " + pkg + "\n\n")
 	b.WriteString("import (\n")
 	b.WriteString("\t\"github.com/tamnd/gopy/compile\"\n")
-	b.WriteString("\t\"github.com/tamnd/gopy/compile/opcode\"\n")
 	b.WriteString("\t\"github.com/tamnd/gopy/objects\"\n")
 	b.WriteString(")\n\n")
 	b.WriteString("// dispatchGen is the generated Tier-1 dispatcher. Each arm is\n")

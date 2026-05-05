@@ -82,7 +82,7 @@ func runEmit(src, out, pkg, mode string) error {
 		if err != nil {
 			return err
 		}
-		rendered = EmitTier1File(pkg, hash, analyses)
+		rendered = EmitTier1File(pkg, hash, analyses, BuildFamilyMap(defs.Order))
 	}
 	return os.WriteFile(out, []byte(rendered), 0o644)
 }

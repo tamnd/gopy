@@ -8,14 +8,15 @@
 
 package main
 
-// FamilyMap is variant-name -> base-name. The base opcode is the first
-// member of a family declaration. Variants in the map should dispatch
-// to the base case until v0.11's specializer is in place.
+// FamilyMap is variant-name -> base-name. The family declaration's name
+// is the base opcode (e.g. `family(RESUME, 0) = { RESUME_CHECK }`); the
+// listed members are the adaptive variants. Variants in the map should
+// dispatch to the base case until v0.11's specializer is in place.
 type FamilyMap map[string]string
 
 // BuildFamilyMap walks defs and returns the variant-to-base map.
-// A family with only one member contributes nothing (the lone member
-// is its own base; nothing to redirect).
+// Members that match the family name are skipped (some families list
+// the base alongside its variants).
 func BuildFamilyMap(defs []Def) FamilyMap {
 	out := FamilyMap{}
 	for _, d := range defs {
@@ -23,12 +24,11 @@ func BuildFamilyMap(defs []Def) FamilyMap {
 		if !ok {
 			continue
 		}
-		if len(f.Members) < 2 {
-			continue
-		}
-		base := f.Members[0]
-		for _, m := range f.Members[1:] {
-			out[m] = base
+		for _, m := range f.Members {
+			if m == f.Name {
+				continue
+			}
+			out[m] = f.Name
 		}
 	}
 	return out

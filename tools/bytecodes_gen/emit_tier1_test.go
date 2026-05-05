@@ -13,7 +13,7 @@ func TestEmitTier1ArmFixed(t *testing.T) {
 	}
 	out := EmitTier1Arm(a)
 	for _, want := range []string{
-		"case opcode.BINARY_ADD:",
+		"case compile.BINARY_ADD:",
 		"b := e.pop()",
 		"a := e.pop()",
 		"body pending (B6)",
@@ -47,13 +47,13 @@ func TestEmitTier1FileShape(t *testing.T) {
 		Outputs: nil,
 		Inputs:  nil,
 	}
-	src := EmitTier1File("vm", "deadbeef", []*SignatureAnalysis{a})
+	src := EmitTier1File("vm", "deadbeef", []*SignatureAnalysis{a}, nil)
 	for _, want := range []string{
 		"DO NOT EDIT",
 		"// bytecodes.c sha256: deadbeef",
 		"package vm",
 		"func (e *evalState) dispatchGen(",
-		"case opcode.NOP:",
+		"case compile.NOP:",
 	} {
 		if !strings.Contains(src, want) {
 			t.Errorf("file missing %q\n--- file ---\n%s", want, src)

@@ -4,7 +4,7 @@ import "testing"
 
 func TestBuildFamilyMapMapsVariantsToBase(t *testing.T) {
 	defs := []Def{
-		&FamilyDef{Name: "BINARY_OP", Members: []string{"BINARY_OP", "BINARY_OP_ADD_INT", "BINARY_OP_ADD_STR"}},
+		&FamilyDef{Name: "BINARY_OP", Members: []string{"BINARY_OP_ADD_INT", "BINARY_OP_ADD_STR"}},
 	}
 	fm := BuildFamilyMap(defs)
 	if fm["BINARY_OP_ADD_INT"] != "BINARY_OP" || fm["BINARY_OP_ADD_STR"] != "BINARY_OP" {
@@ -15,10 +15,14 @@ func TestBuildFamilyMapMapsVariantsToBase(t *testing.T) {
 	}
 }
 
-func TestBuildFamilyMapSkipsSoloFamilies(t *testing.T) {
-	defs := []Def{&FamilyDef{Name: "SOLO", Members: []string{"SOLO_OP"}}}
-	if got := BuildFamilyMap(defs); len(got) != 0 {
-		t.Errorf("solo family produced map: %+v", got)
+func TestBuildFamilyMapSkipsBaseInMembers(t *testing.T) {
+	defs := []Def{&FamilyDef{Name: "LOAD_CONST", Members: []string{"LOAD_CONST", "LOAD_CONST_MORTAL"}}}
+	fm := BuildFamilyMap(defs)
+	if _, ok := fm["LOAD_CONST"]; ok {
+		t.Errorf("base listed in members should not appear as variant: %+v", fm)
+	}
+	if fm["LOAD_CONST_MORTAL"] != "LOAD_CONST" {
+		t.Errorf("variant not mapped: %+v", fm)
 	}
 }
 
