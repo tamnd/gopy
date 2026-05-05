@@ -43,11 +43,17 @@ type Runtime struct {
 // initconfig; the lifecycle layer is the sole reader and re-asserts
 // the concrete type at use sites.
 //
+// Finalizing is the bool flag the lifecycle flips during Py_Finalize
+// before clearing modules; it stays at 1 until the interpreter is
+// dropped from the runtime.
+//
 // CPython: Include/internal/pycore_interp.h:L113 PyInterpreterState
 type Interpreter struct {
 	runtime *Runtime
 	threads []*Thread
 	Config  any
+
+	Finalizing int
 }
 
 // Thread is the per-goroutine state. v0.3 carries the current
@@ -142,6 +148,21 @@ func (r *Runtime) NewInterpreter() *Interpreter {
 // Interpreters returns the interpreters owned by r in registration
 // order. The slice aliases internal state; treat it as read-only.
 func (r *Runtime) Interpreters() []*Interpreter { return r.interpreters }
+
+// DropInterpreters detaches every interpreter from r. Used by
+// lifecycle.Finalize to reset the runtime so a subsequent Initialize
+// starts from a clean slate. Each detached interpreter has its
+// runtime backpointer cleared so dangling references stop sharing
+// state.
+//
+// CPython: Python/pylifecycle.c:_PyInterpreterState_DeleteAll
+func (r *Runtime) DropInterpreters() {
+	for _, i := range r.interpreters {
+		i.runtime = nil
+		i.threads = nil
+	}
+	r.interpreters = nil
+}
 
 // AttachThread builds a thread state bound to i and registers it.
 // Mirrors PyThreadState_New for the simple case where the thread is
