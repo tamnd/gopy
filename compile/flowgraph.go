@@ -111,7 +111,9 @@ func Optimize(seq *Sequence, consts *[]any, nlocals, _ int) (*Info, error) {
 	// PASS 2: resolve symbolic jump labels to instruction offsets.
 	// CPython does this on the CFG; we exploit instrseq's existing
 	// ApplyLabelMap so the post-pass Sequence has resolved opargs.
-	seq.ApplyLabelMap(HasTarget)
+	// HasTarget(JUMP) is false because the pseudo opcode has no
+	// metadata row, so we resolve its label by hand.
+	seq.ApplyLabelMap(func(op Opcode) bool { return HasTarget(op) || op == JUMP })
 
 	// PASS 3a: thread chains of unconditional jumps and re-target any
 	// POP_JUMP_IF_X that lands on a trampoline. CPython runs these on
@@ -130,11 +132,24 @@ func Optimize(seq *Sequence, consts *[]any, nlocals, _ int) (*Info, error) {
 	// PASS 11: stack-depth analysis. Forward dataflow over the flat
 	// sequence is sufficient while the optimiser is minimal: every
 	// block boundary is a jump, and the per-instruction effect table
-	// is the same one CPython uses.
+	// is the same one CPython uses. Runs before resolveJumpOffsets
+	// because the dataflow needs jump opargs as absolute target
+	// indices; once offsets are converted to relative byte deltas the
+	// successor walk can no longer follow them.
 	depth, err := calculateStackdepth(seq)
 	if err != nil {
 		return nil, err
 	}
+
+	// PASS 4: lower the pseudo unconditional jumps (`JUMP`,
+	// `JUMP_NO_INTERRUPT`) to their forward / backward counterparts,
+	// then rewrite every jump oparg from absolute index into the
+	// relative code-unit delta the VM consumes. Mirrors the back half
+	// of _PyAssemble_MakeCodeObject.
+	//
+	// CPython: Python/assemble.c:778 _PyAssemble_MakeCodeObject
+	resolveUnconditionalJumps(seq)
+	resolveJumpOffsets(seq)
 
 	info := &Info{
 		MaxStackDepth: depth,
