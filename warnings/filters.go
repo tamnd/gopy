@@ -147,12 +147,15 @@ func Filters() []Filter {
 
 // SetFilters replaces the filter list atomically. The slice is
 // copied so later mutations by the caller do not race with dispatch.
+// The per-module registry is purged so dedup state cannot outlive
+// the rule that produced it.
 //
 // CPython: Python/_warnings.c warnings_filters_mutated
 func SetFilters(rules []Filter) {
 	filterMu.Lock()
-	defer filterMu.Unlock()
 	filters = append([]Filter(nil), rules...)
+	filterMu.Unlock()
+	ResetRegistry()
 }
 
 // Reset restores the default filter list. The user-facing
@@ -161,8 +164,9 @@ func SetFilters(rules []Filter) {
 // CPython: Python/_warnings.c warnings_resetwarnings
 func Reset() {
 	filterMu.Lock()
-	defer filterMu.Unlock()
 	filters = defaultFilters()
+	filterMu.Unlock()
+	ResetRegistry()
 }
 
 // findAction walks the filter list and returns the first matching
@@ -182,12 +186,14 @@ func findAction(message, module string, lineno int, cat *Category) Action {
 }
 
 // Insert prepends a filter, matching simplefilter's semantics
-// (most-recently-added wins).
+// (most-recently-added wins). The registry purge keeps a fresh
+// rule from being shadowed by stale dedup state.
 //
 // CPython: Python/_warnings.c warnings_simple_filter
 func Insert(rule Filter) {
 	filterMu.Lock()
-	defer filterMu.Unlock()
 	filters = append([]Filter{rule}, filters...)
+	filterMu.Unlock()
+	ResetRegistry()
 }
 

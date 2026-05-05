@@ -89,6 +89,9 @@ func WarnAt(category *Category, message, module string, lineno int) error {
 	case ActionError:
 		return &ErrWarning{Category: category, Message: message, Module: module, Lineno: lineno}
 	}
+	if !shouldEmit(action, category, message, module, lineno) {
+		return nil
+	}
 	return emit(currentWriter(), category, message, module, lineno)
 }
 
