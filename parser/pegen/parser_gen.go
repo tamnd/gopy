@@ -11052,6 +11052,7 @@ func parseRule_func_type_comment(p *Parser) any {
 // parseRule_invalid_arguments parses invalid_arguments.
 func parseRule_invalid_arguments(p *Parser) any {
 	if p.ErrorIndicator() { return nil }
+	if !p.CallInvalid() { return nil }
 	if v, ok := p.IsMemoized(Rule_invalid_arguments); ok { return v }
 	mark := p.Mark()
 	_ = mark
@@ -11200,6 +11201,7 @@ func parseRule_invalid_arguments(p *Parser) any {
 // parseRule_invalid_kwarg parses invalid_kwarg.
 func parseRule_invalid_kwarg(p *Parser) any {
 	if p.ErrorIndicator() { return nil }
+	if !p.CallInvalid() { return nil }
 	if v, ok := p.IsMemoized(Rule_invalid_kwarg); ok { return v }
 	mark := p.Mark()
 	_ = mark
@@ -11348,6 +11350,7 @@ func parseRule_expression_without_invalid(p *Parser) any {
 // parseRule_invalid_legacy_expression parses invalid_legacy_expression.
 func parseRule_invalid_legacy_expression(p *Parser) any {
 	if p.ErrorIndicator() { return nil }
+	if !p.CallInvalid() { return nil }
 	if v, ok := p.IsMemoized(Rule_invalid_legacy_expression); ok { return v }
 	mark := p.Mark()
 	_ = mark
@@ -11375,6 +11378,7 @@ func parseRule_invalid_legacy_expression(p *Parser) any {
 // parseRule_invalid_type_param parses invalid_type_param.
 func parseRule_invalid_type_param(p *Parser) any {
 	if p.ErrorIndicator() { return nil }
+	if !p.CallInvalid() { return nil }
 	if v, ok := p.IsMemoized(Rule_invalid_type_param); ok { return v }
 	mark := p.Mark()
 	_ = mark
@@ -11429,6 +11433,7 @@ func parseRule_invalid_type_param(p *Parser) any {
 // parseRule_invalid_expression parses invalid_expression.
 func parseRule_invalid_expression(p *Parser) any {
 	if p.ErrorIndicator() { return nil }
+	if !p.CallInvalid() { return nil }
 	if v, ok := p.IsMemoized(Rule_invalid_expression); ok { return v }
 	mark := p.Mark()
 	_ = mark
@@ -11581,6 +11586,7 @@ func parseRule_invalid_expression(p *Parser) any {
 // parseRule_invalid_named_expression parses invalid_named_expression.
 func parseRule_invalid_named_expression(p *Parser) any {
 	if p.ErrorIndicator() { return nil }
+	if !p.CallInvalid() { return nil }
 	if v, ok := p.IsMemoized(Rule_invalid_named_expression); ok { return v }
 	mark := p.Mark()
 	_ = mark
@@ -11651,6 +11657,7 @@ func parseRule_invalid_named_expression(p *Parser) any {
 // parseRule_invalid_assignment parses invalid_assignment.
 func parseRule_invalid_assignment(p *Parser) any {
 	if p.ErrorIndicator() { return nil }
+	if !p.CallInvalid() { return nil }
 	if v, ok := p.IsMemoized(Rule_invalid_assignment); ok { return v }
 	mark := p.Mark()
 	_ = mark
@@ -11778,6 +11785,7 @@ func parseRule_invalid_assignment(p *Parser) any {
 // parseRule_invalid_ann_assign_target parses invalid_ann_assign_target.
 func parseRule_invalid_ann_assign_target(p *Parser) any {
 	if p.ErrorIndicator() { return nil }
+	if !p.CallInvalid() { return nil }
 	if v, ok := p.IsMemoized(Rule_invalid_ann_assign_target); ok { return v }
 	mark := p.Mark()
 	_ = mark
@@ -11833,6 +11841,7 @@ func parseRule_invalid_ann_assign_target(p *Parser) any {
 // parseRule_invalid_del_stmt parses invalid_del_stmt.
 func parseRule_invalid_del_stmt(p *Parser) any {
 	if p.ErrorIndicator() { return nil }
+	if !p.CallInvalid() { return nil }
 	if v, ok := p.IsMemoized(Rule_invalid_del_stmt); ok { return v }
 	mark := p.Mark()
 	_ = mark
@@ -11859,6 +11868,7 @@ func parseRule_invalid_del_stmt(p *Parser) any {
 // parseRule_invalid_block parses invalid_block.
 func parseRule_invalid_block(p *Parser) any {
 	if p.ErrorIndicator() { return nil }
+	if !p.CallInvalid() { return nil }
 	if v, ok := p.IsMemoized(Rule_invalid_block); ok { return v }
 	mark := p.Mark()
 	_ = mark
@@ -11883,6 +11893,7 @@ func parseRule_invalid_block(p *Parser) any {
 // parseRule_invalid_comprehension parses invalid_comprehension.
 func parseRule_invalid_comprehension(p *Parser) any {
 	if p.ErrorIndicator() { return nil }
+	if !p.CallInvalid() { return nil }
 	if v, ok := p.IsMemoized(Rule_invalid_comprehension); ok { return v }
 	mark := p.Mark()
 	_ = mark
@@ -11959,6 +11970,7 @@ func parseRule_invalid_comprehension(p *Parser) any {
 // parseRule_invalid_dict_comprehension parses invalid_dict_comprehension.
 func parseRule_invalid_dict_comprehension(p *Parser) any {
 	if p.ErrorIndicator() { return nil }
+	if !p.CallInvalid() { return nil }
 	if v, ok := p.IsMemoized(Rule_invalid_dict_comprehension); ok { return v }
 	mark := p.Mark()
 	_ = mark
@@ -11994,6 +12006,7 @@ func parseRule_invalid_dict_comprehension(p *Parser) any {
 // parseRule_invalid_parameters parses invalid_parameters.
 func parseRule_invalid_parameters(p *Parser) any {
 	if p.ErrorIndicator() { return nil }
+	if !p.CallInvalid() { return nil }
 	if v, ok := p.IsMemoized(Rule_invalid_parameters); ok { return v }
 	mark := p.Mark()
 	_ = mark
@@ -12125,6 +12138,7 @@ func parseRule_invalid_parameters(p *Parser) any {
 // parseRule_invalid_default parses invalid_default.
 func parseRule_invalid_default(p *Parser) any {
 	if p.ErrorIndicator() { return nil }
+	if !p.CallInvalid() { return nil }
 	if v, ok := p.IsMemoized(Rule_invalid_default); ok { return v }
 	mark := p.Mark()
 	_ = mark
@@ -12149,6 +12163,7 @@ func parseRule_invalid_default(p *Parser) any {
 // parseRule_invalid_star_etc parses invalid_star_etc.
 func parseRule_invalid_star_etc(p *Parser) any {
 	if p.ErrorIndicator() { return nil }
+	if !p.CallInvalid() { return nil }
 	if v, ok := p.IsMemoized(Rule_invalid_star_etc); ok { return v }
 	mark := p.Mark()
 	_ = mark
@@ -12237,6 +12252,7 @@ func parseRule_invalid_star_etc(p *Parser) any {
 // parseRule_invalid_kwds parses invalid_kwds.
 func parseRule_invalid_kwds(p *Parser) any {
 	if p.ErrorIndicator() { return nil }
+	if !p.CallInvalid() { return nil }
 	if v, ok := p.IsMemoized(Rule_invalid_kwds); ok { return v }
 	mark := p.Mark()
 	_ = mark
@@ -12310,6 +12326,7 @@ func parseRule_invalid_kwds(p *Parser) any {
 // parseRule_invalid_parameters_helper parses invalid_parameters_helper.
 func parseRule_invalid_parameters_helper(p *Parser) any {
 	if p.ErrorIndicator() { return nil }
+	if !p.CallInvalid() { return nil }
 	if v, ok := p.IsMemoized(Rule_invalid_parameters_helper); ok { return v }
 	mark := p.Mark()
 	_ = mark
@@ -12346,6 +12363,7 @@ func parseRule_invalid_parameters_helper(p *Parser) any {
 // parseRule_invalid_lambda_parameters parses invalid_lambda_parameters.
 func parseRule_invalid_lambda_parameters(p *Parser) any {
 	if p.ErrorIndicator() { return nil }
+	if !p.CallInvalid() { return nil }
 	if v, ok := p.IsMemoized(Rule_invalid_lambda_parameters); ok { return v }
 	mark := p.Mark()
 	_ = mark
@@ -12477,6 +12495,7 @@ func parseRule_invalid_lambda_parameters(p *Parser) any {
 // parseRule_invalid_lambda_parameters_helper parses invalid_lambda_parameters_helper.
 func parseRule_invalid_lambda_parameters_helper(p *Parser) any {
 	if p.ErrorIndicator() { return nil }
+	if !p.CallInvalid() { return nil }
 	if v, ok := p.IsMemoized(Rule_invalid_lambda_parameters_helper); ok { return v }
 	mark := p.Mark()
 	_ = mark
@@ -12513,6 +12532,7 @@ func parseRule_invalid_lambda_parameters_helper(p *Parser) any {
 // parseRule_invalid_lambda_star_etc parses invalid_lambda_star_etc.
 func parseRule_invalid_lambda_star_etc(p *Parser) any {
 	if p.ErrorIndicator() { return nil }
+	if !p.CallInvalid() { return nil }
 	if v, ok := p.IsMemoized(Rule_invalid_lambda_star_etc); ok { return v }
 	mark := p.Mark()
 	_ = mark
@@ -12582,6 +12602,7 @@ func parseRule_invalid_lambda_star_etc(p *Parser) any {
 // parseRule_invalid_lambda_kwds parses invalid_lambda_kwds.
 func parseRule_invalid_lambda_kwds(p *Parser) any {
 	if p.ErrorIndicator() { return nil }
+	if !p.CallInvalid() { return nil }
 	if v, ok := p.IsMemoized(Rule_invalid_lambda_kwds); ok { return v }
 	mark := p.Mark()
 	_ = mark
@@ -12655,6 +12676,7 @@ func parseRule_invalid_lambda_kwds(p *Parser) any {
 // parseRule_invalid_double_type_comments parses invalid_double_type_comments.
 func parseRule_invalid_double_type_comments(p *Parser) any {
 	if p.ErrorIndicator() { return nil }
+	if !p.CallInvalid() { return nil }
 	if v, ok := p.IsMemoized(Rule_invalid_double_type_comments); ok { return v }
 	mark := p.Mark()
 	_ = mark
@@ -12690,6 +12712,7 @@ func parseRule_invalid_double_type_comments(p *Parser) any {
 // parseRule_invalid_with_item parses invalid_with_item.
 func parseRule_invalid_with_item(p *Parser) any {
 	if p.ErrorIndicator() { return nil }
+	if !p.CallInvalid() { return nil }
 	if v, ok := p.IsMemoized(Rule_invalid_with_item); ok { return v }
 	mark := p.Mark()
 	_ = mark
@@ -12720,6 +12743,7 @@ func parseRule_invalid_with_item(p *Parser) any {
 // parseRule_invalid_for_if_clause parses invalid_for_if_clause.
 func parseRule_invalid_for_if_clause(p *Parser) any {
 	if p.ErrorIndicator() { return nil }
+	if !p.CallInvalid() { return nil }
 	if v, ok := p.IsMemoized(Rule_invalid_for_if_clause); ok { return v }
 	mark := p.Mark()
 	_ = mark
@@ -12749,6 +12773,7 @@ func parseRule_invalid_for_if_clause(p *Parser) any {
 // parseRule_invalid_for_target parses invalid_for_target.
 func parseRule_invalid_for_target(p *Parser) any {
 	if p.ErrorIndicator() { return nil }
+	if !p.CallInvalid() { return nil }
 	if v, ok := p.IsMemoized(Rule_invalid_for_target); ok { return v }
 	mark := p.Mark()
 	_ = mark
@@ -12777,6 +12802,7 @@ func parseRule_invalid_for_target(p *Parser) any {
 // parseRule_invalid_group parses invalid_group.
 func parseRule_invalid_group(p *Parser) any {
 	if p.ErrorIndicator() { return nil }
+	if !p.CallInvalid() { return nil }
 	if v, ok := p.IsMemoized(Rule_invalid_group); ok { return v }
 	mark := p.Mark()
 	_ = mark
@@ -12828,6 +12854,7 @@ func parseRule_invalid_group(p *Parser) any {
 // parseRule_invalid_import parses invalid_import.
 func parseRule_invalid_import(p *Parser) any {
 	if p.ErrorIndicator() { return nil }
+	if !p.CallInvalid() { return nil }
 	if v, ok := p.IsMemoized(Rule_invalid_import); ok { return v }
 	mark := p.Mark()
 	_ = mark
@@ -12876,6 +12903,7 @@ func parseRule_invalid_import(p *Parser) any {
 // parseRule_invalid_dotted_as_name parses invalid_dotted_as_name.
 func parseRule_invalid_dotted_as_name(p *Parser) any {
 	if p.ErrorIndicator() { return nil }
+	if !p.CallInvalid() { return nil }
 	if v, ok := p.IsMemoized(Rule_invalid_dotted_as_name); ok { return v }
 	mark := p.Mark()
 	_ = mark
@@ -12906,6 +12934,7 @@ func parseRule_invalid_dotted_as_name(p *Parser) any {
 // parseRule_invalid_import_from_as_name parses invalid_import_from_as_name.
 func parseRule_invalid_import_from_as_name(p *Parser) any {
 	if p.ErrorIndicator() { return nil }
+	if !p.CallInvalid() { return nil }
 	if v, ok := p.IsMemoized(Rule_invalid_import_from_as_name); ok { return v }
 	mark := p.Mark()
 	_ = mark
@@ -12936,6 +12965,7 @@ func parseRule_invalid_import_from_as_name(p *Parser) any {
 // parseRule_invalid_import_from_targets parses invalid_import_from_targets.
 func parseRule_invalid_import_from_targets(p *Parser) any {
 	if p.ErrorIndicator() { return nil }
+	if !p.CallInvalid() { return nil }
 	if v, ok := p.IsMemoized(Rule_invalid_import_from_targets); ok { return v }
 	mark := p.Mark()
 	_ = mark
@@ -12978,6 +13008,7 @@ func parseRule_invalid_import_from_targets(p *Parser) any {
 // parseRule_invalid_with_stmt parses invalid_with_stmt.
 func parseRule_invalid_with_stmt(p *Parser) any {
 	if p.ErrorIndicator() { return nil }
+	if !p.CallInvalid() { return nil }
 	if v, ok := p.IsMemoized(Rule_invalid_with_stmt); ok { return v }
 	mark := p.Mark()
 	_ = mark
@@ -13038,6 +13069,7 @@ func parseRule_invalid_with_stmt(p *Parser) any {
 // parseRule_invalid_with_stmt_indent parses invalid_with_stmt_indent.
 func parseRule_invalid_with_stmt_indent(p *Parser) any {
 	if p.ErrorIndicator() { return nil }
+	if !p.CallInvalid() { return nil }
 	if v, ok := p.IsMemoized(Rule_invalid_with_stmt_indent); ok { return v }
 	mark := p.Mark()
 	_ = mark
@@ -13106,6 +13138,7 @@ func parseRule_invalid_with_stmt_indent(p *Parser) any {
 // parseRule_invalid_try_stmt parses invalid_try_stmt.
 func parseRule_invalid_try_stmt(p *Parser) any {
 	if p.ErrorIndicator() { return nil }
+	if !p.CallInvalid() { return nil }
 	if v, ok := p.IsMemoized(Rule_invalid_try_stmt); ok { return v }
 	mark := p.Mark()
 	_ = mark
@@ -13220,6 +13253,7 @@ func parseRule_invalid_try_stmt(p *Parser) any {
 // parseRule_invalid_except_stmt parses invalid_except_stmt.
 func parseRule_invalid_except_stmt(p *Parser) any {
 	if p.ErrorIndicator() { return nil }
+	if !p.CallInvalid() { return nil }
 	if v, ok := p.IsMemoized(Rule_invalid_except_stmt); ok { return v }
 	mark := p.Mark()
 	_ = mark
@@ -13326,6 +13360,7 @@ func parseRule_invalid_except_stmt(p *Parser) any {
 // parseRule_invalid_except_star_stmt parses invalid_except_star_stmt.
 func parseRule_invalid_except_star_stmt(p *Parser) any {
 	if p.ErrorIndicator() { return nil }
+	if !p.CallInvalid() { return nil }
 	if v, ok := p.IsMemoized(Rule_invalid_except_star_stmt); ok { return v }
 	mark := p.Mark()
 	_ = mark
@@ -13444,6 +13479,7 @@ func parseRule_invalid_except_star_stmt(p *Parser) any {
 // parseRule_invalid_finally_stmt parses invalid_finally_stmt.
 func parseRule_invalid_finally_stmt(p *Parser) any {
 	if p.ErrorIndicator() { return nil }
+	if !p.CallInvalid() { return nil }
 	if v, ok := p.IsMemoized(Rule_invalid_finally_stmt); ok { return v }
 	mark := p.Mark()
 	_ = mark
@@ -13474,6 +13510,7 @@ func parseRule_invalid_finally_stmt(p *Parser) any {
 // parseRule_invalid_except_stmt_indent parses invalid_except_stmt_indent.
 func parseRule_invalid_except_stmt_indent(p *Parser) any {
 	if p.ErrorIndicator() { return nil }
+	if !p.CallInvalid() { return nil }
 	if v, ok := p.IsMemoized(Rule_invalid_except_stmt_indent); ok { return v }
 	mark := p.Mark()
 	_ = mark
@@ -13529,6 +13566,7 @@ func parseRule_invalid_except_stmt_indent(p *Parser) any {
 // parseRule_invalid_except_star_stmt_indent parses invalid_except_star_stmt_indent.
 func parseRule_invalid_except_star_stmt_indent(p *Parser) any {
 	if p.ErrorIndicator() { return nil }
+	if !p.CallInvalid() { return nil }
 	if v, ok := p.IsMemoized(Rule_invalid_except_star_stmt_indent); ok { return v }
 	mark := p.Mark()
 	_ = mark
@@ -13567,6 +13605,7 @@ func parseRule_invalid_except_star_stmt_indent(p *Parser) any {
 // parseRule_invalid_match_stmt parses invalid_match_stmt.
 func parseRule_invalid_match_stmt(p *Parser) any {
 	if p.ErrorIndicator() { return nil }
+	if !p.CallInvalid() { return nil }
 	if v, ok := p.IsMemoized(Rule_invalid_match_stmt); ok { return v }
 	mark := p.Mark()
 	_ = mark
@@ -13619,6 +13658,7 @@ func parseRule_invalid_match_stmt(p *Parser) any {
 // parseRule_invalid_case_block parses invalid_case_block.
 func parseRule_invalid_case_block(p *Parser) any {
 	if p.ErrorIndicator() { return nil }
+	if !p.CallInvalid() { return nil }
 	if v, ok := p.IsMemoized(Rule_invalid_case_block); ok { return v }
 	mark := p.Mark()
 	_ = mark
@@ -13675,6 +13715,7 @@ func parseRule_invalid_case_block(p *Parser) any {
 // parseRule_invalid_as_pattern parses invalid_as_pattern.
 func parseRule_invalid_as_pattern(p *Parser) any {
 	if p.ErrorIndicator() { return nil }
+	if !p.CallInvalid() { return nil }
 	if v, ok := p.IsMemoized(Rule_invalid_as_pattern); ok { return v }
 	mark := p.Mark()
 	_ = mark
@@ -13723,6 +13764,7 @@ func parseRule_invalid_as_pattern(p *Parser) any {
 // parseRule_invalid_class_pattern parses invalid_class_pattern.
 func parseRule_invalid_class_pattern(p *Parser) any {
 	if p.ErrorIndicator() { return nil }
+	if !p.CallInvalid() { return nil }
 	if v, ok := p.IsMemoized(Rule_invalid_class_pattern); ok { return v }
 	mark := p.Mark()
 	_ = mark
@@ -13752,6 +13794,7 @@ func parseRule_invalid_class_pattern(p *Parser) any {
 // parseRule_invalid_class_argument_pattern parses invalid_class_argument_pattern.
 func parseRule_invalid_class_argument_pattern(p *Parser) any {
 	if p.ErrorIndicator() { return nil }
+	if !p.CallInvalid() { return nil }
 	if v, ok := p.IsMemoized(Rule_invalid_class_argument_pattern); ok { return v }
 	mark := p.Mark()
 	_ = mark
@@ -13783,6 +13826,7 @@ func parseRule_invalid_class_argument_pattern(p *Parser) any {
 // parseRule_invalid_if_stmt parses invalid_if_stmt.
 func parseRule_invalid_if_stmt(p *Parser) any {
 	if p.ErrorIndicator() { return nil }
+	if !p.CallInvalid() { return nil }
 	if v, ok := p.IsMemoized(Rule_invalid_if_stmt); ok { return v }
 	mark := p.Mark()
 	_ = mark
@@ -13835,6 +13879,7 @@ func parseRule_invalid_if_stmt(p *Parser) any {
 // parseRule_invalid_elif_stmt parses invalid_elif_stmt.
 func parseRule_invalid_elif_stmt(p *Parser) any {
 	if p.ErrorIndicator() { return nil }
+	if !p.CallInvalid() { return nil }
 	if v, ok := p.IsMemoized(Rule_invalid_elif_stmt); ok { return v }
 	mark := p.Mark()
 	_ = mark
@@ -13887,6 +13932,7 @@ func parseRule_invalid_elif_stmt(p *Parser) any {
 // parseRule_invalid_else_stmt parses invalid_else_stmt.
 func parseRule_invalid_else_stmt(p *Parser) any {
 	if p.ErrorIndicator() { return nil }
+	if !p.CallInvalid() { return nil }
 	if v, ok := p.IsMemoized(Rule_invalid_else_stmt); ok { return v }
 	mark := p.Mark()
 	_ = mark
@@ -13939,6 +13985,7 @@ func parseRule_invalid_else_stmt(p *Parser) any {
 // parseRule_invalid_while_stmt parses invalid_while_stmt.
 func parseRule_invalid_while_stmt(p *Parser) any {
 	if p.ErrorIndicator() { return nil }
+	if !p.CallInvalid() { return nil }
 	if v, ok := p.IsMemoized(Rule_invalid_while_stmt); ok { return v }
 	mark := p.Mark()
 	_ = mark
@@ -13991,6 +14038,7 @@ func parseRule_invalid_while_stmt(p *Parser) any {
 // parseRule_invalid_for_stmt parses invalid_for_stmt.
 func parseRule_invalid_for_stmt(p *Parser) any {
 	if p.ErrorIndicator() { return nil }
+	if !p.CallInvalid() { return nil }
 	if v, ok := p.IsMemoized(Rule_invalid_for_stmt); ok { return v }
 	mark := p.Mark()
 	_ = mark
@@ -14059,6 +14107,7 @@ func parseRule_invalid_for_stmt(p *Parser) any {
 // parseRule_invalid_def_raw parses invalid_def_raw.
 func parseRule_invalid_def_raw(p *Parser) any {
 	if p.ErrorIndicator() { return nil }
+	if !p.CallInvalid() { return nil }
 	if v, ok := p.IsMemoized(Rule_invalid_def_raw); ok { return v }
 	mark := p.Mark()
 	_ = mark
@@ -14144,6 +14193,7 @@ func parseRule_invalid_def_raw(p *Parser) any {
 // parseRule_invalid_class_def_raw parses invalid_class_def_raw.
 func parseRule_invalid_class_def_raw(p *Parser) any {
 	if p.ErrorIndicator() { return nil }
+	if !p.CallInvalid() { return nil }
 	if v, ok := p.IsMemoized(Rule_invalid_class_def_raw); ok { return v }
 	mark := p.Mark()
 	_ = mark
@@ -14204,6 +14254,7 @@ func parseRule_invalid_class_def_raw(p *Parser) any {
 // parseRule_invalid_double_starred_kvpairs parses invalid_double_starred_kvpairs.
 func parseRule_invalid_double_starred_kvpairs(p *Parser) any {
 	if p.ErrorIndicator() { return nil }
+	if !p.CallInvalid() { return nil }
 	if v, ok := p.IsMemoized(Rule_invalid_double_starred_kvpairs); ok { return v }
 	mark := p.Mark()
 	_ = mark
@@ -14272,6 +14323,7 @@ func parseRule_invalid_double_starred_kvpairs(p *Parser) any {
 // parseRule_invalid_kvpair parses invalid_kvpair.
 func parseRule_invalid_kvpair(p *Parser) any {
 	if p.ErrorIndicator() { return nil }
+	if !p.CallInvalid() { return nil }
 	if v, ok := p.IsMemoized(Rule_invalid_kvpair); ok { return v }
 	mark := p.Mark()
 	_ = mark
@@ -14335,6 +14387,7 @@ func parseRule_invalid_kvpair(p *Parser) any {
 // parseRule_invalid_starred_expression_unpacking parses invalid_starred_expression_unpacking.
 func parseRule_invalid_starred_expression_unpacking(p *Parser) any {
 	if p.ErrorIndicator() { return nil }
+	if !p.CallInvalid() { return nil }
 	if v, ok := p.IsMemoized(Rule_invalid_starred_expression_unpacking); ok { return v }
 	mark := p.Mark()
 	_ = mark
@@ -14367,6 +14420,7 @@ func parseRule_invalid_starred_expression_unpacking(p *Parser) any {
 // parseRule_invalid_starred_expression parses invalid_starred_expression.
 func parseRule_invalid_starred_expression(p *Parser) any {
 	if p.ErrorIndicator() { return nil }
+	if !p.CallInvalid() { return nil }
 	if v, ok := p.IsMemoized(Rule_invalid_starred_expression); ok { return v }
 	mark := p.Mark()
 	_ = mark
@@ -14390,6 +14444,7 @@ func parseRule_invalid_starred_expression(p *Parser) any {
 // parseRule_invalid_fstring_replacement_field parses invalid_fstring_replacement_field.
 func parseRule_invalid_fstring_replacement_field(p *Parser) any {
 	if p.ErrorIndicator() { return nil }
+	if !p.CallInvalid() { return nil }
 	if v, ok := p.IsMemoized(Rule_invalid_fstring_replacement_field); ok { return v }
 	mark := p.Mark()
 	_ = mark
@@ -14604,6 +14659,7 @@ func parseRule_invalid_fstring_replacement_field(p *Parser) any {
 // parseRule_invalid_fstring_conversion_character parses invalid_fstring_conversion_character.
 func parseRule_invalid_fstring_conversion_character(p *Parser) any {
 	if p.ErrorIndicator() { return nil }
+	if !p.CallInvalid() { return nil }
 	if v, ok := p.IsMemoized(Rule_invalid_fstring_conversion_character); ok { return v }
 	mark := p.Mark()
 	_ = mark
@@ -14642,6 +14698,7 @@ func parseRule_invalid_fstring_conversion_character(p *Parser) any {
 // parseRule_invalid_tstring_replacement_field parses invalid_tstring_replacement_field.
 func parseRule_invalid_tstring_replacement_field(p *Parser) any {
 	if p.ErrorIndicator() { return nil }
+	if !p.CallInvalid() { return nil }
 	if v, ok := p.IsMemoized(Rule_invalid_tstring_replacement_field); ok { return v }
 	mark := p.Mark()
 	_ = mark
@@ -14856,6 +14913,7 @@ func parseRule_invalid_tstring_replacement_field(p *Parser) any {
 // parseRule_invalid_tstring_conversion_character parses invalid_tstring_conversion_character.
 func parseRule_invalid_tstring_conversion_character(p *Parser) any {
 	if p.ErrorIndicator() { return nil }
+	if !p.CallInvalid() { return nil }
 	if v, ok := p.IsMemoized(Rule_invalid_tstring_conversion_character); ok { return v }
 	mark := p.Mark()
 	_ = mark
@@ -14894,6 +14952,7 @@ func parseRule_invalid_tstring_conversion_character(p *Parser) any {
 // parseRule_invalid_string_tstring_concat parses invalid_string_tstring_concat.
 func parseRule_invalid_string_tstring_concat(p *Parser) any {
 	if p.ErrorIndicator() { return nil }
+	if !p.CallInvalid() { return nil }
 	if v, ok := p.IsMemoized(Rule_invalid_string_tstring_concat); ok { return v }
 	mark := p.Mark()
 	_ = mark
@@ -14936,6 +14995,7 @@ func parseRule_invalid_string_tstring_concat(p *Parser) any {
 // parseRule_invalid_arithmetic parses invalid_arithmetic.
 func parseRule_invalid_arithmetic(p *Parser) any {
 	if p.ErrorIndicator() { return nil }
+	if !p.CallInvalid() { return nil }
 	if v, ok := p.IsMemoized(Rule_invalid_arithmetic); ok { return v }
 	mark := p.Mark()
 	_ = mark
@@ -14968,6 +15028,7 @@ func parseRule_invalid_arithmetic(p *Parser) any {
 // parseRule_invalid_factor parses invalid_factor.
 func parseRule_invalid_factor(p *Parser) any {
 	if p.ErrorIndicator() { return nil }
+	if !p.CallInvalid() { return nil }
 	if v, ok := p.IsMemoized(Rule_invalid_factor); ok { return v }
 	mark := p.Mark()
 	_ = mark
@@ -14997,6 +15058,7 @@ func parseRule_invalid_factor(p *Parser) any {
 // parseRule_invalid_type_params parses invalid_type_params.
 func parseRule_invalid_type_params(p *Parser) any {
 	if p.ErrorIndicator() { return nil }
+	if !p.CallInvalid() { return nil }
 	if v, ok := p.IsMemoized(Rule_invalid_type_params); ok { return v }
 	mark := p.Mark()
 	_ = mark
@@ -19320,14 +19382,42 @@ func parseRule__rhs_156(p *Parser) any {
 var placeholderMatched = struct{}{}
 
 // Dispatch picks the entry-point rule for m and runs it.
-// While action translation is offline (M3..M5) every
-// successful parse produces a placeholder tree, so the
-// caller cannot consume the result yet. ErrParserNotImplemented
-// surfaces until M7 wires real ast.Module construction.
+// Mirrors CPython's _PyPegen_run_parser: try once with
+// call_invalid_rules off, retry once with it on if the
+// first pass missed, then surface either the placeholder
+// tree or ErrParserNotImplemented (until M6/M7 wire real
+// AST construction and error propagation).
 //
-// CPython: Parser/parser.c entry-point dispatch
+// CPython: Parser/pegen.c:946 _PyPegen_run_parser
 func Dispatch(p *Parser, m StartRule) (any, error) {
-	_ = p
-	_ = m
+	if p == nil { return nil, ErrParserNotImplemented }
+	var result any
+	switch m {
+	case StartFile:
+		result = parseRule_file(p)
+	case StartSingle:
+		result = parseRule_interactive(p)
+	case StartEval:
+		result = parseRule_eval(p)
+	case StartFunctionType:
+		result = parseRule_func_type(p)
+	default:
+		return nil, ErrParserNotImplemented
+	}
+	if result == nil {
+		p.SetCallInvalid(true)
+		p.Reset(0)
+		switch m {
+		case StartFile:
+			_ = parseRule_file(p)
+		case StartSingle:
+			_ = parseRule_interactive(p)
+		case StartEval:
+			_ = parseRule_eval(p)
+		case StartFunctionType:
+			_ = parseRule_func_type(p)
+		}
+		return nil, ErrParserNotImplemented
+	}
 	return nil, ErrParserNotImplemented
 }

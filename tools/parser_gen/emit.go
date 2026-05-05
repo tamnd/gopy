@@ -310,12 +310,19 @@ func (e *emitter) writeRule(r *Rule) {
 
 // writeRuleBody emits the alt-by-alt body. suffix is appended to the
 // function name (so leaders use "_raw"). memoize controls whether the
-// body wraps itself in IsMemoized/InsertMemo.
+// body wraps itself in IsMemoized/InsertMemo. Invalid rules
+// (name starting with "invalid_") gate themselves on
+// p.CallInvalid(); they only run on the second parse pass.
+//
+// CPython: Tools/peg_generator/pegen/c_generator.py call_invalid_rules
 func (e *emitter) writeRuleBody(r *Rule, suffix string, memoize bool) {
 	out := e.buf
 	e.printf("// parseRule_%s%s parses %s.\n", r.Name, suffix, r.Name)
 	e.printf("func parseRule_%s%s(p *Parser) any {\n", r.Name, suffix)
 	out.WriteString("\tif p.ErrorIndicator() { return nil }\n")
+	if isInvalidRule(r.Name) {
+		out.WriteString("\tif !p.CallInvalid() { return nil }\n")
+	}
 	if memoize {
 		e.printf("\tif v, ok := p.IsMemoized(Rule_%s); ok { return v }\n", r.Name)
 	}
@@ -743,17 +750,38 @@ func (e *emitter) writeDispatch() {
 	e.buf.WriteString("var placeholderMatched = struct{}{}\n\n")
 
 	e.buf.WriteString("// Dispatch picks the entry-point rule for m and runs it.\n")
-	e.buf.WriteString("// While action translation is offline (M3..M5) every\n")
-	e.buf.WriteString("// successful parse produces a placeholder tree, so the\n")
-	e.buf.WriteString("// caller cannot consume the result yet. ErrParserNotImplemented\n")
-	e.buf.WriteString("// surfaces until M7 wires real ast.Module construction.\n")
+	e.buf.WriteString("// Mirrors CPython's _PyPegen_run_parser: try once with\n")
+	e.buf.WriteString("// call_invalid_rules off, retry once with it on if the\n")
+	e.buf.WriteString("// first pass missed, then surface either the placeholder\n")
+	e.buf.WriteString("// tree or ErrParserNotImplemented (until M6/M7 wire real\n")
+	e.buf.WriteString("// AST construction and error propagation).\n")
 	e.buf.WriteString("//\n")
-	e.buf.WriteString("// CPython: Parser/parser.c entry-point dispatch\n")
+	e.buf.WriteString("// CPython: Parser/pegen.c:946 _PyPegen_run_parser\n")
 	e.buf.WriteString("func Dispatch(p *Parser, m StartRule) (any, error) {\n")
-	e.buf.WriteString("\t_ = p\n")
-	e.buf.WriteString("\t_ = m\n")
+	e.buf.WriteString("\tif p == nil { return nil, ErrParserNotImplemented }\n")
+	e.buf.WriteString("\tvar result any\n")
+	e.buf.WriteString("\tswitch m {\n")
+	e.buf.WriteString("\tcase StartFile:\n\t\tresult = parseRule_file(p)\n")
+	e.buf.WriteString("\tcase StartSingle:\n\t\tresult = parseRule_interactive(p)\n")
+	e.buf.WriteString("\tcase StartEval:\n\t\tresult = parseRule_eval(p)\n")
+	e.buf.WriteString("\tcase StartFunctionType:\n\t\tresult = parseRule_func_type(p)\n")
+	e.buf.WriteString("\tdefault:\n\t\treturn nil, ErrParserNotImplemented\n")
+	e.buf.WriteString("\t}\n")
+	e.buf.WriteString("\tif result == nil {\n")
+	e.buf.WriteString("\t\tp.SetCallInvalid(true)\n")
+	e.buf.WriteString("\t\tp.Reset(0)\n")
+	e.buf.WriteString("\t\tswitch m {\n")
+	e.buf.WriteString("\t\tcase StartFile:\n\t\t\t_ = parseRule_file(p)\n")
+	e.buf.WriteString("\t\tcase StartSingle:\n\t\t\t_ = parseRule_interactive(p)\n")
+	e.buf.WriteString("\t\tcase StartEval:\n\t\t\t_ = parseRule_eval(p)\n")
+	e.buf.WriteString("\t\tcase StartFunctionType:\n\t\t\t_ = parseRule_func_type(p)\n")
+	e.buf.WriteString("\t\t}\n")
+	e.buf.WriteString("\t\treturn nil, ErrParserNotImplemented\n")
+	e.buf.WriteString("\t}\n")
 	e.buf.WriteString("\treturn nil, ErrParserNotImplemented\n")
 	e.buf.WriteString("}\n")
 }
 
 func lower(s string) string { return strings.ToLower(s) }
+
+func isInvalidRule(name string) bool { return strings.HasPrefix(name, "invalid_") }

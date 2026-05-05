@@ -89,6 +89,14 @@ func TestEmitPythonGramRoundtrip(t *testing.T) {
 	if !strings.Contains(out, "cut = true") {
 		t.Errorf("expected at least one alt with a cut marker")
 	}
+	// Invalid rules from M5 must gate themselves on CallInvalid().
+	if !strings.Contains(out, "if !p.CallInvalid() { return nil }") {
+		t.Errorf("expected invalid_* rules to gate on CallInvalid()")
+	}
+	// Two-pass dispatch from M5.
+	if !strings.Contains(out, "p.SetCallInvalid(true)") {
+		t.Errorf("expected Dispatch to retry with SetCallInvalid(true)")
+	}
 }
 
 func loadPythonGram(t *testing.T) []byte {
