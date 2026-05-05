@@ -69,6 +69,7 @@ type NumberMethods struct {
 	Xor         func(a, b Object) (Object, error)
 	Lshift      func(a, b Object) (Object, error)
 	Rshift      func(a, b Object) (Object, error)
+	Power       func(a, b, mod Object) (Object, error)
 	Negative    func(o Object) (Object, error)
 	Positive    func(o Object) (Object, error)
 	Invert      func(o Object) (Object, error)

@@ -54,6 +54,7 @@ func init() {
 		Xor:         intXor,
 		Lshift:      intLshift,
 		Rshift:      intRshift,
+		Power:       intPower,
 		Negative:    intNeg,
 		Positive:    intPos,
 		Invert:      intInvert,
@@ -314,6 +315,38 @@ func intRshift(a, b Object) (Object, error) {
 		return nil, errors.New("OverflowError: shift count too large")
 	}
 	return NewIntFromBig(new(big.Int).Rsh(&ai.v, uint(n))), nil
+}
+
+// intPower implements `pow(a, b)` and `pow(a, b, mod)` for ints. A
+// negative exponent without a modulus falls through to a float
+// promotion via NotImplemented; the abstract layer would normally
+// retry against float's slot (no Power yet on Float, so the caller
+// gets a TypeError until it lands).
+//
+// CPython: Objects/longobject.c long_pow
+func intPower(a, b, mod Object) (Object, error) {
+	ai, bi, ok := intPair(a, b)
+	if !ok {
+		return notImplemented(), nil
+	}
+	if bi.v.Sign() < 0 {
+		// Negative exponent needs a float result; let the abstract
+		// layer try the next slot.
+		return notImplemented(), nil
+	}
+	var m *big.Int
+	if mod != nil && mod != None() {
+		mi, ok := mod.(*Int)
+		if !ok {
+			return notImplemented(), nil
+		}
+		if mi.v.Sign() == 0 {
+			return nil, errors.New("ValueError: pow() 3rd argument cannot be 0")
+		}
+		m = &mi.v
+	}
+	out := new(big.Int).Exp(&ai.v, &bi.v, m)
+	return NewIntFromBig(out), nil
 }
 
 func intNeg(o Object) (Object, error) {

@@ -146,6 +146,7 @@ func TestEvalBinaryOpIntArith(t *testing.T) {
 		{name: "lshift", sub: 3, a: 1, b: 4, want: 16},
 		{name: "rshift", sub: 9, a: 32, b: 2, want: 8},
 		{name: "truediv", sub: 11, a: 7, b: 2, isFloat: true, wantFlt: 3.5},
+		{name: "power", sub: 8, a: 2, b: 10, want: 1024},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

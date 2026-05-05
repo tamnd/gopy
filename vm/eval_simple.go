@@ -1223,6 +1223,7 @@ func binaryOp(sub int32, a, b objects.Object) (objects.Object, error) {
 		nbMult        = 5
 		nbRemainder   = 6
 		nbOr          = 7
+		nbPower       = 8
 		nbRshift      = 9
 		nbSubtract    = 10
 		nbTrueDivide  = 11
@@ -1237,6 +1238,7 @@ func binaryOp(sub int32, a, b objects.Object) (objects.Object, error) {
 		nbInplaceMult        = 18
 		nbInplaceRemainder   = 19
 		nbInplaceOr          = 20
+		nbInplacePower       = 21
 		nbInplaceRshift      = 22
 		nbInplaceSubtract    = 23
 		nbInplaceTrueDivide  = 24
@@ -1288,10 +1290,40 @@ func binaryOp(sub int32, a, b objects.Object) (objects.Object, error) {
 		return numericForward(a, b, ">>", func(n *objects.NumberMethods) func(a, b objects.Object) (objects.Object, error) {
 			return n.Rshift
 		})
+	case nbPower, nbInplacePower:
+		return powerOp(a, b, nil)
 	case nbSubscr:
 		return getItem(a, b)
 	}
 	return nil, fmt.Errorf("vm: BINARY_OP suboperator %d not implemented in v0.6", sub)
+}
+
+// powerOp routes BINARY_OP NB_POWER through NumberMethods.Power on
+// either operand, mirroring numericForward's NotImplemented walk.
+// The optional `mod` argument is reserved for the three-arg pow()
+// builtin; the bytecode form always passes nil.
+//
+// CPython: Objects/abstract.c PyNumber_Power
+func powerOp(a, b, mod objects.Object) (objects.Object, error) {
+	if n := a.Type().Number; n != nil && n.Power != nil {
+		out, err := n.Power(a, b, mod)
+		if err != nil {
+			return nil, err
+		}
+		if !objects.IsNotImplemented(out) {
+			return out, nil
+		}
+	}
+	if n := b.Type().Number; n != nil && n.Power != nil {
+		out, err := n.Power(a, b, mod)
+		if err != nil {
+			return nil, err
+		}
+		if !objects.IsNotImplemented(out) {
+			return out, nil
+		}
+	}
+	return nil, fmt.Errorf("TypeError: unsupported operand type(s) for ** or pow(): '%s' and '%s'", a.Type().Name, b.Type().Name)
 }
 
 // numericForward walks a's number slot first, then b's, returning
