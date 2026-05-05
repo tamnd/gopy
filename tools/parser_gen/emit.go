@@ -874,6 +874,12 @@ func (e *emitter) writeActionHelperStubs() {
 		"actionPgenAugoperator":            true,
 		"actionPgenCmpopExprPair":          true,
 		"actionPgenSetExprContext":         true,
+		"actionPgenSeqFlatten":             true,
+		"actionPgenSeqAppendToEnd":         true,
+		"actionPgenRegisterStmts":          true,
+		"actionPgenSlashWithDefault":       true,
+		"actionPgenSetupFullFormatSpec":    true,
+		"actionPgenJoinedStr":              true,
 	}
 	seen := map[string]bool{}
 	for _, m := range re.FindAllString(body, -1) {

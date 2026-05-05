@@ -1056,7 +1056,7 @@ func parseRule_statements(p *Parser) any {
 			a := parseRule__loop1_2(p)
 			if a == nil { return nil }
 			_ = a
-			return []any{a}
+			return actionPgenSeqFlatten(p, p, a)
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_statements, v)
 			return v
@@ -1079,7 +1079,7 @@ func parseRule_statement(p *Parser) any {
 			a := parseRule_compound_stmt(p)
 			if a == nil { return nil }
 			_ = a
-			return []any{a}
+			return actionPgenRegisterStmts(p, p, actionPgenSingletonSeq(p, p, a))
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_statement, v)
 			return v
@@ -1115,7 +1115,7 @@ func parseRule_single_compound_stmt(p *Parser) any {
 			a := parseRule_compound_stmt(p)
 			if a == nil { return nil }
 			_ = a
-			return []any{a}
+			return actionPgenRegisterStmts(p, p, actionPgenSingletonSeq(p, p, a))
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_single_compound_stmt, v)
 			return v
@@ -1207,7 +1207,7 @@ func parseRule_simple_stmts(p *Parser) any {
 			newline := p.ExpectToken(tokenize.NEWLINE)
 			if newline == nil { return nil }
 			_ = newline
-			return []any{a, newline}
+			return actionPgenSingletonSeq(p, p, a)
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_simple_stmts, v)
 			return v
@@ -3045,7 +3045,7 @@ func parseRule_slash_with_default(p *Parser) any {
 			op_1 := p.ExpectToken(tokenize.COMMA)
 			if op_1 == nil { return nil }
 			_ = op_1
-			return []any{a, b, op, op_1}
+			return actionPgenSlashWithDefault(p, p, a, b)
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_slash_with_default, v)
 			return v
@@ -3064,7 +3064,7 @@ func parseRule_slash_with_default(p *Parser) any {
 			if op == nil { return nil }
 			_ = op
 			if !p.Lookahead(true, func(p *Parser) any { return p.ExpectToken(tokenize.RPAR) }) { return nil }
-			return []any{a, b, op}
+			return actionPgenSlashWithDefault(p, p, a, b)
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_slash_with_default, v)
 			return v
@@ -8490,7 +8490,7 @@ func parseRule_lambda_slash_with_default(p *Parser) any {
 			op_1 := p.ExpectToken(tokenize.COMMA)
 			if op_1 == nil { return nil }
 			_ = op_1
-			return []any{a, b, op, op_1}
+			return actionPgenSlashWithDefault(p, p, a, b)
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_lambda_slash_with_default, v)
 			return v
@@ -8509,7 +8509,7 @@ func parseRule_lambda_slash_with_default(p *Parser) any {
 			if op == nil { return nil }
 			_ = op
 			if !p.Lookahead(true, func(p *Parser) any { return p.ExpectToken(tokenize.COLON) }) { return nil }
-			return []any{a, b, op}
+			return actionPgenSlashWithDefault(p, p, a, b)
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_lambda_slash_with_default, v)
 			return v
@@ -8913,7 +8913,7 @@ func parseRule_fstring_full_format_spec(p *Parser) any {
 			_ = colon
 			spec := parseRule__loop0_63(p)
 			_ = spec
-			return []any{colon, spec}
+			return actionPgenSetupFullFormatSpec(p, p, colon, spec)
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_fstring_full_format_spec, v)
 			return v
@@ -8977,7 +8977,7 @@ func parseRule_fstring(p *Parser) any {
 			c := p.ExpectToken(tokenize.FSTRING_END)
 			if c == nil { return nil }
 			_ = c
-			return []any{a, b, c}
+			return actionPgenJoinedStr(p, p, a, b, c)
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_fstring, v)
 			return v
@@ -9086,7 +9086,7 @@ func parseRule_tstring_full_format_spec(p *Parser) any {
 			_ = colon
 			spec := parseRule__loop0_65(p)
 			_ = spec
-			return []any{colon, spec}
+			return actionPgenSetupFullFormatSpec(p, p, colon, spec)
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_tstring_full_format_spec, v)
 			return v
@@ -10188,7 +10188,7 @@ func parseRule_star_targets_tuple_seq(p *Parser) any {
 			_ = b
 			opt := p.ExpectToken(tokenize.COMMA)
 			_ = opt
-			return []any{a, b, opt}
+			return actionPgenSeqInsertInFront(p, p, a, b)
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_star_targets_tuple_seq, v)
 			return v
@@ -10204,7 +10204,7 @@ func parseRule_star_targets_tuple_seq(p *Parser) any {
 			op := p.ExpectToken(tokenize.COMMA)
 			if op == nil { return nil }
 			_ = op
-			return []any{a, op}
+			return actionPgenSingletonSeq(p, p, a)
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_star_targets_tuple_seq, v)
 			return v
@@ -10896,7 +10896,7 @@ func parseRule_type_expressions(p *Parser) any {
 			b := parseRule_expression(p)
 			if b == nil { return nil }
 			_ = b
-			return []any{a, op, op_1, b}
+			return actionPgenSeqAppendToEnd(p, p, a, b)
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_type_expressions, v)
 			return v
@@ -10918,7 +10918,7 @@ func parseRule_type_expressions(p *Parser) any {
 			b := parseRule_expression(p)
 			if b == nil { return nil }
 			_ = b
-			return []any{a, op, op_1, b}
+			return actionPgenSeqAppendToEnd(p, p, a, b)
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_type_expressions, v)
 			return v
@@ -10959,7 +10959,7 @@ func parseRule_type_expressions(p *Parser) any {
 			a := parseRule_expression(p)
 			if a == nil { return nil }
 			_ = a
-			return []any{op, a}
+			return actionPgenSingletonSeq(p, p, a)
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_type_expressions, v)
 			return v
@@ -10975,7 +10975,7 @@ func parseRule_type_expressions(p *Parser) any {
 			a := parseRule_expression(p)
 			if a == nil { return nil }
 			_ = a
-			return []any{op, a}
+			return actionPgenSingletonSeq(p, p, a)
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_type_expressions, v)
 			return v

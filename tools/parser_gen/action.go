@@ -177,6 +177,15 @@ func (tr *cTranslator) parsePrimary() (string, bool) {
 	case "op":
 		if t.text == "(" {
 			tr.advance()
+			// C type cast pattern: `(typename ...*)expr`. Skip the
+			// cast and parse the suffix expression. Recognised when
+			// the first token after `(` is an identifier whose name
+			// looks like a C type and is followed by zero or more
+			// `*` then `)`.
+			if cast, ok := tr.tryParseCast(); ok {
+				_ = cast
+				return tr.parsePrimary()
+			}
 			inner, ok := tr.parseExpr()
 			if !ok {
 				return "", false
@@ -261,6 +270,80 @@ var pyConstants = map[string]string{
 	"Py_False":    "pyFalseSentinel",
 	"Py_None":     "pyNoneSentinel",
 	"Py_Ellipsis": "pyEllipsisSentinel",
+}
+
+// cTypeNames lists the C / asdl type names the grammar uses inside
+// cast expressions. The translator drops the cast: the Go side
+// already handles values as interface{}.
+var cTypeNames = map[string]bool{
+	"asdl_stmt_seq":           true,
+	"asdl_expr_seq":           true,
+	"asdl_alias_seq":           true,
+	"asdl_arg_seq":            true,
+	"asdl_excepthandler_seq":  true,
+	"asdl_keyword_seq":        true,
+	"asdl_match_case_seq":     true,
+	"asdl_pattern_seq":        true,
+	"asdl_type_param_seq":     true,
+	"asdl_withitem_seq":       true,
+	"asdl_comprehension_seq":  true,
+	"asdl_int_seq":            true,
+	"asdl_seq":                true,
+	"asdl_identifier_seq":     true,
+	"expr_ty":                 true,
+	"stmt_ty":                 true,
+	"arguments_ty":            true,
+	"arg_ty":                  true,
+	"keyword_ty":              true,
+	"comprehension_ty":        true,
+	"alias_ty":                true,
+	"withitem_ty":             true,
+	"match_case_ty":           true,
+	"pattern_ty":              true,
+	"excepthandler_ty":        true,
+	"AugOperator":             true,
+	"CmpopExprPair":           true,
+	"KeyValuePair":            true,
+	"KeyPatternPair":          true,
+	"KeywordOrStarred":        true,
+	"NameDefaultPair":         true,
+	"SlashWithDefault":        true,
+	"StarEtc":                 true,
+	"PyObject":                true,
+	"int":                     true,
+	"void":                    true,
+	"char":                    true,
+	"const":                   true,
+}
+
+// tryParseCast checks whether the current cursor (just past an open
+// paren) is a C type cast. If so, advances past the typename, the
+// pointer stars, and the closing paren and returns ok=true. Leaves
+// the cursor unchanged otherwise.
+func (tr *cTranslator) tryParseCast() (string, bool) {
+	saved := tr.pos
+	if tr.peek().kind != "id" {
+		return "", false
+	}
+	name := tr.peek().text
+	if !cTypeNames[name] {
+		return "", false
+	}
+	tr.advance()
+	// Skip an optional `const` after the type — appears in some
+	// grammar casts but does not affect semantics.
+	if tr.peek().kind == "id" && tr.peek().text == "const" {
+		tr.advance()
+	}
+	for tr.peek().text == "*" {
+		tr.advance()
+	}
+	if tr.peek().text != ")" {
+		tr.pos = saved
+		return "", false
+	}
+	tr.advance() // consume ')'
+	return name, true
 }
 
 // parseIDExpr handles identifiers that may be plain refs, calls, or

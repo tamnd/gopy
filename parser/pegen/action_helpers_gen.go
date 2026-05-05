@@ -50,6 +50,13 @@ func argAt(args []any, i int) any {
 // ast.Expr or runs out of structure. Many expression rules currently
 // wrap their inner result as []any{e} or []any{e, rest}; the helpers
 // pull the typed value back out. Returns nil if no Expr is found.
+//
+// Bare NAME / NUMBER / STRING / FSTRING tokens get the implicit
+// conversion CPython's c_generator inserts when a rule's [type] is
+// expr_ty: NAME becomes ast.Name with Load ctx, NUMBER becomes a
+// numeric ast.Constant, single-string tokens become a string
+// ast.Constant. Rules that need a different ctx (Store / Del) call
+// SetExprContext on the result via _PyPegen_set_expr_context.
 func asExpr(v any) ast.Expr {
 	for {
 		switch x := v.(type) {
@@ -57,6 +64,11 @@ func asExpr(v any) ast.Expr {
 			return nil
 		case ast.Expr:
 			return x
+		case *Token:
+			if x == nil {
+				return nil
+			}
+			return tokenToExpr(x)
 		case []any:
 			if len(x) == 0 {
 				return nil
@@ -65,6 +77,40 @@ func asExpr(v any) ast.Expr {
 		default:
 			return nil
 		}
+	}
+}
+
+// tokenToExpr maps a NAME / NUMBER / STRING token onto the ast.Expr
+// node CPython implicitly creates when the surrounding rule expects
+// an expr_ty. Anything else returns nil so callers fall through to
+// placeholderMatched.
+func tokenToExpr(t *Token) ast.Expr {
+	pos := tokenPos(t)
+	switch t.Type {
+	case tokenize.NAME:
+		return &ast.Name{Id: string(t.Bytes), Ctx: ast.Load, Pos: pos}
+	case tokenize.NUMBER:
+		if v, ok := parseNumberLiteral(string(t.Bytes)); ok {
+			return &ast.Constant{Value: v, Pos: pos}
+		}
+	case tokenize.STRING:
+		if s, ok := decodeStringToken(string(t.Bytes)); ok {
+			return &ast.Constant{Value: s, Pos: pos}
+		}
+	}
+	return nil
+}
+
+// tokenPos lifts a Token's location into the AST Pos shape.
+func tokenPos(t *Token) ast.Pos {
+	if t == nil {
+		return ast.NoPos
+	}
+	return ast.Pos{
+		Lineno:       t.Lineno,
+		ColOffset:    t.ColOff,
+		EndLineno:    t.EndLine,
+		EndColOffset: t.EndCol,
 	}
 }
 
@@ -1453,6 +1499,68 @@ func actionPgenSetExprContext(p *Parser, args ...any) any {
 		return expr
 	}
 	return SetExprContext(expr, ctx)
+}
+
+// actionPgenSeqFlatten flattens a nested any-shape into a single
+// Seq[Stmt]. Used by the `statements` rule whose body is
+// `_PyPegen_seq_flatten(p, a)` over the +-repetition of `statement`.
+//
+// CPython: Parser/action_helpers.c:33 _PyPegen_seq_flatten
+func actionPgenSeqFlatten(p *Parser, args ...any) any {
+	_ = p
+	return stmtSeqOf(argAt(args, 1))
+}
+
+// actionPgenSeqAppendToEnd appends `item` to the end of `seq`. The
+// grammar uses it to glue a singleton onto the tail of a +-repetition
+// when collecting non-empty statement sequences.
+//
+// CPython: Parser/action_helpers.c _PyPegen_seq_append_to_end
+func actionPgenSeqAppendToEnd(p *Parser, args ...any) any {
+	_ = p
+	seq := stmtSeqOf(argAt(args, 1))
+	item := asStmt(argAt(args, 2))
+	if item == nil {
+		return seq
+	}
+	out := make([]ast.Stmt, 0, len(seq)+1)
+	out = append(out, seq...)
+	out = append(out, item)
+	return ast.Seq[ast.Stmt](out)
+}
+
+// actionPgenRegisterStmts annotates the parser's current statement
+// sequence for the interactive REPL. A no-op for the file path; the
+// helper just returns its input unchanged.
+//
+// CPython: Parser/action_helpers.c _PyPegen_register_stmts
+func actionPgenRegisterStmts(p *Parser, args ...any) any {
+	_ = p
+	return argAt(args, 1)
+}
+
+// actionPgenSlashWithDefault and actionPgenSetupFullFormatSpec are
+// argument-shape helpers the grammar reaches for in the parameters
+// and f-string surfaces respectively. The typed forms land with the
+// arguments / fstring panel; the placeholder returns the raw inputs.
+func actionPgenSlashWithDefault(p *Parser, args ...any) any {
+	_ = p
+	_ = args
+	return placeholderMatched
+}
+
+func actionPgenSetupFullFormatSpec(p *Parser, args ...any) any {
+	_ = p
+	_ = args
+	return placeholderMatched
+}
+
+// actionPgenJoinedStr is the constructor surface for f-string joins.
+// Real implementation lands with the f-string panel.
+func actionPgenJoinedStr(p *Parser, args ...any) any {
+	_ = p
+	_ = args
+	return placeholderMatched
 }
 
 // decodeTypeComment turns an optional TYPE_COMMENT token into the
