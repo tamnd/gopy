@@ -54,7 +54,18 @@ type Type struct {
 	//
 	// CPython: Include/cpython/object.h tp_vectorcall_offset + Py_TPFLAGS_HAVE_VECTORCALL
 	Vectorcall func(callable Object, args []Object, nargsf uint, kwnames *Tuple) (Object, error)
-	Dealloc    func(o Object)
+	// Getattro is the tp_getattro slot. Receives the owner and the
+	// attribute name (as a Str), returns the attribute value or an
+	// error. Mirrors getattrofunc.
+	//
+	// CPython: Include/cpython/object.h tp_getattro
+	Getattro func(o Object, name Object) (Object, error)
+	// Setattro is the tp_setattro slot. value==nil signals a delete
+	// (PyObject_DelAttr forwards there). Mirrors setattrofunc.
+	//
+	// CPython: Include/cpython/object.h tp_setattro
+	Setattro func(o Object, name Object, value Object) error
+	Dealloc  func(o Object)
 
 	Number   *NumberMethods
 	Sequence *SequenceMethods
