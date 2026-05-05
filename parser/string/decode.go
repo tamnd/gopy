@@ -102,6 +102,25 @@ func decodeUnicodeEscapes(s []byte) (text string, warnings []string, err error) 
 			}
 			out = utf8.AppendRune(out, rune(v))
 			i += 8
+		case 'N':
+			// CPython: Objects/unicodeobject.c _PyUnicode_DecodeUnicodeEscape
+			// \N{NAME} expands via the unicodedata name table.
+			if i >= len(s) || s[i] != '{' {
+				return "", nil, fmt.Errorf("malformed \\N character escape")
+			}
+			j := i + 1
+			for j < len(s) && s[j] != '}' {
+				j++
+			}
+			if j >= len(s) {
+				return "", nil, fmt.Errorf("malformed \\N character escape")
+			}
+			r, nerr := CharByName(string(s[i+1 : j]))
+			if nerr != nil {
+				return "", nil, fmt.Errorf("unknown Unicode character name")
+			}
+			out = utf8.AppendRune(out, r)
+			i = j + 1
 		default:
 			// PEP 414 keeps the backslash in the output for
 			// unrecognized escapes; CPython 3.14 also emits a
