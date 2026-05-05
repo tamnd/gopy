@@ -151,6 +151,23 @@ func TestEvalUnaryInvert(t *testing.T) {
 	}
 }
 
+// TestEvalInstrumentedReturnValue confirms an INSTRUMENTED_ opcode
+// runs the base behavior when no monitoring tools are attached. Real
+// monitoring lands with 1634 at v0.9.
+func TestEvalInstrumentedReturnValue(t *testing.T) {
+	ts := state.NewThread()
+	bc := append(instr(compile.LOAD_CONST, 0), instr(compile.INSTRUMENTED_RETURN_VALUE, 0)...)
+	co := &objects.Code{Code: bc, Stacksize: 4, Consts: []any{int64(7)}}
+	v, err := EvalCode(ts, co, nil, nil)
+	if err != nil {
+		t.Fatalf("Eval err: %v", err)
+	}
+	got, ok := v.(*objects.Int)
+	if !ok || intVal(got) != 7 {
+		t.Errorf("got %v, want 7", v)
+	}
+}
+
 func TestEvalIsOp(t *testing.T) {
 	ts := state.NewThread()
 	// LOAD_CONST 0 (None); LOAD_CONST 0 (None); IS_OP 0 -> True

@@ -27,6 +27,12 @@ import (
 //
 // CPython: Python/ceval.c switch over op
 func (e *evalState) dispatch(op compile.Opcode, oparg uint32) (next int, retVal objects.Object, retErr error, retDone bool, err error) {
+	// Strip the INSTRUMENTED_ prefix before dispatching so monitored
+	// bytecode runs the base behavior. PEP 669 monitoring itself is
+	// out of scope for v0.6 (lands in 1634 at v0.9).
+	if base, rewritten := baseForInstrumented(op); rewritten {
+		op = base
+	}
 	// Hand-written panel for the smallest core opcodes so trivial
 	// programs run end-to-end before 1621 codegen lands.
 	if next, retVal, retErr, retDone, ok, err := e.trySimple(op, oparg); ok {
