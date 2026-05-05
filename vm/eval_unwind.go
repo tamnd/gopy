@@ -16,16 +16,30 @@ import (
 // frame. Returns (residualValue, true) on hit (caller continues
 // dispatch); (nil, false) on miss (caller propagates).
 //
-// CPython: Python/ceval.c exception_unwind
+// CPython: Python/ceval.c:L1815 get_exception_handler + exception_unwind
 func (e *evalState) handleException(err error) (objects.Object, bool) {
-	// Walk e.f.Code.ExceptionTable for an entry whose [start, end)
-	// range covers e.f.PrevInstr. The encoding is the varint format
-	// 1628 emits: see Python/ceval.c get_exception_handler.
-	//
-	// v0.6: not implemented. The loop just propagates the error.
-	// Lands fully in #158.
+	co := e.f.Code
+	if co == nil || len(co.ExceptionTable) == 0 {
+		return nil, false
+	}
+	entry, ok := findExcHandler(co.ExceptionTable, e.f.InstrPtr)
+	if !ok {
+		return nil, false
+	}
+	// Truncate the value stack to the depth the handler expects.
+	if entry.depth < e.f.StackTop {
+		e.f.StackTop = entry.depth
+	}
+	// preserveLasti would push the failing-instruction offset onto
+	// the stack so the handler can re-raise with correct lasti. We
+	// don't model that until exception objects land (#160).
+	_ = entry.preserveLasti
+	// The exception value itself isn't pushed yet either; that needs
+	// the exception object hierarchy from #160.
 	_ = err
-	return nil, false
+	e.f.InstrPtr = entry.target
+	e.f.PrevInstr = entry.target
+	return nil, true
 }
 
 // unwind is invoked when the eval-breaker handler errors. It pops
