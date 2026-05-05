@@ -19379,63 +19379,6 @@ func parseRule__rhs_156(p *Parser) any {
 
 // Action helper stubs. The action translator emits calls into
 // these names; real implementations land with the AST surface.
-func actionAstAssert(p *Parser, args ...any) any { _ = p; _ = args; return placeholderMatched }
-func actionAstBreak(p *Parser, args ...any) any { _ = p; _ = args; return placeholderMatched }
-func actionAstContinue(p *Parser, args ...any) any { _ = p; _ = args; return placeholderMatched }
-func actionAstDelete(p *Parser, args ...any) any { _ = p; _ = args; return placeholderMatched }
-func actionAstExceptHandler(p *Parser, args ...any) any { _ = p; _ = args; return placeholderMatched }
-func actionAstExpr(p *Parser, args ...any) any { _ = p; _ = args; return placeholderMatched }
-func actionAstGeneratorExp(p *Parser, args ...any) any { _ = p; _ = args; return placeholderMatched }
-func actionAstIf(p *Parser, args ...any) any { _ = p; _ = args; return placeholderMatched }
-func actionAstIfExp(p *Parser, args ...any) any { _ = p; _ = args; return placeholderMatched }
-func actionAstImport(p *Parser, args ...any) any { _ = p; _ = args; return placeholderMatched }
-func actionAstImportFrom(p *Parser, args ...any) any { _ = p; _ = args; return placeholderMatched }
-func actionAstListComp(p *Parser, args ...any) any { _ = p; _ = args; return placeholderMatched }
-func actionAstMatchAs(p *Parser, args ...any) any { _ = p; _ = args; return placeholderMatched }
-func actionAstMatchClass(p *Parser, args ...any) any { _ = p; _ = args; return placeholderMatched }
-func actionAstMatchMapping(p *Parser, args ...any) any { _ = p; _ = args; return placeholderMatched }
-func actionAstMatchSequence(p *Parser, args ...any) any { _ = p; _ = args; return placeholderMatched }
-func actionAstMatchStar(p *Parser, args ...any) any { _ = p; _ = args; return placeholderMatched }
-func actionAstMatchValue(p *Parser, args ...any) any { _ = p; _ = args; return placeholderMatched }
-func actionAstPass(p *Parser, args ...any) any { _ = p; _ = args; return placeholderMatched }
-func actionAstRaise(p *Parser, args ...any) any { _ = p; _ = args; return placeholderMatched }
-func actionAstReturn(p *Parser, args ...any) any { _ = p; _ = args; return placeholderMatched }
-func actionAstSet(p *Parser, args ...any) any { _ = p; _ = args; return placeholderMatched }
-func actionAstSetComp(p *Parser, args ...any) any { _ = p; _ = args; return placeholderMatched }
-func actionAstSlice(p *Parser, args ...any) any { _ = p; _ = args; return placeholderMatched }
-func actionAstTry(p *Parser, args ...any) any { _ = p; _ = args; return placeholderMatched }
-func actionAstWhile(p *Parser, args ...any) any { _ = p; _ = args; return placeholderMatched }
-func actionAstYield(p *Parser, args ...any) any { _ = p; _ = args; return placeholderMatched }
-func actionAstYieldFrom(p *Parser, args ...any) any { _ = p; _ = args; return placeholderMatched }
-func actionPgenAddTypeCommentToArg(p *Parser, args ...any) any { _ = p; _ = args; return placeholderMatched }
-func actionPgenArgumentsParsingError(p *Parser, args ...any) any { _ = p; _ = args; return placeholderMatched }
-func actionPgenCheckFstringConversion(p *Parser, args ...any) any { _ = p; _ = args; return placeholderMatched }
-func actionPgenClassDefDecorators(p *Parser, args ...any) any { _ = p; _ = args; return placeholderMatched }
-func actionPgenCollectCallSeqs(p *Parser, args ...any) any { _ = p; _ = args; return placeholderMatched }
-func actionPgenConcatenateStrings(p *Parser, args ...any) any { _ = p; _ = args; return placeholderMatched }
-func actionPgenConcatenateTstrings(p *Parser, args ...any) any { _ = p; _ = args; return placeholderMatched }
-func actionPgenConstantFromString(p *Parser, args ...any) any { _ = p; _ = args; return placeholderMatched }
-func actionPgenConstantFromToken(p *Parser, args ...any) any { _ = p; _ = args; return placeholderMatched }
-func actionPgenDecodedConstantFromToken(p *Parser, args ...any) any { _ = p; _ = args; return placeholderMatched }
-func actionPgenEnsureImaginary(p *Parser, args ...any) any { _ = p; _ = args; return placeholderMatched }
-func actionPgenEnsureReal(p *Parser, args ...any) any { _ = p; _ = args; return placeholderMatched }
-func actionPgenFormattedValue(p *Parser, args ...any) any { _ = p; _ = args; return placeholderMatched }
-func actionPgenFunctionDefDecorators(p *Parser, args ...any) any { _ = p; _ = args; return placeholderMatched }
-func actionPgenGetExprName(p *Parser, args ...any) any { _ = p; _ = args; return placeholderMatched }
-func actionPgenInteractiveExit(p *Parser, args ...any) any { _ = p; _ = args; return placeholderMatched }
-func actionPgenInterpolation(p *Parser, args ...any) any { _ = p; _ = args; return placeholderMatched }
-func actionPgenJoinNamesWithDot(p *Parser, args ...any) any { _ = p; _ = args; return placeholderMatched }
-func actionPgenJoinSequences(p *Parser, args ...any) any { _ = p; _ = args; return placeholderMatched }
-func actionPgenKeyPatternPair(p *Parser, args ...any) any { _ = p; _ = args; return placeholderMatched }
-func actionPgenKeyValuePair(p *Parser, args ...any) any { _ = p; _ = args; return placeholderMatched }
-func actionPgenKeywordOrStarred(p *Parser, args ...any) any { _ = p; _ = args; return placeholderMatched }
-func actionPgenMakeArguments(p *Parser, args ...any) any { _ = p; _ = args; return placeholderMatched }
-func actionPgenNameDefaultPair(p *Parser, args ...any) any { _ = p; _ = args; return placeholderMatched }
-func actionPgenNonparenGenexpInCall(p *Parser, args ...any) any { _ = p; _ = args; return placeholderMatched }
-func actionPgenSeqCountDots(p *Parser, args ...any) any { _ = p; _ = args; return placeholderMatched }
-func actionPgenSeqInsertInFront(p *Parser, args ...any) any { _ = p; _ = args; return placeholderMatched }
-func actionPgenSingletonSeq(p *Parser, args ...any) any { _ = p; _ = args; return placeholderMatched }
-func actionPgenStarEtc(p *Parser, args ...any) any { _ = p; _ = args; return placeholderMatched }
 func raiseAction(p *Parser, kind string, args ...any) any {
 	_ = p
 	_ = kind
