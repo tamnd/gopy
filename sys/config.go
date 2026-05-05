@@ -40,6 +40,9 @@ func UpdateConfig(d *objects.Dict, cfg *initconfig.PyConfig) error {
 	if err := setItem(d, "_xoptions", xOptionsDict(cfg.XOptions)); err != nil {
 		return err
 	}
+	if err := setItem(d, "flags", makeFlags(cfg)); err != nil {
+		return err
+	}
 
 	for _, kv := range []struct {
 		name  string
