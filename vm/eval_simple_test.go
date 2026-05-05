@@ -105,6 +105,59 @@ func TestEvalLoadGlobal(t *testing.T) {
 	}
 }
 
+func TestEvalJumpForward(t *testing.T) {
+	ts := state.NewThread()
+	// LOAD_CONST 0 (1); JUMP_FORWARD 1 (skip next instr); LOAD_CONST 1 (2); RETURN_VALUE
+	// Result should be 1 since we skip the second LOAD_CONST.
+	bc := append(instr(compile.LOAD_CONST, 0), instr(compile.JUMP_FORWARD, 1)...)
+	bc = append(bc, instr(compile.LOAD_CONST, 1)...)
+	bc = append(bc, instr(compile.RETURN_VALUE, 0)...)
+	co := &objects.Code{Code: bc, Stacksize: 4, Consts: []any{int64(1), int64(2)}}
+	v, err := EvalCode(ts, co, nil, nil)
+	if err != nil {
+		t.Fatalf("Eval err: %v", err)
+	}
+	if got, ok := v.(*objects.Int); !ok || intVal(got) != 1 {
+		t.Errorf("got %v, want 1", v)
+	}
+}
+
+func TestEvalPopJumpIfFalseTaken(t *testing.T) {
+	ts := state.NewThread()
+	// LOAD_CONST 0 (False); POP_JUMP_IF_FALSE 1; LOAD_CONST 1 (1); RETURN_VALUE
+	// Then at jump target: LOAD_CONST 2 (2); RETURN_VALUE -> 2
+	bc := append(instr(compile.LOAD_CONST, 0), instr(compile.POP_JUMP_IF_FALSE, 2)...)
+	bc = append(bc, instr(compile.LOAD_CONST, 1)...)
+	bc = append(bc, instr(compile.RETURN_VALUE, 0)...)
+	bc = append(bc, instr(compile.LOAD_CONST, 2)...)
+	bc = append(bc, instr(compile.RETURN_VALUE, 0)...)
+	co := &objects.Code{Code: bc, Stacksize: 4, Consts: []any{false, int64(1), int64(2)}}
+	v, err := EvalCode(ts, co, nil, nil)
+	if err != nil {
+		t.Fatalf("Eval err: %v", err)
+	}
+	if got, ok := v.(*objects.Int); !ok || intVal(got) != 2 {
+		t.Errorf("got %v, want 2 (jump taken)", v)
+	}
+}
+
+func TestEvalPopJumpIfFalseNotTaken(t *testing.T) {
+	ts := state.NewThread()
+	bc := append(instr(compile.LOAD_CONST, 0), instr(compile.POP_JUMP_IF_FALSE, 2)...)
+	bc = append(bc, instr(compile.LOAD_CONST, 1)...)
+	bc = append(bc, instr(compile.RETURN_VALUE, 0)...)
+	bc = append(bc, instr(compile.LOAD_CONST, 2)...)
+	bc = append(bc, instr(compile.RETURN_VALUE, 0)...)
+	co := &objects.Code{Code: bc, Stacksize: 4, Consts: []any{true, int64(1), int64(2)}}
+	v, err := EvalCode(ts, co, nil, nil)
+	if err != nil {
+		t.Fatalf("Eval err: %v", err)
+	}
+	if got, ok := v.(*objects.Int); !ok || intVal(got) != 1 {
+		t.Errorf("got %v, want 1 (jump not taken)", v)
+	}
+}
+
 func TestEvalPopTopThenReturn(t *testing.T) {
 	ts := state.NewThread()
 	// LOAD_CONST 0 (10); LOAD_CONST 1 (20); POP_TOP; RETURN_VALUE -> 10

@@ -152,6 +152,44 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, retVal
 		v := e.popObject()
 		return 0, v, nil, true, true, nil
 
+	case compile.JUMP_FORWARD:
+		return e.jumpBy(int(oparg) + 1), nil, nil, false, true, nil
+	case compile.JUMP_BACKWARD, compile.JUMP_BACKWARD_NO_INTERRUPT:
+		// Backward jumps poll the eval breaker (CPython: CHECK_EVAL_BREAKER
+		// fires here so signal handlers and pending calls can run mid-loop).
+		// JUMP_BACKWARD_NO_INTERRUPT skips the poll.
+		if op == compile.JUMP_BACKWARD && e.breaker != nil && e.breaker.Load() != 0 {
+			if berr := e.handleEvalBreaker(); berr != nil {
+				return 0, nil, nil, false, true, berr
+			}
+		}
+		return e.jumpBy(-int(oparg) + 1), nil, nil, false, true, nil
+
+	case compile.POP_JUMP_IF_TRUE, compile.POP_JUMP_IF_FALSE,
+		compile.POP_JUMP_IF_NONE, compile.POP_JUMP_IF_NOT_NONE:
+		v := e.popObject()
+		var take bool
+		switch op {
+		case compile.POP_JUMP_IF_NONE:
+			take = (v == objects.None())
+		case compile.POP_JUMP_IF_NOT_NONE:
+			take = (v != objects.None())
+		default:
+			truthy, terr := objects.IsTruthy(v)
+			if terr != nil {
+				return 0, nil, nil, false, true, terr
+			}
+			if op == compile.POP_JUMP_IF_TRUE {
+				take = truthy
+			} else {
+				take = !truthy
+			}
+		}
+		if take {
+			return e.jumpBy(int(oparg) + 1), nil, nil, false, true, nil
+		}
+		return e.advance(1), nil, nil, false, true, nil
+
 	case compile.LOAD_NAME, compile.LOAD_GLOBAL, compile.STORE_NAME,
 		compile.STORE_GLOBAL, compile.DELETE_NAME, compile.DELETE_GLOBAL:
 		v, perr := e.execNameOp(op, oparg)
