@@ -17,6 +17,7 @@ package main
 
 import (
 	"fmt"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -113,6 +114,7 @@ func Emit(g *Grammar) string {
 	e.writeRuleNameTable()
 	e.writeKeywordTables()
 	e.buf.WriteString(e.bodies.String())
+	e.writeActionHelperStubs()
 	e.writeDispatch()
 	return e.buf.String()
 }
@@ -434,6 +436,28 @@ func (e *emitter) writeAltBlock(r *Rule, a *Alt) {
 		out.WriteString("\t\tcut := false\n")
 	}
 	out.WriteString("\t\tif v := func() any {\n")
+	names := e.writeAltItems(a, hasCut)
+	e.writeAltReturn(a, names)
+	out.WriteString("\t\t}(); v != nil {\n")
+	if e.canMemoize(r) {
+		e.printf("\t\t\tp.InsertMemo(mark, Rule_%s, v)\n", r.Name)
+	}
+	out.WriteString("\t\t\treturn v\n\t\t}\n")
+	out.WriteString("\t\tp.Reset(mark)\n")
+	if hasCut {
+		out.WriteString("\t\tif cut {\n")
+		if e.canMemoize(r) {
+			e.printf("\t\t\tp.InsertMemo(mark, Rule_%s, nil)\n", r.Name)
+		}
+		out.WriteString("\t\t\treturn nil\n\t\t}\n")
+	}
+	out.WriteString("\t}\n")
+}
+
+// writeAltItems emits the per-item bindings inside an alt closure
+// and returns the list of bound names available to the action.
+func (e *emitter) writeAltItems(a *Alt, hasCut bool) []string {
+	out := e.buf
 	names := []string{}
 	dedup := map[string]int{}
 	for _, ni := range a.Items {
@@ -475,32 +499,34 @@ func (e *emitter) writeAltBlock(r *Rule, a *Alt) {
 			}
 		}
 	}
+	return names
+}
+
+// writeAltReturn emits the closure's return statement: a translated
+// action expression when possible, otherwise the bound names as a
+// []any (or placeholderMatched if nothing was bound).
+func (e *emitter) writeAltReturn(a *Alt, names []string) {
+	out := e.buf
+	bound := map[string]bool{}
+	for _, n := range names {
+		bound[n] = true
+	}
+	if expr, ok := translateAction(a.Action, bound); ok && a.Action != "" {
+		e.printf("\t\t\treturn %s\n", expr)
+		return
+	}
 	if len(names) == 0 {
 		out.WriteString("\t\t\treturn placeholderMatched\n")
-	} else {
-		out.WriteString("\t\t\treturn []any{")
-		for i, n := range names {
-			if i > 0 {
-				out.WriteString(", ")
-			}
-			out.WriteString(n)
+		return
+	}
+	out.WriteString("\t\t\treturn []any{")
+	for i, n := range names {
+		if i > 0 {
+			out.WriteString(", ")
 		}
-		out.WriteString("}\n")
+		out.WriteString(n)
 	}
-	out.WriteString("\t\t}(); v != nil {\n")
-	if e.canMemoize(r) {
-		e.printf("\t\t\tp.InsertMemo(mark, Rule_%s, v)\n", r.Name)
-	}
-	out.WriteString("\t\t\treturn v\n\t\t}\n")
-	out.WriteString("\t\tp.Reset(mark)\n")
-	if hasCut {
-		out.WriteString("\t\tif cut {\n")
-		if e.canMemoize(r) {
-			e.printf("\t\t\tp.InsertMemo(mark, Rule_%s, nil)\n", r.Name)
-		}
-		out.WriteString("\t\t\treturn nil\n\t\t}\n")
-	}
-	out.WriteString("\t}\n")
+	out.WriteString("}\n")
 }
 
 // canMemoize reports whether the rule's body should write memo
@@ -739,6 +765,40 @@ func itemKey(it Item) string {
 		return rhsKey(x)
 	}
 	return "?"
+}
+
+// writeActionHelperStubs scans the already-emitted rule bodies for
+// references to action helpers (actionAst*, actionPgen*, raiseAction)
+// and emits panic-stubs so the generated file compiles. Real
+// implementations land alongside the AST surface in M7.
+func (e *emitter) writeActionHelperStubs() {
+	body := e.bodies.String()
+	re := regexp.MustCompile(`\b(actionAst[A-Za-z0-9_]+|actionPgen[A-Za-z0-9_]+|raiseAction)\b`)
+	seen := map[string]bool{}
+	for _, m := range re.FindAllString(body, -1) {
+		seen[m] = true
+	}
+	if len(seen) == 0 {
+		return
+	}
+	names := make([]string, 0, len(seen))
+	for n := range seen {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	e.buf.WriteString("// Action helper stubs. The action translator emits calls into\n")
+	e.buf.WriteString("// these names; real implementations land with the AST surface.\n")
+	for _, n := range names {
+		if n == "raiseAction" {
+			e.buf.WriteString("func raiseAction(p *Parser, kind string, args ...any) any {\n")
+			e.buf.WriteString("\t_ = p\n\t_ = kind\n\t_ = args\n")
+			e.buf.WriteString("\tp.SetErrorIndicator(true)\n")
+			e.buf.WriteString("\treturn nil\n}\n\n")
+			continue
+		}
+		e.printf("func %s(p *Parser, args ...any) any { _ = p; _ = args; return placeholderMatched }\n", n)
+	}
+	e.buf.WriteString("\n")
 }
 
 // writeDispatch emits the entry-point dispatcher and the
