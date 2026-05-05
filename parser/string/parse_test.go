@@ -71,6 +71,27 @@ func TestParseBytes(t *testing.T) {
 	}
 }
 
+func TestBytesPassesThroughUnicodeEscapes(t *testing.T) {
+	// In bytes literals, \u \U \N{...} are not interpreted; the
+	// backslash and the letter stay in the output verbatim.
+	//
+	// CPython: Objects/bytesobject.c _PyBytes_DecodeEscape
+	cases := []struct{ in, want string }{
+		{`b'\U0001F600'`, `\U0001F600`},
+		{`b'\N{LATIN SMALL LETTER A}'`, `\N{LATIN SMALL LETTER A}`},
+	}
+	for _, c := range cases {
+		got, err := ParseString([]byte(c.in))
+		if err != nil {
+			t.Errorf("ParseString(%q) err = %v", c.in, err)
+			continue
+		}
+		if string(got.Bytes) != c.want {
+			t.Errorf("ParseString(%q) Bytes = %q want %q", c.in, got.Bytes, c.want)
+		}
+	}
+}
+
 func TestBytesRejectsHighChar(t *testing.T) {
 	if _, err := ParseString([]byte("b'é'")); err == nil {
 		t.Errorf("expected non-ASCII bytes literal to fail")
