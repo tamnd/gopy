@@ -21,6 +21,10 @@ func TestFStringNestingDepth(t *testing.T) {
 		{0, `"plain"`},
 		{1, `f'a{x}b'`},
 		{2, `f"a{f'b{c}d'}e"`},
+		{3, `f"""a{f'b{f"c{d}"}e'}f"""`},
+		{4, `f"""a{f'''b{f"c{f'd{e}'}g"}h'''}i"""`},
+		{1, `f'pad {x:.2f} end'`},
+		{2, `f'{f"{x:>{w}}"}'`},
 	}
 	for _, c := range cases {
 		toks := tokenize_(t, c.src+"\n")
