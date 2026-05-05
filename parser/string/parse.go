@@ -30,6 +30,13 @@ type Result struct {
 	Bytes   []byte
 	IsBytes bool
 	IsRaw   bool
+	// Warnings carries SyntaxWarning text (one per unknown escape)
+	// that the caller should surface separately. Empty when the
+	// literal contained no flagged escapes.
+	//
+	// CPython: Objects/unicodeobject.c emits PyExc_SyntaxWarning
+	// from _PyUnicode_DecodeUnicodeEscapeInternal.
+	Warnings []string
 }
 
 // errBadInternalCall mirrors PyErr_BadInternalCall: the caller fed
@@ -93,14 +100,21 @@ stripped:
 			}
 		}
 		out := s
+		var warns []string
 		if !noEscape {
-			b, err := decodeBytesEscapes(s)
+			b, w, err := decodeBytesEscapes(s)
 			if err != nil {
 				return Result{}, err
 			}
 			out = b
+			warns = w
 		}
-		return Result{Bytes: append([]byte(nil), out...), IsBytes: true, IsRaw: rawMode}, nil
+		return Result{
+			Bytes:    append([]byte(nil), out...),
+			IsBytes:  true,
+			IsRaw:    rawMode,
+			Warnings: warns,
+		}, nil
 	}
 
 	if noEscape {
@@ -109,11 +123,11 @@ stripped:
 		}
 		return Result{Text: string(s), IsRaw: rawMode}, nil
 	}
-	text, err := decodeUnicodeEscapes(s)
+	text, warns, err := decodeUnicodeEscapes(s)
 	if err != nil {
 		return Result{}, err
 	}
-	return Result{Text: text}, nil
+	return Result{Text: text, Warnings: warns}, nil
 }
 
 func hasBackslash(b []byte) bool { return strings.IndexByte(string(b), '\\') >= 0 }

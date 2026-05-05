@@ -92,6 +92,19 @@ func TestBytesPassesThroughUnicodeEscapes(t *testing.T) {
 	}
 }
 
+func TestUnknownEscapeWarns(t *testing.T) {
+	r, err := ParseString([]byte(`'\q'`))
+	if err != nil {
+		t.Fatalf("err = %v", err)
+	}
+	if len(r.Warnings) != 1 {
+		t.Fatalf("warnings = %v", r.Warnings)
+	}
+	if r.Warnings[0] != `invalid escape sequence '\q'` {
+		t.Errorf("warning text = %q", r.Warnings[0])
+	}
+}
+
 func TestBytesRejectsHighChar(t *testing.T) {
 	if _, err := ParseString([]byte("b'é'")); err == nil {
 		t.Errorf("expected non-ASCII bytes literal to fail")

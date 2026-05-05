@@ -13,11 +13,14 @@ import (
 
 // decodeUnicodeEscapes walks s and expands the standard Python
 // escape sequences. The returned string is the decoded text in
-// UTF-8 form.
+// UTF-8 form. Unknown escape sequences are kept verbatim and
+// reported via the warnings slice so the caller can surface them
+// as SyntaxWarning text without aborting decoding.
 //
 // CPython: Objects/unicodeobject.c _PyUnicode_DecodeUnicodeEscapeInternal
-func decodeUnicodeEscapes(s []byte) (string, error) {
+func decodeUnicodeEscapes(s []byte) (text string, warnings []string, err error) {
 	var out []byte
+	var warns []string
 	i := 0
 	for i < len(s) {
 		c := s[i]
@@ -28,7 +31,7 @@ func decodeUnicodeEscapes(s []byte) (string, error) {
 		}
 		i++
 		if i >= len(s) {
-			return "", fmt.Errorf("Trailing \\ in string") //nolint:staticcheck // Mirror CPython's exact error text.
+			return "", nil, fmt.Errorf("Trailing \\ in string") //nolint:staticcheck // Mirror CPython's exact error text.
 		}
 		c = s[i]
 		i++
@@ -68,56 +71,57 @@ func decodeUnicodeEscapes(s []byte) (string, error) {
 			}
 		case 'x':
 			if i+2 > len(s) {
-				return "", fmt.Errorf("truncated \\xXX escape")
+				return "", nil, fmt.Errorf("truncated \\xXX escape")
 			}
 			v, err := parseHex(s[i : i+2])
 			if err != nil {
-				return "", err
+				return "", nil, err
 			}
 			out = append(out, byte(v))
 			i += 2
 		case 'u':
 			if i+4 > len(s) {
-				return "", fmt.Errorf("truncated \\uXXXX escape")
+				return "", nil, fmt.Errorf("truncated \\uXXXX escape")
 			}
 			v, err := parseHex(s[i : i+4])
 			if err != nil {
-				return "", err
+				return "", nil, err
 			}
 			out = utf8.AppendRune(out, rune(v))
 			i += 4
 		case 'U':
 			if i+8 > len(s) {
-				return "", fmt.Errorf("truncated \\UXXXXXXXX escape")
+				return "", nil, fmt.Errorf("truncated \\UXXXXXXXX escape")
 			}
 			v, err := parseHex(s[i : i+8])
 			if err != nil {
-				return "", err
+				return "", nil, err
 			}
 			if v > 0x10FFFF {
-				return "", fmt.Errorf("illegal Unicode character in \\U escape")
+				return "", nil, fmt.Errorf("illegal Unicode character in \\U escape")
 			}
 			out = utf8.AppendRune(out, rune(v))
 			i += 8
 		default:
 			// PEP 414 keeps the backslash in the output for
-			// unrecognized escapes (with a DeprecationWarning the
-			// caller surfaces separately).
+			// unrecognized escapes; CPython 3.14 also emits a
+			// SyntaxWarning so the user can spot a typo.
 			out = append(out, '\\', c)
+			warns = append(warns, fmt.Sprintf("invalid escape sequence '\\%c'", c))
 		}
 	}
 	if !utf8.Valid(out) {
-		return "", fmt.Errorf("invalid utf-8 in string literal")
+		return "", nil, fmt.Errorf("invalid utf-8 in string literal")
 	}
-	return string(out), nil
+	return string(out), warns, nil
 }
 
 // decodeBytesEscapes is the bytes form. The unicode escapes are
 // rejected here because they have no meaning in a byte literal.
 //
 // CPython: Objects/bytesobject.c _PyBytes_DecodeEscape
-func decodeBytesEscapes(s []byte) ([]byte, error) {
-	var out []byte
+func decodeBytesEscapes(s []byte) (out []byte, warnings []string, err error) {
+	var warns []string
 	i := 0
 	for i < len(s) {
 		c := s[i]
@@ -128,7 +132,7 @@ func decodeBytesEscapes(s []byte) ([]byte, error) {
 		}
 		i++
 		if i >= len(s) {
-			return nil, fmt.Errorf("Trailing \\ in string") //nolint:staticcheck // Mirror CPython's exact error text.
+			return nil, nil, fmt.Errorf("Trailing \\ in string") //nolint:staticcheck // Mirror CPython's exact error text.
 		}
 		c = s[i]
 		i++
@@ -163,19 +167,20 @@ func decodeBytesEscapes(s []byte) ([]byte, error) {
 			out = append(out, byte(val&0xff))
 		case 'x':
 			if i+2 > len(s) {
-				return nil, fmt.Errorf("truncated \\xXX escape")
+				return nil, nil, fmt.Errorf("truncated \\xXX escape")
 			}
 			v, err := parseHex(s[i : i+2])
 			if err != nil {
-				return nil, err
+				return nil, nil, err
 			}
 			out = append(out, byte(v))
 			i += 2
 		default:
 			out = append(out, '\\', c)
+			warns = append(warns, fmt.Sprintf("invalid escape sequence '\\%c'", c))
 		}
 	}
-	return out, nil
+	return out, warns, nil
 }
 
 func parseHex(s []byte) (int, error) {
