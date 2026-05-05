@@ -211,6 +211,44 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, retVal
 		e.pushObject(out)
 		return e.advance(1), nil, nil, false, true, nil
 
+	case compile.BUILD_LIST:
+		n := int(oparg)
+		items := make([]objects.Object, n)
+		for i := n - 1; i >= 0; i-- {
+			items[i] = e.popObject()
+		}
+		e.pushObject(objects.NewList(items))
+		return e.advance(1), nil, nil, false, true, nil
+
+	case compile.BUILD_TUPLE:
+		n := int(oparg)
+		items := make([]objects.Object, n)
+		for i := n - 1; i >= 0; i-- {
+			items[i] = e.popObject()
+		}
+		e.pushObject(objects.NewTuple(items))
+		return e.advance(1), nil, nil, false, true, nil
+
+	case compile.BUILD_MAP:
+		n := int(oparg)
+		d := objects.NewDict()
+		// Stack layout: ..., k0, v0, k1, v1, ..., kn-1, vn-1 (top)
+		// We pop pairs in reverse and insert; insertion order is then
+		// reversed but Dict iteration order isn't pinned in v0.6.
+		pairs := make([][2]objects.Object, n)
+		for i := n - 1; i >= 0; i-- {
+			v := e.popObject()
+			k := e.popObject()
+			pairs[i] = [2]objects.Object{k, v}
+		}
+		for _, p := range pairs {
+			if serr := d.SetItem(p[0], p[1]); serr != nil {
+				return 0, nil, nil, false, true, serr
+			}
+		}
+		e.pushObject(d)
+		return e.advance(1), nil, nil, false, true, nil
+
 	case compile.IS_OP:
 		b := e.popObject()
 		a := e.popObject()

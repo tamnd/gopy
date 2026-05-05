@@ -152,6 +152,26 @@ func TestEvalIsOp(t *testing.T) {
 	}
 }
 
+func TestEvalBuildTuple(t *testing.T) {
+	ts := state.NewThread()
+	bc := append(instr(compile.LOAD_CONST, 0), instr(compile.LOAD_CONST, 1)...)
+	bc = append(bc, instr(compile.LOAD_CONST, 2)...)
+	bc = append(bc, instr(compile.BUILD_TUPLE, 3)...)
+	bc = append(bc, instr(compile.RETURN_VALUE, 0)...)
+	co := &objects.Code{Code: bc, Stacksize: 4, Consts: []any{int64(1), int64(2), int64(3)}}
+	v, err := EvalCode(ts, co, nil, nil)
+	if err != nil {
+		t.Fatalf("Eval err: %v", err)
+	}
+	tup, ok := v.(*objects.Tuple)
+	if !ok {
+		t.Fatalf("got %T, want *objects.Tuple", v)
+	}
+	if tup.Len() != 3 {
+		t.Errorf("len = %d, want 3", tup.Len())
+	}
+}
+
 func TestEvalJumpForward(t *testing.T) {
 	ts := state.NewThread()
 	// LOAD_CONST 0 (1); JUMP_FORWARD 1 (skip next instr); LOAD_CONST 1 (2); RETURN_VALUE
