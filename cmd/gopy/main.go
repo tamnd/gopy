@@ -6,11 +6,10 @@ package main
 import (
 	"flag"
 	"fmt"
-	"io"
 	"os"
-	"strings"
 
 	"github.com/tamnd/gopy/build"
+	"github.com/tamnd/gopy/builtins"
 	"github.com/tamnd/gopy/compile"
 	"github.com/tamnd/gopy/objects"
 	"github.com/tamnd/gopy/parser"
@@ -81,8 +80,8 @@ func runSource(src string, stdout, stderr *os.File) int {
 	}
 	co := liftCode(cco)
 	ts := state.NewThread()
-	g := objects.NewDict()
-	if err := installBuiltins(g, stdout); err != nil {
+	g, err := builtins.Init(stdout)
+	if err != nil {
 		fmt.Fprintln(stderr, "builtins:", err)
 		return 1
 	}
@@ -100,43 +99,6 @@ func runSource(src string, stdout, stderr *os.File) int {
 		fmt.Fprintln(stdout, s)
 	}
 	return 0
-}
-
-// installBuiltins seeds globals with the v0.6 minimal builtin surface:
-// print(*args, sep=' ', end='\n'). The full builtins module lands with
-// spec 1684; until then this lets `gopy -c "print(1+2)"` print 3.
-func installBuiltins(g *objects.Dict, stdout io.Writer) error {
-	print := objects.NewBuiltinFunction("print", func(args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error) {
-		sep := " "
-		end := "\n"
-		if v, ok := kwargs["sep"]; ok {
-			s, err := objects.Str(v)
-			if err != nil {
-				return nil, err
-			}
-			sep = s
-		}
-		if v, ok := kwargs["end"]; ok {
-			s, err := objects.Str(v)
-			if err != nil {
-				return nil, err
-			}
-			end = s
-		}
-		parts := make([]string, 0, len(args))
-		for _, a := range args {
-			s, err := objects.Str(a)
-			if err != nil {
-				return nil, err
-			}
-			parts = append(parts, s)
-		}
-		if _, err := io.WriteString(stdout, strings.Join(parts, sep)+end); err != nil {
-			return nil, err
-		}
-		return objects.None(), nil
-	})
-	return g.SetItem(objects.NewStr("print"), print)
 }
 
 // liftCode adapts compile.Code into objects.Code (same shape, two
