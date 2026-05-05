@@ -48,8 +48,36 @@ func Init(defaultFile io.Writer) (*objects.Dict, error) {
 			return nil, err
 		}
 	}
+	for _, fn := range reflectionPanel() {
+		if err := setBuiltin(dict, fn.name, objects.NewBuiltinFunction(fn.name, fn.impl)); err != nil {
+			return nil, err
+		}
+	}
 
 	return dict, nil
+}
+
+// reflectionPanel returns the v0.7 reflection builtins (1651-builtins-B).
+//
+// CPython: Python/bltinmodule.c builtin_methods type / isinstance /
+// issubclass / callable / id / hash / repr / str
+func reflectionPanel() []struct {
+	name string
+	impl func(args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error)
+} {
+	return []struct {
+		name string
+		impl func(args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error)
+	}{
+		{"type", TypeOf},
+		{"isinstance", IsInstance},
+		{"issubclass", IsSubclass},
+		{"callable", Callable},
+		{"id", Id},
+		{"hash", Hash},
+		{"repr", Repr},
+		{"str", StrOf},
+	}
 }
 
 // iterationPanel returns the v0.7 iteration builtins (1651-builtins-A).
