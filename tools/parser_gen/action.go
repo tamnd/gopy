@@ -157,7 +157,61 @@ func (tr *cTranslator) advance() ctokTok {
 // a parenthesised conditional. We accept what we can and reject
 // what we cannot.
 func (tr *cTranslator) parseExpr() (string, bool) {
-	return tr.parsePrimary()
+	return tr.parseTernary()
+}
+
+// parseTernary recognizes C's `cond ? yes : no` and translates it
+// into a Go IIFE that returns the matching branch. Both branches are
+// kept lazy by being inside the func body, so a CHECK or RAISE in
+// the alternative side does not run when the condition picks the
+// other side.
+func (tr *cTranslator) parseTernary() (string, bool) {
+	cond, ok := tr.parseInfix()
+	if !ok {
+		return "", false
+	}
+	if tr.peek().text != "?" {
+		return cond, true
+	}
+	tr.advance()
+	yes, ok := tr.parseInfix()
+	if !ok {
+		return "", false
+	}
+	if tr.peek().text != ":" {
+		return "", false
+	}
+	tr.advance()
+	no, ok := tr.parseTernary()
+	if !ok {
+		return "", false
+	}
+	return "func() any { if truthy(" + cond + ") { return " + yes + " }; return " + no + " }()", true
+}
+
+// parseInfix accepts a small set of C infix operators that show up
+// in grammar action bodies. Most actions never need them; the few
+// that do (asdl_seq_LEN(p) == 1) read a primary, an op, and another
+// primary. We do not implement precedence beyond left-to-right.
+func (tr *cTranslator) parseInfix() (string, bool) {
+	left, ok := tr.parsePrimary()
+	if !ok {
+		return "", false
+	}
+	for {
+		op := tr.peek().text
+		switch op {
+		case "==", "!=", "<", "<=", ">", ">=", "&&", "||":
+			tr.advance()
+			right, ok := tr.parsePrimary()
+			if !ok {
+				return "", false
+			}
+			left = left + " " + op + " " + right
+		default:
+			return left, true
+		}
+	}
 }
 
 func (tr *cTranslator) parsePrimary() (string, bool) {
@@ -177,6 +231,15 @@ func (tr *cTranslator) parsePrimary() (string, bool) {
 	case "op":
 		if t.text == "(" {
 			tr.advance()
+			// C type cast pattern: `(typename ...*)expr`. Skip the
+			// cast and parse the suffix expression. Recognized when
+			// the first token after `(` is an identifier whose name
+			// looks like a C type and is followed by zero or more
+			// `*` then `)`.
+			if cast, ok := tr.tryParseCast(); ok {
+				_ = cast
+				return tr.parsePrimary()
+			}
 			inner, ok := tr.parseExpr()
 			if !ok {
 				return "", false
@@ -185,6 +248,13 @@ func (tr *cTranslator) parsePrimary() (string, bool) {
 				return "", false
 			}
 			tr.advance()
+			// A parenthesised expression may be followed by a member
+			// access chain (`((expr_ty) b)->v.Call.args` etc). The
+			// inner string already names the receiver in Go, so feed
+			// it back through parseMemberAccess.
+			if op := tr.peek(); op.text == "->" || op.text == "." {
+				return tr.parseMemberAccess(inner)
+			}
 			return "(" + inner + ")", true
 		}
 		if t.text == "&" || t.text == "*" || t.text == "-" || t.text == "!" {
@@ -207,6 +277,136 @@ func (tr *cTranslator) parsePrimary() (string, bool) {
 	return "", false
 }
 
+// astEnumConstants names the C asdl enum values that the grammar uses
+// directly (Add, Sub, Eq, Load, Store, ...). The Go AST package
+// re-exports them as package-level constants, so a bare identifier in
+// the grammar maps to ast.Foo.
+//
+// CPython: Include/internal/pycore_ast.h asdl enum tags.
+var astEnumConstants = map[string]string{
+	"Load":  "ast.Load",
+	"Store": "ast.Store",
+	"Del":   "ast.Del",
+
+	"And": "ast.And",
+	"Or":  "ast.Or",
+
+	"Add":      "ast.Add",
+	"Sub":      "ast.Sub",
+	"Mult":     "ast.Mult",
+	"MatMult":  "ast.MatMult",
+	"Div":      "ast.Div",
+	"Mod":      "ast.ModOperator",
+	"Pow":      "ast.Pow",
+	"LShift":   "ast.LShift",
+	"RShift":   "ast.RShift",
+	"BitOr":    "ast.BitOr",
+	"BitXor":   "ast.BitXor",
+	"BitAnd":   "ast.BitAnd",
+	"FloorDiv": "ast.FloorDiv",
+
+	"Invert": "ast.Invert",
+	"Not":    "ast.Not",
+	"UAdd":   "ast.UAdd",
+	"USub":   "ast.USub",
+
+	"Eq":    "ast.Eq",
+	"NotEq": "ast.NotEq",
+	"Lt":    "ast.Lt",
+	"LtE":   "ast.LtE",
+	"Gt":    "ast.Gt",
+	"GtE":   "ast.GtE",
+	"Is":    "ast.Is",
+	"IsNot": "ast.IsNot",
+	"In":    "ast.In",
+	"NotIn": "ast.NotIn",
+}
+
+// pyConstants names the C global singletons (Py_True, Py_None, ...)
+// that grammar actions reach into when building Constant nodes. The
+// Go side surfaces them through helper sentinels so the action layer
+// can land them as ast.Constant values.
+var pyConstants = map[string]string{
+	"Py_True":     "pyTrueSentinel",
+	"Py_False":    "pyFalseSentinel",
+	"Py_None":     "pyNoneSentinel",
+	"Py_Ellipsis": "pyEllipsisSentinel",
+}
+
+// cTypeNames lists the C / asdl type names the grammar uses inside
+// cast expressions. The translator drops the cast: the Go side
+// already handles values as interface{}.
+var cTypeNames = map[string]bool{
+	"asdl_stmt_seq":          true,
+	"asdl_expr_seq":          true,
+	"asdl_alias_seq":         true,
+	"asdl_arg_seq":           true,
+	"asdl_excepthandler_seq": true,
+	"asdl_keyword_seq":       true,
+	"asdl_match_case_seq":    true,
+	"asdl_pattern_seq":       true,
+	"asdl_type_param_seq":    true,
+	"asdl_withitem_seq":      true,
+	"asdl_comprehension_seq": true,
+	"asdl_int_seq":           true,
+	"asdl_seq":               true,
+	"asdl_identifier_seq":    true,
+	"expr_ty":                true,
+	"stmt_ty":                true,
+	"arguments_ty":           true,
+	"arg_ty":                 true,
+	"keyword_ty":             true,
+	"comprehension_ty":       true,
+	"alias_ty":               true,
+	"withitem_ty":            true,
+	"match_case_ty":          true,
+	"pattern_ty":             true,
+	"excepthandler_ty":       true,
+	"AugOperator":            true,
+	"CmpopExprPair":          true,
+	"KeyValuePair":           true,
+	"KeyPatternPair":         true,
+	"KeywordOrStarred":       true,
+	"NameDefaultPair":        true,
+	"SlashWithDefault":       true,
+	"StarEtc":                true,
+	"PyObject":               true,
+	"int":                    true,
+	"void":                   true,
+	"char":                   true,
+	"const":                  true,
+}
+
+// tryParseCast checks whether the current cursor (just past an open
+// paren) is a C type cast. If so, advances past the typename, the
+// pointer stars, and the closing paren and returns ok=true. Leaves
+// the cursor unchanged otherwise.
+func (tr *cTranslator) tryParseCast() (string, bool) {
+	saved := tr.pos
+	if tr.peek().kind != "id" {
+		return "", false
+	}
+	name := tr.peek().text
+	if !cTypeNames[name] {
+		return "", false
+	}
+	tr.advance()
+	// Skip an optional `const` after the type — appears in some
+	// grammar casts but does not affect semantics.
+	if tr.peek().kind == "id" && tr.peek().text == "const" {
+		tr.advance()
+	}
+	for tr.peek().text == "*" {
+		tr.advance()
+	}
+	if tr.peek().text != ")" {
+		tr.pos = saved
+		return "", false
+	}
+	tr.advance() // consume ')'
+	return name, true
+}
+
 // parseIDExpr handles identifiers that may be plain refs, calls, or
 // chains of `->` / `.` accesses.
 func (tr *cTranslator) parseIDExpr() (string, bool) {
@@ -217,6 +417,11 @@ func (tr *cTranslator) parseIDExpr() (string, bool) {
 		return "nil", true
 	case "p":
 		// The parser pointer is always in scope inside generated bodies.
+		// Allow `p->arena` style selectors so action bodies that pass
+		// the arena (which is later stripped) translate cleanly.
+		if op := tr.peek(); op.text == "->" || op.text == "." {
+			return tr.parseMemberAccess("p")
+		}
 		return "p", true
 	case "EXTRA":
 		// EXTRA expands to start/end location args. We surface a
@@ -226,24 +431,115 @@ func (tr *cTranslator) parseIDExpr() (string, bool) {
 	case "true", "false":
 		return name, true
 	}
+	// Bare C type names show up inside CHECK(type_ty, expr) as a
+	// type tag. translateCall drops the leading args, so any string
+	// works; emit a typed-nil so the result still type-checks if a
+	// later pattern slips through. Type tags often appear with one
+	// or more `*` suffixes (`asdl_expr_seq*`, `expr_ty**`); consume
+	// them here so the surrounding parseCall sees a clean `,` next.
+	if cTypeNames[name] {
+		for tr.peek().text == "*" {
+			tr.advance()
+		}
+		return "(any)(nil)", true
+	}
+	if v, ok := astEnumConstants[name]; ok {
+		// Bail if a member-access chain follows an enum; not
+		// expected today and the Go form differs anyway.
+		if op := tr.peek(); op.text == "->" || op.text == "." {
+			return "", false
+		}
+		return v, true
+	}
+	if v, ok := pyConstants[name]; ok {
+		return v, true
+	}
 	// Function call?
 	if tr.peek().text == "(" {
 		return tr.parseCall(name)
 	}
-	// Member access chains drop us into typed-field territory. Bound
-	// vars in the generated closures are interface{}, so a field
-	// access cannot compile. Bail out and let the alt fall back to
-	// placeholderMatched until the runtime types are firmed up.
+	// Member access chains: bound names are interface{} so field
+	// access cannot compile directly. We recognize three shapes:
+	//
+	//   <bound>->kind                 → AugOperator helper output, the
+	//                                   bound name already carries the
+	//                                   operator so drop the selector.
+	//   <bound>->v.Name.id            → identifier text from a NAME
+	//                                   token; map to nameIDOf(<bound>).
+	//   <bound>->v.<Type>.<field>     → field on an expr_ty union; map
+	//                                   to a typed accessor helper.
 	if op := tr.peek(); op.text == "->" || op.text == "." {
-		return "", false
+		if tr.bound == nil || !tr.bound[name] {
+			return "", false
+		}
+		expr, ok := tr.parseMemberAccess(goIdent(name))
+		return expr, ok
 	}
 	// Only accept identifiers that are actually in scope. Anything
-	// else (AST enum constants like Store, Add, etc., free helpers,
-	// stray macros) would not compile.
+	// else (free helpers, stray macros) would not compile.
 	if tr.bound == nil || !tr.bound[name] {
 		return "", false
 	}
 	return goIdent(name), true
+}
+
+// parseMemberAccess walks a chain of `->` / `.` selectors that
+// follows a bound name. The bound name itself was already consumed
+// and `recv` carries the Go expression that names it. The cursor is
+// at the first `->` or `.`.
+//
+// We recognize:
+//
+//	<recv>->kind             → recv (the operator/kind value flows
+//	                            through the bound name unchanged)
+//	<recv>->v.Name.id        → nameIDOf(recv)
+//	<recv>->v.Call.args      → callArgsOf(recv)
+//	<recv>->v.Call.keywords  → callKwOf(recv)
+//
+// Anything else fails the translation and the alt falls back to the
+// raw arg-list shape.
+func (tr *cTranslator) parseMemberAccess(recv string) (string, bool) {
+	tr.advance() // consume the leading -> or .
+	if tr.peek().kind != "id" {
+		return "", false
+	}
+	first := tr.advance().text
+	if first == "kind" {
+		return recv, true
+	}
+	if first == "arena" {
+		// `p->arena` is stripped by stripExtra; return a recognizable
+		// form so the surrounding call-arg join sees an exact match.
+		return recv + ".arena", true
+	}
+	if first != "v" {
+		return "", false
+	}
+	if tr.peek().text != "." && tr.peek().text != "->" {
+		return "", false
+	}
+	tr.advance()
+	if tr.peek().kind != "id" {
+		return "", false
+	}
+	typeName := tr.advance().text
+	if tr.peek().text != "." && tr.peek().text != "->" {
+		return "", false
+	}
+	tr.advance()
+	if tr.peek().kind != "id" {
+		return "", false
+	}
+	field := tr.advance().text
+	switch typeName + "." + field {
+	case "Name.id":
+		return "nameIDOf(" + recv + ")", true
+	case "Call.args":
+		return "callArgsOf(" + recv + ")", true
+	case "Call.keywords":
+		return "callKwOf(" + recv + ")", true
+	}
+	return "", false
 }
 
 // parseCall translates a C call. fname is the function name we just
@@ -287,6 +583,19 @@ func translateCall(fname string, args []string) (string, bool) {
 		if len(args) >= 4 {
 			return args[len(args)-1], true
 		}
+	case "NEW_TYPE_COMMENT":
+		// Macro that wraps an optional TYPE_COMMENT token into a
+		// PyObject* string. The action helpers accept the raw token
+		// and decode internally, so just pass the token through.
+		if len(args) == 2 {
+			return args[1], true
+		}
+	case "INVALID_VERSION_CHECK":
+		// Version-gate macro: emits the body when the runtime is at
+		// least the named version. Pass-through to the body arg.
+		if len(args) >= 3 {
+			return args[len(args)-1], true
+		}
 	case "RAISE_SYNTAX_ERROR", "RAISE_SYNTAX_ERROR_KNOWN_LOCATION",
 		"RAISE_SYNTAX_ERROR_KNOWN_RANGE", "RAISE_SYNTAX_ERROR_ON_NEXT_TOKEN",
 		"RAISE_SYNTAX_ERROR_STARTING_FROM", "RAISE_SYNTAX_ERROR_INVALID_TARGET",
@@ -306,11 +615,14 @@ func translateCall(fname string, args []string) (string, bool) {
 
 // stripExtra removes the EXTRA sentinel from an argument list.
 // Helper functions take p as their first parameter and pull the
-// location fields off the parser internally.
+// location fields off the parser internally. The CPython arena
+// pointer (`p->arena`, translated as `p.arena`) is also stripped
+// since helpers allocate using Go memory directly.
 func stripExtra(args []string) []string {
 	out := args[:0]
 	for _, a := range args {
-		if strings.TrimSpace(a) == "EXTRA" {
+		t := strings.TrimSpace(a)
+		if t == "EXTRA" || t == "p.arena" || t == "p->arena" {
 			continue
 		}
 		out = append(out, a)

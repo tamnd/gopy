@@ -355,14 +355,14 @@ func TestCallPlainEmitsCall(t *testing.T) {
 	}
 	u := compileMod(t, exprMod(e))
 	want := []string{
-		"LOAD_NAME", "LOAD_CONST", "LOAD_CONST", "CALL", "POP_TOP",
+		"LOAD_NAME", "PUSH_NULL", "LOAD_CONST", "LOAD_CONST", "CALL", "POP_TOP",
 		"LOAD_CONST", "RETURN_VALUE",
 	}
 	if got := opNames(u); !equalStrings(got, want) {
 		t.Errorf("ops = %v, want %v", got, want)
 	}
-	if u.Seq.Instrs[3].Oparg != 2 {
-		t.Errorf("CALL oparg = %d, want 2", u.Seq.Instrs[3].Oparg)
+	if u.Seq.Instrs[4].Oparg != 2 {
+		t.Errorf("CALL oparg = %d, want 2", u.Seq.Instrs[4].Oparg)
 	}
 }
 
@@ -376,7 +376,8 @@ func TestCallKwEmitsCallKw(t *testing.T) {
 	u := compileMod(t, exprMod(e))
 	got := opNames(u)
 	want := []string{
-		"LOAD_NAME",  // f
+		"LOAD_NAME", // f
+		"PUSH_NULL",
 		"LOAD_CONST", // 1
 		"LOAD_CONST", // ("x",) tuple
 		"CALL_KW",

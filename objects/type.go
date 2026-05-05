@@ -45,6 +45,26 @@ type Type struct {
 	Iter     func(o Object) (Object, error)
 	IterNext func(o Object) (Object, error)
 	Call     func(o Object, args []Object, kwargs map[string]Object) (Object, error)
+	// Vectorcall is the PEP 590 fast-call slot. When non-nil, the call
+	// machinery uses this instead of going through Call. args is a flat
+	// array of positional values followed by keyword values; nargsf is
+	// the positional count optionally combined with the
+	// VectorcallArgumentsOffset flag; kwnames is a tuple of keyword
+	// name strings (or nil).
+	//
+	// CPython: Include/cpython/object.h tp_vectorcall_offset + Py_TPFLAGS_HAVE_VECTORCALL
+	Vectorcall func(callable Object, args []Object, nargsf uint, kwnames *Tuple) (Object, error)
+	// Getattro is the tp_getattro slot. Receives the owner and the
+	// attribute name (as a Str), returns the attribute value or an
+	// error. Mirrors getattrofunc.
+	//
+	// CPython: Include/cpython/object.h tp_getattro
+	Getattro func(o Object, name Object) (Object, error)
+	// Setattro is the tp_setattro slot. value==nil signals a delete
+	// (PyObject_DelAttr forwards there). Mirrors setattrofunc.
+	//
+	// CPython: Include/cpython/object.h tp_setattro
+	Setattro func(o Object, name Object, value Object) error
 	Dealloc  func(o Object)
 
 	Number   *NumberMethods
@@ -58,13 +78,24 @@ type Type struct {
 //
 // CPython: Include/cpython/object.h:L195 PyNumberMethods
 type NumberMethods struct {
-	Add      func(a, b Object) (Object, error)
-	Subtract func(a, b Object) (Object, error)
-	Multiply func(a, b Object) (Object, error)
-	Negative func(o Object) (Object, error)
-	Bool     func(o Object) (bool, error)
-	Int      func(o Object) (Object, error)
-	Float    func(o Object) (Object, error)
+	Add         func(a, b Object) (Object, error)
+	Subtract    func(a, b Object) (Object, error)
+	Multiply    func(a, b Object) (Object, error)
+	TrueDivide  func(a, b Object) (Object, error)
+	FloorDivide func(a, b Object) (Object, error)
+	Remainder   func(a, b Object) (Object, error)
+	And         func(a, b Object) (Object, error)
+	Or          func(a, b Object) (Object, error)
+	Xor         func(a, b Object) (Object, error)
+	Lshift      func(a, b Object) (Object, error)
+	Rshift      func(a, b Object) (Object, error)
+	Power       func(a, b, mod Object) (Object, error)
+	Negative    func(o Object) (Object, error)
+	Positive    func(o Object) (Object, error)
+	Invert      func(o Object) (Object, error)
+	Bool        func(o Object) (bool, error)
+	Int         func(o Object) (Object, error)
+	Float       func(o Object) (Object, error)
 }
 
 // SequenceMethods is the v0.2 subset of tp_as_sequence.

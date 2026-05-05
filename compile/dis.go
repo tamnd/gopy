@@ -45,7 +45,7 @@ func disasmCode(b *strings.Builder, co *Code, indent int) {
 		if op == EXTENDED_ARG {
 			continue
 		}
-		fmt.Fprintf(b, "%s%4d %-30s %d\n", prefix, off, opName(op), oparg)
+		fmt.Fprintf(b, "%s%4d %-30s %d\n", prefix, off, op.Name(), oparg)
 	}
 	for _, c := range co.Consts {
 		if inner, ok := c.(*Code); ok {

@@ -25,14 +25,16 @@ func (c *Compiler) visitCall(e *ast.Call) error {
 	return c.emitCallPlain(e)
 }
 
-// emitCallPlain: LOAD callable, push self placeholder (None),
-// LOAD args, CALL n.
+// emitCallPlain: LOAD callable, push self placeholder (NULL),
+// LOAD args, CALL n. The stack layout CALL expects (bottom to top)
+// is [callable, NULL/self, arg0, ..., argN].
 //
 // CPython: codegen_call simple branch
 func (c *Compiler) emitCallPlain(e *ast.Call) error {
 	if err := c.visitExpr(e.Func); err != nil {
 		return err
 	}
+	c.addOp(PUSH_NULL, loc(e))
 	for _, a := range e.Args {
 		if err := c.visitExpr(a); err != nil {
 			return err
@@ -50,6 +52,7 @@ func (c *Compiler) emitCallKw(e *ast.Call) error {
 	if err := c.visitExpr(e.Func); err != nil {
 		return err
 	}
+	c.addOp(PUSH_NULL, loc(e))
 	for _, a := range e.Args {
 		if err := c.visitExpr(a); err != nil {
 			return err
@@ -79,6 +82,7 @@ func (c *Compiler) emitCallEx(e *ast.Call) error {
 	if err := c.visitExpr(e.Func); err != nil {
 		return err
 	}
+	c.addOp(PUSH_NULL, loc(e))
 	c.addOpI(BUILD_LIST, 0, loc(e))
 	pending := 0
 	flushArgs := func() {

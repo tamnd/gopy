@@ -117,34 +117,94 @@ func JoinNamesWithDot(first, second *ast.Name) string {
 // CPython: Parser/action_helpers.c:181 (n-ary fold pattern)
 func JoinIDsWithDot(ids []string) string { return strings.Join(ids, ".") }
 
-// SetExprContext walks a Name / Tuple / List / Starred / Attribute /
-// Subscript tree and stamps each node's expr_context to ctx. Used
-// for assignment targets (Store) and del statements (Del).
+// SetExprContext returns a copy of expr with ctx as the context. Name,
+// Tuple, List, Subscript, Attribute and Starred are rewritten; every
+// other expression kind is returned unchanged. Tuple and List recurse
+// through their element list via setSeqContext; Starred recurses into
+// its inner value.
 //
-// CPython: Parser/action_helpers.c:323 _PyPegen_set_expr_context
-func SetExprContext(e ast.Expr, ctx ast.ExprContext) ast.Expr {
-	switch v := e.(type) {
+// CPython: Parser/action_helpers.c:309 _PyPegen_set_expr_context
+func SetExprContext(p *Parser, expr ast.Expr, ctx ast.ExprContext) ast.Expr {
+	switch v := expr.(type) {
 	case *ast.Name:
-		v.Ctx = ctx
-	case *ast.Attribute:
-		v.Ctx = ctx
-	case *ast.Subscript:
-		v.Ctx = ctx
-	case *ast.Starred:
-		v.Ctx = ctx
-		v.Value = SetExprContext(v.Value, ctx)
+		return setNameContext(p, v, ctx)
 	case *ast.Tuple:
-		v.Ctx = ctx
-		for i, el := range v.Elts {
-			v.Elts[i] = SetExprContext(el, ctx)
-		}
+		return setTupleContext(p, v, ctx)
 	case *ast.List:
-		v.Ctx = ctx
-		for i, el := range v.Elts {
-			v.Elts[i] = SetExprContext(el, ctx)
-		}
+		return setListContext(p, v, ctx)
+	case *ast.Subscript:
+		return setSubscriptContext(p, v, ctx)
+	case *ast.Attribute:
+		return setAttributeContext(p, v, ctx)
+	case *ast.Starred:
+		return setStarredContext(p, v, ctx)
 	}
-	return e
+	return expr
+}
+
+// setSeqContext walks every element of seq and rebuilds the slice with
+// each element rewritten through SetExprContext.
+//
+// CPython: Parser/action_helpers.c:243 _set_seq_context
+func setSeqContext(p *Parser, seq []ast.Expr, ctx ast.ExprContext) []ast.Expr {
+	if len(seq) == 0 {
+		return nil
+	}
+	out := make([]ast.Expr, len(seq))
+	for i, e := range seq {
+		out[i] = SetExprContext(p, e, ctx)
+	}
+	return out
+}
+
+// setNameContext returns a fresh Name carrying ctx.
+//
+// CPython: Parser/action_helpers.c:262 _set_name_context
+func setNameContext(p *Parser, e *ast.Name, ctx ast.ExprContext) ast.Expr {
+	_ = p
+	return &ast.Name{Id: e.Id, Ctx: ctx, Pos: e.Pos}
+}
+
+// setTupleContext returns a fresh Tuple whose elements have been
+// rewritten with ctx.
+//
+// CPython: Parser/action_helpers.c:268 _set_tuple_context
+func setTupleContext(p *Parser, e *ast.Tuple, ctx ast.ExprContext) ast.Expr {
+	return &ast.Tuple{Elts: setSeqContext(p, e.Elts, ctx), Ctx: ctx, Pos: e.Pos}
+}
+
+// setListContext is the List counterpart of setTupleContext.
+//
+// CPython: Parser/action_helpers.c:277 _set_list_context
+func setListContext(p *Parser, e *ast.List, ctx ast.ExprContext) ast.Expr {
+	return &ast.List{Elts: setSeqContext(p, e.Elts, ctx), Ctx: ctx, Pos: e.Pos}
+}
+
+// setSubscriptContext returns a fresh Subscript carrying ctx; the
+// value and slice are reused unchanged because subscript ctx never
+// recurses in CPython.
+//
+// CPython: Parser/action_helpers.c:286 _set_subscript_context
+func setSubscriptContext(p *Parser, e *ast.Subscript, ctx ast.ExprContext) ast.Expr {
+	_ = p
+	return &ast.Subscript{Value: e.Value, Slice: e.Slice, Ctx: ctx, Pos: e.Pos}
+}
+
+// setAttributeContext returns a fresh Attribute carrying ctx; the
+// value/attr pair is reused unchanged.
+//
+// CPython: Parser/action_helpers.c:293 _set_attribute_context
+func setAttributeContext(p *Parser, e *ast.Attribute, ctx ast.ExprContext) ast.Expr {
+	_ = p
+	return &ast.Attribute{Value: e.Value, Attr: e.Attr, Ctx: ctx, Pos: e.Pos}
+}
+
+// setStarredContext returns a fresh Starred whose inner value has
+// been rewritten through SetExprContext.
+//
+// CPython: Parser/action_helpers.c:300 _set_starred_context
+func setStarredContext(p *Parser, e *ast.Starred, ctx ast.ExprContext) ast.Expr {
+	return &ast.Starred{Value: SetExprContext(p, e.Value, ctx), Ctx: ctx, Pos: e.Pos}
 }
 
 // GetExprName returns the human-readable phrase used in

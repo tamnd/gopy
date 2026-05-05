@@ -1,226 +1,374 @@
-// Stack-depth analysis for the flowgraph. CPython runs a forward
-// dataflow over the CFG, propagating the post-instruction stack
-// height; the maximum across all blocks becomes co_stacksize.
+// Stack-depth analysis for the flowgraph. Forward dataflow over the
+// instruction stream, propagating the post-instruction stack height
+// to the fall-through successor and to each jump target. The maximum
+// across all reachable points becomes co_stacksize.
 //
-// Until the full per-opcode metadata table from
-// pycore_opcode_metadata.h is generated, we use a hand-written effect
-// table covering every opcode the codegen actually emits. Opcodes
-// outside the table contribute zero effect, which is the same default
-// CPython falls back to for unknown ops in the assertion build.
-//
-// CPython: Python/flowgraph.c:L809 calculate_stackdepth +
-// Python/compile.c stackdepth bookkeeping.
+// CPython runs the dataflow on the CFG (basicblock list); gopy walks
+// the flat instruction sequence with a worklist of instruction
+// indices. Each block-entry index plays the role of a basicblock,
+// so the algorithm is the same up to the substitution
+// "block[i]->b_startdepth" with "startDepth[i]".
 
 package compile
 
 import "fmt"
 
-// stackEffect returns (push - pop) for op with the given oparg. The
-// taken parameter selects the jump-taken vs not-taken effect for
-// conditional jumps; in CPython this is the pseudo "jump" stack
-// effect column. For non-jumping ops the value is ignored.
+// stackEffects mirrors the C struct returned by get_stack_effects. The
+// C version has room for additional columns (max effect, etc) that the
+// minimal port does not need yet.
 //
-// CPython: Python/flowgraph.c:L768 get_stack_effect
-func stackEffect(op Opcode, oparg int32, taken bool) int {
-	if e, ok := stackEffectTable[op]; ok {
-		if taken && e.jumpEffect != noJumpEffect {
-			return e.jumpEffect
-		}
-		if e.opargFunc != nil {
-			return e.opargFunc(oparg)
-		}
-		return e.effect
+// CPython: Python/flowgraph.c:762 stack_effects
+type stackEffects struct {
+	// Net is the post-instruction stack height delta (push - pop).
+	Net int
+}
+
+// getStackEffects returns the stack effect of one opcode/oparg pair.
+// jump selects the jump-taken column for branching opcodes (FOR_ITER,
+// SEND). Returns an error for opcodes outside the metadata table.
+//
+// CPython: Python/flowgraph.c:767 get_stack_effects
+func getStackEffects(op Opcode, oparg int32, jump bool, effects *stackEffects) error {
+	if op < 0 {
+		return fmt.Errorf("compile: invalid opcode %d", op)
 	}
-	// Unknown opcode: zero effect. CPython would assert here in debug
-	// builds; the caller asserts again at the end of the pass when
-	// the running depth would go negative.
-	return 0
+	// Specialized instructions are not supported. CPython gates on
+	// `opcode <= MAX_REAL_OPCODE && _PyOpcode_Deopt[opcode] != opcode`
+	// to reject specialized variants. gopy's codegen never emits
+	// specialized opcodes (the specializer is a runtime concern), so
+	// the check is structurally a no-op here; the comment preserves
+	// the invariant.
+	popped := numPopped(op, oparg)
+	pushed := numPushed(op, oparg)
+	if popped < 0 || pushed < 0 {
+		return fmt.Errorf("compile: unknown stack effect for opcode %s arg %d", op.Name(), oparg)
+	}
+	if isBlockPushOpcode(op) && !jump {
+		effects.Net = 0
+		return nil
+	}
+	effects.Net = pushed - popped
+	return nil
 }
 
-const noJumpEffect = -9999
-
-type stackEffectEntry struct {
-	effect     int
-	jumpEffect int
-	opargFunc  func(int32) int
-}
-
-func entry(e int) stackEffectEntry {
-	return stackEffectEntry{effect: e, jumpEffect: noJumpEffect}
-}
-
-func entryJump(e, jump int) stackEffectEntry {
-	return stackEffectEntry{effect: e, jumpEffect: jump}
-}
-
-func entryFunc(f func(int32) int) stackEffectEntry {
-	return stackEffectEntry{jumpEffect: noJumpEffect, opargFunc: f}
-}
-
-// stackEffectTable mirrors the per-opcode rows from
-// Python/compile.c PyCompile_OpcodeStackEffectWithJump (the same data
-// flowgraph.c reads via _PyOpcode_num_popped/_pushed). Only the rows
-// our codegen actually emits are populated.
+// isBlockPushOpcode mirrors IS_BLOCK_PUSH_OPCODE: SETUP_FINALLY,
+// SETUP_WITH, SETUP_CLEANUP push a try/with handler onto the block
+// stack and contribute a non-zero effect only when the implicit
+// exception edge is taken.
 //
-// CPython: Python/compile.c PyCompile_OpcodeStackEffectWithJump
-var stackEffectTable = map[Opcode]stackEffectEntry{
-	NOP:                        entry(0),
-	RESUME:                     entry(0),
-	POP_TOP:                    entry(-1),
-	POP_ITER:                   entry(-1),
-	PUSH_NULL:                  entry(1),
-	END_FOR:                    entry(-1),
-	END_SEND:                   entry(-1),
-	UNARY_NEGATIVE:             entry(0),
-	UNARY_NOT:                  entry(0),
-	UNARY_INVERT:               entry(0),
-	GET_ITER:                   entry(0),
-	GET_LEN:                    entry(1),
-	GET_AITER:                  entry(0),
-	GET_ANEXT:                  entry(1),
-	GET_AWAITABLE:              entry(0),
-	GET_YIELD_FROM_ITER:        entry(0),
-	BINARY_OP:                  entry(-1),
-	BINARY_SLICE:               entry(-2),
-	STORE_SLICE:                entry(-4),
-	STORE_SUBSCR:               entry(-3),
-	DELETE_SUBSCR:              entry(-2),
-	BUILD_SLICE:                entryFunc(func(a int32) int { return 1 - int(a) }),
-	BUILD_LIST:                 entryFunc(func(a int32) int { return 1 - int(a) }),
-	BUILD_SET:                  entryFunc(func(a int32) int { return 1 - int(a) }),
-	BUILD_TUPLE:                entryFunc(func(a int32) int { return 1 - int(a) }),
-	BUILD_MAP:                  entryFunc(func(a int32) int { return 1 - 2*int(a) }),
-	BUILD_STRING:               entryFunc(func(a int32) int { return 1 - int(a) }),
-	LIST_APPEND:                entry(-1),
-	SET_ADD:                    entry(-1),
-	MAP_ADD:                    entry(-2),
-	LIST_EXTEND:                entry(-1),
-	SET_UPDATE:                 entry(-1),
-	DICT_UPDATE:                entry(-1),
-	DICT_MERGE:                 entry(-1),
-	LOAD_FAST:                  entry(1),
-	LOAD_FAST_BORROW:           entry(1),
-	LOAD_FAST_CHECK:            entry(1),
-	LOAD_FAST_AND_CLEAR:        entry(1),
-	LOAD_NAME:                  entry(1),
-	LOAD_GLOBAL:                entryFunc(func(a int32) int { return 1 + int(a&1) }),
-	LOAD_DEREF:                 entry(1),
-	LOAD_FROM_DICT_OR_DEREF:    entry(0),
-	LOAD_CLOSURE:               entry(1),
-	LOAD_CONST:                 entry(1),
-	LOAD_SMALL_INT:             entry(1),
-	LOAD_COMMON_CONSTANT:       entry(1),
-	LOAD_LOCALS:                entry(1),
-	LOAD_BUILD_CLASS:           entry(1),
-	LOAD_ATTR:                  entryFunc(func(a int32) int { return int(a & 1) }),
-	LOAD_SUPER_ATTR:            entryFunc(func(a int32) int { return -1 + int(a&1) }),
-	LOAD_SPECIAL:               entry(1),
-	LOAD_FROM_DICT_OR_GLOBALS:  entry(0),
-	STORE_FAST:                 entry(-1),
-	STORE_FAST_MAYBE_NULL:      entry(-1),
-	STORE_NAME:                 entry(-1),
-	STORE_GLOBAL:               entry(-1),
-	STORE_DEREF:                entry(-1),
-	STORE_ATTR:                 entry(-2),
-	DELETE_FAST:                entry(0),
-	DELETE_NAME:                entry(0),
-	DELETE_GLOBAL:              entry(0),
-	DELETE_DEREF:               entry(0),
-	DELETE_ATTR:                entry(-1),
-	COMPARE_OP:                 entry(-1),
-	IS_OP:                      entry(-1),
-	CONTAINS_OP:                entry(-1),
-	CHECK_EXC_MATCH:            entry(0),
-	CHECK_EG_MATCH:             entry(0),
-	IMPORT_NAME:                entry(-1),
-	IMPORT_FROM:                entry(1),
-	JUMP:                       entry(0),
-	JUMP_NO_INTERRUPT:          entry(0),
-	JUMP_BACKWARD:              entry(0),
-	JUMP_BACKWARD_NO_INTERRUPT: entry(0),
-	JUMP_FORWARD:               entry(0),
-	POP_JUMP_IF_FALSE:          entry(-1),
-	POP_JUMP_IF_TRUE:           entry(-1),
-	POP_JUMP_IF_NONE:           entry(-1),
-	POP_JUMP_IF_NOT_NONE:       entry(-1),
-	FOR_ITER:                   entryJump(1, 1),
-	SEND:                       entryJump(0, -1),
-	YIELD_VALUE:                entry(0),
-	RESERVED:                   entry(0),
-	RETURN_VALUE:               entry(-1),
-	RETURN_GENERATOR:           entry(1),
-	RAISE_VARARGS:              entryFunc(func(a int32) int { return -int(a) }),
-	RERAISE:                    entry(-1),
-	INTERPRETER_EXIT:           entry(-1),
-	END_ASYNC_FOR:              entry(-2),
-	CLEANUP_THROW:              entry(-2),
-	PUSH_EXC_INFO:              entry(1),
-	POP_EXCEPT:                 entry(-1),
-	WITH_EXCEPT_START:          entry(1),
-	SETUP_WITH:                 entry(0),
-	SETUP_FINALLY:              entry(0),
-	SETUP_CLEANUP:              entry(0),
-	CALL:                       entryFunc(func(a int32) int { return -1 - int(a) }),
-	CALL_KW:                    entryFunc(func(a int32) int { return -2 - int(a) }),
-	CALL_FUNCTION_EX:           entryFunc(func(a int32) int { return -2 - int(a&1) }),
-	CALL_INTRINSIC_1:           entry(0),
-	CALL_INTRINSIC_2:           entry(-1),
-	MAKE_FUNCTION:              entry(0),
-	SET_FUNCTION_ATTRIBUTE:     entry(-1),
-	MAKE_CELL:                  entry(0),
-	COPY:                       entry(1),
-	COPY_FREE_VARS:             entry(0),
-	SWAP:                       entry(0),
-	UNPACK_SEQUENCE:            entryFunc(func(a int32) int { return int(a) - 1 }),
-	UNPACK_EX:                  entryFunc(func(a int32) int { return int(a&0xff) + int(a>>8) }),
-	FORMAT_SIMPLE:              entry(0),
-	FORMAT_WITH_SPEC:           entry(-1),
-	CONVERT_VALUE:              entry(0),
-	BUILD_INTERPOLATION:        entryFunc(func(a int32) int { return 1 - int(a&3) }),
-	BUILD_TEMPLATE:             entry(-1),
-	MATCH_MAPPING:              entry(1),
-	MATCH_SEQUENCE:             entry(1),
-	MATCH_KEYS:                 entry(1),
-	MATCH_CLASS:                entry(-2),
-	TO_BOOL:                    entry(0),
-	NOT_TAKEN:                  entry(0),
-	SETUP_ANNOTATIONS:          entry(0),
-	EXIT_INIT_CHECK:            entry(-1),
+// CPython: Include/internal/pycore_opcode_utils.h:17 IS_BLOCK_PUSH_OPCODE
+func isBlockPushOpcode(op Opcode) bool {
+	switch op {
+	case SETUP_FINALLY, SETUP_WITH, SETUP_CLEANUP:
+		return true
+	}
+	return false
 }
 
-// calculateStackdepth performs a single forward pass over the flat
-// sequence and returns the maximum running stack height plus a
-// non-negativity check. CPython's full pass tracks branches through
-// the CFG; for the minimum-viable port we run the linear walk and
-// rely on the fact that codegen emits well-balanced sequences (every
-// branch reconverges with a matching depth before re-use).
+// isScopeExitOpcode mirrors IS_SCOPE_EXIT_OPCODE.
 //
-// CPython: Python/flowgraph.c:L809 calculate_stackdepth
+// CPython: Include/internal/pycore_opcode_utils.h:52 IS_SCOPE_EXIT_OPCODE
+func isScopeExitOpcode(op Opcode) bool {
+	switch op {
+	case RETURN_VALUE, RAISE_VARARGS, RERAISE:
+		return true
+	}
+	return false
+}
+
+// numPopped returns the number of operand-stack values opcode
+// consumes for the given oparg. -1 if the opcode is unknown.
+//
+// CPython: Python/Python-ast.c via _PyOpcode_num_popped (generated from
+// Python/bytecodes.c). gopy reads the same data from a hand-maintained
+// table keyed by opcode; the table values mirror the bytecodes.c
+// "inputs" arity.
+func numPopped(op Opcode, oparg int32) int {
+	if e, ok := opcodeArity[op]; ok {
+		if e.poppedFunc != nil {
+			return e.poppedFunc(oparg)
+		}
+		return e.popped
+	}
+	return -1
+}
+
+// numPushed returns the number of operand-stack values opcode
+// produces for the given oparg. -1 if the opcode is unknown.
+//
+// CPython: _PyOpcode_num_pushed.
+func numPushed(op Opcode, oparg int32) int {
+	if e, ok := opcodeArity[op]; ok {
+		if e.pushedFunc != nil {
+			return e.pushedFunc(oparg)
+		}
+		return e.pushed
+	}
+	return -1
+}
+
+// arityEntry stores the popped/pushed counts for one opcode. Either
+// the constant fields or the oparg-dependent function fields are used,
+// matching the two shapes of CPython's bytecodes.c "inputs"/"outputs"
+// declarations.
+type arityEntry struct {
+	popped, pushed         int
+	poppedFunc, pushedFunc func(int32) int
+}
+
+func arity(p, u int) arityEntry { return arityEntry{popped: p, pushed: u} }
+
+// arityFunc is the generic constructor for opcodes whose stack effect
+// depends on oparg.
+func arityFunc(pop, push func(int32) int) arityEntry {
+	return arityEntry{poppedFunc: pop, pushedFunc: push}
+}
+
+// constI returns a constant-int func used by arityFunc when only one
+// of (pop, push) is oparg-dependent.
+func constI(n int) func(int32) int { return func(int32) int { return n } }
+
+// opcodeArity is the per-opcode (popped, pushed) table. Mirrors the
+// "inputs" / "outputs" arity fields generated into
+// pycore_opcode_metadata.h. Only the rows codegen actually emits are
+// populated; opcodes outside the table are reported as -1 and surface
+// an error from getStackEffects.
+//
+// CPython: Include/internal/pycore_opcode_metadata.h
+// _PyOpcode_num_popped / _PyOpcode_num_pushed switches.
+var opcodeArity = map[Opcode]arityEntry{
+	NOP:                        arity(0, 0),
+	RESUME:                     arity(0, 0),
+	POP_TOP:                    arity(1, 0),
+	POP_ITER:                   arity(1, 0),
+	PUSH_NULL:                  arity(0, 1),
+	END_FOR:                    arity(1, 0),
+	END_SEND:                   arity(2, 1),
+	UNARY_NEGATIVE:             arity(1, 1),
+	UNARY_NOT:                  arity(1, 1),
+	UNARY_INVERT:               arity(1, 1),
+	GET_ITER:                   arity(1, 1),
+	GET_LEN:                    arity(1, 2),
+	GET_AITER:                  arity(1, 1),
+	GET_ANEXT:                  arity(1, 2),
+	GET_AWAITABLE:              arity(1, 1),
+	GET_YIELD_FROM_ITER:        arity(1, 1),
+	BINARY_OP:                  arity(2, 1),
+	BINARY_SLICE:               arity(3, 1),
+	STORE_SLICE:                arity(4, 0),
+	STORE_SUBSCR:               arity(3, 0),
+	DELETE_SUBSCR:              arity(2, 0),
+	BUILD_SLICE:                arityFunc(func(a int32) int { return int(a) }, constI(1)),
+	BUILD_LIST:                 arityFunc(func(a int32) int { return int(a) }, constI(1)),
+	BUILD_SET:                  arityFunc(func(a int32) int { return int(a) }, constI(1)),
+	BUILD_TUPLE:                arityFunc(func(a int32) int { return int(a) }, constI(1)),
+	BUILD_MAP:                  arityFunc(func(a int32) int { return 2 * int(a) }, constI(1)),
+	BUILD_STRING:               arityFunc(func(a int32) int { return int(a) }, constI(1)),
+	LIST_APPEND:                arity(1, 0),
+	SET_ADD:                    arity(1, 0),
+	MAP_ADD:                    arity(2, 0),
+	LIST_EXTEND:                arity(1, 0),
+	SET_UPDATE:                 arity(1, 0),
+	DICT_UPDATE:                arity(1, 0),
+	DICT_MERGE:                 arity(1, 0),
+	LOAD_FAST:                  arity(0, 1),
+	LOAD_FAST_BORROW:           arity(0, 1),
+	LOAD_FAST_CHECK:            arity(0, 1),
+	LOAD_FAST_AND_CLEAR:        arity(0, 1),
+	LOAD_NAME:                  arity(0, 1),
+	LOAD_GLOBAL:                arityFunc(constI(0), func(a int32) int { return 1 + int(a&1) }),
+	LOAD_DEREF:                 arity(0, 1),
+	LOAD_FROM_DICT_OR_DEREF:    arity(1, 1),
+	LOAD_CLOSURE:               arity(0, 1),
+	LOAD_CONST:                 arity(0, 1),
+	LOAD_SMALL_INT:             arity(0, 1),
+	LOAD_COMMON_CONSTANT:       arity(0, 1),
+	LOAD_LOCALS:                arity(0, 1),
+	LOAD_BUILD_CLASS:           arity(0, 1),
+	LOAD_ATTR:                  arityFunc(constI(1), func(a int32) int { return 1 + int(a&1) }),
+	LOAD_SUPER_ATTR:            arityFunc(constI(3), func(a int32) int { return 2 + int(a&1) }),
+	LOAD_SPECIAL:               arity(1, 2),
+	LOAD_FROM_DICT_OR_GLOBALS:  arity(1, 1),
+	STORE_FAST:                 arity(1, 0),
+	STORE_FAST_MAYBE_NULL:      arity(1, 0),
+	STORE_NAME:                 arity(1, 0),
+	STORE_GLOBAL:               arity(1, 0),
+	STORE_DEREF:                arity(1, 0),
+	STORE_ATTR:                 arity(2, 0),
+	DELETE_FAST:                arity(0, 0),
+	DELETE_NAME:                arity(0, 0),
+	DELETE_GLOBAL:              arity(0, 0),
+	DELETE_DEREF:               arity(0, 0),
+	DELETE_ATTR:                arity(1, 0),
+	COMPARE_OP:                 arity(2, 1),
+	IS_OP:                      arity(2, 1),
+	CONTAINS_OP:                arity(2, 1),
+	CHECK_EXC_MATCH:            arity(2, 2),
+	CHECK_EG_MATCH:             arity(2, 2),
+	IMPORT_NAME:                arity(2, 1),
+	IMPORT_FROM:                arity(1, 2),
+	JUMP:                       arity(0, 0),
+	JUMP_NO_INTERRUPT:          arity(0, 0),
+	JUMP_BACKWARD:              arity(0, 0),
+	JUMP_BACKWARD_NO_INTERRUPT: arity(0, 0),
+	JUMP_FORWARD:               arity(0, 0),
+	POP_JUMP_IF_FALSE:          arity(1, 0),
+	POP_JUMP_IF_TRUE:           arity(1, 0),
+	POP_JUMP_IF_NONE:           arity(1, 0),
+	POP_JUMP_IF_NOT_NONE:       arity(1, 0),
+	FOR_ITER:                   arity(1, 2),
+	SEND:                       arity(2, 2),
+	YIELD_VALUE:                arity(1, 1),
+	RESERVED:                   arity(0, 0),
+	RETURN_VALUE:               arity(1, 0),
+	RETURN_GENERATOR:           arity(0, 1),
+	RAISE_VARARGS:              arityFunc(func(a int32) int { return int(a) }, constI(0)),
+	RERAISE:                    arity(1, 0),
+	INTERPRETER_EXIT:           arity(1, 0),
+	END_ASYNC_FOR:              arity(2, 0),
+	CLEANUP_THROW:              arity(3, 1),
+	PUSH_EXC_INFO:              arity(1, 2),
+	POP_EXCEPT:                 arity(1, 0),
+	WITH_EXCEPT_START:          arity(4, 5),
+	SETUP_WITH:                 arity(0, 0),
+	SETUP_FINALLY:              arity(0, 0),
+	SETUP_CLEANUP:              arity(0, 0),
+	POP_BLOCK:                  arity(0, 0),
+	CALL:                       arityFunc(func(a int32) int { return 2 + int(a) }, constI(1)),
+	CALL_KW:                    arityFunc(func(a int32) int { return 3 + int(a) }, constI(1)),
+	CALL_FUNCTION_EX:           arityFunc(func(a int32) int { return 3 + int(a&1) }, constI(1)),
+	CALL_INTRINSIC_1:           arity(1, 1),
+	CALL_INTRINSIC_2:           arity(2, 1),
+	MAKE_FUNCTION:              arity(1, 1),
+	SET_FUNCTION_ATTRIBUTE:     arity(2, 1),
+	MAKE_CELL:                  arity(0, 0),
+	COPY:                       arity(0, 1),
+	COPY_FREE_VARS:             arity(0, 0),
+	SWAP:                       arity(0, 0),
+	UNPACK_SEQUENCE:            arityFunc(constI(1), func(a int32) int { return int(a) }),
+	UNPACK_EX:                  arityFunc(constI(1), func(a int32) int { return int(a&0xff) + 1 + int(a>>8) }),
+	FORMAT_SIMPLE:              arity(1, 1),
+	FORMAT_WITH_SPEC:           arity(2, 1),
+	CONVERT_VALUE:              arity(1, 1),
+	BUILD_INTERPOLATION:        arityFunc(func(a int32) int { return 2 + int(a&1) }, constI(1)),
+	BUILD_TEMPLATE:             arity(2, 1),
+	MATCH_MAPPING:              arity(1, 2),
+	MATCH_SEQUENCE:             arity(1, 2),
+	MATCH_KEYS:                 arity(2, 3),
+	MATCH_CLASS:                arity(3, 1),
+	TO_BOOL:                    arity(1, 1),
+	NOT_TAKEN:                  arity(0, 0),
+	SETUP_ANNOTATIONS:          arity(0, 0),
+	EXIT_INIT_CHECK:            arity(1, 0),
+}
+
+// stackdepthMin is the sentinel CPython sets as b_startdepth before
+// the dataflow visits a block. -1 says the block has not yet been
+// reached; any first push wins.
+//
+// CPython: Python/flowgraph.c:813 INT_MIN init
+const stackdepthMin = -1
+
+// stackdepthPush pushes idx onto the worklist when the proposed depth
+// is greater than the current startDepth[idx]. Mirrors the CPython
+// helper of the same name. The CPython version asserts startDepth is
+// either uninitialised or matches the new value; gopy reports the
+// inconsistency through the error return.
+//
+// CPython: Python/flowgraph.c:790 stackdepth_push
+func stackdepthPush(stack []int, sp int, startDepth []int, idx, depth int) (int, error) {
+	if startDepth[idx] >= 0 && startDepth[idx] != depth {
+		return sp, fmt.Errorf("compile: invalid CFG, inconsistent stackdepth at %d (have %d, got %d)",
+			idx, startDepth[idx], depth)
+	}
+	if startDepth[idx] < depth && startDepth[idx] < 100 {
+		startDepth[idx] = depth
+		stack[sp] = idx
+		sp++
+	}
+	return sp, nil
+}
+
+// calculateStackdepth performs the forward dataflow over seq and
+// returns the maximum running stack height. Mirrors CPython's CFG-based
+// `calculate_stackdepth` with the basicblock list flattened to a
+// worklist of instruction indices.
+//
+// CPython: Python/flowgraph.c:808 calculate_stackdepth
 func calculateStackdepth(seq *Sequence) (int, error) {
-	depth := 0
-	maxDepth := 0
-	for i, ins := range seq.Instrs {
-		eff := stackEffect(ins.Op, ins.Oparg, false)
-		depth += eff
+	if len(seq.Instrs) == 0 {
+		return 0, nil
+	}
+	startDepth := make([]int, len(seq.Instrs))
+	for i := range startDepth {
+		startDepth[i] = stackdepthMin
+	}
+	stack := make([]int, len(seq.Instrs))
+	sp := 0
+	maxdepth := 0
+	var err error
+	sp, err = stackdepthPush(stack, sp, startDepth, 0, 0)
+	if err != nil {
+		return 0, err
+	}
+	for sp > 0 {
+		sp--
+		i := stack[sp]
+		depth := startDepth[i]
 		if depth < 0 {
-			return 0, fmt.Errorf("compile: negative stackdepth %d at instr %d (%s)", depth, i, opName(ins.Op))
+			continue
 		}
-		if depth > maxDepth {
-			maxDepth = depth
+		j := i
+		for j < len(seq.Instrs) {
+			ins := &seq.Instrs[j]
+			var effects stackEffects
+			if err := getStackEffects(ins.Op, ins.Oparg, false, &effects); err != nil {
+				return 0, fmt.Errorf("compile: invalid stack effect for opcode=%s arg=%d: %w",
+					ins.Op.Name(), ins.Oparg, err)
+			}
+			newDepth := depth + effects.Net
+			if newDepth < 0 {
+				return 0, fmt.Errorf("compile: invalid CFG, stack underflow at %d (%s)",
+					j, ins.Op.Name())
+			}
+			if depth > maxdepth {
+				maxdepth = depth
+			}
+			if HasTarget(ins.Op) && ins.Op != END_ASYNC_FOR {
+				if err := getStackEffects(ins.Op, ins.Oparg, true, &effects); err != nil {
+					return 0, fmt.Errorf("compile: invalid stack effect for opcode=%s arg=%d (jump): %w",
+						ins.Op.Name(), ins.Oparg, err)
+				}
+				targetDepth := depth + effects.Net
+				if targetDepth < 0 {
+					return 0, fmt.Errorf("compile: invalid CFG, target stackdepth %d at %d (%s)",
+						targetDepth, j, ins.Op.Name())
+				}
+				if depth > maxdepth {
+					maxdepth = depth
+				}
+				targetIdx := int(ins.Oparg)
+				if targetIdx >= 0 && targetIdx < len(seq.Instrs) {
+					sp, err = stackdepthPush(stack, sp, startDepth, targetIdx, targetDepth)
+					if err != nil {
+						return 0, err
+					}
+				}
+			}
+			depth = newDepth
+			if isUnconditionalJump(ins.Op) || isScopeExitOpcode(ins.Op) {
+				// remaining code is dead
+				j = len(seq.Instrs)
+				break
+			}
+			j++
+		}
+		if j < len(seq.Instrs) {
+			sp, err = stackdepthPush(stack, sp, startDepth, j, depth)
+			if err != nil {
+				return 0, err
+			}
 		}
 	}
-	return maxDepth, nil
-}
-
-// opName returns the textual mnemonic for op, used by error messages.
-// Falls back to a numeric form when the table does not know op.
-//
-// CPython: Python/compile.c _PyOpcode_OpName
-func opName(op Opcode) string {
-	if int(op) >= 0 && int(op) < len(opcodeName) {
-		if n := opcodeName[op]; n != "" {
-			return n
-		}
-	}
-	return fmt.Sprintf("op#%d", op)
+	return maxdepth, nil
 }

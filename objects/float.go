@@ -1,6 +1,7 @@
 package objects
 
 import (
+	"errors"
 	"fmt"
 	"math"
 	"strconv"
@@ -27,12 +28,16 @@ func init() {
 	FloatType.Hash = floatHash
 	FloatType.RichCmp = floatRichCmp
 	FloatType.Number = &NumberMethods{
-		Add:      floatAdd,
-		Subtract: floatSub,
-		Multiply: floatMul,
-		Negative: floatNeg,
-		Bool:     floatBool,
-		Float:    func(o Object) (Object, error) { return o, nil },
+		Add:         floatAdd,
+		Subtract:    floatSub,
+		Multiply:    floatMul,
+		TrueDivide:  floatTrueDiv,
+		FloorDivide: floatFloorDiv,
+		Remainder:   floatMod,
+		Negative:    floatNeg,
+		Positive:    func(o Object) (Object, error) { return o, nil },
+		Bool:        floatBool,
+		Float:       func(o Object) (Object, error) { return o, nil },
 	}
 }
 
@@ -151,6 +156,56 @@ func floatMul(a, b Object) (Object, error) {
 
 func floatNeg(o Object) (Object, error) {
 	return NewFloat(-o.(*Float).v), nil
+}
+
+// floatTrueDiv mirrors CPython's float_true_divide; division by zero
+// raises ZeroDivisionError rather than producing inf.
+//
+// CPython: Objects/floatobject.c float_true_divide
+func floatTrueDiv(a, b Object) (Object, error) {
+	af, bf, ok := floatPair(a, b)
+	if !ok {
+		return notImplemented(), nil
+	}
+	if bf == 0 {
+		return nil, errors.New("ZeroDivisionError: float division by zero")
+	}
+	return NewFloat(af / bf), nil
+}
+
+// floatFloorDiv returns floor(a/b) as a float, matching Python's
+// `__floordiv__`. The result is still a float when both operands are
+// float; the int / int case stays in intFloorDiv.
+//
+// CPython: Objects/floatobject.c float_floor_div
+func floatFloorDiv(a, b Object) (Object, error) {
+	af, bf, ok := floatPair(a, b)
+	if !ok {
+		return notImplemented(), nil
+	}
+	if bf == 0 {
+		return nil, errors.New("ZeroDivisionError: float floor division by zero")
+	}
+	return NewFloat(math.Floor(af / bf)), nil
+}
+
+// floatMod implements Python `%` for floats, where the sign of the
+// result matches the divisor (like math.Mod, then adjusted).
+//
+// CPython: Objects/floatobject.c float_rem
+func floatMod(a, b Object) (Object, error) {
+	af, bf, ok := floatPair(a, b)
+	if !ok {
+		return notImplemented(), nil
+	}
+	if bf == 0 {
+		return nil, errors.New("ZeroDivisionError: float modulo")
+	}
+	r := math.Mod(af, bf)
+	if r != 0 && (r < 0) != (bf < 0) {
+		r += bf
+	}
+	return NewFloat(r), nil
 }
 
 func floatBool(o Object) (bool, error) {

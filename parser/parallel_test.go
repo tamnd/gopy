@@ -1,14 +1,14 @@
-// Spec 1642 surface guarantee: distinct ParseString calls are
-// goroutine-safe. One Parser instance is not, but the package-level
-// entry point hands a fresh State and Parser to each call so they
-// must not share state.
+// Distinct ParseString calls must be goroutine-safe. One Parser
+// instance is not, but the package-level entry point hands a fresh
+// State and Parser to each call so they must not share state.
 
 package parser
 
 import (
-	"errors"
 	"sync"
 	"testing"
+
+	"github.com/tamnd/gopy/ast"
 )
 
 func TestParseStringConcurrent(t *testing.T) {
@@ -20,9 +20,13 @@ func TestParseStringConcurrent(t *testing.T) {
 		go func(id int) {
 			defer wg.Done()
 			for range calls {
-				_, err := ParseString("x = 1\n", "x.py", ModeFile)
-				if !errors.Is(err, ErrParserNotImplemented) {
-					t.Errorf("goroutine %d: err = %v, want sentinel", id, err)
+				mod, err := ParseString("x = 1\n", "x.py", ModeFile)
+				if err != nil {
+					t.Errorf("goroutine %d: %v", id, err)
+					return
+				}
+				if _, ok := mod.(*ast.Module); !ok {
+					t.Errorf("goroutine %d: got %T, want *ast.Module", id, mod)
 					return
 				}
 			}

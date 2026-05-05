@@ -80,61 +80,222 @@ func isComplex(v any) bool {
 // CPython: Parser/action_helpers.c:716 _PyPegen_augoperator
 func AugOp(op ast.Operator) ast.Operator { return op }
 
-// ConcatenateStrings joins adjacent Constant string nodes into
-// one. The C source flattens at the AST level; the Go version
-// returns a single Constant when every piece is a plain string,
-// otherwise it leaves the slice for the JoinedStr builder to
-// handle.
+// ConcatenateStrings folds a sequence of adjacent string / fstring
+// pieces into a single AST node. The shape mirrors CPython exactly:
+//
+//   - all-plain unicode pieces collapse to one Constant string;
+//   - all-bytes pieces collapse to one Constant []byte;
+//   - mixing bytes with anything non-bytes pins the parser's error
+//     indicator (the caller surfaces "cannot mix bytes and nonbytes
+//     literals");
+//   - any f-string piece flips the result into a JoinedStr whose
+//     values are the flattened-and-folded element list.
+//
+// EXTRA position arguments are dropped at the action-translator layer,
+// so the assembled nodes use ast.NoPos.
 //
 // CPython: Parser/action_helpers.c:1860 _PyPegen_concatenate_strings
-func ConcatenateStrings(parts []ast.Expr) ast.Expr {
-	if len(parts) == 0 {
+func ConcatenateStrings(p *Parser, parts []ast.Expr) ast.Expr {
+	n := len(parts)
+	if n == 0 {
 		return nil
 	}
-	if len(parts) == 1 {
-		return parts[0]
+	fStringFound := false
+	unicodeFound := false
+	bytesFound := false
+	for _, elem := range parts {
+		switch e := elem.(type) {
+		case *ast.Constant:
+			if _, isBytes := e.Value.([]byte); isBytes {
+				bytesFound = true
+			} else {
+				unicodeFound = true
+			}
+		case *ast.JoinedStr:
+			fStringFound = true
+		case *ast.TemplateStr:
+			// python.gram routes TemplateStr through
+			// _PyPegen_concatenate_tstrings; reaching this branch
+			// means a grammar bug, not user input.
+			return nil
+		default:
+			fStringFound = true
+		}
 	}
-	if joined, ok := tryJoinPlainConstants(parts); ok {
-		return joined
+	if (unicodeFound || fStringFound) && bytesFound {
+		p.errorIndicator = true
+		return nil
 	}
-	return &ast.JoinedStr{Values: parts}
+	if !fStringFound {
+		if n == 1 {
+			return parts[0]
+		}
+		if bytesFound {
+			return buildConcatenatedBytes(parts)
+		}
+		return buildConcatenatedUnicode(parts)
+	}
+	return buildConcatenatedJoinedStr(parts)
 }
 
-func tryJoinPlainConstants(parts []ast.Expr) (ast.Expr, bool) {
+// buildConcatenatedBytes folds an all-bytes part list into a single
+// Constant whose Value is the concatenated []byte. The kind of the
+// first piece propagates, mirroring the unicode path even though
+// bytes literals never carry a u/b kind annotation in practice.
+//
+// CPython: Parser/action_helpers.c:1610 _build_concatenated_bytes
+func buildConcatenatedBytes(parts []ast.Expr) ast.Expr {
+	var kind *string
+	if c, ok := parts[0].(*ast.Constant); ok {
+		kind = c.Kind
+	}
+	var out []byte
+	for _, elem := range parts {
+		c, ok := elem.(*ast.Constant)
+		if !ok {
+			return nil
+		}
+		b, _ := c.Value.([]byte)
+		out = append(out, b...)
+	}
+	return &ast.Constant{Value: out, Kind: kind, Pos: ast.NoPos}
+}
+
+// buildConcatenatedUnicode folds adjacent plain-string Constants. The
+// kind of the first piece wins ("u'a' 'b'" -> u"ab", "'a' u'b'" ->
+// "ab").
+//
+// CPython: Parser/action_helpers.c:1636 _build_concatenated_unicode
+func buildConcatenatedUnicode(parts []ast.Expr) ast.Expr {
+	first, ok := parts[0].(*ast.Constant)
+	if !ok {
+		return nil
+	}
+	kind := first.Kind
 	var sb strings.Builder
-	first := parts[0]
-	pos := first.Position()
-	for _, p := range parts {
-		c, ok := p.(*ast.Constant)
+	for _, elem := range parts {
+		c, ok := elem.(*ast.Constant)
 		if !ok {
-			return nil, false
+			return nil
 		}
-		s, ok := c.Value.(string)
-		if !ok {
-			return nil, false
-		}
+		s, _ := c.Value.(string)
 		sb.WriteString(s)
 	}
-	return &ast.Constant{Value: sb.String(), Pos: pos}, true
+	return &ast.Constant{Value: sb.String(), Kind: kind, Pos: ast.NoPos}
 }
 
-// FunctionDefDecorators returns a copy of fn with decorators stamped
-// in. The C source rebuilds the FunctionDef / AsyncFunctionDef node
-// to keep arena ownership clean; gopy mutates in place because the
-// node already lives in the parser's value heap.
+// buildConcatenatedStr flattens nested JoinedStr / TemplateStr
+// children into a single value list, then folds runs of adjacent
+// Constant pieces and drops empty Constants. The fold preserves the
+// kind of the run's first piece, matching unicode-concat semantics.
+//
+// CPython: Parser/action_helpers.c:1682 _build_concatenated_str
+func buildConcatenatedStr(parts []ast.Expr) []ast.Expr {
+	var flattened []ast.Expr
+	for _, elem := range parts {
+		switch e := elem.(type) {
+		case *ast.JoinedStr:
+			flattened = append(flattened, e.Values...)
+		case *ast.TemplateStr:
+			flattened = append(flattened, e.Values...)
+		default:
+			flattened = append(flattened, elem)
+		}
+	}
+	var values []ast.Expr
+	for i := 0; i < len(flattened); i++ {
+		elem := flattened[i]
+		if c, ok := elem.(*ast.Constant); ok {
+			if i+1 < len(flattened) {
+				if _, isConst := flattened[i+1].(*ast.Constant); isConst {
+					firstElem := c
+					kind := firstElem.Kind
+					var sb strings.Builder
+					j := i
+					for ; j < len(flattened); j++ {
+						cc, ok := flattened[j].(*ast.Constant)
+						if !ok {
+							break
+						}
+						if s, ok := cc.Value.(string); ok {
+							sb.WriteString(s)
+						}
+					}
+					i = j - 1
+					folded := &ast.Constant{Value: sb.String(), Kind: kind, Pos: ast.NoPos}
+					elem = folded
+					c = folded
+				}
+			}
+			if s, ok := c.Value.(string); ok && s == "" {
+				continue
+			}
+		}
+		values = append(values, elem)
+	}
+	return values
+}
+
+// buildConcatenatedJoinedStr wraps the folded value list in a
+// JoinedStr.
+//
+// CPython: Parser/action_helpers.c:1838 _build_concatenated_joined_str
+func buildConcatenatedJoinedStr(parts []ast.Expr) ast.Expr {
+	return &ast.JoinedStr{Values: buildConcatenatedStr(parts), Pos: ast.NoPos}
+}
+
+// FunctionDefDecorators returns a fresh FunctionDef / AsyncFunctionDef
+// equivalent to fn but with decorators stamped in. CPython rebuilds
+// the node so the original (decorator-free) value the function_def_raw
+// rule produced stays untouched in the arena.
 //
 // CPython: Parser/action_helpers.c:727 _PyPegen_function_def_decorators
-func FunctionDefDecorators(decorators []ast.Expr, fn ast.Stmt) ast.Stmt {
+func FunctionDefDecorators(p *Parser, decorators []ast.Expr, fn ast.Stmt) ast.Stmt {
+	_ = p
 	switch v := fn.(type) {
-	case *ast.FunctionDef:
-		v.DecoratorList = decorators
-		return v
 	case *ast.AsyncFunctionDef:
-		v.DecoratorList = decorators
-		return v
-	case *ast.ClassDef:
-		v.DecoratorList = decorators
-		return v
+		return &ast.AsyncFunctionDef{
+			Name:          v.Name,
+			Args:          v.Args,
+			Body:          v.Body,
+			DecoratorList: decorators,
+			Returns:       v.Returns,
+			TypeComment:   v.TypeComment,
+			TypeParams:    v.TypeParams,
+			Pos:           v.Pos,
+		}
+	case *ast.FunctionDef:
+		return &ast.FunctionDef{
+			Name:          v.Name,
+			Args:          v.Args,
+			Body:          v.Body,
+			DecoratorList: decorators,
+			Returns:       v.Returns,
+			TypeComment:   v.TypeComment,
+			TypeParams:    v.TypeParams,
+			Pos:           v.Pos,
+		}
 	}
 	return fn
+}
+
+// ClassDefDecorators returns a fresh ClassDef equivalent to classDef
+// but with decorators stamped in.
+//
+// CPython: Parser/action_helpers.c:756 _PyPegen_class_def_decorators
+func ClassDefDecorators(p *Parser, decorators []ast.Expr, classDef ast.Stmt) ast.Stmt {
+	_ = p
+	v, ok := classDef.(*ast.ClassDef)
+	if !ok {
+		return classDef
+	}
+	return &ast.ClassDef{
+		Name:          v.Name,
+		Bases:         v.Bases,
+		Keywords:      v.Keywords,
+		Body:          v.Body,
+		DecoratorList: decorators,
+		TypeParams:    v.TypeParams,
+		Pos:           v.Pos,
+	}
 }

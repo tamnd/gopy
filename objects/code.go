@@ -16,6 +16,8 @@ package objects
 //
 // CPython: Include/internal/pycore_code.h:115 _PyCodeObject
 type Code struct {
+	Header
+
 	// Argument shape. CPython sets all four counts at compile time;
 	// the interpreter reads them when binding a CALL_FUNCTION.
 	Argcount        int
@@ -59,4 +61,16 @@ type Code struct {
 	// ExceptionTable is the compact try/except table the
 	// interpreter walks on RAISE_VARARGS / END_FINALLY.
 	ExceptionTable []byte
+}
+
+// CodeType is the type singleton for code objects.
+//
+// CPython: Objects/codeobject.c PyCode_Type
+var CodeType = NewType("code", []*Type{objectType})
+
+// NewCode returns a Code with its header bound to CodeType.
+func NewCode() *Code {
+	c := &Code{}
+	c.init(CodeType)
+	return c
 }

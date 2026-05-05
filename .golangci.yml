@@ -60,8 +60,10 @@ linters:
     revive:
       rules:
         - name: var-naming
-        - name: package-comments
-        - name: exported
+        # package-comments and exported are disabled because the
+        # CPython-parity header style (citing the upstream file at
+        # the top of every .go) does not start with "Package <name>"
+        # and the rule fires per file rather than per package.
         - name: error-return
         - name: error-naming
         - name: if-return
@@ -80,7 +82,10 @@ linters:
         - name: redefines-builtin-id
         - name: superfluous-else
         - name: unreachable-code
-        - name: unused-parameter
+        # unused-parameter is disabled because the dispatch-table
+        # function signatures carry shared shape (e.g. `ts *Thread`)
+        # for trait conformance even when a particular handler does
+        # not need the value.
         - name: var-declaration
     misspell:
       locale: US
@@ -151,6 +156,25 @@ linters:
         linters:
           - gocognit
           - gocyclo
+      # builtin_print_impl carries CPython's surface for print():
+      # file/sep/end/flush kwargs plus the per-arg loop. The branch
+      # tree mirrors Python/bltinmodule.c.
+      - path: builtins/print\.go
+        linters:
+          - gocognit
+          - gocyclo
+      # calculateStackdepth ports Python/flowgraph.c branch tree.
+      # Collapsing it would diverge from the source shape.
+      - path: compile/flowgraph_stackdepth\.go
+        linters:
+          - gocognit
+          - gocyclo
+      # buildConcatenatedStr ports the string-folding branch tree
+      # from Parser/action_helpers.c.
+      - path: parser/pegen/extras\.go
+        linters:
+          - gocognit
+          - gocyclo
       # Pegen scaffolding has many helpers held for the generated
       # parser table; flagging them as unused now would force ugly
       # nolint stamps everywhere. Re-enabled once parser_gen lands.
@@ -181,6 +205,12 @@ formatters:
     goimports:
       local-prefixes:
         - github.com/tamnd/gopy
+  exclusions:
+    paths:
+      # Generated parser table; the generator emits this verbatim
+      # and gofmt-aligning it would diverge from the rule numbering
+      # in the source grammar.
+      - parser/pegen/parser_gen.go
 
 issues:
   max-same-issues: 0

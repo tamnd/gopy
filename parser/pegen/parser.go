@@ -135,14 +135,26 @@ func New(tok *lexer.State, start StartRule, flags int) *Parser {
 // fillToken pulls one more token from the lexer into the buffer and
 // returns its index. Returns -1 on lexer EOF.
 //
+// Generic OP tokens get upgraded to the specific operator type their
+// bytes name (PyToken_OneChar / TwoChars / ThreeChars in CPython).
+// The grammar matches operator tokens by exact type (EQUAL, COMMA,
+// PLUSEQUAL, ...), so a flat OP would never match.
+//
 // CPython: Parser/pegen.c:62 _PyPegen_fill_token
+// CPython: Parser/lexer/lexer.c PyToken_OneChar / TwoChars / ThreeChars
 func (p *Parser) fillToken() int {
 	if p.errorIndicator {
 		return -1
 	}
 	tk := p.tok.Get()
+	kind := tk.Kind
+	if kind == tokenize.OP {
+		if exact, ok := opTokenType[string(tk.Bytes)]; ok {
+			kind = exact
+		}
+	}
 	t := &Token{
-		Type:     tk.Kind,
+		Type:     kind,
 		Bytes:    tk.Bytes,
 		Level:    tk.Level,
 		Lineno:   tk.Start.Line,
@@ -155,6 +167,63 @@ func (p *Parser) fillToken() int {
 	idx := p.fill
 	p.fill++
 	return idx
+}
+
+// opTokenType maps the source bytes of an operator (or punctuation)
+// to the specific tokenize.Type CPython's tokenizer would assign.
+// The lexer flattens everything into OP; the grammar reads exact
+// types, so the parser has to upgrade on intake.
+//
+// CPython: Parser/lexer/lexer.c PyToken_OneChar / TwoChars / ThreeChars
+var opTokenType = map[string]tokenize.Type{
+	"(":   tokenize.LPAR,
+	")":   tokenize.RPAR,
+	"[":   tokenize.LSQB,
+	"]":   tokenize.RSQB,
+	"{":   tokenize.LBRACE,
+	"}":   tokenize.RBRACE,
+	",":   tokenize.COMMA,
+	":":   tokenize.COLON,
+	";":   tokenize.SEMI,
+	".":   tokenize.DOT,
+	"+":   tokenize.PLUS,
+	"-":   tokenize.MINUS,
+	"*":   tokenize.STAR,
+	"/":   tokenize.SLASH,
+	"|":   tokenize.VBAR,
+	"&":   tokenize.AMPER,
+	"<":   tokenize.LESS,
+	">":   tokenize.GREATER,
+	"=":   tokenize.EQUAL,
+	"%":   tokenize.PERCENT,
+	"~":   tokenize.TILDE,
+	"^":   tokenize.CIRCUMFLEX,
+	"@":   tokenize.AT,
+	"!":   tokenize.EXCLAMATION,
+	"==":  tokenize.EQEQUAL,
+	"!=":  tokenize.NOTEQUAL,
+	"<=":  tokenize.LESSEQUAL,
+	">=":  tokenize.GREATEREQUAL,
+	"<<":  tokenize.LEFTSHIFT,
+	">>":  tokenize.RIGHTSHIFT,
+	"**":  tokenize.DOUBLESTAR,
+	"+=":  tokenize.PLUSEQUAL,
+	"-=":  tokenize.MINEQUAL,
+	"*=":  tokenize.STAREQUAL,
+	"/=":  tokenize.SLASHEQUAL,
+	"%=":  tokenize.PERCENTEQUAL,
+	"&=":  tokenize.AMPEREQUAL,
+	"|=":  tokenize.VBAREQUAL,
+	"^=":  tokenize.CIRCUMFLEXEQUAL,
+	"<<=": tokenize.LEFTSHIFTEQUAL,
+	">>=": tokenize.RIGHTSHIFTEQUAL,
+	"**=": tokenize.DOUBLESTAREQUAL,
+	"//":  tokenize.DOUBLESLASH,
+	"//=": tokenize.DOUBLESLASHEQUAL,
+	"@=":  tokenize.ATEQUAL,
+	"->":  tokenize.RARROW,
+	"...": tokenize.ELLIPSIS,
+	":=":  tokenize.COLONEQUAL,
 }
 
 // Mark returns the current parse position. Pair with Reset.
@@ -184,10 +253,20 @@ func (p *Parser) Peek() *Token {
 // Expect consumes the token at the mark if it matches kind, returning
 // the token; otherwise returns nil and leaves mark unchanged.
 //
+// A NAME token whose bytes are a hard keyword is refused: CPython's
+// lexer assigns those a per-keyword token type so the generic NAME
+// alts never see them. gopy's lexer emits NAME for every identifier,
+// so the discrimination has to happen at the parser layer instead.
+// ExpectName / ExpectSoftKeyword bypass this filter; they match by
+// bytes and need to accept keyword tokens.
+//
 // CPython: Parser/pegen.c:296 _PyPegen_expect_token
 func (p *Parser) Expect(kind tokenize.Type) *Token {
 	t := p.Peek()
 	if t == nil || t.Type != kind {
+		return nil
+	}
+	if kind == tokenize.NAME && hardKeywordSet[string(t.Bytes)] {
 		return nil
 	}
 	p.mark++

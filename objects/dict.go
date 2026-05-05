@@ -57,6 +57,20 @@ func NewDict() *Dict {
 // CPython: Objects/dictobject.c:L3138 PyDict_Size
 func (d *Dict) Len() int { return d.used }
 
+// Keys returns a snapshot of the live keys in insertion order. The
+// returned slice is owned by the caller.
+//
+// CPython: Objects/dictobject.c PyDict_Keys
+func (d *Dict) Keys() []Object {
+	out := make([]Object, 0, d.used)
+	for _, e := range d.entries {
+		if e.used {
+			out = append(out, e.key)
+		}
+	}
+	return out
+}
+
 // SetItem inserts or replaces key. Mirrors PyDict_SetItem.
 //
 // CPython: Objects/dictobject.c:L1985 PyDict_SetItem

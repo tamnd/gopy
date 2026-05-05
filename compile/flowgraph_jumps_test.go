@@ -126,12 +126,18 @@ func TestOptimizeIntegratesPasses(t *testing.T) {
 		t.Fatalf("Optimize: %v", err)
 	}
 	// First JUMP should now point straight at the RETURN, skipping the
-	// trampoline JUMP at mid.
+	// trampoline JUMP at mid. Opargs are relative deltas after Optimize:
+	// target = (i + 1) + oparg.
 	for i, ins := range seq.Instrs {
 		if ins.Op == JUMP_FORWARD {
-			if seq.Instrs[ins.Oparg].Op != RETURN_VALUE {
+			target := i + 1 + int(ins.Oparg)
+			if target < 0 || target >= len(seq.Instrs) || seq.Instrs[target].Op != RETURN_VALUE {
+				op := NOP
+				if target >= 0 && target < len(seq.Instrs) {
+					op = seq.Instrs[target].Op
+				}
 				t.Errorf("instr %d JUMP did not thread to RETURN: target op = %v",
-					i, seq.Instrs[ins.Oparg].Op)
+					i, op)
 			}
 			break
 		}

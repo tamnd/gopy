@@ -70,13 +70,28 @@ func (p *Parser) UpdateMemo(mark, ruleType int, node any) {
 // whether the result matches the requested polarity. Positive-true
 // reports whether fn produced a non-nil node.
 //
+// fn's any return is treated as nil when it carries a typed-nil
+// pointer (e.g. `*Token(nil)` returned from ExpectToken). Without
+// the unwrap the interface header keeps the type word and `!= nil`
+// reports a spurious match, which trips negative-lookahead alts.
+//
 // CPython: Parser/pegen.c:392 _PyPegen_lookahead
 func (p *Parser) Lookahead(positive bool, fn func(*Parser) any) bool {
 	mark := p.mark
 	res := fn(p)
 	p.mark = mark
-	matched := res != nil
+	matched := !isNilResult(res)
 	return matched == positive
+}
+
+func isNilResult(v any) bool {
+	if v == nil {
+		return true
+	}
+	if x, ok := v.(*Token); ok {
+		return x == nil
+	}
+	return false
 }
 
 // LookaheadWithName runs fn at the current mark, restores mark, and

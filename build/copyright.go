@@ -2,6 +2,8 @@ package build
 
 // Copyright is the static copyright string surfaced by the runtime,
 // matching the form used by CPython's Py_GetCopyright.
+//
+// CPython: Python/getcopyright.c:20 Py_GetCopyright
 const Copyright = "Copyright (c) 2026 The gopy Authors. All Rights Reserved.\n" +
 	"\n" +
 	"Portions of the design and behavior are derived from CPython,\n" +

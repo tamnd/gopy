@@ -1,0 +1,165 @@
+// Wires objects.FunctionType.Call so a Python-defined function can be
+// invoked through objects.Call. Lives in the vm package because the
+// call needs to push a new frame and drive the eval loop, which the
+// objects package can't reach without an import cycle.
+//
+// CPython: Objects/funcobject.c function_call
+package vm
+
+import (
+	"fmt"
+	"runtime"
+	"strconv"
+	"sync"
+
+	"github.com/tamnd/gopy/objects"
+	"github.com/tamnd/gopy/stackref"
+	"github.com/tamnd/gopy/state"
+)
+
+// activeThreads maps a goroutine ID to the *state.Thread Eval is
+// running on that goroutine. Mirrors what CPython gets from
+// PyThreadState_GET, just keyed off the Go scheduler instead of an
+// OS thread. The map is concurrent-safe so one goroutine entering
+// Eval cannot stomp on another goroutine's slot.
+//
+// Distinct goroutines run independent Eval calls without a lock; the
+// map's only contention is between Eval's primer and a nested
+// callPyFunction reader on the same goroutine, which never overlap.
+//
+// CPython: Include/internal/pycore_pystate.h _PyThreadState_GET
+var activeThreads sync.Map // map[uint64]*state.Thread
+
+// goid returns the current goroutine's ID. Pulled out of
+// runtime.Stack since Go does not expose goroutine identity in its
+// public API. Cheap enough for Eval entry/exit; not called per
+// opcode.
+func goid() uint64 {
+	var buf [64]byte
+	n := runtime.Stack(buf[:], false)
+	// "goroutine N [..." — read digits after the "goroutine " prefix.
+	const prefix = "goroutine "
+	if n <= len(prefix) {
+		return 0
+	}
+	s := buf[len(prefix):n]
+	end := 0
+	for end < len(s) && s[end] >= '0' && s[end] <= '9' {
+		end++
+	}
+	id, _ := strconv.ParseUint(string(s[:end]), 10, 64)
+	return id
+}
+
+// setActiveThread primes the current goroutine's Eval slot and
+// returns the previous occupant so the caller can restore it on the
+// way out. Eval calls this on entry; callPyFunction reads through
+// currentThread.
+func setActiveThread(ts *state.Thread) *state.Thread {
+	g := goid()
+	var prev *state.Thread
+	if v, ok := activeThreads.Load(g); ok {
+		prev = v.(*state.Thread)
+	}
+	activeThreads.Store(g, ts)
+	return prev
+}
+
+// restoreActiveThread is the defer-side of setActiveThread.
+func restoreActiveThread(prev *state.Thread) {
+	g := goid()
+	if prev == nil {
+		activeThreads.Delete(g)
+		return
+	}
+	activeThreads.Store(g, prev)
+}
+
+// currentThread returns the Eval thread on the current goroutine, or
+// nil if the goroutine is not currently inside Eval (in which case
+// callPyFunction allocates a fresh Thread).
+func currentThread() *state.Thread {
+	g := goid()
+	if v, ok := activeThreads.Load(g); ok {
+		return v.(*state.Thread)
+	}
+	return nil
+}
+
+func init() {
+	objects.FunctionType.Call = callPyFunction
+}
+
+// callPyFunction pushes a frame for the function's code, binds args
+// into fast-locals, and runs the eval loop. Supports positional and
+// keyword arguments; positional defaults fill in the tail when the
+// caller provided fewer args than parameters. *args / **kwargs are
+// not yet supported.
+//
+// CPython: Objects/call.c _PyEval_Vector
+func callPyFunction(o objects.Object, args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error) {
+	fn := o.(*objects.Function)
+	co := fn.Code
+	if co == nil {
+		return nil, fmt.Errorf("TypeError: function %q has no code", fn.Name)
+	}
+	npos := co.Argcount
+	if npos == 0 && len(co.Varnames) > 0 {
+		// v0.6 compiler doesn't always set Argcount yet; fall back to
+		// "all varnames are positional" until that wires up.
+		npos = len(co.Varnames)
+	}
+	if len(args) > npos {
+		return nil, fmt.Errorf("TypeError: %s() takes %d positional arguments but %d were given",
+			fn.Name, npos, len(args))
+	}
+	ts := currentThread()
+	if ts == nil {
+		ts = state.NewThread()
+	}
+	stack := frameStackFor(ts)
+	f := stack.Push(co, fn.Globals, nil, fn, nil)
+	defer stack.Pop()
+
+	// Positional bind.
+	for i, a := range args {
+		f.SetLocal(i, stackref.FromObject(a))
+	}
+	// Keyword bind: scan Varnames for a match, error on unknown name.
+	for k, v := range kwargs {
+		idx := -1
+		for i, name := range co.Varnames {
+			if name == k {
+				idx = i
+				break
+			}
+		}
+		if idx < 0 {
+			return nil, fmt.Errorf("TypeError: %s() got an unexpected keyword argument %q", fn.Name, k)
+		}
+		if !f.LocalAt(idx).IsNull() {
+			return nil, fmt.Errorf("TypeError: %s() got multiple values for argument %q", fn.Name, k)
+		}
+		f.SetLocal(idx, stackref.FromObject(v))
+	}
+	// Defaults fill any unbound positional tail.
+	if fn.Defaults != nil {
+		nDefaults := fn.Defaults.Len()
+		for i := 0; i < nDefaults; i++ {
+			slot := npos - nDefaults + i
+			if slot < 0 {
+				continue
+			}
+			if f.LocalAt(slot).IsNull() {
+				f.SetLocal(slot, stackref.FromObject(fn.Defaults.Item(i)))
+			}
+		}
+	}
+	// Verify every positional slot is bound.
+	for i := 0; i < npos; i++ {
+		if f.LocalAt(i).IsNull() {
+			return nil, fmt.Errorf("TypeError: %s() missing required argument %q", fn.Name, co.Varnames[i])
+		}
+	}
+	return Eval(ts, f)
+}

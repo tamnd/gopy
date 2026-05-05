@@ -23,8 +23,11 @@ func TestOptimizeResolvesLabels(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Optimize: %v", err)
 	}
-	if got := seq.Instrs[1].Oparg; got != 3 {
-		t.Errorf("expected POP_JUMP_IF_FALSE oparg resolved to 3, got %d", got)
+	// Optimize rewrites jump opargs to relative deltas: target_index -
+	// next_instr. POP_JUMP_IF_FALSE at index 1 lands at the NOP at
+	// index 3, so delta = 3 - 2 = 1.
+	if got := seq.Instrs[1].Oparg; got != 1 {
+		t.Errorf("expected POP_JUMP_IF_FALSE relative oparg 1, got %d", got)
 	}
 	if info.MaxStackDepth < 1 {
 		t.Errorf("expected non-zero max stack depth, got %d", info.MaxStackDepth)

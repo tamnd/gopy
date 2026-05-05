@@ -1,6 +1,7 @@
 package objects
 
 import (
+	"errors"
 	"fmt"
 	"math/big"
 )
@@ -42,13 +43,24 @@ func init() {
 	IntType.Hash = intHash
 	IntType.RichCmp = intRichCmp
 	IntType.Number = &NumberMethods{
-		Add:      intAdd,
-		Subtract: intSub,
-		Multiply: intMul,
-		Negative: intNeg,
-		Bool:     intBool,
-		Int:      func(o Object) (Object, error) { return o, nil },
-		Float:    intFloat,
+		Add:         intAdd,
+		Subtract:    intSub,
+		Multiply:    intMul,
+		TrueDivide:  intTrueDiv,
+		FloorDivide: intFloorDiv,
+		Remainder:   intMod,
+		And:         intAnd,
+		Or:          intOr,
+		Xor:         intXor,
+		Lshift:      intLshift,
+		Rshift:      intRshift,
+		Power:       intPower,
+		Negative:    intNeg,
+		Positive:    intPos,
+		Invert:      intInvert,
+		Bool:        intBool,
+		Int:         func(o Object) (Object, error) { return o, nil },
+		Float:       intFloat,
 	}
 	for i := range smallInts {
 		o := &Int{}
@@ -187,9 +199,175 @@ func intMul(a, b Object) (Object, error) {
 	return NewIntFromBig(out), nil
 }
 
+// intTrueDiv implements `a / b` for ints. CPython returns a float
+// even for exact integer ratios, so we shadow that contract here.
+//
+// CPython: Objects/longobject.c long_true_divide
+func intTrueDiv(a, b Object) (Object, error) {
+	ai, bi, ok := intPair(a, b)
+	if !ok {
+		return notImplemented(), nil
+	}
+	if bi.v.Sign() == 0 {
+		return nil, errors.New("ZeroDivisionError: division by zero")
+	}
+	af, _ := new(big.Float).SetInt(&ai.v).Float64()
+	bf, _ := new(big.Float).SetInt(&bi.v).Float64()
+	return NewFloat(af / bf), nil
+}
+
+// intFloorDiv implements `a // b` with Python floor semantics: the
+// quotient is rounded toward negative infinity, not toward zero.
+// big.Int.QuoRem is truncated division, so we adjust when the
+// remainder is non-zero and the operand signs differ.
+//
+// CPython: Objects/longobject.c long_div
+func intFloorDiv(a, b Object) (Object, error) {
+	ai, bi, ok := intPair(a, b)
+	if !ok {
+		return notImplemented(), nil
+	}
+	if bi.v.Sign() == 0 {
+		return nil, errors.New("ZeroDivisionError: integer division or modulo by zero")
+	}
+	q, r := new(big.Int), new(big.Int)
+	q.QuoRem(&ai.v, &bi.v, r)
+	if r.Sign() != 0 && (ai.v.Sign() < 0) != (bi.v.Sign() < 0) {
+		q.Sub(q, big.NewInt(1))
+	}
+	return NewIntFromBig(q), nil
+}
+
+// intMod implements `a % b` with Python sign-of-divisor semantics.
+// big.Int.QuoRem leaves a remainder with the sign of the dividend,
+// so we add `b` when the signs differ to land on Python's contract.
+//
+// CPython: Objects/longobject.c long_mod
+func intMod(a, b Object) (Object, error) {
+	ai, bi, ok := intPair(a, b)
+	if !ok {
+		return notImplemented(), nil
+	}
+	if bi.v.Sign() == 0 {
+		return nil, errors.New("ZeroDivisionError: integer division or modulo by zero")
+	}
+	q, r := new(big.Int), new(big.Int)
+	q.QuoRem(&ai.v, &bi.v, r)
+	if r.Sign() != 0 && (ai.v.Sign() < 0) != (bi.v.Sign() < 0) {
+		r.Add(r, &bi.v)
+	}
+	return NewIntFromBig(r), nil
+}
+
+func intAnd(a, b Object) (Object, error) {
+	ai, bi, ok := intPair(a, b)
+	if !ok {
+		return notImplemented(), nil
+	}
+	return NewIntFromBig(new(big.Int).And(&ai.v, &bi.v)), nil
+}
+
+func intOr(a, b Object) (Object, error) {
+	ai, bi, ok := intPair(a, b)
+	if !ok {
+		return notImplemented(), nil
+	}
+	return NewIntFromBig(new(big.Int).Or(&ai.v, &bi.v)), nil
+}
+
+func intXor(a, b Object) (Object, error) {
+	ai, bi, ok := intPair(a, b)
+	if !ok {
+		return notImplemented(), nil
+	}
+	return NewIntFromBig(new(big.Int).Xor(&ai.v, &bi.v)), nil
+}
+
+// intLshift / intRshift use uint shift counts; CPython raises on
+// negative shift counts and on counts that overflow C long.
+//
+// CPython: Objects/longobject.c long_lshift / long_rshift
+func intLshift(a, b Object) (Object, error) {
+	ai, bi, ok := intPair(a, b)
+	if !ok {
+		return notImplemented(), nil
+	}
+	if bi.v.Sign() < 0 {
+		return nil, errors.New("ValueError: negative shift count")
+	}
+	n, fits := bi.Int64()
+	if !fits || n > (1<<31) {
+		return nil, errors.New("OverflowError: shift count too large")
+	}
+	return NewIntFromBig(new(big.Int).Lsh(&ai.v, uint(n))), nil
+}
+
+func intRshift(a, b Object) (Object, error) {
+	ai, bi, ok := intPair(a, b)
+	if !ok {
+		return notImplemented(), nil
+	}
+	if bi.v.Sign() < 0 {
+		return nil, errors.New("ValueError: negative shift count")
+	}
+	n, fits := bi.Int64()
+	if !fits || n > (1<<31) {
+		return nil, errors.New("OverflowError: shift count too large")
+	}
+	return NewIntFromBig(new(big.Int).Rsh(&ai.v, uint(n))), nil
+}
+
+// intPower implements `pow(a, b)` and `pow(a, b, mod)` for ints. A
+// negative exponent without a modulus falls through to a float
+// promotion via NotImplemented; the abstract layer would normally
+// retry against float's slot (no Power yet on Float, so the caller
+// gets a TypeError until it lands).
+//
+// CPython: Objects/longobject.c long_pow
+func intPower(a, b, mod Object) (Object, error) {
+	ai, bi, ok := intPair(a, b)
+	if !ok {
+		return notImplemented(), nil
+	}
+	if bi.v.Sign() < 0 {
+		// Negative exponent needs a float result; let the abstract
+		// layer try the next slot.
+		return notImplemented(), nil
+	}
+	var m *big.Int
+	if mod != nil && mod != None() {
+		mi, ok := mod.(*Int)
+		if !ok {
+			return notImplemented(), nil
+		}
+		if mi.v.Sign() == 0 {
+			return nil, errors.New("ValueError: pow() 3rd argument cannot be 0")
+		}
+		m = &mi.v
+	}
+	out := new(big.Int).Exp(&ai.v, &bi.v, m)
+	return NewIntFromBig(out), nil
+}
+
 func intNeg(o Object) (Object, error) {
 	i := o.(*Int)
 	out := new(big.Int).Neg(&i.v)
+	return NewIntFromBig(out), nil
+}
+
+// intPos returns the int unchanged. CPython returns the same object
+// for plain int but a fresh int for subclasses; the v0.6 panel does
+// not yet support int subclasses so the same-object form is correct.
+//
+// CPython: Objects/longobject.c long_long
+func intPos(o Object) (Object, error) { return o, nil }
+
+// intInvert returns the bitwise complement, matching ~x == -(x+1).
+//
+// CPython: Objects/longobject.c long_invert
+func intInvert(o Object) (Object, error) {
+	i := o.(*Int)
+	out := new(big.Int).Not(&i.v)
 	return NewIntFromBig(out), nil
 }
 

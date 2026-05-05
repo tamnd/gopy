@@ -217,13 +217,15 @@ func (e *emitter) writePreamble() {
 	e.buf.WriteString("\npackage pegen\n\n")
 	e.buf.WriteString("import (\n")
 	e.buf.WriteString("\t\"errors\"\n\n")
+	e.buf.WriteString("\t\"github.com/tamnd/gopy/ast\"\n")
 	e.buf.WriteString("\t\"github.com/tamnd/gopy/tokenize\"\n")
 	e.buf.WriteString(")\n\n")
 	e.buf.WriteString("// ErrParserNotImplemented is returned by Dispatch while the\n")
 	e.buf.WriteString("// per-rule emitter still produces placeholder action results.\n")
 	e.buf.WriteString("// The real AST surface lands with the action translator (M6).\n")
 	e.buf.WriteString("var ErrParserNotImplemented = errors.New(\"pegen: generated rule bodies not yet emitted\")\n\n")
-	e.buf.WriteString("var _ = tokenize.NAME // keep import alive when no rule uses it.\n\n")
+	e.buf.WriteString("var _ = tokenize.NAME // keep import alive when no rule uses it.\n")
+	e.buf.WriteString("var _ = ast.Add       // keep import alive when no rule uses it.\n\n")
 }
 
 func (e *emitter) writeRuleConstants() {
@@ -605,6 +607,21 @@ func (e *emitter) callItemRaw(it Item) callSpec {
 }
 
 func (e *emitter) callNameLeaf(x *NameLeaf) callSpec {
+	// Mirror CPython's c_generator BASE_NODETYPES special-case: NAME,
+	// NUMBER, and STRING leaves resolve to typed expr_ty / Token *
+	// helpers rather than to the generic ExpectToken path. Without
+	// this, atom rules like `atom: NAME` return the raw token and
+	// downstream rules see a *Token where they expect ast.Expr.
+	//
+	// CPython: Tools/peg_generator/pegen/c_generator.py:157 visit_NameLeaf
+	switch x.Value {
+	case "NAME":
+		return callSpec{varName: "name_var", expr: "nameToken(p)", shape: shapeBlocking}
+	case "NUMBER":
+		return callSpec{varName: "number_var", expr: "numberToken(p)", shape: shapeBlocking}
+	case "STRING":
+		return callSpec{varName: "string_var", expr: "stringToken(p)", shape: shapeBlocking}
+	}
 	if tok, ok := builtinTokens[x.Value]; ok {
 		return callSpec{varName: lower(x.Value), expr: "p.ExpectToken(tokenize." + tok + ")", shape: shapeBlocking}
 	}
@@ -785,10 +802,111 @@ func (e *emitter) writeActionHelperStubs() {
 	body := e.bodies.String()
 	re := regexp.MustCompile(`\b(actionAst[A-Za-z0-9_]+|actionPgen[A-Za-z0-9_]+|raiseAction)\b`)
 	// Names that have hand-written implementations elsewhere in the
-	// pegen package. Keep this list small; each entry is a place
-	// where the typed AST surface meets the untyped any boundary.
+	// pegen package. Each entry is a place where the typed AST
+	// surface meets the untyped any boundary.
 	excluded := map[string]bool{
-		"actionPgenMakeModule": true,
+		"actionPgenMakeModule":               true,
+		"actionAstPass":                      true,
+		"actionAstBreak":                     true,
+		"actionAstContinue":                  true,
+		"actionAstReturn":                    true,
+		"actionAstRaise":                     true,
+		"actionAstAssert":                    true,
+		"actionAstDelete":                    true,
+		"actionAstExpr":                      true,
+		"actionAstYield":                     true,
+		"actionAstYieldFrom":                 true,
+		"actionAstImport":                    true,
+		"actionAstImportFrom":                true,
+		"actionAstIf":                        true,
+		"actionAstWhile":                     true,
+		"actionAstIfExp":                     true,
+		"actionAstTry":                       true,
+		"actionAstExceptHandler":             true,
+		"actionAstSlice":                     true,
+		"actionAstSet":                       true,
+		"actionAstListComp":                  true,
+		"actionAstSetComp":                   true,
+		"actionAstGeneratorExp":              true,
+		"actionAstMatchAs":                   true,
+		"actionAstMatchClass":                true,
+		"actionAstMatchMapping":              true,
+		"actionAstMatchSequence":             true,
+		"actionAstMatchStar":                 true,
+		"actionAstMatchValue":                true,
+		"actionPgenSeqCountDots":             true,
+		"actionPgenSingletonSeq":             true,
+		"actionPgenSeqInsertInFront":         true,
+		"actionPgenJoinNamesWithDot":         true,
+		"actionPgenJoinSequences":            true,
+		"actionPgenGetExprName":              true,
+		"actionPgenInteractiveExit":          true,
+		"actionPgenKeyValuePair":             true,
+		"actionPgenKeyPatternPair":           true,
+		"actionPgenKeywordOrStarred":         true,
+		"actionPgenNameDefaultPair":          true,
+		"actionPgenConstantFromToken":        true,
+		"actionPgenConstantFromString":       true,
+		"actionPgenDecodedConstantFromToken": true,
+		"actionPgenEnsureImaginary":          true,
+		"actionPgenEnsureReal":               true,
+		"actionPgenFormattedValue":           true,
+		"actionPgenInterpolation":            true,
+		"actionPgenConcatenateStrings":       true,
+		"actionPgenConcatenateTstrings":      true,
+		"actionPgenCheckFstringConversion":   true,
+		"actionPgenAddTypeCommentToArg":      true,
+		"actionPgenArgumentsParsingError":    true,
+		"actionPgenClassDefDecorators":       true,
+		"actionPgenFunctionDefDecorators":    true,
+		"actionPgenCollectCallSeqs":          true,
+		"actionPgenSeqExtractStarredExprs":   true,
+		"actionPgenSeqDeleteStarredExprs":    true,
+		"actionPgenDummyName":                true,
+		"actionAstKeyword":                   true,
+		"actionPgenMakeArguments":            true,
+		"actionPgenNonparenGenexpInCall":     true,
+		"actionPgenStarEtc":                  true,
+		"actionAstAssign":                    true,
+		"actionAstAugAssign":                 true,
+		"actionAstAnnAssign":                 true,
+		"actionAstBinOp":                     true,
+		"actionAstBoolOp":                    true,
+		"actionAstUnaryOp":                   true,
+		"actionAstCompare":                   true,
+		"actionAstNamedExpr":                 true,
+		"actionAstAwait":                     true,
+		"actionAstName":                      true,
+		"actionAstAttribute":                 true,
+		"actionAstSubscript":                 true,
+		"actionAstStarred":                   true,
+		"actionAstTuple":                     true,
+		"actionAstList":                      true,
+		"actionAstDict":                      true,
+		"actionAstCall":                      true,
+		"actionAstConstant":                  true,
+		"actionAstFor":                       true,
+		"actionAstAsyncFor":                  true,
+		"actionAstWith":                      true,
+		"actionAstAsyncWith":                 true,
+		"actionAstMatchSingleton":            true,
+		"actionPgenAugoperator":              true,
+		"actionPgenCmpopExprPair":            true,
+		"actionPgenSetExprContext":           true,
+		"actionPgenSeqFlatten":               true,
+		"actionPgenSeqAppendToEnd":           true,
+		"actionPgenRegisterStmts":            true,
+		"actionPgenSlashWithDefault":         true,
+		"actionPgenSetupFullFormatSpec":      true,
+		"actionPgenJoinedStr":                true,
+		"actionAstFunctionDef":               true,
+		"actionAstAsyncFunctionDef":          true,
+		"actionAstComprehension":             true,
+		"actionAstExpression":                true,
+		"actionAstInteractive":               true,
+		"actionAstFunctionType":              true,
+		"actionPgenEmptyArguments":           true,
+		"actionAstArg":                       true,
 	}
 	seen := map[string]bool{}
 	for _, m := range re.FindAllString(body, -1) {

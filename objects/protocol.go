@@ -125,6 +125,70 @@ func IsTruthy(o Object) (bool, error) {
 	return true, nil
 }
 
+// GetAttr fetches o.name. Routes through the type's Getattro slot.
+// Returns AttributeError when the type exposes no attribute access.
+//
+// CPython: Objects/object.c:1290 PyObject_GetAttr
+func GetAttr(o Object, name Object) (Object, error) {
+	if name == nil || name.Type() != strStubType {
+		return nil, fmt.Errorf("TypeError: attribute name must be string, not '%s'", typeNameOf(name))
+	}
+	tp := o.Type()
+	if tp.Getattro != nil {
+		return tp.Getattro(o, name)
+	}
+	return nil, fmt.Errorf("AttributeError: '%s' object has no attribute '%s'", tp.Name, attrNameStr(name))
+}
+
+// SetAttr writes o.name = value. value==nil deletes the attribute
+// (CPython routes PyObject_DelAttr through here too).
+//
+// CPython: Objects/object.c:1440 PyObject_SetAttr
+func SetAttr(o Object, name Object, value Object) error {
+	if name == nil || name.Type() != strStubType {
+		return fmt.Errorf("TypeError: attribute name must be string, not '%s'", typeNameOf(name))
+	}
+	tp := o.Type()
+	if tp.Setattro != nil {
+		return tp.Setattro(o, name, value)
+	}
+	verb := "assign to"
+	if value == nil {
+		verb = "del"
+	}
+	if tp.Getattro == nil {
+		return fmt.Errorf("TypeError: '%s' object has no attributes (%s .%s)", tp.Name, verb, attrNameStr(name))
+	}
+	return fmt.Errorf("TypeError: '%s' object has only read-only attributes (%s .%s)", tp.Name, verb, attrNameStr(name))
+}
+
+// DelAttr deletes o.name. Forwards to SetAttr with value==nil to
+// match CPython's single dispatch.
+//
+// CPython: Objects/object.c:1490 PyObject_DelAttr
+func DelAttr(o Object, name Object) error {
+	return SetAttr(o, name, nil)
+}
+
+// attrNameStr extracts the underlying Go string of an attribute-name
+// Object. Falls back to the type name when extraction fails so error
+// messages stay readable.
+func attrNameStr(name Object) string {
+	if s, ok := name.(*strStub); ok {
+		return s.v
+	}
+	return typeNameOf(name)
+}
+
+// typeNameOf returns the type name of o, or "<nil>" when o is nil.
+// Used for protocol-level error formatting.
+func typeNameOf(o Object) string {
+	if o == nil {
+		return "<nil>"
+	}
+	return o.Type().Name
+}
+
 // reflectOp returns the operator that swaps the operands. < becomes
 // >, <= becomes >=, == and != stay.
 //
