@@ -46,6 +46,8 @@ func init() {
 		Subtract: intSub,
 		Multiply: intMul,
 		Negative: intNeg,
+		Positive: intPos,
+		Invert:   intInvert,
 		Bool:     intBool,
 		Int:      func(o Object) (Object, error) { return o, nil },
 		Float:    intFloat,
@@ -190,6 +192,22 @@ func intMul(a, b Object) (Object, error) {
 func intNeg(o Object) (Object, error) {
 	i := o.(*Int)
 	out := new(big.Int).Neg(&i.v)
+	return NewIntFromBig(out), nil
+}
+
+// intPos returns the int unchanged. CPython returns the same object
+// for plain int but a fresh int for subclasses; the v0.6 panel does
+// not yet support int subclasses so the same-object form is correct.
+//
+// CPython: Objects/longobject.c long_long
+func intPos(o Object) (Object, error) { return o, nil }
+
+// intInvert returns the bitwise complement, matching ~x == -(x+1).
+//
+// CPython: Objects/longobject.c long_invert
+func intInvert(o Object) (Object, error) {
+	i := o.(*Int)
+	out := new(big.Int).Not(&i.v)
 	return NewIntFromBig(out), nil
 }
 

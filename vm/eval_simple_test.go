@@ -136,6 +136,21 @@ func TestEvalUnaryNot(t *testing.T) {
 	}
 }
 
+func TestEvalUnaryInvert(t *testing.T) {
+	ts := state.NewThread()
+	bc := append(instr(compile.LOAD_CONST, 0), instr(compile.UNARY_INVERT, 0)...)
+	bc = append(bc, instr(compile.RETURN_VALUE, 0)...)
+	co := &objects.Code{Code: bc, Stacksize: 4, Consts: []any{int64(5)}}
+	v, err := EvalCode(ts, co, nil, nil)
+	if err != nil {
+		t.Fatalf("Eval err: %v", err)
+	}
+	got, ok := v.(*objects.Int)
+	if !ok || intVal(got) != -6 {
+		t.Errorf("got %v, want -6", v)
+	}
+}
+
 func TestEvalIsOp(t *testing.T) {
 	ts := state.NewThread()
 	// LOAD_CONST 0 (None); LOAD_CONST 0 (None); IS_OP 0 -> True

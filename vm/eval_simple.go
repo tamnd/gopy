@@ -55,7 +55,13 @@ func wrapConst(v any) (objects.Object, error) {
 //nolint:gocognit,gocyclo,gocritic,unparam // hand-written opcode switch; the wide return tuple matches dispatch's contract and the arm count shrinks as 1621 codegen replaces these.
 func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, retVal objects.Object, retErr error, retDone, ok bool, err error) {
 	switch op {
-	case compile.NOP:
+	case compile.NOP, compile.CACHE, compile.RESERVED:
+		// CACHE words are inline-specialization slots; the dispatcher
+		// only sees them when fetch() runs past the end of an
+		// instruction word, which the action translator does not do.
+		// Treat them as NOP so a hand-rolled bytecode that includes
+		// padding stays valid. RESERVED is the parity-pin opcode in
+		// CPython's table; behavior matches NOP in unspecialized form.
 		return e.advance(), nil, nil, false, true, nil
 
 	case compile.RESUME:
@@ -195,6 +201,19 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, retVal
 			return 0, nil, nil, false, true, terr
 		}
 		e.pushObject(objects.NewBool(!truthy))
+		return e.advance(), nil, nil, false, true, nil
+
+	case compile.UNARY_INVERT:
+		a := e.popObject()
+		nm := a.Type().Number
+		if nm == nil || nm.Invert == nil {
+			return 0, nil, nil, false, true, fmt.Errorf("TypeError: bad operand type for unary ~: '%s'", a.Type().Name)
+		}
+		out, ierr := nm.Invert(a)
+		if ierr != nil {
+			return 0, nil, nil, false, true, ierr
+		}
+		e.pushObject(out)
 		return e.advance(), nil, nil, false, true, nil
 
 	case compile.COMPARE_OP:

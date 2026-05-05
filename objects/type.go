@@ -62,6 +62,8 @@ type NumberMethods struct {
 	Subtract func(a, b Object) (Object, error)
 	Multiply func(a, b Object) (Object, error)
 	Negative func(o Object) (Object, error)
+	Positive func(o Object) (Object, error)
+	Invert   func(o Object) (Object, error)
 	Bool     func(o Object) (bool, error)
 	Int      func(o Object) (Object, error)
 	Float    func(o Object) (Object, error)
