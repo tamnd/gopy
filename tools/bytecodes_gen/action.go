@@ -80,6 +80,22 @@ func (t *actionTranslator) translateStmt() error {
 		return t.translateNullary("// INPUTS_DEAD: no-op in refcount-only path")
 	case "STAT_INC", "STAT_DEC":
 		return t.skipParenthesised()
+	case "DEAD":
+		// DEAD(name) marks a name as no longer referenced after this
+		// point. The refcount-only path has nothing to do; the stack
+		// slot for the input has already been popped by the prologue.
+		return t.skipParenthesised()
+	case "SYNC_SP", "DISPATCH", "DISPATCH_GOTO", "DISPATCH_SAME_OPARG",
+		"ADVANCE_ADAPTIVE_COUNTER", "PAUSE_ADAPTIVE_COUNTER":
+		// Cache/dispatch macros that are no-ops for v0.6 (no
+		// specializer, no computed-goto). The eval loop drives every
+		// dispatch through the main switch, so DISPATCH() is implicit.
+		return t.skipParenthesised()
+	case "PyStackRef_CLOSE", "PyStackRef_XCLOSE":
+		// Stack-ref close: drop the runtime ref. CLOSE asserts non-null;
+		// XCLOSE tolerates null. Both map to .Close() on the popped
+		// local, since stackref.Ref's Close already null-checks.
+		return t.translateUnaryCall(".Close()")
 	}
 	return fmt.Errorf("unrecognized token at action body start: %q", tk.Text)
 }
@@ -118,6 +134,57 @@ func (t *actionTranslator) translateErrorIf() error {
 	fmt.Fprintf(t.writer, "if %s { return 0, e.error(%q) }\n",
 		strings.TrimSpace(cond), strings.TrimSpace(label))
 	return nil
+}
+
+// translateUnaryCall handles `MACRO(arg);` where arg is a single bound
+// stack-slot name. Emits `arg<suffix>` (e.g. `.Close()`). Bails when
+// the argument is anything more interesting than a bare identifier,
+// since those need typed-helper translation that we do not have yet.
+func (t *actionTranslator) translateUnaryCall(suffix string) error {
+	t.pos++ // macro name
+	arg, err := t.takeParenthesised()
+	if err != nil {
+		return err
+	}
+	t.acceptSemi()
+	arg = strings.TrimSpace(arg)
+	if !isBareIdent(arg) {
+		return fmt.Errorf("unary call arg %q is not a bare identifier", arg)
+	}
+	if _, ok := t.bound[arg]; !ok {
+		return fmt.Errorf("unary call arg %q is not a bound stack slot", arg)
+	}
+	fmt.Fprintf(t.writer, "%s%s\n", goLocalName(arg), suffix)
+	return nil
+}
+
+// goLocalName mirrors bindName for the case where the slot has a real
+// source name. Keyword slots get a `_v` suffix so the body references
+// match the prologue's locals.
+func goLocalName(name string) string {
+	if goKeywords[name] {
+		return name + "_v"
+	}
+	return name
+}
+
+// isBareIdent returns true if s is a single C identifier with no
+// operators, casts, or member access.
+func isBareIdent(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i, r := range s {
+		switch {
+		case r == '_' || (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z'):
+			// always allowed
+		case (r >= '0' && r <= '9') && i > 0:
+			// allowed after first char
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 // translateNullary emits a single statement and consumes

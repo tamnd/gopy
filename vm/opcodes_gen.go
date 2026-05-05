@@ -180,8 +180,8 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 	case compile.END_FOR:
 		value := e.pop()
 		_ = value
-		// body bail: unrecognized token at action body start: "PyStackRef_CLOSE"
-		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
+		value.Close()
+		return e.advance(), nil, nil, false, nil
 	case compile.END_SEND:
 		value := e.pop()
 		_ = value
@@ -493,8 +493,8 @@ func (e *evalState) dispatchGen(op compile.Opcode, oparg uint32) (next int, retV
 	case compile.POP_TOP:
 		value := e.pop()
 		_ = value
-		// body bail: unrecognized token at action body start: "PyStackRef_CLOSE"
-		return 0, nil, nil, false, opcodeNotImplemented(op) // body pending (B6)
+		value.Close()
+		return e.advance(), nil, nil, false, nil
 	case compile.PUSH_EXC_INFO:
 		exc := e.pop()
 		_ = exc

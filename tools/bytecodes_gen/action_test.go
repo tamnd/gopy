@@ -69,6 +69,54 @@ func TestTranslateBodyUnrecognizedFalls(t *testing.T) {
 	}
 }
 
+func TestTranslateBodyStackRefClose(t *testing.T) {
+	body := tokLine("PyStackRef_CLOSE(value);")
+	sig := &SignatureAnalysis{Name: "POP_TOP", Inputs: []StackBinding{{Name: "value"}}}
+	got, ok, note := TranslateBody(body, sig)
+	if !ok {
+		t.Fatalf("translate failed: %s", note)
+	}
+	if !strings.Contains(got, "value.Close()") {
+		t.Errorf("expected value.Close(), got:\n%s", got)
+	}
+}
+
+func TestTranslateBodyStackRefCloseKeywordSlot(t *testing.T) {
+	body := tokLine("PyStackRef_CLOSE(type);")
+	sig := &SignatureAnalysis{Name: "X", Inputs: []StackBinding{{Name: "type"}}}
+	got, ok, note := TranslateBody(body, sig)
+	if !ok {
+		t.Fatalf("translate failed: %s", note)
+	}
+	if !strings.Contains(got, "type_v.Close()") {
+		t.Errorf("expected type_v.Close() (keyword rename), got:\n%s", got)
+	}
+}
+
+func TestTranslateBodyDeadIsNoop(t *testing.T) {
+	body := tokLine("DEAD(value);")
+	sig := &SignatureAnalysis{Name: "X", Inputs: []StackBinding{{Name: "value"}}}
+	got, ok, note := TranslateBody(body, sig)
+	if !ok {
+		t.Fatalf("translate failed: %s", note)
+	}
+	if got != "" {
+		t.Errorf("expected empty body for DEAD, got:\n%s", got)
+	}
+}
+
+func TestTranslateBodyOutputsBail(t *testing.T) {
+	body := tokLine("DEAD(value);")
+	sig := &SignatureAnalysis{Name: "X", Outputs: []StackBinding{{Name: "out"}}}
+	_, ok, note := TranslateBody(body, sig)
+	if ok {
+		t.Errorf("expected bail when sig has outputs")
+	}
+	if note == "" {
+		t.Errorf("expected explanatory note")
+	}
+}
+
 func TestSplitTopLevelComma(t *testing.T) {
 	a, b, ok := splitTopLevelComma("res == NULL, error")
 	if !ok || strings.TrimSpace(a) != "res == NULL" || strings.TrimSpace(b) != "error" {
