@@ -4,7 +4,7 @@
 package build
 
 // Version is the gopy release version. Bumped per release tag.
-const Version = "0.7.0"
+const Version = "0.8.0-dev"
 
 // PythonCompatVersion is the upstream CPython version this port tracks.
 const PythonCompatVersion = "3.14.0+"
