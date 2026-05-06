@@ -17,6 +17,8 @@ import (
 	"io"
 	"math"
 	"math/big"
+
+	"github.com/tamnd/gopy/objects"
 )
 
 // Version is the wire-format version Dump/Load speak. CPython 3.14
@@ -130,6 +132,8 @@ func (e *encoder) write(v any) error {
 		return e.writeIntLike(x)
 	case *big.Int:
 		return writeLong(e.w, x, typeLong)
+	case *objects.Code:
+		return marshalCode(e, x)
 	case float64:
 		if err := e.writeByte(typeBinaryFloat); err != nil {
 			return err
@@ -369,6 +373,8 @@ func (d *decoder) decodeTag(tag byte) (any, error) {
 			return nil, err
 		}
 		return d.readTuple(int(n))
+	case typeCode:
+		return unmarshalCode(d)
 	case typeRef:
 		n, err := d.readInt32()
 		if err != nil {

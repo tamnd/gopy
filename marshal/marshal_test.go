@@ -5,6 +5,8 @@ import (
 	"math/big"
 	"reflect"
 	"testing"
+
+	"github.com/tamnd/gopy/objects"
 )
 
 // TestRoundtrip walks each value supported by the v0.5 skeleton
@@ -138,6 +140,100 @@ func TestInternedStringDecodes(t *testing.T) {
 	}
 	if got.(string) != "abc" {
 		t.Errorf("got %q, want abc", got)
+	}
+}
+
+// TestTypeCodeRoundtrip pins *objects.Code encode/decode through the
+// TYPE_CODE wire format, including nested code objects in consts.
+func TestTypeCodeRoundtrip(t *testing.T) {
+	c := objects.NewCode()
+	c.Argcount = 2
+	c.PosonlyArgcount = 1
+	c.KwonlyArgcount = 0
+	c.Stacksize = 4
+	c.Flags = 0x43
+	c.Code = []byte{0x64, 0x00, 0x53, 0x00}
+	c.Consts = []any{nil, int64(42), "hello"}
+	c.Names = []string{"x", "y"}
+	c.Varnames = []string{"a", "b"}
+	c.Cellvars = []string{"cell"}
+	c.Freevars = []string{"free"}
+	c.Filename = "test.py"
+	c.Name = "testfunc"
+	c.Qualname = "module.testfunc"
+	c.Firstlineno = 10
+	c.Linetable = []byte{0x80, 0x04}
+	c.ExceptionTable = []byte{}
+
+	var buf bytes.Buffer
+	if err := Dump(&buf, c); err != nil {
+		t.Fatalf("Dump code: %v", err)
+	}
+	got, err := Load(&buf)
+	if err != nil {
+		t.Fatalf("Load code: %v", err)
+	}
+	rc, ok := got.(*objects.Code)
+	if !ok {
+		t.Fatalf("Load returned %T, want *objects.Code", got)
+	}
+	if rc.Argcount != c.Argcount {
+		t.Errorf("Argcount = %d, want %d", rc.Argcount, c.Argcount)
+	}
+	if rc.Flags != c.Flags {
+		t.Errorf("Flags = %d, want %d", rc.Flags, c.Flags)
+	}
+	if !bytes.Equal(rc.Code, c.Code) {
+		t.Errorf("Code = %v, want %v", rc.Code, c.Code)
+	}
+	if rc.Name != c.Name {
+		t.Errorf("Name = %q, want %q", rc.Name, c.Name)
+	}
+	if rc.Firstlineno != c.Firstlineno {
+		t.Errorf("Firstlineno = %d, want %d", rc.Firstlineno, c.Firstlineno)
+	}
+	if !reflect.DeepEqual(rc.Varnames, c.Varnames) {
+		t.Errorf("Varnames = %v, want %v", rc.Varnames, c.Varnames)
+	}
+	if !reflect.DeepEqual(rc.Cellvars, c.Cellvars) {
+		t.Errorf("Cellvars = %v, want %v", rc.Cellvars, c.Cellvars)
+	}
+	if !reflect.DeepEqual(rc.Freevars, c.Freevars) {
+		t.Errorf("Freevars = %v, want %v", rc.Freevars, c.Freevars)
+	}
+}
+
+// TestTypeCodeNestedConst pins that a code object nested inside
+// consts is decoded recursively as *objects.Code.
+func TestTypeCodeNestedConst(t *testing.T) {
+	inner := objects.NewCode()
+	inner.Name = "inner"
+	inner.Code = []byte{0x64, 0x00, 0x53, 0x00}
+	inner.Consts = []any{nil}
+
+	outer := objects.NewCode()
+	outer.Name = "outer"
+	outer.Code = []byte{0x64, 0x00, 0x53, 0x00}
+	outer.Consts = []any{inner}
+
+	var buf bytes.Buffer
+	if err := Dump(&buf, outer); err != nil {
+		t.Fatalf("Dump: %v", err)
+	}
+	got, err := Load(&buf)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	rc := got.(*objects.Code)
+	if rc.Name != "outer" {
+		t.Errorf("outer.Name = %q, want outer", rc.Name)
+	}
+	ri, ok := rc.Consts[0].(*objects.Code)
+	if !ok {
+		t.Fatalf("consts[0] = %T, want *objects.Code", rc.Consts[0])
+	}
+	if ri.Name != "inner" {
+		t.Errorf("inner.Name = %q, want inner", ri.Name)
 	}
 }
 
