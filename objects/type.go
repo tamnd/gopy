@@ -31,7 +31,12 @@ const (
 type Type struct {
 	Header
 
-	Name     string
+	Name string
+	// Module mirrors __module__ on a type. Empty (treated as
+	// "builtins") for the built-in types ported in objects/.
+	//
+	// CPython: Objects/typeobject.c:907 type_module
+	Module   string
 	BaseSize int
 	ItemSize int
 
