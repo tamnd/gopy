@@ -93,11 +93,13 @@ type gcState struct {
 	// PyWeakReference clearing path with the ref type.
 	weakProxies map[objects.Object][]*objects.WeakProxy
 
-	// garbage holds objects whose collection was suppressed because
-	// they carry a legacy __del__. gopy unifies finalizers under
-	// PEP 442 so garbage stays empty; we expose the list anyway to
-	// match the gc.garbage Python attribute.
-	garbage []objects.Object
+	// garbage is the gc.garbage list. CPython appends two kinds of
+	// objects to it: legacy-finalizer cycles, and (when DEBUG_SAVEALL
+	// is set) every reclaim candidate. gopy is PEP 442 only so the
+	// legacy path is empty; the SAVEALL path lands in collectMain.
+	// The same list object is also stamped onto the gc module dict so
+	// `gc.garbage` and the runtime view stay in sync.
+	garbage *objects.List
 
 	// debug is the bitmask set by gc.set_debug.
 	debug int
@@ -262,5 +264,18 @@ func IsFinalized(o objects.Object) bool {
 func SetCallbacks(cbs *objects.List) {
 	state.mu.Lock()
 	state.callbacks = cbs
+	state.mu.Unlock()
+}
+
+// SetGarbage installs the gc.garbage list. The module init stamps the
+// list onto the module dict and registers it here so the collector
+// can append uncollectable cycles when DEBUG_SAVEALL is set. Passing
+// nil clears the binding.
+//
+// CPython: Python/gc.c:180 _PyGC_Init publishes gcstate->garbage; the
+// collector appends through delete_garbage / handle_legacy_finalizers.
+func SetGarbage(g *objects.List) {
+	state.mu.Lock()
+	state.garbage = g
 	state.mu.Unlock()
 }

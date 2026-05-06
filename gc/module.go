@@ -51,9 +51,11 @@ func buildModule() (*objects.Module, error) {
 		{"get_stats", gcGetStats},
 		{"is_finalized", gcIsFinalized},
 	}
-	if err := d.SetItem(objects.NewStr("garbage"), objects.NewList(nil)); err != nil {
+	garbageList := objects.NewList(nil)
+	if err := d.SetItem(objects.NewStr("garbage"), garbageList); err != nil {
 		return nil, err
 	}
+	SetGarbage(garbageList)
 	cbs := objects.NewList(nil)
 	if err := d.SetItem(objects.NewStr("callbacks"), cbs); err != nil {
 		return nil, err

@@ -113,13 +113,19 @@ func collectMain(gen int) (int, []pendingCallback) {
 	pending := handleWeakrefs(unreachable, state.weakrefs, state.weakProxies)
 
 	finalizeGarbage(unreachable, state.finalizers, state.finalized)
-	collected := listSize(unreachable)
-	reclaimUnreachable(unreachable, state.tracked, state.finalized)
-	clearUnreachableMask(young)
-	clearAllFreeLists()
 
-	state.stats[gen].collections++
-	state.stats[gen].collected += collected
+	// Resurrection check. handleResurrected re-runs deduce on the
+	// post-finalize list so any object a finalizer refloated comes
+	// back out of the reclaim path. The caller-visible behavior
+	// matches CPython: resurrected objects survive into the next
+	// generation; only stillUnreachable enters delete_garbage.
+	stillUnreachable := newListHead()
+	if err := handleResurrected(unreachable, stillUnreachable, state.tracked); err != nil {
+		// On a traversal error we fall back to treating everything as
+		// still unreachable. Mirrors CPython's behavior of pressing
+		// on after PyErr_FormatUnraisable.
+		listMerge(unreachable, stillUnreachable)
+	}
 
 	// Promote survivors. CPython moves them to the next-older
 	// generation unless we are already at the top; the same mapping
@@ -129,7 +135,38 @@ func collectMain(gen int) (int, []pendingCallback) {
 		dest = gen + 1
 		state.generations[dest].count++
 	}
+
+	// Resurrected objects (still on the now-empty `unreachable` head)
+	// move to the destination generation alongside the regular
+	// survivors. Clear residual flags first.
+	clearUnreachableMask(unreachable)
+	for g := unreachable.next; g != unreachable; g = g.next {
+		g.flags &^= gcCollecting
+	}
+	listMerge(unreachable, state.generations[dest].head)
+
+	collected := listSize(stillUnreachable)
+	if state.debug&DebugSaveAll != 0 && state.garbage != nil {
+		appendGarbage(state.garbage, stillUnreachable)
+	}
+	reclaimUnreachable(stillUnreachable, state.tracked, state.finalized)
+	clearUnreachableMask(young)
+	clearAllFreeLists()
+
+	state.stats[gen].collections++
+	state.stats[gen].collected += collected
+
 	listMerge(young, state.generations[dest].head)
 
 	return collected, pending
+}
+
+// appendGarbage appends every node on `list` to the gc.garbage list.
+// CPython does this inline in delete_garbage when DEBUG_SAVEALL is on.
+//
+// CPython: Python/gc.c:1142 delete_garbage SAVEALL branch
+func appendGarbage(garbage *objects.List, list *gcHead) {
+	for g := list.next; g != list; g = g.next {
+		garbage.Append(g.obj)
+	}
 }
