@@ -110,7 +110,7 @@ func collectMain(gen int) (int, []pendingCallback) {
 
 	untrackTuples(young, state.tracked)
 
-	pending := handleWeakrefs(unreachable, state.weakrefs)
+	pending := handleWeakrefs(unreachable, state.weakrefs, state.weakProxies)
 
 	finalizeGarbage(unreachable, state.finalizers, state.finalized)
 	collected := listSize(unreachable)

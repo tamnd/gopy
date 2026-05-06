@@ -85,6 +85,14 @@ type gcState struct {
 	// Cleared in handle_weakrefs when the referent goes unreachable.
 	weakrefs map[objects.Object][]*objects.Weakref
 
+	// weakProxies tracks weakref.proxy / CallableProxyType instances
+	// alongside the ref-style weakrefs so the same handle_weakrefs
+	// pass can clear both shapes once the referent goes unreachable.
+	//
+	// CPython: Objects/weakrefobject.c:344 the proxy types share the
+	// PyWeakReference clearing path with the ref type.
+	weakProxies map[objects.Object][]*objects.WeakProxy
+
 	// garbage holds objects whose collection was suppressed because
 	// they carry a legacy __del__. gopy unifies finalizers under
 	// PEP 442 so garbage stays empty; we expose the list anyway to
@@ -122,8 +130,9 @@ func newGCState() *gcState {
 		enabled:    true,
 		finalizers: make(map[objects.Object]Finalizer),
 		tracked:    make(map[objects.Object]*gcHead),
-		weakrefs:   make(map[objects.Object][]*objects.Weakref),
-		finalized:  make(map[objects.Object]struct{}),
+		weakrefs:    make(map[objects.Object][]*objects.Weakref),
+		weakProxies: make(map[objects.Object][]*objects.WeakProxy),
+		finalized:   make(map[objects.Object]struct{}),
 	}
 	s.generations[0].threshold = defaultThreshold0
 	s.generations[1].threshold = defaultThreshold1
