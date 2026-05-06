@@ -8,7 +8,7 @@ import (
 	"strings"
 
 	"github.com/tamnd/gopy/ast"
-	"github.com/tamnd/gopy/tokenize"
+	"github.com/tamnd/gopy/token"
 )
 
 // nameFromToken builds a Load-context Name expression from a NAME
@@ -41,7 +41,7 @@ func nameFromToken(p *Parser, t *Token) ast.Expr {
 //
 // CPython: Parser/pegen.c:592 _PyPegen_name_token
 func nameToken(p *Parser) ast.Expr {
-	t := p.ExpectToken(tokenize.NAME)
+	t := p.ExpectToken(token.NAME)
 	return nameFromToken(p, t)
 }
 
@@ -52,7 +52,7 @@ func nameToken(p *Parser) ast.Expr {
 //
 // CPython: Parser/pegen.c:599 _PyPegen_string_token
 func stringToken(p *Parser) *Token {
-	return p.ExpectToken(tokenize.STRING)
+	return p.ExpectToken(token.STRING)
 }
 
 // numberToken consumes the next NUMBER token and lifts it to a
@@ -61,7 +61,7 @@ func stringToken(p *Parser) *Token {
 //
 // CPython: Parser/pegen.c:695 _PyPegen_number_token
 func numberToken(p *Parser) ast.Expr {
-	t := p.ExpectToken(tokenize.NUMBER)
+	t := p.ExpectToken(token.NUMBER)
 	if t == nil {
 		return nil
 	}

@@ -10,7 +10,7 @@
 // CPython: Parser/lexer/state.h, Parser/lexer/state.c
 package lexer
 
-import "github.com/tamnd/gopy/tokenize"
+import "github.com/tamnd/gopy/token"
 
 const (
 	maxIndent       = 100
@@ -96,7 +96,7 @@ type Pos struct {
 //
 // CPython: Parser/lexer/state.h:29 struct token
 type Tok struct {
-	Kind        tokenize.Type
+	Kind        token.Type
 	Bytes       []byte
 	Start       Pos
 	End         Pos

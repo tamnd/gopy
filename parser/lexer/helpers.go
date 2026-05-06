@@ -11,7 +11,7 @@ package lexer
 import (
 	"fmt"
 
-	"github.com/tamnd/gopy/tokenize"
+	"github.com/tamnd/gopy/token"
 )
 
 // syntaxError records a SyntaxError at the current cursor position and
@@ -22,7 +22,7 @@ import (
 func (s *State) syntaxError(format string, args ...any) Tok {
 	s.recordError(fmt.Sprintf(format, args...))
 	s.done = eSyntax
-	return s.tokenSetup(tokenize.ERRORTOKEN, s.cur, s.cur)
+	return s.tokenSetup(token.ERRORTOKEN, s.cur, s.cur)
 }
 
 // syntaxErrorKnownRange records a SyntaxError pinned to a specific
@@ -37,7 +37,7 @@ func (s *State) syntaxErrorKnownRange(startCol, endCol int, format string, args 
 		s.err.EndPos.Col = endCol
 	}
 	s.done = eSyntax
-	return s.tokenSetup(tokenize.ERRORTOKEN, s.cur, s.cur)
+	return s.tokenSetup(token.ERRORTOKEN, s.cur, s.cur)
 }
 
 // indentError flags an inconsistent-tab/space situation. Mirrors the
@@ -47,7 +47,7 @@ func (s *State) syntaxErrorKnownRange(startCol, endCol int, format string, args 
 func (s *State) indentError() Tok {
 	s.done = eTabSpace
 	s.cur = s.inp
-	return s.tokenSetup(tokenize.ERRORTOKEN, s.cur, s.cur)
+	return s.tokenSetup(token.ERRORTOKEN, s.cur, s.cur)
 }
 
 // warnInvalidEscape mirrors the deprecation warning the C tokenizer

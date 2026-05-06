@@ -10,13 +10,13 @@ import (
 	"testing"
 
 	"github.com/tamnd/gopy/parser/lexer"
-	"github.com/tamnd/gopy/tokenize"
+	"github.com/tamnd/gopy/token"
 )
 
 func drain(s *lexer.State) {
 	for {
 		tk := s.Get()
-		if tk.Kind == tokenize.ENDMARKER || tk.Kind == tokenize.ERRORTOKEN {
+		if tk.Kind == token.ENDMARKER || tk.Kind == token.ERRORTOKEN {
 			return
 		}
 	}

@@ -10,7 +10,7 @@ package partest
 import (
 	"testing"
 
-	"github.com/tamnd/gopy/tokenize"
+	"github.com/tamnd/gopy/token"
 )
 
 func TestFStringNestingDepth(t *testing.T) {
@@ -34,11 +34,11 @@ func TestFStringNestingDepth(t *testing.T) {
 		var starts, ends int
 		for _, tk := range toks {
 			switch tk.Kind {
-			case tokenize.FSTRING_START:
+			case token.FSTRING_START:
 				starts++
-			case tokenize.FSTRING_END:
+			case token.FSTRING_END:
 				ends++
-			case tokenize.ERRORTOKEN:
+			case token.ERRORTOKEN:
 				t.Errorf("depth %d: lexer rejected %q (%v)", c.depth, c.src, kinds(toks))
 			}
 		}

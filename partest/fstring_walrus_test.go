@@ -9,18 +9,18 @@ package partest
 import (
 	"testing"
 
-	"github.com/tamnd/gopy/tokenize"
+	"github.com/tamnd/gopy/token"
 )
 
 func TestFStringWalrus(t *testing.T) {
 	src := "f'before {(y := 5)} after'\n"
 	toks := tokenize_(t, src)
 	for _, tk := range toks {
-		if tk.Kind == tokenize.ERRORTOKEN {
+		if tk.Kind == token.ERRORTOKEN {
 			t.Fatalf("walrus inside f-string rejected: %v", kinds(toks))
 		}
 	}
-	if !contains(toks, tokenize.FSTRING_START) || !contains(toks, tokenize.FSTRING_END) {
+	if !contains(toks, token.FSTRING_START) || !contains(toks, token.FSTRING_END) {
 		t.Errorf("walrus f-string missing brackets: %v", kinds(toks))
 	}
 }
@@ -31,11 +31,11 @@ func TestFStringMultiline(t *testing.T) {
 	src := "f'''\nhello\n{\n    x\n    +\n    y\n}\n'''\n"
 	toks := tokenize_(t, src)
 	for _, tk := range toks {
-		if tk.Kind == tokenize.ERRORTOKEN {
+		if tk.Kind == token.ERRORTOKEN {
 			t.Fatalf("multiline f-string rejected: %v", kinds(toks))
 		}
 	}
-	if !contains(toks, tokenize.FSTRING_START) || !contains(toks, tokenize.FSTRING_END) {
+	if !contains(toks, token.FSTRING_START) || !contains(toks, token.FSTRING_END) {
 		t.Errorf("multiline f-string missing brackets: %v", kinds(toks))
 	}
 }

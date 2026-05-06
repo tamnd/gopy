@@ -11,7 +11,7 @@ package lexer
 import (
 	"fmt"
 
-	"github.com/tamnd/gopy/tokenize"
+	"github.com/tamnd/gopy/token"
 )
 
 // eof is the sentinel returned by nextC at end of input. CPython uses
@@ -99,10 +99,10 @@ func (s *State) tokGetNormalMode() Tok {
 	if s.pendin != 0 {
 		if s.pendin < 0 {
 			s.pendin++
-			return s.tokenSetup(tokenize.DEDENT, s.cur, s.cur)
+			return s.tokenSetup(token.DEDENT, s.cur, s.cur)
 		}
 		s.pendin--
-		return s.tokenSetup(tokenize.INDENT, s.cur, s.cur)
+		return s.tokenSetup(token.INDENT, s.cur, s.cur)
 	}
 
 	c := s.nextC()
@@ -147,7 +147,7 @@ func (s *State) tokGetNormalMode() Tok {
 			if c == '\n' {
 				end = s.cur - 1
 			}
-			tok := s.tokenSetup(tokenize.COMMENT, commentStart, end)
+			tok := s.tokenSetup(token.COMMENT, commentStart, end)
 			if c == '\n' {
 				s.commentNewline = true
 			}
@@ -169,9 +169,9 @@ func (s *State) tokGetNormalMode() Tok {
 		s.col = 0
 		s.lineStart = s.cur
 		if s.level > 0 {
-			return s.tokenSetup(tokenize.NL, start, end)
+			return s.tokenSetup(token.NL, start, end)
 		}
-		return s.tokenSetup(tokenize.NEWLINE, start, end)
+		return s.tokenSetup(token.NEWLINE, start, end)
 	}
 
 	if c == eof {
@@ -233,7 +233,7 @@ done:
 		if s.indent+1 >= maxIndent {
 			s.done = eIndent
 			s.recordError("too many levels of indentation")
-			return s.tokenSetup(tokenize.ERRORTOKEN, s.cur, s.cur), true
+			return s.tokenSetup(token.ERRORTOKEN, s.cur, s.cur), true
 		}
 		s.pendin++
 		s.indent++
@@ -248,7 +248,7 @@ done:
 	if col != s.indstack[s.indent] {
 		s.done = eDedent
 		s.recordError("unindent does not match any outer indentation level")
-		return s.tokenSetup(tokenize.ERRORTOKEN, s.cur, s.cur), true
+		return s.tokenSetup(token.ERRORTOKEN, s.cur, s.cur), true
 	}
 	return Tok{}, false
 }
@@ -277,7 +277,7 @@ func (s *State) scanName(_ int) Tok {
 		return s.scanString(c)
 	}
 	s.backup(c)
-	return s.tokenSetup(tokenize.NAME, s.start, s.cur)
+	return s.tokenSetup(token.NAME, s.start, s.cur)
 }
 
 // scanNumber scans an integer or floating-point literal. Handles the
@@ -293,19 +293,19 @@ func (s *State) scanNumber(c int) Tok {
 			for isHexDigitOrUnderscore(s.peek()) {
 				s.nextC()
 			}
-			return s.tokenSetup(tokenize.NUMBER, s.start, s.cur)
+			return s.tokenSetup(token.NUMBER, s.start, s.cur)
 		}
 		if c == 'o' || c == 'O' {
 			for isOctDigitOrUnderscore(s.peek()) {
 				s.nextC()
 			}
-			return s.tokenSetup(tokenize.NUMBER, s.start, s.cur)
+			return s.tokenSetup(token.NUMBER, s.start, s.cur)
 		}
 		if c == 'b' || c == 'B' {
 			for isBinDigitOrUnderscore(s.peek()) {
 				s.nextC()
 			}
-			return s.tokenSetup(tokenize.NUMBER, s.start, s.cur)
+			return s.tokenSetup(token.NUMBER, s.start, s.cur)
 		}
 		// Leading zero followed by decimal digits, '.', 'e', 'j' falls
 		// through to the regular decimal path.
@@ -332,7 +332,7 @@ func (s *State) scanNumber(c int) Tok {
 		c = s.nextC()
 	}
 	s.backup(c)
-	return s.tokenSetup(tokenize.NUMBER, s.start, s.cur)
+	return s.tokenSetup(token.NUMBER, s.start, s.cur)
 }
 
 func isHexDigitOrUnderscore(c int) bool {
@@ -366,7 +366,7 @@ func (s *State) scanString(quote int) Tok {
 			triple = true
 		} else {
 			// Empty string literal "".
-			return s.tokenSetup(tokenize.STRING, s.start, s.cur)
+			return s.tokenSetup(token.STRING, s.start, s.cur)
 		}
 	}
 	for {
@@ -375,32 +375,32 @@ func (s *State) scanString(quote int) Tok {
 		case eof:
 			s.done = eEOFS
 			s.recordError("unterminated string literal")
-			return s.tokenSetup(tokenize.ERRORTOKEN, s.start, s.cur)
+			return s.tokenSetup(token.ERRORTOKEN, s.start, s.cur)
 		case '\\':
 			if s.nextC() == eof {
 				s.done = eEOFS
 				s.recordError("unterminated string literal")
-				return s.tokenSetup(tokenize.ERRORTOKEN, s.start, s.cur)
+				return s.tokenSetup(token.ERRORTOKEN, s.start, s.cur)
 			}
 			continue
 		case '\n':
 			if !triple {
 				s.done = eEOLS
 				s.recordError("unterminated string literal")
-				return s.tokenSetup(tokenize.ERRORTOKEN, s.start, s.cur)
+				return s.tokenSetup(token.ERRORTOKEN, s.start, s.cur)
 			}
 			s.lineno++
 			s.col = 0
 		}
 		if c == quote {
 			if !triple {
-				return s.tokenSetup(tokenize.STRING, s.start, s.cur)
+				return s.tokenSetup(token.STRING, s.start, s.cur)
 			}
 			if s.peek() == quote {
 				s.nextC()
 				if s.peek() == quote {
 					s.nextC()
-					return s.tokenSetup(tokenize.STRING, s.start, s.cur)
+					return s.tokenSetup(token.STRING, s.start, s.cur)
 				}
 			}
 		}
@@ -422,7 +422,7 @@ func (s *State) scanOperator(c int) Tok {
 				m.curlyBracketDepth++
 			}
 		}
-		return s.tokenSetup(tokenize.OP, s.start, s.cur)
+		return s.tokenSetup(token.OP, s.start, s.cur)
 	case ')', ']', '}':
 		s.popParen(byte(c))
 		// Inside an f-string expression, after popping, a `}` that
@@ -443,7 +443,7 @@ func (s *State) scanOperator(c int) Tok {
 				m.inDebug = false
 			}
 		}
-		return s.tokenSetup(tokenize.OP, s.start, s.cur)
+		return s.tokenSetup(token.OP, s.start, s.cur)
 	case '*', '/', '<', '>', '=', '!':
 		if s.peek() == '=' {
 			s.nextC()
@@ -453,22 +453,22 @@ func (s *State) scanOperator(c int) Tok {
 				s.nextC()
 			}
 		}
-		return s.tokenSetup(tokenize.OP, s.start, s.cur)
+		return s.tokenSetup(token.OP, s.start, s.cur)
 	case '+', '%', '&', '|', '^', '@':
 		if s.peek() == '=' {
 			s.nextC()
 		}
-		return s.tokenSetup(tokenize.OP, s.start, s.cur)
+		return s.tokenSetup(token.OP, s.start, s.cur)
 	case '-':
 		if s.peek() == '=' || s.peek() == '>' {
 			s.nextC()
 		}
-		return s.tokenSetup(tokenize.OP, s.start, s.cur)
+		return s.tokenSetup(token.OP, s.start, s.cur)
 	case ':':
 		if s.peek() == '=' {
 			s.nextC()
 		}
-		return s.tokenSetup(tokenize.OP, s.start, s.cur)
+		return s.tokenSetup(token.OP, s.start, s.cur)
 	case '.':
 		if s.peek() == '.' {
 			s.nextC()
@@ -478,13 +478,13 @@ func (s *State) scanOperator(c int) Tok {
 		} else if d := s.peek(); d >= '0' && d <= '9' {
 			return s.scanNumber('.')
 		}
-		return s.tokenSetup(tokenize.OP, s.start, s.cur)
+		return s.tokenSetup(token.OP, s.start, s.cur)
 	case ',', ';', '~':
-		return s.tokenSetup(tokenize.OP, s.start, s.cur)
+		return s.tokenSetup(token.OP, s.start, s.cur)
 	}
 	s.done = eToken
 	s.recordError("invalid character")
-	return s.tokenSetup(tokenize.ERRORTOKEN, s.start, s.cur)
+	return s.tokenSetup(token.ERRORTOKEN, s.start, s.cur)
 }
 
 func (s *State) pushParen(c byte) {
@@ -537,10 +537,10 @@ func (s *State) popParen(c byte) {
 func (s *State) endmarker() Tok {
 	if s.indent > 0 {
 		s.indent--
-		return s.tokenSetup(tokenize.DEDENT, s.cur, s.cur)
+		return s.tokenSetup(token.DEDENT, s.cur, s.cur)
 	}
 	s.done = eEOF
-	return s.tokenSetup(tokenize.ENDMARKER, s.cur, s.cur)
+	return s.tokenSetup(token.ENDMARKER, s.cur, s.cur)
 }
 
 // maybeTypeComment inspects a comment span and emits a TYPE_COMMENT
@@ -562,7 +562,7 @@ func (s *State) maybeTypeComment(start, end int) (Tok, bool) {
 	for body < end && (s.buf[body] == ' ' || s.buf[body] == '\t') {
 		body++
 	}
-	return s.typeCommentTokenSetup(tokenize.TYPE_COMMENT, s.startCol, s.col, body, end), true
+	return s.typeCommentTokenSetup(token.TYPE_COMMENT, s.startCol, s.col, body, end), true
 }
 
 // tokGetFStringMode scans inside an f-string or t-string body. Stub:
