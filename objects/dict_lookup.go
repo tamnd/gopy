@@ -96,25 +96,41 @@ func compareSplit(d *Dict, slot *dictEntry, key Object, hash int64) (bool, error
 // dictProbe is the shared open-addressed driver. perturb mixes the
 // upper hash bits into the probe sequence so colliding low bits
 // don't form long chains. cmp is the variant-specific equality
-// check; the loop returns the slot index on hit or the first empty
-// slot on miss, matching the (idx, found) shape callers expect.
+// check.
+//
+// On a hit it returns the slot index. On a miss it returns the
+// reusable insertion point: the first dummy slot the probe walked
+// through, or the empty slot that ended the walk if no dummies were
+// seen. This is the same freeslot tracking CPython's lookdict does
+// so SetItem can reuse a tombstone instead of extending the chain.
 //
 // CPython: Objects/dictobject.c:1001 do_lookup
 func dictProbe(d *Dict, key Object, hash int64, cmp dictCompare) (int, bool, error) {
 	mask := uint64(len(d.entries) - 1)
 	i := uint64(hash) & mask
 	perturb := uint64(hash)
+	freeSlot := -1
 	for {
 		slot := &d.entries[i]
 		if !slot.used {
-			return int(i), false, nil
-		}
-		eq, err := cmp(d, slot, key, hash)
-		if err != nil {
-			return 0, false, err
-		}
-		if eq {
-			return int(i), true, nil
+			if slot.dummy {
+				if freeSlot < 0 {
+					freeSlot = int(i)
+				}
+			} else {
+				if freeSlot >= 0 {
+					return freeSlot, false, nil
+				}
+				return int(i), false, nil
+			}
+		} else {
+			eq, err := cmp(d, slot, key, hash)
+			if err != nil {
+				return 0, false, err
+			}
+			if eq {
+				return int(i), true, nil
+			}
 		}
 		perturb >>= 5
 		i = (5*i + 1 + perturb) & mask

@@ -2,26 +2,32 @@ package objects
 
 import "strings"
 
-// dictEntry is one slot in the dict's open-addressed table. CPython
-// uses a parallel index array + entry array for compact dicts; v0.2
-// ships the simpler two-array form and the compact layout arrives
-// with the full dictobject.c port in v0.4.
+// dictEntry is one slot in the dict's open-addressed table. The slot
+// is one of three states: empty (used=false, dummy=false) the probe
+// stops here; active (used=true) the key/value/hash fields are live;
+// dummy (dummy=true) the slot was deleted but stays in the chain so
+// later probes for keys hashed earlier in the chain still find them.
+// The dummy goes away on the next resize. CPython tracks the same
+// three states via DKIX_EMPTY/DKIX_DUMMY/ix>=0 in its parallel index
+// array.
 //
-// CPython: Objects/dictobject.c:L353 PyDictKeyEntry
+// CPython: Objects/dictobject.c:353 PyDictKeyEntry
 type dictEntry struct {
 	hash  int64
 	key   Object
 	value Object
 	used  bool
+	dummy bool
 }
 
 // Dict is the Python dict.
 //
-// CPython: Include/cpython/dictobject.h:L19 PyDictObject
+// CPython: Include/cpython/dictobject.h:19 PyDictObject
 type Dict struct {
 	Header
 	entries []dictEntry
-	used    int
+	used    int      // active entries
+	fill    int      // active entries + dummies; only resets on resize
 	kind    dictKind // DictKeysKind: gates the four lookup variants
 }
 
@@ -99,16 +105,13 @@ func (d *Dict) Keys() []Object {
 
 // SetItem inserts or replaces key. Mirrors PyDict_SetItem.
 //
-// CPython: Objects/dictobject.c:L1985 PyDict_SetItem
+// CPython: Objects/dictobject.c:1985 PyDict_SetItem
 func (d *Dict) SetItem(key, value Object) error {
 	h, err := Hash(key)
 	if err != nil {
 		return err
 	}
-	if d.used*3 >= len(d.entries)*2 {
-		d.grow()
-	}
-	return d.insert(h, key, value)
+	return dictInsert(d, h, key, value)
 }
 
 // GetItem looks up key. Returns errKeyNotFound when absent.
@@ -131,22 +134,9 @@ func (d *Dict) GetItem(key Object) (Object, error) {
 
 // DelItem removes key. Mirrors PyDict_DelItem.
 //
-// CPython: Objects/dictobject.c:L2154 PyDict_DelItem
+// CPython: Objects/dictobject.c:2834 PyDict_DelItem
 func (d *Dict) DelItem(key Object) error {
-	h, err := Hash(key)
-	if err != nil {
-		return err
-	}
-	idx, ok, err := d.lookup(h, key)
-	if err != nil {
-		return err
-	}
-	if !ok {
-		return errKeyNotFound
-	}
-	d.entries[idx] = dictEntry{}
-	d.used--
-	return nil
+	return dictDelete(d, key)
 }
 
 // Contains reports whether key is in the dict.
@@ -168,31 +158,6 @@ func (d *Dict) Contains(key Object) (bool, error) {
 // CPython: Objects/dictobject.c:1247 _Py_dict_lookup
 func (d *Dict) lookup(h int64, key Object) (idx int, found bool, err error) {
 	return dispatchLookup(d, key, h)
-}
-
-func (d *Dict) insert(h int64, key, value Object) error {
-	idx, ok, err := d.lookup(h, key)
-	if err != nil {
-		return err
-	}
-	d.entries[idx] = dictEntry{hash: h, key: key, value: value, used: true}
-	if !ok {
-		d.used++
-		d.downgradeKindOnInsert(key)
-	}
-	return nil
-}
-
-func (d *Dict) grow() {
-	old := d.entries
-	d.entries = make([]dictEntry, len(old)*2)
-	d.used = 0
-	for _, e := range old {
-		if !e.used {
-			continue
-		}
-		_ = d.insert(e.hash, e.key, e.value)
-	}
 }
 
 func dictLen(o Object) (int, error) { return o.(*Dict).Len(), nil }
