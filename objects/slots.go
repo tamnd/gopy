@@ -64,12 +64,14 @@ type NumberMethods struct {
 //
 // CPython: Include/cpython/object.h:L262 PySequenceMethods
 type SequenceMethods struct {
-	Length   func(o Object) (int, error)
-	Concat   func(a, b Object) (Object, error)
-	Repeat   func(o Object, n int) (Object, error)
-	GetItem  func(o Object, i int) (Object, error)
-	SetItem  func(o Object, i int, v Object) error
-	Contains func(o, v Object) (bool, error)
+	Length        func(o Object) (int, error)
+	Concat        func(a, b Object) (Object, error)
+	Repeat        func(o Object, n int) (Object, error)
+	GetItem       func(o Object, i int) (Object, error)
+	SetItem       func(o Object, i int, v Object) error
+	Contains      func(o, v Object) (bool, error)
+	InPlaceConcat func(a, b Object) (Object, error)
+	InPlaceRepeat func(o Object, n int) (Object, error)
 }
 
 // MappingMethods is the v0.2 subset of tp_as_mapping.
