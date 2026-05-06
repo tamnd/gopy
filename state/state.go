@@ -60,11 +60,26 @@ type Interpreter struct {
 // exception pointer; v0.6 adds the frame stack and v0.7 adds the
 // dict/globals slots.
 //
+// id is the per-thread identifier the contextvars cache compares
+// against (matches PyThreadState.id). ctx holds the current
+// *contextvar.Context as an untyped any so package state stays free
+// of a contextvar import. ctxVersion is bumped on every Enter / Exit
+// so the ContextVar tsid+version cache invalidates correctly.
+//
 // CPython: Include/cpython/pystate.h:L75 PyThreadState
 type Thread struct {
-	interp *Interpreter
-	exc    atomic.Value // holds Exception or nil
+	interp     *Interpreter
+	exc        atomic.Value // holds Exception or nil
+	id         uint64
+	ctx        any
+	ctxVersion uint64
 }
+
+// threadIDCounter feeds Thread.id. Starts at 1 so 0 is reserved as a
+// "never seen" sentinel for the ContextVar cache.
+//
+// CPython: Python/pystate.c:L908 _PyThreadState_NewID
+var threadIDCounter atomic.Uint64
 
 // CurrentException returns the current exception or nil. Mirrors
 // _PyErr_Occurred.
@@ -170,11 +185,42 @@ func (r *Runtime) DropInterpreters() {
 //
 // CPython: Python/pystate.c:L915 PyThreadState_New
 func (i *Interpreter) AttachThread() *Thread {
-	t := &Thread{interp: i}
+	t := &Thread{interp: i, id: threadIDCounter.Add(1)}
 	t.exc.Store(excHolder{})
 	i.threads = append(i.threads, t)
 	return t
 }
+
+// ID returns the per-thread identifier. Used by the ContextVar cache.
+//
+// CPython: Include/cpython/pystate.h PyThreadState.id
+func (t *Thread) ID() uint64 { return t.id }
+
+// Context returns the current context, stored as any to avoid
+// importing contextvar. The contextvar package re-asserts the
+// concrete *Context type at use sites. nil signals "no context yet";
+// the contextvar layer lazily allocates an empty one on first use,
+// matching CPython's context_get.
+//
+// CPython: Include/cpython/pystate.h PyThreadState.context
+func (t *Thread) Context() any { return t.ctx }
+
+// SetContext installs a new current context. The contextvar layer
+// passes a *contextvar.Context (or nil to clear). Each call bumps
+// ContextVersion so the per-ContextVar cache invalidates.
+//
+// CPython: Python/context.c:L184 context_switched
+func (t *Thread) SetContext(ctx any) {
+	t.ctx = ctx
+	t.ctxVersion++
+}
+
+// ContextVersion returns the version counter that increments on
+// every context switch. The ContextVar cache stamps this value into
+// the entry on every set / get so a switch invalidates stale reads.
+//
+// CPython: Include/cpython/pystate.h PyThreadState.context_ver
+func (t *Thread) ContextVersion() uint64 { return t.ctxVersion }
 
 // Runtime returns the runtime that owns i.
 //
