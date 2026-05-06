@@ -56,9 +56,16 @@ type gcState struct {
 
 	enabled     bool
 	generations [NumGenerations]generation
+	permanent   *gcHead
 
 	finalizers map[objects.Object]Finalizer
 	tracked    map[objects.Object]*gcHead
+
+	// garbage holds objects whose collection was suppressed because
+	// they carry a legacy __del__. gopy unifies finalizers under
+	// PEP 442 so garbage stays empty; we expose the list anyway to
+	// match the gc.garbage Python attribute.
+	garbage []objects.Object
 }
 
 // state is the single package-level collector state. The v0.3
@@ -81,6 +88,7 @@ func newGCState() *gcState {
 	for i := range s.generations {
 		s.generations[i].head = newListHead()
 	}
+	s.permanent = newListHead()
 	return s
 }
 

@@ -40,6 +40,18 @@ func buildModule() (*objects.Module, error) {
 		{"set_threshold", gcSetThreshold},
 		{"get_count", gcGetCount},
 		{"is_tracked", gcIsTracked},
+		{"get_objects", gcGetObjects},
+		{"get_referrers", gcGetReferrers},
+		{"get_referents", gcGetReferents},
+		{"freeze", gcFreeze},
+		{"unfreeze", gcUnfreeze},
+		{"get_freeze_count", gcGetFreezeCount},
+	}
+	if err := d.SetItem(objects.NewStr("garbage"), objects.NewList(nil)); err != nil {
+		return nil, err
+	}
+	if err := d.SetItem(objects.NewStr("callbacks"), objects.NewList(nil)); err != nil {
+		return nil, err
 	}
 	for _, e := range entries {
 		bf := objects.NewBuiltinFunction(e.name, e.fn)
@@ -173,4 +185,79 @@ func gcIsTracked(args []objects.Object, kwargs map[string]objects.Object) (objec
 		return nil, fmt.Errorf("TypeError: is_tracked() takes no keyword arguments")
 	}
 	return objects.NewBool(IsTracked(args[0])), nil
+}
+
+// gcGetObjects implements gc.get_objects([generation]).
+//
+// CPython: Modules/gcmodule.c gc_get_objects_impl
+func gcGetObjects(args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error) {
+	if len(kwargs) != 0 {
+		return nil, fmt.Errorf("TypeError: get_objects() takes no keyword arguments")
+	}
+	if len(args) > 1 {
+		return nil, fmt.Errorf("TypeError: get_objects() takes at most 1 argument (%d given)", len(args))
+	}
+	gen := -1
+	if len(args) == 1 {
+		x, ok := args[0].(*objects.Int)
+		if !ok {
+			return nil, fmt.Errorf("TypeError: get_objects() argument must be int, not %s", args[0].Type().Name)
+		}
+		v, fits := x.Int64()
+		if !fits {
+			return nil, fmt.Errorf("OverflowError: get_objects() argument out of range")
+		}
+		gen = int(v)
+		if gen < 0 || gen >= NumGenerations {
+			return nil, fmt.Errorf("ValueError: generation must be in range(%d)", NumGenerations)
+		}
+	}
+	return objects.NewList(GetObjects(gen)), nil
+}
+
+// gcGetReferrers implements gc.get_referrers(*objs).
+//
+// CPython: Modules/gcmodule.c gc_get_referrers
+func gcGetReferrers(args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error) {
+	if len(kwargs) != 0 {
+		return nil, fmt.Errorf("TypeError: get_referrers() takes no keyword arguments")
+	}
+	return objects.NewList(GetReferrers(args...)), nil
+}
+
+// gcGetReferents implements gc.get_referents(*objs).
+//
+// CPython: Modules/gcmodule.c gc_get_referents
+func gcGetReferents(args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error) {
+	if len(kwargs) != 0 {
+		return nil, fmt.Errorf("TypeError: get_referents() takes no keyword arguments")
+	}
+	return objects.NewList(GetReferents(args...)), nil
+}
+
+// gcFreeze / gcUnfreeze / gcGetFreezeCount expose the permanent
+// generation surface.
+//
+// CPython: Modules/gcmodule.c gc_freeze / gc_unfreeze / gc_get_freeze_count
+func gcFreeze(args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error) {
+	if len(args) != 0 || len(kwargs) != 0 {
+		return nil, fmt.Errorf("TypeError: freeze() takes no arguments")
+	}
+	Freeze()
+	return objects.None(), nil
+}
+
+func gcUnfreeze(args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error) {
+	if len(args) != 0 || len(kwargs) != 0 {
+		return nil, fmt.Errorf("TypeError: unfreeze() takes no arguments")
+	}
+	Unfreeze()
+	return objects.None(), nil
+}
+
+func gcGetFreezeCount(args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error) {
+	if len(args) != 0 || len(kwargs) != 0 {
+		return nil, fmt.Errorf("TypeError: get_freeze_count() takes no arguments")
+	}
+	return objects.NewInt(int64(GetFreezeCount())), nil
 }
