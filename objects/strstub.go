@@ -20,17 +20,13 @@ func init() {
 	strStubType.Str = func(o Object) (string, error) {
 		return o.(*strStub).v, nil
 	}
-	// Hash + RichCmp lets strings act as dict keys for the v0.6 VM.
-	// The real Unicode hash (siphash with the runtime salt) lands
-	// with the unicodeobject port in v0.4 / spec 1616.
+	// Hash + RichCmp lets strings act as dict keys. Empty strings
+	// hash to 0, matching CPython; everything else routes through
+	// SipHash-1-3 with the runtime hash secret.
+	//
+	// CPython: Objects/unicodeobject.c:11532 unicode_hash
 	strStubType.Hash = func(o Object) (int64, error) {
-		s := o.(*strStub).v
-		var h uint64 = 1469598103934665603
-		for i := 0; i < len(s); i++ {
-			h ^= uint64(s[i])
-			h *= 1099511628211
-		}
-		return int64(h), nil
+		return HashString(o.(*strStub).v), nil
 	}
 	strStubType.RichCmp = func(a, b Object, op CompareOp) (Object, error) {
 		bs, ok := b.(*strStub)
