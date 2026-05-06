@@ -99,6 +99,11 @@ func Init(defaultFile io.Writer) (*objects.Dict, error) {
 		}
 	}
 
+	importFn := objects.NewBuiltinFunction("__import__", Import)
+	if err := setBuiltin(dict, "__import__", importFn); err != nil {
+		return nil, err
+	}
+
 	return dict, nil
 }
 

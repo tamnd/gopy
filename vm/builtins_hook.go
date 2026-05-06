@@ -8,11 +8,14 @@ package vm
 
 import (
 	"github.com/tamnd/gopy/builtins"
+	"github.com/tamnd/gopy/imp"
 	"github.com/tamnd/gopy/objects"
+	"github.com/tamnd/gopy/state"
 )
 
 func init() {
 	builtins.SetCurrentScope(currentScope)
+	builtins.SetImporter(currentImporter)
 }
 
 // currentScope yields the running frame's (globals, locals). The
@@ -40,4 +43,24 @@ func currentScope() (objects.Object, objects.Object) {
 		return f.Globals, nil
 	}
 	return f.Globals, d
+}
+
+// currentImporter is the hook builtins.__import__ delegates to. It
+// reuses vmExecutor so the import can run frozen / built-in module
+// init code, then forwards to imp.ImportModuleLevel. fromlist is
+// accepted for signature parity; the existing IMPORT_NAME arm
+// likewise drops it pending fromlist-driven submodule discovery.
+//
+// CPython: Python/import.c:1561 PyImport_ImportModuleLevelObject
+func currentImporter(name, pkgname string, level int, _ []string) (objects.Object, error) {
+	ts := currentThread()
+	if ts == nil {
+		ts = state.NewThread()
+	}
+	exec := &vmExecutor{ts: ts}
+	mod, err := imp.ImportModuleLevel(exec, name, pkgname, level)
+	if err != nil {
+		return nil, err
+	}
+	return mod, nil
 }

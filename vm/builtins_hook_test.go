@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/tamnd/gopy/compile"
+	"github.com/tamnd/gopy/imp"
 	"github.com/tamnd/gopy/objects"
 	"github.com/tamnd/gopy/state"
 )
@@ -66,5 +67,26 @@ func TestCurrentScopeReturnsExplicitLocals(t *testing.T) {
 	}
 	if gotL != l {
 		t.Fatalf("locals = %v, want explicit dict", gotL)
+	}
+}
+
+// TestCurrentImporterRoutesThroughInittab pins that the __import__ hook
+// installed by vm.init forwards to imp.ImportModuleLevel: a builtin
+// registered in the inittab is reachable via currentImporter.
+func TestCurrentImporterRoutesThroughInittab(t *testing.T) {
+	const name = "_test_vm_importer_module"
+	imp.RemoveModule(name)
+	want := objects.NewModule(name)
+	if err := imp.AppendInittab(name, func() (*objects.Module, error) { return want, nil }); err != nil {
+		t.Fatalf("AppendInittab: %v", err)
+	}
+	defer imp.RemoveModule(name)
+
+	got, err := currentImporter(name, "", 0, nil)
+	if err != nil {
+		t.Fatalf("currentImporter: %v", err)
+	}
+	if got != want {
+		t.Fatalf("currentImporter = %v, want %v", got, want)
 	}
 }
