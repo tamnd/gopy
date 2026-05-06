@@ -47,6 +47,19 @@ func init() {
 	CoroAwaitType = NewType("coroutine_wrapper", []*Type{objectType})
 	CoroAwaitType.Iter = func(o Object) (Object, error) { return o, nil }
 	CoroAwaitType.IterNext = coroAwaitNext
+	CoroAwaitType.TpTraverse = coroAwaiterTraverse
+}
+
+// coroAwaiterTraverse visits the wrapped coroutine. Mirrors
+// coro_wrapper_traverse.
+//
+// CPython: Objects/genobject.c:1480 coro_wrapper_traverse
+func coroAwaiterTraverse(o Object, visit Visitor) error {
+	w := o.(*coroAwaiter)
+	if w.coro == nil {
+		return nil
+	}
+	return visit(w.coro)
 }
 
 // NewCoroutine creates a coroutine. Like Generator the caller is

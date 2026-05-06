@@ -133,12 +133,3 @@ func collectMain(gen int) (int, []pendingCallback) {
 
 	return collected, pending
 }
-
-// clearAllFreeLists is the gopy stand-in for CPython's
-// _PyGC_ClearAllFreeLists (gc_gil.c). CPython drops cached objects
-// from per-type free lists on every collection; gopy has no such
-// caches, so the call is a no-op kept here to match the call site
-// shape and make the absence explicit.
-//
-// CPython: Python/gc_gil.c _PyGC_ClearAllFreeLists
-func clearAllFreeLists() {}

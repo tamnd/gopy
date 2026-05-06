@@ -63,6 +63,83 @@ var frameType = NewType("frame", []*Type{objectType})
 
 func init() {
 	frameType.Repr = frameRepr
+	frameType.TpTraverse = frameTraverse
+}
+
+// frameTraverse walks every Object reachable from the frame: f_trace
+// plus the activation record's globals, builtins, locals, fast/cell/
+// free locals, and the back-frame chain. Mirrors frame_traverse on
+// the live PyFrameObject.
+//
+// CPython: Objects/frameobject.c:1163 frame_traverse
+func frameTraverse(o Object, visit Visitor) error {
+	f := o.(*Frame)
+	if f.trace != nil {
+		if err := visit(f.trace); err != nil {
+			return err
+		}
+	}
+	if f.interp == nil {
+		return nil
+	}
+	if err := visitInterp(f.interp, visit); err != nil {
+		return err
+	}
+	for back := f.interp.FrameBack(); back != nil; back = back.FrameBack() {
+		if err := visitInterp(back, visit); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// visitInterp walks the references on a single activation record. It
+// is split out from frameTraverse so the back-chain loop can reuse it
+// without recursing through the wrapper-allocation path.
+func visitInterp(ip InterpreterFrame, visit Visitor) error {
+	if g := ip.FrameGlobals(); g != nil {
+		if err := visit(g); err != nil {
+			return err
+		}
+	}
+	if b := ip.FrameBuiltins(); b != nil {
+		if err := visit(b); err != nil {
+			return err
+		}
+	}
+	if l := ip.FrameLocals(); l != nil {
+		if err := visit(l); err != nil {
+			return err
+		}
+	}
+	for i, n := 0, ip.FrameNumLocals(); i < n; i++ {
+		v := ip.FrameFastLocal(i)
+		if v == nil {
+			continue
+		}
+		if err := visit(v); err != nil {
+			return err
+		}
+	}
+	for i, n := 0, ip.FrameNumCells(); i < n; i++ {
+		v := ip.FrameCellLocal(i)
+		if v == nil {
+			continue
+		}
+		if err := visit(v); err != nil {
+			return err
+		}
+	}
+	for i, n := 0, ip.FrameNumFrees(); i < n; i++ {
+		v := ip.FrameFreeLocal(i)
+		if v == nil {
+			continue
+		}
+		if err := visit(v); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // NewFrame wraps interp in a Python-level frame object. interp is

@@ -16,6 +16,21 @@ type Cell struct {
 // CPython: Objects/cellobject.c PyCell_Type
 var CellType = NewType("cell", []*Type{objectType})
 
+func init() {
+	CellType.TpTraverse = cellTraverse
+}
+
+// cellTraverse visits the contents reference. Mirrors cell_traverse.
+//
+// CPython: Objects/cellobject.c:282 cell_traverse
+func cellTraverse(o Object, visit Visitor) error {
+	c := o.(*Cell)
+	if c.Contents == nil {
+		return nil
+	}
+	return visit(c.Contents)
+}
+
 // NewCell builds a cell holding contents. Pass nil for an unbound cell.
 //
 // CPython: Objects/cellobject.c PyCell_New

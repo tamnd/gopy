@@ -32,6 +32,23 @@ func init() {
 	BoundMethodType.Repr = boundMethodRepr
 	BoundMethodType.Str = boundMethodRepr
 	BoundMethodType.Vectorcall = boundMethodVectorcall
+	BoundMethodType.TpTraverse = boundMethodTraverse
+}
+
+// boundMethodTraverse visits imFunc and imSelf. Mirrors method_traverse.
+//
+// CPython: Objects/classobject.c:262 method_traverse
+func boundMethodTraverse(o Object, visit Visitor) error {
+	m := o.(*BoundMethod)
+	if m.imFunc != nil {
+		if err := visit(m.imFunc); err != nil {
+			return err
+		}
+	}
+	if m.imSelf != nil {
+		return visit(m.imSelf)
+	}
+	return nil
 }
 
 // NewBoundMethod pairs fn with self.
@@ -91,6 +108,18 @@ func init() {
 	ClassMethodType.Repr = classMethodRepr
 	ClassMethodType.Str = classMethodRepr
 	ClassMethodType.DescrGet = classMethodDescrGet
+	ClassMethodType.TpTraverse = classMethodTraverse
+}
+
+// classMethodTraverse visits the wrapped callable. Mirrors cm_traverse.
+//
+// CPython: Objects/funcobject.c:1106 cm_traverse
+func classMethodTraverse(o Object, visit Visitor) error {
+	cm := o.(*ClassMethod)
+	if cm.cmCallable == nil {
+		return nil
+	}
+	return visit(cm.cmCallable)
 }
 
 // NewClassMethod wraps fn so attribute access binds it to the class
@@ -146,6 +175,18 @@ func init() {
 	StaticMethodType.Repr = staticMethodRepr
 	StaticMethodType.Str = staticMethodRepr
 	StaticMethodType.DescrGet = staticMethodDescrGet
+	StaticMethodType.TpTraverse = staticMethodTraverse
+}
+
+// staticMethodTraverse visits the wrapped callable. Mirrors sm_traverse.
+//
+// CPython: Objects/funcobject.c:1220 sm_traverse
+func staticMethodTraverse(o Object, visit Visitor) error {
+	sm := o.(*StaticMethod)
+	if sm.smCallable == nil {
+		return nil
+	}
+	return visit(sm.smCallable)
 }
 
 // NewStaticMethod wraps fn so attribute access on an instance returns

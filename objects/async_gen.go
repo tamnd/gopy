@@ -62,11 +62,43 @@ func init() {
 		[]*Type{objectType})
 	AsyncGenASendType.Iter = func(o Object) (Object, error) { return o, nil }
 	AsyncGenASendType.IterNext = asyncGenASendNext
+	AsyncGenASendType.TpTraverse = asyncGenASendTraverse
 
 	AsyncGenAThrowType = NewType("async_generator_athrow",
 		[]*Type{objectType})
 	AsyncGenAThrowType.Iter = func(o Object) (Object, error) { return o, nil }
 	AsyncGenAThrowType.IterNext = asyncGenAThrowNext
+	AsyncGenAThrowType.TpTraverse = asyncGenAThrowTraverse
+}
+
+// asyncGenASendTraverse visits the wrapped generator and the pending
+// send value. Mirrors async_gen_asend_traverse.
+//
+// CPython: Objects/genobject.c:1933 async_gen_asend_traverse
+func asyncGenASendTraverse(o Object, visit Visitor) error {
+	a := o.(*asyncGenASend)
+	if a.gen != nil {
+		if err := visit(a.gen); err != nil {
+			return err
+		}
+	}
+	if a.val != nil {
+		return visit(a.val)
+	}
+	return nil
+}
+
+// asyncGenAThrowTraverse visits the wrapped generator. The pending
+// error is a Go error rather than a Python object, so it is not
+// reachable through the cycle GC. Mirrors async_gen_athrow_traverse.
+//
+// CPython: Objects/genobject.c:2342 async_gen_athrow_traverse
+func asyncGenAThrowTraverse(o Object, visit Visitor) error {
+	a := o.(*asyncGenAThrow)
+	if a.gen == nil {
+		return nil
+	}
+	return visit(a.gen)
 }
 
 // NewAsyncGenerator creates an async generator with the given name.
