@@ -22,6 +22,7 @@ type Dict struct {
 	Header
 	entries []dictEntry
 	used    int
+	kind    dictKind // DictKeysKind: gates the four lookup variants
 }
 
 // DictType is the type singleton for dict. Mirrors PyDict_Type.
@@ -72,7 +73,7 @@ func dictTraverse(o Object, visit Visitor) error {
 //
 // CPython: Objects/dictobject.c:L765 PyDict_New
 func NewDict() *Dict {
-	d := &Dict{entries: make([]dictEntry, dictMinSize)}
+	d := &Dict{entries: make([]dictEntry, dictMinSize), kind: dictKindUnicode}
 	d.init(DictType)
 	return d
 }
@@ -160,29 +161,13 @@ func (d *Dict) Contains(key Object) (bool, error) {
 	return ok, err
 }
 
+// lookup is the dispatcher all dict ops route through. Picks one of
+// the four CPython lookdict variants based on the dict's key-kind
+// flag and the lookup key's type. See dict_lookup.go.
+//
+// CPython: Objects/dictobject.c:1247 _Py_dict_lookup
 func (d *Dict) lookup(h int64, key Object) (idx int, found bool, err error) {
-	mask := uint64(len(d.entries) - 1)
-	i := uint64(h) & mask
-	perturb := uint64(h)
-	for {
-		e := &d.entries[i]
-		if !e.used {
-			return int(i), false, nil
-		}
-		if e.hash == h {
-			eq, err := RichCmpBool(e.key, key, CompareEQ)
-			if err != nil {
-				return 0, false, err
-			}
-			if eq {
-				return int(i), true, nil
-			}
-		}
-		// CPython probing: i = (5*i + 1 + perturb) & mask; perturb >>= 5.
-		// CPython: Objects/dictobject.c:L171 PERTURB_SHIFT.
-		perturb >>= 5
-		i = (5*i + 1 + perturb) & mask
-	}
+	return dispatchLookup(d, key, h)
 }
 
 func (d *Dict) insert(h int64, key, value Object) error {
@@ -193,6 +178,7 @@ func (d *Dict) insert(h int64, key, value Object) error {
 	d.entries[idx] = dictEntry{hash: h, key: key, value: value, used: true}
 	if !ok {
 		d.used++
+		d.downgradeKindOnInsert(key)
 	}
 	return nil
 }
