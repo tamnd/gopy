@@ -44,41 +44,7 @@ func rangeRepr(o Object) (string, error) {
 	return fmt.Sprintf("range(%s, %s, %s)", r.Start.v.String(), r.Stop.v.String(), r.Step.v.String()), nil
 }
 
-// rangeIterator yields Ints from start (inclusive) to stop (exclusive)
-// stepping by step. CPython has long-range and short-range fast paths;
-// v0.2 ships only the long-range path.
-//
-// CPython: Objects/rangeobject.c:L877 PyLongRangeIter_Type
-type rangeIterator struct {
-	Header
-	cur  *Int
-	stop *Int
-	step *Int
-	asc  bool
-}
-
-var rangeIterType = NewType("range_iterator", []*Type{objectType})
-
-func init() {
-	rangeIterType.Iter = func(o Object) (Object, error) { return o, nil }
-	rangeIterType.IterNext = func(o Object) (Object, error) {
-		it := o.(*rangeIterator)
-		c := it.cur.v.Cmp(&it.stop.v)
-		if (it.asc && c >= 0) || (!it.asc && c <= 0) {
-			return nil, ErrStopIteration
-		}
-		out := NewIntFromBig(&it.cur.v)
-		next := &Int{}
-		next.init(IntType)
-		next.v.Add(&it.cur.v, &it.step.v)
-		it.cur = next
-		return out, nil
-	}
-}
-
 func rangeIter(o Object) (Object, error) {
 	r := o.(*Range)
-	it := &rangeIterator{cur: r.Start, stop: r.Stop, step: r.Step, asc: r.Step.v.Sign() > 0}
-	it.init(rangeIterType)
-	return it, nil
+	return newRangeIterator(r.Start, r.Stop, r.Step), nil
 }
