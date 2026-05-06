@@ -67,6 +67,33 @@ func TestRunDashCSmoke(t *testing.T) {
 	}
 }
 
+func TestRunScriptFile(t *testing.T) {
+	// Bare positional argument routes through pythonrun.RunAnyFile.
+	// The contract here is the same as TestRunDashCSmoke: the wiring
+	// must drive without panicking; success or a parser/eval bail are
+	// both acceptable while the panel is incomplete.
+	stdout, cleanupOut := captureFile(t)
+	defer cleanupOut()
+	stderr, cleanupErr := captureFile(t)
+	defer cleanupErr()
+
+	script, err := os.CreateTemp(t.TempDir(), "script-*.py")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, werr := script.WriteString("pass\n"); werr != nil {
+		t.Fatal(werr)
+	}
+	_ = script.Close()
+
+	rc := run([]string{script.Name()}, stdout, stderr)
+	out := readFile(t, stdout)
+	errOut := readFile(t, stderr)
+	if rc != 0 && errOut == "" && out == "" {
+		t.Fatalf("rc=%d but no output: should at least surface an error", rc)
+	}
+}
+
 func TestRunUnknownFlag(t *testing.T) {
 	stdout, cleanupOut := captureFile(t)
 	defer cleanupOut()

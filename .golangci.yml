@@ -137,6 +137,12 @@ linters:
       - path: tools/
         linters:
           - gosec
+      # pythonrun.RunFile is the port of PyRun_AnyFileExFlags: reading a
+      # caller-supplied path is the entire contract, so G304 does not
+      # apply.
+      - path: pythonrun/runfile\.go
+        linters:
+          - gosec
       # FormatInt and ParseSpec mirror format_long_internal /
       # parse_internal_render_format_spec; the branch tree matches
       # CPython's switch and is the unit of parity.
@@ -172,6 +178,18 @@ linters:
       # buildConcatenatedStr ports the string-folding branch tree
       # from Parser/action_helpers.c.
       - path: parser/pegen/extras\.go
+        linters:
+          - gocognit
+          - gocyclo
+      # ConfigParseCmdline mirrors config_parse_cmdline's switch
+      # statement from Python/initconfig.c, and the getopt iterator
+      # mirrors _PyOS_GetOpt's branch tree from Python/getopt.c.
+      # Collapsing the cases would diverge from the source shape.
+      - path: initconfig/config_cli\.go
+        linters:
+          - gocognit
+          - gocyclo
+      - path: initconfig/getopt\.go
         linters:
           - gocognit
           - gocyclo

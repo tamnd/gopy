@@ -20,18 +20,40 @@ type Exception interface {
 
 // Runtime is the process-wide runtime state. Mirrors _PyRuntimeState.
 //
-// CPython: Include/internal/pycore_runtime.h:L162 _PyRuntimeState
+// Preinitialized, CoreInitialized, and Initialized are the staged
+// init flags the lifecycle layer flips as it walks pre-init / core
+// init / main init. They are exported so the lifecycle and finalize
+// paths in package lifecycle can read and set them without an
+// accessor sprawl.
+//
+// CPython: Include/internal/pycore_runtime_structs.h:171 preinitialized
 type Runtime struct {
 	interpreters []*Interpreter
+
+	Preinitialized  int
+	CoreInitialized int
+	Initialized     int
 }
 
 // Interpreter is the per-interpreter state. v0.7 fills in the dict of
 // builtins, sys module, import locks, and so on.
 //
+// Config is the *initconfig.PyConfig the lifecycle stamps in during
+// pyinit_core. Stored as any so package state stays independent of
+// initconfig; the lifecycle layer is the sole reader and re-asserts
+// the concrete type at use sites.
+//
+// Finalizing is the bool flag the lifecycle flips during Py_Finalize
+// before clearing modules; it stays at 1 until the interpreter is
+// dropped from the runtime.
+//
 // CPython: Include/internal/pycore_interp.h:L113 PyInterpreterState
 type Interpreter struct {
 	runtime *Runtime
 	threads []*Thread
+	Config  any
+
+	Finalizing int
 }
 
 // Thread is the per-goroutine state. v0.3 carries the current
@@ -97,14 +119,71 @@ type excHolder struct{ e Exception }
 //
 // CPython: Python/pystate.c:L915 PyThreadState_New
 func NewThread() *Thread {
-	r := &Runtime{}
+	r := NewRuntime()
+	i := r.NewInterpreter()
+	return i.AttachThread()
+}
+
+// NewRuntime allocates a fresh process-wide runtime. The lifecycle
+// layer calls this on its way through pyinit_core; tests poke at it
+// directly to build a runtime without going through the full init
+// staging.
+//
+// CPython: Python/pystate.c:_PyRuntime_Initialize
+func NewRuntime() *Runtime {
+	return &Runtime{}
+}
+
+// NewInterpreter allocates an interpreter owned by r and registers
+// it in r.interpreters. The first call returns the main interpreter;
+// later calls (sub-interpreters) land in v0.13.
+//
+// CPython: Python/pystate.c:_PyInterpreterState_Enable
+func (r *Runtime) NewInterpreter() *Interpreter {
 	i := &Interpreter{runtime: r}
 	r.interpreters = append(r.interpreters, i)
+	return i
+}
+
+// Interpreters returns the interpreters owned by r in registration
+// order. The slice aliases internal state; treat it as read-only.
+func (r *Runtime) Interpreters() []*Interpreter { return r.interpreters }
+
+// DropInterpreters detaches every interpreter from r. Used by
+// lifecycle.Finalize to reset the runtime so a subsequent Initialize
+// starts from a clean slate. Each detached interpreter has its
+// runtime backpointer cleared so dangling references stop sharing
+// state.
+//
+// CPython: Python/pylifecycle.c:_PyInterpreterState_DeleteAll
+func (r *Runtime) DropInterpreters() {
+	for _, i := range r.interpreters {
+		i.runtime = nil
+		i.threads = nil
+	}
+	r.interpreters = nil
+}
+
+// AttachThread builds a thread state bound to i and registers it.
+// Mirrors PyThreadState_New for the simple case where the thread is
+// being attached fresh (no detached predecessor).
+//
+// CPython: Python/pystate.c:L915 PyThreadState_New
+func (i *Interpreter) AttachThread() *Thread {
 	t := &Thread{interp: i}
-	i.threads = append(i.threads, t)
 	t.exc.Store(excHolder{})
+	i.threads = append(i.threads, t)
 	return t
 }
+
+// Runtime returns the runtime that owns i.
+//
+// CPython: Python/pystate.c:_PyInterpreterState_GetRuntime
+func (i *Interpreter) Runtime() *Runtime { return i.runtime }
+
+// Threads returns the threads attached to i in attach order. The
+// slice aliases internal state; treat it as read-only.
+func (i *Interpreter) Threads() []*Thread { return i.threads }
 
 // Interp returns the interpreter that owns t. Mirrors
 // PyThreadState_GetInterpreter.

@@ -34,8 +34,10 @@ func init() {
 		TrueDivide:  floatTrueDiv,
 		FloorDivide: floatFloorDiv,
 		Remainder:   floatMod,
+		Divmod:      floatDivmod,
 		Negative:    floatNeg,
 		Positive:    func(o Object) (Object, error) { return o, nil },
+		Absolute:    floatAbs,
 		Bool:        floatBool,
 		Float:       func(o Object) (Object, error) { return o, nil },
 	}
@@ -156,6 +158,32 @@ func floatMul(a, b Object) (Object, error) {
 
 func floatNeg(o Object) (Object, error) {
 	return NewFloat(-o.(*Float).v), nil
+}
+
+// floatAbs ports float_abs.
+//
+// CPython: Objects/floatobject.c float_abs
+func floatAbs(o Object) (Object, error) {
+	return NewFloat(math.Abs(o.(*Float).v)), nil
+}
+
+// floatDivmod ports float_divmod, returning (floor(a/b), a - b*floor(a/b)).
+//
+// CPython: Objects/floatobject.c float_divmod
+func floatDivmod(a, b Object) (Object, error) {
+	af, bf, ok := floatPair(a, b)
+	if !ok {
+		return notImplemented(), nil
+	}
+	if bf == 0 {
+		return nil, errors.New("ZeroDivisionError: float divmod()")
+	}
+	q := math.Floor(af / bf)
+	r := math.Mod(af, bf)
+	if r != 0 && (r < 0) != (bf < 0) {
+		r += bf
+	}
+	return NewTuple([]Object{NewFloat(q), NewFloat(r)}), nil
 }
 
 // floatTrueDiv mirrors CPython's float_true_divide; division by zero
