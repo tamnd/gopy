@@ -244,7 +244,7 @@ func reflectionPanel() []struct {
 // growing one entry per builtin.
 //
 // CPython: Python/bltinmodule.c builtin_methods iter / next / len /
-// reversed / enumerate / zip / range
+// reversed / enumerate / zip / range / map / filter
 func iterationPanel() []struct {
 	name string
 	impl func(args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error)
@@ -260,6 +260,8 @@ func iterationPanel() []struct {
 		{"enumerate", Enumerate},
 		{"zip", Zip},
 		{"range", Range},
+		{"map", Map},
+		{"filter", Filter},
 	}
 }
 
