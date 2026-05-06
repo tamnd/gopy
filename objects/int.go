@@ -17,11 +17,6 @@ type Int struct {
 	v big.Int
 }
 
-const (
-	smallIntMin = -5
-	smallIntMax = 256
-)
-
 // IntType is the type singleton for int. Mirrors PyLong_Type. Slots
 // are wired in init() to break the variable-init dependency cycle
 // (slots reference NewIntFromBig which references the small-int
@@ -29,13 +24,6 @@ const (
 //
 // CPython: Objects/longobject.c:L6447 PyLong_Type
 var IntType = NewType("int", []*Type{objectType})
-
-// smallInts is the cache for -5..256, matching CPython. Filled in
-// init() so the slice is fully built before any concrete Int is
-// constructed.
-//
-// CPython: Objects/longobject.c:L19 _PyLong_SMALL_INTS
-var smallInts [smallIntMax - smallIntMin + 1]*Int
 
 func init() {
 	IntType.Repr = intRepr
@@ -64,12 +52,7 @@ func init() {
 		Int:         func(o Object) (Object, error) { return o, nil },
 		Float:       intFloat,
 	}
-	for i := range smallInts {
-		o := &Int{}
-		o.init(IntType)
-		o.v.SetInt64(int64(smallIntMin + i))
-		smallInts[i] = o
-	}
+	initSmallInts()
 }
 
 // NewInt builds an int from an int64. Returns the cached singleton
@@ -77,8 +60,8 @@ func init() {
 //
 // CPython: Objects/longobject.c:L322 PyLong_FromLong
 func NewInt(x int64) *Int {
-	if x >= smallIntMin && x <= smallIntMax {
-		return smallInts[x-smallIntMin]
+	if cached := smallIntFromInt64(x); cached != nil {
+		return cached
 	}
 	o := &Int{}
 	o.init(IntType)
@@ -91,11 +74,8 @@ func NewInt(x int64) *Int {
 //
 // CPython: Objects/longobject.c:L156 _PyLong_FromBytes (adapted from)
 func NewIntFromBig(b *big.Int) *Int {
-	if b.IsInt64() {
-		x := b.Int64()
-		if x >= smallIntMin && x <= smallIntMax {
-			return smallInts[x-smallIntMin]
-		}
+	if cached := smallIntFromBig(b); cached != nil {
+		return cached
 	}
 	o := &Int{}
 	o.init(IntType)
