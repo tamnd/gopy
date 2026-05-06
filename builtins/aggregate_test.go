@@ -35,7 +35,7 @@ func TestSumWithStart(t *testing.T) {
 	}
 }
 
-// TestSumRejectsStringStart pins the "use ''.join()" guard.
+// TestSumRejectsStringStart pins the "use ”.join()" guard.
 func TestSumRejectsStringStart(t *testing.T) {
 	tup := objects.NewTuple(nil)
 	_, err := Sum([]objects.Object{tup, objects.NewStr("seed")}, nil)

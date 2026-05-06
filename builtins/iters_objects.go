@@ -5,6 +5,7 @@
 package builtins
 
 import (
+	"errors"
 	"fmt"
 
 	"github.com/tamnd/gopy/objects"
@@ -183,7 +184,7 @@ func init() {
 		out := make([]objects.Object, len(z.iters))
 		for i, it := range z.iters {
 			v, err := it.Type().IterNext(it)
-			if err == objects.ErrStopIteration {
+			if errors.Is(err, objects.ErrStopIteration) {
 				z.done = true
 				if z.strict {
 					if serr := zipStrictCheck(z.iters, i); serr != nil {
@@ -219,7 +220,7 @@ func zipStrictCheck(iters []objects.Object, shortIdx int) error {
 			continue
 		}
 		_, err := it.Type().IterNext(it)
-		if err == objects.ErrStopIteration {
+		if errors.Is(err, objects.ErrStopIteration) {
 			continue
 		}
 		if err != nil {

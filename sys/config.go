@@ -110,7 +110,7 @@ func xOptionsDict(opts []string) *objects.Dict {
 // value; value is nil when no "=" appears.
 //
 // CPython: Python/initconfig.c:config_init_xoptions split on '='
-func splitXOption(opt string) (string, *string) {
+func splitXOption(opt string) (key string, val *string) {
 	for i := 0; i < len(opt); i++ {
 		if opt[i] == '=' {
 			rest := opt[i+1:]

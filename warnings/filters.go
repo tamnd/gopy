@@ -63,18 +63,18 @@ func (c *Category) IsSubclass(other *Category) bool {
 //
 // CPython: Lib/warnings.py module body
 var (
-	WarningCategory                = &Category{Name: "Warning"}
-	UserWarning                    = &Category{Name: "UserWarning", Parent: WarningCategory}
-	DeprecationWarning             = &Category{Name: "DeprecationWarning", Parent: WarningCategory}
-	PendingDeprecationWarning      = &Category{Name: "PendingDeprecationWarning", Parent: WarningCategory}
-	SyntaxWarning                  = &Category{Name: "SyntaxWarning", Parent: WarningCategory}
-	RuntimeWarning                 = &Category{Name: "RuntimeWarning", Parent: WarningCategory}
-	FutureWarning                  = &Category{Name: "FutureWarning", Parent: WarningCategory}
-	ImportWarning                  = &Category{Name: "ImportWarning", Parent: WarningCategory}
-	UnicodeWarning                 = &Category{Name: "UnicodeWarning", Parent: WarningCategory}
-	BytesWarning                   = &Category{Name: "BytesWarning", Parent: WarningCategory}
-	ResourceWarning                = &Category{Name: "ResourceWarning", Parent: WarningCategory}
-	EncodingWarning                = &Category{Name: "EncodingWarning", Parent: WarningCategory}
+	WarningCategory           = &Category{Name: "Warning"}
+	UserWarning               = &Category{Name: "UserWarning", Parent: WarningCategory}
+	DeprecationWarning        = &Category{Name: "DeprecationWarning", Parent: WarningCategory}
+	PendingDeprecationWarning = &Category{Name: "PendingDeprecationWarning", Parent: WarningCategory}
+	SyntaxWarning             = &Category{Name: "SyntaxWarning", Parent: WarningCategory}
+	RuntimeWarning            = &Category{Name: "RuntimeWarning", Parent: WarningCategory}
+	FutureWarning             = &Category{Name: "FutureWarning", Parent: WarningCategory}
+	ImportWarning             = &Category{Name: "ImportWarning", Parent: WarningCategory}
+	UnicodeWarning            = &Category{Name: "UnicodeWarning", Parent: WarningCategory}
+	BytesWarning              = &Category{Name: "BytesWarning", Parent: WarningCategory}
+	ResourceWarning           = &Category{Name: "ResourceWarning", Parent: WarningCategory}
+	EncodingWarning           = &Category{Name: "EncodingWarning", Parent: WarningCategory}
 )
 
 // Filter is one entry in the filter list. nil regexes match any
@@ -197,4 +197,3 @@ func Insert(rule Filter) {
 	filterMu.Unlock()
 	ResetRegistry()
 }
-

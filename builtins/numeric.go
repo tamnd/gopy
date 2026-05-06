@@ -129,7 +129,7 @@ func formatIntBase(args []objects.Object, name string, base int, prefix string) 
 // non-ASCII code points replaced by \xHH / \uHHHH / \UHHHHHHHH escapes.
 //
 // CPython: Python/bltinmodule.c:540 builtin_ascii
-func Ascii(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+func ASCII(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
 	if len(args) != 1 {
 		return nil, fmt.Errorf("TypeError: ascii() takes exactly one argument (%d given)", len(args))
 	}
@@ -182,19 +182,19 @@ func Format(args []objects.Object, _ map[string]objects.Object) (objects.Object,
 	}
 	spec, err := format.ParseSpec(specStr)
 	if err != nil {
-		return nil, fmt.Errorf("ValueError: %s", err)
+		return nil, fmt.Errorf("ValueError: %w", err)
 	}
 	switch v := args[0].(type) {
 	case *objects.Int:
 		out, err := format.FormatInt(v.BigInt(), spec)
 		if err != nil {
-			return nil, fmt.Errorf("ValueError: %s", err)
+			return nil, fmt.Errorf("ValueError: %w", err)
 		}
 		return objects.NewStr(out), nil
 	case *objects.Float:
 		out, err := format.FormatFloat(v.Float64(), spec)
 		if err != nil {
-			return nil, fmt.Errorf("ValueError: %s", err)
+			return nil, fmt.Errorf("ValueError: %w", err)
 		}
 		return objects.NewStr(out), nil
 	}
@@ -202,7 +202,7 @@ func Format(args []objects.Object, _ map[string]objects.Object) (objects.Object,
 		s, _ := objects.Str(args[0])
 		out, err := format.FormatString(s, spec)
 		if err != nil {
-			return nil, fmt.Errorf("ValueError: %s", err)
+			return nil, fmt.Errorf("ValueError: %w", err)
 		}
 		return objects.NewStr(out), nil
 	}

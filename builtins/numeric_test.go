@@ -136,7 +136,7 @@ func TestBinOctHexShape(t *testing.T) {
 // TestAsciiEscapesNonAscii pins the \xHH / \uHHHH / \UHHHHHHHH escapes.
 func TestAsciiEscapesNonAscii(t *testing.T) {
 	in := "café"
-	v, err := Ascii([]objects.Object{objects.NewStr(in)}, nil)
+	v, err := ASCII([]objects.Object{objects.NewStr(in)}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

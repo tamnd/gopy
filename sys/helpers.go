@@ -63,7 +63,7 @@ func Bind(d *objects.Dict, ts *state.Thread) error {
 // CPython: Python/sysmodule.c:915 sys_exit_impl
 func makeExit(ts *state.Thread) func([]objects.Object, map[string]objects.Object) (objects.Object, error) {
 	return func(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
-		var status objects.Object = objects.None()
+		status := objects.None()
 		if len(args) > 0 {
 			status = args[0]
 		}

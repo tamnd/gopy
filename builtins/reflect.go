@@ -120,7 +120,7 @@ func Callable(args []objects.Object, _ map[string]objects.Object) (objects.Objec
 // object's lifetime) holds within a single GC cycle.
 //
 // CPython: Python/bltinmodule.c:1335 builtin_id_impl
-func Id(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+func ID(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
 	if len(args) != 1 {
 		return nil, fmt.Errorf("TypeError: id() takes exactly one argument (%d given)", len(args))
 	}
