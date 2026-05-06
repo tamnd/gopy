@@ -26,6 +26,7 @@ var (
 	PyExc_TypeError           = newExcType("TypeError", []*objects.Type{PyExc_Exception})
 	PyExc_ValueError          = newExcType("ValueError", []*objects.Type{PyExc_Exception})
 	PyExc_StopIteration       = newExcType("StopIteration", []*objects.Type{PyExc_Exception})
+	PyExc_StopAsyncIteration  = newExcType("StopAsyncIteration", []*objects.Type{PyExc_Exception})
 	PyExc_SystemExit          = newExcType("SystemExit", []*objects.Type{PyExc_BaseException})
 	PyExc_KeyboardInterrupt   = newExcType("KeyboardInterrupt", []*objects.Type{PyExc_BaseException})
 	PyExc_ImportError         = newExcType("ImportError", []*objects.Type{PyExc_Exception})
