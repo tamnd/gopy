@@ -38,6 +38,15 @@ func Init(defaultFile io.Writer) (*objects.Dict, error) {
 	if err := setBuiltin(dict, "NotImplemented", objects.NotImplemented()); err != nil {
 		return nil, err
 	}
+	if err := setBuiltin(dict, "Ellipsis", objects.Ellipsis()); err != nil {
+		return nil, err
+	}
+
+	for _, t := range typeSingletons() {
+		if err := setBuiltin(dict, t.name, t.t); err != nil {
+			return nil, err
+		}
+	}
 
 	printFn := objects.NewBuiltinFunction("print", Print(defaultFile))
 	if err := setBuiltin(dict, "print", printFn); err != nil {
@@ -91,6 +100,38 @@ func Init(defaultFile io.Writer) (*objects.Dict, error) {
 	}
 
 	return dict, nil
+}
+
+// typeSingletons returns the type-object names CPython exposes
+// directly via SETBUILTIN. The names that already have constructor
+// wrappers in constructorPanel (int, float, bool, list, tuple, dict)
+// or that are still registered as helper functions (str, type, range,
+// enumerate, reversed, zip, map, filter) stay where they are; this
+// panel covers only the gaps. Type call dispatch (so calling these
+// names constructs an instance) is a separate task; for now they
+// surface as type objects usable by isinstance/issubclass and as
+// metadata.
+//
+// CPython: Python/bltinmodule.c:3461 SETBUILTIN block
+func typeSingletons() []struct {
+	name string
+	t    *objects.Type
+} {
+	return []struct {
+		name string
+		t    *objects.Type
+	}{
+		{"object", objects.ObjectType()},
+		{"bytes", objects.BytesType},
+		{"bytearray", objects.ByteArrayType},
+		{"complex", objects.ComplexType},
+		{"frozenset", objects.FrozensetType},
+		{"set", objects.SetType},
+		{"slice", objects.SliceType},
+		{"property", objects.PropertyType},
+		{"classmethod", objects.ClassMethodType},
+		{"staticmethod", objects.StaticMethodType},
+	}
 }
 
 // asyncIterPanel returns the async iteration builtins: aiter, anext.
