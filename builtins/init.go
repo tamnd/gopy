@@ -73,8 +73,30 @@ func Init(defaultFile io.Writer) (*objects.Dict, error) {
 			return nil, err
 		}
 	}
+	for _, fn := range scopePanel() {
+		if err := setBuiltin(dict, fn.name, objects.NewBuiltinFunction(fn.name, fn.impl)); err != nil {
+			return nil, err
+		}
+	}
 
 	return dict, nil
+}
+
+// scopePanel returns the introspection builtins that read the running
+// frame: globals(), locals().
+//
+// CPython: Python/bltinmodule.c builtin_methods globals / locals
+func scopePanel() []struct {
+	name string
+	impl func(args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error)
+} {
+	return []struct {
+		name string
+		impl func(args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error)
+	}{
+		{"globals", Globals},
+		{"locals", Locals},
+	}
 }
 
 // constructorPanel returns the v0.7 constructor wrappers

@@ -100,3 +100,16 @@ func (s *FrameStack) Detach() *Frame {
 
 // Depth returns the number of live frames.
 func (s *FrameStack) Depth() int { return s.depth }
+
+// Top returns the most recently pushed frame, or nil if the stack is
+// empty. Mirrors PyThreadState_GetFrame: the thread's view of its own
+// activation chain. Mutating the returned frame mutates the live
+// activation record, so callers should treat it as read-only.
+//
+// CPython: Python/pystate.c:2099 PyThreadState_GetFrame
+func (s *FrameStack) Top() *Frame {
+	if s.current == nil || s.current.top == 0 {
+		return nil
+	}
+	return &s.current.frames[s.current.top-1]
+}
