@@ -1,10 +1,10 @@
 // gcState mirrors the live subset of CPython's _gc_runtime_state.
 // v0.10 introduces it to replace the v0.3 anonymous package-level
 // state struct in gc.go. Fields that exist in CPython but have no
-// gopy caller yet (the generation list heads, generationStats,
-// garbage list, callbacks list, heapSize, long-lived counters,
-// permanentGeneration, debug, collecting) are deferred to the
-// checklist items that introduce their consumers (1613-B onwards).
+// gopy caller yet (generationStats, garbage list, callbacks list,
+// heapSize, long-lived counters, permanentGeneration, debug,
+// collecting) are deferred to the checklist items that introduce
+// their consumers.
 //
 // The GIL-disabled fields (young + old[2], freeze_active, last_mem,
 // deferred_count, mutex) are not modeled in v0.10; gopy ships only
@@ -36,12 +36,12 @@ const (
 	defaultThreshold2 = 10
 )
 
-// generation tracks the threshold and live count for a CPython
-// generation. The doubly-linked head pointer that CPython carries
-// here lands with 1613-B (gc/list.go).
+// generation tracks the threshold, live count, and the doubly-linked
+// list head for one CPython generation.
 //
 // CPython: Include/internal/pycore_interp_structs.h gc_generation
 type generation struct {
+	head      *gcHead
 	threshold int
 	count     int
 }
@@ -58,7 +58,7 @@ type gcState struct {
 	generations [NumGenerations]generation
 
 	finalizers map[objects.Object]Finalizer
-	tracked    map[objects.Object]struct{}
+	tracked    map[objects.Object]*gcHead
 }
 
 // state is the single package-level collector state. The v0.3
@@ -73,11 +73,14 @@ func newGCState() *gcState {
 	s := &gcState{
 		enabled:    true,
 		finalizers: make(map[objects.Object]Finalizer),
-		tracked:    make(map[objects.Object]struct{}),
+		tracked:    make(map[objects.Object]*gcHead),
 	}
 	s.generations[0].threshold = defaultThreshold0
 	s.generations[1].threshold = defaultThreshold1
 	s.generations[2].threshold = defaultThreshold2
+	for i := range s.generations {
+		s.generations[i].head = newListHead()
+	}
 	return s
 }
 
