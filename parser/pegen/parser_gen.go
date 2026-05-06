@@ -9,7 +9,7 @@ import (
 	"errors"
 
 	"github.com/tamnd/gopy/ast"
-	"github.com/tamnd/gopy/tokenize"
+	"github.com/tamnd/gopy/token"
 )
 
 // ErrParserNotImplemented is returned by Dispatch while the
@@ -17,7 +17,7 @@ import (
 // The real AST surface lands with the action translator (M6).
 var ErrParserNotImplemented = errors.New("pegen: generated rule bodies not yet emitted")
 
-var _ = tokenize.NAME // keep import alive when no rule uses it.
+var _ = token.NAME // keep import alive when no rule uses it.
 var _ = ast.Add       // keep import alive when no rule uses it.
 
 // Generated rule ids. Dense small ints in declaration
@@ -940,7 +940,7 @@ func parseRule_file(p *Parser) any {
 		if v := func() any {
 			a := parseRule_statements(p)
 			_ = a
-			endmarker := p.ExpectToken(tokenize.ENDMARKER)
+			endmarker := p.ExpectToken(token.ENDMARKER)
 			if endmarker == nil { return nil }
 			_ = endmarker
 			return actionPgenMakeModule(p, p, a)
@@ -991,7 +991,7 @@ func parseRule_eval(p *Parser) any {
 			_ = a
 			rep := parseRule__loop0_1(p)
 			_ = rep
-			endmarker := p.ExpectToken(tokenize.ENDMARKER)
+			endmarker := p.ExpectToken(token.ENDMARKER)
 			if endmarker == nil { return nil }
 			_ = endmarker
 			return actionAstExpression(p, a)
@@ -1014,15 +1014,15 @@ func parseRule_func_type(p *Parser) any {
 	// alt 0
 	{
 		if v := func() any {
-			op := p.ExpectToken(tokenize.LPAR)
+			op := p.ExpectToken(token.LPAR)
 			if op == nil { return nil }
 			_ = op
 			a := parseRule_type_expressions(p)
 			_ = a
-			op_1 := p.ExpectToken(tokenize.RPAR)
+			op_1 := p.ExpectToken(token.RPAR)
 			if op_1 == nil { return nil }
 			_ = op_1
-			op_2 := p.ExpectToken(tokenize.RARROW)
+			op_2 := p.ExpectToken(token.RARROW)
 			if op_2 == nil { return nil }
 			_ = op_2
 			b := parseRule_expression(p)
@@ -1030,7 +1030,7 @@ func parseRule_func_type(p *Parser) any {
 			_ = b
 			rep := parseRule__loop0_1(p)
 			_ = rep
-			endmarker := p.ExpectToken(tokenize.ENDMARKER)
+			endmarker := p.ExpectToken(token.ENDMARKER)
 			if endmarker == nil { return nil }
 			_ = endmarker
 			return actionAstFunctionType(p, a, b)
@@ -1138,7 +1138,7 @@ func parseRule_statement_newline(p *Parser) any {
 			a := parseRule_single_compound_stmt(p)
 			if a == nil { return nil }
 			_ = a
-			newline := p.ExpectToken(tokenize.NEWLINE)
+			newline := p.ExpectToken(token.NEWLINE)
 			if newline == nil { return nil }
 			_ = newline
 			return a
@@ -1164,7 +1164,7 @@ func parseRule_statement_newline(p *Parser) any {
 	// alt 2
 	{
 		if v := func() any {
-			newline := p.ExpectToken(tokenize.NEWLINE)
+			newline := p.ExpectToken(token.NEWLINE)
 			if newline == nil { return nil }
 			_ = newline
 			return actionPgenSingletonSeq(p, p, actionAstPass(p))
@@ -1177,7 +1177,7 @@ func parseRule_statement_newline(p *Parser) any {
 	// alt 3
 	{
 		if v := func() any {
-			endmarker := p.ExpectToken(tokenize.ENDMARKER)
+			endmarker := p.ExpectToken(token.ENDMARKER)
 			if endmarker == nil { return nil }
 			_ = endmarker
 			return actionPgenInteractiveExit(p, p)
@@ -1203,8 +1203,8 @@ func parseRule_simple_stmts(p *Parser) any {
 			a := parseRule_simple_stmt(p)
 			if a == nil { return nil }
 			_ = a
-			if !p.Lookahead(false, func(p *Parser) any { return p.ExpectToken(tokenize.SEMI) }) { return nil }
-			newline := p.ExpectToken(tokenize.NEWLINE)
+			if !p.Lookahead(false, func(p *Parser) any { return p.ExpectToken(token.SEMI) }) { return nil }
+			newline := p.ExpectToken(token.NEWLINE)
 			if newline == nil { return nil }
 			_ = newline
 			return actionPgenSingletonSeq(p, p, a)
@@ -1220,9 +1220,9 @@ func parseRule_simple_stmts(p *Parser) any {
 			a := parseRule__gather_3(p)
 			if a == nil { return nil }
 			_ = a
-			opt := p.ExpectToken(tokenize.SEMI)
+			opt := p.ExpectToken(token.SEMI)
 			_ = opt
-			newline := p.ExpectToken(tokenize.NEWLINE)
+			newline := p.ExpectToken(token.NEWLINE)
 			if newline == nil { return nil }
 			_ = newline
 			return a
@@ -1573,7 +1573,7 @@ func parseRule_assignment(p *Parser) any {
 			a := nameToken(p)
 			if a == nil { return nil }
 			_ = a
-			op := p.ExpectToken(tokenize.COLON)
+			op := p.ExpectToken(token.COLON)
 			if op == nil { return nil }
 			_ = op
 			b := parseRule_expression(p)
@@ -1594,7 +1594,7 @@ func parseRule_assignment(p *Parser) any {
 			a := parseRule__group_10(p)
 			if a == nil { return nil }
 			_ = a
-			op := p.ExpectToken(tokenize.COLON)
+			op := p.ExpectToken(token.COLON)
 			if op == nil { return nil }
 			_ = op
 			b := parseRule_expression(p)
@@ -1618,8 +1618,8 @@ func parseRule_assignment(p *Parser) any {
 			b := parseRule_annotated_rhs(p)
 			if b == nil { return nil }
 			_ = b
-			if !p.Lookahead(false, func(p *Parser) any { return p.ExpectToken(tokenize.EQUAL) }) { return nil }
-			tc := p.ExpectToken(tokenize.TYPE_COMMENT)
+			if !p.Lookahead(false, func(p *Parser) any { return p.ExpectToken(token.EQUAL) }) { return nil }
+			tc := p.ExpectToken(token.TYPE_COMMENT)
 			_ = tc
 			return actionAstAssign(p, a, b, tc)
 		}(); v != nil {
@@ -1715,7 +1715,7 @@ func parseRule_augassign(p *Parser) any {
 	// alt 0
 	{
 		if v := func() any {
-			op := p.ExpectToken(tokenize.PLUSEQUAL)
+			op := p.ExpectToken(token.PLUSEQUAL)
 			if op == nil { return nil }
 			_ = op
 			return actionPgenAugoperator(p, p, ast.Add)
@@ -1728,7 +1728,7 @@ func parseRule_augassign(p *Parser) any {
 	// alt 1
 	{
 		if v := func() any {
-			op := p.ExpectToken(tokenize.MINEQUAL)
+			op := p.ExpectToken(token.MINEQUAL)
 			if op == nil { return nil }
 			_ = op
 			return actionPgenAugoperator(p, p, ast.Sub)
@@ -1741,7 +1741,7 @@ func parseRule_augassign(p *Parser) any {
 	// alt 2
 	{
 		if v := func() any {
-			op := p.ExpectToken(tokenize.STAREQUAL)
+			op := p.ExpectToken(token.STAREQUAL)
 			if op == nil { return nil }
 			_ = op
 			return actionPgenAugoperator(p, p, ast.Mult)
@@ -1754,7 +1754,7 @@ func parseRule_augassign(p *Parser) any {
 	// alt 3
 	{
 		if v := func() any {
-			op := p.ExpectToken(tokenize.ATEQUAL)
+			op := p.ExpectToken(token.ATEQUAL)
 			if op == nil { return nil }
 			_ = op
 			return actionPgenAugoperator(p, p, ast.MatMult)
@@ -1767,7 +1767,7 @@ func parseRule_augassign(p *Parser) any {
 	// alt 4
 	{
 		if v := func() any {
-			op := p.ExpectToken(tokenize.SLASHEQUAL)
+			op := p.ExpectToken(token.SLASHEQUAL)
 			if op == nil { return nil }
 			_ = op
 			return actionPgenAugoperator(p, p, ast.Div)
@@ -1780,7 +1780,7 @@ func parseRule_augassign(p *Parser) any {
 	// alt 5
 	{
 		if v := func() any {
-			op := p.ExpectToken(tokenize.PERCENTEQUAL)
+			op := p.ExpectToken(token.PERCENTEQUAL)
 			if op == nil { return nil }
 			_ = op
 			return actionPgenAugoperator(p, p, ast.ModOperator)
@@ -1793,7 +1793,7 @@ func parseRule_augassign(p *Parser) any {
 	// alt 6
 	{
 		if v := func() any {
-			op := p.ExpectToken(tokenize.AMPEREQUAL)
+			op := p.ExpectToken(token.AMPEREQUAL)
 			if op == nil { return nil }
 			_ = op
 			return actionPgenAugoperator(p, p, ast.BitAnd)
@@ -1806,7 +1806,7 @@ func parseRule_augassign(p *Parser) any {
 	// alt 7
 	{
 		if v := func() any {
-			op := p.ExpectToken(tokenize.VBAREQUAL)
+			op := p.ExpectToken(token.VBAREQUAL)
 			if op == nil { return nil }
 			_ = op
 			return actionPgenAugoperator(p, p, ast.BitOr)
@@ -1819,7 +1819,7 @@ func parseRule_augassign(p *Parser) any {
 	// alt 8
 	{
 		if v := func() any {
-			op := p.ExpectToken(tokenize.CIRCUMFLEXEQUAL)
+			op := p.ExpectToken(token.CIRCUMFLEXEQUAL)
 			if op == nil { return nil }
 			_ = op
 			return actionPgenAugoperator(p, p, ast.BitXor)
@@ -1832,7 +1832,7 @@ func parseRule_augassign(p *Parser) any {
 	// alt 9
 	{
 		if v := func() any {
-			op := p.ExpectToken(tokenize.LEFTSHIFTEQUAL)
+			op := p.ExpectToken(token.LEFTSHIFTEQUAL)
 			if op == nil { return nil }
 			_ = op
 			return actionPgenAugoperator(p, p, ast.LShift)
@@ -1845,7 +1845,7 @@ func parseRule_augassign(p *Parser) any {
 	// alt 10
 	{
 		if v := func() any {
-			op := p.ExpectToken(tokenize.RIGHTSHIFTEQUAL)
+			op := p.ExpectToken(token.RIGHTSHIFTEQUAL)
 			if op == nil { return nil }
 			_ = op
 			return actionPgenAugoperator(p, p, ast.RShift)
@@ -1858,7 +1858,7 @@ func parseRule_augassign(p *Parser) any {
 	// alt 11
 	{
 		if v := func() any {
-			op := p.ExpectToken(tokenize.DOUBLESTAREQUAL)
+			op := p.ExpectToken(token.DOUBLESTAREQUAL)
 			if op == nil { return nil }
 			_ = op
 			return actionPgenAugoperator(p, p, ast.Pow)
@@ -1871,7 +1871,7 @@ func parseRule_augassign(p *Parser) any {
 	// alt 12
 	{
 		if v := func() any {
-			op := p.ExpectToken(tokenize.DOUBLESLASHEQUAL)
+			op := p.ExpectToken(token.DOUBLESLASHEQUAL)
 			if op == nil { return nil }
 			_ = op
 			return actionPgenAugoperator(p, p, ast.FloorDiv)
@@ -2303,15 +2303,15 @@ func parseRule_import_from_targets(p *Parser) any {
 	// alt 0
 	{
 		if v := func() any {
-			op := p.ExpectToken(tokenize.LPAR)
+			op := p.ExpectToken(token.LPAR)
 			if op == nil { return nil }
 			_ = op
 			a := parseRule_import_from_as_names(p)
 			if a == nil { return nil }
 			_ = a
-			opt := p.ExpectToken(tokenize.COMMA)
+			opt := p.ExpectToken(token.COMMA)
 			_ = opt
-			op_1 := p.ExpectToken(tokenize.RPAR)
+			op_1 := p.ExpectToken(token.RPAR)
 			if op_1 == nil { return nil }
 			_ = op_1
 			return a
@@ -2327,7 +2327,7 @@ func parseRule_import_from_targets(p *Parser) any {
 			import_from_as_names := parseRule_import_from_as_names(p)
 			if import_from_as_names == nil { return nil }
 			_ = import_from_as_names
-			if !p.Lookahead(false, func(p *Parser) any { return p.ExpectToken(tokenize.COMMA) }) { return nil }
+			if !p.Lookahead(false, func(p *Parser) any { return p.ExpectToken(token.COMMA) }) { return nil }
 			return []any{import_from_as_names}
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_import_from_targets, v)
@@ -2338,7 +2338,7 @@ func parseRule_import_from_targets(p *Parser) any {
 	// alt 2
 	{
 		if v := func() any {
-			op := p.ExpectToken(tokenize.STAR)
+			op := p.ExpectToken(token.STAR)
 			if op == nil { return nil }
 			_ = op
 			return actionPgenSingletonSeq(p, p, actionPgenAliasForStar(p, p))
@@ -2519,7 +2519,7 @@ func parseRule_dotted_name_raw(p *Parser) any {
 			a := parseRule_dotted_name(p)
 			if a == nil { return nil }
 			_ = a
-			op := p.ExpectToken(tokenize.DOT)
+			op := p.ExpectToken(token.DOT)
 			if op == nil { return nil }
 			_ = op
 			b := nameToken(p)
@@ -2555,16 +2555,16 @@ func parseRule_block(p *Parser) any {
 	// alt 0
 	{
 		if v := func() any {
-			newline := p.ExpectToken(tokenize.NEWLINE)
+			newline := p.ExpectToken(token.NEWLINE)
 			if newline == nil { return nil }
 			_ = newline
-			indent := p.ExpectToken(tokenize.INDENT)
+			indent := p.ExpectToken(token.INDENT)
 			if indent == nil { return nil }
 			_ = indent
 			a := parseRule_statements(p)
 			if a == nil { return nil }
 			_ = a
-			dedent := p.ExpectToken(tokenize.DEDENT)
+			dedent := p.ExpectToken(token.DEDENT)
 			if dedent == nil { return nil }
 			_ = dedent
 			return a
@@ -2698,7 +2698,7 @@ func parseRule_class_def_raw(p *Parser) any {
 			_ = t
 			b := parseRule__rhs_22(p)
 			_ = b
-			op := p.ExpectToken(tokenize.COLON)
+			op := p.ExpectToken(token.COLON)
 			if op == nil { return nil }
 			_ = op
 			c := parseRule_block(p)
@@ -2784,17 +2784,17 @@ func parseRule_function_def_raw(p *Parser) any {
 			_ = n
 			t := parseRule_type_params(p)
 			_ = t
-			op := p.ExpectToken(tokenize.LPAR)
+			op := p.ExpectToken(token.LPAR)
 			if op == nil { return nil }
 			_ = op
 			params := parseRule_params(p)
 			_ = params
-			op_1 := p.ExpectToken(tokenize.RPAR)
+			op_1 := p.ExpectToken(token.RPAR)
 			if op_1 == nil { return nil }
 			_ = op_1
 			a := parseRule__rhs_23(p)
 			_ = a
-			op_2 := p.ExpectToken(tokenize.COLON)
+			op_2 := p.ExpectToken(token.COLON)
 			if op_2 == nil { return nil }
 			_ = op_2
 			tc := parseRule_func_type_comment(p)
@@ -2823,17 +2823,17 @@ func parseRule_function_def_raw(p *Parser) any {
 			_ = n
 			t := parseRule_type_params(p)
 			_ = t
-			op := p.ExpectToken(tokenize.LPAR)
+			op := p.ExpectToken(token.LPAR)
 			if op == nil { return nil }
 			_ = op
 			params := parseRule_params(p)
 			_ = params
-			op_1 := p.ExpectToken(tokenize.RPAR)
+			op_1 := p.ExpectToken(token.RPAR)
 			if op_1 == nil { return nil }
 			_ = op_1
 			a := parseRule__rhs_23(p)
 			_ = a
-			op_2 := p.ExpectToken(tokenize.COLON)
+			op_2 := p.ExpectToken(token.COLON)
 			if op_2 == nil { return nil }
 			_ = op_2
 			tc := parseRule_func_type_comment(p)
@@ -2991,10 +2991,10 @@ func parseRule_slash_no_default(p *Parser) any {
 			a := parseRule__loop1_26(p)
 			if a == nil { return nil }
 			_ = a
-			op := p.ExpectToken(tokenize.SLASH)
+			op := p.ExpectToken(token.SLASH)
 			if op == nil { return nil }
 			_ = op
-			op_1 := p.ExpectToken(tokenize.COMMA)
+			op_1 := p.ExpectToken(token.COMMA)
 			if op_1 == nil { return nil }
 			_ = op_1
 			return a
@@ -3010,10 +3010,10 @@ func parseRule_slash_no_default(p *Parser) any {
 			a := parseRule__loop1_26(p)
 			if a == nil { return nil }
 			_ = a
-			op := p.ExpectToken(tokenize.SLASH)
+			op := p.ExpectToken(token.SLASH)
 			if op == nil { return nil }
 			_ = op
-			if !p.Lookahead(true, func(p *Parser) any { return p.ExpectToken(tokenize.RPAR) }) { return nil }
+			if !p.Lookahead(true, func(p *Parser) any { return p.ExpectToken(token.RPAR) }) { return nil }
 			return a
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_slash_no_default, v)
@@ -3039,10 +3039,10 @@ func parseRule_slash_with_default(p *Parser) any {
 			b := parseRule__loop1_27(p)
 			if b == nil { return nil }
 			_ = b
-			op := p.ExpectToken(tokenize.SLASH)
+			op := p.ExpectToken(token.SLASH)
 			if op == nil { return nil }
 			_ = op
-			op_1 := p.ExpectToken(tokenize.COMMA)
+			op_1 := p.ExpectToken(token.COMMA)
 			if op_1 == nil { return nil }
 			_ = op_1
 			return actionPgenSlashWithDefault(p, p, a, b)
@@ -3060,10 +3060,10 @@ func parseRule_slash_with_default(p *Parser) any {
 			b := parseRule__loop1_27(p)
 			if b == nil { return nil }
 			_ = b
-			op := p.ExpectToken(tokenize.SLASH)
+			op := p.ExpectToken(token.SLASH)
 			if op == nil { return nil }
 			_ = op
-			if !p.Lookahead(true, func(p *Parser) any { return p.ExpectToken(tokenize.RPAR) }) { return nil }
+			if !p.Lookahead(true, func(p *Parser) any { return p.ExpectToken(token.RPAR) }) { return nil }
 			return actionPgenSlashWithDefault(p, p, a, b)
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_slash_with_default, v)
@@ -3097,7 +3097,7 @@ func parseRule_star_etc(p *Parser) any {
 	// alt 1
 	{
 		if v := func() any {
-			op := p.ExpectToken(tokenize.STAR)
+			op := p.ExpectToken(token.STAR)
 			if op == nil { return nil }
 			_ = op
 			a := parseRule_param_no_default(p)
@@ -3117,7 +3117,7 @@ func parseRule_star_etc(p *Parser) any {
 	// alt 2
 	{
 		if v := func() any {
-			op := p.ExpectToken(tokenize.STAR)
+			op := p.ExpectToken(token.STAR)
 			if op == nil { return nil }
 			_ = op
 			a := parseRule_param_no_default_star_annotation(p)
@@ -3137,10 +3137,10 @@ func parseRule_star_etc(p *Parser) any {
 	// alt 3
 	{
 		if v := func() any {
-			op := p.ExpectToken(tokenize.STAR)
+			op := p.ExpectToken(token.STAR)
 			if op == nil { return nil }
 			_ = op
-			op_1 := p.ExpectToken(tokenize.COMMA)
+			op_1 := p.ExpectToken(token.COMMA)
 			if op_1 == nil { return nil }
 			_ = op_1
 			b := parseRule__loop1_29(p)
@@ -3194,7 +3194,7 @@ func parseRule_kwds(p *Parser) any {
 	// alt 1
 	{
 		if v := func() any {
-			op := p.ExpectToken(tokenize.DOUBLESTAR)
+			op := p.ExpectToken(token.DOUBLESTAR)
 			if op == nil { return nil }
 			_ = op
 			a := parseRule_param_no_default(p)
@@ -3223,10 +3223,10 @@ func parseRule_param_no_default(p *Parser) any {
 			a := parseRule_param(p)
 			if a == nil { return nil }
 			_ = a
-			op := p.ExpectToken(tokenize.COMMA)
+			op := p.ExpectToken(token.COMMA)
 			if op == nil { return nil }
 			_ = op
-			tc := p.ExpectToken(tokenize.TYPE_COMMENT)
+			tc := p.ExpectToken(token.TYPE_COMMENT)
 			_ = tc
 			return actionPgenAddTypeCommentToArg(p, p, a, tc)
 		}(); v != nil {
@@ -3241,9 +3241,9 @@ func parseRule_param_no_default(p *Parser) any {
 			a := parseRule_param(p)
 			if a == nil { return nil }
 			_ = a
-			tc := p.ExpectToken(tokenize.TYPE_COMMENT)
+			tc := p.ExpectToken(token.TYPE_COMMENT)
 			_ = tc
-			if !p.Lookahead(true, func(p *Parser) any { return p.ExpectToken(tokenize.RPAR) }) { return nil }
+			if !p.Lookahead(true, func(p *Parser) any { return p.ExpectToken(token.RPAR) }) { return nil }
 			return actionPgenAddTypeCommentToArg(p, p, a, tc)
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_param_no_default, v)
@@ -3267,10 +3267,10 @@ func parseRule_param_no_default_star_annotation(p *Parser) any {
 			a := parseRule_param_star_annotation(p)
 			if a == nil { return nil }
 			_ = a
-			op := p.ExpectToken(tokenize.COMMA)
+			op := p.ExpectToken(token.COMMA)
 			if op == nil { return nil }
 			_ = op
-			tc := p.ExpectToken(tokenize.TYPE_COMMENT)
+			tc := p.ExpectToken(token.TYPE_COMMENT)
 			_ = tc
 			return actionPgenAddTypeCommentToArg(p, p, a, tc)
 		}(); v != nil {
@@ -3285,9 +3285,9 @@ func parseRule_param_no_default_star_annotation(p *Parser) any {
 			a := parseRule_param_star_annotation(p)
 			if a == nil { return nil }
 			_ = a
-			tc := p.ExpectToken(tokenize.TYPE_COMMENT)
+			tc := p.ExpectToken(token.TYPE_COMMENT)
 			_ = tc
-			if !p.Lookahead(true, func(p *Parser) any { return p.ExpectToken(tokenize.RPAR) }) { return nil }
+			if !p.Lookahead(true, func(p *Parser) any { return p.ExpectToken(token.RPAR) }) { return nil }
 			return actionPgenAddTypeCommentToArg(p, p, a, tc)
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_param_no_default_star_annotation, v)
@@ -3314,10 +3314,10 @@ func parseRule_param_with_default(p *Parser) any {
 			c := parseRule_default(p)
 			if c == nil { return nil }
 			_ = c
-			op := p.ExpectToken(tokenize.COMMA)
+			op := p.ExpectToken(token.COMMA)
 			if op == nil { return nil }
 			_ = op
-			tc := p.ExpectToken(tokenize.TYPE_COMMENT)
+			tc := p.ExpectToken(token.TYPE_COMMENT)
 			_ = tc
 			return actionPgenNameDefaultPair(p, p, a, c, tc)
 		}(); v != nil {
@@ -3335,9 +3335,9 @@ func parseRule_param_with_default(p *Parser) any {
 			c := parseRule_default(p)
 			if c == nil { return nil }
 			_ = c
-			tc := p.ExpectToken(tokenize.TYPE_COMMENT)
+			tc := p.ExpectToken(token.TYPE_COMMENT)
 			_ = tc
-			if !p.Lookahead(true, func(p *Parser) any { return p.ExpectToken(tokenize.RPAR) }) { return nil }
+			if !p.Lookahead(true, func(p *Parser) any { return p.ExpectToken(token.RPAR) }) { return nil }
 			return actionPgenNameDefaultPair(p, p, a, c, tc)
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_param_with_default, v)
@@ -3363,10 +3363,10 @@ func parseRule_param_maybe_default(p *Parser) any {
 			_ = a
 			c := parseRule_default(p)
 			_ = c
-			op := p.ExpectToken(tokenize.COMMA)
+			op := p.ExpectToken(token.COMMA)
 			if op == nil { return nil }
 			_ = op
-			tc := p.ExpectToken(tokenize.TYPE_COMMENT)
+			tc := p.ExpectToken(token.TYPE_COMMENT)
 			_ = tc
 			return actionPgenNameDefaultPair(p, p, a, c, tc)
 		}(); v != nil {
@@ -3383,9 +3383,9 @@ func parseRule_param_maybe_default(p *Parser) any {
 			_ = a
 			c := parseRule_default(p)
 			_ = c
-			tc := p.ExpectToken(tokenize.TYPE_COMMENT)
+			tc := p.ExpectToken(token.TYPE_COMMENT)
 			_ = tc
-			if !p.Lookahead(true, func(p *Parser) any { return p.ExpectToken(tokenize.RPAR) }) { return nil }
+			if !p.Lookahead(true, func(p *Parser) any { return p.ExpectToken(token.RPAR) }) { return nil }
 			return actionPgenNameDefaultPair(p, p, a, c, tc)
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_param_maybe_default, v)
@@ -3457,7 +3457,7 @@ func parseRule_annotation(p *Parser) any {
 	// alt 0
 	{
 		if v := func() any {
-			op := p.ExpectToken(tokenize.COLON)
+			op := p.ExpectToken(token.COLON)
 			if op == nil { return nil }
 			_ = op
 			a := parseRule_expression(p)
@@ -3483,7 +3483,7 @@ func parseRule_star_annotation(p *Parser) any {
 	// alt 0
 	{
 		if v := func() any {
-			op := p.ExpectToken(tokenize.COLON)
+			op := p.ExpectToken(token.COLON)
 			if op == nil { return nil }
 			_ = op
 			a := parseRule_star_expression(p)
@@ -3509,7 +3509,7 @@ func parseRule_default(p *Parser) any {
 	// alt 0
 	{
 		if v := func() any {
-			op := p.ExpectToken(tokenize.EQUAL)
+			op := p.ExpectToken(token.EQUAL)
 			if op == nil { return nil }
 			_ = op
 			a := parseRule_expression(p)
@@ -3567,7 +3567,7 @@ func parseRule_if_stmt(p *Parser) any {
 			a := parseRule_named_expression(p)
 			if a == nil { return nil }
 			_ = a
-			op := p.ExpectToken(tokenize.COLON)
+			op := p.ExpectToken(token.COLON)
 			if op == nil { return nil }
 			_ = op
 			b := parseRule_block(p)
@@ -3592,7 +3592,7 @@ func parseRule_if_stmt(p *Parser) any {
 			a := parseRule_named_expression(p)
 			if a == nil { return nil }
 			_ = a
-			op := p.ExpectToken(tokenize.COLON)
+			op := p.ExpectToken(token.COLON)
 			if op == nil { return nil }
 			_ = op
 			b := parseRule_block(p)
@@ -3639,7 +3639,7 @@ func parseRule_elif_stmt(p *Parser) any {
 			a := parseRule_named_expression(p)
 			if a == nil { return nil }
 			_ = a
-			op := p.ExpectToken(tokenize.COLON)
+			op := p.ExpectToken(token.COLON)
 			if op == nil { return nil }
 			_ = op
 			b := parseRule_block(p)
@@ -3664,7 +3664,7 @@ func parseRule_elif_stmt(p *Parser) any {
 			a := parseRule_named_expression(p)
 			if a == nil { return nil }
 			_ = a
-			op := p.ExpectToken(tokenize.COLON)
+			op := p.ExpectToken(token.COLON)
 			if op == nil { return nil }
 			_ = op
 			b := parseRule_block(p)
@@ -3708,7 +3708,7 @@ func parseRule_else_block(p *Parser) any {
 			kw := p.ExpectName("else")
 			if kw == nil { return nil }
 			_ = kw
-			f := p.ExpectForced(tokenize.COLON, ":")
+			f := p.ExpectForced(token.COLON, ":")
 			if f == nil { return nil }
 			_ = f
 			b := parseRule_block(p)
@@ -3753,7 +3753,7 @@ func parseRule_while_stmt(p *Parser) any {
 			a := parseRule_named_expression(p)
 			if a == nil { return nil }
 			_ = a
-			op := p.ExpectToken(tokenize.COLON)
+			op := p.ExpectToken(token.COLON)
 			if op == nil { return nil }
 			_ = op
 			b := parseRule_block(p)
@@ -3808,10 +3808,10 @@ func parseRule_for_stmt(p *Parser) any {
 			ex := parseRule_star_expressions(p)
 			if ex == nil { return nil }
 			_ = ex
-			op := p.ExpectToken(tokenize.COLON)
+			op := p.ExpectToken(token.COLON)
 			if op == nil { return nil }
 			_ = op
-			tc := p.ExpectToken(tokenize.TYPE_COMMENT)
+			tc := p.ExpectToken(token.TYPE_COMMENT)
 			_ = tc
 			b := parseRule_block(p)
 			if b == nil { return nil }
@@ -3849,10 +3849,10 @@ func parseRule_for_stmt(p *Parser) any {
 			ex := parseRule_star_expressions(p)
 			if ex == nil { return nil }
 			_ = ex
-			op := p.ExpectToken(tokenize.COLON)
+			op := p.ExpectToken(token.COLON)
 			if op == nil { return nil }
 			_ = op
-			tc := p.ExpectToken(tokenize.TYPE_COMMENT)
+			tc := p.ExpectToken(token.TYPE_COMMENT)
 			_ = tc
 			b := parseRule_block(p)
 			if b == nil { return nil }
@@ -3912,21 +3912,21 @@ func parseRule_with_stmt(p *Parser) any {
 			kw := p.ExpectName("with")
 			if kw == nil { return nil }
 			_ = kw
-			op := p.ExpectToken(tokenize.LPAR)
+			op := p.ExpectToken(token.LPAR)
 			if op == nil { return nil }
 			_ = op
 			a := parseRule__gather_30(p)
 			if a == nil { return nil }
 			_ = a
-			opt := p.ExpectToken(tokenize.COMMA)
+			opt := p.ExpectToken(token.COMMA)
 			_ = opt
-			op_1 := p.ExpectToken(tokenize.RPAR)
+			op_1 := p.ExpectToken(token.RPAR)
 			if op_1 == nil { return nil }
 			_ = op_1
-			op_2 := p.ExpectToken(tokenize.COLON)
+			op_2 := p.ExpectToken(token.COLON)
 			if op_2 == nil { return nil }
 			_ = op_2
-			tc := p.ExpectToken(tokenize.TYPE_COMMENT)
+			tc := p.ExpectToken(token.TYPE_COMMENT)
 			_ = tc
 			b := parseRule_block(p)
 			if b == nil { return nil }
@@ -3947,10 +3947,10 @@ func parseRule_with_stmt(p *Parser) any {
 			a := parseRule__gather_30(p)
 			if a == nil { return nil }
 			_ = a
-			op := p.ExpectToken(tokenize.COLON)
+			op := p.ExpectToken(token.COLON)
 			if op == nil { return nil }
 			_ = op
-			tc := p.ExpectToken(tokenize.TYPE_COMMENT)
+			tc := p.ExpectToken(token.TYPE_COMMENT)
 			_ = tc
 			b := parseRule_block(p)
 			if b == nil { return nil }
@@ -3971,18 +3971,18 @@ func parseRule_with_stmt(p *Parser) any {
 			kw_1 := p.ExpectName("with")
 			if kw_1 == nil { return nil }
 			_ = kw_1
-			op := p.ExpectToken(tokenize.LPAR)
+			op := p.ExpectToken(token.LPAR)
 			if op == nil { return nil }
 			_ = op
 			a := parseRule__gather_30(p)
 			if a == nil { return nil }
 			_ = a
-			opt := p.ExpectToken(tokenize.COMMA)
+			opt := p.ExpectToken(token.COMMA)
 			_ = opt
-			op_1 := p.ExpectToken(tokenize.RPAR)
+			op_1 := p.ExpectToken(token.RPAR)
 			if op_1 == nil { return nil }
 			_ = op_1
-			op_2 := p.ExpectToken(tokenize.COLON)
+			op_2 := p.ExpectToken(token.COLON)
 			if op_2 == nil { return nil }
 			_ = op_2
 			b := parseRule_block(p)
@@ -4007,10 +4007,10 @@ func parseRule_with_stmt(p *Parser) any {
 			a := parseRule__gather_30(p)
 			if a == nil { return nil }
 			_ = a
-			op := p.ExpectToken(tokenize.COLON)
+			op := p.ExpectToken(token.COLON)
 			if op == nil { return nil }
 			_ = op
-			tc := p.ExpectToken(tokenize.TYPE_COMMENT)
+			tc := p.ExpectToken(token.TYPE_COMMENT)
 			_ = tc
 			b := parseRule_block(p)
 			if b == nil { return nil }
@@ -4120,7 +4120,7 @@ func parseRule_try_stmt(p *Parser) any {
 			kw := p.ExpectName("try")
 			if kw == nil { return nil }
 			_ = kw
-			f := p.ExpectForced(tokenize.COLON, ":")
+			f := p.ExpectForced(token.COLON, ":")
 			if f == nil { return nil }
 			_ = f
 			b := parseRule_block(p)
@@ -4142,7 +4142,7 @@ func parseRule_try_stmt(p *Parser) any {
 			kw := p.ExpectName("try")
 			if kw == nil { return nil }
 			_ = kw
-			f := p.ExpectForced(tokenize.COLON, ":")
+			f := p.ExpectForced(token.COLON, ":")
 			if f == nil { return nil }
 			_ = f
 			b := parseRule_block(p)
@@ -4168,7 +4168,7 @@ func parseRule_try_stmt(p *Parser) any {
 			kw := p.ExpectName("try")
 			if kw == nil { return nil }
 			_ = kw
-			f := p.ExpectForced(tokenize.COLON, ":")
+			f := p.ExpectForced(token.COLON, ":")
 			if f == nil { return nil }
 			_ = f
 			b := parseRule_block(p)
@@ -4220,7 +4220,7 @@ func parseRule_except_block(p *Parser) any {
 			e := parseRule_expression(p)
 			if e == nil { return nil }
 			_ = e
-			op := p.ExpectToken(tokenize.COLON)
+			op := p.ExpectToken(token.COLON)
 			if op == nil { return nil }
 			_ = op
 			b := parseRule_block(p)
@@ -4248,7 +4248,7 @@ func parseRule_except_block(p *Parser) any {
 			t := nameToken(p)
 			if t == nil { return nil }
 			_ = t
-			op := p.ExpectToken(tokenize.COLON)
+			op := p.ExpectToken(token.COLON)
 			if op == nil { return nil }
 			_ = op
 			b := parseRule_block(p)
@@ -4270,7 +4270,7 @@ func parseRule_except_block(p *Parser) any {
 			e := parseRule_expressions(p)
 			if e == nil { return nil }
 			_ = e
-			op := p.ExpectToken(tokenize.COLON)
+			op := p.ExpectToken(token.COLON)
 			if op == nil { return nil }
 			_ = op
 			b := parseRule_block(p)
@@ -4289,7 +4289,7 @@ func parseRule_except_block(p *Parser) any {
 			kw := p.ExpectName("except")
 			if kw == nil { return nil }
 			_ = kw
-			op := p.ExpectToken(tokenize.COLON)
+			op := p.ExpectToken(token.COLON)
 			if op == nil { return nil }
 			_ = op
 			b := parseRule_block(p)
@@ -4344,13 +4344,13 @@ func parseRule_except_star_block(p *Parser) any {
 			kw := p.ExpectName("except")
 			if kw == nil { return nil }
 			_ = kw
-			op := p.ExpectToken(tokenize.STAR)
+			op := p.ExpectToken(token.STAR)
 			if op == nil { return nil }
 			_ = op
 			e := parseRule_expression(p)
 			if e == nil { return nil }
 			_ = e
-			op_1 := p.ExpectToken(tokenize.COLON)
+			op_1 := p.ExpectToken(token.COLON)
 			if op_1 == nil { return nil }
 			_ = op_1
 			b := parseRule_block(p)
@@ -4369,7 +4369,7 @@ func parseRule_except_star_block(p *Parser) any {
 			kw := p.ExpectName("except")
 			if kw == nil { return nil }
 			_ = kw
-			op := p.ExpectToken(tokenize.STAR)
+			op := p.ExpectToken(token.STAR)
 			if op == nil { return nil }
 			_ = op
 			e := parseRule_expression(p)
@@ -4381,7 +4381,7 @@ func parseRule_except_star_block(p *Parser) any {
 			t := nameToken(p)
 			if t == nil { return nil }
 			_ = t
-			op_1 := p.ExpectToken(tokenize.COLON)
+			op_1 := p.ExpectToken(token.COLON)
 			if op_1 == nil { return nil }
 			_ = op_1
 			b := parseRule_block(p)
@@ -4400,13 +4400,13 @@ func parseRule_except_star_block(p *Parser) any {
 			kw := p.ExpectName("except")
 			if kw == nil { return nil }
 			_ = kw
-			op := p.ExpectToken(tokenize.STAR)
+			op := p.ExpectToken(token.STAR)
 			if op == nil { return nil }
 			_ = op
 			e := parseRule_expressions(p)
 			if e == nil { return nil }
 			_ = e
-			op_1 := p.ExpectToken(tokenize.COLON)
+			op_1 := p.ExpectToken(token.COLON)
 			if op_1 == nil { return nil }
 			_ = op_1
 			b := parseRule_block(p)
@@ -4461,7 +4461,7 @@ func parseRule_finally_block(p *Parser) any {
 			kw := p.ExpectName("finally")
 			if kw == nil { return nil }
 			_ = kw
-			f := p.ExpectForced(tokenize.COLON, ":")
+			f := p.ExpectForced(token.COLON, ":")
 			if f == nil { return nil }
 			_ = f
 			a := parseRule_block(p)
@@ -4493,19 +4493,19 @@ func parseRule_match_stmt(p *Parser) any {
 			subject := parseRule_subject_expr(p)
 			if subject == nil { return nil }
 			_ = subject
-			op := p.ExpectToken(tokenize.COLON)
+			op := p.ExpectToken(token.COLON)
 			if op == nil { return nil }
 			_ = op
-			newline := p.ExpectToken(tokenize.NEWLINE)
+			newline := p.ExpectToken(token.NEWLINE)
 			if newline == nil { return nil }
 			_ = newline
-			indent := p.ExpectToken(tokenize.INDENT)
+			indent := p.ExpectToken(token.INDENT)
 			if indent == nil { return nil }
 			_ = indent
 			cases := parseRule__loop1_34(p)
 			if cases == nil { return nil }
 			_ = cases
-			dedent := p.ExpectToken(tokenize.DEDENT)
+			dedent := p.ExpectToken(token.DEDENT)
 			if dedent == nil { return nil }
 			_ = dedent
 			return actionAstMatch(p, subject, cases)
@@ -4544,7 +4544,7 @@ func parseRule_subject_expr(p *Parser) any {
 			value := parseRule_star_named_expression(p)
 			if value == nil { return nil }
 			_ = value
-			op := p.ExpectToken(tokenize.COMMA)
+			op := p.ExpectToken(token.COMMA)
 			if op == nil { return nil }
 			_ = op
 			values := parseRule_star_named_expressions(p)
@@ -4603,7 +4603,7 @@ func parseRule_case_block(p *Parser) any {
 			_ = pattern
 			guard := parseRule_guard(p)
 			_ = guard
-			op := p.ExpectToken(tokenize.COLON)
+			op := p.ExpectToken(token.COLON)
 			if op == nil { return nil }
 			_ = op
 			body := parseRule_block(p)
@@ -5088,7 +5088,7 @@ func parseRule_complex_number(p *Parser) any {
 			real := parseRule_signed_real_number(p)
 			if real == nil { return nil }
 			_ = real
-			op := p.ExpectToken(tokenize.PLUS)
+			op := p.ExpectToken(token.PLUS)
 			if op == nil { return nil }
 			_ = op
 			imag := parseRule_imaginary_number(p)
@@ -5107,7 +5107,7 @@ func parseRule_complex_number(p *Parser) any {
 			real := parseRule_signed_real_number(p)
 			if real == nil { return nil }
 			_ = real
-			op := p.ExpectToken(tokenize.MINUS)
+			op := p.ExpectToken(token.MINUS)
 			if op == nil { return nil }
 			_ = op
 			imag := parseRule_imaginary_number(p)
@@ -5146,7 +5146,7 @@ func parseRule_signed_number(p *Parser) any {
 	// alt 1
 	{
 		if v := func() any {
-			op := p.ExpectToken(tokenize.MINUS)
+			op := p.ExpectToken(token.MINUS)
 			if op == nil { return nil }
 			_ = op
 			number := numberToken(p)
@@ -5185,7 +5185,7 @@ func parseRule_signed_real_number(p *Parser) any {
 	// alt 1
 	{
 		if v := func() any {
-			op := p.ExpectToken(tokenize.MINUS)
+			op := p.ExpectToken(token.MINUS)
 			if op == nil { return nil }
 			_ = op
 			real := parseRule_real_number(p)
@@ -5375,7 +5375,7 @@ func parseRule_attr_raw(p *Parser) any {
 			value := parseRule_name_or_attr(p)
 			if value == nil { return nil }
 			_ = value
-			op := p.ExpectToken(tokenize.DOT)
+			op := p.ExpectToken(token.DOT)
 			if op == nil { return nil }
 			_ = op
 			attr := nameToken(p)
@@ -5431,13 +5431,13 @@ func parseRule_group_pattern(p *Parser) any {
 	// alt 0
 	{
 		if v := func() any {
-			op := p.ExpectToken(tokenize.LPAR)
+			op := p.ExpectToken(token.LPAR)
 			if op == nil { return nil }
 			_ = op
 			pattern := parseRule_pattern(p)
 			if pattern == nil { return nil }
 			_ = pattern
-			op_1 := p.ExpectToken(tokenize.RPAR)
+			op_1 := p.ExpectToken(token.RPAR)
 			if op_1 == nil { return nil }
 			_ = op_1
 			return pattern
@@ -5460,12 +5460,12 @@ func parseRule_sequence_pattern(p *Parser) any {
 	// alt 0
 	{
 		if v := func() any {
-			op := p.ExpectToken(tokenize.LSQB)
+			op := p.ExpectToken(token.LSQB)
 			if op == nil { return nil }
 			_ = op
 			patterns := parseRule_maybe_sequence_pattern(p)
 			_ = patterns
-			op_1 := p.ExpectToken(tokenize.RSQB)
+			op_1 := p.ExpectToken(token.RSQB)
 			if op_1 == nil { return nil }
 			_ = op_1
 			return actionAstMatchSequence(p, patterns)
@@ -5478,12 +5478,12 @@ func parseRule_sequence_pattern(p *Parser) any {
 	// alt 1
 	{
 		if v := func() any {
-			op := p.ExpectToken(tokenize.LPAR)
+			op := p.ExpectToken(token.LPAR)
 			if op == nil { return nil }
 			_ = op
 			patterns := parseRule_open_sequence_pattern(p)
 			_ = patterns
-			op_1 := p.ExpectToken(tokenize.RPAR)
+			op_1 := p.ExpectToken(token.RPAR)
 			if op_1 == nil { return nil }
 			_ = op_1
 			return actionAstMatchSequence(p, patterns)
@@ -5509,7 +5509,7 @@ func parseRule_open_sequence_pattern(p *Parser) any {
 			pattern := parseRule_maybe_star_pattern(p)
 			if pattern == nil { return nil }
 			_ = pattern
-			op := p.ExpectToken(tokenize.COMMA)
+			op := p.ExpectToken(token.COMMA)
 			if op == nil { return nil }
 			_ = op
 			patterns := parseRule_maybe_sequence_pattern(p)
@@ -5537,7 +5537,7 @@ func parseRule_maybe_sequence_pattern(p *Parser) any {
 			patterns := parseRule__gather_39(p)
 			if patterns == nil { return nil }
 			_ = patterns
-			opt := p.ExpectToken(tokenize.COMMA)
+			opt := p.ExpectToken(token.COMMA)
 			_ = opt
 			return patterns
 		}(); v != nil {
@@ -5595,7 +5595,7 @@ func parseRule_star_pattern(p *Parser) any {
 	// alt 0
 	{
 		if v := func() any {
-			op := p.ExpectToken(tokenize.STAR)
+			op := p.ExpectToken(token.STAR)
 			if op == nil { return nil }
 			_ = op
 			target := parseRule_pattern_capture_target(p)
@@ -5611,7 +5611,7 @@ func parseRule_star_pattern(p *Parser) any {
 	// alt 1
 	{
 		if v := func() any {
-			op := p.ExpectToken(tokenize.STAR)
+			op := p.ExpectToken(token.STAR)
 			if op == nil { return nil }
 			_ = op
 			wildcard_pattern := parseRule_wildcard_pattern(p)
@@ -5637,10 +5637,10 @@ func parseRule_mapping_pattern(p *Parser) any {
 	// alt 0
 	{
 		if v := func() any {
-			op := p.ExpectToken(tokenize.LBRACE)
+			op := p.ExpectToken(token.LBRACE)
 			if op == nil { return nil }
 			_ = op
-			op_1 := p.ExpectToken(tokenize.RBRACE)
+			op_1 := p.ExpectToken(token.RBRACE)
 			if op_1 == nil { return nil }
 			_ = op_1
 			return actionAstMatchMapping(p, nil, nil, nil)
@@ -5653,15 +5653,15 @@ func parseRule_mapping_pattern(p *Parser) any {
 	// alt 1
 	{
 		if v := func() any {
-			op := p.ExpectToken(tokenize.LBRACE)
+			op := p.ExpectToken(token.LBRACE)
 			if op == nil { return nil }
 			_ = op
 			rest := parseRule_double_star_pattern(p)
 			if rest == nil { return nil }
 			_ = rest
-			opt := p.ExpectToken(tokenize.COMMA)
+			opt := p.ExpectToken(token.COMMA)
 			_ = opt
-			op_1 := p.ExpectToken(tokenize.RBRACE)
+			op_1 := p.ExpectToken(token.RBRACE)
 			if op_1 == nil { return nil }
 			_ = op_1
 			return actionAstMatchMapping(p, nil, nil, nameIDOf(rest))
@@ -5674,21 +5674,21 @@ func parseRule_mapping_pattern(p *Parser) any {
 	// alt 2
 	{
 		if v := func() any {
-			op := p.ExpectToken(tokenize.LBRACE)
+			op := p.ExpectToken(token.LBRACE)
 			if op == nil { return nil }
 			_ = op
 			items := parseRule_items_pattern(p)
 			if items == nil { return nil }
 			_ = items
-			op_1 := p.ExpectToken(tokenize.COMMA)
+			op_1 := p.ExpectToken(token.COMMA)
 			if op_1 == nil { return nil }
 			_ = op_1
 			rest := parseRule_double_star_pattern(p)
 			if rest == nil { return nil }
 			_ = rest
-			opt := p.ExpectToken(tokenize.COMMA)
+			opt := p.ExpectToken(token.COMMA)
 			_ = opt
-			op_2 := p.ExpectToken(tokenize.RBRACE)
+			op_2 := p.ExpectToken(token.RBRACE)
 			if op_2 == nil { return nil }
 			_ = op_2
 			return actionAstMatchMapping(p, actionPgenGetPatternKeys(p, p, items), actionPgenGetPatterns(p, p, items), nameIDOf(rest))
@@ -5701,15 +5701,15 @@ func parseRule_mapping_pattern(p *Parser) any {
 	// alt 3
 	{
 		if v := func() any {
-			op := p.ExpectToken(tokenize.LBRACE)
+			op := p.ExpectToken(token.LBRACE)
 			if op == nil { return nil }
 			_ = op
 			items := parseRule_items_pattern(p)
 			if items == nil { return nil }
 			_ = items
-			opt := p.ExpectToken(tokenize.COMMA)
+			opt := p.ExpectToken(token.COMMA)
 			_ = opt
-			op_1 := p.ExpectToken(tokenize.RBRACE)
+			op_1 := p.ExpectToken(token.RBRACE)
 			if op_1 == nil { return nil }
 			_ = op_1
 			return actionAstMatchMapping(p, actionPgenGetPatternKeys(p, p, items), actionPgenGetPatterns(p, p, items), nil)
@@ -5758,7 +5758,7 @@ func parseRule_key_value_pattern(p *Parser) any {
 			key := parseRule__group_41(p)
 			if key == nil { return nil }
 			_ = key
-			op := p.ExpectToken(tokenize.COLON)
+			op := p.ExpectToken(token.COLON)
 			if op == nil { return nil }
 			_ = op
 			pattern := parseRule_pattern(p)
@@ -5784,7 +5784,7 @@ func parseRule_double_star_pattern(p *Parser) any {
 	// alt 0
 	{
 		if v := func() any {
-			op := p.ExpectToken(tokenize.DOUBLESTAR)
+			op := p.ExpectToken(token.DOUBLESTAR)
 			if op == nil { return nil }
 			_ = op
 			target := parseRule_pattern_capture_target(p)
@@ -5813,10 +5813,10 @@ func parseRule_class_pattern(p *Parser) any {
 			cls := parseRule_name_or_attr(p)
 			if cls == nil { return nil }
 			_ = cls
-			op := p.ExpectToken(tokenize.LPAR)
+			op := p.ExpectToken(token.LPAR)
 			if op == nil { return nil }
 			_ = op
-			op_1 := p.ExpectToken(tokenize.RPAR)
+			op_1 := p.ExpectToken(token.RPAR)
 			if op_1 == nil { return nil }
 			_ = op_1
 			return actionAstMatchClass(p, cls, nil, nil, nil)
@@ -5832,15 +5832,15 @@ func parseRule_class_pattern(p *Parser) any {
 			cls := parseRule_name_or_attr(p)
 			if cls == nil { return nil }
 			_ = cls
-			op := p.ExpectToken(tokenize.LPAR)
+			op := p.ExpectToken(token.LPAR)
 			if op == nil { return nil }
 			_ = op
 			patterns := parseRule_positional_patterns(p)
 			if patterns == nil { return nil }
 			_ = patterns
-			opt := p.ExpectToken(tokenize.COMMA)
+			opt := p.ExpectToken(token.COMMA)
 			_ = opt
-			op_1 := p.ExpectToken(tokenize.RPAR)
+			op_1 := p.ExpectToken(token.RPAR)
 			if op_1 == nil { return nil }
 			_ = op_1
 			return actionAstMatchClass(p, cls, patterns, nil, nil)
@@ -5856,15 +5856,15 @@ func parseRule_class_pattern(p *Parser) any {
 			cls := parseRule_name_or_attr(p)
 			if cls == nil { return nil }
 			_ = cls
-			op := p.ExpectToken(tokenize.LPAR)
+			op := p.ExpectToken(token.LPAR)
 			if op == nil { return nil }
 			_ = op
 			keywords := parseRule_keyword_patterns(p)
 			if keywords == nil { return nil }
 			_ = keywords
-			opt := p.ExpectToken(tokenize.COMMA)
+			opt := p.ExpectToken(token.COMMA)
 			_ = opt
-			op_1 := p.ExpectToken(tokenize.RPAR)
+			op_1 := p.ExpectToken(token.RPAR)
 			if op_1 == nil { return nil }
 			_ = op_1
 			return actionAstMatchClass(p, cls, nil, actionPgenMapNamesToIds(p, p, actionPgenGetPatternKeys(p, p, keywords)), actionPgenGetPatterns(p, p, keywords))
@@ -5880,21 +5880,21 @@ func parseRule_class_pattern(p *Parser) any {
 			cls := parseRule_name_or_attr(p)
 			if cls == nil { return nil }
 			_ = cls
-			op := p.ExpectToken(tokenize.LPAR)
+			op := p.ExpectToken(token.LPAR)
 			if op == nil { return nil }
 			_ = op
 			patterns := parseRule_positional_patterns(p)
 			if patterns == nil { return nil }
 			_ = patterns
-			op_1 := p.ExpectToken(tokenize.COMMA)
+			op_1 := p.ExpectToken(token.COMMA)
 			if op_1 == nil { return nil }
 			_ = op_1
 			keywords := parseRule_keyword_patterns(p)
 			if keywords == nil { return nil }
 			_ = keywords
-			opt := p.ExpectToken(tokenize.COMMA)
+			opt := p.ExpectToken(token.COMMA)
 			_ = opt
-			op_2 := p.ExpectToken(tokenize.RPAR)
+			op_2 := p.ExpectToken(token.RPAR)
 			if op_2 == nil { return nil }
 			_ = op_2
 			return actionAstMatchClass(p, cls, patterns, actionPgenMapNamesToIds(p, p, actionPgenGetPatternKeys(p, p, keywords)), actionPgenGetPatterns(p, p, keywords))
@@ -5979,7 +5979,7 @@ func parseRule_keyword_pattern(p *Parser) any {
 			arg := nameToken(p)
 			if arg == nil { return nil }
 			_ = arg
-			op := p.ExpectToken(tokenize.EQUAL)
+			op := p.ExpectToken(token.EQUAL)
 			if op == nil { return nil }
 			_ = op
 			value := parseRule_pattern(p)
@@ -6013,7 +6013,7 @@ func parseRule_type_alias(p *Parser) any {
 			_ = n
 			t := parseRule_type_params(p)
 			_ = t
-			op := p.ExpectToken(tokenize.EQUAL)
+			op := p.ExpectToken(token.EQUAL)
 			if op == nil { return nil }
 			_ = op
 			b := parseRule_expression(p)
@@ -6052,13 +6052,13 @@ func parseRule_type_params(p *Parser) any {
 	// alt 1
 	{
 		if v := func() any {
-			op := p.ExpectToken(tokenize.LSQB)
+			op := p.ExpectToken(token.LSQB)
 			if op == nil { return nil }
 			_ = op
 			t := parseRule_type_param_seq(p)
 			if t == nil { return nil }
 			_ = t
-			op_1 := p.ExpectToken(tokenize.RSQB)
+			op_1 := p.ExpectToken(token.RSQB)
 			if op_1 == nil { return nil }
 			_ = op_1
 			return t
@@ -6084,7 +6084,7 @@ func parseRule_type_param_seq(p *Parser) any {
 			a := parseRule__gather_44(p)
 			if a == nil { return nil }
 			_ = a
-			opt := p.ExpectToken(tokenize.COMMA)
+			opt := p.ExpectToken(token.COMMA)
 			_ = opt
 			return a
 		}(); v != nil {
@@ -6136,7 +6136,7 @@ func parseRule_type_param(p *Parser) any {
 	// alt 2
 	{
 		if v := func() any {
-			op := p.ExpectToken(tokenize.STAR)
+			op := p.ExpectToken(token.STAR)
 			if op == nil { return nil }
 			_ = op
 			a := nameToken(p)
@@ -6154,7 +6154,7 @@ func parseRule_type_param(p *Parser) any {
 	// alt 3
 	{
 		if v := func() any {
-			op := p.ExpectToken(tokenize.DOUBLESTAR)
+			op := p.ExpectToken(token.DOUBLESTAR)
 			if op == nil { return nil }
 			_ = op
 			a := nameToken(p)
@@ -6182,7 +6182,7 @@ func parseRule_type_param_bound(p *Parser) any {
 	// alt 0
 	{
 		if v := func() any {
-			op := p.ExpectToken(tokenize.COLON)
+			op := p.ExpectToken(token.COLON)
 			if op == nil { return nil }
 			_ = op
 			e := parseRule_expression(p)
@@ -6208,7 +6208,7 @@ func parseRule_type_param_default(p *Parser) any {
 	// alt 0
 	{
 		if v := func() any {
-			op := p.ExpectToken(tokenize.EQUAL)
+			op := p.ExpectToken(token.EQUAL)
 			if op == nil { return nil }
 			_ = op
 			e := parseRule_expression(p)
@@ -6234,7 +6234,7 @@ func parseRule_type_param_starred_default(p *Parser) any {
 	// alt 0
 	{
 		if v := func() any {
-			op := p.ExpectToken(tokenize.EQUAL)
+			op := p.ExpectToken(token.EQUAL)
 			if op == nil { return nil }
 			_ = op
 			e := parseRule_star_expression(p)
@@ -6266,7 +6266,7 @@ func parseRule_expressions(p *Parser) any {
 			b := parseRule__loop1_45(p)
 			if b == nil { return nil }
 			_ = b
-			opt := p.ExpectToken(tokenize.COMMA)
+			opt := p.ExpectToken(token.COMMA)
 			_ = opt
 			return actionAstTuple(p, actionPgenSeqInsertInFront(p, p, a, b), ast.Load)
 		}(); v != nil {
@@ -6281,7 +6281,7 @@ func parseRule_expressions(p *Parser) any {
 			a := parseRule_expression(p)
 			if a == nil { return nil }
 			_ = a
-			op := p.ExpectToken(tokenize.COMMA)
+			op := p.ExpectToken(token.COMMA)
 			if op == nil { return nil }
 			_ = op
 			return actionAstTuple(p, actionPgenSingletonSeq(p, p, a), ast.Load)
@@ -6454,7 +6454,7 @@ func parseRule_star_expressions(p *Parser) any {
 			b := parseRule__loop1_46(p)
 			if b == nil { return nil }
 			_ = b
-			opt := p.ExpectToken(tokenize.COMMA)
+			opt := p.ExpectToken(token.COMMA)
 			_ = opt
 			return actionAstTuple(p, actionPgenSeqInsertInFront(p, p, a, b), ast.Load)
 		}(); v != nil {
@@ -6469,7 +6469,7 @@ func parseRule_star_expressions(p *Parser) any {
 			a := parseRule_star_expression(p)
 			if a == nil { return nil }
 			_ = a
-			op := p.ExpectToken(tokenize.COMMA)
+			op := p.ExpectToken(token.COMMA)
 			if op == nil { return nil }
 			_ = op
 			return actionAstTuple(p, actionPgenSingletonSeq(p, p, a), ast.Load)
@@ -6505,7 +6505,7 @@ func parseRule_star_expression(p *Parser) any {
 	// alt 0
 	{
 		if v := func() any {
-			op := p.ExpectToken(tokenize.STAR)
+			op := p.ExpectToken(token.STAR)
 			if op == nil { return nil }
 			_ = op
 			a := parseRule_bitwise_or(p)
@@ -6547,7 +6547,7 @@ func parseRule_star_named_expressions(p *Parser) any {
 			a := parseRule__gather_47(p)
 			if a == nil { return nil }
 			_ = a
-			opt := p.ExpectToken(tokenize.COMMA)
+			opt := p.ExpectToken(token.COMMA)
 			_ = opt
 			return a
 		}(); v != nil {
@@ -6569,7 +6569,7 @@ func parseRule_star_named_expression(p *Parser) any {
 	// alt 0
 	{
 		if v := func() any {
-			op := p.ExpectToken(tokenize.STAR)
+			op := p.ExpectToken(token.STAR)
 			if op == nil { return nil }
 			_ = op
 			a := parseRule_bitwise_or(p)
@@ -6612,7 +6612,7 @@ func parseRule_assignment_expression(p *Parser) any {
 			a := nameToken(p)
 			if a == nil { return nil }
 			_ = a
-			op := p.ExpectToken(tokenize.COLONEQUAL)
+			op := p.ExpectToken(token.COLONEQUAL)
 			if op == nil { return nil }
 			_ = op
 			cut = true
@@ -6672,7 +6672,7 @@ func parseRule_named_expression(p *Parser) any {
 			expression := parseRule_expression(p)
 			if expression == nil { return nil }
 			_ = expression
-			if !p.Lookahead(false, func(p *Parser) any { return p.ExpectToken(tokenize.COLONEQUAL) }) { return nil }
+			if !p.Lookahead(false, func(p *Parser) any { return p.ExpectToken(token.COLONEQUAL) }) { return nil }
 			return []any{expression}
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_named_expression, v)
@@ -6989,7 +6989,7 @@ func parseRule_eq_bitwise_or(p *Parser) any {
 	// alt 0
 	{
 		if v := func() any {
-			op := p.ExpectToken(tokenize.EQEQUAL)
+			op := p.ExpectToken(token.EQEQUAL)
 			if op == nil { return nil }
 			_ = op
 			a := parseRule_bitwise_or(p)
@@ -7015,7 +7015,7 @@ func parseRule_noteq_bitwise_or(p *Parser) any {
 	// alt 0
 	{
 		if v := func() any {
-			op := p.ExpectToken(tokenize.NOTEQUAL)
+			op := p.ExpectToken(token.NOTEQUAL)
 			if op == nil { return nil }
 			_ = op
 			a := parseRule_bitwise_or(p)
@@ -7041,7 +7041,7 @@ func parseRule_lte_bitwise_or(p *Parser) any {
 	// alt 0
 	{
 		if v := func() any {
-			op := p.ExpectToken(tokenize.LESSEQUAL)
+			op := p.ExpectToken(token.LESSEQUAL)
 			if op == nil { return nil }
 			_ = op
 			a := parseRule_bitwise_or(p)
@@ -7067,7 +7067,7 @@ func parseRule_lt_bitwise_or(p *Parser) any {
 	// alt 0
 	{
 		if v := func() any {
-			op := p.ExpectToken(tokenize.LESS)
+			op := p.ExpectToken(token.LESS)
 			if op == nil { return nil }
 			_ = op
 			a := parseRule_bitwise_or(p)
@@ -7093,7 +7093,7 @@ func parseRule_gte_bitwise_or(p *Parser) any {
 	// alt 0
 	{
 		if v := func() any {
-			op := p.ExpectToken(tokenize.GREATEREQUAL)
+			op := p.ExpectToken(token.GREATEREQUAL)
 			if op == nil { return nil }
 			_ = op
 			a := parseRule_bitwise_or(p)
@@ -7119,7 +7119,7 @@ func parseRule_gt_bitwise_or(p *Parser) any {
 	// alt 0
 	{
 		if v := func() any {
-			op := p.ExpectToken(tokenize.GREATER)
+			op := p.ExpectToken(token.GREATER)
 			if op == nil { return nil }
 			_ = op
 			a := parseRule_bitwise_or(p)
@@ -7278,7 +7278,7 @@ func parseRule_bitwise_or_raw(p *Parser) any {
 			a := parseRule_bitwise_or(p)
 			if a == nil { return nil }
 			_ = a
-			op := p.ExpectToken(tokenize.VBAR)
+			op := p.ExpectToken(token.VBAR)
 			if op == nil { return nil }
 			_ = op
 			b := parseRule_bitwise_xor(p)
@@ -7337,7 +7337,7 @@ func parseRule_bitwise_xor_raw(p *Parser) any {
 			a := parseRule_bitwise_xor(p)
 			if a == nil { return nil }
 			_ = a
-			op := p.ExpectToken(tokenize.CIRCUMFLEX)
+			op := p.ExpectToken(token.CIRCUMFLEX)
 			if op == nil { return nil }
 			_ = op
 			b := parseRule_bitwise_and(p)
@@ -7396,7 +7396,7 @@ func parseRule_bitwise_and_raw(p *Parser) any {
 			a := parseRule_bitwise_and(p)
 			if a == nil { return nil }
 			_ = a
-			op := p.ExpectToken(tokenize.AMPER)
+			op := p.ExpectToken(token.AMPER)
 			if op == nil { return nil }
 			_ = op
 			b := parseRule_shift_expr(p)
@@ -7455,7 +7455,7 @@ func parseRule_shift_expr_raw(p *Parser) any {
 			a := parseRule_shift_expr(p)
 			if a == nil { return nil }
 			_ = a
-			op := p.ExpectToken(tokenize.LEFTSHIFT)
+			op := p.ExpectToken(token.LEFTSHIFT)
 			if op == nil { return nil }
 			_ = op
 			b := parseRule_sum(p)
@@ -7473,7 +7473,7 @@ func parseRule_shift_expr_raw(p *Parser) any {
 			a := parseRule_shift_expr(p)
 			if a == nil { return nil }
 			_ = a
-			op := p.ExpectToken(tokenize.RIGHTSHIFT)
+			op := p.ExpectToken(token.RIGHTSHIFT)
 			if op == nil { return nil }
 			_ = op
 			b := parseRule_sum(p)
@@ -7544,7 +7544,7 @@ func parseRule_sum_raw(p *Parser) any {
 			a := parseRule_sum(p)
 			if a == nil { return nil }
 			_ = a
-			op := p.ExpectToken(tokenize.PLUS)
+			op := p.ExpectToken(token.PLUS)
 			if op == nil { return nil }
 			_ = op
 			b := parseRule_term(p)
@@ -7562,7 +7562,7 @@ func parseRule_sum_raw(p *Parser) any {
 			a := parseRule_sum(p)
 			if a == nil { return nil }
 			_ = a
-			op := p.ExpectToken(tokenize.MINUS)
+			op := p.ExpectToken(token.MINUS)
 			if op == nil { return nil }
 			_ = op
 			b := parseRule_term(p)
@@ -7621,7 +7621,7 @@ func parseRule_term_raw(p *Parser) any {
 			a := parseRule_term(p)
 			if a == nil { return nil }
 			_ = a
-			op := p.ExpectToken(tokenize.STAR)
+			op := p.ExpectToken(token.STAR)
 			if op == nil { return nil }
 			_ = op
 			b := parseRule_factor(p)
@@ -7639,7 +7639,7 @@ func parseRule_term_raw(p *Parser) any {
 			a := parseRule_term(p)
 			if a == nil { return nil }
 			_ = a
-			op := p.ExpectToken(tokenize.SLASH)
+			op := p.ExpectToken(token.SLASH)
 			if op == nil { return nil }
 			_ = op
 			b := parseRule_factor(p)
@@ -7657,7 +7657,7 @@ func parseRule_term_raw(p *Parser) any {
 			a := parseRule_term(p)
 			if a == nil { return nil }
 			_ = a
-			op := p.ExpectToken(tokenize.DOUBLESLASH)
+			op := p.ExpectToken(token.DOUBLESLASH)
 			if op == nil { return nil }
 			_ = op
 			b := parseRule_factor(p)
@@ -7675,7 +7675,7 @@ func parseRule_term_raw(p *Parser) any {
 			a := parseRule_term(p)
 			if a == nil { return nil }
 			_ = a
-			op := p.ExpectToken(tokenize.PERCENT)
+			op := p.ExpectToken(token.PERCENT)
 			if op == nil { return nil }
 			_ = op
 			b := parseRule_factor(p)
@@ -7693,7 +7693,7 @@ func parseRule_term_raw(p *Parser) any {
 			a := parseRule_term(p)
 			if a == nil { return nil }
 			_ = a
-			op := p.ExpectToken(tokenize.AT)
+			op := p.ExpectToken(token.AT)
 			if op == nil { return nil }
 			_ = op
 			b := parseRule_factor(p)
@@ -7741,7 +7741,7 @@ func parseRule_factor(p *Parser) any {
 	// alt 0
 	{
 		if v := func() any {
-			op := p.ExpectToken(tokenize.PLUS)
+			op := p.ExpectToken(token.PLUS)
 			if op == nil { return nil }
 			_ = op
 			a := parseRule_factor(p)
@@ -7757,7 +7757,7 @@ func parseRule_factor(p *Parser) any {
 	// alt 1
 	{
 		if v := func() any {
-			op := p.ExpectToken(tokenize.MINUS)
+			op := p.ExpectToken(token.MINUS)
 			if op == nil { return nil }
 			_ = op
 			a := parseRule_factor(p)
@@ -7773,7 +7773,7 @@ func parseRule_factor(p *Parser) any {
 	// alt 2
 	{
 		if v := func() any {
-			op := p.ExpectToken(tokenize.TILDE)
+			op := p.ExpectToken(token.TILDE)
 			if op == nil { return nil }
 			_ = op
 			a := parseRule_factor(p)
@@ -7815,7 +7815,7 @@ func parseRule_power(p *Parser) any {
 			a := parseRule_await_primary(p)
 			if a == nil { return nil }
 			_ = a
-			op := p.ExpectToken(tokenize.DOUBLESTAR)
+			op := p.ExpectToken(token.DOUBLESTAR)
 			if op == nil { return nil }
 			_ = op
 			b := parseRule_factor(p)
@@ -7916,7 +7916,7 @@ func parseRule_primary_raw(p *Parser) any {
 			a := parseRule_primary(p)
 			if a == nil { return nil }
 			_ = a
-			op := p.ExpectToken(tokenize.DOT)
+			op := p.ExpectToken(token.DOT)
 			if op == nil { return nil }
 			_ = op
 			b := nameToken(p)
@@ -7949,12 +7949,12 @@ func parseRule_primary_raw(p *Parser) any {
 			a := parseRule_primary(p)
 			if a == nil { return nil }
 			_ = a
-			op := p.ExpectToken(tokenize.LPAR)
+			op := p.ExpectToken(token.LPAR)
 			if op == nil { return nil }
 			_ = op
 			b := parseRule_arguments(p)
 			_ = b
-			op_1 := p.ExpectToken(tokenize.RPAR)
+			op_1 := p.ExpectToken(token.RPAR)
 			if op_1 == nil { return nil }
 			_ = op_1
 			return actionAstCall(p, a, func() any { if truthy((b)) { return callArgsOf(b) }; return nil }(), func() any { if truthy((b)) { return callKwOf(b) }; return nil }())
@@ -7969,13 +7969,13 @@ func parseRule_primary_raw(p *Parser) any {
 			a := parseRule_primary(p)
 			if a == nil { return nil }
 			_ = a
-			op := p.ExpectToken(tokenize.LSQB)
+			op := p.ExpectToken(token.LSQB)
 			if op == nil { return nil }
 			_ = op
 			b := parseRule_slices(p)
 			if b == nil { return nil }
 			_ = b
-			op_1 := p.ExpectToken(tokenize.RSQB)
+			op_1 := p.ExpectToken(token.RSQB)
 			if op_1 == nil { return nil }
 			_ = op_1
 			return actionAstSubscript(p, a, b, ast.Load)
@@ -8011,7 +8011,7 @@ func parseRule_slices(p *Parser) any {
 			a := parseRule_slice(p)
 			if a == nil { return nil }
 			_ = a
-			if !p.Lookahead(false, func(p *Parser) any { return p.ExpectToken(tokenize.COMMA) }) { return nil }
+			if !p.Lookahead(false, func(p *Parser) any { return p.ExpectToken(token.COMMA) }) { return nil }
 			return a
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_slices, v)
@@ -8025,7 +8025,7 @@ func parseRule_slices(p *Parser) any {
 			a := parseRule__gather_51(p)
 			if a == nil { return nil }
 			_ = a
-			opt := p.ExpectToken(tokenize.COMMA)
+			opt := p.ExpectToken(token.COMMA)
 			_ = opt
 			return actionAstTuple(p, a, ast.Load)
 		}(); v != nil {
@@ -8049,7 +8049,7 @@ func parseRule_slice(p *Parser) any {
 		if v := func() any {
 			a := parseRule_expression(p)
 			_ = a
-			op := p.ExpectToken(tokenize.COLON)
+			op := p.ExpectToken(token.COLON)
 			if op == nil { return nil }
 			_ = op
 			b := parseRule_expression(p)
@@ -8168,7 +8168,7 @@ func parseRule_atom(p *Parser) any {
 	// alt 6
 	{
 		if v := func() any {
-			if !p.Lookahead(true, func(p *Parser) any { return p.ExpectToken(tokenize.LPAR) }) { return nil }
+			if !p.Lookahead(true, func(p *Parser) any { return p.ExpectToken(token.LPAR) }) { return nil }
 			g := parseRule__group_53(p)
 			if g == nil { return nil }
 			_ = g
@@ -8182,7 +8182,7 @@ func parseRule_atom(p *Parser) any {
 	// alt 7
 	{
 		if v := func() any {
-			if !p.Lookahead(true, func(p *Parser) any { return p.ExpectToken(tokenize.LSQB) }) { return nil }
+			if !p.Lookahead(true, func(p *Parser) any { return p.ExpectToken(token.LSQB) }) { return nil }
 			g := parseRule__group_54(p)
 			if g == nil { return nil }
 			_ = g
@@ -8196,7 +8196,7 @@ func parseRule_atom(p *Parser) any {
 	// alt 8
 	{
 		if v := func() any {
-			if !p.Lookahead(true, func(p *Parser) any { return p.ExpectToken(tokenize.LBRACE) }) { return nil }
+			if !p.Lookahead(true, func(p *Parser) any { return p.ExpectToken(token.LBRACE) }) { return nil }
 			g := parseRule__group_55(p)
 			if g == nil { return nil }
 			_ = g
@@ -8210,7 +8210,7 @@ func parseRule_atom(p *Parser) any {
 	// alt 9
 	{
 		if v := func() any {
-			op := p.ExpectToken(tokenize.ELLIPSIS)
+			op := p.ExpectToken(token.ELLIPSIS)
 			if op == nil { return nil }
 			_ = op
 			return actionAstConstant(p, pyEllipsisSentinel, nil)
@@ -8233,13 +8233,13 @@ func parseRule_group(p *Parser) any {
 	// alt 0
 	{
 		if v := func() any {
-			op := p.ExpectToken(tokenize.LPAR)
+			op := p.ExpectToken(token.LPAR)
 			if op == nil { return nil }
 			_ = op
 			a := parseRule__group_56(p)
 			if a == nil { return nil }
 			_ = a
-			op_1 := p.ExpectToken(tokenize.RPAR)
+			op_1 := p.ExpectToken(token.RPAR)
 			if op_1 == nil { return nil }
 			_ = op_1
 			return a
@@ -8280,7 +8280,7 @@ func parseRule_lambdef(p *Parser) any {
 			_ = kw
 			a := parseRule_lambda_params(p)
 			_ = a
-			op := p.ExpectToken(tokenize.COLON)
+			op := p.ExpectToken(token.COLON)
 			if op == nil { return nil }
 			_ = op
 			b := parseRule_expression(p)
@@ -8436,10 +8436,10 @@ func parseRule_lambda_slash_no_default(p *Parser) any {
 			a := parseRule__loop1_59(p)
 			if a == nil { return nil }
 			_ = a
-			op := p.ExpectToken(tokenize.SLASH)
+			op := p.ExpectToken(token.SLASH)
 			if op == nil { return nil }
 			_ = op
-			op_1 := p.ExpectToken(tokenize.COMMA)
+			op_1 := p.ExpectToken(token.COMMA)
 			if op_1 == nil { return nil }
 			_ = op_1
 			return a
@@ -8455,10 +8455,10 @@ func parseRule_lambda_slash_no_default(p *Parser) any {
 			a := parseRule__loop1_59(p)
 			if a == nil { return nil }
 			_ = a
-			op := p.ExpectToken(tokenize.SLASH)
+			op := p.ExpectToken(token.SLASH)
 			if op == nil { return nil }
 			_ = op
-			if !p.Lookahead(true, func(p *Parser) any { return p.ExpectToken(tokenize.COLON) }) { return nil }
+			if !p.Lookahead(true, func(p *Parser) any { return p.ExpectToken(token.COLON) }) { return nil }
 			return a
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_lambda_slash_no_default, v)
@@ -8484,10 +8484,10 @@ func parseRule_lambda_slash_with_default(p *Parser) any {
 			b := parseRule__loop1_60(p)
 			if b == nil { return nil }
 			_ = b
-			op := p.ExpectToken(tokenize.SLASH)
+			op := p.ExpectToken(token.SLASH)
 			if op == nil { return nil }
 			_ = op
-			op_1 := p.ExpectToken(tokenize.COMMA)
+			op_1 := p.ExpectToken(token.COMMA)
 			if op_1 == nil { return nil }
 			_ = op_1
 			return actionPgenSlashWithDefault(p, p, a, b)
@@ -8505,10 +8505,10 @@ func parseRule_lambda_slash_with_default(p *Parser) any {
 			b := parseRule__loop1_60(p)
 			if b == nil { return nil }
 			_ = b
-			op := p.ExpectToken(tokenize.SLASH)
+			op := p.ExpectToken(token.SLASH)
 			if op == nil { return nil }
 			_ = op
-			if !p.Lookahead(true, func(p *Parser) any { return p.ExpectToken(tokenize.COLON) }) { return nil }
+			if !p.Lookahead(true, func(p *Parser) any { return p.ExpectToken(token.COLON) }) { return nil }
 			return actionPgenSlashWithDefault(p, p, a, b)
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_lambda_slash_with_default, v)
@@ -8542,7 +8542,7 @@ func parseRule_lambda_star_etc(p *Parser) any {
 	// alt 1
 	{
 		if v := func() any {
-			op := p.ExpectToken(tokenize.STAR)
+			op := p.ExpectToken(token.STAR)
 			if op == nil { return nil }
 			_ = op
 			a := parseRule_lambda_param_no_default(p)
@@ -8562,10 +8562,10 @@ func parseRule_lambda_star_etc(p *Parser) any {
 	// alt 2
 	{
 		if v := func() any {
-			op := p.ExpectToken(tokenize.STAR)
+			op := p.ExpectToken(token.STAR)
 			if op == nil { return nil }
 			_ = op
-			op_1 := p.ExpectToken(tokenize.COMMA)
+			op_1 := p.ExpectToken(token.COMMA)
 			if op_1 == nil { return nil }
 			_ = op_1
 			b := parseRule__loop1_62(p)
@@ -8619,7 +8619,7 @@ func parseRule_lambda_kwds(p *Parser) any {
 	// alt 1
 	{
 		if v := func() any {
-			op := p.ExpectToken(tokenize.DOUBLESTAR)
+			op := p.ExpectToken(token.DOUBLESTAR)
 			if op == nil { return nil }
 			_ = op
 			a := parseRule_lambda_param_no_default(p)
@@ -8648,7 +8648,7 @@ func parseRule_lambda_param_no_default(p *Parser) any {
 			a := parseRule_lambda_param(p)
 			if a == nil { return nil }
 			_ = a
-			op := p.ExpectToken(tokenize.COMMA)
+			op := p.ExpectToken(token.COMMA)
 			if op == nil { return nil }
 			_ = op
 			return a
@@ -8664,7 +8664,7 @@ func parseRule_lambda_param_no_default(p *Parser) any {
 			a := parseRule_lambda_param(p)
 			if a == nil { return nil }
 			_ = a
-			if !p.Lookahead(true, func(p *Parser) any { return p.ExpectToken(tokenize.COLON) }) { return nil }
+			if !p.Lookahead(true, func(p *Parser) any { return p.ExpectToken(token.COLON) }) { return nil }
 			return a
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_lambda_param_no_default, v)
@@ -8691,7 +8691,7 @@ func parseRule_lambda_param_with_default(p *Parser) any {
 			c := parseRule_default(p)
 			if c == nil { return nil }
 			_ = c
-			op := p.ExpectToken(tokenize.COMMA)
+			op := p.ExpectToken(token.COMMA)
 			if op == nil { return nil }
 			_ = op
 			return actionPgenNameDefaultPair(p, p, a, c, nil)
@@ -8710,7 +8710,7 @@ func parseRule_lambda_param_with_default(p *Parser) any {
 			c := parseRule_default(p)
 			if c == nil { return nil }
 			_ = c
-			if !p.Lookahead(true, func(p *Parser) any { return p.ExpectToken(tokenize.COLON) }) { return nil }
+			if !p.Lookahead(true, func(p *Parser) any { return p.ExpectToken(token.COLON) }) { return nil }
 			return actionPgenNameDefaultPair(p, p, a, c, nil)
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_lambda_param_with_default, v)
@@ -8736,7 +8736,7 @@ func parseRule_lambda_param_maybe_default(p *Parser) any {
 			_ = a
 			c := parseRule_default(p)
 			_ = c
-			op := p.ExpectToken(tokenize.COMMA)
+			op := p.ExpectToken(token.COMMA)
 			if op == nil { return nil }
 			_ = op
 			return actionPgenNameDefaultPair(p, p, a, c, nil)
@@ -8754,7 +8754,7 @@ func parseRule_lambda_param_maybe_default(p *Parser) any {
 			_ = a
 			c := parseRule_default(p)
 			_ = c
-			if !p.Lookahead(true, func(p *Parser) any { return p.ExpectToken(tokenize.COLON) }) { return nil }
+			if !p.Lookahead(true, func(p *Parser) any { return p.ExpectToken(token.COLON) }) { return nil }
 			return actionPgenNameDefaultPair(p, p, a, c, nil)
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_lambda_param_maybe_default, v)
@@ -8811,7 +8811,7 @@ func parseRule_fstring_middle(p *Parser) any {
 	// alt 1
 	{
 		if v := func() any {
-			t := p.ExpectToken(tokenize.FSTRING_MIDDLE)
+			t := p.ExpectToken(token.FSTRING_MIDDLE)
 			if t == nil { return nil }
 			_ = t
 			return actionPgenConstantFromToken(p, p, t)
@@ -8834,19 +8834,19 @@ func parseRule_fstring_replacement_field(p *Parser) any {
 	// alt 0
 	{
 		if v := func() any {
-			op := p.ExpectToken(tokenize.LBRACE)
+			op := p.ExpectToken(token.LBRACE)
 			if op == nil { return nil }
 			_ = op
 			a := parseRule_annotated_rhs(p)
 			if a == nil { return nil }
 			_ = a
-			debug_expr := p.ExpectToken(tokenize.EQUAL)
+			debug_expr := p.ExpectToken(token.EQUAL)
 			_ = debug_expr
 			conversion := parseRule_fstring_conversion(p)
 			_ = conversion
 			format := parseRule_fstring_full_format_spec(p)
 			_ = format
-			rbrace := p.ExpectToken(tokenize.RBRACE)
+			rbrace := p.ExpectToken(token.RBRACE)
 			if rbrace == nil { return nil }
 			_ = rbrace
 			return actionPgenFormattedValue(p, p, a, debug_expr, conversion, format, rbrace)
@@ -8908,7 +8908,7 @@ func parseRule_fstring_full_format_spec(p *Parser) any {
 	// alt 0
 	{
 		if v := func() any {
-			colon := p.ExpectToken(tokenize.COLON)
+			colon := p.ExpectToken(token.COLON)
 			if colon == nil { return nil }
 			_ = colon
 			spec := parseRule__loop0_63(p)
@@ -8933,7 +8933,7 @@ func parseRule_fstring_format_spec(p *Parser) any {
 	// alt 0
 	{
 		if v := func() any {
-			t := p.ExpectToken(tokenize.FSTRING_MIDDLE)
+			t := p.ExpectToken(token.FSTRING_MIDDLE)
 			if t == nil { return nil }
 			_ = t
 			return actionPgenDecodedConstantFromToken(p, p, t)
@@ -8969,12 +8969,12 @@ func parseRule_fstring(p *Parser) any {
 	// alt 0
 	{
 		if v := func() any {
-			a := p.ExpectToken(tokenize.FSTRING_START)
+			a := p.ExpectToken(token.FSTRING_START)
 			if a == nil { return nil }
 			_ = a
 			b := parseRule__loop0_64(p)
 			_ = b
-			c := p.ExpectToken(tokenize.FSTRING_END)
+			c := p.ExpectToken(token.FSTRING_END)
 			if c == nil { return nil }
 			_ = c
 			return actionPgenJoinedStr(p, p, a, b, c)
@@ -8997,19 +8997,19 @@ func parseRule_tstring_format_spec_replacement_field(p *Parser) any {
 	// alt 0
 	{
 		if v := func() any {
-			op := p.ExpectToken(tokenize.LBRACE)
+			op := p.ExpectToken(token.LBRACE)
 			if op == nil { return nil }
 			_ = op
 			a := parseRule_annotated_rhs(p)
 			if a == nil { return nil }
 			_ = a
-			debug_expr := p.ExpectToken(tokenize.EQUAL)
+			debug_expr := p.ExpectToken(token.EQUAL)
 			_ = debug_expr
 			conversion := parseRule_fstring_conversion(p)
 			_ = conversion
 			format := parseRule_tstring_full_format_spec(p)
 			_ = format
-			rbrace := p.ExpectToken(tokenize.RBRACE)
+			rbrace := p.ExpectToken(token.RBRACE)
 			if rbrace == nil { return nil }
 			_ = rbrace
 			return actionPgenFormattedValue(p, p, a, debug_expr, conversion, format, rbrace)
@@ -9045,7 +9045,7 @@ func parseRule_tstring_format_spec(p *Parser) any {
 	// alt 0
 	{
 		if v := func() any {
-			t := p.ExpectToken(tokenize.TSTRING_MIDDLE)
+			t := p.ExpectToken(token.TSTRING_MIDDLE)
 			if t == nil { return nil }
 			_ = t
 			return actionPgenDecodedConstantFromToken(p, p, t)
@@ -9081,7 +9081,7 @@ func parseRule_tstring_full_format_spec(p *Parser) any {
 	// alt 0
 	{
 		if v := func() any {
-			colon := p.ExpectToken(tokenize.COLON)
+			colon := p.ExpectToken(token.COLON)
 			if colon == nil { return nil }
 			_ = colon
 			spec := parseRule__loop0_65(p)
@@ -9106,19 +9106,19 @@ func parseRule_tstring_replacement_field(p *Parser) any {
 	// alt 0
 	{
 		if v := func() any {
-			op := p.ExpectToken(tokenize.LBRACE)
+			op := p.ExpectToken(token.LBRACE)
 			if op == nil { return nil }
 			_ = op
 			a := parseRule_annotated_rhs(p)
 			if a == nil { return nil }
 			_ = a
-			debug_expr := p.ExpectToken(tokenize.EQUAL)
+			debug_expr := p.ExpectToken(token.EQUAL)
 			_ = debug_expr
 			conversion := parseRule_fstring_conversion(p)
 			_ = conversion
 			format := parseRule_tstring_full_format_spec(p)
 			_ = format
-			rbrace := p.ExpectToken(tokenize.RBRACE)
+			rbrace := p.ExpectToken(token.RBRACE)
 			if rbrace == nil { return nil }
 			_ = rbrace
 			return actionPgenInterpolation(p, p, a, debug_expr, conversion, format, rbrace)
@@ -9167,7 +9167,7 @@ func parseRule_tstring_middle(p *Parser) any {
 	// alt 1
 	{
 		if v := func() any {
-			t := p.ExpectToken(tokenize.TSTRING_MIDDLE)
+			t := p.ExpectToken(token.TSTRING_MIDDLE)
 			if t == nil { return nil }
 			_ = t
 			return actionPgenConstantFromToken(p, p, t)
@@ -9190,12 +9190,12 @@ func parseRule_tstring(p *Parser) any {
 	// alt 0
 	{
 		if v := func() any {
-			a := p.ExpectToken(tokenize.TSTRING_START)
+			a := p.ExpectToken(token.TSTRING_START)
 			if a == nil { return nil }
 			_ = a
 			b := parseRule__loop0_66(p)
 			_ = b
-			c := p.ExpectToken(tokenize.TSTRING_END)
+			c := p.ExpectToken(token.TSTRING_END)
 			if c == nil { return nil }
 			_ = c
 			return actionPgenTemplateStr(p, p, a, b, c)
@@ -9290,12 +9290,12 @@ func parseRule_list(p *Parser) any {
 	// alt 0
 	{
 		if v := func() any {
-			op := p.ExpectToken(tokenize.LSQB)
+			op := p.ExpectToken(token.LSQB)
 			if op == nil { return nil }
 			_ = op
 			a := parseRule_star_named_expressions(p)
 			_ = a
-			op_1 := p.ExpectToken(tokenize.RSQB)
+			op_1 := p.ExpectToken(token.RSQB)
 			if op_1 == nil { return nil }
 			_ = op_1
 			return actionAstList(p, a, ast.Load)
@@ -9318,12 +9318,12 @@ func parseRule_tuple(p *Parser) any {
 	// alt 0
 	{
 		if v := func() any {
-			op := p.ExpectToken(tokenize.LPAR)
+			op := p.ExpectToken(token.LPAR)
 			if op == nil { return nil }
 			_ = op
 			a := parseRule__rhs_69(p)
 			_ = a
-			op_1 := p.ExpectToken(tokenize.RPAR)
+			op_1 := p.ExpectToken(token.RPAR)
 			if op_1 == nil { return nil }
 			_ = op_1
 			return actionAstTuple(p, a, ast.Load)
@@ -9346,13 +9346,13 @@ func parseRule_set(p *Parser) any {
 	// alt 0
 	{
 		if v := func() any {
-			op := p.ExpectToken(tokenize.LBRACE)
+			op := p.ExpectToken(token.LBRACE)
 			if op == nil { return nil }
 			_ = op
 			a := parseRule_star_named_expressions(p)
 			if a == nil { return nil }
 			_ = a
-			op_1 := p.ExpectToken(tokenize.RBRACE)
+			op_1 := p.ExpectToken(token.RBRACE)
 			if op_1 == nil { return nil }
 			_ = op_1
 			return actionAstSet(p, a)
@@ -9375,12 +9375,12 @@ func parseRule_dict(p *Parser) any {
 	// alt 0
 	{
 		if v := func() any {
-			op := p.ExpectToken(tokenize.LBRACE)
+			op := p.ExpectToken(token.LBRACE)
 			if op == nil { return nil }
 			_ = op
 			a := parseRule_double_starred_kvpairs(p)
 			_ = a
-			op_1 := p.ExpectToken(tokenize.RBRACE)
+			op_1 := p.ExpectToken(token.RBRACE)
 			if op_1 == nil { return nil }
 			_ = op_1
 			return actionAstDict(p, actionPgenGetKeys(p, p, a), actionPgenGetValues(p, p, a))
@@ -9393,13 +9393,13 @@ func parseRule_dict(p *Parser) any {
 	// alt 1
 	{
 		if v := func() any {
-			op := p.ExpectToken(tokenize.LBRACE)
+			op := p.ExpectToken(token.LBRACE)
 			if op == nil { return nil }
 			_ = op
 			invalid_double_starred_kvpairs := parseRule_invalid_double_starred_kvpairs(p)
 			if invalid_double_starred_kvpairs == nil { return nil }
 			_ = invalid_double_starred_kvpairs
-			op_1 := p.ExpectToken(tokenize.RBRACE)
+			op_1 := p.ExpectToken(token.RBRACE)
 			if op_1 == nil { return nil }
 			_ = op_1
 			return []any{op, invalid_double_starred_kvpairs, op_1}
@@ -9425,7 +9425,7 @@ func parseRule_double_starred_kvpairs(p *Parser) any {
 			a := parseRule__gather_70(p)
 			if a == nil { return nil }
 			_ = a
-			opt := p.ExpectToken(tokenize.COMMA)
+			opt := p.ExpectToken(token.COMMA)
 			_ = opt
 			return a
 		}(); v != nil {
@@ -9447,7 +9447,7 @@ func parseRule_double_starred_kvpair(p *Parser) any {
 	// alt 0
 	{
 		if v := func() any {
-			op := p.ExpectToken(tokenize.DOUBLESTAR)
+			op := p.ExpectToken(token.DOUBLESTAR)
 			if op == nil { return nil }
 			_ = op
 			a := parseRule_bitwise_or(p)
@@ -9489,7 +9489,7 @@ func parseRule_kvpair(p *Parser) any {
 			a := parseRule_expression(p)
 			if a == nil { return nil }
 			_ = a
-			op := p.ExpectToken(tokenize.COLON)
+			op := p.ExpectToken(token.COLON)
 			if op == nil { return nil }
 			_ = op
 			b := parseRule_expression(p)
@@ -9637,7 +9637,7 @@ func parseRule_listcomp(p *Parser) any {
 	// alt 0
 	{
 		if v := func() any {
-			op := p.ExpectToken(tokenize.LSQB)
+			op := p.ExpectToken(token.LSQB)
 			if op == nil { return nil }
 			_ = op
 			a := parseRule_named_expression(p)
@@ -9646,7 +9646,7 @@ func parseRule_listcomp(p *Parser) any {
 			b := parseRule_for_if_clauses(p)
 			if b == nil { return nil }
 			_ = b
-			op_1 := p.ExpectToken(tokenize.RSQB)
+			op_1 := p.ExpectToken(token.RSQB)
 			if op_1 == nil { return nil }
 			_ = op_1
 			return actionAstListComp(p, a, b)
@@ -9682,7 +9682,7 @@ func parseRule_setcomp(p *Parser) any {
 	// alt 0
 	{
 		if v := func() any {
-			op := p.ExpectToken(tokenize.LBRACE)
+			op := p.ExpectToken(token.LBRACE)
 			if op == nil { return nil }
 			_ = op
 			a := parseRule_named_expression(p)
@@ -9691,7 +9691,7 @@ func parseRule_setcomp(p *Parser) any {
 			b := parseRule_for_if_clauses(p)
 			if b == nil { return nil }
 			_ = b
-			op_1 := p.ExpectToken(tokenize.RBRACE)
+			op_1 := p.ExpectToken(token.RBRACE)
 			if op_1 == nil { return nil }
 			_ = op_1
 			return actionAstSetComp(p, a, b)
@@ -9727,7 +9727,7 @@ func parseRule_genexp(p *Parser) any {
 	// alt 0
 	{
 		if v := func() any {
-			op := p.ExpectToken(tokenize.LPAR)
+			op := p.ExpectToken(token.LPAR)
 			if op == nil { return nil }
 			_ = op
 			a := parseRule__group_73(p)
@@ -9736,7 +9736,7 @@ func parseRule_genexp(p *Parser) any {
 			b := parseRule_for_if_clauses(p)
 			if b == nil { return nil }
 			_ = b
-			op_1 := p.ExpectToken(tokenize.RPAR)
+			op_1 := p.ExpectToken(token.RPAR)
 			if op_1 == nil { return nil }
 			_ = op_1
 			return actionAstGeneratorExp(p, a, b)
@@ -9772,7 +9772,7 @@ func parseRule_dictcomp(p *Parser) any {
 	// alt 0
 	{
 		if v := func() any {
-			op := p.ExpectToken(tokenize.LBRACE)
+			op := p.ExpectToken(token.LBRACE)
 			if op == nil { return nil }
 			_ = op
 			a := parseRule_kvpair(p)
@@ -9781,7 +9781,7 @@ func parseRule_dictcomp(p *Parser) any {
 			b := parseRule_for_if_clauses(p)
 			if b == nil { return nil }
 			_ = b
-			op_1 := p.ExpectToken(tokenize.RBRACE)
+			op_1 := p.ExpectToken(token.RBRACE)
 			if op_1 == nil { return nil }
 			_ = op_1
 			return []any{op, a, b, op_1}
@@ -9820,9 +9820,9 @@ func parseRule_arguments(p *Parser) any {
 			a := parseRule_args(p)
 			if a == nil { return nil }
 			_ = a
-			opt := p.ExpectToken(tokenize.COMMA)
+			opt := p.ExpectToken(token.COMMA)
 			_ = opt
-			if !p.Lookahead(true, func(p *Parser) any { return p.ExpectToken(tokenize.RPAR) }) { return nil }
+			if !p.Lookahead(true, func(p *Parser) any { return p.ExpectToken(token.RPAR) }) { return nil }
 			return a
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_arguments, v)
@@ -9897,7 +9897,7 @@ func parseRule_kwargs(p *Parser) any {
 			a := parseRule__gather_76(p)
 			if a == nil { return nil }
 			_ = a
-			op := p.ExpectToken(tokenize.COMMA)
+			op := p.ExpectToken(token.COMMA)
 			if op == nil { return nil }
 			_ = op
 			b := parseRule__gather_77(p)
@@ -9962,7 +9962,7 @@ func parseRule_starred_expression(p *Parser) any {
 	// alt 1
 	{
 		if v := func() any {
-			op := p.ExpectToken(tokenize.STAR)
+			op := p.ExpectToken(token.STAR)
 			if op == nil { return nil }
 			_ = op
 			a := parseRule_expression(p)
@@ -10017,7 +10017,7 @@ func parseRule_kwarg_or_starred(p *Parser) any {
 			a := nameToken(p)
 			if a == nil { return nil }
 			_ = a
-			op := p.ExpectToken(tokenize.EQUAL)
+			op := p.ExpectToken(token.EQUAL)
 			if op == nil { return nil }
 			_ = op
 			b := parseRule_expression(p)
@@ -10072,7 +10072,7 @@ func parseRule_kwarg_or_double_starred(p *Parser) any {
 			a := nameToken(p)
 			if a == nil { return nil }
 			_ = a
-			op := p.ExpectToken(tokenize.EQUAL)
+			op := p.ExpectToken(token.EQUAL)
 			if op == nil { return nil }
 			_ = op
 			b := parseRule_expression(p)
@@ -10088,7 +10088,7 @@ func parseRule_kwarg_or_double_starred(p *Parser) any {
 	// alt 2
 	{
 		if v := func() any {
-			op := p.ExpectToken(tokenize.DOUBLESTAR)
+			op := p.ExpectToken(token.DOUBLESTAR)
 			if op == nil { return nil }
 			_ = op
 			a := parseRule_expression(p)
@@ -10117,7 +10117,7 @@ func parseRule_star_targets(p *Parser) any {
 			a := parseRule_star_target(p)
 			if a == nil { return nil }
 			_ = a
-			if !p.Lookahead(false, func(p *Parser) any { return p.ExpectToken(tokenize.COMMA) }) { return nil }
+			if !p.Lookahead(false, func(p *Parser) any { return p.ExpectToken(token.COMMA) }) { return nil }
 			return a
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_star_targets, v)
@@ -10133,7 +10133,7 @@ func parseRule_star_targets(p *Parser) any {
 			_ = a
 			b := parseRule__loop0_78(p)
 			_ = b
-			opt := p.ExpectToken(tokenize.COMMA)
+			opt := p.ExpectToken(token.COMMA)
 			_ = opt
 			return actionAstTuple(p, actionPgenSeqInsertInFront(p, p, a, b), ast.Store)
 		}(); v != nil {
@@ -10158,7 +10158,7 @@ func parseRule_star_targets_list_seq(p *Parser) any {
 			a := parseRule__gather_79(p)
 			if a == nil { return nil }
 			_ = a
-			opt := p.ExpectToken(tokenize.COMMA)
+			opt := p.ExpectToken(token.COMMA)
 			_ = opt
 			return a
 		}(); v != nil {
@@ -10186,7 +10186,7 @@ func parseRule_star_targets_tuple_seq(p *Parser) any {
 			b := parseRule__loop1_80(p)
 			if b == nil { return nil }
 			_ = b
-			opt := p.ExpectToken(tokenize.COMMA)
+			opt := p.ExpectToken(token.COMMA)
 			_ = opt
 			return actionPgenSeqInsertInFront(p, p, a, b)
 		}(); v != nil {
@@ -10201,7 +10201,7 @@ func parseRule_star_targets_tuple_seq(p *Parser) any {
 			a := parseRule_star_target(p)
 			if a == nil { return nil }
 			_ = a
-			op := p.ExpectToken(tokenize.COMMA)
+			op := p.ExpectToken(token.COMMA)
 			if op == nil { return nil }
 			_ = op
 			return actionPgenSingletonSeq(p, p, a)
@@ -10224,7 +10224,7 @@ func parseRule_star_target(p *Parser) any {
 	// alt 0
 	{
 		if v := func() any {
-			op := p.ExpectToken(tokenize.STAR)
+			op := p.ExpectToken(token.STAR)
 			if op == nil { return nil }
 			_ = op
 			a := parseRule__group_81(p)
@@ -10266,7 +10266,7 @@ func parseRule_target_with_star_atom(p *Parser) any {
 			a := parseRule_t_primary(p)
 			if a == nil { return nil }
 			_ = a
-			op := p.ExpectToken(tokenize.DOT)
+			op := p.ExpectToken(token.DOT)
 			if op == nil { return nil }
 			_ = op
 			b := nameToken(p)
@@ -10286,13 +10286,13 @@ func parseRule_target_with_star_atom(p *Parser) any {
 			a := parseRule_t_primary(p)
 			if a == nil { return nil }
 			_ = a
-			op := p.ExpectToken(tokenize.LSQB)
+			op := p.ExpectToken(token.LSQB)
 			if op == nil { return nil }
 			_ = op
 			b := parseRule_slices(p)
 			if b == nil { return nil }
 			_ = b
-			op_1 := p.ExpectToken(tokenize.RSQB)
+			op_1 := p.ExpectToken(token.RSQB)
 			if op_1 == nil { return nil }
 			_ = op_1
 			if !p.Lookahead(false, func(p *Parser) any { return parseRule_t_lookahead(p) }) { return nil }
@@ -10342,13 +10342,13 @@ func parseRule_star_atom(p *Parser) any {
 	// alt 1
 	{
 		if v := func() any {
-			op := p.ExpectToken(tokenize.LPAR)
+			op := p.ExpectToken(token.LPAR)
 			if op == nil { return nil }
 			_ = op
 			a := parseRule_target_with_star_atom(p)
 			if a == nil { return nil }
 			_ = a
-			op_1 := p.ExpectToken(tokenize.RPAR)
+			op_1 := p.ExpectToken(token.RPAR)
 			if op_1 == nil { return nil }
 			_ = op_1
 			return actionPgenSetExprContext(p, p, a, ast.Store)
@@ -10361,12 +10361,12 @@ func parseRule_star_atom(p *Parser) any {
 	// alt 2
 	{
 		if v := func() any {
-			op := p.ExpectToken(tokenize.LPAR)
+			op := p.ExpectToken(token.LPAR)
 			if op == nil { return nil }
 			_ = op
 			a := parseRule_star_targets_tuple_seq(p)
 			_ = a
-			op_1 := p.ExpectToken(tokenize.RPAR)
+			op_1 := p.ExpectToken(token.RPAR)
 			if op_1 == nil { return nil }
 			_ = op_1
 			return actionAstTuple(p, a, ast.Store)
@@ -10379,12 +10379,12 @@ func parseRule_star_atom(p *Parser) any {
 	// alt 3
 	{
 		if v := func() any {
-			op := p.ExpectToken(tokenize.LSQB)
+			op := p.ExpectToken(token.LSQB)
 			if op == nil { return nil }
 			_ = op
 			a := parseRule_star_targets_list_seq(p)
 			_ = a
-			op_1 := p.ExpectToken(tokenize.RSQB)
+			op_1 := p.ExpectToken(token.RSQB)
 			if op_1 == nil { return nil }
 			_ = op_1
 			return actionAstList(p, a, ast.Store)
@@ -10433,13 +10433,13 @@ func parseRule_single_target(p *Parser) any {
 	// alt 2
 	{
 		if v := func() any {
-			op := p.ExpectToken(tokenize.LPAR)
+			op := p.ExpectToken(token.LPAR)
 			if op == nil { return nil }
 			_ = op
 			a := parseRule_single_target(p)
 			if a == nil { return nil }
 			_ = a
-			op_1 := p.ExpectToken(tokenize.RPAR)
+			op_1 := p.ExpectToken(token.RPAR)
 			if op_1 == nil { return nil }
 			_ = op_1
 			return a
@@ -10465,7 +10465,7 @@ func parseRule_single_subscript_attribute_target(p *Parser) any {
 			a := parseRule_t_primary(p)
 			if a == nil { return nil }
 			_ = a
-			op := p.ExpectToken(tokenize.DOT)
+			op := p.ExpectToken(token.DOT)
 			if op == nil { return nil }
 			_ = op
 			b := nameToken(p)
@@ -10485,13 +10485,13 @@ func parseRule_single_subscript_attribute_target(p *Parser) any {
 			a := parseRule_t_primary(p)
 			if a == nil { return nil }
 			_ = a
-			op := p.ExpectToken(tokenize.LSQB)
+			op := p.ExpectToken(token.LSQB)
 			if op == nil { return nil }
 			_ = op
 			b := parseRule_slices(p)
 			if b == nil { return nil }
 			_ = b
-			op_1 := p.ExpectToken(tokenize.RSQB)
+			op_1 := p.ExpectToken(token.RSQB)
 			if op_1 == nil { return nil }
 			_ = op_1
 			if !p.Lookahead(false, func(p *Parser) any { return parseRule_t_lookahead(p) }) { return nil }
@@ -10538,7 +10538,7 @@ func parseRule_t_primary_raw(p *Parser) any {
 			a := parseRule_t_primary(p)
 			if a == nil { return nil }
 			_ = a
-			op := p.ExpectToken(tokenize.DOT)
+			op := p.ExpectToken(token.DOT)
 			if op == nil { return nil }
 			_ = op
 			b := nameToken(p)
@@ -10557,13 +10557,13 @@ func parseRule_t_primary_raw(p *Parser) any {
 			a := parseRule_t_primary(p)
 			if a == nil { return nil }
 			_ = a
-			op := p.ExpectToken(tokenize.LSQB)
+			op := p.ExpectToken(token.LSQB)
 			if op == nil { return nil }
 			_ = op
 			b := parseRule_slices(p)
 			if b == nil { return nil }
 			_ = b
-			op_1 := p.ExpectToken(tokenize.RSQB)
+			op_1 := p.ExpectToken(token.RSQB)
 			if op_1 == nil { return nil }
 			_ = op_1
 			if !p.Lookahead(true, func(p *Parser) any { return parseRule_t_lookahead(p) }) { return nil }
@@ -10595,12 +10595,12 @@ func parseRule_t_primary_raw(p *Parser) any {
 			a := parseRule_t_primary(p)
 			if a == nil { return nil }
 			_ = a
-			op := p.ExpectToken(tokenize.LPAR)
+			op := p.ExpectToken(token.LPAR)
 			if op == nil { return nil }
 			_ = op
 			b := parseRule_arguments(p)
 			_ = b
-			op_1 := p.ExpectToken(tokenize.RPAR)
+			op_1 := p.ExpectToken(token.RPAR)
 			if op_1 == nil { return nil }
 			_ = op_1
 			if !p.Lookahead(true, func(p *Parser) any { return parseRule_t_lookahead(p) }) { return nil }
@@ -10635,7 +10635,7 @@ func parseRule_t_lookahead(p *Parser) any {
 	// alt 0
 	{
 		if v := func() any {
-			op := p.ExpectToken(tokenize.LPAR)
+			op := p.ExpectToken(token.LPAR)
 			if op == nil { return nil }
 			_ = op
 			return []any{op}
@@ -10648,7 +10648,7 @@ func parseRule_t_lookahead(p *Parser) any {
 	// alt 1
 	{
 		if v := func() any {
-			op := p.ExpectToken(tokenize.LSQB)
+			op := p.ExpectToken(token.LSQB)
 			if op == nil { return nil }
 			_ = op
 			return []any{op}
@@ -10661,7 +10661,7 @@ func parseRule_t_lookahead(p *Parser) any {
 	// alt 2
 	{
 		if v := func() any {
-			op := p.ExpectToken(tokenize.DOT)
+			op := p.ExpectToken(token.DOT)
 			if op == nil { return nil }
 			_ = op
 			return []any{op}
@@ -10687,7 +10687,7 @@ func parseRule_del_targets(p *Parser) any {
 			a := parseRule__gather_82(p)
 			if a == nil { return nil }
 			_ = a
-			opt := p.ExpectToken(tokenize.COMMA)
+			opt := p.ExpectToken(token.COMMA)
 			_ = opt
 			return a
 		}(); v != nil {
@@ -10712,7 +10712,7 @@ func parseRule_del_target(p *Parser) any {
 			a := parseRule_t_primary(p)
 			if a == nil { return nil }
 			_ = a
-			op := p.ExpectToken(tokenize.DOT)
+			op := p.ExpectToken(token.DOT)
 			if op == nil { return nil }
 			_ = op
 			b := nameToken(p)
@@ -10732,13 +10732,13 @@ func parseRule_del_target(p *Parser) any {
 			a := parseRule_t_primary(p)
 			if a == nil { return nil }
 			_ = a
-			op := p.ExpectToken(tokenize.LSQB)
+			op := p.ExpectToken(token.LSQB)
 			if op == nil { return nil }
 			_ = op
 			b := parseRule_slices(p)
 			if b == nil { return nil }
 			_ = b
-			op_1 := p.ExpectToken(tokenize.RSQB)
+			op_1 := p.ExpectToken(token.RSQB)
 			if op_1 == nil { return nil }
 			_ = op_1
 			if !p.Lookahead(false, func(p *Parser) any { return parseRule_t_lookahead(p) }) { return nil }
@@ -10788,13 +10788,13 @@ func parseRule_del_t_atom(p *Parser) any {
 	// alt 1
 	{
 		if v := func() any {
-			op := p.ExpectToken(tokenize.LPAR)
+			op := p.ExpectToken(token.LPAR)
 			if op == nil { return nil }
 			_ = op
 			a := parseRule_del_target(p)
 			if a == nil { return nil }
 			_ = a
-			op_1 := p.ExpectToken(tokenize.RPAR)
+			op_1 := p.ExpectToken(token.RPAR)
 			if op_1 == nil { return nil }
 			_ = op_1
 			return actionPgenSetExprContext(p, p, a, ast.Del)
@@ -10807,12 +10807,12 @@ func parseRule_del_t_atom(p *Parser) any {
 	// alt 2
 	{
 		if v := func() any {
-			op := p.ExpectToken(tokenize.LPAR)
+			op := p.ExpectToken(token.LPAR)
 			if op == nil { return nil }
 			_ = op
 			a := parseRule_del_targets(p)
 			_ = a
-			op_1 := p.ExpectToken(tokenize.RPAR)
+			op_1 := p.ExpectToken(token.RPAR)
 			if op_1 == nil { return nil }
 			_ = op_1
 			return actionAstTuple(p, a, ast.Del)
@@ -10825,12 +10825,12 @@ func parseRule_del_t_atom(p *Parser) any {
 	// alt 3
 	{
 		if v := func() any {
-			op := p.ExpectToken(tokenize.LSQB)
+			op := p.ExpectToken(token.LSQB)
 			if op == nil { return nil }
 			_ = op
 			a := parseRule_del_targets(p)
 			_ = a
-			op_1 := p.ExpectToken(tokenize.RSQB)
+			op_1 := p.ExpectToken(token.RSQB)
 			if op_1 == nil { return nil }
 			_ = op_1
 			return actionAstList(p, a, ast.Del)
@@ -10856,19 +10856,19 @@ func parseRule_type_expressions(p *Parser) any {
 			a := parseRule__gather_83(p)
 			if a == nil { return nil }
 			_ = a
-			op := p.ExpectToken(tokenize.COMMA)
+			op := p.ExpectToken(token.COMMA)
 			if op == nil { return nil }
 			_ = op
-			op_1 := p.ExpectToken(tokenize.STAR)
+			op_1 := p.ExpectToken(token.STAR)
 			if op_1 == nil { return nil }
 			_ = op_1
 			b := parseRule_expression(p)
 			if b == nil { return nil }
 			_ = b
-			op_2 := p.ExpectToken(tokenize.COMMA)
+			op_2 := p.ExpectToken(token.COMMA)
 			if op_2 == nil { return nil }
 			_ = op_2
-			op_3 := p.ExpectToken(tokenize.DOUBLESTAR)
+			op_3 := p.ExpectToken(token.DOUBLESTAR)
 			if op_3 == nil { return nil }
 			_ = op_3
 			c := parseRule_expression(p)
@@ -10887,10 +10887,10 @@ func parseRule_type_expressions(p *Parser) any {
 			a := parseRule__gather_83(p)
 			if a == nil { return nil }
 			_ = a
-			op := p.ExpectToken(tokenize.COMMA)
+			op := p.ExpectToken(token.COMMA)
 			if op == nil { return nil }
 			_ = op
-			op_1 := p.ExpectToken(tokenize.STAR)
+			op_1 := p.ExpectToken(token.STAR)
 			if op_1 == nil { return nil }
 			_ = op_1
 			b := parseRule_expression(p)
@@ -10909,10 +10909,10 @@ func parseRule_type_expressions(p *Parser) any {
 			a := parseRule__gather_83(p)
 			if a == nil { return nil }
 			_ = a
-			op := p.ExpectToken(tokenize.COMMA)
+			op := p.ExpectToken(token.COMMA)
 			if op == nil { return nil }
 			_ = op
-			op_1 := p.ExpectToken(tokenize.DOUBLESTAR)
+			op_1 := p.ExpectToken(token.DOUBLESTAR)
 			if op_1 == nil { return nil }
 			_ = op_1
 			b := parseRule_expression(p)
@@ -10928,16 +10928,16 @@ func parseRule_type_expressions(p *Parser) any {
 	// alt 3
 	{
 		if v := func() any {
-			op := p.ExpectToken(tokenize.STAR)
+			op := p.ExpectToken(token.STAR)
 			if op == nil { return nil }
 			_ = op
 			a := parseRule_expression(p)
 			if a == nil { return nil }
 			_ = a
-			op_1 := p.ExpectToken(tokenize.COMMA)
+			op_1 := p.ExpectToken(token.COMMA)
 			if op_1 == nil { return nil }
 			_ = op_1
-			op_2 := p.ExpectToken(tokenize.DOUBLESTAR)
+			op_2 := p.ExpectToken(token.DOUBLESTAR)
 			if op_2 == nil { return nil }
 			_ = op_2
 			b := parseRule_expression(p)
@@ -10953,7 +10953,7 @@ func parseRule_type_expressions(p *Parser) any {
 	// alt 4
 	{
 		if v := func() any {
-			op := p.ExpectToken(tokenize.STAR)
+			op := p.ExpectToken(token.STAR)
 			if op == nil { return nil }
 			_ = op
 			a := parseRule_expression(p)
@@ -10969,7 +10969,7 @@ func parseRule_type_expressions(p *Parser) any {
 	// alt 5
 	{
 		if v := func() any {
-			op := p.ExpectToken(tokenize.DOUBLESTAR)
+			op := p.ExpectToken(token.DOUBLESTAR)
 			if op == nil { return nil }
 			_ = op
 			a := parseRule_expression(p)
@@ -11008,10 +11008,10 @@ func parseRule_func_type_comment(p *Parser) any {
 	// alt 0
 	{
 		if v := func() any {
-			newline := p.ExpectToken(tokenize.NEWLINE)
+			newline := p.ExpectToken(token.NEWLINE)
 			if newline == nil { return nil }
 			_ = newline
-			t := p.ExpectToken(tokenize.TYPE_COMMENT)
+			t := p.ExpectToken(token.TYPE_COMMENT)
 			if t == nil { return nil }
 			_ = t
 			if !p.Lookahead(true, func(p *Parser) any { return parseRule__group_84(p) }) { return nil }
@@ -11038,7 +11038,7 @@ func parseRule_func_type_comment(p *Parser) any {
 	// alt 2
 	{
 		if v := func() any {
-			type_comment := p.ExpectToken(tokenize.TYPE_COMMENT)
+			type_comment := p.ExpectToken(token.TYPE_COMMENT)
 			if type_comment == nil { return nil }
 			_ = type_comment
 			return []any{type_comment}
@@ -11065,7 +11065,7 @@ func parseRule_invalid_arguments(p *Parser) any {
 			g := parseRule__group_85(p)
 			if g == nil { return nil }
 			_ = g
-			a := p.ExpectToken(tokenize.COMMA)
+			a := p.ExpectToken(token.COMMA)
 			if a == nil { return nil }
 			_ = a
 			gat := parseRule__gather_86(p)
@@ -11087,7 +11087,7 @@ func parseRule_invalid_arguments(p *Parser) any {
 			b := parseRule_for_if_clauses(p)
 			if b == nil { return nil }
 			_ = b
-			op := p.ExpectToken(tokenize.COMMA)
+			op := p.ExpectToken(token.COMMA)
 			if op == nil { return nil }
 			_ = op
 			opt := parseRule__rhs_87(p)
@@ -11105,7 +11105,7 @@ func parseRule_invalid_arguments(p *Parser) any {
 			a := nameToken(p)
 			if a == nil { return nil }
 			_ = a
-			b := p.ExpectToken(tokenize.EQUAL)
+			b := p.ExpectToken(token.EQUAL)
 			if b == nil { return nil }
 			_ = b
 			expression := parseRule_expression(p)
@@ -11129,7 +11129,7 @@ func parseRule_invalid_arguments(p *Parser) any {
 			a := nameToken(p)
 			if a == nil { return nil }
 			_ = a
-			b := p.ExpectToken(tokenize.EQUAL)
+			b := p.ExpectToken(token.EQUAL)
 			if b == nil { return nil }
 			_ = b
 			if !p.Lookahead(true, func(p *Parser) any { return parseRule__group_89(p) }) { return nil }
@@ -11162,7 +11162,7 @@ func parseRule_invalid_arguments(p *Parser) any {
 			args := parseRule_args(p)
 			if args == nil { return nil }
 			_ = args
-			op := p.ExpectToken(tokenize.COMMA)
+			op := p.ExpectToken(token.COMMA)
 			if op == nil { return nil }
 			_ = op
 			a := parseRule_expression(p)
@@ -11184,7 +11184,7 @@ func parseRule_invalid_arguments(p *Parser) any {
 			a := parseRule_args(p)
 			if a == nil { return nil }
 			_ = a
-			op := p.ExpectToken(tokenize.COMMA)
+			op := p.ExpectToken(token.COMMA)
 			if op == nil { return nil }
 			_ = op
 			args := parseRule_args(p)
@@ -11214,7 +11214,7 @@ func parseRule_invalid_kwarg(p *Parser) any {
 			a := parseRule__group_90(p)
 			if a == nil { return nil }
 			_ = a
-			b := p.ExpectToken(tokenize.EQUAL)
+			b := p.ExpectToken(token.EQUAL)
 			if b == nil { return nil }
 			_ = b
 			return []any{a, b}
@@ -11230,7 +11230,7 @@ func parseRule_invalid_kwarg(p *Parser) any {
 			a := nameToken(p)
 			if a == nil { return nil }
 			_ = a
-			b := p.ExpectToken(tokenize.EQUAL)
+			b := p.ExpectToken(token.EQUAL)
 			if b == nil { return nil }
 			_ = b
 			expression := parseRule_expression(p)
@@ -11253,7 +11253,7 @@ func parseRule_invalid_kwarg(p *Parser) any {
 			a := parseRule_expression(p)
 			if a == nil { return nil }
 			_ = a
-			b := p.ExpectToken(tokenize.EQUAL)
+			b := p.ExpectToken(token.EQUAL)
 			if b == nil { return nil }
 			_ = b
 			return raiseAction(p, "RAISE_SYNTAX_ERROR_KNOWN_RANGE", a, b, "expression cannot contain assignment, perhaps you meant \"==\"?")
@@ -11266,13 +11266,13 @@ func parseRule_invalid_kwarg(p *Parser) any {
 	// alt 3
 	{
 		if v := func() any {
-			a := p.ExpectToken(tokenize.DOUBLESTAR)
+			a := p.ExpectToken(token.DOUBLESTAR)
 			if a == nil { return nil }
 			_ = a
 			expression := parseRule_expression(p)
 			if expression == nil { return nil }
 			_ = expression
-			op := p.ExpectToken(tokenize.EQUAL)
+			op := p.ExpectToken(token.EQUAL)
 			if op == nil { return nil }
 			_ = op
 			b := parseRule_expression(p)
@@ -11363,7 +11363,7 @@ func parseRule_invalid_legacy_expression(p *Parser) any {
 			a := nameToken(p)
 			if a == nil { return nil }
 			_ = a
-			if !p.Lookahead(false, func(p *Parser) any { return p.ExpectToken(tokenize.LPAR) }) { return nil }
+			if !p.Lookahead(false, func(p *Parser) any { return p.ExpectToken(token.LPAR) }) { return nil }
 			b := parseRule_star_expressions(p)
 			if b == nil { return nil }
 			_ = b
@@ -11388,13 +11388,13 @@ func parseRule_invalid_type_param(p *Parser) any {
 	// alt 0
 	{
 		if v := func() any {
-			op := p.ExpectToken(tokenize.STAR)
+			op := p.ExpectToken(token.STAR)
 			if op == nil { return nil }
 			_ = op
 			a := nameToken(p)
 			if a == nil { return nil }
 			_ = a
-			colon := p.ExpectToken(tokenize.COLON)
+			colon := p.ExpectToken(token.COLON)
 			if colon == nil { return nil }
 			_ = colon
 			e := parseRule_expression(p)
@@ -11410,13 +11410,13 @@ func parseRule_invalid_type_param(p *Parser) any {
 	// alt 1
 	{
 		if v := func() any {
-			op := p.ExpectToken(tokenize.DOUBLESTAR)
+			op := p.ExpectToken(token.DOUBLESTAR)
 			if op == nil { return nil }
 			_ = op
 			a := nameToken(p)
 			if a == nil { return nil }
 			_ = a
-			colon := p.ExpectToken(tokenize.COLON)
+			colon := p.ExpectToken(token.COLON)
 			if colon == nil { return nil }
 			_ = colon
 			e := parseRule_expression(p)
@@ -11552,10 +11552,10 @@ func parseRule_invalid_expression(p *Parser) any {
 			_ = a
 			opt := parseRule_lambda_params(p)
 			_ = opt
-			b := p.ExpectToken(tokenize.COLON)
+			b := p.ExpectToken(token.COLON)
 			if b == nil { return nil }
 			_ = b
-			if !p.Lookahead(true, func(p *Parser) any { return p.ExpectToken(tokenize.FSTRING_MIDDLE) }) { return nil }
+			if !p.Lookahead(true, func(p *Parser) any { return p.ExpectToken(token.FSTRING_MIDDLE) }) { return nil }
 			return raiseAction(p, "RAISE_SYNTAX_ERROR_KNOWN_RANGE", a, b, "f-string: lambda expressions are not allowed without parentheses")
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_invalid_expression, v)
@@ -11571,10 +11571,10 @@ func parseRule_invalid_expression(p *Parser) any {
 			_ = a
 			opt := parseRule_lambda_params(p)
 			_ = opt
-			b := p.ExpectToken(tokenize.COLON)
+			b := p.ExpectToken(token.COLON)
 			if b == nil { return nil }
 			_ = b
-			if !p.Lookahead(true, func(p *Parser) any { return p.ExpectToken(tokenize.TSTRING_MIDDLE) }) { return nil }
+			if !p.Lookahead(true, func(p *Parser) any { return p.ExpectToken(token.TSTRING_MIDDLE) }) { return nil }
 			return raiseAction(p, "RAISE_SYNTAX_ERROR_KNOWN_RANGE", a, b, "t-string: lambda expressions are not allowed without parentheses")
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_invalid_expression, v)
@@ -11599,7 +11599,7 @@ func parseRule_invalid_named_expression(p *Parser) any {
 			a := parseRule_expression(p)
 			if a == nil { return nil }
 			_ = a
-			op := p.ExpectToken(tokenize.COLONEQUAL)
+			op := p.ExpectToken(token.COLONEQUAL)
 			if op == nil { return nil }
 			_ = op
 			expression := parseRule_expression(p)
@@ -11618,7 +11618,7 @@ func parseRule_invalid_named_expression(p *Parser) any {
 			a := nameToken(p)
 			if a == nil { return nil }
 			_ = a
-			op := p.ExpectToken(tokenize.EQUAL)
+			op := p.ExpectToken(token.EQUAL)
 			if op == nil { return nil }
 			_ = op
 			b := parseRule_bitwise_or(p)
@@ -11639,7 +11639,7 @@ func parseRule_invalid_named_expression(p *Parser) any {
 			a := parseRule_bitwise_or(p)
 			if a == nil { return nil }
 			_ = a
-			b := p.ExpectToken(tokenize.EQUAL)
+			b := p.ExpectToken(token.EQUAL)
 			if b == nil { return nil }
 			_ = b
 			bitwise_or := parseRule_bitwise_or(p)
@@ -11670,7 +11670,7 @@ func parseRule_invalid_assignment(p *Parser) any {
 			a := parseRule_invalid_ann_assign_target(p)
 			if a == nil { return nil }
 			_ = a
-			op := p.ExpectToken(tokenize.COLON)
+			op := p.ExpectToken(token.COLON)
 			if op == nil { return nil }
 			_ = op
 			expression := parseRule_expression(p)
@@ -11689,12 +11689,12 @@ func parseRule_invalid_assignment(p *Parser) any {
 			a := parseRule_star_named_expression(p)
 			if a == nil { return nil }
 			_ = a
-			op := p.ExpectToken(tokenize.COMMA)
+			op := p.ExpectToken(token.COMMA)
 			if op == nil { return nil }
 			_ = op
 			rep := parseRule__loop0_98(p)
 			_ = rep
-			op_1 := p.ExpectToken(tokenize.COLON)
+			op_1 := p.ExpectToken(token.COLON)
 			if op_1 == nil { return nil }
 			_ = op_1
 			expression := parseRule_expression(p)
@@ -11713,7 +11713,7 @@ func parseRule_invalid_assignment(p *Parser) any {
 			a := parseRule_expression(p)
 			if a == nil { return nil }
 			_ = a
-			op := p.ExpectToken(tokenize.COLON)
+			op := p.ExpectToken(token.COLON)
 			if op == nil { return nil }
 			_ = op
 			expression := parseRule_expression(p)
@@ -11734,7 +11734,7 @@ func parseRule_invalid_assignment(p *Parser) any {
 			a := parseRule_star_expressions(p)
 			if a == nil { return nil }
 			_ = a
-			op := p.ExpectToken(tokenize.EQUAL)
+			op := p.ExpectToken(token.EQUAL)
 			if op == nil { return nil }
 			_ = op
 			return []any{rep, a, op}
@@ -11752,7 +11752,7 @@ func parseRule_invalid_assignment(p *Parser) any {
 			a := parseRule_yield_expr(p)
 			if a == nil { return nil }
 			_ = a
-			op := p.ExpectToken(tokenize.EQUAL)
+			op := p.ExpectToken(token.EQUAL)
 			if op == nil { return nil }
 			_ = op
 			return raiseAction(p, "RAISE_SYNTAX_ERROR_KNOWN_LOCATION", a, "assignment to yield expression not possible")
@@ -11821,13 +11821,13 @@ func parseRule_invalid_ann_assign_target(p *Parser) any {
 	// alt 2
 	{
 		if v := func() any {
-			op := p.ExpectToken(tokenize.LPAR)
+			op := p.ExpectToken(token.LPAR)
 			if op == nil { return nil }
 			_ = op
 			a := parseRule_invalid_ann_assign_target(p)
 			if a == nil { return nil }
 			_ = a
-			op_1 := p.ExpectToken(tokenize.RPAR)
+			op_1 := p.ExpectToken(token.RPAR)
 			if op_1 == nil { return nil }
 			_ = op_1
 			return a
@@ -11878,10 +11878,10 @@ func parseRule_invalid_block(p *Parser) any {
 	// alt 0
 	{
 		if v := func() any {
-			newline := p.ExpectToken(tokenize.NEWLINE)
+			newline := p.ExpectToken(token.NEWLINE)
 			if newline == nil { return nil }
 			_ = newline
-			if !p.Lookahead(false, func(p *Parser) any { return p.ExpectToken(tokenize.INDENT) }) { return nil }
+			if !p.Lookahead(false, func(p *Parser) any { return p.ExpectToken(token.INDENT) }) { return nil }
 			return raiseAction(p, "RAISE_INDENTATION_ERROR", "expected an indented block")
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_invalid_block, v)
@@ -11928,7 +11928,7 @@ func parseRule_invalid_comprehension(p *Parser) any {
 			a := parseRule_star_named_expression(p)
 			if a == nil { return nil }
 			_ = a
-			op := p.ExpectToken(tokenize.COMMA)
+			op := p.ExpectToken(token.COMMA)
 			if op == nil { return nil }
 			_ = op
 			b := parseRule_star_named_expressions(p)
@@ -11953,7 +11953,7 @@ func parseRule_invalid_comprehension(p *Parser) any {
 			a := parseRule_star_named_expression(p)
 			if a == nil { return nil }
 			_ = a
-			b := p.ExpectToken(tokenize.COMMA)
+			b := p.ExpectToken(token.COMMA)
 			if b == nil { return nil }
 			_ = b
 			for_if_clauses := parseRule_for_if_clauses(p)
@@ -11980,10 +11980,10 @@ func parseRule_invalid_dict_comprehension(p *Parser) any {
 	// alt 0
 	{
 		if v := func() any {
-			op := p.ExpectToken(tokenize.LBRACE)
+			op := p.ExpectToken(token.LBRACE)
 			if op == nil { return nil }
 			_ = op
-			a := p.ExpectToken(tokenize.DOUBLESTAR)
+			a := p.ExpectToken(token.DOUBLESTAR)
 			if a == nil { return nil }
 			_ = a
 			bitwise_or := parseRule_bitwise_or(p)
@@ -11992,7 +11992,7 @@ func parseRule_invalid_dict_comprehension(p *Parser) any {
 			for_if_clauses := parseRule_for_if_clauses(p)
 			if for_if_clauses == nil { return nil }
 			_ = for_if_clauses
-			op_1 := p.ExpectToken(tokenize.RBRACE)
+			op_1 := p.ExpectToken(token.RBRACE)
 			if op_1 == nil { return nil }
 			_ = op_1
 			return raiseAction(p, "RAISE_SYNTAX_ERROR_KNOWN_LOCATION", a, "dict unpacking cannot be used in dict comprehension")
@@ -12019,7 +12019,7 @@ func parseRule_invalid_parameters(p *Parser) any {
 			a := p.ExpectSoftKeyword("/")
 			if a == nil { return nil }
 			_ = a
-			op := p.ExpectToken(tokenize.COMMA)
+			op := p.ExpectToken(token.COMMA)
 			if op == nil { return nil }
 			_ = op
 			return raiseAction(p, "RAISE_SYNTAX_ERROR_KNOWN_LOCATION", a, "at least one argument must precede /")
@@ -12037,7 +12037,7 @@ func parseRule_invalid_parameters(p *Parser) any {
 			_ = g
 			rep := parseRule__loop0_28(p)
 			_ = rep
-			a := p.ExpectToken(tokenize.SLASH)
+			a := p.ExpectToken(token.SLASH)
 			if a == nil { return nil }
 			_ = a
 			return raiseAction(p, "RAISE_SYNTAX_ERROR_KNOWN_LOCATION", a, "/ may appear only once")
@@ -12072,15 +12072,15 @@ func parseRule_invalid_parameters(p *Parser) any {
 		if v := func() any {
 			rep := parseRule__loop0_24(p)
 			_ = rep
-			a := p.ExpectToken(tokenize.LPAR)
+			a := p.ExpectToken(token.LPAR)
 			if a == nil { return nil }
 			_ = a
 			rep_1 := parseRule__loop1_26(p)
 			if rep_1 == nil { return nil }
 			_ = rep_1
-			opt := p.ExpectToken(tokenize.COMMA)
+			opt := p.ExpectToken(token.COMMA)
 			_ = opt
-			b := p.ExpectToken(tokenize.RPAR)
+			b := p.ExpectToken(token.RPAR)
 			if b == nil { return nil }
 			_ = b
 			return raiseAction(p, "RAISE_SYNTAX_ERROR_KNOWN_RANGE", a, b, "Function parameters cannot be parenthesized")
@@ -12097,7 +12097,7 @@ func parseRule_invalid_parameters(p *Parser) any {
 			_ = opt
 			rep := parseRule__loop0_28(p)
 			_ = rep
-			op := p.ExpectToken(tokenize.STAR)
+			op := p.ExpectToken(token.STAR)
 			if op == nil { return nil }
 			_ = op
 			g := parseRule__group_103(p)
@@ -12105,7 +12105,7 @@ func parseRule_invalid_parameters(p *Parser) any {
 			_ = g
 			rep_1 := parseRule__loop0_28(p)
 			_ = rep_1
-			a := p.ExpectToken(tokenize.SLASH)
+			a := p.ExpectToken(token.SLASH)
 			if a == nil { return nil }
 			_ = a
 			return raiseAction(p, "RAISE_SYNTAX_ERROR_KNOWN_LOCATION", a, "/ must be ahead of *")
@@ -12121,10 +12121,10 @@ func parseRule_invalid_parameters(p *Parser) any {
 			rep := parseRule__loop1_29(p)
 			if rep == nil { return nil }
 			_ = rep
-			op := p.ExpectToken(tokenize.SLASH)
+			op := p.ExpectToken(token.SLASH)
 			if op == nil { return nil }
 			_ = op
-			a := p.ExpectToken(tokenize.STAR)
+			a := p.ExpectToken(token.STAR)
 			if a == nil { return nil }
 			_ = a
 			return raiseAction(p, "RAISE_SYNTAX_ERROR_KNOWN_LOCATION", a, "expected comma between / and *")
@@ -12148,7 +12148,7 @@ func parseRule_invalid_default(p *Parser) any {
 	// alt 0
 	{
 		if v := func() any {
-			a := p.ExpectToken(tokenize.EQUAL)
+			a := p.ExpectToken(token.EQUAL)
 			if a == nil { return nil }
 			_ = a
 			if !p.Lookahead(true, func(p *Parser) any { return parseRule__group_104(p) }) { return nil }
@@ -12173,7 +12173,7 @@ func parseRule_invalid_star_etc(p *Parser) any {
 	// alt 0
 	{
 		if v := func() any {
-			a := p.ExpectToken(tokenize.STAR)
+			a := p.ExpectToken(token.STAR)
 			if a == nil { return nil }
 			_ = a
 			g := parseRule__group_105(p)
@@ -12189,13 +12189,13 @@ func parseRule_invalid_star_etc(p *Parser) any {
 	// alt 1
 	{
 		if v := func() any {
-			op := p.ExpectToken(tokenize.STAR)
+			op := p.ExpectToken(token.STAR)
 			if op == nil { return nil }
 			_ = op
-			op_1 := p.ExpectToken(tokenize.COMMA)
+			op_1 := p.ExpectToken(token.COMMA)
 			if op_1 == nil { return nil }
 			_ = op_1
-			type_comment := p.ExpectToken(tokenize.TYPE_COMMENT)
+			type_comment := p.ExpectToken(token.TYPE_COMMENT)
 			if type_comment == nil { return nil }
 			_ = type_comment
 			return raiseAction(p, "RAISE_SYNTAX_ERROR", "bare * has associated type comment")
@@ -12208,13 +12208,13 @@ func parseRule_invalid_star_etc(p *Parser) any {
 	// alt 2
 	{
 		if v := func() any {
-			op := p.ExpectToken(tokenize.STAR)
+			op := p.ExpectToken(token.STAR)
 			if op == nil { return nil }
 			_ = op
 			param := parseRule_param(p)
 			if param == nil { return nil }
 			_ = param
-			a := p.ExpectToken(tokenize.EQUAL)
+			a := p.ExpectToken(token.EQUAL)
 			if a == nil { return nil }
 			_ = a
 			return raiseAction(p, "RAISE_SYNTAX_ERROR_KNOWN_LOCATION", a, "var-positional argument cannot have default value")
@@ -12227,7 +12227,7 @@ func parseRule_invalid_star_etc(p *Parser) any {
 	// alt 3
 	{
 		if v := func() any {
-			op := p.ExpectToken(tokenize.STAR)
+			op := p.ExpectToken(token.STAR)
 			if op == nil { return nil }
 			_ = op
 			g := parseRule__group_106(p)
@@ -12235,7 +12235,7 @@ func parseRule_invalid_star_etc(p *Parser) any {
 			_ = g
 			rep := parseRule__loop0_28(p)
 			_ = rep
-			a := p.ExpectToken(tokenize.STAR)
+			a := p.ExpectToken(token.STAR)
 			if a == nil { return nil }
 			_ = a
 			g_1 := parseRule__group_106(p)
@@ -12262,13 +12262,13 @@ func parseRule_invalid_kwds(p *Parser) any {
 	// alt 0
 	{
 		if v := func() any {
-			op := p.ExpectToken(tokenize.DOUBLESTAR)
+			op := p.ExpectToken(token.DOUBLESTAR)
 			if op == nil { return nil }
 			_ = op
 			param := parseRule_param(p)
 			if param == nil { return nil }
 			_ = param
-			a := p.ExpectToken(tokenize.EQUAL)
+			a := p.ExpectToken(token.EQUAL)
 			if a == nil { return nil }
 			_ = a
 			return raiseAction(p, "RAISE_SYNTAX_ERROR_KNOWN_LOCATION", a, "var-keyword argument cannot have default value")
@@ -12281,13 +12281,13 @@ func parseRule_invalid_kwds(p *Parser) any {
 	// alt 1
 	{
 		if v := func() any {
-			op := p.ExpectToken(tokenize.DOUBLESTAR)
+			op := p.ExpectToken(token.DOUBLESTAR)
 			if op == nil { return nil }
 			_ = op
 			param := parseRule_param(p)
 			if param == nil { return nil }
 			_ = param
-			op_1 := p.ExpectToken(tokenize.COMMA)
+			op_1 := p.ExpectToken(token.COMMA)
 			if op_1 == nil { return nil }
 			_ = op_1
 			a := parseRule_param(p)
@@ -12303,13 +12303,13 @@ func parseRule_invalid_kwds(p *Parser) any {
 	// alt 2
 	{
 		if v := func() any {
-			op := p.ExpectToken(tokenize.DOUBLESTAR)
+			op := p.ExpectToken(token.DOUBLESTAR)
 			if op == nil { return nil }
 			_ = op
 			param := parseRule_param(p)
 			if param == nil { return nil }
 			_ = param
-			op_1 := p.ExpectToken(tokenize.COMMA)
+			op_1 := p.ExpectToken(token.COMMA)
 			if op_1 == nil { return nil }
 			_ = op_1
 			a := parseRule__group_107(p)
@@ -12376,7 +12376,7 @@ func parseRule_invalid_lambda_parameters(p *Parser) any {
 			a := p.ExpectSoftKeyword("/")
 			if a == nil { return nil }
 			_ = a
-			op := p.ExpectToken(tokenize.COMMA)
+			op := p.ExpectToken(token.COMMA)
 			if op == nil { return nil }
 			_ = op
 			return raiseAction(p, "RAISE_SYNTAX_ERROR_KNOWN_LOCATION", a, "at least one argument must precede /")
@@ -12394,7 +12394,7 @@ func parseRule_invalid_lambda_parameters(p *Parser) any {
 			_ = g
 			rep := parseRule__loop0_61(p)
 			_ = rep
-			a := p.ExpectToken(tokenize.SLASH)
+			a := p.ExpectToken(token.SLASH)
 			if a == nil { return nil }
 			_ = a
 			return raiseAction(p, "RAISE_SYNTAX_ERROR_KNOWN_LOCATION", a, "/ may appear only once")
@@ -12429,15 +12429,15 @@ func parseRule_invalid_lambda_parameters(p *Parser) any {
 		if v := func() any {
 			rep := parseRule__loop0_57(p)
 			_ = rep
-			a := p.ExpectToken(tokenize.LPAR)
+			a := p.ExpectToken(token.LPAR)
 			if a == nil { return nil }
 			_ = a
 			gat := parseRule__gather_109(p)
 			if gat == nil { return nil }
 			_ = gat
-			opt := p.ExpectToken(tokenize.COMMA)
+			opt := p.ExpectToken(token.COMMA)
 			_ = opt
-			b := p.ExpectToken(tokenize.RPAR)
+			b := p.ExpectToken(token.RPAR)
 			if b == nil { return nil }
 			_ = b
 			return raiseAction(p, "RAISE_SYNTAX_ERROR_KNOWN_RANGE", a, b, "Lambda expression parameters cannot be parenthesized")
@@ -12454,7 +12454,7 @@ func parseRule_invalid_lambda_parameters(p *Parser) any {
 			_ = opt
 			rep := parseRule__loop0_61(p)
 			_ = rep
-			op := p.ExpectToken(tokenize.STAR)
+			op := p.ExpectToken(token.STAR)
 			if op == nil { return nil }
 			_ = op
 			g := parseRule__group_110(p)
@@ -12462,7 +12462,7 @@ func parseRule_invalid_lambda_parameters(p *Parser) any {
 			_ = g
 			rep_1 := parseRule__loop0_61(p)
 			_ = rep_1
-			a := p.ExpectToken(tokenize.SLASH)
+			a := p.ExpectToken(token.SLASH)
 			if a == nil { return nil }
 			_ = a
 			return raiseAction(p, "RAISE_SYNTAX_ERROR_KNOWN_LOCATION", a, "/ must be ahead of *")
@@ -12478,10 +12478,10 @@ func parseRule_invalid_lambda_parameters(p *Parser) any {
 			rep := parseRule__loop1_62(p)
 			if rep == nil { return nil }
 			_ = rep
-			op := p.ExpectToken(tokenize.SLASH)
+			op := p.ExpectToken(token.SLASH)
 			if op == nil { return nil }
 			_ = op
-			a := p.ExpectToken(tokenize.STAR)
+			a := p.ExpectToken(token.STAR)
 			if a == nil { return nil }
 			_ = a
 			return raiseAction(p, "RAISE_SYNTAX_ERROR_KNOWN_LOCATION", a, "expected comma between / and *")
@@ -12542,7 +12542,7 @@ func parseRule_invalid_lambda_star_etc(p *Parser) any {
 	// alt 0
 	{
 		if v := func() any {
-			op := p.ExpectToken(tokenize.STAR)
+			op := p.ExpectToken(token.STAR)
 			if op == nil { return nil }
 			_ = op
 			g := parseRule__group_111(p)
@@ -12558,13 +12558,13 @@ func parseRule_invalid_lambda_star_etc(p *Parser) any {
 	// alt 1
 	{
 		if v := func() any {
-			op := p.ExpectToken(tokenize.STAR)
+			op := p.ExpectToken(token.STAR)
 			if op == nil { return nil }
 			_ = op
 			lambda_param := parseRule_lambda_param(p)
 			if lambda_param == nil { return nil }
 			_ = lambda_param
-			a := p.ExpectToken(tokenize.EQUAL)
+			a := p.ExpectToken(token.EQUAL)
 			if a == nil { return nil }
 			_ = a
 			return raiseAction(p, "RAISE_SYNTAX_ERROR_KNOWN_LOCATION", a, "var-positional argument cannot have default value")
@@ -12577,7 +12577,7 @@ func parseRule_invalid_lambda_star_etc(p *Parser) any {
 	// alt 2
 	{
 		if v := func() any {
-			op := p.ExpectToken(tokenize.STAR)
+			op := p.ExpectToken(token.STAR)
 			if op == nil { return nil }
 			_ = op
 			g := parseRule__group_112(p)
@@ -12585,7 +12585,7 @@ func parseRule_invalid_lambda_star_etc(p *Parser) any {
 			_ = g
 			rep := parseRule__loop0_61(p)
 			_ = rep
-			a := p.ExpectToken(tokenize.STAR)
+			a := p.ExpectToken(token.STAR)
 			if a == nil { return nil }
 			_ = a
 			g_1 := parseRule__group_112(p)
@@ -12612,13 +12612,13 @@ func parseRule_invalid_lambda_kwds(p *Parser) any {
 	// alt 0
 	{
 		if v := func() any {
-			op := p.ExpectToken(tokenize.DOUBLESTAR)
+			op := p.ExpectToken(token.DOUBLESTAR)
 			if op == nil { return nil }
 			_ = op
 			lambda_param := parseRule_lambda_param(p)
 			if lambda_param == nil { return nil }
 			_ = lambda_param
-			a := p.ExpectToken(tokenize.EQUAL)
+			a := p.ExpectToken(token.EQUAL)
 			if a == nil { return nil }
 			_ = a
 			return raiseAction(p, "RAISE_SYNTAX_ERROR_KNOWN_LOCATION", a, "var-keyword argument cannot have default value")
@@ -12631,13 +12631,13 @@ func parseRule_invalid_lambda_kwds(p *Parser) any {
 	// alt 1
 	{
 		if v := func() any {
-			op := p.ExpectToken(tokenize.DOUBLESTAR)
+			op := p.ExpectToken(token.DOUBLESTAR)
 			if op == nil { return nil }
 			_ = op
 			lambda_param := parseRule_lambda_param(p)
 			if lambda_param == nil { return nil }
 			_ = lambda_param
-			op_1 := p.ExpectToken(tokenize.COMMA)
+			op_1 := p.ExpectToken(token.COMMA)
 			if op_1 == nil { return nil }
 			_ = op_1
 			a := parseRule_lambda_param(p)
@@ -12653,13 +12653,13 @@ func parseRule_invalid_lambda_kwds(p *Parser) any {
 	// alt 2
 	{
 		if v := func() any {
-			op := p.ExpectToken(tokenize.DOUBLESTAR)
+			op := p.ExpectToken(token.DOUBLESTAR)
 			if op == nil { return nil }
 			_ = op
 			lambda_param := parseRule_lambda_param(p)
 			if lambda_param == nil { return nil }
 			_ = lambda_param
-			op_1 := p.ExpectToken(tokenize.COMMA)
+			op_1 := p.ExpectToken(token.COMMA)
 			if op_1 == nil { return nil }
 			_ = op_1
 			a := parseRule__group_107(p)
@@ -12686,19 +12686,19 @@ func parseRule_invalid_double_type_comments(p *Parser) any {
 	// alt 0
 	{
 		if v := func() any {
-			type_comment := p.ExpectToken(tokenize.TYPE_COMMENT)
+			type_comment := p.ExpectToken(token.TYPE_COMMENT)
 			if type_comment == nil { return nil }
 			_ = type_comment
-			newline := p.ExpectToken(tokenize.NEWLINE)
+			newline := p.ExpectToken(token.NEWLINE)
 			if newline == nil { return nil }
 			_ = newline
-			type_comment_1 := p.ExpectToken(tokenize.TYPE_COMMENT)
+			type_comment_1 := p.ExpectToken(token.TYPE_COMMENT)
 			if type_comment_1 == nil { return nil }
 			_ = type_comment_1
-			newline_1 := p.ExpectToken(tokenize.NEWLINE)
+			newline_1 := p.ExpectToken(token.NEWLINE)
 			if newline_1 == nil { return nil }
 			_ = newline_1
-			indent := p.ExpectToken(tokenize.INDENT)
+			indent := p.ExpectToken(token.INDENT)
 			if indent == nil { return nil }
 			_ = indent
 			return raiseAction(p, "RAISE_SYNTAX_ERROR", "Cannot have two type comments on def")
@@ -12812,13 +12812,13 @@ func parseRule_invalid_group(p *Parser) any {
 	// alt 0
 	{
 		if v := func() any {
-			op := p.ExpectToken(tokenize.LPAR)
+			op := p.ExpectToken(token.LPAR)
 			if op == nil { return nil }
 			_ = op
 			a := parseRule_starred_expression(p)
 			if a == nil { return nil }
 			_ = a
-			op_1 := p.ExpectToken(tokenize.RPAR)
+			op_1 := p.ExpectToken(token.RPAR)
 			if op_1 == nil { return nil }
 			_ = op_1
 			return raiseAction(p, "RAISE_SYNTAX_ERROR_KNOWN_LOCATION", a, "cannot use starred expression here")
@@ -12831,16 +12831,16 @@ func parseRule_invalid_group(p *Parser) any {
 	// alt 1
 	{
 		if v := func() any {
-			op := p.ExpectToken(tokenize.LPAR)
+			op := p.ExpectToken(token.LPAR)
 			if op == nil { return nil }
 			_ = op
-			a := p.ExpectToken(tokenize.DOUBLESTAR)
+			a := p.ExpectToken(token.DOUBLESTAR)
 			if a == nil { return nil }
 			_ = a
 			expression := parseRule_expression(p)
 			if expression == nil { return nil }
 			_ = expression
-			op_1 := p.ExpectToken(tokenize.RPAR)
+			op_1 := p.ExpectToken(token.RPAR)
 			if op_1 == nil { return nil }
 			_ = op_1
 			return raiseAction(p, "RAISE_SYNTAX_ERROR_KNOWN_LOCATION", a, "cannot use double starred expression here")
@@ -12889,7 +12889,7 @@ func parseRule_invalid_import(p *Parser) any {
 			kw := p.ExpectName("import")
 			if kw == nil { return nil }
 			_ = kw
-			token := p.ExpectToken(tokenize.NEWLINE)
+			token := p.ExpectToken(token.NEWLINE)
 			if token == nil { return nil }
 			_ = token
 			return raiseAction(p, "RAISE_SYNTAX_ERROR_STARTING_FROM", token, "Expected one or more names after 'import'")
@@ -12978,10 +12978,10 @@ func parseRule_invalid_import_from_targets(p *Parser) any {
 			import_from_as_names := parseRule_import_from_as_names(p)
 			if import_from_as_names == nil { return nil }
 			_ = import_from_as_names
-			op := p.ExpectToken(tokenize.COMMA)
+			op := p.ExpectToken(token.COMMA)
 			if op == nil { return nil }
 			_ = op
-			newline := p.ExpectToken(tokenize.NEWLINE)
+			newline := p.ExpectToken(token.NEWLINE)
 			if newline == nil { return nil }
 			_ = newline
 			return raiseAction(p, "RAISE_SYNTAX_ERROR", "trailing comma not allowed without surrounding parentheses")
@@ -12994,7 +12994,7 @@ func parseRule_invalid_import_from_targets(p *Parser) any {
 	// alt 1
 	{
 		if v := func() any {
-			token := p.ExpectToken(tokenize.NEWLINE)
+			token := p.ExpectToken(token.NEWLINE)
 			if token == nil { return nil }
 			_ = token
 			return raiseAction(p, "RAISE_SYNTAX_ERROR_STARTING_FROM", token, "Expected one or more names after 'import'")
@@ -13026,7 +13026,7 @@ func parseRule_invalid_with_stmt(p *Parser) any {
 			gat := parseRule__gather_116(p)
 			if gat == nil { return nil }
 			_ = gat
-			newline := p.ExpectToken(tokenize.NEWLINE)
+			newline := p.ExpectToken(token.NEWLINE)
 			if newline == nil { return nil }
 			_ = newline
 			return raiseAction(p, "RAISE_SYNTAX_ERROR", "expected ':'")
@@ -13044,18 +13044,18 @@ func parseRule_invalid_with_stmt(p *Parser) any {
 			kw := p.ExpectName("with")
 			if kw == nil { return nil }
 			_ = kw
-			op := p.ExpectToken(tokenize.LPAR)
+			op := p.ExpectToken(token.LPAR)
 			if op == nil { return nil }
 			_ = op
 			gat := parseRule__gather_117(p)
 			if gat == nil { return nil }
 			_ = gat
-			opt_1 := p.ExpectToken(tokenize.COMMA)
+			opt_1 := p.ExpectToken(token.COMMA)
 			_ = opt_1
-			op_1 := p.ExpectToken(tokenize.RPAR)
+			op_1 := p.ExpectToken(token.RPAR)
 			if op_1 == nil { return nil }
 			_ = op_1
-			newline := p.ExpectToken(tokenize.NEWLINE)
+			newline := p.ExpectToken(token.NEWLINE)
 			if newline == nil { return nil }
 			_ = newline
 			return raiseAction(p, "RAISE_SYNTAX_ERROR", "expected ':'")
@@ -13087,13 +13087,13 @@ func parseRule_invalid_with_stmt_indent(p *Parser) any {
 			gat := parseRule__gather_116(p)
 			if gat == nil { return nil }
 			_ = gat
-			op := p.ExpectToken(tokenize.COLON)
+			op := p.ExpectToken(token.COLON)
 			if op == nil { return nil }
 			_ = op
-			newline := p.ExpectToken(tokenize.NEWLINE)
+			newline := p.ExpectToken(token.NEWLINE)
 			if newline == nil { return nil }
 			_ = newline
-			if !p.Lookahead(false, func(p *Parser) any { return p.ExpectToken(tokenize.INDENT) }) { return nil }
+			if !p.Lookahead(false, func(p *Parser) any { return p.ExpectToken(token.INDENT) }) { return nil }
 			return []any{opt, a, gat, op, newline}
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_invalid_with_stmt_indent, v)
@@ -13109,24 +13109,24 @@ func parseRule_invalid_with_stmt_indent(p *Parser) any {
 			a := p.ExpectName("with")
 			if a == nil { return nil }
 			_ = a
-			op := p.ExpectToken(tokenize.LPAR)
+			op := p.ExpectToken(token.LPAR)
 			if op == nil { return nil }
 			_ = op
 			gat := parseRule__gather_117(p)
 			if gat == nil { return nil }
 			_ = gat
-			opt_1 := p.ExpectToken(tokenize.COMMA)
+			opt_1 := p.ExpectToken(token.COMMA)
 			_ = opt_1
-			op_1 := p.ExpectToken(tokenize.RPAR)
+			op_1 := p.ExpectToken(token.RPAR)
 			if op_1 == nil { return nil }
 			_ = op_1
-			op_2 := p.ExpectToken(tokenize.COLON)
+			op_2 := p.ExpectToken(token.COLON)
 			if op_2 == nil { return nil }
 			_ = op_2
-			newline := p.ExpectToken(tokenize.NEWLINE)
+			newline := p.ExpectToken(token.NEWLINE)
 			if newline == nil { return nil }
 			_ = newline
-			if !p.Lookahead(false, func(p *Parser) any { return p.ExpectToken(tokenize.INDENT) }) { return nil }
+			if !p.Lookahead(false, func(p *Parser) any { return p.ExpectToken(token.INDENT) }) { return nil }
 			return []any{opt, a, op, gat, opt_1, op_1, op_2, newline}
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_invalid_with_stmt_indent, v)
@@ -13151,13 +13151,13 @@ func parseRule_invalid_try_stmt(p *Parser) any {
 			a := p.ExpectName("try")
 			if a == nil { return nil }
 			_ = a
-			op := p.ExpectToken(tokenize.COLON)
+			op := p.ExpectToken(token.COLON)
 			if op == nil { return nil }
 			_ = op
-			newline := p.ExpectToken(tokenize.NEWLINE)
+			newline := p.ExpectToken(token.NEWLINE)
 			if newline == nil { return nil }
 			_ = newline
-			if !p.Lookahead(false, func(p *Parser) any { return p.ExpectToken(tokenize.INDENT) }) { return nil }
+			if !p.Lookahead(false, func(p *Parser) any { return p.ExpectToken(token.INDENT) }) { return nil }
 			return []any{a, op, newline}
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_invalid_try_stmt, v)
@@ -13171,7 +13171,7 @@ func parseRule_invalid_try_stmt(p *Parser) any {
 			kw := p.ExpectName("try")
 			if kw == nil { return nil }
 			_ = kw
-			op := p.ExpectToken(tokenize.COLON)
+			op := p.ExpectToken(token.COLON)
 			if op == nil { return nil }
 			_ = op
 			block := parseRule_block(p)
@@ -13191,7 +13191,7 @@ func parseRule_invalid_try_stmt(p *Parser) any {
 			kw := p.ExpectName("try")
 			if kw == nil { return nil }
 			_ = kw
-			op := p.ExpectToken(tokenize.COLON)
+			op := p.ExpectToken(token.COLON)
 			if op == nil { return nil }
 			_ = op
 			rep := parseRule__loop0_119(p)
@@ -13202,7 +13202,7 @@ func parseRule_invalid_try_stmt(p *Parser) any {
 			a := p.ExpectName("except")
 			if a == nil { return nil }
 			_ = a
-			b := p.ExpectToken(tokenize.STAR)
+			b := p.ExpectToken(token.STAR)
 			if b == nil { return nil }
 			_ = b
 			expression := parseRule_expression(p)
@@ -13210,7 +13210,7 @@ func parseRule_invalid_try_stmt(p *Parser) any {
 			_ = expression
 			opt := parseRule__rhs_120(p)
 			_ = opt
-			op_1 := p.ExpectToken(tokenize.COLON)
+			op_1 := p.ExpectToken(token.COLON)
 			if op_1 == nil { return nil }
 			_ = op_1
 			return raiseAction(p, "RAISE_SYNTAX_ERROR_KNOWN_RANGE", a, b, "cannot have both 'except' and 'except*' on the same 'try'")
@@ -13226,7 +13226,7 @@ func parseRule_invalid_try_stmt(p *Parser) any {
 			kw := p.ExpectName("try")
 			if kw == nil { return nil }
 			_ = kw
-			op := p.ExpectToken(tokenize.COLON)
+			op := p.ExpectToken(token.COLON)
 			if op == nil { return nil }
 			_ = op
 			rep := parseRule__loop0_119(p)
@@ -13239,7 +13239,7 @@ func parseRule_invalid_try_stmt(p *Parser) any {
 			_ = a
 			opt := parseRule__rhs_121(p)
 			_ = opt
-			op_1 := p.ExpectToken(tokenize.COLON)
+			op_1 := p.ExpectToken(token.COLON)
 			if op_1 == nil { return nil }
 			_ = op_1
 			return raiseAction(p, "RAISE_SYNTAX_ERROR_KNOWN_LOCATION", a, "cannot have both 'except' and 'except*' on the same 'try'")
@@ -13269,7 +13269,7 @@ func parseRule_invalid_except_stmt(p *Parser) any {
 			a := parseRule_expression(p)
 			if a == nil { return nil }
 			_ = a
-			op := p.ExpectToken(tokenize.COMMA)
+			op := p.ExpectToken(token.COMMA)
 			if op == nil { return nil }
 			_ = op
 			expressions := parseRule_expressions(p)
@@ -13281,7 +13281,7 @@ func parseRule_invalid_except_stmt(p *Parser) any {
 			name_var := nameToken(p)
 			if name_var == nil { return nil }
 			_ = name_var
-			op_1 := p.ExpectToken(tokenize.COLON)
+			op_1 := p.ExpectToken(token.COLON)
 			if op_1 == nil { return nil }
 			_ = op_1
 			return raiseAction(p, "RAISE_SYNTAX_ERROR_STARTING_FROM", a, "multiple exception types must be parenthesized when using 'as'")
@@ -13302,7 +13302,7 @@ func parseRule_invalid_except_stmt(p *Parser) any {
 			_ = expression
 			opt := parseRule__rhs_120(p)
 			_ = opt
-			newline := p.ExpectToken(tokenize.NEWLINE)
+			newline := p.ExpectToken(token.NEWLINE)
 			if newline == nil { return nil }
 			_ = newline
 			return raiseAction(p, "RAISE_SYNTAX_ERROR", "expected ':'")
@@ -13318,7 +13318,7 @@ func parseRule_invalid_except_stmt(p *Parser) any {
 			a := p.ExpectName("except")
 			if a == nil { return nil }
 			_ = a
-			newline := p.ExpectToken(tokenize.NEWLINE)
+			newline := p.ExpectToken(token.NEWLINE)
 			if newline == nil { return nil }
 			_ = newline
 			return raiseAction(p, "RAISE_SYNTAX_ERROR", "expected ':'")
@@ -13343,7 +13343,7 @@ func parseRule_invalid_except_stmt(p *Parser) any {
 			a := parseRule_expression(p)
 			if a == nil { return nil }
 			_ = a
-			op := p.ExpectToken(tokenize.COLON)
+			op := p.ExpectToken(token.COLON)
 			if op == nil { return nil }
 			_ = op
 			block := parseRule_block(p)
@@ -13373,13 +13373,13 @@ func parseRule_invalid_except_star_stmt(p *Parser) any {
 			kw := p.ExpectName("except")
 			if kw == nil { return nil }
 			_ = kw
-			op := p.ExpectToken(tokenize.STAR)
+			op := p.ExpectToken(token.STAR)
 			if op == nil { return nil }
 			_ = op
 			a := parseRule_expression(p)
 			if a == nil { return nil }
 			_ = a
-			op_1 := p.ExpectToken(tokenize.COMMA)
+			op_1 := p.ExpectToken(token.COMMA)
 			if op_1 == nil { return nil }
 			_ = op_1
 			expressions := parseRule_expressions(p)
@@ -13391,7 +13391,7 @@ func parseRule_invalid_except_star_stmt(p *Parser) any {
 			name_var := nameToken(p)
 			if name_var == nil { return nil }
 			_ = name_var
-			op_2 := p.ExpectToken(tokenize.COLON)
+			op_2 := p.ExpectToken(token.COLON)
 			if op_2 == nil { return nil }
 			_ = op_2
 			return raiseAction(p, "RAISE_SYNTAX_ERROR_STARTING_FROM", a, "multiple exception types must be parenthesized when using 'as'")
@@ -13407,7 +13407,7 @@ func parseRule_invalid_except_star_stmt(p *Parser) any {
 			a := p.ExpectName("except")
 			if a == nil { return nil }
 			_ = a
-			op := p.ExpectToken(tokenize.STAR)
+			op := p.ExpectToken(token.STAR)
 			if op == nil { return nil }
 			_ = op
 			expression := parseRule_expression(p)
@@ -13415,7 +13415,7 @@ func parseRule_invalid_except_star_stmt(p *Parser) any {
 			_ = expression
 			opt := parseRule__rhs_120(p)
 			_ = opt
-			newline := p.ExpectToken(tokenize.NEWLINE)
+			newline := p.ExpectToken(token.NEWLINE)
 			if newline == nil { return nil }
 			_ = newline
 			return raiseAction(p, "RAISE_SYNTAX_ERROR", "expected ':'")
@@ -13431,7 +13431,7 @@ func parseRule_invalid_except_star_stmt(p *Parser) any {
 			a := p.ExpectName("except")
 			if a == nil { return nil }
 			_ = a
-			op := p.ExpectToken(tokenize.STAR)
+			op := p.ExpectToken(token.STAR)
 			if op == nil { return nil }
 			_ = op
 			g := parseRule__group_122(p)
@@ -13450,7 +13450,7 @@ func parseRule_invalid_except_star_stmt(p *Parser) any {
 			kw := p.ExpectName("except")
 			if kw == nil { return nil }
 			_ = kw
-			op := p.ExpectToken(tokenize.STAR)
+			op := p.ExpectToken(token.STAR)
 			if op == nil { return nil }
 			_ = op
 			expression := parseRule_expression(p)
@@ -13462,7 +13462,7 @@ func parseRule_invalid_except_star_stmt(p *Parser) any {
 			a := parseRule_expression(p)
 			if a == nil { return nil }
 			_ = a
-			op_1 := p.ExpectToken(tokenize.COLON)
+			op_1 := p.ExpectToken(token.COLON)
 			if op_1 == nil { return nil }
 			_ = op_1
 			block := parseRule_block(p)
@@ -13492,13 +13492,13 @@ func parseRule_invalid_finally_stmt(p *Parser) any {
 			a := p.ExpectName("finally")
 			if a == nil { return nil }
 			_ = a
-			op := p.ExpectToken(tokenize.COLON)
+			op := p.ExpectToken(token.COLON)
 			if op == nil { return nil }
 			_ = op
-			newline := p.ExpectToken(tokenize.NEWLINE)
+			newline := p.ExpectToken(token.NEWLINE)
 			if newline == nil { return nil }
 			_ = newline
-			if !p.Lookahead(false, func(p *Parser) any { return p.ExpectToken(tokenize.INDENT) }) { return nil }
+			if !p.Lookahead(false, func(p *Parser) any { return p.ExpectToken(token.INDENT) }) { return nil }
 			return []any{a, op, newline}
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_invalid_finally_stmt, v)
@@ -13528,13 +13528,13 @@ func parseRule_invalid_except_stmt_indent(p *Parser) any {
 			_ = expression
 			opt := parseRule__rhs_120(p)
 			_ = opt
-			op := p.ExpectToken(tokenize.COLON)
+			op := p.ExpectToken(token.COLON)
 			if op == nil { return nil }
 			_ = op
-			newline := p.ExpectToken(tokenize.NEWLINE)
+			newline := p.ExpectToken(token.NEWLINE)
 			if newline == nil { return nil }
 			_ = newline
-			if !p.Lookahead(false, func(p *Parser) any { return p.ExpectToken(tokenize.INDENT) }) { return nil }
+			if !p.Lookahead(false, func(p *Parser) any { return p.ExpectToken(token.INDENT) }) { return nil }
 			return []any{a, expression, opt, op, newline}
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_invalid_except_stmt_indent, v)
@@ -13548,13 +13548,13 @@ func parseRule_invalid_except_stmt_indent(p *Parser) any {
 			a := p.ExpectName("except")
 			if a == nil { return nil }
 			_ = a
-			op := p.ExpectToken(tokenize.COLON)
+			op := p.ExpectToken(token.COLON)
 			if op == nil { return nil }
 			_ = op
-			newline := p.ExpectToken(tokenize.NEWLINE)
+			newline := p.ExpectToken(token.NEWLINE)
 			if newline == nil { return nil }
 			_ = newline
-			if !p.Lookahead(false, func(p *Parser) any { return p.ExpectToken(tokenize.INDENT) }) { return nil }
+			if !p.Lookahead(false, func(p *Parser) any { return p.ExpectToken(token.INDENT) }) { return nil }
 			return []any{a, op, newline}
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_invalid_except_stmt_indent, v)
@@ -13579,7 +13579,7 @@ func parseRule_invalid_except_star_stmt_indent(p *Parser) any {
 			a := p.ExpectName("except")
 			if a == nil { return nil }
 			_ = a
-			op := p.ExpectToken(tokenize.STAR)
+			op := p.ExpectToken(token.STAR)
 			if op == nil { return nil }
 			_ = op
 			expression := parseRule_expression(p)
@@ -13587,13 +13587,13 @@ func parseRule_invalid_except_star_stmt_indent(p *Parser) any {
 			_ = expression
 			opt := parseRule__rhs_120(p)
 			_ = opt
-			op_1 := p.ExpectToken(tokenize.COLON)
+			op_1 := p.ExpectToken(token.COLON)
 			if op_1 == nil { return nil }
 			_ = op_1
-			newline := p.ExpectToken(tokenize.NEWLINE)
+			newline := p.ExpectToken(token.NEWLINE)
 			if newline == nil { return nil }
 			_ = newline
-			if !p.Lookahead(false, func(p *Parser) any { return p.ExpectToken(tokenize.INDENT) }) { return nil }
+			if !p.Lookahead(false, func(p *Parser) any { return p.ExpectToken(token.INDENT) }) { return nil }
 			return []any{a, op, expression, opt, op_1, newline}
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_invalid_except_star_stmt_indent, v)
@@ -13621,7 +13621,7 @@ func parseRule_invalid_match_stmt(p *Parser) any {
 			subject_expr := parseRule_subject_expr(p)
 			if subject_expr == nil { return nil }
 			_ = subject_expr
-			newline := p.ExpectToken(tokenize.NEWLINE)
+			newline := p.ExpectToken(token.NEWLINE)
 			if newline == nil { return nil }
 			_ = newline
 			return raiseAction(p, "RAISE_SYNTAX_ERROR", "expected ':'")
@@ -13640,13 +13640,13 @@ func parseRule_invalid_match_stmt(p *Parser) any {
 			subject := parseRule_subject_expr(p)
 			if subject == nil { return nil }
 			_ = subject
-			op := p.ExpectToken(tokenize.COLON)
+			op := p.ExpectToken(token.COLON)
 			if op == nil { return nil }
 			_ = op
-			newline := p.ExpectToken(tokenize.NEWLINE)
+			newline := p.ExpectToken(token.NEWLINE)
 			if newline == nil { return nil }
 			_ = newline
-			if !p.Lookahead(false, func(p *Parser) any { return p.ExpectToken(tokenize.INDENT) }) { return nil }
+			if !p.Lookahead(false, func(p *Parser) any { return p.ExpectToken(token.INDENT) }) { return nil }
 			return []any{a, subject, op, newline}
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_invalid_match_stmt, v)
@@ -13676,7 +13676,7 @@ func parseRule_invalid_case_block(p *Parser) any {
 			_ = patterns
 			opt := parseRule_guard(p)
 			_ = opt
-			newline := p.ExpectToken(tokenize.NEWLINE)
+			newline := p.ExpectToken(token.NEWLINE)
 			if newline == nil { return nil }
 			_ = newline
 			return raiseAction(p, "RAISE_SYNTAX_ERROR", "expected ':'")
@@ -13697,13 +13697,13 @@ func parseRule_invalid_case_block(p *Parser) any {
 			_ = patterns
 			opt := parseRule_guard(p)
 			_ = opt
-			op := p.ExpectToken(tokenize.COLON)
+			op := p.ExpectToken(token.COLON)
 			if op == nil { return nil }
 			_ = op
-			newline := p.ExpectToken(tokenize.NEWLINE)
+			newline := p.ExpectToken(token.NEWLINE)
 			if newline == nil { return nil }
 			_ = newline
-			if !p.Lookahead(false, func(p *Parser) any { return p.ExpectToken(tokenize.INDENT) }) { return nil }
+			if !p.Lookahead(false, func(p *Parser) any { return p.ExpectToken(token.INDENT) }) { return nil }
 			return []any{a, patterns, opt, op, newline}
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_invalid_case_block, v)
@@ -13777,7 +13777,7 @@ func parseRule_invalid_class_pattern(p *Parser) any {
 			name_or_attr := parseRule_name_or_attr(p)
 			if name_or_attr == nil { return nil }
 			_ = name_or_attr
-			op := p.ExpectToken(tokenize.LPAR)
+			op := p.ExpectToken(token.LPAR)
 			if op == nil { return nil }
 			_ = op
 			a := parseRule_invalid_class_argument_pattern(p)
@@ -13809,7 +13809,7 @@ func parseRule_invalid_class_argument_pattern(p *Parser) any {
 			keyword_patterns := parseRule_keyword_patterns(p)
 			if keyword_patterns == nil { return nil }
 			_ = keyword_patterns
-			op := p.ExpectToken(tokenize.COMMA)
+			op := p.ExpectToken(token.COMMA)
 			if op == nil { return nil }
 			_ = op
 			a := parseRule_positional_patterns(p)
@@ -13842,7 +13842,7 @@ func parseRule_invalid_if_stmt(p *Parser) any {
 			named_expression := parseRule_named_expression(p)
 			if named_expression == nil { return nil }
 			_ = named_expression
-			newline := p.ExpectToken(tokenize.NEWLINE)
+			newline := p.ExpectToken(token.NEWLINE)
 			if newline == nil { return nil }
 			_ = newline
 			return raiseAction(p, "RAISE_SYNTAX_ERROR", "expected ':'")
@@ -13861,13 +13861,13 @@ func parseRule_invalid_if_stmt(p *Parser) any {
 			a_1 := parseRule_named_expression(p)
 			if a_1 == nil { return nil }
 			_ = a_1
-			op := p.ExpectToken(tokenize.COLON)
+			op := p.ExpectToken(token.COLON)
 			if op == nil { return nil }
 			_ = op
-			newline := p.ExpectToken(tokenize.NEWLINE)
+			newline := p.ExpectToken(token.NEWLINE)
 			if newline == nil { return nil }
 			_ = newline
-			if !p.Lookahead(false, func(p *Parser) any { return p.ExpectToken(tokenize.INDENT) }) { return nil }
+			if !p.Lookahead(false, func(p *Parser) any { return p.ExpectToken(token.INDENT) }) { return nil }
 			return []any{a, a_1, op, newline}
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_invalid_if_stmt, v)
@@ -13895,7 +13895,7 @@ func parseRule_invalid_elif_stmt(p *Parser) any {
 			named_expression := parseRule_named_expression(p)
 			if named_expression == nil { return nil }
 			_ = named_expression
-			newline := p.ExpectToken(tokenize.NEWLINE)
+			newline := p.ExpectToken(token.NEWLINE)
 			if newline == nil { return nil }
 			_ = newline
 			return raiseAction(p, "RAISE_SYNTAX_ERROR", "expected ':'")
@@ -13914,13 +13914,13 @@ func parseRule_invalid_elif_stmt(p *Parser) any {
 			named_expression := parseRule_named_expression(p)
 			if named_expression == nil { return nil }
 			_ = named_expression
-			op := p.ExpectToken(tokenize.COLON)
+			op := p.ExpectToken(token.COLON)
 			if op == nil { return nil }
 			_ = op
-			newline := p.ExpectToken(tokenize.NEWLINE)
+			newline := p.ExpectToken(token.NEWLINE)
 			if newline == nil { return nil }
 			_ = newline
-			if !p.Lookahead(false, func(p *Parser) any { return p.ExpectToken(tokenize.INDENT) }) { return nil }
+			if !p.Lookahead(false, func(p *Parser) any { return p.ExpectToken(token.INDENT) }) { return nil }
 			return []any{a, named_expression, op, newline}
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_invalid_elif_stmt, v)
@@ -13945,13 +13945,13 @@ func parseRule_invalid_else_stmt(p *Parser) any {
 			a := p.ExpectName("else")
 			if a == nil { return nil }
 			_ = a
-			op := p.ExpectToken(tokenize.COLON)
+			op := p.ExpectToken(token.COLON)
 			if op == nil { return nil }
 			_ = op
-			newline := p.ExpectToken(tokenize.NEWLINE)
+			newline := p.ExpectToken(token.NEWLINE)
 			if newline == nil { return nil }
 			_ = newline
-			if !p.Lookahead(false, func(p *Parser) any { return p.ExpectToken(tokenize.INDENT) }) { return nil }
+			if !p.Lookahead(false, func(p *Parser) any { return p.ExpectToken(token.INDENT) }) { return nil }
 			return []any{a, op, newline}
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_invalid_else_stmt, v)
@@ -13965,7 +13965,7 @@ func parseRule_invalid_else_stmt(p *Parser) any {
 			kw := p.ExpectName("else")
 			if kw == nil { return nil }
 			_ = kw
-			op := p.ExpectToken(tokenize.COLON)
+			op := p.ExpectToken(token.COLON)
 			if op == nil { return nil }
 			_ = op
 			block := parseRule_block(p)
@@ -14001,7 +14001,7 @@ func parseRule_invalid_while_stmt(p *Parser) any {
 			named_expression := parseRule_named_expression(p)
 			if named_expression == nil { return nil }
 			_ = named_expression
-			newline := p.ExpectToken(tokenize.NEWLINE)
+			newline := p.ExpectToken(token.NEWLINE)
 			if newline == nil { return nil }
 			_ = newline
 			return raiseAction(p, "RAISE_SYNTAX_ERROR", "expected ':'")
@@ -14020,13 +14020,13 @@ func parseRule_invalid_while_stmt(p *Parser) any {
 			named_expression := parseRule_named_expression(p)
 			if named_expression == nil { return nil }
 			_ = named_expression
-			op := p.ExpectToken(tokenize.COLON)
+			op := p.ExpectToken(token.COLON)
 			if op == nil { return nil }
 			_ = op
-			newline := p.ExpectToken(tokenize.NEWLINE)
+			newline := p.ExpectToken(token.NEWLINE)
 			if newline == nil { return nil }
 			_ = newline
-			if !p.Lookahead(false, func(p *Parser) any { return p.ExpectToken(tokenize.INDENT) }) { return nil }
+			if !p.Lookahead(false, func(p *Parser) any { return p.ExpectToken(token.INDENT) }) { return nil }
 			return []any{a, named_expression, op, newline}
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_invalid_while_stmt, v)
@@ -14062,7 +14062,7 @@ func parseRule_invalid_for_stmt(p *Parser) any {
 			star_expressions := parseRule_star_expressions(p)
 			if star_expressions == nil { return nil }
 			_ = star_expressions
-			newline := p.ExpectToken(tokenize.NEWLINE)
+			newline := p.ExpectToken(token.NEWLINE)
 			if newline == nil { return nil }
 			_ = newline
 			return raiseAction(p, "RAISE_SYNTAX_ERROR", "expected ':'")
@@ -14089,13 +14089,13 @@ func parseRule_invalid_for_stmt(p *Parser) any {
 			star_expressions := parseRule_star_expressions(p)
 			if star_expressions == nil { return nil }
 			_ = star_expressions
-			op := p.ExpectToken(tokenize.COLON)
+			op := p.ExpectToken(token.COLON)
 			if op == nil { return nil }
 			_ = op
-			newline := p.ExpectToken(tokenize.NEWLINE)
+			newline := p.ExpectToken(token.NEWLINE)
 			if newline == nil { return nil }
 			_ = newline
-			if !p.Lookahead(false, func(p *Parser) any { return p.ExpectToken(tokenize.INDENT) }) { return nil }
+			if !p.Lookahead(false, func(p *Parser) any { return p.ExpectToken(token.INDENT) }) { return nil }
 			return []any{opt, a, star_targets, kw, star_expressions, op, newline}
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_invalid_for_stmt, v)
@@ -14127,23 +14127,23 @@ func parseRule_invalid_def_raw(p *Parser) any {
 			_ = name_var
 			opt_1 := parseRule_type_params(p)
 			_ = opt_1
-			op := p.ExpectToken(tokenize.LPAR)
+			op := p.ExpectToken(token.LPAR)
 			if op == nil { return nil }
 			_ = op
 			opt_2 := parseRule_params(p)
 			_ = opt_2
-			op_1 := p.ExpectToken(tokenize.RPAR)
+			op_1 := p.ExpectToken(token.RPAR)
 			if op_1 == nil { return nil }
 			_ = op_1
 			opt_3 := parseRule__rhs_124(p)
 			_ = opt_3
-			op_2 := p.ExpectToken(tokenize.COLON)
+			op_2 := p.ExpectToken(token.COLON)
 			if op_2 == nil { return nil }
 			_ = op_2
-			newline := p.ExpectToken(tokenize.NEWLINE)
+			newline := p.ExpectToken(token.NEWLINE)
 			if newline == nil { return nil }
 			_ = newline
-			if !p.Lookahead(false, func(p *Parser) any { return p.ExpectToken(tokenize.INDENT) }) { return nil }
+			if !p.Lookahead(false, func(p *Parser) any { return p.ExpectToken(token.INDENT) }) { return nil }
 			return []any{opt, a, name_var, opt_1, op, opt_2, op_1, opt_3, op_2, newline}
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_invalid_def_raw, v)
@@ -14164,17 +14164,17 @@ func parseRule_invalid_def_raw(p *Parser) any {
 			_ = name_var
 			opt_1 := parseRule_type_params(p)
 			_ = opt_1
-			f := p.ExpectForced(tokenize.LPAR, "(")
+			f := p.ExpectForced(token.LPAR, "(")
 			if f == nil { return nil }
 			_ = f
 			opt_2 := parseRule_params(p)
 			_ = opt_2
-			op := p.ExpectToken(tokenize.RPAR)
+			op := p.ExpectToken(token.RPAR)
 			if op == nil { return nil }
 			_ = op
 			opt_3 := parseRule__rhs_124(p)
 			_ = opt_3
-			f_1 := p.ExpectForced(tokenize.COLON, ":")
+			f_1 := p.ExpectForced(token.COLON, ":")
 			if f_1 == nil { return nil }
 			_ = f_1
 			opt_4 := parseRule_func_type_comment(p)
@@ -14213,7 +14213,7 @@ func parseRule_invalid_class_def_raw(p *Parser) any {
 			_ = opt
 			opt_1 := parseRule__rhs_125(p)
 			_ = opt_1
-			newline := p.ExpectToken(tokenize.NEWLINE)
+			newline := p.ExpectToken(token.NEWLINE)
 			if newline == nil { return nil }
 			_ = newline
 			return raiseAction(p, "RAISE_SYNTAX_ERROR", "expected ':'")
@@ -14236,13 +14236,13 @@ func parseRule_invalid_class_def_raw(p *Parser) any {
 			_ = opt
 			opt_1 := parseRule__rhs_125(p)
 			_ = opt_1
-			op := p.ExpectToken(tokenize.COLON)
+			op := p.ExpectToken(token.COLON)
 			if op == nil { return nil }
 			_ = op
-			newline := p.ExpectToken(tokenize.NEWLINE)
+			newline := p.ExpectToken(token.NEWLINE)
 			if newline == nil { return nil }
 			_ = newline
-			if !p.Lookahead(false, func(p *Parser) any { return p.ExpectToken(tokenize.INDENT) }) { return nil }
+			if !p.Lookahead(false, func(p *Parser) any { return p.ExpectToken(token.INDENT) }) { return nil }
 			return []any{a, name_var, opt, opt_1, op, newline}
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_invalid_class_def_raw, v)
@@ -14267,7 +14267,7 @@ func parseRule_invalid_double_starred_kvpairs(p *Parser) any {
 			gat := parseRule__gather_70(p)
 			if gat == nil { return nil }
 			_ = gat
-			op := p.ExpectToken(tokenize.COMMA)
+			op := p.ExpectToken(token.COMMA)
 			if op == nil { return nil }
 			_ = op
 			invalid_kvpair := parseRule_invalid_kvpair(p)
@@ -14286,10 +14286,10 @@ func parseRule_invalid_double_starred_kvpairs(p *Parser) any {
 			expression := parseRule_expression(p)
 			if expression == nil { return nil }
 			_ = expression
-			op := p.ExpectToken(tokenize.COLON)
+			op := p.ExpectToken(token.COLON)
 			if op == nil { return nil }
 			_ = op
-			a := p.ExpectToken(tokenize.STAR)
+			a := p.ExpectToken(token.STAR)
 			if a == nil { return nil }
 			_ = a
 			bitwise_or := parseRule_bitwise_or(p)
@@ -14308,7 +14308,7 @@ func parseRule_invalid_double_starred_kvpairs(p *Parser) any {
 			expression := parseRule_expression(p)
 			if expression == nil { return nil }
 			_ = expression
-			a := p.ExpectToken(tokenize.COLON)
+			a := p.ExpectToken(token.COLON)
 			if a == nil { return nil }
 			_ = a
 			if !p.Lookahead(true, func(p *Parser) any { return parseRule__group_126(p) }) { return nil }
@@ -14336,7 +14336,7 @@ func parseRule_invalid_kvpair(p *Parser) any {
 			a := parseRule_expression(p)
 			if a == nil { return nil }
 			_ = a
-			if !p.Lookahead(false, func(p *Parser) any { return p.ExpectToken(tokenize.COLON) }) { return nil }
+			if !p.Lookahead(false, func(p *Parser) any { return p.ExpectToken(token.COLON) }) { return nil }
 			return []any{a}
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_invalid_kvpair, v)
@@ -14350,10 +14350,10 @@ func parseRule_invalid_kvpair(p *Parser) any {
 			expression := parseRule_expression(p)
 			if expression == nil { return nil }
 			_ = expression
-			op := p.ExpectToken(tokenize.COLON)
+			op := p.ExpectToken(token.COLON)
 			if op == nil { return nil }
 			_ = op
-			a := p.ExpectToken(tokenize.STAR)
+			a := p.ExpectToken(token.STAR)
 			if a == nil { return nil }
 			_ = a
 			bitwise_or := parseRule_bitwise_or(p)
@@ -14372,7 +14372,7 @@ func parseRule_invalid_kvpair(p *Parser) any {
 			expression := parseRule_expression(p)
 			if expression == nil { return nil }
 			_ = expression
-			a := p.ExpectToken(tokenize.COLON)
+			a := p.ExpectToken(token.COLON)
 			if a == nil { return nil }
 			_ = a
 			if !p.Lookahead(true, func(p *Parser) any { return parseRule__group_126(p) }) { return nil }
@@ -14397,13 +14397,13 @@ func parseRule_invalid_starred_expression_unpacking(p *Parser) any {
 	// alt 0
 	{
 		if v := func() any {
-			a := p.ExpectToken(tokenize.STAR)
+			a := p.ExpectToken(token.STAR)
 			if a == nil { return nil }
 			_ = a
 			expression := parseRule_expression(p)
 			if expression == nil { return nil }
 			_ = expression
-			op := p.ExpectToken(tokenize.EQUAL)
+			op := p.ExpectToken(token.EQUAL)
 			if op == nil { return nil }
 			_ = op
 			b := parseRule_expression(p)
@@ -14430,7 +14430,7 @@ func parseRule_invalid_starred_expression(p *Parser) any {
 	// alt 0
 	{
 		if v := func() any {
-			op := p.ExpectToken(tokenize.STAR)
+			op := p.ExpectToken(token.STAR)
 			if op == nil { return nil }
 			_ = op
 			return raiseAction(p, "RAISE_SYNTAX_ERROR", "Invalid star expression")
@@ -14454,10 +14454,10 @@ func parseRule_invalid_fstring_replacement_field(p *Parser) any {
 	// alt 0
 	{
 		if v := func() any {
-			op := p.ExpectToken(tokenize.LBRACE)
+			op := p.ExpectToken(token.LBRACE)
 			if op == nil { return nil }
 			_ = op
-			a := p.ExpectToken(tokenize.EQUAL)
+			a := p.ExpectToken(token.EQUAL)
 			if a == nil { return nil }
 			_ = a
 			return raiseAction(p, "RAISE_SYNTAX_ERROR_KNOWN_LOCATION", a, "f-string: valid expression required before '='")
@@ -14470,10 +14470,10 @@ func parseRule_invalid_fstring_replacement_field(p *Parser) any {
 	// alt 1
 	{
 		if v := func() any {
-			op := p.ExpectToken(tokenize.LBRACE)
+			op := p.ExpectToken(token.LBRACE)
 			if op == nil { return nil }
 			_ = op
-			a := p.ExpectToken(tokenize.EXCLAMATION)
+			a := p.ExpectToken(token.EXCLAMATION)
 			if a == nil { return nil }
 			_ = a
 			return raiseAction(p, "RAISE_SYNTAX_ERROR_KNOWN_LOCATION", a, "f-string: valid expression required before '!'")
@@ -14486,10 +14486,10 @@ func parseRule_invalid_fstring_replacement_field(p *Parser) any {
 	// alt 2
 	{
 		if v := func() any {
-			op := p.ExpectToken(tokenize.LBRACE)
+			op := p.ExpectToken(token.LBRACE)
 			if op == nil { return nil }
 			_ = op
-			a := p.ExpectToken(tokenize.COLON)
+			a := p.ExpectToken(token.COLON)
 			if a == nil { return nil }
 			_ = a
 			return raiseAction(p, "RAISE_SYNTAX_ERROR_KNOWN_LOCATION", a, "f-string: valid expression required before ':'")
@@ -14502,10 +14502,10 @@ func parseRule_invalid_fstring_replacement_field(p *Parser) any {
 	// alt 3
 	{
 		if v := func() any {
-			op := p.ExpectToken(tokenize.LBRACE)
+			op := p.ExpectToken(token.LBRACE)
 			if op == nil { return nil }
 			_ = op
-			a := p.ExpectToken(tokenize.RBRACE)
+			a := p.ExpectToken(token.RBRACE)
 			if a == nil { return nil }
 			_ = a
 			return raiseAction(p, "RAISE_SYNTAX_ERROR_KNOWN_LOCATION", a, "f-string: valid expression required before '}'")
@@ -14518,7 +14518,7 @@ func parseRule_invalid_fstring_replacement_field(p *Parser) any {
 	// alt 4
 	{
 		if v := func() any {
-			op := p.ExpectToken(tokenize.LBRACE)
+			op := p.ExpectToken(token.LBRACE)
 			if op == nil { return nil }
 			_ = op
 			if !p.Lookahead(false, func(p *Parser) any { return parseRule_annotated_rhs(p) }) { return nil }
@@ -14532,7 +14532,7 @@ func parseRule_invalid_fstring_replacement_field(p *Parser) any {
 	// alt 5
 	{
 		if v := func() any {
-			op := p.ExpectToken(tokenize.LBRACE)
+			op := p.ExpectToken(token.LBRACE)
 			if op == nil { return nil }
 			_ = op
 			annotated_rhs := parseRule_annotated_rhs(p)
@@ -14549,13 +14549,13 @@ func parseRule_invalid_fstring_replacement_field(p *Parser) any {
 	// alt 6
 	{
 		if v := func() any {
-			op := p.ExpectToken(tokenize.LBRACE)
+			op := p.ExpectToken(token.LBRACE)
 			if op == nil { return nil }
 			_ = op
 			annotated_rhs := parseRule_annotated_rhs(p)
 			if annotated_rhs == nil { return nil }
 			_ = annotated_rhs
-			op_1 := p.ExpectToken(tokenize.EQUAL)
+			op_1 := p.ExpectToken(token.EQUAL)
 			if op_1 == nil { return nil }
 			_ = op_1
 			if !p.Lookahead(false, func(p *Parser) any { return parseRule__group_128(p) }) { return nil }
@@ -14569,13 +14569,13 @@ func parseRule_invalid_fstring_replacement_field(p *Parser) any {
 	// alt 7
 	{
 		if v := func() any {
-			op := p.ExpectToken(tokenize.LBRACE)
+			op := p.ExpectToken(token.LBRACE)
 			if op == nil { return nil }
 			_ = op
 			annotated_rhs := parseRule_annotated_rhs(p)
 			if annotated_rhs == nil { return nil }
 			_ = annotated_rhs
-			opt := p.ExpectToken(tokenize.EQUAL)
+			opt := p.ExpectToken(token.EQUAL)
 			_ = opt
 			invalid_fstring_conversion_character := parseRule_invalid_fstring_conversion_character(p)
 			if invalid_fstring_conversion_character == nil { return nil }
@@ -14590,13 +14590,13 @@ func parseRule_invalid_fstring_replacement_field(p *Parser) any {
 	// alt 8
 	{
 		if v := func() any {
-			op := p.ExpectToken(tokenize.LBRACE)
+			op := p.ExpectToken(token.LBRACE)
 			if op == nil { return nil }
 			_ = op
 			annotated_rhs := parseRule_annotated_rhs(p)
 			if annotated_rhs == nil { return nil }
 			_ = annotated_rhs
-			opt := p.ExpectToken(tokenize.EQUAL)
+			opt := p.ExpectToken(token.EQUAL)
 			_ = opt
 			opt_1 := parseRule__rhs_129(p)
 			_ = opt_1
@@ -14611,22 +14611,22 @@ func parseRule_invalid_fstring_replacement_field(p *Parser) any {
 	// alt 9
 	{
 		if v := func() any {
-			op := p.ExpectToken(tokenize.LBRACE)
+			op := p.ExpectToken(token.LBRACE)
 			if op == nil { return nil }
 			_ = op
 			annotated_rhs := parseRule_annotated_rhs(p)
 			if annotated_rhs == nil { return nil }
 			_ = annotated_rhs
-			opt := p.ExpectToken(tokenize.EQUAL)
+			opt := p.ExpectToken(token.EQUAL)
 			_ = opt
 			opt_1 := parseRule__rhs_129(p)
 			_ = opt_1
-			op_1 := p.ExpectToken(tokenize.COLON)
+			op_1 := p.ExpectToken(token.COLON)
 			if op_1 == nil { return nil }
 			_ = op_1
 			rep := parseRule__loop0_63(p)
 			_ = rep
-			if !p.Lookahead(false, func(p *Parser) any { return p.ExpectToken(tokenize.RBRACE) }) { return nil }
+			if !p.Lookahead(false, func(p *Parser) any { return p.ExpectToken(token.RBRACE) }) { return nil }
 			return []any{op, annotated_rhs, opt, opt_1, op_1, rep}
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_invalid_fstring_replacement_field, v)
@@ -14637,17 +14637,17 @@ func parseRule_invalid_fstring_replacement_field(p *Parser) any {
 	// alt 10
 	{
 		if v := func() any {
-			op := p.ExpectToken(tokenize.LBRACE)
+			op := p.ExpectToken(token.LBRACE)
 			if op == nil { return nil }
 			_ = op
 			annotated_rhs := parseRule_annotated_rhs(p)
 			if annotated_rhs == nil { return nil }
 			_ = annotated_rhs
-			opt := p.ExpectToken(tokenize.EQUAL)
+			opt := p.ExpectToken(token.EQUAL)
 			_ = opt
 			opt_1 := parseRule__rhs_129(p)
 			_ = opt_1
-			if !p.Lookahead(false, func(p *Parser) any { return p.ExpectToken(tokenize.RBRACE) }) { return nil }
+			if !p.Lookahead(false, func(p *Parser) any { return p.ExpectToken(token.RBRACE) }) { return nil }
 			return []any{op, annotated_rhs, opt, opt_1}
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_invalid_fstring_replacement_field, v)
@@ -14669,7 +14669,7 @@ func parseRule_invalid_fstring_conversion_character(p *Parser) any {
 	// alt 0
 	{
 		if v := func() any {
-			op := p.ExpectToken(tokenize.EXCLAMATION)
+			op := p.ExpectToken(token.EXCLAMATION)
 			if op == nil { return nil }
 			_ = op
 			if !p.Lookahead(true, func(p *Parser) any { return parseRule__group_130(p) }) { return nil }
@@ -14683,7 +14683,7 @@ func parseRule_invalid_fstring_conversion_character(p *Parser) any {
 	// alt 1
 	{
 		if v := func() any {
-			op := p.ExpectToken(tokenize.EXCLAMATION)
+			op := p.ExpectToken(token.EXCLAMATION)
 			if op == nil { return nil }
 			_ = op
 			if !p.Lookahead(false, func(p *Parser) any { return nameToken(p) }) { return nil }
@@ -14708,10 +14708,10 @@ func parseRule_invalid_tstring_replacement_field(p *Parser) any {
 	// alt 0
 	{
 		if v := func() any {
-			op := p.ExpectToken(tokenize.LBRACE)
+			op := p.ExpectToken(token.LBRACE)
 			if op == nil { return nil }
 			_ = op
-			a := p.ExpectToken(tokenize.EQUAL)
+			a := p.ExpectToken(token.EQUAL)
 			if a == nil { return nil }
 			_ = a
 			return raiseAction(p, "RAISE_SYNTAX_ERROR_KNOWN_LOCATION", a, "t-string: valid expression required before '='")
@@ -14724,10 +14724,10 @@ func parseRule_invalid_tstring_replacement_field(p *Parser) any {
 	// alt 1
 	{
 		if v := func() any {
-			op := p.ExpectToken(tokenize.LBRACE)
+			op := p.ExpectToken(token.LBRACE)
 			if op == nil { return nil }
 			_ = op
-			a := p.ExpectToken(tokenize.EXCLAMATION)
+			a := p.ExpectToken(token.EXCLAMATION)
 			if a == nil { return nil }
 			_ = a
 			return raiseAction(p, "RAISE_SYNTAX_ERROR_KNOWN_LOCATION", a, "t-string: valid expression required before '!'")
@@ -14740,10 +14740,10 @@ func parseRule_invalid_tstring_replacement_field(p *Parser) any {
 	// alt 2
 	{
 		if v := func() any {
-			op := p.ExpectToken(tokenize.LBRACE)
+			op := p.ExpectToken(token.LBRACE)
 			if op == nil { return nil }
 			_ = op
-			a := p.ExpectToken(tokenize.COLON)
+			a := p.ExpectToken(token.COLON)
 			if a == nil { return nil }
 			_ = a
 			return raiseAction(p, "RAISE_SYNTAX_ERROR_KNOWN_LOCATION", a, "t-string: valid expression required before ':'")
@@ -14756,10 +14756,10 @@ func parseRule_invalid_tstring_replacement_field(p *Parser) any {
 	// alt 3
 	{
 		if v := func() any {
-			op := p.ExpectToken(tokenize.LBRACE)
+			op := p.ExpectToken(token.LBRACE)
 			if op == nil { return nil }
 			_ = op
-			a := p.ExpectToken(tokenize.RBRACE)
+			a := p.ExpectToken(token.RBRACE)
 			if a == nil { return nil }
 			_ = a
 			return raiseAction(p, "RAISE_SYNTAX_ERROR_KNOWN_LOCATION", a, "t-string: valid expression required before '}'")
@@ -14772,7 +14772,7 @@ func parseRule_invalid_tstring_replacement_field(p *Parser) any {
 	// alt 4
 	{
 		if v := func() any {
-			op := p.ExpectToken(tokenize.LBRACE)
+			op := p.ExpectToken(token.LBRACE)
 			if op == nil { return nil }
 			_ = op
 			if !p.Lookahead(false, func(p *Parser) any { return parseRule_annotated_rhs(p) }) { return nil }
@@ -14786,7 +14786,7 @@ func parseRule_invalid_tstring_replacement_field(p *Parser) any {
 	// alt 5
 	{
 		if v := func() any {
-			op := p.ExpectToken(tokenize.LBRACE)
+			op := p.ExpectToken(token.LBRACE)
 			if op == nil { return nil }
 			_ = op
 			annotated_rhs := parseRule_annotated_rhs(p)
@@ -14803,13 +14803,13 @@ func parseRule_invalid_tstring_replacement_field(p *Parser) any {
 	// alt 6
 	{
 		if v := func() any {
-			op := p.ExpectToken(tokenize.LBRACE)
+			op := p.ExpectToken(token.LBRACE)
 			if op == nil { return nil }
 			_ = op
 			annotated_rhs := parseRule_annotated_rhs(p)
 			if annotated_rhs == nil { return nil }
 			_ = annotated_rhs
-			op_1 := p.ExpectToken(tokenize.EQUAL)
+			op_1 := p.ExpectToken(token.EQUAL)
 			if op_1 == nil { return nil }
 			_ = op_1
 			if !p.Lookahead(false, func(p *Parser) any { return parseRule__group_128(p) }) { return nil }
@@ -14823,13 +14823,13 @@ func parseRule_invalid_tstring_replacement_field(p *Parser) any {
 	// alt 7
 	{
 		if v := func() any {
-			op := p.ExpectToken(tokenize.LBRACE)
+			op := p.ExpectToken(token.LBRACE)
 			if op == nil { return nil }
 			_ = op
 			annotated_rhs := parseRule_annotated_rhs(p)
 			if annotated_rhs == nil { return nil }
 			_ = annotated_rhs
-			opt := p.ExpectToken(tokenize.EQUAL)
+			opt := p.ExpectToken(token.EQUAL)
 			_ = opt
 			invalid_tstring_conversion_character := parseRule_invalid_tstring_conversion_character(p)
 			if invalid_tstring_conversion_character == nil { return nil }
@@ -14844,13 +14844,13 @@ func parseRule_invalid_tstring_replacement_field(p *Parser) any {
 	// alt 8
 	{
 		if v := func() any {
-			op := p.ExpectToken(tokenize.LBRACE)
+			op := p.ExpectToken(token.LBRACE)
 			if op == nil { return nil }
 			_ = op
 			annotated_rhs := parseRule_annotated_rhs(p)
 			if annotated_rhs == nil { return nil }
 			_ = annotated_rhs
-			opt := p.ExpectToken(tokenize.EQUAL)
+			opt := p.ExpectToken(token.EQUAL)
 			_ = opt
 			opt_1 := parseRule__rhs_129(p)
 			_ = opt_1
@@ -14865,22 +14865,22 @@ func parseRule_invalid_tstring_replacement_field(p *Parser) any {
 	// alt 9
 	{
 		if v := func() any {
-			op := p.ExpectToken(tokenize.LBRACE)
+			op := p.ExpectToken(token.LBRACE)
 			if op == nil { return nil }
 			_ = op
 			annotated_rhs := parseRule_annotated_rhs(p)
 			if annotated_rhs == nil { return nil }
 			_ = annotated_rhs
-			opt := p.ExpectToken(tokenize.EQUAL)
+			opt := p.ExpectToken(token.EQUAL)
 			_ = opt
 			opt_1 := parseRule__rhs_129(p)
 			_ = opt_1
-			op_1 := p.ExpectToken(tokenize.COLON)
+			op_1 := p.ExpectToken(token.COLON)
 			if op_1 == nil { return nil }
 			_ = op_1
 			rep := parseRule__loop0_63(p)
 			_ = rep
-			if !p.Lookahead(false, func(p *Parser) any { return p.ExpectToken(tokenize.RBRACE) }) { return nil }
+			if !p.Lookahead(false, func(p *Parser) any { return p.ExpectToken(token.RBRACE) }) { return nil }
 			return []any{op, annotated_rhs, opt, opt_1, op_1, rep}
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_invalid_tstring_replacement_field, v)
@@ -14891,17 +14891,17 @@ func parseRule_invalid_tstring_replacement_field(p *Parser) any {
 	// alt 10
 	{
 		if v := func() any {
-			op := p.ExpectToken(tokenize.LBRACE)
+			op := p.ExpectToken(token.LBRACE)
 			if op == nil { return nil }
 			_ = op
 			annotated_rhs := parseRule_annotated_rhs(p)
 			if annotated_rhs == nil { return nil }
 			_ = annotated_rhs
-			opt := p.ExpectToken(tokenize.EQUAL)
+			opt := p.ExpectToken(token.EQUAL)
 			_ = opt
 			opt_1 := parseRule__rhs_129(p)
 			_ = opt_1
-			if !p.Lookahead(false, func(p *Parser) any { return p.ExpectToken(tokenize.RBRACE) }) { return nil }
+			if !p.Lookahead(false, func(p *Parser) any { return p.ExpectToken(token.RBRACE) }) { return nil }
 			return []any{op, annotated_rhs, opt, opt_1}
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_invalid_tstring_replacement_field, v)
@@ -14923,7 +14923,7 @@ func parseRule_invalid_tstring_conversion_character(p *Parser) any {
 	// alt 0
 	{
 		if v := func() any {
-			op := p.ExpectToken(tokenize.EXCLAMATION)
+			op := p.ExpectToken(token.EXCLAMATION)
 			if op == nil { return nil }
 			_ = op
 			if !p.Lookahead(true, func(p *Parser) any { return parseRule__group_130(p) }) { return nil }
@@ -14937,7 +14937,7 @@ func parseRule_invalid_tstring_conversion_character(p *Parser) any {
 	// alt 1
 	{
 		if v := func() any {
-			op := p.ExpectToken(tokenize.EXCLAMATION)
+			op := p.ExpectToken(token.EXCLAMATION)
 			if op == nil { return nil }
 			_ = op
 			if !p.Lookahead(false, func(p *Parser) any { return nameToken(p) }) { return nil }
@@ -15068,10 +15068,10 @@ func parseRule_invalid_type_params(p *Parser) any {
 	// alt 0
 	{
 		if v := func() any {
-			op := p.ExpectToken(tokenize.LSQB)
+			op := p.ExpectToken(token.LSQB)
 			if op == nil { return nil }
 			_ = op
-			token := p.ExpectToken(tokenize.RSQB)
+			token := p.ExpectToken(token.RSQB)
 			if token == nil { return nil }
 			_ = token
 			return raiseAction(p, "RAISE_SYNTAX_ERROR_STARTING_FROM", token, "Type parameter list cannot be empty")
@@ -15091,7 +15091,7 @@ func parseRule__loop0_1(p *Parser) any {
 	mark := p.Mark()
 	var children []any
 	for {
-		v := p.ExpectToken(tokenize.NEWLINE)
+		v := p.ExpectToken(token.NEWLINE)
 		if v == nil { break }
 		children = append(children, v)
 		mark = p.Mark()
@@ -15125,7 +15125,7 @@ func parseRule__gather_3(p *Parser) any {
 	children := []any{first}
 	for {
 		smark := p.Mark()
-		if s := p.ExpectToken(tokenize.SEMI); s == nil { p.Reset(smark); break } else { _ = s }
+		if s := p.ExpectToken(token.SEMI); s == nil { p.Reset(smark); break } else { _ = s }
 		n := parseRule_simple_stmt(p)
 		if n == nil { p.Reset(smark); break }
 		children = append(children, n)
@@ -15191,7 +15191,7 @@ func parseRule__group_5(p *Parser) any {
 	// alt 1
 	{
 		if v := func() any {
-			op := p.ExpectToken(tokenize.AT)
+			op := p.ExpectToken(token.AT)
 			if op == nil { return nil }
 			_ = op
 			return []any{op}
@@ -15240,7 +15240,7 @@ func parseRule__group_6(p *Parser) any {
 	// alt 1
 	{
 		if v := func() any {
-			op := p.ExpectToken(tokenize.AT)
+			op := p.ExpectToken(token.AT)
 			if op == nil { return nil }
 			_ = op
 			return []any{op}
@@ -15335,7 +15335,7 @@ func parseRule__rhs_9(p *Parser) any {
 	// alt 0
 	{
 		if v := func() any {
-			op := p.ExpectToken(tokenize.EQUAL)
+			op := p.ExpectToken(token.EQUAL)
 			if op == nil { return nil }
 			_ = op
 			d := parseRule_annotated_rhs(p)
@@ -15361,13 +15361,13 @@ func parseRule__group_10(p *Parser) any {
 	// alt 0
 	{
 		if v := func() any {
-			op := p.ExpectToken(tokenize.LPAR)
+			op := p.ExpectToken(token.LPAR)
 			if op == nil { return nil }
 			_ = op
 			b := parseRule_single_target(p)
 			if b == nil { return nil }
 			_ = b
-			op_1 := p.ExpectToken(tokenize.RPAR)
+			op_1 := p.ExpectToken(token.RPAR)
 			if op_1 == nil { return nil }
 			_ = op_1
 			return b
@@ -15445,7 +15445,7 @@ func parseRule__gather_13(p *Parser) any {
 	children := []any{first}
 	for {
 		smark := p.Mark()
-		if s := p.ExpectToken(tokenize.COMMA); s == nil { p.Reset(smark); break } else { _ = s }
+		if s := p.ExpectToken(token.COMMA); s == nil { p.Reset(smark); break } else { _ = s }
 		n := nameToken(p)
 		if n == nil { p.Reset(smark); break }
 		children = append(children, n)
@@ -15462,7 +15462,7 @@ func parseRule__group_14(p *Parser) any {
 	// alt 0
 	{
 		if v := func() any {
-			op := p.ExpectToken(tokenize.SEMI)
+			op := p.ExpectToken(token.SEMI)
 			if op == nil { return nil }
 			_ = op
 			return []any{op}
@@ -15475,7 +15475,7 @@ func parseRule__group_14(p *Parser) any {
 	// alt 1
 	{
 		if v := func() any {
-			newline := p.ExpectToken(tokenize.NEWLINE)
+			newline := p.ExpectToken(token.NEWLINE)
 			if newline == nil { return nil }
 			_ = newline
 			return []any{newline}
@@ -15498,7 +15498,7 @@ func parseRule__rhs_15(p *Parser) any {
 	// alt 0
 	{
 		if v := func() any {
-			op := p.ExpectToken(tokenize.COMMA)
+			op := p.ExpectToken(token.COMMA)
 			if op == nil { return nil }
 			_ = op
 			z := parseRule_expression(p)
@@ -15555,7 +15555,7 @@ func parseRule__gather_18(p *Parser) any {
 	children := []any{first}
 	for {
 		smark := p.Mark()
-		if s := p.ExpectToken(tokenize.COMMA); s == nil { p.Reset(smark); break } else { _ = s }
+		if s := p.ExpectToken(token.COMMA); s == nil { p.Reset(smark); break } else { _ = s }
 		n := parseRule_import_from_as_name(p)
 		if n == nil { p.Reset(smark); break }
 		children = append(children, n)
@@ -15598,7 +15598,7 @@ func parseRule__gather_20(p *Parser) any {
 	children := []any{first}
 	for {
 		smark := p.Mark()
-		if s := p.ExpectToken(tokenize.COMMA); s == nil { p.Reset(smark); break } else { _ = s }
+		if s := p.ExpectToken(token.COMMA); s == nil { p.Reset(smark); break } else { _ = s }
 		n := parseRule_dotted_as_name(p)
 		if n == nil { p.Reset(smark); break }
 		children = append(children, n)
@@ -15631,12 +15631,12 @@ func parseRule__rhs_22(p *Parser) any {
 	// alt 0
 	{
 		if v := func() any {
-			op := p.ExpectToken(tokenize.LPAR)
+			op := p.ExpectToken(token.LPAR)
 			if op == nil { return nil }
 			_ = op
 			z := parseRule_arguments(p)
 			_ = z
-			op_1 := p.ExpectToken(tokenize.RPAR)
+			op_1 := p.ExpectToken(token.RPAR)
 			if op_1 == nil { return nil }
 			_ = op_1
 			return z
@@ -15659,7 +15659,7 @@ func parseRule__rhs_23(p *Parser) any {
 	// alt 0
 	{
 		if v := func() any {
-			op := p.ExpectToken(tokenize.RARROW)
+			op := p.ExpectToken(token.RARROW)
 			if op == nil { return nil }
 			_ = op
 			z := parseRule_expression(p)
@@ -15778,7 +15778,7 @@ func parseRule__gather_30(p *Parser) any {
 	children := []any{first}
 	for {
 		smark := p.Mark()
-		if s := p.ExpectToken(tokenize.COMMA); s == nil { p.Reset(smark); break } else { _ = s }
+		if s := p.ExpectToken(token.COMMA); s == nil { p.Reset(smark); break } else { _ = s }
 		n := parseRule_with_item(p)
 		if n == nil { p.Reset(smark); break }
 		children = append(children, n)
@@ -15795,7 +15795,7 @@ func parseRule__group_31(p *Parser) any {
 	// alt 0
 	{
 		if v := func() any {
-			op := p.ExpectToken(tokenize.COMMA)
+			op := p.ExpectToken(token.COMMA)
 			if op == nil { return nil }
 			_ = op
 			return []any{op}
@@ -15808,7 +15808,7 @@ func parseRule__group_31(p *Parser) any {
 	// alt 1
 	{
 		if v := func() any {
-			op := p.ExpectToken(tokenize.RPAR)
+			op := p.ExpectToken(token.RPAR)
 			if op == nil { return nil }
 			_ = op
 			return []any{op}
@@ -15821,7 +15821,7 @@ func parseRule__group_31(p *Parser) any {
 	// alt 2
 	{
 		if v := func() any {
-			op := p.ExpectToken(tokenize.COLON)
+			op := p.ExpectToken(token.COLON)
 			if op == nil { return nil }
 			_ = op
 			return []any{op}
@@ -15892,7 +15892,7 @@ func parseRule__gather_35(p *Parser) any {
 	children := []any{first}
 	for {
 		smark := p.Mark()
-		if s := p.ExpectToken(tokenize.VBAR); s == nil { p.Reset(smark); break } else { _ = s }
+		if s := p.ExpectToken(token.VBAR); s == nil { p.Reset(smark); break } else { _ = s }
 		n := parseRule_closed_pattern(p)
 		if n == nil { p.Reset(smark); break }
 		children = append(children, n)
@@ -15909,7 +15909,7 @@ func parseRule__group_36(p *Parser) any {
 	// alt 0
 	{
 		if v := func() any {
-			op := p.ExpectToken(tokenize.PLUS)
+			op := p.ExpectToken(token.PLUS)
 			if op == nil { return nil }
 			_ = op
 			return []any{op}
@@ -15922,7 +15922,7 @@ func parseRule__group_36(p *Parser) any {
 	// alt 1
 	{
 		if v := func() any {
-			op := p.ExpectToken(tokenize.MINUS)
+			op := p.ExpectToken(token.MINUS)
 			if op == nil { return nil }
 			_ = op
 			return []any{op}
@@ -15958,7 +15958,7 @@ func parseRule__group_37(p *Parser) any {
 	// alt 1
 	{
 		if v := func() any {
-			fstring_start := p.ExpectToken(tokenize.FSTRING_START)
+			fstring_start := p.ExpectToken(token.FSTRING_START)
 			if fstring_start == nil { return nil }
 			_ = fstring_start
 			return []any{fstring_start}
@@ -15971,7 +15971,7 @@ func parseRule__group_37(p *Parser) any {
 	// alt 2
 	{
 		if v := func() any {
-			tstring_start := p.ExpectToken(tokenize.TSTRING_START)
+			tstring_start := p.ExpectToken(token.TSTRING_START)
 			if tstring_start == nil { return nil }
 			_ = tstring_start
 			return []any{tstring_start}
@@ -15994,7 +15994,7 @@ func parseRule__group_38(p *Parser) any {
 	// alt 0
 	{
 		if v := func() any {
-			op := p.ExpectToken(tokenize.DOT)
+			op := p.ExpectToken(token.DOT)
 			if op == nil { return nil }
 			_ = op
 			return []any{op}
@@ -16007,7 +16007,7 @@ func parseRule__group_38(p *Parser) any {
 	// alt 1
 	{
 		if v := func() any {
-			op := p.ExpectToken(tokenize.LPAR)
+			op := p.ExpectToken(token.LPAR)
 			if op == nil { return nil }
 			_ = op
 			return []any{op}
@@ -16020,7 +16020,7 @@ func parseRule__group_38(p *Parser) any {
 	// alt 2
 	{
 		if v := func() any {
-			op := p.ExpectToken(tokenize.EQUAL)
+			op := p.ExpectToken(token.EQUAL)
 			if op == nil { return nil }
 			_ = op
 			return []any{op}
@@ -16043,7 +16043,7 @@ func parseRule__gather_39(p *Parser) any {
 	children := []any{first}
 	for {
 		smark := p.Mark()
-		if s := p.ExpectToken(tokenize.COMMA); s == nil { p.Reset(smark); break } else { _ = s }
+		if s := p.ExpectToken(token.COMMA); s == nil { p.Reset(smark); break } else { _ = s }
 		n := parseRule_maybe_star_pattern(p)
 		if n == nil { p.Reset(smark); break }
 		children = append(children, n)
@@ -16060,7 +16060,7 @@ func parseRule__gather_40(p *Parser) any {
 	children := []any{first}
 	for {
 		smark := p.Mark()
-		if s := p.ExpectToken(tokenize.COMMA); s == nil { p.Reset(smark); break } else { _ = s }
+		if s := p.ExpectToken(token.COMMA); s == nil { p.Reset(smark); break } else { _ = s }
 		n := parseRule_key_value_pattern(p)
 		if n == nil { p.Reset(smark); break }
 		children = append(children, n)
@@ -16113,7 +16113,7 @@ func parseRule__gather_42(p *Parser) any {
 	children := []any{first}
 	for {
 		smark := p.Mark()
-		if s := p.ExpectToken(tokenize.COMMA); s == nil { p.Reset(smark); break } else { _ = s }
+		if s := p.ExpectToken(token.COMMA); s == nil { p.Reset(smark); break } else { _ = s }
 		n := parseRule_pattern(p)
 		if n == nil { p.Reset(smark); break }
 		children = append(children, n)
@@ -16130,7 +16130,7 @@ func parseRule__gather_43(p *Parser) any {
 	children := []any{first}
 	for {
 		smark := p.Mark()
-		if s := p.ExpectToken(tokenize.COMMA); s == nil { p.Reset(smark); break } else { _ = s }
+		if s := p.ExpectToken(token.COMMA); s == nil { p.Reset(smark); break } else { _ = s }
 		n := parseRule_keyword_pattern(p)
 		if n == nil { p.Reset(smark); break }
 		children = append(children, n)
@@ -16147,7 +16147,7 @@ func parseRule__gather_44(p *Parser) any {
 	children := []any{first}
 	for {
 		smark := p.Mark()
-		if s := p.ExpectToken(tokenize.COMMA); s == nil { p.Reset(smark); break } else { _ = s }
+		if s := p.ExpectToken(token.COMMA); s == nil { p.Reset(smark); break } else { _ = s }
 		n := parseRule_type_param(p)
 		if n == nil { p.Reset(smark); break }
 		children = append(children, n)
@@ -16196,7 +16196,7 @@ func parseRule__gather_47(p *Parser) any {
 	children := []any{first}
 	for {
 		smark := p.Mark()
-		if s := p.ExpectToken(tokenize.COMMA); s == nil { p.Reset(smark); break } else { _ = s }
+		if s := p.ExpectToken(token.COMMA); s == nil { p.Reset(smark); break } else { _ = s }
 		n := parseRule_star_named_expression(p)
 		if n == nil { p.Reset(smark); break }
 		children = append(children, n)
@@ -16261,7 +16261,7 @@ func parseRule__gather_51(p *Parser) any {
 	children := []any{first}
 	for {
 		smark := p.Mark()
-		if s := p.ExpectToken(tokenize.COMMA); s == nil { p.Reset(smark); break } else { _ = s }
+		if s := p.ExpectToken(token.COMMA); s == nil { p.Reset(smark); break } else { _ = s }
 		n := parseRule__group_141(p)
 		if n == nil { p.Reset(smark); break }
 		children = append(children, n)
@@ -16278,7 +16278,7 @@ func parseRule__rhs_52(p *Parser) any {
 	// alt 0
 	{
 		if v := func() any {
-			op := p.ExpectToken(tokenize.COLON)
+			op := p.ExpectToken(token.COLON)
 			if op == nil { return nil }
 			_ = op
 			d := parseRule_expression(p)
@@ -16674,7 +16674,7 @@ func parseRule__rhs_69(p *Parser) any {
 			y := parseRule_star_named_expression(p)
 			if y == nil { return nil }
 			_ = y
-			op := p.ExpectToken(tokenize.COMMA)
+			op := p.ExpectToken(token.COMMA)
 			if op == nil { return nil }
 			_ = op
 			z := parseRule_star_named_expressions(p)
@@ -16699,7 +16699,7 @@ func parseRule__gather_70(p *Parser) any {
 	children := []any{first}
 	for {
 		smark := p.Mark()
-		if s := p.ExpectToken(tokenize.COMMA); s == nil { p.Reset(smark); break } else { _ = s }
+		if s := p.ExpectToken(token.COMMA); s == nil { p.Reset(smark); break } else { _ = s }
 		n := parseRule_double_starred_kvpair(p)
 		if n == nil { p.Reset(smark); break }
 		children = append(children, n)
@@ -16763,7 +16763,7 @@ func parseRule__group_73(p *Parser) any {
 			expression := parseRule_expression(p)
 			if expression == nil { return nil }
 			_ = expression
-			if !p.Lookahead(false, func(p *Parser) any { return p.ExpectToken(tokenize.COLONEQUAL) }) { return nil }
+			if !p.Lookahead(false, func(p *Parser) any { return p.ExpectToken(token.COLONEQUAL) }) { return nil }
 			return []any{expression}
 		}(); v != nil {
 			p.InsertMemo(mark, Rule__group_73, v)
@@ -16784,7 +16784,7 @@ func parseRule__gather_74(p *Parser) any {
 	children := []any{first}
 	for {
 		smark := p.Mark()
-		if s := p.ExpectToken(tokenize.COMMA); s == nil { p.Reset(smark); break } else { _ = s }
+		if s := p.ExpectToken(token.COMMA); s == nil { p.Reset(smark); break } else { _ = s }
 		n := parseRule__group_143(p)
 		if n == nil { p.Reset(smark); break }
 		children = append(children, n)
@@ -16801,7 +16801,7 @@ func parseRule__rhs_75(p *Parser) any {
 	// alt 0
 	{
 		if v := func() any {
-			op := p.ExpectToken(tokenize.COMMA)
+			op := p.ExpectToken(token.COMMA)
 			if op == nil { return nil }
 			_ = op
 			k := parseRule_kwargs(p)
@@ -16827,7 +16827,7 @@ func parseRule__gather_76(p *Parser) any {
 	children := []any{first}
 	for {
 		smark := p.Mark()
-		if s := p.ExpectToken(tokenize.COMMA); s == nil { p.Reset(smark); break } else { _ = s }
+		if s := p.ExpectToken(token.COMMA); s == nil { p.Reset(smark); break } else { _ = s }
 		n := parseRule_kwarg_or_starred(p)
 		if n == nil { p.Reset(smark); break }
 		children = append(children, n)
@@ -16844,7 +16844,7 @@ func parseRule__gather_77(p *Parser) any {
 	children := []any{first}
 	for {
 		smark := p.Mark()
-		if s := p.ExpectToken(tokenize.COMMA); s == nil { p.Reset(smark); break } else { _ = s }
+		if s := p.ExpectToken(token.COMMA); s == nil { p.Reset(smark); break } else { _ = s }
 		n := parseRule_kwarg_or_double_starred(p)
 		if n == nil { p.Reset(smark); break }
 		children = append(children, n)
@@ -16876,7 +16876,7 @@ func parseRule__gather_79(p *Parser) any {
 	children := []any{first}
 	for {
 		smark := p.Mark()
-		if s := p.ExpectToken(tokenize.COMMA); s == nil { p.Reset(smark); break } else { _ = s }
+		if s := p.ExpectToken(token.COMMA); s == nil { p.Reset(smark); break } else { _ = s }
 		n := parseRule_star_target(p)
 		if n == nil { p.Reset(smark); break }
 		children = append(children, n)
@@ -16909,7 +16909,7 @@ func parseRule__group_81(p *Parser) any {
 	// alt 0
 	{
 		if v := func() any {
-			if !p.Lookahead(false, func(p *Parser) any { return p.ExpectToken(tokenize.STAR) }) { return nil }
+			if !p.Lookahead(false, func(p *Parser) any { return p.ExpectToken(token.STAR) }) { return nil }
 			star_target := parseRule_star_target(p)
 			if star_target == nil { return nil }
 			_ = star_target
@@ -16933,7 +16933,7 @@ func parseRule__gather_82(p *Parser) any {
 	children := []any{first}
 	for {
 		smark := p.Mark()
-		if s := p.ExpectToken(tokenize.COMMA); s == nil { p.Reset(smark); break } else { _ = s }
+		if s := p.ExpectToken(token.COMMA); s == nil { p.Reset(smark); break } else { _ = s }
 		n := parseRule_del_target(p)
 		if n == nil { p.Reset(smark); break }
 		children = append(children, n)
@@ -16950,7 +16950,7 @@ func parseRule__gather_83(p *Parser) any {
 	children := []any{first}
 	for {
 		smark := p.Mark()
-		if s := p.ExpectToken(tokenize.COMMA); s == nil { p.Reset(smark); break } else { _ = s }
+		if s := p.ExpectToken(token.COMMA); s == nil { p.Reset(smark); break } else { _ = s }
 		n := parseRule_expression(p)
 		if n == nil { p.Reset(smark); break }
 		children = append(children, n)
@@ -16967,10 +16967,10 @@ func parseRule__group_84(p *Parser) any {
 	// alt 0
 	{
 		if v := func() any {
-			newline := p.ExpectToken(tokenize.NEWLINE)
+			newline := p.ExpectToken(token.NEWLINE)
 			if newline == nil { return nil }
 			_ = newline
-			indent := p.ExpectToken(tokenize.INDENT)
+			indent := p.ExpectToken(token.INDENT)
 			if indent == nil { return nil }
 			_ = indent
 			return []any{newline, indent}
@@ -17029,7 +17029,7 @@ func parseRule__gather_86(p *Parser) any {
 	children := []any{first}
 	for {
 		smark := p.Mark()
-		if s := p.ExpectToken(tokenize.COMMA); s == nil { p.Reset(smark); break } else { _ = s }
+		if s := p.ExpectToken(token.COMMA); s == nil { p.Reset(smark); break } else { _ = s }
 		n := parseRule__group_146(p)
 		if n == nil { p.Reset(smark); break }
 		children = append(children, n)
@@ -17088,7 +17088,7 @@ func parseRule__group_88(p *Parser) any {
 			args := parseRule_args(p)
 			if args == nil { return nil }
 			_ = args
-			op := p.ExpectToken(tokenize.COMMA)
+			op := p.ExpectToken(token.COMMA)
 			if op == nil { return nil }
 			_ = op
 			return []any{args, op}
@@ -17111,7 +17111,7 @@ func parseRule__group_89(p *Parser) any {
 	// alt 0
 	{
 		if v := func() any {
-			op := p.ExpectToken(tokenize.COMMA)
+			op := p.ExpectToken(token.COMMA)
 			if op == nil { return nil }
 			_ = op
 			return []any{op}
@@ -17124,7 +17124,7 @@ func parseRule__group_89(p *Parser) any {
 	// alt 1
 	{
 		if v := func() any {
-			op := p.ExpectToken(tokenize.RPAR)
+			op := p.ExpectToken(token.RPAR)
 			if op == nil { return nil }
 			_ = op
 			return []any{op}
@@ -17199,7 +17199,7 @@ func parseRule__group_91(p *Parser) any {
 			name_var := nameToken(p)
 			if name_var == nil { return nil }
 			_ = name_var
-			op := p.ExpectToken(tokenize.EQUAL)
+			op := p.ExpectToken(token.EQUAL)
 			if op == nil { return nil }
 			_ = op
 			return []any{name_var, op}
@@ -17254,7 +17254,7 @@ func parseRule__group_93(p *Parser) any {
 	// alt 1
 	{
 		if v := func() any {
-			soft_keyword := p.ExpectToken(tokenize.SOFT_KEYWORD)
+			soft_keyword := p.ExpectToken(token.SOFT_KEYWORD)
 			if soft_keyword == nil { return nil }
 			_ = soft_keyword
 			return []any{soft_keyword}
@@ -17290,7 +17290,7 @@ func parseRule__group_94(p *Parser) any {
 	// alt 1
 	{
 		if v := func() any {
-			op := p.ExpectToken(tokenize.COLON)
+			op := p.ExpectToken(token.COLON)
 			if op == nil { return nil }
 			_ = op
 			return []any{op}
@@ -17362,7 +17362,7 @@ func parseRule__group_96(p *Parser) any {
 	// alt 0
 	{
 		if v := func() any {
-			op := p.ExpectToken(tokenize.EQUAL)
+			op := p.ExpectToken(token.EQUAL)
 			if op == nil { return nil }
 			_ = op
 			return []any{op}
@@ -17375,7 +17375,7 @@ func parseRule__group_96(p *Parser) any {
 	// alt 1
 	{
 		if v := func() any {
-			op := p.ExpectToken(tokenize.COLONEQUAL)
+			op := p.ExpectToken(token.COLONEQUAL)
 			if op == nil { return nil }
 			_ = op
 			return []any{op}
@@ -17516,7 +17516,7 @@ func parseRule__group_100(p *Parser) any {
 	// alt 0
 	{
 		if v := func() any {
-			op := p.ExpectToken(tokenize.LSQB)
+			op := p.ExpectToken(token.LSQB)
 			if op == nil { return nil }
 			_ = op
 			return []any{op}
@@ -17529,7 +17529,7 @@ func parseRule__group_100(p *Parser) any {
 	// alt 1
 	{
 		if v := func() any {
-			op := p.ExpectToken(tokenize.LPAR)
+			op := p.ExpectToken(token.LPAR)
 			if op == nil { return nil }
 			_ = op
 			return []any{op}
@@ -17542,7 +17542,7 @@ func parseRule__group_100(p *Parser) any {
 	// alt 2
 	{
 		if v := func() any {
-			op := p.ExpectToken(tokenize.LBRACE)
+			op := p.ExpectToken(token.LBRACE)
 			if op == nil { return nil }
 			_ = op
 			return []any{op}
@@ -17565,7 +17565,7 @@ func parseRule__group_101(p *Parser) any {
 	// alt 0
 	{
 		if v := func() any {
-			op := p.ExpectToken(tokenize.LSQB)
+			op := p.ExpectToken(token.LSQB)
 			if op == nil { return nil }
 			_ = op
 			return []any{op}
@@ -17578,7 +17578,7 @@ func parseRule__group_101(p *Parser) any {
 	// alt 1
 	{
 		if v := func() any {
-			op := p.ExpectToken(tokenize.LBRACE)
+			op := p.ExpectToken(token.LBRACE)
 			if op == nil { return nil }
 			_ = op
 			return []any{op}
@@ -17637,7 +17637,7 @@ func parseRule__group_103(p *Parser) any {
 	// alt 0
 	{
 		if v := func() any {
-			op := p.ExpectToken(tokenize.COMMA)
+			op := p.ExpectToken(token.COMMA)
 			if op == nil { return nil }
 			_ = op
 			return []any{op}
@@ -17673,7 +17673,7 @@ func parseRule__group_104(p *Parser) any {
 	// alt 0
 	{
 		if v := func() any {
-			op := p.ExpectToken(tokenize.RPAR)
+			op := p.ExpectToken(token.RPAR)
 			if op == nil { return nil }
 			_ = op
 			return []any{op}
@@ -17686,7 +17686,7 @@ func parseRule__group_104(p *Parser) any {
 	// alt 1
 	{
 		if v := func() any {
-			op := p.ExpectToken(tokenize.COMMA)
+			op := p.ExpectToken(token.COMMA)
 			if op == nil { return nil }
 			_ = op
 			return []any{op}
@@ -17709,7 +17709,7 @@ func parseRule__group_105(p *Parser) any {
 	// alt 0
 	{
 		if v := func() any {
-			op := p.ExpectToken(tokenize.RPAR)
+			op := p.ExpectToken(token.RPAR)
 			if op == nil { return nil }
 			_ = op
 			return []any{op}
@@ -17722,7 +17722,7 @@ func parseRule__group_105(p *Parser) any {
 	// alt 1
 	{
 		if v := func() any {
-			op := p.ExpectToken(tokenize.COMMA)
+			op := p.ExpectToken(token.COMMA)
 			if op == nil { return nil }
 			_ = op
 			g := parseRule__group_149(p)
@@ -17761,7 +17761,7 @@ func parseRule__group_106(p *Parser) any {
 	// alt 1
 	{
 		if v := func() any {
-			op := p.ExpectToken(tokenize.COMMA)
+			op := p.ExpectToken(token.COMMA)
 			if op == nil { return nil }
 			_ = op
 			return []any{op}
@@ -17784,7 +17784,7 @@ func parseRule__group_107(p *Parser) any {
 	// alt 0
 	{
 		if v := func() any {
-			op := p.ExpectToken(tokenize.STAR)
+			op := p.ExpectToken(token.STAR)
 			if op == nil { return nil }
 			_ = op
 			return []any{op}
@@ -17797,7 +17797,7 @@ func parseRule__group_107(p *Parser) any {
 	// alt 1
 	{
 		if v := func() any {
-			op := p.ExpectToken(tokenize.DOUBLESTAR)
+			op := p.ExpectToken(token.DOUBLESTAR)
 			if op == nil { return nil }
 			_ = op
 			return []any{op}
@@ -17810,7 +17810,7 @@ func parseRule__group_107(p *Parser) any {
 	// alt 2
 	{
 		if v := func() any {
-			op := p.ExpectToken(tokenize.SLASH)
+			op := p.ExpectToken(token.SLASH)
 			if op == nil { return nil }
 			_ = op
 			return []any{op}
@@ -17869,7 +17869,7 @@ func parseRule__gather_109(p *Parser) any {
 	children := []any{first}
 	for {
 		smark := p.Mark()
-		if s := p.ExpectToken(tokenize.COMMA); s == nil { p.Reset(smark); break } else { _ = s }
+		if s := p.ExpectToken(token.COMMA); s == nil { p.Reset(smark); break } else { _ = s }
 		n := parseRule_lambda_param(p)
 		if n == nil { p.Reset(smark); break }
 		children = append(children, n)
@@ -17886,7 +17886,7 @@ func parseRule__group_110(p *Parser) any {
 	// alt 0
 	{
 		if v := func() any {
-			op := p.ExpectToken(tokenize.COMMA)
+			op := p.ExpectToken(token.COMMA)
 			if op == nil { return nil }
 			_ = op
 			return []any{op}
@@ -17922,7 +17922,7 @@ func parseRule__group_111(p *Parser) any {
 	// alt 0
 	{
 		if v := func() any {
-			op := p.ExpectToken(tokenize.COLON)
+			op := p.ExpectToken(token.COLON)
 			if op == nil { return nil }
 			_ = op
 			return []any{op}
@@ -17935,7 +17935,7 @@ func parseRule__group_111(p *Parser) any {
 	// alt 1
 	{
 		if v := func() any {
-			op := p.ExpectToken(tokenize.COMMA)
+			op := p.ExpectToken(token.COMMA)
 			if op == nil { return nil }
 			_ = op
 			g := parseRule__group_150(p)
@@ -17974,7 +17974,7 @@ func parseRule__group_112(p *Parser) any {
 	// alt 1
 	{
 		if v := func() any {
-			op := p.ExpectToken(tokenize.COMMA)
+			op := p.ExpectToken(token.COMMA)
 			if op == nil { return nil }
 			_ = op
 			return []any{op}
@@ -18002,7 +18002,7 @@ func parseRule__group_113(p *Parser) any {
 			_ = bitwise_or
 			rep := parseRule__loop0_151(p)
 			_ = rep
-			opt := p.ExpectToken(tokenize.COMMA)
+			opt := p.ExpectToken(token.COMMA)
 			_ = opt
 			return []any{bitwise_or, rep, opt}
 		}(); v != nil {
@@ -18024,7 +18024,7 @@ func parseRule__gather_114(p *Parser) any {
 	children := []any{first}
 	for {
 		smark := p.Mark()
-		if s := p.ExpectToken(tokenize.COMMA); s == nil { p.Reset(smark); break } else { _ = s }
+		if s := p.ExpectToken(token.COMMA); s == nil { p.Reset(smark); break } else { _ = s }
 		n := parseRule_dotted_name(p)
 		if n == nil { p.Reset(smark); break }
 		children = append(children, n)
@@ -18067,7 +18067,7 @@ func parseRule__gather_116(p *Parser) any {
 	children := []any{first}
 	for {
 		smark := p.Mark()
-		if s := p.ExpectToken(tokenize.COMMA); s == nil { p.Reset(smark); break } else { _ = s }
+		if s := p.ExpectToken(token.COMMA); s == nil { p.Reset(smark); break } else { _ = s }
 		n := parseRule__group_153(p)
 		if n == nil { p.Reset(smark); break }
 		children = append(children, n)
@@ -18084,7 +18084,7 @@ func parseRule__gather_117(p *Parser) any {
 	children := []any{first}
 	for {
 		smark := p.Mark()
-		if s := p.ExpectToken(tokenize.COMMA); s == nil { p.Reset(smark); break } else { _ = s }
+		if s := p.ExpectToken(token.COMMA); s == nil { p.Reset(smark); break } else { _ = s }
 		n := parseRule__group_154(p)
 		if n == nil { p.Reset(smark); break }
 		children = append(children, n)
@@ -18203,7 +18203,7 @@ func parseRule__group_122(p *Parser) any {
 	// alt 0
 	{
 		if v := func() any {
-			newline := p.ExpectToken(tokenize.NEWLINE)
+			newline := p.ExpectToken(token.NEWLINE)
 			if newline == nil { return nil }
 			_ = newline
 			return []any{newline}
@@ -18216,7 +18216,7 @@ func parseRule__group_122(p *Parser) any {
 	// alt 1
 	{
 		if v := func() any {
-			op := p.ExpectToken(tokenize.COLON)
+			op := p.ExpectToken(token.COLON)
 			if op == nil { return nil }
 			_ = op
 			return []any{op}
@@ -18242,7 +18242,7 @@ func parseRule__rhs_123(p *Parser) any {
 			positional_patterns := parseRule_positional_patterns(p)
 			if positional_patterns == nil { return nil }
 			_ = positional_patterns
-			op := p.ExpectToken(tokenize.COMMA)
+			op := p.ExpectToken(token.COMMA)
 			if op == nil { return nil }
 			_ = op
 			return []any{positional_patterns, op}
@@ -18265,7 +18265,7 @@ func parseRule__rhs_124(p *Parser) any {
 	// alt 0
 	{
 		if v := func() any {
-			op := p.ExpectToken(tokenize.RARROW)
+			op := p.ExpectToken(token.RARROW)
 			if op == nil { return nil }
 			_ = op
 			expression := parseRule_expression(p)
@@ -18291,12 +18291,12 @@ func parseRule__rhs_125(p *Parser) any {
 	// alt 0
 	{
 		if v := func() any {
-			op := p.ExpectToken(tokenize.LPAR)
+			op := p.ExpectToken(token.LPAR)
 			if op == nil { return nil }
 			_ = op
 			opt := parseRule_arguments(p)
 			_ = opt
-			op_1 := p.ExpectToken(tokenize.RPAR)
+			op_1 := p.ExpectToken(token.RPAR)
 			if op_1 == nil { return nil }
 			_ = op_1
 			return []any{op, opt, op_1}
@@ -18319,7 +18319,7 @@ func parseRule__group_126(p *Parser) any {
 	// alt 0
 	{
 		if v := func() any {
-			op := p.ExpectToken(tokenize.RBRACE)
+			op := p.ExpectToken(token.RBRACE)
 			if op == nil { return nil }
 			_ = op
 			return []any{op}
@@ -18332,7 +18332,7 @@ func parseRule__group_126(p *Parser) any {
 	// alt 1
 	{
 		if v := func() any {
-			op := p.ExpectToken(tokenize.COMMA)
+			op := p.ExpectToken(token.COMMA)
 			if op == nil { return nil }
 			_ = op
 			return []any{op}
@@ -18355,7 +18355,7 @@ func parseRule__group_127(p *Parser) any {
 	// alt 0
 	{
 		if v := func() any {
-			op := p.ExpectToken(tokenize.EQUAL)
+			op := p.ExpectToken(token.EQUAL)
 			if op == nil { return nil }
 			_ = op
 			return []any{op}
@@ -18368,7 +18368,7 @@ func parseRule__group_127(p *Parser) any {
 	// alt 1
 	{
 		if v := func() any {
-			op := p.ExpectToken(tokenize.EXCLAMATION)
+			op := p.ExpectToken(token.EXCLAMATION)
 			if op == nil { return nil }
 			_ = op
 			return []any{op}
@@ -18381,7 +18381,7 @@ func parseRule__group_127(p *Parser) any {
 	// alt 2
 	{
 		if v := func() any {
-			op := p.ExpectToken(tokenize.COLON)
+			op := p.ExpectToken(token.COLON)
 			if op == nil { return nil }
 			_ = op
 			return []any{op}
@@ -18394,7 +18394,7 @@ func parseRule__group_127(p *Parser) any {
 	// alt 3
 	{
 		if v := func() any {
-			op := p.ExpectToken(tokenize.RBRACE)
+			op := p.ExpectToken(token.RBRACE)
 			if op == nil { return nil }
 			_ = op
 			return []any{op}
@@ -18417,7 +18417,7 @@ func parseRule__group_128(p *Parser) any {
 	// alt 0
 	{
 		if v := func() any {
-			op := p.ExpectToken(tokenize.EXCLAMATION)
+			op := p.ExpectToken(token.EXCLAMATION)
 			if op == nil { return nil }
 			_ = op
 			return []any{op}
@@ -18430,7 +18430,7 @@ func parseRule__group_128(p *Parser) any {
 	// alt 1
 	{
 		if v := func() any {
-			op := p.ExpectToken(tokenize.COLON)
+			op := p.ExpectToken(token.COLON)
 			if op == nil { return nil }
 			_ = op
 			return []any{op}
@@ -18443,7 +18443,7 @@ func parseRule__group_128(p *Parser) any {
 	// alt 2
 	{
 		if v := func() any {
-			op := p.ExpectToken(tokenize.RBRACE)
+			op := p.ExpectToken(token.RBRACE)
 			if op == nil { return nil }
 			_ = op
 			return []any{op}
@@ -18466,7 +18466,7 @@ func parseRule__rhs_129(p *Parser) any {
 	// alt 0
 	{
 		if v := func() any {
-			op := p.ExpectToken(tokenize.EXCLAMATION)
+			op := p.ExpectToken(token.EXCLAMATION)
 			if op == nil { return nil }
 			_ = op
 			name_var := nameToken(p)
@@ -18492,7 +18492,7 @@ func parseRule__group_130(p *Parser) any {
 	// alt 0
 	{
 		if v := func() any {
-			op := p.ExpectToken(tokenize.COLON)
+			op := p.ExpectToken(token.COLON)
 			if op == nil { return nil }
 			_ = op
 			return []any{op}
@@ -18505,7 +18505,7 @@ func parseRule__group_130(p *Parser) any {
 	// alt 1
 	{
 		if v := func() any {
-			op := p.ExpectToken(tokenize.RBRACE)
+			op := p.ExpectToken(token.RBRACE)
 			if op == nil { return nil }
 			_ = op
 			return []any{op}
@@ -18564,7 +18564,7 @@ func parseRule__group_132(p *Parser) any {
 	// alt 0
 	{
 		if v := func() any {
-			op := p.ExpectToken(tokenize.PLUS)
+			op := p.ExpectToken(token.PLUS)
 			if op == nil { return nil }
 			_ = op
 			return []any{op}
@@ -18577,7 +18577,7 @@ func parseRule__group_132(p *Parser) any {
 	// alt 1
 	{
 		if v := func() any {
-			op := p.ExpectToken(tokenize.MINUS)
+			op := p.ExpectToken(token.MINUS)
 			if op == nil { return nil }
 			_ = op
 			return []any{op}
@@ -18590,7 +18590,7 @@ func parseRule__group_132(p *Parser) any {
 	// alt 2
 	{
 		if v := func() any {
-			op := p.ExpectToken(tokenize.STAR)
+			op := p.ExpectToken(token.STAR)
 			if op == nil { return nil }
 			_ = op
 			return []any{op}
@@ -18603,7 +18603,7 @@ func parseRule__group_132(p *Parser) any {
 	// alt 3
 	{
 		if v := func() any {
-			op := p.ExpectToken(tokenize.SLASH)
+			op := p.ExpectToken(token.SLASH)
 			if op == nil { return nil }
 			_ = op
 			return []any{op}
@@ -18616,7 +18616,7 @@ func parseRule__group_132(p *Parser) any {
 	// alt 4
 	{
 		if v := func() any {
-			op := p.ExpectToken(tokenize.PERCENT)
+			op := p.ExpectToken(token.PERCENT)
 			if op == nil { return nil }
 			_ = op
 			return []any{op}
@@ -18629,7 +18629,7 @@ func parseRule__group_132(p *Parser) any {
 	// alt 5
 	{
 		if v := func() any {
-			op := p.ExpectToken(tokenize.DOUBLESLASH)
+			op := p.ExpectToken(token.DOUBLESLASH)
 			if op == nil { return nil }
 			_ = op
 			return []any{op}
@@ -18642,7 +18642,7 @@ func parseRule__group_132(p *Parser) any {
 	// alt 6
 	{
 		if v := func() any {
-			op := p.ExpectToken(tokenize.AT)
+			op := p.ExpectToken(token.AT)
 			if op == nil { return nil }
 			_ = op
 			return []any{op}
@@ -18665,7 +18665,7 @@ func parseRule__group_133(p *Parser) any {
 	// alt 0
 	{
 		if v := func() any {
-			op := p.ExpectToken(tokenize.PLUS)
+			op := p.ExpectToken(token.PLUS)
 			if op == nil { return nil }
 			_ = op
 			return []any{op}
@@ -18678,7 +18678,7 @@ func parseRule__group_133(p *Parser) any {
 	// alt 1
 	{
 		if v := func() any {
-			op := p.ExpectToken(tokenize.MINUS)
+			op := p.ExpectToken(token.MINUS)
 			if op == nil { return nil }
 			_ = op
 			return []any{op}
@@ -18691,7 +18691,7 @@ func parseRule__group_133(p *Parser) any {
 	// alt 2
 	{
 		if v := func() any {
-			op := p.ExpectToken(tokenize.TILDE)
+			op := p.ExpectToken(token.TILDE)
 			if op == nil { return nil }
 			_ = op
 			return []any{op}
@@ -18717,7 +18717,7 @@ func parseRule__group_134(p *Parser) any {
 			z := parseRule_star_targets(p)
 			if z == nil { return nil }
 			_ = z
-			op := p.ExpectToken(tokenize.EQUAL)
+			op := p.ExpectToken(token.EQUAL)
 			if op == nil { return nil }
 			_ = op
 			return z
@@ -18740,7 +18740,7 @@ func parseRule__group_135(p *Parser) any {
 	// alt 0
 	{
 		if v := func() any {
-			op := p.ExpectToken(tokenize.DOT)
+			op := p.ExpectToken(token.DOT)
 			if op == nil { return nil }
 			_ = op
 			return []any{op}
@@ -18753,7 +18753,7 @@ func parseRule__group_135(p *Parser) any {
 	// alt 1
 	{
 		if v := func() any {
-			op := p.ExpectToken(tokenize.ELLIPSIS)
+			op := p.ExpectToken(token.ELLIPSIS)
 			if op == nil { return nil }
 			_ = op
 			return []any{op}
@@ -18776,13 +18776,13 @@ func parseRule__group_136(p *Parser) any {
 	// alt 0
 	{
 		if v := func() any {
-			op := p.ExpectToken(tokenize.AT)
+			op := p.ExpectToken(token.AT)
 			if op == nil { return nil }
 			_ = op
 			f := parseRule_named_expression(p)
 			if f == nil { return nil }
 			_ = f
-			newline := p.ExpectToken(tokenize.NEWLINE)
+			newline := p.ExpectToken(token.NEWLINE)
 			if newline == nil { return nil }
 			_ = newline
 			return f
@@ -18805,7 +18805,7 @@ func parseRule__group_137(p *Parser) any {
 	// alt 0
 	{
 		if v := func() any {
-			op := p.ExpectToken(tokenize.COMMA)
+			op := p.ExpectToken(token.COMMA)
 			if op == nil { return nil }
 			_ = op
 			c := parseRule_expression(p)
@@ -18831,7 +18831,7 @@ func parseRule__group_138(p *Parser) any {
 	// alt 0
 	{
 		if v := func() any {
-			op := p.ExpectToken(tokenize.COMMA)
+			op := p.ExpectToken(token.COMMA)
 			if op == nil { return nil }
 			_ = op
 			c := parseRule_star_expression(p)
@@ -18987,7 +18987,7 @@ func parseRule__group_143(p *Parser) any {
 			g := parseRule__group_73(p)
 			if g == nil { return nil }
 			_ = g
-			if !p.Lookahead(false, func(p *Parser) any { return p.ExpectToken(tokenize.EQUAL) }) { return nil }
+			if !p.Lookahead(false, func(p *Parser) any { return p.ExpectToken(token.EQUAL) }) { return nil }
 			return []any{g}
 		}(); v != nil {
 			p.InsertMemo(mark, Rule__group_143, v)
@@ -19008,7 +19008,7 @@ func parseRule__group_144(p *Parser) any {
 	// alt 0
 	{
 		if v := func() any {
-			op := p.ExpectToken(tokenize.COMMA)
+			op := p.ExpectToken(token.COMMA)
 			if op == nil { return nil }
 			_ = op
 			c := parseRule_star_target(p)
@@ -19037,7 +19037,7 @@ func parseRule__group_145(p *Parser) any {
 			gat := parseRule__gather_74(p)
 			if gat == nil { return nil }
 			_ = gat
-			op := p.ExpectToken(tokenize.COMMA)
+			op := p.ExpectToken(token.COMMA)
 			if op == nil { return nil }
 			_ = op
 			kwargs := parseRule_kwargs(p)
@@ -19066,7 +19066,7 @@ func parseRule__group_146(p *Parser) any {
 			starred_expression := parseRule_starred_expression(p)
 			if starred_expression == nil { return nil }
 			_ = starred_expression
-			if !p.Lookahead(false, func(p *Parser) any { return p.ExpectToken(tokenize.EQUAL) }) { return nil }
+			if !p.Lookahead(false, func(p *Parser) any { return p.ExpectToken(token.EQUAL) }) { return nil }
 			return []any{starred_expression}
 		}(); v != nil {
 			p.InsertMemo(mark, Rule__group_146, v)
@@ -19114,7 +19114,7 @@ func parseRule__group_148(p *Parser) any {
 			star_targets := parseRule_star_targets(p)
 			if star_targets == nil { return nil }
 			_ = star_targets
-			op := p.ExpectToken(tokenize.EQUAL)
+			op := p.ExpectToken(token.EQUAL)
 			if op == nil { return nil }
 			_ = op
 			return []any{star_targets, op}
@@ -19137,7 +19137,7 @@ func parseRule__group_149(p *Parser) any {
 	// alt 0
 	{
 		if v := func() any {
-			op := p.ExpectToken(tokenize.RPAR)
+			op := p.ExpectToken(token.RPAR)
 			if op == nil { return nil }
 			_ = op
 			return []any{op}
@@ -19150,7 +19150,7 @@ func parseRule__group_149(p *Parser) any {
 	// alt 1
 	{
 		if v := func() any {
-			op := p.ExpectToken(tokenize.DOUBLESTAR)
+			op := p.ExpectToken(token.DOUBLESTAR)
 			if op == nil { return nil }
 			_ = op
 			return []any{op}
@@ -19173,7 +19173,7 @@ func parseRule__group_150(p *Parser) any {
 	// alt 0
 	{
 		if v := func() any {
-			op := p.ExpectToken(tokenize.COLON)
+			op := p.ExpectToken(token.COLON)
 			if op == nil { return nil }
 			_ = op
 			return []any{op}
@@ -19186,7 +19186,7 @@ func parseRule__group_150(p *Parser) any {
 	// alt 1
 	{
 		if v := func() any {
-			op := p.ExpectToken(tokenize.DOUBLESTAR)
+			op := p.ExpectToken(token.DOUBLESTAR)
 			if op == nil { return nil }
 			_ = op
 			return []any{op}
@@ -19224,7 +19224,7 @@ func parseRule__group_152(p *Parser) any {
 	// alt 0
 	{
 		if v := func() any {
-			op := p.ExpectToken(tokenize.COMMA)
+			op := p.ExpectToken(token.COMMA)
 			if op == nil { return nil }
 			_ = op
 			return []any{op}
@@ -19237,7 +19237,7 @@ func parseRule__group_152(p *Parser) any {
 	// alt 1
 	{
 		if v := func() any {
-			op := p.ExpectToken(tokenize.RPAR)
+			op := p.ExpectToken(token.RPAR)
 			if op == nil { return nil }
 			_ = op
 			return []any{op}
@@ -19250,7 +19250,7 @@ func parseRule__group_152(p *Parser) any {
 	// alt 2
 	{
 		if v := func() any {
-			op := p.ExpectToken(tokenize.SEMI)
+			op := p.ExpectToken(token.SEMI)
 			if op == nil { return nil }
 			_ = op
 			return []any{op}
@@ -19263,7 +19263,7 @@ func parseRule__group_152(p *Parser) any {
 	// alt 3
 	{
 		if v := func() any {
-			newline := p.ExpectToken(tokenize.NEWLINE)
+			newline := p.ExpectToken(token.NEWLINE)
 			if newline == nil { return nil }
 			_ = newline
 			return []any{newline}
@@ -19336,7 +19336,7 @@ func parseRule__group_155(p *Parser) any {
 	// alt 0
 	{
 		if v := func() any {
-			op := p.ExpectToken(tokenize.COMMA)
+			op := p.ExpectToken(token.COMMA)
 			if op == nil { return nil }
 			_ = op
 			bitwise_or := parseRule_bitwise_or(p)

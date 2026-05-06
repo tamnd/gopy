@@ -20,7 +20,7 @@ import (
 	"strings"
 
 	"github.com/tamnd/gopy/ast"
-	"github.com/tamnd/gopy/tokenize"
+	"github.com/tamnd/gopy/token"
 )
 
 // pyConstantSentinel tags Py_True / Py_False / Py_None / Py_Ellipsis
@@ -87,13 +87,13 @@ func asExpr(v any) ast.Expr {
 func tokenToExpr(t *Token) ast.Expr {
 	pos := tokenPos(t)
 	switch t.Type {
-	case tokenize.NAME:
+	case token.NAME:
 		return &ast.Name{Id: string(t.Bytes), Ctx: ast.Load, Pos: pos}
-	case tokenize.NUMBER:
+	case token.NUMBER:
 		if v, ok := parseNumberLiteral(string(t.Bytes)); ok {
 			return &ast.Constant{Value: v, Pos: pos}
 		}
-	case tokenize.STRING:
+	case token.STRING:
 		if s, ok := decodeStringToken(string(t.Bytes)); ok {
 			return &ast.Constant{Value: s, Pos: pos}
 		}
@@ -1183,7 +1183,7 @@ func nameOf(v any) *string {
 	case nil:
 		return nil
 	case *Token:
-		if x == nil || x.Type != tokenize.NAME {
+		if x == nil || x.Type != token.NAME {
 			return nil
 		}
 		s := string(x.Bytes)
@@ -1583,11 +1583,11 @@ func constantValue(v any) any {
 			return nil
 		}
 		switch t.Type {
-		case tokenize.NUMBER:
+		case token.NUMBER:
 			if v, ok := parseNumberLiteral(string(t.Bytes)); ok {
 				return v
 			}
-		case tokenize.STRING:
+		case token.STRING:
 			if s, ok := decodeStringToken(string(t.Bytes)); ok {
 				return s
 			}

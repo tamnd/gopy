@@ -16,6 +16,7 @@ type List struct {
 var ListType = NewType("list", []*Type{objectType})
 
 func init() {
+	ListType.TpFlags = TpFlagSequence
 	ListType.Repr = listRepr
 	ListType.Str = listRepr
 	ListType.RichCmp = listRichCmp

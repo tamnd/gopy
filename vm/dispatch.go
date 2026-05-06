@@ -42,6 +42,14 @@ func (e *evalState) dispatch(op compile.Opcode, oparg uint32) (next int, retVal 
 	if next, ok, err := e.tryImport(op, oparg); ok {
 		return next, nil, nil, false, err
 	}
+	// Generator / coroutine / context-manager arms.
+	if r, err := e.tryGen(op, oparg); r.ok {
+		return r.next, r.retVal, r.retErr, r.retDone, err
+	}
+	// Pattern-match arms.
+	if next, ok, err := e.tryMatch(op, oparg); ok {
+		return next, nil, nil, false, err
+	}
 	return 0, nil, nil, false, opcodeNotImplemented(op)
 }
 

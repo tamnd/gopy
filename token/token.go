@@ -1,13 +1,15 @@
-// Package tokenize declares the token kind constants and the public
-// iterator surface.
+// Package token declares the token kind constants shared by the
+// lexer and tokenize packages.
 //
-// Numeric values for the constants live in types_gen.go, generated
-// from cpython/Grammar/Tokens via tools/tokens_go. Keeping the type
-// itself in a hand-written file lets other files in the package
-// depend on `Type` without requiring the generator to have run yet.
+// Mirrors CPython's split between the C tokenizer's enum (in
+// Include/internal/pycore_token.h) and the Python-level Lib/token.py
+// re-export. Keeping the kinds in their own package lets the lexer
+// produce them and the tokenize wrapper consume them without an
+// import cycle.
 //
 // CPython: Include/internal/pycore_token.h Token enum
-package tokenize
+// CPython: Lib/token.py
+package token
 
 // Type is the token kind. Numeric values match CPython 3.14
 // Grammar/Tokens one for one. The full constant set is in

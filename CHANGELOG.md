@@ -11,6 +11,36 @@ folder; this file is the aggregated index.
 
 ## Unreleased
 
+## v0.9.0 - 2026-05-06
+
+See [`changelog/v0.9.0.md`](changelog/v0.9.0.md).
+
+* feat(vm): generator opcodes (`RETURN_GENERATOR`, `YIELD_VALUE`,
+  `SEND`, `GET_YIELD_FROM_ITER`, `CLEANUP_THROW`); each generator
+  runs on its own goroutine with buffered yield/send channels.
+* feat(vm): pattern-match opcodes (`MATCH_MAPPING`,
+  `MATCH_SEQUENCE`, `MATCH_KEYS`, `MATCH_CLASS`) plus
+  `WITH_EXCEPT_START` and the async-iter / awaitable v0.9 stubs.
+* feat(vm): `BUILD_SET` / `SET_ADD` / `SET_UPDATE` real
+  implementations; `IMPORT_STAR` routed through `CALL_INTRINSIC_1`.
+* feat(vm): per-thread `gilSwitchTimer` arms `BreakerGILDropRequest`
+  via `pytime.Monotonic`, mirroring CPython's `take_gil` interval.
+* feat(objects): `Generator` type plus `TpFlags` with
+  `TpFlagMapping` / `TpFlagSequence`.
+* feat(pytime): port `Python/pytime.c` — `Time` typed int64,
+  rounding modes, `Time_` / `Monotonic` / `PerfCounter` clocks,
+  `Deadline`, `ClockInfo`.
+* feat(hamt): port `Python/hamt.c` — immutable hash-array mapped
+  trie with structure sharing.
+* feat(contextvar): port `Python/context.c` and the
+  `_contextvars` built-in module — `ContextVar`, `Context`,
+  `Token`, `copy_context`.
+* feat(getopt): port `Python/getopt.c` — `_PyOS_GetOpt`; the CLI
+  in `cmd/gopy` now parses argv through it.
+* feat(hashtable): port `Python/hashtable.c` — generic
+  `_Py_hashtable_t` for runtime infrastructure.
+* feat(tokenize): drive `Iter` from the real lexer state machine.
+
 ## v0.8.0 - 2026-05-06
 
 See [`changelog/v0.8.0.md`](changelog/v0.8.0.md).

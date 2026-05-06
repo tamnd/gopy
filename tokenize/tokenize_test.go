@@ -4,67 +4,65 @@ import (
 	"errors"
 	"io"
 	"testing"
+
+	"github.com/tamnd/gopy/token"
 )
 
-// TestSkeletonReturnsEOF: the v0.5 skeleton always reports io.EOF.
-// This test pins the contract so consumers can program against the
-// stable surface today.
-func TestSkeletonReturnsEOF(t *testing.T) {
-	it := New("x = 1", false)
-	_, err := it.Next()
+// TestEndmarkerThenEOF: after the lexer emits ENDMARKER, Next reports
+// io.EOF on the following call. Pins the iterator-protocol contract.
+func TestEndmarkerThenEOF(t *testing.T) {
+	it := New("", false)
+	tok, err := it.Next()
+	if err != nil {
+		t.Fatalf("first Next: err=%v", err)
+	}
+	if tok.Type != token.ENDMARKER {
+		t.Fatalf("first token = %s, want ENDMARKER", tok.Type)
+	}
+	_, err = it.Next()
 	if !errors.Is(err, io.EOF) {
-		t.Errorf("Next() error = %v, want io.EOF", err)
+		t.Errorf("second Next error = %v, want io.EOF", err)
 	}
 }
 
-// TestTypeNumericValues pins a hand-picked subset of token numeric
-// values against CPython 3.14 Grammar/Tokens. The generator emits the
-// full set; this test catches drift if the file is hand-edited.
-func TestTypeNumericValues(t *testing.T) {
-	cases := []struct {
-		got  Type
-		want int
-		name string
-	}{
-		{ENDMARKER, 0, "ENDMARKER"},
-		{NAME, 1, "NAME"},
-		{NUMBER, 2, "NUMBER"},
-		{STRING, 3, "STRING"},
-		{NEWLINE, 4, "NEWLINE"},
-		{INDENT, 5, "INDENT"},
-		{DEDENT, 6, "DEDENT"},
-		{OP, 55, "OP"},
-		{COMMENT, 65, "COMMENT"},
-		{NL, 66, "NL"},
-		{ENCODING, 68, "ENCODING"},
-	}
-	for _, c := range cases {
-		if int(c.got) != c.want {
-			t.Errorf("%s = %d, want %d", c.name, int(c.got), c.want)
+// TestSimpleAssignment walks a `x = 1` source through the iterator and
+// pins the leading kinds against CPython tokenize parity. Full byte-
+// for-byte parity with tokenize.tokenize() lives in the partest panel;
+// this just verifies the wiring reaches the lexer.
+func TestSimpleAssignment(t *testing.T) {
+	it := New("x = 1\n", false)
+	want := []token.Type{token.NAME, token.OP, token.NUMBER, token.NEWLINE}
+	for i, w := range want {
+		tok, err := it.Next()
+		if err != nil {
+			t.Fatalf("Next #%d: %v", i, err)
+		}
+		if tok.Type != w {
+			t.Fatalf("Next #%d type = %s, want %s", i, tok.Type, w)
 		}
 	}
 }
 
-// TestTypeString pins the CPython tok_name parity for Type.String.
-func TestTypeString(t *testing.T) {
-	if got := NAME.String(); got != "NAME" {
-		t.Errorf("NAME.String() = %q, want NAME", got)
+func TestNewReadlineDrainsLines(t *testing.T) {
+	lines := []string{"x = 1\n", ""}
+	i := 0
+	rl := func() (string, error) {
+		if i >= len(lines) || lines[i] == "" {
+			return "", io.EOF
+		}
+		s := lines[i]
+		i++
+		return s, nil
 	}
-	if got := ENCODING.String(); got != "ENCODING" {
-		t.Errorf("ENCODING.String() = %q, want ENCODING", got)
-	}
-	if got := Type(-1).String(); got != "TYPE(-1)" {
-		t.Errorf("Type(-1).String() = %q, want TYPE(-1)", got)
-	}
-}
-
-func TestNewReadlineSkeleton(t *testing.T) {
-	it := NewReadline(func() (string, error) { return "", io.EOF }, true)
+	it := NewReadline(rl, false)
 	if it == nil {
 		t.Fatal("NewReadline returned nil")
 	}
-	_, err := it.Next()
-	if !errors.Is(err, io.EOF) {
-		t.Errorf("Next() error = %v, want io.EOF", err)
+	tok, err := it.Next()
+	if err != nil {
+		t.Fatalf("Next: %v", err)
+	}
+	if tok.Type != token.NAME || tok.Value != "x" {
+		t.Fatalf("first token = (%s, %q), want (NAME, \"x\")", tok.Type, tok.Value)
 	}
 }

@@ -4,7 +4,7 @@
 // CPython: Include/internal/pycore_token.h
 // CPython: Grammar/Tokens
 
-package tokenize
+package token
 
 // Token kinds, numeric values pinned to CPython's token.h. The
 // ALL_CAPS spellings preserve parity with `token.tok_name` so

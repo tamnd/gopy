@@ -7,7 +7,7 @@ package pegen
 
 import (
 	perrors "github.com/tamnd/gopy/parser/errors"
-	"github.com/tamnd/gopy/tokenize"
+	"github.com/tamnd/gopy/token"
 )
 
 // IsMemoized checks whether the rule with id ruleType has already
@@ -110,14 +110,14 @@ func (p *Parser) LookaheadWithName(positive bool, fn func(*Parser) any, _ string
 // Returns the token on match (advancing mark) or nil on miss.
 //
 // CPython: Parser/pegen.c:296 _PyPegen_expect_token
-func (p *Parser) ExpectToken(kind tokenize.Type) *Token { return p.Expect(kind) }
+func (p *Parser) ExpectToken(kind token.Type) *Token { return p.Expect(kind) }
 
 // ExpectForced advances past a token of kind kind. If the next
 // token does not match, it raises a SyntaxError with the "expected
 // '%s'" template and trips the error indicator.
 //
 // CPython: Parser/pegen.c:441 _PyPegen_expect_forced_token
-func (p *Parser) ExpectForced(kind tokenize.Type, expected string) *Token {
+func (p *Parser) ExpectForced(kind token.Type, expected string) *Token {
 	if p.errorIndicator {
 		return nil
 	}
@@ -138,7 +138,7 @@ func (p *Parser) ExpectForced(kind tokenize.Type, expected string) *Token {
 // CPython: Parser/pegen.c:425 _PyPegen_expect_soft_keyword
 func (p *Parser) ExpectSoftKeyword(kw string) *Token {
 	t := p.Peek()
-	if t == nil || t.Type != tokenize.NAME || string(t.Bytes) != kw {
+	if t == nil || t.Type != token.NAME || string(t.Bytes) != kw {
 		return nil
 	}
 	p.mark++
@@ -154,7 +154,7 @@ func (p *Parser) LastNonWhitespaceToken() *Token {
 	for i := p.fill - 1; i >= 0; i-- {
 		t := p.tokens[i]
 		switch t.Type {
-		case tokenize.NEWLINE, tokenize.NL, tokenize.INDENT, tokenize.DEDENT:
+		case token.NEWLINE, token.NL, token.INDENT, token.DEDENT:
 			continue
 		}
 		return t

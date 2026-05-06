@@ -8,7 +8,7 @@
 
 package lexer
 
-import "github.com/tamnd/gopy/tokenize"
+import "github.com/tamnd/gopy/token"
 
 // detectStringPrefix returns the (rawFlag, kind, ok) triple for a name
 // already scanned at start..s.cur followed by a quote at s.cur. Empty
@@ -93,9 +93,9 @@ func (s *State) startFString(prefixStart, prefixEnd int, quote int) Tok {
 	m.curlyBracketDepth = 0
 	m.curlyBracketExprStartDepth = -1
 
-	t := s.tokenSetup(tokenize.FSTRING_START, prefixStart, s.cur)
+	t := s.tokenSetup(token.FSTRING_START, prefixStart, s.cur)
 	if kind == kindTString {
-		t.Kind = tokenize.TSTRING_START
+		t.Kind = token.TSTRING_START
 	}
 	return t
 }
@@ -145,21 +145,21 @@ func (s *State) tokGetFStringModeImpl() Tok {
 // string kind.
 //
 // CPython: Parser/lexer/lexer.c:42 FTSTRING_END
-func (s *State) fstringEndKind(m *tokenizerMode) tokenize.Type {
+func (s *State) fstringEndKind(m *tokenizerMode) token.Type {
 	if m.stringKind == kindTString {
-		return tokenize.TSTRING_END
+		return token.TSTRING_END
 	}
-	return tokenize.FSTRING_END
+	return token.FSTRING_END
 }
 
 // fstringMiddleKind is the FSTRING_MIDDLE / TSTRING_MIDDLE selector.
 //
 // CPython: Parser/lexer/lexer.c:41 FTSTRING_MIDDLE
-func (s *State) fstringMiddleKind(m *tokenizerMode) tokenize.Type {
+func (s *State) fstringMiddleKind(m *tokenizerMode) token.Type {
 	if m.stringKind == kindTString {
-		return tokenize.TSTRING_MIDDLE
+		return token.TSTRING_MIDDLE
 	}
-	return tokenize.FSTRING_MIDDLE
+	return token.FSTRING_MIDDLE
 }
 
 // fstringMiddle scans literal text up to the next { or } or closing

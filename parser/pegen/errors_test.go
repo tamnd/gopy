@@ -5,7 +5,7 @@ import (
 
 	perrors "github.com/tamnd/gopy/parser/errors"
 	"github.com/tamnd/gopy/parser/lexer"
-	"github.com/tamnd/gopy/tokenize"
+	"github.com/tamnd/gopy/token"
 )
 
 func newPforTest(src string) *Parser {
@@ -57,7 +57,7 @@ func TestShallowErrorDoesNotOverwriteDeeper(t *testing.T) {
 func TestExpectForcedPinsExpectedToken(t *testing.T) {
 	p := newPforTest("foo\n")
 	_ = p.Peek()
-	if got := p.ExpectForced(tokenize.COLON, ":"); got != nil {
+	if got := p.ExpectForced(token.COLON, ":"); got != nil {
 		t.Fatalf("ExpectForced returned %v, want nil on miss", got)
 	}
 	se := p.PinnedError()

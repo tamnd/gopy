@@ -1,4 +1,4 @@
-// Command tokens_go generates tokenize/types_gen.go from CPython 3.14
+// Command tokens_go generates token/types_gen.go from CPython 3.14
 // source.
 //
 // Inputs:
@@ -9,14 +9,14 @@
 //     adds on top of the C tokenizer's set).
 //
 // Output:
-//   - <repo>/tokenize/types_gen.go: typed Type constants and the
+//   - <repo>/token/types_gen.go: typed Type constants and the
 //     tokenNames lookup table.
 //
 // Run with:
 //
 //	go run ./tools/tokens_go \
 //	  -cpython=$HOME/cpython-314 \
-//	  -out=tokenize/types_gen.go
+//	  -out=token/types_gen.go
 //
 // The CPython source is not vendored. The output file is checked in
 // so the runtime build has no Python dependency.
@@ -141,7 +141,7 @@ func emit(values map[string]int) ([]byte, error) {
 	fmt.Fprintln(&buf, "// CPython: Include/internal/pycore_token.h")
 	fmt.Fprintln(&buf, "// CPython: Grammar/Tokens")
 	fmt.Fprintln(&buf)
-	fmt.Fprintln(&buf, "package tokenize")
+	fmt.Fprintln(&buf, "package token")
 	fmt.Fprintln(&buf)
 	fmt.Fprintln(&buf, "// Token kinds, numeric values pinned to CPython's token.h. The")
 	fmt.Fprintln(&buf, "// ALL_CAPS spellings preserve parity with `token.tok_name` so")

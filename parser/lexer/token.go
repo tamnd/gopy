@@ -4,7 +4,7 @@
 
 package lexer
 
-import "github.com/tamnd/gopy/tokenize"
+import "github.com/tamnd/gopy/token"
 
 // tokenSetup fills the boundary fields on a Tok the FSM has been
 // staging, then returns it. The C source mutates a caller-owned token
@@ -12,7 +12,7 @@ import "github.com/tamnd/gopy/tokenize"
 // the FSM works in offsets rather than pointers.
 //
 // CPython: Parser/lexer/state.c:131 _PyLexer_token_setup
-func (s *State) tokenSetup(kind tokenize.Type, start, end int) Tok {
+func (s *State) tokenSetup(kind token.Type, start, end int) Tok {
 	t := Tok{
 		Kind:        kind,
 		Level:       s.level,
@@ -42,7 +42,7 @@ func (s *State) tokenSetup(kind tokenize.Type, start, end int) Tok {
 // scanner needs to span the # ... newline range explicitly.
 //
 // CPython: Parser/lexer/state.c:118 _PyLexer_type_comment_token_setup
-func (s *State) typeCommentTokenSetup(kind tokenize.Type, startCol, endCol, start, end int) Tok {
+func (s *State) typeCommentTokenSetup(kind token.Type, startCol, endCol, start, end int) Tok {
 	return Tok{
 		Kind:        kind,
 		Level:       s.level,
@@ -59,11 +59,11 @@ func (s *State) typeCommentTokenSetup(kind tokenize.Type, startCol, endCol, star
 // opening quote sat instead of where the closing quote sat.
 //
 // CPython: Include/internal/pycore_token.h:96 ISSTRINGLIT
-func isStringLit(t tokenize.Type) bool {
+func isStringLit(t token.Type) bool {
 	switch t {
-	case tokenize.STRING,
-		tokenize.FSTRING_START, tokenize.FSTRING_MIDDLE, tokenize.FSTRING_END,
-		tokenize.TSTRING_START, tokenize.TSTRING_MIDDLE, tokenize.TSTRING_END:
+	case token.STRING,
+		token.FSTRING_START, token.FSTRING_MIDDLE, token.FSTRING_END,
+		token.TSTRING_START, token.TSTRING_MIDDLE, token.TSTRING_END:
 		return true
 	}
 	return false

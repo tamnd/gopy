@@ -11,7 +11,7 @@ import (
 	"testing"
 
 	"github.com/tamnd/gopy/parser/lexer"
-	"github.com/tamnd/gopy/tokenize"
+	"github.com/tamnd/gopy/token"
 )
 
 func tokenize_(t *testing.T, src string) []lexer.Tok {
@@ -21,7 +21,7 @@ func tokenize_(t *testing.T, src string) []lexer.Tok {
 	for {
 		tk := st.Get()
 		out = append(out, tk)
-		if tk.Kind == tokenize.ENDMARKER || tk.Kind == tokenize.ERRORTOKEN {
+		if tk.Kind == token.ENDMARKER || tk.Kind == token.ERRORTOKEN {
 			break
 		}
 		if len(out) > 10000 {
@@ -31,15 +31,15 @@ func tokenize_(t *testing.T, src string) []lexer.Tok {
 	return out
 }
 
-func kinds(toks []lexer.Tok) []tokenize.Type {
-	out := make([]tokenize.Type, len(toks))
+func kinds(toks []lexer.Tok) []token.Type {
+	out := make([]token.Type, len(toks))
 	for i, t := range toks {
 		out[i] = t.Kind
 	}
 	return out
 }
 
-func contains(toks []lexer.Tok, kind tokenize.Type) bool {
+func contains(toks []lexer.Tok, kind token.Type) bool {
 	for _, t := range toks {
 		if t.Kind == kind {
 			return true
@@ -52,29 +52,29 @@ func TestLexerCorpus(t *testing.T) {
 	cases := []struct {
 		name string
 		src  string
-		want []tokenize.Type
+		want []token.Type
 	}{
 		{
 			"empty",
 			"",
-			[]tokenize.Type{tokenize.ENDMARKER},
+			[]token.Type{token.ENDMARKER},
 		},
 		{
 			"simple_assign",
 			"x = 1\n",
-			[]tokenize.Type{
-				tokenize.NAME, tokenize.OP, tokenize.NUMBER,
-				tokenize.NEWLINE, tokenize.ENDMARKER,
+			[]token.Type{
+				token.NAME, token.OP, token.NUMBER,
+				token.NEWLINE, token.ENDMARKER,
 			},
 		},
 		{
 			"def",
 			"def f():\n    return 1\n",
-			[]tokenize.Type{
-				tokenize.NAME, tokenize.NAME, tokenize.OP, tokenize.OP,
-				tokenize.OP, tokenize.NEWLINE, tokenize.INDENT,
-				tokenize.NAME, tokenize.NUMBER, tokenize.NEWLINE,
-				tokenize.DEDENT, tokenize.ENDMARKER,
+			[]token.Type{
+				token.NAME, token.NAME, token.OP, token.OP,
+				token.OP, token.NEWLINE, token.INDENT,
+				token.NAME, token.NUMBER, token.NEWLINE,
+				token.DEDENT, token.ENDMARKER,
 			},
 		},
 		{
@@ -91,7 +91,7 @@ func TestLexerCorpus(t *testing.T) {
 				t.Errorf("%s: kinds = %v want %v", c.name, got, c.want)
 			}
 		}
-		if !contains(toks, tokenize.ENDMARKER) {
+		if !contains(toks, token.ENDMARKER) {
 			t.Errorf("%s: missing ENDMARKER", c.name)
 		}
 	}
@@ -106,7 +106,7 @@ func TestLexerStringLiterals(t *testing.T) {
 		`b'bytes'`,
 	} {
 		toks := tokenize_(t, src+"\n")
-		if !contains(toks, tokenize.STRING) {
+		if !contains(toks, token.STRING) {
 			t.Errorf("%q: no STRING token", src)
 		}
 	}
@@ -114,7 +114,7 @@ func TestLexerStringLiterals(t *testing.T) {
 
 func TestLexerFString(t *testing.T) {
 	toks := tokenize_(t, "f'a{b}c'\n")
-	if !contains(toks, tokenize.FSTRING_START) || !contains(toks, tokenize.FSTRING_END) {
+	if !contains(toks, token.FSTRING_START) || !contains(toks, token.FSTRING_END) {
 		t.Errorf("f-string brackets missing in %v", kinds(toks))
 	}
 }
@@ -123,7 +123,7 @@ func TestLexerErrUnterminatedString(t *testing.T) {
 	st := lexer.FromString("'unterminated\n", lexer.ModeFile)
 	for {
 		tk := st.Get()
-		if tk.Kind == tokenize.ENDMARKER || tk.Kind == tokenize.ERRORTOKEN {
+		if tk.Kind == token.ENDMARKER || tk.Kind == token.ERRORTOKEN {
 			break
 		}
 	}
@@ -150,7 +150,7 @@ func TestLexerCorpusKindNames(t *testing.T) {
 	}
 }
 
-func sameKinds(a, b []tokenize.Type) bool {
+func sameKinds(a, b []token.Type) bool {
 	if len(a) != len(b) {
 		return false
 	}

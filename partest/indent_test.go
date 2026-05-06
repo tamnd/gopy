@@ -11,10 +11,10 @@ import (
 	"testing"
 
 	"github.com/tamnd/gopy/parser/lexer"
-	"github.com/tamnd/gopy/tokenize"
+	"github.com/tamnd/gopy/token"
 )
 
-func countKind(toks []lexer.Tok, k tokenize.Type) int {
+func countKind(toks []lexer.Tok, k token.Type) int {
 	n := 0
 	for _, t := range toks {
 		if t.Kind == k {
@@ -39,8 +39,8 @@ func TestIndentDedentPairs(t *testing.T) {
 	}
 	for _, c := range cases {
 		toks := tokenize_(t, c.src)
-		gotI := countKind(toks, tokenize.INDENT)
-		gotD := countKind(toks, tokenize.DEDENT)
+		gotI := countKind(toks, token.INDENT)
+		gotD := countKind(toks, token.DEDENT)
 		if gotI != c.wantIndents || gotD != c.wantDedents {
 			t.Errorf("%s: indents=%d dedents=%d, want %d/%d (kinds=%v)",
 				c.name, gotI, gotD, c.wantIndents, c.wantDedents, kinds(toks))
@@ -52,7 +52,7 @@ func TestDedentBalances(t *testing.T) {
 	// Every INDENT must be matched by a DEDENT before ENDMARKER.
 	src := "if a:\n    if b:\n        c\n        d\n    e\nf\n"
 	toks := tokenize_(t, src)
-	if countKind(toks, tokenize.INDENT) != countKind(toks, tokenize.DEDENT) {
+	if countKind(toks, token.INDENT) != countKind(toks, token.DEDENT) {
 		t.Errorf("INDENT/DEDENT not balanced: %v", kinds(toks))
 	}
 }

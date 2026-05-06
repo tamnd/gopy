@@ -23,7 +23,7 @@ import (
 	"strings"
 )
 
-// exactTokenTypes maps an operator literal to its tokenize.Type
+// exactTokenTypes maps an operator literal to its token.Type
 // constant name. Mirrors token.EXACT_TOKEN_TYPES from CPython.
 //
 // CPython: Lib/token.py EXACT_TOKEN_TYPES
@@ -218,13 +218,13 @@ func (e *emitter) writePreamble() {
 	e.buf.WriteString("import (\n")
 	e.buf.WriteString("\t\"errors\"\n\n")
 	e.buf.WriteString("\t\"github.com/tamnd/gopy/ast\"\n")
-	e.buf.WriteString("\t\"github.com/tamnd/gopy/tokenize\"\n")
+	e.buf.WriteString("\t\"github.com/tamnd/gopy/token\"\n")
 	e.buf.WriteString(")\n\n")
 	e.buf.WriteString("// ErrParserNotImplemented is returned by Dispatch while the\n")
 	e.buf.WriteString("// per-rule emitter still produces placeholder action results.\n")
 	e.buf.WriteString("// The real AST surface lands with the action translator (M6).\n")
 	e.buf.WriteString("var ErrParserNotImplemented = errors.New(\"pegen: generated rule bodies not yet emitted\")\n\n")
-	e.buf.WriteString("var _ = tokenize.NAME // keep import alive when no rule uses it.\n")
+	e.buf.WriteString("var _ = token.NAME // keep import alive when no rule uses it.\n")
 	e.buf.WriteString("var _ = ast.Add       // keep import alive when no rule uses it.\n\n")
 }
 
@@ -623,7 +623,7 @@ func (e *emitter) callNameLeaf(x *NameLeaf) callSpec {
 		return callSpec{varName: "string_var", expr: "stringToken(p)", shape: shapeBlocking}
 	}
 	if tok, ok := builtinTokens[x.Value]; ok {
-		return callSpec{varName: lower(x.Value), expr: "p.ExpectToken(tokenize." + tok + ")", shape: shapeBlocking}
+		return callSpec{varName: lower(x.Value), expr: "p.ExpectToken(token." + tok + ")", shape: shapeBlocking}
 	}
 	return callSpec{varName: x.Value, expr: "parseRule_" + x.Value + "(p)", shape: shapeBlocking}
 }
@@ -634,7 +634,7 @@ func (e *emitter) callStringLeaf(x *StringLeaf) callSpec {
 		return callSpec{varName: "kw", expr: "p.ExpectSoftKeyword(" + strconv.Quote(s) + ")", shape: shapeBlocking}
 	}
 	if tok, ok := exactTokenTypes[s]; ok {
-		return callSpec{varName: "op", expr: "p.ExpectToken(tokenize." + tok + ")", shape: shapeBlocking}
+		return callSpec{varName: "op", expr: "p.ExpectToken(token." + tok + ")", shape: shapeBlocking}
 	}
 	return callSpec{varName: "kw", expr: "p.ExpectName(" + strconv.Quote(s) + ")", shape: shapeBlocking}
 }
@@ -652,7 +652,7 @@ func (e *emitter) callForced(x *Forced) callSpec {
 		s, soft := unquoteLeaf(sl.Value)
 		if !soft {
 			if tok, okt := exactTokenTypes[s]; okt {
-				return callSpec{varName: "f", expr: "p.ExpectForced(tokenize." + tok + ", " + strconv.Quote(s) + ")", shape: shapeBlocking}
+				return callSpec{varName: "f", expr: "p.ExpectForced(token." + tok + ", " + strconv.Quote(s) + ")", shape: shapeBlocking}
 			}
 		}
 	}

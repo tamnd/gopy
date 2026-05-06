@@ -15,7 +15,7 @@ package pegen
 import (
 	perrors "github.com/tamnd/gopy/parser/errors"
 	"github.com/tamnd/gopy/parser/lexer"
-	"github.com/tamnd/gopy/tokenize"
+	"github.com/tamnd/gopy/token"
 )
 
 // Flag bits that mirror PyPARSE_*. The parser respects a subset; the
@@ -51,7 +51,7 @@ const (
 //
 // CPython: Parser/pegen.h:39 Token
 type Token struct {
-	Type     tokenize.Type
+	Type     token.Type
 	Bytes    []byte
 	Level    int
 	Lineno   int
@@ -148,7 +148,7 @@ func (p *Parser) fillToken() int {
 	}
 	tk := p.tok.Get()
 	kind := tk.Kind
-	if kind == tokenize.OP {
+	if kind == token.OP {
 		if exact, ok := opTokenType[string(tk.Bytes)]; ok {
 			kind = exact
 		}
@@ -170,60 +170,60 @@ func (p *Parser) fillToken() int {
 }
 
 // opTokenType maps the source bytes of an operator (or punctuation)
-// to the specific tokenize.Type CPython's tokenizer would assign.
+// to the specific token.Type CPython's tokenizer would assign.
 // The lexer flattens everything into OP; the grammar reads exact
 // types, so the parser has to upgrade on intake.
 //
 // CPython: Parser/lexer/lexer.c PyToken_OneChar / TwoChars / ThreeChars
-var opTokenType = map[string]tokenize.Type{
-	"(":   tokenize.LPAR,
-	")":   tokenize.RPAR,
-	"[":   tokenize.LSQB,
-	"]":   tokenize.RSQB,
-	"{":   tokenize.LBRACE,
-	"}":   tokenize.RBRACE,
-	",":   tokenize.COMMA,
-	":":   tokenize.COLON,
-	";":   tokenize.SEMI,
-	".":   tokenize.DOT,
-	"+":   tokenize.PLUS,
-	"-":   tokenize.MINUS,
-	"*":   tokenize.STAR,
-	"/":   tokenize.SLASH,
-	"|":   tokenize.VBAR,
-	"&":   tokenize.AMPER,
-	"<":   tokenize.LESS,
-	">":   tokenize.GREATER,
-	"=":   tokenize.EQUAL,
-	"%":   tokenize.PERCENT,
-	"~":   tokenize.TILDE,
-	"^":   tokenize.CIRCUMFLEX,
-	"@":   tokenize.AT,
-	"!":   tokenize.EXCLAMATION,
-	"==":  tokenize.EQEQUAL,
-	"!=":  tokenize.NOTEQUAL,
-	"<=":  tokenize.LESSEQUAL,
-	">=":  tokenize.GREATEREQUAL,
-	"<<":  tokenize.LEFTSHIFT,
-	">>":  tokenize.RIGHTSHIFT,
-	"**":  tokenize.DOUBLESTAR,
-	"+=":  tokenize.PLUSEQUAL,
-	"-=":  tokenize.MINEQUAL,
-	"*=":  tokenize.STAREQUAL,
-	"/=":  tokenize.SLASHEQUAL,
-	"%=":  tokenize.PERCENTEQUAL,
-	"&=":  tokenize.AMPEREQUAL,
-	"|=":  tokenize.VBAREQUAL,
-	"^=":  tokenize.CIRCUMFLEXEQUAL,
-	"<<=": tokenize.LEFTSHIFTEQUAL,
-	">>=": tokenize.RIGHTSHIFTEQUAL,
-	"**=": tokenize.DOUBLESTAREQUAL,
-	"//":  tokenize.DOUBLESLASH,
-	"//=": tokenize.DOUBLESLASHEQUAL,
-	"@=":  tokenize.ATEQUAL,
-	"->":  tokenize.RARROW,
-	"...": tokenize.ELLIPSIS,
-	":=":  tokenize.COLONEQUAL,
+var opTokenType = map[string]token.Type{
+	"(":   token.LPAR,
+	")":   token.RPAR,
+	"[":   token.LSQB,
+	"]":   token.RSQB,
+	"{":   token.LBRACE,
+	"}":   token.RBRACE,
+	",":   token.COMMA,
+	":":   token.COLON,
+	";":   token.SEMI,
+	".":   token.DOT,
+	"+":   token.PLUS,
+	"-":   token.MINUS,
+	"*":   token.STAR,
+	"/":   token.SLASH,
+	"|":   token.VBAR,
+	"&":   token.AMPER,
+	"<":   token.LESS,
+	">":   token.GREATER,
+	"=":   token.EQUAL,
+	"%":   token.PERCENT,
+	"~":   token.TILDE,
+	"^":   token.CIRCUMFLEX,
+	"@":   token.AT,
+	"!":   token.EXCLAMATION,
+	"==":  token.EQEQUAL,
+	"!=":  token.NOTEQUAL,
+	"<=":  token.LESSEQUAL,
+	">=":  token.GREATEREQUAL,
+	"<<":  token.LEFTSHIFT,
+	">>":  token.RIGHTSHIFT,
+	"**":  token.DOUBLESTAR,
+	"+=":  token.PLUSEQUAL,
+	"-=":  token.MINEQUAL,
+	"*=":  token.STAREQUAL,
+	"/=":  token.SLASHEQUAL,
+	"%=":  token.PERCENTEQUAL,
+	"&=":  token.AMPEREQUAL,
+	"|=":  token.VBAREQUAL,
+	"^=":  token.CIRCUMFLEXEQUAL,
+	"<<=": token.LEFTSHIFTEQUAL,
+	">>=": token.RIGHTSHIFTEQUAL,
+	"**=": token.DOUBLESTAREQUAL,
+	"//":  token.DOUBLESLASH,
+	"//=": token.DOUBLESLASHEQUAL,
+	"@=":  token.ATEQUAL,
+	"->":  token.RARROW,
+	"...": token.ELLIPSIS,
+	":=":  token.COLONEQUAL,
 }
 
 // Mark returns the current parse position. Pair with Reset.
@@ -261,12 +261,12 @@ func (p *Parser) Peek() *Token {
 // bytes and need to accept keyword tokens.
 //
 // CPython: Parser/pegen.c:296 _PyPegen_expect_token
-func (p *Parser) Expect(kind tokenize.Type) *Token {
+func (p *Parser) Expect(kind token.Type) *Token {
 	t := p.Peek()
 	if t == nil || t.Type != kind {
 		return nil
 	}
-	if kind == tokenize.NAME && hardKeywordSet[string(t.Bytes)] {
+	if kind == token.NAME && hardKeywordSet[string(t.Bytes)] {
 		return nil
 	}
 	p.mark++
@@ -278,7 +278,7 @@ func (p *Parser) Expect(kind tokenize.Type) *Token {
 // CPython: Parser/pegen.c:268 _PyPegen_expect_keyword
 func (p *Parser) ExpectName(s string) *Token {
 	t := p.Peek()
-	if t == nil || t.Type != tokenize.NAME || string(t.Bytes) != s {
+	if t == nil || t.Type != token.NAME || string(t.Bytes) != s {
 		return nil
 	}
 	p.mark++
