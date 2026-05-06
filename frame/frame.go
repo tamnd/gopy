@@ -234,3 +234,61 @@ func (f *Frame) LocalAt(i int) stackref.Ref { return f.LocalsPlus[i] }
 
 // SetLocal stores r at fast-local slot i.
 func (f *Frame) SetLocal(i int, r stackref.Ref) { f.LocalsPlus[i] = r }
+
+// The methods below satisfy objects.InterpreterFrame so the
+// Python-level frame wrapper in objects/ can read this activation
+// record without importing the frame package. The Frame-prefixed
+// names avoid colliding with the existing field names (Code,
+// Globals, etc.) on this same type.
+//
+// CPython: Include/cpython/frameobject.h PyFrame_Get* / FastLocal*
+
+// FrameCode returns the running Code object.
+func (f *Frame) FrameCode() *objects.Code { return f.Code }
+
+// FrameGlobals returns f_globals.
+func (f *Frame) FrameGlobals() objects.Object { return f.Globals }
+
+// FrameBuiltins returns f_builtins.
+func (f *Frame) FrameBuiltins() objects.Object { return f.Builtins }
+
+// FrameLocals returns f_locals (nil for fast-locals frames).
+func (f *Frame) FrameLocals() objects.Object { return f.Locals }
+
+// FrameBack returns the caller's activation record, or nil at the
+// thread root. The explicit nil return avoids handing back a typed
+// nil wrapped in a non-nil interface.
+func (f *Frame) FrameBack() objects.InterpreterFrame {
+	if f.Previous == nil {
+		return nil
+	}
+	return f.Previous
+}
+
+// FrameLasti returns the offset of the next instruction.
+func (f *Frame) FrameLasti() int { return f.InstrPtr }
+
+// FrameNumLocals returns the count of fast-local slots.
+func (f *Frame) FrameNumLocals() int { return NLocalsOf(f.Code) }
+
+// FrameFastLocal returns the fast local at index i, or nil if the
+// slot is unbound.
+func (f *Frame) FrameFastLocal(i int) objects.Object {
+	return f.LocalsPlus[i].AsObject()
+}
+
+// FrameNumCells returns the count of cell slots.
+func (f *Frame) FrameNumCells() int { return NCellsOf(f.Code) }
+
+// FrameCellLocal returns the cell var at index i, or nil if unbound.
+func (f *Frame) FrameCellLocal(i int) objects.Object {
+	return f.LocalsPlus[CellsStart(f.Code)+i].AsObject()
+}
+
+// FrameNumFrees returns the count of free-var slots.
+func (f *Frame) FrameNumFrees() int { return NFreeOf(f.Code) }
+
+// FrameFreeLocal returns the free var at index i, or nil if unbound.
+func (f *Frame) FrameFreeLocal(i int) objects.Object {
+	return f.LocalsPlus[FreesStart(f.Code)+i].AsObject()
+}
