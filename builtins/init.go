@@ -12,6 +12,7 @@ package builtins
 
 import (
 	"io"
+	"os"
 
 	"github.com/tamnd/gopy/objects"
 )
@@ -40,6 +41,11 @@ func Init(defaultFile io.Writer) (*objects.Dict, error) {
 
 	printFn := objects.NewBuiltinFunction("print", Print(defaultFile))
 	if err := setBuiltin(dict, "print", printFn); err != nil {
+		return nil, err
+	}
+
+	inputFn := objects.NewBuiltinFunction("input", Input(os.Stdin, defaultFile))
+	if err := setBuiltin(dict, "input", inputFn); err != nil {
 		return nil, err
 	}
 
