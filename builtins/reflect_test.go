@@ -72,8 +72,8 @@ func TestCallableSplits(t *testing.T) {
 // the same Python object across calls (identity invariant).
 func TestIdSameForIdenticalObject(t *testing.T) {
 	x := objects.NewStr("hello")
-	a, _ := Id([]objects.Object{x}, nil)
-	b, _ := Id([]objects.Object{x}, nil)
+	a, _ := ID([]objects.Object{x}, nil)
+	b, _ := ID([]objects.Object{x}, nil)
 	av, _ := a.(*objects.Int).Int64()
 	bv, _ := b.(*objects.Int).Int64()
 	if av != bv {

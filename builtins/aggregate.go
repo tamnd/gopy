@@ -4,6 +4,7 @@
 package builtins
 
 import (
+	"errors"
 	"fmt"
 	"sort"
 
@@ -13,7 +14,7 @@ import (
 
 // Sum ports builtin_sum_impl. Iterates iterable accumulating with
 // PyNumber_Add starting from start (default 0). Strings are rejected
-// to match CPython's "use ''.join() instead" guard.
+// to match CPython's "use ”.join() instead" guard.
 //
 // CPython: Python/bltinmodule.c:2658 builtin_sum_impl
 func Sum(args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error) {
@@ -38,7 +39,7 @@ func Sum(args []objects.Object, kwargs map[string]objects.Object) (objects.Objec
 	acc := start
 	for {
 		v, err := abstract.IterNext(it)
-		if err == objects.ErrStopIteration {
+		if errors.Is(err, objects.ErrStopIteration) {
 			return acc, nil
 		}
 		if err != nil {
@@ -95,7 +96,7 @@ func minMax(args []objects.Object, kwargs map[string]objects.Object, op objects.
 	var bestKey, bestVal objects.Object
 	for {
 		v, err := abstract.IterNext(it)
-		if err == objects.ErrStopIteration {
+		if errors.Is(err, objects.ErrStopIteration) {
 			break
 		}
 		if err != nil {
@@ -142,7 +143,7 @@ func Any(args []objects.Object, _ map[string]objects.Object) (objects.Object, er
 	}
 	for {
 		v, err := abstract.IterNext(it)
-		if err == objects.ErrStopIteration {
+		if errors.Is(err, objects.ErrStopIteration) {
 			return objects.False(), nil
 		}
 		if err != nil {
@@ -171,7 +172,7 @@ func All(args []objects.Object, _ map[string]objects.Object) (objects.Object, er
 	}
 	for {
 		v, err := abstract.IterNext(it)
-		if err == objects.ErrStopIteration {
+		if errors.Is(err, objects.ErrStopIteration) {
 			return objects.True(), nil
 		}
 		if err != nil {
@@ -217,7 +218,7 @@ func Sorted(args []objects.Object, kwargs map[string]objects.Object) (objects.Ob
 	var pairs []pair
 	for {
 		v, err := abstract.IterNext(it)
-		if err == objects.ErrStopIteration {
+		if errors.Is(err, objects.ErrStopIteration) {
 			break
 		}
 		if err != nil {

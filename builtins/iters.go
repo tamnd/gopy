@@ -10,6 +10,7 @@
 package builtins
 
 import (
+	"errors"
 	"fmt"
 
 	"github.com/tamnd/gopy/objects"
@@ -98,7 +99,7 @@ func Next(args []objects.Object, _ map[string]objects.Object) (objects.Object, e
 	if err == nil {
 		return v, nil
 	}
-	if err == objects.ErrStopIteration {
+	if errors.Is(err, objects.ErrStopIteration) {
 		if len(args) == 2 {
 			return args[1], nil
 		}

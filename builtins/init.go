@@ -121,7 +121,7 @@ func numericPanel() []struct {
 		{"bin", Bin},
 		{"oct", Oct},
 		{"hex", Hex},
-		{"ascii", Ascii},
+		{"ascii", ASCII},
 		{"format", Format},
 	}
 }
@@ -182,7 +182,7 @@ func reflectionPanel() []struct {
 		{"isinstance", IsInstance},
 		{"issubclass", IsSubclass},
 		{"callable", Callable},
-		{"id", Id},
+		{"id", ID},
 		{"hash", Hash},
 		{"repr", Repr},
 		{"str", StrOf},

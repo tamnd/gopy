@@ -13,6 +13,7 @@
 package builtins
 
 import (
+	"errors"
 	"fmt"
 	"math/big"
 
@@ -85,7 +86,7 @@ func parseIntString(s string, base int) (objects.Object, error) {
 func stripIntLiteral(s string, base int) string {
 	t := trimSpace(s)
 	sign := ""
-	if len(t) > 0 && (t[0] == '+' || t[0] == '-') {
+	if t != "" && (t[0] == '+' || t[0] == '-') {
 		sign = string(t[0])
 		t = t[1:]
 	}
@@ -114,7 +115,7 @@ func parseBase(s string, base int) int {
 		return base
 	}
 	t := trimSpace(s)
-	if len(t) > 0 && (t[0] == '+' || t[0] == '-') {
+	if t != "" && (t[0] == '+' || t[0] == '-') {
 		t = t[1:]
 	}
 	if len(t) > 1 && t[0] == '0' {
@@ -131,10 +132,10 @@ func parseBase(s string, base int) int {
 }
 
 func trimSpace(s string) string {
-	for len(s) > 0 && pystrconv.IsSpace(s[0]) {
+	for s != "" && pystrconv.IsSpace(s[0]) {
 		s = s[1:]
 	}
-	for len(s) > 0 && pystrconv.IsSpace(s[len(s)-1]) {
+	for s != "" && pystrconv.IsSpace(s[len(s)-1]) {
 		s = s[:len(s)-1]
 	}
 	return s
@@ -263,7 +264,7 @@ func drainIterable(o objects.Object) ([]objects.Object, error) {
 	var items []objects.Object
 	for {
 		v, err := abstract.IterNext(it)
-		if err == objects.ErrStopIteration {
+		if errors.Is(err, objects.ErrStopIteration) {
 			return items, nil
 		}
 		if err != nil {
@@ -295,7 +296,7 @@ func mergeFromPairs(dst *objects.Dict, iterable objects.Object) error {
 	i := 0
 	for {
 		v, err := abstract.IterNext(it)
-		if err == objects.ErrStopIteration {
+		if errors.Is(err, objects.ErrStopIteration) {
 			return nil
 		}
 		if err != nil {
