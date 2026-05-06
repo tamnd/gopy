@@ -11,6 +11,32 @@ folder; this file is the aggregated index.
 
 ## Unreleased
 
+## v0.10.0 - 2026-05-06
+
+See [`changelog/v0.10.0.md`](changelog/v0.10.0.md).
+
+* feat(gc): port the cycle collector. `gc_collect_main` runs end to
+  end: `update_refs` snapshots refcounts, `subtract_refs` walks
+  `tp_traverse` to surface intra-cycle references, `move_unreachable`
+  partitions the candidate set, `handle_weakrefs` clears weakrefs and
+  queues callbacks, `finalize_garbage` runs PEP 442 finalizers, and
+  survivors are promoted into the next generation.
+* feat(gc): three generations with the CPython default thresholds
+  (700 / 10 / 10), the permanent generation for `gc.freeze`, and the
+  per-referent weakref index on the collector state.
+* feat(gc): `gc` builtin module surface. `collect`, `enable`,
+  `disable`, `isenabled`, `get_threshold`, `set_threshold`,
+  `get_count`, `is_tracked`, `get_objects`, `get_referrers`,
+  `get_referents`, `freeze`, `unfreeze`, `get_freeze_count`, plus
+  `garbage` and `callbacks` list attributes.
+* feat(objects): `TpTraverse` slot on `Type`. `tuple`, `list`,
+  `dict`, and `set` walk their elements through the user-supplied
+  `visitproc`. The collector uses this slot to discover intra-cycle
+  edges.
+* feat(objects): `Weakref` (`weakref.ref`) Python object with
+  `Referent`, `Callback`, `Clear`, plus `WeakrefType` carrying the
+  `Call` slot (returns the referent or `None`), `Repr`, and `Hash`.
+
 ## v0.9.0 - 2026-05-06
 
 See [`changelog/v0.9.0.md`](changelog/v0.9.0.md).
