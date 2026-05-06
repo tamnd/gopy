@@ -503,6 +503,138 @@ func concat(parts ...[]byte) []byte {
 	return out
 }
 
+func TestEvalMatchMapping(t *testing.T) {
+	ts := state.NewThread()
+	d := objects.NewDict()
+	if err := d.SetItem(objects.NewStr("k"), objects.NewInt(1)); err != nil {
+		t.Fatal(err)
+	}
+	// LOAD_CONST 0 (dict); MATCH_MAPPING; RETURN_VALUE -> True (pops the bool).
+	co := &objects.Code{
+		Code: concat(
+			instr(compile.LOAD_CONST, 0),
+			instr(compile.MATCH_MAPPING, 0),
+			instr(compile.RETURN_VALUE, 0),
+		),
+		Consts:    []any{d},
+		Stacksize: 4,
+	}
+	v, err := EvalCode(ts, co, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v != objects.True() {
+		t.Errorf("got %v, want True", v)
+	}
+}
+
+func TestEvalMatchSequence(t *testing.T) {
+	ts := state.NewThread()
+	l := objects.NewList([]objects.Object{objects.NewInt(1)})
+	co := &objects.Code{
+		Code: concat(
+			instr(compile.LOAD_CONST, 0),
+			instr(compile.MATCH_SEQUENCE, 0),
+			instr(compile.RETURN_VALUE, 0),
+		),
+		Consts:    []any{l},
+		Stacksize: 4,
+	}
+	v, err := EvalCode(ts, co, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v != objects.True() {
+		t.Errorf("got %v, want True", v)
+	}
+}
+
+func TestEvalMatchSequenceFalse(t *testing.T) {
+	ts := state.NewThread()
+	co := &objects.Code{
+		Code: concat(
+			instr(compile.LOAD_CONST, 0),
+			instr(compile.MATCH_SEQUENCE, 0),
+			instr(compile.RETURN_VALUE, 0),
+		),
+		Consts:    []any{int64(7)},
+		Stacksize: 4,
+	}
+	v, err := EvalCode(ts, co, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v != objects.False() {
+		t.Errorf("got %v, want False", v)
+	}
+}
+
+func TestEvalMatchKeys(t *testing.T) {
+	ts := state.NewThread()
+	d := objects.NewDict()
+	if err := d.SetItem(objects.NewStr("a"), objects.NewInt(10)); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.SetItem(objects.NewStr("b"), objects.NewInt(20)); err != nil {
+		t.Fatal(err)
+	}
+	keys := objects.NewTuple([]objects.Object{
+		objects.NewStr("a"), objects.NewStr("b"),
+	})
+	// LOAD_CONST 0 (dict), LOAD_CONST 1 (keys), MATCH_KEYS, RETURN_VALUE -> tuple(10,20).
+	co := &objects.Code{
+		Code: concat(
+			instr(compile.LOAD_CONST, 0),
+			instr(compile.LOAD_CONST, 1),
+			instr(compile.MATCH_KEYS, 0),
+			instr(compile.RETURN_VALUE, 0),
+		),
+		Consts:    []any{d, keys},
+		Stacksize: 4,
+	}
+	v, err := EvalCode(ts, co, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tup, ok := v.(*objects.Tuple)
+	if !ok || tup.Len() != 2 {
+		t.Fatalf("got %T, want *Tuple len 2", v)
+	}
+	a, _ := tup.Item(0).(*objects.Int).Int64()
+	b, _ := tup.Item(1).(*objects.Int).Int64()
+	if a != 10 || b != 20 {
+		t.Errorf("got (%d,%d), want (10,20)", a, b)
+	}
+}
+
+func TestEvalMatchKeysMissing(t *testing.T) {
+	ts := state.NewThread()
+	d := objects.NewDict()
+	if err := d.SetItem(objects.NewStr("a"), objects.NewInt(10)); err != nil {
+		t.Fatal(err)
+	}
+	keys := objects.NewTuple([]objects.Object{
+		objects.NewStr("a"), objects.NewStr("missing"),
+	})
+	co := &objects.Code{
+		Code: concat(
+			instr(compile.LOAD_CONST, 0),
+			instr(compile.LOAD_CONST, 1),
+			instr(compile.MATCH_KEYS, 0),
+			instr(compile.RETURN_VALUE, 0),
+		),
+		Consts:    []any{d, keys},
+		Stacksize: 4,
+	}
+	v, err := EvalCode(ts, co, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v != objects.None() {
+		t.Errorf("got %v, want None on missing key", v)
+	}
+}
+
 func TestEvalGenerator(t *testing.T) {
 	ts := state.NewThread()
 	// A code object representing a generator that yields 42 once. Layout:
