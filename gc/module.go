@@ -50,9 +50,9 @@ func buildModule() (*objects.Module, error) {
 	return m, nil
 }
 
-// gcCollect implements gc.collect([generation]). v0.10's collector is
-// still a no-op so the int return is always zero; the cycle path
-// arrives with 1613-K.
+// gcCollect implements gc.collect([generation=NumGenerations-1]).
+// Defaults to a full collection (oldest generation) when no argument
+// is supplied, matching CPython's gc.collect() default.
 //
 // CPython: Modules/gcmodule.c:1822 gc_collect_impl
 func gcCollect(args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error) {
@@ -62,7 +62,19 @@ func gcCollect(args []objects.Object, kwargs map[string]objects.Object) (objects
 	if len(kwargs) != 0 {
 		return nil, fmt.Errorf("TypeError: collect() takes no keyword arguments")
 	}
-	return objects.NewInt(int64(Collect())), nil
+	gen := NumGenerations - 1
+	if len(args) == 1 {
+		x, ok := args[0].(*objects.Int)
+		if !ok {
+			return nil, fmt.Errorf("TypeError: collect() argument must be int, not %s", args[0].Type().Name)
+		}
+		v, fits := x.Int64()
+		if !fits {
+			return nil, fmt.Errorf("OverflowError: collect() argument out of range")
+		}
+		gen = int(v)
+	}
+	return objects.NewInt(int64(Collect(gen))), nil
 }
 
 // gcEnable / gcDisable / gcIsEnabled wrap the package-level toggles.

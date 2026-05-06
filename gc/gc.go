@@ -105,12 +105,3 @@ func IsTracked(o objects.Object) bool {
 	state.mu.Unlock()
 	return ok
 }
-
-// Collect runs the cycle collector. v0.3 has none, so this returns 0.
-// The signature is preserved so callers compile against v0.10 without
-// changes.
-//
-// CPython: Modules/gcmodule.c:L1430 gc_collect_main
-func Collect() int {
-	return 0
-}
