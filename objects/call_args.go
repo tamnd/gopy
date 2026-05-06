@@ -129,15 +129,15 @@ func MissingArgumentsError(qualname, kind string, names []string) error {
 // triggers the parenthetical "(and N keyword-only argument)" tail.
 //
 // CPython: Python/ceval.c:1487 too_many_positional
-func TooManyPositionalError(qualname string, given, atLeast, max, kwonlyGiven int) error {
+func TooManyPositionalError(qualname string, given, atLeast, atMost, kwonlyGiven int) error {
 	var sig string
 	plural := ""
-	if atLeast != max {
-		sig = fmt.Sprintf("from %d to %d", atLeast, max)
+	if atLeast != atMost {
+		sig = fmt.Sprintf("from %d to %d", atLeast, atMost)
 		plural = "s"
 	} else {
-		sig = fmt.Sprintf("%d", max)
-		if max != 1 {
+		sig = fmt.Sprintf("%d", atMost)
+		if atMost != 1 {
 			plural = "s"
 		}
 	}
@@ -260,8 +260,7 @@ func iterToSliceObj(o Object) ([]Object, error) {
 // isString returns true when o is a Python str. Used by the kwarg
 // validators in this file to enforce "keywords must be strings".
 func isString(o Object) bool {
-	switch o.(type) {
-	case *Unicode:
+	if _, ok := o.(*Unicode); ok {
 		return true
 	}
 	return o.Type() != nil && o.Type().Name == "str"

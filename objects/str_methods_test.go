@@ -277,14 +277,14 @@ func TestStrTranslate(t *testing.T) {
 	}
 }
 
-func TestStrIsAscii(t *testing.T) {
-	if !StrIsAscii("hello") {
+func TestStrIsASCII(t *testing.T) {
+	if !StrIsASCII("hello") {
 		t.Error("hello is ascii")
 	}
-	if StrIsAscii("café") {
+	if StrIsASCII("café") {
 		t.Error("café is not ascii")
 	}
-	if !StrIsAscii("") {
+	if !StrIsASCII("") {
 		t.Error("empty string is ascii (matches CPython)")
 	}
 }

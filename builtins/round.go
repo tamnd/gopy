@@ -25,7 +25,7 @@ func Round(args []objects.Object, _ map[string]objects.Object) (objects.Object, 
 	if len(args) < 1 || len(args) > 2 {
 		return nil, fmt.Errorf("TypeError: round expected 1 or 2 arguments, got %d", len(args))
 	}
-	var ndigits objects.Object = objects.None()
+	ndigits := objects.None()
 	if len(args) == 2 {
 		ndigits = args[1]
 	}
@@ -74,7 +74,7 @@ func roundInt(self *objects.Int, ndigits objects.Object) (objects.Object, error)
 
 // divmodNear returns (q, r) such that q*b + r == a and r is the
 // remainder of minimum absolute value, breaking ties toward an even
-// quotient. Mirrors _PyLong_DivmodNear's banker's-rounding behaviour
+// quotient. Mirrors _PyLong_DivmodNear's banker's-rounding behavior
 // without dragging in the full long arithmetic surface.
 //
 // CPython: Objects/longobject.c _PyLong_DivmodNear

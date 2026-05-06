@@ -197,4 +197,3 @@ func dictRepr(o Object) (string, error) {
 	b.WriteByte('}')
 	return b.String(), nil
 }
-

@@ -44,7 +44,7 @@ func nextDictPow2(n int) int {
 // next insert needs a resize first.
 //
 // CPython: Objects/dictobject.c:1799 (insert_combined_dict's dk_usable check)
-func loadAtCapacity(used, cap int) bool { return used+1 > usableFraction(cap) }
+func loadAtCapacity(used, capacity int) bool { return used >= usableFraction(capacity) }
 
 // dictInsert is the shared insert-or-replace path. The probing
 // dispatcher returns either the slot the key is already in (replace)

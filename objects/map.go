@@ -41,7 +41,7 @@ func init() {
 // CPython: Python/bltinmodule.c:1361 map_new
 func NewMap(fn Object, iterables []Object, strict bool) (*Map, error) {
 	if len(iterables) < 1 {
-		return nil, errors.New("TypeError: map() must have at least two arguments.")
+		return nil, errors.New("TypeError: map() must have at least two arguments")
 	}
 	iters := make([]Object, len(iterables))
 	for i, src := range iterables {

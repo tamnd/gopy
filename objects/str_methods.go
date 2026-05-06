@@ -37,7 +37,7 @@ func asUnicode(o Object) (string, bool) {
 // and end are negative-aware; they are clamped to [0, n] where n is
 // the rune count of the string.
 //
-// CPython: Objects/unicodeobject.c:L11949 ADJUST_INDICES (unicode flavour)
+// CPython: Objects/unicodeobject.c:L11949 ADJUST_INDICES (unicode flavor)
 func clampStrSlice(n, start, end int) (int, int) {
 	if start < 0 {
 		start += n
@@ -275,7 +275,7 @@ func strSplitWhitespace(s string, maxsplit int, reverse bool) []string {
 }
 
 // StrSplitLines ports str.splitlines: line-terminator-aware split.
-// CPython recognises \r, \n, \r\n, plus the wider universal-newline
+// CPython recognizes \r, \n, \r\n, plus the wider universal-newline
 // set (\v, \f, \x1c..\x1e, \x85,  ,  ).
 //
 // CPython: Objects/unicodeobject.c:L13342 unicode_splitlines_impl
@@ -525,7 +525,7 @@ func StrZFill(s string, width int) string {
 		return s
 	}
 	pad := strings.Repeat("0", width-n)
-	if len(s) > 0 && (s[0] == '+' || s[0] == '-') {
+	if s != "" && (s[0] == '+' || s[0] == '-') {
 		return string(s[0]) + pad + s[1:]
 	}
 	return pad + s
@@ -541,11 +541,9 @@ func StrExpandTabs(s string, tabsize int) string {
 	for _, r := range s {
 		switch r {
 		case '\t':
-			n := tabsize
+			var n int
 			if tabsize > 0 {
 				n = tabsize - col%tabsize
-			} else {
-				n = 0
 			}
 			for i := 0; i < n; i++ {
 				b.WriteByte(' ')
@@ -587,18 +585,18 @@ func StrTranslate(s string, table map[rune]rune) string {
 // map to -1.
 //
 // CPython: Objects/unicodeobject.c:L13476 maketrans
-func MakeStrTrans(from, to, delete string) (map[rune]rune, error) {
+func MakeStrTrans(from, to, drop string) (map[rune]rune, error) {
 	fromR := []rune(from)
 	toR := []rune(to)
 	if len(fromR) != len(toR) {
 		return nil, errors.New(
 			"ValueError: the first two maketrans arguments must have equal length")
 	}
-	m := make(map[rune]rune, len(fromR)+len(delete))
+	m := make(map[rune]rune, len(fromR)+len(drop))
 	for i, r := range fromR {
 		m[r] = toR[i]
 	}
-	for _, r := range delete {
+	for _, r := range drop {
 		m[r] = -1
 	}
 	return m, nil
@@ -620,7 +618,7 @@ func MakeStrTrans(from, to, delete string) (map[rune]rune, error) {
 // CPython: Objects/unicodeobject.c:L12470 unicode_isidentifier_impl
 // CPython: Objects/unicodeobject.c:L12485 unicode_isprintable_impl
 
-func StrIsAscii(s string) bool {
+func StrIsASCII(s string) bool {
 	for i := 0; i < len(s); i++ {
 		if s[i] >= 0x80 {
 			return false

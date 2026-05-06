@@ -32,9 +32,7 @@ func TestReloadModuleNilArgRejected(t *testing.T) {
 // TestReloadModuleMissingNameRejected pins that a module without
 // __name__ in its dict is rejected with TypeError.
 func TestReloadModuleMissingNameRejected(t *testing.T) {
-	mod := &objects.Module{}
-	// Drive the dict initializer through NewModule then strip __name__.
-	mod = objects.NewModule("temp")
+	mod := objects.NewModule("temp")
 	_ = mod.Dict().DelItem(objects.NewStr("__name__"))
 	if _, err := ReloadModule(&stubExec{}, mod); err == nil {
 		t.Fatal("expected TypeError for module with no __name__")

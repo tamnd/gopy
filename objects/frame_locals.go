@@ -11,9 +11,9 @@ package objects
 // FrameFastToLocals returns a fresh dict that maps the frame's local
 // names to their current values. The order matches CPython:
 //
-//   1. fast locals (Code.Varnames)
-//   2. cell vars   (Code.Cellvars)
-//   3. free vars   (Code.Freevars)
+//  1. fast locals (Code.Varnames)
+//  2. cell vars   (Code.Cellvars)
+//  3. free vars   (Code.Freevars)
 //
 // Unbound slots (Null in the activation record) are skipped, matching
 // CPython's "missing key" behavior. The returned dict is owned by the

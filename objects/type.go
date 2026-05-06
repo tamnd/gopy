@@ -43,17 +43,17 @@ type Type struct {
 	Bases []*Type
 	MRO   []*Type
 
-	Repr     func(o Object) (string, error)
-	Str      func(o Object) (string, error)
-	Hash     func(o Object) (int64, error)
-	RichCmp  func(a, b Object, op CompareOp) (Object, error)
+	Repr    func(o Object) (string, error)
+	Str     func(o Object) (string, error)
+	Hash    func(o Object) (int64, error)
+	RichCmp func(a, b Object, op CompareOp) (Object, error)
 	// Format is the tp_format slot. Receives the object and the
 	// format-spec string (the part after the colon in str.format).
 	// When nil, the protocol-level Format helper falls back to Str
 	// for empty specs and raises TypeError otherwise.
 	//
 	// CPython: Objects/typeobject.c:L8260 slot_tp_format
-	Format func(o Object, spec string) (string, error)
+	Format   func(o Object, spec string) (string, error)
 	Iter     func(o Object) (Object, error)
 	IterNext func(o Object) (Object, error)
 	Call     func(o Object, args []Object, kwargs map[string]Object) (Object, error)

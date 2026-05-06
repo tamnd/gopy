@@ -1,6 +1,9 @@
 package objects
 
-import "testing"
+import (
+	"errors"
+	"testing"
+)
 
 func TestUsableFractionMatchesCpythonCurve(t *testing.T) {
 	// USABLE_FRACTION(n) = 2n/3
@@ -64,7 +67,7 @@ func TestDelItemLeavesDummySlot(t *testing.T) {
 func TestDelItemMissingKey(t *testing.T) {
 	d := NewDict()
 	_ = d.SetItem(NewStr("a"), NewInt(1))
-	if err := d.DelItem(NewStr("nope")); err != errKeyNotFound {
+	if err := d.DelItem(NewStr("nope")); !errors.Is(err, errKeyNotFound) {
 		t.Errorf("missing-key delete err = %v, want errKeyNotFound", err)
 	}
 }

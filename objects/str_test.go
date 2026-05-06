@@ -9,7 +9,7 @@ func TestUnicodeKindAscii(t *testing.T) {
 	if s.Kind() != StrKind1Byte {
 		t.Errorf("kind = %d, want %d", s.Kind(), StrKind1Byte)
 	}
-	if !s.IsAscii() {
+	if !s.IsASCII() {
 		t.Error("'hello' should classify as ASCII")
 	}
 	if s.Length() != 5 {
@@ -23,7 +23,7 @@ func TestUnicodeKindLatin1(t *testing.T) {
 	if s.Kind() != StrKind1Byte {
 		t.Errorf("kind = %d, want 1", s.Kind())
 	}
-	if s.IsAscii() {
+	if s.IsASCII() {
 		t.Error("'café' should not classify as ASCII")
 	}
 	if s.Length() != 4 {
@@ -37,7 +37,7 @@ func TestUnicodeKindBmp(t *testing.T) {
 	if s.Kind() != StrKind2Byte {
 		t.Errorf("kind = %d, want 2", s.Kind())
 	}
-	if s.IsAscii() {
+	if s.IsASCII() {
 		t.Error("'中文' is not ASCII")
 	}
 	if s.Length() != 2 {
@@ -61,7 +61,7 @@ func TestUnicodeEmpty(t *testing.T) {
 	if s.Kind() != StrKind1Byte {
 		t.Errorf("empty string kind = %d, want 1", s.Kind())
 	}
-	if !s.IsAscii() {
+	if !s.IsASCII() {
 		t.Error("empty string should be ascii")
 	}
 	if s.Length() != 0 {

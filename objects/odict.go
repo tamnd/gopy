@@ -46,10 +46,10 @@ var odictNodeType = NewType("_odictnode", []*Type{objectType})
 // CPython: Objects/odictobject.c:489 _odictobject
 type OrderedDict struct {
 	Header
-	inner *Dict       // key -> *odictNode
-	first *odictNode  // head of insertion-order list
-	last  *odictNode  // tail of insertion-order list
-	state uint64      // bumps on link-list mutation; iter checks
+	inner *Dict      // key -> *odictNode
+	first *odictNode // head of insertion-order list
+	last  *odictNode // tail of insertion-order list
+	state uint64     // bumps on link-list mutation; iter checks
 }
 
 // OrderedDictType is the type singleton for collections.OrderedDict.

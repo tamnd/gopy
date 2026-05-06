@@ -21,7 +21,7 @@ import (
 // CPython: Python/bltinmodule.c:1361 map_new
 func Map(args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error) {
 	if len(args) < 2 {
-		return nil, fmt.Errorf("TypeError: map() must have at least two arguments.")
+		return nil, fmt.Errorf("TypeError: map() must have at least two arguments")
 	}
 	strict := false
 	for k, v := range kwargs {

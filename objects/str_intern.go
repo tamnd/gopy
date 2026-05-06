@@ -18,9 +18,13 @@ var (
 
 // InternInPlace returns the canonical interned *Unicode for *p,
 // rewriting *p so callers see the canonical pointer. Equivalent
-// strings share the same *Unicode after this call.
+// strings share the same *Unicode after this call. The pointer-to-
+// interface signature is the contract CPython exposes; callers rely
+// on the rewrite to swap in the canonical pointer.
 //
 // CPython: Objects/unicodeobject.c:16135 PyUnicode_InternInPlace
+//
+//nolint:gocritic // ptrToRefParam: the pointer-rewrite is the API contract.
 func InternInPlace(p *Object) {
 	if p == nil || *p == nil {
 		return

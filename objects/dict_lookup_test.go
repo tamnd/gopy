@@ -1,6 +1,9 @@
 package objects
 
-import "testing"
+import (
+	"errors"
+	"testing"
+)
 
 func TestNewDictStartsUnicodeKind(t *testing.T) {
 	d := NewDict()
@@ -58,7 +61,7 @@ func TestDispatchUnicodeGenericPath(t *testing.T) {
 	// without crashing and route through the unicode/generic variant.
 	d := NewDict()
 	_ = d.SetItem(NewStr("k"), NewInt(1))
-	if _, err := d.GetItem(NewInt(0)); err != errKeyNotFound {
+	if _, err := d.GetItem(NewInt(0)); !errors.Is(err, errKeyNotFound) {
 		t.Errorf("non-str lookup on str-only dict should miss; got err = %v", err)
 	}
 }

@@ -46,11 +46,11 @@ type generation struct {
 	count     int
 }
 
-// genStats mirrors CPython's struct gc_generation_stats: per-generation
+// GenStats mirrors CPython's struct gc_generation_stats: per-generation
 // counters that get_stats reports back to user code.
 //
 // CPython: Include/internal/pycore_interp_structs.h gc_generation_stats
-type genStats struct {
+type GenStats struct {
 	collections   int
 	collected     int
 	uncollectable int
@@ -104,7 +104,7 @@ type gcState struct {
 
 	// stats accumulates per-generation collection counters surfaced
 	// through gc.get_stats.
-	stats [NumGenerations]genStats
+	stats [NumGenerations]GenStats
 
 	// finalized records which objects have already had their
 	// finalizer run, so gc.is_finalized can answer truthfully even
@@ -127,9 +127,9 @@ var state = newGCState()
 // CPython: Python/gc.c:113 _PyGC_InitState
 func newGCState() *gcState {
 	s := &gcState{
-		enabled:    true,
-		finalizers: make(map[objects.Object]Finalizer),
-		tracked:    make(map[objects.Object]*gcHead),
+		enabled:     true,
+		finalizers:  make(map[objects.Object]Finalizer),
+		tracked:     make(map[objects.Object]*gcHead),
 		weakrefs:    make(map[objects.Object][]*objects.Weakref),
 		weakProxies: make(map[objects.Object][]*objects.WeakProxy),
 		finalized:   make(map[objects.Object]struct{}),
@@ -230,13 +230,11 @@ func GetDebug() int {
 // uncollectable) counters. The returned slice has length NumGenerations.
 //
 // CPython: Modules/gcmodule.c:365 gc_get_stats_impl
-func GetStats() []genStats {
+func GetStats() []GenStats {
 	state.mu.Lock()
 	defer state.mu.Unlock()
-	out := make([]genStats, NumGenerations)
-	for i := range state.stats {
-		out[i] = state.stats[i]
-	}
+	out := make([]GenStats, NumGenerations)
+	copy(out, state.stats[:])
 	return out
 }
 

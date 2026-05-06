@@ -20,7 +20,7 @@ import (
 	"github.com/tamnd/gopy/objects"
 )
 
-// Input returns the input(prompt='') closure. defaultIn is the
+// Input returns the input(prompt=”) closure. defaultIn is the
 // reader the line gets pulled from (CPython uses sys.stdin);
 // defaultOut is the writer the prompt gets flushed to (CPython uses
 // sys.stdout).

@@ -95,14 +95,15 @@ func NewFunctionWithQualName(code *Code, globals Object, qualname string) (*Func
 
 func newFunction(name string, code *Code, globals Object, qualname string) (*Function, error) {
 	f := &Function{Name: name, Code: code, Globals: globals}
-	if qualname != "" {
+	switch {
+	case qualname != "":
 		f.Qualname = qualname
-	} else if code != nil {
+	case code != nil:
 		f.Qualname = code.Qualname
 		if f.Qualname == "" {
 			f.Qualname = name
 		}
-	} else {
+	default:
 		f.Qualname = name
 	}
 	f.Doc = functionDocFromCode(code)

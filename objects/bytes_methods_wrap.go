@@ -40,7 +40,7 @@ func asBytesLike(o Object) ([]byte, bool) {
 // clampBytesSlice maps Python's optional [start:end] slice arguments
 // onto a real [lo, hi) range against a payload of length n. Negative
 // values count from the end; values past the bounds are clamped. A
-// missing argument is signalled by start=0, end=intMax (matching the
+// missing argument is signaled by start=0, end=intMax (matching the
 // clinic defaults of bytes.find / bytes.count).
 //
 // CPython: Objects/bytesobject.c:2117 ADJUST_INDICES (the macro
@@ -151,11 +151,11 @@ func (b *Bytes) EndsWith(suffix []byte, start, end int) bool {
 	return bytes.HasSuffix(b.v[lo:hi], suffix)
 }
 
-// isAsciiSpace returns true for the bytes Py_ISSPACE recognises:
+// isASCIISpace returns true for the bytes Py_ISSPACE recognizes:
 // space, tab, newline, vertical tab, form feed, carriage return.
 //
 // CPython: Include/internal/pycore_ctype.h Py_ISSPACE
-func isAsciiSpace(c byte) bool {
+func isASCIISpace(c byte) bool {
 	switch c {
 	case ' ', '\t', '\n', '\v', '\f', '\r':
 		return true
@@ -170,7 +170,8 @@ func isAsciiSpace(c byte) bool {
 //
 // CPython: Objects/bytesobject.c:1768 bytes_split_impl
 // CPython: Objects/stringlib/split.h:60 stringlib_split (and
-//          stringlib_split_whitespace)
+//
+//	stringlib_split_whitespace)
 func (b *Bytes) Split(sep []byte, maxsplit int) ([]*Bytes, error) {
 	if sep == nil {
 		return splitWhitespace(b.v, maxsplit, false), nil
@@ -227,7 +228,8 @@ func (b *Bytes) RSplit(sep []byte, maxsplit int) ([]*Bytes, error) {
 // the rightmost cuts (the rsplit case).
 //
 // CPython: Objects/stringlib/split.h:8 STRIPSPACE / split_whitespace
-//          and rsplit_whitespace
+//
+//	and rsplit_whitespace
 func splitWhitespace(v []byte, maxsplit int, reverse bool) []*Bytes {
 	if maxsplit < 0 {
 		maxsplit = bytesMaxIndex
@@ -237,7 +239,7 @@ func splitWhitespace(v []byte, maxsplit int, reverse bool) []*Bytes {
 		i := 0
 		n := len(v)
 		for i < n {
-			for i < n && isAsciiSpace(v[i]) {
+			for i < n && isASCIISpace(v[i]) {
 				i++
 			}
 			if i >= n {
@@ -248,7 +250,7 @@ func splitWhitespace(v []byte, maxsplit int, reverse bool) []*Bytes {
 				return out
 			}
 			j := i
-			for j < n && !isAsciiSpace(v[j]) {
+			for j < n && !isASCIISpace(v[j]) {
 				j++
 			}
 			out = append(out, NewBytes(v[i:j]))
@@ -260,7 +262,7 @@ func splitWhitespace(v []byte, maxsplit int, reverse bool) []*Bytes {
 	n := len(v)
 	j := n
 	for j > 0 {
-		for j > 0 && isAsciiSpace(v[j-1]) {
+		for j > 0 && isASCIISpace(v[j-1]) {
 			j--
 		}
 		if j <= 0 {
@@ -271,7 +273,7 @@ func splitWhitespace(v []byte, maxsplit int, reverse bool) []*Bytes {
 			break
 		}
 		i := j
-		for i > 0 && !isAsciiSpace(v[i-1]) {
+		for i > 0 && !isASCIISpace(v[i-1]) {
 			i--
 		}
 		out = append(out, NewBytes(v[i:j]))
@@ -317,7 +319,7 @@ func (b *Bytes) SplitLines(keepends bool) []*Bytes {
 }
 
 // Partition cuts b at the first occurrence of sep into (head, sep,
-// tail). When sep doesn't occur, the result is (b, b'', b''). An
+// tail). When sep doesn't occur, the result is (b, b”, b”). An
 // empty sep is a ValueError.
 //
 // CPython: Objects/bytesobject.c:1807 bytes_partition_impl
@@ -337,7 +339,7 @@ func (b *Bytes) Partition(sep []byte) (*Bytes, *Bytes, *Bytes, error) {
 }
 
 // RPartition is Partition that searches from the right. The miss
-// case mirrors CPython: (b'', b'', b) instead of (b, b'', b'').
+// case mirrors CPython: (b”, b”, b) instead of (b, b”, b”).
 //
 // CPython: Objects/bytesobject.c:1834 bytes_rpartition_impl
 // CPython: Objects/stringlib/partition.h:55 stringlib_rpartition
@@ -391,11 +393,11 @@ func (b *Bytes) Join(seq []Object) (*Bytes, error) {
 //
 // CPython: Objects/bytesobject.c:2310 bytes_replace_impl
 // CPython: Objects/stringlib/transmogrify.h:444 stringlib_replace
-func (b *Bytes) Replace(old, new []byte, count int) *Bytes {
+func (b *Bytes) Replace(old, repl []byte, count int) *Bytes {
 	if count < 0 {
 		count = -1
 	}
-	return NewBytes(bytes.Replace(b.v, old, new, count))
+	return NewBytes(bytes.Replace(b.v, old, repl, count))
 }
 
 // stripPredicate returns a function that reports whether c is in the
@@ -405,7 +407,7 @@ func (b *Bytes) Replace(old, new []byte, count int) *Bytes {
 // CPython: Objects/bytesobject.c:1990 do_argstrip helpers
 func stripPredicate(chars []byte) func(byte) bool {
 	if chars == nil {
-		return isAsciiSpace
+		return isASCIISpace
 	}
 	var set [256]bool
 	for _, c := range chars {
@@ -667,7 +669,7 @@ func BytesFromHex(s string) (*Bytes, error) {
 	out := make([]byte, 0, len(s)/2)
 	i, n := 0, len(s)
 	for i < n {
-		for i < n && isAsciiSpace(s[i]) {
+		for i < n && isASCIISpace(s[i]) {
 			i++
 		}
 		if i >= n {

@@ -450,14 +450,8 @@ func formatFloat(v Object, arg *fmtArg) (string, error) {
 	}
 	verb := byte(arg.ch)
 	out := strconv.FormatFloat(f, verb, prec, 64)
-	if (arg.ch == 'g' || arg.ch == 'G') && arg.flags&fmtAlt == 0 && prec > 0 {
-		// Go's 'g' already strips trailing zeros after the decimal,
-		// matching CPython; nothing to do.
-	}
-	if !strings.ContainsAny(out, ".eE") && (arg.ch == 'g' || arg.ch == 'G') {
-		// CPython appends nothing extra; Go matches. Keep the branch
-		// for symmetry with the reference.
-	}
+	// Go's 'g'/'G' already match CPython for trailing-zero stripping
+	// and bare-int presentation, so no post-processing is needed here.
 	if f >= 0 {
 		switch {
 		case arg.flags&fmtSign != 0:
@@ -571,7 +565,7 @@ func writePadded(out *strings.Builder, arg *fmtArg, body string) {
 		out.WriteString(strings.Repeat(" ", pad))
 	case arg.flags&fmtZero != 0 && arg.signable:
 		signEnd := 0
-		if len(body) > 0 && (body[0] == '-' || body[0] == '+' || body[0] == ' ') {
+		if body != "" && (body[0] == '-' || body[0] == '+' || body[0] == ' ') {
 			signEnd = 1
 		}
 		prefixEnd := signEnd

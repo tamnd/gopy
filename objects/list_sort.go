@@ -48,18 +48,18 @@ type sortslice struct {
 	base   int
 }
 
-func (s sortslice) keyAt(i int) Object   { return s.keys[s.base+i] }
-func (s sortslice) valAt(i int) Object   { return s.values[s.base+i] }
-func (s *sortslice) advance(d int)       { s.base += d }
-func (s sortslice) hasValues() bool      { return s.values != nil }
+func (s *sortslice) advance(d int)  { s.base += d }
+func (s sortslice) hasValues() bool { return s.values != nil }
 
-// sortsliceCopy puts (src.key[i], src.val[i]) at (dst.key[j], dst.val[j]).
+// sortsliceCopy puts (src.key[0], src.val[0]) at (dst.key[j], dst.val[j]).
+// All callers pass src offset 0; the macro form in CPython exposes it as
+// a parameter but the merges only ever copy the head of src.
 //
 // CPython: Objects/listobject.c:1640 sortslice_copy
-func sortsliceCopy(dst sortslice, j int, src sortslice, i int) {
-	dst.keys[dst.base+j] = src.keys[src.base+i]
+func sortsliceCopy(dst sortslice, j int, src sortslice) {
+	dst.keys[dst.base+j] = src.keys[src.base]
 	if dst.hasValues() {
-		dst.values[dst.base+j] = src.values[src.base+i]
+		dst.values[dst.base+j] = src.values[src.base]
 	}
 }
 
@@ -485,12 +485,11 @@ func mergeLo(ms *mergeState, ssa sortslice, na int, ssb sortslice, nb int) error
 	}
 	if na == 1 {
 		sortsliceMemmove(dest, 0, ssb, 0, nb)
-		sortsliceCopy(dest, nb, ssa, 0)
+		sortsliceCopy(dest, nb, ssa)
 		return nil
 	}
 
 	mg := ms.minGallop
-mainLoop:
 	for {
 		acount, bcount := 0, 0
 		for {
@@ -517,7 +516,7 @@ mainLoop:
 				na--
 				if na == 1 {
 					sortsliceMemmove(dest, 0, ssb, 0, nb)
-					sortsliceCopy(dest, nb, ssa, 0)
+					sortsliceCopy(dest, nb, ssa)
 					return nil
 				}
 				if acount >= mg {
@@ -544,7 +543,7 @@ mainLoop:
 				na -= k
 				if na == 1 {
 					sortsliceMemmove(dest, 0, ssb, 0, nb)
-					sortsliceCopy(dest, nb, ssa, 0)
+					sortsliceCopy(dest, nb, ssa)
 					return nil
 				}
 				if na == 0 {
@@ -576,7 +575,7 @@ mainLoop:
 			na--
 			if na == 1 {
 				sortsliceMemmove(dest, 0, ssb, 0, nb)
-				sortsliceCopy(dest, nb, ssa, 0)
+				sortsliceCopy(dest, nb, ssa)
 				return nil
 			}
 			if acount < minGallop && bcount < minGallop {
@@ -585,7 +584,6 @@ mainLoop:
 		}
 		mg++
 		ms.minGallop = mg
-		continue mainLoop
 	}
 }
 
@@ -628,12 +626,11 @@ func mergeHi(ms *mergeState, ssa sortslice, na int, ssb sortslice, nb int) error
 		dest.advance(-na)
 		ssa.advance(-na)
 		sortsliceMemmove(dest, 1, ssa, 1, na)
-		sortsliceCopy(dest, 0, ssb, 0)
+		sortsliceCopy(dest, 0, ssb)
 		return nil
 	}
 
 	mg := ms.minGallop
-mainLoop:
 	for {
 		acount, bcount := 0, 0
 		for {
@@ -662,7 +659,7 @@ mainLoop:
 					dest.advance(-na)
 					ssa.advance(-na)
 					sortsliceMemmove(dest, 1, ssa, 1, na)
-					sortsliceCopy(dest, 0, ssb, 0)
+					sortsliceCopy(dest, 0, ssb)
 					return nil
 				}
 				if bcount >= mg {
@@ -698,7 +695,7 @@ mainLoop:
 				dest.advance(-na)
 				ssa.advance(-na)
 				sortsliceMemmove(dest, 1, ssa, 1, na)
-				sortsliceCopy(dest, 0, ssb, 0)
+				sortsliceCopy(dest, 0, ssb)
 				return nil
 			}
 
@@ -718,7 +715,7 @@ mainLoop:
 					dest.advance(-na)
 					ssa.advance(-na)
 					sortsliceMemmove(dest, 1, ssa, 1, na)
-					sortsliceCopy(dest, 0, ssb, 0)
+					sortsliceCopy(dest, 0, ssb)
 					return nil
 				}
 				if nb == 0 {
@@ -736,7 +733,6 @@ mainLoop:
 		}
 		mg++
 		ms.minGallop = mg
-		continue mainLoop
 	}
 }
 
@@ -850,14 +846,8 @@ func foundNewRun(ms *mergeState, n2 int) error {
 func mergeForceCollapse(ms *mergeState) error {
 	for ms.n > 1 {
 		n := ms.n - 2
-		if n > 0 {
-			lt, err := boolLT(ms.pending[n-1].len, ms.pending[n+1].len)
-			if err != nil {
-				return err
-			}
-			if lt {
-				n--
-			}
+		if n > 0 && ms.pending[n-1].len < ms.pending[n+1].len {
+			n--
 		}
 		if err := mergeAt(ms, n); err != nil {
 			return err
@@ -865,8 +855,6 @@ func mergeForceCollapse(ms *mergeState) error {
 	}
 	return nil
 }
-
-func boolLT(a, b int) (bool, error) { return a < b, nil }
 
 // mergeComputeMinrun rounds n down to a power of two between 32 and
 // 64, biased so n/minrun is close to a power of two from below. Tiny

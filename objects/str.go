@@ -111,8 +111,8 @@ func (s *Unicode) Kind() byte { return s.kind }
 // Length returns the number of code points.
 func (s *Unicode) Length() int { return s.length }
 
-// IsAscii reports whether every code point is < 0x80.
-func (s *Unicode) IsAscii() bool { return s.ascii }
+// IsASCII reports whether every code point is < 0x80.
+func (s *Unicode) IsASCII() bool { return s.ascii }
 
 // IsReady reports whether the canonical layout is built. Always true
 // for strings created via NewStr.

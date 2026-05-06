@@ -1,6 +1,7 @@
 package objects
 
 import (
+	"bytes"
 	"strings"
 	"testing"
 )
@@ -367,7 +368,7 @@ func TestBytesFromHex(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := []byte{0xb9, 0x01, 0xef}
-	if string(b.v) != string(want) {
+	if !bytes.Equal(b.v, want) {
 		t.Errorf("fromhex = % x, want % x", b.v, want)
 	}
 }
