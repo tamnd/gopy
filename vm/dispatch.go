@@ -43,8 +43,8 @@ func (e *evalState) dispatch(op compile.Opcode, oparg uint32) (next int, retVal 
 		return next, nil, nil, false, err
 	}
 	// Generator / coroutine / context-manager arms.
-	if next, retVal, retErr, retDone, ok, err := e.tryGen(op, oparg); ok {
-		return next, retVal, retErr, retDone, err
+	if r, err := e.tryGen(op, oparg); r.ok {
+		return r.next, r.retVal, r.retErr, r.retDone, err
 	}
 	// Pattern-match arms.
 	if next, ok, err := e.tryMatch(op, oparg); ok {

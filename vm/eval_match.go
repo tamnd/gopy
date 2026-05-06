@@ -15,8 +15,6 @@ import (
 
 // tryMatch handles MATCH_* opcodes. Returns ok=false when op is not in
 // this panel. err is a dispatch-level error (not retDone).
-//
-//nolint:gocognit // match dispatch panel; bounded by pattern-match spec 1693
 func (e *evalState) tryMatch(op compile.Opcode, oparg uint32) (next int, ok bool, err error) {
 	switch op {
 	case compile.MATCH_MAPPING:
@@ -39,7 +37,7 @@ func (e *evalState) tryMatch(op compile.Opcode, oparg uint32) (next int, ok bool
 // stays on the stack.
 //
 // CPython: Python/bytecodes.c:3062 MATCH_MAPPING
-func (e *evalState) execMatchMapping() (int, bool, error) {
+func (e *evalState) execMatchMapping() (next int, handled bool, err error) {
 	subject := e.peek(0).AsObject()
 	match := subject.Type().TpFlags&objects.TpFlagMapping != 0
 	e.pushObject(objects.NewBool(match))
@@ -51,7 +49,7 @@ func (e *evalState) execMatchMapping() (int, bool, error) {
 // The subject stays on the stack.
 //
 // CPython: Python/bytecodes.c:3067 MATCH_SEQUENCE
-func (e *evalState) execMatchSequence() (int, bool, error) {
+func (e *evalState) execMatchSequence() (next int, handled bool, err error) {
 	subject := e.peek(0).AsObject()
 	match := subject.Type().TpFlags&objects.TpFlagSequence != 0
 	e.pushObject(objects.NewBool(match))
@@ -67,7 +65,7 @@ func (e *evalState) execMatchSequence() (int, bool, error) {
 //
 // CPython: Python/bytecodes.c:3072 MATCH_KEYS
 // CPython: Python/ceval.c:L5052 _PyEval_MatchKeys
-func (e *evalState) execMatchKeys() (int, bool, error) {
+func (e *evalState) execMatchKeys() (next int, handled bool, err error) {
 	keys, ok := e.peek(0).AsObject().(*objects.Tuple)
 	if !ok {
 		return 0, true, fmt.Errorf("MATCH_KEYS: keys not a tuple")
@@ -131,7 +129,7 @@ func matchKeysGet(subject, key objects.Object) (objects.Object, error) {
 //
 // CPython: Python/bytecodes.c:3043 MATCH_CLASS
 // CPython: Python/ceval.c _PyEval_MatchClass
-func (e *evalState) execMatchClass(oparg uint32) (int, bool, error) {
+func (e *evalState) execMatchClass(oparg uint32) (next int, handled bool, err error) {
 	names := e.popObject()
 	typeObj := e.popObject()
 	subject := e.popObject()
@@ -159,8 +157,7 @@ func (e *evalState) execMatchClass(oparg uint32) (int, bool, error) {
 	if npos > 0 {
 		matchArgs, agerr := objects.GetAttr(typeObj, objects.NewStr("__match_args__"))
 		if agerr != nil {
-			e.pushObject(objects.None())
-			return e.advance(), true, nil
+			return e.matchNoMatch(), true, nil //nolint:nilerr // pattern-match swallows lookup errors as "no match"
 		}
 		maTup, isTup := matchArgs.(*objects.Tuple)
 		if !isTup || maTup.Len() < npos {
@@ -170,13 +167,11 @@ func (e *evalState) execMatchClass(oparg uint32) (int, bool, error) {
 		for i := 0; i < npos; i++ {
 			attrNameStr, serr := objects.Str(maTup.Item(i))
 			if serr != nil {
-				e.pushObject(objects.None())
-				return e.advance(), true, nil
+				return e.matchNoMatch(), true, nil //nolint:nilerr // pattern-match swallows lookup errors as "no match"
 			}
 			val, verr := objects.GetAttr(subject, objects.NewStr(attrNameStr))
 			if verr != nil {
-				e.pushObject(objects.None())
-				return e.advance(), true, nil
+				return e.matchNoMatch(), true, nil //nolint:nilerr // pattern-match swallows lookup errors as "no match"
 			}
 			attrs[i] = val
 		}
@@ -186,19 +181,28 @@ func (e *evalState) execMatchClass(oparg uint32) (int, bool, error) {
 	for i := 0; i < nkw; i++ {
 		nameStr, serr := objects.Str(namesTup.Item(i))
 		if serr != nil {
-			e.pushObject(objects.None())
-			return e.advance(), true, nil
+			return e.matchNoMatch(), true, nil //nolint:nilerr // pattern-match swallows lookup errors as "no match"
 		}
 		val, verr := objects.GetAttr(subject, objects.NewStr(nameStr))
 		if verr != nil {
-			e.pushObject(objects.None())
-			return e.advance(), true, nil
+			return e.matchNoMatch(), true, nil //nolint:nilerr // pattern-match swallows lookup errors as "no match"
 		}
 		attrs[npos+i] = val
 	}
 
 	e.pushObject(objects.NewTuple(attrs))
 	return e.advance(), true, nil
+}
+
+// matchNoMatch pushes None on the stack and returns the advanced
+// instruction pointer. Used by MATCH_CLASS arms that swallow a lookup
+// error and report "no match" rather than propagating it; named so
+// the swallow is explicit at the call site.
+//
+// CPython: Python/ceval.c _PyEval_MatchClass error → None branch
+func (e *evalState) matchNoMatch() int {
+	e.pushObject(objects.None())
+	return e.advance()
 }
 
 // isInstance returns true if o is an instance of tp. v0.9 checks

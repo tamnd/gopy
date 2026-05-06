@@ -15,11 +15,21 @@ import (
 	"github.com/tamnd/gopy/objects"
 )
 
-// tryGen handles generator / coroutine / with opcodes. Returns ok=false
-// when op is not in this panel; the call shape matches dispatch.
-//
-//nolint:gocognit,gocyclo // generator dispatch panel; arm count is bounded by spec 1693
-func (e *evalState) tryGen(op compile.Opcode, oparg uint32) (next int, retVal objects.Object, retErr error, retDone, ok bool, err error) {
+// genResult bundles the dispatch outcome for the generator / coroutine
+// / with panel. ok=false means tryGen did not match the opcode and the
+// caller should fall through to the next dispatch layer.
+type genResult struct {
+	next    int
+	retVal  objects.Object
+	retErr  error
+	retDone bool
+	ok      bool
+}
+
+// tryGen handles generator / coroutine / with opcodes. ok=false on the
+// returned genResult means the opcode is not in this panel; err is a
+// dispatch-level failure.
+func (e *evalState) tryGen(op compile.Opcode, oparg uint32) (genResult, error) {
 	switch op {
 	case compile.RETURN_GENERATOR:
 		return e.execReturnGenerator()
@@ -51,7 +61,7 @@ func (e *evalState) tryGen(op compile.Opcode, oparg uint32) (next int, retVal ob
 	case compile.WITH_EXCEPT_START:
 		return e.execWithExceptStart()
 	}
-	return 0, nil, nil, false, false, nil
+	return genResult{}, nil
 }
 
 // execReturnGenerator ports RETURN_GENERATOR: detaches the current frame,
@@ -59,7 +69,7 @@ func (e *evalState) tryGen(op compile.Opcode, oparg uint32) (next int, retVal ob
 // returns the generator to the caller.
 //
 // CPython: Python/bytecodes.c:4982 RETURN_GENERATOR
-func (e *evalState) execReturnGenerator() (int, objects.Object, error, bool, bool, error) {
+func (e *evalState) execReturnGenerator() (genResult, error) {
 	name := e.f.Code.Name
 
 	// Capture the post-RETURN_GENERATOR IP before Detach. Detach zeroes
@@ -91,9 +101,9 @@ func (e *evalState) execReturnGenerator() (int, objects.Object, error, bool, boo
 		// Run the generator body. yieldCh/sendCh are threaded through
 		// evalState so YIELD_VALUE can reach them.
 		ge := &evalState{
-			ts:      savedTS,
-			f:       savedFrame,
-			breaker: breakerFor(savedTS),
+			ts:       savedTS,
+			f:        savedFrame,
+			breaker:  breakerFor(savedTS),
 			genYield: gen.YieldCh,
 			genSend:  gen.SendCh,
 		}
@@ -106,7 +116,7 @@ func (e *evalState) execReturnGenerator() (int, objects.Object, error, bool, boo
 	}()
 
 	// Return the generator to the caller as a terminal return.
-	return 0, gen, nil, true, true, nil
+	return genResult{retVal: gen, retDone: true, ok: true}, nil
 }
 
 // execYieldValue ports YIELD_VALUE: pops the value to yield, sends it
@@ -114,21 +124,21 @@ func (e *evalState) execReturnGenerator() (int, objects.Object, error, bool, boo
 // The sent value becomes the result of the yield expression.
 //
 // CPython: Python/bytecodes.c:1370 YIELD_VALUE
-func (e *evalState) execYieldValue(_ uint32) (int, objects.Object, error, bool, bool, error) {
+func (e *evalState) execYieldValue(_ uint32) (genResult, error) {
 	if e.genYield == nil {
-		return 0, nil, nil, false, true, fmt.Errorf("vm: YIELD_VALUE outside generator context")
+		return genResult{ok: true}, fmt.Errorf("vm: YIELD_VALUE outside generator context")
 	}
 	val := e.popObject()
 	e.genYield <- objects.GenMsg{Val: val}
 	// Suspend: block until the next Send / throw.
 	msg := <-e.genSend
 	if msg.Err != nil {
-		return 0, nil, nil, false, true, msg.Err
+		return genResult{ok: true}, msg.Err
 	}
 	// Push the sent value as the result of the yield expression, then
 	// continue at the RESUME that immediately follows YIELD_VALUE.
 	e.pushObject(msg.Val)
-	return e.advance(), nil, nil, false, true, nil
+	return genResult{next: e.advance(), ok: true}, nil
 }
 
 // execSend ports the SEND opcode: sends a value into the generator or
@@ -139,7 +149,7 @@ func (e *evalState) execYieldValue(_ uint32) (int, objects.Object, error, bool, 
 // StopIteration: [...], jump past END_SEND by oparg
 //
 // CPython: Python/bytecodes.c:1297 _SEND
-func (e *evalState) execSend(oparg uint32) (int, objects.Object, error, bool, bool, error) {
+func (e *evalState) execSend(oparg uint32) (genResult, error) {
 	v := e.popObject()
 	recvRef := e.peek(0)
 	recv := recvRef.AsObject()
@@ -151,13 +161,13 @@ func (e *evalState) execSend(oparg uint32) (int, objects.Object, error, bool, bo
 			// Pop exhausted generator; jump past END_SEND.
 			ref := e.pop()
 			ref.Close()
-			return e.jumpBy(int(oparg) + 1), nil, nil, false, true, nil
+			return genResult{next: e.jumpBy(int(oparg) + 1), ok: true}, nil
 		}
 		if serr != nil {
-			return 0, nil, nil, false, true, serr
+			return genResult{ok: true}, serr
 		}
 		e.pushObject(val)
-		return e.advance(), nil, nil, false, true, nil
+		return genResult{next: e.advance(), ok: true}, nil
 
 	default:
 		// Generic path: if v is None, call tp_iternext; otherwise call .send(v).
@@ -166,26 +176,26 @@ func (e *evalState) execSend(oparg uint32) (int, objects.Object, error, bool, bo
 		var nerr error
 		if v == objects.None() {
 			if t.IterNext == nil {
-				return 0, nil, nil, false, true, fmt.Errorf("TypeError: %s is not an iterator", t.Name)
+				return genResult{ok: true}, fmt.Errorf("TypeError: %s is not an iterator", t.Name)
 			}
 			val, nerr = t.IterNext(recv)
 		} else {
 			sendAttr, agerr := objects.GetAttr(recv, objects.NewStr("send"))
 			if agerr != nil {
-				return 0, nil, nil, false, true, agerr
+				return genResult{ok: true}, agerr
 			}
 			val, nerr = objects.Call(sendAttr, objects.NewTuple([]objects.Object{v}), nil)
 		}
 		if errors.Is(nerr, objects.ErrStopIteration) {
 			ref := e.pop()
 			ref.Close()
-			return e.jumpBy(int(oparg) + 1), nil, nil, false, true, nil
+			return genResult{next: e.jumpBy(int(oparg) + 1), ok: true}, nil
 		}
 		if nerr != nil {
-			return 0, nil, nil, false, true, nerr
+			return genResult{ok: true}, nerr
 		}
 		e.pushObject(val)
-		return e.advance(), nil, nil, false, true, nil
+		return genResult{next: e.advance(), ok: true}, nil
 	}
 }
 
@@ -193,45 +203,44 @@ func (e *evalState) execSend(oparg uint32) (int, objects.Object, error, bool, bo
 // generator or iterator, leave it. Otherwise call iter(TOS).
 //
 // CPython: Python/bytecodes.c:3091 GET_YIELD_FROM_ITER
-func (e *evalState) execGetYieldFromIter() (int, objects.Object, error, bool, bool, error) {
+func (e *evalState) execGetYieldFromIter() (genResult, error) {
 	iterable := e.popObject()
-	switch iterable.(type) {
-	case *objects.Generator:
+	if _, isGen := iterable.(*objects.Generator); isGen {
 		e.pushObject(iterable)
-		return e.advance(), nil, nil, false, true, nil
+		return genResult{next: e.advance(), ok: true}, nil
 	}
 	t := iterable.Type()
 	if t.Iter == nil {
-		return 0, nil, nil, false, true, fmt.Errorf("TypeError: '%s' object is not iterable", t.Name)
+		return genResult{ok: true}, fmt.Errorf("TypeError: '%s' object is not iterable", t.Name)
 	}
 	it, ierr := t.Iter(iterable)
 	if ierr != nil {
-		return 0, nil, nil, false, true, ierr
+		return genResult{ok: true}, ierr
 	}
 	e.pushObject(it)
-	return e.advance(), nil, nil, false, true, nil
+	return genResult{next: e.advance(), ok: true}, nil
 }
 
 // execGetAwaitable ports GET_AWAITABLE: for now surfaces coroutines as
 // not yet implemented; awaitable protocol (1687) lands in v0.10.
 //
 // CPython: Python/bytecodes.c:1274 GET_AWAITABLE
-func (e *evalState) execGetAwaitable(_ uint32) (int, objects.Object, error, bool, bool, error) {
-	return 0, nil, nil, false, true, fmt.Errorf("GET_AWAITABLE: coroutine/awaitable protocol not yet implemented (v0.9)")
+func (e *evalState) execGetAwaitable(_ uint32) (genResult, error) {
+	return genResult{ok: true}, fmt.Errorf("GET_AWAITABLE: coroutine/awaitable protocol not yet implemented (v0.9)")
 }
 
 // execGetAiter ports GET_AITER: async iterator protocol pending.
 //
 // CPython: Python/bytecodes.c:1230 GET_AITER
-func (e *evalState) execGetAiter() (int, objects.Object, error, bool, bool, error) {
-	return 0, nil, nil, false, true, fmt.Errorf("GET_AITER: async iterator protocol not yet implemented (v0.9)")
+func (e *evalState) execGetAiter() (genResult, error) {
+	return genResult{ok: true}, fmt.Errorf("GET_AITER: async iterator protocol not yet implemented (v0.9)")
 }
 
 // execGetAnext ports GET_ANEXT: async iterator protocol pending.
 //
 // CPython: Python/bytecodes.c:1266 GET_ANEXT
-func (e *evalState) execGetAnext() (int, objects.Object, error, bool, bool, error) {
-	return 0, nil, nil, false, true, fmt.Errorf("GET_ANEXT: async iterator protocol not yet implemented (v0.9)")
+func (e *evalState) execGetAnext() (genResult, error) {
+	return genResult{ok: true}, fmt.Errorf("GET_ANEXT: async iterator protocol not yet implemented (v0.9)")
 }
 
 // execEndAsyncFor ports END_ASYNC_FOR: pops async iterator and awaitable;
@@ -239,26 +248,26 @@ func (e *evalState) execGetAnext() (int, objects.Object, error, bool, bool, erro
 // Async protocol pending.
 //
 // CPython: Python/bytecodes.c END_ASYNC_FOR (_END_ASYNC_FOR)
-func (e *evalState) execEndAsyncFor() (int, objects.Object, error, bool, bool, error) {
-	return 0, nil, nil, false, true, fmt.Errorf("END_ASYNC_FOR: async iterator protocol not yet implemented (v0.9)")
+func (e *evalState) execEndAsyncFor() (genResult, error) {
+	return genResult{ok: true}, fmt.Errorf("END_ASYNC_FOR: async iterator protocol not yet implemented (v0.9)")
 }
 
 // execCleanupThrow ports CLEANUP_THROW: if the exception is StopIteration,
 // extract its value; otherwise re-raise.
 //
 // CPython: Python/bytecodes.c:1471 CLEANUP_THROW
-func (e *evalState) execCleanupThrow() (int, objects.Object, error, bool, bool, error) {
-	excVal := e.popObject()   // the thrown exception
-	_ = e.popObject()         // last_sent_val (discard)
-	_ = e.popObject()         // sub_iter (discard)
+func (e *evalState) execCleanupThrow() (genResult, error) {
+	excVal := e.popObject() // the thrown exception
+	_ = e.popObject()       // last_sent_val (discard)
+	_ = e.popObject()       // sub_iter (discard)
 
 	if errors.Is(excAsError(excVal), objects.ErrStopIteration) {
 		e.pushObject(objects.None())
 		// StopIteration.value would be the stop value; use None for now.
 		e.pushObject(objects.None())
-		return e.advance(), nil, nil, false, true, nil
+		return genResult{next: e.advance(), ok: true}, nil
 	}
-	return 0, nil, nil, false, true, excAsError(excVal)
+	return genResult{ok: true}, excAsError(excVal)
 }
 
 // execWithExceptStart ports WITH_EXCEPT_START: calls context.__exit__
@@ -268,7 +277,7 @@ func (e *evalState) execCleanupThrow() (int, objects.Object, error, bool, bool, 
 // Stack after:  [..., exit_fn, exit_self_or_null, lasti, unused, exc_val, exit_result]
 //
 // CPython: Python/bytecodes.c:3524 WITH_EXCEPT_START
-func (e *evalState) execWithExceptStart() (int, objects.Object, error, bool, bool, error) {
+func (e *evalState) execWithExceptStart() (genResult, error) {
 	// Stack layout from bottom: exit_fn, exit_self, lasti, unused, exc_val (TOS).
 	// peek(0)=exc_val, peek(1)=unused, peek(2)=lasti, peek(3)=exit_self, peek(4)=exit_fn
 	excVal := e.peek(0).AsObject()
@@ -278,16 +287,16 @@ func (e *evalState) execWithExceptStart() (int, objects.Object, error, bool, boo
 
 	// Call exit_fn(type, val, traceback). v0.9 passes (type(exc), exc, None)
 	// because we don't have traceback objects yet.
-	excType := objects.Object(objects.None())
+	excType := objects.None()
 	if excVal != objects.None() {
 		excType = excVal.Type()
 	}
 	result, cerr := objects.Call(exitFn, objects.NewTuple([]objects.Object{excType, excVal, objects.None()}), nil)
 	if cerr != nil {
-		return 0, nil, nil, false, true, cerr
+		return genResult{ok: true}, cerr
 	}
 	e.pushObject(result)
-	return e.advance(), nil, nil, false, true, nil
+	return genResult{next: e.advance(), ok: true}, nil
 }
 
 // excAsError converts an exception object (which may be a string Str or
@@ -314,4 +323,3 @@ func excObjectErr(o objects.Object) error {
 	}
 	return nil
 }
-

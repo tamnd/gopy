@@ -6,6 +6,7 @@
 package hashtable
 
 import (
+	"errors"
 	"hash/fnv"
 	"testing"
 )
@@ -129,7 +130,7 @@ func TestForeachStopsOnError(t *testing.T) {
 		}
 		return nil
 	})
-	if err != stopErr {
+	if !errors.Is(err, stopErr) {
 		t.Fatalf("Foreach error: got %v, want stop", err)
 	}
 	if visited != 5 {

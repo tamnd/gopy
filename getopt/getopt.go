@@ -83,7 +83,7 @@ type State struct {
 	optPtr string
 }
 
-// New returns a State initialised the way _PyOS_ResetGetOpt leaves
+// New returns a State initialized the way _PyOS_ResetGetOpt leaves
 // the globals: opterr=true, optind=1, optarg="", opt_ptr="".
 //
 // CPython: Python/getopt.c:52 _PyOS_ResetGetOpt
@@ -99,30 +99,9 @@ func New() *State {
 //
 // CPython: Python/getopt.c:60 _PyOS_GetOpt
 func (s *State) GetOpt(argv []string, shortOpts string, longOpts []LongOption) int {
-	if s.optPtr == "" {
-		if s.OptInd >= len(argv) {
-			return EOF
-		}
-		cur := argv[s.OptInd]
-		if len(cur) == 0 || cur[0] != '-' || len(cur) == 1 /* lone dash */ {
-			return EOF
-		}
-		if cur == "--" {
-			s.OptInd++
-			return EOF
-		}
-		if cur == "--help" {
-			s.OptInd++
-			return 'h'
-		}
-		if cur == "--version" {
-			s.OptInd++
-			return 'V'
-		}
-		s.optPtr = cur[1:]
-		s.OptInd++
+	if r, ok := s.startWord(argv); ok {
+		return r
 	}
-
 	if s.optPtr == "" {
 		return EOF
 	}
@@ -130,43 +109,89 @@ func (s *State) GetOpt(argv []string, shortOpts string, longOpts []LongOption) i
 	s.optPtr = s.optPtr[1:]
 
 	if option == '-' {
-		// long option (--name)
-		if s.optPtr == "" {
-			s.errorf("Expected long option\n")
-			return EOF
-		}
-		s.LongIndex = 0
-		var found *LongOption
-		for i := range longOpts {
-			if longOpts[i].Name == s.optPtr {
-				s.LongIndex = i
-				found = &longOpts[i]
-				break
-			}
-		}
-		if found == nil {
-			s.errorf("Unknown option: %s\n", argv[s.OptInd-1])
-			return ErrorMark
-		}
-		s.optPtr = ""
-		if !found.HasArg {
-			return found.Val
-		}
-		if s.OptInd >= len(argv) {
-			s.errorf("Argument expected for the %s options\n", argv[s.OptInd-1])
-			return ErrorMark
-		}
-		s.OptArg = argv[s.OptInd]
+		return s.parseLong(argv, longOpts)
+	}
+	return s.parseShort(argv, shortOpts, option)
+}
+
+// startWord advances to the next argv word and prepares optPtr to
+// scan its option chars. Returns (val, true) when the caller should
+// return immediately (EOF / -h / -V); (_, false) means optPtr is now
+// loaded and the caller should keep parsing.
+//
+// CPython: Python/getopt.c:60 _PyOS_GetOpt prelude
+func (s *State) startWord(argv []string) (int, bool) {
+	if s.optPtr != "" {
+		return 0, false
+	}
+	if s.OptInd >= len(argv) {
+		return EOF, true
+	}
+	cur := argv[s.OptInd]
+	if cur == "" || cur[0] != '-' || len(cur) == 1 /* lone dash */ {
+		return EOF, true
+	}
+	switch cur {
+	case "--":
 		s.OptInd++
+		return EOF, true
+	case "--help":
+		s.OptInd++
+		return 'h', true
+	case "--version":
+		s.OptInd++
+		return 'V', true
+	}
+	s.optPtr = cur[1:]
+	s.OptInd++
+	return 0, false
+}
+
+// parseLong matches optPtr against longOpts and consumes the
+// argument when HasArg is set.
+//
+// CPython: Python/getopt.c:60 _PyOS_GetOpt long-option branch
+func (s *State) parseLong(argv []string, longOpts []LongOption) int {
+	if s.optPtr == "" {
+		s.errorf("Expected long option\n")
+		return EOF
+	}
+	s.LongIndex = 0
+	var found *LongOption
+	for i := range longOpts {
+		if longOpts[i].Name == s.optPtr {
+			s.LongIndex = i
+			found = &longOpts[i]
+			break
+		}
+	}
+	if found == nil {
+		s.errorf("Unknown option: %s\n", argv[s.OptInd-1])
+		return ErrorMark
+	}
+	s.optPtr = ""
+	if !found.HasArg {
 		return found.Val
 	}
+	if s.OptInd >= len(argv) {
+		s.errorf("Argument expected for the %s options\n", argv[s.OptInd-1])
+		return ErrorMark
+	}
+	s.OptArg = argv[s.OptInd]
+	s.OptInd++
+	return found.Val
+}
 
+// parseShort handles a single short-option char including its
+// argument (if shortOpts marks it with a trailing colon).
+//
+// CPython: Python/getopt.c:60 _PyOS_GetOpt short-option branch
+func (s *State) parseShort(argv []string, shortOpts string, option byte) int {
 	idx := strings.IndexByte(shortOpts, option)
 	if idx < 0 {
 		s.errorf("Unknown option: -%c\n", option)
 		return ErrorMark
 	}
-
 	if idx+1 < len(shortOpts) && shortOpts[idx+1] == ':' {
 		if s.optPtr != "" {
 			s.OptArg = s.optPtr
@@ -180,7 +205,6 @@ func (s *State) GetOpt(argv []string, shortOpts string, longOpts []LongOption) i
 			s.OptInd++
 		}
 	}
-
 	return int(option)
 }
 

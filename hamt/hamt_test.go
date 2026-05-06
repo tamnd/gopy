@@ -175,7 +175,7 @@ func TestHamtCollision(t *testing.T) {
 	}
 	// Walk down to the leaf following the hash.
 	hash, _ := hamtHash(k1)
-	var n node = h.root
+	n := h.root
 	depth := 0
 	for {
 		if c, ok := n.(*collisionNode); ok {

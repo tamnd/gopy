@@ -66,7 +66,7 @@ func TestEvalImportStarUsesAll(t *testing.T) {
 
 // TestEvalImportStarFallsBackToDict: when __all__ is absent the helper
 // iterates the module's __dict__ keys and skips names that start with
-// "_". Pins the dunder-skip behaviour of CPython's import_all_from.
+// "_". Pins the dunder-skip behavior of CPython's import_all_from.
 func TestEvalImportStarFallsBackToDict(t *testing.T) {
 	mod := objects.NewModule("src")
 	d := mod.Dict()

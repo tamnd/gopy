@@ -220,48 +220,7 @@ func (b *bitmapNode) assoc(shift uint32, hash int32, key, val objects.Object) (n
 	idx := hamtBitindex(b.bitmap, bit)
 
 	if b.bitmap&bit != 0 {
-		keyIdx := 2 * idx
-		valIdx := keyIdx + 1
-		keyOrNull := b.array[keyIdx]
-		valOrNode := b.array[valIdx]
-
-		if keyOrNull == nil {
-			oldSub := valOrNode.(node)
-			subNode, addedLeaf, err := oldSub.assoc(shift+5, hash, key, val)
-			if err != nil {
-				return nil, false, err
-			}
-			if subNode == oldSub {
-				return b, addedLeaf, nil
-			}
-			ret := b.clone()
-			ret.array[valIdx] = subNode.(objects.Object)
-			return ret, addedLeaf, nil
-		}
-
-		eq, err := objects.RichCmpBool(key, keyOrNull, objects.CompareEQ)
-		if err != nil {
-			return nil, false, err
-		}
-		if eq {
-			if val == valOrNode {
-				return b, false, nil
-			}
-			ret := b.clone()
-			ret.array[valIdx] = val
-			return ret, false, nil
-		}
-
-		// New key shares the (shift, hash) slot with an existing one.
-		// Promote both into a sub-node.
-		subNode, err := newBitmapOrCollision(shift+5, keyOrNull, valOrNode, hash, key, val)
-		if err != nil {
-			return nil, false, err
-		}
-		ret := b.clone()
-		ret.array[keyIdx] = nil
-		ret.array[valIdx] = subNode.(objects.Object)
-		return ret, true, nil
+		return b.assocFilled(shift, hash, idx, key, val)
 	}
 
 	// Bit not set: a fresh slot in this node.
@@ -315,6 +274,54 @@ func (b *bitmapNode) assoc(shift uint32, hash int32, key, val objects.Object) (n
 	}
 	out.bitmap = b.bitmap | bit
 	return out, true, nil
+}
+
+// assocFilled handles the bit-set branch of assoc: descend into a
+// sub-node, replace an equal key, or promote two colliding keys into
+// a new sub-node.
+//
+// CPython: Python/hamt.c:686 hamt_node_bitmap_assoc bit-set branch
+func (b *bitmapNode) assocFilled(shift uint32, hash int32, idx uint32, key, val objects.Object) (node, bool, error) {
+	keyIdx := 2 * idx
+	valIdx := keyIdx + 1
+	keyOrNull := b.array[keyIdx]
+	valOrNode := b.array[valIdx]
+
+	if keyOrNull == nil {
+		oldSub := valOrNode.(node)
+		subNode, addedLeaf, err := oldSub.assoc(shift+5, hash, key, val)
+		if err != nil {
+			return nil, false, err
+		}
+		if subNode == oldSub {
+			return b, addedLeaf, nil
+		}
+		ret := b.clone()
+		ret.array[valIdx] = subNode.(objects.Object)
+		return ret, addedLeaf, nil
+	}
+
+	eq, err := objects.RichCmpBool(key, keyOrNull, objects.CompareEQ)
+	if err != nil {
+		return nil, false, err
+	}
+	if eq {
+		if val == valOrNode {
+			return b, false, nil
+		}
+		ret := b.clone()
+		ret.array[valIdx] = val
+		return ret, false, nil
+	}
+
+	subNode, err := newBitmapOrCollision(shift+5, keyOrNull, valOrNode, hash, key, val)
+	if err != nil {
+		return nil, false, err
+	}
+	ret := b.clone()
+	ret.array[keyIdx] = nil
+	ret.array[valIdx] = subNode.(objects.Object)
+	return ret, true, nil
 }
 
 // without on a bitmap node.
@@ -621,9 +628,9 @@ func (a *arrayNode) find(shift uint32, hash int32, key objects.Object) (objects.
 // needed by the runtime (HAMT is private to the runtime), but we
 // implement them so the value can flow through any code that expects
 // an Object.
-func (a *arrayNode) Type() *objects.Type   { return nil }
-func (a *arrayNode) Hdr() *objects.Header  { return nil }
-func (b *bitmapNode) Type() *objects.Type  { return nil }
-func (b *bitmapNode) Hdr() *objects.Header { return nil }
-func (c *collisionNode) Type() *objects.Type   { return nil }
-func (c *collisionNode) Hdr() *objects.Header  { return nil }
+func (a *arrayNode) Type() *objects.Type      { return nil }
+func (a *arrayNode) Hdr() *objects.Header     { return nil }
+func (b *bitmapNode) Type() *objects.Type     { return nil }
+func (b *bitmapNode) Hdr() *objects.Header    { return nil }
+func (c *collisionNode) Type() *objects.Type  { return nil }
+func (c *collisionNode) Hdr() *objects.Header { return nil }

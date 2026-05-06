@@ -104,4 +104,3 @@ func TestGILSwitchTimerResetClearsArm(t *testing.T) {
 		t.Error("timer.armed should clear on reset")
 	}
 }
-

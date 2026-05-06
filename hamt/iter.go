@@ -31,7 +31,7 @@ func (h *Hamt) Iter() *Iter {
 // iteration (none today, but plumbed for parity with CPython).
 //
 // CPython: Python/hamt.c:2182 hamt_iterator_next
-func (it *Iter) Next() (objects.Object, objects.Object, bool, error) {
+func (it *Iter) Next() (key, val objects.Object, ok bool, err error) {
 	for {
 		if it.level < 0 {
 			return nil, nil, false, nil
@@ -70,7 +70,7 @@ func (it *Iter) Next() (objects.Object, objects.Object, bool, error) {
 //	(false, _)    -- the node is exhausted, pop a level.
 //
 // CPython: Python/hamt.c:2080 hamt_iterator_bitmap_next
-func (it *Iter) bitmapStep(n *bitmapNode) (objects.Object, objects.Object, bool, bool) {
+func (it *Iter) bitmapStep(n *bitmapNode) (key, val objects.Object, advanced, ok bool) {
 	level := it.level
 	pos := it.pos[level]
 	if pos+1 >= len(n.array) {
@@ -102,14 +102,15 @@ func (it *Iter) arrayStep(n *arrayNode) bool {
 		return false
 	}
 	for i := pos; i < arrayNodeSize; i++ {
-		if n.children[i] != nil {
-			it.pos[level] = i + 1
-			next := level + 1
-			it.pos[next] = 0
-			it.nodes[next] = n.children[i]
-			it.level = next
-			return true
+		if n.children[i] == nil {
+			continue
 		}
+		it.pos[level] = i + 1
+		next := level + 1
+		it.pos[next] = 0
+		it.nodes[next] = n.children[i]
+		it.level = next
+		return true
 	}
 	return false
 }
@@ -118,7 +119,7 @@ func (it *Iter) arrayStep(n *arrayNode) bool {
 // signature as bitmapStep.
 //
 // CPython: Python/hamt.c:2117 hamt_iterator_collision_next
-func (it *Iter) collisionStep(n *collisionNode) (objects.Object, objects.Object, bool, bool) {
+func (it *Iter) collisionStep(n *collisionNode) (key, val objects.Object, advanced, ok bool) {
 	level := it.level
 	pos := it.pos[level]
 	if pos+1 >= len(n.array) {

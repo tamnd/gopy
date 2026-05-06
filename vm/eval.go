@@ -34,9 +34,9 @@ var ErrNotImplemented = errors.New("vm: opcode not implemented in v0.6")
 type evalState struct {
 	ts       *state.Thread
 	f        *frame.Frame
-	breaker  *gil.Breaker      // shadow of ts's breaker, hot-path read
-	gilTimer *gilSwitchTimer   // shadow of ts's switch-interval timer
-	gil      *gil.GIL          // attached interpreter GIL; nil in v0.9
+	breaker  *gil.Breaker    // shadow of ts's breaker, hot-path read
+	gilTimer *gilSwitchTimer // shadow of ts's switch-interval timer
+	gil      *gil.GIL        // attached interpreter GIL; nil in v0.9
 
 	// genYield/genSend are non-nil when this evalState is running the body
 	// of a generator object. YIELD_VALUE sends on genYield and blocks on

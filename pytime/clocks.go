@@ -18,6 +18,8 @@ var processStart = time.Now()
 // to *out. The trailing underscore avoids colliding with the type.
 //
 // CPython: Python/pytime.c:1010 PyTime_Time
+//
+//nolint:revive // Time_ keeps the trailing underscore to avoid shadowing the package's Time type
 func Time_(out *Time) error {
 	*out = Time(time.Now().UnixNano())
 	return nil

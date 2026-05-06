@@ -137,7 +137,7 @@ func (e *evalState) importStar(from objects.Object) error {
 		if nerr != nil {
 			return fmt.Errorf("TypeError: 'import *' name must be str")
 		}
-		if skipUnder && len(name) > 0 && name[0] == '_' {
+		if skipUnder && name != "" && name[0] == '_' {
 			continue
 		}
 		val, verr := objects.GetAttr(from, objects.NewStr(name))
