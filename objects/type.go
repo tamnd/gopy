@@ -70,7 +70,22 @@ type Type struct {
 	//
 	// CPython: Include/cpython/object.h tp_setattro
 	Setattro func(o Object, name Object, value Object) error
-	Dealloc  func(o Object)
+
+	// DescrGet is the tp_descr_get slot. When a class attribute that
+	// implements this slot is found during instance attribute lookup,
+	// the lookup machinery hands it to DescrGet so the descriptor can
+	// produce the bound value. owner is the instance the lookup
+	// started from (nil when accessed on the class itself); ownerType
+	// is the type whose __mro__ supplied the descriptor.
+	//
+	// CPython: Include/cpython/object.h tp_descr_get
+	DescrGet func(descr Object, owner Object, ownerType *Type) (Object, error)
+	// DescrSet is the tp_descr_set slot. value==nil signals a delete.
+	//
+	// CPython: Include/cpython/object.h tp_descr_set
+	DescrSet func(descr Object, owner Object, value Object) error
+
+	Dealloc func(o Object)
 
 	// TpTraverse mirrors tp_traverse. It calls visit on every Object
 	// reachable directly from o so the cycle collector can walk the
