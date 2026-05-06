@@ -11,6 +11,28 @@ folder; this file is the aggregated index.
 
 ## Unreleased
 
+## v0.8.0 - 2026-05-06
+
+See [`changelog/v0.8.0.md`](changelog/v0.8.0.md).
+
+* feat(marshal): `TYPE_LONG` decoder, `FLAG_REF` back-references,
+  interned-string tags, `TYPE_CODE` round-trip for the 3.11+ wire
+  format, `TYPE_SET` / `TYPE_FROZENSET` / `TYPE_DICT` /
+  `TYPE_BINARY_COMPLEX` encoding and decoding.
+* feat(marshal): `WritePyc` / `ReadPyc` implement the PEP 552
+  16-byte `.pyc` header (timestamp and hash variants).
+* feat(codecs): codec registry (`Register` / `Lookup`), built-in
+  utf-8, ascii, and latin-1 codecs with alias normalization, and
+  `Encode` / `Decode` entry points.
+* feat(imp): frozen module table, sys.modules registry, inittab,
+  `InitImportlib` two-phase bootstrap sequence, `ExecCodeModule`,
+  source and `.pyc` loaders, and `ImportModuleLevel` with the
+  sys.modules → frozen → built-in lookup chain.
+* feat(vm): `IMPORT_NAME` and `IMPORT_FROM` bytecode arms wired into
+  the eval loop via `vmExecutor` implementing `imp.Executor`.
+* feat(objects): `Module` type, `Set` and `Frozenset` types.
+* feat(errors): `ImportError` / `ModuleNotFoundError` hierarchy.
+
 ## v0.7.0 - 2026-05-06
 
 See [`changelog/v0.7.0.md`](changelog/v0.7.0.md).
