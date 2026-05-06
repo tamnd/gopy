@@ -728,17 +728,57 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, retVal
 		return e.advance(), nil, nil, false, true, nil
 
 	case compile.BUILD_SET:
-		// v0.6 has no Set type yet; surface as TypeError so the
-		// dispatch table is wired and tests can detect the gap.
-		return 0, nil, nil, false, true, fmt.Errorf("BUILD_SET: set type not yet implemented in v0.6")
+		// Build a set from n stack items. CPython: Objects/setobject.c BUILD_SET.
+		//
+		// CPython: Python/bytecodes.c BUILD_SET
+		n := int(oparg)
+		s := objects.NewSet()
+		items := make([]objects.Object, n)
+		for i := n - 1; i >= 0; i-- {
+			items[i] = e.popObject()
+		}
+		for _, it := range items {
+			if aerr := s.Add(it); aerr != nil {
+				return 0, nil, nil, false, true, aerr
+			}
+		}
+		e.pushObject(s)
+		return e.advance(), nil, nil, false, true, nil
 
 	case compile.SET_ADD:
-		// SET_ADD: same shape as LIST_APPEND but for the set type.
-		return 0, nil, nil, false, true, fmt.Errorf("SET_ADD: set type not yet implemented in v0.6")
+		// Stack: ..., set, ..., value (oparg slots above set). Pops value,
+		// adds to the set at depth oparg.
+		//
+		// CPython: Python/bytecodes.c SET_ADD
+		v := e.popObject()
+		s, ok := e.peek(int(oparg) - 1).AsObject().(*objects.Set)
+		if !ok {
+			return 0, nil, nil, false, true, fmt.Errorf("SET_ADD: target not a set")
+		}
+		if aerr := s.Add(v); aerr != nil {
+			return 0, nil, nil, false, true, aerr
+		}
+		return e.advance(), nil, nil, false, true, nil
 
 	case compile.SET_UPDATE:
-		// SET_UPDATE: extend a set by another iterable. Set type pending.
-		return 0, nil, nil, false, true, fmt.Errorf("SET_UPDATE: set type not yet implemented in v0.6")
+		// Pop iterable, extend the set at depth oparg.
+		//
+		// CPython: Python/bytecodes.c SET_UPDATE
+		v := e.popObject()
+		s, ok := e.peek(int(oparg) - 1).AsObject().(*objects.Set)
+		if !ok {
+			return 0, nil, nil, false, true, fmt.Errorf("SET_UPDATE: target not a set")
+		}
+		items, ierr := iterToSlice(v)
+		if ierr != nil {
+			return 0, nil, nil, false, true, ierr
+		}
+		for _, it := range items {
+			if aerr := s.Add(it); aerr != nil {
+				return 0, nil, nil, false, true, aerr
+			}
+		}
+		return e.advance(), nil, nil, false, true, nil
 
 	case compile.SETUP_ANNOTATIONS:
 		// SETUP_ANNOTATIONS: ensure __annotations__ is a dict in the

@@ -503,6 +503,84 @@ func concat(parts ...[]byte) []byte {
 	return out
 }
 
+func TestEvalBuildSet(t *testing.T) {
+	ts := state.NewThread()
+	co := &objects.Code{
+		Code: concat(
+			instr(compile.LOAD_CONST, 0),
+			instr(compile.LOAD_CONST, 1),
+			instr(compile.BUILD_SET, 2),
+			instr(compile.RETURN_VALUE, 0),
+		),
+		Consts:    []any{int64(1), int64(2)},
+		Stacksize: 4,
+	}
+	v, err := EvalCode(ts, co, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, ok := v.(*objects.Set)
+	if !ok {
+		t.Fatalf("got %T, want *objects.Set", v)
+	}
+	if s.Len() != 2 {
+		t.Errorf("set len = %d, want 2", s.Len())
+	}
+}
+
+func TestEvalSetAdd(t *testing.T) {
+	ts := state.NewThread()
+	// BUILD_SET 0 (empty), LOAD_CONST 0 (42), SET_ADD 1, RETURN_VALUE.
+	co := &objects.Code{
+		Code: concat(
+			instr(compile.BUILD_SET, 0),
+			instr(compile.LOAD_CONST, 0),
+			instr(compile.SET_ADD, 1),
+			instr(compile.RETURN_VALUE, 0),
+		),
+		Consts:    []any{int64(42)},
+		Stacksize: 4,
+	}
+	v, err := EvalCode(ts, co, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, ok := v.(*objects.Set)
+	if !ok || s.Len() != 1 {
+		t.Fatalf("got %T len? want set len 1", v)
+	}
+	has, _ := s.Contains(objects.NewInt(42))
+	if !has {
+		t.Errorf("set missing 42")
+	}
+}
+
+func TestEvalSetUpdate(t *testing.T) {
+	ts := state.NewThread()
+	// BUILD_SET 0, LOAD_CONST 0 (list[1,2,3]), SET_UPDATE 1, RETURN_VALUE.
+	src := objects.NewList([]objects.Object{
+		objects.NewInt(1), objects.NewInt(2), objects.NewInt(3),
+	})
+	co := &objects.Code{
+		Code: concat(
+			instr(compile.BUILD_SET, 0),
+			instr(compile.LOAD_CONST, 0),
+			instr(compile.SET_UPDATE, 1),
+			instr(compile.RETURN_VALUE, 0),
+		),
+		Consts:    []any{src},
+		Stacksize: 4,
+	}
+	v, err := EvalCode(ts, co, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, ok := v.(*objects.Set)
+	if !ok || s.Len() != 3 {
+		t.Fatalf("got %T len? want set len 3", v)
+	}
+}
+
 func TestEvalMatchMapping(t *testing.T) {
 	ts := state.NewThread()
 	d := objects.NewDict()
