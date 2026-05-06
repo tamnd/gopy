@@ -42,6 +42,10 @@ func (e *evalState) dispatch(op compile.Opcode, oparg uint32) (next int, retVal 
 	if next, ok, err := e.tryImport(op, oparg); ok {
 		return next, nil, nil, false, err
 	}
+	// Generator / coroutine / context-manager arms.
+	if next, retVal, retErr, retDone, ok, err := e.tryGen(op, oparg); ok {
+		return next, retVal, retErr, retDone, err
+	}
 	return 0, nil, nil, false, opcodeNotImplemented(op)
 }
 

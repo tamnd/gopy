@@ -35,6 +35,15 @@ type evalState struct {
 	ts      *state.Thread
 	f       *frame.Frame
 	breaker *gil.Breaker // shadow of ts's breaker, hot-path read
+
+	// genYield/genSend are non-nil when this evalState is running the body
+	// of a generator object. YIELD_VALUE sends on genYield and blocks on
+	// genSend; RETURN_GENERATOR wires them in when spawning the goroutine.
+	//
+	// CPython: (no direct equivalent — CPython uses tstate->current_frame
+	// and the generator object's gi_frame_state)
+	genYield chan<- objects.GenMsg
+	genSend  <-chan objects.GenMsg
 }
 
 // Eval runs f to completion under ts and returns the value the frame

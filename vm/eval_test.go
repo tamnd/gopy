@@ -20,9 +20,9 @@ func instr(op compile.Opcode, arg byte) []byte { return []byte{byte(op), arg} }
 
 func TestEvalNotImplementedSurface(t *testing.T) {
 	ts := state.NewThread()
-	// BINARY_OP is not in the hand-written panel, so dispatch should
+	// LOAD_SUPER_ATTR is not in any hand-written panel, so dispatch should
 	// fall through to ErrNotImplemented.
-	co := codeWithBytecode(instr(compile.YIELD_VALUE, 0))
+	co := codeWithBytecode(instr(compile.LOAD_SUPER_ATTR, 0))
 	_, err := EvalCode(ts, co, nil, nil)
 	if err == nil {
 		t.Fatal("expected ErrNotImplemented for ungenerated dispatch")
@@ -34,13 +34,13 @@ func TestEvalNotImplementedSurface(t *testing.T) {
 
 func TestEvalErrorMentionsOpcodeName(t *testing.T) {
 	ts := state.NewThread()
-	co := codeWithBytecode(instr(compile.YIELD_VALUE, 0))
+	co := codeWithBytecode(instr(compile.LOAD_SUPER_ATTR, 0))
 	_, err := EvalCode(ts, co, nil, nil)
 	if err == nil {
 		t.Fatal("expected error")
 	}
-	if got := err.Error(); !contains(got, "YIELD_VALUE") {
-		t.Errorf("error %q should mention YIELD_VALUE", got)
+	if got := err.Error(); !contains(got, "LOAD_SUPER_ATTR") {
+		t.Errorf("error %q should mention LOAD_SUPER_ATTR", got)
 	}
 }
 
@@ -68,9 +68,9 @@ func TestThreadVMLazyInit(t *testing.T) {
 
 func TestEvalExtendedArgFetch(t *testing.T) {
 	ts := state.NewThread()
-	// EXTENDED_ARG 0x01, then BINARY_OP 0x02 -> oparg should be 0x0102.
-	// BINARY_OP is unimplemented so we expect ErrNotImplemented to bubble.
-	bc := append(instr(compile.EXTENDED_ARG, 1), instr(compile.YIELD_VALUE, 2)...)
+	// EXTENDED_ARG 0x01, then LOAD_SUPER_ATTR 0x02 -> oparg should be 0x0102.
+	// LOAD_SUPER_ATTR is unimplemented so we expect ErrNotImplemented to bubble.
+	bc := append(instr(compile.EXTENDED_ARG, 1), instr(compile.LOAD_SUPER_ATTR, 2)...)
 	co := codeWithBytecode(bc)
 
 	_, err := EvalCode(ts, co, nil, nil)
@@ -488,4 +488,106 @@ func indexOf(s, sub string) int {
 		}
 	}
 	return -1
+}
+
+// concat joins instruction byte slices for readability.
+func concat(parts ...[]byte) []byte {
+	var n int
+	for _, p := range parts {
+		n += len(p)
+	}
+	out := make([]byte, 0, n)
+	for _, p := range parts {
+		out = append(out, p...)
+	}
+	return out
+}
+
+func TestEvalGenerator(t *testing.T) {
+	ts := state.NewThread()
+	// A code object representing a generator that yields 42 once. Layout:
+	//   RESUME 0           - initial entry; advances to RETURN_GENERATOR
+	//   RETURN_GENERATOR 0 - detaches frame; first EvalCode call returns the gen
+	//   LOAD_CONST 0 (42)  - body starts here on first Send()
+	//   YIELD_VALUE 0      - yields 42, blocks for next Send()
+	//   RESUME 1           - re-entry after yield
+	//   RETURN_VALUE 0     - returns the sent value (None); goroutine signals StopIteration
+	co := &objects.Code{
+		Code: concat(
+			instr(compile.RESUME, 0),
+			instr(compile.RETURN_GENERATOR, 0),
+			instr(compile.LOAD_CONST, 0),
+			instr(compile.YIELD_VALUE, 0),
+			instr(compile.RESUME, 1),
+			instr(compile.RETURN_VALUE, 0),
+		),
+		Consts:    []any{int64(42)},
+		Stacksize: 4,
+		Name:      "gen",
+	}
+	obj, err := EvalCode(ts, co, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gen, ok := obj.(*objects.Generator)
+	if !ok {
+		t.Fatalf("got %T, want *objects.Generator", obj)
+	}
+	v, err := gen.Send(objects.None())
+	if err != nil {
+		t.Fatalf("first Send: %v", err)
+	}
+	got, _ := v.(*objects.Int).Int64()
+	if got != 42 {
+		t.Errorf("first yield = %d, want 42", got)
+	}
+	if _, err := gen.Send(objects.None()); !errors.Is(err, objects.ErrStopIteration) {
+		t.Errorf("second Send err = %v, want ErrStopIteration", err)
+	}
+}
+
+func TestEvalGetYieldFromIterPassesGenerator(t *testing.T) {
+	ts := state.NewThread()
+	gen := objects.NewGenerator("dummy")
+	// LOAD_CONST 0 (generator); GET_YIELD_FROM_ITER; RETURN_VALUE.
+	co := &objects.Code{
+		Code: concat(
+			instr(compile.LOAD_CONST, 0),
+			instr(compile.GET_YIELD_FROM_ITER, 0),
+			instr(compile.RETURN_VALUE, 0),
+		),
+		Consts:    []any{gen},
+		Stacksize: 4,
+	}
+	v, err := EvalCode(ts, co, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v != gen {
+		t.Errorf("GET_YIELD_FROM_ITER changed a generator: got %v, want same gen", v)
+	}
+}
+
+func TestEvalGetYieldFromIterCallsIter(t *testing.T) {
+	ts := state.NewThread()
+	src := objects.NewList([]objects.Object{objects.NewInt(1), objects.NewInt(2)})
+	co := &objects.Code{
+		Code: concat(
+			instr(compile.LOAD_CONST, 0),
+			instr(compile.GET_YIELD_FROM_ITER, 0),
+			instr(compile.RETURN_VALUE, 0),
+		),
+		Consts:    []any{src},
+		Stacksize: 4,
+	}
+	v, err := EvalCode(ts, co, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v == src {
+		t.Errorf("GET_YIELD_FROM_ITER returned the list unchanged; expected an iterator")
+	}
+	if v == nil {
+		t.Fatal("got nil iterator")
+	}
 }
