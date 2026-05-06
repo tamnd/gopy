@@ -123,6 +123,7 @@ func numericPanel() []struct {
 		{"hex", Hex},
 		{"ascii", ASCII},
 		{"format", Format},
+		{"round", Round},
 	}
 }
 
