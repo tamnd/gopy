@@ -8,6 +8,7 @@
 package contextvar
 
 import (
+	"sync"
 	"unsafe"
 
 	"github.com/tamnd/gopy/errors"
@@ -19,7 +20,9 @@ import (
 // ContextVar is the Python-level context variable. The cache fields
 // match CPython's var_cached / var_cached_tsid / var_cached_tsver.
 // hasDefault distinguishes "no default" from "default=None"; CPython
-// uses NULL on the C side for the same purpose.
+// uses NULL on the C side for the same purpose. cacheMu guards the
+// cache slot: CPython relies on the GIL to serialize writes, but gopy
+// runs goroutines truly in parallel so we need an explicit lock.
 //
 // CPython: Python/context.c:861 contextvar_new
 type ContextVar struct {
@@ -28,6 +31,7 @@ type ContextVar struct {
 	defaultVal  objects.Object
 	hasDefault  bool
 	hash        int64
+	cacheMu     sync.Mutex
 	cachedTSID  uint64
 	cachedVer   uint64
 	cachedVal   objects.Object
@@ -91,10 +95,8 @@ func (cv *ContextVar) Get(ts *state.Thread) (objects.Object, error) {
 		return cv.notFound(ts)
 	}
 
-	if cv.cachedValid &&
-		cv.cachedTSID == ts.ID() &&
-		cv.cachedVer == ts.ContextVersion() {
-		return cv.cachedVal, nil
+	if val, ok := cv.cacheLookup(ts); ok {
+		return val, nil
 	}
 
 	val, found, err := cur.vars.Find(cv)
@@ -102,10 +104,7 @@ func (cv *ContextVar) Get(ts *state.Thread) (objects.Object, error) {
 		return nil, err
 	}
 	if found {
-		cv.cachedVal = val
-		cv.cachedTSID = ts.ID()
-		cv.cachedVer = ts.ContextVersion()
-		cv.cachedValid = true
+		cv.cacheStore(ts, val)
 		return val, nil
 	}
 	return cv.notFound(ts)
@@ -119,20 +118,15 @@ func (cv *ContextVar) Get(ts *state.Thread) (objects.Object, error) {
 func (cv *ContextVar) GetWithDefault(ts *state.Thread, def objects.Object) (objects.Object, error) {
 	cur, _ := ts.Context().(*Context)
 	if cur != nil {
-		if cv.cachedValid &&
-			cv.cachedTSID == ts.ID() &&
-			cv.cachedVer == ts.ContextVersion() {
-			return cv.cachedVal, nil
+		if val, ok := cv.cacheLookup(ts); ok {
+			return val, nil
 		}
 		val, found, err := cur.vars.Find(cv)
 		if err != nil {
 			return nil, err
 		}
 		if found {
-			cv.cachedVal = val
-			cv.cachedTSID = ts.ID()
-			cv.cachedVer = ts.ContextVersion()
-			cv.cachedValid = true
+			cv.cacheStore(ts, val)
 			return val, nil
 		}
 	}
@@ -173,10 +167,7 @@ func (cv *ContextVar) Set(ts *state.Thread, val objects.Object) (*Token, error) 
 	}
 	ctx.vars = newVars
 
-	cv.cachedVal = val
-	cv.cachedTSID = ts.ID()
-	cv.cachedVer = ts.ContextVersion()
-	cv.cachedValid = true
+	cv.cacheStore(ts, val)
 	return tok, nil
 }
 
@@ -203,7 +194,7 @@ func (cv *ContextVar) Reset(ts *state.Thread, tok *Token) error {
 	}
 
 	tok.used = true
-	cv.cachedValid = false
+	cv.cacheInvalidate()
 
 	if !tok.hadOld {
 		newVars, removed, err := ctx.vars.Without(cv)
@@ -223,6 +214,43 @@ func (cv *ContextVar) Reset(ts *state.Thread, tok *Token) error {
 	}
 	ctx.vars = newVars
 	return nil
+}
+
+// cacheLookup returns the cached value if it matches ts's id and
+// context version. Holds cacheMu so concurrent Set/Reset calls from
+// other threads cannot tear the slot.
+//
+// CPython: Python/context.c:298 PyContextVar_Get (cache hit branch)
+func (cv *ContextVar) cacheLookup(ts *state.Thread) (objects.Object, bool) {
+	cv.cacheMu.Lock()
+	defer cv.cacheMu.Unlock()
+	if cv.cachedValid &&
+		cv.cachedTSID == ts.ID() &&
+		cv.cachedVer == ts.ContextVersion() {
+		return cv.cachedVal, true
+	}
+	return nil, false
+}
+
+// cacheStore overwrites the cache slot.
+//
+// CPython: Python/context.c:309 PyContextVar_Get (cache fill branch)
+func (cv *ContextVar) cacheStore(ts *state.Thread, val objects.Object) {
+	cv.cacheMu.Lock()
+	defer cv.cacheMu.Unlock()
+	cv.cachedVal = val
+	cv.cachedTSID = ts.ID()
+	cv.cachedVer = ts.ContextVersion()
+	cv.cachedValid = true
+}
+
+// cacheInvalidate marks the cache slot stale.
+//
+// CPython: Python/context.c:393 PyContextVar_Reset (cache invalidate)
+func (cv *ContextVar) cacheInvalidate() {
+	cv.cacheMu.Lock()
+	defer cv.cacheMu.Unlock()
+	cv.cachedValid = false
 }
 
 var (
