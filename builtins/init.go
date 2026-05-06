@@ -84,8 +84,29 @@ func Init(defaultFile io.Writer) (*objects.Dict, error) {
 			return nil, err
 		}
 	}
+	for _, fn := range asyncIterPanel() {
+		if err := setBuiltin(dict, fn.name, objects.NewBuiltinFunction(fn.name, fn.impl)); err != nil {
+			return nil, err
+		}
+	}
 
 	return dict, nil
+}
+
+// asyncIterPanel returns the async iteration builtins: aiter, anext.
+//
+// CPython: Python/bltinmodule.c builtin_methods aiter / anext
+func asyncIterPanel() []struct {
+	name string
+	impl func(args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error)
+} {
+	return []struct {
+		name string
+		impl func(args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error)
+	}{
+		{"aiter", AIter},
+		{"anext", ANext},
+	}
 }
 
 // scopePanel returns the introspection builtins that read the running

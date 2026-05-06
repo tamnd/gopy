@@ -53,6 +53,10 @@ func init() {
 	AsyncGeneratorType = NewType("async_generator", []*Type{objectType})
 	AsyncGeneratorType.Repr = asyncGenRepr
 	AsyncGeneratorType.Str = asyncGenRepr
+	AsyncGeneratorType.Async = &AsyncMethods{
+		Aiter: func(o Object) (Object, error) { return o, nil },
+		Anext: func(o Object) (Object, error) { return o.(*AsyncGenerator).Anext(), nil },
+	}
 
 	AsyncGenASendType = NewType("async_generator_asend",
 		[]*Type{objectType})

@@ -83,3 +83,14 @@ type MappingMethods struct {
 	SetItem func(o, key, v Object) error
 	DelItem func(o, key Object) error
 }
+
+// AsyncMethods mirrors PyAsyncMethods (tp_as_async). am_aiter returns
+// the async iterator, am_anext returns the awaitable that yields the
+// next value, am_await is the __await__ slot used by `await` itself.
+//
+// CPython: Include/cpython/object.h PyAsyncMethods
+type AsyncMethods struct {
+	Aiter func(o Object) (Object, error)
+	Anext func(o Object) (Object, error)
+	Await func(o Object) (Object, error)
+}

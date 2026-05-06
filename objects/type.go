@@ -105,6 +105,7 @@ type Type struct {
 	Number   *NumberMethods
 	Sequence *SequenceMethods
 	Mapping  *MappingMethods
+	Async    *AsyncMethods
 
 	// TpFlags mirrors CPython's tp_flags bitset for the subset of flags
 	// that affect VM dispatch (MATCH_MAPPING / MATCH_SEQUENCE).
