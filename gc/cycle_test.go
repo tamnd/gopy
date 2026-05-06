@@ -2,8 +2,8 @@
 // is shaped after the corresponding case in cpython/Lib/test/test_gc.py
 // and pins the observable behavior we want before declaring v0.10
 // done. Subset coverage: cycle reclaim, finalizer fires once,
-// transitive reclaim through a chain. Weakref interaction lands with
-// 1613-I.
+// transitive reclaim through a chain, and weakref-before-finalizer
+// ordering.
 
 package gc
 
@@ -126,5 +126,40 @@ func TestCycleChainReachableSurvives(t *testing.T) {
 	if !IsTracked(rooted) || !IsTracked(a) || !IsTracked(b) {
 		t.Fatalf("rooted chain dropped: rooted=%v a=%v b=%v",
 			IsTracked(rooted), IsTracked(a), IsTracked(b))
+	}
+}
+
+func TestCycleWeakrefClearedBeforeFinalizer(t *testing.T) {
+	defer untrackAll()
+	defer func() {
+		state.mu.Lock()
+		state.weakrefs = make(map[objects.Object][]*objects.Weakref)
+		state.mu.Unlock()
+	}()
+	// CPython orders handle_weakrefs ahead of finalize_garbage so a
+	// finalizer that consults a weakref onto its own cycle sees the
+	// referent already dead. gopy must match: by the time the
+	// finalizer fires the weakref's Referent() returns None.
+	a := objects.NewList(nil)
+	b := objects.NewList(nil)
+	a.Append(b)
+	b.Append(a)
+	Track(a)
+	Track(b)
+
+	w := objects.NewWeakref(a, nil)
+	RegisterWeakref(w)
+
+	var seenInsideFinalizer objects.Object
+	RegisterFinalizer(a, func(_ objects.Object) {
+		seenInsideFinalizer = w.Referent()
+	})
+
+	if Collect(2) != 2 {
+		t.Fatalf("cycle did not reclaim")
+	}
+	if seenInsideFinalizer != objects.None() {
+		t.Fatalf("finalizer saw Referent = %v, want None (weakref must clear first)",
+			seenInsideFinalizer)
 	}
 }
