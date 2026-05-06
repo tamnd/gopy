@@ -70,7 +70,21 @@ type Type struct {
 	Number   *NumberMethods
 	Sequence *SequenceMethods
 	Mapping  *MappingMethods
+
+	// TpFlags mirrors CPython's tp_flags bitset for the subset of flags
+	// that affect VM dispatch (MATCH_MAPPING / MATCH_SEQUENCE).
+	//
+	// CPython: Include/object.h Py_TPFLAGS_*
+	TpFlags uint64
 }
+
+// TpFlag values used by MATCH_MAPPING and MATCH_SEQUENCE.
+//
+// CPython: Include/object.h:L284 Py_TPFLAGS_MAPPING / Py_TPFLAGS_SEQUENCE
+const (
+	TpFlagMapping  uint64 = 1 << 6
+	TpFlagSequence uint64 = 1 << 5
+)
 
 // NumberMethods is the v0.2 subset of tp_as_number. The reflected
 // variants are handled by the abstract layer; concrete types only

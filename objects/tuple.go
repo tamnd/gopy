@@ -24,6 +24,7 @@ var TupleType = NewType("tuple", []*Type{objectType})
 var emptyTuple *Tuple
 
 func init() {
+	TupleType.TpFlags = TpFlagSequence
 	TupleType.Repr = tupleRepr
 	TupleType.Str = tupleRepr
 	TupleType.Hash = tupleHash
