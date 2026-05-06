@@ -60,6 +60,9 @@ type gcState struct {
 
 	finalizers map[objects.Object]Finalizer
 	tracked    map[objects.Object]*gcHead
+	// weakrefs maps a referent to the weakrefs pointing at it.
+	// Cleared in handle_weakrefs when the referent goes unreachable.
+	weakrefs map[objects.Object][]*objects.Weakref
 
 	// garbage holds objects whose collection was suppressed because
 	// they carry a legacy __del__. gopy unifies finalizers under
@@ -81,6 +84,7 @@ func newGCState() *gcState {
 		enabled:    true,
 		finalizers: make(map[objects.Object]Finalizer),
 		tracked:    make(map[objects.Object]*gcHead),
+		weakrefs:   make(map[objects.Object][]*objects.Weakref),
 	}
 	s.generations[0].threshold = defaultThreshold0
 	s.generations[1].threshold = defaultThreshold1

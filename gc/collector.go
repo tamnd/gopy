@@ -6,7 +6,6 @@
 //
 // What gopy leaves out:
 //
-//   - handle_weakrefs lands with 1613-I.
 //   - gc_select_generation auto-trigger lands with 1613-K.x once we
 //     wire allocator hooks.
 //   - delete_garbage's tp_clear loop is replaced by reclaimUnreachable
@@ -25,6 +24,10 @@ package gc
 // optional generation through unchecked. When the collector is
 // disabled (gc.disable()) Collect returns 0 without touching state.
 //
+// Weakref callbacks queued by handleWeakrefs run after the collector
+// lock has been released. CPython does the same so callbacks can
+// safely take the GIL, allocate, or trigger another collection.
+//
 // CPython: Python/gc.c:1430 gc_collect_main
 func Collect(gen int) int {
 	if gen < 0 {
@@ -34,18 +37,23 @@ func Collect(gen int) int {
 		gen = NumGenerations - 1
 	}
 	state.mu.Lock()
-	defer state.mu.Unlock()
 	if !state.enabled {
+		state.mu.Unlock()
 		return 0
 	}
-	return collectMain(gen)
+	collected, pending := collectMain(gen)
+	state.mu.Unlock()
+	invokeWeakrefCallbacks(pending)
+	return collected
 }
 
 // collectMain is the lock-held inner driver. Mirrors gc_collect_main
-// minus the auto-trigger and weakref steps.
+// minus the auto-trigger. Returns the reclaim count and any pending
+// weakref callbacks; the caller invokes the callbacks after dropping
+// state.mu.
 //
 // CPython: Python/gc.c:1430 gc_collect_main
-func collectMain(gen int) int {
+func collectMain(gen int) (int, []pendingCallback) {
 	young := newListHead()
 	for i := 0; i <= gen; i++ {
 		listMerge(state.generations[i].head, young)
@@ -55,17 +63,19 @@ func collectMain(gen int) int {
 	updateRefs(young)
 	if err := subtractRefs(young, state.tracked); err != nil {
 		listMerge(young, state.generations[gen].head)
-		return 0
+		return 0, nil
 	}
 
 	unreachable := newListHead()
 	if err := moveUnreachable(young, unreachable, state.tracked); err != nil {
 		listMerge(young, state.generations[gen].head)
 		listMerge(unreachable, state.generations[gen].head)
-		return 0
+		return 0, nil
 	}
 
 	untrackTuples(young, state.tracked)
+
+	pending := handleWeakrefs(unreachable, state.weakrefs)
 
 	finalizeGarbage(unreachable, state.finalizers)
 	collected := listSize(unreachable)
@@ -83,7 +93,7 @@ func collectMain(gen int) int {
 	}
 	listMerge(young, state.generations[dest].head)
 
-	return collected
+	return collected, pending
 }
 
 // clearAllFreeLists is the gopy stand-in for CPython's
