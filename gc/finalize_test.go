@@ -32,7 +32,7 @@ func TestFinalizeGarbageRunsEachFinalizerOnce(t *testing.T) {
 		b: func(o objects.Object) { calls[o]++ },
 	}
 
-	finalizeGarbage(unreachable, fin)
+	finalizeGarbage(unreachable, fin, nil)
 
 	if calls[a] != 1 || calls[b] != 1 {
 		t.Fatalf("calls=%v, want each fired once", calls)
@@ -61,7 +61,7 @@ func TestFinalizeGarbageSkipsFinalizedFlag(t *testing.T) {
 		a: func(o objects.Object) { calls++ },
 	}
 
-	finalizeGarbage(unreachable, fin)
+	finalizeGarbage(unreachable, fin, nil)
 
 	if calls != 0 {
 		t.Fatalf("finalizer fired despite FINALIZED bit: %d", calls)
@@ -76,7 +76,7 @@ func TestFinalizeGarbageNoFinalizerIsNoop(t *testing.T) {
 	unreachable, _ := buildUnreachable([]objects.Object{a})
 	fin := map[objects.Object]Finalizer{}
 
-	finalizeGarbage(unreachable, fin)
+	finalizeGarbage(unreachable, fin, nil)
 
 	if unreachable.next == unreachable {
 		t.Fatalf("list should still hold the object")
@@ -91,7 +91,7 @@ func TestReclaimUnreachableEmptiesListAndTracked(t *testing.T) {
 	b := objects.NewList(nil)
 	unreachable, tracked := buildUnreachable([]objects.Object{a, b})
 
-	reclaimUnreachable(unreachable, tracked)
+	reclaimUnreachable(unreachable, tracked, nil)
 
 	if !listIsEmpty(unreachable) {
 		t.Fatalf("unreachable not emptied")

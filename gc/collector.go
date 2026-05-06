@@ -18,6 +18,10 @@
 
 package gc
 
+import (
+	"github.com/tamnd/gopy/objects"
+)
+
 // Collect runs a collection on generations 0..gen and returns the
 // number of objects reclaimed. The argument is clamped into the
 // [0, NumGenerations) range so callers can pass gc.collect()'s
@@ -41,10 +45,41 @@ func Collect(gen int) int {
 		state.mu.Unlock()
 		return 0
 	}
+	cbList := state.callbacks
+	state.mu.Unlock()
+	invokeGCCallback(cbList, "start", gen, 0, 0)
+
+	state.mu.Lock()
 	collected, pending := collectMain(gen)
 	state.mu.Unlock()
+
 	invokeWeakrefCallbacks(pending)
+	invokeGCCallback(cbList, "stop", gen, collected, 0)
 	return collected
+}
+
+// invokeGCCallback calls each entry in the gc.callbacks list with
+// (phase, info). info is the dict {"generation": gen, "collected": n,
+// "uncollectable": u}. Errors raised by the callbacks are ignored,
+// matching CPython's PyErr_FormatUnraisable path.
+//
+// CPython: Python/gc.c invoke_gc_callback
+func invokeGCCallback(cbs *objects.List, phase string, gen, collected, uncollectable int) {
+	if cbs == nil || cbs.Len() == 0 {
+		return
+	}
+	info := objects.NewDict()
+	_ = info.SetItem(objects.NewStr("generation"), objects.NewInt(int64(gen)))
+	_ = info.SetItem(objects.NewStr("collected"), objects.NewInt(int64(collected)))
+	_ = info.SetItem(objects.NewStr("uncollectable"), objects.NewInt(int64(uncollectable)))
+	args := objects.NewTuple([]objects.Object{objects.NewStr(phase), info})
+	for i := 0; i < cbs.Len(); i++ {
+		cb := cbs.Item(i)
+		if cb == nil {
+			continue
+		}
+		_, _ = objects.Call(cb, args, nil)
+	}
 }
 
 // collectMain is the lock-held inner driver. Mirrors gc_collect_main
@@ -77,11 +112,14 @@ func collectMain(gen int) (int, []pendingCallback) {
 
 	pending := handleWeakrefs(unreachable, state.weakrefs)
 
-	finalizeGarbage(unreachable, state.finalizers)
+	finalizeGarbage(unreachable, state.finalizers, state.finalized)
 	collected := listSize(unreachable)
-	reclaimUnreachable(unreachable, state.tracked)
+	reclaimUnreachable(unreachable, state.tracked, state.finalized)
 	clearUnreachableMask(young)
 	clearAllFreeLists()
+
+	state.stats[gen].collections++
+	state.stats[gen].collected += collected
 
 	// Promote survivors. CPython moves them to the next-older
 	// generation unless we are already at the top; the same mapping

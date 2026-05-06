@@ -31,12 +31,15 @@ import (
 // object normally, and the next gc.Collect cycle will re-evaluate it.
 //
 // CPython: Python/gc.c:1067 finalize_garbage
-func finalizeGarbage(unreachable *gcHead, finalizers map[objects.Object]Finalizer) {
+func finalizeGarbage(unreachable *gcHead, finalizers map[objects.Object]Finalizer, finalized map[objects.Object]struct{}) {
 	for g := unreachable.next; g != unreachable; g = g.next {
 		if g.flags&gcFinalized != 0 {
 			continue
 		}
 		g.flags |= gcFinalized
+		if finalized != nil {
+			finalized[g.obj] = struct{}{}
+		}
 		fn, ok := finalizers[g.obj]
 		if !ok {
 			continue
@@ -54,10 +57,13 @@ func finalizeGarbage(unreachable *gcHead, finalizers map[objects.Object]Finalize
 // reclaims unreachable cycles on its own schedule.
 //
 // CPython: Python/gc.c:1198 delete_garbage
-func reclaimUnreachable(unreachable *gcHead, tracked map[objects.Object]*gcHead) {
+func reclaimUnreachable(unreachable *gcHead, tracked map[objects.Object]*gcHead, finalized map[objects.Object]struct{}) {
 	for unreachable.next != unreachable {
 		g := unreachable.next
 		listRemove(g)
 		delete(tracked, g.obj)
+		if finalized != nil {
+			delete(finalized, g.obj)
+		}
 	}
 }
