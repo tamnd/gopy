@@ -38,6 +38,10 @@ func (e *evalState) dispatch(op compile.Opcode, oparg uint32) (next int, retVal 
 	if next, retVal, retErr, retDone, ok, err := e.trySimple(op, oparg); ok {
 		return next, retVal, retErr, retDone, err
 	}
+	// Import machinery arms.
+	if next, ok, err := e.tryImport(op, oparg); ok {
+		return next, nil, nil, false, err
+	}
 	return 0, nil, nil, false, opcodeNotImplemented(op)
 }
 

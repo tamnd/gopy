@@ -27,6 +27,8 @@ var (
 	PyExc_StopIteration       = newExcType("StopIteration", []*objects.Type{PyExc_Exception})
 	PyExc_SystemExit          = newExcType("SystemExit", []*objects.Type{PyExc_BaseException})
 	PyExc_KeyboardInterrupt   = newExcType("KeyboardInterrupt", []*objects.Type{PyExc_BaseException})
+	PyExc_ImportError         = newExcType("ImportError", []*objects.Type{PyExc_Exception})
+	PyExc_ModuleNotFoundError = newExcType("ModuleNotFoundError", []*objects.Type{PyExc_ImportError})
 )
 
 func newExcType(name string, bases []*objects.Type) *objects.Type {

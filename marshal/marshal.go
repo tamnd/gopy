@@ -2,12 +2,10 @@
 // reads and writes the .pyc wire format that the import system uses
 // to cache compiled code objects.
 //
-// v0.5 lands a skeleton: the Version constant, the type-tag table,
-// and a Dump/Load round-trip for the small subset of values that
-// codegen and the v05test gate need (None, bool, int (32-bit and
-// long), float64, string, bytes, tuple, list). Code-object encoding,
-// the REF / INTERNED de-dup tables, complex, set/frozenset, and
-// slice land in v0.8 alongside the import system.
+// v0.8 adds: TYPE_LONG (arbitrary-precision ints via *big.Int), FLAG_REF
+// back-reference dedup in the decoder, TYPE_REF, and the full set of
+// interned-string tags (TYPE_ASCII, TYPE_ASCII_INTERNED,
+// TYPE_SHORT_ASCII_INTERNED, TYPE_INTERNED).
 //
 // CPython: Python/marshal.c
 package marshal
@@ -18,6 +16,9 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"math/big"
+
+	"github.com/tamnd/gopy/objects"
 )
 
 // Version is the wire-format version Dump/Load speak. CPython 3.14
@@ -28,30 +29,45 @@ import (
 const Version = 5
 
 // Type tags from Python/marshal.c. Single-byte discriminators on the
-// wire. The high bit (0x80) is the FLAG_REF marker; not used in v0.5.
+// wire. The high bit (0x80) is the FLAG_REF marker.
 //
 // CPython: Python/marshal.c TYPE_*
 const (
-	typeNull        = '0'
-	typeNone        = 'N'
-	typeFalse       = 'F'
-	typeTrue        = 'T'
-	typeStopIter    = 'S'
-	typeEllipsis    = '.'
-	typeInt         = 'i'
-	typeInt64       = 'I'
-	typeFloat       = 'f'
-	typeBinaryFloat = 'g'
-	typeLong        = 'l'
-	typeString      = 's'
-	typeTuple       = '('
-	typeSmallTuple  = ')'
-	typeList        = '['
-	typeDict        = '{'
-	typeCode        = 'c'
-	typeUnicode     = 'u'
-	typeShortASCII  = 'z'
+	typeNull               = '0'
+	typeNone               = 'N'
+	typeFalse              = 'F'
+	typeTrue               = 'T'
+	typeStopIter           = 'S'
+	typeEllipsis           = '.'
+	typeInt                = 'i'
+	typeInt64              = 'I'
+	typeFloat              = 'f'
+	typeBinaryFloat        = 'g'
+	typeLong               = 'l'
+	typeString             = 's'
+	typeInterned           = 't'
+	typeRef                = 'r'
+	typeTuple              = '('
+	typeSmallTuple         = ')'
+	typeList               = '['
+	typeDict               = '{'
+	typeCode               = 'c'
+	typeUnicode            = 'u'
+	typeASCII              = 'a'
+	typeASCIIInterned      = 'A'
+	typeShortASCII         = 'z'
+	typeShortASCIIInterned = 'Z'
+	typeSet                = '<'
+	typeFrozenset          = '>'
+	typeComplex            = 'x'
+	typeBinaryComplex      = 'y'
 )
+
+// flagRef is OR'd onto a type tag to signal that the object should be
+// added to the back-reference table at the current index slot.
+//
+// CPython: Python/marshal.c FLAG_REF
+const flagRef = 0x80
 
 // ErrUnmarshallable matches CPython's WFERR_UNMARSHALLABLE.
 //
@@ -118,6 +134,16 @@ func (e *encoder) write(v any) error {
 		return e.writeIntLike(int64(x))
 	case int64:
 		return e.writeIntLike(x)
+	case *big.Int:
+		return writeLong(e.w, x, typeLong)
+	case *objects.Code:
+		return marshalCode(e, x)
+	case *objects.Set:
+		return e.writeSet(x)
+	case map[any]any:
+		return e.writeDict(x)
+	case complex128:
+		return e.writeComplex(x)
 	case float64:
 		if err := e.writeByte(typeBinaryFloat); err != nil {
 			return err
@@ -161,8 +187,7 @@ func (e *encoder) write(v any) error {
 }
 
 // writeIntLike picks TYPE_INT for values that fit in int32, falling
-// back to TYPE_INT64 for the rest. CPython's TYPE_LONG (PyLong) wire
-// format is a v0.8 deliverable.
+// back to TYPE_INT64 for the rest.
 //
 // CPython: Python/marshal.c w_object PyLong arm
 func (e *encoder) writeIntLike(v int64) error {
@@ -213,7 +238,8 @@ func isASCII(s string) bool {
 }
 
 type decoder struct {
-	r io.ByteReader
+	r    io.ByteReader
+	refs []any
 }
 
 func byteReaderOf(r io.Reader) io.ByteReader {
@@ -265,21 +291,42 @@ func (d *decoder) readInt64() (int64, error) {
 	return int64(binary.LittleEndian.Uint64(buf)), nil
 }
 
-// read decodes the next value. The wire format mirrors the encoder
-// arms; unknown tags return an error.
+// read decodes the next value. FLAG_REF objects are appended to the
+// refs slice so later TYPE_REF tags can resolve them.
 //
 // CPython: Python/marshal.c r_object
-//
-//nolint:gocyclo // mirrors CPython's per-tag wire dispatch.
 func (d *decoder) read() (any, error) {
 	tag, err := d.readByte()
 	if err != nil {
 		return nil, err
 	}
-	// Strip FLAG_REF; v0.5 does not honor the back-reference table.
-	tag &^= 0x80
+
+	hasRef := (tag & flagRef) != 0
+	tag &^= flagRef
+
+	// Reserve a slot in the ref table before decoding so that
+	// self-referential structures work correctly.
+	refIdx := -1
+	if hasRef {
+		refIdx = len(d.refs)
+		d.refs = append(d.refs, nil)
+	}
+
+	var v any
+	v, err = d.decodeTag(tag)
+	if err != nil {
+		return nil, err
+	}
+	if hasRef {
+		d.refs[refIdx] = v
+	}
+	return v, nil
+}
+
+//nolint:gocyclo // mirrors CPython's per-tag wire dispatch.
+func (d *decoder) decodeTag(tag byte) (any, error) {
 	switch tag {
-	case typeNone:
+	case typeNone, typeNull:
 		return nil, nil
 	case typeTrue:
 		return true, nil
@@ -290,13 +337,15 @@ func (d *decoder) read() (any, error) {
 		return int64(v), err
 	case typeInt64:
 		return d.readInt64()
+	case typeLong:
+		return readLong(d.r)
 	case typeBinaryFloat:
 		bits, err := d.readInt64()
 		if err != nil {
 			return nil, err
 		}
 		return math.Float64frombits(uint64(bits)), nil
-	case typeShortASCII:
+	case typeShortASCII, typeShortASCIIInterned:
 		n, err := d.readByte()
 		if err != nil {
 			return nil, err
@@ -306,7 +355,7 @@ func (d *decoder) read() (any, error) {
 			return nil, err
 		}
 		return string(buf), nil
-	case typeUnicode:
+	case typeASCII, typeASCIIInterned, typeInterned, typeUnicode:
 		n, err := d.readInt32()
 		if err != nil {
 			return nil, err
@@ -334,6 +383,27 @@ func (d *decoder) read() (any, error) {
 			return nil, err
 		}
 		return d.readTuple(int(n))
+	case typeCode:
+		return unmarshalCode(d)
+	case typeSet:
+		return d.readSet(false)
+	case typeFrozenset:
+		return d.readSet(true)
+	case typeDict:
+		return d.readDict()
+	case typeComplex:
+		return d.readComplexText()
+	case typeBinaryComplex:
+		return d.readBinaryComplex()
+	case typeRef:
+		n, err := d.readInt32()
+		if err != nil {
+			return nil, err
+		}
+		if int(n) < 0 || int(n) >= len(d.refs) {
+			return nil, fmt.Errorf("marshal: invalid ref index %d (table size %d)", n, len(d.refs))
+		}
+		return d.refs[n], nil
 	}
 	return nil, fmt.Errorf("marshal: unknown type tag %q (0x%02x)", rune(tag), tag)
 }
@@ -348,4 +418,216 @@ func (d *decoder) readTuple(n int) ([]any, error) {
 		out[i] = v
 	}
 	return out, nil
+}
+
+// writeSet encodes a set or frozenset.
+//
+// CPython: Python/marshal.c w_object PySet_Type / PyFrozenSet_Type
+func (e *encoder) writeSet(s *objects.Set) error {
+	tag := byte(typeSet)
+	if s.Type() == objects.FrozensetType {
+		tag = typeFrozenset
+	}
+	if err := e.writeByte(tag); err != nil {
+		return err
+	}
+	items := s.Items()
+	if err := e.writeInt32(int32(len(items))); err != nil {
+		return err
+	}
+	for _, item := range items {
+		v, err := fromObject(item)
+		if err != nil {
+			return err
+		}
+		if err := e.write(v); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// writeDict encodes a map[any]any as TYPE_DICT with null terminator.
+//
+// CPython: Python/marshal.c w_object PyDict_Type
+func (e *encoder) writeDict(m map[any]any) error {
+	if err := e.writeByte(typeDict); err != nil {
+		return err
+	}
+	for k, v := range m {
+		if err := e.write(k); err != nil {
+			return err
+		}
+		if err := e.write(v); err != nil {
+			return err
+		}
+	}
+	return e.writeByte(typeNull)
+}
+
+// writeComplex encodes a complex128 as TYPE_BINARY_COMPLEX.
+//
+// CPython: Python/marshal.c w_object PyComplex_Type (binary form)
+func (e *encoder) writeComplex(c complex128) error {
+	if err := e.writeByte(typeBinaryComplex); err != nil {
+		return err
+	}
+	if err := e.writeInt64(int64(math.Float64bits(real(c)))); err != nil {
+		return err
+	}
+	return e.writeInt64(int64(math.Float64bits(imag(c))))
+}
+
+// readSet decodes a TYPE_SET or TYPE_FROZENSET. If frozen is true the
+// result is an immutable frozenset.
+//
+// CPython: Python/marshal.c r_object TYPE_SET / TYPE_FROZENSET
+func (d *decoder) readSet(frozen bool) (any, error) {
+	n, err := d.readInt32()
+	if err != nil {
+		return nil, err
+	}
+	items := make([]objects.Object, 0, int(n))
+	for i := int32(0); i < n; i++ {
+		v, err := d.read()
+		if err != nil {
+			return nil, err
+		}
+		obj, err := toObject(v)
+		if err != nil {
+			return nil, fmt.Errorf("marshal: set element: %w", err)
+		}
+		items = append(items, obj)
+	}
+	if frozen {
+		return objects.NewFrozenset(items)
+	}
+	s := objects.NewSet()
+	for _, item := range items {
+		if err := s.Add(item); err != nil {
+			return nil, err
+		}
+	}
+	return s, nil
+}
+
+// toObject converts a plain Go marshal value to an objects.Object for
+// use as a set key or dict key. Only hashable types are accepted.
+func toObject(v any) (objects.Object, error) {
+	switch x := v.(type) {
+	case nil:
+		return objects.None(), nil
+	case bool:
+		return objects.NewBool(x), nil
+	case int64:
+		return objects.NewInt(x), nil
+	case float64:
+		return objects.NewFloat(x), nil
+	case string:
+		return objects.NewStr(x), nil
+	case objects.Object:
+		return x, nil
+	}
+	return nil, fmt.Errorf("marshal: cannot convert %T to Object", v)
+}
+
+// fromObject converts an objects.Object back to a plain Go marshal
+// value so that set and frozenset items can pass through write().
+func fromObject(obj objects.Object) (any, error) {
+	switch x := obj.(type) {
+	case *objects.Int:
+		if v, ok := x.Int64(); ok {
+			return v, nil
+		}
+		return x.BigInt(), nil
+	case *objects.Float:
+		return x.Float64(), nil
+	case *objects.Bool:
+		v, _ := x.Int64()
+		return v != 0, nil
+	case *objects.Set:
+		return x, nil
+	case *objects.Code:
+		return x, nil
+	}
+	// None and str use unexported concrete types; dispatch via type slots.
+	if obj.Type() == objects.NoneType() {
+		return nil, nil
+	}
+	if obj.Type().Str != nil {
+		s, err := obj.Type().Str(obj)
+		if err == nil {
+			return s, nil
+		}
+	}
+	return nil, fmt.Errorf("marshal: cannot convert %T to plain value", obj)
+}
+
+// readDict decodes a TYPE_DICT (null-terminated key/value pairs).
+//
+// CPython: Python/marshal.c r_object TYPE_DICT
+func (d *decoder) readDict() (any, error) {
+	m := make(map[any]any)
+	for {
+		k, err := d.read()
+		if err != nil {
+			return nil, err
+		}
+		if k == nil {
+			break
+		}
+		v, err := d.read()
+		if err != nil {
+			return nil, err
+		}
+		m[k] = v
+	}
+	return m, nil
+}
+
+// readComplexText decodes a TYPE_COMPLEX (text-encoded float pair).
+// Each component is a length-prefixed ASCII float string.
+//
+// CPython: Python/marshal.c r_object TYPE_COMPLEX
+func (d *decoder) readComplexText() (any, error) {
+	rn, err := d.readByte()
+	if err != nil {
+		return nil, err
+	}
+	rbuf, err := d.readN(int(rn))
+	if err != nil {
+		return nil, err
+	}
+	var r float64
+	if _, err := fmt.Sscanf(string(rbuf), "%g", &r); err != nil {
+		return nil, fmt.Errorf("marshal: complex real part %q: %w", rbuf, err)
+	}
+	in, err := d.readByte()
+	if err != nil {
+		return nil, err
+	}
+	ibuf, err := d.readN(int(in))
+	if err != nil {
+		return nil, err
+	}
+	var im float64
+	if _, err := fmt.Sscanf(string(ibuf), "%g", &im); err != nil {
+		return nil, fmt.Errorf("marshal: complex imag part %q: %w", ibuf, err)
+	}
+	return complex(r, im), nil
+}
+
+// readBinaryComplex decodes a TYPE_BINARY_COMPLEX (two IEEE 754 doubles).
+//
+// CPython: Python/marshal.c r_object TYPE_BINARY_COMPLEX
+func (d *decoder) readBinaryComplex() (any, error) {
+	rb, err := d.readInt64()
+	if err != nil {
+		return nil, err
+	}
+	ib, err := d.readInt64()
+	if err != nil {
+		return nil, err
+	}
+	return complex(math.Float64frombits(uint64(rb)), math.Float64frombits(uint64(ib))), nil
 }
