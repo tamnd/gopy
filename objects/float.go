@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math"
 	"strconv"
+	"strings"
 )
 
 // Float is the Python float, an IEEE-754 double.
@@ -58,16 +59,104 @@ func (f *Float) Float64() float64 {
 }
 
 func floatRepr(o Object) (string, error) {
-	v := o.(*Float).v
+	return formatFloatShort(o.(*Float).v), nil
+}
+
+// formatFloatShort mirrors PyOS_double_to_string('r', 0,
+// Py_DTSF_ADD_DOT_0): emit the shortest decimal digit string that
+// round-trips to the same double, then choose between fixed and
+// exponential layout the same way CPython does. CPython switches to
+// exponent form when the decimal-point position is <= -4 or > 16;
+// Go's strconv.FormatFloat 'g' format flips earlier, so this routine
+// re-derives the layout by going through 'e' first.
+//
+// CPython: Python/pystrtod.c:1265 PyOS_double_to_string
+func formatFloatShort(v float64) string {
 	switch {
 	case math.IsNaN(v):
-		return "nan", nil
+		return "nan"
 	case math.IsInf(v, 1):
-		return "inf", nil
+		return "inf"
 	case math.IsInf(v, -1):
-		return "-inf", nil
+		return "-inf"
 	}
-	return strconv.FormatFloat(v, 'g', -1, 64), nil
+	s := strconv.FormatFloat(v, 'e', -1, 64)
+	neg := false
+	if s[0] == '-' {
+		neg = true
+		s = s[1:]
+	}
+	mantissa, expStr, _ := strings.Cut(s, "e")
+	exp, _ := strconv.Atoi(expStr)
+	digits := mantissa
+	if intPart, frac, hasDot := strings.Cut(mantissa, "."); hasDot {
+		digits = intPart + frac
+	}
+	decpt := exp + 1
+	if decpt <= -4 || decpt > 16 {
+		return formatFloatExp(neg, digits, decpt)
+	}
+	return formatFloatFixed(neg, digits, decpt)
+}
+
+// formatFloatExp lays the digits out as d.dddde+NN, mirroring the
+// 'e' branch inside CPython's format_float_short.
+//
+// CPython: Python/pystrtod.c:1027 format_float_short (e branch)
+func formatFloatExp(neg bool, digits string, decpt int) string {
+	var b strings.Builder
+	if neg {
+		b.WriteByte('-')
+	}
+	b.WriteByte(digits[0])
+	if len(digits) > 1 {
+		b.WriteByte('.')
+		b.WriteString(digits[1:])
+	}
+	b.WriteByte('e')
+	e := decpt - 1
+	if e >= 0 {
+		b.WriteByte('+')
+	} else {
+		b.WriteByte('-')
+		e = -e
+	}
+	if e < 10 {
+		b.WriteByte('0')
+	}
+	b.WriteString(strconv.Itoa(e))
+	return b.String()
+}
+
+// formatFloatFixed lays the digits out as ddd.ddd, padding zeros on
+// either side as needed and adding a trailing ".0" for integral
+// values (the Py_DTSF_ADD_DOT_0 flag CPython's float_repr passes in).
+//
+// CPython: Python/pystrtod.c:1027 format_float_short (f branch)
+func formatFloatFixed(neg bool, digits string, decpt int) string {
+	var b strings.Builder
+	if neg {
+		b.WriteByte('-')
+	}
+	switch {
+	case decpt <= 0:
+		b.WriteString("0.")
+		for i := 0; i < -decpt; i++ {
+			b.WriteByte('0')
+		}
+		b.WriteString(digits)
+	case decpt >= len(digits):
+		b.WriteString(digits)
+		for i := 0; i < decpt-len(digits); i++ {
+			b.WriteByte('0')
+		}
+		b.WriteString(".0")
+	default:
+		b.WriteString(digits[:decpt])
+		b.WriteByte('.')
+		b.WriteString(digits[decpt:])
+	}
+	return b.String()
 }
 
 // floatHash maps a float to the same hash as the equivalent int when
