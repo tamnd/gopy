@@ -32,9 +32,11 @@ var ErrNotImplemented = errors.New("vm: opcode not implemented in v0.6")
 //
 // CPython: Python/ceval.c locals at the top of _PyEval_EvalFrameDefault
 type evalState struct {
-	ts      *state.Thread
-	f       *frame.Frame
-	breaker *gil.Breaker // shadow of ts's breaker, hot-path read
+	ts       *state.Thread
+	f        *frame.Frame
+	breaker  *gil.Breaker      // shadow of ts's breaker, hot-path read
+	gilTimer *gilSwitchTimer   // shadow of ts's switch-interval timer
+	gil      *gil.GIL          // attached interpreter GIL; nil in v0.9
 
 	// genYield/genSend are non-nil when this evalState is running the body
 	// of a generator object. YIELD_VALUE sends on genYield and blocks on
@@ -53,7 +55,8 @@ type evalState struct {
 func Eval(ts *state.Thread, f *frame.Frame) (objects.Object, error) {
 	prev := setActiveThread(ts)
 	defer restoreActiveThread(prev)
-	e := &evalState{ts: ts, f: f, breaker: breakerFor(ts)}
+	v := vmFor(ts)
+	e := &evalState{ts: ts, f: f, breaker: v.breaker, gilTimer: &v.gilTimer, gil: v.gil}
 	return e.run()
 }
 
@@ -76,6 +79,9 @@ func EvalCode(ts *state.Thread, co *objects.Code, globals, locals objects.Object
 // CPython: Python/ceval.c _PyEval_EvalFrameDefault main loop
 func (e *evalState) run() (objects.Object, error) {
 	for {
+		if e.gilTimer != nil {
+			e.gilTimer.poll(e.gil, e.breaker)
+		}
 		if e.breaker != nil && e.breaker.Load() != 0 {
 			if err := e.handleEvalBreaker(); err != nil {
 				return e.unwind(err)
