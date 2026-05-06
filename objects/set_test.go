@@ -146,6 +146,31 @@ func TestFrozensetHashStable(t *testing.T) {
 	}
 }
 
+// TestFrozensetHashOrderIndependent pins that two frozensets with
+// the same members hash to the same value regardless of insert order.
+func TestFrozensetHashOrderIndependent(t *testing.T) {
+	a, _ := NewFrozenset([]Object{NewInt(1), NewInt(2), NewInt(3)})
+	b, _ := NewFrozenset([]Object{NewInt(3), NewInt(1), NewInt(2)})
+	ha, _ := Hash(a)
+	hb, _ := Hash(b)
+	if ha != hb {
+		t.Errorf("hash diverges with insert order: %d != %d", ha, hb)
+	}
+}
+
+// TestFrozensetHashEmpty pins that the empty frozenset has a stable
+// hash and never returns the -1 sentinel.
+func TestFrozensetHashEmpty(t *testing.T) {
+	fs, _ := NewFrozenset(nil)
+	h, err := Hash(fs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if h == -1 {
+		t.Error("hash returned -1 sentinel")
+	}
+}
+
 // TestSetUnhashable pins that a mutable set is not hashable.
 func TestSetUnhashable(t *testing.T) {
 	s := NewSet()

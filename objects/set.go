@@ -265,28 +265,42 @@ func setReprInner(s *Set, open, suffix string) (string, error) {
 	return b.String(), nil
 }
 
-// frozensetHash computes the hash of a frozenset. Mirrors the XOR-based
-// hash used by CPython: fold all element hashes together with rotation.
+// frozensetHash computes the hash of a frozenset. Each element hash
+// is run through _shuffle_bits before being XOR-folded so that nested
+// frozensets disperse properly, the count is mixed in, and a final
+// avalanche step matches CPython byte for byte.
 //
-// CPython: Objects/setobject.c:L793 frozenset_hash
+// CPython: Objects/setobject.c:793 frozenset_hash
 func frozensetHash(o Object) (int64, error) {
 	s := o.(*Set)
 	if s.hashValid {
 		return s.cachedHash, nil
 	}
-	// XOR-fold with rotation to make the result order-independent.
 	var h uint64
 	for _, e := range s.entries {
 		if !e.used {
 			continue
 		}
-		// rotate left by 5
-		v := uint64(e.hash)
-		h ^= (v << 5) | (v >> 59)
+		h ^= shuffleBits(uint64(e.hash))
 	}
-	s.cachedHash = int64(h)
+	h ^= (uint64(s.used) + 1) * 1927868237
+	h ^= (h >> 11) ^ (h >> 25)
+	h = h*69069 + 907133923
+	out := int64(h)
+	if out == -1 {
+		out = 590923713
+	}
+	s.cachedHash = out
 	s.hashValid = true
-	return s.cachedHash, nil
+	return out, nil
+}
+
+// shuffleBits is the per-element disperse used by frozenset_hash so
+// that small element-hash differences don't collide after the XOR.
+//
+// CPython: Objects/setobject.c:768 _shuffle_bits
+func shuffleBits(h uint64) uint64 {
+	return ((h ^ 89869747) ^ (h << 16)) * 3644798167
 }
 
 // setRichCmp implements == and != for both set and frozenset by
