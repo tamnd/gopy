@@ -1,0 +1,132 @@
+// IMPORT_NAME and IMPORT_FROM bytecode arms. Added to the hand-written
+// panel rather than the generated arms because the import machinery
+// depends on the imp package which is only available after v0.8.
+//
+// CPython: Python/bytecodes.c IMPORT_NAME / IMPORT_FROM
+package vm
+
+import (
+	"fmt"
+
+	"github.com/tamnd/gopy/compile"
+	"github.com/tamnd/gopy/imp"
+	"github.com/tamnd/gopy/objects"
+	"github.com/tamnd/gopy/state"
+)
+
+// vmExecutor implements imp.Executor using the current thread's eval loop.
+// It is created per-import inside the IMPORT_NAME arm.
+type vmExecutor struct {
+	ts *state.Thread
+}
+
+// ExecCode executes code in mod's namespace using the current thread.
+//
+// CPython: Python/ceval.c:L753 _PyEval_EvalCode (simplified)
+func (e *vmExecutor) ExecCode(code *objects.Code, mod *objects.Module) (objects.Object, error) {
+	return EvalCode(e.ts, code, mod.Dict(), nil)
+}
+
+// tryImport handles IMPORT_NAME and IMPORT_FROM. It is consulted by
+// dispatch before falling back to the generated arms.
+//
+// CPython: Python/bytecodes.c IMPORT_NAME / IMPORT_FROM
+func (e *evalState) tryImport(op compile.Opcode, oparg uint32) (next int, ok bool, err error) {
+	switch op {
+	case compile.IMPORT_NAME:
+		// Stack: TOS = fromlist, TOS1 = level (int).
+		// oparg = index into co.Names.
+		// CPython: Python/bytecodes.c IMPORT_NAME
+		fromlistObj := e.popObject()
+		levelObj := e.popObject()
+
+		co := e.f.Code
+		if int(oparg) >= len(co.Names) {
+			return 0, true, fmt.Errorf("vm: IMPORT_NAME: name index %d out of range", oparg)
+		}
+		modname := co.Names[oparg]
+
+		level := importLevel(levelObj)
+		pkgname := globalName(e.f.Globals)
+
+		exec := &vmExecutor{ts: e.ts}
+		mod, ierr := imp.ImportModuleLevel(exec, modname, pkgname, level)
+		if ierr != nil {
+			return 0, true, ierr
+		}
+
+		// For submodule imports (fromlist non-empty), return the top-level.
+		// For "from x import y", fromlist=("y",) but we push the module and
+		// let IMPORT_FROM extract the attribute.
+		_ = fromlistObj
+		e.pushObject(mod)
+		return e.advance(), true, nil
+
+	case compile.IMPORT_FROM:
+		// TOS remains the module (not popped); push the attribute.
+		// oparg = index into co.Names.
+		// CPython: Python/bytecodes.c IMPORT_FROM
+		mod := e.popObject()
+
+		co := e.f.Code
+		if int(oparg) >= len(co.Names) {
+			return 0, true, fmt.Errorf("vm: IMPORT_FROM: name index %d out of range", oparg)
+		}
+		attrname := co.Names[oparg]
+
+		attr, gerr := objects.GetAttr(mod, objects.NewStr(attrname))
+		if gerr != nil {
+			return 0, true, fmt.Errorf("vm: ImportError: cannot import name %q: %w", attrname, gerr)
+		}
+
+		// IMPORT_FROM leaves the module on the stack under the attribute.
+		e.pushObject(mod)
+		e.pushObject(attr)
+		return e.advance(), true, nil
+	}
+	return 0, false, nil
+}
+
+// importLevel extracts the integer import level from a Python int object.
+// Level 0 = absolute, 1+ = relative.
+//
+// CPython: Python/bytecodes.c IMPORT_NAME (level = PEEK(2))
+func importLevel(obj objects.Object) int {
+	if obj == nil {
+		return 0
+	}
+	iv, ok := obj.(*objects.Int)
+	if !ok {
+		return 0
+	}
+	v, exact := iv.Int64()
+	if !exact || v < 0 {
+		return 0
+	}
+	return int(v)
+}
+
+// globalName extracts __name__ from the globals dict for use as the
+// anchor in relative imports.
+//
+// CPython: Python/bytecodes.c IMPORT_NAME (GLOBALS()["__name__"])
+func globalName(globals objects.Object) string {
+	if globals == nil {
+		return ""
+	}
+	d, ok := globals.(*objects.Dict)
+	if !ok {
+		return ""
+	}
+	v, err := d.GetItem(objects.NewStr("__name__"))
+	if err != nil || v == nil {
+		return ""
+	}
+	if tp := v.Type(); tp.Str != nil {
+		s, serr := tp.Str(v)
+		if serr == nil {
+			return s
+		}
+	}
+	return ""
+}
