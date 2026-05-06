@@ -129,38 +129,6 @@ func listRepr(o Object) (string, error) {
 	return b.String(), nil
 }
 
-func listRichCmp(a, b Object, op CompareOp) (Object, error) {
-	al, ok := a.(*List)
-	if !ok {
-		return notImplemented(), nil
-	}
-	bl, ok := b.(*List)
-	if !ok {
-		return notImplemented(), nil
-	}
-	switch op {
-	case CompareEQ, CompareNE:
-		eq := len(al.items) == len(bl.items)
-		if eq {
-			for i := range al.items {
-				ok, err := RichCmpBool(al.items[i], bl.items[i], CompareEQ)
-				if err != nil {
-					return nil, err
-				}
-				if !ok {
-					eq = false
-					break
-				}
-			}
-		}
-		if op == CompareNE {
-			eq = !eq
-		}
-		return NewBool(eq), nil
-	}
-	return notImplemented(), nil
-}
-
 // listIterator is the iterator returned by iter(list).
 //
 // CPython: Objects/listobject.c:L3539 PyListIter_Type
