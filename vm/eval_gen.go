@@ -263,11 +263,27 @@ func (e *evalState) execCleanupThrow() (genResult, error) {
 
 	if errors.Is(excAsError(excVal), objects.ErrStopIteration) {
 		e.pushObject(objects.None())
-		// StopIteration.value would be the stop value; use None for now.
-		e.pushObject(objects.None())
+		e.pushObject(stopIterationValue(excVal))
 		return genResult{next: e.advance(), ok: true}, nil
 	}
 	return genResult{ok: true}, excAsError(excVal)
+}
+
+// stopIterationValue returns the .value attribute of a StopIteration
+// exception, mirroring CPython's PyStopIterationObject->value access
+// in CLEANUP_THROW. Falls back to None when the exception object
+// doesn't carry args (e.g. it was synthesized from a flat sentinel).
+//
+// CPython: Python/bytecodes.c:1481 CLEANUP_THROW (the
+// PyStopIterationObject ->value field)
+func stopIterationValue(o objects.Object) objects.Object {
+	if exc, ok := o.(objects.ExceptionInstance); ok {
+		args := exc.ExceptionArgs()
+		if args != nil && args.Len() > 0 {
+			return args.Item(0)
+		}
+	}
+	return objects.None()
 }
 
 // execWithExceptStart ports WITH_EXCEPT_START: calls context.__exit__

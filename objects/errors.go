@@ -28,3 +28,16 @@ var errKeyNotFound = errors.New("KeyError")
 //
 // CPython: Objects/object.c:L869 PyObject_Hash
 var errUnhashable = errors.New("TypeError: unhashable type")
+
+// ExceptionInstance is the structural interface a Python exception
+// object satisfies so packages outside errors/ can read its type and
+// args without importing errors and creating layering cycles. The
+// canonical implementation is *errors.Exception.
+//
+// CPython: Objects/exceptions.c:L34 BaseExceptionObject (the fields
+// PyExc_*Object exposes through tp_getset)
+type ExceptionInstance interface {
+	Object
+	ExceptionType() *Type
+	ExceptionArgs() *Tuple
+}
