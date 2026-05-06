@@ -1,37 +1,22 @@
-// Package gc ports the refcount-only path of cpython/Python/gc.c.
-// v0.3 ships Track, Untrack, RegisterFinalizer, and Finalize. Cycle
-// collection is a no-op until v0.10 lands the cycle collector.
+// Package gc ports cpython/Python/gc.c. v0.3 shipped Track / Untrack /
+// RegisterFinalizer / Finalize against a package-level state
+// variable; v0.10 grows that into a full GCState (see state.go) and
+// adds the cycle collector. The public functions in this file keep
+// their v0.3 signatures so the rest of the runtime compiles
+// unchanged.
 //
 // CPython: Python/gc.c file overview
 package gc
 
 import (
-	"sync"
-
 	"github.com/tamnd/gopy/objects"
 )
 
 // Finalizer is the Go equivalent of tp_finalize. The runtime invokes
 // it once, immediately before reclaiming the object.
 //
-// CPython: Include/cpython/object.h:L237 tp_finalize
+// CPython: Include/cpython/object.h:237 tp_finalize
 type Finalizer func(o objects.Object)
-
-// state holds the package-level finalizer table and tracked-object
-// set. Mirrors the gc state struct in CPython but without the
-// generation lists; cycles are not collected in v0.3.
-//
-// CPython: Include/internal/pycore_gc.h:L150 GCState
-var state struct {
-	mu         sync.Mutex
-	finalizers map[objects.Object]Finalizer
-	tracked    map[objects.Object]struct{}
-}
-
-func init() {
-	state.finalizers = make(map[objects.Object]Finalizer)
-	state.tracked = make(map[objects.Object]struct{})
-}
 
 // RegisterFinalizer associates fn with o. The runtime calls Finalize
 // to invoke it. Mirrors PyObject_GC_RegisterFinalizer in spirit; in
@@ -62,54 +47,61 @@ func Finalize(o objects.Object) {
 	if ok {
 		delete(state.finalizers, o)
 	}
-	delete(state.tracked, o)
+	if g, gtracked := state.tracked[o]; gtracked {
+		listRemove(g)
+		delete(state.tracked, o)
+	}
 	state.mu.Unlock()
 	if ok {
 		fn(o)
 	}
 }
 
-// Track adds o to the tracked-object set. Cycle collection (v0.10)
-// will walk this set; for now it is bookkeeping only.
+// Track adds o to the youngest generation. CPython appends to the
+// generation0 list head; we follow exactly that pattern.
 //
-// CPython: Modules/gcmodule.c:L2178 PyObject_GC_Track
+// CPython: Include/internal/pycore_object.h:225 _PyObject_GC_TRACK
 func Track(o objects.Object) {
 	if o == nil {
 		return
 	}
 	state.mu.Lock()
-	state.tracked[o] = struct{}{}
-	state.mu.Unlock()
+	defer state.mu.Unlock()
+	if _, ok := state.tracked[o]; ok {
+		return
+	}
+	g := &gcHead{obj: o}
+	listAppend(g, state.generations[0].head)
+	state.tracked[o] = g
+	state.generations[0].count++
 }
 
-// Untrack removes o from the tracked-object set. No-op if not
-// tracked.
+// Untrack removes o from whichever generation list it currently sits
+// on. No-op if the object was never tracked. CPython internally
+// keeps the FINALIZED bit while clearing COLLECTING; gopy lets the
+// gcHead vanish since the per-object map drops it too.
 //
-// CPython: Modules/gcmodule.c:L2200 PyObject_GC_UnTrack
+// CPython: Include/internal/pycore_object.h:248 _PyObject_GC_UNTRACK
 func Untrack(o objects.Object) {
 	if o == nil {
 		return
 	}
 	state.mu.Lock()
+	defer state.mu.Unlock()
+	g, ok := state.tracked[o]
+	if !ok {
+		return
+	}
+	listRemove(g)
 	delete(state.tracked, o)
-	state.mu.Unlock()
 }
 
 // IsTracked reports whether o is currently tracked.
 //
-// CPython: Include/internal/pycore_object.h:L268 _PyObject_GC_IS_TRACKED
+// CPython: Include/internal/pycore_object.h:268 _PyObject_GC_IS_TRACKED
 func IsTracked(o objects.Object) bool {
 	state.mu.Lock()
 	_, ok := state.tracked[o]
 	state.mu.Unlock()
 	return ok
-}
-
-// Collect runs the cycle collector. v0.3 has none, so this returns 0.
-// The signature is preserved so callers compile against v0.10 without
-// changes.
-//
-// CPython: Modules/gcmodule.c:L1430 gc_collect_main
-func Collect() int {
-	return 0
 }

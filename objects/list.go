@@ -26,6 +26,23 @@ func init() {
 		GetItem: listGetItem,
 		SetItem: listSetItem,
 	}
+	ListType.TpTraverse = listTraverse
+}
+
+// listTraverse visits every item. Mirrors list_traverse.
+//
+// CPython: Objects/listobject.c:2829 list_traverse
+func listTraverse(o Object, visit Visitor) error {
+	l := o.(*List)
+	for _, it := range l.items {
+		if it == nil {
+			continue
+		}
+		if err := visit(it); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // NewList builds a list from items. The slice is copied.

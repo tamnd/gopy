@@ -30,8 +30,21 @@ func TestTrackUntrack(t *testing.T) {
 	}
 }
 
-func TestCollectIsNoop(t *testing.T) {
-	if gc.Collect() != 0 {
-		t.Fatal("v0.3 Collect must return 0")
+func TestCollectEmptyReturnsZero(t *testing.T) {
+	// With nothing tracked, the collector finds nothing to reclaim.
+	if got := gc.Collect(2); got != 0 {
+		t.Fatalf("Collect on empty state = %d, want 0", got)
+	}
+}
+
+func TestCollectDisabledReturnsZero(t *testing.T) {
+	gc.Disable()
+	defer gc.Enable()
+	o := objects.NewList(nil)
+	o.Append(o)
+	gc.Track(o)
+	defer gc.Untrack(o)
+	if got := gc.Collect(2); got != 0 {
+		t.Fatalf("Collect while disabled = %d, want 0", got)
 	}
 }

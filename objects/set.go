@@ -53,6 +53,7 @@ func init() {
 		Length:   setLen,
 		Contains: setContains,
 	}
+	SetType.TpTraverse = setTraverse
 
 	FrozensetType.Repr = frozensetRepr
 	FrozensetType.Str = frozensetRepr
@@ -63,6 +64,23 @@ func init() {
 		Length:   setLen,
 		Contains: setContains,
 	}
+	FrozensetType.TpTraverse = setTraverse
+}
+
+// setTraverse visits each element of a set or frozenset.
+//
+// CPython: Objects/setobject.c:1956 set_traverse
+func setTraverse(o Object, visit Visitor) error {
+	s := o.(*Set)
+	for _, e := range s.entries {
+		if !e.used || e.key == nil {
+			continue
+		}
+		if err := visit(e.key); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // NewSet creates an empty mutable set.

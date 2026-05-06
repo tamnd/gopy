@@ -34,6 +34,7 @@ func init() {
 		Length:  tupleLen,
 		GetItem: tupleGetItem,
 	}
+	TupleType.TpTraverse = tupleTraverse
 	emptyTuple = &Tuple{}
 	emptyTuple.init(TupleType)
 }
@@ -65,6 +66,22 @@ func (t *Tuple) Item(i int) Object { return t.items[i] }
 
 func tupleLen(o Object) (int, error) {
 	return o.(*Tuple).Len(), nil
+}
+
+// tupleTraverse visits every element. Mirrors tupletraverse.
+//
+// CPython: Objects/tupleobject.c:644 tupletraverse
+func tupleTraverse(o Object, visit Visitor) error {
+	t := o.(*Tuple)
+	for _, it := range t.items {
+		if it == nil {
+			continue
+		}
+		if err := visit(it); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func tupleGetItem(o Object, i int) (Object, error) {
