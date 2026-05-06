@@ -59,20 +59,21 @@ func TestLookupUnknownReturnsError(t *testing.T) {
 	}
 }
 
-// TestLookupNormalizesName pins that "UTF-8" and "utf_8" resolve to
-// the same codec.
+// TestLookupNormalizesName pins that name normalization folds hyphens
+// and case before querying the search path.
 func TestLookupNormalizesName(t *testing.T) {
+	// Use a synthetic codec name that does not conflict with built-ins.
 	Register(func(name string) (*CodecInfo, error) {
-		if name == "utf_8" {
-			return &CodecInfo{Name: "utf_8"}, nil
+		if name == "test_norm_codec" {
+			return &CodecInfo{Name: "test_norm_codec"}, nil
 		}
 		return nil, nil
 	})
-	ci, err := Lookup("UTF-8")
+	ci, err := Lookup("TEST-NORM-CODEC")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if ci.Name != "utf_8" {
-		t.Errorf("name = %q, want utf_8", ci.Name)
+	if ci.Name != "test_norm_codec" {
+		t.Errorf("name = %q, want test_norm_codec", ci.Name)
 	}
 }
