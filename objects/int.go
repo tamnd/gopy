@@ -241,64 +241,6 @@ func intMod(a, b Object) (Object, error) {
 	return NewIntFromBig(r), nil
 }
 
-func intAnd(a, b Object) (Object, error) {
-	ai, bi, ok := intPair(a, b)
-	if !ok {
-		return notImplemented(), nil
-	}
-	return NewIntFromBig(new(big.Int).And(&ai.v, &bi.v)), nil
-}
-
-func intOr(a, b Object) (Object, error) {
-	ai, bi, ok := intPair(a, b)
-	if !ok {
-		return notImplemented(), nil
-	}
-	return NewIntFromBig(new(big.Int).Or(&ai.v, &bi.v)), nil
-}
-
-func intXor(a, b Object) (Object, error) {
-	ai, bi, ok := intPair(a, b)
-	if !ok {
-		return notImplemented(), nil
-	}
-	return NewIntFromBig(new(big.Int).Xor(&ai.v, &bi.v)), nil
-}
-
-// intLshift / intRshift use uint shift counts; CPython raises on
-// negative shift counts and on counts that overflow C long.
-//
-// CPython: Objects/longobject.c long_lshift / long_rshift
-func intLshift(a, b Object) (Object, error) {
-	ai, bi, ok := intPair(a, b)
-	if !ok {
-		return notImplemented(), nil
-	}
-	if bi.v.Sign() < 0 {
-		return nil, errors.New("ValueError: negative shift count")
-	}
-	n, fits := bi.Int64()
-	if !fits || n > (1<<31) {
-		return nil, errors.New("OverflowError: shift count too large")
-	}
-	return NewIntFromBig(new(big.Int).Lsh(&ai.v, uint(n))), nil
-}
-
-func intRshift(a, b Object) (Object, error) {
-	ai, bi, ok := intPair(a, b)
-	if !ok {
-		return notImplemented(), nil
-	}
-	if bi.v.Sign() < 0 {
-		return nil, errors.New("ValueError: negative shift count")
-	}
-	n, fits := bi.Int64()
-	if !fits || n > (1<<31) {
-		return nil, errors.New("OverflowError: shift count too large")
-	}
-	return NewIntFromBig(new(big.Int).Rsh(&ai.v, uint(n))), nil
-}
-
 // intPower implements `pow(a, b)` and `pow(a, b, mod)` for ints. A
 // negative exponent without a modulus falls through to a float
 // promotion via NotImplemented; the abstract layer would normally
@@ -375,15 +317,6 @@ func intDivmod(a, b Object) (Object, error) {
 //
 // CPython: Objects/longobject.c long_long
 func intPos(o Object) (Object, error) { return o, nil }
-
-// intInvert returns the bitwise complement, matching ~x == -(x+1).
-//
-// CPython: Objects/longobject.c long_invert
-func intInvert(o Object) (Object, error) {
-	i := o.(*Int)
-	out := new(big.Int).Not(&i.v)
-	return NewIntFromBig(out), nil
-}
 
 func intBool(o Object) (bool, error) {
 	return o.(*Int).v.Sign() != 0, nil
