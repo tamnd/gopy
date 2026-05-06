@@ -29,6 +29,27 @@ func Str(o Object) (string, error) {
 	return Repr(o)
 }
 
+// Format is the protocol-level entry point that ports
+// PyObject_Format. An empty spec is shorthand for str(o); a non-empty
+// spec dispatches to the type's Format slot, falling back to a
+// TypeError for objects that don't define one.
+//
+// CPython: Objects/object.c:L803 PyObject_Format
+func Format(o Object, spec string) (string, error) {
+	if o == nil {
+		return "<nil>", nil
+	}
+	if spec == "" {
+		return Str(o)
+	}
+	if f := o.Type().Format; f != nil {
+		return f(o, spec)
+	}
+	return "", fmt.Errorf(
+		"TypeError: unsupported format string passed to %s.__format__",
+		o.Type().Name)
+}
+
 // Hash returns the hash of o. Errors with errUnhashable when the
 // type has no Hash slot. Mirrors PyObject_Hash.
 //
