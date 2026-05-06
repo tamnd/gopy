@@ -94,6 +94,17 @@ type Type struct {
 
 	Dealloc func(o Object)
 
+	// Finalize is the tp_finalize slot. The cycle collector invokes
+	// it once on each unreachable object before reclaiming, and the
+	// destruction path fires it from PyObject_CallFinalizer. User
+	// classes get this slot populated with a wrapper that calls
+	// __del__; built-in types fill it in directly when they need
+	// cleanup that runs before memory goes back.
+	//
+	// CPython: Include/cpython/object.h:237 tp_finalize
+	// CPython: Objects/typeobject.c slot_tp_finalize
+	Finalize func(o Object)
+
 	// TpTraverse mirrors tp_traverse. It calls visit on every Object
 	// reachable directly from o so the cycle collector can walk the
 	// reference graph. Returning a non-nil error short-circuits the

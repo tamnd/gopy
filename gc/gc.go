@@ -54,6 +54,10 @@ func Finalize(o objects.Object) {
 	state.mu.Unlock()
 	if ok {
 		fn(o)
+		return
+	}
+	if slot := typeFinalize(o); slot != nil {
+		slot(o)
 	}
 }
 

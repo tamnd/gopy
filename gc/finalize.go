@@ -40,13 +40,31 @@ func finalizeGarbage(unreachable *gcHead, finalizers map[objects.Object]Finalize
 		if finalized != nil {
 			finalized[g.obj] = struct{}{}
 		}
-		fn, ok := finalizers[g.obj]
-		if !ok {
+		if fn, ok := finalizers[g.obj]; ok {
+			delete(finalizers, g.obj)
+			fn(g.obj)
 			continue
 		}
-		delete(finalizers, g.obj)
-		fn(g.obj)
+		if slot := typeFinalize(g.obj); slot != nil {
+			slot(g.obj)
+		}
 	}
+}
+
+// typeFinalize returns the tp_finalize slot for o's type, or nil if
+// the type has none. The collector falls back to this when no
+// explicit Finalizer was registered, so user classes with __del__
+// (and built-in types that opt in) participate in cycle finalization.
+//
+// CPython: Objects/object.c:489 PyObject_CallFinalizer (tp_finalize lookup)
+func typeFinalize(o objects.Object) func(objects.Object) {
+	if o == nil {
+		return nil
+	}
+	if t := o.Type(); t != nil && t.Finalize != nil {
+		return t.Finalize
+	}
+	return nil
 }
 
 // reclaimUnreachable drops every entry on unreachable from the
