@@ -21,8 +21,9 @@ import (
 type gcFlag uint8
 
 const (
-	gcFinalized  gcFlag = 1 << 0
-	gcCollecting gcFlag = 1 << 1
+	gcFinalized   gcFlag = 1 << 0
+	gcCollecting  gcFlag = 1 << 1
+	gcUnreachable gcFlag = 1 << 2
 )
 
 // gcHead is the doubly-linked list node CPython embeds in every
