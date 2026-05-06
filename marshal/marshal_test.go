@@ -52,9 +52,9 @@ func TestRoundtrip(t *testing.T) {
 // surfaces ErrUnmarshallable rather than panicking.
 func TestUnmarshallable(t *testing.T) {
 	var buf bytes.Buffer
-	err := Dump(&buf, complex(1, 2))
+	err := Dump(&buf, make(chan int))
 	if err == nil {
-		t.Fatal("expected error for complex value")
+		t.Fatal("expected error for chan value")
 	}
 }
 
@@ -252,5 +252,134 @@ func TestTypeLongLimbArithmetic(t *testing.T) {
 	}
 	if got.(*big.Int).Cmp(v) != 0 {
 		t.Errorf("got %v, want %v", got, v)
+	}
+}
+
+// TestTypeSetRoundtrip pins that a *objects.Set round-trips through
+// TYPE_SET and comes back as a *objects.Set with the same elements.
+func TestTypeSetRoundtrip(t *testing.T) {
+	s := objects.NewSet()
+	for _, v := range []any{int64(1), int64(2), int64(3)} {
+		obj, _ := toObject(v)
+		if err := s.Add(obj); err != nil {
+			t.Fatalf("Add: %v", err)
+		}
+	}
+	var buf bytes.Buffer
+	if err := Dump(&buf, s); err != nil {
+		t.Fatalf("Dump: %v", err)
+	}
+	got, err := Load(&buf)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	rs, ok := got.(*objects.Set)
+	if !ok {
+		t.Fatalf("Load returned %T, want *objects.Set", got)
+	}
+	if rs.Len() != s.Len() {
+		t.Errorf("Len = %d, want %d", rs.Len(), s.Len())
+	}
+	for _, item := range s.Items() {
+		ok, err := rs.Contains(item)
+		if err != nil {
+			t.Fatalf("Contains: %v", err)
+		}
+		if !ok {
+			t.Errorf("missing element %v", item)
+		}
+	}
+}
+
+// TestTypeFrozensetRoundtrip pins that a frozenset round-trips through
+// TYPE_FROZENSET and comes back as a frozen *objects.Set.
+func TestTypeFrozensetRoundtrip(t *testing.T) {
+	items := []objects.Object{
+		objects.NewStr("a"),
+		objects.NewStr("b"),
+	}
+	fs, err := objects.NewFrozenset(items)
+	if err != nil {
+		t.Fatalf("NewFrozenset: %v", err)
+	}
+	var buf bytes.Buffer
+	if err := Dump(&buf, fs); err != nil {
+		t.Fatalf("Dump: %v", err)
+	}
+	got, err := Load(&buf)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	rfs, ok := got.(*objects.Set)
+	if !ok {
+		t.Fatalf("Load returned %T, want *objects.Set", got)
+	}
+	if rfs.Len() != fs.Len() {
+		t.Errorf("Len = %d, want %d", rfs.Len(), fs.Len())
+	}
+	if rfs.Type() != objects.FrozensetType {
+		t.Errorf("Type = %v, want FrozensetType", rfs.Type())
+	}
+}
+
+// TestTypeDictRoundtrip pins that a map[any]any round-trips through
+// TYPE_DICT and comes back with matching key/value pairs.
+func TestTypeDictRoundtrip(t *testing.T) {
+	m := map[any]any{
+		"key1": int64(42),
+		"key2": true,
+		"key3": nil,
+	}
+	var buf bytes.Buffer
+	if err := Dump(&buf, m); err != nil {
+		t.Fatalf("Dump: %v", err)
+	}
+	got, err := Load(&buf)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	rm, ok := got.(map[any]any)
+	if !ok {
+		t.Fatalf("Load returned %T, want map[any]any", got)
+	}
+	if len(rm) != len(m) {
+		t.Errorf("len = %d, want %d", len(rm), len(m))
+	}
+	for k, want := range m {
+		got, exists := rm[k]
+		if !exists {
+			t.Errorf("missing key %v", k)
+			continue
+		}
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("key %v: got %#v, want %#v", k, got, want)
+		}
+	}
+}
+
+// TestTypeComplexRoundtrip pins that complex128 round-trips through
+// TYPE_BINARY_COMPLEX with correct real and imaginary parts.
+func TestTypeComplexRoundtrip(t *testing.T) {
+	cases := []complex128{
+		complex(0, 0),
+		complex(1.5, -2.5),
+		complex(3.14159, 2.71828),
+	}
+	for _, c := range cases {
+		var buf bytes.Buffer
+		if err := Dump(&buf, c); err != nil {
+			t.Fatalf("Dump(%v): %v", c, err)
+		}
+		got, err := Load(&buf)
+		if err != nil {
+			t.Fatalf("Load(%v): %v", c, err)
+		}
+		rc, ok := got.(complex128)
+		if !ok {
+			t.Fatalf("Load returned %T, want complex128", got)
+		}
+		if rc != c {
+			t.Errorf("got %v, want %v", rc, c)
+		}
 	}
 }
