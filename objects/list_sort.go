@@ -11,8 +11,9 @@
 // unsafe_latin_compare, unsafe_long_compare, unsafe_float_compare,
 // and unsafe_tuple_compare. Those are correctness-preserving
 // optimisations: same answer, fewer indirections per compare. The
-// gopy str layout (1677-A) is still strStub, so unsafe_latin_compare
-// would have to be rewritten when that lands. Until then every
+// gopy str layout is the Unicode struct rather than CPython's
+// PEP 393 byte arrays, so unsafe_latin_compare has no direct
+// counterpart yet (see 1677-B). Until then every
 // compare goes through RichCmpBool, which is what safe_object_compare
 // does in CPython too.
 //

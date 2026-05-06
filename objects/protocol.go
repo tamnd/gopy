@@ -130,7 +130,7 @@ func IsTruthy(o Object) (bool, error) {
 //
 // CPython: Objects/object.c:1290 PyObject_GetAttr
 func GetAttr(o Object, name Object) (Object, error) {
-	if name == nil || name.Type() != strStubType {
+	if name == nil || name.Type() != strType {
 		return nil, fmt.Errorf("TypeError: attribute name must be string, not '%s'", typeNameOf(name))
 	}
 	tp := o.Type()
@@ -145,7 +145,7 @@ func GetAttr(o Object, name Object) (Object, error) {
 //
 // CPython: Objects/object.c:1440 PyObject_SetAttr
 func SetAttr(o Object, name Object, value Object) error {
-	if name == nil || name.Type() != strStubType {
+	if name == nil || name.Type() != strType {
 		return fmt.Errorf("TypeError: attribute name must be string, not '%s'", typeNameOf(name))
 	}
 	tp := o.Type()
@@ -174,7 +174,7 @@ func DelAttr(o Object, name Object) error {
 // Object. Falls back to the type name when extraction fails so error
 // messages stay readable.
 func attrNameStr(name Object) string {
-	if s, ok := name.(*strStub); ok {
+	if s, ok := name.(*Unicode); ok {
 		return s.v
 	}
 	return typeNameOf(name)

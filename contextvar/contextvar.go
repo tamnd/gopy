@@ -71,7 +71,7 @@ func (cv *ContextVar) Default() (objects.Object, bool) {
 func generateHash(addr unsafe.Pointer, name string) int64 {
 	nameHash, err := objects.Hash(objects.NewStr(name))
 	if err != nil {
-		// strStub.Hash never errors; the err branch is here for
+		// Unicode.Hash never errors; the err branch is here for
 		// shape parity with the C version's PyObject_Hash failure.
 		nameHash = 0
 	}

@@ -21,7 +21,7 @@ func HashBytes(src []byte) int64 {
 }
 
 // HashString is the string-shaped wrapper around HashBytes. Used by
-// str (and the legacy strStub) so the slot implementation reads as
+// str so the slot implementation reads as
 // "hash this string", not "convert to []byte and call the buffer
 // hasher".
 //

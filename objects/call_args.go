@@ -261,7 +261,7 @@ func iterToSliceObj(o Object) ([]Object, error) {
 // validators in this file to enforce "keywords must be strings".
 func isString(o Object) bool {
 	switch o.(type) {
-	case *strStub:
+	case *Unicode:
 		return true
 	}
 	return o.Type() != nil && o.Type().Name == "str"

@@ -22,7 +22,7 @@ func TestStrStubHashRoutesThroughSipHash(t *testing.T) {
 		t.Fatalf("Hash(str): %v", err)
 	}
 	if got != HashString("widget") {
-		t.Fatalf("strStub hash %d, want %d", got, HashString("widget"))
+		t.Fatalf("Unicode hash %d, want %d", got, HashString("widget"))
 	}
 }
 

@@ -82,7 +82,7 @@ func TestProbeChainSurvivesDeleteOfMiddleEntry(t *testing.T) {
 	if err != nil {
 		t.Fatalf("eight should still be findable through dummy slot: %v", err)
 	}
-	if v, _ := got.(*strStub); v == nil || v.v != "eight" {
+	if v, _ := got.(*Unicode); v == nil || v.v != "eight" {
 		t.Errorf("got %v, want eight", got)
 	}
 }

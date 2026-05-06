@@ -150,7 +150,7 @@ func structSeqRichCmp(a, b Object, op CompareOp) (Object, error) {
 }
 
 func structSeqGetattro(o Object, name Object) (Object, error) {
-	n, ok := name.(*strStub)
+	n, ok := name.(*Unicode)
 	if !ok {
 		return nil, fmt.Errorf("TypeError: attribute name must be string, not '%s'", typeNameOf(name))
 	}

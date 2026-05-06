@@ -127,7 +127,7 @@ func moduleStrAttr(m *Module, attr string) string {
 	if err != nil {
 		return ""
 	}
-	if s, ok := v.(*strStub); ok {
+	if s, ok := v.(*Unicode); ok {
 		return s.v
 	}
 	return ""

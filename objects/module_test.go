@@ -12,7 +12,7 @@ func TestNewModuleStoresName(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	s, ok := v.(*strStub)
+	s, ok := v.(*Unicode)
 	if !ok || s.v != "mymod" {
 		t.Errorf("__name__ = %v, want mymod", v)
 	}
@@ -68,7 +68,7 @@ func TestModulePEP562Getattr(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	s, ok := v.(*strStub)
+	s, ok := v.(*Unicode)
 	if !ok || s.v != "hooked" {
 		t.Errorf("got %v, want hooked", v)
 	}

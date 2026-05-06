@@ -29,7 +29,7 @@ package objects
 //
 // CPython: Objects/dictobject.c:567 PyDictKeysObject (DICT_KEYS_SPLIT)
 type SharedKeys struct {
-	keys   []*strStub
+	keys   []*Unicode
 	hashes []int64
 	refs   int // number of split-dicts referencing this
 }
@@ -41,11 +41,11 @@ type SharedKeys struct {
 // CPython: Objects/dictobject.c:625 new_keys_object (with split flag)
 func NewSharedKeys(names []string) (*SharedKeys, error) {
 	sk := &SharedKeys{
-		keys:   make([]*strStub, len(names)),
+		keys:   make([]*Unicode, len(names)),
 		hashes: make([]int64, len(names)),
 	}
 	for i, name := range names {
-		s := NewStr(name).(*strStub)
+		s := NewStr(name).(*Unicode)
 		h, err := Hash(s)
 		if err != nil {
 			return nil, err

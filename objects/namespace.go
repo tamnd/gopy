@@ -51,7 +51,7 @@ func namespaceRepr(o Object) (string, error) {
 	n := o.(*Namespace)
 	keys := make([]string, 0, n.dict.Len())
 	for _, k := range n.dict.Keys() {
-		s, ok := k.(*strStub)
+		s, ok := k.(*Unicode)
 		if !ok {
 			continue
 		}

@@ -21,7 +21,7 @@ import "fmt"
 type dictKind uint8
 
 const (
-	dictKindUnicode dictKind = iota // all live keys are *strStub
+	dictKindUnicode dictKind = iota // all live keys are *Unicode
 	dictKindGeneral                 // at least one non-str key
 	dictKindSplit                   // split-keys (instance dict); not yet implemented
 )
@@ -38,8 +38,8 @@ type dictCompare func(d *Dict, slot *dictEntry, key Object, hash int64) (bool, e
 //
 // CPython: Objects/dictobject.c:1080 compare_unicode_unicode
 func compareUnicodeUnicode(_ *Dict, slot *dictEntry, key Object, hash int64) (bool, error) {
-	stored := slot.key.(*strStub)
-	lookup := key.(*strStub)
+	stored := slot.key.(*Unicode)
+	lookup := key.(*Unicode)
 	if stored == lookup {
 		return true, nil
 	}
@@ -139,7 +139,7 @@ func dictProbe(d *Dict, key Object, hash int64, cmp dictCompare) (int, bool, err
 
 // lookupUnicodeUnicode dispatches with the unicode/unicode comparator.
 // Callers must have already confirmed both that the dict's kind is
-// not General and that the lookup key is *strStub; otherwise the
+// not General and that the lookup key is *Unicode; otherwise the
 // type-asserts in compareUnicodeUnicode panic.
 //
 // CPython: Objects/dictobject.c:1095 unicodekeys_lookup_unicode
@@ -171,7 +171,7 @@ func lookupGeneric(d *Dict, key Object, hash int64) (int, bool, error) {
 //
 // CPython: Objects/dictobject.c:1160 unicodekeys_lookup_split
 func lookupSplit(d *Dict, key Object, hash int64) (int, bool, error) {
-	if _, ok := key.(*strStub); !ok {
+	if _, ok := key.(*Unicode); !ok {
 		return 0, false, fmt.Errorf("SystemError: lookupSplit called with non-str key of type %s", key.Type().Name)
 	}
 	return dictProbe(d, key, hash, compareSplit)
@@ -186,12 +186,12 @@ func lookupSplit(d *Dict, key Object, hash int64) (int, bool, error) {
 func dispatchLookup(d *Dict, key Object, hash int64) (int, bool, error) {
 	switch d.kind {
 	case dictKindUnicode:
-		if _, ok := key.(*strStub); ok {
+		if _, ok := key.(*Unicode); ok {
 			return lookupUnicodeUnicode(d, key, hash)
 		}
 		return lookupUnicodeGeneric(d, key, hash)
 	case dictKindSplit:
-		if _, ok := key.(*strStub); ok {
+		if _, ok := key.(*Unicode); ok {
 			return lookupSplit(d, key, hash)
 		}
 		return lookupUnicodeGeneric(d, key, hash)
@@ -212,7 +212,7 @@ func (d *Dict) downgradeKindOnInsert(key Object) {
 	if d.kind != dictKindUnicode {
 		return
 	}
-	if _, ok := key.(*strStub); !ok {
+	if _, ok := key.(*Unicode); !ok {
 		d.kind = dictKindGeneral
 	}
 }

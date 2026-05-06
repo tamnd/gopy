@@ -74,7 +74,7 @@ func TestDispatchGenericPath(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	v, _ := got.(*strStub)
+	v, _ := got.(*Unicode)
 	if v.v != "seven" {
 		t.Errorf("got %q, want seven", v.v)
 	}
@@ -120,7 +120,7 @@ func TestLookupGenericFindsIntKey(t *testing.T) {
 	if !ok {
 		t.Fatal("expected hit")
 	}
-	v, _ := d.entries[idx].value.(*strStub)
+	v, _ := d.entries[idx].value.(*Unicode)
 	if v.v != "answer" {
 		t.Errorf("got %q, want answer", v.v)
 	}

@@ -135,7 +135,7 @@ func functionDocFromCode(code *Code) Object {
 		return NewStr(doc)
 	}
 	if doc, ok := code.Consts[0].(Object); ok {
-		if _, isStr := doc.(*strStub); isStr {
+		if _, isStr := doc.(*Unicode); isStr {
 			return doc
 		}
 	}
