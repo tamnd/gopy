@@ -1,37 +1,22 @@
-// Package gc ports the refcount-only path of cpython/Python/gc.c.
-// v0.3 ships Track, Untrack, RegisterFinalizer, and Finalize. Cycle
-// collection is a no-op until v0.10 lands the cycle collector.
+// Package gc ports cpython/Python/gc.c. v0.3 shipped Track / Untrack /
+// RegisterFinalizer / Finalize against a package-level state
+// variable; v0.10 grows that into a full GCState (see state.go) and
+// adds the cycle collector. The public functions in this file keep
+// their v0.3 signatures so the rest of the runtime compiles
+// unchanged.
 //
 // CPython: Python/gc.c file overview
 package gc
 
 import (
-	"sync"
-
 	"github.com/tamnd/gopy/objects"
 )
 
 // Finalizer is the Go equivalent of tp_finalize. The runtime invokes
 // it once, immediately before reclaiming the object.
 //
-// CPython: Include/cpython/object.h:L237 tp_finalize
+// CPython: Include/cpython/object.h:237 tp_finalize
 type Finalizer func(o objects.Object)
-
-// state holds the package-level finalizer table and tracked-object
-// set. Mirrors the gc state struct in CPython but without the
-// generation lists; cycles are not collected in v0.3.
-//
-// CPython: Include/internal/pycore_gc.h:L150 GCState
-var state struct {
-	mu         sync.Mutex
-	finalizers map[objects.Object]Finalizer
-	tracked    map[objects.Object]struct{}
-}
-
-func init() {
-	state.finalizers = make(map[objects.Object]Finalizer)
-	state.tracked = make(map[objects.Object]struct{})
-}
 
 // RegisterFinalizer associates fn with o. The runtime calls Finalize
 // to invoke it. Mirrors PyObject_GC_RegisterFinalizer in spirit; in
