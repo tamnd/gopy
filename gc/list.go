@@ -28,14 +28,15 @@ const (
 // gcHead is the doubly-linked list node CPython embeds in every
 // tracked object as PyGC_Head. obj points at the gopy object so the
 // collector can find its way from a list node back to the live
-// object without unsafe pointer arithmetic. The refs scratch slot
-// CPython packs into the upper bits of _gc_prev lands with 1613-F
-// (gc/refs.go) when update_refs needs it.
+// object without unsafe pointer arithmetic. refs is the scratch slot
+// CPython packs into the upper bits of _gc_prev; update_refs writes
+// the object's refcount there and subtract_refs decrements it.
 //
 // CPython: Include/internal/pycore_interp_structs.h PyGC_Head
 type gcHead struct {
 	prev, next *gcHead
 	obj        objects.Object
+	refs       int64
 	flags      gcFlag
 }
 
