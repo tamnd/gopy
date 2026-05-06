@@ -143,6 +143,11 @@ linters:
       - path: pythonrun/runfile\.go
         linters:
           - gosec
+      # imp/loader.go is the port of SourceFileLoader / SourcelessFileLoader:
+      # reading caller-supplied module file paths is the entire contract.
+      - path: imp/loader\.go
+        linters:
+          - gosec
       # FormatInt and ParseSpec mirror format_long_internal /
       # parse_internal_render_format_spec; the branch tree matches
       # CPython's switch and is the unit of parity.
