@@ -19,6 +19,7 @@ var (
 	PyExc_IndexError          = newExcType("IndexError", []*objects.Type{PyExc_LookupError})
 	PyExc_OverflowError       = newExcType("OverflowError", []*objects.Type{PyExc_ArithmeticError})
 	PyExc_ZeroDivisionError   = newExcType("ZeroDivisionError", []*objects.Type{PyExc_ArithmeticError})
+	PyExc_FloatingPointError  = newExcType("FloatingPointError", []*objects.Type{PyExc_ArithmeticError})
 	PyExc_NotImplementedError = newExcType("NotImplementedError", []*objects.Type{PyExc_RuntimeError})
 	PyExc_AttributeError      = newExcType("AttributeError", []*objects.Type{PyExc_Exception})
 	PyExc_NameError           = newExcType("NameError", []*objects.Type{PyExc_Exception})

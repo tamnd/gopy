@@ -118,6 +118,9 @@ linters:
       - path: errors/builtins\.go
         linters:
           - revive
+      - path: errors/exc_.*\.go
+        linters:
+          - revive
       # format.FormatString/FormatInt/FormatFloat mirror CPython's
       # format_*_internal entry points; the parity is part of the spec
       # so the "name stutters" advice does not apply.
