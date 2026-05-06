@@ -25,10 +25,11 @@ type dictEntry struct {
 // CPython: Include/cpython/dictobject.h:19 PyDictObject
 type Dict struct {
 	Header
-	entries []dictEntry
-	used    int      // active entries
-	fill    int      // active entries + dummies; only resets on resize
-	kind    dictKind // DictKeysKind: gates the four lookup variants
+	entries    []dictEntry
+	used       int         // active entries
+	fill       int         // active entries + dummies; only resets on resize
+	kind       dictKind    // DictKeysKind: gates the four lookup variants
+	sharedKeys *SharedKeys // non-nil while in split-keys mode (1680-D)
 }
 
 // DictType is the type singleton for dict. Mirrors PyDict_Type.
