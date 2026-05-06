@@ -16,6 +16,7 @@ import (
 
 	"github.com/tamnd/gopy/compile"
 	"github.com/tamnd/gopy/frame"
+	"github.com/tamnd/gopy/intrinsics"
 	"github.com/tamnd/gopy/objects"
 	"github.com/tamnd/gopy/stackref"
 )
@@ -802,6 +803,15 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, retVal
 		v := e.popObject()
 		if int(oparg) >= len(intrinsicsUnary) {
 			return 0, nil, nil, false, true, fmt.Errorf("CALL_INTRINSIC_1: oparg %d out of range", oparg)
+		}
+		// IMPORT_STAR needs the current frame's locals, which the generic
+		// intrinsic signature doesn't carry. Route it directly.
+		if oparg == intrinsics.UnaryImportStarID {
+			if ierr := e.importStar(v); ierr != nil {
+				return 0, nil, nil, false, true, ierr
+			}
+			e.pushObject(objects.None())
+			return e.advance(), nil, nil, false, true, nil
 		}
 		fn := intrinsicsUnary[oparg]
 		if fn == nil {

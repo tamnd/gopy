@@ -87,6 +87,70 @@ func (e *evalState) tryImport(op compile.Opcode, oparg uint32) (next int, ok boo
 	return 0, false, nil
 }
 
+// importStar implements `from x import *`. It reads __all__ from the module
+// if present; otherwise it reads __dict__ and skips names that start with "_".
+// All found names are stored into the current frame's locals (or globals for
+// module-scope code).
+//
+// CPython: Python/intrinsics.c:124 import_star
+// CPython: Python/intrinsics.c:40 import_all_from
+func (e *evalState) importStar(from objects.Object) error {
+	locals := e.f.Locals
+	if locals == nil {
+		locals = e.f.Globals
+	}
+	if locals == nil {
+		return fmt.Errorf("ImportError: no locals found during 'import *'")
+	}
+	dst, ok := locals.(*objects.Dict)
+	if !ok {
+		return fmt.Errorf("ImportError: 'import *' locals must be a dict, got %T", locals)
+	}
+
+	var all []objects.Object
+	skipUnder := false
+
+	// Check for __all__.
+	allAttr, aerr := objects.GetAttr(from, objects.NewStr("__all__"))
+	if aerr == nil && allAttr != nil {
+		items, ierr := iterToSlice(allAttr)
+		if ierr != nil {
+			return ierr
+		}
+		all = items
+	} else {
+		// Fall back to __dict__ keys, skipping names starting with "_".
+		dictAttr, derr := objects.GetAttr(from, objects.NewStr("__dict__"))
+		if derr != nil || dictAttr == nil {
+			return fmt.Errorf("ImportError: from-import-* object has no __dict__ and no __all__")
+		}
+		items, ierr := iterToSlice(dictAttr)
+		if ierr != nil {
+			return ierr
+		}
+		all = items
+		skipUnder = true
+	}
+
+	for _, nameObj := range all {
+		name, nerr := objects.Str(nameObj)
+		if nerr != nil {
+			return fmt.Errorf("TypeError: 'import *' name must be str")
+		}
+		if skipUnder && len(name) > 0 && name[0] == '_' {
+			continue
+		}
+		val, verr := objects.GetAttr(from, objects.NewStr(name))
+		if verr != nil {
+			return verr
+		}
+		if serr := dst.SetItem(objects.NewStr(name), val); serr != nil {
+			return serr
+		}
+	}
+	return nil
+}
+
 // importLevel extracts the integer import level from a Python int object.
 // Level 0 = absolute, 1+ = relative.
 //
