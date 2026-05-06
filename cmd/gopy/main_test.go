@@ -35,20 +35,6 @@ func TestRunDefault(t *testing.T) {
 	}
 }
 
-func TestRunCopyright(t *testing.T) {
-	stdout, cleanup := captureFile(t)
-	defer cleanup()
-
-	rc := run([]string{"--copyright"}, stdout, os.Stderr)
-	if rc != 0 {
-		t.Fatalf("run --copyright returned %d, want 0", rc)
-	}
-	out := readFile(t, stdout)
-	if !strings.Contains(out, "gopy Authors") {
-		t.Fatalf("copyright output %q must mention the gopy Authors", out)
-	}
-}
-
 func TestRunDashCSmoke(t *testing.T) {
 	// The -c flag is the v0.6 smoke harness. The parser/VM panel is
 	// incomplete, so we accept either a clean exit (0) or a non-zero

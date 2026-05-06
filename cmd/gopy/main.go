@@ -6,12 +6,12 @@
 package main
 
 import (
-	"flag"
 	"fmt"
 	"os"
 
 	"github.com/tamnd/gopy/build"
 	"github.com/tamnd/gopy/builtins"
+	"github.com/tamnd/gopy/getopt"
 	"github.com/tamnd/gopy/pythonrun"
 	"github.com/tamnd/gopy/state"
 )
@@ -20,42 +20,69 @@ func main() {
 	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
 }
 
+// run drives _PyOS_GetOpt the same way pymain_init walks argv before
+// the runtime config exists. argv is rewrapped with a leading program
+// name because getopt.GetOpt starts at OptInd=1 (matching CPython's
+// _PyOS_optind reset value).
+//
+// CPython: Modules/main.c:48 pymain_init
 func run(args []string, stdout, stderr *os.File) int {
-	fs := flag.NewFlagSet("gopy", flag.ContinueOnError)
-	fs.SetOutput(stderr)
+	argv := make([]string, 0, len(args)+1)
+	argv = append(argv, "gopy")
+	argv = append(argv, args...)
+
+	st := getopt.New()
+	st.Stderr = stderr
 
 	var (
-		showVersion   bool
-		showCopyright bool
-		evalSrc       string
+		showVersion bool
+		evalSrc     string
+		modName     string
+		hasC, hasM  bool
 	)
-	fs.BoolVar(&showVersion, "version", false, "print the gopy version and exit")
-	fs.BoolVar(&showVersion, "V", false, "print the gopy version and exit (shorthand)")
-	fs.BoolVar(&showCopyright, "copyright", false, "print the copyright notice and exit")
-	fs.StringVar(&evalSrc, "c", "", "program passed in as string (terminates option list)")
 
-	fs.Usage = func() {
-		fmt.Fprintf(stderr, "usage: gopy [options]\n\noptions:\n")
-		fs.PrintDefaults()
-	}
-
-	if err := fs.Parse(args); err != nil {
-		return 2
+opts:
+	for {
+		c := st.GetOpt(argv, getopt.PythonShortOpts, getopt.PythonLongOpts)
+		switch c {
+		case getopt.EOF:
+			break opts
+		case getopt.ErrorMark:
+			return 2
+		case 'V':
+			showVersion = true
+		case 'h', '?':
+			fmt.Fprintln(stderr, "usage: gopy [option] ... [-c cmd | -m mod | file | -] [arg] ...")
+			return 0
+		case 'c':
+			evalSrc = st.OptArg
+			hasC = true
+			break opts
+		case 'm':
+			modName = st.OptArg
+			hasM = true
+			break opts
+		default:
+			// Other CPython flags (-b, -B, -O, -W, -X, ...) are accepted
+			// for option-set parity. Wiring each to the runtime config
+			// lands with initconfig.c in a later milestone.
+		}
 	}
 
 	switch {
 	case showVersion:
 		fmt.Fprintln(stdout, build.VersionString())
 		return 0
-	case showCopyright:
-		fmt.Fprint(stdout, build.Copyright)
-		return 0
-	case evalSrc != "":
+	case hasC:
 		return runSource(evalSrc, stdout, stderr)
-	case fs.NArg() > 0:
-		return runFile(fs.Arg(0), stdout, stderr)
+	case hasM:
+		fmt.Fprintf(stderr, "gopy: -m %s: not implemented yet\n", modName)
+		return 2
 	}
 
+	if st.OptInd < len(argv) {
+		return runFile(argv[st.OptInd], stdout, stderr)
+	}
 	return runInteractive(stdout, stderr)
 }
 
