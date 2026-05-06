@@ -67,6 +67,14 @@ type Type struct {
 	Setattro func(o Object, name Object, value Object) error
 	Dealloc  func(o Object)
 
+	// TpTraverse mirrors tp_traverse. It calls visit on every Object
+	// reachable directly from o so the cycle collector can walk the
+	// reference graph. Returning a non-nil error short-circuits the
+	// traversal.
+	//
+	// CPython: Include/cpython/object.h tp_traverse
+	TpTraverse func(o Object, visit Visitor) error
+
 	Number   *NumberMethods
 	Sequence *SequenceMethods
 	Mapping  *MappingMethods
@@ -77,6 +85,13 @@ type Type struct {
 	// CPython: Include/object.h Py_TPFLAGS_*
 	TpFlags uint64
 }
+
+// Visitor is the visitproc shape passed to TpTraverse. CPython's
+// visitproc takes a void* arg; gopy closures already capture state
+// so the second argument is unnecessary here.
+//
+// CPython: Include/cpython/object.h:L83 visitproc
+type Visitor func(Object) error
 
 // TpFlag values used by MATCH_MAPPING and MATCH_SEQUENCE.
 //

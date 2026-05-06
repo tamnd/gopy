@@ -42,6 +42,30 @@ func init() {
 		SetItem: dictMappingSet,
 		DelItem: dictMappingDel,
 	}
+	DictType.TpTraverse = dictTraverse
+}
+
+// dictTraverse visits every key and every value.
+//
+// CPython: Objects/dictobject.c:4022 dict_traverse
+func dictTraverse(o Object, visit Visitor) error {
+	d := o.(*Dict)
+	for _, e := range d.entries {
+		if !e.used {
+			continue
+		}
+		if e.key != nil {
+			if err := visit(e.key); err != nil {
+				return err
+			}
+		}
+		if e.value != nil {
+			if err := visit(e.value); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 // NewDict builds an empty dict.
