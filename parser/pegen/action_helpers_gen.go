@@ -1165,6 +1165,10 @@ func stringSeqOf(v any) ast.Seq[string] {
 			if t != nil {
 				out = append(out, string(t.Bytes))
 			}
+		case ast.Seq[string]:
+			out = append(out, t...)
+		case []string:
+			out = append(out, t...)
 		case []any:
 			for _, e := range t {
 				walk(e)
@@ -1425,18 +1429,28 @@ func actionAstUnaryOp(p *Parser, args ...any) any {
 }
 
 // actionAstCompare builds a Compare. Args: (left, ops, comparators).
+// CPython's grammar splits the cmpop_pair list into parallel ops /
+// exprs slices via _PyPegen_get_cmpops / _PyPegen_get_exprs before
+// calling the constructor; we accept either the precomputed split
+// or the original pair list (older shape) so the rule keeps working
+// either way.
 func actionAstCompare(p *Parser, args ...any) any {
 	_ = p
 	left := asExpr(argAt(args, 0))
 	if left == nil {
 		return placeholderMatched
 	}
+	ops, opsOK := argAt(args, 1).(ast.Seq[ast.Cmpop])
+	rhs, rhsOK := argAt(args, 2).(ast.Seq[ast.Expr])
+	if opsOK && rhsOK && len(ops) > 0 {
+		return &ast.Compare{Left: left, Ops: ops, Comparators: rhs, Pos: ast.NoPos}
+	}
 	cmps := flattenCmpopExprPairs(argAt(args, 1))
 	if len(cmps) == 0 {
 		return placeholderMatched
 	}
-	ops := make(ast.Seq[ast.Cmpop], 0, len(cmps))
-	rhs := make(ast.Seq[ast.Expr], 0, len(cmps))
+	ops = make(ast.Seq[ast.Cmpop], 0, len(cmps))
+	rhs = make(ast.Seq[ast.Expr], 0, len(cmps))
 	for _, pair := range cmps {
 		ops = append(ops, pair.Op)
 		rhs = append(rhs, pair.Expr)
@@ -2104,4 +2118,357 @@ func actionAstComprehension(p *Parser, args ...any) any {
 		return placeholderMatched
 	}
 	return &ast.Comprehension{Target: target, Iter: iter, Ifs: ifs, IsAsync: isAsync}
+}
+
+// actionAstAlias builds an alias entry for import / from-import.
+// Args: (name_id, asname_id_or_nil).
+//
+// CPython: Parser/Python.asdl alias(identifier name, identifier? asname)
+func actionAstAlias(p *Parser, args ...any) any {
+	_ = p
+	name := identString(argAt(args, 0))
+	if name == "" {
+		return placeholderMatched
+	}
+	out := &ast.Alias{Name: name, Pos: ast.NoPos}
+	if as := identString(argAt(args, 1)); as != "" {
+		out.Asname = &as
+	}
+	return out
+}
+
+// actionAstGlobal builds Global. Args: (names_seq).
+//
+// CPython: Parser/Python.asdl Global(identifier* names)
+func actionAstGlobal(p *Parser, args ...any) any {
+	_ = p
+	names := stringSeqOf(argAt(args, 0))
+	if len(names) == 0 {
+		return placeholderMatched
+	}
+	return &ast.Global{Names: names, Pos: ast.NoPos}
+}
+
+// actionAstNonlocal builds Nonlocal. Args: (names_seq).
+//
+// CPython: Parser/Python.asdl Nonlocal(identifier* names)
+func actionAstNonlocal(p *Parser, args ...any) any {
+	_ = p
+	names := stringSeqOf(argAt(args, 0))
+	if len(names) == 0 {
+		return placeholderMatched
+	}
+	return &ast.Nonlocal{Names: names, Pos: ast.NoPos}
+}
+
+// actionAstLambda builds Lambda. Args: (args, body).
+//
+// CPython: Parser/Python.asdl Lambda(arguments args, expr body)
+func actionAstLambda(p *Parser, args ...any) any {
+	_ = p
+	a := argumentsOf(argAt(args, 0))
+	body := asExpr(argAt(args, 1))
+	if body == nil {
+		return placeholderMatched
+	}
+	return &ast.Lambda{Args: a, Body: body, Pos: ast.NoPos}
+}
+
+// actionAstWithitem builds withitem. Args: (context_expr, optional_vars).
+//
+// CPython: Parser/Python.asdl withitem(expr context_expr, expr? optional_vars)
+func actionAstWithitem(p *Parser, args ...any) any {
+	_ = p
+	ctx := asExpr(argAt(args, 0))
+	if ctx == nil {
+		return placeholderMatched
+	}
+	return &ast.Withitem{ContextExpr: ctx, OptionalVars: asExpr(argAt(args, 1))}
+}
+
+// actionAstMatch builds Match. Args: (subject, cases).
+//
+// CPython: Parser/Python.asdl Match(expr subject, match_case* cases)
+func actionAstMatch(p *Parser, args ...any) any {
+	_ = p
+	subject := asExpr(argAt(args, 0))
+	cases := matchCaseSeqOf(argAt(args, 1))
+	if subject == nil || len(cases) == 0 {
+		return placeholderMatched
+	}
+	return &ast.Match{Subject: subject, Cases: cases, Pos: ast.NoPos}
+}
+
+// actionAstMatchCase builds match_case. Args: (pattern, guard, body).
+//
+// CPython: Parser/Python.asdl match_case(pattern pattern, expr? guard, stmt* body)
+func actionAstMatchCase(p *Parser, args ...any) any {
+	_ = p
+	pat := patternOf(argAt(args, 0))
+	body := stmtSeqOf(argAt(args, 2))
+	if pat == nil || len(body) == 0 {
+		return placeholderMatched
+	}
+	return &ast.MatchCase{Pattern: pat, Guard: asExpr(argAt(args, 1)), Body: body}
+}
+
+// actionAstTryStar builds TryStar. Args: (body, handlers, orelse, finalbody).
+//
+// CPython: Parser/Python.asdl TryStar(stmt* body, excepthandler* handlers,
+//	stmt* orelse, stmt* finalbody)
+func actionAstTryStar(p *Parser, args ...any) any {
+	_ = p
+	body := stmtSeqOf(argAt(args, 0))
+	if len(body) == 0 {
+		return placeholderMatched
+	}
+	return &ast.TryStar{
+		Body:      body,
+		Handlers:  exceptHandlerSeqOf(argAt(args, 1)),
+		Orelse:    stmtSeqOf(argAt(args, 2)),
+		Finalbody: stmtSeqOf(argAt(args, 3)),
+		Pos:       ast.NoPos,
+	}
+}
+
+// actionAstTypeAlias builds TypeAlias. Args: (name_expr, type_params, value).
+//
+// CPython: Parser/Python.asdl TypeAlias(expr name, type_param* type_params, expr value)
+func actionAstTypeAlias(p *Parser, args ...any) any {
+	_ = p
+	name := asExpr(argAt(args, 0))
+	value := asExpr(argAt(args, 2))
+	if name == nil || value == nil {
+		return placeholderMatched
+	}
+	return &ast.TypeAlias{
+		Name:       name,
+		TypeParams: typeParamSeqOf(argAt(args, 1)),
+		Value:      value,
+		Pos:        ast.NoPos,
+	}
+}
+
+// actionAstTypeVar builds TypeVar. Args: (name_id, bound, default).
+//
+// CPython: Parser/Python.asdl TypeVar(identifier name, expr? bound, expr? default_value)
+func actionAstTypeVar(p *Parser, args ...any) any {
+	_ = p
+	name := identString(argAt(args, 0))
+	if name == "" {
+		return placeholderMatched
+	}
+	return &ast.TypeVar{
+		Name:         name,
+		Bound:        exprOptional(argAt(args, 1)),
+		DefaultValue: exprOptional(argAt(args, 2)),
+		Pos:          ast.NoPos,
+	}
+}
+
+// actionAstTypeVarTuple builds TypeVarTuple. Args: (name_id, default).
+//
+// CPython: Parser/Python.asdl TypeVarTuple(identifier name, expr? default_value)
+func actionAstTypeVarTuple(p *Parser, args ...any) any {
+	_ = p
+	name := identString(argAt(args, 0))
+	if name == "" {
+		return placeholderMatched
+	}
+	return &ast.TypeVarTuple{
+		Name:         name,
+		DefaultValue: exprOptional(argAt(args, 1)),
+		Pos:          ast.NoPos,
+	}
+}
+
+// actionAstParamSpec builds ParamSpec. Args: (name_id, default).
+//
+// CPython: Parser/Python.asdl ParamSpec(identifier name, expr? default_value)
+func actionAstParamSpec(p *Parser, args ...any) any {
+	_ = p
+	name := identString(argAt(args, 0))
+	if name == "" {
+		return placeholderMatched
+	}
+	return &ast.ParamSpec{
+		Name:         name,
+		DefaultValue: exprOptional(argAt(args, 1)),
+		Pos:          ast.NoPos,
+	}
+}
+
+// actionPgenMapNamesToIds extracts the identifier text from a
+// sequence of NAME tokens or *ast.Name expressions.
+//
+// CPython: Parser/action_helpers.c _PyPegen_map_names_to_ids
+func actionPgenMapNamesToIds(p *Parser, args ...any) any {
+	_ = p
+	v := argAt(args, 1)
+	var out []string
+	var walk func(any)
+	walk = func(x any) {
+		switch t := x.(type) {
+		case nil:
+		case *Token:
+			if t != nil && t.Type == token.NAME {
+				out = append(out, string(t.Bytes))
+			}
+		case *ast.Name:
+			if t != nil {
+				out = append(out, t.Id)
+			}
+		case string:
+			out = append(out, t)
+		case []any:
+			for _, e := range t {
+				walk(e)
+			}
+		}
+	}
+	walk(v)
+	if len(out) == 0 {
+		return ast.Seq[string]{}
+	}
+	return ast.Seq[string](out)
+}
+
+// actionPgenAliasForStar builds the alias entry for `from X import *`.
+// CPython spells the asname as "*" and leaves asname unset.
+//
+// CPython: Parser/action_helpers.c _PyPegen_alias_for_star
+func actionPgenAliasForStar(p *Parser, args ...any) any {
+	_ = p
+	_ = args
+	return &ast.Alias{Name: "*", Pos: ast.NoPos}
+}
+
+// actionPgenGetCmpops returns the operator slice from a list of
+// cmpopExprPair, mirroring `_PyPegen_get_cmpops` which projects out
+// the cmpop column.
+//
+// CPython: Parser/action_helpers.c _PyPegen_get_cmpops
+func actionPgenGetCmpops(p *Parser, args ...any) any {
+	_ = p
+	pairs := flattenCmpopExprPairs(argAt(args, 1))
+	out := make(ast.Seq[ast.Cmpop], 0, len(pairs))
+	for _, pr := range pairs {
+		out = append(out, pr.Op)
+	}
+	return out
+}
+
+// actionPgenGetExprs returns the rhs-expression slice from a list of
+// cmpopExprPair, mirroring `_PyPegen_get_exprs`.
+//
+// CPython: Parser/action_helpers.c _PyPegen_get_exprs
+func actionPgenGetExprs(p *Parser, args ...any) any {
+	_ = p
+	pairs := flattenCmpopExprPairs(argAt(args, 1))
+	out := make(ast.Seq[ast.Expr], 0, len(pairs))
+	for _, pr := range pairs {
+		out = append(out, pr.Expr)
+	}
+	return out
+}
+
+// actionPgenGetKeys returns the key column from a list of [2]any
+// (key, value) pairs produced by actionPgenKeyValuePair.
+//
+// CPython: Parser/action_helpers.c _PyPegen_get_keys
+func actionPgenGetKeys(p *Parser, args ...any) any {
+	_ = p
+	out := make(ast.Seq[ast.Expr], 0)
+	for _, pr := range flattenKVPairs(argAt(args, 1)) {
+		out = append(out, asExpr(pr[0]))
+	}
+	return out
+}
+
+// actionPgenGetValues returns the value column from a list of [2]any
+// (key, value) pairs.
+//
+// CPython: Parser/action_helpers.c _PyPegen_get_values
+func actionPgenGetValues(p *Parser, args ...any) any {
+	_ = p
+	out := make(ast.Seq[ast.Expr], 0)
+	for _, pr := range flattenKVPairs(argAt(args, 1)) {
+		out = append(out, asExpr(pr[1]))
+	}
+	return out
+}
+
+// actionPgenGetPatternKeys returns the key column from a list of
+// [2]any (key, pattern) pairs from actionPgenKeyPatternPair.
+//
+// CPython: Parser/action_helpers.c _PyPegen_get_pattern_keys
+func actionPgenGetPatternKeys(p *Parser, args ...any) any {
+	_ = p
+	out := make(ast.Seq[ast.Expr], 0)
+	for _, pr := range flattenKVPairs(argAt(args, 1)) {
+		out = append(out, asExpr(pr[0]))
+	}
+	return out
+}
+
+// actionPgenGetPatterns returns the pattern column from a list of
+// [2]any (key, pattern) pairs.
+//
+// CPython: Parser/action_helpers.c _PyPegen_get_patterns
+func actionPgenGetPatterns(p *Parser, args ...any) any {
+	_ = p
+	out := make(ast.Seq[ast.Pattern], 0)
+	for _, pr := range flattenKVPairs(argAt(args, 1)) {
+		if pat := patternOf(pr[1]); pat != nil {
+			out = append(out, pat)
+		}
+	}
+	return out
+}
+
+// flattenKVPairs walks v (possibly nested []any) and collects every
+// [2]any entry produced by KeyValuePair / KeyPatternPair. Pairs are
+// the smallest object the rule emits so flattening through one level
+// is enough.
+func flattenKVPairs(v any) [][2]any {
+	var out [][2]any
+	var walk func(any)
+	walk = func(x any) {
+		switch t := x.(type) {
+		case nil:
+		case [2]any:
+			out = append(out, t)
+		case []any:
+			for _, e := range t {
+				walk(e)
+			}
+		}
+	}
+	walk(v)
+	return out
+}
+
+// matchCaseSeqOf coerces v into Seq[*ast.MatchCase]. The cases rule
+// returns a +-repetition wrapped in []any.
+func matchCaseSeqOf(v any) ast.Seq[*ast.MatchCase] {
+	var out []*ast.MatchCase
+	var walk func(any)
+	walk = func(x any) {
+		switch t := x.(type) {
+		case nil:
+		case *ast.MatchCase:
+			if t != nil {
+				out = append(out, t)
+			}
+		case []any:
+			for _, e := range t {
+				walk(e)
+			}
+		}
+	}
+	walk(v)
+	if len(out) == 0 {
+		return nil
+	}
+	return ast.Seq[*ast.MatchCase](out)
 }
