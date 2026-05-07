@@ -109,6 +109,11 @@ func Init(defaultFile io.Writer) (*objects.Dict, error) {
 		return nil, err
 	}
 
+	openFn := objects.NewBuiltinFunction("open", Open)
+	if err := setBuiltin(dict, "open", openFn); err != nil {
+		return nil, err
+	}
+
 	evalFn := objects.NewBuiltinFunction("eval", Eval)
 	if err := setBuiltin(dict, "eval", evalFn); err != nil {
 		return nil, err
