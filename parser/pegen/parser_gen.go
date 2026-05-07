@@ -9774,7 +9774,7 @@ func parseRule_dictcomp(p *Parser) any {
 			op_1 := p.ExpectToken(token.RBRACE)
 			if op_1 == nil { return nil }
 			_ = op_1
-			return []any{op, a, b, op_1}
+			return actionAstDictComp(p, kvKey(a), kvValue(a), b)
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_dictcomp, v)
 			return v
