@@ -10,6 +10,7 @@ package monitor
 
 import (
 	"fmt"
+	"sync"
 	"sync/atomic"
 
 	"github.com/tamnd/gopy/objects"
@@ -69,6 +70,17 @@ type InterpState struct {
 	// CPython: Include/internal/pycore_interp_structs.h
 	//          ceval.instrumentation_version
 	version atomic.Uint32
+
+	// SysProfileOnce gates the one-shot install of the legacy
+	// sys.setprofile event handlers; SysTraceOnce does the same for
+	// sys.settrace. CPython spells these as _PyOnceFlag fields on
+	// PyInterpreterState. The first SetProfile / SetTrace caller
+	// runs the install, every subsequent caller skips it.
+	//
+	// CPython: Include/internal/pycore_interp_structs.h
+	//          sys_profile_once_flag / sys_trace_once_flag
+	SysProfileOnce sync.Once
+	SysTraceOnce   sync.Once
 }
 
 // NewInterpState allocates a zero-valued InterpState. All slots start

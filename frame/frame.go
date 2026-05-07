@@ -84,6 +84,27 @@ type Frame struct {
 	// YieldOffset is set when a generator suspends at YIELD_VALUE
 	// so RESUME picks up at the right instruction.
 	YieldOffset int
+
+	// TraceLines mirrors PyFrameObject.f_trace_lines. The legacy
+	// sys.settrace machinery suppresses the LINE callback when this
+	// flag is false; user code sets it via frame.f_trace_lines.
+	// Defaults to true to match CPython.
+	//
+	// CPython: Include/cpython/frameobject.h PyFrameObject.f_trace_lines
+	TraceLines bool
+	// TraceOpcodes mirrors PyFrameObject.f_trace_opcodes. The legacy
+	// trace bridge installs INSTRUMENTED_INSTRUCTION on the running
+	// frame's code only when this is true.
+	//
+	// CPython: Include/cpython/frameobject.h PyFrameObject.f_trace_opcodes
+	TraceOpcodes bool
+	// Lineno is the line number the legacy trace bridge passes to
+	// the user's tracefunc. The bridge stamps it before each call
+	// and clears it back to zero on the way out, mirroring
+	// CPython's frame->f_lineno protocol.
+	//
+	// CPython: Include/cpython/frameobject.h PyFrameObject.f_lineno
+	Lineno int
 }
 
 // NLocalsOf returns the count of fast-local slots a code object owns.
@@ -148,6 +169,9 @@ func (f *Frame) Init(co *objects.Code, globals, builtins objects.Object, fn obje
 	f.Owner = OwnedByEval
 	f.ReturnOffset = 0
 	f.YieldOffset = 0
+	f.TraceLines = true
+	f.TraceOpcodes = false
+	f.Lineno = 0
 	size := SizeFor(co)
 	if cap(f.LocalsPlus) >= size {
 		f.LocalsPlus = f.LocalsPlus[:size]
