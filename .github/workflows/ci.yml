@@ -67,6 +67,9 @@ jobs:
         with:
           go-version: ${{ matrix.go }}
           check-latest: true
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
       - run: go build ./...
       - run: go test -race -count=1 ./...
 
