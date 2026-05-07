@@ -861,6 +861,7 @@ func (e *emitter) writeActionHelperStubs() {
 		"actionAstListComp":                  true,
 		"actionAstSetComp":                   true,
 		"actionAstGeneratorExp":              true,
+		"actionAstDictComp":                  true,
 		"actionAstMatchAs":                   true,
 		"actionAstMatchClass":                true,
 		"actionAstMatchMapping":              true,

@@ -485,6 +485,20 @@ func actionAstGeneratorExp(p *Parser, args ...any) any {
 	return &ast.GeneratorExp{Elt: elt, Generators: gens, Pos: ast.NoPos}
 }
 
+// actionAstDictComp builds a DictComp. Args: (key, value, generators).
+//
+// CPython: Parser/Python.asdl DictComp(expr key, expr value, comprehension* generators)
+func actionAstDictComp(p *Parser, args ...any) any {
+	_ = p
+	key := asExpr(argAt(args, 0))
+	value := asExpr(argAt(args, 1))
+	gens := comprehensionSeqOf(argAt(args, 2))
+	if key == nil || value == nil || len(gens) == 0 {
+		return placeholderMatched
+	}
+	return &ast.DictComp{Key: key, Value: value, Generators: gens, Pos: ast.NoPos}
+}
+
 // Match patterns: each helper builds the matching ast.* pattern. The
 // upstream pattern rules still produce []any wrappers in many cases
 // so the helpers fall back to placeholderMatched when shape is wrong.
@@ -1952,6 +1966,24 @@ func callArgsOf(v any) ast.Seq[ast.Expr] {
 func callKwOf(v any) ast.Seq[*ast.Keyword] {
 	if c, ok := v.(*ast.Call); ok && c != nil {
 		return c.Keywords
+	}
+	return nil
+}
+
+// kvKey / kvValue project the columns out of a [2]any pair the
+// KeyValuePair / KeyPatternPair / NameDefaultPair helpers stamp out.
+// Mirrors `pair->key` / `pair->value` (also `pair->name` /
+// `pair->pattern`) in the C grammar.
+func kvKey(v any) any {
+	if p, ok := v.([2]any); ok {
+		return p[0]
+	}
+	return nil
+}
+
+func kvValue(v any) any {
+	if p, ok := v.([2]any); ok {
+		return p[1]
 	}
 	return nil
 }
