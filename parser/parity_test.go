@@ -11,11 +11,13 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"os/exec"
 	"strings"
 	"testing"
 
 	"github.com/tamnd/gopy/ast"
+	"github.com/tamnd/gopy/build"
 )
 
 // parityFixtures is the seed corpus. Every fixture is a Python source
@@ -82,6 +84,10 @@ func TestParserParity(t *testing.T) {
 	if _, err := exec.LookPath("python3"); err != nil {
 		t.Skip("python3 not on PATH")
 	}
+	if err := requirePythonMinor(t.Context(), build.PythonMajorVersion, build.PythonMinorVersion); err != nil {
+		t.Skipf("parity gate needs python %d.%d: %v",
+			build.PythonMajorVersion, build.PythonMinorVersion, err)
+	}
 	for _, fx := range parityFixtures {
 		t.Run(fx.name, func(t *testing.T) {
 			want, err := pythonAstDump(t.Context(), fx.src)
@@ -98,6 +104,29 @@ func TestParserParity(t *testing.T) {
 			}
 		})
 	}
+}
+
+// requirePythonMinor reports an error unless `python3` on PATH matches the
+// given major.minor version. The parity gate compares ast.dump output
+// byte-for-byte, and that output format is not stable across minor
+// versions, so the test only runs when versions line up.
+func requirePythonMinor(ctx context.Context, major, minor int) error {
+	cmd := exec.CommandContext(ctx, "python3", "-c",
+		"import sys; print(sys.version_info[0], sys.version_info[1])")
+	var out, errb bytes.Buffer
+	cmd.Stdout = &out
+	cmd.Stderr = &errb
+	if err := cmd.Run(); err != nil {
+		return errors.New(strings.TrimSpace(errb.String()))
+	}
+	var gotMajor, gotMinor int
+	if _, err := fmt.Sscanf(out.String(), "%d %d", &gotMajor, &gotMinor); err != nil {
+		return err
+	}
+	if gotMajor != major || gotMinor != minor {
+		return fmt.Errorf("python3 reports %d.%d, want %d.%d", gotMajor, gotMinor, major, minor)
+	}
+	return nil
 }
 
 // pythonAstDump runs `python3 -c 'import ast; print(ast.dump(ast.parse(SRC)))'`
