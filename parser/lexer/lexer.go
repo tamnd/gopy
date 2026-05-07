@@ -448,11 +448,16 @@ func (s *State) scanOperator(c int) Tok {
 	switch c {
 	case '(', '[', '{':
 		s.pushParen(byte(c))
+		// CPython bumps curly_bracket_depth on every opener, not just
+		// `{`. The misleading name is upstream's: the counter tracks
+		// nesting depth of any bracket while inside an f-string so the
+		// `:` format-spec switch only triggers at the outermost level
+		// (e.g. it must NOT fire for the slice colon in
+		// f"{arr[1:2]}").
+		//
+		// CPython: Parser/lexer/lexer.c:1312
 		if s.insideFString() {
-			m := s.curMode()
-			if c == '{' {
-				m.curlyBracketDepth++
-			}
+			s.curMode().curlyBracketDepth++
 		}
 		return s.tokenSetup(token.OP, s.start, s.cur)
 	case ')', ']', '}':
@@ -499,6 +504,20 @@ func (s *State) scanOperator(c int) Tok {
 	case ':':
 		if s.peek() == '=' {
 			s.nextC()
+		}
+		// Inside an f-string interpolation `{expr:fmt}`, a `:` at the
+		// outer curly-bracket level switches the lexer back to fstring
+		// mode for the format-spec body so `>10`, `>{w}`, etc. arrive
+		// as FSTRING_MIDDLE rather than as separate operators.
+		//
+		// CPython: Parser/lexer/lexer.c:1271 (is_punctuation branch)
+		if s.insideFString() && s.insideFStringExpr() {
+			m := s.curMode()
+			cursor := m.curlyBracketDepth - 1
+			if cursor == m.curlyBracketExprStartDepth {
+				m.kind = tokFStringMode
+				m.inFormatSpec = true
+			}
 		}
 		return s.tokenSetup(token.OP, s.start, s.cur)
 	case '.':
