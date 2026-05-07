@@ -560,7 +560,9 @@ func actionAstMatchAs(p *Parser, args ...any) any {
 
 func actionPgenSeqCountDots(p *Parser, args ...any) any {
 	_ = p
-	return SeqCountDots(flattenTokens(argAt(args, 1)))
+	// _PyPegen_seq_count_dots(seq) takes no explicit Parser*, so the
+	// translator emits a single positional arg: args[0] is the seq.
+	return SeqCountDots(flattenTokens(argAt(args, 0)))
 }
 
 func actionPgenSingletonSeq(p *Parser, args ...any) any {
@@ -2475,4 +2477,28 @@ func matchCaseSeqOf(v any) ast.Seq[*ast.MatchCase] {
 		return nil
 	}
 	return ast.Seq[*ast.MatchCase](out)
+}
+
+// actionPgenCheckedFutureImport mirrors `_PyPegen_checked_future_import`.
+// CPython also flips the parser's PARSE_BARRY_AS_BDFL flag when a
+// `from __future__ import barry_as_FLUFL` is seen; that flag is not
+// yet plumbed through the Go parser, so we build the ImportFrom and
+// leave the flag handling for when feature_version / future flags
+// are wired up.
+//
+// CPython: Parser/action_helpers.c:1921 _PyPegen_checked_future_import
+func actionPgenCheckedFutureImport(p *Parser, args ...any) any {
+	_ = p
+	mod := nameOf(argAt(args, 1))
+	names := aliasSeqOf(argAt(args, 2))
+	lvl := intOf(argAt(args, 3))
+	out := &ast.ImportFrom{Names: names, Pos: ast.NoPos}
+	if mod != nil {
+		s := *mod
+		out.Module = &s
+	}
+	if lvl != nil {
+		out.Level = lvl
+	}
+	return out
 }

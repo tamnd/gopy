@@ -949,6 +949,7 @@ func (e *emitter) writeActionHelperStubs() {
 		"actionAstParamSpec":                 true,
 		"actionPgenMapNamesToIds":            true,
 		"actionPgenAliasForStar":             true,
+		"actionPgenCheckedFutureImport":      true,
 		"actionPgenGetCmpops":                true,
 		"actionPgenGetExprs":                 true,
 		"actionPgenGetKeys":                  true,
