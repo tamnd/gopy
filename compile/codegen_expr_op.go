@@ -114,6 +114,41 @@ const (
 	nbSubscr    int32 = 26
 )
 
+// Exported NB_* opargs for the BINARY_OP family. The lowercase
+// constants above are the codegen-side spelling; specializers and
+// dispatch arms read the exported ones.
+//
+// CPython: Include/opcode.h NB_*
+const (
+	NB_ADD              int32 = 0
+	NB_AND              int32 = 1
+	NB_FLOOR_DIVIDE     int32 = 2
+	NB_LSHIFT           int32 = 3
+	NB_MATRIX_MULTIPLY  int32 = 4
+	NB_MULTIPLY         int32 = 5
+	NB_REMAINDER        int32 = 6
+	NB_OR               int32 = 7
+	NB_POWER            int32 = 8
+	NB_RSHIFT           int32 = 9
+	NB_SUBTRACT         int32 = 10
+	NB_TRUE_DIVIDE      int32 = 11
+	NB_XOR              int32 = 12
+	NB_INPLACE_ADD      int32 = 13
+	NB_INPLACE_AND      int32 = 14
+	NB_INPLACE_FLOOR_DIVIDE int32 = 15
+	NB_INPLACE_LSHIFT   int32 = 16
+	NB_INPLACE_MATRIX_MULTIPLY int32 = 17
+	NB_INPLACE_MULTIPLY int32 = 18
+	NB_INPLACE_REMAINDER int32 = 19
+	NB_INPLACE_OR       int32 = 20
+	NB_INPLACE_POWER    int32 = 21
+	NB_INPLACE_RSHIFT   int32 = 22
+	NB_INPLACE_SUBTRACT int32 = 23
+	NB_INPLACE_TRUE_DIVIDE int32 = 24
+	NB_INPLACE_XOR      int32 = 25
+	NB_SUBSCR           int32 = 26
+)
+
 // visitUnaryOp emits UNARY_NEGATIVE / UNARY_INVERT / UNARY_NOT or, for
 // `not`, TO_BOOL + UNARY_NOT. CPython 3.14 collapsed unary plus on
 // numeric constants in the folder, so UAdd just visits the operand

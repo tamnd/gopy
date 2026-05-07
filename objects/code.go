@@ -66,6 +66,30 @@ type Code struct {
 	// ExceptionTable is the compact try/except table the
 	// interpreter walks on RAISE_VARARGS / END_FINALLY.
 	ExceptionTable []byte
+
+	// Quickened is true when the bytecode has been Quickened: every
+	// adaptive opcode is followed by its inline cache cells, with
+	// counters seeded by specialize.Quicken. The dispatch loop only
+	// drives the adaptive specializer / deopt loop on Quickened code.
+	//
+	// CPython: Include/internal/pycore_code.h _PyCode_QUICKENED
+	Quickened bool
+
+	// MonitoringData is the per-code PEP 669 instrumentation slab,
+	// allocated lazily by the instrument pass. Stored as any so the
+	// objects package stays independent of monitor; the monitor
+	// package owns the concrete *monitor.CoMonitoringData type and
+	// asserts it back at use sites.
+	//
+	// CPython: Include/internal/pycore_code.h _co_monitoring
+	MonitoringData any
+
+	// MonitoringVersion is the global monitoring version snapshot
+	// from the last instrument pass. The shadow walk re-instruments
+	// when this drifts from the interpreter's current version.
+	//
+	// CPython: Include/internal/pycore_code.h _co_instrumentation_version
+	MonitoringVersion uint32
 }
 
 // CodeType is the type singleton for code objects.

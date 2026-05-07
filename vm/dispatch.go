@@ -27,11 +27,37 @@ import (
 //
 // CPython: Python/ceval.c switch over op
 func (e *evalState) dispatch(op compile.Opcode, oparg uint32) (next int, retVal objects.Object, retErr error, retDone bool, err error) {
-	// Strip the INSTRUMENTED_ prefix before dispatching so monitored
-	// bytecode runs the base behavior. PEP 669 monitoring itself is
-	// out of scope for v0.6 (lands in 1634 at v0.9).
+	// Fire any registered PEP 669 callbacks subscribed to this
+	// (event, offset) pair, then strip the INSTRUMENTED_ prefix so
+	// the base body runs. INSTRUMENTED_LINE is handled separately:
+	// the original opcode is hidden in CoMonitoringData.Lines, not
+	// recoverable through the deinstrument table.
+	if op == compile.INSTRUMENTED_LINE {
+		newOp, err := e.handleInstrumentedLine()
+		if err != nil {
+			return 0, nil, nil, false, err
+		}
+		op = newOp
+	}
+	if err := e.fireInstrumented(op, oparg); err != nil {
+		return 0, nil, nil, false, err
+	}
 	if base, rewritten := baseForInstrumented(op); rewritten {
 		op = base
+	}
+	// On Quickened code, fold any specialized variant back to its
+	// adaptive parent so the generic body runs (gopy doesn't have
+	// fast-path arms for the specialized opcodes yet) and tick the
+	// adaptive counter so a hot site eventually re-specializes.
+	if base, deopted := e.maybeDeopt(op); deopted {
+		op = base
+	} else if e.adaptiveTick(op, oparg) {
+		// adaptiveTick rewrote the opcode in place; pick up the
+		// fresh op so the generic body still runs this tick.
+		op = compile.Opcode(e.f.Code.Code[e.f.InstrPtr])
+		if base2, deopted2 := e.maybeDeopt(op); deopted2 {
+			op = base2
+		}
 	}
 	// Hand-written panel for the smallest core opcodes so trivial
 	// programs run end-to-end before 1621 codegen lands.

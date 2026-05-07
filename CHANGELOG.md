@@ -11,6 +11,56 @@ folder; this file is the aggregated index.
 
 ## Unreleased
 
+## v0.11.0 - 2026-05-07
+
+See [`changelog/v0.11.0.md`](changelog/v0.11.0.md).
+
+* feat(specialize): port the PEP 659 adaptive specializer.
+  Backoff counter and inline-cache layouts, `_PyCode_Quicken`,
+  the `_PyOpcode_Caches` and `_PyOpcode_Deopt` tables, plus per
+  family ports of `LOAD_ATTR`, `STORE_ATTR`, `LOAD_GLOBAL`,
+  `LOAD_SUPER_ATTR`, `BINARY_OP`, `COMPARE_OP`, `CONTAINS_OP`,
+  `TO_BOOL`, `STORE_SUBSCR`, `UNPACK_SEQUENCE`, `FOR_ITER`,
+  `SEND`, `CALL`, and `CALL_KW`. Each family lands with its hit
+  / miss / deopt path and the `tp_version_tag` / `dk_version`
+  guards the fast variants assume.
+* feat(vm): wire the specializer into dispatch. Quickened
+  opcodes peel into the typed variant on hit, increment the
+  per-cache counter, and fall back to the generic arm with the
+  deopt counter primed.
+* feat(monitor): port PEP 669 `sys.monitoring`. Per-interpreter
+  state slab, the 19 fire-event entry points, the
+  `_Py_Instrument` shadow walk that rewrites quickened bytecode
+  to `INSTRUMENTED_*` variants in place, the per-code tool-slot
+  lifecycle (`use_tool_id` / `free_tool_id` / `get_tool`), line
+  instrumentation driven by the PEP 626 line table, and the
+  shared callback runner that honours `Disable` / `Missing`.
+* feat(monitor): port the `sys.monitoring` builtin module.
+  `use_tool_id`, `free_tool_id`, `get_tool`, `register_callback`,
+  `set_events` / `get_events`, `set_local_events` /
+  `get_local_events`, `restart_events`, plus the event / tool
+  constants and the `DISABLE` / `MISSING` singletons.
+* feat(vm): port `Python/legacy_tracing.c`. The bridge registers
+  `sys.profile` and `sys.trace` as PEP 669 tools 6 and 7 and
+  translates the matching events into Go-level `LegacyTraceFunc`
+  callbacks shaped like CPython's `Py_tracefunc`. Forward jumps
+  return `Disable` so the line handler takes over via
+  `INSTRUMENTED_LINE`.
+* feat(vm): wire `sys.settrace`, `sys.setprofile`, `sys.gettrace`,
+  `sys.getprofile`. Python callables ride through a Go trampoline
+  shaped like `LegacyTraceFunc`, then defer to `SetTrace` /
+  `SetProfile` to install the bridge.
+* feat(frame): per-frame `TraceLines`, `TraceOpcodes`, and
+  `Lineno` slots so the bridge can drive line and opcode events
+  on demand without paying for them at steady state.
+* feat(compile): regenerate the opcode table to pick up the
+  specialized variants (`LOAD_ATTR_INSTANCE_VALUE`,
+  `BINARY_OP_ADD_INT`, ...) and the `INSTRUMENTED_*` mirror set.
+* test(vmtest): v0.11 end-to-end gate (`v011_gate_test.go`).
+  Drives the specializer, the PEP 669 monitor fan-out, the
+  `sys.settrace` bridge, and the `sys.monitoring` builtin
+  surface through their public entry points.
+
 ## v0.10.2 - 2026-05-07
 
 See [`changelog/v0.10.2.md`](changelog/v0.10.2.md).

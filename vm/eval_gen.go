@@ -167,7 +167,7 @@ func (e *evalState) execSend(oparg uint32) (genResult, error) {
 			return genResult{ok: true}, serr
 		}
 		e.pushObject(val)
-		return genResult{next: e.advance(), ok: true}, nil
+		return genResult{next: e.cacheAdvance(compile.SEND), ok: true}, nil
 
 	default:
 		// Generic path: if v is None, call tp_iternext; otherwise call .send(v).
@@ -195,7 +195,7 @@ func (e *evalState) execSend(oparg uint32) (genResult, error) {
 			return genResult{ok: true}, nerr
 		}
 		e.pushObject(val)
-		return genResult{next: e.advance(), ok: true}, nil
+		return genResult{next: e.cacheAdvance(compile.SEND), ok: true}, nil
 	}
 }
 

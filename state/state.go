@@ -4,7 +4,11 @@
 // v0.7.
 package state
 
-import "sync/atomic"
+import (
+	"sync/atomic"
+
+	"github.com/tamnd/gopy/monitor"
+)
 
 // Exception is the interface state stores in the per-thread exception
 // slot. The concrete type lives in the errors package; state knows
@@ -54,6 +58,13 @@ type Interpreter struct {
 	Config  any
 
 	Finalizing int
+
+	// Monitors is the per-interpreter PEP 669 monitoring state. Lazy-
+	// allocated by NewInterpreter so unused interpreters do not pay
+	// the (small) cost of the callable / version tables.
+	//
+	// CPython: Include/internal/pycore_interp_structs.h:948 monitors
+	Monitors *monitor.InterpState
 }
 
 // Thread is the per-goroutine state. v0.3 carries the current
@@ -155,7 +166,7 @@ func NewRuntime() *Runtime {
 //
 // CPython: Python/pystate.c:_PyInterpreterState_Enable
 func (r *Runtime) NewInterpreter() *Interpreter {
-	i := &Interpreter{runtime: r}
+	i := &Interpreter{runtime: r, Monitors: monitor.NewInterpState()}
 	r.interpreters = append(r.interpreters, i)
 	return i
 }

@@ -13,6 +13,7 @@ import (
 
 	"github.com/tamnd/gopy/frame"
 	"github.com/tamnd/gopy/gil"
+	"github.com/tamnd/gopy/objects"
 	"github.com/tamnd/gopy/state"
 )
 
@@ -23,6 +24,18 @@ type threadVM struct {
 	pending  *gil.Pending
 	gil      *gil.GIL // nil in v0.9; v0.13 sub-interpreter wiring populates this
 	gilTimer gilSwitchTimer
+
+	// cTraceFunc / cTraceObj back the legacy sys.settrace bridge.
+	// They mirror PyThreadState.c_tracefunc / c_traceobj. nil
+	// tracefunc means tracing is off on this thread. The install
+	// path swaps both at once under the world-stop CPython does;
+	// gopy is single-interpreter so the swap is unsynchronized.
+	//
+	// CPython: Include/cpython/pystate.h:88-93
+	cTraceFunc   LegacyTraceFunc
+	cTraceObj    objects.Object
+	cProfileFunc LegacyTraceFunc
+	cProfileObj  objects.Object
 }
 
 var threadVMs sync.Map // map[*state.Thread]*threadVM

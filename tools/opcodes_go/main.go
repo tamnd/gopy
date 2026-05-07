@@ -64,8 +64,12 @@ func main() {
 	}
 }
 
-// parseOpmap parses the opmap dict literal in _opcode_metadata.py.
-// Lines have the shape `    'NAME': N,`.
+// parseOpmap parses both the opmap and _specialized_opmap dict
+// literals in _opcode_metadata.py. Lines have the shape
+// `    'NAME': N,`. Specialized variants (LOAD_ATTR_INSTANCE_VALUE,
+// BINARY_OP_ADD_INT, ...) live in _specialized_opmap and the
+// adaptive specializer needs to refer to them by name, so we
+// merge both dicts into a single map.
 func parseOpmap(path string) (map[string]int, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -75,11 +79,13 @@ func parseOpmap(path string) (map[string]int, error) {
 	out := map[string]int{}
 	in := false
 	for _, line := range strings.Split(string(data), "\n") {
+		trimmed := strings.TrimSpace(line)
 		switch {
-		case strings.HasPrefix(strings.TrimSpace(line), "opmap = {"):
+		case strings.HasPrefix(trimmed, "opmap = {"),
+			strings.HasPrefix(trimmed, "_specialized_opmap = {"):
 			in = true
-		case in && strings.HasPrefix(strings.TrimSpace(line), "}"):
-			return out, nil
+		case in && strings.HasPrefix(trimmed, "}"):
+			in = false
 		case in:
 			if m := re.FindStringSubmatch(line); m != nil {
 				v, err := strconv.Atoi(m[2])
@@ -90,7 +96,10 @@ func parseOpmap(path string) (map[string]int, error) {
 			}
 		}
 	}
-	return nil, fmt.Errorf("opmap dict not found in %s", path)
+	if len(out) == 0 {
+		return nil, fmt.Errorf("opmap dict not found in %s", path)
+	}
+	return out, nil
 }
 
 // parseFlags parses the table entries in pycore_opcode_metadata.h.

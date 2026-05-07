@@ -30,6 +30,14 @@ type Dict struct {
 	fill       int         // active entries + dummies; only resets on resize
 	kind       dictKind    // DictKeysKind: gates the four lookup variants
 	sharedKeys *SharedKeys // non-nil while in split-keys mode (1680-D)
+	// keysVersion is the dk_version stamped into inline caches by the
+	// adaptive specializer. 0 means "not yet allocated or invalidated";
+	// GetKeysVersion lazily allocates a fresh value from the global
+	// counter on first read. Insert/delete clears it back to 0 so the
+	// next read forces a re-allocation and prior cache hits invalidate.
+	//
+	// CPython: Include/internal/pycore_dict.h dk_version
+	keysVersion uint32
 }
 
 // DictType is the type singleton for dict. Mirrors PyDict_Type.
