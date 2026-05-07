@@ -39,15 +39,18 @@ func (c *Compiler) addLoadConst(value any, l ast.Pos) {
 
 // addOpName emits an opcode whose oparg is an index into one of the
 // per-unit string pools (Names / VarNames / FreeVars / CellVars).
-// LOAD_ATTR/LOAD_SUPER_ATTR carry an extra "method" / "two-arg
-// constructor" bit packed into oparg; this helper bakes it in to
-// match CPython's codegen_addop_name.
+// LOAD_ATTR / LOAD_GLOBAL / LOAD_SUPER_ATTR pack an extra low bit
+// into oparg (the "push NULL self slot" / "method form" bit); the
+// real name index lives in bits 1+. The bit itself is left zero
+// here. The flowgraph fixes it up later when a following CALL turns
+// the load + call into a method-style call.
 //
 // CPython: Python/codegen.c:L354 codegen_addop_name
 func (c *Compiler) addOpName(op Opcode, pool *poolKind, name string, l ast.Pos) {
 	idx := c.poolIndex(pool, name)
 	arg := int32(idx)
-	if op == LOAD_ATTR {
+	switch op {
+	case LOAD_ATTR, LOAD_GLOBAL, LOAD_SUPER_ATTR:
 		arg <<= 1
 	}
 	c.seq().Addop(op, arg, l)
