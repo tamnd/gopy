@@ -209,7 +209,7 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, retVal
 			return 0, nil, nil, false, true, berr
 		}
 		e.pushObject(out)
-		return e.advance(), nil, nil, false, true, nil
+		return e.cacheAdvance(compile.BINARY_OP), nil, nil, false, true, nil
 
 	case compile.UNARY_NEGATIVE:
 		a := e.popObject()
@@ -258,7 +258,7 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, retVal
 			return 0, nil, nil, false, true, cerr
 		}
 		e.pushObject(out)
-		return e.advance(), nil, nil, false, true, nil
+		return e.cacheAdvance(compile.COMPARE_OP), nil, nil, false, true, nil
 
 	case compile.BUILD_LIST:
 		n := int(oparg)
@@ -365,7 +365,7 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, retVal
 			return 0, nil, nil, false, true, nerr
 		}
 		e.pushObject(v)
-		return e.advance(), nil, nil, false, true, nil
+		return e.cacheAdvance(compile.FOR_ITER), nil, nil, false, true, nil
 
 	case compile.END_FOR:
 		// END_FOR pops the exhausted iterator left by FOR_ITER's
@@ -394,7 +394,7 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, retVal
 			return 0, nil, nil, false, true, cerr
 		}
 		e.pushObject(out)
-		return e.advance(), nil, nil, false, true, nil
+		return e.cacheAdvance(compile.CALL), nil, nil, false, true, nil
 
 	case compile.UNPACK_SEQUENCE:
 		seq := e.popObject()
@@ -408,7 +408,7 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, retVal
 		for i := n - 1; i >= 0; i-- {
 			e.pushObject(items[i])
 		}
-		return e.advance(), nil, nil, false, true, nil
+		return e.cacheAdvance(compile.UNPACK_SEQUENCE), nil, nil, false, true, nil
 
 	case compile.BUILD_SLICE:
 		// oparg is 2 (start:stop) or 3 (start:stop:step).
@@ -428,7 +428,7 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, retVal
 		if serr := setItem(container, key, v); serr != nil {
 			return 0, nil, nil, false, true, serr
 		}
-		return e.advance(), nil, nil, false, true, nil
+		return e.cacheAdvance(compile.STORE_SUBSCR), nil, nil, false, true, nil
 
 	case compile.DELETE_SUBSCR:
 		key := e.popObject()
@@ -451,7 +451,7 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, retVal
 			hit = !hit
 		}
 		e.pushObject(objects.NewBool(hit))
-		return e.advance(), nil, nil, false, true, nil
+		return e.cacheAdvance(compile.CONTAINS_OP), nil, nil, false, true, nil
 
 	case compile.RAISE_VARARGS:
 		// oparg: 0 = re-raise, 1 = raise exc, 2 = raise exc from cause.
@@ -954,7 +954,7 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, retVal
 			return 0, nil, nil, false, true, cerr
 		}
 		e.pushObject(out)
-		return e.advance(), nil, nil, false, true, nil
+		return e.cacheAdvance(compile.CALL_KW), nil, nil, false, true, nil
 
 	case compile.CALL_FUNCTION_EX:
 		// Stack: [callable, NULL, args_iterable, kwargs_dict_or_NULL].
@@ -1088,7 +1088,7 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, retVal
 			return 0, nil, nil, false, true, terr
 		}
 		e.pushObject(objects.NewBool(truthy))
-		return e.advance(), nil, nil, false, true, nil
+		return e.cacheAdvance(compile.TO_BOOL), nil, nil, false, true, nil
 
 	case compile.NOT_TAKEN:
 		// 3.14 marker that flags the not-taken branch of a conditional
@@ -1213,19 +1213,19 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, retVal
 			return 0, nil, nil, false, true, perr
 		}
 		_ = v
-		return e.advance(), nil, nil, false, true, nil
+		return e.cacheAdvance(op), nil, nil, false, true, nil
 
 	case compile.LOAD_ATTR:
 		if perr := e.execLoadAttr(oparg); perr != nil {
 			return 0, nil, nil, false, true, perr
 		}
-		return e.advance(), nil, nil, false, true, nil
+		return e.cacheAdvance(compile.LOAD_ATTR), nil, nil, false, true, nil
 
 	case compile.STORE_ATTR:
 		if perr := e.execStoreAttr(oparg); perr != nil {
 			return 0, nil, nil, false, true, perr
 		}
-		return e.advance(), nil, nil, false, true, nil
+		return e.cacheAdvance(compile.STORE_ATTR), nil, nil, false, true, nil
 
 	case compile.DELETE_ATTR:
 		if perr := e.execDeleteAttr(oparg); perr != nil {

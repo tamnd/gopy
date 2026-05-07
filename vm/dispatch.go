@@ -33,6 +33,20 @@ func (e *evalState) dispatch(op compile.Opcode, oparg uint32) (next int, retVal 
 	if base, rewritten := baseForInstrumented(op); rewritten {
 		op = base
 	}
+	// On Quickened code, fold any specialized variant back to its
+	// adaptive parent so the generic body runs (gopy doesn't have
+	// fast-path arms for the specialized opcodes yet) and tick the
+	// adaptive counter so a hot site eventually re-specializes.
+	if base, deopted := e.maybeDeopt(op); deopted {
+		op = base
+	} else if e.adaptiveTick(op, oparg) {
+		// adaptiveTick rewrote the opcode in place; pick up the
+		// fresh op so the generic body still runs this tick.
+		op = compile.Opcode(e.f.Code.Code[e.f.InstrPtr])
+		if base2, deopted2 := e.maybeDeopt(op); deopted2 {
+			op = base2
+		}
+	}
 	// Hand-written panel for the smallest core opcodes so trivial
 	// programs run end-to-end before 1621 codegen lands.
 	if next, retVal, retErr, retDone, ok, err := e.trySimple(op, oparg); ok {

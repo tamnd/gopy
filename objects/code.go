@@ -66,6 +66,14 @@ type Code struct {
 	// ExceptionTable is the compact try/except table the
 	// interpreter walks on RAISE_VARARGS / END_FINALLY.
 	ExceptionTable []byte
+
+	// Quickened is true when the bytecode has been Quickened: every
+	// adaptive opcode is followed by its inline cache cells, with
+	// counters seeded by specialize.Quicken. The dispatch loop only
+	// drives the adaptive specializer / deopt loop on Quickened code.
+	//
+	// CPython: Include/internal/pycore_code.h _PyCode_QUICKENED
+	Quickened bool
 }
 
 // CodeType is the type singleton for code objects.
