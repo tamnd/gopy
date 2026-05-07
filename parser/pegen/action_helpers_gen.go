@@ -1750,7 +1750,9 @@ func flattenCmpopExprPairs(v any) []cmpopExprPair {
 // CPython: Parser/action_helpers.c _PyPegen_augoperator
 func actionPgenAugoperator(p *Parser, args ...any) any {
 	_ = p
-	if op, ok := argAt(args, 0).(ast.Operator); ok {
+	// Pgen helpers receive the parser explicitly as args[0]; the
+	// operator the rule passes lives at args[1].
+	if op, ok := argAt(args, 1).(ast.Operator); ok {
 		return op
 	}
 	return placeholderMatched
