@@ -143,6 +143,7 @@ func typeSingletons() []struct {
 		{"property", objects.PropertyType},
 		{"classmethod", objects.ClassMethodType},
 		{"staticmethod", objects.StaticMethodType},
+		{"super", objects.SuperType},
 	}
 }
 

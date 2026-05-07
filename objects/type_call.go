@@ -46,6 +46,13 @@ func typeCall(callable Object, args []Object, kwargs map[string]Object) (Object,
 		return typeMetaCall(args, kwargs)
 	}
 
+	// Built-in types that publish their own constructor (super, ...) get
+	// dispatched through that slot directly. Mirrors the way CPython's
+	// PyType_Type tp_call routes through the subtype's tp_new/tp_init.
+	if cls.Call != nil {
+		return cls.Call(callable, args, kwargs)
+	}
+
 	if !cls.IsUser {
 		return nil, fmt.Errorf("TypeError: cannot create '%s' instances directly", cls.Name)
 	}

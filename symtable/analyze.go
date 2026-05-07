@@ -71,7 +71,7 @@ func analyzeBlock(t *Table, ste *Entry, bound, free, global, typeParams nameSet,
 	if ste.IsFunctionLike() {
 		analyzeCells(scopes, newfree, inlinedCells)
 	} else if ste.Type == ClassBlock {
-		dropClassFree(ste, newfree)
+		dropClassFree(ste, scopes, newfree)
 	}
 	classflag := ste.Type == ClassBlock || ste.CanSeeClassScope
 	updateSymbols(ste.Symbols, scopes, bound, newfree, inlinedCells, classflag)
@@ -288,18 +288,40 @@ func analyzeCells(scopes map[string]Scope, free, inlinedCells nameSet) {
 
 // dropClassFree removes the implicit class-scope names from a class
 // block's free set and records the corresponding ste_needs_* flag.
+// When the discard fires the class scope owns the implicit cell, so
+// stamp the symbol as Cell here to spare callers a separate lookup
+// path. CPython does the same shaping in compile.c (u_cellvars), but
+// gopy keeps the cell view inside the symtable.
 //
 // CPython: Python/symtable.c:L958 drop_class_free
-func dropClassFree(ste *Entry, free nameSet) {
+func dropClassFree(ste *Entry, scopes map[string]Scope, free nameSet) {
 	if free.discard("__class__") {
 		ste.NeedsClassClosure = true
+		stampImplicitCell(ste, scopes, "__class__")
 	}
 	if free.discard("__classdict__") {
 		ste.NeedsClassDict = true
+		stampImplicitCell(ste, scopes, "__classdict__")
 	}
 	if free.discard("__conditional_annotations__") {
 		ste.HasConditionalAnnotations = true
 	}
+}
+
+// stampImplicitCell records name as a Cell-scoped, locally-bound
+// symbol on ste, keeping the parallel scopes map in sync so the
+// updateSymbols pass that runs right after sees a resolved scope.
+// CPython tracks the same fact via a separate u_cellvars list in the
+// compiler unit; gopy folds it into the symtable so downstream codegen
+// sees a uniform Cell scope without extra plumbing.
+//
+// CPython: Python/compile.c:L610 needs_class_closure cellvars handling
+func stampImplicitCell(ste *Entry, scopes map[string]Scope, name string) {
+	flags := ste.Symbols[name]
+	flags |= DefLocal
+	flags &^= ScopeMask << ScopeOffset
+	ste.Symbols[name] = flags
+	scopes[name] = Cell
 }
 
 // updateSymbols writes scope information back into ste.Symbols and

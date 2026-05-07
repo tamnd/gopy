@@ -29,6 +29,17 @@ func NewUserType(name string, bases []*Type, ns *Dict) *Type {
 	t.Getattro = instanceGetAttr
 	t.Setattro = instanceSetAttr
 	if ns != nil {
+		// __classcell__ is the cell __build_class__ left in the
+		// namespace so we can patch it with the new class. It is not a
+		// real attribute, so install it before walking the rest of the
+		// namespace and skip it during the descriptor copy.
+		classCellKey := NewStr("__classcell__")
+		if cellObj, err := ns.GetItem(classCellKey); err == nil {
+			if cell, ok := cellObj.(*Cell); ok {
+				cell.Contents = t
+			}
+			_ = ns.DelItem(classCellKey)
+		}
 		for _, k := range ns.Keys() {
 			s, ok := k.(*Unicode)
 			if !ok {
