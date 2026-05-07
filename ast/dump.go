@@ -43,6 +43,12 @@ func dumpFormat(v any) (string, bool) {
 	}
 
 	if rv.Kind() == reflect.Slice {
+		// Bytes literals (`b'...'`) land here as []byte. CPython
+		// renders them via repr(bytes), not as a list of ints, so
+		// route them through dumpRepr before the generic slice path.
+		if rv.Type().Elem().Kind() == reflect.Uint8 {
+			return reprBytes(rv.Bytes()), true
+		}
 		if rv.Len() == 0 {
 			return "[]", true
 		}
