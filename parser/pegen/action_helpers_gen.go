@@ -2487,11 +2487,11 @@ func actionAstParamSpec(p *Parser, args ...any) any {
 	}
 }
 
-// actionPgenMapNamesToIds extracts the identifier text from a
+// actionPgenMapNamesToIDs extracts the identifier text from a
 // sequence of NAME tokens or *ast.Name expressions.
 //
 // CPython: Parser/action_helpers.c _PyPegen_map_names_to_ids
-func actionPgenMapNamesToIds(p *Parser, args ...any) any {
+func actionPgenMapNamesToIDs(p *Parser, args ...any) any {
 	_ = p
 	v := argAt(args, 1)
 	var out []string
@@ -2567,8 +2567,9 @@ func actionPgenGetExprs(p *Parser, args ...any) any {
 // CPython: Parser/action_helpers.c _PyPegen_get_keys
 func actionPgenGetKeys(p *Parser, args ...any) any {
 	_ = p
-	out := make(ast.Seq[ast.Expr], 0)
-	for _, pr := range flattenKVPairs(argAt(args, 1)) {
+	pairs := flattenKVPairs(argAt(args, 1))
+	out := make(ast.Seq[ast.Expr], 0, len(pairs))
+	for _, pr := range pairs {
 		out = append(out, asExpr(pr[0]))
 	}
 	return out
@@ -2580,8 +2581,9 @@ func actionPgenGetKeys(p *Parser, args ...any) any {
 // CPython: Parser/action_helpers.c _PyPegen_get_values
 func actionPgenGetValues(p *Parser, args ...any) any {
 	_ = p
-	out := make(ast.Seq[ast.Expr], 0)
-	for _, pr := range flattenKVPairs(argAt(args, 1)) {
+	pairs := flattenKVPairs(argAt(args, 1))
+	out := make(ast.Seq[ast.Expr], 0, len(pairs))
+	for _, pr := range pairs {
 		out = append(out, asExpr(pr[1]))
 	}
 	return out
@@ -2593,8 +2595,9 @@ func actionPgenGetValues(p *Parser, args ...any) any {
 // CPython: Parser/action_helpers.c _PyPegen_get_pattern_keys
 func actionPgenGetPatternKeys(p *Parser, args ...any) any {
 	_ = p
-	out := make(ast.Seq[ast.Expr], 0)
-	for _, pr := range flattenKVPairs(argAt(args, 1)) {
+	pairs := flattenKVPairs(argAt(args, 1))
+	out := make(ast.Seq[ast.Expr], 0, len(pairs))
+	for _, pr := range pairs {
 		out = append(out, asExpr(pr[0]))
 	}
 	return out
@@ -2606,8 +2609,9 @@ func actionPgenGetPatternKeys(p *Parser, args ...any) any {
 // CPython: Parser/action_helpers.c _PyPegen_get_patterns
 func actionPgenGetPatterns(p *Parser, args ...any) any {
 	_ = p
-	out := make(ast.Seq[ast.Pattern], 0)
-	for _, pr := range flattenKVPairs(argAt(args, 1)) {
+	pairs := flattenKVPairs(argAt(args, 1))
+	out := make(ast.Seq[ast.Pattern], 0, len(pairs))
+	for _, pr := range pairs {
 		if pat := patternOf(pr[1]); pat != nil {
 			out = append(out, pat)
 		}

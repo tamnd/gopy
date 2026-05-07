@@ -2035,7 +2035,7 @@ func parseRule_global_stmt(p *Parser) any {
 			a := parseRule__gather_13(p)
 			if a == nil { return nil }
 			_ = a
-			return actionAstGlobal(p, actionPgenMapNamesToIds(p, p, a))
+			return actionAstGlobal(p, actionPgenMapNamesToIDs(p, p, a))
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_global_stmt, v)
 			return v
@@ -2061,7 +2061,7 @@ func parseRule_nonlocal_stmt(p *Parser) any {
 			a := parseRule__gather_13(p)
 			if a == nil { return nil }
 			_ = a
-			return actionAstNonlocal(p, actionPgenMapNamesToIds(p, p, a))
+			return actionAstNonlocal(p, actionPgenMapNamesToIDs(p, p, a))
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_nonlocal_stmt, v)
 			return v
@@ -5857,7 +5857,7 @@ func parseRule_class_pattern(p *Parser) any {
 			op_1 := p.ExpectToken(token.RPAR)
 			if op_1 == nil { return nil }
 			_ = op_1
-			return actionAstMatchClass(p, cls, nil, actionPgenMapNamesToIds(p, p, actionPgenGetPatternKeys(p, p, keywords)), actionPgenGetPatterns(p, p, keywords))
+			return actionAstMatchClass(p, cls, nil, actionPgenMapNamesToIDs(p, p, actionPgenGetPatternKeys(p, p, keywords)), actionPgenGetPatterns(p, p, keywords))
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_class_pattern, v)
 			return v
@@ -5887,7 +5887,7 @@ func parseRule_class_pattern(p *Parser) any {
 			op_2 := p.ExpectToken(token.RPAR)
 			if op_2 == nil { return nil }
 			_ = op_2
-			return actionAstMatchClass(p, cls, patterns, actionPgenMapNamesToIds(p, p, actionPgenGetPatternKeys(p, p, keywords)), actionPgenGetPatterns(p, p, keywords))
+			return actionAstMatchClass(p, cls, patterns, actionPgenMapNamesToIDs(p, p, actionPgenGetPatternKeys(p, p, keywords)), actionPgenGetPatterns(p, p, keywords))
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_class_pattern, v)
 			return v
