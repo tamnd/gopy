@@ -11,6 +11,30 @@ folder; this file is the aggregated index.
 
 ## Unreleased
 
+## v0.10.2 - 2026-05-07
+
+See [`changelog/v0.10.2.md`](changelog/v0.10.2.md).
+
+* feat(parser/lexer): port the `goto nextline` flow from
+  `Parser/lexer/lexer.c`. Blank and comment-only lines, plus
+  newlines inside parens, no longer leak NEWLINE tokens to the
+  parser; under tokenize-module mode they emit NL / COMMENT.
+* feat(parser): surface pinned `SyntaxError` from `runParse`
+  instead of masking it as `ErrParserNotImplemented`.
+* feat(parser/pegen): fall back to `*math/big.Int` on integer
+  literals that overflow `int64` so e.g.
+  `0xffffffffffffffff` parses.
+* feat(parser/pegen): bridge the alt-success / action-result split
+  via the `matchedOr` helper. Single-binding alts that bind a rule
+  whose body returned `nil` no longer unwind the consumed tokens
+  (fixes shapes like `class B2():`).
+* feat(tools/parser_gen): emit `matchedOr(...)` wrappers around
+  default-action and bare-bound-name returns; regenerated
+  `parser_gen.go` carries 306 call sites.
+* test(parser): full `Lib/test/test_grammar.py` parses end to end
+  (`TestParseTestGrammar`). Corpus iteration over `$CPYTHON/Lib`
+  reaches 78.2% typed (563/720), up from 10/720 in v0.10.1.
+
 ## v0.10.1 - 2026-05-07
 
 See [`changelog/v0.10.1.md`](changelog/v0.10.1.md).
