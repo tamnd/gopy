@@ -145,5 +145,5 @@ print(ast.dump(ast.parse(src)))
 	if err := cmd.Run(); err != nil {
 		return "", errors.New(strings.TrimSpace(errb.String()))
 	}
-	return strings.TrimRight(out.String(), "\n"), nil
+	return strings.TrimRight(out.String(), "\r\n"), nil
 }
