@@ -675,16 +675,22 @@ func (e *emitter) callGroup(x *Group) callSpec {
 }
 
 func (e *emitter) callForced(x *Forced) callSpec {
+	// Forced markers (`&&token`) are guards: the action body never
+	// references their value. Emit with empty varName so writeAltItems
+	// drops the binding and prevents collisions when a user-named item
+	// in the same alt happens to be called `f` (e.g. try_stmt's
+	// `f=finally_block` — the forced colon used to grab "f" first and
+	// shadow the real binding).
 	if sl, ok := x.Node.(*StringLeaf); ok {
 		s, soft := unquoteLeaf(sl.Value)
 		if !soft {
 			if tok, okt := exactTokenTypes[s]; okt {
-				return callSpec{varName: "f", expr: "p.ExpectForced(token." + tok + ", " + strconv.Quote(s) + ")", shape: shapeBlocking}
+				return callSpec{expr: "p.ExpectForced(token." + tok + ", " + strconv.Quote(s) + ")", shape: shapeBlocking}
 			}
 		}
 	}
 	inner := e.callItemRaw(x.Node)
-	return callSpec{varName: "f", expr: inner.expr, shape: shapeBlocking}
+	return callSpec{expr: inner.expr, shape: shapeBlocking}
 }
 
 func (e *emitter) lookaheadCall(node Item, positive bool) callSpec {
