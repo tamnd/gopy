@@ -53,6 +53,13 @@ func forceInstrument(code *objects.Code, interp *InterpState) error {
 	if data.Tools == nil {
 		data.Tools = make([]uint8, instructionCount(code))
 	}
+	if active.Tools[EventLine] != 0 {
+		ensureLines(code, data)
+		if multipleTools(active.Tools[EventLine]) && data.LineTools == nil {
+			data.LineTools = make([]uint8, instructionCount(code))
+			initializeLineTools(code, data, &active)
+		}
+	}
 
 	for instr := 0; instr < len(data.Tools); {
 		op := compile.Opcode(byteAt(code.Code, instr))
@@ -62,7 +69,7 @@ func forceInstrument(code *objects.Code, interp *InterpState) error {
 			continue
 		}
 		ev := EventForOpcode(base)
-		if int(ev) < LocalEvents {
+		if int(ev) < LocalEvents && ev != EventLine {
 			if removed := removedEvents.Tools[ev]; removed != 0 {
 				removeTools(code, data, instr, ev, removed)
 			}
@@ -73,8 +80,33 @@ func forceInstrument(code *objects.Code, interp *InterpState) error {
 		instr += 1 + cacheCount(base, code)
 	}
 
+	if removed := removedEvents.Tools[EventLine]; removed != 0 && data.Lines != nil {
+		for instr := 0; instr < instructionCount(code); instr++ {
+			if getOriginalOpcode(data.Lines, instr) != 0 {
+				removeLineTools(code, data, instr, removed)
+			}
+		}
+	}
+	if added := newEvents.Tools[EventLine]; added != 0 && data.Lines != nil {
+		for instr := 0; instr < instructionCount(code); instr++ {
+			if getOriginalOpcode(data.Lines, instr) != 0 {
+				addLineTools(code, data, instr, added)
+			}
+		}
+	}
+
 	code.MonitoringVersion = interp.GlobalVersion()
 	return nil
+}
+
+// multipleTools reports whether more than one bit is set in mask.
+// CPython allocates per-codeunit line/tool tables only when several
+// tools observe the same code; a single tool can be encoded in the
+// active_monitors mask alone.
+//
+// CPython: Python/instrumentation.c:1693 multiple_tools
+func multipleTools(mask uint8) bool {
+	return mask != 0 && (mask&(mask-1)) != 0
 }
 
 // instructionCount returns the number of codeunits in code's

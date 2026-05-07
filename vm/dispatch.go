@@ -29,7 +29,16 @@ import (
 func (e *evalState) dispatch(op compile.Opcode, oparg uint32) (next int, retVal objects.Object, retErr error, retDone bool, err error) {
 	// Fire any registered PEP 669 callbacks subscribed to this
 	// (event, offset) pair, then strip the INSTRUMENTED_ prefix so
-	// the base body runs.
+	// the base body runs. INSTRUMENTED_LINE is handled separately:
+	// the original opcode is hidden in CoMonitoringData.Lines, not
+	// recoverable through the deinstrument table.
+	if op == compile.INSTRUMENTED_LINE {
+		newOp, err := e.handleInstrumentedLine()
+		if err != nil {
+			return 0, nil, nil, false, err
+		}
+		op = newOp
+	}
 	if err := e.fireInstrumented(op, oparg); err != nil {
 		return 0, nil, nil, false, err
 	}

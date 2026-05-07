@@ -23,6 +23,11 @@ func (e *evalState) fireInstrumented(op compile.Opcode, oparg uint32) error {
 	if !monitor.IsInstrumented(op) {
 		return nil
 	}
+	if op == compile.INSTRUMENTED_LINE {
+		// Line marker is handled by handleInstrumentedLine, which
+		// also recovers the original opcode for the rest of dispatch.
+		return nil
+	}
 	co := e.f.Code
 	data := monitor.CoMonitoring(co)
 	if data == nil || data.Tools == nil {
@@ -55,6 +60,31 @@ func (e *evalState) fireInstrumented(op compile.Opcode, oparg uint32) error {
 	// the cleared tools again.
 	data.Tools[instr] = state.Active
 	return nil
+}
+
+// handleInstrumentedLine resolves an INSTRUMENTED_LINE marker at the
+// current instr pointer: it fires LINE for any subscribed tool and
+// returns the underlying opcode the dispatcher should run instead of
+// the marker. Returns NOP when the offset is not actually marked or
+// when no monitoring data is present.
+//
+// CPython: Python/instrumentation.c:1297 _Py_call_instrumentation_line
+func (e *evalState) handleInstrumentedLine() (compile.Opcode, error) {
+	co := e.f.Code
+	interp := e.ts.Interp().Monitors
+	instr := e.f.InstrPtr / 2
+	prev := -1
+	if e.f.PrevInstr >= 0 && e.f.PrevInstr < len(co.Code) {
+		prev = e.f.PrevInstr / 2
+	}
+	disp, err := monitor.CallInstrumentationLine(interp, co, instr, prev)
+	if err != nil {
+		return compile.NOP, err
+	}
+	if disp.OriginalOpcode == 0 {
+		return compile.NOP, nil
+	}
+	return disp.OriginalOpcode, nil
 }
 
 // fireForEvent dispatches to the matching FireXxx entry point in the
