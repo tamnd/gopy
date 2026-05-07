@@ -15,7 +15,9 @@ import (
 
 // makeReadFile writes contents to a tempfile and returns it opened
 // for reading via NewFile. binary toggles between bytes and str
-// surfaces.
+// surfaces. The cleanup hook closes the file before t.TempDir's own
+// cleanup tries to remove it: Windows refuses to unlink a still-open
+// handle.
 func makeReadFile(t *testing.T, binary bool, contents string) *File {
 	t.Helper()
 	dir := t.TempDir()
@@ -31,10 +33,14 @@ func makeReadFile(t *testing.T, binary bool, contents string) *File {
 	if err != nil {
 		t.Fatalf("os.Open: %v", err)
 	}
-	return NewFile(f, path, mode, binary, true, false)
+	fi := NewFile(f, path, mode, binary, true, false)
+	t.Cleanup(func() { _ = fi.Close() })
+	return fi
 }
 
-// makeWriteFile opens a fresh tempfile for writing.
+// makeWriteFile opens a fresh tempfile for writing. The cleanup hook
+// closes the file ahead of t.TempDir's removal so Windows can unlink
+// the underlying path.
 func makeWriteFile(t *testing.T, binary bool) (*File, string) {
 	t.Helper()
 	dir := t.TempDir()
@@ -47,7 +53,9 @@ func makeWriteFile(t *testing.T, binary bool) (*File, string) {
 	if err != nil {
 		t.Fatalf("os.OpenFile: %v", err)
 	}
-	return NewFile(f, path, mode, binary, false, true), path
+	fi := NewFile(f, path, mode, binary, false, true)
+	t.Cleanup(func() { _ = fi.Close() })
+	return fi, path
 }
 
 func TestFileReadAllText(t *testing.T) {
