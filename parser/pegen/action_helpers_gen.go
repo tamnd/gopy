@@ -1946,10 +1946,40 @@ func actionPgenSlashWithDefault(p *Parser, args ...any) any {
 	return out
 }
 
+// actionPgenSetupFullFormatSpec wraps a format-spec body (from
+// `:spec*` in fstring_full_format_spec) into the expression that
+// FormattedValue.format_spec carries. CPython filters out empty
+// Constant nodes and either returns a JoinedStr or concatenates the
+// surviving parts; the result is then wrapped in a ResultTokenWithMetadata.
+// We return the bare expression since the FormatSpec slot reads an Expr.
+//
+// CPython: Parser/action_helpers.c:990 _PyPegen_setup_full_format_spec
 func actionPgenSetupFullFormatSpec(p *Parser, args ...any) any {
 	_ = p
-	_ = args
-	return placeholderMatched
+	spec := joinedStrValues(argAt(args, 2))
+	filtered := make([]ast.Expr, 0, len(spec))
+	for _, item := range spec {
+		if c, ok := item.(*ast.Constant); ok {
+			if s, isStr := c.Value.(string); isStr && s == "" {
+				continue
+			}
+		}
+		filtered = append(filtered, item)
+	}
+	n := len(filtered)
+	if n == 0 {
+		return &ast.JoinedStr{Values: filtered, Pos: ast.NoPos}
+	}
+	if n == 1 {
+		if _, ok := filtered[0].(*ast.Constant); ok {
+			return &ast.JoinedStr{Values: filtered, Pos: ast.NoPos}
+		}
+	}
+	concat := ConcatenateStrings(p, filtered)
+	if concat == nil {
+		return &ast.JoinedStr{Values: filtered, Pos: ast.NoPos}
+	}
+	return concat
 }
 
 // actionPgenJoinedStr ports `_PyPegen_joined_str`. Args:
@@ -2373,6 +2403,7 @@ func actionAstMatchCase(p *Parser, args ...any) any {
 // actionAstTryStar builds TryStar. Args: (body, handlers, orelse, finalbody).
 //
 // CPython: Parser/Python.asdl TryStar(stmt* body, excepthandler* handlers,
+//
 //	stmt* orelse, stmt* finalbody)
 func actionAstTryStar(p *Parser, args ...any) any {
 	_ = p
