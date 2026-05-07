@@ -59,7 +59,7 @@ func (c *Compiler) visitClassDef(s *ast.ClassDef) error {
 	if err := c.emitInnerClassCode(innerScope, s); err != nil {
 		return err
 	}
-	c.addOpI(MAKE_FUNCTION, closureFlag, loc(s))
+	c.emitMakeFunction(closureFlag, loc(s))
 
 	// 4. Class name as a constant. CPython passes this as the second
 	// positional arg of __build_class__.
@@ -112,6 +112,15 @@ func (c *Compiler) emitInnerClassCode(innerScope *symtable.Entry, s *ast.ClassDe
 	c.enterScope(innerScope)
 	c.addOpI(RESUME, 0, loc(s))
 
+	// MAKE_CELL for __class__ when an inner method referenced super or
+	// __class__ directly. The cell stays unbound until __build_class__
+	// patches it with the freshly built class object.
+	if innerScope.NeedsClassClosure {
+		cellPool := poolCellVars
+		idx := c.poolIndex(&cellPool, "__class__")
+		c.addOpI(MAKE_CELL, int32(idx), loc(s))
+	}
+
 	// __name__ -> __module__: the class body sees the enclosing
 	// module's __name__ via the surrounding namespace (LOAD_NAME) and
 	// stores it as the class's __module__ attribute.
@@ -130,10 +139,23 @@ func (c *Compiler) emitInnerClassCode(innerScope *symtable.Entry, s *ast.ClassDe
 		return err
 	}
 
-	// Implicit return None. The full __classcell__ panel (CPython
-	// returns the cell when methods reference __class__) lands
-	// alongside the super() support.
-	c.addReturnNoneIfMissing(loc(s))
+	// Return __classcell__ when the class needs the implicit cell so
+	// __build_class__ can fill it with the new class object. Otherwise
+	// fall through to LOAD_CONST None / RETURN_VALUE.
+	if innerScope.NeedsClassClosure {
+		// LOAD_CLOSURE is the conceptual op (push the cell itself); the
+		// gopy assembler models it as LOAD_FAST against the cellvars
+		// pool, matching how emitClosure threads cells into a child
+		// function's MAKE_FUNCTION.
+		cellPool := poolCellVars
+		c.addOpName(LOAD_FAST, &cellPool, "__class__", loc(s))
+		c.addOpI(COPY, 1, loc(s))
+		namePool := poolNames
+		c.addOpName(STORE_NAME, &namePool, "__classcell__", loc(s))
+		c.addOp(RETURN_VALUE, loc(s))
+	} else {
+		c.addReturnNoneIfMissing(loc(s))
+	}
 
 	innerUnit := c.unit()
 	innerUnit.Name = s.Name

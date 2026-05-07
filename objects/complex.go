@@ -1,0 +1,240 @@
+// The Complex type, a Python complex number. CPython stores the real
+// and imaginary parts as two C doubles; gopy uses Go's complex128 so
+// the math/cmplx routines do most of the heavy lifting.
+//
+// CPython: Objects/complexobject.c:1075 PyComplex_Type
+
+package objects
+
+import (
+	"errors"
+	"math"
+	"math/cmplx"
+	"strings"
+)
+
+// Complex is the Python complex number.
+//
+// CPython: Include/cpython/complexobject.h:7 PyComplexObject
+type Complex struct {
+	Header
+	v complex128
+}
+
+// ComplexType is the type singleton for complex.
+//
+// CPython: Objects/complexobject.c:1075 PyComplex_Type
+var ComplexType = NewType("complex", []*Type{objectType})
+
+func init() {
+	ComplexType.Repr = complexRepr
+	ComplexType.Str = complexRepr
+	ComplexType.Hash = complexHash
+	ComplexType.RichCmp = complexRichCmp
+	ComplexType.Number = &NumberMethods{
+		Add:        complexAdd,
+		Subtract:   complexSub,
+		Multiply:   complexMul,
+		TrueDivide: complexTrueDiv,
+		Power:      complexPower,
+		Negative:   complexNeg,
+		Positive:   func(o Object) (Object, error) { return o, nil },
+		Absolute:   complexAbs,
+		Bool:       complexBool,
+	}
+}
+
+// NewComplex builds a complex from real and imaginary parts.
+//
+// CPython: Objects/complexobject.c:138 PyComplex_FromDoubles
+func NewComplex(re, im float64) *Complex {
+	o := &Complex{v: complex(re, im)}
+	o.init(ComplexType)
+	return o
+}
+
+// Complex128 returns the underlying value.
+func (c *Complex) Complex128() complex128 {
+	return c.v
+}
+
+// Real returns the real component.
+func (c *Complex) Real() float64 { return real(c.v) }
+
+// Imag returns the imaginary component.
+func (c *Complex) Imag() float64 { return imag(c.v) }
+
+// complexRepr formats as "(re+imj)" / "(re-imj)" / "imj" depending on
+// the real and imaginary parts, matching complex_repr. CPython does
+// not pass Py_DTSF_ADD_DOT_0 here, so integral parts come out without
+// the trailing ".0".
+//
+// CPython: Objects/complexobject.c:362 complex_repr
+func complexRepr(o Object) (string, error) {
+	v := o.(*Complex).v
+	re, im := real(v), imag(v)
+	if re == 0 && !math.Signbit(re) {
+		return complexFormatPart(im) + "j", nil
+	}
+	sign := "+"
+	if math.Signbit(im) {
+		sign = ""
+	}
+	return "(" + complexFormatPart(re) + sign + complexFormatPart(im) + "j)", nil
+}
+
+// complexFormatPart is formatFloatShort without the Py_DTSF_ADD_DOT_0
+// flag: drops the trailing ".0" that complex_repr leaves out for
+// integral real/imag parts.
+//
+// CPython: Python/pystrtod.c:1265 PyOS_double_to_string ('r' mode, no flag)
+func complexFormatPart(v float64) string {
+	s := formatFloatShort(v)
+	if strings.HasSuffix(s, ".0") {
+		return s[:len(s)-2]
+	}
+	return s
+}
+
+// complexHash xors the real and imag hashes after multiplying the
+// imaginary part by a fixed multiplier, matching CPython.
+//
+// CPython: Objects/complexobject.c:467 complex_hash
+func complexHash(o Object) (int64, error) {
+	v := o.(*Complex).v
+	rh, err := floatHash(NewFloat(real(v)))
+	if err != nil {
+		return 0, err
+	}
+	ih, err := floatHash(NewFloat(imag(v)))
+	if err != nil {
+		return 0, err
+	}
+	const mult = 1000003
+	h := rh ^ (ih * mult)
+	if h == -1 {
+		h = -2
+	}
+	return h, nil
+}
+
+// complexRichCmp implements complex equality. Ordering operators
+// raise TypeError to match CPython.
+//
+// CPython: Objects/complexobject.c:642 complex_richcompare
+func complexRichCmp(a, b Object, op CompareOp) (Object, error) {
+	av, ok := asComplex(a)
+	if !ok {
+		return notImplemented(), nil
+	}
+	bv, ok := asComplex(b)
+	if !ok {
+		return notImplemented(), nil
+	}
+	switch op {
+	case CompareEQ:
+		return NewBool(av == bv), nil
+	case CompareNE:
+		return NewBool(av != bv), nil
+	}
+	return nil, errors.New("TypeError: no ordering relation is defined for complex numbers")
+}
+
+// asComplex coerces an int / float / complex operand to complex128.
+//
+// CPython: Objects/complexobject.c:281 to_complex
+func asComplex(o Object) (complex128, bool) {
+	switch x := o.(type) {
+	case *Complex:
+		return x.v, true
+	case *Float:
+		return complex(x.v, 0), true
+	case *Int:
+		return complex(intToFloat(x), 0), true
+	}
+	return 0, false
+}
+
+func complexPair(a, b Object) (av, bv complex128, ok bool) {
+	av, aok := asComplex(a)
+	bv, bok := asComplex(b)
+	if !aok || !bok {
+		return 0, 0, false
+	}
+	return av, bv, true
+}
+
+func complexAdd(a, b Object) (Object, error) {
+	av, bv, ok := complexPair(a, b)
+	if !ok {
+		return notImplemented(), nil
+	}
+	v := av + bv
+	return NewComplex(real(v), imag(v)), nil
+}
+
+func complexSub(a, b Object) (Object, error) {
+	av, bv, ok := complexPair(a, b)
+	if !ok {
+		return notImplemented(), nil
+	}
+	v := av - bv
+	return NewComplex(real(v), imag(v)), nil
+}
+
+func complexMul(a, b Object) (Object, error) {
+	av, bv, ok := complexPair(a, b)
+	if !ok {
+		return notImplemented(), nil
+	}
+	v := av * bv
+	return NewComplex(real(v), imag(v)), nil
+}
+
+// complexTrueDiv mirrors complex_div; division by zero raises
+// ZeroDivisionError rather than producing inf+inf*j.
+//
+// CPython: Objects/complexobject.c:843 complex_div
+func complexTrueDiv(a, b Object) (Object, error) {
+	av, bv, ok := complexPair(a, b)
+	if !ok {
+		return notImplemented(), nil
+	}
+	if bv == 0 {
+		return nil, errors.New("ZeroDivisionError: complex division by zero")
+	}
+	v := av / bv
+	return NewComplex(real(v), imag(v)), nil
+}
+
+// complexPower implements `pow(a, b)`. The third modulus argument is
+// rejected with TypeError, matching CPython.
+//
+// CPython: Objects/complexobject.c:884 complex_pow
+func complexPower(a, b, mod Object) (Object, error) {
+	if mod != nil && mod != None() {
+		return nil, errors.New("TypeError: complex modulo")
+	}
+	av, bv, ok := complexPair(a, b)
+	if !ok {
+		return notImplemented(), nil
+	}
+	v := cmplx.Pow(av, bv)
+	return NewComplex(real(v), imag(v)), nil
+}
+
+func complexNeg(o Object) (Object, error) {
+	v := -o.(*Complex).v
+	return NewComplex(real(v), imag(v)), nil
+}
+
+// complexAbs returns the magnitude as a float, matching CPython.
+//
+// CPython: Objects/complexobject.c:798 complex_abs
+func complexAbs(o Object) (Object, error) {
+	return NewFloat(cmplx.Abs(o.(*Complex).v)), nil
+}
+
+func complexBool(o Object) (bool, error) {
+	return o.(*Complex).v != 0, nil
+}

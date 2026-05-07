@@ -24,26 +24,73 @@ import (
 // queue from being observed half-drained by a second collector pass.
 //
 // Resurrection: a finalizer is allowed to take a new reference to
-// the object. CPython detects this by re-walking the list after
-// finalization runs and pulling resurrected objects out of the
-// reclaim path. gopy relies on Go's own GC to keep resurrected
-// objects alive: any new reference taken by user code roots the
-// object normally, and the next gc.Collect cycle will re-evaluate it.
+// the object. handleResurrected re-walks the post-finalize list to
+// pull resurrected objects out of the reclaim path; see that helper
+// for the matching CPython logic.
 //
 // CPython: Python/gc.c:1067 finalize_garbage
-func finalizeGarbage(unreachable *gcHead, finalizers map[objects.Object]Finalizer) {
+func finalizeGarbage(unreachable *gcHead, finalizers map[objects.Object]Finalizer, finalized map[objects.Object]struct{}) {
 	for g := unreachable.next; g != unreachable; g = g.next {
 		if g.flags&gcFinalized != 0 {
 			continue
 		}
 		g.flags |= gcFinalized
-		fn, ok := finalizers[g.obj]
-		if !ok {
+		if finalized != nil {
+			finalized[g.obj] = struct{}{}
+		}
+		if fn, ok := finalizers[g.obj]; ok {
+			delete(finalizers, g.obj)
+			fn(g.obj)
 			continue
 		}
-		delete(finalizers, g.obj)
-		fn(g.obj)
+		if slot := typeFinalize(g.obj); slot != nil {
+			slot(g.obj)
+		}
 	}
+}
+
+// typeFinalize returns the tp_finalize slot for o's type, or nil if
+// the type has none. The collector falls back to this when no
+// explicit Finalizer was registered, so user classes with __del__
+// (and built-in types that opt in) participate in cycle finalization.
+//
+// CPython: Objects/object.c:489 PyObject_CallFinalizer (tp_finalize lookup)
+func typeFinalize(o objects.Object) func(objects.Object) {
+	if o == nil {
+		return nil
+	}
+	if t := o.Type(); t != nil && t.Finalize != nil {
+		return t.Finalize
+	}
+	return nil
+}
+
+// handleResurrected re-runs deduce_unreachable on the post-finalize
+// list. Finalizers may have taken a new reference (via objects.Incref
+// from user code, or by stashing the object on a still-tracked
+// container); those objects need to come back out of the reclaim path.
+//
+// On entry, every node on `unreachable` carries gcCollecting and
+// gcUnreachable. Both flags are stripped so updateRefs / subtractRefs /
+// moveUnreachable can re-evaluate the set: updateRefs reseeds refs
+// from the live refcount, subtractRefs walks tp_traverse, and
+// moveUnreachable splits survivors (resurrected) from the still-dead.
+//
+// On exit, `unreachable` holds the resurrected nodes (caller merges
+// them back into a generation) and `stillUnreachable` holds the truly
+// dead nodes the caller will reclaim.
+//
+// CPython: Python/gc.c:1261 handle_resurrected_objects
+func handleResurrected(unreachable, stillUnreachable *gcHead, tracked map[objects.Object]*gcHead) error {
+	for g := unreachable.next; g != unreachable; g = g.next {
+		g.flags &^= gcUnreachable
+		g.flags &^= gcCollecting
+	}
+	updateRefs(unreachable)
+	if err := subtractRefs(unreachable, tracked); err != nil {
+		return err
+	}
+	return moveUnreachable(unreachable, stillUnreachable, tracked)
 }
 
 // reclaimUnreachable drops every entry on unreachable from the
@@ -54,10 +101,13 @@ func finalizeGarbage(unreachable *gcHead, finalizers map[objects.Object]Finalize
 // reclaims unreachable cycles on its own schedule.
 //
 // CPython: Python/gc.c:1198 delete_garbage
-func reclaimUnreachable(unreachable *gcHead, tracked map[objects.Object]*gcHead) {
+func reclaimUnreachable(unreachable *gcHead, tracked map[objects.Object]*gcHead, finalized map[objects.Object]struct{}) {
 	for unreachable.next != unreachable {
 		g := unreachable.next
 		listRemove(g)
 		delete(tracked, g.obj)
+		if finalized != nil {
+			delete(finalized, g.obj)
+		}
 	}
 }

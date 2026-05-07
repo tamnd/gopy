@@ -40,12 +40,32 @@ func RegisterWeakref(w *objects.Weakref) {
 	state.mu.Unlock()
 }
 
-// pendingCallback pairs a weakref with its registered callback so the
-// caller can invoke callback(weakref) after the collector lock is
-// released. CPython delivers the weakref as the callback's sole
-// argument (see _PyWeakref_ClearRef + handle_weakrefs).
+// RegisterWeakProxy records p against its referent. The collector
+// clears the proxy and queues its callback exactly the way it does
+// for ref-style weakrefs.
+//
+// CPython: Objects/weakrefobject.c:925 PyWeakref_NewProxy registers
+// via the same tp_weaklistoffset slot used by PyWeakref_NewRef.
+func RegisterWeakProxy(p *objects.WeakProxy) {
+	if p == nil {
+		return
+	}
+	target := p.Referent()
+	if target == nil {
+		return
+	}
+	state.mu.Lock()
+	state.weakProxies[target] = append(state.weakProxies[target], p)
+	state.mu.Unlock()
+}
+
+// pendingCallback pairs a weakref or proxy with its registered
+// callback so the caller can invoke callback(weakref) after the
+// collector lock is released. CPython delivers the weakref as the
+// callback's sole argument (see _PyWeakref_ClearRef +
+// handle_weakrefs); the proxy variants share the path.
 type pendingCallback struct {
-	weakref  *objects.Weakref
+	weakref  objects.Object
 	callback objects.Object
 }
 
@@ -54,18 +74,25 @@ type pendingCallback struct {
 // caller, which invokes them after dropping state.mu.
 //
 // CPython: Python/gc.c:879 handle_weakrefs
-func handleWeakrefs(unreachable *gcHead, weakrefs map[objects.Object][]*objects.Weakref) []pendingCallback {
+func handleWeakrefs(unreachable *gcHead, weakrefs map[objects.Object][]*objects.Weakref, proxies map[objects.Object][]*objects.WeakProxy) []pendingCallback {
 	var pending []pendingCallback
 	for g := unreachable.next; g != unreachable; g = g.next {
-		wrs, ok := weakrefs[g.obj]
-		if !ok {
-			continue
+		if wrs, ok := weakrefs[g.obj]; ok {
+			delete(weakrefs, g.obj)
+			for _, w := range wrs {
+				cb := w.Clear()
+				if cb != nil && cb != objects.None() {
+					pending = append(pending, pendingCallback{weakref: w, callback: cb})
+				}
+			}
 		}
-		delete(weakrefs, g.obj)
-		for _, w := range wrs {
-			cb := w.Clear()
-			if cb != nil && cb != objects.None() {
-				pending = append(pending, pendingCallback{weakref: w, callback: cb})
+		if prs, ok := proxies[g.obj]; ok {
+			delete(proxies, g.obj)
+			for _, p := range prs {
+				cb := p.Clear()
+				if cb != nil && cb != objects.None() {
+					pending = append(pending, pendingCallback{weakref: p, callback: cb})
+				}
 			}
 		}
 	}

@@ -120,8 +120,9 @@ func TestFunctionParamUsesLoadFast(t *testing.T) {
 }
 
 // TestFunctionDefaultEmitsBuildTuple verifies positional defaults are
-// evaluated in the outer scope, packed via BUILD_TUPLE, and that the
-// MAKE_FUNCTION oparg is 0x01.
+// evaluated in the outer scope, packed via BUILD_TUPLE, and that
+// SET_FUNCTION_ATTRIBUTE 0x01 stamps them onto the function after
+// MAKE_FUNCTION.
 func TestFunctionDefaultEmitsBuildTuple(t *testing.T) {
 	fn := &ast.FunctionDef{
 		Name: "f",
@@ -133,10 +134,11 @@ func TestFunctionDefaultEmitsBuildTuple(t *testing.T) {
 	}
 	u := compileMod(t, module(fn))
 	want := []string{
-		"LOAD_CONST",    // default 7
-		"BUILD_TUPLE",   // pack (7,)
-		"LOAD_CONST",    // inner code
-		"MAKE_FUNCTION", // flags=0x01
+		"LOAD_CONST",             // default 7
+		"BUILD_TUPLE",            // pack (7,)
+		"LOAD_CONST",             // inner code
+		"MAKE_FUNCTION",          // wrap code (no oparg)
+		"SET_FUNCTION_ATTRIBUTE", // attach defaults via 0x01
 		"STORE_NAME",
 		"LOAD_CONST",
 		"RETURN_VALUE",
@@ -144,18 +146,18 @@ func TestFunctionDefaultEmitsBuildTuple(t *testing.T) {
 	if got := opNames(u); !equalStrings(got, want) {
 		t.Fatalf("ops = %v, want %v", got, want)
 	}
-	// The MAKE_FUNCTION instr is at index 3.
-	mf := u.Seq.Instrs[3]
-	if mf.Op != MAKE_FUNCTION {
-		t.Fatalf("expected MAKE_FUNCTION at index 3, got %v", mf.Op)
+	sfa := u.Seq.Instrs[4]
+	if sfa.Op != SET_FUNCTION_ATTRIBUTE {
+		t.Fatalf("expected SET_FUNCTION_ATTRIBUTE at index 4, got %v", sfa.Op)
 	}
-	if mf.Oparg != 0x01 {
-		t.Errorf("MAKE_FUNCTION oparg = %#x, want 0x01", mf.Oparg)
+	if sfa.Oparg != 0x01 {
+		t.Errorf("SET_FUNCTION_ATTRIBUTE oparg = %#x, want 0x01", sfa.Oparg)
 	}
 }
 
 // TestKwonlyDefaultEmitsBuildMap verifies keyword-only defaults are
-// emitted as a BUILD_MAP, and that MAKE_FUNCTION has the 0x02 bit.
+// emitted as a BUILD_MAP and stamped onto the function via
+// SET_FUNCTION_ATTRIBUTE 0x02.
 func TestKwonlyDefaultEmitsBuildMap(t *testing.T) {
 	fn := &ast.FunctionDef{
 		Name: "f",
@@ -167,11 +169,12 @@ func TestKwonlyDefaultEmitsBuildMap(t *testing.T) {
 	}
 	u := compileMod(t, module(fn))
 	want := []string{
-		"LOAD_CONST",    // "y" name
-		"LOAD_CONST",    // 9
-		"BUILD_MAP",     // {"y": 9}
-		"LOAD_CONST",    // inner code
-		"MAKE_FUNCTION", // flags=0x02
+		"LOAD_CONST",             // "y" name
+		"LOAD_CONST",             // 9
+		"BUILD_MAP",              // {"y": 9}
+		"LOAD_CONST",             // inner code
+		"MAKE_FUNCTION",          // wrap code
+		"SET_FUNCTION_ATTRIBUTE", // attach kwdefaults via 0x02
 		"STORE_NAME",
 		"LOAD_CONST",
 		"RETURN_VALUE",
@@ -179,9 +182,12 @@ func TestKwonlyDefaultEmitsBuildMap(t *testing.T) {
 	if got := opNames(u); !equalStrings(got, want) {
 		t.Fatalf("ops = %v, want %v", got, want)
 	}
-	mf := u.Seq.Instrs[4]
-	if mf.Oparg != 0x02 {
-		t.Errorf("MAKE_FUNCTION oparg = %#x, want 0x02", mf.Oparg)
+	sfa := u.Seq.Instrs[5]
+	if sfa.Op != SET_FUNCTION_ATTRIBUTE {
+		t.Fatalf("expected SET_FUNCTION_ATTRIBUTE at index 5, got %v", sfa.Op)
+	}
+	if sfa.Oparg != 0x02 {
+		t.Errorf("SET_FUNCTION_ATTRIBUTE oparg = %#x, want 0x02", sfa.Oparg)
 	}
 }
 
@@ -248,7 +254,8 @@ func TestLambdaEmitsInnerCodeAndMakeFunction(t *testing.T) {
 // TestNestedFunctionClosureEmitsLoadFast covers the closure path:
 // `def outer(x):\n  def inner():\n    return x` should leave the
 // outer's `x` as a cell, and emit LOAD_FAST x / BUILD_TUPLE 1 in
-// outer before MAKE_FUNCTION with the 0x08 closure flag.
+// outer before MAKE_FUNCTION, with SET_FUNCTION_ATTRIBUTE 0x08
+// stamping the closure tuple onto the new function.
 func TestNestedFunctionClosureEmitsLoadFast(t *testing.T) {
 	inner := &ast.FunctionDef{
 		Name: "inner",
@@ -265,21 +272,22 @@ func TestNestedFunctionClosureEmitsLoadFast(t *testing.T) {
 	outerUnit := findInnerUnit(t, u)
 	got := opNames(outerUnit)
 	// Look for the LOAD_FAST + BUILD_TUPLE + LOAD_CONST + MAKE_FUNCTION
-	// sequence inside outer.
+	// + SET_FUNCTION_ATTRIBUTE sequence inside outer.
 	found := false
-	for i := 0; i+3 < len(got); i++ {
+	for i := 0; i+4 < len(got); i++ {
 		if got[i] == "LOAD_FAST" && got[i+1] == "BUILD_TUPLE" &&
-			got[i+2] == "LOAD_CONST" && got[i+3] == "MAKE_FUNCTION" {
+			got[i+2] == "LOAD_CONST" && got[i+3] == "MAKE_FUNCTION" &&
+			got[i+4] == "SET_FUNCTION_ATTRIBUTE" {
 			found = true
-			if outerUnit.Seq.Instrs[i+3].Oparg&0x08 == 0 {
-				t.Errorf("MAKE_FUNCTION oparg = %#x, want closure bit 0x08",
-					outerUnit.Seq.Instrs[i+3].Oparg)
+			if outerUnit.Seq.Instrs[i+4].Oparg&0x08 == 0 {
+				t.Errorf("SET_FUNCTION_ATTRIBUTE oparg = %#x, want closure bit 0x08",
+					outerUnit.Seq.Instrs[i+4].Oparg)
 			}
 			break
 		}
 	}
 	if !found {
-		t.Errorf("expected closure tuple emit pattern in outer ops; got %v", got)
+		t.Errorf("expected closure attach pattern in outer ops; got %v", got)
 	}
 
 	// The innermost unit should LOAD_DEREF x (free var).

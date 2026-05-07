@@ -14,11 +14,23 @@ import (
 	"fmt"
 )
 
+// ErrGeneratorExit is the Go-level sentinel for PyExc_GeneratorExit.
+// close() throws this into the body; if the body yields a value
+// instead of swallowing it, the runtime raises RuntimeError per
+// CPython's "generator ignored GeneratorExit" check.
+//
+// CPython: Objects/exceptions.c PyExc_GeneratorExit
+var ErrGeneratorExit = errors.New("GeneratorExit")
+
+// ErrStopAsyncIteration mirrors PyExc_StopAsyncIteration. An async
+// generator returning normally surfaces this to its consumer.
+//
+// CPython: Objects/exceptions.c PyExc_StopAsyncIteration
+var ErrStopAsyncIteration = errors.New("StopAsyncIteration")
+
 // GenMsg is the channel message type for the generator yield/send protocol.
 // Exported so the vm package can use it without importing this struct
 // from a helper package.
-//
-// CPython: (no direct equivalent — CPython uses frame state + C stack)
 type GenMsg struct {
 	Val Object // yielded / sent value; nil when Err is set
 	Err error  // ErrStopIteration at normal end; other errors on throw()
@@ -34,11 +46,8 @@ type Generator struct {
 	Name string
 
 	// YieldCh carries values from the generator to the caller.
-	// The generator goroutine writes here at each YIELD_VALUE.
 	YieldCh chan GenMsg
 	// SendCh carries values from the caller into the generator.
-	// The caller writes here via Send(); the generator reads here
-	// after each YIELD_VALUE to get the next sent value.
 	SendCh chan GenMsg
 
 	started bool
@@ -95,10 +104,44 @@ func (g *Generator) Send(v Object) (Object, error) {
 	return msg.Val, nil
 }
 
-// Close terminates the generator by throwing GeneratorExit into it.
+// Throw raises err inside the generator at its current YIELD_VALUE
+// suspension point. If the generator catches it and yields, that
+// value is returned; if it propagates, Throw returns the error.
 //
-// CPython: Objects/genobject.c:L441 gen_close
+// CPython: Objects/genobject.c:L466 _gen_throw
+func (g *Generator) Throw(err error) (Object, error) {
+	if err == nil {
+		return nil, errors.New("TypeError: throw() requires an exception")
+	}
+	if g.closed {
+		return nil, err
+	}
+	if !g.started {
+		// Throwing into an unstarted generator: do not run the body,
+		// just propagate the exception. Mirrors gen_send_ex when the
+		// frame has not yet executed a YIELD.
+		g.closed = true
+		return nil, err
+	}
+	g.SendCh <- GenMsg{Err: err}
+	msg := <-g.YieldCh
+	if msg.Err != nil {
+		g.closed = true
+		return nil, msg.Err
+	}
+	return msg.Val, nil
+}
+
+// Close throws GeneratorExit into the generator. A body that yields
+// instead of swallowing the exit raises RuntimeError; StopIteration
+// and GeneratorExit are both treated as a clean exit.
+//
+// CPython: Objects/genobject.c:L388 gen_close
 func (g *Generator) Close() error {
+	return g.closeWith("generator ignored GeneratorExit")
+}
+
+func (g *Generator) closeWith(ignoredMsg string) error {
 	if g.closed {
 		return nil
 	}
@@ -106,10 +149,16 @@ func (g *Generator) Close() error {
 		g.closed = true
 		return nil
 	}
-	g.closed = true
-	g.SendCh <- GenMsg{Err: fmt.Errorf("GeneratorExit")}
+	g.SendCh <- GenMsg{Err: ErrGeneratorExit}
 	msg := <-g.YieldCh
-	if msg.Err != nil && errors.Is(msg.Err, ErrStopIteration) {
+	g.closed = true
+	if msg.Err == nil {
+		// Body yielded a value rather than letting GeneratorExit
+		// propagate. CPython calls this an error.
+		return fmt.Errorf("RuntimeError: %s", ignoredMsg)
+	}
+	if errors.Is(msg.Err, ErrGeneratorExit) ||
+		errors.Is(msg.Err, ErrStopIteration) {
 		return nil
 	}
 	return msg.Err

@@ -221,35 +221,150 @@ func (e *evalState) execGetYieldFromIter() (genResult, error) {
 	return genResult{next: e.advance(), ok: true}, nil
 }
 
-// execGetAwaitable ports GET_AWAITABLE: for now surfaces coroutines as
-// not yet implemented; awaitable protocol (1687) lands in v0.10.
+// execGetAwaitable ports GET_AWAITABLE: pops a value and pushes an
+// awaitable iterator. Coroutines act as their own iterator (CPython
+// returns the coroutine directly without the coro_wrapper indirection).
+// For everything else the type's __await__ slot is consulted.
 //
 // CPython: Python/bytecodes.c:1274 GET_AWAITABLE
+// CPython: Python/ceval.c:3640 _PyEval_GetAwaitable
+// CPython: Objects/genobject.c:1067 _PyCoro_GetAwaitableIter
 func (e *evalState) execGetAwaitable(_ uint32) (genResult, error) {
-	return genResult{ok: true}, fmt.Errorf("GET_AWAITABLE: coroutine/awaitable protocol not yet implemented (v0.9)")
+	iterable := e.popObject()
+	iter, err := getAwaitableIter(iterable)
+	if err != nil {
+		return genResult{ok: true}, err
+	}
+	e.pushObject(iter)
+	return genResult{next: e.advance(), ok: true}, nil
 }
 
-// execGetAiter ports GET_AITER: async iterator protocol pending.
+// execGetAiter ports GET_AITER: pops an iterable and pushes its async
+// iterator. Equivalent to value.__aiter__(). The result must itself
+// expose __anext__; otherwise the type doesn't satisfy the async-for
+// protocol.
 //
 // CPython: Python/bytecodes.c:1230 GET_AITER
 func (e *evalState) execGetAiter() (genResult, error) {
-	return genResult{ok: true}, fmt.Errorf("GET_AITER: async iterator protocol not yet implemented (v0.9)")
+	obj := e.popObject()
+	t := obj.Type()
+	if t.Async == nil || t.Async.Aiter == nil {
+		return genResult{ok: true}, fmt.Errorf(
+			"TypeError: 'async for' requires an object with __aiter__ method, got %s", t.Name)
+	}
+	iter, err := t.Async.Aiter(obj)
+	if err != nil {
+		return genResult{ok: true}, err
+	}
+	it := iter.Type()
+	if it.Async == nil || it.Async.Anext == nil {
+		return genResult{ok: true}, fmt.Errorf(
+			"TypeError: 'async for' received an object from __aiter__ that does not implement __anext__: %s",
+			it.Name)
+	}
+	e.pushObject(iter)
+	return genResult{next: e.advance(), ok: true}, nil
 }
 
-// execGetAnext ports GET_ANEXT: async iterator protocol pending.
+// execGetAnext ports GET_ANEXT: leaves the async iterator on the stack
+// and pushes the awaitable that yields the next value. AsyncGenerator
+// objects already produce an awaitable from __anext__; for any other
+// async iterator the result is routed through the awaitable-iter
+// helper to wrap a __await__ shape into an iterator.
 //
 // CPython: Python/bytecodes.c:1266 GET_ANEXT
+// CPython: Python/ceval.c:3562 _PyEval_GetANext
 func (e *evalState) execGetAnext() (genResult, error) {
-	return genResult{ok: true}, fmt.Errorf("GET_ANEXT: async iterator protocol not yet implemented (v0.9)")
+	aiter := e.peek(0).AsObject()
+	t := aiter.Type()
+	if t.Async == nil || t.Async.Anext == nil {
+		return genResult{ok: true}, fmt.Errorf(
+			"TypeError: 'async for' requires an iterator with __anext__ method, got %s", t.Name)
+	}
+	next, err := t.Async.Anext(aiter)
+	if err != nil {
+		return genResult{ok: true}, err
+	}
+	// AsyncGenerator's am_anext already returns the AsyncGenASend
+	// awaitable. Other shapes return a coroutine or an object whose
+	// __await__ produces the awaitable; route through the same helper
+	// GET_AWAITABLE uses.
+	if _, ok := aiter.(*objects.AsyncGenerator); !ok {
+		wrapped, werr := getAwaitableIter(next)
+		if werr != nil {
+			return genResult{ok: true}, fmt.Errorf(
+				"TypeError: 'async for' received an invalid object from __anext__: %s",
+				next.Type().Name)
+		}
+		next = wrapped
+	}
+	e.pushObject(next)
+	return genResult{next: e.advance(), ok: true}, nil
 }
 
-// execEndAsyncFor ports END_ASYNC_FOR: pops async iterator and awaitable;
-// re-raises unless the exception is StopAsyncIteration.
-// Async protocol pending.
+// execEndAsyncFor ports END_ASYNC_FOR: the async-for body raised the
+// exception sitting at TOS while driving the awaitable below it. If
+// it was StopAsyncIteration the loop ends cleanly; anything else
+// surfaces as a real raise.
 //
-// CPython: Python/bytecodes.c END_ASYNC_FOR (_END_ASYNC_FOR)
+// Stack: [..., awaitable, exc] -- []
+//
+// CPython: Python/bytecodes.c:1442 _END_ASYNC_FOR
 func (e *evalState) execEndAsyncFor() (genResult, error) {
-	return genResult{ok: true}, fmt.Errorf("END_ASYNC_FOR: async iterator protocol not yet implemented (v0.9)")
+	excVal := e.popObject()
+	_ = e.popObject() // awaitable; discarded either way
+
+	if isStopAsyncIteration(excVal) {
+		return genResult{next: e.advance(), ok: true}, nil
+	}
+	return genResult{ok: true}, excAsError(excVal)
+}
+
+// getAwaitableIter ports _PyCoro_GetAwaitableIter: a coroutine is its
+// own awaitable iterator; anything else routes through tp_as_async's
+// am_await slot. The slot's result must be an iterator and must not
+// be another coroutine (PEP 492 forbids __await__ from returning a
+// coroutine).
+//
+// CPython: Objects/genobject.c:1067 _PyCoro_GetAwaitableIter
+func getAwaitableIter(o objects.Object) (objects.Object, error) {
+	if _, ok := o.(*objects.Coroutine); ok {
+		return o, nil
+	}
+	t := o.Type()
+	if t.Async != nil && t.Async.Await != nil {
+		res, err := t.Async.Await(o)
+		if err != nil {
+			return nil, err
+		}
+		if _, ok := res.(*objects.Coroutine); ok {
+			return nil, fmt.Errorf("TypeError: __await__() returned a coroutine")
+		}
+		if res.Type().IterNext == nil {
+			return nil, fmt.Errorf(
+				"TypeError: __await__() returned non-iterator of type '%s'",
+				res.Type().Name)
+		}
+		return res, nil
+	}
+	return nil, fmt.Errorf("TypeError: object %s can't be used in 'await' expression", t.Name)
+}
+
+// isStopAsyncIteration reports whether o represents a StopAsyncIteration
+// exception. CPython matches via PyErr_GivenExceptionMatches on
+// PyExc_StopAsyncIteration; gopy still keeps the sentinel error along
+// with the type name as the bridge.
+func isStopAsyncIteration(o objects.Object) bool {
+	if o == nil || o == objects.None() {
+		return false
+	}
+	if errors.Is(excAsError(o), objects.ErrStopAsyncIteration) {
+		return true
+	}
+	if t := o.Type(); t != nil && t.Name == "StopAsyncIteration" {
+		return true
+	}
+	return false
 }
 
 // execCleanupThrow ports CLEANUP_THROW: if the exception is StopIteration,
@@ -263,11 +378,27 @@ func (e *evalState) execCleanupThrow() (genResult, error) {
 
 	if errors.Is(excAsError(excVal), objects.ErrStopIteration) {
 		e.pushObject(objects.None())
-		// StopIteration.value would be the stop value; use None for now.
-		e.pushObject(objects.None())
+		e.pushObject(stopIterationValue(excVal))
 		return genResult{next: e.advance(), ok: true}, nil
 	}
 	return genResult{ok: true}, excAsError(excVal)
+}
+
+// stopIterationValue returns the .value attribute of a StopIteration
+// exception, mirroring CPython's PyStopIterationObject->value access
+// in CLEANUP_THROW. Falls back to None when the exception object
+// doesn't carry args (e.g. it was synthesized from a flat sentinel).
+//
+// CPython: Python/bytecodes.c:1481 CLEANUP_THROW (the
+// PyStopIterationObject ->value field)
+func stopIterationValue(o objects.Object) objects.Object {
+	if exc, ok := o.(objects.ExceptionInstance); ok {
+		args := exc.ExceptionArgs()
+		if args != nil && args.Len() > 0 {
+			return args.Item(0)
+		}
+	}
+	return objects.None()
 }
 
 // execWithExceptStart ports WITH_EXCEPT_START: calls context.__exit__

@@ -7,6 +7,8 @@
 
 package lexer
 
+import "github.com/tamnd/gopy/codecs"
+
 // FromString builds a State that tokenises the given source. The
 // driver loads the whole buffer up front; underflow returns false on
 // the next refill request, matching the C source's
@@ -27,15 +29,33 @@ func FromString(src string, mode Mode) *State {
 // CPython: Parser/tokenizer/utf8_tokenizer.c:11 _PyTokenizer_FromUTF8
 func FromBytes(src []byte, mode Mode) *State {
 	s := newState()
+	hadBOM := false
 	// Strip a UTF-8 BOM. PEP 263 says the BOM signature is treated as
 	// declaring UTF-8 encoding; conflicting `coding:` cookies are
-	// flagged by the action_helpers layer, not here.
+	// flagged here so the parser surfaces a SyntaxError.
+	// CPython: Parser/tokenizer/helpers.c:265 check_bom
 	if len(src) >= 3 && src[0] == 0xef && src[1] == 0xbb && src[2] == 0xbf {
 		src = src[3:]
 		s.encoding = "utf-8"
+		hadBOM = true
 	}
-	if name := DetectEncodingCookie(src); name != "" && s.encoding == "" {
-		s.encoding = name
+	if name := DetectEncodingCookie(src); name != "" {
+		// CPython: Parser/tokenizer/helpers.c:425 BOM vs cookie mismatch
+		if hadBOM && !isUTF8Name(name) {
+			s.recordError("encoding declaration in Unicode string")
+			s.done = eEncoding
+		} else if !hadBOM {
+			s.encoding = name
+			if !isUTF8Name(name) {
+				decoded, _, err := codecs.Decode(src, name, "strict")
+				if err != nil {
+					s.recordError("encoding problem: " + name)
+					s.done = eEncoding
+				} else {
+					src = []byte(decoded)
+				}
+			}
+		}
 	}
 	src = NormalizeNewlines(src)
 	s.buf = src

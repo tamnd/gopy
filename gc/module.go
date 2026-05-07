@@ -46,12 +46,34 @@ func buildModule() (*objects.Module, error) {
 		{"freeze", gcFreeze},
 		{"unfreeze", gcUnfreeze},
 		{"get_freeze_count", gcGetFreezeCount},
+		{"set_debug", gcSetDebug},
+		{"get_debug", gcGetDebug},
+		{"get_stats", gcGetStats},
+		{"is_finalized", gcIsFinalized},
 	}
-	if err := d.SetItem(objects.NewStr("garbage"), objects.NewList(nil)); err != nil {
+	garbageList := objects.NewList(nil)
+	if err := d.SetItem(objects.NewStr("garbage"), garbageList); err != nil {
 		return nil, err
 	}
-	if err := d.SetItem(objects.NewStr("callbacks"), objects.NewList(nil)); err != nil {
+	SetGarbage(garbageList)
+	cbs := objects.NewList(nil)
+	if err := d.SetItem(objects.NewStr("callbacks"), cbs); err != nil {
 		return nil, err
+	}
+	SetCallbacks(cbs)
+	for _, c := range []struct {
+		name string
+		v    int
+	}{
+		{"DEBUG_STATS", DebugStats},
+		{"DEBUG_COLLECTABLE", DebugCollectable},
+		{"DEBUG_UNCOLLECTABLE", DebugUncollectable},
+		{"DEBUG_SAVEALL", DebugSaveAll},
+		{"DEBUG_LEAK", DebugLeak},
+	} {
+		if err := d.SetItem(objects.NewStr(c.name), objects.NewInt(int64(c.v))); err != nil {
+			return nil, err
+		}
 	}
 	for _, e := range entries {
 		bf := objects.NewBuiltinFunction(e.name, e.fn)
@@ -260,4 +282,77 @@ func gcGetFreezeCount(args []objects.Object, kwargs map[string]objects.Object) (
 		return nil, fmt.Errorf("TypeError: get_freeze_count() takes no arguments")
 	}
 	return objects.NewInt(int64(GetFreezeCount())), nil
+}
+
+// gcSetDebug installs the debug bitmask used by the collector. CPython
+// accepts any int and stores the value verbatim; the bits the collector
+// actually checks are the DEBUG_* constants defined on the module.
+//
+// CPython: Modules/gcmodule.c:116 gc_set_debug_impl
+func gcSetDebug(args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error) {
+	if len(args) != 1 {
+		return nil, fmt.Errorf("TypeError: set_debug() takes exactly 1 argument (%d given)", len(args))
+	}
+	if len(kwargs) != 0 {
+		return nil, fmt.Errorf("TypeError: set_debug() takes no keyword arguments")
+	}
+	x, ok := args[0].(*objects.Int)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: set_debug() argument must be int, not %s", args[0].Type().Name)
+	}
+	v, fits := x.Int64()
+	if !fits {
+		return nil, fmt.Errorf("OverflowError: set_debug() argument out of range")
+	}
+	SetDebug(int(v))
+	return objects.None(), nil
+}
+
+// gcGetDebug returns the current debug bitmask.
+//
+// CPython: Modules/gcmodule.c:131 gc_get_debug_impl
+func gcGetDebug(args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error) {
+	if len(args) != 0 || len(kwargs) != 0 {
+		return nil, fmt.Errorf("TypeError: get_debug() takes no arguments")
+	}
+	return objects.NewInt(int64(GetDebug())), nil
+}
+
+// gcGetStats returns a list of three dicts, one per generation, each
+// reporting collections, collected, and uncollectable counters.
+//
+// CPython: Modules/gcmodule.c:365 gc_get_stats_impl
+func gcGetStats(args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error) {
+	if len(args) != 0 || len(kwargs) != 0 {
+		return nil, fmt.Errorf("TypeError: get_stats() takes no arguments")
+	}
+	stats := GetStats()
+	out := make([]objects.Object, len(stats))
+	for i, s := range stats {
+		d := objects.NewDict()
+		if err := d.SetItem(objects.NewStr("collections"), objects.NewInt(int64(s.collections))); err != nil {
+			return nil, err
+		}
+		if err := d.SetItem(objects.NewStr("collected"), objects.NewInt(int64(s.collected))); err != nil {
+			return nil, err
+		}
+		if err := d.SetItem(objects.NewStr("uncollectable"), objects.NewInt(int64(s.uncollectable))); err != nil {
+			return nil, err
+		}
+		out[i] = d
+	}
+	return objects.NewList(out), nil
+}
+
+// gcIsFinalized answers gc.is_finalized(obj).
+//
+// CPython: Modules/gcmodule.c gc_is_finalized
+func gcIsFinalized(args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error) {
+	if len(args) != 1 {
+		return nil, fmt.Errorf("TypeError: is_finalized() takes exactly 1 argument (%d given)", len(args))
+	}
+	if len(kwargs) != 0 {
+		return nil, fmt.Errorf("TypeError: is_finalized() takes no keyword arguments")
+	}
+	return objects.NewBool(IsFinalized(args[0])), nil
 }

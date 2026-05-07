@@ -57,6 +57,10 @@ linters:
         # We carry deliberate var-name parity with CPython where it
         # helps readability of the port.
         - paramTypeCombine
+        # Multi-return functions in C-mirrored code rarely benefit
+        # from named results; the upstream signatures use positional
+        # returns and the Go callers immediately destructure.
+        - unnamedResult
     revive:
       rules:
         - name: var-naming
@@ -116,6 +120,9 @@ linters:
       # PyExc_* singletons keep CPython's exact spelling for source-shape
       # parity; the underscore is part of the public API contract.
       - path: errors/builtins\.go
+        linters:
+          - revive
+      - path: errors/exc_.*\.go
         linters:
           - revive
       # format.FormatString/FormatInt/FormatFloat mirror CPython's
@@ -195,6 +202,38 @@ linters:
           - gocognit
           - gocyclo
       - path: initconfig/getopt\.go
+        linters:
+          - gocognit
+          - gocyclo
+      # mergeLo / mergeHi / Sort port the TimSort merge loops from
+      # Objects/listobject.c branch-for-branch; collapsing them would
+      # diverge from the upstream algorithm.
+      - path: objects/list_sort\.go
+        linters:
+          - gocognit
+          - gocyclo
+      # strSplitWhitespace mirrors stringlib_split_whitespace plus its
+      # rsplit twin; the dual-direction loop tree is the unit of parity.
+      - path: objects/str_methods\.go
+        linters:
+          - gocognit
+          - gocyclo
+      # PyUnicode_Format dispatches one big switch on the conversion
+      # character; that's the upstream shape.
+      - path: objects/str_modulo\.go
+        linters:
+          - gocognit
+          - gocyclo
+      # Code.Replace mirrors the code_replace switch on attribute name.
+      # The CodeReplace struct is the call-site shape (a builder), so
+      # passing it by value is the API contract.
+      - path: objects/code\.go
+        linters:
+          - gocritic
+          - gocyclo
+      # builtins.Init wires every built-in into the dict; the size
+      # mirrors the surface, not algorithmic complexity.
+      - path: builtins/init\.go
         linters:
           - gocognit
           - gocyclo

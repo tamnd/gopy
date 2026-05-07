@@ -12,6 +12,7 @@ package builtins
 
 import (
 	"io"
+	"os"
 
 	"github.com/tamnd/gopy/objects"
 )
@@ -37,9 +38,23 @@ func Init(defaultFile io.Writer) (*objects.Dict, error) {
 	if err := setBuiltin(dict, "NotImplemented", objects.NotImplemented()); err != nil {
 		return nil, err
 	}
+	if err := setBuiltin(dict, "Ellipsis", objects.Ellipsis()); err != nil {
+		return nil, err
+	}
+
+	for _, t := range typeSingletons() {
+		if err := setBuiltin(dict, t.name, t.t); err != nil {
+			return nil, err
+		}
+	}
 
 	printFn := objects.NewBuiltinFunction("print", Print(defaultFile))
 	if err := setBuiltin(dict, "print", printFn); err != nil {
+		return nil, err
+	}
+
+	inputFn := objects.NewBuiltinFunction("input", Input(os.Stdin, defaultFile))
+	if err := setBuiltin(dict, "input", inputFn); err != nil {
 		return nil, err
 	}
 
@@ -73,8 +88,115 @@ func Init(defaultFile io.Writer) (*objects.Dict, error) {
 			return nil, err
 		}
 	}
+	for _, fn := range scopePanel() {
+		if err := setBuiltin(dict, fn.name, objects.NewBuiltinFunction(fn.name, fn.impl)); err != nil {
+			return nil, err
+		}
+	}
+	for _, fn := range asyncIterPanel() {
+		if err := setBuiltin(dict, fn.name, objects.NewBuiltinFunction(fn.name, fn.impl)); err != nil {
+			return nil, err
+		}
+	}
+
+	importFn := objects.NewBuiltinFunction("__import__", Import)
+	if err := setBuiltin(dict, "__import__", importFn); err != nil {
+		return nil, err
+	}
+
+	compileFn := objects.NewBuiltinFunction("compile", Compile)
+	if err := setBuiltin(dict, "compile", compileFn); err != nil {
+		return nil, err
+	}
+
+	openFn := objects.NewBuiltinFunction("open", Open)
+	if err := setBuiltin(dict, "open", openFn); err != nil {
+		return nil, err
+	}
+
+	evalFn := objects.NewBuiltinFunction("eval", Eval)
+	if err := setBuiltin(dict, "eval", evalFn); err != nil {
+		return nil, err
+	}
+	execFn := objects.NewBuiltinFunction("exec", Exec)
+	if err := setBuiltin(dict, "exec", execFn); err != nil {
+		return nil, err
+	}
+
+	if buildClass != nil {
+		bcFn := objects.NewBuiltinFunction("__build_class__", buildClass)
+		if err := setBuiltin(dict, "__build_class__", bcFn); err != nil {
+			return nil, err
+		}
+	}
 
 	return dict, nil
+}
+
+// typeSingletons returns the type-object names CPython exposes
+// directly via SETBUILTIN. The names that already have constructor
+// wrappers in constructorPanel (int, float, bool, list, tuple, dict)
+// or that are still registered as helper functions (str, type, range,
+// enumerate, reversed, zip, map, filter) stay where they are; this
+// panel covers only the gaps. Type call dispatch (so calling these
+// names constructs an instance) is a separate task; for now they
+// surface as type objects usable by isinstance/issubclass and as
+// metadata.
+//
+// CPython: Python/bltinmodule.c:3461 SETBUILTIN block
+func typeSingletons() []struct {
+	name string
+	t    *objects.Type
+} {
+	return []struct {
+		name string
+		t    *objects.Type
+	}{
+		{"object", objects.ObjectType()},
+		{"bytes", objects.BytesType},
+		{"bytearray", objects.ByteArrayType},
+		{"complex", objects.ComplexType},
+		{"frozenset", objects.FrozensetType},
+		{"set", objects.SetType},
+		{"slice", objects.SliceType},
+		{"property", objects.PropertyType},
+		{"classmethod", objects.ClassMethodType},
+		{"staticmethod", objects.StaticMethodType},
+		{"super", objects.SuperType},
+	}
+}
+
+// asyncIterPanel returns the async iteration builtins: aiter, anext.
+//
+// CPython: Python/bltinmodule.c builtin_methods aiter / anext
+func asyncIterPanel() []struct {
+	name string
+	impl func(args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error)
+} {
+	return []struct {
+		name string
+		impl func(args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error)
+	}{
+		{"aiter", AIter},
+		{"anext", ANext},
+	}
+}
+
+// scopePanel returns the introspection builtins that read the running
+// frame: globals(), locals().
+//
+// CPython: Python/bltinmodule.c builtin_methods globals / locals
+func scopePanel() []struct {
+	name string
+	impl func(args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error)
+} {
+	return []struct {
+		name string
+		impl func(args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error)
+	}{
+		{"globals", Globals},
+		{"locals", Locals},
+	}
 }
 
 // constructorPanel returns the v0.7 constructor wrappers
@@ -123,6 +245,7 @@ func numericPanel() []struct {
 		{"hex", Hex},
 		{"ascii", ASCII},
 		{"format", Format},
+		{"round", Round},
 	}
 }
 
@@ -194,7 +317,7 @@ func reflectionPanel() []struct {
 // growing one entry per builtin.
 //
 // CPython: Python/bltinmodule.c builtin_methods iter / next / len /
-// reversed / enumerate / zip / range
+// reversed / enumerate / zip / range / map / filter
 func iterationPanel() []struct {
 	name string
 	impl func(args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error)
@@ -210,6 +333,8 @@ func iterationPanel() []struct {
 		{"enumerate", Enumerate},
 		{"zip", Zip},
 		{"range", Range},
+		{"map", Map},
+		{"filter", Filter},
 	}
 }
 

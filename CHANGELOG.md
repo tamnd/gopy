@@ -11,6 +11,43 @@ folder; this file is the aggregated index.
 
 ## Unreleased
 
+## v0.10.1 - 2026-05-07
+
+See [`changelog/v0.10.1.md`](changelog/v0.10.1.md).
+
+* feat(builtins): `compile`, `eval`, `exec`, `__import__`, `open`,
+  plus `map` / `filter` as real iterator types and the remaining
+  `aiter` / `anext` / `input` / `globals` / `locals` / `round`
+  odds-and-ends from `Python/bltinmodule.c`.
+* feat(objects): `__build_class__` end to end so `class C(...): ...`
+  runs, with `__slots__` honored and `super()` driven by the
+  `__class__` closure cell. `memoryview`, `WeakSet` /
+  `WeakValueDictionary` / `WeakKeyDictionary`, weakref `proxy` and
+  `CallableProxyType`, the Python-level `frame` and `traceback`
+  types, plus `Ellipsis`, `PyCapsule`, and `types.SimpleNamespace`.
+* feat(objects): `_io.File` collapsing `RawIOBase` / `BufferedReader`
+  / `TextIOWrapper` into one object - the layered split is a v0.11
+  follow-up.
+* feat(myreadline): port `Parser/myreadline.c` - `PyOS_Readline`
+  dispatch through a swappable `Reader` hook, the unedited
+  `StdioReadline` fallback, and `ErrInterrupt` for Ctrl-C. The REPL
+  loop now reads every prompt through this entry.
+* feat(vm): `GET_AWAITABLE` plus the async-for opcodes; `CLEANUP_THROW`
+  surfaces `StopIteration.value` so `yield from` terminates with the
+  expected return value.
+* feat(errors): the remaining built-in exception classes - warnings,
+  syntax, os (errno-mapped), unicode, group, plus
+  `FloatingPointError`.
+* feat(compile): `SET_FUNCTION_ATTRIBUTE` for closure / defaults;
+  `LOAD_GLOBAL` with name index packed into bits 1+.
+* feat(lexer): PEP 263 source-encoding cookie; sources are
+  transcoded to UTF-8 before tokenization.
+* feat(unicode): `PyUnicode_Format` (`%`-style) end to end.
+* feat(imp): `imp.reload(module)`.
+* feat(gc): `set_debug` / `get_debug` / `get_stats` / `is_finalized`,
+  callback hooks, `DEBUG_SAVEALL` populating `gc.garbage`,
+  resurrection detection.
+
 ## v0.10.0 - 2026-05-06
 
 See [`changelog/v0.10.0.md`](changelog/v0.10.0.md).

@@ -29,6 +29,27 @@ func Str(o Object) (string, error) {
 	return Repr(o)
 }
 
+// Format is the protocol-level entry point that ports
+// PyObject_Format. An empty spec is shorthand for str(o); a non-empty
+// spec dispatches to the type's Format slot, falling back to a
+// TypeError for objects that don't define one.
+//
+// CPython: Objects/object.c:L803 PyObject_Format
+func Format(o Object, spec string) (string, error) {
+	if o == nil {
+		return "<nil>", nil
+	}
+	if spec == "" {
+		return Str(o)
+	}
+	if f := o.Type().Format; f != nil {
+		return f(o, spec)
+	}
+	return "", fmt.Errorf(
+		"TypeError: unsupported format string passed to %s.__format__",
+		o.Type().Name)
+}
+
 // Hash returns the hash of o. Errors with errUnhashable when the
 // type has no Hash slot. Mirrors PyObject_Hash.
 //
@@ -130,7 +151,7 @@ func IsTruthy(o Object) (bool, error) {
 //
 // CPython: Objects/object.c:1290 PyObject_GetAttr
 func GetAttr(o Object, name Object) (Object, error) {
-	if name == nil || name.Type() != strStubType {
+	if name == nil || name.Type() != strType {
 		return nil, fmt.Errorf("TypeError: attribute name must be string, not '%s'", typeNameOf(name))
 	}
 	tp := o.Type()
@@ -145,7 +166,7 @@ func GetAttr(o Object, name Object) (Object, error) {
 //
 // CPython: Objects/object.c:1440 PyObject_SetAttr
 func SetAttr(o Object, name Object, value Object) error {
-	if name == nil || name.Type() != strStubType {
+	if name == nil || name.Type() != strType {
 		return fmt.Errorf("TypeError: attribute name must be string, not '%s'", typeNameOf(name))
 	}
 	tp := o.Type()
@@ -174,7 +195,7 @@ func DelAttr(o Object, name Object) error {
 // Object. Falls back to the type name when extraction fails so error
 // messages stay readable.
 func attrNameStr(name Object) string {
-	if s, ok := name.(*strStub); ok {
+	if s, ok := name.(*Unicode); ok {
 		return s.v
 	}
 	return typeNameOf(name)

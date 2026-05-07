@@ -136,15 +136,22 @@ func GetReferrers(args ...objects.Object) []objects.Object {
 	return out
 }
 
-// Garbage returns a snapshot of the gc.garbage list. gopy's unified
-// finalizer model keeps this empty; the function exists so the gc
-// module can publish gc.garbage as a list.
+// Garbage returns a snapshot of the gc.garbage list. The list grows
+// when the collector runs with DEBUG_SAVEALL set. The same list object
+// is stamped onto the gc module dict, so user code can also read or
+// clear it through gc.garbage directly.
 //
 // CPython: Modules/gcmodule.c gc.garbage attribute
 func Garbage() []objects.Object {
 	state.mu.Lock()
 	defer state.mu.Unlock()
-	out := make([]objects.Object, len(state.garbage))
-	copy(out, state.garbage)
+	if state.garbage == nil {
+		return nil
+	}
+	n := state.garbage.Len()
+	out := make([]objects.Object, n)
+	for i := 0; i < n; i++ {
+		out[i] = state.garbage.Item(i)
+	}
 	return out
 }

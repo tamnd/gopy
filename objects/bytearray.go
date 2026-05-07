@@ -1,0 +1,271 @@
+// The ByteArray type, a mutable byte string. CPython exposes the
+// same byte-level operations as PyBytes plus in-place mutation
+// (append, extend, insert, pop, ...) and an unhashable instance.
+//
+// CPython: Objects/bytearrayobject.c:2654 PyByteArray_Type
+
+package objects
+
+import (
+	"errors"
+	"fmt"
+	"strings"
+)
+
+// ByteArray is the mutable byte string. Mirrors PyByteArrayObject.
+//
+// CPython: Include/cpython/bytearrayobject.h:13 PyByteArrayObject
+type ByteArray struct {
+	VarHeader
+	v []byte
+}
+
+// ByteArrayType is the type singleton for bytearray.
+//
+// CPython: Objects/bytearrayobject.c:2654 PyByteArray_Type
+var ByteArrayType = NewType("bytearray", []*Type{objectType})
+
+func init() {
+	ByteArrayType.Repr = byteArrayRepr
+	ByteArrayType.Str = byteArrayRepr
+	ByteArrayType.Hash = byteArrayHash
+	ByteArrayType.RichCmp = byteArrayRichCmp
+	ByteArrayType.Sequence = &SequenceMethods{
+		Length:   byteArrayLen,
+		GetItem:  byteArrayGetItem,
+		SetItem:  byteArraySetItem,
+		Contains: byteArrayContains,
+	}
+}
+
+// NewByteArray wraps a copy of buf in a ByteArray.
+//
+// CPython: Objects/bytearrayobject.c:138 PyByteArray_FromStringAndSize
+func NewByteArray(buf []byte) *ByteArray {
+	b := &ByteArray{v: append([]byte(nil), buf...)}
+	b.init(ByteArrayType)
+	b.size = int64(len(buf))
+	return b
+}
+
+// Bytes returns the underlying mutable buffer. Callers may mutate
+// the returned slice; doing so updates the ByteArray in place.
+func (b *ByteArray) Bytes() []byte {
+	return b.v
+}
+
+// Len returns the number of bytes.
+//
+// CPython: Objects/bytearrayobject.c:62 PyByteArray_Size
+func (b *ByteArray) Len() int {
+	return len(b.v)
+}
+
+// Append puts byte v at the tail. v must be in [0, 255].
+//
+// CPython: Objects/bytearrayobject.c:2243 bytearray_append
+func (b *ByteArray) Append(v int) error {
+	if v < 0 || v > 255 {
+		return errors.New("ValueError: byte must be in range(0, 256)")
+	}
+	b.v = append(b.v, byte(v))
+	b.size = int64(len(b.v))
+	return nil
+}
+
+// Extend concatenates the bytes from src.
+//
+// CPython: Objects/bytearrayobject.c:2299 bytearray_extend
+func (b *ByteArray) Extend(src []byte) {
+	b.v = append(b.v, src...)
+	b.size = int64(len(b.v))
+}
+
+// Insert places v at position where, shifting later bytes right.
+// Negative where is clamped to 0; where past the end appends.
+//
+// CPython: Objects/bytearrayobject.c:2206 bytearray_insert
+func (b *ByteArray) Insert(where int, v int) error {
+	if v < 0 || v > 255 {
+		return errors.New("ValueError: byte must be in range(0, 256)")
+	}
+	n := len(b.v)
+	if where < 0 {
+		where += n
+		if where < 0 {
+			where = 0
+		}
+	}
+	if where > n {
+		where = n
+	}
+	b.v = append(b.v, 0)
+	copy(b.v[where+1:], b.v[where:])
+	b.v[where] = byte(v)
+	b.size = int64(len(b.v))
+	return nil
+}
+
+// Pop removes and returns the byte at index i. Default index in
+// CPython is -1; the gopy port leaves that decision to the caller.
+//
+// CPython: Objects/bytearrayobject.c:2267 bytearray_pop
+func (b *ByteArray) Pop(i int) (int, error) {
+	n := len(b.v)
+	if n == 0 {
+		return 0, errors.New("IndexError: pop from empty bytearray")
+	}
+	if i < 0 {
+		i += n
+	}
+	if i < 0 || i >= n {
+		return 0, errors.New("IndexError: pop index out of range")
+	}
+	v := b.v[i]
+	b.v = append(b.v[:i], b.v[i+1:]...)
+	b.size = int64(len(b.v))
+	return int(v), nil
+}
+
+// Clear truncates the buffer to zero length.
+//
+// CPython: Objects/bytearrayobject.c:2191 bytearray_clear
+func (b *ByteArray) Clear() {
+	b.v = b.v[:0]
+	b.size = 0
+}
+
+// Reverse reverses bytes in place.
+//
+// CPython: Objects/bytearrayobject.c:2226 bytearray_reverse
+func (b *ByteArray) Reverse() {
+	for i, j := 0, len(b.v)-1; i < j; i, j = i+1, j-1 {
+		b.v[i], b.v[j] = b.v[j], b.v[i]
+	}
+}
+
+// byteArrayRepr formats as bytearray(b'...'), reusing bytesRepr for
+// the inner literal so quoting and escaping match exactly.
+//
+// CPython: Objects/bytearrayobject.c:2566 bytearray_repr
+func byteArrayRepr(o Object) (string, error) {
+	inner, err := bytesRepr(NewBytes(o.(*ByteArray).v))
+	if err != nil {
+		return "", err
+	}
+	return "bytearray(" + inner + ")", nil
+}
+
+// byteArrayHash always raises TypeError. bytearray is mutable and
+// therefore unhashable, matching CPython.
+//
+// CPython: Objects/bytearrayobject.c:1031 bytearray_hash
+func byteArrayHash(o Object) (int64, error) {
+	return 0, errors.New("TypeError: unhashable type: 'bytearray'")
+}
+
+// byteArrayRichCmp compares against bytes and bytearray operands by
+// byte value. Mixed compares with anything else fall through to
+// NotImplemented.
+//
+// CPython: Objects/bytearrayobject.c:1058 bytearray_richcompare
+func byteArrayRichCmp(a, b Object, op CompareOp) (Object, error) {
+	ab, ok := a.(*ByteArray)
+	if !ok {
+		return notImplemented(), nil
+	}
+	var rhs []byte
+	switch x := b.(type) {
+	case *ByteArray:
+		rhs = x.v
+	case *Bytes:
+		rhs = x.v
+	default:
+		return notImplemented(), nil
+	}
+	c := bytesCompare(ab.v, rhs)
+	var res bool
+	switch op {
+	case CompareLT:
+		res = c < 0
+	case CompareLE:
+		res = c <= 0
+	case CompareEQ:
+		res = c == 0
+	case CompareNE:
+		res = c != 0
+	case CompareGT:
+		res = c > 0
+	case CompareGE:
+		res = c >= 0
+	}
+	return NewBool(res), nil
+}
+
+func byteArrayLen(o Object) (int, error) {
+	return o.(*ByteArray).Len(), nil
+}
+
+func byteArrayGetItem(o Object, i int) (Object, error) {
+	b := o.(*ByteArray)
+	if i < 0 {
+		i += len(b.v)
+	}
+	if i < 0 || i >= len(b.v) {
+		return nil, errIndexOutOfRange
+	}
+	return NewInt(int64(b.v[i])), nil
+}
+
+// byteArraySetItem assigns a single byte. The new value must be an
+// int in [0, 255]; CPython also accepts a one-byte buffer there but
+// that path isn't ported yet.
+//
+// CPython: Objects/bytearrayobject.c:529 bytearray_ass_subscript
+func byteArraySetItem(o Object, i int, v Object) error {
+	b := o.(*ByteArray)
+	if i < 0 {
+		i += len(b.v)
+	}
+	if i < 0 || i >= len(b.v) {
+		return errIndexOutOfRange
+	}
+	iv, ok := v.(*Int)
+	if !ok {
+		return fmt.Errorf("TypeError: an integer is required")
+	}
+	n, fits := iv.Int64()
+	if !fits || n < 0 || n > 255 {
+		return errors.New("ValueError: byte must be in range(0, 256)")
+	}
+	b.v[i] = byte(n)
+	return nil
+}
+
+func byteArrayContains(o, v Object) (bool, error) {
+	b := o.(*ByteArray)
+	switch x := v.(type) {
+	case *Int:
+		n, ok := x.Int64()
+		if !ok || n < 0 || n > 255 {
+			return false, errors.New("ValueError: byte must be in range(0, 256)")
+		}
+		for _, c := range b.v {
+			if int64(c) == n {
+				return true, nil
+			}
+		}
+		return false, nil
+	case *Bytes:
+		if len(x.v) == 0 {
+			return true, nil
+		}
+		return strings.Contains(string(b.v), string(x.v)), nil
+	case *ByteArray:
+		if len(x.v) == 0 {
+			return true, nil
+		}
+		return strings.Contains(string(b.v), string(x.v)), nil
+	}
+	return false, errors.New("TypeError: a bytes-like object is required")
+}

@@ -31,17 +31,29 @@ const (
 type Type struct {
 	Header
 
-	Name     string
+	Name string
+	// Module mirrors __module__ on a type. Empty (treated as
+	// "builtins") for the built-in types ported in objects/.
+	//
+	// CPython: Objects/typeobject.c:907 type_module
+	Module   string
 	BaseSize int
 	ItemSize int
 
 	Bases []*Type
 	MRO   []*Type
 
-	Repr     func(o Object) (string, error)
-	Str      func(o Object) (string, error)
-	Hash     func(o Object) (int64, error)
-	RichCmp  func(a, b Object, op CompareOp) (Object, error)
+	Repr    func(o Object) (string, error)
+	Str     func(o Object) (string, error)
+	Hash    func(o Object) (int64, error)
+	RichCmp func(a, b Object, op CompareOp) (Object, error)
+	// Format is the tp_format slot. Receives the object and the
+	// format-spec string (the part after the colon in str.format).
+	// When nil, the protocol-level Format helper falls back to Str
+	// for empty specs and raises TypeError otherwise.
+	//
+	// CPython: Objects/typeobject.c:L8260 slot_tp_format
+	Format   func(o Object, spec string) (string, error)
 	Iter     func(o Object) (Object, error)
 	IterNext func(o Object) (Object, error)
 	Call     func(o Object, args []Object, kwargs map[string]Object) (Object, error)
@@ -65,7 +77,33 @@ type Type struct {
 	//
 	// CPython: Include/cpython/object.h tp_setattro
 	Setattro func(o Object, name Object, value Object) error
-	Dealloc  func(o Object)
+
+	// DescrGet is the tp_descr_get slot. When a class attribute that
+	// implements this slot is found during instance attribute lookup,
+	// the lookup machinery hands it to DescrGet so the descriptor can
+	// produce the bound value. owner is the instance the lookup
+	// started from (nil when accessed on the class itself); ownerType
+	// is the type whose __mro__ supplied the descriptor.
+	//
+	// CPython: Include/cpython/object.h tp_descr_get
+	DescrGet func(descr Object, owner Object, ownerType *Type) (Object, error)
+	// DescrSet is the tp_descr_set slot. value==nil signals a delete.
+	//
+	// CPython: Include/cpython/object.h tp_descr_set
+	DescrSet func(descr Object, owner Object, value Object) error
+
+	Dealloc func(o Object)
+
+	// Finalize is the tp_finalize slot. The cycle collector invokes
+	// it once on each unreachable object before reclaiming, and the
+	// destruction path fires it from PyObject_CallFinalizer. User
+	// classes get this slot populated with a wrapper that calls
+	// __del__; built-in types fill it in directly when they need
+	// cleanup that runs before memory goes back.
+	//
+	// CPython: Include/cpython/object.h:237 tp_finalize
+	// CPython: Objects/typeobject.c slot_tp_finalize
+	Finalize func(o Object)
 
 	// TpTraverse mirrors tp_traverse. It calls visit on every Object
 	// reachable directly from o so the cycle collector can walk the
@@ -78,12 +116,38 @@ type Type struct {
 	Number   *NumberMethods
 	Sequence *SequenceMethods
 	Mapping  *MappingMethods
+	Async    *AsyncMethods
 
 	// TpFlags mirrors CPython's tp_flags bitset for the subset of flags
 	// that affect VM dispatch (MATCH_MAPPING / MATCH_SEQUENCE).
 	//
 	// CPython: Include/object.h Py_TPFLAGS_*
 	TpFlags uint64
+
+	// IsUser is the gopy stand-in for Py_TPFLAGS_HEAPTYPE: true for
+	// classes built via NewUserType (and thus through __build_class__
+	// or type(name, bases, dict)). The type-call path consults this
+	// to decide between class construction and instance allocation.
+	//
+	// CPython: Include/object.h Py_TPFLAGS_HEAPTYPE
+	IsUser bool
+
+	// Slots holds the resolved __slots__ names for this user type, in
+	// declaration order. Empty when the class did not declare __slots__
+	// or the class is a built-in. Each name has a fixed index into the
+	// instance slots array; MemberDescr objects carry the index and act
+	// as data descriptors so reads/writes go through DescrGet/DescrSet.
+	//
+	// CPython: Objects/typeobject.c:4401 type_new_descriptors
+	Slots []string
+
+	// HasDict is true when instances of this type carry a per-instance
+	// __dict__. False only when the class declares __slots__ without
+	// __dict__ (and no base contributes one). Mirrors a non-zero
+	// tp_dictoffset / Py_TPFLAGS_MANAGED_DICT.
+	//
+	// CPython: Include/cpython/typeobject.h tp_dictoffset
+	HasDict bool
 }
 
 // Visitor is the visitproc shape passed to TpTraverse. CPython's
@@ -100,56 +164,6 @@ const (
 	TpFlagMapping  uint64 = 1 << 6
 	TpFlagSequence uint64 = 1 << 5
 )
-
-// NumberMethods is the v0.2 subset of tp_as_number. The reflected
-// variants are handled by the abstract layer; concrete types only
-// implement the forward direction.
-//
-// CPython: Include/cpython/object.h:L195 PyNumberMethods
-type NumberMethods struct {
-	Add         func(a, b Object) (Object, error)
-	Subtract    func(a, b Object) (Object, error)
-	Multiply    func(a, b Object) (Object, error)
-	TrueDivide  func(a, b Object) (Object, error)
-	FloorDivide func(a, b Object) (Object, error)
-	Remainder   func(a, b Object) (Object, error)
-	And         func(a, b Object) (Object, error)
-	Or          func(a, b Object) (Object, error)
-	Xor         func(a, b Object) (Object, error)
-	Lshift      func(a, b Object) (Object, error)
-	Rshift      func(a, b Object) (Object, error)
-	Power       func(a, b, mod Object) (Object, error)
-	Divmod      func(a, b Object) (Object, error)
-	Negative    func(o Object) (Object, error)
-	Positive    func(o Object) (Object, error)
-	Absolute    func(o Object) (Object, error)
-	Invert      func(o Object) (Object, error)
-	Bool        func(o Object) (bool, error)
-	Int         func(o Object) (Object, error)
-	Float       func(o Object) (Object, error)
-}
-
-// SequenceMethods is the v0.2 subset of tp_as_sequence.
-//
-// CPython: Include/cpython/object.h:L262 PySequenceMethods
-type SequenceMethods struct {
-	Length   func(o Object) (int, error)
-	Concat   func(a, b Object) (Object, error)
-	Repeat   func(o Object, n int) (Object, error)
-	GetItem  func(o Object, i int) (Object, error)
-	SetItem  func(o Object, i int, v Object) error
-	Contains func(o, v Object) (bool, error)
-}
-
-// MappingMethods is the v0.2 subset of tp_as_mapping.
-//
-// CPython: Include/cpython/object.h:L255 PyMappingMethods
-type MappingMethods struct {
-	Length  func(o Object) (int, error)
-	GetItem func(o, key Object) (Object, error)
-	SetItem func(o, key, v Object) error
-	DelItem func(o, key Object) error
-}
 
 // typeType is the type of Type itself. Lazily initialized on first
 // use to break the bootstrap cycle (Type.Header.typ == typeType).

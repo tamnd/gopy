@@ -899,6 +899,7 @@ func (e *emitter) writeActionHelperStubs() {
 		"actionPgenSlashWithDefault":         true,
 		"actionPgenSetupFullFormatSpec":      true,
 		"actionPgenJoinedStr":                true,
+		"actionAstClassDef":                  true,
 		"actionAstFunctionDef":               true,
 		"actionAstAsyncFunctionDef":          true,
 		"actionAstComprehension":             true,

@@ -18,6 +18,10 @@
 
 package gc
 
+import (
+	"github.com/tamnd/gopy/objects"
+)
+
 // Collect runs a collection on generations 0..gen and returns the
 // number of objects reclaimed. The argument is clamped into the
 // [0, NumGenerations) range so callers can pass gc.collect()'s
@@ -41,10 +45,41 @@ func Collect(gen int) int {
 		state.mu.Unlock()
 		return 0
 	}
+	cbList := state.callbacks
+	state.mu.Unlock()
+	invokeGCCallback(cbList, "start", gen, 0, 0)
+
+	state.mu.Lock()
 	collected, pending := collectMain(gen)
 	state.mu.Unlock()
+
 	invokeWeakrefCallbacks(pending)
+	invokeGCCallback(cbList, "stop", gen, collected, 0)
 	return collected
+}
+
+// invokeGCCallback calls each entry in the gc.callbacks list with
+// (phase, info). info is the dict {"generation": gen, "collected": n,
+// "uncollectable": u}. Errors raised by the callbacks are ignored,
+// matching CPython's PyErr_FormatUnraisable path.
+//
+// CPython: Python/gc.c invoke_gc_callback
+func invokeGCCallback(cbs *objects.List, phase string, gen, collected, uncollectable int) {
+	if cbs == nil || cbs.Len() == 0 {
+		return
+	}
+	info := objects.NewDict()
+	_ = info.SetItem(objects.NewStr("generation"), objects.NewInt(int64(gen)))
+	_ = info.SetItem(objects.NewStr("collected"), objects.NewInt(int64(collected)))
+	_ = info.SetItem(objects.NewStr("uncollectable"), objects.NewInt(int64(uncollectable)))
+	args := objects.NewTuple([]objects.Object{objects.NewStr(phase), info})
+	for i := 0; i < cbs.Len(); i++ {
+		cb := cbs.Item(i)
+		if cb == nil {
+			continue
+		}
+		_, _ = objects.Call(cb, args, nil)
+	}
 }
 
 // collectMain is the lock-held inner driver. Mirrors gc_collect_main
@@ -75,13 +110,22 @@ func collectMain(gen int) (int, []pendingCallback) {
 
 	untrackTuples(young, state.tracked)
 
-	pending := handleWeakrefs(unreachable, state.weakrefs)
+	pending := handleWeakrefs(unreachable, state.weakrefs, state.weakProxies)
 
-	finalizeGarbage(unreachable, state.finalizers)
-	collected := listSize(unreachable)
-	reclaimUnreachable(unreachable, state.tracked)
-	clearUnreachableMask(young)
-	clearAllFreeLists()
+	finalizeGarbage(unreachable, state.finalizers, state.finalized)
+
+	// Resurrection check. handleResurrected re-runs deduce on the
+	// post-finalize list so any object a finalizer refloated comes
+	// back out of the reclaim path. The caller-visible behavior
+	// matches CPython: resurrected objects survive into the next
+	// generation; only stillUnreachable enters delete_garbage.
+	stillUnreachable := newListHead()
+	if err := handleResurrected(unreachable, stillUnreachable, state.tracked); err != nil {
+		// On a traversal error we fall back to treating everything as
+		// still unreachable. Mirrors CPython's behavior of pressing
+		// on after PyErr_FormatUnraisable.
+		listMerge(unreachable, stillUnreachable)
+	}
 
 	// Promote survivors. CPython moves them to the next-older
 	// generation unless we are already at the top; the same mapping
@@ -91,16 +135,38 @@ func collectMain(gen int) (int, []pendingCallback) {
 		dest = gen + 1
 		state.generations[dest].count++
 	}
+
+	// Resurrected objects (still on the now-empty `unreachable` head)
+	// move to the destination generation alongside the regular
+	// survivors. Clear residual flags first.
+	clearUnreachableMask(unreachable)
+	for g := unreachable.next; g != unreachable; g = g.next {
+		g.flags &^= gcCollecting
+	}
+	listMerge(unreachable, state.generations[dest].head)
+
+	collected := listSize(stillUnreachable)
+	if state.debug&DebugSaveAll != 0 && state.garbage != nil {
+		appendGarbage(state.garbage, stillUnreachable)
+	}
+	reclaimUnreachable(stillUnreachable, state.tracked, state.finalized)
+	clearUnreachableMask(young)
+	clearAllFreeLists()
+
+	state.stats[gen].collections++
+	state.stats[gen].collected += collected
+
 	listMerge(young, state.generations[dest].head)
 
 	return collected, pending
 }
 
-// clearAllFreeLists is the gopy stand-in for CPython's
-// _PyGC_ClearAllFreeLists (gc_gil.c). CPython drops cached objects
-// from per-type free lists on every collection; gopy has no such
-// caches, so the call is a no-op kept here to match the call site
-// shape and make the absence explicit.
+// appendGarbage appends every node on `list` to the gc.garbage list.
+// CPython does this inline in delete_garbage when DEBUG_SAVEALL is on.
 //
-// CPython: Python/gc_gil.c _PyGC_ClearAllFreeLists
-func clearAllFreeLists() {}
+// CPython: Python/gc.c:1142 delete_garbage SAVEALL branch
+func appendGarbage(garbage *objects.List, list *gcHead) {
+	for g := list.next; g != list; g = g.next {
+		garbage.Append(g.obj)
+	}
+}

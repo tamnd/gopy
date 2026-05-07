@@ -27,6 +27,28 @@ type Exception struct {
 // IsException implements the state.Exception marker.
 func (e *Exception) IsException() {}
 
+// ExceptionType implements objects.ExceptionInstance: returns the
+// exception's class. Used by packages that can't import errors/ but
+// need to read the exception's metadata, such as the vm's
+// CLEANUP_THROW handler.
+//
+// CPython: Objects/exceptions.c:L34 BaseExceptionObject (Py_TYPE
+// access on tp_getset)
+func (e *Exception) ExceptionType() *objects.Type {
+	return e.ExcType
+}
+
+// ExceptionArgs implements objects.ExceptionInstance: returns the
+// args tuple, never nil.
+//
+// CPython: Objects/exceptions.c:L184 BaseException_args_getter
+func (e *Exception) ExceptionArgs() *objects.Tuple {
+	if e.Args == nil {
+		return objects.NewTuple(nil)
+	}
+	return e.Args
+}
+
 // New constructs an exception with the given type and args. Mirrors
 // BaseException_new + BaseException_init.
 //

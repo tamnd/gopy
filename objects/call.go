@@ -204,6 +204,91 @@ func CallObject(callable Object, args *Tuple) (Object, error) {
 	return Call(callable, args, nil)
 }
 
+// VectorcallDict is the PyObject_VectorcallDict entry: same shape as
+// Vectorcall but the keyword side is a *Dict instead of (kwnames,
+// trailing args). Empty/nil kwargs short-circuit to a plain
+// vectorcall; otherwise the dict is unpacked into kwnames + values
+// appended to a fresh stack so the underlying slot sees the standard
+// vectorcall layout.
+//
+// CPython: Objects/call.c:154 PyObject_VectorcallDict (forwards to
+// Objects/call.c:110 _PyObject_VectorcallDictTstate)
+func VectorcallDict(callable Object, args []Object, nargsf uint, kwargs *Dict) (Object, error) {
+	nargs := VectorcallNargs(nargsf)
+	if nargs < 0 {
+		return nil, fmt.Errorf("VectorcallDict: nargs %d < 0", nargs)
+	}
+	fn := vectorcallFunction(callable)
+	if fn == nil {
+		var keywords Object
+		if kwargs != nil && kwargs.Len() > 0 {
+			keywords = kwargs
+		}
+		return MakeTpCall(callable, args, nargs, keywords)
+	}
+	if kwargs == nil || kwargs.Len() == 0 {
+		return fn(callable, args[:nargs], nargsf, nil)
+	}
+	keys := kwargs.Keys()
+	stack := make([]Object, nargs+len(keys))
+	if nargs > 0 {
+		copy(stack, args[:nargs])
+	}
+	kwnamesItems := make([]Object, 0, len(keys))
+	for i, k := range keys {
+		v, err := kwargs.GetItem(k)
+		if err != nil {
+			return nil, err
+		}
+		stack[nargs+i] = v
+		kwnamesItems = append(kwnamesItems, k)
+	}
+	kwnames := NewTuple(kwnamesItems)
+	return fn(callable, stack, uint(nargs)|VectorcallArgumentsOffset, kwnames)
+}
+
+// VectorcallPrepend prepends arg to the positional portion of args
+// and dispatches the result. CPython exploits the
+// VectorcallArgumentsOffset hint to overwrite args[-1] in place; Go
+// slices can't address the slot before a sub-slice's start, so gopy
+// always allocates a fresh stack regardless of the OFFSET bit. The
+// behavioral contract matches; only the alloc-saving fast path is
+// missing.
+//
+// CPython: Objects/call.c:829 _PyObject_VectorcallPrepend
+func VectorcallPrepend(callable Object, arg Object, args []Object, nargsf uint, kwnames *Tuple) (Object, error) {
+	nargs := VectorcallNargs(nargsf)
+	if nargs < 0 {
+		return nil, fmt.Errorf("VectorcallPrepend: nargs %d < 0", nargs)
+	}
+	nkw := kwnamesLen(kwnames)
+	stack := make([]Object, 1+nargs+nkw)
+	stack[0] = arg
+	if nargs+nkw > 0 {
+		copy(stack[1:], args[:nargs+nkw])
+	}
+	return Vectorcall(callable, stack, uint(nargs+1), kwnames)
+}
+
+// CallPrepend mirrors _PyObject_Call_Prepend: builds a fresh args
+// stack with obj at slot 0 followed by the positional tuple, then
+// dispatches via VectorcallDict so the keyword dict is honored
+// without first materializing it as kwnames.
+//
+// CPython: Objects/call.c:478 _PyObject_Call_Prepend
+func CallPrepend(callable Object, obj Object, args *Tuple, kwargs *Dict) (Object, error) {
+	if args == nil {
+		args = NewTuple(nil)
+	}
+	argcount := args.Len()
+	stack := make([]Object, argcount+1)
+	stack[0] = obj
+	for i := 0; i < argcount; i++ {
+		stack[i+1] = args.Item(i)
+	}
+	return VectorcallDict(callable, stack, uint(argcount+1), kwargs)
+}
+
 // objectIsNotCallable formats the canonical TypeError raised when a
 // callable lacks both vectorcall and tp_call.
 //
