@@ -863,10 +863,20 @@ func actionPgenConcatenateTstrings(p *Parser, args ...any) any {
 	return placeholderMatched
 }
 
+// actionPgenCheckFstringConversion validates the conversion specifier
+// after `!` in an f-string interpolation and returns the conv Name so
+// downstream FormattedValue construction can read its single-character
+// id. The CPython helper wraps this in a ResultTokenWithMetadata; our
+// fstringConversionChar accepts the bare *ast.Name directly.
+//
+// CPython: Parser/action_helpers.c:966 _PyPegen_check_fstring_conversion
 func actionPgenCheckFstringConversion(p *Parser, args ...any) any {
 	_ = p
-	_ = args
-	return placeholderMatched
+	conv := asExpr(argAt(args, 2))
+	if conv == nil {
+		return placeholderMatched
+	}
+	return conv
 }
 
 // actionPgenAddTypeCommentToArg wires the param-with-type-comment alt
