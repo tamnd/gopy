@@ -36,80 +36,95 @@ func literalEvalConvert(node any) (any, error) {
 	case *Constant:
 		return n.Value, nil
 	case *Tuple:
-		out := make([]any, n.Elts.Len())
-		for i := 0; i < n.Elts.Len(); i++ {
-			v, err := literalEvalConvert(n.Elts.Get(i))
-			if err != nil {
-				return nil, err
-			}
-			out[i] = v
-		}
-		return out, nil
+		return evalSeqLiteral(n.Elts)
 	case *List:
-		out := make([]any, n.Elts.Len())
-		for i := 0; i < n.Elts.Len(); i++ {
-			v, err := literalEvalConvert(n.Elts.Get(i))
-			if err != nil {
-				return nil, err
-			}
-			out[i] = v
-		}
-		return out, nil
+		return evalSeqLiteral(n.Elts)
 	case *Set:
-		out := make(map[any]struct{}, n.Elts.Len())
-		for i := 0; i < n.Elts.Len(); i++ {
-			v, err := literalEvalConvert(n.Elts.Get(i))
-			if err != nil {
-				return nil, err
-			}
-			out[v] = struct{}{}
-		}
-		return out, nil
+		return evalSetLiteral(n.Elts)
 	case *Call:
-		// Only `set()` (the empty-set call) is allowed by literal_eval.
-		name, ok := n.Func.(*Name)
-		if ok && name.Id == "set" && n.Args.Len() == 0 && n.Keywords.Len() == 0 {
-			return map[any]struct{}{}, nil
-		}
-		return nil, malformed(node)
+		return evalCallLiteral(n)
 	case *Dict:
-		if n.Keys.Len() != n.Values.Len() {
-			return nil, malformed(node)
-		}
-		out := make(map[any]any, n.Keys.Len())
-		for i := 0; i < n.Keys.Len(); i++ {
-			k, err := literalEvalConvert(n.Keys.Get(i))
-			if err != nil {
-				return nil, err
-			}
-			v, err := literalEvalConvert(n.Values.Get(i))
-			if err != nil {
-				return nil, err
-			}
-			out[k] = v
-		}
-		return out, nil
+		return evalDictLiteral(n)
 	case *BinOp:
-		if n.Op != Add && n.Op != Sub {
-			return nil, malformed(node)
-		}
-		left, err := literalEvalSignedNum(n.Left)
-		if err != nil {
-			return nil, err
-		}
-		right, err := literalEvalNum(n.Right)
-		if err != nil {
-			return nil, err
-		}
-		if !isReal(left) || !isComplex(right) {
-			return literalEvalSignedNum(node)
-		}
-		if n.Op == Add {
-			return numAdd(left, right), nil
-		}
-		return numSub(left, right), nil
+		return evalBinOpLiteral(n)
 	}
 	return literalEvalSignedNum(node)
+}
+
+func evalSeqLiteral(elts Seq[Expr]) ([]any, error) {
+	out := make([]any, elts.Len())
+	for i := 0; i < elts.Len(); i++ {
+		v, err := literalEvalConvert(elts.Get(i))
+		if err != nil {
+			return nil, err
+		}
+		out[i] = v
+	}
+	return out, nil
+}
+
+func evalSetLiteral(elts Seq[Expr]) (map[any]struct{}, error) {
+	out := make(map[any]struct{}, elts.Len())
+	for i := 0; i < elts.Len(); i++ {
+		v, err := literalEvalConvert(elts.Get(i))
+		if err != nil {
+			return nil, err
+		}
+		out[v] = struct{}{}
+	}
+	return out, nil
+}
+
+// evalCallLiteral allows only the empty set() call, the single Call form
+// literal_eval accepts.
+func evalCallLiteral(n *Call) (any, error) {
+	name, ok := n.Func.(*Name)
+	if ok && name.Id == "set" && n.Args.Len() == 0 && n.Keywords.Len() == 0 {
+		return map[any]struct{}{}, nil
+	}
+	return nil, malformed(n)
+}
+
+func evalDictLiteral(n *Dict) (map[any]any, error) {
+	if n.Keys.Len() != n.Values.Len() {
+		return nil, malformed(n)
+	}
+	out := make(map[any]any, n.Keys.Len())
+	for i := 0; i < n.Keys.Len(); i++ {
+		k, err := literalEvalConvert(n.Keys.Get(i))
+		if err != nil {
+			return nil, err
+		}
+		v, err := literalEvalConvert(n.Values.Get(i))
+		if err != nil {
+			return nil, err
+		}
+		out[k] = v
+	}
+	return out, nil
+}
+
+// evalBinOpLiteral covers the real+complex arithmetic CPython admits in
+// literal_eval; everything else falls through to the signed-number path.
+func evalBinOpLiteral(n *BinOp) (any, error) {
+	if n.Op != Add && n.Op != Sub {
+		return nil, malformed(n)
+	}
+	left, err := literalEvalSignedNum(n.Left)
+	if err != nil {
+		return nil, err
+	}
+	right, err := literalEvalNum(n.Right)
+	if err != nil {
+		return nil, err
+	}
+	if !isReal(left) || !isComplex(right) {
+		return literalEvalSignedNum(n)
+	}
+	if n.Op == Add {
+		return numAdd(left, right), nil
+	}
+	return numSub(left, right), nil
 }
 
 func literalEvalNum(node any) (any, error) {
