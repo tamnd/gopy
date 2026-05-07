@@ -770,10 +770,60 @@ func actionPgenEnsureReal(p *Parser, args ...any) any {
 // so the gate test continues to skip those shapes cleanly rather
 // than mis-typing.
 
+// actionPgenFormattedValue ports `_PyPegen_formatted_value`. Args:
+// (p, expression, debug_token, conversion_result, format_result, rbrace).
+// For the no-debug path we just build a FormattedValue. The debug-text
+// shim that wraps the value into a JoinedStr is intentionally
+// minimal until the parser exposes the metadata we'd need.
+//
+// CPython: Parser/action_helpers.c:1564 _PyPegen_formatted_value
 func actionPgenFormattedValue(p *Parser, args ...any) any {
 	_ = p
-	_ = args
-	return placeholderMatched
+	value := asExpr(argAt(args, 1))
+	if value == nil {
+		return placeholderMatched
+	}
+	debug, _ := argAt(args, 2).(*Token)
+	conv := fstringConversionChar(argAt(args, 3))
+	format := asExpr(argAt(args, 4))
+	if conv == 0 && debug != nil && format == nil {
+		conv = 'r'
+	} else if conv == 0 {
+		conv = -1
+	}
+	return &ast.FormattedValue{
+		Value:      value,
+		Conversion: conv,
+		FormatSpec: format,
+		Pos:        ast.NoPos,
+	}
+}
+
+// fstringConversionChar pulls the character code out of whatever
+// actionPgenCheckFstringConversion returned. The conversion token in
+// f'{y!r}' is a single-letter NAME ('s', 'r', or 'a'); store the
+// rune as an int. nil means "no conversion specified".
+func fstringConversionChar(v any) int {
+	if v == nil {
+		return 0
+	}
+	switch t := v.(type) {
+	case int:
+		return t
+	case rune:
+		return int(t)
+	case *Token:
+		if t == nil || len(t.Bytes) == 0 {
+			return 0
+		}
+		return int(t.Bytes[0])
+	case *ast.Name:
+		if t == nil || t.Id == "" {
+			return 0
+		}
+		return int(t.Id[0])
+	}
+	return 0
 }
 
 func actionPgenInterpolation(p *Parser, args ...any) any {
@@ -1885,12 +1935,46 @@ func actionPgenSetupFullFormatSpec(p *Parser, args ...any) any {
 	return placeholderMatched
 }
 
-// actionPgenJoinedStr is the constructor surface for f-string joins.
-// Real implementation lands with the f-string panel.
+// actionPgenJoinedStr ports `_PyPegen_joined_str`. Args:
+// (p, fstring_start_token, raw_expressions, fstring_end_token).
+// _get_resized_exprs in CPython merges adjacent constants and
+// upgrades any FormattedValue that ends up alone into a JoinedStr;
+// we emit the wrapper unconditionally so dump renders match.
+//
+// CPython: Parser/action_helpers.c:1396 _PyPegen_joined_str
 func actionPgenJoinedStr(p *Parser, args ...any) any {
 	_ = p
-	_ = args
-	return placeholderMatched
+	values := joinedStrValues(argAt(args, 2))
+	return &ast.JoinedStr{Values: values, Pos: ast.NoPos}
+}
+
+// joinedStrValues coerces a raw_expressions seq into the Values slot
+// on an ast.JoinedStr. The grammar produces a []any (loop result)
+// containing FormattedValue / Constant / placeholder values; we
+// strip the placeholders and keep the rest in order.
+func joinedStrValues(v any) ast.Seq[ast.Expr] {
+	var out []ast.Expr
+	var walk func(any)
+	walk = func(x any) {
+		switch t := x.(type) {
+		case nil:
+		case ast.Expr:
+			out = append(out, t)
+		case []any:
+			for _, e := range t {
+				walk(e)
+			}
+		case []ast.Expr:
+			out = append(out, t...)
+		case ast.Seq[ast.Expr]:
+			out = append(out, t...)
+		}
+	}
+	walk(v)
+	if len(out) == 0 {
+		return nil
+	}
+	return ast.Seq[ast.Expr](out)
 }
 
 // decodeTypeComment turns an optional TYPE_COMMENT token into the
