@@ -962,7 +962,7 @@ func (e *emitter) writeActionHelperStubs() {
 		"actionAstTypeVar":                   true,
 		"actionAstTypeVarTuple":              true,
 		"actionAstParamSpec":                 true,
-		"actionPgenMapNamesToIds":            true,
+		"actionPgenMapNamesToIDs":            true,
 		"actionPgenAliasForStar":             true,
 		"actionPgenCheckedFutureImport":      true,
 		"actionPgenGetCmpops":                true,
