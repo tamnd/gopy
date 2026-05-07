@@ -3708,9 +3708,7 @@ func parseRule_else_block(p *Parser) any {
 			kw := p.ExpectName("else")
 			if kw == nil { return nil }
 			_ = kw
-			f := p.ExpectForced(token.COLON, ":")
-			if f == nil { return nil }
-			_ = f
+			if _v := p.ExpectForced(token.COLON, ":"); _v == nil { return nil }
 			b := parseRule_block(p)
 			if b == nil { return nil }
 			_ = b
@@ -4120,15 +4118,13 @@ func parseRule_try_stmt(p *Parser) any {
 			kw := p.ExpectName("try")
 			if kw == nil { return nil }
 			_ = kw
-			f := p.ExpectForced(token.COLON, ":")
-			if f == nil { return nil }
-			_ = f
+			if _v := p.ExpectForced(token.COLON, ":"); _v == nil { return nil }
 			b := parseRule_block(p)
 			if b == nil { return nil }
 			_ = b
-			f_1 := parseRule_finally_block(p)
-			if f_1 == nil { return nil }
-			_ = f_1
+			f := parseRule_finally_block(p)
+			if f == nil { return nil }
+			_ = f
 			return actionAstTry(p, b, nil, nil, f)
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_try_stmt, v)
@@ -4142,9 +4138,7 @@ func parseRule_try_stmt(p *Parser) any {
 			kw := p.ExpectName("try")
 			if kw == nil { return nil }
 			_ = kw
-			f := p.ExpectForced(token.COLON, ":")
-			if f == nil { return nil }
-			_ = f
+			if _v := p.ExpectForced(token.COLON, ":"); _v == nil { return nil }
 			b := parseRule_block(p)
 			if b == nil { return nil }
 			_ = b
@@ -4153,8 +4147,8 @@ func parseRule_try_stmt(p *Parser) any {
 			_ = ex
 			el := parseRule_else_block(p)
 			_ = el
-			f_1 := parseRule_finally_block(p)
-			_ = f_1
+			f := parseRule_finally_block(p)
+			_ = f
 			return actionAstTry(p, b, ex, el, f)
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_try_stmt, v)
@@ -4168,9 +4162,7 @@ func parseRule_try_stmt(p *Parser) any {
 			kw := p.ExpectName("try")
 			if kw == nil { return nil }
 			_ = kw
-			f := p.ExpectForced(token.COLON, ":")
-			if f == nil { return nil }
-			_ = f
+			if _v := p.ExpectForced(token.COLON, ":"); _v == nil { return nil }
 			b := parseRule_block(p)
 			if b == nil { return nil }
 			_ = b
@@ -4179,8 +4171,8 @@ func parseRule_try_stmt(p *Parser) any {
 			_ = ex
 			el := parseRule_else_block(p)
 			_ = el
-			f_1 := parseRule_finally_block(p)
-			_ = f_1
+			f := parseRule_finally_block(p)
+			_ = f
 			return actionAstTryStar(p, b, ex, el, f)
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_try_stmt, v)
@@ -4461,9 +4453,7 @@ func parseRule_finally_block(p *Parser) any {
 			kw := p.ExpectName("finally")
 			if kw == nil { return nil }
 			_ = kw
-			f := p.ExpectForced(token.COLON, ":")
-			if f == nil { return nil }
-			_ = f
+			if _v := p.ExpectForced(token.COLON, ":"); _v == nil { return nil }
 			a := parseRule_block(p)
 			if a == nil { return nil }
 			_ = a
@@ -14164,9 +14154,7 @@ func parseRule_invalid_def_raw(p *Parser) any {
 			_ = name_var
 			opt_1 := parseRule_type_params(p)
 			_ = opt_1
-			f := p.ExpectForced(token.LPAR, "(")
-			if f == nil { return nil }
-			_ = f
+			if _v := p.ExpectForced(token.LPAR, "("); _v == nil { return nil }
 			opt_2 := parseRule_params(p)
 			_ = opt_2
 			op := p.ExpectToken(token.RPAR)
@@ -14174,15 +14162,13 @@ func parseRule_invalid_def_raw(p *Parser) any {
 			_ = op
 			opt_3 := parseRule__rhs_124(p)
 			_ = opt_3
-			f_1 := p.ExpectForced(token.COLON, ":")
-			if f_1 == nil { return nil }
-			_ = f_1
+			if _v := p.ExpectForced(token.COLON, ":"); _v == nil { return nil }
 			opt_4 := parseRule_func_type_comment(p)
 			_ = opt_4
 			block := parseRule_block(p)
 			if block == nil { return nil }
 			_ = block
-			return []any{opt, kw, name_var, opt_1, f, opt_2, op, opt_3, f_1, opt_4, block}
+			return []any{opt, kw, name_var, opt_1, opt_2, op, opt_3, opt_4, block}
 		}(); v != nil {
 			p.InsertMemo(mark, Rule_invalid_def_raw, v)
 			return v
