@@ -215,6 +215,17 @@ func (s *InterpState) GetEvents(tool Tool) EventSet {
 	return result
 }
 
+// RestartEvents bumps the global monitoring version twice: once into
+// the new last_restart_version and again so live code objects that
+// see this version know to re-instrument from scratch instead of
+// diffing.
+//
+// CPython: Python/instrumentation.c:2436 monitoring_restart_events_impl
+func (s *InterpState) RestartEvents() {
+	s.bumpVersion()
+	s.bumpVersion()
+}
+
 // SetEvents replaces tool's event mask. Bumps the global version when
 // the mask actually changed so the shadow walk re-instruments
 // dependent code. The caller (sys.monitoring.set_events) is
