@@ -103,20 +103,20 @@ func fireForEvent(
 ) error {
 	switch ev {
 	case monitor.EventPyReturn:
-		retval := objects.Object(objects.None())
+		retval := objects.None()
 		if e.f.StackTop > 0 {
 			retval = e.peek(0).AsObject()
 		}
 		return monitor.FirePyReturn(interp, state, co, offset, retval)
 	case monitor.EventPyYield:
-		retval := objects.Object(objects.None())
+		retval := objects.None()
 		if e.f.StackTop > 0 {
 			retval = e.peek(0).AsObject()
 		}
 		return monitor.FirePyYield(interp, state, co, offset, retval)
 	case monitor.EventCall:
-		callable := objects.Object(objects.None())
-		arg0 := objects.Object(objects.None())
+		callable := objects.None()
+		arg0 := objects.None()
 		if base == compile.CALL || base == compile.CALL_KW {
 			n := int(oparg)
 			if e.f.StackTop >= n+2 {

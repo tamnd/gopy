@@ -125,6 +125,32 @@ linters:
       - path: errors/exc_.*\.go
         linters:
           - revive
+      # NB_* / MIN_* constants mirror CPython's BINARY_OP sub-opcode and
+      # opcode-range enums byte for byte. The spelling is the parity
+      # contract with Include/opcode.h.
+      - path: compile/codegen_expr_op\.go
+        linters:
+          - revive
+      - path: compile/instrseq\.go
+        linters:
+          - revive
+      # forceInstrument and BuildSysMonitoring mirror CPython's
+      # _Py_Instrument and the sys.monitoring builtin wiring; their
+      # branch tree is the parity unit with Python/instrumentation.c.
+      - path: monitor/install\.go
+        linters:
+          - gocognit
+          - gocyclo
+      - path: monitor/sysmonitoring\.go
+        linters:
+          - gocognit
+          - gocyclo
+      # specializeAt fans out to every adaptive opcode arm; the switch
+      # matches Python/specialize.c's per-opcode dispatch shape.
+      - path: vm/adaptive\.go
+        linters:
+          - gocognit
+          - gocyclo
       # format.FormatString/FormatInt/FormatFloat mirror CPython's
       # format_*_internal entry points; the parity is part of the spec
       # so the "name stutters" advice does not apply.

@@ -82,7 +82,7 @@ func BinaryOp(lhs, rhs objects.Object, code []byte, instr int, oparg int32, next
 // (non-subclass) type. CPython spells the same check as
 // `Py_IS_TYPE(lhs, Py_TYPE(rhs))`.
 func sameExactType(lhs, rhs objects.Object) bool {
-	return objects.Type_(lhs) == objects.Type_(rhs)
+	return objects.ExactType(lhs) == objects.ExactType(rhs)
 }
 
 // specializeBinarySubscr handles the NB_SUBSCR sub-tree. Returns

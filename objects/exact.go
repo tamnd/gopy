@@ -12,56 +12,56 @@ package objects
 //
 // CPython: Include/cpython/longintrepr.h PyLong_CheckExact
 func IsExactInt(o Object) bool {
-	return Type_(o) == IntType
+	return ExactType(o) == IntType
 }
 
 // IsExactFloat reports whether o is exactly *Float.
 //
 // CPython: Include/cpython/floatobject.h PyFloat_CheckExact
 func IsExactFloat(o Object) bool {
-	return Type_(o) == FloatType
+	return ExactType(o) == FloatType
 }
 
 // IsExactStr reports whether o is exactly *Unicode.
 //
 // CPython: Include/cpython/unicodeobject.h PyUnicode_CheckExact
 func IsExactStr(o Object) bool {
-	return Type_(o) == strType
+	return ExactType(o) == strType
 }
 
 // IsExactList reports whether o is exactly *List.
 //
 // CPython: Include/cpython/listobject.h PyList_CheckExact
 func IsExactList(o Object) bool {
-	return Type_(o) == ListType
+	return ExactType(o) == ListType
 }
 
 // IsExactTuple reports whether o is exactly *Tuple.
 //
 // CPython: Include/cpython/tupleobject.h PyTuple_CheckExact
 func IsExactTuple(o Object) bool {
-	return Type_(o) == TupleType
+	return ExactType(o) == TupleType
 }
 
 // IsExactBool reports whether o is exactly *Bool.
 //
 // CPython: Include/cpython/boolobject.h PyBool_Check
 func IsExactBool(o Object) bool {
-	return Type_(o) == BoolType
+	return ExactType(o) == BoolType
 }
 
 // IsExactSlice reports whether o is exactly *Slice.
 //
 // CPython: Include/cpython/sliceobject.h PySlice_Check
 func IsExactSlice(o Object) bool {
-	return Type_(o) == SliceType
+	return ExactType(o) == SliceType
 }
 
 // IsExactSet reports whether o is exactly *Set.
 //
 // CPython: Include/cpython/setobject.h PySet_CheckExact
 func IsExactSet(o Object) bool {
-	return Type_(o) == SetType
+	return ExactType(o) == SetType
 }
 
 // IsExactFrozenSet reports whether o is exactly *Set with the
@@ -70,7 +70,7 @@ func IsExactSet(o Object) bool {
 //
 // CPython: Include/cpython/setobject.h PyFrozenSet_CheckExact
 func IsExactFrozenSet(o Object) bool {
-	return Type_(o) == FrozensetType
+	return ExactType(o) == FrozensetType
 }
 
 // IsListIter reports whether o is exactly a list_iterator. The
@@ -78,7 +78,7 @@ func IsExactFrozenSet(o Object) bool {
 //
 // CPython: Objects/listobject.c PyListIter_Type
 func IsListIter(o Object) bool {
-	return Type_(o) == listIterType
+	return ExactType(o) == listIterType
 }
 
 // IsTupleIter reports whether o is exactly a tuple_iterator. The
@@ -86,7 +86,7 @@ func IsListIter(o Object) bool {
 //
 // CPython: Objects/tupleobject.c PyTupleIter_Type
 func IsTupleIter(o Object) bool {
-	return Type_(o) == tupleIterType
+	return ExactType(o) == tupleIterType
 }
 
 // IsRangeIter reports whether o is exactly a range_iterator. The
@@ -94,7 +94,7 @@ func IsTupleIter(o Object) bool {
 //
 // CPython: Objects/rangeobject.c PyRangeIter_Type
 func IsRangeIter(o Object) bool {
-	return Type_(o) == rangeIterType
+	return ExactType(o) == rangeIterType
 }
 
 // IsGenerator reports whether o is exactly a generator. The FOR_ITER
@@ -103,7 +103,7 @@ func IsRangeIter(o Object) bool {
 //
 // CPython: Objects/genobject.c PyGen_Type
 func IsGenerator(o Object) bool {
-	return Type_(o) == GeneratorType
+	return ExactType(o) == GeneratorType
 }
 
 // IsCoroutine reports whether o is exactly a coroutine. SEND uses
@@ -111,13 +111,14 @@ func IsGenerator(o Object) bool {
 //
 // CPython: Objects/genobject.c PyCoro_Type
 func IsCoroutine(o Object) bool {
-	return Type_(o) == CoroutineType
+	return ExactType(o) == CoroutineType
 }
 
-// Type_ is the package-internal accessor used by the exact-type
-// predicates so they read uniformly. It cannot be named Type
-// because that already exists as the type-object struct name.
-func Type_(o Object) *Type {
+// ExactType returns o's concrete *Type with a nil guard. Used by the
+// IsExact* predicates so they read uniformly. The exported TypeOf
+// returns Object, not *Type, so the predicates need this narrower
+// helper.
+func ExactType(o Object) *Type {
 	if o == nil {
 		return nil
 	}

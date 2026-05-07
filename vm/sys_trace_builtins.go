@@ -35,16 +35,17 @@ var whatStrings = [8]string{
 // with (frame, what, arg). Mirrors call_trampoline in CPython.
 //
 // CPython: Python/sysmodule.c:1071 call_trampoline
-func callTrampoline(callback objects.Object, f *frame.Frame, what int, arg objects.Object) (objects.Object, error) {
+func callTrampoline(callback objects.Object, f *frame.Frame, what int, arg objects.Object) error {
 	if arg == nil {
 		arg = objects.None()
 	}
 	if what < 0 || what >= len(whatStrings) {
-		return nil, fmt.Errorf("invalid trace what %d", what)
+		return fmt.Errorf("invalid trace what %d", what)
 	}
 	frameObj := objects.NewFrame(f)
 	args := []objects.Object{frameObj, objects.NewStr(whatStrings[what]), arg}
-	return objects.Vectorcall(callback, args, uint(len(args)), nil)
+	_, err := objects.Vectorcall(callback, args, uint(len(args)), nil)
+	return err
 }
 
 // profileTrampoline is the LegacyTraceFunc SetProfile installs when
@@ -55,7 +56,7 @@ func callTrampoline(callback objects.Object, f *frame.Frame, what int, arg objec
 // CPython: Python/sysmodule.c:1086 profile_trampoline
 func profileTrampoline(callback objects.Object) LegacyTraceFunc {
 	return func(_ objects.Object, f *frame.Frame, what int, arg objects.Object) error {
-		_, err := callTrampoline(callback, f, what, arg)
+		err := callTrampoline(callback, f, what, arg)
 		if err != nil {
 			ts := currentThread()
 			if ts != nil {
@@ -75,7 +76,7 @@ func profileTrampoline(callback objects.Object) LegacyTraceFunc {
 // CPython: Python/sysmodule.c:1101 trace_trampoline
 func traceTrampoline(callback objects.Object) LegacyTraceFunc {
 	return func(_ objects.Object, f *frame.Frame, what int, arg objects.Object) error {
-		_, err := callTrampoline(callback, f, what, arg)
+		err := callTrampoline(callback, f, what, arg)
 		if err != nil {
 			ts := currentThread()
 			if ts != nil {

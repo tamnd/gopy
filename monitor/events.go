@@ -24,17 +24,17 @@ type Event uint8
 //
 // CPython: Include/cpython/monitoring.h:8-18
 const (
-	EventPyStart        Event = 0
-	EventPyResume       Event = 1
-	EventPyReturn       Event = 2
-	EventPyYield        Event = 3
-	EventCall           Event = 4
-	EventLine           Event = 5
-	EventInstruction    Event = 6
-	EventJump           Event = 7
-	EventBranchLeft     Event = 8
-	EventBranchRight    Event = 9
-	EventStopIteration  Event = 10
+	EventPyStart       Event = 0
+	EventPyResume      Event = 1
+	EventPyReturn      Event = 2
+	EventPyYield       Event = 3
+	EventCall          Event = 4
+	EventLine          Event = 5
+	EventInstruction   Event = 6
+	EventJump          Event = 7
+	EventBranchLeft    Event = 8
+	EventBranchRight   Event = 9
+	EventStopIteration Event = 10
 )
 
 // Other events, mainly raised on exception flow.

@@ -140,11 +140,11 @@ func TestInitialJumpAndSideExitShapes(t *testing.T) {
 
 func TestAdaptiveWarmupAndCooldownShapes(t *testing.T) {
 	w := AdaptiveCounterWarmup()
-	if (w.ValueAndBackoff >> BackoffBits) != 1 || (w.ValueAndBackoff & 0xF) != 1 {
+	if (w.ValueAndBackoff>>BackoffBits) != 1 || (w.ValueAndBackoff&0xF) != 1 {
 		t.Fatalf("warmup shape: raw 0x%04x", w.ValueAndBackoff)
 	}
 	c := AdaptiveCounterCooldown()
-	if (c.ValueAndBackoff >> BackoffBits) != 52 || (c.ValueAndBackoff & 0xF) != 0 {
+	if (c.ValueAndBackoff>>BackoffBits) != 52 || (c.ValueAndBackoff&0xF) != 0 {
 		t.Fatalf("cooldown shape: raw 0x%04x", c.ValueAndBackoff)
 	}
 }

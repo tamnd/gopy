@@ -101,7 +101,7 @@ func BuildSysMonitoring(interp *InterpState) *objects.Module {
 		if err != nil {
 			return nil, err
 		}
-		var cb objects.Object = args[2]
+		cb := args[2]
 		if cb == objects.None() {
 			cb = nil
 		}
@@ -283,8 +283,8 @@ func eventFromBit(bit int) (Event, error) {
 // CPython's monitoring_set_events_impl.
 //
 // CPython: Python/instrumentation.c:2316 monitoring_set_events_impl
-func normalizeEventSet(raw int64, max int) (EventSet, error) {
-	if raw < 0 || raw >= (1<<max) {
+func normalizeEventSet(raw int64, maxBits int) (EventSet, error) {
+	if raw < 0 || raw >= (1<<maxBits) {
 		return 0, fmt.Errorf("invalid event set 0x%x", raw)
 	}
 	set := EventSet(raw)

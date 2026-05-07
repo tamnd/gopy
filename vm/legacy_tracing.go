@@ -38,14 +38,14 @@ type LegacyTraceFunc func(obj objects.Object, f *frame.Frame, kind int, arg obje
 //
 // CPython: Include/cpython/pystate.h:Py_tracefunc constants
 const (
-	PyTraceCall        = 0
-	PyTraceException   = 1
-	PyTraceLine        = 2
-	PyTraceReturn      = 3
-	PyTraceCCall       = 4
-	PyTraceCException  = 5
-	PyTraceCReturn     = 6
-	PyTraceOpcode      = 7
+	PyTraceCall       = 0
+	PyTraceException  = 1
+	PyTraceLine       = 2
+	PyTraceReturn     = 3
+	PyTraceCCall      = 4
+	PyTraceCException = 5
+	PyTraceCReturn    = 6
+	PyTraceOpcode     = 7
 )
 
 // CTraceFunc returns the thread's legacy tracefunc, or nil if
@@ -163,7 +163,7 @@ func sysProfileThrow(args []objects.Object, _ map[string]objects.Object) (object
 //
 // CPython: Python/legacy_tracing.c:82 sys_profile_return
 func sysProfileReturn(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
-	var retval objects.Object = objects.None()
+	retval := objects.None()
 	if len(args) >= 3 {
 		retval = args[2]
 	}
@@ -220,7 +220,7 @@ func sysTraceUnwind(args []objects.Object, _ map[string]objects.Object) (objects
 //
 // CPython: Python/legacy_tracing.c:272 sys_trace_return
 func sysTraceReturn(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
-	var retval objects.Object = objects.None()
+	retval := objects.None()
 	if len(args) >= 3 {
 		retval = args[2]
 	}
@@ -231,7 +231,7 @@ func sysTraceReturn(args []objects.Object, _ map[string]objects.Object) (objects
 //
 // CPython: Python/legacy_tracing.c:287 sys_trace_yield
 func sysTraceYield(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
-	var retval objects.Object = objects.None()
+	retval := objects.None()
 	if len(args) >= 3 {
 		retval = args[2]
 	}
@@ -244,11 +244,11 @@ func sysTraceYield(args []objects.Object, _ map[string]objects.Object) (objects.
 //
 // CPython: Python/legacy_tracing.c:213 sys_trace_exception_func
 func sysTraceExceptionFunc(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
-	var exc objects.Object = objects.None()
+	exc := objects.None()
 	if len(args) >= 3 {
 		exc = args[2]
 	}
-	exType := objects.Object(objects.None())
+	exType := objects.None()
 	if exc != objects.None() {
 		exType = exc.Type()
 	}
