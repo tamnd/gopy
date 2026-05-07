@@ -688,20 +688,20 @@ func actionPgenNameDefaultPair(p *Parser, args ...any) any {
 	return out
 }
 
-// actionPgenConstantFromToken builds a numeric Constant.
+// actionPgenConstantFromToken builds a Constant from the raw bytes of
+// an FSTRING_MIDDLE / TSTRING_MIDDLE token. The bytes are the literal
+// text between interpolations (with `{{` / `}}` already collapsed by
+// the tokenizer); CPython feeds them through PyUnicode_FromString
+// without escape decoding.
 //
-// CPython: Parser/action_helpers.c:583 _PyPegen_constant_from_token
+// CPython: Parser/action_helpers.c:1431 _PyPegen_constant_from_token
 func actionPgenConstantFromToken(p *Parser, args ...any) any {
 	_ = p
 	t, ok := argAt(args, 1).(*Token)
 	if !ok || t == nil {
 		return placeholderMatched
 	}
-	v, ok := parseNumberLiteral(string(t.Bytes))
-	if !ok {
-		return placeholderMatched
-	}
-	return &ast.Constant{Value: v, Pos: ast.NoPos}
+	return &ast.Constant{Value: string(t.Bytes), Pos: ast.NoPos}
 }
 
 // actionPgenConstantFromString builds a string-literal Constant. The
@@ -725,8 +725,15 @@ func actionPgenConstantFromString(p *Parser, args ...any) any {
 	return &ast.Constant{Value: body, Pos: ast.NoPos}
 }
 
+// actionPgenDecodedConstantFromToken builds a Constant from FSTRING_MIDDLE
+// bytes that came from a format-spec body. CPython runs the bytes
+// through _PyPegen_decode_string, which handles escapes when the
+// surrounding f-string is non-raw; for the bare `>10` case the bytes
+// arrive without escapes so wrapping the raw text matches CPython.
+//
+// CPython: Parser/action_helpers.c:1404 _PyPegen_decoded_constant_from_token
 func actionPgenDecodedConstantFromToken(p *Parser, args ...any) any {
-	return actionPgenConstantFromString(p, args...)
+	return actionPgenConstantFromToken(p, args...)
 }
 
 func actionPgenEnsureImaginary(p *Parser, args ...any) any {
