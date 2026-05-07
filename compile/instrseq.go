@@ -15,6 +15,21 @@ const MaxOpcode = 511
 // CPython: Python/instruction_sequence.c:L122
 const MaxOparg = 1 << 30
 
+// MIN_SPECIALIZED_OPCODE is the lowest opcode value reserved for a
+// specialized variant (LOAD_ATTR_INSTANCE_VALUE and friends).
+// Anything below it is either an unspecialized opcode or a CPython
+// reserved slot. MIN_INSTRUMENTED_OPCODE is the threshold at which
+// the instrumentation shadow opcodes start; the specializer's
+// set_opcode helper bails out when the slot already lives in that
+// range to avoid stomping an instrumented instruction.
+//
+// CPython: Include/opcode_ids.h:253 MIN_SPECIALIZED_OPCODE
+// CPython: Include/opcode_ids.h:254 MIN_INSTRUMENTED_OPCODE
+const (
+	MIN_SPECIALIZED_OPCODE  Opcode = 129
+	MIN_INSTRUMENTED_OPCODE Opcode = 234
+)
+
 // Opcode is a single bytecode opcode. The numeric values match
 // cpython/Lib/opcode.py and are filled in by compile/opcodes_gen.go.
 type Opcode int32
