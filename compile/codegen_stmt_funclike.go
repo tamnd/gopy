@@ -87,7 +87,7 @@ func (c *Compiler) compileFunctionLike(name string, args *ast.Arguments,
 		return err
 	}
 
-	c.addOpI(MAKE_FUNCTION, flags, loc(scopeKey))
+	c.emitMakeFunction(flags, loc(scopeKey))
 
 	// Apply decorators. Each is a CALL with one argument (the
 	// function below it on the stack).
@@ -243,6 +243,32 @@ func (c *Compiler) emitDefaults(args *ast.Arguments, l ast.Pos) (int32, error) {
 		flags |= 0x02
 	}
 	return flags, nil
+}
+
+// emitMakeFunction emits MAKE_FUNCTION followed by one
+// SET_FUNCTION_ATTRIBUTE per set flag bit, matching the 3.14 split:
+// MAKE_FUNCTION just wraps the code object, then each attribute
+// (closure, annotations, kwdefaults, defaults) gets stamped on by a
+// separate op that consumes the value pushed earlier in the outer
+// scope. The order is closure -> annotations -> kwdefaults ->
+// defaults so each op finds its value sitting just below the
+// function on the stack.
+//
+// CPython: Python/codegen.c:L923 codegen_make_closure
+func (c *Compiler) emitMakeFunction(flags int32, l ast.Pos) {
+	c.addOp(MAKE_FUNCTION, l)
+	if flags&0x08 != 0 {
+		c.addOpI(SET_FUNCTION_ATTRIBUTE, 0x08, l)
+	}
+	if flags&0x04 != 0 {
+		c.addOpI(SET_FUNCTION_ATTRIBUTE, 0x04, l)
+	}
+	if flags&0x02 != 0 {
+		c.addOpI(SET_FUNCTION_ATTRIBUTE, 0x02, l)
+	}
+	if flags&0x01 != 0 {
+		c.addOpI(SET_FUNCTION_ATTRIBUTE, 0x01, l)
+	}
 }
 
 // emitClosure emits the closure-cell tuple if the inner scope has
