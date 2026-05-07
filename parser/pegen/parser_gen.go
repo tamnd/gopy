@@ -19381,28 +19381,8 @@ func parseRule__rhs_156(p *Parser) any {
 
 // Action helper stubs. The action translator emits calls into
 // these names; real implementations land with the AST surface.
-func actionAstAlias(p *Parser, args ...any) any { _ = p; _ = args; return placeholderMatched }
-func actionAstGlobal(p *Parser, args ...any) any { _ = p; _ = args; return placeholderMatched }
-func actionAstLambda(p *Parser, args ...any) any { _ = p; _ = args; return placeholderMatched }
-func actionAstMatch(p *Parser, args ...any) any { _ = p; _ = args; return placeholderMatched }
-func actionAstMatchCase(p *Parser, args ...any) any { _ = p; _ = args; return placeholderMatched }
-func actionAstNonlocal(p *Parser, args ...any) any { _ = p; _ = args; return placeholderMatched }
-func actionAstParamSpec(p *Parser, args ...any) any { _ = p; _ = args; return placeholderMatched }
-func actionAstTryStar(p *Parser, args ...any) any { _ = p; _ = args; return placeholderMatched }
-func actionAstTypeAlias(p *Parser, args ...any) any { _ = p; _ = args; return placeholderMatched }
-func actionAstTypeVar(p *Parser, args ...any) any { _ = p; _ = args; return placeholderMatched }
-func actionAstTypeVarTuple(p *Parser, args ...any) any { _ = p; _ = args; return placeholderMatched }
-func actionAstWithitem(p *Parser, args ...any) any { _ = p; _ = args; return placeholderMatched }
-func actionPgenAliasForStar(p *Parser, args ...any) any { _ = p; _ = args; return placeholderMatched }
 func actionPgenCheckLegacyStmt(p *Parser, args ...any) any { _ = p; _ = args; return placeholderMatched }
 func actionPgenCheckedFutureImport(p *Parser, args ...any) any { _ = p; _ = args; return placeholderMatched }
-func actionPgenGetCmpops(p *Parser, args ...any) any { _ = p; _ = args; return placeholderMatched }
-func actionPgenGetExprs(p *Parser, args ...any) any { _ = p; _ = args; return placeholderMatched }
-func actionPgenGetKeys(p *Parser, args ...any) any { _ = p; _ = args; return placeholderMatched }
-func actionPgenGetPatternKeys(p *Parser, args ...any) any { _ = p; _ = args; return placeholderMatched }
-func actionPgenGetPatterns(p *Parser, args ...any) any { _ = p; _ = args; return placeholderMatched }
-func actionPgenGetValues(p *Parser, args ...any) any { _ = p; _ = args; return placeholderMatched }
-func actionPgenMapNamesToIds(p *Parser, args ...any) any { _ = p; _ = args; return placeholderMatched }
 func actionPgenTemplateStr(p *Parser, args ...any) any { _ = p; _ = args; return placeholderMatched }
 func raiseAction(p *Parser, kind string, args ...any) any {
 	_ = p
