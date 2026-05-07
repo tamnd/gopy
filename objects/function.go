@@ -61,9 +61,28 @@ var FunctionType = NewType("function", []*Type{objectType})
 func init() {
 	FunctionType.Repr = functionRepr
 	FunctionType.Str = functionRepr
+	// Functions are descriptors: fetched off an instance they bind
+	// into a method that prepends self. Fetched off the class they
+	// pass through unchanged.
+	//
+	// CPython: Objects/funcobject.c:1057 func_descr_get
+	FunctionType.DescrGet = functionDescrGet
 	// FunctionType.Call is wired by the vm package on init since the
 	// call needs to push a frame and drive Eval; doing that from
 	// objects would be a circular import.
+}
+
+// functionDescrGet implements the function descriptor protocol:
+// `instance.method` returns a BoundMethod, `Class.method` returns the
+// raw function. owner==nil signals access through the class itself
+// (e.g. `Class.method`).
+//
+// CPython: Objects/funcobject.c:1057 func_descr_get
+func functionDescrGet(descr Object, owner Object, _ *Type) (Object, error) {
+	if owner == nil || owner == None() {
+		return descr, nil
+	}
+	return NewBoundMethod(descr, owner), nil
 }
 
 func functionRepr(o Object) (string, error) {

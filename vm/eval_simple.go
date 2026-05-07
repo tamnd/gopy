@@ -21,6 +21,23 @@ import (
 	"github.com/tamnd/gopy/stackref"
 )
 
+// liftNestedCode mirrors pythonrun.liftCode for inner code objects
+// reached through a parent's Consts slot. Nested defs / lambdas /
+// class bodies all surface here.
+func liftNestedCode(c *compile.Code) *objects.Code {
+	return &objects.Code{
+		Name:           c.Name,
+		Code:           c.Code,
+		Consts:         c.Consts,
+		Names:          c.Names,
+		Varnames:       c.VarNames,
+		Freevars:       c.FreeVars,
+		Cellvars:       c.CellVars,
+		Stacksize:      c.Stacksize,
+		ExceptionTable: c.ExceptionTable,
+	}
+}
+
 // wrapConst converts a raw compile-time constant value into an Object.
 // The compiler stores constants as Go scalars in code.Consts; the VM
 // has to lift them on first observation.
@@ -53,6 +70,8 @@ func wrapConst(v any) (objects.Object, error) {
 			items[i] = item
 		}
 		return objects.NewTuple(items), nil
+	case *compile.Code:
+		return liftNestedCode(x), nil
 	case objects.Object:
 		return x, nil
 	}
@@ -855,10 +874,28 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, retVal
 		return 0, v, nil, true, true, nil
 
 	case compile.LOAD_BUILD_CLASS:
-		// __build_class__ isn't ported until objects/class lands. Surface
-		// a clear error so a class def fails loudly instead of silently
-		// running the body as a free expression.
-		return 0, nil, nil, false, true, fmt.Errorf("LOAD_BUILD_CLASS: classes not yet implemented in v0.6")
+		// Push the __build_class__ builtin so the codegen sequence
+		// (PUSH_NULL, body fn, name, *bases, CALL) lands on the right
+		// callable. The builtin is registered into the dict by
+		// builtins.Init via the BuildClass hook the vm package wires.
+		// Frames built without an explicit Builtins dict (the v0.7
+		// pattern that uses globals as both) fall through to globals.
+		key := objects.NewStr("__build_class__")
+		bc, ok, err := lookupIn(e.f.Builtins, key)
+		if err != nil {
+			return 0, nil, nil, false, true, err
+		}
+		if !ok {
+			bc, ok, err = lookupIn(e.f.Globals, key)
+			if err != nil {
+				return 0, nil, nil, false, true, err
+			}
+		}
+		if !ok {
+			return 0, nil, nil, false, true, fmt.Errorf("NameError: __build_class__ not found")
+		}
+		e.pushObject(bc)
+		return e.advance(), nil, nil, false, true, nil
 
 	case compile.UNPACK_EX:
 		// oparg low byte: items before *rest. high byte: items after.

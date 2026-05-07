@@ -19382,7 +19382,6 @@ func parseRule__rhs_156(p *Parser) any {
 // Action helper stubs. The action translator emits calls into
 // these names; real implementations land with the AST surface.
 func actionAstAlias(p *Parser, args ...any) any { _ = p; _ = args; return placeholderMatched }
-func actionAstClassDef(p *Parser, args ...any) any { _ = p; _ = args; return placeholderMatched }
 func actionAstGlobal(p *Parser, args ...any) any { _ = p; _ = args; return placeholderMatched }
 func actionAstLambda(p *Parser, args ...any) any { _ = p; _ = args; return placeholderMatched }
 func actionAstMatch(p *Parser, args ...any) any { _ = p; _ = args; return placeholderMatched }

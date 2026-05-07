@@ -123,6 +123,14 @@ type Type struct {
 	//
 	// CPython: Include/object.h Py_TPFLAGS_*
 	TpFlags uint64
+
+	// IsUser is the gopy stand-in for Py_TPFLAGS_HEAPTYPE: true for
+	// classes built via NewUserType (and thus through __build_class__
+	// or type(name, bases, dict)). The type-call path consults this
+	// to decide between class construction and instance allocation.
+	//
+	// CPython: Include/object.h Py_TPFLAGS_HEAPTYPE
+	IsUser bool
 }
 
 // Visitor is the visitproc shape passed to TpTraverse. CPython's

@@ -1908,6 +1908,8 @@ func callKwOf(v any) ast.Seq[*ast.Keyword] {
 // argumentsOf coerces an action arg into *ast.Arguments. The grammar
 // passes either a real Arguments value (when params matched) or the
 // fallback empty arguments produced by actionPgenEmptyArguments.
+// `params` arrives wrapped in []any{*ast.Arguments} via the surrounding
+// rule alt, so unwrap one level when we see that shape.
 func argumentsOf(v any) *ast.Arguments {
 	switch x := v.(type) {
 	case nil:
@@ -1917,6 +1919,12 @@ func argumentsOf(v any) *ast.Arguments {
 			return &ast.Arguments{}
 		}
 		return x
+	case []any:
+		for _, e := range x {
+			if a, ok := e.(*ast.Arguments); ok && a != nil {
+				return a
+			}
+		}
 	}
 	return &ast.Arguments{}
 }
@@ -1980,6 +1988,33 @@ func actionAstFunctionDef(p *Parser, args ...any) any {
 		Returns:       exprOptional(argAt(args, 4)),
 		TypeComment:   decodeTypeComment(argAt(args, 5)),
 		TypeParams:    typeParamSeqOf(argAt(args, 6)),
+		Pos:           ast.NoPos,
+	}
+}
+
+// actionAstClassDef builds ClassDef. Args from the translator:
+// (name, bases, keywords, body, decorators, type_params).
+// decorators arrive as nil here; actionPgenClassDefDecorators stamps
+// them later when the surrounding rule sees a decorator list.
+//
+// CPython: Parser/Python.asdl ClassDef
+func actionAstClassDef(p *Parser, args ...any) any {
+	_ = p
+	name, _ := argAt(args, 0).(string)
+	if name == "" {
+		return placeholderMatched
+	}
+	body := stmtSeqOf(argAt(args, 3))
+	if len(body) == 0 {
+		return placeholderMatched
+	}
+	return &ast.ClassDef{
+		Name:          name,
+		Bases:         exprSeqOf(argAt(args, 1)),
+		Keywords:      keywordSeqOf(argAt(args, 2)),
+		Body:          body,
+		DecoratorList: exprSeqOf(argAt(args, 4)),
+		TypeParams:    typeParamSeqOf(argAt(args, 5)),
 		Pos:           ast.NoPos,
 	}
 }
