@@ -657,8 +657,16 @@ func (e *emitter) callNameLeaf(x *NameLeaf) callSpec {
 
 func (e *emitter) callStringLeaf(x *StringLeaf) callSpec {
 	s, soft := unquoteLeaf(x.Value)
-	if soft {
-		return callSpec{varName: "kw", expr: "p.ExpectSoftKeyword(" + strconv.Quote(s) + ")", shape: shapeBlocking}
+	// CPython: Tools/peg_generator/pegen/c_generator.py:191 visit_StringLeaf
+	// Identifiers go to keyword/soft-keyword helpers based on quote style;
+	// operator literals always resolve via exactTokenTypes regardless of
+	// quotes. Without this, "!" (double-quoted in fstring_conversion) was
+	// emitting ExpectSoftKeyword instead of ExpectToken(EXCLAMATION).
+	if isKeywordLiteral(s) {
+		if soft {
+			return callSpec{varName: "kw", expr: "p.ExpectSoftKeyword(" + strconv.Quote(s) + ")", shape: shapeBlocking}
+		}
+		return callSpec{varName: "kw", expr: "p.ExpectName(" + strconv.Quote(s) + ")", shape: shapeBlocking}
 	}
 	if tok, ok := exactTokenTypes[s]; ok {
 		return callSpec{varName: "op", expr: "p.ExpectToken(token." + tok + ")", shape: shapeBlocking}
