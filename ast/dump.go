@@ -164,11 +164,11 @@ func asdlFieldName(structName, fieldName string) string {
 }
 
 type structKey struct {
-	struct_, field string
+	structName, field string
 }
 
 var asdlFieldNameOverrides = map[structKey]string{
-	{"ClassDef", "Bases"}: "bases",
+	{"ClassDef", "Bases"}:        "bases",
 	{"Withitem", "ContextExpr"}:  "context_expr",
 	{"Withitem", "OptionalVars"}: "optional_vars",
 }
@@ -183,10 +183,7 @@ var asdlFieldNameByFieldOnly = map[string]string{
 // fields render as "field=None" instead. The table mirrors
 // Parser/Python.asdl line by line.
 func isOptional(structName, fieldName string) bool {
-	if optionalFields[structKey{structName, fieldName}] {
-		return true
-	}
-	return false
+	return optionalFields[structKey{structName, fieldName}]
 }
 
 // optionalFields enumerates every asdl `?` field. Generated from
@@ -245,58 +242,83 @@ func dumpRepr(v any) string {
 	if v == nil {
 		return "None"
 	}
-	switch x := v.(type) {
-	case bool:
-		if x {
-			return "True"
-		}
-		return "False"
-	case int:
-		return strconv.Itoa(x)
-	case int8, int16, int32, int64:
-		return fmt.Sprintf("%d", x)
-	case uint, uint8, uint16, uint32, uint64:
-		return fmt.Sprintf("%d", x)
-	case float32:
-		return reprFloat(float64(x))
-	case float64:
-		return reprFloat(x)
-	case complex64:
-		return reprComplex(complex128(x))
-	case complex128:
-		return reprComplex(x)
-	case string:
-		return reprString(x)
-	case []byte:
-		return reprBytes(x)
-	case *string:
-		if x == nil {
-			return "None"
-		}
-		return reprString(*x)
-	case *int:
-		if x == nil {
-			return "None"
-		}
-		return strconv.Itoa(*x)
-	case *big.Int:
-		return x.String()
-	case ExprContext:
-		return x.String() + "()"
-	case Boolop:
-		return x.String() + "()"
-	case Operator:
-		return operatorName(x) + "()"
-	case Unaryop:
-		return x.String() + "()"
-	case Cmpop:
-		return cmpopName(x) + "()"
+	if s, ok := dumpReprScalar(v); ok {
+		return s
+	}
+	if s, ok := dumpReprPointer(v); ok {
+		return s
+	}
+	if s, ok := dumpReprEnum(v); ok {
+		return s
 	}
 	rv := reflect.ValueOf(v)
 	if rv.Kind() == reflect.Pointer && rv.IsNil() {
 		return "None"
 	}
 	return fmt.Sprintf("%v", v)
+}
+
+func dumpReprScalar(v any) (string, bool) {
+	switch x := v.(type) {
+	case bool:
+		if x {
+			return "True", true
+		}
+		return "False", true
+	case int:
+		return strconv.Itoa(x), true
+	case int8, int16, int32, int64:
+		return fmt.Sprintf("%d", x), true
+	case uint, uint8, uint16, uint32, uint64:
+		return fmt.Sprintf("%d", x), true
+	case float32:
+		return reprFloat(float64(x)), true
+	case float64:
+		return reprFloat(x), true
+	case complex64:
+		return reprComplex(complex128(x)), true
+	case complex128:
+		return reprComplex(x), true
+	case string:
+		return reprString(x), true
+	case []byte:
+		return reprBytes(x), true
+	}
+	return "", false
+}
+
+func dumpReprPointer(v any) (string, bool) {
+	switch x := v.(type) {
+	case *string:
+		if x == nil {
+			return "None", true
+		}
+		return reprString(*x), true
+	case *int:
+		if x == nil {
+			return "None", true
+		}
+		return strconv.Itoa(*x), true
+	case *big.Int:
+		return x.String(), true
+	}
+	return "", false
+}
+
+func dumpReprEnum(v any) (string, bool) {
+	switch x := v.(type) {
+	case ExprContext:
+		return x.String() + "()", true
+	case Boolop:
+		return x.String() + "()", true
+	case Operator:
+		return operatorName(x) + "()", true
+	case Unaryop:
+		return x.String() + "()", true
+	case Cmpop:
+		return cmpopName(x) + "()", true
+	}
+	return "", false
 }
 
 // operatorName returns the asdl name for an Operator value. gopy's
@@ -355,7 +377,7 @@ func reprComplex(c complex128) string {
 }
 
 // reprString ports Python's repr(str). Picks the quote style that
-// minimises escapes (single by default, double if the body contains
+// minimizes escapes (single by default, double if the body contains
 // a single quote and no double), then escapes \\ and the chosen quote
 // plus the standard non-printable escapes.
 func reprString(s string) string {
@@ -381,18 +403,15 @@ func reprString(s string) string {
 		case '\t':
 			b.WriteString("\\t")
 		default:
-			if r < 0x20 || r == 0x7f {
+			switch {
+			case r < 0x20 || r == 0x7f:
 				fmt.Fprintf(&b, "\\x%02x", r)
-			} else if r < 0x80 {
+			case r < 0x80, unicode.IsPrint(r):
 				b.WriteRune(r)
-			} else if unicode.IsPrint(r) {
-				b.WriteRune(r)
-			} else {
-				if r < 0x10000 {
-					fmt.Fprintf(&b, "\\u%04x", r)
-				} else {
-					fmt.Fprintf(&b, "\\U%08x", r)
-				}
+			case r < 0x10000:
+				fmt.Fprintf(&b, "\\u%04x", r)
+			default:
+				fmt.Fprintf(&b, "\\U%08x", r)
 			}
 		}
 	}
@@ -406,9 +425,10 @@ func reprBytes(bs []byte) string {
 	hasSingle := false
 	hasDouble := false
 	for _, b := range bs {
-		if b == '\'' {
+		switch b {
+		case '\'':
 			hasSingle = true
-		} else if b == '"' {
+		case '"':
 			hasDouble = true
 		}
 	}
