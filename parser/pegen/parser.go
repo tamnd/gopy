@@ -13,6 +13,7 @@
 package pegen
 
 import (
+	"github.com/tamnd/gopy/build"
 	perrors "github.com/tamnd/gopy/parser/errors"
 	"github.com/tamnd/gopy/parser/lexer"
 	"github.com/tamnd/gopy/token"
@@ -126,9 +127,10 @@ type Location struct {
 // CPython: Parser/pegen.c:1024 _PyPegen_Parser_New
 func New(tok *lexer.State, start StartRule, flags int) *Parser {
 	return &Parser{
-		tok:       tok,
-		startRule: start,
-		flags:     flags,
+		tok:            tok,
+		startRule:      start,
+		flags:          flags,
+		featureVersion: build.PythonMinorVersion,
 	}
 }
 
