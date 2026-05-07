@@ -515,8 +515,22 @@ func (e *emitter) writeAltItems(a *Alt, hasCut bool) []string {
 }
 
 // writeAltReturn emits the closure's return statement: a translated
-// action expression when possible, otherwise the bound names as a
-// []any (or placeholderMatched if nothing was bound).
+// action expression when possible, otherwise the default PEG action.
+//
+// The default action is the lone bound name (CPython: the c_generator
+// emits `_res = <var>` when the alt has a single positional and no
+// explicit action). Empty alts return placeholderMatched, multi-name
+// alts without a translated action keep the []any fallback.
+//
+// Critically, the alt's outer wrapper treats `v != nil` as "alt
+// matched". CPython instead treats "all items matched" as success and
+// allows the action to legitimately produce NULL. To bridge the two
+// without rewriting every alt, this emitter routes the return through
+// matchedOr — nil maps to placeholderMatched, real values pass through.
+// Action-translated alts (which always build a fresh node) skip the
+// guard so the typed value flows untouched.
+//
+// CPython: Tools/peg_generator/pegen/c_generator.py visit_Alt
 func (e *emitter) writeAltReturn(a *Alt, names []string) {
 	out := e.buf
 	bound := map[string]bool{}
@@ -524,11 +538,24 @@ func (e *emitter) writeAltReturn(a *Alt, names []string) {
 		bound[n] = true
 	}
 	if expr, ok := translateAction(a.Action, bound); ok && a.Action != "" {
+		// A bare binding `{ z }` carries the same nil-might-be-legit
+		// semantics as the PEG default action below, so wrap it the
+		// same way. Constructor calls (actionAst*, actionPgen*) and
+		// composite expressions take their nil at face value: nil
+		// means the action genuinely failed.
+		if bound[strings.TrimSpace(expr)] {
+			e.printf("\t\t\treturn matchedOr(%s)\n", expr)
+			return
+		}
 		e.printf("\t\t\treturn %s\n", expr)
 		return
 	}
 	if len(names) == 0 {
 		out.WriteString("\t\t\treturn placeholderMatched\n")
+		return
+	}
+	if len(names) == 1 {
+		e.printf("\t\t\treturn matchedOr(%s)\n", names[0])
 		return
 	}
 	out.WriteString("\t\t\treturn []any{")
