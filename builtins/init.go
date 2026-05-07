@@ -104,6 +104,11 @@ func Init(defaultFile io.Writer) (*objects.Dict, error) {
 		return nil, err
 	}
 
+	compileFn := objects.NewBuiltinFunction("compile", Compile)
+	if err := setBuiltin(dict, "compile", compileFn); err != nil {
+		return nil, err
+	}
+
 	if buildClass != nil {
 		bcFn := objects.NewBuiltinFunction("__build_class__", buildClass)
 		if err := setBuiltin(dict, "__build_class__", bcFn); err != nil {
