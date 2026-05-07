@@ -84,7 +84,7 @@ jobs:
           check-latest: true
       - run: go test -race -covermode=atomic -coverprofile=coverage.txt ./...
       - run: go tool cover -func=coverage.txt | tail -n 1
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: coverage
           path: coverage.txt
