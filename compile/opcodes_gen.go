@@ -25,166 +25,251 @@ const (
 
 // Opcode constants. Numeric values match cpython 3.14 opmap.
 const (
-	CACHE                             Opcode = 0
-	BINARY_SLICE                      Opcode = 1
-	BUILD_TEMPLATE                    Opcode = 2
-	CALL_FUNCTION_EX                  Opcode = 4
-	CHECK_EG_MATCH                    Opcode = 5
-	CHECK_EXC_MATCH                   Opcode = 6
-	CLEANUP_THROW                     Opcode = 7
-	DELETE_SUBSCR                     Opcode = 8
-	END_FOR                           Opcode = 9
-	END_SEND                          Opcode = 10
-	EXIT_INIT_CHECK                   Opcode = 11
-	FORMAT_SIMPLE                     Opcode = 12
-	FORMAT_WITH_SPEC                  Opcode = 13
-	GET_AITER                         Opcode = 14
-	GET_ANEXT                         Opcode = 15
-	GET_ITER                          Opcode = 16
-	RESERVED                          Opcode = 17
-	GET_LEN                           Opcode = 18
-	GET_YIELD_FROM_ITER               Opcode = 19
-	INTERPRETER_EXIT                  Opcode = 20
-	LOAD_BUILD_CLASS                  Opcode = 21
-	LOAD_LOCALS                       Opcode = 22
-	MAKE_FUNCTION                     Opcode = 23
-	MATCH_KEYS                        Opcode = 24
-	MATCH_MAPPING                     Opcode = 25
-	MATCH_SEQUENCE                    Opcode = 26
-	NOP                               Opcode = 27
-	NOT_TAKEN                         Opcode = 28
-	POP_EXCEPT                        Opcode = 29
-	POP_ITER                          Opcode = 30
-	POP_TOP                           Opcode = 31
-	PUSH_EXC_INFO                     Opcode = 32
-	PUSH_NULL                         Opcode = 33
-	RETURN_GENERATOR                  Opcode = 34
-	RETURN_VALUE                      Opcode = 35
-	SETUP_ANNOTATIONS                 Opcode = 36
-	STORE_SLICE                       Opcode = 37
-	STORE_SUBSCR                      Opcode = 38
-	TO_BOOL                           Opcode = 39
-	UNARY_INVERT                      Opcode = 40
-	UNARY_NEGATIVE                    Opcode = 41
-	UNARY_NOT                         Opcode = 42
-	WITH_EXCEPT_START                 Opcode = 43
-	BINARY_OP                         Opcode = 44
-	BUILD_INTERPOLATION               Opcode = 45
-	BUILD_LIST                        Opcode = 46
-	BUILD_MAP                         Opcode = 47
-	BUILD_SET                         Opcode = 48
-	BUILD_SLICE                       Opcode = 49
-	BUILD_STRING                      Opcode = 50
-	BUILD_TUPLE                       Opcode = 51
-	CALL                              Opcode = 52
-	CALL_INTRINSIC_1                  Opcode = 53
-	CALL_INTRINSIC_2                  Opcode = 54
-	CALL_KW                           Opcode = 55
-	COMPARE_OP                        Opcode = 56
-	CONTAINS_OP                       Opcode = 57
-	CONVERT_VALUE                     Opcode = 58
-	COPY                              Opcode = 59
-	COPY_FREE_VARS                    Opcode = 60
-	DELETE_ATTR                       Opcode = 61
-	DELETE_DEREF                      Opcode = 62
-	DELETE_FAST                       Opcode = 63
-	DELETE_GLOBAL                     Opcode = 64
-	DELETE_NAME                       Opcode = 65
-	DICT_MERGE                        Opcode = 66
-	DICT_UPDATE                       Opcode = 67
-	END_ASYNC_FOR                     Opcode = 68
-	EXTENDED_ARG                      Opcode = 69
-	FOR_ITER                          Opcode = 70
-	GET_AWAITABLE                     Opcode = 71
-	IMPORT_FROM                       Opcode = 72
-	IMPORT_NAME                       Opcode = 73
-	IS_OP                             Opcode = 74
-	JUMP_BACKWARD                     Opcode = 75
-	JUMP_BACKWARD_NO_INTERRUPT        Opcode = 76
-	JUMP_FORWARD                      Opcode = 77
-	LIST_APPEND                       Opcode = 78
-	LIST_EXTEND                       Opcode = 79
-	LOAD_ATTR                         Opcode = 80
-	LOAD_COMMON_CONSTANT              Opcode = 81
-	LOAD_CONST                        Opcode = 82
-	LOAD_DEREF                        Opcode = 83
-	LOAD_FAST                         Opcode = 84
-	LOAD_FAST_AND_CLEAR               Opcode = 85
-	LOAD_FAST_BORROW                  Opcode = 86
-	LOAD_FAST_BORROW_LOAD_FAST_BORROW Opcode = 87
-	LOAD_FAST_CHECK                   Opcode = 88
-	LOAD_FAST_LOAD_FAST               Opcode = 89
-	LOAD_FROM_DICT_OR_DEREF           Opcode = 90
-	LOAD_FROM_DICT_OR_GLOBALS         Opcode = 91
-	LOAD_GLOBAL                       Opcode = 92
-	LOAD_NAME                         Opcode = 93
-	LOAD_SMALL_INT                    Opcode = 94
-	LOAD_SPECIAL                      Opcode = 95
-	LOAD_SUPER_ATTR                   Opcode = 96
-	MAKE_CELL                         Opcode = 97
-	MAP_ADD                           Opcode = 98
-	MATCH_CLASS                       Opcode = 99
-	POP_JUMP_IF_FALSE                 Opcode = 100
-	POP_JUMP_IF_NONE                  Opcode = 101
-	POP_JUMP_IF_NOT_NONE              Opcode = 102
-	POP_JUMP_IF_TRUE                  Opcode = 103
-	RAISE_VARARGS                     Opcode = 104
-	RERAISE                           Opcode = 105
-	SEND                              Opcode = 106
-	SET_ADD                           Opcode = 107
-	SET_FUNCTION_ATTRIBUTE            Opcode = 108
-	SET_UPDATE                        Opcode = 109
-	STORE_ATTR                        Opcode = 110
-	STORE_DEREF                       Opcode = 111
-	STORE_FAST                        Opcode = 112
-	STORE_FAST_LOAD_FAST              Opcode = 113
-	STORE_FAST_STORE_FAST             Opcode = 114
-	STORE_GLOBAL                      Opcode = 115
-	STORE_NAME                        Opcode = 116
-	SWAP                              Opcode = 117
-	UNPACK_EX                         Opcode = 118
-	UNPACK_SEQUENCE                   Opcode = 119
-	YIELD_VALUE                       Opcode = 120
-	RESUME                            Opcode = 128
-	INSTRUMENTED_END_FOR              Opcode = 234
-	INSTRUMENTED_POP_ITER             Opcode = 235
-	INSTRUMENTED_END_SEND             Opcode = 236
-	INSTRUMENTED_FOR_ITER             Opcode = 237
-	INSTRUMENTED_INSTRUCTION          Opcode = 238
-	INSTRUMENTED_JUMP_FORWARD         Opcode = 239
-	INSTRUMENTED_NOT_TAKEN            Opcode = 240
-	INSTRUMENTED_POP_JUMP_IF_TRUE     Opcode = 241
-	INSTRUMENTED_POP_JUMP_IF_FALSE    Opcode = 242
-	INSTRUMENTED_POP_JUMP_IF_NONE     Opcode = 243
-	INSTRUMENTED_POP_JUMP_IF_NOT_NONE Opcode = 244
-	INSTRUMENTED_RESUME               Opcode = 245
-	INSTRUMENTED_RETURN_VALUE         Opcode = 246
-	INSTRUMENTED_YIELD_VALUE          Opcode = 247
-	INSTRUMENTED_END_ASYNC_FOR        Opcode = 248
-	INSTRUMENTED_LOAD_SUPER_ATTR      Opcode = 249
-	INSTRUMENTED_CALL                 Opcode = 250
-	INSTRUMENTED_CALL_KW              Opcode = 251
-	INSTRUMENTED_CALL_FUNCTION_EX     Opcode = 252
-	INSTRUMENTED_JUMP_BACKWARD        Opcode = 253
-	INSTRUMENTED_LINE                 Opcode = 254
-	ENTER_EXECUTOR                    Opcode = 255
-	ANNOTATIONS_PLACEHOLDER           Opcode = 256
-	JUMP                              Opcode = 257
-	JUMP_IF_FALSE                     Opcode = 258
-	JUMP_IF_TRUE                      Opcode = 259
-	JUMP_NO_INTERRUPT                 Opcode = 260
-	LOAD_CLOSURE                      Opcode = 261
-	POP_BLOCK                         Opcode = 262
-	SETUP_CLEANUP                     Opcode = 263
-	SETUP_FINALLY                     Opcode = 264
-	SETUP_WITH                        Opcode = 265
-	STORE_FAST_MAYBE_NULL             Opcode = 266
+	CACHE                                     Opcode = 0
+	BINARY_SLICE                              Opcode = 1
+	BUILD_TEMPLATE                            Opcode = 2
+	BINARY_OP_INPLACE_ADD_UNICODE             Opcode = 3
+	CALL_FUNCTION_EX                          Opcode = 4
+	CHECK_EG_MATCH                            Opcode = 5
+	CHECK_EXC_MATCH                           Opcode = 6
+	CLEANUP_THROW                             Opcode = 7
+	DELETE_SUBSCR                             Opcode = 8
+	END_FOR                                   Opcode = 9
+	END_SEND                                  Opcode = 10
+	EXIT_INIT_CHECK                           Opcode = 11
+	FORMAT_SIMPLE                             Opcode = 12
+	FORMAT_WITH_SPEC                          Opcode = 13
+	GET_AITER                                 Opcode = 14
+	GET_ANEXT                                 Opcode = 15
+	GET_ITER                                  Opcode = 16
+	RESERVED                                  Opcode = 17
+	GET_LEN                                   Opcode = 18
+	GET_YIELD_FROM_ITER                       Opcode = 19
+	INTERPRETER_EXIT                          Opcode = 20
+	LOAD_BUILD_CLASS                          Opcode = 21
+	LOAD_LOCALS                               Opcode = 22
+	MAKE_FUNCTION                             Opcode = 23
+	MATCH_KEYS                                Opcode = 24
+	MATCH_MAPPING                             Opcode = 25
+	MATCH_SEQUENCE                            Opcode = 26
+	NOP                                       Opcode = 27
+	NOT_TAKEN                                 Opcode = 28
+	POP_EXCEPT                                Opcode = 29
+	POP_ITER                                  Opcode = 30
+	POP_TOP                                   Opcode = 31
+	PUSH_EXC_INFO                             Opcode = 32
+	PUSH_NULL                                 Opcode = 33
+	RETURN_GENERATOR                          Opcode = 34
+	RETURN_VALUE                              Opcode = 35
+	SETUP_ANNOTATIONS                         Opcode = 36
+	STORE_SLICE                               Opcode = 37
+	STORE_SUBSCR                              Opcode = 38
+	TO_BOOL                                   Opcode = 39
+	UNARY_INVERT                              Opcode = 40
+	UNARY_NEGATIVE                            Opcode = 41
+	UNARY_NOT                                 Opcode = 42
+	WITH_EXCEPT_START                         Opcode = 43
+	BINARY_OP                                 Opcode = 44
+	BUILD_INTERPOLATION                       Opcode = 45
+	BUILD_LIST                                Opcode = 46
+	BUILD_MAP                                 Opcode = 47
+	BUILD_SET                                 Opcode = 48
+	BUILD_SLICE                               Opcode = 49
+	BUILD_STRING                              Opcode = 50
+	BUILD_TUPLE                               Opcode = 51
+	CALL                                      Opcode = 52
+	CALL_INTRINSIC_1                          Opcode = 53
+	CALL_INTRINSIC_2                          Opcode = 54
+	CALL_KW                                   Opcode = 55
+	COMPARE_OP                                Opcode = 56
+	CONTAINS_OP                               Opcode = 57
+	CONVERT_VALUE                             Opcode = 58
+	COPY                                      Opcode = 59
+	COPY_FREE_VARS                            Opcode = 60
+	DELETE_ATTR                               Opcode = 61
+	DELETE_DEREF                              Opcode = 62
+	DELETE_FAST                               Opcode = 63
+	DELETE_GLOBAL                             Opcode = 64
+	DELETE_NAME                               Opcode = 65
+	DICT_MERGE                                Opcode = 66
+	DICT_UPDATE                               Opcode = 67
+	END_ASYNC_FOR                             Opcode = 68
+	EXTENDED_ARG                              Opcode = 69
+	FOR_ITER                                  Opcode = 70
+	GET_AWAITABLE                             Opcode = 71
+	IMPORT_FROM                               Opcode = 72
+	IMPORT_NAME                               Opcode = 73
+	IS_OP                                     Opcode = 74
+	JUMP_BACKWARD                             Opcode = 75
+	JUMP_BACKWARD_NO_INTERRUPT                Opcode = 76
+	JUMP_FORWARD                              Opcode = 77
+	LIST_APPEND                               Opcode = 78
+	LIST_EXTEND                               Opcode = 79
+	LOAD_ATTR                                 Opcode = 80
+	LOAD_COMMON_CONSTANT                      Opcode = 81
+	LOAD_CONST                                Opcode = 82
+	LOAD_DEREF                                Opcode = 83
+	LOAD_FAST                                 Opcode = 84
+	LOAD_FAST_AND_CLEAR                       Opcode = 85
+	LOAD_FAST_BORROW                          Opcode = 86
+	LOAD_FAST_BORROW_LOAD_FAST_BORROW         Opcode = 87
+	LOAD_FAST_CHECK                           Opcode = 88
+	LOAD_FAST_LOAD_FAST                       Opcode = 89
+	LOAD_FROM_DICT_OR_DEREF                   Opcode = 90
+	LOAD_FROM_DICT_OR_GLOBALS                 Opcode = 91
+	LOAD_GLOBAL                               Opcode = 92
+	LOAD_NAME                                 Opcode = 93
+	LOAD_SMALL_INT                            Opcode = 94
+	LOAD_SPECIAL                              Opcode = 95
+	LOAD_SUPER_ATTR                           Opcode = 96
+	MAKE_CELL                                 Opcode = 97
+	MAP_ADD                                   Opcode = 98
+	MATCH_CLASS                               Opcode = 99
+	POP_JUMP_IF_FALSE                         Opcode = 100
+	POP_JUMP_IF_NONE                          Opcode = 101
+	POP_JUMP_IF_NOT_NONE                      Opcode = 102
+	POP_JUMP_IF_TRUE                          Opcode = 103
+	RAISE_VARARGS                             Opcode = 104
+	RERAISE                                   Opcode = 105
+	SEND                                      Opcode = 106
+	SET_ADD                                   Opcode = 107
+	SET_FUNCTION_ATTRIBUTE                    Opcode = 108
+	SET_UPDATE                                Opcode = 109
+	STORE_ATTR                                Opcode = 110
+	STORE_DEREF                               Opcode = 111
+	STORE_FAST                                Opcode = 112
+	STORE_FAST_LOAD_FAST                      Opcode = 113
+	STORE_FAST_STORE_FAST                     Opcode = 114
+	STORE_GLOBAL                              Opcode = 115
+	STORE_NAME                                Opcode = 116
+	SWAP                                      Opcode = 117
+	UNPACK_EX                                 Opcode = 118
+	UNPACK_SEQUENCE                           Opcode = 119
+	YIELD_VALUE                               Opcode = 120
+	RESUME                                    Opcode = 128
+	BINARY_OP_ADD_FLOAT                       Opcode = 129
+	BINARY_OP_ADD_INT                         Opcode = 130
+	BINARY_OP_ADD_UNICODE                     Opcode = 131
+	BINARY_OP_EXTEND                          Opcode = 132
+	BINARY_OP_MULTIPLY_FLOAT                  Opcode = 133
+	BINARY_OP_MULTIPLY_INT                    Opcode = 134
+	BINARY_OP_SUBSCR_DICT                     Opcode = 135
+	BINARY_OP_SUBSCR_GETITEM                  Opcode = 136
+	BINARY_OP_SUBSCR_LIST_INT                 Opcode = 137
+	BINARY_OP_SUBSCR_LIST_SLICE               Opcode = 138
+	BINARY_OP_SUBSCR_STR_INT                  Opcode = 139
+	BINARY_OP_SUBSCR_TUPLE_INT                Opcode = 140
+	BINARY_OP_SUBTRACT_FLOAT                  Opcode = 141
+	BINARY_OP_SUBTRACT_INT                    Opcode = 142
+	CALL_ALLOC_AND_ENTER_INIT                 Opcode = 143
+	CALL_BOUND_METHOD_EXACT_ARGS              Opcode = 144
+	CALL_BOUND_METHOD_GENERAL                 Opcode = 145
+	CALL_BUILTIN_CLASS                        Opcode = 146
+	CALL_BUILTIN_FAST                         Opcode = 147
+	CALL_BUILTIN_FAST_WITH_KEYWORDS           Opcode = 148
+	CALL_BUILTIN_O                            Opcode = 149
+	CALL_ISINSTANCE                           Opcode = 150
+	CALL_KW_BOUND_METHOD                      Opcode = 151
+	CALL_KW_NON_PY                            Opcode = 152
+	CALL_KW_PY                                Opcode = 153
+	CALL_LEN                                  Opcode = 154
+	CALL_LIST_APPEND                          Opcode = 155
+	CALL_METHOD_DESCRIPTOR_FAST               Opcode = 156
+	CALL_METHOD_DESCRIPTOR_FAST_WITH_KEYWORDS Opcode = 157
+	CALL_METHOD_DESCRIPTOR_NOARGS             Opcode = 158
+	CALL_METHOD_DESCRIPTOR_O                  Opcode = 159
+	CALL_NON_PY_GENERAL                       Opcode = 160
+	CALL_PY_EXACT_ARGS                        Opcode = 161
+	CALL_PY_GENERAL                           Opcode = 162
+	CALL_STR_1                                Opcode = 163
+	CALL_TUPLE_1                              Opcode = 164
+	CALL_TYPE_1                               Opcode = 165
+	COMPARE_OP_FLOAT                          Opcode = 166
+	COMPARE_OP_INT                            Opcode = 167
+	COMPARE_OP_STR                            Opcode = 168
+	CONTAINS_OP_DICT                          Opcode = 169
+	CONTAINS_OP_SET                           Opcode = 170
+	FOR_ITER_GEN                              Opcode = 171
+	FOR_ITER_LIST                             Opcode = 172
+	FOR_ITER_RANGE                            Opcode = 173
+	FOR_ITER_TUPLE                            Opcode = 174
+	JUMP_BACKWARD_JIT                         Opcode = 175
+	JUMP_BACKWARD_NO_JIT                      Opcode = 176
+	LOAD_ATTR_CLASS                           Opcode = 177
+	LOAD_ATTR_CLASS_WITH_METACLASS_CHECK      Opcode = 178
+	LOAD_ATTR_GETATTRIBUTE_OVERRIDDEN         Opcode = 179
+	LOAD_ATTR_INSTANCE_VALUE                  Opcode = 180
+	LOAD_ATTR_METHOD_LAZY_DICT                Opcode = 181
+	LOAD_ATTR_METHOD_NO_DICT                  Opcode = 182
+	LOAD_ATTR_METHOD_WITH_VALUES              Opcode = 183
+	LOAD_ATTR_MODULE                          Opcode = 184
+	LOAD_ATTR_NONDESCRIPTOR_NO_DICT           Opcode = 185
+	LOAD_ATTR_NONDESCRIPTOR_WITH_VALUES       Opcode = 186
+	LOAD_ATTR_PROPERTY                        Opcode = 187
+	LOAD_ATTR_SLOT                            Opcode = 188
+	LOAD_ATTR_WITH_HINT                       Opcode = 189
+	LOAD_CONST_IMMORTAL                       Opcode = 190
+	LOAD_CONST_MORTAL                         Opcode = 191
+	LOAD_GLOBAL_BUILTIN                       Opcode = 192
+	LOAD_GLOBAL_MODULE                        Opcode = 193
+	LOAD_SUPER_ATTR_ATTR                      Opcode = 194
+	LOAD_SUPER_ATTR_METHOD                    Opcode = 195
+	RESUME_CHECK                              Opcode = 196
+	SEND_GEN                                  Opcode = 197
+	STORE_ATTR_INSTANCE_VALUE                 Opcode = 198
+	STORE_ATTR_SLOT                           Opcode = 199
+	STORE_ATTR_WITH_HINT                      Opcode = 200
+	STORE_SUBSCR_DICT                         Opcode = 201
+	STORE_SUBSCR_LIST_INT                     Opcode = 202
+	TO_BOOL_ALWAYS_TRUE                       Opcode = 203
+	TO_BOOL_BOOL                              Opcode = 204
+	TO_BOOL_INT                               Opcode = 205
+	TO_BOOL_LIST                              Opcode = 206
+	TO_BOOL_NONE                              Opcode = 207
+	TO_BOOL_STR                               Opcode = 208
+	UNPACK_SEQUENCE_LIST                      Opcode = 209
+	UNPACK_SEQUENCE_TUPLE                     Opcode = 210
+	UNPACK_SEQUENCE_TWO_TUPLE                 Opcode = 211
+	INSTRUMENTED_END_FOR                      Opcode = 234
+	INSTRUMENTED_POP_ITER                     Opcode = 235
+	INSTRUMENTED_END_SEND                     Opcode = 236
+	INSTRUMENTED_FOR_ITER                     Opcode = 237
+	INSTRUMENTED_INSTRUCTION                  Opcode = 238
+	INSTRUMENTED_JUMP_FORWARD                 Opcode = 239
+	INSTRUMENTED_NOT_TAKEN                    Opcode = 240
+	INSTRUMENTED_POP_JUMP_IF_TRUE             Opcode = 241
+	INSTRUMENTED_POP_JUMP_IF_FALSE            Opcode = 242
+	INSTRUMENTED_POP_JUMP_IF_NONE             Opcode = 243
+	INSTRUMENTED_POP_JUMP_IF_NOT_NONE         Opcode = 244
+	INSTRUMENTED_RESUME                       Opcode = 245
+	INSTRUMENTED_RETURN_VALUE                 Opcode = 246
+	INSTRUMENTED_YIELD_VALUE                  Opcode = 247
+	INSTRUMENTED_END_ASYNC_FOR                Opcode = 248
+	INSTRUMENTED_LOAD_SUPER_ATTR              Opcode = 249
+	INSTRUMENTED_CALL                         Opcode = 250
+	INSTRUMENTED_CALL_KW                      Opcode = 251
+	INSTRUMENTED_CALL_FUNCTION_EX             Opcode = 252
+	INSTRUMENTED_JUMP_BACKWARD                Opcode = 253
+	INSTRUMENTED_LINE                         Opcode = 254
+	ENTER_EXECUTOR                            Opcode = 255
+	ANNOTATIONS_PLACEHOLDER                   Opcode = 256
+	JUMP                                      Opcode = 257
+	JUMP_IF_FALSE                             Opcode = 258
+	JUMP_IF_TRUE                              Opcode = 259
+	JUMP_NO_INTERRUPT                         Opcode = 260
+	LOAD_CLOSURE                              Opcode = 261
+	POP_BLOCK                                 Opcode = 262
+	SETUP_CLEANUP                             Opcode = 263
+	SETUP_FINALLY                             Opcode = 264
+	SETUP_WITH                                Opcode = 265
+	STORE_FAST_MAYBE_NULL                     Opcode = 266
 )
 
 // opcodeFlags is indexed by opcode value.
 var opcodeFlags = [267]uint16{
 	BINARY_SLICE:                      0x0300,
 	BUILD_TEMPLATE:                    0x0300,
+	BINARY_OP_INPLACE_ADD_UNICODE:     0x07a0,
 	CALL_FUNCTION_EX:                  0x4340,
 	CHECK_EG_MATCH:                    0x0300,
 	CHECK_EXC_MATCH:                   0x4300,
@@ -299,33 +384,117 @@ var opcodeFlags = [267]uint16{
 	UNPACK_SEQUENCE:                   0x0301,
 	YIELD_VALUE:                       0x0001,
 	RESUME:                            0x4341,
-	INSTRUMENTED_END_FOR:              0xc300,
-	INSTRUMENTED_POP_ITER:             0x0200,
-	INSTRUMENTED_END_SEND:             0x4300,
-	INSTRUMENTED_FOR_ITER:             0x4309,
-	INSTRUMENTED_INSTRUCTION:          0x0300,
-	INSTRUMENTED_JUMP_FORWARD:         0x0001,
-	INSTRUMENTED_POP_JUMP_IF_TRUE:     0x0001,
-	INSTRUMENTED_POP_JUMP_IF_FALSE:    0x0001,
-	INSTRUMENTED_POP_JUMP_IF_NONE:     0x0201,
-	INSTRUMENTED_POP_JUMP_IF_NOT_NONE: 0x0201,
-	INSTRUMENTED_RESUME:               0x4341,
-	INSTRUMENTED_RETURN_VALUE:         0x0300,
-	INSTRUMENTED_YIELD_VALUE:          0x4301,
-	INSTRUMENTED_END_ASYNC_FOR:        0x4309,
-	INSTRUMENTED_LOAD_SUPER_ATTR:      0x0305,
-	INSTRUMENTED_CALL:                 0x4341,
-	INSTRUMENTED_CALL_KW:              0x4301,
-	INSTRUMENTED_CALL_FUNCTION_EX:     0x4340,
-	INSTRUMENTED_JUMP_BACKWARD:        0x0341,
-	INSTRUMENTED_LINE:                 0x0200,
-	ENTER_EXECUTOR:                    0x0001,
+	BINARY_OP_ADD_FLOAT:               0x0500,
+	BINARY_OP_ADD_INT:                 0x0700,
+	BINARY_OP_ADD_UNICODE:             0x0500,
+	BINARY_OP_EXTEND:                  0x0380,
+	BINARY_OP_MULTIPLY_FLOAT:          0x0500,
+	BINARY_OP_MULTIPLY_INT:            0x0700,
+	BINARY_OP_SUBSCR_DICT:             0x0700,
+	BINARY_OP_SUBSCR_GETITEM:          0x0080,
+	BINARY_OP_SUBSCR_LIST_INT:         0x0680,
+	BINARY_OP_SUBSCR_LIST_SLICE:       0x0700,
+	BINARY_OP_SUBSCR_STR_INT:          0x0680,
+	BINARY_OP_SUBSCR_TUPLE_INT:        0x0480,
+	BINARY_OP_SUBTRACT_FLOAT:          0x0500,
+	BINARY_OP_SUBTRACT_INT:            0x0700,
+	CALL_ALLOC_AND_ENTER_INIT:         0x4381,
+	CALL_BOUND_METHOD_EXACT_ARGS:      0x0681,
+	CALL_BOUND_METHOD_GENERAL:         0x4781,
+	CALL_BUILTIN_CLASS:                0x03c1,
+	CALL_BUILTIN_FAST:                 0x03c1,
+	CALL_BUILTIN_FAST_WITH_KEYWORDS:   0x03c1,
+	CALL_BUILTIN_O:                    0x0741,
+	CALL_ISINSTANCE:                   0x4381,
+	CALL_KW_BOUND_METHOD:              0x0781,
+	CALL_KW_NON_PY:                    0x0741,
+	CALL_KW_PY:                        0x0781,
+	CALL_LEN:                          0x4380,
+	CALL_LIST_APPEND:                  0x0381,
+	CALL_METHOD_DESCRIPTOR_FAST:       0x0741,
+	CALL_METHOD_DESCRIPTOR_FAST_WITH_KEYWORDS: 0x0741,
+	CALL_METHOD_DESCRIPTOR_NOARGS:             0x0741,
+	CALL_METHOD_DESCRIPTOR_O:                  0x0741,
+	CALL_NON_PY_GENERAL:                       0x0741,
+	CALL_PY_EXACT_ARGS:                        0x0481,
+	CALL_PY_GENERAL:                           0x4781,
+	CALL_STR_1:                                0x03c1,
+	CALL_TUPLE_1:                              0x03c1,
+	CALL_TYPE_1:                               0x0281,
+	COMPARE_OP_FLOAT:                          0x0401,
+	COMPARE_OP_INT:                            0x0481,
+	COMPARE_OP_STR:                            0x0401,
+	CONTAINS_OP_DICT:                          0x0701,
+	CONTAINS_OP_SET:                           0x0381,
+	FOR_ITER_GEN:                              0x0081,
+	FOR_ITER_LIST:                             0x0689,
+	FOR_ITER_RANGE:                            0x0509,
+	FOR_ITER_TUPLE:                            0x0609,
+	JUMP_BACKWARD_JIT:                         0x0349,
+	JUMP_BACKWARD_NO_JIT:                      0x0349,
+	LOAD_ATTR_CLASS:                           0x0401,
+	LOAD_ATTR_CLASS_WITH_METACLASS_CHECK:      0x0401,
+	LOAD_ATTR_GETATTRIBUTE_OVERRIDDEN:         0x0085,
+	LOAD_ATTR_INSTANCE_VALUE:                  0x0681,
+	LOAD_ATTR_METHOD_LAZY_DICT:                0x0481,
+	LOAD_ATTR_METHOD_NO_DICT:                  0x0401,
+	LOAD_ATTR_METHOD_WITH_VALUES:              0x0481,
+	LOAD_ATTR_MODULE:                          0x0281,
+	LOAD_ATTR_NONDESCRIPTOR_NO_DICT:           0x0601,
+	LOAD_ATTR_NONDESCRIPTOR_WITH_VALUES:       0x0681,
+	LOAD_ATTR_PROPERTY:                        0x0481,
+	LOAD_ATTR_SLOT:                            0x0481,
+	LOAD_ATTR_WITH_HINT:                       0x0685,
+	LOAD_CONST_IMMORTAL:                       0x0003,
+	LOAD_CONST_MORTAL:                         0x0003,
+	LOAD_GLOBAL_BUILTIN:                       0x0081,
+	LOAD_GLOBAL_MODULE:                        0x0081,
+	LOAD_SUPER_ATTR_ATTR:                      0x0385,
+	LOAD_SUPER_ATTR_METHOD:                    0x4385,
+	RESUME_CHECK:                              0x0080,
+	SEND_GEN:                                  0x0081,
+	STORE_ATTR_INSTANCE_VALUE:                 0x0600,
+	STORE_ATTR_SLOT:                           0x0680,
+	STORE_ATTR_WITH_HINT:                      0x0685,
+	STORE_SUBSCR_DICT:                         0x0700,
+	STORE_SUBSCR_LIST_INT:                     0x0680,
+	TO_BOOL_ALWAYS_TRUE:                       0x0600,
+	TO_BOOL_BOOL:                              0x0400,
+	TO_BOOL_INT:                               0x0600,
+	TO_BOOL_LIST:                              0x0400,
+	TO_BOOL_NONE:                              0x0400,
+	TO_BOOL_STR:                               0x0600,
+	UNPACK_SEQUENCE_LIST:                      0x0481,
+	UNPACK_SEQUENCE_TUPLE:                     0x0481,
+	UNPACK_SEQUENCE_TWO_TUPLE:                 0x0681,
+	INSTRUMENTED_END_FOR:                      0xc300,
+	INSTRUMENTED_POP_ITER:                     0x0200,
+	INSTRUMENTED_END_SEND:                     0x4300,
+	INSTRUMENTED_FOR_ITER:                     0x4309,
+	INSTRUMENTED_INSTRUCTION:                  0x0300,
+	INSTRUMENTED_JUMP_FORWARD:                 0x0001,
+	INSTRUMENTED_POP_JUMP_IF_TRUE:             0x0001,
+	INSTRUMENTED_POP_JUMP_IF_FALSE:            0x0001,
+	INSTRUMENTED_POP_JUMP_IF_NONE:             0x0201,
+	INSTRUMENTED_POP_JUMP_IF_NOT_NONE:         0x0201,
+	INSTRUMENTED_RESUME:                       0x4341,
+	INSTRUMENTED_RETURN_VALUE:                 0x0300,
+	INSTRUMENTED_YIELD_VALUE:                  0x4301,
+	INSTRUMENTED_END_ASYNC_FOR:                0x4309,
+	INSTRUMENTED_LOAD_SUPER_ATTR:              0x0305,
+	INSTRUMENTED_CALL:                         0x4341,
+	INSTRUMENTED_CALL_KW:                      0x4301,
+	INSTRUMENTED_CALL_FUNCTION_EX:             0x4340,
+	INSTRUMENTED_JUMP_BACKWARD:                0x0341,
+	INSTRUMENTED_LINE:                         0x0200,
+	ENTER_EXECUTOR:                            0x0001,
 }
 
 var opcodeName = [267]string{
 	CACHE:                             "CACHE",
 	BINARY_SLICE:                      "BINARY_SLICE",
 	BUILD_TEMPLATE:                    "BUILD_TEMPLATE",
+	BINARY_OP_INPLACE_ADD_UNICODE:     "BINARY_OP_INPLACE_ADD_UNICODE",
 	CALL_FUNCTION_EX:                  "CALL_FUNCTION_EX",
 	CHECK_EG_MATCH:                    "CHECK_EG_MATCH",
 	CHECK_EXC_MATCH:                   "CHECK_EXC_MATCH",
@@ -444,39 +613,122 @@ var opcodeName = [267]string{
 	UNPACK_SEQUENCE:                   "UNPACK_SEQUENCE",
 	YIELD_VALUE:                       "YIELD_VALUE",
 	RESUME:                            "RESUME",
-	INSTRUMENTED_END_FOR:              "INSTRUMENTED_END_FOR",
-	INSTRUMENTED_POP_ITER:             "INSTRUMENTED_POP_ITER",
-	INSTRUMENTED_END_SEND:             "INSTRUMENTED_END_SEND",
-	INSTRUMENTED_FOR_ITER:             "INSTRUMENTED_FOR_ITER",
-	INSTRUMENTED_INSTRUCTION:          "INSTRUMENTED_INSTRUCTION",
-	INSTRUMENTED_JUMP_FORWARD:         "INSTRUMENTED_JUMP_FORWARD",
-	INSTRUMENTED_NOT_TAKEN:            "INSTRUMENTED_NOT_TAKEN",
-	INSTRUMENTED_POP_JUMP_IF_TRUE:     "INSTRUMENTED_POP_JUMP_IF_TRUE",
-	INSTRUMENTED_POP_JUMP_IF_FALSE:    "INSTRUMENTED_POP_JUMP_IF_FALSE",
-	INSTRUMENTED_POP_JUMP_IF_NONE:     "INSTRUMENTED_POP_JUMP_IF_NONE",
-	INSTRUMENTED_POP_JUMP_IF_NOT_NONE: "INSTRUMENTED_POP_JUMP_IF_NOT_NONE",
-	INSTRUMENTED_RESUME:               "INSTRUMENTED_RESUME",
-	INSTRUMENTED_RETURN_VALUE:         "INSTRUMENTED_RETURN_VALUE",
-	INSTRUMENTED_YIELD_VALUE:          "INSTRUMENTED_YIELD_VALUE",
-	INSTRUMENTED_END_ASYNC_FOR:        "INSTRUMENTED_END_ASYNC_FOR",
-	INSTRUMENTED_LOAD_SUPER_ATTR:      "INSTRUMENTED_LOAD_SUPER_ATTR",
-	INSTRUMENTED_CALL:                 "INSTRUMENTED_CALL",
-	INSTRUMENTED_CALL_KW:              "INSTRUMENTED_CALL_KW",
-	INSTRUMENTED_CALL_FUNCTION_EX:     "INSTRUMENTED_CALL_FUNCTION_EX",
-	INSTRUMENTED_JUMP_BACKWARD:        "INSTRUMENTED_JUMP_BACKWARD",
-	INSTRUMENTED_LINE:                 "INSTRUMENTED_LINE",
-	ENTER_EXECUTOR:                    "ENTER_EXECUTOR",
-	ANNOTATIONS_PLACEHOLDER:           "ANNOTATIONS_PLACEHOLDER",
-	JUMP:                              "JUMP",
-	JUMP_IF_FALSE:                     "JUMP_IF_FALSE",
-	JUMP_IF_TRUE:                      "JUMP_IF_TRUE",
-	JUMP_NO_INTERRUPT:                 "JUMP_NO_INTERRUPT",
-	LOAD_CLOSURE:                      "LOAD_CLOSURE",
-	POP_BLOCK:                         "POP_BLOCK",
-	SETUP_CLEANUP:                     "SETUP_CLEANUP",
-	SETUP_FINALLY:                     "SETUP_FINALLY",
-	SETUP_WITH:                        "SETUP_WITH",
-	STORE_FAST_MAYBE_NULL:             "STORE_FAST_MAYBE_NULL",
+	BINARY_OP_ADD_FLOAT:               "BINARY_OP_ADD_FLOAT",
+	BINARY_OP_ADD_INT:                 "BINARY_OP_ADD_INT",
+	BINARY_OP_ADD_UNICODE:             "BINARY_OP_ADD_UNICODE",
+	BINARY_OP_EXTEND:                  "BINARY_OP_EXTEND",
+	BINARY_OP_MULTIPLY_FLOAT:          "BINARY_OP_MULTIPLY_FLOAT",
+	BINARY_OP_MULTIPLY_INT:            "BINARY_OP_MULTIPLY_INT",
+	BINARY_OP_SUBSCR_DICT:             "BINARY_OP_SUBSCR_DICT",
+	BINARY_OP_SUBSCR_GETITEM:          "BINARY_OP_SUBSCR_GETITEM",
+	BINARY_OP_SUBSCR_LIST_INT:         "BINARY_OP_SUBSCR_LIST_INT",
+	BINARY_OP_SUBSCR_LIST_SLICE:       "BINARY_OP_SUBSCR_LIST_SLICE",
+	BINARY_OP_SUBSCR_STR_INT:          "BINARY_OP_SUBSCR_STR_INT",
+	BINARY_OP_SUBSCR_TUPLE_INT:        "BINARY_OP_SUBSCR_TUPLE_INT",
+	BINARY_OP_SUBTRACT_FLOAT:          "BINARY_OP_SUBTRACT_FLOAT",
+	BINARY_OP_SUBTRACT_INT:            "BINARY_OP_SUBTRACT_INT",
+	CALL_ALLOC_AND_ENTER_INIT:         "CALL_ALLOC_AND_ENTER_INIT",
+	CALL_BOUND_METHOD_EXACT_ARGS:      "CALL_BOUND_METHOD_EXACT_ARGS",
+	CALL_BOUND_METHOD_GENERAL:         "CALL_BOUND_METHOD_GENERAL",
+	CALL_BUILTIN_CLASS:                "CALL_BUILTIN_CLASS",
+	CALL_BUILTIN_FAST:                 "CALL_BUILTIN_FAST",
+	CALL_BUILTIN_FAST_WITH_KEYWORDS:   "CALL_BUILTIN_FAST_WITH_KEYWORDS",
+	CALL_BUILTIN_O:                    "CALL_BUILTIN_O",
+	CALL_ISINSTANCE:                   "CALL_ISINSTANCE",
+	CALL_KW_BOUND_METHOD:              "CALL_KW_BOUND_METHOD",
+	CALL_KW_NON_PY:                    "CALL_KW_NON_PY",
+	CALL_KW_PY:                        "CALL_KW_PY",
+	CALL_LEN:                          "CALL_LEN",
+	CALL_LIST_APPEND:                  "CALL_LIST_APPEND",
+	CALL_METHOD_DESCRIPTOR_FAST:       "CALL_METHOD_DESCRIPTOR_FAST",
+	CALL_METHOD_DESCRIPTOR_FAST_WITH_KEYWORDS: "CALL_METHOD_DESCRIPTOR_FAST_WITH_KEYWORDS",
+	CALL_METHOD_DESCRIPTOR_NOARGS:             "CALL_METHOD_DESCRIPTOR_NOARGS",
+	CALL_METHOD_DESCRIPTOR_O:                  "CALL_METHOD_DESCRIPTOR_O",
+	CALL_NON_PY_GENERAL:                       "CALL_NON_PY_GENERAL",
+	CALL_PY_EXACT_ARGS:                        "CALL_PY_EXACT_ARGS",
+	CALL_PY_GENERAL:                           "CALL_PY_GENERAL",
+	CALL_STR_1:                                "CALL_STR_1",
+	CALL_TUPLE_1:                              "CALL_TUPLE_1",
+	CALL_TYPE_1:                               "CALL_TYPE_1",
+	COMPARE_OP_FLOAT:                          "COMPARE_OP_FLOAT",
+	COMPARE_OP_INT:                            "COMPARE_OP_INT",
+	COMPARE_OP_STR:                            "COMPARE_OP_STR",
+	CONTAINS_OP_DICT:                          "CONTAINS_OP_DICT",
+	CONTAINS_OP_SET:                           "CONTAINS_OP_SET",
+	FOR_ITER_GEN:                              "FOR_ITER_GEN",
+	FOR_ITER_LIST:                             "FOR_ITER_LIST",
+	FOR_ITER_RANGE:                            "FOR_ITER_RANGE",
+	FOR_ITER_TUPLE:                            "FOR_ITER_TUPLE",
+	JUMP_BACKWARD_JIT:                         "JUMP_BACKWARD_JIT",
+	JUMP_BACKWARD_NO_JIT:                      "JUMP_BACKWARD_NO_JIT",
+	LOAD_ATTR_CLASS:                           "LOAD_ATTR_CLASS",
+	LOAD_ATTR_CLASS_WITH_METACLASS_CHECK:      "LOAD_ATTR_CLASS_WITH_METACLASS_CHECK",
+	LOAD_ATTR_GETATTRIBUTE_OVERRIDDEN:         "LOAD_ATTR_GETATTRIBUTE_OVERRIDDEN",
+	LOAD_ATTR_INSTANCE_VALUE:                  "LOAD_ATTR_INSTANCE_VALUE",
+	LOAD_ATTR_METHOD_LAZY_DICT:                "LOAD_ATTR_METHOD_LAZY_DICT",
+	LOAD_ATTR_METHOD_NO_DICT:                  "LOAD_ATTR_METHOD_NO_DICT",
+	LOAD_ATTR_METHOD_WITH_VALUES:              "LOAD_ATTR_METHOD_WITH_VALUES",
+	LOAD_ATTR_MODULE:                          "LOAD_ATTR_MODULE",
+	LOAD_ATTR_NONDESCRIPTOR_NO_DICT:           "LOAD_ATTR_NONDESCRIPTOR_NO_DICT",
+	LOAD_ATTR_NONDESCRIPTOR_WITH_VALUES:       "LOAD_ATTR_NONDESCRIPTOR_WITH_VALUES",
+	LOAD_ATTR_PROPERTY:                        "LOAD_ATTR_PROPERTY",
+	LOAD_ATTR_SLOT:                            "LOAD_ATTR_SLOT",
+	LOAD_ATTR_WITH_HINT:                       "LOAD_ATTR_WITH_HINT",
+	LOAD_CONST_IMMORTAL:                       "LOAD_CONST_IMMORTAL",
+	LOAD_CONST_MORTAL:                         "LOAD_CONST_MORTAL",
+	LOAD_GLOBAL_BUILTIN:                       "LOAD_GLOBAL_BUILTIN",
+	LOAD_GLOBAL_MODULE:                        "LOAD_GLOBAL_MODULE",
+	LOAD_SUPER_ATTR_ATTR:                      "LOAD_SUPER_ATTR_ATTR",
+	LOAD_SUPER_ATTR_METHOD:                    "LOAD_SUPER_ATTR_METHOD",
+	RESUME_CHECK:                              "RESUME_CHECK",
+	SEND_GEN:                                  "SEND_GEN",
+	STORE_ATTR_INSTANCE_VALUE:                 "STORE_ATTR_INSTANCE_VALUE",
+	STORE_ATTR_SLOT:                           "STORE_ATTR_SLOT",
+	STORE_ATTR_WITH_HINT:                      "STORE_ATTR_WITH_HINT",
+	STORE_SUBSCR_DICT:                         "STORE_SUBSCR_DICT",
+	STORE_SUBSCR_LIST_INT:                     "STORE_SUBSCR_LIST_INT",
+	TO_BOOL_ALWAYS_TRUE:                       "TO_BOOL_ALWAYS_TRUE",
+	TO_BOOL_BOOL:                              "TO_BOOL_BOOL",
+	TO_BOOL_INT:                               "TO_BOOL_INT",
+	TO_BOOL_LIST:                              "TO_BOOL_LIST",
+	TO_BOOL_NONE:                              "TO_BOOL_NONE",
+	TO_BOOL_STR:                               "TO_BOOL_STR",
+	UNPACK_SEQUENCE_LIST:                      "UNPACK_SEQUENCE_LIST",
+	UNPACK_SEQUENCE_TUPLE:                     "UNPACK_SEQUENCE_TUPLE",
+	UNPACK_SEQUENCE_TWO_TUPLE:                 "UNPACK_SEQUENCE_TWO_TUPLE",
+	INSTRUMENTED_END_FOR:                      "INSTRUMENTED_END_FOR",
+	INSTRUMENTED_POP_ITER:                     "INSTRUMENTED_POP_ITER",
+	INSTRUMENTED_END_SEND:                     "INSTRUMENTED_END_SEND",
+	INSTRUMENTED_FOR_ITER:                     "INSTRUMENTED_FOR_ITER",
+	INSTRUMENTED_INSTRUCTION:                  "INSTRUMENTED_INSTRUCTION",
+	INSTRUMENTED_JUMP_FORWARD:                 "INSTRUMENTED_JUMP_FORWARD",
+	INSTRUMENTED_NOT_TAKEN:                    "INSTRUMENTED_NOT_TAKEN",
+	INSTRUMENTED_POP_JUMP_IF_TRUE:             "INSTRUMENTED_POP_JUMP_IF_TRUE",
+	INSTRUMENTED_POP_JUMP_IF_FALSE:            "INSTRUMENTED_POP_JUMP_IF_FALSE",
+	INSTRUMENTED_POP_JUMP_IF_NONE:             "INSTRUMENTED_POP_JUMP_IF_NONE",
+	INSTRUMENTED_POP_JUMP_IF_NOT_NONE:         "INSTRUMENTED_POP_JUMP_IF_NOT_NONE",
+	INSTRUMENTED_RESUME:                       "INSTRUMENTED_RESUME",
+	INSTRUMENTED_RETURN_VALUE:                 "INSTRUMENTED_RETURN_VALUE",
+	INSTRUMENTED_YIELD_VALUE:                  "INSTRUMENTED_YIELD_VALUE",
+	INSTRUMENTED_END_ASYNC_FOR:                "INSTRUMENTED_END_ASYNC_FOR",
+	INSTRUMENTED_LOAD_SUPER_ATTR:              "INSTRUMENTED_LOAD_SUPER_ATTR",
+	INSTRUMENTED_CALL:                         "INSTRUMENTED_CALL",
+	INSTRUMENTED_CALL_KW:                      "INSTRUMENTED_CALL_KW",
+	INSTRUMENTED_CALL_FUNCTION_EX:             "INSTRUMENTED_CALL_FUNCTION_EX",
+	INSTRUMENTED_JUMP_BACKWARD:                "INSTRUMENTED_JUMP_BACKWARD",
+	INSTRUMENTED_LINE:                         "INSTRUMENTED_LINE",
+	ENTER_EXECUTOR:                            "ENTER_EXECUTOR",
+	ANNOTATIONS_PLACEHOLDER:                   "ANNOTATIONS_PLACEHOLDER",
+	JUMP:                                      "JUMP",
+	JUMP_IF_FALSE:                             "JUMP_IF_FALSE",
+	JUMP_IF_TRUE:                              "JUMP_IF_TRUE",
+	JUMP_NO_INTERRUPT:                         "JUMP_NO_INTERRUPT",
+	LOAD_CLOSURE:                              "LOAD_CLOSURE",
+	POP_BLOCK:                                 "POP_BLOCK",
+	SETUP_CLEANUP:                             "SETUP_CLEANUP",
+	SETUP_FINALLY:                             "SETUP_FINALLY",
+	SETUP_WITH:                                "SETUP_WITH",
+	STORE_FAST_MAYBE_NULL:                     "STORE_FAST_MAYBE_NULL",
 }
 
 // Name returns the symbolic name for op, or "" if op is not a known opcode.
