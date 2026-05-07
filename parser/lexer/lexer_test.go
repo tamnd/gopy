@@ -53,8 +53,33 @@ func TestEmpty(t *testing.T) {
 }
 
 func TestComment(t *testing.T) {
+	// CPython parser mode (tok_extra_tokens=0) drops comment-only lines
+	// entirely via `goto nextline` (Parser/lexer/lexer.c:817), so a file
+	// containing only `# hello\n` reaches the parser as just ENDMARKER.
 	got := kinds(tokenize_(t, "# hello\n"))
-	want := []token.Type{token.NEWLINE, token.ENDMARKER}
+	want := []token.Type{token.ENDMARKER}
+	if len(got) != len(want) {
+		t.Fatalf("got %v, want %v", got, want)
+	}
+	for i := range got {
+		if got[i] != want[i] {
+			t.Errorf("token %d: got %v, want %v", i, got[i], want[i])
+		}
+	}
+}
+
+func TestCommentExtraTokens(t *testing.T) {
+	s := FromString("# hello\n", ModeFile)
+	s.SetExtraTokens(true)
+	var got []token.Type
+	for i := 0; i < 20; i++ {
+		tk := s.Get()
+		got = append(got, tk.Kind)
+		if tk.Kind == token.ENDMARKER {
+			break
+		}
+	}
+	want := []token.Type{token.COMMENT, token.NL, token.ENDMARKER}
 	if len(got) != len(want) {
 		t.Fatalf("got %v, want %v", got, want)
 	}
@@ -116,7 +141,37 @@ func TestLineContinuation(t *testing.T) {
 }
 
 func TestParenContinuation(t *testing.T) {
+	// In parser mode (tok_extra_tokens=0), an in-paren '\n' goes
+	// through `goto nextline` (Parser/lexer/lexer.c:817) and produces
+	// no NL token. The python-level tokenize module flips
+	// tok_extra_tokens to 1, which is what TestParenContinuationExtraTokens
+	// pins below.
 	got := kinds(tokenize_(t, "(a +\n b)\n"))
+	want := []token.Type{
+		token.OP, token.NAME, token.OP,
+		token.NAME, token.OP, token.NEWLINE, token.ENDMARKER,
+	}
+	if len(got) != len(want) {
+		t.Fatalf("got %v, want %v", got, want)
+	}
+	for i := range got {
+		if got[i] != want[i] {
+			t.Errorf("token %d: got %v, want %v", i, got[i], want[i])
+		}
+	}
+}
+
+func TestParenContinuationExtraTokens(t *testing.T) {
+	s := FromString("(a +\n b)\n", ModeFile)
+	s.SetExtraTokens(true)
+	var got []token.Type
+	for i := 0; i < 20; i++ {
+		tk := s.Get()
+		got = append(got, tk.Kind)
+		if tk.Kind == token.ENDMARKER || tk.Kind == token.ERRORTOKEN {
+			break
+		}
+	}
 	want := []token.Type{
 		token.OP, token.NAME, token.OP, token.NL,
 		token.NAME, token.OP, token.NEWLINE, token.ENDMARKER,

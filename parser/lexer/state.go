@@ -199,6 +199,13 @@ type State struct {
 	commentNewline  bool
 	implicitNewline bool
 
+	// blankline tracks "this line had no real tokens": indent loop
+	// landed on '#', '\n', or EOF. Mirrors the local `blankline` in
+	// CPython tok_get_normal_mode (Parser/lexer/lexer.c:504). Used by
+	// the '\n' branch to skip blank/comment-only lines instead of
+	// emitting NEWLINE, matching the C `goto nextline`.
+	blankline bool
+
 	// underflow refills buf when cur == inp. nil for in-memory
 	// drivers that load the whole source up front.
 	underflow func(*State) bool
