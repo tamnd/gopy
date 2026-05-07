@@ -78,6 +78,7 @@ func dictInsert(d *Dict, h int64, key, value Object) error {
 	*slot = dictEntry{hash: h, key: key, value: value, used: true}
 	d.used++
 	d.downgradeKindOnInsert(key)
+	d.invalidateKeysVersion()
 	return nil
 }
 
@@ -100,6 +101,7 @@ func dictDelete(d *Dict, key Object) error {
 	}
 	d.entries[idx] = dictEntry{dummy: true}
 	d.used--
+	d.invalidateKeysVersion()
 	return nil
 }
 

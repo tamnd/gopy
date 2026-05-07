@@ -148,6 +148,16 @@ type Type struct {
 	//
 	// CPython: Include/cpython/typeobject.h tp_dictoffset
 	HasDict bool
+
+	// versionTag is the tp_version_tag the adaptive specializer
+	// stamps into LOAD_ATTR / STORE_ATTR / CALL inline caches and
+	// the dispatch loop checks on every hit. 0 means "not yet
+	// allocated or already invalidated"; VersionTag lazily
+	// allocates a fresh value from the global counter, mutations
+	// that change observable type state reset it back to 0.
+	//
+	// CPython: Include/internal/pycore_typeobject.h tp_version_tag
+	versionTag uint32
 }
 
 // Visitor is the visitproc shape passed to TpTraverse. CPython's
