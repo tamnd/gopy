@@ -16,6 +16,7 @@
 package pegen
 
 import (
+	"math/big"
 	"strconv"
 	"strings"
 
@@ -1265,11 +1266,17 @@ func parseNumberLiteral(s string) (any, bool) {
 		base = 2
 		body = body[2:]
 	}
-	n, err := strconv.ParseInt(body, base, 64)
-	if err != nil {
+	if n, err := strconv.ParseInt(body, base, 64); err == nil {
+		return n, true
+	}
+	// Out of int64 range: lift to *big.Int. CPython routes this through
+	// PyLong_FromString (Parser/string_parser.c parsenumber), which is
+	// arbitrary-precision; the validator accepts *big.Int.
+	bi, ok := new(big.Int).SetString(body, base)
+	if !ok {
 		return nil, false
 	}
-	return n, true
+	return bi, true
 }
 
 // decodeStringToken strips quote/prefix wrapping and decodes escapes.
@@ -1849,12 +1856,36 @@ func decodeTypeComment(v any) *string {
 	return nil
 }
 
+// matchedOr lifts a default PEG action ("return the lone binding")
+// across a legitimately-nil sub-rule result. CPython distinguishes
+// "alt matched all items" (success, action may produce NULL) from
+// "alt failed" (reset and try the next alt) via the comma operator
+// in C; gopy's generator collapses both into "result != nil". When
+// an alt's lone binding is itself an optional sub-rule that returned
+// nil, this helper substitutes placeholderMatched so the alt counts
+// as success and the consumed tokens stay consumed.
+//
+// CPython: Parser/parser.c (e.g. _tmp_26_rule's `_res = z` followed
+// by `goto done` — the alt succeeds even when z is NULL).
+func matchedOr(v any) any {
+	if v == nil {
+		return placeholderMatched
+	}
+	return v
+}
+
 // truthy is the C-style truthiness check the action-body translator
 // emits for ternary conditions. Mirrors the implicit `!= 0` /
 // `!= NULL` check that C uses on pointers, ints, and bool-like
 // expressions inside `cond ? a : b`.
 func truthy(v any) bool {
 	if v == nil {
+		return false
+	}
+	if v == placeholderMatched {
+		// Alt matched but its action produced NULL (e.g. empty
+		// `()` arguments). The C grammar treats NULL as "no
+		// value", so report truthy=false here too.
 		return false
 	}
 	switch x := v.(type) {
