@@ -704,7 +704,9 @@ func actionPgenConstantFromToken(p *Parser, args ...any) any {
 	return &ast.Constant{Value: v, Pos: ast.NoPos}
 }
 
-// actionPgenConstantFromString builds a string-literal Constant.
+// actionPgenConstantFromString builds a string-literal Constant. The
+// `b` prefix routes through []byte so the Constant.Value matches
+// CPython's `bytes` type instead of `str`.
 //
 // CPython: Parser/action_helpers.c:601 _PyPegen_constant_from_string
 func actionPgenConstantFromString(p *Parser, args ...any) any {
@@ -713,11 +715,14 @@ func actionPgenConstantFromString(p *Parser, args ...any) any {
 	if !ok || t == nil {
 		return placeholderMatched
 	}
-	s, ok := decodeStringToken(string(t.Bytes))
+	body, isBytes, ok := decodeStringTokenTagged(string(t.Bytes))
 	if !ok {
 		return placeholderMatched
 	}
-	return &ast.Constant{Value: s, Pos: ast.NoPos}
+	if isBytes {
+		return &ast.Constant{Value: []byte(body), Pos: ast.NoPos}
+	}
+	return &ast.Constant{Value: body, Pos: ast.NoPos}
 }
 
 func actionPgenDecodedConstantFromToken(p *Parser, args ...any) any {
@@ -1304,32 +1309,46 @@ func parseNumberLiteral(s string) (any, bool) {
 // real path and will replace this once the action surface is wired
 // to it.
 func decodeStringToken(s string) (string, bool) {
+	body, _, ok := decodeStringTokenTagged(s)
+	return body, ok
+}
+
+// decodeStringTokenTagged returns the literal body together with a
+// flag that says whether the source had a bytes prefix (b/B). The
+// caller can branch on the flag to wrap the body in `[]byte` so the
+// Constant.Value matches CPython's `bytes` vs `str` distinction.
+func decodeStringTokenTagged(s string) (string, bool, bool) {
 	if len(s) < 2 {
-		return "", false
+		return "", false, false
 	}
+	bytesLit := false
 	for s != "" {
 		c := s[0]
 		if c == '\'' || c == '"' {
 			break
 		}
-		if c == 'b' || c == 'B' || c == 'r' || c == 'R' || c == 'u' || c == 'U' || c == 'f' || c == 'F' || c == 't' || c == 'T' {
+		switch c {
+		case 'b', 'B':
+			bytesLit = true
 			s = s[1:]
-			continue
+		case 'r', 'R', 'u', 'U', 'f', 'F', 't', 'T':
+			s = s[1:]
+		default:
+			return "", false, false
 		}
-		return "", false
 	}
 	if len(s) < 2 {
-		return "", false
+		return "", false, false
 	}
 	q := s[0]
 	if q != s[len(s)-1] {
-		return "", false
+		return "", false, false
 	}
 	body := s[1 : len(s)-1]
 	if len(body) >= 4 && body[:2] == strings.Repeat(string(q), 2) && body[len(body)-2:] == strings.Repeat(string(q), 2) {
 		body = body[2 : len(body)-2]
 	}
-	return body, true
+	return body, bytesLit, true
 }
 
 // withitemSeqOf walks v and collects the *ast.Withitem values found
