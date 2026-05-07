@@ -57,6 +57,22 @@ func IsExactSlice(o Object) bool {
 	return Type_(o) == SliceType
 }
 
+// IsExactSet reports whether o is exactly *Set.
+//
+// CPython: Include/cpython/setobject.h PySet_CheckExact
+func IsExactSet(o Object) bool {
+	return Type_(o) == SetType
+}
+
+// IsExactFrozenSet reports whether o is exactly *Set with the
+// frozenset type. gopy stores both kinds in the same struct and
+// distinguishes them by their type pointer.
+//
+// CPython: Include/cpython/setobject.h PyFrozenSet_CheckExact
+func IsExactFrozenSet(o Object) bool {
+	return Type_(o) == FrozensetType
+}
+
 // Type_ is the package-internal accessor used by the exact-type
 // predicates so they read uniformly. It cannot be named Type
 // because that already exists as the type-object struct name.
