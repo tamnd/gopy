@@ -109,6 +109,15 @@ func Init(defaultFile io.Writer) (*objects.Dict, error) {
 		return nil, err
 	}
 
+	evalFn := objects.NewBuiltinFunction("eval", Eval)
+	if err := setBuiltin(dict, "eval", evalFn); err != nil {
+		return nil, err
+	}
+	execFn := objects.NewBuiltinFunction("exec", Exec)
+	if err := setBuiltin(dict, "exec", execFn); err != nil {
+		return nil, err
+	}
+
 	if buildClass != nil {
 		bcFn := objects.NewBuiltinFunction("__build_class__", buildClass)
 		if err := setBuiltin(dict, "__build_class__", bcFn); err != nil {

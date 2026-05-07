@@ -16,6 +16,7 @@ import (
 func init() {
 	builtins.SetCurrentScope(currentScope)
 	builtins.SetImporter(currentImporter)
+	builtins.SetEvaluator(currentEvaluator)
 }
 
 // currentScope yields the running frame's (globals, locals). The
@@ -43,6 +44,21 @@ func currentScope() (objects.Object, objects.Object) {
 		return f.Globals, nil
 	}
 	return f.Globals, d
+}
+
+// currentEvaluator is the hook builtins.eval and builtins.exec
+// dispatch through. It pulls the active state.Thread off the goroutine
+// (or allocates a fresh one when called outside any frame, e.g. from a
+// stand-alone program that imports gopy as a library) and calls
+// EvalCode against the supplied globals/locals.
+//
+// CPython: equivalent of PyEval_EvalCode (Python/ceval.c)
+func currentEvaluator(code *objects.Code, globals, locals objects.Object) (objects.Object, error) {
+	ts := currentThread()
+	if ts == nil {
+		ts = state.NewThread()
+	}
+	return EvalCode(ts, code, globals, locals)
 }
 
 // currentImporter is the hook builtins.__import__ delegates to. It
