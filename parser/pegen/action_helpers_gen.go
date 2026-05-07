@@ -1762,8 +1762,10 @@ func actionPgenAugoperator(p *Parser, args ...any) any {
 // CPython: Parser/action_helpers.c _PyPegen_cmpop_expr_pair
 func actionPgenCmpopExprPair(p *Parser, args ...any) any {
 	_ = p
-	op, ok := argAt(args, 0).(ast.Cmpop)
-	expr := asExpr(argAt(args, 1))
+	// CPython spelling is `_PyPegen_cmpop_expr_pair(p, op, expr)`, so
+	// the action translator emits the parser explicitly as args[0].
+	op, ok := argAt(args, 1).(ast.Cmpop)
+	expr := asExpr(argAt(args, 2))
 	if !ok || expr == nil {
 		return placeholderMatched
 	}
