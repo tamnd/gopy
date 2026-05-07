@@ -131,6 +131,23 @@ type Type struct {
 	//
 	// CPython: Include/object.h Py_TPFLAGS_HEAPTYPE
 	IsUser bool
+
+	// Slots holds the resolved __slots__ names for this user type, in
+	// declaration order. Empty when the class did not declare __slots__
+	// or the class is a built-in. Each name has a fixed index into the
+	// instance slots array; MemberDescr objects carry the index and act
+	// as data descriptors so reads/writes go through DescrGet/DescrSet.
+	//
+	// CPython: Objects/typeobject.c:4401 type_new_descriptors
+	Slots []string
+
+	// HasDict is true when instances of this type carry a per-instance
+	// __dict__. False only when the class declares __slots__ without
+	// __dict__ (and no base contributes one). Mirrors a non-zero
+	// tp_dictoffset / Py_TPFLAGS_MANAGED_DICT.
+	//
+	// CPython: Include/cpython/typeobject.h tp_dictoffset
+	HasDict bool
 }
 
 // Visitor is the visitproc shape passed to TpTraverse. CPython's

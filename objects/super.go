@@ -87,7 +87,7 @@ func supercheck(typ *Type, obj Object) (*Type, error) {
 		name = t.Name
 	}
 	return nil, fmt.Errorf(
-		"TypeError: super(type, obj): obj (%s %s) is not an instance or subtype of type (%s).",
+		"TypeError: super(type, obj): obj (%s %s) is not an instance or subtype of type (%s)",
 		kind, name, typ.Name,
 	)
 }

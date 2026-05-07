@@ -1,11 +1,14 @@
 // Instance is the v0.10 carrier for an object whose class was defined
 // in Python. Its Header.typ points at the user-defined Type built by
 // __build_class__; attribute lookup walks the type's MRO via
-// LookupDescriptor and falls through to the per-instance __dict__.
+// LookupDescriptor and, when t.HasDict, falls through to the
+// per-instance __dict__. Classes that declare __slots__ without
+// __dict__ have a nil dict and rely on the slots array plus the
+// MemberDescr data descriptors registered on the type.
 //
-// CPython models the same shape with a PyObject + tp_dictoffset slot;
-// gopy keeps the dict directly on the struct since every user class
-// gets one until __slots__ lands (1672).
+// CPython models the same shape with a PyObject whose tp_dictoffset
+// optionally points at the dict and whose ht_slots/PyMemberDef table
+// describes the fixed-offset slot fields.
 //
 // CPython: Objects/typeobject.c PyBaseObject_Type slots
 //          (tp_getattro -> PyObject_GenericGetAttr,
@@ -16,25 +19,37 @@ package objects
 import "fmt"
 
 // Instance backs a Python-level object whose type is a user-defined
-// class. Header.typ is the class; dict holds per-instance attributes.
+// class. Header.typ is the class; dict holds per-instance attributes
+// (nil when the class declared __slots__ without __dict__); slots
+// holds the fixed-index storage for __slots__ entries.
 type Instance struct {
 	Header
 
-	dict *Dict
+	dict  *Dict
+	slots []Object
 }
 
 // NewInstance allocates a fresh Instance bound to t. The instance
-// __dict__ is empty.
+// __dict__ is empty when t.HasDict; the slots array is sized to
+// t.Slots and starts all-nil (each slot reads as AttributeError until
+// assigned).
 //
 // CPython: Objects/typeobject.c:1748 type_call (object_new path)
 func NewInstance(t *Type) *Instance {
-	inst := &Instance{dict: NewDict()}
+	inst := &Instance{}
+	if t.HasDict {
+		inst.dict = NewDict()
+	}
+	if n := len(t.Slots); n > 0 {
+		inst.slots = make([]Object, n)
+	}
 	inst.init(t)
 	return inst
 }
 
 // Dict returns the instance __dict__. Mutating it is how attribute
-// stores land.
+// stores land. Returns nil when the class declared __slots__ without
+// __dict__.
 func (i *Instance) Dict() *Dict { return i.dict }
 
 // instanceGetAttr is the tp_getattro slot for user-defined types.
@@ -59,8 +74,10 @@ func instanceGetAttr(o Object, name Object) (Object, error) {
 			return dt.DescrGet(descr, o, tp)
 		}
 	}
-	if v, err := inst.dict.GetItem(name); err == nil {
-		return v, nil
+	if inst.dict != nil {
+		if v, err := inst.dict.GetItem(name); err == nil {
+			return v, nil
+		}
 	}
 	if descr != nil {
 		dt := descr.Type()
@@ -91,6 +108,12 @@ func instanceSetAttr(o Object, name Object, value Object) error {
 		if dset := descr.Type().DescrSet; dset != nil {
 			return dset(descr, o, value)
 		}
+	}
+	if inst.dict == nil {
+		// __slots__ class without __dict__: any name not covered by a
+		// type-level descriptor is rejected, mirroring CPython's
+		// PyObject_GenericSetAttr when tp_dictoffset == 0.
+		return fmt.Errorf("AttributeError: '%s' object has no attribute '%s'", tp.Name, attrNameStr(name))
 	}
 	if value == nil {
 		if _, err := inst.dict.GetItem(name); err != nil {
