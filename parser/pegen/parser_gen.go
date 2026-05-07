@@ -8872,7 +8872,7 @@ func parseRule_fstring_conversion(p *Parser) any {
 	// alt 0
 	{
 		if v := func() any {
-			conv_token := p.ExpectSoftKeyword("!")
+			conv_token := p.ExpectToken(token.EXCLAMATION)
 			if conv_token == nil { return nil }
 			_ = conv_token
 			conv := nameToken(p)
@@ -12006,7 +12006,7 @@ func parseRule_invalid_parameters(p *Parser) any {
 	// alt 0
 	{
 		if v := func() any {
-			a := p.ExpectSoftKeyword("/")
+			a := p.ExpectToken(token.SLASH)
 			if a == nil { return nil }
 			_ = a
 			op := p.ExpectToken(token.COMMA)
@@ -12363,7 +12363,7 @@ func parseRule_invalid_lambda_parameters(p *Parser) any {
 	// alt 0
 	{
 		if v := func() any {
-			a := p.ExpectSoftKeyword("/")
+			a := p.ExpectToken(token.SLASH)
 			if a == nil { return nil }
 			_ = a
 			op := p.ExpectToken(token.COMMA)
