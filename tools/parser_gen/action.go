@@ -512,6 +512,19 @@ func (tr *cTranslator) parseMemberAccess(recv string) (string, bool) {
 		// form so the surrounding call-arg join sees an exact match.
 		return recv + ".arena", true
 	}
+	// KeyValuePair / KeyPatternPair / NameDefaultPair top-level
+	// fields. The Go encoding stores these as `[2]any{a, b}` so we
+	// pull out the column directly.
+	switch first {
+	case "key":
+		return "kvKey(" + recv + ")", true
+	case "value":
+		return "kvValue(" + recv + ")", true
+	case "name":
+		return "kvKey(" + recv + ")", true
+	case "pattern":
+		return "kvValue(" + recv + ")", true
+	}
 	if first != "v" {
 		return "", false
 	}
@@ -650,7 +663,9 @@ func goIdent(s string) string {
 
 // capName turns a C-style snake_case identifier into Go CamelCase.
 // `make_module` becomes `MakeModule`, `seq_flatten` becomes
-// `SeqFlatten`. Leading underscore is dropped.
+// `SeqFlatten`. Leading underscore is dropped. Common Go initialisms
+// (e.g. ids, url) get fully uppercased to keep revive's var-naming
+// linter happy.
 func capName(s string) string {
 	if s == "" {
 		return s
@@ -661,6 +676,10 @@ func capName(s string) string {
 		if p == "" {
 			continue
 		}
+		if up, ok := initialisms[p]; ok {
+			b.WriteString(up)
+			continue
+		}
 		r := []rune(p)
 		if unicode.IsLower(r[0]) {
 			r[0] = unicode.ToUpper(r[0])
@@ -668,6 +687,15 @@ func capName(s string) string {
 		b.WriteString(string(r))
 	}
 	return b.String()
+}
+
+// initialisms is the set of snake-case parts that should be fully
+// uppercased when joined into CamelCase, matching revive's var-naming
+// rules. Extend if new helpers introduce more initialism collisions.
+var initialisms = map[string]string{
+	"ids": "IDs",
+	"id":  "ID",
+	"url": "URL",
 }
 
 // goString rewraps a C-style string literal as a Go raw string.

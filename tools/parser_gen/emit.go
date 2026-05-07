@@ -515,8 +515,22 @@ func (e *emitter) writeAltItems(a *Alt, hasCut bool) []string {
 }
 
 // writeAltReturn emits the closure's return statement: a translated
-// action expression when possible, otherwise the bound names as a
-// []any (or placeholderMatched if nothing was bound).
+// action expression when possible, otherwise the default PEG action.
+//
+// The default action is the lone bound name (CPython: the c_generator
+// emits `_res = <var>` when the alt has a single positional and no
+// explicit action). Empty alts return placeholderMatched, multi-name
+// alts without a translated action keep the []any fallback.
+//
+// Critically, the alt's outer wrapper treats `v != nil` as "alt
+// matched". CPython instead treats "all items matched" as success and
+// allows the action to legitimately produce NULL. To bridge the two
+// without rewriting every alt, this emitter routes the return through
+// matchedOr — nil maps to placeholderMatched, real values pass through.
+// Action-translated alts (which always build a fresh node) skip the
+// guard so the typed value flows untouched.
+//
+// CPython: Tools/peg_generator/pegen/c_generator.py visit_Alt
 func (e *emitter) writeAltReturn(a *Alt, names []string) {
 	out := e.buf
 	bound := map[string]bool{}
@@ -524,11 +538,24 @@ func (e *emitter) writeAltReturn(a *Alt, names []string) {
 		bound[n] = true
 	}
 	if expr, ok := translateAction(a.Action, bound); ok && a.Action != "" {
+		// A bare binding `{ z }` carries the same nil-might-be-legit
+		// semantics as the PEG default action below, so wrap it the
+		// same way. Constructor calls (actionAst*, actionPgen*) and
+		// composite expressions take their nil at face value: nil
+		// means the action genuinely failed.
+		if bound[strings.TrimSpace(expr)] {
+			e.printf("\t\t\treturn matchedOr(%s)\n", expr)
+			return
+		}
 		e.printf("\t\t\treturn %s\n", expr)
 		return
 	}
 	if len(names) == 0 {
 		out.WriteString("\t\t\treturn placeholderMatched\n")
+		return
+	}
+	if len(names) == 1 {
+		e.printf("\t\t\treturn matchedOr(%s)\n", names[0])
 		return
 	}
 	out.WriteString("\t\t\treturn []any{")
@@ -630,8 +657,16 @@ func (e *emitter) callNameLeaf(x *NameLeaf) callSpec {
 
 func (e *emitter) callStringLeaf(x *StringLeaf) callSpec {
 	s, soft := unquoteLeaf(x.Value)
-	if soft {
-		return callSpec{varName: "kw", expr: "p.ExpectSoftKeyword(" + strconv.Quote(s) + ")", shape: shapeBlocking}
+	// CPython: Tools/peg_generator/pegen/c_generator.py:191 visit_StringLeaf
+	// Identifiers go to keyword/soft-keyword helpers based on quote style;
+	// operator literals always resolve via exactTokenTypes regardless of
+	// quotes. Without this, "!" (double-quoted in fstring_conversion) was
+	// emitting ExpectSoftKeyword instead of ExpectToken(EXCLAMATION).
+	if isKeywordLiteral(s) {
+		if soft {
+			return callSpec{varName: "kw", expr: "p.ExpectSoftKeyword(" + strconv.Quote(s) + ")", shape: shapeBlocking}
+		}
+		return callSpec{varName: "kw", expr: "p.ExpectName(" + strconv.Quote(s) + ")", shape: shapeBlocking}
 	}
 	if tok, ok := exactTokenTypes[s]; ok {
 		return callSpec{varName: "op", expr: "p.ExpectToken(token." + tok + ")", shape: shapeBlocking}
@@ -648,16 +683,22 @@ func (e *emitter) callGroup(x *Group) callSpec {
 }
 
 func (e *emitter) callForced(x *Forced) callSpec {
+	// Forced markers (`&&token`) are guards: the action body never
+	// references their value. Emit with empty varName so writeAltItems
+	// drops the binding and prevents collisions when a user-named item
+	// in the same alt happens to be called `f` (e.g. try_stmt's
+	// `f=finally_block` — the forced colon used to grab "f" first and
+	// shadow the real binding).
 	if sl, ok := x.Node.(*StringLeaf); ok {
 		s, soft := unquoteLeaf(sl.Value)
 		if !soft {
 			if tok, okt := exactTokenTypes[s]; okt {
-				return callSpec{varName: "f", expr: "p.ExpectForced(token." + tok + ", " + strconv.Quote(s) + ")", shape: shapeBlocking}
+				return callSpec{expr: "p.ExpectForced(token." + tok + ", " + strconv.Quote(s) + ")", shape: shapeBlocking}
 			}
 		}
 	}
 	inner := e.callItemRaw(x.Node)
-	return callSpec{varName: "f", expr: inner.expr, shape: shapeBlocking}
+	return callSpec{expr: inner.expr, shape: shapeBlocking}
 }
 
 func (e *emitter) lookaheadCall(node Item, positive bool) callSpec {
@@ -828,6 +869,7 @@ func (e *emitter) writeActionHelperStubs() {
 		"actionAstListComp":                  true,
 		"actionAstSetComp":                   true,
 		"actionAstGeneratorExp":              true,
+		"actionAstDictComp":                  true,
 		"actionAstMatchAs":                   true,
 		"actionAstMatchClass":                true,
 		"actionAstMatchMapping":              true,
@@ -851,6 +893,7 @@ func (e *emitter) writeActionHelperStubs() {
 		"actionPgenEnsureImaginary":          true,
 		"actionPgenEnsureReal":               true,
 		"actionPgenFormattedValue":           true,
+		"actionPgenJoinedStr":                true,
 		"actionPgenInterpolation":            true,
 		"actionPgenConcatenateStrings":       true,
 		"actionPgenConcatenateTstrings":      true,
@@ -898,7 +941,6 @@ func (e *emitter) writeActionHelperStubs() {
 		"actionPgenRegisterStmts":            true,
 		"actionPgenSlashWithDefault":         true,
 		"actionPgenSetupFullFormatSpec":      true,
-		"actionPgenJoinedStr":                true,
 		"actionAstClassDef":                  true,
 		"actionAstFunctionDef":               true,
 		"actionAstAsyncFunctionDef":          true,
@@ -908,6 +950,27 @@ func (e *emitter) writeActionHelperStubs() {
 		"actionAstFunctionType":              true,
 		"actionPgenEmptyArguments":           true,
 		"actionAstArg":                       true,
+		"actionAstAlias":                     true,
+		"actionAstGlobal":                    true,
+		"actionAstNonlocal":                  true,
+		"actionAstLambda":                    true,
+		"actionAstWithitem":                  true,
+		"actionAstMatch":                     true,
+		"actionAstMatchCase":                 true,
+		"actionAstTryStar":                   true,
+		"actionAstTypeAlias":                 true,
+		"actionAstTypeVar":                   true,
+		"actionAstTypeVarTuple":              true,
+		"actionAstParamSpec":                 true,
+		"actionPgenMapNamesToIDs":            true,
+		"actionPgenAliasForStar":             true,
+		"actionPgenCheckedFutureImport":      true,
+		"actionPgenGetCmpops":                true,
+		"actionPgenGetExprs":                 true,
+		"actionPgenGetKeys":                  true,
+		"actionPgenGetValues":                true,
+		"actionPgenGetPatternKeys":           true,
+		"actionPgenGetPatterns":              true,
 	}
 	seen := map[string]bool{}
 	for _, m := range re.FindAllString(body, -1) {

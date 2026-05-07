@@ -16,6 +16,7 @@
 package pegen
 
 import (
+	"math/big"
 	"strconv"
 	"strings"
 
@@ -484,6 +485,20 @@ func actionAstGeneratorExp(p *Parser, args ...any) any {
 	return &ast.GeneratorExp{Elt: elt, Generators: gens, Pos: ast.NoPos}
 }
 
+// actionAstDictComp builds a DictComp. Args: (key, value, generators).
+//
+// CPython: Parser/Python.asdl DictComp(expr key, expr value, comprehension* generators)
+func actionAstDictComp(p *Parser, args ...any) any {
+	_ = p
+	key := asExpr(argAt(args, 0))
+	value := asExpr(argAt(args, 1))
+	gens := comprehensionSeqOf(argAt(args, 2))
+	if key == nil || value == nil || len(gens) == 0 {
+		return placeholderMatched
+	}
+	return &ast.DictComp{Key: key, Value: value, Generators: gens, Pos: ast.NoPos}
+}
+
 // Match patterns: each helper builds the matching ast.* pattern. The
 // upstream pattern rules still produce []any wrappers in many cases
 // so the helpers fall back to placeholderMatched when shape is wrong.
@@ -559,7 +574,9 @@ func actionAstMatchAs(p *Parser, args ...any) any {
 
 func actionPgenSeqCountDots(p *Parser, args ...any) any {
 	_ = p
-	return SeqCountDots(flattenTokens(argAt(args, 1)))
+	// _PyPegen_seq_count_dots(seq) takes no explicit Parser*, so the
+	// translator emits a single positional arg: args[0] is the seq.
+	return SeqCountDots(flattenTokens(argAt(args, 0)))
 }
 
 func actionPgenSingletonSeq(p *Parser, args ...any) any {
@@ -671,23 +688,25 @@ func actionPgenNameDefaultPair(p *Parser, args ...any) any {
 	return out
 }
 
-// actionPgenConstantFromToken builds a numeric Constant.
+// actionPgenConstantFromToken builds a Constant from the raw bytes of
+// an FSTRING_MIDDLE / TSTRING_MIDDLE token. The bytes are the literal
+// text between interpolations (with `{{` / `}}` already collapsed by
+// the tokenizer); CPython feeds them through PyUnicode_FromString
+// without escape decoding.
 //
-// CPython: Parser/action_helpers.c:583 _PyPegen_constant_from_token
+// CPython: Parser/action_helpers.c:1431 _PyPegen_constant_from_token
 func actionPgenConstantFromToken(p *Parser, args ...any) any {
 	_ = p
 	t, ok := argAt(args, 1).(*Token)
 	if !ok || t == nil {
 		return placeholderMatched
 	}
-	v, ok := parseNumberLiteral(string(t.Bytes))
-	if !ok {
-		return placeholderMatched
-	}
-	return &ast.Constant{Value: v, Pos: ast.NoPos}
+	return &ast.Constant{Value: string(t.Bytes), Pos: ast.NoPos}
 }
 
-// actionPgenConstantFromString builds a string-literal Constant.
+// actionPgenConstantFromString builds a string-literal Constant. The
+// `b` prefix routes through []byte so the Constant.Value matches
+// CPython's `bytes` type instead of `str`.
 //
 // CPython: Parser/action_helpers.c:601 _PyPegen_constant_from_string
 func actionPgenConstantFromString(p *Parser, args ...any) any {
@@ -696,15 +715,25 @@ func actionPgenConstantFromString(p *Parser, args ...any) any {
 	if !ok || t == nil {
 		return placeholderMatched
 	}
-	s, ok := decodeStringToken(string(t.Bytes))
+	body, isBytes, ok := decodeStringTokenTagged(string(t.Bytes))
 	if !ok {
 		return placeholderMatched
 	}
-	return &ast.Constant{Value: s, Pos: ast.NoPos}
+	if isBytes {
+		return &ast.Constant{Value: []byte(body), Pos: ast.NoPos}
+	}
+	return &ast.Constant{Value: body, Pos: ast.NoPos}
 }
 
+// actionPgenDecodedConstantFromToken builds a Constant from FSTRING_MIDDLE
+// bytes that came from a format-spec body. CPython runs the bytes
+// through _PyPegen_decode_string, which handles escapes when the
+// surrounding f-string is non-raw; for the bare `>10` case the bytes
+// arrive without escapes so wrapping the raw text matches CPython.
+//
+// CPython: Parser/action_helpers.c:1404 _PyPegen_decoded_constant_from_token
 func actionPgenDecodedConstantFromToken(p *Parser, args ...any) any {
-	return actionPgenConstantFromString(p, args...)
+	return actionPgenConstantFromToken(p, args...)
 }
 
 func actionPgenEnsureImaginary(p *Parser, args ...any) any {
@@ -748,10 +777,60 @@ func actionPgenEnsureReal(p *Parser, args ...any) any {
 // so the gate test continues to skip those shapes cleanly rather
 // than mis-typing.
 
+// actionPgenFormattedValue ports `_PyPegen_formatted_value`. Args:
+// (p, expression, debug_token, conversion_result, format_result, rbrace).
+// For the no-debug path we just build a FormattedValue. The debug-text
+// shim that wraps the value into a JoinedStr is intentionally
+// minimal until the parser exposes the metadata we'd need.
+//
+// CPython: Parser/action_helpers.c:1564 _PyPegen_formatted_value
 func actionPgenFormattedValue(p *Parser, args ...any) any {
 	_ = p
-	_ = args
-	return placeholderMatched
+	value := asExpr(argAt(args, 1))
+	if value == nil {
+		return placeholderMatched
+	}
+	debug, _ := argAt(args, 2).(*Token)
+	conv := fstringConversionChar(argAt(args, 3))
+	format := asExpr(argAt(args, 4))
+	if conv == 0 && debug != nil && format == nil {
+		conv = 'r'
+	} else if conv == 0 {
+		conv = -1
+	}
+	return &ast.FormattedValue{
+		Value:      value,
+		Conversion: conv,
+		FormatSpec: format,
+		Pos:        ast.NoPos,
+	}
+}
+
+// fstringConversionChar pulls the character code out of whatever
+// actionPgenCheckFstringConversion returned. The conversion token in
+// f'{y!r}' is a single-letter NAME ('s', 'r', or 'a'); store the
+// rune as an int. nil means "no conversion specified".
+func fstringConversionChar(v any) int {
+	if v == nil {
+		return 0
+	}
+	switch t := v.(type) {
+	case int:
+		return t
+	case rune:
+		return int(t)
+	case *Token:
+		if t == nil || len(t.Bytes) == 0 {
+			return 0
+		}
+		return int(t.Bytes[0])
+	case *ast.Name:
+		if t == nil || t.Id == "" {
+			return 0
+		}
+		return int(t.Id[0])
+	}
+	return 0
 }
 
 func actionPgenInterpolation(p *Parser, args ...any) any {
@@ -784,10 +863,20 @@ func actionPgenConcatenateTstrings(p *Parser, args ...any) any {
 	return placeholderMatched
 }
 
+// actionPgenCheckFstringConversion validates the conversion specifier
+// after `!` in an f-string interpolation and returns the conv Name so
+// downstream FormattedValue construction can read its single-character
+// id. The CPython helper wraps this in a ResultTokenWithMetadata; our
+// fstringConversionChar accepts the bare *ast.Name directly.
+//
+// CPython: Parser/action_helpers.c:966 _PyPegen_check_fstring_conversion
 func actionPgenCheckFstringConversion(p *Parser, args ...any) any {
 	_ = p
-	_ = args
-	return placeholderMatched
+	conv := asExpr(argAt(args, 2))
+	if conv == nil {
+		return placeholderMatched
+	}
+	return conv
 }
 
 // actionPgenAddTypeCommentToArg wires the param-with-type-comment alt
@@ -1164,6 +1253,10 @@ func stringSeqOf(v any) ast.Seq[string] {
 			if t != nil {
 				out = append(out, string(t.Bytes))
 			}
+		case ast.Seq[string]:
+			out = append(out, t...)
+		case []string:
+			out = append(out, t...)
 		case []any:
 			for _, e := range t {
 				walk(e)
@@ -1265,11 +1358,17 @@ func parseNumberLiteral(s string) (any, bool) {
 		base = 2
 		body = body[2:]
 	}
-	n, err := strconv.ParseInt(body, base, 64)
-	if err != nil {
+	if n, err := strconv.ParseInt(body, base, 64); err == nil {
+		return n, true
+	}
+	// Out of int64 range: lift to *big.Int. CPython routes this through
+	// PyLong_FromString (Parser/string_parser.c parsenumber), which is
+	// arbitrary-precision; the validator accepts *big.Int.
+	bi, ok := new(big.Int).SetString(body, base)
+	if !ok {
 		return nil, false
 	}
-	return n, true
+	return bi, true
 }
 
 // decodeStringToken strips quote/prefix wrapping and decodes escapes.
@@ -1277,32 +1376,46 @@ func parseNumberLiteral(s string) (any, bool) {
 // real path and will replace this once the action surface is wired
 // to it.
 func decodeStringToken(s string) (string, bool) {
+	body, _, ok := decodeStringTokenTagged(s)
+	return body, ok
+}
+
+// decodeStringTokenTagged returns the literal body together with a
+// flag that says whether the source had a bytes prefix (b/B). The
+// caller can branch on the flag to wrap the body in `[]byte` so the
+// Constant.Value matches CPython's `bytes` vs `str` distinction.
+func decodeStringTokenTagged(s string) (string, bool, bool) {
 	if len(s) < 2 {
-		return "", false
+		return "", false, false
 	}
+	bytesLit := false
 	for s != "" {
 		c := s[0]
 		if c == '\'' || c == '"' {
 			break
 		}
-		if c == 'b' || c == 'B' || c == 'r' || c == 'R' || c == 'u' || c == 'U' || c == 'f' || c == 'F' || c == 't' || c == 'T' {
+		switch c {
+		case 'b', 'B':
+			bytesLit = true
 			s = s[1:]
-			continue
+		case 'r', 'R', 'u', 'U', 'f', 'F', 't', 'T':
+			s = s[1:]
+		default:
+			return "", false, false
 		}
-		return "", false
 	}
 	if len(s) < 2 {
-		return "", false
+		return "", false, false
 	}
 	q := s[0]
 	if q != s[len(s)-1] {
-		return "", false
+		return "", false, false
 	}
 	body := s[1 : len(s)-1]
 	if len(body) >= 4 && body[:2] == strings.Repeat(string(q), 2) && body[len(body)-2:] == strings.Repeat(string(q), 2) {
 		body = body[2 : len(body)-2]
 	}
-	return body, true
+	return body, bytesLit, true
 }
 
 // withitemSeqOf walks v and collects the *ast.Withitem values found
@@ -1418,18 +1531,28 @@ func actionAstUnaryOp(p *Parser, args ...any) any {
 }
 
 // actionAstCompare builds a Compare. Args: (left, ops, comparators).
+// CPython's grammar splits the cmpop_pair list into parallel ops /
+// exprs slices via _PyPegen_get_cmpops / _PyPegen_get_exprs before
+// calling the constructor; we accept either the precomputed split
+// or the original pair list (older shape) so the rule keeps working
+// either way.
 func actionAstCompare(p *Parser, args ...any) any {
 	_ = p
 	left := asExpr(argAt(args, 0))
 	if left == nil {
 		return placeholderMatched
 	}
+	ops, opsOK := argAt(args, 1).(ast.Seq[ast.Cmpop])
+	rhs, rhsOK := argAt(args, 2).(ast.Seq[ast.Expr])
+	if opsOK && rhsOK && len(ops) > 0 {
+		return &ast.Compare{Left: left, Ops: ops, Comparators: rhs, Pos: ast.NoPos}
+	}
 	cmps := flattenCmpopExprPairs(argAt(args, 1))
 	if len(cmps) == 0 {
 		return placeholderMatched
 	}
-	ops := make(ast.Seq[ast.Cmpop], 0, len(cmps))
-	rhs := make(ast.Seq[ast.Expr], 0, len(cmps))
+	ops = make(ast.Seq[ast.Cmpop], 0, len(cmps))
+	rhs = make(ast.Seq[ast.Expr], 0, len(cmps))
 	for _, pair := range cmps {
 		ops = append(ops, pair.Op)
 		rhs = append(rhs, pair.Expr)
@@ -1729,7 +1852,9 @@ func flattenCmpopExprPairs(v any) []cmpopExprPair {
 // CPython: Parser/action_helpers.c _PyPegen_augoperator
 func actionPgenAugoperator(p *Parser, args ...any) any {
 	_ = p
-	if op, ok := argAt(args, 0).(ast.Operator); ok {
+	// Pgen helpers receive the parser explicitly as args[0]; the
+	// operator the rule passes lives at args[1].
+	if op, ok := argAt(args, 1).(ast.Operator); ok {
 		return op
 	}
 	return placeholderMatched
@@ -1741,8 +1866,10 @@ func actionPgenAugoperator(p *Parser, args ...any) any {
 // CPython: Parser/action_helpers.c _PyPegen_cmpop_expr_pair
 func actionPgenCmpopExprPair(p *Parser, args ...any) any {
 	_ = p
-	op, ok := argAt(args, 0).(ast.Cmpop)
-	expr := asExpr(argAt(args, 1))
+	// CPython spelling is `_PyPegen_cmpop_expr_pair(p, op, expr)`, so
+	// the action translator emits the parser explicitly as args[0].
+	op, ok := argAt(args, 1).(ast.Cmpop)
+	expr := asExpr(argAt(args, 2))
 	if !ok || expr == nil {
 		return placeholderMatched
 	}
@@ -1819,18 +1946,82 @@ func actionPgenSlashWithDefault(p *Parser, args ...any) any {
 	return out
 }
 
+// actionPgenSetupFullFormatSpec wraps a format-spec body (from
+// `:spec*` in fstring_full_format_spec) into the expression that
+// FormattedValue.format_spec carries. CPython filters out empty
+// Constant nodes and either returns a JoinedStr or concatenates the
+// surviving parts; the result is then wrapped in a ResultTokenWithMetadata.
+// We return the bare expression since the FormatSpec slot reads an Expr.
+//
+// CPython: Parser/action_helpers.c:990 _PyPegen_setup_full_format_spec
 func actionPgenSetupFullFormatSpec(p *Parser, args ...any) any {
 	_ = p
-	_ = args
-	return placeholderMatched
+	spec := joinedStrValues(argAt(args, 2))
+	filtered := make([]ast.Expr, 0, len(spec))
+	for _, item := range spec {
+		if c, ok := item.(*ast.Constant); ok {
+			if s, isStr := c.Value.(string); isStr && s == "" {
+				continue
+			}
+		}
+		filtered = append(filtered, item)
+	}
+	n := len(filtered)
+	if n == 0 {
+		return &ast.JoinedStr{Values: filtered, Pos: ast.NoPos}
+	}
+	if n == 1 {
+		if _, ok := filtered[0].(*ast.Constant); ok {
+			return &ast.JoinedStr{Values: filtered, Pos: ast.NoPos}
+		}
+	}
+	concat := ConcatenateStrings(p, filtered)
+	if concat == nil {
+		return &ast.JoinedStr{Values: filtered, Pos: ast.NoPos}
+	}
+	return concat
 }
 
-// actionPgenJoinedStr is the constructor surface for f-string joins.
-// Real implementation lands with the f-string panel.
+// actionPgenJoinedStr ports `_PyPegen_joined_str`. Args:
+// (p, fstring_start_token, raw_expressions, fstring_end_token).
+// _get_resized_exprs in CPython merges adjacent constants and
+// upgrades any FormattedValue that ends up alone into a JoinedStr;
+// we emit the wrapper unconditionally so dump renders match.
+//
+// CPython: Parser/action_helpers.c:1396 _PyPegen_joined_str
 func actionPgenJoinedStr(p *Parser, args ...any) any {
 	_ = p
-	_ = args
-	return placeholderMatched
+	values := joinedStrValues(argAt(args, 2))
+	return &ast.JoinedStr{Values: values, Pos: ast.NoPos}
+}
+
+// joinedStrValues coerces a raw_expressions seq into the Values slot
+// on an ast.JoinedStr. The grammar produces a []any (loop result)
+// containing FormattedValue / Constant / placeholder values; we
+// strip the placeholders and keep the rest in order.
+func joinedStrValues(v any) ast.Seq[ast.Expr] {
+	var out []ast.Expr
+	var walk func(any)
+	walk = func(x any) {
+		switch t := x.(type) {
+		case nil:
+		case ast.Expr:
+			out = append(out, t)
+		case []any:
+			for _, e := range t {
+				walk(e)
+			}
+		case []ast.Expr:
+			out = append(out, t...)
+		case ast.Seq[ast.Expr]:
+			out = append(out, t...)
+		}
+	}
+	walk(v)
+	if len(out) == 0 {
+		return nil
+	}
+	return ast.Seq[ast.Expr](out)
 }
 
 // decodeTypeComment turns an optional TYPE_COMMENT token into the
@@ -1849,12 +2040,36 @@ func decodeTypeComment(v any) *string {
 	return nil
 }
 
+// matchedOr lifts a default PEG action ("return the lone binding")
+// across a legitimately-nil sub-rule result. CPython distinguishes
+// "alt matched all items" (success, action may produce NULL) from
+// "alt failed" (reset and try the next alt) via the comma operator
+// in C; gopy's generator collapses both into "result != nil". When
+// an alt's lone binding is itself an optional sub-rule that returned
+// nil, this helper substitutes placeholderMatched so the alt counts
+// as success and the consumed tokens stay consumed.
+//
+// CPython: Parser/parser.c (e.g. _tmp_26_rule's `_res = z` followed
+// by `goto done` — the alt succeeds even when z is NULL).
+func matchedOr(v any) any {
+	if v == nil {
+		return placeholderMatched
+	}
+	return v
+}
+
 // truthy is the C-style truthiness check the action-body translator
 // emits for ternary conditions. Mirrors the implicit `!= 0` /
 // `!= NULL` check that C uses on pointers, ints, and bool-like
 // expressions inside `cond ? a : b`.
 func truthy(v any) bool {
 	if v == nil {
+		return false
+	}
+	if v == placeholderMatched {
+		// Alt matched but its action produced NULL (e.g. empty
+		// `()` arguments). The C grammar treats NULL as "no
+		// value", so report truthy=false here too.
 		return false
 	}
 	switch x := v.(type) {
@@ -1901,6 +2116,24 @@ func callArgsOf(v any) ast.Seq[ast.Expr] {
 func callKwOf(v any) ast.Seq[*ast.Keyword] {
 	if c, ok := v.(*ast.Call); ok && c != nil {
 		return c.Keywords
+	}
+	return nil
+}
+
+// kvKey / kvValue project the columns out of a [2]any pair the
+// KeyValuePair / KeyPatternPair / NameDefaultPair helpers stamp out.
+// Mirrors `pair->key` / `pair->value` (also `pair->name` /
+// `pair->pattern`) in the C grammar.
+func kvKey(v any) any {
+	if p, ok := v.([2]any); ok {
+		return p[0]
+	}
+	return nil
+}
+
+func kvValue(v any) any {
+	if p, ok := v.([2]any); ok {
+		return p[1]
 	}
 	return nil
 }
@@ -2073,4 +2306,386 @@ func actionAstComprehension(p *Parser, args ...any) any {
 		return placeholderMatched
 	}
 	return &ast.Comprehension{Target: target, Iter: iter, Ifs: ifs, IsAsync: isAsync}
+}
+
+// actionAstAlias builds an alias entry for import / from-import.
+// Args: (name_id, asname_id_or_nil).
+//
+// CPython: Parser/Python.asdl alias(identifier name, identifier? asname)
+func actionAstAlias(p *Parser, args ...any) any {
+	_ = p
+	name := identString(argAt(args, 0))
+	if name == "" {
+		return placeholderMatched
+	}
+	out := &ast.Alias{Name: name, Pos: ast.NoPos}
+	if as := identString(argAt(args, 1)); as != "" {
+		out.Asname = &as
+	}
+	return out
+}
+
+// actionAstGlobal builds Global. Args: (names_seq).
+//
+// CPython: Parser/Python.asdl Global(identifier* names)
+func actionAstGlobal(p *Parser, args ...any) any {
+	_ = p
+	names := stringSeqOf(argAt(args, 0))
+	if len(names) == 0 {
+		return placeholderMatched
+	}
+	return &ast.Global{Names: names, Pos: ast.NoPos}
+}
+
+// actionAstNonlocal builds Nonlocal. Args: (names_seq).
+//
+// CPython: Parser/Python.asdl Nonlocal(identifier* names)
+func actionAstNonlocal(p *Parser, args ...any) any {
+	_ = p
+	names := stringSeqOf(argAt(args, 0))
+	if len(names) == 0 {
+		return placeholderMatched
+	}
+	return &ast.Nonlocal{Names: names, Pos: ast.NoPos}
+}
+
+// actionAstLambda builds Lambda. Args: (args, body).
+//
+// CPython: Parser/Python.asdl Lambda(arguments args, expr body)
+func actionAstLambda(p *Parser, args ...any) any {
+	_ = p
+	a := argumentsOf(argAt(args, 0))
+	body := asExpr(argAt(args, 1))
+	if body == nil {
+		return placeholderMatched
+	}
+	return &ast.Lambda{Args: a, Body: body, Pos: ast.NoPos}
+}
+
+// actionAstWithitem builds withitem. Args: (context_expr, optional_vars).
+//
+// CPython: Parser/Python.asdl withitem(expr context_expr, expr? optional_vars)
+func actionAstWithitem(p *Parser, args ...any) any {
+	_ = p
+	ctx := asExpr(argAt(args, 0))
+	if ctx == nil {
+		return placeholderMatched
+	}
+	return &ast.Withitem{ContextExpr: ctx, OptionalVars: asExpr(argAt(args, 1))}
+}
+
+// actionAstMatch builds Match. Args: (subject, cases).
+//
+// CPython: Parser/Python.asdl Match(expr subject, match_case* cases)
+func actionAstMatch(p *Parser, args ...any) any {
+	_ = p
+	subject := asExpr(argAt(args, 0))
+	cases := matchCaseSeqOf(argAt(args, 1))
+	if subject == nil || len(cases) == 0 {
+		return placeholderMatched
+	}
+	return &ast.Match{Subject: subject, Cases: cases, Pos: ast.NoPos}
+}
+
+// actionAstMatchCase builds match_case. Args: (pattern, guard, body).
+//
+// CPython: Parser/Python.asdl match_case(pattern pattern, expr? guard, stmt* body)
+func actionAstMatchCase(p *Parser, args ...any) any {
+	_ = p
+	pat := patternOf(argAt(args, 0))
+	body := stmtSeqOf(argAt(args, 2))
+	if pat == nil || len(body) == 0 {
+		return placeholderMatched
+	}
+	return &ast.MatchCase{Pattern: pat, Guard: asExpr(argAt(args, 1)), Body: body}
+}
+
+// actionAstTryStar builds TryStar. Args: (body, handlers, orelse, finalbody).
+//
+// CPython: Parser/Python.asdl TryStar(stmt* body, excepthandler* handlers,
+//
+//	stmt* orelse, stmt* finalbody)
+func actionAstTryStar(p *Parser, args ...any) any {
+	_ = p
+	body := stmtSeqOf(argAt(args, 0))
+	if len(body) == 0 {
+		return placeholderMatched
+	}
+	return &ast.TryStar{
+		Body:      body,
+		Handlers:  exceptHandlerSeqOf(argAt(args, 1)),
+		Orelse:    stmtSeqOf(argAt(args, 2)),
+		Finalbody: stmtSeqOf(argAt(args, 3)),
+		Pos:       ast.NoPos,
+	}
+}
+
+// actionAstTypeAlias builds TypeAlias. Args: (name_expr, type_params, value).
+//
+// CPython: Parser/Python.asdl TypeAlias(expr name, type_param* type_params, expr value)
+func actionAstTypeAlias(p *Parser, args ...any) any {
+	_ = p
+	name := asExpr(argAt(args, 0))
+	value := asExpr(argAt(args, 2))
+	if name == nil || value == nil {
+		return placeholderMatched
+	}
+	return &ast.TypeAlias{
+		Name:       name,
+		TypeParams: typeParamSeqOf(argAt(args, 1)),
+		Value:      value,
+		Pos:        ast.NoPos,
+	}
+}
+
+// actionAstTypeVar builds TypeVar. Args: (name_id, bound, default).
+//
+// CPython: Parser/Python.asdl TypeVar(identifier name, expr? bound, expr? default_value)
+func actionAstTypeVar(p *Parser, args ...any) any {
+	_ = p
+	name := identString(argAt(args, 0))
+	if name == "" {
+		return placeholderMatched
+	}
+	return &ast.TypeVar{
+		Name:         name,
+		Bound:        exprOptional(argAt(args, 1)),
+		DefaultValue: exprOptional(argAt(args, 2)),
+		Pos:          ast.NoPos,
+	}
+}
+
+// actionAstTypeVarTuple builds TypeVarTuple. Args: (name_id, default).
+//
+// CPython: Parser/Python.asdl TypeVarTuple(identifier name, expr? default_value)
+func actionAstTypeVarTuple(p *Parser, args ...any) any {
+	_ = p
+	name := identString(argAt(args, 0))
+	if name == "" {
+		return placeholderMatched
+	}
+	return &ast.TypeVarTuple{
+		Name:         name,
+		DefaultValue: exprOptional(argAt(args, 1)),
+		Pos:          ast.NoPos,
+	}
+}
+
+// actionAstParamSpec builds ParamSpec. Args: (name_id, default).
+//
+// CPython: Parser/Python.asdl ParamSpec(identifier name, expr? default_value)
+func actionAstParamSpec(p *Parser, args ...any) any {
+	_ = p
+	name := identString(argAt(args, 0))
+	if name == "" {
+		return placeholderMatched
+	}
+	return &ast.ParamSpec{
+		Name:         name,
+		DefaultValue: exprOptional(argAt(args, 1)),
+		Pos:          ast.NoPos,
+	}
+}
+
+// actionPgenMapNamesToIDs extracts the identifier text from a
+// sequence of NAME tokens or *ast.Name expressions.
+//
+// CPython: Parser/action_helpers.c _PyPegen_map_names_to_ids
+func actionPgenMapNamesToIDs(p *Parser, args ...any) any {
+	_ = p
+	v := argAt(args, 1)
+	var out []string
+	var walk func(any)
+	walk = func(x any) {
+		switch t := x.(type) {
+		case nil:
+		case *Token:
+			if t != nil && t.Type == token.NAME {
+				out = append(out, string(t.Bytes))
+			}
+		case *ast.Name:
+			if t != nil {
+				out = append(out, t.Id)
+			}
+		case string:
+			out = append(out, t)
+		case []any:
+			for _, e := range t {
+				walk(e)
+			}
+		}
+	}
+	walk(v)
+	if len(out) == 0 {
+		return ast.Seq[string]{}
+	}
+	return ast.Seq[string](out)
+}
+
+// actionPgenAliasForStar builds the alias entry for `from X import *`.
+// CPython spells the asname as "*" and leaves asname unset.
+//
+// CPython: Parser/action_helpers.c _PyPegen_alias_for_star
+func actionPgenAliasForStar(p *Parser, args ...any) any {
+	_ = p
+	_ = args
+	return &ast.Alias{Name: "*", Pos: ast.NoPos}
+}
+
+// actionPgenGetCmpops returns the operator slice from a list of
+// cmpopExprPair, mirroring `_PyPegen_get_cmpops` which projects out
+// the cmpop column.
+//
+// CPython: Parser/action_helpers.c _PyPegen_get_cmpops
+func actionPgenGetCmpops(p *Parser, args ...any) any {
+	_ = p
+	pairs := flattenCmpopExprPairs(argAt(args, 1))
+	out := make(ast.Seq[ast.Cmpop], 0, len(pairs))
+	for _, pr := range pairs {
+		out = append(out, pr.Op)
+	}
+	return out
+}
+
+// actionPgenGetExprs returns the rhs-expression slice from a list of
+// cmpopExprPair, mirroring `_PyPegen_get_exprs`.
+//
+// CPython: Parser/action_helpers.c _PyPegen_get_exprs
+func actionPgenGetExprs(p *Parser, args ...any) any {
+	_ = p
+	pairs := flattenCmpopExprPairs(argAt(args, 1))
+	out := make(ast.Seq[ast.Expr], 0, len(pairs))
+	for _, pr := range pairs {
+		out = append(out, pr.Expr)
+	}
+	return out
+}
+
+// actionPgenGetKeys returns the key column from a list of [2]any
+// (key, value) pairs produced by actionPgenKeyValuePair.
+//
+// CPython: Parser/action_helpers.c _PyPegen_get_keys
+func actionPgenGetKeys(p *Parser, args ...any) any {
+	_ = p
+	pairs := flattenKVPairs(argAt(args, 1))
+	out := make(ast.Seq[ast.Expr], 0, len(pairs))
+	for _, pr := range pairs {
+		out = append(out, asExpr(pr[0]))
+	}
+	return out
+}
+
+// actionPgenGetValues returns the value column from a list of [2]any
+// (key, value) pairs.
+//
+// CPython: Parser/action_helpers.c _PyPegen_get_values
+func actionPgenGetValues(p *Parser, args ...any) any {
+	_ = p
+	pairs := flattenKVPairs(argAt(args, 1))
+	out := make(ast.Seq[ast.Expr], 0, len(pairs))
+	for _, pr := range pairs {
+		out = append(out, asExpr(pr[1]))
+	}
+	return out
+}
+
+// actionPgenGetPatternKeys returns the key column from a list of
+// [2]any (key, pattern) pairs from actionPgenKeyPatternPair.
+//
+// CPython: Parser/action_helpers.c _PyPegen_get_pattern_keys
+func actionPgenGetPatternKeys(p *Parser, args ...any) any {
+	_ = p
+	pairs := flattenKVPairs(argAt(args, 1))
+	out := make(ast.Seq[ast.Expr], 0, len(pairs))
+	for _, pr := range pairs {
+		out = append(out, asExpr(pr[0]))
+	}
+	return out
+}
+
+// actionPgenGetPatterns returns the pattern column from a list of
+// [2]any (key, pattern) pairs.
+//
+// CPython: Parser/action_helpers.c _PyPegen_get_patterns
+func actionPgenGetPatterns(p *Parser, args ...any) any {
+	_ = p
+	pairs := flattenKVPairs(argAt(args, 1))
+	out := make(ast.Seq[ast.Pattern], 0, len(pairs))
+	for _, pr := range pairs {
+		if pat := patternOf(pr[1]); pat != nil {
+			out = append(out, pat)
+		}
+	}
+	return out
+}
+
+// flattenKVPairs walks v (possibly nested []any) and collects every
+// [2]any entry produced by KeyValuePair / KeyPatternPair. Pairs are
+// the smallest object the rule emits so flattening through one level
+// is enough.
+func flattenKVPairs(v any) [][2]any {
+	var out [][2]any
+	var walk func(any)
+	walk = func(x any) {
+		switch t := x.(type) {
+		case nil:
+		case [2]any:
+			out = append(out, t)
+		case []any:
+			for _, e := range t {
+				walk(e)
+			}
+		}
+	}
+	walk(v)
+	return out
+}
+
+// matchCaseSeqOf coerces v into Seq[*ast.MatchCase]. The cases rule
+// returns a +-repetition wrapped in []any.
+func matchCaseSeqOf(v any) ast.Seq[*ast.MatchCase] {
+	var out []*ast.MatchCase
+	var walk func(any)
+	walk = func(x any) {
+		switch t := x.(type) {
+		case nil:
+		case *ast.MatchCase:
+			if t != nil {
+				out = append(out, t)
+			}
+		case []any:
+			for _, e := range t {
+				walk(e)
+			}
+		}
+	}
+	walk(v)
+	if len(out) == 0 {
+		return nil
+	}
+	return ast.Seq[*ast.MatchCase](out)
+}
+
+// actionPgenCheckedFutureImport mirrors `_PyPegen_checked_future_import`.
+// CPython also flips the parser's PARSE_BARRY_AS_BDFL flag when a
+// `from __future__ import barry_as_FLUFL` is seen; that flag is not
+// yet plumbed through the Go parser, so we build the ImportFrom and
+// leave the flag handling for when feature_version / future flags
+// are wired up.
+//
+// CPython: Parser/action_helpers.c:1921 _PyPegen_checked_future_import
+func actionPgenCheckedFutureImport(p *Parser, args ...any) any {
+	_ = p
+	mod := nameOf(argAt(args, 1))
+	names := aliasSeqOf(argAt(args, 2))
+	lvl := intOf(argAt(args, 3))
+	out := &ast.ImportFrom{Names: names, Pos: ast.NoPos}
+	if mod != nil {
+		s := *mod
+		out.Module = &s
+	}
+	if lvl != nil {
+		out.Level = lvl
+	}
+	return out
 }

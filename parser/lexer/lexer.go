@@ -84,110 +84,134 @@ func (s *State) peek() int {
 // the source and returns it. The C source mutates a caller-owned token
 // and returns the kind; gopy returns Tok by value.
 //
+// The body is wrapped in a for loop so the '\n' branch can `continue`
+// to mirror CPython's `goto nextline`: a blank or comment-only line
+// resets state and rescans the next line instead of emitting a
+// spurious NEWLINE token.
+//
 // CPython: Parser/lexer/lexer.c:501 tok_get_normal_mode
 func (s *State) tokGetNormalMode() Tok {
-	s.start = s.cur
-	s.startCol = s.col
+	for {
+		s.start = s.cur
+		s.startCol = s.col
+		s.blankline = false
 
-	if s.atbol {
-		s.atbol = false
-		if t, emit := s.indentNL(); emit {
-			return t
-		}
-	}
-
-	if s.pendin != 0 {
-		if s.pendin < 0 {
-			s.pendin++
-			return s.tokenSetup(token.DEDENT, s.cur, s.cur)
-		}
-		s.pendin--
-		return s.tokenSetup(token.INDENT, s.cur, s.cur)
-	}
-
-	c := s.nextC()
-	for c == ' ' || c == '\t' || c == '\014' {
-		c = s.nextC()
-	}
-
-	// Line continuation: a backslash at end of line joins the next
-	// line into the current one without emitting NEWLINE.
-	//
-	// CPython: Parser/lexer/lexer.c:1205 (continuation branch)
-	for c == '\\' && s.peek() == '\n' {
-		s.nextC()
-		s.lineno++
-		s.col = 0
-		s.lineStart = s.cur
-		s.contLine = true
-		c = s.nextC()
-		for c == ' ' || c == '\t' || c == '\014' {
-			c = s.nextC()
-		}
-	}
-
-	s.start = s.cur - 1
-	s.startCol = s.col - 1
-
-	if c == '#' {
-		commentStart := s.cur - 1
-		for c != '\n' && c != eof {
-			c = s.nextC()
-		}
-		// Type comment recognition (`# type: ...`).
-		//
-		// CPython: Parser/lexer/lexer.c:830 type-comment branch
-		if s.typeComments {
-			if t, ok := s.maybeTypeComment(commentStart, s.cur); ok {
+		if s.atbol {
+			s.atbol = false
+			if t, emit := s.indentNL(); emit {
 				return t
 			}
 		}
-		if s.tokExtraTokens {
-			end := s.cur
-			if c == '\n' {
-				end = s.cur - 1
+
+		if s.pendin != 0 {
+			if s.pendin < 0 {
+				s.pendin++
+				return s.tokenSetup(token.DEDENT, s.cur, s.cur)
 			}
-			tok := s.tokenSetup(token.COMMENT, commentStart, end)
-			if c == '\n' {
-				s.commentNewline = true
+			s.pendin--
+			return s.tokenSetup(token.INDENT, s.cur, s.cur)
+		}
+
+		c := s.nextC()
+		for c == ' ' || c == '\t' || c == '\014' {
+			c = s.nextC()
+		}
+
+		// Line continuation: a backslash at end of line joins the next
+		// line into the current one without emitting NEWLINE.
+		//
+		// CPython: Parser/lexer/lexer.c:1205 (continuation branch)
+		for c == '\\' && s.peek() == '\n' {
+			s.nextC()
+			s.lineno++
+			s.col = 0
+			s.lineStart = s.cur
+			s.contLine = true
+			c = s.nextC()
+			for c == ' ' || c == '\t' || c == '\014' {
+				c = s.nextC()
+			}
+		}
+
+		s.start = s.cur - 1
+		s.startCol = s.col - 1
+
+		if c == '#' {
+			commentStart := s.cur - 1
+			for c != '\n' && c != eof {
+				c = s.nextC()
+			}
+			// Type comment recognition (`# type: ...`).
+			//
+			// CPython: Parser/lexer/lexer.c:830 type-comment branch
+			if s.typeComments {
+				if t, ok := s.maybeTypeComment(commentStart, s.cur); ok {
+					return t
+				}
+			}
+			if s.tokExtraTokens {
+				// CPython: Parser/lexer/lexer.c:721 tok_backup(tok, c).
+				// Hand the trailing '\n' (or EOF) back so the next
+				// call hits the '\n' branch and emits NL.
+				end := s.cur
+				if c == '\n' || c == eof {
+					s.backup(c)
+					end = s.cur
+				}
+				tok := s.tokenSetup(token.COMMENT, commentStart, end)
+				s.commentNewline = s.blankline
+				return tok
 			}
 			if c == eof {
-				s.done = eEOF
+				return s.endmarker()
 			}
-			return tok
 		}
+
+		if c == '\n' {
+			start := s.start
+			end := s.cur
+			s.atbol = true
+			s.lineno++
+			s.col = 0
+			s.lineStart = s.cur
+			// CPython: Parser/lexer/lexer.c:805. Blank line or in-paren
+			// continuation drops the newline entirely (`goto nextline`)
+			// unless extra-tokens mode wants the NL. Otherwise emit
+			// NEWLINE.
+			if s.blankline || s.level > 0 {
+				if s.tokExtraTokens {
+					if s.commentNewline {
+						s.commentNewline = false
+					}
+					return s.tokenSetup(token.NL, start, end)
+				}
+				continue
+			}
+			// CPython: Parser/lexer/lexer.c:819. A comment-only line in
+			// extra-tokens mode emitted COMMENT first, then this branch
+			// flushes the trailing NL.
+			if s.commentNewline && s.tokExtraTokens {
+				s.commentNewline = false
+				return s.tokenSetup(token.NL, start, end)
+			}
+			return s.tokenSetup(token.NEWLINE, start, end)
+		}
+
 		if c == eof {
 			return s.endmarker()
 		}
-	}
 
-	if c == '\n' {
-		start := s.start
-		end := s.cur
-		s.atbol = true
-		s.lineno++
-		s.col = 0
-		s.lineStart = s.cur
-		if s.level > 0 {
-			return s.tokenSetup(token.NL, start, end)
+		if isPotentialIdentifierStart(c) {
+			return s.scanName(c)
 		}
-		return s.tokenSetup(token.NEWLINE, start, end)
+		if c >= '0' && c <= '9' {
+			return s.scanNumber(c)
+		}
+		if c == '"' || c == '\'' {
+			return s.scanString(c)
+		}
+		return s.scanOperator(c)
 	}
-
-	if c == eof {
-		return s.endmarker()
-	}
-
-	if isPotentialIdentifierStart(c) {
-		return s.scanName(c)
-	}
-	if c >= '0' && c <= '9' {
-		return s.scanNumber(c)
-	}
-	if c == '"' || c == '\'' {
-		return s.scanString(c)
-	}
-	return s.scanOperator(c)
 }
 
 // indentNL handles beginning-of-line column counting and emits INDENT
@@ -220,7 +244,15 @@ done:
 
 	// Blank line, comment-only line, or in-paren continuation: do not
 	// adjust indent stack.
+	//
+	// CPython: Parser/lexer/lexer.c:550 sets blankline=1 when the
+	// indent loop lands on '#', '\n', or '\r'. The '\n' branch later
+	// uses blankline to drop the newline via `goto nextline` so blank
+	// and comment-only lines don't reach the parser as NEWLINE tokens.
 	c := s.peek()
+	if c == '#' || c == '\n' || c == eof {
+		s.blankline = true
+	}
 	if c == '#' || c == '\n' || c == eof || s.level > 0 {
 		return Tok{}, false
 	}
@@ -416,11 +448,16 @@ func (s *State) scanOperator(c int) Tok {
 	switch c {
 	case '(', '[', '{':
 		s.pushParen(byte(c))
+		// CPython bumps curly_bracket_depth on every opener, not just
+		// `{`. The misleading name is upstream's: the counter tracks
+		// nesting depth of any bracket while inside an f-string so the
+		// `:` format-spec switch only triggers at the outermost level
+		// (e.g. it must NOT fire for the slice colon in
+		// f"{arr[1:2]}").
+		//
+		// CPython: Parser/lexer/lexer.c:1312
 		if s.insideFString() {
-			m := s.curMode()
-			if c == '{' {
-				m.curlyBracketDepth++
-			}
+			s.curMode().curlyBracketDepth++
 		}
 		return s.tokenSetup(token.OP, s.start, s.cur)
 	case ')', ']', '}':
@@ -468,13 +505,34 @@ func (s *State) scanOperator(c int) Tok {
 		if s.peek() == '=' {
 			s.nextC()
 		}
+		// Inside an f-string interpolation `{expr:fmt}`, a `:` at the
+		// outer curly-bracket level switches the lexer back to fstring
+		// mode for the format-spec body so `>10`, `>{w}`, etc. arrive
+		// as FSTRING_MIDDLE rather than as separate operators.
+		//
+		// CPython: Parser/lexer/lexer.c:1271 (is_punctuation branch)
+		if s.insideFString() && s.insideFStringExpr() {
+			m := s.curMode()
+			cursor := m.curlyBracketDepth - 1
+			if cursor == m.curlyBracketExprStartDepth {
+				m.kind = tokFStringMode
+				m.inFormatSpec = true
+			}
+		}
 		return s.tokenSetup(token.OP, s.start, s.cur)
 	case '.':
+		// `...` is the only multi-dot operator; `..` is two separate
+		// DOTs. CPython's lexer mirrors that: peek twice and only
+		// commit to ELLIPSIS when both extra dots are there.
+		//
+		// CPython: Parser/lexer/lexer.c:832 (period branch)
 		if s.peek() == '.' {
 			s.nextC()
 			if s.peek() == '.' {
 				s.nextC()
+				return s.tokenSetup(token.OP, s.start, s.cur)
 			}
+			s.backup('.')
 		} else if d := s.peek(); d >= '0' && d <= '9' {
 			return s.scanNumber('.')
 		}

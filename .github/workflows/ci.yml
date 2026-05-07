@@ -28,8 +28,10 @@ jobs:
         with:
           go-version-file: go.mod
           check-latest: true
-      - run: go mod download
-      - run: go vet ./...
+      - name: Download modules
+        run: go mod download
+      - name: Run go vet
+        run: go vet ./...
       - name: Verify go.mod is tidy
         run: |
           go mod tidy
@@ -67,8 +69,13 @@ jobs:
         with:
           go-version: ${{ matrix.go }}
           check-latest: true
-      - run: go build ./...
-      - run: go test -race -count=1 ./...
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+      - name: Build
+        run: go build ./...
+      - name: Run tests
+        run: go test -race -count=1 ./...
 
   coverage:
     name: coverage
@@ -82,8 +89,10 @@ jobs:
         with:
           go-version-file: go.mod
           check-latest: true
-      - run: go test -race -covermode=atomic -coverprofile=coverage.txt ./...
-      - run: go tool cover -func=coverage.txt | tail -n 1
+      - name: Run tests with coverage
+        run: go test -race -covermode=atomic -coverprofile=coverage.txt ./...
+      - name: Print coverage summary
+        run: go tool cover -func=coverage.txt | tail -n 1
       - uses: actions/upload-artifact@v7
         with:
           name: coverage
