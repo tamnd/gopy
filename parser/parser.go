@@ -62,6 +62,12 @@ func runParse(st *lexer.State, mode Mode) (ast.Mod, error) {
 	p := pegen.New(st, pegenStartRule(mode), 0)
 	node, err := pegen.Dispatch(p, pegenStartRule(mode))
 	if errors.Is(err, pegen.ErrParserNotImplemented) {
+		// Real SyntaxError beats the not-implemented sentinel:
+		// CPython surfaces the pinned error at the farthest token
+		// (Parser/pegen.c:1136 _PyPegen_run_parser).
+		if e := p.PinnedError(); e != nil {
+			return nil, e
+		}
 		return nil, ErrParserNotImplemented
 	}
 	if err != nil {
