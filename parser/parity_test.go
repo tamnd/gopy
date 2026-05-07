@@ -9,6 +9,7 @@ package parser
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"os/exec"
 	"strings"
@@ -83,7 +84,7 @@ func TestParserParity(t *testing.T) {
 	}
 	for _, fx := range parityFixtures {
 		t.Run(fx.name, func(t *testing.T) {
-			want, err := pythonAstDump(fx.src)
+			want, err := pythonAstDump(t.Context(), fx.src)
 			if err != nil {
 				t.Fatalf("python3 ast.dump: %v", err)
 			}
@@ -102,8 +103,8 @@ func TestParserParity(t *testing.T) {
 // pythonAstDump runs `python3 -c 'import ast; print(ast.dump(ast.parse(SRC)))'`
 // on the raw source and returns the printed string with the trailing
 // newline trimmed.
-func pythonAstDump(src string) (string, error) {
-	cmd := exec.Command("python3", "-c", `
+func pythonAstDump(ctx context.Context, src string) (string, error) {
+	cmd := exec.CommandContext(ctx, "python3", "-c", `
 import ast, sys
 src = sys.stdin.read()
 print(ast.dump(ast.parse(src)))
