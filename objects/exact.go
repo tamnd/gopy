@@ -73,6 +73,47 @@ func IsExactFrozenSet(o Object) bool {
 	return Type_(o) == FrozensetType
 }
 
+// IsListIter reports whether o is exactly a list_iterator. The
+// FOR_ITER specializer reads this to pick FOR_ITER_LIST.
+//
+// CPython: Objects/listobject.c PyListIter_Type
+func IsListIter(o Object) bool {
+	return Type_(o) == listIterType
+}
+
+// IsTupleIter reports whether o is exactly a tuple_iterator. The
+// FOR_ITER specializer reads this to pick FOR_ITER_TUPLE.
+//
+// CPython: Objects/tupleobject.c PyTupleIter_Type
+func IsTupleIter(o Object) bool {
+	return Type_(o) == tupleIterType
+}
+
+// IsRangeIter reports whether o is exactly a range_iterator. The
+// FOR_ITER specializer reads this to pick FOR_ITER_RANGE.
+//
+// CPython: Objects/rangeobject.c PyRangeIter_Type
+func IsRangeIter(o Object) bool {
+	return Type_(o) == rangeIterType
+}
+
+// IsGenerator reports whether o is exactly a generator. The FOR_ITER
+// specializer reads this to pick FOR_ITER_GEN, and SEND uses it to
+// pick SEND_GEN.
+//
+// CPython: Objects/genobject.c PyGen_Type
+func IsGenerator(o Object) bool {
+	return Type_(o) == GeneratorType
+}
+
+// IsCoroutine reports whether o is exactly a coroutine. SEND uses
+// this together with IsGenerator to pick SEND_GEN.
+//
+// CPython: Objects/genobject.c PyCoro_Type
+func IsCoroutine(o Object) bool {
+	return Type_(o) == CoroutineType
+}
+
 // Type_ is the package-internal accessor used by the exact-type
 // predicates so they read uniformly. It cannot be named Type
 // because that already exists as the type-object struct name.
