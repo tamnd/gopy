@@ -521,11 +521,18 @@ func (s *State) scanOperator(c int) Tok {
 		}
 		return s.tokenSetup(token.OP, s.start, s.cur)
 	case '.':
+		// `...` is the only multi-dot operator; `..` is two separate
+		// DOTs. CPython's lexer mirrors that: peek twice and only
+		// commit to ELLIPSIS when both extra dots are there.
+		//
+		// CPython: Parser/lexer/lexer.c:832 (period branch)
 		if s.peek() == '.' {
 			s.nextC()
 			if s.peek() == '.' {
 				s.nextC()
+				return s.tokenSetup(token.OP, s.start, s.cur)
 			}
+			s.backup('.')
 		} else if d := s.peek(); d >= '0' && d <= '9' {
 			return s.scanNumber('.')
 		}
