@@ -149,8 +149,6 @@ func newOptimizerEmitter(out *CWriter) *OptimizerEmitter {
 // the spill counter, since the abstract interpreter never reloads.
 //
 // CPython: Tools/cases_generator/optimizer_generator.py:104-105 OptimizerEmitter.emit_save
-//
-//nolint:gocritic // hugeParam: matches the ReplacementFunc signature.
 func (e *OptimizerEmitter) optimizerSaveStack(
 	tkn Token, it *TokenIterator, _ CodeSection, storage *Storage, _ *Instruction,
 ) (bool, error) {
@@ -169,8 +167,6 @@ func (e *OptimizerEmitter) optimizerSaveStack(
 // has no reload step, so consume the macro and emit nothing.
 //
 // CPython: Tools/cases_generator/optimizer_generator.py:107-108 OptimizerEmitter.emit_reload
-//
-//nolint:gocritic // hugeParam: matches the ReplacementFunc signature.
 func (e *OptimizerEmitter) optimizerReloadStack(
 	tkn Token, it *TokenIterator, _ CodeSection, _ *Storage, _ *Instruction,
 ) (bool, error) {
