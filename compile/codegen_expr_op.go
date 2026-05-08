@@ -177,17 +177,13 @@ func (c *Compiler) visitUnaryOp(e *ast.UnaryOp) error {
 
 // visitCompare emits a chained comparison.
 //
-//	a < b < c  ->  a; b; SWAP 2; COPY 2; COMPARE_OP <;
-//	               POP_JUMP_IF_FALSE end_short;
-//	               c; COMPARE_OP <;
-//	               JUMP end;
-//	             end_short: SWAP 2; POP_TOP;
-//	             end:
+// For each rung but the last we keep the right-hand operand on the
+// stack to feed the next rung, run the comparison against a duplicate,
+// and branch on the bool form. The final rung leaves the raw
+// comparison result on top, with cleanup taking the same shape so the
+// stack height matches at the join.
 //
-// For a single op we skip the chain bookkeeping and just emit
-// COMPARE_OP / CONTAINS_OP / IS_OP.
-//
-// CPython: Python/codegen.c:L3552 codegen_compare
+// CPython: Python/codegen.c:3552 codegen_compare
 func (c *Compiler) visitCompare(e *ast.Compare) error {
 	if len(e.Ops) == 0 || len(e.Ops) != len(e.Comparators) {
 		return fmt.Errorf("compile: malformed Compare ops=%d comparators=%d",
@@ -196,7 +192,8 @@ func (c *Compiler) visitCompare(e *ast.Compare) error {
 	if err := c.visitExpr(e.Left); err != nil {
 		return err
 	}
-	if len(e.Ops) == 1 {
+	last := len(e.Ops) - 1
+	if last == 0 {
 		if err := c.visitExpr(e.Comparators[0]); err != nil {
 			return err
 		}
@@ -205,24 +202,28 @@ func (c *Compiler) visitCompare(e *ast.Compare) error {
 	}
 	cleanup := c.newLabel()
 	end := c.newLabel()
-	last := len(e.Ops) - 1
-	for i, op := range e.Ops {
+	for i := range last {
 		if err := c.visitExpr(e.Comparators[i]); err != nil {
 			return err
 		}
-		if i < last {
-			c.addOpI(SWAP, 2, loc(e))
-			c.addOpI(COPY, 2, loc(e))
-			c.emitCmpOp(op, loc(e))
-			c.addOpJump(POP_JUMP_IF_FALSE, cleanup, loc(e))
-			continue
-		}
-		c.emitCmpOp(op, loc(e))
-		c.addOpJump(JUMP, end, loc(e))
+		c.addOpI(SWAP, 2, loc(e))
+		c.addOpI(COPY, 2, loc(e))
+		c.emitCmpOp(e.Ops[i], loc(e))
+		c.addOpI(COPY, 1, loc(e))
+		c.addOp(TO_BOOL, loc(e))
+		c.addOpJump(POP_JUMP_IF_FALSE, cleanup, loc(e))
+		c.addOp(POP_TOP, loc(e))
 	}
+	if err := c.visitExpr(e.Comparators[last]); err != nil {
+		return err
+	}
+	c.emitCmpOp(e.Ops[last], loc(e))
+	c.addOpJump(JUMP_NO_INTERRUPT, end, ast.Pos{})
+
 	c.useLabel(cleanup)
 	c.addOpI(SWAP, 2, loc(e))
 	c.addOp(POP_TOP, loc(e))
+
 	c.useLabel(end)
 	return nil
 }

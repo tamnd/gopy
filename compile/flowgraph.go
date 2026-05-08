@@ -111,9 +111,12 @@ func Optimize(seq *Sequence, consts *[]any, nlocals, _ int) (*Info, error) {
 	// PASS 2: resolve symbolic jump labels to instruction offsets.
 	// CPython does this on the CFG; we exploit instrseq's existing
 	// ApplyLabelMap so the post-pass Sequence has resolved opargs.
-	// HasTarget(JUMP) is false because the pseudo opcode has no
-	// metadata row, so we resolve its label by hand.
-	seq.ApplyLabelMap(func(op Opcode) bool { return HasTarget(op) || op == JUMP })
+	// HasTarget(JUMP) and HasTarget(JUMP_NO_INTERRUPT) are false
+	// because the pseudo opcodes have no metadata row, so we resolve
+	// their labels by hand.
+	seq.ApplyLabelMap(func(op Opcode) bool {
+		return HasTarget(op) || op == JUMP || op == JUMP_NO_INTERRUPT
+	})
 
 	// PASS 3a: thread chains of unconditional jumps and re-target any
 	// POP_JUMP_IF_X that lands on a trampoline. CPython runs these on
