@@ -154,6 +154,7 @@ func typeSingletons() []struct {
 		t    *objects.Type
 	}{
 		{"object", objects.ObjectType()},
+		{"type", objects.TypeType()},
 		{"int", objects.IntType},
 		{"float", objects.FloatType},
 		{"bool", objects.BoolType},
@@ -408,7 +409,6 @@ func reflectionPanel() []struct {
 		name string
 		impl func(args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error)
 	}{
-		{"type", TypeOf},
 		{"isinstance", IsInstance},
 		{"issubclass", IsSubclass},
 		{"callable", Callable},

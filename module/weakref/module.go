@@ -74,7 +74,7 @@ func newRefType() *objects.Type {
 	t := objects.NewType("ref", []*objects.Type{objects.ObjectType()})
 	t.HasDict = true
 	t.TpNew = func(cls *objects.Type, args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
-		var captured objects.Object = objects.None()
+		captured := objects.None()
 		if len(args) >= 1 {
 			captured = args[0]
 		}

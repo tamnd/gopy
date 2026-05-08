@@ -42,6 +42,18 @@ func RunFile(ts *state.Thread, filename string, globals, locals objects.Object) 
 	}
 	defer restore()
 
+	// Stamp __name__ = "__main__" on the globals if absent, so
+	// `if __name__ == "__main__"` in the script works.
+	//
+	// CPython: Python/pythonrun.c:472 set_file_name (paired branch)
+	if dict != nil {
+		nameKey := objects.NewStr("__name__")
+		if has, _ := dict.Contains(nameKey); !has {
+			_ = dict.SetItem(nameKey, objects.NewStr("__main__"))
+			defer func() { _ = dict.DelItem(nameKey) }()
+		}
+	}
+
 	return RunString(ts, string(src), filename, parser.ModeFile, globals, locals)
 }
 

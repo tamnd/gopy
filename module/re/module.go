@@ -14,7 +14,6 @@ package re
 import (
 	"fmt"
 	gore "regexp"
-	"strings"
 
 	"github.com/tamnd/gopy/imp"
 	"github.com/tamnd/gopy/objects"
@@ -93,7 +92,6 @@ func noop(_ []objects.Object, _ map[string]objects.Object) (objects.Object, erro
 //
 // CPython: Lib/re/_parser.py the syntax surface
 func translatePattern(p string) string {
-	p = strings.ReplaceAll(p, "(?P<", "(?P<")
 	return p
 }
 
@@ -112,7 +110,7 @@ func patternInst(pat string, flags int) (objects.Object, *gore.Regexp, error) {
 	}
 	r, err := gore.Compile(src)
 	if err != nil {
-		return nil, nil, fmt.Errorf("re.error: %v", err)
+		return nil, nil, fmt.Errorf("re.error: %w", err)
 	}
 	inst := objects.NewInstance(patternType)
 	_ = inst.Dict().SetItem(objects.NewStr("pattern"), objects.NewStr(pat))
@@ -152,7 +150,7 @@ func reCompile(args []objects.Object, _ map[string]objects.Object) (objects.Obje
 	return inst, err
 }
 
-func makeMatch(m []int, s string, r *gore.Regexp) objects.Object {
+func makeMatch(m []int, s string) objects.Object {
 	if m == nil {
 		return objects.None()
 	}
@@ -174,10 +172,10 @@ func reMatch(args []objects.Object, _ map[string]objects.Object) (objects.Object
 	}
 	s, _ := objects.Str(args[1])
 	loc := r.FindStringIndex(s)
-	if loc == nil || loc[0] != 0 {
+	if len(loc) < 2 || loc[0] != 0 {
 		return objects.None(), nil
 	}
-	return makeMatch(loc, s, r), nil
+	return makeMatch(loc, s), nil
 }
 
 func reFullmatch(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
@@ -190,10 +188,10 @@ func reFullmatch(args []objects.Object, _ map[string]objects.Object) (objects.Ob
 	}
 	s, _ := objects.Str(args[1])
 	loc := r.FindStringIndex(s)
-	if loc == nil || loc[0] != 0 || loc[1] != len(s) {
+	if len(loc) < 2 || loc[0] != 0 || loc[1] != len(s) {
 		return objects.None(), nil
 	}
-	return makeMatch(loc, s, r), nil
+	return makeMatch(loc, s), nil
 }
 
 func reSearch(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
@@ -206,7 +204,7 @@ func reSearch(args []objects.Object, _ map[string]objects.Object) (objects.Objec
 	}
 	s, _ := objects.Str(args[1])
 	loc := r.FindStringIndex(s)
-	return makeMatch(loc, s, r), nil
+	return makeMatch(loc, s), nil
 }
 
 func reFindall(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {

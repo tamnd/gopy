@@ -108,15 +108,15 @@ func pathEntries() []struct {
 	}
 }
 
-func argString(args []objects.Object, idx int) (string, error) {
-	if idx >= len(args) {
-		return "", fmt.Errorf("TypeError: missing argument %d", idx)
+func argString(args []objects.Object) (string, error) {
+	if len(args) == 0 {
+		return "", fmt.Errorf("TypeError: missing argument")
 	}
-	return objects.Str(args[idx])
+	return objects.Str(args[0])
 }
 
 func basename(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
-	s, err := argString(args, 0)
+	s, err := argString(args)
 	if err != nil {
 		return nil, err
 	}
@@ -124,7 +124,7 @@ func basename(args []objects.Object, _ map[string]objects.Object) (objects.Objec
 }
 
 func dirname(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
-	s, err := argString(args, 0)
+	s, err := argString(args)
 	if err != nil {
 		return nil, err
 	}
@@ -144,7 +144,7 @@ func join(args []objects.Object, _ map[string]objects.Object) (objects.Object, e
 }
 
 func splitPath(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
-	s, err := argString(args, 0)
+	s, err := argString(args)
 	if err != nil {
 		return nil, err
 	}
@@ -154,7 +154,7 @@ func splitPath(args []objects.Object, _ map[string]objects.Object) (objects.Obje
 }
 
 func splitext(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
-	s, err := argString(args, 0)
+	s, err := argString(args)
 	if err != nil {
 		return nil, err
 	}
@@ -164,7 +164,7 @@ func splitext(args []objects.Object, _ map[string]objects.Object) (objects.Objec
 }
 
 func isabs(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
-	s, err := argString(args, 0)
+	s, err := argString(args)
 	if err != nil {
 		return nil, err
 	}
@@ -172,19 +172,19 @@ func isabs(args []objects.Object, _ map[string]objects.Object) (objects.Object, 
 }
 
 func abspath(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
-	s, err := argString(args, 0)
+	s, err := argString(args)
 	if err != nil {
 		return nil, err
 	}
 	abs, perr := filepath.Abs(s)
 	if perr != nil {
-		return objects.NewStr(s), nil
+		return objects.NewStr(s), nil //nolint:nilerr // mirror posixpath: fall back to the input on resolve failure
 	}
 	return objects.NewStr(abs), nil
 }
 
 func normpath(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
-	s, err := argString(args, 0)
+	s, err := argString(args)
 	if err != nil {
 		return nil, err
 	}
@@ -192,7 +192,7 @@ func normpath(args []objects.Object, _ map[string]objects.Object) (objects.Objec
 }
 
 func relpath(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
-	target, err := argString(args, 0)
+	target, err := argString(args)
 	if err != nil {
 		return nil, err
 	}
@@ -205,13 +205,13 @@ func relpath(args []objects.Object, _ map[string]objects.Object) (objects.Object
 	}
 	rel, perr := filepath.Rel(base, target)
 	if perr != nil {
-		return objects.NewStr(target), nil
+		return objects.NewStr(target), nil //nolint:nilerr // mirror posixpath: fall back to the input on resolve failure
 	}
 	return objects.NewStr(rel), nil
 }
 
 func isfile(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
-	s, err := argString(args, 0)
+	s, err := argString(args)
 	if err != nil {
 		return nil, err
 	}
@@ -220,7 +220,7 @@ func isfile(args []objects.Object, _ map[string]objects.Object) (objects.Object,
 }
 
 func isdir(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
-	s, err := argString(args, 0)
+	s, err := argString(args)
 	if err != nil {
 		return nil, err
 	}
@@ -229,7 +229,7 @@ func isdir(args []objects.Object, _ map[string]objects.Object) (objects.Object, 
 }
 
 func exists(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
-	s, err := argString(args, 0)
+	s, err := argString(args)
 	if err != nil {
 		return nil, err
 	}
@@ -264,12 +264,12 @@ func commonprefix(args []objects.Object, _ map[string]objects.Object) (objects.O
 	}
 	prefix := strs[0]
 	for _, s := range strs[1:] {
-		max := len(prefix)
-		if len(s) < max {
-			max = len(s)
+		limit := len(prefix)
+		if len(s) < limit {
+			limit = len(s)
 		}
 		i := 0
-		for i < max && prefix[i] == s[i] {
+		for i < limit && prefix[i] == s[i] {
 			i++
 		}
 		prefix = prefix[:i]
@@ -278,7 +278,7 @@ func commonprefix(args []objects.Object, _ map[string]objects.Object) (objects.O
 }
 
 func expanduser(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
-	s, err := argString(args, 0)
+	s, err := argString(args)
 	if err != nil {
 		return nil, err
 	}
@@ -292,7 +292,7 @@ func expanduser(args []objects.Object, _ map[string]objects.Object) (objects.Obj
 func getcwd(_ []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
 	cwd, err := goos.Getwd()
 	if err != nil {
-		return nil, fmt.Errorf("OSError: %v", err)
+		return nil, fmt.Errorf("OSError: %w", err)
 	}
 	return objects.NewStr(cwd), nil
 }
@@ -304,7 +304,7 @@ func listdir(args []objects.Object, _ map[string]objects.Object) (objects.Object
 	}
 	ents, err := goos.ReadDir(dir)
 	if err != nil {
-		return nil, fmt.Errorf("OSError: %v", err)
+		return nil, fmt.Errorf("OSError: %w", err)
 	}
 	items := make([]objects.Object, len(ents))
 	for i, e := range ents {

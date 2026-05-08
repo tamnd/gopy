@@ -36,15 +36,15 @@ var (
 	// stdlib code paths that reference them by name resolve at import.
 	//
 	// CPython: Objects/exceptions.c:L2200 the remainder of the family
-	PyExc_AssertionError      = newExcType("AssertionError", []*objects.Type{PyExc_Exception})
-	PyExc_MemoryError         = newExcType("MemoryError", []*objects.Type{PyExc_Exception})
-	PyExc_EOFError            = newExcType("EOFError", []*objects.Type{PyExc_Exception})
-	PyExc_BufferError         = newExcType("BufferError", []*objects.Type{PyExc_Exception})
-	PyExc_RecursionError      = newExcType("RecursionError", []*objects.Type{PyExc_RuntimeError})
-	PyExc_UnboundLocalError   = newExcType("UnboundLocalError", []*objects.Type{PyExc_NameError})
-	PyExc_ReferenceError      = newExcType("ReferenceError", []*objects.Type{PyExc_Exception})
-	PyExc_SystemError         = newExcType("SystemError", []*objects.Type{PyExc_Exception})
-	PyExc_GeneratorExit       = newExcType("GeneratorExit", []*objects.Type{PyExc_BaseException})
+	PyExc_AssertionError    = newExcType("AssertionError", []*objects.Type{PyExc_Exception})
+	PyExc_MemoryError       = newExcType("MemoryError", []*objects.Type{PyExc_Exception})
+	PyExc_EOFError          = newExcType("EOFError", []*objects.Type{PyExc_Exception})
+	PyExc_BufferError       = newExcType("BufferError", []*objects.Type{PyExc_Exception})
+	PyExc_RecursionError    = newExcType("RecursionError", []*objects.Type{PyExc_RuntimeError})
+	PyExc_UnboundLocalError = newExcType("UnboundLocalError", []*objects.Type{PyExc_NameError})
+	PyExc_ReferenceError    = newExcType("ReferenceError", []*objects.Type{PyExc_Exception})
+	PyExc_SystemError       = newExcType("SystemError", []*objects.Type{PyExc_Exception})
+	PyExc_GeneratorExit     = newExcType("GeneratorExit", []*objects.Type{PyExc_BaseException})
 )
 
 func newExcType(name string, bases []*objects.Type) *objects.Type {

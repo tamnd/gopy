@@ -9,6 +9,7 @@
 package functools
 
 import (
+	"errors"
 	"fmt"
 
 	"github.com/tamnd/gopy/imp"
@@ -102,7 +103,13 @@ func reduce(args []objects.Object, _ map[string]objects.Object) (objects.Object,
 	}
 	for {
 		v, ierr := itType.IterNext(it)
-		if ierr != nil || v == nil {
+		if ierr != nil {
+			if errors.Is(ierr, objects.ErrStopIteration) {
+				break
+			}
+			return nil, ierr
+		}
+		if v == nil {
 			break
 		}
 		next, err := objects.Call(fn, objects.NewTuple([]objects.Object{acc, v}), nil)
@@ -142,7 +149,7 @@ func newPartialType() *objects.Type {
 		inst := objects.NewInstance(cls)
 		_ = inst.Dict().SetItem(objects.NewStr("func"), fn)
 		_ = inst.Dict().SetItem(objects.NewStr("args"), objects.NewTuple(bound))
-		inst.Dict().SetItem(objects.NewStr("keywords"), objects.NewDict()) //nolint:errcheck
+		_ = inst.Dict().SetItem(objects.NewStr("keywords"), objects.NewDict())
 		t.Call = func(o objects.Object, callArgs []objects.Object, callKwargs map[string]objects.Object) (objects.Object, error) {
 			full := append(append([]objects.Object{}, bound...), callArgs...)
 			merged := map[string]objects.Object{}

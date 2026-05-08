@@ -10,6 +10,7 @@
 package fnmatch
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 
@@ -86,7 +87,13 @@ func fnmatchFilter(args []objects.Object, _ map[string]objects.Object) (objects.
 	var out []objects.Object
 	for {
 		v, ierr := itType.IterNext(it)
-		if ierr != nil || v == nil {
+		if ierr != nil {
+			if errors.Is(ierr, objects.ErrStopIteration) {
+				break
+			}
+			return nil, ierr
+		}
+		if v == nil {
 			break
 		}
 		s, _ := objects.Str(v)
@@ -124,18 +131,7 @@ func matchHere(name, pat string, i, j int) bool {
 	for j < len(pat) {
 		switch pat[j] {
 		case '*':
-			for k := j + 1; k < len(pat) && pat[k] == '*'; k++ {
-				j = k
-			}
-			if j+1 == len(pat) {
-				return true
-			}
-			for k := i; k <= len(name); k++ {
-				if matchHere(name, pat, k, j+1) {
-					return true
-				}
-			}
-			return false
+			return matchStar(name, pat, i, j)
 		case '?':
 			if i >= len(name) {
 				return false
@@ -143,23 +139,11 @@ func matchHere(name, pat string, i, j int) bool {
 			i++
 			j++
 		case '[':
-			closeIdx := strings.IndexByte(pat[j:], ']')
-			if closeIdx < 0 || i >= len(name) {
-				if i < len(name) && name[i] == pat[j] {
-					i++
-					j++
-					continue
-				}
+			ni, nj, ok := matchClass(name, pat, i, j)
+			if !ok {
 				return false
 			}
-			cls := pat[j+1 : j+closeIdx]
-			ch := name[i]
-			matched := strings.IndexByte(cls, ch) >= 0
-			if !matched {
-				return false
-			}
-			i++
-			j += closeIdx + 1
+			i, j = ni, nj
 		default:
 			if i >= len(name) || name[i] != pat[j] {
 				return false
@@ -169,4 +153,34 @@ func matchHere(name, pat string, i, j int) bool {
 		}
 	}
 	return i == len(name)
+}
+
+func matchStar(name, pat string, i, j int) bool {
+	for k := j + 1; k < len(pat) && pat[k] == '*'; k++ {
+		j = k
+	}
+	if j+1 == len(pat) {
+		return true
+	}
+	for k := i; k <= len(name); k++ {
+		if matchHere(name, pat, k, j+1) {
+			return true
+		}
+	}
+	return false
+}
+
+func matchClass(name, pat string, i, j int) (int, int, bool) {
+	closeIdx := strings.IndexByte(pat[j:], ']')
+	if closeIdx < 0 || i >= len(name) {
+		if i < len(name) && name[i] == pat[j] {
+			return i + 1, j + 1, true
+		}
+		return 0, 0, false
+	}
+	cls := pat[j+1 : j+closeIdx]
+	if strings.IndexByte(cls, name[i]) < 0 {
+		return 0, 0, false
+	}
+	return i + 1, j + closeIdx + 1, true
 }

@@ -13,6 +13,7 @@
 package collections
 
 import (
+	"errors"
 	"fmt"
 
 	"github.com/tamnd/gopy/imp"
@@ -130,7 +131,10 @@ func extractFieldNames(obj objects.Object) ([]string, error) {
 	for {
 		v, ierr := itType.IterNext(it)
 		if ierr != nil {
-			break
+			if errors.Is(ierr, objects.ErrStopIteration) {
+				break
+			}
+			return nil, ierr
 		}
 		if v == nil {
 			break
@@ -181,29 +185,44 @@ func newDictAlias(name string) *objects.Type {
 func newListAlias(name string) *objects.Type {
 	t := objects.NewType(name, []*objects.Type{objects.ListType})
 	t.HasDict = true
-	t.TpNew = func(cls *objects.Type, args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
-		_ = cls
-		if len(args) >= 1 {
-			tp := args[0].Type()
-			if tp.Iter != nil {
-				it, err := tp.Iter(args[0])
-				if err == nil {
-					var items []objects.Object
-					itType := it.Type()
-					for {
-						v, ierr := itType.IterNext(it)
-						if ierr != nil || v == nil {
-							break
-						}
-						items = append(items, v)
-					}
-					return objects.NewList(items), nil
-				}
-			}
+	t.TpNew = func(_ *objects.Type, args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+		items, err := drainIter(args)
+		if err != nil {
+			return nil, err
 		}
-		return objects.NewList(nil), nil
+		return objects.NewList(items), nil
 	}
 	return t
+}
+
+func drainIter(args []objects.Object) ([]objects.Object, error) {
+	if len(args) < 1 {
+		return nil, nil
+	}
+	tp := args[0].Type()
+	if tp.Iter == nil {
+		return nil, nil
+	}
+	it, err := tp.Iter(args[0])
+	if err != nil {
+		return nil, nil //nolint:nilerr // fall back to empty list when iter is not callable
+	}
+	var items []objects.Object
+	itType := it.Type()
+	for {
+		v, ierr := itType.IterNext(it)
+		if ierr != nil {
+			if errors.Is(ierr, objects.ErrStopIteration) {
+				break
+			}
+			return nil, ierr
+		}
+		if v == nil {
+			break
+		}
+		items = append(items, v)
+	}
+	return items, nil
 }
 
 func newStringAlias(name string) *objects.Type {
