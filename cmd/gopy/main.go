@@ -8,10 +8,16 @@ package main
 import (
 	"fmt"
 	"os"
+	"path/filepath"
+	"strings"
 
 	"github.com/tamnd/gopy/build"
 	"github.com/tamnd/gopy/builtins"
+	"github.com/tamnd/gopy/compile"
 	"github.com/tamnd/gopy/getopt"
+	"github.com/tamnd/gopy/imp"
+	"github.com/tamnd/gopy/objects"
+	"github.com/tamnd/gopy/parser"
 	"github.com/tamnd/gopy/pythonrun"
 	"github.com/tamnd/gopy/state"
 
@@ -92,6 +98,64 @@ opts:
 	return runInteractive(stdout, stderr)
 }
 
+// installPathFinder wires the PathFinder consulted by imp.ImportModule
+// after the inittab miss. The path list mirrors CPython's
+// _PyConfig_InitPathConfig prefix: argv[0]'s parent directory (or "."
+// for -c / interactive), PYTHONPATH entries, then the cwd. The full
+// initconfig path resolution lands later; this is the slice that
+// matters for unittest enablement.
+//
+// CPython: Python/initconfig.c:1734 _PyConfig_InitPathConfig
+// CPython: Lib/importlib/_bootstrap_external.py:1196 PathFinder
+func installPathFinder(scriptPath string) {
+	var paths []string
+	switch {
+	case scriptPath != "":
+		paths = append(paths, filepath.Dir(scriptPath))
+	default:
+		paths = append(paths, "")
+	}
+	if env := os.Getenv("PYTHONPATH"); env != "" {
+		for _, p := range strings.Split(env, string(os.PathListSeparator)) {
+			if p != "" {
+				paths = append(paths, p)
+			}
+		}
+	}
+	imp.SetPathFinder(&imp.PathFinder{
+		Paths:    paths,
+		Compiler: gopyCompile,
+	})
+}
+
+// gopyCompile is the SourceCompiler injected into PathFinder. It is
+// the parser + compiler chain that pythonrun.RunString runs.
+//
+// CPython: Python/pythonrun.c:1102 Py_CompileStringExFlags
+func gopyCompile(src, filename string) (*objects.Code, error) {
+	if src == "" || src[len(src)-1] != '\n' {
+		src += "\n"
+	}
+	mod, err := parser.ParseString(src, filename, parser.ModeFile)
+	if err != nil {
+		return nil, err
+	}
+	cco, err := compile.Compile(mod, filename, 0)
+	if err != nil {
+		return nil, err
+	}
+	return &objects.Code{
+		Code:           cco.Code,
+		Consts:         cco.Consts,
+		Names:          cco.Names,
+		Varnames:       cco.VarNames,
+		Freevars:       cco.FreeVars,
+		Cellvars:       cco.CellVars,
+		Stacksize:      cco.Stacksize,
+		ExceptionTable: cco.ExceptionTable,
+	}, nil
+}
+
 // runSource is the gopy -c entry. It dispatches to
 // pythonrun.RunSimpleString, the port of CPython's
 // PyRun_SimpleStringFlags. The globals dict comes from builtins.Init
@@ -105,6 +169,7 @@ func runSource(src string, stdout, stderr *os.File) int {
 		fmt.Fprintln(stderr, "builtins:", err)
 		return 1
 	}
+	installPathFinder("")
 	ts := state.NewThread()
 	return pythonrun.RunSimpleString(ts, src, g, stderr)
 }
@@ -119,6 +184,7 @@ func runFile(path string, stdout, stderr *os.File) int {
 		fmt.Fprintln(stderr, "builtins:", err)
 		return 1
 	}
+	installPathFinder(path)
 	ts := state.NewThread()
 	return pythonrun.RunAnyFile(ts, path, g, stderr)
 }
@@ -135,6 +201,7 @@ func runInteractive(stdout, stderr *os.File) int {
 		fmt.Fprintln(stderr, "builtins:", err)
 		return 1
 	}
+	installPathFinder("")
 	ts := state.NewThread()
 	if pythonrun.InteractiveLoop(ts, os.Stdin, stdout, stderr, g) != 0 {
 		return 1

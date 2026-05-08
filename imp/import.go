@@ -8,6 +8,7 @@
 package imp
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 
@@ -66,6 +67,18 @@ func ImportModuleLevel(exec Executor, name, pkgname string, level int) (*objects
 		}
 		AddModule(absName, mod)
 		return mod, nil
+	}
+
+	// 4. Path-based finder (sys.path).
+	// CPython: Lib/importlib/_bootstrap_external.py:1284 PathFinder.find_spec
+	if f := GetPathFinder(); f != nil {
+		mod, err := f.FindModule(exec, absName)
+		if err == nil {
+			return mod, nil
+		}
+		if !errors.Is(err, ErrModuleNotFound) {
+			return nil, err
+		}
 	}
 
 	return nil, fmt.Errorf("%w: No module named %q", ErrModuleNotFound, absName)
