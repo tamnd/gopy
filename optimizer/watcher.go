@@ -271,9 +271,6 @@ func DispatchTypeMutation(interp *state.Interpreter, typ unsafe.Pointer) {
 func globalsWatcherCallback(interp *state.Interpreter) DictWatchCallback {
 	return func(_ DictWatchEvent, dict unsafe.Pointer, _ unsafe.Pointer, _ unsafe.Pointer) int {
 		ExecutorsInvalidateDependency(interp, dict, true)
-		if d := (*objects.Dict)(dict); d != nil {
-			d.IncrementMutations()
-		}
 		DictUnwatch(interp, GlobalsWatcherID, dict)
 		return 0
 	}
@@ -317,6 +314,7 @@ func WatcherInit(interp *state.Interpreter) {
 		DispatchTypeMutation(interp, unsafe.Pointer(t))
 	}
 	objects.DictMutationHook = func(d *objects.Dict) {
+		d.IncrementMutations()
 		DispatchDictMutation(interp, DictEventModified, unsafe.Pointer(d), nil, nil)
 	}
 }

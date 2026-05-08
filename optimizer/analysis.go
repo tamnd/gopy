@@ -85,10 +85,9 @@ func removeGlobals(interp *state.Interpreter, frame objects.InterpreterFrame, bu
 	// These values represent stacks of booleans (one bool per bit).
 	// Pushing a frame shifts left, popping a frame shifts right.
 	var (
-		functionChecked           uint32
-		builtinsWatched           uint32
-		globalsWatched            uint32
-		precheckedFunctionVersion uint32
+		functionChecked uint32
+		builtinsWatched uint32
+		globalsWatched  uint32
 	)
 
 	// CPython arms the watcher callbacks lazily here; gopy installs
@@ -153,52 +152,18 @@ func removeGlobals(interp *state.Interpreter, frame objects.InterpreterFrame, bu
 			if functionChecked&1 != 0 {
 				convertGlobalToConst(inst, globals, false)
 			}
-		case UopPushFrame:
-			builtinsWatched <<= 1
-			globalsWatched <<= 1
-			functionChecked <<= 1
-			operand := buffer[pc].Operand0
-			if operand == 0 || operand&1 != 0 {
-				// Either a code object (low bit tag) or NULL.
-				return 1
-			}
-			fn := (*objects.Function)(unsafe.Pointer(uintptr(operand)))
-			if fn == nil {
-				return 1
-			}
-			functionVersion = fn.Version
-			if precheckedFunctionVersion == functionVersion {
-				functionChecked |= 1
-			}
-			precheckedFunctionVersion = 0
-			globals, _ = fn.Globals.(*objects.Dict)
-			builtins, _ = fn.Builtins.(*objects.Dict)
-			if globals == nil || builtins == nil {
-				return 1
-			}
-			if interp.Builtins != nil && interp.Builtins != objects.Object(builtins) {
-				return 1
-			}
-		case UopReturnValue:
-			builtinsWatched >>= 1
-			globalsWatched >>= 1
-			functionChecked >>= 1
-			operand := buffer[pc].Operand0
-			if operand == 0 || operand&1 != 0 {
-				return 1
-			}
-			fn := (*objects.Function)(unsafe.Pointer(uintptr(operand)))
-			if fn == nil {
-				return 1
-			}
-			functionVersion = fn.Version
-			globals, _ = fn.Globals.(*objects.Dict)
-			builtins, _ = fn.Builtins.(*objects.Dict)
-			if globals == nil || builtins == nil {
-				return 1
-			}
+		case UopPushFrame, UopReturnValue:
+			// CPython shifts builtinsWatched / globalsWatched / functionChecked
+			// here to model the per-frame stack of bools. gopy bails out
+			// instead because the function-pointer projection that the
+			// upstream remove_globals consumes lands once trace.go writes
+			// PyFunctionObject* through a side table (a uint64 integer is
+			// not a Go-safe pointer carrier under checkptr).
+			return 1
 		case UopCheckFunctionExactArgs:
-			precheckedFunctionVersion = uint32(buffer[pc].Operand0)
+			// Stash the prechecked version on the inst; consumed once the
+			// PushFrame side-table lands (see UopPushFrame above).
+			_ = uint32(buffer[pc].Operand0)
 		default:
 			if inst.IsTerminator() {
 				return 1
