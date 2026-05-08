@@ -56,6 +56,7 @@ func init() {
 	strType.Str = unicodeStr
 	strType.Hash = unicodeHash
 	strType.RichCmp = unicodeRichCmp
+	strType.Getattro = GenericGetAttr
 	// Sequence.Repeat: 'ab' * 3 == 'ababab'.
 	//
 	// CPython: Objects/unicodeobject.c:11556 unicode_repeat

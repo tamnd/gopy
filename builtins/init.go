@@ -394,6 +394,7 @@ func attributePanel() []struct {
 		{"hasattr", HasAttr},
 		{"setattr", SetAttr},
 		{"delattr", DelAttr},
+		{"dir", Dir},
 	}
 }
 

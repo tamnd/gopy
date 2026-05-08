@@ -131,6 +131,29 @@ func lookupTypeMember(t *Type, name string) Object {
 // CPython: Objects/typeobject.c:1057 type_dict (analog)
 var typeDescrTable = map[*Type]map[string]Object{}
 
+// TypeDescrNames returns the names registered on t through
+// SetTypeDescr, walking the MRO and de-duplicating. Used by builtins
+// dir() to introspect a class.
+func TypeDescrNames(t *Type) []string {
+	seen := map[string]struct{}{}
+	for _, base := range t.MRO {
+		if base == nil {
+			continue
+		}
+		for name := range typeDescrTable[base] {
+			seen[name] = struct{}{}
+		}
+	}
+	for name := range typeDescrTable[t] {
+		seen[name] = struct{}{}
+	}
+	out := make([]string, 0, len(seen))
+	for name := range seen {
+		out = append(out, name)
+	}
+	return out
+}
+
 // SetTypeDescr installs d as the attribute name on t. Used by built-in
 // type initialisers to expose properties before the typeobject port
 // gives every type a real __dict__.
