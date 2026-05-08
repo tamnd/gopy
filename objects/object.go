@@ -12,6 +12,24 @@ var objectType = func() *Type {
 	return t
 }()
 
+// init wires object_new: bare object() returns a fresh instance.
+// Mirrors CPython's tp_new on PyBaseObject_Type. Wired via init() to
+// break the objectType -> NewInstance -> NewDict -> DictType cycle.
+//
+// CPython: Objects/typeobject.c:5021 object_new
+func init() {
+	objectType.TpNew = func(cls *Type, _ []Object, _ map[string]Object) (Object, error) {
+		return NewInstance(cls), nil
+	}
+	// object.__init__ is a no-op accepting any args. Subclasses that
+	// inherit __init__ from object reach this via super().__init__().
+	//
+	// CPython: Objects/typeobject.c:5097 object_init
+	SetTypeDescr(objectType, "__init__", NewBuiltinFunction("__init__", func(_ []Object, _ map[string]Object) (Object, error) {
+		return None(), nil
+	}))
+}
+
 // ObjectType returns the root `object` type singleton. Mirrors
 // PyBaseObject_Type.
 //

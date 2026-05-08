@@ -110,6 +110,23 @@ func (e *evalState) tryImport(op compile.Opcode, oparg uint32) (next int, ok boo
 
 		attr, gerr := objects.GetAttr(mod, objects.NewStr(attrname))
 		if gerr != nil {
+			// Submodule fallback: when the parent module has __name__
+			// and __path__, treat AttributeError as "submodule not yet
+			// imported as an attribute" and force the import. After the
+			// import the cached entry under "<parent>.<name>" wins on
+			// retry. CPython's import_from does the same dance after
+			// PyObject_GetAttr returns NULL with AttributeError set.
+			//
+			// CPython: Python/import.c:3722 import_from
+			sub, subErr := importSubmoduleFallback(e, mod, attrname)
+			if subErr == nil && sub != nil {
+				e.pushObject(mod)
+				e.pushObject(sub)
+				return e.advance(), true, nil
+			}
+			if subErr != nil {
+				return 0, true, fmt.Errorf("vm: ImportError: cannot import name %q: %w", attrname, subErr)
+			}
 			return 0, true, fmt.Errorf("vm: ImportError: cannot import name %q: %w", attrname, gerr)
 		}
 
@@ -204,10 +221,14 @@ func importLevel(obj objects.Object) int {
 	return int(v)
 }
 
-// globalName extracts __name__ from the globals dict for use as the
-// anchor in relative imports.
+// globalName extracts the relative-import anchor from the globals
+// dict. CPython prefers __package__ (the dotted package containing
+// the importing module) and falls back to __name__ when __package__
+// is missing or None. Reading __name__ alone breaks `from . import
+// foo` inside a submodule because __name__ there is the dotted
+// module path while __package__ correctly points at the parent.
 //
-// CPython: Python/bytecodes.c IMPORT_NAME (GLOBALS()["__name__"])
+// CPython: Python/import.c:1665 import_name (read __package__ first)
 func globalName(globals objects.Object) string {
 	if globals == nil {
 		return ""
@@ -215,6 +236,11 @@ func globalName(globals objects.Object) string {
 	d, ok := globals.(*objects.Dict)
 	if !ok {
 		return ""
+	}
+	if v, err := d.GetItem(objects.NewStr("__package__")); err == nil && v != nil && !objects.IsNone(v) {
+		if s, serr := objects.Str(v); serr == nil && s != "" {
+			return s
+		}
 	}
 	v, err := d.GetItem(objects.NewStr("__name__"))
 	if err != nil || v == nil {
@@ -227,4 +253,37 @@ func globalName(globals objects.Object) string {
 		}
 	}
 	return ""
+}
+
+// importSubmoduleFallback retries IMPORT_FROM for the case where mod is
+// a package whose submodule "name" was registered in sys.modules under
+// "<package>.<name>" but never bound as an attribute on the parent.
+// CPython does this in import_from when PyObject_GetAttr returns
+// AttributeError: read parent.__name__, look up the joined name in
+// sys.modules, and import it if missing. Returns (subModule, nil) on
+// success, (nil, err) if the submodule load itself failed, and
+// (nil, nil) when there is no parent package to query.
+//
+// CPython: Python/import.c:3722 import_from
+func importSubmoduleFallback(e *evalState, mod objects.Object, name string) (objects.Object, error) {
+	parentName := ""
+	if pn, perr := objects.GetAttr(mod, objects.NewStr("__name__")); perr == nil && pn != nil {
+		if s, serr := objects.Str(pn); serr == nil {
+			parentName = s
+		}
+	}
+	if parentName == "" {
+		return nil, nil
+	}
+	full := parentName + "." + name
+
+	if cached, ok := imp.GetModule(full); ok {
+		return cached, nil
+	}
+	exec := &vmExecutor{ts: e.ts, builtins: callerBuiltins(e.f)}
+	sub, err := imp.ImportModuleLevel(exec, full, "", 0)
+	if err != nil {
+		return nil, err
+	}
+	return sub, nil
 }

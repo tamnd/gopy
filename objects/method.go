@@ -109,6 +109,21 @@ func init() {
 	ClassMethodType.Str = classMethodRepr
 	ClassMethodType.DescrGet = classMethodDescrGet
 	ClassMethodType.TpTraverse = classMethodTraverse
+	// classmethod(fn): wrap fn so attribute access binds to the class.
+	//
+	// CPython: Objects/funcobject.c:1059 cm_init
+	ClassMethodType.TpNew = func(_ *Type, args []Object, _ map[string]Object) (Object, error) {
+		if len(args) < 1 {
+			return nil, fmt.Errorf("TypeError: classmethod expected 1 argument, got 0")
+		}
+		return NewClassMethod(args[0]), nil
+	}
+	StaticMethodType.TpNew = func(_ *Type, args []Object, _ map[string]Object) (Object, error) {
+		if len(args) < 1 {
+			return nil, fmt.Errorf("TypeError: staticmethod expected 1 argument, got 0")
+		}
+		return NewStaticMethod(args[0]), nil
+	}
 }
 
 // classMethodTraverse visits the wrapped callable. Mirrors cm_traverse.

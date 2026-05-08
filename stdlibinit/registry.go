@@ -42,4 +42,25 @@ import (
 	// resolves at name-lookup time.
 	// CPython: Modules/config.c.in:48 {"_io", PyInit__io}
 	_ "github.com/tamnd/gopy/module/io"
+
+	// Go-backed Python modules: not in CPython's config.c.in (those
+	// are pure-Python in Lib/), but until the corresponding Lib/*.py
+	// vendoring lands the import system needs something to satisfy
+	// `import traceback` and friends pulled in by unittest.
+	_ "github.com/tamnd/gopy/module/traceback"
+	_ "github.com/tamnd/gopy/module/collections"
+	_ "github.com/tamnd/gopy/module/os"
+	_ "github.com/tamnd/gopy/module/fnmatch"
+	_ "github.com/tamnd/gopy/module/functools"
+	_ "github.com/tamnd/gopy/module/time"
+	_ "github.com/tamnd/gopy/module/types"
+	_ "github.com/tamnd/gopy/module/warnings"
+	_ "github.com/tamnd/gopy/module/contextlib"
+	_ "github.com/tamnd/gopy/module/re"
+	_ "github.com/tamnd/gopy/module/pprint"
+	_ "github.com/tamnd/gopy/module/difflib"
+	_ "github.com/tamnd/gopy/module/colorize"
+	_ "github.com/tamnd/gopy/module/signal"
+	_ "github.com/tamnd/gopy/module/weakref"
+	_ "github.com/tamnd/gopy/module/argparse"
 )
