@@ -1,6 +1,7 @@
 package imp_test
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -118,7 +119,7 @@ func TestPathFinderMissingReturnsErrModuleNotFound(t *testing.T) {
 	if err == nil {
 		t.Fatal("FindModule: nil err, want ErrModuleNotFound")
 	}
-	if !isModuleNotFound(err) {
+	if !errors.Is(err, imp.ErrModuleNotFound) {
 		t.Fatalf("err = %v, want ErrModuleNotFound chain", err)
 	}
 }
@@ -133,21 +134,6 @@ func intEquals(o objects.Object, want int64) bool {
 	}
 	v, ok := i.Int64()
 	return ok && v == want
-}
-
-func isModuleNotFound(err error) bool {
-	for e := err; e != nil; {
-		if e == imp.ErrModuleNotFound {
-			return true
-		}
-		type unwrapper interface{ Unwrap() error }
-		u, ok := e.(unwrapper)
-		if !ok {
-			return false
-		}
-		e = u.Unwrap()
-	}
-	return false
 }
 
 // TestImportModuleConsultsPathFinder pins the splice in import.go:
@@ -193,7 +179,7 @@ func TestImportModuleFallsThroughEmptyFinder(t *testing.T) {
 	if err == nil {
 		t.Fatal("err = nil, want ModuleNotFound")
 	}
-	if !isModuleNotFound(err) {
+	if !errors.Is(err, imp.ErrModuleNotFound) {
 		t.Fatalf("err = %v, want ErrModuleNotFound chain", err)
 	}
 }
