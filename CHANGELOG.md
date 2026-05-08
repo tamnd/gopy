@@ -11,6 +11,51 @@ folder; this file is the aggregated index.
 
 ## Unreleased
 
+## v0.12.0 - 2026-05-08
+
+See [`changelog/v0.12.0.md`](changelog/v0.12.0.md).
+
+* feat(optimizer): port the Tier-2 trace projector, executor
+  lifecycle, and analysis skeleton from
+  `Python/optimizer.c` and `Python/optimizer_analysis.c`. Adds
+  `optimizer/` with the bloom filter, side table,
+  `AllocateExecutor` / `ExecutorInit` / detach / clear / pending
+  deletion-list two-phase free, the `JitOptContext` lattice and
+  `AbstractFrame` arena, `TranslateBytecodeToTrace` projection
+  with its `lookupMacro` identity fallback, the
+  `_START_EXECUTOR` / `_MAKE_WARM` / `_JUMP_TO_TOP` prelude, and
+  the `prepare_for_execution` exit / error stub split.
+* feat(optimizer/analysis): port the three-phase orchestrator
+  (`_Py_uop_analyze_and_optimize`) plus
+  `remove_unneeded_uops`. Drops `_SET_IP` and `_CHECK_VALIDITY`
+  rows where escapes can be proved out of reach since
+  `_START_EXECUTOR`, collapses the load-then-pop idiom, and
+  resurrects `_SET_IP` ahead of the next escaping uop. The
+  per-opcode abstract-interpretation table (gated on the DSL
+  generator) and the dict / type watcher arm (gated on watcher
+  infrastructure) are deferred to follow-up work; the
+  orchestrator runs the unwired phases as no-op stubs so the
+  follow-ups slot in as body swaps.
+* feat(vm): wire `JUMP_BACKWARD` and `ENTER_EXECUTOR`. Every
+  warm hit calls `tryWarmupTier2` which routes through
+  `optimizer.Optimize`; on success the install site flips to
+  `ENTER_EXECUTOR` and subsequent hits land in `enterExecutor`.
+  With no uop dispatcher yet, the arm deopts to the Tier-1
+  instruction the install path stashed in `Executor.VMData`.
+* feat(objects/code): add `Code.Executors` side table for the
+  per-install-site executor list.
+* feat(tools/uops_gen): scaffold the DSL generator. Parses
+  `pycore_uop_ids.h` and `pycore_uop_metadata.h`, emits
+  `optimizer/uop_ids_gen.go` and `optimizer/uop_meta_gen.go`,
+  and ships a drift check so the regenerated tables do not
+  silently fall behind upstream.
+* fix(compile): encode `COMPARE_OP` oparg with the comparison
+  kind in the high bits, matching CPython's pre-specializer
+  layout. Unblocks the `comparison_eq` smoke fixture deferred
+  from v0.11.
+* chore: clean up gofmt, revive, staticcheck, and unparam
+  findings across the tree.
+
 ## v0.11.0 - 2026-05-07
 
 See [`changelog/v0.11.0.md`](changelog/v0.11.0.md).
