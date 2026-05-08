@@ -1,6 +1,9 @@
 package objects
 
-import "strings"
+import (
+	"fmt"
+	"strings"
+)
 
 // dictEntry is one slot in the dict's open-addressed table. The slot
 // is one of three states: empty (used=false, dummy=false) the probe
@@ -68,6 +71,66 @@ func init() {
 		DelItem: dictMappingDel,
 	}
 	DictType.TpTraverse = dictTraverse
+	DictType.Getattro = GenericGetAttr
+	SetTypeDescr(DictType, "keys", NewMethodDescr(DictType, "keys", dictKeysMethod))
+	SetTypeDescr(DictType, "values", NewMethodDescr(DictType, "values", dictValuesMethod))
+	SetTypeDescr(DictType, "items", NewMethodDescr(DictType, "items", dictItemsMethod))
+	SetTypeDescr(DictType, "get", NewMethodDescr(DictType, "get", dictGetMethod))
+	SetTypeDescr(DictType, "__contains__", NewMethodDescr(DictType, "__contains__", dictContainsMethod))
+}
+
+func dictKeysMethod(args []Object, _ map[string]Object) (Object, error) {
+	if len(args) != 1 {
+		return nil, fmt.Errorf("TypeError: keys() takes no arguments (%d given)", len(args)-1)
+	}
+	return args[0].(*Dict).KeysView(), nil
+}
+
+func dictValuesMethod(args []Object, _ map[string]Object) (Object, error) {
+	if len(args) != 1 {
+		return nil, fmt.Errorf("TypeError: values() takes no arguments (%d given)", len(args)-1)
+	}
+	return args[0].(*Dict).ValuesView(), nil
+}
+
+func dictItemsMethod(args []Object, _ map[string]Object) (Object, error) {
+	if len(args) != 1 {
+		return nil, fmt.Errorf("TypeError: items() takes no arguments (%d given)", len(args)-1)
+	}
+	return args[0].(*Dict).ItemsView(), nil
+}
+
+// dictGetMethod ports dict_get_impl: dict.get(key, default=None).
+//
+// CPython: Objects/dictobject.c:3823 dict_get_impl
+func dictGetMethod(args []Object, _ map[string]Object) (Object, error) {
+	if len(args) < 2 || len(args) > 3 {
+		return nil, fmt.Errorf("TypeError: get expected 1 to 2 arguments, got %d", len(args)-1)
+	}
+	d := args[0].(*Dict)
+	v, err := d.GetItem(args[1])
+	if err == nil && v != nil {
+		return v, nil
+	}
+	if len(args) == 3 {
+		return args[2], nil
+	}
+	return None(), nil
+}
+
+// dictContainsMethod backs dict.__contains__.
+//
+// CPython: Objects/dictobject.c:3735 dict_contains
+func dictContainsMethod(args []Object, _ map[string]Object) (Object, error) {
+	if len(args) != 2 {
+		return nil, fmt.Errorf("TypeError: __contains__() takes exactly one argument (%d given)", len(args)-1)
+	}
+	d := args[0].(*Dict)
+	v, err := d.GetItem(args[1])
+	if err != nil {
+		return nil, err
+	}
+	return NewBool(v != nil), nil
 }
 
 // dictTraverse visits every key and every value.

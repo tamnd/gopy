@@ -1441,18 +1441,18 @@ func binaryOp(sub int32, a, b objects.Object) (objects.Object, error) {
 		nbSubscr             = 26
 	)
 	switch sub {
-	case nbAdd, nbInplaceAdd:
-		return numericForward(a, b, "+", func(n *objects.NumberMethods) func(a, b objects.Object) (objects.Object, error) {
-			return n.Add
-		})
+	case nbAdd:
+		return objects.NumberAdd(a, b)
+	case nbInplaceAdd:
+		return objects.NumberInPlaceAdd(a, b)
 	case nbSubtract, nbInplaceSubtract:
 		return numericForward(a, b, "-", func(n *objects.NumberMethods) func(a, b objects.Object) (objects.Object, error) {
 			return n.Subtract
 		})
-	case nbMult, nbInplaceMult:
-		return numericForward(a, b, "*", func(n *objects.NumberMethods) func(a, b objects.Object) (objects.Object, error) {
-			return n.Multiply
-		})
+	case nbMult:
+		return objects.NumberMultiply(a, b)
+	case nbInplaceMult:
+		return objects.NumberInPlaceMultiply(a, b)
 	case nbTrueDivide, nbInplaceTrueDivide:
 		return numericForward(a, b, "/", func(n *objects.NumberMethods) func(a, b objects.Object) (objects.Object, error) {
 			return n.TrueDivide
