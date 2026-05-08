@@ -4,6 +4,11 @@
 #
 # Update protocol: bump this file and the file together. Never edit
 # the vendored .py. Local overrides go elsewhere.
+#
+# License: stdlib/LICENSE is a verbatim copy of CPython's LICENSE
+# (PSF License Agreement). It governs every .py listed below; the
+# Apache-2.0 LICENSE in the repo root governs gopy's own code.
+LICENSE b0e25a78cffb43f4d92de8b61ccfa1f1f98ecbc22330b54b5251e7b6ba010231 LICENSE
 unittest/__init__.py 2698f2daf7a02609a6825b89cd459ebaa283dec2403c7b846315a0701bc74a0d Lib/unittest/__init__.py
 unittest/__main__.py ff6b9a100d32001715b40d61bc4d613623b139edb1fdc3566427b83c331caae3 Lib/unittest/__main__.py
 unittest/_log.py 905672317ab26c656c600defce25d477728068f597f00a7f94e22e8128c323b9 Lib/unittest/_log.py
