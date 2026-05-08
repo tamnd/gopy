@@ -91,12 +91,13 @@ func init() {
 }
 
 // callPyFunction pushes a frame for the function's code, binds args
-// into fast-locals, and runs the eval loop. Supports positional and
-// keyword arguments; positional defaults fill in the tail when the
-// caller provided fewer args than parameters. *args / **kwargs are
-// not yet supported.
+// into fast-locals, and runs the eval loop. Mirrors CPython's
+// initialize_locals: positional bind, *args pack, kw-only bind,
+// **kwargs collect, defaults, kw-defaults, missing-arg check.
 //
 // CPython: Objects/call.c _PyEval_Vector
+//
+//nolint:gocognit // matches CPython's initialize_locals; splitting the steps out hides the linear flow without removing branches.
 func callPyFunction(o objects.Object, args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error) {
 	fn := o.(*objects.Function)
 	co := fn.Code
