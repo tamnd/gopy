@@ -55,7 +55,7 @@ func stubType(name string) *objects.Type {
 // CPython: Modules/_io/_iomodule.c:709 (UnsupportedOperation registration)
 var unsupportedOpType = stubType("_io.UnsupportedOperation")
 
-// buildModule materialises the _io module dict. Mirrors the
+// buildModule materializes the _io module dict. Mirrors the
 // PyInit__io entry: register every type and module-level constant
 // the public io module imports through `from _io import ...`.
 //

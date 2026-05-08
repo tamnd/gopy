@@ -75,72 +75,37 @@ func NewStringIO() *StringIO {
 //
 // CPython: Modules/_io/stringio.c:670 _io_StringIO___init___impl
 func stringIOCall(_ objects.Object, args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error) {
-	var (
-		initial *objects.Unicode
-		nlSet   bool
-		nlIsStr bool
-		nlVal   string
-	)
-	// initial_value: str | None, default "".
-	if len(args) >= 1 {
-		v := args[0]
-		if !objects.IsNone(v) {
-			s, ok := v.(*objects.Unicode)
-			if !ok {
-				return nil, fmt.Errorf("TypeError: initial_value must be str or None, not %s", v.Type().Name)
-			}
-			initial = s
-		}
+	if len(args) > 2 {
+		return nil, fmt.Errorf("TypeError: StringIO() takes at most 2 arguments (%d given)", len(args))
 	}
-	// newline: str | None, default "\n".
-	if len(args) >= 2 {
-		v := args[1]
-		nlSet = true
-		if objects.IsNone(v) {
-			nlIsStr = false
-		} else {
-			s, ok := v.(*objects.Unicode)
-			if !ok {
-				return nil, fmt.Errorf("TypeError: newline must be str or None, not %s", v.Type().Name)
-			}
-			nlIsStr = true
-			nlVal = s.Value()
-		}
+	initial, err := strOrNone(positional(args, 0), "initial_value")
+	if err != nil {
+		return nil, err
+	}
+	nlSet := len(args) >= 2
+	nlVal, nlIsStr, err := newlineArg(positional(args, 1))
+	if err != nil {
+		return nil, err
 	}
 	for k, v := range kwargs {
 		switch k {
 		case "initial_value":
-			if !objects.IsNone(v) {
-				s, ok := v.(*objects.Unicode)
-				if !ok {
-					return nil, fmt.Errorf("TypeError: initial_value must be str or None, not %s", v.Type().Name)
-				}
-				initial = s
+			initial, err = strOrNone(v, "initial_value")
+			if err != nil {
+				return nil, err
 			}
 		case "newline":
 			nlSet = true
-			if objects.IsNone(v) {
-				nlIsStr = false
-			} else {
-				s, ok := v.(*objects.Unicode)
-				if !ok {
-					return nil, fmt.Errorf("TypeError: newline must be str or None, not %s", v.Type().Name)
-				}
-				nlIsStr = true
-				nlVal = s.Value()
+			nlVal, nlIsStr, err = newlineArg(v)
+			if err != nil {
+				return nil, err
 			}
 		default:
 			return nil, fmt.Errorf("TypeError: StringIO() got an unexpected keyword argument %q", k)
 		}
 	}
-	if len(args) > 2 {
-		return nil, fmt.Errorf("TypeError: StringIO() takes at most 2 arguments (%d given)", len(args))
-	}
-	// Reject illegal newline values up front. CPython accepts only
-	// "", "\n", "\r", "\r\n", or None.
-	//
-	// CPython: Modules/_io/stringio.c:696 illegal newline check
 	if nlSet && nlIsStr {
+		// CPython: Modules/_io/stringio.c:696 illegal newline check.
 		switch nlVal {
 		case "", "\n", "\r", "\r\n":
 		default:
@@ -155,10 +120,47 @@ func stringIOCall(_ objects.Object, args []objects.Object, kwargs map[string]obj
 		s.readNL = "\n"
 		s.hasReadNL = true
 	}
-	if initial != nil {
-		s.buf = []rune(initial.Value())
+	if initial != "" {
+		s.buf = []rune(initial)
 	}
 	return s, nil
+}
+
+func positional(args []objects.Object, i int) objects.Object {
+	if i < len(args) {
+		return args[i]
+	}
+	return nil
+}
+
+// strOrNone validates that v is None or a str. Returns the underlying
+// Go string (empty if None or unset). Used by `initial_value`.
+func strOrNone(v objects.Object, name string) (string, error) {
+	if v == nil || objects.IsNone(v) {
+		return "", nil
+	}
+	s, ok := v.(*objects.Unicode)
+	if !ok {
+		return "", fmt.Errorf("TypeError: %s must be str or None, not %s", name, v.Type().Name)
+	}
+	return s.Value(), nil
+}
+
+// newlineArg unpacks the `newline` argument: nil means "not supplied",
+// None means "supplied as None" (no translation), str is the raw value
+// to be range-checked by the caller.
+func newlineArg(v objects.Object) (val string, isStr bool, err error) {
+	if v == nil {
+		return "", false, nil
+	}
+	if objects.IsNone(v) {
+		return "", false, nil
+	}
+	s, ok := v.(*objects.Unicode)
+	if !ok {
+		return "", false, fmt.Errorf("TypeError: newline must be str or None, not %s", v.Type().Name)
+	}
+	return s.Value(), true, nil
 }
 
 func stringIORepr(_ objects.Object) (string, error) {
@@ -176,7 +178,7 @@ func stringIOIter(o objects.Object) (objects.Object, error) {
 	return s, nil
 }
 
-// stringIOIterNext yields the next line, signalling EOF with
+// stringIOIterNext yields the next line, signaling EOF with
 // ErrStopIteration. Mirrors stringio_iternext.
 //
 // CPython: Modules/_io/stringio.c:407 stringio_iternext
@@ -368,10 +370,20 @@ func stringIOGetattr(o objects.Object, name objects.Object) (objects.Object, err
 
 // stringIOMethod returns the built-in function backing the named
 // method. Mirrors the row pick CPython does in stringio_methods at
-// stringio_member_descriptor lookup time.
+// stringio_member_descriptor lookup time. Split into two halves so
+// each side stays under the cyclomatic threshold.
 //
 // CPython: Modules/_io/stringio.c:1035 stringio_methods
 func stringIOMethod(s *StringIO, name string) objects.Object {
+	if fn := stringIOIOMethod(s, name); fn != nil {
+		return fn
+	}
+	return stringIOCapMethod(s, name)
+}
+
+// stringIOIOMethod returns the I/O-active methods that touch the
+// buffer or cursor.
+func stringIOIOMethod(s *StringIO, name string) objects.Object {
 	switch name {
 	case "write":
 		return objects.NewBuiltinFunction("write", func(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
@@ -419,6 +431,15 @@ func stringIOMethod(s *StringIO, name string) objects.Object {
 			}
 			return objects.None(), nil
 		})
+	}
+	return nil
+}
+
+// stringIOCapMethod returns the capability/protocol methods: the
+// readable / writable / seekable / isatty trio plus the context-
+// manager hooks.
+func stringIOCapMethod(s *StringIO, name string) objects.Object {
+	switch name {
 	case "readable":
 		return objects.NewBuiltinFunction("readable", func(_ []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
 			if err := s.checkUsable(); err != nil {
