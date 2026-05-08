@@ -283,6 +283,29 @@ linters:
       - path: parser/lexer/token\.go
         linters:
           - unused
+      # Tier-2 optimizer scaffolding. has_space_for_executor /
+      # get_index_for_executor / insert_executor / executorDetach are
+      # called by Optimize once executor.go and optimize.go land
+      # (tasks #437, #439).
+      - path: optimizer/side_table\.go
+        linters:
+          - unused
+      # The lattice's per-tag switches mirror optimizer_symbols.c
+      # branch-for-branch; collapsing them would diverge from the
+      # source shape and break the gate fixtures.
+      - path: optimizer/symbols\.go
+        linters:
+          - gocyclo
+          - gocognit
+          - gocritic
+      # TranslateBytecodeToTrace mirrors optimizer.c's
+      # translate_bytecode_to_trace branch-for-branch; the per-opcode
+      # switch and the inlined macro-expansion loop are the unit of
+      # parity with CPython.
+      - path: optimizer/trace\.go
+        linters:
+          - gocognit
+          - gocyclo
 
 formatters:
   enable:
