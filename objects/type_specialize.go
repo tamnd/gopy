@@ -24,8 +24,28 @@ func (t *Type) VersionTag() uint32 {
 // (Setattr, Setattro on a class) call this so old inline caches no
 // longer match.
 //
-// CPython: Python/typeobject.c:L301 _PyType_Modified (the
-// PyType_Modified entry point)
+// Fires TypeModifiedHook so registered type watchers (notably the
+// Tier-2 optimizer's invalidation pass) can drop any cached state
+// keyed on this type. Mirrors the type_modified_unlocked walk over
+// interp->type_watchers in CPython.
+//
+// CPython: Objects/typeobject.c:1130 type_modified_unlocked /
+// Objects/typeobject.c:1200 PyType_Modified
 func (t *Type) InvalidateVersionTag() {
 	t.versionTag = 0
+	if hook := TypeModifiedHook; hook != nil {
+		hook(t)
+	}
 }
+
+// TypeModifiedHook is fired by InvalidateVersionTag whenever a type
+// mutates. The Tier-2 optimizer installs a closure here at
+// WatcherInit time so it can run DispatchTypeMutation without
+// objects depending on optimizer.
+//
+// Single-interpreter assumption holds in v0.12; sub-interpreters
+// (v0.13) need a per-interpreter registry instead.
+//
+// CPython: Objects/typeobject.c:1170-1188 (notify type watchers
+// loop inside type_modified_unlocked)
+var TypeModifiedHook func(t *Type)

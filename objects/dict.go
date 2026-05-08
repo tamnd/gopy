@@ -38,6 +38,15 @@ type Dict struct {
 	//
 	// CPython: Include/internal/pycore_dict.h dk_version
 	keysVersion uint32
+
+	// mutationCount tallies how many times the watcher callback has
+	// fired on this dict. The Tier-2 globals/builtins folder reads it
+	// to decide whether the dict is too volatile to specialize. CPython
+	// stores the same counter in the high bits of _ma_watcher_tag
+	// (DICT_WATCHED_MUTATION_BITS); gopy keeps it in its own field.
+	//
+	// CPython: Include/internal/pycore_dict.h DICT_WATCHED_MUTATION_BITS
+	mutationCount uint32
 }
 
 // DictType is the type singleton for dict. Mirrors PyDict_Type.
