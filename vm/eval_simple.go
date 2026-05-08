@@ -82,7 +82,7 @@ func wrapConst(v any) (objects.Object, error) {
 // notImplemented. Returns ok=false if op isn't in the hand-written
 // panel. The retDone/err return shape matches dispatch.
 //
-//nolint:gocognit,gocyclo,gocritic,unparam // hand-written opcode switch; the wide return tuple matches dispatch's contract and the arm count shrinks as 1621 codegen replaces these.
+//nolint:gocognit,gocyclo,gocritic // hand-written opcode switch; the wide return tuple matches dispatch's contract and the arm count shrinks as 1621 codegen replaces these.
 func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, retVal objects.Object, retErr error, retDone, ok bool, err error) {
 	switch op {
 	case compile.NOP, compile.CACHE, compile.RESERVED:
@@ -199,7 +199,15 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, retVal
 				return 0, nil, nil, false, true, berr
 			}
 		}
-		return e.jumpBy(-int(oparg) + 1), nil, nil, false, true, nil
+		target := e.jumpBy(-int(oparg) + 1)
+		if op == compile.JUMP_BACKWARD && target >= 0 {
+			e.tryWarmupTier2(target / 2)
+		}
+		return target, nil, nil, false, true, nil
+
+	case compile.ENTER_EXECUTOR:
+		next, retVal, retErr, retDone, eerr := e.enterExecutor(oparg)
+		return next, retVal, retErr, retDone, true, eerr
 
 	case compile.BINARY_OP:
 		b := e.popObject()
