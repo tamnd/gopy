@@ -181,7 +181,7 @@ func loadAsPackage(exec Executor, compiler SourceCompiler, initFile, pkgDir, nam
 	}
 	AddModule(name, mod)
 
-	src, err := os.ReadFile(initFile)
+	src, err := os.ReadFile(initFile) //nolint:gosec // initFile is filepath.Join of a trusted PathFinder.Paths entry.
 	if err != nil {
 		return nil, fmt.Errorf("imp: loadAsPackage %q: %w", name, err)
 	}
@@ -215,7 +215,7 @@ func loadAsModule(exec Executor, compiler SourceCompiler, file, name, parent str
 	}
 	AddModule(name, mod)
 
-	src, err := os.ReadFile(file)
+	src, err := os.ReadFile(file) //nolint:gosec // file is filepath.Join of a trusted PathFinder.Paths entry.
 	if err != nil {
 		return nil, fmt.Errorf("imp: loadAsModule %q: %w", name, err)
 	}

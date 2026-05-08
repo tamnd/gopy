@@ -136,13 +136,13 @@ func installPathFinder(scriptPath string) {
 // (pathconfig/) targets the CPython install layout, not the gopy
 // repo layout, so this entry uses a smaller resolver:
 //
-//   1. $GOPY_STDLIB if set and points at a directory.
-//   2. Walk up from the executable until a stdlib/unittest/ entry
-//      shows up; the gopy binary lives next to its source tree
-//      during development and inside the install root in releases.
-//   3. Walk up from the cwd looking for the same marker. This is the
-//      common case for `go run ./cmd/gopy` and for tests that
-//      execute under the repo.
+//  1. $GOPY_STDLIB if set and points at a directory.
+//  2. Walk up from the executable until a stdlib/unittest/ entry
+//     shows up; the gopy binary lives next to its source tree
+//     during development and inside the install root in releases.
+//  3. Walk up from the cwd looking for the same marker. This is the
+//     common case for `go run ./cmd/gopy` and for tests that
+//     execute under the repo.
 //
 // Returns the empty string when no candidate exists; the caller
 // silently drops it from sys.path.
@@ -187,7 +187,7 @@ func walkUpForStdlib(start string) string {
 }
 
 func isDir(p string) bool {
-	info, err := os.Stat(p)
+	info, err := os.Stat(p) //nolint:gosec // p is os.Executable/os.Getwd/$GOPY_STDLIB derived.
 	return err == nil && info.IsDir()
 }
 
