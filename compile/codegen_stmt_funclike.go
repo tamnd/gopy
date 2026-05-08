@@ -57,7 +57,7 @@ func (c *Compiler) compileFunctionLike(name string, args *ast.Arguments,
 	// Evaluate decorator expressions (in source order, top-to-bottom)
 	// before the function is created. They wrap the result of
 	// MAKE_FUNCTION in reverse order via CALL.
-	if err := c.visitExprs(decorators); err != nil {
+	if err := c.visitDecorators(decorators); err != nil {
 		return err
 	}
 
@@ -89,10 +89,14 @@ func (c *Compiler) compileFunctionLike(name string, args *ast.Arguments,
 
 	c.emitMakeFunction(flags, loc(scopeKey))
 
-	// Apply decorators. Each is a CALL with one argument (the
-	// function below it on the stack).
+	// Apply decorators. Each emits CALL 0: 3.14 lays out the stack as
+	// [..., decorator, wrapped] and CALL's MAYBE_EXPAND_METHOD path
+	// promotes the non-NULL self_or_null slot (wrapped) into the first
+	// positional arg, yielding decorator(wrapped).
+	//
+	// CPython: Python/codegen.c:976 codegen_apply_decorators
 	for range decorators {
-		c.addOpI(CALL, 1, loc(scopeKey))
+		c.addOpI(CALL, 0, loc(scopeKey))
 	}
 
 	if isLambda {
@@ -307,12 +311,12 @@ func (c *Compiler) emitClosure(inner *symtable.Entry, l ast.Pos) (int32, error) 
 // CPython: Python/codegen.c:L1311 codegen_function_body prologue
 func (c *Compiler) emitMakeCellAndCopyFree(sc *symtable.Entry, l ast.Pos) error {
 	// Cell vars first: every name flagged as Cell in this function
-	// gets a MAKE_CELL n where n is the varnames index. Skip names
-	// that are not parameters (those are handled by ordinary
-	// STORE_DEREF the first time they get assigned).
+	// gets a MAKE_CELL n where n is the cellvars index. The runtime
+	// arm looks the name up against varnames so a parameter cell-var
+	// transfers its value into the cell.
 	for _, name := range sc.Varnames {
 		if sc.GetScope(name) == symtable.Cell {
-			pool := poolVarNames
+			pool := poolCellVars
 			idx := c.poolIndex(&pool, name)
 			c.addOpI(MAKE_CELL, int32(idx), l)
 		}
@@ -348,13 +352,17 @@ func freeVarsOf(sc *symtable.Entry) []string {
 	return out
 }
 
-// visitExprs evaluates a sequence of expressions in order, leaving
-// each result on the stack.
+// visitDecorators evaluates a decorator list, leaving each callable
+// on the stack in source order. The wrapped value (function or
+// class) is pushed by the caller; each subsequent CALL 0 then
+// consumes [decorator, wrapped] and pushes decorator(wrapped). The
+// 3.14 CALL convention treats a non-NULL self_or_null slot as the
+// first positional arg, so no PUSH_NULL is needed here.
 //
-// CPython: Python/codegen.c VISIT_SEQ(c, expr, seq) macro expansion
-func (c *Compiler) visitExprs(es ast.Seq[ast.Expr]) error {
-	for _, e := range es {
-		if err := c.visitExpr(e); err != nil {
+// CPython: Python/codegen.c:962 codegen_decorators
+func (c *Compiler) visitDecorators(decos ast.Seq[ast.Expr]) error {
+	for _, d := range decos {
+		if err := c.visitExpr(d); err != nil {
 			return err
 		}
 	}

@@ -143,6 +143,7 @@ func TestEvalMakeFunctionAndCall(t *testing.T) {
 		Code: append(
 			instr(compile.LOAD_FAST, 0),
 			instr(compile.RETURN_VALUE, 0)...),
+		Argcount:  1,
 		Varnames:  []string{"x"},
 		Stacksize: 4,
 		Name:      "id",

@@ -32,8 +32,10 @@ func (c *Compiler) visitClassDef(s *ast.ClassDef) error {
 		return fmt.Errorf("compile: ClassDef with PEP 695 type params not yet supported")
 	}
 	// 1. Decorators are evaluated outer-first; each wraps the produced
-	// class object via a CALL 1 after the build-class call.
-	if err := c.visitExprs(s.DecoratorList); err != nil {
+	// class object via a CALL 0 after the build-class call (the class
+	// sits in the self_or_null slot which CALL promotes to the first
+	// positional arg).
+	if err := c.visitDecorators(s.DecoratorList); err != nil {
 		return err
 	}
 
@@ -89,9 +91,13 @@ func (c *Compiler) visitClassDef(s *ast.ClassDef) error {
 		c.addOpI(CALL, nargs, loc(s))
 	}
 
-	// 6. Decorator chain: each wraps the result via CALL 1.
+	// 6. Decorator chain. CALL 0 per layer: the class sits in the
+	// self_or_null slot, which the CALL macro path promotes to a
+	// first positional arg.
+	//
+	// CPython: Python/codegen.c:976 codegen_apply_decorators
 	for range s.DecoratorList {
-		c.addOpI(CALL, 1, loc(s))
+		c.addOpI(CALL, 0, loc(s))
 	}
 
 	// 7. Bind the produced class object to the class name in the

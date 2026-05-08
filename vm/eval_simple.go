@@ -26,15 +26,23 @@ import (
 // class bodies all surface here.
 func liftNestedCode(c *compile.Code) *objects.Code {
 	return &objects.Code{
-		Name:           c.Name,
-		Code:           c.Code,
-		Consts:         c.Consts,
-		Names:          c.Names,
-		Varnames:       c.VarNames,
-		Freevars:       c.FreeVars,
-		Cellvars:       c.CellVars,
-		Stacksize:      c.Stacksize,
-		ExceptionTable: c.ExceptionTable,
+		Argcount:        c.Argcount,
+		PosonlyArgcount: c.PosOnlyArgCount,
+		KwonlyArgcount:  c.KwOnlyArgCount,
+		Stacksize:       c.Stacksize,
+		Flags:           int(c.Flags),
+		Code:            c.Code,
+		Consts:          c.Consts,
+		Names:           c.Names,
+		Varnames:        c.VarNames,
+		Freevars:        c.FreeVars,
+		Cellvars:        c.CellVars,
+		Filename:        c.Filename,
+		Name:            c.Name,
+		Qualname:        c.Qualname,
+		Firstlineno:     c.Firstlineno,
+		Linetable:       c.Linetable,
+		ExceptionTable:  c.ExceptionTable,
 	}
 }
 
@@ -647,26 +655,44 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, retVal
 		return e.advance(), nil, nil, false, true, nil
 
 	case compile.MAKE_CELL:
-		// Promote fast-local oparg to a fresh cell slot at the cells
-		// region. The slot indexes are aligned: cell variable i lives at
-		// CellsStart + i and shadows local oparg.
+		// Wrap the named local in a fresh cell. oparg is the cellvars
+		// index (in gopy's split layout); the cell var name is looked
+		// up against varnames so that a parameter that's also a cell
+		// var transfers its value into the cell. The cell is stored at
+		// the cell-region slot for LOAD_DEREF, and mirrored back to
+		// the local slot so the LOAD_FAST that emitClosure threads
+		// into the closure tuple picks up the cell rather than the
+		// raw parameter value (CPython 3.14 achieves the same effect
+		// via overlapped localsplus slots).
 		//
-		// CPython: Python/bytecodes.c MAKE_CELL
-		base := frame.NLocalsOf(e.f.Code)
-		idx := base + int(oparg)
+		// CPython: Python/bytecodes.c:1863 MAKE_CELL
+		co := e.f.Code
+		base := frame.NLocalsOf(co)
+		cellIdx := int(oparg)
+		var name string
+		if cellIdx < len(co.Cellvars) {
+			name = co.Cellvars[cellIdx]
+		}
+		localIdx := -1
+		for i, vn := range co.Varnames {
+			if vn == name {
+				localIdx = i
+				break
+			}
+		}
 		var contents objects.Object
-		if idx < base+frame.NCellsOf(e.f.Code) {
-			ref := e.f.LocalsPlus[idx]
+		if localIdx >= 0 {
+			ref := e.f.LocalsPlus[localIdx]
 			if !ref.IsNull() {
-				if existing, ok := ref.AsObject().(*objects.Cell); ok {
-					contents = existing.Contents
-				} else {
-					contents = ref.AsObject()
-				}
+				contents = ref.AsObject()
 			}
 		}
 		cell := objects.NewCell(contents)
-		e.f.LocalsPlus[idx] = stackref.FromObject(cell)
+		cellRef := stackref.FromObject(cell)
+		e.f.LocalsPlus[base+cellIdx] = cellRef
+		if localIdx >= 0 {
+			e.f.LocalsPlus[localIdx] = cellRef
+		}
 		return e.advance(), nil, nil, false, true, nil
 
 	case compile.COPY_FREE_VARS:

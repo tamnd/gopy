@@ -213,14 +213,23 @@ func gopyCompile(src, filename string) (*objects.Code, error) {
 		return nil, err
 	}
 	return &objects.Code{
-		Code:           cco.Code,
-		Consts:         cco.Consts,
-		Names:          cco.Names,
-		Varnames:       cco.VarNames,
-		Freevars:       cco.FreeVars,
-		Cellvars:       cco.CellVars,
-		Stacksize:      cco.Stacksize,
-		ExceptionTable: cco.ExceptionTable,
+		Argcount:        cco.Argcount,
+		PosonlyArgcount: cco.PosOnlyArgCount,
+		KwonlyArgcount:  cco.KwOnlyArgCount,
+		Stacksize:       cco.Stacksize,
+		Flags:           int(cco.Flags),
+		Code:            cco.Code,
+		Consts:          cco.Consts,
+		Names:           cco.Names,
+		Varnames:        cco.VarNames,
+		Freevars:        cco.FreeVars,
+		Cellvars:        cco.CellVars,
+		Filename:        cco.Filename,
+		Name:            cco.Name,
+		Qualname:        cco.Qualname,
+		Firstlineno:     cco.Firstlineno,
+		Linetable:       cco.Linetable,
+		ExceptionTable:  cco.ExceptionTable,
 	}, nil
 }
 
