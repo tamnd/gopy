@@ -214,6 +214,12 @@ type Emitter struct {
 	Out       *CWriter
 	Labels    map[string]*Label
 	replacers map[string]ReplacementFunc
+	// GotoLabelHook overrides Emitter.gotoLabel; the optimizer subclass
+	// installs a verbatim emitter here because the abstract interpreter
+	// has no JUMP_TO_LABEL machinery.
+	//
+	// CPython: Tools/cases_generator/optimizer_generator.py:110-112 OptimizerEmitter.goto_label
+	GotoLabelHook func(gotoTkn, label Token, storage *Storage) error
 }
 
 // NewEmitter builds an Emitter wired to the default replacement registry.
@@ -588,6 +594,9 @@ func (e *Emitter) StackPointer(
 //
 // CPython: Tools/cases_generator/generators_common.py:386-399 Emitter.gotoTknlabel
 func (e *Emitter) gotoLabel(gotoTkn, label Token, storage *Storage) error {
+	if e.GotoLabelHook != nil {
+		return e.GotoLabelHook(gotoTkn, label, storage)
+	}
 	node, ok := e.Labels[label.Text]
 	if !ok {
 		return analysisError(fmt.Sprintf("Label '%s' does not exist", label.Text), label)

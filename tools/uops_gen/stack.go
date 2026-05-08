@@ -1105,7 +1105,14 @@ func (s *Storage) Merge(other *Storage, out *CWriter) error {
 		other.printComment(out)
 		return newStackError("Unmergeable inputs. Differing state of '%s'", diff.Name())
 	}
-	for i, v := range s.Inputs {
+	// zip-equivalent: stop at the shorter of the two lists, mirroring
+	// the upstream zip(self.inputs, other.inputs) loop semantics.
+	n := len(s.Inputs)
+	if len(other.Inputs) < n {
+		n = len(other.Inputs)
+	}
+	for i := 0; i < n; i++ {
+		v := s.Inputs[i]
 		ov := other.Inputs[i]
 		if v.InLocal != ov.InLocal {
 			return newStackError("'%s' is cleared on some paths, but not all", v.Name())
