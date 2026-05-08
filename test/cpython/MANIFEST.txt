@@ -1,0 +1,523 @@
+# gopy test corpus manifest
+#
+# One row per entry under CPython 3.14's Lib/test/. Format:
+#
+#   name<TAB>status<TAB>version<TAB>note (optional)
+#
+# Status values:
+#
+#   done          test runs green under the gopy harness; pinned in CI
+#   ready         feature shipped; test expected to pass once vendored
+#   pending       vendored but has known divergences; runner skips
+#   deferred      feature has not shipped yet (typically stdlib gap)
+#   out-of-scope  CPython internals gopy will not carry
+#
+# Version names the gopy release that owns the underlying feature.
+# Empty (just a tab placeholder) for out-of-scope entries.
+#
+# A trailing "/" on the name marks a Lib/test/test_X/ package
+# (sub-suite) rather than a flat test_X.py file.
+#
+# Source of truth for the triage rationale: ~/notes/Spec/1700/.
+# Whenever a row's status changes, update the spec too.
+
+# ---- Lexer / tokenizer ---------------------------------------------
+test_keyword	ready	v0.5.5	keyword module is a generated table
+test_source_encoding	ready	v0.5.5	parser/lexer encoding detection
+test_tabnanny	ready	v0.9.0	rides on tokenize.Iter
+test_tokenize	ready	v0.9.0	tokenize.Iter graduated to real lexer in v0.9
+test_utf8source	ready	v0.5.5	parser/lexer utf-8 default
+
+# ---- Parser / grammar / AST ----------------------------------------
+test_annotationlib	ready	v0.10.1	annotation lazy resolver
+test_asdl_parser	ready	v0.5.0	ast/asdl.go
+test_ast/	ready	v0.10.2	full ast.dump panel
+test_decorators	ready	v0.5.0	decorator codegen
+test_eof	ready	v0.10.2	EOF / continuation handling in parser
+test_fstring	ready	v0.10.2	PEP 701 f-strings
+test_future_stmt/	ready	v0.5.0	__future__ flag plumbing
+test_global	ready	v0.5.0	symtable global / nonlocal
+test_grammar	done	v0.10.2	parser drop pinned in v0.10.2 release notes
+test_int_literal	ready	v0.4.0	int parsing in pystrconv
+test_keywordonlyarg	ready	v0.5.0	parser kw-only args
+test_metaclass	ready	v0.10.1	__build_class__ + type creation
+test_named_expressions	ready	v0.10.2	walrus parser/codegen
+test_patma	ready	v0.9.0	PEP 634 pattern matching
+test_peg_generator/	deferred	v0.5.5	tools/parser_gen/ still WIP
+test_pep646_syntax	ready	v0.10.2	starred type-param syntax
+test_positional_only_arg	ready	v0.5.0	parser pos-only args
+test_scope	ready	v0.5.0	symtable scoping
+test_string_literals	ready	v0.10.2	string parser corner cases
+test_subclassinit	ready	v0.10.1	__init_subclass__ hook
+test_syntax	ready	v0.10.2	parser/errors panel
+test_tstring	ready	v0.10.2	PEP 750 t-strings
+test_type_aliases	ready	v0.10.2	type Foo = ...
+test_type_annotations	ready	v0.10.2	annotation lowering
+test_type_comments	ready	v0.10.2	parser type-comment mode
+test_type_params	ready	v0.10.2	PEP 695 type parameters
+test_unicode_identifiers	ready	v0.10.2	NFKC identifier normalization
+test_unpack	ready	v0.5.0	tuple unpack codegen
+test_unpack_ex	ready	v0.5.0	starred unpack
+test_unparse	ready	v0.5.0	ast/unparse.go
+
+# ---- Compile / codegen / dis ---------------------------------------
+test__opcode	ready	v0.5.0	_opcode module surface
+test_clinic	out-of-scope	-	CPython tooling, not a runtime feature
+test_code	ready	v0.5.0	Code object reflection
+test_code_module	ready	v0.10.1	code module (REPL helper)
+test_codeop	ready	v0.10.1	codeop on top of compile()
+test_compile	ready	v0.10.1	full compile() builtin panel
+test_compileall	ready	v0.10.1	needs py_compile + filesystem walk
+test_compiler_assemble	done	v0.5.0	gated in v05test/
+test_compiler_codegen	done	v0.5.0	gated in v05test/
+test_dictcomps	ready	v0.5.0	dict comprehension codegen
+test_dis	done	v0.5.0	gated via golden corpus in v05test/
+test_format	done	v0.4.0	gated in v04test/
+test_generated_cases	ready	v0.12.0	tools/uops_gen panel
+test_genexps	ready	v0.9.0	generator expressions
+test_listcomps	ready	v0.5.0	list comprehension codegen
+test_lltrace	out-of-scope	-	low-level dispatch trace, build-time only
+test_opcodes	ready	v0.5.0	bytecode opcode table
+test_peepholer	ready	v0.5.0	flowgraph optimization panel
+test_print	ready	v0.7.0	print() builtin
+test_py_compile	ready	v0.10.1	py_compile module
+test_setcomps	ready	v0.5.0	set comprehension codegen
+test_symtable	ready	v0.5.0	symtable module
+test_thread_local_bytecode	deferred	post-0.12	per-thread quickening
+
+# ---- VM / eval loop ------------------------------------------------
+test_augassign	ready	v0.5.0	augassign codegen
+test_call	ready	v0.9.0	CALL / KW_NAMES family
+test_compare	ready	v0.2.0	comparison fallbacks
+test_contains	ready	v0.2.0	__contains__ protocol
+test_dynamic	ready	v0.7.0	exec/eval against frame.f_locals
+test_eval	ready	v0.10.1	eval() builtin
+test_extcall	ready	v0.9.0	extended call (* and ** expansion)
+test_frame	ready	v0.9.0	frame object surface
+test_index	ready	v0.4.0	__index__ protocol
+test_isinstance	ready	v0.2.0	isinstance() panel
+test_iter	ready	v0.2.0	iter()/next() builtins
+test_iterlen	ready	v0.2.0	__length_hint__
+test_pow	ready	v0.4.0	builtin pow()
+test_richcmp	ready	v0.2.0	rich comparison protocol
+test_typechecks	ready	v0.2.0	type-check fast paths
+test_unary	ready	v0.4.0	unary number ops
+test_with	ready	v0.9.0	context manager; with statement
+
+# ---- Iterators / generators / coroutines ---------------------------
+test_asyncgen	ready	v0.9.0	async generators
+test_coroutines	ready	v0.9.0	async def + await codegen
+test_generator_stop	ready	v0.9.0	PEP 479
+test_generators	ready	v0.9.0	generator protocol panel
+test_yield_from	ready	v0.9.0	yield from semantics
+
+# ---- Exceptions / traceback ----------------------------------------
+test_baseexception	ready	v0.3.0	BaseException root
+test_except_star	ready	v0.3.0	except* syntax
+test_exception_group	ready	v0.3.0	PEP 654 exception groups
+test_exception_hierarchy	ready	v0.3.0	MRO of builtin exceptions
+test_exception_variations	ready	v0.3.0	except / except* shapes
+test_exceptions	ready	v0.3.0	full exception type panel
+test_raise	ready	v0.3.0	raise / raise from semantics
+test_traceback	ready	v0.3.0	traceback module
+
+# ---- Builtins / types ----------------------------------------------
+test_abstract_numbers	ready	v0.4.0	numbers module
+test_bool	ready	v0.2.0	bool subclass of int
+test_buffer	out-of-scope	-	C-level buffer protocol API
+test_builtin	ready	v0.7.0	full builtins module surface
+test_bytes	ready	v0.4.0	bytes immutable buffer
+test_complex	ready	v0.4.0	complex literal + arithmetic
+test_dict	ready	v0.2.0	dict type panel
+test_dictviews	ready	v0.2.0	dict_keys / dict_values / dict_items
+test_float	ready	v0.4.0	float parse / format / arithmetic
+test_funcattrs	ready	v0.5.0	function attribute panel
+test_int	ready	v0.2.0	int type + small-int cache
+test_list	ready	v0.2.0	list type panel
+test_long	ready	v0.2.0	unbounded int (long) panel
+test_memoryview	ready	v0.4.0	memoryview surface
+test_numeric_tower	ready	v0.4.0	numbers ABC tower
+test_property	ready	v0.10.1	property descriptor
+test_range	ready	v0.2.0	range type
+test_set	ready	v0.4.0	set / frozenset panel
+test_slice	ready	v0.2.0	slice type
+test_str	ready	v0.4.0	str (PEP 393 unicode)
+test_strtod	ready	v0.4.0	covered implicitly via test_float
+test_structseq	ready	v0.7.0	named-tuple style structseq
+test_tuple	ready	v0.2.0	tuple type panel
+test_types	ready	v0.2.0	types module
+test_ucn	ready	v0.4.0	\N{NAME} resolver
+test_unicode_file	ready	v0.10.1	filesystem unicode path
+test_unicode_file_functions	ready	v0.10.1	os path unicode
+test_unicodedata	ready	v0.4.0	unicodedata data tables
+test_userdict	ready	v0.10.1	UserDict subclassing
+test_userlist	ready	v0.10.1	UserList subclassing
+test_userstring	ready	v0.10.1	UserString subclassing
+
+# ---- Classes / descriptors / methods -------------------------------
+test_abc	ready	v0.10.1	abc module + ABCMeta
+test_class	ready	v0.10.1	__build_class__ panel
+test_descr	ready	v0.10.1	descriptors / slots / methods
+test_descrtut	ready	v0.10.1	descriptor tutorial doctest
+test_dynamicclassattribute	ready	v0.10.1	DynamicClassAttribute
+test_enum	ready	v0.10.1	enum module
+test_genericalias	ready	v0.10.1	builtin __class_getitem__
+test_genericclass	ready	v0.10.1	typing.Generic plumbing
+test_super	ready	v0.10.1	super() resolution
+test_type_cache	ready	v0.11.0	type version cache (specializer)
+test_typing	ready	v0.10.1	typing module surface
+test_typing/	ready	v0.10.1	typing sub-suite
+
+# ---- Modules / imports ---------------------------------------------
+test__interpchannels	deferred	post-0.12	PEP 554 interpreters
+test__interpreters	deferred	post-0.12	PEP 554 interpreters
+test_crossinterp	deferred	post-0.12	crossinterp module
+test_frozen	ready	v0.8.0	frozen module flag in marshal
+test_import/	ready	v0.8.0	full import system panel
+test_importlib/	ready	v0.8.0	importlib package
+test_interpreters/	deferred	post-0.12	PEP 554 sub-suite
+test_module	ready	v0.7.0	module type
+test_module/	ready	v0.7.0	module-level fixtures
+test_modulefinder	ready	v0.8.0	modulefinder utility
+test_pkg	ready	v0.8.0	package-style imports
+test_pkgutil	ready	v0.8.0	pkgutil walk_packages etc
+test_pyclbr	ready	v0.8.0	pyclbr class browser
+test_runpy	ready	v0.10.1	runpy for gopy -m
+test_zipapp	deferred	v0.10.1	zipapp not shipped
+test_zipimport	deferred	v0.8.0	zipimport not shipped
+test_zipimport_support	deferred	v0.8.0	zipimport not shipped
+
+# ---- GC / weakref --------------------------------------------------
+test_finalization	ready	v0.10.0	PEP 442 finalizers
+test_free_threading/	deferred	post-0.12	PEP 703 free threading
+test_gc	ready	v0.10.0	full cycle collector panel
+test_weakref	ready	v0.10.0	weakref + finalizer queue
+test_weakset	ready	v0.10.0	WeakSet on weakref
+
+# ---- Codecs / encodings --------------------------------------------
+test_charmapcodec	deferred	v0.8.0	charmap codec not shipped
+test_codeccallbacks	ready	v0.8.0	codecs error-callback registry
+test_codecencodings_cn	deferred	v0.8.0	CJK codecs not shipped
+test_codecencodings_hk	deferred	v0.8.0	CJK codecs not shipped
+test_codecencodings_iso2022	deferred	v0.8.0	iso2022 codecs not shipped
+test_codecencodings_jp	deferred	v0.8.0	CJK codecs not shipped
+test_codecencodings_kr	deferred	v0.8.0	CJK codecs not shipped
+test_codecencodings_tw	deferred	v0.8.0	CJK codecs not shipped
+test_codecmaps_cn	deferred	v0.8.0	CJK codec maps
+test_codecmaps_hk	deferred	v0.8.0	CJK codec maps
+test_codecmaps_jp	deferred	v0.8.0	CJK codec maps
+test_codecmaps_kr	deferred	v0.8.0	CJK codec maps
+test_codecmaps_tw	deferred	v0.8.0	CJK codec maps
+test_codecs	ready	v0.8.0	utf-8 / ascii / latin-1 panel
+test_multibytecodec	deferred	v0.8.0	multibyte codec base class
+
+# ---- IO / buffer ---------------------------------------------------
+test_bufio	ready	v0.10.1	BufferedReader
+test_file	ready	v0.10.1	file builtin
+test_file_eintr	ready	v0.10.1	EINTR retry
+test_fileio	ready	v0.10.1	FileIO low-level
+test_io	ready	v0.10.1	io module on top of objects.File
+test_largefile	deferred	v0.10.1	needs > 4 GiB filesystem
+test_memoryio	ready	v0.10.1	BytesIO / StringIO
+test_univnewlines	ready	v0.10.1	universal newline mode
+
+# ---- Filesystem / path ---------------------------------------------
+test_filecmp	ready	v0.10.1	filecmp module
+test_fileinput	ready	v0.10.1	fileinput module
+test_fileutils	deferred	v0.10.1	C-level filesystem path helpers
+test_fnmatch	ready	v0.10.1	fnmatch module
+test_genericpath	ready	v0.10.1	shared os.path helpers
+test_glob	ready	v0.10.1	glob module
+test_mmap	deferred	v0.10.1	mmap module not shipped
+test_ntpath	ready	v0.10.1	ntpath module
+test_nturl2path	deferred	v0.10.1	windows-only
+test_os	ready	v0.10.1	os module
+test_pathlib/	ready	v0.10.1	pathlib module
+test_posix	ready	v0.10.1	posix module
+test_posixpath	ready	v0.10.1	posixpath module
+test_shutil	ready	v0.10.1	shutil module
+test_stat	ready	v0.10.1	stat module
+test_tempfile	ready	v0.10.1	tempfile module
+
+# ---- Hash / random / crypto ----------------------------------------
+test_hash	ready	v0.4.0	hash() builtin under SipHash
+test_hashlib	deferred	v0.4.0	hashlib not shipped
+test_hmac	deferred	v0.4.0	hmac not shipped
+test_random	ready	v0.7.0	random module
+test_secrets	deferred	v0.7.0	secrets not shipped
+
+# ---- Math / numbers ------------------------------------------------
+test_binop	ready	v0.4.0	binary number ops
+test_cmath	ready	v0.4.0	cmath module
+test_decimal	deferred	v0.4.0	decimal not shipped
+test_fractions	ready	v0.4.0	fractions module
+test_math	ready	v0.4.0	math module
+test_math_property	ready	v0.4.0	math hypothesis-style
+test_statistics	ready	v0.4.0	statistics module
+
+# ---- Datetime / time -----------------------------------------------
+test_calendar	ready	v0.9.0	calendar module
+test_datetime	ready	v0.9.0	datetime module on top of pytime
+test_strftime	ready	v0.9.0	strftime parity
+test_strptime	ready	v0.9.0	strptime parity
+test_time	ready	v0.9.0	time module
+test_zoneinfo/	deferred	post-0.12	zoneinfo TZ database
+
+# ---- Collections / containers --------------------------------------
+test_array	ready	v0.10.1	array module
+test_bisect	ready	v0.10.1	bisect module
+test_collections	ready	v0.10.1	collections module
+test_defaultdict	ready	v0.10.1	collections.defaultdict
+test_deque	ready	v0.10.1	collections.deque
+test_enumerate	ready	v0.7.0	enumerate() builtin
+test_graphlib	ready	v0.10.1	graphlib topological sort
+test_heapq	ready	v0.10.1	heapq module
+test_ordered_dict	ready	v0.2.0	dict insertion order
+test_queue	ready	v0.10.1	queue module
+test_sort	ready	v0.2.0	list.sort panel
+
+# ---- Itertools / functools / operator ------------------------------
+test_contextlib	ready	v0.10.1	contextlib module
+test_contextlib_async	ready	v0.10.1	contextlib async helpers
+test_functools	ready	v0.10.1	functools module
+test_itertools	ready	v0.10.1	itertools module
+test_operator	ready	v0.10.1	operator module
+test_reprlib	ready	v0.10.1	reprlib module
+
+# ---- Inspect / reflection / typing ---------------------------------
+test_inspect/	ready	v0.10.1	inspect module
+test_linecache	ready	v0.7.0	linecache module (used by traceback)
+
+# ---- Logging / warnings --------------------------------------------
+test_flufl	ready	v0.7.0	__future__ barry_as_FLUFL
+test_logging	ready	v0.10.1	logging module
+test_warnings/	ready	v0.7.0	_warnings module
+
+# ---- CLI / REPL ----------------------------------------------------
+test__colorize	ready	v0.10.1	_colorize internal helper
+test_argparse	ready	v0.10.1	argparse module
+test_atexit	ready	v0.7.0	atexit module
+test_audit	ready	v0.7.0	sys.audit hook
+test_cmd	ready	v0.7.0	cmd module (REPL framework)
+test_cmd_line	ready	v0.7.0	cmd-line argument panel
+test_cmd_line_script	ready	v0.7.0	gopy script.py invocation
+test_getopt	ready	v0.9.0	getopt module
+test_optparse	ready	v0.10.1	optparse module
+test_pyrepl/	deferred	v0.10.1	pyrepl line editor
+test_readline	deferred	v0.10.1	readline integration
+test_repl	ready	v0.7.0	basic REPL gate
+test_rlcompleter	deferred	v0.10.1	readline integration
+test_token	ready	v0.9.0	token module
+
+# ---- Profiling / tracing -------------------------------------------
+test_cprofile	deferred	v0.11.0	cProfile (C accelerator)
+test_external_inspection	out-of-scope	-	gdb-based
+test_monitoring	done	v0.11.0	gated indirectly via v012test/
+test_opcache	done	v0.11.0	gated via v012test/
+test_optimizer	done	v0.12.0	gated via v012test/
+test_perf_profiler	out-of-scope	-	perf integration not portable
+test_perfmaps	out-of-scope	-	perf integration not portable
+test_profile	ready	v0.11.0	profile module
+test_pstats	ready	v0.11.0	pstats reader
+test_sys_setprofile	ready	v0.11.0	sys.setprofile under monitor
+test_sys_settrace	ready	v0.11.0	sys.settrace under monitor
+test_trace	ready	v0.11.0	trace module on top of monitor
+test_tracemalloc	deferred	v0.11.0	tracemalloc not shipped
+
+# ---- Threading / concurrency / async --------------------------------
+test_asyncio/	deferred	v0.9.0	asyncio package on top of v0.9 coroutines
+test_concurrent_futures/	deferred	v0.10.1	concurrent.futures
+test_eintr	ready	v0.10.1	EINTR handling
+test_fork1	deferred	v0.10.1	os.fork tests
+test_multiprocessing_fork/	deferred	v0.10.1	multiprocessing fork start method
+test_multiprocessing_forkserver/	deferred	v0.10.1	multiprocessing forkserver
+test_multiprocessing_main_handling	deferred	v0.10.1	multiprocessing not shipped
+test_multiprocessing_spawn/	deferred	v0.10.1	multiprocessing spawn
+test_popen	deferred	v0.10.1	os.popen
+test_signal	ready	v0.10.1	signal module
+test_subprocess	deferred	v0.10.1	subprocess module
+test_thread	ready	v0.7.0	_thread module
+test_threadedtempfile	ready	v0.10.1	tempfile under threads
+test_threading	ready	v0.7.0	threading on top of pythread
+test_threading_local	ready	v0.7.0	thread-local
+test_threadsignals	ready	v0.10.1	signal-from-thread
+test_wait3	deferred	v0.10.1	os.wait3
+test_wait4	deferred	v0.10.1	os.wait4
+
+# ---- Stdlib data formats -------------------------------------------
+test_base64	ready	v0.10.1	base64 module
+test_binascii	ready	v0.10.1	binascii module
+test_bz2	deferred	v0.10.1	bz2 not shipped
+test_configparser	deferred	v0.10.1	configparser not shipped
+test_copy	ready	v0.8.0	copy / deepcopy on top of __copy__ slot
+test_copyreg	deferred	v0.8.0	needs pickle
+test_csv	deferred	v0.10.1	csv not shipped
+test_dataclasses/	ready	v0.10.1	dataclasses module
+test_dbm	deferred	v0.10.1	dbm module
+test_dbm_dumb	deferred	v0.10.1	dbm.dumb
+test_dbm_gnu	deferred	v0.10.1	dbm.gnu
+test_dbm_ndbm	deferred	v0.10.1	dbm.ndbm
+test_dbm_sqlite3	deferred	v0.10.1	sqlite3-backed dbm
+test_difflib	ready	v0.10.1	difflib module
+test_doctest/	ready	v0.10.1	doctest module
+test_docxmlrpc	deferred	v0.10.1	xmlrpc not shipped
+test_email/	deferred	v0.10.1	email not shipped
+test_gzip	deferred	v0.10.1	gzip not shipped
+test_html	deferred	v0.10.1	html module
+test_htmlparser	deferred	v0.10.1	html.parser
+test_http_cookiejar	deferred	post-0.12	http.cookiejar
+test_http_cookies	deferred	post-0.12	http.cookies
+test_ipaddress	ready	v0.10.1	ipaddress module
+test_json/	deferred	v0.8.0	json not shipped
+test_lzma	deferred	v0.10.1	lzma not shipped
+test_mailbox	deferred	post-0.12	mailbox module
+test_marshal	ready	v0.8.0	marshal module (PEP 552)
+test_mimetypes	ready	v0.10.1	mimetypes module
+test_minidom	deferred	v0.10.1	xml.dom not shipped
+test_pickle	deferred	v0.8.0	pickle not shipped
+test_picklebuffer	deferred	v0.8.0	pickle not shipped
+test_pickletools	deferred	v0.8.0	pickle not shipped
+test_plistlib	deferred	v0.10.1	plistlib not shipped
+test_pprint	ready	v0.10.1	pprint module
+test_pulldom	deferred	v0.10.1	xml.dom not shipped
+test_pyexpat	deferred	v0.10.1	needs libexpat binding
+test_quopri	deferred	v0.10.1	quopri encoder
+test_re	deferred	v0.4.0	re module not shipped
+test_sax	deferred	v0.10.1	xml.sax not shipped
+test_shelve	deferred	v0.10.1	shelve depends on dbm
+test_shlex	ready	v0.10.1	shlex module
+test_sqlite3/	deferred	v0.10.1	sqlite3 not shipped
+test_string	ready	v0.10.1	string module (flat file)
+test_string/	ready	v0.10.1	string sub-suite
+test_stringprep	ready	v0.10.1	stringprep module
+test_struct	ready	v0.8.0	struct module
+test_tarfile	deferred	v0.10.1	tarfile not shipped
+test_textwrap	ready	v0.10.1	textwrap module
+test_tomllib/	deferred	v0.10.1	tomllib not shipped
+test_unittest/	ready	v0.10.1	unittest framework
+test_uuid	ready	v0.10.1	uuid module
+test_xml_dom_minicompat	deferred	v0.10.1	xml.dom not shipped
+test_xml_dom_xmlbuilder	deferred	v0.10.1	xml.dom not shipped
+test_xml_etree	deferred	v0.10.1	xml.etree not shipped
+test_xml_etree_c	deferred	v0.10.1	xml.etree.cElementTree
+test_xmlrpc	deferred	v0.10.1	xmlrpc not shipped
+test_xpickle	deferred	v0.8.0	pickle cross-version
+test_zipfile/	deferred	v0.10.1	zipfile not shipped
+test_zipfile64	deferred	v0.10.1	zip64 not shipped
+test_zlib	deferred	v0.10.1	zlib not shipped
+test_zstd	deferred	v0.10.1	zstd new in 3.14
+
+# ---- Misc / utility -----------------------------------------------
+test___all__	ready	v0.10.1	stdlib __all__ smoke
+test_bdb	out-of-scope	-	bdb (pdb dependency)
+test_bigaddrspace	out-of-scope	-	huge-allocation regression
+test_bigmem	out-of-scope	-	huge-memory regression
+test_build_details	out-of-scope	-	CPython build manifest
+test_colorsys	ready	v0.10.1	colorsys module
+test_context	ready	v0.9.0	contextvars module
+test_errno	ready	v0.7.0	errno module
+test_getpass	deferred	v0.10.1	getpass module
+test_getpath	out-of-scope	-	C-level getpath
+test_locale	deferred	v0.7.0	locale module
+test__locale	deferred	v0.7.0	_locale module
+test_longexp	ready	v0.4.0	long expression panel
+test_pdb	out-of-scope	-	pdb debugger
+test_platform	ready	v0.7.0	platform module
+test_pydoc/	deferred	v0.10.1	pydoc package
+test_regrtest	out-of-scope	-	regrtest is the harness itself
+test_remote_pdb	out-of-scope	-	pdb remote
+test_sched	ready	v0.10.1	sched module
+test_script_helper	ready	v0.7.0	test.support.script_helper
+test_site	ready	v0.7.0	site module
+test_sundry	ready	v0.7.0	sundry stdlib smoke
+test_support	ready	v0.7.0	test.support smoke
+test_sys	ready	v0.7.0	sys module
+test_sysconfig	ready	v0.10.1	sysconfig (gopy build flags)
+test_timeit	ready	v0.10.1	timeit module
+test_tools/	out-of-scope	-	tools shipped with CPython only
+test_unittest	ready	v0.10.1	unittest module flat-file complement
+test_venv	deferred	v0.10.1	venv depends on filesystem layout
+test_ensurepip	deferred	v0.10.1	pip bundling
+test_webbrowser	deferred	post-0.12	webbrowser module
+
+# ---- Networking ---------------------------------------------------
+test_devpoll	deferred	post-0.12	devpoll selector
+test_epoll	deferred	post-0.12	epoll selector
+test_ftplib	deferred	post-0.12	ftplib
+test_httplib	deferred	post-0.12	http.client
+test_httpservers	deferred	post-0.12	http.server
+test_imaplib	deferred	post-0.12	imaplib
+test_kqueue	deferred	post-0.12	kqueue selector
+test_netrc	deferred	post-0.12	netrc parser
+test_poll	deferred	post-0.12	poll selector
+test_poplib	deferred	post-0.12	poplib
+test_robotparser	deferred	post-0.12	robotparser
+test_select	deferred	post-0.12	select module
+test_selectors	deferred	post-0.12	selectors module
+test_smtplib	deferred	post-0.12	smtplib
+test_smtpnet	deferred	post-0.12	smtplib live-net
+test_socket	deferred	post-0.12	socket module
+test_socketserver	deferred	post-0.12	socketserver
+test_ssl	deferred	post-0.12	ssl
+test_timeout	deferred	post-0.12	socket timeout
+test_urllib	deferred	post-0.12	urllib
+test_urllib2	deferred	post-0.12	urllib2
+test_urllib2_localnet	deferred	post-0.12	urllib2 localnet
+test_urllib2net	deferred	post-0.12	urllib2 live-net
+test_urllib_response	deferred	post-0.12	urllib response
+test_urllibnet	deferred	post-0.12	urllib live-net
+test_urlparse	deferred	post-0.12	urllib.parse
+test_wsgiref	deferred	post-0.12	wsgiref
+
+# ---- Out-of-scope (CPython internals / platform shells / GUI) -----
+test__osx_support	out-of-scope	-	apple-only
+test_android	out-of-scope	-	android-only
+test_apple	out-of-scope	-	apple-only
+test_audioop	out-of-scope	-	deprecated 3.13
+test_aifc	out-of-scope	-	deprecated 3.13
+test_c_locale_coercion	out-of-scope	-	C-locale coercion (build flag)
+test_capi/	out-of-scope	-	C-API surface; gopy is pure Go
+test_cext/	out-of-scope	-	C extensions
+test_cgi	out-of-scope	-	deprecated 3.13
+test_cgitb	out-of-scope	-	deprecated 3.13
+test_chunk	out-of-scope	-	deprecated 3.13
+test_cppext/	out-of-scope	-	C++ extensions
+test_ctypes/	out-of-scope	-	ctypes; defer to gopy/ctypes if ever
+test_curses	out-of-scope	-	curses (terminal UI)
+test_dtrace	out-of-scope	-	dtrace probes
+test_embed	out-of-scope	-	C embedding API
+test_faulthandler	out-of-scope	-	C signal handler
+test_fcntl	out-of-scope	-	POSIX-only
+test_gdb/	out-of-scope	-	gdb integration; not portable
+test_gettext	out-of-scope	-	gettext locale strings
+test_grp	out-of-scope	-	POSIX-only, niche
+test_idle	out-of-scope	-	idle (tk-based IDE)
+test_imghdr	out-of-scope	-	deprecated 3.13
+test_ioctl	out-of-scope	-	POSIX-only
+test_launcher	out-of-scope	-	windows launcher
+test_msvcrt	out-of-scope	-	windows-only
+test_openpty	out-of-scope	-	POSIX-only
+test_osx_env	out-of-scope	-	apple-only
+test_pty	out-of-scope	-	POSIX-only, niche
+test_pwd	out-of-scope	-	POSIX-only, niche
+test_resource	out-of-scope	-	rlimit (POSIX-only)
+test_sndhdr	out-of-scope	-	deprecated 3.13
+test_stable_abi_ctypes	out-of-scope	-	C ABI surface
+test_startfile	out-of-scope	-	windows-only
+test_syslog	out-of-scope	-	syslog (POSIX-only, niche)
+test_tcl	out-of-scope	-	tk/tcl GUI
+test_termios	out-of-scope	-	POSIX-only
+test_tkinter/	out-of-scope	-	tk/tcl GUI
+test_ttk/	out-of-scope	-	tk/tcl GUI
+test_ttk_textonly	out-of-scope	-	tk/tcl GUI
+test_tty	out-of-scope	-	POSIX-only, niche
+test_turtle	out-of-scope	-	turtle (tk-based)
+test_utf8_mode	out-of-scope	-	-X utf8 mode (build flag)
+test_wave	out-of-scope	-	deprecated 3.13
+test_winapi	out-of-scope	-	windows-only
+test_winconsoleio	out-of-scope	-	windows-only
+test_winreg	out-of-scope	-	windows-only
+test_winsound	out-of-scope	-	windows-only
+test_wmi	out-of-scope	-	windows-only
+test_xxlimited	out-of-scope	-	limited C-API smoke
+test_xxtestfuzz	out-of-scope	-	C fuzz harness
