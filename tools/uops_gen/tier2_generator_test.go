@@ -1,6 +1,6 @@
-// Tests for tier2_generator.go: end-to-end pipeline against the real
-// Python/bytecodes.c, plus a per-replacer check for the Tier-2 EXIT_IF
-// jump-target shape.
+// Tests for tier2_generator.go: dispatch + stubs end-to-end against
+// the real Python/bytecodes.c, plus a per-replacer check for the
+// Tier-2 EXIT_IF jump-target shape and a ported-detection round-trip.
 //
 // CPython: Tools/cases_generator/tier2_generator.py
 package main
@@ -9,6 +9,8 @@ import (
 	"bytes"
 	"go/parser"
 	"go/token"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -37,7 +39,7 @@ func parseAndAnalyze(t *testing.T, src, path string) *Analysis {
 	return a
 }
 
-func TestGenerateTier2_RealBytecodes(t *testing.T) {
+func TestGenerateTier2Dispatch_RealBytecodes(t *testing.T) {
 	const path = "/Users/apple/cpython-314/Python/bytecodes.c"
 	src, err := readBytecodesSection(path)
 	if err != nil {
@@ -46,62 +48,113 @@ func TestGenerateTier2_RealBytecodes(t *testing.T) {
 	a := parseAndAnalyze(t, src, path)
 
 	var out bytes.Buffer
-	if err := GenerateTier2(a, "", &out); err != nil {
-		t.Fatalf("GenerateTier2: %v", err)
+	if err := GenerateTier2Dispatch(a, "", &out); err != nil {
+		t.Fatalf("GenerateTier2Dispatch: %v", err)
 	}
 	got := out.String()
 
-	// Representative uops we expect to see as comment blocks plus
-	// handler stubs.
-	wantUops := []string{
-		"_LOAD_FAST",
-		"_RESUME_CHECK",
-		"_CHECK_VALIDITY",
-		"_BINARY_OP_ADD_INT",
-		"_GUARD_TOS_INT",
-		"_GUARD_NOS_INT",
-		"_EXIT_TRACE",
+	wantDispatchHits := []string{
+		"func (s *Tier2State) executeUop(inst *UOPInstruction) Tier2Status",
+		"switch inst.Opcode()",
+		"case UopLoadFast:\n\t\treturn s.uopLoadFast(inst)",
+		"case UopExitTrace:\n\t\treturn s.uopExitTrace(inst)",
+		"case UopCheckValidity:\n\t\treturn s.uopCheckValidity(inst)",
+		"return StatusDeopt",
 	}
-	for _, name := range wantUops {
-		caseMarker := "case " + name + ":"
-		stubMarker := "func uop" + name + "()"
-		if !strings.Contains(got, caseMarker) {
-			t.Errorf("missing case marker for %s", name)
-		}
-		if !strings.Contains(got, stubMarker) {
-			t.Errorf("missing handler stub for %s", name)
+	for _, want := range wantDispatchHits {
+		if !strings.Contains(got, want) {
+			t.Errorf("dispatch missing fragment %q\n--- output ---\n%s", want, got)
 		}
 	}
 
-	// Output must be parseable Go.
 	fset := token.NewFileSet()
-	if _, err := parser.ParseFile(fset, "uops_cases_gen.go", got, parser.ParseComments); err != nil {
-		// Print first ~20 lines to aid debugging without flooding.
-		lines := strings.SplitN(got, "\n", 50)
-		preview := strings.Join(lines[:min(40, len(lines))], "\n")
-		t.Fatalf("generated file is not parseable Go: %v\n--- preview ---\n%s", err, preview)
-	}
-
-	// _LOAD_FAST's body should mention frame->localsplus inside its
-	// comment block. We grep within the slice that starts at the case
-	// marker and ends at the next handler stub.
-	loadIdx := strings.Index(got, "// uop _LOAD_FAST body:")
-	if loadIdx < 0 {
-		t.Fatal("missing _LOAD_FAST comment block header")
-	}
-	loadEnd := strings.Index(got[loadIdx:], "func uop_LOAD_FAST()")
-	if loadEnd < 0 {
-		t.Fatal("missing _LOAD_FAST handler stub after comment block")
-	}
-	loadBlock := got[loadIdx : loadIdx+loadEnd]
-	// _LOAD_FAST's body should reference GETLOCAL(oparg) (the macro
-	// that expands to frame->localsplus[oparg] in the C side).
-	if !strings.Contains(loadBlock, "GETLOCAL(oparg)") {
-		t.Errorf("_LOAD_FAST body missing GETLOCAL(oparg) reference; got:\n%s", loadBlock)
+	if _, err := parser.ParseFile(fset, "uops_dispatch_gen.go", got, parser.ParseComments); err != nil {
+		t.Fatalf("dispatch is not parseable Go: %v\n--- output ---\n%s", err, got)
 	}
 }
 
-// TestTier2Emitter_ErrorIfReplacer feeds a synthetic uop body with an
+func TestGenerateTier2Stubs_PortedDetectionFiltersHits(t *testing.T) {
+	const path = "/Users/apple/cpython-314/Python/bytecodes.c"
+	src, err := readBytecodesSection(path)
+	if err != nil {
+		t.Skipf("upstream not available: %v", err)
+	}
+	a := parseAndAnalyze(t, src, path)
+
+	// First emit with no ported set: every viable uop is stubbed.
+	var allStubs bytes.Buffer
+	if err := GenerateTier2Stubs(a, nil, "", &allStubs); err != nil {
+		t.Fatalf("GenerateTier2Stubs(nil): %v", err)
+	}
+	allText := allStubs.String()
+	if !strings.Contains(allText, "func (s *Tier2State) uopLoadFast(") {
+		t.Fatal("expected uopLoadFast stub when ported set is empty")
+	}
+	if !strings.Contains(allText, "func (s *Tier2State) uopCheckValidity(") {
+		t.Fatal("expected uopCheckValidity stub when ported set is empty")
+	}
+
+	// Then emit with uopLoadFast marked ported: that one stub drops out.
+	ported := map[string]struct{}{"uopLoadFast": {}}
+	var partial bytes.Buffer
+	if err := GenerateTier2Stubs(a, ported, "", &partial); err != nil {
+		t.Fatalf("GenerateTier2Stubs(ported): %v", err)
+	}
+	partText := partial.String()
+	if strings.Contains(partText, "func (s *Tier2State) uopLoadFast(") {
+		t.Error("expected uopLoadFast stub to be dropped when ported")
+	}
+	if !strings.Contains(partText, "func (s *Tier2State) uopCheckValidity(") {
+		t.Error("expected uopCheckValidity stub to remain when not ported")
+	}
+
+	fset := token.NewFileSet()
+	if _, err := parser.ParseFile(fset, "uops_stubs_gen.go", partText, parser.ParseComments); err != nil {
+		t.Fatalf("stubs file is not parseable Go: %v", err)
+	}
+}
+
+// TestDetectPortedUops_FlatDir round-trips the AST scanner over a
+// throwaway temp dir holding two Go files: one with a hand-ported
+// method on *Tier2State, and one *_gen.go file that the scanner must
+// ignore.
+func TestDetectPortedUops_FlatDir(t *testing.T) {
+	dir := t.TempDir()
+	mustWrite(t, filepath.Join(dir, "uops_impl.go"), `package optimizer
+
+type Tier2State struct{}
+type UOPInstruction struct{}
+type Tier2Status int
+
+func (s *Tier2State) uopLoadFast(_ *UOPInstruction) Tier2Status { return 0 }
+func (s *Tier2State) uopNop(_ *UOPInstruction) Tier2Status { return 0 }
+func (s *Tier2State) helper() {}
+`)
+	// Generated file: must be ignored.
+	mustWrite(t, filepath.Join(dir, "uops_stubs_gen.go"), `package optimizer
+
+func (s *Tier2State) uopExitTrace(_ *UOPInstruction) Tier2Status { return 0 }
+`)
+
+	got, err := DetectPortedUops(dir)
+	if err != nil {
+		t.Fatalf("DetectPortedUops: %v", err)
+	}
+	if _, ok := got["uopLoadFast"]; !ok {
+		t.Errorf("expected uopLoadFast in ported set, got %v", got)
+	}
+	if _, ok := got["uopNop"]; !ok {
+		t.Errorf("expected uopNop in ported set, got %v", got)
+	}
+	if _, ok := got["uopExitTrace"]; ok {
+		t.Errorf("uopExitTrace came from a *_gen.go file and must not be detected")
+	}
+	if _, ok := got["helper"]; ok {
+		t.Errorf("helper does not start with uop and must not be detected")
+	}
+}
+
+// TestTier2Emitter_ExitIfReplacer feeds a synthetic uop body with an
 // EXIT_IF and asserts that the Tier-2 replacer emits the
 // JUMP_TO_JUMP_TARGET tail rather than the Tier-1 JUMP_TO_PREDICTED.
 func TestTier2Emitter_ExitIfReplacer(t *testing.T) {
@@ -131,5 +184,12 @@ func TestTier2Emitter_ExitIfReplacer(t *testing.T) {
 	}
 	if strings.Contains(got, "JUMP_TO_PREDICTED") {
 		t.Errorf("Tier-2 EXIT_IF must not emit JUMP_TO_PREDICTED; got:\n%s", got)
+	}
+}
+
+func mustWrite(t *testing.T, path, content string) {
+	t.Helper()
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatalf("write %s: %v", path, err)
 	}
 }

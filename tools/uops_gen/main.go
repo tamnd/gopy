@@ -21,7 +21,9 @@ func main() {
 	var (
 		src          = flag.String("src", "", "path to input header (pycore_uop_ids.h or pycore_uop_metadata.h) or DSL (bytecodes.c)")
 		src2         = flag.String("src2", "", "second DSL input for optimizer-cases (optimizer_bytecodes.c)")
-		out          = flag.String("out", "", "output Go file")
+		out          = flag.String("out", "", "output Go file (cases: dispatch path)")
+		stubsOut     = flag.String("stubs-out", "", "stubs output Go file (cases mode only)")
+		portedFrom   = flag.String("ported-from", "", "directory to scan for hand-ported *Tier2State methods (cases mode only)")
 		pkg          = flag.String("pkg", "", "target Go package")
 		mode         = flag.String("mode", "", "ids|meta|cases|optimizer-cases|check-drift")
 		againstHash  = flag.String("hash", "", "expected sha256 (for check-drift)")
@@ -58,11 +60,11 @@ func main() {
 			os.Exit(1)
 		}
 	case "cases":
-		if *out == "" {
-			fmt.Fprintln(os.Stderr, "cases requires -out")
+		if *out == "" || *stubsOut == "" || *portedFrom == "" {
+			fmt.Fprintln(os.Stderr, "cases requires -out (dispatch), -stubs-out, and -ported-from")
 			os.Exit(2)
 		}
-		if err := runEmitCases(*src, *out, *projectRoot); err != nil {
+		if err := runEmitCases(*src, *out, *stubsOut, *portedFrom, *projectRoot); err != nil {
 			fmt.Fprintln(os.Stderr, "cases:", err)
 			os.Exit(1)
 		}
@@ -228,10 +230,14 @@ func parseDSL(src string) ([]Node, error) {
 	return forest, nil
 }
 
-// runEmitCases drives GenerateTier2 over Python/bytecodes.c.
+// runEmitCases drives GenerateTier2Dispatch and GenerateTier2Stubs
+// over Python/bytecodes.c. The dispatch file lands at dispatchOut;
+// stubs land at stubsOut. Hand-ported method names are auto-detected
+// by scanning portedFrom (the optimizer/ directory) so a second pass
+// will not re-stub bodies that have moved into uops_impl.go.
 //
 // CPython: Tools/cases_generator/tier2_generator.py generate_tier2
-func runEmitCases(src, out, projectRoot string) error {
+func runEmitCases(src, dispatchOut, stubsOut, portedFrom, projectRoot string) error {
 	forest, err := parseDSL(src)
 	if err != nil {
 		return err
@@ -240,15 +246,32 @@ func runEmitCases(src, out, projectRoot string) error {
 	if err != nil {
 		return err
 	}
-	var buf bytes.Buffer
-	if err := GenerateTier2(analysis, projectRoot, &buf); err != nil {
+	ported, err := DetectPortedUops(portedFrom)
+	if err != nil {
+		return fmt.Errorf("detect ported uops: %w", err)
+	}
+
+	var dispatchBuf bytes.Buffer
+	if err := GenerateTier2Dispatch(analysis, projectRoot, &dispatchBuf); err != nil {
 		return err
 	}
-	formatted, err := format.Source(buf.Bytes())
+	dispatchFmt, err := format.Source(dispatchBuf.Bytes())
 	if err != nil {
-		return fmt.Errorf("gofmt cases output: %w", err)
+		return fmt.Errorf("gofmt dispatch output: %w", err)
 	}
-	return os.WriteFile(out, formatted, 0o644)
+	if err := os.WriteFile(dispatchOut, dispatchFmt, 0o644); err != nil {
+		return err
+	}
+
+	var stubsBuf bytes.Buffer
+	if err := GenerateTier2Stubs(analysis, ported, projectRoot, &stubsBuf); err != nil {
+		return err
+	}
+	stubsFmt, err := format.Source(stubsBuf.Bytes())
+	if err != nil {
+		return fmt.Errorf("gofmt stubs output: %w", err)
+	}
+	return os.WriteFile(stubsOut, stubsFmt, 0o644)
 }
 
 // runEmitOptimizerCases drives GenerateOptimizer over the base
