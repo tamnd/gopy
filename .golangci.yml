@@ -319,7 +319,7 @@ linters:
       # Token value type, the master regex builder, and the recursive
       # descent functions verbatim is the parity discipline. Token
       # is intentionally a value because lexer.py treats it as one.
-      - path: tools/uops_gen/(lexer|parsing|plexer|cwriter|analyzer)\.go
+      - path: tools/uops_gen/(lexer|parsing|plexer|cwriter|analyzer|stack)\.go
         linters:
           - gocritic
           - gocognit
