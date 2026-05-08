@@ -41,6 +41,14 @@ type InterpreterFrame interface {
 	FrameCellLocal(i int) Object
 	FrameNumFrees() int
 	FrameFreeLocal(i int) Object
+	// FrameFunc returns the Function that produced the call, or nil
+	// when the frame was not created from a function (e.g. module
+	// init, exec). The Tier-2 globals folder needs the function for
+	// _PyFunction_GetVersionForCurrentState; everything else can use
+	// FrameGlobals/FrameBuiltins.
+	//
+	// CPython: Python/optimizer_analysis.c:156 _PyFrame_GetFunction
+	FrameFunc() Object
 }
 
 // Frame is the Python-level frame object. It wraps an interpreter
