@@ -54,6 +54,8 @@ func init() {
 		Contains: setContains,
 	}
 	SetType.TpTraverse = setTraverse
+	SetType.Getattro = GenericGetAttr
+	SetTypeDescr(SetType, "__contains__", NewMethodDescr(SetType, "__contains__", setContainsMethod))
 
 	FrozensetType.Repr = frozensetRepr
 	FrozensetType.Str = frozensetRepr
@@ -65,6 +67,8 @@ func init() {
 		Contains: setContains,
 	}
 	FrozensetType.TpTraverse = setTraverse
+	FrozensetType.Getattro = GenericGetAttr
+	SetTypeDescr(FrozensetType, "__contains__", NewMethodDescr(FrozensetType, "__contains__", setContainsMethod))
 }
 
 // setTraverse visits each element of a set or frozenset.
@@ -226,6 +230,22 @@ func (s *Set) grow() {
 func setLen(o Object) (int, error) { return o.(*Set).Len(), nil }
 
 func setContains(o, key Object) (bool, error) { return o.(*Set).Contains(key) }
+
+// setContainsMethod is the __contains__ method-descriptor entry. The
+// receiver arrives as args[0] when the descriptor is dispatched
+// unbound, and BoundMethod prepends self for the bound case.
+//
+// CPython: Objects/setobject.c:1804 set_contains
+func setContainsMethod(args []Object, _ map[string]Object) (Object, error) {
+	if len(args) != 2 {
+		return nil, fmt.Errorf("TypeError: __contains__() takes exactly one argument (%d given)", len(args)-1)
+	}
+	ok, err := args[0].(*Set).Contains(args[1])
+	if err != nil {
+		return nil, err
+	}
+	return NewBool(ok), nil
+}
 
 func setRepr(o Object) (string, error) {
 	s := o.(*Set)
