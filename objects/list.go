@@ -1,6 +1,7 @@
 package objects
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 )
@@ -161,7 +162,7 @@ func listInPlaceConcat(a, b Object) (Object, error) {
 	}
 	for {
 		v, err := itType.IterNext(it)
-		if err == ErrStopIteration {
+		if errors.Is(err, ErrStopIteration) {
 			break
 		}
 		if err != nil {
