@@ -82,7 +82,7 @@ func TestDispatchDictMutation_IgnoresUnsubscribedDict(t *testing.T) {
 }
 
 // TestDispatchTypeMutation_FiresWatcherAndInvalidates is the type
-// watcher analogue of the dict test.
+// watcher analog of the dict test.
 func TestDispatchTypeMutation_FiresWatcherAndInvalidates(t *testing.T) {
 	interp := &state.Interpreter{}
 	WatcherInit(interp)

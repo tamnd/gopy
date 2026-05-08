@@ -8,9 +8,9 @@ func TestUniqueIDPool_AssignSequential(t *testing.T) {
 	var p UniqueIDPool
 	for want := int64(1); want <= int64(poolMinSize); want++ {
 		obj := new(int)
-		got := p.AssignUniqueId(obj)
+		got := p.AssignUniqueID(obj)
 		if got != want {
-			t.Errorf("AssignUniqueId got %d, want %d", got, want)
+			t.Errorf("AssignUniqueID got %d, want %d", got, want)
 		}
 		if p.Lookup(got) != obj {
 			t.Errorf("Lookup(%d) did not return the registered object", got)
@@ -18,23 +18,23 @@ func TestUniqueIDPool_AssignSequential(t *testing.T) {
 	}
 }
 
-// TestUniqueIDPool_ReleaseReusesLIFO confirms ReleaseUniqueId pushes
-// onto a LIFO freelist (matching the upstream behaviour where the
+// TestUniqueIDPool_ReleaseReusesLIFO confirms ReleaseUniqueID pushes
+// onto a LIFO freelist (matching the upstream behavior where the
 // most-recently-released id is the first to be reassigned).
 func TestUniqueIDPool_ReleaseReusesLIFO(t *testing.T) {
 	var p UniqueIDPool
-	a := p.AssignUniqueId("a")
-	b := p.AssignUniqueId("b")
-	c := p.AssignUniqueId("c")
+	a := p.AssignUniqueID("a")
+	b := p.AssignUniqueID("b")
+	c := p.AssignUniqueID("c")
 
-	p.ReleaseUniqueId(b)
-	p.ReleaseUniqueId(a)
+	p.ReleaseUniqueID(b)
+	p.ReleaseUniqueID(a)
 
 	// LIFO: a was released last, so it must come back first.
-	if got := p.AssignUniqueId("a2"); got != a {
+	if got := p.AssignUniqueID("a2"); got != a {
 		t.Errorf("first reassign after free(a, b) got %d, want %d", got, a)
 	}
-	if got := p.AssignUniqueId("b2"); got != b {
+	if got := p.AssignUniqueID("b2"); got != b {
 		t.Errorf("second reassign got %d, want %d", got, b)
 	}
 	// Still untouched
@@ -50,9 +50,9 @@ func TestUniqueIDPool_GrowsAcrossPoolMinSize(t *testing.T) {
 	var p UniqueIDPool
 	const n = poolMinSize*3 + 1
 	for i := 1; i <= n; i++ {
-		got := p.AssignUniqueId(i)
+		got := p.AssignUniqueID(i)
 		if got != int64(i) {
-			t.Errorf("AssignUniqueId(#%d) got %d, want %d", i, got, i)
+			t.Errorf("AssignUniqueID(#%d) got %d, want %d", i, got, i)
 		}
 	}
 	if p.Size() < n {
@@ -60,18 +60,18 @@ func TestUniqueIDPool_GrowsAcrossPoolMinSize(t *testing.T) {
 	}
 }
 
-// TestUniqueIDPool_ReleaseRejectsOutOfRange confirms ReleaseUniqueId
+// TestUniqueIDPool_ReleaseRejectsOutOfRange confirms ReleaseUniqueID
 // silently ignores invalid ids rather than corrupting the pool.
 func TestUniqueIDPool_ReleaseRejectsOutOfRange(t *testing.T) {
 	var p UniqueIDPool
-	a := p.AssignUniqueId("a")
-	p.ReleaseUniqueId(0)              // sentinel
-	p.ReleaseUniqueId(-5)             // negative
-	p.ReleaseUniqueId(int64(p.size) + 100) // past end
+	a := p.AssignUniqueID("a")
+	p.ReleaseUniqueID(0)                   // sentinel
+	p.ReleaseUniqueID(-5)                  // negative
+	p.ReleaseUniqueID(int64(p.size) + 100) // past end
 
 	// Pool must still be well-formed: a is reusable.
-	p.ReleaseUniqueId(a)
-	if got := p.AssignUniqueId("a2"); got != a {
+	p.ReleaseUniqueID(a)
+	if got := p.AssignUniqueID("a2"); got != a {
 		t.Errorf("after a round of bogus releases the pool lost track of id %d (got %d)", a, got)
 	}
 }
@@ -80,7 +80,7 @@ func TestUniqueIDPool_ReleaseRejectsOutOfRange(t *testing.T) {
 // and resets the bookkeeping so Lookup returns nil and Size==0.
 func TestUniqueIDPool_FinalizeClears(t *testing.T) {
 	var p UniqueIDPool
-	id := p.AssignUniqueId("a")
+	id := p.AssignUniqueID("a")
 	if p.Lookup(id) != "a" {
 		t.Fatalf("setup: Lookup must see the inserted object")
 	}

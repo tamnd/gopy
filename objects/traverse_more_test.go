@@ -87,7 +87,7 @@ func (f *fakeInterp) FrameNumCells() int          { return len(f.cells) }
 func (f *fakeInterp) FrameCellLocal(i int) Object { return f.cells[i] }
 func (f *fakeInterp) FrameNumFrees() int          { return len(f.frees) }
 func (f *fakeInterp) FrameFreeLocal(i int) Object { return f.frees[i] }
-func (f *fakeInterp) FrameFunc() Object            { return nil }
+func (f *fakeInterp) FrameFunc() Object           { return nil }
 
 func TestFrameTraverseVisitsScopeAndLocals(t *testing.T) {
 	g := NewDict()

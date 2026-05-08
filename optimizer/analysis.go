@@ -85,10 +85,10 @@ func removeGlobals(interp *state.Interpreter, frame objects.InterpreterFrame, bu
 	// These values represent stacks of booleans (one bool per bit).
 	// Pushing a frame shifts left, popping a frame shifts right.
 	var (
-		functionChecked            uint32
-		builtinsWatched            uint32
-		globalsWatched             uint32
-		precheckedFunctionVersion  uint32
+		functionChecked           uint32
+		builtinsWatched           uint32
+		globalsWatched            uint32
+		precheckedFunctionVersion uint32
 	)
 
 	// CPython arms the watcher callbacks lazily here; gopy installs
@@ -232,14 +232,14 @@ func incorrectKeys(inst *UOPInstruction, obj objects.Object) bool {
 // hold a live binding.
 //
 // CPython: Python/optimizer_analysis.c:94-127 convert_global_to_const
-func convertGlobalToConst(inst *UOPInstruction, dict *objects.Dict, pop bool) objects.Object {
+func convertGlobalToConst(inst *UOPInstruction, dict *objects.Dict, pop bool) {
 	index := int(inst.Operand1)
 	if uint64(dict.GetKeysVersion()) != inst.Operand0 {
-		return nil
+		return
 	}
 	_, value, ok := dict.EntryAt(index)
 	if !ok || value == nil {
-		return nil
+		return
 	}
 	if pop {
 		inst.SetOpcode(UopPopTopLoadConstInlineBorrow)
@@ -247,7 +247,6 @@ func convertGlobalToConst(inst *UOPInstruction, dict *objects.Dict, pop bool) ob
 		inst.SetOpcode(UopLoadConstInlineBorrow)
 	}
 	inst.Operand0 = uint64(uintptr(unsafe.Pointer(&value)))
-	return value
 }
 
 // optimizeUops is the abstract-interpreter forward pass. CPython
@@ -328,7 +327,7 @@ func removeUnneededUops(buffer []UOPInstruction, bufferSize int) int {
 				mayHaveEscaped = true
 			}
 			if needsIP && lastSetIP >= 0 {
-				buffer[lastSetIP].SetOpcode(UopSetIp) //nolint:gosec // lastSetIP only grows from earlier loop iterations
+				buffer[lastSetIP].SetOpcode(UopSetIp)
 				lastSetIP = -1
 			}
 		}

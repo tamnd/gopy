@@ -9,7 +9,7 @@
 // Reserve calls StopTheWorld / StartTheWorld in upstream so no other
 // thread observes a moving array; gopy has no stop-the-world hook
 // yet, so the calls are placeholders documented inline. The mutex on
-// QSBRShared still serialises the resize itself.
+// QSBRShared still serializes the resize itself.
 //
 // CPython: Python/qsbr.c (Py_GIL_DISABLED #ifdef block)
 
@@ -77,8 +77,8 @@ type QSBRThreadState struct {
 //
 // CPython: Include/internal/pycore_qsbr.h:73-76 _qsbr_pad
 type QSBRPad struct {
-	QSBR    QSBRThreadState
-	padding [64]byte
+	QSBR QSBRThreadState
+	_    [64]byte // cache-line padding
 }
 
 // QSBRShared is the per-interpreter QSBR state. wrSeq advances on
@@ -262,7 +262,7 @@ func (s *QSBRShared) growThreadArray() {
 //
 // gopy NOTE: upstream brackets growThreadArray with StopTheWorld /
 // StartTheWorld; gopy has no stop-the-world hook yet, so the lock on
-// s.mu is the only serialisation. The freelist invariant still
+// s.mu is the only serialization. The freelist invariant still
 // holds: the array slice is rebuilt before any reader sees the new
 // indices.
 //

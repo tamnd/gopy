@@ -2,14 +2,14 @@
 // per-thread reference counting and recycles them through a freelist
 // when the owning object goes away.
 //
-// This file ports only the pool / freelist side: AssignUniqueId,
-// ReleaseUniqueId, FinalizeUniqueIdPool, and the internal resize
+// This file ports only the pool / freelist side: AssignUniqueID,
+// ReleaseUniqueID, FinalizeUniqueIdPool, and the internal resize
 // helper. The refcount-merge side (resize_local_refcounts,
 // _PyObject_ThreadIncrefSlow, _PyObject_MergePerThreadRefcounts,
 // _PyObject_FinalizePerThreadRefcounts, _PyObject_DisablePerThreadRefcounting,
 // clear_unique_id) is deferred: it touches a per-thread refcount
 // array and PyType / PyDict / PyCode internal fields that gopy has
-// not modelled yet.
+// not modeled yet.
 //
 // CPython: Python/uniqueid.c (Py_GIL_DISABLED #ifdef block)
 
@@ -19,7 +19,7 @@ import (
 	"github.com/tamnd/gopy/pysync"
 )
 
-// InvalidUniqueID is the sentinel returned when AssignUniqueId fails
+// InvalidUniqueID is the sentinel returned when AssignUniqueID fails
 // or when an object has not been assigned an id.
 //
 // CPython: Include/internal/pycore_uniqueid.h:28 _Py_INVALID_UNIQUE_ID
@@ -61,7 +61,7 @@ type UniqueIDPool struct {
 // must hold p.mu.
 //
 // CPython: Python/uniqueid.c:23-51 resize_interp_type_id_pool
-func (p *UniqueIDPool) resize() error {
+func (p *UniqueIDPool) resize() {
 	newSize := p.size * 2
 	if newSize < poolMinSize {
 		newSize = poolMinSize
@@ -78,21 +78,18 @@ func (p *UniqueIDPool) resize() error {
 	p.table = newTable
 	p.freelistHead = start + 1 // 1-based id of first new entry
 	p.size = newSize
-	return nil
 }
 
-// AssignUniqueId pulls the head off the freelist, stores obj in the
+// AssignUniqueID pulls the head off the freelist, stores obj in the
 // resulting slot, and returns the 1-based id. Returns InvalidUniqueID
 // if the resize fails.
 //
-// CPython: Python/uniqueid.c:79-102 _PyObject_AssignUniqueId
-func (p *UniqueIDPool) AssignUniqueId(obj any) int64 {
+// CPython: Python/uniqueid.c:79-102 _PyObject_AssignUniqueID
+func (p *UniqueIDPool) AssignUniqueID(obj any) int64 {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if p.freelistHead == 0 {
-		if err := p.resize(); err != nil {
-			return InvalidUniqueID
-		}
+		p.resize()
 	}
 	id := p.freelistHead
 	entry := &p.table[id-1]
@@ -102,11 +99,11 @@ func (p *UniqueIDPool) AssignUniqueId(obj any) int64 {
 	return int64(id)
 }
 
-// ReleaseUniqueId returns id to the freelist. The caller is
+// ReleaseUniqueID returns id to the freelist. The caller is
 // responsible for ensuring nothing still holds id.
 //
-// CPython: Python/uniqueid.c:104-117 _PyObject_ReleaseUniqueId
-func (p *UniqueIDPool) ReleaseUniqueId(id int64) {
+// CPython: Python/uniqueid.c:104-117 _PyObject_ReleaseUniqueID
+func (p *UniqueIDPool) ReleaseUniqueID(id int64) {
 	if id <= 0 {
 		return
 	}
@@ -122,7 +119,7 @@ func (p *UniqueIDPool) ReleaseUniqueId(id int64) {
 }
 
 // Lookup returns the object currently associated with id, or nil
-// when the slot is free or out of range. No CPython analogue, but
+// when the slot is free or out of range. No CPython analog, but
 // useful for the refcount-merge port that lands later.
 func (p *UniqueIDPool) Lookup(id int64) any {
 	if id <= 0 {

@@ -36,20 +36,22 @@ type node struct {
 	Context *Context
 }
 
-func (n *node) setContext(c Context)   { n.Context = &c }
-func (n *node) GetContext() *Context   { return n.Context }
+func (n *node) setContext(c Context) { n.Context = &c }
+func (n *node) GetContext() *Context { return n.Context }
 func (n *node) Tokens() []Token {
 	if n.Context == nil {
 		return nil
 	}
 	return n.Context.Owner.Tokens[n.Context.Begin:n.Context.End]
 }
+
 func (n *node) Text() string {
 	if n.Context == nil {
 		return ""
 	}
 	return ToText(n.Context.Owner.Tokens[n.Context.Begin:n.Context.End], 0)
 }
+
 func (n *node) FirstToken() Token {
 	return n.Context.Owner.Tokens[n.Context.Begin]
 }
@@ -646,10 +648,7 @@ func (p *Parser) stackEffect() (*StackEffect, error) {
 		if typeText != "" {
 			return nil, p.MakeSyntaxError("Unexpected [", Token{}, false)
 		}
-		expr, err := p.expression()
-		if err != nil {
-			return nil, err
-		}
+		expr := p.expression()
 		if expr == nil {
 			return nil, p.MakeSyntaxError("Expected expression", Token{}, false)
 		}
@@ -667,7 +666,7 @@ func (p *Parser) stackEffect() (*StackEffect, error) {
 // expression consumes tokens up to the matching ] or ).
 //
 // CPython: Tools/cases_generator/parsing.py:482-497 expression
-func (p *Parser) expression() (*Expression, error) {
+func (p *Parser) expression() *Expression {
 	begin := p.GetPos()
 	var tokens []Token
 	level := 1
@@ -689,12 +688,12 @@ func (p *Parser) expression() (*Expression, error) {
 	}
 	if len(tokens) == 0 {
 		p.SetPos(begin)
-		return nil, nil
+		return nil
 	}
 	e := &Expression{Size: strings.TrimSpace(ToText(tokens, 0))}
 	end := p.GetPos()
 	e.setContext(Context{Begin: begin, End: end, Owner: p})
-	return e, nil
+	return e
 }
 
 // macroDef parses `macro(NAME) = uops;`.
@@ -936,10 +935,10 @@ func (p *Parser) pseudoDef() (*Pseudo, error) {
 		p.SetPos(begin)
 		return nil, nil
 	}
-	asSequence := false
-	closing := TokRBrace
+	var asSequence bool
+	var closing string
 	if _, ok := p.Expect(TokLBrace); ok {
-		// already set
+		closing = TokRBrace
 	} else if _, ok := p.Expect(TokLBracket); ok {
 		asSequence = true
 		closing = TokRBracket
@@ -1017,9 +1016,9 @@ func (p *Parser) block() (*BlockStmt, error) {
 	}
 	var stmts []Stmt
 	for {
-		close, ok := p.Expect(TokRBrace)
+		closeTok, ok := p.Expect(TokRBrace)
 		if ok {
-			return &BlockStmt{Open: open, Body: stmts, Close: close}, nil
+			return &BlockStmt{Open: open, Body: stmts, Close: closeTok}, nil
 		}
 		s, err := p.stmt()
 		if err != nil {
@@ -1073,7 +1072,7 @@ func (p *Parser) stmt() (Stmt, error) {
 // ifStmt parses `if (cond) body [else ...]`.
 //
 // CPython: Tools/cases_generator/parsing.py:679-690 if_stmt
-func (p *Parser) ifStmt(if_ Token) (*IfStmt, error) {
+func (p *Parser) ifStmt(ifTok Token) (*IfStmt, error) {
 	lparen, err := p.Require(TokLParen)
 	if err != nil {
 		return nil, err
@@ -1104,7 +1103,7 @@ func (p *Parser) ifStmt(if_ Token) (*IfStmt, error) {
 			}
 		}
 	}
-	return &IfStmt{If: if_, Condition: condition, Body: body, Else: elseTok, ElseBody: elseBody}, nil
+	return &IfStmt{If: ifTok, Condition: condition, Body: body, Else: elseTok, ElseBody: elseBody}, nil
 }
 
 // macroIf parses `#if cond ... [#else ...] #endif`.
@@ -1146,7 +1145,7 @@ func (p *Parser) macroIf(cond Token) (*MacroIfStmt, error) {
 // forStmt parses `for (header) body`.
 //
 // CPython: Tools/cases_generator/parsing.py:709-713 for_stmt
-func (p *Parser) forStmt(for_ Token) (*ForStmt, error) {
+func (p *Parser) forStmt(forTok Token) (*ForStmt, error) {
 	lparen, err := p.Require(TokLParen)
 	if err != nil {
 		return nil, err
@@ -1159,13 +1158,13 @@ func (p *Parser) forStmt(for_ Token) (*ForStmt, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &ForStmt{For: for_, Header: append([]Token{lparen}, rest...), Body: body}, nil
+	return &ForStmt{For: forTok, Header: append([]Token{lparen}, rest...), Body: body}, nil
 }
 
 // whileStmt parses `while (cond) body`.
 //
 // CPython: Tools/cases_generator/parsing.py:715-719 while_stmt
-func (p *Parser) whileStmt(while_ Token) (*WhileStmt, error) {
+func (p *Parser) whileStmt(whileTok Token) (*WhileStmt, error) {
 	lparen, err := p.Require(TokLParen)
 	if err != nil {
 		return nil, err
@@ -1178,5 +1177,5 @@ func (p *Parser) whileStmt(while_ Token) (*WhileStmt, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &WhileStmt{While: while_, Condition: append([]Token{lparen}, rest...), Body: body}, nil
+	return &WhileStmt{While: whileTok, Condition: append([]Token{lparen}, rest...), Body: body}, nil
 }

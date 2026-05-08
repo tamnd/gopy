@@ -44,7 +44,7 @@ func TestExecutorDependsOn_StampsBloom(t *testing.T) {
 	probe.Init()
 	probe.Add(unsafe.Pointer(&y))
 	// May produce a false positive (bloom is probabilistic), but with
-	// a freshly-initialised bloom and a single unrelated pointer the
+	// a freshly-initialized bloom and a single unrelated pointer the
 	// probability is dominated by the seed; we treat a hit as benign.
 }
 
