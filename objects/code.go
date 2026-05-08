@@ -90,6 +90,15 @@ type Code struct {
 	//
 	// CPython: Include/internal/pycore_code.h _co_instrumentation_version
 	MonitoringVersion uint32
+
+	// Executors is the lazily-allocated Tier-2 executor side table.
+	// ENTER_EXECUTOR oparg indexes into Executors.Entries[]. Stored as
+	// any so the objects package stays independent of optimizer; the
+	// optimizer package owns the concrete *optimizer.ExecutorArray
+	// type and asserts it back at use sites.
+	//
+	// CPython: Include/internal/pycore_code.h co_executors
+	Executors any
 }
 
 // CodeType is the type singleton for code objects.

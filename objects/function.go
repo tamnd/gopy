@@ -162,6 +162,14 @@ func functionDocFromCode(code *Code) Object {
 	return None()
 }
 
+// GetVersionForCurrentState returns func_version. Mirrors CPython's
+// helper of the same name; the Tier-2 globals folder stamps the
+// returned value into _CHECK_FUNCTION uops so the dispatch loop can
+// short-circuit when the function shape still matches.
+//
+// CPython: Objects/funcobject.c:401 _PyFunction_GetVersionForCurrentState
+func (f *Function) GetVersionForCurrentState() uint32 { return f.Version }
+
 // SetCode binds a new code object. Rejects code with a free-var
 // count that doesn't match the captured closure size, mirroring
 // func_set_code's nclosure==nfreevars guard.

@@ -1,0 +1,487 @@
+// Tier-2 generator. Produces two files for the optimizer package:
+//
+//   - uops_dispatch_gen.go: a switch on inst.Opcode() that delegates
+//     to the per-uop method on *Tier2State.
+//   - uops_stubs_gen.go: one StatusDeopt stub per Tier-2 viable uop
+//     that the optimizer/ tree has not yet hand-ported, with the
+//     Tier-2-rewritten C body preserved as a // comment block above
+//     the stub so a porter has the spec inline.
+//
+// Hand-ported method names are auto-detected by parsing the
+// optimizer/ Go AST; the generator omits a stub for any uop whose
+// method name is already defined on *Tier2State. This is the
+// "lock the shape now, no rewrite later" contract the v0.12 plan
+// committed to: future regenerations after upstream CPython evolves
+// only re-emit the dispatch table and stub set, leaving hand-ported
+// bodies untouched.
+//
+// CPython: Tools/cases_generator/tier2_generator.py
+package main
+
+import (
+	"bytes"
+	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
+	"io"
+	"os"
+	"path/filepath"
+	"sort"
+	"strings"
+)
+
+// Tier2Emitter overrides the Tier-1 default replacers for DEOPT_IF /
+// EXIT_IF / oparg with the Tier-2 jump-target shape. Reused by the
+// stubs writer to capture each uop's rewritten body as a Go comment.
+//
+// CPython: Tools/cases_generator/tier2_generator.py:61-133 Tier2Emitter
+type Tier2Emitter struct {
+	*Emitter
+}
+
+// NewTier2Emitter wires the shared Emitter then overrides the three
+// replacers that differ for Tier-2.
+//
+// CPython: Tools/cases_generator/tier2_generator.py:63-65 Tier2Emitter.__init__
+func NewTier2Emitter(out *CWriter, labels map[string]*Label) *Tier2Emitter {
+	base := NewEmitter(out, labels)
+	t := &Tier2Emitter{Emitter: base}
+	base.SetReplacer("DEOPT_IF", t.deoptIf)
+	base.SetReplacer("EXIT_IF", t.exitIf)
+	base.SetReplacer("oparg", t.oparg)
+	return t
+}
+
+// deoptIfExitIf is the shared body for DEOPT_IF / EXIT_IF in Tier-2.
+//
+// CPython: Tools/cases_generator/tier2_generator.py:73-112 Tier2Emitter.deopt_if / exit_if
+func (t *Tier2Emitter) deoptIfExitIf(
+	tkn Token, it *TokenIterator,
+) (bool, error) {
+	t.Out.EmitAt("if ", tkn)
+	lparen, ok := it.Next()
+	if !ok || lparen.Kind != TokLParen {
+		return false, analysisError("Expected '(' after DEOPT_IF/EXIT_IF", tkn)
+	}
+	t.Emit(lparen)
+	first, hasFirst := it.Peek()
+	if _, err := emitTo(t.Out, it, TokRParen); err != nil {
+		return false, err
+	}
+	if _, ok := it.Next(); !ok { // semicolon
+		return false, analysisError("Expected ';' after DEOPT_IF/EXIT_IF", tkn)
+	}
+	t.Emit(") {\n")
+	t.Emit("UOP_STAT_INC(uopcode, miss);\n")
+	t.Emit("JUMP_TO_JUMP_TARGET();\n")
+	t.Emit("}\n")
+	return !alwaysTrue(first, hasFirst), nil
+}
+
+// deoptIf is the Tier-2 DEOPT_IF replacer.
+//
+// CPython: Tools/cases_generator/tier2_generator.py:73-92 Tier2Emitter.deopt_if
+func (t *Tier2Emitter) deoptIf(
+	tkn Token, it *TokenIterator, _ CodeSection, _ *Storage, _ *Instruction,
+) (bool, error) {
+	return t.deoptIfExitIf(tkn, it)
+}
+
+// exitIf is the Tier-2 EXIT_IF replacer (identical body to deoptIf).
+//
+// CPython: Tools/cases_generator/tier2_generator.py:94-112 Tier2Emitter.exit_if
+func (t *Tier2Emitter) exitIf(
+	tkn Token, it *TokenIterator, _ CodeSection, _ *Storage, _ *Instruction,
+) (bool, error) {
+	return t.deoptIfExitIf(tkn, it)
+}
+
+// oparg substitutes the literal 0 or 1 when the uop name ends in _0 or
+// _1 and the token is followed by `& 1`. Otherwise it emits the bare
+// identifier.
+//
+// CPython: Tools/cases_generator/tier2_generator.py:114-133 Tier2Emitter.oparg
+func (t *Tier2Emitter) oparg(
+	tkn Token, it *TokenIterator, uop CodeSection, _ *Storage, _ *Instruction,
+) (bool, error) {
+	u, ok := uop.(*Uop)
+	if !ok || (!strings.HasSuffix(u.Name, "_0") && !strings.HasSuffix(u.Name, "_1")) {
+		t.Emit(tkn)
+		return true, nil
+	}
+	amp, ok := it.Peek()
+	if !ok || amp.Text != "&" {
+		t.Emit(tkn)
+		return true, nil
+	}
+	if _, ok := it.Next(); !ok { // consume &
+		t.Emit(tkn)
+		return true, nil
+	}
+	one, ok := it.Next()
+	if !ok || one.Text != "1" {
+		t.Emit(tkn)
+		t.Emit(amp)
+		if ok {
+			t.Emit(one)
+		}
+		return true, nil
+	}
+	t.Out.EmitAt(string(u.Name[len(u.Name)-1]), tkn)
+	return true, nil
+}
+
+// declareTier2Variable emits a single C declaration for a stack item.
+//
+// CPython: Tools/cases_generator/tier2_generator.py:36-44 declare_variable
+func declareTier2Variable(v *StackItem, seen map[string]struct{}, out *CWriter) {
+	if !v.Used {
+		return
+	}
+	if _, ok := seen[v.Name]; ok {
+		return
+	}
+	seen[v.Name] = struct{}{}
+	typ, _ := typeAndNull(v)
+	space := ""
+	if n := len(typ); n > 0 {
+		last := typ[n-1]
+		if (last >= 'a' && last <= 'z') || (last >= 'A' && last <= 'Z') || (last >= '0' && last <= '9') || last == '_' {
+			space = " "
+		}
+	}
+	out.Emit(fmt.Sprintf("%s%s%s;\n", typ, space, v.Name))
+}
+
+// declareTier2Variables emits the declarations for all live stack
+// variables of a uop.
+//
+// CPython: Tools/cases_generator/tier2_generator.py:47-58 declare_variables
+func declareTier2Variables(uop *Uop, out *CWriter) {
+	stack := NewStack()
+	null := NullCWriter()
+	for i := len(uop.Stack.Inputs) - 1; i >= 0; i-- {
+		_, _ = stack.Pop(uop.Stack.Inputs[i], null)
+	}
+	for _, v := range uop.Stack.Outputs {
+		stack.Push(LocalUndefined(v))
+	}
+	seen := map[string]struct{}{"unused": {}}
+	for i := len(uop.Stack.Inputs) - 1; i >= 0; i-- {
+		declareTier2Variable(uop.Stack.Inputs[i], seen, out)
+	}
+	for _, v := range uop.Stack.Outputs {
+		declareTier2Variable(v, seen, out)
+	}
+}
+
+// writeTier2Uop runs the Emitter over a single uop's body.
+//
+// CPython: Tools/cases_generator/tier2_generator.py:136-161 write_uop
+func writeTier2Uop(uop *Uop, emitter *Tier2Emitter, stack *Stack) (*Stack, error) {
+	emitter.Out.StartLine()
+	switch {
+	case uop.Properties.Oparg:
+		emitter.Emit("oparg = CURRENT_OPARG();\n")
+	case uop.Properties.ConstOparg >= 0:
+		emitter.Emit(fmt.Sprintf("oparg = %d;\n", uop.Properties.ConstOparg))
+		emitter.Emit("assert(oparg == CURRENT_OPARG());\n")
+	}
+	storage, err := StorageForUop(stack, uop, emitter.Out, true)
+	if err != nil {
+		return nil, err
+	}
+	idx := 0
+	for _, cache := range uop.Caches {
+		if cache.Name == "unused" {
+			continue
+		}
+		var typ, cast string
+		if cache.Size == 4 {
+			typ = "PyObject *"
+			cast = "PyObject *"
+		} else {
+			typ = fmt.Sprintf("uint%d_t ", cache.Size*16)
+			cast = fmt.Sprintf("uint%d_t", cache.Size*16)
+		}
+		emitter.Emit(fmt.Sprintf("%s%s = (%s)CURRENT_OPERAND%d();\n", typ, cache.Name, cast, idx))
+		idx++
+	}
+	_, storage, err = emitter.EmitTokens(uop, storage, nil, false)
+	if err != nil {
+		return nil, err
+	}
+	if err := storage.Flush(emitter.Out); err != nil {
+		return nil, err
+	}
+	return storage.Stack, nil
+}
+
+// tier2Skips is the upstream SKIPS tuple of names that never appear in
+// the Tier-2 case table.
+//
+// CPython: Tools/cases_generator/tier2_generator.py:163 SKIPS
+var tier2Skips = map[string]struct{}{"_EXTENDED_ARG": {}}
+
+// orderedUopNames returns analysis.Uops keys in sorted order to keep
+// the generated file deterministic.
+func orderedUopNames(a *Analysis) []string {
+	names := make([]string, 0, len(a.Uops))
+	for k := range a.Uops {
+		names = append(names, k)
+	}
+	sort.Strings(names)
+	return names
+}
+
+// commentPrefix turns a captured C-flavored body into a Go // comment
+// block, one line at a time, so the generated file remains valid Go.
+func commentPrefix(body string) string {
+	if body == "" {
+		return ""
+	}
+	lines := strings.Split(body, "\n")
+	for i, l := range lines {
+		l = strings.TrimRight(l, "\r ")
+		if l == "" {
+			lines[i] = "//"
+		} else {
+			lines[i] = "// " + l
+		}
+	}
+	for len(lines) > 0 && lines[len(lines)-1] == "//" {
+		lines = lines[:len(lines)-1]
+	}
+	return strings.Join(lines, "\n") + "\n"
+}
+
+// uopMethodName returns the *Tier2State method name a uop binds to.
+// Method names follow uop + PascalCase(name without the leading _).
+// For example, _LOAD_FAST -> uopLoadFast, _LOAD_FAST_0 -> uopLoadFast0.
+func uopMethodName(name string) string {
+	stripped := strings.TrimLeft(name, "_")
+	return "uop" + pascal(stripped)
+}
+
+// isViableTier2Uop returns true if the uop is one of the rows the
+// dispatch / stubs writers should emit for. Mirrors the same filter
+// the upstream tier2_generator.write_cases applies.
+func isViableTier2Uop(uop *Uop) bool {
+	if _, skip := tier2Skips[uop.Name]; skip {
+		return false
+	}
+	if uop.Properties.Tier == 1 {
+		return false
+	}
+	if uop.IsSuper() {
+		return false
+	}
+	if uop.WhyNotViable() != "" {
+		return false
+	}
+	return true
+}
+
+// DetectPortedUops scans every non-_gen.go file in goDir for method
+// declarations on *Tier2State whose names start with "uop". The
+// returned set is the universe of method names the stubs writer must
+// avoid re-emitting.
+//
+// Skipping *_gen.go files is what keeps the detector from reading its
+// own previous output and concluding every uop is hand-ported.
+func DetectPortedUops(goDir string) (map[string]struct{}, error) {
+	ported := map[string]struct{}{}
+	entries, err := os.ReadDir(goDir)
+	if err != nil {
+		return nil, err
+	}
+	fset := token.NewFileSet()
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		name := e.Name()
+		if !strings.HasSuffix(name, ".go") {
+			continue
+		}
+		if strings.HasSuffix(name, "_gen.go") {
+			continue
+		}
+		if strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		path := filepath.Join(goDir, name)
+		body, err := os.ReadFile(path)
+		if err != nil {
+			return nil, err
+		}
+		f, err := parser.ParseFile(fset, path, body, parser.SkipObjectResolution)
+		if err != nil {
+			return nil, fmt.Errorf("parse %s: %w", path, err)
+		}
+		for _, decl := range f.Decls {
+			fn, ok := decl.(*ast.FuncDecl)
+			if !ok || fn.Recv == nil || len(fn.Recv.List) == 0 {
+				continue
+			}
+			if !receiverIsTier2State(fn.Recv.List[0].Type) {
+				continue
+			}
+			if !strings.HasPrefix(fn.Name.Name, "uop") {
+				continue
+			}
+			ported[fn.Name.Name] = struct{}{}
+		}
+	}
+	return ported, nil
+}
+
+// receiverIsTier2State reports whether expr is `*Tier2State`.
+func receiverIsTier2State(expr ast.Expr) bool {
+	star, ok := expr.(*ast.StarExpr)
+	if !ok {
+		return false
+	}
+	id, ok := star.X.(*ast.Ident)
+	if !ok {
+		return false
+	}
+	return id.Name == "Tier2State"
+}
+
+// renderUopBody captures the Tier-2-rewritten C body for a single uop
+// as a Go // comment block. Used by the stubs writer to leave the
+// porting spec inline above each StatusDeopt body.
+func renderUopBody(analysis *Analysis, uop *Uop) (string, error) {
+	var body bytes.Buffer
+	writer := NewCWriter(&body, 2, false)
+	emitter := NewTier2Emitter(writer, analysis.Labels)
+	writer.Emit(fmt.Sprintf("case %s: {\n", uop.Name))
+	declareTier2Variables(uop, writer)
+	stack := NewStack()
+	if _, err := writeTier2Uop(uop, emitter, stack); err != nil {
+		return "", fmt.Errorf("write_uop %s: %w", uop.Name, err)
+	}
+	writer.StartLine()
+	if !uop.Properties.AlwaysExits {
+		writer.Emit("break;\n")
+	}
+	writer.StartLine()
+	writer.Emit("}\n")
+	return body.String(), nil
+}
+
+// GenerateTier2Dispatch writes the executeUop dispatch switch into
+// out. One case per Tier-2 viable uop, each delegating to the
+// matching method on *Tier2State.
+//
+// CPython: Tools/cases_generator/tier2_generator.py:166-202 generate_tier2 (dispatch slice)
+func GenerateTier2Dispatch(analysis *Analysis, projectRoot string, out *bytes.Buffer) error {
+	if err := writeHeader(
+		"tools/uops_gen/tier2_generator.go",
+		[]string{"Python/bytecodes.c"},
+		out, "//", projectRoot,
+	); err != nil {
+		return err
+	}
+	if _, err := io.WriteString(out, "// Code generated by tools/uops_gen; DO NOT EDIT.\n\n"); err != nil {
+		return err
+	}
+	if _, err := io.WriteString(out, "package optimizer\n\n"); err != nil {
+		return err
+	}
+	if _, err := io.WriteString(out, dispatchDoc); err != nil {
+		return err
+	}
+	if _, err := io.WriteString(out, "func (s *Tier2State) executeUop(inst *UOPInstruction) Tier2Status {\n"); err != nil {
+		return err
+	}
+	if _, err := io.WriteString(out, "\tswitch inst.Opcode() {\n"); err != nil {
+		return err
+	}
+	for _, name := range orderedUopNames(analysis) {
+		uop := analysis.Uops[name]
+		if !isViableTier2Uop(uop) {
+			continue
+		}
+		method := uopMethodName(name)
+		idConst := "Uop" + pascal(strings.TrimLeft(name, "_"))
+		fmt.Fprintf(out, "\tcase %s:\n\t\treturn s.%s(inst)\n", idConst, method)
+	}
+	if _, err := io.WriteString(out, "\t}\n"); err != nil {
+		return err
+	}
+	if _, err := io.WriteString(out, "\treturn StatusDeopt\n}\n"); err != nil {
+		return err
+	}
+	return nil
+}
+
+// dispatchDoc is the doc comment stamped above the executeUop fan-out.
+const dispatchDoc = `// executeUop is the dispatch fan-out. Generated from the analyzer
+// AST so adding a uop upstream auto-extends the switch on regen;
+// hand-ported bodies live in uops_impl.go and the un-ported tail
+// lives as StatusDeopt stubs in uops_stubs_gen.go.
+//
+// CPython: Python/ceval.c:1291-1356 tier2_dispatch switch
+`
+
+// GenerateTier2Stubs writes a StatusDeopt method per Tier-2 viable
+// uop NOT present in ported. Each stub carries the Tier-2-rewritten
+// C body as a // comment block above it, so a porter has the full
+// spec inline.
+//
+// CPython: Tools/cases_generator/tier2_generator.py:166-202 generate_tier2 (stub slice)
+func GenerateTier2Stubs(analysis *Analysis, ported map[string]struct{}, projectRoot string, out *bytes.Buffer) error {
+	if err := writeHeader(
+		"tools/uops_gen/tier2_generator.go",
+		[]string{"Python/bytecodes.c"},
+		out, "//", projectRoot,
+	); err != nil {
+		return err
+	}
+	if _, err := io.WriteString(out, "// Code generated by tools/uops_gen; DO NOT EDIT.\n\n"); err != nil {
+		return err
+	}
+	if _, err := io.WriteString(out, "package optimizer\n\n"); err != nil {
+		return err
+	}
+	if _, err := io.WriteString(out, stubsDoc); err != nil {
+		return err
+	}
+	for _, name := range orderedUopNames(analysis) {
+		uop := analysis.Uops[name]
+		if !isViableTier2Uop(uop) {
+			continue
+		}
+		method := uopMethodName(name)
+		if _, alreadyPorted := ported[method]; alreadyPorted {
+			continue
+		}
+		body, err := renderUopBody(analysis, uop)
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(out, "// %s body (Tier-2 rewrite, awaiting hand-port):\n", uop.Name)
+		if _, err := io.WriteString(out, commentPrefix(body)); err != nil {
+			return err
+		}
+		fmt.Fprintf(out, "func (s *Tier2State) %s(_ *UOPInstruction) Tier2Status {\n", method)
+		fmt.Fprintf(out, "\treturn s.unimplementedUop(%q)\n", name)
+		fmt.Fprintf(out, "}\n\n")
+	}
+	return nil
+}
+
+// stubsDoc is the file-level comment for the stubs file.
+const stubsDoc = `// One StatusDeopt method per Tier-2-viable uop the optimizer/ tree
+// has not yet hand-ported. Each method's // comment block carries
+// the Tier-2-rewritten C body so a porter has the spec inline.
+//
+// To port: copy the function over into uops_impl.go, translate the
+// commented C body into Go, and regenerate. The generator detects
+// the new method on *Tier2State and stops emitting a stub for it.
+//
+// CPython: Python/executor_cases.c.h (per-uop case bodies)
+`

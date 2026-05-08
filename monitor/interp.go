@@ -97,14 +97,13 @@ func (s *InterpState) GlobalVersion() uint32 {
 	return s.version.Load()
 }
 
-// bumpVersion increments the instrumentation version and returns the
-// new value. The eval-loop bit-packing CPython does for the eval
-// breaker is not yet relevant in gopy; the counter just monotonically
-// increases.
+// bumpVersion increments the instrumentation version. The eval-loop
+// bit-packing CPython does for the eval breaker is not yet relevant
+// in gopy; the counter just monotonically increases.
 //
 // CPython: Python/instrumentation.c:2019 new_version
-func (s *InterpState) bumpVersion() uint32 {
-	return s.version.Add(1)
+func (s *InterpState) bumpVersion() {
+	s.version.Add(1)
 }
 
 // validTool reports whether tool is in the 0..MaxToolID-1 range.

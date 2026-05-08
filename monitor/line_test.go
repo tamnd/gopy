@@ -25,9 +25,9 @@ func makeLineCode(opcodes []byte) *objects.Code {
 	const noCols = 13 << 3
 	var tab []byte
 	for i := 0; i < len(opcodes)/2; i++ {
-		tab = append(tab, byte(start|noCols|0))
-		// Signed varint for delta=1: (1<<1)|0 = 2.
-		tab = append(tab, 2)
+		// First byte: start | noCols | length=0 (one codeunit).
+		// Second byte: signed varint for delta=1: (1<<1)|0 = 2.
+		tab = append(tab, byte(start|noCols), 2)
 	}
 	c.Linetable = tab
 	return c

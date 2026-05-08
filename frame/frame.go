@@ -276,6 +276,12 @@ func (f *Frame) FrameGlobals() objects.Object { return f.Globals }
 // FrameBuiltins returns f_builtins.
 func (f *Frame) FrameBuiltins() objects.Object { return f.Builtins }
 
+// FrameFunc returns the Function that produced this call, or nil for
+// frames that were not created from a function (module init, exec).
+//
+// CPython: Python/optimizer_analysis.c:156 _PyFrame_GetFunction
+func (f *Frame) FrameFunc() objects.Object { return f.Func }
+
 // FrameLocals returns f_locals (nil for fast-locals frames).
 func (f *Frame) FrameLocals() objects.Object { return f.Locals }
 

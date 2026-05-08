@@ -125,6 +125,32 @@ linters:
       - path: errors/exc_.*\.go
         linters:
           - revive
+      # NB_* / MIN_* constants mirror CPython's BINARY_OP sub-opcode and
+      # opcode-range enums byte for byte. The spelling is the parity
+      # contract with Include/opcode.h.
+      - path: compile/codegen_expr_op\.go
+        linters:
+          - revive
+      - path: compile/instrseq\.go
+        linters:
+          - revive
+      # forceInstrument and BuildSysMonitoring mirror CPython's
+      # _Py_Instrument and the sys.monitoring builtin wiring; their
+      # branch tree is the parity unit with Python/instrumentation.c.
+      - path: monitor/install\.go
+        linters:
+          - gocognit
+          - gocyclo
+      - path: monitor/sysmonitoring\.go
+        linters:
+          - gocognit
+          - gocyclo
+      # specializeAt fans out to every adaptive opcode arm; the switch
+      # matches Python/specialize.c's per-opcode dispatch shape.
+      - path: vm/adaptive\.go
+        linters:
+          - gocognit
+          - gocyclo
       # format.FormatString/FormatInt/FormatFloat mirror CPython's
       # format_*_internal entry points; the parity is part of the spec
       # so the "name stutters" advice does not apply.
@@ -257,6 +283,52 @@ linters:
       - path: parser/lexer/token\.go
         linters:
           - unused
+      # Tier-2 optimizer scaffolding. has_space_for_executor /
+      # get_index_for_executor / insert_executor / executorDetach are
+      # called by Optimize once executor.go and optimize.go land
+      # (tasks #437, #439).
+      - path: optimizer/side_table\.go
+        linters:
+          - unused
+      # The lattice's per-tag switches mirror optimizer_symbols.c
+      # branch-for-branch; collapsing them would diverge from the
+      # source shape and break the gate fixtures.
+      - path: optimizer/symbols\.go
+        linters:
+          - gocyclo
+          - gocognit
+          - gocritic
+      # TranslateBytecodeToTrace mirrors optimizer.c's
+      # translate_bytecode_to_trace branch-for-branch; the per-opcode
+      # switch and the inlined macro-expansion loop are the unit of
+      # parity with CPython.
+      - path: optimizer/trace\.go
+        linters:
+          - gocognit
+          - gocyclo
+      # removeGlobals tracks optimizer_analysis.c case-for-case; the
+      # branch shape is the unit of parity. The unsafe.Pointer cast
+      # mirrors the C uintptr-as-PyObject* round-trip.
+      - path: optimizer/analysis\.go
+        linters:
+          - gocognit
+          - gocyclo
+          - gosec
+          - govet
+      # cases_generator/lexer.py and parsing.py shape: keeping the
+      # Token value type, the master regex builder, and the recursive
+      # descent functions verbatim is the parity discipline. Token
+      # is intentionally a value because lexer.py treats it as one.
+      - path: tools/uops_gen/(lexer|parsing|plexer|cwriter|analyzer|stack|generators_common|tier2_generator|optimizer_generator)\.go
+        linters:
+          - gocritic
+          - gocognit
+          - gocyclo
+          - prealloc
+      - path: tools/uops_gen/lexer_test\.go
+        linters:
+          - gocritic
+          - errorlint
 
 formatters:
   enable:

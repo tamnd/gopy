@@ -65,6 +65,42 @@ type Interpreter struct {
 	//
 	// CPython: Include/internal/pycore_interp_structs.h:948 monitors
 	Monitors *monitor.InterpState
+
+	// Optimizer is the per-interpreter Tier-2 executor list and
+	// pending-deletion bookkeeping. Stored as any so package state
+	// stays independent of optimizer; the optimizer package owns the
+	// concrete *optimizer.InterpState type and asserts it back at
+	// use sites.
+	//
+	// CPython: Include/internal/pycore_interp_structs.h executor_list_head /
+	// executor_deletion_list_head / executor_deletion_list_remaining_capacity
+	Optimizer any
+
+	// Watchers is the per-interpreter dict / type watcher registry the
+	// Tier-2 optimizer hangs invalidation callbacks on. Stored as any
+	// so package state stays independent of optimizer; the optimizer
+	// package owns the concrete *optimizer.WatcherTable type.
+	//
+	// CPython: Include/internal/pycore_interp_structs.h dict_state.watchers /
+	// type_watchers
+	Watchers any
+
+	// Builtins is the canonical builtins dict. The Tier-2 globals
+	// folder bails when a frame's f_builtins points elsewhere (i.e. a
+	// non-default builtins dict). Stored as any so package state stays
+	// independent of objects; the optimizer asserts it back to *Dict
+	// at use sites.
+	//
+	// CPython: Include/internal/pycore_interp.h PyInterpreterState.builtins
+	Builtins any
+
+	// BuiltinDictMutations counts how many times the builtins dict has
+	// been replaced wholesale (the rare event CPython tracks under
+	// rare_events.builtin_dict). The Tier-2 folder stops specializing
+	// _LOAD_GLOBAL_BUILTINS once this exceeds the cap.
+	//
+	// CPython: Include/internal/pycore_interp_structs.h rare_events.builtin_dict
+	BuiltinDictMutations int
 }
 
 // Thread is the per-goroutine state. v0.3 carries the current

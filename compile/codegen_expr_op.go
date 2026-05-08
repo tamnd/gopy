@@ -120,33 +120,33 @@ const (
 //
 // CPython: Include/opcode.h NB_*
 const (
-	NB_ADD              int32 = 0
-	NB_AND              int32 = 1
-	NB_FLOOR_DIVIDE     int32 = 2
-	NB_LSHIFT           int32 = 3
-	NB_MATRIX_MULTIPLY  int32 = 4
-	NB_MULTIPLY         int32 = 5
-	NB_REMAINDER        int32 = 6
-	NB_OR               int32 = 7
-	NB_POWER            int32 = 8
-	NB_RSHIFT           int32 = 9
-	NB_SUBTRACT         int32 = 10
-	NB_TRUE_DIVIDE      int32 = 11
-	NB_XOR              int32 = 12
-	NB_INPLACE_ADD      int32 = 13
-	NB_INPLACE_AND      int32 = 14
-	NB_INPLACE_FLOOR_DIVIDE int32 = 15
-	NB_INPLACE_LSHIFT   int32 = 16
+	NB_ADD                     int32 = 0
+	NB_AND                     int32 = 1
+	NB_FLOOR_DIVIDE            int32 = 2
+	NB_LSHIFT                  int32 = 3
+	NB_MATRIX_MULTIPLY         int32 = 4
+	NB_MULTIPLY                int32 = 5
+	NB_REMAINDER               int32 = 6
+	NB_OR                      int32 = 7
+	NB_POWER                   int32 = 8
+	NB_RSHIFT                  int32 = 9
+	NB_SUBTRACT                int32 = 10
+	NB_TRUE_DIVIDE             int32 = 11
+	NB_XOR                     int32 = 12
+	NB_INPLACE_ADD             int32 = 13
+	NB_INPLACE_AND             int32 = 14
+	NB_INPLACE_FLOOR_DIVIDE    int32 = 15
+	NB_INPLACE_LSHIFT          int32 = 16
 	NB_INPLACE_MATRIX_MULTIPLY int32 = 17
-	NB_INPLACE_MULTIPLY int32 = 18
-	NB_INPLACE_REMAINDER int32 = 19
-	NB_INPLACE_OR       int32 = 20
-	NB_INPLACE_POWER    int32 = 21
-	NB_INPLACE_RSHIFT   int32 = 22
-	NB_INPLACE_SUBTRACT int32 = 23
-	NB_INPLACE_TRUE_DIVIDE int32 = 24
-	NB_INPLACE_XOR      int32 = 25
-	NB_SUBSCR           int32 = 26
+	NB_INPLACE_MULTIPLY        int32 = 18
+	NB_INPLACE_REMAINDER       int32 = 19
+	NB_INPLACE_OR              int32 = 20
+	NB_INPLACE_POWER           int32 = 21
+	NB_INPLACE_RSHIFT          int32 = 22
+	NB_INPLACE_SUBTRACT        int32 = 23
+	NB_INPLACE_TRUE_DIVIDE     int32 = 24
+	NB_INPLACE_XOR             int32 = 25
+	NB_SUBSCR                  int32 = 26
 )
 
 // visitUnaryOp emits UNARY_NEGATIVE / UNARY_INVERT / UNARY_NOT or, for
@@ -228,9 +228,9 @@ func (c *Compiler) visitCompare(e *ast.Compare) error {
 }
 
 // emitCmpOp picks COMPARE_OP / CONTAINS_OP / IS_OP for one rung of a
-// Compare. CPython packs the operator into the oparg's high bits
-// alongside a TO_BOOL-eligibility mask; we leave the high bits clear
-// and let the flowgraph's super-instruction pass fix them up.
+// Compare. CPython packs the operator into the oparg as
+// `(cmp << 5) | compare_masks[cmp]`: high 5 bits hold the kind that
+// dispatch reads back, low 4 bits hold the TO_BOOL-eligibility mask.
 //
 // CPython: Python/codegen.c codegen_addcompare
 func (c *Compiler) emitCmpOp(op ast.Cmpop, l ast.Pos) {
@@ -258,15 +258,18 @@ func (c *Compiler) emitCmpOp(op ast.Cmpop, l ast.Pos) {
 	}
 }
 
-// COMPARE_OP suboperators (low 4 bits). CPython:
-// Include/internal/pycore_opcode_metadata.h Cmp_kind.
+// COMPARE_OP oparg encoding: high 5 bits = kind (Py_LT..Py_GE),
+// low 4 bits = comparison-result mask (UNORDERED=1, LESS_THAN=2,
+// GREATER_THAN=4, EQUALS=8). Values pre-encode `(cmp << 5) | mask`.
+//
+// CPython: Python/codegen.c compare_masks, Include/object.h Py_LT..Py_GE.
 const (
-	cmpLt    = 0
-	cmpLtE   = 1
-	cmpEq    = 2
-	cmpNotEq = 3
-	cmpGt    = 4
-	cmpGtE   = 5
+	cmpLt    = (0 << 5) | 2       // Py_LT, LESS_THAN
+	cmpLtE   = (1 << 5) | (2 | 8) // Py_LE, LESS_THAN | EQUALS
+	cmpEq    = (2 << 5) | 8       // Py_EQ, EQUALS
+	cmpNotEq = (3 << 5) | 7       // Py_NE, UNORDERED | LESS_THAN | GREATER_THAN
+	cmpGt    = (4 << 5) | 4       // Py_GT, GREATER_THAN
+	cmpGtE   = (5 << 5) | (4 | 8) // Py_GE, GREATER_THAN | EQUALS
 )
 
 // visitIfExp emits a conditional expression: `body if test else else_`.

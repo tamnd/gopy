@@ -71,10 +71,10 @@ func forceInstrument(code *objects.Code, interp *InterpState) error {
 		ev := EventForOpcode(base)
 		if int(ev) < LocalEvents && ev != EventLine {
 			if removed := removedEvents.Tools[ev]; removed != 0 {
-				removeTools(code, data, instr, ev, removed)
+				removeTools(code, data, instr, removed)
 			}
 			if added := newEvents.Tools[ev]; added != 0 {
-				addTools(code, data, instr, ev, added)
+				addTools(code, data, instr, added)
 			}
 		}
 		instr += 1 + cacheCount(base, code)
@@ -159,7 +159,7 @@ func monitorsEmpty(m *LocalMonitors) bool {
 // opcode if it was not already there.
 //
 // CPython: Python/instrumentation.c:889 add_tools
-func addTools(code *objects.Code, data *CoMonitoringData, offset int, ev Event, tools uint8) {
+func addTools(code *objects.Code, data *CoMonitoringData, offset int, tools uint8) {
 	if data.Tools == nil {
 		data.Tools = make([]uint8, instructionCount(code))
 	}
@@ -184,7 +184,7 @@ func addTools(code *objects.Code, data *CoMonitoringData, offset int, ev Event, 
 // adaptive parent so dispatch returns to the fast path.
 //
 // CPython: Python/instrumentation.c:828 remove_tools
-func removeTools(code *objects.Code, data *CoMonitoringData, offset int, ev Event, tools uint8) {
+func removeTools(code *objects.Code, data *CoMonitoringData, offset int, tools uint8) {
 	if data.Tools == nil {
 		return
 	}

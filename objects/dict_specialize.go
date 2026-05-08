@@ -81,10 +81,64 @@ func (d *Dict) GetKeysVersion() uint32 {
 // will allocate a fresh version, so any cached inline-cache copy
 // stops matching.
 //
-// CPython: Objects/dictobject.c dk_version invalidation, called from
-// every insert/delete path that bumps dk_usable.
+// Also fires DictMutationHook so registered dict watchers (notably
+// the Tier-2 optimizer's globals/builtins invalidation) can drop any
+// cached state keyed on this dict. Mirrors the _PyDict_NotifyEvent
+// dispatch CPython runs from every mutation site.
+//
+// CPython: Objects/dictobject.c dk_version invalidation /
+// Objects/dictobject.c _PyDict_NotifyEvent
 func (d *Dict) invalidateKeysVersion() {
 	d.keysVersion = 0
+	if hook := DictMutationHook; hook != nil {
+		hook(d)
+	}
+}
+
+// DictMutationHook is fired by every mutation that calls
+// invalidateKeysVersion (insert, delete, resize). The Tier-2
+// optimizer installs a closure here at WatcherInit time so it can
+// run DispatchDictMutation without objects depending on optimizer.
+//
+// Single-interpreter assumption holds in v0.12; sub-interpreters
+// (v0.13) need a per-interpreter registry instead.
+//
+// CPython: Objects/dictobject.c _PyDict_NotifyEvent (the watcher
+// dispatch invoked from every mutation site)
+var DictMutationHook func(d *Dict)
+
+// Mutations returns the watcher mutation counter for d. The Tier-2
+// optimizer caps folding once this exceeds
+// MaxAllowedGlobalsModifications.
+//
+// CPython: Python/optimizer_analysis.c:54-59 get_mutations
+func (d *Dict) Mutations() uint32 { return d.mutationCount }
+
+// IncrementMutations bumps the watcher mutation counter. The Tier-2
+// optimizer's globals watcher callback runs this after invalidating
+// dependent executors so the next folding pass sees the bumped count.
+//
+// CPython: Python/optimizer_analysis.c:62-66 increment_mutations
+func (d *Dict) IncrementMutations() { d.mutationCount++ }
+
+// Entries iterates active str-keyed entries, yielding (slotIndex, key,
+// value) for each used slot. The Tier-2 globals folder uses this to
+// resolve a precomputed slot index back to the live value without
+// importing dict internals. ok=false when slotIndex is out of range or
+// names a dead slot. The unicode-keys precondition matches the dict
+// kind the inline-cache stamp relies on.
+//
+// CPython: Objects/dictobject.c DK_UNICODE_ENTRIES dictionary entry
+// access
+func (d *Dict) EntryAt(slot int) (key, value Object, ok bool) {
+	if slot < 0 || slot >= len(d.entries) {
+		return nil, nil, false
+	}
+	e := d.entries[slot]
+	if !e.used {
+		return nil, nil, false
+	}
+	return e.key, e.value, true
 }
 
 // IsExactDict reports whether o is exactly *Dict (not a subclass).

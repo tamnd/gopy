@@ -40,9 +40,8 @@ func Call(callable objects.Object, code []byte, instr int, oparg, nargs int32) {
 		Unspecialize(code, instr)
 		return
 	case *objects.Type:
-		if specializeClassCall(v, code, instr, oparg, nargs) {
-			return
-		}
+		specializeClassCall(v, code, instr, oparg, nargs)
+		return
 	case *objects.CFunction:
 		_ = v
 		Specialize(code, instr, compile.CALL_NON_PY_GENERAL)
@@ -101,7 +100,7 @@ func specializePyCall(fn *objects.Function, code []byte, instr int, nargs int32,
 // through to CALL_NON_PY_GENERAL.
 //
 // CPython: Python/specialize.c:1965 specialize_class_call
-func specializeClassCall(tp *objects.Type, code []byte, instr int, oparg, nargs int32) bool {
+func specializeClassCall(tp *objects.Type, code []byte, instr int, oparg, nargs int32) {
 	if !tp.IsUser {
 		// CPython treats every type with Py_TPFLAGS_IMMUTABLETYPE as
 		// the eligible target for CALL_TYPE_1 / CALL_STR_1 /
@@ -111,24 +110,23 @@ func specializeClassCall(tp *objects.Type, code []byte, instr int, oparg, nargs 
 			switch tp {
 			case objects.StrType():
 				Specialize(code, instr, compile.CALL_STR_1)
-				return true
+				return
 			case objects.TypeType():
 				Specialize(code, instr, compile.CALL_TYPE_1)
-				return true
+				return
 			case objects.TupleType:
 				Specialize(code, instr, compile.CALL_TUPLE_1)
-				return true
+				return
 			}
 		}
 		Specialize(code, instr, compile.CALL_BUILTIN_CLASS)
-		return true
+		return
 	}
 	// User class: CPython only specializes the
 	// CALL_ALLOC_AND_ENTER_INIT path when tp_new is object.__new__
 	// and __init__ is a SIMPLE_FUNCTION. gopy does not yet wire the
 	// init-cache machinery so we fall through to the generic arm.
 	Specialize(code, instr, compile.CALL_NON_PY_GENERAL)
-	return true
 }
 
 func boolToInt32(b bool) int32 {

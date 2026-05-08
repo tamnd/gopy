@@ -40,7 +40,7 @@ func ToBool(value objects.Object, code []byte, instr int) {
 		Specialize(code, instr, compile.TO_BOOL_STR)
 		return
 	}
-	if t := objects.Type_(value); t != nil && t.IsUser {
+	if t := objects.ExactType(value); t != nil && t.IsUser {
 		// CPython runs _PyType_Validate with check_type_always_true,
 		// which rejects classes that override __bool__ / __len__ via
 		// nb_bool, mp_length, or sq_length. gopy's user types do not
