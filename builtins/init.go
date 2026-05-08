@@ -268,9 +268,8 @@ func scopePanel() []struct {
 	}
 }
 
-// constructorPanel returns the v0.7 constructor wrappers
-// (1651-builtins-F): int, float, bool, list, tuple, dict. set lands
-// alongside the set / frozenset port.
+// constructorPanel returns the constructor wrappers exposed as
+// builtins (1651-builtins-F).
 //
 // CPython: Python/bltinmodule.c the type singletons exposed as
 // builtins through _PyBuiltin_Init's SETBUILTIN macro
@@ -288,6 +287,8 @@ func constructorPanel() []struct {
 		{"list", ListCtor},
 		{"tuple", TupleCtor},
 		{"dict", DictCtor},
+		{"set", SetCtor},
+		{"frozenset", FrozensetCtor},
 	}
 }
 

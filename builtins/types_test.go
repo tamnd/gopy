@@ -21,8 +21,6 @@ func TestInitExposesTypeSingletons(t *testing.T) {
 		{"bytes", objects.BytesType},
 		{"bytearray", objects.ByteArrayType},
 		{"complex", objects.ComplexType},
-		{"frozenset", objects.FrozensetType},
-		{"set", objects.SetType},
 		{"slice", objects.SliceType},
 		{"property", objects.PropertyType},
 		{"classmethod", objects.ClassMethodType},
