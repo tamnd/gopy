@@ -9,21 +9,55 @@ import (
 	"fmt"
 
 	"github.com/tamnd/gopy/compile"
+	"github.com/tamnd/gopy/frame"
 	"github.com/tamnd/gopy/imp"
 	"github.com/tamnd/gopy/objects"
 	"github.com/tamnd/gopy/state"
 )
 
+// callerBuiltins returns the __builtins__ the importing frame should
+// hand to the imported module. Mirrors _PyEval_BuildFrame's
+// inheritance chain: prefer the frame's own builtins; if absent (the
+// top-level -c case where globals == builtins-dict) fall back to
+// globals itself.
+//
+// CPython: Python/ceval.c:1849 _PyEval_BuildFrame
+func callerBuiltins(f *frame.Frame) objects.Object {
+	if f == nil {
+		return nil
+	}
+	if f.Builtins != nil {
+		return f.Builtins
+	}
+	return f.Globals
+}
+
 // vmExecutor implements imp.Executor using the current thread's eval loop.
-// It is created per-import inside the IMPORT_NAME arm.
+// It is created per-import inside the IMPORT_NAME arm. builtins is the
+// __builtins__ binding the importing frame is running under; it is
+// stamped onto the imported module's dict so LOAD_GLOBAL inside the
+// imported module can reach print, getattr, and friends.
+//
+// CPython: Python/import.c:L657 module_init_dunder_attrs sets
+// __builtins__ alongside __name__ and __file__.
 type vmExecutor struct {
-	ts *state.Thread
+	ts       *state.Thread
+	builtins objects.Object
 }
 
 // ExecCode executes code in mod's namespace using the current thread.
+// Before running the body, stamp __builtins__ onto the module dict if
+// the importing frame had one. CPython does the same in
+// module_init_dunder_attrs.
 //
 // CPython: Python/ceval.c:L753 _PyEval_EvalCode (simplified)
+// CPython: Python/import.c:L657 module_init_dunder_attrs
 func (e *vmExecutor) ExecCode(code *objects.Code, mod *objects.Module) (objects.Object, error) {
+	if e.builtins != nil {
+		if err := mod.Dict().SetItem(objects.NewStr("__builtins__"), e.builtins); err != nil {
+			return nil, err
+		}
+	}
 	return EvalCode(e.ts, code, mod.Dict(), nil)
 }
 
@@ -49,7 +83,7 @@ func (e *evalState) tryImport(op compile.Opcode, oparg uint32) (next int, ok boo
 		level := importLevel(levelObj)
 		pkgname := globalName(e.f.Globals)
 
-		exec := &vmExecutor{ts: e.ts}
+		exec := &vmExecutor{ts: e.ts, builtins: callerBuiltins(e.f)}
 		mod, ierr := imp.ImportModuleLevel(exec, modname, pkgname, level)
 		if ierr != nil {
 			return 0, true, ierr

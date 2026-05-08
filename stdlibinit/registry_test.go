@@ -23,12 +23,19 @@ func TestInittabHasContextVars(t *testing.T) {
 	}
 }
 
+// TestInittabHasSys pins the same contract for sys.
+func TestInittabHasSys(t *testing.T) {
+	if fn := imp.FindInitFunc("sys"); fn == nil {
+		t.Fatal("imp.FindInitFunc(\"sys\") = nil; stdlibinit should register sys")
+	}
+}
+
 // TestInittabSnapshotIncludesAll asserts the snapshot lists every
 // module the registry blank-imports. Adding a new built-in module
 // to registry.go means adding its name here; the test fails loudly
 // on a mismatch.
 func TestInittabSnapshotIncludesAll(t *testing.T) {
-	want := []string{"gc", "_contextvars"}
+	want := []string{"gc", "_contextvars", "sys"}
 	have := map[string]bool{}
 	for _, e := range imp.InittabSnapshot() {
 		have[e.Name] = true

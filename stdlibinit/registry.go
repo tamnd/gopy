@@ -29,4 +29,8 @@ import (
 	// contextvar/module.go init().
 	// CPython: Modules/config.c.in:50 {"_contextvars", PyInit__contextvars}
 	_ "github.com/tamnd/gopy/contextvar"
+
+	// Built-in module: sys. Registers itself via sys/module.go init().
+	// CPython: Modules/config.c.in:42 {"sys", _PyImport_BuiltinSys}
+	_ "github.com/tamnd/gopy/sys"
 )

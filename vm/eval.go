@@ -66,12 +66,35 @@ func Eval(ts *state.Thread, f *frame.Frame) (objects.Object, error) {
 // CPython: Python/ceval.c PyEval_EvalCode
 func EvalCode(ts *state.Thread, co *objects.Code, globals, locals objects.Object) (objects.Object, error) {
 	stack := frameStackFor(ts)
-	f := stack.Push(co, globals, nil, nil, nil)
+	f := stack.Push(co, globals, builtinsFromGlobals(globals), nil, nil)
 	if locals != nil {
 		f.Locals = locals
 	}
 	defer stack.Pop()
 	return Eval(ts, f)
+}
+
+// builtinsFromGlobals extracts globals['__builtins__'] for use as the
+// frame builtins. Mirrors _PyEval_BuildFrame, which reads the same
+// slot off the function's globals before calling _PyFrame_Initialize.
+// __builtins__ is conventionally a module on __main__ and a dict on
+// imported modules; LOAD_GLOBAL needs the dict either way, so unwrap
+// the module if it shows up.
+//
+// CPython: Python/ceval.c:1849 _PyEval_BuildFrame frame->f_builtins setup
+func builtinsFromGlobals(globals objects.Object) objects.Object {
+	d, ok := globals.(*objects.Dict)
+	if !ok {
+		return nil
+	}
+	v, err := d.GetItem(objects.NewStr("__builtins__"))
+	if err != nil || v == nil {
+		return nil
+	}
+	if m, ok := v.(*objects.Module); ok {
+		return m.Dict()
+	}
+	return v
 }
 
 // run is the dispatch loop driver.
