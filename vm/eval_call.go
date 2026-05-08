@@ -97,7 +97,7 @@ func init() {
 //
 // CPython: Objects/call.c _PyEval_Vector
 //
-//nolint:gocognit // matches CPython's initialize_locals; splitting the steps out hides the linear flow without removing branches.
+//nolint:gocognit,gocyclo // matches CPython's initialize_locals; splitting the steps out hides the linear flow without removing branches.
 func callPyFunction(o objects.Object, args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error) {
 	fn := o.(*objects.Function)
 	co := fn.Code
