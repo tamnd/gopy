@@ -33,4 +33,11 @@ import (
 	// Built-in module: sys. Registers itself via sys/module.go init().
 	// CPython: Modules/config.c.in:42 {"sys", _PyImport_BuiltinSys}
 	_ "github.com/tamnd/gopy/sys"
+
+	// Built-in module: _io. Registers itself via pyio/module.go
+	// init(). The current port covers StringIO; the rest of the
+	// type family is stubbed so io.py's `from _io import (...)`
+	// resolves at name-lookup time.
+	// CPython: Modules/config.c.in:48 {"_io", PyInit__io}
+	_ "github.com/tamnd/gopy/pyio"
 )
