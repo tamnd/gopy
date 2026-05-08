@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -16,8 +17,12 @@ import (
 func buildGopy(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
-	bin := filepath.Join(dir, "gopy")
-	cmd := exec.Command("go", "build", "-o", bin, "github.com/tamnd/gopy/cmd/gopy")
+	name := "gopy"
+	if runtime.GOOS == "windows" {
+		name += ".exe"
+	}
+	bin := filepath.Join(dir, name)
+	cmd := exec.CommandContext(t.Context(), "go", "build", "-o", bin, "github.com/tamnd/gopy/cmd/gopy")
 	cmd.Stderr = os.Stderr
 	if err := cmd.Run(); err != nil {
 		t.Skipf("go build gopy: %v", err)

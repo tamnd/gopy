@@ -110,7 +110,7 @@ func (r *Runner) Run(ctx context.Context, e Entry) Result {
 	cctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	cmd := exec.CommandContext(cctx, r.Binary, path)
+	cmd := exec.CommandContext(cctx, r.Binary, path) //nolint:gosec // Binary and path come from a vetted manifest, not external user input
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
@@ -161,8 +161,8 @@ func (r *Runner) RunAll(ctx context.Context) []Result {
 // Summary tallies a slice of Results by outcome.
 func Summary(results []Result) map[Outcome]int {
 	out := make(map[Outcome]int)
-	for _, r := range results {
-		out[r.Outcome]++
+	for i := range results {
+		out[results[i].Outcome]++
 	}
 	return out
 }
@@ -208,4 +208,3 @@ func CountFiles(corpus string) (int, error) {
 	})
 	return n, err
 }
-
