@@ -57,6 +57,16 @@ type Type struct {
 	Iter     func(o Object) (Object, error)
 	IterNext func(o Object) (Object, error)
 	Call     func(o Object, args []Object, kwargs map[string]Object) (Object, error)
+	// TpNew is the tp_new slot: the constructor invoked when the type
+	// is called (e.g. int(x)). typeCall reaches this through the
+	// metaclass tp_call. Built-in primitive types set TpNew rather
+	// than Call so that calling instances of the type stays a TypeError
+	// and callable(obj) keeps returning False; CPython encodes the same
+	// distinction by leaving PyLong_Type.tp_call NULL while wiring
+	// long_new through PyType_Type.tp_call.
+	//
+	// CPython: Include/cpython/typeobject.h tp_new
+	TpNew func(cls *Type, args []Object, kwargs map[string]Object) (Object, error)
 	// Vectorcall is the PEP 590 fast-call slot. When non-nil, the call
 	// machinery uses this instead of going through Call. args is a flat
 	// array of positional values followed by keyword values; nargsf is

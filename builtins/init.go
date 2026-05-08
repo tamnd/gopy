@@ -13,10 +13,13 @@ package builtins
 import (
 	"io"
 	"os"
+	"sync"
 
 	"github.com/tamnd/gopy/errors"
 	"github.com/tamnd/gopy/objects"
 )
+
+var wireOnce sync.Once
 
 // Init constructs the builtins dict and stamps the v0.6 surface into
 // it: None / True / False / NotImplemented as named constants, and
@@ -25,6 +28,7 @@ import (
 //
 // CPython: Python/bltinmodule.c:3425 _PyBuiltin_Init body, "SETBUILTIN" macro
 func Init(defaultFile io.Writer) (*objects.Dict, error) {
+	wireTypeCalls()
 	dict := objects.NewDict()
 
 	if err := setBuiltin(dict, "None", objects.None()); err != nil {
@@ -90,11 +94,6 @@ func Init(defaultFile io.Writer) (*objects.Dict, error) {
 			return nil, err
 		}
 	}
-	for _, fn := range constructorPanel() {
-		if err := setBuiltin(dict, fn.name, objects.NewBuiltinFunction(fn.name, fn.impl)); err != nil {
-			return nil, err
-		}
-	}
 	for _, fn := range scopePanel() {
 		if err := setBuiltin(dict, fn.name, objects.NewBuiltinFunction(fn.name, fn.impl)); err != nil {
 			return nil, err
@@ -141,14 +140,9 @@ func Init(defaultFile io.Writer) (*objects.Dict, error) {
 }
 
 // typeSingletons returns the type-object names CPython exposes
-// directly via SETBUILTIN. The names that already have constructor
-// wrappers in constructorPanel (int, float, bool, list, tuple, dict)
-// or that are still registered as helper functions (str, type, range,
-// enumerate, reversed, zip, map, filter) stay where they are; this
-// panel covers only the gaps. Type call dispatch (so calling these
-// names constructs an instance) is a separate task; for now they
-// surface as type objects usable by isinstance/issubclass and as
-// metadata.
+// directly via SETBUILTIN. Each row's Call slot is wired below in
+// wireTypeCalls so calling the name (e.g. int(x)) goes through the
+// metaclass tp_call path the same way it does in CPython.
 //
 // CPython: Python/bltinmodule.c:3461 SETBUILTIN block
 func typeSingletons() []struct {
@@ -160,6 +154,12 @@ func typeSingletons() []struct {
 		t    *objects.Type
 	}{
 		{"object", objects.ObjectType()},
+		{"int", objects.IntType},
+		{"float", objects.FloatType},
+		{"bool", objects.BoolType},
+		{"list", objects.ListType},
+		{"tuple", objects.TupleType},
+		{"dict", objects.DictType},
 		{"bytes", objects.BytesType},
 		{"bytearray", objects.ByteArrayType},
 		{"complex", objects.ComplexType},
@@ -170,6 +170,35 @@ func typeSingletons() []struct {
 		{"classmethod", objects.ClassMethodType},
 		{"staticmethod", objects.StaticMethodType},
 		{"super", objects.SuperType},
+	}
+}
+
+// wireTypeCalls hooks each built-in type's tp_new slot to its
+// constructor wrapper. Once wired, `int(x)` reaches typeCall, which
+// dispatches through cls.TpNew when the metaclass call kicks in; the
+// type itself stays the value bound to the builtin name, so
+// isinstance(x, int) keeps treating int as a *Type. tp_call stays nil
+// on these types so callable(1) returns False, matching CPython where
+// PyLong_Type.tp_call is NULL while PyLong_Type.tp_new (long_new) does
+// the construction.
+//
+// CPython: Objects/longobject.c:6438 PyLong_Type (tp_new = long_new, tp_call NULL)
+func wireTypeCalls() {
+	wireOnce.Do(func() {
+		bindCtor(objects.IntType, IntCtor)
+		bindCtor(objects.FloatType, FloatCtor)
+		bindCtor(objects.BoolType, BoolCtor)
+		bindCtor(objects.ListType, ListCtor)
+		bindCtor(objects.TupleType, TupleCtor)
+		bindCtor(objects.DictType, DictCtor)
+		bindCtor(objects.SetType, SetCtor)
+		bindCtor(objects.FrozensetType, FrozensetCtor)
+	})
+}
+
+func bindCtor(t *objects.Type, fn func(args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error)) {
+	t.TpNew = func(_ *objects.Type, args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error) {
+		return fn(args, kwargs)
 	}
 }
 
@@ -265,30 +294,6 @@ func scopePanel() []struct {
 	}{
 		{"globals", Globals},
 		{"locals", Locals},
-	}
-}
-
-// constructorPanel returns the constructor wrappers exposed as
-// builtins (1651-builtins-F).
-//
-// CPython: Python/bltinmodule.c the type singletons exposed as
-// builtins through _PyBuiltin_Init's SETBUILTIN macro
-func constructorPanel() []struct {
-	name string
-	impl func(args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error)
-} {
-	return []struct {
-		name string
-		impl func(args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error)
-	}{
-		{"int", IntCtor},
-		{"float", FloatCtor},
-		{"bool", BoolCtor},
-		{"list", ListCtor},
-		{"tuple", TupleCtor},
-		{"dict", DictCtor},
-		{"set", SetCtor},
-		{"frozenset", FrozensetCtor},
 	}
 }
 
