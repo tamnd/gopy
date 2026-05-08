@@ -46,17 +46,30 @@ type PathFinder struct {
 	Compiler SourceCompiler
 }
 
+// errFinderMiss is the sentinel FindModule returns when no path
+// finder entry matched the requested module. It wraps
+// ErrModuleNotFound so callers that only care about the broad
+// "module not found" category keep matching, while the import
+// driver can use errors.Is(err, errFinderMiss) to distinguish a
+// finder miss from a real loader error whose own chain happens to
+// mention ModuleNotFound (e.g. a transitive import that failed).
+//
+// CPython: Lib/importlib/_bootstrap.py:1184 _find_and_load uses None
+// from find_spec for the same purpose.
+var errFinderMiss = fmt.Errorf("%w: finder miss", ErrModuleNotFound)
+
 // FindModule walks the directories that should be searched for name
-// and either loads the matching source file as a module or returns
-// ErrModuleNotFound. Top-level names are searched against Paths;
-// dotted names are searched against the parent package's __path__,
-// matching CPython's FileFinder behavior.
+// and either loads the matching source file as a module, returns
+// errFinderMiss when no entry matched, or returns the loader's error
+// when the file was found but compile/exec failed. Top-level names
+// are searched against Paths; dotted names are searched against the
+// parent package's __path__, matching CPython's FileFinder behavior.
 //
 // CPython: Lib/importlib/_bootstrap_external.py:1357 FileFinder.find_spec
 // CPython: Lib/importlib/_bootstrap.py:1184 _find_and_load
 func (p *PathFinder) FindModule(exec Executor, name string) (*objects.Module, error) {
 	if p == nil || p.Compiler == nil {
-		return nil, ErrModuleNotFound
+		return nil, errFinderMiss
 	}
 
 	parent, tail := splitParent(name)
@@ -64,7 +77,7 @@ func (p *PathFinder) FindModule(exec Executor, name string) (*objects.Module, er
 	if parent != "" {
 		parentMod, ok := GetModule(parent)
 		if !ok {
-			return nil, fmt.Errorf("%w: parent package %q is not in sys.modules", ErrModuleNotFound, parent)
+			return nil, fmt.Errorf("%w: parent package %q is not in sys.modules", errFinderMiss, parent)
 		}
 		paths, err := readPackagePath(parentMod)
 		if err != nil {
@@ -92,7 +105,7 @@ func (p *PathFinder) FindModule(exec Executor, name string) (*objects.Module, er
 			return loadAsModule(exec, p.Compiler, modFile, name, parent)
 		}
 	}
-	return nil, fmt.Errorf("%w: No module named %q", ErrModuleNotFound, name)
+	return nil, fmt.Errorf("%w: %s", errFinderMiss, name)
 }
 
 // splitParent splits a dotted module name into (parent, tail).
