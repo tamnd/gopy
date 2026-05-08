@@ -101,9 +101,9 @@ opts:
 // installPathFinder wires the PathFinder consulted by imp.ImportModule
 // after the inittab miss. The path list mirrors CPython's
 // _PyConfig_InitPathConfig prefix: argv[0]'s parent directory (or "."
-// for -c / interactive), PYTHONPATH entries, then the cwd. The full
-// initconfig path resolution lands later; this is the slice that
-// matters for unittest enablement.
+// for -c / interactive), PYTHONPATH entries, then the vendored
+// stdlib root. The full initconfig path resolution lands later; this
+// is the slice that matters for unittest enablement.
 //
 // CPython: Python/initconfig.c:1734 _PyConfig_InitPathConfig
 // CPython: Lib/importlib/_bootstrap_external.py:1196 PathFinder
@@ -122,10 +122,78 @@ func installPathFinder(scriptPath string) {
 			}
 		}
 	}
+	if root := findStdlibRoot(); root != "" {
+		paths = append(paths, root)
+	}
 	imp.SetPathFinder(&imp.PathFinder{
 		Paths:    paths,
 		Compiler: gopyCompile,
 	})
+}
+
+// findStdlibRoot locates the vendored gopy stdlib tree. CPython's
+// equivalent is Modules/getpath.py's prefix discovery; the gopy port
+// (pathconfig/) targets the CPython install layout, not the gopy
+// repo layout, so this entry uses a smaller resolver:
+//
+//   1. $GOPY_STDLIB if set and points at a directory.
+//   2. Walk up from the executable until a stdlib/unittest/ entry
+//      shows up; the gopy binary lives next to its source tree
+//      during development and inside the install root in releases.
+//   3. Walk up from the cwd looking for the same marker. This is the
+//      common case for `go run ./cmd/gopy` and for tests that
+//      execute under the repo.
+//
+// Returns the empty string when no candidate exists; the caller
+// silently drops it from sys.path.
+//
+// CPython: Modules/getpath.py:550 calculate_path
+func findStdlibRoot() string {
+	if env := os.Getenv("GOPY_STDLIB"); env != "" {
+		if isDir(env) {
+			return env
+		}
+	}
+	if exe, err := os.Executable(); err == nil {
+		if root := walkUpForStdlib(filepath.Dir(exe)); root != "" {
+			return root
+		}
+	}
+	if cwd, err := os.Getwd(); err == nil {
+		if root := walkUpForStdlib(cwd); root != "" {
+			return root
+		}
+	}
+	return ""
+}
+
+// walkUpForStdlib walks parent directories looking for a `stdlib`
+// folder that contains the unittest marker file. Returns the
+// `stdlib` path on hit, or "" if the search reaches the filesystem
+// root with nothing.
+func walkUpForStdlib(start string) string {
+	dir := start
+	for {
+		candidate := filepath.Join(dir, "stdlib")
+		if isDir(candidate) && isFile(filepath.Join(candidate, "unittest", "__init__.py")) {
+			return candidate
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return ""
+		}
+		dir = parent
+	}
+}
+
+func isDir(p string) bool {
+	info, err := os.Stat(p)
+	return err == nil && info.IsDir()
+}
+
+func isFile(p string) bool {
+	info, err := os.Stat(p)
+	return err == nil && info.Mode().IsRegular()
 }
 
 // gopyCompile is the SourceCompiler injected into PathFinder. It is
