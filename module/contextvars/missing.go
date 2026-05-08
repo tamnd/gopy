@@ -4,7 +4,7 @@
 //
 // CPython: Python/context.c:1303 Token.MISSING
 
-package contextvar
+package contextvars
 
 import "github.com/tamnd/gopy/objects"
 

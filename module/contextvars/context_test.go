@@ -3,7 +3,7 @@
 // isolation, LookupError on missing, RuntimeError on re-entry,
 // snapshot independence, and per-thread isolation across goroutines.
 
-package contextvar
+package contextvars
 
 import (
 	"sync"

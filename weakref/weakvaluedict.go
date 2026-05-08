@@ -13,7 +13,7 @@ import (
 	"fmt"
 	"sync"
 
-	"github.com/tamnd/gopy/gc"
+	"github.com/tamnd/gopy/module/gc"
 	"github.com/tamnd/gopy/objects"
 )
 

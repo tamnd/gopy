@@ -5,7 +5,7 @@
 //
 // CPython: Python/context.c:773 ContextVar
 
-package contextvar
+package contextvars
 
 import (
 	"sync"

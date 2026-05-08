@@ -4,7 +4,7 @@
 //
 // CPython: Python/context.c:408 PyContext
 
-package contextvar
+package contextvars
 
 import (
 	"github.com/tamnd/gopy/errors"

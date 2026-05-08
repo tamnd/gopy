@@ -6,7 +6,7 @@
 //
 // CPython: Python/_contextvars.c
 
-package contextvar
+package contextvars
 
 import (
 	"fmt"

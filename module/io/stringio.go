@@ -14,7 +14,7 @@
 // CPython: Modules/_io/stringio.c:20 stringio (struct definition)
 // CPython: Modules/_io/stringio.c:1073 stringio_slots (type slots)
 
-package pyio
+package io
 
 import (
 	"fmt"

@@ -11,7 +11,7 @@
 // CPython: Modules/_io/_iomodule.c:580 module_methods (module-level fns)
 // CPython: Modules/_io/_iomodule.c:782 PyInit__io (the build hook)
 
-package pyio
+package io
 
 import (
 	"fmt"

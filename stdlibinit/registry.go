@@ -4,12 +4,12 @@
 // module; the linker then materializes the inittab at startup.
 //
 // gopy uses Go init() blocks instead: each module package
-// (gc/, contextvar/, ...) calls imp.AppendInittab from its own
-// init(). Those init blocks only run when their package is imported
-// somewhere in the dependency graph. Without a central registration
-// site, cmd/gopy/main.go would have to blank-import every module
-// package by hand, and forgetting one means import gc silently
-// raises ModuleNotFoundError at runtime.
+// (module/gc/, module/contextvars/, ...) calls imp.AppendInittab
+// from its own init(). Those init blocks only run when their
+// package is imported somewhere in the dependency graph. Without
+// a central registration site, cmd/gopy/main.go would have to
+// blank-import every module package by hand, and forgetting one
+// means import gc silently raises ModuleNotFoundError at runtime.
 //
 // This package centralizes that registration: blank-importing
 // stdlibinit pulls in every gopy module package, which forces every
@@ -21,23 +21,25 @@
 package stdlibinit
 
 import (
-	// Built-in module: gc. Registers itself via gc/module.go init().
+	// Built-in module: gc. Registers itself via module/gc/module.go
+	// init().
 	// CPython: Modules/config.c.in:47 {"gc", PyInit_gc}
-	_ "github.com/tamnd/gopy/gc"
+	_ "github.com/tamnd/gopy/module/gc"
 
 	// Built-in module: _contextvars. Registers itself via
-	// contextvar/module.go init().
+	// module/contextvars/module.go init().
 	// CPython: Modules/config.c.in:50 {"_contextvars", PyInit__contextvars}
-	_ "github.com/tamnd/gopy/contextvar"
+	_ "github.com/tamnd/gopy/module/contextvars"
 
-	// Built-in module: sys. Registers itself via sys/module.go init().
+	// Built-in module: sys. Registers itself via module/sys/module.go
+	// init().
 	// CPython: Modules/config.c.in:42 {"sys", _PyImport_BuiltinSys}
-	_ "github.com/tamnd/gopy/sys"
+	_ "github.com/tamnd/gopy/module/sys"
 
-	// Built-in module: _io. Registers itself via pyio/module.go
+	// Built-in module: _io. Registers itself via module/io/module.go
 	// init(). The current port covers StringIO; the rest of the
 	// type family is stubbed so io.py's `from _io import (...)`
 	// resolves at name-lookup time.
 	// CPython: Modules/config.c.in:48 {"_io", PyInit__io}
-	_ "github.com/tamnd/gopy/pyio"
+	_ "github.com/tamnd/gopy/module/io"
 )

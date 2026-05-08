@@ -4,7 +4,7 @@
 //
 // CPython: Python/context.c:1115 Token
 
-package contextvar
+package contextvars
 
 import (
 	"fmt"

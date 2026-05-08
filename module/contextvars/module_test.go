@@ -2,7 +2,7 @@
 // Mirrors the test_contextvars boundary: import _contextvars; check
 // the four exposed names; check the type-as-constructor shape.
 
-package contextvar
+package contextvars
 
 import (
 	"strings"

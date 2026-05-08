@@ -4,7 +4,7 @@
 //
 // CPython: Python/context.c:753 PyContext_Type / 1097 PyContextVar_Type / 1265 PyContextToken_Type / 1324 _PyContextTokenMissing_Type
 
-package contextvar
+package contextvars
 
 import "github.com/tamnd/gopy/objects"
 
