@@ -14,6 +14,12 @@ import (
 	"github.com/tamnd/gopy/getopt"
 	"github.com/tamnd/gopy/pythonrun"
 	"github.com/tamnd/gopy/state"
+
+	// Pull in the stdlib inittab. Each built-in module package
+	// registers itself with imp.AppendInittab from its own init().
+	// stdlibinit is the central blank-import surface, equivalent to
+	// CPython's Modules/config.c.in.
+	_ "github.com/tamnd/gopy/stdlibinit"
 )
 
 func main() {
