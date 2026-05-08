@@ -66,7 +66,11 @@ func rootRelativePath(filename, projectRoot string) string {
 	if err != nil {
 		return filepath.ToSlash(filename)
 	}
-	rel, err := filepath.Rel(projectRoot, abs)
+	rootAbs, err := filepath.Abs(projectRoot)
+	if err != nil {
+		return filepath.ToSlash(filename)
+	}
+	rel, err := filepath.Rel(rootAbs, abs)
 	if err != nil || strings.HasPrefix(rel, "..") {
 		return filepath.ToSlash(filename)
 	}
