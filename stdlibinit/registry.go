@@ -43,6 +43,25 @@ import (
 	// CPython: Modules/config.c.in:48 {"_io", PyInit__io}
 	_ "github.com/tamnd/gopy/module/io"
 
+	// Built-in module: _types. Re-exports the canonical type
+	// singletons (FunctionType, MappingProxyType, SimpleNamespace,
+	// ...) consumed by the vendored Lib/types.py.
+	// CPython: Modules/Setup.bootstrap.in:28 _types _typesmodule.c
+	_ "github.com/tamnd/gopy/module/types"
+
+	// Built-in module: errno. Registers itself via
+	// module/errno/module.go init(). Exposes the host platform's
+	// POSIX errno constants plus the reverse `errorcode` dict.
+	// CPython: Modules/config.c.in:46 {"errno", PyInit_errno}
+	_ "github.com/tamnd/gopy/module/errno"
+
+	// Built-in module: _functools. Registers itself via
+	// module/_functools/module.go init(). Backs Lib/functools.py with
+	// the partial type, the cmp_to_key key class, reduce, and the
+	// _lru_cache_wrapper used by @lru_cache.
+	// CPython: Modules/config.c.in:45 {"_functools", PyInit__functools}
+	_ "github.com/tamnd/gopy/module/_functools"
+
 	// Go-backed Python modules: not in CPython's config.c.in (those
 	// are pure-Python in Lib/), but until the corresponding Lib/*.py
 	// vendoring lands the import system needs something to satisfy
@@ -51,6 +70,7 @@ import (
 	_ "github.com/tamnd/gopy/module/collections"
 	_ "github.com/tamnd/gopy/module/colorize"
 	_ "github.com/tamnd/gopy/module/contextlib"
+	_ "github.com/tamnd/gopy/module/dataclasses"
 	_ "github.com/tamnd/gopy/module/difflib"
 	_ "github.com/tamnd/gopy/module/fnmatch"
 	_ "github.com/tamnd/gopy/module/functools"
@@ -60,7 +80,6 @@ import (
 	_ "github.com/tamnd/gopy/module/signal"
 	_ "github.com/tamnd/gopy/module/time"
 	_ "github.com/tamnd/gopy/module/traceback"
-	_ "github.com/tamnd/gopy/module/types"
 	_ "github.com/tamnd/gopy/module/warnings"
 	_ "github.com/tamnd/gopy/module/weakref"
 )
