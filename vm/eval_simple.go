@@ -15,10 +15,12 @@ import (
 	"strings"
 
 	"github.com/tamnd/gopy/compile"
+	pyerrors "github.com/tamnd/gopy/errors"
 	"github.com/tamnd/gopy/frame"
 	"github.com/tamnd/gopy/intrinsics"
 	"github.com/tamnd/gopy/objects"
 	"github.com/tamnd/gopy/stackref"
+	"github.com/tamnd/gopy/state"
 )
 
 // liftNestedCode mirrors pythonrun.liftCode for inner code objects
@@ -475,19 +477,24 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, retVal
 
 	case compile.RAISE_VARARGS:
 		// oparg: 0 = re-raise, 1 = raise exc, 2 = raise exc from cause.
-		// v0.6 has no exception object hierarchy yet, so we surface the
-		// raised value as a Go error with its repr; the eval loop's
-		// exception table walker handles the unwind.
+		// Sets the exception on the thread state via errors.Raise so
+		// the unwind path, PrintEx, and HandleSystemExit can all read
+		// it. The Go error returned is just the sentinel that drives
+		// handleException; the real data lives on ts.
+		//
+		// CPython: Python/bytecodes.c:1648 RAISE_VARARGS
 		switch oparg {
 		case 0:
 			return 0, nil, nil, false, true, errors.New("RuntimeError: No active exception to re-raise")
 		case 1:
-			exc := e.popObject()
-			return 0, nil, nil, false, true, fmt.Errorf("%s", objectRepr(exc))
+			val := e.popObject()
+			exc := raiseValue(e.ts, val, nil)
+			return 0, nil, nil, false, true, exc
 		case 2:
 			cause := e.popObject()
-			exc := e.popObject()
-			return 0, nil, nil, false, true, fmt.Errorf("%s (from %s)", objectRepr(exc), objectRepr(cause))
+			val := e.popObject()
+			exc := raiseValue(e.ts, val, cause)
+			return 0, nil, nil, false, true, exc
 		}
 		return 0, nil, nil, false, true, fmt.Errorf("vm: RAISE_VARARGS: invalid oparg %d", oparg)
 
@@ -1809,6 +1816,74 @@ func commonConstant(name string) *objects.Type {
 	t := objects.NewType(name, nil)
 	commonConstantsCache[name] = t
 	return t
+}
+
+// raiseValue is the do-raise body of RAISE_VARARGS. val is whatever
+// the bytecode pushed for the raise statement: an exception instance,
+// an exception class (CPython instantiates it with no args), or some
+// other object (TypeError). cause is the `from <cause>` value or nil.
+// raiseValue installs the resulting exception on the thread state and
+// returns the Go sentinel that drives the unwind loop.
+//
+// CPython: Python/ceval.c:L3105 do_raise
+func raiseValue(ts *state.Thread, val, cause objects.Object) error {
+	exc, err := normalizeRaise(val)
+	if err != nil {
+		return err
+	}
+	if cause != nil {
+		causeExc, cerr := normalizeCause(cause)
+		if cerr != nil {
+			return cerr
+		}
+		pyerrors.RaiseFrom(ts, exc, causeExc)
+	} else {
+		pyerrors.Raise(ts, exc)
+	}
+	return excSentinel(exc)
+}
+
+// normalizeRaise mirrors the head of do_raise: if val is already an
+// exception instance, keep it; if it is an exception class, call it
+// with no args; otherwise raise TypeError.
+//
+// CPython: Python/ceval.c:L3140 do_raise (the PyExceptionInstance_Check
+// / PyExceptionClass_Check branches)
+func normalizeRaise(val objects.Object) (*pyerrors.Exception, error) {
+	if exc, ok := val.(*pyerrors.Exception); ok {
+		return exc, nil
+	}
+	if t, ok := val.(*objects.Type); ok && pyerrors.IsSubtype(t, pyerrors.PyExc_BaseException) {
+		return pyerrors.New(t, objects.NewTuple(nil)), nil
+	}
+	return nil, fmt.Errorf("TypeError: exceptions must derive from BaseException")
+}
+
+// normalizeCause handles the `from <cause>` operand. None clears the
+// cause; otherwise the same exception-instance-or-class normalization
+// runs.
+//
+// CPython: Python/ceval.c:L3119 do_raise (cause branch)
+func normalizeCause(cause objects.Object) (*pyerrors.Exception, error) {
+	if cause == nil || cause == objects.None() {
+		return nil, nil
+	}
+	return normalizeRaise(cause)
+}
+
+// excSentinel returns the Go error the unwind loop sees once the
+// exception is on the thread state. The text mirrors
+// `repr(exc)`-style output so any test that pins err.Error() before
+// the proper traceback printer lands keeps working.
+func excSentinel(exc *pyerrors.Exception) error {
+	if exc == nil {
+		return errors.New("Exception")
+	}
+	msg := exc.Message()
+	if msg == "" {
+		return fmt.Errorf("%s", exc.TypeName())
+	}
+	return fmt.Errorf("%s: %s", exc.TypeName(), msg)
 }
 
 // objectRepr returns repr(o), falling back to a placeholder so error
