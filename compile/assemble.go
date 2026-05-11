@@ -39,8 +39,21 @@ func Assemble(seq *Sequence, info *Info, unit *Unit, filename string) (*Code, er
 		FirstLineno: unit.FirstLineno,
 		lineCursor:  unit.FirstLineno,
 	}
+	nlocals := len(unit.VarNames)
 	for i := range seq.Instrs {
-		a.emitInstr(&seq.Instrs[i])
+		ins := seq.Instrs[i]
+		// LOAD_CLOSURE is a pseudo op that maps to LOAD_FAST against
+		// the localsplus slot holding the cell. emitClosure emits it
+		// with oparg in deref-index space (cell_idx, or NCells+free_idx);
+		// bias by NLocals here so the runtime LOAD_FAST reads the
+		// correct slot.
+		//
+		// CPython: Python/compile.c LOAD_CLOSURE alias to LOAD_FAST
+		if ins.Op == LOAD_CLOSURE {
+			ins.Op = LOAD_FAST
+			ins.Oparg = int32(nlocals) + ins.Oparg
+		}
+		a.emitInstr(&ins)
 	}
 	a.LineTable = assembleLineTable(seq, unit.FirstLineno)
 	a.ExceptionTable = assembleExceptionTable(seq)
