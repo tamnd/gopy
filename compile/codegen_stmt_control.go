@@ -132,8 +132,10 @@ func (c *Compiler) visitBreak(s *ast.Break) error {
 	if loop == nil {
 		return fmt.Errorf("compile: 'break' outside loop")
 	}
-	c.unwindToLoop(loop, loc(s))
-	c.addOpJump(JUMP, loop.Exit, loc(s))
+	l := loc(s)
+	c.unwindToLoop(loop, l)
+	c.unwindFblock(loop, l)
+	c.addOpJump(JUMP, loop.Exit, l)
 	return nil
 }
 
@@ -150,17 +152,64 @@ func (c *Compiler) visitContinue(s *ast.Continue) error {
 	return nil
 }
 
-// unwindToLoop emits the cleanup ops for any intermediate fblocks
-// between the current top and the named loop. The full unwind table
-// (try / finally / with) lands when those constructs land. For now
-// only handle the no-intermediate case; reject otherwise so we never
-// emit a half-unwound jump.
+// unwindToLoop emits the cleanup ops for every fblock between the
+// current top and the named loop, walking from inner to outer. Each
+// kind contributes its own unwind sequence (POP_BLOCK, POP_EXCEPT,
+// inline finally body, ...). The loop frame itself does not unwind.
 //
 // CPython: Python/codegen.c:L622 codegen_unwind_fblock_stack
-func (c *Compiler) unwindToLoop(loop *fblock, _ ast.Pos) {
+func (c *Compiler) unwindToLoop(loop *fblock, l ast.Pos) {
 	for i := len(c.fblocks) - 1; i >= 0; i-- {
-		if &c.fblocks[i] == loop {
+		fb := &c.fblocks[i]
+		if fb == loop {
 			return
 		}
+		c.unwindFblock(fb, l)
+	}
+}
+
+// unwindFblock emits the cleanup ops for one fblock kind. Mirrors
+// CPython's codegen_unwind_fblock with preserve_tos == 0.
+//
+// CPython: Python/codegen.c:L518 codegen_unwind_fblock
+func (c *Compiler) unwindFblock(fb *fblock, l ast.Pos) {
+	switch fb.Kind {
+	case fblockWhileLoop,
+		fblockExceptionHandler,
+		fblockExceptionGroupHandler,
+		fblockAsyncComprehensionGenerator,
+		fblockStopIteration:
+		return
+	case fblockForLoop:
+		c.addOp(POP_TOP, l)
+	case fblockTryExcept:
+		c.addOp(POP_BLOCK, l)
+	case fblockFinallyTry:
+		c.addOp(POP_BLOCK, l)
+		if stmts, ok := fb.Datum.([]ast.Stmt); ok {
+			_ = c.visitStmts(stmts)
+		}
+	case fblockFinallyEnd:
+		c.addOp(POP_TOP, l)
+		c.addOp(POP_BLOCK, l)
+		c.addOp(POP_EXCEPT, l)
+	case fblockWith, fblockAsyncWith:
+		c.addOp(POP_BLOCK, l)
+		_ = c.callExitWithNones(l)
+		c.addOp(POP_TOP, l)
+	case fblockHandlerCleanup:
+		name, hasName := fb.Datum.(string)
+		if hasName {
+			c.addOp(POP_BLOCK, l)
+		}
+		c.addOp(POP_BLOCK, l)
+		c.addOp(POP_EXCEPT, l)
+		if hasName {
+			c.addLoadConst(nil, l)
+			_ = c.nameOpStore(name, l)
+			_ = c.nameOpDelete(name, l)
+		}
+	case fblockPopValue:
+		c.addOp(POP_TOP, l)
 	}
 }

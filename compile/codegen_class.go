@@ -141,6 +141,17 @@ func (c *Compiler) emitInnerClassCode(innerScope *symtable.Entry, s *ast.ClassDe
 	c.addLoadConst(s.Name, loc(s))
 	c.addOpName(STORE_NAME, &pool, "__qualname__", loc(s))
 
+	// SETUP_ANNOTATIONS makes __annotations__ an empty dict in the
+	// class namespace when the body carries annotated assignments.
+	// AnnAssign stores into that dict so dataclasses / typing reflect
+	// on cls.__annotations__.
+	//
+	// CPython: Python/codegen.c codegen_class_body (the
+	// ste_annotations_used check before visiting the body)
+	if bodyHasAnnotations(s.Body) {
+		c.addOp(SETUP_ANNOTATIONS, loc(s))
+	}
+
 	if err := c.visitStmts(s.Body); err != nil {
 		return err
 	}

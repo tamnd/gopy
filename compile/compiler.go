@@ -84,7 +84,7 @@ func assembleUnit(unit *Unit, filename string) (*Code, error) {
 		}
 		unit.Consts[i] = childCo
 	}
-	info, err := Optimize(unit.Seq, &unit.Consts, len(unit.VarNames), unit.FirstLineno)
+	info, err := OptimizeWithFlags(unit.Seq, &unit.Consts, len(unit.VarNames), unit.Flags)
 	if err != nil {
 		return nil, fmt.Errorf("compile: %s: flowgraph: %w", unit.Name, err)
 	}

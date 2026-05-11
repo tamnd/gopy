@@ -122,21 +122,37 @@ func (c *Compiler) emitNamed(name string, mode nameMode, l ast.Pos) error {
 // emitDeref emits LOAD_DEREF / STORE_DEREF / DELETE_DEREF for cells
 // and free variables.
 //
+// The runtime treats the oparg as the deref-space index (cells first,
+// then frees) so the LOAD_DEREF dispatch can index LocalsPlus uniformly
+// with NLocals + oparg. Cell vars use their CellVars pool index; free
+// vars use len(CellVars) + FreeVars pool index. This matches what
+// emitClosure does for LOAD_CLOSURE and what CPython's fix_cell_offsets
+// rewrites in flowgraph.c:3844 (where the codegen first records raw
+// pool indices and the offset fix-up pass collapses them to deref
+// space).
+//
 // CPython: Python/codegen.c Cell/Free branch in codegen_nameop
+// CPython: Python/flowgraph.c:3844 fix_cell_offsets
 func (c *Compiler) emitDeref(name string, mode nameMode, l ast.Pos) error {
 	scope := c.scope.GetScope(name)
+	var op Opcode
+	switch mode {
+	case opLoad:
+		op = LOAD_DEREF
+	case opStore:
+		op = STORE_DEREF
+	case opDelete:
+		op = DELETE_DEREF
+	}
 	pool := poolCellVars
 	if scope == symtable.Free {
 		pool = poolFreeVars
 	}
-	switch mode {
-	case opLoad:
-		c.addOpName(LOAD_DEREF, &pool, name, l)
-	case opStore:
-		c.addOpName(STORE_DEREF, &pool, name, l)
-	case opDelete:
-		c.addOpName(DELETE_DEREF, &pool, name, l)
+	idx := c.poolIndex(&pool, name)
+	if scope == symtable.Free {
+		idx += len(c.unit().CellVars)
 	}
+	c.seq().Addop(op, int32(idx), l)
 	return nil
 }
 

@@ -141,11 +141,13 @@ func inplaceOpKind(op ast.Operator) (int32, error) {
 	return 0, fmt.Errorf("compile: unknown inplace operator %v", op)
 }
 
-// visitAnnAssign emits the annotation half of `x: T = v`. CPython
-// always evaluates the annotation in deferred mode (PEP 649) at
-// module / class scope; inside a function it skips the annotation
-// entirely. The runtime store of the value follows the same paths as
-// a normal Assign target.
+// visitAnnAssign emits the annotation half of `x: T = v`. The value
+// assignment, when present, follows the normal Assign target path.
+// At module and class scope the annotation expression is evaluated
+// eagerly and stored into __annotations__[name] so downstream code
+// (e.g. dataclasses) can introspect the class. PEP 649's deferred /
+// lazy form is pending; the eager store is the pre-3.14 baseline that
+// keeps the surface working.
 //
 // CPython: Python/codegen.c:L5476 codegen_annassign
 func (c *Compiler) visitAnnAssign(s *ast.AnnAssign) error {
@@ -157,17 +159,28 @@ func (c *Compiler) visitAnnAssign(s *ast.AnnAssign) error {
 			return err
 		}
 	}
-	// Annotation: deferred at module / class scope. The full PEP 649
-	// hookup is pending; for now we record the annotation expression
-	// on the unit so a later pass can drain them at end-of-block.
-	if c.scope.Type != symtable.FunctionBlock {
-		if name, ok := s.Target.(*ast.Name); ok {
-			c.unit().DeferredAnnotations = append(
-				c.unit().DeferredAnnotations,
-				deferredAnnotation{Name: name.Id, Value: s.Annotation, Loc: loc(s)},
-			)
-		}
+	if c.scope.Type == symtable.FunctionBlock {
+		return nil
 	}
+	name, ok := s.Target.(*ast.Name)
+	if !ok {
+		// Subscript / attribute targets only get their value stored;
+		// CPython skips the annotation-dict update for them too.
+		return nil
+	}
+	// Record the deferred annotation for any future PEP 649 hookup,
+	// then emit the eager store: __annotations__[name] = annotation.
+	c.unit().DeferredAnnotations = append(
+		c.unit().DeferredAnnotations,
+		deferredAnnotation{Name: name.Id, Value: s.Annotation, Loc: loc(s)},
+	)
+	if err := c.visitExpr(s.Annotation); err != nil {
+		return err
+	}
+	pool := poolNames
+	c.addOpName(LOAD_NAME, &pool, "__annotations__", loc(s))
+	c.addLoadConst(name.Id, loc(s))
+	c.addOp(STORE_SUBSCR, loc(s))
 	return nil
 }
 
@@ -301,6 +314,7 @@ func (c *Compiler) visitImportFrom(s *ast.ImportFrom) error {
 
 	if len(s.Names) == 1 && s.Names[0].Name == "*" {
 		c.addOpI(CALL_INTRINSIC_1, intrinsicImportStar, loc(s))
+		c.addOp(POP_TOP, loc(s))
 		return nil
 	}
 	for _, alias := range s.Names {

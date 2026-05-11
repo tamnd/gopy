@@ -19,7 +19,11 @@ import (
 // CPython: Python/codegen.c:L868 codegen_body called from
 // _PyCodegen_Module
 func (c *Compiler) visitModule(m *ast.Module) error {
-	if err := c.visitStmts(m.Body); err != nil {
+	body := c.consumeDocstring(m.Body)
+	if bodyHasAnnotations(body) {
+		c.addOp(SETUP_ANNOTATIONS, ast.Pos{Lineno: 1})
+	}
+	if err := c.visitStmts(body); err != nil {
 		return err
 	}
 	c.addReturnNoneIfMissing(ast.Pos{Lineno: -1})
@@ -76,6 +80,58 @@ func (c *Compiler) visitStmts(stmts ast.Seq[ast.Stmt]) error {
 		}
 	}
 	return nil
+}
+
+// bodyHasAnnotations reports whether body contains an AnnAssign whose
+// target is a bare Name. SETUP_ANNOTATIONS is only worth emitting when
+// at least one such assignment will populate __annotations__. Module
+// and class bodies don't recurse into nested defs / classes (those have
+// their own scope and __annotations__), so a shallow scan over the
+// top-level statements matches CPython's ste_annotations_used flag.
+//
+// CPython: Python/symtable.c sets ste_annotations_used when an
+// AnnAssign with a Name target is visited at module / class scope.
+func bodyHasAnnotations(body ast.Seq[ast.Stmt]) bool {
+	for _, s := range body {
+		if a, ok := s.(*ast.AnnAssign); ok {
+			if _, ok := a.Target.(*ast.Name); ok {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// consumeDocstring inspects body[0] for a bare string literal. When
+// found, it pins the string at the current unit's first const slot,
+// sets the CoHasDocstring flag, and returns the body with that first
+// statement skipped. Callers that want CPython-style __doc__ exposure
+// must invoke this before the first const-emitting opcode so the
+// docstring lands at index 0.
+//
+// CPython: Python/codegen.c:L868 codegen_body (the
+// PyUnicode_CheckExact / CO_HAS_DOCSTRING block at body entry)
+func (c *Compiler) consumeDocstring(body ast.Seq[ast.Stmt]) ast.Seq[ast.Stmt] {
+	if len(body) == 0 {
+		return body
+	}
+	es, ok := body[0].(*ast.ExprStmt)
+	if !ok {
+		return body
+	}
+	con, ok := es.Value.(*ast.Constant)
+	if !ok {
+		return body
+	}
+	s, ok := con.Value.(string)
+	if !ok {
+		return body
+	}
+	// Pin the docstring at consts[0] and set the flag. Callers must
+	// have just opened the unit so no other const has been registered.
+	c.constIndex(s)
+	c.unit().Flags |= CoHasDocstring
+	return body[1:]
 }
 
 // visitStmt dispatches on the concrete Stmt type. Every stmt kind
