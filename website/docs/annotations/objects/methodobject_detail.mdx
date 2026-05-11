@@ -1,0 +1,116 @@
+---
+title: "methodobject.c: built-in method and C function objects"
+description: "PyCFunctionObject layout, PyMethodDef flag dispatch, vectorcall path, and PyMethod_New binding for bound methods"
+cpython_path: Objects/methodobject.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+ported_to: objects/method.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`Objects/methodobject.c` implements two related but distinct object types:
+`PyCFunction_Type` (a C-implemented callable bound to an optional `self`) and
+`PyMethod_Type` (a Python-level bound method pairing a function with an
+instance). Both share this file because historically they were a single type.
+
+## Map
+
+| Lines | Symbol | Purpose |
+|-------|--------|---------|
+| 1-50 | `PyCFunctionObject` (struct layout) | Fields: `m_ml` (PyMethodDef), `m_self`, `m_module`, `m_weakreflist`, `vectorcall` |
+| 51-110 | `PyCFunction_NewEx` / `PyJit_GenericAlias` | Allocates; sets vectorcall slot based on `ml_flags` |
+| 111-190 | `PyMethodDef` flag table | `METH_VARARGS`, `METH_FASTCALL`, `METH_NOARGS`, `METH_O`, `METH_CLASS`, `METH_STATIC`, `METH_COEXIST` |
+| 191-280 | `method_vectorcall` | Inspects `ml_flags` at call time, routes to correct ABI |
+| 281-350 | `meth_get__doc__` / `meth_get__name__` | Attribute access; `__text_signature__` also lives here |
+| 351-420 | `PyMethod_New` | Binds a Python function to an instance; checks `func` is callable |
+| 421-500 | `PyMethod_Type` / `PyCMethod_Type` definition | Type slots including `tp_vectorcall_offset` |
+
+## Reading
+
+### PyCFunctionObject struct
+
+The struct is small by design: `m_ml` points to a static `PyMethodDef` that
+the extension module owns. `m_self` is `NULL` for module-level functions and
+the instance for bound methods. `m_module` is set when the function is created
+via `PyModule_AddFunctions`.
+
+```c
+// CPython: Objects/methodobject.c:22 PyCFunctionObject definition
+typedef struct {
+    PyObject_HEAD
+    PyMethodDef *m_ml;   /* Description of the C function */
+    PyObject    *m_self; /* Passed as 'self' arg to the C func */
+    PyObject    *m_module; /* The __module__ attribute, can be anything */
+    PyObject    *m_weakreflist;
+    vectorcallfunc vectorcall;
+} PyCFunctionObject;
+```
+
+### PyMethodDef flag dispatch
+
+`ml_flags` is a bitmask that controls both the calling convention and whether
+the method is a class method or static method. `method_vectorcall` checks the
+flags at each call rather than branching at construction time, so a single
+`PyCFunctionObject` can be reused without reallocation.
+
+```c
+// CPython: Objects/methodobject.c:210 method_vectorcall (simplified)
+switch (flags & ~(METH_CLASS | METH_STATIC | METH_COEXIST)) {
+case METH_NOARGS:
+    result = (*meth)(self, NULL);   break;
+case METH_O:
+    result = (*meth)(self, args[0]); break;
+case METH_VARARGS:
+    stack = _PyTuple_FromArray(args, nargs);
+    result = (*meth)(self, stack);  break;
+case METH_FASTCALL:
+    result = ((_PyCFunctionFast)meth)(self, args, nargs); break;
+}
+```
+
+`METH_FASTCALL | METH_KEYWORDS` is the preferred ABI for new C extensions in
+3.14 because it avoids tuple allocation and passes `kwargs` as a separate
+`PyObject` array.
+
+### PyMethod_New binding
+
+`PyMethod_New` in the latter half of the file handles Python-level bound
+methods (produced by attribute lookup on an instance). It differs from
+`PyCFunction_New` in that both `func` and `self` are arbitrary `PyObject`
+pointers with no constraint on the calling convention.
+
+```c
+// CPython: Objects/methodobject.c:360 PyMethod_New
+PyObject *
+PyMethod_New(PyObject *func, PyObject *self)
+{
+    if (self == NULL) {
+        PyErr_BadInternalCall();
+        return NULL;
+    }
+    im = free_list ? (PyObject *)free_list : PyObject_GC_New(...);
+    Py_SET_TYPE(im, &PyMethod_Type);
+    ((PyMethodObject *)im)->im_func = Py_NewRef(func);
+    ((PyMethodObject *)im)->im_self = Py_NewRef(self);
+    _PyObject_GC_TRACK(im);
+    return im;
+}
+```
+
+The free-list optimisation (up to 256 recycled `PyMethodObject` entries) is a
+hot-path win because `obj.method()` creates and discards a bound method on
+every call.
+
+## gopy notes
+
+`objects/method.go` ports `PyMethod_Type` as `MethodType` and `PyCFunction_Type`
+as `CFunction`. The `m_ml` equivalent is a Go struct `MethodDef` carrying a
+function pointer typed as `func(*Object, []*Object) (*Object, error)`.
+
+The flag-based dispatch table in `method_vectorcall` maps to a Go switch in
+`(*CFunction).Call`. `METH_FASTCALL | METH_KEYWORDS` is not yet handled;
+keyword-carrying calls fall back to the `METH_VARARGS` path with a synthesised
+tuple, which is correct but slower. The free-list for `PyMethodObject` has no
+Go equivalent; GC handles reclamation.

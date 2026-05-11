@@ -1,0 +1,105 @@
+---
+title: "Include/dictobject.h: Dict Object Public API"
+description: "PyDictObject public fields, PyDict_GET_SIZE macro, SetItem/GetItem/GetItemWithError, PyDict_Next iteration protocol, and merge/update flag semantics"
+cpython_path: Include/dictobject.h
+cpython_version: "3.14"
+lines: 120
+status: annotated
+ported_to: objects/dict.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+The public dict headers expose a minimal surface: size query, key/value access, and the `PyDict_Next` cursor. The internal layout (hash tables, split vs combined storage, version tags) lives in `Objects/dict-common.h` and `Objects/dictobject.c`. Understanding the public API is enough to port extension-facing code; understanding the internals is needed to port the eval loop's fast-path LOAD/STORE_FAST_CHECK optimizations.
+
+## Map
+
+| Lines | Symbol | Kind |
+|-------|--------|------|
+| 1–8 | `PyDict_Type` / `PyDictKeys_Type` extern declarations | variables |
+| 9–14 | `PyDict_Check` / `PyDict_CheckExact` | macros |
+| 15–18 | `PyDict_New` / `PyDict_Copy` | functions |
+| 19–26 | `PyDict_GetItem` / `PyDict_GetItemWithError` | functions |
+| 27–34 | `PyDict_SetItem` / `PyDict_DelItem` | functions |
+| 35–42 | `PyDict_GetItemString` / `PyDict_SetItemString` | functions |
+| 43–50 | `PyDict_Next` | function |
+| 51–58 | `PyDict_Keys` / `PyDict_Values` / `PyDict_Items` | functions |
+| 59–64 | `PyDict_Size` | function |
+| 65–72 | `PyDict_Clear` / `PyDict_Contains` | functions |
+| 73–84 | `PyDict_Merge` / `PyDict_Update` / `PyDict_MergeFromSeq2` | functions |
+| 85–100 | `PyDictObject` struct | struct (cpython/dictobject.h) |
+| 101–112 | `PyDict_GET_SIZE` | macro (cpython/dictobject.h) |
+
+## Reading
+
+### PyDictObject struct and PyDict_GET_SIZE
+
+```c
+/* Include/cpython/dictobject.h */
+typedef struct {
+    PyObject_HEAD
+    Py_ssize_t      ma_used;       /* number of live key-value pairs */
+    uint64_t        ma_version_tag;/* incremented on every mutation */
+    PyDictKeysObject *ma_keys;
+    /* ma_values is NULL for combined-table dicts */
+    PyDictValuesObject *ma_values;
+} PyDictObject;
+
+#define PyDict_GET_SIZE(op) (assert(PyDict_Check(op)), \
+                             ((PyDictObject *)(op))->ma_used)
+```
+
+`ma_used` is the authoritative logical size. `PyDict_GET_SIZE` reads it directly without the function-call overhead of `PyDict_Size`. It must only be called on a known-dict object; the `assert` is elided in release builds.
+
+`ma_version_tag` is a global-monotonic counter incremented on every insert, update, or delete. The eval loop uses it to invalidate per-opcode inline caches without scanning the dict.
+
+Split-table dicts (used for instance `__dict__` when all instances share the same key set) store values in a separate `PyDictValuesObject`. Combined-table dicts set `ma_values` to `NULL` and store values inline in `ma_keys`.
+
+### GetItem variants and error conventions
+
+```c
+/* Returns borrowed reference; returns NULL without setting exception
+   when key is missing. Sets exception only on internal errors. */
+PyObject *PyDict_GetItem(PyObject *mp, PyObject *key);
+
+/* Returns borrowed reference; sets KeyError when key is missing,
+   sets other exceptions on hash or comparison errors. */
+PyObject *PyDict_GetItemWithError(PyObject *mp, PyObject *key);
+
+/* Returns borrowed reference; key must be a C string (converted
+   internally via PyUnicode_FromString). */
+PyObject *PyDict_GetItemString(PyObject *dp, const char *key);
+```
+
+The distinction between `PyDict_GetItem` and `PyDict_GetItemWithError` is important for correctness. `PyDict_GetItem` swallows exceptions raised by `__hash__` or `__eq__`, returning `NULL` silently. Code that uses it cannot distinguish "key not found" from "hash raised an exception." `PyDict_GetItemWithError` is the safe form and is preferred in new CPython code since 3.2.
+
+### PyDict_Next iteration protocol
+
+```c
+int PyDict_Next(PyObject *mp, Py_ssize_t *ppos, PyObject **pkey,
+                PyObject **pvalue);
+```
+
+`*ppos` must be initialized to `0` before the first call. Each successful call sets `*pkey` and `*pvalue` to borrowed references and advances `*ppos`. Returns 0 when iteration is exhausted. The dict must not be mutated during iteration; doing so produces undefined behavior (the internal index array may be reallocated).
+
+The protocol is used by `PyDict_Merge` and by several stdlib modules that need to iterate without constructing a temporary list.
+
+### Merge and update flags
+
+```c
+int PyDict_Merge(PyObject *a, PyObject *b, int override);
+int PyDict_Update(PyObject *a, PyObject *b);
+int PyDict_MergeFromSeq2(PyObject *d, PyObject *seq2, int override);
+```
+
+`override` controls conflict resolution: `0` means skip existing keys (equivalent to `setdefault` semantics), `1` means overwrite existing keys (equivalent to `dict.update` semantics), and `2` means raise `ValueError` on duplicate keys (used by the `**kwargs` merge in the eval loop to catch duplicate keyword arguments in a function call).
+
+`PyDict_Update(a, b)` is a thin wrapper around `PyDict_Merge(a, b, 1)`. `PyDict_MergeFromSeq2` accepts any iterable of key-value pairs (matching `dict([(k, v), ...])` semantics) and applies the same override flag.
+
+## gopy notes
+
+- `objects/dict.go` implements combined-table storage only. Split-table optimization is not yet ported; `ma_values` is always treated as `NULL`.
+- `ma_version_tag` is ported as a `uint64` field and is incremented in every mutating method. Inline cache invalidation in the eval loop reads it via `DictVersionTag()`.
+- `PyDict_GetItem` silent-exception semantics are reproduced by a `getItemNoError` helper that discards `KeyError` but propagates all other errors, matching CPython's behavior.
+- `PyDict_Next` is ported in `objects/dict_iter.go` using a position index into the internal entries slice. The no-mutation-during-iteration requirement is documented but not enforced at runtime.
+- The `override=2` path for `PyDict_Merge` is ported in `objects/dict_mutate.go` and is exercised by the `CALL` opcode's keyword-argument merging in `vm/eval_call.go`.

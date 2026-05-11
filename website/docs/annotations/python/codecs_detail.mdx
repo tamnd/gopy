@@ -1,0 +1,112 @@
+---
+title: "Python/codecs.c: Codec and Error Handler Registry"
+description: "PyCodec_Register, codec search path, PyCodec_Encode/Decode dispatch, and the built-in error handler table"
+cpython_path: Python/codecs.c
+cpython_version: "3.14"
+lines: 900
+status: annotated
+ported_to: objects/str.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`Python/codecs.c` implements the codec registry: the global list of search functions, the per-codec `_PyCodecInfo` cache, the encode/decode dispatch helpers, and the named error handler table (`strict`, `ignore`, `replace`, `xmlcharrefreplace`, `backslashreplace`, `surrogateescape`, `surrogatepass`).
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-60 | `_PyCodecRegistry` struct | Per-interpreter state: `search_path` list, `search_cache` dict, `error_handlers` dict |
+| 61-180 | `PyCodec_Register` | Appends a callable to `search_path`; validates it is callable |
+| 181-310 | `_PyCodec_Lookup` | Normalizes the encoding name, consults `search_cache`, then walks `search_path` until a non-`None` result |
+| 311-420 | `_PyCodecInfo` layout and `codec_getitem` helpers | Extracts encoder, decoder, stream reader/writer from the 4-tuple returned by search functions |
+| 421-560 | `PyCodec_Encode` / `PyCodec_Decode` | Look up codec, call the appropriate callable, validate return type is `(bytes, int)` or `(str, int)` |
+| 561-700 | `PyCodec_RegisterError` / `PyCodec_LookupError` | Maintains `error_handlers` dict; used by all codec C extensions to resolve the handler name |
+| 701-900 | Built-in error handler implementations | `strict_errors`, `ignore_errors`, `replace_errors`, `xmlcharrefreplace_errors`, `backslashreplace_errors`, `surrogatepass_errors`, `surrogateescape_errors` |
+
+## Reading
+
+### Codec search and caching
+
+`_PyCodec_Lookup` normalizes the encoding name with `_PyCodec_NormalizeEncoding` (lowercases, maps hyphens and spaces to underscores), checks `search_cache`, then walks `search_path` in order. The first non-`None` return value is stored back into the cache and returned as a `_PyCodecInfo`.
+
+```c
+/* Python/codecs.c ~220 */
+PyObject *
+_PyCodec_Lookup(const char *encoding)
+{
+    ...
+    /* Normalize */
+    v = normalizestring(encoding);  /* -> "utf_8", "latin_1", etc. */
+
+    /* Cache hit */
+    result = PyDict_GetItemWithError(interp->codecs.search_cache, v);
+    if (result != NULL) { Py_INCREF(result); goto done; }
+
+    /* Walk search_path */
+    for (i = 0; i < PyList_GET_SIZE(interp->codecs.search_path); i++) {
+        func   = PyList_GET_ITEM(interp->codecs.search_path, i);
+        result = PyObject_CallOneArg(func, v);
+        if (result == Py_None) { Py_DECREF(result); continue; }
+        if (result != NULL) break;
+    }
+    ...
+    PyDict_SetItem(interp->codecs.search_cache, v, result);
+done:
+    ...
+}
+```
+
+### Encode/Decode dispatch
+
+Both `PyCodec_Encode` and `PyCodec_Decode` delegate to `_PyCodec_EncodeInternal` / `_PyCodec_DecodeInternal`. These call the codec callable, then validate that the return value is a 2-tuple whose second element (the consumed-length integer) is non-negative.
+
+```c
+/* Python/codecs.c ~460 */
+static PyObject *
+_PyCodec_EncodeInternal(PyObject *object,
+                        PyObject *codec,
+                        const char *encoding,
+                        const char *errors)
+{
+    PyObject *encoder = PyTuple_GET_ITEM(codec, 0);
+    PyObject *args    = Py_BuildValue("(Oz)", object, errors);
+    PyObject *result  = PyObject_Call(encoder, args, NULL);
+    ...
+    /* result must be (bytes, int) */
+    if (!PyTuple_Check(result) || PyTuple_GET_SIZE(result) != 2) {
+        PyErr_SetString(PyExc_TypeError,
+            "encoder must return a tuple (object, integer)");
+    }
+    ...
+}
+```
+
+### Error handler registry
+
+Error handlers are stored in `interp->codecs.error_handlers`, a plain dict keyed by name. `PyCodec_RegisterError` is simply `PyDict_SetItem` with validation. The seven built-in handlers are registered during `_PyCodec_InitRegistry` at interpreter startup.
+
+```c
+/* Python/codecs.c ~575 */
+int
+PyCodec_RegisterError(const char *name, PyObject *error)
+{
+    PyInterpreterState *interp = _PyInterpreterState_GET();
+    if (!PyCallable_Check(error)) {
+        PyErr_SetString(PyExc_TypeError,
+            "codec error handler must be a callable object");
+        return -1;
+    }
+    return PyDict_SetItemString(interp->codecs.error_handlers,
+                                name, error);
+}
+```
+
+The `surrogateescape` and `surrogatepass` handlers were added in 3.1 and 3.2 respectively; no new built-in handlers were added in 3.14. The 3.14 change in this file is the addition of `PyCodec_UnregisterError` (mirrors `PyCodec_Register` gaining an unregister counterpart in PEP 758).
+
+## gopy notes
+
+- `objects/str.go` implements `str.encode()` and `bytes.decode()` but routes them through a Go-native codec map rather than the CPython search-path mechanism. There is no equivalent of `PyCodec_Register` yet.
+- The error handler names (`strict`, `ignore`, `replace`) are accepted as string arguments in `objects/str.go` but resolved by a Go switch statement, not by `PyCodec_LookupError`.
+- `xmlcharrefreplace` and `backslashreplace` are not yet implemented in gopy. Passing them raises `LookupError` at runtime.
+- A full port of `_PyCodecRegistry` would require per-interpreter state wiring; that work is deferred until the sub-interpreter story is clearer.

@@ -1,0 +1,56 @@
+---
+title: "calendar.py annotation"
+description: "TextCalendar, HTMLCalendar, and the week-building algorithm"
+cpython_path: Lib/calendar.py
+cpython_version: "3.14"
+lines: 750
+status: annotated
+ported_to: module/calendar/module.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`calendar.py` provides text and HTML calendar rendering, locale-aware month/day name tables, and low-level week arithmetic. It has no C accelerator; this file is the sole implementation.
+
+## Map
+
+| Lines | Symbol | Purpose |
+|-------|--------|---------|
+| 1-40 | module header, `MONDAY`..`SUNDAY` | Weekday constants (0=Monday, 6=Sunday, matching ISO 8601) |
+| 41-80 | `setfirstweekday` / `firstweekday` | Module-level first-weekday state |
+| 81-160 | `_localedata` helpers | Locale-aware month and day name lookup via `locale` module |
+| 161-260 | `Calendar` base class | `iterweekdays`, `itermonthdates`, `itermonthdays` generators |
+| 261-360 | `TextCalendar` | Formats weeks and months as plain text using `formatweek`, `formatmonth`, `formatyear` |
+| 361-480 | `HTMLCalendar` | Overrides formatting methods to emit `<table>` markup with CSS class hooks |
+| 481-550 | `LocaleTextCalendar` / `LocaleHTMLCalendar` | Subclasses that temporarily switch the locale via `locale.setlocale` |
+| 551-650 | Module-level convenience functions | `month`, `calendar`, `weekday`, `weekheader`, `isleap`, `leapdays`, `monthrange`, `monthcalendar` |
+| 651-750 | `timegm`, `main` (CLI) | POSIX timestamp from UTC struct, command-line entry point |
+
+## Reading
+
+### `monthcalendar` week-building algorithm
+
+`Calendar.monthdayscalendar` (<CpyLink path="Lib/calendar.py" line={208} label="line 208"/>) returns a list of weeks, each a list of 7 integers where 0 means the day falls outside the target month. The algorithm:
+
+1. Calls `itermonthdates` to get a `date` iterator that pads the month to complete weeks.
+2. Groups the iterator output into slices of seven.
+3. Replaces out-of-month dates with `0`.
+
+The padding logic in `itermonthdates` adjusts the start of the first week by walking backward to the nearest `firstweekday`, and pads the trailing week forward to the next Sunday (or whatever the last weekday of the week is). This means some months produce 4 rows, most produce 5, and February can produce 6 when it starts late in the week in a non-leap year.
+
+### `setfirstweekday` and its effect on iteration
+
+The module keeps `_firstweekday` as a module global. `Calendar.__init__` captures the value at construction time into `self.firstweekday`. Changing the module global after constructing a `Calendar` instance does not affect that instance. This is a common source of confusion. The `setfirstweekday` convenience function updates the module global only (<CpyLink path="Lib/calendar.py" line={69} label="line 69"/>).
+
+### HTML calendar CSS hooks
+
+`HTMLCalendar.formatday` (<CpyLink path="Lib/calendar.py" line={395} label="line 395"/>) adds a CSS class to each `<td>` element: `mon` through `sun` for weekday, `noday` for padding cells. No inline styles are emitted, which lets callers apply their own stylesheets. The class names are English weekday abbreviations regardless of locale; `LocaleHTMLCalendar` changes displayed text but not CSS class names.
+
+## gopy notes
+
+- The module has no C extension; a full port requires only the Python semantics.
+- `itermonthdates` yields `datetime.date` objects, so the port depends on the `date` type from `_pydatetime.py` being available first.
+- `timegm` is a thin wrapper and can delegate to the Go `time` package (`time.Date(...).Unix()`).
+- The locale subclasses call `locale.setlocale` and restore the original locale in a `try/finally` block. The gopy port should use a mutex around that section to avoid races in multi-threaded programs.
+- 3.14 adds `Calendar.itermonthdates2` yielding `(date, weekday)` pairs. This is a new API with no compatibility concern.
+---

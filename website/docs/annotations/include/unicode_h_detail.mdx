@@ -1,0 +1,111 @@
+---
+title: "Include/cpython/unicodeobject.h: Unicode Object Layout"
+description: "Internal struct layout, kind/compact/ascii flags, PyUnicode_KIND macro, data pointer arithmetic, wstr/utf8 cache fields, and the 3.14 PyUnicodeWriter type"
+cpython_path: Include/cpython/unicodeobject.h
+cpython_version: "3.14"
+lines: 500
+status: annotated
+ported_to: objects/str.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+CPython's Unicode implementation uses three nested struct layouts to avoid allocating separate buffers for ASCII-only and Latin-1 strings. The header encodes the string kind (1/2/4 bytes per code point), compactness, and ASCII-only status in a single bitfield packed into the shared `ob_base` of every Python object.
+
+## Map
+
+| Lines | Symbol | Kind |
+|-------|--------|------|
+| 72–110 | `PyASCIIObject` | struct |
+| 111–145 | `PyCompactUnicodeObject` | struct |
+| 146–185 | `PyUnicodeObject` | struct |
+| 210–230 | `PyUnicode_KIND` | macro |
+| 231–245 | `PyUnicode_DATA` | macro |
+| 260–275 | `PyUnicode_GET_LENGTH` | macro |
+| 300–340 | `PyUnicode_AsUTF8AndSize` | function |
+| 380–420 | `PyUnicodeWriter` | struct (3.14) |
+| 430–460 | `PyUnicodeWriter_Create` / `PyUnicodeWriter_Finish` | functions (3.14) |
+
+## Reading
+
+### Three-level struct hierarchy
+
+The three structs form a containment chain. `PyASCIIObject` is the base; `PyCompactUnicodeObject` embeds it; `PyUnicodeObject` embeds that. Casting between them is safe when the corresponding flag bits are set.
+
+```c
+typedef struct {
+    PyObject_HEAD
+    Py_ssize_t length;
+    Py_hash_t  hash;
+    struct {
+        unsigned int interned:2;
+        unsigned int kind:3;
+        unsigned int compact:1;
+        unsigned int ascii:1;
+    } state;
+    wchar_t *wstr;           /* removed in 3.13 */
+} PyASCIIObject;
+
+typedef struct {
+    PyASCIIObject _base;
+    Py_ssize_t    utf8_length;
+    char         *utf8;
+    Py_ssize_t    wstr_length;  /* removed in 3.13 */
+} PyCompactUnicodeObject;
+
+typedef struct {
+    PyCompactUnicodeObject _base;
+    union {
+        void      *any;
+        Py_UCS1   *latin1;
+        Py_UCS2   *ucs2;
+        Py_UCS4   *ucs4;
+    } data;
+} PyUnicodeObject;
+```
+
+`kind` encodes the per-code-point width: `PyUnicode_1BYTE_KIND` (1), `PyUnicode_2BYTE_KIND` (2), `PyUnicode_4BYTE_KIND` (4). When `compact` and `ascii` are both set, the character buffer follows the `PyASCIIObject` header immediately in memory, so no heap pointer is stored at all.
+
+### PyUnicode_KIND and PyUnicode_DATA
+
+```c
+#define PyUnicode_KIND(op) \
+    (assert(PyUnicode_Check(op)), \
+     ((PyASCIIObject *)(op))->state.kind)
+
+#define PyUnicode_DATA(op) \
+    (assert(PyUnicode_Check(op)), \
+     PyUnicode_IS_COMPACT(op)                          \
+         ? (PyUnicode_IS_ASCII(op)                     \
+                ? (void *)((PyASCIIObject *)(op) + 1)  \
+                : (void *)((PyCompactUnicodeObject *)(op) + 1)) \
+         : ((PyUnicodeObject *)(op))->data.any)
+```
+
+`PyUnicode_DATA` performs pointer arithmetic relative to the struct header when the string is compact. Non-compact (legacy) strings store the buffer in `data.any`. In practice, CPython's allocator always produces compact strings; legacy strings exist only when `PyUnicode_FromKindAndData` is used with pre-3.3 extension code.
+
+### PyUnicodeWriter (3.14)
+
+3.14 introduced `PyUnicodeWriter` as a stable replacement for the internal `_PyUnicodeWriter` type, exposing an append-then-finish builder pattern.
+
+```c
+typedef struct PyUnicodeWriter PyUnicodeWriter;
+
+PyUnicodeWriter *PyUnicodeWriter_Create(Py_ssize_t length);
+int  PyUnicodeWriter_WriteStr(PyUnicodeWriter *writer, PyObject *str);
+int  PyUnicodeWriter_WriteChar(PyUnicodeWriter *writer, Py_UCS4 ch);
+int  PyUnicodeWriter_WriteUTF8(PyUnicodeWriter *writer,
+                               const char *str, Py_ssize_t size);
+PyObject *PyUnicodeWriter_Finish(PyUnicodeWriter *writer);
+void      PyUnicodeWriter_Discard(PyUnicodeWriter *writer);
+```
+
+`Create` accepts a size hint; the writer over-allocates internally and upgrades the internal kind when a wide character is appended. `Finish` returns a ready-to-use `str` object and frees the writer. `Discard` frees without returning an object, used on error paths.
+
+## gopy notes
+
+- `objects/str.go` mirrors the three-level layout using Go struct embedding. The `kind` field is stored as a `uint8` matching CPython's 3-bit encoding.
+- Compact ASCII strings are stored as a plain Go `string` value appended after the header struct; pointer arithmetic is avoided by keeping a `[]byte` slice header pointing into the same allocation.
+- `PyUnicode_DATA` pointer logic is replaced by a `data()` method that switches on `kind` and returns the backing slice header.
+- The `wstr` and `wstr_length` fields are not ported; they were removed in CPython 3.12 and gopy targets 3.14 semantics only.
+- `PyUnicodeWriter` is tracked but not yet ported. Builder-pattern string construction currently uses Go's `strings.Builder` internally.

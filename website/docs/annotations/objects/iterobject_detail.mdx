@@ -1,0 +1,121 @@
+---
+title: "iterobject.c: sequence and callable iterator types"
+description: "PySeqIter_Type and PyCallIter_Type internals, exhaustion via StopIteration, and 3.14 changes to iterator protocol"
+cpython_path: Objects/iterobject.c
+cpython_version: "3.14"
+lines: 200
+status: annotated
+ported_to: objects/object.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`Objects/iterobject.c` is one of the smallest files in `Objects/` but touches
+a protocol used by every `for` loop and comprehension in CPython. It provides
+two concrete iterator types: `PySeqIter_Type` (index-based, for sequences) and
+`PyCallIter_Type` (sentinel-based, for callables).
+
+## Map
+
+| Lines | Symbol | Purpose |
+|-------|--------|---------|
+| 1-30 | `seqiterobject` struct | Fields: `it_index` (Py_ssize_t), `it_seq` (borrowed sequence ref) |
+| 31-70 | `PySeqIter_New` | Allocates; stores initial `it_index = 0` |
+| 71-110 | `iter_iternext` (sequence path) | Calls `PySequence_GetItem`; sets `it_seq = NULL` on `IndexError` |
+| 111-130 | `PySeqIter_Type` definition | `tp_iternext = iter_iternext`, `tp_iter = PyObject_SelfIter` |
+| 131-160 | `calliterobject` struct | Fields: `it_callable`, `it_sentinel` (owned refs) |
+| 161-180 | `PyCallIter_New` | Validates sentinel is not `NULL`; stores both refs |
+| 181-200 | `calliter_iternext` | Calls `it_callable()`; compares result to `it_sentinel` via `PyObject_RichCompareBool` |
+
+## Reading
+
+### PySeqIter_Type: index-based exhaustion
+
+`iter_iternext` for sequence iterators is the canonical pattern for consuming
+an indexed sequence. It increments `it_index` on each call and catches
+`IndexError` to signal exhaustion by clearing `it_seq`. After clearing, the
+iterator returns `NULL` without setting an exception, which is the standard
+protocol for a spent iterator.
+
+```c
+// CPython: Objects/iterobject.c:75 iter_iternext
+static PyObject *
+iter_iternext(PyObject *iterator)
+{
+    seqiterobject *it = (seqiterobject *)iterator;
+    PyObject *seq = it->it_seq;
+    if (seq == NULL)
+        return NULL;
+    result = (*Py_TYPE(seq)->tp_as_sequence->sq_item)(seq, it->it_index);
+    if (result != NULL) {
+        ++it->it_index;
+        return result;
+    }
+    if (PyErr_ExceptionMatches(PyExc_StopIteration) ||
+        PyErr_ExceptionMatches(PyExc_IndexError)) {
+        PyErr_Clear();
+        it->it_seq = NULL;
+        Py_DECREF(seq);
+    }
+    return NULL;
+}
+```
+
+Clearing `it_seq` on exhaustion serves double duty: it releases the sequence
+reference (allowing GC) and acts as the "spent" sentinel for future calls.
+
+### PyCallIter_Type: sentinel comparison
+
+`calliter_iternext` is used by the two-argument form of `iter(callable,
+sentinel)`. On each step it calls `it_callable` with no arguments, then
+compares the result to `it_sentinel` using rich comparison (`==`). A truthy
+comparison result exhausts the iterator by clearing both stored references.
+
+```c
+// CPython: Objects/iterobject.c:185 calliter_iternext
+static PyObject *
+calliter_iternext(calliterobject *it)
+{
+    if (it->it_callable == NULL)
+        return NULL;
+    result = _PyObject_CallNoArgs(it->it_callable);
+    if (result == NULL) {
+        /* StopIteration or real error: both exhaust the iterator */
+        Py_CLEAR(it->it_callable);
+        Py_CLEAR(it->it_sentinel);
+        return NULL;
+    }
+    ok = PyObject_RichCompareBool(result, it->it_sentinel, Py_EQ);
+    if (ok > 0) {
+        Py_CLEAR(it->it_callable);
+        Py_CLEAR(it->it_sentinel);
+        Py_DECREF(result);
+        return NULL;   /* exhausted */
+    }
+    return result;
+}
+```
+
+A `StopIteration` raised inside the callable is treated as exhaustion, not an
+error. The `if (result == NULL)` branch clears both refs, so the next call
+returns `NULL` immediately without re-entering the callable.
+
+### 3.14 changes
+
+Python 3.14 introduced `PEP 768` tracing hooks that can observe
+`tp_iternext` calls. `Objects/iterobject.c` gained a thin wrapper in 3.14
+that notifies the monitoring subsystem (`sys.monitoring`) when an iterator is
+exhausted. This does not change the logic visible to extension code but does
+add a few lines around the `return NULL` paths to fire `STOP_ITERATION` events.
+
+## gopy notes
+
+`objects/object.go` provides `SeqIter` and `CallIter` as Go structs. The
+`iter_iternext` sequence path maps to `(*SeqIter).Next()`, which calls
+`vm.GetItem(seq, index)` and catches `StopIteration` or `IndexError` to clear
+the sequence field, matching CPython behaviour.
+
+The `calliter_iternext` sentinel path is in `(*CallIter).Next()`. The
+`PyObject_RichCompareBool` call maps to `vm.RichCompareBool(result, sentinel,
+OpEq)`. The 3.14 monitoring hooks are not yet ported; `sys.monitoring`
+integration is deferred to a later milestone.
