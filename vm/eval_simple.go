@@ -636,7 +636,8 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, retVal
 		cellObj := ref.AsObject()
 		cell, ok := cellObj.(*objects.Cell)
 		if !ok || cell == nil {
-			return 0, nil, nil, false, true, fmt.Errorf("LOAD_DEREF: slot %d not a cell, got %T", oparg, cellObj)
+			name := derefName(e.f.Code, int(oparg))
+			return 0, nil, nil, false, true, fmt.Errorf("LOAD_DEREF: %s slot %d not a cell in %s:%s, got %T", name, oparg, e.f.Code.Filename, e.f.Code.Name, cellObj)
 		}
 		if cell.Contents == nil {
 			return 0, nil, nil, false, true, fmt.Errorf("NameError: free variable referenced before assignment")
@@ -1884,6 +1885,19 @@ func excSentinel(exc *pyerrors.Exception) error {
 		return fmt.Errorf("%s", exc.TypeName())
 	}
 	return fmt.Errorf("%s: %s", exc.TypeName(), msg)
+}
+
+// derefName returns the cell or free variable name at index idx in
+// the cell+free layout. Used purely for error messages so a failing
+// LOAD_DEREF tells the operator which name is unbound.
+func derefName(co *objects.Code, idx int) string {
+	if idx < len(co.Cellvars) {
+		return co.Cellvars[idx]
+	}
+	if i := idx - len(co.Cellvars); i >= 0 && i < len(co.Freevars) {
+		return co.Freevars[i]
+	}
+	return "<unknown>"
 }
 
 // objectRepr returns repr(o), falling back to a placeholder so error
