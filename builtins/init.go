@@ -155,6 +155,7 @@ func typeSingletons() []struct {
 	}{
 		{"object", objects.ObjectType()},
 		{"type", objects.TypeType()},
+		{"str", objects.StrType()},
 		{"int", objects.IntType},
 		{"float", objects.FloatType},
 		{"bool", objects.BoolType},
@@ -186,6 +187,7 @@ func typeSingletons() []struct {
 // CPython: Objects/longobject.c:6438 PyLong_Type (tp_new = long_new, tp_call NULL)
 func wireTypeCalls() {
 	wireOnce.Do(func() {
+		bindCtor(objects.StrType(), StrOf)
 		bindCtor(objects.IntType, IntCtor)
 		bindCtor(objects.FloatType, FloatCtor)
 		bindCtor(objects.BoolType, BoolCtor)
@@ -416,7 +418,6 @@ func reflectionPanel() []struct {
 		{"id", ID},
 		{"hash", Hash},
 		{"repr", Repr},
-		{"str", StrOf},
 	}
 }
 
