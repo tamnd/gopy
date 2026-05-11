@@ -1,0 +1,203 @@
+---
+title: "Lib/_py_warnings.py"
+description: The pure-Python fallback implementation of the warnings subsystem, covering filter management, warn dispatch, showwarning output, and the catch_warnings context manager.
+cpython_path: Lib/_py_warnings.py
+cpython_version: "3.14"
+lines: 869
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`_py_warnings.py` is CPython's reference implementation of the warnings subsystem.
+At startup, `Lib/warnings.py` imports everything from this module and then
+overlays selected symbols with faster versions from the `_warnings` C extension
+(`Modules/_warnings.c`).
+The Python version is the ground truth for behavior: when the C extension is absent
+(embedded builds, early bootstrap) `_py_warnings` runs unmodified.
+
+In 3.14 the module was significantly reworked to support `context_aware_warnings`
+via `_contextvars.ContextVar`, replacing the previous simple global-mutation model
+inside `catch_warnings`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| <Cpy path="Lib/_py_warnings.py" lines="37-43">37-43</Cpy> | `filters`, `defaultaction`, `onceregistry` | Module-level state: filter list, fallback action, once-registry dict |
+| <Cpy path="Lib/_py_warnings.py" lines="52-83">52-83</Cpy> | `_Context` / `_GlobalContext` | Per-context filter list carrier; `_GlobalContext` proxies the module global |
+| <Cpy path="Lib/_py_warnings.py" lines="86-87">86-87</Cpy> | `_warnings_context` | `ContextVar` that holds the active `_Context` when context-aware mode is on |
+| <Cpy path="Lib/_py_warnings.py" lines="89-108">89-108</Cpy> | `_get_context` / `_set_context` / `_new_context` | Context-var accessors; `_new_context` copies the current context for isolation |
+| <Cpy path="Lib/_py_warnings.py" lines="111-114">111-114</Cpy> | `_get_filters` | Non-public helper returning the active filter list from the current context |
+| <Cpy path="Lib/_py_warnings.py" lines="117-118">117-118</Cpy> | `_filters_mutated_lock_held` | Bumps `_filters_version` to invalidate per-module `__warningregistry__` caches |
+| <Cpy path="Lib/_py_warnings.py" lines="121-124">121-124</Cpy> | `showwarning` | Public hook; constructs `WarningMessage` and delegates to `_showwarnmsg_impl` |
+| <Cpy path="Lib/_py_warnings.py" lines="133-150">133-150</Cpy> | `_showwarnmsg_impl` | Writes the formatted warning text to `sys.stderr` (or the context log) |
+| <Cpy path="Lib/_py_warnings.py" lines="153-210">153-210</Cpy> | `_formatwarnmsg_impl` | Formats `filename:lineno: Category: message` plus optional tracemalloc allocation trace |
+| <Cpy path="Lib/_py_warnings.py" lines="217-233">217-233</Cpy> | `_showwarnmsg` | Checks if `showwarning` was monkey-patched and routes accordingly |
+| <Cpy path="Lib/_py_warnings.py" lines="254-291">254-291</Cpy> | `filterwarnings` | Validates arguments, compiles regexes, prepends or appends a 5-tuple to the filter list |
+| <Cpy path="Lib/_py_warnings.py" lines="294-310">294-310</Cpy> | `simplefilter` | Inserts a pattern-less 5-tuple `(action, None, category, None, lineno)` |
+| <Cpy path="Lib/_py_warnings.py" lines="320-334">320-334</Cpy> | `_add_filter` | Low-level locked insertion; removes duplicates before prepending |
+| <Cpy path="Lib/_py_warnings.py" lines="337-341">337-341</Cpy> | `resetwarnings` | Clears the entire filter list under the lock |
+| <Cpy path="Lib/_py_warnings.py" lines="359-384">359-384</Cpy> | `_setoption` | Parses a `-W` flag string `action:message:category:module:lineno` and calls `filterwarnings` |
+| <Cpy path="Lib/_py_warnings.py" lines="443-495">443-495</Cpy> | `warn` | Main public entry point: resolves the call frame, builds the registry key, calls `warn_explicit` |
+| <Cpy path="Lib/_py_warnings.py" lines="498-568">498-568</Cpy> | `warn_explicit` | Applies the filter list, consults `onceregistry`, and dispatches to `_showwarnmsg` |
+| <Cpy path="Lib/_py_warnings.py" lines="571-593">571-593</Cpy> | `WarningMessage` | Data class holding `(message, category, filename, lineno, file, line, source)` |
+| <Cpy path="Lib/_py_warnings.py" lines="596-678">596-678</Cpy> | `catch_warnings` | Context manager that saves and restores filter state; supports `record=True` and context-var isolation |
+| <Cpy path="Lib/_py_warnings.py" lines="681-811">681-811</Cpy> | `deprecated` | PEP 702 decorator that emits a `DeprecationWarning` on use of classes or callables |
+| <Cpy path="Lib/_py_warnings.py" lines="817-833">817-833</Cpy> | `_deprecated` | Internal helper that raises `RuntimeError` if the removal version has passed |
+| <Cpy path="Lib/_py_warnings.py" lines="861-869">861-869</Cpy> | `_setup_defaults` | Installs the standard ignore filters for `DeprecationWarning`, `ImportWarning`, etc. |
+
+## Reading
+
+### warn: frame resolution and registry lookup
+
+`warn` resolves the caller frame by walking `stacklevel` levels up from the
+call site, skipping CPython-internal bootstrap frames. The `__warningregistry__`
+dict stored in each module's globals is keyed by `(text, category, lineno)` and
+acts as a fast-path cache; it is invalidated when `_filters_version` changes.
+
+```python
+# CPython: Lib/_py_warnings.py:443 warn
+def warn(message, category=None, stacklevel=1, source=None,
+         *, skip_file_prefixes=()):
+    # resolve the call frame
+    try:
+        if stacklevel <= 1 or _is_internal_frame(sys._getframe(1)):
+            frame = sys._getframe(stacklevel)
+        else:
+            frame = sys._getframe(1)
+            for x in range(stacklevel-1):
+                frame = _next_external_frame(frame, skip_file_prefixes)
+                if frame is None:
+                    raise ValueError
+    except ValueError:
+        globals = sys.__dict__
+        filename = "<sys>"
+        lineno = 0
+    else:
+        globals = frame.f_globals
+        filename = frame.f_code.co_filename
+        lineno = frame.f_lineno
+    registry = globals.setdefault("__warningregistry__", {})
+    _wm.warn_explicit(message, category, filename, lineno,
+                      globals['__name__'], registry, globals, source=source)
+```
+
+### warn_explicit: filter scan and action dispatch
+
+`warn_explicit` is where the 5-tuple filter list is linearly scanned. The
+`_filters_version` check clears stale per-module registries. `onceregistry`
+uses a 2-tuple `(text, category)` key, dropping the lineno to deduplicate
+across different call sites.
+
+```python
+# CPython: Lib/_py_warnings.py:498 warn_explicit (filter scan)
+if registry.get('version', 0) != _wm._filters_version:
+    registry.clear()
+    registry['version'] = _wm._filters_version
+if registry.get(key):
+    return
+for item in _wm._get_filters():
+    action, msg, cat, mod, ln = item
+    if ((msg is None or msg.match(text)) and
+        issubclass(category, cat) and
+        (mod is None or mod.match(module)) and
+        (ln == 0 or lineno == ln)):
+        break
+else:
+    action = _wm.defaultaction
+
+# CPython: Lib/_py_warnings.py:539 warn_explicit (once action)
+if action == "once":
+    registry[key] = 1
+    oncekey = (text, category)
+    if _wm.onceregistry.get(oncekey):
+        return
+    _wm.onceregistry[oncekey] = 1
+```
+
+### catch_warnings: context-var isolation in 3.14
+
+When `sys.flags.context_aware_warnings` is set, `catch_warnings.__enter__` copies
+the current `_Context` into a new `ContextVar` binding rather than mutating the
+module global. This makes `catch_warnings` safe across `asyncio.Task` boundaries.
+
+```python
+# CPython: Lib/_py_warnings.py:639 catch_warnings.__enter__
+def __enter__(self):
+    ...
+    with _wm._lock:
+        if _use_context:
+            self._saved_context, context = self._module._new_context()
+        else:
+            context = None
+            self._filters = self._module.filters
+            self._module.filters = self._filters[:]
+            self._showwarnmsg_impl = self._module._showwarnmsg_impl
+        self._showwarning = self._module.showwarning
+        self._module._filters_mutated_lock_held()
+        if self._record:
+            if _use_context:
+                context.log = log = []
+            else:
+                log = []
+                self._module._showwarnmsg_impl = log.append
+    ...
+    return log
+
+# CPython: Lib/_py_warnings.py:668 catch_warnings.__exit__
+def __exit__(self, *exc_info):
+    ...
+    with _wm._lock:
+        if _use_context:
+            self._module._warnings_context.set(self._saved_context)
+        else:
+            self._module.filters = self._filters
+            self._module._showwarnmsg_impl = self._showwarnmsg_impl
+        self._module.showwarning = self._showwarning
+        self._module._filters_mutated_lock_held()
+```
+
+### filterwarnings and the 5-tuple format
+
+Each filter is a 5-tuple `(action, compiled_message_re, category, compiled_module_re, lineno)`.
+Either regex field can be `None` to match everything. `filterwarnings` validates and
+compiles the regexes; `simplefilter` skips that and passes `None` directly.
+
+```python
+# CPython: Lib/_py_warnings.py:254 filterwarnings (signature and validation)
+def filterwarnings(action, message="", category=Warning, module="", lineno=0,
+                   append=False):
+    if action not in {"error","ignore","always","all","default","module","once"}:
+        raise ValueError(f"invalid action: {action!r}")
+    ...
+    if message:
+        message = re.compile(message, re.I)
+    else:
+        message = None
+    if module:
+        module = re.compile(module)
+    else:
+        module = None
+    _wm._add_filter(action, message, category, module, lineno, append=append)
+```
+
+## gopy notes
+
+The filter list is a plain `[]any` slice at runtime (5-tuples). In Go this becomes
+`[]FilterEntry` with named fields, making the scan in `warn_explicit` a simple range loop.
+
+`_filters_version` is an integer that must be atomically incremented; use
+`sync/atomic.AddInt64`.
+
+`warn` needs Go goroutine-local storage for the equivalent of `frame.f_locals /
+f_globals / f_code.co_filename`. gopy's `vm.Frame` already carries that; `warn`
+should accept a `*vm.Frame` argument for the caller frame rather than calling
+`sys._getframe`.
+
+`catch_warnings` with `record=True` replaces `_showwarnmsg_impl` with a list-append.
+In Go that is a function-pointer swap on the module object under a mutex, which
+matches the existing lock pattern in `_add_filter`.
+
+The `deprecated` class (lines 681-811) depends on `functools.wraps` and `inspect`
+at decoration time; port those dependencies first before tackling `deprecated`.

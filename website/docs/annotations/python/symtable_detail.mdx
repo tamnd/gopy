@@ -1,0 +1,112 @@
+---
+title: "Python/symtable.c"
+description: The CPython symbol table pass that resolves every name to its scope before any bytecode is emitted
+cpython_path: Python/symtable.c
+cpython_version: "3.14"
+lines: 1700
+status: annotated
+go_path: symtable/
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+## Map
+
+| CPython symbol | Lines (approx) | gopy counterpart |
+|---|---|---|
+| `PySymtable_BuildObject` / `_PySymtable_Build` | 412-500 | `symtable/build.go` `Build` |
+| `ste_new` | 92-130 | `symtable/build.go` `enterBlock` |
+| `symtable_enter_block` | 1456-1500 | `symtable/build.go` `enterBlock` |
+| `symtable_exit_block` | 1400-1420 | `symtable/build.go` `exitBlock` |
+| `symtable_add_def` / `symtable_add_def_helper` | 1498-1652 | `symtable/build.go` `addDef` |
+| `symtable_lookup` / `symtable_lookup_entry` | 1478-1492 | `symtable/build.go` `lookup` |
+| `PySTEntryObject` fields | Include/internal/pycore_symtable.h:88 | `symtable/entry.go` `Entry` |
+| `symtable_visit_stmt` / `symtable_visit_expr` | 1700-2700 | `symtable/build_visit.go` |
+| `symtable_visit_arguments` | 2884 | `symtable/build_helpers.go` `visitArguments` |
+| `symtable_visit_params` | 2761 | `symtable/build_helpers.go` `visitParams` |
+| `symtable_visit_annotation` | 2775 | `symtable/build_helpers.go` `visitAnnotation` |
+| `symtable_analyze` | 1369 | `symtable/analyze.go` `analyze` |
+| `analyze_block` | 1131 | `symtable/analyze.go` `analyzeBlock` |
+| `analyze_name` | 666 | `symtable/analyze.go` `analyzeName` |
+| `analyze_cells` | 913 | `symtable/analyze.go` `analyzeCells` |
+| `update_symbols` | 985 | `symtable/analyze.go` `updateSymbols` |
+| `analyze_child_block` | 1325 | `symtable/analyze.go` `analyzeChildBlock` |
+| `inline_comprehension` | 802 | `symtable/analyze.go` `inlineComprehension` |
+| `is_free_in_any_child` | 785 | `symtable/analyze.go` `isFreeInAnyChild` |
+| `_Py_Mangle` | 3207 | `symtable/mangle.go` `Mangle` |
+| `_Py_MaybeMangle` | 3187 | `symtable/mangle.go` `MaybeMangle` |
+| `_PyST_IsFunctionLike` | 566 | `symtable/entry.go` `Entry.IsFunctionLike` |
+| `_PyST_GetScope` | 555 | `symtable/entry.go` `Entry.GetScope` |
+| `_PyST_GetSymbol` | 535 | `symtable/entry.go` `Entry.GetSymbol` |
+
+## Reading
+
+### Entry point and the AST walk
+
+<CpyLink file="Python/symtable.c" line={412}>_PySymtable_Build</CpyLink> allocates a `symtable` struct, opens a module-level `PySTEntryObject`, and calls `symtable_visit_stmt` on each top-level statement. The visit functions are a recursive AST walker: each node type triggers `symtable_enter_block` for new scopes and `symtable_add_def` for every name binding or reference.
+
+gopy `symtable/build.go` `Build` is a direct port. It returns a `*Table` that holds the root `*Entry` and a map from AST node id to `*Entry` for all nested scopes.
+
+`PySTEntryObject` (declared in `Include/internal/pycore_symtable.h:88`) carries:
+
+- `ste_id`: the AST node that opened this scope
+- `ste_symbols`: a dict mapping name strings to integer flag words
+- `ste_varnames`: ordered list of `DEF_PARAM` names (the `co_varnames` prototype)
+- `ste_children`: ordered list of nested `PySTEntryObject`s
+- `ste_type`: `FunctionBlock`, `ClassBlock`, or `ModuleBlock`
+
+gopy `symtable/entry.go` `Entry` mirrors each field. `IsFunctionLike` returns true for functions, async functions, and lambdas (CPython `_PyST_IsFunctionLike:566`).
+
+### Scope flags
+
+Each name in `ste_symbols` stores a bitmask of `DEF_*` and `SCOPE_*` bits:
+
+| Bit constant | Meaning |
+|---|---|
+| `DEF_GLOBAL` | explicit `global` declaration |
+| `DEF_LOCAL` | assigned in this scope |
+| `DEF_PARAM` | function parameter |
+| `DEF_FREE` | used but not defined here |
+| `DEF_CELL` | name is a closure cell |
+| `DEF_NONLOCAL` | explicit `nonlocal` declaration |
+
+The scope type extracted from the high bits by `_PyST_GetScope` (CPython `Python/symtable.c:555`) is what codegen reads to choose between `LOAD_FAST`, `LOAD_DEREF`, `LOAD_GLOBAL`, and `LOAD_NAME`.
+
+```go
+// symtable/entry.go
+const (
+    ScopeLocal    Scope = 1
+    ScopeGlobal   Scope = 2
+    ScopeFree     Scope = 3
+    ScopeCell      Scope = 4
+    ScopeGlobalExplicit Scope = 5
+    ScopeGlobalImplicit Scope = 6
+    ScopeAnnotation     Scope = 7
+)
+```
+
+### The analyze phase
+
+The visit walk only records raw `DEF_*` bits. <CpyLink file="Python/symtable.c" line={1369}>symtable_analyze</CpyLink> runs a second pass that propagates free variables from inner to outer scopes and promotes `DEF_LOCAL` names that are referenced from inner scopes to `DEF_CELL`.
+
+<CpyLink file="Python/symtable.c" line={1131}>analyze_block</CpyLink> is the recursive core. For each block it calls <CpyLink file="Python/symtable.c" line={666}>analyze_name</CpyLink> on every name in `ste_symbols`, then recurses into children via <CpyLink file="Python/symtable.c" line={1325}>analyze_child_block</CpyLink>, and finally calls `update_symbols` to write the resolved `SCOPE_*` bits back.
+
+`CanSeeClassScope` is a cascade rule: a name that is free in a function nested inside a class can "see" the class namespace if no intervening function also defines the name. gopy `symtable/analyze.go` `canSeeClassScope` ports this logic (CPython `Python/symtable.c` `CanSeeClassScope` in `analyze_block`).
+
+### Comprehension scope isolation in CPython 3.12+
+
+Before 3.12, every comprehension was always an isolated scope. Starting with 3.12, <CpyLink file="Python/symtable.c" line={802}>inline_comprehension</CpyLink> can fold a comprehension into its enclosing scope when all iteration variables stay local. `is_free_in_any_child` (CPython `Python/symtable.c:785`) checks whether any nested scope captures a comprehension variable before the decision is made. gopy `symtable/analyze.go` ports both functions and sets `Entry.CompInlined` to signal to codegen that no separate code object is needed.
+
+## gopy notes
+
+gopy splits `Python/symtable.c` across:
+
+- `symtable/build.go`: pipeline entry, `enterBlock`/`exitBlock`, `addDef`, `lookup`.
+- `symtable/build_visit.go`: the `symtable_visit_stmt` / `symtable_visit_expr` AST walker.
+- `symtable/build_helpers.go`: argument, annotation, alias, and default visitor helpers.
+- `symtable/analyze.go`: the entire `symtable_analyze` pass including `analyze_block`, `analyze_name`, `analyze_cells`, `update_symbols`, `inline_comprehension`.
+- `symtable/entry.go`: `Entry` struct, `GetScope`, `GetSymbol`, `IsFunctionLike`.
+- `symtable/mangle.go`: `Mangle` / `MaybeMangle` (CPython `_Py_Mangle` at line 3207).
+- `symtable/types.go`: scope constants, block type constants, flag bitmasks.
+
+The analyze pass in gopy uses Go maps and slices in place of CPython's `PySet_*` API. The algorithmic structure is identical: a depth-first post-order traversal where each child's free-variable set is merged upward before the parent finalises its own scope flags.

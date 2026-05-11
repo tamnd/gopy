@@ -1,0 +1,120 @@
+---
+title: Lib/bisect.py
+description: Annotated reading of the bisect module providing binary search and sorted-insertion helpers with an optional C accelerator.
+cpython_path: Lib/bisect.py
+cpython_version: "3.14"
+lines: 100
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-5 | module header | `__all__` declaration |
+| 6-30 | `bisect_right` (pure Python) | binary search returning right insertion point |
+| 31-55 | `bisect_left` (pure Python) | binary search returning left insertion point |
+| 56-65 | `insort_right` | calls `bisect_right` then `list.insert` |
+| 66-75 | `insort_left` | calls `bisect_left` then `list.insert` |
+| 76-85 | `bisect` alias | `bisect = bisect_right` |
+| 86-90 | `insort` alias | `insort = insort_right` |
+| 91-100 | C accelerator swap | replaces functions with `_bisect` versions when available |
+
+## Reading
+
+### bisect_right pure-Python fallback
+
+The algorithm maintains two indices `lo` and `hi` (defaulting to `0` and `len(a)`) and halves the range on each step. The `key` parameter, added in Python 3.10, applies a transformation before comparing.
+
+```python
+def bisect_right(a, x, lo=0, hi=None, *, key=None):
+    if lo < 0:
+        raise ValueError('lo must be non-negative')
+    if hi is None:
+        hi = len(a)
+    if key is None:
+        while lo < hi:
+            mid = (lo + hi) // 2
+            if x < a[mid]:
+                hi = mid
+            else:
+                lo = mid + 1
+    else:
+        while lo < hi:
+            mid = (lo + hi) // 2
+            if x < key(a[mid]):
+                hi = mid
+            else:
+                lo = mid + 1
+    return lo
+```
+
+"Right" means that if `x` is already present, the returned index is one past the last occurrence, so inserting at that position keeps existing equal elements to the left.
+
+### bisect_left and the left/right distinction
+
+`bisect_left` is identical except the comparison is flipped to `a[mid] < x` (or `key(a[mid]) < x`), which makes the invariant `a[lo-1] < x <= a[hi]` instead of `a[lo-1] <= x < a[hi]`.
+
+```python
+def bisect_left(a, x, lo=0, hi=None, *, key=None):
+    if lo < 0:
+        raise ValueError('lo must be non-negative')
+    if hi is None:
+        hi = len(a)
+    if key is None:
+        while lo < hi:
+            mid = (lo + hi) // 2
+            if a[mid] < x:
+                lo = mid + 1
+            else:
+                hi = mid
+    else:
+        while lo < hi:
+            mid = (lo + hi) // 2
+            if key(a[mid]) < x:
+                lo = mid + 1
+            else:
+                hi = mid
+    return lo
+```
+
+The practical difference: `bisect_left([1, 2, 2, 3], 2)` returns `1`; `bisect_right` returns `3`.
+
+### insort and the insert step
+
+The `insort` variants are thin wrappers that call the corresponding `bisect` function and then call `list.insert` at the returned index.
+
+```python
+def insort_right(a, x, lo=0, hi=None, *, key=None):
+    if key is None:
+        lo = bisect_right(a, x, lo, hi)
+    else:
+        lo = bisect_right(a, x, lo, hi, key=key)
+    a.insert(lo, x)
+```
+
+Because `list.insert` is O(n), `insort` is O(n) overall even though the search is O(log n). For large lists `sortedcontainers.SortedList` is the practical alternative.
+
+### C accelerator swap
+
+At the bottom of the file, inside a `try/except ImportError`, all four public names are rebound to the versions from `_bisect`.
+
+```python
+try:
+    from _bisect import *
+except ImportError:
+    pass
+```
+
+This means the pure-Python functions above act as the documented specification and as the fallback, while the C versions provide the fast path. The module also serves as the reference implementation for `heapq.nlargest` and `heapq.nsmallest`, which use `bisect_right` to find the insertion point when maintaining a bounded heap.
+
+## gopy notes
+
+- The pure-Python fallback is the correct porting target. A Go implementation of `bisect_right` and `bisect_left` is around 20 lines each and avoids any dependency on a C extension.
+- The `lo/hi` bounds must be validated before the loop; raise `ValueError` for negative `lo` (already in the Python source).
+- The `key` parameter requires calling back into the Python evaluator for each midpoint comparison, so the hot path (no `key`) should avoid any Go interface indirection.
+- `insort_right` and `insort_left` must call the list `insert` method through the sequence protocol already in `objects/protocol.go`, not a Go slice append.
+- `bisect` and `insort` aliases are plain attribute assignments on the module after the four core functions are registered.
+- Because `heapq` imports `bisect`, porting `heapq` depends on this module being available first.

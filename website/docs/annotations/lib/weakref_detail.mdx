@@ -1,0 +1,186 @@
+---
+title: "Lib/weakref.py"
+description: Pure-Python layer over the _weakref C extension providing WeakValueDictionary, WeakKeyDictionary, WeakSet, WeakMethod, and the finalize destructor callback.
+cpython_path: Lib/weakref.py
+cpython_version: "3.14"
+lines: 574
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`weakref.py` is a thin Python layer on top of `_weakref` (written in C, exposed
+via `Objects/weakrefobject.c`). The file re-exports the low-level `ref`, `proxy`,
+`getweakrefcount`, and `getweakrefs` directly from `_weakref`, then adds the pure-Python
+collection wrappers and the `finalize` destructor helper.
+
+The key insight across all four collection classes is the same: the GC callback
+installed on each weak reference must avoid creating a reference cycle back to
+`self`, so each callback receives a `ref(self)` (a second-order weakref) and
+dereferences it before touching the mapping.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| <Cpy path="Lib/weakref.py" lines="12-20">12-20</Cpy> | `ref`, `proxy`, `getweakrefcount`, `getweakrefs` | Re-exported from `_weakref` C extension |
+| <Cpy path="Lib/weakref.py" lines="22-22">22-22</Cpy> | `WeakSet` | Re-exported from `_weakrefset` C-adjacent module |
+| <Cpy path="Lib/weakref.py" lines="38-89">38-89</Cpy> | `WeakMethod` | `ref` subclass that weakly holds both `__self__` and `__func__` to avoid keeping the instance alive |
+| <Cpy path="Lib/weakref.py" lines="46-66">46-66</Cpy> | `WeakMethod.__new__` | Creates two `ref` objects (`obj` and `func`) sharing a single `_cb` callback via a self-weakref trick |
+| <Cpy path="Lib/weakref.py" lines="68-73">68-73</Cpy> | `WeakMethod.__call__` | Dereferences both refs; returns a live bound method or `None` |
+| <Cpy path="Lib/weakref.py" lines="92-275">92-275</Cpy> | `WeakValueDictionary` | `MutableMapping` with weak values; `remove` callback keyed by `wr.key` via `KeyedRef` |
+| <Cpy path="Lib/weakref.py" lines="104-113">104-113</Cpy> | `WeakValueDictionary.__init__` | Installs `remove` closure and calls `_remove_dead_weakref` atomically on GC |
+| <Cpy path="Lib/weakref.py" lines="138-139">138-139</Cpy> | `WeakValueDictionary.__setitem__` | Wraps each value in a `KeyedRef` that carries the dict key |
+| <Cpy path="Lib/weakref.py" lines="277-295">277-295</Cpy> | `KeyedRef` | `ref` subclass with a `.key` slot, shared remove callback avoids per-entry closures |
+| <Cpy path="Lib/weakref.py" lines="298-437">298-437</Cpy> | `WeakKeyDictionary` | `MutableMapping` with weak keys; `remove` callback closes over `ref(self)` to break cycles |
+| <Cpy path="Lib/weakref.py" lines="309-320">309-320</Cpy> | `WeakKeyDictionary.__init__` | Installs `remove` via inner closure, stores data as `ref(key) -> value` |
+| <Cpy path="Lib/weakref.py" lines="334-335">334-335</Cpy> | `WeakKeyDictionary.__setitem__` | Registers the key's weak ref with the `remove` callback |
+| <Cpy path="Lib/weakref.py" lines="385-395">385-395</Cpy> | `WeakKeyDictionary.keyrefs` | Returns a snapshot list of key weak refs (not guaranteed live) |
+| <Cpy path="Lib/weakref.py" lines="440-574">440-574</Cpy> | `finalize` | High-level destructor: runs `func(*args, **kwargs)` exactly once when the referent is collected |
+| <Cpy path="Lib/weakref.py" lines="458-483">458-483</Cpy> | `finalize.__init__` | Registers with `atexit` on first use; stores `_Info` in class-level `_registry` dict |
+| <Cpy path="Lib/weakref.py" lines="485-490">485-490</Cpy> | `finalize.__call__` | Pops from `_registry`; runs `func` if still alive and not in shutdown |
+| <Cpy path="Lib/weakref.py" lines="534-539">534-539</Cpy> | `finalize._select_for_exit` | Returns live atexit finalizers sorted by creation index (oldest first) |
+| <Cpy path="Lib/weakref.py" lines="541-574">541-574</Cpy> | `finalize._exitfunc` | Called by `atexit`; disables GC, drains pending finalizers, re-enables GC |
+
+## Reading
+
+### WeakMethod: the self-weakref trick
+
+A bound method holds a strong reference to `self`, so a plain `ref(method)` would
+keep the instance alive. `WeakMethod` solves this by holding a `ref` to `obj`
+(the instance) and a separate `ref` to `func` (the unbound function). Both share
+the `_cb` callback, which itself avoids a cycle by capturing `ref(self)` (a
+weakref to the `WeakMethod` object) rather than `self` directly.
+
+```python
+# CPython: Lib/weakref.py:46 WeakMethod.__new__
+def __new__(cls, meth, callback=None):
+    obj = meth.__self__
+    func = meth.__func__
+    def _cb(arg):
+        self = self_wr()          # dereference to avoid cycle
+        if self._alive:
+            self._alive = False
+            if callback is not None:
+                callback(self)
+    self = ref.__new__(cls, obj, _cb)
+    self._func_ref = ref(func, _cb)
+    self._meth_type = type(meth)
+    self._alive = True
+    self_wr = ref(self)           # second-order weakref breaks the cycle
+    return self
+
+# CPython: Lib/weakref.py:68 WeakMethod.__call__
+def __call__(self):
+    obj = super().__call__()
+    func = self._func_ref()
+    if obj is None or func is None:
+        return None
+    return self._meth_type(func, obj)
+```
+
+### WeakValueDictionary: KeyedRef and atomic removal
+
+`WeakValueDictionary` uses `KeyedRef` (a `ref` subclass with a `.key` slot) so
+that a single shared `remove` closure can find the right dict entry without
+capturing each key individually. The `_remove_dead_weakref` C function is called
+to atomically remove the entry, guarding against concurrent GC calls.
+
+```python
+# CPython: Lib/weakref.py:104 WeakValueDictionary.__init__
+def __init__(self, other=(), /, **kw):
+    def remove(wr, selfref=ref(self), _atomic_removal=_remove_dead_weakref):
+        self = selfref()
+        if self is not None:
+            _atomic_removal(self.data, wr.key)  # atomic: safe under concurrent GC
+    self._remove = remove
+    self.data = {}
+    self.update(other, **kw)
+
+# CPython: Lib/weakref.py:138 WeakValueDictionary.__setitem__
+def __setitem__(self, key, value):
+    self.data[key] = KeyedRef(value, self._remove, key)
+
+# CPython: Lib/weakref.py:289 KeyedRef.__new__
+def __new__(type, ob, callback, key):
+    self = ref.__new__(type, ob, callback)
+    self.key = key
+    return self
+```
+
+### finalize: class-level registry and atexit drain
+
+`finalize` objects are their own keys in the class-level `_registry` dict. This
+means a `finalize` instance holds no strong reference to `obj`; the only reference
+path is `_registry[self].weakref -> obj`. When `obj` is collected, the weak ref
+callback fires `self()`, which pops from `_registry` and calls `func`.
+
+```python
+# CPython: Lib/weakref.py:468 finalize.__init__
+def __init__(self, obj, func, /, *args, **kwargs):
+    if not self._registered_with_atexit:
+        import atexit
+        atexit.register(self._exitfunc)
+        finalize._registered_with_atexit = True
+    info = self._Info()
+    info.weakref = ref(obj, self)   # GC fires self() when obj dies
+    info.func = func
+    info.args = args
+    info.kwargs = kwargs or None
+    info.atexit = True
+    info.index = next(self._index_iter)
+    self._registry[self] = info
+    finalize._dirty = True
+
+# CPython: Lib/weakref.py:485 finalize.__call__
+def __call__(self, _=None):
+    info = self._registry.pop(self, None)
+    if info and not self._shutdown:
+        return info.func(*info.args, **(info.kwargs or {}))
+```
+
+### WeakKeyDictionary: remove closure via selfref
+
+`WeakKeyDictionary` stores `ref(key) -> value`. The `remove` closure installed as
+the key's ref callback needs access to the dictionary itself, but capturing `self`
+directly would create a cycle. The same `selfref = ref(self)` pattern as
+`WeakValueDictionary` breaks the cycle.
+
+```python
+# CPython: Lib/weakref.py:309 WeakKeyDictionary.__init__
+def __init__(self, dict=None):
+    self.data = {}
+    def remove(k, selfref=ref(self)):
+        self = selfref()
+        if self is not None:
+            try:
+                del self.data[k]
+            except KeyError:
+                pass
+    self._remove = remove
+    if dict is not None:
+        self.update(dict)
+
+# CPython: Lib/weakref.py:334 WeakKeyDictionary.__setitem__
+def __setitem__(self, key, value):
+    self.data[ref(key, self._remove)] = value
+```
+
+## gopy notes
+
+`ref` and `proxy` are C-level (`Objects/weakrefobject.c`); gopy's `objects/`
+directory must implement the weak-reference machinery before any of the Python
+wrappers become useful. `getweakrefcount` and `getweakrefs` are also C-level
+and belong there.
+
+`WeakMethod` can be ported as a Go struct embedding the `ref` type, with two
+`*ref` fields for `_func_ref` and a bool for `_alive`. The shared `_cb` callback
+is a closure over a `weakref.Pointer` to the `WeakMethod` object.
+
+`KeyedRef` is a small struct: embed `ref`, add a `key objects.Object` field.
+`_remove_dead_weakref` needs to be a Go function that performs a map delete under
+the same lock that guards GC callbacks.
+
+`finalize._registry` should be a `sync.Map` so GC-triggered callbacks (which can
+fire on any goroutine) do not race with `__init__` and `detach`. The `_exitfunc`
+classmethod maps to a package-level `atexit` hook registered once.

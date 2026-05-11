@@ -1,0 +1,67 @@
+---
+title: "Objects/rangeobject.c"
+description: CPython implementation of the Python range type with O(1) membership test and arbitrary-precision arithmetic
+cpython_path: Objects/rangeobject.c
+cpython_version: "3.14"
+lines: 750
+status: annotated
+ported_to: objects/range.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+|-------|--------|------|------|
+| 19–35 | `rangeobject` | Struct: `start`, `stop`, `step`, `length` as `PyObject*` | `objects.Range` (length derived) |
+| 92–130 | `range_from_array` | Core constructor; validates step != 0, computes length | `objects.NewRange` |
+| 200–250 | `range_length` | `max(0, ceil((stop-start)/step))` | `(*rangeIterator).LengthHint` |
+| 300–340 | `range_item` | `start + i*step`, raises `IndexError` on out-of-bounds | not yet ported |
+| 400–460 | `range_contains` | O(1) membership: checks residue then bounds | not yet ported |
+| 500–550 | `range_reverse` | Returns a `range_iterator` walking from `last` to `first` | not yet ported |
+| 600–680 | `range_repr` | `"range(start, stop)"` or `"range(start, stop, step)"` | `objects.rangeRepr` |
+| 700–760 | `range_reduce` | Pickle support via `__reduce__` returning `(range, (start, stop, step))` | not yet ported |
+| 800–900 | `rangeiterobject` | Iterator struct: `index`, `start`, `step`, `len` | `objects.rangeIterator` |
+| 1006 | `longrangeiter_len` | `__length_hint__` on a half-consumed iterator | `(*rangeIterator).LengthHint` |
+| 1128 | `PyLongRangeIter_Type` | Type singleton for the iterator | `objects.rangeIterType` |
+| 949 | `PyRange_Type` | Type singleton for range | `objects.RangeType` |
+
+## Reading
+
+### Object layout
+
+<Cpy src="Objects/rangeobject.c" sym="rangeobject" /> stores `start`, `stop`, `step`, and a pre-computed `length` all as `PyObject*` (i.e. arbitrary-precision Python ints). The length is computed once at construction so `len(r)` is O(1) without re-division.
+
+gopy's `objects.Range` stores `Start`, `Stop`, and `Step` as `*Int` (Go `math/big`-backed), but omits the cached `length` field. Length is re-derived from `LengthHint` on the iterator when needed. This is a minor deviation; a cached length field may be added when `__len__` is ported.
+
+### Length formula
+
+The canonical length of `range(start, stop, step)` is `max(0, ceil((stop - start) / step))`. <Cpy src="Objects/rangeobject.c" sym="range_length" /> computes this with arbitrary-precision integer division: `(stop - start + step - sign(step)) / step` where `sign(step)` is +1 for ascending ranges and -1 for descending. `(*rangeIterator).LengthHint` in gopy uses `math/big.Int.QuoRem` for the same ceiling division, adjusting by checking whether the remainder is non-zero.
+
+### Item access
+
+<Cpy src="Objects/rangeobject.c" sym="range_item" /> returns `start + i * step`. Negative indices are normalised by adding `length`. An out-of-bounds index raises `IndexError`. This slot is not yet ported in gopy; the iterator path is available instead.
+
+### O(1) membership test
+
+<Cpy src="Objects/rangeobject.c" sym="range_contains" /> tests `x in r` without iterating. It checks three conditions in order: `x` must be an int (or bool), `x` must satisfy `(x - start) % step == 0`, and `x` must lie within `[start, stop)` (adjusted for step sign). The result is always O(1) regardless of range size. This is one of the more subtle slots; it is not yet ported in gopy.
+
+### Iterator and reverse
+
+<Cpy src="Objects/rangeobject.c" sym="rangeiterobject" /> tracks `index` (current position), `start`, `step`, and `len` (remaining count). Each `tp_iternext` call increments `index`, computes `start + index * step`, and checks against `len`. gopy's `rangeIterator` stores `cur`, `stop`, and `step` as `*Int` values and advances `cur` by `step` on each `IterNext` call, using a `big.Int.Cmp` bound check.
+
+`range_reverse` is not yet ported. CPython implements it by constructing a new iterator starting from the last element and walking backwards; gopy would need to compute `last = start + (length-1)*step` and negate the step.
+
+### Repr and pickle
+
+`range_repr` emits `"range(start, stop)"` when `step == 1`, otherwise `"range(start, stop, step)"`. `objects.rangeRepr` matches this exactly. `range_reduce` emits a `(range, (start, stop, step))` tuple for `pickle`; it is not yet ported.
+
+## gopy mirror
+
+The port is split across two files:
+
+- `/objects/range.go` covers `rangeobject`, `PyRange_Type`, `NewRange`, and `rangeRepr`.
+- `/objects/range_iter.go` covers `rangeiterobject`, `PyLongRangeIter_Type`, `newRangeIterator`, and `LengthHint`.
+
+`range_item`, `range_contains`, `range_reverse`, and `range_reduce` are pending.

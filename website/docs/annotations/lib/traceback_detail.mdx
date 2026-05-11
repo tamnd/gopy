@@ -1,0 +1,155 @@
+---
+title: "Lib/traceback.py"
+description: Python's traceback module captures, formats, and prints exception stack traces with full position metadata and exception-chain support.
+cpython_path: Lib/traceback.py
+cpython_version: "3.14"
+lines: 1745
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+The traceback module is the public face of CPython's exception-printing pipeline.
+Every unhandled exception you see in a terminal passes through this file.
+In 3.14 the module grew colorization support via `_colorize`, extended position
+metadata (end-line, column, end-column), and a `show_group` path for
+`BaseExceptionGroup` trees.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| <Cpy path="Lib/traceback.py" lines="29-35">29-35</Cpy> | `print_list` | Writes a formatted stack list to a file, delegates to `StackSummary.from_list` |
+| <Cpy path="Lib/traceback.py" lines="37-49">37-49</Cpy> | `format_list` | Returns a list of formatted strings from a `StackSummary` or legacy tuples |
+| <Cpy path="Lib/traceback.py" lines="55-63">55-63</Cpy> | `print_tb` | Prints up to `limit` frames from a traceback object |
+| <Cpy path="Lib/traceback.py" lines="65-67">65-67</Cpy> | `format_tb` | One-liner wrapper: `format_list(extract_tb(...))` |
+| <Cpy path="Lib/traceback.py" lines="69-83">69-83</Cpy> | `extract_tb` | Builds a `StackSummary` from `_walk_tb_with_full_positions` |
+| <Cpy path="Lib/traceback.py" lines="119-134">119-134</Cpy> | `print_exception` | Top-level print entry point, constructs `TracebackException` and calls `.print()` |
+| <Cpy path="Lib/traceback.py" lines="146-159">146-159</Cpy> | `format_exception` | Same as `print_exception` but returns a list of strings |
+| <Cpy path="Lib/traceback.py" lines="208-214">208-214</Cpy> | `print_exc` / `format_exc` | Convenience wrappers around `sys.exception()` |
+| <Cpy path="Lib/traceback.py" lines="278-379">278-379</Cpy> | `FrameSummary` | Holds per-frame metadata: filename, lineno, end_lineno, colno, end_colno, name, locals |
+| <Cpy path="Lib/traceback.py" lines="382-396">382-396</Cpy> | `walk_stack` | Generator that walks `f.f_back` upward, yields `(frame, lineno)` |
+| <Cpy path="Lib/traceback.py" lines="399-407">399-407</Cpy> | `walk_tb` | Generator that walks `tb.tb_next`, yields `(frame, lineno)` |
+| <Cpy path="Lib/traceback.py" lines="410-421">410-421</Cpy> | `_walk_tb_with_full_positions` | Internal variant of `walk_tb` that yields 4-tuple positions from `co_positions()` |
+| <Cpy path="Lib/traceback.py" lines="434-791">434-791</Cpy> | `StackSummary` | `list` subclass; `extract`, `from_list`, `format`, `format_frame_summary` |
+| <Cpy path="Lib/traceback.py" lines="459-507">459-507</Cpy> | `StackSummary._extract_from_extended_frame_gen` | Core extractor, applies `tracebacklimit`, defers line lookups |
+| <Cpy path="Lib/traceback.py" lines="528-710">528-710</Cpy> | `StackSummary.format_frame_summary` | Renders one frame with caret underlining, colorization, and wide-char support |
+| <Cpy path="Lib/traceback.py" lines="799-810">799-810</Cpy> | `_Anchors` | Named tuple recording binary-op / bracket anchor positions for caret rendering |
+| <Cpy path="Lib/traceback.py" lines="812-956">812-956</Cpy> | `_extract_caret_anchors_from_line_segment` | Parses a code segment with `ast` to find op/subscript/call bracket positions |
+| <Cpy path="Lib/traceback.py" lines="1004-1576">1004-1576</Cpy> | `TracebackException` | Snapshot class: captures exc type, str, notes, syntax-error fields, chain, and groups |
+| <Cpy path="Lib/traceback.py" lines="1044-1189">1044-1189</Cpy> | `TracebackException.__init__` | Walks `__cause__` / `__context__` iteratively to avoid recursion, captures `StackSummary` |
+| <Cpy path="Lib/traceback.py" lines="1226-1278">1226-1278</Cpy> | `TracebackException.format_exception_only` | Yields the final "ExcType: msg" line plus `__notes__` and group children |
+| <Cpy path="Lib/traceback.py" lines="1468-1566">1468-1566</Cpy> | `TracebackException.format` | Main generator: resolves chain order, delegates to `stack.format` and `format_exception_only` |
+| <Cpy path="Lib/traceback.py" lines="1602-1684">1602-1684</Cpy> | `_compute_suggestion_error` | Levenshtein-based "Did you mean?" hint for `NameError` / `AttributeError` / `ImportError` |
+| <Cpy path="Lib/traceback.py" lines="1687-1745">1687-1745</Cpy> | `_levenshtein_distance` | Pure-Python port of `Python/suggestions.c:levenshtein_distance` |
+
+## Reading
+
+### FrameSummary: capturing position metadata
+
+`FrameSummary` stores everything needed to reconstruct one line of the "File ..., line N, in func" output.
+In 3.14 it gained `end_lineno`, `colno`, and `end_colno` from `co_positions()` so that
+multi-line expressions can be underlined precisely.
+
+```python
+# CPython: Lib/traceback.py:292 FrameSummary.__slots__
+__slots__ = ('filename', 'lineno', 'end_lineno', 'colno', 'end_colno',
+             'name', '_lines', '_lines_dedented', 'locals', '_code')
+
+# CPython: Lib/traceback.py:359 FrameSummary._original_lines (property)
+@property
+def _original_lines(self):
+    self._set_lines()
+    return self._lines
+
+# CPython: Lib/traceback.py:373 FrameSummary.line (property)
+@property
+def line(self):
+    self._set_lines()
+    if self._lines is None:
+        return None
+    return self._lines.partition("\n")[0].strip()
+```
+
+### StackSummary.extract and the extended frame generator
+
+`extract` is the public API; it wraps the frame generator to add `None` position fields and
+forwards to `_extract_from_extended_frame_gen`, which is also called directly by
+`extract_tb` with the full 4-tuple positions.
+
+```python
+# CPython: Lib/traceback.py:438 StackSummary.extract
+@classmethod
+def extract(klass, frame_gen, *, limit=None, lookup_lines=True,
+        capture_locals=False):
+    def extended_frame_gen():
+        for f, lineno in frame_gen:
+            yield f, (lineno, None, None, None)
+    return klass._extract_from_extended_frame_gen(
+        extended_frame_gen(), limit=limit, lookup_lines=lookup_lines,
+        capture_locals=capture_locals)
+
+# CPython: Lib/traceback.py:466 StackSummary._extract_from_extended_frame_gen (limit handling)
+builtin_limit = limit is BUILTIN_EXCEPTION_LIMIT
+if limit is None or builtin_limit:
+    limit = getattr(sys, 'tracebacklimit', None)
+    if limit is not None and limit < 0:
+        limit = 0
+```
+
+### TracebackException: iterative chain walk
+
+The constructor avoids Python recursion on deeply-chained exceptions by using an explicit
+queue. The `_seen` set (keyed by `id(exc_value)`) breaks `__cause__` / `__context__` cycles.
+
+```python
+# CPython: Lib/traceback.py:1123 TracebackException.__init__ (queue loop)
+if not is_recursive_call:
+    queue = [(self, exc_value)]
+    while queue:
+        te, e = queue.pop()
+        if (e is not None and e.__cause__ is not None
+            and id(e.__cause__) not in _seen):
+            cause = TracebackException(
+                type(e.__cause__), e.__cause__,
+                e.__cause__.__traceback__, ...)
+        else:
+            cause = None
+        ...
+        te.__cause__ = cause
+        te.__context__ = context
+        te.exceptions = exceptions
+        if cause:
+            queue.append((te.__cause__, e.__cause__))
+```
+
+### format_exc and print_exc convenience wrappers
+
+Both wrappers call `sys.exception()` to retrieve the current exception from the interpreter
+thread state, which replaced the old three-argument `sys.exc_info()` pattern in 3.12.
+
+```python
+# CPython: Lib/traceback.py:208 print_exc
+def print_exc(limit=None, file=None, chain=True):
+    print_exception(sys.exception(), limit=limit, file=file, chain=chain)
+
+# CPython: Lib/traceback.py:212 format_exc
+def format_exc(limit=None, chain=True):
+    return "".join(format_exception(sys.exception(), limit=limit, chain=chain))
+```
+
+## gopy notes
+
+`FrameSummary` maps cleanly to a Go struct with pointer-nullable int fields for the
+column positions. The lazy `_set_lines` / `line` property pattern should become
+a sync.Once-guarded call to `linecache.GetLine`. `StackSummary.format` can stay
+as a method on `[]FrameSummary` that returns `[]string`.
+
+`TracebackException` is the harder target: the iterative `__cause__` / `__context__`
+queue in `__init__` must be reproduced exactly to avoid Go stack overflows on deep chains.
+The `_Anchors` AST walk (`_extract_caret_anchors_from_line_segment`) depends on a
+Python `ast` parse, which gopy does not yet expose; caret rendering can be stubbed to
+plain underlines until that gate is cleared.
+
+`_levenshtein_distance` at lines 1687-1745 is a self-contained algorithm with no
+CPython-internal dependencies and is a straightforward port.

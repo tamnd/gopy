@@ -1,0 +1,59 @@
+---
+title: "Include/internal/pycore_interp.h"
+description: Layout of the per-interpreter state struct and the global runtime singleton that coordinate all Python threads
+cpython_path: Include/internal/pycore_interp.h
+cpython_version: "3.14"
+lines: 400
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Every Python sub-interpreter owns a `_PyInterpreterState` that holds its dictionaries, GC generations, caches, and the list of threads running inside it. This header exposes the full layout of that struct, the global `_PyRuntime` singleton that spans all interpreters, and the per-interpreter free lists for small integers and float objects.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-40 | `_PyInterpreterState.id` | Monotonically increasing integer identifying the interpreter within the process |
+| 41-70 | `_PyInterpreterState.tstate_head` | Head of the singly-linked list of `_PyThreadState` structs for threads in this interpreter |
+| 71-100 | `_PyInterpreterState.builtins` | Reference to the `builtins` module dict for this interpreter |
+| 101-120 | `_PyInterpreterState.sysdict` | Reference to the `sys` module dict for this interpreter |
+| 121-140 | `_PyInterpreterState.importlib` | Reference to the `importlib._bootstrap` module used for imports |
+| 141-170 | `_PyInterpreterState.eval_breaker` | Atomic flag polled by the eval loop to handle signals, GIL drops, and pending calls |
+| 171-200 | `_PyInterpreterState.gc` | Embedded `_gc_runtime_state` holding the three generational lists and GC statistics |
+| 201-230 | `_PyInterpreterState.caches` | Inline-cache tables used by the specializing adaptive interpreter |
+| 231-250 | `_PyInterpreterState._warnings_filters` | List of active warning filter tuples for the `warnings` module |
+| 251-280 | `_Py_InitInterpreterState` | Function (or macro) that zero-initialises a freshly allocated interpreter state |
+| 281-320 | `_PyRuntime` | Process-wide `_PyRuntimeState` singleton declared `extern` and defined in `Python/pylifecycle.c` |
+| 321-360 | `_PyRuntime.interpreters.mutex` | `PyMutex` serialising access to the doubly-linked list of all live interpreters |
+| 361-380 | per-interpreter small-int free list | Cache of pre-allocated `PyLongObject` values for integers in the range -5 to 256 |
+| 381-400 | per-interpreter float free list | Slab of recycled `PyFloatObject` headers to avoid `malloc` on hot float paths |
+
+## Reading
+
+### _PyInterpreterState fields
+
+The interpreter state is the root of every resource owned by one sub-interpreter. `id` is assigned at creation time from a global counter in `_PyRuntime` and is never reused. `tstate_head` is the first thread state; new threads prepend themselves to this list under the interpreter's lock. `builtins`, `sysdict`, and `importlib` are plain `PyObject *` references to the corresponding module dicts and are set during interpreter initialisation before any user code runs.
+
+`eval_breaker` is the most performance-sensitive field. The eval loop tests it on every backward branch and function return. When any of the pending-call, signal, or GIL-drop bits are set in `eval_breaker`, the loop calls `_Py_HandlePending` instead of fetching the next instruction. Because the field is accessed from multiple threads, it is declared `_Atomic`.
+
+### GC generational state
+
+The embedded `gc` field of type `_gc_runtime_state` holds three `generation` structs (see `pycore_gc.h`), plus aggregate counters for total objects tracked, total collections, objects collected, and objects that survived. All GC operations for a given interpreter read and write this field rather than global state, which is what makes sub-interpreters independent for GC purposes.
+
+The `caches` field is an array of `_Py_CODEUNIT` tables used by the tier-1 specializing interpreter. When an adaptive instruction replaces a generic opcode, it writes cached operand data into this array indexed by the instruction's position in the code object. Different interpreters maintain separate caches so that one interpreter's specialization decisions do not contaminate another's.
+
+### _PyRuntime singleton
+
+`_PyRuntime` is of type `_PyRuntimeState` and is defined once in `Python/pylifecycle.c`. It bundles state that must be shared across all interpreters: the interpreter list, the GIL (for the default build), signal handlers, memory allocator hooks, and the pre-initialization settings. Because it is a true global, any code that accesses interpreter-specific data via `_PyRuntime` must hold the `interpreters.mutex` or use atomic operations.
+
+`_PyRuntime.interpreters.mutex` is a `PyMutex` (a thin wrapper around the OS futex or `pthread_mutex_t`). It must be held when traversing or modifying the doubly-linked list of live `_PyInterpreterState` objects. Failing to do so is a race condition that manifests as use-after-free during interpreter shutdown.
+
+### Free lists
+
+The small-int free list pre-allocates `PyLongObject` instances for integers -5 through 256. These objects are immortal within the interpreter: their reference count is never decremented to zero. The float free list is a slab of up to 256 recycled `PyFloatObject` structs. Both lists are per-interpreter in CPython 3.12 and later, replacing the previous per-process global slabs, so that sub-interpreters do not share mutable allocator state.
+
+## gopy notes
+
+gopy represents interpreter state through `vm.Interpreter` and `vm.ThreadState` rather than matching the CPython layout field-for-field. The `eval_breaker` mechanism maps loosely to gopy's signal channel and pending-call queue. The GC generational lists are not ported (see `pycore_gc.h` notes). The small-int and float free lists are replaced by Go's allocator; gopy interns small integers in a static array initialised at startup. When reading CPython code that passes `_PyInterpreterState *` arguments, the gopy equivalent is usually a `*vm.Interpreter` receiver.
