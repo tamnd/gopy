@@ -1650,6 +1650,9 @@ func getItem(container, key objects.Object) (objects.Object, error) {
 		return t.Mapping.GetItem(container, key)
 	}
 	if t.Sequence != nil && t.Sequence.GetItem != nil {
+		if sl, ok := key.(*objects.Slice); ok {
+			return sliceSequence(container, sl)
+		}
 		idx, ok := key.(*objects.Int)
 		if !ok {
 			return nil, fmt.Errorf("TypeError: '%s' indices must be integers, not %s", t.Name, key.Type().Name)
@@ -1670,6 +1673,53 @@ func getItem(container, key objects.Object) (objects.Object, error) {
 		return t.Sequence.GetItem(container, int(i))
 	}
 	return nil, fmt.Errorf("TypeError: '%s' object is not subscriptable", t.Name)
+}
+
+// sliceSequence walks a sequence's GetItem slot once per index in the
+// slice. CPython lists / tuples / strings each have their own
+// PySequence_GetSlice fast path; gopy uses a single generic loop
+// against the int-indexed Sequence.GetItem, then rewraps the result
+// in the source container's type. Negative or zero-length slices
+// produce an empty container.
+//
+// CPython: Objects/abstract.c PyObject_GetItem slice branch +
+// per-type sq_slice routines (list_subscript, tuple_subscript,
+// unicode_subscript)
+func sliceSequence(container objects.Object, sl *objects.Slice) (objects.Object, error) {
+	t := container.Type()
+	if t.Sequence == nil || t.Sequence.Length == nil || t.Sequence.GetItem == nil {
+		return nil, fmt.Errorf("TypeError: '%s' object is not subscriptable", t.Name)
+	}
+	n, err := t.Sequence.Length(container)
+	if err != nil {
+		return nil, err
+	}
+	start, _, step, count, err := sl.GetIndices(n)
+	if err != nil {
+		return nil, err
+	}
+	items := make([]objects.Object, 0, count)
+	for i := 0; i < count; i++ {
+		v, gerr := t.Sequence.GetItem(container, start+i*step)
+		if gerr != nil {
+			return nil, gerr
+		}
+		items = append(items, v)
+	}
+	switch container.(type) {
+	case *objects.List:
+		return objects.NewList(items), nil
+	case *objects.Tuple:
+		return objects.NewTuple(items), nil
+	case *objects.Unicode:
+		var sb strings.Builder
+		for _, it := range items {
+			s, _ := objects.Str(it)
+			sb.WriteString(s)
+		}
+		return objects.NewStr(sb.String()), nil
+	}
+	return objects.NewList(items), nil
 }
 
 // delItem mirrors PyObject_DelItem.
