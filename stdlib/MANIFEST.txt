@@ -9,6 +9,7 @@
 # (PSF License Agreement). It governs every .py listed below; the
 # Apache-2.0 LICENSE in the repo root governs gopy's own code.
 LICENSE b0e25a78cffb43f4d92de8b61ccfa1f1f98ecbc22330b54b5251e7b6ba010231 LICENSE
+_collections_abc.py 50beebb1f309d83fd3af45f0e4c98c9dbfe0edd2f40edc8dc79e5cf0072cfbea Lib/_collections_abc.py
 _colorize.py 15db41bec8e25fd1ba81cf234df2cc7446d0fbc10285fda73186176365efd730 Lib/_colorize.py
 functools.py 046ec9660146db48862c7b22c78e2ef3818eaed6920e5cbf35f551ef09fec6cd Lib/functools.py
 keyword.py 18c2be738c04ad20ad375f6a71db34b3823c7f40b0340f5294d0e89f3c9b093b Lib/keyword.py
