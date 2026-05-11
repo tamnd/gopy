@@ -1,0 +1,62 @@
+---
+title: "subprocess.py: Popen, communicate, and wrappers"
+description: "Annotated walkthrough of CPython Lib/subprocess.py covering Popen.__init__ platform dispatch, communicate() deadlock-safe read, check_call/check_output, DEVNULL/PIPE constants, and the 3.14 process_group change"
+cpython_path: Lib/subprocess.py
+cpython_version: "3.14"
+lines: 1900
+status: annotated
+ported_to: module/subprocess
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`subprocess.py` is the high-level process-spawning interface. On POSIX it wraps `fork`/`exec`; on Windows it wraps `CreateProcess`. Nearly everything flows through the single `Popen` class.
+
+## Map
+
+| Lines | Symbol | Notes |
+|-------|--------|-------|
+| 1–80 | Module constants | `PIPE`, `STDOUT`, `DEVNULL`, `STD_INPUT_HANDLE`, signal sentinels |
+| 81–160 | `CompletedProcess` | Simple result dataclass; `check_returncode` raises `CalledProcessError` |
+| 161–320 | `Popen.__init__` | Argument normalisation, env/cwd handling, platform dispatch to `_execute_child` |
+| 321–500 | `Popen._execute_child` (POSIX) | `fork` + `exec`, pipe setup, `preexec_fn` call, `process_group` change (3.14) |
+| 501–620 | `Popen._execute_child` (Windows) | `CreateProcess` flags, `STARTUPINFO`, handle inheritance |
+| 621–780 | `Popen.communicate` | Deadlock-safe read via threads or `select`; stdin drain, stdout/stderr join |
+| 781–860 | `Popen.wait` / `poll` | `waitpid` loop with timeout on POSIX, `WaitForSingleObject` on Windows |
+| 861–950 | `Popen._communicate_with_select` | POSIX `select`-based drain to avoid pipe-buffer deadlock |
+| 951–1020 | `Popen._communicate_with_poll` | Alternative `poll`-based drain used when `select` is unavailable |
+| 1021–1100 | `check_call` / `check_output` | Thin wrappers that raise `CalledProcessError` on non-zero exit |
+| 1101–1200 | `run` | Universal entry point; delegates to `Popen`, then `communicate` |
+| 1201–1400 | `getoutput` / `getstatusoutput` | Shell-string convenience wrappers (legacy API) |
+| 1401–1900 | Internal helpers | `_args_from_interpreter_flags`, `_optim_args_from_interpreter_flags`, platform detection utilities |
+
+## Reading
+
+### Popen.__init__ and platform dispatch
+
+<Cpy src="Lib/subprocess.py" start={161} end={320} />
+
+`__init__` normalises the `args` argument (string vs list), resolves `executable`, converts `encoding`/`errors` for text mode, then calls the private `_execute_child`. On POSIX this is `_execute_child` defined in the `if mswindows` else branch (line ~500). The Windows path prepares a `STARTUPINFO` struct and calls `CreateProcess` through `_winapi`.
+
+The 3.14 `process_group` parameter (line ~430) replaces the older `start_new_session` boolean. When set, it calls `os.setpgid(0, process_group)` in the child after fork, which lets callers control job-control grouping without a full new session.
+
+### communicate() and the deadlock problem
+
+<Cpy src="Lib/subprocess.py" start={621} end={780} />
+
+Naive simultaneous `read(stdout)` and `read(stderr)` deadlocks when one pipe fills its kernel buffer while the parent is blocked on the other. `communicate` sidesteps this by reading both pipes concurrently. On POSIX with both stdout and stderr, it uses either `_communicate_with_select` or `_communicate_with_poll` (chosen at import time). On Windows, two `Thread` objects drain each pipe in parallel.
+
+After the reads complete, `wait` is called once. The return value is `(stdout_data, stderr_data)`.
+
+### check_call, check_output, and run
+
+<Cpy src="Lib/subprocess.py" start={1021} end={1100} />
+
+`check_call` calls `run(..., check=True)`. `check_output` additionally captures stdout and passes it into the raised `CalledProcessError` for inspection. Both are thin convenience wrappers; all logic lives in `run` and `Popen`. `run` is the modern preferred entry point introduced in 3.5.
+
+## gopy notes
+
+- `DEVNULL` requires opening `os.devnull` at spawn time and closing the fd after `_execute_child` returns; the fd table bookkeeping sits in `Popen.__init__` around line 300.
+- `process_group` interacts with signal delivery: a child in a different process group will not receive `SIGINT` from the terminal. Port `_execute_child`'s `setpgid` call faithfully.
+- The `preexec_fn` hook runs between `fork` and `exec` in the child; it cannot be supported in a goroutine-based port without `syscall.ForkExec` and careful locking.
+- `communicate` with `timeout` raises `TimeoutExpired` and then kills the child; implement the kill-then-drain sequence exactly as CPython does to avoid zombie processes.

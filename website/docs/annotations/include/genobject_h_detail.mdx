@@ -1,0 +1,106 @@
+---
+title: "Include/cpython/genobject.h — generator and coroutine internals"
+description: "PyGenObject layout, _PyGenObject_HEAD macro, PyCoroObject and PyAsyncGenObject forward declarations, ag_finalizer, and 3.14 changes"
+cpython_path: Include/cpython/genobject.h
+cpython_version: "3.14"
+lines: 100
+status: annotated
+ported_to: objects/instance.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Generators, coroutines, and async generators all share a single C-level head
+macro (`_PyGenObject_HEAD`) that embeds the suspended frame, the running flag,
+and the name fields. This header defines the three concrete struct types,
+declares the type objects, provides `CheckExact` macros, and (since 3.12)
+exposes the `ag_finalizer` field used to hook async-generator cleanup.
+
+## Map
+
+| Lines | Symbol | Kind | Notes |
+|-------|--------|------|-------|
+| 1-8 | guard + includes | boilerplate | pulls in `frameobject.h` |
+| 10-28 | `_PyGenObject_HEAD` | macro | shared layout embedded in all three types |
+| 30-36 | `PyGenObject` | struct | `_PyGenObject_HEAD` only |
+| 38-44 | `PyGen_Type` | extern | type object for plain generators |
+| 46-48 | `PyGen_CheckExact` | macro | type identity check |
+| 50-62 | `PyCoroObject` | struct | adds `cr_origin` for traceback |
+| 64-66 | `PyCoro_CheckExact` | macro | type identity check |
+| 68-82 | `PyAsyncGenObject` | struct | adds `ag_finalizer`, `ag_closed`, `ag_running_async` |
+| 84-88 | `PyAsyncGen_CheckExact` | macro | type identity check |
+| 90-100 | new in 3.14 | notes | frame pointer replaced by `_PyInterpreterFrame` embed |
+
+## Reading
+
+### `_PyGenObject_HEAD` layout
+
+Every generator-family object starts with this macro expansion:
+
+```c
+#define _PyGenObject_HEAD(prefix)                \
+    PyObject_HEAD                                \
+    PyObject *prefix##_name;                     \
+    PyObject *prefix##_qualname;                 \
+    _PyInterpreterFrame prefix##_iframe;         \
+    PyObject *prefix##_origin_or_finalizer;      \
+    char prefix##_running;                       \
+    char prefix##_frame_state;                   \
+    char prefix##_hooks_inited;                  \
+    char prefix##_closed;
+```
+
+`prefix##_iframe` is an embedded (not heap-allocated) interpreter frame. In
+3.12+ the frame is no longer a separate heap object; it lives directly inside
+the generator struct, which is why `sizeof(PyGenObject)` grew noticeably.
+
+`prefix##_frame_state` encodes whether the frame is created, suspended, running,
+completed, or cleared. The eval loop checks this before resuming.
+
+### Concrete types and CheckExact macros
+
+```c
+typedef struct {
+    _PyGenObject_HEAD(gi)
+} PyGenObject;
+
+typedef struct {
+    _PyGenObject_HEAD(cr)
+    PyObject *cr_origin;  /* call-stack snapshot for RuntimeWarning */
+} PyCoroObject;
+
+typedef struct {
+    _PyGenObject_HEAD(ag)
+    /* ag_origin_or_finalizer reused for finalizer in async gen */
+} PyAsyncGenObject;
+
+#define PyGen_CheckExact(op)      Py_IS_TYPE((op), &PyGen_Type)
+#define PyCoro_CheckExact(op)     Py_IS_TYPE((op), &PyCoro_Type)
+#define PyAsyncGen_CheckExact(op) Py_IS_TYPE((op), &PyAsyncGen_Type)
+```
+
+`ag_origin_or_finalizer` doubles as `ag_finalizer` for async generators: when
+the async gen is not yet closed, CPython stores the finalizer callable there.
+A separate `ag_closed` flag distinguishes the two uses.
+
+### 3.14 changes
+
+In 3.14, `_PyInterpreterFrame` was refactored so that the embedded frame in
+`_PyGenObject_HEAD` no longer stores a back-pointer to the previous frame.
+Instead the eval loop reconstructs the chain through `tstate->current_frame`.
+Code that walked `gen->gi_frame->f_back` directly now goes through
+`_PyThreadState_GetFrame`.
+
+## gopy notes
+
+- gopy models all three generator types through a single `Generator` struct in
+  `objects/instance.go`, parameterized by a `genKind` constant
+  (plain, coro, asyncgen). This matches the `_PyGenObject_HEAD` design.
+- `gi_iframe` maps to a `Frame` pointer field. The frame is heap-allocated in
+  gopy (matching pre-3.12 CPython); the embedded-frame optimization is a
+  future task.
+- `ag_finalizer` is stored as an `Object` field on the async-gen variant and
+  is invoked in `vm/eval_unwind.go` during unwinding, matching
+  `_PyGen_Finalize` in CPython's `Objects/genobject.c`.
+- `CheckExact` macros correspond to Go type assertions (`g.kind == kindCoro`,
+  etc.) inside the eval loop rather than exported API functions.

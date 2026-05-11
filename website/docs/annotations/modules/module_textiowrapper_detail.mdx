@@ -1,0 +1,120 @@
+---
+title: "TextIOWrapper detail"
+description: "Annotation of line accumulator buffer, incremental codec, readline universal newlines, seek/tell snapshot, and write_through flag in Modules/_io/textio.c"
+cpython_path: Modules/_io/textio.c
+cpython_version: "3.14"
+lines: 3500
+status: annotated
+ported_to: module/io
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+## Overview
+
+`textio.c` is the thickest file in the `_io` module. It implements
+`TextIOWrapper`, the layer that converts between raw bytes (from a
+`BufferedReader`/`BufferedWriter`) and Python `str` objects. The key moving
+parts are: the incremental codec pair, the line accumulator (`pending_bytes`),
+the universal-newlines state machine, and the snapshot used by `tell()` to
+reconstruct a byte position from a codec state.
+
+## Map
+
+| Region | Lines (approx) | What lives there |
+|--------|---------------|-----------------|
+| Struct + init helpers | 1-350 | `textio` C struct, `textiowrapper_init`, codec lookup |
+| `_textiowrapper_writeflush` | 350-500 | drain `pending_bytes`, call codec encoder |
+| `textiowrapper_write` | 500-700 | accumulate to `pending_bytes`, `write_through` path |
+| `_textiowrapper_read_chunk` | 700-950 | read raw bytes, run incremental decoder |
+| `textiowrapper_readline` | 950-1350 | universal newlines state machine |
+| `textiowrapper_read` | 1350-1550 | bulk read, merge decoded chunks |
+| `textiowrapper_tell` | 1550-1800 | snapshot: bytes-offset + codec state pickle |
+| `textiowrapper_seek` | 1800-2100 | restore snapshot, re-decode lead bytes |
+| Properties | 2100-2400 | `line_buffering`, `write_through`, `encoding`, `errors`, `newlines` |
+| `textiowrapper_iternext` | 2400-2600 | `__next__` delegates to `readline` |
+| Utility / class def | 2600-3500 | `repr`, `closed` check, type slot wiring |
+
+## Reading
+
+### pending_bytes and write_through
+
+<Cpy src="Modules/_io/textio.c" lines="500-700" />
+
+`textiowrapper_write` does not encode immediately. Instead it appends the
+`str` argument to `self->pending_bytes` (a `list` of `str` objects). The list
+is flushed to the underlying buffer only when:
+
+- `self->write_through` is set (forced immediate encode + flush on every write),
+- the accumulated total exceeds `self->chunk_size` (8192 bytes by default), or
+- an explicit `flush()` is called.
+
+The flush path (`_textiowrapper_writeflush`) joins `pending_bytes` into a single
+`str`, calls `self->encoder.encode(s)`, and writes the resulting `bytes` to the
+underlying buffer. Joining first (rather than encoding each fragment) matters
+because some codecs (e.g. UTF-16) produce a BOM only for the first chunk; a
+single `encode` call keeps the BOM logic correct.
+
+`write_through` bypasses the list entirely: the string is encoded immediately
+and the underlying buffer's own `flush` is called. This is the mode used by
+`sys.stdout` in unbuffered mode.
+
+### _read_chunk and the incremental decoder
+
+<Cpy src="Modules/_io/textio.c" lines="700-950" />
+
+`_textiowrapper_read_chunk` reads up to `self->chunk_size` bytes from the raw
+buffer and feeds them to `self->decoder` (an `IncrementalDecoder`). The decoder
+is called as `decoder.decode(b, final=False)`. The decoded `str` is appended to
+`self->decoded_chars` and the raw byte count consumed is stored in
+`self->decoded_chars_used` for accounting by `tell()`.
+
+The snapshot saved before each chunk read is the pair
+`(raw_offset, decoder_state)` where `decoder_state` is the opaque bytes
+returned by `decoder.getstate()`. This snapshot is what `tell()` returns
+(encoded as a single integer via a positional packing scheme described below).
+
+### readline, universal newlines, and tell/seek
+
+<Cpy src="Modules/_io/textio.c" lines="950-1200" />
+
+`textiowrapper_readline` scans `self->decoded_chars` for a newline. When
+`self->readnl` is `None` (universal newlines mode) it accepts `\n`, `\r`, and
+`\r\n`. The `\r` case is tricky: after consuming `\r`, the function must peek
+at the next character to decide whether to absorb a following `\n`. If the
+buffer is exhausted at the `\r`, another `_read_chunk` is issued before
+deciding. The current newline translation is tracked in `self->seennl`
+(a bitmask) which is exposed as the `newlines` property.
+
+`textiowrapper_tell` returns a cookie integer. The cookie encodes three fields
+packed into a 64-bit int: the raw byte offset (lower bits), the number of bytes
+to feed the decoder before the position is valid (`dec_flags`), and the number
+of characters to skip after decoding (`chars_to_skip`). This scheme allows
+`textiowrapper_seek` to reconstruct exact mid-stream positions without storing
+state externally.
+
+`textiowrapper_seek` for a non-zero position calls `raw.seek(start_pos)`,
+feeds `dec_flags` bytes through `decoder.decode` with `final=False` to
+restore codec state, then discards `chars_to_skip` characters from the decoded
+output. Seeking to offset 0 is a fast path that resets the decoder with
+`decoder.reset()`.
+
+The 3.14 change adds a `newline_decoder` fast path for `\n`-only files where
+`\r` translation is entirely skipped, improving `readline` throughput by
+roughly 8% on large log files.
+
+## gopy notes
+
+- `pending_bytes` is modelled as `[]string` in `module/io/textiowrapper.go`.
+  The join-before-encode invariant is preserved by `writeFlush`.
+- The incremental decoder interface maps to `golang.org/x/text/transform.Transformer`.
+  `decoder.getstate()` has no direct Go equivalent; the port saves the transformer's
+  internal byte buffer (`pendingBytes []byte`) as the snapshot state.
+- The tell cookie packing uses `encoding/binary` with a fixed layout struct.
+  The field widths match CPython's constants `COOKIE_BUF_OFFSET_SIZE` etc. so
+  cookies produced by gopy are interchangeable with CPython's for the same file.
+- Universal newlines scanning is a hand-ported loop in `readLine`; the `seennl`
+  bitmask is kept as a `uint8` with the same bit positions as CPython's `SEEN_CR`,
+  `SEEN_LF`, `SEEN_CRLF` constants (`1`, `2`, `4`).
+- `write_through` is a `bool` field; when set, `Write` calls `b.Flush()` on the
+  underlying buffered writer after every encode, matching CPython behaviour.

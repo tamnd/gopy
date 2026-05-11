@@ -1,0 +1,93 @@
+---
+title: "Objects/namespaceobject.c: SimpleNamespace"
+description: "Annotation for the CPython file implementing types.SimpleNamespace, a dict-backed attribute namespace"
+cpython_path: Objects/namespaceobject.c
+cpython_version: "3.14"
+lines: 300
+status: annotated
+ported_to: objects/namespace.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+## Overview
+
+`Objects/namespaceobject.c` is the C backing for `types.SimpleNamespace`. The object is nothing more than a `PyObject` header plus a single `ns_dict` field that stores all attributes. Construction accepts arbitrary keyword arguments, which are inserted directly into `ns_dict`. The implementation is deliberately minimal: there is no `__slots__`, no `__dict__` descriptor dance, and no `tp_members` table. Everything flows through `ns_dict` via the generic `PyObject_GenericGetAttr` / `PyObject_GenericSetAttr` pair that CPython routes through `tp_dictoffset`.
+
+The file also participates in the module `__spec__` protocol: when the import system creates a module loader for a namespace package, it attaches a `SimpleNamespace` as the `__spec__` attribute so that `importlib._bootstrap` can read `origin`, `submodule_search_locations`, and `loader` without requiring a dedicated class.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-30 | struct / layout | `_PyNamespaceObject` definition with single `ns_dict` field |
+| 31-80 | `namespace_new` | Allocates object and creates an empty `dict` for `ns_dict` |
+| 81-120 | `namespace_init` | Iterates keyword args and calls `PyObject_SetAttr` for each |
+| 121-160 | `namespace_repr` | Collects `ns_dict` items, sorts keys, formats as `namespace(k=v, ...)` |
+| 161-200 | `namespace_richcompare` | Delegates to `PyObject_RichCompare` on the two `ns_dict` dicts |
+| 201-230 | `namespace_getstate` / `namespace_setstate` | Pickle support via `ns_dict` copy |
+| 231-270 | `namespace_dealloc` | `Py_CLEAR(ns_dict)` then frees the object |
+| 271-300 | `PyNamespace_Type` | Type object wiring `tp_new`, `tp_init`, `tp_repr`, `tp_richcompare` |
+
+## Reading
+
+### Construction from keyword arguments
+
+`namespace_new` allocates the object and builds an empty dict. `namespace_init` then iterates the `kwds` dict and calls `PyObject_SetAttr` for each pair. This two-step design means subclasses can override `__init__` without touching `__new__`, and it means attribute setting goes through the normal descriptor protocol rather than bypassing it.
+
+```c
+/* Objects/namespaceobject.c:namespace_init (simplified) */
+static int
+namespace_init(PyObject *self, PyObject *args, PyObject *kwds)
+{
+    if (kwds == NULL)
+        return 0;
+    PyObject *key, *value;
+    Py_ssize_t pos = 0;
+    while (PyDict_Next(kwds, &pos, &key, &value)) {
+        if (PyObject_SetAttr(self, key, value) != 0)
+            return -1;
+    }
+    return 0;
+}
+```
+
+### Sorted repr
+
+`namespace_repr` sorts the keys before formatting so that `repr` output is deterministic regardless of dict insertion order. The sorted list is built with `PyDict_Keys` followed by `PyList_Sort`. Each `(key, value)` pair is rendered as `key=repr(value)` and joined with `", "`.
+
+```c
+/* Objects/namespaceobject.c:namespace_repr (simplified) */
+static PyObject *
+namespace_repr(PyObject *ns)
+{
+    PyObject *keys = PyDict_Keys(((PyNamespaceObject *)ns)->ns_dict);
+    PyList_Sort(keys);
+    /* ... format each pair and join ... */
+    return PyUnicode_FromFormat("namespace(%s)", joined);
+}
+```
+
+### Equality via dict comparison
+
+`namespace_richcompare` simply grabs `ns_dict` from both operands and delegates the comparison to `PyObject_RichCompare`. This means two namespaces are equal if and only if their underlying dicts are equal, which matches the documented contract.
+
+```c
+/* Objects/namespaceobject.c:namespace_richcompare (simplified) */
+static PyObject *
+namespace_richcompare(PyObject *self, PyObject *other, int op)
+{
+    if (op != Py_EQ && op != Py_NE)
+        Py_RETURN_NOTIMPLEMENTED;
+    PyObject *d1 = ((PyNamespaceObject *)self)->ns_dict;
+    PyObject *d2 = ((PyNamespaceObject *)other)->ns_dict;
+    return PyObject_RichCompare(d1, d2, op);
+}
+```
+
+## gopy notes
+
+- `objects/namespace.go` ports `PyNamespaceObject` as a struct embedding `Object` with a `dict` field. Construction and keyword-arg init are complete.
+- The sorted-keys `repr` is implemented in Go using `slices.Sort` on a string slice extracted from the dict.
+- Pickle support (`__getstate__` / `__setstate__`) is stubbed but not yet hooked into the `pickle` module port.
+- The `__spec__` protocol usage in `vm/eval_import.go` creates a `SimpleNamespace` for namespace packages; that call path exercises the Go port directly.

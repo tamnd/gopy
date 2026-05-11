@@ -1,0 +1,106 @@
+---
+title: "Objects/moduleobject.c: PyModuleObject layout and multi-phase init"
+description: "Annotation for the CPython file covering module object allocation, md_dict/md_state, PyModule_ExecDef, and 3.14 changes"
+cpython_path: Objects/moduleobject.c
+cpython_version: "3.14"
+lines: 600
+status: annotated
+ported_to: objects/module.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+## Overview
+
+`Objects/moduleobject.c` implements the `PyModuleObject` struct and the full lifecycle of a Python module: allocation, dict initialization, name/filename attributes, multi-phase init via `PyModuleDef_Exec`, and deallocation. The struct carries two key fields: `md_dict` (a plain `dict` holding all module-level names) and `md_state` (an opaque pointer to per-module C extension state, sized by `PyModuleDef.m_size`).
+
+In 3.14 the file gained `_PyModule_SetAttrConstantError` for improved error messages when code tries to overwrite a constant defined in the module's `__dict__`, and the `md_weaklist` slot was removed in favor of the common `tp_weaklistoffset` mechanism.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-60 | struct layout | `PyModuleObject` with `md_dict`, `md_state`, `md_def`, `md_weaklist` |
+| 61-120 | `module_new` / `PyModule_NewObject` | Allocates module, creates `md_dict`, sets `__name__` |
+| 121-170 | `PyModule_New` | Thin wrapper that encodes a `const char *` name to unicode then calls `PyModule_NewObject` |
+| 171-230 | `module_init_dict` | Sets `__name__`, `__doc__`, `__package__`, `__loader__`, `__spec__` to `None` defaults |
+| 231-300 | `PyModule_GetDict` | Returns `md_dict`; aborts if called on a non-module (safety guard) |
+| 301-380 | `PyModule_AddObjectRef` / `PyModule_Add` | Helpers that insert an attribute into `md_dict` with error checking |
+| 381-460 | `PyModule_ExecDef` | Runs all `Py_mod_exec` slots in a `PyModuleDef` for multi-phase init |
+| 461-520 | `module_repr` | Returns `<module 'name' from 'file'>` or `<module 'name' (built-in)>` |
+| 521-560 | `module_getattro` | Custom `__getattr__` hook that raises `ImportError` with the module name included |
+| 561-600 | `PyModule_Type` | Type object; `tp_new`, `tp_init`, `tp_repr`, `tp_getattro`, `tp_dealloc` |
+
+## Reading
+
+### md_dict initialization
+
+`module_init_dict` is called from `PyModule_NewObject` immediately after the dict is created. It pre-populates the standard dunder keys so that code reading `mod.__package__` never sees a `KeyError`, only `None`. The `__spec__` key is set to `None` here and later overwritten by the import machinery with a real `ModuleSpec` object.
+
+```c
+/* Objects/moduleobject.c:module_init_dict (simplified) */
+static int
+module_init_dict(PyModuleObject *mod, PyObject *md_dict,
+                 PyObject *name, PyObject *doc)
+{
+    if (PyDict_SetItemString(md_dict, "__name__",    name)    < 0) return -1;
+    if (PyDict_SetItemString(md_dict, "__doc__",     doc)     < 0) return -1;
+    if (PyDict_SetItemString(md_dict, "__package__", Py_None) < 0) return -1;
+    if (PyDict_SetItemString(md_dict, "__loader__",  Py_None) < 0) return -1;
+    if (PyDict_SetItemString(md_dict, "__spec__",    Py_None) < 0) return -1;
+    return 0;
+}
+```
+
+### Multi-phase init with PyModule_ExecDef
+
+`PyModule_ExecDef` iterates the `m_slots` array of a `PyModuleDef`. Slots with type `Py_mod_exec` are function pointers that receive the partially initialized module and return 0 on success. This allows a C extension to split allocation (handled by `PyModule_Create`) from the execution of top-level code, which is the C equivalent of running a `.py` file body.
+
+```c
+/* Objects/moduleobject.c:PyModule_ExecDef (simplified) */
+int
+PyModule_ExecDef(PyObject *module, PyModuleDef *def)
+{
+    if (def->m_slots == NULL)
+        return 0;
+    for (PyModuleDef_Slot *cur = def->m_slots; cur->slot; cur++) {
+        if (cur->slot == Py_mod_exec) {
+            int (*exec_func)(PyObject *) = cur->value;
+            if (exec_func(module) != 0) {
+                /* ensure an exception is set */
+                return -1;
+            }
+        }
+    }
+    return 0;
+}
+```
+
+### Custom __getattr__ for missing attributes
+
+`module_getattro` first tries the standard `PyObject_GenericGetAttr`. On failure it looks for a `__getattr__` key in `md_dict` and calls it, which lets modules define dynamic attribute dispatch. If that also fails, the error message is augmented with the module name to produce messages like `module 'os' has no attribute 'fork'` instead of a bare `AttributeError`.
+
+```c
+/* Objects/moduleobject.c:module_getattro (simplified) */
+static PyObject *
+module_getattro(PyObject *m, PyObject *name)
+{
+    PyObject *attr = PyObject_GenericGetAttr(m, name);
+    if (attr != NULL)
+        return attr;
+    /* try __getattr__ hook, then enrich error message */
+    PyObject *getattr = PyDict_GetItemWithError(md_dict, &_Py_ID(__getattr__));
+    if (getattr)
+        return PyObject_CallOneArg(getattr, name);
+    /* enrich AttributeError with module name */
+    ...
+}
+```
+
+## gopy notes
+
+- `objects/module.go` implements `Module` as a Go struct with a `dict` field (the `md_dict` equivalent) and a `def` pointer for built-in modules.
+- `md_state` has no direct Go equivalent yet. Built-in module state is instead stored as Go struct fields on each module implementation under `module/xxx/`.
+- Multi-phase init (`PyModule_ExecDef`) is not yet wired; the current loader in `vm/eval_import.go` calls the module's `init` function directly and expects a fully initialized object back.
+- `module_getattro` with the `__getattr__` hook is partially ported: the enriched error message path is done, but the dynamic `__getattr__` delegation is pending.
+- The 3.14 `_PyModule_SetAttrConstantError` helper has no gopy analog; constant protection is not yet enforced.

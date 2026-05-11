@@ -1,0 +1,98 @@
+---
+title: "FileIO detail"
+description: "Annotation of fileio_init open() with O_CLOEXEC, read/readall/readinto/write, seekable/readable/writable, fileno delegation in Modules/_io/fileio.c"
+cpython_path: Modules/_io/fileio.c
+cpython_version: "3.14"
+lines: 1000
+status: annotated
+ported_to: module/io
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+## Overview
+
+`fileio.c` wraps the OS file descriptor. It is the lowest layer in the `io`
+stack and the only layer that issues real `read(2)` / `write(2)` / `lseek(2)`
+syscalls. Everything above (`BufferedReader`, `TextIOWrapper`) builds on top of
+the `RawIOBase` interface that `FileIO` implements.
+
+The C struct is small: an `int fd`, three mode flags (`readable`, `writable`,
+`appending`), a `closefd` bool, and a weakref list. There is no userspace buffer.
+
+## Map
+
+| Region | Lines (approx) | What lives there |
+|--------|---------------|-----------------|
+| Struct + helpers | 1-100 | `fileio` C struct, `_Py_BEGIN_SUPPRESS_IPH` macros |
+| `fileio_init` | 100-380 | path decode, `open(2)` with `O_CLOEXEC`, mode parsing |
+| `fileio_read` | 380-470 | `Py_BEGIN_ALLOW_THREADS` + `read(2)` |
+| `fileio_readall` | 470-600 | growing buffer loop, `fstat` hint |
+| `fileio_readinto` | 600-670 | write-buffer protocol, single `read(2)` |
+| `fileio_write` | 670-730 | single `write(2)`, handle `EINTR` |
+| `fileio_seek` / `tell` | 730-800 | `lseek(2)` wrappers |
+| Properties | 800-900 | `readable`, `writable`, `seekable`, `fileno`, `name`, `mode` |
+| Close / finalizer | 900-1000 | `fileio_close`, `fileio_finalize`, fd safety |
+
+## Reading
+
+### fileio_init and O_CLOEXEC
+
+<Cpy src="Modules/_io/fileio.c" lines="100-280" />
+
+`fileio_init` accepts either a string path or an integer fd. For the path case it
+decodes to `wchar_t` on Windows and stays as UTF-8 bytes on POSIX. The flags
+passed to `open(2)` are built from the mode string: `"r"` gives `O_RDONLY`,
+`"w"` gives `O_WRONLY|O_CREAT|O_TRUNC`, `"a"` gives `O_WRONLY|O_CREAT|O_APPEND`,
+and `"+"` adds `O_RDWR`. `O_CLOEXEC` is OR-ed in unconditionally on platforms
+that define it (all modern POSIX targets), so the fd is not inherited across
+`exec(2)` by default. The 3.14 change adds `O_CLOEXEC` on FreeBSD 13+ where
+it was previously skipped due to an old kernel bug check.
+
+After `open(2)` returns, the code checks `S_ISDIR(st.st_mode)` and raises
+`IsADirectoryError` before Python ever sees the fd.
+
+### fileio_readall and the growing buffer
+
+<Cpy src="Modules/_io/fileio.c" lines="470-600" />
+
+`fileio_readall` is used by `read(-1)` (read to EOF). It calls `fstat` to get an
+initial size hint, allocates a `bytes` object of that size, then loops calling
+`read(2)` and growing the buffer with `_PyBytes_Resize` on each partial fill.
+The loop exits when `read(2)` returns 0 (EOF) or raises an exception.
+
+`Py_BEGIN_ALLOW_THREADS` / `Py_END_ALLOW_THREADS` brackets each `read(2)` call
+so other Python threads can run while waiting on I/O. The `EINTR` case is handled
+by `_Py_READ_RETRY_ON_EINTR` which retries the syscall automatically.
+
+The 3.14 change here replaces the `_PyBytes_Resize` call with
+`PyBytes_FromStringAndSize` on the final slice when the `fstat` hint was an
+overestimate, avoiding an extra copy in the common case.
+
+### seekable, readable, writable properties and fileno
+
+<Cpy src="Modules/_io/fileio.c" lines="800-900" />
+
+`fileio_seekable` calls `lseek(fd, 0, SEEK_CUR)` and returns `True` if it does
+not raise. The result is cached in `self->seekable` (`-1` = unknown, `0` = no,
+`1` = yes) so the check is free after the first call. Pipes and sockets return
+`False` here.
+
+`fileio_readable` and `fileio_writable` just return the stored `self->readable`
+and `self->writable` booleans set during `fileio_init`. There is no syscall.
+
+`fileio_fileno` returns `self->fd` as a Python `int`. When `closefd=False` was
+passed to the constructor the fd is still returned, but `fileio_close` skips
+the `close(2)` syscall.
+
+## gopy notes
+
+- The Go port in `module/io/fileio.go` wraps `os.File` rather than a raw fd.
+  `os.File` sets `O_CLOEXEC` on all POSIX platforms via `syscall.Open` flags,
+  matching CPython 3.14 behaviour.
+- `fileio_readall` maps to `FileIO.readAll` which calls `io.ReadAll` on the
+  underlying `os.File`. The `fstat` hint optimisation is skipped; Go's
+  `bytes.Buffer` provides equivalent growth behaviour.
+- The `seekable` cache (`-1/0/1` sentinel) is replicated as an `int8` field.
+- `IsADirectoryError` is raised by checking `os.ModeDir` on the `os.FileInfo`
+  returned by `os.Stat` before opening, matching CPython semantics.

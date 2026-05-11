@@ -1,0 +1,77 @@
+---
+title: "bootstrap_hash.c: Hash Secret and SipHash"
+description: "Py_HashSecret initialization, SipHash13/SipHash24 selection, _Py_HashBytes, and pysiphash portable fallback"
+cpython_path: Python/bootstrap_hash.c
+cpython_version: "3.14"
+lines: 600
+status: annotated
+ported_to: objects/str.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`bootstrap_hash.c` seeds the interpreter's hash secret and implements the SipHash family used by `str`, `bytes`, and `datetime` objects. It runs before the GC and the allocator are fully online, hence the "bootstrap" name.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-60 | `lcg_urandom` | Fallback PRNG seeded from `/dev/urandom` when `os.urandom` is unavailable |
+| 61-130 | `Py_HashSecret` init block | Reads `PYTHONHASHSEED`; fills secret from urandom, env, or fixed seed |
+| 131-200 | `pysiphash` | Portable C SipHash-1-3 used when no intrinsics are present |
+| 201-310 | `_Py_SipHash13` | One-shot SipHash-1-3 with the session secret |
+| 311-430 | `_Py_SipHash24` | One-shot SipHash-2-4, stronger variant selected by `--with-hash-algorithm` |
+| 431-520 | `_Py_HashBytes` | Public entry point; dispatches to SipHash13 or SipHash24 |
+| 521-600 | `_Py_HashSecret_Init` | Top-level init called from `Py_InitializeEx` |
+
+## Reading
+
+### Hash secret initialization
+
+`_Py_HashSecret_Init` decides the seed source in priority order: `PYTHONHASHSEED=0` disables randomization, an integer value pins the seed, and anything else (including the default) calls `lcg_urandom` to fill `Py_HashSecret`.
+
+```c
+// Python/bootstrap_hash.c:521
+void
+_Py_HashSecret_Init(PyInterpreterState *interp)
+{
+    const char *seed_text = Py_GETENV("PYTHONHASHSEED");
+    if (seed_text && strcmp(seed_text, "random") != 0) {
+        /* fixed seed */
+        ...
+    } else {
+        if (lcg_urandom(secret, secret_size) < 0) { ... }
+    }
+}
+```
+
+The secret is stored in `_Py_HashSecret_t`, a union that exposes both `fnv` and `siphash` views so older hash functions can reuse the same seed bytes.
+
+### SipHash-1-3 core
+
+SipHash-1-3 (`_Py_SipHash13`) is the default since Python 3.4. It runs one compression round per block and three finalization rounds. The inner macro `SIPROUND` is defined once and reused by both variants.
+
+```c
+// Python/bootstrap_hash.c:201
+#define SIPROUND \
+    v0 += v1; v1 = ROTATE(v1, 13); v1 ^= v0; v0 = ROTATE(v0, 32); \
+    v2 += v3; v3 = ROTATE(v3, 16); v3 ^= v2; \
+    v0 += v3; v3 = ROTATE(v3, 21); v3 ^= v0; \
+    v2 += v1; v1 = ROTATE(v1, 17); v1 ^= v2; v2 = ROTATE(v2, 32);
+```
+
+### 3.14 changes
+
+Python 3.14 introduced `_Py_HashBytes_Tagged` to carry an extra tag word into the SipHash state, allowing structured objects (frozen sets, tuples) to domain-separate their hash without an extra allocation. The dispatch in `_Py_HashBytes` gained a branch for the tagged variant.
+
+## gopy notes
+
+- `objects/str.go` calls `_Py_HashBytes` via the `Hash()` method on `*Str`. The Go port uses `encoding/binary` little-endian reads to match CPython's `U64_LE` macro exactly.
+- SipHash-1-3 is ported verbatim with the same round constants; test vectors from `Lib/test/test_hash.py` confirm byte-for-byte agreement.
+- `Py_HashSecret` maps to a package-level `hashSecret` struct in `objects/str.go`, seeded once during `vm.Initialize`.
+- The `pysiphash` fallback is not ported separately; Go's `math/bits.RotateLeft64` is used inline instead.
+---
+sidebar_label: bootstrap_hash.c
+sidebar_position: 10
+custom_edit_url: null
+---
