@@ -1,0 +1,190 @@
+---
+title: Objects/genobject.c
+description: "Annotation: CPython generator, coroutine, and async generator objects"
+cpython_path: Objects/genobject.c
+cpython_version: "3.14"
+lines: 820
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Objects/genobject.c" />
+
+All three suspendable-function types share a common C layout and a single
+frame-resume core. `PyGenObject` is the base. `PyCoroObject` and
+`PyAsyncGenObject` are struct-compatible prefixes that add type-specific
+fields. The distinction between types is established at creation time from code
+flags (`CO_COROUTINE`, `CO_ASYNC_GENERATOR`). Suspension and resumption both
+pass through `gen_send_ex2`, which is the single function that moves a frame
+from a paused state to the next `YIELD_VALUE` or to return/raise.
+
+## Map
+
+| Lines | Symbol | Notes |
+|-------|--------|-------|
+| 1-55 | `PyGenObject` struct | `gi_frame_state`, `gi_code`, `gi_weakreflist`, `gi_name`, `gi_qualname` |
+| 56-90 | `gen_traverse` / `gen_dealloc` | GC traversal, frame cleanup on dealloc |
+| 91-150 | `gen_send_ex2` | core resume: restores frame, runs eval loop, handles suspension |
+| 151-200 | `gen_send` / `gen_iternext` | thin wrappers over `gen_send_ex2` |
+| 201-270 | `_gen_throw` | `GeneratorExit` / `throw()` path, re-raises inside suspended frame |
+| 271-310 | `gen_close` | sends `GeneratorExit`, suppresses `StopIteration` |
+| 311-360 | `gen_repr` | `<generator object name at 0x...>` |
+| 361-420 | `PyGen_NewWithQualName` | allocates gen, transfers frame ownership |
+| 421-480 | `PyCoro_New` / `PyCoroObject` | coroutine-specific type, `CO_COROUTINE` check |
+| 481-560 | coroutine `am_await` / `cr_origin` | `__await__` returns self, origin tracking |
+| 561-650 | `PyAsyncGen_New` / `PyAsyncGenObject` | async generator layout, `aclose`/`athrow` helpers |
+| 651-750 | `PyAsyncGenASend` / `PyAsyncGenAThrow` | `am_send` protocol, `asend()`/`athrow()` objects |
+| 751-820 | type objects | `PyGen_Type`, `PyCoro_Type`, `PyAsyncGen_Type` |
+
+## Reading
+
+### PyGenObject layout
+
+The struct fields that matter most at runtime are `gi_frame_state` (an integer
+encoding whether the frame is created, suspended, running, or closed) and the
+embedded `_PyInterpreterFrame`, which holds all fast locals, the value stack,
+and the instruction pointer. `gi_code` is a borrowed reference to the code
+object kept alive by the frame. `gi_weakreflist` supports `weakref.ref` to
+generators without adding overhead to the common case.
+
+```c
+// CPython: Objects/genobject.c:27 PyGenObject
+typedef struct {
+    PyObject_HEAD
+    /* The gi_ prefix is used for generators, cr_ for coroutines,
+       ag_ for async generators. */
+    PyObject *gi_weakreflist;
+    PyObject *gi_name;
+    PyObject *gi_qualname;
+    _PyErr_StackItem gi_exc_state;
+    PyObject *gi_origin_or_finalizer;
+    char gi_hooks_inited;
+    char gi_closed;
+    char gi_running_async;
+    int8_t gi_frame_state;
+    PyObject *gi_code;
+    _PyInterpreterFrame gi_iframe;
+} PyGenObject;
+```
+
+### gen_send_ex2 — frame resume and suspend
+
+This function is the heart of the generator machinery. It validates that the
+generator is not already running and not closed, installs the thread-state's
+exception context, then re-enters the eval loop. When `YIELD_VALUE` is
+executed, the eval loop returns with `FRAME_SUSPENDED` written to
+`gi_frame_state`. `gen_send_ex2` then pops the result off the frame stack and
+returns it to the caller. On `RETURN_VALUE` or an unhandled exception, the
+frame is finalized and `gi_frame_state` is set to `FRAME_COMPLETED`.
+
+```c
+// CPython: Objects/genobject.c:103 gen_send_ex2
+static PyObject *
+gen_send_ex2(PyGenObject *gen, PyObject *arg, int exc, int closing)
+{
+    PyThreadState *tstate = _PyThreadState_GET();
+    _PyInterpreterFrame *frame = (_PyInterpreterFrame *)gen->gi_iframe;
+
+    if (gen->gi_frame_state == FRAME_CREATED && arg && arg != Py_None) {
+        /* Sent value into just-started generator that is not None. */
+        const char *msg = "can't send non-None value to a just-started generator";
+        if (PyCoro_CheckExact(gen))
+            msg = "can't send a value to a just-started coroutine";
+        PyErr_SetString(PyExc_TypeError, msg);
+        return NULL;
+    }
+    /* ... frame reinstallation and eval loop entry ... */
+}
+```
+
+### GeneratorExit throw path
+
+`gen_close` constructs a `GeneratorExit` instance and routes it through
+`_gen_throw`. Inside `_gen_throw`, the exception is injected into the
+suspended frame by storing it in the thread state and then re-entering the
+eval loop. If the generator catches `GeneratorExit` and yields, that is an
+error (`RuntimeError: generator ignored GeneratorExit`). If the generator
+raises `StopIteration` or `GeneratorExit` itself, `gen_close` suppresses the
+exception and returns `None`. Any other exception propagates to the caller.
+
+```c
+// CPython: Objects/genobject.c:231 _gen_throw
+static PyObject *
+_gen_throw(PyGenObject *gen, int close_on_genexit,
+           PyObject *typ, PyObject *val, PyObject *tb)
+{
+    /* ... normalize exception, check for GeneratorExit ... */
+    if (PyErr_GivenExceptionMatches(typ, PyExc_GeneratorExit)) {
+        gen->gi_closed = 1;
+    }
+    return gen_send_ex2(gen, val, 1, close_on_genexit);
+}
+```
+
+### Coroutine vs generator — CO_COROUTINE flag
+
+`PyCoro_New` is structurally identical to `PyGen_NewWithQualName` except it
+asserts `CO_COROUTINE` in the code flags and uses `PyCoro_Type`. The runtime
+distinction matters in two places: `SEND` / `YIELD_FROM` reject a coroutine as
+a sub-iterator unless it is being awaited, and `gen_send_ex2` uses a different
+error message for "can't send into just-started coroutine." The `am_await`
+slot on `PyCoro_Type` returns `self`, making a coroutine its own awaitable.
+
+```c
+// CPython: Objects/genobject.c:434 PyCoro_New
+PyObject *
+PyCoro_New(PyFrameObject *f, PyObject *name, PyObject *qualname)
+{
+    PyObject *coro = gen_new_with_qualname(&PyCoro_Type, f, name, qualname);
+    return coro;
+}
+```
+
+### Async generator am_send protocol
+
+`PyAsyncGenObject` adds `ag_running_async` and an optional finalizer hook. The
+`asend()` method returns a `PyAsyncGenASend` object, which implements
+`am_send` rather than `tp_iternext`. `am_send` takes an input value and an
+output `*PyObject` and returns one of `PYGEN_NEXT`, `PYGEN_RETURN`, or
+`PYGEN_ERROR`. This three-way return is needed because async generators produce
+values through `YIELD_VALUE` but also need to signal completion without raising
+`StopIteration` (which would be swallowed by `async for`). `aclose()` produces
+a `PyAsyncGenAThrow` that injects `GeneratorExit` and handles the
+`StopAsyncIteration` bookkeeping.
+
+```c
+// CPython: Objects/genobject.c:672 async_gen_asend_send
+static PySendResult
+async_gen_asend_send(PyAsyncGenASend *o, PyObject *arg, PyObject **result)
+{
+    PyObject *value;
+    if (o->ags_state == AWAITABLE_STATE_CLOSED) {
+        PyErr_SetNone(PyExc_StopIteration);
+        *result = NULL;
+        return PYGEN_ERROR;
+    }
+    /* delegate to gen_send_ex2 through the shared gen machinery */
+    PySendResult res = gen_send_ex2((PyGenObject *)o->ags_gen, arg, 0, 0);
+    /* ... handle ASYNC_GEN_ATHROW wrapping ... */
+    return res;
+}
+```
+
+## gopy notes
+
+Status: not yet ported.
+
+Planned package paths within the `objects` package:
+
+- `objects/gen.go` — `PyGenObject` layout, `gen_send_ex2` port, `PyGen_Type`
+- `objects/coro.go` — `PyCoroObject`, `PyCoro_Type`, `am_await` returning self
+- `objects/asyncgen.go` — `PyAsyncGenObject`, `PyAsyncGenASend`, `PyAsyncGenAThrow`, `am_send` protocol
+
+The `gen_send_ex2` port is a blocking dependency for any test that exercises
+`yield`, `yield from`, `await`, or `async for`. The frame-state integer
+(`FRAME_CREATED`, `FRAME_SUSPENDED`, `FRAME_COMPLETED`) maps to a Go `int8`
+field on the generator struct and must use the same sentinel values as the
+corresponding constants in `compile/flowgraph.go`. The `GeneratorExit` throw
+path in `_gen_throw` must be ported before `try/finally` inside generators can
+be tested reliably.

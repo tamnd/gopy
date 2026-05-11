@@ -1,0 +1,102 @@
+---
+title: "Lib/typing.py (generics and special forms)"
+description: "Annotation of CPython's typing module: generics, special forms, TypeVar, and runtime helpers"
+cpython_path: Lib/typing.py
+cpython_version: "3.14"
+lines: 3700
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/typing.py" />
+
+## Map
+
+| Lines | Symbol | Purpose |
+|-------|--------|---------|
+| 1–120 | module header, `__all__` | Imports, version guard, `_SpecialGenericAlias` sentinel |
+| 121–350 | `_SpecialForm` | Descriptor-based special form: `Optional`, `Union`, `Literal`, `Final`, etc. |
+| 351–520 | `Union` special form | `__getitem__` flattening and deduplication of union members |
+| 521–640 | `Literal` | Flattening nested `Literal` and hashability enforcement |
+| 641–800 | `TypeVar` | `__init__`, constraint and bound validation, `__typing_subst__` |
+| 801–920 | `ParamSpec`, `TypeVarTuple` | PEP 612/646 parameter types |
+| 921–1100 | `Generic` | `__init_subclass__`, `__class_getitem__`, `_GenericAlias` creation |
+| 1101–1350 | `_GenericAlias` | Subscripted alias: `__getitem__`, `__origin__`, `__args__`, `copy_with` |
+| 1351–1500 | `_SpecialGenericAlias` | Pre-constructed aliases for `List`, `Dict`, `Tuple`, etc. |
+| 1501–1700 | `Protocol` | `__init_subclass__`, `runtime_checkable`, `__instancecheck__` |
+| 1701–1900 | `get_type_hints()` | Resolve string annotations via `eval` in the correct namespace |
+| 1901–2100 | `overload`, `get_overloads()` | Registry keyed by `(qualname, module)`, decorator and retrieval |
+| 2101–2400 | `cast`, `assert_type`, `reveal_type` | No-op runtime helpers with type-checker semantics |
+| 2401–3700 | `TypedDict`, `NamedTuple`, `dataclass_transform`, `@override` | Structured types, PEP 681/698 decorators |
+
+## Reading
+
+### `_SpecialForm` and subscript dispatch for `Optional`, `Union`, and `Literal`
+
+`_SpecialForm` is a descriptor class. Each special form is created by decorating a function with `@_SpecialForm`, which stores the function as the `_getitem` callable. When user code writes `Optional[int]`, Python calls `_SpecialForm.__getitem__`, which delegates to that stored callable.
+
+```python
+# CPython: Lib/typing.py:395 _SpecialForm.__getitem__
+def __getitem__(self, parameters):
+    item = _type_check(parameters, f'{self._name} accepts only single type.')
+    return _GenericAlias(self, (item,))
+```
+
+`Union.__getitem__` is more elaborate. It flattens nested `Union` types, deduplicates members while preserving left-to-right order, and collapses a single-member union back to that member directly. The deduplication uses a dict keyed on the hash of each argument, which means unhashable types raise `TypeError` at subscription time rather than at runtime.
+
+`Literal` applies similar flattening: `Literal[Literal[1, 2], 3]` becomes `Literal[1, 2, 3]`. Each value is also validated for hashability and for being a legal literal type (int, str, bytes, bool, enum members, or `None`).
+
+### `Generic.__init_subclass__`, `__class_getitem__`, and `TypeVar`
+
+`Generic` is the base class that enables parameterisation. `__init_subclass__` collects `TypeVar` objects from the `__orig_bases__` of the new subclass and stores them as `__type_params__`. This happens at class-definition time.
+
+`Generic.__class_getitem__` returns a `_GenericAlias`. When the alias is itself subscripted (e.g. `MyClass[int]`), `_GenericAlias.__getitem__` substitutes concrete types for `TypeVar` slots via `TypeVar.__typing_subst__`.
+
+```python
+# CPython: Lib/typing.py:987 Generic.__class_getitem__
+def __class_getitem__(cls, params):
+    if not isinstance(params, tuple):
+        params = (params,)
+    ...
+    return _GenericAlias(cls, params)
+```
+
+`TypeVar.__init__` validates that `constraints` and `bound` are not used together, that at least two constraints are supplied when any are given, and that each constraint is a valid type. The `covariant` and `contravariant` flags are mutually exclusive.
+
+```python
+# CPython: Lib/typing.py:808 TypeVar.__init__
+def __init__(self, name, *constraints, bound=None,
+             covariant=False, contravariant=False, infer_variance=False):
+    ...
+    if constraints and bound is not None:
+        raise TypeError('Constraints cannot be combined with bound=...')
+    if len(constraints) == 1:
+        raise TypeError('A single constraint is not allowed')
+```
+
+### `get_type_hints()` and the `overload` registry
+
+`get_type_hints()` resolves `__annotations__` for a class or function, converting string annotations to type objects. It calls `eval()` using the module's global namespace merged with any provided `localns`. For classes it walks the MRO and merges annotations from each base in reverse order, so derived class annotations shadow base ones.
+
+```python
+# CPython: Lib/typing.py:1879 get_type_hints
+def get_type_hints(obj, globalns=None, localns=None, include_extras=False):
+    ...
+    hints = {}
+    for name, value in obj.__annotations__.items():
+        if isinstance(value, str):
+            value = ForwardRef(value)
+        hints[name] = _eval_type(value, globalns, localns)
+    return hints
+```
+
+The `overload` decorator does not wrap the function at all. Instead it registers the function in a module-level dict keyed on `(function.__qualname__, function.__module__)`. `get_overloads()` looks up that dict and returns the list in registration order. The last definition of an overloaded function (the actual implementation) is the one that replaces the registry entry; it is not itself stored in the overload list.
+
+## gopy notes
+
+Status: not yet ported.
+
+Planned package path: `module/typing/`.
+
+The `_SpecialForm` descriptor and `_GenericAlias` subscription machinery must be ported before `module/dataclasses/` can support `ClassVar` and `InitVar`. `get_type_hints()` requires a working `eval` path through the gopy compiler, which means it depends on `pythonrun.RunString`. The `overload` registry is a pure data structure and can be ported early without other dependencies. `TypeVar`, `ParamSpec`, and `TypeVarTuple` map naturally to Go structs and can be added incrementally.

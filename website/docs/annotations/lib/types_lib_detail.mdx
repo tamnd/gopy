@@ -1,0 +1,99 @@
+---
+title: Lib/types.py
+description: "Annotation of CPython's types module: built-in type re-exports and utility descriptors"
+cpython_path: Lib/types.py
+cpython_version: "3.14"
+lines: 320
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/types.py" />
+
+## Map
+
+| Lines | Symbol | Purpose |
+|-------|--------|---------|
+| 1–30 | module header | Imports; retrieves built-in types by introspecting known objects |
+| 31–60 | generator / coroutine / async-generator type aliases | `GeneratorType`, `CoroutineType`, `AsyncGeneratorType` |
+| 61–80 | `FunctionType`, `LambdaType`, `CodeType`, `MappingProxyType` | Re-exports from C layer or from `_collections_abc` |
+| 81–120 | `ModuleType` with `__spec__` | Thin wrapper that sets `__spec__` on newly constructed modules |
+| 121–160 | `SimpleNamespace` | Pure-Python class for `__dict__`-backed attribute storage |
+| 161–200 | `DynamicClassAttribute` | Descriptor routing attribute access to `__getattr__` on the type |
+| 201–240 | `GenericAlias` re-export | Imported from `builtins` as `types.GenericAlias` |
+| 241–270 | `UnionType` re-export | Imported from `_types` C extension as `types.UnionType` |
+| 271–320 | `NoneType`, `NotImplementedType`, `EllipsisType`, `CapsuleType` | Singleton type objects via `type(None)` etc. |
+
+## Reading
+
+### `SimpleNamespace` and `MappingProxyType`
+
+`SimpleNamespace` is defined in pure Python in this file. Its `__init__` accepts only keyword arguments and stores them directly into `self.__dict__`. `__repr__` renders the dict contents in sorted key order for stable output. `__eq__` compares `__dict__` pairs directly.
+
+```python
+# CPython: Lib/types.py:182 SimpleNamespace.__init__
+class SimpleNamespace:
+    def __init__(self, /, **kwargs):
+        self.__dict__.update(kwargs)
+
+    def __repr__(self):
+        items = (f'{k}={v!r}' for k, v in sorted(self.__dict__.items()))
+        return f'{type(self).__name__}({", ".join(items)})'
+
+    def __eq__(self, other):
+        if isinstance(self, SimpleNamespace) and isinstance(other, SimpleNamespace):
+            return self.__dict__ == other.__dict__
+        return NotImplemented
+```
+
+`MappingProxyType` is not implemented here. The file simply re-exports the C-level `mappingproxy` type from `_collections_abc` (or directly from `builtins` depending on the build). The re-export gives it a stable public name in `types`.
+
+### Generator, coroutine, and async-generator type objects
+
+CPython obtains these type objects by constructing minimal objects and calling `type()` on them, rather than referencing any C symbol directly. The pattern is the same for all three.
+
+```python
+# CPython: Lib/types.py:36 generator/coroutine type discovery
+def _f(): yield
+GeneratorType = type(_f())
+
+async def _c(): pass
+CoroutineType = type(_c())
+_c().close()  # suppress "coroutine was never awaited" warning
+
+async def _ag(): yield
+AsyncGeneratorType = type(_ag())
+```
+
+This approach means the file has no dependency on any private C API symbol: the correct type object is always retrieved from the interpreter that is actually running the code. The `_c().close()` call is necessary to silence the runtime warning that fires when a coroutine object is garbage-collected without being awaited.
+
+`ModuleType` is also obtained from the C layer. The file extends it only to ensure that `__spec__` is set to `None` when a module is constructed without a loader spec, matching the contract described in `importlib`.
+
+### `DynamicClassAttribute` descriptor
+
+`DynamicClassAttribute` is used internally by `enum.Enum` to allow an attribute to behave differently when accessed on the class versus on an instance. On an instance it calls the getter as a normal property. On the class it raises `AttributeError`, which triggers the metaclass `__getattr__` instead.
+
+```python
+# CPython: Lib/types.py:232 DynamicClassAttribute.__get__
+class DynamicClassAttribute:
+    def __get__(self, instance, ownerclass=None):
+        if instance is None:
+            if self.__doc__:
+                # called on the class, let __getattr__ handle it
+                raise AttributeError()
+            return self
+        if self.fget is None:
+            raise AttributeError()
+        return self.fget(instance)
+```
+
+The practical effect is that `MyEnum.some_attribute` can return an enum-level value (via the metaclass) while `MyEnum.member.some_attribute` returns the instance-level value via the getter. `GenericAlias` and `UnionType` are straightforward re-exports from lower-level modules and carry no Python-level logic in this file.
+
+## gopy notes
+
+Status: partially ported.
+
+Planned package path: `module/types/`.
+
+`SimpleNamespace` maps directly to a gopy object with a `Dict`-backed attribute store; the implementation lives in `objects/namespace.go`. `MappingProxyType` has a stub in `objects/mapping_proxy.go` (untracked file visible in the current working tree). `GeneratorType`, `CoroutineType`, and `AsyncGeneratorType` are already present as gopy type objects and need only to be wired into the `module/types/` export table. `DynamicClassAttribute` requires the descriptor protocol (implemented in `objects/descr.go`) and can be ported once that stabilises. `GenericAlias` and `UnionType` stubs exist in `objects/generic_alias.go` and `objects/union_type.go` respectively, also currently untracked.

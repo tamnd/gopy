@@ -1,0 +1,159 @@
+---
+title: Objects/iterobject.c
+description: "Annotation: CPython sequence and callable iterators"
+cpython_path: Objects/iterobject.c
+cpython_version: "3.14"
+lines: 220
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Objects/iterobject.c" />
+
+This file implements the two built-in iterator types that back the majority of
+Python `for` loops. `PySeqIter_Type` is created by `iter(obj)` when the object
+supports `__getitem__` but not `__iter__`. `PyCallIter_Type` is created by
+`iter(callable, sentinel)` and drives polling loops such as reading a file in
+fixed-size chunks. Both expose only a `tp_iternext` slot; the `for` loop
+bytecode (`FOR_ITER`) calls that slot directly without going through
+`__next__`.
+
+## Map
+
+| Lines | Symbol | Notes |
+|-------|--------|-------|
+| 1-25 | `seqiterobject` struct | `it_seq` (borrowed ref to sequence), `it_index` counter |
+| 26-55 | `PySeqIter_New` | allocates, stores sequence ref |
+| 56-100 | `seqiter_next` | calls `PyObject_GetItem`, handles `IndexError` exhaustion |
+| 101-120 | `seqiter_len` | `__length_hint__` support via `sq_length` |
+| 121-145 | `PySeqIter_Type` | type object, includes `tp_as_sequence` |
+| 146-165 | `calliterobject` struct | `it_callable`, `it_sentinel` |
+| 166-190 | `PyCallIter_New` | allocates, stores callable and sentinel |
+| 191-215 | `calliter_next` | calls callable, compares result to sentinel with `PyObject_RichCompareBool` |
+| 216-220 | `PyCallIter_Type` | type object |
+
+## Reading
+
+### seqiterobject layout and PySeqIter_New
+
+The struct holds two fields beyond the header. `it_seq` keeps a strong
+reference to the underlying sequence and is set to `NULL` when the iterator is
+exhausted. `it_index` starts at zero and increments on each successful
+`tp_iternext` call.
+
+```c
+// CPython: Objects/iterobject.c:14 seqiterobject
+typedef struct {
+    PyObject_HEAD
+    Py_ssize_t it_index;
+    PyObject *it_seq; /* Set to NULL when iterator is exhausted */
+} seqiterobject;
+```
+
+`PySeqIter_New` performs no type check on its argument. Any object is
+acceptable; the sequence protocol is enforced lazily inside `seqiter_next`.
+
+```c
+// CPython: Objects/iterobject.c:34 PySeqIter_New
+PyObject *
+PySeqIter_New(PyObject *seq)
+{
+    seqiterobject *it = PyObject_GC_New(seqiterobject, &PySeqIter_Type);
+    if (it == NULL)
+        return NULL;
+    it->it_index = 0;
+    it->it_seq = Py_NewRef(seq);
+    _PyObject_GC_TRACK(it);
+    return (PyObject *)it;
+}
+```
+
+### seqiter_next and IndexError-based exhaustion
+
+The exhaustion protocol for sequence iterators relies on `IndexError` (or
+`StopIteration`). When `PyObject_GetItem` raises either of those, the iterator
+clears its `it_seq` reference and signals exhaustion by returning `NULL`
+without an active exception. Any other exception propagates normally.
+
+```c
+// CPython: Objects/iterobject.c:63 seqiter_next
+static PyObject *
+seqiter_next(seqiterobject *it)
+{
+    PyObject *seq = it->it_seq;
+    if (seq == NULL)
+        return NULL;
+
+    PyObject *result = PySequence_GetItem(seq, it->it_index);
+    if (result != NULL) {
+        ++it->it_index;
+        return result;
+    }
+    if (PyErr_ExceptionMatches(PyExc_IndexError) ||
+        PyErr_ExceptionMatches(PyExc_StopIteration))
+    {
+        PyErr_Clear();
+        it->it_seq = NULL;
+        Py_DECREF(seq);
+    }
+    return NULL;
+}
+```
+
+### calliterobject and sentinel comparison
+
+`PyCallIter_New` requires both a callable and a sentinel object. On each
+`tp_iternext` invocation, the iterator calls `it_callable` with no arguments
+and compares the result to `it_sentinel` using `==` (i.e.,
+`PyObject_RichCompareBool` with `Py_EQ`). When they are equal the iterator
+exhausts itself by releasing both references and returning `NULL`.
+
+```c
+// CPython: Objects/iterobject.c:199 calliter_next
+static PyObject *
+calliter_next(calliterobject *it)
+{
+    if (it->it_callable == NULL)
+        return NULL;
+
+    PyObject *result = _PyObject_CallNoArgs(it->it_callable);
+    if (result == NULL) {
+        if (PyErr_ExceptionMatches(PyExc_StopIteration))
+            PyErr_Clear();
+        return NULL;
+    }
+    int ok = PyObject_RichCompareBool(it->it_sentinel, result, Py_EQ);
+    if (ok == 0)
+        return result;   /* not sentinel, keep going */
+    Py_DECREF(result);
+    if (ok > 0) {
+        Py_CLEAR(it->it_callable);
+        Py_CLEAR(it->it_sentinel);
+    }
+    return NULL;
+}
+```
+
+### How for-loops use tp_iternext
+
+The `FOR_ITER` opcode does not call `__next__` through the attribute lookup
+path. It reads `Py_TYPE(iter)->tp_iternext` directly and invokes the function
+pointer. A `NULL` return with no active exception means the iterator is done
+and the loop exits. A `NULL` return with an active exception (including
+`StopIteration`) propagates upward. This means `tp_iternext` implementations
+must follow a strict discipline: clear the exception before returning `NULL` on
+normal exhaustion, as `seqiter_next` and `calliter_next` both do above.
+
+## gopy notes
+
+Status: not yet ported.
+
+Planned package path: `objects/iter.go` inside the `objects` package.
+`PySeqIter_Type` maps to a Go struct with `itSeq *Object` and `itIndex int`
+fields. `PyCallIter_Type` maps to a Go struct with `itCallable *Object` and
+`itSentinel *Object` fields. Both `tp_iternext` slots translate to Go methods
+that implement a common `Iterator` interface consumed by the `FOR_ITER`
+dispatch path in `vm/eval_gen.go`. The `IndexError`-clearing logic in
+`seqiter_next` must be ported exactly, as it is observable from Python code
+that catches `IndexError` around a `for` loop.

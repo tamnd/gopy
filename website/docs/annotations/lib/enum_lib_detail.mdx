@@ -1,0 +1,126 @@
+---
+title: Lib/enum.py
+description: "Annotated reading of CPython Lib/enum.py"
+cpython_path: Lib/enum.py
+cpython_version: "3.14"
+lines: 3000
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/enum.py" />
+
+## Map
+
+| Lines | Symbol | Purpose |
+|-------|--------|---------|
+| 1-80 | module header | imports, `__all__`, helper utilities |
+| 81-150 | `_EnumDict` | custom namespace dict used during class body execution |
+| 151-260 | `EnumType.__new__()` | metaclass: member creation loop, descriptor installation |
+| 261-340 | `EnumType._generate_next_value_()` | auto-numbering hook |
+| 341-410 | `EnumType._missing_()` | fallback for unknown values |
+| 411-480 | `EnumMember` descriptor | `__get__` returns the member, `__set__` raises |
+| 481-560 | `Enum.__new__()`, `Enum.__init__()` | per-member instance construction |
+| 561-640 | `Enum.__repr__()`, `__str__()`, `__format__()`, `__hash__()` | display and hashing |
+| 641-750 | `Flag.__or__()`, `__and__()`, `__xor__()`, `__invert__()` | bitwise composition |
+| 751-850 | `Flag._missing_()`, pseudo-member cache | composite Flag member lookup |
+| 851-950 | `auto` class | `_generate_next_value_` integration |
+| 951-1050 | `IntEnum`, `StrEnum`, `IntFlag` mixin classes | type-mixed enum bases |
+| 1051-3000 | helpers, `_decompose()`, `unique()`, `verify()`, pickling support | supporting infrastructure |
+
+## Reading
+
+### EnumType.__new__ and the member creation loop
+
+`EnumType.__new__` is the metaclass constructor. After the class body runs inside `_EnumDict`, the metaclass iterates over the collected member names and values, calls `_generate_next_value_` for any `auto()` placeholders, and then creates each member by calling the underlying data type's `__new__`.
+
+```python
+# CPython: Lib/enum.py:151 EnumType.__new__
+def __new__(metacls, cls, bases, classdict, *, boundary=None, _simple=False, **kwds):
+    ...
+    # resolve auto() values
+    for key in classdict._member_names:
+        value = classdict[key]
+        if isinstance(value, auto):
+            if value.value == _auto_null:
+                value.value = enum_class._generate_next_value_(
+                    key, 1, len(enum_class._member_names_), last_values[:])
+            value = value.value
+        ...
+        # create the actual member
+        enum_member = __new__(enum_class, value)
+        ...
+        classdict[key] = enum_member
+        enum_class._member_map_[key] = enum_member
+```
+
+Each member is a genuine instance of the new enum class. The member map (`_member_map_`) and the value-to-member map (`_value2member_map_`) are populated here so that lookups by name and by value both work in O(1) after class creation.
+
+### _missing_ and unknown value handling
+
+When `EnumType.__call__` receives a value that is not in `_value2member_map_`, it calls `_missing_` as a last resort. The default implementation raises `ValueError`. Subclasses override it to return a dynamically created member, return `None` to get the default error, or raise a custom exception.
+
+```python
+# CPython: Lib/enum.py:341 EnumType._missing_
+@classmethod
+def _missing_(cls, value):
+    return None
+```
+
+The call site in `__new__` wraps this:
+
+```python
+# CPython: Lib/enum.py:220 EnumType.__call__
+def __call__(cls, value, names=None, ...):
+    if names is None:
+        return cls._new_member_(value)
+
+def _new_member_(cls, value):
+    ...
+    if value in cls._value2member_map_:
+        return cls._value2member_map_[value]
+    try:
+        return cls._missing_(value)
+    except Exception:
+        ...
+        raise ValueError(...)
+```
+
+### Flag bitwise operations
+
+`Flag` overrides the four bitwise operators to produce composite pseudo-members. `__or__` combines two flags by OR-ing their integer values, then looks up or creates a composite member via `cls._create_pseudo_member_values_`.
+
+```python
+# CPython: Lib/enum.py:641 Flag.__or__
+def __or__(self, other):
+    if isinstance(other, self.__class__):
+        return self.__class__(self._value_ | other._value_)
+    return NotImplemented
+
+# CPython: Lib/enum.py:655 Flag.__and__
+def __and__(self, other):
+    if isinstance(other, self.__class__):
+        return self.__class__(self._value_ & other._value_)
+    return NotImplemented
+
+# CPython: Lib/enum.py:661 Flag.__xor__
+def __xor__(self, other):
+    if isinstance(other, self.__class__):
+        return self.__class__(self._value_ ^ other._value_)
+    return NotImplemented
+
+# CPython: Lib/enum.py:667 Flag.__invert__
+def __invert__(self):
+    if self._inverted_ is None:
+        self._inverted_ = self.__class__(self._singles_mask_ ^ self._value_)
+    return self._inverted_
+```
+
+`__invert__` uses `_singles_mask_`, which is the OR of all single-bit member values defined on the class. This ensures that inverting a flag only sets bits that correspond to declared members rather than flipping all 64 bits.
+
+## gopy notes
+
+Status: not yet ported.
+
+A port would live at `module/enum/` in the gopy tree. `EnumType` is a metaclass, so porting it requires `objects/type.go` and `objects/usertype.go` to support custom `tp_new` and `tp_init` at the metaclass level. The `_EnumDict` namespace needs the custom `__setitem__` logic that intercepts descriptor assignments during class body execution. `Flag` bitwise ops are straightforward integer arithmetic once composite pseudo-member creation is handled. `StrEnum` and `IntEnum` depend on the mixed-base `__new__` resolution order being correct, so `objects/type_call.go` MRO lookup must be solid before those mixins can work.

@@ -1,0 +1,200 @@
+---
+title: Modules/_csv.c
+description: "CPython C extension implementing the csv module: dialect registry, reader state machine, and writer quoting logic"
+cpython_path: Modules/_csv.c
+cpython_version: "3.14"
+lines: 1800
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/_csv.c" />
+
+The `_csv` extension module backs Python's public `csv` package. It provides
+`csv.reader`, `csv.writer`, `csv.register_dialect`, `csv.get_dialect`, and the
+`Dialect` class, all implemented in C for performance. The pure-Python `csv.py`
+layer in `Lib/csv.py` is a thin re-export shim; all real work happens here.
+
+## Map
+
+| Symbol | Kind | Lines (approx) | Purpose |
+|---|---|---|---|
+| `DialectObj` | struct | 80-160 | Per-dialect options: delimiter, quotechar, lineterminator, quoting, etc. |
+| `dialect_check_quoting` | function | 165-180 | Validates `quoting` field against `QUOTE_*` constants |
+| `dialect_check_char` | function | 182-210 | Validates single-char fields (delimiter, quotechar, escapechar) |
+| `dialect_new` | function | 450-570 | `tp_new` for `DialectObj`; merges keyword args with a base dialect |
+| `dialect_validate` | function | 212-280 | Final cross-field consistency check after construction |
+| `ReaderObj` | struct | 600-660 | Per-reader state: dialect pointer, field buffer, parse state enum |
+| `parse_process_char` | function | 700-900 | Core reader state machine; one byte at a time |
+| `Reader_iternext` | function | 950-1020 | Pulls a line from the input iterator, drives `parse_process_char` |
+| `WriterObj` | struct | 1050-1090 | Per-writer state: dialect pointer, output buffer, `writeline` callable |
+| `csv_writerow` | function | 1100-1250 | Formats one sequence of fields into CSV bytes |
+| `csv_writerows` | function | 1255-1280 | Iterates an iterable, calls `csv_writerow` for each row |
+| `get_dialect_from_registry` | function | 1300-1340 | Looks up a dialect by name from the module-level dict |
+| `csv_register_dialect` | function | 1345-1410 | Constructs a `DialectObj` and stores it in the registry |
+| `csv_unregister_dialect` | function | 1415-1435 | Removes a dialect from the registry |
+| `csv_get_dialect` | function | 1440-1460 | Public `csv.get_dialect(name)` |
+| `csv_list_dialects` | function | 1462-1480 | Returns registry keys as a list |
+| `_csv_module_exec` | function | 1700-1800 | Module init: registers built-in `excel`, `excel-tab`, `unix` dialects |
+
+## Reading
+
+### DialectObj struct and validation
+
+A `DialectObj` holds every configurable option for a dialect. Fields are stored
+as C primitives (single `Py_UCS4` code point for char fields, `int` for
+booleans and enums) so the reader and writer hot paths avoid Python attribute
+lookups.
+
+```c
+// CPython: Modules/_csv.c:80 DialectObj
+typedef struct {
+    PyObject_HEAD
+    char doublequote;
+    char skipinitialspace;
+    char strict;
+    int quoting;
+    Py_UCS4 delimiter;
+    Py_UCS4 quotechar;
+    Py_UCS4 escapechar;
+    PyObject *lineterminator;
+} DialectObj;
+```
+
+Validation is split across two helpers. `dialect_check_char` rejects strings
+longer than one code point and NUL bytes. `dialect_check_quoting` maps the
+integer `quoting` argument against the `QUOTE_*` enum values.
+`dialect_validate` then enforces cross-field rules: `QUOTE_NONE` requires
+either `escapechar` or `doublequote`; `quotechar` is only optional when
+`quoting == QUOTE_NONE`.
+
+```c
+// CPython: Modules/_csv.c:212 dialect_validate
+static int
+dialect_validate(DialectObj *self)
+{
+    if (self->quoting == QUOTE_NONE && self->escapechar == 0 &&
+        !self->doublequote) {
+        PyErr_SetString(error_obj,
+            "delimiter' must be a 1-character string");
+        return -1;
+    }
+    ...
+}
+```
+
+### Reader state machine (parse_process_char)
+
+The reader is a single-function state machine keyed on a `ParserState` enum.
+`parse_process_char` is called for every character (and once with a sentinel
+EOF). Transitions are encoded as a `switch` over the current state combined
+with `if` branches on the character class (delimiter, quotechar, escapechar,
+newline, or other).
+
+```c
+// CPython: Modules/_csv.c:700 parse_process_char
+static int
+parse_process_char(ReaderObj *self, Py_UCS4 module_state, Py_UCS4 c)
+{
+    switch (self->state) {
+    case START_RECORD:
+        if (c == '\0') break;       /* empty line */
+        if (c == '\n' || c == '\r') { self->state = EAT_CRNL; break; }
+        self->state = START_FIELD;
+        /* fall through */
+    case START_FIELD:
+        ...
+    case IN_QUOTED_FIELD:
+        ...
+    }
+}
+```
+
+States of note: `IN_QUOTED_FIELD` accumulates characters until a closing
+`quotechar`; `QUOTE_IN_QUOTED_FIELD` handles the ambiguity between a doubled
+quotechar (doublequote escape) and a closing quote followed by a delimiter.
+`ESCAPED_CHAR` consumes the next byte literally when an `escapechar` was seen.
+
+### Writer and csv_writerow quoting logic
+
+`csv_writerow` iterates the input sequence, converts each item to a string via
+`PyObject_Str`, then decides quoting for that field based on the dialect's
+`quoting` mode:
+
+- `QUOTE_ALL`: always wrap in `quotechar`.
+- `QUOTE_NONNUMERIC`: wrap unless the string can be parsed as a float.
+- `QUOTE_MINIMAL` (default): wrap only if the field contains delimiter,
+  quotechar, lineterminator, or a leading/trailing space.
+- `QUOTE_NONE`: never wrap; escape special characters with `escapechar` or
+  raise if no escapechar is set.
+
+```c
+// CPython: Modules/_csv.c:1100 csv_writerow
+static PyObject *
+csv_writerow(WriterObj *self, PyObject *seq)
+{
+    DialectObj *dialect = self->dialect;
+    ...
+    for (i = 0; i < num_fields; i++) {
+        ...
+        if (dialect->quoting == QUOTE_NONNUMERIC) {
+            /* try to convert; quote if conversion fails */
+        }
+        ...
+    }
+    ...
+}
+```
+
+After building the output in a `_PyUnicodeWriter`, `csv_writerow` appends the
+`lineterminator` string and calls `self->writeline` (the file-like object's
+`write` method) with the completed buffer.
+
+### register_dialect and the dialect registry
+
+The registry is a plain Python `dict` stored as `module_state->dialect_dict`.
+`csv_register_dialect` accepts either a `Dialect` subclass or keyword
+arguments, constructs a `DialectObj`, and stores it under the given name string
+as the dict key. Only `str` keys are permitted; the check is explicit to prevent
+silent bugs from bytes or integer keys.
+
+```c
+// CPython: Modules/_csv.c:1345 csv_register_dialect
+static PyObject *
+csv_register_dialect(PyObject *module, PyObject *args, PyObject *kwargs)
+{
+    PyObject *name_obj, *dialect_inst = NULL;
+    ...
+    if (!PyUnicode_Check(name_obj)) {
+        PyErr_SetString(PyExc_TypeError,
+            "dialect name must be a string");
+        return NULL;
+    }
+    ...
+    if (PyDict_SetItem(module_state->dialect_dict, name_obj, dialect_inst))
+        goto err;
+    ...
+}
+```
+
+The three built-in dialects (`excel`, `excel-tab`, `unix`) are registered
+during `_csv_module_exec` by constructing literal `DialectObj` values and
+inserting them before user code runs.
+
+## gopy notes
+
+Status: not yet ported.
+
+Planned package path: `module/csv/`
+
+The reader state machine is the highest-priority item because it drives
+`csv.reader` correctness. The dialect struct maps cleanly to a Go struct with
+the same fields. The registry can be a `map[string]*Dialect` protected by a
+`sync.Mutex` since CPython's GIL currently serialises access but gopy targets
+free-threaded operation.
+
+The writer's quoting logic should be ported function-by-function from
+`csv_writerow` with a CPython citation per branch. The `QUOTE_NONNUMERIC`
+float-detection path calls `PyFloat_FromString` internally; gopy's equivalent
+should use `strconv.ParseFloat` with the same fallback behaviour.

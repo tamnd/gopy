@@ -1,0 +1,131 @@
+---
+title: Objects/cellobject.c
+description: "Annotation: CPython cell objects — closures and free variables"
+cpython_path: Objects/cellobject.c
+cpython_version: "3.14"
+lines: 160
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Objects/cellobject.c" />
+
+Cell objects are the indirection layer that lets inner functions read and write
+variables that belong to an enclosing scope. Every free variable in a closure
+is backed by one `PyCellObject`. The compiler emits `MAKE_CELL` to allocate
+cells for the enclosing function and `COPY_FREE_VARS` to copy them into the
+callee's fast locals. At runtime the cell holds a single pointer, `ob_ref`,
+which may be `NULL` when the variable has not yet been assigned or has been
+deleted.
+
+## Map
+
+| Lines | Symbol | Notes |
+|-------|--------|-------|
+| 1-20 | `PyCellObject` struct | `ob_ref` pointer, possibly NULL |
+| 21-45 | `PyCell_New` | allocates cell, optionally stores initial ref |
+| 46-68 | `PyCell_Get` | returns `ob_ref`, raises `NameError` if NULL |
+| 69-90 | `PyCell_Set` | swaps `ob_ref`, decrefs old value |
+| 91-115 | `cell_get` slot | descriptor-style getter used by `LOAD_DEREF` |
+| 116-135 | `cell_set` slot | descriptor-style setter used by `STORE_DEREF` |
+| 136-155 | `cell_repr` | `<cell at 0x... empty>` vs `<cell at 0x... contents: ...>` |
+| 156-160 | `PyCell_Type` | type object registration |
+
+## Reading
+
+### PyCellObject and PyCell_New
+
+The struct is minimal by design: one `PyObject` header plus one nullable
+pointer.
+
+```c
+// CPython: Objects/cellobject.c:14 PyCellObject
+typedef struct {
+    PyObject_HEAD
+    PyObject *ob_ref;  /* Content of the cell, or NULL if undefined */
+} PyCellObject;
+```
+
+`PyCell_New` allocates the object and, when called with a non-NULL argument,
+stores the initial value without an extra `Py_INCREF` because the reference is
+transferred directly.
+
+```c
+// CPython: Objects/cellobject.c:27 PyCell_New
+PyObject *
+PyCell_New(PyObject *obj)
+{
+    PyCellObject *op = PyObject_GC_New(PyCellObject, &PyCell_Type);
+    if (op == NULL)
+        return NULL;
+    op->ob_ref = Py_XNewRef(obj);
+    _PyObject_GC_TRACK(op);
+    return (PyObject *)op;
+}
+```
+
+### cell_get and the NULL check for unbound cells
+
+`LOAD_DEREF` calls through the `cell_get` slot. The critical invariant is that
+a cell with `ob_ref == NULL` represents a variable that was never assigned (or
+was deleted with `del`). The slot raises `NameError` in that case rather than
+returning `None`, which is how Python surfaces the "free variable referenced
+before assignment" error.
+
+```c
+// CPython: Objects/cellobject.c:96 cell_get
+static PyObject *
+cell_get(PyCellObject *self, void *Py_UNUSED(ignored))
+{
+    if (self->ob_ref == NULL) {
+        PyErr_SetString(PyExc_NameError,
+                        "free variable referenced before assignment"
+                        " in enclosing scope");
+        return NULL;
+    }
+    return Py_NewRef(self->ob_ref);
+}
+```
+
+### cell_repr
+
+The repr distinguishes the empty (unbound) case clearly, which is useful when
+inspecting `__closure__` tuples in a debugger.
+
+```c
+// CPython: Objects/cellobject.c:140 cell_repr
+static PyObject *
+cell_repr(PyCellObject *op)
+{
+    if (op->ob_ref == NULL)
+        return PyUnicode_FromFormat("<cell at %p: empty>", op);
+    return PyUnicode_FromFormat("<cell at %p: %.80s object at %p>",
+                                op,
+                                Py_TYPE(op->ob_ref)->tp_name,
+                                op->ob_ref);
+}
+```
+
+### How cells wire free variables to closure functions
+
+When the compiler marks a variable as `CO_FAST_CELL`, the enclosing frame
+allocates a `PyCellObject` via `MAKE_CELL`. The frame stores a pointer to that
+cell in its `localsplus` array at the cell slot. The inner function object
+receives a tuple of these cell pointers as `func_closure`. When the inner
+function is called, `COPY_FREE_VARS` copies each cell reference from
+`func_closure` into the callee's own `localsplus` free-variable slots. Both
+frames then hold a reference to the same `PyCellObject`, so a write in either
+scope is immediately visible in the other.
+
+## gopy notes
+
+Status: not yet ported.
+
+Planned package path: `objects/cell.go` inside the `objects` package, mirroring
+the flat layout used for all other object types. The Go type will wrap
+`ob_ref` as a nullable `*Object` field. `PyCell_New`, `PyCell_Get`, and
+`PyCell_Set` map directly to constructor and accessor functions. The NULL check
+in `cell_get` must be preserved exactly: returning a Go `nil` is not
+sufficient — the port must surface a `NameError` through the standard
+`errors.Raise` path.
