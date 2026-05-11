@@ -117,9 +117,37 @@ type Interpreter struct {
 type Thread struct {
 	interp     *Interpreter
 	exc        atomic.Value // holds Exception or nil
+	handled    atomic.Value // currently-handled Exception, mirrors PyThreadState.exc_info->exc_value
 	id         uint64
 	ctx        any
 	ctxVersion uint64
+}
+
+// HandledException returns the currently-handled exception (the one a
+// running except handler is processing), or nil. Mirrors the
+// exc_info->exc_value slot in CPython's _PyErr_StackItem chain. The
+// raised-exception slot (CurrentException) is cleared on handler entry;
+// this slot persists for sys.exc_info() to read.
+//
+// CPython: Include/internal/pycore_runtime.h _PyErr_StackItem
+func (t *Thread) HandledException() Exception {
+	v := t.handled.Load()
+	if v == nil {
+		return nil
+	}
+	h, _ := v.(excHolder)
+	return h.e
+}
+
+// SetHandledException replaces the handled-exception slot. Passing nil
+// clears it. CPython: bytecodes.c POP_EXCEPT / PUSH_EXC_INFO maintain
+// the exc_info stack; this method is the equivalent setter.
+func (t *Thread) SetHandledException(exc Exception) {
+	if exc == nil {
+		t.handled.Store(excHolder{})
+		return
+	}
+	t.handled.Store(excHolder{e: exc})
 }
 
 // threadIDCounter feeds Thread.id. Starts at 1 so 0 is reserved as a
