@@ -1,0 +1,78 @@
+---
+title: Lib/tomllib/__init__.py
+description: "tomllib package entry point: re-exports load and loads from the pure-Python parser, providing TOML 1.0 parsing with no third-party dependency."
+cpython_path: Lib/tomllib/__init__.py
+cpython_version: "3.14"
+lines: 10
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Lib/tomllib/__init__.py`
+
+<CpyLink path="Lib/tomllib/__init__.py" />
+
+`Lib/tomllib/__init__.py` is the public entry point of the `tomllib` package added in
+Python 3.11. It re-exports `load` and `loads` from the internal `_parser` implementation
+module, presenting a minimal two-function API for parsing TOML 1.0 documents. The package
+has no write support by design; TOML serialization was intentionally excluded from the
+standard library scope.
+
+## Map
+
+| Lines | Symbol | Role |
+| ----- | ------ | ---- |
+| 1-4 | module header | SPDX license and docstring |
+| 5 | `__all__` | Declares the three public names: `"loads"`, `"load"`, `"TOMLDecodeError"` |
+| 7 | import | Pulls `TOMLDecodeError`, `load`, `loads` from `._parser` |
+| 10 | module fixup | Sets `TOMLDecodeError.__module__ = __name__` so tracebacks show `tomllib.TOMLDecodeError` |
+
+## Reading
+
+### Two-function API design
+
+`tomllib` deliberately exposes only `load` and `loads`. This mirrors the `json` module's
+interface: `load` accepts a binary file object opened in `"rb"` mode, and `loads` accepts a
+`str`. The restriction to binary input for `load` is intentional: TOML 1.0 requires UTF-8,
+and accepting binary avoids encoding ambiguity that a text-mode file would introduce.
+
+```python
+# CPython: Lib/tomllib/__init__.py:5 __all__
+__all__ = ("loads", "load", "TOMLDecodeError")
+
+from ._parser import TOMLDecodeError, load, loads
+
+TOMLDecodeError.__module__ = __name__
+```
+
+### Implementation delegation to `_parser`
+
+The actual parsing lives in `Lib/tomllib/_parser.py`, a pure-Python recursive-descent
+parser that covers the full TOML 1.0 grammar. The `__init__.py` adds no logic beyond the
+import. This two-file split keeps the public namespace minimal while allowing the
+implementation to grow independently.
+
+```python
+# CPython: Lib/tomllib/_parser.py:1 module header
+# Pure-Python TOML 1.0 parser.
+# Source: MIT-licensed tomli by Taneli Hukkinen, adapted for CPython stdlib
+```
+
+### No write support
+
+The `tomllib` module is intentionally read-only. PEP 680 explicitly deferred write support
+to keep the stdlib addition small and focused. Users who need TOML serialization use the
+third-party `tomli-w` package, which mirrors the `tomllib` API in reverse.
+
+## gopy notes
+
+Not yet ported. Planned package path is `module/tomllib`. The Go port should expose
+`Load(r io.Reader) (map[string]any, error)` and `Loads(s string) (map[string]any, error)`.
+The `_parser.py` pure-Python recursive-descent implementation translates
+straightforwardly to Go. TOML date/time types map to `time.Time` with UTC normalization.
+
+## CPython 3.14 changes
+
+The `tomllib` package is unchanged in 3.14. The underlying `_parser.py` received minor
+fixes for edge cases in inline-table and multiline string handling.

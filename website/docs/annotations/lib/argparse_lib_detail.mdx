@@ -1,0 +1,125 @@
+---
+title: Lib/argparse.py
+description: "Command-line argument parsing library built on top of optparse conventions, providing automatic help generation, type coercion, and subcommand dispatch."
+cpython_path: Lib/argparse.py
+cpython_version: "3.14"
+lines: 2786
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Lib/argparse.py`
+
+<CpyLink path="Lib/argparse.py" />
+
+`argparse` is the standard library module for parsing command-line arguments. It accepts a declarative description of positional and optional arguments via `add_argument()` calls, then converts `sys.argv` (or any list of strings) into a typed `Namespace` object. The module handles usage and help formatting, type coercion, default values, mutual exclusion groups, and recursive subparser dispatch. It was originally authored by Steven J. Bethard and is now maintained by Raymond Hettinger.
+
+## Map
+
+| Lines | Symbol | Role |
+| ----- | ------ | ---- |
+| 1-108 | module header | Docstring, `__all__`, constants (`SUPPRESS`, `OPTIONAL`, `ZERO_OR_MORE`, `ONE_OR_MORE`, `PARSER`, `REMAINDER`) |
+| 109-160 | `_AttributeHolder` | Abstract base providing `__repr__` for all parser objects |
+| 140-160 | `_copy_items`, `_identity` | Utility helpers for action value copying and identity coercion |
+| 161-711 | `HelpFormatter` | Formats usage lines and per-argument help; manages indent, section nesting, and ANSI color via `_colorize` |
+| 712-776 | `RawDescriptionHelpFormatter`, `RawTextHelpFormatter`, `ArgumentDefaultsHelpFormatter` | Formatter subclasses that suppress whitespace normalization or append default values |
+| 758-776 | `MetavarTypeHelpFormatter` | Formatter that uses the type name as metavar |
+| 777-828 | `_get_action_name`, `ArgumentError`, `ArgumentTypeError` | Error types and the helper that extracts a human-readable action label |
+| 829-926 | `Action` | Abstract base for all actions; defines `__call__` protocol |
+| 927-1336 | `_StoreAction` ... `_ExtendAction` | Concrete built-in actions: store, store-const, store-true/false, append, append-const, count, help, version, subparsers, extend |
+| 1209-1326 | `_SubParsersAction` | Action that delegates parsing to a named child `ArgumentParser` |
+| 1338-1397 | `FileType` | Callable factory for file-typed arguments (deprecated since 3.14) |
+| 1399-1417 | `Namespace` | Simple `object` subclass holding parsed attributes; supports `__contains__` and `__eq__` |
+| 1419-1752 | `_ActionsContainer` | Core mixin: action registry, `add_argument()`, `add_argument_group()`, `add_mutually_exclusive_group()`, conflict resolution |
+| 1753-1817 | `_ArgumentGroup`, `_MutuallyExclusiveGroup` | Grouping containers that feed back into a parent `_ActionsContainer` |
+| 1819-1840 | `_prog_name` | Determines `prog` string from `sys.argv[0]` or supplied value |
+| 1841-2786 | `ArgumentParser` | Main public class: `parse_args()`, `parse_known_args()`, `parse_intermixed_args()`, help printing, error handling, and `sys.exit()` integration |
+
+## Reading
+
+### Constants and sentinel values
+
+The module defines a handful of sentinel strings at the top of the file. `SUPPRESS` is used as both a default value and a metavar to hide an argument from help output. The nargs constants (`OPTIONAL`, `ZERO_OR_MORE`, `ONE_OR_MORE`, `PARSER`, `REMAINDER`) map directly to the `nargs=` keyword values a caller passes to `add_argument()`. These are plain string sentinels rather than enums, which means equality checks against them work in both directions.
+
+```python
+# CPython: Lib/argparse.py:96 SUPPRESS
+SUPPRESS = '==SUPPRESS=='
+
+OPTIONAL = '?'
+ZERO_OR_MORE = '*'
+ONE_OR_MORE = '+'
+PARSER = 'A...'
+REMAINDER = '...'
+```
+
+### HelpFormatter and color support (3.14 addition)
+
+`HelpFormatter` gained a `color` parameter in 3.14. During `__init__` it calls `_set_color()`, which imports the new `_colorize` C extension to decide whether ANSI escape codes should wrap metavars, option strings, and usage lines. When the terminal does not support color, a no-op theme is used and `self._decolor` is set to the `_identity` function so downstream code never needs branching.
+
+```python
+# CPython: Lib/argparse.py:199 HelpFormatter._set_color
+def _set_color(self, color):
+    from _colorize import can_colorize, decolor, get_theme
+
+    if color and can_colorize():
+        self._theme = get_theme(force_color=True).argparse
+        self._decolor = decolor
+    else:
+        self._theme = get_theme(force_no_color=True).argparse
+        self._decolor = _identity
+```
+
+### Action registry and add_argument
+
+`_ActionsContainer` keeps a `_registries` dict keyed by category (such as `'action'` or `'type'`). Callers register custom actions or types with `register()`, and lookups happen through `_registry_get()`. The `add_argument()` method validates the option strings, selects the right `Action` subclass via the registry, and appends it to `_actions`. Positional arguments are distinguished from optional ones solely by whether the first option string starts with a prefix character.
+
+```python
+# CPython: Lib/argparse.py:1419 _ActionsContainer.__init__
+class _ActionsContainer(object):
+    def __init__(self, description, prefix_chars,
+                 argument_default, conflict_handler):
+        self.description = description
+        self.argument_default = argument_default
+        self.prefix_chars = prefix_chars
+        self.conflict_handler = conflict_handler
+        self._registries = {}
+        self._actions = []
+        self._option_string_actions = {}
+        self._action_groups = []
+        self._mutually_exclusive_groups = []
+        self._defaults = {}
+        self._negative_number_matcher = _re.compile(r'^-\d+$|^-\d*\.\d+$')
+        self._has_negative_number_optionals = []
+```
+
+### ArgumentParser.parse_known_args and the two-pass split
+
+`parse_args()` is a thin wrapper around `parse_known_args()`, which in turn calls the internal `_parse_known_args()`. The internal method runs two phases: first it consumes all positional arguments greedily, then it revisits any remaining strings to pick up optional arguments that appeared after positionals. This two-pass design is what allows constructs like `prog file.txt --verbose` to work even though `--verbose` appears after the positional. Unrecognized arguments are returned as the second element of the tuple rather than raising immediately, letting callers chain parsers with `parse_known_args()`.
+
+```python
+# CPython: Lib/argparse.py:1841 ArgumentParser
+class ArgumentParser(_AttributeHolder, _ActionsContainer):
+    ...
+    def parse_args(self, args=None, namespace=None):
+        args, argv = self.parse_known_args(args, namespace)
+        if argv:
+            msg = _('unrecognized arguments: %s')
+            self.error(msg % ' '.join(argv))
+        return args
+```
+
+### suggest_on_error (3.14 addition)
+
+When `suggest_on_error=True` is passed to `ArgumentParser.__init__`, the error path for unknown subcommands and choices calls `difflib.get_close_matches()` to append a "did you mean?" hint to the error message. This behavior is opt-in and defaults to `False` so existing scripts are unaffected.
+
+## gopy notes
+
+`argparse` is a pure-Python module with no C extension dependency beyond the new `_colorize` helper added in 3.14. A gopy port needs to implement the `_colorize` module or stub it out before `HelpFormatter` will initialize. The action registry pattern (string keys to callable factories) maps naturally to a Go `map[string]func(...) Action`. `Namespace` is effectively a `map[string]any` with attribute-style access, which can be represented as a struct with a `map` backend. The most complex piece is `_parse_known_args` with its intermixed-arguments logic; porting it requires careful handling of Go's lack of Python-style list slicing.
+
+## CPython 3.14 changes
+
+- `HelpFormatter` gained a `color` parameter (default `True`) that integrates with the new `_colorize` C extension to emit ANSI-colored help output.
+- `ArgumentParser` gained `color=True` and `suggest_on_error=False` keyword-only parameters.
+- `FileType` was deprecated. The deprecation warning is emitted in `FileType.__init__`.
+- The `allow_abbrev` behavior for optional argument prefix matching was tightened to avoid ambiguous prefix collisions across argument groups.
