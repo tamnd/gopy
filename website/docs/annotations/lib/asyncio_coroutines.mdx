@@ -5,8 +5,8 @@ cpython_version: "3.14"
 gopy_status: "not_ported"
 ---
 
-import CpyLink from "@site/src/components/CpyLink";
-import Map from "@site/src/components/Map";
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
 
 <CpyLink path="Lib/asyncio/coroutines.py" />
 
@@ -18,12 +18,6 @@ machinery: `iscoroutine` and `iscoroutinefunction`. It also housed the
 `async def` world, but that decorator was deprecated in Python 3.11 and
 removed in 3.12. The file today is roughly 80 lines of focused utility code.
 
-<Map
-  entries={[
-    { name: "iscoroutine", kind: "function" },
-    { name: "iscoroutinefunction", kind: "function" },
-  ]}
-/>
 
 ## Reading
 

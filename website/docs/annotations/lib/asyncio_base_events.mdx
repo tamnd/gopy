@@ -5,8 +5,8 @@ cpython_version: "3.14"
 gopy_status: "not_ported"
 ---
 
-import CpyLink from "@site/src/components/CpyLink";
-import Map from "@site/src/components/Map";
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
 
 <CpyLink path="Lib/asyncio/base_events.py" />
 
@@ -20,20 +20,6 @@ scheduler state (`_ready`, `_scheduled`), the I/O polling contract
 loops such as `SelectorEventLoop` and `ProactorEventLoop` inherit from this
 class and supply only the I/O-specific methods.
 
-<Map
-  entries={[
-    { name: "BaseEventLoop", kind: "class" },
-    { name: "BaseEventLoop.run_forever", kind: "method" },
-    { name: "BaseEventLoop.run_until_complete", kind: "method" },
-    { name: "BaseEventLoop._run_once", kind: "method" },
-    { name: "BaseEventLoop.create_connection", kind: "method" },
-    { name: "BaseEventLoop.create_server", kind: "method" },
-    { name: "BaseEventLoop.sock_recv", kind: "method" },
-    { name: "BaseEventLoop.sock_sendall", kind: "method" },
-    { name: "BaseEventLoop.sock_connect", kind: "method" },
-    { name: "BaseEventLoop.sock_accept", kind: "method" },
-  ]}
-/>
 
 ## Reading
 

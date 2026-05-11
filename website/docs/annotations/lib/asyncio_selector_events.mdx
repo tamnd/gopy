@@ -5,8 +5,8 @@ cpython_version: "3.14"
 gopy_status: "not_ported"
 ---
 
-import CpyLink from "@site/src/components/CpyLink";
-import Map from "@site/src/components/Map";
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
 
 <CpyLink path="Lib/asyncio/selector_events.py" />
 
@@ -21,19 +21,6 @@ transport implementations for stream and datagram sockets:
 buffer outgoing data and register interest in read/write readiness events with
 the selector.
 
-<Map
-  entries={[
-    { name: "_SelectorEventLoop", kind: "class" },
-    { name: "_SelectorEventLoop._process_events", kind: "method" },
-    { name: "_SelectorEventLoop._ensure_fd_no_transport", kind: "method" },
-    { name: "BaseSelectorEventLoop", kind: "class" },
-    { name: "_SelectorTransport", kind: "class" },
-    { name: "_SelectorSocketTransport", kind: "class" },
-    { name: "_SelectorDatagramTransport", kind: "class" },
-    { name: "_SelectorSocketTransport._read_ready", kind: "method" },
-    { name: "_SelectorSocketTransport._write_ready", kind: "method" },
-  ]}
-/>
 
 ## Reading
 

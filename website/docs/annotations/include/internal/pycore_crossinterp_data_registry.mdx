@@ -3,8 +3,8 @@ title: pycore_crossinterp_data_registry.h
 cpython_path: Include/internal/pycore_crossinterp_data_registry.h
 ---
 
-import CpyLink from '@site/src/components/CpyLink';
-import Map from '@site/src/components/Map';
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
 
 # pycore_crossinterp_data_registry.h
 
@@ -17,15 +17,6 @@ safely reconstructed on the other side. This header declares the data
 structures that hold those serializers and the lookup function that finds the
 right one for a given type.
 
-<Map
-  nodes={[
-    { id: "_PyXIData_lookup_context_t",  kind: "struct",    ported: false },
-    { id: "_PyXIData_registry_t",        kind: "struct",    ported: false },
-    { id: "_PyXIData_registryitem_t",    kind: "struct",    ported: false },
-    { id: "_PyXIData_Lookup",            kind: "function",  ported: false },
-    { id: "_PyXIData_RegisterType",      kind: "function",  ported: false },
-  ]}
-/>
 
 ## CPython 3.14 changes
 

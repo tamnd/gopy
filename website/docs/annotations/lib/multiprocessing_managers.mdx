@@ -5,8 +5,8 @@ cpython_lines: 1000
 status: "not-ported"
 ---
 
-import CpyLink from "@site/src/components/CpyLink";
-import Map from "@site/src/components/Map";
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
 
 # multiprocessing.managers
 
@@ -14,19 +14,6 @@ import Map from "@site/src/components/Map";
 
 Shared object managers for multiprocessing. `BaseManager` spawns a dedicated server process that owns the real Python objects. Client processes receive proxy objects whose method calls are serialized over a socket, dispatched by the server, and the results sent back. `SyncManager` (the standard concrete subclass) registers Queue, Lock, Event, Semaphore, BoundedSemaphore, Value, Array, dict, list, and Namespace as shared proxies. `AutoProxy` inspects any arbitrary object and generates a proxy class for it at import time.
 
-<Map
-  nodes={[
-    { id: "BaseManager",      label: "BaseManager",         kind: "class",    lines: "1-150"   },
-    { id: "Server",           label: "Server",               kind: "class",    lines: "151-420" },
-    { id: "BaseProxy",        label: "BaseProxy",            kind: "class",    lines: "421-600" },
-    { id: "AutoProxy",        label: "AutoProxy()",          kind: "function", lines: "601-700" },
-    { id: "MakeProxyType",    label: "MakeProxyType()",      kind: "function", lines: "701-760" },
-    { id: "SyncManager",      label: "SyncManager",          kind: "class",    lines: "761-860" },
-    { id: "dispatch",         label: "dispatch()",           kind: "function", lines: "861-920" },
-    { id: "convert_to_error", label: "convert_to_error()",  kind: "function", lines: "921-960" },
-    { id: "NamespaceProxy",   label: "NamespaceProxy",       kind: "class",    lines: "961-1000" },
-  ]}
-/>
 
 ## Reading
 

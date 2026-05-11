@@ -3,8 +3,8 @@ title: pycore_atomic.h
 cpython_path: Include/internal/pycore_atomic.h
 ---
 
-import CpyLink from '@site/src/components/CpyLink';
-import Map from '@site/src/components/Map';
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
 
 # pycore_atomic.h
 
@@ -17,21 +17,6 @@ inline functions degrade to plain reads and writes, so callers do not need
 `_Py_atomic_ptr_t` wrapper types that communicate atomic intent to both the
 compiler and human readers.
 
-<Map
-  nodes={[
-    { id: "_Py_atomic_int",                       kind: "type",     ported: false },
-    { id: "_Py_atomic_ptr_t",                     kind: "type",     ported: false },
-    { id: "_Py_atomic_load_int_relaxed",          kind: "function", ported: false },
-    { id: "_Py_atomic_store_int_relaxed",         kind: "function", ported: false },
-    { id: "_Py_atomic_load_int_acquire",          kind: "function", ported: false },
-    { id: "_Py_atomic_store_int_release",         kind: "function", ported: false },
-    { id: "_Py_atomic_add_int",                   kind: "function", ported: false },
-    { id: "_Py_atomic_compare_exchange_int",      kind: "function", ported: false },
-    { id: "_Py_atomic_load_ptr_relaxed",          kind: "function", ported: false },
-    { id: "_Py_atomic_store_ptr_release",         kind: "function", ported: false },
-    { id: "_Py_atomic_compare_exchange_ptr",      kind: "function", ported: false },
-  ]}
-/>
 
 ## CPython 3.14 changes
 
