@@ -1,0 +1,214 @@
+---
+title: Python/assemble.c
+description: Final compiler stage. Converts an optimized flat instr_sequence into a PyCodeObject, including bytecode encoding, PEP 657 location table, varint exception table, localsplus layout, and the _PyCode_New call.
+cpython_path: Python/assemble.c
+cpython_version: "3.14"
+lines: 802
+status: annotated
+ported_to: compile/
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Python/assemble.c`
+
+<CpyLink path="Python/assemble.c" />
+
+The final stage of the compiler pipeline. Receives an optimized,
+flattened `instr_sequence` (output of [`flowgraph.c`](flowgraph)) and
+produces a `PyCodeObject`. The work is split into five concerns:
+instruction encoding (variable-width `_Py_CODEUNIT`, 2 bytes each),
+the location info table (PEP 657 compressed side table parallel to
+bytecode), the exception table (varint-encoded start/size/handler
+tuples), the `localsplus` name and kind arrays, and the final
+`_PyCode_New` call via a `_PyCodeConstructor` struct.
+
+The public entry is `_PyAssemble_MakeCodeObject`. Everything else is
+internal to this file.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Python/assemble.c" lines="30-61">30-61</Cpy> | `same_location`, `instr_size` | Instruction width: 1-4 codeunits depending on oparg magnitude. | `compile/assemble.go` |
+| <Cpy path="Python/assemble.c" lines="62-97">62-97</Cpy> | `assemble_init`, `assemble_free` | Allocate and release bytecode/linetable/exceptiontable buffers. | `compile/assemble.go` |
+| <Cpy path="Python/assemble.c" lines="98-195">98-195</Cpy> | `write_except_byte`, `assemble_emit_exception_table_item`, `assemble_emit_exception_table_entry`, `assemble_exception_table` | Encode and write the varint exception table. | `compile/flowgraph_except.go` |
+| <Cpy path="Python/assemble.c" lines="196-336">196-336</Cpy> | `write_location_first_byte`, `write_location_*` family | Encode PEP 657 location entries (SHORT/ONE_LINE/LONG/NONE forms). | `compile/flowgraph_passes.go` |
+| <Cpy path="Python/assemble.c" lines="337-370">337-370</Cpy> | `assemble_location_info` | Iterate instructions and emit one location entry per run. | `compile/flowgraph_passes.go:resolveLineNumbers` |
+| <Cpy path="Python/assemble.c" lines="369-457">369-457</Cpy> | `write_instr`, `assemble_emit_instr`, `assemble_emit` | Write bytecode codeunits to the output buffer. | `compile/assemble.go` |
+| <Cpy path="Python/assemble.c" lines="458-573">458-573</Cpy> | `dict_keys_inorder`, `compute_localsplus_info` | Build `co_localsplusnames` and `co_localspluskinds` from the metadata dicts. | `compile/assemble.go` |
+| <Cpy path="Python/assemble.c" lines="575-673">575-673</Cpy> | `makecode` | Fill a `_PyCodeConstructor` and call `_PyCode_New`. | `compile/assemble.go:makeCode` |
+| <Cpy path="Python/assemble.c" lines="675-777">675-777</Cpy> | `resolve_jump_offsets`, `resolve_unconditional_jumps` | Patch forward jump targets; simplify unconditional chains. | `compile/flowgraph_jumps.go` |
+| <Cpy path="Python/assemble.c" lines="779-802">779-802</Cpy> | `_PyAssemble_MakeCodeObject` | Public entry: init, emit, resolve jumps, resolve locations, makecode, free. | `compile/assemble.go:MakeCodeObject` |
+
+## Reading
+
+### Instruction width (lines 30 to 61)
+
+<CpyLink path="Python/assemble.c" lines="30-61" />
+
+```c
+static int
+instr_size(struct cfg_instr *instruction)
+{
+    int oparg = instruction->i_oparg;
+    assert(HAS_ARG(instruction->i_opcode) || oparg == 0);
+    int extended_args = (0xFFFFFF < oparg) + (0xFFFF < oparg) + (0xFF < oparg);
+    int codeunit_size = 1 + extended_args;
+    return codeunit_size;
+}
+```
+
+A `_Py_CODEUNIT` is two bytes: opcode and oparg. Instructions whose
+`oparg` exceeds 255 require one or more `EXTENDED_ARG` prefix
+codeunits, each shifting the accumulated oparg left by 8 bits.
+`instr_size` returns 1 through 4 based on the number of bytes needed
+to represent the oparg value. The emit loop in `write_instr` uses this
+count to write the correct sequence of `EXTENDED_ARG` units followed
+by the real opcode.
+
+### Location table format (lines 196 to 336)
+
+<CpyLink path="Python/assemble.c" lines="196-336" />
+
+PEP 657 encodes source location in a side table that runs parallel to
+the bytecode. Each entry covers one or more consecutive instructions
+and encodes the start line, end line, start column, and end column.
+The first byte packs the entry form and the instruction count it covers.
+
+```c
+static int
+write_location_first_byte(struct assembler *a, int code, int length)
+{
+    Py_ssize_t len = PyBytes_GET_SIZE(a->a_linetable);
+    if (a->a_location_off + 1 >= len) {
+        if (_PyBytes_Resize(&a->a_linetable, len * 2) < 0) {
+            return ERROR;
+        }
+    }
+    unsigned char *table = (unsigned char *)PyBytes_AS_STRING(a->a_linetable);
+    table[a->a_location_off++] = 0x80 | (code << 3) | (length - 1);
+    return SUCCESS;
+}
+```
+
+Four forms are used, selected by `write_location_info_entry` to pick
+the shortest representation:
+
+- `SHORT_FORM` (code 0-9): line delta 0-2, start column and end column
+  each fit in 3 bits. Encodes in 2 additional bytes after the first.
+- `ONE_LINE_FORM` (code 10-12): line delta 0-2, columns each fit in a
+  byte. Encodes in 2 additional bytes.
+- `LONG_FORM` (code 13): absolute start and end line, start and end
+  column each in a byte. Encodes in 4 additional bytes.
+- `NO_COLUMNS` (code 14): line delta only, no column info. Encodes in
+  1 additional byte.
+- `NO_LOCATION` (code 15): no source info at all (e.g., synthetic
+  instructions). First byte only, no additional bytes.
+
+The decoder in `ceval.c` (`_PyCode_InitAddressRange` and
+`advance_with_error`) does the reverse walk to reconstruct location
+info for tracebacks.
+
+### Exception table (lines 98 to 195)
+
+<CpyLink path="Python/assemble.c" lines="98-195" />
+
+```c
+static int
+assemble_emit_exception_table_entry(struct assembler *a,
+                                    int start, int handler,
+                                    struct cfg_excepthandler *handler_info)
+{
+    Py_ssize_t size = handler - start;
+    assert(handler_info->h_startdepth >= 0);
+    int depth = handler_info->h_startdepth - 1;
+    int lasti = handler_info->h_preserve_lasti;
+    int depth_lasti = (depth << 1) | lasti;
+    RETURN_IF_ERROR(assemble_emit_exception_table_item(a, start, start));
+    RETURN_IF_ERROR(assemble_emit_exception_table_item(a, size, start));
+    RETURN_IF_ERROR(assemble_emit_exception_table_item(a, handler, handler));
+    RETURN_IF_ERROR(assemble_emit_exception_table_item(a, depth_lasti, 0));
+    return SUCCESS;
+}
+```
+
+Each entry covers a contiguous bytecode range that should dispatch to
+a given handler when an exception is raised. The four fields are
+varint-encoded: `start` offset, `size` (handler minus start), handler
+offset, and `depth_lasti` (stack depth at entry, with the
+`h_preserve_lasti` flag packed into bit 0). The decoder in
+`ceval.c:get_exception_handler` reverses the varint read and binary
+searches the table by bytecode offset.
+
+### `_PyAssemble_MakeCodeObject` (lines 779 to 802)
+
+<CpyLink path="Python/assemble.c" lines="779-802" />
+
+```c
+PyCodeObject *
+_PyAssemble_MakeCodeObject(_PyCompile_CodeUnitMetadata *umd,
+                           PyObject *const_cache,
+                           PyObject *consts, int maxdepth,
+                           _PyCompile_InstructionSequence *instrs,
+                           int nlocalsplus, int code_flags,
+                           PyObject *filename)
+{
+    PyCodeObject *co = NULL;
+    struct assembler a;
+    RETURN_IF_ERROR(assemble_init(&a, nlocalsplus, umd->u_firstlineno));
+    RETURN_IF_ERROR(assemble_emit(&a, instrs));
+    RETURN_IF_ERROR(resolve_jump_offsets(&a, instrs));
+    RETURN_IF_ERROR(assemble_location_info(&a, instrs, umd->u_firstlineno));
+    co = makecode(umd, &a, const_cache, consts, maxdepth, nlocalsplus,
+                  code_flags, filename);
+    assemble_free(&a);
+    return co;
+}
+```
+
+Linear sequence: allocate assembler buffers, write all instruction
+codeunits, patch forward jump offsets, write the location table, then
+call `makecode` to assemble all pieces into a `PyCodeObject`. The
+assembler struct is stack-allocated and freed unconditionally at the
+end; `makecode` returns a new reference that outlives the assembler.
+
+### `makecode` (lines 575 to 673)
+
+<CpyLink path="Python/assemble.c" lines="575-673" />
+
+`makecode` fills a `_PyCodeConstructor` from all assembled pieces:
+the bytecode `bytes` object, the linetable `bytes` object, the
+exception table `bytes` object, the consts tuple, the names tuple, and
+the `localsplusnames`/`localspluskinds` arrays built by
+`compute_localsplus_info`. It calls `_PyCompile_ConstCacheMergeOne` on
+each constant that needs deduplication, then calls `_PyCode_Validate`
+to check structural invariants and finally `_PyCode_New` to allocate
+the real code object.
+
+The consts are merged rather than replaced: `_PyCompile_ConstCacheMergeOne`
+walks the cache looking for an interned equivalent and substitutes it
+in place so that identical constant values across compilation units
+share a single object.
+
+## Notes for the gopy mirror
+
+- `compile/assemble.go` is the direct port. `instr_size` and
+  `write_instr` follow the same 1-4 codeunit rule.
+- The location table is emitted by
+  `compile/flowgraph_passes.go:resolveLineNumbers`, which mirrors
+  `assemble_location_info` and the `write_location_*` family.
+- The exception table is written in `compile/flowgraph_except.go`,
+  mirroring `assemble_exception_table` and
+  `assemble_emit_exception_table_entry`.
+- `resolve_unconditional_jumps` was added in 3.13 as a post-optimizer
+  cleanup pass; `compile/flowgraph_jumps.go` includes it.
+
+## CPython 3.14 changes worth noting
+
+- PEP 657 location table format is unchanged from its introduction in
+  3.11. The encoding documented here applies to 3.11 through 3.14.
+- `resolve_unconditional_jumps` (lines 730-777) was added in 3.13 to
+  collapse chains of unconditional jumps that the CFG optimizer can
+  leave behind.
+- No structural changes in 3.14 specific to this file.

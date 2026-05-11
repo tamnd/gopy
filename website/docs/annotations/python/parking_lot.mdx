@@ -1,0 +1,195 @@
+---
+title: Python/parking_lot.c
+description: Parking-lot wait queue for the free-threaded interpreter — hash-bucketed thread suspension and wakeup over futexes or semaphores.
+cpython_path: Python/parking_lot.c
+cpython_version: "3.14"
+lines: 442
+status: annotated
+ported_to: pythonrun/parking_lot.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Python/parking_lot.c`
+
+<CpyLink path="Python/parking_lot.c" />
+
+A parking lot is a wait queue for threads that are blocked on a Python lock
+in the free-threaded (no-GIL) build. The name and the design come from
+WebKit's `WTF::ParkingLot` and the paper "Futexes are Tricky" by Ulrich
+Drepper.
+
+The key insight is that lock word and wait queue must be managed atomically.
+A naive implementation would check the lock, decide to sleep, then be
+preempted before actually sleeping, missing the wakeup. The parking lot
+solves this by holding a per-bucket spinlock while the sleeping thread
+checks the lock word: if the word has changed since the thread last read it,
+`_PyParkingLot_Park` returns immediately rather than sleeping.
+
+The wait queue is partitioned into `NUM_BUCKETS` (128) hash buckets keyed
+by the lock address. Each bucket is a `_Bucket` struct holding a spinlock
+and a doubly-linked list of `_ParkingLotNode` waiters. The spinlock is
+acquired with a brief spin then a platform sleep (`_PyMutex_LockTimed`).
+
+At the OS level, `_PyParkingLot_Park` sleeps on a `_PyEventRc` (an
+event object backed by a futex on Linux, a semaphore on macOS, and a
+`CONDITION_VARIABLE` on Windows). This keeps the file portable while
+the hot path stays branchless for the non-contended case.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Python/parking_lot.c" lines="1-80">1-80</Cpy> | `_ParkingLotNode`, `_Bucket`, `_parking_lot_buckets` | Data structures: waiter node (event, address, expected, next/prev), bucket array. | `pythonrun/parking_lot.go:ParkingLotNode` / `Bucket` |
+| <Cpy path="Python/parking_lot.c" lines="81-160">81-160</Cpy> | `bucket_for`, `lock_bucket`, `unlock_bucket` | Hash address to bucket; acquire/release the per-bucket spinlock. | `pythonrun/parking_lot.go:bucketFor` |
+| <Cpy path="Python/parking_lot.c" lines="161-270">161-270</Cpy> | `_PyParkingLot_Park` | Atomic check-then-sleep: lock bucket, compare `*address` to `expected`, enqueue node, release bucket lock, sleep on event. | `pythonrun/parking_lot.go:Park` |
+| <Cpy path="Python/parking_lot.c" lines="271-370">271-370</Cpy> | `_PyParkingLot_Unpark` | Lock bucket, dequeue one waiter, call `unpark_fn` while holding the lock, signal the waiter's event. | `pythonrun/parking_lot.go:Unpark` |
+| <Cpy path="Python/parking_lot.c" lines="371-420">371-420</Cpy> | `_PyParkingLot_UnparkAll` | Lock bucket, drain the entire waiter list for `address`, signal each event. | `pythonrun/parking_lot.go:UnparkAll` |
+| <Cpy path="Python/parking_lot.c" lines="421-442">421-442</Cpy> | `_PyParkingLot_BeginUnpark` / `_PyParkingLot_FinishUnpark` | Two-phase unpark variant; `BeginUnpark` dequeues the waiter while still holding the lock for atomic CAS. | `pythonrun/parking_lot.go:BeginUnpark` |
+
+## Reading
+
+### Bucket-based wait queue (lines 1 to 160)
+
+<CpyLink path="Python/parking_lot.c" lines="1-160" />
+
+```c
+typedef struct _ParkingLotNode {
+    struct _ParkingLotNode *next;
+    struct _ParkingLotNode *prev;
+    _PyEventRc             *event;
+    const void             *address;
+    /* Expected value of *address at park time. */
+    uintptr_t               expected;
+    /* Set to 1 by Unpark to indicate the wakeup was intentional. */
+    int                     handed_off;
+} _ParkingLotNode;
+
+#define NUM_BUCKETS 128
+
+typedef struct {
+    _PyMutex          mutex;
+    _ParkingLotNode  *head;
+    _ParkingLotNode  *tail;
+} _Bucket;
+
+static _Bucket _parking_lot_buckets[NUM_BUCKETS];
+```
+
+`address` is the address of the lock word being waited on, typically a
+`uint8_t *` inside a `_PyMutex`. `bucket_for(address)` computes
+`(uintptr_t)address * MULTIPLIER >> (64 - LOG2_NUM_BUCKETS)` — a
+multiplicative hash that distributes common small-stack addresses across all
+128 buckets. Each bucket is a FIFO list; new waiters are appended to `tail`
+so `Unpark` can wake them in arrival order (important for mutex fairness).
+
+The `_PyMutex` inside each `_Bucket` is itself a tiny spinlock backed by
+`_PyMutex_LockTimed` with a spin-count threshold. It must not be a
+full parking-lot mutex to avoid recursion.
+
+### `_PyParkingLot_Park` atomic check-then-sleep (lines 161 to 270)
+
+<CpyLink path="Python/parking_lot.c" lines="161-270" />
+
+```c
+int
+_PyParkingLot_Park(const void *address, const void *expected, size_t size,
+                   _PyTime_t timeout_ns, void *park_arg, int call_before_sleep)
+{
+    _ParkingLotNode node;
+    _Bucket *bucket = bucket_for(address);
+
+    _PyMutex_Lock(&bucket->mutex);
+
+    /* Atomic check: has the value already changed? */
+    if (!_Py_atomic_compare_equal(address, expected, size)) {
+        _PyMutex_Unlock(&bucket->mutex);
+        return PY_PARK_AGAIN;
+    }
+
+    node.address  = address;
+    node.event    = _PyEventRc_New();
+    node.handed_off = 0;
+    enqueue(bucket, &node);
+    _PyMutex_Unlock(&bucket->mutex);
+
+    /* Optional callback while not holding bucket lock. */
+    if (call_before_sleep) { ... }
+
+    /* Sleep until Unpark signals the event. */
+    int timed_out = !_PyEvent_WaitTimed(node.event->event, timeout_ns);
+
+    if (timed_out) {
+        /* Remove ourselves from the queue if still there. */
+        _PyMutex_Lock(&bucket->mutex);
+        int in_queue = remove_waiter(bucket, &node);
+        _PyMutex_Unlock(&bucket->mutex);
+        if (in_queue) {
+            _PyEventRc_Decref(node.event);
+            return PY_PARK_TIMEOUT;
+        }
+    }
+    _PyEventRc_Decref(node.event);
+    return node.handed_off ? PY_PARK_OK : PY_PARK_INTR;
+}
+```
+
+The bucket lock is held for the minimum window: just long enough to compare
+`*address` against `expected` and enqueue the node. Releasing the lock
+before sleeping avoids holding it for the duration of the sleep. If
+`*address` already differs from `expected` (a concurrent unlocker already
+cleared the lock word), the function returns `PY_PARK_AGAIN` without
+sleeping. The caller (`_PyMutex_LockTimed`) then retries its CAS directly.
+
+`_Py_atomic_compare_equal` uses `__atomic_load_n` with
+`__ATOMIC_SEQ_CST` to guarantee the read is not moved outside the critical
+section by the compiler.
+
+### `_PyParkingLot_Unpark` with unpark callback (lines 271 to 370)
+
+<CpyLink path="Python/parking_lot.c" lines="271-370" />
+
+```c
+void
+_PyParkingLot_Unpark(const void *address, _Py_unpark_fn_t *fn, void *arg)
+{
+    _Bucket *bucket = bucket_for(address);
+    _PyMutex_Lock(&bucket->mutex);
+
+    _ParkingLotNode *waiter = find_first_waiter(bucket, address);
+    int has_more = (waiter != NULL && waiter->next != NULL &&
+                    waiter->next->address == address);
+
+    if (waiter) {
+        dequeue(bucket, waiter);
+    }
+
+    /* Call fn while still holding the bucket lock. */
+    if (fn) {
+        fn(arg, waiter != NULL, has_more);
+    }
+
+    _PyMutex_Unlock(&bucket->mutex);
+
+    if (waiter) {
+        waiter->handed_off = 1;
+        _PyEvent_Notify(waiter->event->event);
+    }
+}
+```
+
+The `fn` callback runs with the bucket lock held. This is the critical
+invariant: `fn` can atomically update the lock word (e.g. clear the
+"has waiters" bit) at the same time as the waiter is removed from the
+queue. Without this window, a thread woken by `_PyEvent_Notify` could
+re-enter `_PyParkingLot_Park` and observe a stale "has waiters" bit in the
+lock word before `fn` has had a chance to clear it.
+
+`has_more` tells `fn` whether additional waiters remain; the `_PyMutex`
+implementation uses this to keep the "contended" bit set when it should
+be, avoiding a thundering-herd where every unparked thread tries to
+acquire without noticing the queue is non-empty.
+
+`_PyParkingLot_UnparkAll` (lines 371 to 420) follows the same pattern but
+drains the entire waiter list atomically before releasing the bucket lock,
+then signals each event outside the lock.

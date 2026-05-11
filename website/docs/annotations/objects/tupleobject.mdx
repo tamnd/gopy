@@ -1,0 +1,165 @@
+---
+title: Objects/tupleobject.c
+description: Immutable sequence. Fixed-size ob_item[] array, free-list for small tuples, hash caching.
+cpython_path: Objects/tupleobject.c
+cpython_version: "3.14"
+lines: 1214
+status: annotated
+ported_to: objects/tuple.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Objects/tupleobject.c`
+
+<CpyLink path="Objects/tupleobject.c" />
+
+Tuples are fixed-size arrays of `PyObject*`. Once created, neither the length
+nor the element pointers can be changed (barring the single-use `PyTuple_SET_ITEM`
+during construction). The empty tuple is a singleton; `PyTuple_New(0)` always
+returns the same immortal object. Small tuples (length 0 through 19) are
+recycled through per-length free lists so that repeated construction and
+destruction of equal-length tuples avoids repeated `malloc` and `free` calls.
+`PyTuple_Pack` is the varargs constructor used throughout the interpreter
+whenever a tuple of known arguments must be built in C. The tuple hash is
+computed lazily on first access and cached in `ob_shash`.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Objects/tupleobject.c" lines="1-80">1-80</Cpy> | `tuple_new_impl`, `PyTuple_New` | Allocate; check per-length free list before calling the allocator. | `objects/tuple.go:NewTuple` |
+| <Cpy path="Objects/tupleobject.c" lines="80-200">80-200</Cpy> | `PyTuple_Pack`, `_PyTuple_FromArray`, `_PyTuple_FromArraySteal` | Bulk constructors from varargs and C arrays; `Steal` variants take ownership. | `objects/tuple.go:TuplePack` |
+| <Cpy path="Objects/tupleobject.c" lines="200-400">200-400</Cpy> | `PyTuple_GetItem`, `PyTuple_GET_ITEM`, `PyTuple_SetItem`, `PyTuple_Size` | Element access and size query. `SetItem` is only safe during construction. | `objects/tuple.go` |
+| <Cpy path="Objects/tupleobject.c" lines="400-600">400-600</Cpy> | `tupleiter_new`, `tupleiter_next`, `tupleiter_len` | Tuple iterator: index-based, no allocation after construction. | `objects/tuple.go:TupleIter` |
+| <Cpy path="Objects/tupleobject.c" lines="600-800">600-800</Cpy> | `tuple_repr`, `tuple_hash`, `tuple_richcompare` | Repr, hash with `ob_shash` cache, lexicographic comparison. | `objects/tuple.go:tupleHash` |
+| <Cpy path="Objects/tupleobject.c" lines="800-1000">800-1000</Cpy> | `tuple_concat`, `tuple_slice`, `tuplesubtype_new` | Sequence operations; `tuple_slice` returns a new tuple with a copy of the slice. | `objects/tuple.go` |
+| <Cpy path="Objects/tupleobject.c" lines="1000-1214">1000-1214</Cpy> | `tuplefreelist_clear`, `tuple_tp_dealloc`, `PyTuple_Type` | Free-list management, dealloc, and the type object definition. | `objects/tuple.go` |
+
+## Reading
+
+### Free-list (lines 1000 to 1100)
+
+<CpyLink path="Objects/tupleobject.c" lines="1000-1100" />
+
+Per-length free lists hold up to `PyTuple_MAXSAVESIZE` (20) distinct length
+buckets, each up to `PyTuple_MAXFREELIST` (2000) entries deep. On deallocation,
+if the tuple's length is within the range and the bucket is not full, the tuple
+object is not freed. Instead `ob_item[0]` is overwritten with the current head
+of the free list, turning the live element slot into a linked-list next pointer.
+On the next `PyTuple_New(n)` call for the same length, the head is popped and
+the tuple is reused without touching the allocator:
+
+```c
+static void
+tuple_tp_dealloc(PyObject *self)
+{
+    PyTupleObject *op = (PyTupleObject *)self;
+    Py_ssize_t len = Py_SIZE(op);
+    PyInterpreterState *interp = _PyInterpreterState_GET();
+    struct _Py_tuple_state *state = &interp->tuple;
+    if (len < PyTuple_MAXSAVESIZE
+            && state->numfree[len] < PyTuple_MAXFREELIST
+            && Py_IS_TYPE(op, &PyTuple_Type))
+    {
+        op->ob_item[0] = (PyObject *)state->free_list[len];
+        state->free_list[len] = op;
+        state->numfree[len]++;
+        return;
+    }
+    /* slow path: dec-ref elements and free */
+    for (Py_ssize_t i = len; --i >= 0; )
+        Py_XDECREF(op->ob_item[i]);
+    Py_TYPE(op)->tp_free((PyObject *)op);
+}
+```
+
+The reuse trick relies on `ob_item[0]` being a `PyObject*`-sized field and on
+the allocator returning memory of the same size for the same-length tuple on
+the next allocation.
+
+### `tuple_hash` (lines 600 to 700)
+
+<CpyLink path="Objects/tupleobject.c" lines="600-700" />
+
+The hash is computed once and stored in `ob_shash`, which is initialized to -1.
+An `ob_shash != -1` check short-circuits the entire computation on subsequent
+calls. The algorithm multiplies a running accumulator by a constant and XORs in
+each element's hash, preventing permutations from producing the same result:
+
+```c
+static Py_hash_t
+tuple_hash(PyTupleObject *v)
+{
+    if (v->ob_shash != -1)
+        return v->ob_shash;
+    Py_uhash_t acc = _PyHASH_XXPRIME_5;
+    for (Py_ssize_t i = 0; i < Py_SIZE(v); i++) {
+        Py_uhash_t lane = PyObject_Hash(v->ob_item[i]);
+        if (lane == (Py_uhash_t)-1)
+            return -1;
+        acc += lane * _PyHASH_XXPRIME_2;
+        acc = _PyHASH_XXROTATE(acc);
+        acc *= _PyHASH_XXPRIME_1;
+    }
+    acc += Py_SIZE(v) ^ (_PyHASH_XXPRIME_5 ^ 3527539UL);
+    if (acc == (Py_uhash_t)-1)
+        acc = 1546275796;
+    v->ob_shash = (Py_hash_t)acc;
+    return v->ob_shash;
+}
+```
+
+The empty-tuple hash is effectively a compile-time constant because the loop
+does not execute, so `_PyTuple_HashEmpty` can precompute it at startup. The
+final fixup avoids -1 (the error sentinel).
+
+### `PyTuple_Pack` (lines 80 to 150)
+
+<CpyLink path="Objects/tupleobject.c" lines="80-150" />
+
+Varargs constructor used throughout the interpreter. Allocates via `PyTuple_New`
+then copies elements with `PyTuple_SET_ITEM`, which performs no bounds checking
+and increments the reference count of each item:
+
+```c
+PyObject *
+PyTuple_Pack(Py_ssize_t n, ...)
+{
+    va_list vargs;
+    va_start(vargs, n);
+    PyObject *result = PyTuple_New(n);
+    if (result == NULL) {
+        va_end(vargs);
+        return NULL;
+    }
+    for (Py_ssize_t i = 0; i < n; i++) {
+        PyObject *o = va_arg(vargs, PyObject *);
+        PyTuple_SET_ITEM(result, i, Py_NewRef(o));
+    }
+    va_end(vargs);
+    return result;
+}
+```
+
+`PyTuple_SET_ITEM` bypasses `PyTuple_SetItem`'s type and bounds checks; it is
+intended only for freshly-allocated tuples whose slots have not yet been filled.
+Most C code that builds tuples uses `PyTuple_Pack` rather than calling
+`PyTuple_New` followed by individual `PyTuple_SET_ITEM` calls, because the
+varargs form is easier to read and less error-prone.
+
+## gopy mirror
+
+`objects/tuple.go`. The free-list is implemented with a `sync.Pool` per
+distinct length, which achieves the same allocation amortization without the
+manual linked-list threading. The hash is cached in an `int64` field initialized
+to `math.MinInt64`. `PyTuple_Pack` maps to `NewTuple(items...)` which accepts
+a variadic `[]Object` argument.
+
+## CPython 3.14 changes
+
+No significant changes. Free-list size constants (`PyTuple_MAXSAVESIZE`,
+`PyTuple_MAXFREELIST`) have been stable since 3.3. The hash algorithm was
+updated to the xxHash-derived accumulator in 3.8. `_PyTuple_FromArraySteal` was
+added as an internal fast path in 3.12 for code paths that transfer ownership
+of a C array of object pointers.

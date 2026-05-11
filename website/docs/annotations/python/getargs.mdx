@@ -1,0 +1,276 @@
+---
+title: Python/getargs.c
+description: Central C argument parsing machinery for CPython extensions: format-string dispatch in convertsimple, the core vgetargs1_impl loop, keyword argument handling, and fast clinic-generated _PyArg_ParseStack paths.
+cpython_path: Python/getargs.c
+cpython_version: "3.14"
+lines: 1600
+status: annotated
+ported_to: pythonrun/getargs.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Python/getargs.c`
+
+<CpyLink path="Python/getargs.c" />
+
+The argument parsing engine for C extensions. Every `PyArg_Parse*` function
+in the public C API routes through this file. The design is a format-string
+mini-language where each character maps to a C type and a conversion
+function. Parsing is deliberately strict: unknown format characters are
+rejected at runtime with a `SystemError`, and type mismatches raise
+`TypeError`.
+
+The top of the file defines the public entry points:
+`PyArg_ParseTuple` for positional-only functions,
+`PyArg_ParseTupleAndKeywords` for functions with keyword support,
+`PyArg_VaParseTupleAndKeywords` for the `va_list` variant, and
+`_PyArg_ParseStack` / `_PyArg_ParseStackAndKeywords` for the Argument
+Clinic fast path that receives a C array instead of a tuple object.
+
+All of these converge on the internal `vgetargs1_impl` function, which
+drives the format-string loop. `vgetargs1_impl` calls `convertsimple`
+once per format character to convert the corresponding Python argument
+into the caller's C variable. When the format string contains `|`, all
+following arguments are optional; if the Python call did not supply them,
+the corresponding C slots are left at their defaults. `$` marks the
+start of keyword-only arguments (arguments that must be named by the
+caller and may not be passed positionally).
+
+Two guard functions, `_PyArg_NoKeywords` and `_PyArg_NoPositional`, cover
+the common pattern of rejecting any keywords or any positional arguments
+entirely, without going through the full format machinery.
+`PyArg_ValidateKeywordArguments` walks the `kwargs` dict and raises
+`TypeError` for any key that does not appear in the allowed keyword list.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Python/getargs.c" lines="1-120">1-120</Cpy> | file header / `PyArg_Parse` / `PyArg_ParseTuple` | Public entry points for positional-only parsing. `PyArg_ParseTuple` validates that `args` is a tuple, then calls `vgetargs1_impl`. | `pythonrun/getargs.go:ParseTuple` |
+| <Cpy path="Python/getargs.c" lines="121-320">121-320</Cpy> | `vgetargs1_impl` | Core loop: iterates format string, advances the argument pointer, calls `convertsimple` for each format character, handles `|` optional marker and `$` keyword-only marker. | `pythonrun/getargs.go:vgetargs1Impl` |
+| <Cpy path="Python/getargs.c" lines="321-700">321-700</Cpy> | `convertsimple` | Per-character dispatch. Converts a single Python argument to the C type indicated by the format character. Raises `TypeError` on mismatch. | `pythonrun/getargs.go:convertSimple` |
+| <Cpy path="Python/getargs.c" lines="701-900">701-900</Cpy> | `PyArg_ParseTupleAndKeywords` / `PyArg_VaParseTupleAndKeywords` / `vgetargskeywords` | Keyword argument parsing. `vgetargskeywords` builds a `keywords` index, scans `kwargs`, matches names to format positions, then calls `convertsimple`. | `pythonrun/getargs.go:ParseTupleAndKeywords` |
+| <Cpy path="Python/getargs.c" lines="901-1100">901-1100</Cpy> | `_PyArg_ParseStack` / `_PyArg_ParseStackAndKeywords` | Clinic-generated fast path: receives a `PyObject *const *` array and `Py_ssize_t nargs` instead of a tuple. Avoids tuple allocation on the hot path. | `pythonrun/getargs.go:ParseStack` |
+| <Cpy path="Python/getargs.c" lines="1101-1300">1101-1300</Cpy> | `PyArg_ValidateKeywordArguments` / `_PyArg_NoKeywords` / `_PyArg_NoPositional` / `_PyArg_BadArgument` | Argument validation guards and error formatters. | `pythonrun/getargs.go:ValidateKeywordArguments` |
+| <Cpy path="Python/getargs.c" lines="1301-1500">1301-1500</Cpy> | `cleanup_ptr` / `cleanup_buffer` / `returncomplex` | Cleanup helpers registered during parsing for buffers and complex numbers that were allocated before a later argument fails. | `pythonrun/getargs.go:cleanupBuffer` |
+| <Cpy path="Python/getargs.c" lines="1501-1600">1501-1600</Cpy> | `_PyArg_UnpackKeywords` / `_PyArg_UnpackKeywordsWithVararg` | Low-level helpers used by Argument Clinic for `METH_FASTCALL | METH_KEYWORDS` functions: repack positional and keyword arrays into a flat slot array. | `pythonrun/getargs.go:UnpackKeywords` |
+
+## Reading
+
+### `convertsimple` key format characters (lines 321 to 700)
+
+<CpyLink path="Python/getargs.c" lines="321-700" />
+
+`convertsimple` is the dispatch heart of the file. It takes the current
+format character, the Python argument, and a pointer to the C destination
+variable, and performs the conversion:
+
+```c
+static const char *
+convertsimple(PyObject *arg, const char **p_format, va_list *p_va,
+              int flags, char *msgbuf, size_t bufsize,
+              freelist_t *freelist)
+{
+    const char *format = *p_format;
+    char c = *format++;
+    ...
+    switch (c) {
+    case 'b': /* byte — unsigned char */
+        ...
+    case 'i': /* int */
+        {
+            int *p = va_arg(*p_va, int *);
+            long ival = PyLong_AsLong(arg);
+            if (ival == -1 && PyErr_Occurred()) return converterr("int", ...);
+            *p = (int)ival;
+            break;
+        }
+    case 'l': /* long int */
+        ...
+    case 's': /* str to const char * (UTF-8) */
+        {
+            const char **p = va_arg(*p_va, const char **);
+            Py_ssize_t len;
+            ssize_t slen;
+            *p = PyUnicode_AsUTF8AndSize(arg, &len);
+            if (*p == NULL) return converterr("str", ...);
+            ...
+            break;
+        }
+    case 'O': /* object — any type, no conversion */
+        {
+            PyTypeObject *type;
+            PyObject **p;
+            if (*format == '!') { /* O! — exact type check */
+                type = va_arg(*p_va, PyTypeObject *);
+                p = va_arg(*p_va, PyObject **);
+                if (!PyObject_TypeCheck(arg, type))
+                    return converterr(type->tp_name, ...);
+                *p = arg;
+                format++;
+            } else if (*format == '&') { /* O& — converter callback */
+                typedef int (*converter)(PyObject *, void *);
+                converter convert = va_arg(*p_va, converter);
+                void *addr = va_arg(*p_va, void *);
+                if (!convert(arg, addr))
+                    return converterr("(converter)", ...);
+                format++;
+            } else {
+                p = va_arg(*p_va, PyObject **);
+                *p = arg;
+            }
+            break;
+        }
+    ...
+    }
+}
+```
+
+Selected format characters and their C types:
+
+| Char | C type | Conversion |
+|------|--------|------------|
+| `b` | `unsigned char` | `PyLong_AsLong`, range [0, 255] |
+| `h` | `short int` | `PyLong_AsLong` |
+| `i` | `int` | `PyLong_AsLong` |
+| `l` | `long` | `PyLong_AsLong` |
+| `L` | `long long` | `PyLong_AsLongLong` |
+| `k` | `unsigned long` | `PyLong_AsUnsignedLongMask` (no overflow check) |
+| `d` | `double` | `PyFloat_AsDouble` |
+| `f` | `float` | `(float)PyFloat_AsDouble` |
+| `s` | `const char *` | `PyUnicode_AsUTF8AndSize`, valid until object is GC'd |
+| `y` | `const char *` | `PyBytes_AsStringAndSize`, bytes only |
+| `z` | `const char *` | like `s` but accepts `None` (gives `NULL`) |
+| `u` | `const Py_UNICODE *` | deprecated wide-char buffer |
+| `p` | `int` | `PyObject_IsTrue` — truth predicate |
+| `O` | `PyObject *` | any object, borrowed reference |
+| `O!` | `PyObject *` | exact type check via `PyObject_TypeCheck` |
+| `O&` | converter | caller-supplied `int conv(PyObject*, void*)` |
+| `*` | `Py_buffer` | `PyBUF_SIMPLE` buffer protocol |
+
+The `|` character is not handled inside `convertsimple`; it is consumed by
+`vgetargs1_impl` before calling `convertsimple` and sets a flag that makes
+subsequent missing arguments non-fatal. `$` similarly sets a flag that the
+remaining names must be keyword-only.
+
+### `vgetargs1_impl` loop (lines 121 to 320)
+
+<CpyLink path="Python/getargs.c" lines="121-320" />
+
+```c
+static int
+vgetargs1_impl(PyObject *compat_args, PyObject *const *stack,
+               Py_ssize_t nargs, const char *format, va_list *p_va, int flags)
+{
+    int min = -1, max = INT_MAX;
+    int i = 0;
+    const char *fname = NULL, *message = NULL;
+    ...
+    for (;;) {
+        const char *thisgroupformat;
+        int ngroup = 0;
+        ...
+        c = *format++;
+        if (c == '\0') break;
+        if (c == '|') { min = i; continue; }
+        if (c == '$') { /* keyword-only start */ continue; }
+        if (c == ':') { fname = format; break; }
+        if (c == ';') { message = format; break; }
+
+        if (i >= nargs) {
+            if (i < min) { /* required arg missing */ ... error ... }
+            /* optional: skip va_arg slots */
+            skipitem(&format, p_va, flags);
+            continue;
+        }
+
+        arg = (stack != NULL) ? stack[i] : PyTuple_GET_ITEM(compat_args, i);
+        msg = convertsimple(arg, &format, p_va, flags, ...);
+        if (msg != NULL) { /* conversion failed */ ... error ... }
+        i++;
+    }
+    ...
+}
+```
+
+The loop tracks `i` (number of positional arguments consumed) against
+`nargs`. When `i >= nargs` and the optional marker `|` has been seen
+(`min != -1`), missing arguments are silently skipped by calling
+`skipitem` which advances `p_va` without reading from `args`. If the
+`|` has not been seen and `i >= nargs`, the function raises `TypeError:
+function takes exactly N arguments (M given)`.
+
+`fname` and `message` come from `:name` and `;message` suffixes in the
+format string. `:name` is used to give the function name in error messages;
+`;message` replaces the entire generated error message with a literal string.
+
+### Keyword argument handling (lines 701 to 900)
+
+<CpyLink path="Python/getargs.c" lines="701-900" />
+
+`vgetargskeywords` is the keyword-aware variant. It receives the positional
+args as a tuple (or stack array), the keyword dict, and a
+`NULL`-terminated `char *kwlist[]` naming every accepted parameter in
+format-string order.
+
+```c
+static int
+vgetargskeywords(PyObject *args, PyObject *kwargs,
+                 const char *format, char **kwlist, va_list *p_va, int flags)
+{
+    Py_ssize_t nargs = PyTuple_GET_SIZE(args);
+    Py_ssize_t nkwargs = (kwargs == NULL) ? 0 : PyDict_GET_SIZE(kwargs);
+    ...
+    /* First pass: positional arguments */
+    for (i = 0; kwlist[i] && i < nargs; i++) {
+        ...
+        msg = convertsimple(PyTuple_GET_ITEM(args, i), &format, p_va, ...);
+    }
+    /* Second pass: keyword arguments */
+    for (; kwlist[i]; i++) {
+        PyObject *current_arg = NULL;
+        if (nkwargs > 0 && kwlist[i][0]) {
+            current_arg = PyDict_GetItemString(kwargs, kwlist[i]);
+        }
+        if (current_arg != NULL) {
+            ...
+            msg = convertsimple(current_arg, &format, p_va, ...);
+        } else if (required) {
+            PyErr_Format(PyExc_TypeError, "%.200s() missing required "
+                         "argument: '%.200s'", ...);
+            return 0;
+        } else {
+            skipitem(&format, p_va, flags);
+        }
+    }
+    /* Third pass: reject unknown kwargs */
+    if (nkwargs > 0) {
+        PyObject *key;
+        Py_ssize_t pos = 0;
+        while (PyDict_Next(kwargs, &pos, &key, NULL)) {
+            /* check key is in kwlist */
+            ...
+        }
+    }
+    return 1;
+}
+```
+
+The three-pass structure guarantees that positional arguments fill the
+leading slots, then keyword arguments fill remaining named slots, and
+finally any keyword that does not appear in `kwlist` raises `TypeError`.
+The `$` marker sets `keyword_only_start`, and any parameter after it
+is skipped in the first (positional) pass even if the caller supplies it
+positionally.
+
+## CPython 3.14 changes worth noting
+
+`_PyArg_UnpackKeywordsWithVararg` was added in 3.12 for Argument Clinic
+functions declared with `*args`. It separates the fixed named parameters
+from the star-args slice during fast-call dispatch. In 3.14 the `p` format
+character is documented as stable API (it was informally supported since
+3.3 but not guaranteed). The `u` and `u#` format characters remain
+deprecated since 3.3 and emit a `DeprecationWarning` in 3.13+.
+`_PyArg_BadArgument` was added in 3.11 to provide a consistent, structured
+error message format used by Argument Clinic; it is unchanged in 3.14.

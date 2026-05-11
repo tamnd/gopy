@@ -1,0 +1,167 @@
+---
+title: Modules/_operator.c
+description: C implementation of the operator module — callable equivalents of Python operators plus attrgetter, itemgetter, and methodcaller.
+cpython_path: Modules/_operator.c
+cpython_version: "3.14"
+lines: 600
+status: annotated
+ported_to: module/operator/module.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Modules/_operator.c`
+
+<CpyLink path="Modules/_operator.c" />
+
+The C backend for the `operator` module. `Lib/operator.py` imports this
+module as `_operator` and re-exports everything. The module provides
+callable equivalents of every Python operator so that code using
+higher-order functions (`map`, `sorted`, `functools.reduce`) can pass an
+operator directly without writing a lambda.
+
+The file divides into three groups:
+
+- **Arithmetic and bitwise wrappers** — thin C functions that delegate to
+  the corresponding `PyNumber_*` or `PySequence_*` API call. Most are
+  two-liners.
+- **Comparison wrappers** — `op_eq` through `op_ge`, each calling
+  `PyObject_RichCompare` with the appropriate `Py_EQ` / `Py_NE` / `Py_LT`
+  / `Py_LE` / `Py_GT` / `Py_GE` flag.
+- **Callable objects** — `attrgetter`, `itemgetter`, and `methodcaller`,
+  which are Python types (not plain functions) so that they can store
+  state and be pickled.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Modules/_operator.c" lines="1-50">1-50</Cpy> | includes, `_operator_state` | Headers and per-interpreter state struct. | `module/operator/module.go:state` |
+| <Cpy path="Modules/_operator.c" lines="50-200">50-200</Cpy> | `op_add`, `op_sub`, `op_mul`, `op_matmul`, `op_truediv`, `op_floordiv`, `op_mod`, `op_pow`, `op_neg`, `op_pos`, `op_abs`, `op_index` | Arithmetic wrappers delegating to `PyNumber_*`. | `module/operator/module.go:Add`, `Sub`, `Mul`, etc. |
+| <Cpy path="Modules/_operator.c" lines="200-300">200-300</Cpy> | `op_and_`, `op_or_`, `op_xor`, `op_invert`, `op_lshift`, `op_rshift` | Bitwise wrappers delegating to `PyNumber_And` / `PyNumber_Or` etc. | `module/operator/module.go:And`, `Or`, `Xor`, etc. |
+| <Cpy path="Modules/_operator.c" lines="300-370">300-370</Cpy> | `op_eq`, `op_ne`, `op_lt`, `op_le`, `op_gt`, `op_ge` | Comparison wrappers using `PyObject_RichCompare`. | `module/operator/module.go:Eq`, `Ne`, `Lt`, etc. |
+| <Cpy path="Modules/_operator.c" lines="370-430">370-430</Cpy> | `op_getitem`, `op_setitem`, `op_delitem`, `op_contains`, `op_concat`, `op_iconcat`, `op_length_hint`, `op_truth` | Sequence/mapping wrappers and truthiness. | `module/operator/module.go:GetItem`, `SetItem`, etc. |
+| <Cpy path="Modules/_operator.c" lines="430-520">430-520</Cpy> | `attrgetter_new`, `attrgetter_call`, `attrgetter_repr`, `attrgetter_reduce` | `attrgetter` type: stores one or more attribute name strings; supports dotted-name chaining. | `module/operator/module.go:AttrGetter` |
+| <Cpy path="Modules/_operator.c" lines="520-570">520-570</Cpy> | `itemgetter_new`, `itemgetter_call`, `itemgetter_repr`, `itemgetter_reduce` | `itemgetter` type: stores one or more keys; applies `op_getitem` on each call. | `module/operator/module.go:ItemGetter` |
+| <Cpy path="Modules/_operator.c" lines="570-600">570-600</Cpy> | `methodcaller_new`, `methodcaller_call`, `methodcaller_repr`, `methodcaller_reduce`, `_operatormodule`, `PyInit__operator` | `methodcaller` type and module entry point. | `module/operator/module.go:MethodCaller`, `Module` |
+
+## Reading
+
+### Arithmetic wrappers (lines 50 to 200)
+
+<CpyLink path="Modules/_operator.c" lines="50-200" />
+
+Every arithmetic wrapper is two lines of C — validate argument count (via
+Argument Clinic) and call the matching number-protocol function:
+
+```c
+static PyObject *
+op_add(PyObject *module, PyObject *const *args, Py_ssize_t nargs)
+{
+    /* Argument Clinic: two positional args a, b */
+    PyObject *a = args[0], *b = args[1];
+    return PyNumber_Add(a, b);
+}
+```
+
+`op_neg`, `op_pos`, and `op_abs` take a single argument and delegate to
+`PyNumber_Negative`, `PyNumber_Positive`, and `PyNumber_Absolute`
+respectively. `op_index` calls `PyNumber_Index`, which is the slot used by
+`__index__` (required by `range` and slice objects).
+
+The in-place variants (`op_iadd`, `op_isub`, etc.) call the `PyNumber_InPlace*`
+functions. When the object does not support in-place mutation, Python falls
+back to the regular binary operation and returns a new object, so the
+in-place operator functions never raise `TypeError` solely because the
+type is immutable.
+
+### `attrgetter` dotted-name chaining (lines 430 to 520)
+
+<CpyLink path="Modules/_operator.c" lines="430-520" />
+
+`attrgetter` stores its attribute name(s) at construction time and
+applies `getattr` on each call. When a name contains dots, `attrgetter`
+splits it and chains multiple `getattr` calls:
+
+```c
+static PyObject *
+attrgetter_call(attrgetterobject *ag, PyObject *args, PyObject *kw)
+{
+    PyObject *obj;
+    if (!PyArg_UnpackTuple(args, "attrgetter", 1, 1, &obj))
+        return NULL;
+
+    /* For each stored attribute (there may be more than one): */
+    for (Py_ssize_t i = 0; i < ag->nattrs; i++) {
+        PyObject *attr = ag->attr[i];  /* may contain dots */
+        /* Walk the dotted chain. */
+        PyObject *result = obj;
+        Py_ssize_t dotcount = ag->dotcount[i];
+        for (Py_ssize_t j = 0; j <= dotcount; j++) {
+            PyObject *name = ag->dotnames[i][j];
+            result = PyObject_GetAttr(result, name);
+            if (j > 0) Py_DECREF(/* previous result */...);
+            if (result == NULL) return NULL;
+        }
+        /* Store or return the result. */
+        ...
+    }
+}
+```
+
+At construction time (`attrgetter_new`), each dotted name like `"a.b.c"` is
+split on `"."` and the pieces are stored in `ag->dotnames[i]` as a
+pre-built tuple of interned strings. This pre-splitting means the dot
+splitting cost is paid once at `attrgetter("a.b.c")` time, not on every
+call.
+
+When `attrgetter` receives multiple names (e.g., `attrgetter("x", "y")`),
+`attrgetter_call` returns a tuple of results rather than a single value.
+This is used with `sorted(records, key=attrgetter("last", "first"))`.
+
+### `methodcaller` (lines 570 to 600)
+
+<CpyLink path="Modules/_operator.c" lines="570-600" />
+
+`methodcaller` stores a method name, positional arguments, and keyword
+arguments at construction time, then calls
+`obj.method(*args, **kwargs)` on every invocation:
+
+```c
+static PyObject *
+methodcaller_call(methodcallerobject *mc, PyObject *args, PyObject *kw)
+{
+    PyObject *method = PyObject_GetAttr(args_obj, mc->name);
+    if (method == NULL) return NULL;
+    PyObject *result = PyObject_Call(method, mc->args, mc->kwds);
+    Py_DECREF(method);
+    return result;
+}
+```
+
+The single-argument form `methodcaller("strip")` is the most common usage
+with `map`. The stored `mc->args` tuple is prepended from the
+construction call, not from the invocation call, which is the
+distinguishing feature from `attrgetter`: `methodcaller` passes stored
+arguments, `attrgetter` passes none.
+
+`methodcaller.__reduce__` serializes to
+`(methodcaller, (name,) + args, kwds)` for pickling support. This mirrors
+`partial.__reduce__` in `_functoolsmodule.c`.
+
+## gopy mirror
+
+`module/operator/module.go`. The arithmetic and comparison wrappers are
+one-line functions calling the corresponding `objects` protocol helpers.
+`AttrGetter` pre-splits dotted names at construction and walks the chain
+with `objects.GetAttr`. `ItemGetter` calls `objects.GetItem`. `MethodCaller`
+uses `objects.GetAttr` followed by `objects.Call`.
+
+## CPython 3.14 changes
+
+`op_matmul` (`@`) and `op_imatmul` (`@=`) were added in 3.5 (PEP 465)
+and are stable. The `attrgetter` and `itemgetter` types gained
+`__class_getitem__` in 3.9 for use in type annotations
+(`operator.attrgetter[str]`). The per-interpreter state struct was
+introduced in 3.12 to hold references to exception types used in
+`methodcaller` error paths.

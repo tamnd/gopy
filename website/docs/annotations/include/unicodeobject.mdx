@@ -1,0 +1,133 @@
+---
+title: Include/unicodeobject.h
+description: Public C API for Python str objects — construction from C strings, UTF-8 encode/decode, interning, and type checks.
+cpython_path: Include/unicodeobject.h
+cpython_version: "3.14"
+lines: 300
+status: annotated
+ported_to: objects/str.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Include/unicodeobject.h`
+
+<CpyLink path="Include/unicodeobject.h" />
+
+The public header for `str`. CPython 3.12 completed the removal of the
+"legacy string" representation: every `PyUnicodeObject` is now either a
+compact ASCII string or a compact Unicode string (the `wstr` and `wstr_length`
+fields are gone). The public API surface in this header is therefore narrower
+than it once was; the wide-character and UCS-2/UCS-4 accessors that existed
+through 3.11 were demoted to `Include/cpython/unicodeobject.h` or removed
+entirely.
+
+In gopy, `str` is represented by a Go `string` (always valid UTF-8) wrapped in
+`objects/str.go`. The interning table uses a Go `map[string]*Str`. Construction
+functions translate directly: `PyUnicode_FromString` becomes a `NewStr(s
+string)` call, and `PyUnicode_AsUTF8` is a no-op field read because Go strings
+are already UTF-8.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Include/unicodeobject.h" lines="1-30">1-30</Cpy> | `PyUnicode_Check` / `PyUnicode_CheckExact` | Type-check macros; `PyUnicode_Check` accepts subclasses. | `objects/str.go` |
+| <Cpy path="Include/unicodeobject.h" lines="31-80">31-80</Cpy> | `PyUnicode_FromString` / `PyUnicode_FromStringAndSize` / `PyUnicode_FromFormat` | Create a `str` from a C string, a buffer with length, or a printf-style format. | `objects/str.go` |
+| <Cpy path="Include/unicodeobject.h" lines="81-130">81-130</Cpy> | `PyUnicode_AsUTF8` / `PyUnicode_AsUTF8AndSize` | Return a pointer to the object's UTF-8 representation, cached inside the object. | `objects/str.go` |
+| <Cpy path="Include/unicodeobject.h" lines="131-170">131-170</Cpy> | `PyUnicode_DecodeUTF8` / `PyUnicode_DecodeUTF8Stateful` | Decode a raw byte buffer to a `str`, with configurable error handler. | `objects/str.go` |
+| <Cpy path="Include/unicodeobject.h" lines="171-210">171-210</Cpy> | `PyUnicode_Concat` / `PyUnicode_Join` / `PyUnicode_Split` / `PyUnicode_Contains` | String operations that mirror Python-level `str` methods. | `objects/str.go` |
+| <Cpy path="Include/unicodeobject.h" lines="211-250">211-250</Cpy> | `PyUnicode_Compare` / `PyUnicode_CompareWithASCIIString` / `PyUnicode_EqualToUTF8` | Comparison functions returning `-1`/`0`/`1` or a bool. | `objects/str.go` |
+| <Cpy path="Include/unicodeobject.h" lines="251-300">251-300</Cpy> | `PyUnicode_InternInPlace` / `PyUnicode_InternFromString` / `PyUnicode_IsIdentifier` | Interning and identifier predicate. | `objects/str.go` |
+
+## Reading
+
+### Construction functions (lines 31 to 80)
+
+<CpyLink path="Include/unicodeobject.h" lines="31-80" />
+
+`PyUnicode_FromString` is the most common entry point. It expects a
+null-terminated UTF-8 C string and raises `ValueError` if the bytes are not
+valid UTF-8.
+
+```c
+PyAPI_FUNC(PyObject *) PyUnicode_FromString(const char *u);
+
+PyAPI_FUNC(PyObject *) PyUnicode_FromStringAndSize(
+    const char *u,   /* UTF-8 bytes; may be NULL if size == 0 */
+    Py_ssize_t size);
+
+PyAPI_FUNC(PyObject *) PyUnicode_FromFormat(
+    const char *format, ...);
+```
+
+`PyUnicode_FromStringAndSize` is used when the caller knows the length or when
+the buffer may contain embedded null bytes. Passing `NULL` with `size == 0`
+produces the empty string singleton.
+
+`PyUnicode_FromFormat` supports a subset of `printf` directives plus
+Python-specific ones such as `%U` (a `PyObject *` that must already be a
+`str`) and `%R` (calls `repr()` on the argument). It constructs the result by
+appending segments and does not go through `sprintf`, so it is safe from
+buffer overflows.
+
+In gopy `NewStr(s string)` covers `PyUnicode_FromString`. The format variant
+is not needed because Go's `fmt.Sprintf` is used wherever CPython would call
+`PyUnicode_FromFormat`.
+
+### UTF-8 encode/decode (lines 81 to 170)
+
+<CpyLink path="Include/unicodeobject.h" lines="81-170" />
+
+```c
+PyAPI_FUNC(const char *) PyUnicode_AsUTF8(PyObject *unicode);
+
+PyAPI_FUNC(const char *) PyUnicode_AsUTF8AndSize(
+    PyObject *unicode,
+    Py_ssize_t *size);   /* written on success; may be NULL */
+
+PyAPI_FUNC(PyObject *) PyUnicode_DecodeUTF8(
+    const char *s,
+    Py_ssize_t size,
+    const char *errors); /* "strict", "replace", "ignore", or NULL */
+```
+
+`PyUnicode_AsUTF8` encodes the string to UTF-8 on the first call and caches
+the result in the compact string's trailing bytes (for compact ASCII the cache
+is trivially the existing buffer). The returned pointer is valid for the
+lifetime of the string object and must not be freed. `PyUnicode_AsUTF8AndSize`
+writes the byte count to `*size`, which callers need when the string may
+contain embedded nulls.
+
+`PyUnicode_DecodeUTF8` is the inverse: it turns a raw byte array into a `str`.
+The `errors` argument is the standard codec error handler name. Passing `NULL`
+is equivalent to `"strict"`. The `Stateful` variant returns the number of
+consumed bytes, which is useful for incremental decoders.
+
+In gopy `AsUTF8` is a trivial cast because the underlying Go `string` is
+already UTF-8. `DecodeUTF8` validates the input with `utf8.Valid` and wraps it.
+
+### Interning (lines 251 to 300)
+
+<CpyLink path="Include/unicodeobject.h" lines="251-300" />
+
+```c
+PyAPI_FUNC(void) PyUnicode_InternInPlace(PyObject **p);
+PyAPI_FUNC(PyObject *) PyUnicode_InternFromString(const char *v);
+```
+
+Interning stores a canonical copy of each distinct string value in a global
+table (`_Py_interned` dict). `PyUnicode_InternInPlace` takes a pointer to a
+`PyObject *`, replaces it with the canonical copy (or inserts the current
+object as the canonical copy), and adjusts refcounts. After this call `*p ==
+*q` is guaranteed whenever `*p` and `*q` have equal string values and both
+have been interned.
+
+CPython aggressively interns identifier strings (names used as attribute
+lookups, variable names, and keyword argument names) because `LOAD_ATTR` and
+`STORE_FAST` compare pointers rather than characters. `PyUnicode_IsIdentifier`
+tests whether a string satisfies the Unicode identifier grammar (start
+character, continue characters) without calling Python-level `str.isidentifier`.
+
+In gopy the interning table is a `sync.Map` from the Go string value to
+`*Str`. `InternInPlace` is the same operation minus the refcount adjustment.

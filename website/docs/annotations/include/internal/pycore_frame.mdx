@@ -1,0 +1,139 @@
+---
+title: Include/internal/pycore_frame.h
+description: _PyInterpreterFrame — the internal execution frame struct, owner enum, and inline stack-pointer helpers.
+cpython_path: Include/internal/pycore_frame.h
+cpython_version: "3.14"
+lines: 61
+status: annotated
+ported_to: objects/frame.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Include/internal/pycore_frame.h`
+
+<CpyLink path="Include/internal/pycore_frame.h" />
+
+Declares `_PyInterpreterFrame`, the internal execution frame that the
+eval loop actually manipulates. The Python-visible `PyFrameObject` is a
+lazily-allocated wrapper around this struct; most of the interesting
+state lives here, not in `PyFrameObject`.
+
+The companion file `Include/internal/pycore_interpframe.h` (406 lines)
+holds the bulk of the frame inline functions (`_PyFrame_GetLocals`,
+`_PyFrame_FastToLocals`, etc.). This shorter header carries only the
+struct definition, the `owner` enum, and the three most performance-
+critical inline helpers that the eval loop calls on every instruction.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Include/internal/pycore_frame.h" lines="1-20">1-20</Cpy> | `_PyFrameOwner` enum | `FRAME_OWNED_BY_CSTACK`, `FRAME_OWNED_BY_THREAD`, `FRAME_OWNED_BY_GENERATOR`, `FRAME_OWNED_BY_FRAME_OBJECT`. | `objects/frame.go` |
+| <Cpy path="Include/internal/pycore_frame.h" lines="21-45">21-45</Cpy> | `_PyInterpreterFrame` struct | All execution frame fields: executable, globals, builtins, locals, frame_obj, prev_instr, localsplus. | `objects/frame.go` |
+| <Cpy path="Include/internal/pycore_frame.h" lines="46-52">46-52</Cpy> | `_PyFrame_IsIncomplete` | True while `RESUME` has not yet run — used to detect partially-initialized frames. | `objects/frame.go` |
+| <Cpy path="Include/internal/pycore_frame.h" lines="53-57">53-57</Cpy> | `_PyFrame_GetCode` | Casts `f_executable` to `PyCodeObject *` for the common case. | `objects/frame.go` |
+| <Cpy path="Include/internal/pycore_frame.h" lines="58-61">58-61</Cpy> | `_PyFrame_SetStackPointer` / `_PyFrame_GetStackPointer` | Read/write the stack pointer stored as an offset from `localsplus`. | `objects/frame.go` |
+
+## Reading
+
+### `_PyInterpreterFrame` fields vs `PyFrameObject` (lines 21 to 45)
+
+<CpyLink path="Include/internal/pycore_frame.h" lines="21-45" />
+
+```c
+struct _PyInterpreterFrame {
+    /* f_executable is the code object (common case) or a function object
+       when the frame is a generator/coroutine still at the first RESUME. */
+    PyObject *f_executable;
+
+    struct _PyInterpreterFrame *previous;
+    PyObject *f_globals;
+    PyObject *f_builtins;
+    PyObject *f_locals;          /* may be NULL for optimised frames */
+    PyFrameObject *frame_obj;    /* lazily created PyFrameObject wrapper */
+
+    _Py_CODEUNIT *prev_instr;    /* pointer to last-executed instruction word */
+    int f_lasti;                 /* last instruction index (for tracing) */
+    bool f_trace_lines;
+    bool f_trace_opcodes;
+    uint8_t owner;               /* one of _PyFrameOwner */
+
+    /* The eval stack and fast locals share this array. Layout:
+         [0 .. nlocals)           fast locals
+         [nlocals .. ncellvars)   cell vars
+         [ncellvars .. nfreevars) free vars
+         [nfreevars .. )          eval stack  */
+    PyObject *localsplus[1];
+};
+```
+
+The key design decision is the `localsplus` flexible array. Fast
+locals, cell variables, free variables, and the evaluation stack all
+live in one contiguous slab. The interpreter only needs to advance a
+single pointer (`sp`) through that slab; no separate stack allocation
+is required. `PyCodeObject.co_stacksize` tells the eval loop how many
+extra slots to reserve beyond the variable section.
+
+`PyFrameObject` is a separate heap allocation created on demand (when
+Python code calls `sys._getframe()` or a debugger inspects the frame).
+It holds a borrowed reference back to the `_PyInterpreterFrame`.
+Because of this lazy creation, always test `frame->frame_obj != NULL`
+before touching `PyFrameObject` fields.
+
+In gopy, `objects/frame.go` mirrors `_PyInterpreterFrame` directly.
+`PyFrameObject` is represented as a distinct `FrameObject` struct that
+wraps `*Frame`; it is only allocated when `frame_obj` is requested.
+
+### `owner` enum (lines 1 to 20)
+
+<CpyLink path="Include/internal/pycore_frame.h" lines="1-20" />
+
+```c
+typedef enum _PyFrameOwner {
+    FRAME_OWNED_BY_CSTACK = 0,       /* allocated in C stack frame (inlined call) */
+    FRAME_OWNED_BY_THREAD = 1,       /* heap-allocated, owned by thread state */
+    FRAME_OWNED_BY_GENERATOR = 2,    /* owned by a generator/coroutine object */
+    FRAME_OWNED_BY_FRAME_OBJECT = 3, /* kept alive only by PyFrameObject */
+} _PyFrameOwner;
+```
+
+The `owner` field drives deallocation. When the eval loop returns from
+a frame it checks `owner` to decide whether to free the frame
+immediately (`FRAME_OWNED_BY_THREAD`), leave it on the C stack
+(`FRAME_OWNED_BY_CSTACK`), or hand it back to the generator object
+(`FRAME_OWNED_BY_GENERATOR`). `FRAME_OWNED_BY_FRAME_OBJECT` means the
+`PyFrameObject` wrapper is the last reference holder; the frame is
+freed when the wrapper is GC'd.
+
+In gopy, frame lifetime follows Go's GC so the `owner` enum is
+informational only. The eval loop in `vm/eval_gen.go` stores it for
+parity with CPython's debug assertions.
+
+### Inline stack-pointer helpers (lines 58 to 61)
+
+<CpyLink path="Include/internal/pycore_frame.h" lines="58-61" />
+
+```c
+static inline void
+_PyFrame_SetStackPointer(struct _PyInterpreterFrame *frame, PyObject **sp)
+{
+    frame->prev_instr = (_Py_CODEUNIT *)(sp);  /* overloaded during suspension */
+}
+
+static inline PyObject **
+_PyFrame_GetStackPointer(struct _PyInterpreterFrame *frame)
+{
+    return (PyObject **)frame->prev_instr;
+}
+```
+
+When a generator or coroutine suspends, CPython stores the stack
+pointer in `prev_instr` via a pointer cast. On resume, the stack
+pointer is recovered with `_PyFrame_GetStackPointer` before the eval
+loop overwrites `prev_instr` with the actual instruction pointer.
+This dual use of `prev_instr` is the reason the field is typed as
+`_Py_CODEUNIT *` even though it temporarily holds a `PyObject **`.
+
+In gopy's `objects/frame.go`, the two helpers are Go methods on
+`*Frame` that manipulate a `stackPointer int` index into `Localsplus`.

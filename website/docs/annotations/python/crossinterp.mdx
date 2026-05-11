@@ -1,0 +1,161 @@
+---
+title: Python/crossinterp.c
+description: Cross-interpreter object sharing — extracting, transferring, and recreating Python objects across sub-interpreter boundaries.
+cpython_path: Python/crossinterp.c
+cpython_version: "3.14"
+lines: 3304
+status: annotated
+ported_to: pythonrun/crossinterp.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Python/crossinterp.c`
+
+<CpyLink path="Python/crossinterp.c" />
+
+The sub-interpreter isolation layer introduced by PEP 554. Python
+objects live in a single interpreter; passing them across interpreter
+boundaries is unsafe because each interpreter manages its own reference
+counts, type objects, and GIL. `crossinterp.c` provides a controlled
+channel: a sending interpreter serialises an object into a
+`_PyCrossInterpreterData` buffer (a plain C struct with no Python
+pointers), and the receiving interpreter reconstructs a new Python object
+from that buffer.
+
+The file also contains the execution primitives that run a C callable
+inside another interpreter's thread state (`_Py_CallInInterpreter`), the
+`_PyXI_Enter` / `_PyXI_Exit` pair that set up a cross-interpreter
+execution context, and the isolation-level predicate
+`_PyInterpreterState_RequiresIDRef` used by the `interpreters` module to
+enforce strict separation.
+
+The companion header files `Python/crossinterp_data_lookup.h` and
+`Python/crossinterp_exceptions.h` handle the type registry and exception
+serialisation respectively; they are included inline from this file.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Python/crossinterp.c" lines="1-150">1-150</Cpy> | Includes, `_PyCrossInterpreterData` layout | The data struct: `data`, `obj`, `interp`, `new_object` function pointer, `free` function pointer. | `pythonrun/crossinterp.go:CrossInterpreterData` |
+| <Cpy path="Python/crossinterp.c" lines="151-450">151-450</Cpy> | `_PyObject_CheckCrossInterpreterData` | Verifies the object's type is registered as shareable; raises `ValueError` if not. | `pythonrun/crossinterp.go:CheckCrossInterpreterData` |
+| <Cpy path="Python/crossinterp.c" lines="451-800">451-800</Cpy> | `_PyObject_GetCrossInterpreterData` / `_PyObject_NewCrossInterpreterData` | Calls `tp_get_xid` (the type's registered extractor), fills the `_PyCrossInterpreterData` buffer, pins the source interpreter. | `pythonrun/crossinterp.go:GetCrossInterpreterData` |
+| <Cpy path="Python/crossinterp.c" lines="801-1100">801-1100</Cpy> | `_PyXIData_Release` / `_PyXIData_ReleaseAndRawFree` | Decrement the source object's refcount and free the buffer; must be called from the source interpreter. | `pythonrun/crossinterp.go:XIDataRelease` |
+| <Cpy path="Python/crossinterp.c" lines="1101-1500">1101-1500</Cpy> | `_PyInterpreterState_RequiresIDRef` / `_PyInterpreterID_*` | Isolation-level predicate and interpreter-ID object type. | `pythonrun/crossinterp.go:RequiresIDRef` |
+| <Cpy path="Python/crossinterp.c" lines="1501-2200">1501-2200</Cpy> | `_PyXI_Enter` / `_PyXI_Exit` | Push and pop the cross-interpreter execution context; set up the target thread state, handle namespace propagation. | `pythonrun/crossinterp.go:XIEnter` / `XIExit` |
+| <Cpy path="Python/crossinterp.c" lines="2201-3304">2201-3304</Cpy> | `_Py_CallInInterpreter` / `_Py_CallInInterpreterAndRawFree` | Run a `crossinterpdatafunc` in the target interpreter's thread state; used by `channel.send` / `channel.recv`. | `pythonrun/crossinterp.go:CallInInterpreter` |
+
+## Reading
+
+### `_PyObject_GetCrossInterpreterData` dispatch (lines 451 to 800)
+
+<CpyLink path="Python/crossinterp.c" lines="451-800" />
+
+`_PyObject_GetCrossInterpreterData` is the main entry point for a sender.
+
+```c
+int
+_PyObject_GetCrossInterpreterData(PyObject *obj, _PyCrossInterpreterData *data)
+{
+    PyInterpreterState *interp = _PyInterpreterState_GET();
+
+    /* Look up the registered extractor for obj's type. */
+    crossinterpdatafunc getdata = lookup_getdata(interp, obj);
+    if (getdata == NULL) {
+        if (!PyErr_Occurred()) {
+            _PyErr_SetStringWithName(interp,
+                PyExc_ValueError,
+                "unsupported cross-interpreter type",
+                Py_TYPE(obj)->tp_name);
+        }
+        return -1;
+    }
+    Py_INCREF(obj);
+    int res = getdata(interp, obj, data);
+    if (res != 0) {
+        Py_DECREF(obj);
+        return -1;
+    }
+    _PyCrossInterpreterData_SET_INTERPID(data, interp);
+    return 0;
+}
+```
+
+`lookup_getdata` searches the interpreter's type registry
+(`interp->xid_lookup`) for a `crossinterpdatafunc` keyed by `Py_TYPE(obj)`.
+Built-in registrations cover `int`, `float`, `bytes`, `str`, `bool`, and
+`None`. Extension types can register their own extractor via
+`PyInterpreterState_AddXIData`. After the extractor fills `data->data` with
+a marshalled copy, the interpreter ID is stamped into the struct so
+`_PyXIData_Release` can route the free back to the right interpreter.
+
+### `_PyCrossInterpreterData` layout (lines 1 to 150)
+
+<CpyLink path="Python/crossinterp.c" lines="1-150" />
+
+```c
+struct _PyCrossInterpreterData {
+    /* Marshalled data; layout is type-defined. */
+    void                  *data;
+    /* Borrowed reference to the original object (source interp only). */
+    PyObject              *obj;
+    /* Source interpreter ID. */
+    int64_t                interpid;
+    /* Reconstruct a Python object in the target interpreter. */
+    xid_newobjectfunc      new_object;
+    /* Free data->data; called from the source interpreter. */
+    xid_freefunc           free;
+};
+```
+
+The struct is plain C: no Python headers, no GC participation. `data` is a
+`void *` whose layout is entirely up to the extractor; for `str` it is a
+`PyBytes` object owned by the source interpreter's allocator, while for
+`int` it is a heap-allocated `long long`. The `new_object` function pointer
+is called in the target interpreter to reconstruct a Python object; it
+receives only the `_PyCrossInterpreterData *` and returns a new reference.
+`free` is called in the source interpreter after the transfer completes,
+or on error paths to avoid leaking the marshalled copy.
+
+### `_PyXI_Enter` and `_PyXI_Exit` (lines 1501 to 2200)
+
+<CpyLink path="Python/crossinterp.c" lines="1501-2200" />
+
+`_PyXI_Enter` prepares the target interpreter to receive a cross-interpreter
+call. It acquires the target interpreter's GIL, creates a fresh thread state
+for the calling OS thread within the target, and optionally propagates a
+`__main__` namespace snapshot encoded as cross-interpreter data.
+
+```c
+int
+_PyXI_Enter(_PyXIState *xistate, PyInterpreterState *interp,
+            PyObject *nsupdates)
+{
+    PyThreadState *tstate = _PyThreadState_NewBound(interp, ...);
+    if (tstate == NULL) return -1;
+
+    PyEval_RestoreThread(tstate);     /* acquire interp's GIL */
+    xistate->tstate = tstate;
+
+    if (nsupdates != NULL) {
+        /* propagate the namespace snapshot */
+        if (_PyXI_ApplyNamespaceOverrides(xistate, nsupdates) < 0) {
+            _PyXI_Exit(xistate);
+            return -1;
+        }
+    }
+    return 0;
+}
+```
+
+`_PyXI_Exit` does the symmetric teardown: saves any result or exception
+back through cross-interpreter data, releases the target GIL via
+`PyEval_SaveThread`, and destroys the temporary thread state. The
+caller (typically `_Py_CallInInterpreter`) then re-acquires its own
+interpreter's GIL to process the result.
+
+The pair is the boundary between the two interpreters: everything inside
+`_PyXI_Enter` / `_PyXI_Exit` runs with the target interpreter's GIL held
+and its thread state current. Nothing Python-heap-allocated in the source
+interpreter may be touched inside that window.

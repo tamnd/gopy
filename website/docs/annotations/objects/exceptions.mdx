@@ -1,0 +1,223 @@
+---
+title: Objects/exceptions.c
+description: Built-in exception hierarchy. BaseException base class, __traceback__, __cause__, __context__, __suppress_context__, and all concrete exception types.
+cpython_path: Objects/exceptions.c
+cpython_version: "3.14"
+lines: 4586
+status: annotated
+ported_to: objects/exceptions.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Objects/exceptions.c`
+
+<CpyLink path="Objects/exceptions.c" />
+
+All Python exceptions inherit from `BaseException`. This file defines the
+`BaseException` type and all 60+ built-in exception types. Most concrete types
+are thin type objects with no extra fields beyond what `BaseException` provides.
+The key fields on `BaseException` are `args` (the constructor tuple), `tb`
+(`__traceback__`), `cause` (`__cause__`, set by `raise X from Y`), `context`
+(`__context__`, set implicitly when one exception occurs while another is being
+handled), and `suppress_context` (`__suppress_context__`, True when
+`raise X from None`). `OSError` and `SyntaxError` subclasses add specialized
+fields.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Objects/exceptions.c" lines="1-200">1-200</Cpy> | `BaseException_init`, `BaseException_new`, `BaseException_dealloc`, `BaseException_traverse` | Base class lifecycle. | `objects/exceptions.go:BaseException` |
+| <Cpy path="Objects/exceptions.c" lines="200-500">200-500</Cpy> | `BaseException_repr`, `BaseException_str`, `BaseException_args`, `BaseException_with_traceback` | `__repr__`, `__str__`, `with_traceback()`. | `objects/exceptions.go:baseExceptionRepr` |
+| <Cpy path="Objects/exceptions.c" lines="500-900">500-900</Cpy> | `BaseException_get_tb`, `BaseException_set_tb`, `BaseException_get_cause`, `BaseException_set_cause`, `BaseException_get_context`, `BaseException_set_context`, `BaseException_get_suppress_context`, `BaseException_set_suppress_context` | Dunder attribute getsets. | `objects/exceptions.go` |
+| <Cpy path="Objects/exceptions.c" lines="900-1200">900-1200</Cpy> | `_PyException_AddNote`, `BaseExceptionGroup` type, `ExceptionGroup` type | Notes (`__notes__` list) and exception groups (PEP 654). | `objects/exceptions.go:AddNote` |
+| <Cpy path="Objects/exceptions.c" lines="1200-1800">1200-1800</Cpy> | `OSError_init`, `OSError_reduce`, `OSError_new`, errno/strerror/filename getsets | `OSError` and its `errno`-dispatched subclasses. | `objects/exceptions.go:OSError` |
+| <Cpy path="Objects/exceptions.c" lines="1800-2400">1800-2400</Cpy> | `SyntaxError_init`, `SyntaxError_str`, lineno/offset/filename/text/end_lineno/end_offset getsets | `SyntaxError` with six location fields. | `objects/exceptions.go:SyntaxError` |
+| <Cpy path="Objects/exceptions.c" lines="2400-4000">2400-4000</Cpy> | All concrete exception types: `ValueError`, `TypeError`, `KeyError`, `StopIteration`, `SystemExit`, `ImportError`, `UnicodeError` subclasses, etc. | Concrete types, most as thin wrappers. | `objects/exceptions.go` |
+| <Cpy path="Objects/exceptions.c" lines="4000-4586">4000-4586</Cpy> | `_PyExc_Init`, `_PyException_SetCause`, `_PyException_SetContext` | Interpreter init, cause/context setters used by the eval loop. | `objects/exceptions.go:Init` |
+
+## Reading
+
+### `BaseException_init` (lines 1 to 200)
+
+<CpyLink path="Objects/exceptions.c" lines="1-200" />
+
+`__init__` stores the positional args tuple in `self->args` with a strong
+reference. `__str__` behavior is based on the length of `args`:
+
+```c
+static int
+BaseException_init(PyBaseExceptionObject *self, PyObject *args, PyObject *kwds)
+{
+    static char *kwlist[] = {"args", 0};
+    PyObject *args_ = NULL;
+    if (!_PyArg_NoKeywords("BaseException", kwds))
+        return -1;
+    Py_INCREF(args);
+    Py_XSETREF(self->args, args);
+    return 0;
+}
+
+static PyObject *
+BaseException_str(PyBaseExceptionObject *self)
+{
+    switch (PyTuple_GET_SIZE(self->args)) {
+    case 0:
+        return PyUnicode_FromString("");
+    case 1:
+        return PyObject_Str(PyTuple_GET_ITEM(self->args, 0));
+    default:
+        return PyObject_Str(self->args);
+    }
+}
+```
+
+`with_traceback(tb)` sets `self->tb` and returns `self` to support the
+chaining idiom `raise X.with_traceback(tb)`:
+
+```c
+static PyObject *
+BaseException_with_traceback(PyObject *self, PyObject *tb)
+{
+    if (tb != Py_None && !PyTraceBack_Check(tb)) {
+        PyErr_SetString(PyExc_TypeError,
+            "__traceback__ must be a traceback or None");
+        return NULL;
+    }
+    Py_XSETREF(((PyBaseExceptionObject *)self)->tb, Py_XNewRef(tb));
+    return Py_NewRef(self);
+}
+```
+
+### Cause and context (lines 500 to 900)
+
+<CpyLink path="Objects/exceptions.c" lines="500-900" />
+
+`__cause__` is set by `raise X from Y`: the compiler emits `RAISE_VARARGS 2`
+and the eval loop calls `_PyException_SetCause(exc, cause)`. `__context__` is
+set implicitly by the eval loop when an exception escapes while another is
+already active in the thread state. `__suppress_context__` is set True when
+`raise X from None` is used, which causes the traceback machinery to omit the
+"During handling of the above exception, another exception occurred" message:
+
+```c
+void
+_PyException_SetCause(PyObject *exception, PyObject *cause)
+{
+    PyBaseExceptionObject *exc = (PyBaseExceptionObject *)exception;
+
+    Py_XSETREF(exc->cause, Py_XNewRef(cause));
+    /* raise X from None sets suppress_context so the "during handling"
+       message is not printed. */
+    exc->suppress_context = (cause == Py_None) ? 1 : 0;
+}
+
+void
+_PyException_SetContext(PyObject *exception, PyObject *context)
+{
+    PyBaseExceptionObject *exc = (PyBaseExceptionObject *)exception;
+    Py_XSETREF(exc->context, Py_XNewRef(context));
+}
+```
+
+### `OSError` (lines 1200 to 1800)
+
+<CpyLink path="Objects/exceptions.c" lines="1200-1800" />
+
+`OSError.__init__` has special-cased 2-arg and 3-arg forms:
+
+```c
+static int
+OSError_init(PyOSErrorObject *self, PyObject *args, PyObject *kwds)
+{
+    PyObject *myerrno = NULL, *strerror = NULL;
+    PyObject *filename = NULL, *filename2 = NULL;
+    Py_ssize_t nargs = PyTuple_GET_SIZE(args);
+
+    if (nargs >= 2 && nargs <= 5) {
+        /* (errno, strerror[, filename[, winerror[, filename2]]]) */
+        if (!PyArg_UnpackTuple(args, "OSError", 2, 5,
+                               &myerrno, &strerror,
+                               &filename, NULL, &filename2))
+            return -1;
+    }
+    Py_XSETREF(self->myerrno,  Py_XNewRef(myerrno));
+    Py_XSETREF(self->strerror, Py_XNewRef(strerror));
+    Py_XSETREF(self->filename, Py_XNewRef(filename));
+    Py_XSETREF(self->filename2, Py_XNewRef(filename2));
+    ...
+}
+```
+
+`OSError_new` dispatches to the correct subclass based on the `errno` argument
+when `OSError` is called directly. The table maps errno values such as `ENOENT`
+to `FileNotFoundError`, `EACCES` to `PermissionError`, and so on. This is the
+mechanism that makes `open("missing")` raise `FileNotFoundError` even though
+the C call returns an `OSError`.
+
+### `KeyError.__str__` (lines 2400 and later)
+
+<CpyLink path="Objects/exceptions.c" lines="2400-2600" />
+
+`KeyError` overrides `__str__` to use `repr(key)` instead of `str(key)` for
+single-argument exceptions. This ensures string keys are shown with their
+quotes in tracebacks:
+
+```c
+static PyObject *
+KeyError_str(PyBaseExceptionObject *self)
+{
+    /* If args is a one-element tuple, use repr of the element. */
+    if (PyTuple_GET_SIZE(self->args) == 1) {
+        return PyObject_Repr(PyTuple_GET_ITEM(self->args, 0));
+    }
+    return BaseException_str(self);
+}
+```
+
+So `KeyError("missing")` prints as `KeyError: 'missing'` (with quotes), not
+`KeyError: missing`.
+
+### `_PyExc_Init` (lines 4000 and later)
+
+<CpyLink path="Objects/exceptions.c" lines="4000-4586" />
+
+Registers all built-in exception types in the `builtins` module and sets up the
+inheritance chain. The hierarchy is established by passing explicit `tp_base`
+pointers:
+
+```
+BaseException
+  Exception
+    ArithmeticError
+      FloatingPointError, OverflowError, ZeroDivisionError
+    LookupError
+      IndexError, KeyError
+    ValueError
+      UnicodeError
+        UnicodeDecodeError, UnicodeEncodeError, UnicodeTranslateError
+    TypeError, RuntimeError, OSError, ...
+  GeneratorExit, KeyboardInterrupt, SystemExit
+```
+
+`OSError` aliases (`IOError`, `EnvironmentError`, `WindowsError` on Windows)
+are set up here by adding them as attributes of the `builtins` module pointing
+to the same type object. `_PyExc_Init` also calls `PyType_Ready` on every
+exception type in dependency order.
+
+## gopy mirror
+
+`objects/exceptions.go`. All 60+ types are defined with `__module__ = "builtins"`.
+The `OSError` subclass dispatch uses the same errno-to-type table as CPython.
+`SyntaxError` carries the same six location fields (`filename`, `lineno`,
+`offset`, `text`, `end_lineno`, `end_offset`). `_PyException_SetCause` and
+`_PyException_SetContext` are exported functions called from `vm/eval_unwind.go`.
+
+## CPython 3.14 changes
+
+`ExceptionGroup` and `BaseExceptionGroup` added in 3.11 (PEP 654). `Exception.add_note()`
+and the `__notes__` list attribute added in 3.11. `BaseException.__notes__` is lazily
+created on first call to `add_note`. `UnicodeError` subclasses stable since 3.0. The
+`end_lineno` and `end_offset` fields on `SyntaxError` added in 3.10 for richer error
+messages.

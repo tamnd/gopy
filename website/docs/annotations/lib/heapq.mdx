@@ -1,0 +1,195 @@
+---
+title: Lib/heapq.py
+description: Pure-Python min-heap implementation with push, pop, heapify, merge, nlargest, and nsmallest; accelerated by _heapq when available.
+cpython_path: Lib/heapq.py
+cpython_version: "3.14"
+lines: 500
+status: annotated
+ported_to: module/heapq/module.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Lib/heapq.py`
+
+<CpyLink path="Lib/heapq.py" />
+
+A pure-Python implementation of the binary min-heap data structure. The
+heap is represented as a plain list where `heap[0]` is always the
+smallest element and, for every index `k`, the children of `heap[k]` are
+`heap[2*k+1]` and `heap[2*k+2]`. The module tries to import accelerated
+versions of its core functions from the C extension `_heapq` at the
+bottom of the file; if `_heapq` is available the C versions replace the
+Python ones, so only the Python implementations are documented here.
+
+The two internal helpers are `_siftup` (restores heap order after
+placing a new element at the root by pushing it down toward the leaves)
+and `_siftdown` (restores heap order after appending to the end by
+pulling the element up toward the root). The public API is built
+entirely on these two primitives.
+
+`nlargest` and `nsmallest` choose between three strategies depending on
+the relationship between `n` and `len(iterable)`: a plain `sorted()`
+call for small collections where sorting is cheaper, a
+`heapq`-maintained fixed-size heap for large collections, and a fast
+`min()`/`max()` special-case when `n == 1`.
+
+`merge` implements a k-way merge using a heap whose entries carry
+`(key, order, value, iterator)` tuples. The `order` tiebreaker avoids
+calling `__lt__` between values when two keys compare equal, which would
+fail for types that define only `__eq__`.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Lib/heapq.py" lines="1-80">1-80</Cpy> | Module docstring, `heappush`, `heappop` | Core push and pop operations using `_siftdown` / `_siftup`. | `module/heapq/module.go` |
+| <Cpy path="Lib/heapq.py" lines="81-130">81-130</Cpy> | `heapify`, `heapreplace`, `heappushpop` | `heapify` uses Floyd's O(n) algorithm; `heapreplace` skips the initial size check; `heappushpop` avoids a push when `item >= heap[0]`. | `module/heapq/module.go` |
+| <Cpy path="Lib/heapq.py" lines="131-250">131-250</Cpy> | `merge` | k-way merge over arbitrary sorted iterables using a heap; supports `key` and `reverse` keyword arguments. | `module/heapq/module.go` |
+| <Cpy path="Lib/heapq.py" lines="251-350">251-350</Cpy> | `nlargest`, `nsmallest` | Top-n selection with three-strategy dispatch: `sorted`, fixed-size heap, or `min`/`max`. | `module/heapq/module.go` |
+| <Cpy path="Lib/heapq.py" lines="351-430">351-430</Cpy> | `_siftdown`, `_siftdown_max`, `_siftup`, `_siftup_max` | Internal heap-maintenance primitives; `_max` variants support `nlargest`'s internal max-heap. | `module/heapq/module.go` |
+| <Cpy path="Lib/heapq.py" lines="431-470">431-470</Cpy> | `_heapq` import, C override block | Replaces Python implementations with C ones when `_heapq` is importable. | `module/heapq/module.go` |
+| <Cpy path="Lib/heapq.py" lines="471-500">471-500</Cpy> | `__all__`, module docstring footer | Public API declaration. | `module/heapq/module.go` |
+
+## Reading
+
+### `_siftdown` and `_siftup` algorithms (lines 351 to 430)
+
+<CpyLink path="Lib/heapq.py" lines="351-430" />
+
+```python
+def _siftdown(heap, startpos, pos):
+    newitem = heap[pos]
+    # Follow the path to the root, moving parents down until finding a place
+    # newitem can sit in.
+    while pos > startpos:
+        parentpos = (pos - 1) >> 1
+        parent = heap[parentpos]
+        if newitem < parent:
+            heap[pos] = parent
+            pos = parentpos
+            continue
+        break
+    heap[pos] = newitem
+
+def _siftup(heap, pos):
+    endpos = len(heap)
+    startpos = pos
+    newitem = heap[pos]
+    # Bubble up the smaller child until hitting a leaf.
+    childpos = 2*pos + 1    # leftmost child position
+    while childpos < endpos:
+        # Set childpos to index of smaller child.
+        rightpos = childpos + 1
+        if rightpos < endpos and not heap[childpos] < heap[rightpos]:
+            childpos = rightpos
+        # Move the smaller child up.
+        heap[pos] = heap[childpos]
+        pos = childpos
+        childpos = 2*pos + 1
+    # The leaf at pos is empty now.  Put newitem there, and bubble it up
+    # to its final resting place (by sifting its parents down).
+    heap[pos] = newitem
+    _siftdown(heap, startpos, pos)
+```
+
+`_siftdown` is the "bubble up" pass: it walks from `pos` toward the root
+along the single parent path, shifting each parent down one slot until
+the invariant is restored. The comparison is `newitem < parent` so only
+one relational call is needed per level.
+
+`_siftup` is the "push down" pass used after placing a foreign element at
+an internal node (e.g., after `heappop` puts the last element at the
+root). It first descends greedily to a leaf by always following the
+smaller child, filling each node with its smaller child as it goes. Then
+it calls `_siftdown` on the leaf to pull the element back up to its
+correct position. This two-phase approach makes exactly `log(n)` swaps
+rather than up to `2*log(n)`, at the cost of one extra `_siftdown` call.
+
+The `_max` variants (`_siftdown_max`, `_siftup_max`) flip all comparisons
+so that `heap[0]` is the largest element; they are used internally by
+`nsmallest` when maintaining a fixed-size max-heap to track the `n`
+smallest items seen so far.
+
+### `nlargest` and `nsmallest` strategy selection (lines 251 to 350)
+
+<CpyLink path="Lib/heapq.py" lines="251-350" />
+
+```python
+def nsmallest(n, iterable, key=None):
+    if n < 0:
+        return []
+    it = iter(iterable)
+    if n == 1:
+        sentinel = object()
+        result = min(it, default=sentinel, key=key)
+        return [] if result is sentinel else [result]
+    # When n>=size, it's faster to use sorted()
+    try:
+        size = len(iterable)
+    except (TypeError, AttributeError):
+        pass
+    else:
+        if n >= size * 0.6:
+            return sorted(iterable, key=key)[:n]
+    # Heap-based selection for the general case
+    result = _nsmallest(n, iterable, key)
+    return sorted(result, key=key)
+```
+
+Three thresholds control which strategy runs. When `n == 1` the function
+delegates to the built-in `min()` with a sentinel default, avoiding heap
+construction entirely. When `n >= 0.6 * len(iterable)` a full `sorted()`
+call is cheaper because the heap's overhead exceeds the sort's. Otherwise
+`_nsmallest` builds a max-heap of size `n` over the iterable, replacing
+the root whenever a smaller element is found, and returns the heap
+contents sorted at the end.
+
+`nlargest` mirrors this structure with a min-heap and `max()`.
+
+### `merge` k-way heap (lines 131 to 250)
+
+<CpyLink path="Lib/heapq.py" lines="131-250" />
+
+```python
+def merge(*iterables, key=None, reverse=False):
+    h = []
+    h_append = h.append
+    if reverse:
+        _heapify = _heapify_max
+        _heappop = _heappop_max
+        direction = -1
+    else:
+        _heapify = heapify
+        _heappop = heappop
+        direction = 1
+
+    if key is None:
+        for order, it in enumerate(map(iter, iterables)):
+            try:
+                next = it.__next__
+                h_append([next(), order * direction, next])
+            except StopIteration:
+                pass
+        _heapify(h)
+        ...
+    else:
+        for order, it in enumerate(map(iter, iterables)):
+            try:
+                next = it.__next__
+                value = next()
+                h_append([key(value), order * direction, value, next])
+            except StopIteration:
+                pass
+        _heapify(h)
+        ...
+```
+
+Each heap entry is a list `[key_value, order, value, next_fn]`. Using a
+list rather than a tuple allows in-place mutation when an iterator
+produces its next item, avoiding a heap replace with tuple reconstruction.
+The `order` field is `index * direction` so that when two key values
+compare equal the iterator with the lower original index wins (stable
+merge), and the comparison never falls through to `value` where `__lt__`
+might not be defined. Exhausted iterators are removed by catching
+`StopIteration` from `next_fn()` inside the tight loop.

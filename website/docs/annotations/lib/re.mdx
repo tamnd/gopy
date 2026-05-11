@@ -1,0 +1,118 @@
+---
+title: Lib/re/__init__.py
+description: The public re API; compiles patterns to _sre.SRE_Pattern objects and dispatches all convenience functions through a module-level LRU cache.
+cpython_path: Lib/re/__init__.py
+cpython_version: "3.14"
+lines: 350
+status: annotated
+ported_to: module/re/module.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Lib/re/__init__.py`
+
+<CpyLink path="Lib/re/__init__.py" />
+
+The user-facing surface of Python's regular-expression library. The
+actual matching engine is the C extension `_sre`; the pattern compiler
+lives in `sre_compile.py` and the syntax constants in `sre_constants.py`.
+`Lib/re/__init__.py` ties those pieces together, adds a `functools.lru_cache`
+on top of `sre_compile.compile`, and re-exports everything through a
+clean public namespace.
+
+`Pattern` and `Match` in this module are thin aliases for
+`_sre.SRE_Pattern` and `_sre.SRE_Match`. All flag constants (`A`, `I`,
+`L`, `M`, `S`, `X`, `U`) are instances of `RegexFlag`, a plain
+`enum.IntFlag` defined here, with the legacy single-letter names kept
+as aliases.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Lib/re/__init__.py" lines="1-60">1-60</Cpy> | module docstring, imports, `__all__` | Imports `_sre`, `sre_compile`, `sre_constants`; defines the public export list. | `module/re/module.go` |
+| <Cpy path="Lib/re/__init__.py" lines="61-130">61-130</Cpy> | `RegexFlag` | `enum.IntFlag` defining `A`/`ASCII`, `I`/`IGNORECASE`, `L`/`LOCALE`, `M`/`MULTILINE`, `S`/`DOTALL`, `X`/`VERBOSE`, `U`/`UNICODE`, `NOFLAG`, and the internal `T`/`TEMPLATE`. | `module/re/module.go` |
+| <Cpy path="Lib/re/__init__.py" lines="131-175">131-175</Cpy> | `compile`, `_cache` | Calls `sre_compile.compile`; the result is cached by `functools.lru_cache` keyed on `(pattern, flags)`. `purge()` calls `_cache.cache_clear()`. | `module/re/module.go` |
+| <Cpy path="Lib/re/__init__.py" lines="176-240">176-240</Cpy> | `match`, `fullmatch`, `search`, `findall`, `finditer`, `sub`, `subn`, `split` | One-line convenience wrappers: each calls `compile(pattern, flags).method(string, ...)`. | `module/re/module.go` |
+| <Cpy path="Lib/re/__init__.py" lines="241-275">241-275</Cpy> | `escape` | Escapes every non-alphanumeric byte using `re._special_chars_map`, a precomputed translation table. | `module/re/module.go` |
+| <Cpy path="Lib/re/__init__.py" lines="276-350">276-350</Cpy> | `Pattern`, `Match`, `error`, `Scanner` | Type aliases, re-exported exception `error = sre_constants.error`, and the internal `Scanner` class used by `finditer`. | `module/re/module.go` |
+
+## Reading
+
+### `compile` and the pattern cache (lines 131 to 175)
+
+<CpyLink path="Lib/re/__init__.py" lines="131-175" />
+
+```python
+@functools.lru_cache(maxsize=512, typed=True)
+def _compile(pattern, flags):
+    if isinstance(flags, RegexFlag):
+        flags = flags.value
+    return sre_compile.compile(pattern, flags)
+
+def compile(pattern, flags=0):
+    "Compile a regular expression pattern, returning a Pattern object."
+    return _compile(pattern, flags)
+
+def purge():
+    "Clear the regular expression caches"
+    _compile.cache_clear()
+```
+
+`_compile` is the cached inner function; `compile` is the public
+wrapper that normalises `RegexFlag` instances to their integer value
+before the cache lookup. The cache is an `lru_cache` with `maxsize=512`
+and `typed=True`, so `compile("a", re.I)` and `compile(b"a", re.I)`
+are distinct entries. `purge()` exposes `cache_clear()` so callers can
+reclaim memory without restarting the interpreter.
+
+### Flag constants (lines 61 to 130)
+
+<CpyLink path="Lib/re/__init__.py" lines="61-130" />
+
+```python
+class RegexFlag(enum.IntFlag):
+    A = ASCII    = sre_constants.SRE_FLAG_ASCII
+    I = IGNORECASE = sre_constants.SRE_FLAG_IGNORECASE
+    L = LOCALE   = sre_constants.SRE_FLAG_LOCALE
+    M = MULTILINE = sre_constants.SRE_FLAG_MULTILINE
+    S = DOTALL   = sre_constants.SRE_FLAG_DOTALL
+    X = VERBOSE  = sre_constants.SRE_FLAG_VERBOSE
+    U = UNICODE  = sre_constants.SRE_FLAG_UNICODE
+    NOFLAG       = 0
+    T = TEMPLATE = sre_constants.SRE_FLAG_TEMPLATE
+```
+
+All flag values are drawn from `sre_constants` so that the C engine and
+the Python layer agree on their integer representations. Because
+`RegexFlag` is an `IntFlag`, flags can be combined with `|` and tested
+with `&`. The single-letter aliases (`A`, `I`, etc.) are canonical;
+the long names are bound to the same member object, not a copy.
+
+### Convenience function delegation (lines 176 to 240)
+
+<CpyLink path="Lib/re/__init__.py" lines="176-240" />
+
+```python
+def match(pattern, string, flags=0):
+    """Try to apply the pattern at the start of the string."""
+    return _compile(pattern, flags).match(string)
+
+def fullmatch(pattern, string, flags=0):
+    """Try to apply the pattern to all of the string."""
+    return _compile(pattern, flags).fullmatch(string)
+
+def search(pattern, string, flags=0):
+    """Scan through string looking for a match."""
+    return _compile(pattern, flags).search(string)
+
+def sub(pattern, repl, string, count=0, flags=0):
+    """Return the string obtained by replacing ... """
+    return _compile(pattern, flags).sub(repl, string, count)
+```
+
+Every convenience function calls `_compile` (not `compile`) directly so
+the cache lookup is as cheap as possible. The real work happens in the
+`_sre.SRE_Pattern` methods, which are implemented in C. The Python layer
+adds nothing beyond the cache and the flag normalisation.

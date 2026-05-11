@@ -1,0 +1,180 @@
+---
+title: Python/context.c
+description: Context variable machinery — PyContext, PyContextVar, and PyContextToken implemented over a HAMT.
+cpython_path: Python/context.c
+cpython_version: "3.14"
+lines: 1000
+status: annotated
+ported_to: module/contextlib/module.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Python/context.c`
+
+<CpyLink path="Python/context.c" />
+
+Context variable machinery introduced by PEP 567. Three public types work
+together: `PyContext` is an immutable snapshot of a variable-to-value mapping,
+`PyContextVar` is a typed key that carries a name and an optional default
+value, and `PyContextToken` is the handle returned by `PyContextVar_Set` that
+lets a caller undo a set via `PyContextVar_Reset`.
+
+The mapping inside every `PyContext` is a Hash Array Mapped Trie (HAMT, see
+[`hamt.c`](hamt)). Because the HAMT is persistent, installing a new value
+produces a new root node while leaving all old roots intact. This is what
+makes `ctx.run(callable)` safe: the interpreter pushes a copy, runs the
+callable, and pops back to the original without disturbing any concurrent
+threads or nested calls that held a reference to the old context.
+
+The interpreter's thread state keeps a `tstate->context` pointer to the
+currently active `PyContext`. `PyContext_Enter` / `PyContext_Exit` push and
+pop that pointer using a linked list of `PyContextObject` nodes rather than
+a separate stack structure, because the `PyContextObject` itself stores the
+previous context in `ctx_prev_context`.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Python/context.c" lines="1-80">1-80</Cpy> | `PyContext` type object, `context_new` / `context_dealloc` | Allocate and free a `PyContextObject`; the HAMT root lives in `ctx_vars`. | `module/contextlib/module.go:newContext` |
+| <Cpy path="Python/context.c" lines="81-200">81-200</Cpy> | `PyContext_CopyCurrent` | Copy the interpreter's current context for use in a new thread; shares the immutable HAMT root safely. | `module/contextlib/module.go:CopyCurrent` |
+| <Cpy path="Python/context.c" lines="201-320">201-320</Cpy> | `PyContext_Enter` / `PyContext_Exit` | Push/pop `tstate->context`; `Enter` saves the previous context in `ctx_prev_context`. | `module/contextlib/module.go:Enter` / `Exit` |
+| <Cpy path="Python/context.c" lines="321-480">321-480</Cpy> | `PyContextVar` type object, `contextvar_new` | Allocate a `PyContextVar`; store name and optional default in `var_name` / `var_default`. | `module/contextlib/module.go:newContextVar` |
+| <Cpy path="Python/context.c" lines="481-600">481-600</Cpy> | `PyContextVar_Get` | Look up the variable in the current context's HAMT; return the default or raise `LookupError` when absent. | `module/contextlib/module.go:ContextVarGet` |
+| <Cpy path="Python/context.c" lines="601-760">601-760</Cpy> | `PyContextVar_Set` | Call `_PyHamt_Assoc` to produce a new HAMT root; wrap the old value in a `PyContextToken`; update `tstate->context`. | `module/contextlib/module.go:ContextVarSet` |
+| <Cpy path="Python/context.c" lines="761-880">761-880</Cpy> | `PyContextVar_Reset` | Validate the token belongs to this variable and the current context; restore the old value via `_PyHamt_Assoc` or `_PyHamt_Without`. | `module/contextlib/module.go:ContextVarReset` |
+| <Cpy path="Python/context.c" lines="881-1000">881-1000</Cpy> | `PyContextToken` type object, `token_new` / `token_dealloc` | Immutable record of `(var, old_value, context_at_set)`; `used` flag prevents double-reset. | `module/contextlib/module.go:newContextToken` |
+
+## Reading
+
+### `PyContext` over HAMT (lines 1 to 200)
+
+<CpyLink path="Python/context.c" lines="1-200" />
+
+```c
+typedef struct {
+    PyObject_HEAD
+    PyObject    *ctx_vars;    /* PyHamtObject * */
+    PyObject    *ctx_prev_context;
+    uint64_t     ctx_run_ref_count;
+    Py_hash_t    ctx_cached_hash;
+} PyContextObject;
+```
+
+The `ctx_vars` field is a `PyHamtObject *` — the persistent trie from
+`hamt.c`. Because the HAMT never mutates in place, two `PyContextObject`
+instances can share sub-tries with zero copying; only the root pointer
+differs. `ctx_prev_context` threads the stack that `PyContext_Enter` /
+`PyContext_Exit` manipulates.
+
+`PyContext_CopyCurrent` (lines 81 to 200) copies the thread-local context
+for handoff to a new thread. The implementation calls `_PyHamt_Copy` on the
+current `ctx_vars`, which in practice just increments the root's reference
+count because HAMTs are immutable.
+
+```c
+PyObject *
+PyContext_CopyCurrent(void)
+{
+    PyThreadState *ts = _PyThreadState_GET();
+    PyObject *ctx = ts->context;
+    if (ctx == NULL) {
+        return context_new_empty();
+    }
+    return context_new_from_vars(
+        ((PyContextObject *)ctx)->ctx_vars);
+}
+```
+
+### `PyContextVar_Set` and `PyContextToken` (lines 601 to 880)
+
+<CpyLink path="Python/context.c" lines="601-880" />
+
+`PyContextVar_Set` is the hot path for `var.set(value)`. It calls
+`_PyHamt_Assoc` to get a new HAMT root, then allocates a `PyContextToken`
+recording the old value, and installs a fresh `PyContextObject` onto
+`tstate->context`.
+
+```c
+PyObject *
+PyContextVar_Set(PyObject *ovar, PyObject *val)
+{
+    PyContextVar *var = (PyContextVar *)ovar;
+    PyContextObject *ctx = get_thread_context();
+
+    PyObject *old_val = NULL;
+    if (_PyHamt_Find(ctx->ctx_vars, var->var_key, &old_val) == -1) {
+        return NULL;
+    }
+
+    PyObject *new_vars = _PyHamt_Assoc(ctx->ctx_vars, var->var_key, val);
+    if (new_vars == NULL) {
+        return NULL;
+    }
+
+    PyObject *tok = token_new(ctx, var, old_val);
+    ...
+    ctx = context_new_from_vars(new_vars);
+    ...
+    set_thread_context(ctx);
+    return tok;
+}
+```
+
+`PyContextVar_Reset` (lines 761 to 880) validates the token's `used` flag,
+confirms that the current context matches `token->tok_ctx`, then either
+calls `_PyHamt_Assoc` with the saved old value or `_PyHamt_Without` if the
+variable was absent when the token was created.
+
+### `PyContext_Enter` and `PyContext_Exit` (lines 201 to 320)
+
+<CpyLink path="Python/context.c" lines="201-320" />
+
+```c
+int
+PyContext_Enter(PyObject *octx)
+{
+    PyContextObject *ctx = (PyContextObject *)octx;
+    PyThreadState *ts = _PyThreadState_GET();
+    ctx->ctx_prev_context = ts->context;
+    Py_XINCREF(ctx->ctx_prev_context);
+    ts->context = (PyObject *)ctx;
+    Py_INCREF(ctx);
+    ctx->ctx_run_ref_count++;
+    return 0;
+}
+
+int
+PyContext_Exit(PyObject *octx)
+{
+    PyContextObject *ctx = (PyContextObject *)octx;
+    PyThreadState *ts = _PyThreadState_GET();
+    ...
+    ts->context = ctx->ctx_prev_context;
+    ctx->ctx_prev_context = NULL;
+    ctx->ctx_run_ref_count--;
+    Py_DECREF(ctx);
+    return 0;
+}
+```
+
+`ctx_run_ref_count` guards against a context being entered on two threads or
+reentered on one; attempting to enter an already-active context raises
+`RuntimeError`. The pop path restores `ts->context` to whatever was saved in
+`ctx_prev_context` at enter time, so nested `run()` calls correctly unwind.
+
+## Notes for the gopy mirror
+
+`module/contextlib/module.go` ports all three public types. The HAMT calls
+(`_PyHamt_Assoc`, `_PyHamt_Without`, `_PyHamt_Find`) map to the methods on
+`objects/hamt.go:Hamt`. The thread-state pointer (`tstate->context`) is
+replaced by a per-goroutine value stored in the interpreter's `ThreadState`
+struct.
+
+## CPython 3.14 changes worth noting
+
+The `PyContextVar` and `PyContext` APIs are stable since 3.7. In 3.14 the
+only notable change is alignment with the free-threaded build (PEP 703):
+`ctx_run_ref_count` uses atomic operations in the free-threaded build, but
+the GIL-holding path is unchanged.

@@ -1,0 +1,195 @@
+---
+title: Lib/typing.py
+description: Runtime support for PEP 484 type hints; provides TypeVar, Generic, Union, Optional, Protocol, TypedDict, overload, get_type_hints, and the generic alias machinery.
+cpython_path: Lib/typing.py
+cpython_version: "3.14"
+lines: 3500
+status: annotated
+ported_to: module/typing/module.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Lib/typing.py`
+
+<CpyLink path="Lib/typing.py" />
+
+The pure-Python implementation of Python's type-annotation runtime. The
+module is entirely self-contained: it imports only builtins and a handful
+of stdlib helpers (`abc`, `functools`, `re`, `sys`, `types`,
+`annotationlib`). No C accelerator exists; every feature described here
+runs at the speed of pure Python.
+
+The file has four conceptual layers. At the bottom are the type variable
+forms: `TypeVar`, `ParamSpec`, `TypeVarTuple`, and `Unpack` (PEPs 484,
+612, 646). Above them sits the generic alias machinery, centred on
+`_GenericAlias` and `_SpecialForm`. `Generic` uses `__class_getitem__` to
+produce aliases at subscript time. The union forms `Union` and `Optional`
+are `_SpecialForm` instances that normalise their arguments at construction.
+At the top are the reflection utilities: `get_type_hints`, `overload`,
+`cast`, `Protocol`, `TypedDict`, and `runtime_checkable`.
+
+In 3.14, `annotationlib` was added as a new stdlib module and
+`get_type_hints` now delegates string-annotation evaluation to
+`annotationlib.get_annotations`, which handles `from __future__ import
+annotations` and `__annotate__` callables introduced by PEP 649.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Lib/typing.py" lines="1-120">1-120</Cpy> | Module header, `__all__`, `_SpecialForm` bootstrap | Module docstring, exports list, and the `_SpecialForm` descriptor that backs `Union`, `Optional`, `ClassVar`, etc. | `module/typing/module.go` |
+| <Cpy path="Lib/typing.py" lines="121-350">121-350</Cpy> | `TypeVar`, `_TypeVarLike`, `ParamSpec`, `TypeVarTuple` | Type variable classes; store `__name__`, `__constraints__`, `__bound__`, `__covariant__`, `__contravariant__`; support `__class_getitem__` for PEP 695 syntax. | `module/typing/module.go` |
+| <Cpy path="Lib/typing.py" lines="351-700">351-700</Cpy> | `_GenericAlias`, `_SpecialGenericAlias`, `_UnionGenericAlias`, `_LiteralGenericAlias` | Runtime forms of parameterised generics. `__origin__` is the unparameterised type; `__args__` is the argument tuple. `__class_getitem__` on `Generic` produces these. | `module/typing/module.go` |
+| <Cpy path="Lib/typing.py" lines="701-900">701-900</Cpy> | `Generic` | Base class for generic types; defines `__class_getitem__` and `__init_subclass__`; populates `__parameters__` from the type-variable arguments. | `module/typing/module.go` |
+| <Cpy path="Lib/typing.py" lines="901-1050">901-1050</Cpy> | `Union`, `Optional` | `_SpecialForm`-backed combinators; `Union` deduplicates and flattens nested unions at construction time; `Optional[X]` expands to `Union[X, None]`. | `module/typing/module.go` |
+| <Cpy path="Lib/typing.py" lines="1051-1400">1051-1400</Cpy> | `get_type_hints` | Evaluates string annotations in the correct global and local namespace; delegates to `annotationlib.get_annotations` in 3.14; handles `TYPE_CHECKING` guards. | `module/typing/module.go` |
+| <Cpy path="Lib/typing.py" lines="1401-1700">1401-1700</Cpy> | `overload`, `_overload_registry`, `get_overloads` | `@overload` stores each decorated function in a per-module registry keyed by qualname; the last non-overloaded definition is the runtime implementation. | `module/typing/module.go` |
+| <Cpy path="Lib/typing.py" lines="1701-2100">1701-2100</Cpy> | `Protocol`, `runtime_checkable`, `_ProtocolMeta` | Structural subtyping; `_ProtocolMeta.__subclasshook__` checks that all `Protocol` members are present on the candidate class; `runtime_checkable` enables `isinstance`. | `module/typing/module.go` |
+| <Cpy path="Lib/typing.py" lines="2101-2600">2101-2600</Cpy> | `TypedDict`, `NamedTuple` | `TypedDict` creates a plain `dict` subclass annotated with per-key types; `NamedTuple` builds a `collections.namedtuple` subclass. | `module/typing/module.go` |
+| <Cpy path="Lib/typing.py" lines="2601-3500">2601-3500</Cpy> | `cast`, `assert_never`, `reveal_type`, `dataclass_transform`, `Unpack`, `TypeAlias`, `Never`, `Self`, `LiteralString`, `Concatenate` | Miscellaneous forms and no-op helpers; `cast` returns its second argument unchanged; `assert_never` always raises. | `module/typing/module.go` |
+
+## Reading
+
+### `_GenericAlias` construction (lines 351 to 700)
+
+<CpyLink path="Lib/typing.py" lines="351-700" />
+
+```python
+class _GenericAlias(_Final, _root=True):
+    def __init__(self, origin, args, *, name=None, inst=True):
+        self.__origin__ = origin
+        self.__args__ = args if args else ()
+        self._name = name
+        self._inst = inst
+
+    def __class_getitem__(cls, params):
+        if not isinstance(params, tuple):
+            params = (params,)
+        return cls(cls, params)
+
+    def __getattr__(self, attr):
+        if attr in {'__origin__', '__args__', ...}:
+            return super().__getattribute__(attr)
+        return getattr(self.__origin__, attr)
+```
+
+`_GenericAlias` is the object you hold when you write `List[int]` or
+`Dict[str, int]`. `__origin__` is the bare type (`list`, `dict`);
+`__args__` is a tuple of the type arguments. Attribute look-up falls
+through to `__origin__` for everything not explicitly stored, so
+`List[int].__doc__` returns `list.__doc__`.
+
+`__class_getitem__` on `Generic` subclasses delegates here. When the
+arguments contain type variables, `__parameters__` is computed as the
+deduplicated, ordered union of all type variables reachable from
+`__args__`, enabling further specialisation. Calling the alias (i.e.,
+`List[int](...)`) delegates to `self.__origin__(...)` unless `_inst` is
+false.
+
+### `Union` deduplication (lines 901 to 1050)
+
+<CpyLink path="Lib/typing.py" lines="901-1050" />
+
+```python
+@_SpecialForm
+def Union(self, parameters):
+    msg = "Union[arg, ...]: arg should be a type."
+    parameters = tuple(_type_check(p, msg) for p in parameters)
+    parameters = _flatten_literal_params(parameters)
+    ...
+    # deduplicate keeping order
+    params = []
+    for p in parameters:
+        if p not in params:
+            params.append(p)
+    # Union with a single argument collapses
+    if len(params) == 1:
+        return params[0]
+    ...
+    return _UnionGenericAlias(Union, tuple(params))
+```
+
+`Union` is a `_SpecialForm`, so `Union[X, Y]` calls this function with
+`parameters = (X, Y)`. The construction rules are:
+
+1. Each argument is type-checked via `_type_check`.
+2. Nested `Union`s are flattened: `Union[Union[int, str], bytes]` becomes
+   `Union[int, str, bytes]`.
+3. Duplicates are removed in order of first appearance.
+4. `Union[X]` collapses to `X` (single argument).
+5. `Union[X, None]` is the canonical form of `Optional[X]`.
+
+`Optional` is implemented as `Union.__getitem__((X, type(None)))`, so it
+goes through the same path and the result is identical to writing
+`Union[X, None]` explicitly.
+
+### `get_type_hints` annotation resolution (lines 1051 to 1400)
+
+<CpyLink path="Lib/typing.py" lines="1051-1400" />
+
+```python
+def get_type_hints(obj, globalns=None, localns=None, include_extras=False):
+    if isinstance(obj, type):
+        hints = {}
+        for base in reversed(obj.__mro__):
+            if getattr(base, '__no_type_check__', None):
+                continue
+            base_globals = getattr(sys.modules.get(base.__module__, None),
+                                   '__dict__', {}) or {}
+            ann = annotationlib.get_annotations(
+                base, format=annotationlib.Format.VALUE,
+                eval_str=True, globals=base_globals, locals=localns,
+            )
+            hints.update(ann)
+        ...
+        return hints
+```
+
+The function walks the MRO in reverse (most-base first) so that subclass
+annotations shadow base-class ones. For each class it calls
+`annotationlib.get_annotations` with `Format.VALUE`, which evaluates
+string annotations using the class's own module globals, not the caller's.
+This matters for `from __future__ import annotations`: in 3.14, PEP 649
+changed the default from stringifying all annotations to deferring
+evaluation via an `__annotate__` callable, and `get_type_hints` triggers
+that evaluation.
+
+When `include_extras=False` (the default) all `Annotated[T, ...]` wrappers
+are stripped, returning just the bare type `T`. This preserves backward
+compatibility with code that does not know about `Annotated`.
+
+### `Protocol` structural check (lines 1701 to 2100)
+
+<CpyLink path="Lib/typing.py" lines="1701-2100" />
+
+```python
+class _ProtocolMeta(ABCMeta):
+    def __subclasshook__(cls, other):
+        if cls is Protocol:
+            return NotImplemented
+        if (cls.__dict__.get('_is_runtime_checkable') and
+                cls.__dict__.get('_is_protocol')):
+            for attr in _get_protocol_attrs(cls):
+                for base in other.__mro__:
+                    if attr in base.__dict__:
+                        break
+                    annotations = getattr(base, '__annotations__', {})
+                    if attr in annotations:
+                        break
+                else:
+                    return NotImplemented
+            return True
+        return NotImplemented
+```
+
+`Protocol` uses `ABCMeta` as its metaclass to plug into `isinstance` and
+`issubclass`. `__subclasshook__` is only active when the protocol is
+decorated with `@runtime_checkable`; without it, `isinstance` falls back to
+the normal nominal check and raises `TypeError`.
+
+`_get_protocol_attrs` collects all attributes that are declared in the
+`Protocol` subclass bodies but not in `Protocol`, `Generic`, or `object`
+itself. The MRO walk inside `__subclasshook__` checks both `__dict__` and
+`__annotations__` so that attribute-only protocols (where the member is
+declared with a type annotation but no value) are supported.

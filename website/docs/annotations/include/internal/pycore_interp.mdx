@@ -1,0 +1,110 @@
+---
+title: Include/internal/pycore_interp.h
+description: Thin include-bridge for PyInterpreterState — pulls in pycore_interp_structs.h and declares init/lookup helpers.
+cpython_path: Include/internal/pycore_interp.h
+cpython_version: "3.14"
+lines: 109
+status: annotated
+ported_to: pythonrun/interp.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Include/internal/pycore_interp.h`
+
+<CpyLink path="Include/internal/pycore_interp.h" />
+
+In CPython 3.14 the `PyInterpreterState` struct definition was moved
+out of `pycore_interp.h` and into the generated
+`pycore_interp_structs.h`. This file is now a thin umbrella that
+includes the structs header plus `pycore_interp_structs.h`, then
+declares the handful of functions that operate on the interpreter
+before the runtime is fully initialized.
+
+The file you want to read for the full struct layout is
+[`Include/internal/pycore_interp_structs.h`](../pycore_interp_structs)
+(994 lines). The present file documents only what is left here after
+the refactor: the init/teardown declarations and a few helper macros.
+
+`PyInterpreterState` is the unit of sub-interpreter isolation. Each
+sub-interpreter has its own module table, its own `__builtins__`, its
+own GC generations, and its own thread-state list. The `_PyRuntime`
+singleton holds a singly-linked list of all live interpreters via the
+`next` field.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Include/internal/pycore_interp.h" lines="1-30">1-30</Cpy> | includes + guard | Pulls in `pycore_interp_structs.h`, `pycore_gc.h`, `pycore_context.h`. | n/a |
+| <Cpy path="Include/internal/pycore_interp.h" lines="31-50">31-50</Cpy> | `_PyInterpreterState_Init` / `_PyInterpreterState_Clear` / `_PyInterpreterState_Delete` | Lifecycle: allocate, clear, free an interpreter. | `pythonrun/interp.go` |
+| <Cpy path="Include/internal/pycore_interp.h" lines="51-65">51-65</Cpy> | `_PyInterpreterState_IDInitref` / `_PyInterpreterState_IDIncref` / `_PyInterpreterState_IDDecref` | Reference-count the interpreter ID used by `_interpreters.get_current()`. | `pythonrun/interp.go` |
+| <Cpy path="Include/internal/pycore_interp.h" lines="66-80">66-80</Cpy> | `_PyInterpreterState_Get` / `_PyInterpreterState_GET` | Fast accessor: current interpreter from the calling thread state. | `pythonrun/interp.go` |
+| <Cpy path="Include/internal/pycore_interp.h" lines="81-95">81-95</Cpy> | `_PyInterpreterState_GetMainModule` / `_PyInterpreterState_SetRunningMain` | Module and main-thread bookkeeping helpers. | `pythonrun/interp.go` |
+| <Cpy path="Include/internal/pycore_interp.h" lines="96-109">96-109</Cpy> | `_PyInterpreterState_HasFeature` | Tests bits in `interp->features` (e.g. `Py_TPFLAGS_BASETYPE` isolation). | `pythonrun/interp.go` |
+
+## Reading
+
+### `PyInterpreterState` fields (in pycore_interp_structs.h)
+
+The struct is defined in `Include/internal/pycore_interp_structs.h`.
+The most important fields for gopy are:
+
+```c
+struct _is {
+    PyInterpreterState *next;          // linked list via _PyRuntime.interpreters
+    struct pyruntimestate *runtime;    // back-pointer to _PyRuntimeState
+
+    int64_t id;                        // unique interpreter ID
+    int64_t id_refcount;               // refcount from _interpreters module
+
+    PyObject *modules;                 // sys.modules (a dict)
+    PyObject *modules_by_index;        // list indexed by def->m_base.m_index
+    PyObject *builtins;                // __builtins__ dict
+    PyObject *sysdict;                 // sys module dict
+    PyObject *importlib;               // importlib._bootstrap module
+
+    struct _gc_runtime_state gc;       // embedded GC state for this interpreter
+
+    PyObject *warnings_filters;        // warnings.filters list
+    int warnings_filters_version;
+
+    PyThreadState *tstate_head;        // head of the per-thread list
+    int _initialized;
+};
+```
+
+`modules_by_index` is a list where `modules_by_index[def->m_base.m_index]`
+gives back the module object for a given `PyModuleDef`. The index is
+assigned once per `PyModuleDef` across all interpreters; when a new
+sub-interpreter imports the module, the list is extended to accommodate
+the index. This is the mechanism that lets multi-phase init modules
+(PEP 451) store per-interpreter state without a hash lookup.
+
+### GC state embedding (struct _gc_runtime_state)
+
+Each interpreter carries a full `struct _gc_runtime_state` inline
+(not a pointer). The GC generations (`gen0`, `gen1`, `gen2`) and the
+`garbage` list are per-interpreter so that sub-interpreters can collect
+independently. The collector is triggered from `_PyEval_EvalFrameDefault`
+via `_Py_HandlePending` which checks `interp->gc.collecting` and
+`interp->gc.enabled`.
+
+In gopy there is no GC cycle collector (Go's runtime handles cycles),
+so `struct _gc_runtime_state` is represented as an empty stub in
+`pythonrun/interp.go` and the track/untrack calls are no-ops.
+
+### `_PyInterpreterState_GET` (lines 66 to 80)
+
+<CpyLink path="Include/internal/pycore_interp.h" lines="66-80" />
+
+```c
+/* Macro for speed-critical paths — no function call overhead. */
+#define _PyInterpreterState_GET() \
+    (_PyThreadState_GET()->interp)
+```
+
+`_PyInterpreterState_GET()` (uppercase) is an inlined macro used in
+hot paths like `LOAD_GLOBAL`. The lowercase `_PyInterpreterState_Get()`
+is a proper function that validates that a thread state exists before
+dereferencing it. Both map to `vm.CurrentInterp()` in gopy's eval loop.

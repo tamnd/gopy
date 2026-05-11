@@ -1,0 +1,142 @@
+---
+title: Include/abstract.h
+description: Public C API for Python's abstract object protocol, covering object, number, sequence, and mapping operations.
+cpython_path: Include/abstract.h
+cpython_version: "3.14"
+lines: 300
+status: annotated
+ported_to: objects/protocol.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Include/abstract.h`
+
+<CpyLink path="Include/abstract.h" />
+
+The abstract object interface. Rather than dispatching through concrete type
+checks, every operation in this header goes through the slot tables on
+`PyTypeObject`: `tp_call`, `nb_add`, `sq_length`, `mp_subscript`, and so on.
+This is the layer that makes duck typing work in C: code calling
+`PyObject_GetItem` does not care whether the target is a list, dict, or a
+custom object with `__getitem__`.
+
+In gopy the equivalent lives in `objects/protocol.go`. Each function maps to a
+method call on the `Object` interface, which dispatches through the type's
+registered slots. The number, sequence, and mapping sub-protocols each have
+their own section in that file, mirroring the grouping in this header.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Include/abstract.h" lines="1-40">1-40</Cpy> | `PyObject_Call` / `PyObject_CallObject` / `PyObject_CallNoArgs` / `PyObject_CallOneArg` | Invoke any callable; routes through `tp_call` or vectorcall. | `objects/protocol.go` |
+| <Cpy path="Include/abstract.h" lines="41-90">41-90</Cpy> | `PyObject_Repr` / `PyObject_Str` / `PyObject_ASCII` / `PyObject_Bytes` / `PyObject_IsTrue` / `PyObject_Not` | Conversion and truth-value slots: `tp_repr`, `tp_str`, `nb_bool`. | `objects/protocol.go` |
+| <Cpy path="Include/abstract.h" lines="91-140">91-140</Cpy> | `PyObject_HasAttr` / `PyObject_GetAttr` / `PyObject_SetAttr` / `PyObject_DelAttr` / `PyObject_Dir` | Attribute access; delegates to `tp_getattro` / `tp_setattro`. | `objects/protocol.go` |
+| <Cpy path="Include/abstract.h" lines="141-180">141-180</Cpy> | `PyObject_RichCompare` / `PyObject_RichCompareBool` / `PyObject_GetItem` / `PyObject_SetItem` / `PyObject_DelItem` / `PyIter_Next` | Rich comparison (`tp_richcompare`) and subscript / iteration slots. | `objects/protocol.go` |
+| <Cpy path="Include/abstract.h" lines="181-220">181-220</Cpy> | `PyNumber_Add` / `PyNumber_Subtract` / `PyNumber_Multiply` / `PyNumber_TrueDivide` / `PyNumber_FloorDivide` / `PyNumber_Remainder` / `PyNumber_Power` | Binary arithmetic; tries `nb_*` slots on left operand then right. | `objects/protocol.go` |
+| <Cpy path="Include/abstract.h" lines="221-250">221-250</Cpy> | `PyNumber_Index` / `PyNumber_Long` / `PyNumber_Float` | Coercion to integer or float; `nb_index`, `nb_int`, `nb_float`. | `objects/protocol.go` |
+| <Cpy path="Include/abstract.h" lines="251-275">251-275</Cpy> | `PySequence_Length` / `PySequence_Concat` / `PySequence_Repeat` / `PySequence_GetItem` / `PySequence_GetSlice` / `PySequence_Contains` / `PySequence_List` / `PySequence_Tuple` | Sequence protocol; uses `sq_*` and `mp_*` slots. | `objects/protocol.go` |
+| <Cpy path="Include/abstract.h" lines="276-300">276-300</Cpy> | `PyMapping_Length` / `PyMapping_GetItemString` / `PyMapping_SetItemString` / `PyMapping_HasKey` | Mapping protocol; thin wrappers around `PyObject_GetItem` / `PyObject_SetItem` with string keys. | `objects/protocol.go` |
+
+## Reading
+
+### Object protocol: calling and conversion (lines 1 to 90)
+
+<CpyLink path="Include/abstract.h" lines="1-90" />
+
+The call family covers three tiers. `PyObject_CallNoArgs` and
+`PyObject_CallOneArg` exist to avoid allocating a tuple for the common
+zero- and one-argument cases; both delegate to the vectorcall path when the
+type supports it (`PY_VECTORCALL_ARGUMENTS_OFFSET`). `PyObject_Call` is the
+general entry point, accepting a positional tuple plus an optional keyword
+dict and routing through `tp_call`.
+
+```c
+PyAPI_FUNC(PyObject *) PyObject_Call(
+    PyObject *callable,
+    PyObject *args,      /* tuple */
+    PyObject *kwargs);   /* dict or NULL */
+
+PyAPI_FUNC(PyObject *) PyObject_CallNoArgs(PyObject *func);
+PyAPI_FUNC(PyObject *) PyObject_CallOneArg(PyObject *func, PyObject *arg);
+```
+
+`PyObject_IsTrue` returns `1`, `0`, or `-1` (error). It checks `nb_bool`
+first, then `mp_length`, then `sq_length`, falling back to `1` for any
+non-NULL object. `PyObject_Not` inverts that result.
+
+`PyObject_Repr` calls `tp_repr`. If the slot is absent it falls back to a
+default `<TypeName object at 0xADDR>` string. `PyObject_Str` calls `tp_str`
+and then falls back to `tp_repr`. `PyObject_ASCII` calls `PyObject_Repr` and
+then replaces every non-ASCII character with `\xNN` / `\uNNNN` / `\UNNNNNNNN`
+escapes.
+
+### Attribute access and comparison (lines 91 to 180)
+
+<CpyLink path="Include/abstract.h" lines="91-180" />
+
+`PyObject_GetAttr` dispatches through `tp_getattro`. For most objects this is
+`PyObject_GenericGetAttr`, which searches the MRO then the instance dict.
+`PyObject_HasAttr` is a convenience wrapper that suppresses `AttributeError`
+and returns a bool.
+
+```c
+PyAPI_FUNC(PyObject *) PyObject_GetAttr(PyObject *o, PyObject *attr_name);
+PyAPI_FUNC(int)        PyObject_HasAttr(PyObject *o, PyObject *attr_name);
+PyAPI_FUNC(int)        PyObject_SetAttr(PyObject *o, PyObject *attr_name, PyObject *v);
+```
+
+`PyObject_RichCompare` takes an `op` argument (`Py_LT`, `Py_LE`, `Py_EQ`,
+`Py_NE`, `Py_GT`, `Py_GE`) and calls `tp_richcompare`. When the left type
+does not implement the comparison the right operand's reflected slot is tried.
+`PyObject_RichCompareBool` wraps this and converts the result to `0`/`1`/`-1`,
+short-circuiting identity equality for `Py_EQ` and `Py_NE` as an optimization.
+
+`PyObject_GetItem` routes through `mp_subscript` (mapping protocol) before
+falling back to `sq_item` (sequence protocol with integer index). Slice
+objects reach `mp_subscript` directly. `PyObject_SetItem` and
+`PyObject_DelItem` mirror it via `mp_ass_subscript`.
+
+### Number protocol (lines 181 to 250)
+
+<CpyLink path="Include/abstract.h" lines="181-250" />
+
+Binary arithmetic uses a three-step search. Given `a + b`:
+
+1. If `type(b)` is a strict subtype of `type(a)` and `type(b)` overrides the
+   slot, try `type(b)` first (reflected operand).
+2. Try `type(a).nb_add(a, b)`.
+3. Try `type(b).nb_radd(b, a)`.
+
+```c
+PyAPI_FUNC(PyObject *) PyNumber_Add(PyObject *o1, PyObject *o2);
+PyAPI_FUNC(PyObject *) PyNumber_Subtract(PyObject *o1, PyObject *o2);
+PyAPI_FUNC(PyObject *) PyNumber_Multiply(PyObject *o1, PyObject *o2);
+PyAPI_FUNC(PyObject *) PyNumber_TrueDivide(PyObject *o1, PyObject *o2);
+```
+
+`PyNumber_Index` coerces via `nb_index`; it is used wherever CPython needs a
+lossless integer (slice indices, `__index__` protocol). `PyNumber_Long` is
+similar but also accepts `nb_int` and `tp_as_number->nb_float` via truncation.
+
+### Sequence and mapping protocols (lines 251 to 300)
+
+<CpyLink path="Include/abstract.h" lines="251-300" />
+
+`PySequence_Length` tries `sq_length` then `mp_length`. Both protocols share
+the same fallback because many types implement only one slot family.
+
+`PySequence_Contains` first checks `sq_contains`; if absent it falls back to
+a linear scan using `PyObject_RichCompareBool(Py_EQ)`.
+
+```c
+PyAPI_FUNC(Py_ssize_t) PySequence_Length(PyObject *o);
+PyAPI_FUNC(int)        PySequence_Contains(PyObject *seq, PyObject *ob);
+PyAPI_FUNC(PyObject *) PySequence_List(PyObject *o);
+PyAPI_FUNC(PyObject *) PySequence_Tuple(PyObject *o);
+```
+
+The mapping helpers `PyMapping_GetItemString` and `PyMapping_SetItemString`
+intern the key with `PyUnicode_InternInPlace` before the lookup, matching the
+behavior of the `LOAD_ATTR` bytecode path.

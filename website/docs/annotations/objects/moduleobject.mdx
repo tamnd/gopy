@@ -1,0 +1,148 @@
+---
+title: Objects/moduleobject.c
+description: PyModuleObject layout, creation, dict access, attribute lookup, state pointer, and module repr.
+cpython_path: Objects/moduleobject.c
+cpython_version: "3.14"
+lines: 900
+status: annotated
+ported_to: objects/module.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Objects/moduleobject.c`
+
+<CpyLink path="Objects/moduleobject.c" />
+
+Module objects. A `PyModuleObject` holds five fields: `md_dict` (the module's
+namespace, always a `PyDictObject`), `md_def` (a pointer to the `PyModuleDef`
+that created the module, or NULL for dynamically created modules), `md_state`
+(extra memory allocated after the object header for multi-phase init modules
+with `m_size > 0`), `md_weaklist` (weak reference support), and `md_name` (a
+`PyUnicodeObject` copy of `__name__`, kept separate for fast access during
+error formatting before the dict is ready). This file provides module
+construction (`PyModule_NewObject`, `PyModule_New`), dict access
+(`PyModule_GetDict`), attribute get/set with `__getattr__` hook support,
+`PyModuleDef`-based state access, the `PyModule_Add*` family for populating
+the namespace, and `module_repr`.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Objects/moduleobject.c" lines="1-80">1-80</Cpy> | `PyModule_NewObject`, `PyModule_New` | Allocate a module, create `md_dict`, populate `__name__`, `__doc__`, `__package__`, `__loader__`, `__spec__` as `None`. | `objects/module.go:NewModule` |
+| <Cpy path="Objects/moduleobject.c" lines="81-180">81-180</Cpy> | `PyModule_GetDict`, `PyModule_GetNameObject`, `PyModule_GetName`, `PyModule_GetFilenameObject`, `PyModule_GetFilename` | Accessors that read from `md_dict`; `GetDict` returns a borrowed reference directly. | `objects/module.go:(*Module).Dict` |
+| <Cpy path="Objects/moduleobject.c" lines="181-300">181-300</Cpy> | `PyModule_GetDef`, `PyModule_GetState`, `PyModule_SetDef` | `md_def` and `md_state` access; `GetState` returns NULL and sets `SystemError` when `m_size == 0` or no def. | `objects/module.go:(*Module).State` |
+| <Cpy path="Objects/moduleobject.c" lines="301-480">301-480</Cpy> | `PyModule_AddObject`, `PyModule_AddObjectRef`, `PyModule_Add`, `PyModule_AddIntConstant`, `PyModule_AddStringConstant`, `PyModule_AddType` | Insert names into `md_dict`; `AddObject` steals the reference on success; `AddObjectRef` does not. | `objects/module.go` |
+| <Cpy path="Objects/moduleobject.c" lines="481-650">481-650</Cpy> | `module_getattro`, `module_setattro` | Attribute lookup: checks `md_dict`, then falls back to `md_def->m_methods`, then calls `__getattr__` if present. | `objects/module.go:moduleGetattr` |
+| <Cpy path="Objects/moduleobject.c" lines="651-780">651-780</Cpy> | `module_repr` | Formats `<module 'name' from 'file'>` or `<module 'name' (built-in)>` using `__spec__` when available. | `objects/module.go:moduleRepr` |
+| <Cpy path="Objects/moduleobject.c" lines="781-900">781-900</Cpy> | `module_traverse`, `module_clear`, `module_dealloc`, `PyModule_Type` | GC traversal visits `md_dict` and `md_def`; dealloc frees `md_state`; type object definition. | `objects/module.go` |
+
+## Reading
+
+### `PyModule_NewObject` (lines 1 to 80)
+
+<CpyLink path="Objects/moduleobject.c" lines="1-80" />
+
+Module construction allocates the `PyModuleObject`, creates a fresh dict for
+`md_dict`, and immediately populates five dunder attributes. The `md_state`
+pointer is set to NULL; it is only allocated by `PyModule_ExecDef` when the
+`PyModuleDef` specifies `m_size > 0`. All five dunders are set to `None` so
+that `importlib` machinery can safely read them even before the loader fills
+them in:
+
+```c
+PyObject *
+PyModule_NewObject(PyObject *name)
+{
+    PyModuleObject *m;
+    m = PyObject_GC_New(PyModuleObject, &PyModule_Type);
+    if (m == NULL)
+        return NULL;
+    m->md_def = NULL;
+    m->md_state = NULL;
+    m->md_weaklist = NULL;
+    m->md_name = Py_NewRef(name);
+    m->md_dict = PyDict_New();
+    if (m->md_dict == NULL)
+        goto fail;
+    if (module_init_dict(m, m->md_dict, name, NULL) != 0)
+        goto fail;
+    _PyObject_GC_TRACK(m);
+    return (PyObject *)m;
+fail:
+    Py_DECREF(m);
+    return NULL;
+}
+```
+
+`module_init_dict` sets `__name__`, `__doc__` (to `None`), `__package__` (to
+`None`), `__loader__` (to `None`), and `__spec__` (to `None`). This matches
+the attribute set that `importlib._bootstrap` expects to find on any freshly
+created module.
+
+### `PyModule_AddObject` and `PyModule_AddObjectRef` (lines 301 to 480)
+
+<CpyLink path="Objects/moduleobject.c" lines="301-480" />
+
+Two variants for adding a name to the module dict. `PyModule_AddObjectRef`
+inserts without stealing the reference, returning 0 on success and -1 on
+error. `PyModule_AddObject` is the older API that steals the reference on
+success but not on failure, requiring callers to `Py_DECREF` on the returned
+-1 path:
+
+```c
+int
+PyModule_AddObject(PyObject *mod, const char *name, PyObject *value)
+{
+    int res = PyModule_AddObjectRef(mod, name, value);
+    if (res == 0) {
+        Py_DECREF(value);  // steal on success
+    }
+    return res;
+}
+```
+
+The asymmetric steal-only-on-success convention is a long-standing CPython
+API quirk. New code should prefer `PyModule_Add` (3.13+) or
+`PyModule_AddObjectRef`, both of which have symmetric reference semantics.
+
+### `module_repr` (lines 651 to 780)
+
+<CpyLink path="Objects/moduleobject.c" lines="651-780" />
+
+Repr first consults `__spec__` to delegate to `ModuleSpec.__repr__`. If
+`__spec__` is `None` or absent it falls back to constructing the string
+directly from `__name__` and `__file__`:
+
+```c
+static PyObject *
+module_repr(PyModuleObject *m)
+{
+    PyInterpreterState *interp = _PyInterpreterState_GET();
+
+    return PyObject_CallMethod(interp->importlib,
+                               "_module_repr", "O", m);
+}
+```
+
+The actual formatting logic lives in `importlib._bootstrap._module_repr`,
+which produces `<module 'name' from 'path'>` when `__spec__.origin` is set,
+`<module 'name' (built-in)>` for built-in modules, and
+`<module 'name' (frozen)>` for frozen modules. The C side simply delegates,
+so repr is always consistent with the importlib view of the module.
+
+## gopy mirror
+
+`objects/module.go`. `NewModule` creates `md_dict` and initializes dunders.
+`(*Module).State` / `(*Module).SetState` map to `md_state`. `moduleGetattr`
+handles the `__getattr__` fallback. `moduleRepr` formats the built-in / file
+variants. `md_def` is represented as a Go interface rather than a C struct pointer.
+
+## CPython 3.14 changes
+
+`PyModule_Add` (symmetric reference semantics) stabilized in 3.13.
+Multi-phase initialization via `PyModuleDef_Init` and `PyModule_ExecDef`
+stable since 3.5. The `module_getattro` `__getattr__` fallback was added in
+3.7 (PEP 562). `md_weaklist` support present since modules were made
+weakly referenceable in 2.1.

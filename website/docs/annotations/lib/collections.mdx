@@ -1,0 +1,141 @@
+---
+title: Lib/collections/__init__.py
+description: Pure-Python collection types — namedtuple, OrderedDict, defaultdict, Counter, ChainMap, deque, and the User* wrappers.
+cpython_path: Lib/collections/__init__.py
+cpython_version: "3.14"
+lines: 1100
+status: annotated
+ported_to: module/collections/module.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Lib/collections/__init__.py`
+
+<CpyLink path="Lib/collections/__init__.py" />
+
+The `collections` package exposes both C-accelerated types (imported from
+`_collections`) and types implemented entirely in Python. `deque`,
+`defaultdict`, and `OrderedDict` have C implementations that this file
+imports and, for `OrderedDict`, subclasses to add a couple of extra
+methods. `namedtuple`, `Counter`, `ChainMap`, `UserDict`, `UserList`, and
+`UserString` are pure Python.
+
+The file also re-exports `_sys.hexversion`, provides `__getattr__` for
+lazy-loaded names (`AsyncGenerator`, `Coroutine`, etc. delegated to
+`collections.abc`), and populates `__all__`.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Lib/collections/__init__.py" lines="1-60">1-60</Cpy> | Module header, C imports, `__getattr__` | Import `_collections`; expose `deque`, `defaultdict`, `OrderedDict`; lazy-delegate `abc` names. | `module/collections/module.go` |
+| <Cpy path="Lib/collections/__init__.py" lines="62-290">62-290</Cpy> | `namedtuple` | Factory that generates a `tuple` subclass with named accessors, `_make`, `_asdict`, `_replace`, and `__repr__` via `exec`. | `module/collections/module.go` |
+| <Cpy path="Lib/collections/__init__.py" lines="292-420">292-420</Cpy> | `OrderedDict` | Python wrapper over the C `PyODictObject`; adds `move_to_end(key, last=True)` and overrides `popitem(last=True)`. | `module/collections/module.go` |
+| <Cpy path="Lib/collections/__init__.py" lines="422-600">422-600</Cpy> | `Counter` | `dict` subclass for counting hashables; `most_common` uses `heapq.nlargest`; arithmetic operators discard zero/negative counts. | `module/collections/module.go` |
+| <Cpy path="Lib/collections/__init__.py" lines="602-720">602-720</Cpy> | `ChainMap` | Wraps a list of mappings; reads walk the chain; writes, deletes, and `setdefault` apply to the first map only. | `module/collections/module.go` |
+| <Cpy path="Lib/collections/__init__.py" lines="722-890">722-890</Cpy> | `UserDict` | Pure-Python `MutableMapping` wrapping a real `dict` in `self.data`; subclasses can override individual operations. | `module/collections/module.go` |
+| <Cpy path="Lib/collections/__init__.py" lines="892-1100">892-1100</Cpy> | `UserList`, `UserString` | Sequence and str wrappers in the same style as `UserDict`. | `module/collections/module.go` |
+
+## Reading
+
+### `namedtuple` codegen (lines 62 to 290)
+
+<CpyLink path="Lib/collections/__init__.py" lines="62-290" />
+
+```python
+def namedtuple(typename, field_names, *, rename=False,
+               defaults=None, module=None):
+    ...
+    # Build the class namespace via exec
+    class_namespace = {
+        '_nt_itemgetters': tuple(map(_itemgetter, range(len(field_names)))),
+        ...
+    }
+    exec(class_definition, class_namespace)
+    result = class_namespace[typename]
+    result.__qualname__ = typename
+    if module is not None:
+        result.__module__ = module
+    ...
+    return result
+```
+
+`namedtuple` builds a string containing a complete class definition and
+passes it to `exec`. The generated class body includes `__slots__ = ()`,
+a `__new__` that delegates to `tuple.__new__`, per-field `property`
+descriptors backed by `operator.itemgetter`, `_make` as a `classmethod`,
+`_asdict`, `_replace`, `_fields`, `_field_defaults`, and `__repr__`. The
+`exec` approach avoids the overhead of `__getattr__` on every field
+access while keeping the implementation readable. When `rename=True`,
+invalid identifiers and duplicates are silently replaced with positional
+names (`_0`, `_1`, …). When `defaults` is provided the last
+`len(defaults)` fields receive default values injected into the generated
+`__new__` signature.
+
+### `Counter.__add__` positive-only semantics (lines 422 to 600)
+
+<CpyLink path="Lib/collections/__init__.py" lines="422-600" />
+
+```python
+def __add__(self, other):
+    '''Add counts, but keep only results with positive counts.
+
+    >>> Counter('abbb') + Counter('bcc')
+    Counter({'b': 4, 'c': 2, 'a': 1})
+    '''
+    if not isinstance(other, Counter):
+        return NotImplemented
+    result = Counter()
+    for elem, count in self.items():
+        newcount = count + other[elem]
+        if newcount > 0:
+            result[elem] = newcount
+    for elem, count in other.items():
+        if elem not in self and count > 0:
+            result[elem] = count
+    return result
+```
+
+`__add__` and `__sub__` strip non-positive counts from the result.
+This matches the multiset semantics: you cannot have a negative number
+of items. `update` and `subtract` are the in-place counterparts and do
+_not_ strip zeros, because they are intended for incremental accumulation
+where intermediate negatives are meaningful. `|` (union) and `&`
+(intersection) keep only positive counts using `max` and `min`
+respectively.
+
+### `ChainMap` lookup and write semantics (lines 602 to 720)
+
+<CpyLink path="Lib/collections/__init__.py" lines="602-720" />
+
+```python
+class ChainMap(MutableMapping):
+    def __init__(self, *maps):
+        self.maps = list(maps) or [{}]
+
+    def __getitem__(self, key):
+        for mapping in self.maps:
+            try:
+                return mapping[key]
+            except KeyError:
+                pass
+        return self.__missing__(key)
+
+    def __setitem__(self, key, value):
+        self.maps[0][key] = value
+
+    def __delitem__(self, key):
+        try:
+            del self.maps[0][key]
+        except KeyError:
+            raise KeyError(f'Key not found in the first mapping: {key!r}')
+```
+
+Reads walk `self.maps` in order and return the first hit, giving earlier
+maps higher priority. Writes and deletes are confined to `self.maps[0]`.
+This means deleting a key from a `ChainMap` can reveal the same key from
+a deeper map — `ChainMap` does not hide entries in child maps when you
+delete from the parent. `new_child(m=None)` creates a new `ChainMap`
+with a fresh empty dict (or `m`) prepended to the existing chain, which
+is the standard pattern for scope-chain implementations.

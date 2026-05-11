@@ -1,0 +1,267 @@
+---
+title: Python/bltinmodule.c
+description: All Python built-in functions and the builtins module. Implements abs through zip, __build_class__, and _PyBuiltin_Init.
+cpython_path: Python/bltinmodule.c
+cpython_version: "3.14"
+lines: 3200
+status: annotated
+ported_to: vm/eval_gen.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Python/bltinmodule.c`
+
+<CpyLink path="Python/bltinmodule.c" />
+
+The `builtins` module. Every name visible in Python without an import lives
+here: all the built-in functions (`abs` through `zip`), all the built-in types
+(`bool`, `bytearray`, `bytes`, `dict`, `float`, `frozenset`, `int`, `list`,
+`object`, `range`, `set`, `str`, `tuple`, `type`), and the two special forms
+`__build_class__` and `__import__`. The file is self-contained: each function
+is a `PyMethodDef`-registered C function, and `_PyBuiltin_Init` at the bottom
+assembles them into the `builtins` module dict.
+
+`__build_class__` is the most structurally interesting entry: it is what
+`class` statements compile into calls to (via `LOAD_BUILD_CLASS` +
+`CALL`). It handles metaclass resolution, base-class `__mro_entries__`
+expansion, and the two-pass body execution. `builtin_eval` and `builtin_exec`
+both sit on top of `PyCompile_OpcodeStackEffectWithJump` and the full compile
+pipeline. `builtin_isinstance` delegates to `abstract_issubclass` after
+flattening any tuple second argument.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Python/bltinmodule.c" lines="1-120">1-120</Cpy> | `builtin_abs` / `builtin_all` / `builtin_any` / `builtin_ascii` / `builtin_bin` | Trivial one-liner builtins delegating to number protocol or `PyObject_ASCII`. | `vm/eval_gen.go:builtinAbs` etc. |
+| <Cpy path="Python/bltinmodule.c" lines="121-350">121-350</Cpy> | `builtin_breakpoint` / `builtin_callable` / `builtin_chr` / `builtin_compile` / `builtin_delattr` / `builtin_dir` / `builtin_divmod` | Mixed group. `builtin_compile` is the only large one: it handles `source`, `filename`, `mode`, `flags`, `dont_inherit`, `optimize`, and the `feature_version` keyword. | `vm/eval_gen.go:builtinCompile` |
+| <Cpy path="Python/bltinmodule.c" lines="351-620">351-620</Cpy> | `builtin_eval` / `builtin_exec` | Compile or accept a code object and run it in a namespace. Detailed below. | `vm/eval_gen.go:builtinEval` |
+| <Cpy path="Python/bltinmodule.c" lines="621-800">621-800</Cpy> | `builtin_filter` / `builtin_format` / `builtin_getattr` / `builtin_globals` / `builtin_hasattr` / `builtin_hash` / `builtin_help` / `builtin_hex` / `builtin_id` / `builtin_input` | I/O and attribute inspection group. `builtin_input` is the largest: reads `sys.stdin`, handles `sys.ps1`/`ps2`, and interacts with `sys.stdout` flushing. | `vm/eval_gen.go:builtinInput` |
+| <Cpy path="Python/bltinmodule.c" lines="801-1050">801-1050</Cpy> | `builtin_isinstance` / `builtin_issubclass` / `builtin_iter` / `builtin_aiter` / `builtin_anext` / `builtin_len` / `builtin_locals` | Type-checking and iteration group. `builtin_isinstance` detail below. | `vm/eval_gen.go:builtinIsinstance` |
+| <Cpy path="Python/bltinmodule.c" lines="1051-1300">1051-1300</Cpy> | `builtin_map` / `builtin_max` / `builtin_min` / `builtin_next` / `builtin_oct` / `builtin_open` / `builtin_ord` / `builtin_pow` | Numeric and IO group. `builtin_max`/`min` share `min_max` with a `cmp_op` parameter. `builtin_open` delegates entirely to `io.open`. | `vm/eval_gen.go:builtinMax` |
+| <Cpy path="Python/bltinmodule.c" lines="1301-1550">1301-1550</Cpy> | `builtin_print` / `builtin_repr` / `builtin_round` / `builtin_setattr` / `builtin_sorted` / `builtin_sum` | Output and mutation group. `builtin_print` detail below. | `vm/eval_gen.go:builtinPrint` |
+| <Cpy path="Python/bltinmodule.c" lines="1551-1800">1551-1800</Cpy> | `builtin_vars` / `builtin_zip` / `builtin_reversed` / `builtin_enumerate` | Container and lazy-sequence wrappers. Each validates its arguments then constructs the corresponding type instance. | `vm/eval_gen.go:builtinZip` |
+| <Cpy path="Python/bltinmodule.c" lines="1801-2300">1801-2300</Cpy> | `builtin___build_class__` | Metaclass resolution and class body execution. Detailed below. | `vm/eval_gen.go:builtinBuildClass` |
+| <Cpy path="Python/bltinmodule.c" lines="2301-2600">2301-2600</Cpy> | `builtin___import__` | Thin wrapper around `PyImport_ImportModuleLevelObject`. | `vm/eval_import.go:builtinImport` |
+| <Cpy path="Python/bltinmodule.c" lines="2601-2900">2601-2900</Cpy> | `builtin_methods` table / type registrations | `PyMethodDef` array for all functions, plus the inline registrations for `bool`, `bytearray`, `bytes`, etc. | `vm/eval_gen.go:builtinMethods` |
+| <Cpy path="Python/bltinmodule.c" lines="2901-3200">2901-3200</Cpy> | `_PyBuiltin_Init` | Allocate the `builtins` module, add every function and type to its dict, set `__doc__`, return it. | `vm/eval_gen.go:BuiltinInit` |
+
+## Reading
+
+### `__build_class__` (lines 1801 to 2300)
+
+<CpyLink path="Python/bltinmodule.c" lines="1801-2300" />
+
+```c
+static PyObject *
+builtin___build_class__(PyObject *self, PyObject *const *args, Py_ssize_t nargs,
+                        PyObject *kwnames)
+{
+    PyObject *func, *name, *bases = NULL, *mkw = NULL, *meta, *winner, *prep;
+    ...
+    /* 1. Expand __mro_entries__ on each base */
+    bases = update_bases(orig_bases, nargs - 2);
+    ...
+    /* 2. Determine the metaclass */
+    meta = calculate_metaclass(metatype, bases);
+    ...
+    /* 3. Call meta.__prepare__ to get the namespace */
+    prep = PyObject_GetAttr(meta, &_Py_ID(__prepare__));
+    ns = PyObject_Call(prep, ...);
+    ...
+    /* 4. Execute the class body */
+    cls = PyObject_Call(func, cell, mkw);  /* func is the compiled body */
+    ...
+    /* 5. Call the metaclass to build the type */
+    cls = PyObject_Call(meta, ...);
+    return cls;
+}
+```
+
+`LOAD_BUILD_CLASS` pushes this function onto the stack. The class statement
+compiles to a call with the body as a closure-bearing function, the class
+name, and the base list. The five steps are:
+
+1. `update_bases` calls `__mro_entries__` on any base that defines it (PEP 560),
+   expanding proxy objects like `Generic[T]` into their real bases.
+2. `calculate_metaclass` finds the most-derived metaclass among all bases and
+   the explicit `metaclass=` keyword, raising `TypeError` on conflicts.
+3. `meta.__prepare__` is called to produce the namespace dict. If the metaclass
+   has no `__prepare__`, a plain `dict` is used.
+4. The compiled class body function is called with the namespace as its
+   `__locals__`. This populates the namespace with methods and class variables.
+5. The metaclass is called with `(name, bases, namespace, **kwds)` to build
+   the final type object.
+
+In gopy, `vm/eval_gen.go:builtinBuildClass` mirrors all five steps. The
+`__mro_entries__` expansion is the part most likely to diverge from CPython;
+it is guarded by a test that exercises `Generic` base classes.
+
+### `builtin_eval` / `builtin_exec` (lines 351 to 620)
+
+<CpyLink path="Python/bltinmodule.c" lines="351-620" />
+
+```c
+static PyObject *
+builtin_eval_impl(PyObject *module, PyObject *source, PyObject *globals,
+                  PyObject *locals)
+{
+    ...
+    if (PyCode_Check(source)) {
+        /* already compiled */
+        if (PyCode_GetNumFree(source) > 0) {
+            PyErr_SetString(PyExc_TypeError, ...);
+            return NULL;
+        }
+    }
+    else {
+        /* compile the string */
+        cf.cf_flags = PyCF_SOURCE_IS_UTF8 | cf_flags;
+        source = Py_CompileStringExFlags(str, filename,
+                                         Py_eval_input, &cf, -1);
+        ...
+    }
+    return PyEval_EvalCode(source, globals, locals);
+}
+```
+
+`builtin_eval` and `builtin_exec` share most of their body. The key
+difference is the compile mode: `Py_eval_input` for `eval` (single
+expression, returns a value) versus `Py_file_input` for `exec` (statement
+sequence, returns `None`). Both accept a pre-compiled code object to skip
+the compile step entirely.
+
+Both functions default `globals` to `PyEval_GetGlobals()` (the caller's
+globals) and `locals` to `PyEval_GetLocals()` (the caller's locals) when
+those arguments are omitted. Passing `globals` but not `locals` makes `locals`
+default to `globals`, which is the right behavior for a module-level exec.
+
+The `__future__` flags from the enclosing code object (`cf_flags`) are
+forwarded to the compiler so that a `from __future__ import annotations`
+at module level propagates into an `eval` call inside that module.
+
+### `builtin_isinstance` (lines 801 to 870)
+
+<CpyLink path="Python/bltinmodule.c" lines="801-870" />
+
+```c
+static PyObject *
+builtin_isinstance_impl(PyObject *module, PyObject *inst, PyObject *cls)
+{
+    int retval = PyObject_IsInstance(inst, cls);
+    if (retval < 0)
+        return NULL;
+    return PyBool_FromLong(retval);
+}
+```
+
+The implementation is a thin wrapper around `PyObject_IsInstance`
+(`Objects/abstract.c`). The tuple-flattening that lets
+`isinstance(x, (A, B))` work lives inside `abstract_issubclass` in
+`Objects/abstract.c`, not here; the builtins file merely validates
+argument count and type before delegating.
+
+`builtin_issubclass` is structurally identical, delegating to
+`PyObject_IsSubclass`. Both are called heavily from the eval loop's
+`IS_OP`/`CHECK_EXC_MATCH` opcodes via their Python-level names; for
+performance-critical paths the opcodes call `abstract_issubclass`
+directly.
+
+### `builtin_print` (lines 1301 to 1420)
+
+<CpyLink path="Python/bltinmodule.c" lines="1301-1420" />
+
+```c
+static PyObject *
+builtin_print_impl(PyObject *module, PyObject *args, PyObject *sep,
+                   PyObject *end, PyObject *file, int flush)
+{
+    ...
+    if (file == Py_None) {
+        file = _PySys_GetAttr(tstate, &_Py_ID(stdout));
+        ...
+    }
+    for (i = 0; i < PyTuple_GET_SIZE(args); i++) {
+        if (i > 0) {
+            if (sep == NULL)
+                err = PyFile_WriteString(" ", file);
+            else
+                err = PyFile_WriteObject(sep, file, Py_PRINT_RAW);
+            ...
+        }
+        err = PyFile_WriteObject(PyTuple_GET_ITEM(args, i), file, Py_PRINT_RAW);
+        ...
+    }
+    if (end == NULL)
+        err = PyFile_WriteString("\n", file);
+    else
+        err = PyFile_WriteObject(end, file, Py_PRINT_RAW);
+    ...
+    if (flush) {
+        PyObject *tmp = PyObject_CallMethodNoArgs(file, &_Py_ID(flush));
+        ...
+    }
+    Py_RETURN_NONE;
+}
+```
+
+`file` defaults to `sys.stdout`. If `sys.stdout` is `None` (e.g., the
+interpreter is embedded and has no stdout), a `RuntimeError` is raised.
+`sep` defaults to `" "` and `end` defaults to `"\n"` when `None` is passed
+(the Argument Clinic generated wrapper converts the default `NULL` to
+`Py_None` before reaching this function, so the `== NULL` checks here are
+for the case where the caller passes an explicit `None`).
+
+`flush=True` calls `file.flush()` after writing. This is the only
+`sys.stdout` flushing that CPython does automatically; the interpreter does
+not flush between prompts in non-interactive mode.
+
+### `_PyBuiltin_Init` (lines 2901 to 3200)
+
+<CpyLink path="Python/bltinmodule.c" lines="2901-3200" />
+
+```c
+PyObject *
+_PyBuiltin_Init(PyInterpreterState *interp)
+{
+    PyObject *mod = _PyModule_CreateInitialized(&builtinsmodule, ...);
+    ...
+    if (PyDict_SetItemString(dict, "None",  Py_None) < 0) return NULL;
+    if (PyDict_SetItemString(dict, "Ellipsis", Py_Ellipsis) < 0) return NULL;
+    if (PyDict_SetItemString(dict, "NotImplemented", Py_NotImplemented) < 0) return NULL;
+    if (PyDict_SetItemString(dict, "True",  Py_True) < 0) return NULL;
+    if (PyDict_SetItemString(dict, "False", Py_False) < 0) return NULL;
+    ...
+    SETBUILTIN("abs",             builtin_abs);
+    SETBUILTIN("all",             builtin_all);
+    ...
+    SETBUILTIN("bool",            &PyBool_Type);
+    SETBUILTIN("bytearray",       &PyByteArray_Type);
+    ...
+    return mod;
+}
+```
+
+`SETBUILTIN` is a macro that calls `PyDict_SetItemString` and also stores
+the object in `interp->builtins_copy` for fast `LOAD_GLOBAL` specialization.
+The singletons `None`, `Ellipsis`, `NotImplemented`, `True`, and `False` are
+registered first so that they are always present even if a type initialization
+fails partway through. The order of type registrations matters: `bool` must
+come after `int` (its base type) because `_PyBuiltin_Init` is called after
+the core types are initialized.
+
+In gopy, `vm/eval_gen.go:BuiltinInit` mirrors this function. The Go version
+uses a slice of `(name, object)` pairs rather than a macro, and registers
+types that have already been set up by `objects/type.go` and friends.
+
+## CPython 3.14 changes worth noting
+
+`builtin_breakpoint` in 3.14 looks up `sys.breakpointhook` lazily on each
+call rather than caching it at module init, fixing a race when
+`sys.breakpointhook` is replaced after startup (gh-90780).
+`builtin_input` gained an `encoding` parameter (PEP 745 / gh-111134) for
+binary-mode stdin.
+`aiter` and `anext` were added in 3.10 and are unchanged in 3.14.
+The Argument Clinic annotations throughout the file were regenerated for
+3.14's updated `clinic` tool but the C logic is stable across 3.12-3.14.

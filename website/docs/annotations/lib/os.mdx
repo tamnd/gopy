@@ -1,0 +1,223 @@
+---
+title: Lib/os.py
+description: Pure-Python OS interface; augments the posix/nt C extension with walk, makedirs, PathLike, fspath, and the _Environ mapping.
+cpython_path: Lib/os.py
+cpython_version: "3.14"
+lines: 1200
+status: annotated
+ported_to: module/os/module.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Lib/os.py`
+
+<CpyLink path="Lib/os.py" />
+
+`os.py` is the thin pure-Python layer that sits on top of the `posix`
+(Unix) or `nt` (Windows) C extension. It imports everything from that
+extension into its own namespace via `from posix import *`, then
+overrides or augments a subset of the names with pure-Python
+implementations that add missing features or provide a cleaner API.
+
+The module sets `os.path` to either `posixpath` or `ntpath` based on
+`os.name`, and re-exports `sep`, `linesep`, `curdir`, `pardir`, and
+`extsep` from the path submodule. `scandir` and `DirEntry` come
+directly from the C extension; `walk` is the pure-Python generator that
+calls `scandir` internally.
+
+`PathLike` (PEP 519) and `fspath` live here. The `_Environ` mapping
+class wraps `putenv`/`unsetenv` so that dictionary-style mutations on
+`os.environ` propagate to the process environment automatically.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Lib/os.py" lines="1-100">1-100</Cpy> | Module bootstrap, `_names` filter, `os.path` assignment | Imports the platform C extension, filters its namespace, sets `os.path` to `posixpath` or `ntpath`. | `module/os/module.go` |
+| <Cpy path="Lib/os.py" lines="101-300">101-300</Cpy> | `_Environ`, `environ`, `environb`, `getenv`, `putenv`, `unsetenv` | `_Environ` is a `MutableMapping` backed by the C-level `putenv`/`unsetenv`; `environ` and `environb` are the process-wide instances. | `module/os/module.go` |
+| <Cpy path="Lib/os.py" lines="301-550">301-550</Cpy> | `walk` | Recursive directory-tree generator using `scandir`; supports `topdown`, `onerror`, and `followlinks`; symlink cycle detection via `stat` when `followlinks=True`. | `module/os/module.go` |
+| <Cpy path="Lib/os.py" lines="551-700">551-700</Cpy> | `makedirs`, `removedirs`, `renames` | `makedirs` creates intermediate directories, handling the `exist_ok` race; `removedirs` prunes empty ancestors; `renames` wraps both. | `module/os/module.go` |
+| <Cpy path="Lib/os.py" lines="701-900">701-900</Cpy> | `PathLike`, `fspath` | `PathLike` is an ABC requiring `__fspath__`; `fspath` coerces `str`, `bytes`, or `PathLike` to a file-system path and raises `TypeError` otherwise. | `module/os/module.go` |
+| <Cpy path="Lib/os.py" lines="901-1050">901-1050</Cpy> | `get_exec_path`, `_execvpe`, `execvpe` | Path-list search for executables; pure-Python fallback when the C module lacks `execvpe`. | `module/os/module.go` |
+| <Cpy path="Lib/os.py" lines="1051-1150">1051-1150</Cpy> | `popen`, `_wrap_close` | Thin wrapper around `subprocess.Popen` that presents a file-like interface; `_wrap_close` propagates the exit code from `close()`. | `module/os/module.go` |
+| <Cpy path="Lib/os.py" lines="1151-1200">1151-1200</Cpy> | `register_at_fork`, `set_inheritable`, `get_inheritable`, `urandom` | Unix-only helpers re-exported from `posix` with fallback stubs on Windows. | `module/os/module.go` |
+
+## Reading
+
+### `walk` using `scandir` (lines 301 to 550)
+
+<CpyLink path="Lib/os.py" lines="301-550" />
+
+```python
+def walk(top, topdown=True, onerror=None, followlinks=False):
+    sys.audit("os.walk", top, topdown, onerror, followlinks)
+    return _walk(fspath(top), topdown, onerror, followlinks)
+
+def _walk(top, topdown, onerror, followlinks):
+    dirs = []
+    nondirs = []
+    walk_dirs = []
+
+    try:
+        scandir_it = scandir(top)
+    except OSError as error:
+        if onerror is not None:
+            onerror(error)
+        return
+
+    with scandir_it:
+        while True:
+            try:
+                entry = next(scandir_it)
+            except StopIteration:
+                break
+            try:
+                is_dir = entry.is_dir()
+            except OSError:
+                is_dir = False
+            if is_dir:
+                dirs.append(entry.name)
+                ...
+            else:
+                nondirs.append(entry.name)
+
+    if topdown:
+        yield top, dirs, nondirs
+        ...
+    for dirname in walk_dirs:
+        yield from _walk(dirname, topdown, onerror, followlinks)
+    if not topdown:
+        yield top, dirs, nondirs
+```
+
+Since Python 3.5, `walk` uses `scandir` instead of `listdir` + `stat`.
+`scandir` returns `DirEntry` objects whose `is_dir()` method uses the
+directory-entry cache from `readdir`/`FindNextFile`, avoiding a separate
+`stat` syscall on most file systems. When `followlinks=False` (the
+default), `entry.is_dir(follow_symlinks=False)` is used so that symlinks
+to directories are placed in `nondirs`, not `dirs`. When
+`followlinks=True` and the walk is recursive, each target directory is
+stat-ed and its `(st_dev, st_ino)` pair is checked against a seen-set to
+break symlink cycles.
+
+The `topdown` flag controls whether the yielded triple for a directory
+appears before or after its subtree; when `topdown=True` the caller can
+modify the `dirs` list in-place to prune the walk.
+
+### `makedirs` and `exist_ok` (lines 551 to 630)
+
+<CpyLink path="Lib/os.py" lines="551-630" />
+
+```python
+def makedirs(name, mode=0o777, exist_ok=False):
+    head, tail = path.split(name)
+    if not tail:
+        head, tail = path.split(head)
+    if head and tail and not path.exists(head):
+        try:
+            makedirs(head, mode, exist_ok)
+        except FileExistsError:
+            pass
+    try:
+        mkdir(name, mode)
+    except OSError:
+        if not exist_ok or not path.isdir(name):
+            raise
+```
+
+`makedirs` recurses to create every missing ancestor before calling
+`mkdir` on the leaf. The `exist_ok=True` path handles the TOCTOU race:
+after `path.exists(head)` returns `False` another process may create
+`head`, so the recursive call catches `FileExistsError` silently. The
+leaf `mkdir` is also allowed to fail with `OSError` when `exist_ok=True`
+and the path is already a directory, confirmed by the `path.isdir` check.
+Without `exist_ok`, any `OSError` from `mkdir` propagates unchanged.
+
+### `PathLike` and `fspath` (lines 701 to 900)
+
+<CpyLink path="Lib/os.py" lines="701-900" />
+
+```python
+class PathLike(abc.ABC):
+    @abc.abstractmethod
+    def __fspath__(self):
+        ...
+
+    @classmethod
+    def __subclasshook__(cls, subclass):
+        if cls is PathLike:
+            return hasattr(subclass, '__fspath__')
+        return NotImplemented
+
+def fspath(path):
+    if isinstance(path, (str, bytes)):
+        return path
+    path_type = type(path)
+    try:
+        path_repr = path_type.__fspath__(path)
+    except AttributeError:
+        if hasattr(path_type, '__fspath__'):
+            raise
+        else:
+            raise TypeError(
+                "expected str, bytes or os.PathLike object, not "
+                + path_type.__name__)
+    if isinstance(path_repr, (str, bytes)):
+        return path_repr
+    raise TypeError(
+        "expected %s.__fspath__() to return str or bytes, not %r"
+        % (path_type.__name__, type(path_repr).__name__))
+```
+
+`PathLike` is the ABC for the `__fspath__` protocol (PEP 519).
+`__subclasshook__` makes `isinstance(x, os.PathLike)` work for any
+class that defines `__fspath__` without explicit registration.
+`fspath` fast-paths `str` and `bytes` (returning them unchanged) and
+calls `type(path).__fspath__(path)` for everything else. The type
+dispatch (not `path.__fspath__()`) mirrors how the interpreter itself
+invokes special methods, preventing user-level `__fspath__` that returns
+a non-`str`/non-`bytes` value from silently succeeding.
+
+### `_Environ` mapping (lines 101 to 300)
+
+<CpyLink path="Lib/os.py" lines="101-300" />
+
+```python
+class _Environ(MutableMapping):
+    def __init__(self, data, encodekey, decodekey, encodevalue, decodevalue):
+        self.encodekey = encodekey
+        self.decodekey = decodekey
+        self.encodevalue = encodevalue
+        self.decodevalue = decodevalue
+        self._data = data
+
+    def __setitem__(self, key, value):
+        putenv(self.encodekey(key), self.encodevalue(value))
+        self._data[self.encodekey(key)] = self.encodevalue(value)
+
+    def __delitem__(self, key):
+        unsetenv(self.encodekey(key))
+        try:
+            del self._data[self.encodekey(key)]
+        except KeyError:
+            raise KeyError(key) from None
+
+    def __getitem__(self, key):
+        try:
+            value = self._data[self.encodekey(key)]
+        except KeyError:
+            raise KeyError(key) from None
+        return self.decodevalue(value)
+```
+
+`_Environ` wraps a `dict` (populated at startup from the C-level
+`environ` snapshot) together with encode/decode functions that handle
+`str` vs. `bytes` conversions. Writes go to both `putenv` (the live
+process environment) and `self._data` (the Python-visible mirror).
+Deletes call `unsetenv` and remove from `_data`. Reads decode the
+stored bytes/str back to the appropriate type.
+
+`environ` uses `str` encode/decode on all platforms; `environb` (Unix
+only) uses raw `bytes` keys and values and shares the same underlying
+`_data` dict, so mutations through either view are visible in both.

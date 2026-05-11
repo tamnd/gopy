@@ -1,0 +1,195 @@
+---
+title: Python/_warnings.c
+description: Warning emission, filter matching, duplicate suppression, and the PyErr_WarnEx entry point.
+cpython_path: Python/_warnings.c
+cpython_version: "3.14"
+lines: 700
+status: annotated
+ported_to: pythonrun/warnings.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Python/_warnings.c`
+
+<CpyLink path="Python/_warnings.c" />
+
+The C-level warning subsystem. `PyErr_WarnEx` is the single entry point for
+all C-extension and interpreter-internal warnings; it builds the call site
+information (module, filename, lineno) from the current frame and then calls
+`warn_explicit`, which does filter matching, duplicate suppression, and action
+dispatch.
+
+Warning filters live in `sys.filters`, a Python list of 5-tuples
+`(action, message_regex, category, module_regex, lineno)`. Actions are the
+strings `"default"`, `"ignore"`, `"always"`, `"error"`, `"once"`, `"module"`.
+The list is traversed in order; the first matching filter wins. If no filter
+matches, the compiled-in default action is `"default"`.
+
+Duplicate suppression is per-module: `warn_explicit` reads (or creates) a
+`__warningregistry__` dict from the calling module's globals and checks
+whether the key `(text, category, lineno)` is already present. If so, the
+warning is silently dropped. This makes `"default"`, `"once"`, and `"module"`
+all cheap to re-execute in a hot loop.
+
+`_filters_mutated` is a version counter incremented whenever `sys.filters` is
+modified. `warn_explicit` reads the counter at the start of the filter loop
+and aborts with `RuntimeError` if it changes mid-search, preventing torn reads
+when a filter hook modifies the list.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Python/_warnings.c" lines="1-80">1-80</Cpy> | `_filters_mutated` / `_PyWarnings_InitState` | Version counter and per-interpreter warning state initialization. | `pythonrun/warnings.go:InitState` |
+| <Cpy path="Python/_warnings.c" lines="81-200">81-200</Cpy> | `get_warnings_attr` / `get_filters` / `get_once_registry` | Helpers to read `warnings.filters`, `warnings.defaultaction`, and `warnings.onceregistry` from the `warnings` module. | `pythonrun/warnings.go:getFilters` |
+| <Cpy path="Python/_warnings.c" lines="201-370">201-370</Cpy> | `warn_explicit` | Core logic: filter loop, `__warningregistry__` lookup, action dispatch to `showwarning`. | `pythonrun/warnings.go:warnExplicit` |
+| <Cpy path="Python/_warnings.c" lines="371-480">371-480</Cpy> | `setup_warnings_filters` | Populate default filters from `-W` command-line flags and `PYTHONWARNINGS` environment variable at interpreter startup. | `pythonrun/warnings.go:setupFilters` |
+| <Cpy path="Python/_warnings.c" lines="481-570">481-570</Cpy> | `PyErr_WarnExplicitObject` / `PyErr_WarnExplicit` | Low-level explicit-call-site entry; accepts pre-computed filename, module, lineno. | `pythonrun/warnings.go:WarnExplicitObject` |
+| <Cpy path="Python/_warnings.c" lines="571-650">571-650</Cpy> | `PyErr_WarnEx` / `PyErr_WarnFormat` | High-level entry; extracts call site from frame globals and `co_filename` then delegates to `warn_explicit`. | `pythonrun/warnings.go:WarnEx` |
+| <Cpy path="Python/_warnings.c" lines="651-700">651-700</Cpy> | `_PyWarnings_Fini` / `warnings_module_exec` | Module teardown and `_warnings` module init (the C shadow of the pure-Python `warnings` module). | `pythonrun/warnings.go:Fini` |
+
+## Reading
+
+### Filter matching in `warn_explicit` (lines 201 to 370)
+
+<CpyLink path="Python/_warnings.c" lines="201-370" />
+
+```c
+static int
+warn_explicit(PyThreadState *tstate, PyObject *category, PyObject *message,
+              PyObject *filename, int lineno, PyObject *module,
+              PyObject *registry, PyObject *lineno_obj)
+{
+    PyObject *filters = get_filters(tstate);
+    ...
+    Py_ssize_t n = PyList_GET_SIZE(filters);
+    for (Py_ssize_t i = 0; i < n; i++) {
+        PyObject *tmp_item = PyList_GET_ITEM(filters, i);
+        /* unpack 5-tuple */
+        PyObject *action   = PyTuple_GET_ITEM(tmp_item, 0);
+        PyObject *msg_re   = PyTuple_GET_ITEM(tmp_item, 1);
+        PyObject *cat      = PyTuple_GET_ITEM(tmp_item, 2);
+        PyObject *mod_re   = PyTuple_GET_ITEM(tmp_item, 3);
+        int       filt_ln  = (int)PyLong_AsLong(PyTuple_GET_ITEM(tmp_item, 4));
+        ...
+        /* category match: issubclass(category, cat) */
+        int rc = PyObject_IsSubclass(category, cat);
+        if (!rc) continue;
+        /* lineno match: 0 means any */
+        if (filt_ln != 0 && filt_ln != lineno) continue;
+        /* regex matches on text and module name */
+        ...
+        goto handle_action;
+    }
+    action = get_default_action(tstate);
+
+handle_action:
+    if (_PyUnicode_EqualToASCIIString(action, "error")) {
+        PyErr_SetObject(category, message);
+        return -1;
+    }
+    if (_PyUnicode_EqualToASCIIString(action, "ignore")) {
+        return 0;
+    }
+    ...
+}
+```
+
+The filter loop is a simple linear scan. The category check uses
+`PyObject_IsSubclass` so `DeprecationWarning` matches a filter for
+`Warning`. The `msg_re` and `mod_re` fields are compiled regex objects (or
+`None` to match anything); the match is applied with `re.search`, not
+`re.match`, so partial matches work.
+
+If the version counter `_filters_version` changes between iterations,
+`warn_explicit` raises `RuntimeError("the warnings filter changed during
+iteration")` to avoid processing a torn filter list.
+
+### Duplicate suppression via `__warningregistry__` (lines 201 to 370)
+
+<CpyLink path="Python/_warnings.c" lines="201-370" />
+
+```c
+    /* registry key: (text, category, lineno) */
+    PyObject *key = PyTuple_Pack(3, text, category, lineno_obj);
+    ...
+    PyObject *already = PyDict_GetItemWithError(registry, key);
+    if (already != NULL) {
+        return 0;  /* already warned at this site */
+    }
+    ...
+    /* after showing the warning, record the key */
+    if (PyDict_SetItem(registry, key, Py_True) < 0) {
+        return -1;
+    }
+```
+
+For `"default"` action the registry key is `(message_text, category, lineno)`,
+so the same warning at the same line is shown exactly once per module import.
+For `"module"` action the lineno component is replaced by `0` so the warning
+is shown once per module regardless of line. For `"once"` action the global
+`warnings.onceregistry` dict is used instead of the per-module registry.
+The `"always"` and `"error"` actions skip the registry entirely.
+
+`__warningregistry__` is created lazily in the calling module's globals the
+first time a suppressible warning fires in that module. It is a plain dict
+and can be cleared by user code (`import warnings; warnings.resetwarnings()`
+does not clear it; only direct `del module.__warningregistry__` does).
+
+### `PyErr_WarnEx` entry (lines 571 to 650)
+
+<CpyLink path="Python/_warnings.c" lines="571-650" />
+
+```c
+int
+PyErr_WarnEx(PyObject *category, const char *text, Py_ssize_t stack_level)
+{
+    PyThreadState *tstate = _PyThreadState_GET();
+    ...
+    /* walk up stack_level frames to find caller */
+    PyFrameObject *f = PyThreadState_GetFrame(tstate);
+    for (Py_ssize_t i = 0; i < stack_level && f != NULL; i++) {
+        PyFrameObject *tmp = PyFrame_GetBack(f);
+        Py_DECREF(f);
+        f = tmp;
+    }
+
+    PyObject *filename = f ? PyFrame_GetFilename(f) : NULL;
+    PyObject *module   = f ? _PyFrame_GetModuleName(f) : NULL;
+    int        lineno  = f ? PyFrame_GetLineNumber(f) : 0;
+    PyObject *registry = f ? _PyFrame_GetGlobals(f) : NULL;
+    ...
+    return warn_explicit(tstate, category, message,
+                         filename, lineno, module, registry, lineno_obj);
+}
+```
+
+`stack_level` lets a library wrapper skip its own frame so the warning
+points at the caller of the library, not at the library internals. The
+standard value is `1` (point at the direct caller); `warnings.warn(...,
+stacklevel=2)` uses `2` to skip the calling function as well.
+
+`PyErr_WarnFormat` is a thin wrapper that calls `PyUnicode_FromFormat` first
+and then calls `PyErr_WarnEx` with the resulting string. Both are the
+preferred entry points for C extension code; `PyErr_WarnExplicit` / 
+`PyErr_WarnExplicitObject` are for the rare case where the call site
+information is already known (e.g., the compiler warning path).
+
+## Notes for the gopy mirror
+
+`pythonrun/warnings.go` ports the full `warn_explicit` path. The
+`__warningregistry__` dict is a `*objects.Dict` looked up from the module
+globals passed into `WarnExplicit`. The filter list is read from
+`sys.filters` via the same `sysGet` helper used elsewhere in `pythonrun/`.
+The `_filters_mutated` version counter maps to an `atomic.Uint64` on the
+interpreter state.
+
+## CPython 3.14 changes worth noting
+
+`_warnings.c` is stable across 3.11 to 3.14. The main 3.12 change was
+moving `_Py_Warnings_State` from `_PyRuntimeState` onto `PyInterpreterState`
+to support sub-interpreters (gh-91924); the filter list and `onceregistry`
+are now per-interpreter rather than per-process. In 3.14 the only visible
+change is that `PyErr_WarnDeprecatedFormat` was added as a convenience
+wrapper for deprecation messages from the C API.

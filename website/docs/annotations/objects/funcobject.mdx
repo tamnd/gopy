@@ -1,0 +1,204 @@
+---
+title: Objects/funcobject.c
+description: PyFunctionObject. function creation, closure cells, __code__ replacement, func_get/set descriptors, and the __wrapped__ convention.
+cpython_path: Objects/funcobject.c
+cpython_version: "3.14"
+lines: 1907
+status: annotated
+ported_to: objects/function.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Objects/funcobject.c`
+
+<CpyLink path="Objects/funcobject.c" />
+
+Python function objects. A `PyFunctionObject` holds `func_code` (the code
+object), `func_globals` (the module globals dict), `func_closure` (a tuple of
+`PyCellObject`), `func_defaults` and `func_kwdefaults` for default argument
+values, `func_annotations`, `func_doc`, `func_name`, `func_qualname`, and
+`func_dict` (the `__dict__`). This file provides construction
+(`PyFunction_New`, `PyFunction_NewWithQualName`), all the `func_*` getsets,
+the `__get__` descriptor that returns a bound method, and `func_repr`. The
+`PyCFunction` and `PyMethod` families that wrap C callables also live at the
+bottom of this file.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Objects/funcobject.c" lines="1-80">1-80</Cpy> | `PyFunction_NewWithQualName`, `PyFunction_New` | Allocate a function object; copy code ref, take globals ref, set version. | `objects/function.go:NewFunction` |
+| <Cpy path="Objects/funcobject.c" lines="81-140">81-140</Cpy> | `PyFunction_GetCode`, `PyFunction_GetGlobals`, `PyFunction_GetModule`, `PyFunction_GetDefaults`, `PyFunction_GetKwDefaults`, `PyFunction_GetClosure`, `PyFunction_GetAnnotations` | Field accessors returning borrowed references. | `objects/function.go` |
+| <Cpy path="Objects/funcobject.c" lines="141-220">141-220</Cpy> | `PyFunction_SetCode`, `PyFunction_SetDefaults`, `PyFunction_SetKwDefaults`, `PyFunction_SetClosure`, `PyFunction_SetAnnotations` | Field setters; `SetCode` validates free-variable count and bumps version. | `objects/function.go:(*Function).SetCode` |
+| <Cpy path="Objects/funcobject.c" lines="221-400">221-400</Cpy> | `func_get_name`, `func_set_name`, `func_get_qualname`, `func_set_qualname`, `func_get_doc`, `func_set_doc`, `func_get_dict`, `func_set_dict`, `func_get_module`, `func_set_module` | Python-level `__name__`, `__qualname__`, `__doc__`, `__dict__`, `__module__` getsets. | `objects/function.go` |
+| <Cpy path="Objects/funcobject.c" lines="401-500">401-500</Cpy> | `func_get_annotations`, `func_set_annotations`, `func_get_annotate`, `func_set_annotate` | `__annotations__` and PEP 649 `__annotate__` (lazy evaluation) getsets. | `objects/function.go` |
+| <Cpy path="Objects/funcobject.c" lines="501-600">501-600</Cpy> | `func_get_code`, `func_set_code`, `func_get_globals`, `func_get_closure`, `func_get_defaults`, `func_set_defaults`, `func_get_kwdefaults`, `func_set_kwdefaults` | Remaining dunder getsets exposed in `func_memberlist`. | `objects/function.go` |
+| <Cpy path="Objects/funcobject.c" lines="601-700">601-700</Cpy> | `func_repr` | `<function name at 0x...>` or `<function qualname at 0x...>`. | `objects/function.go:funcRepr` |
+| <Cpy path="Objects/funcobject.c" lines="701-800">701-800</Cpy> | `func_traverse`, `func_clear`, `func_dealloc` | GC traversal (visits code, globals, closure, defaults, annotations) and deallocation. | `objects/function.go` |
+| <Cpy path="Objects/funcobject.c" lines="801-950">801-950</Cpy> | `func_descr_get` | `__get__`: returns `MethodType(self, obj)` when accessed on an instance. | `objects/function.go:(*Function).DescrGet` |
+| <Cpy path="Objects/funcobject.c" lines="951-1100">951-1100</Cpy> | `func_new_impl`, `func_new` | `types.FunctionType(code, globals[, name, argdefs, closure])` constructor for `copy` and pickle. | `objects/function.go:funcNew` |
+| <Cpy path="Objects/funcobject.c" lines="1101-1300">1101-1300</Cpy> | `func_annotations_from_annotate`, `func_annotations_setter` | PEP 649 lazy annotation materialization: call `__annotate__` on first access. | `objects/function.go` |
+| <Cpy path="Objects/funcobject.c" lines="1301-1500">1301-1500</Cpy> | `PyFunction_Type` definition, `func_memberlist`, `func_getsetlist` | Type object, member list, getset list for `types.FunctionType`. | `objects/function.go:FunctionType` |
+| <Cpy path="Objects/funcobject.c" lines="1501-1700">1501-1700</Cpy> | `PyCFunction_NewInternal`, `PyCFunction_New`, `PyCMethod_New`, `PyCFunction_GetFunction`, `PyCFunction_GetSelf`, `PyCFunction_GetFlags`, `PyCFunction_Call` | `PyCFunctionObject` construction and call dispatch across `METH_*` flags. | `objects/function.go:BuiltinFunction` |
+| <Cpy path="Objects/funcobject.c" lines="1701-1907">1701-1907</Cpy> | `meth_repr`, `meth_traverse`, `meth_dealloc`, `PyCFunction_Type`, `PyMethodObject`, `PyMethod_New`, `PyMethod_Type` | Repr, GC, and type objects for `PyCFunction` and bound `PyMethod`. | `objects/method.go` |
+
+## Reading
+
+### `PyFunction_NewWithQualName` (lines 1 to 80)
+
+<CpyLink path="Objects/funcobject.c" lines="1-80" />
+
+Function creation copies the code object pointer (takes a strong reference),
+takes a strong reference to the globals dict, and initializes all optional
+fields to NULL. The `func_version` field (added in 3.13) is set by combining
+the code object's `co_version` with a per-interpreter counter; it is used by
+the specializing adaptive interpreter to guard `CALL_PY_EXACT_ARGS` inline
+caches. When `func_version` changes, any cached specialization for calls to
+this function is no longer valid:
+
+```c
+PyObject *
+PyFunction_NewWithQualName(PyObject *code, PyObject *globals,
+                           PyObject *qualname)
+{
+    PyFunctionObject *op = PyObject_GC_New(PyFunctionObject,
+                                           &PyFunction_Type);
+    if (op == NULL)
+        return NULL;
+
+    op->func_code      = Py_NewRef(code);
+    op->func_globals   = Py_NewRef(globals);
+    op->func_builtins  = NULL;  // filled lazily
+    op->func_name      = Py_NewRef(((PyCodeObject *)code)->co_name);
+    op->func_qualname  = qualname ? Py_NewRef(qualname) : op->func_name;
+    op->func_defaults  = NULL;
+    op->func_kwdefaults = NULL;
+    op->func_closure   = NULL;
+    op->func_doc       = Py_None;
+    op->func_dict      = NULL;
+    op->func_weakreflist = NULL;
+    op->func_annotations = NULL;
+    op->func_annotate  = NULL;
+    op->func_version   = _PyFunction_GetVersionForCurrentState(
+                             (PyCodeObject *)code);
+    _PyObject_GC_TRACK(op);
+    return (PyObject *)op;
+}
+```
+
+`func_builtins` is filled lazily on first call rather than at construction to
+avoid a globals lookup for functions that are created but never called (common
+during import of large modules).
+
+### `func_descr_get` (lines 801 to 950)
+
+<CpyLink path="Objects/funcobject.c" lines="801-950" />
+
+The `__get__` protocol that turns a function stored in a class dict into a
+bound method when accessed on an instance. When `obj` is not NULL and not the
+type itself, wraps `(self, obj)` in a `PyMethodObject`. This is the complete
+mechanism behind `instance.method()`: the function object sits in the class
+dict unchanged; `__get__` binds it to the instance at access time:
+
+```c
+static PyObject *
+func_descr_get(PyObject *func, PyObject *obj, PyObject *type)
+{
+    if (obj == Py_None || obj == NULL) {
+        return Py_NewRef(func);
+    }
+    return PyMethod_New(func, obj);
+}
+```
+
+`PyMethod_New` allocates a `PyMethodObject` holding strong references to both
+`func` and `obj`. The method's `tp_call` slot then calls
+`_PyObject_Call(func, prepend(obj, args), kwargs)`. No copy of the function
+code is made; methods are cheap wrapper objects.
+
+### `func_set_code` (lines 141 to 180)
+
+<CpyLink path="Objects/funcobject.c" lines="141-180" />
+
+`func.__code__ = new_code` is validated before the swap. The new code object
+must have the same number of free variables as the function's current closure,
+otherwise the function's cell array would be out of sync with what the new
+bytecode expects:
+
+```c
+int
+PyFunction_SetCode(PyObject *func, PyObject *value)
+{
+    if (!PyCode_Check(value)) {
+        PyErr_SetString(PyExc_TypeError,
+                        "__code__ must be set to a code object");
+        return -1;
+    }
+    PyCodeObject *co = (PyCodeObject *)value;
+    PyFunctionObject *op = (PyFunctionObject *)func;
+    if (PySys_Audit("object.__setattr__", "OsO",
+                    func, "__code__", value) < 0) {
+        return -1;
+    }
+    Py_ssize_t nclosure = (op->func_closure == NULL ? 0
+                           : PyTuple_GET_SIZE(op->func_closure));
+    if (co->co_nfreevars != nclosure) {
+        PyErr_Format(PyExc_ValueError,
+            "%U() requires a code object with %zd free vars, not %zd",
+            op->func_name, nclosure, co->co_nfreevars);
+        return -1;
+    }
+    op->func_version = 0;  // Invalidate specializing-interpreter caches.
+    Py_XSETREF(op->func_code, Py_NewRef(value));
+    return 0;
+}
+```
+
+Setting `func_version` to 0 forces the specializing interpreter to
+re-specialize any `CALL_PY_EXACT_ARGS` instruction that previously cached this
+function. This is the same invalidation path used when a code object is
+mutated via the watcher API.
+
+### `PyCFunction` family (lines 1501 to 1700)
+
+<CpyLink path="Objects/funcobject.c" lines="1501-1700" />
+
+C-implemented callables. `PyCFunctionObject` holds a `PyMethodDef*` (name,
+function pointer, flags, docstring) plus a `self` pointer (the module or
+class). The `ml_flags` field selects the call convention:
+
+| Flag | Signature |
+| ---- | --------- |
+| `METH_NOARGS` | `f(self, NULL)` |
+| `METH_O` | `f(self, single_arg)` |
+| `METH_VARARGS` | `f(self, args_tuple)` |
+| `METH_FASTCALL` | `f(self, args_array, nargs)` |
+| `METH_VARARGS | METH_KEYWORDS` | `f(self, args_tuple, kwargs_dict)` |
+| `METH_FASTCALL | METH_KEYWORDS` | `f(self, args_array, nargs, kwnames)` |
+
+`PyCFunction_Call` dispatches to the correct convention. `METH_FASTCALL` is
+the vectorcall convention for C functions; it avoids tuple allocation for
+positional arguments and is the preferred convention for new built-in
+functions. These objects are what appear behind every `len`, `print`,
+`dict.get`, `list.append`, etc.
+
+`PyCMethod_New` creates a variant that also stores the defining class (the
+`__self__` of classmethods), used by `__init_subclass__` dispatch and
+`classmethod` descriptors.
+
+## gopy mirror
+
+`objects/function.go`. `func_version` is preserved for inline cache
+invalidation. `func_descr_get` maps to `(*Function).DescrGet`. `PyCFunction`
+family maps to `objects/builtin_function.go` (Go functions wrapped as Python
+callables). `PyMethodObject` maps to `objects/method.go`.
+
+## CPython 3.14 changes
+
+`func_version` field added in 3.13 for specializing adaptive interpreter cache
+guards. PEP 649 deferred annotation evaluation changes `__annotations__` from
+an eagerly built dict to a lazily called `__annotate__` function; the new
+`func_annotate` field stores the callable and `func_annotations` is populated
+on first access via `func_annotations_from_annotate`. `PyFunction_GET_ANNOTATIONS`
+updated accordingly. `PyCMethod_New` stabilized in 3.9.

@@ -1,0 +1,116 @@
+---
+title: Objects/namespaceobject.c
+description: _PyNamespaceObject backing types.SimpleNamespace, storing attributes in an internal dict with sorted repr.
+cpython_path: Objects/namespaceobject.c
+cpython_version: "3.14"
+lines: 250
+status: annotated
+ported_to: objects/namespace.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Objects/namespaceobject.c`
+
+<CpyLink path="Objects/namespaceobject.c" />
+
+The backing C type for `types.SimpleNamespace`. A `_PyNamespaceObject` holds a
+single `ns_dict` field (a `PyDictObject`) that stores all instance attributes.
+There are no slots: every attribute access goes through `ns_dict` via
+`PyObject_GenericGetAttr` / `PyObject_GenericSetAttr`. The type is exposed in
+Python as `types.SimpleNamespace` and is commonly used as a lightweight
+attribute bag. `_PyNamespace_New` provides a C-level constructor used by
+`types.SimpleNamespace.__new__`; `namespace_init` populates the dict from
+`**kwargs`; `namespace_repr` formats `namespace(key=val, ...)` with keys in
+sorted order.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Objects/namespaceobject.c" lines="1-50">1-50</Cpy> | `namespace_new`, `_PyNamespace_New` | Allocate a `_PyNamespaceObject` and create the empty `ns_dict`. | `objects/namespace.go:NewNamespace` |
+| <Cpy path="Objects/namespaceobject.c" lines="51-100">51-100</Cpy> | `namespace_init` | Iterate `kwargs`, insert each key-value pair into `ns_dict`; positional args are rejected. | `objects/namespace.go:namespaceNew` |
+| <Cpy path="Objects/namespaceobject.c" lines="101-140">101-140</Cpy> | `namespace_getattro`, `namespace_setattro` | Delegate to `PyObject_GenericGetAttr` / `PyObject_GenericSetAttr`, which walk `__dict__`. | `objects/namespace.go:namespaceGetattr` |
+| <Cpy path="Objects/namespaceobject.c" lines="141-200">141-200</Cpy> | `namespace_repr` | Sort `ns_dict` keys, format each as `key=repr(val)`, wrap in `namespace(...)`. | `objects/namespace.go:namespaceRepr` |
+| <Cpy path="Objects/namespaceobject.c" lines="201-230">201-230</Cpy> | `namespace_richcompare` | Compare two namespaces by type equality and then `ns_dict` equality. | `objects/namespace.go:namespaceCompare` |
+| <Cpy path="Objects/namespaceobject.c" lines="231-250">231-250</Cpy> | `namespace_traverse`, `namespace_clear`, `namespace_dealloc`, `_PyNamespace_Type` | GC traversal visits `ns_dict`; type object definition for `types.SimpleNamespace`. | `objects/namespace.go` |
+
+## Reading
+
+### `namespace_init` (lines 51 to 100)
+
+<CpyLink path="Objects/namespaceobject.c" lines="51-100" />
+
+`namespace_init` is the `tp_init` slot. It rejects positional arguments and
+then merges `kwargs` into `ns_dict`. Passing positional arguments raises
+`TypeError` with a message pointing to keyword-only usage:
+
+```c
+static int
+namespace_init(PyObject *self, PyObject *args, PyObject *kwds)
+{
+    _PyNamespaceObject *ns = (_PyNamespaceObject *)self;
+
+    if (PyTuple_GET_SIZE(args) != 0) {
+        PyErr_SetString(PyExc_TypeError,
+            "no positional arguments expected");
+        return -1;
+    }
+    if (kwds == NULL)
+        return 0;
+    if (!PyDict_Check(kwds))
+        return -1;
+    return PyDict_Update(ns->ns_dict, kwds);
+}
+```
+
+`PyDict_Update` is used rather than a manual loop so that the merge respects
+any subclassing of `dict`. The `ns_dict` field is always a plain `PyDictObject`
+allocated in `namespace_new`; no split-table optimizations apply here.
+
+### `namespace_repr` (lines 141 to 200)
+
+<CpyLink path="Objects/namespaceobject.c" lines="141-200" />
+
+Repr sorts the dict keys before formatting so that the output is stable across
+runs. This is a deliberate design choice: `SimpleNamespace` is frequently used
+in tests and configuration code where a deterministic repr matters for
+comparison and debugging:
+
+```c
+static PyObject *
+namespace_repr(PyObject *ns_obj)
+{
+    _PyNamespaceObject *ns = (_PyNamespaceObject *)ns_obj;
+
+    /* Sort keys for stable repr. */
+    PyObject *keys = PyDict_Keys(ns->ns_dict);
+    if (keys == NULL)
+        return NULL;
+    if (PyList_Sort(keys) != 0) {
+        Py_DECREF(keys);
+        return NULL;
+    }
+    ...
+    /* Build "namespace(key=repr(val), ...)" */
+}
+```
+
+Repr handles the re-entrancy guard (infinite-loop avoidance) via
+`Py_ReprEnter` / `Py_ReprLeave`, the same mechanism used by `list_repr` and
+`dict_repr`. A recursive `SimpleNamespace` containing itself prints as
+`namespace(key=namespace(...))`.
+
+## gopy mirror
+
+`objects/namespace.go`. `NewNamespace` allocates and creates `ns_dict`.
+`namespaceNew` (the `tp_new` / `tp_init` combined entry) processes `kwargs`.
+`namespaceGetattr` / `namespaceSetattr` delegate to the generic attribute
+machinery. `namespaceRepr` sorts keys and formats the output.
+`namespaceCompare` handles `==` and `!=` by comparing dicts.
+
+## CPython 3.14 changes
+
+`types.SimpleNamespace` introduced in 3.3 (PEP 3132 / `argparse` namespace
+consolidation). The `__reduce__` support for pickling has been present since
+3.4. No structural changes in 3.14.

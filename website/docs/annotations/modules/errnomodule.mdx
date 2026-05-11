@@ -1,0 +1,110 @@
+---
+title: Modules/errnomodule.c
+description: Thin module that registers every errno.h constant as a Python integer and builds the errno.errorcode reverse-mapping dict.
+cpython_path: Modules/errnomodule.c
+cpython_version: "3.14"
+lines: 80
+status: annotated
+ported_to: module/errno/module.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Modules/errnomodule.c`
+
+<CpyLink path="Modules/errnomodule.c" />
+
+The `errno` module is one of the simplest C extension modules in CPython.
+Its entire job is to walk every platform `errno.h` constant and expose it as a
+Python `int` attribute on the module, then construct a reverse-mapping dict
+`errno.errorcode` that maps integer codes back to their symbolic names (e.g.
+`{1: "EPERM", 2: "ENOENT", ...}`).
+
+There is no Python-layer fallback. The module is entirely self-contained in
+this file and is built as a built-in on all platforms.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Modules/errnomodule.c" lines="1-15">1-15</Cpy> | includes | Headers: `Python.h`, platform `errno.h`. | — |
+| <Cpy path="Modules/errnomodule.c" lines="15-55">15-55</Cpy> | `add_errno_const` macro, constant block | Registers each `errno.h` symbol via `PyModule_AddIntConstant`. | `module/errno/module.go:addConst` |
+| <Cpy path="Modules/errnomodule.c" lines="55-75">55-75</Cpy> | `errno_exec`, `errorcode` dict construction | Builds the `errorcode` dict from the already-registered constants. | `module/errno/module.go:buildErrorcode` |
+| <Cpy path="Modules/errnomodule.c" lines="75-80">75-80</Cpy> | `_errnomodule`, `PyInit_errno` | Module definition and entry point. | `module/errno/module.go:Module` |
+
+## Reading
+
+### `add_errno_const` macro pattern (lines 15 to 55)
+
+<CpyLink path="Modules/errnomodule.c" lines="15-55" />
+
+Every platform constant is added through a single macro so no per-constant
+boilerplate accumulates:
+
+```c
+#define add_errno_const(name) \
+    PyModule_AddIntConstant(m, #name, name)
+```
+
+The macro stringifies the symbol name with `#name`, so the attribute name in
+Python matches the C identifier exactly. The body of `errno_exec` is then a
+flat list of conditional blocks:
+
+```c
+#ifdef EPERM
+    add_errno_const(EPERM);
+#endif
+#ifdef ENOENT
+    add_errno_const(ENOENT);
+#endif
+/* ... ~100 more #ifdef blocks ... */
+```
+
+Each block is guarded with `#ifdef` so the module compiles cleanly on any
+platform regardless of which subset of constants the system header defines.
+`PyModule_AddIntConstant` returns `-1` on failure; the generated code checks
+the return value and aborts module init if any constant fails to register.
+
+### `errorcode` dict construction (lines 55 to 75)
+
+<CpyLink path="Modules/errnomodule.c" lines="55-75" />
+
+After all constants are registered, `errno_exec` reads them back from the
+module's `__dict__` to build the reverse mapping:
+
+```c
+PyObject *d = PyModule_GetDict(m);
+PyObject *de = PyDict_New();
+/* ... */
+PyObject *keys = PyMapping_Keys(d);
+for (int i = 0; i < PyList_GET_SIZE(keys); i++) {
+    PyObject *key = PyList_GET_ITEM(keys, i);
+    PyObject *val = PyObject_GetItem(d, key);
+    /* Skip non-integer entries (e.g. __name__, __doc__). */
+    if (!PyLong_Check(val)) { Py_DECREF(val); continue; }
+    /* Only add the first name for any given code number. */
+    if (!PyDict_Contains(de, val))
+        PyDict_SetItem(de, val, key);
+    Py_DECREF(val);
+}
+PyModule_AddObject(m, "errorcode", de);
+```
+
+The "first name wins" policy means that on Linux, where `EDEADLOCK` is an
+alias for `EDEADLK`, only one string appears in `errorcode` for the shared
+integer value. Which name wins depends on iteration order of the module dict,
+which is insertion order in CPython 3.7+.
+
+## gopy mirror
+
+`module/errno/module.go`. Each platform constant is added with the Go
+equivalent of `PyModule_AddIntConstant`. The `errorcode` dict is built by
+iterating the registered names after the constant block, mirroring the
+CPython iteration strategy.
+
+## CPython 3.14 changes
+
+The module moved from single-phase to multi-phase init (`Py_mod_exec`) in
+3.12, splitting the old `PyInit_errno` monolith into an `errno_exec` function.
+The constant list and `errorcode` logic are otherwise unchanged since
+Python 2.

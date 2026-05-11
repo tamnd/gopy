@@ -1,0 +1,187 @@
+---
+title: Objects/methodobject.c
+description: PyCFunctionObject — the backing type for all built-in functions, C-extension methods, and their flag-based call dispatch.
+cpython_path: Objects/methodobject.c
+cpython_version: "3.14"
+lines: 700
+status: annotated
+ported_to: objects/method.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Objects/methodobject.c`
+
+<CpyLink path="Objects/methodobject.c" />
+
+C-implemented callables. Every built-in function visible in Python — `len`,
+`print`, `dict.get`, `list.append`, `str.join` — is backed by a
+`PyCFunctionObject`. This struct holds a `PyMethodDef*` (name, C function
+pointer, calling-convention flags, docstring) together with a `m_self` pointer
+(the module or class instance the function is bound to) and an optional
+`m_module` reference for module-level functions.
+
+The critical design decision in this file is the `ml_flags` dispatch table.
+Rather than a single universal C signature, CPython defines six calling
+conventions controlled by bit flags in `PyMethodDef.ml_flags`. The right
+convention for a given function is chosen at call time, not at definition time,
+so a single function pointer type (`PyCFunction`) covers them all via casting.
+The `PyCMethod` variant (`PyCMethodObject`) adds a `mm_class` field for methods
+that need to know the defining class, used by `__init_subclass__` and
+`classmethod` descriptors.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Objects/methodobject.c" lines="1-100">1-100</Cpy> | `PyCFunction_NewEx`, `PyCFunction_New`, `PyCMethod_New`, free-list alloc | Allocate a `PyCFunctionObject`; free-list backed for performance; `PyCMethod_New` also sets `mm_class`. | `objects/method.go` |
+| <Cpy path="Objects/methodobject.c" lines="101-200">101-200</Cpy> | `PyCFunction_GetFunction`, `PyCFunction_GetSelf`, `PyCFunction_GetFlags`, `PyCFunction_GetModule` | Inline accessors returning the C function pointer, `m_self`, `ml_flags`, and `m_module`. | `objects/method.go` |
+| <Cpy path="Objects/methodobject.c" lines="201-380">201-380</Cpy> | `meth_call`, flag-based dispatch | `tp_call` implementation; dispatches to the correct C signature based on `ml_flags` combinations. | `objects/method.go` |
+| <Cpy path="Objects/methodobject.c" lines="381-500">381-500</Cpy> | `meth_vectorcall`, `PyCFunction_CallMethodObjArgs` | Zero-copy vectorcall path for `METH_FASTCALL`; avoids tuple/dict allocation for positional-only calls. | `objects/method.go` |
+| <Cpy path="Objects/methodobject.c" lines="501-600">501-600</Cpy> | `meth_repr`, `meth_hash`, `meth_richcompare`, `meth_traverse`, `meth_dealloc` | Repr as `<built-in function name>` or `<built-in method name of obj>`; hash; equality; GC support. | `objects/method.go` |
+| <Cpy path="Objects/methodobject.c" lines="601-700">601-700</Cpy> | `PyCFunction_Type`, `PyCMethod_Type` | Type object definitions; `PyCMethod_Type` is a subtype of `PyCFunction_Type` and adds `mm_class` in the member list. | `objects/method.go` |
+
+## Reading
+
+### `PyCFunction_NewEx` and the free-list (lines 1 to 100)
+
+<CpyLink path="Objects/methodobject.c" lines="1-100" />
+
+`PyCFunction_NewEx` is the primary constructor. It accepts the `PyMethodDef`,
+the `self` object (module or instance), and an optional `module` name string.
+Like `PyMethod_New`, it uses a per-interpreter free-list:
+
+```c
+PyObject *
+PyCFunction_NewEx(PyMethodDef *ml, PyObject *self, PyObject *module)
+{
+    PyCFunctionObject *op;
+    op = (PyCFunctionObject *)free_list;
+    if (op != NULL) {
+        free_list = (PyCFunctionObject *)(op->m_self);
+        numfree--;
+        (void)PyObject_INIT(op, &PyCFunction_Type);
+    }
+    else {
+        op = PyObject_GC_New(PyCFunctionObject, &PyCFunction_Type);
+        if (op == NULL)
+            return NULL;
+    }
+    op->m_ml = ml;
+    op->m_self = Py_NewRef(self);
+    op->m_module = Py_XNewRef(module);
+    op->m_weakreflist = NULL;
+    op->vectorcall = meth_vectorcall;
+    _PyObject_GC_TRACK(op);
+    return (PyObject *)op;
+}
+```
+
+`PyCMethod_New` extends this to also store `mm_class` — the class on which the
+method was defined. This is needed by `__init_subclass__` which must receive the
+class being initialized, not just the instance.
+
+### Flag-based dispatch in `meth_call` (lines 201 to 380)
+
+<CpyLink path="Objects/methodobject.c" lines="201-380" />
+
+`meth_call` unpacks `ml_flags` and routes to the correct C calling convention.
+The six conventions and their C signatures are:
+
+| Flag | C signature called |
+| ---- | ------------------ |
+| `METH_NOARGS` | `f(self, NULL)` |
+| `METH_O` | `f(self, single_arg)` |
+| `METH_VARARGS` | `f(self, args_tuple)` |
+| `METH_VARARGS | METH_KEYWORDS` | `f(self, args_tuple, kwargs_dict)` |
+| `METH_FASTCALL` | `f(self, args_array, nargs)` |
+| `METH_FASTCALL | METH_KEYWORDS` | `f(self, args_array, nargs, kwnames_tuple)` |
+
+```c
+static PyObject *
+meth_call(PyObject *func, PyObject *args, PyObject *kwds)
+{
+    PyCFunctionObject *f = (PyCFunctionObject *)func;
+    PyMethodDef *ml = f->m_ml;
+    PyObject *self = f->m_self;
+    int flags = ml->ml_flags;
+
+    if ((flags & METH_KEYWORDS) == 0 && kwds != NULL
+        && PyDict_GET_SIZE(kwds) != 0)
+    {
+        PyErr_Format(PyExc_TypeError,
+            "%.200s() takes no keyword arguments", ml->ml_name);
+        return NULL;
+    }
+
+    switch (flags & (METH_VARARGS | METH_FASTCALL | METH_NOARGS
+                     | METH_O | METH_KEYWORDS)) {
+    case METH_VARARGS:
+        return ml->ml_meth(self, args);
+    case METH_VARARGS | METH_KEYWORDS:
+        return ((PyCFunctionWithKeywords)ml->ml_meth)(self, args, kwds);
+    case METH_FASTCALL:
+        return _PyArg_CallUnboundMethod_FastCall(f, args);
+    /* ... remaining cases ... */
+    }
+}
+```
+
+`METH_NOARGS` and `METH_O` are checked after extracting the tuple so they can
+validate the exact argument count and produce better error messages than a
+generic "wrong number of arguments".
+
+### Vectorcall path (lines 381 to 500)
+
+<CpyLink path="Objects/methodobject.c" lines="381-500" />
+
+`meth_vectorcall` is the `tp_vectorcall` slot. For `METH_FASTCALL` functions it
+passes the raw `args` array directly, skipping tuple creation entirely:
+
+```c
+static PyObject *
+meth_vectorcall(PyObject *func, PyObject *const *args,
+                size_t nargsf, PyObject *kwnames)
+{
+    PyCFunctionObject *cf = (PyCFunctionObject *)func;
+    PyMethodDef *ml = cf->m_ml;
+    PyObject *self = cf->m_self;
+    Py_ssize_t nargs = PyVectorcall_NARGS(nargsf);
+    int flags = ml->ml_flags;
+
+    switch (flags & (METH_FASTCALL | METH_KEYWORDS | METH_NOARGS | METH_O)) {
+    case METH_FASTCALL:
+        /* No keyword arguments allowed. */
+        if (kwnames != NULL && PyTuple_GET_SIZE(kwnames) != 0) {
+            PyErr_Format(PyExc_TypeError, /* ... */);
+            return NULL;
+        }
+        return ((PyCFunctionFast)ml->ml_meth)(self, args, nargs);
+    case METH_FASTCALL | METH_KEYWORDS:
+        return ((PyCFunctionFastWithKeywords)ml->ml_meth)(
+            self, args, nargs, kwnames);
+    /* ... METH_NOARGS, METH_O, METH_VARARGS fall-through ... */
+    }
+}
+```
+
+This is the path taken by `CALL_BUILTIN_FAST` in the specializing interpreter.
+For a call like `len(x)` the entire dispatch goes through vectorcall without
+any heap allocation.
+
+## gopy mirror
+
+`objects/method.go` for the Go-level equivalent of `PyCFunctionObject`. In
+gopy, built-in functions are represented as Go closures wrapped by the
+`BuiltinFunction` type, so the `ml_flags` dispatch is replaced by Go's native
+function types. `PyCMethod_Type` maps to a field on the method struct that
+records the defining class when needed.
+
+## CPython 3.14 changes
+
+`PyCMethod_Type` and `PyCMethod_New` stabilized in 3.9 for `Py_mod_exec`-style
+extension modules. Vectorcall (`tp_vectorcall`) for `PyCFunctionObject` added
+in 3.9. `METH_FASTCALL | METH_KEYWORDS` became the recommended convention for
+new built-in methods in 3.10. `PyCFunction_GetModule` added in 3.9.
+`_Py_IDENTIFIER`-based method tables removed in 3.13 in favor of statically
+initialized `PyMethodDef` arrays.

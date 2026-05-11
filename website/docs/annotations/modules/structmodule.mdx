@@ -1,0 +1,212 @@
+---
+title: Modules/_struct.c
+description: C implementation of the struct module — packing and unpacking binary data with a format-string dispatch table and a cached Struct type.
+cpython_path: Modules/_struct.c
+cpython_version: "3.14"
+lines: 1800
+status: annotated
+ported_to: module/struct/module.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Modules/_struct.c`
+
+<CpyLink path="Modules/_struct.c" />
+
+The C backend for the `struct` module. `Lib/struct.py` re-exports
+everything from `_struct`. The module converts between Python values and
+C binary data laid out according to a format string, making it the
+primary tool for reading and writing binary file formats, network
+protocols, and memory-mapped structures from Python.
+
+`_struct.c` is organized around a dispatch table of `formatdef` entries,
+one per format character. Each entry carries the character, the size of the
+native C type, the alignment requirement, and two function pointers: a
+packer that converts a Python object to bytes and an unpacker that
+converts bytes to a Python object. The format string is compiled once into
+a sequence of `(formatdef*, count)` pairs stored in a `Struct` object,
+amortizing the parsing cost over repeated calls.
+
+The file divides into four logical sections:
+
+- **Format character table** — one `formatdef` row per format character,
+  for standard (little- and big-endian) and native layouts.
+- **`pack` / `unpack` loops** — traverse the compiled format sequence and
+  call each entry's pack/unpack function pointer.
+- **`Struct` compiled-format type** — caches the parsed format and exposes
+  `pack`, `unpack`, `pack_into`, `unpack_from`, `iter_unpack`, and
+  `size` as methods/attributes.
+- **Module-level convenience wrappers** — `struct.pack`, `struct.unpack`,
+  `struct.calcsize`, `struct.pack_into`, `struct.unpack_from`, and
+  `struct.iter_unpack` that each construct a temporary `Struct` and
+  delegate.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Modules/_struct.c" lines="1-80">1-80</Cpy> | includes, `_structmodulestate`, forward declarations | Per-interpreter state; references to cached exception types. | `module/struct/module.go:state` |
+| <Cpy path="Modules/_struct.c" lines="80-400">80-400</Cpy> | `formatdef` struct; `native_table`, `bigendian_table`, `lilendian_table` | Dispatch tables mapping each format character to its packer/unpacker and size. | `module/struct/module.go:formatTable` |
+| <Cpy path="Modules/_struct.c" lines="400-750">400-750</Cpy> | `nu_*` / `np_*` packer/unpacker functions | One pair per format character: convert between Python objects and raw bytes. | `module/struct/module.go:packByte`, `unpackByte`, etc. |
+| <Cpy path="Modules/_struct.c" lines="750-950">750-950</Cpy> | `s_object`, `s_init`, `s_dealloc`, `s_repr` | `Struct` type internals: the compiled-format object. | `module/struct/module.go:Struct` |
+| <Cpy path="Modules/_struct.c" lines="950-1150">950-1150</Cpy> | `s_pack`, `s_pack_into`, `s_unpack`, `s_unpack_from`, `s_iter_unpack` | `Struct` instance methods: the pack/unpack loops. | `module/struct/module.go:StructPack`, `StructUnpack` |
+| <Cpy path="Modules/_struct.c" lines="1150-1350">1150-1350</Cpy> | `unpackiter` type, `unpackiter_next` | Iterator returned by `Struct.iter_unpack`; yields successive fixed-size chunks. | `module/struct/module.go:UnpackIter` |
+| <Cpy path="Modules/_struct.c" lines="1350-1600">1350-1600</Cpy> | `calcsize`, `pack`, `pack_into`, `unpack`, `unpack_from`, `iter_unpack` | Module-level convenience functions delegating to `Struct`. | `module/struct/module.go:CalcSize`, `Pack`, `Unpack` |
+| <Cpy path="Modules/_struct.c" lines="1600-1800">1600-1800</Cpy> | `_struct_methods`, `_structmodule`, `PyInit__struct` | Method table, module definition, and entry point. | `module/struct/module.go:Module` |
+
+## Reading
+
+### Format character dispatch table (lines 80 to 400)
+
+<CpyLink path="Modules/_struct.c" lines="80-400" />
+
+Each format character is described by a `formatdef` struct:
+
+```c
+typedef struct _formatdef {
+    char format;
+    Py_ssize_t size;
+    Py_ssize_t alignment;
+    PyObject* (*unpack)(const char *, const formatdef *);
+    int (*pack)(char *, PyObject *, const formatdef *);
+} formatdef;
+```
+
+There are three separate tables:
+
+- `native_table` — uses the platform's C sizes and alignment (the `@`
+  prefix, which is also the default when no prefix is given).
+- `bigendian_table` — fixed sizes, no alignment, big-endian byte order
+  (`>` and `!` prefixes).
+- `lilendian_table` — fixed sizes, no alignment, little-endian byte order
+  (`<` prefix). The `=` prefix uses the same fixed sizes as `<`/`>` but
+  selects the platform's native byte order at runtime.
+
+All three tables end with a sentinel entry `{0}`. The format string parser
+calls `whichtable` to select the active table based on the first
+character, then walks the format string looking up each character with
+`getentry`:
+
+```c
+static const formatdef *
+whichtable(const char **pfmt)
+{
+    const char *fmt = (*pfmt)++;
+    switch (*fmt) {
+    case '<': return lilendian_table;
+    case '>': case '!': return bigendian_table;
+    case '=': return (PY_LITTLE_ENDIAN ? lilendian_table : bigendian_table);
+    case '@': case '\0': return native_table;
+    default:
+        (*pfmt)--;           /* put the character back */
+        return native_table;
+    }
+}
+```
+
+Format characters not present in a table (e.g., `n`/`N` ssize_t/size_t
+are only in the native table) raise `struct.error` from `getentry`.
+
+The half-float character `e` (IEEE 754 binary16) is in both fixed-size
+tables. It is implemented entirely in software using bit-manipulation in
+`pack_halffloat` and `unpack_halffloat` since C has no native 16-bit
+float type before C23.
+
+### `pack` and `unpack` loops (lines 950 to 1150)
+
+<CpyLink path="Modules/_struct.c" lines="950-1150" />
+
+`s_pack` iterates over the compiled format sequence stored in
+`s_object->s_codes` and calls each entry's pack function:
+
+```c
+static PyObject *
+s_pack(PyObject *self, PyObject *const *args, Py_ssize_t nargs)
+{
+    PyObject *result = PyBytes_FromStringAndSize(NULL, s->s_size);
+    char *buf = PyBytes_AS_STRING(result);
+    const formatcode *code = s->s_codes;
+
+    for (; code->fmtdef != NULL; code++) {
+        const formatdef *e = code->fmtdef;
+        char *res = buf + code->offset;
+        Py_ssize_t n = code->repeat;
+
+        if (e->format == 's' || e->format == 'p') {
+            /* String/pascal: consume one arg for the whole run. */
+            if (e->pack(res, *args++, e) < 0) goto error;
+        } else {
+            /* Scalar: consume one arg per repeat count. */
+            while (n-- > 0) {
+                if (e->pack(res, *args++, e) < 0) goto error;
+                res += e->size;
+            }
+        }
+    }
+    return result;
+    ...
+}
+```
+
+`s_unpack` is the mirror: it allocates a result tuple of the right size,
+iterates over `s_codes`, and calls each entry's unpack function to
+populate successive tuple slots.
+
+`s_pack_into` works like `s_pack` but writes into a caller-supplied
+writable buffer object (anything supporting the buffer protocol with
+`PyBUF_WRITABLE`). `s_unpack_from` reads from a buffer at a given offset.
+
+### `Struct` compiled-format cache (lines 750 to 950)
+
+<CpyLink path="Modules/_struct.c" lines="750-950" />
+
+`Struct(fmt)` parses the format string once and stores the result in an
+`s_object`:
+
+```c
+typedef struct {
+    PyObject_HEAD
+    Py_ssize_t s_size;      /* total byte size of one packed unit */
+    Py_ssize_t s_len;       /* number of Python objects consumed/produced */
+    formatcode *s_codes;    /* compiled (formatdef*, offset, repeat) triples */
+    PyObject *s_format;     /* the original format string */
+    PyObject *weakreflist;
+} PyStructObject;
+```
+
+`s_codes` is a heap-allocated array of `formatcode` records:
+
+```c
+typedef struct { const formatdef *fmtdef; Py_ssize_t offset; Py_ssize_t size; Py_ssize_t repeat; } formatcode;
+```
+
+`s_init` walks the format string once to count entries, allocates the
+`s_codes` array, then walks it a second time to fill in each entry's
+`fmtdef` pointer, byte offset, and repeat count. After this the format
+string is not consulted again; all pack/unpack calls work from `s_codes`.
+
+The module-level `struct.pack(fmt, ...)` does not cache the `Struct`
+object. For repeated calls with the same format, callers should construct a
+`Struct` instance explicitly and reuse it.
+
+`Struct` supports `__reduce__` / `__setstate__` for pickling. The
+pickled form is `(Struct, (fmt,))`, so unpickling simply reconstructs from
+the format string.
+
+## gopy mirror
+
+`module/struct/module.go`. `formatTable` maps Go `byte` format characters
+to pack/unpack function pairs. `Struct` is a Go struct holding `size`,
+`codes []formatCode`, and the original format string. `Pack` and `Unpack`
+iterate `codes` and call function pointers. Half-float encoding replicates
+the bit-manipulation from `pack_halffloat` / `unpack_halffloat`.
+
+## CPython 3.14 changes
+
+The `e` half-float format character was added in 3.6. The `n` and `N`
+ssize_t/size_t characters are only available with the `@` (native) prefix
+and have been present since 3.3. `iter_unpack` and `Struct.iter_unpack`
+were added in 3.4. The per-interpreter state struct and the migration of
+exception caching to it were done in 3.12. The core pack/unpack logic and
+the `formatdef` table structure are unchanged since Python 2.

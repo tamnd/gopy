@@ -1,0 +1,138 @@
+---
+title: Include/object.h
+description: Public C API for the Python object protocol — PyObject, PyVarObject, refcount macros, and accessor helpers.
+cpython_path: Include/object.h
+cpython_version: "3.14"
+lines: 828
+status: annotated
+ported_to: objects/object.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Include/object.h`
+
+<CpyLink path="Include/object.h" />
+
+The root public header. Every C extension and every file that touches
+a `PyObject *` includes this transitively through `Python.h`.
+It declares the two fundamental structs (`PyObject`, `PyVarObject`),
+all refcount macros, the standard accessor macros, and the forward
+declaration of `PyTypeObject` whose full layout lives in
+`Include/cpython/object.h`.
+
+In the free-threaded build (`Py_GIL_DISABLED`) the struct layout and
+the refcount macros both change: `ob_refcnt` is replaced by `ob_tid`
+plus a biased reference count word, and `Py_INCREF` / `Py_DECREF`
+become atomic CAS loops. The macros abstract all of that so callers
+compile cleanly under both build modes.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Include/object.h" lines="103-145">103-145</Cpy> | `PyObject` / `PyVarObject` | Core struct layout: `ob_refcnt`, `ob_type`, `ob_size`. | `objects/object.go` |
+| <Cpy path="Include/object.h" lines="147-160">147-160</Cpy> | `PyObject_HEAD` / `PyObject_VAR_HEAD` | Struct-embedding macros for type definitions. | `objects/object.go` |
+| <Cpy path="Include/object.h" lines="162-220">162-220</Cpy> | `Py_TYPE` / `Py_SET_TYPE` / `Py_REFCNT` / `Py_SET_REFCNT` / `Py_SIZE` / `Py_SET_SIZE` | Type-safe accessor macros (strict since 3.10). | `objects/object.go` |
+| <Cpy path="Include/object.h" lines="222-310">222-310</Cpy> | `PyTypeObject` forward decl + slot typedefs | `unaryfunc`, `binaryfunc`, `ternaryfunc`, etc. | `objects/type.go` |
+| <Cpy path="Include/object.h" lines="312-420">312-420</Cpy> | `Py_INCREF` / `Py_DECREF` / `Py_XINCREF` / `Py_XDECREF` / `Py_CLEAR` | Refcount mutation; atomic paths in free-threaded build. | `objects/object.go` |
+| <Cpy path="Include/object.h" lines="422-530">422-530</Cpy> | `Py_RETURN_NONE` / `Py_RETURN_TRUE` / `Py_RETURN_FALSE` / `Py_RETURN_RICHCOMPARE` | Convenience return macros for C slot functions. | `objects/object.go` |
+| <Cpy path="Include/object.h" lines="532-630">532-630</Cpy> | `_Py_CAST` / `_Py_REFTOTAL` / `_Py_NoneStruct` / `_Py_NotImplementedStruct` | Internal helpers and singleton declarations. | `objects/object.go` |
+| <Cpy path="Include/object.h" lines="632-828">632-828</Cpy> | `PyObject_*` protocol functions | `PyObject_IsTrue`, `PyObject_Repr`, `PyObject_Hash`, `PyObject_RichCompare`, etc. | `objects/protocol.go` |
+
+## Reading
+
+### `PyObject` layout (lines 103 to 160)
+
+<CpyLink path="Include/object.h" lines="103-160" />
+
+```c
+/* Standard GIL build */
+struct _object {
+    Py_ssize_t ob_refcnt;
+    PyTypeObject *ob_type;
+};
+
+/* Variable-length variant */
+struct _var_object {
+    PyObject ob_base;
+    Py_ssize_t ob_size;
+};
+```
+
+`PyObject` is the minimal prefix shared by every Python value.
+`PyVarObject` adds `ob_size`, which counts elements in bytes objects,
+lists, tuples, and all other variable-length types (it is *not* the
+allocation size).
+
+In the free-threaded (`Py_GIL_DISABLED`) build the first field becomes
+`uint64_t ob_tid` (the creating thread ID used for biased reference
+counting), and `ob_refcnt` is demoted to a 16-bit field after that.
+The `_Py_CAST` helper and the `Py_REFCNT` macro hide the difference.
+
+The `PyObject_HEAD` macro is the idiomatic way to embed the prefix in a
+concrete type definition. `PyObject_VAR_HEAD` embeds `PyVarObject` for
+variable-length types:
+
+```c
+typedef struct {
+    PyObject_VAR_HEAD
+    PyObject **ob_item;  /* pointer to first element */
+    Py_ssize_t allocated;
+} PyListObject;
+```
+
+### Refcount macros (lines 312 to 420)
+
+<CpyLink path="Include/object.h" lines="312-420" />
+
+```c
+static inline void Py_INCREF(PyObject *op) {
+#if defined(Py_GIL_DISABLED)
+    _Py_INCREF_SPECIALIZED(op);
+#else
+    op->ob_refcnt++;
+#endif
+}
+
+static inline void Py_DECREF(PyObject *op) {
+    if (--op->ob_refcnt == 0) {
+        _Py_Dealloc(op);
+    }
+}
+```
+
+`Py_XINCREF` / `Py_XDECREF` are null-safe wrappers. `Py_CLEAR(p)` sets
+`p` to `NULL` before decrementing, which prevents use-after-free when
+the decrement triggers a finalizer that reads `p`.
+
+In gopy, reference counting is replaced by Go's garbage collector.
+`Py_INCREF` and `Py_DECREF` are no-ops; the macros exist in the Go
+source only as inline comments or are omitted entirely where Go's GC
+makes them redundant.
+
+### Accessor macros (lines 162 to 220)
+
+<CpyLink path="Include/object.h" lines="162-220" />
+
+```c
+static inline PyTypeObject* Py_TYPE(PyObject *ob) {
+    return ob->ob_type;
+}
+static inline void Py_SET_TYPE(PyObject *ob, PyTypeObject *type) {
+    ob->ob_type = type;
+}
+static inline Py_ssize_t Py_REFCNT(PyObject *ob) {
+    return ob->ob_refcnt;
+}
+```
+
+Before 3.10 these were plain macros and direct field access was common.
+Since 3.10 the `Py_LIMITED_API` guard and strict-aliasing requirements
+force all access through the inline functions. `Py_SIZE` reads
+`ob_size` from a `PyVarObject *` and requires a cast; `Py_SET_SIZE`
+writes it. Any code that mixed `ob_type` field access with
+`PY_TYPE()` will generate a deprecation warning.
+
+In gopy the analogues are methods on the `Object` interface:
+`Type() *Type`, `SetType(*Type)`, `Len() int`.

@@ -1,0 +1,194 @@
+---
+title: Lib/traceback.py
+description: Format and print Python tracebacks and exception chains; provides TracebackException, StackSummary, FrameSummary, and the walk_stack/walk_tb generators.
+cpython_path: Lib/traceback.py
+cpython_version: "3.14"
+lines: 600
+status: annotated
+ported_to: module/traceback/module.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Lib/traceback.py`
+
+<CpyLink path="Lib/traceback.py" />
+
+`traceback.py` is a pure-Python module that converts live exception
+objects and frame chains into serializable data structures, then formats
+them as human-readable text. It is the backend for the default exception
+hook (`sys.excepthook`), for `unittest` failure output, and for any code
+that needs to capture or pretty-print tracebacks without re-raising.
+
+The module is structured in three layers:
+
+1. Low-level walkers: `walk_stack` and `walk_tb` are generators that
+   produce `(frame, lineno)` pairs by following `f_back` or `tb_next`
+   chains.
+
+2. Capture structures: `FrameSummary` stores a single frame's filename,
+   line number, function name, and the source text. `StackSummary` is a
+   list of `FrameSummary` objects with a class method `extract` that
+   calls one of the walkers.
+
+3. Formatting: `TracebackException` recursively captures `__cause__`,
+   `__context__`, and `__suppress_context__` at construction time and
+   provides `format()` / `format_exc()` generators. Top-level helpers
+   `format_exception`, `format_tb`, `print_exception`, and `print_tb`
+   delegate to these structures.
+
+PEP 657 (fine-grained error locations) added `_ExceptionPrintContext` in
+3.11 to carry the caret annotation state across the recursive formatting
+calls.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Lib/traceback.py" lines="1-60">1-60</Cpy> | Module header, `__all__`, imports | Public surface and sentinel constants. | `module/traceback/module.go` |
+| <Cpy path="Lib/traceback.py" lines="61-120">61-120</Cpy> | `print_tb`, `format_tb`, `extract_tb` | Top-level helpers that format or print a `tb` chain. | `module/traceback/module.go` |
+| <Cpy path="Lib/traceback.py" lines="121-180">121-180</Cpy> | `print_exception`, `format_exception`, `format_exc`, `print_last` | Format a complete exception (chain + traceback + message). | `module/traceback/module.go` |
+| <Cpy path="Lib/traceback.py" lines="181-250">181-250</Cpy> | `walk_stack`, `walk_tb` | Generators that yield `(frame, lineno)` by walking `f_back` / `tb_next`. | `module/traceback/module.go` |
+| <Cpy path="Lib/traceback.py" lines="251-360">251-360</Cpy> | `FrameSummary`, `StackSummary` | `FrameSummary` stores one frame; `StackSummary.extract` captures a walk into a list. | `module/traceback/module.go` |
+| <Cpy path="Lib/traceback.py" lines="361-420">361-420</Cpy> | `_ExceptionPrintContext` | Carries indentation depth and caret-annotation state (PEP 657) through recursive `TracebackException.format` calls. | `module/traceback/module.go` |
+| <Cpy path="Lib/traceback.py" lines="421-520">421-520</Cpy> | `TracebackException.__init__` | Recursively captures exception chain (`__cause__`, `__context__`, `__suppress_context__`) and extracts `StackSummary`. | `module/traceback/module.go` |
+| <Cpy path="Lib/traceback.py" lines="521-600">521-600</Cpy> | `TracebackException.format`, `format_stack`, `format_exception_only` | Yield formatted lines for the full chain, a single stack, or only the exception line. | `module/traceback/module.go` |
+
+## Reading
+
+### `TracebackException.__init__` — exception chaining capture (lines 421 to 520)
+
+<CpyLink path="Lib/traceback.py" lines="421-520" />
+
+```python
+class TracebackException:
+    def __init__(self, exc_type, exc_value, exc_tb, *,
+                 limit=None, lookup_lines=True,
+                 capture_locals=False, compact=False,
+                 max_group_width=15, max_group_depth=10,
+                 _seen=None):
+        if _seen is None:
+            _seen = set()
+        _seen.add(id(exc_value))
+
+        if exc_value and exc_value.__cause__ is not None:
+            cause = exc_value.__cause__
+            if id(cause) not in _seen:
+                cause = TracebackException(
+                    type(cause), cause, cause.__traceback__,
+                    ..., _seen=_seen)
+            else:
+                cause = None
+        else:
+            cause = None
+
+        if exc_value and exc_value.__context__ is not None:
+            context = exc_value.__context__
+            if id(context) not in _seen:
+                context = TracebackException(
+                    type(context), context, context.__traceback__,
+                    ..., _seen=_seen)
+            else:
+                context = None
+        else:
+            context = None
+
+        self.__cause__ = cause
+        self.__context__ = context
+        self.__suppress_context__ = \
+            exc_value.__suppress_context__ if exc_value else False
+        ...
+        self.stack = StackSummary.extract(
+            walk_tb(exc_tb), limit=limit, lookup_lines=lookup_lines,
+            capture_locals=capture_locals)
+```
+
+The constructor captures both `__cause__` and `__context__` recursively,
+passing a `_seen` set to break cycles (an exception can appear multiple
+times in a chain if it was raised, caught, and re-raised). Cycle
+detection uses `id(exc_value)` rather than identity so that even
+replaced exception objects are recognized.
+
+`StackSummary.extract(walk_tb(exc_tb))` drives `walk_tb` to convert the
+live `tb_next` chain into a `StackSummary` at construction time. This
+means the frames are snapshotted immediately: source lines are read
+while the files are still accessible, and local variable values (if
+`capture_locals=True`) are `repr`-ed before they go out of scope.
+
+### `format_exception` chain walk (lines 521 to 600)
+
+<CpyLink path="Lib/traceback.py" lines="521-600" />
+
+```python
+def format(self, *, chain=True, _ctx=None):
+    if _ctx is None:
+        _ctx = _ExceptionPrintContext()
+
+    output = []
+    exc = self
+    while True:
+        if chain:
+            if exc.__cause__ is not None:
+                yield from exc.__cause__.format(chain=chain, _ctx=_ctx)
+                yield _cause_message
+            elif (exc.__context__ is not None
+                  and not exc.__suppress_context__):
+                yield from exc.__context__.format(chain=chain, _ctx=_ctx)
+                yield _context_message
+        if exc.exc_traceback is not None:
+            yield 'Traceback (most recent call last):\n'
+            yield from exc.stack.format()
+        yield from exc.format_exception_only()
+        break
+```
+
+`format` walks the chain from the innermost `__cause__` or `__context__`
+outward, yielding the chaining header (`"The above exception was the
+direct cause..."` or `"During handling of the above exception..."`)
+between each pair. `__suppress_context__` is checked so that `raise B
+from None` (which sets `__suppress_context__ = True`) suppresses the
+implicit context chain. The `_ExceptionPrintContext` object tracks how
+deeply nested the format call is (for exception groups) and whether PEP
+657 caret annotations have been emitted for each frame.
+
+### `StackSummary.extract` (lines 251 to 360)
+
+<CpyLink path="Lib/traceback.py" lines="251-360" />
+
+```python
+class StackSummary(list):
+    @classmethod
+    def extract(cls, frame_gen, *, limit=None, lookup_lines=True,
+                capture_locals=False):
+        def extended_frame_gen():
+            for f, lineno in frame_gen:
+                yield f, (f.f_lineno, f.f_lasti)
+
+        result = cls()
+        fnames = {}
+        for f, (lineno, lasti) in itertools.islice(
+                extended_frame_gen(), limit):
+            co = f.f_code
+            filename = co.co_filename
+            name = co.co_qualname
+            ...
+            if lookup_lines:
+                linecache.checkcache(filename)
+            locals_ = f.f_locals if capture_locals else None
+            result.append(FrameSummary(
+                filename, lineno, name,
+                lookup_line=lookup_lines,
+                locals=locals_,
+                lasti=lasti,
+            ))
+        return result
+```
+
+`extract` drives any `(frame, lineno)` generator (usually `walk_tb` or
+`walk_stack`) and converts each frame into a `FrameSummary`. It records
+`f_lasti` (the last bytecode offset) alongside the line number so that
+PEP 657 fine-grained error annotations can later compute column offsets.
+`linecache.checkcache` is called per unique filename to ensure the source
+cache is current. When `capture_locals` is true, `f.f_locals` is taken
+at this moment; the values are `repr`-ed lazily inside `FrameSummary` to
+defer expensive repr calls until the traceback is actually formatted.

@@ -1,0 +1,347 @@
+---
+title: Python/import.c
+description: The import system's C layer. Entry point for every import statement, sys.modules registry, extension caching, frozen module bootstrap, and interpreter shutdown cleanup.
+cpython_path: Python/import.c
+cpython_version: "3.14"
+lines: 4956
+status: annotated
+ported_to: vm/eval_import.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Python/import.c`
+
+<CpyLink path="Python/import.c" />
+
+The C layer of the import machinery. `PyImport_ImportModuleLevelObject` is the
+function behind every `import` statement: it resolves relative imports from
+`__package__` or `__spec__.parent`, checks `sys.modules` for an already-loaded
+module, and delegates to `importlib._bootstrap._find_and_load` for everything
+else. The file also owns the per-interpreter import lock, the `sys.modules`
+accessor helpers, the extension module (`.so`/`.pyd`) cache,
+`PyImport_ExecCodeModule*` which executes a code object inside a fresh module
+namespace, the built-in module registration table (`_PyImport_Inittab`), frozen
+module handling (including the `importlib` bootstrap itself), and
+`PyImport_Cleanup` which tears down `sys.modules` at interpreter shutdown in a
+safe ordering.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Python/import.c" lines="1-50">1-50</Cpy> | file header / includes | Lock state type, `import_lock` global. | `vm/import_lock.go` |
+| <Cpy path="Python/import.c" lines="51-150">51-150</Cpy> | `_PyImport_AcquireLock` / `_PyImport_ReleaseLock` | Per-interpreter recursive import mutex. | `vm/import_lock.go:AcquireLock` |
+| <Cpy path="Python/import.c" lines="151-250">151-250</Cpy> | `import_get_module` / `import_set_module` | `sys.modules` dict read/write helpers. | `vm/eval_import.go:getModule` |
+| <Cpy path="Python/import.c" lines="251-400">251-400</Cpy> | `import_set_module_attrstring` / `_PyImport_SetModule` / `_PyImport_GetModuleAttrString` | Attribute-level sys.modules accessors. | `vm/eval_import.go:setModuleAttr` |
+| <Cpy path="Python/import.c" lines="401-500">401-500</Cpy> | `_PyImport_CheckSubinterpIncompatibleExtensionAllowed` | Sub-interpreter isolation guard for C extensions (PEP 630). | `vm/eval_import.go` |
+| <Cpy path="Python/import.c" lines="501-600">501-600</Cpy> | `_PyImport_FindExtensionObject` | Cache lookup for already-loaded `.so` modules by `(name, path)` key. | `vm/eval_import.go:findExtension` |
+| <Cpy path="Python/import.c" lines="601-700">601-700</Cpy> | `_PyImport_LoadDynamicModuleWithSpec` | Multi-phase init path (PEP 451): calls `Py_mod_exec` slot. | `vm/eval_import.go:loadDynamic` |
+| <Cpy path="Python/import.c" lines="701-800">701-800</Cpy> | `PyImport_ExecCodeModuleObject` | Create module, set dunder attrs, exec body, register in `sys.modules`. | `vm/eval_import.go:ExecCodeModule` |
+| <Cpy path="Python/import.c" lines="801-1000">801-1000</Cpy> | `PyImport_ExecCodeModuleWithPathnames` / `PyImport_ExecCodeModuleEx` / `PyImport_ExecCodeModule` | Convenience wrappers around `ExecCodeModuleObject`. | `vm/eval_import.go` |
+| <Cpy path="Python/import.c" lines="1001-1200">1001-1200</Cpy> | `get_sourcefile` / `get_filename` | Derive `__file__` from a loader or spec object. | `vm/eval_import.go:getFilename` |
+| <Cpy path="Python/import.c" lines="1201-1400">1201-1400</Cpy> | `PyImport_GetImporter` / `_PyImport_FindBuiltin` | Path-based finder lookup and built-in module finder. | `vm/eval_import.go:getImporter` |
+| <Cpy path="Python/import.c" lines="1401-1800">1401-1800</Cpy> | `PyImport_ImportModuleLevelObject` | Main import entry: relative resolution, `sys.modules` check, `importlib` call, attribute extraction. | `vm/eval_import.go:ImportModuleLevel` |
+| <Cpy path="Python/import.c" lines="1801-2000">1801-2000</Cpy> | `PyImport_ImportModule` / `PyImport_ImportModuleNoBlock` / `PyImport_ImportModuleEx` | Convenience wrappers (level=0, no block). | `vm/eval_import.go:ImportModule` |
+| <Cpy path="Python/import.c" lines="2001-2200">2001-2200</Cpy> | `PyImport_Import` | The `__import__` built-in C entry; calls `builtins.__import__`. | `vm/eval_import.go:Import` |
+| <Cpy path="Python/import.c" lines="2201-2600">2201-2600</Cpy> | `PyImport_AddModuleObject` / `PyImport_AddModule` / `PyImport_AddModuleRef` | Create or retrieve a module in `sys.modules` (3.13+ strong-ref variant). | `vm/eval_import.go:AddModule` |
+| <Cpy path="Python/import.c" lines="2601-3000">2601-3000</Cpy> | `PyImport_ReloadModule` | `importlib.reload` C entry. | `vm/eval_import.go:ReloadModule` |
+| <Cpy path="Python/import.c" lines="3001-3500">3001-3500</Cpy> | `_PyImport_Inittab` / `PyImport_AppendInittab` / `PyImport_ExtendInittab` | Built-in module registration table and extension API. | `stdlibinit/registry.go` |
+| <Cpy path="Python/import.c" lines="3501-4000">3501-4000</Cpy> | `_PyImport_FindFrozenObject` / `_PyImport_ImportFrozenModuleObject` / `imp_find_module` / `imp_load_source` | Frozen module marshal/exec and legacy `imp` helpers. | `stdlibinit/registry.go:FindFrozen` |
+| <Cpy path="Python/import.c" lines="4001-4956">4001-4956</Cpy> | `imp` module methods / `importlib` init / `PyImport_Cleanup` | Module object for `_imp`, `importlib` bootstrap init, shutdown cleanup. | `vm/eval_import.go:Cleanup` |
+
+## Reading
+
+### Import lock (lines 51 to 150)
+
+<CpyLink path="Python/import.c" lines="51-150" />
+
+```c
+void
+_PyImport_AcquireLock(PyInterpreterState *interp)
+{
+    _PyImport_lock *lock = &interp->imports.lock;
+    unsigned long me = PyThread_get_thread_ident();
+    PyThread_acquire_lock(lock->mutex, 1);
+    if (lock->count > 0 && lock->thread == me) {
+        /* Recursive acquisition by the same thread. */
+        lock->count++;
+        PyThread_release_lock(lock->mutex);
+        return;
+    }
+    while (lock->count > 0) {
+        lock->waiting++;
+        PyThread_release_lock(lock->mutex);
+        PyThread_acquire_lock(lock->lock, 1);
+        PyThread_acquire_lock(lock->mutex, 1);
+        lock->waiting--;
+    }
+    lock->thread = me;
+    lock->count = 1;
+    PyThread_release_lock(lock->mutex);
+}
+```
+
+The import lock is a per-interpreter recursive mutex stored in
+`interp->imports.lock`. The same thread can acquire it multiple times
+(each acquisition increments `count`); a different thread blocks on
+`lock->lock` until `count` reaches zero. Without this lock, two threads
+importing the same module simultaneously could both execute the module body and
+both try to insert different objects into `sys.modules`.
+
+`_PyImport_ReleaseLock` decrements `count` and signals any waiting threads when
+it reaches zero. The lock is also released around long I/O operations in the
+import path so the GIL can be dropped without exposing a half-initialized
+`sys.modules`.
+
+In gopy, `vm/import_lock.go` uses `sync.Mutex` with a manual recursion counter
+on the goroutine ID, matching the CPython semantics.
+
+### `PyImport_ImportModuleLevelObject` (lines 1401 to 1800)
+
+<CpyLink path="Python/import.c" lines="1401-1800" />
+
+```c
+PyObject *
+PyImport_ImportModuleLevelObject(PyObject *name, PyObject *globals,
+                                 PyObject *locals, PyObject *fromlist,
+                                 int level)
+{
+    ...
+    if (level > 0) {
+        abs_name = resolve_name(tstate, name, globals, level);
+        if (abs_name == NULL)
+            goto error;
+    }
+    else {
+        ...
+        abs_name = Py_NewRef(name);
+    }
+
+    mod = import_get_module(tstate, abs_name);
+    if (mod != NULL && mod != Py_None) {
+        ...
+        goto module_loaded;
+    }
+
+    ...
+    final_mod = _PyObject_CallMethodObjArgs(interp->importlib,
+                                            &_Py_ID(_find_and_load),
+                                            abs_name, interp->import_func,
+                                            NULL);
+    ...
+module_loaded:
+    if (fromlist != NULL && PyObject_IsTrue(fromlist)) {
+        ...
+    }
+    else {
+        /* Return top-level package for 'import foo.bar'. */
+        ...
+    }
+```
+
+This function is called by the `IMPORT_NAME` opcode handler for every `import`
+statement. `level` is the number of leading dots: `import foo` gives `level=0`,
+`from . import bar` gives `level=1`, and so on. For `level > 0` the private
+`resolve_name` helper walks `__package__` (or `__spec__.parent`) up by `level`
+packages to compute the absolute name.
+
+After resolving the name, `import_get_module` checks `sys.modules`. A cache hit
+skips `importlib` entirely. A miss calls `importlib._bootstrap._find_and_load`
+which runs the full finder/loader chain. For `from foo import bar` style
+imports the `fromlist` is non-empty and `_handle_fromlist` extracts the
+requested attributes from the loaded package; otherwise the top-level package
+object is returned (so `import foo.bar; foo.bar` works).
+
+gopy mirrors this in `vm/eval_import.go:ImportModuleLevel`. The relative
+resolution is a direct port of `resolve_name`. The `importlib` call goes
+through the same `module/importlib` frozen bootstrap.
+
+### Extension module caching (lines 501 to 700)
+
+<CpyLink path="Python/import.c" lines="501-700" />
+
+```c
+PyObject *
+_PyImport_FindExtensionObject(PyObject *name, PyObject *path,
+                              PyInterpreterState *interp)
+{
+    PyObject *key = PyTuple_Pack(2, name, path);
+    ...
+    PyObject *mod = PyDict_GetItemWithError(interp->imports.extensions, key);
+    if (mod == NULL) {
+        Py_DECREF(key);
+        return NULL;
+    }
+    ...
+    /* Re-init: call Py_mod_exec slot again for multi-phase modules */
+    ...
+    return mod;
+}
+```
+
+`.so`/`.pyd` extension modules are cached in `interp->imports.extensions` keyed
+by a `(name, path)` tuple. On a cache hit in the same interpreter, the cached
+module object is returned without re-executing the module body. This matters
+for modules with global C state: re-running `PyInit_foo` would reinitialize
+that state and potentially crash.
+
+Multi-phase init modules (PEP 451, `Py_mod_exec` slot) go through
+`_PyImport_LoadDynamicModuleWithSpec` instead, which calls the `Py_mod_exec`
+slot each time the module is loaded into a new namespace. Single-phase init
+modules (`PyInit_foo` returns the module directly) are fully cached after the
+first load.
+
+Sub-interpreter isolation is enforced by
+`_PyImport_CheckSubinterpIncompatibleExtensionAllowed`: single-phase init
+extension modules with global C state cannot be loaded into sub-interpreters
+that request strict isolation (PEP 630 / `Py_TPFLAGS_BASETYPE` checks added in
+3.12).
+
+### `PyImport_ExecCodeModuleObject` (lines 701 to 800)
+
+<CpyLink path="Python/import.c" lines="701-800" />
+
+```c
+PyObject *
+PyImport_ExecCodeModuleObject(PyObject *name, PyObject *co,
+                               PyObject *pathname, PyObject *cpathname)
+{
+    ...
+    mod = import_add_module(tstate, name);
+    ...
+    dict = PyModule_GetDict(mod);
+    ...
+    if (PyDict_SetItemString(dict, "__spec__", spec) < 0) goto error;
+    if (pathname && PyDict_SetItemString(dict, "__file__", pathname) < 0) goto error;
+    if (cpathname && PyDict_SetItemString(dict, "__cached__", cpathname) < 0) goto error;
+    ...
+    v = PyEval_EvalCode(co, dict, dict);
+    ...
+}
+```
+
+This function executes a code object (a compiled `.pyc` or in-memory bytecode)
+inside a module namespace. The module is inserted into `sys.modules` via
+`import_add_module` *before* execution. This pre-insertion is intentional:
+if the module body triggers a circular import, the importer will find the
+partially-initialized module object in `sys.modules` and return it rather than
+re-entering the import, which avoids infinite recursion.
+
+`__spec__`, `__file__`, `__cached__`, `__loader__`, and `__package__` are all
+set before `PyEval_EvalCode` is called. If execution fails, the module is
+removed from `sys.modules` to avoid leaving a broken module behind. The
+`ExecCodeModuleWithPathnames` and `ExecCodeModuleEx` wrappers just add
+defaulting logic for the `pathname` and `cpathname` arguments.
+
+### Frozen modules (lines 3501 to 4000)
+
+<CpyLink path="Python/import.c" lines="3501-4000" />
+
+```c
+const struct _frozen *
+_PyImport_FindFrozenObject(const char *name)
+{
+    const struct _frozen *p = PyImport_FrozenModules;
+    for (; p->name != NULL; p++) {
+        if (strcmp(p->name, name) == 0) {
+            return p;
+        }
+    }
+    return NULL;
+}
+
+int
+_PyImport_ImportFrozenModuleObject(PyObject *name)
+{
+    const struct _frozen *p = _PyImport_FindFrozenObject(PyUnicode_AsUTF8(name));
+    ...
+    PyObject *co = PyMarshal_ReadObjectFromString((char *)p->code, p->size);
+    ...
+    return PyImport_ExecCodeModuleObject(name, co, NULL, NULL) != NULL ? 1 : 0;
+}
+```
+
+Frozen modules have their marshalled bytecode embedded in the
+`PyImport_FrozenModules` array, which is generated by
+`Tools/scripts/freeze.py` and linked into the interpreter binary.
+`_PyImport_FindFrozenObject` does a linear scan of the array by name.
+`_PyImport_ImportFrozenModuleObject` unmarshals the bytecode with
+`PyMarshal_ReadObjectFromString` and then calls `PyImport_ExecCodeModuleObject`
+to execute it.
+
+The `importlib` bootstrap (`importlib._bootstrap` and
+`importlib._bootstrap_external`) is itself a frozen module. This is why
+`PyImport_ImportModuleLevelObject` can call into `importlib` before any file
+system finder is available: the bootstrap is already in the binary. The
+interpreter initializes `importlib` from the frozen array during
+`Py_InitializeFromConfig`, before any user code runs.
+
+In gopy, `stdlibinit/registry.go` holds the frozen module table and
+`FindFrozen` mirrors `_PyImport_FindFrozenObject`.
+
+### `PyImport_Cleanup` (lines 4001 to 4956)
+
+<CpyLink path="Python/import.c" lines="4001-4956" />
+
+```c
+void
+PyImport_Cleanup(PyInterpreterState *interp)
+{
+    /* First pass: delete non-dunder modules. */
+    ...
+    while (/* modules dict is not empty */) {
+        PyObject *key, *value;
+        Py_ssize_t pos = 0;
+        while (PyDict_Next(modules, &pos, &key, &value)) {
+            if (!is_dunder_name(key)) {
+                PyDict_DelItem(modules, key);
+            }
+        }
+    }
+    /* Second pass: delete dunder modules except builtins and sys. */
+    ...
+    /* Third pass: delete builtins and sys. */
+    ...
+}
+```
+
+Called at interpreter shutdown, `PyImport_Cleanup` removes entries from
+`sys.modules` in a defined order to maximize the chance that `__del__`
+methods and finalizers can still use Python objects.
+
+The ordering is: non-dunder modules first (user code, third-party libraries),
+then dunder modules (internal and stdlib modules), and finally `builtins` and
+`sys` last. This means that when a user module's `__del__` runs, `sys.stderr`
+and `builtins.print` are still available. Without the ordering, a
+`__del__` that calls `print` could see `None` where `print` used to be because
+the `builtins` module was already wiped.
+
+After each deletion pass, module values are set to `None` rather than removed
+immediately, so that any remaining references from finalizers get a `None`
+sentinel instead of a dangling pointer. The full cleanup is repeated in a loop
+until no new modules are added by finalizers.
+
+## Notes for the gopy mirror
+
+`vm/eval_import.go` handles the `IMPORT_NAME`, `IMPORT_FROM`, and
+`IMPORT_STAR` opcodes and calls into `module/importlib/` for the finder/loader
+chain. `ImportModuleLevel` is a direct port of
+`PyImport_ImportModuleLevelObject`. The import lock is a `sync.Mutex` with a
+goroutine-local recursion counter in `vm/import_lock.go`. Frozen module
+bootstrap is `stdlibinit/registry.go`.
+
+`PyImport_AddModuleRef` (3.13+, returns a strong reference) is the preferred
+variant in new code; gopy exposes this as `AddModuleRef` and does not expose
+the borrowing `AddModule` variant in new Go call sites.
+
+## CPython 3.14 changes worth noting
+
+PEP 451 module spec protocol has been stable since 3.4 and is unchanged in
+3.14. Sub-interpreter extension isolation
+(`_PyImport_CheckSubinterpIncompatibleExtensionAllowed`) was tightened in 3.12
+with PEP 630 and related work; 3.14 tightens it further for modules that
+declare `Py_MOD_MULTIPLE_INTERPRETERS_NOT_SUPPORTED`.
+`PyImport_AddModuleRef` (strong-reference variant) was added in 3.13,
+replacing the borrowing `PyImport_AddModule` for new callers. The frozen module
+table format and `_PyImport_FindFrozenObject` scan loop are unchanged.

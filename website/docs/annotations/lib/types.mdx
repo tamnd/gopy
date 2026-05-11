@@ -1,0 +1,150 @@
+---
+title: Lib/types.py
+description: Names for built-in types not directly accessible as builtins, plus metaclass helpers new_class/resolve_bases/prepare_class and the coroutine decorator.
+cpython_path: Lib/types.py
+cpython_version: "3.14"
+lines: 344
+status: annotated
+ported_to: stdlib/types.py
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Lib/types.py`
+
+<CpyLink path="Lib/types.py" />
+
+`types.py` has two distinct halves. The first half (lines 10 to 76)
+extracts type objects by inspecting sentinel instances: `FunctionType`
+is `type(lambda: None)`, `GeneratorType` is `type((_g := (lambda: (yield
+1))())`, and so on. All of these names are imported from `_types` (the C
+accelerator) when available and fall back to the Python extraction
+pattern otherwise. The second half (lines 79 to 343) provides
+`new_class`, `resolve_bases`, `prepare_class`, `get_original_bases`,
+`DynamicClassAttribute`, `_GeneratorWrapper`, and `coroutine`.
+
+In CPython 3.14, `_types` is a new C module that caches the extracted
+type objects so the fallback `_f()`, `_g()` sentinel dance is only used
+when `_types` is absent.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Lib/types.py" lines="10-76">10-76</Cpy> | Type singletons block | Extract `FunctionType`, `LambdaType`, `CodeType`, `MappingProxyType`, `SimpleNamespace`, `CellType`, `GeneratorType`, `CoroutineType`, `AsyncGeneratorType`, `MethodType`, `ModuleType`, `TracebackType`, `FrameType`, `GenericAlias`, `UnionType`, `NoneType`, etc. from sentinel objects or from `_types`. | `stdlib/types.py` |
+| <Cpy path="Lib/types.py" lines="80-88">80-88</Cpy> | `new_class` | Create a class dynamically by calling `resolve_bases`, `prepare_class`, and the metaclass. | `stdlib/types.py` |
+| <Cpy path="Lib/types.py" lines="90-109">90-109</Cpy> | `resolve_bases` | Walk `bases`, call `__mro_entries__` on non-type entries, return a possibly-expanded tuple (PEP 560). | `stdlib/types.py` |
+| <Cpy path="Lib/types.py" lines="111-158">111-158</Cpy> | `prepare_class`, `_calculate_meta` | Find the most-derived metaclass, call its `__prepare__`, return `(meta, ns, kwds)`. | `stdlib/types.py` |
+| <Cpy path="Lib/types.py" lines="161-186">161-186</Cpy> | `get_original_bases` | Return `cls.__orig_bases__` when present, else `cls.__bases__`. | `stdlib/types.py` |
+| <Cpy path="Lib/types.py" lines="189-249">189-249</Cpy> | `DynamicClassAttribute` | Descriptor that raises `AttributeError` on class-level access, routing it to `__getattr__`; used by `enum`. | `stdlib/types.py` |
+| <Cpy path="Lib/types.py" lines="252-291">252-291</Cpy> | `_GeneratorWrapper` | Wraps a non-native generator so it exposes the coroutine interface (`send`, `throw`, `close`, `__await__`). | `stdlib/types.py` |
+| <Cpy path="Lib/types.py" lines="293-343">293-343</Cpy> | `coroutine` | Decorator that marks a plain generator function as a coroutine by setting `CO_ITERABLE_COROUTINE` in `co_flags`, or wraps non-native generators in `_GeneratorWrapper`. | `stdlib/types.py` |
+
+## Reading
+
+### Type singletons extraction (lines 10 to 76)
+
+<CpyLink path="Lib/types.py" lines="10-76" />
+
+```python
+try:
+    from _types import *
+except ImportError:
+    import sys
+
+    def _f(): pass
+    FunctionType = type(_f)
+    LambdaType = type(lambda: None)
+    CodeType = type(_f.__code__)
+    MappingProxyType = type(type.__dict__)
+    SimpleNamespace = type(sys.implementation)
+
+    def _g():
+        yield 1
+    GeneratorType = type(_g())
+
+    async def _c(): pass
+    _c = _c()
+    CoroutineType = type(_c)
+    _c.close()  # Prevent ResourceWarning
+    ...
+    del sys, _f, _g, _C, _c, _ag, _cell_factory
+```
+
+Each name is obtained by constructing a throw-away instance of the
+desired type and calling `type()` on it. Coroutines require `_c.close()`
+immediately to avoid a `ResourceWarning` from the GC. Async generators
+need the same pattern. The names are deleted after use to keep the module
+namespace clean. When `_types` (C) is available the sentinel dance is
+skipped entirely.
+
+### `new_class` / `resolve_bases` / `prepare_class` (lines 80 to 158)
+
+<CpyLink path="Lib/types.py" lines="80-158" />
+
+```python
+def new_class(name, bases=(), kwds=None, exec_body=None):
+    resolved_bases = resolve_bases(bases)
+    meta, ns, kwds = prepare_class(name, resolved_bases, kwds)
+    if exec_body is not None:
+        exec_body(ns)
+    if resolved_bases is not bases:
+        ns['__orig_bases__'] = bases
+    return meta(name, resolved_bases, ns, **kwds)
+
+def resolve_bases(bases):
+    new_bases = list(bases)
+    updated = False
+    shift = 0
+    for i, base in enumerate(bases):
+        if isinstance(base, type):
+            continue
+        if not hasattr(base, "__mro_entries__"):
+            continue
+        new_base = base.__mro_entries__(bases)
+        updated = True
+        ...
+    if not updated:
+        return bases
+    return tuple(new_bases)
+
+def prepare_class(name, bases=(), kwds=None):
+    ...
+    meta = _calculate_meta(meta, bases)
+    if hasattr(meta, '__prepare__'):
+        ns = meta.__prepare__(name, bases, **kwds)
+    else:
+        ns = {}
+    return meta, ns, kwds
+```
+
+`resolve_bases` implements PEP 560: any base that is not a plain `type`
+and defines `__mro_entries__` is replaced by the tuple it returns.
+`prepare_class` extracts the metaclass from `kwds['metaclass']` or
+infers it from `type(bases[0])`, then calls `_calculate_meta` to resolve
+conflicts (raises `TypeError` on incompatible metaclasses). `new_class`
+is the programmatic equivalent of the `class` statement: it threads all
+three helpers and then calls the metaclass.
+
+### `DynamicClassAttribute` (lines 189 to 249)
+
+<CpyLink path="Lib/types.py" lines="189-249" />
+
+```python
+class DynamicClassAttribute:
+    def __get__(self, instance, ownerclass=None):
+        if instance is None:
+            if self.__isabstractmethod__:
+                return self
+            raise AttributeError()
+        elif self.fget is None:
+            raise AttributeError("unreadable attribute")
+        return self.fget(instance)
+```
+
+On instance access the descriptor behaves like a `property`. On class
+access it raises `AttributeError` (unless the property is abstract), which
+causes `type.__getattribute__` to fall through to the class's
+`__getattr__`. `enum.Enum` uses this to expose `name` and `value` as
+virtual attributes on the enum class without shadowing the descriptor on
+members.

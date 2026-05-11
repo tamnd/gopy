@@ -1,0 +1,198 @@
+---
+title: Objects/listobject.c
+description: Mutable sequence. Dynamic array with over-allocation, sort (Timsort), and list comprehension fast path.
+cpython_path: Objects/listobject.c
+cpython_version: "3.14"
+lines: 4262
+status: annotated
+ported_to: objects/list.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Objects/listobject.c`
+
+<CpyLink path="Objects/listobject.c" />
+
+Lists are dynamic arrays. The allocated capacity is kept larger than the logical
+size to amortize `realloc` calls: each growth step over-allocates by roughly
+12.5% for large lists and by 3 to 6 elements for small ones. The `list` free-list
+recycles the outer `PyListObject` shell (not its contents) to avoid repeated
+`PyObject_GC_New` overhead. `list.sort()` uses Timsort, an adaptive natural-run
+merge sort. The sort implementation is self-contained within this file and
+accounts for roughly 60% of the line count. `list.__class_getitem__` returns a
+`GenericAlias` to support `list[int]` type hints.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Objects/listobject.c" lines="1-100">1-100</Cpy> | `list_new_impl`, `PyList_New` | Allocate; pop the free-list before calling the allocator. | `objects/list.go:NewList` |
+| <Cpy path="Objects/listobject.c" lines="100-300">100-300</Cpy> | `PyList_Append`, `app1`, `list_resize` | Append with over-allocation formula; `app1` is the inlined fast path. | `objects/list.go:(*List).Append` |
+| <Cpy path="Objects/listobject.c" lines="300-600">300-600</Cpy> | `PyList_GetItem`, `PyList_SetItem`, `PyList_Insert`, `PyList_SetSlice` | Element access, assignment, insertion, and slice replacement. | `objects/list.go` |
+| <Cpy path="Objects/listobject.c" lines="600-900">600-900</Cpy> | `list_extend`, `_PyList_Extend`, `list_inplace_concat` | `list.extend()` protocol; tries `__length_hint__` before iterating. | `objects/list.go:(*List).Extend` |
+| <Cpy path="Objects/listobject.c" lines="900-1200">900-1200</Cpy> | `list_index`, `list_count`, `list_remove`, `list_pop` | Linear search, occurrence count, element removal, and pop. | `objects/list.go` |
+| <Cpy path="Objects/listobject.c" lines="1200-1600">1200-1600</Cpy> | `list_reverse`, `list_copy` | In-place reversal by swapping element pointers; shallow copy via `list_slice`. | `objects/list.go` |
+| <Cpy path="Objects/listobject.c" lines="1600-1700">1600-1700</Cpy> | `merge_compute_minrun`, `count_run`, `binarysort` | Timsort: minimum run length, natural run detection, binary insertion sort. | `objects/list_sort.go` |
+| <Cpy path="Objects/listobject.c" lines="1700-2000">1700-2000</Cpy> | `merge_init`, `merge_free`, `merge_getmem` | Timsort merge state: temp buffer management. | `objects/list_sort.go` |
+| <Cpy path="Objects/listobject.c" lines="2000-2600">2000-2600</Cpy> | `merge_lo`, `merge_hi` | Timsort merge: left-run-first and right-run-first merge with galloping mode. | `objects/list_sort.go:mergeLo` |
+| <Cpy path="Objects/listobject.c" lines="2600-3000">2600-3000</Cpy> | `gallop_left`, `gallop_right` | Timsort galloping search: exponential probe followed by binary search. | `objects/list_sort.go` |
+| <Cpy path="Objects/listobject.c" lines="3000-3400">3000-3400</Cpy> | `merge_collapse`, `merge_force_collapse` | Timsort stack invariant maintenance and final forced collapse. | `objects/list_sort.go` |
+| <Cpy path="Objects/listobject.c" lines="3400-4262">3400-4262</Cpy> | `list_sort_impl`, `PyList_Sort`, `PyList_Type` | Top-level sort entry point, Schwartzian-transform key wrapper, type definition. | `objects/list_sort.go:listSort` |
+
+## Reading
+
+### Over-allocation: `list_resize` (lines 100 to 200)
+
+<CpyLink path="Objects/listobject.c" lines="100-200" />
+
+When the logical size exceeds the allocated capacity, `list_resize` computes a
+new capacity using a formula that gives approximately 12.5% headroom for large
+lists and a fixed margin for small ones:
+
+```c
+static int
+list_resize(PyListObject *self, Py_ssize_t newsize)
+{
+    Py_ssize_t new_allocated, num_allocated_bytes;
+    Py_ssize_t allocated = self->allocated;
+
+    if (allocated >= newsize && newsize >= (allocated >> 1)) {
+        /* Within the existing allocation; just update ob_size. */
+        Py_SET_SIZE(self, newsize);
+        return 0;
+    }
+
+    new_allocated = ((size_t)newsize + (newsize >> 3) +
+                     (newsize < 9 ? 3 : 6));
+    ...
+    self->allocated = new_allocated;
+    Py_SET_SIZE(self, newsize);
+    return 0;
+}
+```
+
+The expression `newsize + (newsize >> 3) + (3 or 6)` gives 12.5% plus a fixed
+offset. For a 100-element list the next allocation is 118 elements. The check
+at the top avoids realloc when the list shrinks but stays above half the current
+allocation, preventing thrashing when elements are alternately appended and
+removed.
+
+### `count_run` (lines 1600 to 1700)
+
+<CpyLink path="Objects/listobject.c" lines="1600-1700" />
+
+Timsort begins each pass by identifying the longest already-ordered prefix
+(a "natural run"). A descending run is reversed in place to become ascending,
+making the algorithm adaptive to partially-sorted input:
+
+```c
+static Py_ssize_t
+count_run(PyListObject *lo, PyObject **lo_base, PyObject **hi,
+          MergeState *ms, int *descending)
+{
+    Py_ssize_t k;
+    PyObject **p = lo_base + 1;
+    *descending = 0;
+
+    if (p == hi)
+        return 1;
+
+    if (ISLT(*p, *lo_base, compare)) {
+        *descending = 1;
+        while (p < hi && ISLT(*p, *(p-1), compare))
+            ++p;
+    } else {
+        while (p < hi && !ISLT(*p, *(p-1), compare))
+            ++p;
+    }
+    return p - lo_base;
+}
+```
+
+`merge_compute_minrun` chooses a minimum run length between 32 and 64 by
+finding the smallest power-of-two-ish value such that `n / minrun` is just
+below a power of two. This keeps the number of runs close to a power of two,
+which improves merge balance and minimizes total comparisons.
+
+### `merge_lo` and `merge_hi` (lines 2000 to 2600)
+
+<CpyLink path="Objects/listobject.c" lines="2000-2600" />
+
+`merge_lo` is called when the left run is no longer than the right run. It
+copies the left run into a temporary buffer and merges back into the original
+array from left to right, requiring only a buffer of size equal to the shorter
+run. `merge_hi` mirrors this for right-run-shorter cases, copying the right run
+and merging right to left.
+
+Both functions implement galloping mode. After seven consecutive elements are
+taken from the same run, the merge switches from element-by-element comparison
+to an exponential probe (`gallop_left` or `gallop_right`) that finds the
+insertion point with `O(log k)` comparisons where `k` is the length of the
+streak. This is highly effective when one run contains a long sorted block that
+is entirely less (or greater) than the other:
+
+```c
+/* Gallop: find the index where b[0] should be inserted in a[0:n]. */
+static Py_ssize_t
+gallop_left(MergeState *ms, PyObject *key, PyObject **a, Py_ssize_t n,
+            Py_ssize_t hint)
+{
+    Py_ssize_t ofs = 1, lastofs = 0, k;
+    /* Exponential probe from hint outward */
+    while (ofs < n && ISLT(a[hint + ofs], key, compare)) {
+        lastofs = ofs;
+        ofs = (ofs << 1) + 1;
+    }
+    /* Binary search between lastofs and min(ofs, n) */
+    ...
+}
+```
+
+The gallop threshold is adaptive: if galloping does not find at least 7
+consecutive wins, `ms->min_gallop` is incremented to dampen future galloping
+on nearly-random input.
+
+### `PyList_Append`: fast path (lines 100 to 200)
+
+<CpyLink path="Objects/listobject.c" lines="100-200" />
+
+`PyList_Append` delegates to `app1`. If the list has spare capacity the fast
+path increments `ob_size` and stores the new item without touching the
+allocator:
+
+```c
+static int
+app1(PyListObject *self, PyObject *v)
+{
+    Py_ssize_t n = PyList_GET_SIZE(self);
+    if (n == self->allocated) {
+        int ret = list_resize(self, n + 1);
+        if (ret != 0)
+            return ret;
+    }
+    Py_INCREF(v);
+    PyList_SET_ITEM(self, n, v);
+    Py_SET_SIZE(self, n + 1);
+    return 0;
+}
+```
+
+`list_resize` is only called when `ob_size == allocated`. Because the
+over-allocation formula is applied inside `list_resize`, repeated appends
+trigger at most `O(log n)` reallocations over `n` appends, giving amortized
+O(1) per append.
+
+## gopy mirror
+
+`objects/list.go`. The over-allocation formula is identical. Timsort lives in
+`objects/list_sort.go`. The shell free-list is implemented via `sync.Pool`.
+`list.sort()` with a key function uses the same Schwartzian-transform wrapper
+approach as CPython.
+
+## CPython 3.14 changes
+
+Timsort has been unchanged since Python 2.4. `list.__class_getitem__` returning
+`GenericAlias` was added in 3.9. The free-list was made per-interpreter in 3.12
+to avoid contention in sub-interpreters. No 3.14-specific changes to the core
+list implementation.

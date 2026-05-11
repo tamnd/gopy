@@ -1,0 +1,293 @@
+---
+title: Python/thread.c
+description: Platform-agnostic thread and lock primitives used by the GIL and the _thread module, including PyThread_start_new_thread, mutex wrappers, thread-specific storage (PEP 539), and sys._current_frames introspection.
+cpython_path: Python/thread.c
+cpython_version: "3.14"
+lines: 1200
+status: annotated
+ported_to: pythonrun/thread.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Python/thread.c`
+
+<CpyLink path="Python/thread.c" />
+
+The portable threading layer. All platform-specific code is behind a single
+`#include` at the bottom of the file (`thread_pthread.h` on POSIX or
+`thread_nt.h` on Windows). The file exposes a stable API surface used by
+three consumers: the GIL implementation (`ceval_gil.c`), the `_thread`
+extension module, and internal runtime code that needs per-thread storage.
+
+Thread lifecycle is `PyThread_start_new_thread` (spawn) and
+`PyThread_exit_thread` (terminate the calling thread). The spawned thread
+receives a `(func, arg)` pair as a `void *`-wrapped struct; CPython wraps
+these in `_PyThread_CurrentHandles` to track all live threads for
+`sys._current_frames` and `sys._current_exceptions`.
+
+Locking is `PyThread_allocate_lock` / `PyThread_free_lock` (allocation),
+`PyThread_acquire_lock` / `PyThread_acquire_lock_timed` (acquire), and
+`PyThread_release_lock` (release). The `timed` variant is what the GIL
+uses: it calls `PyThread_acquire_lock_timed` with a timeout, and if the
+GIL is not acquired within `TIMEOUT_TICKS` the waiting thread sets
+`eval_breaker` to force a check interval switch.
+
+Thread-specific storage (TSS) was redesigned in PEP 539. The deprecated
+`PyThread_create_key` / `PyThread_get_key_value` / `PyThread_set_key_value`
+API is still present for ABI compatibility but wraps the new
+`PyThread_tss_*` API. `Py_tss_t` is a struct (not a bare `int` key) that
+holds the underlying `pthread_key_t` or `DWORD` together with a
+`_is_initialized` flag, allowing safe static initialization.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Python/thread.c" lines="1-100">1-100</Cpy> | file header / `PyThread_init_thread` / `_PyThread_cond_init` | Includes, platform-detection macros, and initialization of the thread system. `PyThread_init_thread` is a no-op on most platforms; pthread initialization is done lazily. | `pythonrun/thread.go:InitThread` |
+| <Cpy path="Python/thread.c" lines="101-280">101-280</Cpy> | `PyThread_start_new_thread` | Spawn a new OS thread. Wraps `pthread_create` (POSIX) or `_beginthreadex` (Windows). Stores the thread handle in `_PyRuntime.threads.handles` for `_current_frames` introspection. | `pythonrun/thread.go:StartNewThread` |
+| <Cpy path="Python/thread.c" lines="281-420">281-420</Cpy> | `PyThread_exit_thread` / `PyThread_get_thread_ident` / `PyThread_get_thread_native_id` | Thread identity. `PyThread_get_thread_ident` returns a `unsigned long` unique per thread, used as the key in `threading.current_thread()`. | `pythonrun/thread.go:GetThreadIdent` |
+| <Cpy path="Python/thread.c" lines="421-640">421-640</Cpy> | `PyThread_allocate_lock` / `PyThread_free_lock` / `PyThread_acquire_lock` / `PyThread_acquire_lock_timed` / `PyThread_release_lock` | Mutex primitives. `acquire_lock_timed` drives the GIL timeout loop; `WAIT_TIMED_OUT` triggers `eval_breaker`. | `pythonrun/thread.go:AllocateLock` |
+| <Cpy path="Python/thread.c" lines="641-800">641-800</Cpy> | `_PyThread_CurrentFrames` / `_PyThread_CurrentExceptions` | Walk all live `PyThreadState` objects and snapshot their current frame or current exception into a `{ident: frame}` or `{ident: exc}` dict. Implements `sys._current_frames()` and `sys._current_exceptions()`. | `pythonrun/thread.go:CurrentFrames` |
+| <Cpy path="Python/thread.c" lines="801-950">801-950</Cpy> | `PyThread_create_key` / `PyThread_delete_key` / `PyThread_get_key_value` / `PyThread_set_key_value` / `PyThread_delete_key_value` | Deprecated TLS API. Each function forwards to the TSS API via a compatibility shim. Present for binary compatibility with extensions compiled against 3.x headers. | `pythonrun/thread.go:CreateKey` |
+| <Cpy path="Python/thread.c" lines="951-1100">951-1100</Cpy> | `PyThread_tss_alloc` / `PyThread_tss_free` / `PyThread_tss_is_created` / `PyThread_tss_create` / `PyThread_tss_delete` / `PyThread_tss_set` / `PyThread_tss_get` | PEP 539 TSS API. Operates on `Py_tss_t`, which embeds the platform key and an `_is_initialized` flag. Safe to allocate statically. | `pythonrun/thread.go:TssCreate` |
+| <Cpy path="Python/thread.c" lines="1101-1200">1101-1200</Cpy> | platform `#include` / `thread_pthread.h` or `thread_nt.h` | All platform-specific implementations are pulled in here as a single include at the end of the translation unit. | `pythonrun/thread.go` (platform layer) |
+
+## Reading
+
+### `PyThread_start_new_thread` (lines 101 to 280)
+
+<CpyLink path="Python/thread.c" lines="101-280" />
+
+```c
+unsigned long
+PyThread_start_new_thread(void (*func)(void *), void *arg)
+{
+    pthread_t th;
+    pthread_attr_t attrs;
+    ...
+    pthread_attr_init(&attrs);
+    pthread_attr_setscope(&attrs, PTHREAD_SCOPE_SYSTEM);
+    ...
+    status = pthread_create(&th, &attrs,
+                            (void *(*)(void *)) func, arg);
+    pthread_attr_destroy(&attrs);
+    if (status != 0) {
+        PyErr_SetFromErrno(PyExc_RuntimeError);
+        return PYTHREAD_INVALID_THREAD_ID;
+    }
+    pthread_detach(th);
+    return (unsigned long)th;
+}
+```
+
+The thread is created **detached** (`pthread_detach`). CPython does not
+join threads: the `_thread` module's `start_new_thread` function is
+fire-and-forget from the OS's perspective. Cleanup is the responsibility
+of the thread function itself, which in CPython is always
+`t_bootstrap` in `_threadmodule.c`. `t_bootstrap` acquires the GIL,
+calls the Python callable, handles exceptions, decrefs the callable and
+args, and releases the GIL before returning.
+
+`PTHREAD_SCOPE_SYSTEM` requests system-scope scheduling (1:1 threading)
+instead of process-scope (M:N). On Linux and macOS this is the only
+supported scope; the `pthread_attr_setscope` call is defensive.
+
+The return value is `(unsigned long)th`, which `PyThread_get_thread_ident`
+later returns for the same thread. On Linux this is the `pthread_t` value,
+which maps to the kernel thread ID. On macOS it is a mach port handle.
+Both are opaque: Python code treats them as integers useful only for
+equality comparison.
+
+In gopy, Go's goroutine model replaces OS threads. `StartNewThread` maps
+to `go func()` with a goroutine-local `vm.ThreadState`. The `ident` is
+derived from the goroutine's `runtime.Goexit` address to preserve
+uniqueness semantics.
+
+### Lock primitives (lines 421 to 640)
+
+<CpyLink path="Python/thread.c" lines="421-640" />
+
+The lock type is a `PyThread_type_lock`, which is a `void *` pointing to
+a platform-specific struct. On POSIX the struct wraps a
+`pthread_mutex_t` and a `pthread_cond_t`:
+
+```c
+typedef struct {
+    char             locked;    /* 0=unlocked, 1=locked */
+    pthread_mutex_t  mut;
+    pthread_cond_t   lock_released;
+} pthread_lock;
+```
+
+`PyThread_acquire_lock_timed` uses the condition variable to implement
+the timeout:
+
+```c
+PyLockStatus
+PyThread_acquire_lock_timed(PyThread_type_lock lock,
+                            PY_TIMEOUT_T microseconds,
+                            int intr_flag)
+{
+    pthread_lock *thelock = (pthread_lock *)lock;
+    int success = 0;
+    struct timespec ts;
+    ...
+    pthread_mutex_lock(&thelock->mut);
+    while (thelock->locked) {
+        if (microseconds > 0) {
+            MICROSECONDS_TO_TIMESPEC(microseconds, ts);
+            status = pthread_cond_timedwait(&thelock->lock_released,
+                                            &thelock->mut, &ts);
+            if (status == ETIMEDOUT) break;
+        } else if (microseconds == 0) {
+            break;   /* non-blocking: already held, fail immediately */
+        } else {
+            /* microseconds == -1: wait indefinitely */
+            pthread_cond_wait(&thelock->lock_released, &thelock->mut);
+        }
+    }
+    ...
+    pthread_mutex_unlock(&thelock->mut);
+    return success ? PY_LOCK_ACQUIRED : PY_LOCK_FAILURE;
+}
+```
+
+`microseconds == -1` means block forever (used for `lock.acquire()`
+with no timeout). `microseconds == 0` means a non-blocking trylock. Any
+positive value implements the timed case. The GIL uses a value of
+`TIMEOUT_TICKS` microseconds (5000 by default) and on `PY_LOCK_FAILURE`
+sets `eval_breaker` to trigger a thread switch check in the eval loop.
+
+`intr_flag` controls whether `EINTR` from a signal handler is retried
+or propagated. When `intr_flag=1`, an `EINTR` immediately returns
+`PY_LOCK_INTR`, which tells the GIL code to check for pending signals
+before retrying.
+
+In gopy, the GIL is a Go `sync.Mutex` and the timed path is implemented
+with `sync/atomic` and a short `time.Sleep` loop rather than a condition
+variable, achieving equivalent semantics without the platform layer.
+
+### Thread-specific storage (TSS) — PEP 539 (lines 951 to 1100)
+
+<CpyLink path="Python/thread.c" lines="951-1100" />
+
+PEP 539 replaced the old `int`-keyed TLS API with `Py_tss_t`:
+
+```c
+struct Py_tss_t {
+    int _is_initialized;
+    pthread_key_t _key;      /* POSIX */
+    /* DWORD _key; on Windows */
+};
+```
+
+The `_is_initialized` field allows static initialization:
+
+```c
+#define Py_tss_NEEDS_INIT {0}
+static Py_tss_t mykey = Py_tss_NEEDS_INIT;
+```
+
+The lifecycle functions map directly to the platform API:
+
+```c
+int
+PyThread_tss_create(Py_tss_t *key)
+{
+    assert(key != NULL);
+    if (key->_is_initialized) return 0;
+    int fail = pthread_key_create(&(key->_key), NULL);
+    if (fail) return -1;
+    key->_is_initialized = 1;
+    return 0;
+}
+
+void
+PyThread_tss_delete(Py_tss_t *key)
+{
+    assert(key != NULL && key->_is_initialized);
+    pthread_key_delete(key->_key);
+    key->_is_initialized = 0;
+}
+
+int
+PyThread_tss_set(Py_tss_t *key, void *value)
+{
+    assert(key->_is_initialized);
+    return pthread_setspecific(key->_key, value) ? -1 : 0;
+}
+
+void *
+PyThread_tss_get(Py_tss_t *key)
+{
+    assert(key->_is_initialized);
+    return pthread_getspecific(key->_key);
+}
+```
+
+CPython uses TSS for the `PyThreadState` pointer itself
+(`_Py_tss_tstate`) and for the GIL owner identifier. Extension modules
+use it for per-thread caches (e.g., `decimal` uses TSS for its thread
+context). The old `PyThread_create_key` API wraps `PyThread_tss_alloc` +
+`PyThread_tss_create`, and `PyThread_set_key_value` / `PyThread_get_key_value`
+wrap `PyThread_tss_set` / `PyThread_tss_get`.
+
+In gopy, TSS is modeled as `goroutine-local` state via a `sync.Map`
+keyed on `goroutine ID`. `pythonrun/thread.go:TssCreate` allocates a
+`Py_tss_t`-equivalent struct and registers it in the global TSS registry.
+
+### `_PyThread_CurrentFrames` (lines 641 to 720)
+
+<CpyLink path="Python/thread.c" lines="641-720" />
+
+```c
+PyObject *
+_PyThread_CurrentFrames(void)
+{
+    PyObject *result = PyDict_New();
+    ...
+    PyInterpreterState *interp = _PyInterpreterState_GET();
+    HEAD_LOCK(runtime);
+    PyThreadState *tstate;
+    for (tstate = interp->threads.head; tstate != NULL;
+         tstate = tstate->next)
+    {
+        PyObject *id = PyLong_FromUnsignedLong(tstate->thread_id);
+        PyObject *frame = PyThreadState_GetFrame(tstate);
+        if (id && frame)
+            PyDict_SetItem(result, id, frame);
+        Py_XDECREF(id);
+        Py_XDECREF(frame);
+    }
+    HEAD_UNLOCK(runtime);
+    return result;
+}
+```
+
+`_PyThread_CurrentFrames` acquires `HEAD_LOCK` to safely iterate the
+`interp->threads` linked list. For each `PyThreadState` it calls
+`PyThreadState_GetFrame`, which returns a new reference to the topmost
+`PyFrameObject` (or `NULL` if the thread is idle). The result dict maps
+`thread_id` (the `unsigned long` from `PyThread_get_thread_ident`) to the
+frame object.
+
+`_PyThread_CurrentExceptions` is structurally identical but reads
+`tstate->current_exception` instead of `PyThreadState_GetFrame`. Both
+functions are exposed to Python as `sys._current_frames()` and
+`sys._current_exceptions()`, which `traceback` and `faulthandler` use
+to generate cross-thread stack dumps.
+
+## CPython 3.14 changes worth noting
+
+`PyThread_get_thread_native_id` was added in 3.8 and returns the OS-level
+thread ID (e.g. `gettid()` on Linux, `GetCurrentThreadId()` on Windows).
+It is distinct from `PyThread_get_thread_ident`, which returns the `pthread_t`
+value cast to `unsigned long`. In 3.14 the function is available on all
+supported platforms and is used by `threading.Thread.native_id`.
+The deprecated `PyThread_create_key` family still compiles but emits
+`PendingDeprecationWarning` when called from Python through `_thread`
+(gh-100272). `Py_tss_t` is unchanged since PEP 539 landed in 3.7.
+The `intr_flag` parameter of `PyThread_acquire_lock_timed` is unchanged;
+the GIL code continues to pass `1` for interruptible waits and `0` for
+uninterruptible ones.

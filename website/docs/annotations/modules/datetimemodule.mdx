@@ -1,0 +1,199 @@
+---
+title: Modules/_datetimemodule.c
+description: C implementation of the datetime module — date, time, datetime, timedelta, timezone, and tzinfo types with packed byte storage and aware/naive arithmetic.
+cpython_path: Modules/_datetimemodule.c
+cpython_version: "3.14"
+lines: 6000
+status: annotated
+ported_to: module/datetime/module.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Modules/_datetimemodule.c`
+
+<CpyLink path="Modules/_datetimemodule.c" />
+
+The C implementation of the `datetime` module. `Lib/datetime.py` imports
+`_datetime` (this module's C accelerator) and re-exports its types as the
+public `datetime.date`, `datetime.time`, `datetime.datetime`,
+`datetime.timedelta`, `datetime.timezone`, and `datetime.tzinfo`.
+
+All six types are defined here as C extension types. The key design choices
+are packed byte storage (year/month/day/hour/minute/second/microsecond laid
+out as raw bytes inside each struct to minimize per-object overhead) and
+strict aware-vs-naive distinction enforced at comparison and arithmetic time.
+
+The file also exposes `PyDateTime_CAPI`, a C-level capsule that lets other C
+extensions (e.g. database drivers) create and inspect datetime objects without
+going through the Python layer.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Modules/_datetimemodule.c" lines="1-200">1-200</Cpy> | macros, `GET_*`/`SET_*` accessors | Packed byte field accessors for year, month, day, hour, minute, second, microsecond. | `module/datetime/module.go:fieldAccessors` |
+| <Cpy path="Modules/_datetimemodule.c" lines="200-600">200-600</Cpy> | `PyDateTime_Date`, `date_new`, `date_repr`, `date_richcompare` | `date` type: stores year (2 bytes), month, day as packed bytes. | `module/datetime/module.go:Date` |
+| <Cpy path="Modules/_datetimemodule.c" lines="600-1200">600-1200</Cpy> | `PyDateTime_Time`, `time_new`, `time_repr`, `time_richcompare` | `time` type: hour, minute, second, microsecond (4 bytes packed), plus tzinfo. | `module/datetime/module.go:Time` |
+| <Cpy path="Modules/_datetimemodule.c" lines="1200-2400">1200-2400</Cpy> | `PyDateTime_DateTime`, `datetime_new`, `datetime_add`, `datetime_subtract`, `datetime_richcompare` | `datetime` type: combined date + time fields; arithmetic and comparison with timezone handling. | `module/datetime/module.go:DateTime` |
+| <Cpy path="Modules/_datetimemodule.c" lines="2400-3600">2400-3600</Cpy> | `PyDelta_New`, `delta_new`, `delta_richcompare`, `delta_add`, `delta_multiply` | `timedelta` type: days, seconds, microseconds with normalization. | `module/datetime/module.go:TimeDelta` |
+| <Cpy path="Modules/_datetimemodule.c" lines="3600-4400">3600-4400</Cpy> | `PyDateTime_TimeZone`, `timezone_new`, `timezone_utcoffset`, `timezone_repr` | `timezone` type: fixed UTC offset backed by a `timedelta`. | `module/datetime/module.go:TimeZone` |
+| <Cpy path="Modules/_datetimemodule.c" lines="4400-5200">4400-5200</Cpy> | `datetime_strftime`, `datetime_strptime`, `_strptime_datetime` | Format (`strftime`) and parse (`strptime`) datetime strings. | `module/datetime/module.go:Strftime` |
+| <Cpy path="Modules/_datetimemodule.c" lines="5200-5700">5200-5700</Cpy> | `PyDateTime_CAPI`, `datetime_get_C_API` | C API capsule — lets C extensions create datetime objects directly. | `module/datetime/module.go:CAPI` |
+| <Cpy path="Modules/_datetimemodule.c" lines="5700-6000">5700-6000</Cpy> | `_datetimemodule`, `PyInit__datetime` | Module definition, type registration, and entry point. | `module/datetime/module.go:Module` |
+
+## Reading
+
+### Packed byte layout for `date`, `time`, and `datetime` (lines 1 to 200)
+
+<CpyLink path="Modules/_datetimemodule.c" lines="1-200" />
+
+Rather than storing year/month/day as Python `int` objects, `_datetimemodule.c`
+packs them as raw bytes inside the struct. The macros at the top of the file
+define how to read and write each field:
+
+```c
+/* date stores: 2-byte year (big-endian), 1-byte month, 1-byte day */
+#define GET_YEAR(o)         ((((PyDateTime_Date*)(o))->data[0] << 8) | \
+                              ((PyDateTime_Date*)(o))->data[1])
+#define SET_YEAR(o, v)      (((PyDateTime_Date*)(o))->data[0] = (v) >> 8, \
+                              ((PyDateTime_Date*)(o))->data[1] = (v) & 0xff)
+
+/* time stores: hour, minute, second, then 3-byte microsecond */
+#define GET_HOUR(o)         (((PyDateTime_Time*)(o))->data[0])
+#define GET_MICROSECOND(o)  ((((PyDateTime_Time*)(o))->data[3] << 16) | \
+                              (((PyDateTime_Time*)(o))->data[4] << 8)  | \
+                               ((PyDateTime_Time*)(o))->data[5])
+```
+
+`PyDateTime_DateTime` is a `PyDateTime_Date` with a `PyDateTime_Time` tacked
+on at the end, so the `date` accessors work on the first four bytes and the
+`time` accessors begin at offset 4.
+
+This layout means a `date` object occupies 4 bytes of payload plus the
+standard Python object header, and a `datetime` occupies 10 bytes of payload.
+No `int` boxing is needed for any of the calendar fields.
+
+### `PyDelta_New` normalization (lines 2400 to 3600)
+
+<CpyLink path="Modules/_datetimemodule.c" lines="2400-3600" />
+
+`timedelta` stores three integers: `days`, `seconds`, and `microseconds`. The
+constructor normalizes them so that `0 <= microseconds < 1_000_000` and
+`0 <= seconds < 86_400` always hold, carrying excess into the next unit:
+
+```c
+static PyObject *
+delta_new(PyTypeObject *type, PyObject *args, PyObject *kw)
+{
+    /* ... parse days, seconds, microseconds, milliseconds, minutes,
+           hours, weeks from kwargs ... */
+
+    /* Normalize microseconds into (seconds, us). */
+    double x = us_double + seconds_double * 1e6 + ...;
+    ...
+    us = (PY_LONG_LONG)x;
+    seconds = us / 1000000;
+    us      = us % 1000000;
+    if (us < 0) { seconds--; us += 1000000; }
+
+    /* Normalize seconds into (days, s). */
+    days   += seconds / 86400;
+    seconds = seconds % 86400;
+    if (seconds < 0) { days--; seconds += 86400; }
+    ...
+}
+```
+
+`PyDelta_New(days, seconds, microseconds, normalize)` is the C-API entry
+point. When `normalize == 1` it runs the same arithmetic. When `normalize == 0`
+it trusts the caller (used internally for fast construction of already-normal
+values).
+
+The result is that `timedelta(seconds=90061, microseconds=1500000)` produces
+the same object as `timedelta(days=1, hours=1, minutes=1, seconds=2,
+microseconds=500000)`.
+
+### Aware vs naive comparison (lines 1200 to 2400)
+
+<CpyLink path="Modules/_datetimemodule.c" lines="1200-2400" />
+
+A datetime is "aware" if it carries a non-`None` `tzinfo`, otherwise "naive".
+CPython enforces that you cannot compare an aware datetime with a naive one:
+
+```c
+static PyObject *
+datetime_richcompare(PyObject *self, PyObject *other, int op)
+{
+    PyObject *offset, *offset_other;
+
+    if (!PyDateTime_Check(other)) {
+        Py_RETURN_NOTIMPLEMENTED;
+    }
+
+    offset       = datetime_utcoffset(self, NULL);
+    offset_other = datetime_utcoffset(other, NULL);
+
+    if ((offset == Py_None) != (offset_other == Py_None)) {
+        /* One aware, one naive: raise TypeError. */
+        PyErr_SetString(PyExc_TypeError,
+            "can't compare offset-naive and offset-aware datetimes");
+        Py_DECREF(offset);
+        Py_DECREF(offset_other);
+        return NULL;
+    }
+
+    if (offset != Py_None) {
+        /* Both aware: compare adjusted UTC values. */
+        /* self_adj = self - offset, other_adj = other - offset_other */
+        ...
+    }
+    /* Both naive: compare calendar fields directly. */
+    return datetime_cmp_notz(self, other, op);
+}
+```
+
+`datetime_add` follows the same pattern: adding a `timedelta` to an aware
+`datetime` preserves the `tzinfo` object in the result (the timezone does not
+shift — only the wall-clock fields change).
+
+### `datetime_strftime` and `datetime_strptime` (lines 4400 to 5200)
+
+<CpyLink path="Modules/_datetimemodule.c" lines="4400-5200" />
+
+`strftime` builds a format string, replaces `%f` (microseconds, a Python
+extension to POSIX `strftime`) manually, then delegates the rest to the
+platform `strftime` via `time.strftime`:
+
+```c
+static PyObject *
+datetime_strftime(PyDateTime_DateTime *self, PyObject *args)
+{
+    PyObject *format, *result;
+    /* Replace %f with zero-padded microseconds before calling time.strftime. */
+    format = replace_format(format_arg, self);
+    result = call_tzname(self, format);   /* delegates to time.strftime */
+    ...
+}
+```
+
+`strptime` is delegated entirely to `_strptime.py` via
+`_strptime._strptime_datetime`, so `_datetimemodule.c` only provides the
+glue that calls the Python function and wraps the result.
+
+## gopy mirror
+
+`module/datetime/module.go`. `Date`, `Time`, and `DateTime` are Go structs
+that store calendar fields as plain `int` values (no byte-packing; Go's
+compiler handles alignment). `TimeDelta` normalizes on construction following
+the same carry logic. `TimeZone` wraps a `TimeDelta` offset. The CAPI capsule
+is not exported from gopy (no C extensions to support).
+
+## CPython 3.14 changes
+
+`_datetimemodule.c` has been the C accelerator since Python 2.4; the pure-Python
+fallback in `Lib/datetime.py` still exists but is only used when the C
+extension fails to import. The `fold` attribute (for handling DST transitions
+with `PEP 495`) was added in 3.6. Multi-phase module init (`Py_mod_exec`) was
+adopted in 3.12. The `datetime.UTC` singleton (`timezone(timedelta(0))`) was
+added in 3.11.

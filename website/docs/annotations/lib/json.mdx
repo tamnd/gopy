@@ -1,0 +1,125 @@
+---
+title: Lib/json/__init__.py
+description: Top-level json API; wires loads/dumps/load/dump to JSONDecoder and JSONEncoder and documents every customisation hook.
+cpython_path: Lib/json/__init__.py
+cpython_version: "3.14"
+lines: 360
+status: annotated
+ported_to: module/json/module.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Lib/json/__init__.py`
+
+<CpyLink path="Lib/json/__init__.py" />
+
+The public entry point for Python's JSON library. The actual codec
+work lives in two sibling files: `json/decoder.py` (`JSONDecoder`,
+`JSONDecodeError`) and `json/encoder.py` (`JSONEncoder`). The C
+accelerator `_json` is tried first at import time; if it is absent the
+pure-Python scanner and encoder take over transparently.
+
+`Lib/json/__init__.py` exports `dumps`, `dump`, `loads`, `load`,
+`JSONDecoder`, `JSONDecodeError`, and `JSONEncoder` from `__all__`. The
+`loads`/`dumps` functions accept every customisation parameter those
+classes offer so callers rarely need to instantiate the codec classes
+directly.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Lib/json/__init__.py" lines="1-50">1-50</Cpy> | module docstring, imports, `__all__` | Imports `JSONDecoder`, `JSONDecodeError`, and `JSONEncoder` from sub-modules; defines the public export list. | `module/json/module.go` |
+| <Cpy path="Lib/json/__init__.py" lines="51-120">51-120</Cpy> | `dump` | Serialises `obj` to a file-like object; delegates to `JSONEncoder(…).iterencode(obj)` and writes each chunk. | `module/json/module.go` |
+| <Cpy path="Lib/json/__init__.py" lines="121-185">121-185</Cpy> | `dumps` | Same as `dump` but joins chunks into a `str`. Returns early via `cls(…).encode(obj)` when no custom `cls` is needed. | `module/json/module.go` |
+| <Cpy path="Lib/json/__init__.py" lines="186-255">186-255</Cpy> | `load` | Reads a file-like object and passes the result to `loads`. | `module/json/module.go` |
+| <Cpy path="Lib/json/__init__.py" lines="256-330">256-330</Cpy> | `loads` | Decodes a JSON document; builds a `JSONDecoder` (or uses `cls`) with the supplied hooks and calls `decoder.decode(s)`. | `module/json/module.go` |
+| <Cpy path="Lib/json/__init__.py" lines="331-360">331-360</Cpy> | `detect_encoding` | Sniffs a `bytes` or `bytearray` for BOM / null-byte patterns to determine UTF-8/16/32 encoding before decoding. | `module/json/module.go` |
+
+## Reading
+
+### `loads` entry point (lines 256 to 330)
+
+<CpyLink path="Lib/json/__init__.py" lines="256-330" />
+
+```python
+def loads(s, *, cls=None, object_hook=None, parse_float=None,
+          parse_int=None, parse_constant=None, object_pairs_hook=None,
+          **kw):
+    if isinstance(s, str):
+        if s.startswith('﻿'):
+            raise JSONDecodeError("Unexpected UTF-8 BOM (decode using utf-8-sig)",
+                                  s, 0)
+    else:
+        if not isinstance(s, (bytes, bytearray)):
+            raise TypeError(...)
+        s = s.decode(detect_encoding(s), 'surrogatepass')
+    if (cls is None and object_hook is None and
+            parse_int is None and parse_float is None and
+            parse_constant is None and object_pairs_hook is None and not kw):
+        return _default_decoder.decode(s)
+    if cls is None:
+        cls = JSONDecoder
+    if object_hook is not None:
+        kw['object_hook'] = object_hook
+    if object_pairs_hook is not None:
+        kw['object_pairs_hook'] = object_pairs_hook
+    return cls(parse_float=parse_float, parse_int=parse_int,
+               parse_constant=parse_constant, **kw).decode(s)
+```
+
+The fast path reuses `_default_decoder`, a module-level `JSONDecoder()`
+instance, whenever no hooks are supplied. Bytes input is decoded to
+`str` first via `detect_encoding`. The `parse_float` and `parse_int`
+hooks let callers replace `float(token)` and `int(token)` with arbitrary
+callables (e.g., `decimal.Decimal`).
+
+### `dumps` and `JSONEncoder` customisation (lines 121 to 185)
+
+<CpyLink path="Lib/json/__init__.py" lines="121-185" />
+
+```python
+def dumps(obj, *, skipkeys=False, ensure_ascii=True,
+          check_circular=True, allow_nan=True, cls=None,
+          indent=None, separators=None, default=None,
+          sort_keys=False, **kw):
+    if (not skipkeys and ensure_ascii and
+            check_circular and allow_nan and
+            cls is None and indent is None and separators is None and
+            default is None and not sort_keys and not kw):
+        return _default_encoder.encode(obj)
+    if cls is None:
+        cls = JSONEncoder
+    return cls(
+        skipkeys=skipkeys, ensure_ascii=ensure_ascii,
+        check_circular=check_circular, allow_nan=allow_nan, indent=indent,
+        separators=separators, default=default, sort_keys=sort_keys,
+        **kw).encode(obj)
+```
+
+Again a fast path: `_default_encoder` is a module-level
+`JSONEncoder()` instance used when every parameter is at its default
+value. For the general case a new `JSONEncoder` is constructed and
+`encode` is called. The `default` parameter is passed through to
+`JSONEncoder.__init__` so that subclassing is not required for simple
+type overrides; the encoder calls `self.default(o)` when it encounters
+an object it cannot serialise natively.
+
+### `JSONDecoder` / `JSONEncoder` customisation hooks
+
+The four hooks accepted by `loads` map directly to constructor
+parameters of `JSONDecoder`:
+
+- `object_hook(dict)` is called on every JSON object; its return value
+  replaces the dict.
+- `object_pairs_hook(list_of_pairs)` is called instead of
+  `object_hook` when set, receiving key-value pairs in document order.
+- `parse_float(str)` replaces `float` for all JSON floating-point
+  literals.
+- `parse_int(str)` replaces `int` for all JSON integer literals.
+
+On the encoder side, `JSONEncoder.default(self, o)` is the override
+point for unknown types; the base implementation raises `TypeError`.
+`iterencode` uses the C function `_json.encode_basestring_ascii` when
+available to avoid Python-level character iteration over strings.

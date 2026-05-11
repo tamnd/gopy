@@ -1,0 +1,219 @@
+---
+title: Python/errors.c
+description: Exception creation, propagation, normalization, and display. Implements all PyErr_* functions and the single-object exception model introduced in 3.12.
+cpython_path: Python/errors.c
+cpython_version: "3.14"
+lines: 2069
+status: annotated
+ported_to: errors/
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Python/errors.c`
+
+<CpyLink path="Python/errors.c" />
+
+Exception creation, propagation, and normalization. In CPython 3.12+ the
+"current exception" is stored as a single `PyObject *exc_value` on the
+thread state (`tstate->current_exception`), replacing the old
+type/value/traceback triple. This file provides all `PyErr_*` functions that
+set, clear, query, or chain exceptions, plus `_PyErr_NormalizeException`
+which ensures the value is always an instance of the declared type. The lower
+half of the file (lines 900 to 2069) handles display: `PyErr_WriteUnraisable`,
+`PyErr_SyntaxLocationObject`, and the `_PyErr_Display*` family that drives
+the traceback module when printing an unhandled exception.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Python/errors.c" lines="25-108">25-108</Cpy>       | `_PyErr_SetRaisedException` / `_PyErr_CreateException` / `_PyErr_Restore` / `PyErr_Restore` / `_PyErr_GetTopmostException` | Low-level set/get for the single-object model. | `errors/errors.go:SetRaisedException` |
+| <Cpy path="Python/errors.c" lines="109-243">109-243</Cpy>     | `_PyErr_SetObject` | Normalize and set exception from a type+value pair (3.11 legacy path). | `errors/errors.go:SetObject` |
+| <Cpy path="Python/errors.c" lines="244-309">244-309</Cpy>     | `PyErr_SetObject` / `_PyErr_SetKeyError` / `_PyErr_SetNone` / `_PyErr_SetString` / `PyErr_SetString` | Convenience setters. | `errors/errors.go:SetString` |
+| <Cpy path="Python/errors.c" lines="321-492">321-492</Cpy>     | `PyErr_GivenExceptionMatches` / `_PyErr_ExceptionMatches` / `_PyErr_NormalizeException` | Match and normalize. | `errors/errors.go:GivenExceptionMatches` |
+| <Cpy path="Python/errors.c" lines="500-638">500-638</Cpy>     | `_PyErr_GetRaisedException` / `_PyErr_Fetch` / `_PyErr_Clear` / `_PyErr_GetHandledException` / `_PyErr_SetHandledException` | Fetch/clear API. | `errors/errors.go:GetRaisedException` |
+| <Cpy path="Python/errors.c" lines="640-736">640-736</Cpy>     | `_PyErr_StackItemToExcInfoTuple` / `_PyErr_ChainExceptions` / `_PyErr_ChainExceptions1` | Implicit and explicit exception chaining. | `errors/errors.go:ChainExceptions1` |
+| <Cpy path="Python/errors.c" lines="737-900">737-900</Cpy>     | `PyErr_Format` / `_PyErr_FormatFromCause` / `PyErr_FormatV` | Formatted error strings. | `errors/errors.go:Format` |
+| <Cpy path="Python/errors.c" lines="900-1200">900-1200</Cpy>   | `PyErr_BadArgument` / `PyErr_NoMemory` / `PyErr_SetFromErrno` / `PyErr_SetFromWindowsErr` (and variants) | Stdlib setters for OS and C-API errors. | `errors/errors.go:SetFromErrno` |
+| <Cpy path="Python/errors.c" lines="1200-2069">1200-2069</Cpy> | `PyErr_WriteUnraisable` / `PyErr_SyntaxLocationObject` / `PyErr_ProgramText` / `PyErr_RangedSyntaxLocationObject` / `_PyErr_Display*` | Display and `SyntaxError` annotation. | `errors/errors.go:WriteUnraisable` |
+
+## Reading
+
+### Single-object exception model (lines 25 to 57)
+
+<CpyLink path="Python/errors.c" lines="25-57" />
+
+```c
+void
+_PyErr_SetRaisedException(PyThreadState *tstate, PyObject *exc)
+{
+    PyObject *old_exc = tstate->current_exception;
+    assert(exc == NULL || PyExceptionInstance_Check(exc));
+    tstate->current_exception = exc;
+    Py_XDECREF(old_exc);
+}
+```
+
+In 3.12+ `tstate->current_exception` holds the exception instance directly.
+There is no separate type or traceback slot at the thread level; the type is
+`type(exc)` and the traceback is `exc.__traceback__`. The function decrefs
+the previous exception before installing the new one, so callers must incref
+if they are handing off a borrowed reference.
+
+`PyErr_Restore` at line 59 is the legacy path for C code that still holds
+a type/value/traceback triple. It calls `_PyErr_CreateException` to build
+an instance from the triple and then calls `_PyErr_SetRaisedException`. Code
+that was written for 3.11 and earlier continues to compile and link
+unchanged; it just goes through one extra normalization step.
+
+### `_PyErr_SetObject` (lines 152 to 243)
+
+<CpyLink path="Python/errors.c" lines="152-243" />
+
+```c
+void
+_PyErr_SetObject(PyThreadState *tstate, PyObject *exception, PyObject *value)
+{
+    ...
+    if (value == NULL || !PyExceptionInstance_Check(value)) {
+        /* Normalize to get a proper instance */
+        PyObject *fixed_value;
+        if (value == NULL) {
+            fixed_value = _PyObject_CallNoArgs(exception);
+        } else {
+            fixed_value = PyObject_CallOneArg(exception, value);
+        }
+        if (fixed_value == NULL) {
+            return;
+        }
+        Py_DECREF(value);
+        value = fixed_value;
+    }
+    ...
+    _PyErr_SetRaisedException(tstate, value);
+}
+```
+
+This is the normalization path. If `value` is `NULL`, calling the exception
+type with no arguments gives a default instance. If `value` is not already
+an instance of `exception`, the type is called with `value` as the sole
+argument, so `raise KeyError(key)` (which passes a pre-built instance) and
+`raise KeyError, key` (the C-level pattern that passes type and value
+separately) both produce the same result. The traceback of the resulting
+instance is set from `tstate->exc_traceback` if present.
+
+### `PyErr_GivenExceptionMatches` (lines 332 to 363)
+
+<CpyLink path="Python/errors.c" lines="332-363" />
+
+```c
+int
+PyErr_GivenExceptionMatches(PyObject *err, PyObject *exc)
+{
+    if (err == NULL || exc == NULL) {
+        return 0;
+    }
+    if (PyTuple_Check(exc)) {
+        Py_ssize_t i, n;
+        n = PyTuple_Size(exc);
+        for (i = 0; i < n; i++) {
+            if (PyErr_GivenExceptionMatches(err,
+                                            PyTuple_GET_ITEM(exc, n))) {
+                return 1;
+            }
+        }
+        return 0;
+    }
+    ...
+    return PyObject_IsSubclass(err, exc);
+}
+```
+
+This function is called at the `CHECK_EXC_MATCH` opcode for every `except`
+clause. Tuple support means `except (TypeError, ValueError):` works without
+compiler involvement; the opcode just passes the tuple and this function
+recurses. For single types the call bottoms out in `PyObject_IsSubclass`,
+which traverses the MRO. There is no fast path for exact type equality in
+3.14; the subclass check is fast enough that one was removed as a
+maintenance burden.
+
+### Exception chaining (lines 707 to 736)
+
+<CpyLink path="Python/errors.c" lines="707-736" />
+
+```c
+void
+_PyErr_ChainExceptions1(PyObject *exc)
+{
+    if (exc == NULL) {
+        return;
+    }
+    PyThreadState *tstate = _PyThreadState_GET();
+    PyObject *cur_exc = _PyErr_GetRaisedException(tstate);
+    if (cur_exc == NULL) {
+        _PyErr_SetRaisedException(tstate, exc);
+    }
+    else {
+        /* Set the context of the new exc to the old exc */
+        if (PyException_GetContext(cur_exc) == NULL &&
+            !_PyBaseExceptionObject_check_suppress_context(cur_exc)) {
+            Py_INCREF(exc);
+            PyException_SetContext(cur_exc, exc);
+        }
+        Py_DECREF(exc);
+        _PyErr_SetRaisedException(tstate, cur_exc);
+    }
+}
+```
+
+`_PyErr_ChainExceptions1` implements implicit chaining: the exception passed
+in becomes the `__context__` of the currently active exception, producing the
+"During handling of the above exception, another exception occurred" message.
+The guard `!suppress_context` means that `raise X from Y` (which sets
+`__suppress_context__ = True` and `__cause__ = Y`) suppresses the implicit
+context even if a context is present.
+
+`_PyErr_ChainExceptions` at line 686 is the three-argument legacy form for C
+code that held a type/value/traceback before 3.12; it converts the triple to
+an instance and then calls `_PyErr_ChainExceptions1`.
+
+### `PyErr_WriteUnraisable` (lines 900 to 1000)
+
+<CpyLink path="Python/errors.c" lines="900-1000" />
+
+Used when an exception cannot be propagated: inside `__del__`, `tp_dealloc`,
+`tp_finalize`, or any finalizer-style callback where the caller has no
+mechanism to receive a Python exception. The function first checks
+`sys.unraisablehook`; if set, it builds an `sys.UnraisableHookArgs` namedtuple
+and calls the hook. If the hook is absent or itself raises, it falls back to
+writing directly to `sys.stderr` in the format:
+
+```
+Exception ignored in: <repr of obj>
+Traceback (most recent call last):
+  ...
+ExceptionType: message
+```
+
+In gopy, `errors.WriteUnraisable` mirrors this function. It is called from
+the garbage collector's `__del__` runner and from any Go code that catches
+a panic originating from a Python finalizer.
+
+## Notes for the gopy mirror
+
+`errors/errors.go` preserves the single-object model. `_PyErr_NormalizeException`
+is only called by the C-extension compatibility layer; the Go eval loop always
+deals in normalized instances, so normalization cost is paid only when C code
+uses the old `PyErr_Restore` / `PyErr_Fetch` triple API.
+`PyErr_WriteUnraisable` maps to `errors.WriteUnraisable`. All `PyErr_SetFrom*`
+OS-error setters are present for C extension compatibility, but the Go stdlib
+wrappers use `errors.SetString` directly.
+
+## CPython 3.14 changes worth noting
+
+`_PyErr_SetLocaleString` is deprecated in 3.14; callers should use
+`PyErr_SetString` with UTF-8. `PyErr_RangedSyntaxLocationObject` was added in
+3.12 for PEP 657 column-range error display and is unchanged in 3.14.
+The single-object `tstate->current_exception` model dates from 3.12 (gh-89975);
+3.14 has no structural changes to this file.

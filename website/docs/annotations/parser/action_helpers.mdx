@@ -1,0 +1,194 @@
+---
+title: Parser/action_helpers.c
+description: AST construction helpers invoked by the generated PEG parser for arguments, function/class definitions, assignments, imports, and string concatenation.
+cpython_path: Parser/action_helpers.c
+cpython_version: "3.14"
+lines: 1953
+status: annotated
+ported_to: parser/pegen/action_helpers_gen.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Parser/action_helpers.c`
+
+<CpyLink path="Parser/action_helpers.c" />
+
+The semantic-action layer of the PEG grammar. Every rule in
+`Grammar/python.gram` that produces an AST node calls a function from
+this file rather than building the node inline. Keeping construction
+here means the generated `Parser/parser.c` stays readable and
+regenerable: the generator emits call sites, this file holds the logic.
+
+The file groups naturally around what it constructs: argument lists,
+callable signatures (functions and lambdas), class definitions,
+assignment nodes, import nodes, sequence utilities, and string
+literal joining. A handful of validation helpers sit at the bottom:
+`_PyPegen_check_barry_as_flufl` enforces the `from __future__ import
+barry_as_FLUFL` easter egg, and `_PyPegen_set_expr_context` is shared
+with `pegen_errors.c` for target re-classification.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Parser/action_helpers.c" lines="1-50">1-50</Cpy> | `_PyPegen_seq_insert_in_front` / `_PyPegen_seq_append_to_end` | Prepend or append one element to an `asdl_seq`, allocating a new sequence. | `parser/pegen/action_helpers_gen.go:SeqInsertInFront/SeqAppendToEnd` |
+| <Cpy path="Parser/action_helpers.c" lines="51-120">51-120</Cpy> | `_PyPegen_join_names_with_dot` | Walk an attribute chain and concatenate with `.` to produce a plain string identifier. | `parser/pegen/action_helpers_gen.go:JoinNamesWithDot` |
+| <Cpy path="Parser/action_helpers.c" lines="121-280">121-280</Cpy> | `_PyPegen_make_arguments` | Build `arguments_ty` from positional args, `*args`, keyword-only args, `**kwargs`, and their defaults. | `parser/pegen/action_helpers_gen.go:MakeArguments` |
+| <Cpy path="Parser/action_helpers.c" lines="281-520">281-520</Cpy> | `_PyPegen_make_function_def_or_lambda` | Assemble a `FunctionDef`, `AsyncFunctionDef`, or `Lambda` node; attach decorators, return annotation, and PEP 695 type parameters. | `parser/pegen/action_helpers_gen.go:MakeFunctionDefOrLambda` |
+| <Cpy path="Parser/action_helpers.c" lines="521-680">521-680</Cpy> | `_PyPegen_make_class_def` | Assemble a `ClassDef`; handle PEP 695 type parameters and the keyword-argument form of base classes. | `parser/pegen/action_helpers_gen.go:MakeClassDef` |
+| <Cpy path="Parser/action_helpers.c" lines="681-820">681-820</Cpy> | `_PyPegen_make_assignment` / `_PyPegen_make_augmented_assignment` | Construct `Assign` and `AugAssign` nodes; validate that targets are legal l-values. | `parser/pegen/action_helpers_gen.go:MakeAssignment/MakeAugAssignment` |
+| <Cpy path="Parser/action_helpers.c" lines="821-970">821-970</Cpy> | `_PyPegen_make_import_from` | Process dotted module name and alias list into an `ImportFrom` node; resolve leading dots as relative-import level. | `parser/pegen/action_helpers_gen.go:MakeImportFrom` |
+| <Cpy path="Parser/action_helpers.c" lines="971-1200">971-1200</Cpy> | `_PyPegen_string_token_concatenate` | Concatenate adjacent string-literal tokens; dispatch raw/bytes/str/f-string kinds to `string_parser.c`. | `parser/pegen/action_helpers_gen.go:StringTokenConcatenate` |
+| <Cpy path="Parser/action_helpers.c" lines="1201-1380">1201-1380</Cpy> | `_PyPegen_make_starred_expressions` / `_PyPegen_make_yield_expression` | Build `Starred`, `Yield`, and `YieldFrom` AST nodes. | `parser/pegen/action_helpers_gen.go` |
+| <Cpy path="Parser/action_helpers.c" lines="1381-1600">1381-1600</Cpy> | `_PyPegen_make_with_item` / `_PyPegen_make_try_*` | Assemble `With`, `Try`, `TryStar` nodes; collect handlers and `orelse`/`finalbody`. | `parser/pegen/action_helpers_gen.go` |
+| <Cpy path="Parser/action_helpers.c" lines="1601-1820">1601-1820</Cpy> | `_PyPegen_make_match_case` / `_PyPegen_make_pattern_*` | Structural-pattern-matching node constructors (PEP 634). | `parser/pegen/action_helpers_gen.go` |
+| <Cpy path="Parser/action_helpers.c" lines="1821-1953">1821-1953</Cpy> | `_PyPegen_check_barry_as_flufl` / `_PyPegen_check_legacy_stmt` | Future-import enforcement and legacy-syntax diagnostics. | `parser/pegen/action_helpers_gen.go:CheckBarryAsFlufl` |
+
+## Reading
+
+### Argument construction (lines 121 to 280)
+
+<CpyLink path="Parser/action_helpers.c" lines="121-280" />
+
+```c
+arguments_ty
+_PyPegen_make_arguments(Parser *p, asdl_arg_seq *slash_without_default,
+                        SlashWithDefault *slash_with_default,
+                        asdl_arg_seq *plain_names,
+                        asdl_seq *names_with_defaults,
+                        ...)
+{
+    asdl_arg_seq *posonlyargs;
+    if (slash_without_default != NULL) {
+        posonlyargs = slash_without_default;
+        ...
+    } else if (slash_with_default != NULL) {
+        ...
+        posonlyargs = _Py_asdl_arg_seq_new(pos_only_len, p->arena);
+    } else {
+        posonlyargs = _Py_asdl_arg_seq_new(0, p->arena);
+    }
+    ...
+    return _PyAST_arguments(posonlyargs, args, vararg, kwonlyargs,
+                            kw_defaults, kwarg, defaults, p->arena);
+}
+```
+
+The `arguments_ty` constructor mirrors the grammar's four
+comma-separated zones: positional-only (before `/`), regular
+positional, keyword-only (after `*`), and `**kwargs`. Defaults are
+stored in two parallel lists: `defaults` for positional args (right-
+aligned, so `len(defaults) <= len(posonlyargs) + len(args)`) and
+`kw_defaults` for keyword-only args (index-aligned, `None` where no
+default was given). The split between `slash_without_default` and
+`slash_with_default` reflects two grammar productions for the `/`
+separator depending on whether any positional-only argument has a
+default.
+
+### Function and lambda assembly (lines 281 to 520)
+
+<CpyLink path="Parser/action_helpers.c" lines="281-520" />
+
+```c
+stmt_ty
+_PyPegen_make_function_def_or_lambda(Parser *p, int is_async,
+    expr_ty returns, asdl_expr_seq *decorators,
+    asdl_type_param_seq *type_params, arguments_ty args,
+    asdl_stmt_seq *body, ...)
+{
+    if (type_params != NULL) {
+        /* PEP 695: wrap body in a TypeVar scope */
+        ...
+    }
+    if (is_async) {
+        return _PyAST_AsyncFunctionDef(name, args, body, decorators,
+                                       returns, docstring, type_params, ...);
+    }
+    return _PyAST_FunctionDef(name, args, body, decorators,
+                              returns, docstring, type_params, ...);
+}
+```
+
+A single helper covers `def`, `async def`, and `lambda` to avoid
+duplicating the decorator-attachment and PEP 695 type-parameter
+wrapping logic. Lambda produces an `expr_ty` (`Lambda_kind`) rather
+than a `stmt_ty`; the helper returns a `void *` and the caller casts.
+PEP 695 type parameters are attached directly to the node in 3.14;
+earlier CPython emitted a wrapping scope, but that was moved into
+the compiler.
+
+### Class definition assembly (lines 521 to 680)
+
+<CpyLink path="Parser/action_helpers.c" lines="521-680" />
+
+The grammar for `class` has two distinct base-list forms: the old
+`class Foo(Base)` and the new `class Foo[T](Base)` (PEP 695). Both
+paths converge here. Keyword arguments in the base list, such as
+`class Foo(metaclass=Meta)`, are split into a `keywords` seq and
+passed through as-is to `_PyAST_ClassDef`. The `type_params` list
+is set only when the `[T, ...]` syntax is present; it is `NULL`
+otherwise, not an empty list, so consumers can distinguish the two
+forms.
+
+### String token concatenation (lines 971 to 1200)
+
+<CpyLink path="Parser/action_helpers.c" lines="971-1200" />
+
+```c
+expr_ty
+_PyPegen_string_token_concatenate(Parser *p, asdl_seq *strings)
+{
+    ...
+    for (Py_ssize_t i = 0; i < n; i++) {
+        token = asdl_seq_GET(strings, i);
+        ...
+        if (fstring) {
+            /* delegate to fstring machinery */
+        } else {
+            result = _PyPegen_decode_string(p, ...);
+        }
+    }
+    return _PyPegen_concatenate_strings(p, parts, EXTRA_EXPR(...));
+}
+```
+
+Adjacent string literals in Python are joined at compile time. This
+function iterates the token list, dispatches each literal to
+`string_parser.c` based on its prefix characters, collects the
+decoded parts, and calls `_PyPegen_concatenate_strings` to merge
+them. Mixing `bytes` with `str` raises a `SyntaxError` here, before
+any runtime object is created. F-strings add `JoinedStr` / `FormattedValue`
+nodes rather than plain string constants, which is why the result type
+is `expr_ty` rather than a raw `PyObject *`.
+
+### `_PyPegen_check_barry_as_flufl` (lines 1821 to 1953)
+
+<CpyLink path="Parser/action_helpers.c" lines="1821-1953" />
+
+```c
+int
+_PyPegen_check_barry_as_flufl(Parser *p, Token *t)
+{
+    const char *tok_str = t->start;
+    if (p->flags & PyPARSE_BARRY_AS_BDFL) {
+        if (strncmp(tok_str, "!=", 2) == 0) {
+            RAISE_SYNTAX_ERROR("with Barry as BDFL, use '<>' instead of '!='");
+            return -1;
+        }
+        return 0;
+    }
+    if (strncmp(tok_str, "<>", 2) == 0) {
+        RAISE_SYNTAX_ERROR("invalid syntax. Did you mean != ?");
+        return -1;
+    }
+    return 0;
+}
+```
+
+When `from __future__ import barry_as_FLUFL` is active the parser flag
+`PyPARSE_BARRY_AS_BDFL` is set and `!=` becomes a syntax error; the
+programmer must use `<>`. Without the flag the inverse applies: `<>` is
+the syntax error. The grammar calls this function when it sees either
+token in a comparison expression, making the check symmetric with no
+special grammar alternative needed for either form.

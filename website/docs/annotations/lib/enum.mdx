@@ -1,0 +1,190 @@
+---
+title: Lib/enum.py
+description: Pure-Python implementation of the enum module; defines EnumType metaclass, Enum base class, Flag, IntEnum, StrEnum, and the auto() helper.
+cpython_path: Lib/enum.py
+cpython_version: "3.14"
+lines: 3000
+status: annotated
+ported_to: module/enum/module.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Lib/enum.py`
+
+<CpyLink path="Lib/enum.py" />
+
+`enum.py` is almost entirely pure Python. There is no C accelerator; the
+module bootstraps the enum machinery using two ordinary class-body tricks:
+a custom `__prepare__` that returns an `_EnumDict` instance, and a
+`__new__` on `EnumType` that processes that dict into enum members once
+the class body finishes executing.
+
+Every enum class is an instance of `EnumType` (the metaclass). Each
+member is an instance of the enum class itself. So `Color.RED` is an
+object whose `type(Color.RED) is Color` and whose `type(Color) is
+EnumType`. This two-level nesting means `isinstance` and `issubclass`
+work naturally.
+
+In CPython 3.14 the module gained `member` / `nonmember` descriptor
+helpers, the `_simple_enum` fast-path decorator used for
+`re.RegexFlag` and friends, and annotation-driven member detection via
+`__annotate__` (PEP 649).
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Lib/enum.py" lines="1-100">1-100</Cpy> | Module header, `__all__`, `_is_descriptor`, `_is_dunder`, `_is_sunder` | Guard predicates used during `_EnumDict.__setitem__` to decide whether a name is a member, a descriptor, or a special. | `module/enum/module.go` |
+| <Cpy path="Lib/enum.py" lines="101-280">101-280</Cpy> | `_EnumDict` | Custom `dict` subclass returned by `EnumType.__prepare__`. Intercepts `__setitem__` to collect member names, their values, and any aliases. | `module/enum/module.go` |
+| <Cpy path="Lib/enum.py" lines="281-620">281-620</Cpy> | `EnumType` (metaclass) | `__new__` builds the enum class: validates names, calls `_generate_next_value_` for `auto()` members, populates `_member_names_`, `_member_map_`, `_value2member_map_`, and installs `EnumType` methods. | `module/enum/module.go` |
+| <Cpy path="Lib/enum.py" lines="621-900">621-900</Cpy> | `Enum` | Base class for all enums. Provides `__new__`, `_missing_`, `__repr__`, `__str__`, `__format__`, `__hash__`, pickle support, and iteration. | `module/enum/module.go` |
+| <Cpy path="Lib/enum.py" lines="901-1100">901-1100</Cpy> | `IntEnum`, `StrEnum`, `IntFlag`, `Flag` | Mixin subclasses. `IntEnum` and `StrEnum` inherit from `int` / `str` so members interoperate with plain values. `Flag` adds bitwise `&`, `|`, `^`, `~` via `__and__`/`__or__`/`__xor__`/`__invert__`. | `module/enum/module.go` |
+| <Cpy path="Lib/enum.py" lines="1101-1250">1101-1250</Cpy> | `auto` | Sentinel whose `_generate_next_value_` is called by `EnumType.__new__` to assign the next automatic value; subclasses override `_generate_next_value_` to change the sequence. | `module/enum/module.go` |
+| <Cpy path="Lib/enum.py" lines="1251-1450">1251-1450</Cpy> | `unique`, `verify`, `FlagBoundary` | `unique` decorator raises `ValueError` on aliases. `verify` with `UNIQUE`, `CONTINUOUS`, or `NAMED_FLAGS` performs stricter post-hoc checks. | `module/enum/module.go` |
+| <Cpy path="Lib/enum.py" lines="1451-1700">1451-1700</Cpy> | `_simple_enum`, `_magic_mixin`, `global_enum`, `show_flag_values` | Utility decorators: `_simple_enum` is a fast-path that skips `EnumType.__new__` for flag-like enums; `global_enum` injects members into the module namespace. | `module/enum/module.go` |
+| <Cpy path="Lib/enum.py" lines="1701-3000">1701-3000</Cpy> | `member`, `nonmember`, `property` (enum version), `_EnumMemberMixin`, pickle/copy support | `member` forces a value to be treated as a member even if it looks like a descriptor; `nonmember` does the opposite. The enum-local `property` overrides the built-in so it is not mistaken for a descriptor inside `_EnumDict`. | `module/enum/module.go` |
+
+## Reading
+
+### `_EnumDict.__setitem__` member detection (lines 101 to 280)
+
+<CpyLink path="Lib/enum.py" lines="101-280" />
+
+```python
+class _EnumDict(dict):
+    def __setitem__(self, key, value):
+        if _is_sunder(key):
+            ...  # handle _name_, _value_, _missing_, etc.
+        elif _is_dunder(key):
+            ...  # handle __dunder__ attributes
+        elif _is_descriptor(value):
+            self._member_names.discard(key)
+            super().__setitem__(key, value)
+        else:
+            # it's a new member
+            if key in self._member_names:
+                raise TypeError(f'Attempted to reuse name: {key!r}')
+            self._member_names[key] = None
+            self._last_values.append(value)
+            super().__setitem__(key, value)
+```
+
+`_EnumDict` is the namespace passed to the class body. Every assignment
+goes through `__setitem__`. The three guard predicates partition names
+into sunder specials (`_name_`), dunder specials (`__name__`),
+descriptors (anything with `__get__`, `__set__`, or `__delete__`), and
+ordinary members. The last category accumulates in `_member_names`
+(an ordered dict used as an ordered set) and `_last_values` so that
+`auto()` can compute the next value without knowing the member name in
+advance.
+
+The `member` and `nonmember` wrappers override this classification:
+`member(v)` tags `v` so the descriptor check is skipped; `nonmember(v)`
+tags `v` so it is always excluded.
+
+### `EnumType.__new__` member construction (lines 281 to 620)
+
+<CpyLink path="Lib/enum.py" lines="281-620" />
+
+```python
+class EnumType(type):
+    def __new__(metacls, cls, bases, classdict, *, boundary=None, _simple=False, **kwds):
+        ...
+        # resolve auto() values
+        for key in classdict._member_names:
+            value = classdict[key]
+            if isinstance(value, auto):
+                value = metacls._generate_next_value_(key, 1,
+                        len(enum_class._member_names_),
+                        classdict._last_values[:])
+            ...
+        # create each member
+        for key, value in enum_members.items():
+            enum_member = enum_class.__new__(enum_class, value)
+            enum_member._name_ = key
+            enum_member._value_ = value
+            enum_class._member_names_.append(key)
+            enum_class._member_map_[key] = enum_member
+            try:
+                enum_class._value2member_map_[value] = enum_member
+            except TypeError:
+                pass  # unhashable value
+```
+
+`EnumType.__new__` runs after the class body is fully executed. It
+iterates `classdict._member_names` in definition order. For each `auto()`
+value it calls `_generate_next_value_` so subclasses can change the
+sequence (e.g., `StrEnum._generate_next_value_` returns `key.lower()`).
+Then it constructs each member by calling `enum_class.__new__` directly,
+bypassing `__init__`, and wires up the three lookup structures:
+`_member_names_` (list for iteration), `_member_map_` (name to member),
+and `_value2member_map_` (value to canonical member, skipped for
+unhashable values). Aliases (same value, different name) are added to
+`_member_map_` but not to `_member_names_`, so `list(MyEnum)` omits them.
+
+### `auto()` and `_generate_next_value_` (lines 1101 to 1250)
+
+<CpyLink path="Lib/enum.py" lines="1101-1250" />
+
+```python
+class auto(int):
+    _value_ = 0
+
+    @staticmethod
+    def _generate_next_value_(name, start, count, last_values):
+        for last_value in reversed(last_values):
+            try:
+                return last_value + 1
+            except TypeError:
+                pass
+        return start
+```
+
+`auto` is a subclass of `int` so it satisfies `isinstance(v, int)` checks
+inside `_EnumDict`. The default `_generate_next_value_` looks at the most
+recent member value and increments it; if all prior values are
+non-numeric it falls back to `start` (typically 1). `StrEnum` overrides
+this to return `name.lower()`, and `Flag` overrides it to return the next
+power of two. User-defined enums can override it on the class body:
+
+```python
+class Planet(Enum):
+    @staticmethod
+    def _generate_next_value_(name, start, count, last_values):
+        return name
+    MERCURY = auto()  # 'MERCURY'
+```
+
+### `Flag` bitwise operations (lines 901 to 1100)
+
+<CpyLink path="Lib/enum.py" lines="901-1100" />
+
+```python
+class Flag(Enum):
+    def __or__(self, other):
+        if isinstance(other, self.__class__):
+            return self.__class__(self._value_ | other._value_)
+        return NotImplemented
+
+    def __and__(self, other):
+        if isinstance(other, self.__class__):
+            return self.__class__(self._value_ & other._value_)
+        return NotImplemented
+
+    def __xor__(self, other):
+        if isinstance(other, self.__class__):
+            return self.__class__(self._value_ ^ other._value_)
+        return NotImplemented
+
+    def __invert__(self):
+        return self.__class__(~self._value_)
+```
+
+`Flag` stores each member as a power-of-two integer. Compound values
+(e.g., `Perm.R | Perm.W`) are constructed by calling `self.__class__(v)`
+which either finds an existing member in `_value2member_map_` or builds a
+pseudo-member on the fly. The `FlagBoundary` enum controls what happens
+with out-of-range values: `STRICT` raises, `CONFORM` masks, `EJECT`
+downgrades to `int`, and `KEEP` (the default for `Flag`) preserves the
+value as a pseudo-member.

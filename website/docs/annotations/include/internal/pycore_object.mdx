@@ -1,0 +1,140 @@
+---
+title: Include/internal/pycore_object.h
+description: Internal macros and helpers for PyObject manipulation — Py_TRACE_REFS doubly-linked list, GC tracking predicates, deferred refcount, and specialized incref/decref fast paths.
+cpython_path: Include/internal/pycore_object.h
+cpython_version: "3.14"
+lines: 300
+status: annotated
+ported_to: objects/object.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Include/internal/pycore_object.h`
+
+<CpyLink path="Include/internal/pycore_object.h" />
+
+The private extension to `Include/object.h`. Whereas the public header
+exposes only the stable C API surface, this file gives the interpreter's
+own C files access to the extra object-header fields used in debug and
+free-threaded builds, the GC tracking fast paths, and the specialized
+incref/decref helpers that the eval loop uses to avoid virtual dispatch
+through `tp_dealloc`.
+
+The header is included by virtually every `.c` file under `Python/` and
+`Objects/`, but never by third-party extension code. Anything declared
+here is fair game to change between minor releases.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Include/internal/pycore_object.h" lines="1-40">1-40</Cpy> | `_PyObject_HEAD_EXTRA` | Doubly-linked list pointers (`_ob_next`, `_ob_prev`) compiled in only when `Py_TRACE_REFS` is defined; empty struct in release builds. | `objects/object.go` |
+| <Cpy path="Include/internal/pycore_object.h" lines="41-80">41-80</Cpy> | `_PyObject_IS_GC` | Checks `Py_TYPE(op)->tp_flags & Py_TPFLAGS_HAVE_GC` to decide whether the object participates in cyclic GC. | `objects/object.go` |
+| <Cpy path="Include/internal/pycore_object.h" lines="81-130">81-130</Cpy> | `_PyObject_GC_IS_TRACKED` / `_PyObject_GC_TRACK` / `_PyObject_GC_UNTRACK` | Thin wrappers around the `PyGC_Head` list ops from `pycore_gc.h`; live here so object-layer code only needs this one include. | `objects/object.go` |
+| <Cpy path="Include/internal/pycore_object.h" lines="131-180">131-180</Cpy> | `_PyObject_SetDeferredRefcount` | Marks an object as using deferred reference counting in free-threaded (`Py_GIL_DISABLED`) builds; no-op in the GIL build. | `objects/object.go` |
+| <Cpy path="Include/internal/pycore_object.h" lines="181-240">181-240</Cpy> | `_Py_INCREF_SPECIALIZED` / `_Py_DECREF_SPECIALIZED` | Fast-path incref/decref that accept a compile-time-known destructor so the decref can call it directly without going through `tp_dealloc`. | `objects/object.go` |
+| <Cpy path="Include/internal/pycore_object.h" lines="241-270">241-270</Cpy> | `_PyObject_IsFreeing` | Re-entrancy guard inside `tp_dealloc`; set while an object's destructor is running so nested decrefs can detect the cycle. | `objects/object.go` |
+| <Cpy path="Include/internal/pycore_object.h" lines="271-300">271-300</Cpy> | Miscellaneous internal helpers | `_PyObject_Init`, `_PyObject_InitVar`, `_PyObject_New`, `_PyObject_NewVar` — allocator helpers that populate the object header. | `objects/object.go` |
+
+## Reading
+
+### `_PyObject_HEAD_EXTRA` (lines 1 to 40)
+
+<CpyLink path="Include/internal/pycore_object.h" lines="1-40" />
+
+```c
+#ifdef Py_TRACE_REFS
+/* Extra fields at the front of every PyObject for the all-objects list. */
+#define _PyObject_HEAD_EXTRA            \
+    PyObject *_ob_next;                 \
+    PyObject *_ob_prev;
+
+#define _PyObject_EXTRA_INIT            \
+    _Py_NULL, _Py_NULL,
+#else
+#define _PyObject_HEAD_EXTRA
+#define _PyObject_EXTRA_INIT
+#endif
+```
+
+When CPython is built with `Py_TRACE_REFS` (passing `--with-trace-refs`
+to `configure`, or `Py_DEBUG` in some configurations), every `PyObject`
+in the heap is linked into a global doubly-linked list via `_ob_next`
+and `_ob_prev`. The `sys.getobjects()` function and the `PYTHONDUMPREFS`
+environment variable use this list to enumerate all live Python objects.
+
+In a standard release build both macros expand to nothing, so the fields
+add zero bytes to the struct layout. The `_PyObject_EXTRA_INIT` macro
+supplies the two `NULL` initializers only in `Py_TRACE_REFS` builds.
+
+In gopy, the linked-list mechanism is not ported because Go's runtime
+provides equivalent object enumeration through the GC. The macros are
+defined as empty so that any C-style initializers compile without change.
+
+### `_PyObject_IS_GC` (lines 41 to 80)
+
+<CpyLink path="Include/internal/pycore_object.h" lines="41-80" />
+
+```c
+static inline int
+_PyObject_IS_GC(PyObject *obj)
+{
+    return (Py_TYPE(obj)->tp_flags & Py_TPFLAGS_HAVE_GC) != 0;
+}
+```
+
+A one-liner predicate that the allocator calls before deciding whether to
+prepend a `PyGC_Head` node. If the type does not set `Py_TPFLAGS_HAVE_GC`
+in `tp_flags`, the allocator uses the leaner `PyObject_Malloc` path and
+skips the GC header entirely. This matters for performance: most built-in
+scalar types (integers, floats, bytes) have no cyclic references and do
+not need the overhead.
+
+The `_PyObject_GC_IS_TRACKED`, `_PyObject_GC_TRACK`, and
+`_PyObject_GC_UNTRACK` helpers below this predicate delegate to the
+`pycore_gc.h` list operations. They are duplicated here (as one-line
+wrappers) so that files that only deal with object-layer concerns do not
+have to include the full GC header.
+
+In gopy, `_PyObject_IS_GC` maps to the `IsGC() bool` method on
+`objects/object.go`'s `Object` interface, which checks the equivalent
+`TypeFlagHaveGC` bit on the gopy `Type`.
+
+### `_Py_DECREF_SPECIALIZED` (lines 181 to 240)
+
+<CpyLink path="Include/internal/pycore_object.h" lines="181-240" />
+
+```c
+/* Specialized DECREF for objects whose destructor is known at
+   compile time (e.g. float, int).  Avoids an indirect call through
+   tp_dealloc when the reference count hits zero. */
+static inline void
+_Py_DECREF_SPECIALIZED(PyObject *op, destructor destruct)
+{
+    if (_Py_IsImmortal(op)) {
+        return;
+    }
+#if defined(Py_GIL_DISABLED)
+    /* free-threaded path omitted for brevity */
+#else
+    if (--op->ob_refcnt == 0) {
+        destruct(op);
+    }
+#endif
+}
+```
+
+The specialize adaptive interpreter knows the exact type of many objects
+at each bytecode. For example, a `LOAD_FAST` that is known to return a
+`float` can use `_Py_DECREF_SPECIALIZED(old_value, PyFloat_Type.tp_dealloc)`
+and the compiler inlines the destructor call, eliminating an indirect
+branch through the type's `tp_dealloc` slot.
+
+`_Py_INCREF_SPECIALIZED` is the paired macro: it checks immortality and
+otherwise increments `ob_refcnt` (or performs the biased atomic increment
+in the free-threaded build).
+
+In gopy, neither helper has a direct counterpart because Go's garbage
+collector owns object lifetime. Wherever CPython would call
+`_Py_DECREF_SPECIALIZED`, gopy simply drops the Go reference.

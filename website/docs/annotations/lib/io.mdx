@@ -1,0 +1,124 @@
+---
+title: Lib/io.py
+description: Thin pure-Python wrapper that imports the _io C extension and re-exports the full I/O hierarchy including open, abstract base classes, and concrete stream classes.
+cpython_path: Lib/io.py
+cpython_version: "3.14"
+lines: 100
+status: annotated
+ported_to: module/io/module.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Lib/io.py`
+
+<CpyLink path="Lib/io.py" />
+
+`Lib/io.py` is almost entirely a re-export file. The real implementation
+lives in `Modules/_io/` (a C extension registered as `_io`). The
+pure-Python file exists so that `import io` works before the C extension
+is available (e.g., during interpreter bootstrap) and so that the module
+can provide a small number of pure-Python fallback definitions.
+
+The file imports `_io` with `from _io import *` and then adds
+`BlockingIOError` (an alias for the built-in exception of the same name),
+`DEFAULT_BUFFER_SIZE` (8192), and `open` (re-exported from `_io.open`).
+The `open_code` function is also re-exported from `_io` and used when the
+interpreter runs in isolated mode (`-I` flag).
+
+The abstract base class hierarchy (`IOBase`, `RawIOBase`, `BufferedIOBase`,
+`TextIOBase`) and the concrete class hierarchy (`FileIO`, `BytesIO`,
+`StringIO`, `BufferedReader`, `BufferedWriter`, `BufferedRandom`,
+`BufferedRWPair`, `TextIOWrapper`, `IncrementalNewlineDecoder`) are all
+defined in C and merely re-exported here. `UnsupportedOperation` is the
+exception raised by methods that are not supported on a given stream type.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Lib/io.py" lines="1-30">1-30</Cpy> | Module docstring, `_io` import, `__all__` | Imports the C extension and establishes the public namespace. | `module/io/module.go` |
+| <Cpy path="Lib/io.py" lines="31-60">31-60</Cpy> | `DEFAULT_BUFFER_SIZE`, `BlockingIOError`, `open`, `open_code` | Module-level constants and the two entry-point functions; `open` is `_io.open`; `BlockingIOError` is the built-in. | `module/io/module.go` |
+| <Cpy path="Lib/io.py" lines="61-80">61-80</Cpy> | Abstract base classes re-export: `IOBase`, `RawIOBase`, `BufferedIOBase`, `TextIOBase`, `UnsupportedOperation` | The four ABC layers and the sentinel exception; all implemented in C. | `module/io/module.go` |
+| <Cpy path="Lib/io.py" lines="81-100">81-100</Cpy> | Concrete class re-export: `FileIO`, `BytesIO`, `StringIO`, `BufferedReader`, `BufferedWriter`, `BufferedRandom`, `BufferedRWPair`, `TextIOWrapper`, `IncrementalNewlineDecoder` | All nine concrete stream types; all implemented in C. | `module/io/module.go` |
+
+## Reading
+
+### `open` dispatch logic (lines 31 to 60)
+
+<CpyLink path="Lib/io.py" lines="31-60" />
+
+```python
+DEFAULT_BUFFER_SIZE = 8 * 1024  # 8192
+
+# Pretend this exception was created here.
+BlockingIOError = BlockingIOError
+
+open = _io.open
+open_code = _io.open_code
+```
+
+`_io.open` is the canonical `builtins.open`. It parses the `mode`
+string, picks a concrete class, wraps a `FileIO` (raw) in a
+`BufferedReader`, `BufferedWriter`, or `BufferedRandom`, and optionally
+wraps that in a `TextIOWrapper` for text mode. `open_code` is the
+same entry point used by `importlib` and the `-I` isolated-mode flag;
+it may call a custom hook registered via `PyFile_SetOpenCodeHook` in
+the C API.
+
+`BlockingIOError` is the built-in exception of the same name, re-bound
+here so that `io.BlockingIOError` and `builtins.BlockingIOError` are the
+identical object. `DEFAULT_BUFFER_SIZE` is 8192 bytes and is consulted
+by `BufferedReader`, `BufferedWriter`, and `BufferedRandom` when no
+explicit buffer size is given.
+
+### ABC hierarchy (lines 61 to 80)
+
+<CpyLink path="Lib/io.py" lines="61-80" />
+
+```python
+# ABCs
+from _io import (IOBase, RawIOBase, BufferedIOBase, TextIOBase,
+                 UnsupportedOperation)
+```
+
+The four abstract layers form a simple hierarchy:
+
+```
+IOBase
+├── RawIOBase        # unbuffered binary: read/readinto/write
+├── BufferedIOBase   # buffered binary: read/read1/readinto/write/detach
+└── TextIOBase       # text: read/readline/write/seek/tell/detach
+```
+
+`IOBase` provides `fileno`, `seek`, `tell`, `truncate`, `flush`,
+`close`, `readable`, `writable`, `seekable`, `__iter__`, and
+`readline`. Subclasses override only the methods they support; all
+others raise `UnsupportedOperation` (a subclass of both `OSError` and
+`ValueError` so that code catching either will intercept it).
+
+### `BytesIO` and `StringIO` in-memory streams (lines 81 to 100)
+
+<CpyLink path="Lib/io.py" lines="81-100" />
+
+```python
+from _io import (FileIO,
+                 BytesIO, StringIO,
+                 BufferedReader, BufferedWriter,
+                 BufferedRandom, BufferedRWPair,
+                 TextIOWrapper,
+                 IncrementalNewlineDecoder)
+```
+
+`BytesIO` is a `BufferedIOBase` backed by a resizable `bytes` buffer in
+memory. It supports `read`, `write`, `seek`, `tell`, `getvalue`, and
+`getbuffer`. `StringIO` is the text equivalent: a `TextIOBase` backed
+by a `str` buffer. Both accept an optional initial value in their
+constructor and reset the position to 0. Neither supports `fileno()`;
+calling it raises `UnsupportedOperation`.
+
+`TextIOWrapper` is the most complex concrete class: it wraps a
+`BufferedIOBase`, handles a configurable `encoding` and `errors`
+policy, translates newlines via `IncrementalNewlineDecoder` when
+`newline` is not `None`, and manages a write-through or write-through-plus-buffer
+mode via the `line_buffering` and `write_through` flags.

@@ -1,0 +1,211 @@
+---
+title: Modules/_randommodule.c
+description: C implementation of Python's random module — Mersenne Twister MT19937 with seed, getrandbits, and state serialization.
+cpython_path: Modules/_randommodule.c
+cpython_version: "3.14"
+lines: 600
+status: annotated
+ported_to: module/random/module.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Modules/_randommodule.c`
+
+<CpyLink path="Modules/_randommodule.c" />
+
+The C implementation of the Mersenne Twister MT19937 pseudo-random number
+generator used by `random.Random`. `Lib/random.py` imports `_random` (this
+module) as the `Random` base class and builds the higher-level convenience
+functions (`randint`, `choice`, `shuffle`, `gauss`, etc.) on top of it.
+
+The MT19937 algorithm produces a sequence of 32-bit unsigned integers with a
+period of 2^19937 - 1. The implementation here follows the original Matsumoto
+and Nishimura paper, with minor adjustments for Python's object model.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Modules/_randommodule.c" lines="1-60">1-60</Cpy> | `N`, `M`, MT constants | MT19937 recurrence constants (`N=624`, `M=397`, `MATRIX_A`, `UPPER_MASK`, `LOWER_MASK`). | `module/random/module.go:mtConstants` |
+| <Cpy path="Modules/_randommodule.c" lines="60-160">60-160</Cpy> | `RandomObject`, `genrand_uint32` | `RandomObject` struct (`state[624]`, `index`); raw 32-bit MT output generation. | `module/random/module.go:RandomObject` |
+| <Cpy path="Modules/_randommodule.c" lines="160-280">160-280</Cpy> | `random_seed`, `init_by_array` | Seed MT from `int`, `bytes`, `float`, or `None` (falls back to `os.urandom`). | `module/random/module.go:Seed` |
+| <Cpy path="Modules/_randommodule.c" lines="280-380">280-380</Cpy> | `random_random` | `random()` method: calls `genrand_uint32` twice, assembles a 53-bit mantissa, returns `float` in [0.0, 1.0). | `module/random/module.go:Random` |
+| <Cpy path="Modules/_randommodule.c" lines="380-480">380-480</Cpy> | `random_getrandbits` | `getrandbits(k)`: concatenates ceil(k/32) MT words, masks to k bits, returns a Python `int`. | `module/random/module.go:GetRandBits` |
+| <Cpy path="Modules/_randommodule.c" lines="480-560">480-560</Cpy> | `random_setstate`, `random_getstate` | Serialize and restore the 624-element MT state array for `pickle`. | `module/random/module.go:GetState` |
+| <Cpy path="Modules/_randommodule.c" lines="560-600">560-600</Cpy> | `Random_Type`, `_randommodule`, `PyInit__random` | Type object, module definition, and entry point. | `module/random/module.go:Module` |
+
+## Reading
+
+### MT19937 state generation — `genrand_uint32` (lines 60 to 160)
+
+<CpyLink path="Modules/_randommodule.c" lines="60-160" />
+
+`RandomObject` stores the 624-word state array and an `index` cursor:
+
+```c
+typedef struct {
+    PyObject_HEAD
+    int        index;
+    uint32_t   state[N];   /* N = 624 */
+} RandomObject;
+```
+
+`genrand_uint32` returns the next 32-bit value. When `index` reaches `N`,
+the state array is regenerated in place by the MT recurrence:
+
+```c
+static uint32_t
+genrand_uint32(RandomObject *self)
+{
+    uint32_t y;
+    static uint32_t mag01[2] = {0x0U, MATRIX_A};
+
+    if (self->index >= N) {
+        /* Generate N new words. */
+        int kk;
+        for (kk = 0; kk < N - M; kk++) {
+            y = (self->state[kk] & UPPER_MASK) |
+                (self->state[kk+1] & LOWER_MASK);
+            self->state[kk] = self->state[kk+M] ^ (y >> 1) ^ mag01[y & 1];
+        }
+        for (; kk < N - 1; kk++) {
+            y = (self->state[kk] & UPPER_MASK) |
+                (self->state[kk+1] & LOWER_MASK);
+            self->state[kk] = self->state[kk+(M-N)] ^ (y >> 1) ^ mag01[y & 1];
+        }
+        y = (self->state[N-1] & UPPER_MASK) |
+            (self->state[0]   & LOWER_MASK);
+        self->state[N-1] = self->state[M-1] ^ (y >> 1) ^ mag01[y & 1];
+        self->index = 0;
+    }
+
+    /* Tempering. */
+    y  = self->state[self->index++];
+    y ^= (y >> 11);
+    y ^= (y << 7)  & 0x9d2c5680U;
+    y ^= (y << 15) & 0xefc60000U;
+    y ^= (y >> 18);
+    return y;
+}
+```
+
+The four XOR/shift tempering steps at the end improve the statistical
+distribution of the output bits without changing the period of the generator.
+
+### `random_seed` from a Python object (lines 160 to 280)
+
+<CpyLink path="Modules/_randommodule.c" lines="160-280" />
+
+`random_seed(self, n=None)` accepts several types:
+
+- `None` (or no argument): reads 2500 bytes from `os.urandom` and calls
+  `init_by_array` with the result, giving a cryptographically seeded MT.
+- `int`: converts the integer to a big-endian byte string via
+  `_PyLong_AsByteArray`, then calls `init_by_array`.
+- `float`: converts to `int` via `hash` and proceeds as above.
+- `bytes` or `bytearray`: passes the raw bytes directly to `init_by_array`.
+
+```c
+static PyObject *
+random_seed(RandomObject *self, PyObject *args)
+{
+    PyObject *n = Py_None;
+    ...
+    if (n == Py_None) {
+        /* Use os.urandom for unpredictable seed. */
+        n = PyObject_CallObject(urandom, ...);
+        ...
+    }
+    if (PyLong_Check(n)) {
+        key = _PyLong_AsByteArray(...);
+        init_by_array(self, (uint32_t *)key, key_len / 4);
+    }
+    ...
+}
+```
+
+`init_by_array` (ported from the original MT reference implementation)
+iterates over the seed words to mix them into the 624-element state array,
+then runs a second pass to spread high-index contributions throughout the
+array. This ensures that seeds of any length produce a well-distributed initial
+state.
+
+### `random_getrandbits` (lines 380 to 480)
+
+<CpyLink path="Modules/_randommodule.c" lines="380-480" />
+
+`getrandbits(k)` is the lowest-level integer primitive. It generates
+`ceil(k / 32)` MT words and concatenates their bits:
+
+```c
+static PyObject *
+random_getrandbits(RandomObject *self, PyObject *args)
+{
+    int k, i, words;
+    uint32_t *bits;
+
+    if (!PyArg_ParseTuple(args, "i:getrandbits", &k)) return NULL;
+    if (k <= 0) { PyErr_SetString(PyExc_ValueError, ...); return NULL; }
+
+    words = (k + 31) / 32;
+    bits  = PyMem_Malloc(words * 4);
+    for (i = 0; i < words; i++)
+        bits[i] = genrand_uint32(self);
+
+    /* Mask the top word to exactly k bits. */
+    if (k % 32 != 0)
+        bits[words - 1] >>= (32 - (k % 32));
+
+    result = _PyLong_FromByteArray((unsigned char *)bits, words * 4,
+                                   /*little_endian=*/1, /*is_signed=*/0);
+    PyMem_Free(bits);
+    return result;
+}
+```
+
+`random.randbelow(n)` in `Lib/random.py` calls `getrandbits(n.bit_length())`
+in a rejection loop to return a uniform value in [0, n) without modular bias.
+
+### `random_getstate` and `random_setstate` (lines 480 to 560)
+
+<CpyLink path="Modules/_randommodule.c" lines="480-560" />
+
+`getstate()` returns a tuple `(version, internalstate, gauss_next)` where
+`internalstate` is a Python tuple of 625 integers: the 624 MT state words
+followed by `index`. `setstate()` restores the array from the same tuple,
+allowing `random.Random` objects to be pickled and reproduced exactly:
+
+```c
+static PyObject *
+random_getstate(RandomObject *self, PyObject *Py_UNUSED(ignored))
+{
+    PyObject *state = PyTuple_New(N + 1);
+    for (i = 0; i < N; i++)
+        PyTuple_SET_ITEM(state, i, PyLong_FromUnsignedLong(self->state[i]));
+    PyTuple_SET_ITEM(state, N, PyLong_FromLong(self->index));
+    return Py_BuildValue("(iOO)", VERSION, state, Py_None);
+}
+```
+
+`Lib/random.py` wraps this in `Random.__getstate__` and adds the Gaussian
+`gauss_next` value (a float or `None`) as the third element. The integer
+`VERSION` tag allows future format changes to be detected.
+
+## gopy mirror
+
+`module/random/module.go`. `RandomObject` maps to a Go struct with `[624]uint32`
+and `int` index. `genrand_uint32` is a direct port of the C function.
+`Seed` converts Python objects using gopy's integer and bytes helpers.
+`GetRandBits` builds a `big.Int` from concatenated 32-bit words. `GetState`
+and `SetState` serialize to a gopy tuple.
+
+## CPython 3.14 changes
+
+The MT19937 core has been unchanged since Python 2.1. `random_seed` was
+extended in 3.2 to accept `bytes` and `bytearray` directly. In 3.9, `seed`
+with `version=2` (the default since 3.2) began hashing `str`, `bytes`, and
+`datetime` objects through `hashlib.sha512` to remove platform-dependent
+`hash()` bias from seeds. Multi-phase module init was adopted in 3.12. The
+`Random.randbytes(n)` convenience method was added in 3.9 as a pure-Python
+wrapper over `getrandbits(n*8)`.

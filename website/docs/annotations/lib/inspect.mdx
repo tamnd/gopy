@@ -1,0 +1,196 @@
+---
+title: Lib/inspect.py
+description: Runtime introspection utilities for live objects; type predicates, signature extraction, source retrieval, and stack inspection.
+cpython_path: Lib/inspect.py
+cpython_version: "3.14"
+lines: 1800
+status: annotated
+ported_to: module/inspect/module.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Lib/inspect.py`
+
+<CpyLink path="Lib/inspect.py" />
+
+`inspect` is the standard toolkit for runtime introspection. It has no C
+accelerator; everything runs in pure Python on top of the object model.
+
+The module divides into four broad areas. Type predicates
+(`isfunction`, `isclass`, `ismodule`, etc.) answer questions about object
+kinds. Member retrieval (`getmembers`, `classify_class_attrs`) walks the
+MRO. The signature sub-system (`Signature`, `Parameter`, `signature`)
+builds a structured description of a callable's parameter list. Source
+utilities (`getsource`, `getsourcelines`, `findsource`) read source text
+via `linecache`. Stack utilities (`stack`, `currentframe`, `getframeinfo`,
+`FrameInfo`) expose the live call stack.
+
+CPython 3.14 added annotation-aware introspection via `annotationlib`:
+`get_annotations` now accepts a `format` argument that controls whether
+annotations are returned as strings (PEP 563), forward-ref objects
+(PEP 749), or fully evaluated values.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Lib/inspect.py" lines="1-120">1-120</Cpy> | Module header, `__all__`, `CO_*` flag constants | Exports list and code-object flag constants mirrored from `dis`. | `module/inspect/module.go` |
+| <Cpy path="Lib/inspect.py" lines="121-330">121-330</Cpy> | `ismodule`, `isclass`, `ismethod`, `isfunction`, `isgeneratorfunction`, `iscoroutinefunction`, `isasyncgenfunction`, `isbuiltin`, `isroutine`, `isabstract`, and friends | One-liner type predicates. Most check `isinstance` against a type from `types`; `isgeneratorfunction` additionally checks `CO_GENERATOR` in `__code__.co_flags`. | `module/inspect/module.go` |
+| <Cpy path="Lib/inspect.py" lines="331-520">331-520</Cpy> | `getmembers`, `getmembers_static`, `classify_class_attrs`, `getmodule`, `getdoc`, `getfile`, `getabsfile` | Member enumeration. `getmembers` calls `dir(obj)` and guards each `getattr` with `AttributeError`. `classify_class_attrs` walks `obj.__mro__` to determine where each attribute was defined and its kind (data descriptor, method, etc.). | `module/inspect/module.go` |
+| <Cpy path="Lib/inspect.py" lines="521-780">521-780</Cpy> | `findsource`, `getsourcelines`, `getsource`, `getcomments`, `cleandoc` | Source retrieval. `findsource` uses `linecache.getlines` and scans backward from the reported line number to find the `def`/`class` header. `cleandoc` strips leading indentation. | `module/inspect/module.go` |
+| <Cpy path="Lib/inspect.py" lines="781-900">781-900</Cpy> | `FrameInfo`, `Traceback`, `stack`, `trace`, `currentframe`, `getframeinfo`, `getouterframes`, `getinnerframes` | Stack introspection. `stack()` calls `currentframe()` and then follows `f_back` links, wrapping each frame in a `FrameInfo` named tuple. | `module/inspect/module.go` |
+| <Cpy path="Lib/inspect.py" lines="901-1100">901-1100</Cpy> | `Parameter`, `BoundArguments` | The parameter model. `Parameter.kind` is one of five `_ParameterKind` enum members. `BoundArguments` holds the result of `Signature.bind`; its `apply_defaults` fills in default values. | `module/inspect/module.go` |
+| <Cpy path="Lib/inspect.py" lines="1101-1500">1101-1500</Cpy> | `Signature`, `_signature_from_callable`, `_signature_from_function`, `_signature_from_builtin`, `_signature_fromstr`, `_signature_bound_method` | Signature construction dispatch. `signature(obj)` is a thin wrapper around `_signature_from_callable` which tries each strategy in order: `__signature__`, `__text_signature__`, `functools.partial` unwrapping, `__wrapped__` following, then direct code-object inspection. | `module/inspect/module.go` |
+| <Cpy path="Lib/inspect.py" lines="1501-1800">1501-1800</Cpy> | `get_annotations`, `signature` (public entry), `_get_user_defined_method`, `_is_duck_type_method`, miscellaneous helpers | `get_annotations` delegates to `annotationlib` in 3.14. The public `signature` adds the `follow_wrapped` and `globals`/`locals` arguments and calls `_signature_from_callable`. | `module/inspect/module.go` |
+
+## Reading
+
+### `signature` dispatch chain (lines 1101 to 1500)
+
+<CpyLink path="Lib/inspect.py" lines="1101-1500" />
+
+```python
+def _signature_from_callable(obj, *,
+                              follow_wrapper_chains=True,
+                              skip_bound_arg=True,
+                              globals=None, locals=None,
+                              eval_str=False,
+                              sigcls=None):
+    if not callable(obj):
+        raise TypeError('{!r} is not a callable object'.format(obj))
+
+    if isinstance(obj, types.MethodType):
+        # In this case we skip the first argument of the underlying function
+        sig = _get_signature_of(obj.__func__, follow_wrapper_chains,
+                                skip_bound_arg)
+        if skip_bound_arg:
+            return _signature_bound_method(sig)
+        return sig
+
+    # Was this function wrapped by a decorator?
+    if follow_wrapper_chains:
+        obj = unwrap(obj, stop=(lambda f: hasattr(f, '__signature__')))
+        ...
+
+    try:
+        sig = obj.__signature__
+    except AttributeError:
+        pass
+    else:
+        if sig is not None:
+            return sig
+
+    try:
+        text_sig = obj.__text_signature__
+    except AttributeError:
+        pass
+    else:
+        if text_sig:
+            return _signature_fromstr(sigcls, obj, text_sig)
+
+    if isinstance(obj, types.FunctionType):
+        return _signature_from_function(sigcls, obj, ...)
+
+    if isinstance(obj, functools.partial):
+        return _signature_get_partial(wrapped_sig, obj)
+```
+
+The dispatch is a long `if`/`try` ladder. Priority order: explicit
+`__signature__`, `__text_signature__` (used by C extensions that embed a
+signature string in the docstring), `functools.partial` unwrapping,
+`__wrapped__` following (for decorated functions), direct
+`types.FunctionType` inspection, and finally the C-builtin heuristics.
+Each strategy either returns a `Signature` or falls through to the next.
+
+`_signature_fromstr` parses the `(param, ...)` text that C extension
+authors embed as `functionname($module, /, ...)`, normalises the `$`
+pseudo-parameter into `POSITIONAL_ONLY`, and calls `compile` + `eval` on
+the result to get an AST node back out.
+
+### `Signature` and `Parameter` model (lines 901 to 1100)
+
+<CpyLink path="Lib/inspect.py" lines="901-1100" />
+
+```python
+class _ParameterKind(enum.IntEnum):
+    POSITIONAL_ONLY = 0
+    POSITIONAL_OR_KEYWORD = 1
+    VAR_POSITIONAL = 2
+    KEYWORD_ONLY = 3
+    VAR_KEYWORD = 4
+
+class Parameter:
+    empty = _empty
+
+    def __init__(self, name, kind, *, default=_empty, annotation=_empty):
+        if kind not in _ParameterKind:
+            raise ValueError(f'invalid value for kind: {kind!r}')
+        if default is not _empty and kind in (_VAR_POSITIONAL, _VAR_KEYWORD):
+            raise ValueError(f'{kind.description} parameters cannot have default values')
+        ...
+        self._name = name
+        self._kind = kind
+        self._default = default
+        self._annotation = annotation
+```
+
+`Parameter` is immutable by convention (the mutating helpers like
+`replace` return new instances). The `_empty` sentinel is a class
+attribute used instead of `None` so that `None` is a valid annotation or
+default. `Signature.bind` and `Signature.bind_partial` use `Parameter.kind`
+to route positional and keyword arguments through the parameter list,
+collecting `VAR_POSITIONAL` into a tuple and `VAR_KEYWORD` into a dict.
+
+`BoundArguments.apply_defaults` fills in `Parameter.default` for any
+missing keyword-only or positional-or-keyword parameter, and inserts an
+empty tuple / empty dict for any `VAR_POSITIONAL` / `VAR_KEYWORD`
+parameter that received no arguments.
+
+### `getsource` and `linecache` (lines 521 to 780)
+
+<CpyLink path="Lib/inspect.py" lines="521-780" />
+
+```python
+def findsource(object):
+    file = getsourcefile(object)
+    if file:
+        ...
+    lines = linecache.getlines(file)
+    if not lines:
+        raise OSError('could not get source code')
+    ...
+    lnum = object.__code__.co_firstlineno - 1
+    ...
+    while lnum > 0:
+        if pat.match(lines[lnum]):
+            break
+        lnum -= 1
+    return lines, lnum
+
+def getsourcelines(object):
+    object = unwrap(object)
+    lines, lnum = findsource(object)
+    return getblock(lines[lnum:]), lnum + 1
+
+def getsource(object):
+    lines, lnum = getsourcelines(object)
+    return ''.join(lines)
+```
+
+`findsource` obtains the raw line list via `linecache.getlines`, which
+caches file contents so repeated calls do not re-read from disk. It then
+scans backward from `co_firstlineno` looking for the `def` or `class`
+keyword using a compiled regex. `getblock` follows the indentation of
+that first line to determine how many subsequent lines belong to the
+block.
+
+For classes, `findsource` uses `__firstlineno__` (added in 3.12) when
+available, then falls back to scanning for the class header. For
+lambdas, the entire logical line is returned since lambdas have no
+dedicated block structure.
+
+`cleandoc` removes leading and trailing blank lines and then strips the
+common leading whitespace from all non-empty lines, matching the
+behaviour of `compile.c`'s `_PyCompile_CleanDoc` but running at runtime
+rather than compile time.

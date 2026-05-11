@@ -1,0 +1,206 @@
+---
+title: Python/codecs.c
+description: The codec registry — encoding-name normalization, search-function dispatch, and the encode/decode/incremental/stream convenience wrappers.
+cpython_path: Python/codecs.c
+cpython_version: "3.14"
+lines: 900
+status: annotated
+ported_to: pythonrun/codecs.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Python/codecs.c`
+
+<CpyLink path="Python/codecs.c" />
+
+The codec registry is how CPython maps an encoding name (e.g. `"utf-8"`,
+`"latin_1"`, `"iso8859-15"`) to a five-element tuple of callables:
+`(encoder, decoder, stream_reader, stream_writer, incremental_encoder_factory)`.
+Search functions registered via `codecs.register()` are tried in order; the
+first non-`None` return wins and is cached.
+
+The file is roughly 900 lines and covers four concerns: registration of search
+functions, lookup with name normalization and caching, convenience wrappers
+(`PyCodec_Encode`, `PyCodec_Decode`, `PyCodec_IncrementalEncoder`, etc.), and
+the `charmap_build` / `charmap_decode` helpers used by single-byte codec
+implementations. The Python-visible `codecs` module imports the C entry points
+via `_codecsmodule.c`; the functions here are pure C API.
+
+Name normalization is the subtlest part: before consulting the cache or calling
+any search function, `_PyCodec_Lookup` converts the encoding string to
+lowercase and maps every space and hyphen to an underscore, so `"UTF-8"`,
+`"utf_8"`, `"utf 8"`, and `"utf-8"` all hash to the same cache key.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Python/codecs.c" lines="1-80">1-80</Cpy> | `_PyCodec_InitRegistry` / `PyCodec_Register` | Initialize the per-interpreter `codec_search_path` list and `codec_search_cache` dict; append a new search function. | `pythonrun/codecs.go:InitRegistry` / `Register` |
+| <Cpy path="Python/codecs.c" lines="81-220">81-220</Cpy> | `_PyCodec_Lookup` / `normalizestring` | Normalize the encoding name (lowercase, spaces/hyphens to `_`), check `codec_search_cache`, then walk `codec_search_path` calling each function. | `pythonrun/codecs.go:Lookup` |
+| <Cpy path="Python/codecs.c" lines="221-380">221-380</Cpy> | `_PyCodecInfo_GetIncrementalDecoder` / `_PyCodecInfo_GetIncrementalEncoder` | Extract `codec[3]` / `codec[2]` from the codec-info tuple and instantiate with the `errors` argument; used for BOM-aware UTF-* codecs. | `pythonrun/codecs.go:GetIncrementalDecoder` / `GetIncrementalEncoder` |
+| <Cpy path="Python/codecs.c" lines="381-540">381-540</Cpy> | `PyCodec_Encode` / `PyCodec_Decode` | Look up the codec tuple, call `codec[0](obj, errors)` or `codec[1](obj, errors)`, validate that the result is a 2-tuple, and return `result[0]`. | `pythonrun/codecs.go:Encode` / `Decode` |
+| <Cpy path="Python/codecs.c" lines="541-680">541-680</Cpy> | `PyCodec_IncrementalEncoder` / `PyCodec_IncrementalDecoder` / `PyCodec_StreamReader` / `PyCodec_StreamWriter` | Factory wrappers: call `codec[2]` through `codec[5]` with the `errors` string and return the resulting object. | `pythonrun/codecs.go:IncrementalEncoder` etc. |
+| <Cpy path="Python/codecs.c" lines="681-800">681-800</Cpy> | `_PyCodec_EncodeInternal` / `_PyCodec_DecodeInternal` | Internal variants that accept a pre-looked-up codec tuple, used by the `bytes.decode` / `str.encode` fast paths. | `pythonrun/codecs.go:EncodeInternal` / `DecodeInternal` |
+| <Cpy path="Python/codecs.c" lines="801-900">801-900</Cpy> | `charmap_build` / helper tables | Build a decode table from a 256-character Unicode string mapping ordinal positions to code points; used by single-byte encodings. | `pythonrun/codecs.go:CharmapBuild` |
+
+## Reading
+
+### `_PyCodec_Lookup` — normalization and cache (lines 81 to 220)
+
+<CpyLink path="Python/codecs.c" lines="81-220" />
+
+```c
+PyObject *
+_PyCodec_Lookup(const char *encoding)
+{
+    if (encoding == NULL) {
+        PyErr_BadArgument();
+        return NULL;
+    }
+    PyInterpreterState *interp = _PyInterpreterState_GET();
+    if (interp->codec_search_path == NULL && _PyCodec_InitRegistry(interp) < 0) {
+        return NULL;
+    }
+
+    /* Normalize the encoding name */
+    PyObject *v = normalizestring(encoding);
+    if (v == NULL) {
+        return NULL;
+    }
+
+    /* Check the cache first */
+    PyObject *result = PyDict_GetItemWithError(interp->codec_search_cache, v);
+    if (result != NULL) {
+        Py_INCREF(result);
+        Py_DECREF(v);
+        return result;
+    }
+    ...
+    /* Walk codec_search_path */
+    Py_ssize_t i, len = PyList_GET_SIZE(interp->codec_search_path);
+    for (i = 0; i < len; i++) {
+        PyObject *func = PyList_GET_ITEM(interp->codec_search_path, i);
+        result = PyObject_CallOneArg(func, v);
+        if (result == Py_None) {
+            Py_DECREF(result);
+            continue;
+        }
+        if (result != NULL) {
+            /* Cache successful lookup */
+            if (PyDict_SetItem(interp->codec_search_cache, v, result) < 0) {
+                Py_DECREF(result);
+                Py_DECREF(v);
+                return NULL;
+            }
+            Py_DECREF(v);
+            return result;
+        }
+        Py_DECREF(v);
+        return NULL;
+    }
+    /* No search function matched */
+    PyErr_Format(PyExc_LookupError,
+                 "unknown encoding: %s", encoding);
+    Py_DECREF(v);
+    return NULL;
+}
+```
+
+`normalizestring` (immediately above this function) iterates over each byte of
+the encoding name: ASCII letters are lowercased with `Py_TOLOWER`; spaces
+(`0x20`) and hyphens (`0x2D`) become underscores (`0x5F`); every other
+character is kept as-is. The result is a Python `str` used as the dict key.
+
+The cache (`codec_search_cache`) is a plain dict on the per-interpreter state.
+It is populated after the first successful lookup and consulted before walking
+the search path on subsequent calls, so repeated `"utf-8"` lookups are a
+single dict probe.
+
+### `PyCodec_Encode` and `PyCodec_Decode` (lines 381 to 540)
+
+<CpyLink path="Python/codecs.c" lines="381-540" />
+
+```c
+PyObject *
+PyCodec_Encode(PyObject *object, const char *encoding, const char *errors)
+{
+    PyObject *codec = _PyCodec_Lookup(encoding);
+    if (codec == NULL)
+        return NULL;
+
+    PyObject *encoder = PyTuple_GET_ITEM(codec, 0);
+    PyObject *args = Py_BuildValue("(Os)", object, errors ? errors : "strict");
+    Py_DECREF(codec);
+    if (args == NULL)
+        return NULL;
+
+    PyObject *result = PyObject_Call(encoder, args, NULL);
+    Py_DECREF(args);
+    if (result == NULL)
+        return NULL;
+
+    /* result must be (encoded_object, length) */
+    if (!PyTuple_Check(result) || PyTuple_GET_SIZE(result) != 2) {
+        PyErr_SetString(PyExc_TypeError,
+                        "encoder must return a tuple (object, integer)");
+        Py_DECREF(result);
+        return NULL;
+    }
+    PyObject *encoded = PyTuple_GET_ITEM(result, 0);
+    Py_INCREF(encoded);
+    Py_DECREF(result);
+    return encoded;
+}
+```
+
+The codec tuple layout is fixed: index 0 is the encoder callable, index 1 is
+the decoder, index 2 is the incremental encoder factory, index 3 is the
+incremental decoder factory, index 4 is the stream reader factory, and index 5
+is the stream writer factory. `PyCodec_Decode` follows the identical pattern
+using index 1.
+
+Both functions validate the return value. A codec that forgets to wrap its
+output in a two-element tuple gets a `TypeError` from the C layer rather than
+a silent wrong-type result propagating to the caller.
+
+### `_PyCodecInfo_GetIncrementalDecoder` (lines 221 to 380)
+
+<CpyLink path="Python/codecs.c" lines="221-380" />
+
+```c
+PyObject *
+_PyCodecInfo_GetIncrementalDecoder(PyObject *codec_info,
+                                   const char *errors)
+{
+    PyObject *incremental_decoder =
+        PyTuple_GET_ITEM(codec_info, 3);
+    if (incremental_decoder == Py_None) {
+        PyErr_SetString(PyExc_LookupError,
+                        "codec doesn't support incremental decoding");
+        return NULL;
+    }
+    return PyObject_CallFunction(incremental_decoder, "s", errors);
+}
+```
+
+The incremental interfaces are used by `io.TextIOWrapper` for buffered stream
+decoding. UTF-8, UTF-16, and UTF-32 use this path because they require BOM
+detection and multi-byte boundary handling across `read()` calls.
+`_PyCodecInfo_GetIncrementalEncoder` is the symmetric counterpart using index 2.
+
+## Notes for the gopy mirror
+
+`pythonrun/codecs.go` holds the registry state as a per-interpreter struct
+with a `[]callable` search path and a `map[string]CodecInfo` cache. The name
+normalization is a straightforward byte loop matching `normalizestring` in
+CPython. `Encode` / `Decode` call into the Python-side codec tuple via
+`objects.Call` and validate the two-element tuple return in the same order as
+the C code.
+
+## CPython 3.14 changes worth noting
+
+In 3.14 `PyCodec_Register` gained a check that the search function is actually
+callable before appending it to the path, turning a deferred `TypeError` at
+lookup time into an eager one at registration time. The codec tuple layout
+(indices 0 through 5) is unchanged since Python 2.2.

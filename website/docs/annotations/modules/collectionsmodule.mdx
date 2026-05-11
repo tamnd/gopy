@@ -1,0 +1,263 @@
+---
+title: Modules/_collectionsmodule.c
+description: C implementation of collections.deque — a doubly-linked list of fixed-size blocks giving O(1) append/pop on both ends — plus _count_elements for Counter.
+cpython_path: Modules/_collectionsmodule.c
+cpython_version: "3.14"
+lines: 2200
+status: annotated
+ported_to: module/collections/module.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Modules/_collectionsmodule.c`
+
+<CpyLink path="Modules/_collectionsmodule.c" />
+
+The `_collections` built-in module contains the C implementation of
+`collections.deque`. `Lib/collections/__init__.py` imports `deque` from
+`_collections` and re-exports it as the public `collections.deque`.
+
+A deque ("double-ended queue") supports O(1) amortized append and pop from
+either end. The implementation achieves this by storing items in a
+doubly-linked list of fixed-size arrays called *blocks*. Blocks hold
+`BLOCKLEN = 64` items each; the deque only allocates or frees a block when
+a boundary is crossed.
+
+The file also provides `_collections._count_elements`, a C-speed helper used
+by `collections.Counter` to tally elements from an iterable into a dict.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Modules/_collectionsmodule.c" lines="1-80">1-80</Cpy> | `BLOCKLEN`, `block`, `blockindex` | Block struct and index arithmetic constants. | `module/collections/module.go:block` |
+| <Cpy path="Modules/_collectionsmodule.c" lines="80-300">80-300</Cpy> | `dequeobject`, `deque_new`, `deque_init`, `deque_clear` | Deque type layout: left/right block pointers, `leftindex`, `rightindex`, `len`, `maxlen`. | `module/collections/module.go:Deque` |
+| <Cpy path="Modules/_collectionsmodule.c" lines="300-500">300-500</Cpy> | `deque_append`, `deque_appendleft` | Add to tail/head; allocate a new block when the current is full. | `module/collections/module.go:Append` |
+| <Cpy path="Modules/_collectionsmodule.c" lines="500-650">500-650</Cpy> | `deque_pop`, `deque_popleft` | Remove from tail/head; free block when empty. | `module/collections/module.go:Pop` |
+| <Cpy path="Modules/_collectionsmodule.c" lines="650-900">650-900</Cpy> | `deque_rotate` | Rotate N steps; moves whole blocks when `|N| >= BLOCKLEN`. | `module/collections/module.go:Rotate` |
+| <Cpy path="Modules/_collectionsmodule.c" lines="900-1200">900-1200</Cpy> | `deque_extend`, `deque_extendleft`, `deque_insert`, `deque_remove`, `deque_index`, `deque_count` | Bulk and search operations. | `module/collections/module.go:Extend` |
+| <Cpy path="Modules/_collectionsmodule.c" lines="1200-1600">1200-1600</Cpy> | `deque_iter`, `dequeiterobject`, `dequeiter_next`, `dequereviter` | Forward and reverse iterators; O(1) per step using block + index cursor. | `module/collections/module.go:DequeIter` |
+| <Cpy path="Modules/_collectionsmodule.c" lines="1600-1900">1600-1900</Cpy> | `deque_getitem`, `deque_setitem`, `deque_delitem`, `deque_richcompare`, `deque_repr`, `deque_sizeof` | Sequence protocol, comparison, and introspection. | `module/collections/module.go:DequeSeq` |
+| <Cpy path="Modules/_collectionsmodule.c" lines="1900-2200">1900-2200</Cpy> | `_count_elements`, `deque_type`, `_collectionsmodule`, `PyInit__collections` | `Counter` helper, type object, module definition and entry point. | `module/collections/module.go:CountElements` |
+
+## Reading
+
+### Block layout and `deque_append` (lines 1 to 500)
+
+<CpyLink path="Modules/_collectionsmodule.c" lines="1-500" />
+
+Each block is a small struct holding a `prev`/`next` pointer pair and a
+fixed-size item array:
+
+```c
+#define BLOCKLEN 64
+
+typedef struct BLOCK {
+    struct BLOCK *leftlink;
+    PyObject *data[BLOCKLEN];
+    struct BLOCK *rightlink;
+} block;
+```
+
+`dequeobject` keeps a `leftblock`/`rightblock` pair and two index cursors
+`leftindex` (next read position at the left end) and `rightindex` (last write
+position at the right end):
+
+```c
+typedef struct {
+    PyObject_VAR_HEAD
+    block        *leftblock;
+    block        *rightblock;
+    Py_ssize_t    leftindex;   /* 0 <= leftindex < BLOCKLEN */
+    Py_ssize_t    rightindex;  /* 0 <= rightindex < BLOCKLEN */
+    uint64_t      state;       /* incremented on mutation */
+    Py_ssize_t    maxlen;      /* -1 means unbounded */
+    PyObject     *weakreflist;
+} dequeobject;
+```
+
+`deque_append` writes to `rightindex + 1`. When `rightindex` reaches
+`BLOCKLEN - 1`, a new block is allocated and linked:
+
+```c
+static PyObject *
+deque_append(dequeobject *deque, PyObject *item)
+{
+    if (deque->rightindex == BLOCKLEN - 1) {
+        block *b = newblock();
+        if (b == NULL) return NULL;
+        b->leftlink = deque->rightblock;
+        deque->rightblock->rightlink = b;
+        deque->rightblock = b;
+        deque->rightindex = -1;
+    }
+    Py_INCREF(item);
+    deque->len++;
+    deque->rightindex++;
+    deque->rightblock->data[deque->rightindex] = item;
+    TRIM(deque, deque_popleft);   /* enforce maxlen */
+    Py_RETURN_NONE;
+}
+```
+
+`TRIM` is a macro that calls `deque_popleft` (or `deque_pop` for
+`appendleft`) when `deque->len > deque->maxlen`. This enforces the bounded
+deque contract in O(1) without an extra conditional branch in the hot path.
+
+### `deque_rotate` (lines 650 to 900)
+
+<CpyLink path="Modules/_collectionsmodule.c" lines="650-900" />
+
+`deque.rotate(n)` moves `n` items from the right end to the left end (or vice
+versa for negative `n`). The naive approach would call `append`/`pop` `|n|`
+times. CPython optimises large rotations by moving whole blocks at once when
+`|n| >= BLOCKLEN`:
+
+```c
+static PyObject *
+deque_rotate(dequeobject *deque, PyObject *const *args, Py_ssize_t nargs)
+{
+    Py_ssize_t n = 1;
+    /* ... parse n ... */
+
+    /* Optimisation: move whole blocks for large rotations. */
+    while (n > 0) {
+        if (deque->leftindex == 0) {
+            block *b = deque->rightblock;   /* steal from right */
+            deque->rightblock = b->leftlink;
+            deque->rightblock->rightlink = NULL;
+            b->rightlink = deque->leftblock;
+            deque->leftblock->leftlink = b;
+            deque->leftblock = b;
+            deque->leftindex = BLOCKLEN;
+        }
+        m = MIN(n, deque->leftindex);       /* items to move in this pass */
+        deque->leftindex -= m;
+        deque->rightindex -= m;
+        /* ... memmove items within the block ... */
+        n -= m;
+    }
+    /* symmetric loop for n < 0 */
+    ...
+}
+```
+
+For small `|n|` (less than `BLOCKLEN`) the function falls through to an
+item-by-item loop that calls `deque_pop` / `deque_appendleft` (or the mirror
+pair). The block-move path avoids per-item reference count churn and makes
+`rotate` effectively O(|n| / BLOCKLEN) in terms of memory operations for
+large `n`.
+
+### `maxlen` auto-eviction (lines 300 to 500)
+
+<CpyLink path="Modules/_collectionsmodule.c" lines="300-500" />
+
+When `maxlen` is set, the deque is bounded. `deque_append` enforces this with
+the `TRIM` macro:
+
+```c
+#define TRIM(d, popfunction)                                    \
+    if (Py_SIZE(d) > d->maxlen) {                               \
+        PyObject *rv = popfunction(d, NULL);                    \
+        assert(rv != NULL);                                     \
+        assert(PyNone_Check(rv));                               \
+        Py_DECREF(rv);                                          \
+    }
+```
+
+`deque_append` passes `deque_popleft` as the pop function (evict from the
+opposite end), while `deque_appendleft` passes `deque_pop`. The macro fires
+at most once per append because `maxlen` constrains the size to never exceed
+`maxlen + 1` before the trim. This gives the bounded deque its "sliding
+window" semantics: appending to a full deque atomically advances both ends.
+
+### `_count_elements` (lines 1900 to 2000)
+
+<CpyLink path="Modules/_collectionsmodule.c" lines="1900-2000" />
+
+`_count_elements(mapping, iterable)` is a tight C loop that increments
+`mapping[key]` for each item from the iterable, used as the inner loop of
+`Counter.__init__` and `Counter.update`:
+
+```c
+static PyObject *
+_count_elements(PyObject *self, PyObject *args)
+{
+    PyObject *it, *mapping, *key, *count, *oldval;
+    /* ... */
+    while ((key = iternext(it))) {
+        oldval = PyObject_GetItem(mapping, key);
+        if (oldval == NULL) {
+            PyErr_Clear();
+            PyObject_SetItem(mapping, key, _PyLong_One);
+        } else {
+            count = PyNumber_Add(oldval, _PyLong_One);
+            PyObject_SetItem(mapping, key, count);
+            /* ... */
+        }
+        Py_DECREF(key);
+    }
+    /* ... */
+}
+```
+
+The function avoids going through Python-level `__getitem__` / `__setitem__`
+dispatch for the common case where `mapping` is a plain `dict`, using the
+`PyDict_GetItemWithError` / `PyDict_SetItem` fast path instead.
+
+### `deque_iter` (lines 1200 to 1600)
+
+<CpyLink path="Modules/_collectionsmodule.c" lines="1200-1600" />
+
+The iterator object stores a block pointer and an index rather than a Python
+integer position, so advancing is a single pointer dereference plus an
+increment with no division:
+
+```c
+typedef struct {
+    PyObject_HEAD
+    block       *b;
+    Py_ssize_t   index;
+    dequeobject *deque;
+    uint64_t     state;   /* detect mutation during iteration */
+    Py_ssize_t   counter; /* items remaining */
+} dequeiterobject;
+
+static PyObject *
+dequeiter_next(dequeiterobject *it)
+{
+    if (it->b == NULL || it->counter == 0)
+        return NULL;   /* exhausted */
+    if (it->deque->state != it->state) {
+        PyErr_SetString(PyExc_RuntimeError,
+                        "deque changed size during iteration");
+        return NULL;
+    }
+    PyObject *item = it->b->data[it->index];
+    it->index++;
+    if (it->index == BLOCKLEN) {
+        it->b = it->b->rightlink;
+        it->index = 0;
+    }
+    it->counter--;
+    Py_INCREF(item);
+    return item;
+}
+```
+
+The `state` field mirrors `dequeobject.state`, which is incremented on every
+mutation. Any modification to the deque while iterating raises
+`RuntimeError: deque changed size during iteration`.
+
+## gopy mirror
+
+`module/collections/module.go`. `block` maps to a Go struct with a `[64]*py.Object` data array and left/right sibling pointers. `Deque` wraps left/right block pointers and index cursors. `Append`, `Pop`, `Rotate`, and `Extend` follow the block-chain logic above. `CountElements` is a direct port of `_count_elements`.
+
+## CPython 3.14 changes
+
+`deque` has been a C type since Python 2.4. The iterator gained the mutation
+`state` check in 3.0. `BLOCKLEN` was increased from 62 to 64 in 3.5 to align
+the block struct to a cache line. Multi-phase module init was added in 3.12.
+The `deque.__class_getitem__` classmethod (for `deque[int]` type hints) was
+added in 3.9 and is implemented in `Objects/genericaliasobject.c`, not here.

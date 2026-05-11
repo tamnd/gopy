@@ -1,0 +1,150 @@
+---
+title: Lib/pathlib/__init__.py
+description: Object-oriented filesystem path API; PurePath for pure manipulation and Path for concrete I/O operations.
+cpython_path: Lib/pathlib/__init__.py
+cpython_version: "3.14"
+lines: 800
+status: annotated
+ported_to: module/pathlib/module.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Lib/pathlib/__init__.py`
+
+<CpyLink path="Lib/pathlib/__init__.py" />
+
+`pathlib` provides two class hierarchies. `PurePath` is immutable and
+never touches the filesystem; it only parses and manipulates path strings.
+`Path` extends `PurePath` with filesystem operations, delegating to
+`os`, `os.path`, and `io` beneath the hood.
+
+In CPython 3.12 the module was restructured: the OS-dispatch layer moved
+into a `_flavours` scheme and then in 3.13 was simplified further so that
+`PosixPath` and `WindowsPath` select behaviour via class attributes rather
+than a separate `_Flavour` object. CPython 3.14 introduced
+`pathlib._abc` as a public ABC layer; `Path` now subclasses
+`pathlib._abc.ABCPath` which declares the abstract interface.
+
+The public names are `PurePath`, `PurePosixPath`, `PureWindowsPath`,
+`Path`, `PosixPath`, and `WindowsPath`. `Path()` returns a `PosixPath`
+or `WindowsPath` instance depending on `os.name` at import time.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Lib/pathlib/__init__.py" lines="1-50">1-50</Cpy> | Module header, `__all__`, imports | Imports `os`, `os.path`, `io`, `stat`, `fnmatch`, `re`, `pathlib._abc`. | `module/pathlib/module.go` |
+| <Cpy path="Lib/pathlib/__init__.py" lines="51-200">51-200</Cpy> | `PurePath.__new__`, `__reduce__`, `__fspath__`, `__repr__`, `__hash__`, `__eq__`, `__lt__` and friends | Immutable path construction and comparison. `__new__` calls `_from_parsed_parts` after joining all positional arguments with the OS separator. | `module/pathlib/module.go` |
+| <Cpy path="Lib/pathlib/__init__.py" lines="201-310">201-310</Cpy> | `PurePath.drive`, `PurePath.root`, `PurePath.anchor`, `PurePath.parts`, `PurePath.parent`, `PurePath.parents`, `PurePath.name`, `PurePath.suffix`, `PurePath.stem` | Computed properties that parse the internal string representation without touching the filesystem. | `module/pathlib/module.go` |
+| <Cpy path="Lib/pathlib/__init__.py" lines="311-400">311-400</Cpy> | `PurePath.__truediv__`, `PurePath.__rtruediv__`, `PurePath.joinpath`, `PurePath.with_name`, `PurePath.with_stem`, `PurePath.with_suffix`, `PurePath.relative_to`, `PurePath.is_relative_to`, `PurePath.match` | Path combination and transformation. `__truediv__` delegates to `joinpath`; `relative_to` raises `ValueError` when the argument is not a prefix. | `module/pathlib/module.go` |
+| <Cpy path="Lib/pathlib/__init__.py" lines="401-450">401-450</Cpy> | `PurePosixPath`, `PureWindowsPath` | OS-specific pure subclasses. Select POSIX vs. Windows separator and case-sensitivity via class-level `_flavour` attributes. | `module/pathlib/module.go` |
+| <Cpy path="Lib/pathlib/__init__.py" lines="451-600">451-600</Cpy> | `Path.stat`, `Path.lstat`, `Path.exists`, `Path.is_file`, `Path.is_dir`, `Path.is_symlink`, `Path.is_mount`, `Path.is_absolute` | Stat-based predicates. `exists` catches `OSError`; `is_file` / `is_dir` follow symlinks; `is_symlink` does not. | `module/pathlib/module.go` |
+| <Cpy path="Lib/pathlib/__init__.py" lines="601-680">601-680</Cpy> | `Path.open`, `Path.read_bytes`, `Path.read_text`, `Path.write_bytes`, `Path.write_text` | I/O helpers. All delegate to `io.open`; `read_text` / `write_text` accept `encoding` and `errors` kwargs. | `module/pathlib/module.go` |
+| <Cpy path="Lib/pathlib/__init__.py" lines="681-750">681-750</Cpy> | `Path.iterdir`, `Path.glob`, `Path.rglob`, `Path.walk` | Directory traversal. `iterdir` wraps `os.scandir`. `glob` compiles the pattern via `re` and walks the tree with `_WildcardSelector`. | `module/pathlib/module.go` |
+| <Cpy path="Lib/pathlib/__init__.py" lines="751-800">751-800</Cpy> | `Path.mkdir`, `Path.chmod`, `Path.unlink`, `Path.rmdir`, `Path.rename`, `Path.replace`, `Path.symlink_to`, `Path.hardlink_to`, `Path.resolve`, `Path.expanduser` | Mutating operations and resolution. `resolve` calls `os.path.realpath`. `mkdir` with `parents=True` iterates over `self.parents` in reverse and calls `os.mkdir` on each. | `module/pathlib/module.go` |
+
+## Reading
+
+### `PurePath` parse: drive, root, and parts (lines 51 to 310)
+
+<CpyLink path="Lib/pathlib/__init__.py" lines="51-310" />
+
+```python
+class PurePath:
+    __slots__ = (
+        '_raw_paths', '_drv', '_root', '_tail_cached',
+        '_str', '_str_normcase_cached', '_hash', '_parts_normcase_cached',
+    )
+
+    def __new__(cls, *args, **kwargs):
+        if cls is PurePath:
+            cls = PureWindowsPath if os.name == 'nt' else PurePosixPath
+        return object.__new__(cls)
+
+    def __init__(self, *args):
+        paths = []
+        for arg in args:
+            if isinstance(arg, PurePath):
+                paths += arg._raw_paths
+            else:
+                paths.append(os.fspath(arg))
+        self._raw_paths = paths
+
+    @property
+    def _str_normcase(self):
+        try:
+            return self._str_normcase_cached
+        except AttributeError:
+            self._str_normcase_cached = self._format_parsed_parts(
+                self.drive, self.root, self._tail) or '.'
+            return self._str_normcase_cached
+```
+
+The parsed `_drv`, `_root`, and `_tail` are populated lazily from
+`_raw_paths` on first access. `_tail` is the list of path components
+after the drive and root. All computed properties (`parts`, `parent`,
+`name`, `suffix`, `stem`) derive from these three fields and are
+themselves cached in slots via `AttributeError`-guarded lazy properties.
+
+On Windows, `PureWindowsPath` overrides the parsing helpers to handle
+UNC paths (`\\server\share\...`) and drive letters (`C:\...`). On POSIX
+the drive is always `''`.
+
+### `Path.__truediv__` and `joinpath` (lines 311 to 400)
+
+<CpyLink path="Lib/pathlib/__init__.py" lines="311-400" />
+
+```python
+def __truediv__(self, key):
+    try:
+        return self._from_parsed_string(
+            self._str + self._flavour.sep + os.fspath(key))
+    except TypeError:
+        return NotImplemented
+
+def joinpath(self, *pathsegments):
+    return self.with_segments(self, *pathsegments)
+```
+
+`__truediv__` is the `/` operator for path joining. It calls
+`os.fspath` on the right-hand side, so any object implementing
+`__fspath__` works as a path component. If `key` is an absolute path the
+leading separator makes it replace rather than extend the left-hand side,
+matching `os.path.join` semantics.
+
+`joinpath` is the multi-argument form. `with_segments` is a class method
+that constructs a new instance of the same type, which lets subclasses
+override construction without overriding every combination method.
+
+### `Path.glob` and pattern matching (lines 681 to 750)
+
+<CpyLink path="Lib/pathlib/__init__.py" lines="681-750" />
+
+```python
+def glob(self, pattern, *, case_sensitive=None):
+    if not pattern:
+        raise ValueError("Unacceptable pattern: {!r}".format(pattern))
+    raw = self._flavour.casefold(pattern)
+    drv, root, pattern_parts = self._flavour.parse_parts((raw,))
+    if not pattern_parts:
+        raise ValueError("Unacceptable pattern: {!r}".format(pattern))
+    selector = _make_selector(tuple(pattern_parts), self._flavour,
+                              case_sensitive)
+    for p in selector.select_from(self):
+        yield p
+```
+
+`_make_selector` converts a sequence of pattern parts into a chain of
+selector objects. A literal part becomes a `_PreciseSelector`. A part
+containing `*` or `?` becomes a `_WildcardSelector` that calls
+`fnmatch.translate` to compile a regex. A `**` part becomes a
+`_RecursiveWildcardSelector` that walks the entire subtree.
+
+Each selector's `select_from(parent)` method calls `parent.iterdir()`,
+filters entries against its pattern, and then delegates each match to the
+next selector in the chain. This lazy chaining means `glob` is a
+generator that yields paths one at a time without building a full
+directory listing up front.
+
+`rglob(pattern)` is sugar for `glob('**/' + pattern)`.

@@ -1,0 +1,210 @@
+---
+title: Modules/_pickle.c
+description: C implementation of the pickle module — Pickler and Unpickler objects, protocol 0-5 opcode dispatch, and a growable Pdata value stack.
+cpython_path: Modules/_pickle.c
+cpython_version: "3.14"
+lines: 8000
+status: annotated
+ported_to: module/pickle/module.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Modules/_pickle.c`
+
+<CpyLink path="Modules/_pickle.c" />
+
+The C implementation of the `pickle` module. The pure-Python
+`Lib/pickle.py` exists as a reference and fallback, but the interpreter
+imports `_pickle` (this file) in preference so that serialization is fast
+enough to be used in the REPL, `multiprocessing`, and `shelve`.
+
+The file is organized around two top-level types:
+
+- `Pickler` — reads Python objects and writes a byte stream in one of
+  protocol versions 0-5.
+- `Unpickler` — reads a pickle byte stream and reconstructs Python objects.
+
+Both types are registered as `pickle.Pickler` and `pickle.Unpickler`.
+`pickle.dump` / `pickle.dumps` / `pickle.load` / `pickle.loads` are thin
+wrappers that construct a temporary instance and call `dump()` / `load()`.
+
+Memoization is central to correctness: the memo dict maps `id(obj)` to
+`(memo_index, obj)`, preventing infinite loops on recursive structures and
+enabling the `GET`/`PUT` opcodes to share references.
+
+Protocol 5 (Python 3.8+) adds `BYTEARRAY8` and the out-of-band buffer
+opcodes `NEXT_BUFFER` and `READONLY_BUFFER` for zero-copy serialization of
+large buffers across process boundaries.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Modules/_pickle.c" lines="1-200">1-200</Cpy> | includes, opcode constants, `Py_OPCODE` table | Protocol opcode byte values for all five protocol versions. | `module/pickle/module.go:opcodeTable` |
+| <Cpy path="Modules/_pickle.c" lines="200-600">200-600</Cpy> | `Pdata`, `Pdata_New`, `Pdata_free`, `Pdata_push`, `Pdata_pop`, `Pdata_poptuple` | Growable value stack used by the Unpickler. Fixed-size array with heap overflow. | `module/pickle/module.go:Pdata` |
+| <Cpy path="Modules/_pickle.c" lines="600-1400">600-1400</Cpy> | `PicklerObject`, `Pickler_New`, `Pickler_clear`, `Pickler_dealloc` | Pickler type definition and lifecycle. Holds `write`, `memo`, `dispatch_table`, `proto`. | `module/pickle/module.go:Pickler` |
+| <Cpy path="Modules/_pickle.c" lines="1400-3200">1400-3200</Cpy> | `save`, `save_bool`, `save_long`, `save_float`, `save_bytes`, `save_str`, `save_tuple`, `save_list`, `save_dict`, `save_set`, `save_frozenset`, `save_global`, `save_pers`, `save_reduce` | Pickler `save` dispatch chain. Checks `dispatch_table` first, then `__reduce_ex__(4)`, then `__reduce__`. | `module/pickle/module.go:save` |
+| <Cpy path="Modules/_pickle.c" lines="3200-3800">3200-3800</Cpy> | `Pickler_dump`, `Pickler_clear_memo`, `Pickler_getstate`, `Pickler_setstate` | Public Pickler methods. `dump` drives the top-level `save` call. | `module/pickle/module.go:Dump` |
+| <Cpy path="Modules/_pickle.c" lines="3800-4400">3800-4400</Cpy> | `UnpicklerObject`, `Unpickler_New`, `Unpickler_clear`, `Unpickler_dealloc` | Unpickler type definition and lifecycle. Holds `read`, `readline`, `memo`, `stack` (Pdata). | `module/pickle/module.go:Unpickler` |
+| <Cpy path="Modules/_pickle.c" lines="4400-6800">4400-6800</Cpy> | `load_*` handlers | One handler per opcode byte: `load_mark`, `load_stop`, `load_int`, `load_binint`, `load_long`, `load_float`, `load_string`, `load_binstring`, `load_unicode`, `load_binunicode`, `load_list`, `load_dict`, `load_tuple`, `load_build`, `load_global`, `load_reduce`, `load_appends`, `load_setitems`, `load_frozenset`, `load_bytearray8`, `load_next_buffer`, etc. | `module/pickle/module.go:loadHandlers` |
+| <Cpy path="Modules/_pickle.c" lines="6800-7400">6800-7400</Cpy> | `load`, dispatch table for `load` | Main Unpickler loop: reads one opcode byte at a time and dispatches to the matching `load_*` handler. | `module/pickle/module.go:Load` |
+| <Cpy path="Modules/_pickle.c" lines="7400-7800">7400-7800</Cpy> | `Unpickler_load`, `Unpickler_find_class`, `Unpickler_memo` | Public Unpickler methods. `find_class` is the override hook for restricting deserialization. | `module/pickle/module.go:FindClass` |
+| <Cpy path="Modules/_pickle.c" lines="7800-8000">7800-8000</Cpy> | `_picklemodule`, `PyInit__pickle` | Module definition, `pickle.dump` / `loads` / `dumps` / `load` convenience functions, and module entry point. | `module/pickle/module.go:Module` |
+
+## Reading
+
+### `save` dispatch chain (lines 1400 to 3200)
+
+<CpyLink path="Modules/_pickle.c" lines="1400-3200" />
+
+`save` is the heart of the Pickler. It is called recursively for every
+Python object that needs to be serialized.
+
+```c
+static int
+save(PicklerObject *self, PyObject *obj, int pers_save)
+{
+    /* 1. Persistent ID hook */
+    if (!pers_save && self->pers_func) {
+        if (save_pers(self, obj) != 0)  /* writes PERSID / BINPERSID */
+            goto error;
+        ...
+    }
+
+    /* 2. Memo check — already serialized? */
+    if (PyMemoTable_Get(self->memo, obj)) {
+        if (memo_get(self, obj) < 0)  /* writes GET / BINGET / LONG_BINGET */
+            goto error;
+        return 0;
+    }
+
+    /* 3. dispatch_table lookup */
+    reduce_func = PyObject_GetItem(self->dispatch_table, (PyObject *)type);
+    if (reduce_func != NULL) { ... }
+    else if (PyErr_Occurred()) { ... }
+
+    /* 4. __reduce_ex__(protocol) */
+    else {
+        reduce_func = PyObject_GetAttr(obj, &_Py_ID(__reduce_ex__));
+        reduce_value = PyObject_CallOneArg(reduce_func, protocol_int);
+    }
+
+    /* 5. Interpret the reduce value (string = global name, tuple = callable+args) */
+    if (PyUnicode_Check(reduce_value))
+        status = save_global(self, obj, reduce_value);
+    else
+        status = save_reduce(self, reduce_value, obj);
+    ...
+}
+```
+
+The lookup order is: persistent-ID hook, memo (already emitted), per-type
+`dispatch_table`, `__reduce_ex__`, `__reduce__`. Types like `int`, `str`,
+`list`, `dict`, and `tuple` have direct fast paths in `save_long`,
+`save_str`, etc., which are reached via a type-keyed C dispatch table
+before the `__reduce_ex__` path is ever tried.
+
+`save_reduce` interprets the five-tuple `(callable, args, state,
+list_items, dict_items)` returned by `__reduce_ex__`, emitting `GLOBAL` /
+`REDUCE` / `BUILD` / `APPENDS` / `SETITEMS` opcodes as needed.
+
+### `Pdata` stack (lines 200 to 600)
+
+<CpyLink path="Modules/_pickle.c" lines="200-600" />
+
+The Unpickler maintains a value stack called `Pdata`. Most opcodes push
+objects onto it; `REDUCE` / `BUILD` / `APPENDS` / `SETITEMS` pop and
+combine them.
+
+```c
+typedef struct {
+    PyObject_HEAD
+    PyObject **data;    /* pointer to the array of stack entries */
+    Py_ssize_t allocated;  /* slots allocated */
+    Py_ssize_t length;     /* slots in use */
+} Pdata;
+```
+
+`Pdata_New` allocates an initial array of `8` slots. `Pdata_push`
+doubles capacity when the array is full. `Pdata_poptuple(pdata, start)`
+slices off everything from `start` to `length` into a new tuple — this
+is how `TUPLE` builds its tuple and `APPENDS` builds its list batch.
+
+The Pdata stack never uses a Python list object; the raw C array avoids
+reference-count overhead on the hot path. Objects are reference-counted
+correctly: each slot holds a strong reference, and `Pdata_clear` decrefs
+all live entries.
+
+### `load_global` name resolution (lines 4800 to 4950)
+
+<CpyLink path="Modules/_pickle.c" lines="4800-4950" />
+
+`GLOBAL` and `STACK_GLOBAL` reconstitute a reference to a callable by
+module name and qualified name:
+
+```c
+static int
+load_global(UnpicklerObject *self)
+{
+    /* Read "module\nqualname\n" from the stream */
+    PyObject *global_name, *module_name, *module, *obj;
+
+    module_name = _Unpickler_ReadLine(self);
+    global_name = _Unpickler_ReadLine(self);
+
+    /* Call find_class which defaults to __import__ + getattr walk */
+    obj = find_class(self, module_name, global_name);
+    PDATA_PUSH(self->stack, obj, -1);
+    return 0;
+}
+```
+
+`find_class` is the override point for sandboxing. The default
+implementation calls `sys.modules[module_name]` then walks the dotted
+`qualname` with `getattr`, so `builtins.dict` correctly resolves to the
+built-in `dict` type. The `Unpickler.find_class` Python-level method wraps
+this hook.
+
+`STACK_GLOBAL` (protocol 2+) pops the module and name directly from the
+Pdata stack instead of reading ASCII lines, saving encoding overhead for
+binary protocols.
+
+### Protocol v5 buffer objects (lines 6500 to 6800)
+
+<CpyLink path="Modules/_pickle.c" lines="6500-6800" />
+
+Protocol 5 adds three new opcodes for out-of-band buffer transfer:
+
+```c
+static int
+load_next_buffer(UnpicklerObject *self)
+{
+    if (self->buffers == NULL) {
+        PyErr_SetString(PyExc_AttributeError,
+                        "pickle stream refers to out-of-band buffers, "
+                        "but no *buffers* argument was given");
+        return -1;
+    }
+    PyObject *buf = PyIter_Next(self->buffers);
+    ...
+    PDATA_PUSH(self->stack, buf, -1);
+    return 0;
+}
+```
+
+`BYTEARRAY8` serializes a `bytearray` inline with an 8-byte little-endian
+length prefix (up to 2^64 bytes). `NEXT_BUFFER` pops the next object from
+the `buffers` iterator supplied to `Unpickler` at construction time.
+`READONLY_BUFFER` wraps the top-of-stack object in a read-only
+`memoryview`, signaling that the receiver must not modify the buffer. These
+opcodes enable zero-copy sharing of `numpy` arrays between processes.
+
+## CPython 3.14 changes
+
+The `dispatch_table` lookup was refactored in 3.12 to consult
+`copyreg.dispatch_table` as a fallback when the Pickler's own
+`dispatch_table` attribute is absent, matching the documented behavior.
+Protocol 5 (`BYTEARRAY8`, `NEXT_BUFFER`, `READONLY_BUFFER`) was added in
+3.8 and is unchanged in 3.14. The `Argument Clinic` annotations throughout
+were regenerated for the 3.14 clinic tool but the C logic is stable.

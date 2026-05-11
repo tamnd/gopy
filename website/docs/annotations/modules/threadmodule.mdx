@@ -1,0 +1,158 @@
+---
+title: Modules/_threadmodule.c
+description: Implements the low-level _thread built-in module — thread creation, lock objects, and thread-local storage that the threading module builds on.
+cpython_path: Modules/_threadmodule.c
+cpython_version: "3.14"
+lines: 1200
+status: annotated
+ported_to: module/thread/module.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Modules/_threadmodule.c`
+
+<CpyLink path="Modules/_threadmodule.c" />
+
+`_thread` is the low-level threading primitive module. The high-level
+`threading` module (`Lib/threading.py`) imports `_thread` and layers
+`Thread`, `Event`, `Condition`, and `Semaphore` on top of it. This C file
+provides the three core building blocks: thread creation, a binary mutex
+lock, and thread-local storage.
+
+Thread creation delegates entirely to the platform abstraction layer.
+`PyThread_start_new_thread` (in `Python/thread_pthread.h` or the Win32
+equivalent) does the actual OS call; `_threadmodule.c` only wraps the
+Python callable in a bootstrap struct and passes that struct as the thread
+argument.
+
+The `_thread.lock` type (`_thread_LockType`) wraps a `PyThread_type_lock`
+opaque handle. All GIL interactions are explicit: `lock_acquire_impl`
+releases the GIL before calling `PyThread_acquire_lock_timed` so that other
+Python threads can run while the caller waits.
+
+`_thread._local` (`_thread__local`) provides per-thread attribute
+namespaces. Each `_local` instance holds a dict per live thread, stored
+under the thread's `PyThreadState`. On attribute access the object looks up
+the current thread's state and fetches the right dict.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Modules/_threadmodule.c" lines="1-80">1-80</Cpy> | includes, `bootstate` struct | Header and per-thread bootstrap struct holding callable, args, kwargs, and `PyInterpreterState *`. | `module/thread/module.go:bootstate` |
+| <Cpy path="Modules/_threadmodule.c" lines="80-180">80-180</Cpy> | `t_bootstrap` | Thread entry point: initialise `PyThreadState`, call the Python callable, handle exceptions, and call `PyThread_exit_thread`. | `module/thread/module.go:tBootstrap` |
+| <Cpy path="Modules/_threadmodule.c" lines="180-300">180-300</Cpy> | `_thread_start_new_thread_impl` | Allocate `bootstate`, incref callable and args, call `PyThread_start_new_thread`; return thread identifier. | `module/thread/module.go:StartNewThread` |
+| <Cpy path="Modules/_threadmodule.c" lines="300-600">300-600</Cpy> | `_thread_LockType`, `lock_acquire_impl`, `lock_release_impl`, `lock_locked_impl` | `_thread.lock` type backed by `PyThread_type_lock`; acquire releases GIL and supports a floating-point timeout. | `module/thread/module.go:LockType` |
+| <Cpy path="Modules/_threadmodule.c" lines="600-750">600-750</Cpy> | `_thread_get_ident_impl`, `_thread_get_native_id_impl` | Return Python-level thread identifier and OS-level native thread ID. | `module/thread/module.go:GetIdent` |
+| <Cpy path="Modules/_threadmodule.c" lines="750-1050">750-1050</Cpy> | `_thread__local`, `_local_impl`, `local_getattro`, `local_setattro` | Thread-local storage: per-thread dict attached to `PyThreadState`; attribute access dispatches to the current thread's dict. | `module/thread/module.go:LocalType` |
+| <Cpy path="Modules/_threadmodule.c" lines="1050-1200">1050-1200</Cpy> | `_thread_methods[]`, `_threadmodule`, `PyInit__thread` | Method table, module definition, and entry point. | `module/thread/module.go:Module` |
+
+## Reading
+
+### `t_bootstrap` thread setup and teardown (lines 80 to 180)
+
+<CpyLink path="Modules/_threadmodule.c" lines="80-180" />
+
+`t_bootstrap` is the function pointer passed to `PyThread_start_new_thread`.
+The OS calls it on the new thread. It sets up Python's per-thread state,
+calls the Python callable, and then tears everything down:
+
+```c
+static void
+t_bootstrap(void *boot_raw)
+{
+    struct bootstate *boot = boot_raw;
+    PyThreadState *tstate = _PyThreadState_New(boot->interp, ...);
+    PyEval_AcquireThread(tstate);
+
+    PyObject *res = PyObject_Call(boot->func, boot->args, boot->keyw);
+    if (res == NULL) {
+        if (PyErr_ExceptionMatches(PyExc_SystemExit))
+            PyErr_Clear();
+        else
+            PyErr_WriteUnraisable(boot->func);
+    } else {
+        Py_DECREF(res);
+    }
+
+    Py_DECREF(boot->func);
+    Py_DECREF(boot->args);
+    Py_XDECREF(boot->keyw);
+    PyMem_Free(boot);
+    PyThreadState_Clear(tstate);
+    PyThreadState_DeleteCurrent();
+    PyThread_exit_thread();
+}
+```
+
+The key invariant is that `t_bootstrap` owns all three references it was
+handed (func, args, keyw) and is responsible for decrementing them before
+the thread exits. `PyThreadState_DeleteCurrent` releases the GIL and removes
+the thread state from the interpreter list.
+
+### `lock_acquire_impl` GIL release and timed wait (lines 300 to 600)
+
+<CpyLink path="Modules/_threadmodule.c" lines="300-600" />
+
+`lock_acquire_impl` accepts a `blocking` flag and a floating-point `timeout`
+in seconds. When blocking it releases the GIL for the duration of the wait
+so other threads can progress:
+
+```c
+static PyObject *
+lock_acquire_impl(lockobject *self, int blocking, double timeout)
+{
+    PyLockStatus r;
+    _PyTime_t timeout_ns = ...;  /* convert to nanoseconds */
+
+    Py_BEGIN_ALLOW_THREADS
+    r = PyThread_acquire_lock_timed(self->lock_lock, timeout_ns, 1);
+    Py_END_ALLOW_THREADS
+
+    return PyBool_FromLong(r == PY_LOCK_ACQUIRED);
+}
+```
+
+`Py_BEGIN_ALLOW_THREADS` / `Py_END_ALLOW_THREADS` expand to
+`PyEval_SaveThread` / `PyEval_RestoreThread`, which drop and reacquire the
+GIL respectively. A timeout of `-1` means "wait forever". A timeout of `0`
+with `blocking=False` is a non-blocking try that never yields the GIL.
+
+### `_thread._local` storage (lines 750 to 1050)
+
+<CpyLink path="Modules/_threadmodule.c" lines="750-1050" />
+
+Each `_thread._local` instance holds a `dummies` dict that maps a weak
+reference to the current thread to that thread's attribute dict:
+
+```c
+static PyObject *
+local_getattro(localobject *self, PyObject *name)
+{
+    PyObject *ldict = _local_get_dict(self);  /* current thread's dict */
+    if (ldict == NULL) return NULL;
+    return PyObject_GenericGetAttr((PyObject *)ldict, name);
+}
+```
+
+`_local_get_dict` calls `PyThreadState_GetDict()` to locate the current
+thread's state dict, looks up the `_local` instance's key within it, and
+creates a fresh empty dict on first access. When a thread exits, the weak
+reference in `dummies` is cleared and the associated attribute dict is
+released automatically.
+
+## gopy mirror
+
+`module/thread/module.go`. `LockType` wraps a `sync.Mutex`. `tBootstrap`
+launches a goroutine rather than an OS thread; the goroutine acquires its own
+`PyThreadState` equivalent before calling the Python callable. `LocalType`
+uses a `sync.Map` keyed by goroutine ID to store per-goroutine attribute
+dicts.
+
+## CPython 3.14 changes
+
+The `bootstate` struct gained `PyInterpreterState *interp` in 3.12 to
+support sub-interpreters. `_thread.get_native_id()` was added in 3.8.
+`lock_acquire_impl` switched from a `long` microsecond timeout to a
+nanosecond-precision `_PyTime_t` value in 3.2.

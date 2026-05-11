@@ -1,0 +1,225 @@
+---
+title: Python/initconfig.c
+description: Parses command-line arguments, environment variables, and pyconfig.h-derived defaults into a PyConfig struct; drives the pre-initialization PyPreConfig path and the Py_RunMain entry point.
+cpython_path: Python/initconfig.c
+cpython_version: "3.14"
+lines: 2500
+status: annotated
+ported_to: pythonrun/initconfig.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Python/initconfig.c`
+
+<CpyLink path="Python/initconfig.c" />
+
+The configuration layer that sits between the OS environment and
+`Py_InitializeFromConfig`. Two structs are involved: `PyPreConfig`, a
+minimal struct that is processed before any allocator is active (its fields
+control the allocator choice, UTF-8 mode, and locale coercion), and
+`PyConfig`, the full configuration struct that carries `sys.argv`, search
+paths, feature flags, and every environment-variable knob exposed by the
+interpreter.
+
+`PyConfig_InitPythonConfig` sets `PyConfig` to the defaults appropriate for
+running a standard `python` process. `PyConfig_InitIsolatedConfig` sets the
+same struct to isolated-mode defaults, where environment variables and the
+user `site-packages` directory are disabled. Both funnel through
+`_PyConfig_Read` once the caller has finished overriding fields.
+
+`_PyConfig_Read` is the main parsing entry point. It calls
+`config_read_env_vars` to populate fields from `PYTHONPATH`,
+`PYTHONHOME`, `PYTHONSTARTUP`, `PYTHONWARNINGS`, `PYTHONINSPECT`, and the
+full set of `PYTHON*` knobs, then `config_init_argv` to resolve
+`sys.argv[0]` into `sys.prefix` / `sys.exec_prefix` and the initial
+`sys.path` entries. The final `_Py_GetConfigsAsDict` helper exports both
+the `PyPreConfig` and `PyConfig` structs as a Python `dict`, which is what
+`sys._getxoptions()` and `sys.flags` read from.
+
+`Py_RunMain` is the C-level entry point for the `python` executable itself.
+It parses `sys.argv` via `pymain_parse_cmdline`, calls
+`Py_InitializeFromConfig`, dispatches to `pymain_run_python` (which handles
+`-c`, `-m`, file, and REPL modes), then calls `Py_FinalizeEx` and
+translates the exit status into a process exit code.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Python/initconfig.c" lines="1-100">1-100</Cpy> | file header / `PyPreConfig` defaults | Includes and `_PyPreConfig_InitCompatConfig` / `PyPreConfig_InitPythonConfig` / `PyPreConfig_InitIsolatedConfig`. | `pythonrun/initconfig.go:PreConfigInit` |
+| <Cpy path="Python/initconfig.c" lines="101-300">101-300</Cpy> | `_PyPreConfig_Read` / `preconfig_read_env_vars` | Processes `PYTHONMALLOC`, `PYTHONUTF8`, `PYTHONCOERCECLOCALE` into `PyPreConfig` before allocators start. | `pythonrun/initconfig.go:PreConfigRead` |
+| <Cpy path="Python/initconfig.c" lines="301-600">301-600</Cpy> | `PyConfig_InitPythonConfig` / `PyConfig_InitIsolatedConfig` / `_PyConfig_InitCompatConfig` | Zero `PyConfig` and fill in per-mode defaults. Isolated mode zeros `use_environment`, `user_site_directory`, and `site_import`. | `pythonrun/initconfig.go:ConfigInit` |
+| <Cpy path="Python/initconfig.c" lines="601-900">601-900</Cpy> | `config_read_env_vars` | Reads `PYTHONPATH`, `PYTHONHOME`, `PYTHONSTARTUP`, `PYTHONWARNINGS`, `PYTHONINSPECT`, `PYTHONDONTWRITEBYTECODE`, `PYTHONNOUSERSITE`, `PYTHONOPTIMIZE`, `PYTHONDEBUG`, `PYTHONFAULTHANDLER`, `PYTHONTRACEMALLOC`, and others into the appropriate `PyConfig` fields. | `pythonrun/initconfig.go:readEnvVars` |
+| <Cpy path="Python/initconfig.c" lines="901-1200">901-1200</Cpy> | `config_init_argv` / `config_update_argv` | Processes `sys.argv[0]` to derive `sys.prefix`, `sys.exec_prefix`, and the first entries of `sys.path`. On Unix, calls `_Py_wgetcwd` and resolves symlinks; on Windows, uses `GetModuleFileNameW`. | `pythonrun/initconfig.go:initArgv` |
+| <Cpy path="Python/initconfig.c" lines="1201-1600">1201-1600</Cpy> | `_PyConfig_Read` | Master parsing entry point: calls `config_read_env_vars`, `config_init_argv`, `config_init_import`, and `config_init_tracemalloc`; validates the resulting struct. | `pythonrun/initconfig.go:ConfigRead` |
+| <Cpy path="Python/initconfig.c" lines="1601-1900">1601-1900</Cpy> | `Py_RunMain` / `pymain_parse_cmdline` / `pymain_run_python` | The `python` executable entry point: parse `-c`/`-m`/file/REPL from `sys.argv`, call `Py_InitializeFromConfig`, run, then `Py_FinalizeEx`. | `pythonrun/initconfig.go:RunMain` |
+| <Cpy path="Python/initconfig.c" lines="1901-2200">1901-2200</Cpy> | `_Py_GetConfigsAsDict` / `_PyConfig_AsDict` / `_PyPreConfig_AsDict` | Export both config structs as Python dicts. Used by `sys._getxoptions()`, `sys.flags`, and the `_testinternalcapi` module. | `pythonrun/initconfig.go:ConfigAsDict` |
+| <Cpy path="Python/initconfig.c" lines="2201-2350">2201-2350</Cpy> | `PyConfig_SetString` / `PyConfig_SetBytesString` / `PyConfig_SetArgv` / `PyConfig_SetWideStringList` | Public setters used by embedding applications to override individual `PyConfig` fields after `PyConfig_Init*`. | `pythonrun/initconfig.go:ConfigSet` |
+| <Cpy path="Python/initconfig.c" lines="2351-2500">2351-2500</Cpy> | `PyConfig_Clear` / `PyPreConfig_Clear` / `_PyWstrList_Clear` | Deallocate heap strings inside `PyConfig` / `PyPreConfig` structs. Must be called even on a partially-initialized config if `PyConfig_Read` fails. | `pythonrun/initconfig.go:ConfigClear` |
+
+## Reading
+
+### `PyConfig` vs `PyPreConfig` (lines 1 to 300)
+
+<CpyLink path="Python/initconfig.c" lines="1-300" />
+
+`PyPreConfig` is the smaller, earlier struct. It holds only the fields
+needed to select the memory allocator (`PYTHONMALLOC`), enable UTF-8 mode
+(`PYTHONUTF8`), and coerce the C locale to UTF-8 (`PYTHONCOERCECLOCALE`).
+`_PyPreConfig_Read` runs before any Python object is allocated, so it
+cannot use `PyMem_Malloc`; it works entirely with stack buffers and the
+raw OS environment.
+
+`PyConfig` is the complete configuration. It includes every field in
+`PyPreConfig` plus the full `sys.argv` list, `sys.path`,
+`sys.executable`, all feature flags, and all startup file paths. It is
+initialized with either `PyConfig_InitPythonConfig` (normal mode) or
+`PyConfig_InitIsolatedConfig` (embedding / test mode), then read with
+`_PyConfig_Read` before being passed to `Py_InitializeFromConfig`.
+
+The split exists so that very early failures (wrong allocator, mismatched
+locale) can be reported before any Python object is created and before
+`PYTHONHOME` is consulted.
+
+### `_PyConfig_Read` (lines 1201 to 1600)
+
+<CpyLink path="Python/initconfig.c" lines="1201-1600" />
+
+```c
+PyStatus
+_PyConfig_Read(PyConfig *config, int compute_path_config)
+{
+    PyStatus status;
+
+    status = _PyConfig_InitImportConfig(config);
+    if (_PyStatus_EXCEPTION(status)) return status;
+
+    if (config->use_environment) {
+        status = config_read_env_vars(config);
+        if (_PyStatus_EXCEPTION(status)) return status;
+    }
+
+    /* Command-line options override environment variables */
+    if (config->parse_argv == 1) {
+        status = config_parse_cmdline(config, ...);
+        if (_PyStatus_EXCEPTION(status)) return status;
+    }
+
+    if (compute_path_config) {
+        status = _PyConfig_InitPathConfig(config, 1);
+        if (_PyStatus_EXCEPTION(status)) return status;
+    }
+
+    config_init_stdio(config);
+    ...
+    return _PyStatus_OK();
+}
+```
+
+The function applies configuration sources in priority order: import
+config defaults first, then environment variables, then command-line flags.
+Command-line flags always win. `_PyConfig_InitPathConfig` is where the
+actual `sys.path` list is constructed from `PYTHONPATH`, `PYTHONHOME`, and
+the module-search-path prefix computed from `sys.argv[0]`.
+
+`compute_path_config` is false during the pre-init phase (so that path
+computation is deferred until after the allocator is finalized) and true
+for all normal startup paths.
+
+### `config_read_env_vars` (lines 601 to 900)
+
+<CpyLink path="Python/initconfig.c" lines="601-900" />
+
+```c
+static PyStatus
+config_read_env_vars(PyConfig *config)
+{
+    /* PYTHONPATH */
+    status = config_init_pythonpath(config);
+    ...
+
+    /* PYTHONHOME */
+    status = config_init_home(config);
+    ...
+
+    /* PYTHONINSPECT */
+    if (Py_GETENV("PYTHONINSPECT") && *Py_GETENV("PYTHONINSPECT") != '\0')
+        config->inspect = 1;
+
+    /* PYTHONDONTWRITEBYTECODE */
+    if (Py_GETENV("PYTHONDONTWRITEBYTECODE") && ...)
+        config->write_bytecode = 0;
+
+    /* PYTHONWARNINGS */
+    status = config_init_warnings(config);
+    ...
+
+    /* PYTHONOPTIMIZE, PYTHONDEBUG, PYTHONFAULTHANDLER, ... */
+    ...
+    return _PyStatus_OK();
+}
+```
+
+`config_read_env_vars` is the single source of truth for every
+`PYTHON*` environment variable except `PYTHONMALLOC`, `PYTHONUTF8`, and
+`PYTHONCOERCECLOCALE` (those belong to `PyPreConfig`). The function is
+skipped entirely when `config->use_environment == 0`, which is the case in
+isolated mode and when `-E` is passed on the command line.
+
+`PYTHONWARNINGS` is a colon-separated list appended to
+`config->warnoptions`. `PYTHONPATH` is split on `os.pathsep` and prepended
+to `config->pythonpath_env`. Both are later merged into the final `sys.path`
+by `_PyConfig_InitPathConfig`.
+
+### `Py_RunMain` (lines 1601 to 1900)
+
+<CpyLink path="Python/initconfig.c" lines="1601-1900" />
+
+```c
+int
+Py_RunMain(void)
+{
+    int exitcode = 0;
+
+    PyConfig config;
+    PyConfig_InitPythonConfig(&config);
+
+    PyStatus status = pymain_parse_cmdline(&config);
+    if (_PyStatus_EXCEPTION(status)) {
+        exitcode = pymain_exit_err_print(&status);
+        goto exit;
+    }
+
+    status = Py_InitializeFromConfig(&config);
+    if (_PyStatus_EXCEPTION(status)) {
+        exitcode = pymain_exit_err_print(&status);
+        goto exit;
+    }
+
+    exitcode = pymain_run_python(NULL);
+
+exit:
+    PyConfig_Clear(&config);
+    return exitcode;
+}
+```
+
+`Py_RunMain` is the body of the `python` executable's `main()`. It owns the
+`PyConfig` lifetime: init, parse, initialize, run, clear. The three
+dispatch targets in `pymain_run_python` are `-c command` (runs a string),
+`-m module` (imports and runs as `__main__`), and a filename or stdin
+(runs as a file or the REPL).
+
+`PyConfig_Clear` must be called on every exit path, including the error
+paths before `Py_InitializeFromConfig`, because `pymain_parse_cmdline` may
+have allocated wide-string copies of `sys.argv` entries.
+
+## CPython 3.14 changes worth noting
+
+`PYTHON_HISTORY` (added in 3.13) controls the readline history file path;
+`config_read_env_vars` reads it in 3.14. `PYTHON_COLORS` (3.13) and
+`PYTHON_BASIC_REPL` (3.13) are also now read here. The `PyConfig.perf_profiling`
+field, backing `-Xperf`, was added in 3.12 and is stable in 3.14.
+`Py_RunMain` no longer calls `_Py_InitSignalHandling` directly; that moved
+into `_Py_InitializeMain` in 3.13 (gh-99729).

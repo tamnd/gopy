@@ -1,0 +1,166 @@
+---
+title: Lib/copy.py
+description: Shallow and deep copy operations with cycle detection via a memo dict and dispatch through __copy__, __deepcopy__, and __reduce_ex__.
+cpython_path: Lib/copy.py
+cpython_version: "3.14"
+lines: 300
+status: annotated
+ported_to: module/copy/module.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Lib/copy.py`
+
+<CpyLink path="Lib/copy.py" />
+
+A short, self-contained module that provides two public functions:
+`copy` for shallow copies and `deepcopy` for recursive deep copies.
+Neither function has a C accelerator; the entire implementation is pure
+Python.
+
+The module's design predates the modern `__copy__` / `__deepcopy__`
+protocol and still carries the older `copyreg.dispatch_table` path for
+compatibility with pickled objects. The two dispatch chains overlap but
+are separate: `copy` has no recursion or memo dict, while `deepcopy`
+carries a `memo` dict throughout to handle cyclic object graphs and shared
+references.
+
+Atomic types (integers, floats, booleans, strings, bytes, `None`,
+`Ellipsis`, `NotImplemented`, and types themselves) are returned unchanged
+by both functions because they are immutable and identity is safe to
+share. For mutable containers (`list`, `dict`, `set`) `deepcopy` recurses
+into every element before constructing the new container, then stores the
+result in `memo` before returning it so that self-referential structures
+terminate.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Lib/copy.py" lines="1-60">1-60</Cpy> | Module header, `_copy_dispatch`, `Error` | Imports, the atomic-type fast-path dispatch table for `copy`, and the module-level `Error` exception alias. | `module/copy/module.go` |
+| <Cpy path="Lib/copy.py" lines="61-130">61-130</Cpy> | `copy` | Shallow copy; dispatches through `_copy_dispatch`, then `copyreg.dispatch_table`, then `__copy__`, then falls back to `__reduce_ex__`. | `module/copy/module.go` |
+| <Cpy path="Lib/copy.py" lines="131-240">131-240</Cpy> | `deepcopy`, `_deepcopy_atomic`, `_deepcopy_list`, `_deepcopy_tuple`, `_deepcopy_dict` | Deep copy entry point and per-type helpers; `memo` maps `id(obj)` to the already-copied object to break cycles. | `module/copy/module.go` |
+| <Cpy path="Lib/copy.py" lines="241-270">241-270</Cpy> | `_reconstruct` | Rebuilds objects from the five-tuple returned by `__reduce__` / `__reduce_ex__`; handles state dicts, list items, and dict items. | `module/copy/module.go` |
+| <Cpy path="Lib/copy.py" lines="271-300">271-300</Cpy> | `_deepcopy_dispatch` population, `replace` | Fills the `_deepcopy_dispatch` table for all atomic and built-in container types; `replace` is a 3.13+ addition for `copy.replace`. | `module/copy/module.go` |
+
+## Reading
+
+### `copy` dispatch chain (lines 61 to 130)
+
+<CpyLink path="Lib/copy.py" lines="61-130" />
+
+```python
+def copy(x):
+    cls = type(x)
+
+    copier = _copy_dispatch.get(cls)
+    if copier:
+        return copier(x)
+
+    if issubclass(cls, type):
+        # treat it as a regular class
+        return _copy_immutable(x)
+
+    copier = getattr(cls, "__copy__", None)
+    if copier is not None:
+        return copier()
+
+    reductor = getattr(cls, "__reduce_ex__", None)
+    rv = reductor(4)
+    if isinstance(rv, str):
+        return x
+    return _reconstruct(x, None, *rv)
+```
+
+The dispatch order is:
+
+1. `_copy_dispatch` table: covers the atomic types (int, float, str, bytes,
+   bool, None, type, etc.) and returns the object unchanged.
+2. `issubclass(cls, type)`: class objects are immutable, returned as-is.
+3. `cls.__copy__()`: the recommended hook for custom shallow-copy logic.
+4. `__reduce_ex__(4)`: the pickle protocol 4 fallback; if the result is a
+   string the object is a global and is returned unchanged, otherwise
+   `_reconstruct` reassembles it from the reduce tuple.
+
+Note that `copyreg.dispatch_table` is checked inside `_reconstruct` rather
+than at the top of `copy`, unlike `deepcopy` which checks it earlier.
+
+### `deepcopy` and the memo dict (lines 131 to 240)
+
+<CpyLink path="Lib/copy.py" lines="131-240" />
+
+```python
+def deepcopy(x, memo=None, _nil=[]):
+    if memo is None:
+        memo = {}
+
+    d = id(x)
+    y = memo.get(d, _nil)
+    if y is not _nil:
+        return y
+
+    cls = type(x)
+    if issubclass(cls, type):
+        y = _deepcopy_atomic(x, memo)
+    else:
+        copier = _deepcopy_dispatch.get(cls)
+        if copier is not None:
+            y = copier(x, memo)
+        else:
+            ...
+            reductor = getattr(x, "__deepcopy__", None)
+            if reductor is not None:
+                y = reductor(memo)
+            ...
+    memo[d] = y
+    ...
+    return y
+```
+
+The `memo` dict is the cycle-breaker. Before dispatching to any copier the
+function checks whether `id(x)` already has an entry and returns the
+cached copy immediately if so. This handles both cycles (an object that
+contains itself) and shared references (two fields pointing to the same
+object), preserving the graph topology of the original.
+
+The sentinel `_nil` (a module-level list) is used instead of `None` so
+that `None` itself can be stored in `memo` without ambiguity.
+
+The copier for `tuple` is special: a tuple containing only atomic
+elements is returned as-is, but a tuple containing mutable values is
+rebuilt element-by-element and stored in `memo` before being returned,
+because the tuple might be referenced again later in the same graph.
+
+### `deepcopy` for containers (lines 131 to 240)
+
+<CpyLink path="Lib/copy.py" lines="131-240" />
+
+```python
+def _deepcopy_list(x, memo):
+    y = []
+    memo[id(x)] = y        # store before recursing
+    append = y.append
+    for a in x:
+        append(deepcopy(a, memo))
+    return y
+
+def _deepcopy_dict(x, memo):
+    y = {}
+    memo[id(x)] = y        # store before recursing
+    for key, value in x.items():
+        y[deepcopy(key, memo)] = deepcopy(value, memo)
+    return y
+```
+
+Both `_deepcopy_list` and `_deepcopy_dict` store the new empty container
+in `memo` before recursing into the elements. This is the critical ordering
+that makes cycle detection work: if `x` contains a back-reference to
+itself, the recursive `deepcopy(a, memo)` call will find the already-stored
+`y` in `memo` rather than looping forever.
+
+`_deepcopy_tuple` cannot do the same trick directly because tuples are
+immutable. Instead it copies all elements first into a list, then
+constructs the tuple. If the resulting tuple compares equal to the
+original (all elements were atomic or were the same objects) it returns
+the original tuple; otherwise it stores and returns the new one.

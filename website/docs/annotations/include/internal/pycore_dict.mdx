@@ -1,0 +1,161 @@
+---
+title: Include/internal/pycore_dict.h
+description: Internal dict representation — PyDictKeysObject layout, split-table predicates, USABLE_FRACTION load factor, and watcher notification.
+cpython_path: Include/internal/pycore_dict.h
+cpython_version: "3.14"
+lines: 150
+status: annotated
+ported_to: objects/dict.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Include/internal/pycore_dict.h`
+
+<CpyLink path="Include/internal/pycore_dict.h" />
+
+Exposes the internals of `PyDictObject` that `Include/dictobject.h`
+deliberately hides. Extension authors see only an opaque pointer; the
+interpreter and the specializing adaptive loader need the full struct
+layout to perform inline cache lookups and split-table optimisations.
+
+The central type is `PyDictKeysObject`. In CPython's compact hash table
+design, a single `PyDictKeysObject` can be shared across many "split"
+dict instances that all have the same type and were created in the same
+class body. Each split instance then stores only its `PyObject *`
+values in a separate values array, not a full key-value table.
+
+This sharing is the mechanism behind PEP 412 (key-sharing dicts) and
+is critical for instance-attribute lookup speed: the per-class shared
+`PyDictKeysObject` is cached on the type, so attribute lookup can skip
+the hash entirely once the specializing interpreter has recorded the
+split-table index.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Include/internal/pycore_dict.h" lines="1-35">1-35</Cpy> | `DICT_INITIAL_INDEX_LOG2` / `USABLE_FRACTION` / `_PyDictKeys_HASH_BITS` | Starting table size (log2=3 → 8 slots), 2/3 load factor macro, and bits in the compact index array. | `objects/dict.go` |
+| <Cpy path="Include/internal/pycore_dict.h" lines="36-75">36-75</Cpy> | `PyDictKeysObject` | Shared-keys object: `dk_refcnt`, `dk_log2_size`, `dk_nentries`, `dk_usable`, `dk_version`, `dk_lookup`, `dk_indices`, `dk_entries`. | `objects/dict.go` |
+| <Cpy path="Include/internal/pycore_dict.h" lines="76-100">76-100</Cpy> | `PyDictUnicodeEntry` / `PyDictKeyEntry` | Unicode-key fast-path entry (key + hash only) vs general entry (key + hash + value). | `objects/dict.go` |
+| <Cpy path="Include/internal/pycore_dict.h" lines="101-115">101-115</Cpy> | `_PyDict_HasSplitTable` / `_PyDict_GetSplitIndex` | Predicates and index accessor for split-dict instances. | `objects/dict.go` |
+| <Cpy path="Include/internal/pycore_dict.h" lines="116-130">116-130</Cpy> | `_PyDict_NotifyEvent` | Watcher notification: bumps `dk_version` and dispatches registered `PyDict_WatchCallback` callbacks. | `objects/dict.go` |
+| <Cpy path="Include/internal/pycore_dict.h" lines="131-140">131-140</Cpy> | `_PyDictKeys_StringLookup` / `_PyDictKeys_StringLookupSplit` | Fast unicode-key lookup path used by the specializing adaptive interpreter. | `objects/dict.go` |
+| <Cpy path="Include/internal/pycore_dict.h" lines="141-150">141-150</Cpy> | `_PyDict_LoadGlobal` | Inline-cache-aware global variable loader; called by `LOAD_GLOBAL_MODULE` specialized form. | `objects/dict.go` |
+
+## Reading
+
+### `PyDictKeysObject` layout (lines 36 to 75)
+
+<CpyLink path="Include/internal/pycore_dict.h" lines="36-75" />
+
+```c
+struct _Py_dict_keys_object {
+    Py_ssize_t dk_refcnt;       /* shared-key reference count */
+    uint8_t    dk_log2_size;    /* log2 of number of index slots */
+    uint8_t    dk_log2_index_bytes; /* log2 of bytes per index slot */
+    uint8_t    dk_kind;         /* DICT_KEYS_GENERAL or DICT_KEYS_UNICODE */
+    uint32_t   dk_version;      /* bumped on every mutation */
+    Py_ssize_t dk_usable;       /* number of usable entry slots left */
+    Py_ssize_t dk_nentries;     /* number of used entry slots */
+    /* Compact index array followed immediately by the entry array.
+       Index slots are 1, 2, or 4 bytes wide (dk_log2_index_bytes). */
+    char dk_indices[];
+};
+```
+
+The compact indices array stores small integers that are indices into
+the `dk_entries` array. A slot holding `-1` (all bits set for the
+chosen width) means "empty"; `-2` means "dummy" (deleted). The entry
+array begins immediately after the index array in the same allocation,
+so a single `malloc` covers both.
+
+`dk_log2_size` determines the number of index slots: `1 << dk_log2_size`.
+`dk_log2_index_bytes` determines the width of each index slot (0 = 1 byte,
+1 = 2 bytes, 2 = 4 bytes). Dicts start with `DICT_INITIAL_INDEX_LOG2 = 3`
+(8 slots, 1-byte indices) and resize by doubling when `dk_usable` drops
+to zero.
+
+`dk_version` is a 32-bit counter. It is incremented on every structural
+mutation (insert, delete, resize). The specializing adaptive interpreter
+caches this version alongside a split-table index; on attribute lookup
+it compares the cached version to `dk_version` and falls back to the
+slow path if they differ.
+
+In gopy, `objects/dict.go` represents `PyDictKeysObject` as
+`DictKeysObject` with `DkVersion uint32`, `DkLogSize uint8`,
+`DkNEntries int`, and a `[]DictKeyEntry` slice instead of the C
+flexible array.
+
+### Split tables (lines 101 to 115)
+
+<CpyLink path="Include/internal/pycore_dict.h" lines="101-115" />
+
+```c
+static inline bool _PyDict_HasSplitTable(const PyDictObject *mp) {
+    return mp->ma_values != NULL;
+}
+
+static inline Py_ssize_t
+_PyDict_GetSplitIndex(PyDictObject *mp, PyObject *key) {
+    assert(_PyDict_HasSplitTable(mp));
+    return _PyDictKeys_StringLookupSplit(mp->ma_keys, key);
+}
+```
+
+A "split dict" is one whose `ma_values` pointer is non-NULL. In that
+case `ma_keys` points to the shared `PyDictKeysObject` owned by the
+type, and `ma_values` points to an array of `PyObject *` values
+parallel to `dk_entries`. Multiple instance dicts created from the
+same class body all share the same `ma_keys`, so the key array and
+hash table are allocated only once per class, not once per instance.
+
+`_PyDict_HasSplitTable` is the fast predicate used by the attr-lookup
+fast path to decide whether to call `_PyDict_GetSplitIndex`. The
+returned index is the integer stored in `dk_indices` for the given key;
+the caller then indexes `ma_values[index]` directly, bypassing the hash
+table entirely.
+
+Split dicts are "un-split" (converted to a combined dict) when any
+non-string key is inserted, when the dict is passed to `**kwargs`
+unpacking, or when the number of keys in `ma_keys` diverges from what
+the type's layout cache expects.
+
+In gopy, `objects/dict.go` tracks `maValues []Object` for split
+instances and `nil` for combined dicts, matching the C sentinel
+exactly.
+
+### `USABLE_FRACTION` load factor (lines 1 to 35)
+
+<CpyLink path="Include/internal/pycore_dict.h" lines="1-35" />
+
+```c
+#define DICT_INITIAL_INDEX_LOG2  3   /* 2^3 = 8 index slots */
+
+/* Keep the load factor at 2/3. */
+#define USABLE_FRACTION(n) (((n) << 1)/3)
+
+/* Bits needed to represent one index slot for a table of size n. */
+#define _PyDictKeys_HASH_BITS(n) Py_BIT_LENGTH((n) - 1)
+```
+
+`USABLE_FRACTION` caps the number of live entries at two-thirds of the
+index slot count. With 8 initial slots the first table holds at most 5
+entries before triggering a resize. This 2/3 load factor balances
+lookup probe lengths (kept short by leaving 1/3 of slots empty) against
+memory overhead.
+
+When `dk_usable` reaches zero during an insert, the dict resizes to a
+new `PyDictKeysObject` with double the index slots and a fresh entries
+array. All existing entries are rehashed into the new index array;
+`dk_version` is incremented so every cached split-table index becomes
+invalid simultaneously.
+
+`DICT_INITIAL_INDEX_LOG2 = 3` means new empty dicts start at 8 index
+slots and 5 usable entry slots. For the common case of small instance
+dicts (3-6 attributes) this is exactly one allocation, no resize.
+
+In gopy, `objects/dict.go` uses `usableFraction(n int) int` as a
+direct port and `dictInitialIndexLog2 = 3` as a package-level constant.
+The resize path in `dictResize` mirrors CPython's `resize_compact` and
+`compact_keys_new` sequence.

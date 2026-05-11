@@ -1,0 +1,118 @@
+---
+title: Objects/boolobject.c
+description: Bool singleton type. Py_True and Py_False are immortal compact-int singletons; PyBool_FromLong never allocates.
+cpython_path: Objects/boolobject.c
+cpython_version: "3.14"
+lines: 227
+status: annotated
+ported_to: objects/bool.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Objects/boolobject.c`
+
+<CpyLink path="Objects/boolobject.c" />
+
+`bool` is a subtype of `int`. `PyBool_Type` inherits every numeric slot from
+`PyLong_Type` and overrides only a handful: `nb_and`, `nb_or`, `nb_xor` (to
+return `bool` rather than `int`), `tp_repr` (to return `"True"` or `"False"`),
+and `tp_new` (to call `PyObject_IsTrue` and return a singleton). The two
+singletons `Py_True` and `Py_False` are compact integers with values 1 and 0
+respectively; they are immortal and their reference counts are never
+decremented to zero.
+
+`PyBool_FromLong` is the only public constructor. It checks whether the C
+`long` argument is nonzero and returns the pre-allocated singleton directly,
+so `bool` construction never touches the allocator. `bool_new` (backing
+`bool(x)`) calls `PyObject_IsTrue(x)` and likewise returns a singleton; the
+`tp_new` slot therefore also never allocates. Because every `bool` value is a
+singleton, identity comparison (`is`) always works correctly for `True` and
+`False`.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Objects/boolobject.c" lines="1-40">1-40</Cpy> | `Py_True`, `Py_False` | Immortal compact-int singletons with values 1 and 0. | `objects/bool.go` |
+| <Cpy path="Objects/boolobject.c" lines="40-80">40-80</Cpy> | `bool_and`, `bool_or`, `bool_xor` | Override `nb_and`/`nb_or`/`nb_xor` to return `bool` instead of `int`. | `objects/bool.go:boolAnd` |
+| <Cpy path="Objects/boolobject.c" lines="80-120">80-120</Cpy> | `bool_repr` | Returns interned string `"True"` or `"False"`. | `objects/bool.go:boolRepr` |
+| <Cpy path="Objects/boolobject.c" lines="120-160">120-160</Cpy> | `PyBool_FromLong` | Returns singleton; never allocates. | `objects/bool.go:BoolFromLong` |
+| <Cpy path="Objects/boolobject.c" lines="160-227">160-227</Cpy> | `bool_new`, `PyBool_Type` | `bool(x)` via `PyObject_IsTrue`; type object inheriting from `PyLong_Type`. | `objects/bool.go:boolNew` |
+
+## Reading
+
+### Singletons and `PyBool_FromLong` (lines 1 to 160)
+
+<CpyLink path="Objects/boolobject.c" lines="1-160" />
+
+`Py_False` and `Py_True` are statically allocated `PyLongObject` structs whose
+`lv_tag` encodes the compact-int layout introduced in 3.12. The compact form
+stores the integer value directly in the first digit slot without a separate
+heap allocation. Both objects carry the immortal flag so that
+`Py_DECREF` on them is a no-op.
+
+`PyBool_FromLong` is a two-branch function with no allocation path:
+
+```c
+PyObject *
+PyBool_FromLong(long ok)
+{
+    PyObject *result;
+    if (ok)
+        result = Py_True;
+    else
+        result = Py_False;
+    return Py_NewRef(result);
+}
+```
+
+`Py_NewRef` increments the reference count (for non-immortal objects) and
+returns the pointer. For immortal singletons the increment is elided by the
+immortal check in the refcount macro. The function is called throughout the
+interpreter whenever a C-level predicate needs to produce a Python `bool`.
+
+### `bool_new` (lines 160 to 200)
+
+<CpyLink path="Objects/boolobject.c" lines="160-200" />
+
+`bool_new` backs `bool(x)`. It ignores `type` (subclassing `bool` is
+permitted by the type system but cannot produce a new singleton), calls
+`PyObject_IsTrue`, and maps the result to the appropriate singleton:
+
+```c
+static PyObject *
+bool_new(PyTypeObject *type, PyObject *args, PyObject *kwds)
+{
+    PyObject *x = Py_False;
+    long ok;
+    if (!_PyArg_NoKeywords("bool", kwds))
+        return NULL;
+    if (!PyArg_UnpackTuple(args, "bool", 0, 1, &x))
+        return NULL;
+    ok = PyObject_IsTrue(x);
+    if (ok < 0)
+        return NULL;
+    return PyBool_FromLong(ok);
+}
+```
+
+`PyObject_IsTrue` dispatches through `nb_bool`, then `mp_length`, then
+`sq_length` in that order (defined in `Objects/object.c`). A return value of
+`-1` signals an exception; `0` maps to `Py_False`; any positive value maps to
+`Py_True`.
+
+## gopy mirror
+
+`objects/bool.go`. `BoolFromLong` returns package-level `True` and `False`
+variables that mirror the CPython singletons. `boolNew` calls the Go
+`ObjectIsTrue` helper. The `nb_and`/`nb_or`/`nb_xor` overrides are present to
+preserve the invariant that bitwise operations on `bool` return `bool`, not
+`int`.
+
+## CPython 3.14 changes
+
+The compact-int layout for singletons was introduced in 3.12, replacing the
+older static `PyLongObject` with an explicit `ob_digit` array. The immortal
+object protocol (`_Py_IsImmortal`, `_Py_DECREF_NO_DEALLOC`) was also
+formalised in 3.12. No 3.14-specific changes affect `boolobject.c`.

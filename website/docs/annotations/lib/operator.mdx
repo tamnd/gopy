@@ -1,0 +1,162 @@
+---
+title: Lib/operator.py
+description: Pure-Python fallback for Modules/_operator.c; exposes arithmetic, comparison, bitwise, and sequence operators as named functions plus attrgetter, itemgetter, and methodcaller.
+cpython_path: Lib/operator.py
+cpython_version: "3.14"
+lines: 200
+status: annotated
+ported_to: module/operator/module.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Lib/operator.py`
+
+<CpyLink path="Lib/operator.py" />
+
+`operator.py` is a thin pure-Python stub. At import time it tries to
+import all names from the C extension `_operator`; any name not found
+there falls back to the Python definition in this file. In practice, on a
+normal CPython build every public name is satisfied by `_operator.so` and
+none of the Python bodies run at call time. The file therefore serves two
+purposes: it documents the expected API in readable Python, and it
+provides a complete fallback for environments where the C extension is
+absent.
+
+The module exports operator equivalents for every Python operator:
+arithmetic (`add`, `sub`, `mul`, `truediv`, `floordiv`, `mod`, `pow`,
+`neg`, `pos`, `abs`), bitwise (`and_`, `or_`, `xor`, `invert`,
+`lshift`, `rshift`), comparison (`lt`, `le`, `eq`, `ne`, `ge`, `gt`),
+identity and membership (`is_`, `is_not`, `contains`), and sequence
+(`concat`, `getitem`, `setitem`, `delitem`, `indexOf`, `countOf`).
+In-place variants (`iadd`, `isub`, etc.) mirror the augmented-assignment
+operators.
+
+The three callable factories (`attrgetter`, `itemgetter`, `methodcaller`)
+are the most commonly used part of the module: they produce lightweight
+callables used as `key=` arguments to `sorted`, `min`, `max`, and
+`itertools` functions.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Lib/operator.py" lines="1-30">1-30</Cpy> | Module header, `__all__` | Docstring and the list of all exported names; `__all__` drives `from operator import *`. | `module/operator/module.go` |
+| <Cpy path="Lib/operator.py" lines="31-100">31-100</Cpy> | Arithmetic and comparison wrappers | One-liner functions (`add`, `sub`, `mul`, `truediv`, `lt`, `eq`, etc.) that call the corresponding dunder method; C override via `from _operator import *`. | `module/operator/module.go` |
+| <Cpy path="Lib/operator.py" lines="101-130">101-130</Cpy> | In-place operator variants | `iadd`, `isub`, `imul`, `itruediv`, `ifloordiv`, `imod`, `ipow`, `iand`, `ior`, `ixor`, `ilshift`, `irshift`, `iconcat`; call `__iadd__` etc. and return the result. | `module/operator/module.go` |
+| <Cpy path="Lib/operator.py" lines="131-175">131-175</Cpy> | `attrgetter`, `itemgetter` | Callable factories; `attrgetter` supports dotted names by chaining `getattr` calls; `itemgetter` with multiple items returns a tuple. | `module/operator/module.go` |
+| <Cpy path="Lib/operator.py" lines="176-200">176-200</Cpy> | `methodcaller` | Stores `name`, `args`, and `kwargs` at construction; `__call__` does `getattr(obj, name)(*args, **kwargs)`. | `module/operator/module.go` |
+
+## Reading
+
+### Arithmetic wrapper pattern (lines 31 to 100)
+
+<CpyLink path="Lib/operator.py" lines="31-100" />
+
+```python
+def add(a, b):
+    "Same as a + b."
+    return a + b
+
+def sub(a, b):
+    "Same as a - b."
+    return a - b
+
+def mul(a, b):
+    "Same as a * b."
+    return a * b
+
+def truediv(a, b):
+    "Same as a / b."
+    return a / b
+
+def lt(a, b):
+    "Same as a < b."
+    return a < b
+```
+
+Each wrapper is a one-liner that applies the Python operator directly.
+The docstring uses the canonical phrasing "Same as a OP b." which the
+generated reference documentation preserves. When `_operator` is
+importable (always, on CPython) the C version replaces the Python body
+entirely, but the semantics are identical.
+
+The trailing underscore on `and_`, `or_`, and `not_` avoids shadowing the
+Python keywords. `truth(obj)` is `bool(obj)`; it is distinct from `not_`
+so callers have a named function for the truthy test without negation.
+
+### `attrgetter` dotted-name chain (lines 131 to 175)
+
+<CpyLink path="Lib/operator.py" lines="131-175" />
+
+```python
+class attrgetter:
+    def __init__(self, attr, *attrs):
+        if not attrs:
+            if not isinstance(attr, str):
+                raise TypeError(...)
+            self._attrs = (attr,)
+            names = attr.split('.')
+            def func(obj):
+                for name in names:
+                    obj = getattr(obj, name)
+                return obj
+            self._call = func
+        else:
+            self._attrs = (attr,) + attrs
+            getters = tuple(attrgetter(a)._call for a in self._attrs)
+            def func(obj):
+                return tuple(getter(obj) for getter in getters)
+            self._call = func
+
+    def __call__(self, obj):
+        return self._call(obj)
+```
+
+`attrgetter('a.b.c')` compiles the dotted name into a chain of `getattr`
+calls at construction time, not at call time. The resulting closure
+iterates over the pre-split list `['a', 'b', 'c']`, which avoids
+repeated string splitting when the getter is used as a `key=` argument
+over a large sequence.
+
+When multiple attribute names are passed (`attrgetter('x', 'y')`) the
+constructor builds one inner `attrgetter` per name and the outer
+`__call__` returns a tuple, matching the behaviour of `itemgetter` with
+multiple indices.
+
+### `methodcaller` (lines 176 to 200)
+
+<CpyLink path="Lib/operator.py" lines="176-200" />
+
+```python
+class methodcaller:
+    def __init__(self, name, /, *args, **kwargs):
+        self.__name = name
+        if not isinstance(self.__name, str):
+            raise TypeError('method name must be a string')
+        self.__args = args
+        self.__kwargs = kwargs
+
+    def __call__(self, obj):
+        return getattr(obj, self.__name)(*self.__args, **self.__kwargs)
+
+    def __repr__(self):
+        args = [repr(self.__name)]
+        args.extend(map(repr, self.__args))
+        args.extend('%s=%r' % (k, v) for k, v in self.__kwargs.items())
+        return '%s.%s(%s)' % (self.__class__.__module__,
+                              self.__class__.__qualname__,
+                              ', '.join(args))
+```
+
+`methodcaller` captures the method name and any fixed arguments at
+construction time. The `__call__` implementation looks up the method
+on the object at call time using `getattr`, which means it works on any
+object that has an attribute with the given name, not just instances of a
+specific class. This makes it suitable as a `key=` function whenever you
+need to call a zero-or-fixed-arg method on each element of a sequence,
+for example `sorted(dates, key=methodcaller('isoformat'))`.
+
+The `__repr__` reproduces a constructor call that could recreate the
+object, which aids debugging when the callable appears in tracebacks or
+`repr` output of container types.

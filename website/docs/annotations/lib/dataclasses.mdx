@@ -1,0 +1,190 @@
+---
+title: Lib/dataclasses.py
+description: The @dataclass decorator and supporting API; inspects __annotations__ to auto-generate __init__, __repr__, __eq__, ordering, and __hash__ methods.
+cpython_path: Lib/dataclasses.py
+cpython_version: "3.14"
+lines: 1500
+status: annotated
+ported_to: module/dataclasses/module.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Lib/dataclasses.py`
+
+<CpyLink path="Lib/dataclasses.py" />
+
+`dataclasses.py` is a pure-Python module that provides the `@dataclass`
+class decorator (PEP 557). The decorator inspects `__annotations__` on
+the decorated class and its MRO, builds a `Field` object for each
+annotated name, then generates and `exec`s synthetic method source code
+for `__init__`, `__repr__`, `__eq__`, and optionally the ordering
+methods (`__lt__`, `__le__`, `__gt__`, `__ge__`) and `__hash__`.
+
+The module exports a small but carefully designed API surface: `dataclass`,
+`field`, `Field`, `FrozenInstanceError`, `InitVar`, `KW_ONLY`,
+`MISSING`, `fields`, `asdict`, `astuple`, `make_dataclass`, `replace`,
+and `is_dataclass`. All generated code is executed with a temporary
+`__globals__` namespace that contains only the names the generated body
+actually needs, which keeps the compiled function objects portable across
+`pickle` boundaries.
+
+Python 3.10 added `KW_ONLY` (a sentinel object placed in the annotations
+list to mark all following fields as keyword-only in `__init__`). Python
+3.12 added `__slots__`-generating support when `slots=True` is passed to
+`@dataclass`.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Lib/dataclasses.py" lines="1-80">1-80</Cpy> | Module-level sentinels: `MISSING`, `KW_ONLY`, `HAS_DEFAULT`, `HAS_DEFAULT_FACTORY`, `HAS_INIT_VAR` | Sentinel objects used as default markers in `Field` so that `None` can be a valid default. | `module/dataclasses/module.go` |
+| <Cpy path="Lib/dataclasses.py" lines="81-300">81-300</Cpy> | `Field`, `field` | Per-field configuration container; `field()` is the public constructor; `Field.__set_name__` validates that `default` and `default_factory` are not both set. | `module/dataclasses/module.go` |
+| <Cpy path="Lib/dataclasses.py" lines="301-420">301-420</Cpy> | `InitVar` | Generic alias that marks a parameter as `__init__`-only; never stored as an instance attribute; detected in `_process_class` by `isinstance(f.type, InitVar)`. | `module/dataclasses/module.go` |
+| <Cpy path="Lib/dataclasses.py" lines="421-900">421-900</Cpy> | `_process_class` | Core logic: walks the MRO to collect inherited fields, builds the `__init__` source string (including `__post_init__` forwarding), `exec`s it, and attaches all generated dunder methods. | `module/dataclasses/module.go` |
+| <Cpy path="Lib/dataclasses.py" lines="901-1000">901-1000</Cpy> | `dataclass` | Public decorator; thin wrapper around `_process_class`; accepts `init`, `repr`, `eq`, `order`, `unsafe_hash`, `frozen`, `match_args`, `kw_only`, `slots`, `weakref_slot`. | `module/dataclasses/module.go` |
+| <Cpy path="Lib/dataclasses.py" lines="1001-1150">1001-1150</Cpy> | `fields`, `asdict`, `astuple` | `fields` returns the tuple of `Field` objects stored in `__dataclass_fields__`; `asdict` and `astuple` recurse into nested dataclasses, lists, tuples, and dicts. | `module/dataclasses/module.go` |
+| <Cpy path="Lib/dataclasses.py" lines="1151-1350">1151-1350</Cpy> | `make_dataclass` | Programmatic dataclass creation: builds an `__annotations__` dict and calls `dataclass(type(name, bases, ns))`. | `module/dataclasses/module.go` |
+| <Cpy path="Lib/dataclasses.py" lines="1351-1450">1351-1450</Cpy> | `replace` | Returns a new instance of the same dataclass with specified fields replaced; validates that only init-eligible field names are passed. | `module/dataclasses/module.go` |
+| <Cpy path="Lib/dataclasses.py" lines="1451-1500">1451-1500</Cpy> | `is_dataclass`, `_is_dataclass_instance` | Predicate helpers; `is_dataclass` returns `True` for classes and instances whose type carries `__dataclass_fields__`. | `module/dataclasses/module.go` |
+
+## Reading
+
+### `_process_class` field collection and `__init__` codegen (lines 421 to 900)
+
+<CpyLink path="Lib/dataclasses.py" lines="421-900" />
+
+```python
+def _process_class(cls, init, repr, eq, order, unsafe_hash, frozen,
+                   match_args, kw_only, slots, weakref_slot):
+    # Collect fields defined on this class and inherited ones.
+    fields = {}
+
+    # Walk the MRO in reverse so subclass fields override base fields.
+    for b in cls.__mro__[-1:0:-1]:
+        base_fields = getattr(b, _FIELDS, None)
+        if base_fields is not None:
+            for f in base_fields.values():
+                fields[f.name] = f
+
+    # Now process this class's own annotations.
+    cls_fields = [_field_init(f, kw_only)
+                  for f in _fields_in_class(cls)]
+    for f in cls_fields:
+        fields[f.name] = f
+
+    # Generate and exec __init__.
+    flds = [f for f in fields.values() if f._field_type is _FIELD]
+    _set_new_attribute(cls, '__init__',
+                       _init_fn(flds, frozen, has_post_init,
+                                self_name, globals, slots))
+```
+
+The MRO walk (reversed so that `object` is processed first) ensures
+inherited fields retain their declaration order while being overridable
+by the subclass. `_field_init` processes each `(name, annotation)` pair
+from `cls.__annotations__`, consulting the default value already stored
+on the class if any. The `KW_ONLY` sentinel is detected here: once a
+field named `KW_ONLY` is encountered, all subsequent fields in that
+class have `kw_only=True` injected.
+
+`_init_fn` builds a string of Python source:
+
+```python
+def _init_fn(fields, frozen, has_post_init, self_name, globals, slots):
+    seen_default = False
+    body_lines = []
+    for f in fields:
+        ...
+        if f.default is MISSING and f.default_factory is MISSING:
+            # No default.
+            if seen_default:
+                raise TypeError(f'non-default argument {f.name!r} '
+                                'follows default argument')
+        else:
+            seen_default = True
+        ...
+    return _create_fn('__init__',
+                      [self_name] + [_init_param(f) for f in fields],
+                      body_lines,
+                      locals=locals,
+                      globals=globals,
+                      return_type=None)
+```
+
+`_create_fn` assembles the source string from the parameter list and body
+lines, then calls `exec` with a private `globals` dict that contains only
+the names the body actually references (default factories, field types for
+`InitVar` checks, etc.). The resulting function object is stored back on
+the class via `_set_new_attribute`, which skips the assignment if the
+class already defines the method unless `force=True`.
+
+### `InitVar` and `KW_ONLY` (lines 301 to 420)
+
+<CpyLink path="Lib/dataclasses.py" lines="301-420" />
+
+```python
+class InitVar:
+    __slots__ = ('type', )
+
+    def __init__(self, type):
+        self.type = type
+
+    def __class_getitem__(cls, type):
+        return cls(type)
+
+# Sentinel for keyword-only fields.
+KW_ONLY = KW_ONLY()
+```
+
+`InitVar` is a generic alias used in annotations to declare parameters
+that are passed to `__init__` (and forwarded to `__post_init__`) but
+never stored as instance attributes. A field annotated `InitVar[T]` is
+detected in `_process_class` by `isinstance(f.type, InitVar)`; such
+fields are collected into the `__post_init__` call signature rather than
+the instance initialization body.
+
+`KW_ONLY` is a module-level sentinel instance. When `_process_class`
+encounters an annotation whose value is `KW_ONLY`, it switches a boolean
+flag that forces all subsequent `Field` objects in that class to have
+`kw_only=True`. This allows mixing positional and keyword-only fields
+without relying solely on the class-level `kw_only` argument.
+
+### `asdict` recursive conversion (lines 1001 to 1100)
+
+<CpyLink path="Lib/dataclasses.py" lines="1001-1100" />
+
+```python
+def asdict(obj, *, dict_factory=dict):
+    if not _is_dataclass_instance(obj):
+        raise TypeError("asdict() should be called on dataclass instances")
+    return _asdict_inner(obj, dict_factory)
+
+def _asdict_inner(obj, dict_factory):
+    if _is_dataclass_instance(obj):
+        result = []
+        for f in fields(obj):
+            value = _asdict_inner(getattr(obj, f.name), dict_factory)
+            result.append((f.name, value))
+        return dict_factory(result)
+    elif isinstance(obj, tuple) and hasattr(obj, '_fields'):
+        # namedtuple
+        return type(obj)(*[_asdict_inner(v, dict_factory) for v in obj])
+    elif isinstance(obj, (list, tuple)):
+        return type(obj)(_asdict_inner(v, dict_factory) for v in obj)
+    elif isinstance(obj, dict):
+        return type(obj)((_asdict_inner(k, dict_factory),
+                          _asdict_inner(v, dict_factory))
+                         for k, v in obj.items())
+    else:
+        return copy.deepcopy(obj)
+```
+
+`_asdict_inner` recurses depth-first. Nested dataclasses become dicts
+(assembled via `dict_factory` to allow `OrderedDict` or similar).
+Named tuples are reconstructed element-by-element. Plain lists and
+tuples preserve their concrete type via `type(obj)(...)`. Dicts have
+both keys and values recursed. Anything else is deep-copied so the
+returned dict is fully independent of the original object graph.
+`astuple` follows the same recursive structure but produces nested
+tuples instead of dicts.

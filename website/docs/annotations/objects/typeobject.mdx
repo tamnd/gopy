@@ -1,0 +1,274 @@
+---
+title: Objects/typeobject.c
+description: The type system. type.__new__, MRO computation, slot inheritance, descriptor protocol, __init_subclass__, __set_name__, and metaclass machinery.
+cpython_path: Objects/typeobject.c
+cpython_version: "3.14"
+lines: 12302
+status: annotated
+ported_to: objects/type.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Objects/typeobject.c`
+
+<CpyLink path="Objects/typeobject.c" />
+
+The largest file in CPython. `PyType_Type` is the type object for type objects
+themselves. This file implements: type creation (`type_new`), the C3 MRO
+linearization (`mro_internal`), slot inheritance (`inherit_slots`,
+`fixup_slot_dispatchers`), descriptor lookup (`_PyType_Lookup`), attribute
+access on types (`type_getattro`), and the `__subclasshook__` /
+`__instancecheck__` protocol. The slot wrappers that expose C slots as Python
+methods (`slot_tp_repr`, `slot_nb_add`, etc.) are also here.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Objects/typeobject.c" lines="50-120">50-120</Cpy> | `type_repr` | `repr(SomeType)` via `tp_repr`. | `objects/type.go:typeRepr` |
+| <Cpy path="Objects/typeobject.c" lines="121-200">121-200</Cpy> | `type_call` | `type(obj)` and `type(name, bases, ns)` dispatch. | `objects/type_call.go:TypeCall` |
+| <Cpy path="Objects/typeobject.c" lines="201-300">201-300</Cpy> | `type_getattro` | Attribute lookup on a type: MRO search then data descriptor check. | `objects/type.go:TypeGetAttro` |
+| <Cpy path="Objects/typeobject.c" lines="301-380">301-380</Cpy> | `type_setattro` | Attribute write on a type; invalidates `tp_version_tag`. | `objects/type.go:TypeSetAttro` |
+| <Cpy path="Objects/typeobject.c" lines="381-420">381-420</Cpy> | `type_traverse`, `type_clear`, `type_dealloc` | GC traversal, cycle break, and deallocation for type objects. | `objects/type.go` |
+| <Cpy path="Objects/typeobject.c" lines="421-550">421-550</Cpy> | `_PyType_Lookup` | MRO attribute search with inline cache keyed on `(type, name, version_tag)`. | `objects/type.go:(*Type).Lookup` |
+| <Cpy path="Objects/typeobject.c" lines="551-650">551-650</Cpy> | `_PyType_LookupId`, `_PyType_LookupRef` | Variants of `_PyType_Lookup` for C-string keys and borrowed-ref-safe callers. | `objects/type.go` |
+| <Cpy path="Objects/typeobject.c" lines="651-800">651-800</Cpy> | `_PyType_CacheTag`, `_PyType_Modified` | Version-tag management; bump and propagate on mutation. | `objects/type.go:Modified` |
+| <Cpy path="Objects/typeobject.c" lines="801-950">801-950</Cpy> | `type_new_alloc`, `type_new_set_slots` | Allocate the new type object; validate and lay out `__slots__`. | `objects/type.go` |
+| <Cpy path="Objects/typeobject.c" lines="951-1100">951-1100</Cpy> | `type_new_descriptors` | Build slot descriptor objects for every `__slots__` entry. | `objects/type.go:typeNewDescriptors` |
+| <Cpy path="Objects/typeobject.c" lines="1101-1200">1101-1200</Cpy> | `type_new_set_names` | Walk `tp_dict` and call `__set_name__` on each descriptor. | `objects/type.go:typeNewSetNames` |
+| <Cpy path="Objects/typeobject.c" lines="1201-1350">1201-1350</Cpy> | `type_new_init_subclass` | Call `__init_subclass__` on every base passing keyword arguments from the class statement. | `objects/type.go:typeNewInitSubclass` |
+| <Cpy path="Objects/typeobject.c" lines="1351-2000">1351-2000</Cpy> | `type_new` | Full `type.__new__(mcs, name, bases, ns, **kw)` implementation. | `objects/type.go:typeNew` |
+| <Cpy path="Objects/typeobject.c" lines="2001-2200">2001-2200</Cpy> | `calculate_metaclass` | Select the most-derived metaclass from bases; raise `TypeError` on conflict. | `objects/type.go:calculateMetaclass` |
+| <Cpy path="Objects/typeobject.c" lines="2201-2500">2201-2500</Cpy> | `mro_internal`, `mro_implementation` | C3 linearization entry points; return an ordered `tuple` of types. | `objects/type.go:mroInternal` |
+| <Cpy path="Objects/typeobject.c" lines="2501-2800">2501-2800</Cpy> | `mro_merge`, `mro_check_duplicates` | Inner C3 merge loop; detects cycles and inconsistencies. | `objects/type.go:mroMerge` |
+| <Cpy path="Objects/typeobject.c" lines="2801-3200">2801-3200</Cpy> | `type_ready_check_dict`, `type_ready_fill_dict` | Fill `tp_dict` with wrappers for inherited slots before freezing. | `objects/type.go` |
+| <Cpy path="Objects/typeobject.c" lines="3201-3800">3201-3800</Cpy> | `type_ready`, `PyType_Ready` | Full type finalization: set `tp_base`, build MRO, inherit slots, populate `tp_dict`. | `objects/type.go:Ready` |
+| <Cpy path="Objects/typeobject.c" lines="3801-4500">3801-4500</Cpy> | `inherit_slots`, `inherit_special` | Copy NULL slot pointers from base to derived type. | `objects/type.go:inheritSlots` |
+| <Cpy path="Objects/typeobject.c" lines="4501-5000">4501-5000</Cpy> | `fixup_slot_dispatchers`, `update_all_slots`, `update_one_slot` | Install or refresh `slot_*` wrapper functions after any class dict mutation. | `objects/type.go:fixupSlotDispatchers` |
+| <Cpy path="Objects/typeobject.c" lines="5001-6000">5001-6000</Cpy> | `slot_tp_repr`, `slot_tp_hash`, `slot_tp_call`, `slot_tp_str` | `tp_*` wrappers: call the Python `__dunder__` via vectorcall. | `objects/type.go` |
+| <Cpy path="Objects/typeobject.c" lines="6001-7000">6001-7000</Cpy> | `slot_nb_add`, `slot_nb_subtract`, `slot_nb_multiply`, `slot_nb_radd` | Numeric slot wrappers; reversed ops try the right-hand type first for subtypes. | `objects/type.go` |
+| <Cpy path="Objects/typeobject.c" lines="7001-8000">7001-8000</Cpy> | `PyObject_GenericGetDict`, `PyObject_GenericSetDict`, `_PyObjectDict_SetItem` | Generic instance `__dict__` management. | `objects/object.go:GenericGetDict` |
+| <Cpy path="Objects/typeobject.c" lines="8001-9000">8001-9000</Cpy> | `subtype_setdict`, `subtype_getweakref`, `type_get_doc` | Subtype-specific slot implementations for `__dict__`, `__weakref__`, `__doc__`. | `objects/usertype.go` |
+| <Cpy path="Objects/typeobject.c" lines="9001-9800">9001-9800</Cpy> | `super_getattro`, `super_descr_get`, `super_init` | `super()` implementation: MRO index search and attribute lookup one slot past the pivot. | `objects/super.go` |
+| <Cpy path="Objects/typeobject.c" lines="9801-10500">9801-10500</Cpy> | `object_init`, `object_new`, `object_repr`, `object_hash` | Slots for `object` itself (the root base class). | `objects/object.go` |
+| <Cpy path="Objects/typeobject.c" lines="10501-11000">10501-11000</Cpy> | `type___instancecheck___impl`, `type___subclasscheck___impl` | `isinstance` / `issubclass` with `__instancecheck__` and `__subclasshook__` support. | `objects/type.go` |
+| <Cpy path="Objects/typeobject.c" lines="11001-11500">11001-11500</Cpy> | `__init_subclass__` default, `__class_getitem__` default | Default implementations; `__class_getitem__` returns a `GenericAlias`. | `objects/type.go`, `objects/generic_alias.go` |
+| <Cpy path="Objects/typeobject.c" lines="11501-12302">11501-12302</Cpy> | `PyType_AddWatcher`, `PyType_ClearWatcher`, `PyType_Watch`, `PyType_Unwatch` | Type watcher API for inline cache invalidation by the specializing interpreter. | `objects/type.go:AddWatcher` |
+
+## Reading
+
+### `_PyType_Lookup` (lines 421 to 550)
+
+<CpyLink path="Objects/typeobject.c" lines="421-550" />
+
+The hottest function in the interpreter for attribute-heavy workloads. Walks
+`tp_mro` from left to right, checks each type's `tp_dict` for `name`. Before
+the walk it probes a global fixed-size hash table (the "lookup cache") keyed
+on `(type, name)`. The entry also stores the `tp_version_tag` of the type at
+the time it was cached; a version mismatch forces a full MRO walk and updates
+the cache.
+
+```c
+PyObject *
+_PyType_Lookup(PyTypeObject *type, PyObject *name)
+{
+    PyObject *mro = type->tp_mro;
+    Py_ssize_t n = PyTuple_GET_SIZE(mro);
+    for (Py_ssize_t i = 0; i < n; i++) {
+        PyTypeObject *base = (PyTypeObject *)PyTuple_GET_ITEM(mro, i);
+        PyObject *res = PyDict_GetItemWithError(base->tp_dict, name);
+        if (res != NULL) {
+            return res;
+        }
+    }
+    return NULL;
+}
+```
+
+The actual implementation wraps this loop with the version-tag cache check. On
+a cache hit the version tag of the cached type is compared with the current
+`type->tp_version_tag`; if they match the cached result is returned without
+touching any dict. Cache entries are invalidated whenever `tp_version_tag`
+changes, which happens in `_PyType_Modified` after any mutation of a type or
+its bases.
+
+### `type_new` (lines 1351 to 2000)
+
+<CpyLink path="Objects/typeobject.c" lines="1351-2000" />
+
+`type(name, bases, namespace)` implemented in C. The sequence of operations:
+
+1. Validate that `bases` is a non-empty tuple of types.
+2. Call `calculate_metaclass` to find the most-derived metaclass among all bases.
+3. If the winning metaclass is not `type` itself, forward to
+   `metaclass(name, bases, ns)` and return.
+4. Allocate the type object via `type_new_alloc`, compute layout from `__slots__`.
+5. Copy entries from the user-supplied namespace into `tp_dict`.
+6. Call `type_new_descriptors` to build `member_descriptor` objects for
+   `__slots__`.
+7. Call `PyType_Ready` to fill inherited slots and build the MRO.
+8. Call `type_new_set_names` to invoke `__set_name__(owner, name)` on each
+   descriptor that defines it.
+9. Call `type_new_init_subclass` to invoke `__init_subclass__` on each base,
+   forwarding any keyword arguments from the class statement.
+
+`calculate_metaclass` selects the metaclass:
+
+```c
+static PyTypeObject *
+calculate_metaclass(PyTypeObject *metatype, PyObject *bases)
+{
+    PyTypeObject *winner = metatype;
+    Py_ssize_t nbases = PyTuple_GET_SIZE(bases);
+    for (Py_ssize_t i = 0; i < nbases; i++) {
+        PyTypeObject *base = (PyTypeObject *)PyTuple_GET_ITEM(bases, i);
+        PyTypeObject *basemet = Py_TYPE(base);
+        if (PyType_IsSubtype(winner, basemet))
+            continue;
+        if (PyType_IsSubtype(basemet, winner)) {
+            winner = basemet;
+            continue;
+        }
+        PyErr_SetString(PyExc_TypeError,
+            "metaclass conflict: the metaclass of a derived class "
+            "must be a (non-strict) subclass of the metaclasses of all its bases");
+        return NULL;
+    }
+    return winner;
+}
+```
+
+### MRO: `mro_internal` (lines 2201 to 2500)
+
+<CpyLink path="Objects/typeobject.c" lines="2201-2500" />
+
+C3 linearization. Builds a list of lists: each direct base's existing MRO plus
+the `bases` tuple itself. The merge loop repeatedly picks the head of the first
+list whose head does not appear in the tail of any other list:
+
+```
+// Pseudocode for mro_merge
+lists = [base.mro for base in bases] + [list(bases)]
+result = [type]
+while any list is non-empty:
+    for lst in lists:
+        candidate = lst[0]
+        if candidate not in [l[1:] for l in lists]:
+            result.append(candidate)
+            for lst in lists:
+                if lst[0] == candidate:
+                    lst.pop(0)
+            break
+    else:
+        raise TypeError("Cannot create a consistent method resolution order")
+```
+
+If no candidate is found in a full sweep, the bases have an inconsistent
+ordering and `TypeError` is raised. The result is stored as `type->tp_mro`, a
+tuple borrowed by all subsequent `_PyType_Lookup` calls.
+
+### `PyType_Ready` (lines 3201 to 3800)
+
+<CpyLink path="Objects/typeobject.c" lines="3201-3800" />
+
+Called once per statically defined C type at module or interpreter
+initialization. The critical operations:
+
+1. Set `tp_base` to `&PyBaseObject_Type` if still NULL.
+2. Call `PyType_Ready` recursively on `tp_base` and each element of `tp_bases`
+   if they are not yet ready.
+3. Compute `tp_mro` via `mro_internal`.
+4. Call `inherit_slots` to copy NULL slot pointers from the base type.
+5. Populate `tp_dict` with `slot_wrapper` and `method_descriptor` objects for
+   every slot the type exposes.
+6. Set `Py_TPFLAGS_READY` on the type.
+
+After `PyType_Ready` a C type is immutable from the C side. Python subclassing
+goes through `type_new` instead, which calls `PyType_Ready` on the newly
+created type before returning.
+
+### Slot wrappers (lines 5001 to 7000)
+
+<CpyLink path="Objects/typeobject.c" lines="5001-7000" />
+
+When a Python class defines `__repr__`, CPython installs `slot_tp_repr` into
+`tp->tp_repr`. That C function then calls `self.__repr__()` via
+`_PyObject_CallMethodNoArgs`. The numeric wrappers are more complex because
+they handle reflected operations:
+
+```c
+static PyObject *
+slot_nb_add(PyObject *self, PyObject *other)
+{
+    PyObject *r;
+    // If type(other) is a subtype of type(self), try other.__radd__ first.
+    if (!Py_IS_TYPE(self, Py_TYPE(other)) &&
+        PyType_IsSubtype(Py_TYPE(other), Py_TYPE(self))) {
+        r = call_maybe(other, &_Py_ID(__radd__), self);
+        if (r != Py_NotImplemented)
+            return r;
+        Py_DECREF(r);
+    }
+    r = call_maybe(self, &_Py_ID(__add__), other);
+    if (r != Py_NotImplemented)
+        return r;
+    Py_DECREF(r);
+    r = call_maybe(other, &_Py_ID(__radd__), self);
+    return r;
+}
+```
+
+`fixup_slot_dispatchers` is called whenever a class `__dict__` changes: it
+walks every slot and (re-)installs the appropriate `slot_*` function or NULL
+depending on whether the corresponding `__dunder__` is defined anywhere in the
+MRO.
+
+### `super_getattro` (lines 9001 to 9500)
+
+<CpyLink path="Objects/typeobject.c" lines="9001-9500" />
+
+`super(type, obj).__getattribute__(name)` starts the MRO search one entry past
+`type` in `obj`'s MRO. The pivot search:
+
+```c
+// Find the index of 'type' in mro(type(obj)):
+PyObject *mro = Py_TYPE(obj)->tp_mro;
+Py_ssize_t n = PyTuple_GET_SIZE(mro);
+Py_ssize_t i;
+for (i = 0; i < n; i++) {
+    if ((PyObject *)type == PyTuple_GET_ITEM(mro, i))
+        break;
+}
+// Walk from i+1 onward:
+for (i++; i < n; i++) {
+    PyTypeObject *base = (PyTypeObject *)PyTuple_GET_ITEM(mro, i);
+    PyObject *res = PyDict_GetItemWithError(base->tp_dict, name);
+    if (res != NULL) {
+        descrgetfunc f = Py_TYPE(res)->tp_descr_get;
+        if (f != NULL)
+            res = f(res, obj, (PyObject *)Py_TYPE(obj));
+        return res;
+    }
+}
+```
+
+If the name is found, descriptors are invoked normally. This is the entire
+mechanism behind `super().method()`: no magic beyond an MRO scan starting one
+slot after the pivot type.
+
+## gopy mirror
+
+`objects/type.go`, `objects/type_call.go`, `objects/usertype.go`,
+`objects/super.go`. `_PyType_Lookup` maps to `(*Type).Lookup`. The MRO is a
+Go `[]*Type` slice. Slot wrappers are generated by `gen/slots/` from
+`Include/cpython/typeslots.h`. `PyType_Ready` maps to `(*Type).Ready`.
+
+## CPython 3.14 changes
+
+`__class_getitem__` protocol stabilized (returns `GenericAlias` by default).
+Type watcher API (`PyType_AddWatcher`) added in 3.12; improved overflow
+handling in 3.13. `tp_version_tag` overflow handling improved in 3.13.
+`__init_subclass__` keyword-argument forwarding has been stable since 3.6.
+PEP 649 adds `__annotations__` lazy evaluation, changing how annotation
+descriptors in class bodies interact with `type_new`.

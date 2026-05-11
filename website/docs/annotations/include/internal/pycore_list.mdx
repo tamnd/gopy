@@ -1,0 +1,144 @@
+---
+title: Include/internal/pycore_list.h
+description: Internal list helpers — ob_item / ob_alloc layout, fast append paths that steal a reference, and the per-interpreter free-list for recycling PyListObject headers.
+cpython_path: Include/internal/pycore_list.h
+cpython_version: "3.14"
+lines: 100
+status: annotated
+ported_to: objects/list.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Include/internal/pycore_list.h`
+
+<CpyLink path="Include/internal/pycore_list.h" />
+
+The private companion to `Include/listobject.h`. The public header
+exposes `PyList_New`, `PyList_Append`, and the checked `PyList_GET_ITEM`
+accessor. This file adds the unchecked accessor macro, the fast append
+variants used by the compiler's list-building bytecodes, and the
+free-list state struct that lets the interpreter recycle list headers
+between short-lived allocations.
+
+The list's internal layout (item pointer array separate from the object
+header, over-allocated capacity tracked alongside `ob_size`) is the
+reason CPython lists have amortized O(1) append: the item array is grown
+with `realloc`, not with a copy-on-write strategy.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Include/internal/pycore_list.h" lines="1-25">1-25</Cpy> | `_PyList_ITEMS(op)` | Unchecked cast to `PyObject **` returning `((PyListObject *)(op))->ob_item`; the fast path used inside the interpreter. | `objects/list.go` |
+| <Cpy path="Include/internal/pycore_list.h" lines="26-55">26-55</Cpy> | `_PyList_AppendTakeRef` / `_PyList_AppendTakeRefListResize` | Append helpers that steal the caller's reference; `AppendTakeRef` is the fast inline path, `AppendTakeRefListResize` handles the slow reallocation case. | `objects/list.go` |
+| <Cpy path="Include/internal/pycore_list.h" lines="56-75">56-75</Cpy> | `_PyList_CompactFreeList` | Called by the cyclic GC sweep phase to drain the per-interpreter list free-list down to its minimum size. | `objects/list.go` |
+| <Cpy path="Include/internal/pycore_list.h" lines="76-90">76-90</Cpy> | `struct _Py_list_freelist` | Per-interpreter state: `items[PyList_MAXFREELIST]` array of recycled headers plus `numfree` counter. | `objects/list.go` |
+| <Cpy path="Include/internal/pycore_list.h" lines="91-100">91-100</Cpy> | `ob_alloc` field note | Documents that `PyListObject.ob_alloc` (allocated capacity) is always `>= ob_size` (used length); the gap is the over-allocation buffer. | `objects/list.go` |
+
+## Reading
+
+### `_PyList_ITEMS` (lines 1 to 25)
+
+<CpyLink path="Include/internal/pycore_list.h" lines="1-25" />
+
+```c
+static inline PyObject **
+_PyList_ITEMS(PyObject *op)
+{
+    return ((PyListObject *)op)->ob_item;
+}
+```
+
+`PyListObject` stores its elements in a separately allocated pointer
+array. `ob_item` points at index 0 of this array. `ob_size` (inherited
+from `PyVarObject`) is the number of live elements. `ob_alloc` is the
+number of slots allocated in the pointer array.
+
+The invariant is `0 <= ob_size <= ob_alloc`. When `ob_size == ob_alloc`
+the next append will trigger `list_resize`, which calls `realloc` and
+bumps `ob_alloc` to `ob_size * 1.125 + 6` (rounded to a multiple of
+four), giving amortized O(1) appends.
+
+`_PyList_ITEMS` performs no type check. It is used inside the interpreter
+where the type is already known, and in tight inner loops where the
+overhead of `PyList_Check` would be measurable. Callers outside
+`Objects/listobject.c` should use the public `PyList_GET_ITEM` macro,
+which does include an assertion in debug builds.
+
+In gopy, `objects/list.go` stores the item array as a `[]Object` slice.
+The `Items()` method returns the underlying slice header directly,
+matching the zero-copy intent of `_PyList_ITEMS`.
+
+### `_PyList_AppendTakeRef` (lines 26 to 55)
+
+<CpyLink path="Include/internal/pycore_list.h" lines="26-55" />
+
+```c
+static inline int
+_PyList_AppendTakeRef(PyListObject *self, PyObject *newitem)
+{
+    assert(newitem != NULL);
+    Py_ssize_t len = self->ob_size;
+    Py_ssize_t allocated = self->ob_alloc;
+    assert(allocated >= len);
+    if (allocated > len) {
+        self->ob_item[len] = newitem;
+        self->ob_size = len + 1;
+        return 0;
+    }
+    return _PyList_AppendTakeRefListResize(self, newitem);
+}
+```
+
+The "TakeRef" suffix means the function consumes the reference: the
+caller must already own a reference to `newitem` and must not decrement
+it afterwards. This is the convention used by `LIST_APPEND` and
+`BUILD_LIST_UNPACK` bytecodes, where the value on the stack is popped
+(ownership transferred) before the append call.
+
+The inline fast path runs in constant time when capacity is available: it
+writes the pointer and increments `ob_size` with no function call overhead.
+Only when `ob_size == ob_alloc` does execution fall through to
+`_PyList_AppendTakeRefListResize`, which calls `realloc` and may return a
+Python `MemoryError`.
+
+In gopy, the equivalent in `objects/list.go` is a Go append to the
+`[]Object` slice. The "steal reference" contract is vacuous under Go's GC,
+but the function signature is preserved so that ported bytecode handlers
+read consistently with CPython's source.
+
+### Free-list (lines 56 to 100)
+
+<CpyLink path="Include/internal/pycore_list.h" lines="56-100" />
+
+```c
+#define PyList_MAXFREELIST  80
+
+struct _Py_list_freelist {
+    PyListObject *items[PyList_MAXFREELIST];
+    int numfree;
+};
+```
+
+When a `PyListObject` header is deallocated, `list_dealloc` checks
+whether `numfree < PyList_MAXFREELIST`. If so, the header (not the item
+array, which is freed immediately) is stashed in the `items` array and
+`numfree` is incremented. The next call to `PyList_New` that does not
+find a suitable cached item array will pop from this list instead of
+calling `PyObject_GC_New`.
+
+The free-list is per-interpreter (accessed via
+`_PyInterpreterState_GET()->list.freelist`) so it does not require a
+lock in free-threaded builds.
+
+`_PyList_CompactFreeList` is called by the GC to shrink the free-list
+back to a smaller bound (currently 0), freeing the headers that are
+otherwise held indefinitely. Without this, a workload that creates and
+destroys millions of short-lived lists would permanently pin 80 headers
+per interpreter.
+
+In gopy, list headers are ordinary heap allocations managed by Go's GC.
+The free-list is not ported; the `_Py_list_freelist` struct is defined
+as an empty placeholder so that `struct _Py_interp_cached_objects`
+compiles without change.

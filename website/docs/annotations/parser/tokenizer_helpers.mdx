@@ -1,0 +1,228 @@
+---
+title: Parser/tokenizer/helpers.c
+description: Shared tokenizer utilities: allocation, operator dispatch, encoding-file scan, and the public Get entry point.
+cpython_path: Parser/tokenizer/helpers.c
+cpython_version: "3.14"
+lines: 581
+status: annotated
+ported_to: parser/tokenizer/
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Parser/tokenizer/helpers.c`
+
+<CpyLink path="Parser/tokenizer/helpers.c" />
+
+The utility layer shared by all three tokenizer back-ends (file, string,
+readline). Back-end-specific code lives in `file_tokenizer.c`,
+`string_tokenizer.c`, and `readline_tokenizer.c`; everything they have in
+common lives here.
+
+The two most-referenced pieces are `_PyTokenizer_New` / `_PyTokenizer_Free`
+(lifecycle) and the `_PyToken_OneChar` / `_PyToken_TwoChars` /
+`_PyToken_ThreeChars` operator-dispatch table. A third notable function,
+`_PyTokenizer_FindEncodingFilename`, provides the encoding-detection entry
+point for the `-c` flag and import machinery when no `tok_state` is yet
+alive.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Parser/tokenizer/helpers.c" lines="1-48">1-48</Cpy>     | `_PyTokenizer_New` | `calloc`s a `tok_state`, sets safe defaults (tabsize=8, `done=E_OK`). | `newTokenizer` in `parser/tokenizer/helpers.go` |
+| <Cpy path="Parser/tokenizer/helpers.c" lines="50-118">50-118</Cpy> | `_PyTokenizer_Free` | Releases every heap field: line buffer, encoding string, prompt copies, mode stack. | `(*Tokenizer).Free` |
+| <Cpy path="Parser/tokenizer/helpers.c" lines="120-188">120-188</Cpy>| `_PyToken_OneChar` | Single-character operator dispatch (switch on `c1`). | `parser/tokenizer/op.go:OneChar` |
+| <Cpy path="Parser/tokenizer/helpers.c" lines="190-328">190-328</Cpy>| `_PyToken_TwoChars` | Two-character operator dispatch (nested switch `c1`, `c2`). | `parser/tokenizer/op.go:TwoChars` |
+| <Cpy path="Parser/tokenizer/helpers.c" lines="330-400">330-400</Cpy>| `_PyToken_ThreeChars` | Three-character operator dispatch (triple-nested switch). | `parser/tokenizer/op.go:ThreeChars` |
+| <Cpy path="Parser/tokenizer/helpers.c" lines="402-530">402-530</Cpy>| `_PyTokenizer_FindEncodingFilename` | Opens a file, reads two lines, returns any `coding:` declaration. | `FindEncodingFilename` |
+| <Cpy path="Parser/tokenizer/helpers.c" lines="532-581">532-581</Cpy>| `_PyTokenizer_Get` | Public entry: delegates to `tok->underflow`-backed `tok_get`; coerces decode errors to `ERRORTOKEN`. | `(*Tokenizer).Get` |
+
+## Reading
+
+### `_PyTokenizer_New` (lines 1 to 48)
+
+<CpyLink path="Parser/tokenizer/helpers.c" lines="1-48" />
+
+```c
+struct tok_state *
+_PyTokenizer_New(void)
+{
+    struct tok_state *tok = (struct tok_state *)PyMem_Calloc(1, sizeof(*tok));
+    if (tok == NULL) {
+        PyErr_NoMemory();
+        return NULL;
+    }
+    tok->filename    = NULL;
+    tok->decoding_state = STATE_INIT;
+    tok->decoding_erred = 0;
+    tok->indent      = 0;
+    tok->indstack[0] = 0;
+    tok->atbol       = 1;   /* very first token is at beginning of line */
+    tok->pendin      = 0;
+    tok->tabsize     = 8;   /* PEP 8 default */
+    tok->done        = E_OK;
+    tok->async_def   = 0;
+    tok->async_def_indent = 0;
+    tok->async_def_nl = 0;
+    tok->tok_mode_stack_index = 0;
+    tok->tok_mode_stack[0].kind = TOK_REGULAR_MODE;
+    return tok;
+}
+```
+
+`PyMem_Calloc` zeroes the struct, so most fields need no explicit
+initialisation. The ones set explicitly are those where zero is not the right
+default: `atbol=1` means "we are at the beginning of the very first line" so
+indentation checking fires immediately; `tabsize=8` is the Python default tab
+width; `tok_mode_stack[0].kind = TOK_REGULAR_MODE` puts the f-string mode
+stack in its ground state.
+
+In the gopy mirror, `newTokenizer()` allocates a `Tokenizer` value on the Go
+heap and sets the same fields. The mode stack becomes a `[]mode` slice with
+one pre-pushed entry.
+
+### `_PyTokenizer_Free` (lines 50 to 118)
+
+<CpyLink path="Parser/tokenizer/helpers.c" lines="50-118" />
+
+```c
+void
+_PyTokenizer_Free(struct tok_state *tok)
+{
+    if (tok->encoding != NULL)
+        PyMem_Free(tok->encoding);
+    Py_XDECREF(tok->filename);
+    if (tok->fp != NULL && tok->fp != stdin)
+        fclose(tok->fp);
+    if (tok->input)
+        PyMem_Free((char *)tok->input);
+    PyMem_Free(tok);
+}
+```
+
+The file is closed here only if it was opened by `_PyTokenizer_FromFile`;
+when the caller passes an already-open `FILE*` the tokenizer sets a flag to
+suppress the `fclose`. The `input` field is the copy of the source string made
+for string tokenizers that needed a trailing newline appended; it is `NULL`
+when the original buffer was used directly.
+
+### `_PyToken_OneChar` / `TwoChars` / `ThreeChars` (lines 120 to 400)
+
+<CpyLink path="Parser/tokenizer/helpers.c" lines="120-400" />
+
+The three operator-dispatch functions implement a longest-match probe. The
+lexer in `tok_get_normal_mode` calls them in sequence, keeping the last
+non-`OP` result:
+
+```c
+/* inside tok_get_normal_mode */
+int type = _PyToken_OneChar(c);
+if (/* peek succeeds */) {
+    int type2 = _PyToken_TwoChars(c, c2);
+    if (type2 != OP) {
+        type = type2;
+        if (/* peek succeeds */) {
+            int type3 = _PyToken_ThreeChars(c, c2, c3);
+            if (type3 != OP)
+                type = type3;
+            else
+                tok_backup(tok, c3);
+        }
+    } else
+        tok_backup(tok, c2);
+}
+```
+
+`_PyToken_OneChar` covers the 23 single-character operators including `(`,
+`)`, `[`, `]`, `{`, `}`, `,`, `;`, `:`, `@`, `.`, `+`, `-`, `*`, `/`, `|`,
+`&`, `^`, `~`, `<`, `>`, `=`, `%`. It returns `OP` as a sentinel meaning "no
+one-char match" (not to be confused with the `OP` pseudo-token kind).
+
+`_PyToken_TwoChars` handles 32 two-character sequences including walrus `:=`
+(PEP 572), floor-division `//`, matrix multiply `@=`, return annotation `->`,
+and the Python-2-compat not-equal `<>`.
+
+`_PyToken_ThreeChars` covers five sequences: `**=`, `...`, `//=`, `<<=`,
+`>>=`.
+
+The Go port in `parser/tokenizer/op.go` preserves the switch shape verbatim.
+Token-kind constants become a `type Kind int` in `parser/token/`.
+
+### `_PyTokenizer_FindEncodingFilename` (lines 402 to 530)
+
+<CpyLink path="Parser/tokenizer/helpers.c" lines="402-530" />
+
+```c
+const char *
+_PyTokenizer_FindEncodingFilename(int fd, PyObject *filename)
+{
+    struct tok_state *tok;
+    FILE *fp;
+    const char *encoding = NULL;
+
+    fd = dup(fd);
+    if (fd < 0)
+        return NULL;
+    fp = fdopen(fd, "r");
+    if (fp == NULL) {
+        close(fd);
+        return NULL;
+    }
+    tok = _PyTokenizer_FromFile(fp, NULL, NULL, NULL);
+    if (tok == NULL) {
+        fclose(fp);
+        return NULL;
+    }
+    ...
+    /* read at most two tokens; stop at NEWLINE or ENCODING */
+    while (tok->done == E_OK) {
+        struct token token;
+        (void) _PyTokenizer_Get(tok, &token);
+        if (token.type == ENCODING) {
+            encoding = tok->encoding;
+            tok->encoding = NULL;   /* steal the string */
+            break;
+        }
+        if (token.type == NEWLINE)
+            break;
+    }
+    _PyTokenizer_Free(tok);
+    fclose(fp);
+    return encoding;    /* caller must PyMem_Free */
+}
+```
+
+Used by `importlib._bootstrap_external` (via `_imp.source_hash`) and the `-c`
+command-line path to determine the encoding of a file before creating a full
+tokenizer or parser. It duplicates the file descriptor so the caller's
+position is not disturbed, then creates a throw-away `tok_state` just to
+consume the `ENCODING` pseudo-token.
+
+The caller receives a heap-allocated string and must call `PyMem_Free` on it.
+The gopy equivalent returns a plain `string` (no explicit free needed).
+
+### `_PyTokenizer_Get` (lines 532 to 581)
+
+<CpyLink path="Parser/tokenizer/helpers.c" lines="532-581" />
+
+```c
+int
+_PyTokenizer_Get(struct tok_state *tok, struct token *token)
+{
+    int result = tok_get(tok, token);
+    if (tok->decoding_erred) {
+        result = ERRORTOKEN;
+        tok->done = E_DECODE;
+    }
+    return result;
+}
+```
+
+The sole public entry point for advancing the tokenizer. All callers (the PEG
+parser, `tokenize.py`'s C accelerator, the encoding scanner above) go through
+here. The decode-error coercion centralises a concern that would otherwise need
+to be handled in every caller: if `iconv` failed on a non-UTF-8 file, the next
+token is unconditionally `ERRORTOKEN` and `tok->done` is set to stop further
+scanning. The internal `tok_get` that does the real work is defined in
+`Parser/lexer/lexer.c:1616`.

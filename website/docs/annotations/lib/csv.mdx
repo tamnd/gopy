@@ -1,0 +1,142 @@
+---
+title: Lib/csv.py
+description: Thin pure-Python wrapper around the _csv C extension, providing DictReader, DictWriter, and dialect helpers.
+cpython_path: Lib/csv.py
+cpython_version: "3.14"
+lines: 100
+status: annotated
+ported_to: module/csv/module.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Lib/csv.py`
+
+<CpyLink path="Lib/csv.py" />
+
+`csv.py` is almost entirely a thin layer on top of the `_csv` C
+extension. The C module supplies the `reader` and `writer` types, the
+dialect registry (`register_dialect`, `unregister_dialect`,
+`list_dialects`, `get_dialect`), the `Dialect` base class, and all
+quoting constants. The Python file adds two convenience classes,
+`DictReader` and `DictWriter`, and three dialect subclasses (`excel`,
+`excel_tab`, `unix_dialect`).
+
+The split is intentional: parsing CSV byte-by-byte at Python speed is
+too slow for large files, so the state machine lives in C. The Python
+layer handles the dict-based API and dialect registration, which are
+called rarely and do not need C-level speed.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Lib/csv.py" lines="1-20">1-20</Cpy> | Imports, `__all__`, re-exports from `_csv` | Pulls `reader`, `writer`, `Dialect`, `Error`, constants, and registry functions from `_csv`. | `module/csv/module.go` |
+| <Cpy path="Lib/csv.py" lines="21-40">21-40</Cpy> | `excel`, `excel_tab`, `unix_dialect` | Built-in dialect subclasses registered at import time; `excel` is the RFC 4180 default, `unix_dialect` uses `\n` line terminator. | `module/csv/module.go` |
+| <Cpy path="Lib/csv.py" lines="41-75">41-75</Cpy> | `DictReader` | Wraps a `reader`; auto-detects `fieldnames` from first row; yields `dict` (or custom `restkey`/`restval`) per row. | `module/csv/module.go` |
+| <Cpy path="Lib/csv.py" lines="76-100">76-100</Cpy> | `DictWriter` | Wraps a `writer`; validates rows against `fieldnames`; `writeheader()` writes the header row; `writerow`/`writerows` enforce field ordering. | `module/csv/module.go` |
+
+## Reading
+
+### `DictReader` fieldname detection (lines 41 to 75)
+
+<CpyLink path="Lib/csv.py" lines="41-75" />
+
+```python
+class DictReader:
+    def __init__(self, f, fieldnames=None, restkey=None, restval=None,
+                 dialect="excel", *args, **kwds):
+        self._fieldnames = fieldnames   # list of keys for the dict
+        self.restkey = restkey          # key to catch long rows
+        self.restval = restval          # default value for short rows
+        self.reader = reader(f, dialect, *args, **kwds)
+        self.dialect = dialect
+        self.line_num = 0
+
+    @property
+    def fieldnames(self):
+        if self._fieldnames is None:
+            try:
+                self._fieldnames = next(self.reader)
+            except StopIteration:
+                pass
+        self.line_num = self.reader.line_num
+        return self._fieldnames
+
+    def __next__(self):
+        if self.line_num == 0:
+            # Used only for its side effect.
+            self.fieldnames
+        row = next(self.reader)
+        self.line_num = self.reader.line_num
+        # unlike the basic reader, we prefer not to return blanks,
+        # because we will typically wind up with a dict full of None
+        # values
+        while row == []:
+            row = next(self.reader)
+        d = dict(zip(self.fieldnames, row))
+        lf = len(self.fieldnames)
+        lr = len(row)
+        if lf < lr:
+            d[self.restkey] = row[lf:]
+        elif lf > lr:
+            for key in self.fieldnames[lr:]:
+                d[key] = self.restval
+        return d
+```
+
+`fieldnames` is a lazy property. On the first access it calls
+`next(self.reader)` to consume the header row from the underlying `_csv`
+reader, storing the result in `_fieldnames`. Subsequent accesses return
+the cached value. `__next__` calls `self.fieldnames` on the first
+iteration (when `line_num == 0`) purely for this side effect.
+
+Row length mismatches are handled symmetrically: extra fields are
+collected into a list under `self.restkey` (default `None`), and missing
+fields are filled with `self.restval` (default `None`). This means a
+short row produces a dict with `None` values for absent columns, which is
+distinct from the column being absent from `fieldnames` entirely.
+
+### `DictWriter.writerow` field ordering (lines 76 to 100)
+
+<CpyLink path="Lib/csv.py" lines="76-100" />
+
+```python
+class DictWriter:
+    def __init__(self, f, fieldnames, restval='', extrasaction='raise',
+                 dialect='excel', *args, **kwds):
+        self.fieldnames = fieldnames    # keys for the dict
+        self.restval = restval          # for writing short dicts
+        if extrasaction.lower() not in ("raise", "ignore"):
+            raise ValueError("extrasaction (%r) must be 'raise' or 'ignore'"
+                             % extrasaction)
+        self.extrasaction = extrasaction
+        self.writer = writer(f, dialect, *args, **kwds)
+
+    def writeheader(self):
+        header = dict(zip(self.fieldnames, self.fieldnames))
+        return self.writerow(header)
+
+    def _dict_to_list(self, rowdict):
+        if self.extrasaction == "raise":
+            wrong_fields = rowdict.keys() - self.fieldnames
+            if wrong_fields:
+                raise ValueError("dict contains fields not in fieldnames: "
+                                 + ", ".join([repr(x) for x in wrong_fields]))
+        return [rowdict.get(key, self.restval) for key in self.fieldnames]
+
+    def writerow(self, rowdict):
+        return self.writer.writerow(self._dict_to_list(rowdict))
+```
+
+`_dict_to_list` enforces column order by iterating `self.fieldnames` and
+calling `rowdict.get(key, self.restval)` for each. This means the output
+column order is determined by the `fieldnames` list given at construction
+time, not by insertion order in the dict. If `extrasaction == "raise"`
+(the default), any key in `rowdict` that is not in `fieldnames` causes a
+`ValueError` before writing anything.
+
+`writeheader` is implemented by constructing an identity dict
+`{name: name for name in fieldnames}` and passing it through `writerow`.
+This means the header row goes through the same `_dict_to_list` path as
+data rows, so dialect quoting rules apply to field names too.

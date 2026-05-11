@@ -1,0 +1,194 @@
+---
+title: Python/ceval_gil.c
+description: GIL lifecycle, acquire/release, eval-breaker bit coordination, and switch interval.
+cpython_path: Python/ceval_gil.c
+cpython_version: "3.14"
+lines: 1434
+status: annotated
+ported_to: vm/gil.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Python/ceval_gil.c`
+
+<CpyLink path="Python/ceval_gil.c" />
+
+The Global Interpreter Lock. One mutex-plus-condvar per interpreter
+(or shared across subinterpreters in the default configuration).
+`take_gil` blocks until it can atomically set the `gil_locked` flag;
+`drop_gil` signals any waiting thread. The eval-breaker mechanism in
+`ceval.c` checks a bitmask on every backward jump and function call;
+`ceval_gil.c` sets and clears those bits as the GIL state changes.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Python/ceval_gil.c" lines="55-148">55-148</Cpy>    | `copy_eval_breaker_bits`, `update_eval_breaker_for_thread` | Manage per-thread eval-breaker bitmask. | `vm/gil.go:updateEvalBreaker` |
+| <Cpy path="Python/ceval_gil.c" lines="149-215">149-215</Cpy>  | `_gil_initialize`, `gil_created`, `create_gil`, `destroy_gil`, `recreate_gil` | GIL object lifecycle. | `vm/gil.go:GILCreate` |
+| <Cpy path="Python/ceval_gil.c" lines="203-284">203-284</Cpy>  | `drop_gil_impl`, `drop_gil` | Release the lock and signal waiting threads. | `vm/gil.go:DropGIL` |
+| <Cpy path="Python/ceval_gil.c" lines="285-419">285-419</Cpy>  | `take_gil` | Acquire the lock; may request the current holder to drop via eval-breaker. | `vm/gil.go:TakeGIL` |
+| <Cpy path="Python/ceval_gil.c" lines="420-459">420-459</Cpy>  | `_PyEval_SetSwitchInterval`, `_PyEval_GetSwitchInterval`, `_PyEval_ThreadsInitialized` | Switch interval configuration and query. | `vm/gil.go:SetSwitchInterval` |
+| <Cpy path="Python/ceval_gil.c" lines="460-549">460-549</Cpy>  | `current_thread_holds_gil`, `init_shared_gil`, `init_own_gil`, `_PyEval_InitGIL`, `_PyEval_FiniGIL` | Per-interpreter GIL initialization. | `vm/gil.go:InitGIL` |
+| <Cpy path="Python/ceval_gil.c" lines="550-609">550-609</Cpy>  | `PyEval_InitThreads`, `PyEval_AcquireLock`, `PyEval_ReleaseLock`, `_PyEval_AcquireLock`, `_PyEval_ReleaseLock`, `PyEval_AcquireThread`, `PyEval_ReleaseThread` | Public thread API. | `vm/gil_public.go` |
+
+## Reading
+
+### Eval-breaker bits (lines 55 to 148)
+
+<CpyLink path="Python/ceval_gil.c" lines="55-148" />
+
+The eval-breaker is a bitmask word read on every backward jump
+(`JUMP_BACKWARD`) and at function entry (`RESUME`). Bits include
+`_PY_GIL_DROP_REQUEST_BIT` (another thread wants the GIL),
+`_PY_SIGNALS_PENDING_BIT`, `_PY_CALLS_TO_DO_BIT`, and others.
+`update_eval_breaker_for_thread` propagates the interpreter-level
+bits to the target thread's copy atomically:
+
+```c
+static void
+update_eval_breaker_for_thread(PyInterpreterState *interp, PyThreadState *tstate)
+{
+    ...
+    uintptr_t bits = _Py_atomic_load_uintptr_relaxed(&interp->ceval.eval_breaker);
+    /* Copy interpreter-wide bits that do not belong to any one thread */
+    copy_eval_breaker_bits(bits, tstate);
+    ...
+}
+```
+
+`copy_eval_breaker_bits` does the per-thread write under the same
+memory ordering used by `take_gil` so the acquiring thread always sees
+an up-to-date snapshot of pending work before entering its first
+bytecode.
+
+### `take_gil` (lines 285 to 419)
+
+<CpyLink path="Python/ceval_gil.c" lines="285-419" />
+
+The acquisition loop. If the GIL is locked by another thread, the
+requesting thread sets `_PY_GIL_DROP_REQUEST_BIT` on the current
+holder's eval-breaker and waits on a condvar with the switch interval
+timeout (default 5 ms):
+
+```c
+static void
+take_gil(PyThreadState *tstate)
+{
+    ...
+    if (_Py_atomic_load_int_relaxed(&gil->locked)) {
+        /* Request the current holder to drop */
+        SET_GIL_DROP_REQUEST(interp);
+        ...
+        int timed_out = 0;
+        COND_TIMED_WAIT(gil->cond, gil->mutex, interval, timed_out);
+        ...
+    }
+    ...
+    _Py_atomic_store_int_relaxed(&gil->locked, 1);
+    _Py_atomic_store_int_relaxed(&gil->last_holder, (uintptr_t)tstate);
+    ...
+    RESET_GIL_DROP_REQUEST(interp);
+    update_eval_breaker_for_thread(interp, tstate);
+}
+```
+
+The current holder drops the GIL at the next eval-breaker check in
+`ceval.c`. `take_gil` then re-locks and clears the request bit. The
+function also handles `KeyboardInterrupt` delivery during the wait:
+if the main thread is the waiting thread and a signal is pending, it
+sets the signal flag and returns, allowing the signal handler to run
+before the GIL is reacquired normally.
+
+### `drop_gil` (lines 203 to 284)
+
+<CpyLink path="Python/ceval_gil.c" lines="203-284" />
+
+Releases the mutex, broadcasts on the condvar, and clears its own
+`_PY_GIL_DROP_REQUEST_BIT`. If `final_release` is set (thread
+exiting), it also clears all eval-breaker bits set on behalf of the
+current thread:
+
+```c
+static void
+drop_gil(struct _ceval_state *ceval, PyThreadState *tstate,
+         int final_release)
+{
+    ...
+    _Py_atomic_store_int_relaxed(&gil->locked, 0);
+    ...
+    COND_SIGNAL(gil->cond);
+    MUTEX_UNLOCK(gil->mutex);
+
+    if (final_release) {
+        /* Remove this thread's bits from the eval-breaker */
+        ...
+        update_eval_breaker_for_thread(interp, NULL);
+    }
+}
+```
+
+Signalling on `gil->cond` wakes exactly one waiting thread; because
+the condvar uses a plain broadcast in some configurations, spurious
+wakeups are handled by the `take_gil` loop re-checking `gil->locked`
+before proceeding.
+
+### Sub-interpreter GIL modes (lines 477 to 548)
+
+<CpyLink path="Python/ceval_gil.c" lines="477-548" />
+
+Each `PyInterpreterState` can have its own GIL (`own_gil` flag,
+PEP 684) or share the main interpreter's. `init_own_gil` initializes
+a fresh `_gil_runtime_state`; `init_shared_gil` points to the main
+runtime's singleton:
+
+```c
+static void
+init_own_gil(PyInterpreterState *interp, struct _gil_runtime_state *gil)
+{
+    assert(!gil_created(gil));
+    _gil_initialize(gil);
+    assert(gil_created(gil));
+    interp->ceval.gil = gil;
+}
+
+static void
+init_shared_gil(PyInterpreterState *interp, struct _gil_runtime_state *gil)
+{
+    assert(gil_created(gil));
+    interp->ceval.gil = gil;
+}
+```
+
+`_PyEval_InitGIL` chooses between the two paths based on the
+`isolated` flag passed to `_interpreters.create()`. This is the
+mechanism behind PEP 684 sub-interpreter isolation. A subinterpreter
+created with `isolated=True` acquires and releases its own lock
+independently; it can run concurrently with the main interpreter on
+a second OS thread, because the two interpreters' `take_gil`/`drop_gil`
+calls operate on different `_gil_runtime_state` instances.
+
+## Notes for the gopy mirror
+
+`vm/gil.go` implements the GIL as a Go `sync.Mutex` plus a
+`sync.Cond`. The eval-breaker is a Go `atomic.Uint32`. The switch
+interval maps to a Go ticker that fires `GIL_DROP_REQUEST` every
+5 ms by default. Sub-interpreter GIL isolation is supported: the
+`Interpreter` struct carries either a pointer to the shared runtime
+`GIL` or an interpreter-local one, matching the `init_shared_gil`
+/ `init_own_gil` split.
+
+## CPython 3.14 changes worth noting
+
+PEP 703 free-threaded mode (`Py_GIL_DISABLED`) makes `ceval_gil.c`
+optional at runtime. In free-threaded builds the file still compiles
+but `take_gil` and `drop_gil` become no-ops; the eval-breaker bits
+that previously coordinated GIL hand-off are repurposed for
+thread-safe signal delivery and pending-call processing. The
+`_PyEval_InitGIL` path that chooses between `init_own_gil` and
+`init_shared_gil` based on the interpreter isolation flag is new in
+3.12 (PEP 684) and stable in 3.14. In 3.14 the `recreate_gil` path
+(used after `fork()`) gained an explicit drain of the pending-signals
+queue to avoid a race between the forked child's signal state and the
+freshly created GIL.

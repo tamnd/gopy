@@ -1,0 +1,176 @@
+---
+title: Modules/_sre.c
+description: C engine for the re module — NFA-based regex matching with an opcode dispatch loop, repeat backtracking, and an incremental scanner object.
+cpython_path: Modules/_sre.c
+cpython_version: "3.14"
+lines: 3000
+status: annotated
+ported_to: module/re/module.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Modules/_sre.c`
+
+<CpyLink path="Modules/_sre.c" />
+
+`_sre` is the C engine that drives `re`. Pattern compilation is done in
+Python by `Lib/sre_compile.py`, which emits a flat bytecode array and passes
+it to the C layer as a Python `bytes` object. `_sre` receives that bytecode
+and executes it against a subject string using an NFA simulation.
+
+The module exposes three public types: `re.Pattern` (compiled pattern),
+`re.Match` (match result), and `re.Scanner` (incremental iterator). All
+three are defined entirely in this file. The Python-level `re` module
+(`Lib/re/__init__.py`) is a thin wrapper that calls `_sre.compile` and
+translates exceptions.
+
+The matching engine is a hand-written opcode interpreter. There is no
+recursive call for most opcodes; the main loop is a `while (1)` switch over
+`pattern[ptr]`. Backtracking is handled through an explicit mark stack
+(`state->mark`) and, for repeats, a `RepeatObject` linked list pushed on
+`state->repeat`.
+
+Because the engine operates on Python string data, it is instantiated three
+times via C preprocessor macros: once for 1-byte strings (Latin-1 / bytes),
+once for 2-byte UCS-2, and once for 4-byte UCS-4. The macro
+`SRE(name)` expands to `sre_ucs1_name`, `sre_ucs2_name`, or `sre_ucs4_name`
+depending on the `SRE_CHAR` width in scope.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Modules/_sre.c" lines="1-150">1-150</Cpy> | includes, `SRE_STATE`, `SRE_REPEAT` structs | Header and the two central state structs used throughout matching. | `module/re/module.go:SreState` |
+| <Cpy path="Modules/_sre.c" lines="150-500">150-500</Cpy> | `SRE_MATCH`, opcode dispatch loop | Main NFA dispatch: `LITERAL`, `NOT_LITERAL`, `ANY`, `IN`, `AT`, `GROUPREF`, `BRANCH`, `SUBPATTERN`, `ASSERT`, `ASSERT_NOT`. | `module/re/module.go:SreMatch` |
+| <Cpy path="Modules/_sre.c" lines="500-900">500-900</Cpy> | `REPEAT`, `REPEAT_ONE`, `MIN_REPEAT_ONE` opcodes | Greedy and lazy repeat matching with backtrack save/restore via mark stack. | `module/re/module.go:SreRepeat` |
+| <Cpy path="Modules/_sre.c" lines="900-1200">900-1200</Cpy> | `SRE_SEARCH`, `sre_search` | Search for pattern anywhere in the subject; tries `SRE_MATCH` at each position with fast-path character class skip. | `module/re/module.go:SreSearch` |
+| <Cpy path="Modules/_sre.c" lines="1200-1700">1200-1700</Cpy> | `PatternObject`, `pattern_match`, `pattern_search`, `pattern_findall`, `pattern_finditer`, `pattern_sub`, `pattern_subn` | `re.Pattern` type and its methods. | `module/re/module.go:PatternObject` |
+| <Cpy path="Modules/_sre.c" lines="1700-2200">1700-2200</Cpy> | `MatchObject`, `match_group`, `match_groups`, `match_groupdict`, `match_span`, `match_start`, `match_end`, `match_expand` | `re.Match` type: group extraction and span calculation. | `module/re/module.go:MatchObject` |
+| <Cpy path="Modules/_sre.c" lines="2200-2700">2200-2700</Cpy> | `ScannerObject`, `scanner_match`, `scanner_search` | `re.Scanner` incremental iterator used by `findall` and `finditer`. | `module/re/module.go:ScannerObject` |
+| <Cpy path="Modules/_sre.c" lines="2700-3000">2700-3000</Cpy> | `_sre_compile_impl`, `_sre_methods[]`, `_sremodule`, `PyInit__sre` | Module init: receive compiled bytecode from Python and construct a `PatternObject`. | `module/re/module.go:Module` |
+
+## Reading
+
+### `SRE_STATE` layout (lines 1 to 150)
+
+<CpyLink path="Modules/_sre.c" lines="1-150" />
+
+`SRE_STATE` is the scratch buffer that lives on the C stack for the duration
+of a single match attempt. It holds pointers into the subject string, the
+mark array for group captures, and the repeat stack:
+
+```c
+typedef struct {
+    const void *beginning;  /* start of subject buffer */
+    const void *start;      /* current search start */
+    const void *end;        /* one past end of subject */
+    Py_ssize_t  pos;        /* match start position (code units) */
+    Py_ssize_t  endpos;     /* match end limit */
+    Py_ssize_t  lastindex;  /* index of last matched group */
+    Py_ssize_t  lastmark;   /* highest mark index used */
+    Py_ssize_t *mark;       /* capture group start/end positions */
+    int         charsize;   /* 1, 2, or 4 */
+    SRE_REPEAT *repeat;     /* innermost active repeat */
+    int         error;      /* non-zero on failure/error */
+} SRE_STATE;
+```
+
+`mark` is a flat array indexed by `2*group` (start) and `2*group+1` (end).
+`SRE_REPEAT` is a linked list node that records the repeat count and a saved
+copy of `mark` so that backtracking can restore capture state after a failed
+greedy attempt.
+
+### `SRE_MATCH` opcode dispatch (lines 150 to 500)
+
+<CpyLink path="Modules/_sre.c" lines="150-500" />
+
+The inner loop reads one word from the pattern buffer at `ctx->pattern_ptr`
+and switches on it. Most opcodes consume one or two words and advance both
+the pattern pointer and the subject pointer:
+
+```c
+while (1) {
+    switch (*pattern++) {
+    case SRE_OP_FAILURE:
+        RETURN_FAILURE;
+
+    case SRE_OP_SUCCESS:
+        state->ptr = ptr;
+        RETURN_SUCCESS;
+
+    case SRE_OP_LITERAL:
+        if (ptr >= end || (SRE_CODE)*ptr != pattern[0])
+            RETURN_FAILURE;
+        pattern++;
+        ptr++;
+        break;
+
+    case SRE_OP_ANY:
+        if (ptr >= end || SRE_IS_LINEBREAK((SRE_CODE)*ptr))
+            RETURN_FAILURE;
+        ptr++;
+        break;
+
+    case SRE_OP_BRANCH: {
+        /* try each alternative; backtrack on FAILURE */
+        ...
+    }
+    ...
+    }
+}
+```
+
+`RETURN_FAILURE` and `RETURN_SUCCESS` are macros that handle the simulated
+call stack: when the engine needs to try alternatives it pushes a
+`SRE_STACKITEM` and `goto` to the retry label rather than making a real
+recursive call.
+
+### `REPEAT` and `REPEAT_ONE` backtracking (lines 500 to 900)
+
+<CpyLink path="Modules/_sre.c" lines="500-900" />
+
+`REPEAT_ONE` handles the common case `x+`, `x*`, `x?` where the repeated
+atom matches exactly one character. It counts the maximum number of
+characters the atom matches greedily, then backs off one at a time trying
+the continuation:
+
+```c
+case SRE_OP_REPEAT_ONE: {
+    Py_ssize_t mincount = pattern[1];
+    Py_ssize_t maxcount = pattern[2];
+
+    /* count maximum greedy matches */
+    Py_ssize_t count = SRE_COUNT(state, pattern+3, maxcount);
+    if (count < mincount) RETURN_FAILURE;
+
+    /* try continuation from longest to shortest */
+    while (count >= mincount) {
+        state->ptr = ptr + count * state->charsize;
+        ret = SRE_MATCH(state, pattern + pattern[0]);
+        if (ret != SRE_ERROR_FAILURE) RETURN_ON_ERROR(ret);
+        count--;
+    }
+    RETURN_FAILURE;
+}
+```
+
+The general `REPEAT` opcode (for patterns with sub-expressions longer than
+one character) pushes an `SRE_REPEAT` node onto `state->repeat` and uses
+the mark-save/restore mechanism to backtrack group captures across
+iterations.
+
+## gopy mirror
+
+`module/re/module.go`. The opcode constants are generated from the same
+`sre_constants.py` table used by `sre_compile.py`. The Go engine mirrors the
+three-width instantiation pattern using a `charWidth` parameter rather than
+C preprocessor macros.
+
+## CPython 3.14 changes
+
+The `ATOMIC_GROUP` and `POSSESSIVE_REPEAT` opcodes were added in 3.11 to
+support atomic groups and possessive quantifiers. The `GROUPREF_EXISTS`
+opcode for conditional patterns has been present since Python 2.4.
+`PatternObject` gained a `__class_getitem__` slot in 3.9 to support
+`re.Pattern[str]` generic aliases.

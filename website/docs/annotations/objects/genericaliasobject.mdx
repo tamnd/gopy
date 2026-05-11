@@ -1,0 +1,192 @@
+---
+title: Objects/genericaliasobject.c
+description: Py_GenericAlias — the runtime object behind PEP 585 generic syntax such as list[int] and dict[str, int].
+cpython_path: Objects/genericaliasobject.c
+cpython_version: "3.14"
+lines: 700
+status: annotated
+ported_to: objects/generic_alias.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Objects/genericaliasobject.c`
+
+<CpyLink path="Objects/genericaliasobject.c" />
+
+PEP 585 generic alias objects. Before 3.9, parameterizing a built-in collection
+type at runtime (`list[int]`) raised a `TypeError`. PEP 585 made the built-in
+types themselves subscriptable by adding a `__class_getitem__` that returns a
+`Py_GenericAliasObject` rather than the type itself.
+
+A `Py_GenericAliasObject` pairs an origin type (`list`) with a tuple of
+type arguments (`(int,)`). It is a lightweight value type: not a real type, not
+usable with `isinstance` or `issubclass`, but callable (delegating to the
+origin), iterable (over the args for use in `typing.get_args`), and
+representable. The `__parameters__` attribute extracts any free `TypeVar`
+instances from `args`, enabling `list[T].__parameters__ == (T,)` for generic
+functions that need to substitute type variables.
+
+`ga_getattribute` is the most delicate part of the file: most attribute
+lookups are forwarded to the origin class (so `list[int].__doc__` works), but
+`__origin__`, `__args__`, `__parameters__`, `__mro_entries__`, and
+`__reduce__` are intercepted and served from the alias object itself.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Objects/genericaliasobject.c" lines="1-80">1-80</Cpy> | `Py_GenericAlias`, `ga_alloc` | Entry point called by `type.__class_getitem__`; allocates the object and stores `origin` and a normalized `args` tuple. | `objects/generic_alias.go:NewGenericAlias` |
+| <Cpy path="Objects/genericaliasobject.c" lines="81-200">81-200</Cpy> | `ga_repr`, `ga_repr_item` | Formats `origin.__qualname__[args]`; handles nested aliases, `None` (shown as `None`), and unions recursively. | `objects/generic_alias.go:gaRepr` |
+| <Cpy path="Objects/genericaliasobject.c" lines="201-380">201-380</Cpy> | `ga_getattribute`, `ga_dir` | Forwards attribute access to the origin; intercepts `__origin__`, `__args__`, `__parameters__`, `__mro_entries__`, `__typing_unpacked_tuple_args__`. | `objects/generic_alias.go:gaGetattro` |
+| <Cpy path="Objects/genericaliasobject.c" lines="381-500">381-500</Cpy> | `ga_call`, `ga_instancecheck`, `ga_subclasscheck` | `ga_call` delegates to `origin(*args, **kwargs)`; `ga_instancecheck` and `ga_subclasscheck` raise `TypeError`. | `objects/generic_alias.go:gaCall` |
+| <Cpy path="Objects/genericaliasobject.c" lines="501-600">501-600</Cpy> | `ga_subscript`, `ga_richcompare`, `ga_hash`, `ga_iter` | Subscription returns a new alias; richcompare checks origin and args equality; hash combines both; iter yields args. | `objects/generic_alias.go:gaSubscript`, `gaRichCompare`, `gaHash` |
+| <Cpy path="Objects/genericaliasobject.c" lines="601-700">601-700</Cpy> | `Py_GenericAliasType`, `ga_traverse`, `ga_dealloc`, `makeParameters` | Type object; GC traversal over origin and args; `makeParameters` walks args collecting free TypeVars. | `objects/generic_alias.go:GenericAliasType`, `makeParameters` |
+
+## Reading
+
+### `Py_GenericAlias` (lines 1 to 80)
+
+<CpyLink path="Objects/genericaliasobject.c" lines="1-80" />
+
+The entry point is `Py_GenericAlias(origin, args)`. When called via
+`list[int]`, Python invokes `list.__class_getitem__((int,))` which in turn
+calls `Py_GenericAlias(list_type, int)`. A single non-tuple argument is
+promoted to a one-tuple:
+
+```c
+PyObject *
+Py_GenericAlias(PyObject *origin, PyObject *args)
+{
+    if (!PyTuple_Check(args)) {
+        args = PyTuple_Pack(1, args);
+        if (args == NULL)
+            return NULL;
+    }
+    else {
+        Py_INCREF(args);
+    }
+    gaobject *alias = PyObject_GC_New(gaobject, &Py_GenericAliasType);
+    if (alias == NULL) {
+        Py_DECREF(args);
+        return NULL;
+    }
+    alias->origin = Py_NewRef(origin);
+    alias->args   = args;   /* already increffed above */
+    alias->parameters = NULL;   /* computed lazily */
+    alias->starred = 0;
+    _PyObject_GC_TRACK(alias);
+    return (PyObject *)alias;
+}
+```
+
+`parameters` is `NULL` until first accessed via `__parameters__`, at which
+point `makeParameters` walks the args tuple collecting any object whose type
+exposes `__typing_subst__` (the marker interface that `TypeVar` implements).
+
+### `ga_repr` (lines 81 to 200)
+
+<CpyLink path="Objects/genericaliasobject.c" lines="81-200" />
+
+The repr formats `origin.__qualname__` followed by `[args]`. Nested generic
+aliases are printed recursively. Special cases handle `None` (shown as `None`
+rather than `<class 'NoneType'>`), `Union` objects, and
+`typing.Unpack[T]` / starred aliases introduced for PEP 646 variadic generics:
+
+```c
+static int
+ga_repr_item(_PyUnicodeWriter *writer, PyObject *p)
+{
+    PyObject *qualname = NULL;
+    PyObject *module = NULL;
+    PyObject *r = NULL;
+    int err;
+
+    if (p == Py_None) {
+        return _PyUnicodeWriter_WriteASCIIString(writer, "None", 4);
+    }
+    /* For a nested GenericAlias, recurse directly. */
+    if (Py_IS_TYPE(p, &Py_GenericAliasType)) {
+        r = ga_repr(p);
+        goto done;
+    }
+    /* Fall back to __qualname__ with optional module prefix. */
+    qualname = PyObject_GetAttr(p, &_Py_ID(__qualname__));
+    /* ... module prefix elision for builtins ... */
+}
+```
+
+The module prefix is omitted for built-in types (`builtins.list` is shown as
+`list`), but preserved for types from other modules
+(`collections.deque[int]` keeps the `collections.` prefix).
+
+### `ga_getattribute` (lines 201 to 380)
+
+<CpyLink path="Objects/genericaliasobject.c" lines="201-380" />
+
+Most attributes are delegated to the origin type so that introspection tools
+see the same methods as on the unparameterized type. A small set of names is
+intercepted first:
+
+```c
+static PyObject *
+ga_getattribute(PyObject *self, PyObject *name)
+{
+    gaobject *alias = (gaobject *)self;
+    /* Intercept alias-specific attributes. */
+    if (PyUnicode_Check(name)) {
+        if (PyUnicode_CompareWithASCIIString(name, "__origin__") == 0)
+            return Py_NewRef(alias->origin);
+        if (PyUnicode_CompareWithASCIIString(name, "__args__") == 0)
+            return Py_NewRef(alias->args);
+        if (PyUnicode_CompareWithASCIIString(name, "__parameters__") == 0)
+            return ga_parameters(self);
+        if (PyUnicode_CompareWithASCIIString(name, "__mro_entries__") == 0)
+            return PyObject_GetAttr((PyObject *)&PyType_Type, name);
+    }
+    /* Forward everything else to origin. */
+    return PyObject_GetAttr(alias->origin, name);
+}
+```
+
+`__mro_entries__` is special: it must return a tuple of the classes to insert
+into a base class list when `class Foo(list[int])` is written. Forwarding to
+`type.__mro_entries__` returns `(origin,)`, making `list[int]` legal as a base
+class since 3.9.
+
+### `ga_call` (lines 381 to 500)
+
+<CpyLink path="Objects/genericaliasobject.c" lines="381-500" />
+
+`ga_call` makes the alias callable, so `list[int]()` works identically to
+`list()`. The type arguments are ignored at call time; they exist for static
+type checkers only:
+
+```c
+static PyObject *
+ga_call(PyObject *self, PyObject *args, PyObject *kwds)
+{
+    gaobject *alias = (gaobject *)self;
+    return PyObject_Call(alias->origin, args, kwds);
+}
+```
+
+`ga_instancecheck` and `ga_subclasscheck` both raise `TypeError` with the
+message `Subscripted generics cannot be used with class and instance checks`.
+This matches the documented behavior: `isinstance([], list[int])` is an error.
+
+## gopy mirror
+
+`objects/generic_alias.go` for `GenericAlias`, `NewGenericAlias`, `gaRepr`,
+`gaGetattro`, `gaCall`, `gaSubscript`, `makeParameters`, and
+`GenericAliasType`. The blocked-attribute set (`gaAttrBlocked`) and own-attribute
+set (`gaAttrOwn`) in the Go code correspond directly to the intercept checks in
+`ga_getattribute`.
+
+## CPython 3.14 changes
+
+PEP 585 (generic built-in types) shipped in 3.9. PEP 646 variadic generics
+(`*Ts`, `Unpack[Ts]`, starred aliases) added in 3.11, adding the `starred`
+field and `__typing_unpacked_tuple_args__` intercept to `ga_getattribute`. The
+`__class_getitem__` default implementation on `type` that calls `Py_GenericAlias`
+was added in 3.9. `ga_dir` (so `dir(list[int])` works) added in 3.11.
