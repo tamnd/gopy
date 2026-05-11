@@ -1,0 +1,166 @@
+---
+title: "Python/compile.c — AST-to-bytecode compiler"
+description: "Annotated reading of the CPython AST-to-bytecode compiler in compile.c"
+cpython_path: Python/compile.c
+cpython_version: "3.14"
+lines: 7000
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`Python/compile.c` translates a Python AST into a `PyCodeObject`. The compiler is a
+single-pass recursive descent over AST nodes. It builds a control-flow graph of basic
+blocks (`basicblock`), then the `assemble` pass lowers that graph to a flat bytecode
+sequence and computes stack depth, line-number tables, and the exception table.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| ~350  | `compiler_mod` | Entry point; dispatches on module/interactive/expression |
+| ~900  | `compiler_function` | Handles `def` and `async def`; emits nested code object |
+| ~1100 | `compiler_class` | Emits `LOAD_BUILD_CLASS` and the class body code object |
+| ~1400 | `compiler_if` | Emits conditional jumps for `if`/`elif`/`else` |
+| ~1480 | `compiler_for` | Emits `GET_ITER` / `FOR_ITER` / loop body / `JUMP_BACKWARD` |
+| ~1600 | `compiler_try` | Emits exception table entries for `try`/`except`/`finally` |
+| ~1800 | `compiler_with` | Emits `BEFORE_WITH` / `WITH_EXCEPT_START` cleanup |
+| ~2100 | `compiler_comprehension` | Listcomp/dictcomp/genexp: nested code object + `MAKE_FUNCTION` |
+| ~2500 | `compiler_import` | `IMPORT_NAME` + `IMPORT_FROM` + `STORE_NAME` |
+| ~5800 | `assemble` | Converts basicblock graph to flat bytecode |
+
+## Reading
+
+### `compiler_mod` — entry point
+
+`compiler_mod` is called by `PyAST_CompileObject`. It sets up a fresh `compiler` struct,
+then dispatches on the AST node kind.
+
+```c
+// CPython: Python/compile.c:350 compiler_mod
+static int
+compiler_mod(struct compiler *c, mod_ty mod)
+{
+    switch (mod->kind) {
+    case Module_kind:
+        return compiler_body(c, mod->v.Module.body);
+    case Interactive_kind:
+        return compiler_body(c, mod->v.Interactive.body);
+    case Expression_kind:
+        VISIT(c, expr, mod->v.Expression.body);
+        ADDOP(c, RETURN_VALUE);
+        return SUCCESS;
+    default:
+        PyErr_Format(PyExc_SystemError, "module kind %d", mod->kind);
+        return ERROR;
+    }
+}
+```
+
+The `VISIT` and `ADDOP` macros call the recursive visitor and emit one instruction into
+the current basic block respectively.
+
+### `compiler_function` — def and async def
+
+Function compilation creates a child `compiler` scope, compiles the body into a new
+code object, then emits `MAKE_FUNCTION` in the parent scope to capture free variables
+as a closure.
+
+```c
+// CPython: Python/compile.c:900 compiler_function
+static int
+compiler_function(struct compiler *c, stmt_ty s, int is_async)
+{
+    arguments_ty args = is_async ? s->v.AsyncFunctionDef.args
+                                 : s->v.FunctionDef.args;
+    asdl_expr_seq *decos = is_async ? s->v.AsyncFunctionDef.decorator_list
+                                    : s->v.FunctionDef.decorator_list;
+    RETURN_IF_ERROR(compiler_decorators(c, decos));
+    RETURN_IF_ERROR(compiler_default_arguments(c, args));
+    PyCodeObject *co = compiler_scope(c, s, COMPILER_SCOPE_FUNCTION,
+                                      args, is_async);
+    ADDOP_LOAD_CONST(c, co);
+    ADDOP(c, MAKE_FUNCTION);
+    RETURN_IF_ERROR(compiler_apply_decorators(c, decos));
+    return compiler_nameop(c, name, Store);
+}
+```
+
+### `compiler_comprehension` — nested scope
+
+List comprehensions, dict comprehensions, and generator expressions each compile to an
+inner code object that receives the outermost iterable as its first argument. The outer
+scope emits `GET_ITER` on the iterable, then `CALL` the resulting function object.
+
+```c
+// CPython: Python/compile.c:2100 compiler_comprehension
+static int
+compiler_comprehension(struct compiler *c, expr_ty e, int type,
+                       identifier name, asdl_comprehension_seq *generators,
+                       expr_ty elt, expr_ty val)
+{
+    /* compile the outermost iterator in the enclosing scope */
+    VISIT(c, expr, ((comprehension_ty)asdl_seq_GET(generators, 0))->iter);
+    ADDOP(c, GET_ITER);
+    PyCodeObject *co = compiler_scope(c, e, COMPILER_SCOPE_COMPREHENSION,
+                                      NULL, 0);
+    ADDOP_LOAD_CONST(c, co);
+    ADDOP(c, MAKE_FUNCTION);
+    ADDOP_I(c, CALL, 1);
+    return SUCCESS;
+}
+```
+
+### `assemble` — basicblock graph to bytecode
+
+After all statements are compiled the basicblock linked list is handed to `assemble`.
+It resolves jump targets, computes stack depth via a forward dataflow pass, serializes
+instructions into a `PyObject` bytes array, and builds the `lnotab`/exception table.
+
+```c
+// CPython: Python/compile.c:5800 assemble
+static PyCodeObject *
+assemble(struct compiler *c, int addNone)
+{
+    struct assembler a;
+    if (!assemble_init(&a, c->u))
+        return NULL;
+    if (addNone) {
+        ADDOP_LOAD_CONST(c, Py_None);
+        ADDOP(c, RETURN_VALUE);
+    }
+    assemble_jump_offsets(&a);
+    dfs(c->u->u_cfg_builder, &a);   /* depth-first linearization */
+    if (!assemble_emit(&a))
+        goto error;
+    return makecode(c, &a);
+error:
+    assemble_free(&a);
+    return NULL;
+}
+```
+
+## gopy notes
+
+gopy's compiler lives in `compile/compiler.go` and follows the same two-phase design:
+recursive AST visitors build a `FlowGraph` (`compile/flowgraph.go`) of `BasicBlock`
+nodes, then `compile/flowgraph_passes.go` runs the linearization and stack-depth passes.
+
+`compiler_function` maps to `compileFunction` in `compile/codegen_stmt_funclike.go`.
+`compiler_comprehension` maps to `compileComprehension` in `compile/codegen_expr_name.go`.
+The assemble phase maps to `FlowGraph.Assemble` in `compile/flowgraph.go`.
+
+Exception table generation, which CPython builds in `assemble`, is handled in
+`compile/flowgraph_except.go`.
+
+## CPython 3.14 changes
+
+- `compiler_function` now emits `COPY_FREE_VARS` as the first instruction of every
+  closure code object, replacing the old implicit free-variable copy done by `MAKE_FUNCTION`.
+  This makes the frame setup cost explicit and simplifies the interpreter hot path.
+- The `assemble` pass was rewritten (PEP 744 related cleanup) to operate on a proper
+  control-flow graph rather than a flat instruction list; jump-offset fixups now use
+  a dedicated `flowgraph_optimize` pass instead of iterating until stable.
+- `compiler_comprehension` no longer wraps `async for` targets in extra coroutine
+  machinery for non-async comprehensions, fixing a class of `SyntaxError` false positives
+  introduced in Python 3.12.

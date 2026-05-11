@@ -1,0 +1,129 @@
+---
+title: pycore_frame.h
+description: "Internal frame struct: _PyInterpreterFrame and related helpers"
+cpython_path: Include/internal/pycore_frame.h
+cpython_version: "3.14"
+lines: 250
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Internal header defining `_PyInterpreterFrame`, the lightweight frame struct
+introduced in CPython 3.11 to replace the heavier `PyFrameObject` on the hot
+path. A `PyFrameObject` is now only allocated lazily when Python code actually
+calls `sys._getframe()` or accesses `f_locals`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1–40 | includes / forward decls | pull in `pycore_code.h`, `pystate.h` |
+| 41–90 | `_PyInterpreterFrame` | core per-call-frame struct |
+| 91–120 | `frame_obj_alloc_since_last_yield` | generator bookkeeping field |
+| 121–160 | `_PyFrame_IsIncomplete` | inline predicate |
+| 161–210 | `_PyFrame_GetLocals` | build a locals dict from the frame |
+| 211–250 | misc helpers | `_PyFrame_SetStackPointer`, `_PyFrame_GetCode` |
+
+## Reading
+
+### `_PyInterpreterFrame` struct layout
+
+The struct is allocated directly on the C stack (for regular calls) or inside a
+generator object, keeping frame creation to a single `memset` plus a handful of
+pointer stores.
+
+```c
+// CPython: Include/internal/pycore_frame.h:56 _PyInterpreterFrame
+struct _PyInterpreterFrame {
+    PyObject *f_executable;      /* code object or NULL for shim frames */
+    PyObject *f_funcobj;         /* callable (strong ref) */
+    PyObject *f_globals;         /* globals dict */
+    PyObject *f_builtins;        /* builtins dict */
+    PyObject *f_locals;          /* locals dict or NULL */
+    PyFrameObject *frame_obj;    /* lazily allocated PyFrameObject */
+    _Py_CODEUNIT *instr_ptr;     /* next instruction to execute */
+    PyObject **stackpointer;     /* top of value stack */
+    int stacktop;
+    uint16_t return_offset;
+    char owner;
+    PyObject *localsplus[1];     /* locals + stack, variable length */
+};
+```
+
+`localsplus` holds locals, free variables, cell variables, and the value stack
+all in one contiguous allocation, improving cache locality relative to the old
+`PyFrameObject` layout.
+
+### `_PyFrame_IsIncomplete`
+
+A frame is "incomplete" while it is being set up by `_PyEval_MakeFrameVector`
+but before the first bytecode dispatch. Callers that walk the frame stack (e.g.
+`traceback`) must skip incomplete frames.
+
+```c
+// CPython: Include/internal/pycore_frame.h:122 _PyFrame_IsIncomplete
+static inline bool
+_PyFrame_IsIncomplete(_PyInterpreterFrame *frame)
+{
+    if (frame->owner >= FRAME_OWNED_BY_GENERATOR) {
+        return false;
+    }
+    return frame->instr_ptr <
+        _PyCode_CODE(_PyFrame_GetCode(frame)) + _PyFrame_GetCode(frame)->_co_firsttraceable;
+}
+```
+
+### `_PyFrame_GetLocals`
+
+Builds and returns a snapshot `dict` of the frame's local variables. Called by
+`frame.f_locals` and `locals()`. Returns a new reference.
+
+```c
+// CPython: Include/internal/pycore_frame.h:161 _PyFrame_GetLocals
+PyObject *_PyFrame_GetLocals(_PyInterpreterFrame *frame, int include_hidden);
+```
+
+The `include_hidden` flag controls whether names injected by the debugger (which
+live in a side-table rather than `localsplus`) are surfaced.
+
+### Owner flags
+
+The `owner` byte encodes who is responsible for the frame's memory:
+
+```c
+// CPython: Include/internal/pycore_frame.h:44 _PyFrameOwner
+typedef enum _PyFrameOwner {
+    FRAME_OWNED_BY_THREAD        = 0,
+    FRAME_OWNED_BY_GENERATOR     = 1,
+    FRAME_OWNED_BY_FRAME_OBJECT  = 2,
+    FRAME_OWNED_BY_CSTACK        = 3,
+} _PyFrameOwner;
+```
+
+## gopy notes
+
+gopy uses a flat `Frame` struct in `vm/` that mirrors `_PyInterpreterFrame`.
+Fields to keep in sync:
+
+- `f_executable` maps to `frame.Code` (`*objects.Code`)
+- `f_funcobj` maps to `frame.Callable`
+- `instr_ptr` maps to `frame.LastI` (index, not raw pointer)
+- `localsplus` maps to `frame.Locals` slice + `frame.Stack` slice
+
+The lazy `PyFrameObject` allocation has no direct equivalent yet; gopy always
+materialises a `Frame` value. That is safe for correctness but slightly heavier
+than CPython on call-heavy benchmarks.
+
+`_PyFrame_IsIncomplete` has no gopy port yet. The `traceback` walker in
+`vm/eval_unwind.go` should add an equivalent guard before it is used in
+production stack traces.
+
+## CPython 3.14 changes
+
+- 3.11: `_PyInterpreterFrame` introduced; `PyFrameObject` demoted to a view.
+- 3.12: `f_lasti` removed; replaced by `instr_ptr` pointing directly into the
+  bytecode array.
+- 3.13: `frame_obj_alloc_since_last_yield` added for generator frame auditing.
+- 3.14: `return_offset` field added to avoid a redundant decode of the CALL
+  instruction when propagating return values up the frame stack.

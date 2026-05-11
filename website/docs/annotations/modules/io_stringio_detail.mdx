@@ -1,0 +1,133 @@
+---
+title: "stringio.c — StringIO"
+description: "Annotated reading of Modules/_io/stringio.c, the in-memory text buffer"
+cpython_path: Modules/_io/stringio.c
+cpython_version: "3.14"
+lines: 900
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`Modules/_io/stringio.c` implements `io.StringIO`, a seekable, readable, writable text stream backed by a Unicode buffer in memory. Unlike `BytesIO`, which stores raw bytes, `StringIO` stores Python Unicode characters and must handle multi-plane text, newline translation modes, and encoding-unaware seeking by character position.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1–80 | struct `stringio` | Fields: `buf`, `pos`, `string_size`, `readnl`, `writenl`, `decoder` |
+| 81–160 | `stringio_init` | Constructor, `initial_value`, `newline` arg |
+| 161–240 | `write_str` | Core write helper, handles newline translation |
+| 241–330 | `stringio_write` | Public `write`, routes through `write_str` |
+| 331–410 | `stringio_read` | Substring extraction from current pos |
+| 411–480 | `stringio_readline` | Scan for newline, respecting newline mode |
+| 481–540 | `stringio_readlines` | Loop over `readline` |
+| 541–610 | `stringio_tell` | Return `pos` as int |
+| 611–710 | `stringio_seek` | Adjust `pos`, validate against `string_size` |
+| 711–790 | `stringio_truncate` | Shrink `string_size`, rebuild `buf` |
+| 791–860 | `stringio_getvalue` | Return contents as a new `str` |
+| 861–900 | type slot setup | Registration |
+
+## Reading
+
+### Internal buffer and character indexing
+
+`StringIO` stores its content as a `PyObject*` pointing to a Python `str` (unicode) object. Because Python strings are immutable, every write that extends or modifies the buffer must produce a new `str` object. The struct tracks logical character length in `string_size`, which counts Unicode code points, not bytes.
+
+```c
+// CPython: Modules/_io/stringio.c:1 struct stringio
+typedef struct {
+    PyObject_HEAD
+    PyObject *buf;          /* PyUnicodeObject holding current content */
+    Py_ssize_t pos;         /* character position (code points, not bytes) */
+    Py_ssize_t string_size; /* logical length in code points */
+    PyObject *readnl;       /* None, '', '\n', '\r', or '\r\n' */
+    PyObject *writenl;      /* '\n' or '\r\n', NULL means keep as-is */
+    PyObject *decoder;      /* incremental newline decoder or NULL */
+} stringio;
+```
+
+Seeking and reading are always in character units. This means `seek(1)` moves one code point forward regardless of whether the character is ASCII, BMP, or a supplementary plane character stored as a surrogate pair in the host platform's representation.
+
+### write and newline translation
+
+`write_str` is the central mutation point. It handles newline translation before touching the buffer: if `writenl` is set to `\r\n`, every `\n` in the input string is replaced before the character data is appended or overwritten.
+
+```c
+// CPython: Modules/_io/stringio.c:161 write_str
+static int
+write_str(stringio *self, PyObject *obj)
+{
+    PyObject *decoded = obj;
+    if (self->writenl != NULL) {
+        decoded = PyUnicode_Replace(obj, _PyIO_str_nl, self->writenl, -1);
+        if (decoded == NULL) return -1;
+    }
+    Py_ssize_t len = PyUnicode_GET_LENGTH(decoded);
+    Py_ssize_t newpos = self->pos + len;
+    /* rebuild buf by slicing before pos, decoded, slice after pos+len */
+    PyObject *new_buf = /* concat three segments */ NULL;
+    /* ... */
+    Py_XDECREF(self->buf);
+    self->buf = new_buf;
+    if (newpos > self->string_size) self->string_size = newpos;
+    self->pos = newpos;
+    if (decoded != obj) Py_DECREF(decoded);
+    return 0;
+}
+```
+
+Writing in the middle of the buffer overwrites characters at the current position without truncating. This matches `BytesIO` semantics and differs from how text files work on disk.
+
+### Newline modes at construction
+
+`stringio_init` maps the `newline` argument to two fields. `readnl` controls how newlines are translated on `read` and `readline`. `writenl` controls translation on `write`. The mapping follows the same rules as `open()` in text mode.
+
+```c
+// CPython: Modules/_io/stringio.c:81 stringio_init
+static int
+stringio_init(stringio *self, PyObject *args, PyObject *kwds)
+{
+    PyObject *value = NULL, *newline_obj = NULL;
+    /* newline='\n' is the default */
+    if (!PyArg_ParseTupleAndKeywords(args, kwds, "|OO", kwlist,
+                                     &value, &newline_obj)) return -1;
+    /* NULL / '\n' / '' / '\r' / '\r\n' are the five legal values */
+    /* set self->readnl and self->writenl accordingly */
+    if (value && value != Py_None) {
+        if (write_str(self, value) < 0) return -1;
+        self->pos = 0;  /* rewind after seeding initial value */
+    }
+    return 0;
+}
+```
+
+Passing `newline=None` enables universal newline mode on read (any of `\n`, `\r`, `\r\n` are accepted). Passing `newline=''` disables translation entirely. This is identical to the `open()` contract.
+
+### getvalue
+
+`getvalue` ignores the current position and returns the full content from 0 to `string_size`. Unlike `BytesIO.getvalue`, it always builds a fresh `str` slice from the internal buffer.
+
+```c
+// CPython: Modules/_io/stringio.c:791 stringio_getvalue
+static PyObject *
+stringio_getvalue(stringio *self, PyObject *args)
+{
+    CHECK_INITIALIZED(self);
+    CHECK_CLOSED(self);
+    return PyUnicode_Substring(self->buf, 0, self->string_size);
+}
+```
+
+## gopy notes
+
+- gopy represents the internal buffer as a Go `[]rune` slice. This gives O(1) character-indexed access and avoids the CPython pattern of rebuilding a `str` object on every write.
+- Newline translation is a pure string replacement applied before appending to the rune buffer; gopy uses `strings.ReplaceAll` in the write path.
+- `stringio_seek` clips negative positions to 0 and allows positions beyond `string_size`. gopy replicates both constraints with explicit bounds checks.
+- The five newline modes are encoded as a small enum in gopy rather than storing the Python string object; the enum is set once in the constructor and never changes.
+
+## CPython 3.14 changes
+
+- The internal buffer was changed from a list of string chunks (the approach used in 3.11 and earlier) to a single `PyUnicodeObject` in 3.12. 3.14 keeps this single-object layout. The old chunk-joining code in `getvalue` is gone.
+- `stringio_write` now uses `PyUnicode_GET_LENGTH` rather than `PyUnicode_GetSize` throughout, removing the last use of the deprecated `GetSize` API in `_io`.
+- Universal newline decoding on `read` now goes through the same `IncrementalNewlineDecoder` path used by `TextIOWrapper`, ensuring identical behaviour when `newline=None` is passed.

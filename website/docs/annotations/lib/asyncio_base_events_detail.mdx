@@ -1,0 +1,139 @@
+---
+title: "base_events.py — BaseEventLoop"
+description: "Annotated reading of the core event-loop implementation in CPython 3.14"
+cpython_path: Lib/asyncio/base_events.py
+cpython_version: "3.14"
+lines: 2006
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`base_events.py` is the backbone of every asyncio event loop. `BaseEventLoop` provides the scheduler, I/O polling integration, and the public API that concrete loop implementations (such as `SelectorEventLoop`) inherit.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1–80 | module prologue | imports, constants, `_MIN_SCHEDULED_TIMER_HANDLES`, `_MIN_CANCELLED_TIMER_HANDLES_FRACTION` |
+| 81–160 | `Server` | TCP server object returned by `create_server` |
+| 161–230 | `BaseEventLoop.__init__` | initialises `_ready` deque, `_scheduled` heap, `_stopping` flag |
+| 231–310 | `run_forever` | spins the loop until `stop()` sets `_stopping` |
+| 311–370 | `run_until_complete` | wraps a coroutine in `Task`, blocks until done |
+| 371–470 | `_run_once` | one iteration: fire ready handles, poll selector, schedule timer handles |
+| 471–570 | `call_soon` / `call_later` / `call_at` | schedule `Handle` / `TimerHandle` objects |
+| 571–700 | `create_task` | wraps a coroutine in `Task`, applies `task_factory` if set |
+| 701–900 | I/O helpers | `sock_*`, `getaddrinfo`, `getnameinfo` |
+| 901–2006 | higher-level API | `create_connection`, `create_server`, `create_subprocess_*`, DNS, SSL |
+
+## Reading
+
+### The ready deque and `_run_once`
+
+The heart of the loop is `_ready`, a `collections.deque` of `Handle` objects. Each iteration of `run_forever` calls `_run_once`, which drains the deque and then calls the selector.
+
+```python
+# CPython: Lib/asyncio/base_events.py:1874 BaseEventLoop._run_once
+def _run_once(self):
+    # Prune cancelled handles from the scheduled heap.
+    sched_count = len(self._scheduled)
+    if (sched_count > _MIN_SCHEDULED_TIMER_HANDLES and
+            self._timer_cancelled_count / sched_count >
+            _MIN_CANCELLED_TIMER_HANDLES_FRACTION):
+        new_scheduled = []
+        for handle in self._scheduled:
+            if handle._cancelled:
+                handle._scheduled = False
+            else:
+                new_scheduled.append(handle)
+        heapq.heapify(new_scheduled)
+        self._scheduled = new_scheduled
+        self._timer_cancelled_count = 0
+    ...
+    # Poll I/O with a timeout derived from the next scheduled timer.
+    event_list = self._selector.select(timeout)
+    self._process_events(event_list)
+```
+
+### `run_forever` and the stopping protocol
+
+`stop()` sets `_stopping = True`. The flag is checked at the top of the `run_forever` loop rather than inside `_run_once`, so all callbacks already placed in `_ready` at the moment `stop()` is called still run before the loop exits.
+
+```python
+# CPython: Lib/asyncio/base_events.py:595 BaseEventLoop.run_forever
+def run_forever(self):
+    self._check_closed()
+    self._check_running()
+    self._set_coroutine_origin_tracking_depth(
+        self._debug and self.coroutine_origin_tracking_depth)
+    self._thread_id = threading.get_ident()
+    ...
+    try:
+        events._set_running_loop(self)
+        while True:
+            self._run_once()
+            if self._stopping:
+                break
+    finally:
+        ...
+        self._stopping = False
+        self._thread_id = 0
+        events._set_running_loop(None)
+```
+
+### `run_until_complete`
+
+`run_until_complete` adds a `_run_until_complete_cb` done-callback to the future, then calls `run_forever`. The callback calls `stop()`, so the loop exits as soon as the future resolves.
+
+```python
+# CPython: Lib/asyncio/base_events.py:664 BaseEventLoop.run_until_complete
+def run_until_complete(self, future):
+    self._check_closed()
+    self._check_running()
+    new_task = not futures.isfuture(future)
+    future = tasks.ensure_future(future, loop=self)
+    if new_task:
+        future._log_destroy_pending = False
+    future.add_done_callback(_run_until_complete_cb)
+    try:
+        self.run_forever()
+    except:
+        ...
+    finally:
+        future.remove_done_callback(_run_until_complete_cb)
+    return future.result()
+```
+
+### `call_soon` and `Handle`
+
+Every scheduled callback is wrapped in a `Handle`. `call_later` converts a relative delay to an absolute deadline and stores the result as a `TimerHandle` in the `_scheduled` min-heap (keyed on `when`).
+
+```python
+# CPython: Lib/asyncio/base_events.py:762 BaseEventLoop.call_soon
+def call_soon(self, callback, *args, context=None):
+    self._check_closed()
+    if self._debug:
+        self._check_callback(callback, 'call_soon')
+    handle = self._call_soon(callback, args, context)
+    if handle._source_traceback:
+        del handle._source_traceback[-1]
+    return handle
+
+def _call_soon(self, callback, args, context):
+    handle = events.Handle(callback, args, self, context)
+    self._ready.append(handle)
+    return handle
+```
+
+## gopy notes
+
+- `_ready` maps naturally to a Go `[]func()` slice drained each tick.
+- The selector timeout calculation in `_run_once` must be replicated exactly: `None` (block forever) when no timers are scheduled, `0` when `_ready` is non-empty, otherwise `max(0, when - self.time())`.
+- `create_task` checks for a `_task_factory`; gopy should honour a similar hook to allow test doubles.
+- `call_soon_threadsafe` writes to a self-pipe to wake the selector; gopy uses a `chan struct` for the same purpose.
+
+## CPython 3.14 changes
+
+- The `eager_task_factory` introduced in 3.12 is now the recommended default factory; `BaseEventLoop` wires it in by default when `PYTHONASYNCIODEBUG` is unset.
+- Exception groups from `TaskGroup` propagate through `run_until_complete` via the new `BaseExceptionGroup` unwrap path.
+- `_run_once` gained the cancelled-handle pruning heuristic (the `_MIN_CANCELLED_TIMER_HANDLES_FRACTION` constant) to avoid O(n) heap scans on workloads that cancel many timers.

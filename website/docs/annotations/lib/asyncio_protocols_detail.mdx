@@ -1,0 +1,95 @@
+---
+title: asyncio/protocols.py
+description: "Protocol ABC hierarchy: the callback interface between transports and user code"
+cpython_path: Lib/asyncio/protocols.py
+cpython_version: "3.14"
+lines: 150
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`protocols.py` defines the abstract base classes that asyncio transports call into. A transport owns the socket; a protocol owns the application logic. The two objects are connected by `connection_made`, after which the transport drives the protocol by calling its methods on I/O events. Every method in the file is a no-op stub — subclasses override only what they need.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1–20 | module top | imports, `__all__` |
+| 21–70 | `BaseProtocol` | `connection_made`, `connection_lost`, `pause_writing`, `resume_writing` |
+| 71–100 | `Protocol` | adds `data_received`, `eof_received` |
+| 101–115 | `DatagramProtocol` | adds `datagram_received`, `error_received` |
+| 116–135 | `SubprocessProtocol` | adds `pipe_data_received`, `pipe_connection_lost`, `process_exited` |
+| 136–150 | `BufferedProtocol` | adds `get_buffer`, `buffer_updated`, `eof_received` |
+
+## Reading
+
+### BaseProtocol anchors the lifecycle
+
+`connection_made` is called once by the transport when the connection is established. It receives the transport object, which the protocol should store for later writes. `connection_lost` is called exactly once at teardown.
+
+```python
+# CPython: Lib/asyncio/protocols.py:21 BaseProtocol
+class BaseProtocol:
+    def connection_made(self, transport):
+        """Called when a connection is made."""
+
+    def connection_lost(self, exc):
+        """Called when the connection is lost or closed."""
+
+    def pause_writing(self):
+        """Called when the transport's buffer goes over the high-water mark."""
+
+    def resume_writing(self):
+        """Called when the transport's buffer drains below the low-water mark."""
+```
+
+`pause_writing` / `resume_writing` are the back-pressure hooks. The transport calls them to tell the protocol to slow down or speed up production.
+
+### Protocol adds the data path
+
+`Protocol` extends `BaseProtocol` with the two methods that carry inbound data.
+
+```python
+# CPython: Lib/asyncio/protocols.py:71 Protocol
+class Protocol(BaseProtocol):
+    def data_received(self, data):
+        """Called when some data is received."""
+
+    def eof_received(self):
+        """Called when the other end signals it won't send more data."""
+```
+
+`eof_received` may return a truthy value to keep the transport open for writing after the read side is closed (half-close). Returning `None` or `False` causes the transport to close completely.
+
+### BufferedProtocol for zero-copy reads
+
+`BufferedProtocol` lets the protocol supply the receive buffer itself. The transport calls `get_buffer` to obtain a writable buffer object (any object supporting the buffer protocol), writes received bytes directly into it, then calls `buffer_updated` with the number of bytes written.
+
+```python
+# CPython: Lib/asyncio/protocols.py:136 BufferedProtocol
+class BufferedProtocol(BaseProtocol):
+    def get_buffer(self, sizehint):
+        """Return a buffer for the transport to write into."""
+
+    def buffer_updated(self, nbytes):
+        """Called when the buffer was updated with received data."""
+
+    def eof_received(self):
+        """Called when the other end signals EOF."""
+```
+
+This avoids the intermediate `bytes` allocation that `Protocol.data_received` requires.
+
+## gopy notes
+
+- Every method body is `pass` or just a docstring. The ABCs carry no logic; the hierarchy exists only so `isinstance` checks and `__subclasshook__` can work.
+- `SubprocessProtocol.pipe_data_received` receives a `fd` integer (0=stdin, 1=stdout, 2=stderr) alongside the data bytes. This differs from `data_received`, which has no fd argument.
+- `BufferedProtocol` is the asyncio counterpart to the `readinto` pattern in synchronous I/O. When porting, map `get_buffer` to a `[]byte` slice argument and `buffer_updated` to the byte count returned.
+- `DatagramProtocol.error_received` receives an `OSError`, not an exception chain. It is informational only — the transport does not close on datagram errors.
+
+## CPython 3.14 changes
+
+- No structural changes to the ABC hierarchy in 3.14. The classes are stable since 3.4.
+- `BufferedProtocol` moved from provisional status (3.7) to fully supported in 3.12; 3.14 carries no further changes to it.
+- Type annotations were added across the file in 3.13 and refined in 3.14 (PEP 688 buffer protocol typing).

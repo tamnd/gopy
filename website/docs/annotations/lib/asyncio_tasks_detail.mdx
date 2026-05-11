@@ -1,0 +1,156 @@
+---
+title: "tasks.py — Task, gather, wait, shield"
+description: "Annotated reading of Task and concurrency helpers in CPython 3.14 asyncio"
+cpython_path: Lib/asyncio/tasks.py
+cpython_version: "3.14"
+lines: 718
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`tasks.py` builds the coroutine driver on top of `Future`. `Task` is the only concrete scheduler unit: every `await` chain bottoms out in a `Task.__step` call queued on the event loop's `_ready` deque.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1–40 | module prologue | imports, `current_task`, `all_tasks` weak-set |
+| 41–120 | `Task.__init__` | calls `call_soon(__step)`, registers in `_all_tasks` |
+| 121–200 | `Task.cancel` | sets `_must_cancel`, injects `CancelledError` into live coroutine |
+| 201–310 | `Task.__step` / `Task.__step_run_and_handle_result` | send/throw into coroutine, handle `StopIteration` and future yields |
+| 311–370 | `Task.__wakeup` | done-callback added to awaited futures; calls `__step` |
+| 371–430 | `ensure_future` | coerces coroutines and awaitables to `Task` or `Future` |
+| 431–540 | `gather` | fan-out over an iterable, returns an aggregate future |
+| 541–640 | `wait` / `wait_for` | FIRST_COMPLETED / FIRST_EXCEPTION / ALL_COMPLETED strategies |
+| 641–718 | `shield` | wraps a future to intercept `cancel` calls |
+
+## Reading
+
+### `Task.__init__` and the first step
+
+`Task.__init__` stores the coroutine and immediately enqueues `__step` via `call_soon`. The coroutine does not run during `__init__`; it runs on the next loop iteration. This ordering guarantee is load-bearing: code after `create_task(coro)` runs before the coroutine body starts.
+
+```python
+# CPython: Lib/asyncio/tasks.py:98 Task.__init__
+def __init__(self, coro, *, loop=None, name=None, context=None,
+             eager_start=False):
+    super().__init__(loop=loop)
+    ...
+    self.__coro = coro
+    self.__fut_waiter = None
+    self.__must_cancel = False
+    self.__log_traceback = False
+    self._loop.call_soon(self.__step, context=self._context)
+    _register_task(self)
+```
+
+### `__step`: the coroutine driver
+
+`__step` is the most important method in asyncio. It calls `coro.send(None)` (or `coro.throw(exc)` when cancelling). Three outcomes are possible: the coroutine yields a future (suspension), raises `StopIteration` (normal completion), or raises any other exception (error completion).
+
+```python
+# CPython: Lib/asyncio/tasks.py:230 Task.__step_run_and_handle_result
+def __step_run_and_handle_result(self, exc):
+    coro = self.__coro
+    self._fut_waiter = None
+    try:
+        if exc is None:
+            result = coro.send(None)
+        else:
+            result = coro.throw(exc)
+    except StopIteration as exc:
+        if self.__must_cancel:
+            self.__must_cancel = False
+            super().cancel(self.__cancel_message)
+        else:
+            super().set_result(exc.value)
+    except exceptions.CancelledError as exc:
+        super().cancel(msg=exc.args[0] if exc.args else None)
+    except (KeyboardInterrupt, SystemExit) as exc:
+        super().set_exception(exc)
+        raise
+    except BaseException as exc:
+        super().set_exception(exc)
+    else:
+        # result is a yielded future
+        ...
+        result.add_done_callback(self.__wakeup)
+        self.__fut_waiter = result
+```
+
+### `gather`: fan-out aggregation
+
+`gather` wraps each argument in a `Task` (if not already a future), then returns a single outer future that resolves to a list of results in the original argument order, regardless of completion order.
+
+```python
+# CPython: Lib/asyncio/tasks.py:478 gather
+def gather(*coros_or_futures, return_exceptions=False):
+    children = []
+    nchildren = 0
+    outer = loop.create_future()
+    ...
+    def _done_callback(fut):
+        nonlocal nfinished
+        ...
+        nfinished += 1
+        if nfinished == nchildren:
+            results = []
+            for fut in children:
+                ...
+                results.append(fut.result())
+            outer.set_result(results)
+    for arg in set(coros_or_futures):
+        task = ensure_future(arg, loop=loop)
+        task.add_done_callback(_done_callback)
+        children.append(task)
+```
+
+### `shield`: cancellation firewall
+
+`shield(aw)` returns a new future that mirrors the inner future's result but absorbs `cancel()` calls. If the outer future is cancelled, the inner task keeps running. If the inner task finishes, the outer future is resolved (unless it was already cancelled).
+
+```python
+# CPython: Lib/asyncio/tasks.py:689 shield
+def shield(aw):
+    inner = ensure_future(aw)
+    if inner.done():
+        return inner
+    outer = inner._loop.create_future()
+
+    def _inner_done_callback(inner):
+        if outer.cancelled():
+            if not inner.cancelled():
+                inner.exception()  # suppress warning
+            return
+        if inner.cancelled():
+            outer.cancel()
+        else:
+            exc = inner.exception()
+            if exc is not None:
+                outer.set_exception(exc)
+            else:
+                outer.set_result(inner.result())
+
+    def _outer_done_callback(outer):
+        if not inner.done():
+            inner.remove_done_callback(_inner_done_callback)
+
+    inner.add_done_callback(_inner_done_callback)
+    outer.add_done_callback(_outer_done_callback)
+    return outer
+```
+
+## gopy notes
+
+- `Task.__step` is the central porting target. The Go equivalent calls `coro.Resume()` (or equivalent) and switches on the yielded value type.
+- `__fut_waiter` (the currently awaited future) must be cleared at the top of each `__step` before calling `send`/`throw`, matching CPython exactly.
+- `_must_cancel` and `__cancel_message` pair together; gopy should carry both fields on the task struct.
+- `gather` and `wait` create their own internal `_GatheringFuture` subclass in CPython; gopy can use a plain struct that embeds `Future` with a counter field.
+- `_all_tasks` is a `WeakSet`; gopy can use a map from task pointer to `struct{}` protected by a mutex, with explicit deregistration in `__del__` equivalent.
+
+## CPython 3.14 changes
+
+- `eager_task_factory` (opt-in since 3.12) becomes the default in 3.14: when the coroutine completes synchronously in the first `send`, the task never enters `_ready` and avoids a scheduling round-trip.
+- `TaskGroup.__aexit__` now suppresses only the internal `_abort` cancel; unrelated `CancelledError` exceptions propagate correctly after the fix in bpo-90728.
+- `wait_for` was rewritten in 3.12 to avoid a race between the timeout callback and the inner future completing; the 3.14 version is that rewrite with minor cleanup.
