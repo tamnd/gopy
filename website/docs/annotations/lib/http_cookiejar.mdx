@@ -1,0 +1,133 @@
+---
+title: "http.cookiejar"
+cpython_path: "Lib/http/cookiejar.py"
+approx_lines: 2000
+status: "not_ported"
+---
+
+import CpyLink from "@site/src/components/CpyLink";
+import Map from "@site/src/components/Map";
+
+# http.cookiejar
+
+<CpyLink path="Lib/http/cookiejar.py" />
+
+HTTP cookie management for automated clients (urllib, scrapers, test harnesses).
+`CookieJar` stores `Cookie` objects keyed by domain and path.
+`DefaultCookiePolicy` enforces RFC 2109 / Netscape rules for domain, path, secure,
+and `httponly` attributes. `FileCookieJar` is an abstract base; `LWPCookieJar` and
+`MozillaCookieJar` provide persistent file-backed storage in Lynx and Firefox formats.
+
+## Map
+
+<Map
+  nodes={[
+    { id: "Cookie",               kind: "class",    desc: "Single cookie: name, value, domain, path, expires, secure, httponly, …" },
+    { id: "CookieJar",            kind: "class",    desc: "In-memory store; add, clear, and iterate cookies; thread-safe via _cookies_lock" },
+    { id: "DefaultCookiePolicy",  kind: "class",    desc: "RFC 2109 + Netscape policy: domain, path, secure, httponly checks" },
+    { id: "FileCookieJar",        kind: "class",    desc: "Abstract subclass of CookieJar that adds load/save/revert" },
+    { id: "LWPCookieJar",         kind: "class",    desc: "Lynx-compatible Set-Cookie2 / RFC 2965 text format" },
+    { id: "MozillaCookieJar",     kind: "class",    desc: "Netscape cookies.txt format written by Firefox and curl" },
+    { id: "CookiePolicy",         kind: "class",    desc: "Abstract policy base; subclass to override return_ok / set_ok" },
+    { id: "http2time",            kind: "function", desc: "Parse HTTP date string to seconds-since-epoch" },
+    { id: "time2netscape",        kind: "function", desc: "Format epoch time as Netscape cookie date string" },
+    { id: "reach",                kind: "function", desc: "Compute effective domain 'reach' for domain matching" },
+    { id: "is_HDN",               kind: "function", desc: "Test whether a string is a valid HTTP domain name token" },
+    { id: "domain_match",         kind: "function", desc: "Return True if host matches a cookie domain pattern" },
+    { id: "user_domain_match",    kind: "function", desc: "Lenient domain match used for user-supplied domain= values" },
+    { id: "effective_request_host", kind: "function", desc: "Resolve final host from request after redirects" },
+  ]}
+/>
+
+## Reading
+
+### CookieJar storage model
+
+`CookieJar` holds cookies in a three-level dict `_cookies[domain][path][name]`.
+`_cookies_lock` guards all mutations so the jar can be shared across threads safely.
+The public API is iterator-based: iterating the jar yields flat `Cookie` objects.
+
+```python
+import urllib.request
+from http.cookiejar import CookieJar
+
+jar = CookieJar()
+opener = urllib.request.build_opener(
+    urllib.request.HTTPCookieProcessor(jar)
+)
+opener.open("https://example.com/login")
+
+for cookie in jar:
+    print(cookie.name, "=", cookie.value, "domain:", cookie.domain)
+```
+
+`add_cookie_header(request)` stamps outgoing requests; `extract_cookies(response, request)`
+harvests `Set-Cookie` headers from responses. Both methods delegate accept/reject decisions
+to the attached `CookiePolicy`.
+
+### DefaultCookiePolicy rules
+
+`DefaultCookiePolicy` implements the gate logic that decides whether a cookie may be
+set or sent. The key predicates are layered: `return_ok` calls `return_ok_secure`,
+`return_ok_unverifiable`, `return_ok_domain`, and `return_ok_port`. Each raises
+`_RejectCookie` (an internal sentinel) on failure; the outer caller catches it and
+returns `False`.
+
+```python
+from http.cookiejar import DefaultCookiePolicy
+
+# Block all third-party cookies and require secure flag on .example.com
+policy = DefaultCookiePolicy(
+    strict_ns_domain=DefaultCookiePolicy.DomainStrict,
+    blocked_domains=[".ads.example.com"],
+)
+
+# Domain matching example
+print(policy.domain_return_ok(".example.com", "https://www.example.com/"))  # True
+print(policy.domain_return_ok(".example.com", "https://evil.net/"))         # False
+```
+
+`strict_ns_domain` controls whether `DomainStrict` mode requires the cookie domain to
+share at least one embedded dot and to be a suffix of the request host without leading
+dots stripped.
+
+### FileCookieJar persistence
+
+`LWPCookieJar` writes an LWP format header then one `Set-Cookie2:` line per cookie.
+`MozillaCookieJar` writes the seven-column tab-separated Netscape format that curl and
+Firefox also consume.
+
+```python
+from http.cookiejar import MozillaCookieJar
+
+jar = MozillaCookieJar("/tmp/cookies.txt")
+jar.load(ignore_discard=True, ignore_expires=True)
+
+for c in jar:
+    print(c.name, c.domain, c.expires)
+
+jar.save(ignore_discard=True)
+```
+
+`load` calls `_really_load`, which opens the file and dispatches to the format-specific
+reader. `save` calls `_really_save` and writes a fresh file atomically via a temp path.
+`revert` is `clear` followed by `load`.
+
+## gopy mirror
+
+Not yet ported. The eventual home will be `module/http_cookiejar/` following gopy's
+flat module layout. The port will need:
+
+- `Cookie` struct mirroring all fourteen attributes CPython stores on each cookie.
+- `CookieJar` with a `sync.RWMutex` replacing `_cookies_lock`.
+- `DefaultCookiePolicy` porting the chain of `return_ok_*` predicates.
+- `MozillaCookieJar` / `LWPCookieJar` file I/O using Go's `bufio.Scanner`.
+
+## CPython 3.14 changes
+
+- `MozillaCookieJar` now rejects files whose first line does not contain the
+  expected Netscape magic string, hardening against accidental reads of non-cookie files.
+- `DefaultCookiePolicy` gained a `samesite` attribute to model the `SameSite`
+  cookie attribute (Strict / Lax / None) introduced in RFC 6265bis.
+- `http2time` switched from `email.utils.parsedate` to `email.utils.parsedate_to_datetime`
+  for stricter date validation and timezone handling.

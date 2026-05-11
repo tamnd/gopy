@@ -1,0 +1,141 @@
+---
+title: pycore_typevarobj.h
+cpython_path: Include/internal/pycore_typevarobj.h
+ported_to: objects/typevar.go
+---
+
+import CpyLink from '@site/src/components/CpyLink';
+import Map from '@site/src/components/Map';
+
+# pycore_typevarobj.h
+
+<CpyLink path="Include/internal/pycore_typevarobj.h" />
+
+Internal header declaring the concrete C structs for PEP 695 type parameter
+objects: `TypeVar`, `ParamSpec`, and `TypeVarTuple`. These are the runtime
+representations of the syntax introduced in Python 3.12 (`type X[T] = ...`).
+
+<Map
+  nodes={[
+    { id: "TypeVarObject",       kind: "struct", ported: true,  target: "objects/typevar.go" },
+    { id: "ParamSpecObject",     kind: "struct", ported: true,  target: "objects/typevar.go" },
+    { id: "TypeVarTupleObject",  kind: "struct", ported: true,  target: "objects/typevar.go" },
+    { id: "_PyTypeVar_Type",     kind: "extern", ported: false  },
+    { id: "_PyParamSpec_Type",   kind: "extern", ported: false  },
+    { id: "_PyTypeVarTuple_Type",kind: "extern", ported: false  },
+  ]}
+/>
+
+## CPython 3.14 changes
+
+Python 3.14 added two lazy-evaluation fields to `TypeVarObject` that defer
+bound and constraint resolution until first access. This mirrors the same
+lazy-evaluation strategy used for annotation scopes (`PEP 563` / `PEP 649`).
+
+Previously the bound was stored as a plain `PyObject *`; it is now accompanied
+by `tv_evaluate_bound` (a callable) and `tv_evaluate_constraints` (another
+callable), both of which are set to `NULL` once the result has been
+materialised.
+
+## Reading
+
+### TypeVarObject layout
+
+`TypeVarObject` is the backing struct for every `TypeVar` created with either
+the class-level syntax or the legacy `TypeVar(name, ...)` call:
+
+```c
+typedef struct {
+    PyObject_HEAD
+    PyObject *tv_name;                  /* str: the variable's identifier    */
+    PyObject *tv_bound;                 /* type or None                      */
+    PyObject *tv_constraints;           /* tuple of types, possibly empty    */
+    PyObject *tv_evaluate_bound;        /* callable | NULL once resolved     */
+    PyObject *tv_evaluate_constraints;  /* callable | NULL once resolved     */
+    unsigned char tv_covariant;         /* bool flag                         */
+    unsigned char tv_contravariant;     /* bool flag                         */
+    unsigned char tv_infer_variance;    /* bool flag                         */
+} TypeVarObject;
+```
+
+The `tv_evaluate_*` fields enable deferred evaluation: when the `TypeVar` is
+constructed inside a generic function or class, Python stores a thunk rather
+than the resolved type. The bound is computed by calling `tv_evaluate_bound()`
+on first access and then caching the result back into `tv_bound`.
+
+### ParamSpecObject and TypeVarTupleObject
+
+`ParamSpecObject` is structurally similar but has no constraints. It is used
+for `**P`-style parameter specifications:
+
+```c
+typedef struct {
+    PyObject_HEAD
+    PyObject *ps_name;
+    PyObject *ps_bound;
+    PyObject *ps_evaluate_bound;
+    unsigned char ps_covariant;
+    unsigned char ps_contravariant;
+    unsigned char ps_infer_variance;
+} ParamSpecObject;
+```
+
+`TypeVarTupleObject` is the simplest of the three, used for `*Ts` variadic
+type variables and carrying only a name and an evaluate thunk:
+
+```c
+typedef struct {
+    PyObject_HEAD
+    PyObject *tvt_name;
+    PyObject *tvt_evaluate_default;
+} TypeVarTupleObject;
+```
+
+### Variance flags
+
+All three structs carry `covariant`/`contravariant`/`infer_variance` bytes.
+When `infer_variance` is set the interpreter infers variance from usage at
+type-check time rather than honouring an explicit annotation. CPython's
+`typing` module reads these bytes directly through the C API to avoid
+attribute lookup overhead on hot paths.
+
+## gopy mirror
+
+The Go equivalents live in `objects/typevar.go`. Each CPython struct maps to a
+Go struct embedding `ObjectHead`:
+
+```go
+// objects/typevar.go
+
+type TypeVarObject struct {
+    ObjectHead
+    Name             *StringObject
+    Bound            Object
+    Constraints      *TupleObject
+    EvaluateBound    Object // nil once resolved
+    EvaluateConstraints Object
+    Covariant        bool
+    Contravariant    bool
+    InferVariance    bool
+}
+
+type ParamSpecObject struct {
+    ObjectHead
+    Name          *StringObject
+    Bound         Object
+    EvaluateBound Object
+    Covariant     bool
+    Contravariant bool
+    InferVariance bool
+}
+
+type TypeVarTupleObject struct {
+    ObjectHead
+    Name            *StringObject
+    EvaluateDefault Object
+}
+```
+
+Lazy evaluation is handled by the `Bound()` and `Constraints()` accessor
+methods, which call the thunk if present and then clear it, matching CPython's
+`typevar_bound` slot implementation.

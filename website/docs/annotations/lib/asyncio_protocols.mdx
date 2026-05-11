@@ -1,0 +1,213 @@
+---
+title: Lib/asyncio/protocols.py
+description: Abstract protocol interfaces for asyncio transports; Protocol, BufferedProtocol, DatagramProtocol, and SubprocessProtocol each define a callback contract that transport implementations call.
+cpython_path: Lib/asyncio/protocols.py
+cpython_version: "3.14"
+lines: 200
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Lib/asyncio/protocols.py`
+
+<CpyLink path="Lib/asyncio/protocols.py" />
+
+`protocols.py` defines the abstract callback interfaces that asyncio
+transports invoke as I/O events arrive. The design follows a strict
+separation: a transport owns the OS-level connection and drives reads and
+writes; a protocol owns the application logic and receives callbacks when
+data arrives, the connection opens or closes, or flow-control thresholds
+are crossed.
+
+There are four independent protocol hierarchies. `BaseProtocol` holds the
+three methods shared by all of them: `connection_made`, `connection_lost`,
+and `pause_writing`/`resume_writing`. `Protocol` extends `BaseProtocol`
+for byte-stream (TCP) connections and adds `data_received` and
+`eof_received`. `DatagramProtocol` handles UDP, where each delivery is a
+discrete packet with a source address. `SubprocessProtocol` models the
+three I/O pipes of a child process. `BufferedProtocol` is an alternative
+to `Protocol` that lets the protocol supply its own receive buffer,
+avoiding a copy when the transport calls into application code.
+
+All methods have no-op default implementations. A user protocol only
+overrides the methods it cares about, so a minimal TCP echo server can be
+written with just `data_received` and `connection_lost`.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Lib/asyncio/protocols.py" lines="1-20">1-20</Cpy> | Module header, `__all__` | Exports all four protocol classes; imports nothing from asyncio internals. | (not ported) |
+| <Cpy path="Lib/asyncio/protocols.py" lines="21-70">21-70</Cpy> | `BaseProtocol` | Shared base with `connection_made`, `connection_lost`, `pause_writing`, `resume_writing`; all four are no-ops. | (not ported) |
+| <Cpy path="Lib/asyncio/protocols.py" lines="71-120">71-120</Cpy> | `Protocol` | Extends `BaseProtocol`; adds `data_received(data)` and `eof_received()`; used for TCP and TLS stream connections. | (not ported) |
+| <Cpy path="Lib/asyncio/protocols.py" lines="121-155">121-155</Cpy> | `BufferedProtocol` | Alternative stream protocol; adds `get_buffer(sizehint)`, `buffer_updated(nbytes)`, and `eof_received()`; the transport writes into the buffer returned by `get_buffer` and notifies with `buffer_updated`. | (not ported) |
+| <Cpy path="Lib/asyncio/protocols.py" lines="156-180">156-180</Cpy> | `DatagramProtocol` | Extends `BaseProtocol`; adds `datagram_received(data, addr)` and `error_received(exc)`; used for UDP sockets. | (not ported) |
+| <Cpy path="Lib/asyncio/protocols.py" lines="181-200">181-200</Cpy> | `SubprocessProtocol` | Extends `BaseProtocol`; adds `pipe_data_received(fd, data)`, `pipe_connection_lost(fd, exc)`, and `process_exited()`; models stdout (fd=1), stderr (fd=2), and process exit. | (not ported) |
+
+## Reading
+
+### `BaseProtocol` flow-control callbacks (lines 21 to 70)
+
+<CpyLink path="Lib/asyncio/protocols.py" lines="21-70" />
+
+```python
+class BaseProtocol:
+    def connection_made(self, transport):
+        """Called when a connection is made.
+
+        The argument is the transport representing the connection.
+        To receive data, wait for data_received() calls.
+        When the connection is closed, connection_lost() is called.
+        """
+
+    def connection_lost(self, exc):
+        """Called when the connection is lost or closed.
+
+        The argument is an exception object or None (the latter
+        meaning a regular EOF is received or the connection was
+        aborted or closed).
+        """
+
+    def pause_writing(self):
+        """Called when the transport's buffer goes over the high-water mark.
+
+        Pause and resume calls are paired -- pause_writing() is called
+        once when the buffer goes strictly over the high-water mark
+        (even if subsequent writes increase the buffer size more), and
+        eventually resume_writing() is called once when the buffer size
+        reaches the low-water mark.
+
+        Note that if the buffer size equals the high-water mark,
+        pause_writing() is not called -- it must go strictly over.
+        Conversely, resume_writing() is called when the buffer size is
+        equal or lower than the low-water mark.  These end conditions
+        are important to ensure that things go as expected when either
+        mark is zero.
+        """
+
+    def resume_writing(self):
+        """Called when the transport's buffer drains below the low-water mark."""
+```
+
+The flow-control pair `pause_writing` / `resume_writing` implements the
+producer-consumer backpressure contract. When the transport's internal
+write buffer exceeds the high-water mark it calls `pause_writing` once;
+when the buffer drains to the low-water mark or below it calls
+`resume_writing` once. The protocol is responsible for stopping
+`transport.write` calls during the paused interval. The default no-ops
+mean a protocol that ignores backpressure will accumulate unbounded
+memory in the transport's write buffer rather than crashing immediately,
+but the transport continues to drain correctly on its own. Production
+protocols should always implement both callbacks and stop feeding data
+when paused.
+
+`connection_made` delivers the transport object to the protocol. This is
+the moment the protocol can save a reference to the transport for later
+writes. The argument is always an instance of one of the classes in
+`transports.py`, so `transport.write(b"hello")` is valid immediately
+inside `connection_made`.
+
+### `Protocol.data_received` and `eof_received` (lines 71 to 120)
+
+<CpyLink path="Lib/asyncio/protocols.py" lines="71-120" />
+
+```python
+class Protocol(BaseProtocol):
+    def data_received(self, data):
+        """Called when some data is received.
+
+        The argument is a bytes object.
+
+        IMPORTANT: it may or may not be a whole message; there is no
+        guarantee that the chunks will be sent/received as one whole
+        unit. Framing must be handled by the protocol layer.
+        """
+
+    def eof_received(self):
+        """Called when the other end signals it won't send any more data.
+
+        This will be called at most once. After calling this, the
+        transport will close itself (unless it returned a true value from
+        this method in the SSL/TLS case).
+
+        If this returns a false value (including None), the transport
+        will close itself.  If this returns a true value, closing the
+        transport is up to the protocol.
+        """
+```
+
+The docstring for `data_received` carries an important caveat: data
+arrives in arbitrary chunks. TCP is a byte stream, not a message
+stream, so a single `write(b"hello world")` on one end may arrive as
+two separate `data_received(b"hello ")` and `data_received(b"world")`
+calls on the other. Protocols that speak a framed protocol (HTTP, RESP,
+length-prefixed binary formats) must buffer incoming bytes and extract
+complete messages themselves.
+
+`eof_received` is called at most once when the remote side closes its
+write half of the connection (TCP FIN). Returning a truthy value is a
+hook for TLS protocols that want to suppress the automatic transport
+close: the TLS handshake for connection closure is asynchronous, so the
+TLS transport overrides this path to send a `close_notify` alert before
+fully closing. For plain TCP protocols the return value is ignored and
+the transport closes regardless.
+
+### `BufferedProtocol` zero-copy receive path (lines 121 to 155)
+
+<CpyLink path="Lib/asyncio/protocols.py" lines="121-155" />
+
+```python
+class BufferedProtocol(BaseProtocol):
+    def get_buffer(self, sizehint):
+        """Called to allocate a new receive buffer.
+
+        *sizehint* is a recommended minimum size for the returned
+        buffer.  When set to -1, the buffer size can be arbitrary.
+
+        Must return an object that implements the
+        :ref:`buffer protocol <bufferobjects>`.
+        The returned object is used as a buffer for the incoming data.
+        """
+
+    def buffer_updated(self, nbytes):
+        """Called when the buffer was updated with the received data.
+
+        *nbytes* is the total number of bytes that were written to
+        the buffer.
+        """
+
+    def eof_received(self):
+        """Same semantics as Protocol.eof_received."""
+```
+
+`BufferedProtocol` allows the event loop to write received bytes directly
+into a buffer that the application allocates, eliminating one copy
+compared to `Protocol`. The transport calls `get_buffer(sizehint)` to
+obtain a writable buffer (any object implementing the buffer protocol:
+`bytearray`, `memoryview`, `array.array`). The transport performs the OS
+`recv` call directly into that buffer, then calls `buffer_updated(nbytes)`
+with the count of bytes actually written. The protocol can reuse the same
+buffer across calls by returning it again from `get_buffer`, or can
+allocate a fresh one each time. This interface is primarily used by the
+SSL transport and high-throughput binary protocols where avoiding the
+extra copy matters.
+
+## gopy mirror
+
+`asyncio` protocols are not yet ported to gopy. The interface maps
+naturally to Go: each `Protocol` class becomes a Go interface type with
+the same method signatures, and the no-op default implementations become
+embedded base structs that concrete protocols embed. The
+`get_buffer`/`buffer_updated` pair in `BufferedProtocol` maps directly to
+`io.ReaderFrom` or a custom `BufferedReceiver` interface backed by a
+`[]byte` slice.
+
+## CPython 3.14 changes worth noting
+
+`BufferedProtocol` was added in Python 3.7 as part of the buffered I/O
+rework that also introduced `ReadTransport.set_protocol`. In 3.12, the
+`pause_writing` / `resume_writing` docstrings were corrected to clarify
+the exact threshold semantics (strictly over the high-water mark to
+pause, equal-or-below to resume). In 3.14 there are no breaking changes
+to the protocol interfaces; the file is stable.

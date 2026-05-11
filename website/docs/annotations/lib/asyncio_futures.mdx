@@ -1,0 +1,194 @@
+---
+title: Lib/asyncio/futures.py
+description: asyncio.Future class; PENDING/CANCELLED/FINISHED state machine, done callbacks via loop.call_soon, cancellation with CancelledError, and __await__ for coroutine integration.
+cpython_path: Lib/asyncio/futures.py
+cpython_version: "3.14"
+lines: 350
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Lib/asyncio/futures.py`
+
+<CpyLink path="Lib/asyncio/futures.py" />
+
+`futures.py` implements `asyncio.Future`, the primitive that bridges
+callback-based I/O with coroutine-based code. A `Future` wraps a single
+pending value that will be set exactly once. The file also exports
+`isfuture`, `_future_repr_info`, and `wrap_future` for interop with
+`concurrent.futures.Future`.
+
+A `Future` passes through three states in one direction: `PENDING` to
+either `FINISHED` (via `set_result` or `set_exception`) or `CANCELLED`
+(via `cancel`). Once settled, the state never changes. Done callbacks
+registered with `add_done_callback` are scheduled onto the event loop
+with `loop.call_soon` rather than called inline, so they always execute
+after the current iteration of the event loop.
+
+The `__await__` method allows `await future` inside a coroutine. When
+the future is still pending it `yield`s itself; the event loop captures
+that yielded value, registers a resume callback, and suspends the
+coroutine. When the future is finished, `__await__` returns the result
+directly or re-raises the stored exception.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Lib/asyncio/futures.py" lines="1-40">1-40</Cpy> | Module header, state constants | `PENDING = 0`, `CANCELLED = 1`, `FINISHED = 2`; `__all__` declaration; imports from `events`, `exceptions`, `format_helpers`. | (not ported) |
+| <Cpy path="Lib/asyncio/futures.py" lines="41-80">41-80</Cpy> | `isfuture` / `_future_repr_info` | `isfuture` checks `_asyncio_future_blocking`; `_future_repr_info` builds the list of strings used by `__repr__`. | (not ported) |
+| <Cpy path="Lib/asyncio/futures.py" lines="81-180">81-180</Cpy> | `Future.__init__` / `__repr__` / `__del__` | Constructor binds the loop, sets `_state = PENDING`, initializes the callbacks list and `_exception`. `__del__` logs a warning when a finished future with an exception is garbage-collected without the exception ever being retrieved. | (not ported) |
+| <Cpy path="Lib/asyncio/futures.py" lines="181-230">181-230</Cpy> | `cancel` / `cancelled` / `done` | `cancel` transitions `PENDING -> CANCELLED` and schedules callbacks; `cancelled()` and `done()` are simple state tests. | (not ported) |
+| <Cpy path="Lib/asyncio/futures.py" lines="231-270">231-270</Cpy> | `result` / `exception` | `result` raises `CancelledError` if cancelled, `InvalidStateError` if pending, or the stored exception if finished with an error; otherwise returns the stored value. `exception` mirrors this without returning the value. | (not ported) |
+| <Cpy path="Lib/asyncio/futures.py" lines="271-310">271-310</Cpy> | `add_done_callback` / `remove_done_callback` / `_schedule_callbacks` | Maintains the `_callbacks` list; `_schedule_callbacks` drains it by passing each callback to `loop.call_soon`. | (not ported) |
+| <Cpy path="Lib/asyncio/futures.py" lines="311-350">311-350</Cpy> | `set_result` / `set_exception` / `__await__` / `wrap_future` | State-transition writers; `__await__` is the coroutine protocol entry point; `wrap_future` wraps a `concurrent.futures.Future` by bridging its callback with `loop.call_soon_threadsafe`. | (not ported) |
+
+## Reading
+
+### State machine: `cancel`, `set_result`, `set_exception` (lines 181 to 310)
+
+<CpyLink path="Lib/asyncio/futures.py" lines="181-310" />
+
+```python
+class Future:
+    _state = _PENDING
+
+    def cancel(self, msg=None):
+        if self._state != _PENDING:
+            return False
+        self._state = _CANCELLED
+        self._cancel_message = msg
+        self.__schedule_callbacks()
+        return True
+
+    def set_result(self, result):
+        if self._state != _PENDING:
+            raise exceptions.InvalidStateError(
+                f'{self._state!r}: {self!r}')
+        self._result = result
+        self._state = _FINISHED
+        self.__schedule_callbacks()
+
+    def set_exception(self, exception):
+        if self._state != _PENDING:
+            raise exceptions.InvalidStateError(
+                f'{self._state!r}: {self!r}')
+        if isinstance(exception, type):
+            exception = exception()
+        if type(exception) is StopIteration:
+            raise TypeError(
+                'StopIteration interacts badly with generators '
+                'and cannot be raised into a Future')
+        self._exception = exception
+        self._exception_tb = exception.__traceback__
+        self._state = _FINISHED
+        self.__schedule_callbacks()
+        self.__log_traceback = True
+```
+
+All three methods are guarded by `if self._state != _PENDING`. This is
+the sole enforcement point for the one-way state machine: once a future
+is settled, calling any of the three methods raises `InvalidStateError`
+(or returns `False` for `cancel`). After the state transition,
+`__schedule_callbacks` is called to drain the callback list. Callbacks
+are not called directly here; they are handed to `loop.call_soon`, which
+queues them for the next iteration of the event loop. This guarantees
+that callbacks never execute synchronously on the stack of whoever called
+`set_result`.
+
+`set_exception` rejects `StopIteration` explicitly. If a `StopIteration`
+propagated through `await` it would be misinterpreted by the generator
+machinery as a return value rather than an exception, silently swallowing
+the error. The check converts that silent bug into a hard `TypeError`.
+
+### `result` and exception retrieval (lines 231 to 270)
+
+<CpyLink path="Lib/asyncio/futures.py" lines="231-270" />
+
+```python
+    def result(self):
+        if self._state == _CANCELLED:
+            exc = self._make_cancelled_error()
+            raise exc
+        if self._state != _FINISHED:
+            raise exceptions.InvalidStateError(
+                'Result is not ready.')
+        self.__log_traceback = False
+        if self._exception is not None:
+            raise self._exception.with_traceback(self._exception_tb)
+        return self._result
+
+    def exception(self):
+        if self._state == _CANCELLED:
+            exc = self._make_cancelled_error()
+            raise exc
+        if self._state != _FINISHED:
+            raise exceptions.InvalidStateError(
+                'Exception is not set.')
+        self.__log_traceback = False
+        return self._exception
+```
+
+`result()` clears the `__log_traceback` flag before re-raising. That
+flag is set by `set_exception` and checked in `__del__`: if a future is
+garbage-collected while `__log_traceback` is still `True`, the event loop
+emits a warning including the stored traceback. Calling `result()` or
+`exception()` counts as "acknowledging" the exception, which is why the
+flag is cleared here. This is the mechanism behind the "Future exception
+was never retrieved" warning seen in production asyncio applications.
+
+### `__await__` coroutine protocol (lines 311 to 340)
+
+<CpyLink path="Lib/asyncio/futures.py" lines="311-340" />
+
+```python
+    def __await__(self):
+        if not self.done():
+            self._asyncio_future_blocking = True
+            yield self   # suspend: event loop will resume us
+        if not self.done():
+            raise RuntimeError(
+                "await wasn't used with future")
+        return self.result()
+
+    __iter__ = __await__
+```
+
+When a coroutine executes `await some_future`, Python calls
+`some_future.__await__()` and drives the resulting iterator. If the
+future is still pending, `__await__` sets `_asyncio_future_blocking =
+True` and yields `self` back to the event loop. The event loop sees a
+yielded `Future` object (detected via `isfuture`), adds a done-callback
+that calls `coro.send(None)` when the future settles, and suspends the
+coroutine. When the future finishes, the callback resumes the coroutine
+which re-enters `__await__`, finds `self.done()` is `True`, and falls
+through to `return self.result()`. The `return` inside a generator body
+becomes the `StopIteration.value` that the coroutine runner extracts as
+the `await` expression's value.
+
+`__iter__ = __await__` makes `Future` usable with plain `yield from` as
+well, which was the protocol before `async`/`await` keywords existed.
+The `_asyncio_future_blocking` attribute is the handshake: the event loop
+checks it to distinguish a yielded `Future` from a yielded sub-generator.
+
+## gopy mirror
+
+`asyncio.Future` is not yet ported to gopy. The state machine,
+callback scheduling, and coroutine protocol described here would map to a
+Go struct with a `sync.Mutex`-protected state field and a slice of
+callbacks forwarded to the event loop's run queue. The `__await__` bridge
+is the most Go-specific piece: gopy coroutines are implemented as
+goroutines, so the yield/resume handshake would use a channel rather than
+generator suspension.
+
+## CPython 3.14 changes worth noting
+
+`Future.cancel` grew the optional `msg` parameter in 3.9; the message is
+forwarded to `CancelledError` so callers can distinguish which future was
+cancelled. In 3.12, `Future.__del__` was tightened to only log when the
+loop is still running, avoiding spurious warnings during interpreter
+shutdown. In 3.14, `wrap_future` correctly handles the case where the
+source `concurrent.futures.Future` is already cancelled at wrap time by
+immediately cancelling the returned `asyncio.Future` rather than
+registering a callback that would never fire.

@@ -1,0 +1,163 @@
+---
+title: pycore_atomic.h
+cpython_path: Include/internal/pycore_atomic.h
+---
+
+import CpyLink from '@site/src/components/CpyLink';
+import Map from '@site/src/components/Map';
+
+# pycore_atomic.h
+
+<CpyLink path="Include/internal/pycore_atomic.h" />
+
+Internal header providing atomic operation primitives for CPython's
+free-threaded build (`--disable-gil`). On a GIL build the same macros and
+inline functions degrade to plain reads and writes, so callers do not need
+`#ifdef` guards. The header also defines `_Py_atomic_int` and
+`_Py_atomic_ptr_t` wrapper types that communicate atomic intent to both the
+compiler and human readers.
+
+<Map
+  nodes={[
+    { id: "_Py_atomic_int",                       kind: "type",     ported: false },
+    { id: "_Py_atomic_ptr_t",                     kind: "type",     ported: false },
+    { id: "_Py_atomic_load_int_relaxed",          kind: "function", ported: false },
+    { id: "_Py_atomic_store_int_relaxed",         kind: "function", ported: false },
+    { id: "_Py_atomic_load_int_acquire",          kind: "function", ported: false },
+    { id: "_Py_atomic_store_int_release",         kind: "function", ported: false },
+    { id: "_Py_atomic_add_int",                   kind: "function", ported: false },
+    { id: "_Py_atomic_compare_exchange_int",      kind: "function", ported: false },
+    { id: "_Py_atomic_load_ptr_relaxed",          kind: "function", ported: false },
+    { id: "_Py_atomic_store_ptr_release",         kind: "function", ported: false },
+    { id: "_Py_atomic_compare_exchange_ptr",      kind: "function", ported: false },
+  ]}
+/>
+
+## CPython 3.14 changes
+
+Python 3.14 reorganised this header substantially as part of the free-threaded
+stabilisation work. The main changes:
+
+- `_Py_atomic_int` changed from a `volatile int` alias to a struct wrapping
+  `_Atomic int` (C11) or `__atomic`-qualified int (GCC/Clang built-ins) so
+  that mixing atomic and non-atomic accesses to the same variable is a
+  compile-time error rather than a silent race.
+- Separate acquire/release variants (`_load_acquire` / `_store_release`) were
+  added alongside the existing relaxed variants, giving callers explicit control
+  over memory ordering without pulling in `<stdatomic.h>` directly.
+- A new family of `_Py_atomic_ptr_t` functions mirrors the integer family for
+  pointer-sized values, used by the object reference machinery in
+  `pycore_stackref.h`.
+
+## Reading
+
+### Wrapper types
+
+The two atomic wrapper types prevent accidental non-atomic access. Because they
+are structs (on C11 targets), assigning one directly to a plain `int` or `void
+*` is a type error:
+
+```c
+// GIL build: degrades to a plain int inside a struct
+// Free-threaded build: uses _Atomic int (C11) or __atomic built-ins
+typedef struct { int _val; } _Py_atomic_int;
+
+typedef struct { void *_val; } _Py_atomic_ptr_t;
+```
+
+All functions below take a pointer to one of these structs, never a raw
+integer or pointer directly.
+
+### Integer operations
+
+The most-used group covers load, store, fetch-add, and compare-and-swap. Each
+comes in a relaxed (no ordering guarantee) and an acquire/release (sequential
+consistency implied around the site of interest) flavour:
+
+```c
+/* Load with no ordering guarantee. Safe for statistics counters. */
+static inline int
+_Py_atomic_load_int_relaxed(const _Py_atomic_int *obj);
+
+/* Store with no ordering guarantee. */
+static inline void
+_Py_atomic_store_int_relaxed(_Py_atomic_int *obj, int val);
+
+/* Load with acquire semantics. Pairs with a store_release on the writer. */
+static inline int
+_Py_atomic_load_int_acquire(const _Py_atomic_int *obj);
+
+/* Store with release semantics. */
+static inline void
+_Py_atomic_store_int_release(_Py_atomic_int *obj, int val);
+
+/* Atomic fetch-and-add. Returns the value before addition. */
+static inline int
+_Py_atomic_add_int(_Py_atomic_int *obj, int val);
+
+/* CAS. Writes *expected on failure. Returns 1 on success, 0 on failure. */
+static inline int
+_Py_atomic_compare_exchange_int(
+    _Py_atomic_int *obj,
+    int *expected,
+    int desired
+);
+```
+
+### Pointer operations
+
+The pointer family is structurally identical but operates on `_Py_atomic_ptr_t`
+and `void *` values. It is used throughout the free-threaded object model to
+update reference fields without holding a lock:
+
+```c
+static inline void *
+_Py_atomic_load_ptr_relaxed(const _Py_atomic_ptr_t *obj);
+
+static inline void
+_Py_atomic_store_ptr_release(_Py_atomic_ptr_t *obj, void *val);
+
+static inline int
+_Py_atomic_compare_exchange_ptr(
+    _Py_atomic_ptr_t *obj,
+    void **expected,
+    void *desired
+);
+```
+
+## gopy mirror
+
+This subsystem has not yet been ported to gopy. Go's `sync/atomic` package
+covers the same ground. A thin mapping that preserves the CPython naming
+convention would look like the following, living in a new file such as
+`vm/atomic.go`:
+
+```go
+// future: vm/atomic.go
+
+import "sync/atomic"
+
+// AtomicInt mirrors _Py_atomic_int.
+type AtomicInt struct{ v atomic.Int32 }
+
+func (a *AtomicInt) LoadRelaxed() int32          { return a.v.Load() }
+func (a *AtomicInt) StoreRelaxed(val int32)      { a.v.Store(val) }
+func (a *AtomicInt) Add(delta int32) int32        { return a.v.Add(delta) }
+func (a *AtomicInt) CompareAndSwap(old, new int32) bool {
+    return a.v.CompareAndSwap(old, new)
+}
+
+// AtomicPtr mirrors _Py_atomic_ptr_t.
+type AtomicPtr[T any] struct{ v atomic.Pointer[T] }
+
+func (p *AtomicPtr[T]) LoadRelaxed() *T       { return p.v.Load() }
+func (p *AtomicPtr[T]) StoreRelease(val *T)   { p.v.Store(val) }
+func (p *AtomicPtr[T]) CompareAndSwap(old, new *T) bool {
+    return p.v.CompareAndSwap(old, new)
+}
+```
+
+Go's memory model guarantees that `atomic.Load` / `atomic.Store` already carry
+the acquire/release semantics CPython distinguishes with separate function
+names, so the relaxed vs. acquire/release split collapses to a single
+`atomic.*` call in Go.

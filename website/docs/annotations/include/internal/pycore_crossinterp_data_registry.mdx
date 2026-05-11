@@ -1,0 +1,145 @@
+---
+title: pycore_crossinterp_data_registry.h
+cpython_path: Include/internal/pycore_crossinterp_data_registry.h
+---
+
+import CpyLink from '@site/src/components/CpyLink';
+import Map from '@site/src/components/Map';
+
+# pycore_crossinterp_data_registry.h
+
+<CpyLink path="Include/internal/pycore_crossinterp_data_registry.h" />
+
+Internal header defining the registry of cross-interpreter data converters.
+When an object is passed between sub-interpreters it cannot be shared by
+pointer; instead, a type-specific serializer converts it to a form that can be
+safely reconstructed on the other side. This header declares the data
+structures that hold those serializers and the lookup function that finds the
+right one for a given type.
+
+<Map
+  nodes={[
+    { id: "_PyXIData_lookup_context_t",  kind: "struct",    ported: false },
+    { id: "_PyXIData_registry_t",        kind: "struct",    ported: false },
+    { id: "_PyXIData_registryitem_t",    kind: "struct",    ported: false },
+    { id: "_PyXIData_Lookup",            kind: "function",  ported: false },
+    { id: "_PyXIData_RegisterType",      kind: "function",  ported: false },
+  ]}
+/>
+
+## CPython 3.14 changes
+
+Python 3.14 extracted the cross-interpreter data registry out of the monolithic
+per-interpreter state struct into its own header. The registry is now a
+first-class object, and the lookup context (`_PyXIData_lookup_context_t`) was
+introduced to carry the interpreter pointer and a pre-resolved reference to the
+built-in entry list so that hot lookups do not re-walk global state on every
+call.
+
+Also new in 3.14: the registry gained a read-write lock so that types can
+register serializers from extension modules after interpreter startup, which
+previously required the GIL for safety.
+
+## Reading
+
+### Registry structure
+
+The registry is a singly-linked list of `_PyXIData_registryitem_t` nodes, each
+binding a `PyTypeObject *` to a pair of function pointers:
+
+```c
+typedef int (*xidatafunc)(PyObject *, _PyXIData_t *);
+
+typedef struct _PyXIData_registryitem {
+    struct _PyXIData_registryitem *next;
+    PyTypeObject  *type;
+    xidatafunc     datafunc;   /* object -> _PyXIData_t */
+} _PyXIData_registryitem_t;
+
+typedef struct {
+    _PyXIData_registryitem_t *head;
+    PyThread_type_lock        mutex;    /* free-threaded build only */
+} _PyXIData_registry_t;
+```
+
+The `datafunc` callback fills an opaque `_PyXIData_t` buffer. The receiving
+interpreter calls a corresponding reconstruct function stored inside that
+buffer to rebuild the object from the serialised bytes.
+
+### Lookup context and the fast path
+
+`_PyXIData_lookup_context_t` caches a direct pointer to the head of the
+built-in entries so callers do not have to dereference the full interpreter
+state on every lookup:
+
+```c
+typedef struct {
+    PyInterpreterState        *interp;
+    _PyXIData_registryitem_t  *builtin_head;  /* fast path for common types */
+} _PyXIData_lookup_context_t;
+```
+
+`_PyXIData_Lookup` walks the built-in list first and falls through to the
+per-interpreter extension list only when needed:
+
+```c
+int _PyXIData_Lookup(
+    _PyXIData_lookup_context_t *ctx,
+    PyObject  *obj,
+    _PyXIData_t *data   /* out */
+);
+```
+
+Returns `0` on success, `-1` with an exception set when no serializer is
+registered for `Py_TYPE(obj)`.
+
+### Built-in registrations
+
+At interpreter startup `_PyXIData_Init` registers serializers for the
+following built-in types in order:
+
+```c
+// Python/crossinterp.c (simplified)
+static const struct {
+    PyTypeObject **type;
+    xidatafunc    datafunc;
+} builtin_xid_types[] = {
+    { &PyLong_Type,   _PyLong_GetXIData    },
+    { &PyFloat_Type,  _PyFloat_GetXIData   },
+    { &PyBool_Type,   _PyBool_GetXIData    },
+    { &PyBytes_Type,  _PyBytes_GetXIData   },
+    { &PyStr_Type,    _PyUnicode_GetXIData },
+    { &PyNone_Type,   _PyNone_GetXIData    },
+    { NULL }
+};
+```
+
+Extension types call `_PyXIData_RegisterType` to add themselves to the
+per-interpreter list. `None` and the numeric types use a trivial serializer
+that encodes the value inline inside `_PyXIData_t`; strings use a UTF-8 copy.
+
+## gopy mirror
+
+This subsystem has not yet been ported to gopy. The relevant future location
+would be a new package or file alongside the sub-interpreter machinery, for
+example `vm/crossinterp.go`, mirroring the registry struct as:
+
+```go
+// future: vm/crossinterp.go
+
+type XIDataFunc func(obj Object) (XIData, error)
+
+type XIDataRegistryItem struct {
+    Next     *XIDataRegistryItem
+    Type     *TypeObject
+    DataFunc XIDataFunc
+}
+
+type XIDataRegistry struct {
+    Head  *XIDataRegistryItem
+    Mutex sync.RWMutex // only active in free-threaded builds
+}
+```
+
+The lookup context would carry a direct pointer into the built-in slice to
+reproduce the fast-path optimisation from `_PyXIData_lookup_context_t`.

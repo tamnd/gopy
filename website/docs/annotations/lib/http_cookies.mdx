@@ -1,0 +1,131 @@
+---
+title: "http.cookies"
+cpython_path: "Lib/http/cookies.py"
+approx_lines: 400
+status: "not_ported"
+---
+
+import CpyLink from "@site/src/components/CpyLink";
+import Map from "@site/src/components/Map";
+
+# http.cookies
+
+<CpyLink path="Lib/http/cookies.py" />
+
+RFC 2109 HTTP cookie header parser and serializer. The module centres on two classes:
+`Morsel`, which holds a single parsed cookie with its RFC-defined attributes, and
+`SimpleCookie`, a `dict`-like container of `Morsel` objects that can parse a raw
+`Cookie:` or `Set-Cookie:` header and regenerate it with correct quoting.
+
+## Map
+
+<Map
+  nodes={[
+    { id: "Morsel",            kind: "class",    desc: "One cookie: key, value, coded_value plus attributes (expires, path, domain, secure, httponly, samesite, max-age, comment, version)" },
+    { id: "SimpleCookie",      kind: "class",    desc: "Ordered dict of str -> Morsel; load() parses header strings; output() serializes" },
+    { id: "BaseCookie",        kind: "class",    desc: "Abstract base for SimpleCookie; subclass value_decode/value_encode to customise quoting" },
+    { id: "CookieError",       kind: "class",    desc: "Raised on parse failure or attempts to set an illegal Morsel attribute" },
+    { id: "_quote",            kind: "function", desc: "Translate a cookie value to its quoted form per RFC 2109 safe-char rules" },
+    { id: "_unquote",          kind: "function", desc: "Strip optional double-quote delimiters and unescape backslash sequences" },
+    { id: "_getdate",          kind: "function", desc: "Format an offset in seconds as a Netscape cookie expiry date string" },
+    { id: "_CookiePattern",    kind: "constant", desc: "Pre-compiled regex that tokenises a Cookie: header into name=value pairs" },
+  ]}
+/>
+
+## Reading
+
+### Morsel attributes and legal keys
+
+`Morsel._reserved` is a frozenset of the attribute names RFC 2109 defines. Attempting
+to set an attribute not in that set raises `CookieError`. The `coded_value` attribute
+stores the wire representation (quoted if necessary) while `value` stores the decoded
+Python string. They diverge whenever `_quote` has to escape characters.
+
+```python
+from http.cookies import Morsel, CookieError
+
+m = Morsel()
+m.set("session", "abc 123", '"abc 123"')   # key, raw value, coded value
+
+print(m.key)          # session
+print(m.value)        # abc 123
+print(m.coded_value)  # "abc 123"
+
+m["path"] = "/api"
+m["httponly"] = True
+m["samesite"] = "Lax"
+
+try:
+    m["invalid_attr"] = "boom"
+except CookieError as exc:
+    print(exc)  # Illegal key 'invalid_attr'
+```
+
+`OutputString()` serialises one `Set-Cookie:` line. It iterates `_reserved` in a
+deterministic order, skipping attributes whose value is the empty string or `False`.
+
+### SimpleCookie parse and output
+
+`SimpleCookie.load()` accepts either a raw header string or a pre-split dict.
+When given a string it calls `_BaseCookie__parse_string`, which runs `_CookiePattern`
+in a `finditer` loop to extract `(key, val)` pairs in O(n) time.
+
+```python
+from http.cookies import SimpleCookie
+
+raw = 'csrftoken=abc123; sessionid="xyz"; Path=/; HttpOnly; SameSite=Lax'
+
+sc = SimpleCookie()
+sc.load(raw)
+
+for name, morsel in sc.items():
+    print(name, "->", morsel.value, "| path:", morsel["path"])
+
+# Regenerate the header
+header = sc.output(header="Set-Cookie:")
+print(header)
+```
+
+`output()` calls `Morsel.OutputString()` for each morsel and joins lines with `\r\n`.
+`js_output()` produces a `<script>` block that sets cookies via `document.cookie` for
+situations where the header cannot be set server-side.
+
+### Quoting rules
+
+`_quote` uses `_LegalChars` (all printable ASCII minus the fourteen RFC-reserved
+punctuation characters) as its safe set. Any value containing a character outside that
+set is wrapped in double quotes. Backslash and double-quote inside a quoted value are
+backslash-escaped to produce valid RFC 2109 `quoted-string` tokens.
+
+```python
+from http.cookies import SimpleCookie
+
+sc = SimpleCookie()
+sc["token"] = "hello world"   # space forces quoting
+sc["plain"] = "helloworld"    # stays unquoted
+
+print(sc["token"].coded_value)  # "hello world"
+print(sc["plain"].coded_value)  # helloworld
+```
+
+`_unquote` reverses the process: it strips surrounding `"` if present, then replaces
+`\\` and `\"` escapes with their literal characters using a small substitution table.
+
+## gopy mirror
+
+Not yet ported. The planned location is `module/http_cookies/` following gopy's flat
+module layout. Key work items:
+
+- `Morsel` struct with a fixed attribute map validated against the reserved-key set.
+- `SimpleCookie` backed by an ordered map to preserve insertion order on output.
+- `_CookiePattern` translated to a compiled `regexp.Regexp` with named groups.
+- `_quote` / `_unquote` ported as Go functions operating on `[]byte` for efficiency.
+
+## CPython 3.14 changes
+
+- `Morsel._reserved` gained `"samesite"` as a first-class key (previously callers had
+  to set it via the attribute dict directly with no validation).
+- `_quote` now rejects ASCII control characters (0x00-0x1f, 0x7f) even inside quoted
+  strings, aligning with the stricter interpretation in RFC 6265.
+- `SimpleCookie.load()` emits a `DeprecationWarning` when it silently drops malformed
+  tokens; a future version will raise `CookieError` instead.
