@@ -1,0 +1,111 @@
+---
+title: pycore_import.h
+description: "Internal import machinery declarations"
+cpython_path: Include/internal/pycore_import.h
+cpython_version: "3.14"
+lines: 150
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Internal header that exposes the private import API used by the interpreter core.
+Public callers use `Python/import.c`; this header wires together the per-interpreter
+state, the extension module cache, and the dynamic loader.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1–30 | `_PyImport_State` | Per-interpreter import state struct |
+| 31–50 | `_PyImport_FindExtensionObject` | Look up a cached extension module by name + path |
+| 51–70 | `_PyImport_FixupExtensionObject` | Write an extension module into the cache after load |
+| 71–90 | `_PyImport_GetModuleAttr` | Attribute fetch on a module object without Python overhead |
+| 91–110 | `_PyImport_IsDefaultImportFunc` | Test whether `__import__` has been replaced |
+| 111–130 | `_PyImport_LoadDynamic` | Platform-specific `.so` / `.pyd` loader entry point |
+| 131–150 | misc guards | `extern "C"` guards and include sentinels |
+
+## Reading
+
+### Per-interpreter import state
+
+Every sub-interpreter carries its own `_PyImport_State` so that imports in one
+interpreter do not bleed into another. The two most-referenced fields are
+`modules_by_index` (a `PyListObject` that maps `PyModuleDef.m_base.m_index`
+to the live module object) and `builtins_copy` (a snapshot of `builtins.__dict__`
+taken at interpreter startup).
+
+```c
+// CPython: Include/internal/pycore_import.h:12 _PyImport_State
+struct _PyImport_State {
+    PyObject *modules_by_index;   /* list; indexed by m_base.m_index */
+    PyObject *builtins_copy;      /* shallow copy of builtins.__dict__ */
+    PyObject *import_func;        /* cached builtins.__import__ */
+    ...
+};
+```
+
+### Extension module cache
+
+`_PyImport_FindExtensionObject` walks a per-interpreter dict keyed on
+`(name, path)` tuples. A hit returns the cached `sys.modules` entry without
+re-running `dlopen`. `_PyImport_FixupExtensionObject` is called by the dynamic
+loader immediately after a successful `PyInit_xxx` to populate that same dict.
+
+```c
+// CPython: Include/internal/pycore_import.h:51 _PyImport_FindExtensionObject
+PyObject *_PyImport_FindExtensionObject(PyObject *name, PyObject *path);
+
+// CPython: Include/internal/pycore_import.h:58 _PyImport_FixupExtensionObject
+int _PyImport_FixupExtensionObject(PyObject *mod,
+                                   PyObject *name,
+                                   PyObject *path,
+                                   PyObject *modules);
+```
+
+### Default import check
+
+Before running the full import machinery CPython asks whether `__import__` is
+still the built-in. If it has been monkey-patched the fast path is skipped and
+the call goes through the normal attribute lookup.
+
+```c
+// CPython: Include/internal/pycore_import.h:96 _PyImport_IsDefaultImportFunc
+int _PyImport_IsDefaultImportFunc(PyThreadState *tstate, PyObject *func);
+```
+
+### Dynamic loader
+
+`_PyImport_LoadDynamic` is the single cross-platform entry point for `.so` /
+`.pyd` extension loading. On POSIX it ultimately calls `dlopen`; on Windows it
+calls `LoadLibraryExW`. The function signature is identical on all platforms so
+the rest of the import machinery stays portable.
+
+```c
+// CPython: Include/internal/pycore_import.h:115 _PyImport_LoadDynamic
+PyObject *_PyImport_LoadDynamic(PyObject *name, PyObject *path,
+                                PyObject *file);
+```
+
+## gopy notes
+
+- `_PyImport_State` maps to a struct embedded in `vm.Interpreter`. The
+  `modules_by_index` list is replicated in `objects/module.go` as a Go slice.
+- `_PyImport_FindExtensionObject` and `_PyImport_FixupExtensionObject` are ported
+  in `vm/eval_import.go`. The cache key uses a `[2]string` array instead of a
+  Python tuple.
+- `_PyImport_LoadDynamic` is out of scope for gopy; extension modules are Go
+  packages registered via `stdlibinit/registry.go`.
+- `_PyImport_IsDefaultImportFunc` is inlined at the call site in
+  `vm/eval_import.go` because gopy has no monkey-patching surface yet.
+
+## CPython 3.14 changes
+
+- `_PyImport_State` gained `import_func` as a cached field (previously fetched
+  from `builtins` on every import). This shaves one dict lookup per import
+  statement.
+- The `modules_by_index` list is now pre-allocated to the known `m_index` high
+  watermark at interpreter startup, reducing realloc churn on startup-heavy
+  workloads.
+- `_PyImport_LoadDynamic` signature is unchanged from 3.12, but the internal
+  audit-hook call was moved earlier to fire before `dlopen` rather than after.

@@ -1,0 +1,136 @@
+---
+title: "_threadmodule.c — C implementation of the _thread module"
+description: "Annotated reading of Modules/_threadmodule.c from CPython 3.14"
+cpython_path: Modules/_threadmodule.c
+cpython_version: "3.14"
+lines: 1800
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`_threadmodule.c` implements the low-level `_thread` module: plain locks,
+reentrant locks, thread-local storage, and the `start_new_thread()` call that
+every higher-level threading primitive eventually uses.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1–80 | includes / bootstrap | pulls `pythread.h`, defines `Py_BUILD_CORE_MODULE` |
+| 81–200 | `lockobject` | plain `Lock` type wrapping a `PyThread_type_lock` |
+| 201–520 | `lock_PyThread_acquire_lock()` | blocking acquire with optional timeout |
+| 521–700 | `RLock` object | reentrant lock: owner thread id + recursion count |
+| 701–900 | `_localobject` | thread-local storage: per-thread dict keyed by instance id |
+| 901–1100 | `thread_start_new_thread()` | spawns OS thread via `PyThread_start_new_thread` |
+| 1101–1300 | `thread_get_ident()` | returns OS-level thread id as Python int |
+| 1301–1500 | `thread_after_fork()` | post-fork cleanup (added 3.13) |
+| 1501–1800 | method table / `PyInit__thread` | module setup |
+
+## Reading
+
+### Starting a new thread
+
+`thread_start_new_thread()` is the single path through which every Python
+thread is born. It packages the callable and arguments into a heap-allocated
+`struct bootstate`, then hands off to the OS.
+
+```c
+// CPython: Modules/_threadmodule.c:942 thread_start_new_thread
+boot = PyMem_NEW(struct bootstate, 1);
+boot->tstate = _PyThreadState_New(interp, _PyThreadState_WHENCE_THREADING);
+boot->func   = Py_NewRef(func);
+boot->args   = Py_NewRef(args);
+
+ident = PyThread_start_new_thread(t_bootstrap, (void *)boot);
+if (ident == PYTHREAD_INVALID_THREAD_ID) {
+    PyErr_SetString(ThreadError, "can't start new thread");
+    ...
+}
+```
+
+`t_bootstrap()` runs in the new OS thread: it acquires the GIL, calls
+`boot->func`, handles any uncaught exception via `sys.excepthook`, and then
+calls `PyThreadState_DeleteCurrent()`.
+
+### Lock acquire with timeout
+
+Plain `Lock.acquire()` accepts an optional floating-point `timeout`. Negative
+values mean "block forever"; zero means "try and return immediately".
+
+```c
+// CPython: Modules/_threadmodule.c:248 lock_PyThread_acquire_lock
+if (timeout > 0) {
+    microseconds = (long long)(timeout * 1e6 + 0.5);
+} else if (timeout == 0) {
+    microseconds = 0;   /* non-blocking */
+} else {
+    microseconds = -1;  /* infinite */
+}
+
+r = PyThread_acquire_lock_timed_with_retries(self->lock_lock, microseconds);
+```
+
+The `_with_retries` variant loops internally to absorb `EINTR` on platforms
+where signal delivery can break the underlying `sem_timedwait`.
+
+### RLock: owner and count
+
+`RLock` keeps two extra fields beyond the underlying `PyThread_type_lock`: the
+owning thread id and a recursion depth counter. `acquire()` short-circuits the
+OS call when the calling thread already owns the lock.
+
+```c
+// CPython: Modules/_threadmodule.c:578 rlock_acquire
+if (self->rlock_count > 0 &&
+    self->rlock_owner == PyThread_get_thread_ident()) {
+    /* same thread — just bump the count */
+    self->rlock_count++;
+    Py_RETURN_TRUE;
+}
+/* otherwise fall through to the blocking acquire */
+```
+
+`release()` decrements the count and only calls `PyThread_release_lock()` when
+it reaches zero, restoring `rlock_owner` to `0`.
+
+### Thread-local storage
+
+`_localobject` stores values in a per-thread `dict`. The dict is looked up (or
+created) on every attribute access by hashing the `_local` instance's pointer
+as the key inside the current `PyThreadState`.
+
+```c
+// CPython: Modules/_threadmodule.c:785 _local_get_dict
+idt = PyLong_FromVoidPtr(self);          /* key = instance address */
+dict = PyDict_GetItemWithError(tdict, idt);
+if (dict == NULL) {
+    dict = PyDict_New();
+    PyDict_SetItem(tdict, idt, dict);
+}
+```
+
+This design means `__init__` is called once per thread, not once globally, by
+checking whether the per-thread dict was just created.
+
+## gopy notes
+
+- `thread_start_new_thread()` is the primitive gopy must implement to support
+  `threading.Thread`. The Go equivalent is a goroutine, but the GIL handshake
+  (`_PyThreadState_New` / `PyThreadState_DeleteCurrent`) must be preserved.
+- `RLock` owner tracking uses `PyThread_get_thread_ident()` which maps to
+  `runtime.Goexit`-safe goroutine identity in gopy.
+- `_localobject` maps naturally to a `sync.Map` keyed by goroutine id, but the
+  per-thread `__init__` call-on-first-access behaviour must be reproduced.
+- `thread_after_fork()` is called by `os.fork()` post-fork; gopy does not
+  support `fork` so this can be a no-op stub.
+
+## CPython 3.14 changes
+
+- `thread.after_fork()` was added in 3.13 to give user code a hook to reset
+  lock state after `os.fork()`; 3.14 carries it forward.
+- `Lock` and `RLock` gained `__class_getitem__` in 3.13 to support `Lock[int]`
+  style type hints without raising `TypeError`.
+- The `_thread.excepthook` and `ExceptHookArgs` infrastructure moved to
+  `_threadmodule.c` from `Python/pylifecycle.c` in 3.12 and remains there in
+  3.14.
