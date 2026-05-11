@@ -1,0 +1,141 @@
+---
+title: Modules/_sha256module.c
+description: SHA-256 and SHA-224 hash types backed by the HACL* verified C implementation.
+cpython_path: Modules/_sha256module.c
+cpython_version: "3.14"
+lines: 300
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Modules/_sha256module.c`
+
+<CpyLink path="Modules/_sha256module.c" />
+
+<overview>
+Two-type extension module exposing both `sha256` and `sha224` objects
+from a single C file. Both variants share one C struct (`SHA256object`)
+and one set of method implementations; an `is_sha224` flag on the struct
+selects which HACL* entry points to call and which digest size (32 vs 28
+bytes) to report. The backend is the HACL* formally-verified SHA-2
+implementation under `Modules/_hacl/`, introduced in CPython 3.13.
+</overview>
+
+## Map
+
+| Symbol | Kind | Purpose |
+|---|---|---|
+| `SHA256object` | C struct | Holds `sha256_state_s *`, `is_sha224` flag, and a `lock` |
+| `SHA256_new` | function | Constructor for `sha256`; sets `is_sha224 = 0` |
+| `SHA224_new` | function | Constructor for `sha224`; sets `is_sha224 = 1` |
+| `SHA256_update` | method | Feeds a buffer into `Hacl_Hash_SHA2_update_256` or `..._224` |
+| `SHA256_digest` | method | Returns 32-byte or 28-byte `bytes` depending on `is_sha224` |
+| `SHA256_hexdigest` | method | Hex-encodes the digest to a 64-char or 56-char `str` |
+| `SHA256_copy` | method | Duplicates the HACL* state; copies the `is_sha224` flag |
+| `sha256type` | `PyTypeObject` | Registered as `_sha256.sha256`; `digest_size=32`, `block_size=64` |
+| `sha224type` | `PyTypeObject` | Registered as `_sha256.sha224`; `digest_size=28`, `block_size=64` |
+| `_sha256module` | `PyModuleDef` | Module definition; single-phase init; exports both types |
+
+## Reading
+
+### Shared struct with `is_sha224` flag
+
+Both `sha256` and `sha224` Python types map to the same `SHA256object`.
+The `is_sha224` field is set at construction time and never changed. All
+method implementations branch on this flag to dispatch to the correct
+HACL* function.
+
+```c
+// Modules/_sha256module.c:58  SHA256object
+typedef struct {
+    PyObject_HEAD
+    int is_sha224;
+    Hacl_Hash_SHA2_state_t_256 *hash_state;  /* sha256_state_s */
+#ifdef Py_GIL_DISABLED
+    PyMutex lock;
+#endif
+} SHA256object;
+```
+
+The HACL* library exposes entirely separate families of functions for
+SHA-256 and SHA-224 (`Hacl_Hash_SHA2_*_256` vs `Hacl_Hash_SHA2_*_224`),
+so `is_sha224` is the dispatch key throughout.
+
+### Constructor branching and `usedforsecurity`
+
+Both constructors share the same body except for setting `is_sha224`.
+The optional `data` argument causes an immediate `update` call so that
+`hashlib.sha256(b"hello")` works in one step.
+
+```c
+// Modules/_sha256module.c:105  SHA256_new (simplified)
+static PyObject *
+SHA256_new(PyTypeObject *type, PyObject *args, PyObject *kwds)
+{
+    SHA256object *new;
+    PyObject *data_obj = NULL;
+    int usedforsecurity = 1;
+    static char *kwlist[] = {"string", "usedforsecurity", NULL};
+
+    if (!PyArg_ParseTupleAndKeywords(args, kwds, "|Op:new", kwlist,
+                                     &data_obj, &usedforsecurity))
+        return NULL;
+
+    new = (SHA256object *)type->tp_alloc(type, 0);
+    if (new == NULL)
+        return NULL;
+
+    new->is_sha224 = (type == &sha224type);
+    new->hash_state = new->is_sha224
+        ? Hacl_Hash_SHA2_malloc_224()
+        : Hacl_Hash_SHA2_malloc_256();
+    ...
+}
+```
+
+### `copy` preserving the variant flag
+
+`SHA256_copy` must carry `is_sha224` over to the new object so that the
+copy continues to produce the right digest size and uses the correct
+HACL* update path.
+
+```c
+// Modules/_sha256module.c:210  SHA256_copy
+static PyObject *
+SHA256_copy(SHA256object *self, PyObject *unused)
+{
+    SHA256object *newobj;
+    PyTypeObject *type = self->is_sha224 ? &sha224type : &sha256type;
+
+    if ((newobj = (SHA256object *)type->tp_alloc(type, 0)) == NULL)
+        return NULL;
+
+    newobj->is_sha224 = self->is_sha224;
+    ENTER_HASHXOF(self)
+    newobj->hash_state = self->is_sha224
+        ? Hacl_Hash_SHA2_copy_224(self->hash_state)
+        : Hacl_Hash_SHA2_copy_256(self->hash_state);
+    LEAVE_HASHXOF(self)
+    ...
+    return (PyObject *)newobj;
+}
+```
+
+## gopy mirror
+
+Not yet ported. Go's `crypto/sha256` package covers both SHA-256 and
+SHA-224 (via `sha256.New224()`), making it a direct backend candidate.
+The two Python types can be implemented as separate `*GoType` entries in
+`module/hashlib/` that share one underlying Go `hash.Hash` field.
+
+## CPython 3.14 changes
+
+- The HACL* migration in 3.13 retired the OpenSSL-backed path and the old
+  hand-rolled C implementation. In 3.14 the HACL* vendored copy was
+  refreshed; the Python API surface is unchanged.
+- Both `sha256type` and `sha224type` are now first-class types exported
+  from the `_sha256` module rather than aliases, which makes
+  `isinstance` checks more reliable in downstream code.
+- `usedforsecurity` is accepted on both constructors for FIPS-aware
+  callers, consistent with the rest of the `hashlib` backend modules.

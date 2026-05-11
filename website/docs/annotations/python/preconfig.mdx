@@ -1,0 +1,166 @@
+---
+title: Python/preconfig.c
+description: Pre-initialization configuration read before any Python object is created.
+cpython_path: Python/preconfig.c
+cpython_version: "3.14"
+lines: 600
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Python/preconfig.c`
+
+<CpyLink path="Python/preconfig.c" />
+
+## Map
+
+`Python/preconfig.c` owns the _PyPreConfig lifecycle: zero-initializing the struct,
+reading environment variables, and applying locale coercion. Nothing in this file
+touches Python objects; it must complete before the allocator or codec machinery
+starts.
+
+Key pieces:
+
+| Symbol | Purpose |
+|---|---|
+| `_PyPreConfig` | Struct holding pre-init knobs (see fields below) |
+| `_PyPreConfig_InitCompatConfig` | Zero-fills and sets compatibility-mode defaults |
+| `_PyPreConfig_Read` | Reads env vars and command-line flags into the struct |
+| `_PyPreCmdline` | Transient struct that holds raw argv during parsing |
+| `preconfig_read_env_vars` | Consults `PYTHONUTF8`, `PYTHONCOERCECLOCALE`, `PYTHONDEVMODE` |
+| `preconfig_init_coerce_c_locale` | Decides whether to coerce the C locale to UTF-8 |
+
+### `_PyPreConfig` fields
+
+| Field | Type | Meaning |
+|---|---|---|
+| `allocator` | `int` | Memory allocator selector (`PYMEM_ALLOCATOR_*`) |
+| `configure_locale` | `int` | Whether `setlocale` is called at startup |
+| `coerce_c_locale` | `int` | Coerce `C` locale to `C.UTF-8` or `UTF-8` |
+| `coerce_c_locale_warn` | `int` | Emit a warning when coercion happens |
+| `dev_mode` | `int` | Enable development-mode checks |
+| `isolated` | `int` | Ignore environment variables and user site |
+| `legacy_windows_stdio` | `int` | Use legacy Windows stdio encoding (Windows only) |
+| `parse_argv` | `int` | Whether `sys.argv` is parsed during pre-init |
+| `use_environment` | `int` | Honour `PYTHON*` environment variables |
+| `utf8_mode` | `int` | Force UTF-8 mode regardless of locale |
+
+## Reading
+
+### Environment variable scan
+
+`preconfig_read_env_vars` is the first function that touches the process
+environment. It runs before `Py_Initialize` and before any codec is registered.
+
+```c
+// Python/preconfig.c
+static PyStatus
+preconfig_read_env_vars(PyPreConfig *config)
+{
+    int use_env = config->use_environment;
+
+    // PYTHONUTF8=1 forces utf8_mode on; =0 forces it off.
+    if (use_env && !Py_IgnoreEnvironmentFlag) {
+        const wchar_t *opt = _Py_GetEnv(use_env, "PYTHONUTF8");
+        if (opt != NULL) {
+            if (wcsncmp(opt, L"0", 2) == 0) {
+                config->utf8_mode = 0;
+            }
+            else {
+                config->utf8_mode = 1;
+            }
+        }
+    }
+    ...
+}
+```
+
+The scan is intentionally narrow. Only a handful of `PYTHON*` variables are
+read here; everything else waits until `_PyCoreConfig_Read` later in the
+startup sequence.
+
+### Locale coercion
+
+When `coerce_c_locale` is set, CPython calls `_Py_CoerceLocale` to switch the
+process locale from the bare `C` locale to `C.UTF-8` (glibc) or `UTF-8`
+(macOS). The decision is made in `preconfig_init_coerce_c_locale`:
+
+```c
+// Python/preconfig.c
+static void
+preconfig_init_coerce_c_locale(PyPreConfig *config)
+{
+    const char *env = getenv("PYTHONCOERCECLOCALE");
+    if (env != NULL) {
+        if (strcmp(env, "0") == 0) {
+            if (config->coerce_c_locale < 0) {
+                config->coerce_c_locale = 0;
+            }
+        }
+        else if (strcmp(env, "warn") == 0) {
+            config->coerce_c_locale_warn = 1;
+        }
+        ...
+    }
+}
+```
+
+A negative value in `coerce_c_locale` means "not yet decided"; the function
+fills it in. This two-phase pattern (negative = unset, 0/1 = decided) recurs
+throughout the pre-config layer.
+
+### Read entry point
+
+`_PyPreConfig_Read` ties the pieces together. It calls the env-var scan, the
+locale probe, and the argv scan in sequence, then validates the result:
+
+```c
+// Python/preconfig.c
+PyStatus
+_PyPreConfig_Read(PyPreConfig *config, const _PyArgv *args)
+{
+    PyStatus status;
+
+    status = preconfig_read_env_vars(config);
+    if (_PyStatus_EXCEPTION(status)) {
+        return status;
+    }
+
+    preconfig_init_coerce_c_locale(config);
+
+    if (args != NULL) {
+        status = preconfig_read_cmdline(config, args);
+        if (_PyStatus_EXCEPTION(status)) {
+            return status;
+        }
+    }
+
+    // utf8_mode < 0 means "auto"; resolve it now.
+    if (config->utf8_mode < 0) {
+        config->utf8_mode = 0;
+    }
+    return _PyStatus_OK();
+}
+```
+
+After this function returns, all pre-init fields are non-negative integers; the
+ambiguous "unset" sentinels have been resolved.
+
+## gopy mirror
+
+Not ported. gopy targets Go runtimes that are always UTF-8 and do not expose a
+C locale layer. The only relevant knob, `utf8_mode`, is effectively hardwired to
+`1` in gopy's startup path; there is no struct or read function corresponding to
+`_PyPreConfig`.
+
+If gopy ever needs to support embedding in a non-UTF-8 host process, the
+`configure_locale` and `coerce_c_locale` logic would be the first things to
+revisit.
+
+## CPython 3.14 changes
+
+3.14 made no structural changes to `_PyPreConfig`. The `legacy_windows_stdio`
+field was retained for binary compatibility but its effect was narrowed: it now
+only influences the `stdin`/`stdout`/`stderr` encoding, not the filesystem
+encoding.

@@ -1,0 +1,122 @@
+---
+title: Modules/_sha1module.c
+description: SHA-1 hash type backed by the HACL* verified C implementation.
+cpython_path: Modules/_sha1module.c
+cpython_version: "3.14"
+lines: 200
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Modules/_sha1module.c`
+
+<CpyLink path="Modules/_sha1module.c" />
+
+<overview>
+Single-type extension module exposing `sha1` objects. Prior to CPython
+3.13 this module delegated to OpenSSL's SHA-1 implementation; in 3.13
+the backend was replaced by the HACL* formally-verified C library under
+`Modules/_hacl/`. The Python-visible API is identical to `_md5module`:
+`update`, `digest`, `hexdigest`, and `copy`. Block size is 64 bytes,
+digest size is 20 bytes.
+</overview>
+
+## Map
+
+| Symbol | Kind | Purpose |
+|---|---|---|
+| `SHA1object` | C struct | Holds `sha1_state_s *` (opaque HACL* state) plus a `lock` |
+| `SHA1_new` | function | Module-level constructor; accepts initial `data` and `usedforsecurity` |
+| `sha1_update` | method | Feeds a buffer into `Hacl_Hash_SHA1_update` |
+| `sha1_digest` | method | Calls `Hacl_Hash_SHA1_digest`, returns 20-byte `bytes` |
+| `sha1_hexdigest` | method | Hex-encodes the 20-byte digest to a 40-char `str` |
+| `sha1_copy` | method | Calls `Hacl_Hash_SHA1_copy`, returns independent `SHA1object` |
+| `SHA1Type` | `PyTypeObject` | Registered as `_sha1.sha1` |
+| `_sha1module` | `PyModuleDef` | Module definition; single-phase init |
+
+## Reading
+
+### Object lifecycle and HACL* state ownership
+
+`SHA1_new` allocates the Python object and then calls
+`Hacl_Hash_SHA1_malloc` to obtain a heap-allocated, initialised
+`sha1_state_s *`. Ownership of that pointer lives on the `SHA1object`;
+`tp_dealloc` is responsible for calling `Hacl_Hash_SHA1_free`.
+
+```c
+// Modules/_sha1module.c:80  SHA1_new
+static PyObject *
+SHA1_new(PyTypeObject *type, PyObject *args, PyObject *kwds)
+{
+    SHA1object *new;
+    ...
+    new = (SHA1object *)type->tp_alloc(type, 0);
+    if (new == NULL)
+        return NULL;
+    new->hash_state = Hacl_Hash_SHA1_malloc();
+    if (new->hash_state == NULL) {
+        Py_DECREF(new);
+        return PyErr_NoMemory();
+    }
+    ...
+}
+```
+
+### GIL release during `update`
+
+Like the MD5 module, `sha1_update` releases the GIL for large inputs
+and protects the HACL* state with a per-object `lock`. The threshold
+(`PY_BUF_LOCK_THRESHOLD`, 2048 bytes) is defined in `hashlib.h`.
+
+```c
+// Modules/_sha1module.c:130  sha1_update
+static PyObject *
+sha1_update(SHA1object *self, PyObject *obj)
+{
+    Py_buffer vw;
+    if (PyArg_Parse(obj, "y*", &vw) == 0)
+        return NULL;
+    if (vw.len >= PY_BUF_LOCK_THRESHOLD) {
+        ENTER_HASHXOF(self)
+        Hacl_Hash_SHA1_update(self->hash_state, vw.buf, vw.len);
+        LEAVE_HASHXOF(self)
+    } else {
+        Hacl_Hash_SHA1_update(self->hash_state, vw.buf, vw.len);
+    }
+    PyBuffer_Release(&vw);
+    Py_RETURN_NONE;
+}
+```
+
+### Digest constants exposed as type attributes
+
+`block_size` (64) and `digest_size` (20) are set as integer attributes on
+`SHA1Type` at module init time rather than being computed from the HACL*
+state. They match the values mandated by RFC 3174.
+
+```c
+// Modules/_sha1module.c:55 (PyMemberDef)
+static PyMemberDef SHA1_members[] = {
+    {"digest_size", T_INT, offsetof(SHA1object, digestsize), READONLY, NULL},
+    {"block_size",  T_INT, offsetof(SHA1object, blocksize),  READONLY, NULL},
+    {NULL}
+};
+// blocksize = 64, digestsize = 20 filled in SHA1_new
+```
+
+## gopy mirror
+
+Not yet ported. The natural home is `module/hashlib/` alongside the
+other hash types. Go's `crypto/sha1` package provides the same
+block-and-digest semantics and can serve as the backend in place of HACL*.
+
+## CPython 3.14 changes
+
+- The HACL* migration (3.13) removed the OpenSSL dependency from this
+  module entirely. In 3.14 the HACL* version was bumped to pick up
+  upstream security fixes, but the Python-visible API is unchanged.
+- The `usedforsecurity` keyword is accepted for FIPS-aware callers. SHA-1
+  is considered cryptographically weak, so callers in security-sensitive
+  paths should pass `usedforsecurity=False` or switch to SHA-2.
+- No new methods or attributes were added between 3.13 and 3.14.
