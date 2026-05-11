@@ -1,0 +1,193 @@
+---
+title: Lib/dis.py
+description: Bytecode disassembler; walks co_code/co_linetable to produce human-readable instruction listings and Instruction named tuples.
+cpython_path: Lib/dis.py
+cpython_version: "3.14"
+lines: 900
+status: annotated
+ported_to: module/dis/module.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Lib/dis.py`
+
+<CpyLink path="Lib/dis.py" />
+
+`Lib/dis.py` is the Python-level bytecode disassembler. It accepts
+almost any Python object (function, class, module, code object, source
+string, or raw bytes) and renders the bytecode as a table of mnemonics,
+arguments, and resolved values.
+
+The module is structured around a small public API that delegates to a
+set of private helpers. `dis` and `disassemble` are the top-level
+entry points. `get_instructions` is the structured alternative: it yields
+`Instruction` named tuples rather than printing text, which makes it
+useful for tools that programmatically inspect bytecode. The inner loop
+`_get_instructions_bytes` does the actual decoding work by walking the
+raw bytecode array two bytes at a time (each opcode is one byte, each
+argument one byte, with `EXTENDED_ARG` for values over 255).
+
+Two additional decoders handle the variable-length tables stored alongside
+the bytecode: `findlinestarts` decodes `co_linetable` to map offsets to
+line numbers, and `_parse_exception_table` decodes the exception handler
+ranges. Both tables use a compact delta-encoded format introduced in
+Python 3.12.
+
+gopy's bytecode lives in `compile/`; the disassembler port, when shipped,
+will live in `module/dis/module.go` and expose the same `Instruction` API
+over gopy's instruction set.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Lib/dis.py" lines="1-50">1-50</Cpy> | Module header, opcode tables | Import `opcode`; build `_have_code`, `_all_opname`, `_opcode_metadata` lookup tables. | `module/dis/module.go` |
+| <Cpy path="Lib/dis.py" lines="51-110">51-110</Cpy> | `Instruction`, `Positions` | Named tuple for a single decoded instruction with `opname`, `opcode`, `arg`, `argval`, `argrepr`, `offset`, `starts_line`, `is_jump_target`, `positions`. | `module/dis/module.go` |
+| <Cpy path="Lib/dis.py" lines="111-180">111-180</Cpy> | `pretty_flags` | Decodes the `co_flags` bitmask into a human-readable string of flag names. | `module/dis/module.go` |
+| <Cpy path="Lib/dis.py" lines="181-280">181-280</Cpy> | `dis` | Top-level dispatcher; extracts code objects from functions, classes, modules, or compiles source strings; calls `disassemble` for each. | `module/dis/module.go` |
+| <Cpy path="Lib/dis.py" lines="281-420">281-420</Cpy> | `disassemble`, `_disassemble_bytes` | Format and print a code object's instructions; handles `lasti` highlight, `CACHE` entries, and adaptive specialisation opcodes. | `module/dis/module.go` |
+| <Cpy path="Lib/dis.py" lines="421-560">421-560</Cpy> | `get_instructions`, `_get_instructions_bytes` | Structured iteration; yields `Instruction` for each instruction in the bytecode; resolves `argval`/`argrepr` for every opcode category. | `module/dis/module.go` |
+| <Cpy path="Lib/dis.py" lines="561-650">561-650</Cpy> | `findlinestarts` | Decodes `co_linetable` delta encoding; yields `(offset, lineno)` pairs. | `module/dis/module.go` |
+| <Cpy path="Lib/dis.py" lines="651-730">651-730</Cpy> | `findlabels` | Returns a set of bytecode offsets that are targets of any jump instruction. | `module/dis/module.go` |
+| <Cpy path="Lib/dis.py" lines="731-820">731-820</Cpy> | `_parse_exception_table` | Decodes the exception handler table; yields `_ExceptionTableEntry` records with `start`, `end`, `target`, `depth`, `lasti`. | `module/dis/module.go` |
+| <Cpy path="Lib/dis.py" lines="821-900">821-900</Cpy> | `stack_effect` | Returns the net stack depth change for an opcode and optional argument; delegates to `_opcode.stack_effect` from the C extension. | `module/dis/module.go` |
+
+## Reading
+
+### `Instruction` named tuple (lines 51 to 110)
+
+<CpyLink path="Lib/dis.py" lines="51-110" />
+
+```python
+_Instruction = collections.namedtuple(
+    'Instruction',
+    'opname opcode arg argval argrepr offset '
+    'starts_line is_jump_target positions'
+)
+
+class Instruction(_Instruction):
+    """Details for a bytecode operation."""
+
+    def _disassemble(self, lineno_width=3, mark_as_current=False,
+                     offset_width=4):
+        fields = []
+        if lineno_width:
+            if self.starts_line:
+                fields.append(('%*d' % (lineno_width, self.starts_line)).ljust(...))
+            else:
+                fields.append(' ' * lineno_width)
+        if mark_as_current:
+            fields.append('-->')
+        ...
+        fields.append(self.opname.ljust(_OPNAME_WIDTH))
+        if self.arg is not None:
+            fields.append(repr(self.arg).rjust(_ARG_WIDTH))
+            if self.argrepr:
+                fields.append('(' + self.argrepr + ')')
+        return ' '.join(fields).rstrip()
+```
+
+`Instruction` is a named tuple subclass so it is both iterable (useful
+for unpacking) and has a readable `_disassemble` method for formatting
+output lines. The `starts_line` field is `None` for most instructions and
+is set to the line number only on the first instruction of each source
+line, which is how the disassembler produces the line-number column
+without repeating it on every row. `argrepr` is a human-readable
+description of the resolved argument value: for `LOAD_GLOBAL` it is the
+name string; for `JUMP_FORWARD` it is the target offset.
+
+### `_get_instructions_bytes` inner decode loop (lines 421 to 560)
+
+<CpyLink path="Lib/dis.py" lines="421-560" />
+
+```python
+def _get_instructions_bytes(code, varname_from_oparg=None,
+                             names=None, co_consts=None,
+                             linestarts=None, line_offset=0,
+                             exception_entries=(), co_positions=None,
+                             show_caches=False, original_code=None):
+    labels = findlabels(code)
+    for offset, op, arg in _unpack_opargs(code):
+        starts_line = linestarts.get(offset + line_offset)
+        is_jump_target = offset in labels
+        argval = arg
+        argrepr = ''
+        if arg is not None:
+            argval, argrepr = _get_const_info(op, arg, co_consts)
+            argval, argrepr = _get_name_info(op, argval, argrepr,
+                                              names, varname_from_oparg)
+            if op in hasjabs:
+                argrepr = 'to ' + repr(argval)
+            elif op in hasjrel:
+                signed = arg if op in _signed_ops else ...
+                argval = offset + 2 + signed * 2
+                argrepr = 'to ' + repr(argval)
+            ...
+        positions = ...
+        yield Instruction(opname[op], op, arg, argval, argrepr,
+                          offset, starts_line, is_jump_target, positions)
+```
+
+The loop calls `_unpack_opargs`, which handles `EXTENDED_ARG` chaining
+transparently: each call yields an `(offset, op, arg)` triple where `arg`
+already has the extended prefix merged in. From there the function
+resolves `argval` through a series of opcode-category checks (constants,
+names, locals/cells, jump targets, format specifiers for `FORMAT_VALUE`).
+This is the single place in the module where all argument types are
+decoded; both `disassemble` and `get_instructions` funnel through it.
+
+### `findlinestarts` and the linetable format (lines 561 to 650)
+
+<CpyLink path="Lib/dis.py" lines="561-650" />
+
+```python
+def findlinestarts(code):
+    """Find the offsets in a byte code which are start of lines in the source.
+    Generate pairs (offset, lineno) as described in Python/compile.c.
+    """
+    lastline = None
+    for start, end, line in code.co_lines():
+        if line is not None and line != lastline:
+            lastline = line
+            yield start, line
+```
+
+Python 3.12 replaced the old `co_lnotab` two-byte-pair encoding with a
+richer `co_linetable` that also records column offsets and end positions.
+`co_lines()` is a C method that iterates the new format and yields
+`(start, end, line)` triples. `findlinestarts` filters to the first
+offset per source line, preserving the same `(offset, lineno)` interface
+that older code expected. Tools that need the full position data (for
+precise error highlighting) use `co_positions()` instead, which
+`_get_instructions_bytes` uses when building `Instruction.positions`.
+
+### `_parse_exception_table` (lines 731 to 820)
+
+<CpyLink path="Lib/dis.py" lines="731-820" />
+
+```python
+def _parse_exception_table(code):
+    iterator = _parse_varint(code.co_exceptiontable)
+    try:
+        while True:
+            start = next(iterator) * 2
+            length = next(iterator) * 2
+            end = start + length - 2
+            target = next(iterator) * 2
+            dl = next(iterator)
+            depth = dl >> 1
+            lasti = bool(dl & 1)
+            yield _ExceptionTableEntry(start, end, target, depth, lasti)
+    except StopIteration:
+        return
+```
+
+`co_exceptiontable` is a compact byte sequence introduced in Python 3.11
+to replace the old block stack. Each entry encodes a bytecode range
+(`start` to `end`), the handler target offset, the stack depth at the
+entry point, and a `lasti` flag that controls whether the `RESUME` opcode
+at the target should restore `f_lasti`. Values are stored as variable-
+length integers (`_parse_varint` reads them one byte at a time, using the
+high bit as a continuation flag). The `depth` field is used by the
+interpreter to pop excess stack entries before jumping to the handler.

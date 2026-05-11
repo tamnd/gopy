@@ -1,0 +1,209 @@
+---
+title: Lib/socketserver.py
+description: Generic socket server framework providing BaseServer, TCPServer, UDPServer, forking and threading mixins, and request handler base classes.
+cpython_path: Lib/socketserver.py
+cpython_version: "3.14"
+lines: 605
+status: annotated
+ported_to: module/socketserver/module.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Lib/socketserver.py`
+
+<CpyLink path="Lib/socketserver.py" />
+
+`socketserver` provides the scaffolding for writing network servers without
+dealing with socket lifecycle or concurrency plumbing by hand. The module
+defines a two-axis class hierarchy: one axis selects the address family and
+transport (TCP, UDP, Unix stream, Unix datagram) and the other selects the
+concurrency model (synchronous, forking, threading). Any combination is
+assembled by mixing the appropriate pair of classes.
+
+`BaseServer` owns the event loop. `serve_forever(poll_interval)` drives a
+`selectors`-based `select` loop that calls `_handle_request_noblock` each
+time the listening socket becomes readable. `shutdown()` sets a threading
+`Event` that causes `serve_forever` to exit cleanly after the current poll
+cycle.
+
+`TCPServer` and `UDPServer` subclass `BaseServer` and add a bound socket.
+`TCPServer.get_request` calls `accept()` and returns the connected socket;
+`UDPServer.get_request` calls `recvfrom()` and returns a `(data, socket)`
+pair so the handler can reply via `sendto`. The Unix variants (`UnixStreamServer`,
+`UnixDatagramServer`) reuse the same classes with `address_family = AF_UNIX`.
+
+`ForkingMixIn` and `ThreadingMixIn` override `process_request` to spawn a
+child process or thread. They are pure mixins with no state of their own; the
+standard pattern is `class ThreadingTCPServer(ThreadingMixIn, TCPServer): pass`.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Lib/socketserver.py" lines="1-87">1-87</Cpy> | Module docstring, imports, `__all__` | Explains the class matrix; imports `socket`, `selectors`, `os`, `sys`, `threading`; declares `__version__ = "0.4"` and the conditional `__all__`. | `module/socketserver/module.go` |
+| <Cpy path="Lib/socketserver.py" lines="88-265">88-265</Cpy> | `BaseServer` | Abstract base: `serve_forever`, `shutdown`, `handle_request`, `_handle_request_noblock`, `process_request`, `finish_request`, `handle_error`. | `module/socketserver/module.go` |
+| <Cpy path="Lib/socketserver.py" lines="266-361">266-361</Cpy> | `TCPServer` | Binds and listens on a TCP socket; `server_bind`, `server_activate`, `get_request`, `shutdown_request`, `close_request`; `allow_reuse_address` flag. | `module/socketserver/module.go` |
+| <Cpy path="Lib/socketserver.py" lines="362-376">362-376</Cpy> | `UDPServer` | Datagram variant; overrides `get_request` to use `recvfrom` and `socket_type = SOCK_DGRAM`. | `module/socketserver/module.go` |
+| <Cpy path="Lib/socketserver.py" lines="377-512">377-512</Cpy> | `ForkingMixIn`, `ThreadingMixIn` | Per-request `os.fork` and `threading.Thread` mixins; `ForkingMixIn` reaps zombie children; `ThreadingMixIn` optionally joins threads on server close. | `module/socketserver/module.go` |
+| <Cpy path="Lib/socketserver.py" lines="513-525">513-525</Cpy> | `UnixStreamServer`, `UnixDatagramServer` | AF_UNIX wrappers; set `address_family = socket.AF_UNIX`; POSIX-only, excluded from `__all__` on Windows. | `module/socketserver/module.go` |
+| <Cpy path="Lib/socketserver.py" lines="526-553">526-553</Cpy> | `BaseRequestHandler` | Lifecycle base: `__init__` calls `setup()`, `handle()`, `finish()` in sequence; subclasses override `handle()`. | `module/socketserver/module.go` |
+| <Cpy path="Lib/socketserver.py" lines="554-605">554-605</Cpy> | `StreamRequestHandler`, `DatagramRequestHandler` | `StreamRequestHandler` sets up `self.rfile` and `self.wfile` over the connected socket; `DatagramRequestHandler` exposes `self.packet` and `self.socket`. | `module/socketserver/module.go` |
+
+## Reading
+
+### `BaseServer.serve_forever` (lines 88 to 165)
+
+<CpyLink path="Lib/socketserver.py" lines="88-165" />
+
+```python
+def serve_forever(self, poll_interval=0.5):
+    self.__is_shut_down.clear()
+    try:
+        with _ServerSelector() as selector:
+            selector.register(self, selectors.EVENT_READ)
+            while not self.__shutdown_request:
+                ready = selector.select(poll_interval)
+                if self.__shutdown_request:
+                    break
+                if ready:
+                    self._handle_request_noblock()
+                self.service_actions()
+    finally:
+        self.__shutdown_request = False
+        self.__is_shut_down.set()
+```
+
+`serve_forever` registers the server's own file descriptor with a
+`selectors.DefaultSelector` and then polls in a loop. The `poll_interval`
+timeout (default 0.5 s) bounds how long the loop blocks even if no
+connection arrives, ensuring that a `shutdown()` call from another thread
+is noticed within one poll cycle. `__shutdown_request` is a plain bool
+(protected by the GIL) and `__is_shut_down` is a `threading.Event` that
+`shutdown()` waits on, giving callers a clean join-like primitive.
+
+### `TCPServer.__init__` and `server_bind` (lines 266 to 340)
+
+<CpyLink path="Lib/socketserver.py" lines="266-340" />
+
+```python
+class TCPServer(BaseServer):
+    address_family = socket.AF_INET
+    socket_type = socket.SOCK_STREAM
+    request_queue_size = 5
+    allow_reuse_address = False
+    allow_reuse_port = False
+
+    def __init__(self, server_address, RequestHandlerClass,
+                 bind_and_activate=True):
+        BaseServer.__init__(self, server_address, RequestHandlerClass)
+        self.socket = socket.socket(self.address_family, self.socket_type)
+        if bind_and_activate:
+            try:
+                self.server_bind()
+                self.server_activate()
+            except:
+                self.server_close()
+                raise
+
+    def server_bind(self):
+        if self.allow_reuse_address:
+            self.socket.setsockopt(socket.SOL_SOCKET,
+                                   socket.SO_REUSEADDR, 1)
+        if self.allow_reuse_port:
+            self.socket.setsockopt(socket.SOL_SOCKET,
+                                   socket.SO_REUSEPORT, 1)
+        self.socket.bind(self.server_address)
+        self.server_address = self.socket.getsockname()
+```
+
+`TCPServer` creates the socket in `__init__` and immediately attempts
+`server_bind` + `server_activate` unless `bind_and_activate=False` is
+passed (useful for pre-configuring options that must be set before
+`bind`). If binding fails, `server_close()` is called in the `except`
+clause to release the file descriptor before re-raising, preventing an
+fd leak on error. `allow_reuse_address` is the canonical way to avoid
+`Address already in use` errors during rapid server restarts.
+
+### `ForkingMixIn.process_request` and `ThreadingMixIn.process_request` (lines 377 to 512)
+
+<CpyLink path="Lib/socketserver.py" lines="377-512" />
+
+```python
+class ForkingMixIn:
+    def process_request(self, request, client_address):
+        pid = os.fork()
+        if pid:
+            # parent
+            if self.active_children is None:
+                self.active_children = set()
+            self.active_children.add(pid)
+            self.close_request(request)
+        else:
+            # child
+            status = 1
+            try:
+                self.finish_request(request, client_address)
+                status = 0
+            except Exception:
+                self.handle_error(request, client_address)
+            finally:
+                os._exit(status)
+
+class ThreadingMixIn:
+    daemon_threads = False
+
+    def process_request_thread(self, request, client_address):
+        try:
+            self.finish_request(request, client_address)
+        except Exception:
+            self.handle_error(request, client_address)
+        finally:
+            self.shutdown_request(request)
+
+    def process_request(self, request, client_address):
+        t = threading.Thread(target=self.process_request_thread,
+                             args=(request, client_address))
+        t.daemon = self.daemon_threads
+        t.start()
+```
+
+Both mixins override `process_request`, which is the single hook point
+between accepting a connection and dispatching it. `ForkingMixIn` tracks
+child PIDs in `active_children` and calls `collect_children()` (on each
+request) to reap zombies via `os.waitpid`. `ThreadingMixIn` spawns a
+thread and returns immediately; setting `daemon_threads = True` lets the
+server process exit even if handler threads are still running.
+
+### `StreamRequestHandler.setup` (lines 554 to 605)
+
+<CpyLink path="Lib/socketserver.py" lines="554-605" />
+
+```python
+class StreamRequestHandler(BaseRequestHandler):
+    rbufsize = -1     # full buffering
+    wbufsize = 0      # unbuffered writes
+    timeout = None
+    disable_nagle_algorithm = False
+
+    def setup(self):
+        self.connection = self.request
+        if self.timeout is not None:
+            self.connection.settimeout(self.timeout)
+        if self.disable_nagle_algorithm:
+            self.connection.setsockopt(socket.IPPROTO_TCP,
+                                       socket.TCP_NODELAY, True)
+        self.rfile = self.connection.makefile('rb', self.rbufsize)
+        if self.wbufsize == 0:
+            self.wfile = _SocketWriter(self.connection)
+        else:
+            self.wfile = self.connection.makefile('wb', self.wbufsize)
+```
+
+`setup` wraps the raw socket with file-like objects, letting `handle()`
+use `self.rfile.readline()` and `self.wfile.write()` instead of raw
+`recv`/`send` calls. `rbufsize = -1` turns on full buffering for reads
+(efficient for line-oriented protocols) while `wbufsize = 0` leaves
+writes unbuffered so responses are sent immediately without an explicit
+`flush()`. `disable_nagle_algorithm` sets `TCP_NODELAY`, which is useful
+for request-response protocols where small writes must not be coalesced.

@@ -1,0 +1,264 @@
+---
+title: Python/formatter_unicode.c
+description: Unicode format spec parser and type-specific formatters backing str.__format__, int.__format__, float.__format__, and complex.__format__.
+cpython_path: Python/formatter_unicode.c
+cpython_version: "3.14"
+lines: 1726
+status: annotated
+ported_to: format/format.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Python/formatter_unicode.c`
+
+<CpyLink path="Python/formatter_unicode.c" />
+
+Implements the `__format__` slot for the four built-in scalar types:
+`str`, `int`, `float`, and `complex`. The file is also the home of the
+mini-language parser (`parse_internal_render_format_spec`) that turns a
+format spec string such as `">10.3f"` into the `InternalFormatSpec`
+struct consumed by each type's formatter.
+
+The public surface is four functions, one per type, each named
+`_Py<Type>_FormatAdvancedWriter`. They are called indirectly from
+`CONVERT_VALUE` / `FORMAT_VALUE` opcodes via `PyObject_Format`, which
+looks up `type.__format__` on the value object. The private helpers
+(`format_string_internal`, `format_long_internal`, `format_float_internal`,
+`format_complex_internal`) do the actual work; the `…AdvancedWriter` wrappers
+handle the zero-length spec fast path and the type dispatch.
+
+The number formatting path is the more complex one. `calc_number_widths`
+computes the field layout (sign, prefix, grouped digits, decimal point,
+remainder, padding) into a `NumberFieldWidths` struct, and `fill_number`
+writes each field into the `_PyUnicodeWriter` in order. Locale-aware
+formatting (the `n` type code and thousands separators) is handled by
+`get_locale_info` / `free_locale_info`, which query `localeconv()` and
+return Python string objects for the decimal point and separator characters.
+
+gopy ports the spec parser and string formatter in `format/format.go` and
+wires them to `str.__format__` via `objects/str_format.go:unicodeFormat`.
+Integer and float format paths are partially ported; complex formatting is
+not yet implemented.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Python/formatter_unicode.c" lines="1-51">1-51</Cpy> | `unknown_presentation_type` / `invalid_thousands_separator_type` / `invalid_comma_and_underscore` | Error helpers — raise `ValueError` with a message naming the bad format code. | `format/format.go` (inline errors) |
+| <Cpy path="Python/formatter_unicode.c" lines="53-91">53-91</Cpy> | `get_integer` | Consume decimal digits from the format spec and return the parsed `Py_ssize_t`. Detects overflow before it happens. | `format/format.go:parseWidth` |
+| <Cpy path="Python/formatter_unicode.c" lines="93-148">93-148</Cpy> | `is_alignment_token` / `is_sign_element` / `InternalFormatSpec` | Token-type predicates; the `InternalFormatSpec` struct that holds the parsed spec. | `format/spec.go:Spec` |
+| <Cpy path="Python/formatter_unicode.c" lines="150-372">150-372</Cpy> | `parse_internal_render_format_spec` | Parse `[[fill]align][sign][z][#][0][width][grouping][.precision][type]` into `InternalFormatSpec`. | `format/format.go:ParseSpec` |
+| <Cpy path="Python/formatter_unicode.c" lines="374-432">374-432</Cpy> | `calc_padding` / `fill_padding` | Compute left/right pad counts for a given width and alignment; write fill characters into the `_PyUnicodeWriter`. | `format/format.go:applyPadding` |
+| <Cpy path="Python/formatter_unicode.c" lines="434-475">434-475</Cpy> | `LocaleInfo` / `NumberFieldWidths` | Structs for locale-aware number formatting: separator strings, grouping spec, and the per-field widths for a formatted number. | `format/number.go` (partial) |
+| <Cpy path="Python/formatter_unicode.c" lines="488-671">488-671</Cpy> | `parse_number` / `calc_number_widths` | Locate the integer/fractional/exponent split in a pre-formatted number string; compute `NumberFieldWidths` including grouped-digit counts. | `format/number.go:calcWidths` |
+| <Cpy path="Python/formatter_unicode.c" lines="672-785">672-785</Cpy> | `fill_number` | Write sign, prefix, zero-padding, grouped digits, decimal point, remainder, and right-padding into the writer in order. | `format/number.go:fillNumber` |
+| <Cpy path="Python/formatter_unicode.c" lines="786-855">786-855</Cpy> | `get_locale_info` / `free_locale_info` | Retrieve `localeconv()` decimal-point and thousands-separator strings; wrap them as Python `str` objects. | n/a (gopy uses Go `x/text/language`) |
+| <Cpy path="Python/formatter_unicode.c" lines="862-952">862-952</Cpy> | `format_string_internal` | Apply padding and precision truncation to a `str` value. | `format/format.go:FormatString` |
+| <Cpy path="Python/formatter_unicode.c" lines="960-1130">960-1130</Cpy> | `format_long_internal` | Format an `int` for `b`/`c`/`d`/`o`/`x`/`X`/`n` type codes; delegates digit production to `_PyLong_FormatWriter`. | `format/int.go` (partial) |
+| <Cpy path="Python/formatter_unicode.c" lines="1138-1290">1138-1290</Cpy> | `format_float_internal` | Format a `float` for `e`/`E`/`f`/`F`/`g`/`G`/`n`/`%` type codes; delegates digit production to `PyOS_double_to_string`. | `objects/float.go` (partial) |
+| <Cpy path="Python/formatter_unicode.c" lines="1291-1534">1291-1534</Cpy> | `format_complex_internal` | Format a `complex` as `(real+imagj)` applying the float format spec to each component. | not yet ported |
+| <Cpy path="Python/formatter_unicode.c" lines="1539-1587">1539-1587</Cpy> | `format_obj` / `_PyUnicode_FormatAdvancedWriter` | `str.__format__`: zero-length fast path, then `parse_internal_render_format_spec` + `format_string_internal`. | `objects/str_format.go:unicodeFormat` |
+| <Cpy path="Python/formatter_unicode.c" lines="1590-1649">1590-1649</Cpy> | `_PyLong_FormatAdvancedWriter` | `int.__format__`: parse spec, dispatch to `format_long_internal` or promote to float for `e`/`f`/`g`. | `format/int.go` (partial) |
+| <Cpy path="Python/formatter_unicode.c" lines="1652-1688">1652-1688</Cpy> | `_PyFloat_FormatAdvancedWriter` | `float.__format__`: parse spec, dispatch to `format_float_internal`. | `objects/float.go` (partial) |
+| <Cpy path="Python/formatter_unicode.c" lines="1691-1726">1691-1726</Cpy> | `_PyComplex_FormatAdvancedWriter` | `complex.__format__`: parse spec, dispatch to `format_complex_internal`. | not yet ported |
+
+## Reading
+
+### Format spec parser (lines 150 to 372)
+
+<CpyLink path="Python/formatter_unicode.c" lines="150-372" />
+
+```c
+static int
+parse_internal_render_format_spec(PyObject *obj,
+                                  PyObject *format_spec,
+                                  Py_ssize_t start, Py_ssize_t end,
+                                  InternalFormatSpec *format,
+                                  char default_type,
+                                  char default_align)
+{
+    Py_ssize_t pos = start;
+    ...
+    /* If the second char is an alignment token,
+       then parse the fill char */
+    if (end-pos >= 2 && is_alignment_token(READ_spec(pos+1))) {
+        format->align = READ_spec(pos+1);
+        format->fill_char = READ_spec(pos);
+        ...
+        pos += 2;
+    }
+    else if (end-pos >= 1 && is_alignment_token(READ_spec(pos))) {
+        format->align = READ_spec(pos);
+        ++pos;
+    }
+    /* Parse sign, z (neg-zero coercion), # (alternate), 0 (zero-pad) */
+    ...
+    consumed = get_integer(format_spec, &pos, end, &format->width);
+    ...
+    /* Comma or underscore for thousands separator */
+    if (end-pos && READ_spec(pos) == ',') { ... }
+    if (end-pos && READ_spec(pos) == '_') { ... }
+    /* .precision */
+    if (end-pos && READ_spec(pos) == '.') { ... }
+    /* type code */
+    if (end-pos == 1) {
+        format->type = READ_spec(pos);
+        ++pos;
+    }
+    ...
+    return 1;
+}
+```
+
+The parser is a one-pass scan that never backtracks. The `[[fill]align]`
+prefix requires a two-character lookahead: if the second character is an
+alignment token (`<`, `>`, `=`, `^`) then the first is the fill; if
+only the first character is an alignment token, no fill character was
+specified and the default fill (space) is kept. Each optional field is
+tested with a `if (end-pos >= N && ...)` guard so the parser never
+reads past the end of the spec. 3.14 adds the `z` flag (negative-zero
+coercion for floats) and fractional-part thousands separators (`,`/`_`
+after `.precision`).
+
+### `calc_number_widths` — field layout for numeric output (lines 524 to 671)
+
+<CpyLink path="Python/formatter_unicode.c" lines="524-671" />
+
+```c
+static Py_ssize_t
+calc_number_widths(NumberFieldWidths *spec, Py_ssize_t n_prefix,
+                   Py_UCS4 sign_char, Py_ssize_t n_start,
+                   Py_ssize_t n_end, Py_ssize_t n_remainder, Py_ssize_t n_frac,
+                   int has_decimal, const LocaleInfo *locale,
+                   const InternalFormatSpec *format, Py_UCS4 *maxchar)
+{
+    /* output will look like:
+       <lpadding><sign><prefix><spadding><grouped_digits><decimal>
+       <remainder><rpadding>
+    */
+    ...
+    switch (format->sign) {
+    case '+': spec->n_sign = 1; spec->sign = (sign_char=='-' ? '-' : '+'); break;
+    case ' ': spec->n_sign = 1; spec->sign = (sign_char=='-' ? '-' : ' '); break;
+    default:  if (sign_char=='-') { spec->n_sign=1; spec->sign='-'; } break;
+    }
+    ...
+    /* compute grouped digit width using STRINGLIB_GROUPING */
+    spec->n_grouped_digits = _PyUnicode_InsertThousandsGrouping(
+        NULL, 0, 0, NULL, spec->n_digits, spec->n_min_width,
+        locale->grouping, locale->thousands_sep, maxchar);
+    ...
+    /* total width determines padding */
+    n_padding = format->width - ...;
+    switch (format->align) {
+    case '<': spec->n_lpadding = 0; spec->n_rpadding = n_padding; break;
+    case '>': spec->n_lpadding = n_padding; spec->n_rpadding = 0; break;
+    case '=': spec->n_lpadding = 0; spec->n_spadding = n_padding; break;
+    case '^': spec->n_lpadding = n_padding/2; spec->n_rpadding = n_padding - n_padding/2; break;
+    }
+    ...
+}
+```
+
+The function receives a pre-formatted digit string and computes every
+field width that `fill_number` needs to write the result. The
+`n_spadding` field handles the `=` alignment mode, which inserts
+padding between the sign and the digits (useful for zero-padding:
+`"-  42"` becomes `"-0042"`). Grouping width is computed in one pass
+by calling `_PyUnicode_InsertThousandsGrouping` with a `NULL` output
+buffer, which returns the required width without writing.
+
+### `format_long_internal` — integer formatting (lines 960 to 1130)
+
+<CpyLink path="Python/formatter_unicode.c" lines="960-1130" />
+
+```c
+static int
+format_long_internal(PyObject *value, const InternalFormatSpec *format,
+                     _PyUnicodeWriter *writer)
+{
+    ...
+    /* special case for 'c': convert int to a single Unicode character */
+    if (format->type == 'c') {
+        x = PyLong_AsLong(value);
+        ...
+        tmp = PyUnicode_FromOrdinal(x);
+        n_remainder = 1;
+    }
+    else {
+        /* normal integer: pick base from type code */
+        switch (format->type) {
+        case 'b': base = 2;  leading_chars_to_skip = 2; break; /* 0b */
+        case 'o': base = 8;  leading_chars_to_skip = 2; break; /* 0o */
+        case 'x': base = 16; leading_chars_to_skip = 2; break; /* 0x */
+        case 'X': base = 16; leading_chars_to_skip = 2; break; /* 0X */
+        default:  base = 10; leading_chars_to_skip = 0; break;
+        }
+        tmp = _PyLong_Format(value, base);
+        ...
+    }
+    ...
+    n_total = calc_number_widths(&spec, n_prefix, sign_char,
+                                  inumeric_chars, inumeric_chars + n_digits,
+                                  n_remainder, 0, 0, &locale, format, &maxchar);
+    ...
+    return fill_number(writer, &spec, tmp, inumeric_chars,
+                       inumeric_chars + n_digits, NULL, 0, fill_char,
+                       &locale, format->alternate);
+}
+```
+
+`_PyLong_Format` produces a string with an optional `0b`/`0o`/`0x`
+prefix. `leading_chars_to_skip` tells `format_long_internal` how many
+of those prefix characters to peel off before passing the digit span to
+`calc_number_widths`. The `#` (alternate) flag re-attaches the prefix
+into the output; without `#` the prefix is dropped. The `X` type code
+is handled by upper-casing the result of `_PyLong_Format(..., 16)`
+after the fact.
+
+### Public entry points (lines 1539 to 1726)
+
+<CpyLink path="Python/formatter_unicode.c" lines="1539-1726" />
+
+```c
+int
+_PyUnicode_FormatAdvancedWriter(_PyUnicodeWriter *writer,
+                                PyObject *obj,
+                                PyObject *format_spec,
+                                Py_ssize_t start, Py_ssize_t end)
+{
+    InternalFormatSpec format;
+
+    /* zero-length spec: just write str(obj) */
+    if (start == end) {
+        if (PyUnicode_CheckExact(obj))
+            return _PyUnicodeWriter_WriteStr(writer, obj);
+        else
+            return format_obj(obj, writer);
+    }
+
+    if (!parse_internal_render_format_spec(obj, format_spec, start, end,
+                                           &format, 's', '<'))
+        return -1;
+
+    switch (format.type) {
+    case 's':
+        return format_string_internal(obj, &format, writer);
+    default:
+        unknown_presentation_type(format.type, Py_TYPE(obj)->tp_name);
+        return -1;
+    }
+}
+```
+
+All four `…FormatAdvancedWriter` functions share the same structure:
+fast-path for an empty spec (no parsing needed), parse the spec, and
+dispatch to the type-specific internal formatter. They write directly
+into a `_PyUnicodeWriter` rather than constructing an intermediate
+`PyObject *`, which avoids one allocation per `FORMAT_VALUE` opcode.
+The `default_type` and `default_align` arguments to
+`parse_internal_render_format_spec` differ per type: strings use `s`
+and left-align (`<`); integers use `d` and right-align (`>`); floats
+use `\0` (the no-type-code path in `format_float_internal`) and
+right-align.

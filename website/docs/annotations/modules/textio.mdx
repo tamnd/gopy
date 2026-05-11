@@ -1,0 +1,187 @@
+---
+title: Modules/_io/textio.c
+description: Implements TextIOWrapper — the text-mode layer that encodes/decodes bytes through a codec's IncrementalEncoder/IncrementalDecoder and translates newlines.
+cpython_path: Modules/_io/textio.c
+cpython_version: "3.14"
+lines: 3600
+status: annotated
+ported_to: module/io/module.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Modules/_io/textio.c`
+
+<CpyLink path="Modules/_io/textio.c" />
+
+`textio.c` is the implementation of `TextIOWrapper`, the class that sits on
+top of a `BufferedIOBase` object and provides a text-mode interface with
+encoding, decoding, and newline translation.
+
+`TextIOWrapper` is the class returned by `open(path, "r")` (the default).
+It holds a reference to the underlying `buffer` (`BufferedReader` or
+`BufferedWriter`), an `IncrementalDecoder` instance from `codecs`, and an
+`IncrementalEncoder` instance. Reads pull bytes from `buffer`, feed them
+through the decoder, and cache the resulting string in `decoded_chars`.
+Writes encode the string through the encoder and push the resulting bytes
+into `buffer`.
+
+The file is roughly split into three zones: `__init__` and codec setup
+(~lines 1 to 600), the read/decode path (~lines 600 to 1800), and the
+write/encode path plus `seek`/`tell` (~lines 1800 to 3600).
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Modules/_io/textio.c" lines="1-120">1-120</Cpy> | `textio` struct, includes | Internal C struct: `buffer`, `encoding`, `encoder`, `decoder`, `decoded_chars`, `decoded_chars_used`, `pending_bytes`, `snapshot`, `seekable`, `telling`, `b2cratio`. | `module/io/module.go:TextIOWrapper` |
+| <Cpy path="Modules/_io/textio.c" lines="120-600">120-600</Cpy> | `textiowrapper_init` | `__init__`: validates args, resolves encoding, creates `IncrementalDecoder` and `IncrementalEncoder` via `codecs.getincrementaldecoder`/`getincrementalencoder`, sets newline mode. | `module/io/module.go:textioInit` |
+| <Cpy path="Modules/_io/textio.c" lines="600-1000">600-1000</Cpy> | `_textiowrapper_decode` / `textiowrapper_read` | Core decode step: feeds bytes to `decoder.decode(bytes, final=False)`, appends result to `decoded_chars`, updates `decoded_chars_used`. | `module/io/module.go:textioDecode` |
+| <Cpy path="Modules/_io/textio.c" lines="1000-1400">1000-1400</Cpy> | `textiowrapper_readline` | Line reader: reads chars one-by-one from `decoded_chars`; refills via `_textiowrapper_read_chunk` when exhausted; handles universal newline and `\r\n` lookahead. | `module/io/module.go:textioReadline` |
+| <Cpy path="Modules/_io/textio.c" lines="1400-1800">1400-1800</Cpy> | `translate_newlines` / `_textiowrapper_fix_decoder_state` | Newline translation: replaces `\r\n` and standalone `\r` with `\n` in universal mode; `_fix_decoder_state` resets decoder when crossing a line boundary after seek. | `module/io/module.go:translateNewlines` |
+| <Cpy path="Modules/_io/textio.c" lines="1800-2200">1800-2200</Cpy> | `textiowrapper_write` / `_textiowrapper_writeflush` | Write path: encodes text via `encoder.encode(text)`, appends bytes to `pending_bytes`; flushes when pending grows large or on explicit `flush()`. | `module/io/module.go:textioWrite` |
+| <Cpy path="Modules/_io/textio.c" lines="2200-2900">2200-2900</Cpy> | `textiowrapper_tell` / `textiowrapper_seek` | Tell: flushes encoder, takes a snapshot of decoder state, returns a cookie encoding raw byte offset + decoder state. Seek: decodes the cookie and restores decoder + encoder state. | `module/io/module.go:textioTell` |
+| <Cpy path="Modules/_io/textio.c" lines="2900-3600">2900-3600</Cpy> | `TextIOWrapper` type object, getsets, method table | `PyType_Spec`, `__repr__`, `readable`/`writable`/`seekable`, `name`, `mode`, `encoding`, `errors`, `line_buffering`. | `module/io/module.go:TextIOWrapperType` |
+
+## Reading
+
+### `textiowrapper_init` and codec setup (lines 120 to 600)
+
+<CpyLink path="Modules/_io/textio.c" lines="120-600" />
+
+`TextIOWrapper.__init__` resolves the encoding with the following priority:
+the explicit `encoding` argument, the locale encoding (`locale.getpreferredencoding(False)`),
+or `"utf-8"` when `UTF8_MODE` is set. After normalizing, it creates the codec
+objects:
+
+```c
+res = _PyObject_CallMethodIdObjArgs(io, &PyId_getincrementaldecoder,
+                                     enc, NULL);
+/* res is the decoder class; call it with errors= to get an instance */
+self->decoder = _PyObject_CallFunctionObjArgs(res, self->errors, NULL);
+
+res = _PyObject_CallMethodIdObjArgs(io, &PyId_getincrementalencoder,
+                                     enc, NULL);
+self->encoder = _PyObject_CallFunctionObjArgs(res, self->errors, NULL);
+```
+
+Both `encoder` and `decoder` are stored as Python objects on the
+`TextIOWrapper` instance. This means any codec registered with the `codecs`
+module can be plugged in here without changes to `textio.c`.
+
+The `newline` argument controls three modes. `newline=None` is universal
+mode: on input, `\r`, `\r\n`, and `\n` are all translated to `\n`; on
+output, `\n` is written as the platform line separator. `newline=""` is
+universal mode without translation. `newline="\n"` (or any other explicit
+string) means only that exact sequence is recognized as a line ending.
+
+### `textiowrapper_read` decode pipeline (lines 600 to 1000)
+
+<CpyLink path="Modules/_io/textio.c" lines="600-1000" />
+
+`textiowrapper_read(size)` works in two stages. When `size == -1`, it calls
+`self.buffer.read()` to get all remaining bytes, then decodes the entire
+block with `decoder.decode(bytes, final=True)`. When `size > 0`, it reads
+and decodes in chunks until `decoded_chars` has enough characters:
+
+```c
+static int
+_textiowrapper_read_chunk(textio *self, Py_ssize_t size_hint)
+{
+    /* Read a chunk of bytes from the underlying buffer. */
+    input_chunk = PyObject_CallMethodObjArgs(self->buffer,
+                                              _PyIO_str_read1,
+                                              size_hint_obj, NULL);
+    ...
+    /* Decode it. */
+    decoded = PyObject_CallMethodObjArgs(self->decoder,
+                                          _PyIO_str_decode,
+                                          input_chunk, Py_False, NULL);
+    ...
+    /* Append to decoded_chars. */
+    PyUnicode_AppendAndDel(&self->decoded_chars, decoded);
+    return 1;
+}
+```
+
+`decoded_chars_used` is the index into `decoded_chars` of the next
+character to be returned to the caller. Characters before that index have
+already been consumed; they are not copied out until the string is sliced
+in `_textiowrapper_get_decoded_chars`. This avoids repeated string
+allocations when `read(1)` is called in a loop.
+
+### `textiowrapper_readline` (lines 1000 to 1400)
+
+<CpyLink path="Modules/_io/textio.c" lines="1000-1400" />
+
+`readline()` scans `decoded_chars` for a newline character. In universal
+newline mode it must handle `\r\n` sequences that can straddle a chunk
+boundary, so it keeps a one-character lookahead:
+
+```c
+static PyObject *
+textiowrapper_readline(textio *self, PyObject *args)
+{
+    ...
+    while (1) {
+        /* Scan decoded_chars from decoded_chars_used to end. */
+        p = PyUnicode_DATA(self->decoded_chars) + self->decoded_chars_used;
+        end = PyUnicode_GET_LENGTH(self->decoded_chars);
+        for (i = self->decoded_chars_used; i < end; i++) {
+            Py_UCS4 ch = PyUnicode_READ(kind, data, i);
+            if (ch == '\n' || (self->readnl == NULL && ch == '\r'))
+                goto found_newline;
+        }
+        /* No newline in current chunk; read another. */
+        if (!_textiowrapper_read_chunk(self, -1))
+            break;  /* EOF */
+    }
+found_newline:
+    ...
+}
+```
+
+After a `\r` is found, the function peeks at the next character. If it is
+`\n`, both characters are consumed as a single line ending. If the peek
+would require loading another chunk, `_textiowrapper_read_chunk` is called
+again before the peek.
+
+### `textiowrapper_tell` and `textiowrapper_seek` (lines 2200 to 2900)
+
+<CpyLink path="Modules/_io/textio.c" lines="2200-2900" />
+
+`tell()` is complex because the decoder is stateful: to seek back to a
+given position, the decoder must be restored to exactly the state it was in
+when that position was last seen. `TextIOWrapper` solves this by storing a
+"snapshot" before each chunk decode: the snapshot records the raw byte
+offset at the start of the last buffer read and a serialized copy of the
+decoder's state (`decoder.getstate()`). The tell cookie encodes both:
+
+```c
+/* Cookie layout (packed into a Python int):
+   bits  0-63  : raw byte offset
+   bits 64-127 : number of chars already consumed from decoded_chars
+   bits 128+   : decoder state bytes (opaque)
+*/
+static PyObject *
+textiowrapper_tell(textio *self, PyObject *args)
+{
+    /* Flush pending writes first. */
+    if (_textiowrapper_writeflush(self) < 0) return NULL;
+
+    /* Use snapshot to compute position. */
+    dec_buffer = self->snapshot->dec_buffer;
+    dec_flags  = self->snapshot->dec_flags;
+    ...
+}
+```
+
+`seek(cookie)` decodes the cookie, seeks the raw buffer to the stored byte
+offset, re-feeds the snapshot bytes into the decoder (with the saved state
+flags), and then discards the first N already-consumed characters. After
+this, `decoded_chars_used` is set to zero and the decoder is back in sync
+with the stream position.
+
+Seeking to position 0 is a special case: it calls `decoder.reset()` instead
+of restoring a snapshot, since the decoder state at BOF is always the
+initial state.

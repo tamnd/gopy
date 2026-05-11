@@ -1,0 +1,194 @@
+---
+title: Python/intrinsics.c
+description: Implements the intrinsic helper functions invoked by the CALL_INTRINSIC_1 and CALL_INTRINSIC_2 bytecode opcodes.
+cpython_path: Python/intrinsics.c
+cpython_version: "3.14"
+lines: 253
+status: annotated
+ported_to: vm/eval_gen.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Python/intrinsics.c`
+
+<CpyLink path="Python/intrinsics.c" />
+
+`intrinsics.c` defines the small runtime helpers that the bytecode
+interpreter calls through the `CALL_INTRINSIC_1` and `CALL_INTRINSIC_2`
+opcodes. These opcodes carry an integer ID rather than a direct function
+pointer; the eval loop indexes into the `_Py_CallIntrinsic1` or
+`_Py_CallIntrinsic2` dispatch tables at runtime.
+
+The file exists because several operations are too complex to inline
+cleanly in the eval loop but too cheap or semantically special to
+deserve a full Python-visible builtin. The canonical examples are
+`from module import *` (which modifies the caller's namespace),
+`StopIteration`-to-`RuntimeError` conversion inside generators, and
+the PEP 695 type-parameter attachment helpers.
+
+All intrinsics receive the current `tstate` plus one (for `_1`) or
+two (for `_2`) Python object arguments, and return a new reference or
+`NULL` on error.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Python/intrinsics.c" lines="1-30">1-30</Cpy> | includes, forward declarations | Headers and local helpers used by the dispatch functions. | — |
+| <Cpy path="Python/intrinsics.c" lines="31-60">31-60</Cpy> | `intrinsic_print` | `INTRINSIC_PRINT`: writes `repr(value)` to `sys.stdout`; used in interactive mode for bare expression statements. | `vm/eval_gen.go:callIntrinsic1` |
+| <Cpy path="Python/intrinsics.c" lines="61-100">61-100</Cpy> | `intrinsic_import_star` | `INTRINSIC_IMPORT_STAR`: implements `from module import *` by calling `PyObject_GetAttr` for each public name. | `vm/eval_gen.go:callIntrinsic1` |
+| <Cpy path="Python/intrinsics.c" lines="101-125">101-125</Cpy> | `intrinsic_stopiteration_error` | `INTRINSIC_STOPITERATION_ERROR`: converts a `StopIteration` raised inside a generator into a `RuntimeError`. | `vm/eval_gen.go:callIntrinsic1` |
+| <Cpy path="Python/intrinsics.c" lines="126-145">126-145</Cpy> | `intrinsic_async_gen_value_wrapper_new` | `INTRINSIC_ASYNC_GEN_WRAP`: wraps the yielded value in an `_PyAsyncGenValueWrapper`. | `vm/eval_gen.go:callIntrinsic1` |
+| <Cpy path="Python/intrinsics.c" lines="146-160">146-160</Cpy> | `intrinsic_unary_positive` | `INTRINSIC_UNARY_POSITIVE`: calls `PyNumber_Positive` (`__pos__`). | `vm/eval_gen.go:callIntrinsic1` |
+| <Cpy path="Python/intrinsics.c" lines="161-175">161-175</Cpy> | `intrinsic_list_to_tuple` | `INTRINSIC_LIST_TO_TUPLE`: converts a list to a tuple, used to materialise `*args` spreads. | `vm/eval_gen.go:callIntrinsic1` |
+| <Cpy path="Python/intrinsics.c" lines="176-200">176-200</Cpy> | `_Py_CallIntrinsic1`, dispatch table | Table of unary intrinsic functions indexed by `INTRINSIC_*` id; entry point called from the eval loop. | `vm/eval_gen.go:callIntrinsic1` |
+| <Cpy path="Python/intrinsics.c" lines="201-225">201-225</Cpy> | `intrinsic_typevar_with_bound`, `intrinsic_typevar_with_constraints` | `INTRINSIC_TYPEVAR_WITH_BOUND` / `_WITH_CONSTRAINTS`: PEP 695 TypeVar constructor helpers. | `vm/eval_gen.go:callIntrinsic2` |
+| <Cpy path="Python/intrinsics.c" lines="226-253">226-253</Cpy> | `intrinsic_set_function_type_params`, `_Py_CallIntrinsic2` | `INTRINSIC_SET_FUNCTION_TYPE_PARAMS`: attaches `__type_params__` to a function; binary dispatch table. | `vm/eval_gen.go:callIntrinsic2` |
+
+## Reading
+
+### `intrinsic_import_star`: `from module import *` (lines 61 to 100)
+
+<CpyLink path="Python/intrinsics.c" lines="61-100" />
+
+This is one of the more involved unary intrinsics. The bytecode compiler
+emits `CALL_INTRINSIC_1 INTRINSIC_IMPORT_STAR` after an `IMPORT_NAME` that
+corresponds to a `from x import *` statement. By the time the intrinsic
+fires, the module object is on the stack.
+
+```c
+static PyObject *
+intrinsic_import_star(PyThreadState *tstate, PyObject *v)
+{
+    PyObject *locals = _PyEval_GetFrameLocals(tstate->current_frame);
+    if (locals == NULL) {
+        return NULL;
+    }
+    int err = import_all_from(tstate, locals, v);
+    Py_DECREF(locals);
+    if (err < 0) {
+        return NULL;
+    }
+    Py_RETURN_NONE;
+}
+```
+
+`import_all_from` (defined in `ceval.c`) checks for a module-level
+`__all__` attribute. If present it iterates that sequence; otherwise it
+falls back to iterating the module's `__dict__` and skipping names that
+start with an underscore. Each exported name is written into `locals` via
+`PyObject_SetItem`.
+
+### `intrinsic_stopiteration_error`: generator StopIteration coercion (lines 101 to 125)
+
+<CpyLink path="Python/intrinsics.c" lines="101-125" />
+
+PEP 479 (enforced from Python 3.7) requires that a `StopIteration`
+propagating out of a generator body be converted to `RuntimeError` rather
+than silently terminating the generator. The eval loop detects this
+condition and emits `CALL_INTRINSIC_1 INTRINSIC_STOPITERATION_ERROR` to do
+the conversion:
+
+```c
+static PyObject *
+intrinsic_stopiteration_error(PyThreadState *tstate, PyObject *value)
+{
+    PyObject *exc = tstate->current_exception;
+    assert(exc != NULL);
+    assert(PyExceptionInstance_Check(exc));
+    if (!PyErr_GivenExceptionMatches(exc, PyExc_StopIteration)) {
+        Py_INCREF(exc);
+        return exc;
+    }
+    const char *msg =
+        "async generator raised StopIteration";
+    if (!PyCoro_CheckExact(value)) {
+        msg = "generator raised StopIteration";
+    }
+    PyObject *error = _PyErr_FormatFromCause(
+        PyExc_RuntimeError, "%s", msg);
+    return error;
+}
+```
+
+The `value` argument is the currently-executing frame's code object (or
+coroutine), used only to pick the right error message. The actual
+`StopIteration` is read from `tstate->current_exception` and wrapped with
+`_PyErr_FormatFromCause` so that the original exception appears as the
+`__cause__` of the new `RuntimeError`.
+
+### `_Py_CallIntrinsic1`: unary dispatch table (lines 176 to 200)
+
+<CpyLink path="Python/intrinsics.c" lines="176-200" />
+
+The eval loop does not call each intrinsic function directly. Instead it
+indexes into a table, which keeps the `CALL_INTRINSIC_1` handler in
+`ceval.c` to a single indirect call:
+
+```c
+typedef PyObject *(*intrinsic_func1)(PyThreadState *, PyObject *);
+
+static const intrinsic_func1 intrinsic_table1[] = {
+    [INTRINSIC_1_INVALID]                = _PyErr_SetString_Nullptr,
+    [INTRINSIC_PRINT]                    = intrinsic_print,
+    [INTRINSIC_IMPORT_STAR]              = intrinsic_import_star,
+    [INTRINSIC_STOPITERATION_ERROR]      = intrinsic_stopiteration_error,
+    [INTRINSIC_ASYNC_GEN_WRAP]           = intrinsic_async_gen_value_wrapper_new,
+    [INTRINSIC_UNARY_POSITIVE]           = intrinsic_unary_positive,
+    [INTRINSIC_LIST_TO_TUPLE]            = intrinsic_list_to_tuple,
+    [INTRINSIC_TYPEVAR_NEW]              = _Py_TypeVar_NewIntrinsic,
+    [INTRINSIC_PARAMSPEC_NEW]            = _Py_ParamSpec_NewIntrinsic,
+    [INTRINSIC_TYPEVARTUPLE_NEW]         = _Py_TypeVarTuple_NewIntrinsic,
+    [INTRINSIC_SUBSCRIPT_GENERIC]        = _Py_subscript_generic,
+    [INTRINSIC_TYPEALIAS_NEW]            = _Py_TypeAlias_NewIntrinsic,
+};
+
+PyObject *
+_Py_CallIntrinsic1(PyThreadState *tstate, int oparg, PyObject *value)
+{
+    assert(oparg > 0 && oparg < MAX_INTRINSIC_1);
+    return intrinsic_table1[oparg](tstate, value);
+}
+```
+
+`MAX_INTRINSIC_1` is checked at compile time via a static assert against
+the table length, so adding an intrinsic without extending the table
+produces a build error.
+
+### PEP 695 intrinsics: TypeVar, type aliases (lines 201 to 253)
+
+<CpyLink path="Python/intrinsics.c" lines="201-253" />
+
+Three binary intrinsics support PEP 695 (generic functions and classes,
+Python 3.12+). Their second argument is always the new function or class
+object being defined.
+
+```c
+static PyObject *
+intrinsic_set_function_type_params(PyThreadState *Py_UNUSED(tstate),
+                                   PyObject *func, PyObject *type_params)
+{
+    assert(PyFunction_Check(func));
+    assert(PyTuple_Check(type_params));
+    if (PyFunction_SetTypeParams(func, type_params) < 0) {
+        return NULL;
+    }
+    Py_INCREF(func);
+    return func;
+}
+```
+
+`intrinsic_typevar_with_bound` receives `(tstate, typevar, bound)` and
+calls `_Py_TypeVar_SetBound`; `intrinsic_typevar_with_constraints` calls
+`_Py_TypeVar_SetConstraints`. Both are generated by the compiler when it
+encounters a `TypeVar` annotation with `bound=` or constraints in a PEP
+695 type parameter clause.
+
+## gopy mirror
+
+All intrinsics are dispatched inline inside `vm/eval_gen.go`. The two
+`CALL_INTRINSIC_1` and `CALL_INTRINSIC_2` cases contain a `switch` over
+the intrinsic ID that calls the equivalent Go helpers. PEP 695
+intrinsics (`INTRINSIC_TYPEVAR_*`, `INTRINSIC_TYPEALIAS_NEW`) are
+stubbed with `TODO` comments pending the `objects/typevar.go` port.

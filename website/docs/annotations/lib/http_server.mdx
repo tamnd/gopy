@@ -1,0 +1,243 @@
+---
+title: Lib/http/server.py
+description: HTTP/1.1 server framework built on socketserver, providing BaseHTTPRequestHandler, SimpleHTTPRequestHandler, and CGIHTTPRequestHandler.
+cpython_path: Lib/http/server.py
+cpython_version: "3.14"
+lines: 1048
+status: annotated
+ported_to: module/http/server.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Lib/http/server.py`
+
+<CpyLink path="Lib/http/server.py" />
+
+`http/server.py` implements the server side of HTTP/1.1 on top of
+`socketserver.TCPServer`. It provides three concrete handler classes at
+different levels of abstraction: `BaseHTTPRequestHandler` for raw method
+dispatch, `SimpleHTTPRequestHandler` for serving a directory tree, and
+`CGIHTTPRequestHandler` for executing legacy CGI scripts.
+
+`HTTPServer` is a thin `TCPServer` subclass that sets
+`allow_reuse_address = True`. `ThreadingHTTPServer` adds `ThreadingMixIn`
+to handle each request in its own thread. The server classes themselves
+hold almost no logic; all HTTP behaviour lives in the handler.
+
+`BaseHTTPRequestHandler` reads one request line per connection keep-alive
+cycle. `handle()` loops calling `handle_one_request()` as long as the
+connection is kept alive. `handle_one_request` reads the request line,
+calls `parse_request()` to split the method, path, and HTTP version,
+then dispatches to `do_METHOD()` on the handler subclass. The response
+side provides `send_response`, `send_header`, and `end_headers` to build
+well-formed HTTP/1.1 responses without manual string assembly.
+
+`SimpleHTTPRequestHandler` maps URL paths to the local filesystem via
+`translate_path`, serves file contents with correct `Content-Type` from
+`mimetypes`, generates HTML directory listings, and respects
+`If-Modified-Since` for conditional GET.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Lib/http/server.py" lines="1-102">1-102</Cpy> | Module docstring, imports, constants | Docstring, `__version__`, `__all__`, imports of `socketserver`, `email`, `mimetypes`, `http.HTTPStatus`, `urllib.parse`; defines `DEFAULT_ERROR_MESSAGE` and `DEFAULT_ERROR_CONTENT_TYPE`. | `module/http/server.go` |
+| <Cpy path="Lib/http/server.py" lines="103-138">103-138</Cpy> | `HTTPServer`, `ThreadingHTTPServer`, `HTTPSServer`, `ThreadingHTTPSServer` | Thin server classes; `HTTPServer` sets `allow_reuse_address = True`; HTTPS variants configure an `ssl.SSLContext`. | `module/http/server.go` |
+| <Cpy path="Lib/http/server.py" lines="139-244">139-244</Cpy> | `BaseHTTPRequestHandler` class variables | `server_version`, `sys_version`, `error_message_format`, `error_content_type`, `protocol_version`, `MessageClass`; class-level constants shared by all handler instances. | `module/http/server.go` |
+| <Cpy path="Lib/http/server.py" lines="245-386">245-386</Cpy> | `parse_request`, `handle_expect_100`, `handle_one_request`, `handle` | Request parsing and dispatch loop; `parse_request` validates the request line and sets `self.command`, `self.path`, `self.request_version`; `handle` drives keep-alive looping. | `module/http/server.go` |
+| <Cpy path="Lib/http/server.py" lines="387-531">387-531</Cpy> | `send_error`, `send_response`, `send_response_only`, `send_header`, `end_headers`, `flush_headers`, `log_request`, `log_error`, `log_message`, `date_time_string`, `address_string` | Response helpers and logging; `send_response` writes the status line and injects `Server` and `Date` headers automatically. | `module/http/server.go` |
+| <Cpy path="Lib/http/server.py" lines="533-767">533-767</Cpy> | `SimpleHTTPRequestHandler` | File-serving handler: `do_GET`/`do_HEAD`, `send_head`, `list_directory`, `translate_path`, `guess_type`; handles `If-Modified-Since` conditional requests. | `module/http/server.go` |
+| <Cpy path="Lib/http/server.py" lines="768-1048">768-1048</Cpy> | `CGIHTTPRequestHandler` | Deprecated CGI handler: maps `cgi-bin/` URLs to scripts, sets CGI environment variables, executes scripts via `subprocess.Popen` or `os.fork`; includes the module-level `test()` helper. | `module/http/server.go` |
+
+## Reading
+
+### `handle_one_request` and `parse_request` (lines 245 to 386)
+
+<CpyLink path="Lib/http/server.py" lines="245-386" />
+
+```python
+def parse_request(self):
+    requestline = self.raw_requestline
+    requestline = requestline.rstrip('\r\n')
+    self.requestline = requestline
+    words = requestline.split()
+    if len(words) == 0:
+        return False
+    if len(words) >= 3:
+        version = words[-1]
+        try:
+            if not version.startswith('HTTP/'):
+                raise ValueError
+            base_version_number = version.split('/', 1)[1]
+            version_number = tuple(
+                int(n) for n in base_version_number.split('.', 1))
+        except (ValueError, IndexError):
+            self.send_error(HTTPStatus.BAD_REQUEST, ...)
+            return False
+        self.request_version = version
+        self.command, self.path = words[0], words[1]
+    ...
+    return True
+
+def handle_one_request(self):
+    try:
+        self.raw_requestline = self.rfile.readline(65537)
+        if len(self.raw_requestline) > 65536:
+            self.requestline = ''
+            self.request_version = ''
+            self.command = ''
+            self.send_error(HTTPStatus.REQUEST_URI_TOO_LONG)
+            return
+        if not self.raw_requestline:
+            self.close_connection = True
+            return
+        if not self.parse_request():
+            return
+        mname = 'do_' + self.command
+        if not hasattr(self, mname):
+            self.send_error(HTTPStatus.NOT_IMPLEMENTED, ...)
+            return
+        method = getattr(self, mname)
+        method()
+        self.wfile.flush()
+    except TimeoutError as e:
+        self.log_error("Request timed out: %r", e)
+        self.close_connection = True
+```
+
+`handle_one_request` enforces a hard 65536-byte limit on the request
+line before even attempting to parse it, sending a `431` error if
+exceeded. After parsing, method dispatch is purely reflective: it looks
+up `do_GET`, `do_POST`, and so on via `getattr`. Unknown methods yield
+`501 Not Implemented`. Each handler method is responsible for sending its
+own complete response; `handle_one_request` only calls `wfile.flush()`
+afterward.
+
+### `send_response` and response header helpers (lines 387 to 531)
+
+<CpyLink path="Lib/http/server.py" lines="387-531" />
+
+```python
+def send_response(self, code, message=None):
+    if self.request_version != 'HTTP/0.9':
+        if message is None:
+            if code in self.responses:
+                message = self.responses[code][0]
+            else:
+                message = ''
+        if not hasattr(self, '_headers_buffer'):
+            self._headers_buffer = []
+        self._headers_buffer.append(("%s %d %s\r\n" %
+                                     (self.protocol_version, code, message))
+                                    .encode("latin-1", "strict"))
+    if self.server_version:
+        self.send_header('Server', self.version_string())
+    self.send_header('Date', self.date_time_string())
+
+def send_header(self, keyword, value):
+    if self.request_version != 'HTTP/0.9':
+        if not hasattr(self, '_headers_buffer'):
+            self._headers_buffer = []
+        self._headers_buffer.append(
+            ("%s: %s\r\n" % (keyword, value)).encode("latin-1", "strict"))
+    if keyword.lower() == 'connection':
+        if value.lower() == 'close':
+            self.close_connection = True
+        elif value.lower() == 'keep-alive':
+            self.close_connection = False
+
+def end_headers(self):
+    if self.request_version != 'HTTP/0.9':
+        self._headers_buffer.append(b"\r\n")
+        self.flush_headers()
+```
+
+Headers are accumulated in `_headers_buffer` rather than written to the
+socket immediately. `end_headers` appends the blank line that terminates
+the header section and then calls `flush_headers()` to write the entire
+buffer in one `wfile.write` call, reducing the number of TCP segments.
+`send_header` also inspects the `Connection` header value to update
+`self.close_connection`, which controls whether `handle()` will loop for
+a subsequent request on the same connection.
+
+### `SimpleHTTPRequestHandler.send_head` and `list_directory` (lines 533 to 767)
+
+<CpyLink path="Lib/http/server.py" lines="533-767" />
+
+```python
+def send_head(self):
+    path = self.translate_path(self.path)
+    f = None
+    if os.path.isdir(path):
+        parts = urllib.parse.urlsplit(self.path)
+        if not parts.path.endswith('/'):
+            self.send_response(HTTPStatus.MOVED_PERMANENTLY)
+            new_parts = (parts[0], parts[1], parts[2] + '/',
+                         parts[3], parts[4])
+            new_url = urllib.parse.urlunsplit(new_parts)
+            self.send_header("Location", new_url)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return None
+        for index in "index.html", "index.htm":
+            index = os.path.join(path, index)
+            if os.path.isfile(index):
+                path = index
+                break
+        else:
+            return self.list_directory(path)
+    ...
+    try:
+        f = open(path, 'rb')
+    except OSError:
+        self.send_error(HTTPStatus.NOT_FOUND, "File not found")
+        return None
+    ...
+    self.send_response(HTTPStatus.OK)
+    self.send_header("Content-type", ctype)
+    self.send_header("Content-Length", str(fs[6]))
+    self.send_header("Last-Modified",
+                     self.date_time_string(fs.st_mtime))
+    self.end_headers()
+    return f
+```
+
+`send_head` is shared by `do_GET` and `do_HEAD`; `do_GET` reads and
+sends the returned file object while `do_HEAD` discards it, so the
+header logic is never duplicated. Bare directory paths without a trailing
+slash receive a permanent redirect (301) to the slash form, which ensures
+relative links in directory listings resolve correctly. `list_directory`
+reads the directory with `os.listdir`, sorts entries, and emits an HTML
+table with file sizes and modification times using `html.escape` to
+sanitise filenames.
+
+### `BaseHTTPRequestHandler.log_message` (lines 485 to 531)
+
+<CpyLink path="Lib/http/server.py" lines="485-531" />
+
+```python
+def log_message(self, format, *args):
+    sys.stderr.write("%s - - [%s] %s\n" %
+                     (self.address_string(),
+                      self.log_date_time_string(),
+                      format % args))
+
+def log_date_time_string(self):
+    now = time.time()
+    year, month, day, hh, mm, ss, x, y, z = time.localtime(now)
+    s = "%02d/%3s/%04d %02d:%02d:%02d" % (
+        day, self.monthname[month], year, hh, mm, ss)
+    return s
+
+def address_string(self):
+    return self.client_address[0]
+```
+
+All logging goes to `sys.stderr` in Combined Log Format. `log_message`
+is the single override point: subclasses replace it to redirect logs to
+a file or structured logger. `address_string` returns just the client IP
+by default; in older versions it called `socket.getfqdn`, which could
+block on a reverse DNS lookup for every request. The current
+implementation avoids that latency by returning the raw address string,
+leaving DNS resolution to the caller if needed.

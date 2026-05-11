@@ -1,0 +1,196 @@
+---
+title: Lib/multiprocessing/__init__.py
+description: Entry point for the multiprocessing package; exposes Process, Queue, Pipe, Pool, Value, Array, Manager, Lock, and the start-method API.
+cpython_path: Lib/multiprocessing/__init__.py
+cpython_version: "3.14"
+lines: 84
+status: annotated
+ported_to: module/multiprocessing/module.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Lib/multiprocessing/__init__.py`
+
+<CpyLink path="Lib/multiprocessing/__init__.py" />
+
+The `multiprocessing` package lets Python programs spawn, fork, or
+forkserver child processes and coordinate them with the same API that
+`threading` uses for threads. `Lib/multiprocessing/__init__.py` is
+intentionally thin: it re-exports the public symbols from
+sub-modules and wires up the context system so that
+`multiprocessing.Process(...)` resolves to the right implementation for
+the current start method.
+
+The package is organized around a **context** abstraction. Three start
+methods exist:
+
+- `"fork"` (default on Linux / macOS before 3.14) — `os.fork()` duplicates
+  the parent process; the child inherits all open file descriptors and
+  memory. Fast but unsafe with threads or certain C extensions.
+- `"spawn"` (default on Windows and macOS 3.14+) — a fresh Python
+  interpreter is started; only picklable objects can be transferred.
+  Safe but slower.
+- `"forkserver"` — a small server process is forked once at startup;
+  each new worker is a fresh fork of that server, avoiding the
+  thread-safety issue of `"fork"` while not paying the full `"spawn"` cost.
+
+`set_start_method(method, force=False)` sets the method once for the
+process lifetime. `get_context(method)` returns a `BaseContext` subclass
+without changing the default, which is useful inside libraries.
+
+The sub-packages that implement the functionality:
+
+| Sub-module | Responsibility |
+| ---------- | -------------- |
+| `multiprocessing.process` | `BaseProcess` and `Process` class |
+| `multiprocessing.pool` | `Pool`, `AsyncResult`, `MapResult` |
+| `multiprocessing.queues` | `Queue`, `SimpleQueue`, `JoinableQueue` |
+| `multiprocessing.connection` | `Pipe`, `Connection`, `Client`, `Listener` |
+| `multiprocessing.sharedctypes` | `Value`, `Array`, shared memory via `mmap` |
+| `multiprocessing.managers` | `BaseManager`, `SyncManager`, proxy classes |
+| `multiprocessing.synchronize` | `Lock`, `RLock`, `Semaphore`, `Event`, `Barrier` |
+| `multiprocessing.context` | `BaseContext`, `ForkContext`, `SpawnContext`, `ForkServerContext` |
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Lib/multiprocessing/__init__.py" lines="1-30">1-30</Cpy> | Module docstring, imports | Imports `context` sub-module and sets `__all__`. | `module/multiprocessing/module.go` |
+| <Cpy path="Lib/multiprocessing/__init__.py" lines="31-60">31-60</Cpy> | `__getattr__`, attribute forwarding | Forwards attribute lookup to the default context so `multiprocessing.Queue` works without explicit import. | `module/multiprocessing/module.go:getattr` |
+| <Cpy path="Lib/multiprocessing/__init__.py" lines="61-74">61-74</Cpy> | `set_start_method`, `get_context` | Delegates to `context.get_context()`; sets `_default_context`. | `module/multiprocessing/module.go:SetStartMethod` |
+| <Cpy path="Lib/multiprocessing/__init__.py" lines="75-84">75-84</Cpy> | `freeze_support`, `allow_connection_pickling` | Windows exe support and connection pickling hook. | `module/multiprocessing/module.go:FreezeSupport` |
+
+## Reading
+
+### Context forwarding and `__getattr__` (lines 31 to 60)
+
+<CpyLink path="Lib/multiprocessing/__init__.py" lines="31-60" />
+
+```python
+def __getattr__(name):
+    # Attribute lookup for names that are not defined in this module
+    # is forwarded to the default context.
+    return getattr(context._default_context, name)
+```
+
+Every class that `multiprocessing` exports (`Process`, `Queue`, `Pipe`,
+`Pool`, `Lock`, ...) is actually defined inside one of the context
+sub-classes in `multiprocessing.context`. The `__init__.py` does not
+import them directly. Instead, `__getattr__` catches any attribute miss
+and forwards it to `context._default_context`. This means that after
+`set_start_method("spawn")`, `multiprocessing.Queue` silently returns the
+spawn-context `Queue` class rather than the fork-context one, with no
+code change required by the caller.
+
+### `Process` (in `multiprocessing.process`)
+
+<CpyLink path="Lib/multiprocessing/process.py" lines="1-120" />
+
+```python
+class BaseProcess:
+    def __init__(self, group=None, target=None, name=None,
+                 args=(), kwargs={}, *, daemon=None):
+        ...
+        self._target = target
+        self._args = tuple(args)
+        self._kwargs = dict(kwargs)
+        self._name = name or type(self).__name__ + '-' + ...
+
+    def start(self):
+        ...
+        self._popen = self._Popen(self)
+        self._sentinel = self._popen.sentinel
+
+    def join(self, timeout=None):
+        ...
+        res = self._popen.wait(timeout)
+
+    def terminate(self):
+        self._popen.terminate()
+
+    def kill(self):
+        self._popen.kill()
+```
+
+`start()` creates a `_Popen` object whose concrete type depends on the
+start method: `popen_fork.Popen`, `popen_spawn_posix.Popen`, or
+`popen_forkserver.Popen`. Each implements the same interface
+(`wait`, `terminate`, `kill`, `sentinel`). `sentinel` is a file
+descriptor that becomes readable when the child exits, used by `join`
+and by the `ProcessPoolExecutor` reaper thread.
+
+### `Queue` and `SimpleQueue` (in `multiprocessing.queues`)
+
+<CpyLink path="Lib/multiprocessing/queues.py" lines="1-200" />
+
+```python
+class Queue(Queue):
+    def __init__(self, maxsize=0, *, ctx):
+        self._maxsize = maxsize
+        self._reader, self._writer = connection.Pipe(duplex=False)
+        self._rlock = ctx.Lock()
+        self._wlock = ctx.Lock()
+        self._sem = ctx.BoundedSemaphore(maxsize) if maxsize > 0 else None
+        self._after_fork()
+
+    def put(self, obj, block=True, timeout=None):
+        ...
+        self._start_thread()  # lazily start feeder thread
+        self._buffer.append(obj)
+        self._notempty.notify()
+
+    def get(self, block=True, timeout=None):
+        ...
+        with self._rlock:
+            res = self._recv_bytes()
+        return _ForkingPickler.loads(res)
+```
+
+`Queue` uses a `Pipe` for the actual data transport plus a feeder
+thread that pickles items and writes them to the write end. The feeder
+thread is started lazily on the first `put()`. `SimpleQueue` skips the
+feeder thread and the semaphore, writing directly to the pipe on `put()`
+and holding `_wlock` for the duration, making it safe across processes
+but lower throughput.
+
+### `Pool` (in `multiprocessing.pool`)
+
+<CpyLink path="Lib/multiprocessing/pool.py" lines="1-100" />
+
+```python
+class Pool:
+    def __init__(self, processes=None, initializer=None, initargs=(),
+                 maxtasksperchild=None, context=None):
+        self._ctx = context or get_context()
+        self._processes = processes or os.cpu_count()
+        self._pool = []
+        self._repopulate_pool()
+
+    def map(self, func, iterable, chunksize=None):
+        return self._map_async(func, iterable, mapstar, chunksize).get()
+
+    def imap(self, func, iterable, chunksize=1):
+        ...
+
+    def apply_async(self, func, args=(), kwds={}, callback=None, error_callback=None):
+        result = ApplyResult(self, callback, error_callback)
+        self._taskqueue.put(([(result._job, 0, func, args, kwds)], None))
+        return result
+```
+
+The pool maintains a list of `Process` workers, a task queue, and a
+result queue. A worker thread reads from the task queue, sends work to
+idle workers, and a result thread reads from the result queue and
+resolves `AsyncResult` futures. `maxtasksperchild` causes workers to
+exit after handling that many tasks, preventing unbounded memory growth
+in long-running pools.
+
+## Notes for the gopy mirror
+
+`module/multiprocessing/module.go` is a pending stub. The fork and
+forkserver start methods require OS-level process creation that is not
+available inside the gopy VM. The spawn method is possible in principle
+by serializing the interpreter state, but this is deferred. The initial
+stub will expose the API surface and raise `NotImplementedError` for
+`start()`.

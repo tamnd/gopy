@@ -1,0 +1,175 @@
+---
+title: Lib/pprint.py
+description: Pretty-printer with width-aware wrapping, per-type dispatch, cycle detection, and the PrettyPrinter class.
+cpython_path: Lib/pprint.py
+cpython_version: "3.14"
+lines: 688
+status: annotated
+ported_to: module/pprint/module.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Lib/pprint.py`
+
+<CpyLink path="Lib/pprint.py" />
+
+The `pprint` module formats Python objects into human-readable strings while
+respecting a configurable line width. A `PrettyPrinter` instance carries all
+formatting parameters and owns a type-dispatch table (`_dispatch`) keyed by
+`type.__repr__`. The recursive core is `_format`, which builds output by
+writing into a stream and tracking indentation depth. Cycle detection uses
+a `context` dict mapping object `id()` to a sentinel. Per-type handlers
+(`_pprint_dict`, `_pprint_list`, `_pprint_tuple`, `_pprint_set`,
+`_pprint_dataclass`) implement compact single-line and multi-line wrapped
+modes. `_safe_repr` provides a cycle-safe `repr` string together with
+`readable` and `recursive` flags. The module-level `pprint`, `pformat`,
+`isreadable`, and `isrecursive` convenience functions each instantiate a
+temporary `PrettyPrinter`.
+
+gopy ships a Go-backed stub in `module/pprint/module.go` that exposes
+`pprint`, `pformat`, `saferepr`, and a minimal `PrettyPrinter` class.
+The full recursive formatter is pending.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Lib/pprint.py" lines="1-55">1-55</Cpy> | module header, `__all__`, imports | Public surface declaration. | `module/pprint/module.go` |
+| <Cpy path="Lib/pprint.py" lines="56-110">56-110</Cpy> | `pprint`, `pformat`, `isreadable`, `isrecursive`, `pp` | Module-level one-shot helpers; each delegates to a fresh `PrettyPrinter`. | `module/pprint/module.go:pprintFn`, `pformatFn` |
+| <Cpy path="Lib/pprint.py" lines="111-200">111-200</Cpy> | `PrettyPrinter.__init__`, `pprint`, `pformat`, `isreadable`, `isrecursive` | Class constructor validates `indent`, `width`, `depth`; instance methods mirror module-level helpers. | `module/pprint/module.go:PrettyPrinter` |
+| <Cpy path="Lib/pprint.py" lines="200-330">200-330</Cpy> | `_format` | Recursive core: checks width, dispatches on `type(object).__repr__` in `_dispatch`, falls back to `repr`. | pending |
+| <Cpy path="Lib/pprint.py" lines="330-410">330-410</Cpy> | `_pprint_dict` | Sorts keys when `sort_dicts=True`; writes `{key: value}` pairs with `_format_items` for wrapping. | pending |
+| <Cpy path="Lib/pprint.py" lines="410-470">410-470</Cpy> | `_pprint_list`, `_pprint_tuple`, `_format_items` | Sequence formatters; `_format_items` handles compact multi-item packing. | pending |
+| <Cpy path="Lib/pprint.py" lines="470-530">470-530</Cpy> | `_pprint_set`, `_pprint_frozenset` | Sort elements before formatting; use `{...}` vs `frozenset({...})` wrappers. | pending |
+| <Cpy path="Lib/pprint.py" lines="530-600">530-600</Cpy> | `_pprint_str`, `_pprint_bytes`, `_pprint_bytearray` | Long string/bytes splitting at width boundaries. | pending |
+| <Cpy path="Lib/pprint.py" lines="600-660">600-660</Cpy> | `_pprint_dataclass` | Formats `@dataclass` instances field-by-field using `dataclasses.fields`. | pending |
+| <Cpy path="Lib/pprint.py" lines="660-688">660-688</Cpy> | `_safe_repr`, `_recursion`, `_perfcheck` | Cycle-safe repr; `_recursion` placeholder string; `_perfcheck` benchmark helper. | pending |
+
+## Reading
+
+### Module-level helpers (lines 56 to 110)
+
+<CpyLink path="Lib/pprint.py" lines="56-110" />
+
+Each module-level function is a thin wrapper that constructs a disposable
+`PrettyPrinter` and delegates. `pprint` also handles the `stream` default:
+
+```python
+def pprint(object, stream=None, indent=1, width=80, depth=None, *,
+           compact=False, sort_dicts=True, underscore_numbers=False):
+    printer = PrettyPrinter(
+        stream=stream, indent=indent, width=width, depth=depth,
+        compact=compact, sort_dicts=sort_dicts,
+        underscore_numbers=underscore_numbers)
+    printer.pprint(object)
+
+def pformat(object, indent=1, width=80, depth=None, *,
+            compact=False, sort_dicts=True, underscore_numbers=False):
+    return PrettyPrinter(indent=indent, width=width, depth=depth,
+                         compact=compact, sort_dicts=sort_dicts,
+                         underscore_numbers=underscore_numbers).pformat(object)
+```
+
+gopy's stub exposes `pprintFn` and `pformatFn` in Go. Currently they
+forward to `objects.Repr(o)` and write to stdout; the full width-aware path
+is not yet ported.
+
+### `_format` — the recursive core (lines 200 to 330)
+
+<CpyLink path="Lib/pprint.py" lines="200-330" />
+
+`_format` is the central dispatcher. It checks whether the object fits on the
+remaining width by calling `repr` and measuring the result. If the repr is
+short enough it writes it directly; otherwise it looks up the object's type in
+`_dispatch` (keyed by `type.__repr__`) and calls the per-type handler:
+
+```python
+def _format(self, object, stream, indent, allowance, context, level):
+    objid = id(object)
+    if objid in context:
+        stream.write(_recursion(object))
+        self._recursive = True
+        self._readable = False
+        return
+    rep = self._repr(object, context, level)
+    max_width = self._width - indent - allowance
+    if len(rep) <= max_width:
+        stream.write(rep)
+        return
+    p = self._dispatch.get(type(object).__repr__, None)
+    if p is not None:
+        context[objid] = 1
+        p(self, object, stream, indent, allowance, context, level + 1)
+        del context[objid]
+    else:
+        stream.write(rep)
+```
+
+The `context` dict is the cycle guard. The `allowance` parameter reserves
+space for closing brackets so the decision to wrap accounts for the full
+line cost, not just the current item.
+
+### `_pprint_dict` (lines 330 to 410)
+
+<CpyLink path="Lib/pprint.py" lines="330-410" />
+
+Iterates key-value pairs, optionally sorting keys, and formats each entry
+with `_format` recursively. When the total repr fits on one line the pair
+is written inline; otherwise keys and values each get their own indented
+continuation:
+
+```python
+def _pprint_dict(self, object, stream, indent, allowance, context, level):
+    write = stream.write
+    indent += 1
+    items = object.items()
+    if self._sort_dicts:
+        items = sorted(items, key=lambda item: item[0])
+    write('{')
+    if len(object) == 1:
+        key, ent = next(iter(items))
+        self._format(key, stream, indent, allowance + 2, context, level)
+        write(': ')
+        self._format(ent, stream, indent, allowance + 1, context, level)
+    else:
+        self._format_dict_items(items, stream, indent, allowance + 1, context, level)
+    write('}')
+```
+
+The `allowance + 1` accounts for the closing brace; `allowance + 2` for
+the `: ` separator that follows the key.
+
+### `_safe_repr` and cycle detection (lines 660 to 688)
+
+<CpyLink path="Lib/pprint.py" lines="660-688" />
+
+`_safe_repr` returns a triple `(repr_string, readable, recursive)`.
+`readable` is False when the result is not parseable Python (e.g., custom
+`__repr__` output). `recursive` is True when a cycle was detected and the
+sentinel string `<Recursion on TYPENAME with id=ID>` was substituted:
+
+```python
+def _safe_repr(object, context, maxlevels, level, sort_dicts):
+    ...
+    rep = repr(object)
+    ...
+    if issubclass(typ, dict):
+        if not object:
+            return rep, True, False
+        objid = id(object)
+        if maxlevels and level >= maxlevels:
+            return '{...}', False, objid in context
+        if objid in context:
+            return _recursion(object), False, True
+        context[objid] = 1
+        readable = True
+        recursive = False
+        ...
+        del context[objid]
+        return ..., readable, recursive
+```
+
+The same `context` dict threaded through `_format` is passed here so that
+cycles discovered during `_safe_repr` are visible at the `_format` level
+and vice versa.

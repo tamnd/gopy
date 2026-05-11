@@ -1,0 +1,258 @@
+---
+title: Lib/concurrent/futures/__init__.py
+description: High-level asynchronous execution via thread and process pools; exports Future, Executor, ThreadPoolExecutor, ProcessPoolExecutor, wait, and as_completed.
+cpython_path: Lib/concurrent/futures/__init__.py
+cpython_version: "3.14"
+lines: 40
+status: annotated
+ported_to: module/concurrent/futures/module.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Lib/concurrent/futures/__init__.py`
+
+<CpyLink path="Lib/concurrent/futures/__init__.py" />
+
+The `concurrent.futures` package (PEP 3148) exposes a uniform executor
+interface for running callables asynchronously, either in a thread pool or
+a process pool. The entry point file is a short re-export shim; all
+implementation lives in the submodules `_base.py`, `thread.py`, and
+`process.py` under `Lib/concurrent/futures/`.
+
+`_base.py` contains `Future`, `Executor`, `wait`, `as_completed`, and the
+internal `_WorkItem` / `_AcquireFutures` helpers. `thread.py` provides
+`ThreadPoolExecutor` backed by a `queue.SimpleQueue` and daemon worker
+threads. `process.py` provides `ProcessPoolExecutor` backed by
+`multiprocessing`, a result queue, and a manager thread.
+
+The key design invariant is that `Future` is the sole rendezvous object:
+a caller submits work via `executor.submit(fn, *args)`, gets back a
+`Future`, and either blocks on `future.result()` or registers a callback
+via `future.add_done_callback(fn)`. The executor implementation sets the
+future's result (or exception) from the worker thread or process; all
+state transitions are protected by an internal `threading.Lock`.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Lib/concurrent/futures/__init__.py" lines="1-40">1-40</Cpy> | Package `__init__` re-exports | Imports `Future`, `Executor`, `wait`, `as_completed`, `FIRST_COMPLETED`, `FIRST_EXCEPTION`, `ALL_COMPLETED`, `CancelledError`, `TimeoutError`, `BrokenExecutor` from `_base`; `ThreadPoolExecutor` from `thread`; `ProcessPoolExecutor` from `process`. | `module/concurrent/futures/module.go` |
+| <Cpy path="Lib/concurrent/futures/_base.py" lines="1-100">1-100</Cpy> | State constants, `_AcquireFutures`, `_create_and_install_waiters` | `PENDING`, `RUNNING`, `CANCELLED`, `CANCELLED_AND_NOTIFIED`, `FINISHED`; the waiter-installation helper for `wait` and `as_completed`. | `module/concurrent/futures/module.go` |
+| <Cpy path="Lib/concurrent/futures/_base.py" lines="101-320">101-320</Cpy> | `Future` | State machine protected by a `threading.Lock`; `result`, `exception`, `cancel`, `set_result`, `set_exception`, `add_done_callback`. | `module/concurrent/futures/module.go` |
+| <Cpy path="Lib/concurrent/futures/_base.py" lines="321-460">321-460</Cpy> | `wait(fs, timeout, return_when)` | Installs `_FirstCompletedWaiter` or `_AllCompletedWaiter` on every future; blocks on a `threading.Event`; returns `DoneAndNotDoneFutures`. | `module/concurrent/futures/module.go` |
+| <Cpy path="Lib/concurrent/futures/_base.py" lines="461-560">461-560</Cpy> | `as_completed(fs, timeout)` | Generator; installs a waiter on all futures, yields each as it completes via a `queue.SimpleQueue`. | `module/concurrent/futures/module.go` |
+| <Cpy path="Lib/concurrent/futures/_base.py" lines="561-680">561-680</Cpy> | `Executor` (abstract base) | `submit`, `map`, `shutdown`; `map` is implemented as a generator over `as_completed`. | `module/concurrent/futures/module.go` |
+| <Cpy path="Lib/concurrent/futures/thread.py" lines="1-80">1-80</Cpy> | `_WorkItem`, `_worker` | `_WorkItem(future, fn, args, kwargs)`: unit of work; `_worker` is the thread function that drains the `SimpleQueue`. | `module/concurrent/futures/module.go` |
+| <Cpy path="Lib/concurrent/futures/thread.py" lines="81-280">81-280</Cpy> | `ThreadPoolExecutor` | Constructor, `submit`, `_adjust_thread_count`, `shutdown`; uses `queue.SimpleQueue` and a `set` of weak-referenced thread handles. | `module/concurrent/futures/module.go` |
+| <Cpy path="Lib/concurrent/futures/process.py" lines="1-120">1-120</Cpy> | `_process_worker`, `_SafeQueue`, `_CallItem`, `_ResultItem` | Process-side worker loop and the queue items exchanged between the manager thread and worker processes. | `module/concurrent/futures/module.go` |
+| <Cpy path="Lib/concurrent/futures/process.py" lines="121-400">121-400</Cpy> | `_ExecutorManagerThread`, `ProcessPoolExecutor` | Manager thread that feeds `_CallItem`s to workers via a `multiprocessing.Queue` and reads `_ResultItem`s from the result queue. | `module/concurrent/futures/module.go` |
+
+## Reading
+
+### `Future` state machine (lines 101 to 320 of `_base.py`)
+
+<CpyLink path="Lib/concurrent/futures/_base.py" lines="101-320" />
+
+```python
+class Future:
+    def __init__(self):
+        self._condition = threading.Condition()
+        self._state = PENDING
+        self._result = None
+        self._exception = None
+        self._done_callbacks = []
+
+    def result(self, timeout=None):
+        with self._condition:
+            if self._state in [CANCELLED, CANCELLED_AND_NOTIFIED]:
+                raise CancelledError()
+            elif self._state == FINISHED:
+                return self.__get_result()
+            self._condition.wait(timeout)
+            if self._state in [CANCELLED, CANCELLED_AND_NOTIFIED]:
+                raise CancelledError()
+            elif self._state == FINISHED:
+                return self.__get_result()
+            raise TimeoutError()
+
+    def set_result(self, result):
+        with self._condition:
+            if self._state != PENDING:
+                raise InvalidStateError(...)
+            self._result = result
+            self._state = FINISHED
+            for waiter in self._waiters:
+                waiter.add_result(self)
+            self._condition.notify_all()
+        self._invoke_callbacks()
+```
+
+`Future` is a state machine with five states. Only `PENDING -> RUNNING`,
+`PENDING -> CANCELLED`, `RUNNING -> CANCELLED`, and `{PENDING,RUNNING} ->
+FINISHED` are valid transitions. All reads and writes go through
+`self._condition` (a `threading.Condition`), so `result()` can block on
+`_condition.wait(timeout)` without a busy loop. When `set_result` or
+`set_exception` fires, `notify_all()` wakes every blocked caller of
+`result()` or `exception()`. Done callbacks are then invoked outside the
+lock to avoid re-entrancy issues.
+
+The `_waiters` list is maintained by `wait` and `as_completed`; each entry
+is a `_FirstCompletedWaiter` or `_AllCompletedWaiter` whose `add_result`
+/ `add_exception` / `add_cancelled` methods drive a `threading.Event` that
+the waiting thread blocks on.
+
+### `ThreadPoolExecutor.submit` and `_worker` (lines 81 to 280 of `thread.py`)
+
+<CpyLink path="Lib/concurrent/futures/thread.py" lines="81-280" />
+
+```python
+class ThreadPoolExecutor(Executor):
+    def submit(self, fn, /, *args, **kwargs):
+        with self._shutdown_lock:
+            if self._broken:
+                raise BrokenThreadPool(self._broken)
+            if self._shutdown:
+                raise RuntimeError('cannot schedule new futures after shutdown')
+            f = _base.Future()
+            w = _WorkItem(f, fn, args, kwargs)
+            self._work_queue.put(w)
+            self._adjust_thread_count()
+            return f
+
+    def _adjust_thread_count(self):
+        num_threads = len(self._threads)
+        if num_threads < self._max_workers:
+            t = threading.Thread(target=_worker,
+                                 args=(weakref.ref(self, weakref_cb),
+                                       self._work_queue,
+                                       self._initializer,
+                                       self._initargs))
+            t.daemon = True
+            t.start()
+            self._threads.add(t)
+```
+
+`submit` wraps the callable in a `_WorkItem` and places it on a
+`queue.SimpleQueue`. `_adjust_thread_count` then starts a new daemon
+thread if the pool is below `max_workers`. Threads are stored in a `set`
+via strong references; the `ThreadPoolExecutor` itself is passed to the
+thread as a `weakref` so that a thread holding the last reference to the
+executor does not prevent garbage collection. When the executor is
+collected, the weakref callback places a `None` sentinel on the queue,
+causing all worker threads to exit.
+
+```python
+def _worker(executor_reference, work_queue, initializer, initargs):
+    if initializer is not None:
+        try:
+            initializer(*initargs)
+        except BaseException:
+            _base.LOGGER.critical('Exception in initializer:', exc_info=True)
+            executor = executor_reference()
+            if executor is not None:
+                executor._initializer_failed()
+            return
+    try:
+        while True:
+            work_item = work_queue.get(block=True)
+            if work_item is not None:
+                work_item.run()
+                del work_item
+                continue
+            ...
+            return
+    except BaseException:
+        ...
+```
+
+Each worker calls `work_item.run()`, which calls `future.set_result` or
+`future.set_exception` depending on whether the callable raised. Deleting
+`work_item` after `run()` is deliberate: it breaks the reference cycle
+`_WorkItem -> Future -> callbacks -> ...` so the future can be collected
+without waiting for the next GC cycle.
+
+### `ProcessPoolExecutor` and the manager thread (lines 121 to 400 of `process.py`)
+
+<CpyLink path="Lib/concurrent/futures/process.py" lines="121-400" />
+
+```python
+class _ExecutorManagerThread(threading.Thread):
+    def run(self):
+        # Main loop: feed work to processes, read results.
+        while True:
+            self.add_call_item_to_queue()
+            result_item, is_broken, cause = self.wait_result_broken_or_wakeup()
+            if is_broken:
+                self.terminate_broken(cause)
+                return
+            if result_item is not None:
+                self.process_result_item(result_item)
+                del result_item
+            if self.is_shutting_down():
+                self.flag_executor_dead_and_cancel_futures()
+                self.join_executor_internals()
+                return
+
+    def add_call_item_to_queue(self):
+        while True:
+            if self.call_queue.full():
+                return
+            try:
+                work_id, work_item = self.pending_work_items.popitem(last=False)
+            except KeyError:
+                return
+            self.call_queue.put(_CallItem(work_id, work_item.fn,
+                                          work_item.args, work_item.kwargs),
+                                 block=True)
+```
+
+`ProcessPoolExecutor` avoids putting `Future` objects into
+`multiprocessing` queues (which would require them to be picklable and
+would cross the process boundary). Instead, it assigns each work item an
+integer `work_id` and maps `work_id -> Future` in the manager thread's
+`pending_work_items` dict. Worker processes receive `_CallItem(work_id,
+fn, args, kwargs)`, call `fn(*args, **kwargs)`, and send back
+`_ResultItem(work_id, result=..., exception=...)`. The manager thread
+reads `_ResultItem`s from the result queue and calls `set_result` or
+`set_exception` on the corresponding future. This way pickling is limited
+to the callable and its arguments, not to the `Future` machinery.
+
+### `wait` and `as_completed` (lines 321 to 560 of `_base.py`)
+
+<CpyLink path="Lib/concurrent/futures/_base.py" lines="321-560" />
+
+```python
+def wait(fs, timeout=None, return_when=ALL_COMPLETED):
+    fs = set(fs)
+    with _AcquireFutures(fs):
+        done = set(f for f in fs
+                   if f._state in [CANCELLED_AND_NOTIFIED, FINISHED])
+        not_done = fs - done
+        if (return_when == FIRST_COMPLETED) and done:
+            return DoneAndNotDoneFutures(done, not_done)
+        elif (return_when == FIRST_EXCEPTION) and done:
+            if any(f for f in done if not f.cancelled() and f.exception()):
+                return DoneAndNotDoneFutures(done, not_done)
+        waiter = _create_and_install_waiters(fs, return_when)
+    waiter.event.wait(timeout)
+    for f in fs:
+        with f._condition:
+            f._waiters.remove(waiter)
+    done.update(waiter.finished_futures)
+    return DoneAndNotDoneFutures(done, fs - done)
+```
+
+`wait` acquires all futures' conditions simultaneously via `_AcquireFutures`
+(a context manager that sorts the futures by `id` to avoid lock-ordering
+deadlocks) before installing a shared waiter. This ensures no future
+transitions to `FINISHED` between the "already done?" check and the waiter
+installation. `_create_and_install_waiters` appends the waiter to each
+future's `_waiters` list; when a future completes, it calls
+`waiter.add_result(f)`, which may set `waiter.event` if the `return_when`
+condition is satisfied.
+
+`as_completed` works similarly but yields futures one at a time from a
+`SimpleQueue` that the shared waiter populates as each future finishes.
+Futures that are already done when `as_completed` is called are yielded
+first (in arbitrary order) before blocking on the queue.

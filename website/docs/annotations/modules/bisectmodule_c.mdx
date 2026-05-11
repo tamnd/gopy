@@ -1,0 +1,204 @@
+---
+title: Modules/_bisect.c
+description: C implementation of the bisect module — binary search over sorted sequences with a key function, plus in-place sorted insertion via insort_left and insort_right.
+cpython_path: Modules/_bisect.c
+cpython_version: "3.14"
+lines: 250
+status: annotated
+ported_to: module/bisect/module.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Modules/_bisect.c`
+
+<CpyLink path="Modules/_bisect.c" />
+
+`_bisect.c` is the C implementation of the `bisect` standard-library module.
+It provides four public functions:
+
+- `bisect_right` / `bisect_left` — pure binary search; return the insertion
+  index that keeps a sorted sequence in order.
+- `insort_right` / `insort_left` — call the corresponding bisect function,
+  then call `list.insert(index, item)` in place.
+
+The `key` parameter (added in CPython 3.10) applies a callable to each
+sequence element before comparison, matching the convention used by
+`list.sort` and `sorted`. The search item is not transformed; the caller
+is responsible for pre-applying `key` to the needle if needed.
+
+A thin pure-Python layer in `Lib/bisect.py` imports `_bisect` and
+re-exports its names, providing fallbacks for platforms where the C
+extension is not available. The C file is self-contained: no helper
+types, no module state struct, no abstract base classes.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Modules/_bisect.c" lines="1-30">1-30</Cpy> | includes | `Python.h` only; no additional headers. | — |
+| <Cpy path="Modules/_bisect.c" lines="30-110">30-110</Cpy> | `internal_bisect_right` | Half-open interval binary search returning rightmost insertion point; unsigned midpoint avoids overflow. | `module/bisect/module.go:bisectRight` |
+| <Cpy path="Modules/_bisect.c" lines="110-170">110-170</Cpy> | `internal_bisect_left` | Same loop structure but left-biased: advances `lo` when `item <= list[mid]`. | `module/bisect/module.go:bisectLeft` |
+| <Cpy path="Modules/_bisect.c" lines="170-215">170-215</Cpy> | `bisect_right_impl`, `bisect_left_impl`, `insort_right_impl`, `insort_left_impl` | Public Argument Clinic wrappers; validate `lo`/`hi`, call internal helpers, then `list.insert`. | `module/bisect/module.go:InsortRight`, `InsortLeft` |
+| <Cpy path="Modules/_bisect.c" lines="215-250">215-250</Cpy> | `_bisect_methods[]`, `_bisectmodule`, `PyInit__bisect` | Method table and module entry point. | `module/bisect/module.go:Module` |
+
+## Reading
+
+### `internal_bisect_right` core loop (lines 30 to 110)
+
+<CpyLink path="Modules/_bisect.c" lines="30-110" />
+
+The algorithm maintains a half-open interval `[lo, hi)`. At each step it
+computes the midpoint using unsigned arithmetic to avoid signed-integer
+overflow on sequences longer than `PY_SSIZE_T_MAX / 2`, then compares the
+item at that index against the target:
+
+```c
+static Py_ssize_t
+internal_bisect_right(PyObject *list, PyObject *item,
+                      Py_ssize_t lo, Py_ssize_t hi,
+                      PyObject *key)
+{
+    while (lo < hi) {
+        /* Unsigned mid prevents overflow when lo + hi > PY_SSIZE_T_MAX. */
+        Py_ssize_t mid = ((size_t)lo + (size_t)hi) / 2;
+
+        PyObject *litem = PySequence_GetItem(list, mid);
+        if (litem == NULL)
+            return -1;
+
+        PyObject *key_item;
+        if (key != Py_None) {
+            key_item = PyObject_CallOneArg(key, litem);
+            Py_DECREF(litem);
+            if (key_item == NULL)
+                return -1;
+        } else {
+            key_item = litem;
+        }
+
+        /* bisect_right: advance lo when item >= list[mid]. */
+        int cmp = PyObject_RichCompareBool(item, key_item, Py_LT);
+        Py_DECREF(key_item);
+        if (cmp < 0)  return -1;   /* error */
+        if (cmp > 0)  hi = mid;    /* item < list[mid]: go left */
+        else          lo = mid + 1;/* item >= list[mid]: go right */
+    }
+    return lo;
+}
+```
+
+`bisect_right` returns `lo` such that all elements to the left are `<=
+item`. Duplicate values are therefore placed to the right of any equal
+existing elements. `internal_bisect_left` uses the opposite comparison
+direction (`Py_LT` on `key_item` vs. `item`) so that `lo` ends up to the
+left of any equal elements.
+
+### `key` parameter dispatch (lines 30 to 170)
+
+<CpyLink path="Modules/_bisect.c" lines="30-170" />
+
+When `key` is provided and is not `None`, `internal_bisect_right` calls
+`PyObject_CallOneArg(key, litem)` on each candidate element before the
+comparison. The search item itself is passed through unchanged:
+
+```c
+if (key != Py_None) {
+    key_item = PyObject_CallOneArg(key, litem);
+    Py_DECREF(litem);
+    if (key_item == NULL)
+        return -1;
+} else {
+    key_item = litem;   /* borrow; no extra refcount */
+}
+int cmp = PyObject_RichCompareBool(item, key_item, Py_LT);
+Py_DECREF(key_item);
+```
+
+Because only the list elements are transformed, the caller must apply the
+same `key` to the search item before passing it in. This matches the
+contract documented in `Lib/bisect.py` and is consistent with how
+`list.sort(key=...)` handles its comparisons.
+
+Reference counting is careful: if `key` was applied, `litem` is
+`DECREF`'d immediately after `CallOneArg` and `key_item` holds the
+transformed value. If no `key` was applied, `key_item` is just a borrowed
+reference to `litem`, and the single `Py_DECREF(key_item)` at the end of
+the block releases the sequence item.
+
+### `insort_right_impl` in-place insertion (lines 170 to 215)
+
+<CpyLink path="Modules/_bisect.c" lines="170-215" />
+
+`insort_right` and `insort_left` are thin wrappers: they call
+`internal_bisect_right` (or `_left`) to find the insertion index and then
+call `list.insert`:
+
+```c
+static PyObject *
+bisect__bisect_right_impl(PyObject *module, PyObject *a, PyObject *x,
+                          Py_ssize_t lo, Py_ssize_t hi, PyObject *key)
+{
+    Py_ssize_t index = internal_bisect_right(a, x, lo, hi, key);
+    if (index < 0)
+        return NULL;
+    return PyLong_FromSsize_t(index);
+}
+
+static PyObject *
+bisect__insort_right_impl(PyObject *module, PyObject *a, PyObject *x,
+                          Py_ssize_t lo, Py_ssize_t hi, PyObject *key)
+{
+    Py_ssize_t index = internal_bisect_right(a, x, lo, hi, key);
+    if (index < 0)
+        return NULL;
+    PyObject *result = PyObject_CallMethodObjArgs(
+        a, &_Py_ID(insert), PyLong_FromSsize_t(index), x, NULL);
+    Py_XDECREF(result);
+    Py_RETURN_NONE;
+}
+```
+
+Both the `bisect_*` and `insort_*` public wrappers validate that `lo >= 0`
+and, when `hi` was omitted, default it to `PySequence_Size(a)`. An invalid
+`lo` or `hi` raises `ValueError` before the internal helper is called.
+Using `PyObject_CallMethodObjArgs` on `insert` rather than
+`PyList_Insert` means `insort` works on any mutable sequence that
+implements `insert`, not just `list`.
+
+### Module definition and entry point (lines 215 to 250)
+
+<CpyLink path="Modules/_bisect.c" lines="215-250" />
+
+The module definition is minimal: a `PyMethodDef` array with four entries
+and a `PyModuleDef` struct with no per-module state.
+
+```c
+static PyMethodDef bisect_methods[] = {
+    BISECT__BISECT_RIGHT_METHODDEF
+    BISECT__BISECT_LEFT_METHODDEF
+    BISECT__INSORT_RIGHT_METHODDEF
+    BISECT__INSORT_LEFT_METHODDEF
+    {NULL, NULL}
+};
+
+static struct PyModuleDef _bisectmodule = {
+    PyModuleDef_HEAD_INIT,
+    "_bisect",
+    bisect_doc,
+    -1,   /* no per-interpreter state */
+    bisect_methods,
+};
+
+PyMODINIT_FUNC
+PyInit__bisect(void)
+{
+    return PyModule_Create(&_bisectmodule);
+}
+```
+
+The `BISECT__BISECT_RIGHT_METHODDEF` macros are generated by Argument
+Clinic from the `/*[clinic input]` blocks above each function. They expand
+to `{ "bisect_right", ..., METH_FASTCALL|METH_KEYWORDS, ... }` entries,
+which use the `_PyArg_ParseStackAndKeywords` fast path rather than the
+slower `PyArg_ParseTuple`.

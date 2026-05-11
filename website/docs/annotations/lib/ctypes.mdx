@@ -1,0 +1,271 @@
+---
+title: Lib/ctypes/__init__.py
+description: Entry point for the ctypes FFI package; exports CDLL and friends, fundamental C types, Structure, Union, Array, POINTER, cast, byref, and CFUNCTYPE.
+cpython_path: Lib/ctypes/__init__.py
+cpython_version: "3.14"
+lines: 502
+status: annotated
+ported_to: module/ctypes/module.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Lib/ctypes/__init__.py`
+
+<CpyLink path="Lib/ctypes/__init__.py" />
+
+`ctypes` is CPython's built-in foreign-function interface. The package
+glues Python to arbitrary C shared libraries through `libffi` without
+requiring a C compiler at call time. `Lib/ctypes/__init__.py` is the
+thin Python wrapper that imports the accelerated `_ctypes` C extension,
+re-exports all public names, and adds a handful of higher-level
+conveniences that are easier to write in Python.
+
+The module splits into three broad layers. The bottom layer lives in
+`Modules/_ctypes/` and is never imported directly: it implements the
+`_SimpleCData` metaclass, `Structure`/`Union` metaclasses, the `Array`
+type, pointer mechanics, and the `libffi` call dispatch. The middle layer
+is `Lib/ctypes/__init__.py`: it brings those names into the `ctypes`
+namespace, defines the `LibraryLoader` singleton pattern, and provides
+`CFUNCTYPE`/`WINFUNCTYPE` factories. The top layer is user code: callers
+import `ctypes`, load a library with `cdll.LoadLibrary` or `CDLL(name)`,
+and call functions directly as Python attributes.
+
+The four library-handle classes differ only in calling convention:
+`CDLL` uses the standard C `cdecl` convention, `WinDLL` uses `stdcall`
+(Windows only), `OleDLL` is `stdcall` plus automatic `HRESULT` error
+checking, and `PyDLL` is `cdecl` but holds the GIL across the call (for
+libraries that call back into the Python C API).
+
+`LibraryLoader` implements a lazy-loading proxy: `cdll.libc` compiles on
+the first attribute access to `cdll.LoadLibrary("libc")`. The three
+singletons `cdll`, `windll`, and `oledll` wrap `CDLL`, `WinDLL`, and
+`OleDLL` respectively.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Lib/ctypes/__init__.py" lines="1-30">1-30</Cpy> | file header / imports | Imports `_ctypes` and re-exports the C-level names; sets `__version__`. | `module/ctypes/module.go` |
+| <Cpy path="Lib/ctypes/__init__.py" lines="31-80">31-80</Cpy> | `CDLL`, `WinDLL`, `OleDLL`, `PyDLL` | Library handle constructors; thin Python subclasses of `_ctypes.CDLL` with `_func_flags_` set per calling convention. | `module/ctypes/module.go` |
+| <Cpy path="Lib/ctypes/__init__.py" lines="81-120">81-120</Cpy> | `LibraryLoader` | Lazy-load proxy; `__getattr__` calls `LoadLibrary` on first access and caches the handle. | `module/ctypes/module.go` |
+| <Cpy path="Lib/ctypes/__init__.py" lines="121-135">121-135</Cpy> | `cdll`, `windll`, `oledll`, `pydll` | Module-level singleton instances of `LibraryLoader`. | `module/ctypes/module.go` |
+| <Cpy path="Lib/ctypes/__init__.py" lines="136-200">136-200</Cpy> | `c_int`, `c_long`, `c_char`, `c_char_p`, `c_void_p`, `c_double`, etc. | Aliases for the `_SimpleCData` subclasses defined in `_ctypes`; one per C primitive type. | `module/ctypes/module.go` |
+| <Cpy path="Lib/ctypes/__init__.py" lines="201-280">201-280</Cpy> | `Structure`, `Union`, `BigEndianStructure`, `LittleEndianStructure` | Re-exported from `_ctypes`; `_fields_` list of `(name, ctype[, bitwidth])` tuples drives layout. | `module/ctypes/module.go` |
+| <Cpy path="Lib/ctypes/__init__.py" lines="281-340">281-340</Cpy> | `POINTER`, `pointer`, `cast`, `byref`, `addressof`, `sizeof`, `alignment` | Pointer and memory helpers; `byref` returns a temporary pointer without constructing a full `POINTER` type. | `module/ctypes/module.go` |
+| <Cpy path="Lib/ctypes/__init__.py" lines="341-420">341-420</Cpy> | `CFUNCTYPE`, `WINFUNCTYPE`, `PYFUNCTYPE` | Function-type factories; return a new type whose instances wrap a C function pointer for callbacks. | `module/ctypes/module.go` |
+| <Cpy path="Lib/ctypes/__init__.py" lines="421-502">421-502</Cpy> | `Array`, `_SimpleCData`, `_Pointer`, `_FuncPtr` | Base types re-exported from `_ctypes`; `Array` is created implicitly via `SomeType * n`. | `module/ctypes/module.go` |
+
+## Reading
+
+### `CDLL` and `LibraryLoader` (lines 31 to 135)
+
+<CpyLink path="Lib/ctypes/__init__.py" lines="31-135" />
+
+```python
+class CDLL:
+    """An instance of this class represents a loaded dll/shared
+    library, exporting functions using the standard C calling
+    convention (named 'cdecl' on Windows).
+    """
+    _func_flags_ = _FUNCFLAG_CDECL
+    _func_restype_ = c_int
+
+    def __init__(self, name, mode=DEFAULT_MODE, handle=None,
+                 use_errno=False, use_last_error=False,
+                 winmode=None):
+        self._name = name
+        flags = self._func_flags_
+        if use_errno:
+            flags |= _FUNCFLAG_USE_ERRNO
+        if use_last_error:
+            flags |= _FUNCFLAG_USE_LASTERROR
+        ...
+        if handle is None:
+            self._handle = _dlopen(self._name, mode)
+        else:
+            self._handle = handle
+
+    def __getattr__(self, name):
+        if name.startswith('__') and name.endswith('__'):
+            raise AttributeError(name)
+        func = self.__getitem__(name)
+        setattr(self, name, func)
+        return func
+
+    def __getitem__(self, name_or_ordinal):
+        func = self._FuncPtr((name_or_ordinal, self))
+        ...
+        return func
+
+
+class LibraryLoader:
+    def __init__(self, dlltype):
+        self._dlltype = dlltype
+
+    def __getattr__(self, name):
+        if name[0] == '_':
+            raise AttributeError(name)
+        dll = self._dlltype(name)
+        setattr(self, name, dll)
+        return dll
+
+    def LoadLibrary(self, name):
+        return self._dlltype(name)
+
+
+cdll = LibraryLoader(CDLL)
+windll = LibraryLoader(WinDLL)
+oledll = LibraryLoader(OleDLL)
+pydll = LibraryLoader(PyDLL)
+```
+
+`CDLL.__getattr__` is where function resolution happens. On the first
+access of `cdll.libc.printf`, Python calls `CDLL.__getattr__("printf")`,
+which constructs a `_FuncPtr` from a `(name, handle)` pair. The C
+extension looks up the symbol by name via `dlsym` and stores the address
+in the `_FuncPtr` object. The result is then cached with `setattr` so
+the second access skips `__getattr__` entirely.
+
+`LibraryLoader.__getattr__` applies the same lazy pattern one level up:
+`cdll.libc` calls `CDLL("libc")` and caches the handle under `self.libc`.
+This is why both `ctypes.cdll.msvcrt` (Windows) and `ctypes.cdll.LoadLibrary("libm.so.6")` work.
+
+### Fundamental C types (lines 136 to 200)
+
+<CpyLink path="Lib/ctypes/__init__.py" lines="136-200" />
+
+```python
+c_byte = c_int8
+c_ubyte = c_uint8
+c_short = c_int16
+c_ushort = c_uint16
+c_int = c_int32
+c_uint = c_uint32
+c_long = ...    # platform-dependent: 32-bit on Windows, 64-bit on LP64
+c_ulong = ...
+c_longlong = c_int64
+c_ulonglong = c_uint64
+c_float = ...
+c_double = ...
+c_longdouble = ...
+c_char = ...    # single byte; string of length 1
+c_char_p = ...  # NUL-terminated char *; Python str or bytes
+c_wchar = ...
+c_wchar_p = ... # wchar_t *
+c_void_p = ...  # void *; None represents NULL
+c_bool = ...    # C99 _Bool
+```
+
+Every name here is an alias for a `_SimpleCData` subclass defined in the
+`_ctypes` C extension. `_SimpleCData` has a single `value` property that
+converts between the Python-level representation and the in-memory C
+layout. For `c_int`, `value` is a Python `int`. For `c_char_p`, `value`
+is `bytes` or `None`. For `c_void_p`, `value` is `int` (the address) or
+`None`.
+
+The size of `c_long` depends on the platform: 4 bytes on Windows (both
+32-bit and 64-bit) and on 32-bit Linux/macOS, but 8 bytes on 64-bit
+Linux/macOS (LP64 ABI). Code that needs a fixed-width integer should use
+`c_int32` or `c_int64` explicitly.
+
+### `POINTER`, `cast`, and `byref` (lines 281 to 340)
+
+<CpyLink path="Lib/ctypes/__init__.py" lines="281-340" />
+
+```python
+def POINTER(cls):
+    try:
+        return _pointer_type_cache[cls]
+    except KeyError:
+        pass
+    if isinstance(cls, str):
+        klass = type(_Pointer)(cls, (_Pointer,), {})
+        _pointer_type_cache[cls] = klass
+        return klass
+    klass = type(_Pointer)("LP_%s" % (cls.__name__,), (_Pointer,),
+                            {'_type_': cls})
+    _pointer_type_cache[cls] = klass
+    return klass
+
+
+def cast(obj, typ):
+    return _cast(obj, obj, typ)
+
+
+def byref(obj, offset=0):
+    return _byref(obj, offset)
+```
+
+`POINTER(c_int)` creates (and caches) a new type `LP_c_int` that is a
+subclass of `_Pointer` with `_type_ = c_int`. The cache means calling
+`POINTER(c_int)` twice returns the same type object, which matters for
+`isinstance` checks.
+
+`cast(obj, typ)` reinterprets the memory address of `obj` as if it were
+of type `typ`. It does not copy data; the result shares the underlying
+buffer. This is the ctypes equivalent of C's `(typ *)ptr`.
+
+`byref(obj)` returns a lightweight reference to `obj` that can be passed
+to a C function expecting a pointer, without constructing a full
+`POINTER(type)(obj)` wrapper. It is faster and avoids an extra allocation
+but cannot be stored; the reference is only valid for the duration of the
+call.
+
+### `CFUNCTYPE` and callback types (lines 341 to 420)
+
+<CpyLink path="Lib/ctypes/__init__.py" lines="341-420" />
+
+```python
+def CFUNCTYPE(restype, *argtypes, **kw):
+    """CFUNCTYPE(restype, *argtypes,
+                 use_errno=False, use_last_error=False) -> function prototype.
+
+    restype: the result type
+    argtypes: a sequence of the argument types
+    The function prototype can be called in different ways to create a
+    callable object:
+
+      prototype(integer address) -- return a foreign function at the
+                                    specified address which must be callable
+                                    with the specified parameters
+
+      prototype(callable) -- Create and return a C callable function
+                             (known as a callback function) from a Python
+                             callable.
+    ...
+    """
+    try:
+        return _c_functype_cache[(restype, argtypes, kw.get("use_errno", False),
+                                  kw.get("use_last_error", False))]
+    except KeyError:
+        pass
+    flags = _FUNCFLAG_CDECL
+    if kw.pop("use_errno", False):
+        flags |= _FUNCFLAG_USE_ERRNO
+    if kw.pop("use_last_error", False):
+        flags |= _FUNCFLAG_USE_LASTERROR
+    if kw:
+        raise ValueError("unexpected keyword argument(s) %s" % kw.keys())
+    cls = type(_CFuncPtr)("CFUNCTYPE_%s_%s" % (restype, argtypes),
+                          (_CFuncPtr,),
+                          {"_argtypes_": argtypes,
+                           "_restype_": restype,
+                           "_flags_": flags})
+    _c_functype_cache[(restype, argtypes, False, False)] = cls
+    return cls
+```
+
+`CFUNCTYPE` creates a new type that wraps a C function pointer. When
+called with a Python callable, the type registers that callable as a C
+callback: libffi generates a native thunk that calls back into CPython.
+The result must be kept alive as long as the C code may invoke it;
+otherwise the thunk points to a freed object.
+
+Results are cached in `_c_functype_cache` keyed by `(restype, argtypes,
+use_errno, use_last_error)`. `WINFUNCTYPE` is identical except
+`_flags_` uses `_FUNCFLAG_STDCALL` (Windows only). `PYFUNCTYPE` sets
+`_FUNCFLAG_PYTHONAPI` to keep the GIL held across the call.
+
+In gopy, ctypes requires libffi integration and is tracked as pending in
+`module/ctypes/module.go`.

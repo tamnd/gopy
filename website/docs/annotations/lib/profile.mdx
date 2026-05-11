@@ -1,0 +1,204 @@
+---
+title: Lib/profile.py
+description: Pure-Python deterministic profiler using sys.setprofile, covered alongside the C-accelerated cProfile and the pstats result-aggregation layer.
+cpython_path: Lib/profile.py
+cpython_version: "3.14"
+lines: 650
+status: annotated
+ported_to: module/cProfile/module.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Lib/profile.py`
+
+<CpyLink path="Lib/profile.py" />
+
+This page covers three closely related files:
+
+- `Lib/profile.py` (650 lines) — pure-Python profiler.
+- `Lib/cProfile.py` (250 lines) — thin wrapper that substitutes the C
+  extension `_lsprof` for the inner measurement loop.
+- `Lib/pstats.py` (~500 lines) — result aggregation, sorting, and
+  pretty-printing.
+
+All three expose the same `Profile` API. The typical call sequence is:
+
+1. Construct `Profile()`.
+2. Call `enable()` / `disable()` (or use `run` / `runcall` / `runctx`).
+3. Pass the profile object to `pstats.Stats` and call `print_stats`.
+
+`profile.Profile` uses `sys.setprofile` to receive `call`, `return`,
+and `exception` events for every Python function. It maintains a call
+stack in `self.cur` (a linked list of `(t, t_inner, t_local, key,
+callcount, ...)` tuples) and accumulates timings in `self.timings`
+(keyed by `(filename, lineno, funcname)`). `cProfile.Profile` replaces
+the inner loop with `_lsprof.Profiler`, which records the same data in
+C and exposes it through `getstats()`.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Lib/profile.py" lines="1-60">1-60</Cpy> | module header | Imports, `__all__`, `_get_time` (calls `time.process_time`). | `module/cProfile/module.go` |
+| <Cpy path="Lib/profile.py" lines="61-130">61-130</Cpy> | `Profile.__init__` / `Profile.enable` / `Profile.disable` | Install/remove `sys.setprofile(self.dispatcher)`; set `self.cur = None`. | `module/cProfile/module.go` |
+| <Cpy path="Lib/profile.py" lines="131-230">131-230</Cpy> | `Profile.dispatcher` | Central callback; routes `call`, `c_call`, `return`, `c_return`, `exception`, `c_exception` events to `trace_*` methods. | `module/cProfile/module.go` |
+| <Cpy path="Lib/profile.py" lines="231-310">231-310</Cpy> | `Profile.trace_call` / `trace_return` / `trace_exception` | Push/pop the call stack, accumulate `self.timings`. | `module/cProfile/module.go` |
+| <Cpy path="Lib/profile.py" lines="311-390">311-390</Cpy> | `Profile.trace_c_call` / `trace_c_return` / `trace_c_exception` | Same accounting for built-in (C) functions, which fire separate event types. | `module/cProfile/module.go` |
+| <Cpy path="Lib/profile.py" lines="391-460">391-460</Cpy> | `Profile.simulate_call` / `simulate_cmd_complete` | Inject synthetic call/return frames for `run`/`runctx` so the top-level entry appears in the stats. | `module/cProfile/module.go` |
+| <Cpy path="Lib/profile.py" lines="461-530">461-530</Cpy> | `Profile.run` / `runcall` / `runctx` | Entry points: `exec` a code string, call a callable, or exec in explicit namespaces. | `module/cProfile/module.go` |
+| <Cpy path="Lib/profile.py" lines="531-580">531-580</Cpy> | `Profile.print_stats` / `dump_stats` / `create_stats` | Convert `self.timings` into `pstats`-compatible format; write to a file or print. | `module/cProfile/module.go` |
+| <Cpy path="Lib/profile.py" lines="581-650">581-650</Cpy> | `Profile.calibrate` | Runs an empty profile loop `m` times to measure per-call overhead; result subtracted from each timing. | `module/cProfile/module.go` |
+
+## Reading
+
+### `enable` / `disable` and the dispatcher (lines 61 to 230)
+
+<CpyLink path="Lib/profile.py" lines="61-230" />
+
+```python
+def enable(self):
+    self.cur = None
+    self.cmd = ""
+    self.simulate_call('profiler')
+    sys.setprofile(self.dispatcher)
+
+def disable(self):
+    sys.setprofile(None)
+    self.simulate_cmd_complete()
+
+def dispatcher(self, frame, event, arg):
+    if event == 'call':
+        self.trace_call(frame)
+    elif event == 'return':
+        self.trace_return(frame, arg)
+    elif event == 'c_call':
+        self.trace_c_call(frame, arg)
+    elif event == 'c_return':
+        self.trace_c_return(frame, arg)
+    elif event == 'c_exception':
+        self.trace_c_exception(frame, arg)
+    elif event == 'exception':
+        self.trace_exception(frame, arg)
+```
+
+`enable` installs the dispatcher as the profile hook and pushes a
+synthetic `'profiler'` frame so that the outermost user call has a
+parent in the call-graph. `disable` removes the hook and closes the
+synthetic frame. The six event strings are the full set returned by
+CPython's profile hook machinery (`sys.setprofile`); `exception` fires
+only when an exception is not caught in the frame where it was raised,
+which keeps the call-stack accounting consistent with what the return
+event would have recorded.
+
+### Call-stack accounting in `trace_call` / `trace_return` (lines 231 to 310)
+
+<CpyLink path="Lib/profile.py" lines="231-310" />
+
+```python
+def trace_call(self, frame):
+    fn = (frame.f_code.co_filename,
+          frame.f_code.co_firstlineno,
+          frame.f_code.co_qualname)
+    t = self.timer()
+    cur = self.cur
+    # push
+    self.cur = (t, 0, 0, fn, cur, self.timings)
+    timings = self.timings
+    if fn in timings:
+        cc, ns, tt, ct, callers = timings[fn]
+        timings[fn] = cc, ns + 1, tt, ct, callers
+    else:
+        timings[fn] = 0, 1, 0, 0, {}
+
+def trace_return(self, frame, arg):
+    fn, t_enter, t_inner = self.cur[3], self.cur[0], self.cur[1]
+    t = self.timer()
+    t_total = t - t_enter
+    cc, ns, tt, ct, callers = self.timings[fn]
+    tt += t_total - t_inner
+    ct += t_total
+    ...
+    self.cur = self.cur[4]   # pop
+```
+
+The call stack lives in `self.cur` as a singly-linked list of tuples.
+Each tuple stores the entry timestamp, cumulative time spent in callees
+(`t_inner`), local time in this frame (`t_local`), the `(file, line,
+name)` key, a pointer to the parent tuple, and a reference to the
+shared `timings` dict. On return, elapsed time is split between `tt`
+(total time in this function excluding callees) and `ct` (cumulative
+time including callees), matching the columns `tottime` and `cumtime`
+that `pstats` displays.
+
+### `cProfile.Profile` and `_lsprof` (lines 1 to 250 of `Lib/cProfile.py`)
+
+<CpyLink path="Lib/cProfile.py" lines="1-250" />
+
+```python
+import _lsprof
+
+class Profile(_lsprof.Profiler):
+    def print_stats(self, sort=-1):
+        import pstats
+        pstats.Stats(self).strip_dirs().sort_stats(sort).print_stats()
+
+    def enable(self):
+        self.subcalls = True
+        self.builtins = True
+        _lsprof.Profiler.enable(self)
+
+    def getstats(self):
+        # returns list of _lsprof.profiler_entry objects
+        return _lsprof.Profiler.getstats(self)
+```
+
+`cProfile.Profile` inherits almost everything from `_lsprof.Profiler`
+(implemented in `Modules/_lsprof.c`). The Python layer adds
+`print_stats`, `dump_stats`, and `run`/`runcall`/`runctx` as thin
+wrappers, making the interface identical to `profile.Profile`. The
+C profiler stores timings in a hash table of `rotating_node` structs
+and uses `_PyTime_GetPerfCounter` for sub-microsecond resolution, which
+is why `cProfile` is the default choice for production profiling.
+
+### `pstats.Stats.sort_stats` and `print_stats`
+
+<CpyLink path="Lib/pstats.py" lines="1-500" />
+
+```python
+class Stats:
+    def __init__(self, *args, stream=None):
+        self.stream = stream or sys.stdout
+        if not len(args):
+            arg = None
+        else:
+            arg = args[0]
+            args = args[1:]
+        self.init(arg)
+        self.add(*args)
+
+    def sort_stats(self, *field):
+        # field is one of: 'calls', 'cumulative', 'filename',
+        # 'pcalls', 'line', 'name', 'nfl', 'stdname', 'tottime'
+        ...
+        self.fcn_list = [...]
+        return self
+
+    def print_stats(self, *amount):
+        for filename in self.files:
+            print(filename, file=self.stream)
+        ...
+        for func in self.fcn_list:
+            self.print_line(func)
+        return self
+```
+
+`pstats.Stats` accepts one or more `Profile` objects (or filenames
+written by `dump_stats`) in its constructor and merges them into a
+single `stats` dict mapping `(file, line, name)` to
+`(cc, nc, tt, ct, callers)` tuples. `sort_stats` accepts one or more
+sort keys and builds a sorted `fcn_list`; multiple keys break ties
+left-to-right. `print_stats` accepts optional `amount` arguments: an
+integer truncates to that many lines, a float between 0 and 1 keeps
+that fraction, and a string filters by regex match against the
+function name. All three methods return `self` so they can be chained.

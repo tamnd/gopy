@@ -1,0 +1,84 @@
+---
+title: Lib/struct.py
+description: Thin re-export shim for the _struct C extension, which packs and unpacks C-layout binary data according to format strings.
+cpython_path: Lib/struct.py
+cpython_version: "3.14"
+lines: 20
+status: annotated
+ported_to: module/struct/module.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Lib/struct.py`
+
+<CpyLink path="Lib/struct.py" />
+
+`struct.py` contains almost no logic. Its entire job is to import the `_struct`
+C extension and re-export its public API under the `struct` package name. The
+real implementation lives in `Modules/_struct.c`.
+
+The C extension provides:
+
+- `pack(fmt, v1, v2, ...)` / `pack_into(fmt, buffer, offset, ...)` — encode Python values into a `bytes` object or writable buffer.
+- `unpack(fmt, buffer)` / `unpack_from(fmt, buffer, offset=0)` — decode bytes back into a tuple of Python values.
+- `iter_unpack(fmt, buffer)` — iterator that repeatedly unpacks from a buffer.
+- `calcsize(fmt)` — return the number of bytes required by a format string.
+- `Struct(fmt)` — compiled format object that pre-parses the format string, avoiding repeated parsing in tight loops.
+- `error` — exception raised on format or data errors.
+
+Format strings use a one-character byte-order prefix (`<` little-endian, `>`
+big-endian, `=` native byte order, `@` native with alignment, `!` network /
+big-endian) followed by type codes (`b`, `B`, `h`, `H`, `i`, `I`, `l`, `L`,
+`q`, `Q`, `f`, `d`, `s`, `p`, `x`).
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Lib/struct.py" lines="1-5">1-5</Cpy> | `from _struct import *` | Bulk re-export of every public name from the C extension. | `module/struct/module.go` |
+| <Cpy path="Lib/struct.py" lines="6-15">6-15</Cpy> | `from _struct import (pack, pack_into, unpack, unpack_from, iter_unpack, calcsize, Struct, error)` | Explicit re-export to populate `__all__` and satisfy static analysis tools. | `module/struct/module.go` |
+| <Cpy path="Lib/struct.py" lines="16-20">16-20</Cpy> | Module docstring / `__doc__` | Docstring referencing `Modules/_struct.c` as the implementation. | `module/struct/module.go` |
+
+## Reading
+
+### This is a thin wrapper (lines 1 to 20)
+
+<CpyLink path="Lib/struct.py" lines="1-20" />
+
+```python
+"""Functions to convert between Python values and C structs.
+Python bytes objects are used to hold the data representing the C struct
+and also as format strings (explained below) to describe the layout of
+data in the C struct.
+
+The optional first format char indicates byte order, size and alignment:
+  @: native order, size & alignment (default)
+  =: native order, std. size & alignment
+  <: little-endian, std. size & alignment
+  >: big-endian, std. size & alignment
+  !: same as >
+
+...
+"""
+
+from _struct import *
+from _struct import (pack, pack_into, unpack, unpack_from,
+                     iter_unpack, calcsize, Struct, error)
+```
+
+There is no Python logic in this file beyond the `import` statements. Any
+behavioural change to `struct` must be made in `Modules/_struct.c`. The gopy
+port in `module/struct/module.go` implements the same format-string parser and
+binary encoding/decoding in Go, following the C source rather than this file.
+
+Format strings are parsed once by `Struct.__init__` (or lazily on first use by
+the module-level functions) into an internal representation that stores the
+byte-order prefix and a list of `(count, code, size)` triples. `pack` iterates
+this list, converts each Python argument to the C type, and writes the bytes in
+the requested byte order. `unpack` does the reverse: reads `size` bytes, casts
+to the C type, and converts to a Python value.
+
+The `error` exception class is defined in C and is a subclass of `Exception`.
+It is raised when a format string is invalid (unknown code, bad count) or when
+a value does not fit (e.g., packing 300 into a `b` field).

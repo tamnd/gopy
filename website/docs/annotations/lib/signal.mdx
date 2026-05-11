@@ -1,0 +1,149 @@
+---
+title: Lib/signal.py
+description: Pure-Python wrapper around the _signal C extension that adds the Signals and Handlers enums and exposes signal(), raise_signal(), strsignal(), and valid_signals().
+cpython_path: Lib/signal.py
+cpython_version: "3.14"
+lines: 85
+status: annotated
+ported_to: module/signal/module.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Lib/signal.py`
+
+<CpyLink path="Lib/signal.py" />
+
+`Lib/signal.py` is a thin pure-Python shim on top of the `_signal` C
+extension (`Modules/signalmodule.c`). Its main job is to wrap the raw
+integer constants into two `IntEnum` subclasses — `Signals` and
+`Handlers` — so that signal numbers and disposition values are printable
+and comparable by name rather than by opaque integer.
+
+The module also re-exports the critical runtime entry points:
+`signal()`, `raise_signal()`, `getsignal()`, `strsignal()`,
+`valid_signals()`, and the platform-conditional `setitimer` / `getitimer`
+/ `sigwait` / `sigwaitinfo` / `sigtimedwait` / `set_wakeup_fd` / `pause`
+group. Each of these delegates immediately to the corresponding `_signal`
+built-in; the Python layer adds only the enum wrapping.
+
+`SIGINT`, `SIGTERM`, and friends are members of `Signals`. `SIG_DFL` (0)
+and `SIG_IGN` (1) are members of `Handlers`. When `getsignal()` returns a
+disposition it returns a `Handlers` member when the disposition is one of
+these two, making interactive repr output readable.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Lib/signal.py" lines="1-20">1-20</Cpy> | imports, `_signal` star-import | Pull all C-level constants and functions into the module namespace. | `module/signal/module.go` |
+| <Cpy path="Lib/signal.py" lines="21-45">21-45</Cpy> | `Signals` enum | `IntEnum` wrapping every `SIG*` constant exported by `_signal`; generated from `_signal.__dict__`. | `module/signal/module.go:Signals` |
+| <Cpy path="Lib/signal.py" lines="46-55">46-55</Cpy> | `Handlers` enum | `IntEnum` with two members: `SIG_DFL = 0`, `SIG_IGN = 1`. | `module/signal/module.go:Handlers` |
+| <Cpy path="Lib/signal.py" lines="56-70">56-70</Cpy> | `signal()`, `getsignal()` | Install/query a signal handler; wraps `_signal.signal` / `_signal.getsignal` and converts return value to `Handlers` or callable. | `module/signal/module.go:Signal` |
+| <Cpy path="Lib/signal.py" lines="71-85">71-85</Cpy> | `raise_signal()`, `strsignal()`, `valid_signals()` | `raise_signal` forwards to `_signal.raise_signal`; `strsignal` returns a human-readable name; `valid_signals` returns a frozenset of `Signals` members. | `module/signal/module.go:RaiseSignal` |
+
+## Reading
+
+### Star-import bootstrap (lines 1 to 20)
+
+<CpyLink path="Lib/signal.py" lines="1-20" />
+
+```python
+import _signal
+from _signal import *
+
+from enum import IntEnum as _IntEnum
+```
+
+The star-import copies every name from `_signal` into the `signal`
+namespace so that code doing `import signal; signal.SIGINT` still works
+even though the constant is actually defined in C. All subsequent
+definitions in this file shadow or supplement those names.
+
+### `Signals` enum (lines 21 to 45)
+
+<CpyLink path="Lib/signal.py" lines="21-45" />
+
+```python
+class Signals(_IntEnum):
+    pass
+
+_globals = globals()
+def _add_symbols():
+    for name, value in _signal.__dict__.items():
+        if name.startswith('SIG') and not name.startswith('SIG_'):
+            try:
+                _globals[name] = Signals(value)
+            except ValueError:
+                pass
+_add_symbols()
+del _add_symbols, _globals
+```
+
+Rather than hard-coding every platform signal name, the code iterates
+`_signal.__dict__` and collects names that start with `SIG` but not
+`SIG_` (which are reserved for `Handlers`). Each integer value is
+wrapped in `Signals(value)`; any value not yet in the enum triggers a
+`ValueError` which is silently skipped. The resulting enum has as many
+members as the current platform's C signal table provides: a POSIX system
+will include `SIGALRM`, `SIGCHLD`, `SIGUSR1` etc., whereas Windows only
+exposes the ANSI-C-mandated subset.
+
+### `Handlers` enum and `getsignal` wrapping (lines 46 to 70)
+
+<CpyLink path="Lib/signal.py" lines="46-70" />
+
+```python
+class Handlers(_IntEnum):
+    SIG_DFL = SIG_DFL   # 0
+    SIG_IGN = SIG_IGN   # 1
+
+def getsignal(signalnum):
+    handler = _signal.getsignal(signalnum)
+    try:
+        return Handlers(handler)
+    except ValueError:
+        pass
+    return handler
+```
+
+`getsignal` post-processes the raw return value from `_signal.getsignal`.
+If the C layer returns `0` or `1` (the numeric values of `SIG_DFL` and
+`SIG_IGN`), they are converted to the corresponding `Handlers` member so
+that `repr()` prints `<Handlers.SIG_DFL: 0>` instead of just `0`. Any
+other return value (a Python callable set by a previous `signal()` call)
+passes through unchanged.
+
+### `valid_signals`, `raise_signal`, and `strsignal` (lines 71 to 85)
+
+<CpyLink path="Lib/signal.py" lines="71-85" />
+
+```python
+def valid_signals():
+    return _signal.valid_signals()
+
+def raise_signal(signum):
+    return _signal.raise_signal(signum)
+
+def strsignal(signalnum):
+    name = _signal.strsignal(signalnum)
+    if name is None:
+        return None
+    return name
+```
+
+`valid_signals()` delegates to `_signal.valid_signals()` which returns a
+`frozenset` of integers representing the signal numbers supported on the
+current platform. `raise_signal(signum)` calls the C function of the same
+name, which on POSIX calls `raise(3)` and on Windows calls
+`raise()` from the CRT. `strsignal(signalnum)` wraps the C
+`strsignal(3)` call added in Python 3.8; it returns `None` for
+unrecognised signal numbers.
+
+## gopy mirror
+
+`module/signal/module.go`. The `Signals` and `Handlers` enums are
+represented as Go typed-integer constants. `valid_signals()` returns the
+set of signals that Go's `os/signal` package recognises on the current
+platform. `strsignal` is implemented with a lookup table backed by
+`syscall.Signal.String()`.

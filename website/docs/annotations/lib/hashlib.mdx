@@ -1,0 +1,143 @@
+---
+title: Lib/hashlib.py
+description: Thin wrapper that loads hash constructors from the OpenSSL-backed _hashlib C extension and provides pure-Python fallbacks and KDF helpers.
+cpython_path: Lib/hashlib.py
+cpython_version: "3.14"
+lines: 200
+status: annotated
+ported_to: module/hashlib/module.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Lib/hashlib.py`
+
+<CpyLink path="Lib/hashlib.py" />
+
+`hashlib.py` is a small orchestration layer, not an algorithm implementation.
+Its job is to expose a unified `new(name, data)` entry point regardless of
+which backend provides the hash. The module tries `_hashlib` (the OpenSSL
+binding, `Modules/_hashopenssl.c`) first, then falls back to the pure-C
+built-in modules (`_sha256`, `_sha512`, `_md5`, `_sha1`, `_sha3`, `_blake2`).
+
+Convenience aliases (`md5`, `sha1`, `sha256`, etc.) are installed at module
+level as callables so users can write `hashlib.sha256(b"data")` directly.
+
+The two sets `algorithms_guaranteed` and `algorithms_available` give portable
+introspection: code that must run on any platform should only use names in
+`algorithms_guaranteed`.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Lib/hashlib.py" lines="1-60">1-60</Cpy> | Module header, `__always_supported`, `algorithms_guaranteed`, `algorithms_available` | Declares the guaranteed algorithm names and queries `_hashlib.openssl_md_meth_names()` to build `algorithms_available`. | `module/hashlib/module.go` |
+| <Cpy path="Lib/hashlib.py" lines="61-120">61-120</Cpy> | `__get_builtin_constructor`, `__get_openssl_constructor`, `__py_new`, `__hash_new`, `new` | Fallback-chain lookup: OpenSSL first, per-module C extension second, error last. | `module/hashlib/module.go` |
+| <Cpy path="Lib/hashlib.py" lines="121-160">121-160</Cpy> | Constructor aliases (`md5`, `sha1`, `sha224`, `sha256`, `sha384`, `sha512`, `sha3_256`, `sha3_512`, `blake2b`, `blake2s`) | Module-level callables installed by iterating `__always_supported`. | `module/hashlib/module.go` |
+| <Cpy path="Lib/hashlib.py" lines="161-190">161-190</Cpy> | `pbkdf2_hmac`, `scrypt` | Key-derivation functions delegated to `_hashlib.pbkdf2_hmac` and `_hashlib.scrypt`. | `module/hashlib/module.go` |
+| <Cpy path="Lib/hashlib.py" lines="191-200">191-200</Cpy> | `file_digest` | Reads a file-like object in chunks and feeds each chunk to a hash object. | `module/hashlib/module.go` |
+
+## Reading
+
+### `new` fallback chain (lines 61 to 120)
+
+<CpyLink path="Lib/hashlib.py" lines="61-120" />
+
+```python
+def __get_openssl_constructor(name):
+    try:
+        f = getattr(_hashlib, 'openssl_' + name)
+        # test the constructor
+        f()
+        return f
+    except (AttributeError, ValueError):
+        return __get_builtin_constructor(name)
+
+def __get_builtin_constructor(name):
+    cache = __builtin_constructor_cache
+    constructor = cache.get(name)
+    if constructor is not None:
+        return constructor
+    try:
+        if name in {'sha256', 'sha224'}:
+            import _sha256
+            cache['sha224'] = _sha256.sha224
+            cache['sha256'] = _sha256.sha256
+        elif name in {'sha512', 'sha384'}:
+            import _sha512
+            ...
+        ...
+    except ImportError:
+        pass  # no fallback available
+    constructor = cache.get(name)
+    if constructor is not None:
+        return constructor
+    raise ValueError('unsupported hash type ' + name)
+
+def __hash_new(name, data=b'', **kwargs):
+    try:
+        return _hashlib.new(name, data, **kwargs)
+    except ValueError:
+        return __get_builtin_constructor(name)(data, **kwargs)
+```
+
+`new` is the public entry point. The resolution order is: (1) `_hashlib.new`,
+which calls OpenSSL's `EVP_MD_CTX`; (2) on `ValueError` (OpenSSL does not know
+the name), `__get_builtin_constructor` lazily imports the appropriate pure-C
+module and caches the constructor. The cache (`__builtin_constructor_cache`) is
+a module-level dict so the import only happens once per process. If neither
+backend knows the name, `ValueError` propagates to the caller.
+
+### `algorithms_guaranteed` (lines 1 to 60)
+
+<CpyLink path="Lib/hashlib.py" lines="1-60" />
+
+```python
+__always_supported = (
+    'md5', 'sha1', 'sha224', 'sha256', 'sha384', 'sha512',
+    'sha3_224', 'sha3_256', 'sha3_384', 'sha3_512',
+    'sha3_shake_128', 'sha3_shake_256',
+    'blake2b', 'blake2s',
+)
+
+algorithms_guaranteed = set(__always_supported)
+algorithms_available = set()
+
+try:
+    from _hashlib import openssl_md_meth_names
+    algorithms_available = openssl_md_meth_names
+except ImportError:
+    pass
+
+algorithms_available = algorithms_available.union(algorithms_guaranteed)
+```
+
+`algorithms_guaranteed` is a fixed frozenset listing every hash that the
+CPython distribution ships a C implementation for. `algorithms_available` is a
+strict superset: it adds every digest name that the local OpenSSL build
+exposes. Code that must be portable should only use `algorithms_guaranteed`
+names; code that can tolerate platform differences may query `algorithms_available`.
+
+### `pbkdf2_hmac` (lines 161 to 190)
+
+<CpyLink path="Lib/hashlib.py" lines="161-190" />
+
+```python
+def pbkdf2_hmac(hash_name, password, salt, iterations, dklen=None):
+    if not isinstance(hash_name, str):
+        raise TypeError(hash_name)
+    if not isinstance(password, (bytes, bytearray)):
+        password = bytes(memoryview(password))
+    if not isinstance(salt, (bytes, bytearray)):
+        salt = bytes(memoryview(salt))
+    return _hashlib.pbkdf2_hmac(hash_name, password, salt,
+                                iterations, dklen)
+```
+
+`pbkdf2_hmac` is a thin argument-validation wrapper; the actual PBKDF2
+computation is in `_hashlib` (OpenSSL's `PKCS5_PBKDF2_HMAC`). The Python layer
+normalises `password` and `salt` to `bytes` via `memoryview` to avoid a copy
+when a `bytearray` or buffer is passed. `scrypt` follows the same pattern,
+delegating to `_hashlib.scrypt` (OpenSSL 1.1+). Both functions are absent on
+platforms where `_hashlib` was built without the relevant OpenSSL features;
+`hasattr(hashlib, 'scrypt')` is the correct portability check.

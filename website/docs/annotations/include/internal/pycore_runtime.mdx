@@ -1,0 +1,172 @@
+---
+title: Include/internal/pycore_runtime.h
+description: Defines PyRuntimeState — the single global runtime struct holding the interpreter list, allocators, hash secret, audit hooks, and Unicode intern table.
+cpython_path: Include/internal/pycore_runtime.h
+cpython_version: "3.14"
+lines: 250
+status: annotated
+ported_to: pythonrun/pylifecycle.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Include/internal/pycore_runtime.h`
+
+<CpyLink path="Include/internal/pycore_runtime.h" />
+
+Declares `PyRuntimeState`, the single process-wide runtime struct, and
+the `_PyRuntime` global that points to it. Every `Python/` and
+`Objects/` file that needs process-level state reads or writes
+`_PyRuntime` rather than relying on OS thread-locals; per-thread state
+lives one level down in `PyThreadState` (declared in
+`Include/internal/pycore_pystate.h`) and per-interpreter state in
+`PyInterpreterState` (`Include/internal/pycore_interp.h`).
+
+The struct grew significantly in CPython 3.12 and again in 3.13/3.14
+with free-threaded support. Key additions in recent versions include
+`stoptheworld` (a lock used during stop-the-world GC pauses),
+`mimalloc` arena fields, and the `xidregistry` for cross-interpreter
+data sharing. None of those affect the fields annotated below, which
+are the subset gopy ports.
+
+In gopy, `pythonrun/pylifecycle.go` holds a `Runtime` struct that
+mirrors `PyRuntimeState` at the granularity gopy needs. Fields that
+are GIL-specific, mimalloc-specific, or relate to features not yet
+ported (e.g. sub-interpreters) are omitted.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Include/internal/pycore_runtime.h" lines="1-40">1-40</Cpy> | `PyRuntimeState` header + `initialized` / `core_initialized` | Boolean flags written by `_PyRuntimeState_Init`; read by `Py_IsInitialized`. | `pythonrun/pylifecycle.go` |
+| <Cpy path="Include/internal/pycore_runtime.h" lines="41-80">41-80</Cpy> | `finalizing` / `_finalizing_id` | `PyThreadState *` set to the finalising thread when `Py_FinalizeEx` runs; other threads poll this to detect shutdown. | `pythonrun/pylifecycle.go` |
+| <Cpy path="Include/internal/pycore_runtime.h" lines="81-120">81-120</Cpy> | `interpreters` | Linked list of all `PyInterpreterState` structs; `interpreters.main` is the pointer to the main interpreter. | `pythonrun/pylifecycle.go` |
+| <Cpy path="Include/internal/pycore_runtime.h" lines="121-155">121-155</Cpy> | `allocators` | Four `PyMemAllocatorEx` slots: `standard`, `debug`, `obj`, `pymem` — one per allocation domain. | `pythonrun/pylifecycle.go` |
+| <Cpy path="Include/internal/pycore_runtime.h" lines="156-185">156-185</Cpy> | `unicode_state` | Interned-string table (`PyObject *interned`), latin-1 singletons, and the small-integer Unicode cache. | `pythonrun/pylifecycle.go` |
+| <Cpy path="Include/internal/pycore_runtime.h" lines="186-215">186-215</Cpy> | `hash_secret` / `_Py_HashSecret` | The per-process random seed for `PYTHONHASHSEED`; read by `PyObject_Hash` and the `hash()` builtin. | `pythonrun/pylifecycle.go` |
+| <Cpy path="Include/internal/pycore_runtime.h" lines="216-250">216-250</Cpy> | `_PyRuntime` declaration / `_PyRuntimeState_Init` / `_PyRuntimeState_Fini` | Global variable declaration and init/fini functions called from `Py_InitializeFromConfig`. | `pythonrun/pylifecycle.go` |
+
+## Reading
+
+### `PyRuntimeState` fields overview (lines 1 to 80)
+
+<CpyLink path="Include/internal/pycore_runtime.h" lines="1-80" />
+
+```c
+struct pyruntimestate {
+    /* Non-zero when the runtime is fully initialised. */
+    int initialized;
+    int core_initialized;
+
+    /* Set to the thread finalising the interpreter, or NULL. */
+    PyThreadState *finalizing;
+    unsigned long _finalizing_id;
+
+    struct {
+        PyInterpreterState *head;       /* all interpreters (linked list) */
+        PyInterpreterState *main;       /* the main interpreter */
+        int64_t next_id;
+    } interpreters;
+
+    /* ... many more fields ... */
+};
+```
+
+`initialized` and `core_initialized` are written by
+`_PyRuntimeState_Init` in two phases: `core_initialized` is set after
+the low-level allocator, hash secret, and thread state are ready;
+`initialized` is set only after the full `Py_InitializeFromConfig`
+sequence completes (including importing `site`, setting up
+`sys.path`, etc.). Code that needs to check "is Python running at all"
+tests `initialized`; code that needs only the allocator or GC tests
+`core_initialized`.
+
+`finalizing` is set to a non-NULL `PyThreadState *` pointer when
+`Py_FinalizeEx` is running. Threads that poll `_Py_IsFinalizing()`
+check this field. The `_finalizing_id` stores the OS thread ID of the
+finalising thread so that the check is safe to make without holding any
+lock.
+
+In gopy, `pythonrun/pylifecycle.go` declares a `Runtime` value with
+`Initialized bool`, `CoreInitialized bool`, and `Finalizing bool` fields.
+The `Finalize()` function sets `Finalizing = true` before tearing down the
+interpreter list.
+
+### `interpreters` linked list (lines 81 to 120)
+
+<CpyLink path="Include/internal/pycore_runtime.h" lines="81-120" />
+
+```c
+struct {
+    PyThread_type_lock mutex;
+    PyInterpreterState *head;
+    PyInterpreterState *main;
+    int64_t next_id;
+} interpreters;
+```
+
+Every `PyInterpreterState` is linked into this list via its `next`
+field. `head` points to the most recently created interpreter;
+`main` is a stable pointer to the interpreter created by
+`_PyInterpreterState_New` during `Py_InitializeFromConfig`.
+
+Sub-interpreters are created with `Py_NewInterpreter` and destroyed
+with `Py_EndInterpreter`. Each has its own `sys.modules`, its own
+`builtins`, and (in the free-threaded build) its own GIL. The `mutex`
+serialises insertion and removal from the list; reading `head` or
+`main` without the mutex is unsafe in the multi-interpreter case.
+
+`Py_TPFLAGS_BASETYPE` is checked when constructing a type in a
+sub-interpreter: types defined in the main interpreter that do not set
+this flag are not permitted as base classes in sub-interpreters because
+their `tp_new` / `tp_init` slots may hold pointers into the main
+interpreter's heap. This is the primary isolation guard for
+sub-interpreter safety.
+
+In gopy, the multi-interpreter case is not yet ported. `pythonrun/pylifecycle.go`
+holds a single `*Interpreter` value rather than a linked list, and the
+`mutex` has no counterpart. When sub-interpreter support is added, the
+list pattern from this struct will be the model.
+
+### `allocators` four-slot design (lines 121 to 155)
+
+<CpyLink path="Include/internal/pycore_runtime.h" lines="121-155" />
+
+```c
+struct {
+    /* Allocator used for PyMem_RawMalloc (no GIL required). */
+    PyMemAllocatorEx standard;
+    /* Debug wrapper that records alloc/free for -W default. */
+    PyMemAllocatorEx debug;
+    /* Allocator used for PyObject_Malloc (objects, holds GIL). */
+    PyMemAllocatorEx obj;
+    /* Allocator used for PyMem_Malloc (buffers, holds GIL). */
+    PyMemAllocatorEx pymem;
+} allocators;
+```
+
+CPython separates allocation into four domains:
+
+1. `standard` (raw): no GIL required, used for data structures that
+   may be allocated before or after `Py_Initialize`. Maps to
+   `PyMem_RawMalloc`.
+2. `debug`: a wrapper that optionally inserts red zones and tracks
+   allocations for the `-W` memory-debug mode.
+3. `obj`: the object allocator, which sits on top of CPython's
+   `obmalloc` arena system (or mimalloc in 3.14). Used by
+   `PyObject_Malloc` / `PyObject_Free`. Requires the GIL (or per-thread
+   arena ownership in the free-threaded build).
+4. `pymem`: the buffer allocator, used by `PyMem_Malloc` for byte
+   buffers, `bytes` internal storage, and similar. Also requires the GIL
+   in the GIL build.
+
+Each `PyMemAllocatorEx` is a struct of four function pointers (`malloc`,
+`calloc`, `realloc`, `free`) plus a `ctx` void pointer, making the
+allocator fully replaceable via `PyMem_SetAllocator`. The `ctx` pointer
+lets a custom allocator carry its own state without globals.
+
+In gopy, all four domains collapse to Go's built-in allocator (`new`,
+`make`). `pythonrun/pylifecycle.go` does not replicate the four-slot
+layout, but notes the domain boundaries as comments where they affect
+object construction semantics (for example, `PyObject_Malloc` size
+limits that CPython enforces in `obmalloc`).

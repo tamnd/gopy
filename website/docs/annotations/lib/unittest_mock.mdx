@@ -1,0 +1,237 @@
+---
+title: Lib/unittest/mock.py
+description: Comprehensive mocking library for unit tests; provides Mock, MagicMock, patch, create_autospec, and sentinel for isolating units under test.
+cpython_path: Lib/unittest/mock.py
+cpython_version: "3.14"
+lines: 2700
+status: annotated
+ported_to: module/unittest/mock.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Lib/unittest/mock.py`
+
+<CpyLink path="Lib/unittest/mock.py" />
+
+`unittest.mock` is the standard-library mocking framework. Its core
+abstraction is `NonCallableMock`, a proxy object that records every
+attribute access and method call made on it. `Mock` and `MagicMock` add
+callability and automatic magic-method configuration on top of that base.
+
+The class hierarchy is deliberately layered. `NonCallableMock` holds all
+the state: `_mock_children` (child mocks created on attribute access),
+`_mock_call_args_list`, `_mock_called`, and the optional `spec`. `CallableMixin`
+adds `__call__` and the three internal call-recording methods. `Mock` inherits
+from both in MRO order. `MagicMock` adds `MagicMixin` which pre-populates all
+dunder methods (`__iter__`, `__len__`, `__add__`, etc.) so that magic-method
+dispatch, which bypasses `__getattr__`, still routes through the mock.
+
+`patch` is a decorator and context manager that replaces a named attribute
+in a module's namespace for the duration of a test and restores it afterward.
+It delegates to `_patch`, which records the original value in `self.temp_original`
+and uses `setattr`/`delattr` to perform the swap in `__enter__` and the
+restore in `__exit__`. `patch.object`, `patch.dict`, and `patch.multiple`
+are alternative entry points that share the same restoration protocol.
+
+`create_autospec` introspects a live object using `inspect` and builds a
+spec-constrained mock whose attribute accesses and call signatures mirror
+those of the original. Calling a mock created from a function with the
+wrong number of arguments raises `TypeError`, enabling API contract
+testing without invoking the real implementation.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Lib/unittest/mock.py" lines="1-175">1-175</Cpy> | Module header, imports, `__all__`, helpers | `__all__` list; imports `inspect`, `asyncio`, `threading`, `annotationlib`; defines `_builtins`, `FILTER_DIR`, `_safe_super`, `_is_async_obj`, `_is_instance_mock`. | `module/unittest/mock.go` |
+| <Cpy path="Lib/unittest/mock.py" lines="176-225">176-225</Cpy> | `_SentinelObject`, `_Sentinel`, `sentinel` | `sentinel.attribute` returns a unique object each time; used as unambiguous default markers in test assertions. | `module/unittest/mock.go` |
+| <Cpy path="Lib/unittest/mock.py" lines="226-295">226-295</Cpy> | `_CallList`, `call`, `_Call` | `_CallList` is a list subclass whose `__contains__` supports sub-sequence matching; `_Call` records positional and keyword arguments for one invocation. | `module/unittest/mock.go` |
+| <Cpy path="Lib/unittest/mock.py" lines="296-920">296-920</Cpy> | `NonCallableMock` | Core mock state machine: `__init__`, `__setattr__`, `__getattr__`, `configure_mock`, `reset_mock`, `assert_called_with`, `assert_called_once_with`, `assert_any_call`, `assert_has_calls`, `mock_calls`. | `module/unittest/mock.go` |
+| <Cpy path="Lib/unittest/mock.py" lines="921-1090">921-1090</Cpy> | `CallableMixin`, `Mock` | `CallableMixin.__call__` records the call and delegates to `_execute_mock_call`; `Mock` inherits from both to form the standard callable mock. | `module/unittest/mock.go` |
+| <Cpy path="Lib/unittest/mock.py" lines="1091-1595">1091-1595</Cpy> | `_patch`, `patch`, `patch.object`, `patch.dict`, `patch.multiple` | Patching machinery: `_patch.__enter__` replaces the target, `__exit__` restores it; `patch()` is the decorator/context-manager factory. | `module/unittest/mock.go` |
+| <Cpy path="Lib/unittest/mock.py" lines="1596-1940">1596-1940</Cpy> | `_patch_dict`, `_get_method`, `_get_eq`, `_MockIter` | `_patch_dict` saves and restores dictionary contents; `_get_method` is the descriptor that binds magic methods to mock instances. | `module/unittest/mock.go` |
+| <Cpy path="Lib/unittest/mock.py" lines="1941-2100">1941-2100</Cpy> | `MagicMixin`, `MagicMock`, `NonCallableMagicMock` | `MagicMixin._mock_set_magics` populates all dunder slots on the mock class; `MagicMock` combines `MagicMixin` with `Mock`. | `module/unittest/mock.go` |
+| <Cpy path="Lib/unittest/mock.py" lines="2101-2450">2101-2450</Cpy> | `AsyncMockMixin`, `AsyncMock`, `create_autospec`, `mock_open`, `seal` | `create_autospec` mirrors spec signatures; `mock_open` builds a mock with file-object behaviour; `seal` prevents child-mock creation after the mock tree is finalised. | `module/unittest/mock.go` |
+
+## Reading
+
+### `NonCallableMock.__getattr__` and child mock creation (lines 529 to 663)
+
+<CpyLink path="Lib/unittest/mock.py" lines="529-663" />
+
+```python
+def __getattr__(self, name):
+    if name in {'_mock_methods', '_mock_unsafe'}:
+        raise AttributeError(name)
+    elif self._mock_methods is not None:
+        if name not in self._mock_methods or name.startswith('_'):
+            raise AttributeError("Mock object has no attribute %r" % name)
+    elif _all_magics(name):
+        raise AttributeError(name)
+
+    if not self._mock_unsafe and (not self._mock_methods or
+            name not in self._mock_methods):
+        if name.startswith(('assert', 'assret', 'asert', 'aseert', 'assrt')):
+            raise AttributeError(
+                f"{name!r} is not a supported mock method.")
+
+    result = self._mock_children[name]
+    if result is _deleted:
+        raise AttributeError(name)
+    elif result is None:
+        wraps = None
+        if self._mock_wraps is not None:
+            wraps = getattr(self._mock_wraps, name)
+        return self._get_child_mock(
+            parent=self, name=name, wraps=wraps, _new_name=name,
+            _new_parent=self
+        )
+    return result
+```
+
+Every attribute lookup on a `NonCallableMock` that does not resolve
+through `object.__getattribute__` reaches `__getattr__`. If the name is
+not already in `_mock_children` a new child mock is created via
+`_get_child_mock` and cached. The typo guard (lines that check for
+`assert`, `assret`, etc.) catches the common mistake of writing
+`mock.assert_called()` when the method is actually `mock.assert_called_with()`;
+without this guard the typo silently creates a child mock and the
+assertion is never made, leading to false-passing tests.
+
+### `NonCallableMock.assert_called_once_with` and `assert_any_call` (lines 710 to 781)
+
+<CpyLink path="Lib/unittest/mock.py" lines="710-781" />
+
+```python
+def assert_called_with(self, /, *args, **kwargs):
+    if self.call_args is None:
+        expected = self._format_mock_call_signature(args, kwargs)
+        actual = 'not called.'
+        error_message = ...
+        raise AssertionError(error_message)
+    def _error_message():
+        msg = self._format_mock_failure_message(args, kwargs)
+        return msg
+    expected = self._call_matcher(_Call((args, kwargs), two=True))
+    actual = self._call_matcher(self.call_args)
+    if actual != expected:
+        cause = expected if isinstance(expected, Exception) else None
+        raise AssertionError(_error_message()) from cause
+
+def assert_called_once_with(self, /, *args, **kwargs):
+    if not self.call_count == 1:
+        msg = ("Expected '%s' to be called once. Called %s times.%s"
+               % (self._mock_name or 'mock',
+                  self.call_count,
+                  self._calls_repr()))
+        raise AssertionError(msg)
+    return self.assert_called_with(*args, **kwargs)
+
+def assert_any_call(self, /, *args, **kwargs):
+    expected = self._call_matcher(_Call((args, kwargs), two=True))
+    cause = expected if isinstance(expected, Exception) else None
+    matches = [c for c in self.call_args_list
+               if self._call_matcher(c) == expected]
+    if not matches:
+        expected_string = self._format_mock_call_signature(args, kwargs)
+        raise AssertionError(
+            '%s call not found' % expected_string) from cause
+```
+
+`assert_called_with` checks only the most recent call (via `call_args`);
+`assert_called_once_with` additionally enforces that the mock was called
+exactly once. `assert_any_call` scans the entire `call_args_list`, making
+it appropriate when the order or number of calls is irrelevant but a
+specific invocation must have occurred. All three route through
+`_call_matcher`, which applies a `spec`-derived signature to normalise
+positional and keyword arguments before comparison, so
+`mock(1, b=2)` and `mock(a=1, b=2)` match when the spec says the first
+parameter is named `a`.
+
+### `_patch.__enter__` and `__exit__` (lines 1347 to 1525)
+
+<CpyLink path="Lib/unittest/mock.py" lines="1347-1525" />
+
+```python
+def __enter__(self):
+    ...
+    original, local = self.get_original()
+    if self.new is DEFAULT and self.autospec is None:
+        inherit = False
+        if isinstance(original, type):
+            inherit = True
+        new = MagicMock(spec=original, ...)
+    elif self.autospec is not None:
+        new = create_autospec(original, ...)
+    else:
+        new = self.new
+    ...
+    self.temp_original = original
+    self.is_local = local
+    setattr(self.getter(), self.attribute, new)
+    ...
+    return new
+
+def __exit__(self, *exc_info):
+    if self.is_local and self.temp_original is not DEFAULT:
+        setattr(self.getter(), self.attribute, self.temp_original)
+    elif not self.is_local:
+        delattr(self.getter(), self.attribute)
+    ...
+```
+
+`__enter__` calls `get_original()` to resolve the target using
+`getattr(target, attribute)` and records whether the attribute existed
+locally on the object (`is_local`) or was inherited. If no replacement
+was specified (`new is DEFAULT`) a fresh `MagicMock` is auto-created with
+`spec=original` so that the mock mirrors the replaced object's API.
+`__exit__` restores the original: if the attribute was local it uses
+`setattr`, if it was inherited it uses `delattr` so the original
+inherited value becomes visible again rather than shadowing it with the
+saved copy. Stacked `@patch` decorators are applied in reverse MRO order
+(innermost last in the argument list) because each decorator wraps the
+previous one.
+
+### `create_autospec` (lines 2293 to 2450)
+
+<CpyLink path="Lib/unittest/mock.py" lines="2293-2450" />
+
+```python
+def create_autospec(spec, spec_set=False, instance=False,
+                    _parent=None, _name=None, **kwargs):
+    is_type = isinstance(spec, type)
+    is_async_func = _is_async_func(spec)
+    ...
+    if is_type and not instance:
+        _kwargs = {'spec': spec}
+    else:
+        _kwargs = {'spec_set': spec} if spec_set else {'spec': spec}
+    ...
+    if isinstance(spec, FunctionTypes):
+        mock = _get_method(name, mock)
+    ...
+    # Walk the spec's attributes and recursively create child mocks
+    for attr_name in dir(spec):
+        try:
+            attr = getattr(spec, attr_name)
+        except AttributeError:
+            continue
+        if isinstance(attr, FunctionTypes):
+            child = create_autospec(attr, spec_set=spec_set,
+                                    instance=True, _parent=mock,
+                                    _name=attr_name)
+        else:
+            child = _get_method(attr_name, attr)
+        _check_and_set_parent(mock, child, attr_name, attr_name)
+    return mock
+```
+
+`create_autospec` uses `inspect.signature` to attach the real function
+signature to each method mock, so argument-count errors are caught at
+test time rather than silently swallowed. When `spec` is a class and
+`instance=False`, the returned mock behaves like the class itself (i.e.,
+it is callable and returns an instance mock). When `instance=True`, the
+mock behaves like an instance of the class. The recursive walk ensures
+that nested attributes are also spec-constrained rather than being plain
+auto-created child mocks, which would permit any attribute access on them.

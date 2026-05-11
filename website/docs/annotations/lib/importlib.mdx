@@ -1,0 +1,247 @@
+---
+title: Lib/importlib/__init__.py
+description: Public API for Python's import system; thin wrapper over the frozen bootstrap that exposes import_module, reload, invalidate_caches, and util/abc/machinery subpackages.
+cpython_path: Lib/importlib/__init__.py
+cpython_version: "3.14"
+lines: 60
+status: annotated
+ported_to: vm/eval_import.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Lib/importlib/__init__.py`
+
+<CpyLink path="Lib/importlib/__init__.py" />
+
+`Lib/importlib/__init__.py` is deliberately small: about 60 lines of
+public API glue over a much larger machinery that lives in three other
+files. Understanding `importlib` means reading all four together.
+
+`importlib._bootstrap` is the frozen core. It is compiled into the
+interpreter binary and runs before the file system is available. It
+handles built-in modules (`sys`, `_imp`) and frozen modules (anything
+listed in `sys.frozen_modules`). Its key types are `ModuleSpec`,
+`BuiltinImporter`, `FrozenImporter`, and the `_find_and_load` function
+that backs `__import__`.
+
+`importlib._bootstrap_external` handles file-based imports. It is also
+frozen but is loaded slightly later, once the file system is accessible.
+It provides `PathFinder`, `FileFinder`, `SourceFileLoader`,
+`SourcelessFileLoader`, and `ExtensionFileLoader`. `PathFinder` is
+installed on `sys.meta_path`; `FileFinder` is the per-directory hook
+installed on `sys.path_hooks`.
+
+`importlib.abc` re-exports the abstract base classes from
+`importlib._abc`: `Finder`, `Loader`, `MetaPathFinder`, `PathEntryFinder`,
+`ResourceLoader`, `InspectLoader`, `ExecutionLoader`, `FileLoader`, and
+`SourceLoader`. These are the extension points for custom importers.
+
+`importlib.util` provides helper functions for building importers:
+`find_spec`, `module_from_spec`, `spec_from_file_location`,
+`spec_from_loader`, `resolve_name`, `LazyLoader`, and
+`module_for_loader` (deprecated). `importlib.machinery` re-exports the
+concrete loader and finder types from `_bootstrap_external`.
+
+`Lib/importlib/__init__.py` itself provides only four names: `import_module`,
+`reload`, `invalidate_caches`, and `__import__` (private). Everything else
+is in the submodules above.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Lib/importlib/__init__.py" lines="1-15">1-15</Cpy> | file header / bootstrap import | Imports `_bootstrap` and `_bootstrap_external` from the frozen interpreter; populates `__spec__` for both. | `vm/eval_import.go` |
+| <Cpy path="Lib/importlib/__init__.py" lines="16-35">16-35</Cpy> | `import_module` | Resolves relative imports against `package`, then calls `_bootstrap._gcd_import`. | `vm/eval_import.go:importModule` |
+| <Cpy path="Lib/importlib/__init__.py" lines="36-46">36-46</Cpy> | `invalidate_caches` | Calls `finder.invalidate_caches()` on every entry in `sys.meta_path`. | `vm/eval_import.go` |
+| <Cpy path="Lib/importlib/__init__.py" lines="47-60">47-60</Cpy> | `reload` | Delegates to `_bootstrap._exec` after calling `invalidate_caches` for the reloaded module's parent path. | `vm/eval_import.go` |
+
+## Reading
+
+### `import_module` (lines 16 to 35)
+
+<CpyLink path="Lib/importlib/__init__.py" lines="16-35" />
+
+```python
+def import_module(name, package=None):
+    """An implementation of the built-in __import__() function.
+
+    This function always returns the top-level package if the name
+    argument is a relative import (has leading dots), or the module
+    directly named if an absolute import.
+    """
+    level = 0
+    if name.startswith('.'):
+        if not package:
+            msg = ("the 'package' argument is required to perform a relative "
+                   "import for {!r}")
+            raise TypeError(msg.format(name))
+        for character in name:
+            if character != '.':
+                break
+            level += 1
+    return _bootstrap._gcd_import(name[level:], package, level)
+```
+
+`import_module` is the public alternative to the bare `__import__` built-in.
+The key difference: `__import__("os.path")` returns the top-level `os`
+package, whereas `import_module("os.path")` returns the `os.path` module.
+`import_module` achieves this by calling `_bootstrap._gcd_import` directly
+and returning whatever that function returns (always the leaf).
+
+Relative imports require the `package` argument. `import_module(".sibling",
+"mypkg")` is equivalent to `from mypkg import sibling`. The level counter
+counts leading dots and is passed to `_gcd_import` which subtracts it from
+the package hierarchy to find the anchor.
+
+In gopy, `vm/eval_import.go:importModule` mirrors this logic: it resolves
+the level against the calling module's `__package__` attribute, then
+delegates to the import machinery.
+
+### `_bootstrap._gcd_import` and `_find_and_load` (frozen bootstrap)
+
+<CpyLink path="Lib/importlib/_bootstrap.py" lines="1200-1300" />
+
+```python
+def _gcd_import(name, package=None, level=0):
+    _sanity_check(name, package, level)
+    if level > 0:
+        name = _resolve_name(name, package, level)
+    return _find_and_load(name, _gcd_import)
+
+
+def _find_and_load(name, import_):
+    module = sys.modules.get(name, _NEEDS_LOADING)
+    if module is _NEEDS_LOADING:
+        return _find_and_load_unlocked(name, import_)
+    if module is None:
+        message = ('import of {} halted; '
+                   'use of sys.modules[{!r}] = None '
+                   'is deprecated'.format(name, name))
+        _warnings.warn(message, ImportWarning, stacklevel=_calc_importlevel(name))
+    _lock_unlock_module(name)
+    return module
+```
+
+`_find_and_load` is the hot path for every `import` statement. The first
+check is `sys.modules`: if the module is already there, return it
+immediately (with a re-entrant lock to handle concurrent imports). The
+`None` sentinel in `sys.modules` is a deprecated way to block an import.
+
+`_find_and_load_unlocked` walks `sys.meta_path` in order, calling
+`finder.find_spec(name, path, target)` on each. The first non-None
+`ModuleSpec` wins. `_bootstrap.BuiltinImporter` handles C-extension
+built-ins; `_bootstrap.FrozenImporter` handles frozen modules; and
+`_bootstrap_external.PathFinder` handles everything on the file system.
+
+### `importlib.util.find_spec` and `module_from_spec`
+
+<CpyLink path="Lib/importlib/util.py" lines="1-80" />
+
+```python
+def find_spec(name, package=None):
+    """Return the spec for the specified module.
+
+    First, sys.modules is checked to see if the module was already imported.
+    If so, then sys.modules[name].__spec__ is returned. If that happens to
+    be set to None, then ValueError is raised. If the module is not in
+    sys.modules, then sys.meta_path is searched for a suitable spec with the
+    value of 'path' given to the finders. None is returned if no spec could
+    be found.
+    """
+    fullname = resolve_name(name, package) if name.startswith('.') else name
+    if fullname not in sys.modules:
+        parent_name = fullname.rpartition('.')[0]
+        if parent_name:
+            parent = __import__(parent_name, fromlist=['__path__'])
+            parent_path = parent.__path__
+        else:
+            parent_path = None
+        return _bootstrap._find_spec(fullname, parent_path, None)
+    else:
+        module = sys.modules[fullname]
+        if module is None:
+            return None
+        spec = module.__spec__
+        if spec is None:
+            raise ValueError('{}.__spec__ is None'.format(name))
+        return spec
+
+
+def module_from_spec(spec):
+    module = None
+    if hasattr(spec.loader, 'create_module'):
+        module = spec.loader.create_module(spec)
+    if module is None:
+        module = _new_module(spec.name)
+    _bootstrap._init_module_attrs(spec, module)
+    return module
+```
+
+`find_spec` is the introspection counterpart to `import_module`. It never
+executes module code; it only searches the import machinery for a
+`ModuleSpec` and returns it. A `ModuleSpec` carries `name`, `origin`
+(file path or `None`), `submodule_search_locations` (for packages), and
+a reference to the `loader` that would execute it.
+
+`module_from_spec` creates a new module object from a spec without
+importing it. It calls `spec.loader.create_module(spec)` first; if the
+loader returns `None` (which most do), it falls back to `types.ModuleType(spec.name)`.
+Then `_init_module_attrs` sets `__name__`, `__loader__`, `__package__`,
+`__spec__`, `__path__`, and `__file__` on the module. The module is not
+added to `sys.modules` and its code is not executed. To finish the import,
+call `spec.loader.exec_module(module)` manually.
+
+### `reload` (lines 47 to 60)
+
+<CpyLink path="Lib/importlib/__init__.py" lines="47-60" />
+
+```python
+def reload(module):
+    """Reload the module and return it.
+
+    The module must have been successfully imported before.
+    """
+    if not _bootstrap._is_type(module, _bootstrap.ModuleType):
+        raise TypeError("reload() argument must be a module")
+    try:
+        name = module.__spec__.name
+    except AttributeError:
+        name = module.__name__
+
+    if name not in sys.modules:
+        msg = "module {} not in sys.modules"
+        raise ImportError(msg.format(name), name=name)
+    if name in sys.modules:
+        parent_name = name.rpartition('.')[0]
+        if parent_name:
+            from . import util as _util
+            parent = sys.modules.get(parent_name)
+            if parent is None:
+                msg = "parent {!r} not in sys.modules"
+                raise ImportError(msg.format(parent_name), name=parent_name)
+            pkgpath = parent.__path__
+        else:
+            pkgpath = None
+        target = module
+        spec = module.__spec__ = _bootstrap._find_spec(name, pkgpath, target)
+        ...
+    return _bootstrap._exec(spec, module)
+```
+
+`reload` re-executes the module's code in its existing namespace. Existing
+attributes are overwritten by the module code but attributes that are not
+reassigned survive. This is the standard pattern for iterative development:
+modify a `.py` file, call `importlib.reload(mod)`, and continue without
+restarting the interpreter.
+
+`_bootstrap._exec` calls `spec.loader.exec_module(module)` with the same
+module object. For `SourceFileLoader` this re-reads and re-compiles the
+`.py` file. The module is not removed from `sys.modules` first, so any
+code that holds a reference to the old module object sees the updates in
+place.
+
+In gopy, `vm/eval_import.go` handles the `IMPORT_NAME` and
+`IMPORT_FROM` opcodes. The full bootstrap machinery including `find_spec`,
+`module_from_spec`, and `reload` is partially ported; the `SourceFileLoader`
+path is the primary supported loader.

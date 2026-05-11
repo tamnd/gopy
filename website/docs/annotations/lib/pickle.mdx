@@ -1,0 +1,227 @@
+---
+title: Lib/pickle.py
+description: Pure-Python fallback serializer implementing the pickle protocol, with Pickler, Unpickler, memo deduplication, and protocol 4 framing.
+cpython_path: Lib/pickle.py
+cpython_version: "3.14"
+lines: 1700
+status: annotated
+ported_to: module/pickle/module.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Lib/pickle.py`
+
+<CpyLink path="Lib/pickle.py" />
+
+`pickle.py` is the pure-Python reference implementation of the pickle
+serialization protocol. CPython normally shadows it at import time with the
+`_pickle` C extension (built from `Modules/_pickle.c`), but the Python source
+is authoritative for protocol semantics and is the fallback on platforms where
+the C extension is unavailable.
+
+The module is split into two symmetric halves. The write side (`Pickler`) walks
+an object graph, resolves how to serialize each node via a four-step dispatch
+chain, and emits a stream of opcode bytes. The read side (`Unpickler`) replays
+that byte stream through a table-driven virtual machine that rebuilds the
+original graph.
+
+**Protocol versions.** Protocols 0-2 are ASCII-safe and text-based. Protocol
+2 introduced the `NEWOBJ` opcode. Protocol 4 (Python 3.4+) added frames
+(length-prefixed chunks) for efficient network transfer and the `MEMOIZE`
+opcode. Protocol 5 (Python 3.8+) added out-of-band buffer support. The default
+in 3.14 is protocol 5.
+
+**Memo.** Both halves maintain a `memo` dict that enables object-graph
+deduplication. The pickler maps `id(obj)` to `(memo_index, obj)` and emits a
+`PUT`/`BINPUT`/`LONG_BINPUT` opcode to assign an index; subsequent references
+emit `GET`/`BINGET`/`LONG_BINGET`. The unpickler maps `memo_index` to the
+reconstructed object.
+
+**Exception hierarchy.** `PickleError` is the base; `PicklingError` is raised
+by the write side (e.g., unpicklable type); `UnpicklingError` is raised by the
+read side (e.g., invalid opcode, security check).
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Lib/pickle.py" lines="1-100">1-100</Cpy> | Module header, opcode constants | `MARK`, `STOP`, `POP`, `BININT`, `FLOAT`, `FRAME`, etc. defined as byte literals; `DEFAULT_PROTOCOL = 5`. | `module/pickle/module.go` |
+| <Cpy path="Lib/pickle.py" lines="101-200">101-200</Cpy> | `PickleError`, `PicklingError`, `UnpicklingError`, `_Framer`, `_Unframer` | Exception hierarchy and framing helpers that wrap the underlying file-like object. | `module/pickle/module.go` |
+| <Cpy path="Lib/pickle.py" lines="400-750">400-750</Cpy> | `Pickler` | Write side: `dump`, `save`, `save_reduce`; per-type `save_*` methods; `dispatch` table. | `module/pickle/module.go` |
+| <Cpy path="Lib/pickle.py" lines="751-1000">751-1000</Cpy> | `Unpickler` | Read side: `load`, opcode `dispatch` table, `load_*` methods; memo and stack management. | `module/pickle/module.go` |
+| <Cpy path="Lib/pickle.py" lines="1001-1200">1001-1200</Cpy> | `_dumps`, `_loads`, `dump`, `dumps`, `load`, `loads` | Public convenience wrappers. | `module/pickle/module.go` |
+| <Cpy path="Lib/pickle.py" lines="1200-1400">1200-1400</Cpy> | `dispatch_table`, `PickleBuffer`, `_compat_pickle` imports | Per-module dispatch table, out-of-band buffer type, Python 2 compatibility name map. | `module/pickle/module.go` |
+| <Cpy path="Lib/pickle.py" lines="1400-1600">1400-1600</Cpy> | `_reconstructor`, `__newobj__`, `__newobj_ex__` | Helpers called by the unpickler to reconstruct objects from `__reduce_ex__` tuples. | `module/pickle/module.go` |
+| <Cpy path="Lib/pickle.py" lines="1600-1700">1600-1700</Cpy> | C-extension override | Attempts `from _pickle import *`; Python implementations serve as fallback only. | `module/pickle/module.go` |
+
+## Reading
+
+### `save` dispatch chain (lines 400 to 600)
+
+<CpyLink path="Lib/pickle.py" lines="400-600" />
+
+```python
+def save(self, obj, save_persistent_id=True):
+    # ...
+    # Check the memo
+    x = self.memo.get(id(obj))
+    if x is not None:
+        self.write(self.get(x[0]))
+        return
+
+    # Check for persistent id
+    pid = self.persistent_id(obj)
+    if pid is not None:
+        self.save_pers(pid)
+        return
+
+    # Check the memo again (recursion guard)
+    t = type(obj)
+    if t is int:
+        self.save_long(obj)
+        return
+    # ...
+
+    # Check copy_reg.dispatch_table
+    reduce = dispatch_table.get(t)
+    if reduce is not None:
+        rv = reduce(obj)
+    else:
+        # Check for __reduce_ex__ or __reduce__
+        reduce = getattr(obj, "__reduce_ex__", None)
+        if reduce is not None:
+            rv = reduce(self.proto)
+        else:
+            reduce = getattr(obj, "__reduce__", None)
+            if reduce is not None:
+                rv = reduce()
+            else:
+                raise PicklingError(...)
+    self.save_reduce(obj=obj, *rv)
+```
+
+`save` is the central dispatch method. It first consults the memo (to avoid
+re-serializing already-seen objects). Then it checks per-type fast paths (int,
+float, bytes, str, tuple, list, dict are all handled by dedicated `save_*`
+methods in the `dispatch` dict). For arbitrary objects it falls through to the
+four-step `__reduce__` chain: `dispatch_table` (user-registered reducers),
+`__reduce_ex__` (type-level, receives protocol version), then `__reduce__`.
+The return value from any of these is a 2-6 element tuple that `save_reduce`
+interprets.
+
+### Opcode `dispatch` dict in `Unpickler` (lines 751 to 1000)
+
+<CpyLink path="Lib/pickle.py" lines="751-1000" />
+
+```python
+class Unpickler:
+    def load(self):
+        """Read a pickled object representation from the open file."""
+        # ...
+        read = self._file_read
+        dispatch = self.dispatch
+        try:
+            while True:
+                key = read(1)
+                dispatch[key[0]](self)
+        except _Stop as stopinst:
+            return stopinst.value
+
+    dispatch = {}
+
+    def load_int(self):
+        data = self.readline()[:-1]
+        self.append(int(data, 0))
+    dispatch[INT[0]] = load_int
+
+    def load_binint(self):
+        self.append(unpack('<i', self.read(4))[0])
+    dispatch[BININT[0]] = load_binint
+    # ... ~80 more entries
+```
+
+The unpickler is a stack machine. `load` reads one byte at a time and indexes
+into `dispatch` (a class-level dict mapping opcode byte integer to handler
+method). Each handler pops arguments from `self.stack`, reconstructs a Python
+object, and pushes the result. `MARK` pushes a sentinel; `POP_MARK` drains the
+stack back to that sentinel to form a list or dict. `BUILD` calls
+`__setstate__` or updates `__dict__`. `REDUCE` pops `(callable, args)` and
+calls it. `STOP` raises `_Stop(value)` to break the loop and return the top of
+stack as the result.
+
+### Framing in protocol 4+ (lines 101 to 200)
+
+<CpyLink path="Lib/pickle.py" lines="101-200" />
+
+```python
+class _Framer:
+    _FRAME_SIZE_MIN = 4
+    _FRAME_SIZE_TARGET = 64 * 1024
+
+    def start_framing(self):
+        self.current_frame = self.file_write
+
+    def end_framing(self):
+        if self.current_frame and self.current_frame is not self.file_write:
+            self.commit_frame(force=True)
+            self.current_frame = None
+
+    def commit_frame(self, force=False):
+        if self.current_frame:
+            f = self.current_frame
+            if f.tell() >= self._FRAME_SIZE_TARGET or force:
+                data = f.getvalue()
+                write = self.file_write
+                write(FRAME)
+                write(pack("<Q", len(data)))
+                write(data)
+                f.seek(0)
+                f.truncate()
+```
+
+Protocol 4 wraps the byte stream in length-prefixed frames (`FRAME` opcode
+followed by an 8-byte little-endian length). Frames allow a receiver to
+allocate the right buffer before reading and enable efficient chunked transfer.
+`_Framer` buffers writes into an in-memory `BytesIO`; once the buffer exceeds
+`_FRAME_SIZE_TARGET` (64 KiB) or the stream ends, `commit_frame` flushes it
+with the frame header. `_Unframer` on the read side reads the 8-byte length and
+pre-buffers the full frame before dispatching opcodes, so `read(n)` inside the
+frame is always satisfied from memory.
+
+### Memo mechanics (lines 600 to 750)
+
+<CpyLink path="Lib/pickle.py" lines="600-750" />
+
+```python
+# Pickler side
+def memoize(self, obj):
+    assert id(obj) not in self.memo
+    idx = len(self.memo)
+    self.memo[id(obj)] = idx, obj
+    self.write(self.put(idx))
+
+def put(self, idx):
+    if self.bin:
+        if idx < 256:
+            return BINPUT + pack("<B", idx)
+        else:
+            return LONG_BINPUT + pack("<I", idx)
+    return PUT + repr(idx).encode("ascii") + b'\n'
+
+# Unpickler side
+def load_put(self):
+    i = int(self.readline()[:-1])
+    if i < 0:
+        raise ValueError("negative MEMOIZE index")
+    self.memo[i] = self.stack[-1]
+dispatch[PUT[0]] = load_put
+```
+
+The pickler memo maps `id(obj)` to `(index, obj)`. The `obj` reference inside
+the tuple is intentional: it prevents the object from being garbage-collected
+(and its id reused) while pickling is in progress. On the unpickler side the
+memo is a plain index-to-object dict. `GET`/`BINGET` opcodes push a copy of
+the already-seen object onto the stack. The `MEMOIZE` opcode (protocol 4+) is
+a shorter form of `PUT` that assigns the next available index without encoding
+the index explicitly in the stream.

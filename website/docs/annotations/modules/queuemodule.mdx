@@ -1,0 +1,145 @@
+---
+title: Modules/_queuemodule.c
+description: C implementation of queue.SimpleQueue — an unbounded thread-safe FIFO backed by a deque and a condition variable.
+cpython_path: Modules/_queuemodule.c
+cpython_version: "3.14"
+lines: 600
+status: annotated
+ported_to: module/queue/module.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Modules/_queuemodule.c`
+
+<CpyLink path="Modules/_queuemodule.c" />
+
+The C backend for `queue.SimpleQueue`, the unbounded, thread-safe FIFO
+introduced in Python 3.7. The full `Queue`, `LifoQueue`, `PriorityQueue`,
+`Empty`, and `Full` classes remain in `Lib/queue.py`; only `SimpleQueue`
+gets a C acceleration because it is the one used most often by the standard
+library itself (e.g., by `logging`).
+
+`SimpleQueue` stores items in a `collections.deque` and uses a
+`threading.Condition` (wrapping a `threading.Lock`) to block `get` callers
+when the deque is empty and to wake them when `put` adds an item. The lock
+is held only long enough to append or pop and to signal the condition; the
+design avoids holding the GIL across the `Condition.wait` call by releasing
+it inside CPython's `PyObject_CallMethodObjArgs` path.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Modules/_queuemodule.c" lines="1-80">1-80</Cpy> | includes, `simplequeueobject` struct | Type struct: `sq_queue` (deque), `sq_mutex` (Lock), `sq_cond` (Condition), `sq_count` (semaphore for `get`). | `module/queue/module.go:SimpleQueue` |
+| <Cpy path="Modules/_queuemodule.c" lines="80-250">80-250</Cpy> | `simplequeue_new`, `simplequeue_init`, `simplequeue_dealloc` | Allocation: creates the deque and condition objects from the `_collections` and `threading` C APIs. | `module/queue/module.go:NewSimpleQueue` |
+| <Cpy path="Modules/_queuemodule.c" lines="250-400">250-400</Cpy> | `simplequeue_put_impl`, `simplequeue_put_nowait` | Append item to deque; call `Condition.notify()` to wake one blocked `get`. `put_nowait` is an alias with `block=False, timeout=None`. | `module/queue/module.go:Put` |
+| <Cpy path="Modules/_queuemodule.c" lines="400-530">400-530</Cpy> | `simplequeue_get_impl`, `simplequeue_get_nowait` | Pop from deque; if empty and `block=True`, call `Condition.wait(timeout)`. Raises `Empty` on timeout or when `block=False` and queue is empty. | `module/queue/module.go:Get` |
+| <Cpy path="Modules/_queuemodule.c" lines="530-600">530-600</Cpy> | `simplequeue_qsize`, `simplequeue_empty`, `_queuemodule`, `PyInit__queue` | Size queries, module def, and entry point. | `module/queue/module.go:Module` |
+
+## Reading
+
+### `simplequeue_put` and condition variable notify (lines 250 to 400)
+
+<CpyLink path="Modules/_queuemodule.c" lines="250-400" />
+
+`put` never blocks. It appends to the deque under the condition lock and
+then signals one waiter:
+
+```c
+static PyObject *
+simplequeue_put_impl(simplequeueobject *self, PyObject *item,
+                     int block, PyObject *timeout)
+{
+    /* block and timeout are accepted for API compatibility but ignored;
+       SimpleQueue is unbounded so put never blocks. */
+
+    /* Acquire the condition, append, notify, release. */
+    if (_PyObject_CallMethodIdNoArgs((PyObject *)self->sq_cond,
+                                     &PyId_acquire) == NULL)
+        return NULL;
+
+    if (PyObject_CallMethodObjArgs(self->sq_queue,
+                                   _Py_ID(append), item, NULL) == NULL)
+        goto error;
+
+    /* notify() wakes exactly one thread waiting in get(). */
+    if (_PyObject_CallMethodIdNoArgs((PyObject *)self->sq_cond,
+                                     &PyId_notify) == NULL)
+        goto error;
+
+    if (_PyObject_CallMethodIdNoArgs((PyObject *)self->sq_cond,
+                                     &PyId_release) == NULL)
+        return NULL;
+
+    Py_RETURN_NONE;
+error:
+    _PyObject_CallMethodIdNoArgs((PyObject *)self->sq_cond, &PyId_release);
+    return NULL;
+}
+```
+
+`block` and `timeout` are accepted for interface symmetry with `Queue.put`
+but are silently ignored — an unbounded queue never needs to block the
+producer.
+
+### `simplequeue_get` timed wait (lines 400 to 530)
+
+<CpyLink path="Modules/_queuemodule.c" lines="400-530" />
+
+`get` is more involved because it must handle blocking with an optional
+deadline:
+
+```c
+static PyObject *
+simplequeue_get_impl(simplequeueobject *self, int block, PyObject *timeout)
+{
+    /* Acquire condition. */
+    if (_PyObject_CallMethodIdNoArgs((PyObject *)self->sq_cond,
+                                     &PyId_acquire) == NULL)
+        return NULL;
+
+    /* If the deque is empty and block=True, wait (possibly with timeout). */
+    while (PyObject_IsTrue(
+               PyObject_CallMethodNoArgs(self->sq_queue, &PyId___len__)) == 0) {
+        if (!block) {
+            /* Non-blocking: raise Empty immediately. */
+            _PyObject_CallMethodIdNoArgs(self->sq_cond, &PyId_release);
+            PyErr_SetNone(EmptyError);
+            return NULL;
+        }
+        /* Condition.wait(timeout) releases the lock, sleeps, reacquires. */
+        PyObject *rc = PyObject_CallMethodOneArg(
+            (PyObject *)self->sq_cond, &PyId_wait, timeout);
+        if (rc == NULL) goto error;
+        if (rc == Py_False) {
+            /* wait() returned False: timeout expired. */
+            Py_DECREF(rc);
+            _PyObject_CallMethodIdNoArgs(self->sq_cond, &PyId_release);
+            PyErr_SetNone(EmptyError);
+            return NULL;
+        }
+        Py_DECREF(rc);
+    }
+
+    /* Deque has at least one item: pop from the left. */
+    PyObject *item = PyObject_CallMethodNoArgs(self->sq_queue,
+                                               &PyId_popleft);
+    _PyObject_CallMethodIdNoArgs(self->sq_cond, &PyId_release);
+    return item;
+
+error:
+    _PyObject_CallMethodIdNoArgs(self->sq_cond, &PyId_release);
+    return NULL;
+}
+```
+
+The `while` loop re-checks the length after each `wait` return to guard
+against spurious wakeups. `Condition.wait` releases the underlying lock
+before sleeping, so other threads can call `put` while a `get` is blocked.
+`timeout` is passed directly to `Condition.wait`; `threading` converts it
+from seconds to an absolute deadline internally.
+
+In gopy, `module/queue/module.go` mirrors this pattern using a Go channel
+and `time.After` for the timeout path, achieving the same semantics without
+the explicit condition variable.

@@ -1,0 +1,219 @@
+---
+title: Lib/warnings.py
+description: Pure-Python warning machinery; the hot path runs in the C _warnings module but this file owns filters, formatwarning, showwarning, and catch_warnings.
+cpython_path: Lib/warnings.py
+cpython_version: "3.14"
+lines: 470
+status: annotated
+ported_to: module/warnings/module.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Lib/warnings.py`
+
+<CpyLink path="Lib/warnings.py" />
+
+`warnings.py` is the Python-level half of the warning system. The
+performance-sensitive dispatch path lives in `Modules/_warnings.c`; when
+that C module is available it overrides `warn` and `warn_explicit` with
+compiled equivalents that share the same `filters` list and call back into
+the Python `showwarning` and `formatwarning` when they need to display
+output.
+
+The file is structured around four concerns:
+
+1. **Filter management** - `filters` is a module-level list of 5-tuples
+   `(action, message_re, category, module_re, lineno)`. `filterwarnings`,
+   `simplefilter`, and `resetwarnings` mutate it. `_filters_mutated` bumps
+   `_filters_version` so the C layer knows to discard its fast-path cache.
+
+2. **Warning dispatch** - `warn_explicit` walks the filter list, checks the
+   per-module `registry` dict for already-seen warnings, and either raises,
+   logs, or ignores based on the matched action.
+
+3. **Formatting and display** - `formatwarning` assembles the text; the
+   default `showwarning` writes to `sys.stderr`.
+
+4. **State save/restore** - `catch_warnings` is a context manager used in
+   tests and import machinery to snapshot and roll back the full filter
+   state, the `showwarning` hook, and the `_filters_version` counter.
+
+In gopy, the `_warnings` C module's hot path is handled in `vm/eval.go`.
+`module/warnings/module.go` registers the Python-visible names and
+implements the filter list operations.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Lib/warnings.py" lines="1-30">1-30</Cpy> | Module header, `filters`, `defaultaction`, `onceregistry`, `_filters_version` | Declares the module-level filter list and the version counter polled by the C layer. | `module/warnings/module.go` |
+| <Cpy path="Lib/warnings.py" lines="31-80">31-80</Cpy> | `warn(message, category, stacklevel, source)` | Public entry point; normalises `message` to a warning instance, computes `filename`/`lineno` from the call stack, then calls `warn_explicit`. | `module/warnings/module.go` |
+| <Cpy path="Lib/warnings.py" lines="81-200">81-200</Cpy> | `warn_explicit(message, category, filename, lineno, module, registry, module_globals, source)` | Low-level dispatch: checks `__warningregistry__`, walks `filters`, applies action. | `module/warnings/module.go` |
+| <Cpy path="Lib/warnings.py" lines="201-260">201-260</Cpy> | `showwarning`, `formatwarning`, `_showwarning_orig`, `_showwarnmsg`, `_showwarnmsg_impl` | Display chain: `_showwarnmsg` allows a `showwarning` override; `formatwarning` assembles the text. | `module/warnings/module.go` |
+| <Cpy path="Lib/warnings.py" lines="261-370">261-370</Cpy> | `filterwarnings`, `simplefilter`, `resetwarnings`, `_filters_mutated` | Mutate the `filters` list and bump `_filters_version`. | `module/warnings/module.go` |
+| <Cpy path="Lib/warnings.py" lines="371-470">371-470</Cpy> | `catch_warnings` | Context manager that snapshots and restores `filters`, `showwarning`, and related globals. | `module/warnings/module.go` |
+
+## Reading
+
+### `warn` stack-frame inspection (lines 31 to 80)
+
+<CpyLink path="Lib/warnings.py" lines="31-80" />
+
+```python
+def warn(message, category=UserWarning, stacklevel=1, source=None, *,
+         skip_file_prefixes=()):
+    if isinstance(message, Warning):
+        category = message.__class__
+    if not (isinstance(category, type) and issubclass(category, Warning)):
+        raise TypeError("category must be a Warning subclass, not '{:s}'".format(
+            type(category).__name__))
+    # determine the call site
+    try:
+        caller = sys._getframe(stacklevel)
+    except ValueError:
+        ...
+        lineno = 1
+    else:
+        globals = caller.f_globals
+        lineno = caller.f_lineno
+        module = globals.get('__name__') or globals.get('__file__')
+        filename = globals.get('__file__')
+        ...
+    warn_explicit(message, category, filename, lineno, module, registry,
+                  module_globals, source)
+```
+
+`warn` normalises the `message` argument: if a `Warning` instance is
+passed, the category is taken from its class. The `stacklevel` parameter
+walks up `stacklevel` frames via `sys._getframe` so that wrapper
+functions that call `warn` can attribute the warning to their caller.
+`skip_file_prefixes` (new in 3.12) provides an alternative: frames whose
+`__file__` starts with any prefix are skipped automatically, which is
+useful for library utilities that may be several levels deep.
+
+### `warn_explicit` filter walk and registry deduplication (lines 81 to 200)
+
+<CpyLink path="Lib/warnings.py" lines="81-200" />
+
+```python
+def warn_explicit(message, category, filename, lineno,
+                  module=None, registry=None, module_globals=None,
+                  source=None):
+    ...
+    key = (text, category, lineno)
+    if registry.get(key):
+        return
+    ...
+    for item in filters:
+        action, msg, cat, mod, ln = item
+        if ((msg is None or msg.match(text)) and
+            issubclass(category, cat) and
+            (mod is None or mod.match(module)) and
+            (ln == 0 or lineno == ln)):
+            break
+    else:
+        action = defaultaction
+
+    if action == 'error':
+        raise category(message)
+    if action == 'ignore':
+        registry[key] = 1
+        return
+    if action in ('once', 'default'):
+        registry[key] = 1
+    ...
+    _showwarnmsg(_formatwarnmsg(msg))
+```
+
+`warn_explicit` is the only place in the Python layer where the full
+filter walk occurs. The per-module `registry` (typically
+`sys.modules[module].__warningregistry__`) deduplicates warnings so
+that the `"default"` action shows each `(text, category, lineno)` triple
+only once per module. The `"once"` action uses `onceregistry` (a
+module-level dict) to deduplicate across all modules. `"module"` stores
+`(text, category, 0)` in the per-module registry so the warning fires at
+most once per module regardless of line. `"always"` skips registry writes
+entirely.
+
+### `formatwarning` and `showwarning` (lines 201 to 260)
+
+<CpyLink path="Lib/warnings.py" lines="201-260" />
+
+```python
+def formatwarning(message, category, filename, lineno, line=None):
+    s = "%s:%s: %s: %s\n" % (filename, lineno, category.__name__, message)
+    if line is None:
+        try:
+            import linecache
+            line = linecache.getline(filename, lineno)
+        except OSError:
+            pass
+    if line:
+        line = line.strip()
+        s += "  %s\n" % line
+    return s
+
+def showwarning(message, category, filename, lineno, file=None, line=None):
+    if file is None:
+        file = sys.stderr
+        if file is None:
+            return
+    text = formatwarning(message, category, filename, lineno, line)
+    try:
+        file.write(text)
+    except OSError:
+        pass
+```
+
+`formatwarning` optionally fetches the source line via `linecache` so the
+warning message includes a snippet of the offending code. `showwarning` is
+the default display hook; user code can replace it by assigning
+`warnings.showwarning = my_func`. `_showwarnmsg` checks whether
+`showwarning` has been replaced and routes accordingly: if the original
+function is still in place it passes a `WarningMessage` object to
+`_showwarnmsg_impl` to avoid constructing a temporary string when stderr
+is not a tty; otherwise it calls the user-supplied hook with the classic
+six-argument signature for backwards compatibility.
+
+### `catch_warnings` context manager (lines 371 to 470)
+
+<CpyLink path="Lib/warnings.py" lines="371-470" />
+
+```python
+class catch_warnings(object):
+    def __init__(self, *, record=False, module=None):
+        self._record = record
+        self._module = sys.modules['warnings'] if module is None else module
+        self._entered = False
+
+    def __enter__(self):
+        ...
+        self._entered = True
+        self._filters = self._module.filters
+        self._module.filters = self._filters[:]
+        self._module._filters_mutated()
+        self._showwarning = self._module.showwarning
+        self._showwarnmsg_impl = self._module._showwarnmsg_impl
+        if self._record:
+            log = []
+            self._module._showwarnmsg_impl = log.append
+            self._module.showwarning = self._module._showwarning_orig
+            return log
+        else:
+            return None
+
+    def __exit__(self, *exc_info):
+        self._module.filters = self._filters
+        self._module._filters_mutated()
+        self._module.showwarning = self._showwarning
+        self._module._showwarnmsg_impl = self._showwarnmsg_impl
+```
+
+`catch_warnings` is the standard way to isolate warning state in tests.
+`__enter__` makes a shallow copy of `filters` (so that mutations inside
+the `with` block do not affect the outer state) and saves `showwarning`.
+When `record=True` it swaps `_showwarnmsg_impl` for a list-append so
+that all warnings emitted inside the block are collected and returned as
+`WarningMessage` objects. `__exit__` restores every field exactly, calling
+`_filters_mutated()` again so the C layer drops its cached filter state.

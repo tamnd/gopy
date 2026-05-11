@@ -1,0 +1,209 @@
+---
+title: Lib/imaplib.py
+description: IMAP4 client implementation; provides IMAP4 and IMAP4_SSL for reading and managing mail on an IMAP server.
+cpython_path: Lib/imaplib.py
+cpython_version: "3.14"
+lines: 1300
+status: annotated
+ported_to: module/imaplib/module.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Lib/imaplib.py`
+
+<CpyLink path="Lib/imaplib.py" />
+
+`imaplib.py` implements the client side of the IMAP4rev1 protocol (RFC
+3501). It covers the full command set needed to connect, authenticate,
+select mailboxes, search for messages, fetch message data, manipulate
+flags, and log out. The two main classes are `IMAP4` (plain TCP) and
+`IMAP4_SSL` (TLS from the first byte); a deprecated `IMAP4_stream` variant
+is also provided for communicating with a subprocess.
+
+IMAP4 is a tagged protocol: every command the client sends carries a
+unique tag (e.g. `ABCD0001`) and the server responds with a line starting
+with that tag when the command completes. Intermediate untagged responses
+(`*`) carry the actual data. `imaplib` handles this internally: `_command`
+sends the tagged request, `_get_response` collects untagged responses into
+`self.untagged_responses`, and the per-command methods (`fetch`, `search`,
+etc.) read the appropriate key from that dict after the tagged completion
+line arrives.
+
+Literals are another layer of complexity. IMAP4 uses `{n}` synchronizing
+literals for large strings: the client sends the command up to the literal
+marker, the server responds with a `+ go ahead` continuation, and the
+client sends the literal bytes. `_command_complete` manages this
+continuation handshake transparently.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Lib/imaplib.py" lines="1-80">1-80</Cpy> | Module header, constants, `Commands` dict | Defines `IMAP4_PORT`, `IMAP4_SSL_PORT`, `D` debug flag, `Commands` mapping each IMAP command to its valid states, and `Untagged_status` regex. | `module/imaplib/module.go` |
+| <Cpy path="Lib/imaplib.py" lines="81-260">81-260</Cpy> | `IMAP4.__init__`, `open`, `read`, `readline`, `send`, `shutdown` | Establishes the TCP connection; reads the server greeting; initialises tag counter, state machine, and `untagged_responses` dict. | `module/imaplib/module.go` |
+| <Cpy path="Lib/imaplib.py" lines="261-480">261-480</Cpy> | `_command`, `_command_complete`, `_get_response`, `_get_line` | Core tagged-command engine; assembles the tagged request line, handles `{n}` literal continuations, collects untagged responses until the tagged completion arrives. | `module/imaplib/module.go` |
+| <Cpy path="Lib/imaplib.py" lines="481-650">481-650</Cpy> | `capability`, `login`, `authenticate`, `logout` | Session management; `capability` issues CAPABILITY and parses the result; `authenticate` drives the SASL challenge-response loop; `logout` sends LOGOUT and closes the socket. | `module/imaplib/module.go` |
+| <Cpy path="Lib/imaplib.py" lines="651-820">651-820</Cpy> | `select`, `examine`, `create`, `delete`, `rename`, `subscribe`, `unsubscribe`, `list`, `lsub` | Mailbox operations; `select` parses the EXISTS / FLAGS / UIDVALIDITY untagged responses and sets `self.MAILBOX_IS_READONLY`. | `module/imaplib/module.go` |
+| <Cpy path="Lib/imaplib.py" lines="821-980">821-980</Cpy> | `search`, `uid`, `fetch`, `store`, `copy`, `expunge` | Message operations; `uid` prefixes any command with `UID` so message numbers are interpreted as UIDs; `fetch` returns raw RFC 2822 message data. | `module/imaplib/module.go` |
+| <Cpy path="Lib/imaplib.py" lines="981-1150">981-1150</Cpy> | `_untagged_response`, `_parse_data`, `ParseFlags`, `Internaldate2tuple`, `Time2Internaldate` | Response parsing utilities; `ParseFlags` extracts a tuple of flag strings from a parenthesised list; date conversion functions handle IMAP's internal date format. | `module/imaplib/module.go` |
+| <Cpy path="Lib/imaplib.py" lines="1151-1300">1151-1300</Cpy> | `IMAP4_SSL`, `IMAP4_stream`, module-level helpers | `IMAP4_SSL` overrides `open` and `read`/`send` to operate on an `ssl.SSLSocket`; `IMAP4_stream` communicates with a subprocess via `subprocess.Popen`. | `module/imaplib/module.go` |
+
+## Reading
+
+### `_command` and the literal continuation handshake (lines 261 to 480)
+
+<CpyLink path="Lib/imaplib.py" lines="261-480" />
+
+```python
+def _command(self, name, *args):
+    ...
+    tag = self._new_tag()
+    data = bytes('%s %s' % (tag, name), 'ASCII')
+    for arg in args:
+        if arg is None:
+            continue
+        if isinstance(arg, str):
+            arg = bytes(arg, 'ASCII')
+        # Use literal form for arguments containing special chars
+        if b'\n' in arg or b'\r' in arg or not arg.isascii():
+            data = data + bytes(' {%s}' % len(arg), 'ASCII')
+            self.send(data + CRLF)
+            # Wait for continuation response
+            while self._get_response():
+                if self.tagged_commands[tag]:
+                    return tag
+            data = arg
+        else:
+            data = data + b' ' + arg
+    self.send(data + CRLF)
+    return tag
+
+def _command_complete(self, name, tag):
+    self._check_bye()
+    try:
+        typ, data = self._get_tagged_response(tag)
+    except IMAP4.abort as val:
+        raise IMAP4.abort('command: %s => %s' % (name, val))
+    ...
+    return typ, data
+```
+
+`_command` builds the tagged command line incrementally. Each argument is
+examined for characters that require literal encoding (`{n}` form): newlines,
+carriage returns, or non-ASCII bytes all force a literal. For each literal
+the partially-built line is sent, a `+` continuation line is awaited, and
+then the raw literal bytes are sent. Once all arguments are sent the method
+returns the tag string. `_command_complete` blocks until `_get_response`
+has collected the corresponding tagged `OK`/`NO`/`BAD` line.
+
+### `login` and `authenticate` (lines 481 to 650)
+
+<CpyLink path="Lib/imaplib.py" lines="481-650" />
+
+```python
+def login(self, user, password):
+    typ, dat = self._simple_command('LOGIN', user, password)
+    if typ != 'OK':
+        raise self.error(dat[-1])
+    self.state = 'AUTH'
+    return typ, dat
+
+def authenticate(self, mechanism, authobject):
+    mech = mechanism.upper()
+    # RFC 2060 section 6.2.2:
+    # The client MUST be able to accept up to 1000 characters in
+    # a single continuation request.
+    self._simple_command('AUTHENTICATE', mech)
+    # Loop over challenge-response exchanges
+    while True:
+        typ, dat = self._get_response()
+        if typ != '+':
+            break
+        try:
+            dat = b64decode(dat[0] or b'')
+            dat = authobject(dat)
+        except self.abort as val:
+            raise
+        if dat is None:
+            self.send(b'*' + CRLF)
+            raise self.abort('AUTHENTICATE aborted')
+        self.send(b64encode(dat) + CRLF)
+    return self._command_complete('AUTHENTICATE', self.tagnum)
+```
+
+`login` is the simple plaintext path; it transmits credentials directly
+in the LOGIN command and is only appropriate over TLS. `authenticate`
+implements the SASL challenge-response loop used by mechanisms like
+PLAIN, GSSAPI, and SCRAM-SHA-256. The caller supplies an `authobject`
+callable that receives each base64-decoded challenge and returns the
+response bytes; `authenticate` base64-encodes the response and sends it.
+The client can abort the exchange at any point by returning `None` from
+`authobject`, which sends a `*` cancellation line.
+
+### `select` and mailbox state (lines 651 to 820)
+
+<CpyLink path="Lib/imaplib.py" lines="651-820" />
+
+```python
+def select(self, mailbox='INBOX', readonly=False):
+    if readonly:
+        typ, dat = self._simple_command('EXAMINE', mailbox)
+    else:
+        typ, dat = self._simple_command('SELECT', mailbox)
+    if typ == 'OK':
+        self.state = 'SELECTED'
+    else:
+        if self.state == 'SELECTED':
+            self.state = 'AUTH'
+        if typ == 'NO':
+            # [READ-ONLY] response code
+            if self._match(re.compile(r'^\[READ-ONLY\]', re.I), dat[-1]):
+                self.MAILBOX_IS_READONLY = True
+                typ = 'OK'
+    return typ, self.untagged_responses.get('EXISTS', [None])
+```
+
+`select` (and the read-only variant `examine`) transitions the connection
+state machine to `SELECTED`. The untagged responses emitted by the server
+while SELECT is in flight are automatically collected into
+`self.untagged_responses` by `_get_response`. After the tagged OK arrives,
+the caller reads `untagged_responses['EXISTS']` for the message count,
+`untagged_responses['FLAGS']` for the defined flag set, and
+`untagged_responses['UIDVALIDITY']` to detect whether cached UIDs are
+still valid. `select` returns the EXISTS value directly for convenience.
+
+### `fetch` and `search` (lines 821 to 980)
+
+<CpyLink path="Lib/imaplib.py" lines="821-980" />
+
+```python
+def fetch(self, message_set, message_parts):
+    name = 'FETCH'
+    typ, dat = self._simple_command(name, message_set, message_parts)
+    return self._untagged_response(typ, dat, name)
+
+def search(self, charset, *criteria):
+    name = 'SEARCH'
+    if charset:
+        typ, dat = self._simple_command(name, 'CHARSET', charset, *criteria)
+    else:
+        typ, dat = self._simple_command(name, *criteria)
+    return self._untagged_response(typ, dat, name)
+
+def _untagged_response(self, typ, dat, name):
+    if typ == 'NO':
+        return typ, dat
+    if name not in self.untagged_responses:
+        return typ, [None]
+    data = self.untagged_responses.pop(name)
+    return typ, data
+```
+
+`fetch` and `search` are thin wrappers around `_simple_command` that
+collect the untagged response under the matching key (`FETCH` or `SEARCH`)
+and pop it from the dict. The returned data list for a `SEARCH` is a list
+of message number strings (e.g. `[b'1 3 7']`); for `FETCH` it is a list
+of `(header, body)` tuples as raw bytes. The `uid` method prepends `UID`
+to any command name so the same calling convention works for both
+sequence-number and UID-based operations.

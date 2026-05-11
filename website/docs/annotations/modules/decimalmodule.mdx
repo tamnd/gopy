@@ -1,0 +1,234 @@
+---
+title: Modules/_decimal/_decimal.c
+description: C extension implementing the decimal module by wrapping the mpdecimal arbitrary-precision library; provides Decimal and Context heap types with full IEEE 754-2008 arithmetic.
+cpython_path: Modules/_decimal/_decimal.c
+cpython_version: "3.14"
+lines: 6900
+status: annotated
+ported_to: module/decimal/module.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Modules/_decimal/_decimal.c`
+
+<CpyLink path="Modules/_decimal/_decimal.c" />
+
+`_decimal.c` is the C extension that backs Python's `decimal` standard-library
+module. It wraps the `mpdecimal` library (maintained by Stefan Krah), which
+provides arbitrary-precision decimal floating-point arithmetic conforming to
+IBM's General Decimal Arithmetic (GDA) specification and IEEE 754-2008.
+
+The file defines two heap types. `PyDec_Type` (`decimal.Decimal`) stores its
+value as an `mpd_t` embedded in the object struct; the raw coefficient digits
+live in either an inline `mpd_uint128_triple_t` union (for small values) or a
+heap-allocated digit array for larger ones. `PyDecContext_Type`
+(`decimal.Context`) wraps an `mpd_context_t`, which controls precision, rounding
+mode, and signal trapping.
+
+Most arithmetic methods follow a two-step pattern: convert all operands to
+`mpd_t` (via `PyDec_FromObject`), call the appropriate `mpd_q*` function with
+the thread-local context, then wrap the result in a new `PyDec_Type` instance.
+Signal flags raised during the operation are translated into Python exceptions
+or stored as status bits on the context depending on the context's `traps` mask.
+
+The file also manages the per-thread context stack. Each OS thread owns a
+`decimal_state` struct that holds the current `Context` and an optional context
+stack used by `localcontext()`. The `_PyDec_SetCurrentContext` / 
+`_PyDec_GetCurrentContext` helpers read and write that struct.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Modules/_decimal/_decimal.c" lines="1-120">1-120</Cpy> | includes, `decimal_state`, `DecimalObject` | Per-module state struct; `DecimalObject` layout with embedded `mpd_t`. | `module/decimal/module.go` (preamble) |
+| <Cpy path="Modules/_decimal/_decimal.c" lines="120-350">120-350</Cpy> | `_PyDec_GetCurrentContext`, `_PyDec_SetCurrentContext`, `context_copy` | Thread-local context accessors; `context_copy` snapshots an `mpd_context_t`. | `module/decimal/module.go:GetContext` |
+| <Cpy path="Modules/_decimal/_decimal.c" lines="350-700">350-700</Cpy> | `PyDec_FromObject`, `PyDecType_FromLong`, `PyDecType_FromFloat`, `PyDecType_FromString` | Conversion constructors. Dispatch on input type; `FromFloat` uses `mpd_from_double` then applies the context. | `module/decimal/module.go:FromObject` |
+| <Cpy path="Modules/_decimal/_decimal.c" lines="700-1100">700-1100</Cpy> | `dec_new`, `dec_init`, `dec_dealloc`, `dec_repr`, `dec_str` | `Decimal.__new__` / `__repr__` / `__str__`; `dec_new` delegates to `PyDec_FromObject` after validating argument count. | `module/decimal/module.go:DecNew` |
+| <Cpy path="Modules/_decimal/_decimal.c" lines="1100-1500">1100-1500</Cpy> | `dec_richcompare`, `dec_hash` | Comparison via `mpd_qcmp`; `dec_hash` reduces to the integer hash path when the decimal has no fractional part, guaranteeing `hash(Decimal("2.0")) == hash(2)`. | `module/decimal/module.go:DecHash` |
+| <Cpy path="Modules/_decimal/_decimal.c" lines="1500-2200">1500-2200</Cpy> | `nm_add`, `nm_sub`, `nm_mul`, `nm_truediv`, `nm_floordiv`, `nm_mod`, `nm_power`, `nm_neg`, `nm_pos`, `nm_abs` | `nb_*` number-protocol slots; each calls the matching `mpd_q*` function with the current context. | `module/decimal/module.go:DecAdd` |
+| <Cpy path="Modules/_decimal/_decimal.c" lines="2200-2800">2200-2800</Cpy> | `dec_as_integer_ratio`, `dec_to_eng_string`, `dec_quantize`, `dec_same_quantum`, `dec_sqrt`, `dec_exp`, `dec_ln`, `dec_log10` | Decimal-specific math methods; most are thin wrappers around the matching `mpd_q*` function. | `module/decimal/module.go:DecQuantize` |
+| <Cpy path="Modules/_decimal/_decimal.c" lines="2800-3600">2800-3600</Cpy> | `dec_context_manager`, `ContextManager_enter`, `ContextManager_exit` | `Context.localcontext()` context manager; saves the current context on enter and restores it on exit via `_PyDec_SetCurrentContext`. | `module/decimal/module.go:LocalContext` |
+| <Cpy path="Modules/_decimal/_decimal.c" lines="3600-4600">3600-4600</Cpy> | `PyDecContext_Type`, `context_new`, `context_init`, `context_repr`, context property getters/setters | `decimal.Context` type; each property (precision, rounding, Emax, Emin, capitals, clamp, traps, flags) has a C getter/setter that reads or writes the embedded `mpd_context_t`. | `module/decimal/module.go:Context` |
+| <Cpy path="Modules/_decimal/_decimal.c" lines="4600-5600">4600-5600</Cpy> | `PyDec_Type` definition, `dec_methods[]`, `dec_getsets[]`, number-methods struct | Full heap-type definition for `decimal.Decimal`, including `nb_*`, `tp_richcompare`, `tp_hash`, `tp_repr`, `tp_str`, `tp_new`. | `module/decimal/module.go:DecType` |
+| <Cpy path="Modules/_decimal/_decimal.c" lines="5600-6400">5600-6400</Cpy> | signal constants, `DecimalException` subclass hierarchy, `_decimal_exec` | Define and register `InvalidOperation`, `DivisionByZero`, `Overflow`, `Underflow`, `Subnormal`, `Inexact`, `Rounded`, `FloatOperation`; build signal-to-exception map. | `module/decimal/module.go:Signals` |
+| <Cpy path="Modules/_decimal/_decimal.c" lines="6400-6900">6400-6900</Cpy> | `_decimalmodule`, `PyInit__decimal` | Module slot table, `_decimal_exec`, entry point; registers both types and all exception classes. | `module/decimal/module.go:Module` |
+
+## Reading
+
+### Thread-local context: `_PyDec_GetCurrentContext` (lines 120 to 350)
+
+<CpyLink path="Modules/_decimal/_decimal.c" lines="120-350" />
+
+Every operation that does not take an explicit `context=` argument reads the
+thread-local context. CPython stores it in a `decimal_state` struct hung off
+the interpreter's thread state:
+
+```c
+static PyObject *
+_PyDec_GetCurrentContext(PyObject *module)
+{
+    decimal_state *state = get_module_state(module);
+    PyObject *ctx = PyThread_tss_get(&state->tss_context_key);
+    if (ctx == NULL) {
+        /* First access on this thread: install a copy of the default context. */
+        ctx = context_copy(state->default_context, NULL);
+        if (ctx == NULL) return NULL;
+        if (PyThread_tss_set(&state->tss_context_key, ctx) != 0) {
+            Py_DECREF(ctx);
+            PyErr_NoMemory();
+            return NULL;
+        }
+    }
+    Py_INCREF(ctx);
+    return ctx;
+}
+```
+
+`_PyDec_SetCurrentContext` decrefs the old value and sets the new one. The
+`localcontext()` context manager calls `_PyDec_SetCurrentContext` on both enter
+(to push a fresh copy) and exit (to restore the saved pointer). The per-thread
+`tss_context_key` is a `Py_tss_t` created in `_decimal_exec` and destroyed in
+the module's `m_free`.
+
+In gopy the per-goroutine context will use a `goroutine-local` pattern backed
+by `sync.Map` keyed on goroutine ID, or a `context.Context` value, pending
+spec 1700.
+
+### `PyDec_FromObject`: type-dispatched construction (lines 350 to 700)
+
+<CpyLink path="Modules/_decimal/_decimal.c" lines="350-700" />
+
+`PyDec_FromObject` is the central conversion entry point used by both
+`dec_new` and the arithmetic slots:
+
+```c
+static PyObject *
+PyDec_FromObject(PyObject *v, PyObject *context)
+{
+    if (PyDec_Check(v)) {
+        /* Already a Decimal: return a copy. */
+        return dec_copy(v);
+    }
+    else if (PyLong_Check(v)) {
+        return PyDecType_FromLong(v, context);
+    }
+    else if (PyFloat_Check(v)) {
+        /* Raises FloatOperation if the context traps it. */
+        if (flags & MPD_Float_operation) {
+            return _PyDec_RaiseFloatOperation(module);
+        }
+        return PyDecType_FromFloat(v, context);
+    }
+    else if (PyUnicode_Check(v)) {
+        return PyDecType_FromString(v, context);
+    }
+    else if (PyTuple_Check(v)) {
+        /* sign-coefficient-exponent triple for sign-preserving round-trip. */
+        return PyDecType_FromSequence(v, context);
+    }
+    PyErr_Format(PyExc_TypeError,
+        "conversion from %s to Decimal is not supported", ...);
+    return NULL;
+}
+```
+
+The float branch is guarded by `MPD_Float_operation`. If the current context
+traps that signal, constructing a `Decimal` from a `float` raises
+`FloatOperation` instead of silently doing an inexact conversion.
+
+`PyDecType_FromLong` calls `mpd_qset_ssize` for small integers and
+`mpd_qimport_u32` for arbitrary-precision integers, handling the sign
+separately.
+
+### `dec_hash`: integer-compatible hashing (lines 1100 to 1500)
+
+<CpyLink path="Modules/_decimal/_decimal.c" lines="1100-1500" />
+
+Python requires `hash(x) == hash(y)` whenever `x == y`. Because
+`Decimal("2") == Decimal("2.0") == 2`, the hash function must produce the same
+value for all three:
+
+```c
+static Py_hash_t
+dec_hash(PyObject *v)
+{
+    mpd_uint128_triple_t triple = mpd_as_uint128_triple(MPD(v));
+
+    switch (triple.tag) {
+    case MPD_TRIPLE_QNAN:
+        return _Py_HashPointer(v);  /* NaN: identity hash */
+    case MPD_TRIPLE_INF:
+        return triple.sign ? _PyHASH_NINF : _PyHASH_INF;
+    default:
+        break;
+    }
+
+    /* Finite: reduce to a Python integer and use its hash. */
+    PyObject *i = PyLong_FromDecimal(v);   /* exact integer value * 10^exp */
+    if (triple.exp >= 0) {
+        /* coefficient * 10^exp — multiply out */
+        ...
+    } else {
+        /* coefficient / 10^(-exp) — use rational hash formula */
+        ...
+    }
+    Py_hash_t result = PyObject_Hash(i);
+    Py_DECREF(i);
+    return result;
+}
+```
+
+The rational path computes `hash(n/d) = hash(n) * modular_inverse(d, P) % P`
+where `P = sys.hash_info.modulus`, matching the formula used by `fractions.Fraction`.
+This guarantees `hash(Decimal("1.5")) == hash(fractions.Fraction(3, 2))`.
+
+### `dec_context_manager`: `localcontext()` (lines 2800 to 3600)
+
+<CpyLink path="Modules/_decimal/_decimal.c" lines="2800-3600" />
+
+`decimal.localcontext(ctx=None)` returns a context manager that installs a
+copy of `ctx` (or the current context if `ctx is None`) for the duration of
+the `with` block, then restores the original on exit:
+
+```c
+static PyObject *
+ContextManager_enter(PyObject *self, PyObject *args)
+{
+    ContextManagerObject *cm = (ContextManagerObject *)self;
+
+    /* Save the context that was current before the with block. */
+    cm->saved_context = _PyDec_GetCurrentContext(cm->module);
+    if (cm->saved_context == NULL) return NULL;
+
+    /* Install the new context. */
+    if (_PyDec_SetCurrentContext(cm->module, cm->ctx) < 0) return NULL;
+
+    Py_INCREF(cm->ctx);
+    return cm->ctx;
+}
+
+static PyObject *
+ContextManager_exit(PyObject *self, PyObject *args)
+{
+    ContextManagerObject *cm = (ContextManagerObject *)self;
+    int r = _PyDec_SetCurrentContext(cm->module, cm->saved_context);
+    Py_CLEAR(cm->saved_context);
+    if (r < 0) return NULL;
+    Py_RETURN_FALSE;   /* do not suppress exceptions */
+}
+```
+
+`ContextManager_exit` returns `False` so that exceptions raised inside the
+`with` block propagate normally. The `cm->saved_context` reference is owned by
+the context manager object and decreffed in its `tp_dealloc` if `__exit__` is
+never called (e.g., if the thread exits inside the block).
+
+## CPython 3.14 changes worth noting
+
+The `mpdecimal` library was updated to 4.0.0 in CPython 3.13 and remains at
+that version in 3.14. `mpd_uint128_triple_t` (the inline storage path for
+small coefficients) was introduced in mpdecimal 2.5 and is the default for
+64-bit platforms. The per-interpreter state struct (`decimal_state`) replaced
+module-level globals in CPython 3.12. The `FloatOperation` signal is raised
+by default (not trapped) since 3.3; this has not changed in 3.14.

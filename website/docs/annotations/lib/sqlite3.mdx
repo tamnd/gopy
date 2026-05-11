@@ -1,0 +1,238 @@
+---
+title: Lib/sqlite3/__init__.py
+description: Public API shim for the sqlite3 package; re-exports Connection, Cursor, Row, and all constants from the _sqlite3 C extension.
+cpython_path: Lib/sqlite3/__init__.py
+cpython_version: "3.14"
+lines: 32
+status: annotated
+ported_to: module/sqlite3/module.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Lib/sqlite3/__init__.py`
+
+<CpyLink path="Lib/sqlite3/__init__.py" />
+
+`Lib/sqlite3/__init__.py` is a 32-line shim that imports `_sqlite3` (the
+C extension in `Modules/_sqlite/`) and re-exports its public names. All
+the real work is in the C extension; the Python layer only sets
+`apilevel`, `threadsafety`, `paramstyle`, and the default `connect`
+function.
+
+The sqlite3 package is organized as three layers. The bottom layer is
+the SQLite amalgamation (`Modules/_sqlite/clinic/` and the vendored
+`Modules/_sqlite/sqlite3.c`), which ships as a single C source file
+compiled into CPython on platforms that do not have a system libsqlite3.
+The middle layer is `Modules/_sqlite/` which provides the Python types:
+`Connection`, `Cursor`, `Row`, `Statement`, `Blob`, and the exception
+hierarchy. The top layer is `Lib/sqlite3/` which holds the Python-level
+`__init__.py` and `dbapi2.py`.
+
+`connect` is the primary entry point. Its signature matches the DB-API 2.0
+specification (PEP 249): `connect(database, timeout=5.0, detect_types=0,
+isolation_level="", check_same_thread=True, factory=Connection,
+cached_statements=128, uri=False)`. The `factory` parameter lets callers
+substitute a custom `Connection` subclass without losing the C-level
+fast path.
+
+`Connection` exposes the full DB-API 2.0 interface plus several
+SQLite-specific extensions: `create_function`, `create_aggregate`,
+`create_collation`, `set_authorizer`, `set_progress_handler`,
+`set_trace_callback`, `enable_load_extension` (if compiled in),
+`load_extension`, `iterdump`, `backup`, and `blobopen`. In CPython 3.12+
+`Connection` gained the context-manager protocol directly (previously
+`contextlib.closing` was required).
+
+`Cursor` follows DB-API 2.0: `execute`, `executemany`, `executescript`,
+`fetchone`, `fetchmany`, `fetchall`, `close`, and the read-only attributes
+`description`, `rowcount`, and `lastrowid`.
+
+`Row` is a sequence-and-mapping hybrid: it supports integer indexing,
+slice indexing, and case-insensitive column-name lookup via `row["Name"]`.
+It compares equal to tuples with the same values.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Lib/sqlite3/__init__.py" lines="1-10">1-10</Cpy> | file header / `_sqlite3` import | Imports the C extension and captures the module reference. | `module/sqlite3/module.go` |
+| <Cpy path="Lib/sqlite3/__init__.py" lines="11-20">11-20</Cpy> | `apilevel`, `threadsafety`, `paramstyle` | DB-API 2.0 module-level attributes; `apilevel="2.0"`, `threadsafety=1`, `paramstyle="qmark"`. | `module/sqlite3/module.go` |
+| <Cpy path="Lib/sqlite3/__init__.py" lines="21-32">21-32</Cpy> | `connect`, `Connection`, `Cursor`, `Row`, exception re-exports | Re-exports from `_sqlite3`; `connect` is a direct alias for `_sqlite3.connect`. | `module/sqlite3/module.go` |
+
+## Reading
+
+### `connect` and `Connection` lifetime (C extension)
+
+<CpyLink path="Lib/sqlite3/dbapi2.py" lines="1-30" />
+
+```python
+# DB-API 2.0 compliance attributes
+apilevel = "2.0"
+threadsafety = 1   # Threads may share the module but not connections
+paramstyle = "qmark"
+
+from _sqlite3 import *
+from _sqlite3 import (
+    _deprecated_names,
+    connect as _connect,
+)
+
+def connect(database, timeout=5.0, detect_types=0,
+            isolation_level="",
+            check_same_thread=True,
+            factory=None, cached_statements=128, uri=False):
+    if factory is None:
+        return _connect(database, timeout, detect_types,
+                        isolation_level, check_same_thread,
+                        cached_statements, uri)
+    return factory(database, timeout, detect_types,
+                   isolation_level, check_same_thread,
+                   cached_statements, uri)
+```
+
+`connect` opens (or creates) a SQLite database at `database`. Passing
+`":memory:"` gives an in-process database with no file backing. The
+`uri=True` flag allows SQLite URI syntax: `file:///tmp/test.db?mode=ro`
+opens read-only.
+
+`timeout` is the number of seconds to wait for a lock before raising
+`OperationalError`. `isolation_level` controls auto-commit: the empty
+string `""` is the DB-API default (deferred transactions); `None` disables
+implicit `BEGIN`, putting the connection in autocommit mode.
+`check_same_thread=True` (the default) raises `ProgrammingError` if the
+connection is accessed from a thread other than the one that created it.
+
+After `connect`, the connection object must be closed explicitly or used
+as a context manager. `with sqlite3.connect(db) as con:` commits on clean
+exit and rolls back on exception, but does not close the connection;
+call `con.close()` separately.
+
+### `Cursor.execute` and parameter binding
+
+<CpyLink path="Modules/_sqlite/cursor.c" lines="1-60" />
+
+```python
+# Example usage
+con = sqlite3.connect(":memory:")
+con.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, val TEXT)")
+con.execute("INSERT INTO t VALUES (?, ?)", (1, "hello"))
+con.execute("INSERT INTO t VALUES (?, ?)", (2, "world"))
+
+cur = con.cursor()
+cur.execute("SELECT id, val FROM t WHERE id = ?", (1,))
+row = cur.fetchone()
+print(row)          # (1, 'hello')
+print(cur.description)
+# (('id', None, None, None, None, None, None),
+#  ('val', None, None, None, None, None, None))
+```
+
+`execute` accepts a SQL string and an optional sequence or mapping of
+parameters. The `qmark` style uses `?` as positional placeholders;
+`named` style (`:name` or `@name`) uses a dict. Parameters are converted
+from Python types to SQLite types by a built-in adapter table: `None`
+maps to `NULL`, `int` to `INTEGER`, `float` to `REAL`, `str` to `TEXT`,
+`bytes` to `BLOB`. Custom types register via `register_adapter`.
+
+`executemany(sql, seq_of_params)` iterates `seq_of_params` and calls the
+C-level execute loop once per item. It is substantially faster than a
+Python loop over `execute` because the SQL is only parsed once.
+
+`executescript(sql_script)` issues a `COMMIT` first, then executes the
+entire script as a sequence of statements separated by semicolons. It
+bypasses the adapter/converter machinery and ignores `isolation_level`.
+
+### Custom functions and aggregates
+
+<CpyLink path="Modules/_sqlite/connection.c" lines="1-80" />
+
+```python
+import sqlite3, math
+
+con = sqlite3.connect(":memory:")
+
+# Scalar function
+con.create_function("sin", 1, math.sin)
+con.execute("SELECT sin(1.5708)").fetchone()   # (1.0,)
+
+# Deterministic function (SQLite may cache the result for identical inputs)
+con.create_function("upper2", 1, str.upper, deterministic=True)
+
+# Aggregate
+class StdDev:
+    def __init__(self):
+        self.vals = []
+    def step(self, val):
+        self.vals.append(val)
+    def finalize(self):
+        if not self.vals:
+            return None
+        n = len(self.vals)
+        mean = sum(self.vals) / n
+        return math.sqrt(sum((v - mean)**2 for v in self.vals) / n)
+
+con.create_aggregate("stddev", 1, StdDev)
+con.execute("CREATE TABLE nums (x REAL)")
+con.executemany("INSERT INTO nums VALUES (?)", [(1.0,),(2.0,),(3.0,)])
+con.execute("SELECT stddev(x) FROM nums").fetchone()  # (0.816...,)
+
+# Collation
+con.create_collation("nocase_de", lambda a, b: (a.lower() > b.lower()) - (a.lower() < b.lower()))
+```
+
+`create_function(name, num_params, func, *, deterministic=False)` registers
+`func` as a SQLite scalar function. `num_params=-1` means variadic. The
+`deterministic` flag hints to SQLite's query planner that the function has
+no side effects and always returns the same output for the same inputs,
+enabling additional optimizations.
+
+`create_aggregate(name, num_params, aggregate_class)` registers a class
+whose instances accumulate values. SQLite calls `step(value)` for each
+row and `finalize()` once to retrieve the result. The class is
+instantiated fresh for each group.
+
+`create_collation(name, callable)` registers a custom sort order. The
+callable receives two strings and returns a negative, zero, or positive
+integer (like the old `cmp` function). Collations are used in `ORDER BY`
+and `CREATE INDEX ... COLLATE name`.
+
+### `Row` and `text_factory` / `row_factory`
+
+<CpyLink path="Modules/_sqlite/row.c" lines="1-50" />
+
+```python
+con = sqlite3.connect(":memory:")
+con.row_factory = sqlite3.Row
+con.execute("CREATE TABLE p (name TEXT, age INT)")
+con.execute("INSERT INTO p VALUES ('Alice', 30)")
+row = con.execute("SELECT * FROM p").fetchone()
+print(row["name"])       # Alice
+print(row["NAME"])       # Alice  (case-insensitive)
+print(row[0])            # Alice
+print(tuple(row))        # ('Alice', 30)
+
+# Custom row factory
+con.row_factory = lambda cur, row: dict(zip([d[0] for d in cur.description], row))
+row = con.execute("SELECT * FROM p").fetchone()
+print(row)  # {'name': 'Alice', 'age': 30}
+
+# text_factory: controls how TEXT columns are decoded
+con.text_factory = bytes        # return raw bytes instead of str
+con.text_factory = str          # default
+con.text_factory = lambda b: b.decode("latin-1")
+```
+
+`row_factory` is called with `(cursor, row_tuple)` for every row returned
+by a query. Setting it to `sqlite3.Row` activates the built-in `Row` type
+which supports named-column access. Setting it to a lambda or function
+builds whatever Python object the caller prefers.
+
+`text_factory` is called with the raw bytes of each `TEXT` column. The
+default is `str` (UTF-8 decode). Setting it to `bytes` skips decoding
+entirely, which is useful for binary data stored in `TEXT` columns or for
+databases with non-UTF-8 encodings.
+
+In gopy, `module/sqlite3/module.go` is pending and requires either CGo
+bindings to `libsqlite3` or a pure-Go SQLite driver such as
+`modernc.org/sqlite`.

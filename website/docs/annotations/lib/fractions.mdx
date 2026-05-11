@@ -1,0 +1,215 @@
+---
+title: Lib/fractions.py
+description: Exact rational arithmetic backed by two coprime Python integers; supports construction from float, string, and Decimal.
+cpython_path: Lib/fractions.py
+cpython_version: "3.14"
+lines: 700
+status: annotated
+ported_to: module/fractions/module.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Lib/fractions.py`
+
+<CpyLink path="Lib/fractions.py" />
+
+`Lib/fractions.py` is a pure-Python module providing the `Fraction` class,
+an exact rational number type. A `Fraction` stores two Python `int` values,
+`numerator` and `denominator`, always in normalised form: the denominator is
+positive and the GCD of numerator and denominator is 1. All arithmetic is
+exact; no rounding ever occurs except in the explicit conversion methods
+`__float__` and `__round__`.
+
+The module registers `Fraction` as a virtual subclass of
+`numbers.Rational`, placing it correctly in the numeric tower (PEP 3141).
+`int` is registered as a virtual subclass of `numbers.Integral`, which is a
+subclass of `numbers.Rational`, so mixed-type arithmetic between `Fraction`
+and `int` works without any special-casing in the operator methods. Mixed
+arithmetic with `float` and `Decimal` is handled through `__float__` coercion
+and the `Decimal.from_fraction` path respectively.
+
+The most subtle method is `limit_denominator`, which uses the Stern-Brocot
+tree / mediants algorithm to find the closest rational to `self` whose
+denominator does not exceed `max_denominator`. It runs in O(log max_denominator)
+time and is exact for the boundary cases where `self` is already an integer
+or where the target fraction is one of the two mediants.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Lib/fractions.py" lines="1-50">1-50</Cpy> | Imports, `__all__` | `math`, `numbers`, `operator`, `re`, `sys`; `__all__ = ['Fraction']`. | `module/fractions/module.go` |
+| <Cpy path="Lib/fractions.py" lines="51-130">51-130</Cpy> | `_RATIONAL_FORMAT` regex | Compiled regex covering decimal, fraction (`3/7`), and mixed integer-fraction (`1 3/7`) string syntax accepted by `Fraction.__new__`. | `module/fractions/module.go:parser` |
+| <Cpy path="Lib/fractions.py" lines="131-310">131-310</Cpy> | `Fraction.__new__` | Construction from `int`, `float`, `Decimal`, `str`, and `(numerator, denominator)` two-arg form. Calls `math.gcd` and normalises sign. | `module/fractions/module.go:New` |
+| <Cpy path="Lib/fractions.py" lines="311-370">311-370</Cpy> | `Fraction.from_float`, `Fraction.from_decimal` | Alternate constructors; `from_float` uses `float.as_integer_ratio()` for exact conversion. | `module/fractions/module.go:fromFloat` |
+| <Cpy path="Lib/fractions.py" lines="371-430">371-430</Cpy> | `Fraction.limit_denominator` | Stern-Brocot / convergent algorithm capped at `max_denominator`. | `module/fractions/module.go:LimitDenominator` |
+| <Cpy path="Lib/fractions.py" lines="431-480">431-480</Cpy> | `numerator`, `denominator` properties; `__repr__`, `__str__` | Read-only properties returning the stored values; `__repr__` always includes the denominator even for integers. | `module/fractions/module.go:props` |
+| <Cpy path="Lib/fractions.py" lines="481-580">481-580</Cpy> | `_operator_fallbacks`, `__add__`, `__radd__`, `__sub__`, `__rsub__`, `__mul__`, `__rmul__`, `__truediv__`, `__rtruediv__` | Cross-multiply then GCD-reduce helper factory plus the eight additive/multiplicative operators. | `module/fractions/module.go:arithmetic` |
+| <Cpy path="Lib/fractions.py" lines="581-630">581-630</Cpy> | `__pow__`, `__rpow__` | `__pow__` branches on sign of exponent; `__rpow__` returns `float` when base is `float`. | `module/fractions/module.go:power` |
+| <Cpy path="Lib/fractions.py" lines="631-670">631-670</Cpy> | `__pos__`, `__neg__`, `__abs__`, `__trunc__`, `__floor__`, `__ceil__`, `__round__` | Unary and rounding operators; all defer to `numerator // denominator` arithmetic. | `module/fractions/module.go:unary` |
+| <Cpy path="Lib/fractions.py" lines="671-700">671-700</Cpy> | `__float__`, `__int__`, `__hash__`, `__eq__`, `__lt__`, `__le__`, `__gt__`, `__ge__` | Conversion and comparison; `__hash__` satisfies `hash(Fraction(n)) == hash(n)` for integer-valued fractions. | `module/fractions/module.go:compare` |
+
+## Reading
+
+### `Fraction.__new__` — construction and normalisation (lines 131 to 310)
+
+<CpyLink path="Lib/fractions.py" lines="131-310" />
+
+```python
+class Fraction(numbers.Rational):
+    __slots__ = ('_numerator', '_denominator')
+
+    def __new__(cls, numerator=0, denominator=None, *, _normalize=True):
+        self = super().__new__(cls)
+        if denominator is None:
+            if isinstance(numerator, int):
+                self._numerator = numerator
+                self._denominator = 1
+                return self
+            elif isinstance(numerator, float):
+                self._numerator, self._denominator = numerator.as_integer_ratio()
+                return self
+            elif isinstance(numerator, Decimal):
+                ...  # Decimal path uses sign, coefficient, exponent
+            elif isinstance(numerator, str):
+                m = _RATIONAL_FORMAT.match(numerator)
+                if m is None:
+                    raise ValueError(...)
+                numerator = int(m.group('num') or m.group('whole') or 0)
+                denominator = int(m.group('denom') or 1)
+        ...
+        if _normalize:
+            g = math.gcd(numerator, denominator)
+            if denominator < 0:
+                g = -g
+            numerator //= g
+            denominator //= g
+        self._numerator = numerator
+        self._denominator = denominator
+        return self
+```
+
+`__new__` is used rather than `__init__` because `Fraction` is immutable;
+the two fields are set exactly once. The `_normalize=False` keyword is used
+internally by arithmetic methods that already guarantee a normalised result,
+avoiding a redundant GCD call. The `float` path delegates entirely to
+`float.as_integer_ratio()`, which returns the exact rational equivalent of
+the IEEE 754 double, so `Fraction(0.1)` yields
+`3602879701896397/36028797018963968`.
+
+### `_operator_fallbacks` and additive arithmetic (lines 481 to 580)
+
+<CpyLink path="Lib/fractions.py" lines="481-580" />
+
+```python
+def _operator_fallbacks(monomorphic_operator, fallback_operator):
+    def forward(a, b):
+        if isinstance(b, (int, Fraction)):
+            return monomorphic_operator(a, b)
+        elif isinstance(b, float):
+            return fallback_operator(float(a), b)
+        elif isinstance(b, complex):
+            return fallback_operator(complex(a), b)
+        return NotImplemented
+    forward.__name__ = '__' + fallback_operator.__name__ + '__'
+
+    def reverse(b, a):
+        if isinstance(a, numbers.Rational):
+            return monomorphic_operator(a, b)
+        elif isinstance(a, numbers.Number):
+            return fallback_operator(a, type(b)(a))
+        return NotImplemented
+    reverse.__name__ = '__r' + fallback_operator.__name__ + '__'
+    return forward, reverse
+
+def _add(a, b):
+    da, db = a.denominator, b.denominator
+    return Fraction(a.numerator * db + b.numerator * da,
+                    da * db, _normalize=True)
+
+__add__, __radd__ = _operator_fallbacks(_add, operator.add)
+```
+
+`_operator_fallbacks` is a factory that generates both the forward and
+reverse operator methods from a single monomorphic function. The forward
+method handles `Fraction`/`int` pairs directly using cross-multiplication,
+coerces `float` operands to `float(self)` and delegates to the float
+operator, and returns `NotImplemented` for unknown types. The `_normalize=True`
+passed into the `Fraction` constructor in `_add` lets `math.gcd` reduce the
+result; the multiplication temporarily inflates numerator and denominator
+before the normalisation step.
+
+### `Fraction.limit_denominator` (lines 371 to 430)
+
+<CpyLink path="Lib/fractions.py" lines="371-430" />
+
+```python
+def limit_denominator(self, max_denominator=10**6):
+    if max_denominator < 1:
+        raise ValueError("max_denominator should be at least 1")
+    if self._denominator <= max_denominator:
+        return Fraction(self)
+    p0, q0, p1, q1 = 0, 1, 1, 0
+    n, d = self._numerator, self._denominator
+    while True:
+        a = n // d
+        q2 = q0 + a * q1
+        if q2 > max_denominator:
+            break
+        p0, q0, p1, q1 = p1, q1, p0 + a * p1, q2
+        n, d = d, n - a * d
+    k = (max_denominator - q0) // q1
+    bound1 = Fraction(p0 + k * p1, q0 + k * q1)
+    bound2 = Fraction(p1, q1)
+    if abs(bound2 - self) <= abs(bound1 - self):
+        return bound2
+    return bound1
+```
+
+The algorithm computes the continued-fraction expansion of `self` and
+tracks the last two convergents `(p0/q0, p1/q1)`. When the next convergent
+would exceed `max_denominator`, it computes the largest `k` such that
+`q0 + k*q1 <= max_denominator` and compares the two candidate fractions
+`bound1` and `bound2` by absolute distance from `self`, returning the closer
+one. For any `max_denominator >= 1` the result is the best rational
+approximation in the sense that no fraction with a smaller or equal
+denominator is closer to `self`.
+
+### `__round__` and integer-floor arithmetic (lines 631 to 670)
+
+<CpyLink path="Lib/fractions.py" lines="631-670" />
+
+```python
+def __round__(self, ndigits=None):
+    if ndigits is None:
+        # Round to nearest integer, ties to even
+        floor, remainder = divmod(self.numerator, self.denominator)
+        if remainder * 2 < self.denominator:
+            return floor
+        elif remainder * 2 > self.denominator:
+            return floor + 1
+        elif floor % 2 == 0:
+            return floor
+        else:
+            return floor + 1
+    else:
+        shift = 10**abs(ndigits)
+        if ndigits > 0:
+            return Fraction(round(self * shift), shift)
+        else:
+            return Fraction(round(self / shift) * shift)
+
+def __floor__(self):
+    return self.numerator // self.denominator
+
+def __ceil__(self):
+    return -(-self.numerator // self.denominator)
+```
+
+`__round__` with no argument implements banker's rounding (ties-to-even)
+using only integer comparisons; no floating-point arithmetic is involved.
+The `remainder * 2` comparisons detect the exact halfway case without
+converting to `float`. `__floor__` and `__ceil__` use Python's `//` operator,
+which rounds toward negative infinity, so `__ceil__` negates both operands to
+flip the direction.

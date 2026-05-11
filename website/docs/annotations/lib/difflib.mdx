@@ -1,0 +1,187 @@
+---
+title: Lib/difflib.py
+description: Sequence matching, line-by-line diff generation, unified/context diff formatters, and fuzzy close-match lookup.
+cpython_path: Lib/difflib.py
+cpython_version: "3.14"
+lines: 2064
+status: annotated
+ported_to: module/difflib/
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Lib/difflib.py`
+
+<CpyLink path="Lib/difflib.py" />
+
+Pure-Python diff toolkit. The file has no C extension dependency; all
+algorithms are implemented here. The main class, `SequenceMatcher`,
+compares any two sequences of hashable elements using a longest-common-
+subsequence algorithm that pre-hashes elements for O(n) expected-case
+matching block discovery. `Differ` and `HtmlDiff` are built on top of
+`SequenceMatcher`. The standalone functions (`unified_diff`,
+`context_diff`, `ndiff`, `get_close_matches`) are thin wrappers.
+
+`SequenceMatcher` uses an auto-junk heuristic: elements appearing in
+more than 1% of the sequence (and at least twice) are treated as junk.
+The caller can override by passing an explicit `isjunk` predicate.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Lib/difflib.py" lines="1-42">1-42</Cpy> | module docstring, `__all__`, `Match` | Imports `heapq`, `collections.namedtuple`; defines the `Match(a, b, size)` named tuple. | `module/difflib/module.go` |
+| <Cpy path="Lib/difflib.py" lines="44-185">44-185</Cpy> | `SequenceMatcher.__init__`, `set_seqs`, `set_seq1`, `set_seq2` | Constructor, sequence setters, and junk/popularity analysis in `_chain_b`. | `module/difflib/module.go` |
+| <Cpy path="Lib/difflib.py" lines="186-419">186-419</Cpy> | `find_longest_match` | Hash-based scan for the longest junk-free matching block in a subrange. | `module/difflib/module.go` |
+| <Cpy path="Lib/difflib.py" lines="421-545">421-545</Cpy> | `get_matching_blocks`, `get_opcodes`, `get_grouped_opcodes` | Recursive (iterative) LCS assembly; opcode generation from matching blocks. | `module/difflib/module.go` |
+| <Cpy path="Lib/difflib.py" lines="598-650">598-650</Cpy> | `ratio`, `quick_ratio`, `real_quick_ratio` | Similarity ratios: 2*M/T (exact), 2*min(len_a,len_b)/T (quick), 2*min/T (real quick). | `module/difflib/module.go` |
+| <Cpy path="Lib/difflib.py" lines="652-760">652-760</Cpy> | `get_close_matches` | Fuzzy match: score all candidates with `SequenceMatcher.ratio()`, return top-n above cutoff. | `module/difflib/module.go` |
+| <Cpy path="Lib/difflib.py" lines="800-1023">800-1023</Cpy> | `Differ.compare`, `_dump`, `_plain_replace`, `_fancy_replace`, `_fancy_helper`, `_qformat` | Line-by-line `Differ`: `compare` is the entry; `_fancy_replace` inlines intraline marking. | `module/difflib/module.go` |
+| <Cpy path="Lib/difflib.py" lines="1041-1095">1041-1095</Cpy> | `IS_LINE_JUNK`, `IS_CHARACTER_JUNK` | Default junk predicates for `ndiff`. | `module/difflib/module.go` |
+| <Cpy path="Lib/difflib.py" lines="1096-1175">1096-1175</Cpy> | `unified_diff` | Unified diff (`diff -u`) generator: `---`/`+++` headers and `@@` hunks. | `module/difflib/module.go` |
+| <Cpy path="Lib/difflib.py" lines="1176-1255">1176-1255</Cpy> | `context_diff` | Context diff (`diff -c`) generator: `***`/`---` block headers. | `module/difflib/module.go` |
+| <Cpy path="Lib/difflib.py" lines="1280-1345">1280-1345</Cpy> | `diff_bytes`, `ndiff` | `diff_bytes` wraps either diff function for byte sequences; `ndiff` delegates to `Differ`. | `module/difflib/module.go` |
+| <Cpy path="Lib/difflib.py" lines="1347-1660">1347-1660</Cpy> | `_mdiff` | Internal generator for `HtmlDiff`: yields `(from_line, to_line, changed)` triples. | `module/difflib/module.go` |
+| <Cpy path="Lib/difflib.py" lines="1661-2064">1661-2064</Cpy> | `HtmlDiff` | Generates side-by-side HTML diff tables with change highlighting. | `module/difflib/module.go` |
+
+## Reading
+
+### `find_longest_match` (lines 186 to 419)
+
+<CpyLink path="Lib/difflib.py" lines="186-419" />
+
+```python
+def find_longest_match(self, alo=0, ahi=None, blo=0, bhi=None):
+    a, b, b2j, isbjunk = self.a, self.b, self.b2j, self.bjunk.__contains__
+    besti, bestj, bestsize = alo, blo, 0
+    j2len = {}
+    for i in range(alo, ahi):
+        newj2len = {}
+        for j in b2j.get(a[i], []):
+            if j < blo:
+                continue
+            if j >= bhi:
+                break
+            k = newj2len[j] = j2len.get(j-1, 0) + 1
+            if k > bestsize:
+                besti, bestj, bestsize = i-k+1, j-k+1, k
+        j2len = newj2len
+    ...
+    return Match(besti, bestj, bestsize)
+```
+
+`b2j` is a dict mapping each element of `b` to the list of positions
+where it appears. For each position `i` in `a`, the loop looks up
+matching positions in `b` and extends any existing diagonal (`j2len`
+carries the current run lengths). This is the dynamic programming
+step: `j2len[j]` is the length of the longest match ending at `b[j]`
+for the current `a[i]`. After the main loop, the best non-junk match
+is extended at both ends by absorbing adjacent junk elements. The
+result is a `Match(a, b, size)` named tuple.
+
+### `get_opcodes` (lines 492 to 545)
+
+<CpyLink path="Lib/difflib.py" lines="492-545" />
+
+```python
+def get_opcodes(self):
+    if self.opcodes is not None:
+        return self.opcodes
+    i = j = 0
+    self.opcodes = answer = []
+    for ai, bj, size in self.get_matching_blocks():
+        tag = ''
+        if i < ai and j < bj:
+            tag = 'replace'
+        elif i < ai:
+            tag = 'delete'
+        elif j < bj:
+            tag = 'insert'
+        if tag:
+            answer.append((tag, i, ai, j, bj))
+        i, j = ai + size, bj + size
+        if size:
+            answer.append(('equal', ai, i, bj, j))
+    return answer
+```
+
+`get_opcodes` post-processes `get_matching_blocks`. Between each pair
+of matching blocks it emits exactly one non-equal opcode (`replace`,
+`delete`, or `insert`) determined by which side has unconsumed
+elements. The five-tuple form `(tag, i1, i2, j1, j2)` is the standard
+interface consumed by `Differ`, `unified_diff`, `context_diff`, and
+`HtmlDiff`. Results are memoised; calling the method twice is free.
+
+### `unified_diff` (lines 1096 to 1175)
+
+<CpyLink path="Lib/difflib.py" lines="1096-1175" />
+
+```python
+def unified_diff(a, b, fromfile='', tofile='', fromfiledate='',
+                 tofiledate='', n=3, lineterm='\n'):
+    _check_types(a, b, fromfile, tofile, fromfiledate, tofiledate, lineterm)
+    started = False
+    for group in SequenceMatcher(None, a, b).get_grouped_opcodes(n):
+        if not started:
+            started = True
+            yield '--- {}{}{}'.format(fromfile,
+                '\t' + fromfiledate if fromfiledate else '', lineterm)
+            yield '+++ {}{}{}'.format(tofile,
+                '\t' + tofiledate if tofiledate else '', lineterm)
+        first, last = group[0], group[-1]
+        file1_range = _format_range_unified(first[1], last[2])
+        file2_range = _format_range_unified(first[3], last[4])
+        yield '@@ -{} +{} @@{}'.format(file1_range, file2_range, lineterm)
+        for tag, i1, i2, j1, j2 in group:
+            if tag == 'equal':
+                for line in a[i1:i2]: yield ' ' + line
+            if tag in {'replace', 'delete'}:
+                for line in a[i1:i2]: yield '-' + line
+            if tag in {'replace', 'insert'}:
+                for line in b[j1:j2]: yield '+' + line
+```
+
+`get_grouped_opcodes(n)` partitions the opcode list into hunks
+separated by at least `2n` equal lines, trimming the equal runs at
+each end to exactly `n` lines. `unified_diff` iterates those groups,
+emitting one `@@` header per group. The `---`/`+++` file header is
+emitted lazily on the first group so that identical files produce no
+output at all. `_format_range_unified` converts `(start, stop)` to
+the `ed`-format `start,count` notation, with the special case that a
+single-line range omits the comma.
+
+### `Differ._fancy_replace` (lines 880 to 979)
+
+<CpyLink path="Lib/difflib.py" lines="880-979" />
+
+```python
+def _fancy_replace(self, a, alo, ahi, b, blo, bhi):
+    cutoff = 0.74999
+    cruncher = SequenceMatcher(self.charjunk)
+    WINDOW = 10
+    best_i = best_j = None
+    dump_i, dump_j = alo, blo
+    for j in range(blo, bhi):
+        cruncher.set_seq2(b[j])
+        aequiv = alo + (j - blo)
+        arange = range(max(aequiv - WINDOW, dump_i),
+                       min(aequiv + WINDOW + 1, ahi))
+        best_ratio = cutoff
+        for i in arange:
+            cruncher.set_seq1(a[i])
+            if (cruncher.real_quick_ratio() > best_ratio
+                  and cruncher.quick_ratio() > best_ratio
+                  and cruncher.ratio() > best_ratio):
+                best_i, best_j, best_ratio = i, j, cruncher.ratio()
+        if best_i is not None:
+            yield from self._fancy_helper(a, dump_i, best_i, b, dump_j, best_j)
+            ...
+```
+
+`_fancy_replace` is called by `Differ.compare` when a block of lines
+has changed. It looks for pairs of lines whose character-level
+similarity exceeds the `0.74999` cutoff and emits intraline `?` hint
+lines for matched pairs. The `WINDOW = 10` bounds the pairwise search
+to prevent cubic worst-case behaviour. The three-stage ratio guard
+(`real_quick_ratio -> quick_ratio -> ratio`) short-circuits most
+comparisons before the expensive full `ratio()` call is needed.

@@ -1,0 +1,248 @@
+---
+title: Lib/ftplib.py
+description: FTP client implementation; provides FTP and FTP_TLS for transferring files via the File Transfer Protocol.
+cpython_path: Lib/ftplib.py
+cpython_version: "3.14"
+lines: 900
+status: annotated
+ported_to: module/ftplib/module.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Lib/ftplib.py`
+
+<CpyLink path="Lib/ftplib.py" />
+
+`ftplib.py` is the standard library's FTP client. It implements RFC 959
+(File Transfer Protocol) plus the FTPS extension from RFC 4217
+(`FTP_TLS`). The module covers the full lifecycle of an FTP session:
+connecting to a server, authenticating, navigating the directory tree,
+transferring files in ASCII or binary mode, and quitting cleanly.
+
+The `FTP` class maintains a single control connection. Data transfers
+open a separate data connection through `transfercmd`. By default the
+client uses passive mode (`PASV`): it asks the server to listen on an
+ephemeral port and then connects to that port. This avoids firewall
+issues associated with active mode (`PORT`), where the server connects
+back to the client. Active mode is available but not the default.
+
+Binary transfers are handled by `retrbinary` and `storbinary`, which
+operate on raw bytes in fixed-size blocks. ASCII (line-oriented)
+transfers go through `retrlines` and `storlines`, which decode and
+re-encode line endings. Both pairs accept a callback or file-like object
+so callers can stream data without buffering the entire transfer in
+memory.
+
+`FTP_TLS` subclasses `FTP` and adds `auth()` (explicit TLS negotiation
+over an existing connection) and `prot_p()` / `prot_c()` (switching the
+data connection between private/clear protection). Once `prot_p()` is
+called, `transfercmd` wraps the data socket with TLS before use.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Lib/ftplib.py" lines="1-80">1-80</Cpy> | Module header, constants, exceptions | Defines `FTP_PORT`, `MAXLINE`, `CRLF`, `MSG_OOB`, and the `Error` / `error_reply` / `error_temp` / `error_perm` / `error_proto` exception hierarchy. | `module/ftplib/module.go` |
+| <Cpy path="Lib/ftplib.py" lines="81-230">81-230</Cpy> | `FTP.__init__`, `connect`, `getwelcome`, `set_debuglevel`, `set_pasv` | Constructor optionally connects; `connect` opens the control socket and reads the 220 greeting; debug level controls response tracing. | `module/ftplib/module.go` |
+| <Cpy path="Lib/ftplib.py" lines="231-370">231-370</Cpy> | `sendcmd`, `voidcmd`, `sendport`, `sendeprt`, `makeport`, `makepasv`, `ntransfercmd`, `transfercmd` | Low-level command/response helpers and the data-connection factory; `makepasv` parses the `PASV` 227 response; `ntransfercmd` opens the data socket. | `module/ftplib/module.go` |
+| <Cpy path="Lib/ftplib.py" lines="371-520">371-520</Cpy> | `login`, `retrlines`, `storlines`, `retrbinary`, `storbinary` | Authentication and the four transfer methods; binary methods use a `blocksize` loop; line methods iterate `fp.readline()` or call the user callback per line. | `module/ftplib/module.go` |
+| <Cpy path="Lib/ftplib.py" lines="521-680">521-680</Cpy> | `nlst`, `dir`, `mlsd`, `rename`, `delete`, `cwd`, `mkd`, `pwd`, `rmd`, `size`, `quit`, `close` | Directory and file management commands; `mlsd` issues `MLST`-style listing and yields `(name, facts)` pairs; `quit` sends QUIT and calls `close`. | `module/ftplib/module.go` |
+| <Cpy path="Lib/ftplib.py" lines="681-900">681-900</Cpy> | `FTP_TLS`, `auth`, `prot_p`, `prot_c`, `login`, `ntransfercmd` | TLS subclass; `auth` issues `AUTH TLS` and wraps the control socket; `prot_p` enables encrypted data connections; overrides `login` to call `auth` first. | `module/ftplib/module.go` |
+
+## Reading
+
+### `connect` and the control connection (lines 81 to 230)
+
+<CpyLink path="Lib/ftplib.py" lines="81-230" />
+
+```python
+def connect(self, host='', port=0, timeout=-999, source_address=None):
+    if host != '':
+        self.host = host
+    if port > 0:
+        self.port = port
+    if timeout != -999:
+        self.timeout = timeout
+    if source_address is not None:
+        self.source_address = source_address
+    sys.audit("ftplib.connect", self, self.host, self.port)
+    self.sock = socket.create_connection((self.host, self.port),
+                                         self.timeout,
+                                         source_address=self.source_address)
+    self.af = self.sock.family
+    self.file = self.sock.makefile('r', encoding=self.encoding)
+    self.welcome = self.getresp()
+    return self.welcome
+
+def getresp(self):
+    resp = self.getmultiline()
+    if self.debugging:
+        print('*resp*', self.sanitize(resp))
+    c = resp[:1]
+    if c in {'1', '2', '3'}:
+        return resp
+    if c == '4':
+        raise error_temp(resp)
+    if c == '5':
+        raise error_perm(resp)
+    raise error_proto(resp)
+```
+
+`connect` creates the control connection via `socket.create_connection` and
+wraps it with a text-mode `makefile` using the configured encoding (default
+`latin-1`). The `welcome` attribute stores the 220 greeting returned by
+`getresp`. `getresp` calls `getmultiline` to handle multi-line responses
+(where each continuation line begins with the status code followed by a
+hyphen) and then maps the leading digit to the appropriate exception class:
+4xx temporary errors raise `error_temp`, 5xx permanent errors raise
+`error_perm`, and unexpected leading characters raise `error_proto`.
+
+### `transfercmd` and passive mode (lines 231 to 370)
+
+<CpyLink path="Lib/ftplib.py" lines="231-370" />
+
+```python
+def makepasv(self):
+    if self.af == socket.AF_INET:
+        host, port = parse227(self.sendcmd('PASV'))
+    else:
+        host, port = parse229(self.sendcmd('EPSV'))
+    return host, port
+
+def ntransfercmd(self, cmd, rest=None):
+    size = None
+    if self.passiveserver:
+        host, port = self.makepasv()
+        conn = socket.create_connection((host, port), self.timeout,
+                                        source_address=self.source_address)
+        try:
+            if rest is not None:
+                self.sendcmd("REST %s" % rest)
+            resp = self.sendcmd(cmd)
+            if resp[0] == '2':
+                resp = self.getresp()
+            if resp[0] != '1':
+                raise error_reply(resp)
+        except:
+            conn.close()
+            raise
+    else:
+        sock = self.makeport()
+        try:
+            if rest is not None:
+                self.sendcmd("REST %s" % rest)
+            resp = self.sendcmd(cmd)
+            if resp[0] == '2':
+                resp = self.getresp()
+            if resp[0] != '1':
+                raise error_reply(resp)
+            conn, sockaddr = sock.accept()
+        finally:
+            sock.close()
+    if self.timeout is not socket._GLOBAL_DEFAULT_TIMEOUT:
+        conn.settimeout(self.timeout)
+    return conn, size
+```
+
+`ntransfercmd` opens the data connection and issues the transfer command
+(`RETR`, `STOR`, `LIST`, etc.) in the right order relative to the
+connection setup. In passive mode (`passiveserver=True`, the default)
+the data socket connects to the server-specified port before the command
+is sent. In active mode the client binds a listening socket, sends `PORT`,
+then waits for the server to `accept`. The optional `REST` command sets
+the byte offset for restarting an interrupted transfer. `transfercmd`
+wraps `ntransfercmd` and discards the size return value.
+
+### `retrbinary` and `retrlines` (lines 371 to 520)
+
+<CpyLink path="Lib/ftplib.py" lines="371-520" />
+
+```python
+def retrbinary(self, cmd, callback, blocksize=8192, rest=None):
+    self.voidcmd('TYPE I')
+    with self.transfercmd(cmd, rest) as conn:
+        while 1:
+            data = conn.recv(blocksize)
+            if not data:
+                break
+            callback(data)
+        # shutdown ssl layer
+        if _SSLSocket is not None and isinstance(conn, _SSLSocket):
+            conn.unwrap()
+    return self.voidresp()
+
+def retrlines(self, cmd, callback=None):
+    if callback is None:
+        callback = print
+    self.voidcmd('TYPE A')
+    with self.transfercmd(cmd) as conn, \
+         conn.makefile('r', encoding=self.encoding) as fp:
+        while 1:
+            line = fp.readline(self.maxline + 1)
+            if len(line) > self.maxline:
+                raise Error("got more than %d bytes" % self.maxline)
+            if self.debugging > 2:
+                print('*retr*', repr(line))
+            if not line:
+                break
+            if line[-2:] == CRLF:
+                line = line[:-2]
+            elif line[-1:] == '\n':
+                line = line[:-1]
+            callback(line)
+    return self.voidresp()
+```
+
+`retrbinary` switches to binary (`TYPE I`) mode and reads the data
+connection in `blocksize`-byte chunks, passing each chunk to `callback`.
+`retrlines` switches to ASCII (`TYPE A`) mode and wraps the data socket in
+a text-mode file so `readline` handles line buffering. Line endings are
+stripped before `callback` is called: both bare `\n` and `\r\n` are
+normalised. The default callback for `retrlines` is `print`, which makes
+`ftp.retrlines('LIST')` print the directory listing to stdout with no
+additional code.
+
+### `FTP_TLS.auth` and data connection protection (lines 681 to 900)
+
+<CpyLink path="Lib/ftplib.py" lines="681-900" />
+
+```python
+class FTP_TLS(FTP):
+    def auth(self):
+        if self.sock is None:
+            raise ValueError("No control connection")
+        resp = self.voidcmd('AUTH TLS')
+        self.sock = self.context.wrap_socket(self.sock,
+                                             server_hostname=self.host)
+        self.file = self.sock.makefile('r', encoding=self.encoding)
+        return resp
+
+    def prot_p(self):
+        self.voidcmd('PBSZ 0')
+        resp = self.voidcmd('PROT P')
+        self._prot_p = True
+        return resp
+
+    def prot_c(self):
+        resp = self.voidcmd('PROT C')
+        self._prot_p = False
+        return resp
+
+    def ntransfercmd(self, cmd, rest=None):
+        conn, size = FTP.ntransfercmd(self, cmd, rest)
+        if self._prot_p:
+            conn = self.context.wrap_socket(conn,
+                                            server_hostname=self.host)
+        return conn, size
+```
+
+`FTP_TLS` implements RFC 4217 explicit TLS (FTPS). `auth()` issues
+`AUTH TLS` and immediately wraps the control socket; the `file` wrapper
+is recreated around the new TLS socket so text commands continue to work.
+`prot_p()` sends the mandatory `PBSZ 0` (protection buffer size zero)
+followed by `PROT P` to enable private-mode data transfers. The override
+of `ntransfercmd` wraps each new data connection in TLS when `_prot_p`
+is set, ensuring that both control commands and data bytes are encrypted.
+`login` in `FTP_TLS` calls `auth()` before USER / PASS so credentials are
+never sent in the clear.

@@ -1,0 +1,193 @@
+---
+title: Include/internal/pycore_weakref.h
+description: Internal weak-reference helpers used by the GC and object deallocation — chain traversal, referent clearing, and no-callback shutdown path.
+cpython_path: Include/internal/pycore_weakref.h
+cpython_version: "3.14"
+lines: 62
+status: annotated
+ported_to: objects/weakref.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Include/internal/pycore_weakref.h`
+
+<CpyLink path="Include/internal/pycore_weakref.h" />
+
+Internal weak-reference interface used by the cyclic GC, the object
+deallocation path, and the interpreter shutdown sequence. The public
+`weakrefobject.h` header exposes only `PyWeakref_NewRef`,
+`PyWeakref_GetObject`, and the type check macros; this file adds the
+helpers that the GC needs to clear referents and traverse chains
+without triggering Python-level callbacks.
+
+The `PyWeakReference` struct maintains two doubly-linked lists
+simultaneously. The per-referent list (`wr_object_next` /
+`wr_object_prev`) links all weak references that point to the same
+object; the head of this list is stored in the referent's weak-reference
+slot, reached via `tp_weaklistoffset`. A separate global list
+(`wr_list_next` / `wr_list_prev`) is walked by the GC during
+collection to find all live weak references in the heap.
+
+When an object is deallocated, `_PyWeakref_ClearRef` nulls out
+`wr_object` on every node in the per-referent chain. Callbacks are
+scheduled (or skipped during shutdown) after the referent has been
+cleared but before the memory is freed.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Include/internal/pycore_weakref.h" lines="1-18">1-18</Cpy> | `PyWeakReference` internal struct | Full layout: `wr_object`, `wr_callback`, `wr_hash`, `wr_object_next`, `wr_object_prev`, `wr_list_next`, `wr_list_prev`. | `objects/weakref.go` |
+| <Cpy path="Include/internal/pycore_weakref.h" lines="19-30">19-30</Cpy> | `_PyWeakref_GetWeakrefCount` | Counts weak references in the per-referent chain by walking `wr_object_next` links; used in `__del__` safety checks. | `objects/weakref.go` |
+| <Cpy path="Include/internal/pycore_weakref.h" lines="31-42">31-42</Cpy> | `_PyWeakref_ClearRef` | Sets `wr_object` to `Py_None` (the cleared sentinel) and unlinks the node from the per-referent list; called during object deallocation. | `objects/weakref.go` |
+| <Cpy path="Include/internal/pycore_weakref.h" lines="43-52">43-52</Cpy> | `_PyObject_IsWeaklyReferenced` | Tests `Py_TYPE(op)->tp_weaklistoffset != 0` to determine whether the object supports weak references at all. | `objects/weakref.go` |
+| <Cpy path="Include/internal/pycore_weakref.h" lines="53-62">53-62</Cpy> | `_PyObject_ClearWeakRefsNoCallbacks` | Clears all weak refs on an object without invoking any `wr_callback`; called during interpreter shutdown when running finalizers is unsafe. | `objects/weakref.go` |
+
+## Reading
+
+### `PyWeakReference` struct layout (lines 1 to 18)
+
+<CpyLink path="Include/internal/pycore_weakref.h" lines="1-18" />
+
+```c
+struct _PyWeakReference {
+    PyObject_HEAD
+    PyObject *wr_object;       /* referent, or Py_None when cleared */
+    Py_hash_t wr_hash;         /* cached hash of the referent */
+    PyObject *wr_callback;     /* optional callable, or NULL */
+    /* Doubly-linked list of all refs to the same object. */
+    PyWeakReference *wr_object_next;
+    PyWeakReference *wr_object_prev;
+    /* Doubly-linked list for the GC's global weak-ref list. */
+    PyWeakReference *wr_list_next;
+    PyWeakReference *wr_list_prev;
+};
+```
+
+`wr_object` starts as a borrowed reference to the referent. When the
+referent is collected `wr_object` is set to `Py_None` (not `NULL`),
+so that `PyWeakref_GetObject` can return `Py_None` safely without a
+null check on every call.
+
+`wr_hash` caches the referent's hash so that weak-keyed dictionaries
+(such as `weakref.WeakValueDictionary`) can still look up a key after
+the referent has been cleared but before the `weakref` object itself
+is garbage-collected. The hash is computed lazily on the first call to
+`PyObject_Hash` on the weak reference and then frozen.
+
+The two doubly-linked lists serve different consumers. The per-referent
+list (`wr_object_*`) is walked only during deallocation of that one
+object; the global list (`wr_list_*`) is walked by the GC during a
+full collection. Using two separate lists avoids scanning the entire
+heap just to clear refs for one dying object.
+
+In gopy, `objects/weakref.go` represents `PyWeakReference` as
+`WeakReference` with `WrObject Object`, `WrHash int64`,
+`WrCallback Object`, and four pointer fields for the two doubly-linked
+list chains.
+
+### `_PyWeakref_GetWeakrefCount` (lines 19 to 30)
+
+<CpyLink path="Include/internal/pycore_weakref.h" lines="19-30" />
+
+```c
+static inline Py_ssize_t
+_PyWeakref_GetWeakrefCount(PyWeakReference *head)
+{
+    Py_ssize_t count = 0;
+    PyWeakReference *ref = head;
+    while (ref != NULL) {
+        ++count;
+        ref = ref->wr_object_next;
+    }
+    return count;
+}
+```
+
+The function walks the per-referent chain starting from `head`, which
+is the value stored at `tp_weaklistoffset` in the referent's memory.
+The chain is terminated by `NULL` in `wr_object_next`.
+
+The count is used in two places: `object.__del__` safety checks warn
+if an object's `__del__` creates a new weak reference to the object
+while it is being finalized (count would go from N to N+1), and the
+`weakref` module's `getweakrefs()` function calls this to size its
+return list before walking the chain a second time.
+
+The linear walk is acceptable because per-object weak-reference chains
+are almost always very short (1 or 2 entries in practice). In gopy,
+`objects/weakref.go` provides `GetWeakrefCount(head *WeakReference) int`
+with the identical loop.
+
+### `_PyWeakref_ClearRef` (lines 31 to 42)
+
+<CpyLink path="Include/internal/pycore_weakref.h" lines="31-42" />
+
+```c
+static inline void
+_PyWeakref_ClearRef(PyWeakReference *self)
+{
+    PyObject *callback = self->wr_callback;
+
+    /* Clear the referent pointer before invoking the callback so that
+       any re-entrant access sees the cleared state. */
+    self->wr_object = Py_None;
+
+    /* Unlink from the per-referent list. */
+    if (self->wr_object_prev != NULL)
+        self->wr_object_prev->wr_object_next = self->wr_object_next;
+    if (self->wr_object_next != NULL)
+        self->wr_object_next->wr_object_prev = self->wr_object_prev;
+
+    if (callback != NULL)
+        PyObject_CallOneArg(callback, (PyObject *)self);
+}
+```
+
+The clear-before-callback ordering is critical for re-entrancy safety.
+If the callback itself calls `PyWeakref_GetObject` on the same weak
+reference, it must already see `Py_None` rather than a pointer to
+memory that is in the middle of being freed. CPython's
+`Objects/weakrefobject.c` enforces this ordering as an invariant.
+
+`_PyWeakref_ClearRef` is called once per node in the per-referent
+chain during `PyObject_ClearWeakRefs`. In gopy, the Go garbage
+collector handles object lifetime, so `_PyWeakref_ClearRef` is called
+from the `weakref` module's finalizer hook rather than from a
+destructor, preserving the same clear-then-callback invariant.
+
+### `_PyObject_IsWeaklyReferenced` and `_PyObject_ClearWeakRefsNoCallbacks` (lines 43 to 62)
+
+<CpyLink path="Include/internal/pycore_weakref.h" lines="43-62" />
+
+```c
+static inline bool
+_PyObject_IsWeaklyReferenced(PyObject *op)
+{
+    return Py_TYPE(op)->tp_weaklistoffset != 0;
+}
+
+PyAPI_FUNC(void)
+_PyObject_ClearWeakRefsNoCallbacks(PyObject *op);
+```
+
+`_PyObject_IsWeaklyReferenced` is the fast predicate guarding the
+deallocation path. `tp_dealloc` calls it before calling
+`PyObject_ClearWeakRefs`; if `tp_weaklistoffset` is zero the object
+was never registered with the weak-reference machinery and the chain
+walk can be skipped entirely.
+
+`_PyObject_ClearWeakRefsNoCallbacks` is the shutdown-safe variant.
+During interpreter finalization, running Python-level callbacks is
+unsafe because the import system, the `sys` module, and many builtin
+functions may have already been torn down. This function iterates the
+per-referent chain and sets `wr_object` to `Py_None` on each node
+but does not call `wr_callback`. It is called from
+`_Py_ClearStandardStreamEncoding` and the late stages of
+`Py_FinalizeEx`.
+
+In gopy, `objects/weakref.go` exports `IsWeaklyReferenced(op Object) bool`
+as a one-liner that reads `op.Type().TpWeaklistOffset != 0`, and
+`ClearWeakRefsNoCallbacks(op Object)` which walks the chain and zeroes
+`WrObject` without dispatching to `WrCallback`.

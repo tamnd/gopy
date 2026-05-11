@@ -1,0 +1,234 @@
+---
+title: Objects/interpolationobject.c
+description: InterpolationObject backing the Interpolation type added in Python 3.14 for PEP 750 template string literals.
+cpython_path: Objects/interpolationobject.c
+cpython_version: "3.14"
+lines: 200
+status: annotated
+ported_to: objects/interpolation.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Objects/interpolationobject.c`
+
+<CpyLink path="Objects/interpolationobject.c" />
+
+New in Python 3.14 (PEP 750). An `Interpolation` object represents a single
+`{expression}` slot inside a template string literal `t"..."`. Where an f-string
+evaluates its expressions eagerly and produces a plain `str`, a t-string
+produces a `Template` whose interpolated components are preserved as
+`Interpolation` objects so that template processors can inspect the original
+expression text, apply conversions, and format before collapsing to a string.
+
+An `InterpolationObject` carries four fields:
+
+- `interp_value` — the result of evaluating the expression at the call site.
+- `interp_expression` — the source text of the expression as a `str`.
+- `interp_conversion` — a single-character `str` (`'s'`, `'r'`, `'a'`) or
+  `None` if no `!s`/`!r`/`!a` conversion was written.
+- `interp_format_spec` — the format spec string after the `:`, or `None`.
+
+The object is immutable: there are no setters. It supports iteration
+(`val, expr, conv, spec = interpolation`) and has a detailed repr. The C-level
+constructor `PyInterpolation_New` is called by the `FORMAT_WITH_TMPL` opcode
+emitted by the compiler for each interpolation slot in a t-string.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Objects/interpolationobject.c" lines="1-40">1-40</Cpy> | `InterpolationObject` struct, include block | Struct layout: `interp_value`, `interp_expression`, `interp_conversion`, `interp_format_spec`. | `objects/interpolation.go:InterpolationObject` |
+| <Cpy path="Objects/interpolationobject.c" lines="41-90">41-90</Cpy> | `interpolation_new` | `tp_new`: validates types of all four arguments; stores strong references; returns a new `InterpolationObject`. | `objects/interpolation.go:interpolationNew` |
+| <Cpy path="Objects/interpolationobject.c" lines="91-120">91-120</Cpy> | `PyInterpolation_New` | C API constructor called by `FORMAT_WITH_TMPL`; thin wrapper around `interpolation_new` bypassing `tp_new` keyword parsing. | `objects/interpolation.go:NewInterpolation` |
+| <Cpy path="Objects/interpolationobject.c" lines="121-150">121-150</Cpy> | `interpolation_repr` | Formats `Interpolation(value!r, expression!r, conversion=..., format_spec=...)`. | `objects/interpolation.go:interpolationRepr` |
+| <Cpy path="Objects/interpolationobject.c" lines="151-175">151-175</Cpy> | `interpolation_iter`, `interpolation_iter_next` | Yields `(value, expression, conversion, format_spec)` in order; allows tuple-unpacking assignment. | `objects/interpolation.go:interpolationIter` |
+| <Cpy path="Objects/interpolationobject.c" lines="176-200">176-200</Cpy> | `interpolation_getset`, `interpolation_dealloc`, `PyInterpolation_Type` | Read-only getsets for each field; dealloc Py_DECREFs all four; type object. | `objects/interpolation.go:InterpolationType` |
+
+## Reading
+
+### `interpolation_new` (lines 41 to 90)
+
+<CpyLink path="Objects/interpolationobject.c" lines="41-90" />
+
+The `tp_new` slot accepts `value`, `expression`, `conversion`, and
+`format_spec` as positional-or-keyword arguments. `expression` must be a `str`.
+`conversion` must be a one-character `str` drawn from `{'s', 'r', 'a'}` or
+`None`. `format_spec` must be a `str` or `None`:
+
+```c
+static PyObject *
+interpolation_new(PyTypeObject *cls, PyObject *args, PyObject *kwargs)
+{
+    static char *kwlist[] = {
+        "value", "expression", "conversion", "format_spec", NULL
+    };
+    PyObject *value, *expression, *conversion = Py_None,
+             *format_spec = Py_None;
+
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "OO|OO:Interpolation",
+                                     kwlist, &value, &expression,
+                                     &conversion, &format_spec))
+        return NULL;
+
+    if (!PyUnicode_Check(expression)) {
+        PyErr_SetString(PyExc_TypeError,
+            "expression must be a str");
+        return NULL;
+    }
+    if (conversion != Py_None) {
+        if (!PyUnicode_Check(conversion) ||
+            PyUnicode_GET_LENGTH(conversion) != 1) {
+            PyErr_SetString(PyExc_TypeError,
+                "conversion must be a single character or None");
+            return NULL;
+        }
+        Py_UCS4 c = PyUnicode_READ_CHAR(conversion, 0);
+        if (c != 's' && c != 'r' && c != 'a') {
+            PyErr_SetString(PyExc_ValueError,
+                "conversion must be 's', 'r', 'a', or None");
+            return NULL;
+        }
+    }
+
+    InterpolationObject *self =
+        (InterpolationObject *)cls->tp_alloc(cls, 0);
+    if (self == NULL)
+        return NULL;
+
+    self->interp_value      = Py_NewRef(value);
+    self->interp_expression = Py_NewRef(expression);
+    self->interp_conversion = Py_NewRef(conversion);
+    self->interp_format_spec = Py_NewRef(format_spec);
+    return (PyObject *)self;
+}
+```
+
+The validation of `conversion` is strict: the compiler only emits `'s'`, `'r'`,
+or `'a'` for `!s`, `!r`, `!a` conversions respectively, but the Python-level
+constructor is public and must reject invalid values explicitly.
+
+### `PyInterpolation_New` (lines 91 to 120)
+
+<CpyLink path="Objects/interpolationobject.c" lines="91-120" />
+
+The C API constructor is called directly by the `FORMAT_WITH_TMPL` opcode,
+which has already evaluated the expression and collected the static strings. It
+bypasses `PyArg_ParseTupleAndKeywords` and constructs the object directly to
+avoid the overhead of building argument tuples on the hot path in template
+string evaluation:
+
+```c
+PyObject *
+PyInterpolation_New(PyObject *value, PyObject *expression,
+                    PyObject *conversion, PyObject *format_spec)
+{
+    InterpolationObject *self =
+        (InterpolationObject *)PyInterpolation_Type.tp_alloc(
+            &PyInterpolation_Type, 0);
+    if (self == NULL)
+        return NULL;
+    self->interp_value       = Py_NewRef(value);
+    self->interp_expression  = Py_NewRef(expression);
+    self->interp_conversion  = Py_NewRef(conversion);
+    self->interp_format_spec = Py_NewRef(format_spec);
+    return (PyObject *)self;
+}
+```
+
+The compiler guarantees that `expression` is always a `str` interned at compile
+time, `conversion` is one of the three valid single-character strings or `None`,
+and `format_spec` is a `str` or `None`, so none of the validation checks in
+`interpolation_new` are repeated here.
+
+### `interpolation_repr` (lines 121 to 150)
+
+<CpyLink path="Objects/interpolationobject.c" lines="121-150" />
+
+The repr intentionally mirrors the constructor call signature so that
+`eval(repr(interp))` reconstructs the object. Keyword arguments are used for
+`conversion` and `format_spec` to make the output readable and to allow omitting
+`format_spec=None` in the future if a shorter form is ever added:
+
+```c
+static PyObject *
+interpolation_repr(InterpolationObject *self)
+{
+    PyObject *value_repr = PyObject_Repr(self->interp_value);
+    if (value_repr == NULL)
+        return NULL;
+    PyObject *expr_repr = PyObject_Repr(self->interp_expression);
+    if (expr_repr == NULL) {
+        Py_DECREF(value_repr);
+        return NULL;
+    }
+    PyObject *conv_repr = PyObject_Repr(self->interp_conversion);
+    if (conv_repr == NULL) {
+        Py_DECREF(value_repr);
+        Py_DECREF(expr_repr);
+        return NULL;
+    }
+    PyObject *spec_repr = PyObject_Repr(self->interp_format_spec);
+    if (spec_repr == NULL) {
+        Py_DECREF(value_repr);
+        Py_DECREF(expr_repr);
+        Py_DECREF(conv_repr);
+        return NULL;
+    }
+    PyObject *result = PyUnicode_FromFormat(
+        "Interpolation(%S, %S, conversion=%S, format_spec=%S)",
+        value_repr, expr_repr, conv_repr, spec_repr);
+    Py_DECREF(value_repr);
+    Py_DECREF(expr_repr);
+    Py_DECREF(conv_repr);
+    Py_DECREF(spec_repr);
+    return result;
+}
+```
+
+### `interpolation_iter` (lines 151 to 175)
+
+<CpyLink path="Objects/interpolationobject.c" lines="151-175" />
+
+Iteration yields the four fields in declaration order, enabling the idiomatic
+unpacking form `val, expr, conv, spec = interp`. The iterator is a small
+one-shot object that walks an index from 0 to 3:
+
+```c
+static PyObject *
+interpolation_iter_next(InterpolationIterObject *it)
+{
+    InterpolationObject *interp = it->ii_interp;
+    switch (it->ii_index++) {
+    case 0: return Py_NewRef(interp->interp_value);
+    case 1: return Py_NewRef(interp->interp_expression);
+    case 2: return Py_NewRef(interp->interp_conversion);
+    case 3: return Py_NewRef(interp->interp_format_spec);
+    default:
+        return NULL;  /* StopIteration */
+    }
+}
+```
+
+The iterator holds a strong reference to the `InterpolationObject` and is
+collected independently. The `len` of an `Interpolation` is always 4, matching
+the number of fields, so `len(interp)` and `tuple(interp)` both work correctly.
+
+## gopy mirror
+
+`objects/interpolation.go` — planned for v0.14 when PEP 750 template string
+support is added. `NewInterpolation` will wrap all four fields directly without
+going through the Python-level constructor. `InterpolationType` will expose the
+read-only `value`, `expression`, `conversion`, and `format_spec` getsets. The
+iteration protocol will be implemented via a Go closure-based iterator rather
+than a dedicated iterator struct.
+
+## CPython 3.14 changes
+
+`Objects/interpolationobject.c` is entirely new in 3.14 as part of PEP 750
+(template strings). The `FORMAT_WITH_TMPL` bytecode opcode was added
+simultaneously in `Python/ceval.c`. The `Interpolation` type is exposed in the
+`string.templatelib` module alongside the companion `Template` type. No
+equivalent existed in earlier versions; the closest prior art is
+`string.Template` (2.4+), which is a purely Python-level class with no C
+backing.

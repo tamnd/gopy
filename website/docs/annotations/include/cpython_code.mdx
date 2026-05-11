@@ -1,0 +1,204 @@
+---
+title: Include/cpython/code.h
+description: Exposes the internal PyCodeObject layout and bytecode accessor macros to C extensions that need to inspect or construct code objects outside the stable ABI.
+cpython_path: Include/cpython/code.h
+cpython_version: "3.14"
+lines: 200
+status: annotated
+ported_to: objects/code.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Include/cpython/code.h`
+
+<CpyLink path="Include/cpython/code.h" />
+
+The CPython-internal companion to `Include/code.h`. While the stable ABI
+exposes only an opaque `PyCodeObject *` and a handful of `PyCode_Get*`
+accessors, this header lifts the veil: it declares the full `PyCodeObject`
+struct layout, the adaptive-bytecode word type `_Py_CODEUNIT`, the
+low-level bytecode helpers `_PyCode_CODE` and `_PyCode_NBYTES`, and the
+line-number iterator infrastructure built on `co_linetable`.
+
+Code objects are created by the Python compiler and are normally immutable
+once created. The struct fields documented here are not stable ABI; they
+may be reorganised between minor releases. C extensions that need to
+introspect code objects at the field level (e.g. debuggers, profilers, JIT
+compilers) include this header directly and accept the associated
+incompatibility risk.
+
+The constructors `PyCode_New` and `PyCode_NewWithPosOnlyArgs` are exposed
+here primarily for the test suite and for embedding scenarios where code
+objects are built programmatically. Normal code objects are produced by
+`Python/compile.c` and carry additional internal state that these
+constructors do not initialise.
+
+In gopy, `objects/code.go` mirrors `PyCodeObject` as the Go struct
+`CodeObject`. The field names track the C originals (`CoArgcount`,
+`CoPosonlyargcount`, etc.) so that ported functions translate mechanically.
+The adaptive-word type `_Py_CODEUNIT` maps to `CodeUnit` (a `uint16`), and
+`_PyCode_CODE(co)` is implemented as a slice expression over `co.CoCode`.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Include/cpython/code.h" lines="1-30">1-30</Cpy> | `_Py_CODEUNIT` / `_Py_SET_OPCODE` / `_Py_SET_OPARG` | Adaptive bytecode word type and opcode/oparg packing macros. | `objects/code.go` — `CodeUnit` + `SetOpcode` / `SetOparg` |
+| <Cpy path="Include/cpython/code.h" lines="31-115">31-115</Cpy> | `PyCodeObject` struct | Full field layout: argument counts, flags, `co_consts`, `co_names`, `co_varnames`, `co_freevars`, `co_cellvars`, `co_filename`, `co_name`, `co_qualname`, `co_linetable`, `co_code_adaptive`. | `objects/code.go:CodeObject` |
+| <Cpy path="Include/cpython/code.h" lines="116-140">116-140</Cpy> | `_PyCode_CODE(co)` / `_PyCode_NBYTES(co)` / `_PyCode_InitAddressRange` | Low-level bytecode pointer and size helpers; line-number iterator init. | `objects/code.go:CodeCode` / `CodeNbytes` / `CodeInitAddressRange` |
+| <Cpy path="Include/cpython/code.h" lines="141-165">141-165</Cpy> | `PyCode_New` / `PyCode_NewWithPosOnlyArgs` | Constructor functions for test / embedding use. | `objects/code.go:CodeNew` / `CodeNewWithPosOnlyArgs` |
+| <Cpy path="Include/cpython/code.h" lines="166-185">166-185</Cpy> | `PyCode_GetCode` / `PyCode_GetVarnames` / `PyCode_GetCellvars` / `PyCode_GetFreevars` | Public 3.11+ accessors returning tuple / bytes views of code internals. | `objects/code.go:CodeGetCode` / `CodeGetVarnames` / `CodeGetCellvars` / `CodeGetFreevars` |
+| <Cpy path="Include/cpython/code.h" lines="186-200">186-200</Cpy> | `PyCode_Addr2Line` / `PyCode_Addr2Location` | Bytecode-offset-to-source-location converters backed by `co_linetable`. | `objects/code.go:CodeAddr2Line` / `CodeAddr2Location` |
+
+## Reading
+
+### Adaptive bytecode word type (lines 1 to 30)
+
+<CpyLink path="Include/cpython/code.h" lines="1-30" />
+
+```c
+typedef uint16_t _Py_CODEUNIT;
+
+#define _Py_OPCODE(word)      ((word) & 0xff)
+#define _Py_OPARG(word)       ((word) >> 8)
+#define _Py_SET_OPCODE(word, opcode)  ((word) = ((word) & 0xff00) | (opcode))
+#define _Py_SET_OPARG(word, oparg)    ((word) = ((word) & 0x00ff) | ((oparg) << 8))
+```
+
+Each bytecode instruction is packed into a single 16-bit word. The low byte
+holds the opcode; the high byte holds the inline argument. Instructions
+whose argument does not fit in eight bits are preceded by one or more
+`EXTENDED_ARG` prefix words that shift the argument left by eight bits.
+
+The "adaptive" part of `co_code_adaptive` is that the specialising
+interpreter writes back updated opcodes into this array at runtime. That is
+why the field is separate from the frozen `co_code` bytes: `co_code` is
+immutable and is used by tools like `dis`, while `co_code_adaptive` is the
+live copy the evaluator executes.
+
+In gopy, `CodeUnit` is defined as `uint16` and the packing macros become
+inline helpers in `objects/code.go`.
+
+### `PyCodeObject` struct layout (lines 31 to 115)
+
+<CpyLink path="Include/cpython/code.h" lines="31-115" />
+
+```c
+struct PyCodeObject {
+    PyObject_HEAD
+
+    /* Cached co_* attributes: */
+    PyObject *co_consts;      /* tuple of constants */
+    PyObject *co_names;       /* tuple of names */
+    PyObject *co_filename;    /* Unicode: source file name */
+    PyObject *co_name;        /* Unicode: function / class name */
+    PyObject *co_qualname;    /* Unicode: qualified name */
+    PyObject *co_linetable;   /* bytes: compressed (offset, line) pairs */
+
+    /* Counts set at compile time: */
+    int co_argcount;
+    int co_posonlyargcount;
+    int co_kwonlyargcount;
+    int co_nlocals;
+    int co_stacksize;
+    int co_firstlineno;
+    _PyCode_DEF(0);           /* co_code_adaptive[] via flexible array */
+};
+```
+
+`co_linetable` is the compact encoding of bytecode-offset-to-source-line
+mappings introduced in 3.10 (PEP 657). Each entry is a pair of bytes:
+the first is a bytecode offset delta and the second encodes the line-number
+delta. The `PyCode_Addr2Line` and `PyCode_Addr2Location` functions decode
+this table on demand; there is no pre-expanded array.
+
+`co_varnames`, `co_freevars`, and `co_cellvars` are stored as tuples of
+`str` objects and are accessed via the `PyCode_GetVarnames` family of
+accessors rather than being direct fields in the stable ABI struct.
+
+In gopy, `CodeObject` in `objects/code.go` declares each field with the
+same name (capitalised) and the corresponding Go type. The flexible
+`co_code_adaptive` array is stored as `[]CodeUnit` alongside the struct.
+
+### Low-level bytecode helpers (lines 116 to 140)
+
+<CpyLink path="Include/cpython/code.h" lines="116-140" />
+
+```c
+static inline _Py_CODEUNIT *
+_PyCode_CODE(PyCodeObject *co)
+{
+    return (_Py_CODEUNIT *)co->co_code_adaptive;
+}
+
+static inline Py_ssize_t
+_PyCode_NBYTES(PyCodeObject *co)
+{
+    return Py_SIZE(co) * (Py_ssize_t)sizeof(_Py_CODEUNIT);
+}
+
+void _PyCode_InitAddressRange(PyCodeObject *code,
+                              PyCodeAddressRange *bounds);
+```
+
+`_PyCode_CODE` returns a pointer to the first instruction word in
+`co_code_adaptive`. Callers iterate from this pointer up to
+`_PyCode_CODE(co) + Py_SIZE(co)`, which is the past-the-end address.
+`_PyCode_NBYTES` gives the total byte count rather than the word count,
+which is what the marshal layer and the disassembler need.
+
+`_PyCode_InitAddressRange` seeds a `PyCodeAddressRange` cursor at the
+start of `co_linetable`. The caller then calls `_PyLineTable_NextAddressRange`
+in a loop to walk the table. This is the basis of `PyCode_Addr2Line`.
+
+In gopy, `CodeCode(co)` returns `co.CoCodeAdaptive` (a `[]CodeUnit`), and
+`CodeNbytes(co)` returns `len(co.CoCodeAdaptive) * 2`.
+
+### Public accessors and constructors (lines 141 to 200)
+
+<CpyLink path="Include/cpython/code.h" lines="141-200" />
+
+```c
+/* Constructors (testing / embedding only): */
+PyAPI_FUNC(PyCodeObject *) PyCode_New(
+    int argcount, int kwonlyargcount, int nlocals,
+    int stacksize, int flags,
+    PyObject *code, PyObject *consts, PyObject *names,
+    PyObject *varnames, PyObject *freevars, PyObject *cellvars,
+    PyObject *filename, PyObject *name, int firstlineno,
+    PyObject *linetable);
+
+PyAPI_FUNC(PyCodeObject *) PyCode_NewWithPosOnlyArgs(
+    int argcount, int posonlyargcount, int kwonlyargcount,
+    int nlocals, int stacksize, int flags,
+    PyObject *code, PyObject *consts, PyObject *names,
+    PyObject *varnames, PyObject *freevars, PyObject *cellvars,
+    PyObject *filename, PyObject *name, PyObject *qualname,
+    int firstlineno, PyObject *linetable);
+
+/* 3.11+ safe accessors: */
+PyAPI_FUNC(PyObject *) PyCode_GetCode(PyCodeObject *);
+PyAPI_FUNC(PyObject *) PyCode_GetVarnames(PyCodeObject *);
+PyAPI_FUNC(PyObject *) PyCode_GetCellvars(PyCodeObject *);
+PyAPI_FUNC(PyObject *) PyCode_GetFreevars(PyCodeObject *);
+
+/* Source location: */
+PyAPI_FUNC(int) PyCode_Addr2Line(PyCodeObject *, int);
+```
+
+`PyCode_New` is the 3.10-era constructor and lacks `co_qualname`. It is
+retained for binary compatibility but is superseded by
+`PyCode_NewWithPosOnlyArgs`, which carries the `posonlyargcount` field
+added in 3.8 (PEP 570) and the `qualname` added in 3.11.
+
+`PyCode_GetCode` returns `co_code` as a `bytes` object. The field was
+deprecated in 3.11 because it returns a copy of the original
+(non-adaptive) bytecode; callers that need the live adaptive array should
+use `_PyCode_CODE` directly. The `PyCode_GetVarnames`, `PyCode_GetCellvars`,
+and `PyCode_GetFreevars` accessors return references to the tuple fields
+and increment their reference counts.
+
+In gopy, these constructors and accessors are implemented in `objects/code.go`.
+`CodeAddr2Line` walks `co_linetable` using the same two-byte delta encoding
+that CPython uses in `Objects/codeobject.c`.

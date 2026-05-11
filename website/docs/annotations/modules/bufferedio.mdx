@@ -1,0 +1,191 @@
+---
+title: Modules/_io/bufferedio.c
+description: Implements BufferedReader, BufferedWriter, BufferedRandom, and BufferedRWPair — the four buffered binary I/O classes with an internal byte buffer and thread lock.
+cpython_path: Modules/_io/bufferedio.c
+cpython_version: "3.14"
+lines: 3000
+status: annotated
+ported_to: module/io/module.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Modules/_io/bufferedio.c`
+
+<CpyLink path="Modules/_io/bufferedio.c" />
+
+`bufferedio.c` implements the four buffered binary I/O classes:
+`BufferedReader`, `BufferedWriter`, `BufferedRandom`, and `BufferedRWPair`.
+All four share a common `BufferedObject` C struct that holds the internal
+fixed-size byte buffer, position cursors, and a reentrant lock for thread
+safety.
+
+The design is a write-through/read-ahead buffer layered on top of any raw
+`RawIOBase` object (typically a `FileIO`). Reads first satisfy requests
+from the in-memory buffer; when the buffer is exhausted, `raw.readinto`
+refills it in one system call. Writes accumulate in the buffer and are
+flushed to the raw layer either when the buffer is full, when `flush()` is
+called explicitly, or when the object is closed.
+
+`BufferedReader` and `BufferedWriter` handle the two unidirectional cases.
+`BufferedRandom` inherits from both and supports seeking, which requires
+flushing the write buffer before repositioning the raw stream.
+`BufferedRWPair` wraps two separate raw streams (one for reading, one for
+writing) and does not support `seek`.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Modules/_io/bufferedio.c" lines="1-120">1-120</Cpy> | `BufferedObject` struct, includes | Internal C struct definition: `raw`, `buffer`, `buffer_size`, `readable`, `writable`, `pos`, `raw_pos`, `read_pos`, `write_pos`, `lock`. | `module/io/module.go:BufferedObject` |
+| <Cpy path="Modules/_io/bufferedio.c" lines="120-450">120-450</Cpy> | `buffered_flush_and_rewind_unlocked` / `_bufferedwriter_flush_unlocked` | Write-flush path: calls `raw.write(buffer[write_pos:pos])` in a loop until all pending bytes are drained; handles short writes. | `module/io/module.go:bufferedFlush` |
+| <Cpy path="Modules/_io/bufferedio.c" lines="450-900">450-900</Cpy> | `BufferedReader._read_unlocked` / `buffered_read` | Read path: serves from buffer; on miss, calls `raw.readinto` to refill; handles short-read retries and EOF. | `module/io/module.go:bufferedRead` |
+| <Cpy path="Modules/_io/bufferedio.c" lines="900-1400">900-1400</Cpy> | `buffered_write` / `_bufferedwriter_write_unlocked` | Write path: copies data into write buffer; flushes when buffer full; falls back to direct write for large inputs. | `module/io/module.go:bufferedWrite` |
+| <Cpy path="Modules/_io/bufferedio.c" lines="1400-1800">1400-1800</Cpy> | `buffered_seek` / `buffered_tell` | Seek/tell: flushes write buffer, resets read buffer, delegates to `raw.seek`; `tell` adjusts `raw_pos` by `read_pos - pos`. | `module/io/module.go:bufferedSeek` |
+| <Cpy path="Modules/_io/bufferedio.c" lines="1800-2200">1800-2200</Cpy> | `BufferedReader` type object / `BufferedWriter` type object | `PyType_Spec` definitions, `__init__`, `close`, `readable`/`writable`, `__repr__`, `__sizeof__`. | `module/io/module.go:BufferedReaderType` |
+| <Cpy path="Modules/_io/bufferedio.c" lines="2200-2700">2200-2700</Cpy> | `BufferedRandom` type object / `BufferedRWPair` type object | `BufferedRandom` combines read and write paths with a single lock; `BufferedRWPair` delegates to two independent raw objects. | `module/io/module.go:BufferedRandomType` |
+| <Cpy path="Modules/_io/bufferedio.c" lines="2700-3000">2700-3000</Cpy> | `buffered_close` / `buffered_ioclosed` / module state helpers | Close sequence: flushes write buffer, releases lock, marks object closed; helpers for per-interpreter type lookup. | `module/io/module.go:bufferedClose` |
+
+## Reading
+
+### Buffer layout (lines 1 to 120)
+
+<CpyLink path="Modules/_io/bufferedio.c" lines="1-120" />
+
+The internal state of every buffered object is carried in `BufferedObject`:
+
+```c
+typedef struct {
+    PyObject_HEAD
+    PyObject *raw;          /* underlying RawIOBase */
+    Py_buffer buffer;       /* the fixed-size byte buffer */
+    Py_ssize_t buffer_size; /* capacity */
+    Py_ssize_t pos;         /* current logical position in buffer */
+    Py_ssize_t raw_pos;     /* where raw stream thinks it is */
+    Py_ssize_t read_pos;    /* start of unconsumed read data */
+    Py_ssize_t write_pos;   /* end of pending write data */
+    PyObject *lock;         /* RLock for thread safety */
+    int readable, writable;
+} buffered;
+```
+
+`pos` is the offset within `buffer` of the next byte to be consumed by a
+read (or the next byte to be filled by a write). `raw_pos` tracks where the
+underlying raw stream's file position actually is, which may differ from
+`pos` because the buffer may hold data not yet flushed or data already read
+from raw but not yet consumed by the caller.
+
+The buffer is allocated once in `__init__` as a plain C array of
+`buffer_size` bytes. `buffer_size` defaults to `DEFAULT_BUFFER_SIZE` (8192
+on most platforms) and cannot be changed after construction.
+
+### `buffered_read` miss path (lines 450 to 900)
+
+<CpyLink path="Modules/_io/bufferedio.c" lines="450-900" />
+
+When there are insufficient bytes in the buffer to satisfy a read request,
+`BufferedReader._read_unlocked` is called:
+
+```c
+static PyObject *
+_bufferedreader_read_unlocked(buffered *self, Py_ssize_t n)
+{
+    /* If there is data left in the buffer, copy it out first. */
+    Py_ssize_t current_size = READAHEAD(self);  /* pos - read_pos */
+    ...
+    /* Refill: call raw.readinto(buffer) */
+    res = PyObject_CallMethodObjArgs(self->raw, _PyIO_str_readinto,
+                                     memobj, NULL);
+    if (res == NULL || res == Py_None)
+        ...  /* EOF or error */
+    Py_ssize_t n_filled = PyLong_AsSsize_t(res);
+    self->raw_pos  = 0;
+    self->read_pos = 0;
+    self->pos      = 0;
+    ...
+}
+```
+
+`READAHEAD(self)` is the macro `self->pos - self->read_pos`, giving the
+number of unconsumed bytes already in the buffer. After copying those out,
+the function resets both `read_pos` and `pos` to zero and calls
+`raw.readinto` with a writable memoryview of `buffer`. The return value is
+the number of bytes actually placed into `buffer`, which may be less than
+`buffer_size` on a short read. Short reads are retried up to a bounded
+number of times before the partial fill is accepted.
+
+### `buffered_write` and flush (lines 900 to 1400)
+
+<CpyLink path="Modules/_io/bufferedio.c" lines="900-1400" />
+
+The write path is handled by `_bufferedwriter_write_unlocked`:
+
+```c
+static PyObject *
+_bufferedwriter_write_unlocked(buffered *self, Py_buffer *data)
+{
+    Py_ssize_t written = 0;
+    Py_ssize_t avail = self->buffer_size - self->write_pos;
+
+    if (data->len > self->buffer_size) {
+        /* Large write: flush then write directly to raw. */
+        if (_bufferedwriter_flush_unlocked(self) < 0)
+            return NULL;
+        ...
+        return PyObject_CallMethodObjArgs(self->raw, _PyIO_str_write,
+                                          dataobj, NULL);
+    }
+    if (data->len > avail) {
+        /* Buffer full: flush before copying new data in. */
+        if (_bufferedwriter_flush_unlocked(self) < 0)
+            return NULL;
+    }
+    memcpy(self->buffer.buf + self->write_pos,
+           data->buf, data->len);
+    self->write_pos += data->len;
+    ...
+}
+```
+
+Writes smaller than the remaining buffer capacity are simply copied with
+`memcpy`; the raw stream is not touched. When the incoming data would
+overflow the buffer, the write buffer is flushed first. When the write is
+larger than `buffer_size` altogether, the implementation skips the buffer
+entirely and calls `raw.write` directly, avoiding a double copy.
+
+`_bufferedwriter_flush_unlocked` drains the buffer by calling `raw.write`
+in a loop. Because `raw.write` is permitted to return a short count, the
+loop continues until `write_pos` reaches zero.
+
+### `buffered_seek` and `buffered_tell` (lines 1400 to 1800)
+
+<CpyLink path="Modules/_io/bufferedio.c" lines="1400-1800" />
+
+Seeking is non-trivial because the buffer and the raw stream's position may
+be out of sync. For a `BufferedWriter`, any pending write data must be
+flushed before the seek so that the raw stream's position is consistent:
+
+```c
+static PyObject *
+buffered_seek(buffered *self, PyObject *args)
+{
+    ...
+    ENTER_BUFFERED(self)
+    /* Flush write buffer if any. */
+    if (self->writable) {
+        res = _bufferedwriter_flush_unlocked(self);
+        if (res == NULL) goto end;
+    }
+    /* Invalidate read buffer. */
+    self->pos = self->read_pos = 0;
+    self->raw_pos = -1;
+    res = PyObject_CallMethodObjArgs(self->raw, _PyIO_str_seek,
+                                     posobj, whenceobj, NULL);
+    ...
+}
+```
+
+`buffered_tell` does not call `raw.tell` unconditionally. Instead it
+computes the logical position as `raw_pos - (pos - read_pos)`: the raw
+stream's known position minus the unread bytes still sitting in the buffer.
+This avoids a system call on every `tell()` invocation.

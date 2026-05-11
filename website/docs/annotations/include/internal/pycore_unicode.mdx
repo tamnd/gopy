@@ -1,0 +1,150 @@
+---
+title: Include/internal/pycore_unicode.h
+description: Internal Unicode helpers — compact layout structs, state bitfields, fast predicates, and inline data access for str objects.
+cpython_path: Include/internal/pycore_unicode.h
+cpython_version: "3.14"
+lines: 200
+status: annotated
+ported_to: objects/str.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Include/internal/pycore_unicode.h`
+
+<CpyLink path="Include/internal/pycore_unicode.h" />
+
+The private extension to `Include/unicodeobject.h`. The public header
+exposes only the stable API surface for constructing and decoding strings;
+this file gives CPython's own C code access to the two compact struct
+layouts, the `state` bitfield, and the inline-data accessor that all
+live inside the same allocation as the object header.
+
+CPython 3.12 completed the removal of the legacy (non-compact) Unicode
+representation. Every `PyUnicodeObject` is now either a compact ASCII
+string (`PyASCIIObject`, where the character data sits in the bytes
+immediately following the header) or a compact Unicode string
+(`PyCompactUnicodeObject`, which extends `PyASCIIObject` with a UTF-8
+cache pointer and a UTF-8 byte length). There is no longer a
+`PyUnicodeObject` with a separate heap allocation for the character data
+in new code; the macros in this header reflect that single-allocation
+guarantee.
+
+In gopy, `str` is represented as a Go `string` (always valid UTF-8) in
+`objects/str.go`. Because Go strings carry their length and are always
+UTF-8, many of the fields that `PyASCIIObject` and `PyCompactUnicodeObject`
+track explicitly (`length`, `utf8_length`, `hash`) collapse to either a
+trivial field read or a no-op.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Include/internal/pycore_unicode.h" lines="1-40">1-40</Cpy> | `PyASCIIObject` | Base compact struct: `ob_base`, `length`, `hash`, `state` bitfield, `wstr` (removed in 3.12). | `objects/str.go` |
+| <Cpy path="Include/internal/pycore_unicode.h" lines="41-70">41-70</Cpy> | `PyCompactUnicodeObject` | Extension of `PyASCIIObject` for non-ASCII compact strings: adds `utf8_length` and `utf8` cache pointer. | `objects/str.go` |
+| <Cpy path="Include/internal/pycore_unicode.h" lines="71-100">71-100</Cpy> | `PyUnicode_IS_ASCII` / `PyUnicode_IS_COMPACT` / `PyUnicode_GET_LENGTH` | Fast layout predicates and character-count accessor. | `objects/str.go` |
+| <Cpy path="Include/internal/pycore_unicode.h" lines="101-130">101-130</Cpy> | `_PyUnicode_COMPACT_DATA` | Returns a pointer to the inline character data for a compact string. | `objects/str.go` |
+| <Cpy path="Include/internal/pycore_unicode.h" lines="131-155">131-155</Cpy> | `_PyUnicode_EqualToASCIIString` / `_PyUnicode_EqualToASCIIId` | Fast equality tests against a C string or `_Py_Identifier` without encoding overhead. | `objects/str.go` |
+| <Cpy path="Include/internal/pycore_unicode.h" lines="156-180">156-180</Cpy> | `_Py_UNICODE_NEXT` | Advance a UTF-16 buffer pointer one code point, handling surrogate pairs. | `objects/str.go` |
+| <Cpy path="Include/internal/pycore_unicode.h" lines="181-200">181-200</Cpy> | `_PyUnicode_CheckConsistency` | Debug-mode validator that checks all struct fields are internally consistent. | `objects/str.go` |
+
+## Reading
+
+### Compact vs non-compact layout (lines 1 to 70)
+
+<CpyLink path="Include/internal/pycore_unicode.h" lines="1-70" />
+
+```c
+typedef struct {
+    PyObject_HEAD
+    Py_ssize_t length;          /* number of code points */
+    Py_hash_t  hash;            /* -1 if not set */
+    struct {
+        unsigned int interned:2;
+        unsigned int kind:3;    /* PyUnicode_1BYTE_KIND etc. */
+        unsigned int compact:1;
+        unsigned int ascii:1;
+        unsigned int ready:1;
+    } state;
+} PyASCIIObject;
+
+typedef struct {
+    PyASCIIObject _base;
+    Py_ssize_t utf8_length;    /* bytes in the UTF-8 cache, 0 means not set */
+    char      *utf8;           /* UTF-8 representation, or NULL */
+} PyCompactUnicodeObject;
+```
+
+`PyASCIIObject` is the base layout for every compact string. For
+pure-ASCII content (`state.ascii == 1`) the character data is stored
+in the bytes immediately following the `PyASCIIObject` header in the
+same allocation, so no second pointer is needed. For non-ASCII compact
+strings, `PyCompactUnicodeObject` adds a `utf8` cache: the first call
+to `PyUnicode_AsUTF8` encodes the string to a fresh `malloc` buffer and
+stores it here; subsequent calls return the cached pointer.
+
+The `state.kind` field records the storage width of each code unit:
+`PyUnicode_1BYTE_KIND` (Latin-1), `PyUnicode_2BYTE_KIND` (UCS-2), or
+`PyUnicode_4BYTE_KIND` (UCS-4). The "compact" path always picks the
+narrowest kind that covers the string's code point range.
+
+In gopy, `StrObject` in `objects/str.go` stores a single Go `string`
+field. Go strings are always UTF-8, so `length` (code-point count) is
+obtained via `utf8.RuneCountInString`, `hash` is computed lazily on
+first use, and the `state` bitfield has no equivalent; the Go type
+system handles the invariants that the bitfield guards.
+
+### `state` bitfields (lines 1 to 40)
+
+<CpyLink path="Include/internal/pycore_unicode.h" lines="1-40" />
+
+The four most-used flag bits:
+
+- `state.compact`: always `1` in CPython 3.12+ because the legacy
+  non-compact representation was removed.
+- `state.ascii`: `1` when the string contains only codepoints
+  `U+0000`-`U+007F`. Compact ASCII strings store their data inline after
+  `PyASCIIObject`; no `PyCompactUnicodeObject` header is needed.
+- `state.ready`: `1` once the string has been fully initialised and its
+  `length`, `hash`, and character data are valid. Code may not read any
+  other field unless this bit is set.
+- `state.interned`: a two-bit field encoding whether the string is
+  mortal (`SSTATE_NOT_INTERNED = 0`), interned-mortal
+  (`SSTATE_INTERNED_MORTAL = 1`), or immortal
+  (`SSTATE_INTERNED_IMMORTAL = 2`). Immortal interned strings (keyword
+  names, small integer str forms) skip refcount updates entirely.
+
+The `state` word is read by `PyUnicode_IS_ASCII` and `PyUnicode_IS_COMPACT`
+without any allocation or string scan, making them the zero-cost predicates
+that the interpreter uses on the hot attribute-lookup path.
+
+### `_PyUnicode_COMPACT_DATA` (lines 101 to 130)
+
+<CpyLink path="Include/internal/pycore_unicode.h" lines="101-130" />
+
+```c
+static inline const void *
+_PyUnicode_COMPACT_DATA(PyObject *op)
+{
+    if (PyUnicode_IS_ASCII(op)) {
+        return (PyASCIIObject *)op + 1;
+    }
+    return (PyCompactUnicodeObject *)op + 1;
+}
+```
+
+Pointer arithmetic past the header gives the address of the inline
+character buffer. For ASCII strings, the buffer starts one
+`PyASCIIObject` past `op`; for non-ASCII compact strings, one
+`PyCompactUnicodeObject` past `op` (the wider header means the data
+starts slightly further in). Both cases live in the same `malloc` block
+as the header, so no indirection through a separate data pointer is
+needed.
+
+This is used by `PyUnicode_DATA` (the public macro) and by the
+specialising adaptive interpreter when scanning string data at speed.
+
+In gopy, the equivalent is reading the underlying byte slice of a Go
+`string` with `unsafe.StringData`; because Go strings are immutable
+and heap-allocated by the runtime, no explicit offset arithmetic is
+needed.

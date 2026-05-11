@@ -1,0 +1,161 @@
+---
+title: Lib/fnmatch.py
+description: Unix shell-style wildcard matching; translates glob patterns to compiled regular expressions with optional case folding.
+cpython_path: Lib/fnmatch.py
+cpython_version: "3.14"
+lines: 130
+status: annotated
+ported_to: module/fnmatch/module.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Lib/fnmatch.py`
+
+<CpyLink path="Lib/fnmatch.py" />
+
+`fnmatch` is a small pure-Python module that implements the subset of
+shell glob matching used by `ls`, `find`, and similar tools. It does not
+expand path separators or tilde — that is `glob`'s job — it only tests
+whether a single filename matches a pattern.
+
+The module's core device is `translate`, which rewrites a glob pattern
+into a regular expression string. `*` becomes `.*`, `?` becomes `.`, and
+`[seq]` / `[!seq]` become character classes. The resulting regex is
+anchored with `\Z` (end-of-string) so partial matches are rejected.
+`_compile_pattern` wraps `translate` and `re.compile` with
+`functools.lru_cache` so repeated calls with the same `(pat, is_case_sensitive)`
+pair cost nothing after the first.
+
+On Windows, `fnmatch` folds both name and pattern to lower case before
+matching (via `os.path.normcase`); `fnmatchcase` always performs a
+case-sensitive match regardless of platform.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Lib/fnmatch.py" lines="1-20">1-20</Cpy> | Module docstring, imports | Imports `os`, `re`, `functools`; declares `__all__`. | `module/fnmatch/module.go` |
+| <Cpy path="Lib/fnmatch.py" lines="21-45">21-45</Cpy> | `fnmatch(name, pat)` | Normalises case via `os.path.normcase`, delegates to `_compile_pattern`. | `module/fnmatch/module.go` |
+| <Cpy path="Lib/fnmatch.py" lines="46-60">46-60</Cpy> | `fnmatchcase(name, pat)` | Case-sensitive match; calls `_compile_pattern` directly without normalisation. | `module/fnmatch/module.go` |
+| <Cpy path="Lib/fnmatch.py" lines="61-80">61-80</Cpy> | `filter(names, pat)` | Returns the subset of `names` matching `pat`; compiles the pattern once and applies it to each name. | `module/fnmatch/module.go` |
+| <Cpy path="Lib/fnmatch.py" lines="81-95">81-95</Cpy> | `_compile_pattern(pat, is_case_sensitive)` | `lru_cache`-backed helper that calls `translate` then `re.compile`. | `module/fnmatch/module.go` |
+| <Cpy path="Lib/fnmatch.py" lines="96-130">96-130</Cpy> | `translate(pat)` | Converts glob syntax to a regex string: `*` → `.*`, `?` → `.`, `[seq]` → character class, everything else literal-escaped. | `module/fnmatch/module.go` |
+
+## Reading
+
+### `fnmatch` and `fnmatchcase` (lines 21 to 60)
+
+<CpyLink path="Lib/fnmatch.py" lines="21-60" />
+
+```python
+def fnmatch(name, pat):
+    """Test whether NAME matches PATTERN."""
+    name = os.path.normcase(name)
+    pat = os.path.normcase(pat)
+    return fnmatchcase(name, pat)
+
+def fnmatchcase(name, pat):
+    """Test whether NAME matches PATTERN, including case."""
+    match = _compile_pattern(pat, os.path is posixpath)
+    return match(name) is not None
+```
+
+`fnmatch` defers the case question to `os.path.normcase`: on Windows that
+folds both strings to lower case; on POSIX it is a no-op. By doing the
+fold on the pattern as well as the name, the compiled regex cache stays
+consistent across mixed-case calls. `fnmatchcase` bypasses normalisation
+entirely and passes `os.path is posixpath` to `_compile_pattern` so the
+cached key reflects whether the OS file system is case-sensitive.
+
+### `filter` (lines 61 to 80)
+
+<CpyLink path="Lib/fnmatch.py" lines="61-80" />
+
+```python
+def filter(names, pat):
+    """Construct a list from those elements of the iterable NAMES
+    that match PAT."""
+    result = []
+    pat = os.path.normcase(pat)
+    match = _compile_pattern(pat, os.path is posixpath)
+    if os.path is posixpath:
+        # normcase on posix is NOP. Optimize it away from the loop.
+        for name in names:
+            if match(name):
+                result.append(name)
+    else:
+        for name in names:
+            if match(os.path.normcase(name)):
+                result.append(name)
+    return result
+```
+
+`filter` compiles the pattern once and then iterates. On POSIX the inner
+loop skips `normcase` altogether since it is a no-op, which matters for
+large name lists. The split into two loops avoids a per-element branch in
+the hot path.
+
+### `translate` (lines 96 to 130)
+
+<CpyLink path="Lib/fnmatch.py" lines="96-130" />
+
+```python
+def translate(pat):
+    """Translate a shell PATTERN to a regular expression."""
+    i, n = 0, len(pat)
+    res = ''
+    while i < n:
+        c = pat[i]
+        i = i + 1
+        if c == '*':
+            res = res + '.*'
+        elif c == '?':
+            res = res + '.'
+        elif c == '[':
+            j = i
+            # The following two checks handle corner cases:
+            # [!] should not be treated as negation
+            # [] should not be treated as empty character class
+            if j < n and pat[j] == '!':
+                j = j + 1
+            if j < n and pat[j] == ']':
+                j = j + 1
+            while j < n and pat[j] != ']':
+                j = j + 1
+            if j >= n:
+                res = res + '\\['
+            else:
+                stuff = pat[i:j]
+                ...
+                res = '%s[%s]' % (res, stuff)
+                i = j + 1
+        else:
+            res = res + re.escape(c)
+    return r'(?s:%s)\Z' % res
+```
+
+The character-class parser handles the edge cases `[!]` and `[]` that
+would otherwise be mis-parsed as negation or empty class. All literal
+characters go through `re.escape`. The final `(?s:...)` wrapper enables
+`re.DOTALL` inline so `.*` matches newlines, matching bash behaviour for
+filenames that contain unusual bytes. The `\Z` anchor ensures the entire
+name must match, not just a prefix.
+
+### `_compile_pattern` cache (lines 81 to 95)
+
+<CpyLink path="Lib/fnmatch.py" lines="81-95" />
+
+```python
+@functools.lru_cache(maxsize=256)
+def _compile_pattern(pat, is_case_sensitive):
+    if is_case_sensitive:
+        return re.compile(translate(pat)).match
+    else:
+        return re.compile(translate(pat), re.IGNORECASE).match
+```
+
+The cache is keyed on `(pat, is_case_sensitive)` and stores the bound
+`.match` method directly so the hot path is a single callable with no
+attribute lookup. The `maxsize=256` cap prevents unbounded memory growth
+when code generates patterns dynamically.

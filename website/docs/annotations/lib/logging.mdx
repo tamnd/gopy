@@ -1,0 +1,250 @@
+---
+title: Lib/logging/__init__.py
+description: The logging framework; implements Logger hierarchy, LogRecord creation, Handler/Formatter dispatch, Manager name registry, and basicConfig one-call setup.
+cpython_path: Lib/logging/__init__.py
+cpython_version: "3.14"
+lines: 2300
+status: annotated
+ported_to: module/logging/module.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Lib/logging/__init__.py`
+
+<CpyLink path="Lib/logging/__init__.py" />
+
+The entire core logging framework lives in this one file (~2300 lines).
+Unlike `asyncio` or `unittest`, there is no separate package structure:
+`Lib/logging/__init__.py` contains `Logger`, `Handler`, `Formatter`,
+`LogRecord`, `Manager`, `Filter`, `Filterer`, and `basicConfig` all in
+one place. The companion files `Lib/logging/handlers.py` and
+`Lib/logging/config.py` add optional extras (rotating file handlers,
+`dictConfig`) but are not imported by the core.
+
+The central abstraction is the `Logger` hierarchy. Logger names are
+dotted strings: `"a.b.c"` has parent `"a.b"`, which has parent `"a"`,
+which has parent the root logger (`logging.root`). The `Manager` object
+maintains a flat `loggerDict` mapping names to `Logger` instances or
+`PlaceHolder` sentinels (for intermediate names that have no logger yet).
+When a `Logger` emits a record, `callHandlers` walks up the parent chain
+and calls `handle()` on every attached `Handler` until it reaches a
+logger with `propagate = False` or the root.
+
+Level filtering is intentionally cheap. Each `Logger` has an integer
+`level` field (default `NOTSET = 0`, which means "defer to parent").
+`Logger.isEnabledFor(level)` calls `getEffectiveLevel()`, which walks
+the parent chain once to find the first non-zero level, then compares.
+This is the only path for the common case where the log call is below the
+threshold and nothing should happen.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Lib/logging/__init__.py" lines="1-100">1-100</Cpy> | Module header, level constants, `getLevelName`, `addLevelName` | Defines `DEBUG=10`, `INFO=20`, `WARNING=30`, `ERROR=40`, `CRITICAL=50`; builds the two-way `_levelToName`/`_nameToLevel` dicts. | `module/logging/module.go:levels` |
+| <Cpy path="Lib/logging/__init__.py" lines="101-350">101-350</Cpy> | `LogRecord`, `makeLogRecord` | A single log event object. `__init__` records `name`, `levelno`, `pathname`, `lineno`, `msg`, `args`, `exc_info`, `created`, `msecs`, `thread`, and `process`. | `module/logging/module.go:LogRecord` |
+| <Cpy path="Lib/logging/__init__.py" lines="351-550">351-550</Cpy> | `Formatter`, `BufferingFormatter` | `format(record)` calls `formatMessage`, then optionally appends the formatted exception. `%(levelname)s:%(name)s:%(message)s` is the default format string. | `module/logging/module.go:Formatter` |
+| <Cpy path="Lib/logging/__init__.py" lines="551-750">551-750</Cpy> | `Filter`, `Filterer` | `Filter` matches by name prefix; `Filterer` holds a list of `Filter` objects and provides `addFilter`/`removeFilter`/`callFilters`. Both `Logger` and `Handler` inherit from `Filterer`. | `module/logging/module.go:Filter` |
+| <Cpy path="Lib/logging/__init__.py" lines="751-1050">751-1050</Cpy> | `Handler`, `StreamHandler`, `FileHandler` | `Handler.handle(record)` acquires the handler lock, calls `emit(record)`, releases. `StreamHandler.emit` formats the record and writes to `self.stream`. `FileHandler` opens the file lazily. | `module/logging/module.go:Handler` |
+| <Cpy path="Lib/logging/__init__.py" lines="1051-1450">1051-1450</Cpy> | `PlaceHolder`, `Manager`, `Logger` | `Logger.debug`/`info`/`warning`/`error`/`critical` build a `LogRecord` and call `handle`; `callHandlers` walks the parent chain. `Manager.getLogger` constructs the hierarchy. | `module/logging/module.go:Logger` |
+| <Cpy path="Lib/logging/__init__.py" lines="1451-1700">1451-1700</Cpy> | `RootLogger`, `root`, `Logger.manager`, module-level helpers | The root logger is a `RootLogger` instance with level `WARNING`. Module-level `debug()`, `info()`, `warning()` etc. delegate to `root`. | `module/logging/module.go:root` |
+| <Cpy path="Lib/logging/__init__.py" lines="1701-2000">1701-2000</Cpy> | `basicConfig`, `disable`, `addLevelName`, `getLevelName`, `captureWarnings` | `basicConfig` is idempotent: a no-op if `root.handlers` is non-empty. On first call it creates a `StreamHandler` or `FileHandler` and attaches it to `root`. | `module/logging/module.go:basicConfig` |
+| <Cpy path="Lib/logging/__init__.py" lines="2001-2300">2001-2300</Cpy> | `getLogger`, `shutdown`, `NullHandler`, `lastResort`, `_StderrHandler` | `getLogger(name)` delegates to `Logger.manager.getLogger(name)`. `shutdown` flushes and closes all handlers. `lastResort` is a `_StderrHandler` at `WARNING` level used when no handlers are configured. | `module/logging/module.go:getLogger` |
+
+## Reading
+
+### `Logger` hierarchy and `callHandlers` (lines 1051 to 1450)
+
+<CpyLink path="Lib/logging/__init__.py" lines="1051-1450" />
+
+```python
+def callHandlers(self, record):
+    c = self
+    found = 0
+    while c:
+        for hdlr in c.handlers:
+            found = found + 1
+            if record.levelno >= hdlr.level:
+                hdlr.handle(record)
+        if not c.propagate:
+            c = None    # break out
+        else:
+            c = c.parent
+    if (found == 0):
+        if lastResort:
+            if record.levelno >= lastResort.level:
+                lastResort.handle(record)
+        elif raiseExceptions and not self.manager.emittedNoHandlerWarning:
+            sys.stderr.write("No handlers could be found for logger"
+                             " \"%s\"\n" % self.name)
+            self.manager.emittedNoHandlerWarning = True
+```
+
+`callHandlers` walks the `c.parent` chain. Each `Logger` in the chain
+may have zero or more `Handler` objects attached. Every handler whose
+`level` is at or below the record's `levelno` gets a call to
+`hdlr.handle(record)`. Walking continues up the chain unless `c.propagate`
+is `False`.
+
+If the walk completes without finding any handler (including the root
+logger), the framework falls back to `lastResort`, a `_StderrHandler`
+at `WARNING` level. This is the behavior that produces the
+`"No handlers could be found"` message in Python 2; in Python 3 it is
+replaced by silently writing to `sys.stderr` via `lastResort`.
+
+The parent chain is built by `Manager._fixupParents`. Each time a new
+`Logger` is created, `_fixupParents` scans `loggerDict` for the closest
+ancestor and sets `logger.parent` directly. This means parent traversal
+at emit time is a pointer walk with no dict lookups.
+
+### `LogRecord` creation (lines 101 to 350)
+
+<CpyLink path="Lib/logging/__init__.py" lines="101-350" />
+
+```python
+class LogRecord:
+    def __init__(self, name, level, pathname, lineno,
+                 msg, args, exc_info, func=None, sinfo=None):
+        ct = time.time()
+        self.name = name
+        self.msg = msg
+        self.args = args
+        self.levelname = getLevelName(level)
+        self.levelno = level
+        self.pathname = pathname
+        ...
+        self.lineno = lineno
+        self.funcName = func
+        self.created = ct
+        self.msecs = round((ct - int(ct)) * 1000)
+        self.relativeCreated = (self.created - _startTime) * 1000
+        self.thread = threading.get_ident()
+        self.process = os.getpid()
+        ...
+```
+
+`LogRecord.__init__` captures everything needed to format the message
+later. `msg` and `args` are stored separately (not yet interpolated)
+so that handlers can skip formatting entirely for filtered records.
+`getMessage()` performs the `msg % args` interpolation on demand:
+
+```python
+def getMessage(self):
+    msg = str(self.msg)
+    if self.args:
+        msg = msg % self.args
+    return msg
+```
+
+`exc_info` is stored as-is (the `(type, value, traceback)` triple
+returned by `sys.exc_info()`). `Formatter.formatException` converts it
+to a string by calling `traceback.print_exception` only when formatting,
+not at record creation time.
+
+`Logger._log` is the single point that constructs `LogRecord`:
+
+```python
+def _log(self, level, msg, args, **kwargs):
+    ...
+    record = self.makeRecord(self.name, level, fn, lno, msg, args, exc_info, func, extra, sinfo)
+    self.handle(record)
+```
+
+`makeRecord` can be overridden by subclasses to produce custom record
+types. The default calls `LogRecord(...)` directly.
+
+### `Formatter.format` (lines 351 to 550)
+
+<CpyLink path="Lib/logging/__init__.py" lines="351-550" />
+
+```python
+class Formatter:
+    def format(self, record):
+        record.message = record.getMessage()
+        if self.usesTime():
+            record.asctime = self.formatTime(record, self.datefmt)
+        s = self.formatMessage(record)
+        if record.exc_info:
+            if not record.exc_text:
+                record.exc_text = self.formatException(record.exc_info)
+        if record.exc_text:
+            if s[-1:] != "\n":
+                s = s + "\n"
+            s = s + record.exc_text
+        if record.stack_info:
+            if s[-1:] != "\n":
+                s = s + "\n"
+            s = s + self.formatStack(record.stack_info)
+        return s
+```
+
+`Formatter.format` uses `%`-style string interpolation via
+`formatMessage`, which calls `self._style.format(record)`. Three style
+objects exist: `PercentStyle` (`%`), `StrFormatStyle` (`{`), and
+`StringTemplateStyle` (`$`). The style is chosen by the `style` argument
+to `Formatter.__init__`.
+
+Exception formatting is lazy and cached: `record.exc_text` is `None`
+until the first format call, then set to the formatted traceback string.
+Subsequent calls to `format` on the same record skip
+`formatException` entirely.
+
+`formatTime` produces the `asctime` field using `time.strftime`. The
+default `datefmt` is `None`, which maps to ISO 8601-ish
+`"2003-07-08 16:49:45,896"` (the comma before milliseconds is
+deliberate and is documented behavior).
+
+### `basicConfig` (lines 1701 to 2000)
+
+<CpyLink path="Lib/logging/__init__.py" lines="1701-2000" />
+
+```python
+def basicConfig(**kwargs):
+    _acquireLock()
+    try:
+        force = kwargs.pop('force', False)
+        encoding = kwargs.pop('encoding', None)
+        errors = kwargs.pop('errors', 'backslashreplace')
+        if force:
+            for h in root.handlers[:]:
+                root.removeHandler(h)
+                h.close()
+        if len(root.handlers) == 0:
+            handlers = kwargs.pop('handlers', None)
+            ...
+            if handlers is None:
+                filename = kwargs.pop('filename', None)
+                mode = kwargs.pop('mode', 'a')
+                if filename:
+                    h = FileHandler(filename, mode, encoding=encoding, errors=errors)
+                else:
+                    stream = kwargs.pop('stream', None)
+                    h = StreamHandler(stream)
+                handlers = [h]
+            ...
+            fs = kwargs.pop('format', BASIC_FORMAT)
+            dfs = kwargs.pop('datefmt', None)
+            style = kwargs.pop('style', '%')
+            fmt = Formatter(fs, dfs, style)
+            for handler in handlers:
+                ...
+                handler.setFormatter(fmt)
+                root.addHandler(handler)
+            level = kwargs.pop('level', None)
+            if level is not None:
+                root.setLevel(level)
+    finally:
+        _releaseLock()
+```
+
+`basicConfig` is the one-call setup most scripts use. It is guarded by
+`_acquireLock()` (a `threading.RLock`) so it is safe to call from
+multiple threads at startup. The idempotency check (`len(root.handlers) == 0`)
+means a second call is a no-op unless `force=True` is passed.
+
+The precedence is: caller-supplied `handlers` list first; then a named
+`filename`; then a `stream` (defaulting to `sys.stderr`). Only one of
+`handlers`, `filename`, and `stream` may be specified; passing more than
+one raises `ValueError`. After attaching handlers, `basicConfig` sets
+the root level if `level=` was given, leaving it at `WARNING` otherwise.

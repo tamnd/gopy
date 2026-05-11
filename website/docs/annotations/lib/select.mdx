@@ -1,0 +1,88 @@
+---
+title: Lib/select.py
+description: Thin re-export shim for the select C extension; exposes select(), poll, epoll, kqueue, kevent, and devpoll depending on platform.
+cpython_path: Lib/select.py
+cpython_version: "3.14"
+lines: 35
+status: annotated
+ported_to: ""
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Lib/select.py`
+
+<CpyLink path="Lib/select.py" />
+
+`Lib/select.py` is one of the smallest files in CPython's standard
+library. It exists purely to re-export names from the `_select` C
+extension (`Modules/selectmodule.c`) and to make the `select` module
+importable as a Python package when the C accelerator is not available
+(e.g., when building without `_select`).
+
+The actual I/O multiplexing logic — the `select(2)`, `poll(2)`,
+`epoll(7)`, `kqueue(2)`, and `devpoll` system calls — lives entirely in
+`Modules/selectmodule.c`. The Python file adds nothing beyond the
+import.
+
+`select.error` is re-exported as an alias for `OSError` (it was a
+distinct exception type before Python 3.3; the alias is kept for
+backwards compatibility).
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Lib/select.py" lines="1-10">1-10</Cpy> | `from _select import *` | Pull all C-level symbols into the `select` namespace. | not ported |
+| <Cpy path="Lib/select.py" lines="11-20">11-20</Cpy> | `select`, `error` | `select()` is the four-argument `select(2)` wrapper; `error` is `OSError`. | not ported |
+| <Cpy path="Lib/select.py" lines="21-35">21-35</Cpy> | `poll`, `epoll`, `kqueue`, `kevent`, `devpoll` | Platform-conditional types; present only when the underlying syscall exists. | not ported |
+
+## Reading
+
+### Star-import and platform-conditional symbols (lines 1 to 35)
+
+<CpyLink path="Lib/select.py" lines="1-35" />
+
+```python
+from _select import *
+from _select import (
+    select,
+    error,
+)
+
+# Available only on Linux:
+try:
+    from _select import epoll, devpoll
+except ImportError:
+    pass
+
+# Available only on BSD / macOS:
+try:
+    from _select import kqueue, kevent
+except ImportError:
+    pass
+
+# Available on most POSIX systems:
+try:
+    from _select import poll
+except ImportError:
+    pass
+```
+
+The `try/except ImportError` guards mean that a program can test for
+platform support by checking `hasattr(select, 'epoll')` rather than
+inspecting `sys.platform`. The C extension raises `ImportError` at the
+symbol level (not at module load time) when a given syscall is absent,
+which keeps the module importable on all platforms.
+
+`error` is defined as `OSError` in `Modules/selectmodule.c` since
+Python 3.3 (PEP 3151 unified the OS exception hierarchy). Old code that
+caught `select.error` continues to work because `select.error is OSError`
+is true.
+
+## gopy status
+
+Not ported. `select`/`epoll`/`kqueue` are host-OS I/O primitives. gopy
+targets cross-platform Go I/O through the `net` package and does not
+expose raw file-descriptor multiplexing to Python code. If needed in the
+future, `module/select/` would be the target location.

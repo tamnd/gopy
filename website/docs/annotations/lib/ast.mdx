@@ -1,0 +1,185 @@
+---
+title: Lib/ast.py
+description: Pure-Python layer over the C AST; provides parse, dump, literal_eval, NodeVisitor, NodeTransformer, walk, and location helpers.
+cpython_path: Lib/ast.py
+cpython_version: "3.14"
+lines: 1000
+status: annotated
+ported_to: module/ast/module.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Lib/ast.py`
+
+<CpyLink path="Lib/ast.py" />
+
+`Lib/ast.py` is the Python-level wrapper over CPython's built-in `_ast`
+C extension. The C layer owns every AST node class (`Module`, `FunctionDef`,
+`BinOp`, and so on); this file imports them all via `from _ast import *`,
+then adds the tooling that operates on those node objects.
+
+The module is roughly divided into three tiers. The first tier is
+entry-point functions: `parse` for creating an AST from source, `dump` for
+pretty-printing it, and `literal_eval` for safe constant evaluation. The
+second tier is the visitor/transformer pair `NodeVisitor` and
+`NodeTransformer`, which implement the standard tree-walking dispatch
+pattern. The third tier is a set of location utility functions
+(`copy_location`, `fix_missing_locations`, `increment_lineno`) used by
+tools that generate or rewrite AST nodes.
+
+gopy does not yet expose a Python-level `ast` module; when that work ships
+it will live in `module/ast/module.go` and wrap the parser output that
+`parser/pegen/` already produces.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Lib/ast.py" lines="1-40">1-40</Cpy> | Module header, `_ast` import, `__all__` | Import all C node classes; set `PyCF_*` flags and `__version__`. | `module/ast/module.go` |
+| <Cpy path="Lib/ast.py" lines="41-120">41-120</Cpy> | `parse` | Calls `compile()` with `PyCF_ONLY_AST`; handles `type_comments` and `feature_version` flags. | `module/ast/module.go` |
+| <Cpy path="Lib/ast.py" lines="121-200">121-200</Cpy> | `literal_eval` | Recursively evaluates AST nodes for literals only; raises `ValueError` on non-literals. | `module/ast/module.go` |
+| <Cpy path="Lib/ast.py" lines="201-290">201-290</Cpy> | `dump` | Pretty-prints an AST node to a string; supports `annotate_fields`, `include_attributes`, and `indent`. | `module/ast/module.go` |
+| <Cpy path="Lib/ast.py" lines="291-360">291-360</Cpy> | `copy_location`, `fix_missing_locations`, `increment_lineno` | Location utilities: copy source positions between nodes, fill defaults, or shift line numbers by `n`. | `module/ast/module.go` |
+| <Cpy path="Lib/ast.py" lines="361-420">361-420</Cpy> | `get_docstring` | Returns the first statement if it is a string constant; strips indentation when `clean=True`. | `module/ast/module.go` |
+| <Cpy path="Lib/ast.py" lines="421-480">421-480</Cpy> | `walk` | BFS traversal using a deque; yields every node in the tree. | `module/ast/module.go` |
+| <Cpy path="Lib/ast.py" lines="481-700">481-700</Cpy> | `NodeVisitor` | Base class; `visit` dispatches to `visit_CLASSNAME` or falls back to `generic_visit`; `generic_visit` recurses over all child nodes. | `module/ast/module.go` |
+| <Cpy path="Lib/ast.py" lines="701-900">701-900</Cpy> | `NodeTransformer` | `NodeVisitor` subclass; `generic_visit` replaces child nodes with return values; `None` removes a node; a list flattens into the parent sequence. | `module/ast/module.go` |
+| <Cpy path="Lib/ast.py" lines="901-1000">901-1000</Cpy> | `_Unparser`, `unparse` | Regenerates Python source text from an AST node; used by `compile()` error messages and f-string formatting. | `module/ast/module.go` |
+
+## Reading
+
+### `parse` and compile flags (lines 41 to 120)
+
+<CpyLink path="Lib/ast.py" lines="41-120" />
+
+```python
+def parse(source, filename="<unknown>", mode="exec", *,
+          type_comments=False, feature_version=None):
+    flags = PyCF_ONLY_AST
+    if type_comments:
+        flags |= PyCF_TYPE_COMMENTS
+    if isinstance(feature_version, tuple):
+        major, minor = feature_version  # 3, 10 for example
+    elif feature_version is None:
+        major = minor = None
+    else:
+        raise ValueError(...)
+    if major is not None:
+        flags |= ast.PyCF_ALLOW_TOP_LEVEL_AWAIT
+    return compile(source, filename, mode, flags,
+                   _feature_version=minor)
+```
+
+`parse` is mostly flag assembly. The real work happens inside the C
+`compile()` built-in, which returns an AST when `PyCF_ONLY_AST` is set.
+The `type_comments` flag enables parsing of `# type: ignore` and
+`# type: T` comments into the AST as `type_comment` fields on assignment
+and function nodes. The `feature_version` parameter lets tools like
+`black` parse code targeting an older Python without needing to change the
+interpreter version; it is passed down to the C grammar as
+`_feature_version`.
+
+### `literal_eval` recursive descent (lines 121 to 200)
+
+<CpyLink path="Lib/ast.py" lines="121-200" />
+
+```python
+def literal_eval(node_or_string):
+    if isinstance(node_or_string, str):
+        try:
+            node_or_string = parse(node_or_string.lstrip(" \t"), mode='eval')
+        except SyntaxError:
+            ...
+    if isinstance(node_or_string, Expression):
+        node_or_string = node_or_string.body
+    def _convert(node):
+        if isinstance(node, Constant):
+            return node.value
+        elif isinstance(node, Tuple):
+            return tuple(map(_convert, node.elts))
+        elif isinstance(node, List):
+            return list(map(_convert, node.elts))
+        elif isinstance(node, Set):
+            return set(map(_convert, node.elts))
+        elif isinstance(node, Dict):
+            ...
+        elif isinstance(node, BinOp) and isinstance(node.op, (Add, Sub)):
+            # handles complex: 1 + 2j
+            ...
+        raise ValueError('malformed node or string: ' + repr(node))
+    return _convert(node_or_string)
+```
+
+The safety guarantee comes from the whitelist: only `Constant`, container
+literals, and the `Add`/`Sub` binary operators for complex number syntax
+(`1 + 2j`) are accepted. Any other node type raises `ValueError`. This
+makes `literal_eval` safe to call on untrusted input, whereas `eval()`
+would execute arbitrary code. The string path re-parses in `eval` mode so
+that a bare expression is accepted without wrapping it in a `Module`.
+
+### `NodeVisitor.visit` and `generic_visit` (lines 481 to 700)
+
+<CpyLink path="Lib/ast.py" lines="481-700" />
+
+```python
+class NodeVisitor:
+    def visit(self, node):
+        method = 'visit_' + node.__class__.__name__
+        visitor = getattr(self, method, self.generic_visit)
+        return visitor(node)
+
+    def generic_visit(self, node):
+        for field, value in ast.iter_fields(node):
+            if isinstance(value, list):
+                for item in value:
+                    if isinstance(item, AST):
+                        self.visit(item)
+            elif isinstance(value, AST):
+                self.visit(value)
+```
+
+`visit` does a single `getattr` lookup keyed on the concrete class name.
+If no `visit_FunctionDef` method exists on the subclass, it falls back to
+`generic_visit`, which recurses into all child fields. This means a
+visitor that overrides only `visit_Call` will still descend into every
+other node type automatically. The return values from visitor methods are
+passed back to the caller of `visit`; `NodeVisitor` itself ignores them,
+while `NodeTransformer` uses them to replace nodes.
+
+### `NodeTransformer.generic_visit` node replacement (lines 701 to 900)
+
+<CpyLink path="Lib/ast.py" lines="701-900" />
+
+```python
+class NodeTransformer(NodeVisitor):
+    def generic_visit(self, node):
+        for field, old_value in ast.iter_fields(node):
+            if isinstance(old_value, list):
+                new_values = []
+                for old_node in old_value:
+                    if isinstance(old_node, AST):
+                        value = self.visit(old_node)
+                        if value is None:
+                            continue
+                        elif not isinstance(value, AST):
+                            new_values.extend(value)
+                            continue
+                    new_values.append(value)
+                old_value[:] = new_values
+            elif isinstance(old_value, AST):
+                new_value = self.visit(old_value)
+                if new_value is None:
+                    delattr(node, field)
+                else:
+                    setattr(node, field, new_value)
+        return node
+```
+
+`NodeTransformer` contracts: returning the node (possibly mutated) keeps
+it in place; returning `None` removes it from the parent; returning a list
+from a statement context flattens the list into the parent body. This last
+rule is what allows a transformer to expand a single `with` statement into
+multiple `try`/`finally` blocks. The in-place mutation of list fields
+(`old_value[:] = new_values`) means the parent node object is not rebuilt,
+which preserves any other references to the same field.

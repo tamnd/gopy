@@ -1,0 +1,175 @@
+---
+title: Lib/unittest/__init__.py
+description: The unittest testing framework; re-exports TestCase, TestSuite, TestLoader, TestRunner, TestResult, test decorators, and the mock subpackage.
+cpython_path: Lib/unittest/__init__.py
+cpython_version: "3.14"
+lines: 70
+status: annotated
+ported_to: module/unittest/module.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Lib/unittest/__init__.py`
+
+<CpyLink path="Lib/unittest/__init__.py" />
+
+The `unittest` package init. Like `asyncio/__init__.py`, the file is
+short (~70 lines): it imports from the submodules and builds `__all__`.
+The implementation is spread across `case.py` (`TestCase`), `suite.py`
+(`TestSuite`), `loader.py` (`TestLoader`), `runner.py` (`TextTestRunner`),
+`result.py` (`TestResult`), and the `mock` subpackage.
+
+The framework follows the xUnit pattern: tests are methods on
+`TestCase` subclasses, discovered by the `test*` name prefix, collected
+into `TestSuite` trees, run by a `TestRunner`, and recorded in a
+`TestResult`. Decorators (`skip`, `skipIf`, `expectedFailure`) annotate
+individual test methods or whole classes.
+
+`unittest.main()` is the command-line entry point. It calls
+`TestLoader().loadTestsFromModule(module)` on `__main__`, wraps the
+result in a `TestSuite`, and hands it to `TextTestRunner().run(suite)`.
+The runner prints dots or F/E/s characters, one per test, then a summary
+line.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Lib/unittest/__init__.py" lines="1-20">1-20</Cpy> | Package header / `from .case import *` | Re-exports `TestCase`, `FunctionTestCase`, `skip`, `skipIf`, `skipUnless`, `expectedFailure`, `SkipTest`. | `module/unittest/module.go` |
+| <Cpy path="Lib/unittest/__init__.py" lines="21-35">21-35</Cpy> | `from .suite import *` / `from .loader import *` | Re-exports `TestSuite`, `TestLoader`, `defaultTestLoader`. | `module/unittest/module.go` |
+| <Cpy path="Lib/unittest/__init__.py" lines="36-50">36-50</Cpy> | `from .runner import *` / `from .result import *` | Re-exports `TextTestRunner`, `TextTestResult`, `TestResult`, `installHandler`, `registerResult`, `removeResult`, `removeHandler`. | `module/unittest/module.go` |
+| <Cpy path="Lib/unittest/__init__.py" lines="51-60">51-60</Cpy> | `from .signals import *` | Re-exports signal-handling helpers: `installHandler`, `registerResult`, `removeResult`, `removeHandler`. | `module/unittest/module.go` |
+| <Cpy path="Lib/unittest/__init__.py" lines="61-65">61-65</Cpy> | `from .main import *` | Re-exports `TestProgram` and its alias `main`. | `module/unittest/module.go` |
+| <Cpy path="Lib/unittest/__init__.py" lines="66-70">66-70</Cpy> | `from .mock import *` | Re-exports `Mock`, `MagicMock`, `patch`, `call`, `sentinel`, `ANY`, `DEFAULT`, `create_autospec`, `AsyncMock`. | `module/unittest/module.go` |
+| <Cpy path="Lib/unittest/case.py" lines="1-200">1-200</Cpy> | `TestCase.__init__`, `TestCase.run`, assertion dispatch | Base test class. `run()` wraps the test method call in `setUp`/`tearDown` and records the outcome in `TestResult`. | `module/unittest/module.go` |
+| <Cpy path="Lib/unittest/loader.py" lines="1-400">1-400</Cpy> | `TestLoader.discover`, `loadTestsFromModule`, `loadTestsFromTestCase` | Walks directories or modules looking for `TestCase` subclasses and `test*` methods; returns a nested `TestSuite`. | `module/unittest/module.go` |
+
+## Reading
+
+### `TestCase.run` and assertion dispatch (case.py)
+
+<CpyLink path="Lib/unittest/case.py" />
+
+```python
+def run(self, result=None):
+    ...
+    testMethod = getattr(self, self._testMethodName)
+    ...
+    try:
+        self.setUp()
+    except ...:
+        ...
+        return
+    success = False
+    try:
+        testMethod()
+        success = True
+    except self.failureException:
+        result.addFailure(self, sys.exc_info())
+    except _ExpectedFailure as e:
+        result.addExpectedFailure(self, e.exc_info)
+    except _UnexpectedSuccess:
+        result.addUnexpectedSuccess(self)
+    except SkipTest as e:
+        result.addSkip(self, str(e))
+    except KeyboardInterrupt:
+        raise
+    except:
+        result.addError(self, sys.exc_info())
+    ...
+    try:
+        self.tearDown()
+    except ...:
+        ...
+    if success:
+        result.addSuccess(self)
+```
+
+`TestCase.run` is the execution engine for a single test. It drives
+exactly this sequence: `setUp`, the test method, `tearDown`, then one
+`result.add*` call. The distinction between `addFailure` (an
+`AssertionError`) and `addError` (any other exception) is enforced here:
+`self.failureException` is `AssertionError` by default, so any assertion
+helper that raises `AssertionError` is recorded as a failure, not an
+error.
+
+Assertion methods like `assertEqual` are thin wrappers that compute the
+comparison and call `self.fail(msg)` on mismatch. `self.fail` raises
+`AssertionError`, which is then caught by `run`. This means every
+assertion method, however complex, ultimately passes through the same
+single `except self.failureException` clause.
+
+The `subTest` context manager (added in 3.4) creates a lightweight scope
+so that multiple sub-cases within one test method are each recorded
+separately without stopping the method on first failure.
+
+### `TestLoader.discover` (loader.py)
+
+<CpyLink path="Lib/unittest/loader.py" />
+
+```python
+def discover(self, start_dir, pattern='test*.py', top_level_dir=None):
+    ...
+    start_dir = os.path.abspath(start_dir)
+    ...
+    for path in _get_module_from_path(start_dir):
+        tests = self._find_tests(path, pattern)
+        ...
+    return self.suiteClass(discovered)
+```
+
+`discover` is the standard entry point for CI pipelines. It walks
+`start_dir` recursively, imports every `.py` file whose name matches
+`pattern`, and calls `loadTestsFromModule` on each import. The returned
+`TestSuite` is a tree: each discovered module contributes a `TestSuite`
+containing one `TestSuite` per `TestCase` class, each of which contains
+one `FunctionTestCase`-like callable per `test*` method.
+
+`top_level_dir` is added to `sys.path` so that relative imports inside
+test files resolve correctly. The convention is that `top_level_dir` is
+the repository root and `start_dir` is a subdirectory like `tests/`.
+
+### `mock.patch` descriptor protocol (mock.py)
+
+<CpyLink path="Lib/unittest/mock.py" />
+
+```python
+class _patch:
+    def __enter__(self):
+        ...
+        original, local = self.get_original()
+        new = self.new
+        if new is DEFAULT:
+            ...
+            new = MagicMock(spec=...)
+        setattr(self.getter(), self.attribute, new)
+        self.temp_original = original
+        self.is_local = local
+        return new
+
+    def __exit__(self, *exc_info):
+        ...
+        if self.is_local and self.temp_original is not DEFAULT:
+            setattr(self.getter(), self.attribute, self.temp_original)
+        elif not self.is_local:
+            delattr(self.getter(), self.attribute)
+        ...
+```
+
+`patch` is implemented as a context manager and a decorator. As a
+decorator, `_patch.__call__` wraps the decorated function: `__enter__`
+runs before the function body, `__exit__` runs after (even if the
+function raises). The attribute under test is replaced by a
+`MagicMock` on entry, then restored to its original value on exit by
+calling `setattr` with the saved original.
+
+`get_original` uses `getattr` on the target object and records whether
+the attribute was defined directly on the object (`is_local = True`) or
+inherited. On exit, a local attribute is restored with `setattr` while
+an inherited attribute (which was never on the object to begin with) is
+removed with `delattr`, leaving inheritance intact.
+
+`patch.object`, `patch.dict`, and `patch.multiple` are thin specializations
+built on the same `_patch` class that vary how `getter()` resolves the
+target object.

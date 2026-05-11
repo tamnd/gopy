@@ -1,0 +1,263 @@
+---
+title: Lib/logging/handlers.py
+description: Optional logging handlers for file rotation, syslog, SMTP, socket transport, memory buffering, and async queue dispatch.
+cpython_path: Lib/logging/handlers.py
+cpython_version: "3.14"
+lines: 1121
+status: annotated
+ported_to: module/logging/handlers.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Lib/logging/handlers.py`
+
+<CpyLink path="Lib/logging/handlers.py" />
+
+`Lib/logging/handlers.py` is the optional extension layer for the
+logging framework. It is not imported by `logging/__init__.py`; callers
+must `import logging.handlers` explicitly. The file provides handlers
+for every common transport: rotating files, syslog, SMTP, TCP/UDP
+sockets, in-memory buffers, and asynchronous queues.
+
+All handler classes inherit from `logging.Handler` (or from
+`logging.StreamHandler` for stream-based derivatives). The base class
+provides `handle(record)`, which acquires the handler lock, calls
+`emit(record)`, and releases; subclasses only need to implement
+`emit`. The `close()` method in the base unregisters the handler from
+the internal `_handlerList` weak-reference registry.
+
+File-based handlers (`RotatingFileHandler`, `TimedRotatingFileHandler`)
+inherit from `BaseRotatingHandler`, which adds `shouldRollover()` and
+`doRollover()` abstractions and calls them from an overridden `emit`.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Lib/logging/handlers.py" lines="1-50">1-50</Cpy> | Module header, imports | Pulls in `logging`, `socket`, `os`, `pickle`, `struct`, `time`, `re`, `queue`. | `module/logging/handlers.go` |
+| <Cpy path="Lib/logging/handlers.py" lines="51-110">51-110</Cpy> | `BaseRotatingHandler` | Abstract base for rotating handlers; overrides `emit` to call `shouldRollover` / `doRollover` before writing. | `module/logging/handlers.go:BaseRotatingHandler` |
+| <Cpy path="Lib/logging/handlers.py" lines="111-230">111-230</Cpy> | `RotatingFileHandler` | Size-based rotation; renames `.log` to `.log.1`, `.log.1` to `.log.2`, up to `backupCount`. | `module/logging/handlers.go:RotatingFileHandler` |
+| <Cpy path="Lib/logging/handlers.py" lines="231-460">231-460</Cpy> | `TimedRotatingFileHandler` | Time-based rotation; supports `'S'`, `'M'`, `'H'`, `'D'`, `'midnight'`, `'W0'`–`'W6'`; deletes old files beyond `backupCount`. | `module/logging/handlers.go:TimedRotatingFileHandler` |
+| <Cpy path="Lib/logging/handlers.py" lines="461-600">461-600</Cpy> | `SocketHandler`, `DatagramHandler` | TCP / UDP transport; pickles `LogRecord.__dict__` with a 4-byte big-endian length prefix; reconnects on failure. | `module/logging/handlers.go:SocketHandler` |
+| <Cpy path="Lib/logging/handlers.py" lines="601-730">601-730</Cpy> | `SysLogHandler` | RFC 3164 syslog over UDP, TCP, or UNIX socket; maps logging levels to syslog priorities; encodes the priority as `<PRI>`. | `module/logging/handlers.go:SysLogHandler` |
+| <Cpy path="Lib/logging/handlers.py" lines="731-830">731-830</Cpy> | `NTEventLogHandler` | Windows event log via `win32evtlogutil`; no-op on non-Windows. | n/a |
+| <Cpy path="Lib/logging/handlers.py" lines="831-920">831-920</Cpy> | `SMTPHandler` | Emails log records; supports TLS via `secure` tuple; connects, sends, closes per record. | `module/logging/handlers.go:SMTPHandler` |
+| <Cpy path="Lib/logging/handlers.py" lines="921-1000">921-1000</Cpy> | `MemoryHandler`, `BufferingHandler` | Buffers records in a list; flushes to a `target` handler when `capacity` is exceeded or `flushLevel` is reached. | `module/logging/handlers.go:MemoryHandler` |
+| <Cpy path="Lib/logging/handlers.py" lines="1001-1121">1001-1121</Cpy> | `QueueHandler`, `QueueListener` | Async log dispatch: `QueueHandler.emit` enqueues; `QueueListener` runs a background thread that dequeues and calls the real handlers. | `module/logging/handlers.go:QueueHandler` |
+
+## Reading
+
+### `RotatingFileHandler.doRollover` (lines 111 to 230)
+
+<CpyLink path="Lib/logging/handlers.py" lines="111-230" />
+
+```python
+class RotatingFileHandler(BaseRotatingHandler):
+    def __init__(self, filename, mode='a', maxBytes=0, backupCount=0,
+                 encoding=None, delay=False, errors=None):
+        if maxBytes > 0:
+            mode = 'a'
+        BaseRotatingHandler.__init__(self, filename, mode, encoding,
+                                     delay, errors)
+        self.maxBytes = maxBytes
+        self.backupCount = backupCount
+
+    def doRollover(self):
+        if self.stream:
+            self.stream.close()
+            self.stream = None
+        if self.backupCount > 0:
+            for i in range(self.backupCount - 1, 0, -1):
+                sfn = self.rotation_filename("%s.%d" % (self.baseFilename, i))
+                dfn = self.rotation_filename("%s.%d" % (self.baseFilename, i + 1))
+                if os.path.exists(sfn):
+                    if os.path.exists(dfn):
+                        os.remove(dfn)
+                    os.rename(sfn, dfn)
+            dfn = self.rotation_filename(self.baseFilename + ".1")
+            if os.path.exists(dfn):
+                os.remove(dfn)
+            self.rotate(self.baseFilename, dfn)
+        if not self.delay:
+            self.stream = self._open()
+
+    def shouldRollover(self, record):
+        if self.stream is None:
+            self.stream = self._open()
+        if self.maxBytes > 0:
+            msg = "%s\n" % self.format(record)
+            self.stream.seek(0, 2)
+            if self.stream.tell() + len(msg) >= self.maxBytes:
+                return True
+        return False
+```
+
+The rename loop walks backwards from `backupCount-1` down to 1 so that
+`.1` is always renamed to `.2` before the base file is renamed to `.1`.
+`rotation_filename` is a hook that lets callers apply a namer callable
+(e.g. to add a timestamp suffix). `rotate` is a second hook that lets
+callers apply a rotator callable (e.g. for compression).
+
+`shouldRollover` opens the stream if it is `None` (lazy open case),
+then seeks to the end and checks whether adding the formatted record
+would exceed `maxBytes`. Seeking on every record is cheap because the
+OS kernel returns the position from the inode without a syscall on most
+platforms.
+
+### `TimedRotatingFileHandler` (lines 231 to 460)
+
+<CpyLink path="Lib/logging/handlers.py" lines="231-460" />
+
+```python
+class TimedRotatingFileHandler(BaseRotatingHandler):
+    def __init__(self, filename, when='h', interval=1, backupCount=0,
+                 encoding=None, delay=False, utc=False, atTime=None,
+                 errors=None):
+        ...
+        self.when = when.upper()
+        if self.when == 'S':
+            self.interval = 1
+            self.suffix = "%Y-%m-%d_%H-%M-%S"
+            self.extMatch = r"^\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}(\.\w+)?$"
+        elif self.when == 'M':
+            self.interval = 60
+            ...
+        elif self.when == 'MIDNIGHT':
+            self.interval = 60 * 60 * 24
+            ...
+        elif self.when.startswith('W'):
+            self.interval = 60 * 60 * 24 * 7
+            ...
+        self.interval = self.interval * interval
+        self.rolloverAt = self.computeRollover(int(time.time()))
+
+    def computeRollover(self, currentTime):
+        result = currentTime + self.interval
+        if self.when == 'MIDNIGHT' or self.when.startswith('W'):
+            # midnight rollover: align to next midnight or next weekday
+            ...
+        return result
+
+    def doRollover(self):
+        ...
+        t = self.rolloverAt - self.interval
+        ...
+        dfn = self.rotation_filename(self.baseFilename + "." +
+                                     time.strftime(self.suffix, timeTuple))
+        self.rotate(self.baseFilename, dfn)
+        ...
+        self.rolloverAt = self.computeRollover(newRolloverAt)
+```
+
+The `when` string controls both the roll interval and the suffix format
+used for the rotated file name. Old files are identified by matching
+`self.extMatch` against filenames in the directory; files older than
+`backupCount` rotations are deleted by `doRollover`. The `utc` flag
+switches `time.localtime` to `time.gmtime` for the suffix and the
+midnight alignment calculation.
+
+### `SocketHandler` and `DatagramHandler` (lines 461 to 600)
+
+<CpyLink path="Lib/logging/handlers.py" lines="461-600" />
+
+```python
+class SocketHandler(logging.Handler):
+    def makePickle(self, record):
+        ei = record.exc_info
+        if ei:
+            dummy = self.format(record)  # force exc_text
+        d = dict(record.__dict__)
+        d['msg'] = record.getMessage()
+        d['args'] = None
+        d.pop('exc_info', None)
+        s = pickle.dumps(d, 1)
+        slen = struct.pack(">L", len(s))
+        return slen + s
+
+    def send(self, s):
+        if self.sock is None:
+            self.sock = self.makeSocket()
+        self.sock.sendall(s)
+
+    def emit(self, record):
+        try:
+            s = self.makePickle(record)
+            self.send(s)
+        except Exception:
+            self.handleError(record)
+```
+
+The wire format is a 4-byte big-endian length followed by
+`pickle.dumps(record.__dict__, protocol=1)`. The dict form is used
+rather than pickling the `LogRecord` directly because many `LogRecord`
+attributes (like `exc_info`) are not picklable. The `makeLogRecord`
+function on the receiving end reconstructs the `LogRecord` from the
+dict.
+
+`DatagramHandler` overrides `send` to use `socket.sendto` instead of
+`sendall`, with no reconnection logic. `SocketHandler` retries the
+connection after a configurable `retryStart` / `retryMax` backoff.
+
+### `QueueHandler` and `QueueListener` (lines 1001 to 1121)
+
+<CpyLink path="Lib/logging/handlers.py" lines="1001-1121" />
+
+```python
+class QueueHandler(logging.Handler):
+    def __init__(self, queue):
+        logging.Handler.__init__(self)
+        self.queue = queue
+
+    def enqueue(self, record):
+        self.queue.put_nowait(record)
+
+    def prepare(self, record):
+        msg = self.format(record)
+        record = copy.copy(record)
+        record.message = msg
+        record.msg = msg
+        record.args = None
+        record.exc_info = None
+        record.exc_text = None
+        return record
+
+    def emit(self, record):
+        try:
+            self.enqueue(self.prepare(record))
+        except Exception:
+            self.handleError(record)
+
+
+class QueueListener:
+    def __init__(self, queue, *handlers, respect_handler_level=False):
+        self.queue = queue
+        self.handlers = handlers
+        self._thread = None
+        self.respect_handler_level = respect_handler_level
+
+    def start(self):
+        self._thread = t = threading.Thread(target=self._monitor,
+                                            daemon=True)
+        t.start()
+
+    def _monitor(self):
+        while True:
+            record = self.dequeue(True)
+            if record is self._sentinel:
+                break
+            self.handle(record)
+```
+
+`QueueHandler.prepare` formats the record and clears `exc_info` before
+enqueueing, because `exc_info` contains live traceback objects that
+cannot safely cross thread or process boundaries (and may keep large
+object graphs alive). The formatted string is stored in `record.msg`
+so the downstream handlers can emit it without reformatting.
+
+`QueueListener._monitor` loops on `queue.get()` until it receives a
+sentinel object (the class itself, `_sentinel = object()`). `stop()`
+enqueues the sentinel and calls `thread.join()`. `respect_handler_level`
+is a 3.12 addition that skips calling a handler if `record.levelno` is
+below `handler.level`, matching the filtering behavior of direct handler
+attachment.

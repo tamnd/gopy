@@ -1,0 +1,185 @@
+---
+title: Modules/_asynciomodule.c
+description: C acceleration layer for asyncio — implements FutureObj and TaskObj, driving coroutines through the event loop with state-machine transitions and waiter registration.
+cpython_path: Modules/_asynciomodule.c
+cpython_version: "3.14"
+lines: 2500
+status: annotated
+ported_to: module/asyncio/module.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Modules/_asynciomodule.c`
+
+<CpyLink path="Modules/_asynciomodule.c" />
+
+The C acceleration layer for the `asyncio` package. The pure-Python
+`asyncio/futures.py` and `asyncio/tasks.py` import `_asyncio` and
+substitute these C types for their Python counterparts when available,
+giving a meaningful speedup on workloads that create many futures and tasks.
+
+Two types dominate the file:
+
+- `FutureObj` — the core promise. It carries a result or exception once
+  settled, a list of done-callbacks, and a state field that moves through
+  `_PyFuture_PENDING`, `_PyFuture_CANCELLED`, and `_PyFuture_FINISHED`.
+- `TaskObj` — extends `FutureObj` by adding a coroutine reference, a step
+  handle, and waiter tracking. `task_step` drives the coroutine one `send`
+  or `throw` at a time and registers the task as a waiter on any future it
+  yields.
+
+The module also provides `_asyncio.get_event_loop`, `_asyncio.get_running_loop`,
+`_asyncio._get_running_loop`, and `_asyncio._set_running_loop` as thin C
+wrappers around per-thread state.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Modules/_asynciomodule.c" lines="1-80">1-80</Cpy> | includes, state struct | Per-interpreter state and forward declarations. | `module/asyncio/module.go:state` |
+| <Cpy path="Modules/_asynciomodule.c" lines="80-300">80-300</Cpy> | `FutureObj`, `FutureObj_new`, `FutureObj_init` | Future allocation and `__init__`. Stores the loop reference; sets state to `_PyFuture_PENDING`. | `module/asyncio/module.go:Future` |
+| <Cpy path="Modules/_asynciomodule.c" lines="300-600">300-600</Cpy> | `FutureObj_result`, `FutureObj_set_result`, `FutureObj_set_exception`, `FutureObj_cancel` | State-transition methods. `set_result` / `set_exception` move to `_PyFuture_FINISHED`; `cancel` moves to `_PyFuture_CANCELLED`. | `module/asyncio/module.go:FutureResult` |
+| <Cpy path="Modules/_asynciomodule.c" lines="600-800">600-800</Cpy> | `FutureObj_add_done_callback`, `FutureObj_remove_done_callback`, `future_schedule_callbacks` | Callback list management. `future_schedule_callbacks` posts each callback to the loop with `call_soon`. | `module/asyncio/module.go:FutureCallbacks` |
+| <Cpy path="Modules/_asynciomodule.c" lines="800-1000">800-1000</Cpy> | `FutureObj` getset table, `future_tp_*` slots | `__repr__`, `__iter__`, `__await__`, and attribute accessors for `done`, `cancelled`, `result`, `exception`. | `module/asyncio/module.go:FutureSlots` |
+| <Cpy path="Modules/_asynciomodule.c" lines="1000-1300">1000-1300</Cpy> | `TaskObj`, `TaskObj_new`, `TaskObj_init` | Task allocation. Stores `coro`, schedules the first `task_step` via `call_soon`. | `module/asyncio/module.go:Task` |
+| <Cpy path="Modules/_asynciomodule.c" lines="1300-1700">1300-1700</Cpy> | `task_step`, `task_step_impl`, `task_wakeup` | Coroutine driver. Sends `None` or throws on each step; interprets the yielded value to register the task as a waiter. | `module/asyncio/module.go:TaskStep` |
+| <Cpy path="Modules/_asynciomodule.c" lines="1700-2000">1700-2000</Cpy> | `_asyncio_Task_cancel_impl`, `TaskObj_set_name`, `TaskObj_get_coro` | Cancel injection and task introspection. `cancel` schedules a `CancelledError` throw on the next step. | `module/asyncio/module.go:TaskCancel` |
+| <Cpy path="Modules/_asynciomodule.c" lines="2000-2500">2000-2500</Cpy> | `_asyncio_get_running_loop_impl`, `_asyncio__set_running_loop_impl`, module def | Per-thread running-loop accessors and module `PyInit__asyncio`. | `module/asyncio/module.go:RunningLoop` |
+
+## Reading
+
+### `FutureObj` state machine (lines 80 to 600)
+
+<CpyLink path="Modules/_asynciomodule.c" lines="80-600" />
+
+`FutureObj` uses a single `fut_state` field (an `int`) with three values:
+
+```c
+#define _PyFuture_PENDING   0
+#define _PyFuture_CANCELLED 1
+#define _PyFuture_FINISHED  2
+```
+
+`FutureObj_result` checks `fut_state` before touching `fut_result`:
+
+```c
+static PyObject *
+FutureObj_result(FutureObj *fut, PyObject *arg)
+{
+    if (fut->fut_state == _PyFuture_PENDING) {
+        PyErr_SetString(asyncio_InvalidStateError,
+                        "Result is not ready.");
+        return NULL;
+    }
+    if (fut->fut_state == _PyFuture_CANCELLED) {
+        PyObject *exc = create_cancelled_error(fut);
+        PyErr_SetObject(asyncio_CancelledError, exc);
+        Py_DECREF(exc);
+        return NULL;
+    }
+    /* _PyFuture_FINISHED */
+    if (fut->fut_exception != NULL) {
+        PyErr_SetObject(PyExceptionInstance_Class(fut->fut_exception),
+                        fut->fut_exception);
+        return NULL;
+    }
+    Py_INCREF(fut->fut_result);
+    return fut->fut_result;
+}
+```
+
+`FutureObj_set_result` rejects any attempt to settle an already-settled
+future with `InvalidStateError`. On success it sets `fut_result`, advances
+`fut_state` to `_PyFuture_FINISHED`, and calls `future_schedule_callbacks`
+which posts each stored callback to the event loop via `call_soon`.
+
+`FutureObj_cancel` is the only way to reach `_PyFuture_CANCELLED`. It takes
+an optional `msg` argument stored as `fut_cancel_message` and used as the
+`CancelledError` text. Once cancelled, `set_result` and `set_exception` both
+raise `InvalidStateError`.
+
+### `task_step` coroutine driver (lines 1300 to 1700)
+
+<CpyLink path="Modules/_asynciomodule.c" lines="1300-1700" />
+
+`task_step` is the heart of the asyncio C extension. It is called by the
+event loop once per coroutine step:
+
+```c
+static PyObject *
+task_step_impl(TaskObj *task, PyObject *exc)
+{
+    PyObject *result;
+    PyObject *coro = task->task_coro;
+
+    if (exc == NULL)
+        result = _PyObject_CallMethodIdOneArg(coro, &PyId_send, Py_None);
+    else
+        result = _PyObject_CallMethodIdOneArg(coro, &PyId_throw, exc);
+
+    if (result == NULL) {
+        /* Coroutine raised StopIteration or another exception. */
+        if (PyErr_ExceptionMatches(PyExc_StopIteration)) {
+            PyObject *val = ...;  /* extract StopIteration.value */
+            return FutureObj_set_result((FutureObj *)task, val);
+        }
+        if (PyErr_ExceptionMatches(asyncio_CancelledError)) {
+            return FutureObj_cancel((FutureObj *)task, NULL);
+        }
+        /* Any other exception marks the task failed. */
+        return FutureObj_set_exception((FutureObj *)task, current_exc);
+    }
+
+    /* Coroutine yielded a value — expect a Future to await. */
+    if (FutureObj_CheckExact(result)) {
+        /* Register task as a waiter; task_wakeup fires when future settles. */
+        PyObject *fut_cb = task_add_wakeup_callback(result, task);
+        ...
+        task->task_fut_waiter = result;
+        Py_DECREF(result);
+        Py_RETURN_NONE;
+    }
+    /* Yielded something that is not a Future — re-schedule for next iteration. */
+    ...
+}
+```
+
+The three terminal paths mirror the Python `Task.__step` logic exactly.
+`task_wakeup` is the done-callback registered on the awaited future; when the
+future settles, `task_wakeup` clears `task_fut_waiter` and calls
+`task_step` again with the future's result or exception.
+
+### `FutureObj_add_done_callback` scheduling (lines 600 to 800)
+
+<CpyLink path="Modules/_asynciomodule.c" lines="600-800" />
+
+```c
+static PyObject *
+FutureObj_add_done_callback(FutureObj *fut, PyObject *const *args,
+                             Py_ssize_t nargs, PyObject *kwnames)
+{
+    if (fut->fut_state != _PyFuture_PENDING) {
+        /* Future already done: schedule the callback immediately. */
+        return call_soon(fut->fut_loop, arg, context);
+    }
+    /* Append to the callback list. */
+    if (fut->fut_callbacks == NULL) {
+        fut->fut_callbacks = PyList_New(1);
+        ...
+    } else {
+        PyList_Append(fut->fut_callbacks, item);
+    }
+    Py_RETURN_NONE;
+}
+```
+
+Callbacks are stored as `(callable, context)` pairs so the PEP 567
+`contextvars` context captured at `add_done_callback` time is restored when
+the callback fires. `future_schedule_callbacks` iterates the list and calls
+`loop.call_soon(cb, self, context=ctx)` for each entry, then clears
+`fut_callbacks` to drop the references.
+
+`FutureObj_remove_done_callback` walks the list and removes all matching
+entries; it is used by `Task.__step` to avoid a callback being called more
+than once when a cancellation races a normal completion.

@@ -1,0 +1,211 @@
+---
+title: Modules/_json.c
+description: C accelerator for the json module — fast string scanner with Unicode escape handling, recursive dict and list encoder, and C-level Scanner and Encoder objects.
+cpython_path: Modules/_json.c
+cpython_version: "3.14"
+lines: 600
+status: annotated
+ported_to: module/json/encoder.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Modules/_json.c`
+
+<CpyLink path="Modules/_json.c" />
+
+`_json.c` is the C accelerator for the `json` module. The pure-Python
+package in `Lib/json/` imports `_json` and, when available, replaces its
+`scanner` and `encoder` objects with the C implementations. Both halves
+operate entirely on Python `str` objects and list accumulators; no file I/O
+or buffering lives here.
+
+The **decoder** side centres on `scanstring_impl`, a tight loop over the
+characters of a Python `str` that handles all eight single-character escape
+sequences, four-hex-digit `\uXXXX` escapes, and surrogate-pair joining for
+code points above U+FFFF. The `Scanner` object wraps `scanstring_impl` and
+the number-parsing logic into a callable Python type.
+
+The **encoder** side provides `encoder_encode_string` for string values,
+`encoder_encode_float` for floating-point values, and the two recursive
+routines `encoder_listencode_dict` and `encoder_listencode_list`. The
+`Encoder` object bundles configuration (`sort_keys`, `skipkeys`,
+`ensure_ascii`, `allow_nan`, `indent`, `key_separator`, `item_separator`)
+and the circular-reference `markers` dict, then dispatches to the
+appropriate helper on each call.
+
+gopy's current `module/json/` delegates the heavy lifting to Go's
+`encoding/json` but mirrors the CPython object API so that Python code
+referencing `json.scanner.c_make_scanner` or `json.encoder.c_make_encoder`
+still resolves correctly.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Modules/_json.c" lines="1-40">1-40</Cpy> | includes, module-state struct | `Python.h` and the per-module `_jsonmodulestate` holding interned strings. | `module/json/module.go` (preamble) |
+| <Cpy path="Modules/_json.c" lines="40-200">40-200</Cpy> | `scanstring_impl` | Fast JSON string scanner; `\uXXXX` escapes, surrogate pairs, strict-mode bare-surrogate rejection. | `module/json/decoder.go:ScanString` |
+| <Cpy path="Modules/_json.c" lines="200-320">200-320</Cpy> | `Scanner` type: `scanner_new`, `scanner_call`, `scanner_dealloc` | C-level scanner object; wraps `scanstring_impl` and a `_parse_constant` for `Infinity`/`NaN` literals. | `module/json/decoder.go:Scanner` |
+| <Cpy path="Modules/_json.c" lines="320-420">320-420</Cpy> | `encoder_encode_string`, `py_encode_basestring_ascii` | String serialiser; `ensure_ascii` replaces non-ASCII with `\uXXXX` or surrogate pairs. | `module/json/encoder.go:EncodeString` |
+| <Cpy path="Modules/_json.c" lines="420-490">420-490</Cpy> | `encoder_encode_float` | Float serialiser; raises `ValueError` for `nan`/`inf` when `allow_nan=False`. | `module/json/encoder.go:EncodeFloat` |
+| <Cpy path="Modules/_json.c" lines="490-560">490-560</Cpy> | `encoder_listencode_dict`, `encoder_listencode_list` | Recursive container encoders; append string chunks to a list accumulator. | `module/json/encoder.go:EncodeDictChunks`, `EncodeListChunks` |
+| <Cpy path="Modules/_json.c" lines="560-600">560-600</Cpy> | `Encoder` type: `encoder_new`, `encoder_call`, `encoder_dealloc`; `_jsonmodule`, `PyInit__json` | Encoder object and module entry point. | `module/json/encoder.go:Encoder`, `module/json/module.go:Module` |
+
+## Reading
+
+### `scanstring_impl` escape processing (lines 40 to 200)
+
+<CpyLink path="Modules/_json.c" lines="40-200" />
+
+`scanstring_impl(pystr, end, strict)` walks the character data of a Python
+`str` starting at index `end` (the character after the opening `"`). It
+returns a `(str, new_end)` tuple.
+
+Non-escape runs are bulk-copied into a `_PyUnicodeWriter`. When a backslash
+is found, a `switch` dispatches on the next character:
+
+```c
+switch (c) {
+case '"':  c = '"';  break;
+case '\\': c = '\\'; break;
+case '/':  c = '/';  break;
+case 'b':  c = '\b'; break;
+case 'f':  c = '\f'; break;
+case 'n':  c = '\n'; break;
+case 'r':  c = '\r'; break;
+case 't':  c = '\t'; break;
+case 'u':
+    /* Decode four hex digits. */
+    c  = (Py_UCS4)hex_digit[0] << 12;
+    c |= (Py_UCS4)hex_digit[1] << 8;
+    c |= (Py_UCS4)hex_digit[2] << 4;
+    c |= (Py_UCS4)hex_digit[3];
+    if (Py_UNICODE_IS_HIGH_SURROGATE(c)) {
+        /* Peek ahead for a low surrogate \uDC00-\uDFFF. */
+        if (s[0] == '\\' && s[1] == 'u') {
+            Py_UCS4 c2 = /* next \uXXXX */;
+            if (Py_UNICODE_IS_LOW_SURROGATE(c2)) {
+                c = Py_UNICODE_JOIN_SURROGATES(c, c2);
+                s += 6;
+            }
+        }
+    }
+    if (strict && Py_UNICODE_IS_SURROGATE(c)) {
+        PyErr_SetString(PyExc_ValueError,
+            "...unpaired surrogate...");
+        goto bail;
+    }
+    break;
+default:
+    PyErr_SetString(PyExc_ValueError, "Invalid \\escape");
+    goto bail;
+}
+```
+
+`Py_UNICODE_JOIN_SURROGATES` folds the pair into a single supplementary
+code point using `0x10000 + ((hi & 0x3FF) << 10) | (lo & 0x3FF)`. When
+`strict=True` a high surrogate not followed by a low surrogate is an error.
+
+### `encoder_encode_string` and ASCII-safe encoding (lines 320 to 420)
+
+<CpyLink path="Modules/_json.c" lines="320-420" />
+
+`encoder_encode_string` writes the JSON string literal for a Python `str`
+value. Control characters U+0000-U+001F are always escaped. When
+`ensure_ascii=True`, every code point above U+007F is converted to
+`\uXXXX` or, for supplementary characters, a surrogate pair:
+
+```c
+if (c >= 0x10000) {
+    /* Supplementary: emit \uHHHH\uLLLL surrogate pair. */
+    Py_UCS4 v = c - 0x10000;
+    output_char('\\'); output_char('u');
+    emit_hex4((v >> 10) + 0xD800);
+    output_char('\\'); output_char('u');
+    emit_hex4((v & 0x3FF) + 0xDC00);
+} else if (c > 0x7F) {
+    output_char('\\'); output_char('u');
+    emit_hex4(c);
+} else {
+    output_char((char)c);
+}
+```
+
+`py_encode_basestring_ascii` is the `json.encoder.encode_basestring_ascii`
+Python-callable wrapper around the same logic, exposed for use from
+pure-Python code that does not go through the `Encoder` object.
+
+### `encoder_listencode_dict` circular-reference guard (lines 490 to 560)
+
+<CpyLink path="Modules/_json.c" lines="490-560" />
+
+The dict and list encoders append UTF-8 string fragments to a Python list
+accumulator (`chunks`) rather than building one large string inline. This
+avoids quadratic string concatenation for deeply nested structures.
+
+Circular-reference detection uses a `markers` dict keyed on `id(obj)`.
+Before encoding any container, its id is inserted; after encoding it is
+removed:
+
+```c
+static int
+encoder_listencode_dict(PyEncoderObject *s, _PyUnicodeWriter *writer,
+                        PyObject *dct, Py_ssize_t indent_level)
+{
+    Py_ssize_t ident = PyObject_IsTrue(s->markers) ?
+                       PyObject_Hash(dct) : -1;
+    if (s->markers != Py_None) {
+        if (PyDict_Contains(s->markers, dct_id)) {
+            PyErr_SetString(PyExc_ValueError,
+                "Circular reference detected");
+            return -1;
+        }
+        PyDict_SetItem(s->markers, dct_id, dct);
+    }
+    /* ... encode key/value pairs ... */
+    if (s->markers != Py_None)
+        PyDict_DelItem(s->markers, dct_id);
+    return 0;
+}
+```
+
+Keys that are not strings are skipped when `skipkeys=True`, or raise
+`TypeError` otherwise. The key encoding calls `encoder_encode_string`
+directly; value encoding re-enters `encoder_listencode_obj`, which
+dispatches on `Py_TYPE` to the appropriate specialised encoder.
+
+### `Scanner_call` and number parsing (lines 200 to 320)
+
+<CpyLink path="Modules/_json.c" lines="200-320" />
+
+The `Scanner` object is the C equivalent of `json.decoder.JSONDecoder.raw_decode`.
+Its `__call__` method receives a string and an index, then calls
+`scanstring_impl` for string tokens and `_parse_constant` for the three
+special literals:
+
+```c
+static PyObject *
+scanner_call(PyScannerObject *s, PyObject *args, PyObject *kwds)
+{
+    PyObject *pystr;
+    Py_ssize_t end;
+    /* Parse positional args (pystr, idx). */
+    ...
+    /* Delegate to scanstring_impl for '"'. */
+    if (PyUnicode_READ_CHAR(pystr, end) == '"')
+        return scanstring_impl(pystr, end + 1, s->strict);
+
+    /* Delegate to _parse_constant for Infinity / NaN / -Infinity. */
+    if (PyUnicode_READ_CHAR(pystr, end) == 'N' ||
+        PyUnicode_READ_CHAR(pystr, end) == 'I') {
+        return _parse_constant(s, pystr, end);
+    }
+    ...
+}
+```
+
+Number parsing (integer and float recognition) is handled by a regex match
+object stored on `s->parse_float` and `s->parse_int`, which are Python
+callables passed in from `Lib/json/decoder.py`. The C layer calls them via
+`PyObject_CallOneArg`, so the number representation strategy is kept in
+Python.

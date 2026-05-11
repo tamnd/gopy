@@ -1,0 +1,192 @@
+---
+title: Lib/uuid.py
+description: Immutable UUID value type with time-based, name-based, and random generation; ctypes and C-extension backends for platform UUID functions.
+cpython_path: Lib/uuid.py
+cpython_version: "3.14"
+lines: 960
+status: annotated
+ported_to: module/uuid/module.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Lib/uuid.py`
+
+<CpyLink path="Lib/uuid.py" />
+
+`Lib/uuid.py` implements RFC 4122 Universally Unique Identifiers in pure
+Python. The `UUID` class stores the 128-bit value as a single Python `int`
+and exposes the standard fields (`time_low`, `time_mid`, `clock_seq_hi_variant`,
+`node`, etc.) and output formats (`hex`, `bytes`, `bytes_le`, `urn`) as
+read-only properties computed on demand. Variant and version bits are
+validated in `__init__` and written into the internal int at construction
+time.
+
+The four generation functions cover the full RFC surface: `uuid1` is
+time-based and attempts to use the OS UUID library via `ctypes` or the
+`_uuid` C extension (`_generate_time_safe`); `uuid3` and `uuid5` are
+name-based using MD5 and SHA-1 respectively; `uuid4` is random. The
+well-known namespace UUIDs from RFC 4122 Appendix C are pre-constructed
+module-level constants.
+
+`_load_system_functions()` is called once at import time and fills the
+module-level `_generate_time_safe` and `_generate_time_unsafe` references
+by probing the platform in priority order: the `_uuid` C extension, then
+`ctypes.CDLL("libuuid.so.1")`, then a pure-Python time/random fallback.
+
+gopy: `module/uuid/module.go` (pending).
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Lib/uuid.py" lines="1-55">1-55</Cpy> | module docstring, imports, `__author__` | Header and platform-sniffing imports (`os`, `sys`, `ctypes`). | — |
+| <Cpy path="Lib/uuid.py" lines="55-110">55-110</Cpy> | `SafeUUID`, `_load_system_functions` | `SafeUUID` enum (`safe`, `unsafe`, `unknown`); platform UUID backend loader. | pending |
+| <Cpy path="Lib/uuid.py" lines="110-270">110-270</Cpy> | `UUID.__init__` | Parses hex/bytes/bytes_le/fields/int keyword arguments; enforces exactly-one rule; sets variant and version bits. | pending |
+| <Cpy path="Lib/uuid.py" lines="270-420">270-420</Cpy> | `UUID.__repr__`, `UUID.__str__`, `UUID.__eq__`, `UUID.__hash__`, `UUID.__int__`, `UUID.__getstate__`, `UUID.__setstate__` | Value-object protocol: canonical string form, comparison by `int`, hash. | pending |
+| <Cpy path="Lib/uuid.py" lines="420-580">420-580</Cpy> | `UUID.bytes`, `UUID.bytes_le`, `UUID.fields`, `UUID.time_low` … `UUID.node`, `UUID.hex`, `UUID.urn`, `UUID.variant`, `UUID.version`, `UUID.is_safe` | Computed properties over the internal 128-bit int. | pending |
+| <Cpy path="Lib/uuid.py" lines="580-670">580-670</Cpy> | `_generate_time_safe`, `_generate_time_unsafe`, `_netstat_getnode`, `_ipconfig_getnode`, `_ifconfig_getnode`, `_ip_getnode`, `_arp_getnode`, `_lanscan_getnode`, `_netbios_getnode` | Platform-specific MAC address and time-UUID backends. | pending |
+| <Cpy path="Lib/uuid.py" lines="670-760">670-760</Cpy> | `_random_getnode`, `getnode` | Fallback node ID from random bytes; `getnode` tries the system-specific backends in order. | pending |
+| <Cpy path="Lib/uuid.py" lines="760-850">760-850</Cpy> | `uuid1`, `uuid3`, `uuid4`, `uuid5` | The four RFC 4122 generation functions. | pending |
+| <Cpy path="Lib/uuid.py" lines="850-960">850-960</Cpy> | `NAMESPACE_DNS`, `NAMESPACE_URL`, `NAMESPACE_OID`, `NAMESPACE_X500` | Well-known namespace UUIDs from RFC 4122 Appendix C. | pending |
+
+## Reading
+
+### `UUID.__init__` — construction and variant/version encoding (lines 110 to 270)
+
+<CpyLink path="Lib/uuid.py" lines="110-270" />
+
+`__init__` enforces the exactly-one-of `{hex, bytes, bytes_le, fields, int}`
+rule, converts the chosen form to a 128-bit `int`, then stamps the variant
+and version bits into that int before storing it as `self.__dict__['int']`.
+The object is deliberately frozen by overriding `__setattr__` to always
+raise `TypeError`:
+
+```python
+def __init__(self, hex=None, bytes=None, bytes_le=None, fields=None,
+             int=None, version=None, *, is_safe=SafeUUID.unknown):
+    if [hex, bytes, bytes_le, fields, int].count(None) != 4:
+        raise TypeError('one of the hex, bytes, bytes_le, fields, '
+                        'or int arguments must be given')
+    ...
+    if version is not None:
+        if not 1 <= version <= 5:
+            raise ValueError('illegal version number')
+        # Set the variant to RFC 4122.
+        int &= ~(0xc000 << 48)
+        int |=   0x8000 << 48
+        # Set the version number.
+        int &= ~(0xf000 << 64)
+        int |= version << 76
+    object.__setattr__(self, 'int', int)
+    object.__setattr__(self, 'is_safe', is_safe)
+```
+
+The bit arithmetic operates at the Python `int` level; fields such as
+`time_hi_and_version` are carved out of the 128-bit value by the property
+accessors.
+
+### Computed properties over the 128-bit int (lines 420 to 580)
+
+<CpyLink path="Lib/uuid.py" lines="420-580" />
+
+All public attributes are computed properties. `bytes` reconstructs the
+network-byte-order form; `bytes_le` uses little-endian for the first three
+fields (the Windows GUID layout). `variant` inspects the high bits of
+`clock_seq_hi_variant` to classify the UUID as NCS, RFC 4122, Microsoft,
+or reserved:
+
+```python
+@property
+def bytes(self):
+    return self.int.to_bytes(16)
+
+@property
+def bytes_le(self):
+    bytes = self.bytes
+    return (bytes[3::-1] + bytes[5:3:-1] + bytes[7:5:-1] + bytes[8:])
+
+@property
+def variant(self):
+    if not self.int & (0x8000 << 48):
+        return RESERVED_NCS
+    elif not self.int & (0x4000 << 48):
+        return RFC_4122
+    elif not self.int & (0x2000 << 48):
+        return RESERVED_MICROSOFT
+    else:
+        return RESERVED_FUTURE
+```
+
+`hex` is the 32-character lowercase hex string without hyphens; `urn` wraps
+that in `urn:uuid:`; `__str__` inserts hyphens at the RFC-mandated positions
+(`8-4-4-4-12`).
+
+### `uuid1` — time-based generation (lines 760 to 810)
+
+<CpyLink path="Lib/uuid.py" lines="760-810" />
+
+`uuid1` builds a version-1 UUID from the current time, a clock sequence,
+and the node (MAC address). It calls `_generate_time_safe` when available,
+falling back to `_generate_time_unsafe`. The 60-bit timestamp is
+100-nanosecond intervals since 15 October 1582:
+
+```python
+def uuid1(node=None, clock_seq=None):
+    global _last_timestamp
+    import time
+    nanoseconds = time.time_ns()
+    timestamp = nanoseconds // 100 + 0x01b21dd213814000
+    if _generate_time_safe is not None and node is clock_seq is None:
+        uuid_time, safely_generated = _generate_time_safe()
+        ...
+    else:
+        ...
+        if timestamp <= _last_timestamp:
+            timestamp = _last_timestamp + 1
+        _last_timestamp = timestamp
+        if clock_seq is None:
+            import random
+            clock_seq = random.getrandbits(14)
+        time_low = timestamp & 0xffffffff
+        time_mid = (timestamp >> 32) & 0xffff
+        time_hi_version = (timestamp >> 48) & 0x0fff
+        clock_seq_low = clock_seq & 0xff
+        clock_seq_hi_variant = (clock_seq >> 8) & 0x3f
+        ...
+    return UUID(fields=(...), version=1)
+```
+
+The `_last_timestamp` global guards monotonicity when the OS clock jumps
+backward. gopy will port this to `module/uuid/module.go` once the
+`time` module dependency is available.
+
+### `uuid3`, `uuid4`, and `uuid5` (lines 810 to 850)
+
+<CpyLink path="Lib/uuid.py" lines="810-850" />
+
+`uuid3` and `uuid5` hash the namespace UUID's bytes concatenated with the
+name bytes using MD5 and SHA-1 respectively, then set the appropriate version
+bits. `uuid4` is purely random via `os.urandom(16)`:
+
+```python
+def uuid3(namespace, name):
+    if isinstance(name, str):
+        name = name.encode()
+    from hashlib import md5
+    h = md5(namespace.bytes + name, usedforsecurity=False).digest()
+    return UUID(bytes=h, version=3)
+
+def uuid4():
+    return UUID(bytes=os.urandom(16), version=4)
+
+def uuid5(namespace, name):
+    if isinstance(name, str):
+        name = name.encode()
+    from hashlib import sha1
+    h = sha1(namespace.bytes + name, usedforsecurity=False).digest()
+    return UUID(bytes=h[:16], version=5)
+```
+
+The `usedforsecurity=False` flag (introduced in 3.9) suppresses FIPS-mode
+rejections; these hashes are used solely for UUID derivation, not security.

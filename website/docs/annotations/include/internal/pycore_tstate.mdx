@@ -1,0 +1,183 @@
+---
+title: Include/internal/pycore_tstate.h
+description: Internal _PyThreadState fields — the doubly-linked thread list, current frame pointer, exc_info stack, eval_breaker, and the _PyThreadState_GET fast accessor.
+cpython_path: Include/internal/pycore_tstate.h
+cpython_version: "3.14"
+lines: 150
+status: annotated
+ported_to: pythonrun/tstate.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Include/internal/pycore_tstate.h`
+
+<CpyLink path="Include/internal/pycore_tstate.h" />
+
+Declares the internal thread-state fields that are intentionally hidden
+from `Include/cpython/pystate.h`. The public header exposes only the
+fields that embedding applications need; this header exposes everything
+the eval loop, the GC, and the exception machinery need in their hot
+paths.
+
+In the free-threaded build (PEP 703) CPython 3.14 wraps `PyThreadState`
+inside `_PyThreadStateImpl`, which prepends per-thread memory allocator
+state and other no-GIL bookkeeping. In the default GIL build the two
+structs are identical. This header handles both cases with conditional
+compilation.
+
+The most performance-critical item is `_PyThreadState_GET()`. It is
+called at the start of the `_PyEval_EvalFrameDefault` dispatch loop, on
+every exception raise, and in several inline helpers. In a typical build
+it expands to a TLS read or, on architectures where CPython uses a
+dedicated register (e.g., AArch64 with `--enable-tls-model=local-exec`),
+to a single register move.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Include/internal/pycore_tstate.h" lines="1-30">1-30</Cpy> | `_PyThreadStateImpl` struct | Free-threaded-build wrapper around `PyThreadState`; adds `tlbc_index`, per-thread mimalloc state, and biased reference-count fields. | `pythonrun/tstate.go` |
+| <Cpy path="Include/internal/pycore_tstate.h" lines="31-70">31-70</Cpy> | Core `PyThreadState` fields | `interp`, `prev`/`next`, `frame`, `exc_info`, `dict`, `gilstate_counter`, `recursion_depth`, `recursion_limit`. | `pythonrun/tstate.go` |
+| <Cpy path="Include/internal/pycore_tstate.h" lines="71-90">71-90</Cpy> | `c_tracefunc` / `c_profilefunc` / `c_traceobj` | C-level trace and profile hooks set by `sys.settrace` / `sys.setprofile`. | `pythonrun/tstate.go` |
+| <Cpy path="Include/internal/pycore_tstate.h" lines="91-110">91-110</Cpy> | `eval_breaker` | Atomic flag checked at the top of every dispatch loop iteration; set by the GC, signal handlers, and thread interrupts. | `pythonrun/tstate.go` |
+| <Cpy path="Include/internal/pycore_tstate.h" lines="111-130">111-130</Cpy> | `_PyThreadState_GET` / `_PyThreadState_SetCurrent` | Fast TLS/register accessor and its corresponding setter. | `pythonrun/tstate.go` |
+| <Cpy path="Include/internal/pycore_tstate.h" lines="131-140">131-140</Cpy> | `_PyThreadState_IsRunningMain` / `_PyThreadState_MustExit` | Predicates for main-thread detection and interpreter shutdown signalling. | `pythonrun/tstate.go` |
+| <Cpy path="Include/internal/pycore_tstate.h" lines="141-150">141-150</Cpy> | `_PyErr_StackItem` | One node in the per-thread exception stack; holds `exc_value` and `previous_item`. | `pythonrun/tstate.go` |
+
+## Reading
+
+### Key `PyThreadState` fields (lines 31 to 70)
+
+<CpyLink path="Include/internal/pycore_tstate.h" lines="31-70" />
+
+```c
+struct _ts {
+    /* Doubly-linked list of all thread states for this interpreter. */
+    PyThreadState *prev;
+    PyThreadState *next;
+    PyInterpreterState *interp;
+
+    /* Current execution frame. NULL only before the first call into
+       _PyEval_EvalFrameDefault and after the last frame returns. */
+    struct _PyInterpreterFrame *current_frame;
+
+    /* Singly-linked stack of active exception states.
+       exc_info->exc_value is the currently handled exception. */
+    _PyErr_StackItem *exc_info;
+    _PyErr_StackItem exc_state;   /* bottom of the exc_info stack */
+
+    /* Thread-local storage for threading.local() objects. */
+    PyObject *dict;
+
+    int gilstate_counter;         /* > 0 while the GIL is held by this thread */
+    int recursion_depth;
+    int recursion_limit;
+    int recursion_headroom;       /* extra depth allowed inside signal handlers */
+};
+```
+
+`interp` is a back-pointer to the owning `PyInterpreterState`. It is
+always non-NULL for a live thread state. In the common single-interpreter
+case it points to the main interpreter; in a sub-interpreter scenario it
+points to the sub-interpreter that created this thread.
+
+`prev`/`next` maintain a doubly-linked list rooted at
+`interp->threads.head`. The GC walks this list to suspend all threads
+during a stop-the-world collection. `_PyThreadState_Swap` splices a new
+thread state in by updating both pointers and the head pointer atomically
+under the GIL.
+
+`current_frame` is updated on every Python function call and return. The
+eval loop reads it to find the current code object, globals, and
+`localsplus` array. Tracing and profiling hooks read it to build
+`PyFrameObject` wrappers on demand.
+
+`recursion_depth` is incremented by `_Py_EnterRecursiveCall` and
+decremented by `_Py_LeaveRecursiveCall`. When it exceeds
+`recursion_limit` (default 1000) CPython raises `RecursionError`. The
+`recursion_headroom` reserve prevents signal handlers from immediately
+hitting the limit after a `RecursionError` is raised.
+
+In gopy, `pythonrun/tstate.go` defines `ThreadState` with all the same
+fields. `RecursionDepth` and `RecursionLimit` drive `EnterRecursiveCall`
+/ `LeaveRecursiveCall` in the eval loop.
+
+### `_PyThreadState_GET` TLS design (lines 111 to 130)
+
+<CpyLink path="Include/internal/pycore_tstate.h" lines="111-130" />
+
+```c
+/* Fast accessor — one TLS read or register move on supported targets. */
+static inline PyThreadState *
+_PyThreadState_GET(void)
+{
+#ifdef Py_GIL_DISABLED
+    return &_PyThreadState_GetImpl()->base;
+#else
+    return _Py_tss_tls_var;   /* expanded from Py_tss_t */
+#endif
+}
+
+/* Set the current thread state (called by PyEval_RestoreThread). */
+PyAPI_FUNC(void) _PyThreadState_SetCurrent(PyThreadState *tstate);
+```
+
+In the GIL build, `_PyThreadState_GET()` reads a single TLS variable
+(`Py_tss_t`) that is set by `PyEval_RestoreThread` whenever a thread
+reacquires the GIL. On Linux with pthreads this compiles to one
+`pthread_getspecific` call, which on glibc reduces to a TLS segment
+register read — effectively free on the critical path.
+
+In the free-threaded build the call goes through `_PyThreadState_GetImpl`
+which reads a `_Py_tss_t` variable that is written once per OS thread on
+creation and never changes. The extra indirection is acceptable because
+the free-threaded build eliminates the GIL acquire/release overhead that
+far dominates in the GIL build.
+
+`_PyEval_EvalFrameDefault` calls `_PyThreadState_GET()` exactly once,
+at the function entry, and then passes `tstate` as a parameter to every
+helper it calls. This avoids repeated TLS reads inside the dispatch loop.
+
+In gopy, the equivalent is `vm.CurrentTState()` which reads a
+`goroutine-local` pointer stored in a `sync.Map` keyed on
+`runtime.GoID()`. Because goroutines can be rescheduled across OS
+threads, gopy cannot use true TLS; the `sync.Map` lookup is the
+closest approximation with comparable performance characteristics for
+the single-goroutine-per-interpreter use case.
+
+### `exc_info` exception stack (lines 141 to 150)
+
+<CpyLink path="Include/internal/pycore_tstate.h" lines="141-150" />
+
+```c
+typedef struct _PyErr_StackItem {
+    /* The currently handled exception, or NULL if none. */
+    PyObject *exc_value;
+    /* Link to the previous item on the stack (may be NULL). */
+    struct _PyErr_StackItem *previous_item;
+} _PyErr_StackItem;
+```
+
+Python 3.11 replaced the old three-field `(type, value, traceback)`
+exception state with a single `exc_value` that carries its own
+`__traceback__` and `__class__` attributes. Each `except` clause pushes
+a new `_PyErr_StackItem` and pops it on `except` exit.
+
+`tstate->exc_info` always points to the top of the stack.
+`tstate->exc_state` is a stack-allocated bottom sentinel so the list is
+never empty. Code that needs to inspect the currently handled exception
+reads `tstate->exc_info->exc_value`; code that needs to save and restore
+the exception state (e.g., generators and coroutines on suspend/resume)
+swaps `tstate->exc_info` to point at a frame-local `_PyErr_StackItem`.
+
+The `PUSH_EXC_INFO` and `POP_EXC_INFO` bytecodes manage the stack.
+`PUSH_EXC_INFO` saves the old `exc_info->exc_value`, installs the new
+exception as the handled value, and records the old item as
+`previous_item`. `POP_EXC_INFO` reverses the operation and decrefs the
+saved exception.
+
+In gopy, `pythonrun/tstate.go` models `_PyErr_StackItem` as `ErrStackItem`
+with `ExcValue Object` and `PreviousItem *ErrStackItem`. The `vm/eval_unwind.go`
+file implements `PUSH_EXC_INFO` and `POP_EXC_INFO` using the same linked-list
+manipulation as CPython.

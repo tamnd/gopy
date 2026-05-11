@@ -1,0 +1,238 @@
+---
+title: Objects/fileobject.c
+description: High-level file interface that wraps io.IOBase subclasses, providing PyFile_FromFd, PyObject_AsFileDescriptor, and the open_code hook.
+cpython_path: Objects/fileobject.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+ported_to: objects/file.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Objects/fileobject.c`
+
+<CpyLink path="Objects/fileobject.c" />
+
+High-level Python file interface. This file does not implement a `PyTypeObject`
+for file objects — the actual `io.TextIOWrapper`, `io.BufferedReader`, and
+`io.FileIO` types live under `Modules/_io/`. What `fileobject.c` provides is the
+thin C API layer that the rest of the interpreter uses to interact with file-like
+objects: wrapping an existing OS file descriptor into a Python object via
+`io.open()`, extracting a raw integer descriptor from any file-like via
+`.fileno()`, writing Python objects or C strings to a file, and the
+`PyFile_SetOpenCodeHook` mechanism that allows embedders and security tools to
+intercept every `io.open_code()` call for audit or sandbox purposes.
+
+`PyFile_WriteObject` and `PyFile_WriteString` are the two functions the
+interpreter itself calls most often: the `print` builtin calls `WriteObject`,
+and the early startup C code that writes tracebacks and encoding errors calls
+`WriteString` before the `io` module is even available. Both functions handle
+the case where the target file is `NULL` or `sys.stdout`/`sys.stderr` has been
+replaced with a non-compliant object.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Objects/fileobject.c" lines="1-60">1-60</Cpy> | `PyFile_FromFd` | Calls `io.open(fd, mode, buffering, ...)` and returns the resulting Python file object; used when an embedder passes a raw OS descriptor. | `objects/file.go:FileFromFd` |
+| <Cpy path="Objects/fileobject.c" lines="61-120">61-120</Cpy> | `PyObject_AsFileDescriptor` | Returns the integer fd for any Python object: identity if it is an `int`, else calls `.fileno()` and validates the result. | `objects/file.go:AsFileDescriptor` |
+| <Cpy path="Objects/fileobject.c" lines="121-200">121-200</Cpy> | `PyFile_GetLine` | Calls `f.readline(n)` and strips the trailing newline when `n < 0`; raises `EOFError` on empty return. | `objects/file.go:FileGetLine` |
+| <Cpy path="Objects/fileobject.c" lines="201-300">201-300</Cpy> | `PyFile_WriteObject` | Writes `repr(v)` or `str(v)` (when `flags=Py_PRINT_RAW`) to file `f` by calling `f.write()`; handles `NULL` file gracefully. | `objects/file.go:FileWriteObject` |
+| <Cpy path="Objects/fileobject.c" lines="301-360">301-360</Cpy> | `PyFile_WriteString` | Decodes a C `const char *` and calls `f.write()`; first writes to `sys.stderr` if `f` is `NULL`. | `objects/file.go:FileWriteString` |
+| <Cpy path="Objects/fileobject.c" lines="361-430">361-430</Cpy> | `PyFile_SetOpenCodeHook`, `PyFile_OpenCode`, `_PyFile_OpenCodeObject` | Install a global hook for `io.open_code()`; call the hook or fall back to the default `io.open()`. | `objects/file.go:SetOpenCodeHook` |
+| <Cpy path="Objects/fileobject.c" lines="431-500">431-500</Cpy> | `_PyObject_IsReadyForWritebackFlush` | Checks whether a file is in write-back mode so the GC can trigger a flush before collecting it. | `objects/file.go:IsReadyForWritebackFlush` |
+
+## Reading
+
+### `PyFile_FromFd` (lines 1 to 60)
+
+<CpyLink path="Objects/fileobject.c" lines="1-60" />
+
+`PyFile_FromFd` is the bridge between a raw OS descriptor and the Python `io`
+layer. It imports `io` and calls `io.open(fd, mode, buffering, encoding, errors,
+newline, closefd)`. The `closefd` parameter controls whether closing the Python
+object also closes the underlying descriptor — embedders that share a descriptor
+with a C library typically pass `closefd=False`:
+
+```c
+PyObject *
+PyFile_FromFd(int fd, const char *name, const char *mode, int buffering,
+              const char *encoding, const char *errors,
+              const char *newline, int closefd)
+{
+    PyObject *io = PyImport_ImportModule("io");
+    if (io == NULL)
+        return NULL;
+    PyObject *open = PyObject_GetAttrString(io, "open");
+    Py_DECREF(io);
+    if (open == NULL)
+        return NULL;
+
+    PyObject *f = PyObject_CallFunction(open, "isisssO",
+                                        fd, mode, buffering,
+                                        encoding, errors, newline,
+                                        closefd ? Py_True : Py_False);
+    Py_DECREF(open);
+    if (f == NULL)
+        return NULL;
+
+    /* Attach the name attribute if provided. */
+    if (name != NULL) {
+        PyObject *nameobj = PyUnicode_DecodeFSDefault(name);
+        if (nameobj != NULL) {
+            PyObject_SetAttrString(f, "name", nameobj);
+            Py_DECREF(nameobj);
+            PyErr_Clear();  /* non-fatal if the object rejects .name */
+        }
+    }
+    return f;
+}
+```
+
+The `.name` assignment is best-effort: if the `io` object is a custom class that
+rejects attribute assignment, the error is cleared and `PyFile_FromFd` still
+returns the file object successfully.
+
+### `PyObject_AsFileDescriptor` (lines 61 to 120)
+
+<CpyLink path="Objects/fileobject.c" lines="61-120" />
+
+Extracts a raw integer file descriptor from any Python object. If the argument
+is already an `int`, `PyLong_AsInt` is called directly. Otherwise, the function
+looks up and calls the `.fileno()` method. The result is validated: negative
+values raise `ValueError` because they are not valid OS descriptors:
+
+```c
+int
+PyObject_AsFileDescriptor(PyObject *o)
+{
+    int fd;
+
+    if (PyLong_Check(o)) {
+        fd = PyLong_AsInt(o);
+    }
+    else {
+        PyObject *meth = PyObject_GetAttrString(o, "fileno");
+        if (meth == NULL)
+            return -1;
+        PyObject *fno = PyObject_CallNoArgs(meth);
+        Py_DECREF(meth);
+        if (fno == NULL)
+            return -1;
+        if (!PyLong_Check(fno)) {
+            PyErr_SetString(PyExc_TypeError,
+                "fileno() returned a non-integer");
+            Py_DECREF(fno);
+            return -1;
+        }
+        fd = PyLong_AsInt(fno);
+        Py_DECREF(fno);
+    }
+    if (fd < 0) {
+        PyErr_SetString(PyExc_ValueError,
+            "file descriptor cannot be a negative integer (-1)");
+        return -1;
+    }
+    return fd;
+}
+```
+
+This is the function behind `os.write(f, b)` when `f` is not already an
+integer: `os.write` calls `PyObject_AsFileDescriptor` so that file objects,
+socket objects, and any other `.fileno()`-bearing object can be passed.
+
+### `PyFile_WriteObject` (lines 201 to 300)
+
+<CpyLink path="Objects/fileobject.c" lines="201-300" />
+
+The C-level equivalent of `print(v, file=f)`. When `flags` is `Py_PRINT_RAW`,
+`str(v)` is written; otherwise `repr(v)`. Passing `NULL` as `f` writes to
+`sys.stderr` as a best-effort fallback for early-startup or low-memory error
+paths:
+
+```c
+int
+PyFile_WriteObject(PyObject *v, PyObject *f, int flags)
+{
+    if (f == NULL || f == Py_None) {
+        /* Nothing to write to. */
+        return 0;
+    }
+    PyObject *writer = PyObject_GetAttrString(f, "write");
+    if (writer == NULL)
+        return -1;
+
+    PyObject *value;
+    if (flags & Py_PRINT_RAW) {
+        value = PyObject_Str(v);
+    }
+    else {
+        value = PyObject_Repr(v);
+    }
+    if (value == NULL) {
+        Py_DECREF(writer);
+        return -1;
+    }
+    PyObject *result = PyObject_CallOneArg(writer, value);
+    Py_DECREF(value);
+    Py_DECREF(writer);
+    Py_XDECREF(result);
+    return result == NULL ? -1 : 0;
+}
+```
+
+`Py_PRINT_RAW` is set when the interpreter writes exception arguments to
+`sys.stderr` during unhandled exception reporting: it calls `str()` to avoid
+repr's quotation marks in the user-visible traceback output.
+
+### `PyFile_SetOpenCodeHook` and `_PyFile_OpenCodeObject` (lines 361 to 430)
+
+<CpyLink path="Objects/fileobject.c" lines="361-430" />
+
+`PyFile_SetOpenCodeHook` installs a global function pointer called by every
+`io.open_code()` invocation. This is the extension point used by Python
+Security Model compliance layers (e.g. frozen-module importers, audit hooks).
+At most one hook may be installed; a second call raises `SystemError`:
+
+```c
+static PyFile_OpenCodeHookFunction open_code_hook = NULL;
+static void *open_code_userdata = NULL;
+
+int
+PyFile_SetOpenCodeHook(PyFile_OpenCodeHookFunction hook, void *userData)
+{
+    if (Py_IsInitialized() && PySys_Audit("setopencodehook", NULL) < 0)
+        return -1;
+    if (open_code_hook != NULL) {
+        PyErr_SetString(PyExc_SystemError,
+            "PyFile_SetOpenCodeHook() already called");
+        return -1;
+    }
+    open_code_hook = hook;
+    open_code_userdata = userData;
+    return 0;
+}
+```
+
+`_PyFile_OpenCodeObject` is the implementation of `io.open_code(path)`. If a
+hook is installed it is called with the path and `userData`; otherwise it falls
+back to `io.open(path, "rb")`. The hook receives a `PyObject *path` and must
+return a readable binary file object.
+
+## gopy mirror
+
+`objects/file.go` is a thin layer. File objects in gopy are represented as Go
+`io.Reader` / `io.Writer` interfaces wrapped as Python objects. `FileFromFd`
+delegates to the `io` module the same way the C version does. `AsFileDescriptor`
+calls `.fileno()` on non-integer arguments via the standard method-lookup path.
+`SetOpenCodeHook` stores a Go function value rather than a C function pointer.
+`IsReadyForWritebackFlush` inspects the GC-facing buffer state.
+
+## CPython 3.14 changes
+
+`PyFile_SetOpenCodeHook` added in 3.8 as part of the audit hook / PEP 578
+security infrastructure. `_PyObject_IsReadyForWritebackFlush` added in 3.12 to
+support GC-triggered buffer flush before collection of buffered writer objects.
+`PyFile_GetLine` has been present since 2.x; the `n < 0` stripping behavior is
+unchanged since 3.0.

@@ -1,0 +1,173 @@
+---
+title: Lib/socket.py
+description: High-level socket utilities built on top of the _socket C extension, including create_connection, create_server, SocketIO, and the socket class wrapper.
+cpython_path: Lib/socket.py
+cpython_version: "3.14"
+lines: 800
+status: annotated
+ported_to: module/socket/module.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Lib/socket.py`
+
+<CpyLink path="Lib/socket.py" />
+
+`socket.py` wraps the `_socket` C extension (`Modules/socketmodule.c`) with
+higher-level utilities. The `_socket` module exposes the raw POSIX socket API
+almost 1-to-1; `socket.py` adds the subclassed `socket` type with convenience
+methods, module-level helpers for common patterns (`create_connection`,
+`create_server`), and `SocketIO` for integrating sockets with the `io` stack.
+
+All constants (`AF_INET`, `SOCK_STREAM`, `SOL_SOCKET`, `SO_REUSEADDR`, etc.)
+are re-exported from `_socket` at module level. The module also imports and
+re-exports everything from `_socket` that does not need a Python wrapper, so
+`import socket` gives access to `getaddrinfo`, `gethostname`, `htons`, etc.,
+without a second import.
+
+The `socket` class subclasses `_socket.socket` to override `__repr__`,
+`makefile`, `sendfile`, `get_inheritable`, `set_inheritable`, and to add the
+`_closed` flag used by the `io` layer.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Lib/socket.py" lines="1-100">1-100</Cpy> | Module header, constant re-exports | Imports `_socket.*`, sets `__all__`, defines `_GLOBAL_DEFAULT_TIMEOUT`. | `module/socket/module.go` |
+| <Cpy path="Lib/socket.py" lines="101-350">101-350</Cpy> | `socket` class | Subclass of `_socket.socket`; adds `__repr__`, `makefile`, `sendfile`, `get/set_inheritable`, `_closed` flag. | `module/socket/module.go` |
+| <Cpy path="Lib/socket.py" lines="351-550">351-550</Cpy> | `create_connection` | Resolves `address` via `getaddrinfo` and tries each result until a connection succeeds; raises `ExceptionGroup` or last error on full failure. | `module/socket/module.go` |
+| <Cpy path="Lib/socket.py" lines="551-650">551-650</Cpy> | `create_server`, `has_dualstack_ipv6` | One-liner server socket factory; optional dual-stack IPv6 via `IPV6_V6ONLY=0`. | `module/socket/module.go` |
+| <Cpy path="Lib/socket.py" lines="651-700">651-700</Cpy> | `setdefaulttimeout`, `getdefaulttimeout`, `fromshare` | Module-level timeout helpers; `fromshare` reconstructs a socket from Windows shared handle data. | `module/socket/module.go` |
+| <Cpy path="Lib/socket.py" lines="701-800">701-800</Cpy> | `SocketIO` | `io.RawIOBase` subclass that wraps a socket; delegates `readinto`, `write`, `readable`, `writable` to the underlying socket. | `module/socket/module.go` |
+
+## Reading
+
+### `create_connection` retry loop (lines 351 to 550)
+
+<CpyLink path="Lib/socket.py" lines="351-550" />
+
+```python
+def create_connection(address, timeout=_GLOBAL_DEFAULT_TIMEOUT,
+                      source_address=None, *, all_errors=False):
+    host, port = address
+    exceptions = []
+    for res in getaddrinfo(host, port, 0, SOCK_STREAM):
+        af, socktype, proto, canonname, sa = res
+        sock = None
+        try:
+            sock = socket(af, socktype, proto)
+            if timeout is not _GLOBAL_DEFAULT_TIMEOUT:
+                sock.settimeout(timeout)
+            if source_address:
+                sock.bind(source_address)
+            sock.connect(sa)
+            exceptions.clear()
+            return sock
+        except error as exc:
+            exceptions.append(exc)
+            if sock is not None:
+                sock.close()
+    if len(exceptions) == 1 and not all_errors:
+        raise exceptions[0]
+    elif exceptions:
+        try:
+            if not all_errors:
+                raise exceptions[0]
+            raise ExceptionGroup("create_connection failed", exceptions)
+        finally:
+            exceptions.clear()
+    raise error("getaddrinfo returns an empty list")
+```
+
+`create_connection` is used by `http.client`, `ftplib`, `smtplib`, and most
+other network clients in the standard library. The loop over `getaddrinfo`
+results implements Happy Eyeballs-style address family fallback at the Python
+level: IPv6 addresses are tried first if the resolver returns them first, and
+the loop continues through IPv4 if IPv6 fails.
+
+The `all_errors=False` default preserves backward compatibility: callers that
+do not expect an `ExceptionGroup` only see the last error. Setting
+`all_errors=True` collects every connection attempt failure into a Python 3.11+
+`ExceptionGroup`, which gives diagnostic detail for dual-stack environments.
+
+### `create_server` (lines 551 to 650)
+
+<CpyLink path="Lib/socket.py" lines="551-650" />
+
+```python
+def create_server(address, *, family=AF_INET, backlog=None,
+                  reuse_port=False, dualstack_ipv6=False):
+    if dualstack_ipv6:
+        if not has_dualstack_ipv6():
+            raise ValueError("dualstack_ipv6 not supported on this platform")
+        if family != AF_INET6:
+            raise ValueError("dualstack_ipv6 requires AF_INET6")
+    sock = socket(family, SOCK_STREAM)
+    try:
+        if os.name not in ('nt', 'cygwin'):
+            sock.setsockopt(SOL_SOCKET, SO_REUSEADDR, 1)
+        if reuse_port:
+            sock.setsockopt(SOL_SOCKET, SO_REUSEPORT, 1)
+        if dualstack_ipv6:
+            sock.setsockopt(IPPROTO_IPV6, IPV6_V6ONLY, 0)
+        sock.bind(address)
+        sock.listen(backlog if backlog is not None else SOMAXCONN)
+        return sock
+    except:
+        sock.close()
+        raise
+```
+
+`create_server` is a convenience factory for listening server sockets. It
+always sets `SO_REUSEADDR` on non-Windows platforms (avoiding the TIME_WAIT
+bind error on restart). The `dualstack_ipv6` flag clears `IPV6_V6ONLY`, which
+makes an `AF_INET6` socket accept both IPv4 and IPv6 connections on Linux and
+macOS. `has_dualstack_ipv6()` probes whether the platform supports this by
+creating a temporary socket and testing `IPV6_V6ONLY`.
+
+### `SocketIO` (lines 701 to 800)
+
+<CpyLink path="Lib/socket.py" lines="701-800" />
+
+```python
+class SocketIO(io.RawIOBase):
+    def __init__(self, sock, mode):
+        if mode not in ("r", "w", "rw", "rb", "wb", "rwb"):
+            raise ValueError("invalid mode: %r" % mode)
+        io.RawIOBase.__init__(self)
+        self._sock = sock
+        if "b" not in mode:
+            mode += "b"
+        self._mode = mode
+        self._reading = "r" in mode
+        self._writing = "w" in mode
+        self._timeout_occurred = False
+
+    def readinto(self, b):
+        self._checkClosed()
+        self._checkReadable()
+        if self._timeout_occurred:
+            raise OSError("cannot read from timed out object")
+        while True:
+            try:
+                return self._sock.recv_into(b)
+            except error as e:
+                if e.args[0] in _blocking_errnos:
+                    return None
+                raise
+
+    def write(self, b):
+        self._checkClosed()
+        self._checkWritable()
+        return self._sock.send(b)
+```
+
+`SocketIO` bridges the `io` stack and the raw socket API. It subclasses
+`io.RawIOBase`, which provides `read`, `readall`, and `readline` on top of
+the `readinto` primitive. The `_timeout_occurred` flag handles the case where
+a timed-out socket should not be retried: once a timeout is recorded, all
+subsequent reads immediately raise `OSError` rather than blocking again.
+`makefile` on the `socket` class creates a `SocketIO` and wraps it in
+`io.BufferedReader`/`io.BufferedWriter` as appropriate, giving callers a
+fully-buffered file-like interface over a socket.

@@ -1,0 +1,220 @@
+---
+title: Lib/smtplib.py
+description: SMTP client implementation; provides SMTP and SMTP_SSL for sending mail via the Simple Mail Transfer Protocol.
+cpython_path: Lib/smtplib.py
+cpython_version: "3.14"
+lines: 1100
+status: annotated
+ported_to: module/smtplib/module.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Lib/smtplib.py`
+
+<CpyLink path="Lib/smtplib.py" />
+
+`smtplib.py` is the standard library's SMTP client. It implements enough
+of RFC 5321 (SMTP) and RFC 1869 (ESMTP) to send mail from a Python
+process: connecting to an MTA, negotiating capabilities via EHLO,
+optionally upgrading to TLS with STARTTLS, authenticating via AUTH, and
+delivering a message through the MAIL FROM / RCPT TO / DATA exchange.
+
+The two main classes are `SMTP` (plain TCP) and `SMTP_SSL` (TLS from
+the first byte). Both share the same request/response machinery. An
+`SMTP` object connects on construction when `host` is supplied; callers
+can also create the object with no arguments and call `connect` manually
+to control the connection timing.
+
+The AUTH implementation supports four mechanisms in order of preference:
+PLAIN, LOGIN, CRAM-MD5, and XOAUTH2. The `login` method tries each
+mechanism that the server advertised in its EHLO response and stops at
+the first success. Credential encoding (base64 wrapping, HMAC-MD5 for
+CRAM-MD5) is all inline in `auth_plain`, `auth_login`, and `auth_crammd5`.
+
+`sendmail` is the core delivery method. It issues MAIL FROM, one RCPT TO
+per recipient, and DATA, then collects per-recipient status codes. The
+higher-level `send_message` accepts an `email.message.Message` object,
+extracts addresses from the headers, and delegates to `sendmail`.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Lib/smtplib.py" lines="1-90">1-90</Cpy> | Module header, constants, exceptions | Defines `SMTP_PORT`, `SMTP_SSL_PORT`, `CRLF`, `bCRLF`, and the `SMTPException` hierarchy. | `module/smtplib/module.go` |
+| <Cpy path="Lib/smtplib.py" lines="91-250">91-250</Cpy> | `SMTP.__init__`, `_get_socket`, `connect` | Creates the TCP socket via `socket.create_connection`; reads the 220 greeting; sets `self.sock`, `self.file`, `self.helo_resp`. | `module/smtplib/module.go` |
+| <Cpy path="Lib/smtplib.py" lines="251-400">251-400</Cpy> | `send`, `putcmd`, `getreply`, `docmd` | Low-level send/receive helpers; `getreply` reads multi-line responses and splits the numeric code from the message text. | `module/smtplib/module.go` |
+| <Cpy path="Lib/smtplib.py" lines="401-530">401-530</Cpy> | `helo`, `ehlo`, `has_extn`, `help`, `rset`, `noop` | Session-level commands; `ehlo` parses the 250 keyword lines into `self.esmtp_features`; `has_extn` does a case-insensitive lookup. | `module/smtplib/module.go` |
+| <Cpy path="Lib/smtplib.py" lines="531-660">531-660</Cpy> | `starttls`, `_get_socket` (SSL path) | Sends STARTTLS, wraps `self.sock` with `ssl.wrap_socket`, resets the capability state so a fresh EHLO follows. | `module/smtplib/module.go` |
+| <Cpy path="Lib/smtplib.py" lines="661-820">661-820</Cpy> | `login`, `auth`, `auth_plain`, `auth_login`, `auth_crammd5` | AUTH negotiation; `login` enumerates advertised mechanisms; per-mechanism encoders handle base64 and HMAC. | `module/smtplib/module.go` |
+| <Cpy path="Lib/smtplib.py" lines="821-980">821-980</Cpy> | `sendmail`, `send_message` | Core delivery: MAIL FROM, RCPT TO loop, DATA with dot-stuffing via `quotedata`; `send_message` flattens an `email.Message` first. | `module/smtplib/module.go` |
+| <Cpy path="Lib/smtplib.py" lines="981-1100">981-1100</Cpy> | `SMTP_SSL`, `quit`, `close` | TLS-from-first-byte subclass; `quit` sends QUIT and calls `close`; `close` shuts down the socket and clears `self.sock`. | `module/smtplib/module.go` |
+
+## Reading
+
+### `connect` and the greeting handshake (lines 91 to 250)
+
+<CpyLink path="Lib/smtplib.py" lines="91-250" />
+
+```python
+def connect(self, host='localhost', port=0, source_address=None):
+    if not port and (host.find(':') == host.rfind(':')):
+        i = host.rfind(':')
+        if i >= 0:
+            host, port = host[:i], host[i+1:]
+            try:
+                port = int(port)
+            except ValueError:
+                raise OSError("nonnumeric port")
+    if not port:
+        port = self.default_port
+    sys.audit("smtplib.connect", self, host, port)
+    self.sock = self._get_socket(host, port, self.timeout)
+    self.file = None
+    (code, msg) = self.getreply()
+    if self.debuglevel > 0:
+        self._print_debug('connect:', repr(msg))
+    return (code, msg)
+
+def _get_socket(self, host, port, timeout):
+    if self.debuglevel > 0:
+        self._print_debug('connect: to', (host, port), self.source_address)
+    return socket.create_connection((host, port), timeout,
+                                    self.source_address)
+```
+
+`connect` handles the common shorthand of encoding the port in the host
+string (`"mail.example.com:587"`), then delegates socket creation to
+`_get_socket`. After the connection is established, `getreply()` is
+called immediately to consume the server's 220 greeting line. Any code
+other than 220 does not raise an exception here; the caller is expected
+to check the returned `(code, msg)` tuple. The `sys.audit` call fires the
+`smtplib.connect` audit event, which security tools can monitor.
+
+### `ehlo` and capability parsing (lines 401 to 530)
+
+<CpyLink path="Lib/smtplib.py" lines="401-530" />
+
+```python
+def ehlo(self, name=''):
+    self.esmtp_features = {}
+    self.putcmd(self.ehlo_or_helo_if_needed and 'ehlo' or 'ehlo',
+                name or self.local_hostname)
+    (code, msg) = self.getreply()
+    # According to RFC1869 some (badly written)
+    # MTA's will disconnect on an ehlo. Toss an exception if
+    # that happens -ddm
+    if code == -1 and len(msg) == 0:
+        self.close()
+        raise SMTPServerDisconnected("Server not connected")
+    self.ehlo_resp = msg
+    if code != 250:
+        return (code, msg)
+    self.does_esmtp = True
+    resp = self.ehlo_resp.decode("latin-1").split('\n')
+    del resp[0]
+    for each in resp:
+        # To be able to communicate with as many SMTP servers as possible,
+        # we have to work around their bugs.
+        m = re.match(r'(?P<feature>[A-Za-z0-9][A-Za-z0-9\-]*) ?', each)
+        if m:
+            feature = m.group("feature").lower()
+            params = m.string[m.end("feature"):].strip()
+            if feature == "auth":
+                self.esmtp_features[feature] = self.esmtp_features.get(feature, '') \
+                        + ' ' + params
+            else:
+                self.esmtp_features[feature] = params
+    return (code, msg)
+```
+
+The 250 multi-line response from EHLO contains one keyword per line after
+the greeting. Each keyword is lowercased and stored in `self.esmtp_features`
+as a key; the remainder of the line (the parameter string) is the value.
+The `AUTH` keyword is special: servers may advertise it on multiple lines,
+so the parameters are accumulated by concatenation rather than overwriting.
+`has_extn` does a single dict lookup against this map after normalizing
+the query string to lowercase.
+
+### `starttls` and TLS upgrade (lines 531 to 660)
+
+<CpyLink path="Lib/smtplib.py" lines="531-660" />
+
+```python
+def starttls(self, *, keyfile=None, certfile=None, context=None):
+    self.ehlo_or_helo_if_needed()
+    if not self.has_extn("starttls"):
+        raise SMTPNotSupportedError(
+            "STARTTLS extension not supported by server.")
+    (resp, reply) = self.docmd("STARTTLS")
+    if resp == 220:
+        if context is None:
+            context = ssl._create_stdlib_context(certfile=certfile,
+                                                 keyfile=keyfile)
+        self.sock = context.wrap_socket(self.sock,
+                                        server_hostname=self._host)
+        self.file = None
+        # RFC 3207:
+        # The client MUST discard any knowledge obtained from
+        # the server, such as the list of SMTP service extensions,
+        # prior to issuing the EHLO command.
+        self.helo_resp = None
+        self.ehlo_resp = None
+        self.esmtp_features = {}
+        self.does_esmtp = 0
+    return (resp, reply)
+```
+
+After `STARTTLS` is acknowledged with 220, the plain socket is replaced
+with its TLS-wrapped counterpart via `SSLContext.wrap_socket`. Critically,
+all EHLO state (`esmtp_features`, `ehlo_resp`, `does_esmtp`) is reset to
+empty, enforcing RFC 3207's requirement that the client treat the
+connection as a fresh session. Callers must issue a new `ehlo()` after
+`starttls()` to learn which extensions the server offers over TLS.
+
+### `sendmail` and the DATA sequence (lines 821 to 980)
+
+<CpyLink path="Lib/smtplib.py" lines="821-980" />
+
+```python
+def sendmail(self, from_addr, to_addrs, msg, mail_options=(),
+             rcpt_options=()):
+    self.ehlo_or_helo_if_needed()
+    esmtp_opts = []
+    if isinstance(msg, str):
+        msg = _fix_eols(msg).encode('ascii')
+    if self.does_esmtp:
+        if self.has_extn('size'):
+            esmtp_opts.append("size=%d" % len(msg))
+        for option in mail_options:
+            esmtp_opts.append(option)
+    (code, resp) = self.mail(from_addr, esmtp_opts)
+    if code != 250:
+        ...
+        raise SMTPSenderRefused(code, resp, from_addr)
+    senderrs = {}
+    if isinstance(to_addrs, str):
+        to_addrs = [to_addrs]
+    for each in to_addrs:
+        (code, resp) = self.rcpt(each, rcpt_options)
+        if (code != 250) and (code != 251):
+            senderrs[each] = (code, resp)
+    if len(senderrs) == len(to_addrs):
+        self.rset()
+        raise SMTPRecipientsRefused(senderrs)
+    (code, resp) = self.data(msg)
+    if code != 250:
+        ...
+        raise SMTPDataError(code, resp)
+    return senderrs
+```
+
+`sendmail` orchestrates the three-phase SMTP delivery sequence. The MAIL
+FROM phase advertises the message size via the `SIZE` extension when
+available, letting the server reject oversized messages before the data
+transfer. The RCPT TO loop collects per-recipient refusals in `senderrs`
+rather than aborting on the first failure. If every recipient is refused,
+`RSET` is issued to clean up the server state before raising
+`SMTPRecipientsRefused`. A partial success (at least one RCPT accepted)
+proceeds to DATA and returns the `senderrs` dict so the caller can handle
+individual failures.

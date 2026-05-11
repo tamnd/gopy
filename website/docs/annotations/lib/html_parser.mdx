@@ -1,0 +1,197 @@
+---
+title: Lib/html/parser.py
+description: Event-driven HTML parser that tokenizes an HTML byte stream and dispatches to user-overridable handle_* callbacks without building a tree.
+cpython_path: Lib/html/parser.py
+cpython_version: "3.14"
+lines: 490
+status: annotated
+ported_to: module/html/parser.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Lib/html/parser.py`
+
+<CpyLink path="Lib/html/parser.py" />
+
+`html.parser` is a pure-Python push parser. Unlike `xml.etree.ElementTree`
+it does not build an in-memory tree; instead it invokes a set of
+`handle_*` callbacks as it recognises tokens. Subclasses override the
+callbacks they care about and ignore the rest.
+
+The parser inherits from `_markupbase.ParserBase`, which handles
+`<!DOCTYPE ...>` declarations, marked sections (`<![CDATA[ ... ]]>` and
+`<![INCLUDE[ ... ]]>`), and the line/column position tracking used in
+error messages.
+
+`HTMLParser` accepts malformed HTML. The `goahead` scan loop is driven by
+a set of compiled regexes (`starttagfind`, `endtagfind`, `charref`,
+`entityref`, etc.). When a token boundary cannot be found the parser
+buffers remaining data and waits for the next `feed` call.
+
+The `convert_charrefs` flag (default `True` since 3.5) causes all
+character references in text and attribute values to be converted to the
+corresponding Unicode characters before the handle callback is invoked.
+When the flag is `False`, `handle_entityref` and `handle_charref` are
+called separately for each reference.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Lib/html/parser.py" lines="1-50">1-50</Cpy> | Module header, compiled regexes | Defines `starttagfind`, `endtagfind`, `attrfind_tolerant`, `locatestarttagend`, `charref`, `entityref`, `incomplete`, `interesting_*` patterns. | `module/html/parser.go` |
+| <Cpy path="Lib/html/parser.py" lines="51-130">51-130</Cpy> | `HTMLParser.__init__`, `reset`, `feed`, `close`, `getpos`, `error` | Public interface; `feed` appends data to `self.rawdata` then calls `goahead(0)`. | `module/html/parser.go` |
+| <Cpy path="Lib/html/parser.py" lines="131-280">131-280</Cpy> | `goahead(end)` | Main scan loop: recognises and dispatches start tags, end tags, data, comments, declarations, and PIs. | `module/html/parser.go` |
+| <Cpy path="Lib/html/parser.py" lines="281-360">281-360</Cpy> | `handle_starttag`, `handle_endtag`, `handle_startendtag`, `handle_data`, `handle_entityref`, `handle_charref`, `handle_comment`, `handle_decl`, `handle_pi`, `unknown_decl` | User-overridable callbacks; all no-ops in the base class. | `module/html/parser.go` |
+| <Cpy path="Lib/html/parser.py" lines="361-430">361-430</Cpy> | `handle_starttag` attr parsing, `unescape` | Attribute list construction; `unescape` resolves `&lt;`, `&amp;`, `&#nnn;`, `&#xHH;` in attribute values. | `module/html/parser.go` |
+| <Cpy path="Lib/html/parser.py" lines="431-490">431-490</Cpy> | `_markupbase` integration: `goahead` SGML paths | Handles `<!DOCTYPE ...>` and marked sections via `handle_decl` and `unknown_decl`. | `module/html/parser.go` |
+
+## Reading
+
+### `feed` and the `goahead` scan loop (lines 51 to 280)
+
+<CpyLink path="Lib/html/parser.py" lines="51-280" />
+
+```python
+def feed(self, data):
+    self.rawdata = self.rawdata + data
+    self.goahead(0)
+
+def goahead(self, end):
+    rawdata = self.rawdata
+    i = 0
+    n = len(rawdata)
+    while i < n:
+        if self.convert_charrefs and not self.cdata_content_elements:
+            j = rawdata.find('<', i)
+            if j < 0:
+                if end:
+                    self.handle_data(rawdata[i:n])
+                    i = n
+                break
+            if i < j:
+                self.handle_data(rawdata[i:j])
+            i = j
+        else:
+            match = self.interesting.search(rawdata, i)
+            ...
+        startswith = rawdata.startswith
+        if startswith('<', i):
+            if starttagopen.match(rawdata, i):
+                k = self.handle_starttag_token(i)
+            elif startswith('</'):
+                k = self.handle_endtag_token(i)
+            elif startswith('<!--'):
+                k = self.handle_comment_token(i)
+            ...
+```
+
+`goahead` is the central loop. When `convert_charrefs` is `True` it
+searches for the next `<` directly, delivers the intervening text as a
+single `handle_data` call, and then dispatches on the tag type. When
+`convert_charrefs` is `False` it uses the `interesting` regex (which also
+matches `&`) so that entity references trigger separate callbacks. The
+`end` argument is `0` during incremental `feed` calls (allow partial
+tokens to remain buffered) and `1` during `close` (flush everything).
+
+### Attribute parsing in `handle_starttag` (lines 281 to 360)
+
+<CpyLink path="Lib/html/parser.py" lines="281-360" />
+
+```python
+def handle_starttag_token(self, i):
+    rawdata = self.rawdata
+    ...
+    match = locatestarttagend.match(rawdata, i+1)
+    if not match:
+        return -1   # incomplete; wait for more data
+    j = match.end()
+    attrs = []
+    for m in attrfind_tolerant.finditer(rawdata, i+1, j):
+        attrname, rest, attrvalue = m.group(1, 2, 3)
+        attrname = attrname.lower()
+        if not rest:
+            attrvalue = None
+        elif attrvalue[:1] == '\'' == attrvalue[-1:]:
+            attrvalue = attrvalue[1:-1]
+        elif attrvalue[:1] == '"' == attrvalue[-1:]:
+            attrvalue = attrvalue[1:-1]
+        if attrvalue:
+            attrvalue = unescape(attrvalue)
+        attrs.append((attrname, attrvalue))
+    ...
+    self.handle_starttag(tag, attrs)
+```
+
+`attrfind_tolerant` is a lenient regex that handles unquoted, single-quoted,
+and double-quoted attribute values, as well as valueless boolean attributes.
+Attribute names are lower-cased unconditionally to match the HTML spec.
+`unescape` is called on each attribute value after stripping quotes so that
+references like `href="&amp;q=1"` reach the callback as `&q=1`. Void
+elements (`<br/>`, `<img/>`) trigger `handle_startendtag` instead of a
+separate `handle_starttag` + `handle_endtag` pair.
+
+### `unescape` character-reference resolution (lines 361 to 430)
+
+<CpyLink path="Lib/html/parser.py" lines="361-430" />
+
+```python
+def unescape(s):
+    if '&' not in s:
+        return s
+    return _unescape_re.sub(_replace_charref, s)
+
+def _replace_charref(s):
+    s = s.group(1)
+    if s[0] == '#':
+        # numeric character reference
+        if s[1] in ('x', 'X'):
+            char = chr(int(s[2:], 16))
+        else:
+            char = chr(int(s[1:]))
+        ...
+    else:
+        # named character reference
+        try:
+            char = html.entities.html5[s + ';']
+        except KeyError:
+            ...
+    return char
+```
+
+`unescape` is a module-level function (not a method) so it can be used
+independently of the parser. `_unescape_re` matches any `&...;` pattern
+including numeric (`&#nnn;`, `&#xHH;`) and named (`&amp;`, `&lt;`) forms.
+The lookup for named references uses `html.entities.html5`, which covers
+the full HTML5 named character reference table including multi-character
+sequences like `&nGt;` (U+226B U+0338).
+
+### Comment, PI, and declaration dispatch (lines 431 to 490)
+
+<CpyLink path="Lib/html/parser.py" lines="431-490" />
+
+```python
+def handle_comment_token(self, i):
+    rawdata = self.rawdata
+    j = rawdata.find('-->', i+4)
+    if j < 0:
+        return -1  # incomplete
+    self.handle_comment(rawdata[i+4:j])
+    return j + 3
+
+def goahead_pi(self, i):
+    rawdata = self.rawdata
+    j = rawdata.find('?>', i+2)
+    if j < 0:
+        return -1
+    self.handle_pi(rawdata[i+2:j])
+    return j + 2
+```
+
+Comments (`<!-- ... -->`), processing instructions (`<?target data?>`),
+and declarations (`<!...>`) are each handled by a dedicated scanner that
+searches for the appropriate closing delimiter. All three return `-1` when
+the delimiter is not yet in the buffer, leaving the unconsumed data in
+`rawdata` for the next `feed` call. The `_markupbase.ParserBase.handle_decl`
+override specifically recognises `DOCTYPE` and delegates the internal
+subset to `goahead_markupdecl`.

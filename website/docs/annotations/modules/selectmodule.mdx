@@ -1,0 +1,245 @@
+---
+title: Modules/selectmodule.c
+description: C implementation of the select module. Wraps select(2), poll(2), epoll(7), kqueue(2)/kevent(2), and /dev/poll into a single Python API for I/O multiplexing.
+cpython_path: Modules/selectmodule.c
+cpython_version: "3.14"
+lines: 1200
+status: annotated
+ported_to: ""
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Modules/selectmodule.c`
+
+<CpyLink path="Modules/selectmodule.c" />
+
+`selectmodule.c` implements the `select` built-in module, which exposes I/O
+multiplexing primitives from the host operating system. Rather than polling a
+single file descriptor, programs that monitor many sockets or files call one of
+these syscalls and block until at least one descriptor becomes ready, allowing
+a single thread to serve many connections.
+
+The module conditionally compiles four distinct backends depending on what the
+host OS provides:
+
+- `select(2)`: universally available on POSIX and Windows; limited to
+  `FD_SETSIZE` descriptors (typically 1024 on Linux).
+- `poll(2)`: POSIX; no `FD_SETSIZE` limit; available on Linux and macOS.
+- `epoll(7)`: Linux-only; O(1) per ready descriptor regardless of total count.
+- `kqueue(2)` / `kevent(2)`: BSD and macOS; event-driven, supports timers and
+  process events in addition to I/O.
+
+Each backend is a Python type with `register`, `unregister`, `modify`, and
+`poll`/`select` methods. The module also exports the `POLLIN`, `POLLOUT`,
+`POLLERR`, `POLLHUP`, `EPOLLIN`, `EPOLLOUT`, and related constants so callers
+can construct event masks without importing the underlying OS constants
+directly.
+
+gopy does not port this module. Go's runtime scheduler multiplexes goroutines
+over OS I/O events internally via `netpoller`, so Python-level `select` calls
+are not needed; callers that depend on `select` for non-socket descriptors
+are out of scope for the current port.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Modules/selectmodule.c" lines="1-80">1-80</Cpy> | includes, platform guards, `fd2obj`, `seq2set` | Portability guards (`#ifdef HAVE_POLL`, `#ifdef HAVE_EPOLL`, `#ifdef HAVE_KQUEUE`) and helpers to convert Python sequences to `fd_set` / `pollfd` arrays. | not ported |
+| <Cpy path="Modules/selectmodule.c" lines="80-280">80-280</Cpy> | `select_select_impl` | Python-level `select.select(rlist, wlist, xlist[, timeout])`: convert lists to `fd_set`, call `select(2)`, convert `fd_set` results back to Python lists. | not ported |
+| <Cpy path="Modules/selectmodule.c" lines="280-500">280-500</Cpy> | `poll` object: `poll_new`, `poll_register`, `poll_unregister`, `poll_modify`, `poll_poll` | Wraps `poll(2)`: maintains a `dict[fd -> eventmask]` for deduplication, builds a `pollfd[]` array on each `poll()` call, returns a list of `(fd, revent)` tuples. | not ported |
+| <Cpy path="Modules/selectmodule.c" lines="500-750">500-750</Cpy> | `epoll` object: `epoll_new`, `epoll_register`, `epoll_modify`, `epoll_unregister`, `epoll_poll`, `epoll_fileno`, `epoll_fromfd` | Wraps `epoll_create1`, `epoll_ctl`, and `epoll_wait`; the epoll fd is a real file descriptor that can itself be polled. | not ported |
+| <Cpy path="Modules/selectmodule.c" lines="750-1000">750-1000</Cpy> | `kqueue` / `kevent` objects: `kqueue_new`, `kqueue_control`, `kevent_new`, `kevent_richcompare` | BSD/macOS only; `kevent` is a pure data object (`filter`, `flags`, `fflags`, `data`, `udata`); `kqueue.control` calls `kevent(2)` with a changelist and eventlist. | not ported |
+| <Cpy path="Modules/selectmodule.c" lines="1000-1200">1000-1200</Cpy> | `select_methods[]`, constant registration, `PyInit_select` | Method table for module-level `select()` function, type object registrations, and constant assignment (`POLLIN`, `POLLOUT`, `EPOLLIN`, `EPOLLOUT`, `KQ_FILTER_*`, etc.). | not ported |
+
+## Reading
+
+### `seq2set` and `select_select_impl`: `select.select()` (lines 80 to 280)
+
+<CpyLink path="Modules/selectmodule.c" lines="80-280" />
+
+`select.select(rlist, wlist, xlist[, timeout])` is the oldest POSIX
+multiplexing call. It converts Python sequences to `fd_set` bitmasks using the
+`seq2set` helper, which walks the sequence and calls `fd2obj` on each element:
+
+```c
+static int
+seq2set(PyObject *seq, fd_set *set, pylist fd2obj[FD_SETSIZE + 1])
+{
+    int max = -1;
+    PyObject *fast_seq = PySequence_Fast(seq, "select() arg is not iterable");
+    if (!fast_seq) return -1;
+
+    Py_ssize_t n = PySequence_Fast_GET_SIZE(fast_seq);
+    for (Py_ssize_t i = 0; i < n; i++) {
+        PyObject *o = PySequence_Fast_GET_ITEM(fast_seq, i);
+        int fd = PyObject_AsFileDescriptor(o);
+        if (fd < 0 || fd >= FD_SETSIZE) {
+            PyErr_SetString(PyExc_ValueError,
+                "file descriptor out of range in select()");
+            goto finally;
+        }
+        FD_SET(fd, set);
+        fd2obj[fd].obj = o;   /* remember original object for result */
+        if (fd > max) max = fd;
+    }
+    /* ... */
+    return max;
+}
+```
+
+`PyObject_AsFileDescriptor` calls `fileno()` on any object that supports it,
+so raw `int` fds, socket objects, and file objects are all accepted. The result
+lists are reconstructed from the `fd2obj` table by scanning `fd_set` bits
+after `select(2)` returns.
+
+### `poll` object: `register`, `unregister`, `poll` (lines 280 to 500)
+
+<CpyLink path="Modules/selectmodule.c" lines="280-500" />
+
+The `poll` object keeps a Python `dict` mapping `int` fds to event masks.
+`poll()` builds a fresh `struct pollfd[]` array from the dict on every call,
+calls `poll(2)`, and returns only the fds that had non-zero `revents`:
+
+```c
+static PyObject *
+poll_poll(pollObject *self, PyObject *args)
+{
+    /* Convert timeout (ms): -1 means block indefinitely. */
+    int timeout_ms = (int)timeout;
+
+    /* Build pollfd array from dict. */
+    Py_ssize_t nfds = PyDict_GET_SIZE(self->dict);
+    struct pollfd *ufds = PyMem_New(struct pollfd, nfds);
+    /* ... fill ufds from self->dict ... */
+
+    Py_BEGIN_ALLOW_THREADS
+    n = poll(ufds, nfds, timeout_ms);
+    Py_END_ALLOW_THREADS
+
+    /* Build result: list of (fd, revent) for ready descriptors. */
+    PyObject *result_list = PyList_New(0);
+    for (Py_ssize_t i = 0; i < nfds; i++) {
+        if (ufds[i].revents == 0) continue;
+        PyObject *tup = PyTuple_Pack(2,
+            PyLong_FromLong(ufds[i].fd),
+            PyLong_FromLong(ufds[i].revents));
+        PyList_Append(result_list, tup);
+        /* ... */
+    }
+    PyMem_Free(ufds);
+    return result_list;
+}
+```
+
+`Py_BEGIN_ALLOW_THREADS` / `Py_END_ALLOW_THREADS` release and reacquire the
+GIL around the `poll(2)` syscall so that other threads can run while this
+thread is blocked waiting for I/O.
+
+### `epoll` object: `epoll_ctl` and `epoll_wait` (lines 500 to 750)
+
+<CpyLink path="Modules/selectmodule.c" lines="500-750" />
+
+The `epoll` object wraps a kernel epoll instance. Unlike `poll`, the kernel
+maintains the interest list internally, so `register` and `unregister` call
+`epoll_ctl(2)` immediately rather than updating a local dict:
+
+```c
+static PyObject *
+epoll_internal_ctl(int epfd, int mode, PyObject *pfd, unsigned int events)
+{
+    int fd = PyObject_AsFileDescriptor(pfd);
+    if (fd < 0) return NULL;
+
+    struct epoll_event ev = {
+        .events = events,
+        .data.fd = fd,
+    };
+
+    int result = epoll_ctl(epfd, mode, fd, &ev);
+    if (result < 0) {
+        PyErr_SetFromErrno(PyExc_OSError);
+        return NULL;
+    }
+    Py_RETURN_NONE;
+}
+
+static PyObject *
+epoll_poll(pyEpoll_Object *self, PyObject *args, PyObject *kwargs)
+{
+    int maxevents = -1, timeout_ms = -1;
+    /* ... parse maxevents and timeout ... */
+    if (maxevents < 0) maxevents = FD_SETSIZE;   /* reasonable default */
+
+    struct epoll_event *evs = PyMem_New(struct epoll_event, maxevents);
+    Py_BEGIN_ALLOW_THREADS
+    int nfds = epoll_wait(self->epfd, evs, maxevents, timeout_ms);
+    Py_END_ALLOW_THREADS
+
+    PyObject *result = PyList_New(nfds);
+    for (int i = 0; i < nfds; i++) {
+        PyList_SET_ITEM(result, i,
+            PyTuple_Pack(2,
+                PyLong_FromLong(evs[i].data.fd),
+                PyLong_FromLong(evs[i].events)));
+    }
+    PyMem_Free(evs);
+    return result;
+}
+```
+
+`epoll_fromfd(fd)` wraps an existing kernel epoll fd into a Python `epoll`
+object, allowing the fd to be passed across `fork(2)` or over a Unix socket.
+`epoll.fileno()` exposes the underlying fd so that one epoll instance can be
+registered inside another.
+
+### `kqueue` and `kevent`: BSD/macOS event queue (lines 750 to 1000)
+
+<CpyLink path="Modules/selectmodule.c" lines="750-1000" />
+
+On macOS and BSD the preferred multiplexer is `kqueue(2)`. A `kevent` object
+is a pure Python data container mirroring the C `struct kevent` fields:
+`ident` (fd or process id), `filter` (`KQ_FILTER_READ`, `KQ_FILTER_WRITE`,
+`KQ_FILTER_PROC`, etc.), `flags`, `fflags`, `data`, and `udata`. It is
+immutable after construction.
+
+`kqueue.control(changelist, max_events[, timeout])` submits changes to the
+kernel and collects ready events in a single syscall:
+
+```c
+static PyObject *
+kqueue_queue_control(kqueue_queue_Object *self, PyObject *args)
+{
+    /* Convert changelist: list of kevent objects -> struct kevent[]. */
+    nchanges = (changelist == Py_None) ? 0 : PySequence_Size(changelist);
+    struct kevent *chl = PyMem_New(struct kevent, nchanges);
+    for (Py_ssize_t i = 0; i < nchanges; i++) {
+        kqueue_event_Object *e = /* ... */;
+        EV_SET(&chl[i],
+            e->e.ident, e->e.filter, e->e.flags,
+            e->e.fflags, e->e.data, e->e.udata);
+    }
+
+    struct kevent *evl = PyMem_New(struct kevent, nevents);
+    Py_BEGIN_ALLOW_THREADS
+    gotevents = kevent(self->kqfd, chl, nchanges,
+                       evl, nevents,
+                       ptimeout);
+    Py_END_ALLOW_THREADS
+
+    /* Convert struct kevent[] back to Python kevent objects. */
+    PyObject *result = PyList_New(gotevents);
+    for (int i = 0; i < gotevents; i++) {
+        kqueue_event_Object *e = PyObject_New(kqueue_event_Object,
+                                              clinic_state()->kqueue_event_Type);
+        e->e = evl[i];
+        PyList_SET_ITEM(result, i, (PyObject *)e);
+    }
+    /* ... */
+}
+```
+
+`EV_SET` is the BSD macro for initialising a `struct kevent` in place. The
+`udata` field is an opaque pointer; CPython stores the Python integer value
+directly (not a pointer) because the kernel only reflects it back unchanged
+and the Python API treats it as an integer.

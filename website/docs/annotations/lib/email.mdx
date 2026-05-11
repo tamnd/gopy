@@ -1,0 +1,213 @@
+---
+title: Lib/email/__init__.py
+description: Entry point for the email package; re-exports the top-level parsing convenience functions and covers the full email infrastructure including Message, parser, generator, policy, MIME, header, and utils.
+cpython_path: Lib/email/__init__.py
+cpython_version: "3.14"
+lines: 79
+status: annotated
+ported_to: module/email/module.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Lib/email/__init__.py`
+
+<CpyLink path="Lib/email/__init__.py" />
+
+`Lib/email/__init__.py` is a short entry-point (~79 lines) that exposes
+four top-level convenience functions: `message_from_string`,
+`message_from_bytes`, `message_from_binary_file`, and `message_from_file`.
+Each one constructs a `Parser` or `BytesParser`, calls its `parse`/`parsestr`
+method, and returns the resulting `Message` (or `EmailMessage`) object.
+
+The real substance of the `email` package is distributed across a dozen
+files. This page covers the `__init__.py` entry-point and then walks the
+key submodules in the order a typical call chain exercises them: policy
+selection, parsing, the message object, generation, MIME subclasses,
+header encoding, and utility helpers.
+
+The policy object is the central configuration knob. Every parser,
+generator, and message object receives a policy at construction time.
+`compat32` (the default) preserves the 2.x/3.x legacy behavior.
+`EmailPolicy` (and its ready-made instances `email.policy.default`,
+`email.policy.SMTP`, `email.policy.SMTPUTF8`, `email.policy.HTTP`)
+enables the modern API: `EmailMessage` instead of `Message`, strict
+header parsing, and Unicode-native output.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Lib/email/__init__.py" lines="1-30">1-30</Cpy> | Module docstring, `__all__` | Lists the four public functions; imports `policy` and the two parser classes. | `module/email/module.go` |
+| <Cpy path="Lib/email/__init__.py" lines="31-55">31-55</Cpy> | `message_from_string`, `message_from_bytes` | Convenience wrappers: construct a `(Bytes)Parser` with the given policy and parse the input. | `module/email/module.go` |
+| <Cpy path="Lib/email/__init__.py" lines="56-79">56-79</Cpy> | `message_from_file`, `message_from_binary_file` | File-object variants; delegate to `Parser.parse` / `BytesParser.parse` respectively. | `module/email/module.go` |
+| <Cpy path="Lib/email/policy.py" lines="1-100">1-100</Cpy> | `Policy`, `EmailPolicy`, `compat32`, `default`, `SMTP`, `SMTPUTF8`, `HTTP` | Abstract base and concrete policy objects; govern line endings, max line length, header factory, and `utf8` flag. | `module/email/module.go` |
+| <Cpy path="Lib/email/parser.py" lines="1-200">1-200</Cpy> | `Parser`, `BytesParser` | Feed-parser wrappers with `parse(fp)` and `parsestr(text)` methods; delegate to `FeedParser`. | `module/email/module.go` |
+| <Cpy path="Lib/email/feedparser.py" lines="1-500">1-500</Cpy> | `FeedParser`, `BytesFeedParser` | Incremental line-by-line parser; state machine that handles multipart boundaries and encoded-word headers. | `module/email/module.go` |
+| <Cpy path="Lib/email/message.py" lines="1-900">1-900</Cpy> | `Message`, `EmailMessage`, `MIMEPart` | The core message object; header dict, payload, MIME type accessors, `get_payload`, `set_payload`, `walk`. | `module/email/module.go` |
+| <Cpy path="Lib/email/generator.py" lines="1-450">1-450</Cpy> | `Generator`, `BytesGenerator`, `DecodedGenerator` | Flatten a `Message` tree to a string or bytes stream; handle MIME boundaries and Content-Transfer-Encoding. | `module/email/module.go` |
+| <Cpy path="Lib/email/header.py" lines="1-550">1-550</Cpy> | `Header`, `decode_header`, `make_header` | RFC 2047 encoded-word encoding/decoding; `Header` chunks the string into charset-annotated pieces for folding. | `module/email/module.go` |
+| <Cpy path="Lib/email/utils.py" lines="1-430">1-430</Cpy> | `parseaddr`, `formataddr`, `getaddresses`, `parsedate_to_datetime`, `localtime`, `make_msgid` | Address and date parsing/formatting helpers; `parsedate_to_datetime` returns a timezone-aware `datetime`. | `module/email/module.go` |
+| <Cpy path="Lib/email/mime/multipart.py" lines="1-80">1-80</Cpy> | `MIMEMultipart` | MIME multipart container; `attach(msg)` appends a sub-message to the payload list. | `module/email/module.go` |
+| <Cpy path="Lib/email/mime/text.py" lines="1-50">1-50</Cpy> | `MIMEText` | Convenience subclass for `text/*` parts; encodes the payload with the given charset. | `module/email/module.go` |
+
+## Reading
+
+### Top-level convenience functions (lines 31 to 79)
+
+<CpyLink path="Lib/email/__init__.py" lines="31-79" />
+
+```python
+def message_from_string(s, _class=Message, *, policy=compat32):
+    from email.parser import Parser
+    return Parser(_class, policy=policy).parsestr(s)
+
+def message_from_bytes(s, _class=Message, *, policy=compat32):
+    from email.parser import BytesParser
+    return BytesParser(_class, policy=policy).parsebytes(s)
+
+def message_from_file(fp, _class=Message, *, policy=compat32):
+    from email.parser import Parser
+    return Parser(_class, policy=policy).parse(fp)
+
+def message_from_binary_file(fp, _class=Message, *, policy=compat32):
+    from email.parser import BytesParser
+    return BytesParser(_class, policy=policy).parse(fp)
+```
+
+Each function accepts an optional `_class` argument to substitute a
+different message class (e.g., `EmailMessage`) and a `policy` keyword.
+The deferred `import` inside each function avoids circular-import issues
+at package load time, since `email.parser` in turn imports `email.message`.
+Passing `policy=email.policy.default` to any of these functions switches
+the returned object from the legacy `Message` to `EmailMessage` and
+enables strict RFC 5322 parsing throughout.
+
+### `FeedParser` state machine (Lib/email/feedparser.py)
+
+<CpyLink path="Lib/email/feedparser.py" lines="1-500" />
+
+```python
+class FeedParser:
+    def __init__(self, _factory=None, *, policy=compat32):
+        self.policy = policy
+        self._factory = _factory or policy.message_factory
+        self._input = BufferedSubFile()
+        self._msgstack = []
+        self._parse = self._parsegen().__next__
+        self._cur = self._factory()
+        self._last = self._cur
+        self._headersonly = False
+
+    def feed(self, data):
+        self._input.push(data)
+        self._call_parse()
+
+    def _parsegen(self):
+        # yield-based coroutine; each yield suspends until more data arrives
+        for line in self._input:
+            if self._headersonly:
+                lines = [line]
+                for line in self._input:
+                    lines.append(line)
+                self._cur.set_payload(EMPTYSTRING.join(lines))
+                return
+            ...
+            # header parsing, multipart boundary detection, etc.
+```
+
+`FeedParser` uses a generator-based coroutine to implement incremental
+parsing. `_parsegen` is a generator; `_call_parse` advances it one step
+by calling `next` on it. `BufferedSubFile` acts as a queue of lines that
+`_parsegen` iterates over. This design means `feed(data)` can be called
+multiple times with partial data (e.g., streaming a large email from a
+network socket) and the parser will resume exactly where it suspended.
+`BytesFeedParser` subclasses `FeedParser` and decodes each line through
+the policy's `header_source_parse` method before handing it to the same
+generator.
+
+### `Message` header access and `walk` (Lib/email/message.py)
+
+<CpyLink path="Lib/email/message.py" lines="1-900" />
+
+```python
+class Message:
+    def __init__(self, policy=compat32):
+        self._headers = []   # list of (name, value) pairs; preserves order
+        self._payload = None
+        self._charset = None
+        self.policy = policy
+
+    def __getitem__(self, name):
+        return self.get(name)
+
+    def get(self, name, failobj=None):
+        name = name.lower()
+        for k, v in self._headers:
+            if k.lower() == name:
+                return self.policy.header_fetch_parse(k, v)
+        return failobj
+
+    def walk(self):
+        yield self
+        if self.is_multipart():
+            for subpart in self.get_payload():
+                yield from subpart.walk()
+```
+
+`Message._headers` is a plain list of `(name, value)` 2-tuples rather
+than a dict, which preserves duplicate headers (common for `Received:`,
+`DKIM-Signature:`, etc.) and the original insertion order. Header lookups
+are therefore O(n) in the number of headers, which is acceptable because
+typical messages have at most a few dozen headers. `policy.header_fetch_parse`
+allows the policy to decode RFC 2047 encoded words or return a structured
+header object, depending on whether `compat32` or `EmailPolicy` is in use.
+`walk` is a pre-order traversal of the MIME tree: it yields the message
+itself, then recursively yields every sub-part. It is the standard way to
+iterate all parts of a multipart message when processing attachments.
+
+### `email.utils` address and date helpers (Lib/email/utils.py)
+
+<CpyLink path="Lib/email/utils.py" lines="1-430" />
+
+```python
+def parseaddr(addr):
+    addrs = _AddressList(addr).addresslist
+    if not addrs:
+        return ('', '')
+    return addrs[0]
+
+def formataddr(pair, charset='utf-8'):
+    name, address = pair
+    if name:
+        try:
+            name.encode('ascii')
+        except UnicodeEncodeError:
+            if charset:
+                encoded_name = charset.header_encode(name)
+                return "%s <%s>" % (encoded_name, address)
+        quotes = ''
+        if specialsre.search(name):
+            quotes = '"'
+        return '%s%s%s <%s>' % (quotes, name, quotes, address)
+    return address
+
+def parsedate_to_datetime(data):
+    *dtuple, tz = _parsedate_tz(data)
+    if tz is None:
+        return datetime.datetime(*dtuple[:6])
+    return datetime.datetime(*dtuple[:6],
+        tzinfo=datetime.timezone(datetime.timedelta(seconds=tz)))
+```
+
+`parseaddr` delegates to the `_AddressList` class from `email._parseaddr`,
+which implements the RFC 2822 address grammar. It returns a `(realname, addr_spec)`
+pair; if parsing fails it returns `('', '')` rather than raising. `formataddr`
+takes the same pair and reassembles it: if the display name contains RFC 2822
+specials (parentheses, angle brackets, commas, etc.) it wraps the name in
+double quotes; if the name is non-ASCII it RFC 2047-encodes it using the
+supplied charset. `parsedate_to_datetime` is the modern replacement for
+`parsedate` and `parsedate_tz`: it always returns a `datetime.datetime`.
+When the parsed date includes a timezone offset it attaches a
+`datetime.timezone` with the correct UTC offset; otherwise it returns a
+naive `datetime`.

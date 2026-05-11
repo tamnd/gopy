@@ -1,0 +1,180 @@
+---
+title: Python/freelists.c
+description: Per-interpreter free lists for hot-path objects, draining them at GC collection time and interpreter shutdown to avoid malloc overhead.
+cpython_path: Python/freelists.c
+cpython_version: "3.14"
+lines: 150
+status: annotated
+ported_to: objects/freelist.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Python/freelists.c`
+
+<CpyLink path="Python/freelists.c" />
+
+`freelists.c` centralizes the drain logic for every per-interpreter free
+list in CPython. A free list is a singly-linked stack of previously allocated
+objects that have been freed back into the pool rather than returned to
+`malloc`. The first word of each reclaimed slot stores the "next" pointer,
+so no extra allocation is needed to maintain the list. At GC collection time
+and at interpreter shutdown, `_PyObject_ClearFreeLists` walks every registered
+free list, calls its dedicated drain function, and tracks how many objects
+were released.
+
+The free lists managed in this file cover the hottest allocation sites in the
+interpreter: `float` (capacity 256), `tuple` (per-size buckets, capacity 2000
+total), `list` (capacity 80), `dict` and `dictkeys` (capacity 80 each),
+`frame` (capacity 300), `async_generator` (capacity 80), `context` (capacity
+255), and `slice` (no fixed limit beyond available memory). Each drain function
+is defined in the object's own `.c` file and called from here via a single
+sweep.
+
+The design keeps all free-list maintenance in one place so that a new object
+type only needs to register a drain function here rather than hook into
+multiple call sites across the runtime.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Python/freelists.c" lines="1-30">1-30</Cpy> | includes, `_PyFloat_ClearFreeList` call site | Float free list drain (capacity 256); allocator in `Objects/floatobject.c`. | `objects/freelist.go` (stub) |
+| <Cpy path="Python/freelists.c" lines="31-55">31-55</Cpy> | `_PyTuple_ClearFreeList` call site | Tuple free list drain, per-size buckets 0-20, 2000 slots total; allocator in `Objects/tupleobject.c`. | `objects/freelist.go` (stub) |
+| <Cpy path="Python/freelists.c" lines="56-80">56-80</Cpy> | `_PyList_ClearFreeList`, `_PyDict_ClearFreeList`, `_PyDictKeys_ClearFreeList` call sites | List (80), dict (80), dict-keys (80) free list drains. | `objects/freelist.go` (stub) |
+| <Cpy path="Python/freelists.c" lines="81-110">81-110</Cpy> | `_PyFrame_ClearFreeList`, `_PyAsyncGen_ClearFreeList`, `_PyContext_ClearFreeList` call sites | Frame (300), async-generator (80), context (255) free list drains. | `objects/freelist.go` (stub) |
+| <Cpy path="Python/freelists.c" lines="111-130">111-130</Cpy> | `_PySlice_ClearCache` call site | Slice cache drain. | `objects/freelist.go` (stub) |
+| <Cpy path="Python/freelists.c" lines="131-150">131-150</Cpy> | `_PyObject_ClearFreeLists` | Top-level sweep: calls every drain function above; accepts `is_finalization` flag to suppress debug assertions during shutdown. | `objects/freelist.go:ClearFreeLists` (stub) |
+
+## Reading
+
+### Float free list (lines 1 to 30)
+
+<CpyLink path="Python/freelists.c" lines="1-30" />
+
+The float free list is the simplest of the group. Each freed `PyFloatObject`
+has its `ob_type` pointer overwritten with the address of the next free slot.
+The drain function walks the chain and calls `PyObject_Free` on each node:
+
+```c
+void
+_PyFloat_ClearFreeList(PyInterpreterState *interp)
+{
+    struct _Py_float_state *state = &interp->float_state;
+    PyFloatObject *f = state->free_list;
+    while (f != NULL) {
+        PyFloatObject *next = (PyFloatObject *)f->ob_type;
+        PyObject_Free(f);
+        f = next;
+        state->numfree--;
+    }
+    state->free_list = NULL;
+    assert(state->numfree == 0);
+}
+```
+
+The `numfree` counter is decremented rather than zeroed in one step so that
+the assert at the end confirms no slot was double-freed. In a finalization
+context the assert is skipped.
+
+### Tuple free list (lines 31 to 55)
+
+<CpyLink path="Python/freelists.c" lines="31-55" />
+
+Tuples use a two-dimensional free list: one chain per tuple size from 0 to
+`PyTuple_MAXSAVESIZE - 1` (20 slots). Each chain holds at most
+`PyTuple_MAXFREELIST` (2000) objects. The drain iterates every bucket:
+
+```c
+void
+_PyTuple_ClearFreeList(PyInterpreterState *interp)
+{
+    struct _Py_tuple_state *state = &interp->tuple_state;
+    for (Py_ssize_t i = 1; i < PyTuple_MAXSAVESIZE; i++) {
+        PyTupleObject *p = state->free_list[i];
+        while (p) {
+            PyTupleObject *q = (PyTupleObject *)p->ob_item[0];
+            PyObject_GC_Del(p);
+            p = q;
+            state->numfree[i]--;
+        }
+        state->free_list[i] = NULL;
+    }
+}
+```
+
+The `ob_item[0]` slot stores the next pointer for size-1-and-above tuples.
+Size-0 tuples are singletons and never freed; they are excluded from the loop
+by starting at index 1.
+
+### Frame and async-generator free lists (lines 81 to 110)
+
+<CpyLink path="Python/freelists.c" lines="81-110" />
+
+Frame objects (capacity 300) are the highest-frequency allocation in a
+typical Python program. The frame free list uses `_PyFrameObject.f_back` as
+the next pointer:
+
+```c
+void
+_PyFrame_ClearFreeList(PyInterpreterState *interp)
+{
+    struct _Py_frame_state *state = &interp->frame;
+    while (state->free_list != NULL) {
+        PyFrameObject *f = state->free_list;
+        state->free_list = (PyFrameObject *)f->f_back;
+        PyObject_GC_Del(f);
+        --state->numfree;
+    }
+    assert(state->numfree == 0);
+}
+```
+
+Async-generator objects piggyback on the same pattern using the
+`ag_running_async` field as the next-pointer slot. Context objects (capacity
+255) use `ctx_prev_context`. The capacity difference (300 vs 80 vs 255)
+reflects profiling data: frames are created and destroyed far more frequently
+than async generators or context objects in typical workloads.
+
+### `_PyObject_ClearFreeLists` (lines 131 to 150)
+
+<CpyLink path="Python/freelists.c" lines="131-150" />
+
+The top-level sweep is the only function called from outside this file:
+
+```c
+void
+_PyObject_ClearFreeLists(PyInterpreterState *interp, int is_finalization)
+{
+    _PyFloat_ClearFreeList(interp);
+    _PyTuple_ClearFreeList(interp);
+    _PyList_ClearFreeList(interp);
+    _PyDict_ClearFreeList(interp);
+    _PyDictKeys_ClearFreeList(interp);
+    _PyFrame_ClearFreeList(interp);
+    _PyAsyncGen_ClearFreeList(interp);
+    _PyContext_ClearFreeList(interp);
+    _PySlice_ClearCache(interp);
+}
+```
+
+The `is_finalization` parameter is threaded through to individual drain
+functions that skip debug-mode assertions during interpreter shutdown. The
+function is called at the end of every major GC collection cycle and once
+more during `Py_FinalizeEx` to reclaim all pooled memory.
+
+## Notes for the gopy mirror
+
+gopy does not use free lists. Go's garbage collector and escape analysis
+handle object lifetime without a malloc round-trip, so the pooling that
+free lists provide in CPython is not necessary. `objects/freelist.go` exists
+as a stub that exports `ClearFreeLists(interp)` as a no-op, preserving the
+call site in the interpreter lifecycle without doing any real work.
+
+## CPython 3.14 changes worth noting
+
+In 3.14 the free-list state structs moved from `pyinterpreters` globals
+into per-interpreter `PyInterpreterState` sub-structs (e.g.
+`interp->float_state`, `interp->tuple_state`). This is part of the broader
+per-interpreter isolation work; in earlier versions the free lists were shared
+across sub-interpreters, which violated isolation guarantees.

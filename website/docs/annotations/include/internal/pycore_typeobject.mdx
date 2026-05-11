@@ -1,0 +1,155 @@
+---
+title: Include/internal/pycore_typeobject.h
+description: Internal PyTypeObject helpers — MRO search with inline cache, C3 linearisation, tp_flags predicates, and slot version-tag invalidation.
+cpython_path: Include/internal/pycore_typeobject.h
+cpython_version: "3.14"
+lines: 150
+status: annotated
+ported_to: objects/type.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Include/internal/pycore_typeobject.h`
+
+<CpyLink path="Include/internal/pycore_typeobject.h" />
+
+Declares the internal type-system helpers that the public
+`Include/cpython/object.h` deliberately omits. Extension authors only
+need `PyType_Ready`, `PyObject_GetAttr`, and a few slot macros; the
+interpreter and the specializing adaptive loader need direct access to
+the MRO walk, the version-tag cache, and the per-slot update path.
+
+The most performance-critical function here is `_PyType_Lookup`. It is
+called on every attribute access that misses the instance dict, which
+means it runs in the inner loop of almost every Python program. The
+version-tag mechanism lets the specializing interpreter cache the result
+of an MRO walk and validate it on subsequent calls with a single integer
+comparison instead of repeating the full walk.
+
+`_PyType_GetMRO` and `_PyType_CalculateMRO` are the entry points for
+type construction. `_PyType_CalculateMRO` implements the C3
+linearisation algorithm (PEP 3050 / Dylan); `_PyType_GetMRO` wraps it
+with a guard that returns a cached tuple when the MRO is already current.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Include/internal/pycore_typeobject.h" lines="1-25">1-25</Cpy> | `_PyType_Lookup` / `_PyType_LookupId` | MRO walk with inline cache; `_LookupId` variant accepts a `_Py_Identifier` for zero-allocation string keys. | `objects/type.go` |
+| <Cpy path="Include/internal/pycore_typeobject.h" lines="26-50">26-50</Cpy> | `_PyType_GetMRO` / `_PyType_CalculateMRO` | Return or recompute the C3-linearised MRO tuple for a type. | `objects/type.go` |
+| <Cpy path="Include/internal/pycore_typeobject.h" lines="51-80">51-80</Cpy> | `_PyType_HasFeature` / `PyType_IS_GC` | Inline `tp_flags` predicates used throughout the interpreter and GC. | `objects/type.go` |
+| <Cpy path="Include/internal/pycore_typeobject.h" lines="81-105">81-105</Cpy> | `_PyType_GetSlot` | Reads a slot directly from `tp_flags` / slot offset; used by the specializing adaptive interpreter to load a cached callable. | `objects/type.go` |
+| <Cpy path="Include/internal/pycore_typeobject.h" lines="106-125">106-125</Cpy> | `_PyType_UpdateSlot` | Writes a new value to a slot and increments the type's version tag, invalidating all specializing-interpreter caches that depend on that slot. | `objects/type.go` |
+| <Cpy path="Include/internal/pycore_typeobject.h" lines="126-138">126-138</Cpy> | `_PyType_GetVersionTag` / `_PyType_IncrVersion` | Read and bump the 32-bit version counter embedded in `tp_version_tag`. | `objects/type.go` |
+| <Cpy path="Include/internal/pycore_typeobject.h" lines="139-150">139-150</Cpy> | `_PyType_InitCache` | Zeroes the per-type inline attribute cache on type creation. | `objects/type.go` |
+
+## Reading
+
+### `_PyType_Lookup` MRO walk and version cache (lines 1 to 25)
+
+<CpyLink path="Include/internal/pycore_typeobject.h" lines="1-25" />
+
+```c
+/* Search the MRO of type tp for a descriptor named name.
+   Returns a borrowed reference, or NULL if not found.
+   Does NOT set an exception on miss. */
+PyAPI_FUNC(PyObject *) _PyType_Lookup(PyTypeObject *tp, PyObject *name);
+
+/* _Py_Identifier variant — avoids PyUnicode_InternInPlace on every call. */
+PyAPI_FUNC(PyObject *) _PyType_LookupId(PyTypeObject *tp,
+                                         struct _Py_Identifier *name);
+```
+
+`_PyType_Lookup` walks `tp->tp_mro` from left to right, checking each
+base's `tp_dict` for `name`. The first hit is returned as a borrowed
+reference; `NULL` means not found (no exception is set, so callers must
+check separately for error states).
+
+The function is paired with a version-tag cache in the specializing
+adaptive interpreter. Each `PyTypeObject` carries a 32-bit
+`tp_version_tag`. The first time `_PyType_Lookup` finds a descriptor for
+a given type, the specializing interpreter records `(tp_version_tag,
+descriptor)` in an inline cache attached to the `LOAD_ATTR` bytecode. On
+subsequent executions it compares the live `tp_version_tag` to the cached
+value; if they match it uses the cached descriptor directly, skipping the
+MRO walk entirely.
+
+`_PyType_LookupId` is a zero-allocation fast path for C-internal lookups
+using `_Py_Identifier` static strings (e.g. `&PyId___init__`). Because
+`_Py_Identifier` interns the string once at process startup, the hash
+lookup is reduced to a pointer comparison on most calls.
+
+In gopy, `objects/type.go` implements `TypeLookup(tp *Type, name string) Object`
+which walks `tp.MRO()` checking each base's `__dict__`. The version-tag
+comparison is handled inside `vm/eval_gen.go` for the `LOAD_ATTR`
+specialization.
+
+### `_PyType_HasFeature` and `PyType_IS_GC` (lines 51 to 80)
+
+<CpyLink path="Include/internal/pycore_typeobject.h" lines="51-80" />
+
+```c
+static inline int
+_PyType_HasFeature(PyTypeObject *type, unsigned long feature) {
+    return ((type->tp_flags & feature) != 0);
+}
+
+#define PyType_IS_GC(t) _PyType_HasFeature((t), Py_TPFLAGS_HAVE_GC)
+```
+
+`_PyType_HasFeature` is the canonical way to test a single `tp_flags`
+bit. It is inlined at every call site and reduces to a single AND
+instruction. The interpreter calls it on almost every object creation
+(`Py_TPFLAGS_HAVE_GC`) and method resolution
+(`Py_TPFLAGS_METHOD_DESCRIPTOR`).
+
+`PyType_IS_GC` is the most frequently called specialisation. Objects
+whose type has `Py_TPFLAGS_HAVE_GC` must be registered with the cyclic
+GC via `_PyObject_GC_TRACK`; the `tp_traverse` and `tp_clear` slots must
+be non-NULL. Types without this flag are never examined by the collector.
+
+In gopy, Go's GC handles cycle collection so `PyType_IS_GC` always
+returns false. The flag is tracked in `objects/type.go` for protocol
+parity (it is visible through `type.__flags__`) but the track/untrack
+operations are no-ops.
+
+### Slot version tags (lines 106 to 138)
+
+<CpyLink path="Include/internal/pycore_typeobject.h" lines="106-138" />
+
+```c
+static inline unsigned int
+_PyType_GetVersionTag(PyTypeObject *tp) {
+    return tp->tp_version_tag;
+}
+
+/* Increment the version tag and propagate to all subclasses. */
+PyAPI_FUNC(void) _PyType_IncrVersion(PyTypeObject *tp);
+
+/* Set slot[slot_offset] = value, then call _PyType_IncrVersion. */
+PyAPI_FUNC(void) _PyType_UpdateSlot(PyTypeObject *tp,
+                                     int slot_offset,
+                                     void *value);
+```
+
+`tp_version_tag` is a 32-bit monotonic counter. It starts at 1 when
+`PyType_Ready` finishes and is incremented by `_PyType_IncrVersion`
+whenever any slot in the type changes. Because subclass slot tables are
+derived from base class slots, `_PyType_IncrVersion` must recursively
+visit all direct and indirect subclasses and bump their version tags too.
+
+`_PyType_UpdateSlot` is the only correct way to mutate a slot after type
+creation. Bypassing it (writing `tp->tp_hash = ...` directly) would leave
+stale version tags in all inline caches that had cached the old slot
+value, producing silent correctness bugs in the specializing interpreter.
+
+The specializing interpreter stores `(tp_version_tag, cached_value)` in
+the inline cache of `LOAD_ATTR`, `LOAD_METHOD`, `CALL`, and several other
+bytecodes. On the fast path it reads `tp->tp_version_tag`, compares it to
+the cached tag, and uses the cached value only if they match. The whole
+mechanism costs one memory load and one comparison on the hot path.
+
+In gopy, `objects/type.go` stores `VersionTag uint32` on `*Type` and
+`TypeUpdateSlot` mirrors `_PyType_UpdateSlot` including the recursive
+subclass walk via `tp.Subclasses`.

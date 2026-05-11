@@ -1,0 +1,240 @@
+---
+title: Lib/configparser.py
+description: INI-style configuration file reader and writer; provides ConfigParser with BasicInterpolation and ExtendedInterpolation, strict duplicate detection, and typed accessors.
+cpython_path: Lib/configparser.py
+cpython_version: "3.14"
+lines: 1537
+status: annotated
+ported_to: module/configparser/module.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Lib/configparser.py`
+
+<CpyLink path="Lib/configparser.py" />
+
+`configparser` is entirely pure Python. It reads and writes INI-style
+files of the form:
+
+```ini
+[section]
+key = value
+other: another value
+```
+
+The main class is `ConfigParser`, which inherits from `RawConfigParser`
+through `MappingMixin`. `RawConfigParser` owns the storage (`_dict`-based
+section and key maps), the `_read` line-by-line parser, and the `write`
+serialiser. `ConfigParser` adds interpolation: `get` returns a value only
+after passing it through the active `Interpolation` object, which can
+expand `%(key)s` references (`BasicInterpolation`) or cross-section
+`${section:key}` references (`ExtendedInterpolation`).
+
+The file has three distinct concerns. Parsing (`_read`) handles INI
+syntax, continuation lines, and multiline values. Storage maps section
+names to `SectionProxy` objects that behave like dicts. Interpolation
+walks a value string and substitutes references, raising
+`InterpolationDepthError` after ten recursive expansions.
+
+In 3.14 there are no structural changes; the only tweak is that
+`ConfigParser` now raises a `DeprecationWarning` when
+`default_section=None` is passed (the empty-string default section name
+is the supported way to disable the DEFAULT block).
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Lib/configparser.py" lines="1-100">1-100</Cpy> | Module header, `__all__`, exception classes (`Error`, `NoSectionError`, `DuplicateSectionError`, `DuplicateOptionError`, `NoOptionError`, `InterpolationError`, `InterpolationDepthError`, `InterpolationMissingOptionError`, `InterpolationSyntaxError`, `ParsingError`, `MissingSectionHeaderError`) | All public exception types. | `module/configparser/module.go` |
+| <Cpy path="Lib/configparser.py" lines="101-200">101-200</Cpy> | `Interpolation` (base), `BasicInterpolation` | Base no-op interpolation class and the `%(key)s` substitution variant. | `module/configparser/module.go` |
+| <Cpy path="Lib/configparser.py" lines="201-310">201-310</Cpy> | `ExtendedInterpolation` | `${section:key}` cross-section reference expansion with depth limit. | `module/configparser/module.go` |
+| <Cpy path="Lib/configparser.py" lines="311-480">311-480</Cpy> | `RawConfigParser.__init__`, `defaults`, `sections`, `add_section`, `has_section`, `options`, `has_option`, `read`, `read_file`, `read_string`, `read_dict` | Public read API; `read` accepts a filename or list of filenames. | `module/configparser/module.go` |
+| <Cpy path="Lib/configparser.py" lines="481-700">481-700</Cpy> | `_read` | Line-by-line INI parser; handles section headers, key-value pairs with `=` or `:`, continuation lines, and inline comments. | `module/configparser/module.go` |
+| <Cpy path="Lib/configparser.py" lines="701-900">701-900</Cpy> | `get`, `items`, `write` | Core accessors and serialiser; `write` reproduces the INI format from the internal dict. | `module/configparser/module.go` |
+| <Cpy path="Lib/configparser.py" lines="901-1100">901-1100</Cpy> | `set`, `remove_section`, `remove_option`, `_unify_values`, `optionxform` | Mutation and normalisation; `optionxform` is `str.lower` by default to make option names case-insensitive. | `module/configparser/module.go` |
+| <Cpy path="Lib/configparser.py" lines="1101-1250">1101-1250</Cpy> | `ConfigParser` | Subclass that overrides `get` and `items` to call through `_interpolation`; adds `getint`, `getfloat`, `getboolean`. | `module/configparser/module.go` |
+| <Cpy path="Lib/configparser.py" lines="1251-1400">1251-1400</Cpy> | `SectionProxy` | Dict-like view of a single section; delegates all mutations and reads to the parent `ConfigParser`. | `module/configparser/module.go` |
+| <Cpy path="Lib/configparser.py" lines="1401-1537">1401-1537</Cpy> | `ConverterMapping`, converter descriptor helpers | Dynamic typed accessors (`getint`, `getfloat`, `getboolean`, custom converters) derived from the `converters` kwarg. | `module/configparser/module.go` |
+
+## Reading
+
+### `_read` line-by-line parser (lines 481 to 700)
+
+<CpyLink path="Lib/configparser.py" lines="481-700" />
+
+```python
+def _read(self, fp, fpname):
+    ...
+    for lineno, line in enumerate(fp, start=1):
+        ...
+        # comment or blank line
+        if value.strip() == '' or value[0] in self._comment_prefixes:
+            if self._empty_lines_in_values:
+                ...
+            else:
+                indent_level = sys.maxsize
+            continue
+        # section header
+        mo = self.SECTCRE.match(value)
+        if mo:
+            sectname = mo.group('header')
+            ...
+        # no section header in the file?
+        elif cursect is None:
+            raise MissingSectionHeaderError(fpname, lineno, line)
+        # an option line?
+        else:
+            mo = self._optcre.match(value)
+            if mo:
+                optname, vi, optval = mo.group('option', 'vi', 'value')
+                optname = self.optionxform(optname.rstrip())
+                ...
+            else:
+                # a non-fatal parsing error occurred; set up the
+                # temporary error so we can come back to it
+                e = self._handle_error(e, fpname, lineno, line)
+    ...
+    if e:
+        raise e
+```
+
+`_read` is a single-pass loop over the file lines. Section headers are
+matched by `SECTCRE` (a class-level `re.compile` that matches `[header]`
+with optional surrounding whitespace). Key-value pairs are matched by
+`_optcre`, which is built from `self._delimiters` (default `('=', ':')`).
+Continuation lines are detected by comparing the current line's indent
+level to the previous key's indent level; if deeper, the text is appended
+to the previous value's list, which is joined at the end of parsing.
+
+When `strict=True` (the default since 3.2), seeing a duplicate section or
+option within the same source file raises `DuplicateSectionError` /
+`DuplicateOptionError` immediately rather than silently overwriting.
+
+### `BasicInterpolation.before_get` (lines 101 to 200)
+
+<CpyLink path="Lib/configparser.py" lines="101-200" />
+
+```python
+class BasicInterpolation(Interpolation):
+    _KEYCRE = re.compile(r"%\(([^)]*)\)s|.")
+
+    def before_get(self, parser, section, option, value, vars):
+        L = []
+        self._interpolate_some(parser, option, L, value, section, vars, 1)
+        return ''.join(L)
+
+    def _interpolate_some(self, parser, option, accum, rest, section,
+                          map, depth):
+        rawval = parser.get(section, option, raw=True, fallback=rest)
+        if depth > MAX_INTERPOLATION_DEPTH:
+            raise InterpolationDepthError(option, section, rawval)
+        while rest:
+            p = rest.find("%")
+            if p < 0:
+                accum.append(rest)
+                break
+            if p > 0:
+                accum.append(rest[:p])
+                rest = rest[p:]
+            c = rest[1:2]
+            if c == "%":
+                accum.append("%")
+                rest = rest[2:]
+            elif c == "(":
+                m = self._KEYCRE.match(rest)
+                if m is None:
+                    raise InterpolationSyntaxError(...)
+                var = parser.before_get(parser, section, option,
+                                        map[m.group(1)], vars)
+                ...
+```
+
+`BasicInterpolation` scans `value` for `%(key)s` patterns using
+`_KEYCRE`. Each match replaces the `%(key)s` token with the raw value of
+`key` from `vars` (the per-call override dict) if present, otherwise from
+the same section, otherwise from DEFAULTSECT. The recursive call to
+`_interpolate_some` allows values to reference other values, but
+`MAX_INTERPOLATION_DEPTH = 10` caps the depth to prevent loops.
+
+### `ConfigParser.get` and typed accessors (lines 1101 to 1250)
+
+<CpyLink path="Lib/configparser.py" lines="1101-1250" />
+
+```python
+class ConfigParser(RawConfigParser):
+    def get(self, section, option, *, raw=False, vars=None, fallback=_UNSET):
+        try:
+            d = self._unify_values(section, vars)
+        except NoSectionError:
+            if fallback is _UNSET:
+                raise
+            else:
+                return fallback
+        option = self.optionxform(option)
+        try:
+            value = d[option]
+        except KeyError:
+            if fallback is _UNSET:
+                raise NoOptionError(option, section)
+            else:
+                return fallback
+        if raw:
+            return value
+        else:
+            return self._interpolation.before_get(self, section, option,
+                                                  value, d)
+```
+
+`_unify_values` merges the DEFAULT section, the named section's options,
+and the per-call `vars` dict into a single flat mapping. The `raw=True`
+bypass skips interpolation entirely and returns the stored string as-is.
+This matters when implementing `write` (which must not expand
+`%(key)s` tokens before serialising) and when `ExtendedInterpolation`
+itself calls `get` recursively to look up the referenced value.
+
+The typed accessors `getint`, `getfloat`, `getboolean` are defined as
+`_get_conv` closures that call `get` and then apply `int`, `float`, or a
+boolean-string table (`{'1': True, 'yes': True, 'true': True, 'on': True,
+...}`). Custom converters passed to `__init__` via the `converters` kwarg
+are wired up in the same way through `ConverterMapping`.
+
+### `write` serialiser (lines 701 to 900)
+
+<CpyLink path="Lib/configparser.py" lines="701-900" />
+
+```python
+def write(self, fp, space_around_delimiters=True):
+    """Write an .ini-format representation of the configuration state."""
+    if space_around_delimiters:
+        d = " {} ".format(self._delimiters[0])
+    else:
+        d = self._delimiters[0]
+    if self._defaults:
+        self._write_section(fp, self.default_section,
+                            self._defaults.items(), d)
+    for section in self._sections:
+        self._write_section(fp, section,
+                            self._sections[section].items(), d)
+
+def _write_section(self, fp, section_name, section_items, delimiter):
+    fp.write("[{}]\n".format(section_name))
+    for key, value in section_items:
+        value = self._interpolation.before_write(self, section_name, key,
+                                                 value)
+        if value is not None or not self._allow_no_value:
+            value = delimiter + str(value).replace('\n', '\n\t')
+        else:
+            value = ""
+        fp.write("{}{}\n".format(key, value))
+    fp.write("\n")
+```
+
+`write` always uses the first element of `self._delimiters` as the output
+delimiter (typically `=`). Values that contain embedded newlines are
+indented with a tab on continuation lines so that `_read` will
+reassemble them correctly on the next `read` call. The DEFAULT section,
+if non-empty, is written first; remaining sections follow in insertion
+order (Python 3.7+ dict ordering). `before_write` gives the interpolation
+object a final hook to transform values before serialisation; both
+built-in interpolation classes return the value unchanged.

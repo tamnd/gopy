@@ -1,0 +1,228 @@
+---
+title: Lib/http/client.py
+description: HTTP/1.1 client implementation; provides HTTPConnection, HTTPSConnection, and HTTPResponse for making persistent connections and reading responses.
+cpython_path: Lib/http/client.py
+cpython_version: "3.14"
+lines: 1653
+status: annotated
+ported_to: module/http/client.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Lib/http/client.py`
+
+<CpyLink path="Lib/http/client.py" />
+
+`http/client.py` implements the client side of HTTP/1.1. It is the
+backbone of `urllib.request` and most third-party HTTP libraries that
+build on the standard library. The two main classes are `HTTPConnection`
+(plain TCP) and `HTTPSConnection` (TLS wrapper), both sharing the same
+request/response machinery.
+
+An `HTTPConnection` models a single persistent connection to one
+`(host, port)` pair. The caller sends one or more requests with
+`request(method, url, body, headers)` and reads each response with
+`getresponse()`. The connection is reused automatically for subsequent
+requests unless the server sends `Connection: close` or an error forces
+a reconnect.
+
+`HTTPResponse` is the object returned by `getresponse()`. It exposes
+`.status` (integer status code), `.reason` (reason phrase), `.headers`
+(an `HTTPMessage` instance), and file-like read methods: `.read(amt)`,
+`.readline()`, `.readinto(buf)`. It handles both identity-encoded and
+chunked transfer-encoded bodies transparently.
+
+The send path flows through `request` -> `_send_request` ->
+`_send_output` -> `send`. The read path flows through `getresponse` ->
+`HTTPResponse.begin` -> `_read_status` and then `read`/`_read_chunked`
+on demand.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Lib/http/client.py" lines="1-120">1-120</Cpy> | Module header, constants, exceptions | Defines `HTTP_PORT`, `HTTPS_PORT`, `_MAXLINE`, `_MAXHEADERS`, and all `http.client` exception classes. | `module/http/client.go` |
+| <Cpy path="Lib/http/client.py" lines="121-250">121-250</Cpy> | `HTTPMessage`, `parse_headers` | Subclass of `email.message.Message` used as the header container; `parse_headers` feeds raw bytes into an `email.feedparser.FeedParser`. | `module/http/client.go` |
+| <Cpy path="Lib/http/client.py" lines="251-520">251-520</Cpy> | `HTTPResponse` | Status, reason, headers, and body reading; `begin()`, `_read_status()`, `read()`, `_read_chunked()`, `readline()`, `readinto()`. | `module/http/client.go` |
+| <Cpy path="Lib/http/client.py" lines="521-900">521-900</Cpy> | `HTTPConnection.__init__`, `connect`, `close`, `send`, `_send_output` | Connection lifecycle and low-level send; manages `self.sock` and the output buffer list. | `module/http/client.go` |
+| <Cpy path="Lib/http/client.py" lines="901-1150">901-1150</Cpy> | `HTTPConnection.putrequest`, `putheader`, `endheaders`, `_send_request`, `request` | High-level request assembly; builds the request line and header block, encodes body, decides chunked vs identity encoding. | `module/http/client.go` |
+| <Cpy path="Lib/http/client.py" lines="1151-1350">1151-1350</Cpy> | `HTTPConnection.getresponse`, `set_tunnel`, `_get_hostport`, `_set_hostport` | Reads and returns an `HTTPResponse`; `set_tunnel` wires up HTTP CONNECT proxying. | `module/http/client.go` |
+| <Cpy path="Lib/http/client.py" lines="1351-1530">1351-1530</Cpy> | `HTTPSConnection` | SSL/TLS wrapper; accepts `key_file`, `cert_file`, `context`, `check_hostname`; overrides `connect` to wrap the socket with `ssl.wrap_socket`. | `module/http/client.go` |
+| <Cpy path="Lib/http/client.py" lines="1531-1653">1531-1653</Cpy> | `HTTPException` hierarchy, `error` alias, module `__all__` | Public exception tree and backward-compat `error = HTTPException` alias; `__all__` list. | `module/http/client.go` |
+
+## Reading
+
+### `HTTPResponse.begin` and `_read_status` (lines 251 to 380)
+
+<CpyLink path="Lib/http/client.py" lines="251-380" />
+
+```python
+def begin(self):
+    if self.headers is not None:
+        return
+    # read until we get a non-100 response
+    while True:
+        version, status, reason = self._read_status()
+        if status != CONTINUE:
+            break
+        # skip headers of 100 Continue
+        while True:
+            skip = self.fp.readline(_MAXLINE + 1)
+            if len(skip) > _MAXLINE:
+                raise LineTooLong("header line")
+            skip = skip.strip()
+            if not skip:
+                break
+
+def _read_status(self):
+    line = str(self.fp.readline(_MAXLINE + 1), "iso-8859-1")
+    if len(line) > _MAXLINE:
+        raise LineTooLong("status line")
+    ...
+    try:
+        version, status, reason = line.split(None, 2)
+    except ValueError:
+        try:
+            version, status = line.split(None, 1)
+            reason = ""
+        except ValueError:
+            version = ""
+    ...
+    return version, status, reason
+```
+
+`begin` consumes the status line and headers from the raw socket file
+object `self.fp`. It loops to absorb any `100 Continue` responses that
+an upload might have triggered before the real response arrives.
+`_read_status` enforces `_MAXLINE = 65536` on every `readline` call to
+prevent a malicious server from exhausting memory with a never-ending
+status line. The response version string (`HTTP/1.0` or `HTTP/1.1`) sets
+`self.will_close`, which controls whether the connection is reused after
+this response.
+
+### `_read_chunked` (lines 381 to 470)
+
+<CpyLink path="Lib/http/client.py" lines="381-470" />
+
+```python
+def _read_chunked(self, amt):
+    assert self.chunked != _UNKNOWN
+    value = []
+    try:
+        while True:
+            if self.chunk_left == 0:
+                # read next chunk size
+                line = self.fp.readline(_MAXLINE + 1)
+                i = line.find(b";")
+                if i >= 0:
+                    line = line[:i]  # strip chunk extensions
+                chunk_left = int(line, 16)
+                if chunk_left == 0:
+                    break
+                self.chunk_left = chunk_left
+            if amt is None:
+                value.append(self._safe_read(self.chunk_left))
+                self.chunk_left = 0
+            elif amt < self.chunk_left:
+                value.append(self._safe_read(amt))
+                self.chunk_left -= amt
+                break
+            ...
+    finally:
+        ...
+    # read trailing CRLF and optional trailers
+    self._read_and_discard_trailer()
+    ...
+    return b"".join(value)
+```
+
+Chunked transfer encoding sends each body segment prefixed with its
+length in hexadecimal. `_read_chunked` maintains `self.chunk_left` so
+that partial `read(amt)` calls can resume mid-chunk without re-parsing
+the size line. Chunk extensions (everything after the `;` on the size
+line) are discarded. After the terminal zero-length chunk, `_read_and_discard_trailer`
+consumes any trailer headers up to the blank line, preserving HTTP/1.1
+compliance even though CPython's client does not expose trailer values.
+
+### `HTTPConnection.request` and send path (lines 901 to 1150)
+
+<CpyLink path="Lib/http/client.py" lines="901-1150" />
+
+```python
+def request(self, method, url, body=None, headers={}, *,
+            encode_chunked=False):
+    self._send_request(method, url, body, headers, encode_chunked)
+
+def _send_request(self, method, url, body, headers, encode_chunked=False):
+    ...
+    self.putrequest(method, url, ...)
+    ...
+    if body is not None:
+        if hasattr(body, 'read'):
+            # file-like object
+            encode_chunked = True
+            ...
+        elif isinstance(body, str):
+            body = body.encode('iso-8859-1')
+        ...
+        if encode_chunked and self._http_vsn == 11:
+            self.putheader('Transfer-Encoding', 'chunked')
+        else:
+            self.putheader('Content-Length', str(len(body)))
+    ...
+    self.endheaders(body, encode_chunked=encode_chunked)
+
+def _send_output(self, message_body=None, encode_chunked=False):
+    self._buffer.extend((b"\r\n",))
+    msg = b"".join(self._buffer)
+    del self._buffer[:]
+    self.send(msg)
+    if message_body is not None:
+        self.send(message_body)
+```
+
+`request` is the high-level entry point. It delegates to `_send_request`,
+which decides between `Content-Length` (known-length body) and
+`Transfer-Encoding: chunked` (file-like or generator body). For chunked
+bodies, `endheaders` iterates the source in `blocksize`-sized pieces and
+wraps each piece in its hex-length prefix. `_send_output` flushes the
+header buffer accumulated by `putrequest`/`putheader` calls in a single
+`send` syscall to minimize round trips, then sends the body separately.
+
+### `HTTPSConnection.connect` (lines 1351 to 1450)
+
+<CpyLink path="Lib/http/client.py" lines="1351-1450" />
+
+```python
+class HTTPSConnection(HTTPConnection):
+    default_port = HTTPS_PORT
+
+    def __init__(self, host, port=None, *,
+                 key_file=None, cert_file=None,
+                 context=None, check_hostname=None, ...):
+        super().__init__(host, port, ...)
+        ...
+        if context is None:
+            context = ssl._create_default_https_context()
+        ...
+        self._context = context
+
+    def connect(self):
+        super().connect()
+        if self._tunnel_host:
+            server_hostname = self._tunnel_host
+        else:
+            server_hostname = self.host
+        self.sock = self._context.wrap_socket(
+            self.sock, server_hostname=server_hostname)
+```
+
+`HTTPSConnection` inherits the entire request/response machinery from
+`HTTPConnection` and only overrides `connect`. After the TCP handshake,
+it calls `SSLContext.wrap_socket` with `server_hostname` set for SNI.
+If a `set_tunnel` proxy was configured, `server_hostname` is the
+ultimate destination host (the tunnel target), not the proxy, so that
+the certificate is validated against the correct name. The default
+context (`ssl._create_default_https_context`) enables certificate
+verification and hostname checking unless the caller overrides them.

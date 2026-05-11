@@ -1,0 +1,200 @@
+---
+title: Python/typevarobj.c
+description: PEP 695 type parameter objects — TypeVar, TypeVarTuple, ParamSpec, and TypeAliasType — with lazy bound and constraint evaluation.
+cpython_path: Python/typevarobj.c
+cpython_version: "3.14"
+lines: 700
+status: annotated
+ported_to: objects/typevar.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Python/typevarobj.c`
+
+<CpyLink path="Python/typevarobj.c" />
+
+`typevarobj.c` implements the four built-in type parameter objects introduced
+by PEP 695 (Python 3.12). They are exposed as `typing.TypeVar`,
+`typing.TypeVarTuple`, `typing.ParamSpec`, and `typing.TypeAliasType` in the
+public API, but their C-level implementations live here in the interpreter
+core so that the `type` statement and generic class machinery can construct
+them without importing `typing`.
+
+All four types are heap types registered in `Python/typevarobj.c` and added
+to `builtins` at startup. Their `tp_repr` uses `__name__` directly; their
+`tp_richcompare` uses identity (`is`). `TypeVar`, `TypeVarTuple`, and
+`ParamSpec` are all subscriptable: `T[int]` returns a `types.GenericAlias`.
+
+`TypeVar` carries an optional `bound` type and a `constraints` tuple.
+Constraints and bounds are stored as lazy evaluators (`evaluate_bound`,
+`evaluate_constraints`) when the type parameter is created from a `type`
+statement rather than from a direct `TypeVar(...)` call, so that forward
+references inside generic class bodies are not resolved until the type
+parameter is first examined.
+
+`TypeAliasType` represents the result of a `type Alias = ...` statement.
+Its `__value__` attribute is a descriptor that calls the stored
+`ta_value_func` callable on first access and caches the result, implementing
+the same lazy evaluation pattern.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Python/typevarobj.c" lines="1-80">1-80</Cpy> | `typevarobject` struct, `typevar_new`, `typevar_dealloc` | Allocate and free a `TypeVar`; store `tv_name`, `tv_bound`, `tv_constraints`, `tv_default`, `tv_evaluate_bound`, `tv_evaluate_constraints`. | `objects/typevar.go:TypeVar` |
+| <Cpy path="Python/typevarobj.c" lines="81-180">81-180</Cpy> | `typevar_bound`, `typevar_constraints`, `typevar_default` | Property getters: call the evaluate callbacks on first access, cache results; `bound` raises `TypeError` if both bound and constraints are set. | `objects/typevar.go:TypeVar.Bound` |
+| <Cpy path="Python/typevarobj.c" lines="181-270">181-270</Cpy> | `typevar_repr`, `typevar_class_getitem`, `TypeVar_Type` spec | `__repr__` returns `~T` for inferred-variance vars, `T` otherwise; `__class_getitem__` returns `GenericAlias(self, args)`. | `objects/typevar.go:typevarRepr` |
+| <Cpy path="Python/typevarobj.c" lines="271-360">271-360</Cpy> | `typevartupleobject` struct, `typevartuple_new`, `typevartuple_dealloc`, `typevartuple_repr` | Allocate `TypeVarTuple`; stores `tvt_name` and `tvt_default`; `__repr__` returns `*T` (starred) when used in type hints. | `objects/typevar.go:TypeVarTuple` |
+| <Cpy path="Python/typevarobj.c" lines="361-450">361-450</Cpy> | `paramspecobject` struct, `paramspec_new`, `paramspec_dealloc`, `paramspec_repr`, `ParamSpec_Type` spec | Allocate `ParamSpec`; stores `ps_name`, `ps_bound`, `ps_default`; `__repr__` returns `**P`. | `objects/typevar.go:ParamSpec` |
+| <Cpy path="Python/typevarobj.c" lines="451-570">451-570</Cpy> | `typealiastypeobject` struct, `typealiastype_new`, `typealiastype_dealloc` | Allocate `TypeAliasType`; stores `ta_name`, `ta_type_params` (tuple), `ta_value_func`, `ta_value` (cached result). | `objects/typevar.go:TypeAliasType` |
+| <Cpy path="Python/typevarobj.c" lines="571-650">571-650</Cpy> | `typealiastype_value` (descriptor `__get__`), `typealiastype_repr`, `typealiastype_class_getitem` | Lazy value property: calls `ta_value_func()` once, stores result in `ta_value`; `__class_getitem__` delegates to `GenericAlias`. | `objects/typevar.go:TypeAliasType.Value` |
+| <Cpy path="Python/typevarobj.c" lines="651-700">651-700</Cpy> | `TypeAliasType_Type` spec, module-level `_Py_InitializeTypeVarObjects` | Register all four heap type specs against `builtins`; called from `Py_InitializeTypes` during interpreter startup. | `objects/typevar.go:InitTypeVarObjects` |
+
+## Reading
+
+### `TypeVar` struct and construction (lines 1 to 180)
+
+<CpyLink path="Python/typevarobj.c" lines="1-180" />
+
+The internal C struct for `TypeVar` captures all PEP 695 fields:
+
+```c
+typedef struct {
+    PyObject_HEAD
+    PyObject *tv_name;               /* str: the variable's name */
+    PyObject *tv_bound;              /* type | None (cached) */
+    PyObject *tv_constraints;        /* tuple (cached) */
+    PyObject *tv_default;            /* type | TypeVar.NoDefault */
+    PyObject *tv_evaluate_bound;     /* callable | NULL */
+    PyObject *tv_evaluate_constraints; /* callable | NULL */
+    unsigned char tv_infer_variance; /* 1 if variance was not specified */
+} typevarobject;
+```
+
+When `TypeVar("T", bound=X)` is called directly, `tv_bound` is set
+immediately and `tv_evaluate_bound` is `NULL`. When the type parameter comes
+from a `type` statement (`type Alias[T: X] = ...`), the compiler emits a call
+that sets `tv_evaluate_bound` to a `lambda: X` closure, and `tv_bound` starts
+as `NULL`. The getter calls the lambda on first access:
+
+```c
+static PyObject *
+typevar_bound(typevarobject *self, void *unused)
+{
+    if (self->tv_bound != NULL) {
+        return Py_NewRef(self->tv_bound);
+    }
+    if (self->tv_evaluate_bound == NULL) {
+        Py_RETURN_NONE;
+    }
+    PyObject *bound = PyObject_CallNoArgs(self->tv_evaluate_bound);
+    if (bound == NULL) return NULL;
+    self->tv_bound = Py_NewRef(bound);
+    return bound;
+}
+```
+
+### `TypeVarTuple` and `ParamSpec` (lines 271 to 450)
+
+<CpyLink path="Python/typevarobj.c" lines="271-450" />
+
+`TypeVarTuple` and `ParamSpec` follow the same heap-type pattern but carry
+fewer fields. `TypeVarTuple.__repr__` prefixes the name with `*` to signal
+that it unpacks in a type expression:
+
+```c
+static PyObject *
+typevartuple_repr(typevartupleobject *self)
+{
+    return PyUnicode_FromFormat("*%U", self->tvt_name);
+}
+```
+
+`ParamSpec.__repr__` uses `**` prefix similarly:
+
+```c
+static PyObject *
+paramspec_repr(paramspecobject *self)
+{
+    return PyUnicode_FromFormat("**%U", self->ps_name);
+}
+```
+
+Both types support `__class_getitem__` returning a `GenericAlias`, so
+`P[int, str]` and `*Ts[int, str]` are valid subscripts in generic contexts.
+`ParamSpec` also exposes `.args` and `.kwargs` pseudo-attributes used inside
+`Callable` annotations.
+
+### `TypeAliasType` lazy value (lines 451 to 650)
+
+<CpyLink path="Python/typevarobj.c" lines="451-650" />
+
+`TypeAliasType` is the object produced by `type Alias[T] = list[T]`. Its
+`__value__` is a lazy-evaluated descriptor. The compiler wraps the right-hand
+side expression in a zero-argument function and passes it as `ta_value_func`:
+
+```c
+typedef struct {
+    PyObject_HEAD
+    PyObject *ta_name;         /* str */
+    PyObject *ta_type_params;  /* tuple of TypeVar/TypeVarTuple/ParamSpec */
+    PyObject *ta_value_func;   /* callable: () -> type expression */
+    PyObject *ta_value;        /* cached result, NULL until first access */
+} typealiastypeobject;
+
+static PyObject *
+typealiastype_value(typealiastypeobject *self, void *unused)
+{
+    if (self->ta_value != NULL) {
+        return Py_NewRef(self->ta_value);
+    }
+    PyObject *val = PyObject_CallNoArgs(self->ta_value_func);
+    if (val == NULL) return NULL;
+    self->ta_value = Py_NewRef(val);
+    return val;
+}
+```
+
+The first access to `Alias.__value__` evaluates the lambda and caches the
+result. Subsequent accesses return the cached value without calling the
+lambda again. This design supports forward references: the lambda closes over
+the module globals at definition time, so a type used before it is fully
+defined can still be resolved correctly when `__value__` is accessed later.
+
+### `TypeVar.__class_getitem__` and `GenericAlias` (lines 181 to 270)
+
+<CpyLink path="Python/typevarobj.c" lines="181-270" />
+
+All four type-parameter types delegate subscript operations to
+`GenericAlias` via `__class_getitem__`:
+
+```c
+static PyObject *
+typevar_class_getitem(PyObject *self, PyObject *args)
+{
+    return Py_GenericAlias(self, args);
+}
+```
+
+`Py_GenericAlias` (from `Objects/genericaliasobject.c`) stores `(origin,
+args)` and implements `__repr__`, `__instancecheck__`, and `__or__`. This
+means `TypeVar[int]` produces `T[int]` as a `GenericAlias`, consistent with
+how `list[int]` and `tuple[int, str]` work.
+
+## Notes for the gopy mirror
+
+`objects/typevar.go` is planned for v0.13 as part of PEP 695 support.
+The four heap types map directly to Go structs with the same field names.
+Lazy evaluation of `tv_evaluate_bound` and `ta_value_func` will be
+implemented using a sync.Once pattern rather than a NULL check, since Go
+does not guarantee that a nil pointer check is atomic in the presence of
+goroutines.
+
+## CPython 3.14 changes worth noting
+
+`TypeVar` gained a `default` parameter in 3.13 (PEP 696). In 3.14 the
+default is accessible via `tv_default` and exposed as `TypeVar.has_default()`
+and `TypeVar.default`. The `infer_variance` flag (PEP 695) was stabilized in
+3.12 and remains unchanged in 3.14. `TypeAliasType.__type_params__` is a
+read-only property returning `ta_type_params`, added at the same time.

@@ -1,0 +1,229 @@
+---
+title: Modules/arraymodule.c
+description: C implementation of the array module — a mutable, typed, homogeneous sequence backed by a raw C buffer with type-code-dispatched element access.
+cpython_path: Modules/arraymodule.c
+cpython_version: "3.14"
+lines: 2200
+status: annotated
+ported_to: module/array/module.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Modules/arraymodule.c`
+
+<CpyLink path="Modules/arraymodule.c" />
+
+`arraymodule.c` implements `array.array`, a mutable sequence of uniformly typed
+values backed by a C array rather than a `PyObject *` array. Because every
+element is stored as a native C value (no Python object header, no pointer
+indirection), the memory footprint is typically 4-8x smaller than an equivalent
+`list`, and binary I/O round-trips do not require serialization.
+
+The key data structures are:
+
+- `arrayobject` — the Python object. Contains `ob_item` (a `char *` raw
+  buffer), `ob_size` (number of elements), `allocated` (buffer capacity in
+  elements), and `ob_descr` (a pointer to a per-type-code `arraydescr`).
+- `arraydescr` — a static descriptor table entry with `typecode` (`char`),
+  `itemsize` (bytes), and `getitem` / `setitem` function pointers. There is one
+  entry per type code; the table is declared at the top of the file.
+
+Type codes and their C types: `'b'` / `'B'` (int8 / uint8), `'h'` / `'H'`
+(int16 / uint16), `'i'` / `'I'` (int32 / uint32), `'l'` / `'L'` (int64 /
+uint64), `'q'` / `'Q'` (int64 / uint64), `'f'` (float32), `'d'` (float64).
+
+All mutation goes through `ins1`, which is the single place that manages buffer
+growth. Reads and writes dispatch through `ob_descr->getitem` / `setitem`,
+which handle the Python-to-C and C-to-Python conversions for each type code.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Modules/arraymodule.c" lines="1-100">1-100</Cpy> | includes, `arraydescr`, descriptor table | Static per-type-code descriptor with `typecode`, `itemsize`, `getitem`, `setitem`. | `module/array/module.go` (preamble) |
+| <Cpy path="Modules/arraymodule.c" lines="100-350">100-350</Cpy> | `getitem_*` / `setitem_*` families | One `getitem` and one `setitem` per type code; convert between C scalar and `PyObject *`. | `module/array/module.go:GetItem` |
+| <Cpy path="Modules/arraymodule.c" lines="350-550">350-550</Cpy> | `ins1`, `array_item`, `array_ass_item` | Core insert and element-access; `ins1` grows the buffer by doubling. | `module/array/module.go:Ins1` |
+| <Cpy path="Modules/arraymodule.c" lines="550-750">550-750</Cpy> | `array_append`, `array_extend` | Append one element; extend from an iterable with a fast path for `bytes`/`bytearray` for `'b'`/`'B'` codes. | `module/array/module.go:Append` |
+| <Cpy path="Modules/arraymodule.c" lines="750-1000">750-1000</Cpy> | `array_insert`, `array_pop`, `array_remove`, `array_reverse`, `array_index`, `array_count` | Sequence-like mutation methods; `array_insert` calls `ins1`; `array_pop` shifts the tail left. | `module/array/module.go:Insert` |
+| <Cpy path="Modules/arraymodule.c" lines="1000-1250">1000-1250</Cpy> | `array_tobytes`, `array_frombytes`, `array_tofile`, `array_fromfile` | Binary I/O; `tobytes` wraps the buffer in `PyBytes_FromStringAndSize`; `fromfile` reads exactly `n * itemsize` bytes. | `module/array/module.go:ToBytes` |
+| <Cpy path="Modules/arraymodule.c" lines="1250-1450">1250-1450</Cpy> | `array_tolist`, `array_fromlist`, `array_tounicode`, `array_fromunicode` | List and Unicode round-trips; `fromunicode` only valid for `'u'` (deprecated) or `'w'` wide-char arrays. | `module/array/module.go:ToList` |
+| <Cpy path="Modules/arraymodule.c" lines="1450-1650">1450-1650</Cpy> | `array_buffer_info`, `array_byteswap`, `array_reduce_ex` | Buffer address/length for ctypes; in-place byte-swap for endian conversion; `__reduce_ex__` for pickle support. | `module/array/module.go:BufferInfo` |
+| <Cpy path="Modules/arraymodule.c" lines="1650-1900">1650-1900</Cpy> | `array_new`, `array_dealloc`, `array_repr`, `array_richcompare` | Constructor validates type code and optional initializer; comparison lexicographically compares elements via `getitem`. | `module/array/module.go:ArrayNew` |
+| <Cpy path="Modules/arraymodule.c" lines="1900-2050">1900-2050</Cpy> | `array_subscript`, `array_ass_subscript`, buffer protocol | Slice and buffer-protocol support; `getbuffer` exposes the raw `ob_item` pointer for ctypes/memoryview zero-copy. | `module/array/module.go:Subscript` |
+| <Cpy path="Modules/arraymodule.c" lines="2050-2200">2050-2200</Cpy> | `array_methods[]`, `Arraytype`, `PyInit_array` | Method table, type object, and module entry point. | `module/array/module.go:Module` |
+
+## Reading
+
+### `ins1`: buffer growth and element insertion (lines 350 to 550)
+
+<CpyLink path="Modules/arraymodule.c" lines="350-550" />
+
+`ins1` is the only place that touches `ob_item` and `allocated`. It inserts one
+element at position `where`, shifting the tail right:
+
+```c
+static int
+ins1(arrayobject *self, Py_ssize_t where, PyObject *v)
+{
+    Py_ssize_t n = self->ob_size;
+    char *items;
+
+    if (self->ob_descr->setitem(self, -1, v) < 0)
+        return -1;   /* validate v fits the type before allocating */
+
+    /* Grow buffer if needed (doubling strategy). */
+    if (n == self->allocated) {
+        Py_ssize_t newsize = n ? 2 * n : 4;
+        items = PyMem_Realloc(self->ob_item,
+                              newsize * self->ob_descr->itemsize);
+        if (items == NULL) { PyErr_NoMemory(); return -1; }
+        self->ob_item = items;
+        self->allocated = newsize;
+    }
+
+    /* Shift tail right by one element. */
+    memmove(self->ob_item + (where + 1) * self->ob_descr->itemsize,
+            self->ob_item + where * self->ob_descr->itemsize,
+            (n - where) * self->ob_descr->itemsize);
+
+    /* Write the new element. */
+    self->ob_size++;
+    return self->ob_descr->setitem(self, where, v);
+}
+```
+
+The pre-validation call `setitem(self, -1, v)` with index `-1` is a CPython
+convention: the `setitem` functions treat a negative index as a type-check-only
+call (no actual write). This lets `ins1` fail fast with a `TypeError` or
+`OverflowError` before any allocation is done.
+
+### `array_extend`: iterable appending and fast bytes path (lines 550 to 750)
+
+<CpyLink path="Modules/arraymodule.c" lines="550-750" />
+
+`array_extend` handles the common case of extending from another `array` (same
+type code), a `bytes` / `bytearray` object, or a generic iterable:
+
+```c
+static PyObject *
+array_extend(arrayobject *self, PyObject *bb)
+{
+    if (array_Check(bb)) {
+        /* Same-type-code array: memcpy the raw buffer directly. */
+        arrayobject *b = (arrayobject *)bb;
+        if (b->ob_descr != self->ob_descr) {
+            PyErr_SetString(PyExc_TypeError,
+                "cannot extend with array of different typecode");
+            return NULL;
+        }
+        return array_inplace_concat(self, bb);
+    }
+
+    /* Fast path for bytes/bytearray into 'b' or 'B' arrays. */
+    if ((self->ob_descr->typecode == 'b' ||
+         self->ob_descr->typecode == 'B') &&
+        (PyBytes_Check(bb) || PyByteArray_Check(bb))) {
+        Py_buffer view;
+        if (PyObject_GetBuffer(bb, &view, PyBUF_SIMPLE) < 0)
+            return NULL;
+        if (array_frombuffer_impl(self, &view) < 0) {
+            PyBuffer_Release(&view);
+            return NULL;
+        }
+        PyBuffer_Release(&view);
+        Py_RETURN_NONE;
+    }
+
+    /* Generic iterable: call ins1 for each element. */
+    PyObject *it = PyObject_GetIter(bb);
+    ...
+    while ((item = iternext(it)) != NULL) {
+        if (ins1(self, self->ob_size, item) < 0) { ... }
+        Py_DECREF(item);
+    }
+    ...
+}
+```
+
+The `memcpy` path for same-typecode arrays avoids per-element Python object
+creation entirely. The `bytes` fast path similarly skips object allocation by
+going through the buffer protocol.
+
+### `array_tobytes` and `array_frombytes` (lines 1000 to 1250)
+
+<CpyLink path="Modules/arraymodule.c" lines="1000-1250" />
+
+`tobytes` is a single `PyBytes_FromStringAndSize` call on the raw buffer:
+
+```c
+static PyObject *
+array_tobytes(arrayobject *self, PyObject *Py_UNUSED(ignored))
+{
+    return PyBytes_FromStringAndSize(self->ob_item,
+               self->ob_size * self->ob_descr->itemsize);
+}
+```
+
+`frombytes` validates buffer alignment and then `realloc`s `ob_item` to fit the
+new data before `memcpy`ing it in:
+
+```c
+static PyObject *
+array_frombytes(arrayobject *self, Py_buffer *buffer)
+{
+    Py_ssize_t itemsize = self->ob_descr->itemsize;
+    Py_ssize_t n = buffer->len;
+
+    if (n % itemsize != 0) {
+        PyErr_SetString(PyExc_ValueError,
+            "bytes length not a multiple of item size");
+        return NULL;
+    }
+    Py_ssize_t nitems = n / itemsize;
+    Py_ssize_t oldsize = self->ob_size;
+    /* resize to oldsize + nitems */
+    if (array_resize(self, oldsize + nitems) < 0) return NULL;
+    memcpy(self->ob_item + oldsize * itemsize, buffer->buf, n);
+    Py_RETURN_NONE;
+}
+```
+
+`array_tofile` writes in chunks of `Py_WRITE_BUFSIZE` bytes using
+`PyObject_CallMethodObjArgs(f, "write", ...)`. `array_fromfile` reads exactly
+`n * itemsize` bytes, raising `EOFError` if the file is shorter than that.
+
+### Buffer protocol: `array_buffer_info` and `getbuffer` (lines 1450 to 1650)
+
+<CpyLink path="Modules/arraymodule.c" lines="1450-1650" />
+
+`buffer_info()` exposes the raw C pointer and element count for ctypes
+interoperability:
+
+```c
+static PyObject *
+array_buffer_info(arrayobject *self, PyObject *Py_UNUSED(ignored))
+{
+    PyObject *retval = PyTuple_New(2);
+    PyTuple_SET_ITEM(retval, 0,
+        PyLong_FromVoidPtr(self->ob_item));          /* address */
+    PyTuple_SET_ITEM(retval, 1,
+        PyLong_FromSsize_t(self->ob_size));          /* length */
+    return retval;
+}
+```
+
+The buffer protocol implementation (`array_buffer_getbuf`) fills a `Py_buffer`
+struct with `buf = self->ob_item`, `len = ob_size * itemsize`, and a format
+string derived from the type code (e.g., `"b"` for signed byte, `"f"` for
+float). This allows `memoryview(arr)` to provide a zero-copy view and enables
+`struct.pack_into` and NumPy to access the data without copying.
+
+## CPython 3.14 changes worth noting
+
+The `'u'` type code (deprecated since 3.3 as a Py_UNICODE array) was removed
+in 3.13. A new `'w'` type code for `Py_UCS4` (4-byte Unicode code points) was
+added in 3.13 as the forward-compatible replacement. Both changes affect
+`array_tounicode` and `array_fromunicode`. The `array` module gained
+`__class_getitem__` in 3.9 for generic-alias support (`array[int]`) and this
+is unchanged in 3.14.
