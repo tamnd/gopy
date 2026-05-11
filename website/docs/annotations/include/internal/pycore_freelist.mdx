@@ -1,0 +1,119 @@
+---
+title: pycore_freelist.h
+cpython_path: Include/internal/pycore_freelist.h
+kind: header
+lines: ~100
+ported_to: ~
+---
+
+# `pycore_freelist.h`
+
+Per-interpreter free lists for small, frequently-allocated objects. This header defines the
+data structures CPython uses to recycle deallocated objects instead of returning their
+memory to the system allocator immediately.
+
+## Why it exists
+
+Allocation and deallocation of small objects is a hot path in any Python workload. A tight
+loop that appends to a list, formats a float, or builds tuples allocates and frees thousands
+of heap objects per second. Calling `pymalloc` (or the system `malloc`) on every one of
+those churns the allocator's internal bookkeeping.
+
+Free lists short-circuit this: when a `PyFloatObject` is deallocated its memory is pushed
+onto a per-interpreter stack. The next allocation pops that slot, patches the fields, and
+returns a fully-formed object without a single allocator call. `pycore_freelist.h` is where
+all those per-type stack descriptors live.
+
+## Reading: `_Py_freelist` and `_Py_freelist_state`
+
+```c
+// Include/internal/pycore_freelist.h (CPython 3.14)
+struct _Py_freelist {
+    void *head;     // top of the recycled-object stack; NULL when empty
+    int numfree;    // current depth
+    int maxfree;    // capacity; when numfree reaches maxfree, extras are freed
+};
+
+struct _Py_freelist_state {
+    struct _Py_freelist floats;
+    struct _Py_freelist tuples[PyTuple_MAXSAVESIZE];  // one list per size 1..20
+    struct _Py_freelist lists;
+    struct _Py_freelist dicts;
+    struct _Py_freelist frames;
+    struct _Py_freelist slices;
+    struct _Py_freelist contexts;
+};
+```
+
+`_Py_freelist_state` is embedded inside `PyInterpreterState` so each sub-interpreter
+maintains its own recycling pool. Objects can never migrate between interpreters via the
+free list.
+
+`PyTuple_MAXSAVESIZE` is 20. Tuples of different lengths are common enough that CPython
+keeps a separate stack for each length from 1 through 20, avoiding any size-check overhead
+at pop time.
+
+## Reading: allocation fast paths
+
+`_PyFloat_FromDoubleNoOp` and `_PyTuple_FromArray` illustrate the pattern. Both check the
+relevant free list first and only call `PyObject_Malloc` when the list is empty.
+
+```c
+// Simplified from Objects/floatobject.c (CPython 3.14)
+PyObject *
+PyFloat_FromDouble(double fval)
+{
+    struct _Py_freelist *fl = &_Py_INTERP_FREELIST(floats);
+    PyFloatObject *op;
+    if (fl->numfree > 0) {
+        op = (PyFloatObject *)fl->head;
+        fl->head = *(void **)op;
+        fl->numfree--;
+        _PyObject_Init((PyObject *)op, &PyFloat_Type);
+    } else {
+        op = PyObject_Malloc(sizeof(PyFloatObject));
+        if (!op) return PyErr_NoMemory();
+        _PyObject_Init((PyObject *)op, &PyFloat_Type);
+    }
+    op->ob_fval = fval;
+    return (PyObject *)op;
+}
+```
+
+The deallocation mirror (`float_dealloc`) pushes the dying object back onto `fl->head` by
+overwriting its first pointer-sized word with the old head value before incrementing
+`fl->numfree`.
+
+## Reading: interpreter shutdown drain
+
+During `Py_Finalize` the interpreter walks every free list in `_Py_freelist_state` and
+calls the real deallocator on every cached slot. This ensures that objects on the free list
+are counted and reported correctly by memory-leak checkers.
+
+```c
+// Simplified from Objects/tupleobject.c shutdown path
+void
+_PyTuple_Fini(PyInterpreterState *interp)
+{
+    struct _Py_freelist_state *state = &interp->freelist_state;
+    for (int i = 1; i < PyTuple_MAXSAVESIZE; i++) {
+        PyTupleObject *p = state->tuples[i].head;
+        while (p) {
+            PyTupleObject *next = (PyTupleObject *)p->ob_item[0];
+            PyObject_GC_Del(p);
+            p = next;
+        }
+        state->tuples[i].numfree = 0;
+        state->tuples[i].head = NULL;
+    }
+}
+```
+
+## Status in gopy
+
+Not yet ported. In gopy, Go's garbage collector handles object reclamation automatically,
+so there is no structural equivalent to `_Py_freelist`. The `objects/` package allocates
+`PyFloatObject`, `PyTupleObject`, and similar structs directly via Go struct literals and
+relies on the GC to collect them. If allocation pressure becomes measurable in benchmarks,
+a Go `sync.Pool` per type would be the natural analogue, but no such optimization has been
+introduced yet.

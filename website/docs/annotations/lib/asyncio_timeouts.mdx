@@ -1,0 +1,104 @@
+---
+title: Lib/asyncio/timeouts.py
+description: asyncio.timeout() and asyncio.timeout_at() context managers (PEP 679). Injects CancelledError on deadline, re-raises as TimeoutError on exit.
+cpython_path: Lib/asyncio/timeouts.py
+cpython_version: "3.14"
+lines: 200
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Lib/asyncio/timeouts.py`
+
+<CpyLink path="Lib/asyncio/timeouts.py" />
+
+`timeouts.py` implements the `asyncio.timeout()` and `asyncio.timeout_at()` context managers introduced by PEP 679 and shipped in Python 3.11. The central class is `Timeout`, a scope-based deadline mechanism analogous to Trio's `CancelScope`. When the deadline fires, asyncio cancels the current task with a special `CancelledError`; on `__aexit__`, `Timeout` catches that error and re-raises it as a `TimeoutError`, preserving the original `CancelledError` as the `__cause__`. Callers can adjust the deadline mid-flight via `reschedule()` and read it back via `deadline()`.
+
+The design is deliberately cooperative: `Timeout` installs a callback on the event loop timer rather than running any concurrent code of its own. If the task handles a cancellation internally and does not propagate it, `Timeout` will not convert it to `TimeoutError`, which is the correct behavior because the task chose to absorb the cancellation.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Lib/asyncio/timeouts.py" lines="1-15">1-15</Cpy> | imports | `enum`, `events`, `exceptions`, `tasks` | n/a |
+| <Cpy path="Lib/asyncio/timeouts.py" lines="16-30">16-30</Cpy> | `__all__` | Exports `Timeout`, `timeout`, `timeout_at` | n/a |
+| <Cpy path="Lib/asyncio/timeouts.py" lines="31-50">31-50</Cpy> | `_State` enum | Internal state machine: `CREATED`, `ENTERED`, `EXPIRING`, `EXPIRED`, `EXPIRING_CANCELLED` | Not yet ported |
+| <Cpy path="Lib/asyncio/timeouts.py" lines="51-90">51-90</Cpy> | `Timeout.__init__`, `Timeout.__aenter__`, `Timeout.__aexit__` | Async context manager lifecycle | Not yet ported |
+| <Cpy path="Lib/asyncio/timeouts.py" lines="91-120">91-120</Cpy> | `Timeout.reschedule` | Adjust deadline: cancel old timer handle, schedule new one | Not yet ported |
+| <Cpy path="Lib/asyncio/timeouts.py" lines="121-140">121-140</Cpy> | `Timeout.deadline` | Read the current deadline in absolute event-loop time | Not yet ported |
+| <Cpy path="Lib/asyncio/timeouts.py" lines="141-155">141-155</Cpy> | `Timeout.expired` | True if the deadline fired and was not rescheduled past the current time | Not yet ported |
+| <Cpy path="Lib/asyncio/timeouts.py" lines="156-170">156-170</Cpy> | `Timeout._on_timeout` | Timer callback: cancel the current task, transition to `EXPIRING` | Not yet ported |
+| <Cpy path="Lib/asyncio/timeouts.py" lines="171-200">171-200</Cpy> | `timeout`, `timeout_at` | Module-level factory functions | Not yet ported |
+
+## Reading
+
+### `Timeout.__aenter__` and `__aexit__`: the context manager (lines 51 to 90)
+
+<CpyLink path="Lib/asyncio/timeouts.py" lines="51-90" />
+
+`__aenter__` records the current task and, if a deadline was supplied, schedules `_on_timeout` as a loop callback via `loop.call_at()`. The returned handle is stored so `reschedule()` can cancel it later.
+
+```python
+async def __aenter__(self):
+    self._state = _State.ENTERED
+    if self._timeout_handler is not None:
+        raise RuntimeError("Timeout has already been entered")
+    self._task = tasks.current_task()
+    if self._task is None:
+        raise RuntimeError("Timeout should be used inside a task")
+    self._loop = events.get_running_loop()
+    if self._deadline is not None:
+        self._timeout_handler = self._loop.call_at(
+            self._deadline, self._on_timeout, self._task
+        )
+    return self
+```
+
+`__aexit__` examines the state machine. If the state is `EXPIRING` it means `_on_timeout` fired and the task's `CancelledError` propagated out of the `async with` body. The exit handler confirms that the `CancelledError` was issued by this particular `Timeout` (not by an outer cancellation), converts it to `TimeoutError`, chains the original error as `__cause__`, and then transitions the state to `EXPIRED`. If the state is anything else the handler cancels the pending timer handle (if any) and returns normally.
+
+### `_on_timeout`: the timer callback (lines 156 to 170)
+
+<CpyLink path="Lib/asyncio/timeouts.py" lines="156-170" />
+
+`_on_timeout` is the critical path. It calls `task.cancel()`, which schedules a `CancelledError` to be thrown into the task's coroutine on the next event loop iteration, and records the resulting cancel message via `task.cancelling()` so `__aexit__` can distinguish this cancellation from an unrelated outer one.
+
+```python
+def _on_timeout(self, task):
+    assert self._state is _State.ENTERED
+    self._state = _State.EXPIRING
+    task.cancel()
+```
+
+The `task.cancel()` call does not interrupt the task immediately. It sets a flag that the event loop checks at the next `await` point. This is why `Timeout` works correctly even if the timeout fires while the task is executing synchronous code between two `await` expressions: the cancellation is deferred until the next suspension point.
+
+### `reschedule` and `deadline` (lines 91 to 155)
+
+<CpyLink path="Lib/asyncio/timeouts.py" lines="91-155" />
+
+`reschedule(when)` accepts an absolute event-loop time or `None` to disable the timeout entirely. It cancels any existing timer handle, stores the new deadline, and if `when` is not `None` schedules a fresh `call_at`. Calling `reschedule` after the timeout has already fired (`state == EXPIRED`) raises `RuntimeError`.
+
+```python
+def reschedule(self, when):
+    if self._state is not _State.ENTERED:
+        raise RuntimeError(
+            f"Cannot change state of {self._state.value!r} Timeout"
+        )
+    self._deadline = when
+    if self._timeout_handler is not None:
+        self._timeout_handler.cancel()
+    if when is None:
+        self._timeout_handler = None
+    else:
+        self._timeout_handler = self._loop.call_at(when, self._on_timeout, self._task)
+```
+
+`deadline()` is a plain property that returns `self._deadline`. `expired()` returns `True` when the state is `EXPIRED` or when the state is `EXPIRING` and the current loop time is past the deadline.
+
+## gopy mirror
+
+Not yet ported. A Go implementation would represent `Timeout` as a struct holding a `context.CancelFunc` and a `time.Timer`. `__aenter__` maps to starting the timer; `__aexit__` maps to stopping it and checking whether the context was cancelled by the timer's function. The `reschedule` operation maps to `timer.Reset()`. The key semantic difference to preserve is that a cancellation from an outer scope must not be swallowed by the `Timeout` exit handler.
+
+## CPython 3.14 changes
+
+`asyncio.timeout()` was added in 3.11 (PEP 679). In 3.12 the state machine gained the `EXPIRING_CANCELLED` state to handle the edge case where an outer cancellation arrives while the timeout is in the middle of its own cancellation sequence. In 3.14 `Timeout.__repr__` was improved to include the remaining time and the current state, making it easier to debug stalled coroutines under a debugger or with `asyncio.get_event_loop().print_debug()`.

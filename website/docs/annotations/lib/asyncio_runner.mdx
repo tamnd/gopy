@@ -1,0 +1,116 @@
+---
+title: Lib/asyncio/runner.py
+description: asyncio.run() entry point. Runner manages a fresh event loop per call, cancels all tasks on exit, and closes the loop.
+cpython_path: Lib/asyncio/runner.py
+cpython_version: "3.14"
+lines: 200
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Lib/asyncio/runner.py`
+
+<CpyLink path="Lib/asyncio/runner.py" />
+
+`runner.py` provides the `asyncio.run()` convenience function and the `Runner` class that backs it. Every call to `asyncio.run()` creates a brand-new event loop, runs the supplied coroutine to completion, cancels any tasks that were left running, drains the cancellation, and then closes the loop. `Runner` exposes the same lifecycle as an explicit context manager so callers that run multiple coroutines sequentially can reuse the same loop without paying the setup/teardown cost on every call.
+
+The module is small but is the canonical entry point for all asyncio programs. Getting the cancellation order right is the hard part: stray tasks must be cancelled before the loop shuts down, and any `CancelledError` raised by those tasks must be swallowed so the original coroutine result (or exception) propagates cleanly to the caller.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Lib/asyncio/runner.py" lines="1-20">1-20</Cpy> | imports | `events`, `coroutines`, `tasks`, `futures`, `contextvars` | n/a |
+| <Cpy path="Lib/asyncio/runner.py" lines="21-30">21-30</Cpy> | `__all__` | Exports `Runner` and `run` | n/a |
+| <Cpy path="Lib/asyncio/runner.py" lines="31-80">31-80</Cpy> | `Runner.__init__`, `Runner.__enter__`, `Runner.__exit__` | Context manager lifecycle: create loop on enter, call `close()` on exit | Not yet ported |
+| <Cpy path="Lib/asyncio/runner.py" lines="81-130">81-130</Cpy> | `Runner.run` | Run a coroutine to completion on the managed loop | Not yet ported |
+| <Cpy path="Lib/asyncio/runner.py" lines="131-160">131-160</Cpy> | `Runner.close` | Cancel all outstanding tasks, drain cancellation, shut down async generators, close the loop | Not yet ported |
+| <Cpy path="Lib/asyncio/runner.py" lines="161-170">161-170</Cpy> | `Runner.get_loop` | Return the managed loop, raising `RuntimeError` if not entered | Not yet ported |
+| <Cpy path="Lib/asyncio/runner.py" lines="171-200">171-200</Cpy> | `run` | Module-level convenience function wrapping `Runner` | Not yet ported |
+
+## Reading
+
+### Runner lifecycle: `__init__`, `__enter__`, `__exit__` (lines 31 to 80)
+
+<CpyLink path="Lib/asyncio/runner.py" lines="31-80" />
+
+`Runner.__init__` stores the optional `debug` flag and `loop_factory` argument but does not create the loop yet. Loop creation is deferred to `__enter__` (or to the first `run()` call if used without `with`). This lazy approach means constructing a `Runner` is cheap and the loop is created only when actually needed.
+
+```python
+class Runner:
+    def __init__(self, *, debug=None, loop_factory=None):
+        self._loop = None
+        self._debug = debug
+        self._loop_factory = loop_factory
+        self._context = None
+        self._interrupt_count = 0
+        self._set_event_loop = False
+
+    def __enter__(self):
+        self._lazy_init()
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.close()
+        return False
+```
+
+`_lazy_init` is called by both `__enter__` and `run()`. It creates the loop via `loop_factory()` if provided, otherwise via `events.new_event_loop()`. After creation it installs the loop as the running loop for the current OS thread via `events.set_event_loop()`, and applies the `debug` flag if set.
+
+### `Runner.run`: executing a coroutine (lines 81 to 130)
+
+<CpyLink path="Lib/asyncio/runner.py" lines="81-130" />
+
+`run()` wraps the coroutine in a `Task`, sets it as the current task in the `contextvars` context, and calls `loop.run_until_complete()`. SIGINT handling is layered on top: a `KeyboardInterrupt` caught during `run_until_complete` triggers a cancellation of the main task and a retry of `run_until_complete` to let the task's cleanup code run before re-raising.
+
+```python
+def run(self, coro, *, context=None):
+    if not coroutines.iscoroutine(coro):
+        raise ValueError("a coroutine was expected, got {!r}".format(coro))
+    if self._loop is not None and self._loop.is_closed():
+        raise RuntimeError("Runner is closed")
+    self._lazy_init()
+    task = self._loop.create_task(coro, context=context)
+    try:
+        return self._loop.run_until_complete(task)
+    except exceptions.CancelledError:
+        if self._interrupt_count > 0:
+            uncancel = getattr(task, "uncancel", None)
+            if uncancel is not None and uncancel() == 0:
+                raise KeyboardInterrupt()
+        raise
+```
+
+The `uncancel()` mechanism was added in 3.12. It lets structured cancellation distinguish between a user interrupt and a cancellation issued by the program itself.
+
+### `Runner.close`: task cleanup and loop shutdown (lines 131 to 160)
+
+<CpyLink path="Lib/asyncio/runner.py" lines="131-160" />
+
+`close()` gathers all tasks that are still running, cancels each one, and then runs the loop until every cancellation has been processed. After all tasks finish it calls `loop.shutdown_asyncgens()` and `loop.shutdown_default_executor()` to drain the thread-pool executor, then finally calls `loop.close()`.
+
+```python
+def close(self):
+    if self._loop is None or self._loop.is_closed():
+        return
+    try:
+        loop = self._loop
+        _cancel_all_tasks(loop)
+        loop.run_until_complete(loop.shutdown_asyncgens())
+        loop.run_until_complete(loop.shutdown_default_executor())
+    finally:
+        if self._set_event_loop:
+            events.set_event_loop(None)
+        loop.close()
+```
+
+`_cancel_all_tasks` (a module-level helper at the bottom of the file) iterates `asyncio.all_tasks(loop)`, calls `task.cancel()` on each, and then runs `loop.run_until_complete(asyncio.gather(*tasks, return_exceptions=True))` to let every task finish its cancellation handler before the loop is closed. Skipping this step would leave tasks in a state where their `__del__` methods print "Task was destroyed but it is pending!" warnings.
+
+## gopy mirror
+
+Not yet ported. A Go implementation would need a thin wrapper around the event loop interface defined in `vm/` or a dedicated coroutine scheduler. `Runner.run` maps naturally to a function that creates a goroutine-backed event loop, schedules the top-level coroutine as a task, and blocks until the task completes. `Runner.close` maps to loop shutdown with a cancellation sweep over remaining tasks.
+
+## CPython 3.14 changes
+
+`runner.py` was added in CPython 3.11 as part of the `asyncio.run()` rewrite. In 3.12 the `uncancel()` task method was introduced; `Runner.run` uses it to distinguish a `KeyboardInterrupt`-driven cancellation from a programmatic one and to re-raise `KeyboardInterrupt` rather than `CancelledError` in that case. In 3.14 the `loop_factory` parameter was made part of the stable public API after spending one release as provisional, and `Runner` gained `__slots__` to reduce per-instance memory overhead.

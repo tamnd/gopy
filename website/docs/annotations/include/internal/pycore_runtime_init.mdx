@@ -1,0 +1,92 @@
+---
+title: Include/internal/pycore_runtime_init.h
+description: Compile-time initialization macros for _PyRuntimeState and per-interpreter defaults. Designated-initializer structs that let CPython statically allocate runtime state before any C code runs.
+cpython_path: Include/internal/pycore_runtime_init.h
+cpython_version: "3.14"
+lines: 200
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Include/internal/pycore_runtime_init.h`
+
+<CpyLink path="Include/internal/pycore_runtime_init.h" />
+
+Compile-time initialization macros for the CPython runtime state. This header defines the
+zero-initialized blobs that let CPython statically allocate `_PyRuntimeState` and the
+initial interpreter state before any C code runs.
+
+## Map
+
+| Lines | Symbol | Role |
+| ----- | ------ | ---- |
+| 1-80 | `_PyRuntimeState_INIT` | Designated-initializer macro for the global `_PyRuntime` variable |
+| 80-150 | `_Py_interp_config_INIT` | Default `PyInterpreterConfig` for the main interpreter |
+| 150-200 | `INTERP_CREATED_DURING_RUNTIME_INIT` | Sentinel for partially-constructed interpreters |
+
+## Reading
+
+### `_PyRuntimeState_INIT`
+
+CPython needs a fully-formed `_PyRuntimeState` available from the very first instruction of
+the process, before `Py_Initialize` is called. Rather than calling `malloc` and `memset`,
+the runtime is declared as a static global and seeded with designated-initializer macros
+that the C compiler evaluates at link time.
+
+```c
+// Include/internal/pycore_runtime_init.h (CPython 3.14)
+#define _PyRuntimeState_INIT(runtime, open_code_hook) \
+    { \
+        .calls_to_do = 0, \
+        .gilstate = _gilstate_INIT(runtime), \
+        .interpreters = { \
+            .mutex = _PyMutex_STATIC_INIT, \
+            .next_id = -1, \
+        }, \
+        .ceval = { \
+            .perf = _Py_PERF_PROFILING_INIT, \
+        }, \
+        .open_code_hook = open_code_hook, \
+    }
+```
+
+The `runtime` argument is the address of the static `_PyRuntime` variable itself, used so
+that embedded pointers inside the struct can reference their own parent without a run-time
+fixup step.
+
+### `_Py_interp_config_INIT`
+
+A second macro provides the default `PyInterpreterConfig` for the main interpreter. It sets
+the GIL policy, memory allocator selection, and feature-flag fields that a user-visible
+`PyConfig` object is later merged on top of.
+
+```c
+#define _Py_interp_config_INIT \
+    { \
+        .use_main_obmalloc = 1, \
+        .allow_fork = 1, \
+        .allow_exec = 1, \
+        .allow_threads = 1, \
+        .allow_daemon_threads = 1, \
+        .check_multi_interp_extensions = 0, \
+        .gil = PyInterpreterConfig_SHARED_GIL, \
+    }
+```
+
+Sub-interpreters created after the main one inherit these defaults unless the caller
+overrides them via `Py_NewInterpreterFromConfig`.
+
+### `INTERP_CREATED_DURING_RUNTIME_INIT` sentinel
+
+The header also defines the sentinel `INTERP_CREATED_DURING_RUNTIME_INIT`. It is stored in
+`interp->_initialized` while `_Py_InitializeMain` is still running and is used to
+distinguish the partially-constructed main interpreter from fully-ready sub-interpreters.
+Any path that calls `PyThreadState_Get` before `_Py_InitializeMain` completes will see this
+sentinel and can bail out gracefully.
+
+## gopy notes
+
+Not yet ported. gopy's runtime initialization follows a different path: `pythonrun.RunString`
+bootstraps interpreter state procedurally rather than via static zero-initialization. The
+conceptual equivalent lives in `pythonrun/runstring.go` and `vm/eval_gen.go`.

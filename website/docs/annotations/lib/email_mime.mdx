@@ -1,0 +1,176 @@
+---
+title: Lib/email/mime/text.py
+description: MIMEText convenience constructor that encodes a string body with Content-Type text/* and charset; part of the email.mime hierarchy rooted at MIMEBase.
+cpython_path: Lib/email/mime/text.py
+cpython_version: "3.14"
+lines: 40
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Lib/email/mime/text.py`
+
+<CpyLink path="Lib/email/mime/text.py" />
+
+`email.mime.text` provides `MIMEText`, a convenience constructor for
+`text/*` messages. It is the most commonly used class in the `email.mime`
+subpackage: building a plain-text or HTML email body is almost always a
+single `MIMEText(body)` call.
+
+The `email.mime` subpackage is a thin layer of convenience constructors
+sitting on top of the core `email.message.Message` class. Its inheritance
+tree is:
+
+```
+MIMEBase          (email.mime.base)    -- sets MIME-Version and Content-Type
+  MIMENonMultipart  (email.mime.nonmultipart)  -- raises on attach()
+    MIMEText        (email.mime.text)
+    MIMEApplication (email.mime.application)
+    MIMEAudio       (email.mime.audio)
+    MIMEImage       (email.mime.image)
+  MIMEMultipart   (email.mime.multipart)       -- manages boundary and parts list
+```
+
+`MIMEBase.__init__` calls `Message.__init__` and then calls
+`add_header('Content-Type', maintype + '/' + subtype, **params)` to set
+the primary MIME header. `MIMEText` delegates to `MIMENonMultipart`, which
+in turn delegates to `MIMEBase`, so the whole chain bottoms out in a
+plain `Message` object with the appropriate headers pre-installed.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Lib/email/mime/text.py" lines="1-11">1-11</Cpy> | Module header, imports | Imports `MIMENonMultipart`; defines `__all__ = ['MIMEText']`. | (not ported) |
+| <Cpy path="Lib/email/mime/text.py" lines="12-40">12-40</Cpy> | `MIMEText.__init__` | Auto-detects charset (`us-ascii` vs `utf-8`) when `_charset` is `None`; calls `MIMENonMultipart.__init__` with `'text'`, `_subtype`, `charset`; calls `self.set_payload(_text, _charset)`. | (not ported) |
+| `Lib/email/mime/base.py` lines 1-40 | `MIMEBase.__init__` | Root constructor; calls `Message.__init__` and adds `Content-Type: maintype/subtype` plus any keyword params as header parameters. | (not ported) |
+| `Lib/email/mime/multipart.py` lines 1-47 | `MIMEMultipart.__init__` | Sets `Content-Type: multipart/_subtype`; initializes `_payload = []`; optionally accepts initial sub-parts and a boundary string. | (not ported) |
+| `Lib/email/mime/nonmultipart.py` | `MIMENonMultipart.attach` | Overrides `Message.attach` to raise `errors.MultipartConversionError`; non-multipart messages may not have sub-parts attached. | (not ported) |
+
+## Reading
+
+### `MIMEText.__init__` charset auto-detection (lines 12 to 40)
+
+<CpyLink path="Lib/email/mime/text.py" lines="12-40" />
+
+```python
+class MIMEText(MIMENonMultipart):
+    def __init__(self, _text, _subtype='plain', _charset=None, *, policy=None):
+        # Auto-detect charset when not supplied.
+        if _charset is None:
+            try:
+                _text.encode('us-ascii')
+                _charset = 'us-ascii'
+            except UnicodeEncodeError:
+                _charset = 'utf-8'
+
+        MIMENonMultipart.__init__(self, 'text', _subtype, policy=policy,
+                                  charset=str(_charset))
+        self.set_payload(_text, _charset)
+```
+
+When `_charset` is `None`, `MIMEText` probes the body text by attempting
+to encode it as ASCII. If that succeeds, the charset is set to
+`'us-ascii'`, which keeps the `Content-Transfer-Encoding` as `7bit` and
+avoids any payload transformation. If it fails (`UnicodeEncodeError`), the
+charset falls back to `'utf-8'`, which causes `set_payload` to encode the
+payload as quoted-printable or base64 depending on the policy and the
+proportion of non-ASCII bytes.
+
+The `charset=str(_charset)` argument passed to `MIMENonMultipart.__init__`
+becomes a parameter on the `Content-Type` header (e.g.,
+`Content-Type: text/plain; charset="utf-8"`). `str(_charset)` handles the
+case where `_charset` is a `Charset` instance rather than a plain string.
+
+`set_payload(_text, _charset)` on the parent `Message` object both stores
+the payload and sets `Content-Transfer-Encoding` to match the charset's
+encoding scheme. For `us-ascii` and `utf-8` with the default `compat32`
+policy the encoding is `7bit` or `quoted-printable` respectively. Under
+the modern `EmailPolicy` (RFC 6532) the payload is stored as-is and the
+transfer encoding is omitted, since SMTP submissions are expected to be
+8-bit clean.
+
+### `MIMEMultipart` boundary management (multipart.py lines 1 to 47)
+
+<CpyLink path="Lib/email/mime/multipart.py" lines="1-47" />
+
+```python
+class MIMEMultipart(MIMEBase):
+    def __init__(self, _subtype='mixed', boundary=None, _subparts=None,
+                 *, policy=None, **_params):
+        MIMEBase.__init__(self, 'multipart', _subtype, policy=policy,
+                          **_params)
+
+        # Initialize _payload as a list; Message.is_multipart() checks this.
+        self._payload = []
+
+        if _subparts:
+            for p in _subparts:
+                self.attach(p)
+        if boundary:
+            self.set_boundary(boundary)
+```
+
+`MIMEMultipart` is the root of all multi-part messages. It sets
+`Content-Type: multipart/_subtype` (defaulting to `multipart/mixed`),
+then initializes `_payload` as an empty list. `Message.is_multipart()`
+simply checks `isinstance(self._payload, list)`, so this initialization
+is the mechanism that distinguishes multipart from single-part messages
+throughout the library.
+
+The `boundary` parameter, when supplied, is installed immediately via
+`set_boundary`. When not supplied, the boundary is generated lazily by
+`Generator._handle_multipart` at serialization time. The generator
+computes a boundary that does not appear in any sub-part body, trying
+progressively longer hash prefixes until a unique one is found.
+
+Sub-parts are added via `attach(part)` which appends to `self._payload`.
+The `Generator` iterates `get_payload()` (which returns the list) and
+renders each sub-part into its own buffer, then joins the buffers with
+`--boundary` delimiters and a closing `--boundary--` line.
+
+### Building a complete email message
+
+```python
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
+
+msg = MIMEMultipart('alternative')
+msg['Subject'] = 'Hello'
+msg['From']    = 'sender@example.com'
+msg['To']      = 'recipient@example.com'
+
+plain = MIMEText('Hello, world.', 'plain')
+html  = MIMEText('<p>Hello, <b>world</b>.</p>', 'html')
+
+msg.attach(plain)
+msg.attach(html)
+
+print(msg.as_string())
+```
+
+`MIMEMultipart('alternative')` sets `Content-Type: multipart/alternative`.
+Email clients display the last part whose type they understand, so the
+convention is to attach `text/plain` first and `text/html` last. Both
+`MIMEText` instances are constructed with their body text; charset detection
+runs automatically, setting `Content-Transfer-Encoding` and the `charset`
+parameter on each part's `Content-Type` header.
+
+## gopy mirror
+
+Not yet ported. The `email.mime` convenience constructors are pure Python
+and have no C dependencies. They depend only on `email.message.Message` and
+`email.charset.Charset`, both of which are also pure Python. When ported,
+`MIMEText`, `MIMEMultipart`, `MIMEBase`, and `MIMENonMultipart` should live
+at `module/email_mime/` and share a common `Message` struct with the rest
+of the `email` port.
+
+## CPython 3.14 changes
+
+`email.mime.text` and `email.mime.multipart` received no API changes in
+CPython 3.14. The `policy` keyword argument (accepted by all `MIME*`
+constructors and forwarded to `MIMEBase.__init__`) has been present since
+Python 3.6 and was not modified. The `email.headerregistry` path activated
+by `EmailPolicy` gained internal fixes for structured address parsing, but
+those do not touch the `mime/` subpackage directly.
