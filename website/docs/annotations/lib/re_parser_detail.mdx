@@ -1,0 +1,160 @@
+---
+title: "Lib/re/_parser.py"
+description: "Tokenises a regex string and builds a SubPattern tree for the _compiler stage"
+cpython_path: Lib/re/_parser.py
+cpython_version: "3.14"
+lines: 900
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`_parser.py` is the front end of the regex pipeline.
+It reads a raw pattern string character by character and returns a `SubPattern` tree that `_compiler` later converts to opcodes.
+No C code is involved at this stage; the entire tokeniser and recursive-descent parser are pure Python.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1–50 | imports, constants | node-type constants (`LITERAL`, `BRANCH`, `SUBPATTERN`, etc.), escape tables |
+| 51–150 | `Tokenizer` class | `next`, `match`, `getwhile`, `getuntil`, `seek`, `tell` |
+| 151–220 | `SubPattern` class | list-like node; holds `pattern`, `data`, implements `getwidth` |
+| 221–280 | `State` class | per-parse mutable state: group counter, flags, `groupdict` |
+| 281–360 | `_parse_repl` | parses replacement strings for `re.sub` (`\1`, `\g<name>`) |
+| 361–500 | `_parse` | main recursive-descent parser; handles literals, escapes, classes, groups, quantifiers |
+| 501–620 | `_parse` continued | alternation `|`, lookaheads/lookbehinds, named/non-capturing groups |
+| 621–720 | `_parse_flags` | inline flag syntax `(?aiLmsux)` |
+| 721–800 | `_parse_repl` helpers | group-reference resolution |
+| 801–900 | `parse`, `parse_repl` | public entry points; construct `State`, call `_parse`, return root |
+
+## Reading
+
+### The `Tokenizer`
+
+`Tokenizer` wraps the raw source string with a position cursor.
+`getwhile` consumes characters matching a predicate; `getuntil` reads up to a delimiter.
+Both are used heavily inside `_parse` to consume digit runs and named-group identifiers.
+
+```python
+# CPython: Lib/re/_parser.py:51 Tokenizer
+class Tokenizer:
+    def __init__(self, string):
+        self.string = string
+        self.pos = 0
+        self.next = None
+        self.__next()
+
+    def __next(self):
+        if self.pos < len(self.string):
+            self.next = self.string[self.pos]
+        else:
+            self.next = None
+
+    def match(self, char):
+        if char == self.next:
+            self.__next()
+            self.pos += 1
+            return True
+        return False
+
+    def getwhile(self, n, charset):
+        result = ''
+        for _ in range(n):
+            c = self.next
+            if c not in charset:
+                break
+            result += c
+            self.__next()
+            self.pos += 1
+        return result
+```
+
+### `_parse` dispatch loop
+
+The main loop consumes one token at a time and branches on its value.
+Literal characters are collected in a run to form a single `LITERAL` or `LITERAL_IGNORE` node.
+Special characters trigger sub-parsers for groups, character classes, and quantifiers.
+
+```python
+# CPython: Lib/re/_parser.py:361 _parse
+def _parse(source, state, verbose, nested, first=False):
+    subpattern = SubPattern(state)
+    while True:
+        this = source.next
+        if this is None:
+            break
+        if this in '|)':
+            break
+        source.next  # advance
+        if this == '.':
+            subpattern.append((ANY, None))
+        elif this == '^':
+            subpattern.append((AT, AT_BEGINNING))
+        elif this == '$':
+            subpattern.append((AT, AT_END))
+        elif this == '[':
+            subpattern.append(_parse_character_class(source, state, verbose))
+        elif this == '(':
+            subpattern.append(_parse_group(source, state, verbose, nested + 1))
+        ...
+    return subpattern
+```
+
+### Quantifier handling
+
+After any atom is parsed, `_parse` checks whether the next character is `*`, `+`, `?`, or `{`.
+It wraps the last node in a `REPEAT` or `MAX_REPEAT` / `MIN_REPEAT` node and records the `min` and `max` counts.
+
+```python
+# CPython: Lib/re/_parser.py:430 quantifier
+        if source.next in '*+?{':
+            op = source.next
+            source.match(op)
+            if op == '{':
+                lo, hi = _parse_repeat(source)
+            elif op == '*':
+                lo, hi = 0, MAXREPEAT
+            elif op == '+':
+                lo, hi = 1, MAXREPEAT
+            else:  # '?'
+                lo, hi = 0, 1
+            if source.match('?'):
+                subpattern[-1] = (MIN_REPEAT, (lo, hi, subpattern[-1]))
+            else:
+                subpattern[-1] = (MAX_REPEAT, (lo, hi, subpattern[-1]))
+```
+
+### Lookaheads and lookbehinds
+
+`(?=...)`, `(?!...)`, `(?<=...)`, `(?<!...)` are handled inside `_parse_group`.
+Lookbehind width is validated here: CPython requires fixed-width lookbehinds and raises `error` otherwise.
+
+```python
+# CPython: Lib/re/_parser.py:530 lookbehind
+        elif char in '<=!':
+            # lookahead / lookbehind
+            dir = +1 if char == '=' else -1 if char == '<' else ...
+            p = _parse(source, state, verbose, nested + 1)
+            if char in '<=' :
+                # lookbehind: width must be fixed
+                lo, hi = p.getwidth()
+                if lo != hi:
+                    raise source.error(
+                        'look-behind requires fixed width pattern')
+            subpattern.append((GROUPREF_EXISTS if ... else ASSERT, (dir, p)))
+```
+
+## gopy notes
+
+- `SubPattern` is list-like with a `getwidth` method; in Go this maps to a slice of `[2]any` pairs plus a receiver method.
+- `State.groups` is an integer counter; `State.groupdict` maps names to group numbers. Both must survive across recursive `_parse` calls via a pointer receiver.
+- `Tokenizer.pos` is the only mutable field that needs exposure outside the class; gopy exposes it for error-message formatting.
+- `_parse_repl` is a separate public entry point (`parse_repl`) used only by `re.sub`; it can be ported independently of the main `_parse` path.
+- The `verbose` flag strips comments and whitespace from the pattern before tokenisation; this must be applied inside `Tokenizer.__next`, not as a pre-pass.
+
+## CPython 3.14 changes
+
+- 3.12 added `ATOMIC_GROUP` (`(?>...)`) and `POSSESSIVE_REPEAT` (`*+`, `++`, `?+`, `{m,n}+`) parsing; both are present in 3.14.
+- 3.13 tightened error messages for unmatched parentheses and invalid escape sequences; the `source.error` helper now carries a column offset.
+- No changes to the `SubPattern` or `Tokenizer` class interfaces between 3.13 and 3.14.

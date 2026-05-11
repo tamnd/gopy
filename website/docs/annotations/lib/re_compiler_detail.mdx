@@ -1,0 +1,127 @@
+---
+title: "Lib/re/_compiler.py"
+description: "Converts a parsed regex SubPattern tree into integer opcodes for the _sre C engine"
+cpython_path: Lib/re/_compiler.py
+cpython_version: "3.14"
+lines: 700
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`_compiler.py` sits between the parser and the C extension `_sre`.
+It walks the `SubPattern` tree produced by `_parser` and emits a flat list of integers that `_sre.compile` turns into a native `SRE_Pattern`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1–40 | imports, constants | `OPCODES`, `SUCCESS`, `FAILURE`, `_sre` |
+| 41–100 | `_get_iscased` | decides whether a character is case-sensitive under the active flags |
+| 101–180 | `_get_charset` | converts a character-class node to `CHARSET` or `BIGCHARSET` opcodes |
+| 181–260 | `_compile_charset` | drives `_get_charset`, emits the charset block into `_code` |
+| 261–500 | `_compile` | main recursive dispatcher; one branch per `SubPattern` node type |
+| 501–580 | `_compile_info` | emits the `INFO` header block (min/max width, prefix optimisation) |
+| 581–650 | `compile` | public entry; calls `_compile_info` + `_compile`, then `_sre.compile` |
+| 651–700 | helpers | `_simple`, `_generate_overlap_table`, `_get_literal_prefix` |
+
+## Reading
+
+### The `_code` accumulator and `_compile` dispatch
+
+All opcode emission happens by appending integers to a plain list.
+`_compile` is called recursively for nested structures; the list is passed by reference so sub-calls append in place.
+
+```python
+# CPython: Lib/re/_compiler.py:261 _compile
+def _compile(code, pattern, flags):
+    # pattern is a SubPattern; code is the mutable list being built
+    for op, av in pattern:
+        if op is LITERAL:
+            if flags & SRE_FLAG_IGNORECASE:
+                code.append(OPCODES[OP_IGNORE_LITERAL])
+            else:
+                code.append(OPCODES[OP_LITERAL])
+            code.append(av)
+        elif op is SUBPATTERN:
+            group, add_flags, del_flags, p = av
+            ...
+            _compile(code, p, flags)
+        elif op is BRANCH:
+            ...
+```
+
+### Character class compilation
+
+Character classes (`[a-z0-9]`) are compiled to either a 256-bit `CHARSET` (when all codepoints fit in 256) or a `BIGCHARSET` for Unicode ranges above U+00FF.
+
+```python
+# CPython: Lib/re/_compiler.py:101 _get_charset
+def _get_charset(charset, flags):
+    # Returns (True, set) for small charsets or (False, list) for big ones
+    charmap = bytearray(256)
+    for op, av in charset:
+        if op is LITERAL:
+            charmap[av] = 1
+        elif op is RANGE:
+            for i in range(av[0], av[1] + 1):
+                charmap[i] = 1
+    if any(charmap[256:]):
+        return False, _get_bigcharset(charset, flags)
+    return True, charmap
+```
+
+### The `INFO` header
+
+Before the main pattern opcodes, `_compile_info` emits metadata that lets the C engine skip obvious non-matches fast: minimum and maximum match width, and any fixed literal prefix.
+
+```python
+# CPython: Lib/re/_compiler.py:501 _compile_info
+def _compile_info(code, pattern, flags):
+    lo, hi = pattern.getwidth()
+    prefix, prefix_skip, overlap = _get_literal_prefix(pattern, flags)
+    code.extend([
+        OPCODES[OP_INFO],
+        0,                 # flags (filled in below)
+        lo,
+        min(hi, MAXREPEAT),
+    ])
+    if prefix:
+        code[len(code) - 4 + 1] |= SRE_INFO_PREFIX
+        code.append(len(prefix))
+        code.append(prefix_skip)
+        code.extend(prefix)
+        code.extend(overlap)
+```
+
+### Final assembly via `_sre.compile`
+
+After `_compile_info` and `_compile` have filled `_code`, the list is handed to the C extension together with group metadata.
+
+```python
+# CPython: Lib/re/_compiler.py:620 compile
+def compile(p, flags=0):
+    code = []
+    _compile_info(code, p, flags)
+    _compile(code, p, flags)
+    code.append(OPCODES[OP_SUCCESS])
+    return _sre.compile(
+        p.pattern, flags, code,
+        p.pattern.groups - 1,
+        p.pattern.groupdict,
+        p.pattern.indexgroup,
+    )
+```
+
+## gopy notes
+
+- The `_code` list is `[]int` in Go terms. Opcodes are small integers defined in `_constants.py`; gopy mirrors them as `const` iota blocks.
+- `BIGCHARSET` encoding is non-trivial: a 256-entry index table plus 256-bit blocks. Port `_get_bigcharset` verbatim before touching anything that accepts Unicode patterns.
+- `_sre.compile` is the C boundary. In gopy this call is replaced by constructing the Go NFA/DFA struct directly from the same `code` slice.
+- `_compile_info` prefix optimisation is a fast-path skip; it can be stubbed (always emit empty prefix) while bootstrapping and filled in later.
+
+## CPython 3.14 changes
+
+- No structural changes to `_compiler.py` in 3.14; the opcode set and `_code` layout are stable since 3.7.
+- 3.12 added `ATOMIC_GROUP` and `POSSESSIVE_REPEAT` opcodes; both are present in 3.14 and must be handled in the `_compile` dispatch.
+- The `_generate_overlap_table` helper (used for prefix optimisation) is unchanged.

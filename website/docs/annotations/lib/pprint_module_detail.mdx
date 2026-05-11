@@ -1,0 +1,136 @@
+---
+title: pprint.py
+description: "Lib/pprint.py: width-aware pretty-printing of Python objects"
+cpython_path: Lib/pprint.py
+cpython_version: "3.14"
+lines: 600
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`pprint` formats Python objects so that the output fits within a target line
+width. Long containers are broken across indented lines; short ones stay on a
+single line. All state lives in a `PrettyPrinter` instance, so the module-level
+`pprint()` / `pformat()` helpers are thin wrappers.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1–60 | module header, `pprint()`, `pformat()` | Public API, create `PrettyPrinter` and delegate |
+| 61–130 | `PrettyPrinter.__init__()` | Store width, indent, depth, sort_dicts, compact, underscore_numbers |
+| 131–200 | `PrettyPrinter._format()` | Central dispatch: measure, decide single vs multi-line |
+| 201–300 | `_pprint_dict()`, `_pprint_ordered_dict()` | Dict formatting with key sorting |
+| 301–380 | `_pprint_list()`, `_pprint_tuple()`, `_pprint_set()` | Sequence and set formatting |
+| 381–460 | `_pprint_str()`, `_pprint_bytes()` | String/bytes wrapping |
+| 461–530 | `_safe_repr()` | Recursion-detecting repr builder |
+| 531–600 | `_recursion()`, `_safe_tuple()`, helpers | Cycle sentinel and utilities |
+
+## Reading
+
+### `_format()` — the central dispatch loop
+
+`_format()` measures the repr of the object with `_safe_repr`. If it fits on
+the remaining width it writes the repr directly. Otherwise it looks up a
+type-specific printer in `_dispatch`, a dict keyed on `type.__repr__`.
+
+```python
+# CPython: Lib/pprint.py:163 _format
+def _format(self, object, stream, indent, allowance, context, level):
+    objid = id(object)
+    if objid in context:
+        stream.write(_recursion(object))
+        ...
+        return
+    rep = self._repr(object, context, level)
+    max_width = self._width - indent - allowance
+    if len(rep) <= max_width:
+        stream.write(rep)
+        return
+    p = self._dispatch.get(type(object).__repr__, None)
+    if p is not None:
+        context[objid] = 1
+        p(self, object, stream, indent, allowance, context, level + 1)
+        del context[objid]
+```
+
+`context` doubles as the recursion guard (same pattern as `_safe_repr`).
+
+### `_pprint_dict()` and key sorting
+
+When `sort_dicts=True` (the default before 3.8, opt-out from 3.8 onward) the
+keys are sorted. Each key-value pair is formatted recursively with increased
+indent.
+
+```python
+# CPython: Lib/pprint.py:215 _pprint_dict
+def _pprint_dict(self, object, stream, indent, allowance, context, level):
+    write = stream.write
+    write('{')
+    if self._sort_dicts:
+        items = sorted(object.items(), key=_safe_tuple)
+    else:
+        items = object.items()
+    self._format_dict_items(items, stream, indent, allowance + 1, context, level)
+    write('}')
+```
+
+### `compact` mode for sequences
+
+When `compact=True`, `_pprint_list()` tries to pack as many items as possible
+onto each output line before wrapping. This trades vertical space for density.
+
+```python
+# CPython: Lib/pprint.py:320 _format_items
+def _format_items(self, items, stream, indent, allowance, context, level):
+    ...
+    if self._compact:
+        ...
+        for item in items:
+            rep = self._repr(item, context, level)
+            if len(rep) + delimlen <= max_width:
+                ...  # append to current line
+            else:
+                ...  # start new line
+```
+
+### `_safe_repr()` and recursion detection
+
+`_safe_repr` builds a repr string while tracking object ids in `context`. If it
+encounters an id already in `context` it returns the `...` sentinel string
+instead of recursing. The return value is a tuple of
+`(repr_string, readable, recursive)`.
+
+```python
+# CPython: Lib/pprint.py:480 _safe_repr
+def _safe_repr(object, context, maxlevels, level, sort_dicts):
+    typ = type(object)
+    ...
+    objid = id(object)
+    if objid in context:
+        return _recursion(object), False, True
+    context[objid] = 1
+    ...
+    del context[objid]
+    return r, readable, recursive
+```
+
+## gopy notes
+
+- `_dispatch` is a `map[uintptr]formatFunc` in gopy, keyed on the address of
+  the type's `__repr__` method object.
+- `_format()` writes to an `io.Writer`; the CPython `StringIO` stream maps to
+  a `strings.Builder`.
+- `compact` and `underscore_numbers` are stored as plain `bool` fields on the
+  `PrettyPrinter` struct.
+- `_safe_tuple` used for dict key sorting requires a working `LT` comparison;
+  port depends on task #478 (rich comparison protocol).
+
+## CPython 3.14 changes
+
+- 3.10 added `sort_dicts=False` as a constructor parameter.
+- 3.12 added `underscore_numbers`, which inserts `_` separators into large
+  integer reprs matching `int.__format__` behavior.
+- 3.14 extended `_pprint_dataclass()` to handle `__pprint_override__` hooks
+  defined on individual fields, allowing field-level format control.

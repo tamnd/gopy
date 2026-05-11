@@ -1,0 +1,120 @@
+---
+title: Modules/gcmodule.c
+description: "Cyclic garbage collector: mark-and-sweep over tracked objects"
+cpython_path: Modules/gcmodule.c
+cpython_version: "3.14"
+lines: 1800
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+CPython's cyclic garbage collector lives entirely in `Modules/gcmodule.c`. It supplements the reference-counting allocator by detecting reference cycles that keep objects alive even when no external references exist. The collector runs on three generational lists (0, 1, 2) with configurable thresholds.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1–120 | module state, `gcmodule_state` | per-interpreter GC state, generation structs, thresholds |
+| 121–280 | `gc_list_*` helpers | doubly-linked list manipulation for generation lists |
+| 281–450 | `move_unreachable` | partitions a generation into reachable / unreachable using `gc_refs` counts |
+| 451–580 | `handle_weakrefs` | clears weak references before finalizers run |
+| 581–720 | `finalize_garbage` | calls `tp_finalize` on unreachable objects (PEP 442) |
+| 721–900 | `gc_collect_main` | core mark-and-sweep driver; merges generations, calls sub-phases |
+| 901–1050 | `collect_with_callback` | wraps `gc_collect_main`, fires registered `gc.callbacks` |
+| 1051–1200 | `gc_collect_generations` | threshold logic selecting which generation to collect |
+| 1201–1800 | Python-level module methods | `gc.collect`, `gc.disable`, `gc.get_objects`, etc. |
+
+## Reading
+
+### Generation layout and thresholds
+
+Each generation is a `struct gc_generation` holding a doubly-linked sentinel node and a `threshold` count. Object allocation increments the generation-0 counter; when it exceeds `threshold[0]` a collection is triggered. After `threshold[1]` generation-0 collections, generation 1 is also included, and so on.
+
+```c
+// CPython: Modules/gcmodule.c:87 struct gc_generation
+struct gc_generation {
+    PyGC_Head head;   /* sentinel node for the circular list */
+    int threshold;    /* collection threshold */
+    int count;        /* current count */
+};
+```
+
+### `move_unreachable` — the core mark pass
+
+`move_unreachable` implements the reachability pass. It first copies `ob_refcnt` into the `gc_refs` scratch field for every object in the generation, then calls `tp_traverse` to decrement `gc_refs` for each referent. Objects whose `gc_refs` reaches zero have no external references and move to the `unreachable` list.
+
+```c
+// CPython: Modules/gcmodule.c:392 move_unreachable
+static void
+move_unreachable(PyGC_Head *young, PyGC_Head *unreachable)
+{
+    PyGC_Head *gc = GC_NEXT(young);
+    while (gc != young) {
+        PyGC_Head *next;
+        if (gc_get_refs(gc) != 0) {
+            /* reachable: traverse and keep */
+            traverseproc traverse = Py_TYPE(FROM_GC(gc))->tp_traverse;
+            (void) traverse(FROM_GC(gc),
+                            (visitproc)visit_reachable, (void *)young);
+            next = GC_NEXT(gc);
+        } else {
+            next = GC_NEXT(gc);
+            gc_list_move(gc, unreachable);
+            gc_set_refs(gc, GC_UNREACHABLE);
+        }
+        gc = next;
+    }
+}
+```
+
+### `finalize_garbage` — PEP 442 finalizers
+
+Before reclaiming unreachable objects CPython calls `tp_finalize` on each one. A finalizer may resurrect an object by storing a new reference; `handle_legacy_finalizers` moves any such objects back to the reachable set.
+
+```c
+// CPython: Modules/gcmodule.c:614 finalize_garbage
+static void
+finalize_garbage(PyThreadState *tstate, PyGC_Head *collectable)
+{
+    destructor finalize;
+    PyGC_Head *gc = GC_NEXT(collectable);
+    while (gc != collectable) {
+        PyObject *op = FROM_GC(gc);
+        gc = GC_NEXT(gc);
+        if (!_PyGCHead_FINALIZED(gc) &&
+            (finalize = Py_TYPE(op)->tp_finalize) != NULL) {
+            _PyGCHead_SET_FINALIZED(gc);
+            finalize(op);
+        }
+    }
+}
+```
+
+### `collect_with_callback` — user-visible callbacks
+
+`gc.callbacks` is a list of callables invoked before and after each collection. `collect_with_callback` fires `"start"` before the sweep and `"stop"` after, passing a stats dict.
+
+```c
+// CPython: Modules/gcmodule.c:1012 collect_with_callback
+static Py_ssize_t
+collect_with_callback(PyThreadState *tstate, struct _gc_runtime_state *gcstate,
+                      int generation)
+{
+    invoke_gc_callback(tstate, gcstate, "start", generation, 0, 0);
+    Py_ssize_t result = gc_collect_main(tstate, generation, &stats);
+    invoke_gc_callback(tstate, gcstate, "stop", generation,
+                       stats.collected, stats.uncollectable);
+    return result;
+}
+```
+
+## gopy notes
+
+gopy does not implement a cyclic GC. Go's own GC handles memory, so CPython-style generation lists are unnecessary. However, any Python object graph that creates reference cycles through `__del__` / `tp_finalize` must be handled at the Go level. The `finalize_garbage` and `handle_weakrefs` phases are the two pieces most likely to require a Go equivalent when finalizer semantics are needed.
+
+`gc.collect`, `gc.disable`, and `gc.get_objects` are part of the `gc` stdlib module; gopy stubs these in `module/gc/`.
+
+## CPython 3.14 changes
+
+CPython 3.14 moved the GC state from `_PyRuntimeState` into per-interpreter `PyInterpreterState` (`_PyInterpreterState_GET()->gc`). This makes each sub-interpreter collect independently. The `gcmodule_state` accessor macro replaces the older `_PyRuntime.gc` pointer. `gc_collect_main` now takes a `PyThreadState` argument rather than accessing global state directly.

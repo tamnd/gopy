@@ -1,0 +1,124 @@
+---
+title: reprlib.py
+description: "Lib/reprlib.py: truncating repr for debuggers and logging"
+cpython_path: Lib/reprlib.py
+cpython_version: "3.14"
+lines: 250
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`reprlib` provides a `Repr` class whose `repr()` method produces safe,
+length-limited string representations. It is used internally by the `logging`
+module, the interactive debugger, and any code that needs to display arbitrary
+objects without risking unbounded output.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1–35 | `recursive_repr()` | Decorator that returns a placeholder on reentrant calls |
+| 36–80 | `Repr.__init__()` | Configurable limit fields (`maxlist`, `maxdict`, etc.) |
+| 81–110 | `Repr.repr()`, `Repr.repr1()` | Entry points; dispatch by type name |
+| 111–180 | `repr_list`, `repr_tuple`, `repr_set`, `repr_frozenset` | Sequence truncation handlers |
+| 181–220 | `repr_dict` | Dict truncation handler |
+| 221–240 | `repr_str`, `repr_bytes`, `repr_int` | Scalar truncation handlers |
+| 241–250 | `aRepr`, module-level `repr` | Singleton instance and convenience alias |
+
+## Reading
+
+### `recursive_repr()` decorator
+
+`recursive_repr` stores a per-instance set of in-progress object ids in a
+thread-local. If `repr()` is called again with the same id while it is already
+running, the decorator immediately returns the fill value (default `'...'`)
+instead of recursing.
+
+```python
+# CPython: Lib/reprlib.py:12 recursive_repr
+def recursive_repr(fillvalue='...'):
+    def decorating_function(user_function):
+        wrapper = _recursive_repr_helper(user_function, fillvalue)
+        return wrapper
+    return decorating_function
+```
+
+The same decorator is used by `dict.__repr__` in the C layer to handle
+self-referential dicts; the pure-Python version in `reprlib` mirrors that
+contract exactly.
+
+### `repr1()` dispatch by type name
+
+`repr1()` maps a type name to a method named `repr_TYPENAME`. This avoids a
+lookup table and lets subclasses add handlers by simply defining a new method.
+
+```python
+# CPython: Lib/reprlib.py:95 repr1
+def repr1(self, x, level):
+    typename = type(x).__name__
+    if ' ' in typename:
+        parts = typename.split()
+        typename = '_'.join(parts)
+    if hasattr(self, 'repr_' + typename):
+        return getattr(self, 'repr_' + typename)(x, level)
+    else:
+        return self.repr_instance(x, level)
+```
+
+`level` counts down from `maxlevel` to zero. When it reaches zero,
+`repr_instance` is called unconditionally to stop recursion.
+
+### Sequence truncation in `repr_list`
+
+All sequence handlers share the same pattern: iterate up to `maxXxx` items,
+format each with `repr1(item, level - 1)`, and append `'...'` if the container
+had more items than the limit.
+
+```python
+# CPython: Lib/reprlib.py:120 repr_list
+def repr_list(self, x, level):
+    return self._repr_iterable(x, level, '[', ']', self.maxlist)
+
+def _repr_iterable(self, x, level, left, right, maxitems, trail=''):
+    n = len(x)
+    newlevel = level - 1
+    repr1 = self.repr1
+    pieces = [repr1(elem, newlevel) for elem in islice(x, maxitems)]
+    if n > maxitems:
+        pieces.append('...')
+    s = ', '.join(pieces)
+    return '%s%s%s' % (left, s, right + trail)
+```
+
+### `aRepr` singleton and module `repr()`
+
+At module bottom, a single `Repr()` instance named `aRepr` is created with
+default limits. The module-level `repr` name is bound to `aRepr.repr`, giving
+callers a drop-in replacement for the built-in `repr` that never produces
+unbounded output.
+
+```python
+# CPython: Lib/reprlib.py:248 aRepr
+aRepr = Repr()
+repr = aRepr.repr
+```
+
+## gopy notes
+
+- `recursive_repr` relies on thread-local storage. In gopy this maps to a
+  `sync.Map` keyed on `goroutine id` plus object pointer, or a goroutine-local
+  pattern via context values.
+- `repr1()` uses `getattr` for dynamic dispatch. The gopy equivalent is a
+  `map[string]func` populated at `Repr` construction time.
+- Limit fields (`maxlist`, `maxdict`, `maxstring`, `maxother`, `maxlevel`,
+  `maxlong`) become plain `int` fields on a `ReprConfig` struct.
+- `aRepr` is a package-level `var` initialized in an `init()` function.
+
+## CPython 3.14 changes
+
+- 3.13 renamed internal helper `_recursive_repr_helper` and made the
+  thread-local storage an explicit `threading.local()` instance rather than a
+  closure variable, improving subclass behaviour.
+- 3.14 added `maxfrozenset` as a separate limit (previously shared `maxset`),
+  and `repr_frozenset` now uses it independently.

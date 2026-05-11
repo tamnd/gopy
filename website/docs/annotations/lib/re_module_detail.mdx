@@ -1,0 +1,106 @@
+---
+title: "Lib/re/__init__.py"
+description: "Public API surface for Python's re module, including the pattern cache and flag constants"
+cpython_path: Lib/re/__init__.py
+cpython_version: "3.14"
+lines: 400
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+The top-level `re` package exposes the public API that most Python code touches.
+It holds the module-level pattern cache and delegates real work to `_compiler` and the C extension `_sre`.
+
+Python 3.11 converted `re` from a single file into a package (`Lib/re/__init__.py`, `_compiler.py`, `_parser.py`, `_constants.py`).
+The public interface did not change.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1–60 | module header, imports | pulls in `_compiler`, `_parser`, `_constants`, `_sre` |
+| 61–120 | flag constants | `IGNORECASE`, `MULTILINE`, `DOTALL`, `VERBOSE`, etc. |
+| 121–160 | `_cache` | `dict` keyed by `(type, pattern, flags, groups)` deduplicating `Pattern` objects |
+| 161–220 | `compile` | public entry point; checks cache then calls `_compiler.compile` |
+| 221–280 | `match`, `search`, `fullmatch` | thin wrappers around `compile(pattern).match/search/fullmatch` |
+| 281–340 | `findall`, `finditer` | iteration helpers |
+| 341–380 | `sub`, `subn`, `split` | mutation helpers |
+| 381–400 | `error`, `escape`, `purge` | exception re-export, escaping, cache flush |
+
+## Reading
+
+### The pattern cache
+
+The cache avoids recompiling the same pattern on every call site.
+The key encodes the pattern type (str vs bytes), the raw pattern, the flags, and the number of capture groups expected by the caller.
+
+```python
+# CPython: Lib/re/__init__.py:121 _cache
+_cache = {}
+_MAXCACHE = 512
+
+def _compile(pattern, flags):
+    try:
+        return _cache[type(pattern), pattern, flags]
+    except KeyError:
+        pass
+    p = _compiler.compile(pattern, flags)
+    if len(_cache) >= _MAXCACHE:
+        _cache.clear()
+    _cache[type(pattern), pattern, flags] = p
+    return p
+```
+
+### `compile` and flag handling
+
+`re.compile` is the canonical way to obtain a `Pattern` object.
+Flags can be passed as integers or combined with `|`; the compiler normalises them before the cache lookup.
+
+```python
+# CPython: Lib/re/__init__.py:161 compile
+def compile(pattern, flags=0):
+    "Compile a regular expression pattern, returning a Pattern object."
+    return _compile(pattern, flags)
+```
+
+### Convenience wrappers
+
+Every top-level function (`match`, `search`, `findall`, `sub`, `split`) is a one-liner that compiles the pattern then delegates to the resulting `Pattern` method.
+This keeps the fast path for already-cached patterns free of extra allocation.
+
+```python
+# CPython: Lib/re/__init__.py:221 match
+def match(pattern, string, flags=0):
+    "Try to apply the pattern at the start of the string."
+    return _compile(pattern, flags).match(string)
+
+def search(pattern, string, flags=0):
+    "Scan through string looking for a match."
+    return _compile(pattern, flags).search(string)
+```
+
+### Flag constants
+
+The integer flag values mirror `_sre` constants so they can be passed straight through to the C engine.
+
+```python
+# CPython: Lib/re/__init__.py:61 flag constants
+IGNORECASE = I = RegexFlag.IGNORECASE
+MULTILINE  = M = RegexFlag.MULTILINE
+DOTALL     = S = RegexFlag.DOTALL
+VERBOSE    = X = RegexFlag.VERBOSE
+```
+
+## gopy notes
+
+- `_cache` is a plain `dict` in CPython; gopy should mirror this with a mutex-guarded map keyed on a struct equivalent to `(type, pattern, flags)`.
+- `_MAXCACHE = 512` is the eviction threshold; CPython uses `_cache.clear()` (full flush), not LRU.
+- The `RegexFlag` enum wraps the raw integers for 3.6+; gopy only needs the integer values.
+- `_sre.compile` is the C boundary; gopy replaces it with the Go RE2/NFA backend.
+
+## CPython 3.14 changes
+
+- No API-breaking changes to `__init__.py` in 3.14; the package split introduced in 3.11 remains stable.
+- `RegexFlag` gained no new members between 3.13 and 3.14.
+- Cache eviction strategy (full clear at 512 entries) is unchanged.

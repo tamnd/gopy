@@ -1,0 +1,93 @@
+---
+title: "pycore_gc.h — GC internals"
+description: "Annotated reading of CPython's internal GC header: object tracking, generation lists, and mark-phase encoding"
+cpython_path: Include/internal/pycore_gc.h
+cpython_version: "3.14"
+lines: 200
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`Include/internal/pycore_gc.h` is the private header that defines the bookkeeping layer the cyclic garbage collector adds to every tracked heap object. Public GC API lives in `Include/cpython/objimpl.h`; this file is the part you are not supposed to touch from extension code.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1–30 | `PyGC_Head` | Two-pointer struct prepended to every tracked object |
+| 31–55 | `_PyGCHead_PREV` / `_PyGCHead_NEXT` | Accessor macros that strip the tag bit from the low pointer |
+| 56–80 | `_PyGC_PREV_MASK_FINALIZED` / `_PyGC_PREV_MASK_COLLECTING` | Tag-bit constants packed into the low bits of `_gc_prev` |
+| 81–110 | `gc_refs` field semantics | Visit counter during mark; flag values `GC_REACHABLE`, `GC_TENTATIVELY_UNREACHABLE` |
+| 111–145 | `_PyObject_GC_TRACK` / `_PyObject_GC_UNTRACK` | Insert/remove an object from the generation 0 list |
+| 146–200 | Generation structs and `_PyGC_generation` | Per-generation doubly-linked list head plus collection statistics |
+
+## Reading
+
+### PyGC_Head: the hidden prefix
+
+Every object allocated with `PyObject_GC_New` gets a `PyGC_Head` placed immediately before the visible `PyObject` header. The two fields form a doubly-linked list that the collector walks during each collection.
+
+```c
+// CPython: Include/internal/pycore_gc.h:23 PyGC_Head
+typedef struct {
+    uintptr_t _gc_next;
+    uintptr_t _gc_prev;
+} PyGC_Head;
+```
+
+`uintptr_t` is used rather than a pointer type so the implementation can pack status bits into the low bits of each word without tripping strict-aliasing rules.
+
+### Tag-bit encoding in `_gc_prev`
+
+The low two bits of `_gc_prev` carry flags rather than address bits. Bit 0 marks the object as having a `__del__` finalizer that has already been called (`PREV_MASK_FINALIZED`). Bit 1 marks the object as currently inside a collection pass (`PREV_MASK_COLLECTING`). Real pointer values are recovered by masking those bits off.
+
+```c
+// CPython: Include/internal/pycore_gc.h:34 _PyGCHead_PREV
+#define _PyGCHead_PREV(g) ((PyGC_Head*)(g)->_gc_prev & _PyGC_PREV_MASK)
+
+// CPython: Include/internal/pycore_gc.h:36 _PyGCHead_SET_PREV
+#define _PyGCHead_SET_PREV(g, p) \
+    do { (g)->_gc_prev = ((g)->_gc_prev & ~_PyGC_PREV_MASK) \
+                         | ((uintptr_t)(p)); } while (0)
+```
+
+The `_PyGC_PREV_MASK` constant is `~0x3UL`, so the two low bits survive the `SET` macro unchanged while the pointer is written cleanly.
+
+### gc_refs and the mark phase
+
+During the mark phase `gc_refs` is loaded with the object's true reference count. The collector then decrements it once for each reference found within the candidate set. An object whose `gc_refs` reaches zero after that sweep is only reachable through other candidates, making it tentatively unreachable.
+
+```c
+// CPython: Include/internal/pycore_gc.h:92 GC_REACHABLE
+#define GC_REACHABLE          (-1)
+#define GC_TENTATIVELY_UNREACHABLE (-2)
+```
+
+Objects confirmed as live get `gc_refs` reset to `GC_REACHABLE`. Objects not rescued by the second pass keep `GC_TENTATIVELY_UNREACHABLE` and are finalized.
+
+### Tracking and untracking
+
+`_PyObject_GC_TRACK` inserts a freshly constructed object into the generation 0 list. The macro resolves to an inline function in debug builds so it can assert that the object is not already tracked.
+
+```c
+// CPython: Include/internal/pycore_gc.h:128 _PyObject_GC_TRACK
+static inline void _PyObject_GC_TRACK(PyObject *op) {
+    PyGC_Head *gc = _Py_AS_GC(op);
+    // assert not already tracked ...
+    PyGC_Head *last = (PyGC_Head*)(_PyRuntime.gc.generation0->_gc_prev
+                                   & _PyGC_PREV_MASK);
+    _PyGCHead_SET_NEXT(last, gc);
+    _PyGCHead_SET_PREV(gc, last);
+    _PyGCHead_SET_NEXT(gc, _PyRuntime.gc.generation0);
+    _PyGCHead_SET_PREV(_PyRuntime.gc.generation0, gc);
+}
+```
+
+## gopy notes
+
+gopy does not port the cyclic GC. Go's own garbage collector handles all heap memory, so `PyGC_Head` has no direct equivalent. The `_PyObject_GC_TRACK` / `_PyObject_GC_UNTRACK` call sites in CPython are omitted or replaced with no-ops when porting allocation paths. If cycle detection for Python-level `__del__` ordering becomes necessary in a later milestone, a pure-Go mark-and-sweep over the `objects.Object` graph is the intended approach rather than a port of this header.
+
+## CPython 3.14 changes
+
+CPython 3.14 consolidates per-interpreter GC state that was previously global. `_PyRuntime.gc` fields moved into `PyInterpreterState.gc` so that each sub-interpreter runs an independent collection cycle. The `_PyGC_generation` struct gained a `_gc_count` field used by the new incremental collector prototype. The tag-bit layout of `_gc_prev` is unchanged from 3.12.

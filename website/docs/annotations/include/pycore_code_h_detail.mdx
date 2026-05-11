@@ -1,0 +1,85 @@
+---
+title: "pycore_code.h — internal code object extensions"
+description: "Annotated reading of CPython's internal code header: line tables, monitoring hooks, and opcode word manipulation"
+cpython_path: Include/internal/pycore_code.h
+cpython_version: "3.14"
+lines: 250
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`Include/internal/pycore_code.h` extends the public `Include/cpython/code.h` with fields and helpers that interpreter internals need but extension authors should never touch directly. It covers three distinct concerns: the compact line/column table, the PEP 669 per-instruction monitoring data, and the low-level opcode word macros.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1–40 | `_PyCoLocationInfo` | Maps a bytecode offset range to source line and column |
+| 41–70 | `_PyLineTable_NextAddressRange` | Advances an iterator over the compact line table |
+| 71–100 | `_PyCode_InitAddressRange` | Initialises a `PyCodeAddressRange` from a code object |
+| 101–140 | `_PyCoMonitoringData` | Per-instruction monitoring state for PEP 669 |
+| 141–170 | `_Py_MAKE_OPARG` / `_Py_OPCODE` | Pack/unpack opcode and argument from a 16-bit word |
+| 171–210 | `_PyCode_CODE` / `_PyCode_NBYTES` | Pointer and byte-count accessors for the instruction array |
+| 211–250 | `co_qualname` and `co_linetable` notes | 3.12+ additions referenced throughout this header |
+
+## Reading
+
+### Compact line table iteration
+
+Since 3.12, CPython stores source location data in a variable-length table rather than the older `co_lnotab` array. Each entry covers one or more consecutive bytecode words and encodes a line delta plus optional column information in as few bytes as possible.
+
+```c
+// CPython: Include/internal/pycore_code.h:48 _PyLineTable_NextAddressRange
+int _PyLineTable_NextAddressRange(PyCodeAddressRange *range);
+```
+
+The iterator mutates `range->opaque` in place. A return value of 1 means a valid next entry was loaded; 0 means the table is exhausted. Callers loop until 0, reading `range->ar_start`, `range->ar_end`, and `range->ar_line` after each successful step.
+
+### Initialising an address range
+
+Before iterating, you must call `_PyCode_InitAddressRange` to anchor the iterator to a specific code object and bytecode offset.
+
+```c
+// CPython: Include/internal/pycore_code.h:90 _PyCode_InitAddressRange
+void _PyCode_InitAddressRange(PyCodeObject *co,
+                               PyCodeAddressRange *bounds);
+```
+
+This is the correct entry point for tools that want to map an instruction pointer back to a source line, such as traceback formatters and debuggers. The public `PyCode_Addr2Line` wraps this internally.
+
+### PEP 669 monitoring data
+
+PEP 669 (3.12) introduced a per-instruction hook mechanism that replaces the older `sys.settrace` bytecode-level interception. Each code object carries a `_PyCoMonitoringData` block that records which tools have requested events for which instructions.
+
+```c
+// CPython: Include/internal/pycore_code.h:112 _PyCoMonitoringData
+typedef struct {
+    uint8_t  *tools;           /* per-instruction tool bitmask */
+    _PyCoLineInstrumentationData *lines;
+    _PyCoLocalMonitors  local_monitors;
+    _PyCoMonitoringEvents active_monitors;
+} _PyCoMonitoringData;
+```
+
+When no monitoring is active the `tools` pointer is NULL and the fast path in `ceval.c` skips all event dispatch. Setting a breakpoint allocates the array lazily.
+
+### Opcode word macros
+
+The instruction array stores 16-bit words. The high byte is the opcode; the low byte is the inline argument. Extended arguments are handled by the `EXTENDED_ARG` opcode that shifts its byte into the accumulator before the real opcode consumes it.
+
+```c
+// CPython: Include/internal/pycore_code.h:155 _Py_OPCODE
+#define _Py_OPCODE(word)   ((word).op.code)
+#define _Py_OPARG(word)    ((word).op.arg)
+```
+
+Both macros operate on the `_Py_CODEUNIT` union defined in `Include/cpython/code.h`. They are the only sanctioned way to read instruction fields; direct byte indexing is deliberately avoided to allow the word layout to change.
+
+## gopy notes
+
+gopy uses its own `compile` package instruction representation (`compile/flowgraph.go`). The `_Py_OPCODE` / `_Py_OPARG` macros have no direct equivalents because gopy stores opcodes in a `[]Instr` slice rather than a packed word array. Line table iteration is handled by `compile/codegen_stmt.go` which emits position annotations at statement boundaries. The `_PyCoMonitoringData` block is not ported; PEP 669 monitoring is deferred past the current v0.12.1 milestone.
+
+## CPython 3.14 changes
+
+3.14 adds `_PyCoLocationInfo` column data for the new `co_positions()` iterator introduced in 3.11 but only partially optimised until now. The monitoring data struct gained `_PyCoMonitoringEvents` to distinguish local from global event subscriptions, allowing the interpreter to skip dispatch for instructions that no active tool has subscribed to. The `co_qualname` field (added in 3.12) is now used by the `MAKE_FUNCTION` opcode directly rather than being patched in after the fact.
