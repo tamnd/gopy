@@ -1,42 +1,41 @@
 ---
-title: "xml/etree/ElementTree.py"
-description: "XML parsing and serialization: Element tree, XPath subset, iterparse, C14N"
+title: Lib/xml/etree/ElementTree.py
+description: Annotated reading notes for CPython's ElementTree XML library
 cpython_path: Lib/xml/etree/ElementTree.py
 cpython_version: "3.14"
-lines: 1700
+lines: 1800
 status: annotated
 ---
 
 import {Cpy, CpyLink} from '@site/src/components/Cpy';
 
-`Lib/xml/etree/ElementTree.py` is the pure-Python reference for the ElementTree XML API. In a standard CPython install the C accelerator `_elementtree` replaces most of this module at import time, but the Python source is the canonical reference for behavior and the fallback when the C extension is unavailable.
+Source: <CpyLink path="Lib/xml/etree/ElementTree.py" />
 
 ## Map
 
-| Lines | Symbol | Role |
-|-------|--------|------|
-| 1–80 | module preamble | imports, `__all__`, version string |
-| 82–380 | `Element` | tree node: `tag`, `attrib`, `text`, `tail`, `_children` list |
-| 381–460 | `ElementTree` | wraps a root `Element`; owns `parse`, `write`, `find*` |
-| 461–560 | `QName` | qualified name helper for `{uri}local` notation |
-| 561–640 | `TreeBuilder` | SAX-style sink: `start`/`end`/`data`/`comment`/`pi` events |
-| 641–720 | `XMLParser` | thin wrapper around `expat`; feeds bytes to `TreeBuilder` |
-| 721–800 | `iterparse` | lazy `(event, elem)` iterator; streams large documents |
-| 801–860 | `parse` / `fromstring` / `fromstringlist` | convenience parse entry points |
-| 861–960 | `tostring` / `tostringlist` | serialize an `Element` to bytes or str |
-| 961–1020 | `indent` | post-processing pretty-printer (added 3.9) |
-| 1021–1200 | `_serialize_xml` / `_serialize_html` | recursive serialization backends |
-| 1201–1400 | `_namespaces` / `register_namespace` | namespace URI-to-prefix registry |
-| 1401–1700 | `C14NWriterTarget` / `canonicalize` | C14N 2.0 serialization |
+| Lines | Symbol | Purpose |
+|-------|--------|---------|
+| 1–120 | module header, imports | Public API list, conditional C acceleration import |
+| 121–350 | `Element` | Core tree node: tag, attrib, text, tail, child list |
+| 351–430 | `ElementTree` | Wrapper holding the root; owns `parse()` and `write()` |
+| 431–530 | `XMLParser` | Expat-backed push parser; feeds `TreeBuilder` |
+| 531–620 | `TreeBuilder` | SAX-style event sink that assembles `Element` nodes |
+| 621–720 | `iterparse` | Incremental pull-parse yielding (event, element) pairs |
+| 721–820 | `tostring` / `tostringlist` | Serialization to bytes or list of byte chunks |
+| 821–1000 | `_serialize_xml` / `_serialize_html` | Recursive serializers, namespace handling |
+| 1001–1200 | XPath subset | `findall`, `find`, `findtext`, `iterfind`, path tokenizer |
+| 1201–1400 | `_Element_Py` | Pure-Python fallback matching C layout |
+| 1401–1600 | `_elementtree` bridge | Imports C extension; aliases replace pure-Python symbols |
+| 1601–1800 | helpers, `VERSION`, `__all__` | Version string, public re-exports |
 
 ## Reading
 
-### Element: the core data structure
+### Element: the node model
 
-`Element` stores children in `_children`, a plain list. Iteration, slicing, `append`, `insert`, `extend`, and `remove` all delegate directly to `_children`. `text` holds character data before the first child; `tail` holds character data after the element's closing tag.
+Every XML node is an `Element`. The class stores four scalar attributes (`tag`, `attrib`, `text`, `tail`) and a plain list called `_children` in the pure-Python path (named `ob_items` in the C struct). Random-access child operations delegate to that list directly.
 
 ```python
-# CPython: Lib/xml/etree/ElementTree.py:82 Element.__init__
+# CPython: Lib/xml/etree/ElementTree.py:121 Element
 class Element:
     tag = None
     attrib = None
@@ -44,94 +43,78 @@ class Element:
     tail = None
 
     def __init__(self, tag, attrib={}, **extra):
-        if not callable(tag):
-            tag = _coerce_tag(tag)
+        if attrib:
+            attrib = {**attrib, **extra}
+        else:
+            attrib = extra
         self.tag = tag
-        self.attrib = {**attrib, **extra}
+        self.attrib = attrib
         self._children = []
 ```
 
-`Element.iter(tag)` performs a depth-first walk. `find`, `findall`, and `findtext` accept a limited XPath subset implemented in `ElementPath` (a sibling module in the same package).
+The C acceleration mirrors this layout exactly. `_elementtree.Element` is a C struct whose `ob_items` field is a `PyListObject*`. When the C module is available, the name `Element` is rebound to the C type at the bottom of the file, so callers see no difference.
 
-### XMLParser and incremental feeding
+### ElementTree.parse() and XMLParser
 
-`XMLParser` wraps `expat` and forwards SAX-style events to a `TreeBuilder`. `feed` is incremental; `close` finalizes parsing and returns the root element.
+`ElementTree.parse()` opens a file, creates an `XMLParser` (which wraps CPython's `xml.parsers.expat`), and feeds the file to it in 64 KB chunks. The `XMLParser` drives a `TreeBuilder`, which handles `start`, `end`, `data`, and `comment` events to assemble the tree.
 
 ```python
-# CPython: Lib/xml/etree/ElementTree.py:641 XMLParser.feed
+# CPython: Lib/xml/etree/ElementTree.py:431 XMLParser.__init__
 class XMLParser:
     def __init__(self, *, target=None, encoding=None):
-        self.parser = expat.ParserCreate(encoding, "}")
+        try:
+            from xml.parsers import expat
+        except ImportError:
+            raise ImportError(
+                "No module named xml.parsers.expat"
+            ) from None
+        parser = expat.ParserCreate(encoding, "}")
         if target is None:
             target = TreeBuilder()
+        self.parser = parser
         self.target = target
-        ...
-        self.parser.StartElementHandler = self._start
-        self.parser.EndElementHandler = self._end
-        self.parser.CharacterDataHandler = self._data
-
-    def feed(self, data):
-        """Feed encoded data to parser."""
+        self._error = expat.error
+        self._names = {}
+        parser.DefaultHandlerExpand = self._default
+        parser.StartElementHandler = self._start
+        parser.EndElementHandler = self._end
+        parser.CharacterDataHandler = self._data
+        if hasattr(target, "comment"):
+            parser.CommentHandler = self._comment
+        if hasattr(target, "pi"):
+            parser.ProcessingInstructionHandler = self._pi
         try:
-            self.parser.Parse(data, False)
-        except self._error as v:
-            self._raiseerror(v)
-
-    def close(self):
-        """Finish feeding data to parser and return the root element."""
-        try:
-            self.parser.Parse(b"", True)
-        except self._error as v:
-            self._raiseerror(v)
-        try:
-            return self.target.close()
-        finally:
-            del self.parser, self.target
+            self.entity = {}
+            parser.UseForeignDTD(True)
+            parser.SetParamEntityParsing(
+                expat.XML_PARAM_ENTITY_PARSING_UNLESS_STANDALONE)
+        except expat.error:
+            pass
 ```
 
-### iterparse: streaming large documents
+`iterparse()` wraps the same machinery but yields control back to the caller after every `end` event, enabling streaming over large documents without holding the full tree in memory.
 
-`iterparse` is the standard idiom for processing large XML files without loading the full tree into memory. It wraps `XMLParser` with an event queue and yields `(event, elem)` pairs on demand.
+### XPath subset and tostring()
+
+The XPath engine covers a subset of the 1.0 syntax: tag steps, `*`, `.`, `..`, predicates of the form `[@attr]` and `[tag]`, and the `//` descendant axis. It is implemented as a recursive-descent tokenizer feeding a list of selector callables that are chained via `|`.
 
 ```python
-# CPython: Lib/xml/etree/ElementTree.py:721 iterparse (condensed)
-for event, elem in iterparse("catalog.xml", events=("end",)):
-    if elem.tag == "price":
-        total += float(elem.text)
-        elem.clear()   # drop children and text to keep memory flat
+# CPython: Lib/xml/etree/ElementTree.py:1001 findall
+def findall(self, path, namespaces=None):
+    return list(self.iterfind(path, namespaces))
 ```
 
-Calling `elem.clear()` inside the loop is the canonical idiom: it releases `_children`, `text`, `tail`, and `attrib` for elements that have already been processed.
-
-### tostring and indent
-
-`tostring` delegates to `ElementTree.write`, which calls `_serialize_xml` (or `_serialize_html` when `method="html"`). A `_namespaces` pre-pass collects all namespace URIs so `xmlns:` declarations appear on the root element rather than scattered through the tree.
-
-```python
-# CPython: Lib/xml/etree/ElementTree.py:861 tostring
-def tostring(element, encoding="us-ascii", method="xml",
-             *, xml_declaration=None, default_namespace=None,
-             short_empty_elements=True):
-    stream = io.BytesIO()
-    ElementTree(element).write(
-        stream, encoding, xml_declaration=xml_declaration,
-        default_namespace=default_namespace, method=method,
-        short_empty_elements=short_empty_elements)
-    return stream.getvalue()
-```
-
-`indent` (added in 3.9) walks the tree and inserts or updates `text` and `tail` on each element to achieve indented output. It does not change the logical content; it only adds whitespace nodes.
+`tostring()` is a thin wrapper around `tostringlist()`, which drives `_serialize_xml` or `_serialize_html` recursively. Each call pushes byte chunks into a list; the list is joined at the end. Namespace declarations are tracked in a `_namespaces` dict so `xmlns:` attributes are emitted only once per serialization scope.
 
 ## gopy notes
 
-- The planned location is `module/xml_etree/` under gopy's flat module layout.
-- Suggested port order: `Element` struct with slice-backed `_children`, then `TreeBuilder` using Go's `encoding/xml` as the expat replacement, then `XMLParser` wrapping `TreeBuilder`, then `parse`/`fromstring`/`tostring`, then `iterparse` using a goroutine-plus-channel pattern, then `indent` and `canonicalize` last.
-- `_elementtree` (the C accelerator) is out of scope for gopy; the pure-Python path is the port target.
-- `ElementPath` (the XPath subset) is a separate file (`Lib/xml/etree/ElementPath.py`) and must be ported alongside `ElementTree` for `find`/`findall` to work.
+Status: not yet ported.
 
-## CPython 3.14 changes
+Planned package path: `module/xml_etree/` (public name `xml.etree.ElementTree`).
 
-- `iterparse` now has a `__del__` finalizer that closes the underlying file object when iteration stops early, fixing a resource leak present since the class was introduced.
-- `tostring` and `ElementTree.write` gained a `short_empty_elements` keyword argument (default `True`) controlling whether childless elements serialize as self-closing tags.
-- `indent` gained a `level` parameter to start indentation at a depth other than zero, useful when inserting a subtree into an already-indented document.
-- `C14NWriterTarget` now correctly handles `with_comments` for comment nodes that appear before the document element; this was previously silently ignored.
+Key porting decisions:
+
+- The C acceleration (`_elementtree`) provides a fast `Element` type. The Go port will start with the pure-Python path (`_Element_Py`) as the reference, then consider a native Go struct as an optional fast path.
+- `iterparse` relies on coroutine-style interleaving of Expat callbacks with caller iteration. The Go port will model this with a goroutine feeding a channel, matching the generator semantics.
+- The XPath subset tokenizer can be ported as a straight recursive-descent parser without a third-party library.
+- Namespace handling in serialization is stateful across recursive calls. The Go port will pass a `nsmap` value down the call stack rather than using a closure variable.

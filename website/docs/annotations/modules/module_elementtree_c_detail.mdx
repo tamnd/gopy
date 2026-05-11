@@ -1,0 +1,122 @@
+---
+title: Modules/_elementtree.c
+description: "CPython C accelerator for xml.etree.ElementTree: element layout, SAX callbacks, and expat integration"
+cpython_path: Modules/_elementtree.c
+cpython_version: "3.14"
+lines: 3100
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/_elementtree.c" />
+
+`_elementtree` is the C accelerator backing `xml.etree.ElementTree`. It replaces the pure-Python `ElementTree.py` implementation for all performance-critical paths: element construction, attribute access, child management, and SAX-driven parsing via expat.
+
+## Map
+
+| Lines | Symbol | Purpose |
+|-------|--------|---------|
+| 1–120 | includes, `_expat.h` | Pull in expat API and define `XML_Char` aliases |
+| 121–280 | `ElementObjectExtra` | Overflow struct for children beyond 4 inline slots |
+| 281–520 | `ElementObject` | Core element: tag, attrib, text, tail, extra |
+| 521–700 | `element_new` | Allocate and zero-initialise an element |
+| 701–860 | `element_add_subelement` | Append child with capacity-doubling realloc |
+| 861–1050 | `element_getattr` / `element_setattr` | Attribute and text/tail property dispatch |
+| 1051–1300 | `element_iter` | Depth-first traversal using an explicit stack |
+| 1301–1600 | `element_find` / `element_findall` | Path-matching helpers |
+| 1601–1900 | `XMLParser_handler` group | SAX start/end/data/comment callbacks |
+| 1901–2100 | `XMLParser_new` / `XMLParser_dealloc` | expat parser lifecycle |
+| 2101–2400 | `XMLParser_feed` / `XMLParser_close` | Feed bytes into expat, finalise |
+| 2401–2700 | `expat_start_handler` / `expat_end_handler` | Map expat events to Python element ops |
+| 2701–3100 | module init, method tables | `PyModuleDef`, `PyTypeObject` registrations |
+
+## Reading
+
+### ElementObject layout and inline children
+
+Each element stores up to four children inline inside `ElementObject` itself. When a fifth child is appended, `element_add_subelement` allocates an `ElementObjectExtra` and copies the inline slots into it, then continues doubling from there. This avoids a heap allocation for the common case of shallow XML nodes.
+
+```c
+// CPython: Modules/_elementtree.c:281 ElementObject
+typedef struct {
+    PyObject_HEAD
+    PyObject *tag;
+    PyObject *attrib;
+    PyObject *text;
+    PyObject *tail;
+    ElementObjectExtra *extra;   /* NULL until child count > 4 */
+    PyObject *weakreflist;
+} ElementObject;
+```
+
+```c
+// CPython: Modules/_elementtree.c:701 element_add_subelement
+static int
+element_add_subelement(ElementState *st, ElementObject *self, PyObject *element)
+{
+    if (self->extra == NULL) {
+        if (element_resize(st, self, 1) < 0)
+            return -1;
+    }
+    /* capacity doubling inside element_resize */
+    self->extra->children[self->extra->length] = Py_NewRef(element);
+    self->extra->length++;
+    return 0;
+}
+```
+
+`element_resize` calls `PyMem_Realloc` and doubles `allocated` each time, matching CPython list growth semantics.
+
+### XMLParser SAX callbacks and expat integration
+
+`XMLParser` wraps an `XML_Parser` handle from expat. On `XMLParser_feed`, the byte buffer is handed directly to `XML_Parse`. expat fires C-level callbacks (`expat_start_handler`, `expat_end_handler`, `expat_data_handler`) which in turn call the Python-level `TreeBuilder` target methods (`start`, `end`, `data`).
+
+```c
+// CPython: Modules/_elementtree.c:1601 expat_start_handler
+static void
+expat_start_handler(XMLParserObject *self,
+                    const XML_Char *tag_in,
+                    const XML_Char **attrib_in)
+{
+    /* build tag string and attrib dict, then call target.start */
+    PyObject *tag = makeuniversal(self, tag_in);
+    ...
+    PyObject *res = PyObject_CallMethodObjArgs(
+        self->target, st->str_start, tag, attrib, NULL);
+    ...
+}
+```
+
+The `_expat.h` shim resolves expat symbols at import time via `_PyImport_GetModuleAttrString`, so the module does not link expat directly but borrows it from `pyexpat`.
+
+### element_iter depth-first traversal
+
+`element_iter` avoids Python-level recursion by maintaining an explicit `PyListObject` stack. Each iteration pops a node, yields it, then pushes its children in reverse order so the leftmost child is processed first.
+
+```c
+// CPython: Modules/_elementtree.c:1051 element_iter_next
+static PyObject *
+element_iter_next(ElementIterObject *it)
+{
+    if (PyList_GET_SIZE(it->parent_stack) == 0)
+        return NULL;  /* StopIteration */
+
+    ElementObject *elem = (ElementObject *)
+        PyList_GET_ITEM(it->parent_stack,
+                        PyList_GET_SIZE(it->parent_stack) - 1);
+    /* push children onto stack */
+    ...
+    return Py_NewRef((PyObject *)elem);
+}
+```
+
+This matches the behaviour documented for `Element.iter()` in the Python docs: pre-order, self included.
+
+## gopy notes
+
+Status: not yet ported.
+
+Planned package path: `module/elementtree/`.
+
+The port will need to replicate `ElementObject` as a Go struct with an inline four-child array mirroring the C layout, implement `element_add_subelement` capacity doubling, and wire a pure-Go SAX-style callback set to a Go expat binding (or to the stdlib `encoding/xml` scanner as a stopgap). The `_expat.h` dynamic-symbol trick does not apply in Go; expat must be linked directly or replaced.

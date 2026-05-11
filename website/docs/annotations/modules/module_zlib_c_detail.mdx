@@ -1,0 +1,117 @@
+---
+title: Modules/zlibmodule.c
+description: "CPython C extension for zlib: single-shot compress/decompress, stateful objects, and checksum functions"
+cpython_path: Modules/zlibmodule.c
+cpython_version: "3.14"
+lines: 1400
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/zlibmodule.c" />
+
+`zlibmodule.c` wraps the zlib C library, exposing both single-shot convenience functions (`compress`, `decompress`) and stateful streaming objects (`Compress`, `Decompress`) that hold a live `z_stream` struct across multiple calls.
+
+## Map
+
+| Lines | Symbol | Purpose |
+|-------|--------|---------|
+| 1–80 | includes, `ZlibState` | Module state struct holding exception types |
+| 81–200 | `zlib_compress_impl` | Single-shot compress using `deflate` in one pass |
+| 201–340 | `zlib_decompress_impl` | Single-shot decompress using `inflate` in one pass |
+| 341–500 | `Compress_new` / `Compress_dealloc` | Stateful compressor, `deflateInit2` / `deflateEnd` |
+| 501–680 | `Compress_compress_impl` | Feed bytes into `deflate`, accumulate output |
+| 681–780 | `Compress_flush_impl` | Call `deflate(Z_FINISH)` and collect final bytes |
+| 781–900 | `Compress_copy_impl` | `deflateCopy` for checkpoint/branch use |
+| 901–1050 | `Decompress_new` / `Decompress_dealloc` | Stateful decompressor, `inflateInit2` / `inflateEnd` |
+| 1051–1200 | `Decompress_decompress_impl` | Feed bytes into `inflate`, track `unconsumed_tail` |
+| 1201–1290 | `zlib_adler32_impl` / `zlib_crc32_impl` | Running-checksum helpers |
+| 1291–1400 | module init, method tables | `PyModuleDef`, `PyTypeObject` registrations |
+
+## Reading
+
+### Single-shot compress and decompress
+
+`zlib_compress_impl` calls `deflateInit2` to honour the `wbits` framing parameter, then runs `deflate(Z_FINISH)` in a loop that grows the output buffer by doubling until `avail_out` is nonzero after the call. The loop is necessary because the final compressed size is unknown up front.
+
+```c
+// CPython: Modules/zlibmodule.c:81 zlib_compress_impl
+static PyObject *
+zlib_compress_impl(PyObject *module, Py_buffer *data,
+                   int level, int wbits, int strategy,
+                   Py_buffer *zdict)
+{
+    z_stream zst;
+    ...
+    err = deflateInit2(&zst, level, Z_DEFLATED,
+                       wbits, DEF_MEM_LEVEL, strategy);
+    ...
+    do {
+        err = deflate(&zst, Z_FINISH);
+        ...
+    } while (err == Z_OK);  /* Z_STREAM_END breaks the loop */
+    ...
+}
+```
+
+The `wbits` value controls framing: positive values (8-15) produce zlib format, adding 16 switches to gzip format, and negative values (-8 to -15) produce raw deflate with no wrapper.
+
+### Stateful Compress object and flush
+
+`compressobj()` returns a `Compress` object wrapping a heap-allocated `z_stream` initialised by `deflateInit2`. Each call to `compress()` calls `deflate(Z_NO_FLUSH)` and collects output. Calling `flush()` with `Z_FINISH` drains the stream and renders the object unusable for further input.
+
+```c
+// CPython: Modules/zlibmodule.c:681 Compress_flush_impl
+static PyObject *
+Compress_flush_impl(compobject *self, ZlibState *state, int mode)
+{
+    ...
+    do {
+        err = deflate(&self->zst, mode);
+        ...
+    } while (err == Z_OK);
+
+    if (err != Z_STREAM_END && err != Z_BUF_ERROR) {
+        zlib_error(state, self->zst, err, "while flushing");
+        return NULL;
+    }
+    ...
+}
+```
+
+`flush()` also accepts `Z_SYNC_FLUSH` and `Z_FULL_FLUSH` for mid-stream synchronisation points without finalising the stream.
+
+### Decompress and unconsumed_tail
+
+`Decompress_decompress_impl` sets `max_length` to cap output per call. When `inflate` returns `Z_OK` with `avail_in > 0` and the output buffer is full, the remaining input is saved in `self->unconsumed_tail`. The caller must pass `unconsumed_tail` back on the next call or data will be silently dropped.
+
+```c
+// CPython: Modules/zlibmodule.c:1051 Decompress_decompress_impl
+static PyObject *
+Decompress_decompress_impl(compobject *self, ZlibState *state,
+                           Py_buffer *data, Py_ssize_t max_length)
+{
+    ...
+    err = inflate(&self->zst, Z_SYNC_FLUSH);
+    ...
+    if (self->zst.avail_in > 0) {
+        /* save leftover input as unconsumed_tail */
+        Py_buffer tail = {self->zst.next_in, self->zst.avail_in};
+        Py_XDECREF(self->unconsumed_tail);
+        self->unconsumed_tail = PyBytes_FromStringAndSize(
+            (char *)tail.buf, tail.len);
+    }
+    ...
+}
+```
+
+`adler32` and `crc32` both accept an optional `value` seed so checksums can be computed incrementally over multiple calls without a stateful object.
+
+## gopy notes
+
+Status: not yet ported.
+
+Planned package path: `module/zlib/`.
+
+Go's `compress/flate`, `compress/zlib`, and `compress/gzip` packages cover the inflate/deflate and framing logic but do not expose the raw `z_stream` lifecycle needed for `Compress_copy` or the `unconsumed_tail` semantics. The port will likely wrap `cgo` against `libz` directly, mirroring the `z_stream` fields in a Go struct, and implement `adler32`/`crc32` via `hash/adler32` and `hash/crc32` from the Go stdlib.

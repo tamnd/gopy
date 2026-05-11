@@ -1,0 +1,114 @@
+---
+title: Modules/_bz2module.c
+description: "CPython C extension for bz2: BZ2Compressor and BZ2Decompressor wrapping libbz2 with multi-stream support"
+cpython_path: Modules/_bz2module.c
+cpython_version: "3.14"
+lines: 600
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/_bz2module.c" />
+
+`_bz2module.c` wraps libbz2, providing `BZ2Compressor` and `BZ2Decompressor` as stateful objects. Unlike `zlibmodule`, there are no single-shot module-level convenience functions; the `bz2` Python module constructs those from the class API.
+
+## Map
+
+| Lines | Symbol | Purpose |
+|-------|--------|---------|
+| 1–60 | includes, `_bz2module_state` | Module state, `BZError` exception class |
+| 61–180 | `BZ2Compressor` struct, `_bz2_BZ2Compressor_new_impl` | `BZ2_bzCompressInit`, `bz_stream` allocation |
+| 181–300 | `_bz2_BZ2Compressor_compress_impl` | Feed input via `BZ2_bzCompress(BZ_RUN)` |
+| 301–380 | `_bz2_BZ2Compressor_flush_impl` | Drain with `BZ2_bzCompress(BZ_FINISH)` |
+| 381–420 | `BZ2Compressor_dealloc` | `BZ2_bzCompressEnd` and struct free |
+| 421–500 | `BZ2Decompressor` struct, `_bz2_BZ2Decompressor_new_impl` | `BZ2_bzDecompressInit`, `eof`, `needs_input` flags |
+| 501–570 | `_bz2_BZ2Decompressor_decompress_impl` | Feed bytes, handle multi-stream boundaries |
+| 571–600 | module init, method tables | `PyModuleDef`, `PyTypeObject` registrations |
+
+## Reading
+
+### BZ2Compressor lifecycle and bz_stream
+
+`BZ2Compressor.__new__` calls `BZ2_bzCompressInit` with the requested `compresslevel` (1-9) and the `verbosity` and `workFactor` parameters left at their defaults (0). The `bz_stream` struct is embedded directly inside the Python object, avoiding a separate heap allocation.
+
+```c
+// CPython: Modules/_bz2module.c:61 BZ2Compressor (struct)
+typedef struct {
+    PyObject_HEAD
+    bz_stream bzs;          /* embedded, not a pointer */
+    int flushed;
+    PyThread_type_lock lock;
+} BZ2Compressor;
+```
+
+```c
+// CPython: Modules/_bz2module.c:100 _bz2_BZ2Compressor_new_impl
+static PyObject *
+_bz2_BZ2Compressor_new_impl(PyTypeObject *type, int compresslevel)
+{
+    ...
+    bzerror = BZ2_bzCompressInit(&self->bzs, compresslevel, 0, 0);
+    if (catch_bz2_error(state, bzerror))
+        goto error;
+    ...
+}
+```
+
+`compress()` calls `BZ2_bzCompress` with `BZ_RUN`, accumulating output in a `BlocksOutputBuffer` that grows on demand. `flush()` switches the action to `BZ_FINISH` and loops until `BZ2_bzCompress` returns `BZ_STREAM_END`.
+
+### BZ2Decompressor and multi-stream support
+
+The decompressor tracks two boolean flags: `eof` (set when `BZ2_bzDecompress` returns `BZ_STREAM_END`) and `needs_input` (set when the internal buffer is empty and the caller must supply more bytes).
+
+Multi-stream `.bz2` files concatenate independent bzip2 streams. When `BZ2_bzDecompress` signals `BZ_STREAM_END` with bytes still remaining, the decompressor calls `BZ2_bzDecompressEnd` followed immediately by `BZ2_bzDecompressInit` to reset the `bz_stream` in place, then continues processing. This loop repeats until all input is consumed or no stream header is found.
+
+```c
+// CPython: Modules/_bz2module.c:501 _bz2_BZ2Decompressor_decompress_impl
+static PyObject *
+_bz2_BZ2Decompressor_decompress_impl(BZ2Decompressor *self,
+                                     Py_buffer *data,
+                                     Py_ssize_t max_length)
+{
+    ...
+    while (self->bzs.avail_in > 0) {
+        bzerror = BZ2_bzDecompress(&self->bzs);
+        if (bzerror == BZ_STREAM_END) {
+            /* end of one stream; try to init next */
+            BZ2_bzDecompressEnd(&self->bzs);
+            if (self->bzs.avail_in == 0) {
+                self->eof = true;
+                break;
+            }
+            bzerror = BZ2_bzDecompressInit(&self->bzs, 0, 0);
+            ...
+        }
+        ...
+    }
+    self->needs_input = (self->bzs.avail_in == 0);
+    ...
+}
+```
+
+### needs_input and eof properties
+
+Both properties are simple C-level getsets reading the corresponding `int` fields on the object struct. `eof` is sticky once set. `needs_input` is false while the internal buffer still holds unprocessed bytes from a previous call, letting callers drive a state machine without buffering input themselves.
+
+```c
+// CPython: Modules/_bz2module.c:560 BZ2Decompressor_get_needs_input
+static PyObject *
+BZ2Decompressor_get_needs_input(BZ2Decompressor *self, void *Py_UNUSED(ignored))
+{
+    return PyBool_FromLong(self->needs_input);
+}
+```
+
+The same pattern (`PyBool_FromLong` on a bare `int` field) is used for `eof`.
+
+## gopy notes
+
+Status: not yet ported.
+
+Planned package path: `module/bz2/`.
+
+Go's `compress/bzip2` package covers decompression only and does not expose a stateful streaming interface or compression at all. The port will use `cgo` against `libbz2` directly, embedding the `bz_stream` equivalent in Go structs via `C.bz_stream`. Multi-stream handling must replicate the `BZ2_bzDecompressEnd` / `BZ2_bzDecompressInit` reset loop. The `needs_input` and `eof` properties map to exported boolean fields on the Go decompressor struct.

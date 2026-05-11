@@ -1,0 +1,152 @@
+---
+title: "Objects/unicodeobject.c (search and format)"
+description: "Annotated guide to unicode search, split, format, UTF-8 encoding, join, and subscript in CPython 3.14"
+cpython_path: Objects/unicodeobject.c
+cpython_version: "3.14"
+lines: 16000
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Objects/unicodeobject.c" />
+
+## Map
+
+| Symbol | Approx. lines | Purpose |
+|---|---|---|
+| `unicode_find` | 9250-9310 | Implements `str.find` and `str.index` via FASTSEARCH |
+| `unicode_count` | 9180-9245 | Implements `str.count` via FASTSEARCH |
+| `FASTSEARCH` | (Objects/stringlib/fastsearch.h) | Combined Bloom filter plus Boyer-Moore-Horspool |
+| `unicode_split` | 10200-10280 | Implements `str.split(sep, maxsplit)` |
+| `unicode_rsplit` | 10285-10350 | Implements `str.rsplit(sep, maxsplit)` |
+| `unicode_splitlines` | 10355-10420 | Implements `str.splitlines(keepends)` |
+| `unicode_format` | 13800-14050 | Implements the `%` operator for str |
+| `_PyUnicodeWriter` | 1800-1920 | Incremental buffer used by format and join |
+| `unicode_encode_utf8` | 5100-5250 | Fast path for UTF-8 encoding of ASCII-compact strings |
+| `PyUnicode_Join` | 10800-10950 | Implements `sep.join(iterable)` |
+| `unicode_subscript` | 3400-3500 | Implements `str[i]` and `str[i:j:k]` |
+
+## Reading
+
+### FASTSEARCH: Bloom filter plus Boyer-Moore-Horspool
+
+`unicode_find` and `unicode_count` both delegate to the `FASTSEARCH` macro defined in `Objects/stringlib/fastsearch.h`. The algorithm builds a 64-bit Bloom filter from the characters of the pattern, then uses a Boyer-Moore-Horspool bad-character skip table to advance the search window. The Bloom filter provides an O(1) pre-check before the more expensive character comparisons, making single-character searches essentially a linear scan with minimal overhead.
+
+`unicode_find` wraps `FASTSEARCH` with `FAST_SEARCH` mode and returns the first match index. `unicode_count` uses `FAST_COUNT` mode and accumulates non-overlapping matches across the whole string.
+
+```c
+// CPython: Objects/unicodeobject.c:9250 unicode_find
+static Py_ssize_t
+unicode_find(PyObject *self, PyObject *args)
+{
+    ...
+    result = any_find_slice(self, substring, start, end, 1);
+    ...
+}
+```
+
+```c
+// CPython: Objects/unicodeobject.c:9180 unicode_count
+static PyObject *
+unicode_count(PyObject *self, PyObject *args)
+{
+    ...
+    iresult = any_find_slice(self, substring, start, end, -1);
+    ...
+}
+```
+
+### unicode_split, unicode_rsplit, and unicode_splitlines
+
+All three split functions share the same internal helper `split_whitespace` (for the no-separator case) or `split_char`/`split_subtype` (for a separator argument). The `maxsplit` parameter is threaded through each helper and decremented on every successful split; when it reaches zero the remainder of the string becomes the final element of the result list.
+
+`unicode_rsplit` mirrors `unicode_split` but scans from the right, building the result list in reverse and then calling `PyList_Reverse` before returning. `unicode_splitlines` uses a separate character-class table (`LINEBREAK`) to identify line boundaries and optionally retains the terminator in each segment when `keepends=True`.
+
+```c
+// CPython: Objects/unicodeobject.c:10200 unicode_split
+static PyObject *
+unicode_split(PyObject *self, PyObject *args, PyObject *kwds)
+{
+    ...
+    if (substring == Py_None)
+        return split_whitespace(self, maxcount);
+    ...
+    return split(self, substring, maxcount);
+}
+```
+
+```c
+// CPython: Objects/unicodeobject.c:10355 unicode_splitlines
+static PyObject *
+unicode_splitlines(PyObject *self, PyObject *args, PyObject *kwds)
+{
+    int keepends = 0;
+    ...
+    return PyUnicode_Splitlines(self, keepends);
+}
+```
+
+### unicode_format, _PyUnicodeWriter, unicode_encode_utf8, and PyUnicode_Join
+
+`unicode_format` implements the `%` operator. It walks the format string looking for `%` conversion specifiers, dispatches each to a per-type formatter (e.g. `%s` calls `PyObject_Str`, `%d` calls `formatlong`), and appends each fragment to a `_PyUnicodeWriter` buffer.
+
+`_PyUnicodeWriter` is an incremental string builder. It starts with a small stack-allocated buffer and promotes to a heap allocation only when the accumulated length exceeds the initial estimate. The writer tracks the maximum code point seen so far, which lets it choose the narrowest internal representation (Latin-1, UCS-2, or UCS-4) only at the final `_PyUnicodeWriter_Finish` call.
+
+```c
+// CPython: Objects/unicodeobject.c:1800 _PyUnicodeWriter_Init
+void
+_PyUnicodeWriter_Init(_PyUnicodeWriter *writer)
+{
+    memset(writer, 0, sizeof(*writer));
+    writer->min_char = 127;
+    ...
+}
+```
+
+`unicode_encode_utf8` takes the fast path for ASCII-compact strings (kind == PyUnicode_1BYTE_KIND, ascii flag set): it copies the internal byte buffer directly without any per-character transcoding. Non-ASCII strings fall through to a loop that encodes each code point into the standard 2-4 byte UTF-8 sequences.
+
+`PyUnicode_Join` pre-computes the total character count and maximum code point across all items in one pass, allocates a result buffer of exactly the right width, then fills it in a second pass. This avoids any reallocation during the copy phase.
+
+```c
+// CPython: Objects/unicodeobject.c:10800 PyUnicode_Join
+PyObject *
+PyUnicode_Join(PyObject *separator, PyObject *seq)
+{
+    ...
+    /* Calculate result length and maximum character */
+    for (i = 0; i < seqlen; i++) {
+        ...
+        sz += PyUnicode_GET_LENGTH(item);
+        maxchar = Py_MAX(maxchar, PyUnicode_MAX_CHAR_VALUE(item));
+    }
+    ...
+}
+```
+
+`unicode_subscript` dispatches on the index type. An integer index calls `PyUnicode_ReadChar` and wraps the result in a one-character string via `unicode_char`. A slice index calls `PyUnicode_Substring`, which in turn calls `_PyUnicode_Copy` for the appropriate kind (1, 2, or 4 bytes per code point).
+
+```c
+// CPython: Objects/unicodeobject.c:3400 unicode_subscript
+static PyObject *
+unicode_subscript(PyObject *self, PyObject *item)
+{
+    if (_PyIndex_Check(item)) {
+        ...
+        return unicode_char(ch);
+    }
+    else if (PySlice_Check(item)) {
+        ...
+        return PyUnicode_Substring(self, start, stop);
+    }
+    ...
+}
+```
+
+## gopy notes
+
+Status: not yet ported.
+
+Planned package path: `objects/` (as `objects.Str`, alongside `objects/str.go`).
+
+The FASTSEARCH algorithm translates cleanly to a Go generic function parameterized on element width (uint8, uint16, uint32). The `_PyUnicodeWriter` builder maps to a `strings.Builder` wrapper that also tracks `maxChar` for deferred kind selection. UTF-8 encoding is partially handled by Go's native string representation, but the kind-selection logic (Latin-1 vs UCS-2 vs UCS-4 compact storage) still needs a full port before `unicode_format` and `PyUnicode_Join` can be translated correctly.

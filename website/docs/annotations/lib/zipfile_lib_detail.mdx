@@ -1,0 +1,113 @@
+---
+title: Lib/zipfile/__init__.py
+description: "Annotation: CPython Lib/zipfile/__init__.py"
+cpython_path: Lib/zipfile/__init__.py
+cpython_version: "3.14"
+lines: 2500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/zipfile/__init__.py" />
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1–80 | module header, imports | constants, `_CD_*` offsets, `structCentralDir` |
+| 81–260 | `ZipInfo` | per-entry metadata: filename, compress\_type, file\_size, compress\_size, CRC |
+| 261–380 | `_get_codecs`, `_compressor`, `_decompressor` | compressor/decompressor registry keyed by `compress_type` |
+| 381–620 | `ZipExtFile` | read-only file wrapper returned by `ZipFile.open()` |
+| 621–900 | `ZipFile.__init__`, `ZipFile.open` | archive open, mode validation, decompressor selection |
+| 901–1100 | `ZipFile.write`, `ZipFile.writestr` | compression, ZIP64 extension headers |
+| 1101–1250 | `ZipFile.extract`, `ZipFile.extractall` | path safety via `Path.is_relative_to` guard |
+| 1251–1600 | `ZipFile._RealGetContents`, `_EndRecData` | central-directory parsing, ZIP64 end locator |
+| 1601–1900 | `ZipFile.close`, `ZipFile._write_end_record` | finalise central directory, write end-of-central-directory record |
+| 1901–2500 | `Path` | `pathlib`-style facade over zip entries |
+
+## Reading
+
+### ZipFile.open() and decompressor selection
+
+`ZipFile.open()` is the central read path. It validates the entry, selects a
+decompressor via `_get_codecs`, and wraps the raw file object in `ZipExtFile`.
+
+The compressor registry maps integer compression IDs (stored in
+`ZipInfo.compress_type`) to factory callables. `_get_codecs` raises
+`NotImplementedError` for unsupported methods so callers get a clear message
+rather than a silent no-op.
+
+```python
+# CPython: Lib/zipfile/__init__.py:900 ZipFile.open
+def open(self, name, mode="r", pwd=None, *, force_zip64=False):
+    ...
+    zinfo = self.getinfo(name)
+    ...
+    zef_file = _SharedFile(self.fp, zinfo.header_offset, ...)
+    ...
+    return ZipExtFile(zef_file, mode, zinfo, pwd, close_fileobj)
+```
+
+`ZipExtFile` buffers compressed data internally and decompresses on demand
+through the `_decompressor` object stored at construction time. The wrapper
+also verifies the CRC-32 checksum when the caller reaches EOF, raising
+`BadZipFile` on mismatch.
+
+### ZipInfo: per-entry metadata
+
+`ZipInfo` holds all per-entry fields decoded from the local file header and
+the central directory. The two most important size fields are `file_size`
+(uncompressed) and `compress_size` (bytes stored on disk). Both are read from
+the central-directory record; ZIP64 extensions replace them when the values
+overflow a 32-bit field.
+
+```python
+# CPython: Lib/zipfile/__init__.py:81 ZipInfo
+class ZipInfo:
+    ...
+    compress_type: int
+    file_size: int        # uncompressed size
+    compress_size: int    # compressed size on disk
+    CRC: int              # CRC-32 of uncompressed data
+```
+
+The `from_file()` class method is the canonical way to build a `ZipInfo` from
+a real filesystem path. It fills `file_size`, sets `compress_type` to
+`ZIP_STORED` by default, and leaves `compress_size` at zero until the entry
+is actually written.
+
+### extractall() path safety
+
+Older Python versions allowed zip entries whose `filename` component contained
+`..` segments, enabling directory-traversal writes outside the target
+directory. CPython 3.12 introduced an explicit guard using
+`Path.is_relative_to`:
+
+```python
+# CPython: Lib/zipfile/__init__.py:1212 ZipFile.extractall
+for member in members:
+    ...
+    target = pathlib.Path(path) / member.filename
+    if not target.is_relative_to(path):
+        raise ValueError(
+            f"path is outside the target directory: {target!r}")
+```
+
+The guard is applied per-member before any file is opened on disk, so a
+malformed archive cannot escape the destination tree even when `extractall()`
+is called without inspecting individual entries.
+
+## gopy notes
+
+Status: not yet ported.
+
+Planned package path: `module/zipfile/`.
+
+The port will need `ZipInfo`, `ZipFile`, `ZipExtFile`, and `Path`. The
+compressor registry (`_get_codecs`) maps naturally to a Go `map[int]func()`
+keyed by the same integer compression constants. `compress/flate`,
+`compress/zlib`, `compress/bzip2`, and `compress/lzw` from the Go standard
+library cover the four CPython-supported methods (stored, deflate, bzip2, lzma
+requires `github.com/ulikunitz/xz`). The path-safety guard in `extractall()`
+must be ported exactly, as it is a security boundary.

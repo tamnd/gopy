@@ -267,6 +267,7 @@ const sidebars = {
         'annotations/python/suggestions_c_detail',
         'annotations/python/import_c_detail',
         'annotations/python/typeobject_c2_detail',
+        'annotations/python/flowgraph_c_detail',
       ],
     },
     {
@@ -391,6 +392,9 @@ const sidebars = {
         'annotations/objects/codeobject_c_detail',
         'annotations/objects/tupleobject_c2_detail',
         'annotations/objects/listobject_c2_detail',
+        'annotations/objects/dictobject_c2_detail',
+        'annotations/objects/unicodeobject_c2_detail',
+        'annotations/objects/abstract_c_detail2',
       ],
     },
     {
@@ -585,6 +589,8 @@ const sidebars = {
         'annotations/include/include_pycore_import_h_detail',
         'annotations/include/include_pycore_typeobject_h_detail',
         'annotations/include/include_pycore_weakref_h_detail',
+        'annotations/include/include_pycore_list_h_detail',
+        'annotations/include/include_pycore_tuple_h_detail',
       ],
     },
     {
@@ -744,6 +750,9 @@ const sidebars = {
         'annotations/modules/module_signal_c_detail',
         'annotations/modules/module_asyncio_c_detail',
         'annotations/modules/module_contextvars_c2_detail',
+        'annotations/modules/module_elementtree_c_detail',
+        'annotations/modules/module_zlib_c_detail',
+        'annotations/modules/module_bz2_c_detail',
       ],
     },
     {
@@ -1116,6 +1125,10 @@ const sidebars = {
         'annotations/lib/contextlib2_lib_detail',
         'annotations/lib/inspect_lib_detail',
         'annotations/lib/traceback_lib_detail',
+        'annotations/lib/zipfile_lib_detail',
+        'annotations/lib/tarfile_lib_detail',
+        'annotations/lib/gzip_lib_detail',
+        'annotations/lib/urllib_parse_detail2',
       ],
     },
   ],

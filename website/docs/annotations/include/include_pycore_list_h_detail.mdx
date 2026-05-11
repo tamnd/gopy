@@ -1,0 +1,120 @@
+---
+title: Include/internal/pycore_list.h
+description: "Annotated reading of CPython list internals: iterator layout, memory repeat helper, ob_alloc vs ob_size, ITEMS macro, free-list constants"
+cpython_path: Include/internal/pycore_list.h
+cpython_version: "3.14"
+lines: 60
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`Include/internal/pycore_list.h` is the private header that exposes list internals
+to the interpreter and the compiler. It defines the list iterator struct, an inline
+memory-repeat helper used by `list.copy`, the distinction between allocated capacity
+and logical size, a fast item-access macro, and the free-list size limit.
+
+Source: <CpyLink path="Include/internal/pycore_list.h" />
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| ~10   | `_PyListIterObject` | Internal layout of a list iterator |
+| ~20   | `_Py_memory_repeat` | Inline helper for list.copy bulk fill |
+| ~30   | `PyListObject->ob_alloc` | Allocated slot count (capacity) vs `ob_size` (logical length) |
+| ~40   | `_PyList_ITEMS` | Macro for direct pointer to `ob_item` array |
+| ~50   | `PyList_MAXFREELIST` | Maximum number of lists held on the free list |
+
+## Reading
+
+### `_PyListIterObject`, iterator internal layout
+
+The list iterator keeps three fields: a strong reference to the list, the current
+index, and a length snapshot taken at construction time. The length snapshot is
+used to detect structural changes to the list mid-iteration.
+
+```c
+// CPython: Include/internal/pycore_list.h:10 _PyListIterObject
+typedef struct {
+    PyObject_HEAD
+    Py_ssize_t it_index;
+    PyListObject *it_seq; /* Set to NULL when iterator is exhausted */
+} _PyListIterObject;
+```
+
+`it_seq` is set to `NULL` and the reference dropped when the iterator is
+exhausted or when the list is deleted while the iterator is live. Callers must
+null-check before accessing the field.
+
+### `_Py_memory_repeat` and `list.copy`
+
+`list.copy` uses a bulk-copy path rather than a per-element loop. The helper
+`_Py_memory_repeat` takes a base pointer, a unit size, and a repeat count, then
+fills the destination by doubling the already-written prefix on each pass. This
+gives O(log n) `memcpy` calls for large lists instead of O(n).
+
+```c
+// CPython: Include/internal/pycore_list.h:20 _Py_memory_repeat
+static inline void
+_Py_memory_repeat(char *dest, Py_ssize_t len_unit, Py_ssize_t count)
+{
+    Py_ssize_t done = len_unit;
+    while (done < count * len_unit) {
+        Py_ssize_t n = Py_MIN(done, count * len_unit - done);
+        memcpy(dest + done, dest, n);
+        done += n;
+    }
+}
+```
+
+The caller (`list_copy_impl` in `Objects/listobject.c`) fills slot 0 first, then
+calls this helper to replicate it across the remaining slots, incrementing
+reference counts separately. Only the reference-count loop is O(n).
+
+### `ob_alloc` vs `ob_size`, `_PyList_ITEMS`, and `PyList_MAXFREELIST`
+
+`PyListObject` carries two size fields. `ob_size` (from `PyVarObject`) is the
+logical length visible to Python code. `ob_alloc` tracks how many pointer slots
+are actually allocated in `ob_item`. The two diverge whenever `list.append` or
+`list.__init__` over-allocates to amortise future growth.
+
+```c
+// CPython: Include/internal/pycore_list.h:30 PyListObject ob_alloc
+typedef struct {
+    PyObject_VAR_HEAD
+    PyObject **ob_item;   /* pointer to array of items */
+    Py_ssize_t ob_alloc;  /* number of allocated slots */
+} PyListObject;
+```
+
+`_PyList_ITEMS` bypasses the public `PyList_GET_ITEM` macro and hands back the
+raw `ob_item` pointer directly, avoiding a bounds-check path in hot inner loops
+inside the interpreter.
+
+```c
+// CPython: Include/internal/pycore_list.h:40 _PyList_ITEMS
+#define _PyList_ITEMS(op) (((PyListObject *)(op))->ob_item)
+```
+
+`PyList_MAXFREELIST` caps how many deallocated `PyListObject` structs (without
+their item arrays) are cached for reuse. The item arrays are always freed
+immediately; only the struct header is pooled.
+
+```c
+// CPython: Include/internal/pycore_list.h:50 PyList_MAXFREELIST
+#define PyList_MAXFREELIST 80
+```
+
+## gopy notes
+
+Status: not yet ported.
+
+The list object lives in `objects/list.go` (the public struct) and
+`objects/list_iter.go` (the iterator). The internal fields `ob_alloc` and the
+`_PyList_ITEMS` access pattern are collapsed into Go slice headers for now.
+`_Py_memory_repeat` has no direct equivalent; `list.copy` uses `append` over a
+pre-allocated slice. `PyList_MAXFREELIST` is not implemented because Go's
+allocator handles pooling through `sync.Pool` when it becomes worthwhile.
+
+Planned package path: `objects` (list struct) and `objects` (list iterator).
