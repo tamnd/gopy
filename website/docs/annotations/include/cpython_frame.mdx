@@ -1,0 +1,128 @@
+---
+title: Include/cpython/pyframe.h
+description: Public C API for frame introspection, accessible to C extensions and debuggers.
+cpython_path: Include/cpython/pyframe.h
+cpython_version: "3.14"
+lines: 45
+status: annotated
+ported_to: objects/frame.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Include/cpython/pyframe.h`
+
+<CpyLink path="Include/cpython/pyframe.h" />
+
+The public C API for Python frame objects. The file exposes `PyFrameObject` introspection
+functions (`PyFrame_GetBack`, `PyFrame_GetLocals`, `PyFrame_GetGlobals`, `PyFrame_GetBuiltins`,
+`PyFrame_GetGenerator`, `PyFrame_GetLasti`, `PyFrame_GetVar`) alongside the `PyUnstable_`
+family intended for PEP 523 custom evaluators. Since 3.11 the actual activation record is
+`_PyInterpreterFrame` (defined in `Include/internal/pycore_frame.h`); the public
+`PyFrameObject` is a thin Python-visible wrapper around it. A companion header,
+`Include/cpython/frameobject.h`, declares `PyFrame_New`, `PyFrame_LocalsToFast`, and the
+`PyFrameLocalsProxyObject` struct.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| 5 | `PyFrame_Type` | Type object singleton | `objects.FrameType()` |
+| 6 | `PyFrameLocalsProxy_Type` | Type for the locals proxy | not yet ported |
+| 8 | `PyFrame_Check` | Instance check macro | implicit via type comparison |
+| 9 | `PyFrameLocalsProxy_Check` | Instance check macro | not yet ported |
+| 11 | `PyFrame_GetBack` | Returns caller frame (strong ref) | `(*Frame).Back()` |
+| 12 | `PyFrame_GetLocals` | Returns `f_locals` mapping (strong ref) | `InterpreterFrame.FrameLocals()` |
+| 14 | `PyFrame_GetGlobals` | Returns `f_globals` dict (strong ref) | `(*Frame).Globals()` |
+| 15 | `PyFrame_GetBuiltins` | Returns `f_builtins` dict (strong ref) | `(*Frame).Builtins()` |
+| 17 | `PyFrame_GetGenerator` | Returns owning generator/coroutine, or NULL | not yet ported |
+| 18 | `PyFrame_GetLasti` | Returns byte offset of last executed instruction | `(*Frame).Lasti()` |
+| 19 | `PyFrame_GetVar` | Looks up a local by name (strong ref) | not yet ported |
+| 20 | `PyFrame_GetVarString` | Same but takes a C string | not yet ported |
+| 25 | `struct _PyInterpreterFrame` (forward) | Forward declaration for PEP 523 API | `frame.Frame` (package `frame/`) |
+| 29 | `PyUnstable_InterpreterFrame_GetCode` | Code object from raw interp frame | not yet ported |
+| 33 | `PyUnstable_InterpreterFrame_GetLasti` | Byte offset from raw interp frame | not yet ported |
+| 37 | `PyUnstable_InterpreterFrame_GetLine` | Source line from raw interp frame | not yet ported |
+| 39-44 | `PyUnstable_EXECUTABLE_KIND_*` | Executable kind constants for PEP 523 | not yet ported |
+| 45 | `PyUnstable_ExecutableKinds` | Array of kind type objects | not yet ported |
+
+## Reading
+
+### Frame accessor API (lines 11 to 20)
+
+<CpyLink path="Include/cpython/pyframe.h" lines="11-20" />
+
+These nine functions are the stable public surface for reading frame state. Every function
+returns a strong reference (the caller must `Py_DECREF` it) and none of them raise an
+exception on success.
+
+```c
+PyAPI_FUNC(PyFrameObject *) PyFrame_GetBack(PyFrameObject *frame);
+PyAPI_FUNC(PyObject *)      PyFrame_GetLocals(PyFrameObject *frame);
+PyAPI_FUNC(PyObject *)      PyFrame_GetGlobals(PyFrameObject *frame);
+PyAPI_FUNC(PyObject *)      PyFrame_GetBuiltins(PyFrameObject *frame);
+PyAPI_FUNC(PyObject *)      PyFrame_GetGenerator(PyFrameObject *frame);
+PyAPI_FUNC(int)             PyFrame_GetLasti(PyFrameObject *frame);
+PyAPI_FUNC(PyObject*)       PyFrame_GetVar(PyFrameObject *frame, PyObject *name);
+PyAPI_FUNC(PyObject*)       PyFrame_GetVarString(PyFrameObject *frame, const char *name);
+```
+
+In gopy these map to methods on `objects.Frame`, each delegating to the `InterpreterFrame`
+interface. `FrameLocals()` materialises a snapshot dict from fast locals, mirroring the lazy
+evaluation CPython does in `PyFrame_GetLocals`.
+
+### PEP 523 unstable API (lines 25 to 45)
+
+<CpyLink path="Include/cpython/pyframe.h" lines="25-45" />
+
+The `PyUnstable_InterpreterFrame_*` functions operate on the raw `_PyInterpreterFrame`
+(the actual activation record managed by the eval loop), not on the Python-visible wrapper.
+They exist so custom evaluators registered via `_PyInterpreterState_SetEvalFrameFunc` can
+inspect the frame they are handed before or instead of calling `_PyEval_EvalFrameDefault`.
+
+```c
+struct _PyInterpreterFrame;  /* forward-declared here; full struct is internal */
+
+PyAPI_FUNC(PyObject *) PyUnstable_InterpreterFrame_GetCode(
+    struct _PyInterpreterFrame *frame);
+PyAPI_FUNC(int) PyUnstable_InterpreterFrame_GetLasti(
+    struct _PyInterpreterFrame *frame);
+PyAPI_FUNC(int) PyUnstable_InterpreterFrame_GetLine(
+    struct _PyInterpreterFrame *frame);
+```
+
+The `PyUnstable_` prefix signals that these functions may change signature in any minor
+release, unlike the rest of the stable ABI. gopy's `frame.Frame` struct owns the activation
+record and provides equivalent accessors as Go methods.
+
+### Type objects and check macros (lines 5 to 9)
+
+<CpyLink path="Include/cpython/pyframe.h" lines="5-9" />
+
+```c
+PyAPI_DATA(PyTypeObject) PyFrame_Type;
+PyAPI_DATA(PyTypeObject) PyFrameLocalsProxy_Type;
+
+#define PyFrame_Check(op)            Py_IS_TYPE((op), &PyFrame_Type)
+#define PyFrameLocalsProxy_Check(op) Py_IS_TYPE((op), &PyFrameLocalsProxy_Type)
+```
+
+`PyFrame_Type` is the C-level singleton for the `frame` built-in type. gopy exposes it as
+`objects.FrameType()`. The locals proxy type wraps the per-frame local variable mapping with
+copy-on-write semantics introduced in 3.13; gopy does not yet port it.
+
+## gopy mirror
+
+`objects/frame.go` splits the CPython design cleanly: `objects.InterpreterFrame` is a Go
+interface that the live activation record in `frame/frame.go` satisfies, and `objects.Frame`
+is the thin Python-visible wrapper. All `PyFrame_Get*` accessors are present as methods on
+`*Frame`. The `PyUnstable_*` family and `PyFrameLocalsProxy_Type` are not yet ported
+because gopy does not yet expose a PEP 523 custom-evaluator hook.
+
+## CPython 3.14 changes
+
+The file was split from `Include/cpython/frameobject.h` in 3.13. The `PyFrame_GetCode`
+function (present in 3.11-3.12) was removed from the public API in 3.14; callers should now
+use `PyUnstable_InterpreterFrame_GetCode` or retrieve the code object through `f_code` on
+the frame. The `PyFrameLocalsProxy_Type` and its check macro are new in 3.14, reflecting the
+copy-on-write locals proxy that replaces the old eager dict materialisation.

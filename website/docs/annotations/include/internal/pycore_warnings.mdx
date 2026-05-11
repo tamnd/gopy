@@ -1,0 +1,104 @@
+---
+title: Include/internal/pycore_warnings.h
+description: Internal interface for the CPython warnings subsystem, covering interpreter-state initialisation and unawaited-coroutine diagnostics.
+cpython_path: Include/internal/pycore_warnings.h
+cpython_version: "3.14"
+lines: 21
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Include/internal/pycore_warnings.h`
+
+<CpyLink path="Include/internal/pycore_warnings.h" />
+
+A small internal header that stitches the warnings subsystem into the interpreter lifecycle.
+It declares `_PyWarnings_InitState` (called during interpreter startup to zero-initialise
+the per-interpreter warnings state) and `_PyWarnings_Init` (called once at runtime startup
+to install the default warning filters). Two async-specific diagnostics,
+`_PyErr_WarnUnawaitedCoroutine` and `_PyErr_WarnUnawaitedAgenMethod`, live here because
+they emit `RuntimeWarning` through the warnings machinery but are triggered by object
+finalisation rather than user code.
+
+The public-facing API (`PyErr_WarnEx`, `PyErr_WarnFormat`, `warnings.warn`) is declared in
+`Include/warnings.h` and implemented in `Python/warnings.c`. The per-interpreter warnings
+filter list lives in `_PyInterpreterState.warnings`; that struct is defined in
+`Include/internal/pycore_interp.h`, not here.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| 11 | `_PyWarnings_InitState` | Zero-initialises per-interpreter warnings state | not yet ported |
+| 13 | `_PyWarnings_Init` | Installs default filter list at runtime startup | not yet ported |
+| 15 | `_PyErr_WarnUnawaitedCoroutine` | Emits `RuntimeWarning` when a coroutine is GC'd unawaited | not yet ported |
+| 16 | `_PyErr_WarnUnawaitedAgenMethod` | Emits `RuntimeWarning` when an async-gen method is GC'd unawaited | not yet ported |
+
+## Reading
+
+### Interpreter state initialisation (lines 11 to 13)
+
+<CpyLink path="Include/internal/pycore_warnings.h" lines="11-13" />
+
+```c
+extern int  _PyWarnings_InitState(PyInterpreterState *interp);
+extern PyObject* _PyWarnings_Init(void);
+```
+
+`_PyWarnings_InitState` is called from `_PyInterpreterState_InitRunningMain` and must
+succeed before any Python code runs, because the warnings machinery can be triggered
+during codec and codec-error-handler registration. It returns 0 on success and -1 on
+memory failure.
+
+`_PyWarnings_Init` is called once from `Py_InitializeFromConfig` and returns a reference to
+the `warnings` module object. Its main job is to install the default filter list (e.g.,
+`default::DeprecationWarning:__main__`) into `sys.warnoptions` and to set the
+`_filters_mutated` version counter that invalidates the per-thread filter cache.
+
+In gopy, neither function has been ported yet. The `vm` package issues `print`-style
+diagnostics in places where CPython would call `PyErr_WarnEx`; a future port of
+`Python/warnings.c` will wire those through a proper filter chain.
+
+### Unawaited async object diagnostics (lines 15 to 16)
+
+<CpyLink path="Include/internal/pycore_warnings.h" lines="15-16" />
+
+```c
+extern void _PyErr_WarnUnawaitedCoroutine(PyObject *coro);
+extern void _PyErr_WarnUnawaitedAgenMethod(
+    PyAsyncGenObject *agen, PyObject *method);
+```
+
+These two functions are called from `tp_finalize` slots on `PyCoroutine_Type` and
+`PyAsyncGen_Type` respectively. If a coroutine or an async-generator's `aclose()` /
+`athrow()` method is garbage-collected without having been awaited, CPython emits a
+`RuntimeWarning` with a formatted message that includes the coroutine name and the source
+location where it was created.
+
+The implementation in `Python/warnings.c` calls `PyErr_WarnFormat` which itself runs the
+full filter check, `showwarning` hook, and `__warningregistry__` deduplication. Because the
+call happens inside a GC finaliser, CPython saves and restores the current exception state
+around the warning call to avoid clobbering any in-flight exception.
+
+In gopy, `vm/eval_unwind.go` has a stub path for unawaited coroutines but does not yet
+invoke the warnings machinery. When `Python/warnings.c` is ported these stubs will be
+replaced by calls to the Go equivalent of `_PyErr_WarnUnawaitedCoroutine`.
+
+## gopy mirror
+
+None of this file's symbols have been ported yet. The eventual Go shape will be:
+
+- `warningsInitState(interp *Interpreter) error` in a `warnings` package,
+  storing the mutable filter list and version counter in the interpreter struct.
+- `warningsInit() *objects.Module` to install the default filter list during startup.
+- `warnUnawaitedCoroutine(coro objects.Object)` called from the coroutine finaliser in
+  `objects/genobject.go` once that file tracks the `__created_at__` code location.
+
+## CPython 3.14 changes
+
+The header is largely unchanged from 3.13. The notable 3.14 addition is
+`_PyErr_WarnUnawaitedAgenMethod`, which handles async-generator method objects that are
+abandoned without being awaited (a case distinct from the generator itself being abandoned).
+In 3.12 and earlier this situation was silently ignored; 3.13 added the warning and 3.14
+stabilised the internal API for it here.

@@ -1,0 +1,141 @@
+---
+title: Lib/queue.py
+description: Thread-safe FIFO, LIFO, and priority queue implementations for producer-consumer workflows.
+cpython_path: Lib/queue.py
+cpython_version: "3.14"
+lines: 280
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Lib/queue.py`
+
+<CpyLink path="Lib/queue.py" />
+
+`queue.py` provides the `Queue`, `LifoQueue`, `PriorityQueue`, and `SimpleQueue` classes. All variants share a common thread-safe base built on `threading.Condition` objects. The module is designed for producer-consumer patterns: producers call `put()`, consumers call `get()`, and `task_done()`/`join()` let callers block until the backlog is fully processed.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Lib/queue.py" lines="1-10">1-10</Cpy> | imports | `threading`, `heapq`, `collections.deque` | n/a |
+| <Cpy path="Lib/queue.py" lines="11-20">11-20</Cpy> | `__all__` | Public API list | n/a |
+| <Cpy path="Lib/queue.py" lines="21-30">21-30</Cpy> | `Empty`, `Full` | Exception classes | n/a |
+| <Cpy path="Lib/queue.py" lines="31-90">31-90</Cpy> | `Queue.__init__`, `Queue.qsize`, `Queue.empty`, `Queue.full` | Base queue setup and sizing predicates | Not yet ported |
+| <Cpy path="Lib/queue.py" lines="91-160">91-160</Cpy> | `Queue.put`, `Queue.put_nowait`, `Queue.get`, `Queue.get_nowait` | Blocking and non-blocking insertion/retrieval | Not yet ported |
+| <Cpy path="Lib/queue.py" lines="161-200">161-200</Cpy> | `Queue.task_done`, `Queue.join` | Completion tracking | Not yet ported |
+| <Cpy path="Lib/queue.py" lines="201-220">201-220</Cpy> | `Queue._init`, `Queue._qsize`, `Queue._put`, `Queue._get` | Internal `deque`-backed storage hooks | Not yet ported |
+| <Cpy path="Lib/queue.py" lines="221-240">221-240</Cpy> | `LifoQueue` | Stack variant; overrides `_init`, `_put`, `_get` | Not yet ported |
+| <Cpy path="Lib/queue.py" lines="241-260">241-260</Cpy> | `PriorityQueue` | Heap variant; overrides `_init`, `_put`, `_get` | Not yet ported |
+| <Cpy path="Lib/queue.py" lines="261-280">261-280</Cpy> | `SimpleQueue` | Lock-free single-condition simplified queue | Not yet ported |
+
+## Reading
+
+### Initialization and condition variables (lines 31 to 70)
+
+<CpyLink path="Lib/queue.py" lines="31-70" />
+
+The constructor allocates two `threading.Condition` objects that share the same underlying mutex. `not_empty` is notified by `put()` to wake blocked `get()` callers; `not_full` is notified by `get()` to wake blocked `put()` callers. An `all_tasks_done` condition tracks the outstanding work count for `join()`.
+
+```python
+def __init__(self, maxsize=0):
+    self.mutex = threading.Lock()
+    self.not_empty = threading.Condition(self.mutex)
+    self.not_full = threading.Condition(self.mutex)
+    self.all_tasks_done = threading.Condition(self.mutex)
+    self.unfinished_tasks = 0
+    self._init(maxsize)
+```
+
+`maxsize <= 0` means unbounded. The three conditions share `self.mutex`, so any one `with` block holds the same lock that the other two conditions also use.
+
+### Blocking put and get (lines 91 to 160)
+
+<CpyLink path="Lib/queue.py" lines="91-160" />
+
+`put()` acquires the mutex through the `not_full` condition and waits in a `while self._qsize() >= self.maxsize` loop. The loop guard protects against spurious wakeups. Once space exists it delegates to `_put(item)` and then notifies `not_empty` so any blocked `get()` can proceed.
+
+```python
+def put(self, item, block=True, timeout=None):
+    with self.not_full:
+        if self.maxsize > 0:
+            if not block:
+                if self._qsize() >= self.maxsize:
+                    raise Full
+            elif timeout is None:
+                while self._qsize() >= self.maxsize:
+                    self.not_full.wait()
+            elif timeout < 0:
+                raise ValueError("'timeout' must be a non-negative number")
+            else:
+                endtime = time() + timeout
+                while self._qsize() >= self.maxsize:
+                    remaining = endtime - time()
+                    if remaining <= 0.0:
+                        raise Full
+                    self.not_full.wait(remaining)
+        self._put(item)
+        self.unfinished_tasks += 1
+        self.not_empty.notify()
+```
+
+`get()` mirrors this pattern using `not_empty.wait()` and then calls `_get()`, followed by `not_full.notify()`.
+
+### task_done and join (lines 161 to 200)
+
+<CpyLink path="Lib/queue.py" lines="161-200" />
+
+`task_done()` decrements `unfinished_tasks` and, when it reaches zero, broadcasts on `all_tasks_done` to release any thread blocked in `join()`. Calling `task_done()` more times than items were put raises `ValueError`.
+
+```python
+def task_done(self):
+    with self.all_tasks_done:
+        unfinished = self.unfinished_tasks - 1
+        if unfinished <= 0:
+            if unfinished < 0:
+                raise ValueError('task_done() called too many times')
+            self.all_tasks_done.notify_all()
+        self.unfinished_tasks = unfinished
+
+def join(self):
+    with self.all_tasks_done:
+        while self.unfinished_tasks:
+            self.all_tasks_done.wait()
+```
+
+`join()` is safe to call from any thread. It returns immediately if no tasks are outstanding.
+
+### Storage hook overrides (lines 201 to 260)
+
+<CpyLink path="Lib/queue.py" lines="201-260" />
+
+The base `Queue` stores items in a `collections.deque`. The three subclasses override only the four internal hooks, leaving all locking logic in the base class.
+
+```python
+# Queue (FIFO)
+def _init(self, maxsize): self.queue = deque()
+def _qsize(self):         return len(self.queue)
+def _put(self, item):     self.queue.append(item)
+def _get(self):           return self.queue.popleft()
+
+# LifoQueue (LIFO/stack)
+def _init(self, maxsize): self.queue = []
+def _put(self, item):     self.queue.append(item)
+def _get(self):           return self.queue.pop()
+
+# PriorityQueue (min-heap)
+def _init(self, maxsize): self.queue = []
+def _put(self, item):     heappush(self.queue, item)
+def _get(self):           return heappop(self.queue)
+```
+
+`SimpleQueue` is a completely separate class backed by a single `threading.Condition`; it has no `task_done`, no `join`, and no `maxsize`.
+
+## gopy mirror
+
+Not yet ported. The Go standard library provides `sync.Mutex` and `sync.Cond` which map directly onto CPython's `threading.Lock` and `threading.Condition`. A future port would implement `Queue` as a Go struct with `notEmpty` and `notFull` `sync.Cond` fields sharing a single `sync.Mutex`, and would expose `Put`, `Get`, `TaskDone`, and `Join` methods. `LifoQueue` and `PriorityQueue` would embed the base struct and override the storage hooks via interface methods or embedded function fields.
+
+## CPython 3.14 changes
+
+CPython 3.14 made no breaking changes to `queue.py`. The module gained minor type annotation improvements and the `SimpleQueue` class received a small internal refactor to reduce lock contention on single-core interpreters taking advantage of the free-threaded build (`--disable-gil`). Under the free-threaded build, `SimpleQueue` uses a `_thread.RLock` variant rather than a plain `Lock`.

@@ -1,0 +1,146 @@
+---
+title: Modules/_uuidmodule.c
+description: C accelerator for the uuid module, wrapping libuuid or Windows RPC to generate RFC 4122 UUIDs.
+cpython_path: Modules/_uuidmodule.c
+cpython_version: "3.14"
+lines: 154
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Modules/_uuidmodule.c`
+
+<CpyLink path="Modules/_uuidmodule.c" />
+
+`_uuid` is a thin C accelerator that gives `Lib/uuid.py` access to the
+operating system's UUID generation primitives. On macOS and BSD it calls
+`uuid_generate_time_safe` from the system `libuuid`. On Linux it falls back
+through `uuid_generate_time_safe`, then `uuid_create` (NetBSD/DragonFly), then
+the non-safe `uuid_generate_time`. On Windows it calls `UuidCreateSequential`
+from `rpcrt4.dll`. The file also exports two integer flags, `has_uuid_generate_time_safe`
+and `has_stable_extractable_node`, so that `uuid.py` can decide at import time
+whether the underlying source provides a MAC-address-based node identifier.
+When the C extension is absent or the relevant headers are missing, `uuid.py`
+falls back to a pure-Python implementation.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| 1-23 | headers | `Python.h`, platform uuid headers (`uuid.h` / `uuid/uuid.h`), Windows `rpc.h` | - |
+| 27-51 | `py_uuid_generate_time_safe` (POSIX) | Call `uuid_generate_time_safe`, `uuid_create`, or `uuid_generate_time` depending on availability; return `(bytes, status_int)` | - |
+| 55-91 | `py_UuidCreate` / `py_windows_has_stable_node` (Windows) | Call `UuidCreateSequential`; map `RPC_S_*` codes; detect stable MAC node | - |
+| 94-123 | `uuid_exec` | Module exec slot: export `has_uuid_generate_time_safe` and `has_stable_extractable_node` as integer constants | - |
+| 125-133 | `uuid_methods` | Method table: `generate_time_safe` (POSIX) or `UuidCreate` (Windows) | - |
+| 135-148 | `uuid_slots` / `uuidmodule` | `PyModuleDef_Slot` list and `PyModuleDef` struct | - |
+| 150-154 | `PyInit__uuid` | Module init via `PyModuleDef_Init` | - |
+
+## Reading
+
+### POSIX UUID generation with platform fallback (lines 27 to 51)
+
+<CpyLink path="Modules/_uuidmodule.c" lines="27-51" />
+
+The POSIX path is a single function with three compile-time branches:
+
+```c
+static PyObject *
+py_uuid_generate_time_safe(PyObject *Py_UNUSED(context),
+                           PyObject *Py_UNUSED(ignored))
+{
+    uuid_t uuid;
+#ifdef HAVE_UUID_GENERATE_TIME_SAFE
+    int res;
+    res = uuid_generate_time_safe(uuid);
+    return Py_BuildValue("y#i", (const char *) uuid, sizeof(uuid), res);
+#elif defined(HAVE_UUID_CREATE)
+    uint32_t status;
+    uuid_create(&uuid, &status);
+    ...
+    return Py_BuildValue("y#i", (const char *) &uuid, sizeof(uuid), (int) status);
+#else
+    uuid_generate_time(uuid);
+    return Py_BuildValue("y#O", (const char *) uuid, sizeof(uuid), Py_None);
+#endif
+}
+```
+
+The return type is always `(bytes, int_or_None)`. The status integer tells
+`uuid.py` whether the result is based on a stable MAC address (`0`) or is
+random due to a missing network interface. When the non-safe fallback is
+used, `None` is returned in the status position to signal the uncertainty.
+
+### Module exec: capability flags (lines 94 to 123)
+
+<CpyLink path="Modules/_uuidmodule.c" lines="94-123" />
+
+Rather than exporting capabilities as runtime function calls, the module records
+them as integer constants during the exec slot:
+
+```c
+static int
+uuid_exec(PyObject *module)
+{
+#if defined(MS_WINDOWS)
+    ADD_INT("has_uuid_generate_time_safe", 0);
+#elif defined(HAVE_UUID_GENERATE_TIME_SAFE)
+    ADD_INT("has_uuid_generate_time_safe", 1);
+#else
+    ADD_INT("has_uuid_generate_time_safe", 0);
+#endif
+#if defined(MS_WINDOWS)
+    ADD_INT("has_stable_extractable_node", py_windows_has_stable_node());
+#elif defined(HAVE_UUID_GENERATE_TIME_SAFE_STABLE_MAC)
+    ADD_INT("has_stable_extractable_node", 1);
+#else
+    ADD_INT("has_stable_extractable_node", 0);
+#endif
+    return 0;
+}
+```
+
+`py_windows_has_stable_node()` is the one case where a runtime call is needed:
+it actually invokes `UuidCreateSequential` and checks whether the return code is
+`RPC_S_OK` (meaning a real MAC address was available) rather than
+`RPC_S_UUID_LOCAL_ONLY` or `RPC_S_UUID_NO_ADDRESS`.
+
+### Windows path (lines 55 to 91)
+
+<CpyLink path="Modules/_uuidmodule.c" lines="55-91" />
+
+On Windows, `UuidCreateSequential` is called inside an allow-threads block and
+the three success codes are collapsed into a single `bytes` return:
+
+```c
+Py_BEGIN_ALLOW_THREADS
+res = UuidCreateSequential(&uuid);
+Py_END_ALLOW_THREADS
+
+switch (res) {
+case RPC_S_OK:
+case RPC_S_UUID_LOCAL_ONLY:
+case RPC_S_UUID_NO_ADDRESS:
+    return Py_BuildValue("y#", (const char *)&uuid, sizeof(uuid));
+}
+PyErr_SetFromWindowsErr(res);
+return NULL;
+```
+
+Unlike the POSIX variant, the Windows function does not return a status code to
+the caller: `uuid.py` uses the `has_stable_extractable_node` flag set at import
+time to decide whether the node bytes can be trusted as a real MAC address.
+
+## gopy mirror
+
+Not yet ported.
+
+## CPython 3.14 changes
+
+3.14 added `Py_mod_gil = Py_MOD_GIL_NOT_USED` to `uuid_slots` (line 138),
+declaring the module safe under the free-threaded build. The file also switched
+to `Py_LIMITED_API 0x030d0000` (3.13) when the GIL is enabled, which slightly
+narrows the API surface used and allows the extension to be built as a stable-ABI
+wheel. The new `HAVE_UUID_GENERATE_TIME_SAFE_STABLE_MAC` guard (line 116) was
+added to let packagers advertise that a particular libuuid build guarantees a
+real hardware MAC in the time-based UUID.

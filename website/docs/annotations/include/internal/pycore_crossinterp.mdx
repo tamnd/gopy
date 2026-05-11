@@ -1,0 +1,155 @@
+---
+title: Include/internal/pycore_crossinterp.h
+description: Internal API for cross-interpreter data sharing, sessions, and lifecycle under the PEP 734 sub-interpreter model.
+cpython_path: Include/internal/pycore_crossinterp.h
+cpython_version: "3.14"
+lines: 406
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Include/internal/pycore_crossinterp.h`
+
+<CpyLink path="Include/internal/pycore_crossinterp.h" />
+
+The central internal header for everything that crosses an interpreter boundary inside a
+single CPython process. The file defines `_PyXIData_t` (the typed data capsule that carries
+a shareable representation of a Python object), the session API (`_PyXI_session`) used to
+enter and exit a foreign interpreter safely, the error-propagation machinery
+(`_PyXI_excinfo`, `_PyXI_failure`), and the per-interpreter state structs
+(`_PyXI_state_t`, `_PyXI_global_state_t`). It also includes
+`pycore_crossinterp_data_registry.h` to pull in the type-registration tables.
+
+The PEP 734 sub-interpreter model requires that objects sent between interpreters are either
+immortal, type objects, or wrapped as cross-interp data via `_PyObject_GetXIData`. All other
+objects violate interpreter isolation and must not be shared directly. This header is the
+implementation contract for that requirement.
+
+gopy does not yet implement sub-interpreters or isolated `PyInterpreterState` instances, so
+none of this file has been ported. It is documented here to track what will be needed when
+multi-interpreter support lands.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| 18-19 | `PyExc_InterpreterError`, `PyExc_InterpreterNotFoundError` | Public exception singletons | not yet ported |
+| 26-34 | `_Py_simple_func`, `_Py_CallInInterpreter`, `_Py_CallInInterpreterAndRawFree` | Schedule a C callback in another interpreter | not yet ported |
+| 40-85 | `_PyXIData_t` (`struct _xidata`) | Typed cross-interpreter data capsule | not yet ported |
+| 87-88 | `_PyXIData_New`, `_PyXIData_Free` | Heap-allocate / free a capsule | not yet ported |
+| 90-93 | `_PyXIData_DATA`, `_PyXIData_OBJ`, `_PyXIData_INTERPID` | Field accessor macros | not yet ported |
+| 98-129 | `_PyXIData_Init`, `_PyXIData_InitWithSize`, `_PyXIData_Clear`, setter macros | Initialise a capsule from an object | not yet ported |
+| 134-150 | `xidata_fallback_t`, `xidatafunc`, `xidatafbfunc`, `_PyXIData_getdata_t` | Function-pointer types for per-class converters | not yet ported |
+| 152-174 | `_PyXIData_Lookup`, `_PyObject_CheckXIData`, `_PyObject_GetXIData[NoFallback]` | Look up and invoke a type's converter | not yet ported |
+| 176-230 | `_PyBytes_*`, `_PyPickle_*`, `_PyMarshal_*`, `_PyCode_*`, `_PyFunction_*` XIData helpers | Built-in per-type serialisation paths | not yet ported |
+| 234-236 | `_PyXIData_NewObject`, `_PyXIData_Release`, `_PyXIData_ReleaseAndRawFree` | Deserialise or discard a capsule | not yet ported |
+| 241-243 | `#include "pycore_crossinterp_data_registry.h"` | Type-registry structs and functions | not yet ported |
+| 252-268 | `_PyXI_global_state_t`, `_PyXI_state_t` | Per-runtime and per-interpreter XI state | not yet ported |
+| 270-271 | `_PyXI_GET_GLOBAL_STATE`, `_PyXI_GET_STATE` | Accessor macros for the state structs | not yet ported |
+| 274-283 | `_PyXI_Init`, `_PyXI_Fini`, `_PyXI_InitTypes`, `_PyXI_FiniTypes`, global variants | Lifecycle functions | not yet ported |
+| 295-309 | `_PyXI_excinfo` | Cross-interpreter exception snapshot | not yet ported |
+| 306-309 | `_PyXI_NewExcInfo`, `_PyXI_FreeExcInfo`, `_PyXI_FormatExcInfo`, `_PyXI_ExcInfoAsObject` | Work with an exception snapshot | not yet ported |
+| 312-323 | `_PyXI_errcode` enum | Error classification for a session | not yet ported |
+| 325-338 | `_PyXI_failure`, `_PyXI_NewFailure`, `_PyXI_FreeFailure`, `_PyXI_InitFailure*`, `_PyXI_GetFailureCode` | Carry an error out of a session | not yet ported |
+| 336-338 | `_PyXI_UnwrapNotShareableError` | Convert `NotShareableError` back to a Python exception | not yet ported |
+| 351-384 | `_PyXI_session`, `_PyXI_session_result`, `_PyXI_Enter`, `_PyXI_Exit`, `_PyXI_GetMainNamespace`, `_PyXI_Preserve`, `_PyXI_GetPreserved` | Full session lifecycle | not yet ported |
+| 392-400 | `_PyXI_NewInterpreter`, `_PyXI_EndInterpreter` | Create / destroy an interpreter for tests | not yet ported |
+
+## Reading
+
+### Cross-interpreter data capsule: `_PyXIData_t` (lines 40 to 93)
+
+<CpyLink path="Include/internal/pycore_crossinterp.h" lines="40-93" />
+
+`_PyXIData_t` is the unit of exchange. It stores a raw `void *data` pointer, an optional
+back-reference to the originating `PyObject`, the originating interpreter's ID (used instead
+of a pointer to survive interpreter deletion), and two function pointers: `new_object` to
+reconstruct a Python object in the receiving interpreter, and `free` to release the raw data
+when done.
+
+```c
+struct _xidata {
+    void          *data;        // serialised representation
+    PyObject      *obj;         // source object (owned ref) if data is bound to it
+    int64_t        interpid;    // ID of the originating interpreter
+    xid_newobjfunc new_object;  // reconstruct on the far side
+    xid_freefunc   free;        // release data; defaults to PyMem_RawFree
+};
+```
+
+Using an interpreter ID rather than a `PyInterpreterState *` pointer is deliberate: if the
+originating interpreter is deleted before the capsule is consumed, the ID remains valid as a
+tombstone. IDs are never reused, so there is no risk of aliasing a new interpreter.
+
+### Session API: `_PyXI_Enter` and `_PyXI_Exit` (lines 341 to 384)
+
+<CpyLink path="Include/internal/pycore_crossinterp.h" lines="341-384" />
+
+A session is the safe bracket around any cross-interpreter call. `_PyXI_Enter` switches the
+current thread to the target interpreter and optionally populates its `__main__` namespace
+with values from `nsupdates`. `_PyXI_Exit` restores the original interpreter, captures any
+uncaught exception into a `_PyXI_failure`, and returns the result struct to the caller.
+
+```c
+// Enter target interpreter; inject nsupdates into __main__ if non-NULL.
+PyAPI_FUNC(int) _PyXI_Enter(
+    _PyXI_session *session,
+    PyInterpreterState *interp,
+    PyObject *nsupdates,
+    _PyXI_session_result *);
+
+// Exit and capture any failure; fill result->preserved if _PyXI_Preserve was called.
+PyAPI_FUNC(int) _PyXI_Exit(
+    _PyXI_session *,
+    _PyXI_failure *,
+    _PyXI_session_result *);
+```
+
+The `_PyXI_Preserve` / `_PyXI_GetPreserved` pair lets the caller shuttle one named value
+back across the boundary, serialised as a `_PyXIData_t` capsule on exit and deserialised on
+return.
+
+### Error propagation: `_PyXI_errcode` and `_PyXI_failure` (lines 312 to 338)
+
+<CpyLink path="Include/internal/pycore_crossinterp.h" lines="312-338" />
+
+Nine error codes cover every failure mode a session can encounter, from a plain uncaught
+exception (`_PyXI_ERR_UNCAUGHT_EXCEPTION`) to namespace injection failures and
+serialisation failures. The `_PyXI_failure` struct carries one code plus an optional
+`_PyXI_excinfo` snapshot so the originating interpreter can reconstruct or display the
+error without needing access to the target's live exception state.
+
+```c
+typedef enum error_code {
+    _PyXI_ERR_NO_ERROR               =  0,
+    _PyXI_ERR_UNCAUGHT_EXCEPTION     = -1,
+    _PyXI_ERR_OTHER                  = -2,
+    _PyXI_ERR_NO_MEMORY              = -3,
+    _PyXI_ERR_ALREADY_RUNNING        = -4,
+    _PyXI_ERR_MAIN_NS_FAILURE        = -5,
+    _PyXI_ERR_APPLY_NS_FAILURE       = -6,
+    _PyXI_ERR_PRESERVE_FAILURE       = -7,
+    _PyXI_ERR_EXC_PROPAGATION_FAILURE = -8,
+    _PyXI_ERR_NOT_SHAREABLE          = -9,
+} _PyXI_errcode;
+```
+
+## gopy mirror
+
+gopy does not yet implement `PyInterpreterState` isolation or the `_interpreters` / `_channels`
+built-in modules that exercise this API. When multi-interpreter support is added, the natural
+mapping will be: `_PyXIData_t` becomes a Go struct with an `any` data field and function
+values for `NewObject`/`Free`, and sessions map to a pair of goroutine-safe calls that
+switch the active interpreter context. The registry in `pycore_crossinterp_data_registry.h`
+maps to a `sync.Map` keyed by `*Type`.
+
+## CPython 3.14 changes
+
+3.14 is a significant reorganisation of the cross-interpreter subsystem relative to 3.12.
+`_PyCrossInterpreterData` was renamed to `_PyXIData_t` and the entire public naming
+convention shifted from `_PyCrossInterpreterData_*` to `_PyXIData_*`. The session struct
+(`_PyXI_session`) gained `_PyXI_Preserve` / `_PyXI_GetPreserved` for round-tripping a
+single value back to the caller. The `_PyXI_failure` type replaced ad-hoc `int` error
+returns. PEP 734 (`interpreters.create()`) targets 3.14 as its first stable release, making
+this header the implementation backbone of the new feature.

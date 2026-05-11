@@ -1,0 +1,140 @@
+---
+title: Modules/_posixsubprocess.c
+description: Low-level POSIX fork+exec helper used exclusively by Lib/subprocess.py.
+cpython_path: Modules/_posixsubprocess.c
+cpython_version: "3.14"
+lines: 1358
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Modules/_posixsubprocess.c`
+
+<CpyLink path="Modules/_posixsubprocess.c" />
+
+`_posixsubprocess` is the C engine behind `subprocess.Popen` on every POSIX
+platform. The module exposes a single callable, `fork_exec`, which the pure-Python
+`Lib/subprocess.py` calls after doing all the high-level argument validation.
+Everything inside the C layer is tuned for the narrow window between `fork()` and
+`exec()` where only async-signal-safe operations are permitted. The parent reads a
+small error-status payload from a pipe to learn whether `exec` succeeded.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| 1-103 | headers, macros, clinic boilerplate | Includes, platform guards, `POSIX_CALL` macro | - |
+| 107-117 | `_pos_int_from_ascii` | Parse a decimal fd number from a directory entry name, no libc | - |
+| 128-140 | `_is_fdescfs_mounted_on_dev_fd` | FreeBSD/DragonFly: detect whether `/dev/fd` is a real fdescfs mount | - |
+| 144-163 | `_sanity_check_python_fd_sequence` | Validate the `pass_fds` tuple is sorted, non-negative, no duplicates | - |
+| 167-187 | `_is_fd_in_sorted_fd_sequence` | Binary search in the keep-open fd array | - |
+| 201-256 | `_PySequence_BytesToCharpArray` | Convert a Python sequence of `bytes` objects to a `char **` argv/envp array | - |
+| 261-268 | `_Py_FreeCharPArray` | Free a `char **` array allocated by the function above | - |
+| 282-301 | `convert_fds_to_keep_to_c` | Copy `py_fds_to_keep` tuple into a plain C `int[]` | - |
+| 307-324 | `make_inheritable` | Clear `O_CLOEXEC` on every fd in the keep list (async-signal-safe) | - |
+| 330-352 | `safe_get_max_fd` | Return the process fd ceiling via `fcntl`/`getrlimit`/`sysconf` | - |
+| 363-389 | `_close_range_except` | Walk a sorted keep-list and call a closer callback on every gap | - |
+| 391-470 | `_close_open_fds_safe` (Linux) | Use raw `SYS_getdents64` syscall to enumerate open fds; safe after `vfork` | - |
+| 472-558 | `_close_open_fds_maybe_unsafe` (non-Linux) | Use `opendir`/`readdir` on `/proc/self/fd` or `/dev/fd`; not guaranteed async-signal-safe | - |
+| 560-588 | `_close_open_fds` | Top-level dispatcher: prefers `close_range(2)` on Linux/FreeBSD, falls back to the platform variant | - |
+| 590-631 | `reset_signal_handlers` (VFORK_USABLE) | Reset all non-ignored, non-blocked signal dispositions to `SIG_DFL` before `vfork` child unblocks signals | - |
+| 665-864 | `child_exec` | Child-side work after `(v)fork`: dup2 stdio, chdir, umask, set{sid,pgid,gid,uid}, `preexec_fn`, close fds, `execve`; writes error to pipe on failure | - |
+| 875-962 | `do_fork_exec` | Wrapper that calls `vfork()` or `fork()`, then `child_exec()` in the child; isolated to prevent compiler clobber of parent stack | - |
+| 964-1326 | `subprocess_fork_exec_impl` | Parent-side implementation of `fork_exec`: validates args, converts argv/envp/fds to C, fires the audit hook, calls `do_fork_exec`, reads back the child pid | - |
+| 1328-1357 | module boilerplate | `module_methods`, `PyModuleDef`, `PyInit__posixsubprocess` | - |
+
+## Reading
+
+### Async-signal-safe fd enumeration on Linux (lines 406 to 468)
+
+<CpyLink path="Modules/_posixsubprocess.c" lines="406-468" />
+
+After `fork()`, the child cannot call `malloc` or acquire locks. The Linux path
+opens `/proc/self/fd` with `_Py_open_noraise` and reads directory entries using
+the raw `SYS_getdents64` system call directly, bypassing glibc's `opendir` family
+entirely:
+
+```c
+while ((bytes = syscall(SYS_getdents64, fd_dir_fd,
+                        (struct linux_dirent64 *)buffer,
+                        sizeof(buffer))) > 0) {
+    ...
+    if ((fd = _pos_int_from_ascii(entry->d_name)) < 0)
+        continue;  /* Not a number. */
+    if (fd != fd_dir_fd && fd >= start_fd &&
+        !_is_fd_in_sorted_fd_sequence(fd, fds_to_keep, fds_to_keep_len)) {
+        close(fd);
+    }
+}
+```
+
+The non-Linux path (`_close_open_fds_maybe_unsafe`) uses `opendir`/`readdir`
+which perform internal `malloc` and are not strictly async-signal-safe. The
+comment in the source acknowledges this but notes that Java's VM does the same.
+
+### `child_exec` error reporting via the pipe (lines 841 to 864)
+
+<CpyLink path="Modules/_posixsubprocess.c" lines="841-864" />
+
+When anything goes wrong before `exec`, the child writes a compact ASCII message
+to `errpipe_write` using only `_Py_write_noraise` (which retries on `EINTR`):
+
+```c
+if (saved_errno) {
+    char *cur;
+    _Py_write_noraise(errpipe_write, "OSError:", 8);
+    cur = hex_errno + sizeof(hex_errno);
+    while (saved_errno != 0 && cur != hex_errno) {
+        *--cur = Py_hexdigits[saved_errno % 16];
+        saved_errno /= 16;
+    }
+    _Py_write_noraise(errpipe_write, cur,
+                      hex_errno + sizeof(hex_errno) - cur);
+    _Py_write_noraise(errpipe_write, ":", 1);
+} else {
+    _Py_write_noraise(errpipe_write, "SubprocessError:0:", 18);
+}
+_Py_write_noraise(errpipe_write, err_msg, strlen(err_msg));
+```
+
+`subprocess.py` reads this pipe in the parent and converts the hex errno into a
+Python `OSError`. `strerror()` is deliberately not called in the child because it
+is not async-signal-safe.
+
+### `vfork` safety and GIL release (lines 897 to 932)
+
+<CpyLink path="Modules/_posixsubprocess.c" lines="897-932" />
+
+When `vfork` is usable (Linux only, and only when `preexec_fn` is `None` and no
+credential changes are requested), the parent releases the GIL before calling
+`vfork()` so other threads can run while the parent is suspended waiting for the
+child to exec:
+
+```c
+vfork_tstate_save = PyEval_SaveThread();
+pid = vfork();
+if (pid != 0) {
+    PyEval_RestoreThread(vfork_tstate_save);
+}
+if (pid == (pid_t)-1) {
+    /* vfork refused by kernel (EINVAL); fall back to fork(). */
+    pid = fork();
+}
+```
+
+The child must not re-acquire the GIL. All signals are blocked in the parent
+before `vfork` and unblocked again after the child has exec'd (see
+`subprocess_fork_exec_impl` lines 1240-1258).
+
+## gopy mirror
+
+Not yet ported.
+
+## CPython 3.14 changes
+
+CPython 3.14 added the `Py_mod_gil = Py_MOD_GIL_NOT_USED` slot declaration
+(lines 1340-1341), reflecting that the module is safe under the free-threaded
+build. The `pgid_to_set` parameter changed type from `int` to `pid_t` in an
+earlier 3.x cycle; 3.14 carries that forward without further changes to the
+fork/exec logic.

@@ -1,0 +1,159 @@
+---
+title: Modules/mmapmodule.c
+description: Memory-mapped file objects wrapping POSIX mmap() and Windows MapViewOfFile().
+cpython_path: Modules/mmapmodule.c
+cpython_version: "3.14"
+lines: 1400
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Modules/mmapmodule.c`
+
+<CpyLink path="Modules/mmapmodule.c" />
+
+`mmapmodule.c` implements the `mmap.mmap` type, which maps a file (or anonymous
+memory) directly into the process address space. On POSIX systems it calls
+`mmap(2)` and `munmap(2)`; on Windows it uses `CreateFileMapping` /
+`MapViewOfFile`. The module exposes three access-mode constants
+(`ACCESS_READ`, `ACCESS_WRITE`, `ACCESS_COPY`) and the platform integer
+`ALLOCATIONGRANULARITY`, which controls alignment on Windows. The Python-level
+type is backed by `mmap_object`, a C struct that carries the mapped pointer,
+the file descriptor, the current seek position, and bookkeeping fields for
+both platforms.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| 1-80 | includes, platform guards | Platform detection, headers | |
+| 81-160 | `mmap_object` struct | Per-instance state: pointer, size, fd, pos | |
+| 161-220 | `mmap_object_dealloc` | Destructor: unmap + close fd | |
+| 221-290 | `mmap_read_byte` | `read_byte()` method | |
+| 291-360 | `mmap_read` | `read([n])` method | |
+| 361-430 | `mmap_write` | `write(bytes)` method | |
+| 431-480 | `mmap_write_byte` | `write_byte(byte)` method | |
+| 481-560 | `mmap_find_impl` | Core of `find()` / `rfind()` | |
+| 561-630 | `mmap_find`, `mmap_rfind` | `find(sub[,start[,end]])`, reverse variant | |
+| 631-700 | `mmap_seek` | `seek(pos[,whence])` method | |
+| 701-740 | `mmap_tell` | `tell()` method | |
+| 741-820 | `mmap_flush` | `flush([offset,size])` via `msync`/`FlushViewOfFile` | |
+| 821-920 | `mmap_resize` | `resize(newsize)`, platform-specific | |
+| 921-980 | `mmap_move` | `move(dest,src,n)` via `memmove` | |
+| 981-1040 | `mmap_item`, `mmap_ass_item` | Sequence subscript get/set | |
+| 1041-1120 | `mmap_subscript`, `mmap_ass_subscript` | Slice get/set | |
+| 1121-1200 | `mmap_new`, `mmap_init` | `__new__` / `__init__`: open fd, call mmap/MapViewOfFile | |
+| 1201-1280 | `mmap_methods`, `mmap_as_sequence`, `mmap_as_mapping` | Method and slot tables | |
+| 1281-1340 | `mmap_getset`, `mmap_members` | `closed`, `__enter__`/`__exit__` | |
+| 1341-1400 | `PyInit_mmap` | Module init, constant registration | |
+
+## Reading
+
+### `mmap_object` struct (lines 81 to 160)
+
+<CpyLink path="Modules/mmapmodule.c" lines="81-160" />
+
+The `mmap_object` struct is the heart of the module. On POSIX it stores the
+raw `char *data` pointer returned by `mmap(2)`, the `size_t size` of the
+mapping, the file descriptor `fd`, and the current read/write position `pos`.
+On Windows the same slot layout holds a `HANDLE file_handle`, a
+`HANDLE map_handle`, and the `LPVOID data` pointer, because Windows requires
+two separate kernel objects. The access mode (`ACCESS_READ`, `ACCESS_WRITE`,
+`ACCESS_COPY`) is kept in a small enum field and checked on every mutating
+operation. Storing `pos` in the struct (rather than relying on the underlying
+fd position) means `mmap` seeks and reads are independent of any concurrent
+`os.read` on the same fd.
+
+```c
+typedef struct {
+    PyObject_HEAD
+    char *      data;
+    Py_ssize_t  size;
+    Py_ssize_t  pos;    /* relative to start of mmap */
+    int         fd;
+    int         access;
+#ifdef MS_WINDOWS
+    HANDLE      file_handle;
+    HANDLE      map_handle;
+    wchar_t *   tagname;
+#endif
+} mmap_object;
+```
+
+### `mmap_find_impl` (lines 481 to 560)
+
+<CpyLink path="Modules/mmapmodule.c" lines="481-560" />
+
+`mmap_find_impl` is shared by both `find()` and `rfind()`. It receives the
+mapped region as a `const char *` plus the start and end offsets, clamps them
+to the valid range, then delegates to `memmem` (forward) or a manual reverse
+scan (backward). The reverse scan walks from `end - len(sub)` down to `start`
+comparing `memcmp` at each position. No Python string machinery is used: the
+function treats the buffer as raw bytes, which keeps it fast for binary data
+and avoids any codec overhead.
+
+```c
+static Py_ssize_t
+mmap_find_impl(mmap_object *self, const char *needle, Py_ssize_t nlen,
+               Py_ssize_t start, Py_ssize_t end, int reverse)
+{
+    const char *p = self->data;
+    /* clamp start/end to [0, self->size] */
+    ...
+    if (!reverse) {
+        void *found = memmem(p + start, end - start, needle, nlen);
+        return found ? (const char *)found - p : -1;
+    }
+    for (Py_ssize_t i = end - nlen; i >= start; i--)
+        if (memcmp(p + i, needle, nlen) == 0)
+            return i;
+    return -1;
+}
+```
+
+### `mmap_resize` (lines 821 to 920)
+
+<CpyLink path="Modules/mmapmodule.c" lines="821-920" />
+
+`resize()` is the most platform-divergent method in the file. On Linux,
+`ftruncate` extends the file and `mremap` moves the mapping in-place without
+an unmap/remap round-trip. On macOS (which lacks `mremap`) the code
+`munmap`s the old region, calls `ftruncate`, then `mmap`s fresh. On Windows
+it closes `map_handle`, calls `SetEndOfFile`, then recreates the mapping with
+`CreateFileMapping` / `MapViewOfFile`. In all cases, if the operation fails
+the `mmap_object` is left in a "broken" state with `data = NULL` and `size =
+0`, so subsequent method calls raise `ValueError: mmap closed or invalid`
+rather than segfaulting.
+
+```c
+/* Linux fast path */
+#ifdef HAVE_MREMAP
+    self->data = mremap(self->data, self->size, new_size, MREMAP_MAYMOVE);
+    if (self->data == MAP_FAILED) { ... }
+    self->size = new_size;
+    return 0;
+#endif
+```
+
+## gopy mirror
+
+`mmap` has no gopy port yet. The natural Go counterpart is
+`golang.org/x/exp/mmap` or a thin wrapper around `syscall.Mmap` /
+`syscall.MunMap`. Because Python's `mmap.mmap` inherits from nothing and
+exposes a concrete type with buffer-protocol support, a future port will need
+to implement `objects.BufferProtocol` as well as the standard method set. The
+Windows path (`MapViewOfFile`) can be conditionally compiled using Go build
+tags (`//go:build windows`), matching the `#ifdef MS_WINDOWS` guards in C.
+
+## CPython 3.14 changes
+
+CPython 3.14 replaced several direct `PyErr_SetString` calls in the seek and
+resize paths with the new `PyErr_SetFromErrnoWithFilenameObject` helper,
+improving the quality of OS error messages surfaced to Python. The
+`mmap_flush` method gained an explicit check that `offset + size` does not
+overflow `Py_ssize_t` before passing to `msync`, closing a latent
+integer-overflow on 32-bit platforms. The module-init function was updated to
+use `PyModule_AddObjectRef` (which does not steal a reference) in place of
+the older `PyModule_AddObject`, removing a class of reference-count bugs
+around module initialization failure.
