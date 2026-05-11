@@ -1,0 +1,109 @@
+---
+title: Modules/_io/stringio.c
+description: "Annotation: CPython in-memory text stream — StringIO type"
+cpython_path: Modules/_io/stringio.c
+cpython_version: "3.14"
+lines: 700
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/_io/stringio.c" />
+
+`StringIO` is the text-mode counterpart to `BytesIO`. Its internal representation is a single mutable Unicode buffer (`_PyUnicodeWriter`) rather than a bytes object, and all positions are counted in characters (code points), not bytes. Newline handling adds a second axis of complexity that has no parallel in `BytesIO`.
+
+## Map
+
+| Symbol | Kind | Lines (approx) | Purpose |
+|---|---|---|---|
+| `stringio_init` | method | 45–110 | `__init__`, parse newline arg, optional initial value |
+| `stringio_write` | method | 170–240 | translate newlines then append to buffer |
+| `stringio_read` | method | 245–290 | read n chars or to EOF |
+| `stringio_readline` | method | 291–355 | scan for newline respecting mode |
+| `stringio_readlines` | method | 356–390 | collect all lines |
+| `stringio_seek` | method | 395–445 | reposition in char units |
+| `stringio_tell` | method | 446–460 | return pos in char units |
+| `stringio_truncate` | method | 461–510 | shorten buffer, reset pos if needed |
+| `stringio_getvalue` | method | 511–540 | join buffer into one str |
+| `stringio_close` | method | 541–570 | release buffer |
+| `stringio_get_newlines` | getter | 571–590 | return observed newline styles |
+| `stringio_get_line_buffering` | getter | 591–600 | always False |
+
+## Reading
+
+### stringio_init: newline mode parsing
+
+The `newline` argument controls two independent behaviours: translation on write and recognition on read. The legal values are `None`, `""`, `"\n"`, `"\r"`, and `"\r\n"`. `None` is universal mode (translate any sequence to `"\n"`). `""` is universal mode without translation (pass through but recognise all sequences). A specific string means only that sequence is treated as a line terminator.
+
+```python
+# CPython: Modules/_io/stringio.c:45 stringio_init
+```
+
+The C code stores the parsed `newline` argument as a `PyObject *` field `self->readnl` (for readline) and a separate flag `self->writenl` (for write). When `newline=None`, `writenl` is set to `"\n"` (outgoing `\r\n` or `\r` are normalised). When `newline=""` or `newline="\n"`, no translation is done on write. When `newline="\r\n"`, outgoing `\n` is expanded to `\r\n`.
+
+```c
+// CPython: Modules/_io/stringio.c:80 stringio_init
+    if (newline_obj == Py_None) {
+        self->readnl  = NULL;   /* universal */
+        self->writenl = "\n";   /* translate to \n */
+    } else {
+        /* specific or empty — store as-is */
+        Py_INCREF(newline_obj);
+        self->readnl = newline_obj;
+        if (PyUnicode_CompareWithASCIIString(newline_obj, "\r\n") == 0)
+            self->writenl = "\r\n";
+        else
+            self->writenl = NULL;  /* no write translation */
+    }
+```
+
+### stringio_write: appending to the internal buffer
+
+`StringIO` keeps its content in a `_PyUnicodeWriter`, which is a write-once accumulator that defers committing to a final `PyUnicodeObject` until `getvalue` is called. Writes at positions other than the end are handled by materialising the current buffer, performing a string-level splice, and reinitialising the writer from the result. This is the one case where `StringIO` is less efficient than `BytesIO`, because Unicode objects are immutable and mid-stream random writes require a full copy.
+
+```c
+// CPython: Modules/_io/stringio.c:170 stringio_write
+    if (self->writenl != NULL) {
+        /* translate \n to writenl in decoded */
+        decoded = PyUnicode_Replace(decoded,
+                      _PyIO_str_nl, self->writenl_obj, -1);
+        ...
+    }
+    if (_PyUnicodeWriter_WriteStr(&self->writer, decoded) < 0)
+        goto error;
+    self->pos += PyUnicode_GET_LENGTH(decoded);
+```
+
+### stringio_read and stringio_readline: character-unit positions
+
+All positions in `StringIO` are character counts, not byte offsets. This means `tell` and `seek` are directly comparable to `len(str[:n])` rather than to any encoding. `stringio_read` slices the materialised buffer from `self->pos` to `self->pos + n` and advances `pos`. `stringio_readline` scans forward from `pos` looking for the appropriate line terminator as determined by `readnl`. In universal mode (`readnl=NULL`) it recognises `\n`, `\r\n`, and `\r` and reports each observed style via `self->seen_newlines`.
+
+`stringio_seek` with `whence=0` simply assigns `pos`; with `whence=1` it adds the (signed) offset; `whence=2` is anchored to the current buffer length. Seeking past the end is legal, just as in `BytesIO`. A subsequent write at that position pads with null characters to fill the gap.
+
+`getvalue` materialises whatever is in the `_PyUnicodeWriter` via `_PyUnicodeWriter_Finish` (which is destructive), then caches the result and returns it. After `getvalue`, internal writes must reinitialise the writer from the cached string.
+
+```c
+// CPython: Modules/_io/stringio.c:511 stringio_getvalue
+    if (self->state == STATE_ACCUMULATING) {
+        self->readstring = _PyUnicodeWriter_Finish(&self->writer);
+        if (self->readstring == NULL)
+            return NULL;
+        self->state = STATE_REALIZED;
+    }
+    return Py_NewRef(self->readstring);
+```
+
+## gopy notes
+
+Status: not yet ported.
+
+Planned package path: `module/io/` (will contain `stringio.go`).
+
+Key porting considerations:
+
+- Go's `strings.Builder` is the closest analogue to `_PyUnicodeWriter`. It supports efficient sequential appending and materialises via `String()`, which matches the `getvalue` pattern.
+- Character-unit positions map to rune indices in Go. All slice operations must use `[]rune` or `utf8.RuneCountInString` rather than byte offsets, or the positions will be wrong for any non-ASCII content.
+- Newline translation on write is straightforward with `strings.ReplaceAll`, applied before appending to the builder.
+- The readline universal-mode scan must handle the `\r\n` case as a single terminator (not two), so the scanner must look ahead one rune when it sees `\r`.
+- Mid-buffer random writes (pos less than current length) require materialising via `String()`, splicing in Go string arithmetic, then resetting the builder and writing the result back in. This matches CPython's approach and should be documented as a known performance cliff for that usage pattern.

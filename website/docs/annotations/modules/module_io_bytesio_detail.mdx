@@ -1,0 +1,115 @@
+---
+title: Modules/_io/bytesio.c
+description: "Annotation: CPython in-memory bytes stream — BytesIO type"
+cpython_path: Modules/_io/bytesio.c
+cpython_version: "3.14"
+lines: 800
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/_io/bytesio.c" />
+
+`BytesIO` is a fully in-memory stream over a mutable byte buffer. Because there is no OS resource involved, none of these methods release the GIL. The interesting engineering problems are buffer growth strategy and the export-count lock that prevents mutation while a `memoryview` is alive over the internal buffer.
+
+## Map
+
+| Symbol | Kind | Lines (approx) | Purpose |
+|---|---|---|---|
+| `bytesio_init` | method | 50–90 | `__init__`, optional initial bytes |
+| `bytesio_write` | method | 210–280 | append or overwrite, grow buffer |
+| `bytesio_read` | method | 140–175 | read up to n bytes from pos |
+| `bytesio_read1` | method | 176–195 | alias for read (no buffering layer) |
+| `bytesio_readinto` | method | 196–212 | read into caller buffer |
+| `bytesio_readline` | method | 285–325 | scan for newline from pos |
+| `bytesio_readlines` | method | 326–365 | collect all lines |
+| `bytesio_seek` | method | 370–415 | reposition, whence 0/1/2 |
+| `bytesio_tell` | method | 416–425 | return current pos |
+| `bytesio_truncate` | method | 426–475 | shrink or pad buffer |
+| `bytesio_getvalue` | method | 476–495 | return bytes snapshot of buffer |
+| `bytesio_getbuffer` | method | 496–540 | export buffer, increment export count |
+| `bytesio_close` | method | 541–570 | mark closed, release buffer |
+
+## Reading
+
+### bytesio_write: buffer growth
+
+When the write position plus the incoming data length exceeds the current buffer size, `bytesio_write` must grow the buffer. CPython resizes the underlying `PyBytesObject` in place using `_PyBytes_Resize`. The growth is exact (new size = position + incoming length), not exponential, because `BytesIO` is typically used in two patterns: a single sequential write followed by `getvalue`, or a fixed-size overwrite at a known position. Amortised doubling would waste memory in both cases.
+
+```c
+// CPython: Modules/_io/bytesio.c:210 bytesio_write
+    if (self->exports > 0) {
+        PyErr_SetString(PyExc_BufferError,
+            "Existing exports of data: object cannot be re-sized");
+        return NULL;
+    }
+    endpos = (Py_ssize_t)self->pos + size;
+    if (endpos > self->string_size) {
+        if (resize_buffer(self, endpos) < 0)
+            return NULL;
+    }
+    memcpy(PyBytes_AS_STRING(self->buf) + self->pos,
+           pbuf.buf, size);
+    self->pos = endpos;
+```
+
+The `exports > 0` guard is the export-count lock (see below). If it fires, the write is rejected with `BufferError` rather than silently corrupting any live `memoryview`.
+
+### bytesio_read and bytesio_seek: position tracking
+
+All read methods advance `self->pos` by the number of bytes consumed. `bytesio_seek` implements all three `whence` values: 0 (from start), 1 (from current position), 2 (from end). Seeking past the end of the buffer is legal and simply moves `pos` forward; the buffer is not extended until a subsequent write.
+
+```c
+// CPython: Modules/_io/bytesio.c:370 bytesio_seek
+    switch (whence) {
+    case 0:   /* SEEK_SET */
+        if (rawoffset < 0) { ... }
+        self->pos = (size_t)rawoffset;
+        break;
+    case 1:   /* SEEK_CUR */
+        if (rawoffset < 0 && self->pos < (size_t)(-rawoffset)) { ... }
+        self->pos += rawoffset;
+        break;
+    case 2:   /* SEEK_END */
+        if (rawoffset < 0 && self->string_size < (size_t)(-rawoffset)) { ... }
+        self->pos = self->string_size + rawoffset;
+        break;
+    }
+    return PyLong_FromSize_t(self->pos);
+```
+
+### getvalue and the export-count lock
+
+`bytesio_getvalue` returns a fresh `bytes` object that is a snapshot of the current buffer contents (sliced from 0 to `string_size`). It does not transfer ownership of the internal buffer, so the returned object is independent and safe to hold after further writes.
+
+`bytesio_getbuffer` is different: it exports the raw `PyBytesObject` storage directly via the buffer protocol (a `memoryview` can point into it with zero copy). To prevent the buffer from being reallocated while the view is alive, the export count `self->exports` is incremented on each `getbuffer` call and decremented in the corresponding `releasebuffer` callback. Any call to `bytesio_write` that would require a resize checks this count first and raises `BufferError` if it is nonzero.
+
+```c
+// CPython: Modules/_io/bytesio.c:496 bytesio_getbuffer
+static int
+bytesio_getbuffer(bytesio *self, Py_buffer *view, int flags)
+{
+    CHECK_INITIALIZED(self);
+    CHECK_CLOSED(self);
+    if (PyBuffer_FillInfo(view, (PyObject*)self,
+                          PyBytes_AS_STRING(self->buf),
+                          self->string_size, 0, flags) < 0)
+        return -1;
+    self->exports++;
+    return 0;
+}
+```
+
+## gopy notes
+
+Status: not yet ported.
+
+Planned package path: `module/io/` (will contain `bytesio.go`).
+
+Key porting considerations:
+
+- The internal buffer maps naturally to a Go `[]byte`. Growth-on-write can use `append` with an explicit length cap to match CPython's exact-size semantics.
+- The export-count lock must be an `int32` field incremented/decremented atomically if the Go runtime can call `getbuffer` from multiple goroutines. A simpler single-threaded model just uses a plain counter guarded by a check at the top of every mutating method.
+- `getvalue` should copy the slice (`bytes(buf[:pos])` equivalent) to preserve snapshot semantics.
+- `getbuffer` / `releasebuffer` will require implementing the buffer-protocol interface on the Go object type, which is not yet defined in gopy's object model.

@@ -1,160 +1,166 @@
 ---
-title: "Lib/re/_parser.py"
-description: "Tokenises a regex string and builds a SubPattern tree for the _compiler stage"
+title: Lib/re/_parser.py
+description: "Annotated reading: Lib/re/_parser.py"
 cpython_path: Lib/re/_parser.py
 cpython_version: "3.14"
-lines: 900
+lines: 1000
 status: annotated
 ---
 
 import {Cpy, CpyLink} from '@site/src/components/Cpy';
 
-`_parser.py` is the front end of the regex pipeline.
-It reads a raw pattern string character by character and returns a `SubPattern` tree that `_compiler` later converts to opcodes.
-No C code is involved at this stage; the entire tokeniser and recursive-descent parser are pure Python.
+Source: <CpyLink path="Lib/re/_parser.py" />
+
+`_parser.py` converts a raw pattern string into a `SubPattern` tree. Every
+node in the tree is an `(opcode, data)` pair. The top-level entry point is
+`parse()`; replacement-string parsing is handled separately by `parse_repl()`.
+The `Parser` class carries all mutable state: current position, group counter,
+named-group map, and inline flag accumulator.
 
 ## Map
 
 | Lines | Symbol | Role |
 |-------|--------|------|
-| 1–50 | imports, constants | node-type constants (`LITERAL`, `BRANCH`, `SUBPATTERN`, etc.), escape tables |
-| 51–150 | `Tokenizer` class | `next`, `match`, `getwhile`, `getuntil`, `seek`, `tell` |
-| 151–220 | `SubPattern` class | list-like node; holds `pattern`, `data`, implements `getwidth` |
-| 221–280 | `State` class | per-parse mutable state: group counter, flags, `groupdict` |
-| 281–360 | `_parse_repl` | parses replacement strings for `re.sub` (`\1`, `\g<name>`) |
-| 361–500 | `_parse` | main recursive-descent parser; handles literals, escapes, classes, groups, quantifiers |
-| 501–620 | `_parse` continued | alternation `|`, lookaheads/lookbehinds, named/non-capturing groups |
-| 621–720 | `_parse_flags` | inline flag syntax `(?aiLmsux)` |
-| 721–800 | `_parse_repl` helpers | group-reference resolution |
-| 801–900 | `parse`, `parse_repl` | public entry points; construct `State`, call `_parse`, return root |
+| 1-40 | imports, opcode aliases | Pulls `OPCODES` from `_constants`; sets up short aliases |
+| 41-90 | `SubPattern` class | List-like AST node, holds `(opcode, data)` pairs |
+| 91-140 | `SubPattern` methods | `append`, `getwidth`, `dump` |
+| 141-200 | `Tokenizer` class | Character-by-character scanner with one-token lookahead |
+| 201-260 | `Parser` class | State: `string`, `flags`, `groupdict`, `groupwidths`, `lookbehindgroups` |
+| 261-320 | `_parse_sub()` | Handles `|` alternation by recursing into `_parse()` |
+| 321-500 | `_parse()` | Main recursive descent: literals, `.`, `^`, `$`, `[...]`, `(...)`, quantifiers |
+| 501-600 | `_parse_flags()` | Inline `(?imsx:...)` and `(?imsx)` flag directives |
+| 601-680 | `parse_repl()` | Replacement string tokenizer for `\1`, `\g<name>` |
+| 681-780 | `_get_literal_prefix()` | Extracts a fixed prefix for fast pre-scan |
+| 781-860 | `_get_charset()` | Collects character-class items into a list |
+| 861-920 | group numbering helpers | `open_group`, `close_group`, `checkgroup`, `checklookbehindgroup` |
+| 921-1000 | `parse()` | Top-level entry: calls `_parse_sub`, validates flags, returns `SubPattern` |
 
 ## Reading
 
-### The `Tokenizer`
+### SubPattern AST nodes
 
-`Tokenizer` wraps the raw source string with a position cursor.
-`getwhile` consumes characters matching a predicate; `getuntil` reads up to a delimiter.
-Both are used heavily inside `_parse` to consume digit runs and named-group identifiers.
+Every node is an `(opcode, data)` pair appended to a `SubPattern`. A
+`SubPattern` is essentially a typed list that also caches its minimum and
+maximum width for the optimizer. The `data` field varies by opcode: for
+`LITERAL` it is an integer codepoint; for `SUBPATTERN` it is a 4-tuple of
+`(group_id, add_flags, del_flags, pattern)`; for `BRANCH` it is a list of
+alternative `SubPattern` objects.
 
 ```python
-# CPython: Lib/re/_parser.py:51 Tokenizer
-class Tokenizer:
-    def __init__(self, string):
-        self.string = string
-        self.pos = 0
-        self.next = None
-        self.__next()
+# CPython: Lib/re/_parser.py:91 SubPattern
+class SubPattern:
+    """A subpattern, in intermediate form."""
+    def __init__(self, pattern, data=None):
+        self.pattern = pattern
+        if data is None:
+            data = []
+        self.data = data
+        self.width = None
 
-    def __next(self):
-        if self.pos < len(self.string):
-            self.next = self.string[self.pos]
-        else:
-            self.next = None
-
-    def match(self, char):
-        if char == self.next:
-            self.__next()
-            self.pos += 1
-            return True
-        return False
-
-    def getwhile(self, n, charset):
-        result = ''
-        for _ in range(n):
-            c = self.next
-            if c not in charset:
-                break
-            result += c
-            self.__next()
-            self.pos += 1
-        return result
+    def dump(self, level=0):
+        nl = True
+        seqtypes = (tuple, list)
+        for op, av in self.data:
+            ...
 ```
 
-### `_parse` dispatch loop
+Width caching matters because `_compiler.py` uses `getwidth()` during
+look-behind validation to reject variable-width look-behinds at compile time,
+not at match time.
 
-The main loop consumes one token at a time and branches on its value.
-Literal characters are collected in a run to form a single `LITERAL` or `LITERAL_IGNORE` node.
-Special characters trigger sub-parsers for groups, character classes, and quantifiers.
+### Parser class and _parse() state machine
+
+`Parser` is instantiated once per `parse()` call. The most important fields
+are `groupdict` (name to group-id mapping) and `open_groups` (set of groups
+whose closing `)` has not yet been seen, used to reject forward references in
+back-references).
+
+`_parse()` is a large loop over the tokenizer. The key branches are shown
+below. Quantifiers (`*`, `+`, `?`, and bounded repeats) are handled after the main
+dispatch chain. They pop the last appended item, wrap it in a `MAX_REPEAT` or
+`MIN_REPEAT` node, and push that back.
 
 ```python
-# CPython: Lib/re/_parser.py:361 _parse
+# CPython: Lib/re/_parser.py:395 _parse
 def _parse(source, state, verbose, nested, first=False):
-    subpattern = SubPattern(state)
     while True:
-        this = source.next
+        this = source.get()
+        if this is None:
+            break  # end of pattern
+        if this in SPECIAL_CHARS:
+            if this == ".":
+                subpatternappend((ANY, None))
+            elif this == "^":
+                subpatternappend((AT, AT_BEGINNING))
+            elif this == "$":
+                subpatternappend((AT, AT_END))
+            elif this in "([":
+                ...
+```
+
+### _parse_flags() and inline flag directives
+
+`(?imsx)` sets flags for the whole pattern. `(?imsx:...)` sets flags only
+inside the group. The function tracks which flags were added and which were
+removed so that `_compiler.py` can emit `SUBPATTERN` nodes with `add_flags` and
+`del_flags` fields. Conflicting flags (e.g. `ASCII` combined with `LOCALE`) are
+rejected here with a `re.error`, before the compiler ever sees the tree.
+
+```python
+# CPython: Lib/re/_parser.py:501 _parse_flags
+def _parse_flags(source, state, char):
+    sourceget = source.get
+    add_flags = 0
+    del_flags = 0
+    while True:
+        flag = FLAGS[char]
+        if source.next == "-":
+            ...
+            while True:
+                flag = FLAGS[char]
+                del_flags |= flag
+                ...
+        else:
+            add_flags |= flag
+        ...
+    return add_flags, del_flags
+```
+
+### parse_repl() for replacement strings
+
+`parse_repl()` is independent of `_parse()`. It walks a replacement string and
+produces a list of either literal strings or `(MARK, group_id)` pairs. The
+caller in `re.__init__` uses this list to build the replacement by joining
+literals and substituting group captures.
+
+```python
+# CPython: Lib/re/_parser.py:636 parse_repl
+def parse_repl(source, pattern):
+    s = Tokenizer(source)
+    p = []
+    while True:
+        this = s.get()
         if this is None:
             break
-        if this in '|)':
-            break
-        source.next  # advance
-        if this == '.':
-            subpattern.append((ANY, None))
-        elif this == '^':
-            subpattern.append((AT, AT_BEGINNING))
-        elif this == '$':
-            subpattern.append((AT, AT_END))
-        elif this == '[':
-            subpattern.append(_parse_character_class(source, state, verbose))
-        elif this == '(':
-            subpattern.append(_parse_group(source, state, verbose, nested + 1))
-        ...
-    return subpattern
+        if this[0] == "\\":
+            ...
+            p.append(getgroup(escape, pattern))
+        else:
+            p.append((LITERAL, this))
+    return p
 ```
 
-### Quantifier handling
-
-After any atom is parsed, `_parse` checks whether the next character is `*`, `+`, `?`, or `{`.
-It wraps the last node in a `REPEAT` or `MAX_REPEAT` / `MIN_REPEAT` node and records the `min` and `max` counts.
-
-```python
-# CPython: Lib/re/_parser.py:430 quantifier
-        if source.next in '*+?{':
-            op = source.next
-            source.match(op)
-            if op == '{':
-                lo, hi = _parse_repeat(source)
-            elif op == '*':
-                lo, hi = 0, MAXREPEAT
-            elif op == '+':
-                lo, hi = 1, MAXREPEAT
-            else:  # '?'
-                lo, hi = 0, 1
-            if source.match('?'):
-                subpattern[-1] = (MIN_REPEAT, (lo, hi, subpattern[-1]))
-            else:
-                subpattern[-1] = (MAX_REPEAT, (lo, hi, subpattern[-1]))
-```
-
-### Lookaheads and lookbehinds
-
-`(?=...)`, `(?!...)`, `(?<=...)`, `(?<!...)` are handled inside `_parse_group`.
-Lookbehind width is validated here: CPython requires fixed-width lookbehinds and raises `error` otherwise.
-
-```python
-# CPython: Lib/re/_parser.py:530 lookbehind
-        elif char in '<=!':
-            # lookahead / lookbehind
-            dir = +1 if char == '=' else -1 if char == '<' else ...
-            p = _parse(source, state, verbose, nested + 1)
-            if char in '<=' :
-                # lookbehind: width must be fixed
-                lo, hi = p.getwidth()
-                if lo != hi:
-                    raise source.error(
-                        'look-behind requires fixed width pattern')
-            subpattern.append((GROUPREF_EXISTS if ... else ASSERT, (dir, p)))
-```
+`parse_repl()` is small and self-contained; it is a good starting point for
+isolated unit tests before tackling the main parser.
 
 ## gopy notes
 
-- `SubPattern` is list-like with a `getwidth` method; in Go this maps to a slice of `[2]any` pairs plus a receiver method.
-- `State.groups` is an integer counter; `State.groupdict` maps names to group numbers. Both must survive across recursive `_parse` calls via a pointer receiver.
-- `Tokenizer.pos` is the only mutable field that needs exposure outside the class; gopy exposes it for error-message formatting.
-- `_parse_repl` is a separate public entry point (`parse_repl`) used only by `re.sub`; it can be ported independently of the main `_parse` path.
-- The `verbose` flag strips comments and whitespace from the pattern before tokenisation; this must be applied inside `Tokenizer.__next`, not as a pre-pass.
+Status: not yet ported.
 
-## CPython 3.14 changes
+Planned package path: `module/re/`
 
-- 3.12 added `ATOMIC_GROUP` (`(?>...)`) and `POSSESSIVE_REPEAT` (`*+`, `++`, `?+`, `{m,n}+`) parsing; both are present in 3.14.
-- 3.13 tightened error messages for unmatched parentheses and invalid escape sequences; the `source.error` helper now carries a column offset.
-- No changes to the `SubPattern` or `Tokenizer` class interfaces between 3.13 and 3.14.
+`SubPattern` maps to a Go struct with an `opcode` field and a `data`
+interface value. The `Parser` state machine is the most complex piece, roughly
+350 lines of dense logic. A direct port is preferred over wrapping the C `_sre`
+module. `parse_repl()` is the recommended first target for porting because its
+inputs and outputs are narrow and easy to test end-to-end.

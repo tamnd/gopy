@@ -1,0 +1,127 @@
+---
+title: "Objects/memoryobject.c (buffer protocol)"
+description: "Memoryview object and buffer protocol implementation in CPython 3.14"
+cpython_path: Objects/memoryobject.c
+cpython_version: "3.14"
+lines: 2400
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Objects/memoryobject.c" />
+
+## Map
+
+| Lines | Symbol | Purpose |
+|-------|--------|---------|
+| 1–80 | includes, `PyBUF_*` flag constants | request flag definitions |
+| 81–200 | `mbuf_alloc`, `mbuf_release` | managed buffer ref-counting wrapper |
+| 201–400 | `memory_from_contiguous_copy` | copy-on-export for read-only sources |
+| 401–700 | `PyMemoryView_FromObject`, `memory_new` | constructor, `Py_buffer` acquisition |
+| 701–900 | `memory_getbuf`, `memory_releasebuf` | buffer protocol implementation |
+| 901–1100 | `memory_subscript`, `memory_ass_subscript` | indexing and slice assignment |
+| 1101–1400 | `memory_cast` | `cast()` type reinterpretation |
+| 1401–1700 | `unpack_single`, `pack_single` | element read/write for typed views |
+| 1701–1900 | `memory_richcompare`, `memory_hash` | comparison and hashing |
+| 1901–2100 | `memory_repr`, `memory_str` | string representation |
+| 2101–2400 | `PyMemoryView_Type`, property descriptors | type object and attribute getters |
+
+## Reading
+
+### PyMemoryViewObject layout
+
+A memoryview wraps a `Py_buffer` (the standard C-level buffer descriptor) inside a reference-counted "managed buffer" envelope called `PyManagedBufferObject`. The outer `PyMemoryViewObject` holds a pointer to that envelope plus its own flags.
+
+```c
+// CPython: Objects/memoryobject.c:1 PyMemoryViewObject
+typedef struct {
+    PyObject_VAR_HEAD
+    PyManagedBufferObject *mbuf; /* managed buffer, ref-counted separately */
+    Py_hash_t hash;             /* -1 if not yet computed                 */
+    int flags;                  /* MBF_* internal flags                   */
+    Py_ssize_t exports;         /* number of child views exported         */
+    Py_buffer view;             /* the actual Py_buffer descriptor        */
+    PyObject *weakreflist;
+    Py_ssize_t ob_array[1];     /* shape, strides, suboffsets (inline)    */
+} PyMemoryViewObject;
+```
+
+The `view` field carries `ndim`, `shape`, `strides`, `suboffsets`, `itemsize`, `format`, `buf` (raw pointer), and `len`. Shape and stride arrays are stored inline in `ob_array`, so the object is allocated with a variable-size tail.
+
+### Buffer acquisition: PyBUF_* flags
+
+When a consumer calls `PyObject_GetBuffer`, it passes a bitmask of `PyBUF_*` flags that describe what it needs. The producer checks those flags in `memory_getbuf` and either satisfies the request or raises `BufferError`.
+
+```c
+// CPython: Objects/memoryobject.c:701 memory_getbuf
+static int
+memory_getbuf(PyMemoryViewObject *self, Py_buffer *view, int flags)
+{
+    Py_buffer *base = &self->view;
+
+    CHECK_RELEASED(self);
+
+    if (BASE_IS_RELEASED(self))
+        return -1;
+
+    /* verify the consumer's flags are satisfiable */
+    if ((flags & PyBUF_WRITABLE) && base->readonly) {
+        PyErr_SetString(PyExc_BufferError,
+                        "memoryview: underlying buffer is not writable");
+        return -1;
+    }
+    /* ... fill *view from base ... */
+    Py_INCREF(self);
+    view->obj = (PyObject *)self;
+    self->exports++;
+    return 0;
+}
+```
+
+`memory_releasebuf` decrements `exports`. When the count reaches zero and the `MBF_RELEASED` flag is set, the managed buffer envelope is released, decrementing the refcount on the original exporting object.
+
+### Slicing and cast()
+
+`memory_subscript` handles both integer indexing and slice indexing. For slices it constructs a new `PyMemoryViewObject` that shares the same `mbuf`, adjusting `buf`, `shape`, `strides`, and `len` in the child's `Py_buffer`. No data is copied.
+
+```c
+// CPython: Objects/memoryobject.c:901 memory_subscript
+static PyObject *
+memory_subscript(PyMemoryViewObject *self, PyObject *key)
+{
+    Py_buffer *view = &self->view;
+    CHECK_RELEASED(self);
+
+    if (view->ndim == 0) {
+        /* zero-dim: only Ellipsis or empty tuple is valid */
+        ...
+    }
+    if (PyIndex_Check(key)) {
+        return memory_item(self, PyNumber_AsSsize_t(key, PyExc_IndexError));
+    }
+    else if (PySlice_Check(key)) {
+        return memory_slice(self, key);   /* zero-copy sub-view */
+    }
+    ...
+}
+```
+
+`memory_cast` (the implementation of `memoryview.cast()`) reinterprets the raw buffer bytes under a new format string and, optionally, a new shape. It checks that the total byte length is compatible, then builds a fresh `PyMemoryViewObject` that shares `mbuf` but carries a different `view.format` and `view.itemsize`. This is the mechanism behind `memoryview(b).cast('I')` to view bytes as unsigned ints without copying.
+
+## gopy notes
+
+Status: not yet ported.
+
+Planned package path: `objects/` (file `memoryview.go`).
+
+The buffer protocol in gopy will need a Go-level interface analogous to `Py_buffer`. Key items:
+
+- A `Buffer` struct mirroring `Py_buffer` (pointer, length, itemsize, ndim, shape, strides, suboffsets, format, readonly flag).
+- A `BufferProtocol` interface with `GetBuffer(flags int) (*Buffer, error)` and `ReleaseBuffer(*Buffer)`.
+- `MemoryViewObject` wrapping a `*Buffer` plus a ref-counted envelope, mirroring `PyManagedBufferObject`.
+- `MemoryViewFromObject` as the constructor entry point.
+- Slice subscription returning a zero-copy child view by offsetting the pointer and adjusting shape/strides.
+- `Cast` adjusting format and itemsize while preserving the underlying byte span.
+
+The `PyBUF_*` constants should become Go `const` values in the same file to keep the flag semantics co-located with the type.

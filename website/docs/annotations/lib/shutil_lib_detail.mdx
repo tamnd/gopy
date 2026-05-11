@@ -1,0 +1,212 @@
+---
+title: Lib/shutil.py
+description: "Docusaurus annotation for CPython Lib/shutil.py"
+cpython_path: Lib/shutil.py
+cpython_version: "3.14"
+lines: 1600
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`shutil.py` is the standard high-level file and archive utility library. It
+layers on top of `os` to provide copy-with-metadata, recursive tree operations,
+cross-device moves, and a pluggable archive registry. Platform detection at
+module load time selects the fastest available copy mechanism (`sendfile`,
+`copy_file_range`, `fcopyfile`, or plain `read`/`write` buffering).
+
+Source: <CpyLink path="Lib/shutil.py" />
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-72 | imports, feature flags | `_ZLIB_SUPPORTED`, `_USE_CP_SENDFILE`, `_HAS_FCOPYFILE`, etc. |
+| 75-96 | exception classes | `Error`, `SameFileError`, `SpecialFileError`, `ReadError`, `RegistryError` |
+| 98-... | `_fastcopy_fcopyfile` | macOS `fcopyfile(3)` path |
+| 118-... | `_fastcopy_sendfile` | Linux/Android `os.sendfile` path |
+| ~200 | `_copyfileobj_readinto` | fallback buffered copy |
+| 493-531 | `copy2` | copy data plus full metadata via `copystat` |
+| 533-543 | `ignore_patterns` | factory returning a glob-filter callable |
+| 545-... | `_copytree` | recursive tree worker used by `copytree` |
+| 611-657 | `copytree` | public entry point; acquires scandir context manager |
+| 810-856 | `rmtree` | recursive delete with `onerror`/`onexc` handler |
+| 876-... | `move` | rename-or-copy-then-delete with cross-device fallback |
+| ~1100 | archive format registry | `_ARCHIVE_FORMATS`, `register_archive_format` |
+| 1184-... | `make_archive` | dispatch through registry, optional `root_dir` chdir |
+| 1386-... | `unpack_archive` | dispatch through unpack registry |
+| 1435-1468 | `disk_usage` | POSIX `statvfs` branch and Windows `nt._getdiskusage` branch |
+
+## Reading
+
+### `copy2` and metadata preservation
+
+`copy2` is the recommended copy function when full fidelity matters. It copies
+file content with the fast-copy path, then calls `copystat` to replay
+timestamps, permission bits, extended attributes, and (on Windows) file
+attributes. The Windows fast path uses `_winapi.CopyFile2` directly and falls
+back to the generic path on privilege errors.
+
+```python
+# CPython: Lib/shutil.py:493 copy2
+def copy2(src, dst, *, follow_symlinks=True):
+    if os.path.isdir(dst):
+        dst = os.path.join(dst, os.path.basename(src))
+
+    if hasattr(_winapi, "CopyFile2"):
+        src_ = os.fsdecode(src)
+        dst_ = os.fsdecode(dst)
+        flags = _winapi.COPY_FILE_ALLOW_DECRYPTED_DESTINATION
+        if not follow_symlinks:
+            flags |= _winapi.COPY_FILE_COPY_SYMLINK
+        try:
+            _winapi.CopyFile2(src_, dst_, flags)
+            return dst
+        except OSError as exc:
+            # fall through on specific winerrors
+            ...
+
+    copyfile(src, dst, follow_symlinks=follow_symlinks)
+    copystat(src, dst, follow_symlinks=follow_symlinks)
+    return dst
+```
+
+### `copytree`, `ignore_patterns`, and `dirs_exist_ok`
+
+`copytree` opens the source with `os.scandir` as a context manager so the
+directory handle is closed promptly. The actual recursion lives in `_copytree`,
+which receives the already-collected entries list. The `ignore` callable (often
+produced by `ignore_patterns`) is invoked once per directory with the directory
+path and the list of entry names, returning a set of names to skip. The
+`dirs_exist_ok` flag, added in Python 3.8, allows merging into an existing
+destination tree without raising `FileExistsError`.
+
+```python
+# CPython: Lib/shutil.py:611 copytree
+def copytree(src, dst, symlinks=False, ignore=None, copy_function=copy2,
+             ignore_dangling_symlinks=False, dirs_exist_ok=False):
+    sys.audit("shutil.copytree", src, dst)
+    with os.scandir(src) as itr:
+        entries = list(itr)
+    return _copytree(entries=entries, src=src, dst=dst, symlinks=symlinks,
+                     ignore=ignore, copy_function=copy_function,
+                     ignore_dangling_symlinks=ignore_dangling_symlinks,
+                     dirs_exist_ok=dirs_exist_ok)
+```
+
+`ignore_patterns` is a simple factory: it returns a closure that runs
+`fnmatch.filter` against each pattern and unions the results.
+
+```python
+# CPython: Lib/shutil.py:533 ignore_patterns
+def ignore_patterns(*patterns):
+    def _ignore_patterns(path, names):
+        ignored_names = []
+        for pattern in patterns:
+            ignored_names.extend(fnmatch.filter(names, pattern))
+        return set(ignored_names)
+    return _ignore_patterns
+```
+
+### `rmtree` error handler protocol
+
+`rmtree` translates `ignore_errors`, `onerror`, and `onexc` into a single
+`onexc` callable before delegating to `_rmtree_impl`. The `onerror` protocol
+(receiving a `sys.exc_info()` triple) is deprecated but still supported via
+an adapter closure. When all three are absent the default `onexc` simply
+re-raises the active exception.
+
+```python
+# CPython: Lib/shutil.py:810 rmtree
+def rmtree(path, ignore_errors=False, onerror=None, *, onexc=None, dir_fd=None):
+    sys.audit("shutil.rmtree", path, dir_fd)
+    if ignore_errors:
+        def onexc(*args):
+            pass
+    elif onerror is None and onexc is None:
+        def onexc(*args):
+            raise
+    elif onexc is None:
+        # delegate to deprecated onerror
+        def onexc(*args):
+            func, path, exc = args
+            exc_info = type(exc), exc, exc.__traceback__
+            return onerror(func, path, exc_info)
+    _rmtree_impl(path, dir_fd, onexc)
+```
+
+### `move` cross-device handling
+
+`move` tries `os.rename` first. If that raises `OSError` (the typical signal
+for a cross-device move), it falls back: symlinks are recreated, directories
+are copied with `copytree` then removed with `rmtree`, and plain files are
+copied then unlinked. The `copy_function` parameter lets callers substitute a
+different copy routine (for example one that skips metadata).
+
+```python
+# CPython: Lib/shutil.py:876 move
+def move(src, dst, copy_function=copy2):
+    sys.audit("shutil.move", src, dst)
+    try:
+        os.rename(src, real_dst)
+    except OSError:
+        if os.path.islink(src):
+            linkto = os.readlink(src)
+            os.symlink(linkto, real_dst)
+            os.unlink(src)
+        elif os.path.isdir(src):
+            copytree(src, real_dst, copy_function=copy_function, symlinks=True)
+            rmtree(src)
+        else:
+            copy_function(src, real_dst)
+            os.unlink(src)
+```
+
+### Archive registry and `disk_usage`
+
+`make_archive` looks up the requested format name in `_ARCHIVE_FORMATS`, a
+dict populated by `register_archive_format`. The built-in entries are `zip`,
+`tar`, `gztar`, `bztar`, `xztar`, and (when available) `zstdtar`. The format
+function receives `base_name` and `base_dir`; if the format does not support a
+`root_dir` argument natively, `make_archive` performs a `chdir` around the
+call and restores the working directory in a `finally` block.
+
+`disk_usage` is defined conditionally. On POSIX it calls `os.statvfs` and
+computes free space from `f_bavail * f_frsize`. On Windows it calls
+`nt._getdiskusage`. Both branches return the same `namedtuple` with `total`,
+`used`, and `free` fields. The name `disk_usage` is appended to `__all__`
+inside each branch, so it only appears when the platform supports it.
+
+```python
+# CPython: Lib/shutil.py:1443 disk_usage (POSIX)
+def disk_usage(path):
+    st = os.statvfs(path)
+    free = st.f_bavail * st.f_frsize
+    total = st.f_blocks * st.f_frsize
+    used = (st.f_blocks - st.f_bfree) * st.f_frsize
+    return _ntuple_diskusage(total, used, free)
+```
+
+```python
+# CPython: Lib/shutil.py:1460 disk_usage (Windows)
+def disk_usage(path):
+    total, free = nt._getdiskusage(path)
+    used = total - free
+    return _ntuple_diskusage(total, used, free)
+```
+
+## gopy notes
+
+Status: not yet ported.
+
+Planned package path: `module/shutil/`.
+
+The fast-copy selection logic (`sendfile`, `copy_file_range`, `fcopyfile`)
+maps to Go's `io.Copy` with optional `syscall.Sendfile` on Linux. `copystat`
+needs `syscall.Chtimes` plus `os.Chmod`; the extended-attribute path
+(`os.getxattr`/`os.setxattr`) can be stubbed initially. `rmtree` maps to
+`os.RemoveAll` for the happy path, with the `onexc` callback protocol added as
+a thin wrapper. The archive registry can be a Go `map[string]archiveFormat`
+with the same register/unregister API. `disk_usage` maps to
+`syscall.Statfs_t` on POSIX and `syscall.GetDiskFreeSpaceEx` on Windows,
+matching the two CPython branches exactly.

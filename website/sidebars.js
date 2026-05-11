@@ -266,6 +266,7 @@ const sidebars = {
         'annotations/python/context_c2_detail',
         'annotations/python/suggestions_c_detail',
         'annotations/python/import_c_detail',
+        'annotations/python/typeobject_c2_detail',
       ],
     },
     {
@@ -382,6 +383,9 @@ const sidebars = {
         'annotations/objects/bytearrayobject_detail',
         'annotations/objects/setobject_c_detail',
         'annotations/objects/rangeobject_c_detail',
+        'annotations/objects/sliceobject_c_detail',
+        'annotations/objects/memoryobject_c2_detail',
+        'annotations/objects/capsule_c_detail',
       ],
     },
     {
@@ -570,6 +574,8 @@ const sidebars = {
         'annotations/include/include_pycore_dict_h_detail',
         'annotations/include/include_cpython_code_h_detail',
         'annotations/include/include_cpython_pystate_h_detail',
+        'annotations/include/include_pycore_object_h_detail',
+        'annotations/include/include_pycore_long_h_detail',
       ],
     },
     {
@@ -722,6 +728,9 @@ const sidebars = {
         'annotations/modules/module_pickle_c2_detail',
         'annotations/modules/module_json_c_detail',
         'annotations/modules/module_sre_c2_detail',
+        'annotations/modules/module_io_fileio_detail',
+        'annotations/modules/module_io_bytesio_detail',
+        'annotations/modules/module_io_stringio_detail',
       ],
     },
     {
@@ -1082,6 +1091,10 @@ const sidebars = {
         'annotations/lib/socket_lib_detail',
         'annotations/lib/ssl_lib_detail',
         'annotations/lib/select_lib_detail',
+        'annotations/lib/re_init_detail',
+        'annotations/lib/pathlib_init_detail',
+        'annotations/lib/os_lib_detail',
+        'annotations/lib/shutil_lib_detail',
       ],
     },
   ],

@@ -1,0 +1,102 @@
+---
+title: Lib/pathlib/__init__.py
+description: "Docusaurus annotation for CPython Lib/pathlib/__init__.py"
+cpython_path: Lib/pathlib/__init__.py
+cpython_version: "3.14"
+lines: 120
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+This file is the public face of the `pathlib` package. It defines the complete
+object hierarchy for filesystem paths, from the pure (I/O-free) base classes
+through the concrete OS-aware subclasses. In CPython 3.12 the implementation
+was split across several submodules (`_local`, `_os`, `types`); this
+`__init__.py` re-exports everything that callers expect at the top level.
+
+Source: <CpyLink path="Lib/pathlib/__init__.py" />
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-18 | module docstring, imports | stdlib imports plus conditional `pwd`/`grp` |
+| 20-27 | `try: import pwd / grp` | optional Unix-only imports |
+| 29-33 | `from pathlib._os import ...` | low-level helpers (copyfile2, PathInfo, etc.) |
+| 36-40 | `__all__` | six public names exported from the package |
+| 43-46 | `UnsupportedOperation` | raised when an OS does not support an operation |
+| 49-75 | `_PathParents` | sequence view over a path's logical ancestors |
+| 78-... | `PurePath` | base class for all path types; no I/O |
+| ~340 | `PurePosixPath` | pure POSIX subclass |
+| ~360 | `PureWindowsPath` | pure Windows subclass |
+| ~380 | `Path` | concrete path with I/O methods |
+| 1285 | `PosixPath` | `Path` + `PurePosixPath`; gated on non-Windows |
+| 1297 | `WindowsPath` | `Path` + `PureWindowsPath`; gated on Windows |
+
+## Reading
+
+### Re-exports and `__all__`
+
+The six names in `__all__` are the entire public API of the package. All
+concrete implementations have moved to `pathlib._local`; this file only
+re-imports them so that `from pathlib import Path` continues to work.
+
+```python
+# CPython: Lib/pathlib/__init__.py:36 __all__
+__all__ = [
+    "UnsupportedOperation",
+    "PurePath", "PurePosixPath", "PureWindowsPath",
+    "Path", "PosixPath", "WindowsPath",
+]
+```
+
+### PurePath slot layout
+
+`PurePath.__slots__` documents the lazy-parsing strategy. The raw strings are
+stored in `_raw_paths` at construction time. The parsed `_drv`, `_root`, and
+`_tail_cached` slots are filled only when the corresponding properties are
+first accessed, avoiding redundant `os.path.splitroot` calls.
+
+```python
+# CPython: Lib/pathlib/__init__.py:88 PurePath.__slots__
+__slots__ = (
+    '_raw_paths',
+    '_drv', '_root', '_tail_cached',
+    '_str',
+    '_str_normcase_cached',
+    '_parts_normcase_cached',
+    # ...
+)
+```
+
+### Concrete platform subclasses
+
+`PosixPath` and `WindowsPath` are thin mixins. Each guards itself with an
+`os.name` check so that instantiation on the wrong platform raises
+`UnsupportedOperation` rather than silently returning an unusable object.
+
+```python
+# CPython: Lib/pathlib/__init__.py:1285 PosixPath
+class PosixPath(Path, PurePosixPath):
+    __slots__ = ()
+
+    if os.name == 'nt':
+        def __new__(cls, *args, **kwargs):
+            raise UnsupportedOperation(
+                f"cannot instantiate {cls.__name__!r} on your system")
+```
+
+## gopy notes
+
+Status: not yet ported.
+
+Planned package path: `module/pathlib/`.
+
+The pure path arithmetic (drive/root/tail parsing, comparison, hashing) is
+self-contained Python and can be ported as a pure-Go struct with string fields.
+The concrete `Path` class wraps `os.*` calls that gopy already exposes through
+`module/os/`. The `_os` helpers (`copyfile2`, `PathInfo`) belong in a separate
+`module/pathlib/_os/` internal package once the flat layout is established.
+The optional `pwd`/`grp` imports depend on `module/pwd/` and `module/grp/`
+which are not yet scheduled.

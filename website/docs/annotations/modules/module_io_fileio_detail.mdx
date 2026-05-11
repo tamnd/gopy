@@ -1,0 +1,114 @@
+---
+title: Modules/_io/fileio.c
+description: "Annotation: CPython raw file I/O — fileio type"
+cpython_path: Modules/_io/fileio.c
+cpython_version: "3.14"
+lines: 900
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/_io/fileio.c" />
+
+`fileio` is the lowest layer of the `io` stack. It wraps a raw OS file descriptor and exposes `RawIOBase`. Every higher-level buffered or text wrapper eventually calls into this type for the actual `read(2)` / `write(2)` syscalls.
+
+## Map
+
+| Symbol | Kind | Lines (approx) | Purpose |
+|---|---|---|---|
+| `fileio_init` | method | 80–220 | `__init__`: open path or adopt fd, parse mode string |
+| `fileio_dealloc` | slot | 221–255 | destructor, respects `closefd` |
+| `fileio_read` | method | 290–340 | read up to n bytes, releases GIL |
+| `fileio_readall` | method | 341–420 | read until EOF, grows buffer |
+| `fileio_readinto` | method | 421–460 | read into caller-supplied buffer |
+| `fileio_write` | method | 461–510 | write bytes, releases GIL |
+| `fileio_seek` | method | 511–555 | lseek wrapper |
+| `fileio_tell` | method | 556–575 | lseek(fd, 0, SEEK_CUR) |
+| `fileio_truncate` | method | 576–620 | ftruncate at current or given pos |
+| `fileio_close` | method | 625–670 | flush + close fd if closefd |
+| `fileio_get_closefd` | getter | 671–680 | expose closefd flag |
+| `fileio_get_mode` | getter | 681–700 | return mode string used at open |
+
+## Reading
+
+### fileio_init: opening a file
+
+`fileio_init` handles two entry points in one function. When the caller passes an integer (or an object with `__index__`), the existing fd is adopted. When the caller passes a path-like object, `os.fsencode` is called to get bytes and `open(2)` is issued. Mode string parsing is strict: only the characters `r`, `w`, `a`, `b`, `x`, and `+` are accepted, and conflicting combinations are rejected before the syscall.
+
+```c
+// CPython: Modules/_io/fileio.c:80 fileio_init
+static int
+fileio_init(PyObject *oself, PyObject *args, PyObject *kwds)
+{
+    fileio *self = (fileio *)oself;
+    ...
+    if (PyUnicode_Check(nameobj) || PyBytes_Check(nameobj) ||
+        PyObject_CheckBuffer(nameobj)) {
+        /* path-like: encode and call open(2) */
+        ...
+    } else {
+        /* integer fd */
+        fd = PyObject_AsFileDescriptor(nameobj);
+        ...
+    }
+```
+
+The `closefd=False` path records the fd but sets `self->closefd = 0`, so the destructor skips `close(2)`.
+
+### fileio_read and fileio_readall: GIL release around syscalls
+
+Both read methods bracket the OS call with `Py_BEGIN_ALLOW_THREADS` / `Py_END_ALLOW_THREADS`. This is mandatory for any blocking I/O so that other Python threads can continue running while the kernel is waiting on disk or a pipe.
+
+`fileio_read` issues a single `read(2)` and returns whatever the kernel returns, which may be less than requested. `fileio_readall` loops, doubling its scratch buffer until `read(2)` returns 0 (EOF) or an error, then returns one consolidated `bytes` object.
+
+```c
+// CPython: Modules/_io/fileio.c:341 fileio_readall
+    do {
+        Py_BEGIN_ALLOW_THREADS
+        errno = 0;
+        n = read(self->fd, buf + bytes_read, bufsize - bytes_read);
+        Py_END_ALLOW_THREADS
+        if (n == 0)
+            break;
+        ...
+        bytes_read += n;
+        if (bytes_read == bufsize) {
+            bufsize += SMALLCHUNK;  /* grow */
+            ...
+        }
+    } while (1);
+```
+
+`SMALLCHUNK` starts at 8192 bytes. The buffer is reallocated with `PyBytes_Resize` rather than replaced, so only one allocation is live at a time.
+
+### fileio_write and fileio_seek: write path and positioning
+
+`fileio_write` accepts a buffer-protocol object, releases the GIL, then calls `write(2)`. The return value is the number of bytes actually written (which the caller is responsible for handling, as with any raw write). `fileio_seek` and `fileio_tell` are thin `lseek(2)` wrappers; `tell` always passes `SEEK_CUR` with offset 0. `fileio_truncate` calls `ftruncate(2)` at the position argument or, if none is given, at the current position from `tell`.
+
+```c
+// CPython: Modules/_io/fileio.c:461 fileio_write
+    Py_BEGIN_ALLOW_THREADS
+    errno = 0;
+    n = write(self->fd, pbuf.buf, pbuf.len);
+    Py_END_ALLOW_THREADS
+    PyBuffer_Release(&pbuf);
+    if (n < 0) {
+        PyErr_SetFromErrno(PyExc_OSError);
+        return NULL;
+    }
+    return PyLong_FromSsize_t(n);
+```
+
+## gopy notes
+
+Status: not yet ported.
+
+Planned package path: `module/io/` (will contain `fileio.go` alongside buffered and text wrappers).
+
+Key porting considerations:
+
+- The GIL release pattern maps to goroutine-friendly blocking calls in Go. No explicit locking is needed, but care is required not to hold any Python-object references across the OS call.
+- `closefd` must be tracked as a boolean field on the Go struct and checked in the finalizer.
+- Mode string parsing can be ported directly as a small state machine over the ASCII bytes of the mode argument.
+- `readall` buffer growth should use `append` on a `[]byte` slice rather than manual `realloc`, which gives the same amortised behaviour.
