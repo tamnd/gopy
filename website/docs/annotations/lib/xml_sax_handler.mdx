@@ -1,0 +1,138 @@
+---
+title: "Lib/xml/sax/handler.py"
+description: Core SAX 2.0 handler interfaces and feature/property URI constants for Python's xml.sax package.
+cpython_path: Lib/xml/sax/handler.py
+cpython_version: "3.14"
+lines: 387
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# Lib/xml/sax/handler.py
+
+<CpyLink path="Lib/xml/sax/handler.py" />
+
+This file is the pure-interface heart of Python's SAX 2.0 binding. It defines
+no parsing logic; every class is a stub that documents the contract parsers and
+applications must honour. The feature and property URI constants at the bottom
+are the stable public API that driver code passes to `setFeature` /
+`setProperty` on an `XMLReader`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| <Cpy path="Lib/xml/sax/handler.py" lines="22-42">22-42</Cpy> | `ErrorHandler` | Base for error, fatalError, warning callbacks |
+| <Cpy path="Lib/xml/sax/handler.py" lines="47-203">47-203</Cpy> | `ContentHandler` | Main document-event interface (startElement, endElement, characters, etc.) |
+| <Cpy path="Lib/xml/sax/handler.py" lines="208-218">208-218</Cpy> | `DTDHandler` | Notation and unparsed-entity declaration events |
+| <Cpy path="Lib/xml/sax/handler.py" lines="223-234">223-234</Cpy> | `EntityResolver` | External entity resolution hook |
+| <Cpy path="Lib/xml/sax/handler.py" lines="243-285">243-285</Cpy> | `feature_*` constants | URI strings controlling parser behaviour |
+| <Cpy path="Lib/xml/sax/handler.py" lines="294-342">294-342</Cpy> | `property_*` constants | URI strings for extension handler properties |
+| <Cpy path="Lib/xml/sax/handler.py" lines="345-388">345-388</Cpy> | `LexicalHandler` | Optional extension for comments, CDATA, DTD boundaries |
+
+## Reading
+
+### ErrorHandler: the three severity levels
+
+```python
+# CPython: Lib/xml/sax/handler.py:22 ErrorHandler
+class ErrorHandler:
+    def error(self, exception):
+        "Handle a recoverable error."
+        raise exception
+
+    def fatalError(self, exception):
+        "Handle a non-recoverable error."
+        raise exception
+
+    def warning(self, exception):
+        "Handle a warning."
+        print(exception)
+```
+
+The default `warning` implementation prints to stdout instead of raising.
+Subclasses almost always override all three.
+
+### ContentHandler: document lifecycle and element events
+
+```python
+# CPython: Lib/xml/sax/handler.py:80 ContentHandler.startDocument
+    def startDocument(self):
+        """Receive notification of the beginning of a document.
+
+        The SAX parser will invoke this method only once, before any
+        other methods in this interface or in DTDHandler (except for
+        setDocumentLocator)."""
+
+# CPython: Lib/xml/sax/handler.py:126 ContentHandler.startElement
+    def startElement(self, name, attrs):
+        """Signals the start of an element in non-namespace mode.
+
+        The name parameter contains the raw XML 1.0 name of the
+        element type as a string and the attrs parameter holds an
+        instance of the Attributes class containing the attributes of
+        the element."""
+
+# CPython: Lib/xml/sax/handler.py:158 ContentHandler.characters
+    def characters(self, content):
+        """Receive notification of character data.
+
+        The Parser will call this method to report each chunk of
+        character data. SAX parsers may return all contiguous
+        character data in a single chunk, or they may split it into
+        several chunks; however, all of the characters in any single
+        event must come from the same external entity so that the
+        Locator provides useful information."""
+```
+
+### Feature constants
+
+```python
+# CPython: Lib/xml/sax/handler.py:243 feature_namespaces
+feature_namespaces = "http://xml.org/sax/features/namespaces"
+# true: Perform Namespace processing (default).
+# false: Optionally do not perform Namespace processing
+#        (implies namespace-prefixes).
+# access: (parsing) read-only; (not parsing) read/write
+
+# CPython: Lib/xml/sax/handler.py:262 feature_validation
+feature_validation = "http://xml.org/sax/features/validation"
+# true: Report all validation errors (implies external-general-entities and
+#       external-parameter-entities).
+# false: Do not report validation errors.
+# access: (parsing) read-only; (not parsing) read/write
+```
+
+### LexicalHandler and property_lexical_handler
+
+```python
+# CPython: Lib/xml/sax/handler.py:294 property_lexical_handler
+property_lexical_handler = "http://xml.org/sax/properties/lexical-handler"
+# data type: xml.sax.sax2lib.LexicalHandler
+# description: An optional extension handler for lexical events like comments.
+# access: read/write
+
+# CPython: Lib/xml/sax/handler.py:358 LexicalHandler.comment
+class LexicalHandler:
+    def comment(self, content):
+        """Reports a comment anywhere in the document (including the
+        DTD and outside the document element).
+
+        content is a string that holds the contents of the comment."""
+
+    def startCDATA(self):
+        """Reports the beginning of a CDATA marked section.
+
+        The contents of the CDATA marked section will be reported
+        through the characters event."""
+```
+
+## gopy notes
+
+gopy does not yet ship a SAX layer. The interfaces here are reference
+material for any future `module/xml/` work: the handler bases are pure
+stubs with no state, so a Go port would translate each method to a
+corresponding Go interface method, and the feature/property URI constants
+would become package-level string variables matching the exact URI values
+defined here.

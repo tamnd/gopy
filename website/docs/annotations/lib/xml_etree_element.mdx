@@ -1,0 +1,195 @@
+---
+title: "Lib/xml/etree/ElementTree.py"
+description: Pure-Python fallback implementation of ElementTree covering Element, SubElement, TreeBuilder, XMLParser, iterparse, and XPath find helpers.
+cpython_path: Lib/xml/etree/ElementTree.py
+cpython_version: "3.14"
+lines: 2102
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# Lib/xml/etree/ElementTree.py
+
+<CpyLink path="Lib/xml/etree/ElementTree.py" />
+
+CPython normally loads a C accelerator (`_elementtree`) and shadows this
+module at import time. The Python source is the authoritative specification
+of every class's behaviour and is the only implementation available when
+the C extension is absent. The file is divided into four broad areas: the
+in-memory tree model (`Element`, `ElementTree`), serialisation helpers
+(`tostring`, `_serialize_xml`), the streaming parser stack
+(`TreeBuilder`, `XMLParser`, `XMLPullParser`, `iterparse`), and the
+C14N 2.0 writer (`C14NWriterTarget`).
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| <Cpy path="Lib/xml/etree/ElementTree.py" lines="107-116">107-116</Cpy> | `ParseError` | SyntaxError subclass carrying code and position |
+| <Cpy path="Lib/xml/etree/ElementTree.py" lines="126-416">126-416</Cpy> | `Element` | Core node: tag, attrib, text, tail, children list |
+| <Cpy path="Lib/xml/etree/ElementTree.py" lines="419-434">419-434</Cpy> | `SubElement` | Factory that creates and appends a child Element |
+| <Cpy path="Lib/xml/etree/ElementTree.py" lines="470-513">470-513</Cpy> | `QName` | Namespace-qualified name wrapper with comparison operators |
+| <Cpy path="Lib/xml/etree/ElementTree.py" lines="518-743">518-743</Cpy> | `ElementTree` | Tree wrapper with parse, write, find, findall, iterfind |
+| <Cpy path="Lib/xml/etree/ElementTree.py" lines="1077-1099">1077-1099</Cpy> | `tostring` | Serialise element tree to bytes or Unicode string |
+| <Cpy path="Lib/xml/etree/ElementTree.py" lines="1204-1215">1204-1215</Cpy> | `parse` | Load XML file into an ElementTree |
+| <Cpy path="Lib/xml/etree/ElementTree.py" lines="1218-1279">1218-1279</Cpy> | `iterparse` | Streaming iterator yielding (event, elem) pairs |
+| <Cpy path="Lib/xml/etree/ElementTree.py" lines="1281-1336">1281-1336</Cpy> | `XMLPullParser` | Event-queue based non-blocking pull parser |
+| <Cpy path="Lib/xml/etree/ElementTree.py" lines="1339-1353">1339-1353</Cpy> | `XML` / `fromstring` | Parse an XML string and return the root Element |
+| <Cpy path="Lib/xml/etree/ElementTree.py" lines="1398-1516">1398-1516</Cpy> | `TreeBuilder` | SAX-like target: start/data/end callbacks build the tree |
+| <Cpy path="Lib/xml/etree/ElementTree.py" lines="1520-1752">1520-1752</Cpy> | `XMLParser` | expat-backed parser that drives a TreeBuilder target |
+| <Cpy path="Lib/xml/etree/ElementTree.py" lines="1790-2102">1790-2102</Cpy> | `C14NWriterTarget` | Canonical XML 2.0 serialisation writer target |
+
+## Reading
+
+### Element: the core data node
+
+```python
+# CPython: Lib/xml/etree/ElementTree.py:170 Element.__init__
+    def __init__(self, tag, attrib={}, **extra):
+        if not isinstance(attrib, dict):
+            raise TypeError("attrib must be dict, not %s" % (
+                attrib.__class__.__name__,))
+        self.tag = tag
+        self.attrib = {**attrib, **extra}
+        self._children = []
+
+# CPython: Lib/xml/etree/ElementTree.py:276 Element.find
+    def find(self, path, namespaces=None):
+        """Find first matching element by tag name or path.
+
+        *path* is a string having either an element tag or an XPath,
+        *namespaces* is an optional mapping from namespace prefix to full name.
+
+        Return the first matching element, or None if no element was found.
+
+        """
+        return ElementPath.find(self, path, namespaces)
+```
+
+`_children` is a plain Python list; every list-protocol method on
+`Element` (`append`, `extend`, `insert`, `remove`, `__getitem__`,
+`__len__`) delegates to it. The C accelerator replicates this layout with
+a `PyObject *` array on the struct.
+
+### TreeBuilder: incremental tree construction
+
+```python
+# CPython: Lib/xml/etree/ElementTree.py:1460 TreeBuilder.start
+    def start(self, tag, attrs):
+        """Open new element and return it.
+
+        *tag* is the element name, *attrs* is a dict containing element
+        attributes.
+
+        """
+        self._flush()
+        self._last = elem = self._factory(tag, attrs)
+        if self._elem:
+            self._elem[-1].append(elem)
+        elif self._root is None:
+            self._root = elem
+        self._elem.append(elem)
+        self._tail = 0
+        return elem
+
+# CPython: Lib/xml/etree/ElementTree.py:1477 TreeBuilder.end
+    def end(self, tag):
+        """Close and return current Element."""
+        self._flush()
+        self._last = self._elem.pop()
+        assert self._last.tag == tag,\
+               "end tag mismatch (expected %s, got %s)" % (
+                   self._last.tag, tag)
+        self._tail = 1
+        return self._last
+```
+
+### XMLParser wrapping expat
+
+```python
+# CPython: Lib/xml/etree/ElementTree.py:1530 XMLParser.__init__
+    def __init__(self, *, target=None, encoding=None):
+        try:
+            from xml.parsers import expat
+        except ImportError:
+            try:
+                import pyexpat as expat
+            except ImportError:
+                raise ImportError(
+                    "No module named expat; use SimpleXMLTreeBuilder instead"
+                    )
+        parser = expat.ParserCreate(encoding, "}")
+        if target is None:
+            target = TreeBuilder()
+        self.parser = self._parser = parser
+        self.target = self._target = target
+        self._error = expat.error
+        self._names = {} # name memo cache
+        # main callbacks
+        parser.DefaultHandlerExpand = self._default
+        if hasattr(target, 'start'):
+            parser.StartElementHandler = self._start
+        if hasattr(target, 'end'):
+            parser.EndElementHandler = self._end
+        if hasattr(target, 'data'):
+            parser.CharacterDataHandler = target.data
+        parser.buffer_text = 1
+        parser.ordered_attributes = 1
+```
+
+The `ordered_attributes = 1` flag causes expat to report attributes as a
+flat list of alternating name/value strings, which `_start` then converts
+to a dict. The namespace separator `"}"` is the Clark-notation sentinel
+used throughout ElementTree.
+
+### iterparse: streaming (event, elem) pairs
+
+```python
+# CPython: Lib/xml/etree/ElementTree.py:1218 iterparse
+def iterparse(source, events=None, parser=None):
+    """Incrementally parse XML document into ElementTree.
+
+    Returns an iterator providing (event, elem) pairs.
+
+    """
+    pullparser = XMLPullParser(events=events, _parser=parser)
+
+    if not hasattr(source, "read"):
+        source = open(source, "rb")
+        close_source = True
+    else:
+        close_source = False
+
+    def iterator(source):
+        try:
+            while True:
+                yield from pullparser.read_events()
+                data = source.read(16 * 1024)
+                if not data:
+                    break
+                pullparser.feed(data)
+            root = pullparser._close_and_return_root()
+            yield from pullparser.read_events()
+            it = wr()
+            if it is not None:
+                it.root = root
+        finally:
+            if close_source:
+                source.close()
+```
+
+The inner `iterator` generator reads in 16 KiB chunks and drains
+`read_events()` between each chunk so callers see events as soon as they
+are available rather than after the full document is loaded.
+
+## gopy notes
+
+gopy ships no XML package today. When the time comes, the natural split is
+to port `Element` (tag/attrib/text/tail plus a `[]Element` slice for
+children) as a Go struct, keep `ElementTree` as a thin wrapper that holds
+the root, and implement `TreeBuilder` as the target interface fed by an
+expat binding or a Go-native XML tokeniser. The `iterparse` streaming path
+maps cleanly onto a Go channel of `(string, *Element)` pairs. The XPath
+subset in `ElementPath` is a separate file and would be a separate port
+task.

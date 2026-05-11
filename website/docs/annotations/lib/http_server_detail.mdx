@@ -1,0 +1,210 @@
+---
+title: "Lib/http/server.py"
+description: Pure-Python HTTP/1.x server built on socketserver, covering request parsing, response framing, static file serving, and the CLI entry point.
+cpython_path: Lib/http/server.py
+cpython_version: "3.14"
+lines: 1441
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# Lib/http/server.py
+
+<CpyLink path="Lib/http/server.py" />
+
+The file assembles a working HTTP/1.x server from three layers. At the
+bottom, `HTTPServer` subclasses `socketserver.TCPServer` and adds
+`server_name`/`server_port` storage. In the middle,
+`BaseHTTPRequestHandler` handles one request at a time: it parses the
+request line and headers, dispatches to a `do_<COMMAND>` method, and
+provides the `send_response`/`send_header`/`end_headers` trio for building
+responses. At the top, `SimpleHTTPRequestHandler` maps URL paths to the
+local filesystem and generates directory listings. A `ThreadingHTTPServer`
+mixin and a `test()` function complete the module; the `__main__` block
+wires them to argparse so the module doubles as `python -m http.server`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| <Cpy path="Lib/http/server.py" lines="141-152">141-152</Cpy> | `HTTPServer` | TCPServer subclass; stores server_name and server_port |
+| <Cpy path="Lib/http/server.py" lines="154-155">154-155</Cpy> | `ThreadingHTTPServer` | ThreadingMixIn + HTTPServer; daemon_threads=True |
+| <Cpy path="Lib/http/server.py" lines="158-196">158-196</Cpy> | `HTTPSServer` | HTTPServer wrapped in an SSL context |
+| <Cpy path="Lib/http/server.py" lines="199-703">199-703</Cpy> | `BaseHTTPRequestHandler` | Core handler: parse_request, handle_one_request, send_response/header/end_headers, logging |
+| <Cpy path="Lib/http/server.py" lines="320-435">320-435</Cpy> | `parse_request` | Splits request line, validates HTTP version, reads headers |
+| <Cpy path="Lib/http/server.py" lines="455-491">455-491</Cpy> | `handle_one_request` | Reads one request line, calls parse_request, dispatches to do_* |
+| <Cpy path="Lib/http/server.py" lines="553-603">553-603</Cpy> | `send_response` / `send_header` / `end_headers` | Buffer and flush the HTTP response header block |
+| <Cpy path="Lib/http/server.py" lines="706-896">706-896</Cpy> | `SimpleHTTPRequestHandler` | Serves files from cwd; directory listing via list_directory |
+| <Cpy path="Lib/http/server.py" lines="837-896">837-896</Cpy> | `list_directory` | Builds an HTML directory listing |
+| <Cpy path="Lib/http/server.py" lines="1332-1362">1332-1362</Cpy> | `test` | Convenience function: bind, serve_forever, Ctrl-C handling |
+| <Cpy path="Lib/http/server.py" lines="1364-1441">1364-1441</Cpy> | `__main__` block | argparse CLI for `python -m http.server` |
+
+## Reading
+
+### HTTPServer and ThreadingHTTPServer
+
+```python
+# CPython: Lib/http/server.py:141 HTTPServer
+class HTTPServer(socketserver.TCPServer):
+
+    allow_reuse_address = True    # Seems to make sense in testing environment
+    allow_reuse_port = False
+
+    def server_bind(self):
+        """Override server_bind to store the server name."""
+        socketserver.TCPServer.server_bind(self)
+        host, port = self.server_address[:2]
+        self.server_name = socket.getfqdn(host)
+        self.server_port = port
+
+
+# CPython: Lib/http/server.py:154 ThreadingHTTPServer
+class ThreadingHTTPServer(socketserver.ThreadingMixIn, HTTPServer):
+    daemon_threads = True
+```
+
+`allow_reuse_address = True` lets the server restart immediately after a
+crash without waiting out `TIME_WAIT`. `daemon_threads = True` means
+in-flight request threads do not block interpreter shutdown.
+
+### parse_request: splitting and validating the request line
+
+```python
+# CPython: Lib/http/server.py:320 BaseHTTPRequestHandler.parse_request
+    def parse_request(self):
+        self.command = None
+        self.request_version = version = self.default_request_version
+        self.close_connection = True
+        requestline = str(self.raw_requestline, 'iso-8859-1')
+        requestline = requestline.rstrip('\r\n')
+        self.requestline = requestline
+        words = requestline.split()
+        if len(words) == 0:
+            return False
+
+        if len(words) >= 3:  # Enough to determine protocol version
+            version = words[-1]
+            try:
+                if not version.startswith('HTTP/'):
+                    raise ValueError
+                base_version_number = version.split('/', 1)[1]
+                version_number = base_version_number.split(".")
+                if len(version_number) != 2:
+                    raise ValueError
+                version_number = int(version_number[0]), int(version_number[1])
+            except (ValueError, IndexError):
+                self.send_error(
+                    HTTPStatus.BAD_REQUEST,
+                    "Bad request version (%r)" % version)
+                return False
+            if version_number >= (1, 1) and self.protocol_version >= "HTTP/1.1":
+                self.close_connection = False
+        ...
+        self.command, self.path = command, path
+        return True
+```
+
+The open-redirect guard at line 396 (`if self.path.startswith('//')`) was
+added for gh-87389 and strips repeated leading slashes to prevent clients
+from smuggling `//evil.example/` as an absolute URI.
+
+### send_response, send_header, end_headers
+
+```python
+# CPython: Lib/http/server.py:553 BaseHTTPRequestHandler.send_response
+    def send_response(self, code, message=None):
+        self.log_request(code)
+        self.send_response_only(code, message)
+        self.send_header('Server', self.version_string())
+        self.send_header('Date', self.date_time_string())
+
+# CPython: Lib/http/server.py:580 BaseHTTPRequestHandler.send_header
+    def send_header(self, keyword, value):
+        """Send a MIME header to the headers buffer."""
+        if self.request_version != 'HTTP/0.9':
+            if not hasattr(self, '_headers_buffer'):
+                self._headers_buffer = []
+            self._headers_buffer.append(
+                ("%s: %s\r\n" % (keyword, value)).encode('latin-1', 'strict'))
+
+        if keyword.lower() == 'connection':
+            if value.lower() == 'close':
+                self.close_connection = True
+            elif value.lower() == 'keep-alive':
+                self.close_connection = False
+
+# CPython: Lib/http/server.py:594 BaseHTTPRequestHandler.end_headers
+    def end_headers(self):
+        """Send the blank line ending the MIME headers."""
+        if self.request_version != 'HTTP/0.9':
+            self._headers_buffer.append(b"\r\n")
+            self.flush_headers()
+```
+
+Headers accumulate in `_headers_buffer` as encoded bytes and are written
+to `wfile` in a single `b"".join(...)` call in `flush_headers`. Nothing
+touches the socket until `end_headers` is called.
+
+### SimpleHTTPRequestHandler and the test() entry point
+
+```python
+# CPython: Lib/http/server.py:749 SimpleHTTPRequestHandler.send_head
+    def send_head(self):
+        path = self.translate_path(self.path)
+        f = None
+        if os.path.isdir(path):
+            parts = urllib.parse.urlsplit(self.path)
+            if not parts.path.endswith(('/', '%2f', '%2F')):
+                self.send_response(HTTPStatus.MOVED_PERMANENTLY)
+                ...
+                return None
+            for index in self.index_pages:
+                index = os.path.join(path, index)
+                if os.path.isfile(index):
+                    path = index
+                    break
+            else:
+                return self.list_directory(path)
+        ...
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-type", ctype)
+        self.send_header("Content-Length", str(fs[6]))
+        self.send_header("Last-Modified",
+            self.date_time_string(fs.st_mtime))
+        self.end_headers()
+        return f
+
+# CPython: Lib/http/server.py:1332 test
+def test(HandlerClass=BaseHTTPRequestHandler,
+         ServerClass=ThreadingHTTPServer,
+         protocol="HTTP/1.0", port=8000, bind=None,
+         tls_cert=None, tls_key=None, tls_password=None):
+    """Test the HTTP request handler class.
+
+    This runs an HTTP server on port 8000 (or the port argument).
+
+    """
+    ServerClass.address_family, addr = _get_best_family(bind, port)
+    HandlerClass.protocol_version = protocol
+    ...
+    with server as httpd:
+        host, port = httpd.socket.getsockname()[:2]
+        ...
+        try:
+            httpd.serve_forever()
+        except KeyboardInterrupt:
+            print("\nKeyboard interrupt received, exiting.")
+            sys.exit(0)
+```
+
+## gopy notes
+
+gopy has no HTTP server module planned for current milestone work; this
+file is annotated for reference. A Go port would map `HTTPServer` to a
+`net/http`-backed struct, replace the `socketserver.StreamRequestHandler`
+machinery with a `http.Handler` implementation, and re-express
+`BaseHTTPRequestHandler`'s header buffer as a `bufio.Writer`. The
+`SimpleHTTPRequestHandler` filesystem logic translates directly to
+`http.FileServer` with a custom `http.Dir` root. The `test()` function
+has a direct Go analogue in `http.ListenAndServe`.

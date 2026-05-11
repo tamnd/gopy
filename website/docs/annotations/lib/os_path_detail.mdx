@@ -1,0 +1,172 @@
+---
+title: "Lib/posixpath.py"
+description: "POSIX implementation of os.path: path joining, normalization, splitting, home-directory and variable expansion, and filesystem existence tests."
+cpython_path: "Lib/posixpath.py"
+cpython_version: "3.14"
+lines: 597
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# Lib/posixpath.py
+
+<CpyLink path="Lib/posixpath.py" />
+
+This module is the concrete implementation behind `os.path` on all POSIX platforms. It is imported as `os.path` at interpreter startup and re-exported under that name. Functions for existence testing and `commonprefix` live in `Lib/genericpath.py` and are star-imported here; the rest are defined locally.
+
+## Map
+
+| Lines | Symbol | Role |
+|---|---|---|
+| <Cpy path="Lib/posixpath.py" lines="1-41">1-41</Cpy> | Module constants | `sep`, `curdir`, `pardir`, `pathsep`, `defpath`, `devnull`, `altsep` |
+| <Cpy path="Lib/posixpath.py" lines="30-30">30</Cpy> | `from genericpath import *` | Pulls in `exists`, `lexists`, `isfile`, `isdir`, `islink`, `commonprefix`, `getsize`, `getatime`, `getmtime`, `getctime` |
+| <Cpy path="Lib/posixpath.py" lines="43-51">43-51</Cpy> | `_get_sep` | Returns `b'/'` or `'/'` depending on whether the path is bytes or str |
+| <Cpy path="Lib/posixpath.py" lines="54-60">54-60</Cpy> | `normcase` | No-op on POSIX; calls `os.fspath` to accept path-like objects |
+| <Cpy path="Lib/posixpath.py" lines="62-71">62-71</Cpy> | `isabs` | Tests for a leading `/` after `os.fspath` coercion |
+| <Cpy path="Lib/posixpath.py" lines="73-99">73-99</Cpy> | `join` | Concatenates segments with `/`; an absolute segment resets the accumulator |
+| <Cpy path="Lib/posixpath.py" lines="101-117">101-117</Cpy> | `split` | Splits at the last `/` into `(head, tail)`; strips trailing slashes from head |
+| <Cpy path="Lib/posixpath.py" lines="118-131">118-131</Cpy> | `splitext` | Delegates to `genericpath._splitext` using POSIX separators |
+| <Cpy path="Lib/posixpath.py" lines="132-165">132-165</Cpy> | `splitdrive` / `splitroot` | Drive is always empty on POSIX; `splitroot` handles `//` UNC-like prefix |
+| <Cpy path="Lib/posixpath.py" lines="167-189">167-189</Cpy> | `basename` / `dirname` | Thin wrappers around `split` |
+| <Cpy path="Lib/posixpath.py" lines="191-228">191-228</Cpy> | `ismount` | Checks for filesystem root or a mount boundary via `os.lstat` cross-device comparison |
+| <Cpy path="Lib/posixpath.py" lines="230-291">230-291</Cpy> | `expanduser` | Resolves `~` and `~user` via `$HOME` env var or `pwd.getpwuid` / `pwd.getpwnam` |
+| <Cpy path="Lib/posixpath.py" lines="292-372">292-372</Cpy> | `expandvars` | Substitutes `$var` and `${var}` using a compiled regex and `os.environ` |
+| <Cpy path="Lib/posixpath.py" lines="340-372">340-372</Cpy> | `normpath` | Collapses `.`, `..`, and duplicate slashes; falls back to pure Python if `posix._path_normpath` is absent |
+| <Cpy path="Lib/posixpath.py" lines="374-387">374-387</Cpy> | `abspath` | Prepends `os.getcwd()` when the path is relative, then calls `normpath` |
+| <Cpy path="Lib/posixpath.py" lines="389-517">389-517</Cpy> | `realpath` | Resolves all symlinks iteratively using a stack; supports `strict`, `ALLOW_MISSING`, and `ALL_BUT_LAST` modes |
+| <Cpy path="Lib/posixpath.py" lines="518-559">518-559</Cpy> | `relpath` | Computes a relative path from `start` (defaults to `os.curdir`) using component comparison |
+| <Cpy path="Lib/posixpath.py" lines="561-597">561-597</Cpy> | `commonpath` | Returns the longest common sub-path from a sequence; rejects mixing absolute and relative paths |
+
+## Reading
+
+### `join`: absolute-path override semantics
+
+The loop accumulates components left-to-right. When a component starts with `/`, or when the accumulator is empty, the component replaces everything accumulated so far. This mirrors POSIX shell word splitting and means `join('/a', '/b')` returns `'/b'`, not `'/a/b'`.
+
+```python
+# CPython: Lib/posixpath.py:73 join
+def join(a, /, *p):
+    a = os.fspath(a)
+    sep = _get_sep(a)
+    path = a
+    try:
+        for b in p:
+            b = os.fspath(b)
+            if b.startswith(sep) or not path:
+                path = b
+            elif path.endswith(sep):
+                path += b
+            else:
+                path += sep + b
+    except (TypeError, AttributeError, BytesWarning):
+        genericpath._check_arg_types('join', a, *p)
+        raise
+    return path
+```
+
+### `normpath`: dot-segment elimination
+
+`normpath` first tries to import `posix._path_normpath`, a C accelerator. If that is not available (e.g., on non-CPython runtimes), the pure-Python fallback splits on `/`, drops empty and `.` components, and processes `..` by popping the last element unless the path is rooted and the stack is already empty.
+
+```python
+# CPython: Lib/posixpath.py:345 normpath (pure-Python fallback)
+def normpath(path):
+    """Normalize path, eliminating double slashes, etc."""
+    path = os.fspath(path)
+    if isinstance(path, bytes):
+        sep = b'/'; dot = b'.'; dotdot = b'..'
+    else:
+        sep = '/'; dot = '.'; dotdot = '..'
+    if not path:
+        return dot
+    _, initial_slashes, path = splitroot(path)
+    comps = path.split(sep)
+    new_comps = []
+    for comp in comps:
+        if not comp or comp == dot:
+            continue
+        if (comp != dotdot or (not initial_slashes and not new_comps) or
+             (new_comps and new_comps[-1] == dotdot)):
+            new_comps.append(comp)
+        elif new_comps:
+            new_comps.pop()
+    comps = new_comps
+    path = initial_slashes + sep.join(comps)
+    return path or dot
+```
+
+### `expanduser`: `~` resolution from passwd
+
+When the path starts with `~` but no user name follows, the home directory comes from `$HOME`. When a user name is present (e.g., `~alice`), `pwd.getpwnam` is called. Both branches return the path unchanged if the lookup fails, rather than raising.
+
+```python
+# CPython: Lib/posixpath.py:230 expanduser
+def expanduser(path):
+    path = os.fspath(path)
+    tilde = b'~' if isinstance(path, bytes) else '~'
+    if not path.startswith(tilde):
+        return path
+    sep = _get_sep(path)
+    i = path.find(sep, 1)
+    if i < 0:
+        i = len(path)
+    if i == 1:
+        if 'HOME' not in os.environ:
+            import pwd
+            try:
+                userhome = pwd.getpwuid(os.getuid()).pw_dir
+            except KeyError:
+                return path
+        else:
+            userhome = os.environ['HOME']
+    else:
+        import pwd
+        name = path[1:i]
+        if isinstance(name, bytes):
+            name = os.fsdecode(name)
+        try:
+            pwent = pwd.getpwnam(name)
+        except KeyError:
+            return path
+        userhome = pwent.pw_dir
+    userhome = userhome.rstrip(sep)
+    return (userhome + path[i:]) or sep
+```
+
+### `commonpath`: longest common sub-path
+
+Unlike `commonprefix` (which operates character-by-character on raw strings and can return partial path components), `commonpath` splits every path on `/`, strips empty and `.` components, then finds the common prefix of the sorted min and max paths by component. It rejects any mix of absolute and relative inputs.
+
+```python
+# CPython: Lib/posixpath.py:561 commonpath
+def commonpath(paths):
+    paths = tuple(map(os.fspath, paths))
+    if not paths:
+        raise ValueError('commonpath() arg is an empty sequence')
+    sep = b'/' if isinstance(paths[0], bytes) else '/'
+    curdir = b'.' if isinstance(paths[0], bytes) else '.'
+    try:
+        split_paths = [path.split(sep) for path in paths]
+        try:
+            isabs, = {p.startswith(sep) for p in paths}
+        except ValueError:
+            raise ValueError("Can't mix absolute and relative paths") from None
+        split_paths = [[c for c in s if c and c != curdir] for s in split_paths]
+        s1 = min(split_paths)
+        s2 = max(split_paths)
+        common = s1
+        for i, c in enumerate(s1):
+            if c != s2[i]:
+                common = s1[:i]
+                break
+        prefix = sep if isabs else sep[:0]
+        return prefix + sep.join(common)
+    except (TypeError, AttributeError):
+        genericpath._check_arg_types('commonpath', *paths)
+        raise
+```
+
+## gopy notes
+
+`posixpath` is a pure-Python module with no C extension dependency beyond the optional `posix._path_normpath` accelerator. gopy ships its own `os.path` binding that covers `join`, `split`, `dirname`, `basename`, `exists`, `isfile`, `isdir`, and `isabs`. The `expanduser`, `expandvars`, `realpath`, and `commonpath` functions are not yet ported; they are good candidates for the next `os.path` pass because they depend only on `os.environ`, `os.getcwd`, `os.lstat`, and `os.readlink`, all of which gopy already exposes.
