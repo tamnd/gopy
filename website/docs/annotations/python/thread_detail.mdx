@@ -1,0 +1,129 @@
+---
+title: "Python/thread.c and thread_pthread.h: Threading Primitives"
+description: "Thread creation, lock primitives, condition variables, and thread-local storage in CPython 3.14"
+cpython_path: Python/thread.c
+cpython_version: "3.14"
+lines: 800
+status: annotated
+ported_to: vm/thread.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+CPython's low-level thread layer is split across a thin platform-neutral header
+(`Python/thread.c`) and a POSIX implementation (`Python/thread_pthread.h`). On
+Linux and macOS the pthread backend is always active. The layer exposes thread
+creation, advisory locks, condition variables, and the `_Py_tss_*` thread-local
+storage API that replaced the old `PyThread_tss_*` names in 3.12. CPython 3.14
+tightens the TSS API and removes several deprecated lock functions.
+
+## Map
+
+| Lines (combined) | Symbol | Purpose |
+|-----------------|--------|---------|
+| thread.c:1-60 | platform dispatch | `#include` chain selects `thread_pthread.h` or Win32 variant |
+| thread.c:61-130 | `PyThread_init_thread` | One-time thread subsystem init, no-op on pthreads |
+| thread_pthread.h:1-80 | includes, `MICROSECONDS_TO_TIMESPEC` | POSIX headers and timeout helper macro |
+| thread_pthread.h:81-200 | `PyThread_start_new_thread` | `pthread_create` wrapper, detaches the new thread |
+| thread_pthread.h:201-380 | `PyThread_allocate_lock`, `PyThread_acquire_lock_timed`, `PyThread_release_lock` | Mutex + condvar pair implementing timed advisory lock |
+| thread_pthread.h:381-480 | `_PyThread_cond_*` wrappers | `pthread_cond_wait` and `pthread_cond_timedwait` helpers |
+| thread_pthread.h:481-580 | `_Py_tss_create`, `_Py_tss_set`, `_Py_tss_get`, `_Py_tss_delete` | Thread-specific storage via `pthread_key_t` |
+| thread_pthread.h:581-680 | `PyThread_get_thread_ident`, `PyThread_get_thread_native_id` | Return `pthread_self()` cast to `unsigned long` |
+| thread_pthread.h:681-800 | `_PyThread_at_fork_reinit` | Reinitialize locks after `fork()` to avoid deadlocks in child |
+
+## Reading
+
+### PyThread_start_new_thread
+
+The function allocates a small `struct func_arg` on the heap, copies the caller's
+function pointer and argument, calls `pthread_create`, and immediately detaches the
+thread. The wrapper `bootstrap` frees `func_arg` and then calls the user function.
+The return value is the new thread's ident cast to `unsigned long`.
+
+```c
+/* Python/thread_pthread.h:81 PyThread_start_new_thread */
+unsigned long
+PyThread_start_new_thread(void (*func)(void *), void *arg)
+{
+    pthread_t th;
+    struct func_arg *obj = PyMem_RawMalloc(sizeof(struct func_arg));
+    obj->func = func;
+    obj->arg  = arg;
+    if (pthread_create(&th, NULL, bootstrap, obj) != 0) {
+        PyMem_RawFree(obj);
+        return PYTHREAD_INVALID_THREAD_ID;
+    }
+    pthread_detach(th);
+    return (unsigned long) th;
+}
+```
+
+### PyThread_acquire_lock_timed
+
+CPython implements advisory locks as a `pthread_mutex_t` plus a `pthread_cond_t`
+because plain mutexes cannot express the "try for N microseconds" semantic
+portably. The function loops on `pthread_cond_timedwait` until the lock flag is
+clear, then sets it and returns `PY_LOCK_ACQUIRED`.
+
+```c
+/* Python/thread_pthread.h:250 PyThread_acquire_lock_timed */
+PyLockStatus
+PyThread_acquire_lock_timed(PyThread_type_lock lock,
+                            PY_TIMEOUT_T microseconds, int intr_flag)
+{
+    pthread_lock *thelock = lock;
+    int success = 0;
+
+    pthread_mutex_lock(&thelock->mut);
+    while (thelock->locked) {
+        if (microseconds == 0) break;
+        /* build struct timespec from microseconds ... */
+        int r = pthread_cond_timedwait(&thelock->lock_released,
+                                       &thelock->mut, &ts);
+        if (r == ETIMEDOUT) break;
+    }
+    if (!thelock->locked) {
+        thelock->locked = 1;
+        success = 1;
+    }
+    pthread_mutex_unlock(&thelock->mut);
+    return success ? PY_LOCK_ACQUIRED : PY_LOCK_FAILURE;
+}
+```
+
+### _Py_tss_* thread-local storage (3.14)
+
+The TSS API provides a portable `pthread_key_t` wrapper. `_Py_tss_create`
+allocates a key; `_Py_tss_set` and `_Py_tss_get` call `pthread_setspecific` and
+`pthread_getspecific`. CPython 3.14 removed the older `Py_tss_*` spelling (without
+the leading underscore) from the public headers.
+
+```c
+/* Python/thread_pthread.h:481 _Py_tss_create */
+int
+_Py_tss_create(_Py_tss_t *key)
+{
+    assert(key != NULL);
+    return pthread_key_create(&key->_key, NULL);
+}
+
+/* Python/thread_pthread.h:510 _Py_tss_set / _Py_tss_get */
+int   _Py_tss_set(_Py_tss_t *key, void *value) {
+    return pthread_setspecific(key->_key, value);
+}
+void *_Py_tss_get(_Py_tss_t *key) {
+    return pthread_getspecific(key->_key);
+}
+```
+
+## gopy notes
+
+- gopy runs on Go's goroutine scheduler. True OS thread creation is handled via
+  `runtime.LockOSThread` rather than a `pthread_create` wrapper.
+- The advisory lock model (`PyThread_acquire_lock_timed`) maps to Go's
+  `sync.Mutex` combined with a `time.Timer`; the condvar loop is replaced by a
+  channel select.
+- `_Py_tss_*` corresponds to Go's `sync.Map` keyed by goroutine ID in the current
+  prototype, but a proper per-goroutine slot is planned for the GIL-free path.
+- `_PyThread_at_fork_reinit` has no direct analogue yet. gopy does not currently
+  wrap `os.ForkExec` in a way that would require lock reinitialization.

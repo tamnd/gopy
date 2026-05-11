@@ -1,0 +1,116 @@
+---
+title: "html/parser.py: HTMLParser feed loop and callback dispatch"
+description: "Detailed annotations for HTMLParser.feed buffering, the goahead state machine, handle_starttag/endtag/data/comment callbacks, CDATA handling, and 3.14 changes"
+cpython_path: Lib/html/parser.py
+cpython_version: "3.14"
+lines: 500
+status: annotated
+ported_to: module/html/parser
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`html/parser.py` is a pure-Python, permissive HTML parser. It does not build a tree. Instead it fires named callbacks as it recognises tokens, making it suitable for streaming use. The parser tolerates malformed markup by design, consistent with browser behaviour.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1–50 | imports, constants | `attrfind_tolerant`, `tagfind_tolerant`, compiled regexes |
+| 51–100 | `HTMLParser.__init__` | Buffer init, `convert_charrefs` flag |
+| 101–160 | `HTMLParser.feed`, `close` | Incremental buffering, end-of-stream flush |
+| 161–310 | `HTMLParser.goahead` | Central state machine: tag vs data dispatch |
+| 311–390 | `HTMLParser.handle_starttag`, `handle_endtag` | Callback stubs (overridden by subclasses) |
+| 391–440 | `HTMLParser.handle_data`, `handle_comment` | Data and comment callback stubs |
+| 441–470 | `HTMLParser.handle_entityref`, `handle_charref` | Entity and character reference stubs |
+| 471–500 | `HTMLParser.getpos`, `reset` | Position tracking, buffer reset |
+
+## Reading
+
+### `feed` buffering and `goahead`
+
+`feed` appends incoming text to `self.rawdata` and then calls `goahead(0)`. The `0` argument means "not end of file", so the method leaves incomplete tokens in the buffer. `close` calls `goahead(1)` to force a final flush.
+
+```python
+# CPython Lib/html/parser.py (simplified)
+def feed(self, data):
+    self.rawdata = self.rawdata + data
+    self.goahead(0)
+
+def close(self):
+    self.goahead(1)
+    self.rawdata = ''
+```
+
+`goahead` scans `self.rawdata` with a while loop. Each iteration finds the next `<` with `rawdata.find('<', i)`. Text before that position is dispatched to `handle_data` (or deferred until character references are resolved if `convert_charrefs` is set). When no `<` is found and `end` is false, the remaining text is left in the buffer for the next `feed` call.
+
+```python
+# CPython Lib/html/parser.py (simplified)
+def goahead(self, end):
+    rawdata = self.rawdata
+    i = 0
+    n = len(rawdata)
+    while i < n:
+        if self.convert_charrefs and not self.cdata_content_elements:
+            j = rawdata.find('<', i)
+            if j < 0:
+                if end:
+                    self.handle_data(rawdata[i:])
+                    i = n
+                break
+        # ... tag dispatch follows
+    self.rawdata = rawdata[i:]
+```
+
+### `handle_starttag` and attribute parsing
+
+When `goahead` detects a start tag it calls `handle_starttag(tag, attrs)`. The `attrs` list is a sequence of `(name, value)` tuples. Attribute values may be `None` for bare attributes (e.g. `disabled`). The `tagfind_tolerant` and `attrfind_tolerant` regexes allow spaces around `=` and unquoted values.
+
+```python
+# CPython Lib/html/parser.py (simplified)
+def handle_starttag(self, tag, attrs):
+    pass  # override in subclass
+
+def handle_endtag(self, tag):
+    pass
+
+# Example subclass usage:
+class Scraper(HTMLParser):
+    def handle_starttag(self, tag, attrs):
+        if tag == 'a':
+            href = dict(attrs).get('href')
+            print('link:', href)
+```
+
+3.14 tightened the `tagfind_tolerant` regex to reject tag names that start with a digit, aligning the parser more closely with the HTML5 specification. Code that relied on parsing `<3foo>` as a tag will now receive it as raw data.
+
+### CDATA sections and `set_cdata_mode`
+
+Inside `<script>` and `<style>` elements, the parser switches to CDATA mode via `set_cdata_mode`. In this mode `goahead` scans for the literal closing tag string rather than interpreting any `<` as a new tag. This prevents content like `if (a < b)` from being misread as a tag.
+
+```python
+# CPython Lib/html/parser.py (simplified)
+def set_cdata_mode(self, elem):
+    self.cdata_elem = elem.lower()
+
+def clear_cdata_mode(self):
+    self.cdata_elem = None
+
+# goahead checks:
+if self.cdata_elem:
+    # scan for '</script>' literally
+    j = rawdata.lower().find('</' + self.cdata_elem, i)
+    if j < 0:
+        break  # wait for more data
+    self.handle_data(rawdata[i:j])
+    i = self.handle_endtag_close(rawdata, j)
+```
+
+`handle_comment` follows the same incomplete-token deferral strategy: if `-->` is not found, the comment is left in the buffer.
+
+## gopy notes
+
+- `convert_charrefs` (default `True` since Python 3.5) causes `goahead` to batch all text between tags and resolve `&amp;`, `&#39;`, and similar references before calling `handle_data`. A port must apply the same batching or callers will see raw entity text.
+- The `cdata_content_elements` class attribute is a frozenset containing `'script'` and `'style'`. It drives the CDATA mode switch and is consulted in `goahead`, not in `handle_starttag`. A port should not move this check.
+- `getpos` returns `(line, col)` where both are 1-based. Line increments are tracked by counting `\n` in consumed data. A port must update the position counters inside `goahead` at the same points CPython does or `getpos` will drift.
+- The 3.14 digit-in-tagname change is gated on the `tagfind_tolerant` regex, not on a version flag. A port should use the updated pattern unconditionally.

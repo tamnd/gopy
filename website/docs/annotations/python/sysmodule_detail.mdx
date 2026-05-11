@@ -1,0 +1,148 @@
+---
+title: "Python/sysmodule.c: The sys Module"
+description: "sys.argv, sys.path, trace/profile hooks, exc_info, intern, _getframe, and 3.14 additions including sys.getunicodeinternedsize"
+cpython_path: Python/sysmodule.c
+cpython_version: "3.14"
+lines: 3500
+status: annotated
+ported_to: module/sys/module.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`Python/sysmodule.c` implements the built-in `sys` module and the related
+`_PyBuiltin_Init` setup that wires interpreter-wide state to Python-visible
+attributes. It is one of the largest files in CPython at roughly 3500 lines. Key
+responsibilities include populating `sys.argv` and `sys.path` at startup,
+installing the trace and profile hooks used by debuggers and coverage tools,
+exposing the current exception via `sys.exc_info()`, maintaining the string intern
+table, and providing low-level frame introspection through `sys._getframe`.
+CPython 3.14 adds `sys.getunicodeinternedsize()` and adjusts several startup
+sequencing details.
+
+## Map
+
+| Lines | Symbol | Purpose |
+|-------|--------|---------|
+| 1-120 | includes, `sys_flags_type` | Module header and `sys.flags` named-tuple type |
+| 121-300 | `sys_argv_init`, `PySys_SetArgvEx` | Populate `sys.argv` from C `argv`; insert `sys.path[0]` |
+| 301-520 | `sys_path_init`, `_PySys_InitPath` | Build `sys.path` from `PYTHONPATH`, `.pth` files, zip importer |
+| 521-700 | `sys_settrace`, `sys_setprofile` | Install per-thread trace/profile hooks via `PyEval_SetTrace` |
+| 701-820 | `sys_gettrace`, `sys_getprofile` | Return the currently installed hook objects |
+| 821-950 | `sys_exc_info` | Return `(type, value, traceback)` from `tstate->current_exception` |
+| 951-1050 | `sys_intern` | Deduplicate string objects via `PyUnicode_InternInPlace` |
+| 1051-1180 | `sys_getframe` | Walk `tstate->frame` chain by depth, return frame object |
+| 1181-1400 | `sys_getrecursionlimit`, `sys_setrecursionlimit` | Guard and update `tstate->interp->ceval.recursion_limit` |
+| 1401-1600 | `sys_getdefaultencoding`, `sys_getfilesystemencoding` | Encoding accessors |
+| 1601-1900 | `sys_getrefcount`, `sys_getsizeof`, `sys_getallocatedblocks` | Memory introspection helpers |
+| 1901-2100 | `sys_getandroidapilevel`, platform attrs | Platform-specific attributes |
+| 2101-2400 | `_PySys_UpdateConfig` | Apply `PyConfig` fields to live `sys` attributes |
+| 2401-2700 | `sys_methods[]` table | `PyMethodDef` array for all `sys.*` functions |
+| 2701-2900 | `_PySys_InitCore` | First-phase init: create module, set constants, call path init |
+| 2901-3100 | `_PyBuiltin_Init` | Initialize `builtins` module and link it to `sys.modules` |
+| 3101-3300 | `sys_getunicodeinternedsize` | Return count of interned strings (new in 3.14) |
+| 3301-3500 | audit hooks, `sys.addaudithook` | `PySys_Audit` dispatch table and registration |
+
+## Reading
+
+### sys.argv and sys.path initialization
+
+`PySys_SetArgvEx` is called from `Py_InitializeFromConfig` after the interpreter
+is up. It sets `sys.argv` to a list of Unicode objects built from the raw C
+`argv`. When `updatepath` is true it prepends the script's directory (or an empty
+string for `-c` mode) to `sys.path`, matching CPython's documented search order.
+
+```c
+/* Python/sysmodule.c:121 sys_argv_init */
+int
+PySys_SetArgvEx(int argc, wchar_t **argv, int updatepath)
+{
+    PyObject *av = PyList_New(argc);
+    for (int i = 0; i < argc; i++) {
+        PyObject *v = PyUnicode_FromWideChar(argv[i], -1);
+        PyList_SET_ITEM(av, i, v);  /* steals ref */
+    }
+    if (PySys_SetObject("argv", av) != 0) { Py_DECREF(av); return -1; }
+    Py_DECREF(av);
+    if (updatepath) {
+        /* prepend script dir or "" to sys.path */
+        return _PyPathConfig_UpdateSysPath();
+    }
+    return 0;
+}
+```
+
+### sys.settrace and the trace hook
+
+`sys.settrace(f)` stores `f` on the current thread state and sets the
+`c_tracefunc` pointer to `trace_trampoline`. Every opcode dispatch in `ceval.c`
+checks `tstate->tracing` before calling the hook, so the overhead is a single
+branch when no trace is installed.
+
+```c
+/* Python/sysmodule.c:521 sys_settrace */
+static PyObject *
+sys_settrace(PyObject *self, PyObject *args)
+{
+    PyObject *traceobj;
+    if (!PyArg_ParseTuple(args, "O:settrace", &traceobj))
+        return NULL;
+    if (traceobj == Py_None) {
+        PyEval_SetTrace(NULL, NULL);
+    } else {
+        PyEval_SetTrace(trace_trampoline, traceobj);
+    }
+    Py_RETURN_NONE;
+}
+```
+
+### sys.exc_info and sys.getunicodeinternedsize (3.14)
+
+`sys.exc_info()` was refactored in 3.12 to read directly from
+`tstate->current_exception` rather than walking a linked list of `_PyErr_StackItem`
+entries. CPython 3.14 keeps this one-field model and adds
+`sys.getunicodeinternedsize()` which returns the live count of interned string
+objects, useful for memory profiling.
+
+```c
+/* Python/sysmodule.c:821 sys_exc_info */
+static PyObject *
+sys_exc_info(PyObject *self, PyObject *args)
+{
+    PyThreadState *tstate = _PyThreadState_GET();
+    PyObject *exc = tstate->current_exception;
+    if (exc == NULL || exc == Py_None) {
+        return PyTuple_Pack(3, Py_None, Py_None, Py_None);
+    }
+    PyObject *tb = PyException_GetTraceback(exc);  /* new ref or None */
+    PyObject *result = PyTuple_Pack(3,
+                           (PyObject *)Py_TYPE(exc), exc,
+                           tb ? tb : Py_None);
+    Py_XDECREF(tb);
+    return result;
+}
+
+/* Python/sysmodule.c:3101 sys_getunicodeinternedsize (3.14) */
+static PyObject *
+sys_getunicodeinternedsize(PyObject *self, PyObject *args)
+{
+    return PyLong_FromSsize_t(_PyUnicode_InternedSize());
+}
+```
+
+## gopy notes
+
+- `module/sys/module.go` implements `sys.argv`, `sys.path`, `sys.version`, and the
+  basic platform attributes. Trace and profile hook wiring (`sys.settrace`,
+  `sys.setprofile`) is tracked but not yet connected to the eval loop.
+- `sys.exc_info()` currently reads from `vm.ThreadState.CurrentException`, which
+  mirrors the 3.12+ single-field model. The old three-exception tuple path is not
+  ported.
+- `sys.intern` delegates to `objects/str.go:Intern`, which uses a Go
+  `sync.Map[string]*Str` as the intern table. `sys.getunicodeinternedsize` can be
+  wired to `Len()` on that map once exposed.
+- `sys._getframe` is partially implemented: depth-0 (current frame) works, but
+  walking the frame chain for positive depth requires the frame linkage in
+  `vm/eval_gen.go` to be finalized first.
+- `_PyBuiltin_Init` correspondence is in `stdlibinit/registry.go`, which registers
+  all built-in module factories before the first `import` can run.

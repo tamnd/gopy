@@ -1,0 +1,106 @@
+---
+title: "pycore_runtime.h: Runtime State Detail"
+description: "Annotation of the _PyRuntimeState struct, global _PyRuntime, and startup/shutdown flag tracking in CPython 3.14"
+cpython_path: Include/internal/pycore_runtime.h
+cpython_version: "3.14"
+lines: 300
+status: annotated
+ported_to: objects/object.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`pycore_runtime.h` owns the single, process-wide `_PyRuntime` global and the
+`_PyRuntimeState` struct that hangs off it. Every interpreter shares this
+struct. Understanding it is a prerequisite for reading the GIL, `atexit`,
+audit hooks, and the startup/shutdown state machine.
+
+## Map
+
+| Symbol | Kind | Lines (approx) | Notes |
+|---|---|---|---|
+| `_Py_CODEUNIT` | typedef | 40-42 | Single instruction word; `uint16_t` on all platforms |
+| `_PyRuntimeState` | struct | 55-280 | Process-wide singleton |
+| `_PyRuntimeState.interpreters` | field | 70-85 | Linked list head + count of live interpreters |
+| `_PyRuntimeState.main_thread` | field | 90 | OS thread ID of the thread that called `Py_Initialize` |
+| `_PyRuntimeState.gilstate` | field | 110-140 | GIL ownership bookkeeping (`_gilstate_runtime_state`) |
+| `_PyRuntimeState.atexit` | field | 150-160 | Process-level atexit callbacks (distinct from per-interpreter) |
+| `_PyRuntimeState.audit_hooks` | field | 165-175 | Singly-linked list of `sys.audit` hooks |
+| `_PyRuntimeState.stoptheworld` | field | 180-200 | 3.14: stop-the-world GC coordination flags |
+| `_PyRuntime` | extern | 290 | The one and only `_PyRuntimeState` instance |
+| `_Py_IsInitialized` | inline | 295-300 | Reads `_PyRuntime.initialized` |
+
+## Reading
+
+### The `_PyRuntimeState` struct
+
+The struct is large; the excerpt below shows the fields most relevant to
+interpreter startup and shutdown.
+
+```c
+// Include/internal/pycore_runtime.h:55
+struct _PyRuntimeState {
+    /* Has Py_Initialize() completed? */
+    int initialized;
+    /* Is Py_Finalize() in progress? */
+    int finalizing;
+
+    struct pyinterpreters {
+        PyThread_type_lock mutex;
+        PyInterpreterState *head;
+        PyInterpreterState *main;
+        int64_t next_id;
+    } interpreters;
+
+    unsigned long main_thread;
+
+    struct _gilstate_runtime_state gilstate;
+    struct _atexit_runtime_state atexit;
+    struct _Py_audit_hook_list audit_hooks;
+};
+```
+
+The `initialized` / `finalizing` pair drives the startup and shutdown state
+machine. Code that must not run after `Py_Finalize` has started checks
+`_PyRuntime.finalizing` rather than `_PyRuntime.initialized` because the
+latter is cleared only at the very end.
+
+### `_Py_CODEUNIT` typedef
+
+```c
+// Include/internal/pycore_runtime.h:40
+typedef uint16_t _Py_CODEUNIT;
+```
+
+Each bytecode instruction is exactly one `_Py_CODEUNIT`. The opcode sits in
+the low byte and the oparg in the high byte (little-endian layout). The
+3.14 specializing adaptive interpreter reads pairs of consecutive units for
+wide (extended) opcodes.
+
+### 3.14 stop-the-world field
+
+```c
+// Include/internal/pycore_runtime.h:182
+struct _stoptheworld_state {
+    /* Set by the GC thread requesting a stop. */
+    int requested;
+    /* Count of threads that have parked. */
+    int parked_count;
+    PyThread_type_lock lock;
+} stoptheworld;
+```
+
+This field was added in 3.13 and extended in 3.14 to support the incremental
+cyclic GC. The eval loop checks `_PyRuntime.stoptheworld.requested` on the
+`CHECK_EVAL_BREAKER` fast path.
+
+## gopy notes
+
+- `_PyRuntime` maps conceptually to the process-level state that gopy keeps in
+  `objects/object.go`. There is no single Go global matching it; instead the
+  runtime state is threaded through context or held in package-level vars per
+  subsystem.
+- `_Py_CODEUNIT` is `uint16` in `compile/flowgraph.go`.
+- `main_thread` and GIL fields are not yet ported; gopy runs single-threaded.
+- `audit_hooks` support is tracked as a future task once the `sys` module port
+  reaches `sys.audit`.
