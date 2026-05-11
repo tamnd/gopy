@@ -94,7 +94,6 @@ import (
 	_ "github.com/tamnd/gopy/module/signal"
 	_ "github.com/tamnd/gopy/module/time"
 	_ "github.com/tamnd/gopy/module/traceback"
-	_ "github.com/tamnd/gopy/module/warnings"
 	_ "github.com/tamnd/gopy/module/weakref"
 
 	// Built-in module: _weakref. Registers itself via
