@@ -1,0 +1,179 @@
+---
+title: Python/context.c
+description: "Context and ContextVar implementation: HAMT-backed context maps, enter/exit stack, and Token reset"
+cpython_path: Python/context.c
+cpython_version: "3.14"
+lines: 1000
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`Python/context.c` implements `contextvars.Context`, `contextvars.ContextVar`,
+and `contextvars.Token`. Contexts are shallow-immutable HAMT (Hash Array Mapped
+Trie) snapshots; entering a context installs it on the thread state stack and
+exiting restores the previous one.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-60 | includes / forward decls | Internal HAMT API and `_PyHamt` type |
+| 61-120 | `PyContext` struct | Wraps one `_PyHamt *ctx_vars` root |
+| 121-200 | `context_new` / `PyContext_New` | Allocate a fresh empty context |
+| 201-280 | `PyContext_Copy` | Return a new `PyContext` sharing the same HAMT root |
+| 281-380 | `PyContext_Enter` / `PyContext_Exit` | Push/pop on `tstate->context` |
+| 381-500 | `PyContextVar` struct + constructors | Name, default value, optional type check |
+| 501-620 | `PyContextVar_Get` | HAMT lookup with fallback to default |
+| 621-740 | `PyContextVar_Set` | HAMT `assoc` on current context |
+| 741-820 | `PyContextVar_Reset` | Restore old value recorded in a Token |
+| 821-920 | `PyContext_Token` struct | Stores `var`, `old_value`, `used` flag |
+| 921-1000 | Type objects + module init | `PyContext_Type`, `PyContextVar_Type`, `PyToken_Type` |
+
+## Reading
+
+### PyContext_Copy: sharing the HAMT root
+
+`Copy` is O(1) because HAMTs are persistent: copying is just bumping the
+reference count on the existing root node.
+
+```c
+// CPython: Python/context.c:215 PyContext_Copy
+PyObject *
+PyContext_Copy(PyObject *octx)
+{
+    PyContext *ctx = (PyContext *)octx;
+    return (PyObject *)context_new(ctx->ctx_vars);
+}
+```
+
+Two contexts share the same `ctx_vars` pointer until one of them calls
+`PyContextVar_Set`, which produces a new HAMT root via `assoc` and stores it
+only in the current context.
+
+### PyContext_Enter and PyContext_Exit
+
+```c
+// CPython: Python/context.c:295 PyContext_Enter
+int
+PyContext_Enter(PyObject *octx)
+{
+    PyContext *ctx = (PyContext *)octx;
+    PyThreadState *ts = _PyThreadState_GET();
+
+    ctx->ctx_prev = ts->context;   /* save caller's context */
+    ts->context = (PyObject *)ctx;
+    Py_INCREF(ctx);
+    ts->context_ver++;
+    return 0;
+}
+
+// CPython: Python/context.c:330 PyContext_Exit
+int
+PyContext_Exit(PyObject *octx)
+{
+    PyContext *ctx = (PyContext *)octx;
+    PyThreadState *ts = _PyThreadState_GET();
+
+    ts->context = ctx->ctx_prev;
+    ctx->ctx_prev = NULL;
+    Py_DECREF(ctx);
+    ts->context_ver++;
+    return 0;
+}
+```
+
+`ctx_prev` forms a singly-linked stack. `context_ver` is a monotonic counter;
+any cache keyed on context identity invalidates itself when `context_ver`
+changes. `PyContext_Exit` does not call `Py_DECREF(ctx->ctx_prev)` because
+`ctx_prev` is a borrowed reference to the caller's context.
+
+### PyContextVar_Get: HAMT lookup with default fallback
+
+```c
+// CPython: Python/context.c:520 PyContextVar_Get
+int
+PyContextVar_Get(PyObject *ovar, PyObject *def, PyObject **val)
+{
+    PyContextVar *var = (PyContextVar *)ovar;
+    PyThreadState *ts = _PyThreadState_GET();
+    PyContext *ctx = (PyContext *)ts->context;
+
+    PyObject *found = _PyHamt_Find(ctx->ctx_vars, (PyObject *)var);
+    if (found != NULL) {
+        Py_INCREF(found);
+        *val = found;
+        return 0;
+    }
+    /* fall back: explicit default arg, then var->var_default */
+    if (def != NULL) {
+        Py_INCREF(def);
+        *val = def;
+    } else if (var->var_default != NULL) {
+        Py_INCREF(var->var_default);
+        *val = var->var_default;
+    } else {
+        *val = NULL;
+    }
+    return 0;
+}
+```
+
+The HAMT key is the `PyContextVar *` pointer itself, compared by identity.
+This means two different `ContextVar` objects with the same name are always
+distinct keys.
+
+### PyContextVar_Set and Token
+
+```c
+// CPython: Python/context.c:650 PyContextVar_Set
+PyObject *
+PyContextVar_Set(PyObject *ovar, PyObject *val)
+{
+    PyContextVar *var = (PyContextVar *)ovar;
+    PyThreadState *ts = _PyThreadState_GET();
+    PyContext *ctx = (PyContext *)ts->context;
+
+    /* snapshot old value for Token */
+    PyObject *old = _PyHamt_Find(ctx->ctx_vars, (PyObject *)var);
+
+    PyObject *new_vars = _PyHamt_Assoc(ctx->ctx_vars,
+                                       (PyObject *)var, val);
+    if (new_vars == NULL) {
+        return NULL;
+    }
+    Py_SETREF(ctx->ctx_vars, new_vars);  /* mutate current context in place */
+
+    return context_token_new(ctx, var, old);  /* returns a Token */
+}
+```
+
+`_PyHamt_Assoc` is purely functional: it returns a new HAMT root with the
+key/value added, leaving the original root intact (for contexts that share it
+via `Copy`). The current context swaps in the new root via `Py_SETREF`.
+
+## gopy notes
+
+- `PyContext` maps to `objects.ContextObject` in gopy. `ctx_vars` is
+  `*hamt.Node` from the `module/_hamt` package.
+- `PyContext_Enter` / `PyContext_Exit` correspond to
+  `vm.PushContext` / `vm.PopContext` which manipulate `tstate.Context`.
+- `PyContextVar_Get` maps to `objects.ContextVar.Get`; the three-way fallback
+  (found / explicit default / var default) is reproduced exactly.
+- `Token` is `objects.ContextToken`; its `used` guard prevents double-reset.
+- `context_ver` is tracked as `tstate.ContextVer uint64` and is incremented
+  on every enter/exit, matching CPython's invalidation semantics.
+
+## CPython 3.14 changes
+
+- 3.14 adds `PyContext_CopyCurrent` as a C-API convenience that combines
+  `PyContext_CopyCurrent = PyContext_Copy(PyContext_CopyCurrent())` in one call,
+  reducing boilerplate in extension modules (gh-116008).
+- The `ctx_weakreflist` field was added to `PyContext` in 3.14 to allow weak
+  references to context objects (gh-119006).
+- `context_ver` overflow handling was hardened: the counter now wraps at
+  `UINT64_MAX` with an explicit modular increment rather than undefined signed
+  overflow (gh-112130).
+- `PyContextVar_Reset` gains an early-exit when `token->tok_used` is set,
+  raising `RuntimeError` on double-reset. The check existed informally before
+  but is now codified with a dedicated error message.

@@ -1,0 +1,118 @@
+---
+title: Include/cpython/setobject.h
+description: "CPython-internal set/frozenset header: setentry, PySetObject layout, and inline small-set storage"
+cpython_path: Include/cpython/setobject.h
+cpython_version: "3.14"
+lines: 70
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+CPython-internal header for `set` and `frozenset`. The public header in
+`Include/setobject.h` exposes only the abstract API. This file adds the raw
+struct layout needed by the runtime, the GC scanner, and pickle support.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-8 | guard / includes | Header guard |
+| 9-14 | `setentry` | One hash-table slot: cached hash plus key pointer |
+| 15-42 | `PySetObject` | Full set struct with inline `smalltable` and all bookkeeping fields |
+| 43-48 | `PySet_GET_SIZE(so)` | Unsafe fast size read |
+| 49-54 | `_PySet_Dummy` | Sentinel object marking deleted slots |
+| 55-62 | `PySet_Type`, `PyFrozenSet_Type` | Extern type object declarations |
+| 63-70 | `PyFrozenSet_MINSIZE` | Constant for minimum frozen-set allocation |
+
+## Reading
+
+### setentry struct
+
+```c
+// CPython: Include/cpython/setobject.h:11 setentry
+typedef struct {
+    PyObject *key;
+    Py_hash_t hash;
+} setentry;
+```
+
+The hash is stored alongside the key so that resize and lookup can compare
+hashes before calling `__eq__`. A `NULL` key means the slot is empty; the
+`_PySet_Dummy` sentinel means the slot was deleted (tombstone).
+
+### PySetObject struct
+
+```c
+// CPython: Include/cpython/setobject.h:22 PySetObject
+typedef struct {
+    PyObject_HEAD
+
+    Py_ssize_t fill;   /* # slots used including dummy */
+    Py_ssize_t used;   /* # items in set, excluding dummy */
+    Py_ssize_t mask;   /* table size - 1 */
+
+    setentry *table;
+    Py_hash_t hash;    /* only used by frozenset */
+    Py_ssize_t finger; /* search finger for pop() */
+
+    setentry smalltable[8];
+    PyObject *weakreflist;
+} PySetObject;
+```
+
+`smalltable` holds eight slots inline. For sets with up to five elements
+(`fill` stays below `mask * 2/3 + 1`) the object never heap-allocates a
+separate hash table; `table` points directly into `smalltable`. This avoids a
+second allocation for the common case of small sets created in tight loops.
+
+### Inline small-set storage
+
+When a set is created or cleared, `table` is reset to `&so->smalltable[0]` and
+`mask` is set to 7. The first resize doubles the external table and points
+`table` to the new heap block. The GC and copy code must handle both cases, so
+they always go through `table` rather than assuming `smalltable`.
+
+```c
+// CPython: Include/cpython/setobject.h:35 smalltable usage note
+    setentry smalltable[8];  /* table points here for small sets */
+```
+
+### PySet_GET_SIZE and _PySet_Dummy
+
+```c
+// CPython: Include/cpython/setobject.h:45 PySet_GET_SIZE
+#define PySet_GET_SIZE(so) (((PySetObject *)(so))->used)
+
+// CPython: Include/cpython/setobject.h:51 _PySet_Dummy
+PyAPI_DATA(PyObject *) _PySet_Dummy;
+```
+
+`PySet_GET_SIZE` skips the type check that `PySet_Size` performs. `_PySet_Dummy`
+is a module-level singleton; its identity is compared with `==` on the pointer,
+never `__eq__`, so it can be any unique object.
+
+## gopy notes
+
+- `setentry` maps to `objects.SetEntry` in gopy (`Key Object`, `Hash int64`).
+- `PySetObject.smalltable` becomes a fixed-size array field on `SetObject`; for
+  sets with 8 or fewer slots `Table` is sliced from that array.
+- `PySet_GET_SIZE` becomes `s.Used` accessed directly after a type assertion in
+  hot paths.
+- `_PySet_Dummy` is represented as `objects.SetDummy`, a package-level
+  `*BaseObject` sentinel.
+- frozenset hash caching (`hash` field) is handled by checking `so.hash != -1`
+  before recomputing; gopy uses `-1` as the sentinel for "not yet cached",
+  matching CPython exactly.
+
+## CPython 3.14 changes
+
+- The `finger` field (used by `set.pop()` to avoid scanning from slot 0 every
+  time) was added in 3.12 and is unchanged in 3.14.
+- 3.14 adds a free-list for small `PySetObject` allocations (gh-117749),
+  reducing allocation pressure for ephemeral sets in comprehensions. The struct
+  layout is unaffected; the free-list pointer is stored in the interpreter
+  state, not in `PySetObject`.
+- `PyFrozenSet_MINSIZE` was exposed in this header (previously only in the `.c`
+  file) to allow the specialising adaptive interpreter to inline frozen-set
+  construction.

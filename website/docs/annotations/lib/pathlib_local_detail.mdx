@@ -1,0 +1,135 @@
+---
+title: "Lib/pathlib/_local.py"
+description: "PurePath and Path concrete implementations for POSIX and Windows"
+cpython_path: Lib/pathlib/_local.py
+cpython_version: "3.14"
+lines: 1000
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`Lib/pathlib/_local.py` holds the concrete flavour classes and the full
+`PurePath` / `Path` implementations that CPython's pathlib package exposes
+on the local filesystem. It was split out of the monolithic `pathlib.py`
+in Python 3.13 when pathlib gained an abstract-base layer.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1–60 | module imports | `os`, `os.path`, `fnmatch`, `re`, `stat` imports and `__all__` |
+| 61–130 | `_PosixFlavour` | parse, join, and normcase logic for POSIX paths |
+| 131–200 | `_WindowsFlavour` | drive letter, UNC root, and case-fold logic for Windows |
+| 201–340 | `PurePath` | `__new__`, `_from_parsed_parts`, `__str__`, comparison operators |
+| 341–430 | `PurePosixPath` / `PureWindowsPath` | thin subclasses that bind the flavour |
+| 431–560 | `Path.__init__` / `Path.stat` / `Path.lstat` | stat delegation via `os.stat` |
+| 561–680 | `Path.open` / `Path.read_text` / `Path.write_text` | file I/O wrappers |
+| 681–780 | `Path.iterdir` | `os.scandir` loop producing child `Path` objects |
+| 781–900 | `Path.glob` / `Path.rglob` | `_Selector` chain construction and recursion |
+| 901–1000 | `_WildcardSelector` / `_RecursiveWildcardSelector` | per-segment match helpers |
+
+## Reading
+
+### Flavour parse_parts
+
+Each flavour exposes `parse_parts(parts)`, which splits a raw string into
+`(drive, root, tail)`. The POSIX flavour is straightforward; the Windows
+flavour handles drive letters and UNC prefixes before delegating to
+`ntpath.splitroot`.
+
+```python
+# CPython: Lib/pathlib/_local.py:85 _PosixFlavour.parse_parts
+def parse_parts(self, parts):
+    parsed = []
+    sep = self.sep
+    drv = root = ''
+    for part in reversed(parts):
+        if not part:
+            continue
+        drv, root, rel = self.splitroot(part)
+        if sep in rel:
+            parsed.extend(x for x in reversed(rel.split(sep)) if x)
+        elif rel:
+            parsed.append(rel)
+        if drv or root:
+            parsed.append(drv + root)
+            break
+    if drv or root:
+        parsed.reverse()
+    return drv, root, parsed
+```
+
+### PurePath factory
+
+`_from_parsed_parts` is the internal constructor used everywhere a new
+`PurePath` must be built from already-split components, bypassing the
+normal string-parsing overhead.
+
+```python
+# CPython: Lib/pathlib/_local.py:245 PurePath._from_parsed_parts
+@classmethod
+def _from_parsed_parts(cls, drv, root, parts):
+    obj = object.__new__(cls)
+    obj._drv = drv
+    obj._root = root
+    obj._parts = parts
+    return obj
+```
+
+### Path.iterdir
+
+`iterdir` wraps `os.scandir` and yields `Path` objects. The
+`with`-statement ensures the `scandir` iterator is closed even if the
+caller stops early.
+
+```python
+# CPython: Lib/pathlib/_local.py:695 Path.iterdir
+def iterdir(self):
+    with os.scandir(self) as it:
+        for entry in it:
+            yield self._make_child_relpath(entry.name)
+```
+
+### Path.glob recursion
+
+`glob` builds a chain of `_Selector` objects (one per path segment) and
+calls `select_from` on the root. Doubling a `**` segment creates a
+`_RecursiveWildcardSelector` that descends into subdirectories.
+
+```python
+# CPython: Lib/pathlib/_local.py:810 Path.glob
+def glob(self, pattern, *, case_sensitive=None):
+    if not pattern:
+        raise ValueError("Unacceptable pattern: {!r}".format(pattern))
+    drv, root, pattern_parts = self._flavour.parse_parts((pattern,))
+    if not pattern_parts:
+        raise ValueError("Unacceptable pattern: {!r}".format(pattern))
+    selector = _make_selector(tuple(pattern_parts), self._flavour,
+                              case_sensitive=case_sensitive)
+    for p in selector.select_from(self):
+        yield p
+```
+
+## gopy notes
+
+- `_PosixFlavour` and `_WindowsFlavour` map cleanly to Go structs; `parse_parts` is the
+  only method that touches Python list allocation, so it is a porting priority.
+- `Path.iterdir` relies on `os.scandir` returning `DirEntry` objects. gopy wraps
+  `os.ReadDir` in `objects/direntry.go`; the contract is identical.
+- `Path.stat` and `Path.lstat` call `os.stat` / `os.lstat` and wrap the result
+  in a `os.stat_result` object. gopy's `module/os` already exposes this tuple.
+- The `_Selector` chain pattern (build selectors at glob time, iterate at call
+  time) is easily modelled as a slice of Go interface values.
+
+## CPython 3.14 changes
+
+- The `pathlib/_local.py` split from the monolithic `pathlib.py` landed in
+  3.13 (bpo-66543). In 3.14 the internal `_abc.py` abstract layer was
+  extended so that third-party virtual path implementations can reuse more
+  of `_local.py` without subclassing.
+- `Path.glob` received a `case_sensitive` keyword argument in 3.12; in 3.14
+  the argument is forwarded all the way down into `_WildcardSelector` so
+  that compiled regex patterns respect the flag consistently.
+- `_WindowsFlavour.splitroot` now delegates to `ntpath.splitroot` (added in
+  3.12) instead of replicating the UNC-detection logic inline.

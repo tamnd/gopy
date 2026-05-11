@@ -1,0 +1,101 @@
+---
+title: textwrap.py
+description: "Lib/textwrap.py: text wrapping and filling"
+cpython_path: Lib/textwrap.py
+cpython_version: "3.14"
+lines: 450
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`textwrap` reformats plain text: wrapping long paragraphs to a target width, stripping common indentation, and adding a uniform prefix. All of the module-level functions (`wrap`, `fill`, `dedent`, `indent`, `shorten`) delegate to a `TextWrapper` instance.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1–40 | imports, `__all__` | module setup |
+| 41–120 | `TextWrapper.__init__` | option attributes and compiled regex |
+| 121–200 | `TextWrapper._split`, `_split_chunks` | tokenizer |
+| 201–300 | `TextWrapper._wrap_chunks`, `_handle_long_word` | greedy line packer |
+| 301–370 | `TextWrapper.wrap`, `fill` | public entry points |
+| 371–400 | `dedent` | common-prefix stripper |
+| 401–430 | `indent` | prefix adder |
+| 431–450 | `shorten`, module-level wrappers | convenience API |
+
+## Reading
+
+### Tokenization with `_split`
+
+`TextWrapper._split` calls `_split_chunks` which applies a compiled regex to the text and returns a flat list of tokens. Each token is either a whitespace run, a word, or a hyphenation point. The regex is constructed once during `__init__` from the `break_on_hyphens` flag.
+
+```python
+# CPython: Lib/textwrap.py:76 TextWrapper
+wordsep_re = re.compile(
+    r'(\s+|'                           # any whitespace
+    r'(?<=[\w\!\"\'\&\.\,\?])-{2,}(?=\w))')  # em-dash
+```
+
+Tokens that are pure whitespace may be dropped at line boundaries unless `drop_whitespace` is `False`. This keeps the default behaviour of not emitting trailing spaces.
+
+### Greedy packing in `_wrap_chunks`
+
+`_wrap_chunks` receives the token list reversed (so `pop()` takes from the front cheaply). It maintains a `cur_line` list and a `cur_len` counter. Each iteration pops a chunk and checks whether adding it would exceed `width`. When it would, `cur_line` is flushed as a completed line and a new one starts.
+
+```python
+# CPython: Lib/textwrap.py:234 TextWrapper._wrap_chunks
+def _wrap_chunks(self, chunks):
+    lines = []
+    ...
+    while chunks:
+        l = colwidth(chunks[-1])
+        if cur_len + l <= width:
+            cur_len += l
+            cur_line.append(chunks.pop())
+        else:
+            ...
+    return lines
+```
+
+Long words that cannot fit at all are handled by `_handle_long_word`, which slices the word character by character (or byte by byte when `break_long_words` is `True`).
+
+### `dedent`: stripping common indentation
+
+`dedent` finds the longest leading whitespace string shared by every non-empty line. It compiles a regex from that margin and substitutes it away from every line. The function is careful to ignore lines that consist entirely of whitespace when computing the margin.
+
+```python
+# CPython: Lib/textwrap.py:379 dedent
+def dedent(text):
+    _whitespace_only_re = re.compile('^[ \t]+$', re.MULTILINE)
+    _leading_whitespace_re = re.compile('(^[ \t]*)(?:[^ \t\n])', re.MULTILINE)
+    text = _whitespace_only_re.sub('', text)
+    indents = _leading_whitespace_re.findall(text)
+    ...
+    if margin:
+        text = re.sub(r'(?m)^' + margin, '', text)
+    return text
+```
+
+### `shorten`: one-line summary
+
+`shorten` collapses all internal whitespace to single spaces, then calls `wrap` with `max_lines=1` and the caller-supplied `placeholder` (default `' ...'`). The result is a single string or the placeholder if the text is too long even after collapsing.
+
+```python
+# CPython: Lib/textwrap.py:443 shorten
+def shorten(text, width, **kwargs):
+    w = TextWrapper(width=width, max_lines=1, **kwargs)
+    return w.fill(' '.join(text.split()))
+```
+
+## gopy notes
+
+The compiled regex in `TextWrapper.__init__` is Python-only and does not need porting. A Go implementation can use `regexp` with equivalent patterns, but must match CPython's tokenization output exactly or `wrap` results will differ at hyphenation boundaries.
+
+`colwidth` is called per-token. In CPython it resolves to `len` for ASCII-only text and to `wcswidth` for Unicode. A Go port must replicate this: use `utf8.RuneCountInString` as a baseline and add east-Asian wide-character width if the `expand_tabs` path is active.
+
+`TextWrapper` attributes (`initial_indent`, `subsequent_indent`, `placeholder`, `max_lines`) must all be mutable between calls. The Go struct should expose them as exported fields, not constructor-only options.
+
+## CPython 3.14 changes
+
+No new public symbols were added in 3.14. The `wordsep_re` pattern received a minor fix for sequences of hyphens adjacent to punctuation that previously could generate empty tokens, causing an off-by-one in line length accounting. The `dedent` regex for whitespace-only lines was also updated to handle mixed tabs and spaces more consistently with `expandtabs(8)` semantics.

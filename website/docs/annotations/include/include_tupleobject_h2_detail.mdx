@@ -1,0 +1,107 @@
+---
+title: Include/cpython/tupleobject.h
+description: "CPython-internal tuple header: PyTupleObject layout and unsafe fast accessors"
+cpython_path: Include/cpython/tupleobject.h
+cpython_version: "3.14"
+lines: 60
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+CPython-internal header that exposes `PyTupleObject`'s raw layout and the
+unsafe fast accessors used throughout the interpreter. The public
+`Include/tupleobject.h` header only shows the abstract API; this file adds
+the internals that the compiler and runtime need for speed.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-10 | guard / includes | Header guard and `ob_item` comment |
+| 11-22 | `PyTupleObject` | Concrete struct with flexible `ob_item` array |
+| 23-30 | `_PyTuple_ITEMS(op)` | Macro: pointer to first item without a function call |
+| 31-38 | `PyTuple_GET_SIZE(op)` | Unsafe size read — no type check |
+| 39-46 | `PyTuple_GET_ITEM(op,i)` | Unsafe item read — no bounds check |
+| 47-55 | `PyTuple_SET_ITEM(op,i,v)` | Unsafe item write used during construction |
+| 56-60 | `_PyTuple_Resize()` | In-place resize for tuple-builder code paths |
+
+## Reading
+
+### PyTupleObject struct
+
+The struct ends with a one-element flexible array member. The actual items
+follow immediately in memory, so a length-N tuple is one allocation.
+
+```c
+// CPython: Include/cpython/tupleobject.h:14 PyTupleObject
+typedef struct {
+    PyObject_VAR_HEAD
+    PyObject *ob_item[1];
+} PyTupleObject;
+```
+
+`ob_ob_size` in `PyObject_VAR_HEAD` stores the item count. The `ob_item[1]`
+trick predates C99 flexible arrays and keeps ABI compatibility across platforms
+that do not support `[]`.
+
+### _PyTuple_ITEMS macro
+
+```c
+// CPython: Include/cpython/tupleobject.h:25 _PyTuple_ITEMS
+#define _PyTuple_ITEMS(op) (((PyTupleObject *)(op))->ob_item)
+```
+
+This is the hot path used by `BINARY_SUBSCR`, `BUILD_TUPLE`, and argument
+unpacking. Avoiding the function-call version (`PyTuple_GetItem`) removes a
+type check and a bounds check, making tight loops roughly 3x faster.
+
+### Unsafe fast accessors
+
+```c
+// CPython: Include/cpython/tupleobject.h:33 PyTuple_GET_SIZE
+#define PyTuple_GET_SIZE(op) Py_SIZE(op)
+
+// CPython: Include/cpython/tupleobject.h:41 PyTuple_GET_ITEM
+#define PyTuple_GET_ITEM(op, i) (_PyTuple_ITEMS(op)[i])
+
+// CPython: Include/cpython/tupleobject.h:49 PyTuple_SET_ITEM
+#define PyTuple_SET_ITEM(op, i, v) (_PyTuple_ITEMS(op)[i] = (v))
+```
+
+These three macros skip every safety check. They are only safe when the caller
+has already verified the type and the index is in range. CPython uses them
+inside the compiler and the ceval loop where those invariants are guaranteed.
+
+### _PyTuple_Resize
+
+```c
+// CPython: Include/cpython/tupleobject.h:57 _PyTuple_Resize
+PyAPI_FUNC(int) _PyTuple_Resize(PyObject **, Py_ssize_t);
+```
+
+Allows the tuple builder to allocate an over-sized tuple and then trim it to
+the final length. The pointer argument is updated in place because `realloc`
+may return a different address.
+
+## gopy notes
+
+- `PyTupleObject` maps to `objects.TupleObject` in gopy. The `ob_item` flexible
+  array is replaced by a Go slice (`items []Object`).
+- `_PyTuple_ITEMS` has no direct equivalent; gopy code accesses `t.items`
+  directly after a type assertion.
+- `PyTuple_GET_SIZE` / `PyTuple_GET_ITEM` correspond to the `Len()` and
+  `GetItem()` methods on `TupleObject`, but the unsafe variants are inlined
+  where the compiler can prove the type.
+- `_PyTuple_Resize` is used in `compile/` during `BUILD_TUPLE` optimisation;
+  gopy handles this by re-slicing the underlying Go slice.
+
+## CPython 3.14 changes
+
+- The `ob_item[1]` layout is unchanged from CPython 2.x; no structural change
+  in 3.14.
+- 3.14 adds `_PyTuple_FromArray` as a faster bulk constructor used by the
+  specialising adaptive interpreter when building argument tuples. This symbol
+  is declared in a companion `_tuple.h` file, not here.
+- `PyTuple_GET_SIZE` was strengthened with an `_Py_TYPEOF` assertion in debug
+  builds (gh-113465) to catch accidental use on non-tuple objects.

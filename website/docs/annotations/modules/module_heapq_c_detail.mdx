@@ -1,0 +1,136 @@
+---
+title: "_heapq.c — heapq module C implementation"
+description: "Annotated reading of CPython Modules/_heapq.c, the C backend for the heapq module"
+cpython_path: Modules/_heapq.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`heapq` implements a min-heap on a Python list. `_heapq.c` is the C backend.
+The two core primitives are `_siftdown` (leaf moves up) and `_siftup` (root
+moves down). Everything else is built from those two operations.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1–30 | Module header | Includes, forward declarations |
+| 31–110 | `_siftdown` | Moves a leaf node upward to restore heap invariant |
+| 111–200 | `_siftup` | Pushes the root downward, picking the smaller child |
+| 201–260 | `heappush` | Appends item then calls `_siftdown` |
+| 261–320 | `heappop` | Swaps root with last item, shrinks list, calls `_siftup` |
+| 321–370 | `heapreplace` | Returns old root, puts new item at root, calls `_siftup` |
+| 371–420 | `heappushpop` | Short-circuits if new item is smaller than root |
+| 421–470 | `heapify` | Calls `_siftup` on every non-leaf in reverse order |
+| 471–500 | Module init | `PyModuleDef`, method table, `PyDoc` strings |
+
+## Reading
+
+### `_siftdown`: leaf moves up
+
+A newly appended item may be smaller than its parent. `_siftdown` walks the
+item upward, swapping with the parent at each step, until the parent is no
+larger or the item reaches the root.
+
+```c
+// CPython: Modules/_heapq.c:31 _siftdown
+static int
+_siftdown(PyListObject *heap, Py_ssize_t startpos, Py_ssize_t pos)
+{
+    PyObject *newitem, *parent;
+    Py_ssize_t parentpos;
+    newitem = PyList_GET_ITEM(heap, pos);
+    while (pos > startpos) {
+        parentpos = (pos - 1) >> 1;
+        parent = PyList_GET_ITEM(heap, parentpos);
+        if (PyObject_RichCompareBool(newitem, parent, Py_LT) < 0) ... ;
+        /* newitem < parent: swap and continue */
+        PyList_SET_ITEM(heap, pos, parent);
+        pos = parentpos;
+    }
+    PyList_SET_ITEM(heap, pos, newitem);
+    return 0;
+}
+```
+
+### `_siftup`: root moves down
+
+After removing the root, the last element is placed at position 0 and then
+pushed down. At each level `_siftup` picks the smaller of the two children
+and swaps until a leaf is reached, then calls `_siftdown` from that leaf
+position back up to close any remaining gap.
+
+```c
+// CPython: Modules/_heapq.c:111 _siftup
+static int
+_siftup(PyListObject *heap, Py_ssize_t pos)
+{
+    Py_ssize_t endpos, childpos, limit;
+    endpos = PyList_GET_SIZE(heap);
+    limit  = endpos >> 1;          /* first pos without two children */
+    while (pos < limit) {
+        childpos = 2*pos + 1;      /* left child */
+        /* pick smaller child */
+        if (childpos + 1 < endpos &&
+            PyObject_RichCompareBool(
+                PyList_GET_ITEM(heap, childpos+1),
+                PyList_GET_ITEM(heap, childpos), Py_LT) > 0)
+            childpos++;
+        PyList_SET_ITEM(heap, pos, PyList_GET_ITEM(heap, childpos));
+        pos = childpos;
+    }
+    return _siftdown(heap, 0, pos);
+}
+```
+
+### `heappushpop` short-circuit
+
+When the new item is already smaller than or equal to the heap root, no
+rebalancing is needed; the item is returned immediately without touching
+the heap. This makes `heappushpop` faster than a `heappush` followed by a
+`heappop` in the common streaming-median case.
+
+```c
+// CPython: Modules/_heapq.c:371 heappushpop
+static PyObject *
+heappushpop(PyObject *self, PyObject *args)
+{
+    PyObject *heap, *item, *returnitem;
+    ...
+    if (PyList_GET_SIZE(heap) == 0 ||
+        PyObject_RichCompareBool(item,
+            PyList_GET_ITEM(heap, 0), Py_LT) > 0)
+    {
+        Py_INCREF(item);
+        return item;   /* new item is already smallest */
+    }
+    returnitem = PyList_GET_ITEM(heap, 0);
+    PyList_SET_ITEM(heap, 0, item);
+    _siftup((PyListObject *)heap, 0);
+    return returnitem;
+}
+```
+
+## gopy notes
+
+The heapq port in gopy lives at `module/heapq/`. The Go implementation follows
+the same two-function structure. Key points:
+
+- `_siftdown` and `_siftup` take a `*objects.List` and integer positions, matching
+  the C signatures closely.
+- The short-circuit in `heappushpop` is preserved exactly, including the empty-heap
+  branch.
+- `heapify` calls `_siftup` from `n/2 - 1` down to 0, matching CPython's order,
+  which matters for deterministic tie-breaking in tests.
+
+## CPython 3.14 changes
+
+- `_heapq.c` gained annotations for the `Argument Clinic` preprocessor, replacing
+  the older hand-written `PyArg_ParseTuple` calls in `heappush`, `heappop`, and
+  `heapreplace`. The generated clinic code is in `clinic/_heapq.c.h`.
+- No changes to the sift algorithms themselves.
+- The Python fallback in `heapq.py` was updated to keep parity with the C
+  argument signatures after the clinic migration.

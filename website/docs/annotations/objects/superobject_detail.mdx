@@ -1,0 +1,131 @@
+---
+title: superobject.c
+description: "super(): MRO-walking proxy for cooperative inheritance"
+cpython_path: Objects/superobject.c
+cpython_version: "3.14"
+lines: 600
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`Objects/superobject.c` implements the built-in `super`. The zero-argument form (`super()`) is the common case in Python 3, resolved at compile time via the `__class__` cell and the first argument of the calling frame. The two-argument form (`super(Type, obj)`) is explicit and does not rely on frame inspection.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1–50 | struct / layout | `superobject` with `obj`, `obj_type`, `type` fields |
+| 51–150 | `super_init_without_args` | Reads `__class__` cell and first arg from calling frame (PEP 3135) |
+| 151–230 | `super_init` | Validates and stores `type` and `obj`; calls `super_init_without_args` for zero-arg form |
+| 231–350 | `super_getattro` | Walks MRO from the position after `su_type`; returns bound descriptor or raw value |
+| 351–430 | `super_descr_get` | Binds `super` itself to an instance for use as a descriptor on a class |
+| 431–490 | `super_repr` | Formats as `<super: TypeName, ObjTypeName>` |
+| 491–540 | `super_reduce` | Pickle support: reconstructs with the two explicit arguments |
+| 541–600 | `PySuper_Type` | Type object wiring `tp_init`, `tp_getattro`, `tp_descr_get`, `tp_repr` |
+
+## Reading
+
+### Zero-argument super: `super_init_without_args`
+
+PEP 3135 made `super()` magic by having the compiler inject a `__class__` cell into every method that references `super`. `super_init_without_args` walks up the calling frame stack to find a frame whose code object has a `__class__` free variable, reads the cell, and takes the first local as the instance.
+
+```c
+// CPython: Objects/superobject.c:51 super_init_without_args
+static int
+super_init_without_args(_PyInterpreterFrame *cframe,
+                        PyTypeObject **type_p, PyObject **obj_p)
+{
+    PyCodeObject *co = _PyFrame_GetCode(cframe);
+    /* find __class__ among the free vars of co */
+    for (Py_ssize_t i = 0; i < co->co_nfreevars; i++) {
+        PyObject *name = co->co_freevars->ob_item[i];
+        if (_PyUnicode_Equal(name, &_Py_ID(__class__))) {
+            PyObject *cell = cframe->localsplus[co->co_nlocalsplus - co->co_nfreevars + i];
+            *type_p = (PyTypeObject *)PyCell_GET(cell);
+            break;
+        }
+    }
+    /* first positional local is the instance */
+    *obj_p = cframe->localsplus[0];
+    return 0;
+}
+```
+
+### MRO walk in `super_getattro`
+
+`super_getattro` locates `su_type` in `su_obj_type->tp_mro`, then scans every type after it looking for a data descriptor or plain attribute. The first match is returned, optionally bound via `tp_descr_get`.
+
+```c
+// CPython: Objects/superobject.c:231 super_getattro
+static PyObject *
+super_getattro(PyObject *self, PyObject *name)
+{
+    superobject *su = (superobject *)self;
+    PyObject *mro = su->obj_type->tp_mro;
+    Py_ssize_t n = PyTuple_GET_SIZE(mro);
+    /* find su->type in mro */
+    Py_ssize_t i = 0;
+    while (i < n && PyTuple_GET_ITEM(mro, i) != (PyObject *)su->type)
+        i++;
+    /* search from i+1 onward */
+    for (i++; i < n; i++) {
+        PyObject *tmp = PyTuple_GET_ITEM(mro, i);
+        PyObject *res = _PyType_Lookup((PyTypeObject *)tmp, name);
+        if (res != NULL) {
+            descrgetfunc f = Py_TYPE(res)->tp_descr_get;
+            if (f != NULL)
+                res = f(res, su->obj == (PyObject *)su->obj_type
+                            ? NULL : su->obj,
+                        (PyObject *)su->obj_type);
+            return res;
+        }
+    }
+    /* fall back to normal attribute lookup */
+    return PyObject_GenericGetAttr(self, name);
+}
+```
+
+### Descriptor binding: `super_descr_get`
+
+When `super` is itself stored on a class, `super_descr_get` is called to bind it to an instance. This is the mechanism that makes `super()` work correctly when accessed via a descriptor on a metaclass.
+
+```c
+// CPython: Objects/superobject.c:351 super_descr_get
+static PyObject *
+super_descr_get(PyObject *self, PyObject *obj, PyObject *type)
+{
+    superobject *su = (superobject *)self;
+    if (obj == NULL || obj == Py_None || su->obj != NULL)
+        return Py_NewRef(self);
+    /* return a new super bound to obj */
+    return PyObject_CallOneArg((PyObject *)&PySuper_Type, obj);
+}
+```
+
+### Pickle via `super_reduce`
+
+`super_reduce` emits a two-element tuple `(super, (type, obj))` so that `pickle.loads(pickle.dumps(s))` reconstructs the proxy with the explicit two-argument form.
+
+```c
+// CPython: Objects/superobject.c:491 super_reduce
+static PyObject *
+super_reduce(PyObject *self, PyObject *Py_UNUSED(ignored))
+{
+    superobject *su = (superobject *)self;
+    return Py_BuildValue("O(OO)",
+                         &PySuper_Type, su->type, su->obj);
+}
+```
+
+## gopy notes
+
+`objects/super.go` exists and holds the `Super` struct with `Type`, `Obj`, and `ObjType` fields. The two-argument construction path is implemented. The zero-argument path (`super_init_without_args`) is not yet wired: gopy's interpreter frames do not yet expose free-variable cells in a way that the Go equivalent can walk. That requires plumbing `__class__` cell access through `vm/eval_call.go`.
+
+`super_getattro` is the most load-bearing piece. The current Go implementation delegates to `objects/type.go`'s `MROLookup` helper and then calls `DescrGet` on the result, which matches the C logic. Edge cases around `super` used on a metaclass (the `super_descr_get` path) are not yet tested.
+
+## CPython 3.14 changes
+
+- `super_init_without_args` was updated to use `_PyInterpreterFrame` instead of the older `PyFrameObject` pointer, following the 3.11 frame restructure that completed in 3.12. The 3.14 version no longer calls `PyEval_GetFrame`.
+- `super_getattro` gained an early-exit fast path when `su->obj_type` has a single-element MRO (only `object`), avoiding the scan entirely.
+- No changes to the public C API (`PySuper_Type` address and layout are stable).
