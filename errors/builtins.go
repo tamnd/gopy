@@ -50,7 +50,59 @@ var (
 func newExcType(name string, bases []*objects.Type) *objects.Type {
 	t := objects.NewType(name, bases)
 	t.Call = excCall
+	t.Str = excStr
+	t.Repr = excRepr
 	return t
+}
+
+// excStr ports BaseException_str: empty for no args, str(args[0]) for
+// a single arg, repr(args) otherwise.
+//
+// CPython: Objects/exceptions.c:171 BaseException_str
+func excStr(o objects.Object) (string, error) {
+	e, ok := o.(*Exception)
+	if !ok || e.Args == nil {
+		return "", nil
+	}
+	switch e.Args.Len() {
+	case 0:
+		return "", nil
+	case 1:
+		return objects.Str(e.Args.Item(0))
+	default:
+		return objects.Repr(e.Args)
+	}
+}
+
+// excRepr ports BaseException_repr: "TypeName(arg)" for a single arg,
+// "TypeName(args)" otherwise.
+//
+// CPython: Objects/exceptions.c:193 BaseException_repr
+func excRepr(o objects.Object) (string, error) {
+	e, ok := o.(*Exception)
+	if !ok {
+		return "", nil
+	}
+	name := e.TypeName()
+	if e.Args == nil || e.Args.Len() == 0 {
+		return name + "()", nil
+	}
+	if e.Args.Len() == 1 {
+		s, err := objects.Repr(e.Args.Item(0))
+		if err != nil {
+			return "", err
+		}
+		return name + "(" + s + ")", nil
+	}
+	s, err := objects.Repr(e.Args)
+	if err != nil {
+		return "", err
+	}
+	return name + s, nil
+}
+
+func init() {
+	installBaseExceptionAttrs()
 }
 
 // excCall is the tp_call slot for every built-in exception type. It
