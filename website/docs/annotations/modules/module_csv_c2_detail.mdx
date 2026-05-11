@@ -1,0 +1,118 @@
+---
+title: Modules/_csv.c
+description: "CPython C implementation of the csv module: reader, writer, and Dialect"
+cpython_path: Modules/_csv.c
+cpython_version: "3.14"
+lines: 1800
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`Modules/_csv.c` is the complete C implementation of the `csv` module. There is no pure-Python fallback for the core parsing and formatting logic. The file owns three public types: `Dialect`, `Reader`, and `Writer`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1–120 | `DialectObj`, `dialect_check_*` | Dialect type definition and validation |
+| 121–400 | `parse_process_char`, `parse_save_field` | reader state machine |
+| 401–600 | `Reader_iternext` | reader iteration driver |
+| 601–850 | `join_append`, `join_append_data` | writer field quoting |
+| 851–1100 | `csv_writerow`, `csv_writerows` | writer public methods |
+| 1101–1800 | `csv_reader`, `csv_writer`, module init | constructors and module def |
+
+## Reading
+
+### Dialect: settings object
+
+`DialectObj` stores all formatting parameters. Each field is validated at construction time by a dedicated `dialect_check_*` helper so that the hot parse loop can read them without extra checks.
+
+```c
+// CPython: Modules/_csv.c:83 DialectObj
+typedef struct {
+    PyObject_HEAD
+    char delimiter;
+    char quotechar;
+    char escapechar;
+    int doublequote;
+    int skipinitialspace;
+    int strict;
+    int quoting;
+    PyObject *lineterminator;
+} DialectObj;
+```
+
+### parse_process_char: state machine core
+
+The reader advances one character at a time through a `switch` on the current parser state. The states are `START_RECORD`, `START_FIELD`, `IN_FIELD`, `IN_QUOTED_FIELD`, `QUOTE_IN_FIELD`, `ESCAPED_CHAR`, and `EAT_CRNL`. This is the only place where the dialect settings are consulted during parsing.
+
+```c
+// CPython: Modules/_csv.c:187 parse_process_char
+static int
+parse_process_char(ReaderObj *self, module_state *module_state, Py_UCS4 c)
+{
+    switch (self->state) {
+    case IN_FIELD:
+        if (c == self->dialect->delimiter) {
+            if (parse_save_field(self) < 0) return -1;
+            self->state = START_FIELD;
+        }
+        /* ... other transitions ... */
+        break;
+    case IN_QUOTED_FIELD:
+        if (c == self->dialect->quotechar)
+            self->state = QUOTE_IN_FIELD;
+        break;
+    }
+    return 0;
+}
+```
+
+### Reader_iternext: pulling one row
+
+`Reader_iternext` fetches the next line from the underlying iterator, feeds each character to `parse_process_char`, then collects the accumulated fields into a Python list. End-of-file is signaled by `StopIteration`.
+
+```c
+// CPython: Modules/_csv.c:455 Reader_iternext
+static PyObject *
+Reader_iternext(ReaderObj *self)
+{
+    PyObject *lineobj = PyIter_Next(self->input_iter);
+    if (lineobj == NULL) return NULL;
+    /* feed each UCS4 code point through parse_process_char */
+    fields = self->fields;
+    self->fields = NULL;
+    return fields;
+}
+```
+
+### join_append: quoting decision for the writer
+
+`join_append` decides whether a field needs quoting based on the dialect's `quoting` setting and the presence of special characters, then delegates to `join_append_data` for the actual buffer construction.
+
+```c
+// CPython: Modules/_csv.c:668 join_append
+static int
+join_append(WriterObj *self, PyObject *field, int quoted)
+{
+    Py_ssize_t rec_len;
+    if (quoted)
+        rec_len = join_append_data(self, kind, data, field_len, 1);
+    else
+        rec_len = join_append_data(self, kind, data, field_len, 0);
+    return rec_len < 0 ? -1 : 0;
+}
+```
+
+## gopy notes
+
+- The Go port lives in `module/csv/`. The state machine constants (`START_FIELD`, `IN_QUOTED_FIELD`, etc.) are reproduced as typed `int` constants in `reader.go`.
+- `DialectObj` maps to a `Dialect` struct in Go. Validation helpers are ported one-for-one rather than replaced with a single generic validator.
+- `join_append_data` performs in-place reallocation of a C buffer. The Go side uses `strings.Builder` and avoids manual sizing.
+
+## CPython 3.14 changes
+
+- `Dialect.lineterminator` now raises `TypeError` (instead of silently accepting a non-string) when set to a non-`str` value, closing a long-standing inconsistency with the documented type.
+- `parse_process_char` gained a `QUOTE_NONE_ESCAPE` branch to handle `quoting=QUOTE_NONE` together with an `escapechar` more precisely, fixing a regression introduced in 3.12.
+- The module now exposes `csv.QUOTE_STRINGS` and `csv.QUOTE_NOTNULL` constants (added in 3.12 for the writer side) in the C layer rather than patching them in from Python.

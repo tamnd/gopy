@@ -1,0 +1,109 @@
+---
+title: Modules/_json.c
+description: "CPython C accelerator for the json module: scanner, encoder, and string escaping"
+cpython_path: Modules/_json.c
+cpython_version: "3.14"
+lines: 1600
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`Modules/_json.c` is the C accelerator backing Python's `json` module. When available it replaces the pure-Python fallbacks in `json/scanner.py` and `json/encoder.py`. The file owns two public types: `Scanner` (decode side) and `Encoder` (encode side).
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1–80 | includes, `JSONDecodeError` init | module init helpers |
+| 81–350 | `scanner_call`, `scanstring_unicode` | recursive descent JSON parser |
+| 351–550 | `py_encode_basestring`, `py_encode_basestring_ascii` | string escaping |
+| 551–900 | `make_encoder`, `encoder_new` | JSONEncoder state construction |
+| 901–1200 | `encoder_encode_dict`, `encoder_encode_list` | container serialization |
+| 1201–1600 | `encoder_encode_string`, `encoder_listencode_obj` | dispatch and module def |
+
+## Reading
+
+### scanner_call: recursive descent entry point
+
+`scanner_call` is the `tp_call` handler for `Scanner` objects. It delegates to `scan_once_unicode`, which dispatches on the first character and recurses into `parse_object` or `parse_array`.
+
+```c
+// CPython: Modules/_json.c:480 scanner_call
+static PyObject *
+scanner_call(PyScannerObject *s, PyObject *args, PyObject *kwds)
+{
+    PyObject *pystr;
+    Py_ssize_t idx;
+    if (!PyArg_ParseTuple(args, "On:scan_once", &pystr, &idx))
+        return NULL;
+    return scan_once_unicode(s, pystr, idx, NULL);
+}
+```
+
+`scan_once_unicode` reads one character and branches: `{` calls `parse_object`, `[` calls `parse_array`, `"` calls `scanstring_unicode`, and digits or `-` fall through to a `strtod`-based number parser.
+
+### scanstring_unicode: fast string scanner
+
+The hot path for string decoding. It walks the raw `Py_UCS4` buffer directly, collecting runs of safe characters with `memchr` before switching to character-at-a-time handling for escape sequences.
+
+```c
+// CPython: Modules/_json.c:226 scanstring_unicode
+static PyObject *
+scanstring_unicode(PyObject *pystr, Py_ssize_t end, int strict,
+                   Py_ssize_t *next_end_ptr)
+{
+    /* ... fast bulk copy until backslash or quote ... */
+    while (end < len) {
+        c = buf[end];
+        if (c == '"') break;
+        if (c != '\\') { end++; continue; }
+        /* handle escape */
+    }
+}
+```
+
+### py_encode_basestring_ascii: ASCII-safe string encoder
+
+Escapes every non-ASCII code point and all required control characters, producing a quoted JSON string that is safe for any transport. Non-ASCII code points are rendered as `\uXXXX` or surrogate pairs.
+
+```c
+// CPython: Modules/_json.c:616 py_encode_basestring_ascii
+static PyObject *
+py_encode_basestring_ascii(PyObject *self, PyObject *pystr)
+{
+    /* for each code point c:
+       if c > 0x7F or c in MUST_ESCAPE: emit \uXXXX
+       else: copy verbatim */
+}
+```
+
+### encoder_encode_dict: sorted and unsorted dict serialization
+
+When `sort_keys=True` the encoder calls `PyMapping_Keys`, sorts the resulting list, then iterates. Otherwise it calls `PyDict_Next` directly. Each key-value pair is encoded recursively via `encoder_listencode_obj`.
+
+```c
+// CPython: Modules/_json.c:1084 encoder_encode_dict
+static int
+encoder_encode_dict(PyEncoderObject *s, _PyUnicodeWriter *writer,
+                    PyObject *dct, Py_ssize_t indent_level)
+{
+    if (s->sort_keys) {
+        items = PyMapping_Keys(dct);
+        if (PyList_Sort(items) < 0) goto bail;
+    }
+    /* iterate and recurse */
+}
+```
+
+## gopy notes
+
+- The Go port does not yet have a C accelerator layer. `json` encoding and decoding are handled by `module/json/`. The state structs mirror `PyScannerObject` and `PyEncoderObject` field-for-field.
+- `encoder_encode_dict` sort path uses `PyList_Sort`; the Go side must call `objects.ListSort` before iterating to preserve identical output.
+- `scanstring_unicode` relies on `PyUnicode_DATA` / `PyUnicode_KIND` for zero-copy buffer access. The Go side uses `[]rune` slices and avoids that distinction.
+
+## CPython 3.14 changes
+
+- `JSONDecodeError` now carries a `doc` attribute that is a `memoryview` when the input was a `bytes`-like object, matching the behavior change described in bpo-46399.
+- `encoder_listencode_obj` gained a recursion-depth guard using `Py_EnterRecursiveCall` to prevent stack overflow on deeply nested structures, replacing the old Python-level `_ENCODER_MAX_DEPTH` constant.
+- The `indent` fast-path in `encoder_encode_list` was simplified: the trailing-newline logic was unified with the dict path.

@@ -1,0 +1,120 @@
+---
+title: pycore_typeobject.h
+description: "Internal type object helpers: MRO lookup, slot access, and type versioning"
+cpython_path: Include/internal/pycore_typeobject.h
+cpython_version: "3.14"
+lines: 198
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Internal header that extends `PyTypeObject` with private fields and helpers
+used throughout the interpreter. Nothing here is part of the stable C API.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1–40 | `_PyType_LookupRef` | MRO attribute search, returns borrowed ref |
+| 41–70 | `_PyType_Lookup` | MRO attribute search, no reference bump |
+| 71–100 | `_PyType_GetSlot` | Safe slot pointer accessor |
+| 101–130 | `_PyType_GetMethod` | Combined lookup and descriptor binding |
+| 131–155 | `PyTypeObject_Vectorcall` | Inline vectorcall dispatch for type objects |
+| 156–175 | `_PyType_UpdateSlot` | Slot mutation with version tag increment |
+| 176–198 | `_Py_TPFLAGS_STATIC_BUILTIN` | Flag marking C-defined static types |
+
+## Reading
+
+### MRO lookup: `_PyType_Lookup` and `_PyType_LookupRef`
+
+These two functions walk the MRO of a type searching for a name. The
+distinction matters for reference counting: `_PyType_Lookup` returns a
+borrowed reference suitable for slot caches, while `_PyType_LookupRef`
+bumps the refcount for callers that store the result.
+
+```c
+// CPython: Include/internal/pycore_typeobject.h:41 _PyType_Lookup
+extern PyObject *
+_PyType_Lookup(PyTypeObject *type, PyObject *name);
+
+// CPython: Include/internal/pycore_typeobject.h:1 _PyType_LookupRef
+extern int
+_PyType_LookupRef(PyTypeObject *type, PyObject *name, PyObject **result);
+```
+
+`_PyType_LookupRef` stores the result through `result` and returns 1 on
+hit, 0 on miss, -1 on error. The split avoids an extra `Py_XDECREF` in
+every call site that only needs to test for existence.
+
+### Slot access: `_PyType_GetSlot`
+
+Direct slot access by offset is unsafe when the interpreter is running
+with per-interpreter type objects because the offset may differ between
+sub-interpreters. `_PyType_GetSlot` centralises the pointer arithmetic.
+
+```c
+// CPython: Include/internal/pycore_typeobject.h:71 _PyType_GetSlot
+extern void *
+_PyType_GetSlot(PyTypeObject *type, int slot_id);
+```
+
+In gopy the slot table is a fixed array on `*Type`, so the equivalent is
+a direct indexed read; there is no need for a helper.
+
+### Combined lookup and binding: `_PyType_GetMethod`
+
+`_PyType_GetMethod` fuses `_PyType_Lookup` with the descriptor protocol.
+If the found object is a descriptor (has `tp_descr_get`), it is bound
+immediately. This avoids a second MRO walk inside `PyObject_GenericGetAttr`.
+
+```c
+// CPython: Include/internal/pycore_typeobject.h:101 _PyType_GetMethod
+extern int
+_PyType_GetMethod(PyObject *obj, PyObject *name, PyObject **method);
+```
+
+Return value: 1 when a bound method is stored in `method`, 0 when the
+attribute was found but is not a method descriptor, -1 on error.
+
+### Type versioning: `_PyType_UpdateSlot`
+
+Every time a type's slot changes (through `type.__setattr__`, `PyType_Modified`,
+or `type_set_*`) the version tag must be invalidated so inline caches in
+compiled code flush their cached lookups.
+
+```c
+// CPython: Include/internal/pycore_typeobject.h:156 _PyType_UpdateSlot
+extern int
+_PyType_UpdateSlot(PyTypeObject *type, slotdef *p, PyObject *descr);
+```
+
+The function writes the new C-level slot pointer derived from `descr`, then
+increments `tp_version_tag`. In 3.14 the version tag is 32-bit and wraps;
+the specialising adaptive interpreter handles wrap-around by treating
+version 0 as always-invalid.
+
+## gopy notes
+
+- `_PyType_Lookup` maps to `typeObj.Lookup(name)` in `objects/type.go`.
+  gopy's version does not return a borrowed reference because Go's GC
+  manages lifetimes; the caller holds the value alive through the stack frame.
+- `_PyType_GetMethod` is the foundation for `LOAD_METHOD` / `LOAD_ATTR`
+  specialisation. gopy uses `objects.GetMethod` in `objects/method.go` with
+  the same 0/1/-1 tri-state contract.
+- `_Py_TPFLAGS_STATIC_BUILTIN` has no direct counterpart; gopy marks
+  built-in types with a `builtin bool` field on `TypeObject` instead of
+  stuffing another flag bit into `tp_flags`.
+- Version tags are tracked in `objects/type.go` as `versionTag uint32`.
+  The wrapping behaviour is preserved: tag 0 is reserved for "unversioned".
+
+## CPython 3.14 changes
+
+- `_PyType_LookupRef` was added in 3.13 to give callers a strong-reference
+  path without a separate `Py_INCREF`. 3.14 extends its use to the
+  specialising interpreter's inline cache warm-up path.
+- `tp_version_tag` is now validated against a global epoch counter introduced
+  in 3.13 (PEP 703 free-threading); 3.14 tightens the epoch check to catch
+  tag reuse after more than `2^32` invalidations on long-running processes.
+- `_Py_TPFLAGS_STATIC_BUILTIN` gained a companion `_Py_TPFLAGS_HEAPTYPE_IMMORTAL`
+  in 3.14 for immortalised heap types created during interpreter startup.

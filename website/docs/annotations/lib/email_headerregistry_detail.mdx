@@ -1,0 +1,77 @@
+---
+title: Lib/email/headerregistry.py
+description: "HeaderRegistry dispatch table and per-header type classes. Returns typed objects (Address, datetime) instead of raw strings when EmailPolicy is active."
+cpython_path: Lib/email/headerregistry.py
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Lib/email/headerregistry.py`
+
+<CpyLink path="Lib/email/headerregistry.py" />
+
+`Lib/email/headerregistry.py` is the header-object layer that `EmailPolicy` calls into when
+reading or writing headers. Instead of returning raw strings, `HeaderRegistry` dispatches to
+a type-specific class depending on the header name.
+
+## Map
+
+| Lines | Symbol | Role |
+| ----- | ------ | ---- |
+| 1-80 | `BaseHeader` | Mixin that all header classes inherit; stores name and value, provides `fold()` |
+| 81-145 | `UniqueUnstructuredHeader`, `UniqueMessageIDHeader` | Unstructured and message-ID header types |
+| 146-220 | `DateHeader`, `AddressHeader` | Typed headers that parse into datetime and Address objects |
+| 221-310 | `MIMEVersionHeader`, `ParameterizedMIMEHeader` | MIME-specific header types with parameter parsing |
+| 311-440 | `Address`, `Group` | Structured address and group types |
+| 441-500 | `HeaderRegistry` | Dispatch table; maps lowercase header names to classes |
+
+## Reading
+
+### `HeaderRegistry` dispatch
+
+`HeaderRegistry.__call__` is the entry point. Given a header name and a raw value string it
+looks up the registered class for that name.
+
+```python
+# CPython: Lib/email/headerregistry.py:441 HeaderRegistry.__call__
+def __call__(self, name, value):
+    cls = self.registry.get(name.lower(), self.base_class)
+    return cls(name, value)
+```
+
+### `Address` and structured parse
+
+`AddressHeader.parse` calls `email._parseaddr` to turn a raw string into
+`(display_name, addr_spec)` tuples, then wraps each result in an `Address` object.
+
+```python
+# CPython: Lib/email/headerregistry.py:195 AddressHeader.parse
+@staticmethod
+def parse(value, kwds):
+    kwds['parse_tree'] = parse_tree = parser.get_address_list(value)[0]
+    kwds['decoded'] = str(parse_tree)
+    kwds['groups'] = [Group(dn, [Address(dn, addr_spec=addr)])
+                      for dn, addr in parse_tree.as_address_list()]
+    kwds['addresses'] = [address
+                         for group in kwds['groups']
+                         for address in group.addresses]
+```
+
+### `DateHeader.parse`
+
+`DateHeader.parse` calls `utils.parsedate_to_datetime`, which returns a timezone-aware
+`datetime.datetime` if the date string includes a timezone, or a naive `datetime` otherwise.
+
+## gopy notes
+
+Not yet ported. Planned at `module/email/headerregistry`. The Go mirror will need a
+`HeaderRegistry` map from string to a factory function, and concrete types for `Address`,
+`Group`, and the date/MIME families.
+
+## CPython 3.14 changes
+
+Python 3.14 added `Address.display_name` as a property alias. The `HeaderRegistry` default
+set is unchanged.

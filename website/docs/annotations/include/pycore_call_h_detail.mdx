@@ -1,0 +1,123 @@
+---
+title: pycore_call.h
+description: "Internal call helpers bridging tp_call, vectorcall, and legacy _Py_Identifier paths"
+cpython_path: Include/internal/pycore_call.h
+cpython_version: "3.14"
+lines: 98
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+A compact internal header that collects every calling-convention adapter the
+interpreter uses. Public callers use `PyObject_Call`; this header is for the
+hot paths inside `ceval.c`, `typeobject.c`, and the import machinery.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1–20 | `_PyObject_Call` | Final dispatch to `tp_call` or vectorcall slot |
+| 21–38 | `_PyObject_FastCall` | Positional-only vectorcall, no kwargs |
+| 39–52 | `_Py_CallFunctionObjArgs` | Varargs tuple-style call |
+| 53–68 | `_PyObject_CallMethodIdOneArg` | Deprecated `_Py_Identifier` fast single-arg method call |
+| 69–82 | `_PyObject_CallMethodIdObjArgs` | Deprecated `_Py_Identifier` multi-arg method call |
+| 83–98 | `_PyStack_UnpackDict` | Unpack a kwargs dict into a vectorcall `kwnames` array |
+
+## Reading
+
+### Final dispatch: `_PyObject_Call`
+
+`PyObject_Call` (the public API) validates arguments and then delegates to
+`_PyObject_Call`. The split lets internal callers skip the argument checks
+when they know the inputs are already valid.
+
+```c
+// CPython: Include/internal/pycore_call.h:1 _PyObject_Call
+extern PyObject *
+_PyObject_Call(PyThreadState *tstate, PyObject *callable,
+               PyObject *args, PyObject *kwargs);
+```
+
+The implementation prefers the vectorcall slot (`Py_TPFLAGS_HAVE_VECTORCALL`)
+over `tp_call` when both are present, converting the tuple `args` and dict
+`kwargs` into a flat stack array on the fly.
+
+### Positional-only fast path: `_PyObject_FastCall`
+
+When a call site knows there are no keyword arguments it can skip building a
+`kwnames` tuple entirely.
+
+```c
+// CPython: Include/internal/pycore_call.h:21 _PyObject_FastCall
+extern PyObject *
+_PyObject_FastCall(PyObject *func, PyObject *const *args, Py_ssize_t nargs);
+```
+
+This is the vectorcall ABI with `kwnames = NULL`. The eval loop uses this for
+`CALL` instructions where the compiler proved no `**kwargs` were passed.
+
+### Unpacking kwargs: `_PyStack_UnpackDict`
+
+Vectorcall passes keywords as a `kwnames` tuple alongside the positional stack.
+When a callee only understands the old `(args, kwargs)` calling convention,
+`_PyStack_UnpackDict` converts back.
+
+```c
+// CPython: Include/internal/pycore_call.h:83 _PyStack_UnpackDict
+extern int
+_PyStack_UnpackDict(PyThreadState *tstate,
+                    PyObject *const *args, Py_ssize_t nargs,
+                    PyObject *kwnames,
+                    PyObject **p_stack, PyObject **p_kwdict);
+```
+
+The function allocates a new stack array for positional arguments and a fresh
+`dict` for keyword arguments, writing both through the out-parameters. The
+caller owns both and must decref the dict and free the stack with
+`PyMem_Free`.
+
+### Deprecated identifier callers
+
+`_Py_Identifier` was the pre-3.9 intern-on-demand string mechanism. The two
+method-call helpers that use it are kept for compatibility with C extension
+modules that have not migrated to `PyObject_CallMethodOneArg`.
+
+```c
+// CPython: Include/internal/pycore_call.h:53 _PyObject_CallMethodIdOneArg
+extern PyObject *
+_PyObject_CallMethodIdOneArg(PyObject *self, struct _Py_Identifier *name,
+                             PyObject *arg);
+
+// CPython: Include/internal/pycore_call.h:69 _PyObject_CallMethodIdObjArgs
+extern PyObject *
+_PyObject_CallMethodIdObjArgs(PyObject *obj, struct _Py_Identifier *name, ...);
+```
+
+Both functions resolve the identifier to an interned string, call
+`_PyObject_GetMethod`, and then dispatch through the vectorcall path. New
+code should use `PyObject_CallMethodOneArg` instead.
+
+## gopy notes
+
+- gopy's call entry point is `vm.Call` in `vm/eval_call.go`. It mirrors the
+  `_PyObject_Call` split: public callers go through `objects.Call`, which
+  validates, then delegates to the internal `callInternal` that skips checks.
+- `_PyObject_FastCall` maps to `vm.FastCall` in `vm/eval_call.go`. The
+  vectorcall ABI is represented as `func(args []*Object, kwnames *Tuple)`.
+- `_PyStack_UnpackDict` is implemented in `vm/eval_call.go` as `UnpackKwargs`.
+  The Go version returns `([]Object, map[string]Object, error)` rather than
+  using output parameters.
+- `_Py_Identifier` has no counterpart in gopy. All internal string lookups
+  use pre-interned `*objects.Str` values stored as package-level vars.
+
+## CPython 3.14 changes
+
+- The vectorcall protocol (`Py_TPFLAGS_HAVE_VECTORCALL`) became the preferred
+  path in 3.9. By 3.14 the `_Py_Identifier`-based helpers carry a deprecation
+  notice and will be removed in 3.15.
+- `_PyObject_FastCall` gained a `tstate` parameter in 3.12 (previously it
+  used `_PyThreadState_GET()`). All internal callers were updated; the old
+  two-argument form is gone in 3.14.
+- `_PyStack_UnpackDict` is now declared `_Py_NO_RETURN_ON_INTERNALERROR` in
+  debug builds to catch callers that ignore the error return.

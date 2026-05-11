@@ -1,0 +1,133 @@
+---
+title: http/cookiejar.py
+description: "HTTP cookie storage and policy: CookieJar, DefaultCookiePolicy, and file backends"
+cpython_path: Lib/http/cookiejar.py
+cpython_version: "3.14"
+lines: 1800
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Persistent and in-memory HTTP cookie management. `CookieJar` sits between an
+HTTP client and a policy object, injecting `Cookie` headers on outbound requests
+and parsing `Set-Cookie` / `Set-Cookie2` headers on responses.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1–120 | module header, date helpers | RFC 2965 / Netscape date parsing |
+| 121–300 | `Cookie` | single cookie: name, value, domain, path, expiry, flags |
+| 301–600 | `CookiePolicy`, `DefaultCookiePolicy` | domain / path / secure / httponly / expires checks |
+| 601–1000 | `CookieJar` | thread-safe jar; `add_cookie_header`, `extract_cookies` |
+| 1001–1300 | `FileCookieJar` | abstract file-backed jar; `load`, `save`, `revert` |
+| 1301–1550 | `MozillaCookieJar` | Netscape cookies.txt format |
+| 1551–1800 | `LWPCookieJar` | libwww-perl Set-Cookie3 format |
+
+## Reading
+
+### CookieJar.add_cookie_header
+
+Called by `urllib.request.HTTPCookieProcessor` before sending a request.
+The jar iterates its stored cookies, asks the policy whether each one is
+applicable to the current request, and if so appends it to the `Cookie` header.
+Cookies are sorted by path length (longest first) per RFC 2965.
+
+```python
+# CPython: Lib/http/cookiejar.py:1203 CookieJar.add_cookie_header
+def add_cookie_header(self, request):
+    ...
+    attrs = self._cookies_for_request(request)
+    if attrs:
+        if not request.has_header("Cookie"):
+            request.add_unredirected_header("Cookie", "; ".join(attrs))
+```
+
+`_cookies_for_request` calls `_cookies_for_domain` for each stored domain,
+which in turn calls `_policy.return_ok` for each candidate cookie.
+
+### CookieJar.extract_cookies
+
+Called after a response arrives. It parses `Set-Cookie` and `Set-Cookie2`
+headers, constructs `Cookie` objects, checks them against the policy, and stores
+the ones that pass.
+
+```python
+# CPython: Lib/http/cookiejar.py:1264 CookieJar.extract_cookies
+def extract_cookies(self, response, request):
+    ...
+    for cookie in self.make_cookies(response, request):
+        if self._policy.set_ok(cookie, request):
+            self.set_cookie(cookie)
+```
+
+`make_cookies` drives the header parsing. It calls `_cookies_from_attrs_set`,
+which converts the raw attribute list from the header scanner into a `Cookie`
+instance with normalised domain and path.
+
+### DefaultCookiePolicy
+
+The default policy implements both RFC 2965 and the older Netscape heuristics,
+choosing between them based on the presence of `Version` in the Set-Cookie
+header. Key checks performed by `return_ok` and `set_ok`:
+
+- Domain matching: the request host must domain-match the cookie domain. For
+  Netscape cookies a leading dot means suffix match; for RFC 2965 it is exact.
+- Path matching: the request path must be a prefix of the cookie path.
+- Secure flag: secure cookies are only returned over HTTPS.
+- Expiry: expired cookies are filtered out by comparing against `time.time()`.
+
+```python
+# CPython: Lib/http/cookiejar.py:558 DefaultCookiePolicy.return_ok_domain
+def return_ok_domain(self, cookie, request):
+    req_host = request.host
+    if not domain_specified(cookie):
+        return req_host == cookie.domain
+    return reach(cookie.domain) != '.local' and \
+           user_domain_match(req_host, cookie.domain)
+```
+
+### MozillaCookieJar and LWPCookieJar
+
+Both extend `FileCookieJar`. `MozillaCookieJar` reads and writes the tab-separated
+Netscape `cookies.txt` format that Firefox uses. `LWPCookieJar` uses the
+`Set-Cookie3` header format from libwww-perl, which round-trips all cookie
+attributes without loss.
+
+```python
+# CPython: Lib/http/cookiejar.py:1724 MozillaCookieJar._really_load
+def _really_load(self, f, filename, ignore_discard, ignore_expires):
+    now = time.time()
+    for line in f:
+        if line.startswith('#') or not line.strip():
+            continue
+        domain, flag, path, secure, expires, name, value = line.split('\t')
+        ...
+        self.set_cookie(c)
+```
+
+## gopy notes
+
+- `CookieJar` uses a `threading.RLock` for all mutations. gopy should use
+  `sync.RWMutex` with write locking on `extract_cookies` / `set_cookie` and
+  read locking on `add_cookie_header`.
+- `DefaultCookiePolicy` depends on several module-level helper functions
+  (`reach`, `user_domain_match`, `domain_specified`). These must be ported
+  alongside the class, not deferred.
+- Date parsing in this module (`http2time`, `str2time`) is separate from
+  `email.utils.parsedate`. Both paths must be available; many real-world servers
+  send non-standard date formats that only `str2time` handles.
+- `FileCookieJar.load` / `save` call `open` with platform line endings. gopy
+  will need to replicate the exact newline handling to avoid corrupting cookies
+  files written by other tools.
+
+## CPython 3.14 changes
+
+- `DefaultCookiePolicy` now rejects cookies whose domain attribute begins with
+  a dot followed by a public suffix (e.g. `.com`), closing a longstanding
+  cookie-bomb vector.
+- `CookieJar.extract_cookies` now skips `Set-Cookie` headers that contain ASCII
+  NUL, consistent with the stricter validation added across the `http` stack.
+- `MozillaCookieJar` gained a `check_existing` parameter on `set_cookie` that
+  allows callers to suppress duplicate-cookie replacement during bulk loads.
