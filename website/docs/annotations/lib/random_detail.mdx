@@ -1,0 +1,55 @@
+---
+title: "random.py: Mersenne Twister, distributions, and SystemRandom"
+description: "Annotated walkthrough of Lib/random.py covering the Random class, SystemRandom, statistical distributions, weighted sampling, and seed state conversion"
+cpython_path: Lib/random.py
+cpython_version: "3.14"
+lines: 900
+status: annotated
+ported_to: module/random/module.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1–60 | module header, imports | `_random`, `math`, `os`, `_collections_abc` imports; `__all__` |
+| 61–110 | `Random.__init__`, `seed()` | Accepts `int`, `bytes`, `str`, `float`; converts to MT state via sha512 |
+| 111–160 | `Random.getstate`, `setstate` | Tuple-based state snapshot for reproducibility |
+| 161–220 | `Random.random`, `getrandbits` | Thin delegation to C extension `_random.Random` |
+| 221–300 | `Random.randbelow`, `randrange`, `randint` | Pure-Python range sampling; bias-free rejection loop |
+| 301–370 | `Random.choice`, `choices` | `choices` supports `weights` and `cum_weights`; uses `bisect` |
+| 371–440 | `Random.shuffle` | Fisher-Yates in-place; deprecates external RNG argument |
+| 441–500 | `Random.sample` | Hybrid small/large set strategy; accepts `counts` kwarg |
+| 501–580 | `Random.uniform`, `triangular`, `gauss` | Basic float distributions; `gauss` caches one spare deviate |
+| 581–660 | `Random.normalvariate`, `lognormvariate` | Box-Muller transform for normal; no shared state unlike `gauss` |
+| 661–720 | `Random.expovariate`, `vonmisesvariate` | Exponential and circular distributions |
+| 721–800 | `Random.gammavariate`, `betavariate`, `paretovariate`, `weibullvariate` | Higher-order distributions built on gamma |
+| 801–850 | `SystemRandom` | Subclass overriding `random()` and `getrandbits()` with `os.urandom` |
+| 851–900 | Module-level aliases | `seed`, `random`, `choice`, etc. bound to a shared `_inst` |
+
+## Reading
+
+### The Random class and the C extension boundary
+
+`Random` inherits from `_random.Random`, a C type defined in `Modules/_randommodule.c`. The Python class contributes only the higher-level methods. The core `random()` method (returns `float` in `[0.0, 1.0)`) and `getrandbits(k)` live in C and implement the Mersenne Twister MT19937. `seed()` in Python handles type coercion: integers larger than 32 bits are hashed with sha512 to produce a sequence of 32-bit words passed to the C `setstate`.
+
+In 3.14, `seed(None)` falls back to `os.urandom(32)` rather than `time.time`, closing a narrow window where two processes seeded within the same clock tick could share state.
+
+### Weighted sampling with `choices` and `sample`
+
+`choices(population, weights=None, cum_weights=None, k=1)` converts relative weights to a cumulative distribution with `itertools.accumulate`, then calls `bisect.bisect` for each draw. Passing `cum_weights` directly skips the accumulation step. The function raises `TypeError` if both weight forms are supplied.
+
+`sample(population, k, counts=None)` uses two strategies. For small `k` relative to population size it picks random indices and retries on collision; for large `k` it copies the population and performs a partial Fisher-Yates. The `counts` argument repeats elements virtually without materialising the expanded list.
+
+### SystemRandom and OS entropy
+
+`SystemRandom` overrides `random()` as `int.from_bytes(os.urandom(7), 'big') >> 3` (53 useful bits to fill a `float` mantissa) and `getrandbits(k)` as a ceil-byte read of `os.urandom`. It disables `seed`, `getstate`, and `setstate` by raising `NotImplementedError`, since the OS entropy source carries no portable state.
+
+## gopy notes
+
+- The C extension `_random.Random` must be ported or wrapped; the Go side can use `math/rand/v2` with a custom MT19937 source implementing `rand.Source`.
+- `gauss()` stores a cached spare deviate in `self.gauss_next` on the instance. This requires per-instance mutable state on the Go struct, not a package-level variable.
+- `sample` with `counts` is new enough (3.9+) that test coverage in CPython `Lib/test/test_random.py` is the safest gate.
+- `SystemRandom` has no state; its Go equivalent wraps `crypto/rand.Read` directly.

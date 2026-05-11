@@ -1,0 +1,104 @@
+---
+title: "Modules/_bisectmodule.c: bisect module"
+description: "Binary search with lo/hi bounds, list insertion helpers, and the key= argument added in 3.10"
+cpython_path: Modules/_bisectmodule.c
+cpython_version: "3.14"
+lines: 300
+status: annotated
+ported_to: module/bisect/module.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`Modules/_bisectmodule.c` provides sorted-list search and insertion. Each
+public function has a `_left` and `_right` variant that differ only in where
+ties land. The `key=` parameter (3.10+) applies a callable to each list
+element before comparison, matching the convention used by `list.sort` and
+`heapq.nlargest`.
+
+## Map
+
+| C symbol | Lines (approx) | Role | Go equivalent |
+|---|---|---|---|
+| `internal_bisect_right` | 20-75 | Core binary search, right-biased | `bisect.bisectRight` |
+| `bisect_right` | 77-100 | Public wrapper, parses args | `bisect.BisectRight` |
+| `bisect_left` | 102-160 | Left-biased binary search | `bisect.BisectLeft` |
+| `insort_right` | 162-195 | Insert using `bisect_right`, then `list.insert` | `bisect.InsortRight` |
+| `insort_left` | 197-230 | Insert using `bisect_left`, then `list.insert` | `bisect.InsortLeft` |
+| `bisect_exec` | 232-265 | Module exec slot | module init |
+| method table | 267-300 | Registers all six public names | module def |
+
+## Reading
+
+### Binary search core: `internal_bisect_right`
+
+The function implements the standard half-open interval `[lo, hi)`. On each
+iteration the midpoint is `(lo + hi) >> 1` (no overflow risk for `Py_ssize_t`
+on 64-bit). When the element at `mid` is less than `x`, `lo` advances;
+otherwise `hi` retreats. The loop exits when `lo == hi`, which is the
+insertion point.
+
+```c
+// CPython: Modules/_bisectmodule.c:20
+static Py_ssize_t
+internal_bisect_right(PyObject *list, PyObject *item,
+                      Py_ssize_t lo, Py_ssize_t hi,
+                      PyObject *key)
+{
+    while (lo < hi) {
+        Py_ssize_t mid = ((size_t)lo + hi) / 2;
+        litem = PyList_GET_ITEM(list, mid);
+        if (key != Py_None) {
+            litem = PyObject_CallOneArg(key, litem);
+            ...
+        }
+        cmp = PyObject_RichCompareBool(item, litem, Py_LT);
+        if (cmp < 0) return -1;
+        if (cmp) hi = mid; else lo = mid + 1;
+    }
+    return lo;
+}
+```
+
+`bisect_left` is identical except the comparison direction is flipped: `item
+< litem` becomes `litem < item`, which pushes equal elements to the right
+boundary instead of the left.
+
+### `insort_left` and `insort_right`
+
+Both wrappers call the corresponding `bisect_*` function to find the
+insertion index, then call `PyList_Insert`. The cost is `O(log n)` for the
+search plus `O(n)` for the shift, so overall `O(n)`. There is no in-place
+optimization; CPython simply delegates to the existing list insert path.
+
+```c
+// CPython: Modules/_bisectmodule.c:162
+static PyObject *
+insort_right(PyObject *self, PyObject *const *args,
+             Py_ssize_t nargs, PyObject *kwnames)
+{
+    Py_ssize_t index = internal_bisect_right(list, item, lo, hi, key);
+    if (index < 0) return NULL;
+    return PyList_Insert(list, index, item) < 0 ? NULL : Py_None;
+}
+```
+
+### `key=` argument (3.10+) and 3.14 changes
+
+Before 3.10, `bisect` compared list elements directly. The `key=` parameter
+applies a transformation to each element at lookup time, without modifying
+the list. Callers must ensure the list was sorted under the same key. In
+3.14, `bisectmodule.c` uses the Argument Clinic `/*[clinic end generated
+code]*/` machinery uniformly across all six functions, replacing the older
+`METH_FASTCALL | METH_KEYWORDS` parsing scattered through earlier versions.
+
+## gopy notes
+
+- `module/bisect/module.go` should use a single `bisectCore` helper
+  parameterized by direction, rather than duplicating the loop.
+- The `key` callable path must guard against `None` vs. absent key; in Go,
+  represent this as a nullable `*py.Object` and skip the call when nil.
+- `PyList_Insert` shifts elements in C memory; the Go equivalent must go
+  through `objects/` list mutation helpers to keep refcount semantics correct.
+- 3.10 added `key=` to all six functions at once (bpo-4356); any backcompat
+  shim for older list payloads is unnecessary since gopy targets 3.14.

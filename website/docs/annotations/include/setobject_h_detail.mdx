@@ -1,0 +1,75 @@
+---
+title: "Include/setobject.h: set and frozenset object header"
+description: "Forward declarations, construction functions, and mutation API for PySetObject and PyFrozenSetObject"
+cpython_path: Include/setobject.h
+cpython_version: "3.14"
+lines: 80
+status: annotated
+ported_to: objects/set.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`Include/setobject.h` declares the public API for both mutable sets and frozen sets. The two types share a single underlying struct (`PySetObject`) and most of the same internal hash table logic. The only structural difference is that `PyFrozenSet_Type` marks its instances immutable at the type level, making mutation operations raise `TypeError` rather than check a flag at runtime.
+
+## Map
+
+| Lines | Symbol | Kind | Notes |
+|-------|--------|------|-------|
+| 1-8 | `PySetObject` | struct (opaque) | shared by set and frozenset |
+| 9-14 | `PySet_Type` / `PyFrozenSet_Type` | extern | type object singletons |
+| 15-20 | `PySet_Check` / `PyFrozenSet_Check` | macro | type-check, accepts subclasses |
+| 21-25 | `PyAnySet_Check` / `PyAnySet_CheckExact` | macro | accepts either set or frozenset |
+| 28-32 | `PySet_New` | function | builds mutable set from iterable or NULL |
+| 33-37 | `PyFrozenSet_New` | function | builds frozenset from iterable or NULL |
+| 38-42 | `PySet_Size` | function | safe count of items |
+| 43-47 | `PySet_Contains` | function | membership test, returns 0/1/-1 |
+| 48-54 | `PySet_Add` | function | inserts item, steals no ref |
+| 55-60 | `PySet_Discard` | function | removes if present, no error if absent |
+| 61-67 | `PySet_Pop` | function | removes and returns arbitrary item |
+| 68-72 | `PySet_Clear` | function | removes all items, retains allocation |
+| 73-80 | `PySet_GET_SIZE` | unsafe macro | reads `used` field without type check |
+
+## Reading
+
+### Forward declaration and struct layout
+
+The struct is opaque in the public header. The internal layout (in `Include/cpython/setobject.h`) is:
+
+```c
+typedef struct {
+    PyObject_HEAD
+    Py_ssize_t fill;       /* # active + # dummy entries */
+    Py_ssize_t used;       /* # active entries */
+    Py_ssize_t mask;       /* # slots - 1 */
+    setentry *table;       /* pointer to hash table */
+    Py_hash_t hash;        /* cached hash for frozenset, -1 for set */
+    Py_ssize_t finger;     /* next search finger for pop() */
+    setentry smalltable[8];
+    PyObject *weakreflist;
+} PySetObject;
+```
+
+The `smalltable` inline buffer holds up to 8 entries without a heap allocation. Once the table grows beyond that threshold, `table` is redirected to a separately allocated array. This mirrors the small-dict optimization in `dictobject`.
+
+### Construction and the NULL iterable convention
+
+```c
+PyObject *PySet_New(PyObject *iterable);
+PyObject *PyFrozenSet_New(PyObject *iterable);
+```
+
+Both functions accept `NULL` as `iterable`, which produces an empty set. Passing a non-NULL object calls `_PySet_Update` internally, which iterates the object and inserts each element. Duplicate elements are silently ignored because `set_add_key` returns 0 on collision.
+
+### Set protocol: no random access, no indexing
+
+Sets expose no indexing API. There is no `PySet_GetItem(set, index)`. The only way to retrieve a specific element is `PySet_Pop`, which returns an arbitrary item and removes it. This is by design: sets are unordered, and exposing index-based access would imply a stable order that the hash table does not guarantee.
+
+Iteration is supported at the Python level through `tp_iter`, but CPython does not expose a C-level `PySet_Next` equivalent (unlike `PyDict_Next`). Code that needs to inspect all members must either iterate via the Python iterator protocol or use `PySet_Pop` in a loop.
+
+## gopy notes
+
+- `objects/set.go` implements `PySetObject` using a Go `map[uint64]Object` keyed on the item's hash. The inline `smalltable` optimization is not replicated; Go maps handle small sizes efficiently without it.
+- `PySet_GET_SIZE` maps to a direct struct field read on `SetObject.used`. The unsafe macro's lack of type check is preserved intentionally to match CPython performance characteristics in the bytecode interpreter loop.
+- `PyFrozenSet_New` sets an immutable flag on the returned object rather than using a separate type path, because Go does not allow the same trick of sharing struct layout across two distinct type objects the way CPython does with `PySet_Type` / `PyFrozenSet_Type`.
+- Hashing of frozensets (the `hash` field above) is not yet implemented. `PyFrozenSet_Type.tp_hash` is set to `PyObject_HashNotImplemented` as a placeholder.

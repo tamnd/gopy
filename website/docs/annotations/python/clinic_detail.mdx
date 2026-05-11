@@ -1,0 +1,117 @@
+---
+title: "clinic/: Argument Clinic Generated Stubs"
+description: "Annotation for CPython's Argument Clinic DSL, covering generated METH_FASTCALL stubs, type codes, impl_prefix naming, and 3.14 changes"
+cpython_path: Python/clinic/
+cpython_version: "3.14"
+lines: 50000
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`Python/clinic/` holds the C stubs that the `Tools/clinic/clinic.py` preprocessor
+generates from DSL blocks embedded in CPython source files. Each `.c.h` file is
+a 1-to-1 companion for a module file. The DSL block lives between
+`/*[clinic input]` and `/*[clinic start generated code]*/` markers; the output
+block follows immediately.
+
+## Map
+
+| File pattern | Symbol pattern | Role |
+|---|---|---|
+| `*.c.h` (all modules) | `<module>_<func>_impl` | The hand-written implementation function; the generated wrapper calls it after parsing args |
+| `*.c.h` | `<module>_<func>` | The public `PyObject *` wrapper with the `PyMethodDef`-compatible signature |
+| `*.c.h` | `<module>_<func>_methoddef` | Static `PyMethodDef` entry; flags include `METH_FASTCALL`, `METH_KEYWORDS`, or `METH_O` depending on the DSL signature |
+| `builtinmodule.c.h` | `builtin_*` | Stubs for `len`, `isinstance`, `print`, `repr`, and the other ~30 builtins |
+| `abstract.c.h` | `_PyObject_*` | Internal abstract-object helpers exposed through the clinic machinery |
+| `typeobject.c.h` | `object_*` | `object.__init__`, `object.__init_subclass__`, `object.__class_getitem__` |
+| `_io/*.c.h` | `_io_*` | `io.FileIO`, `io.BufferedReader`, and related classes |
+
+## Reading
+
+### DSL format and type codes
+
+A typical clinic block looks like this (from `Modules/_bisectmodule.c`):
+
+```c
+/*[clinic input]
+bisect.bisect_left
+
+    a: object
+    x: object
+    lo: Py_ssize_t = 0
+    hi: object = None
+    *
+    key: object = None
+
+[clinic start generated code]*/
+```
+
+The type codes map directly to argument parsing:
+
+| DSL type | Generated parser call | C type |
+|---|---|---|
+| `object` | raw `PyObject *`, no conversion | `PyObject *` |
+| `int` | `_PyLong_AsInt` | `int` |
+| `Py_ssize_t` | `PyLong_AsSsize_t` | `Py_ssize_t` |
+| `str` | `PyUnicode_FSConverter` | `const char *` |
+| `bool` | `PyObject_IsTrue` | `int` (0/1) |
+| `defining_class` | injects `PyTypeObject *` as first extra arg | `PyTypeObject *` |
+
+### `impl_prefix` naming and `_PyArg_CheckPositional`
+
+The generated wrapper calls `_PyArg_CheckPositional` before dispatching to the
+`_impl` function. For a `METH_FASTCALL` signature:
+
+```c
+/* Python/clinic/builtinmodule.c.h:47 builtin_len */
+static PyObject *
+builtin_len(PyObject *module, PyObject *arg)
+/*[clinic end generated code: output=... input=...]*/
+{
+    return builtin_len_impl(module, arg);
+}
+```
+
+For variadic keyword signatures the generator emits a `_PyArg_ParseStackAndKeywords`
+call guarded by a `nargs` check:
+
+```c
+/* Python/clinic/_bisectmodule.c.h:12 bisect_bisect_left */
+static PyObject *
+bisect_bisect_left(PyObject *module, PyObject *const *args,
+                   Py_ssize_t nargs, PyObject *kwnames)
+{
+    ...
+    if (!_PyArg_CheckPositional("bisect_left", nargs, 2, 4)) {
+        goto exit;
+    }
+    ...
+    return_value = bisect_bisect_left_impl(module, a, x, lo, hi, key);
+exit:
+    return return_value;
+}
+```
+
+### 3.14 changes
+
+3.14 introduced `defining_class` as a first-class DSL type for heap-type
+methods. The generated wrapper now receives `PyTypeObject *cls` and passes it
+through so the impl can call `PyType_GetSlot` without going through the
+instance. The `methoddef` entry gains `METH_METHOD | METH_FASTCALL | METH_KEYWORDS`
+flags for these stubs.
+
+```c
+/* Python/clinic/typeobject.c.h:1 object___init_subclass___impl */
+static PyObject *
+object___init_subclass__(PyObject *self, PyTypeObject *cls,
+                         PyObject *const *args, Py_ssize_t nargs,
+                         PyObject *kwnames)
+```
+
+## gopy notes
+
+- gopy does not run `clinic.py`; Go function signatures are written by hand following the same `_impl` convention to keep diffs readable against CPython.
+- The `METH_FASTCALL | METH_KEYWORDS` pattern maps to Go functions receiving `(args []Object, kwargs StringDict)`.
+- `defining_class` injection is not yet supported. Methods that need the type pointer receive it via the receiver type's `Type()` method instead.
+- Argument validation equivalent to `_PyArg_CheckPositional` lives in `vm/eval_call.go`.

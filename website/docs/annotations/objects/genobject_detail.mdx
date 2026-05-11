@@ -1,0 +1,105 @@
+---
+title: "genobject.c: Generators, Coroutines, and Async Generators"
+description: "PyGenObject/PyCoroObject/PyAsyncGenObject union layout, gen_iternext resumption via _PyEval_EvalFrameDefault, gen_close throwing GeneratorExit, async generator aclose protocol, and 3.14 changes"
+cpython_path: Objects/genobject.c
+cpython_version: "3.14"
+lines: 900
+status: annotated
+ported_to: objects/generator.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`Objects/genobject.c` implements three related suspended-frame types. `PyGenObject` is the plain generator produced by a `def` with `yield`. `PyCoroObject` is the coroutine produced by `async def`. `PyAsyncGenObject` is the async generator from `async def` with `yield`. All three share a common C layout prefix defined by `_PyGenObject_HEAD`, so most of the file is shared infrastructure with three thin wrappers at the top.
+
+## Map
+
+| C symbol | Lines (approx.) | Role |
+|---|---|---|
+| `_PyGenObject_HEAD` | 1-50 | Common prefix: `gi_frame_state`, `gi_code`, `gi_weakreflist`, `gi_name`, `gi_qualname`, `gi_exc_state` |
+| `PyGenObject` | 52-60 | Plain generator; embeds `_PyGenObject_HEAD` |
+| `PyCoroObject` | 62-72 | Coroutine; embeds `_PyGenObject_HEAD` plus `cr_origin` for `sys.set_coroutine_origin_tracking_depth` |
+| `PyAsyncGenObject` | 74-90 | Async generator; adds `ag_running_async` and `ag_finalizer` |
+| `gen_send_ex2` | 260-388 | Core resumption: pushes the send-value, calls `_PyEval_EvalFrameDefault`, handles `StopIteration` |
+| `_gen_throw` | 466-550 | Throw path: injects an exception into the suspended frame |
+| `gen_close` | 388-465 | Throws `GeneratorExit`; raises `RuntimeError` if the body yields instead |
+| `gen_new_with_qualname` | 867-898 | Allocates and initializes a generator object from a frame |
+| `PyGen_Type` | 898-970 | Type object for plain generators |
+| `PyCoro_Type` | 1271-1360 | Type object for coroutines; no `tp_iter`, adds `tp_as_async.am_await` |
+| `coro_await` | 1486-1500 | `am_await`: returns a `coroutine_wrapper` iterator |
+| `_PyCoroWrapper_Type` | 1500-1540 | Thin iterator wrapping a coroutine for `await` expressions |
+| `PyAsyncGen_Type` | 1577-1680 | Async generator type; `am_aiter`, `am_anext` |
+| `async_gen_asend` / `_PyAsyncGenASend_Type` | 1879-2090 | Awaitable returned by `asend()` and `__anext__` |
+| `async_gen_athrow` / `_PyAsyncGenAThrow_Type` | 2272-2390 | Awaitable returned by `athrow()` and `aclose()` |
+| `gen_close` (async path) | 2317-2340 | `aclose()` helper; same GeneratorExit logic, surfaces `StopAsyncIteration` |
+
+## Reading
+
+### gen_send_ex2: the resumption engine
+
+All three types resume via `gen_send_ex2`. The function checks that the frame is in the `FRAME_SUSPENDED` state, pushes the sent value onto the frame's value stack, then tail-calls `_PyEval_EvalFrameDefault`. When the body hits `YIELD_VALUE` the frame state is set back to `FRAME_SUSPENDED` and `gen_send_ex2` returns the yielded object. When the body returns normally the result is wrapped in `StopIteration`.
+
+```c
+/* Objects/genobject.c:260 gen_send_ex2 */
+static int
+gen_send_ex2(PyGenObject *gen, PyObject *arg, PyObject **presult,
+             int exc, int closing)
+{
+    PyFrameObject *f = gen->gi_frame_state == FRAME_CREATED
+                       ? (PyFrameObject *)gen->gi_iframe : NULL;
+    /* ... push arg, set FRAME_EXECUTING ... */
+    result = _PyEval_EvalFrameDefault(tstate, frame, exc);
+    /* ... convert StopIteration value, handle FRAME_COMPLETED ... */
+}
+```
+
+### gen_close and the GeneratorExit protocol
+
+`gen_close` calls `_gen_throw(gen, 0, PyExc_GeneratorExit, NULL, NULL)`. If the body catches `GeneratorExit` and yields a value (rather than re-raising or returning), CPython raises `RuntimeError: generator ignored GeneratorExit`. If the body raises `StopIteration` or `GeneratorExit` the close is silently successful.
+
+```c
+/* Objects/genobject.c:388 gen_close */
+static PyObject *
+gen_close(PyGenObject *gen, PyObject *args)
+{
+    PyObject *retval;
+    PyObject *yf = _PyGen_yf(gen);
+    int err = 0;
+    if (yf) {
+        /* delegate close to the inner iterator first */
+        gen->gi_frame_state = FRAME_EXECUTING;
+        err = gen_close_iter(yf);
+        gen->gi_frame_state = FRAME_SUSPENDED;
+        Py_DECREF(yf);
+    }
+    if (err == 0) {
+        PyErr_SetNone(PyExc_GeneratorExit);
+    }
+    retval = gen_send_ex(gen, Py_None, 1, 1);
+    if (retval) {
+        const char *msg = "generator ignored GeneratorExit";
+        /* ... raise RuntimeError ... */
+    }
+    /* ... */
+}
+```
+
+### Async generator aclose and the finalizer hook
+
+`PyAsyncGenObject` adds `ag_finalizer`, a Python callable set by `sys.set_asyncgen_finalizer`. When the async generator is garbage collected without being explicitly closed, the finalizer is called. `aclose()` returns an `_PyAsyncGenAThrow` awaitable with `agt_args == NULL` (the isClose path). Iterating that awaitable calls `gen_close` internally and converts a clean exit to `StopAsyncIteration`.
+
+3.14 adds `ag_origin_or_finalizer` as a union that holds either the origin frame info (for debugging) or the finalizer callable, reducing the per-object footprint by one pointer.
+
+## gopy notes
+
+gopy ports all three types across `objects/generator.go`, `objects/coroutine.go`, and `objects/async_gen.go`.
+
+The biggest structural difference: gopy uses Go goroutines and channels instead of CPython's frame-suspend/resume stack tricks. Each generator body runs in a dedicated goroutine; `YieldCh` carries yielded values to the caller and `SendCh` carries sent values back. `Generator.Send` mirrors `gen_send_ex2`; `Generator.Throw` mirrors `_gen_throw`; `Generator.Close` mirrors `gen_close`.
+
+`genIterNext` is `tp_iternext` for plain generators. It calls `g.Send(None())`, matching CPython's `gen_iternext` which calls `gen_send_ex(gen, Py_None, 0, 0)`.
+
+For coroutines, `Coroutine.Await` returns a `coroAwaiter` wrapper whose `IterNext` calls `Send(None())`. This mirrors `_PyCoroWrapper_Type`'s `tp_iternext`.
+
+For async generators, `AsyncGenerator.Aclose` returns an `asyncGenAThrow` with `isClose: true`. The `asyncGenAThrowNext` function calls `g.Close()` on the first iteration and returns `StopAsyncIteration`, matching CPython's `aclose()` awaitable behavior.
+
+The `ag_finalizer` / `sys.set_asyncgen_finalizer` hook and the `cr_origin` origin-tracking field are not yet ported.

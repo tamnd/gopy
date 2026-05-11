@@ -1,0 +1,109 @@
+---
+title: "Modules/_heapqmodule.c: heapq module"
+description: "Binary heap invariant, push/pop in O(log n), nlargest/nsmallest shortcuts, and the merge-sort path"
+cpython_path: Modules/_heapqmodule.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+ported_to: module/heapq/module.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`Modules/_heapqmodule.c` implements a min-heap on top of a Python list.
+The heap invariant is `heap[k] <= heap[2*k+1]` and `heap[k] <= heap[2*k+2]`
+for all valid `k`. All public functions operate on ordinary Python lists; no
+separate heap type exists.
+
+## Map
+
+| C symbol | Lines (approx) | Role | Go equivalent |
+|---|---|---|---|
+| `siftdown` | 30-75 | Restore invariant upward after insert | `heapq.siftdown` |
+| `siftup` | 77-130 | Restore invariant downward after pop | `heapq.siftup` |
+| `siftdown_max` / `siftup_max` | 132-195 | Max-heap variants (internal) | `heapq.siftdownMax` |
+| `heappush` | 197-220 | Append then sift down | `heapq.Heappush` |
+| `heappop` | 222-260 | Swap root with last, sift up | `heapq.Heappop` |
+| `heapreplace` | 262-290 | Replace root, sift up (faster than pop+push) | `heapq.Heapreplace` |
+| `heappushpop` | 292-325 | Push then pop (or skip heap entirely) | `heapq.Heappushpop` |
+| `heapify` | 327-355 | Build heap from list in O(n) | `heapq.Heapify` |
+| `_nlargest` / `_nsmallest` | 357-450 | Top-k selection via heap | `heapq.Nlargest`, `heapq.Nsmallest` |
+| `merge` (Python fallback) | stdlib | k-way merge using heap of iterators | Python-level |
+
+## Reading
+
+### `_siftdown` and `_siftup`: the heap invariant
+
+`_siftdown` moves a newly appended element toward the root by repeatedly
+comparing it with its parent at index `(pos-1) >> 1`. `_siftup` moves the
+replacement root downward by always choosing the smaller child. Both run in
+`O(log n)`.
+
+```c
+// CPython: Modules/_heapqmodule.c:30
+static int
+siftdown(PyListObject *heap, Py_ssize_t startpos, Py_ssize_t pos)
+{
+    while (pos > startpos) {
+        Py_ssize_t parentpos = (pos - 1) >> 1;
+        ...
+        if (cmp < 0) break;  /* parent <= newitem, done */
+        ...
+        pos = parentpos;
+    }
+    ...
+}
+```
+
+`_siftup` is more expensive per level because it must compare two children
+before descending. The inner loop uses a leaf-to-root trick: descend to the
+leaf always taking the smaller child, then sift the original root value back
+up from that leaf. This halves the number of comparisons on average.
+
+### `heappop` and `heapreplace`
+
+`heappop` swaps the root with the last element, removes the last element,
+then calls `_siftup` on the new root. `heapreplace` skips the swap and
+directly overwrites the root with the new value before calling `_siftup`.
+Because `heapreplace` avoids one `O(log n)` sift-down pass, it is the
+preferred path inside `nlargest`/`nsmallest`.
+
+```c
+// CPython: Modules/_heapqmodule.c:262
+static PyObject *
+heapreplace(PyObject *self, PyObject *const *args, Py_ssize_t nargs)
+{
+    /* pop root, push item, maintain heap invariant */
+    PyList_SET_ITEM(heap, 0, item);
+    Py_INCREF(item);
+    return siftup((PyListObject *)heap, 0) ? NULL : returnval;
+}
+```
+
+### `nlargest` and `nsmallest`
+
+For small `n` relative to the input size, `nlargest` builds a min-heap of
+the first `n` elements, then iterates the rest calling `heapreplace` whenever
+the candidate exceeds the heap root. `nsmallest` uses a max-heap (the
+`*_max` variants) symmetrically. For edge cases (`n >= len(iterable)` or
+`n == 1`), the implementation falls back to `sorted()` or `max()`/`min()`.
+
+```c
+// CPython: Modules/_heapqmodule.c:380 (nlargest fast path)
+if (PyObject_RichCompareBool(item, heap0, Py_GT) == 1) {
+    PyList_SET_ITEM(result, 0, item);
+    if (siftup_max((PyListObject *)result, 0) < 0) ...
+}
+```
+
+## gopy notes
+
+- `module/heapq/module.go` should implement `siftdown`, `siftup`, and their
+  max-heap variants as unexported helpers, matching the CPython structure.
+- List mutation uses `objects/` list API (`ListSetItem`, `ListGetItem`),
+  not raw slice indexing, to stay consistent with other module ports.
+- The `key=` argument (added for `nlargest`/`nsmallest` in Python 2.4 and
+  present throughout 3.x) requires decorating comparisons; implement as a
+  wrapper that calls the key callable and compares the results.
+- CPython's leaf-trick in `_siftup` is a measurable constant-factor win;
+  the Go port should replicate it rather than using a naive two-child descent.
