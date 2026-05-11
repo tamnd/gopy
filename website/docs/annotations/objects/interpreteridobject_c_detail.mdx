@@ -1,0 +1,116 @@
+---
+title: Objects/interpreteridobject.c
+description: "Annotation: PyInterpreterID object for sub-interpreter identity in CPython 3.14"
+cpython_path: Objects/interpreteridobject.c
+cpython_version: "3.14"
+lines: 200
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Objects/interpreteridobject.c" />
+
+`PyInterpreterID` is a thin Python object that wraps a 64-bit integer identifying a sub-interpreter. It was introduced alongside PEP 684 (per-interpreter GIL) so that user code can pass interpreter IDs across channels without carrying a raw pointer.
+
+## Map
+
+| Lines | Symbol | Purpose |
+|-------|--------|---------|
+| 1-30 | struct | `interpid` C struct wrapping `int64_t id` |
+| 31-70 | `interp_id_new` | Constructor: validates the int64, optionally looks up the live interpreter |
+| 71-100 | `_PyInterpreterID_LookUp` | Resolve an ID to a `PyInterpreterState*` |
+| 101-130 | `interp_id_int` | `__int__` and `__index__` returning the raw int64 |
+| 131-155 | `interp_id_hash` | `__hash__` delegating to the int64 value |
+| 156-175 | `interp_id_richcompare` | `__eq__` comparing two `interpid` objects by their int64 |
+| 176-200 | `PyInterpreterID_Type` | Type object registration |
+
+## Reading
+
+### Object layout and construction
+
+The C struct is intentionally minimal: one `PyObject_HEAD` and one `int64_t`.
+
+```c
+// CPython: Objects/interpreteridobject.c:15 interpid
+typedef struct {
+    PyObject_HEAD
+    int64_t id;
+} interpid;
+```
+
+`interp_id_new` accepts a single integer argument, range-checks it against `INT64_MAX`, and then optionally calls `_PyInterpreterState_LookUpID` to confirm the interpreter is alive. If `lookup` is requested and the ID is unknown, a `RuntimeError` is raised before the object is allocated.
+
+```c
+// CPython: Objects/interpreteridobject.c:38 interp_id_new
+static PyObject *
+interp_id_new(PyTypeObject *cls, PyObject *args, PyObject *kwargs)
+{
+    int64_t id;
+    int lookup = 0;
+    /* ... argument parsing omitted ... */
+    if (lookup) {
+        PyInterpreterState *interp = _PyInterpreterState_LookUpID(id);
+        if (interp == NULL) return NULL;
+    }
+    interpid *self = PyObject_New(interpid, cls);
+    if (self == NULL) return NULL;
+    self->id = id;
+    return (PyObject *)self;
+}
+```
+
+The `lookup` flag is controlled by an internal keyword argument used by the `_interpreters` module. Public callers always supply just the integer.
+
+### _PyInterpreterID_LookUp
+
+`_PyInterpreterID_LookUp` is the C-API entry point for modules that need to convert a Python `InterpreterID` back to a live `PyInterpreterState`. It extracts the `int64_t`, calls `_PyInterpreterState_LookUpID`, and sets a `RuntimeError` if the interpreter has already been destroyed.
+
+```c
+// CPython: Objects/interpreteridobject.c:78 _PyInterpreterID_LookUp
+PyInterpreterState *
+_PyInterpreterID_LookUp(PyObject *requested_id)
+{
+    int64_t id = ((interpid *)requested_id)->id;
+    PyInterpreterState *interp = _PyInterpreterState_LookUpID(id);
+    if (interp == NULL && !PyErr_Occurred()) {
+        PyErr_Format(PyExc_RuntimeError,
+                     "unrecognized interpreter ID %lld", (long long)id);
+    }
+    return interp;
+}
+```
+
+This is the pattern used by `_interpreters.get_current()` and the channel send/recv primitives.
+
+### Hash, equality, and destruction
+
+`__hash__` delegates directly to `PyObject_GenericHash` on the boxed int64, so an `InterpreterID` hashes the same as `int(id)` would. `__eq__` compares the two `int64_t` fields numerically, ignoring type: an `InterpreterID` compares equal to a plain `int` of the same value.
+
+There is no custom `tp_dealloc`. The object does not hold a reference to the `PyInterpreterState`; it only stores the integer key. Destroying an `InterpreterID` object does not affect the interpreter's lifetime. The interpreter's own reference counting lives entirely inside `_PyInterpreterState_IDIncref` / `_PyInterpreterState_IDDecref`, called by the `_interpreters` module, not by this object.
+
+```c
+// CPython: Objects/interpreteridobject.c:156 interp_id_richcompare
+static PyObject *
+interp_id_richcompare(PyObject *self, PyObject *other, int op)
+{
+    if (op != Py_EQ && op != Py_NE) {
+        Py_RETURN_NOTIMPLEMENTED;
+    }
+    /* coerce other to int64 for comparison */
+}
+```
+
+## gopy notes
+
+Status: not yet ported.
+
+Planned package path: `objects/interp_id.go` inside the `objects` package.
+
+Priority considerations:
+
+- This object is small (under 50 lines of logic) and has no GC complexity, so it is a good candidate for an early port.
+- The `_PyInterpreterState_LookUpID` dependency means the port should land after the interpreter-state registry is in place inside the `pystate` package.
+- In Go, the `int64` field maps directly to a Go `int64`. No boxing needed.
+- The `lookup` constructor flag is an internal detail; the public Go constructor can accept a plain `int64` and return an error if the interpreter is not found.
+- PEP 684 (per-interpreter GIL) is the motivating context. The object is used by `interpreters` channel primitives, which are not yet in scope for gopy but will be needed for multi-interpreter support.

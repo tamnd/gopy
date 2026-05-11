@@ -1,0 +1,117 @@
+---
+title: Objects/typevarobject.c
+description: "Annotation: TypeVar, TypeVarTuple, and ParamSpec objects in CPython 3.14"
+cpython_path: Objects/typevarobject.c
+cpython_version: "3.14"
+lines: 800
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Objects/typevarobject.c" />
+
+CPython 3.14 implements `TypeVar`, `TypeVarTuple`, and `ParamSpec` as C objects defined in this file. They back the PEP 695 type parameter syntax (`type X[T] = ...`) and the older `typing.TypeVar` API.
+
+## Map
+
+| Lines | Symbol | Purpose |
+|-------|--------|---------|
+| 1-60 | struct layout | `typevarobject` C struct fields |
+| 61-180 | `typevar_new` | `TypeVar.__new__` constructor and validation |
+| 181-280 | `typevar_evaluate` | Lazy bound/constraint evaluation for PEP 695 |
+| 281-360 | `typevar_getset` | `__name__`, `__bound__`, `__constraints__`, `__default__` |
+| 361-450 | `typevar_class_getitem` | `T[int]` subscript returning `GenericAlias` |
+| 451-560 | `TypeVarTuple` object | Struct, `__new__`, `__iter__`, `__typing_unpack__` |
+| 561-680 | `ParamSpec` object | Struct, `__new__`, `.args`, `.kwargs` properties |
+| 681-800 | type objects | `PyTypeVar_Type`, `PyTypeVarTuple_Type`, `PyParamSpec_Type` |
+
+## Reading
+
+### TypeVar object layout
+
+`typevarobject` carries six fields that map directly to the attributes visible from Python.
+
+```c
+// CPython: Objects/typevarobject.c:18 typevarobject
+typedef struct {
+    PyObject_HEAD
+    PyObject *tv_name;              /* __name__: str */
+    PyObject *tv_bound;             /* __bound__: type | None */
+    PyObject *tv_constraints;       /* __constraints__: tuple */
+    PyObject *tv_default;           /* __default__: type | missing */
+    PyObject *tv_evaluate_bound;    /* PEP 695 lazy callable */
+    PyObject *tv_evaluate_constraints; /* PEP 695 lazy callable */
+} typevarobject;
+```
+
+`tv_evaluate_bound` and `tv_evaluate_constraints` are set when a `TypeVar` is declared inside a `type` statement. CPython defers evaluating the annotation expression until first access, matching PEP 695 semantics. Both fields are `NULL` for the classic `T = TypeVar("T", bound=int)` form.
+
+### TypeVar.__new__ validation
+
+`typevar_new` enforces the constraint rules stated in PEP 484: a TypeVar may have a bound or constraints, but not both, and if constraints are given there must be at least two.
+
+```c
+// CPython: Objects/typevarobject.c:85 typevar_new
+if (bound != NULL && nconstraints > 0) {
+    PyErr_SetString(PyExc_TypeError,
+        "TypeVar cannot have both bound and constraints");
+    return NULL;
+}
+if (nconstraints == 1) {
+    PyErr_SetString(PyExc_TypeError,
+        "A single constraint is not allowed");
+    return NULL;
+}
+```
+
+After validation the constructor stores the raw constraint objects into a tuple and calls `PyObject_GC_New` to allocate the live object.
+
+### TypeVar._evaluate and lazy PEP 695 bounds
+
+`typevar_evaluate` is the backend for the `__bound__` getter when `tv_evaluate_bound` is set. It calls the stored callable, caches the result back into `tv_bound`, then clears `tv_evaluate_bound` so the callable is only invoked once.
+
+```c
+// CPython: Objects/typevarobject.c:210 typevar_evaluate
+static PyObject *
+typevar_evaluate(typevarobject *self, PyObject **slot, PyObject **evaluate_slot)
+{
+    if (*slot == NULL && *evaluate_slot != NULL) {
+        *slot = PyObject_CallNoArgs(*evaluate_slot);
+        if (*slot == NULL) return NULL;
+        Py_CLEAR(*evaluate_slot);
+    }
+    return Py_XNewRef(*slot);
+}
+```
+
+`__class_getitem__` (around line 361) delegates directly to `Py_GenericAlias`, producing a `types.GenericAlias`. That is the only path that makes `list[T]` work when `T` is a `TypeVar`.
+
+### TypeVarTuple and ParamSpec
+
+`TypeVarTuple` adds `__typing_unpack__` so that `*Ts` unpacking works inside `Generic`. Its struct mirrors `typevarobject` but omits `tv_bound` and `tv_constraints`, because `TypeVarTuple` accepts neither.
+
+```c
+// CPython: Objects/typevarobject.c:455 typevartupleobject
+typedef struct {
+    PyObject_HEAD
+    PyObject *tvt_name;
+    PyObject *tvt_default;
+    PyObject *tvt_evaluate_default;
+} typevartupleobject;
+```
+
+`ParamSpec` adds two computed properties, `.args` and `.kwargs`, each returning a `ParamSpecArgs` or `ParamSpecKwargs` wrapper. These wrappers exist so that `Callable[P, R]` can distinguish positional from keyword parts of the parameter specification.
+
+## gopy notes
+
+Status: not yet ported.
+
+Planned package path: `objects/typevar.go` inside the `objects` package, parallel to `objects/type.go`.
+
+Priority considerations:
+
+- `TypeVar`, `TypeVarTuple`, and `ParamSpec` are needed before the `typing` module can pass its own test suite.
+- The lazy-evaluation fields (`tv_evaluate_bound`, `tv_evaluate_constraints`) require a callable-slot mechanism. In Go this will be a `func() (Object, error)` field that is nilled after the first call.
+- `__class_getitem__` can defer to the `GenericAlias` port once that lands in `objects/generic_alias.go` (already present as a stub in the working tree).
+- PEP 695 scoping rules interact with the compiler; the `compile/` package will need to emit the evaluate callables before the type object is initialized.

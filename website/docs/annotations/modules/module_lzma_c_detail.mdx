@@ -1,0 +1,126 @@
+---
+title: Modules/_lzmamodule.c
+description: "Annotated reading: CPython lzma module C extension wrapping liblzma"
+cpython_path: Modules/_lzmamodule.c
+cpython_version: "3.14"
+lines: 900
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/_lzmamodule.c" />
+
+The `_lzma` extension module wraps [liblzma](https://tukaani.org/xz/) (part of the XZ Utils package) to expose `LZMACompressor` and `LZMADecompressor` types in Python. Both types hold a live `lzma_stream` inside their C struct, and the module-level `compress()` / `decompress()` convenience functions are thin wrappers over those types.
+
+## Map
+
+| Symbol | Kind | Lines (approx) | Purpose |
+|---|---|---|---|
+| `Compressor` | struct | 40-60 | Holds `lzma_stream`, format/check, and lock |
+| `Decompressor` | struct | 65-90 | Holds `lzma_stream`, `eof`, `unused_data`, and lock |
+| `Compressor_init` | function | 200-290 | Initialises stream with `lzma_easy_encoder` or `lzma_stream_encoder` |
+| `Decompressor_init` | function | 540-620 | Initialises stream with `lzma_stream_decoder` or `lzma_auto_decoder` |
+| `Compressor_compress` | function | 295-360 | Drives the compress loop, collecting partial output |
+| `Compressor_flush` | function | 365-410 | Finalises stream with `LZMA_FINISH` action |
+| `Decompressor_decompress` | function | 625-730 | Drives the decompress loop, handling multi-stream reset |
+| `FORMAT_AUTO` / `FORMAT_XZ` / `FORMAT_ALONE` / `FORMAT_RAW` | constants | 850-870 | Format selector exposed to Python |
+| `CHECK_CRC32` / `CHECK_CRC64` / `CHECK_SHA256` / `CHECK_NONE` | constants | 870-900 | Integrity check selector |
+
+## Reading
+
+### Stream initialisation and format selection
+
+`Compressor_init` (line 200) inspects the `format` argument to choose between `lzma_easy_encoder` (for XZ with a preset level) and `lzma_stream_encoder` (for raw or alone formats that require explicit filter chains). The `check` argument selects the integrity check appended to each XZ block.
+
+```c
+// CPython: Modules/_lzmamodule.c:200 Compressor_init
+static int
+Compressor_init(Compressor *self, PyObject *args, PyObject *kwargs)
+{
+    if (format == FORMAT_XZ) {
+        lzma_ret ret = lzma_easy_encoder(&self->lzs, preset, check);
+        if (ret != LZMA_OK) {
+            /* raise LZMAError */
+        }
+    } else {
+        /* build filter chain, call lzma_stream_encoder or lzma_alone_encoder */
+    }
+}
+```
+
+`Decompressor_init` (line 540) maps the three user-facing format constants to the appropriate liblzma decoder. `FORMAT_AUTO` becomes `lzma_auto_decoder`, which auto-detects XZ and legacy LZMA streams. `FORMAT_XZ` uses `lzma_stream_decoder`, and `FORMAT_ALONE` uses `lzma_alone_decoder`. `FORMAT_RAW` uses `lzma_raw_decoder` with a caller-supplied filter chain.
+
+```c
+// CPython: Modules/_lzmamodule.c:540 Decompressor_init
+static int
+Decompressor_init(Decompressor *self, PyObject *args, PyObject *kwargs)
+{
+    switch (format) {
+    case FORMAT_AUTO:
+        ret = lzma_auto_decoder(&self->lzs, memlimit, decoder_flags);
+        break;
+    case FORMAT_XZ:
+        ret = lzma_stream_decoder(&self->lzs, memlimit, decoder_flags);
+        break;
+    case FORMAT_ALONE:
+        ret = lzma_alone_decoder(&self->lzs, memlimit);
+        break;
+    }
+}
+```
+
+### Compression partial-output loop
+
+`Compressor_compress` (line 295) feeds input to liblzma in a `do/while` loop, accumulating output chunks into a `PyByteArrayObject`. Each iteration sets `avail_in` and `next_in`, calls `lzma_code` with `LZMA_RUN`, then appends whatever bytes landed in the output buffer. The loop exits when `avail_in` reaches zero, meaning all input has been consumed (though not necessarily flushed to the stream).
+
+```c
+// CPython: Modules/_lzmamodule.c:295 Compressor_compress
+static PyObject *
+Compressor_compress(Compressor *self, PyObject *args)
+{
+    self->lzs.next_in  = (uint8_t *)data.buf;
+    self->lzs.avail_in = data.len;
+    do {
+        arrange_output_buffer(&self->lzs, &result, &output_size);
+        lzma_ret ret = lzma_code(&self->lzs, LZMA_RUN);
+        if (ret != LZMA_OK && ret != LZMA_STREAM_END)
+            goto error;
+    } while (self->lzs.avail_in != 0);
+    /* trim result to actual output length */
+}
+```
+
+`Compressor_flush` (line 365) runs the same loop but passes `LZMA_FINISH` to signal end-of-stream. It keeps looping until liblzma returns `LZMA_STREAM_END`, at which point the XZ footer (including the integrity check) has been written.
+
+### Decompression multi-stream reset
+
+`Decompressor_decompress` (line 625) handles the case where a byte buffer contains more than one concatenated XZ stream. When `lzma_code` returns `LZMA_STREAM_END` but input bytes remain, the function calls `lzma_end` followed by the appropriate `lzma_*_decoder` init to reset the stream state, then continues the loop. Any leftover bytes after the final stream end are stored in `self->unused_data`.
+
+```c
+// CPython: Modules/_lzmamodule.c:670 Decompressor_decompress (multi-stream reset)
+        if (ret == LZMA_STREAM_END) {
+            if (self->lzs.avail_in == 0) {
+                self->eof = 1;
+                break;
+            }
+            /* more data: reset the decoder and continue */
+            lzma_end(&self->lzs);
+            if (reinit_decoder(self) != 0)
+                goto error;
+        }
+```
+
+The `CHECK_CRC64` and `CHECK_NONE` constants (lines 870-900) are passed as the `check` argument to `lzma_easy_encoder`. `CHECK_NONE` disables integrity verification entirely, useful for in-memory pipelines where external framing already covers integrity. `CHECK_CRC64` is the XZ default and provides strong detection of corruption.
+
+## gopy notes
+
+Status: not yet ported.
+
+Planned package path: `module/lzma/`.
+
+The Go standard library does not include an LZMA decoder. The most practical path is a cgo bridge over the system `liblzma`, mirroring how `_lzmamodule.c` works. A pure-Go alternative exists (`github.com/ulikunitz/xz`), but it would need to be evaluated for streaming API compatibility before adoption.
+
+`LZMACompressor` and `LZMADecompressor` both require a per-object mutex because `lzma_stream` is not thread-safe. The Go port should use `sync.Mutex` in the same position.
+
+The multi-stream reset logic in `Decompressor_decompress` must be ported faithfully. Dropping it would silently truncate concatenated XZ files, which are commonly produced by parallel compression tools.

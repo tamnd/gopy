@@ -1,35 +1,35 @@
 ---
-title: fractions.py
+title: Lib/fractions.py
 description: "Exact rational arithmetic implementing the numbers.Rational ABC"
 cpython_path: Lib/fractions.py
 cpython_version: "3.14"
-lines: 700
+lines: 750
 status: annotated
 ---
 
 import {Cpy, CpyLink} from '@site/src/components/Cpy';
 
-`Lib/fractions.py` provides `Fraction`, a pure-Python exact rational type. It stores a numerator and denominator as `int` values, always reduced to lowest terms with a positive denominator. It registers with `numbers.Rational` and interoperates cleanly with `float`, `Decimal`, and the built-in `int`.
+Source: <CpyLink path="Lib/fractions.py" />
 
 ## Map
 
-| Lines | Symbol | Role |
-|-------|--------|------|
+| Lines | Symbol | Purpose |
+|-------|--------|---------|
 | 1–40 | imports, `__all__` | `math`, `numbers`, `operator`, `re` |
-| 42–80 | `_RATIONAL_FORMAT` regex | parses `"3/4"`, `"1.5"`, `"-7"` strings |
-| 82–200 | `Fraction.__new__` | normalization, gcd reduction, sign fix |
-| 201–260 | `Fraction._from_float` | `float.as_integer_ratio()` path |
-| 261–300 | `Fraction._from_decimal` | `Decimal.as_integer_ratio()` path |
-| 301–440 | arithmetic operators | cross-multiply then reduce |
-| 441–530 | comparison operators | cross-multiply for exact ordering |
-| 531–620 | `limit_denominator` | Stern-Brocot / continued-fraction search |
-| 621–700 | `__repr__`, `__str__`, `__format__`, `__hash__` | presentation and hashing |
+| 41–80 | `_RATIONAL_FORMAT` regex | parses `"3/4"`, `"1.5"`, `"-7"` strings |
+| 81–210 | `Fraction.__new__` | normalization, gcd reduction, sign canonicalization |
+| 211–260 | `Fraction._from_float` | `float.as_integer_ratio()` path |
+| 261–305 | `Fraction._from_decimal` | `Decimal.as_integer_ratio()` path |
+| 306–450 | arithmetic operators | cross-multiply with gcd reduction |
+| 451–535 | comparison operators | cross-multiply for exact ordering |
+| 536–630 | `limit_denominator` | Stern-Brocot / continued-fraction walk |
+| 631–750 | `__repr__`, `__str__`, `__format__`, `__hash__`, `__float__` | presentation and protocol |
 
 ## Reading
 
 ### Construction and normalization
 
-`Fraction.__new__` is the only constructor. It accepts an integer pair, a string, a `float`, a `Decimal`, or another `Rational`. After any coercion, the final step always reduces by `math.gcd` and forces the denominator positive.
+`Fraction.__new__` is the only constructor. It accepts an integer pair, a string, a `float`, a `Decimal`, or another `Rational`. After any coercion the final step always reduces by `math.gcd` and forces the denominator positive. The sign of a negative fraction is carried by the numerator.
 
 ```python
 # CPython: Lib/fractions.py:107 Fraction.__new__
@@ -42,6 +42,8 @@ def __new__(cls, numerator=0, denominator=None, *, _normalize=True):
         numerator //= g
         denominator //= g
 ```
+
+The `_normalize=False` path is used internally when the caller already guarantees the pair is reduced, avoiding a redundant gcd call.
 
 ### Float and Decimal conversion paths
 
@@ -66,9 +68,9 @@ def _from_decimal(cls, dec):
     return cls(*dec.as_integer_ratio())
 ```
 
-`float.as_integer_ratio()` returns an exact `(numerator, denominator)` pair where the denominator is a power of two, so no precision is lost.
+`float.as_integer_ratio()` returns an exact `(numerator, denominator)` pair where the denominator is a power of two, so no precision is lost. `__float__` goes the other direction by dividing numerator by denominator using true division.
 
-### Arithmetic via cross-multiplication
+### Arithmetic via cross-multiplication and gcd reduction
 
 To add `a/b + c/d`, the file computes `(a*d + b*c) / (b*d)` then reduces. The intermediate products can be large, but Python `int` is unbounded, so this is exact.
 
@@ -84,11 +86,11 @@ def _add(a, b):
 __add__ = _operator_fallbacks(_add, operator.add)
 ```
 
-`_operator_fallbacks` wraps the core function to produce both `__add__` and `__radd__`, handling type dispatch so that `Fraction + int`, `int + Fraction`, and `Fraction + Fraction` all work.
+`_operator_fallbacks` wraps the core function to produce both `__add__` and `__radd__`, handling type dispatch so that `Fraction + int`, `int + Fraction`, and `Fraction + Fraction` all work correctly. Multiplication follows the same pattern: `(a*c) / (b*d)` with a gcd pass after.
 
 ### `limit_denominator` and the Stern-Brocot tree
 
-Given a maximum denominator `max_denominator`, this method finds the closest rational to `self` whose denominator does not exceed the limit. It uses the continued-fraction convergent algorithm, which is equivalent to walking the Stern-Brocot tree.
+Given a maximum denominator, this method finds the closest rational to `self` whose denominator does not exceed the limit. It uses the continued-fraction convergent algorithm, which is equivalent to walking the Stern-Brocot tree.
 
 ```python
 # CPython: Lib/fractions.py:553 Fraction.limit_denominator
@@ -109,17 +111,17 @@ def limit_denominator(self, max_denominator=10**6):
     ...
 ```
 
-The loop extracts continued-fraction coefficients one at a time. When the next convergent would exceed `max_denominator`, it picks the better of the last two candidates.
+The loop extracts continued-fraction coefficients one at a time. When the next convergent would exceed `max_denominator`, it picks the better of the last two candidates by comparing absolute distances.
 
 ## gopy notes
 
-- `Fraction` stores `_numerator` and `_denominator` as plain attributes set via `object.__setattr__` to work around the slot-less base class. In Go, fields on the struct are fine.
+Status: not yet ported.
+
+Planned package path: `module/fractions/`.
+
+Key porting notes:
+
+- `Fraction` stores `_numerator` and `_denominator` as plain attributes set via `object.__setattr__` to work around the slot-less base class. In Go, struct fields are fine.
 - `_operator_fallbacks` is a higher-order function that manufactures `__add__`/`__radd__` pairs. The gopy equivalent is two separate method registrations on the type object.
-- `math.gcd` in CPython 3.9+ handles negative inputs correctly and returns a non-negative result, so the sign-fix on the denominator is done before calling it. Match that order.
-- `__hash__` uses `hash(float(self))` when the fraction is exactly representable as a float; otherwise it uses `hash(numerator) ^ hash(denominator)` combined in the numeric hash protocol. This must match `int.__hash__` for the invariant `hash(Fraction(n)) == hash(n)`.
-
-## CPython 3.14 changes
-
-- `Fraction` gained a `__format__` method supporting the same format spec as `float`, including `"e"`, `"f"`, `"g"`, and `"%"` presentation types.
-- `_from_decimal` now accepts any object implementing `as_integer_ratio()`, not just `decimal.Decimal` instances, matching the behavior already present in `_from_float`.
-- Several internal helpers were converted to use `__slots__` on an inner class to reduce memory overhead when many `Fraction` objects are alive simultaneously.
+- `math.gcd` in CPython 3.9+ handles negative inputs correctly and returns a non-negative result, so the sign fix on the denominator is done before calling it. Match that order exactly.
+- `__hash__` must satisfy `hash(Fraction(n)) == hash(n)` for any integer `n`. The numeric hash protocol from `numbers.py` governs the formula.

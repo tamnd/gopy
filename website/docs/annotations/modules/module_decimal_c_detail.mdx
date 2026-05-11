@@ -1,0 +1,129 @@
+---
+title: Modules/_decimal/_decimal.c
+description: "Annotated reading: CPython decimal module C extension wrapping mpdecimal"
+cpython_path: Modules/_decimal/_decimal.c
+cpython_version: "3.14"
+lines: 7000
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/_decimal/_decimal.c" />
+
+The `_decimal` extension module wraps the [mpdecimal](https://www.bytereef.org/mpdecimal/) library to implement IEEE 754-2008 decimal floating-point arithmetic. Every Python-level `Decimal` object corresponds to an `mpd_t` value stored inside a `PyDecObject`, and every `Context` object wraps an `mpd_context_t` that controls rounding, precision, and trap flags.
+
+## Map
+
+| Symbol | Kind | Lines (approx) | Purpose |
+|---|---|---|---|
+| `PyDecObject` | struct | 120-145 | Holds `mpd_t` value plus reference to owning context |
+| `PyDecContextObject` | struct | 160-185 | Holds `mpd_context_t` plus thread-local flag |
+| `PyDec_Type` | `PyTypeObject` | 6800-6950 | Top-level `Decimal` type registration |
+| `PyDecContext_Type` | `PyTypeObject` | 6950-7000 | `Context` type registration |
+| `decimal_new` | function | 520-720 | `Decimal.__new__` dispatcher |
+| `PyDec_Add` / `PyDec_Mul` / `PyDec_Div` | functions | 1800-2100 | Arithmetic via mpdecimal traps |
+| `DecimalException` hierarchy | type objects | 280-510 | Maps `mpd_err_t` codes to Python exceptions |
+| `context_getprec` / `context_setprec` | getset | 4100-4250 | Context precision property |
+| `context_getround` / `context_setround` | getset | 4260-4350 | Context rounding mode property |
+| `PyDec_Context_Get` / `PyDec_Context_Set` | functions | 3900-4050 | Thread-local context access |
+
+## Reading
+
+### PyDecObject and PyDec_Type
+
+`PyDecObject` is a standard Python heap type whose first field after `PyObject_HEAD` is the embedded `mpd_t`. Because `mpd_t` carries its own coefficient storage pointer, the object also tracks whether that storage is heap-allocated or uses the inline buffer.
+
+```c
+// CPython: Modules/_decimal/_decimal.c:120 PyDecObject
+typedef struct {
+    PyObject_HEAD
+    PyObject      *context;   /* owning context or NULL for thread-local */
+    mpd_t          dec;       /* mpdecimal value; coefficient may be heap */
+} PyDecObject;
+```
+
+`decimal_new` (line 520) accepts `int`, `str`, `float`, `Decimal`, and a 3-tuple `(sign, digits, exponent)`. Each branch converts its input to an `mpd_t` using the appropriate mpdecimal constructor, then raises any pending signal as a Python exception through the trap mechanism.
+
+```c
+// CPython: Modules/_decimal/_decimal.c:520 decimal_new
+static PyObject *
+decimal_new(PyTypeObject *type, PyObject *args, PyObject *kwds)
+{
+    /* ... dispatch on input type, call mpd_set_string / mpd_set_i64 / etc. */
+    SUBNORMAL_COEFF(v, ctx);   /* mpdecimal signal -> Python exception */
+}
+```
+
+`PyDec_Type` is registered as the `decimal.Decimal` type. Its `tp_richcompare`, `tp_as_number`, and `tp_as_sequence` slots all delegate to mpdecimal operations, checking traps after each call.
+
+### Arithmetic and trap mapping
+
+`PyDec_Add`, `PyDec_Mul`, and `PyDec_Div` follow the same three-step pattern: acquire the thread-local context, call the mpdecimal primitive (e.g. `mpd_qadd`), then inspect `status` against the context's `traps` bitmask.
+
+```c
+// CPython: Modules/_decimal/_decimal.c:1832 PyDec_Add
+static PyObject *
+PyDec_Add(PyObject *v, PyObject *w)
+{
+    mpd_context_t *ctx;
+    uint32_t status = 0;
+
+    CONVERT_BINOP_RAISE(&a, &b, v, w, ctx);
+    mpd_qadd(MPD(result), MPD(a), MPD(b), ctx, &status);
+    if (dec_addstatus(result, status, ctx)) {   /* trap check */
+        Py_DECREF(result);
+        return NULL;
+    }
+    return result;
+}
+```
+
+`dec_addstatus` (line 340) converts a non-zero `status` word into the matching Python exception by walking the `DecimalException` hierarchy. The hierarchy is built at module init time from a table that pairs each `mpd_err_t` flag with a Python type object.
+
+### DecimalException hierarchy and context get/set
+
+The exception classes (`InvalidOperation`, `DivisionByZero`, `Overflow`, `Underflow`, `Subnormal`, `Inexact`, `Rounded`, `Clamped`, `FloatOperation`) are created by `PyErr_NewException` during `_decimal` module initialisation and stored in the module state. They mirror the mpdecimal `MPD_*` constants one-for-one.
+
+```c
+// CPython: Modules/_decimal/_decimal.c:290 DecimalException init
+static int
+init_decimal_exception_hierarchy(PyObject *m)
+{
+    /* Each entry maps an mpd_err_t flag to a class name and base type. */
+    for (int i = 0; signal_map[i].name != NULL; i++) {
+        PyObject *base = signal_map[i].base ? signal_map[i].base : PyExc_ArithmeticError;
+        signal_map[i].ex = PyErr_NewException(signal_map[i].name, base, NULL);
+        /* ... */
+    }
+}
+```
+
+`PyDec_Context_Get` (line 3900) returns the thread-local `Context`. If no thread-local context has been set, it falls back to the module-level default context. `PyDec_Context_Set` (line 3980) writes to the thread state's `dict` under the key `"decimal_context"`.
+
+```c
+// CPython: Modules/_decimal/_decimal.c:3900 PyDec_Context_Get
+static PyObject *
+PyDec_Context_Get(PyObject *self, PyObject *args)
+{
+    PyObject *tl_context;
+    tl_context = PyDict_GetItemWithError(tstate->dict, tl_key);
+    if (tl_context == NULL) {
+        tl_context = module_state->default_context;
+    }
+    Py_INCREF(tl_context);
+    return tl_context;
+}
+```
+
+## gopy notes
+
+Status: not yet ported.
+
+Planned package path: `module/decimal/`.
+
+The main porting challenge is the mpdecimal dependency. Options are: cgo-linking against the system `libmpdec`, vendoring mpdecimal as a cgo sub-package, or writing a pure-Go IEEE 754-2008 decimal engine. The last option gives the cleanest build graph but is the largest upfront investment. A cgo bridge is the fastest path to compatibility.
+
+The `DecimalException` hierarchy must be replicated as Go error types that satisfy `objects.Object` so the VM can raise them through the normal exception path. The thread-local context maps naturally to a goroutine-local value stored in the `vm.Frame` chain.
+
+The `usedforsecurity` parameter is not present in `_decimal` (that belongs to `_hashlib`), so there is no FIPS concern here.

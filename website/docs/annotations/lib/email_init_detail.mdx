@@ -1,0 +1,90 @@
+---
+title: Lib/email/__init__.py
+description: "email package init: message_from_string, message_from_bytes, message_from_file convenience wrappers that couple the parser with a policy object."
+cpython_path: Lib/email/__init__.py
+cpython_version: "3.14"
+lines: 75
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Lib/email/__init__.py`
+
+<CpyLink path="Lib/email/__init__.py" />
+
+`Lib/email/__init__.py` is the public entry point for the email package. It re-exports the
+four convenience functions (`message_from_string`, `message_from_bytes`, `message_from_file`,
+`message_from_binary_file`) that accept raw text or bytes and return a fully parsed `Message`
+or `EmailMessage` object. All parsing work is delegated to `email.parser.Parser` or
+`email.parser.BytesParser`; the init module itself adds no parsing logic.
+
+## Map
+
+| Lines | Symbol | Role |
+| ----- | ------ | ---- |
+| 1-10 | imports | Pull in `Parser`, `BytesParser` from `email.parser` |
+| 11-35 | `message_from_string` | Parse a `str`, return a `Message` |
+| 36-50 | `message_from_bytes` | Parse `bytes`, return a `Message` |
+| 51-65 | `message_from_file` | Parse an open text file object |
+| 66-75 | `message_from_binary_file` | Parse an open binary file object |
+
+## Reading
+
+### Entry-point wrappers
+
+Each function is a thin wrapper that constructs the appropriate parser class and calls its
+`parse` or `parsestr` method. The `policy` keyword argument is forwarded unchanged to the
+parser and ultimately stored on the resulting `Message` object.
+
+```python
+# CPython: Lib/email/__init__.py:11 message_from_string
+def message_from_string(s, _class=message.Message, *, policy=compat32):
+    from email.parser import Parser
+    return Parser(_class, policy=policy).parsestr(s)
+```
+
+```python
+# CPython: Lib/email/__init__.py:36 message_from_bytes
+def message_from_bytes(s, _class=message.Message, *, policy=compat32):
+    from email.parser import BytesParser
+    return BytesParser(_class, policy=policy).parsebytes(s)
+```
+
+The `_class` parameter is the default message class. Callers that want `EmailMessage`
+behaviour pass `_class=email.message.EmailMessage` together with an `EmailPolicy` instance.
+The default `_class=message.Message` together with `policy=compat32` preserves legacy
+behaviour.
+
+### Why deferred imports
+
+The `Parser` and `BytesParser` imports are deferred inside each function body rather than at
+module level. This prevents a circular import cycle: `email.__init__` is the package root,
+and `email.parser` itself imports from `email.message`, which imports from `email.policy`.
+Deferring the imports means the package root finishes loading before the sub-modules start
+resolving each other.
+
+### Policy forwarding
+
+The `policy` argument flows through without transformation:
+
+```python
+# CPython: Lib/email/__init__.py:51 message_from_file
+def message_from_file(fp, _class=message.Message, *, policy=compat32):
+    from email.parser import Parser
+    return Parser(_class, policy=policy).parse(fp)
+```
+
+The distinction between `Compat32` and `EmailPolicy` is therefore fully determined by the
+caller. The init module does not inspect the policy value.
+
+## gopy notes
+
+Not yet ported. The convenience wrappers can be thin Go functions once `email/parser` and
+`email/policy` are in place. The `_class` defaulting pattern maps naturally to a Go option
+struct or functional options.
+
+## CPython 3.14 changes
+
+No behavioural changes in 3.14. The module content is stable since Python 3.6 when
+`EmailMessage` and `EmailPolicy` were introduced.

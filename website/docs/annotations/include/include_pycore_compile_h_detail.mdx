@@ -1,0 +1,88 @@
+---
+title: Include/internal/pycore_compile.h
+description: "Compiler entry points, code-generation state, optimization flags, and doc-string cleaning"
+cpython_path: Include/internal/pycore_compile.h
+cpython_version: "3.14"
+lines: 80
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+This header exposes the internal API that `Python/compile.c` offers to the rest of the interpreter. The symbols here are not part of the stable ABI; they are consumed by `Python/ast_opt.c`, `Python/assemble.c`, and the `dis` / `compile` built-in modules. Embedders should use `Py_CompileString` instead.
+
+## Map
+
+| Lines | Symbol | Purpose |
+|-------|--------|---------|
+| 1-8 | guard + includes | Include guard, `pycore_ast.h`, `pycore_symtable.h` |
+| 9-22 | `_PyCompilerFlags` | Optimization level and future-feature bitmask |
+| 23-35 | `_PyCompile_CodeGenState` | Per-unit state threaded through code generation |
+| 36-42 | `_PyCompile_CodeGen` | Entry point: AST mod node to instruction list |
+| 43-50 | `_PyCompile_Assemble` | Entry point: instruction list to `PyCodeObject` |
+| 51-58 | `_PyCompile_ASTOptimize` | Constant folding and dead-branch elimination on AST |
+| 59-65 | `_PyCompile_CleanDoc` | Strip leading indent from docstring literals |
+| 66-72 | `_PyCompile_OptimizationLevel` | Query the effective `-O` level for a given flags word |
+| 73-80 | `_PyCompile_EnterScope` / `_PyCompile_ExitScope` | Scope push/pop helpers used by code-gen visitors |
+
+## Reading
+
+### Compiler entry points
+
+The public `compile()` built-in and `Py_CompileString` both eventually reach two internal functions. `_PyCompile_CodeGen` walks the AST and emits a linear sequence of `struct instr` records into a `_PyCompile_CodeGenState`. `_PyCompile_Assemble` takes that flat list, computes basic blocks, resolves jump targets, calculates stack depth, and writes the final `PyCodeObject`.
+
+```c
+// CPython: Include/internal/pycore_compile.h:36 _PyCompile_CodeGen
+PyObject *_PyCompile_CodeGen(
+    PyObject *ast,
+    PyObject *filename,
+    PyCompilerFlags *flags,
+    int optimize,
+    int compile_mode);
+```
+
+```c
+// CPython: Include/internal/pycore_compile.h:43 _PyCompile_Assemble
+PyCodeObject *_PyCompile_Assemble(
+    _PyCompile_CodeGenState *state,
+    PyObject *filename,
+    PyObject *instructions);
+```
+
+The split between the two passes is the boundary that the tier-2 optimizer crosses: the instruction list produced by `CodeGen` is inspectable before `Assemble` commits it to bytecode, which is where `_PyCompile_ASTOptimize` is also expected to run.
+
+### Compiler flags and optimization level
+
+`_PyCompilerFlags` holds two orthogonal concepts in a single struct: the `cf_flags` bitmask (which selects `__future__` features like `annotations` or `generator_stop`) and `cf_feature_version` (the minor version used to gate syntax). The optimization level is carried separately as an `int` argument to most entry points rather than being stored in the flags struct.
+
+```c
+// CPython: Include/internal/pycore_compile.h:9 _PyCompilerFlags
+typedef struct {
+    int cf_flags;
+    int cf_feature_version;
+} PyCompilerFlags;
+```
+
+`_PyCompile_OptimizationLevel` is a thin helper that maps the raw `int optimize` argument (values -1, 0, 1, 2) to the effective level, honoring the `-1` sentinel that means "inherit from the interpreter".
+
+### AST optimization and doc cleaning
+
+`_PyCompile_ASTOptimize` runs before `_PyCompile_CodeGen`. It performs constant folding on `BinOp`, `UnaryOp`, and `IfExp` nodes and eliminates `if False:` / `while False:` dead branches. It returns a new (or the same) `mod_ty` root; it does not mutate in place.
+
+```c
+// CPython: Include/internal/pycore_compile.h:51 _PyCompile_ASTOptimize
+mod_ty _PyCompile_ASTOptimize(
+    mod_ty mod,
+    PyObject *filename,
+    PyCompilerFlags *flags,
+    int optimize,
+    PyArena *arena);
+```
+
+`_PyCompile_CleanDoc` handles the `docstring` optimization flag. At `-O2` docstrings are replaced with `None`; at lower levels the leading indentation is stripped so that `inspect.cleandoc` is not needed at runtime. The function operates on a raw `PyObject *` string value extracted from a `Constant` AST node.
+
+## gopy notes
+
+Status: not yet ported.
+
+Planned package path: `compile` (the existing package in this repository). `_PyCompile_CodeGen` maps to the current `compiler.Compile` function. `_PyCompile_Assemble` maps to `flowgraph.Assemble` plus the existing `flowgraph_passes` and `flowgraph_stackdepth` files. `_PyCompile_ASTOptimize` has no equivalent yet; it is planned as `compile/astopt`.
