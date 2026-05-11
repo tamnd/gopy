@@ -1,0 +1,150 @@
+---
+title: Lib/datetime.py
+description: Pure-Python fallback for the _datetime C extension; implements timedelta, date, time, datetime, timezone, and the tzinfo base class.
+cpython_path: Lib/datetime.py
+cpython_version: "3.14"
+lines: 2700
+status: annotated
+ported_to: module/datetime/module.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Lib/datetime.py`
+
+<CpyLink path="Lib/datetime.py" />
+
+The pure-Python implementation of Python's date/time library. At the
+bottom of the file the module attempts to replace itself with the
+accelerated C module `_datetime`; under a normal CPython build the C
+module wins and this file is only consulted for reference or when the C
+extension is unavailable.
+
+The six public classes are `timedelta`, `date`, `time`, `datetime`,
+`timezone`, and `tzinfo`. `datetime` is a subclass of `date`. All
+instances are immutable. Arithmetic between `datetime` objects returns
+a `timedelta`; adding a `timedelta` to a `date` or `datetime` returns a
+new object of the same type.
+
+The module also covers the `fold` attribute (PEP 495) for disambiguating
+wall-clock times during DST transitions, and the aware/naive distinction:
+an instance is "aware" when its `tzinfo` attribute is not `None` and
+`tzinfo.utcoffset()` returns a non-`None` value.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Lib/datetime.py" lines="1-200">1-200</Cpy> | module constants, helper functions | `MAXYEAR`, `MINYEAR`, `_MAXORDINAL`; pure-Python helpers `_cmp`, `_days_in_month`, `_days_before_month`, `_days_before_year`, `_ymd2ord`, `_ord2ymd`. | `module/datetime/module.go` |
+| <Cpy path="Lib/datetime.py" lines="201-500">201-500</Cpy> | `timedelta` | Stores normalised `_days`, `_seconds`, `_microseconds`; arithmetic, comparisons, `total_seconds()`, `__repr__`, `__str__`. | `module/datetime/module.go` |
+| <Cpy path="Lib/datetime.py" lines="501-900">501-900</Cpy> | `date` | Gregorian date from year/month/day; `toordinal`/`fromordinal`; `today`; ISO calendar; `strftime`; arithmetic with `timedelta`. | `module/datetime/module.go` |
+| <Cpy path="Lib/datetime.py" lines="901-1100">901-1100</Cpy> | `tzinfo`, `timezone` | Abstract `tzinfo` base class; `timezone` is the concrete fixed-offset subclass with the `utc` singleton. | `module/datetime/module.go` |
+| <Cpy path="Lib/datetime.py" lines="1101-1500">1101-1500</Cpy> | `time` | Time-of-day with optional `tzinfo` and `fold`; `utcoffset`, `dst`, `tzname`; `isoformat`; aware/naive comparisons. | `module/datetime/module.go` |
+| <Cpy path="Lib/datetime.py" lines="1501-2500">1501-2500</Cpy> | `datetime` | Combines `date` and `time`; `now(tz)`, `utcnow`, `fromtimestamp`, `utcfromtimestamp`, `combine`, `fromisoformat`, `strptime`; full arithmetic. | `module/datetime/module.go` |
+| <Cpy path="Lib/datetime.py" lines="2501-2600">2501-2600</Cpy> | `_wrap_strftime`, `_strptime_datetime` | `strftime` percent-code expansion; `strptime` delegates to `_strptime._strptime_datetime`. | `module/datetime/module.go` |
+| <Cpy path="Lib/datetime.py" lines="2601-2700">2601-2700</Cpy> | C-module replacement block | `try: from _datetime import *` overwrites all names with C implementations when available. | `module/datetime/module.go` |
+
+## Reading
+
+### `timedelta` normalisation (lines 201 to 500)
+
+<CpyLink path="Lib/datetime.py" lines="201-500" />
+
+```python
+def __new__(cls, days=0, seconds=0, microseconds=0,
+            milliseconds=0, minutes=0, hours=0, weeks=0):
+    # Normalise to (days, seconds, microseconds)
+    d = s = us = 0
+    days    += weeks * 7
+    seconds += minutes * 60 + hours * 3600
+    microseconds += milliseconds * 1000
+
+    # us -> seconds carry
+    s, us = divmod(microseconds, 1000000)
+    seconds += s
+    # seconds -> days carry
+    d, s = divmod(seconds, 86400)
+    days += d
+    # Invariants: 0 <= s < 86400, 0 <= us < 1000000
+    if not (-999999999 <= days <= 999999999):
+        raise OverflowError("timedelta # of days is too large")
+    ...
+    self._days = days
+    self._seconds = s
+    self._microseconds = us
+    return self
+```
+
+The constructor reduces every keyword argument to three fields with
+strict invariants: `0 <= _seconds < 86400` and `0 <= _microseconds <
+1000000`. Negative durations are stored as negative `_days` combined
+with positive `_seconds`/`_microseconds` offsets, following the same
+sign convention that Python's `divmod` uses for negative dividends.
+`total_seconds()` reconstructs the float by `(self._days * 86400 +
+self._seconds) * 1e6 + self._microseconds) / 1e6`.
+
+### `date.toordinal` and `fromordinal` (lines 501 to 900)
+
+<CpyLink path="Lib/datetime.py" lines="501-900" />
+
+```python
+def _ymd2ord(year, month, day):
+    assert 1 <= month <= 12
+    dim = _days_in_month(year, month)
+    assert 1 <= day <= dim
+    return (_days_before_year(year)
+            + _days_before_month(year, month)
+            + day)
+
+def _days_before_year(year):
+    y = year - 1
+    return y*365 + y//4 - y//100 + y//400
+
+def _ord2ymd(n):
+    # n is the ordinal (days since year 1, Jan 1)
+    ...
+```
+
+The proleptic Gregorian calendar formula counts days before a year as
+`y*365 + y//4 - y//100 + y//400` where `y = year - 1`. This matches the
+ISO 8601 extrapolated Gregorian calendar. `_ord2ymd` inverts the
+computation using integer arithmetic and a 400-year cycle. `toordinal`
+calls `_ymd2ord`; `fromordinal` calls `_ord2ymd` and constructs a new
+`date`.
+
+### Aware vs naive `datetime` arithmetic (lines 1501 to 2500)
+
+<CpyLink path="Lib/datetime.py" lines="1501-2500" />
+
+```python
+def __sub__(self, other):
+    "Subtract two datetimes, or a datetime and a timedelta."
+    if isinstance(other, datetime):
+        delta = self._getstate() ...
+        # For aware datetimes, convert to UTC first
+        mytz = self.tzinfo
+        ottz = other.tzinfo
+        myoff = self.utcoffset()
+        otoff = other.utcoffset()
+        if myoff == otoff:
+            base_compare = True
+        else:
+            base_compare = myoff is None and otoff is None
+        if base_compare:
+            return timedelta(days=(self.toordinal() - other.toordinal()),
+                             seconds=..., microseconds=...)
+        if myoff is None or otoff is None:
+            raise TypeError("cannot mix naive and aware datetime objects")
+        # Both aware: subtract UTC offsets before differencing
+        ...
+    elif isinstance(other, timedelta):
+        return self + timedelta(-other.days, ...)
+```
+
+Subtracting two `datetime` objects returns a `timedelta`. When both
+instances are naive (no `tzinfo`) the subtraction is purely arithmetic.
+When both are aware, their UTC offsets are subtracted out before
+differencing so the result is always an absolute duration. Mixing naive
+and aware datetimes raises `TypeError`. The `fold` attribute is consulted
+only when a `tzinfo.fromutc` implementation uses it to resolve ambiguous
+wall-clock times; the subtraction operator itself does not touch `fold`.

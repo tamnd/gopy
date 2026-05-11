@@ -1,0 +1,212 @@
+---
+title: Python/ast.c
+description: AST validation and docstring extraction. _PyAST_Validate checks structural invariants after parse; _PyAST_GetDocString retrieves the leading string literal from a body.
+cpython_path: Python/ast.c
+cpython_version: "3.14"
+lines: 1091
+status: annotated
+ported_to: compile/ast_validate.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Python/ast.c`
+
+<CpyLink path="Python/ast.c" />
+
+AST validation and docstring extraction. `_PyAST_Validate` is called
+in debug builds after a successful parse to check invariants that the
+PEG grammar cannot express: legal constant types, valid expression
+contexts, unique keyword names in match patterns, and structural
+constraints on comprehensions, walrus targets, and starred expressions.
+`_PyAST_GetDocString` extracts the leading string literal from a
+function, class, or module body.
+
+The bulk of the file is a set of `validate_*` functions, one per AST
+node family. They recurse through the tree and return 0 on the first
+violation. This file has no effect on correct parses; it exists to
+catch manually-constructed or malformed AST trees early, with a clear
+error message instead of a crash in the compiler.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Python/ast.c" lines="14-51">14-51</Cpy> | recursion guard macro, forward declarations | `validate_stmts`, `validate_exprs`, `validate_patterns`, `validate_type_params` forward decls plus recursion depth check. | `compile/ast_validate.go` |
+| <Cpy path="Python/ast.c" lines="52-156">52-156</Cpy> | `validate_name`, `validate_comprehension`, `validate_keywords`, `validate_args`, `validate_arguments` | Structural validators for sub-nodes shared by multiple parent kinds. | `compile/ast_validate.go` |
+| <Cpy path="Python/ast.c" lines="157-208">157-208</Cpy> | `validate_constant` | Verify that `Constant.value` is one of the legal Python constant types. | `compile/ast_validate.go:validateConstant` |
+| <Cpy path="Python/ast.c" lines="210-416">210-416</Cpy> | `validate_expr` | Switch over all 37 expression kinds; checks context, targets, and structural invariants. | `compile/ast_validate.go:validateExpr` |
+| <Cpy path="Python/ast.c" lines="417-538">417-538</Cpy> | `ensure_literal_*` helpers | Validate that match-case constant patterns contain only literal values. | `compile/ast_validate.go` |
+| <Cpy path="Python/ast.c" lines="539-701">539-701</Cpy> | `validate_capture`, `validate_pattern`, `validate_pattern_match_value` | Match-statement pattern tree validation, including `star_ok` threading. | `compile/ast_validate.go:validatePattern` |
+| <Cpy path="Python/ast.c" lines="702-953">702-953</Cpy> | `validate_assignlist`, `validate_body`, `validate_stmt` | Statement validation: switch over all statement kinds, check targets, bodies, and handlers. | `compile/ast_validate.go:validateStmt` |
+| <Cpy path="Python/ast.c" lines="954-1045">954-1045</Cpy> | `validate_stmts`, `validate_exprs`, `validate_patterns`, `validate_typeparam`, `validate_type_params` | Sequence validators and PEP 695 type parameter validation. | `compile/ast_validate.go` |
+| <Cpy path="Python/ast.c" lines="1047-1075">1047-1075</Cpy> | `_PyAST_Validate` | Public entry. Dispatches on `mod` kind and drives the recursive walk. | `compile/ast_validate.go:Validate` |
+| <Cpy path="Python/ast.c" lines="1077-1091">1077-1091</Cpy> | `_PyAST_GetDocString` | Extract `body[0]` if it is `Expr(Constant(str))`. | `compile/codegen_stmt.go:getDocString` |
+
+## Reading
+
+### `validate_constant` (lines 157 to 208)
+
+<CpyLink path="Python/ast.c" lines="157-208" />
+
+```c
+static int
+validate_constant(struct validator *state, PyObject *value)
+{
+    if (value == Py_None || value == Py_Ellipsis) {
+        return 1;
+    }
+    if (PyBool_Check(value)) {
+        return 1;
+    }
+    if (PyLong_CheckExact(value) || PyFloat_CheckExact(value) ||
+        PyComplex_CheckExact(value) || PyUnicode_CheckExact(value) ||
+        PyBytes_CheckExact(value)) {
+        return 1;
+    }
+    if (PyTuple_CheckExact(value)) {
+        Py_ssize_t i;
+        for (i = 0; i < PyTuple_GET_SIZE(value); i++) {
+            if (!validate_constant(state, PyTuple_GET_ITEM(value, i))) {
+                return 0;
+            }
+        }
+        return 1;
+    }
+    if (PyFrozenSet_Check(value)) {
+        ...
+        return 1;
+    }
+    PyErr_Format(PyExc_SystemError,
+                 "invalid constant value %R", value);
+    return 0;
+}
+```
+
+The legal constant types are `None`, `Ellipsis`, `bool` (checked
+before `int` because `bool` is a subclass of `int`), `int`, `float`,
+`complex`, `str`, `bytes`, `tuple` (validated recursively), and
+`frozenset`. Any other type raises `SystemError` with the repr of the
+value. In practice this fires only when code constructs an `ast.Constant`
+node by hand with an illegal value; the PEG parser never emits a bad
+constant.
+
+### `validate_expr` (lines 210 to 416)
+
+<CpyLink path="Python/ast.c" lines="210-416" />
+
+The switch covers all `expr_ty` kinds. Key invariants enforced here:
+
+- `Starred` expressions are only valid in `Del` or `Store` context;
+  `Load` context is rejected.
+- `NamedExpr` (walrus) targets must have `Store` context; the target
+  must be a plain `Name`.
+- `Yield` and `YieldFrom` are structural; the function checks they
+  appear in a context that allows them (the context comes from the
+  enclosing `validate_stmt` call passing through the recursion).
+- `Lambda` bodies must be a single expression without a return
+  annotation; `validate_arguments` checks the argument defaults.
+- `IfExp` (ternary) validates all three sub-expressions.
+- Comprehension generators are checked via `validate_comprehension`,
+  which verifies the `is_async` flag and nested `if` guards.
+
+Most validation is structural rather than semantic. Type errors,
+undefined names, and scope issues are caught at runtime or by the
+symtable.
+
+### `validate_pattern` (lines 539 to 701)
+
+<CpyLink path="Python/ast.c" lines="539-701" />
+
+The match-statement pattern tree has its own validator separate from
+`validate_expr`. Notable checks:
+
+- `MatchMapping` patterns reject `**rest` where the rest variable is
+  named `_` (the anonymous wildcard). The keys list must not be empty
+  and must contain only literal or attribute-access patterns.
+- `MatchClass` rejects duplicate keyword argument names in the pattern.
+  For example, `case Foo(x=1, x=2)` is caught here.
+- `MatchSequence` threads a `star_ok` flag through its element list to
+  ensure at most one `MatchStar` appears; a second star raises
+  `SyntaxError`.
+- `MatchAs` with a `None` pattern is the wildcard (`case _`); any
+  other `MatchAs` must have a capture name.
+
+### `_PyAST_GetDocString` (lines 1077 to 1091)
+
+<CpyLink path="Python/ast.c" lines="1077-1091" />
+
+```c
+PyObject *
+_PyAST_GetDocString(asdl_stmt_seq *body)
+{
+    if (!asdl_seq_LEN(body)) {
+        return NULL;
+    }
+    stmt_ty st = asdl_seq_GET(body, 0);
+    if (st->kind != Expr_kind) {
+        return NULL;
+    }
+    expr_ty e = st->v.Expr.value;
+    if (e->kind == Constant_kind && PyUnicode_CheckExact(e->v.Constant.value)) {
+        return e->v.Constant.value;
+    }
+    return NULL;
+}
+```
+
+Checks that `body[0]` is an `Expr` statement containing a `Constant`
+with a `str` value. Returns the string object (borrowed reference) or
+`NULL`. Called from `compile.c` when entering a function or class body.
+If a docstring is found, the compiler emits it as the first `LOAD_CONST`
+and it becomes `co_consts[0]`. The `compile.c` caller is responsible
+for the `_PyCompile_CleanDoc` call that strips leading indentation.
+
+In the gopy port, `getDocString` lives in
+`compile/codegen_stmt.go` and is called from the function and class
+body emit path.
+
+### `_PyAST_Validate` (lines 1047 to 1075)
+
+<CpyLink path="Python/ast.c" lines="1047-1075" />
+
+The public entry. Initialises a `struct validator` (holds the current
+recursion depth and a reference to the thread state), then dispatches
+on `mod->kind`:
+
+- `Module_kind`: calls `validate_stmts` on the body.
+- `Interactive_kind`: calls `validate_stmts` on the body.
+- `Expression_kind`: calls `validate_expr` on the single expression.
+- `FunctionType_kind`: validates argument types and the return
+  annotation.
+
+Any `validate_*` call returning 0 surfaces a `SystemError` set by that
+call. The recursion guard inside each `validate_*` function raises
+`RecursionError` if the depth exceeds the interpreter's limit, matching
+the behaviour of the compiler and eval loop.
+
+In gopy, `Validate` in `compile/ast_validate.go` is gated by a build
+tag so production builds skip the pass entirely.
+
+## Notes for the gopy mirror
+
+- `compile/ast_validate.go` is the direct port of the `validate_*`
+  family. The file is compiled only under the `debugvalidate` build tag.
+- `compile/codegen_stmt.go:getDocString` mirrors `_PyAST_GetDocString`.
+  It returns the `*ast.Constant` value rather than a `PyObject *`.
+- The `ensure_literal_*` helpers are inlined into the pattern
+  validator in gopy rather than kept as separate functions.
+- `validate_typeparam` and `validate_type_params` (PEP 695) are
+  included in the port but only exercised when type-alias and
+  generic-function ASTs are present.
+
+## CPython 3.14 changes worth noting
+
+- PEP 695 (`validate_typeparam`, `validate_type_params`, lines
+  1003-1045) was added in 3.12 and extended in 3.13. It validates
+  `TypeVar`, `ParamSpec`, and `TypeVarTuple` nodes inside
+  `TypeAlias` and generic function/class definitions.
+- The `MatchClass` duplicate-keyword check (inside `validate_pattern`)
+  was added as a bug fix in 3.12 and is present in all later versions.
+- `validate_constant` gained `PyFrozenSet_Check` support in 3.10
+  alongside the `match` statement; the check is unchanged through 3.14.

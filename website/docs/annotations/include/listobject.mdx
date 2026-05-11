@@ -1,0 +1,120 @@
+---
+title: Include/listobject.h
+description: Public C API for Python list objects — allocation, element access, mutation, sorting, and type checks.
+cpython_path: Include/listobject.h
+cpython_version: "3.14"
+lines: 80
+status: annotated
+ported_to: objects/list.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Include/listobject.h`
+
+<CpyLink path="Include/listobject.h" />
+
+The public header for `list`. The implementation is a dynamic array of
+`PyObject *` pointers (`ob_item`) with an `ob_size` element count and an
+`allocated` capacity tracked separately. The distinction between the checked
+public API (`PyList_GetItem`, `PyList_SetItem`) and the unchecked macros
+(`PyList_GET_ITEM`, `PyList_SET_ITEM`) is the main complexity: the macro forms
+skip the bounds check and, in the case of `SET_ITEM`, skip the decref of the
+old value, which matters for initialization paths where the slot is still NULL.
+
+In gopy `list` is backed by a Go slice in `objects/list.go`. The unchecked
+macros collapse to direct slice indexing; the checked wrappers add a bounds
+check and return an error.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Include/listobject.h" lines="1-15">1-15</Cpy> | `PyList_Check` / `PyList_CheckExact` | Type-check macros; `PyList_Check` accepts subclasses. | `objects/list.go` |
+| <Cpy path="Include/listobject.h" lines="16-25">16-25</Cpy> | `PyList_New` | Allocate a list with `size` pre-allocated (NULL) slots. | `objects/list.go` |
+| <Cpy path="Include/listobject.h" lines="26-40">26-40</Cpy> | `PyList_Size` / `PyList_GET_SIZE` / `PyList_GetItem` / `PyList_GET_ITEM` | Length and element read; checked vs unchecked variants. | `objects/list.go` |
+| <Cpy path="Include/listobject.h" lines="41-55">41-55</Cpy> | `PyList_SetItem` / `PyList_SET_ITEM` / `PyList_Append` / `PyList_Insert` | Element write and insertion; `SetItem` steals a reference. | `objects/list.go` |
+| <Cpy path="Include/listobject.h" lines="56-70">56-70</Cpy> | `PyList_Sort` / `PyList_Reverse` / `PyList_AsTuple` | Sorting, reversal, and conversion to tuple. | `objects/list.go` |
+| <Cpy path="Include/listobject.h" lines="71-80">71-80</Cpy> | `PyList_GetSlice` / `PyList_SetSlice` | Slice read and write returning a new list or replacing a range. | `objects/list.go` |
+
+## Reading
+
+### `PyList_New` (lines 16 to 25)
+
+<CpyLink path="Include/listobject.h" lines="16-25" />
+
+```c
+PyAPI_FUNC(PyObject *) PyList_New(Py_ssize_t size);
+```
+
+`PyList_New(n)` allocates a list whose `ob_item` array has `n` slots, all
+initialized to `NULL`, and sets `ob_size = n`. The intended use is to
+pre-allocate a result list and then fill it with `PyList_SET_ITEM`:
+
+```c
+PyObject *result = PyList_New(n);
+for (Py_ssize_t i = 0; i < n; i++) {
+    PyObject *item = ...;   /* new reference */
+    PyList_SET_ITEM(result, i, item);  /* steals item; no prior value to decref */
+}
+```
+
+Passing `0` is valid and returns an empty list. The `allocated` capacity is
+set to `size` as well; subsequent `PyList_Append` calls will trigger a
+`realloc` because `ob_size == allocated`.
+
+In gopy `NewList(n int)` allocates a `[]Object` of length `n` with nil slots.
+
+### `SetItem` reference ownership (lines 41 to 55)
+
+<CpyLink path="Include/listobject.h" lines="41-55" />
+
+```c
+PyAPI_FUNC(int) PyList_SetItem(PyObject *list, Py_ssize_t index,
+                               PyObject *item);  /* steals reference to item */
+```
+
+`PyList_SetItem` decrefs the old element at `index` and stores `item` without
+incrementing its refcount (it "steals" the reference). If `index` is out of
+range it raises `IndexError`, decrefs `item`, and returns `-1`. Callers must
+not decref `item` after a successful call.
+
+`PyList_SET_ITEM` is the unchecked macro:
+
+```c
+#define PyList_SET_ITEM(op, i, v)  \
+    (((PyListObject *)(op))->ob_item[i] = (v))
+```
+
+It does not decref the old value and does not bounds-check. Using it on a
+slot that already holds a non-NULL pointer leaks the old object. The safe
+pattern is to use it only during initial fill (all slots are NULL) or when the
+caller explicitly decrefs the old value beforehand.
+
+`PyList_Append` is the ordinary add-one path. It increfs `item` (unlike
+`SetItem`) and grows the backing array as needed using a geometric growth
+factor.
+
+### `GET_ITEM` unchecked access (lines 26 to 40)
+
+<CpyLink path="Include/listobject.h" lines="26-40" />
+
+```c
+PyAPI_FUNC(PyObject *) PyList_GetItem(PyObject *list, Py_ssize_t index);
+
+#define PyList_GET_ITEM(op, i)  \
+    (((PyListObject *)(op))->ob_item[i])
+```
+
+`PyList_GetItem` returns a borrowed reference (no incref). If `index` is
+negative or out of range it raises `IndexError` and returns `NULL`. The
+returned reference is only valid while the list is not modified; any mutation
+(append, delete, sort) may reallocate `ob_item` and invalidate the pointer.
+
+`PyList_GET_ITEM` skips every check and is used in inner loops where the index
+is already known valid (e.g., inside `listobject.c`'s sort and
+`PyList_AsTuple`).
+
+`PyList_AsTuple` copies all elements into a new tuple with a single allocation.
+It uses `PyList_GET_ITEM` internally and increfs each element before storing
+it in the tuple.

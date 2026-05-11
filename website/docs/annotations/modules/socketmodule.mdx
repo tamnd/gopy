@@ -1,0 +1,222 @@
+---
+title: Modules/socketmodule.c
+description: The socket module — wraps POSIX and Windows socket APIs as PySocketSockObject with GIL-releasing I/O, timeout handling, and DNS resolution.
+cpython_path: Modules/socketmodule.c
+cpython_version: "3.14"
+lines: 6000
+status: annotated
+ported_to: module/socket/module.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Modules/socketmodule.c`
+
+<CpyLink path="Modules/socketmodule.c" />
+
+The `socket` module. One of the largest single files in CPython's `Modules/`
+directory; it covers both POSIX (`int` file-descriptor sockets) and Windows
+(`SOCKET` handle sockets) in a single source tree guarded by preprocessor
+conditionals.
+
+The central type is `PySocketSockObject`, a thin Python wrapper around a
+single OS socket. It stores the address family, socket type, protocol
+number, and the current timeout in seconds (`-1.0` for blocking, `0.0` for
+non-blocking). All I/O methods release the GIL while the OS call blocks so
+that Python threads can run concurrently.
+
+Module-level functions include the address-family constants (`AF_INET`,
+`AF_UNIX`, etc.), socket-type constants (`SOCK_STREAM`, `SOCK_DGRAM`, etc.),
+all DNS helpers (`gethostbyname`, `getaddrinfo`, `getnameinfo`), and the
+alternative constructors `socketpair`, `fromfd`, and `fromshare`.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Modules/socketmodule.c" lines="1-200">1-200</Cpy> | includes, platform ifdefs, `SOCKET` typedef, `socklen_t` compat | Platform abstraction macros and type aliases. | `module/socket/module.go:socketDefs` |
+| <Cpy path="Modules/socketmodule.c" lines="200-600">200-600</Cpy> | `PySocketSockObject`, `PySocketSock_New`, `PySocketSock_dealloc` | Socket wrapper type: `sock_fd`, `sock_family`, `sock_type`, `sock_proto`, `sock_timeout`. | `module/socket/module.go:SockObject` |
+| <Cpy path="Modules/socketmodule.c" lines="600-900">600-900</Cpy> | `sock_call`, `sock_call_ex`, `internal_select` | GIL-release helper that wraps any blocking syscall with timeout and retry logic. | `module/socket/module.go:sockCall` |
+| <Cpy path="Modules/socketmodule.c" lines="900-1500">900-1500</Cpy> | `sock_accept`, `sock_bind`, `sock_connect`, `sock_connect_ex`, `sock_listen`, `sock_getpeername`, `sock_getsockname` | Connection-management methods. `sock_connect` uses `sock_call` for timeout. | `module/socket/module.go:Accept` |
+| <Cpy path="Modules/socketmodule.c" lines="1500-2500">1500-2500</Cpy> | `sock_recv`, `sock_recv_into`, `sock_recvfrom`, `sock_recvfrom_into`, `sock_recvmsg`, `sock_recvmsg_into` | Receive family. All release the GIL while calling `recv`/`recvfrom`/`recvmsg`. | `module/socket/module.go:Recv` |
+| <Cpy path="Modules/socketmodule.c" lines="2500-3500">2500-3500</Cpy> | `sock_send`, `sock_sendall`, `sock_sendto`, `sock_sendmsg`, `sock_sendmsg_afalg` | Send family. `sock_sendall` retries until all bytes are delivered or an error occurs. | `module/socket/module.go:Send` |
+| <Cpy path="Modules/socketmodule.c" lines="3500-4000">3500-4000</Cpy> | `sock_setblocking`, `sock_settimeout`, `sock_gettimeout`, `sock_setsockopt`, `sock_getsockopt` | Socket option and timeout configuration. `settimeout(None)` restores blocking mode. | `module/socket/module.go:SetTimeout` |
+| <Cpy path="Modules/socketmodule.c" lines="4000-4800">4000-4800</Cpy> | `socket_gethostbyname`, `socket_getaddrinfo`, `socket_getnameinfo`, `socket_gethostbyaddr` | DNS resolution functions. `getaddrinfo` iterates the `addrinfo` linked list. | `module/socket/module.go:GetAddrInfo` |
+| <Cpy path="Modules/socketmodule.c" lines="4800-5400">4800-5400</Cpy> | `socket_socketpair`, `socket_fromfd`, `socket_fromshare`, `socket_dup` | Alternative constructors: create sockets from existing OS handles. | `module/socket/module.go:FromFd` |
+| <Cpy path="Modules/socketmodule.c" lines="5400-6000">5400-6000</Cpy> | `socket_methods` table, constant registrations, `PyInit_socket` | Module entry point. Registers all constants (`AF_*`, `SOCK_*`, `IPPROTO_*`, `SOL_*`). | `module/socket/module.go:Module` |
+
+## Reading
+
+### `PySocketSockObject` layout and `sock_call` GIL-release pattern (lines 200 to 900)
+
+<CpyLink path="Modules/socketmodule.c" lines="200-900" />
+
+```c
+typedef struct {
+    PyObject_HEAD
+    SOCKET_T    sock_fd;       /* OS socket descriptor */
+    int         sock_family;   /* AF_INET, AF_UNIX, ... */
+    int         sock_type;     /* SOCK_STREAM, SOCK_DGRAM, ... */
+    int         sock_proto;    /* IPPROTO_TCP, ... */
+    double      sock_timeout;  /* seconds; -1.0 = blocking, 0.0 = non-blocking */
+    PyObject   *weakreflist;
+} PySocketSockObject;
+```
+
+Every blocking I/O call goes through `sock_call`:
+
+```c
+static int
+sock_call_ex(PySocketSockObject *s,
+             int writing,
+             int (*func)(PySocketSockObject *, void *),
+             void *data,
+             int connect,
+             int *err,
+             _PyTime_t timeout)
+{
+    ...
+    do {
+        Py_BEGIN_ALLOW_THREADS
+        res = (*func)(s, data);  /* the actual syscall */
+        Py_END_ALLOW_THREADS
+
+        if (res) {
+            *err = GET_SOCK_ERROR;
+            if (*err != EINTR)
+                break;
+            /* EINTR: check for signals and retry */
+            if (PyErr_CheckSignals()) return -1;
+        }
+    } while (1);
+
+    if (!res) return 0;  /* success */
+
+    if (timeout > 0 && (*err == EWOULDBLOCK || *err == EAGAIN)) {
+        /* Non-blocking and no data yet: wait for readability/writability */
+        ...
+        res = internal_select(s, writing, timeout, connect);
+        ...
+    }
+    ...
+}
+```
+
+`internal_select` calls `select(2)` (or `poll(2)` when available) with the
+socket's timeout. After `select` returns, the syscall is retried.
+`Py_BEGIN_ALLOW_THREADS` / `Py_END_ALLOW_THREADS` wrap every OS call so
+that the GIL is dropped for the entire blocking period. All receive, send,
+accept, and connect methods are built on top of `sock_call`.
+
+### `sock_connect` timeout and retry logic (lines 900 to 1500)
+
+<CpyLink path="Modules/socketmodule.c" lines="900-1500" />
+
+`connect(2)` has unusual non-blocking semantics: it returns `EINPROGRESS`
+immediately, and the socket becomes writable once the connection is
+established or refused.
+
+```c
+static int
+sock_connect_impl(PySocketSockObject *s, void* Py_UNUSED(data))
+{
+    int err;
+    socklen_t size = sizeof(err);
+
+    /* After select reports writable, check for deferred error */
+    if (getsockopt(s->sock_fd, SOL_SOCKET, SO_ERROR, &err, &size)) {
+        /* getsockopt itself failed */
+        return 0;  /* let errno propagate */
+    }
+    if (err == EISCONN)
+        return 1;   /* success: already connected (Windows quirk) */
+    if (err != 0) {
+        errno = err;
+        return 0;
+    }
+    return 1;
+}
+
+static PyObject *
+sock_connect(PySocketSockObject *s, PyObject *addro)
+{
+    ...
+    res = PyObject_GetBuffer(addro, &pbuf, PyBUF_SIMPLE);
+    ...
+    if (s->sock_timeout > 0) {
+        /* Non-blocking connect: issue it once, wait for writability */
+        ...
+        res = sock_call_ex(s, 1, sock_connect_impl, NULL, 1, &err, s->sock_timeout);
+    } else {
+        Py_BEGIN_ALLOW_THREADS
+        res = connect(s->sock_fd, addr, addrlen);
+        Py_END_ALLOW_THREADS
+    }
+    ...
+}
+```
+
+On timeout, `sock_connect` raises `TimeoutError`. On immediate refusal,
+`ConnectionRefusedError` is raised. On `EINPROGRESS`, `sock_call_ex` enters
+the `internal_select` wait loop. The `connect=1` flag in the `sock_call_ex`
+call tells `internal_select` to wait for writability rather than readability.
+
+### `getaddrinfo` result iteration (lines 4000 to 4800)
+
+<CpyLink path="Modules/socketmodule.c" lines="4000-4800" />
+
+`socket.getaddrinfo` returns a list of 5-tuples, one per address returned
+by the OS `getaddrinfo(3)`:
+
+```c
+static PyObject *
+socket_getaddrinfo(PyObject *self, PyObject *args, PyObject *kwargs)
+{
+    struct addrinfo hints, *res, *res0 = NULL;
+    PyObject *ret = NULL;
+    ...
+    Py_BEGIN_ALLOW_THREADS
+    error = getaddrinfo(hostp, servp, &hints, &res0);
+    Py_END_ALLOW_THREADS
+    if (error) {
+        set_gaierror(error);
+        goto done;
+    }
+
+    ret = PyList_New(0);
+    for (res = res0; res; res = res->ai_next) {
+        PyObject *single = PyTuple_New(5);
+        /* (family, type, proto, canonname, sockaddr) */
+        PyTuple_SET_ITEM(single, 0, PyLong_FromLong(res->ai_family));
+        PyTuple_SET_ITEM(single, 1, PyLong_FromLong(res->ai_socktype));
+        PyTuple_SET_ITEM(single, 2, PyLong_FromLong(res->ai_protocol));
+        PyTuple_SET_ITEM(single, 3, PyUnicode_FromString(res->ai_canonname ?: ""));
+        PyTuple_SET_ITEM(single, 4, makesockaddr(-1, res->ai_addr,
+                                                  res->ai_addrlen,
+                                                  res->ai_protocol));
+        ...
+        PyList_Append(ret, single);
+    }
+done:
+    if (res0) freeaddrinfo(res0);
+    return ret;
+}
+```
+
+The GIL is released for the `getaddrinfo` call because DNS queries can
+block for seconds. `makesockaddr` converts the C `sockaddr` struct into
+a Python tuple: `(host, port)` for `AF_INET`, `(host, port, flowinfo,
+scope_id)` for `AF_INET6`, and a string path for `AF_UNIX`.
+
+`getnameinfo` is the reverse direction: takes a `(host, port)` tuple and
+returns `(hostname, service_name)`. It follows the same GIL-release pattern.
+
+## CPython 3.14 changes
+
+Python 3.11 added `socket.SO_DOMAIN`, `SO_PROTOCOL`, `SO_PEERSEC`, and
+several `TCP_*` constants on Linux. Python 3.12 added
+`socket.setblocking` as a preferred alias for `sock.settimeout(None)` /
+`sock.settimeout(0)`. The `sendmsg_afalg` path for Linux `AF_ALG` crypto
+sockets was added in 3.6 and is unchanged in 3.14. The `SOCK_CLOEXEC` flag
+is automatically set on all new sockets via `sock_cloexec` since 3.4 on
+platforms that support it.

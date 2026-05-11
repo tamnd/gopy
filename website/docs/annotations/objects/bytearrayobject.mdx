@@ -1,0 +1,177 @@
+---
+title: Objects/bytearrayobject.c
+description: Mutable byte buffer with over-allocated heap storage, front-deletion via ob_start offset, and buffer-protocol export tracking.
+cpython_path: Objects/bytearrayobject.c
+cpython_version: "3.14"
+lines: 3070
+status: annotated
+ported_to: objects/bytearray.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Objects/bytearrayobject.c`
+
+<CpyLink path="Objects/bytearrayobject.c" />
+
+`bytearray` is a mutable sequence of integers in the range 0-255. Its internal
+storage is a heap-allocated `char*` buffer (`ob_val`) that is kept separate
+from the `PyByteArrayObject` struct. Two extra fields track the buffer: `ob_alloc`
+holds the total capacity including the over-allocation headroom, and `ob_start`
+is a pointer into `ob_val` that may be advanced past the front of the buffer
+to implement cheap deletion from the beginning without copying. This is the
+same strategy used by `bytes` for slice operations.
+
+Mutations that would overflow the current capacity call `bytearray_resize`,
+which applies the same `newsize + (newsize >> 3) + (3 or 6)` formula as
+`list_resize`. While the buffer is exported via the buffer protocol
+(`ob_exports > 0`), all mutations that would reallocate the buffer raise
+`BufferError`. Reads and in-place modifications at fixed size are still
+permitted.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Objects/bytearrayobject.c" lines="1-100">1-100</Cpy> | `PyByteArray_FromStringAndSize`, `PyByteArray_FromObject` | Allocation from C buffer and from an arbitrary Python object. | `objects/bytearray.go:NewByteArray` |
+| <Cpy path="Objects/bytearrayobject.c" lines="100-300">100-300</Cpy> | `bytearray_resize`, `PyByteArray_Resize` | Over-allocated realloc; `ob_start` reset to `ob_val` on realloc. | `objects/bytearray.go:bytearrayResize` |
+| <Cpy path="Objects/bytearrayobject.c" lines="300-600">300-600</Cpy> | `bytearray_init` | Accepts `int` (zero-fill), `bytes`/`str` with encoding, or iterable of ints. | `objects/bytearray.go:bytearrayInit` |
+| <Cpy path="Objects/bytearrayobject.c" lines="600-900">600-900</Cpy> | `bytearray_getitem`, `bytearray_setitem`, `bytearray_delitem`, `bytearray_ass_subscript` | Index returns `int`; slice assignment handles overlap by copying through a temp buffer. | `objects/bytearray.go` |
+| <Cpy path="Objects/bytearrayobject.c" lines="900-1300">900-1300</Cpy> | `bytearray_append`, `bytearray_extend`, `bytearray_iadd`, `bytearray_insert` | Mutation methods; `bytearray_extend` accepts any bytes-like or iterable. | `objects/bytearray.go:bytearrayAppend` |
+| <Cpy path="Objects/bytearrayobject.c" lines="1300-1700">1300-1700</Cpy> | `bytearray_find`, `bytearray_index`, `bytearray_rfind`, `bytearray_rindex`, `bytearray_count` | Search via `_PyBytesLike_Find`; delegates to `Modules/_string.c`. | `objects/bytearray.go` |
+| <Cpy path="Objects/bytearrayobject.c" lines="1700-2100">1700-2100</Cpy> | `bytearray_replace`, `bytearray_split`, `bytearray_rsplit`, `bytearray_splitlines` | Replace and split; each returns a new `list` of `bytearray` objects. | `objects/bytearray.go` |
+| <Cpy path="Objects/bytearrayobject.c" lines="2100-2500">2100-2500</Cpy> | `bytearray_join`, `bytearray_strip`, `bytearray_lower`, `bytearray_upper`, `bytearray_translate` | Sequence join, whitespace strip, case conversion, byte translation table. | `objects/bytearray.go` |
+| <Cpy path="Objects/bytearrayobject.c" lines="2500-2800">2500-2800</Cpy> | `bytearray_getbuffer`, `bytearray_releasebuffer` | Buffer protocol; `ob_exports` tracks live views; realloc blocked while `ob_exports > 0`. | `objects/bytearray.go:bytearrayGetbuffer` |
+| <Cpy path="Objects/bytearrayobject.c" lines="2800-3070">2800-3070</Cpy> | `bytearray_repr`, `bytearray_dealloc`, `PyByteArray_Type` | Repr produces `bytearray(b'...')`; dealloc frees `ob_val`; type object. | `objects/bytearray.go:bytearrayRepr` |
+
+## Reading
+
+### Buffer layout and `bytearray_resize` (lines 100 to 300)
+
+<CpyLink path="Objects/bytearrayobject.c" lines="100-300" />
+
+The `PyByteArrayObject` layout has three storage-related fields:
+
+```c
+typedef struct {
+    PyObject_VAR_HEAD
+    Py_ssize_t ob_alloc;   /* How many bytes allocated in ob_val */
+    char *ob_val;          /* Physical start of the heap buffer */
+    char *ob_start;        /* Logical start (>= ob_val) */
+    Py_ssize_t ob_exports; /* How many buffer views are active */
+} PyByteArrayObject;
+```
+
+`ob_start` is a cursor into `ob_val`. Deleting bytes from the front advances
+`ob_start` without copying. Appending to the back may trigger a `realloc` of
+the `ob_val` block. After any `realloc`, `ob_start` must be reset to `ob_val`
+because the pointer into the old block is no longer valid. `bytearray_resize`
+handles this reset:
+
+```c
+int
+bytearray_resize(PyByteArrayObject *self, Py_ssize_t requested_size)
+{
+    Py_ssize_t alloc = ...;  /* over-allocation formula */
+    char *sval;
+    Py_ssize_t logical_offset = self->ob_start - self->ob_val;
+
+    if (logical_offset > 0) {
+        /* Shift content back to the front before realloc */
+        memmove(self->ob_val, self->ob_start, Py_SIZE(self));
+        self->ob_start = self->ob_val;
+    }
+    sval = (char *)PyObject_Realloc(self->ob_val, alloc);
+    ...
+    self->ob_val = sval;
+    self->ob_start = sval;
+    self->ob_alloc = alloc;
+    Py_SET_SIZE(self, requested_size);
+    return 0;
+}
+```
+
+The `memmove` step consolidates the buffer before `realloc` so that the
+resulting block starts at offset zero. This pays off when the buffer is
+frequently written to the front after `del ba[0]` calls.
+
+### Mutation methods (lines 900 to 1300)
+
+<CpyLink path="Objects/bytearrayobject.c" lines="900-1300" />
+
+`bytearray_append` is the simplest mutation:
+
+```c
+static PyObject *
+bytearray_append(PyByteArrayObject *self, PyObject *arg)
+{
+    int value;
+    if (!_getbytevalue(arg, &value))
+        return NULL;
+    if (bytearray_resize(self, Py_SIZE(self) + 1) < 0)
+        return NULL;
+    self->ob_start[Py_SIZE(self) - 1] = value;
+    Py_RETURN_NONE;
+}
+```
+
+`bytearray_extend` is more complex: it checks `isinstance(iterable, bytes)`,
+`isinstance(iterable, bytearray)`, and `PyObject_GetBuffer` to take a fast
+path before falling back to a full iterator loop. The fast path copies the
+source into the destination using `memcpy`.
+
+`bytearray_iadd` (the `+=` operator) delegates to `bytearray_extend` and
+returns `self`, allowing chained augmented assignments without allocating a
+new object.
+
+### Buffer protocol (lines 2500 to 2800)
+
+<CpyLink path="Objects/bytearrayobject.c" lines="2500-2800" />
+
+`bytearray_getbuffer` exposes the live buffer to external consumers via the
+`Py_buffer` protocol:
+
+```c
+static int
+bytearray_getbuffer(PyByteArrayObject *obj, Py_buffer *view, int flags)
+{
+    if (view == NULL) {
+        obj->ob_exports++;
+        return 0;
+    }
+    int ret = PyBuffer_FillInfo(view, (PyObject *)obj,
+                                PyByteArray_AS_STRING(obj),
+                                Py_SIZE(obj), 0, flags);
+    if (ret == 0)
+        obj->ob_exports++;
+    return ret;
+}
+```
+
+Each successful `getbuffer` call increments `ob_exports`. `bytearray_releasebuffer`
+decrements it. Any `bytearray_resize` call first checks `ob_exports`:
+
+```c
+if (self->ob_exports > 0 && requested_size != Py_SIZE(self)) {
+    PyErr_SetString(PyExc_BufferError,
+        "Existing exports of data: object cannot be re-sized");
+    return -1;
+}
+```
+
+In-place byte writes (e.g. `ba[0] = 42`) do not resize and are always
+permitted regardless of `ob_exports`.
+
+## gopy mirror
+
+`objects/bytearray.go`. The `ob_val`/`ob_start`/`ob_alloc` layout maps to
+Go fields `val []byte`, `start int`, `alloc int`. The resize formula is an
+exact port. Buffer export tracking is a plain `int32` counter guarded by the
+GIL in the same way as CPython. The bytes-searching helpers delegate to
+`strings.Index` and `bytes.Index`.
+
+## CPython 3.14 changes
+
+`bytearray` has been stable since 3.0. The `ob_start` offset trick was
+present in the original `bytearray` implementation (PEP 3137). No 3.14-specific
+changes affect the core buffer or mutation logic.

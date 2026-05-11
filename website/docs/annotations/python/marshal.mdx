@@ -1,0 +1,255 @@
+---
+title: Python/marshal.c
+description: Binary serialization for .pyc files. Handles write and read paths for all Python constants and code objects, with a reference-deduplication table.
+cpython_path: Python/marshal.c
+cpython_version: "3.14"
+lines: 2163
+status: annotated
+ported_to: marshal/
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Python/marshal.c`
+
+<CpyLink path="Python/marshal.c" />
+
+Binary serialization for `.pyc` files. Two directions: write (`w_*`) and
+read (`r_*`). Handles all Python constants: `None`, `bool`, `int`
+(arbitrary precision), `float` (binary IEEE 754 or decimal string
+fallback), `complex`, `bytes`, `str`, `tuple`, `list`, `dict`, `set`,
+`frozenset`, and code objects. The format is versioned (current version is
+4). A reference table (`w_ref` / `r_ref`) enables DAG de-duplication within
+a single file, so shared subtrees such as repeated constant tuples are
+stored once and back-referenced by index.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Python/marshal.c" lines="127-253">127-253</Cpy>   | `w_flush` / `w_reserve` / `w_string` / `w_short` / `w_long` / `w_pstring` / `w_short_pstring` | Core write primitives. | `marshal/marshal.go` |
+| <Cpy path="Python/marshal.c" lines="296-356">296-356</Cpy>   | `w_PyLong` | Write arbitrary-precision int using the digit array. | `marshal/marshal.go:writeLong` |
+| <Cpy path="Python/marshal.c" lines="357-378">357-378</Cpy>   | `w_float_bin` / `w_float_str` | Write double as IEEE 754 bytes or decimal string fallback. | `marshal/marshal.go:writeFloat` |
+| <Cpy path="Python/marshal.c" lines="380-434">380-434</Cpy>   | `w_ref` | Write-side reference table: map `PyObject *` to index. | `marshal/marshal.go:writeRef` |
+| <Cpy path="Python/marshal.c" lines="459-737">459-737</Cpy>   | `w_object` / `w_complex_object` | Main write dispatcher; covers all types by tag character. | `marshal/marshal.go:writeObject` |
+| <Cpy path="Python/marshal.c" lines="739-823">739-823</Cpy>   | `w_init_refs` / `w_clear_refs` / `PyMarshal_WriteLongToFile` / `PyMarshal_WriteObjectToFile` / `_PyMarshal_WriteObjectToString` | Public write API. | `marshal/marshal.go:WriteObjectToString` |
+| <Cpy path="Python/marshal.c" lines="824-1022">824-1022</Cpy> | `r_string` / `r_byte` / `r_short` / `r_long` / `r_long64` / `r_PyLong` / `r_float_bin` / `r_float_str` | Core read primitives. | `marshal/marshal.go:read*` |
+| <Cpy path="Python/marshal.c" lines="1107-1157">1107-1157</Cpy> | `r_ref_reserve` / `r_ref_insert` / `r_ref` | Read-side reference table. | `marshal/marshal.go:readRef` |
+| <Cpy path="Python/marshal.c" lines="1159-1731">1159-1731</Cpy> | `r_object` | Main read dispatcher; handles 30+ type tags. | `marshal/marshal.go:readObject` |
+| <Cpy path="Python/marshal.c" lines="1732-2163">1732-2163</Cpy> | `read_object` / `PyMarshal_ReadObjectFromFile` / `PyMarshal_ReadObjectFromString` / `PyMarshal_ReadLastObjectFromFile` | Public read API. | `marshal/marshal.go:ReadObjectFromString` |
+
+## Reading
+
+### Format versioning and type tags (lines 459 to 497)
+
+<CpyLink path="Python/marshal.c" lines="459-497" />
+
+```c
+static void
+w_object(PyObject *v, WFILE *p)
+{
+    ...
+    char flag = '\0';
+    char type;
+
+    if (p->depth > MAX_MARSHAL_STACK_DEPTH) {
+        p->error = WFERR_NESTEDTOODEEP;
+        return;
+    }
+    ...
+    if (v == NULL) {
+        type = TYPE_NULL;
+    }
+    else if (v == Py_None) {
+        type = TYPE_NONE;
+    }
+    else if (v == PyExc_StopIteration) {
+        type = TYPE_STOPITER;
+    }
+    else if (v == Py_Ellipsis) {
+        type = TYPE_ELLIPSIS;
+    }
+    else if (v == Py_False) {
+        type = TYPE_FALSE;
+    }
+    else if (v == Py_True) {
+        type = TYPE_TRUE;
+    }
+    else if (!w_ref(v, &flag, p)) {
+        w_complex_object(v, flag, p);
+    }
+```
+
+Each object is written as a one-byte type tag followed by its payload.
+Tags are printable ASCII characters: `'N'` for `None`, `'T'`/`'F'` for
+`True`/`False`, `'i'` for a 32-bit int, `'l'` for a long, `'s'` for a
+short byte string, `'t'` for an interned str, `'u'` for a general unicode
+string, `'C'` for a code object. When an object is entered into the
+write-side reference table, the constant `FLAG_REF` (0x80) is OR'd onto the
+tag byte, so the reader can distinguish a bare value from a referable one
+with a single bit test.
+
+### Reference table (lines 380 to 434 and 1107 to 1157)
+
+<CpyLink path="Python/marshal.c" lines="380-434" />
+
+```c
+static int
+w_ref(PyObject *v, char *flag, WFILE *p)
+{
+    if (p->version < 4 || p->hashtable == NULL) {
+        return 0; /* not writing object references */
+    }
+    /* if it has only one reference, it definitely isn't in the
+       temporary dict */
+    if (Py_REFCNT(v) == 1) {
+        return 0;
+    }
+
+    entry.me_key = v;
+    entry.me_value = (void *)(Py_ssize_t)-1; /* initially invalid */
+    if (_Py_hashtable_set(p->hashtable, v, &entry) < 0) {
+        p->error = WFERR_NOMEMORY;
+        return 0;
+    }
+    ...
+    if (index >= 0) {
+        /* write the back reference */
+        w_byte(TYPE_REF, p);
+        w_long(index, p);
+        return 1;
+    }
+    *flag |= FLAG_REF;
+    return 0;
+}
+```
+
+`w_ref` checks whether `v` already has a slot in the write-side hash table.
+On a hit it writes a `'r'` tag followed by the slot index. On a miss it
+reserves a slot and sets `*flag |= FLAG_REF` so the caller OR-encodes that
+bit into the type byte; the actual slot index is filled in after the object
+body is written. This lazy approach means forward self-references in mutable
+containers (a list that contains itself) are handled naturally.
+
+The read side mirrors this with `r_ref_reserve` (pre-allocate a slot before
+reading the body) and `r_ref_insert` (write the finished object into the
+slot afterwards). Pre-allocation enables circular structures to be
+reconstructed by nested `r_object` calls that reach back through the already
+reserved index.
+
+### Writing code objects (lines 620 to 700)
+
+<CpyLink path="Python/marshal.c" lines="620-700" />
+
+```c
+    else if (PyCode_Check(v)) {
+        PyCodeObject *co = (PyCodeObject *)v;
+        W_TYPE(TYPE_CODE, p);
+        w_long(co->co_argcount, p);
+        w_long(co->co_posonlyargcount, p);
+        w_long(co->co_kwonlyargcount, p);
+        w_long(co->co_stacksize, p);
+        w_long(co->co_flags, p);
+        w_object(co->co_code, p);          /* bytecode bytes */
+        w_object((PyObject *)co->co_consts, p);
+        w_object(co->co_names, p);
+        w_object(co->co_localsplusnames, p);
+        w_object(co->co_localspluskinds, p);
+        w_object(co->co_filename, p);
+        w_object(co->co_name, p);
+        w_object(co->co_qualname, p);
+        w_long(co->co_firstlineno, p);
+        w_object(co->co_linetable, p);
+        w_object(co->co_exceptiontable, p);
+    }
+```
+
+This field order is the canonical `.pyc` code object layout. The reader in
+`r_object` for tag `'C'` reads them back in exactly this sequence and passes
+them to `PyCode_New`. Anyone adding a code object field to CPython must
+update both sides atomically; the marshal version number is the only
+backward-compatibility gate. In gopy, `marshal/marshal.go` preserves this
+field order byte for byte so that `.pyc` files produced by CPython can be
+loaded by the Go runtime and vice versa.
+
+Fields added in 3.12 (`co_qualname`, `co_exceptiontable`) are present in
+3.14; no further changes since.
+
+### `r_object` dispatch (lines 1159 to 1731)
+
+<CpyLink path="Python/marshal.c" lines="1159-1731" />
+
+```c
+static PyObject *
+r_object(RFILE *p)
+{
+    ...
+    int type, flag;
+    unsigned char c = r_byte(p);
+    flag = c & FLAG_REF;
+    type = c & ~FLAG_REF;
+
+    switch (type) {
+    case TYPE_NULL:
+        ...
+    case TYPE_NONE:
+        retval = Py_None;
+        break;
+    ...
+    case TYPE_INT:
+        {
+            int32_t x = r_long(p);
+            retval = PyLong_FromLong(x);
+            R_REF(retval);
+        }
+        break;
+    ...
+    case TYPE_CODE:
+        {
+            int argcount;
+            ...
+            argcount = (int)r_long(p);
+            ...
+            retval = (PyObject *)PyCode_New(...);
+            R_REF(retval);
+        }
+        break;
+    ...
+    case TYPE_TUPLE:
+        {
+            n = r_long(p);
+            v = PyTuple_New(n);
+            R_REF(v);
+            for (int i = 0; i < n; i++) {
+                v2 = r_object(p);
+                PyTuple_SET_ITEM(v, i, v2);
+            }
+        }
+        break;
+```
+
+The read loop strips `FLAG_REF` from the tag, then dispatches. For types
+that can be referenced, `R_REF` pre-allocates the slot immediately after
+allocation so that recursive `r_object` calls can resolve the index before
+the body is complete. `'('` reads a tuple; `'['` reads a list; `'{'` reads
+a dict by alternating key/value `r_object` calls. String variants (`'s'`,
+`'t'`, `'u'`, `'a'`, `'z'`, `'Z'`) differ only in encoding and whether the
+result is interned. The `'C'` case reads all code object fields in the write
+order and calls `PyCode_New`.
+
+## Notes for the gopy mirror
+
+`marshal/marshal.go` preserves all tag constants byte for byte so that files
+written by CPython are readable by gopy. The Go reference table is a slice
+indexed by position rather than a hash table; indexing is safe because
+format version 4 always writes the index in order. The writer is reached
+from `importlib` when compiling a module to `.pyc`; the reader is called by
+`importlib._bootstrap_external.SourcelessFileLoader.get_code`.
+
+## CPython 3.14 changes worth noting
+
+Marshal version 4 has been stable since 3.4. Code object field order was
+updated in 3.12 to add `co_qualname` and `co_exceptiontable` (and to remove
+`co_varnames` / `co_nlocals` as separate fields in favour of
+`co_localsplusnames` / `co_localspluskinds`). 3.14 is unchanged from 3.12
+in this respect.

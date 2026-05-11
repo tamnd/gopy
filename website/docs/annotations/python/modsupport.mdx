@@ -1,0 +1,210 @@
+---
+title: Python/modsupport.c
+description: Module creation helpers (single-phase and multi-phase init), PyMethodDef registration, convenience namespace-population functions, Py_BuildValue format dispatch, and PyArg_UnpackTuple.
+cpython_path: Python/modsupport.c
+cpython_version: "3.14"
+lines: 600
+status: annotated
+ported_to: pythonrun/modsupport.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Python/modsupport.c`
+
+<CpyLink path="Python/modsupport.c" />
+
+The glue layer between the C extension ABI and the interpreter's module
+machinery. The file covers two distinct concerns: building module objects
+from a `PyModuleDef`, and building Python objects from C values.
+
+The first concern splits along two paths introduced by PEP 451. The legacy
+**single-phase** path is `PyModule_Create2`: it takes a `PyModuleDef`, calls
+`PyModule_NewObject` to allocate the module, walks the `PyMethodDef` array
+via `PyModule_AddFunctions`, and then calls the `m_traverse` / `m_clear` /
+`m_free` slots if present. The **multi-phase** path is
+`PyModule_FromDefAndSpec` / `PyModule_FromDefAndSpec2`: it receives a
+`PyModuleSpec` (the Python-level `importlib.machinery.ModuleSpec` object) and
+processes a `PyModuleDef_Slot[]` array, executing `Py_mod_create` and
+`Py_mod_exec` slots in order. Both paths converge on the same module dict.
+
+The second concern is `Py_BuildValue`, which constructs a Python object from
+a printf-style format string and a variable argument list. It is the inverse
+of `PyArg_ParseTuple`: where parsing converts Python objects to C values,
+building converts C values to Python objects. Format characters include
+integers (`i`, `l`, `k`, `L`), floats (`d`, `f`), strings (`s`, `y`, `z`,
+`u`), existing objects (`O`, `N`, `S`), and structural aggregates
+(`(...)` for tuples, `[...]` for lists, `{...}` for dicts). A format of
+`""` (empty) returns `Py_None`.
+
+`PyArg_UnpackTuple` rounds out the file. It provides positional-only
+argument unpacking without a format string: it just bounds-checks the
+tuple length and assigns object pointers to the caller's slots, making
+it the fastest option for functions that accept only a fixed number of
+Python objects.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Python/modsupport.c" lines="1-60">1-60</Cpy> | file header / `PyModule_Create2` | Allocate a module from a `PyModuleDef` (single-phase init). Sets name, doc, dict, and calls `PyModule_AddFunctions`. | `pythonrun/modsupport.go:ModuleCreate2` |
+| <Cpy path="Python/modsupport.c" lines="61-160">61-160</Cpy> | `PyModule_FromDefAndSpec` / `PyModule_FromDefAndSpec2` | Multi-phase init (PEP 451). Iterates `PyModuleDef_Slot[]`: runs `Py_mod_create` to get/build the module object, then `Py_mod_exec` slots in order. | `pythonrun/modsupport.go:ModuleFromDefAndSpec` |
+| <Cpy path="Python/modsupport.c" lines="161-240">161-240</Cpy> | `PyModule_AddFunctions` / `PyModule_AddFunctionToDict` | Walk a `PyMethodDef[]`, create `PyCFunction` objects, and insert them into the module dict. | `pythonrun/modsupport.go:ModuleAddFunctions` |
+| <Cpy path="Python/modsupport.c" lines="241-320">241-320</Cpy> | `PyModule_AddIntConstant` / `PyModule_AddStringConstant` / `PyModule_AddObjectRef` / `PyModule_Add` | Convenience helpers that call `PyDict_SetItemString` on the module dict after boxing the C value. | `pythonrun/modsupport.go:ModuleAddConstant` |
+| <Cpy path="Python/modsupport.c" lines="321-480">321-480</Cpy> | `Py_BuildValue` / `Py_VaBuildValue` / `do_mkvaltuple` / `do_mkdict` / `do_mklist` | Build a Python object from a format string + va_list. `do_mkvaltuple` handles `(...)`, `do_mkdict` handles `{...}`, `do_mklist` handles `[...]`. | `pythonrun/modsupport.go:BuildValue` |
+| <Cpy path="Python/modsupport.c" lines="481-540">481-540</Cpy> | `_Py_BuildValue_SizeT` / `_Py_VaBuildValue_SizeT` | Size-t variants of `Py_BuildValue` for platforms where `sizeof(size_t) != sizeof(int)`. | `pythonrun/modsupport.go:BuildValueSizeT` |
+| <Cpy path="Python/modsupport.c" lines="541-600">541-600</Cpy> | `PyArg_UnpackTuple` | Positional-only argument unpacking: checks `min <= nargs <= max` and writes object pointers into caller-supplied `PyObject **` slots. | `pythonrun/modsupport.go:ArgUnpackTuple` |
+
+## Reading
+
+### `PyModule_Create2` vs `PyModule_FromDefAndSpec` (lines 1 to 160)
+
+<CpyLink path="Python/modsupport.c" lines="1-160" />
+
+Single-phase init is the original extension module protocol. A module calls
+`PyModuleDef_Init` on its `PyModuleDef` to set the magic number, then
+declares a `PyInit_foo` function that returns `PyModule_Create(&def)`.
+The runtime calls `PyInit_foo`, receives the fully populated module object,
+and inserts it into `sys.modules`. There is no way for the init function to
+inspect the `ModuleSpec` or defer population.
+
+```c
+PyObject *
+PyModule_Create2(struct PyModuleDef *def, int module_api_version)
+{
+    ...
+    mod = _PyModule_CreateInitialized(def, module_api_version);
+    if (mod == NULL) return NULL;
+    if (def->m_methods != NULL) {
+        if (PyModule_AddFunctions(mod, def->m_methods) != 0) {
+            Py_DECREF(mod); return NULL;
+        }
+    }
+    if (def->m_doc != NULL) {
+        if (PyModule_SetDocString(mod, def->m_doc) != 0) {
+            Py_DECREF(mod); return NULL;
+        }
+    }
+    return mod;
+}
+```
+
+Multi-phase init (PEP 451, added in 3.5) lets the init function return the
+`PyModuleDef` itself (via `PyModuleDef_Init`) instead of a fully populated
+module. The import machinery then calls `PyModule_FromDefAndSpec2` with the
+spec, running each `PyModuleDef_Slot` in sequence. `Py_mod_create` (slot
+type 1) may return a pre-allocated module object (e.g. a heap type
+subclass); if absent, the runtime allocates one. `Py_mod_exec` slots
+(type 2) populate it and may raise exceptions. The spec is accessible from
+the init function via `PyModule_GetFilenameObject` and friends, which is why
+multi-phase init is required for namespace packages and for modules that
+embed their own `ModuleSpec`.
+
+In 3.14, `Py_mod_multiple_interpreters` (slot type 3) and
+`Py_mod_gil` (slot type 4) were added to advertise per-interpreter and
+GIL-free capability. `PyModule_FromDefAndSpec2` enforces that a module
+declaring `Py_MOD_PER_INTERPRETER_GIL_SUPPORTED` is not loaded into a
+sub-interpreter unless the interpreter was created with
+`Py_NEWINTERPRETER_ISOLATED`.
+
+### `Py_BuildValue` format dispatch (lines 321 to 480)
+
+<CpyLink path="Python/modsupport.c" lines="321-480" />
+
+`Py_BuildValue` is a thin wrapper that calls `_Py_VaBuildValue_SizeT` (or the
+`int`-sized variant) after opening a `va_list`. The real work is in an
+internal `do_mkvalue` function that dispatches on the current format
+character:
+
+```c
+static PyObject *
+do_mkvalue(const char **p_format, va_list *p_va, int flags)
+{
+    for (;;) {
+        switch (*(*p_format)++) {
+        case '(':  return do_mkvaltuple(p_format, p_va, ')', flags);
+        case '[':  return do_mklist(p_format, p_va, ']', flags);
+        case '{':  return do_mkdict(p_format, p_va, flags);
+        case 'b':
+        case 'h':
+        case 'i':  return PyLong_FromLong((long)va_arg(*p_va, int));
+        case 'l':  return PyLong_FromLong(va_arg(*p_va, long));
+        case 'd':  return PyFloat_FromDouble(va_arg(*p_va, double));
+        case 's':  {
+            const char *str = va_arg(*p_va, const char *);
+            return str ? PyUnicode_FromString(str) : (Py_INCREF(Py_None), Py_None);
+        }
+        case 'O':  {
+            PyObject *o = va_arg(*p_va, PyObject *);
+            Py_XINCREF(o);
+            return o;
+        }
+        case 'N':  return va_arg(*p_va, PyObject *);  /* no incref */
+        ...
+        }
+    }
+}
+```
+
+Key distinctions: `O` increments the reference count of the passed object
+(the caller retains its reference and `Py_BuildValue` also holds one);
+`N` steals the reference (caller must not decref). `S` calls `PyObject_Str`
+on its argument before inserting. For dict format `{s:O, s:O}`, the
+`do_mkdict` loop reads pairs of calls to `do_mkvalue`, the first for the
+key and the second for the value.
+
+An empty format string `""` short-circuits to return `Py_None`. A single
+format character returns a scalar. Anything else returns a tuple (the `(`
+is implied when there is more than one top-level format character and no
+explicit grouping).
+
+### `PyArg_UnpackTuple` (lines 541 to 600)
+
+<CpyLink path="Python/modsupport.c" lines="541-600" />
+
+```c
+int
+PyArg_UnpackTuple(PyObject *args, const char *name,
+                  Py_ssize_t min, Py_ssize_t max, ...)
+{
+    Py_ssize_t i, l;
+    PyObject **o;
+    va_list vargs;
+
+    l = PyTuple_GET_SIZE(args);
+    if (l < min || l > max) {
+        /* raise TypeError with an appropriate message */
+        ...
+        return 0;
+    }
+    va_start(vargs, max);
+    for (i = 0; i < l; i++) {
+        o = va_arg(vargs, PyObject **);
+        *o = PyTuple_GET_ITEM(args, i);
+    }
+    va_end(vargs);
+    return 1;
+}
+```
+
+No format string parsing, no type conversion. Each slot receives a borrowed
+reference to the positional argument at that index. This is the correct
+choice for functions like `__new__` or `__init__` overrides in C that accept
+only a known, fixed set of Python objects and will call `PyArg_ParseTuple`
+on them later, or for functions where argument validation is done by
+Argument Clinic.
+
+In gopy, `pythonrun/modsupport.go:ArgUnpackTuple` maps to this directly:
+it length-checks the tuple and populates `[]*objects.Object` slots from the
+caller's variadic list.
+
+## CPython 3.14 changes worth noting
+
+`Py_mod_gil` (slot type 4) is new in 3.14 as part of PEP 703 (no-GIL
+build). Extensions that declare `Py_MOD_GIL_NOT_USED` in this slot opt into
+running without the GIL in free-threaded builds. `PyModule_FromDefAndSpec2`
+rejects such modules in a GIL build unless
+`PYTHON_DISABLE_GIL=1`. `Py_BuildValue` is otherwise unchanged since 3.12.
+`PyModule_Add` (without the `Object`/`Ref` suffix) was added in 3.13 as a
+unified convenience that steals a reference; it replaces the pattern of
+calling `PyModule_AddObjectRef` followed by `Py_DECREF`.

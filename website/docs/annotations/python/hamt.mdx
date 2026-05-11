@@ -1,0 +1,211 @@
+---
+title: Python/hamt.c
+description: Hash Array Mapped Trie — the persistent functional map backing context variables.
+cpython_path: Python/hamt.c
+cpython_version: "3.14"
+lines: 1500
+status: annotated
+ported_to: objects/hamt.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Python/hamt.c`
+
+<CpyLink path="Python/hamt.c" />
+
+A persistent Hash Array Mapped Trie used exclusively by the context variable
+subsystem (`context.c`). Every mutation (`_PyHamt_Assoc`, `_PyHamt_Without`)
+returns a new root while leaving all existing roots valid. Old `PyContextObject`
+instances continue pointing at their original sub-tries; no copy of the full
+map is needed.
+
+The trie partitions a hash into 5-bit chunks, giving a branching factor of
+32. A node at depth `d` indexes on bits `[5d, 5d+4]` of the key hash. Three
+node types cover all cases:
+
+- `W_BitmapNode` — a sparse inner node. Stores a 32-bit bitmap and a flat
+  array of alternating keys and values (for leaf slots) or child pointers
+  (for sub-trie slots). `popcount(bitmap & mask)` gives the child index.
+- `W_ArrayNode` — a dense inner node used when all 32 slots are occupied;
+  stores a plain 32-element pointer array with no bitmap.
+- `W_CollisionNode` — a flat bucket holding all entries whose full hashes
+  collide.
+
+`_PyHamt_New` returns the global empty HAMT singleton (a `PyHamtObject` with
+a `NULL` root). Lookup, insert, and delete all start from `hamt->h_root` and
+recurse through the node hierarchy.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Python/hamt.c" lines="1-120">1-120</Cpy> | `W_BitmapNode` / `W_ArrayNode` / `W_CollisionNode` structs and type objects | Node-type definitions and `tp_*` slots. | `objects/hamt.go:BitmapNode` / `ArrayNode` / `CollisionNode` |
+| <Cpy path="Python/hamt.c" lines="121-280">121-280</Cpy> | `hamt_node_bitmap_new` / `hamt_node_array_new` / `hamt_node_collision_new` | Allocate a new node of each type. | `objects/hamt.go:newBitmapNode` etc. |
+| <Cpy path="Python/hamt.c" lines="281-560">281-560</Cpy> | `hamt_node_bitmap_assoc` / `hamt_node_array_assoc` / `hamt_node_collision_assoc` | Return a new node with a key-value pair inserted or updated; structural sharing with the old node. | `objects/hamt.go:bitmapAssoc` etc. |
+| <Cpy path="Python/hamt.c" lines="561-800">561-800</Cpy> | `hamt_node_bitmap_without` / `hamt_node_array_without` / `hamt_node_collision_without` | Return a new node with a key removed; may downgrade `W_ArrayNode` to `W_BitmapNode`. | `objects/hamt.go:bitmapWithout` etc. |
+| <Cpy path="Python/hamt.c" lines="801-950">801-950</Cpy> | `hamt_node_find` (all three node types) | Lookup with no allocation; returns `HAMT_FOUND`, `HAMT_NOT_FOUND`, or `HAMT_FOUND_DELETED`. | `objects/hamt.go:nodeFind` |
+| <Cpy path="Python/hamt.c" lines="951-1100">951-1100</Cpy> | `_PyHamt_New` / `_PyHamt_Assoc` / `_PyHamt_Without` / `_PyHamt_Find` | Public HAMT API; thin wrappers that call into the per-node-type recursive helpers. | `objects/hamt.go:New` / `Assoc` / `Without` / `Find` |
+| <Cpy path="Python/hamt.c" lines="1101-1300">1101-1300</Cpy> | `hamt_iterator_*` / `_PyHamt_NewIterator` | Depth-first stack-based iterator; three `tp_iternext` implementations, one per node type. | `objects/hamt.go:newIterator` |
+| <Cpy path="Python/hamt.c" lines="1301-1420">1301-1420</Cpy> | `PyHamt_Type` / `hamt_tp_*` slots | Python-visible type object and `__len__`, `__getitem__`, `__repr__`, GC traversal. | `objects/hamt.go:HamtType` |
+| <Cpy path="Python/hamt.c" lines="1421-1500">1421-1500</Cpy> | `_PyHamt_Dump` / `hamt_node_dump_*` | Debug ASCII tree dump; not called from production paths. | n/a |
+
+## Reading
+
+### Node-type trie structure (lines 1 to 280)
+
+<CpyLink path="Python/hamt.c" lines="1-280" />
+
+```c
+typedef struct {
+    PyObject_GC_HEAD
+    uint32_t        b_bitmap;
+    PyObject        *b_array[1];  /* key0, val0, key1, val1, ... or child ptr */
+} PyHamtNode_Bitmap;
+
+typedef struct {
+    PyObject_GC_HEAD
+    PyHamtNode      *a_array[32];
+} PyHamtNode_Array;
+
+typedef struct {
+    PyObject_GC_HEAD
+    Py_hash_t        c_hash;
+    Py_ssize_t       c_count;
+    PyObject        *c_array[1];  /* key0, val0, key1, val1, ... */
+} PyHamtNode_Collision;
+```
+
+`b_array` in a bitmap node is variable-length: the actual allocation is
+`sizeof(PyHamtNode_Bitmap) + (2 * popcount(b_bitmap) - 1) * sizeof(PyObject *)`.
+Leaf entries occupy two consecutive slots `(key, val)`; sub-trie entries
+occupy one slot holding a child node pointer. The two kinds are
+distinguished by the bitmap alone: if the bit for a slot is set and the
+corresponding entry is a key (not a node), it is a leaf; otherwise it is a
+sub-trie. In practice the code uses a separate "node bitmap" and a "value
+bitmap" pair in some node variants, but the 3.14 implementation collapses
+this to a single bitmap with a sign convention for sub-trie slots.
+
+`W_ArrayNode` is created when a bitmap node overflows past 16 entries. It
+holds exactly 32 slots and needs no bitmap: index equals `(hash >> (5*depth))
+& 0x1f` directly.
+
+### `_PyHamt_Assoc` — bitmap update and node split (lines 281 to 560)
+
+<CpyLink path="Python/hamt.c" lines="281-560" />
+
+```c
+static hamt_node_assoc_t
+hamt_node_bitmap_assoc(PyHamtNode_Bitmap *self,
+                       uint32_t shift, Py_hash_t hash,
+                       PyObject *key, PyObject *val,
+                       int *added_leaf)
+{
+    uint32_t bit = hamt_bitpos(hash, shift);
+    uint32_t idx = hamt_bitindex(self->b_bitmap, bit);
+
+    if (self->b_bitmap & bit) {
+        /* slot exists */
+        PyObject *key_or_node = self->b_array[2 * idx];
+        if (IS_BITMAP_NODE(key_or_node)) {
+            /* recurse into child node */
+            ...
+        }
+        /* leaf: compare keys */
+        int cmp = PyObject_RichCompareBool(key_or_node, key, Py_EQ);
+        if (cmp > 0) {
+            /* same key: replace value */
+            return hamt_node_bitmap_new_copy_assoc(self, 2*idx+1, val);
+        }
+        /* collision at this level: push both into a new sub-node */
+        ...
+    } else {
+        /* new slot: insert */
+        ...
+    }
+}
+```
+
+`hamt_bitpos` isolates the 5-bit chunk at the current depth:
+`1u << ((hash >> shift) & 0x1f)`. `hamt_bitindex` counts set bits below that
+position: `__builtin_popcount(bitmap & (bit - 1))`. Together they give the
+array index in O(1).
+
+When two keys map to the same 5-bit chunk at the same depth, the code creates
+a new deeper bitmap node containing both. When two keys have identical full
+hashes a `W_CollisionNode` is created instead. Either way the old bitmap node
+is never modified; a new one is allocated with the updated slot.
+
+### `_PyHamt_Find` (lines 801 to 950)
+
+<CpyLink path="Python/hamt.c" lines="801-950" />
+
+```c
+static int
+hamt_node_bitmap_find(PyHamtNode_Bitmap *self,
+                      uint32_t shift, Py_hash_t hash,
+                      PyObject *key, PyObject **val)
+{
+    uint32_t bit = hamt_bitpos(hash, shift);
+    if (!(self->b_bitmap & bit)) {
+        return HAMT_NOT_FOUND;
+    }
+    uint32_t idx = hamt_bitindex(self->b_bitmap, bit);
+    PyObject *key_or_node = self->b_array[2 * idx];
+    if (IS_BITMAP_NODE(key_or_node)) {
+        return hamt_node_find(key_or_node, shift + 5, hash, key, val);
+    }
+    int cmp = PyObject_RichCompareBool(key_or_node, key, Py_EQ);
+    if (cmp > 0) {
+        *val = self->b_array[2 * idx + 1];
+        return HAMT_FOUND;
+    }
+    return HAMT_NOT_FOUND;
+}
+```
+
+Lookup allocates nothing. Each level shifts the hash by 5 more bits and
+recurses until either a leaf matches, a child node is entered, or a missing
+bitmap bit gives `HAMT_NOT_FOUND`. Worst case depth is `ceil(64/5) = 13`
+for a 64-bit hash. Collision nodes do a linear scan over `c_array` at the
+bottom.
+
+### Iteration (lines 1101 to 1300)
+
+<CpyLink path="Python/hamt.c" lines="1101-1300" />
+
+The iterator keeps a fixed-size stack of `(node, index)` pairs. Each call to
+`tp_iternext` advances the index on the top frame; when a frame is exhausted
+it is popped. When a sub-trie pointer is found, a new frame is pushed for that
+child. Leaf entries yield a `(key, val)` pair to the caller.
+
+```c
+typedef struct {
+    PyObject_HEAD
+    PyObject      **hi_stack[_Py_HAMT_MAX_TREE_DEPTH];
+    Py_ssize_t      hi_index[_Py_HAMT_MAX_TREE_DEPTH];
+    uint8_t         hi_depth;
+    bitmask_t       hi_bitmap[_Py_HAMT_MAX_TREE_DEPTH];
+    PyHamtIteratorState hi_state;
+} PyHamtIteratorObject;
+```
+
+`_Py_HAMT_MAX_TREE_DEPTH` is 7 (covers 32-bit hashes; 64-bit builds use 14).
+The iterator holds strong references to each node on the stack so the trie
+cannot be freed mid-iteration even if the top-level `PyHamtObject` is
+collected.
+
+## Notes for the gopy mirror
+
+`objects/hamt.go` ports all three node types as Go structs. The bitmap
+manipulation (`bitpos`, `bitindex`) is a direct translation of the C macros.
+`PyObject_RichCompareBool` key comparisons are replaced by the `Equal` method
+on `objects.Object`. GC traversal (`tp_traverse`) maps to Go's garbage
+collector, so explicit visit functions are not needed.
+
+## CPython 3.14 changes worth noting
+
+The HAMT implementation has been stable since its introduction in 3.7.3 for
+PEP 567. In 3.14 there are no structural changes; the free-threaded build
+(PEP 703) does not require locking on HAMT nodes because all mutation
+produces new nodes rather than modifying in place.

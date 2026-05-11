@@ -1,0 +1,163 @@
+---
+title: Include/internal/pycore_gc.h
+description: PyGC_Head doubly-linked list node, _gc_runtime_state generations, and the track/untrack/finalize helpers.
+cpython_path: Include/internal/pycore_gc.h
+cpython_version: "3.14"
+lines: 349
+status: annotated
+ported_to: objects/gc.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Include/internal/pycore_gc.h`
+
+<CpyLink path="Include/internal/pycore_gc.h" />
+
+The private GC ABI. Every GC-tracked Python object carries a
+`PyGC_Head` node prepended to its allocation so the cyclic GC can
+walk all live objects without a separate tracking data structure.
+This header defines that node, the per-interpreter generation state,
+and the inline helpers that the allocator and the eval loop use to
+track and untrack objects.
+
+The cyclic collector itself lives in `Modules/gcmodule.c`.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Include/internal/pycore_gc.h" lines="15-55">15-55</Cpy> | `PyGC_Head` struct + `_PyGCHead_*` accessors | Two-pointer doubly-linked list node; `gc_next` low bits carry mark flags. | `objects/gc.go` |
+| <Cpy path="Include/internal/pycore_gc.h" lines="56-80">56-80</Cpy> | `_Py_AS_GC` / `_Py_FROM_GC` | Cast between `PyObject *` and `PyGC_Head *` by subtracting/adding `sizeof(PyGC_Head)`. | `objects/gc.go` |
+| <Cpy path="Include/internal/pycore_gc.h" lines="81-130">81-130</Cpy> | `struct _gc_runtime_state` | Per-interpreter GC state: generation lists, counts, thresholds, `collecting` flag, `garbage` list. | `objects/gc.go` |
+| <Cpy path="Include/internal/pycore_gc.h" lines="131-180">131-180</Cpy> | `_PyObject_GC_IS_TRACKED` / `_PyObject_GC_TRACK` / `_PyObject_GC_UNTRACK` | Add/remove an object from generation 0; assert that the object has a `tp_traverse`. | `objects/gc.go` |
+| <Cpy path="Include/internal/pycore_gc.h" lines="181-240">181-240</Cpy> | `_PyGC_FINALIZED` / `_PyGC_SET_FINALIZED` / `_PyGC_UNREACHABLE` | Mark bits packed into the low two bits of `gc_prev`. | `objects/gc.go` |
+| <Cpy path="Include/internal/pycore_gc.h" lines="241-349">241-349</Cpy> | `_PyGC_generation0` / `_PyObject_GC_New` / `_PyObject_GC_NewVar` / `PyObject_GC_Del` | Allocator wrappers that prepend `PyGC_Head` and call `_PyObject_GC_TRACK`. | `objects/gc.go` |
+
+## Reading
+
+### `PyGC_Head` layout and `_Py_AS_GC` (lines 15 to 80)
+
+<CpyLink path="Include/internal/pycore_gc.h" lines="15-80" />
+
+```c
+/* Lowest two bits of gc_next / gc_prev are used as flags, so the
+   pointers are always to 4-byte-aligned memory. */
+typedef struct {
+    uintptr_t _gc_next;   /* tagged pointer to next node  (or ref count during collection) */
+    uintptr_t _gc_prev;   /* tagged pointer to prev node  (or mark bits during collection) */
+} PyGC_Head;
+
+#define _PyGCHead_NEXT(g)    ((PyGC_Head *)(g)->_gc_next)
+#define _PyGCHead_PREV(g)    ((PyGC_Head *)((g)->_gc_prev & ~3))
+#define _PyGCHead_SET_NEXT(g, p) ((g)->_gc_next = (uintptr_t)(p))
+#define _PyGCHead_SET_PREV(g, p) \
+    ((g)->_gc_prev = ((g)->_gc_prev & 3) | (uintptr_t)(p))
+```
+
+The `PyGC_Head` sits immediately *before* the `PyObject` in memory.
+`_Py_AS_GC(op)` casts a `PyObject *` to `PyGC_Head *` by subtracting
+`sizeof(PyGC_Head)` bytes:
+
+```c
+#define _Py_AS_GC(op) ((PyGC_Head *)(op) - 1)
+#define _Py_FROM_GC(g) ((PyObject *)((PyGC_Head *)(g) + 1))
+```
+
+The low two bits of `_gc_prev` are used as mark flags:
+bit 0 is `_PyGC_PREV_MASK_FINALIZED` (object has been finalized),
+bit 1 is `_PyGC_PREV_MASK_COLLECTING` (object is in the unreachable
+set during this collection). Because all `PyGC_Head` pointers are
+aligned to at least 4 bytes the flag packing is safe on all supported
+platforms. During collection `_gc_next` is repurposed to hold a
+temporary reference count, which is why the field is `uintptr_t`
+rather than a pointer type.
+
+In gopy, `objects/gc.go` defines `GCHead` with identical `Next`/`Prev`
+fields and the same flag constants. Because Go's GC handles cycles,
+`_Py_AS_GC` / `_Py_FROM_GC` and the list manipulation are present only
+for the small number of CPython C extensions that inspect the GC list
+directly.
+
+### GC generation lists (lines 81 to 130)
+
+<CpyLink path="Include/internal/pycore_gc.h" lines="81-130" />
+
+```c
+struct gc_generation {
+    PyGC_Head head;      /* sentinel node for the doubly-linked list */
+    int threshold;       /* collection threshold (object count) */
+    int count;           /* number of tracked objects in this generation */
+};
+
+struct _gc_runtime_state {
+    PyObject *trash_delete_later;
+    uintptr_t trash_delete_nesting;
+
+    int enabled;
+    int debug;
+    struct gc_generation generations[NUM_GENERATIONS];  /* 0, 1, 2 */
+    PyGC_Head *generation0;   /* fast pointer to generations[0].head */
+    struct gc_generation permanent_generation;
+    PyObject *garbage;        /* weakref finalizers list */
+    PyObject *callbacks;      /* gc.callbacks list */
+    Py_ssize_t long_lived_total;
+    Py_ssize_t long_lived_pending;
+    int collecting;
+};
+```
+
+Three generations (0, 1, 2) follow the classic tri-color scheme.
+New objects are inserted into generation 0; surviving a collection
+promotes an object to the next generation. `threshold` is the number
+of new allocations (gen 0) or collection events (gen 1/2) that trigger
+a collection of that generation. Defaults are 700/10/10.
+
+`permanent_generation` holds immortal objects (singletons, interned
+strings) that are never collected; this avoids scanning them on every
+pass.
+
+### Track/untrack helpers (lines 131 to 180)
+
+<CpyLink path="Include/internal/pycore_gc.h" lines="131-180" />
+
+```c
+static inline int
+_PyObject_GC_IS_TRACKED(PyObject *op)
+{
+    PyGC_Head *gc = _Py_AS_GC(op);
+    return (gc->_gc_next != 0);
+}
+
+static inline void
+_PyObject_GC_TRACK(PyObject *op)
+{
+    assert(Py_TYPE(op)->tp_traverse != NULL);
+    PyGC_Head *gc = _Py_AS_GC(op);
+    assert(gc->_gc_next == 0);  /* not already tracked */
+    PyInterpreterState *interp = _PyInterpreterState_GET();
+    PyGC_Head *generation0 = interp->gc.generation0;
+    PyGC_Head *last = _PyGCHead_PREV(generation0);
+    _PyGCHead_SET_NEXT(last, gc);
+    _PyGCHead_SET_PREV(gc, last);
+    _PyGCHead_SET_NEXT(gc, generation0);
+    _PyGCHead_SET_PREV(generation0, gc);
+    interp->gc.generations[0].count++;
+}
+```
+
+`_PyObject_GC_TRACK` appends the object's `PyGC_Head` node to the
+tail of generation 0's circular doubly-linked list. The sentinel node
+(`generation0`) acts as both head and tail so insertion is O(1) without
+a null check. The assert on `tp_traverse` enforces that only objects
+with a traverse slot may be tracked; tracking an object without
+`tp_traverse` would cause the collector to silently miss references.
+
+`_PyObject_GC_UNTRACK` is the reverse: it splices the node out of
+whatever generation list it currently lives in and zeroes `_gc_next` to
+signal "not tracked".
+
+In gopy, these calls are no-ops because Go's garbage collector handles
+reference cycles. The `IS_TRACKED` predicate is preserved and always
+returns `false` so that Python-level `gc.is_tracked()` remains callable
+without panicking.

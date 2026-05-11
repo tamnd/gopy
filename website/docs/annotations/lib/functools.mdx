@@ -1,0 +1,143 @@
+---
+title: Lib/functools.py
+description: Pure-Python tools for higher-order functions; wraps the _functools C extension and adds total_ordering, singledispatch, and cached_property.
+cpython_path: Lib/functools.py
+cpython_version: "3.14"
+lines: 1165
+status: annotated
+ported_to: stdlib/functools.py
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Lib/functools.py`
+
+<CpyLink path="Lib/functools.py" />
+
+The pure-Python complement to `Modules/_functoolsmodule.c`. It imports
+and re-exports the accelerated implementations of `reduce`, `partial`,
+`Placeholder`, `_lru_cache_wrapper`, and `cmp_to_key` from the C
+extension when available, and provides Python fallbacks for the rest.
+Everything in `__all__` is public: `update_wrapper`, `wraps`, `WRAPPER_ASSIGNMENTS`,
+`WRAPPER_UPDATES`, `total_ordering`, `cache`, `cmp_to_key`, `lru_cache`,
+`reduce`, `partial`, `partialmethod`, `singledispatch`,
+`singledispatchmethod`, `cached_property`, and `Placeholder`.
+
+In CPython 3.14, `WRAPPER_ASSIGNMENTS` gained `__annotate__` and
+`__type_params__` (PEP 649 deferred annotations). `singledispatch`
+switched from `__annotations__` to `annotationlib.Format.FORWARDREF`
+for annotation-driven registration.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Lib/functools.py" lines="32-77">32-77</Cpy> | `WRAPPER_ASSIGNMENTS`, `update_wrapper`, `wraps` | Copy name/doc/dict from wrapped to wrapper; the `wraps` decorator is `partial(update_wrapper, ...)`. | `stdlib/functools.py` |
+| <Cpy path="Lib/functools.py" lines="89-199">89-199</Cpy> | `_gt_from_lt` … `_convert`, `total_ordering` | Twelve fill-in comparison helpers and the class decorator that injects them. | `stdlib/functools.py` |
+| <Cpy path="Lib/functools.py" lines="206-228">206-228</Cpy> | `cmp_to_key` | Wraps a two-argument comparator into a key object; C override at line 225. | `stdlib/functools.py` |
+| <Cpy path="Lib/functools.py" lines="273-440">273-440</Cpy> | `_PlaceholderType`, `Placeholder`, `partial` | Partial application with positional placeholder support; C override at line 437. | `stdlib/functools.py` |
+| <Cpy path="Lib/functools.py" lines="443-514">443-514</Cpy> | `partialmethod` | Descriptor variant of `partial` for use inside class bodies. | `stdlib/functools.py` |
+| <Cpy path="Lib/functools.py" lines="520-728">520-728</Cpy> | `_make_key`, `lru_cache`, `_lru_cache_wrapper`, `cache` | LRU cache and its unbounded alias; Python implementation used when C extension missing. | `stdlib/functools.py` |
+| <Cpy path="Lib/functools.py" lines="735-991">735-991</Cpy> | `_c3_merge`, `_c3_mro`, `_compose_mro`, `_find_impl`, `singledispatch` | Single-dispatch infrastructure: C3 MRO computation, ABC-aware dispatch table, and the decorator itself. | `stdlib/functools.py` |
+| <Cpy path="Lib/functools.py" lines="994-1086">994-1086</Cpy> | `singledispatchmethod`, `_singledispatchmethod_get` | Descriptor version of `singledispatch` for methods; `__get__` returns a bound helper. | `stdlib/functools.py` |
+| <Cpy path="Lib/functools.py" lines="1094-1137">1094-1137</Cpy> | `cached_property` | Non-data descriptor that computes on first access and stores the result in the instance `__dict__`. | `stdlib/functools.py` |
+
+## Reading
+
+### `total_ordering` (lines 89 to 199)
+
+<CpyLink path="Lib/functools.py" lines="89-199" />
+
+```python
+_convert = {
+    '__lt__': [('__gt__', _gt_from_lt),
+               ('__le__', _le_from_lt),
+               ('__ge__', _ge_from_lt)],
+    ...
+}
+
+def total_ordering(cls):
+    roots = {op for op in _convert
+             if getattr(cls, op, None) is not getattr(object, op, None)}
+    if not roots:
+        raise ValueError('must define at least one ordering operation: < > <= >=')
+    root = max(roots)   # prefer __lt__ to __le__ to __gt__ to __ge__
+    for opname, opfunc in _convert[root]:
+        if opname not in roots:
+            opfunc.__name__ = opname
+            setattr(cls, opname, opfunc)
+    return cls
+```
+
+The decorator scans the class for user-defined comparison methods (those
+not equal to `object`'s default implementation). It picks one as the
+`root` by string comparison, which gives the documented priority
+`__lt__ > __le__ > __gt__ > __ge__`. For each missing method it injects
+one of the twelve private helpers (`_gt_from_lt`, `_le_from_lt`, etc.)
+that call `type(self).__root__(self, other)` directly to avoid infinite
+recursion through the operator dispatch fallback path.
+
+### `singledispatch` dispatch table and MRO walk (lines 735 to 991)
+
+<CpyLink path="Lib/functools.py" lines="735-991" />
+
+```python
+def singledispatch(func):
+    registry = {}
+    dispatch_cache = weakref.WeakKeyDictionary()
+    cache_token = None
+
+    def dispatch(cls):
+        nonlocal cache_token
+        if cache_token is not None:
+            current_token = get_cache_token()
+            if cache_token != current_token:
+                dispatch_cache.clear()
+                cache_token = current_token
+        try:
+            impl = dispatch_cache[cls]
+        except KeyError:
+            try:
+                impl = registry[cls]
+            except KeyError:
+                impl = _find_impl(cls, registry)
+            dispatch_cache[cls] = impl
+        return impl
+```
+
+`registry` maps types to callables. The fast path checks `dispatch_cache`
+(a `WeakKeyDictionary` keyed by type) before falling back to
+`_find_impl`. `_find_impl` calls `_compose_mro` to build an extended MRO
+that inserts registered ABCs at the right positions, then walks the MRO
+until it finds a matching entry. Results are cached in `dispatch_cache`
+and invalidated whenever `get_cache_token()` changes (i.e., whenever an
+ABC registers a new virtual subclass). `register` also accepts
+`Union`-typed annotations via `annotationlib.Format.FORWARDREF` in 3.14,
+replacing the old `__annotations__` dict look-up.
+
+### `cached_property` (lines 1094 to 1137)
+
+<CpyLink path="Lib/functools.py" lines="1094-1137" />
+
+```python
+class cached_property:
+    def __get__(self, instance, owner=None):
+        if instance is None:
+            return self
+        if self.attrname is None:
+            raise TypeError(
+                "Cannot use cached_property instance without calling __set_name__ on it.")
+        cache = instance.__dict__
+        val = cache.get(self.attrname, _NOT_FOUND)
+        if val is _NOT_FOUND:
+            val = self.func(instance)
+            cache[self.attrname] = val
+        return val
+```
+
+`cached_property` is a non-data descriptor (no `__set__`), so the
+instance `__dict__` lookup takes precedence over the descriptor on all
+subsequent accesses. `__set_name__` records the attribute name; if the
+property is used without it (e.g., constructed and assigned manually)
+`__get__` raises a `TypeError`. Objects without `__dict__` (e.g., those
+with `__slots__`) also raise `TypeError` with a diagnostic message.

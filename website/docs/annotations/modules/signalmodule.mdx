@@ -1,0 +1,189 @@
+---
+title: Modules/signalmodule.c
+description: Implements the signal module — handler registration, async-signal-safe trip_signal, wakeup fd for asyncio, and PyErr_CheckSignals dispatch.
+cpython_path: Modules/signalmodule.c
+cpython_version: "3.14"
+lines: 1500
+status: annotated
+ported_to: module/signal/module.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Modules/signalmodule.c`
+
+<CpyLink path="Modules/signalmodule.c" />
+
+`signalmodule.c` implements the `signal` built-in module. Its job spans two
+execution contexts that cannot share data structures safely: normal Python
+code running in the main thread, and OS signal handlers that can interrupt
+that code at any point.
+
+The module bridges these two worlds through three mechanisms. First, a
+static `Handlers` array stores one entry per signal number; each entry holds
+the Python callable and a `tripped` flag. Second, `trip_signal` (the actual
+C-level signal handler registered with the OS) writes only to `tripped` and
+sets a single eval-breaker bit — both are async-signal-safe operations.
+Third, `PyErr_CheckSignals` runs in the normal interpreter loop: it scans
+`Handlers` for `tripped` entries and calls the associated Python callables
+safely.
+
+`signal_set_wakeup_fd` registers an optional file descriptor. `trip_signal`
+writes one byte to it after setting the `tripped` flag. This lets event loops
+(`asyncio`, `selectors`) unblock a `select`/`epoll` wait when a signal
+arrives, without running Python code inside the signal handler.
+
+On POSIX the module uses `sigaction(2)` so that `SA_RESTART` behaviour and
+`siginfo_t` are available. On Windows it falls back to `signal(2)`.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Modules/signalmodule.c" lines="1-120">1-120</Cpy> | includes, `Handlers[]` array, `wakeup` fd state | Global signal handler table and wakeup fd descriptor. | `module/signal/module.go:handlers` |
+| <Cpy path="Modules/signalmodule.c" lines="120-280">120-280</Cpy> | `trip_signal` | Async-signal-safe C handler: set `Handlers[signum].tripped`, write wakeup byte, set `_PY_SIGNALS_PENDING_BIT`. | `module/signal/module.go:tripSignal` |
+| <Cpy path="Modules/signalmodule.c" lines="280-500">280-500</Cpy> | `signal_signal_impl` | Install Python handler: validate signum and callable, update `Handlers[signum].func`, call `sigaction(2)` or `signal(2)`. | `module/signal/module.go:SignalSignal` |
+| <Cpy path="Modules/signalmodule.c" lines="500-750">500-750</Cpy> | `PyErr_CheckSignals`, `_PyErr_CheckSignalsTstate` | Scan `Handlers` for tripped entries, call Python callables, raise `KeyboardInterrupt` for SIGINT. | `module/signal/module.go:CheckSignals` |
+| <Cpy path="Modules/signalmodule.c" lines="750-950">750-950</Cpy> | `signal_set_wakeup_fd_impl`, `signal_get_wakeup_fd` | Set/get the wakeup file descriptor; validates that the fd is non-blocking. | `module/signal/module.go:SetWakeupFd` |
+| <Cpy path="Modules/signalmodule.c" lines="950-1200">950-1200</Cpy> | `signal_getsignal_impl`, `signal_raise_signal_impl`, `signal_alarm_impl`, `signal_pause_impl`, `_PySignal_AfterFork` | Remaining `signal` methods and post-fork reset. | `module/signal/module.go:Getsignal` |
+| <Cpy path="Modules/signalmodule.c" lines="1200-1500">1200-1500</Cpy> | `signal_methods[]`, `signalmodule`, `PyInit_signal` | Method table, module definition, entry point, and constant registration (SIG_DFL, SIG_IGN, SIGINT, …). | `module/signal/module.go:Module` |
+
+## Reading
+
+### `signal_signal_impl` handler registration (lines 280 to 500)
+
+<CpyLink path="Modules/signalmodule.c" lines="280-500" />
+
+`signal_signal_impl` is the Python-callable `signal.signal(signum, handler)`.
+It validates that the call is coming from the main thread (signal handlers
+can only be set from the main thread), converts the Python callable to an
+`Handlers` entry, and installs the C-level handler with `sigaction`:
+
+```c
+static PyObject *
+signal_signal_impl(PyObject *module, int signalnum, PyObject *handler)
+{
+    if (_PyMainInterpreterThread_Check(tstate) == 0) {
+        PyErr_SetString(PyExc_ValueError,
+            "signal only works in main thread");
+        return NULL;
+    }
+
+    PyObject *old_handler = Handlers[signalnum].func;
+
+    if (handler == IgnoreHandler || handler == DefaultHandler) {
+        func = (PyObject *)handler;
+        sig_handler = handler == IgnoreHandler ? SIG_IGN : SIG_DFL;
+    } else {
+        func = handler;
+        sig_handler = trip_signal;
+    }
+
+    struct sigaction newaction = {
+        .sa_handler = sig_handler,
+        .sa_flags   = SA_RESTART,   /* restart syscalls on EINTR */
+    };
+    sigemptyset(&newaction.sa_mask);
+    sigaction(signalnum, &newaction, NULL);
+
+    Py_INCREF(func);
+    Handlers[signalnum].func = func;
+    Py_DECREF(old_handler);
+    return old_handler;   /* return the previous handler */
+}
+```
+
+`SA_RESTART` means that most system calls interrupted by this signal will
+be automatically restarted by the kernel rather than returning `EINTR`. This
+is the same behaviour as CPython 3.5+ after PEP 475.
+
+### `trip_signal` async-signal-safe path (lines 120 to 280)
+
+<CpyLink path="Modules/signalmodule.c" lines="120-280" />
+
+`trip_signal` is the C function registered with the OS for all Python-managed
+signal numbers. The POSIX async-signal-safety rules forbid calling most
+library functions here; `trip_signal` restricts itself to three operations:
+
+```c
+static void
+trip_signal(int sig_num)
+{
+    unsigned char byte = (unsigned char)sig_num;
+
+    Handlers[sig_num].tripped = 1;
+
+    /* write one byte to the wakeup fd if set */
+    if (wakeup.fd != INVALID_FD) {
+        /* use write(2) — async-signal-safe */
+        write(wakeup.fd, &byte, 1);
+    }
+
+    /* set the eval-breaker bit so the interpreter loop notices */
+    _Py_SET_53BIT(eval_breaker, _PY_SIGNALS_PENDING_BIT);
+}
+```
+
+Setting `_PY_SIGNALS_PENDING_BIT` in the eval-breaker word causes the main
+eval loop to exit its fast path at the next backward jump or function call
+and check for pending signals. The write to `wakeup.fd` lets an event loop
+that is blocked in `select`/`poll`/`epoll` return immediately.
+
+### `PyErr_CheckSignals` pending-signal dispatch (lines 500 to 750)
+
+<CpyLink path="Modules/signalmodule.c" lines="500-750" />
+
+`PyErr_CheckSignals` is called by the eval loop every time the
+`_PY_SIGNALS_PENDING_BIT` is found set. It clears the bit, iterates over all
+signal numbers, and for each entry with `tripped == 1` calls the Python
+handler:
+
+```c
+int
+PyErr_CheckSignals(void)
+{
+    _Py_CLEAR_53BIT(eval_breaker, _PY_SIGNALS_PENDING_BIT);
+
+    for (int i = 1; i < NSIG; i++) {
+        if (Handlers[i].tripped == 0) continue;
+        Handlers[i].tripped = 0;
+
+        PyObject *f = Handlers[i].func;
+        if (f == DefaultHandler) {
+            /* SIGINT default: raise KeyboardInterrupt */
+            if (i == SIGINT) PyErr_SetNone(PyExc_KeyboardInterrupt);
+            continue;
+        }
+        if (f == IgnoreHandler) continue;
+
+        PyObject *args = Py_BuildValue("(iO)", i, Py_None);
+        PyObject *result = PyObject_Call(f, args, NULL);
+        Py_DECREF(args);
+        if (result == NULL) return -1;
+        Py_DECREF(result);
+    }
+    return 0;
+}
+```
+
+If any handler raises an exception (returns `NULL`), `PyErr_CheckSignals`
+returns `-1` immediately and the eval loop propagates the exception. This is
+how `KeyboardInterrupt` is actually raised: not inside `trip_signal`, but
+here in normal Python execution context.
+
+## gopy mirror
+
+`module/signal/module.go`. `tripSignal` is a Go function registered as the
+OS signal handler via `os/signal.Notify`. Because Go's runtime already
+multiplexes OS signals onto goroutines through a channel, the wakeup-fd
+write and eval-breaker bit are emulated with a `chan struct{}` that the
+interpreter goroutine selects on.
+
+## CPython 3.14 changes
+
+`signal_raise_signal` (wrapping POSIX `raise(3)`) was added in 3.8.
+`signal.strsignal` (wrapping `strsignal(3)`) was added in 3.8.
+`signal.pidfd_send_signal` (Linux `pidfd_send_signal(2)`) was added in 3.9.
+The eval-breaker switched from a per-ceval flag to a bitmask word
+(`_PY_SIGNALS_PENDING_BIT`) in 3.12 as part of the specialising adaptive
+interpreter work.

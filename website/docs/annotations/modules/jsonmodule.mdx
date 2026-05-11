@@ -1,0 +1,187 @@
+---
+title: Modules/_json.c
+description: C acceleration for json.encoder and json.decoder — scanstring, escape handling, and recursive value encoding.
+cpython_path: Modules/_json.c
+cpython_version: "3.14"
+lines: 1800
+status: annotated
+ported_to: module/json/module.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Modules/_json.c`
+
+<CpyLink path="Modules/_json.c" />
+
+`_json.c` is the C accelerator for `json.encoder` and `json.decoder`. The
+pure-Python module in `Lib/json/` imports `_json` and replaces its
+`scanner` and `encoder` objects with the C versions when available.
+
+The file is divided into two main halves:
+
+- The **decoder** side: the `Scanner` type and `scanstring_unicode`, which
+  implement recursive-descent JSON parsing with full escape processing.
+- The **encoder** side: the `Encoder` type and helpers
+  `encoder_encode_string`, `encoder_encode_float`,
+  `encoder_listencode_dict`, and `encoder_listencode_list`, which
+  serialize Python objects to JSON text.
+
+Neither half performs file I/O. Both operate on Python `str` objects (or
+`list` buffers for the encoder output) and are called from the Python layer
+in `Lib/json/decoder.py` and `Lib/json/encoder.py`.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Modules/_json.c" lines="1-80">1-80</Cpy> | includes, `PyCFunction` table, `_parse_constant` | Parses `Infinity`, `-Infinity`, `NaN` literals. | `module/json/module.go:parseConstant` |
+| <Cpy path="Modules/_json.c" lines="80-480">80-480</Cpy> | `scanstring_unicode` | Scans a JSON string from a `str`; handles all `\uXXXX` escapes and surrogate pairs. | `module/json/module.go:ScanString` |
+| <Cpy path="Modules/_json.c" lines="480-700">480-700</Cpy> | `Scanner` type, `scanner_new`, `scanner_call`, `scanner_dealloc` | Recursive-descent scanner object wrapping `scanstring_unicode` and `_parse_constant`. | `module/json/module.go:Scanner` |
+| <Cpy path="Modules/_json.c" lines="700-950">700-950</Cpy> | `encoder_encode_string` | Serializes a Python `str` as a JSON string; `ensure_ascii` mode escapes non-ASCII. | `module/json/module.go:EncodeString` |
+| <Cpy path="Modules/_json.c" lines="950-1100">950-1100</Cpy> | `encoder_encode_float`, `encoder_encode_long` | Float and integer serialization; raises on `nan`/`inf` when `allow_nan=False`. | `module/json/module.go:EncodeFloat` |
+| <Cpy path="Modules/_json.c" lines="1100-1350">1100-1350</Cpy> | `encoder_listencode_dict` | Recursively encodes a Python dict as a JSON object; validates key types. | `module/json/module.go:EncodeDictChunks` |
+| <Cpy path="Modules/_json.c" lines="1350-1560">1350-1560</Cpy> | `encoder_listencode_list` | Recursively encodes a Python list or tuple as a JSON array. | `module/json/module.go:EncodeListChunks` |
+| <Cpy path="Modules/_json.c" lines="1560-1720">1560-1720</Cpy> | `Encoder` type, `encoder_new`, `encoder_call`, `encoder_dealloc` | Top-level encoder object; dispatches to `encoder_listencode_*`. | `module/json/module.go:Encoder` |
+| <Cpy path="Modules/_json.c" lines="1720-1800">1720-1800</Cpy> | `_jsonmodule`, `PyInit__json` | Module definition and entry point. | `module/json/module.go:Module` |
+
+## Reading
+
+### `scanstring_unicode` escape handling (lines 80 to 480)
+
+<CpyLink path="Modules/_json.c" lines="80-480" />
+
+`scanstring_unicode(pystr, end, strict)` scans a JSON string starting at
+`end` (the character after the opening `"`). It returns a `(str, new_end)`
+tuple.
+
+The fast path copies chunks of non-escape characters directly into a
+`_PyUnicodeWriter`. When a `\` is encountered, the following character
+determines the escape:
+
+```c
+switch (c) {
+case '"':  c = '"';  break;
+case '\\': c = '\\'; break;
+case '/':  c = '/';  break;
+case 'b':  c = '\b'; break;
+case 'f':  c = '\f'; break;
+case 'n':  c = '\n'; break;
+case 'r':  c = '\r'; break;
+case 't':  c = '\t'; break;
+case 'u':
+    /* Read four hex digits. */
+    c  = digit[0] << 12;
+    c |= digit[1] << 8;
+    c |= digit[2] << 4;
+    c |= digit[3];
+    /* Handle surrogate pairs: \uD800-\uDBFF followed by \uDC00-\uDFFF. */
+    if (Py_UNICODE_IS_HIGH_SURROGATE(c)) {
+        if (s[0] == '\\' && s[1] == 'u') {
+            Py_UCS4 c2 = /* next \uXXXX */;
+            if (Py_UNICODE_IS_LOW_SURROGATE(c2)) {
+                c = Py_UNICODE_JOIN_SURROGATES(c, c2);
+                s += 6;
+            }
+        }
+    }
+    break;
+default:
+    PyErr_SetString(PyExc_ValueError, "invalid \\escape");
+    goto bail;
+}
+```
+
+The surrogate-pair path joins a `\uD8xx\uDCxx` sequence into a single
+Unicode code point using `Py_UNICODE_JOIN_SURROGATES`. When `strict=True`
+(the default), bare surrogates not part of a valid pair raise `ValueError`.
+
+### `encoder_encode_string` ASCII-escape mode (lines 700 to 950)
+
+<CpyLink path="Modules/_json.c" lines="700-950" />
+
+`encoder_encode_string(s, ensure_ascii)` converts a Python `str` to a JSON
+string literal. It writes opening `"`, content, and closing `"` into a
+`_PyBytesWriter` (when `ensure_ascii=True`) or a `_PyUnicodeWriter`.
+
+When `ensure_ascii=True`, every code point above U+007F is replaced with
+`\uXXXX` or a `\uXXXX\uYYYY` surrogate pair:
+
+```c
+if (ensure_ascii) {
+    if (c >= 0x10000) {
+        /* Emit surrogate pair. */
+        Py_UCS4 v = c - 0x10000;
+        output_char('\\'); output_char('u');
+        emit_hex((v >> 10) + 0xD800);
+        output_char('\\'); output_char('u');
+        emit_hex((v & 0x3FF) + 0xDC00);
+    } else {
+        output_char('\\'); output_char('u');
+        emit_hex(c);
+    }
+} else {
+    _PyUnicodeWriter_WriteChar(&writer, c);
+}
+```
+
+Control characters U+0000 through U+001F are always escaped regardless of
+`ensure_ascii`, and the two structural characters `"` and `\` are escaped
+with a plain backslash.
+
+### `encoder_listencode_dict` (lines 1100 to 1350)
+
+<CpyLink path="Modules/_json.c" lines="1100-1350" />
+
+The dict encoder is the recursive core for JSON object serialization. It
+appends string chunks to a Python `list` accumulator (`rval`) rather than
+building a single large string, so the caller can `''.join(rval)` at the
+end.
+
+Keys must be strings (or types coercible to string via the `key` callable).
+Non-string keys raise `TypeError` unless the encoder was constructed with
+`skipkeys=True`, in which case they are silently omitted:
+
+```c
+static int
+encoder_listencode_dict(PyEncoderObject *s, _PyUnicodeWriter *writer,
+                        PyObject *dct, Py_ssize_t indent_level)
+{
+    ...
+    while ((key = PyIter_Next(it))) {
+        if (!PyUnicode_Check(key)) {
+            if (s->skipkeys) { Py_DECREF(key); continue; }
+            PyErr_Format(PyExc_TypeError,
+                         "keys must be strings, not %.100s",
+                         Py_TYPE(key)->tp_name);
+            goto bail;
+        }
+        /* Encode key. */
+        if (encoder_encode_string(s, writer, key) < 0) goto bail;
+        /* Encode value recursively. */
+        value = PyObject_GetItem(dct, key);
+        if (encoder_listencode_obj(s, writer, value, indent_level) < 0)
+            goto bail;
+    }
+    ...
+}
+```
+
+Circular reference detection is done via a `markers` dict keyed on
+`id(obj)`. Before encoding any container, its id is inserted; after
+encoding, the id is removed. A duplicate id raises `ValueError: Circular
+reference detected`.
+
+## gopy mirror
+
+`module/json/module.go`. `ScanString` mirrors `scanstring_unicode`
+character-by-character with the same surrogate-pair join logic.
+`EncodeString` mirrors the `ensure_ascii` branch. `EncodeDictChunks` and
+`EncodeListChunks` mirror the list-accumulator pattern. Circular-reference
+detection uses a Go `map[uintptr]struct{}` keyed on object pointer identity.
+
+## CPython 3.14 changes
+
+`_json.c` has been largely stable since 3.1. The `_PyUnicodeWriter` fast
+path was introduced in 3.3. Per-interpreter state cleanup for the module
+arrived in 3.12.

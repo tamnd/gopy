@@ -1,0 +1,253 @@
+---
+title: Objects/unicodeobject.c
+description: The Unicode string implementation — compact ASCII/UCS representations, UTF-8 decode/encode, hash, interning, and all string methods.
+cpython_path: Objects/unicodeobject.c
+cpython_version: "3.14"
+lines: 16756
+status: annotated
+ported_to: objects/str.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Objects/unicodeobject.c`
+
+<CpyLink path="Objects/unicodeobject.c" />
+
+The largest file in CPython. It implements `str` — the immutable Unicode string
+type. The file covers object allocation and the three-tier internal
+representation, every codec operation needed to convert to and from bytes
+(UTF-8, Latin-1, ASCII, and others), the string method suite (`split`, `join`,
+`replace`, `find`, `format`, `%`-formatting), hashing, interning, and the
+`PyUnicode_Type` type definition.
+
+The central design is the compact representation introduced in Python 3.3. A
+string that contains only ASCII characters is stored as a `PyASCIIObject`
+followed by a C `char[]` — no wchar buffer, no separate allocation. A string
+that fits in Latin-1 or UCS-2 or UCS-4 uses `PyCompactUnicodeObject`, which
+adds codec-state fields but still keeps the character data in a single block.
+The legacy `PyUnicodeObject` with a separate `wstr` buffer was removed in 3.12.
+`PyUnicode_New` picks the right variant at allocation time based on the
+`max_char` argument.
+
+Caching is pervasive. `PyASCIIObject.hash` stores the SipHash-1-3 result after
+the first call to `unicode_hash`, avoiding recomputation. `PyCompactUnicodeObject.utf8`
+and `utf8_length` cache the UTF-8 encoding produced by `PyUnicode_AsUTF8AndSize`
+so that calling the function many times on the same object is O(1) after the
+first call. Interned strings are deduplicated through a global `interned` dict
+keyed by string value; once a string is interned its `interned` state flag is
+set and subsequent `_PyUnicode_InternInPlace` calls are no-ops.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Objects/unicodeobject.c" lines="1-200">1-200</Cpy> | struct layout, `KIND` / `DATA` macros | `PyASCIIObject` / `PyCompactUnicodeObject` hierarchy and accessors. | `objects/str.go` |
+| <Cpy path="Objects/unicodeobject.c" lines="200-700">200-700</Cpy> | `PyUnicode_New`, `_PyUnicode_New` | Allocate compact ASCII or compact Unicode object; copy optional data. | `objects/str.go:NewStr` |
+| <Cpy path="Objects/unicodeobject.c" lines="700-1400">700-1400</Cpy> | `PyUnicode_DecodeUTF8`, `PyUnicode_DecodeUTF8Stateful` | UTF-8 decoder; surrogate handling; incremental state. | `objects/str.go:DecodeUTF8` |
+| <Cpy path="Objects/unicodeobject.c" lines="1400-2200">1400-2200</Cpy> | `PyUnicode_AsUTF8AndSize`, `PyUnicode_AsUTF8` | Encode to UTF-8, cache result in `utf8` field. | `objects/str.go:AsUTF8` |
+| <Cpy path="Objects/unicodeobject.c" lines="2200-3400">2200-3400</Cpy> | `PyUnicode_DecodeASCII`, `PyUnicode_DecodeLatin1`, `PyUnicode_DecodeUTF16`, `PyUnicode_DecodeUTF32` | Additional codecs. | `objects/str.go` |
+| <Cpy path="Objects/unicodeobject.c" lines="3400-4600">3400-4600</Cpy> | `unicode_hash` | SipHash-1-3 / FNV hash; cache in `hash` field; immortal-string stable hash. | `objects/str.go:(*Str).Hash` |
+| <Cpy path="Objects/unicodeobject.c" lines="4600-5400">4600-5400</Cpy> | `PyUnicode_RichCompare`, `unicode_richcompare` | Rich compare; fast path for same-kind same-length strings. | `objects/str.go:(*Str).RichCompare` |
+| <Cpy path="Objects/unicodeobject.c" lines="5400-7000">5400-7000</Cpy> | `unicode_find`, `unicode_split`, `unicode_rsplit`, `unicode_splitlines` | Substring search and split methods. | `objects/str.go` |
+| <Cpy path="Objects/unicodeobject.c" lines="7000-9000">7000-9000</Cpy> | `unicode_replace`, `_PyUnicode_JoinArray`, `unicode_join` | Replace and join. | `objects/str.go` |
+| <Cpy path="Objects/unicodeobject.c" lines="9000-11200">9000-11200</Cpy> | `unicode_format` | `%` formatting: `%s`, `%d`, `%r`, `%a`, width, precision, flags. | `objects/str.go:format` |
+| <Cpy path="Objects/unicodeobject.c" lines="11200-13000">11200-13000</Cpy> | `_PyUnicode_EqualToASCIIString`, `PyUnicode_CompareWithASCIIString`, `_PyUnicode_EqualToASCIIId` | Fast ASCII comparison without encoding. | `objects/str.go:EqualASCII` |
+| <Cpy path="Objects/unicodeobject.c" lines="13000-15000">13000-15000</Cpy> | `_PyUnicode_InternInPlace`, `_PyUnicode_InternMortal`, `PyUnicode_InternInPlace` | Interning via `interned` dict; state flags `SSTATE_INTERNED_MORTAL` / `_IMMORTAL`. | `objects/str.go:Intern` |
+| <Cpy path="Objects/unicodeobject.c" lines="15000-16200">15000-16200</Cpy> | `unicode_new`, `unicode_init`, string method slots | `tp_new`, method table, sequence protocol. | `objects/str.go` |
+| <Cpy path="Objects/unicodeobject.c" lines="16200-16756">16200-16756</Cpy> | `PyUnicode_Type` | Type object definition. | `objects/str.go:StrType` |
+
+## Reading
+
+### Compact representation (lines 1 to 200)
+
+<CpyLink path="Objects/unicodeobject.c" lines="1-200" />
+
+Three structs form a hierarchy. `PyASCIIObject` is the base:
+
+```c
+typedef struct {
+    PyObject_HEAD
+    Py_ssize_t length;
+    Py_hash_t  hash;
+    struct {
+        unsigned int interned:2;
+        unsigned int kind:3;
+        unsigned int compact:1;
+        unsigned int ascii:1;
+    } state;
+} PyASCIIObject;
+```
+
+When `state.ascii == 1` and `state.compact == 1`, the character data is a
+`char[]` immediately after this struct in memory. No second allocation is
+needed. `PyCompactUnicodeObject` extends this with `utf8_length` and `utf8`
+for the cached UTF-8 view, plus `wstr_length` for compatibility. All three
+levels are accessed through the same `PyObject *` pointer; the `state` bitfield
+tells the runtime which layout to use.
+
+`KIND` encodes the character width: `PyUnicode_1BYTE_KIND` (Latin-1 or ASCII),
+`PyUnicode_2BYTE_KIND` (UCS-2), or `PyUnicode_4BYTE_KIND` (UCS-4). The `DATA`
+macro returns a typed pointer so character reads are a single array indexing
+step.
+
+### `PyUnicode_New` (lines 200 to 700)
+
+<CpyLink path="Objects/unicodeobject.c" lines="200-700" />
+
+The sole allocation entry point for the compact layout. `max_char` drives the
+decision:
+
+```c
+PyObject *
+PyUnicode_New(Py_ssize_t size, Py_UCS4 max_char)
+{
+    ...
+    if (max_char < 128) {
+        kind = PyUnicode_1BYTE_KIND;
+        is_ascii = 1;
+        char_size = 1;
+        struct_size = sizeof(PyASCIIObject);
+    } else if (max_char < 256) {
+        kind = PyUnicode_1BYTE_KIND;
+        char_size = 1;
+        struct_size = sizeof(PyCompactUnicodeObject);
+    } else if (max_char < 65536) {
+        kind = PyUnicode_2BYTE_KIND;
+        char_size = 2;
+        struct_size = sizeof(PyCompactUnicodeObject);
+    } else {
+        kind = PyUnicode_4BYTE_KIND;
+        char_size = 4;
+        struct_size = sizeof(PyCompactUnicodeObject);
+    }
+    obj = (PyObject *) PyObject_Malloc(struct_size + (size + 1) * char_size);
+    ...
+    _PyUnicode_LENGTH(unicode) = size;
+    _PyUnicode_HASH(unicode)   = -1;
+    _PyUnicode_STATE(unicode).interned = SSTATE_NOT_INTERNED;
+    _PyUnicode_STATE(unicode).kind     = kind;
+    _PyUnicode_STATE(unicode).compact  = 1;
+    _PyUnicode_STATE(unicode).ascii    = is_ascii;
+    ...
+}
+```
+
+The trailing NUL at `data[size]` is always written so C consumers can treat the
+buffer as a C string when the encoding fits. The hash field is initialized to
+`-1` (meaning not yet computed). Callers write character data directly into the
+buffer returned by `PyUnicode_DATA` immediately after allocation.
+
+### UTF-8 decode (lines 700 to 1400)
+
+<CpyLink path="Objects/unicodeobject.c" lines="700-1400" />
+
+`PyUnicode_DecodeUTF8Stateful` is the canonical decoder. It walks the input
+byte-by-byte, fast-pathing runs of ASCII (the common case for identifiers and
+most source text) and switching to multi-byte handling for sequences that begin
+with a byte `>= 0x80`. Surrogate code points (`U+D800`-`U+DFFF`) are accepted
+or rejected based on the error handler argument. The `consumed` output parameter
+supports incremental decoding: callers pass a partial buffer and learn how many
+bytes were successfully consumed so far.
+
+The error handler (`strict`, `replace`, `ignore`, `surrogateescape`) is
+dispatched through the codec error machinery in `errors.c`, so the decoder does
+not inline handler logic.
+
+### `PyUnicode_AsUTF8AndSize` (lines 1400 to 2200)
+
+<CpyLink path="Objects/unicodeobject.c" lines="1400-2200" />
+
+Produces a UTF-8 C-string view of the string object and caches it:
+
+```c
+const char *
+PyUnicode_AsUTF8AndSize(PyObject *unicode, Py_ssize_t *psize)
+{
+    if (PyUnicode_IS_COMPACT_ASCII(unicode)) {
+        /* Already ASCII — the char[] buffer is valid UTF-8. */
+        if (psize)
+            *psize = PyUnicode_GET_LENGTH(unicode);
+        return (const char *)PyUnicode_DATA(unicode);
+    }
+    if (_PyUnicodeCompact_utf8(unicode) == NULL) {
+        /* Encode and cache. */
+        PyObject *b = _PyUnicode_AsUTF8String(unicode, "strict");
+        ...
+        _PyUnicodeCompact_SET_UTF8(unicode, PyBytes_AS_STRING(b), ...);
+        Py_DECREF(b);
+    }
+    if (psize)
+        *psize = _PyUnicodeCompact_utf8_length(unicode);
+    return _PyUnicodeCompact_utf8(unicode);
+}
+```
+
+For compact ASCII strings the function is effectively free — it returns the
+character buffer that is already valid UTF-8. For other strings the result is
+encoded once and stored in `utf8` / `utf8_length`; subsequent calls return the
+cached pointer. The lifetime of the returned C string is tied to the Python
+object, not a separate `bytes` object.
+
+### Hash (lines 3400 to 4600)
+
+<CpyLink path="Objects/unicodeobject.c" lines="3400-4600" />
+
+`unicode_hash` checks `_PyUnicode_HASH(op) != -1` first (the cached value). On
+a miss it calls `_Py_HashBytes` on the raw character buffer. Internally that
+dispatches to SipHash-1-3 when the hash secret is available, or FNV-1a as a
+fallback. Immortal strings (singletons like the empty string, small integers'
+repr, interned builtins) receive a stable hash that never changes across
+interpreter restarts; all other strings are subject to hash randomization via
+the per-process secret set at startup.
+
+```c
+static Py_hash_t
+unicode_hash(PyObject *self)
+{
+    Py_uhash_t x;
+    if (_PyUnicode_HASH(self) != -1)
+        return _PyUnicode_HASH(self);
+    x = _Py_HashBytes(PyUnicode_DATA(self),
+                      PyUnicode_GET_LENGTH(self) * PyUnicode_KIND(self));
+    if (x == (Py_uhash_t)-1)
+        x = 1520022418;  /* avoid -1 sentinel */
+    _PyUnicode_HASH(self) = x;
+    return x;
+}
+```
+
+### Interning (lines 13000 to 15000)
+
+<CpyLink path="Objects/unicodeobject.c" lines="13000-15000" />
+
+`_PyUnicode_InternInPlace` deduplicates string objects. The caller passes a
+`PyObject **` slot; if an equal string already exists in the `interned` dict
+the slot is rewritten to point at the canonical copy and the caller's reference
+is released. If not, the string is added to `interned` and its
+`state.interned` flag is set to `SSTATE_INTERNED_MORTAL` (or `_IMMORTAL` for
+builtins). Identifier strings used as attribute names and keyword argument names
+go through `_PyUnicode_InternImmortal` so that they survive interpreter
+re-initialization.
+
+```c
+void
+_PyUnicode_InternInPlace(PyInterpreterState *interp, PyObject **p)
+{
+    PyObject *s = *p;
+    if (_PyUnicode_STATE(s).interned == SSTATE_INTERNED_IMMORTAL ||
+        _PyUnicode_STATE(s).interned == SSTATE_INTERNED_MORTAL)
+        return;
+    PyObject *t = PyDict_SetDefault(interp->cached_objects.interned_strings,
+                                    s, s);
+    if (t != s) {
+        Py_SETREF(*p, Py_NewRef(t));
+        return;
+    }
+    /* First intern — mark it. */
+    _PyUnicode_STATE(s).interned = SSTATE_INTERNED_MORTAL;
+    /* Undo the extra refcounts added by SetDefault. */
+    Py_DECREF(s);
+    Py_DECREF(s);
+}
+```

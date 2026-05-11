@@ -1,0 +1,115 @@
+---
+title: Modules/_weakref.c
+description: Thin C module exposing the _weakref built-in — ref, proxy, getweakrefcount, getweakrefs; all logic lives in Objects/weakrefobject.c.
+cpython_path: Modules/_weakref.c
+cpython_version: "3.14"
+lines: 100
+status: annotated
+ported_to: module/weakref/module.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Modules/_weakref.c`
+
+<CpyLink path="Modules/_weakref.c" />
+
+A thin wrapper module. All weak-reference mechanics (the `PyWeakReference`
+object layout, callback invocation, GC integration, the per-object weakref
+list) live in `Objects/weakrefobject.c`. This file just binds four of those C
+functions as Python-callable methods and packages them into the `_weakref`
+built-in module.
+
+The public `weakref` module (`Lib/weakref.py`) imports `_weakref` and re-exports
+`ref`, `proxy`, `getweakrefcount`, and `getweakrefs` alongside its own
+pure-Python `WeakValueDictionary`, `WeakKeyDictionary`, and `WeakSet`.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Modules/_weakref.c" lines="1-20">1-20</Cpy> | includes | Header: `Python.h`, `weakrefobject.h`. | — |
+| <Cpy path="Modules/_weakref.c" lines="20-50">20-50</Cpy> | `weakref_getweakrefcount`, `weakref_getweakrefs`, `weakref_proxy`, `weakref_ref` | Python-callable wrappers. | `module/weakref/module.go:methods` |
+| <Cpy path="Modules/_weakref.c" lines="50-80">50-80</Cpy> | `_weakref_methods[]` | Method table. | `module/weakref/module.go:Module` |
+| <Cpy path="Modules/_weakref.c" lines="80-100">80-100</Cpy> | `_weakrefmodule`, `PyInit__weakref` | Module definition and entry point. | `module/weakref/module.go:Module` |
+
+## Reading
+
+### Method table (lines 50 to 80)
+
+<CpyLink path="Modules/_weakref.c" lines="50-80" />
+
+The four exported methods and their Python signatures:
+
+```c
+static PyMethodDef _weakref_methods[] = {
+    {"getweakrefcount", weakref_getweakrefcount, METH_O,
+     "Return the number of weak references to 'object'."},
+    {"getweakrefs",     weakref_getweakrefs,     METH_O,
+     "Return a list of all weak reference objects pointing to 'object'."},
+    {"proxy",           weakref_proxy,           METH_VARARGS,
+     "create a proxy object that weakly references 'object'"},
+    {"ref",             weakref_ref,             METH_VARARGS,
+     PyDoc_STR("ref(object[, callback]) -- create a weak reference to 'object'")},
+    {NULL, NULL, 0, NULL}
+};
+```
+
+`METH_O` means a single positional argument is passed as a bare `PyObject *`
+(no argument parsing overhead). `METH_VARARGS` is used for `proxy` and `ref`
+because they accept an optional `callback` argument.
+
+### `weakref_getweakrefcount` (lines 20 to 35)
+
+<CpyLink path="Modules/_weakref.c" lines="20-35" />
+
+Delegates directly to `_PyWeakref_GetWeakrefCount` from
+`Objects/weakrefobject.c`:
+
+```c
+static PyObject *
+weakref_getweakrefcount(PyObject *self, PyObject *object)
+{
+    return PyLong_FromSsize_t(_PyWeakref_GetWeakrefCount(
+        _PyObject_GET_WEAKREFS_LISTPTR(object)));
+}
+```
+
+`_PyObject_GET_WEAKREFS_LISTPTR` reads the `tp_weaklistoffset` field of the
+object's type to locate the `PyWeakReference *` head pointer embedded in the
+object. If the type does not support weak references (`tp_weaklistoffset == 0`)
+the list pointer is `NULL` and the count is 0.
+
+### `weakref_ref` (lines 42 to 50)
+
+<CpyLink path="Modules/_weakref.c" lines="42-50" />
+
+Calls `PyWeakref_NewRef`, which is the canonical public API for creating a
+`weakref.ref`:
+
+```c
+static PyObject *
+weakref_ref(PyObject *self, PyObject *args)
+{
+    PyObject *object, *callback = NULL;
+    if (!PyArg_UnpackTuple(args, "ref", 1, 2, &object, &callback))
+        return NULL;
+    return PyWeakref_NewRef(object, callback);
+}
+```
+
+`PyWeakref_NewRef` (in `Objects/weakrefobject.c`) checks that the type supports
+weak references, looks for an existing `ref` with the same callback in the
+object's weakref list (to share the `PyWeakReference` object when possible),
+and inserts a new node at the head of the list otherwise.
+
+## gopy mirror
+
+`module/weakref/module.go`. The four methods forward to the `objects` package
+functions `WeakrefGetCount`, `WeakrefGetRefs`, `WeakrefNewProxy`, and
+`WeakrefNewRef` that port `Objects/weakrefobject.c`.
+
+## CPython 3.14 changes
+
+This file has been stable since Python 2. The module gained multi-phase init
+support (`Py_mod_exec`) in 3.12 but otherwise the method table is unchanged.

@@ -1,0 +1,160 @@
+---
+title: Python/ceval_tracing.c
+description: sys.settrace and sys.setprofile callback dispatch — sets trace/profile functions on a thread state and fires events from the eval loop.
+cpython_path: Python/ceval_tracing.c
+cpython_version: "3.14"
+lines: 400
+status: annotated
+ported_to: vm/eval_simple.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Python/ceval_tracing.c`
+
+<CpyLink path="Python/ceval_tracing.c" />
+
+All tracing and profiling plumbing that `sys.settrace` and `sys.setprofile`
+rely on lives here. The file is roughly 400 lines and sits between the eval
+loop (`ceval.c`) and the Python-level `sys` module: the eval loop calls the
+thin helpers exported from this file, which in turn call the user-supplied
+callable stored on the thread state.
+
+Two separate callback slots exist. `c_tracefunc` / `c_traceobj` serve
+`sys.settrace`; `c_profilefunc` / `c_profileobj` serve `sys.setprofile`.
+Both slots store a raw C function pointer (for speed) alongside the Python
+callable object (for Python-level hooks). The default C function,
+`_PyEval_TraceTrampoline`, is installed automatically when a Python callable
+is registered and simply delegates to the Python object via `PyObject_Call`.
+
+The eval loop does not call these helpers unconditionally. Before every
+potential trace site the loop tests the per-thread `tracing` counter; a
+non-zero value means tracing is active and the appropriate helper is invoked.
+`_PyEval_SetTrace` and `_PyEval_SetProfile` adjust that counter whenever the
+trace/profile function is installed or removed, and they set the eval-breaker
+flag so the running frame notices the change on its next iteration.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Python/ceval_tracing.c" lines="1-60">1-60</Cpy> | `call_trace` | Core dispatcher: calls `tstate->c_tracefunc` with the frame, event code, and arg object; returns 0 on success or -1 to disable tracing. | `vm/eval_simple.go:callTrace` |
+| <Cpy path="Python/ceval_tracing.c" lines="61-120">61-120</Cpy> | `call_trace_protected` | Wraps `call_trace` with a save/restore of `tstate->curexc_*` so that exceptions raised inside a trace callback do not clobber the exception being traced. | `vm/eval_simple.go:callTraceProtected` |
+| <Cpy path="Python/ceval_tracing.c" lines="121-220">121-220</Cpy> | `_PyEval_TraceTrampoline` | Default `c_tracefunc`: turns the C-level call into a Python-level call to `tstate->c_traceobj`; the return value from the Python callable becomes the per-frame local trace function. | `vm/eval_simple.go:TraceTrampoline` |
+| <Cpy path="Python/ceval_tracing.c" lines="221-300">221-300</Cpy> | `_PyEval_SetTrace` / `_PyEval_SetProfile` | Install or remove a trace/profile function; bump or decrement `tstate->tracing`; request an eval-breaker so the change is noticed by the running frame. | `vm/eval_simple.go:SetTrace` / `SetProfile` |
+| <Cpy path="Python/ceval_tracing.c" lines="301-360">301-360</Cpy> | `sys_settrace` / `sys_setprofile` (C entry points) | Python-level entry: validate that the argument is callable or `None`, then delegate to `_PyEval_SetTrace` / `_PyEval_SetProfile`. | `vm/eval_simple.go:SysSetTrace` / `SysSetProfile` |
+| <Cpy path="Python/ceval_tracing.c" lines="361-400">361-400</Cpy> | Trace event constants (`PyTrace_CALL`, `PyTrace_LINE`, `PyTrace_RETURN`, `PyTrace_EXCEPTION`, `PyTrace_OPCODE`, `PyTrace_C_CALL`, `PyTrace_C_RETURN`, `PyTrace_C_EXCEPTION`) | Integer codes passed as the `event` argument to every trace callback. | `vm/eval_simple.go` (constants) |
+
+## Reading
+
+### `call_trace_protected` — save/restore around callback (lines 61 to 120)
+
+<CpyLink path="Python/ceval_tracing.c" lines="61-120" />
+
+```c
+static int
+call_trace_protected(PyThreadState *tstate, PyObject *func, PyObject *self,
+                     PyFrameObject *frame, PyObject **p_locals,
+                     int what, PyObject *arg)
+{
+    PyObject *type, *value, *traceback;
+    int err;
+    _PyErr_StackItem *exc_info = tstate->exc_info;
+    type  = exc_info->exc_value;
+    /* Save the current exception */
+    Py_XINCREF(type);
+    exc_info->exc_value = NULL;
+
+    err = call_trace(tstate, func, self, frame, p_locals, what, arg);
+
+    /* Restore saved exception */
+    PyObject *old = exc_info->exc_value;
+    exc_info->exc_value = type;
+    Py_XDECREF(old);
+    return err;
+}
+```
+
+This is the most delicate piece in the file. When the eval loop fires a
+`PyTrace_EXCEPTION` event it is in the middle of unwinding; `tstate->exc_info`
+already holds the exception being propagated. If the trace callback raises
+(or clears) a different exception, the original would be silently replaced.
+`call_trace_protected` prevents that by stashing `exc_info->exc_value` before
+the call and unconditionally restoring it afterwards.
+
+The unprotected `call_trace` is used for `PyTrace_CALL`, `PyTrace_LINE`, and
+`PyTrace_RETURN` events where no exception is in flight and there is nothing to
+protect.
+
+### Trace event dispatch (lines 1 to 60 and 121 to 220)
+
+<CpyLink path="Python/ceval_tracing.c" lines="1-220" />
+
+The eval loop fires eight distinct event codes:
+
+| Constant | Value | When fired |
+|----------|-------|------------|
+| `PyTrace_CALL` | 0 | Function entry (also generator `send`) |
+| `PyTrace_EXCEPTION` | 1 | Exception has been set; frame is unwinding |
+| `PyTrace_LINE` | 2 | Before executing the first opcode on a new source line |
+| `PyTrace_RETURN` | 3 | Function is about to return a value |
+| `PyTrace_C_CALL` | 4 | A C-level callable is about to be called |
+| `PyTrace_C_EXCEPTION` | 5 | The C callable raised |
+| `PyTrace_C_RETURN` | 6 | The C callable returned |
+| `PyTrace_OPCODE` | 7 | Before every opcode (only when `f_trace_opcodes` is set) |
+
+`call_trace` dispatches by invoking `tstate->c_tracefunc(tstate->c_traceobj,
+frame, what, arg)`. If the callback returns `NULL` (raised an exception) the
+function returns -1 and the eval loop disables the per-frame trace function
+(sets `f_trace = NULL`) to avoid repeated errors from the same frame.
+
+### `_PyEval_TraceTrampoline` (lines 121 to 220)
+
+<CpyLink path="Python/ceval_tracing.c" lines="121-220" />
+
+```c
+int
+_PyEval_TraceTrampoline(PyObject *self, PyFrameObject *frame,
+                        int what, PyObject *arg)
+{
+    PyObject *callback = frame->f_trace;
+    if (callback == NULL) {
+        return 0;
+    }
+    PyObject *result = PyObject_CallFunction(callback, "Oio", frame, what, arg);
+    if (result == NULL) {
+        PyEval_SetTrace(NULL, NULL);
+        Py_CLEAR(frame->f_trace);
+        return -1;
+    }
+    /* The return value replaces f_trace for subsequent events */
+    Py_XDECREF(frame->f_trace);
+    frame->f_trace = result == Py_None ? NULL : result;
+    return 0;
+}
+```
+
+When a Python callable is passed to `sys.settrace`, CPython stores it in
+`tstate->c_traceobj` and installs `_PyEval_TraceTrampoline` as the C-level
+`c_tracefunc`. The trampoline reads the per-frame `f_trace` attribute — which
+the user callback may replace on each `PyTrace_CALL` event to install a
+different callable for subsequent events — and calls it as
+`callback(frame, event, arg)`. The return value becomes the new `f_trace`.
+If `None` is returned, per-frame tracing is disabled for the remainder of that
+call frame.
+
+## Notes for the gopy mirror
+
+`vm/eval_simple.go` contains the Go equivalents of `call_trace`,
+`call_trace_protected`, and `_PyEval_TraceTrampoline`. The eval loop checks
+`tstate.Tracing != 0` before every trace site, matching the C `tstate->tracing`
+guard. `SetTrace` / `SetProfile` adjust that counter and request an
+interpreter tick via `RequestEvalBreaker` so the change is visible to a
+concurrently running frame.
+
+## CPython 3.14 changes worth noting
+
+In 3.14 the `PyTrace_OPCODE` path gained a guard that only fires when the
+frame's `f_trace_opcodes` flag is set, avoiding the opcode-level overhead for
+callers that only need line events. The event constants themselves are stable
+since Python 2.6.

@@ -1,0 +1,191 @@
+---
+title: Python/bootstrap_hash.c
+description: Implements PYTHONHASHSEED randomization by selecting a platform-specific entropy source, filling the global _Py_HashSecret union, and exposing _PyOS_URandom for callers that need random bytes.
+cpython_path: Python/bootstrap_hash.c
+cpython_version: "3.14"
+lines: 600
+status: annotated
+ported_to: pythonrun/bootstrap_hash.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Python/bootstrap_hash.c`
+
+<CpyLink path="Python/bootstrap_hash.c" />
+
+Hash randomization support. Every Python string, bytes, and memoryview
+hash is salted with a per-process secret so that the hash table layout of
+`dict` and `set` is not predictable across runs. This file owns the global
+secret and the startup code that fills it.
+
+The central global is `_Py_HashSecret`, a 24-byte union. When SipHash-1-3
+is in use (the default on 64-bit platforms since 3.4), its `siphash` variant
+provides two 64-bit keys `k0` and `k1`. When FNV is selected (for small
+platforms or when `--with-hash-algorithm=fnv` is configured), its `fnv`
+variant provides `prefix` and `suffix` words.
+
+`_PyRandom_Init` is called early in interpreter startup, before any
+`str`, `bytes`, or `dict` object is created. It reads entropy from
+`/dev/urandom` (Linux, macOS) via `_PyOS_URandom`, or from
+`CryptGenRandom` / `BCryptGenRandom` on Windows. If the platform has no
+secure entropy source and the build was configured with a fallback, the
+`lcg_urandom` LCG provides a weak alternative.
+
+When `PYTHONHASHSEED=0` is set, `_Py_HashRandomizationEnabled` is cleared
+and `_Py_HashSecret` is zeroed, giving deterministic hashes (useful for
+debugging reproducible builds).
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Python/bootstrap_hash.c" lines="1-60">1-60</Cpy> | file header / platform detection | Includes and compile-time selection of `MS_WINDOWS`, `HAVE_GETRANDOM`, `HAVE_GETENTROPY`, or `/dev/urandom` paths. | `pythonrun/bootstrap_hash.go` |
+| <Cpy path="Python/bootstrap_hash.c" lines="61-180">61-180</Cpy> | `_PyOS_URandom` / platform entropy readers | Reads `size` bytes of OS entropy into `buffer`. Dispatches to `getrandom(2)`, `getentropy(3)`, `/dev/urandom`, or `BCryptGenRandom` depending on the platform. | `pythonrun/bootstrap_hash.go:URandom` |
+| <Cpy path="Python/bootstrap_hash.c" lines="181-280">181-280</Cpy> | `lcg_urandom` | A 32-bit LCG fallback seeded from `time(NULL) ^ getpid()`. Used only when no OS entropy source is available. | `pythonrun/bootstrap_hash.go:lcgURandom` |
+| <Cpy path="Python/bootstrap_hash.c" lines="281-400">281-400</Cpy> | `_PyRandom_Init` | Called once at startup: checks `PYTHONHASHSEED`, fills `_Py_HashSecret` via `_PyOS_URandom` or a fixed seed, and sets `_Py_HashRandomizationEnabled`. | `pythonrun/bootstrap_hash.go:RandomInit` |
+| <Cpy path="Python/bootstrap_hash.c" lines="401-520">401-520</Cpy> | `_Py_HashSecret` union definition / `Py_HASHBITS` | The global 24-byte union; `Py_HASHBITS` is 61 on 64-bit platforms (Mersenne prime modulus) and 30 on 32-bit platforms. | `pythonrun/bootstrap_hash.go:HashSecret` |
+| <Cpy path="Python/bootstrap_hash.c" lines="521-600">521-600</Cpy> | `_Py_HashRandomizationEnabled` / `Py_HashRandomizationEnabled` | The public flag read by `sys.flags.hash_randomization`. Zero when `PYTHONHASHSEED=0`. | `pythonrun/bootstrap_hash.go:HashRandomizationEnabled` |
+
+## Reading
+
+### `_Py_HashSecret` union layout (lines 401 to 520)
+
+<CpyLink path="Python/bootstrap_hash.c" lines="401-520" />
+
+```c
+union {
+    /* All the same memory, just viewed differently */
+    unsigned char bytes[24];
+
+    struct {
+        Py_uhash_t prefix;
+        Py_uhash_t suffix;
+    } fnv;
+
+    struct {
+        uint64_t k0;
+        uint64_t k1;
+    } siphash;
+
+    struct {
+        uint16_t padding;
+        uint32_t m;
+        uint32_t s;
+    } djbx33a;
+} _Py_HashSecret_t;
+
+extern _Py_HashSecret_t _Py_HashSecret;
+```
+
+The `siphash` variant is used by the default SipHash-1-3 implementation
+(`Objects/hashlib.h`). `k0` seeds the first SipHash round constant and `k1`
+seeds the second. The `fnv` variant (used by the FNV-1a fallback) treats the
+same 24 bytes as `prefix XOR hash XOR suffix`. The `djbx33a` variant was
+added for the str hash when `--with-hash-algorithm=siphash13` is not
+selected on 32-bit builds.
+
+Because the union spans exactly 24 bytes, `_PyOS_URandom` fills the whole
+thing in one call with `_PyOS_URandom(&_Py_HashSecret, sizeof(_Py_HashSecret))`.
+The active variant is determined at compile time, not at runtime.
+
+### `_PyOS_URandom` (lines 61 to 180)
+
+<CpyLink path="Python/bootstrap_hash.c" lines="61-180" />
+
+```c
+int
+_PyOS_URandom(void *buffer, Py_ssize_t size)
+{
+    if (size < 0) {
+        PyErr_SetString(PyExc_ValueError, "negative count");
+        return -1;
+    }
+    if (size == 0) return 0;
+
+#if defined(MS_WINDOWS)
+    return win32_urandom((unsigned char *)buffer, size, 1);
+#elif defined(HAVE_GETRANDOM)
+    return py_getrandom(buffer, size, 1, 1);
+#elif defined(HAVE_GETENTROPY)
+    return py_getentropy(buffer, size, 1);
+#else
+    return dev_urandom_python(buffer, size);
+#endif
+}
+```
+
+The function tries the best available syscall in order of preference.
+`getrandom(2)` (Linux 3.17+, glibc 2.25+) is preferred because it avoids
+the file-descriptor lifecycle problems of `/dev/urandom`. `getentropy(3)`
+(macOS 10.12+, OpenBSD) is the second choice. `/dev/urandom` is the
+fallback on older POSIX systems; it is opened with `O_CLOEXEC | O_NONBLOCK`
+and read in a retry loop.
+
+On Windows, `BCryptGenRandom` (Vista+) is used in 3.12+. Earlier builds
+used `CryptGenRandom` from the legacy `CryptoAPI`. The `win32_urandom`
+wrapper handles both and converts failure to a `WindowsError` exception.
+
+`_PyOS_URandom` is also used by the `ssl` module and `os.urandom()`, not
+just by `_PyRandom_Init`. In gopy, `pythonrun/bootstrap_hash.go:URandom`
+delegates to `crypto/rand.Read` which provides the same contract on all
+Go-supported platforms.
+
+### `_PyRandom_Init` seed sequence (lines 281 to 400)
+
+<CpyLink path="Python/bootstrap_hash.c" lines="281-400" />
+
+```c
+static void
+_PyRandom_Init(void)
+{
+    char *seed_text = Py_GETENV("PYTHONHASHSEED");
+
+    if (seed_text && strcmp(seed_text, "random") != 0) {
+        char *endptr = seed_text;
+        unsigned long seed = strtoul(seed_text, &endptr, 10);
+        if (*endptr != '\0' || seed > 4294967295UL) {
+            Py_FatalError("PYTHONHASHSEED must be \"random\" or an integer "
+                          "in range [0; 4294967295]");
+        }
+        if (seed == 0) {
+            /* Disable randomization: zero the secret */
+            _Py_HashRandomizationEnabled = 0;
+            memset(&_Py_HashSecret, 0, sizeof(_Py_HashSecret));
+        } else {
+            _Py_HashRandomizationEnabled = 1;
+            lcg_urandom(seed, (unsigned char *)&_Py_HashSecret,
+                        sizeof(_Py_HashSecret));
+        }
+    } else {
+        _Py_HashRandomizationEnabled = 1;
+        if (_PyOS_URandom(&_Py_HashSecret, sizeof(_Py_HashSecret)) < 0) {
+            Py_FatalError("failed to get random bytes for hash secret");
+        }
+    }
+}
+```
+
+The seed sequence handles three cases. When `PYTHONHASHSEED` is absent or
+`"random"`, the secret is filled from the OS entropy source via
+`_PyOS_URandom`. When `PYTHONHASHSEED` is a numeric string greater than
+zero, the `lcg_urandom` LCG expands that 32-bit integer seed to fill the
+24-byte secret (useful for reproducible fuzzing). When `PYTHONHASHSEED=0`,
+the secret is zeroed and `_Py_HashRandomizationEnabled` is cleared, which
+causes `str.__hash__` and `bytes.__hash__` to skip the SipHash rounding and
+use the deterministic FNV path regardless of the compile-time hash selection.
+
+`_PyRandom_Init` is called from `_PyRuntimeState_Init` (since 3.14,
+gh-102160), before any allocator is active, so it uses no Python API and
+calls `Py_FatalError` on failure rather than raising a Python exception.
+
+## CPython 3.14 changes worth noting
+
+In 3.14, `_PyRandom_Init` was moved to `_PyRuntimeState_Init`
+(gh-102160), ensuring hash randomization happens before any allocator is
+active and before any `PyInterpreterState` exists. Previously it was called
+from `_Py_InitializeCore`. The `getrandom` call now uses `GRND_INSECURE`
+as a last resort when `GRND_NONBLOCK` would block and the interpreter is
+in pre-init (gh-91559). The 3.13 `--with-hash-algorithm=fnv` configure
+option is stable in 3.14 and primarily targets embedded systems without a
+reliable entropy source.

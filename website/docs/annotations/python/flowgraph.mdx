@@ -1,0 +1,342 @@
+---
+title: Python/flowgraph.c
+description: CFG builder, peephole optimizer, superinstruction fusion, cold-block separation, and localsplus layout.
+cpython_path: Python/flowgraph.c
+cpython_version: "3.14"
+lines: 4105
+status: annotated
+ported_to: compile/
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Python/flowgraph.c`
+
+<CpyLink path="Python/flowgraph.c" />
+
+The CFG optimizer. Receives a `cfg_builder` from [`compile.c`](compile),
+runs roughly nine passes to eliminate dead code, fold constants, fuse
+superinstructions, separate cold blocks, and fix up line numbers, then
+flattens the result back into an `instr_sequence` for [`assemble.c`](assemble).
+Nothing here touches the AST or the symbol table. All work is on
+`basicblock` linked lists and their `cfg_instr[]` arrays.
+
+The single public entry point that does everything at once is
+`_PyCfg_OptimizeCodeUnit`
+(<Cpy path="Python/flowgraph.c" lines="3629-3654">3629-3654</Cpy>).
+Pipeline I/O goes through
+`_PyCfg_FromInstructionSequence` and
+`_PyCfg_OptimizedCfgToInstructionSequence`
+(<Cpy path="Python/flowgraph.c" lines="3867-4105">3867-4105</Cpy>).
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Python/flowgraph.c" lines="99-165">99-165</Cpy> | `is_block_push`, `is_jump`, `basicblock_next_instr`, `basicblock_last_instr` | Block query helpers: classify instructions and find the last meaningful instruction. | `compile/flowgraph.go` |
+| <Cpy path="Python/flowgraph.c" lines="173-264">173-264</Cpy> | `cfg_builder_new_block`, `basicblock_addop`, `basicblock_add_jump`, `copy_basicblock` | Block construction: allocate a block, append instructions, add a jump, clone. | `compile/flowgraph.go` |
+| <Cpy path="Python/flowgraph.c" lines="331-490">331-490</Cpy> | `cfg_builder_use_next_block`, `_PyCfgBuilder_New/Free`, `_PyCfgBuilder_Addop/_UseLabel` | Public CFG builder API used by `codegen.c`. | `compile/flowgraph.go` |
+| <Cpy path="Python/flowgraph.c" lines="634-784">634-784</Cpy> | `translate_jump_labels_to_targets`, `mark_except_handlers`, `calculate_stackdepth` | Preprocessing passes: resolve virtual labels to block pointers, tag handler blocks, compute max stack depth. | `compile/flowgraph.go`, `compile/flowgraph_stackdepth.go` |
+| <Cpy path="Python/flowgraph.c" lines="885-994">885-994</Cpy> | `label_exception_targets` | Link `SETUP_FINALLY` / `SETUP_WITH` instructions to their handler `basicblock` via the exception table. | `compile/flowgraph_except.go` |
+| <Cpy path="Python/flowgraph.c" lines="995-1160">995-1160</Cpy> | `remove_unreachable`, `remove_redundant_nops`, `remove_redundant_nops_and_pairs` | Dead code elimination: unlink unreachable blocks, compact NOP runs, delete NOP+NOP pairs. | `compile/flowgraph_jumps.go` |
+| <Cpy path="Python/flowgraph.c" lines="1158-1261">1158-1261</Cpy> | `remove_redundant_jumps`, `inline_small_or_no_lineno_blocks` | Jump threading: eliminate jumps that fall through to the next block; fold single-instruction blocks into their predecessor. | `compile/flowgraph_jumps.go` |
+| <Cpy path="Python/flowgraph.c" lines="1263-1434">1263-1434</Cpy> | `jump_thread`, `loads_const`, `get_const_value`, `add_const`, `get_const_loading_instrs` | Constant helpers: test whether a sequence of instructions loads a known constant, retrieve and intern constant values. | `compile/flowgraph_passes.go` |
+| <Cpy path="Python/flowgraph.c" lines="1436-1827">1436-1827</Cpy> | `fold_tuple_of_constants`, `optimize_lists_and_sets`, `fold_const_binop`, `fold_const_unaryop` | Constant folding: pre-compute arithmetic, build literal tuples/sets at compile time. | `compile/flowgraph_passes.go` |
+| <Cpy path="Python/flowgraph.c" lines="1959-2281">1959-2281</Cpy> | `swaptimize`, `apply_static_swaps`, `basicblock_optimize_load_const` | `LOAD_CONST`/`SWAP` optimizer: eliminate swap pairs produced by comprehension and starred-assignment codegen. | `compile/flowgraph_passes.go` |
+| <Cpy path="Python/flowgraph.c" lines="2283-2539">2283-2539</Cpy> | `optimize_basic_block`, `optimize_cfg` | Per-block peephole driver and whole-CFG optimization loop. | `compile/flowgraph_passes.go` |
+| <Cpy path="Python/flowgraph.c" lines="2542-2606">2542-2606</Cpy> | `make_super_instruction`, `insert_superinstructions` | Fuse `LOAD_FAST a; LOAD_FAST b` into `LOAD_FAST_LOAD_FAST` and similar pairs. | `compile/flowgraph_passes.go` |
+| <Cpy path="Python/flowgraph.c" lines="2746-3031">2746-3031</Cpy> | `optimize_load_fast` | Ref-stack dataflow: eliminate redundant `LOAD_FAST_CHECK` guards when the variable is provably initialized. | `compile/flowgraph_passes.go` |
+| <Cpy path="Python/flowgraph.c" lines="3032-3243">3032-3243</Cpy> | `scan_block_for_locals`, `fast_scan_many_locals` | Insert `LOAD_FAST_CHECK` for potentially-uninitialized locals; fast path for large local counts. | `compile/flowgraph_passes.go` |
+| <Cpy path="Python/flowgraph.c" lines="3293-3454">3293-3454</Cpy> | `mark_warm/cold`, `push_cold_blocks_to_end` | Cold block separation: BFS-mark the hot path, then move cold blocks to the tail of the list. | `compile/flowgraph_passes.go` |
+| <Cpy path="Python/flowgraph.c" lines="3455-3628">3455-3628</Cpy> | `convert_pseudo_ops`, `duplicate_exits_without_lineno`, `propagate_line_numbers` | Late passes: replace pseudo-ops with real opcodes, clone exits that lack line info, fill in missing line numbers. | `compile/flowgraph_passes.go` |
+| <Cpy path="Python/flowgraph.c" lines="3629-3654">3629-3654</Cpy> | `_PyCfg_OptimizeCodeUnit` | Master optimizer entry point. Sequences all nine passes. | `compile/flowgraph.go` |
+| <Cpy path="Python/flowgraph.c" lines="3655-3866">3655-3866</Cpy> | `build_cellfixedoffsets`, `insert_prefix_instructions`, `fix_cell_offsets`, `prepare_localsplus` | Localsplus layout: assign cell slots, emit `MAKE_CELL`/`COPY_FREE_VARS`, compute `nlocalsplus`. | `compile/flowgraph.go` |
+| <Cpy path="Python/flowgraph.c" lines="3867-4105">3867-4105</Cpy> | `_PyCfg_FromInstructionSequence`, `_PyCfg_OptimizedCfgToInstructionSequence` | Pipeline I/O: build a CFG from the linear sequence; flatten the optimized CFG back out. | `compile/flowgraph.go` |
+
+## Reading
+
+### The CFG data structure (lines 99 to 188)
+
+<CpyLink path="Python/flowgraph.c" lines="99-188" />
+
+A `cfg_builder` owns a singly-linked list of `basicblock` nodes. Each
+`basicblock` holds a flat `cfg_instr[]` array, a pointer to the
+block's next sibling in the list, and bookkeeping fields for stack
+depth, predecessor count, and the warm/cold marker used by the cache
+pass.
+
+```c
+struct basicblock_ {
+    /* Each basicblock in a compilation unit is linked via b_list in the
+     * reverse order they are allocated. b_list points to the next block,
+     * not to be confused with b_next, which is next by control flow. */
+    struct basicblock_ *b_list;
+    /* The label of this block, determined by the first instruction */
+    _Py_BlockLabel b_label;
+    /* b_iused is the number of used instructions in b_instr[] */
+    int b_iused;
+    /* b_instr is an array of instructions, initially allocated
+       b_ialloc of them, b_ialloc grows as necessary to accommodate
+       more instructions */
+    int b_ialloc;
+    struct cfg_instr *b_instr;
+    /* the next block in the bytecode, or NULL */
+    struct basicblock_ *b_next;
+    ...
+};
+```
+
+Labels are virtual during emission. Codegen calls
+`_PyCfgBuilder_UseLabel` to mark the current block as the target of a
+label id, and `_PyCfgBuilder_Addop` emits instructions with label
+opargs. The first preprocessing pass,
+`translate_jump_labels_to_targets`
+(<Cpy path="Python/flowgraph.c" lines="634-680">634-680</Cpy>),
+walks every instruction and rewrites label opargs to direct
+`basicblock *` pointers, after which no label bookkeeping remains and
+every jump refers directly to its target block.
+
+### `_PyCfg_OptimizeCodeUnit`: the optimizer pipeline (lines 3629 to 3654)
+
+<CpyLink path="Python/flowgraph.c" lines="3629-3654" />
+
+```c
+int
+_PyCfg_OptimizeCodeUnit(cfg_builder *g, PyObject *consts, PyObject *const_cache,
+                        int nlocals, int nparams, int firstlineno)
+{
+    assert(cfg_builder_check(g));
+    /** Preprocessing **/
+    if (translate_jump_labels_to_targets(g) < 0) return ERROR;
+    if (mark_except_handlers(g) < 0) return ERROR;
+    if (label_exception_targets(g) < 0) return ERROR;
+    /** Optimization **/
+    if (optimize_cfg(g, consts, const_cache, nlocals, firstlineno) < 0) return ERROR;
+    if (remove_unused_consts(g, consts) < 0) return ERROR;
+    if (add_checks_for_loads_of_uninitialized_variables(g, nlocals, nparams) < 0) return ERROR;
+    if (insert_superinstructions(g) < 0) return ERROR;
+    /** Post-processing **/
+    if (push_cold_blocks_to_end(g) < 0) return ERROR;
+    if (resolve_line_numbers(g, firstlineno) < 0) return ERROR;
+    return SUCCESS;
+}
+```
+
+Nine passes in order. The first three are pure preprocessing: label
+resolution, exception handler marking, and exception table linkage.
+`optimize_cfg` does the bulk peephole and constant-folding work.
+`remove_unused_consts` prunes constants that folding made unreferenced.
+`add_checks_for_loads_of_uninitialized_variables` inserts
+`LOAD_FAST_CHECK` where needed. `insert_superinstructions` fuses
+adjacent `LOAD_FAST` pairs. `push_cold_blocks_to_end` reorders blocks
+for cache locality. Finally `resolve_line_numbers` propagates line
+information from the source mapping to every instruction.
+
+### `optimize_cfg`: per-optimization passes (lines 2523 to 2539)
+
+<CpyLink path="Python/flowgraph.c" lines="2523-2539" />
+
+```c
+static int
+optimize_cfg(cfg_builder *g, PyObject *consts, PyObject *const_cache,
+             int nlocals, int firstlineno)
+{
+    if (inline_small_or_no_lineno_blocks(g) < 0) return ERROR;
+    if (remove_unreachable(g) < 0) return ERROR;
+    if (resolve_line_numbers(g, firstlineno) < 0) return ERROR;
+    for (basicblock *b = g->g_entryblock; b != NULL; b = b->b_next) {
+        if (optimize_basic_block(g, b, consts) < 0) return ERROR;
+        assert(b->b_predecessors == 0);
+    }
+    if (remove_redundant_nops_and_pairs(g) < 0) return ERROR;
+    if (remove_unreachable(g) < 0) return ERROR;
+    if (remove_redundant_jumps(g) < 0) return ERROR;
+    return SUCCESS;
+}
+```
+
+`inline_small_or_no_lineno_blocks` folds trivial intermediate blocks
+before the main loop so that constant-propagation and peephole see
+merged instruction windows. `remove_unreachable` cuts any blocks that
+became disconnected. `resolve_line_numbers` runs before `optimize_basic_block`
+so that the per-block optimizer can make line-number-aware decisions
+(for instance when deciding whether to eliminate a NOP that carries a
+line number). The per-block peephole pass runs once per block, then
+cleanup removes leftover NOPs, redundant jumps, and unreachable
+blocks.
+
+### Constant folding (lines 1436 to 1827)
+
+<CpyLink path="Python/flowgraph.c" lines="1436-1827" />
+
+`fold_tuple_of_constants`
+(<Cpy path="Python/flowgraph.c" lines="1436-1496">1436-1496</Cpy>)
+detects a run of `LOAD_CONST` instructions immediately followed by
+`BUILD_TUPLE n`. If every preceding `LOAD_CONST` loads a value that is
+already in the constant pool, the pass replaces the entire sequence
+with a single `LOAD_CONST` of the pre-built tuple, converting the
+`BUILD_TUPLE` to a NOP and the individual loads to NOPs. The resulting
+tuple is interned into `consts` via `add_const`.
+
+`fold_const_binop`
+(<Cpy path="Python/flowgraph.c" lines="1694-1764">1694-1764</Cpy>)
+handles `LOAD_CONST a; LOAD_CONST b; BINARY_OP op`. It uses
+`PyNumber_Add`, `PyNumber_Multiply`, and the other `PyNumber_*` APIs
+to compute the result at compile time, but guards against pathological
+inputs:
+
+```c
+static int
+const_folding_safe_multiply(PyObject *left, PyObject *right, PyObject **result)
+{
+    if (PyLong_CheckExact(left) && PyLong_CheckExact(right)) {
+        if (const_folding_check_complexity(left, CONST_COMPLEXITY_LIMIT) < 0
+                || const_folding_check_complexity(right, CONST_COMPLEXITY_LIMIT) < 0) {
+            *result = NULL;
+            return SUCCESS;
+        }
+    }
+    *result = PyNumber_Multiply(left, right);
+    return *result == NULL ? ERROR : SUCCESS;
+}
+```
+
+`const_folding_check_complexity` counts the number of digits in a
+`PyLong` and refuses to fold if either operand exceeds
+`CONST_COMPLEXITY_LIMIT`. The limit was tightened in 3.14 after a
+denial-of-service report where a crafted source file triggered
+enormous intermediate integers during compilation. The same guard
+applies to left-shift (`const_folding_safe_lshift`) and exponentiation
+(`const_folding_safe_power`).
+
+`fold_const_unaryop`
+(<Cpy path="Python/flowgraph.c" lines="1766-1827">1766-1827</Cpy>)
+covers `UNARY_NEGATIVE`, `UNARY_INVERT`, and `UNARY_NOT` over
+`LOAD_CONST`.
+
+### `insert_superinstructions` (lines 2542 to 2606)
+
+<CpyLink path="Python/flowgraph.c" lines="2542-2606" />
+
+```c
+static int
+make_super_instruction(cfg_instr *inst1, cfg_instr *inst2, int super_op)
+{
+    int arg1 = inst1->i_oparg;
+    int arg2 = inst2->i_oparg;
+    /* Require both args to fit in 4 bits so the pair fits in one _Py_CODEUNIT */
+    if (arg1 < 16 && arg2 < 16) {
+        inst1->i_opcode = super_op;
+        inst1->i_oparg = arg1 << 4 | arg2;
+        inst2->i_opcode = NOP;
+        return 1;
+    }
+    return 0;
+}
+```
+
+`insert_superinstructions` walks every block looking for adjacent
+instruction pairs. `LOAD_FAST a; LOAD_FAST b` fuses into
+`LOAD_FAST_LOAD_FAST` with the combined oparg `a<<4 | b`. The same
+encoding handles `LOAD_FAST; STORE_FAST` via `LOAD_FAST_AND_CLEAR`
+and `STORE_FAST_LOAD_FAST`. The 4-bit constraint keeps both opargs in
+a single `_Py_CODEUNIT` word; functions with 16 or more locals do not
+benefit from superinstruction fusion for those locals.
+
+### Cold block separation (lines 3293 to 3454)
+
+<CpyLink path="Python/flowgraph.c" lines="3293-3454" />
+
+`mark_warm`
+(<Cpy path="Python/flowgraph.c" lines="3293-3350">3293-3350</Cpy>)
+runs a BFS from the entry block. It follows `b_next` (fall-through)
+and jump targets but stops at blocks already marked as exception
+handler targets by `mark_except_handlers`. Every block reachable
+through that traversal is tagged warm.
+
+`mark_cold`
+(<Cpy path="Python/flowgraph.c" lines="3352-3380">3352-3380</Cpy>)
+tags every block not reached by `mark_warm` as cold. Exception
+handlers and error recovery paths typically fall here.
+
+`push_cold_blocks_to_end`
+(<Cpy path="Python/flowgraph.c" lines="3382-3454">3382-3454</Cpy>)
+rebuilds the block list in two passes: first warm blocks in original
+order, then cold blocks appended at the tail. The assembler
+(`assemble.c`) emits blocks in list order, so warm blocks land at low
+offsets and fill the same cache lines as the entry code. Except
+handlers, which are rarely executed, end up at high offsets where
+their presence does not evict hot instructions from the instruction
+cache.
+
+### localsplus layout (lines 3655 to 3866)
+
+<CpyLink path="Python/flowgraph.c" lines="3655-3866" />
+
+`build_cellfixedoffsets`
+(<Cpy path="Python/flowgraph.c" lines="3655-3724">3655-3724</Cpy>)
+assigns each cell variable a slot in `localsplus` immediately after
+all fast locals. Cell slots that are also positional arguments get the
+argument's slot index rather than a new slot, so that `MAKE_CELL` can
+move the argument value into the cell in-place.
+
+`insert_prefix_instructions`
+(<Cpy path="Python/flowgraph.c" lines="3726-3810">3726-3810</Cpy>)
+prepends `MAKE_CELL` instructions for each cell variable and a
+`COPY_FREE_VARS n` instruction when the code object has free
+variables. These instructions execute at function entry before any
+user bytecode.
+
+`fix_cell_offsets`
+(<Cpy path="Python/flowgraph.c" lines="3812-3843">3812-3843</Cpy>)
+rewrites `LOAD_DEREF`, `STORE_DEREF`, `LOAD_CLASSDEREF`, and
+`DELETE_DEREF` opargs from symtable-relative cell indices to the
+absolute `localsplus` offsets assigned by `build_cellfixedoffsets`.
+
+`prepare_localsplus`
+(<Cpy path="Python/flowgraph.c" lines="3845-3866">3845-3866</Cpy>)
+finalises `nlocalsplus` by counting fast locals, cell variables, and
+free variables. That count becomes `co_nlocalsplus` in the resulting
+`PyCodeObject`.
+
+## gopy mirror
+
+`compile/flowgraph.go` holds the public driver (`Optimize`,
+`FromSequence`, `ToSequence`), the `BasicBlock` and `Builder` types,
+and the simplest passes (`translateJumpLabelsToTargets`,
+`removeUnreachable`, `removeRedundantNops`, `calculateStackdepth`).
+The larger panels are split by concern:
+
+* `compile/flowgraph_passes.go` covers constant folding,
+  `swaptimize`, `optimizeBasicBlock`, `optimizeCfg`,
+  `insertSuperinstructions`, `optimizeLoadFast`, and
+  `pushColdBlocksToEnd`.
+* `compile/flowgraph_jumps.go` covers jump threading and NOP removal.
+* `compile/flowgraph_stackdepth.go` covers `calculateStackdepth`.
+* `compile/flowgraph_except.go` covers `labelExceptionTargets` and
+  the exception table builder.
+
+Each optimizer pass is a Go function with the CPython name converted
+to camelCase. CPython citations in each function carry the filename
+and line number, for example `// CPython: Python/flowgraph.c:1436
+fold_tuple_of_constants`.
+
+## CPython 3.14 changes worth noting
+
+* `optimize_load_fast`
+  (<Cpy path="Python/flowgraph.c" lines="2746-3031">2746-3031</Cpy>)
+  was introduced in 3.13 to eliminate `LOAD_FAST_CHECK` guards by
+  tracking which locals are provably initialized via a ref-stack
+  dataflow analysis. In 3.14 it handles additional patterns introduced
+  by the tier-2 optimizer.
+* `const_folding_check_complexity` had its limit tightened in 3.14
+  after a denial-of-service report involving large integer
+  exponentiation in constant expressions.
+* `duplicate_exits_without_lineno`
+  (<Cpy path="Python/flowgraph.c" lines="3455-3530">3455-3530</Cpy>)
+  was added in 3.12. It clones exit blocks that lack a line number
+  annotation so that every exit gets the line number of its
+  predecessor, enabling accurate `co_linetable` entries for all paths.
+* The `LOAD_FAST_LOAD_FAST` and `STORE_FAST_LOAD_FAST` superinstructions
+  date to 3.12; 3.14 adds `LOAD_FAST_AND_CLEAR` to the set fused by
+  `insert_superinstructions`.

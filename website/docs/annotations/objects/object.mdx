@@ -1,0 +1,289 @@
+---
+title: Objects/object.c
+description: Base object lifecycle, repr/str/hash/comparison dispatch, refcount machinery, and the PyObject debug infrastructure.
+cpython_path: Objects/object.c
+cpython_version: "3.14"
+lines: 3395
+status: annotated
+ported_to: objects/object.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Objects/object.c`
+
+<CpyLink path="Objects/object.c" />
+
+Foundation of the object model. Provides `PyObject_Init`,
+`PyObject_Repr/Str/ASCII`, `PyObject_Hash`, `PyObject_RichCompare`,
+`PyObject_GetAttr/SetAttr`, `PyObject_IsTrue`, and the reference-count
+functions. Also contains the free-threaded reference count merge path
+(`_Py_MergeZeroLocalRefcount`) and the debug refchain infrastructure
+(`_Py_AddToAllObjects`).
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Objects/object.c" lines="48-270">48-270</Cpy> | `_PyObject_CheckConsistency`, `reftotal_add`, `_Py_FinalizeRefTotal`, `_PyRefchain_*`, `_Py_NegativeRefcount`, `Py_IncRef/DecRef`, `_Py_IncRef/_Py_DecRef` | Refcount debug helpers and the primary inc/dec entry points. | `objects/object.go` |
+| <Cpy path="Objects/object.c" lines="271-530">271-530</Cpy> | `_Py_DecRefSharedIsDead`, `_Py_DecRefShared`, `_Py_MergeZeroLocalRefcount`, `_Py_ExplicitMergeRefcount`, `_PyObject_ResurrectEndSlow` | Free-threaded refcount paths (compiled only under `Py_GIL_DISABLED`). | not ported (Go GC) |
+| <Cpy path="Objects/object.c" lines="530-575">530-575</Cpy> | `PyObject_Init`, `PyObject_InitVar`, `_PyObject_New`, `_PyObject_NewVar` | Allocators and type-member initialization. | `objects/object.go:Init` |
+| <Cpy path="Objects/object.c" lines="576-630">576-630</Cpy> | `PyObject_CallFinalizer`, `PyObject_CallFinalizerFromDealloc` | `tp_finalize` dispatch; handles the resurrection guard. | `objects/object.go:CallFinalizer` |
+| <Cpy path="Objects/object.c" lines="631-756">631-756</Cpy> | `PyObject_Print`, `_PyObject_Dump` | Debug printers; write repr to a FILE or stderr. | `objects/object.go:Dump` |
+| <Cpy path="Objects/object.c" lines="757-900">757-900</Cpy> | `PyObject_Repr`, `PyObject_Str`, `PyObject_ASCII` | String conversion dispatch via `tp_repr`/`tp_str`. | `objects/object.go:Repr`, `Str`, `ASCII` |
+| <Cpy path="Objects/object.c" lines="900-1100">900-1100</Cpy> | `PyObject_GetAttr`, `PyObject_GenericGetAttr`, `PyObject_SetAttr`, `PyObject_GenericSetAttr` | Attribute access and the generic MRO-based lookup. | `objects/object.go:GetAttr`, `SetAttr` |
+| <Cpy path="Objects/object.c" lines="1100-1350">1100-1350</Cpy> | `PyObject_RichCompare`, `PyObject_RichCompareBool`, `do_richcompare` | Rich comparison dispatch (`==`, `<`, `>`, etc.). | `objects/object.go:RichCompare` |
+| <Cpy path="Objects/object.c" lines="1350-1600">1350-1600</Cpy> | `PyObject_Hash`, `PyObject_HashNotImplemented`, `_Py_HashPointer`, `_Py_HashDouble`, `_Py_HashBytes` | Hash dispatch and the low-level hash primitives. | `objects/object.go:Hash` |
+| <Cpy path="Objects/object.c" lines="1600-1900">1600-1900</Cpy> | `PyObject_IsTrue`, `PyObject_Not`, `PyObject_Length`, `PyObject_LengthHint` | Truth testing and length/size protocol. | `objects/object.go:IsTrue`, `Length` |
+| <Cpy path="Objects/object.c" lines="1900-2200">1900-2200</Cpy> | `PyObject_Dir`, `_PyObject_GetMethod`, `_PyObject_NextNotImplemented` | `dir()` implementation and method lookup fast path. | `objects/object.go:Dir`, `GetMethod` |
+| <Cpy path="Objects/object.c" lines="2200-2600">2200-2600</Cpy> | `_PyObject_GetItemId`, `PyObject_GetItem`, `PyObject_SetItem`, `PyObject_DelItem` | Item access via `tp_as_mapping` and `tp_as_sequence`. | `objects/object.go:GetItem`, `SetItem` |
+| <Cpy path="Objects/object.c" lines="2600-3395">2600-3395</Cpy> | `PyObject_Format`, `_PyObject_IsAbstract`, `Py_ReprEnter/Leave`, `_Py_Dealloc`, type slot machinery | Formatting, cycle guard, and final deallocation path. | `objects/object.go:Format`, `Dealloc` |
+
+## Reading
+
+### Reference count basics (lines 335 to 360)
+
+<CpyLink path="Objects/object.c" lines="335-360" />
+
+```c
+void
+Py_IncRef(PyObject *o)
+{
+    if (_Py_IsImmortal(o)) {
+        return;
+    }
+    _Py_INCREF_STAT_INC();
+#ifdef Py_REF_DEBUG
+    reftotal_add(tstate, 1);
+#endif
+    o->ob_refcnt++;
+}
+
+void
+Py_DecRef(PyObject *o)
+{
+    if (_Py_IsImmortal(o)) {
+        return;
+    }
+    _Py_DECREF_STAT_INC();
+#ifdef Py_REF_DEBUG
+    reftotal_add(tstate, -1);
+#endif
+    if (--o->ob_refcnt == 0) {
+        _Py_Dealloc(o);
+    }
+#ifdef Py_GIL_DISABLED
+    else if (o->ob_refcnt < 0) {
+        _Py_NegativeRefcount(filename, lineno, o);
+    }
+#endif
+}
+```
+
+`Py_DecRef` calls `_Py_Dealloc` when the count hits zero. In
+free-threaded builds `Py_DecRef` delegates to `_Py_DecRefShared` for
+objects shared across threads. The immortal-object fast path
+(`_Py_IsImmortal`) skips the refcount update entirely for singletons
+like `None`, `True`, `False`, and small integers.
+
+### Free-threaded merge path (lines 435 to 493)
+
+<CpyLink path="Objects/object.c" lines="435-493" />
+
+```c
+void
+_Py_MergeZeroLocalRefcount(PyObject *op)
+{
+    // Only called when Py_GIL_DISABLED is defined.
+    // Each thread has a local refcount "bias"; when a thread drops
+    // its bias to zero, the object may reach zero globally.
+    Py_ssize_t shared = _Py_atomic_load_ssize_relaxed(&op->ob_ref_shared);
+    if (shared == 0) {
+        _Py_Dealloc(op);
+        return;
+    }
+    ...
+    // Merge local count into shared and check for true zero.
+}
+```
+
+Each thread maintains a local refcount bias to avoid atomic operations
+on every inc/dec. When a thread drops its local bias, it calls this
+function to merge into the shared count and deallocate if the combined
+count is truly zero. This function is compiled only when
+`Py_GIL_DISABLED` is defined (PEP 703, free-threaded CPython 3.13+).
+gopy does not port this path; Go's garbage collector handles object
+lifetime instead.
+
+### `PyObject_Repr` (lines 757 to 798)
+
+<CpyLink path="Objects/object.c" lines="757-798" />
+
+```c
+PyObject *
+PyObject_Repr(PyObject *v)
+{
+    PyObject *res;
+    if (PyErr_CheckSignals())
+        return NULL;
+    if (Py_ReprEnter(v) != 0)
+        return NULL;
+    res = (*Py_TYPE(v)->tp_repr)(v);
+    Py_ReprLeave(v);
+    if (res == NULL)
+        return NULL;
+    if (!PyUnicode_Check(res)) {
+        PyErr_Format(PyExc_TypeError,
+                     "__repr__ returned non-string (type %.200s)",
+                     Py_TYPE(res)->tp_name);
+        Py_DECREF(res);
+        return NULL;
+    }
+    return res;
+}
+```
+
+Calls `tp_repr`, checks the return is a str (raises `TypeError` if
+not), and enforces the `Py_ReprEnter`/`Py_ReprLeave` cycle guard. The
+guard is a per-thread set; if `v` is already in it, `Py_ReprEnter`
+returns non-zero and the call returns `NULL` without entering recursion,
+causing the caller to display `'...'` for the cycle. `Py_ReprLeave`
+removes the object from the set on exit.
+
+### `do_richcompare` (lines 1100 to 1200)
+
+<CpyLink path="Objects/object.c" lines="1100-1200" />
+
+```c
+static PyObject *
+do_richcompare(PyObject *v, PyObject *w, int op)
+{
+    richcmpfunc f;
+    PyObject *res;
+
+    if (!Py_IS_TYPE(v, Py_TYPE(w)) &&
+        PyType_IsSubtype(Py_TYPE(w), Py_TYPE(v)) &&
+        (f = Py_TYPE(w)->tp_richcompare) != NULL) {
+        res = (*f)(w, v, _Py_SwappedOp[op]);
+        if (res != Py_NotImplemented)
+            return res;
+        Py_DECREF(res);
+    }
+    if ((f = Py_TYPE(v)->tp_richcompare) != NULL) {
+        res = (*f)(v, w, op);
+        if (res != Py_NotImplemented)
+            return res;
+        Py_DECREF(res);
+    }
+    if ((f = Py_TYPE(w)->tp_richcompare) != NULL) {
+        res = (*f)(w, v, _Py_SwappedOp[op]);
+        if (res != Py_NotImplemented)
+            return res;
+        Py_DECREF(res);
+    }
+    /* If neither object implements it, provide a sensible default
+       for == and !=, but raise an exception for ordering. */
+    switch (op) {
+    case Py_EQ:
+        res = (v == w) ? Py_True : Py_False;
+        break;
+    case Py_NE:
+        res = (v != w) ? Py_True : Py_False;
+        break;
+    default:
+        PyErr_Format(PyExc_TypeError, ...);
+        return NULL;
+    }
+    return Py_NewRef(res);
+}
+```
+
+The engine behind `==`, `<`, `>`, etc. Tries `tp_richcompare` on the
+left operand, then the right (with the reflected operator via
+`_Py_SwappedOp`). Subtype operands get priority on the right-hand side
+to allow subclasses to override parent comparisons. Falls back to
+identity comparison for `==`/`!=`. Returns `NotImplemented` (not
+`None`) as the sentinel for unimplemented comparisons; callers convert
+that to `TypeError`.
+
+### `PyObject_Hash` (lines 1350 to 1450)
+
+<CpyLink path="Objects/object.c" lines="1350-1450" />
+
+```c
+Py_hash_t
+PyObject_Hash(PyObject *v)
+{
+    Py_uhash_t x;
+    hashfunc tp_hash = Py_TYPE(v)->tp_hash;
+    if (tp_hash != NULL)
+        return (*tp_hash)(v);
+    /* If there's no tp_hash but there is tp_richcompare, the object
+       defines __eq__ without __hash__ and is therefore unhashable. */
+    if (Py_TYPE(v)->tp_richcompare != NULL) {
+        PyErr_Format(PyExc_TypeError, "unhashable type: '%.200s'",
+                     Py_TYPE(v)->tp_name);
+        return -1;
+    }
+    return _Py_HashPointer(v);
+}
+```
+
+Calls `tp_hash`. If NULL, checks for `tp_richcompare` presence: an
+object that defines `__eq__` but not `__hash__` is unhashable by the
+data model, and the check enforces that. Falls back to
+`_Py_HashPointer` for objects with neither. The pointer hash function
+uses a Fibonacci-hashing multiply to spread the low bits so that
+sequential heap addresses do not cluster in hash tables.
+
+### `_Py_Dealloc` (lines 3300 to 3395)
+
+<CpyLink path="Objects/object.c" lines="3300-3395" />
+
+```c
+void
+_Py_Dealloc(PyObject *op)
+{
+    PyTypeObject *type = Py_TYPE(op);
+    destructor dealloc = type->tp_dealloc;
+#ifdef Py_DEBUG
+    _PyObject_CheckConsistency(op, 0);
+#endif
+    if (type->tp_finalize != NULL) {
+        if (PyObject_CallFinalizerFromDealloc(op) < 0) {
+            /* Resurrected */
+            return;
+        }
+    }
+    if (type->tp_free != NULL)
+        (*type->tp_free)(op);
+    else
+        dealloc(op);
+    ...
+}
+```
+
+Calls `tp_finalize` first if set, and checks whether the object was
+resurrected inside the finalizer (the resurrection guard). Then calls
+`tp_dealloc`. In debug builds, `_PyObject_CheckConsistency` runs before
+dealloc to catch inconsistent ob_type or ob_refcnt states. The type
+name is tracked for `sys.getobjects()`.
+
+In gopy, `_Py_Dealloc` maps to the Go garbage collector finalizer
+registered via `runtime.SetFinalizer`. The resurrection guard is not
+reproduced because Go's GC does not permit object resurrection.
+
+## gopy mirror
+
+`objects/object.go`. The dispatch functions (`Repr`, `Str`, `Hash`,
+`RichCompare`, `GetAttr`) are methods on `*Object`. The free-threaded
+refcount merge path is not ported; gopy uses Go's GC instead.
+`_Py_Dealloc` becomes the Go garbage collector finalizer registered via
+`runtime.SetFinalizer`.
+
+## CPython 3.14 changes
+
+Immortal objects (PEP 683) landed in 3.12. Free-threaded refcount
+biasing (`_Py_DecRefShared`, `_Py_MergeZeroLocalRefcount`) is new in
+3.13 (PEP 703). `_PyObject_ResurrectEndSlow` is a 3.14 addition to
+handle the resurrection race in the free-threaded GC.

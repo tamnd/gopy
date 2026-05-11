@@ -1,0 +1,204 @@
+---
+title: Python/pythonrun.c
+description: Top-level code execution: run a string or file as Python, compile source to AST, run the REPL loop, and handle SystemExit from top-level code.
+cpython_path: Python/pythonrun.c
+cpython_version: "3.14"
+lines: 1737
+status: annotated
+ported_to: pythonrun/runstring.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Python/pythonrun.c`
+
+<CpyLink path="Python/pythonrun.c" />
+
+The public "run Python code" API. `PyRun_SimpleStringFlags` is the entry
+point for `python -c "..."` and the `exec(string)` builtin at the top
+level. `PyRun_FileExFlags` covers `python script.py`. Both funnel through
+`run_mod`, which compiles a parsed AST (`mod_ty`) to a code object and
+then calls `run_eval_code_obj` to hand off to the eval loop.
+
+The file also contains the REPL (`_PyRun_InteractiveLoopObject`),
+`handle_system_exit` (the `SystemExit` handler that converts the Python
+exception into a process exit code), and `PyParser_ASTFromStringObject` /
+`PyParser_ASTFromFileObject` which are the pegen parse entry points used
+by the `compile()` builtin and the test suite.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Python/pythonrun.c" lines="1-80">1-80</Cpy> | file header / `fd_is_interactive` | Includes and a helper that tests whether a file descriptor is a tty for `__main__` interactive detection. | `pythonrun/runstring.go` |
+| <Cpy path="Python/pythonrun.c" lines="81-250">81-250</Cpy> | `handle_system_exit` | Catches `SystemExit` at the top level, extracts the exit code from `.code`, writes a string code to stderr, and calls `Py_Exit`. | `pythonrun/runstring.go:handleSystemExit` |
+| <Cpy path="Python/pythonrun.c" lines="251-480">251-480</Cpy> | `PyRun_SimpleStringFlags` / `PyRun_SimpleString` | Compile and execute a NUL-terminated string in `__main__`. The entry point for `-c` and `exec(src)`. | `pythonrun/runstring.go:RunSimpleString` |
+| <Cpy path="Python/pythonrun.c" lines="481-700">481-700</Cpy> | `PyRun_FileExFlags` / `PyRun_AnyFileExFlags` / `PyRun_InteractiveOneObjectEx` | Run a C `FILE *` as Python. `PyRun_AnyFileExFlags` dispatches to the REPL loop if the file is a tty. | `pythonrun/runstring.go:RunFileEx` |
+| <Cpy path="Python/pythonrun.c" lines="701-950">701-950</Cpy> | `run_mod` / `run_eval_code_obj` | Core execution path: compile `mod_ty` to a code object, build a `__main__` dict, call `PyEval_EvalCode`. | `pythonrun/runstring.go:runMod` |
+| <Cpy path="Python/pythonrun.c" lines="951-1200">951-1200</Cpy> | `PyParser_ASTFromStringObject` / `PyParser_ASTFromFileObject` | Parse source text (via pegen) into a `mod_ty` AST node. Used by `compile()` and the REPL. | `pythonrun/runstring.go:ASTFromString` |
+| <Cpy path="Python/pythonrun.c" lines="1201-1500">1201-1500</Cpy> | `_PyRun_InteractiveLoopObject` / `PyRun_InteractiveLoopFlags` | The REPL loop. Reads one statement at a time, compiles and executes each, prints results via `sys.displayhook`. | `pythonrun/runstring.go:InteractiveLoop` |
+| <Cpy path="Python/pythonrun.c" lines="1501-1737">1501-1737</Cpy> | `PyRun_StringFlags` / `Py_CompileStringExFlags` / `Py_CompileStringObject` | String-to-code-object pipeline: parse + compile in one call. These are the public C API entry points for `compile()`. | `pythonrun/runstring.go:CompileString` |
+
+## Reading
+
+### `run_mod` (lines 701 to 820)
+
+<CpyLink path="Python/pythonrun.c" lines="701-820" />
+
+```c
+static PyObject *
+run_mod(mod_ty mod, PyObject *filename, PyObject *globals, PyObject *locals,
+        PyCompilerFlags *flags, PyArena *arena, PyObject *interactive_src,
+        int generate_new_source)
+{
+    PyThreadState *tstate = _PyThreadState_GET();
+    PyCodeObject *co = _PyAST_Compile(mod, filename, flags, -1, arena);
+    if (co == NULL)
+        return NULL;
+    ...
+    PyObject *v = run_eval_code_obj(tstate, co, globals, locals);
+    Py_DECREF(co);
+    return v;
+}
+```
+
+`run_mod` is the junction between the compiler and the eval loop. It calls
+`_PyAST_Compile` (in `Python/compile.c`) to lower the `mod_ty` AST to a
+`PyCodeObject`, then immediately hands the code object to
+`run_eval_code_obj`. The arena passed in holds the AST nodes; it is freed
+by the caller after `run_mod` returns.
+
+The `interactive_src` / `generate_new_source` parameters are used by the
+REPL to attach the original source text to the code object for
+`sys.last_expr` (new in 3.14, gh-91058), so that the most recently entered
+expression is accessible from error handlers and debuggers.
+
+### `run_eval_code_obj` (lines 820 to 870)
+
+<CpyLink path="Python/pythonrun.c" lines="820-870" />
+
+```c
+static PyObject *
+run_eval_code_obj(PyThreadState *tstate, PyCodeObject *co,
+                  PyObject *globals, PyObject *locals)
+{
+    ...
+    if (globals == NULL) {
+        globals = PyEval_GetGlobals();
+        if (locals == NULL) {
+            locals = PyEval_GetLocals();
+            if (locals == NULL)
+                return NULL;
+        }
+    }
+    else if (locals == NULL)
+        locals = globals;
+
+    if (globals == NULL || locals == NULL) {
+        PyErr_SetString(PyExc_SystemError,
+            "globals and locals cannot both be NULL");
+        return NULL;
+    }
+    return PyEval_EvalCode((PyObject*)co, globals, locals);
+}
+```
+
+The globals/locals defaulting logic lives here, not in `PyRun_*`. When
+both are `NULL` (the typical top-level case), `globals` becomes the
+caller's global dict and `locals` becomes the caller's local namespace.
+When `globals` is given but `locals` is not, `locals` defaults to
+`globals`, which is the correct module-level behavior.
+
+`PyEval_EvalCode` is the public entry into the bytecode eval loop
+(`ceval.c`). After this call, `run_eval_code_obj` is a thin wrapper; all
+the interesting work happens in `_PyEval_EvalFrameDefault`.
+
+### `handle_system_exit` (lines 81 to 190)
+
+<CpyLink path="Python/pythonrun.c" lines="81-190" />
+
+```c
+static void
+handle_system_exit(void)
+{
+    PyObject *exc = _PyErr_GetRaisedException(tstate);
+    ...
+    PyObject *code = PyObject_GetAttr(exc, &_Py_ID(code));
+    ...
+    if (code == NULL || code == Py_None)
+        exitcode = 0;
+    else if (PyLong_Check(code)) {
+        exitcode = (int)PyLong_AsLong(code);
+        ...
+    } else {
+        PyObject *sys_stderr = _PySys_GetAttr(tstate, &_Py_ID(stderr));
+        if (sys_stderr != NULL && sys_stderr != Py_None) {
+            PyFile_WriteObject(code, sys_stderr, Py_PRINT_RAW);
+        }
+        ...
+        exitcode = 1;
+    }
+    ...
+    Py_Exit(exitcode);
+}
+```
+
+`handle_system_exit` is called from three places: `PyRun_SimpleStringFlags`,
+`PyRun_AnyFileExFlags`, and the REPL loop, whenever execution of top-level
+code raises `SystemExit`. The function extracts `.code` from the exception
+instance. Integer codes become the process exit code directly. String
+codes are written to `sys.stderr` (without a trailing newline) and the
+process exits with code `1`. A `None` code maps to `0`.
+
+After calling `Py_Exit` (which calls `Py_Finalize` then `exit(3)`), the
+function never returns. The `do {... } while (0)` cleanup block before the
+`Py_Exit` call is a safeguard for the error path where extracting `.code`
+itself raises.
+
+### `_PyRun_InteractiveLoopObject` (lines 1201 to 1400)
+
+<CpyLink path="Python/pythonrun.c" lines="1201-1400" />
+
+```c
+int
+_PyRun_InteractiveLoopObject(FILE *fp, PyObject *filename,
+                              PyCompilerFlags *flags)
+{
+    ...
+    do {
+        ret = PyRun_InteractiveOneObjectEx(fp, filename, flags);
+        if (ret == -1 && PyErr_Occurred()) {
+            if (PyErr_ExceptionMatches(PyExc_SystemExit)) {
+                handle_system_exit();
+            }
+            PyErr_Print();
+            ...
+        }
+    } while (ret != E_EOF);
+    ...
+}
+```
+
+The REPL loop. Each iteration calls `PyRun_InteractiveOneObjectEx`, which
+reads one statement using `PyParser_ASTFromFileObject` with `Py_single_input`
+mode (which compiles to a code object that passes the result of any
+expression through `sys.displayhook`). The loop continues until
+`E_EOF` is returned, which happens when the user types `Ctrl-D` (Unix)
+or `Ctrl-Z` (Windows).
+
+`SystemExit` raised during a REPL iteration is caught here and dispatched
+to `handle_system_exit` rather than printed as a traceback. All other
+unhandled exceptions are printed via `PyErr_Print` and the loop continues.
+`sys.ps1` and `sys.ps2` (the `>>> ` and `... ` prompts) are written by the
+tokenizer when it reads from a tty, not by this function.
+
+## CPython 3.14 changes worth noting
+
+`sys.last_expr` was added in 3.14 (gh-91058). The REPL stores the value of
+the last evaluated expression there so that `_` in the REPL and
+`sys.last_expr` in `except` hooks refer to the same object.
+`PyParser_ASTFromStringObject` no longer accepts `Py_eval_input` for
+multi-line strings in 3.13+; callers must use `Py_file_input` and strip
+the trailing expression themselves.
+The pegen parser replaced the old LL(1) parser in 3.9; these entry points
+have been pegen-only since then and are unchanged in 3.14.

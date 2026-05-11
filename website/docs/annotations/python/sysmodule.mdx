@@ -1,0 +1,222 @@
+---
+title: Python/sysmodule.c
+description: Implements the sys module, including argv, path, modules, version, platform, stdio streams, exc_info, exit, getframe, settrace, and interpreter startup population.
+cpython_path: Python/sysmodule.c
+cpython_version: "3.14"
+lines: 4522
+status: annotated
+ported_to: module/sys/module.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Python/sysmodule.c`
+
+<CpyLink path="Python/sysmodule.c" />
+
+The `sys` module. Every attribute that Python code reads from `sys` is
+either set here at interpreter startup or updated dynamically by functions
+in this file. The top half (~lines 1 to 2200) is the function table:
+C implementations for `sys.exit`, `sys.getframe`, `sys.exc_info`,
+`sys.intern`, `sys.settrace`, `sys.setprofile`, `sys.audit`, and dozens
+of smaller accessors. The bottom half (~lines 2200 to 4522) is the
+initialization path: `_PySys_InitMain` walks the process environment and
+the interpreter config to populate `sys.argv`, `sys.path`, `sys.modules`,
+`sys.version`, `sys.platform`, `sys.byteorder`, `sys.maxsize`, `sys.stdin`,
+`sys.stdout`, `sys.stderr`, `sys.__stdin__`, `sys.__stdout__`, and
+`sys.__stderr__`.
+
+`_PyAttrHasDefaultValue` and `_PySys_SetAttr` provide a thread-safe
+setter used both internally and from the public `PySys_SetObject` API.
+`sys_audit` implements the audit-hook dispatch added in PEP 578: it walks
+the per-interpreter hook list installed by `PySys_AddAuditHook` and calls
+each hook in registration order.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Python/sysmodule.c" lines="1-180">1-180</Cpy> | file header / `sys_audit_tstate` | Includes, forward declarations, and the inner audit dispatcher that walks `tstate->interp->audit_hooks`. | `module/sys/module.go:audit` |
+| <Cpy path="Python/sysmodule.c" lines="181-420">181-420</Cpy> | `sys_exit` / `sys_exc_info` / `sys_current_exceptions` / `sys_current_frames` | Core introspection builtins. `sys_exit` raises `SystemExit`; `sys_exc_info` returns the `(type, value, tb)` triple. | `module/sys/module.go:sysExit` |
+| <Cpy path="Python/sysmodule.c" lines="421-700">421-700</Cpy> | `sys_getframe` / `sys_getframemodulename` / `sys_getrecursionlimit` / `sys_setrecursionlimit` / `sys_intern` | Frame and limit accessors. `sys_getframe` walks the frame chain to depth N; `sys_intern` calls `PyUnicode_InternInPlace`. | `module/sys/module.go:sysGetFrame` |
+| <Cpy path="Python/sysmodule.c" lines="701-1000">701-1000</Cpy> | `sys_getprofile` / `sys_setprofile` / `sys_getprofilefunc` / `sys_gettrace` / `sys_settrace` / `sys_settrace_all_threads` | Profiling and tracing hooks. `sys_settrace` sets `tstate->c_tracefunc` and the corresponding `c_traceobj`. | `module/sys/module.go:sysSetTrace` |
+| <Cpy path="Python/sysmodule.c" lines="1001-1300">1001-1300</Cpy> | `sys_getwindowsversion` / `sys_getandroidapilevel` / `sys_getdlopenflags` / `sys_setdlopenflags` / `sys_getrefcount` / `sys_getsizeof` / `sys_getfilesystemencoding` | Platform and memory accessors. Mostly thin wrappers around fields of `PyInterpreterState` or `PyConfig`. | `module/sys/module.go:sysSizeOf` |
+| <Cpy path="Python/sysmodule.c" lines="1301-1600">1301-1600</Cpy> | `sys_audit` / `PySys_Audit` / `PySys_AddAuditHook` | Audit hook registration and dispatch (PEP 578). `PySys_AddAuditHook` is safe to call before `Py_Initialize`. | `module/sys/module.go:sysAudit` |
+| <Cpy path="Python/sysmodule.c" lines="1601-1900">1601-1900</Cpy> | `sys_getobjects` / `sys_unraisablehook` / `sys_excepthook` / `sys_displayhook` | Default hooks. `sys_displayhook` writes the repr of a non-None result to stdout and stores it in `_`. | `module/sys/module.go:sysDisplayHook` |
+| <Cpy path="Python/sysmodule.c" lines="1901-2200">1901-2200</Cpy> | `sys_methods` table / constant attributes | `PyMethodDef` array for all `sys` callables, plus the `PyMemberDef` and `PyGetSetDef` tables for attributes like `sys.flags` and `sys.float_info`. | `module/sys/module.go:sysMethods` |
+| <Cpy path="Python/sysmodule.c" lines="2201-2800">2201-2800</Cpy> | `make_sys_argv` / `sys_set_path` / `_PySys_SetStringWithError` / `_PySys_SetObjectId` | Helpers used by `_PySys_InitMain` to populate individual attributes. `make_sys_argv` converts the C `wchar_t **` argv into a Python list of strings. | `module/sys/module.go:initArgv` |
+| <Cpy path="Python/sysmodule.c" lines="2801-3600">2801-3600</Cpy> | `_PySys_InitMain` | Main startup sequence: populates `sys.argv`, `sys.path`, `sys.modules`, `sys.version`, `sys.platform`, `sys.byteorder`, `sys.executable`, and streams. | `module/sys/module.go:InitMain` |
+| <Cpy path="Python/sysmodule.c" lines="3601-4100">3601-4100</Cpy> | `_PySys_SetAttr` / `PySys_SetObject` / `PySys_GetObject` / `PySys_GetAttr` / `_PySys_GetOptionalAttr` | Public and internal `sys` attribute accessors used throughout the runtime. | `module/sys/module.go:SetAttr` |
+| <Cpy path="Python/sysmodule.c" lines="4101-4522">4101-4522</Cpy> | `PyModule_Create`-time module def / `_PySys_Create` | Allocate the `sys` module object, run `_PySys_InitMain`, and return it to the interpreter init sequence. | `module/sys/module.go:Create` |
+
+## Reading
+
+### `sys_exit` (lines 181 to 250)
+
+<CpyLink path="Python/sysmodule.c" lines="181-250" />
+
+```c
+static PyObject *
+sys_exit_impl(PyObject *module, PyObject *status)
+{
+    /* Raise SystemExit so callers may catch it or we'll exit. */
+    PyErr_SetObject(PyExc_SystemExit, status);
+    return NULL;
+}
+```
+
+`sys.exit` is one of the simplest functions in the file. It calls
+`PyErr_SetObject(PyExc_SystemExit, status)` and returns `NULL`. The calling
+convention for C functions means returning `NULL` with an active exception
+set propagates the exception up the call stack. There is no `exit(3)` call
+here. The eventual `exit` happens in `handle_system_exit` inside
+`pythonrun.c`, which catches `SystemExit` at the top of the interpreter
+loop, extracts the `code` attribute, and calls `Py_Exit`.
+
+The `status` argument defaults to `0` (via Argument Clinic's `= None`
+default rendered as `Py_None` and then tested for `None`). When `status`
+is a non-zero integer the exit code passed to `Py_Exit` is that integer.
+When it is a string, `handle_system_exit` writes it to `stderr` and exits
+with code `1`.
+
+In gopy, `module/sys/module.go:sysExit` raises `objects.SystemExit` via
+`errors.SetObject`, matching this behavior exactly.
+
+### `sys_getframe` (lines 490 to 570)
+
+<CpyLink path="Python/sysmodule.c" lines="490-570" />
+
+```c
+static PyObject *
+sys_getframe_impl(PyObject *module, int depth)
+{
+    PyFrameObject *f = PyThreadState_GetFrame(_PyThreadState_GET());
+    while (depth > 0 && f != NULL) {
+        PyFrameObject *back = PyFrame_GetBack(f);
+        Py_DECREF(f);
+        f = back;
+        --depth;
+    }
+    if (f == NULL) {
+        PyErr_SetString(PyExc_ValueError,
+            "call stack is not deep enough");
+        return NULL;
+    }
+    return (PyObject *)f;
+}
+```
+
+`sys._getframe(depth)` walks the chain of `PyFrameObject.f_back` pointers
+exactly `depth` steps, decrementing the reference count of each intermediate
+frame as it goes. The returned frame is a new reference. A `depth` of 0
+returns the immediate caller's frame; this is what `inspect.currentframe()`
+and `traceback.extract_stack()` use.
+
+The function is intentionally not marked as a public API. User code is
+expected to call it only through `inspect`; direct use is a C-extension
+pattern and is likely to break under alternative Python implementations.
+In gopy, walking the frame chain is done via `vm.CurrentFrame` which keeps
+frames as linked `*objects.Frame` values on the goroutine's eval stack.
+
+### `sys_settrace` (lines 820 to 920)
+
+<CpyLink path="Python/sysmodule.c" lines="820-920" />
+
+```c
+static PyObject *
+sys_settrace(PyObject *module, PyObject *o)
+{
+    if (o == Py_None)
+        PyEval_SetTrace(NULL, NULL);
+    else
+        PyEval_SetTrace(trace_trampoline, o);
+    Py_RETURN_NONE;
+}
+```
+
+`sys.settrace` delegates immediately to `PyEval_SetTrace` in `ceval.c`.
+`PyEval_SetTrace` sets `tstate->c_tracefunc` and `tstate->c_traceobj` on
+the current thread state. When `c_tracefunc` is non-NULL the eval loop
+calls it at `call`, `return`, `exception`, and `line` events. The
+trampoline `trace_trampoline` unwraps the Python callable from
+`tstate->c_traceobj` and invokes it with a three-argument `(frame, event,
+arg)` tuple.
+
+`sys.setprofile` is structurally identical, delegating to
+`PyEval_SetProfile`. The profile hook fires only on `call` and `return`
+events and does not receive `line` events; it has lower overhead and is
+what `cProfile` uses.
+
+`sys.settrace_all_threads` (added in 3.12) calls `PyEval_SetTrace` on
+every thread state in the interpreter, not just the calling thread. It
+acquires the interpreter's `threads_mutex` before iterating.
+
+### `sys_audit` / `PySys_Audit` (lines 1301 to 1500)
+
+<CpyLink path="Python/sysmodule.c" lines="1301-1500" />
+
+```c
+int
+PySys_Audit(const char *event, const char *argFormat, ...)
+{
+    ...
+    PyInterpreterState *interp = _PyInterpreterState_GET();
+    _Py_AuditHookEntry *e = interp->audit_hooks.head;
+    while (e != NULL) {
+        if (e->hookCFunction(event, eventArgs, e->userData) < 0) {
+            ...
+            return -1;
+        }
+        e = e->next;
+    }
+    ...
+    return 0;
+}
+```
+
+PEP 578 audit hooks fire whenever a security-sensitive operation is about
+to execute: `open`, `import`, `compile`, `exec`, `socket.connect`, and
+about 60 others. Each hook is a C function pointer with signature
+`int hook(const char *event, PyObject *args, void *userData)`.
+`PySys_AddAuditHook` registers hooks on the runtime (pre-init) or
+interpreter (post-init) hook list.
+
+The `sys.addaudithook` Python function adds a Python callable to the same
+list by wrapping it in a C trampoline. Hooks are called in FIFO order.
+A hook returning `-1` aborts the audit and propagates the exception to
+the caller. In gopy, `module/sys/module.go:sysAudit` maintains the same
+linked-list structure and call order.
+
+### `_PySys_InitMain` (lines 2801 to 3600)
+
+<CpyLink path="Python/sysmodule.c" lines="2801-3600" />
+
+`_PySys_InitMain` is called from `_Py_InitializeMain` in `pylifecycle.c`
+once the interpreter state and the `sys` module object both exist. It
+performs three broad tasks.
+
+First, it sets the invariant attributes: `sys.version`, `sys.version_info`,
+`sys.hexversion`, `sys.platform`, `sys.byteorder`, `sys.maxsize`,
+`sys.maxunicode`, `sys.float_info`, `sys.int_info`, `sys.hash_info`, and
+`sys.implementation`.
+
+Second, it converts the process argv and environment into Python objects.
+`make_sys_argv` converts the wide-char argv from `PyConfig.argv` into a
+list of `str`. `sys.path` is built from `PyConfig.module_search_paths`,
+prepending an empty string for `""` (meaning CWD) when the first element
+is empty.
+
+Third, it wires up the standard streams. `sys.stdin`, `sys.stdout`, and
+`sys.stderr` are created from `PyConfig.stdio_encoding` and
+`PyConfig.stdio_errors` using `io.open` on file descriptors 0, 1, and 2.
+The originals are also stored in `sys.__stdin__`, `sys.__stdout__`, and
+`sys.__stderr__` so user code can restore them after reassignment.
+
+## CPython 3.14 changes worth noting
+
+`sys.settrace_all_threads` and `sys.setprofile_all_threads` were added in
+3.12 and are unchanged in 3.14. `sys._getframe` gained a `depth` parameter
+default of `0` in 3.13 (it was positional-only with no default before).
+`sys.audit` is now also checked during `import` of frozen modules (gh-90867).
+`sys._monitoring` (PEP 669) appears as a submodule of `sys` in 3.12+ but
+its implementation lives in `Python/instrumentation.c`, not here.

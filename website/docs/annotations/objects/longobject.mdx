@@ -1,0 +1,216 @@
+---
+title: Objects/longobject.c
+description: Arbitrary-precision integer object. Digit array storage, compact small-int representation, arithmetic, and conversion to/from C types and strings.
+cpython_path: Objects/longobject.c
+cpython_version: "3.14"
+lines: 6871
+status: annotated
+ported_to: objects/long.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Objects/longobject.c`
+
+<CpyLink path="Objects/longobject.c" />
+
+CPython integers use a variable-length digit array. Each digit is 30 bits wide
+on 64-bit platforms. Small integers (-5 to 256) are cached as immortal
+singletons at interpreter startup. In 3.12 and later, compact integers (those
+that fit in one digit) use a two-word layout where the digit is stored inline
+in `ob_digit[0]` without a separate heap allocation. The sign is encoded in the
+`lv_tag` field of `PyLongObject`. Arithmetic dispatches through the `nb_*`
+numeric slots. String conversion uses Knuth-style radix algorithms. The hash
+reduces the integer modulo `_PyHASH_MODULUS` (2^61 - 1 on 64-bit) so that
+equal integers and floats always produce equal hashes.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Objects/longobject.c" lines="1-200">1-200</Cpy> | `_PyLong_IsNonNegativeCompact`, `_PyLong_IsCompact`, `_PyLong_CompactValue`, digit layout macros | Tag-bit layout and inline compact-int accessors. | `objects/long.go` |
+| <Cpy path="Objects/longobject.c" lines="200-600">200-600</Cpy> | `_PyLong_New`, `_PyLong_Copy`, `PyLong_FromLong`, `PyLong_FromUnsignedLong`, `PyLong_FromDouble`, `PyLong_FromVoidPtr` | Allocation and construction from C types. | `objects/long.go:NewLong` |
+| <Cpy path="Objects/longobject.c" lines="600-1200">600-1200</Cpy> | `PyLong_AsLong`, `PyLong_AsUnsignedLong`, `PyLong_AsLongLong`, `PyLong_AsDouble`, `PyLong_AsVoidPtr`, `_PyLong_AsInt` | Extraction to C numeric types with overflow checking. | `objects/long.go` |
+| <Cpy path="Objects/longobject.c" lines="1200-1800">1200-1800</Cpy> | `PyLong_FromString`, `PyLong_FromUnicodeObject` | String parsing with arbitrary radix. | `objects/long.go:LongFromString` |
+| <Cpy path="Objects/longobject.c" lines="1800-2400">1800-2400</Cpy> | `long_to_decimal_string`, `long_format` | Number-to-string conversion for `repr` and `str`. | `objects/long.go:longFormat` |
+| <Cpy path="Objects/longobject.c" lines="2400-3000">2400-3000</Cpy> | `long_add`, `long_sub`, `long_mul`, `long_neg`, `long_abs` | Digit-level addition, subtraction, multiplication, negation, absolute value. | `objects/long.go:longAdd` |
+| <Cpy path="Objects/longobject.c" lines="3000-3600">3000-3600</Cpy> | `long_divrem`, `long_div`, `long_mod`, `long_divmod` | Multi-precision division using Knuth Algorithm D. | `objects/long.go:longDivrem` |
+| <Cpy path="Objects/longobject.c" lines="3600-4200">3600-4200</Cpy> | `long_pow` | Binary exponentiation (square-and-multiply). | `objects/long.go:longPow` |
+| <Cpy path="Objects/longobject.c" lines="4200-4800">4200-4800</Cpy> | `long_lshift`, `long_rshift`, `long_and`, `long_xor`, `long_or` | Bit operations on the digit array. | `objects/long.go:longLshift` |
+| <Cpy path="Objects/longobject.c" lines="4800-5400">4800-5400</Cpy> | `long_richcompare`, `long_hash` | Comparison and hash; hash reduces mod 2^61-1. | `objects/long.go:longHash` |
+| <Cpy path="Objects/longobject.c" lines="5400-6871">5400-6871</Cpy> | `long_repr`, `long_new`, `_PyLong_Init`, `PyUnstable_Long_IsCompact`, `PyLong_GetSign` | Repr, constructor, small-int cache init, public compact-int API. | `objects/long.go:longRepr` |
+
+## Reading
+
+### Compact integers (lines 1 to 200)
+
+<CpyLink path="Objects/longobject.c" lines="1-200" />
+
+Since 3.12, integers whose absolute value is less than 2^30 use a two-word
+`PyLongObject` layout. The digit value is stored directly in `ob_digit[0]` and
+the sign is encoded in `lv_tag`. No separate heap allocation is needed for the
+digit array.
+
+```c
+static inline int
+_PyLong_IsCompact(const PyLongObject *op) {
+    return op->long_value.lv_tag < (2 << NON_SIZE_BITS);
+}
+
+static inline Py_ssize_t
+_PyLong_CompactValue(const PyLongObject *op) {
+    Py_ssize_t sign = 1 - (op->long_value.lv_tag & 3);
+    return sign * (Py_ssize_t)op->long_value.ob_digit[0];
+}
+```
+
+The bottom two bits of `lv_tag` encode the sign: `0` means positive, `2` means
+negative, and `1` is reserved for the zero singleton. The remaining bits encode
+the digit count for non-compact integers, which allows the compact check to be
+a single unsigned compare.
+
+### Small-int cache: `_PyLong_Init` (lines 5400 to 6871)
+
+<CpyLink path="Objects/longobject.c" lines="5400-6871" />
+
+At interpreter startup `_PyLong_Init` pre-allocates integer objects for the
+range -5 to 256. These objects are immortal: their reference counts are never
+decremented. `PyLong_FromLong` checks the requested value against this range
+and returns the cached pointer without touching the allocator:
+
+```c
+#define NSMALLNEGINTS 5
+#define NSMALLPOSINTS 257
+
+static PyLongObject small_ints[NSMALLNEGINTS + NSMALLPOSINTS];
+
+PyObject *
+PyLong_FromLong(long ival)
+{
+    if (ival >= -NSMALLNEGINTS && ival < NSMALLPOSINTS) {
+        PyLongObject *v = &small_ints[ival + NSMALLNEGINTS];
+        return (PyObject *)Py_NewRef(v);
+    }
+    /* slow path: allocate */
+    ...
+}
+```
+
+The cache covers the most common loop counters, boolean-like integers, and
+ASCII code points. Returning a cached pointer avoids both allocation and
+deallocation for the lifetime of the interpreter.
+
+### `long_add` (lines 2400 to 2600)
+
+<CpyLink path="Objects/longobject.c" lines="2400-2600" />
+
+Addition dispatches on whether the two operands have the same sign. For
+same-sign operands it walks the digit arrays left-to-right adding corresponding
+digits plus any carry. For different-sign operands it subtracts the smaller
+absolute value from the larger and copies the sign of the larger:
+
+```c
+static PyLongObject *
+x_add(PyLongObject *a, PyLongObject *b)
+{
+    Py_ssize_t size_a = Py_ABS(Py_SIZE(a));
+    Py_ssize_t size_b = Py_ABS(Py_SIZE(b));
+    PyLongObject *z = _PyLong_New(size_a < size_b ? size_b + 1 : size_a + 1);
+    digit carry = 0;
+    Py_ssize_t i;
+    for (i = 0; i < size_b; ++i) {
+        carry += a->long_value.ob_digit[i] + b->long_value.ob_digit[i];
+        z->long_value.ob_digit[i] = carry & PyLong_MASK;
+        carry >>= PyLong_SHIFT;
+    }
+    for (; i < size_a; ++i) {
+        carry += a->long_value.ob_digit[i];
+        z->long_value.ob_digit[i] = carry & PyLong_MASK;
+        carry >>= PyLong_SHIFT;
+    }
+    z->long_value.ob_digit[i] = carry;
+    return long_normalize(z);
+}
+```
+
+`PyLong_SHIFT` is 30 on 64-bit platforms. `PyLong_MASK` is `(1 << 30) - 1`.
+`long_normalize` trims leading zero digits and sets `ob_size`.
+
+### `long_divrem`: Knuth Algorithm D (lines 3000 to 3200)
+
+<CpyLink path="Objects/longobject.c" lines="3000-3200" />
+
+Multi-precision division uses Knuth's Algorithm D (TAOCP Vol. 2, Section 4.3.1).
+The divisor is left-shifted until its most-significant digit is at least 2^29,
+ensuring that trial quotient digits are accurate to within one. After division
+the remainder is right-shifted by the same amount:
+
+```c
+static int
+inplace_divrem1(digit *pout, digit *pin, Py_ssize_t size, digit n)
+{
+    twodigits rem = 0;
+    pin += size;
+    pout += size;
+    while (--size >= 0) {
+        digit hi;
+        rem = (rem << PyLong_SHIFT) | *--pin;
+        *--pout = hi = (digit)(rem / n);
+        rem -= (twodigits)hi * n;
+    }
+    return (digit)rem;
+}
+```
+
+Single-digit divisors use this fast path. For multi-digit divisors the full
+Algorithm D loop normalizes, computes trial digits, and corrects by at most one
+step.
+
+### `long_hash` (lines 4800 to 5000)
+
+<CpyLink path="Objects/longobject.c" lines="4800-5000" />
+
+The hash maps an arbitrary-precision integer to the same value as `hash()` of
+the equal float. It reduces the integer modulo `_PyHASH_MODULUS` (2^61 - 1 on
+64-bit). Each 30-bit digit at position `i` contributes `digit * 2^(30*i) mod M`.
+The identity 2^61 ≡ 1 (mod M) allows reduction using only 30-bit shifts:
+
+```c
+static Py_hash_t
+long_hash(PyLongObject *v)
+{
+    Py_uhash_t x = 0;
+    Py_ssize_t i = Py_ABS(Py_SIZE(v));
+    while (--i >= 0) {
+        x = ((x << PyLong_SHIFT) & _PyHASH_MODULUS) |
+             x >> (_PyHASH_BITS - PyLong_SHIFT);
+        x += v->long_value.ob_digit[i];
+        if (x >= (Py_uhash_t)_PyHASH_MODULUS)
+            x -= _PyHASH_MODULUS;
+    }
+    if (Py_SIZE(v) < 0)
+        x = _PyHASH_MODULUS - x;
+    if (x == (Py_uhash_t)-1)
+        x = -2;
+    return (Py_hash_t)x;
+}
+```
+
+The rotate-and-add loop accumulates digits from most-significant to
+least-significant. The final check avoids returning -1, which CPython reserves
+as the error sentinel for `tp_hash`.
+
+## gopy mirror
+
+`objects/long.go`. Compact representation is preserved. Digit width is 30 bits.
+The small-int cache is a `[]*Long` slice indexed by `value + 5`. Arithmetic
+delegates to `math/big.Int` for values outside the compact fast path, with the
+digit-level algorithms ported directly for the hot cases.
+
+## CPython 3.14 changes
+
+The compact integer layout has been stable since 3.12. `PyUnstable_Long_IsCompact`
+and `PyUnstable_Long_CompactValue` are the public C extension API for reading
+compact integers without touching the internal layout. `PyLong_GetSign` was
+added in 3.14 as a stable API that returns -1, 0, or 1. PEP 649 has no effect
+on integer objects.

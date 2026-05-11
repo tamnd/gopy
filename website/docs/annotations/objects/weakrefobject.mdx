@@ -1,0 +1,216 @@
+---
+title: Objects/weakrefobject.c
+description: Weak reference and proxy objects. Per-object doubly-linked weak-ref list, callback dispatch on deallocation, and proxy forwarding to live referents.
+cpython_path: Objects/weakrefobject.c
+cpython_version: "3.14"
+lines: 1200
+status: annotated
+ported_to: objects/weakref.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Objects/weakrefobject.c`
+
+<CpyLink path="Objects/weakrefobject.c" />
+
+Weak references let code hold a pointer to an object without preventing its
+deallocation. Every weakly-referenced object carries a `tp_weaklistoffset`
+field that points to a `PyObject *` slot inside the object struct; that slot
+is the head of a doubly-linked list of `PyWeakReference` objects. When the
+referent's reference count drops to zero, `tp_dealloc` calls
+`PyObject_ClearWeakRefs` before freeing memory. `ClearWeakRefs` iterates the
+list, sets each `wr_object` to `Py_None`, and calls any registered callbacks.
+
+`PyWeakref_NewRef` and `PyWeakref_NewProxy` are the two factory functions.
+They check whether an identical weak reference (same referent, same callback)
+already exists in the list and return that cached copy instead of allocating
+a new one, so that `weakref.ref(x) is weakref.ref(x)` holds for callback-free
+references to the same object.
+
+Proxy types (`PyWeakProxy_Type` for non-callables and
+`PyWeakCallableProxy_Type` for callables) forward every operation to the live
+referent. If the referent is dead, every slot raises `ReferenceError`.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Objects/weakrefobject.c" lines="1-80">1-80</Cpy> | `PyWeakReference` struct, `init_weakref`, `new_weakref` | Struct layout (wr_object, wr_callback, wr_hash, wr_prev, wr_next); allocator helpers. | `objects/weakref.go:WeakRef` |
+| <Cpy path="Objects/weakrefobject.c" lines="81-250">81-250</Cpy> | `PyWeakref_NewRef`, `PyWeakref_NewProxy`, `get_basic_refs`, `insert_head`, `insert_after` | Factory functions; list-search for reuse, list-insertion helpers. | `objects/weakref.go:NewWeakRef`, `NewWeakProxy` |
+| <Cpy path="Objects/weakrefobject.c" lines="251-400">251-400</Cpy> | `PyObject_ClearWeakRefs`, `handle_callback` | Called by `tp_dealloc`: clear list, queue callbacks, call them. | `objects/weakref.go:ClearWeakRefs` |
+| <Cpy path="Objects/weakrefobject.c" lines="401-550">401-550</Cpy> | `weakref_hash`, `weakref_repr`, `weakref_richcompare`, `weakref_call` | Hash (delegates to referent, cached in wr_hash), repr, equality by identity, calling the referent. | `objects/weakref.go:weakrefHash`, `weakrefRepr` |
+| <Cpy path="Objects/weakrefobject.c" lines="551-700">551-700</Cpy> | `weakref_dealloc`, `weakref_traverse`, `_PyWeakref_GetWeakrefCount`, `PyWeakref_GetObject` | Deallocation (unlink from list), GC traversal, count query, referent accessor. | `objects/weakref.go:(*WeakRef).Get` |
+| <Cpy path="Objects/weakrefobject.c" lines="701-850">701-850</Cpy> | `PyWeakref_Type`, `proxy_checkref`, proxy slot implementations (nb_add through sq_item) | Type object for `weakref.ref`; proxy helper macro and numeric/sequence slot forwarders. | `objects/weakref.go:WeakRefType` |
+| <Cpy path="Objects/weakrefobject.c" lines="851-1050">851-1050</Cpy> | Proxy mapping/attribute/call slots, `proxy_repr`, `proxy_str`, `proxy_richcompare` | Remaining proxy forwarding: `tp_getattr`, `tp_setattr`, `tp_call`, comparison. | `objects/weakref.go:proxyGetAttr` |
+| <Cpy path="Objects/weakrefobject.c" lines="1051-1200">1051-1200</Cpy> | `PyWeakProxy_Type`, `PyWeakCallableProxy_Type` | Type objects for non-callable and callable proxies. | `objects/weakref.go:WeakProxyType`, `WeakCallableProxyType` |
+
+## Reading
+
+### Struct layout and list management (lines 1 to 80)
+
+<CpyLink path="Objects/weakrefobject.c" lines="1-80" />
+
+Each `PyWeakReference` embeds five fields beyond the standard object header:
+
+```c
+struct _PyWeakReference {
+    PyObject_HEAD
+    PyObject *wr_object;    /* weakly referenced object; Py_None when dead */
+    PyObject *wr_callback;  /* callable or NULL */
+    Py_hash_t wr_hash;      /* cached hash of wr_object (-1 = not yet set) */
+    PyWeakReference *wr_prev; /* doubly-linked list */
+    PyWeakReference *wr_next;
+};
+```
+
+The list is anchored by the `tp_weaklistoffset` slot of the referent.
+`insert_head` puts a new reference at the front; `insert_after` places it
+after an existing reference (used to group callback-free refs first in the
+list so that `get_basic_refs` can locate them in O(1)). This ordering allows
+`PyWeakref_NewRef` to find and return a cached callback-free reference
+without scanning the full list.
+
+### `PyWeakref_NewRef` (lines 81 to 180)
+
+<CpyLink path="Objects/weakrefobject.c" lines="81-180" />
+
+```c
+PyObject *
+PyWeakref_NewRef(PyObject *ob, PyObject *callback)
+{
+    PyWeakReference *result = NULL;
+    PyWeakReference **list;
+    PyWeakReference *ref, *proxy;
+
+    if (!PyType_SUPPORTS_WEAKREFS(Py_TYPE(ob))) {
+        PyErr_Format(PyExc_TypeError,
+                     "cannot create weak reference to '%s' object",
+                     Py_TYPE(ob)->tp_name);
+        return NULL;
+    }
+    list = GET_WEAKREFS_LISTPTR(ob);
+    get_basic_refs(*list, &ref, &proxy);
+    if (callback == Py_None)
+        callback = NULL;
+    if (callback == NULL)
+        /* Attempt to return an existing, no-callback reference. */
+        result = (PyWeakReference *)Py_XNewRef(ref);
+    if (result == NULL) {
+        result = new_weakref(ob, callback);
+        if (result != NULL) {
+            if (callback == NULL)
+                insert_head(result, list);
+            else
+                insert_after(result, *list ? *list : NULL);
+        }
+    }
+    return (PyObject *)result;
+}
+```
+
+If the object type does not declare `tp_weaklistoffset`, the object cannot be
+weakly referenced and a `TypeError` is raised. Otherwise, `get_basic_refs`
+peeks at the first element (callback-free ref) and the second (callback-free
+proxy); if either matches the request, it is returned with an incremented
+reference count. This makes repeated `weakref.ref(obj)` calls cheap.
+
+### `PyObject_ClearWeakRefs` (lines 251 to 400)
+
+<CpyLink path="Objects/weakrefobject.c" lines="251-400" />
+
+Called by every `tp_dealloc` that participates in weak references, before
+any memory is freed:
+
+```c
+void
+PyObject_ClearWeakRefs(PyObject *object)
+{
+    PyWeakReference **list = GET_WEAKREFS_LISTPTR(object);
+
+    /* Examine all callbacks; batch them into a list. */
+    while (*list != NULL) {
+        PyWeakReference *current = *list;
+        Py_ssize_t count = _PyWeakref_GetWeakrefCount(*list);
+        int restore_error = PyErr_Occurred() ? 1 : 0;
+        PyObject *err_type, *err_value, *err_tb;
+
+        if (restore_error)
+            PyErr_Fetch(&err_type, &err_value, &err_tb);
+
+        /* Nullify the object pointer in every reference in the list. */
+        if (current->wr_callback == NULL) {
+            /* No callback: clear and move on. */
+            clear_weakref(current);
+            ...
+        }
+        else {
+            /* Batch all refs with callbacks, call them. */
+            ...
+            handle_callback(current, current->wr_callback);
+        }
+        if (restore_error)
+            PyErr_Restore(err_type, err_value, err_tb);
+    }
+}
+```
+
+The object pointer `wr_object` is set to `Py_None` before any callback is
+called, so a callback that tries to dereference the weak reference sees a
+dead ref rather than a half-freed object. If an in-progress exception exists
+when `ClearWeakRefs` is called (which happens inside `tp_dealloc` during GC),
+it is saved and restored around the callback invocations.
+
+### Proxy forwarding (lines 701 to 1200)
+
+<CpyLink path="Objects/weakrefobject.c" lines="701-1200" />
+
+Proxy slots use a `proxy_checkref` guard before every operation:
+
+```c
+#define UNWRAP(o)  PyWeakref_GET_OBJECT(o)
+
+#define WRAP_UNARY(method, generic) \
+    static PyObject * \
+    method(PyObject *proxy) { \
+        UNWRAP_I(proxy); \
+        return generic(proxy); \
+    }
+```
+
+`UNWRAP_I` expands to:
+
+```c
+if (!PyWeakref_IS_ALIVE(proxy)) {
+    PyErr_SetString(PyExc_ReferenceError,
+                    "weakly-referenced object no longer exists");
+    return NULL; \
+}
+proxy = PyWeakref_GET_OBJECT(proxy);
+```
+
+Every numeric slot (`nb_add`, `nb_subtract`, ...), sequence slot
+(`sq_item`, `sq_contains`), mapping slot, and attribute slot is wrapped
+this way. `PyWeakCallableProxy_Type` adds `tp_call` forwarding on top,
+which is what allows `proxy(args)` to work when the referent is callable.
+The two proxy type objects share the same slot tables except for `tp_call`
+and `tp_flags`.
+
+## gopy mirror
+
+`objects/weakref.go`. `PyWeakReference` maps to `WeakRef` with Go fields
+`Object *Object`, `Callback *Object`, `Hash int64`, `Prev *WeakRef`, and
+`Next *WeakRef`. The weak-ref list head is stored as `**WeakRef` obtained
+from the `WeakList` method on objects that support weak references.
+`ClearWeakRefs` is called from each type's `Dealloc` method.
+`PyWeakProxy_Type` and `PyWeakCallableProxy_Type` map to `WeakProxyType`
+and `WeakCallableProxyType` in the same file.
+
+## CPython 3.14 changes
+
+The doubly-linked list design has been stable since Python 2.2. In 3.12,
+`PyWeakref_GetObject` was joined by `PyWeakref_GetRef` (PEP 699), which
+returns a strong reference and removes the race window where the referent
+could be deallocated between the liveness check and the use.
+`Py_NewRef`/`Py_CLEAR` macros replace the older
+`Py_INCREF`/`Py_XDECREF` style throughout the file in 3.14.

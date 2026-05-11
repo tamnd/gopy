@@ -1,0 +1,184 @@
+---
+title: Objects/structseq.c
+description: PyStructSequence dynamically creates named-tuple-like types for C-defined structs such as os.stat_result and sys.version_info.
+cpython_path: Objects/structseq.c
+cpython_version: "3.14"
+lines: 700
+status: annotated
+ported_to: objects/structseq.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Objects/structseq.c`
+
+<CpyLink path="Objects/structseq.c" />
+
+`PyStructSequence` is the base for C-defined named-tuple-like types used
+throughout the standard library: `os.stat_result`, `sys.version_info`,
+`time.struct_time`, and others. Each type is a `tuple` subclass. The items at
+known indices are the public fields; additional items beyond `n_sequence_fields`
+are hidden from iteration and only accessible by name.
+
+A type is created at runtime by calling `PyStructSequence_InitType2` with a
+`PyStructSequence_Desc` that lists the field names and per-field docstrings. The
+function constructs a `PyTypeObject` that subclasses `tuple`, populates
+`tp_doc`, installs a `__match_args__` tuple for structural pattern matching, and
+adds a `PyMemberDef`-like descriptor for each field that reads `ob_item[index]`.
+
+Instances are created by `structseq_new`, which accepts a positional tuple for
+the required fields and an optional keyword dictionary for hidden named extras.
+The repr produces `TypeName(field=val, ...)` omitting the hidden items.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Objects/structseq.c" lines="1-100">1-100</Cpy> | `structseqfield_descr`, `structseqfield_get` | Per-field descriptor; getter reads `ob_item[index]`. | `objects/structseq.go:structSeqField` |
+| <Cpy path="Objects/structseq.c" lines="100-300">100-300</Cpy> | `PyStructSequence_InitType2`, `PyStructSequence_NewType` | Dynamically creates a `tuple` subtype; installs field descriptors and `__match_args__`. | `objects/structseq.go:InitStructSeqType` |
+| <Cpy path="Objects/structseq.c" lines="300-450">300-450</Cpy> | `structseq_new` | `tp_new`; validates positional tuple length; stores hidden extras from keyword dict. | `objects/structseq.go:structSeqNew` |
+| <Cpy path="Objects/structseq.c" lines="450-560">450-560</Cpy> | `structseq_repr` | Produces `TypeName(field=val, ...)`; skips hidden items. | `objects/structseq.go:structSeqRepr` |
+| <Cpy path="Objects/structseq.c" lines="560-640">560-640</Cpy> | `PyStructSequence_GetItem`, `PyStructSequence_SetItem` | C-level indexed field access; no bounds check in `GetItem`. | `objects/structseq.go:StructSeqGetItem` |
+| <Cpy path="Objects/structseq.c" lines="640-700">640-700</Cpy> | `PyStructSequence_Type` | Base type object; serves as `tp_base` for generated types. | `objects/structseq.go:StructSeqType` |
+
+## Reading
+
+### `PyStructSequence_InitType2` (lines 100 to 300)
+
+<CpyLink path="Objects/structseq.c" lines="100-300" />
+
+The function allocates a heap type, sets its `tp_base` to `&PyTuple_Type`, and
+then populates it from the descriptor:
+
+```c
+int
+PyStructSequence_InitType2(PyTypeObject *type,
+                           PyStructSequence_Desc *desc)
+{
+    PyMemberDef *members;
+    int n_members = count_members(desc);  /* up to PY_MEMBER_SIZE */
+    int n_unnamed = count_unnamed(desc);  /* fields with name == NULL */
+
+    /* Allocate a member array for the visible fields */
+    members = PyMem_NEW(PyMemberDef, n_members - n_unnamed + 1);
+    ...
+    for (int i = 0, k = 0; desc->fields[i].name != NULL; i++) {
+        if (desc->fields[i].name == PyStructSequence_UnnamedField) continue;
+        members[k].name   = desc->fields[i].name;
+        members[k].type   = T_OBJECT;
+        members[k].offset = offsetof(PyTupleObject, ob_item[i]);
+        members[k].flags  = READONLY;
+        members[k].doc    = desc->fields[i].doc;
+        k++;
+    }
+    members[k].name = NULL;  /* sentinel */
+
+    type->tp_members  = members;
+    type->tp_doc      = desc->doc;
+    type->tp_name     = desc->name;
+    type->tp_basicsize = sizeof(PyTupleObject) +
+                         desc->n_in_sequence * sizeof(PyObject *);
+    type->tp_base     = &PyTuple_Type;
+    type->tp_repr     = (reprfunc)structseq_repr;
+    type->tp_new      = structseq_new;
+    ...
+
+    /* __match_args__ */
+    PyObject *match_args = build_match_args(desc);
+    if (PyDict_SetItemString(type->tp_dict,
+                             "__match_args__", match_args) < 0)
+        goto error;
+    ...
+    return PyType_Ready(type);
+}
+```
+
+The `offset` trick works because `PyTupleObject` stores items in `ob_item[]`
+immediately after the header, and the generated type is sized to hold exactly
+`n_in_sequence` public items plus any hidden extras at higher indices.
+
+### `structseq_new` (lines 300 to 450)
+
+<CpyLink path="Objects/structseq.c" lines="300-450" />
+
+`structseq_new` is the `tp_new` slot for all generated types. It allocates a
+`tuple` large enough for both the visible fields and the hidden extras, fills in
+the positional items, then copies named extras from the optional keyword dict:
+
+```c
+static PyObject *
+structseq_new(PyTypeObject *type, PyObject *args, PyObject *kwds)
+{
+    PyObject *seq;
+    PyObject *dict = NULL;
+    Py_ssize_t n_seq  = REAL_SIZE_TP(type);  /* total tuple slots */
+    Py_ssize_t n_vis  = VISIBLE_SIZE_TP(type); /* n_in_sequence */
+
+    if (!PyArg_UnpackTuple(args, type->tp_name, 1, 2, &seq, &dict))
+        return NULL;
+    if (!PySequence_Check(seq) ||
+        PySequence_Length(seq) != n_vis) {
+        PyErr_Format(PyExc_TypeError,
+            "%s() takes a %zd-sequence (%zd-sequence given)",
+            type->tp_name, n_vis, PySequence_Length(seq));
+        return NULL;
+    }
+
+    PyObject *res = PyTuple_New(n_seq);
+    if (res == NULL) return NULL;
+    /* Fill visible items from seq */
+    for (Py_ssize_t i = 0; i < n_vis; i++) {
+        PyObject *val = PySequence_GetItem(seq, i);
+        if (val == NULL) { Py_DECREF(res); return NULL; }
+        PyTuple_SET_ITEM(res, i, val);
+    }
+    /* Fill hidden items from dict (default to None) */
+    for (Py_ssize_t i = n_vis; i < n_seq; i++) {
+        PyObject *val = Py_None;
+        if (dict != NULL) {
+            const char *name = type->tp_members[i - n_vis].name;
+            PyObject *item = PyDict_GetItemString(dict, name);
+            if (item != NULL) val = item;
+        }
+        PyTuple_SET_ITEM(res, i, Py_NewRef(val));
+    }
+    Py_SET_TYPE(res, type);
+    return res;
+}
+```
+
+### `structseq_repr` (lines 450 to 560)
+
+<CpyLink path="Objects/structseq.c" lines="450-560" />
+
+The repr iterates only the visible fields (indices `0` to `n_in_sequence - 1`)
+and formats them as `name=repr(value)` pairs:
+
+```c
+static PyObject *
+structseq_repr(PyStructSequenceObject *obj)
+{
+    PyTypeObject *typ = Py_TYPE(obj);
+    Py_ssize_t n_vis = VISIBLE_SIZE(obj);
+    ...
+    /* Build "TypeName(f0=v0, f1=v1, ...)" */
+    PyObject *pieces = PyList_New(n_vis);
+    for (Py_ssize_t i = 0; i < n_vis; i++) {
+        PyObject *val  = PyTuple_GET_ITEM(obj, i);
+        PyObject *repr = PyObject_Repr(val);
+        const char *name = typ->tp_members[i].name;
+        PyObject *piece = PyUnicode_FromFormat("%s=%S", name, repr);
+        Py_DECREF(repr);
+        PyList_SET_ITEM(pieces, i, piece);
+    }
+    PyObject *joined = PyUnicode_Join(sep_comma_space, pieces);
+    PyObject *result = PyUnicode_FromFormat(
+        "%s(%S)", typ->tp_name, joined);
+    ...
+    return result;
+}
+```
+
+Hidden items at indices `>= n_in_sequence` are silently omitted from the repr
+even though they are accessible as named attributes. `os.stat_result` uses this
+to expose `st_atime_ns` as an attribute without cluttering the repr.

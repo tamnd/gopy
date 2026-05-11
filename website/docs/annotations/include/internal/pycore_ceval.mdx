@@ -1,0 +1,140 @@
+---
+title: Include/internal/pycore_ceval.h
+description: Eval-breaker bitmask constants, GIL-drop and signal bits, and the main eval-loop entry points used by the tier-1 interpreter.
+cpython_path: Include/internal/pycore_ceval.h
+cpython_version: "3.14"
+lines: 150
+status: annotated
+ported_to: vm/eval_gen.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Include/internal/pycore_ceval.h`
+
+<CpyLink path="Include/internal/pycore_ceval.h" />
+
+The control-plane header for the eval loop. It exposes the bitmask
+constants that `tstate->eval_breaker` encodes, the two public entry
+points (`_PyEval_EvalFrameDefault` and `_PyEval_Vector`), and the
+`_Py_HandlePending` function that drains all pending events between
+bytecode instructions.
+
+The eval-breaker is a single `int32_t` field on the thread state.
+Rather than checking a dozen separate flags on every instruction, the
+interpreter checks `eval_breaker != 0` once per backward edge or
+function call. When it is non-zero it jumps to `_Py_HandlePending`,
+which dispatches on individual bits. This keeps the common case (no
+events) down to a single comparison.
+
+The tier-2 optimizer adds its own bit (`_PY_CALLS_TO_DO_BIT`) so the
+specializing adaptive interpreter can schedule re-specialization work
+on the same hot path, without adding another per-instruction branch.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Include/internal/pycore_ceval.h" lines="1-30">1-30</Cpy> | `_PY_GIL_DROP_REQUEST_BIT` | Set by another thread requesting the GIL; triggers a voluntary switch. | `vm/eval_gen.go` |
+| <Cpy path="Include/internal/pycore_ceval.h" lines="31-50">31-50</Cpy> | `_PY_SIGNALS_PENDING_BIT` | Set when at least one `Handlers[signum].tripped` is non-zero. | `vm/eval_gen.go` |
+| <Cpy path="Include/internal/pycore_ceval.h" lines="51-70">51-70</Cpy> | `_PY_CALLS_TO_DO_BIT` | Set when `tstate->calls_to_do > 0`; drives adaptive re-specialization. | `vm/eval_gen.go` |
+| <Cpy path="Include/internal/pycore_ceval.h" lines="71-90">71-90</Cpy> | `_PY_EVAL_EVENTS_BIT` | Set when debugger or profiler callbacks are enabled for this thread. | `vm/eval_gen.go` |
+| <Cpy path="Include/internal/pycore_ceval.h" lines="91-105">91-105</Cpy> | `_Py_SET_53BIT_MAX_WAIT_MICROSECS` | Cap applied to `sys.getswitchinterval()` GIL-wait durations. | `vm/eval_gen.go` |
+| <Cpy path="Include/internal/pycore_ceval.h" lines="106-130">106-130</Cpy> | `_PyEval_EvalFrameDefault` / `_PyEval_Vector` | The tier-1 bytecode dispatch loop and its vectorcall-based entry wrapper. | `vm/eval_gen.go` |
+| <Cpy path="Include/internal/pycore_ceval.h" lines="131-150">131-150</Cpy> | `_Py_HandlePending` | Called inside the eval loop when `eval_breaker != 0`; dispatches GIL drops, signals, and profiler events. | `vm/eval_gen.go` |
+
+## Reading
+
+### Eval-breaker bitmask layout (lines 1 to 105)
+
+<CpyLink path="Include/internal/pycore_ceval.h" lines="1-105" />
+
+```c
+/* Bits of tstate->eval_breaker */
+#define _PY_GIL_DROP_REQUEST_BIT   (1U << 0)
+#define _PY_SIGNALS_PENDING_BIT    (1U << 1)
+#define _PY_CALLS_TO_DO_BIT        (1U << 2)
+#define _PY_EVAL_EVENTS_BIT        (1U << 3)
+```
+
+Each bit is set atomically by the entity that needs attention and
+cleared atomically by `_Py_HandlePending` after processing. The
+combined word is read with a plain load inside the eval loop; when any
+bit is set, control transfers to `_Py_HandlePending`.
+
+`_PY_GIL_DROP_REQUEST_BIT` is the GIL-release trigger. The thread
+holding the GIL checks this on every loop iteration; when it sees the
+bit set it calls `_PyEval_SaveThread` which releases the GIL and then
+immediately re-acquires it, giving other threads a chance to run.
+
+`_PY_CALLS_TO_DO_BIT` is the specializing adaptive interpreter's hook.
+When the counter `tstate->calls_to_do` is incremented (by the optimizer
+or by a warmup threshold being hit), this bit is raised. `_Py_HandlePending`
+decrements the counter and triggers the appropriate specialization work.
+
+`_Py_SET_53BIT_MAX_WAIT_MICROSECS` caps the duration that a thread can
+hold the GIL before the OS scheduler must get a chance to preempt it.
+The name "53-bit" refers to the floating-point precision of the
+`sys.getswitchinterval()` value when rounded to microseconds.
+
+In gopy the eval-breaker is modelled as a `uint32` field on `*ThreadState`.
+The individual bit tests in `vm/eval_gen.go` mirror the C `if (eval_breaker & BIT)` idiom using Go bitwise expressions.
+
+### `_Py_HandlePending` (lines 131 to 150)
+
+<CpyLink path="Include/internal/pycore_ceval.h" lines="131-150" />
+
+```c
+extern int _Py_HandlePending(PyThreadState *tstate);
+```
+
+`_Py_HandlePending` is the central pending-event dispatcher. It
+processes each raised bit in priority order:
+
+1. `_PY_EVAL_EVENTS_BIT` — calls `_PyEval_HandlePendingCalls` which
+   fires any registered `Py_AddPendingCall` callbacks.
+2. `_PY_SIGNALS_PENDING_BIT` — iterates `Handlers[]` and calls signal
+   handlers for each tripped signal number.
+3. `_PY_GIL_DROP_REQUEST_BIT` — drops and immediately re-acquires the
+   GIL, yielding to waiting threads.
+
+The return value is 0 on success and -1 if a signal handler raised an
+exception. The eval loop propagates that -1 directly to its error path.
+
+In `vm/eval_gen.go`, `handlePending(ts *ThreadState)` is the Go
+counterpart. It is called at the top of the backward-jump and function-
+call dispatch cases.
+
+### `_PyEval_EvalFrameDefault` vs `_PyEval_Vector` (lines 106 to 130)
+
+<CpyLink path="Include/internal/pycore_ceval.h" lines="106-130" />
+
+```c
+PyAPI_FUNC(PyObject *) _PyEval_EvalFrameDefault(
+    PyThreadState *tstate,
+    struct _PyInterpreterFrame *frame,
+    int throwflag);
+
+PyAPI_FUNC(PyObject *) _PyEval_Vector(
+    PyThreadState *tstate,
+    PyFunctionObject *func,
+    PyObject *const *args,
+    size_t argcount,
+    PyObject *kwnames);
+```
+
+`_PyEval_EvalFrameDefault` is the raw entry point: the caller has
+already set up an `_PyInterpreterFrame` and hands the eval loop the
+frame directly. The `throwflag` argument is 1 when entering a generator
+or coroutine via `throw()`, which causes the loop to raise the pending
+exception immediately instead of executing the first instruction.
+
+`_PyEval_Vector` is the higher-level vectorcall-compatible wrapper. It
+constructs the argument frame from `args` and `kwnames`, performs the
+binding described in `MAKE_CALL`, and then calls
+`_PyEval_EvalFrameDefault`. Most call sites in `Objects/call.c` and the
+eval loop itself use `_PyEval_Vector` rather than the lower-level form.
+
+In gopy, `EvalFrameDefault` and `EvalVector` in `vm/eval_gen.go` are
+the direct counterparts. `EvalVector` handles argument binding via the
+shared `bindArgs` helper before delegating to `EvalFrameDefault`.

@@ -1,0 +1,164 @@
+---
+title: Parser/tokenizer/file_tokenizer.c
+description: Tokenizer backend that reads source from a C FILE*, with BOM and PEP 263 encoding detection.
+cpython_path: Parser/tokenizer/file_tokenizer.c
+cpython_version: "3.14"
+lines: 493
+status: annotated
+ported_to: parser/tokenizer/
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Parser/tokenizer/file_tokenizer.c`
+
+<CpyLink path="Parser/tokenizer/file_tokenizer.c" />
+
+One of three tokenizer back-ends (file, string, readline). This one wraps a
+C `FILE*` and feeds the core lexer one logical line at a time. It handles all
+encoding detection that must happen before the first byte is handed to the
+scanner: the UTF-8 BOM, the UTF-16 BOM, and the PEP 263 `# -*- coding: …`
+comment in the first two lines.
+
+The detected encoding is stored in `tok->encoding` and propagated to
+`compile()` and the `io` layer. If detection fails, a `SyntaxError` is raised
+before any token is emitted.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Parser/tokenizer/file_tokenizer.c" lines="1-42">1-42</Cpy>     | static helpers / macros | `BOM_UTF8`, `BOM_UTF16_LE`, column-safe `fgetc` wrapper. | internal constants in `parser/tokenizer/file.go` |
+| <Cpy path="Parser/tokenizer/file_tokenizer.c" lines="44-118">44-118</Cpy> | `get_coding_spec` | Scans one text line for `coding[=:]\s*[-\w.]+` and returns the encoding name. | `getCodingSpec` |
+| <Cpy path="Parser/tokenizer/file_tokenizer.c" lines="120-219">120-219</Cpy> | `check_coding_spec` | Reads up to two lines and calls `get_coding_spec`; stores result in `tok->encoding`. | `checkCodingSpec` |
+| <Cpy path="Parser/tokenizer/file_tokenizer.c" lines="221-298">221-298</Cpy> | `fp_readline` | The `underflow` callback: reads one line from `tok->fp`, expands the line buffer if needed. | `(*FileTokenizer).readline` |
+| <Cpy path="Parser/tokenizer/file_tokenizer.c" lines="300-410">300-410</Cpy> | `_PyTokenizer_FromFile` | Factory: opens or adopts a `FILE*`, detects encoding, installs `fp_readline` as `underflow`. | `NewFileTokenizer` |
+| <Cpy path="Parser/tokenizer/file_tokenizer.c" lines="412-493">412-493</Cpy> | `_PyTokenizer_Free` | Releases line buffer, closes file if owned, frees encoding string. | `(*FileTokenizer).Free` |
+
+## Reading
+
+### `_PyTokenizer_FromFile` (lines 300 to 410)
+
+<CpyLink path="Parser/tokenizer/file_tokenizer.c" lines="300-410" />
+
+```c
+struct tok_state *
+_PyTokenizer_FromFile(FILE *fp, const char *ps1, const char *ps2,
+                      const char *enc)
+{
+    struct tok_state *tok = _PyTokenizer_New();
+    if (tok == NULL)
+        return NULL;
+    if (enc != NULL) {
+        /* encoding forced by the caller (e.g. from a BOM already read) */
+        tok->encoding = new_string(enc, strlen(enc), tok);
+        if (!tok->encoding) goto error;
+        tok->decoding_state = STATE_NORMAL;
+    }
+    tok->fp = fp ? fp : stdin;
+    tok->prompt      = ps1;
+    tok->nextprompt  = ps2;
+    tok->underflow   = fp_readline;
+
+    if (fp != NULL && enc == NULL) {
+        if (!check_coding_spec(tok))
+            goto error;
+    }
+    return tok;
+error:
+    _PyTokenizer_Free(tok);
+    return NULL;
+}
+```
+
+When `fp` is `NULL` the tokenizer reads from `stdin` (the interactive
+interpreter path). When `enc` is already known (the caller stripped a BOM
+before handing the file over) encoding detection is skipped and the provided
+name is adopted directly.
+
+`ps1` / `ps2` are the interactive prompts (`>>>` and `...`). They are written
+to `stderr` by `fp_readline` whenever it needs another line from the user.
+
+### Encoding detection: BOM and coding comment (lines 1 to 219)
+
+<CpyLink path="Parser/tokenizer/file_tokenizer.c" lines="1-219" />
+
+Three cases are handled in order:
+
+**UTF-8 BOM** (`\xEF\xBB\xBF`). Detected at the start of `check_coding_spec`
+by peeking three bytes with `fgetc`/`ungetc`. If found, `tok->encoding` is
+set to `"utf-8-sig"` and the three bytes are consumed so the scanner never
+sees them.
+
+```c
+/* line 140-155 */
+c1 = fgetc(fp);
+if (c1 == EOF) goto done;
+c2 = fgetc(fp);
+if (c2 == EOF) { ungetc(c1, fp); goto done; }
+c3 = fgetc(fp);
+if (c1 == 0xEF && c2 == 0xBB && c3 == 0xBF) {
+    tok->encoding = new_string("utf-8-sig", 9, tok);
+    tok->decoding_state = STATE_NORMAL;
+    goto done;
+}
+ungetc(c3, fp); ungetc(c2, fp); ungetc(c1, fp);
+```
+
+**UTF-16 BOM** (`\xFF\xFE` or `\xFE\xFF`). Detected by the same two-byte
+peek. When found, `tok->encoding` is set to `"utf-16"` and the `iconv`
+decoder is initialized. UTF-16 source files are rare in practice but the
+tokenizer must handle them for compatibility.
+
+**PEP 263 `coding:` comment**. `get_coding_spec` is called on the first line,
+and if it returns nothing, on the second line. The regex is:
+
+```
+coding[=:]\s*([-\w.]+)
+```
+
+The match is case-insensitive and the prefix must be preceded by a space,
+tab, or the start of the comment body to avoid false matches in ordinary
+strings.
+
+If none of the three detection paths fires, `tok->encoding` defaults to
+`"utf-8"` (PEP 3120).
+
+### `fp_readline` (lines 221 to 298)
+
+<CpyLink path="Parser/tokenizer/file_tokenizer.c" lines="221-298" />
+
+```c
+static int
+fp_readline(struct tok_state *tok)
+{
+    ...
+    if (tok->prompt != NULL) {
+        char *new_line = PyOS_Readline(stdin, stdout, tok->prompt);
+        tok->prompt = tok->nextprompt;
+        if (new_line == NULL) {
+            tok->done = E_INTR;
+            return 0;
+        }
+        ...
+    }
+    /* Non-interactive: read directly from fp */
+    if (tok->decoding_fgets != NULL) {
+        /* decoding path: iconv-wrapped fgets */
+        ...
+    }
+    else {
+        bytes = fgets_impl(tok->buf, tok->buf_end - tok->buf, tok->fp);
+    }
+    ...
+}
+```
+
+The interactive path calls `PyOS_Readline` so the host application can
+supply its own line-editing library (e.g. readline). The non-interactive path
+uses either a plain `fgets` or the `iconv`-wrapped variant depending on
+whether a non-UTF-8 encoding was detected.
+
+The line buffer starts at 1000 bytes and doubles on each reallocation. The
+`tok->inp` pointer is advanced to the end of the new data, and `tok->cur` is
+left pointing at the start so `tok_nextc` can begin scanning.

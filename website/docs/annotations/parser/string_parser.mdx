@@ -1,0 +1,171 @@
+---
+title: Parser/string_parser.c
+description: Decode and concatenate all string literal forms: plain str, bytes, raw, and f-strings, including escape sequences and f-string literal/expression splitting.
+cpython_path: Parser/string_parser.c
+cpython_version: "3.14"
+lines: 339
+status: annotated
+ported_to: parser/string_parser.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Parser/string_parser.c`
+
+<CpyLink path="Parser/string_parser.c" />
+
+Handles every string literal form that the Python grammar recognises.
+The tokenizer delivers raw token bytes; this file turns them into
+`PyObject *` values or AST nodes. There are four families: plain
+`str` (decoded as UTF-8 with escape expansion), `bytes` (decoded as
+Latin-1 with escape expansion), `raw` (no escape processing), and
+`f-string` (split into literal segments and `FormattedValue` AST nodes
+before being merged into a `JoinedStr`).
+
+The file is small relative to its surface area because two concerns are
+deliberately outside its scope: the tokenizer identifies the literal
+boundaries and delivers a single token per literal (no multi-line
+joining), and the AST arena allocator owns all node memory. This file
+only decodes and constructs.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Parser/string_parser.c" lines="1-40">1-40</Cpy> | `_PyPegen_decode_string` | Entry point for non-f-string literals: strip quotes, detect prefix flags, run the escape decoder. | `parser/string_parser.go:DecodeString` |
+| <Cpy path="Parser/string_parser.c" lines="41-110">41-110</Cpy> | (escape decode loop) | Walk the token bytes, expand `\n`, `\t`, `\xHH`, `\uXXXX`, `\UXXXXXXXX`, `\N{name}`, `\ooo`; raw strings skip this block. | `parser/string_parser.go:decodeEscapes` |
+| <Cpy path="Parser/string_parser.c" lines="111-170">111-170</Cpy> | `fstring_find_literal` | Scan an f-string segment for `{` / `}`, splitting off the leading literal portion and detecting doubled braces `{{` / `}}`. | `parser/string_parser.go:fstringFindLiteral` |
+| <Cpy path="Parser/string_parser.c" lines="171-230">171-230</Cpy> | `fstring_compile_expr` / `fstring_parse_expr` | Parse the expression inside `{...}` by feeding it back into the PEG parser as a sub-expression; handle `=` (debug format), `!` conversion, and `:` format spec. | `parser/string_parser.go:fstringCompileExpr` |
+| <Cpy path="Parser/string_parser.c" lines="231-290">231-290</Cpy> | `fstring_find_expr` | Drive `fstring_find_literal` and `fstring_compile_expr` in alternation to build the list of `FormattedValue` and `Constant` sub-nodes for one f-string token. | `parser/string_parser.go:fstringFindExpr` |
+| <Cpy path="Parser/string_parser.c" lines="291-320">291-320</Cpy> | `_PyPegen_parse_string` | Dispatch based on prefix characters (`b`/`B`, `r`/`R`, `f`/`F`, `u`/`U`) to the correct decode path. | `parser/string_parser.go:ParseString` |
+| <Cpy path="Parser/string_parser.c" lines="321-339">321-339</Cpy> | `_PyPegen_concatenate_strings` | Merge a sequence of already-decoded string parts into a single `Constant` or `JoinedStr` expr node. | `parser/string_parser.go:ConcatenateStrings` |
+
+## Reading
+
+### Escape decoding in `_PyPegen_decode_string` (lines 1 to 110)
+
+<CpyLink path="Parser/string_parser.c" lines="1-110" />
+
+```c
+static int
+decode_unicode_with_escapes(Parser *parser, const char **s, size_t length,
+                            Token *t)
+{
+    const char *p = *s;
+    const char *end = p + length;
+    while (p < end) {
+        if (*p != '\\') { p++; continue; }
+        p++;  /* skip backslash */
+        switch (*p) {
+        case 'n': *w++ = '\n'; p++; break;
+        case 't': *w++ = '\t'; p++; break;
+        case 'x': /* \xHH */
+            ...
+        case 'u': /* \uXXXX */
+            ...
+        case 'U': /* \UXXXXXXXX */
+            ...
+        case 'N': /* \N{name} */
+            ...
+        default:  /* \ooo octal or unrecognised: keep both chars */
+            ...
+        }
+    }
+}
+```
+
+Raw strings (`r"..."` or `R"..."`) bypass this function entirely: the
+prefix check in `_PyPegen_parse_string` detects the `r`/`R` flag and
+calls `PyUnicode_DecodeUTF8` directly on the token bytes. For all other
+`str` literals the escape loop above runs. `\N{name}` is the only case
+that performs a runtime import: it calls `_PyUnicode_GetNameObject`,
+which uses the Unicode name database. The `\ooo` octal fallback keeps
+the backslash and the character if the octal digit count is wrong, which
+matches the documented behavior that an unrecognised escape sequence is
+passed through unchanged (with a `DeprecationWarning` in 3.12+).
+
+Bytes literals follow the same loop but only expand `\xHH`, `\ooo`,
+`\n`, `\t`, and the single-character escapes; `\uXXXX`, `\UXXXXXXXX`,
+and `\N{name}` are not valid in `bytes` and produce a `SyntaxError`.
+
+### F-string literal scanning (lines 111 to 170)
+
+<CpyLink path="Parser/string_parser.c" lines="111-170" />
+
+```c
+static int
+fstring_find_literal(const char **p, const char *end, int raw,
+                     PyObject **literal, int recursion_depth, Parser *parser)
+{
+    const char *s = *p;
+    while (s < end) {
+        char ch = *s;
+        if (ch == '{' || ch == '}') {
+            if (s[1] == ch) {
+                /* doubled brace: emit one brace literal, advance two */
+                ...
+                s += 2;
+            } else if (ch == '}') {
+                RAISE_SYNTAX_ERROR("f-string: single '}' is not allowed");
+                return -1;
+            } else {
+                break;  /* start of expression */
+            }
+        }
+        s++;
+    }
+    *p = s;
+    ...
+}
+```
+
+An f-string token is scanned character by character. A `{` that is not
+followed by another `{` terminates the leading literal and signals the
+start of an interpolation. A `}` that is not doubled is a syntax error.
+The `raw` flag is threaded through so that `rf"..."` does not expand
+escape sequences in the literal portions, which matches the rule that
+raw f-strings are raw everywhere except inside `{...}`.
+
+Nested f-strings (f-strings inside the expression part of another
+f-string) are handled by the `recursion_depth` guard. CPython 3.12
+lifted the nesting ban, and the guard replaces the earlier hard limit
+with an `ast.MAX_NESTING_DEPTH` check so that pathological inputs do
+not exhaust the C stack.
+
+### `_PyPegen_concatenate_strings` (lines 321 to 339)
+
+<CpyLink path="Parser/string_parser.c" lines="321-339" />
+
+```c
+expr_ty
+_PyPegen_concatenate_strings(Parser *p, asdl_seq *strings,
+                             PyArena *arena)
+{
+    Py_ssize_t n = asdl_seq_LEN(strings);
+    /* fast path: single non-fstring */
+    if (n == 1 && !is_fstring(asdl_seq_GET(strings, 0))) {
+        return asdl_seq_GET(strings, 0);
+    }
+    /* mixing bytes with str/fstring is illegal */
+    for (Py_ssize_t i = 0; i < n; i++) {
+        if (kind_of(asdl_seq_GET(strings, i)) == KIND_BYTES) {
+            if (any_non_bytes(strings, i)) {
+                RAISE_SYNTAX_ERROR(...);
+                return NULL;
+            }
+        }
+    }
+    /* merge: if any part is an fstring build JoinedStr, else Constant */
+    ...
+}
+```
+
+Adjacent literals are fed in as an `asdl_seq` of already-decoded
+`expr_ty` nodes. The merge logic has three outcomes: if there is only
+one part and it is not an f-string, it is returned unchanged; if all
+parts are plain `bytes` constants, they are concatenated into one
+`Constant` holding a `PyBytesObject`; if any part is an f-string, all
+parts are flattened into a `JoinedStr` where the non-f-string segments
+become `Constant` children. Mixing `bytes` with `str` or `f-string` is
+caught here with a `SyntaxError` rather than propagating to the
+compiler.

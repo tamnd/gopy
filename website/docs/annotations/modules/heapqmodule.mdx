@@ -1,0 +1,200 @@
+---
+title: Modules/_heapqmodule.c
+description: C implementation of the heapq module — min-heap push, pop, heapify, and pushpop on Python lists.
+cpython_path: Modules/_heapqmodule.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+ported_to: module/heapq/module.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Modules/_heapqmodule.c`
+
+<CpyLink path="Modules/_heapqmodule.c" />
+
+The C backend for `heapq`. The pure-Python layer in `Lib/heapq.py`
+imports this module as `_heapq` and re-exports its functions, adding the
+pure-Python helpers `heapmerge`, `nlargest`, and `nsmallest` that are not
+performance-critical enough to warrant a C implementation.
+
+`_heapqmodule.c` implements five functions:
+
+- `heappush(heap, item)` — appends `item` to the list and restores the
+  heap invariant by sifting up.
+- `heappop(heap)` — removes and returns the smallest element. Moves the
+  last element to position 0 and sifts down.
+- `heapify(heap)` — converts an arbitrary list into a heap in O(n) using
+  Floyd's algorithm.
+- `_heappushpop(heap, item)` / `heappushpop(heap, item)` — atomically
+  pushes and then pops. Faster than separate push and pop calls when the
+  new item would be discarded immediately.
+- `heapreplace(heap, item)` — pops the root and pushes `item` without
+  temporarily disturbing the heap size, making it faster than a pop
+  followed by a push.
+
+The heap invariant throughout is the 0-indexed min-heap property:
+`heap[k] <= heap[2*k+1]` and `heap[k] <= heap[2*k+2]` for all valid `k`.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Modules/_heapqmodule.c" lines="1-40">1-40</Cpy> | includes, `_heapq_state` | Module headers and per-interpreter state. | `module/heapq/module.go:state` |
+| <Cpy path="Modules/_heapqmodule.c" lines="40-160">40-160</Cpy> | `_siftdown`, `_siftdown_max` | Bubble a node up toward the root until the heap invariant is satisfied. Used by `heappush`. | `module/heapq/module.go:siftDown` |
+| <Cpy path="Modules/_heapqmodule.c" lines="160-290">160-290</Cpy> | `_siftup`, `_siftup_max` | Push a node down toward the leaves by swapping with the smaller child until the invariant holds. Used by `heappop` and `heapify`. | `module/heapq/module.go:siftUp` |
+| <Cpy path="Modules/_heapqmodule.c" lines="290-360">290-360</Cpy> | `heappush`, `heappop`, `heapreplace` | Core heap operations: append+sift-up, move-last+sift-down, replace-root+sift-down. | `module/heapq/module.go:HeapPush`, `HeapPop`, `HeapReplace` |
+| <Cpy path="Modules/_heapqmodule.c" lines="360-440">360-440</Cpy> | `_heappushpop`, `heappushpop`, `heapify` | Combined push/pop shortcut and Floyd's O(n) construction. | `module/heapq/module.go:HeapPushPop`, `Heapify` |
+| <Cpy path="Modules/_heapqmodule.c" lines="440-500">440-500</Cpy> | `_heapqmethods`, `_heapqmodule`, `PyInit__heapq` | Method table, module definition, and entry point. | `module/heapq/module.go:Module` |
+
+## Reading
+
+### `_siftdown` and `_siftup` algorithms (lines 40 to 290)
+
+<CpyLink path="Modules/_heapqmodule.c" lines="40-290" />
+
+CPython names these functions in a way that can be confusing. From the
+perspective of the heap list, "sift down" means moving an element toward
+index 0 (up the tree), and "sift up" means moving an element toward
+higher indices (down the tree):
+
+```c
+static int
+_siftdown(PyListObject *heap, Py_ssize_t startpos, Py_ssize_t pos)
+{
+    /* Bubble heap[pos] toward the root until heap[parent] <= heap[pos]. */
+    while (pos > startpos) {
+        Py_ssize_t parentpos = (pos - 1) >> 1;  /* (pos-1) / 2 */
+        PyObject *parent = PyList_GET_ITEM(heap, parentpos);
+        PyObject *newitem = PyList_GET_ITEM(heap, pos);
+        int cmp = PyObject_RichCompareBool(newitem, parent, Py_LT);
+        if (cmp < 0) return -1;
+        if (cmp == 0) break;        /* invariant satisfied */
+        /* Swap child with parent. */
+        PyList_SET_ITEM(heap, parentpos, newitem);
+        PyList_SET_ITEM(heap, pos, parent);
+        pos = parentpos;
+    }
+    return 0;
+}
+```
+
+`_siftup` is the mirror: starting at `pos`, it repeatedly finds the
+smaller of the two children, swaps the node down to that child's position,
+and continues until a leaf is reached. It then calls `_siftdown` on the
+final position to handle the case where the displaced element is smaller
+than its new parent:
+
+```c
+static int
+_siftup(PyListObject *heap, Py_ssize_t pos)
+{
+    Py_ssize_t endpos = PyList_GET_SIZE(heap);
+    Py_ssize_t startpos = pos;
+    Py_ssize_t childpos = 2*pos + 1;   /* left child */
+
+    while (childpos < endpos) {
+        Py_ssize_t rightpos = childpos + 1;
+        if (rightpos < endpos) {
+            int cmp = PyObject_RichCompareBool(
+                PyList_GET_ITEM(heap, rightpos),
+                PyList_GET_ITEM(heap, childpos), Py_LT);
+            if (cmp < 0) return -1;
+            if (cmp > 0) childpos = rightpos;  /* right child is smaller */
+        }
+        /* Move smaller child up to pos. */
+        PyList_SET_ITEM(heap, pos, PyList_GET_ITEM(heap, childpos));
+        pos = childpos;
+        childpos = 2*pos + 1;
+    }
+    PyList_SET_ITEM(heap, pos, PyList_GET_ITEM(heap, startpos));
+    return _siftdown(heap, startpos, pos);
+}
+```
+
+The `_max` variants (`_siftdown_max`, `_siftup_max`) flip the comparison
+to `Py_GT`, implementing a max-heap used internally by `nlargest`.
+
+### `heapify` — Floyd's O(n) construction (lines 360 to 440)
+
+<CpyLink path="Modules/_heapqmodule.c" lines="360-440" />
+
+`heapify` converts an arbitrary list into a heap in linear time by calling
+`_siftup` on every non-leaf node from `n//2 - 1` down to 0:
+
+```c
+static PyObject *
+heapify(PyObject *self, PyObject *heap)
+{
+    PyListObject *list = (PyListObject *)heap;
+    Py_ssize_t n = PyList_GET_SIZE(heap);
+
+    for (Py_ssize_t i = n/2 - 1; i >= 0; i--) {
+        if (_siftup(list, i) < 0)
+            return NULL;
+    }
+    Py_RETURN_NONE;
+}
+```
+
+Starting from the last non-leaf and working upward ensures that when
+`_siftup` processes node `i`, both subtrees rooted at its children are
+already valid heaps. This is Floyd's heap-construction algorithm and runs
+in O(n) because the total work across all `_siftup` calls is bounded by
+the sum of subtree heights, which is O(n).
+
+### `_heappushpop` (lines 360 to 440)
+
+<CpyLink path="Modules/_heapqmodule.c" lines="360-440" />
+
+`heappushpop(heap, item)` is equivalent to `push` followed by `pop`, but
+avoids one unnecessary sift operation when the new item is already smaller
+than or equal to the current root (in which case the item itself is
+returned immediately without touching the heap):
+
+```c
+static PyObject *
+_heappushpop(PyListObject *heap, PyObject *item)
+{
+    if (PyList_GET_SIZE(heap) == 0) {
+        Py_INCREF(item);
+        return item;
+    }
+    PyObject *top = PyList_GET_ITEM(heap, 0);
+    int cmp = PyObject_RichCompareBool(top, item, Py_LT);
+    if (cmp < 0) return NULL;
+    if (cmp == 0) {
+        /* item <= top: return item unchanged */
+        Py_INCREF(item);
+        return item;
+    }
+    /* item > top: replace root with item, sift down, return old root. */
+    Py_INCREF(top);
+    PyList_SET_ITEM(heap, 0, item);   /* steal reference to item */
+    if (_siftup(heap, 0) < 0) {
+        Py_DECREF(top);
+        return NULL;
+    }
+    return top;
+}
+```
+
+`heapreplace(heap, item)` is similar but unconditionally replaces the
+root, raising `IndexError` on an empty heap rather than silently returning
+`item`.
+
+## gopy mirror
+
+`module/heapq/module.go`. `siftDown` and `siftUp` mirror the CPython
+loops using `objects.RichCompareBool`. `Heapify` calls `siftUp` in
+descending index order matching Floyd's algorithm. The max-heap variants
+are kept as separate functions with the comparison direction flipped.
+
+## CPython 3.14 changes
+
+`_heapqmodule.c` is stable across 3.8-3.14. The `key` parameter present
+in the pure-Python `nlargest`/`nsmallest` in `Lib/heapq.py` is not
+reflected in the C module; those helpers remain pure Python. The
+per-interpreter state struct was added in 3.12 alongside the broader
+module-state migration but contains no heap-specific data.

@@ -1,0 +1,177 @@
+---
+title: Parser/pegen_errors.c
+description: Error-recovery and diagnostic helpers for the PEG parser: SyntaxError formatting, tokenizer error wrapping, soft-keyword validation, and expr-context re-classification.
+cpython_path: Parser/pegen_errors.c
+cpython_version: "3.14"
+lines: 462
+status: annotated
+ported_to: parser/pegen/errors.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Parser/pegen_errors.c`
+
+<CpyLink path="Parser/pegen_errors.c" />
+
+All error-recovery helpers for the PEG parser live here. The file has
+three concerns: building a well-formed `SyntaxError` (with filename,
+line numbers, column offsets, and the offending source text), wrapping
+tokenizer errors into the same shape, and two semantic helpers that the
+grammar calls during both the first pass and the error-recovery pass:
+`_PyPegen_set_expr_context` re-classifies an expression as an
+assignment target, and `_PyPegen_check_soft_keyword` validates that a
+soft keyword is used in the context that gives it meaning.
+
+Nothing in this file runs production code paths. Every function either
+sets a Python exception or performs a check that causes the second-pass
+error rules in `parser.c` to fire better diagnostics. The file is
+therefore compiled out of performance-critical measurements but is
+exercised heavily by the parser test suite.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Parser/pegen_errors.c" lines="1-60">1-60</Cpy> | `_PyPegen_make_syntax_error` / `_PyPegen_make_indent_error` | Allocate a `SyntaxError` or `IndentationError` exception with all five location fields populated. | `parser/pegen/errors.go:MakeSyntaxError/MakeIndentError` |
+| <Cpy path="Parser/pegen_errors.c" lines="61-200">61-200</Cpy> | `_PyPegen_raise_error_known_location` | Format a `SyntaxError` and set it as the current exception; extract the source line from the tokenizer buffer for the `text` field. | `parser/pegen/errors.go:RaiseErrorKnownLocation` |
+| <Cpy path="Parser/pegen_errors.c" lines="201-270">201-270</Cpy> | `_PyPegen_raise_error` / `_PyPegen_raise_error_with_col` | Convenience wrappers that locate the error at the current token or at an explicit column. | `parser/pegen/errors.go:RaiseError` |
+| <Cpy path="Parser/pegen_errors.c" lines="271-330">271-330</Cpy> | `_PyPegen_tokenize_error` / `_PyPegen_tokenize_error_with_col` | Wrap tokenizer errors (`tok_state->done != E_OK`) as `SyntaxError`. | `parser/pegen/errors.go:TokenizeError` |
+| <Cpy path="Parser/pegen_errors.c" lines="331-390">331-390</Cpy> | `_PyPegen_set_expr_context` | Recursively rewrite the `ctx` field of an `expr_ty` tree from `Load` to `Store` or `Del`. | `parser/pegen/errors.go:SetExprContext` |
+| <Cpy path="Parser/pegen_errors.c" lines="391-430">391-430</Cpy> | `_PyPegen_check_soft_keyword` | Return the matched soft-keyword string only when context allows it; return `NULL` otherwise to let the grammar backtrack. | `parser/pegen/errors.go:CheckSoftKeyword` |
+| <Cpy path="Parser/pegen_errors.c" lines="431-462">431-462</Cpy> | `_Pypegen_set_syntax_error_metadata` | Attach `filename`, `lineno`, and `offset` to an already-set `SyntaxError` when the first pass left them unset. | `parser/pegen/errors.go:SetSyntaxErrorMetadata` |
+
+## Reading
+
+### `_PyPegen_raise_error_known_location` (lines 61 to 200)
+
+<CpyLink path="Parser/pegen_errors.c" lines="61-200" />
+
+```c
+static void *
+_PyPegen_raise_error_known_location(Parser *p, PyObject *errtype,
+    Py_ssize_t lineno, Py_ssize_t col_offset,
+    Py_ssize_t end_lineno, Py_ssize_t end_col_offset,
+    const char *errmsg, va_list va)
+{
+    PyObject *value = NULL;
+    PyObject *errstr = PyUnicode_FromFormatV(errmsg, va);
+    ...
+    Py_ssize_t col_number = col_offset;
+    /* convert byte offset to character offset */
+    if (p->tok->lineno == lineno) {
+        col_number = _PyPegen_byte_offset_to_character_offset(
+            p->tok->line_start, col_offset);
+    }
+    ...
+    PyObject *tmp = Py_BuildValue("(OiiNii)", p->tok->filename,
+        lineno, col_number, line, end_lineno, end_col_offset);
+    value = PyTuple_Pack(2, errstr, tmp);
+    PyErr_SetObject(errtype, value);
+    ...
+}
+```
+
+Five fields populate the exception: `filename`, `lineno`,
+`col_offset`, `end_lineno`, `end_col_offset`. The `text` field is
+extracted by copying the relevant line from the tokenizer's line
+buffer. Because the tokenizer operates in bytes but the `SyntaxError`
+displays characters, byte offsets are converted through
+`_PyPegen_byte_offset_to_character_offset` (defined in `pegen.c`)
+before the exception tuple is built. Callers that only know the start
+position pass `-1` for the end fields; the function leaves them as
+`-1` so the caret rendering in `traceback.c` can skip the range
+underline.
+
+### `_PyPegen_set_expr_context` (lines 331 to 390)
+
+<CpyLink path="Parser/pegen_errors.c" lines="331-390" />
+
+```c
+expr_ty
+_PyPegen_set_expr_context(Parser *p, expr_ty expression, expr_context_ty ctx)
+{
+    switch (expression->kind) {
+    case Name_kind:
+        expression->v.Name.ctx = ctx;
+        break;
+    case Tuple_kind: {
+        asdl_expr_seq *elts = expression->v.Tuple.elts;
+        for (Py_ssize_t i = 0; i < asdl_seq_LEN(elts); i++) {
+            _PyPegen_set_expr_context(p, asdl_seq_GET(elts, i), ctx);
+        }
+        expression->v.Tuple.ctx = ctx;
+        break;
+    }
+    case List_kind:
+        ...
+    case Attribute_kind:
+        expression->v.Attribute.ctx = ctx;
+        break;
+    case Subscript_kind:
+        expression->v.Subscript.ctx = ctx;
+        break;
+    case Starred_kind:
+        _PyPegen_set_expr_context(p, expression->v.Starred.value, ctx);
+        expression->v.Starred.ctx = ctx;
+        break;
+    default:
+        RAISE_SYNTAX_ERROR_KNOWN_LOCATION(expression,
+            "cannot assign to %s here.", _PyAST_ExprName(expression));
+        return NULL;
+    }
+    return expression;
+}
+```
+
+The grammar parses `a, b = 1, 2` by first parsing `a, b` as an
+expression (context `Load`), then, once it sees `=`, calling this
+function to flip every leaf to `Store`. The recursion covers nested
+tuples, lists, and starred elements, which handles patterns like
+`(a, (b, c)) = ...`. Any node kind that cannot be a target, such as
+`BinOp` or `Call`, triggers a `SyntaxError` rather than a silent
+no-op, so `x + y = 1` is caught here before reaching the compiler.
+
+### `_PyPegen_check_soft_keyword` (lines 391 to 430)
+
+<CpyLink path="Parser/pegen_errors.c" lines="391-430" />
+
+Soft keywords (`match`, `case`, `type`) are syntactically identical to
+ordinary names. The generated parser calls this function when it
+encounters one in a rule that only matches in the right context. The
+function compares the current token's string value against the
+expected keyword string and returns it as a `PyObject *` on success or
+`NULL` on failure, letting PEG backtracking handle the failure branch.
+The check is purely textual and does not alter parser state, which
+means it is safe to call from memo-probing paths and from the
+error-recovery pass.
+
+### Tokenizer error wrapping (lines 271 to 330)
+
+<CpyLink path="Parser/pegen_errors.c" lines="271-330" />
+
+```c
+void *
+_PyPegen_tokenize_error(Parser *p)
+{
+    if (PyErr_Occurred()) {
+        return NULL;  /* tokenizer already set an exception */
+    }
+    const char *msg;
+    switch (p->tok->done) {
+    case E_TOKEN:   msg = "invalid token"; break;
+    case E_EOFS:    msg = "EOF in multi-line string"; break;
+    case E_EOLS:    msg = "EOL while scanning string literal"; break;
+    ...
+    }
+    return _PyPegen_raise_error(p, PyExc_SyntaxError, msg);
+}
+```
+
+The tokenizer sets `tok->done` to a non-`E_OK` code when it
+encounters an unrecoverable character sequence. At that point it has
+not necessarily set a Python exception. This wrapper translates the
+enumeration value into a human-readable message and routes it through
+`_PyPegen_raise_error` so the exception gets the usual location
+metadata. The `E_EOFS` / `E_EOLS` cases cover unclosed multi-line
+strings and are the most common tokenizer errors in practice.

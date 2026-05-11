@@ -1,0 +1,213 @@
+---
+title: Objects/floatobject.c
+description: IEEE 754 double-precision float. Conversion to/from int and string, hash, repr (shortest-round-trip), and arithmetic slots.
+cpython_path: Objects/floatobject.c
+cpython_version: "3.14"
+lines: 2642
+status: annotated
+ported_to: objects/float.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Objects/floatobject.c`
+
+<CpyLink path="Objects/floatobject.c" />
+
+Python floats wrap a C `double`. The `repr` uses the shortest decimal string
+that round-trips back to the same bit pattern, via David Gay's `dtoa` library
+(`_Py_dg_dtoa`). This guarantee has been in place since Python 3.1, so `1.1`
+prints as `'1.1'` rather than `'1.1000000000000001'`. The hash maps floats to
+the same value as equal integers (`hash(1.0) == hash(1) == 1`) using modular
+arithmetic over `_PyHASH_MODULUS`. A free-list of up to 256 float objects
+recycles `PyFloatObject` shells to avoid repeated `malloc` calls. `float_hex`
+and `float_fromhex` provide exact hexadecimal round-trip conversion. Arithmetic
+slots delegate directly to C `double` operations and let the hardware handle
+IEEE 754 edge cases.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Objects/floatobject.c" lines="1-100">1-100</Cpy> | `PyFloat_FromDouble`, `PyFloat_FromString` | Construction from C `double` and from a Python string/bytes. | `objects/float.go:NewFloat` |
+| <Cpy path="Objects/floatobject.c" lines="100-300">100-300</Cpy> | `PyFloat_AsDouble`, `PyFloat_GetMax`, `PyFloat_GetMin`, `PyFloat_GetEps` | Extraction and `sys.float_info` limit accessors. | `objects/float.go` |
+| <Cpy path="Objects/floatobject.c" lines="300-600">300-600</Cpy> | `float_repr`, `float_str` | Shortest round-trip repr via `_Py_dg_dtoa`; `str` falls back to `repr`. | `objects/float.go:floatRepr` |
+| <Cpy path="Objects/floatobject.c" lines="600-900">600-900</Cpy> | `float_hash` | Hash equal to the integer hash for whole-number floats. | `objects/float.go:floatHash` |
+| <Cpy path="Objects/floatobject.c" lines="900-1200">900-1200</Cpy> | `float_richcompare` | Handles NaN (never equal), inf edge cases, and exact int comparison. | `objects/float.go:floatRichcompare` |
+| <Cpy path="Objects/floatobject.c" lines="1200-1600">1200-1600</Cpy> | `float_add`, `float_sub`, `float_mul`, `float_div`, `float_pow` | Arithmetic: delegate to C `double` ops; `float_pow` handles special cases. | `objects/float.go` |
+| <Cpy path="Objects/floatobject.c" lines="1600-1900">1600-1900</Cpy> | `float_floor_div`, `float_mod`, `float_divmod` | Floor division and modulo; `float_divmod` matches `math.fmod` sign convention. | `objects/float.go` |
+| <Cpy path="Objects/floatobject.c" lines="1900-2200">1900-2200</Cpy> | `float_new`, `float_dealloc`, free-list management | Free-list recycling up to `PyFloat_MAXFREELIST` (256) shells. | `objects/float.go` |
+| <Cpy path="Objects/floatobject.c" lines="2200-2642">2200-2642</Cpy> | `float_as_integer_ratio`, `float_hex`, `float_fromhex`, `PyFloat_Type` | `as_integer_ratio`, exact hex conversion, and the type object definition. | `objects/float.go` |
+
+## Reading
+
+### Shortest repr: `float_repr` (lines 300 to 400)
+
+<CpyLink path="Objects/floatobject.c" lines="300-400" />
+
+`float_repr` calls `_Py_dg_dtoa` with mode 0, which returns the shortest
+decimal string that converts back to the same `double`. The result is then
+formatted with an exponent if it is very large or very small:
+
+```c
+static PyObject *
+float_repr(PyFloatObject *v)
+{
+    char *buf;
+    /* _Py_dg_dtoa mode 0: shortest round-trip decimal */
+    buf = _PyFloat_FormatAdvancedWriter(NULL, (PyObject *)v,
+                                        NULL, 0, 0);
+    /* ... or directly: */
+    char s[64];
+    _PyFloat_FormatAdvanced(v->ob_fval, s, sizeof(s));
+    return PyUnicode_FromString(s);
+}
+```
+
+The underlying `_Py_dg_dtoa(x, 0, 0, &decpt, &sign, &end)` call uses David
+Gay's algorithm (originally from `dtoa.c` in the Sun Microsystems fdlibm
+library) to produce the shortest decimal mantissa. For most floats the result
+is 15 to 17 significant digits, but values with short decimal representations
+(like `1.1` or `0.1`) produce the short form directly. `float_str` calls the
+same code path; since 3.2 `str(x)` and `repr(x)` are identical for floats.
+
+### `float_hash` (lines 600 to 700)
+
+<CpyLink path="Objects/floatobject.c" lines="600-700" />
+
+The invariant `hash(x) == hash(int(x))` for whole-number floats requires that
+the hash algorithm match `long_hash`. For floats, `_Py_HashDouble` decomposes
+the value into mantissa `m` and exponent `e` and computes `m * 2^e mod
+_PyHASH_MODULUS`:
+
+```c
+Py_hash_t
+_Py_HashDouble(PyObject *inst, double v)
+{
+    int sign;
+    double m;
+    Py_uhash_t x;
+    int e;
+
+    if (!Py_IS_FINITE(v)) {
+        if (Py_IS_INFINITY(v))
+            return v > 0 ? _PyHASH_INF : -_PyHASH_INF;
+        else
+            return _PyHASH_NAN;
+    }
+
+    m = frexp(v, &e);
+    sign = 1;
+    if (m < 0) { sign = -1; m = -m; }
+
+    /* Convert mantissa to integer: m * 2^DBL_MANT_DIG */
+    x = 0;
+    while (m) {
+        x = ((x << PyLong_SHIFT) & _PyHASH_MODULUS) |
+             x >> (_PyHASH_BITS - PyLong_SHIFT);
+        m *= (double)(1L << PyLong_SHIFT);
+        e -= PyLong_SHIFT;
+        Py_uhash_t y = (Py_uhash_t)m;
+        m -= y;
+        x += y;
+        if (x >= _PyHASH_MODULUS)
+            x -= _PyHASH_MODULUS;
+    }
+    /* Adjust for exponent */
+    e = e >= 0 ? e % _PyHASH_BITS : _PyHASH_BITS - 1 - (-1-e) % _PyHASH_BITS;
+    x = ((x << e) & _PyHASH_MODULUS) | x >> (_PyHASH_BITS - e);
+    x = x * sign;
+    if (x == (Py_uhash_t)-1)
+        x = -2;
+    return (Py_hash_t)x;
+}
+```
+
+Because `long_hash` also reduces modulo `_PyHASH_MODULUS` and both algorithms
+use the same 30-bit digit decomposition, any float equal to an integer produces
+the same hash value.
+
+### `float_richcompare` (lines 900 to 1000)
+
+<CpyLink path="Objects/floatobject.c" lines="900-1000" />
+
+Comparing a float to a Python integer requires care: converting the integer to
+`double` can lose precision for large integers. The comparison first tries
+`PyLong_AsDouble`; if the result is `infinity` due to overflow it concludes that
+the integer has larger magnitude than any finite float. For non-overflow cases
+where the double conversion is not exact, it falls back to comparing the
+integer to the exact `as_integer_ratio` of the float:
+
+```c
+static PyObject *
+float_richcompare(PyObject *v, PyObject *w, int op)
+{
+    double i, j;
+    ...
+    if (PyLong_Check(w)) {
+        /* Try cheap double conversion first */
+        j = PyLong_AsDouble(w);
+        if (j == -1.0 && PyErr_Occurred()) {
+            /* Overflow: |w| > any finite float */
+            PyErr_Clear();
+            ...
+            /* Compare sign only for EQ/NE; use magnitude for ordering */
+        } else if (Py_IS_INFINITY(j)) {
+            /* Double overflow but no Python error: very large int */
+            ...
+        } else {
+            /* j is exact: compare directly */
+            i = PyFloat_AS_DOUBLE(v);
+            ...
+        }
+    }
+    ...
+}
+```
+
+NaN comparisons always return `False` for `==` and `True` for `!=`, matching
+IEEE 754. The C `double` comparison handles inf correctly for all operators.
+
+### Free-list (lines 1900 to 2000)
+
+<CpyLink path="Objects/floatobject.c" lines="1900-2000" />
+
+Up to `PyFloat_MAXFREELIST` (256) `PyFloatObject` shells are kept in a singly-linked
+free-list. On deallocation the `ob_fval` field (a `double`) is repurposed as a
+next pointer. This is safe because `sizeof(double) >= sizeof(void*)` on all
+supported platforms:
+
+```c
+static void
+float_dealloc(PyFloatObject *op)
+{
+    PyInterpreterState *interp = _PyInterpreterState_GET();
+    struct _Py_float_state *state = &interp->float_state;
+    if (state->numfree < PyFloat_MAXFREELIST) {
+        /* Repurpose ob_fval as next-free pointer */
+        *(PyFloatObject **)op = state->free_list;
+        state->free_list = op;
+        ++state->numfree;
+        return;
+    }
+    Py_TYPE(op)->tp_free((PyObject *)op);
+}
+```
+
+`PyFloat_FromDouble` checks `state->numfree` first and pops from the free-list
+when available, initializing the reused object by writing the new `double` value
+into `ob_fval`. The reference count and type pointer are reset by `PyObject_Init`.
+
+## gopy mirror
+
+`objects/float.go`. The shortest-round-trip repr uses
+`strconv.FormatFloat(x, 'g', -1, 64)`, which also returns the shortest decimal
+that round-trips. The hash algorithm is ported identically from `_Py_HashDouble`.
+The free-list is replaced by `sync.Pool`. `float_as_integer_ratio` maps to
+`(*Float).AsIntegerRatio`.
+
+## CPython 3.14 changes
+
+`float_hex` and `float_fromhex` have been stable since 3.1. `float.is_integer()`
+has been available since 3.0. No 3.14-specific changes to the core float
+implementation. The free-list was made per-interpreter in 3.12.

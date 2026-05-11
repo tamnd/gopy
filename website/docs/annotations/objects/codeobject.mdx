@@ -1,0 +1,286 @@
+---
+title: Objects/codeobject.c
+description: PyCodeObject construction, validation, constant interning, location table decode, and the watcher/invalidation API.
+cpython_path: Objects/codeobject.c
+cpython_version: "3.14"
+lines: 3666
+status: annotated
+ported_to: objects/code.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Objects/codeobject.c`
+
+<CpyLink path="Objects/codeobject.c" />
+
+Code objects are the compiled form of a Python function or module:
+bytecode, constants, names, localsplusnames/kinds, linetable, and
+exception table. This file creates them (`_PyCode_New`), validates the
+constructor fields (`_PyCode_Validate`), interns their constants and
+string pools, and provides the line-number lookup API that tracebacks
+use. The "quicken" path installs adaptive specialization counters on
+first use.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Objects/codeobject.c" lines="29-65">29-65</Cpy> | `code_event_name`, `notify_code_watchers`, `PyCode_AddWatcher`, `PyCode_ClearWatcher` | PEP 669 code-object watcher API; up to 8 slots per interpreter. | `objects/code.go:MonitoringData` |
+| <Cpy path="Objects/codeobject.c" lines="117-308">117-308</Cpy> | `should_intern_string`, `should_immortalize_constant`, `intern_strings`, `intern_constants` | Constant pool interning: strings interned in place, short ASCII and small ints immortalized, nested code objects recursed. | `compile/const_cache.go` |
+| <Cpy path="Objects/codeobject.c" lines="310-380">310-380</Cpy> | `validate_and_copy_tuple`, `init_co_cached` | Pre-construction helpers; deep-copy and validate tuple args, seed the inline-cache slab. | `objects/code.go:NewCode` |
+| <Cpy path="Objects/codeobject.c" lines="381-444">381-444</Cpy> | `_Py_set_localsplus_info`, `get_localsplus_counts`, `get_localsplus_names` | localspluskinds accessors; classify each slot as fast-local, cell, free, or hidden. | `objects/code.go:Cellvars`, `Freevars`, `Varnames` |
+| <Cpy path="Objects/codeobject.c" lines="446-593">446-593</Cpy> | `_PyCode_Validate` | Validate all fields of `_PyCodeConstructor`: bytecode length, tuple types, slot-count parity, non-negative stacksize. | `objects/code.go:Replace` (field guards) |
+| <Cpy path="Objects/codeobject.c" lines="511-718">511-718</Cpy> | `init_code`, `scan_varint`, `scan_signed_varint`, `get_line_delta`, `remove_column_info`, `intern_code_constants` | Post-allocation initialization: copy fields, strip column info if requested, run constant interning. | `objects/code.go:NewCode` |
+| <Cpy path="Objects/codeobject.c" lines="718-920">718-920</Cpy> | `_PyCode_New`, `PyUnstable_Code_NewWithPosOnlyArgs`, `PyCode_NewEmpty` | Allocation entry points; compute inline size, initialize the localsplus array, fire watcher callbacks. | `objects/code.go:NewCode` |
+| <Cpy path="Objects/codeobject.c" lines="1017-1200">1017-1200</Cpy> | `PyCode_Addr2Line`, `_PyCode_SafeAddr2Line`, `_PyLineTable_InitAddressRange`, `_PyCode_CheckLineNumber` | Location table traversal: linear scan for one-off lookups; cursor-based amortized scan for sequential access. | `objects/code_tables.go:CoLines`, `CoAddr2Location` |
+| <Cpy path="Objects/codeobject.c" lines="1200-1500">1200-1500</Cpy> | `next_code_delta`, `read_varint`, `read_signed_varint`, `retreat` | Location table iterator primitives: zigzag varint decode, bidirectional cursor movement. | `objects/code_tables.go:readLocVarint`, `readLocSignedVarint` |
+| <Cpy path="Objects/codeobject.c" lines="1500-2500">1500-2500</Cpy> | `PyCode_Addr2Location`, `_PyCode_InitAddressRange`, line/column accessors | Full four-field position decode (line, end-line, col, end-col) for PEP 657 fine-grained tracebacks. | `objects/code_tables.go:CoPositions`, `PositionEntry` |
+| <Cpy path="Objects/codeobject.c" lines="2500-3666">2500-3666</Cpy> | `code_repr`, `co_*` attribute getters, `PyCode_GetCode/VarNames/FreeVars/CellVars/FileName`, `_PyCode_SetExtra`, `PyCode_Type` | Repr, attribute accessors, extra-slot API, and the type object definition. | `objects/code.go:codeRepr`, `CodeType` |
+
+## Reading
+
+### `_PyCode_Validate` (lines 446 to 503)
+
+<CpyLink path="Objects/codeobject.c" lines="446-503" />
+
+```c
+static int
+_PyCode_Validate(struct _PyCodeConstructor *con)
+{
+    /* Check argument types */
+    if (con->code == NULL || !PyBytes_Check(con->code)) {
+        PyErr_SetString(PyExc_SystemError,
+                        "code: co_code must be a bytes object");
+        return -1;
+    }
+    if (PyBytes_GET_SIZE(con->code) % sizeof(_Py_CODEUNIT) != 0) {
+        PyErr_SetString(PyExc_ValueError,
+                        "code: co_code has an odd number of bytes");
+        return -1;
+    }
+    if (con->consts == NULL || !PyTuple_Check(con->consts)) {
+        PyErr_SetString(PyExc_SystemError,
+                        "code: co_consts must be a tuple");
+        return -1;
+    }
+    if (con->localsplusnames == NULL ||
+        !PyTuple_Check(con->localsplusnames)) {
+        PyErr_SetString(PyExc_SystemError,
+                        "code: co_localsplusnames must be a tuple");
+        return -1;
+    }
+    if (con->localspluskinds == NULL ||
+        !PyBytes_Check(con->localspluskinds)) {
+        PyErr_SetString(PyExc_SystemError,
+                        "code: co_localspluskinds must be a bytes object");
+        return -1;
+    }
+    if (PyTuple_GET_SIZE(con->localsplusnames) !=
+        PyBytes_GET_SIZE(con->localspluskinds)) {
+        PyErr_SetString(PyExc_ValueError,
+                        "code: co_localsplusnames and co_localspluskinds "
+                        "must have the same length");
+        return -1;
+    }
+    if (con->stacksize < 0) {
+        PyErr_SetString(PyExc_ValueError,
+                        "code: co_stacksize must be a positive integer");
+        return -1;
+    }
+    return 0;
+}
+```
+
+`co_code` must be a bytes object whose length is a multiple of
+`sizeof(_Py_CODEUNIT)` (2 bytes per instruction). `co_consts` must be a
+tuple. `co_localsplusnames` length must equal `co_localspluskinds`
+length. `co_stacksize` must be non-negative. The eval loop reads all of
+these fields without re-checking; `_PyCode_Validate` is the single gate.
+
+### Constant interning (lines 117 to 308)
+
+<CpyLink path="Objects/codeobject.c" lines="117-308" />
+
+```c
+static int
+intern_constants(PyObject *tuple, int *modified)
+{
+    for (Py_ssize_t i = PyTuple_GET_SIZE(tuple); --i >= 0; ) {
+        PyObject *v = PyTuple_GET_ITEM(tuple, i);
+        if (PyUnicode_CheckExact(v)) {
+            if (should_intern_string(v)) {
+                PyObject *w = v;
+                PyUnicode_InternInPlace(&v);
+                if (w != v) {
+                    PyTuple_SET_ITEM(tuple, i, v);
+                    Py_DECREF(w);
+                    if (modified) {
+                        *modified = 1;
+                    }
+                }
+            }
+        }
+        else if (should_immortalize_constant(v)) {
+            _Py_Immortalize(v);
+        }
+        else if (PyTuple_CheckExact(v)) {
+            if (intern_constants(v, NULL) < 0) {
+                return -1;
+            }
+        }
+        else if (PyCode_Check(v)) {
+            PyCodeObject *co = (PyCodeObject *)v;
+            if (intern_constants(co->co_consts, NULL) < 0) {
+                return -1;
+            }
+        }
+    }
+    return 0;
+}
+```
+
+`intern_constants` walks `co_consts` recursively. Strings are interned
+via `PyUnicode_InternInPlace`. Short ASCII strings and small integers
+are immortalized so they bypass refcount machinery everywhere they
+appear. Nested code objects are recursed, so all constants across the
+entire module share the same interned pool after a single import. In
+gopy, this interning is done at compile time in `compile/const_cache.go`
+rather than at code-object construction time.
+
+### `_PyCode_New` (lines 718 to 766)
+
+<CpyLink path="Objects/codeobject.c" lines="718-766" />
+
+```c
+static PyCodeObject *
+_PyCode_New(struct _PyCodeConstructor *con)
+{
+    /* Compute the total size:
+       sizeof(PyCodeObject)
+       + nlocalsplus * sizeof(_PyLocals_Kind)      // kinds array
+       + sizeof(PyObject *) * (nlocalsplus + nconsts)  // fast-locals + consts
+       The localsplus array is allocated inline, adjacent in memory
+       to the code object itself, to improve cache locality during
+       frame initialization. */
+    Py_ssize_t nlocalsplus =
+        PyTuple_GET_SIZE(con->localsplusnames);
+    Py_ssize_t size = sizeof(PyCodeObject)
+        + nlocalsplus * sizeof(_PyLocals_Kind)
+        + sizeof(PyObject *) * nlocalsplus;
+
+    PyCodeObject *co = (PyCodeObject *)PyObject_GC_NewVar(
+        PyCodeObject, &PyCode_Type, nlocalsplus);
+    if (co == NULL) {
+        return NULL;
+    }
+    ...
+    init_code(co, con);
+    notify_code_watchers(PY_CODE_EVENT_CREATE, co);
+    return co;
+}
+```
+
+Computes the total size with the `localsplus` array (fast locals, cell
+vars, and free vars) allocated inline in the code object. This places
+them adjacent in memory to improve cache locality during frame
+initialization. `notify_code_watchers` fires the PEP 669 `CREATE` event
+so any registered debugger or coverage tool learns about the new code
+object immediately.
+
+### Location table decode (lines 596 to 622 and 1017 to 1200)
+
+<CpyLink path="Objects/codeobject.c" lines="596-622" />
+
+```c
+static int
+scan_varint(const uint8_t *ptr, unsigned int *result)
+{
+    unsigned int read = *ptr++;
+    unsigned int val  = read & 63;
+    unsigned int shift = 0;
+    while (read & 64) {
+        read = *ptr++;
+        shift += 6;
+        val |= (read & 63) << shift;
+    }
+    *result = val;
+    return (int)(ptr - (ptr - shift/6 - 1));
+}
+```
+
+The linetable is a compressed sequence of entries encoding (instruction
+count, line delta, col start, col end). `scan_varint` decodes one
+unsigned varint: bits 0-5 of each byte carry the value in 6-bit chunks
+little-endian, bit 6 signals more bytes follow. `PyCode_Addr2Line` walks
+from the start of the table for each call (O(n)), so it is used only on
+exceptions and tracebacks. `_PyCode_CheckLineNumber` maintains a
+`PyCodeAddressRange` cursor and advances it forward, amortizing the cost
+over sequential instruction-by-instruction access. In gopy,
+`readLocVarint` in `objects/code_tables.go` ports this directly.
+
+### Watcher API (lines 29 to 65)
+
+<CpyLink path="Objects/codeobject.c" lines="29-65" />
+
+```c
+int
+PyCode_AddWatcher(PyCode_WatchCallback callback)
+{
+    PyInterpreterState *interp = _PyInterpreterState_GET();
+    for (int i = 0; i < CODE_MAX_WATCHERS; i++) {
+        if (!interp->code_watchers[i]) {
+            interp->code_watchers[i] = callback;
+            interp->active_code_watchers = 1;
+            return i;
+        }
+    }
+    PyErr_SetString(PyExc_RuntimeError,
+                    "code_watchers array is full");
+    return -1;
+}
+
+static void
+notify_code_watchers(PyCodeEvent event, PyCodeObject *co)
+{
+    PyInterpreterState *interp = _PyInterpreterState_GET();
+    if (!interp->active_code_watchers) {
+        return;
+    }
+    for (int i = 0; i < CODE_MAX_WATCHERS; i++) {
+        PyCode_WatchCallback cb = interp->code_watchers[i];
+        if (cb != NULL) {
+            if (cb(event, co) < 0) {
+                PyErr_WriteUnraisable((PyObject *)co);
+            }
+        }
+    }
+}
+```
+
+`PyCode_AddWatcher` registers a callback for `CREATE`, `MODIFY`, and
+`DESTROY` events on code objects. Up to 8 watchers are supported per
+interpreter (stored in a fixed-size array). `notify_code_watchers`
+iterates the array and calls each non-NULL slot. This is the mechanism
+used by debuggers (pdb, coverage.py) to track code invalidation without
+monkey-patching. gopy mirrors this via the `MonitoringData` field on
+`*Code`, which the monitor package populates.
+
+## gopy mirror
+
+`objects/code.go`. `_PyCode_Validate` maps to the field guards inside
+`(*Code).Replace`. Location table decode lives in
+`objects/code_tables.go` as `CoPositions`, `CoLines`, and
+`CoAddr2Location`. `readLocVarint` and `readLocSignedVarint` port
+`read_varint` and `read_signed_varint` directly. Constant interning is
+done at compile time in `compile/const_cache.go` rather than at
+code-object construction time. The watcher API is not ported as a
+standalone registry; the `MonitoringData any` field provides the
+hook point instead.
+
+## CPython 3.14 changes
+
+`co_qualname` added in 3.11. `co_exceptiontable` added in 3.11.
+`co_linetable` PEP 657 format (column info) added in 3.11. Watcher
+API (`PyCode_AddWatcher`) added in 3.12. `_PyCode_SetExtra` slot count
+can now be queried; previously write-only.

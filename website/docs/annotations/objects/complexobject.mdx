@@ -1,0 +1,170 @@
+---
+title: Objects/complexobject.c
+description: Complex number type. C-level arithmetic on Py_complex structs, hash combining real and imaginary parts, and string parsing for the 1+2j literal syntax.
+cpython_path: Objects/complexobject.c
+cpython_version: "3.14"
+lines: 1422
+status: annotated
+ported_to: objects/complex.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Objects/complexobject.c`
+
+<CpyLink path="Objects/complexobject.c" />
+
+`complex` wraps a C-level `Py_complex` struct that holds two `double` fields,
+`real` and `imag`. The file divides cleanly into a C-level arithmetic layer
+(`c_sum`, `c_diff`, `c_prod`, `c_quot`, `c_pow`) that operates on `Py_complex`
+directly without any Python object overhead, and a Python-object layer
+(`complex_add`, `complex_mul`, etc.) that unpacks operands, calls the C
+functions, and boxes the result. The split is the same pattern used by
+`floatobject.c` for `_Py_HashDouble`.
+
+Only `==` and `!=` are defined for ordering; `<`, `>`, `<=`, and `>=` raise
+`TypeError`. The hash combines the hashes of the real and imaginary parts so
+that a complex number with zero imaginary part hashes identically to the
+equivalent float (and, by float-integer hash compatibility, to the equivalent
+integer). `complex_new` accepts a string in the `"1+2j"` form or separate
+`real` and `imag` keyword arguments.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Objects/complexobject.c" lines="1-100">1-100</Cpy> | `Py_complex` struct, `c_sum`, `c_diff`, `c_prod` | C-level addition, subtraction, and multiplication on `Py_complex`. | `objects/complex.go:cSum` |
+| <Cpy path="Objects/complexobject.c" lines="100-200">100-200</Cpy> | `c_quot`, `c_pow` | C-level division and power; `c_quot` avoids catastrophic cancellation via Smith's algorithm. | `objects/complex.go:cQuot` |
+| <Cpy path="Objects/complexobject.c" lines="200-400">200-400</Cpy> | `PyComplex_FromDoubles`, `PyComplex_RealAsDouble`, `PyComplex_ImagAsDouble`, `PyComplex_AsCComplex` | Allocation and extraction between Python object and C struct. | `objects/complex.go:NewComplex` |
+| <Cpy path="Objects/complexobject.c" lines="400-700">400-700</Cpy> | `complex_add`, `complex_sub`, `complex_mul`, `complex_div`, `complex_pow`, `complex_neg`, `complex_abs` | Numeric slot implementations. | `objects/complex.go:complexAdd` |
+| <Cpy path="Objects/complexobject.c" lines="700-900">700-900</Cpy> | `complex_richcompare` | Only `==` and `!=`; all ordering operators raise `TypeError`. | `objects/complex.go:complexRichcompare` |
+| <Cpy path="Objects/complexobject.c" lines="900-1050">900-1050</Cpy> | `complex_hash` | Hash via `_Py_HashDouble` for real; XOR with imaginary hash times multiplier. | `objects/complex.go:complexHash` |
+| <Cpy path="Objects/complexobject.c" lines="1050-1250">1050-1250</Cpy> | `complex_repr`, `complex_format` | Produces `(1+2j)`, `1j`, `(1-0j)` etc.; handles sign of imaginary zero. | `objects/complex.go:complexRepr` |
+| <Cpy path="Objects/complexobject.c" lines="1250-1422">1250-1422</Cpy> | `complex_new`, `PyComplex_Type` | String parser for `"1+2j"` literals; `real`/`imag` keyword args; type definition. | `objects/complex.go:complexNew` |
+
+## Reading
+
+### C-level arithmetic (lines 1 to 200)
+
+<CpyLink path="Objects/complexobject.c" lines="1-200" />
+
+The `Py_complex` struct is a plain C struct passed by value. The arithmetic
+functions operate on it directly, avoiding Python object overhead for
+intermediate results in long chains of complex arithmetic.
+
+`c_prod` uses the schoolbook formula (four multiplies, two adds):
+
+```c
+Py_complex
+c_prod(Py_complex a, Py_complex b)
+{
+    Py_complex r;
+    r.real = a.real*b.real - a.imag*b.imag;
+    r.imag = a.real*b.imag + a.imag*b.real;
+    return r;
+}
+```
+
+`c_quot` uses Smith's algorithm to avoid intermediate overflow when the
+denominator components differ greatly in magnitude:
+
+```c
+Py_complex
+c_quot(Py_complex a, Py_complex b)
+{
+    Py_complex r;
+    double abs_breal = b.real < 0 ? -b.real : b.real;
+    double abs_bimag = b.imag < 0 ? -b.imag : b.imag;
+    if (abs_breal >= abs_bimag) {
+        double ratio = b.imag / b.real;
+        double denom = b.real + b.imag * ratio;
+        r.real = (a.real + a.imag * ratio) / denom;
+        r.imag = (a.imag - a.real * ratio) / denom;
+    } else {
+        double ratio = b.real / b.imag;
+        double denom = b.real * ratio + b.imag;
+        r.real = (a.real * ratio + a.imag) / denom;
+        r.imag = (a.imag * ratio - a.real) / denom;
+    }
+    return r;
+}
+```
+
+By dividing through by the larger component first, the intermediate values
+stay close to 1.0 and avoid IEEE 754 overflow even when `b.real` and `b.imag`
+are near `DBL_MAX`.
+
+### `complex_hash` (lines 900 to 1050)
+
+<CpyLink path="Objects/complexobject.c" lines="900-1050" />
+
+The hash design preserves the invariant that `hash(3+0j) == hash(3.0) == hash(3)`. For a complex number with zero imaginary part the imaginary hash contribution is zero, so the result reduces to the float hash. For numbers with nonzero imaginary part the two component hashes are combined:
+
+```c
+static Py_hash_t
+complex_hash(PyComplexObject *v)
+{
+    Py_uhash_t hashreal, hashimag, combined;
+    hashreal = (Py_uhash_t)_Py_HashDouble((PyObject *)v, v->cval.real);
+    if (hashreal == (Py_uhash_t)-1)
+        return -1;
+    hashimag = (Py_uhash_t)_Py_HashDouble((PyObject *)v, v->cval.imag);
+    if (hashimag == (Py_uhash_t)-1)
+        return -1;
+    combined = hashreal + _PyHASH_IMAG * hashimag;
+    if (combined == (Py_uhash_t)-1)
+        combined = -2;
+    return (Py_hash_t)combined;
+}
+```
+
+`_PyHASH_IMAG` is a compile-time constant multiplier (currently `1000003`)
+chosen so that `combined` is well-distributed even when both components are
+small integers.
+
+### `complex_repr` (lines 1050 to 1250)
+
+<CpyLink path="Objects/complexobject.c" lines="1050-1250" />
+
+The repr rules are:
+- If the real part is nonzero, wrap in parentheses: `(1+2j)`.
+- If the real part is zero, omit it: `2j` or `-2j`.
+- Always format the imaginary part with a `j` suffix.
+- When the imaginary part is negative, no extra space is inserted: `(1-2j)`.
+- Negative zero in the imaginary part is rendered as `(1-0j)` to distinguish
+  it from `(1+0j)`.
+
+The sign of the imaginary component is tested explicitly against `-0.0` using
+`copysign(1.0, v->cval.imag) < 0` rather than `v->cval.imag < 0` to correctly
+handle IEEE 754 negative zero.
+
+### `complex_new` (lines 1250 to 1422)
+
+<CpyLink path="Objects/complexobject.c" lines="1250-1422" />
+
+`complex_new` accepts three call forms:
+
+1. `complex("1+2j")` -- parse a string.
+2. `complex(real)` -- wrap a single numeric value.
+3. `complex(real, imag)` -- combine two numeric values.
+
+The string parser handles whitespace, optional sign, and the `j`/`J` suffix.
+For numeric arguments it calls `__complex__` if defined, then falls back to
+`__float__`, then `__index__`. The `real` and `imag` keyword arguments
+trigger distinct code paths that bypass `__complex__` so that
+`complex(real=x)` does not lose the imaginary component of `x` if `x` is
+already complex.
+
+## gopy mirror
+
+`objects/complex.go`. The C-level `Py_complex` arithmetic maps to a Go
+`pyComplex` struct with `real` and `imag float64` fields. Smith's algorithm for
+`cQuot` is ported line-for-line. The hash uses the same `_Py_HashDouble` port
+as `objects/float.go` plus the `_PyHASH_IMAG` multiplier.
+
+## CPython 3.14 changes
+
+`c_pow` handling for edge cases (zero base, non-integer exponent) has been
+stable since 3.3. The `__complex_format__` internal API was removed in 3.2;
+`complex_repr` has called `PyOS_double_to_string` directly since then. No
+3.14-specific changes affect `complexobject.c`.

@@ -1,0 +1,232 @@
+---
+title: Objects/genobject.c
+description: Generator, coroutine, and async-generator objects. Frame suspension/resumption, send/throw/close, and ag_running guard.
+cpython_path: Objects/genobject.c
+cpython_version: "3.14"
+lines: 2419
+status: annotated
+ported_to: objects/gen.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Objects/genobject.c`
+
+<CpyLink path="Objects/genobject.c" />
+
+Generator, coroutine, and async-generator objects. All three share a common
+`PyGenObject` base with a suspended `_PyInterpreterFrame` stored inline since
+3.11. `gen_send_ex2` is the shared resume engine: it pushes the frame back onto
+the C call stack via `_PyEval_EvalFrameDefault`, handles `StopIteration` and
+`StopAsyncIteration`, and manages the `gi_frame_state` lifecycle. The
+`PyAsyncGen_Type` adds an `ag_running_async` guard to detect concurrent
+`__anext__` calls and a `PyAsyncGenValueWrapper` object to distinguish
+yielded values from the final return.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Objects/genobject.c" lines="1-100">1-100</Cpy> | `gen_traverse`, `gen_clear`, `gen_dealloc`, `gen_finalize` | GC traversal, cycle break, deallocation, and finalizer. | `objects/gen.go` |
+| <Cpy path="Objects/genobject.c" lines="100-300">100-300</Cpy> | `gen_send_ex`, `gen_send_ex2`, `_PyGen_SetStopIterationValue` | The send/resume engine. | `objects/gen.go:(*Generator).Send` |
+| <Cpy path="Objects/genobject.c" lines="300-500">300-500</Cpy> | `gen_send`, `gen_throw`, `gen_close` | Public generator methods. | `objects/gen.go:Throw` |
+| <Cpy path="Objects/genobject.c" lines="500-700">500-700</Cpy> | `gen_repr`, `gen_get_name`, `gen_get_qualname`, `gi_frame` getter | Repr and accessors. | `objects/gen.go:genRepr` |
+| <Cpy path="Objects/genobject.c" lines="700-900">700-900</Cpy> | `PyGen_New`, `PyGen_NewWithQualName`, `_PyGen_NewUnfinished` | Construction. | `objects/gen.go:NewGenerator` |
+| <Cpy path="Objects/genobject.c" lines="900-1200">900-1200</Cpy> | `coro_send`, `coro_throw`, `coro_close`, `coro_repr`, `PyCoro_New` | Coroutine-specific wrappers. | `objects/gen.go:NewCoroutine` |
+| <Cpy path="Objects/genobject.c" lines="1200-1600">1200-1600</Cpy> | `async_gen_asend_new`, `async_gen_asend_send`, `async_gen_asend_throw`, `async_gen_asend_close` | Async generator `__anext__` awaitable object. | `objects/async_gen.go:asyncGenAsend` |
+| <Cpy path="Objects/genobject.c" lines="1600-2419">1600-2419</Cpy> | `async_gen_athrow_new`, `PyAsyncGen_New`, `PyAsyncGenValueWrapper`, `PyGen_Type`, `PyCoro_Type`, `PyAsyncGen_Type` | Athrow awaitable, construction, value wrapper, type definitions. | `objects/async_gen.go` |
+
+## Reading
+
+### `gen_send_ex2` (lines 100 to 300)
+
+<CpyLink path="Objects/genobject.c" lines="100-300" />
+
+The central resume function. Checks `gi_frame_state` before dispatching:
+
+```c
+static PyObject *
+gen_send_ex2(PyGenObject *gen, PyObject *arg, int exc, int closing)
+{
+    PyFrameState state = gen->gi_frame_state;
+
+    if (state == FRAME_CREATED && arg && arg != Py_None) {
+        /* can't send a non-None value to a just-started generator */
+        _PyErr_SetString(tstate, PyExc_TypeError,
+            "can't send non-None value to a just-started generator");
+        return NULL;
+    }
+    if (state == FRAME_COMPLETED) {
+        if (!closing) {
+            if (PyCoro_CheckExact(gen))
+                _PyErr_SetString(tstate, PyExc_StopIteration, "");
+            else
+                _PyErr_SetNone(tstate, PyExc_StopIteration);
+        }
+        return NULL;
+    }
+    if (state == FRAME_EXECUTING) {
+        _PyErr_SetString(tstate, PyExc_ValueError,
+            "generator already executing");
+        return NULL;
+    }
+
+    /* Resume the frame. */
+    gen->gi_frame_state = FRAME_EXECUTING;
+    _PyInterpreterFrame *frame = (_PyInterpreterFrame *)gen->gi_iframe;
+    frame->previous = tstate->current_frame;
+    tstate->current_frame = frame;
+
+    /* Pass the send value into the frame. */
+    if (!exc) {
+        frame->localsplus[frame->stacktop - 1] = Py_XNewRef(arg);
+    } else {
+        _PyErr_StackItemToExcInfoTuple(tstate, frame);
+    }
+
+    PyObject *result = _PyEval_EvalFrameDefault(tstate, frame, exc);
+    ...
+    if (result == NULL && _PyErr_ExceptionMatches(tstate, PyExc_StopIteration)) {
+        PyObject *val = _PyErr_GetTopmostException(tstate)->exc_value;
+        /* Extract StopIteration.value. */
+        ...
+    }
+    return result;
+}
+```
+
+On return, if the frame yielded a value the result is that value. If the frame
+returned (fell off the end or executed `return`), `result` is NULL with
+`StopIteration` set; `gen_send_ex2` clears the exception and returns NULL,
+which `gen_send` translates into a `StopIteration` for the caller. The
+`gi_frame_state` is set to `FRAME_COMPLETED` so subsequent calls raise
+`StopIteration` immediately.
+
+### Frame suspension (YIELD_VALUE opcode)
+
+The suspension half lives in the eval loop, not in this file. At `YIELD_VALUE`,
+the eval loop:
+
+1. Saves `stack_pointer` into `frame->localsplus[frame->stacktop]`.
+2. Sets `gen->gi_frame_state = FRAME_SUSPENDED`.
+3. Returns the yielded value to `gen_send_ex2` as a non-NULL result.
+4. Clears `frame->previous` so the C call stack is not held by the suspended
+   generator.
+
+The `_PyInterpreterFrame` stays alive inside the generator object. The next
+`send()` call reinstalls `frame->previous` and calls `_PyEval_EvalFrameDefault`
+again from the saved `stack_pointer`.
+
+### `gen_close` (lines 300 to 500)
+
+<CpyLink path="Objects/genobject.c" lines="300-500" />
+
+Throws `GeneratorExit` into the generator. Handles three outcomes:
+
+```c
+static PyObject *
+gen_close(PyObject *self, PyObject *args)
+{
+    PyGenObject *gen = (PyGenObject *)self;
+    PyObject *retval;
+    PyObject *yf = gen_yf(gen);  /* check for yield-from delegation */
+
+    if (yf) {
+        gen->gi_frame_state = FRAME_EXECUTING;
+        retval = gen_close_iter(yf);  /* close the inner iterator first */
+        ...
+    }
+
+    retval = gen_send_ex(gen, Py_None, 1, 1);  /* exc=1, closing=1 */
+    if (retval) {
+        /* Generator caught GeneratorExit and yielded another value. */
+        Py_DECREF(retval);
+        PyErr_SetString(PyExc_RuntimeError,
+            "generator ignored GeneratorExit");
+        return NULL;
+    }
+    if (PyErr_ExceptionMatches(PyExc_StopIteration)
+        || PyErr_ExceptionMatches(PyExc_GeneratorExit)) {
+        PyErr_Clear();
+        Py_RETURN_NONE;
+    }
+    return NULL;  /* propagate other exceptions */
+}
+```
+
+`gen_finalize` calls `gen_close` during GC if `gi_frame_state` is not
+`FRAME_COMPLETED`, ensuring that `finally` blocks and context managers inside
+the generator are cleaned up.
+
+### Async generator `asend` (lines 1200 to 1600)
+
+<CpyLink path="Objects/genobject.c" lines="1200-1600" />
+
+`async_gen.__anext__()` does not call `gen_send_ex2` directly. It returns an
+`async_gen_asend` object, an awaitable that the `async for` machinery drives.
+The awaitable's `send` method delegates to `gen_send_ex2` with the value passed
+by the event loop:
+
+```c
+static PyObject *
+async_gen_asend_send(PyAsyncGenASend *o, PyObject *arg)
+{
+    PyObject *result;
+
+    if (o->ags_state == AWAITABLE_STATE_CLOSED) {
+        PyErr_SetNone(PyExc_StopIteration);
+        return NULL;
+    }
+    if (o->ags_state == AWAITABLE_STATE_ITER) {
+        /* already running */
+        result = gen_send_ex((PyGenObject *)o->ags_gen, arg, 0, 0);
+    } else {
+        /* first send: use the stored value */
+        result = gen_send_ex((PyGenObject *)o->ags_gen,
+                             o->ags_sendval, 0, 0);
+        ...
+        o->ags_state = AWAITABLE_STATE_ITER;
+    }
+
+    if (result) {
+        if (PyAsyncGenValueWrapper_CheckExact(result)) {
+            /* unwrap the yielded value */
+            PyObject *val = ((PyAsyncGenValueWrapper *)result)->agw_val;
+            Py_INCREF(val);
+            Py_DECREF(result);
+            result = val;
+        }
+        /* signal StopIteration to await caller */
+        _PyGen_SetStopIterationValue(result);
+        Py_DECREF(result);
+        return NULL;
+    }
+
+    if (PyErr_ExceptionMatches(PyExc_StopAsyncIteration)) {
+        o->ags_state = AWAITABLE_STATE_CLOSED;
+    }
+    return NULL;
+}
+```
+
+`PyAsyncGenValueWrapper` is a thin single-field object that wraps each yielded
+value. The eval loop wraps values at `YIELD_VALUE` inside an async generator so
+that `gen_send_ex2` can distinguish between a yield (wrapped) and a return
+(unwrapped `StopAsyncIteration`).
+
+## gopy mirror
+
+`objects/gen.go`. The suspended frame is stored as a `*Frame` field. `gen_send_ex2`
+maps to `(*Generator).Send`. The `gi_frame_state` enum is a Go `uint8` with
+the same values. Async generator `asend` and `athrow` objects live in
+`objects/async_gen.go`. The `PyAsyncGenValueWrapper` is `AsyncGenValueWrapper`
+in `objects/async_gen.go`.
+
+## CPython 3.14 changes
+
+Inline frame storage (the `_PyInterpreterFrame` embedded inside the generator
+struct) was introduced in 3.11. Before 3.11, the frame was a heap
+`PyFrameObject`; after 3.11 the frame object is created lazily only when
+accessed via `gi_frame`. The `ag_running_async` guard for concurrent async
+generator iteration has been stable since 3.10. `gi_frame_state` enum values
+are unchanged since 3.11.

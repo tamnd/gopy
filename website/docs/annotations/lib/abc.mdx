@@ -1,0 +1,115 @@
+---
+title: Lib/abc.py
+description: Abstract Base Class machinery; thin Python wrapper over the _abc C extension with ABCMeta, abstractmethod, and ABC.
+cpython_path: Lib/abc.py
+cpython_version: "3.14"
+lines: 200
+status: annotated
+ported_to: module/abc/module.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Lib/abc.py`
+
+<CpyLink path="Lib/abc.py" />
+
+`Lib/abc.py` is the public face of Python's Abstract Base Class
+infrastructure. The heavy lifting — the instance-check cache, the
+virtual-subclass registry, and the version counter — lives in
+`Modules/_abc.c`. This file imports that C extension (falling back to
+`_py_abc` if the accelerator is unavailable), then re-exports a handful
+of symbols and adds the three user-facing pieces that are purely Python:
+`ABCMeta`, `ABC`, and the deprecated combinator decorators.
+
+Because `ABCMeta.__new__` runs at class creation time rather than at
+instance creation time, the work of collecting abstract methods happens
+once per class, not once per instantiation. The result is stored in the
+frozenset `__abstractmethods__`; the object protocol checks that attribute
+in `type.__call__` and raises `TypeError` if it is non-empty.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Lib/abc.py" lines="1-30">1-30</Cpy> | Module header, `_abc` import, `get_cache_token` | Import accelerator; expose `get_cache_token` which returns the ABC version counter used by `singledispatch`. | `module/abc/module.go` |
+| <Cpy path="Lib/abc.py" lines="32-105">32-105</Cpy> | `abstractmethod` | Decorator; sets `__isabstractmethod__ = True` on the wrapped function. | `module/abc/module.go` |
+| <Cpy path="Lib/abc.py" lines="107-165">107-165</Cpy> | `ABCMeta` | Metaclass; `__new__` collects abstract methods, delegates `register`, `__instancecheck__`, and `__subclasscheck__` to `_abc`. | `module/abc/module.go` |
+| <Cpy path="Lib/abc.py" lines="167-180">167-180</Cpy> | `ABC` | Convenience base class: `class ABC(metaclass=ABCMeta): ...`. | `module/abc/module.go` |
+| <Cpy path="Lib/abc.py" lines="182-200">182-200</Cpy> | `abstractclassmethod`, `abstractstaticmethod`, `abstractproperty` | Deprecated combinators; kept for backward compatibility; emit `DeprecationWarning`. | `module/abc/module.go` |
+
+## Reading
+
+### `ABCMeta.__new__` — abstract method collection (lines 107 to 165)
+
+<CpyLink path="Lib/abc.py" lines="107-165" />
+
+```python
+class ABCMeta(type):
+    def __new__(mcls, name, bases, namespace, /, **kwargs):
+        cls = super().__new__(mcls, name, bases, namespace, **kwargs)
+        _abc_init(cls)
+        # Compute set of abstract method names
+        abstracts = {name
+                     for name, value in namespace.items()
+                     if getattr(value, '__isabstractmethod__', False)}
+        for base in bases:
+            for name in getattr(base, '__abstractmethods__', set()):
+                value = getattr(cls, name, None)
+                if getattr(value, '__isabstractmethod__', False):
+                    abstracts.add(name)
+        cls.__abstractmethods__ = frozenset(abstracts)
+        ...
+        return cls
+```
+
+Two passes collect abstract names. The first scans `namespace` (the
+current class body). The second walks each base's existing
+`__abstractmethods__` set and includes any name whose resolved attribute
+on the new class still has `__isabstractmethod__ = True`. This handles
+the case where a subclass provides a concrete override for some methods
+but leaves others abstract. The result is a `frozenset` assigned to
+`__abstractmethods__`; `type.__call__` treats a non-empty frozenset as a
+signal that the class cannot be instantiated.
+
+### `register` and `__subclasshook__` (lines 107 to 165)
+
+<CpyLink path="Lib/abc.py" lines="107-165" />
+
+```python
+    def register(cls, subclass):
+        return _abc_register(cls, subclass)
+
+    def __instancecheck__(cls, instance):
+        return _abc._abc_instancecheck(cls, instance)
+
+    def __subclasscheck__(cls, subclass):
+        return _abc._abc_subclasscheck(cls, subclass)
+```
+
+`register` and both check methods delegate entirely to the C extension.
+The `__subclasshook__` protocol is not defined here; it is a convention
+that user-defined ABCs implement. When `_abc_subclasscheck` runs, it
+calls `cls.__subclasshook__(subclass)` first; if that returns
+`NotImplemented`, it falls back to the registered virtual subclass list
+and the normal MRO check. The version counter returned by
+`get_cache_token()` increments on every `register` call, which is what
+`singledispatch` watches to know when to invalidate its dispatch cache.
+
+### `abstractmethod` (lines 32 to 105)
+
+<CpyLink path="Lib/abc.py" lines="32-105" />
+
+```python
+def abstractmethod(funcobj):
+    funcobj.__isabstractmethod__ = True
+    return funcobj
+```
+
+The decorator itself is three lines. The complexity lives in the
+interaction with other descriptors. A `property` is abstract if its
+`fget`, `fset`, or `fdel` is abstract; `classmethod` and `staticmethod`
+forward the flag from their wrapped function. `ABCMeta.__new__` reads
+`__isabstractmethod__` via `getattr` on the fully resolved attribute, so
+any descriptor that sets the flag on itself (not just on its inner
+function) will be treated as abstract.

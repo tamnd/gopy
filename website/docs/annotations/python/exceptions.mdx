@@ -1,0 +1,159 @@
+---
+title: Python/exceptions.c
+description: Runtime helpers for exception chaining, notes (PEP 678), and cause/context/args accessors that complement the type definitions in Objects/exceptions.c.
+cpython_path: Python/exceptions.c
+cpython_version: "3.14"
+lines: 180
+status: annotated
+ported_to: objects/exception.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Python/exceptions.c`
+
+<CpyLink path="Python/exceptions.c" />
+
+A short file — roughly 180 lines — whose purpose is to provide the C API
+accessors and a handful of runtime helpers that the rest of the interpreter
+needs without pulling in the large `Objects/exceptions.c` type machinery.
+Most exception _type_ definitions live in `Objects/exceptions.c`; this file
+covers the fields that live on every exception _instance_: `__cause__`,
+`__context__`, `__suppress_context__`, `args`, and the 3.11+ `__notes__` list.
+
+`_PyException_AddNote` (PEP 678) is the most self-contained function here.
+The others (`PyException_GetCause`, `PyException_SetCause`,
+`PyException_GetContext`, `PyException_SetContext`, `PyException_GetArgs`,
+`PyException_SetArgs`) are thin wrappers around struct-field reads and writes
+on `PyBaseExceptionObject`, plus reference-count bookkeeping.
+
+`_PyErr_SetFromPyException` converts a Python exception object already in hand
+into a thread-state error, which is the reverse of the usual flow where a
+thread-state error is turned into a Python object for `except` clauses.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Python/exceptions.c" lines="1-40">1-40</Cpy> | `_PyException_AddNote` | Appends a string to `exc.__notes__`, creating the list on first call (PEP 678, Python 3.11+). | `objects/exception.go:AddNote` |
+| <Cpy path="Python/exceptions.c" lines="41-80">41-80</Cpy> | `PyException_GetCause` / `PyException_SetCause` | Read/write `exc.__cause__`; `SetCause` also sets `exc.__suppress_context__ = True` when cause is non-`None`. | `objects/exception.go:GetCause` / `SetCause` |
+| <Cpy path="Python/exceptions.c" lines="81-120">81-120</Cpy> | `PyException_GetContext` / `PyException_SetContext` | Read/write `exc.__context__` without touching `__suppress_context__`. | `objects/exception.go:GetContext` / `SetContext` |
+| <Cpy path="Python/exceptions.c" lines="121-155">121-155</Cpy> | `PyException_GetArgs` / `PyException_SetArgs` | Read/write `exc.args` (a tuple); used by pickle and `BaseException.__reduce__`. | `objects/exception.go:GetArgs` / `SetArgs` |
+| <Cpy path="Python/exceptions.c" lines="156-180">156-180</Cpy> | `_PyErr_SetFromPyException` | Installs an existing exception instance as the thread-state current exception by calling `_PyErr_SetRaisedException`. | `objects/exception.go:SetFromPyException` |
+
+## Reading
+
+### `_PyException_AddNote` (lines 1 to 40)
+
+<CpyLink path="Python/exceptions.c" lines="1-40" />
+
+```c
+int
+_PyException_AddNote(PyObject *exc, PyObject *note)
+{
+    if (!PyExceptionInstance_Check(exc)) {
+        PyErr_Format(PyExc_TypeError,
+                     "exc must be an exception instance, not '%s'",
+                     Py_TYPE(exc)->tp_name);
+        return -1;
+    }
+    PyObject *notes;
+    if (PyObject_GetOptionalAttr(exc, &_Py_ID(__notes__), &notes) < 0) {
+        return -1;
+    }
+    if (notes == NULL) {
+        notes = PyList_New(0);
+        if (notes == NULL) {
+            return -1;
+        }
+        if (PyObject_SetAttr(exc, &_Py_ID(__notes__), notes) < 0) {
+            Py_DECREF(notes);
+            return -1;
+        }
+    }
+    int res = PyList_Append(notes, note);
+    Py_DECREF(notes);
+    return res;
+}
+```
+
+PEP 678 (Python 3.11) introduced `__notes__` as an optional list of strings
+on any exception instance. The `add_note()` method on `BaseException` calls
+this C helper. The list is created lazily on first use, so exceptions that
+never receive a note carry zero overhead. Note that `note` must be a `str`;
+the Python-level `add_note` validates this before calling the C function.
+
+In the `except*` / `ExceptionGroup` context (PEP 654), the interpreter calls
+`_PyException_AddNote` to annotate sub-exceptions with context strings, making
+this function a building block for structured error reporting.
+
+### `PyException_SetCause` — implicit chain suppression (lines 55 to 80)
+
+<CpyLink path="Python/exceptions.c" lines="55-80" />
+
+```c
+void
+PyException_SetCause(PyObject *exception, PyObject *cause)
+{
+    PyBaseExceptionObject *self = (PyBaseExceptionObject *)exception;
+    Py_XDECREF(self->cause);
+    if (cause == Py_None) {
+        Py_DECREF(cause);
+        self->cause = NULL;
+        self->suppress_context = 0;
+    }
+    else {
+        self->cause = cause;  /* steals reference */
+        self->suppress_context = 1;
+    }
+}
+```
+
+The coupling between `__cause__` and `__suppress_context__` is the mechanism
+behind `raise X from Y`. When a cause is set to any non-`None` value,
+`suppress_context` is forced to 1, which makes the traceback printer emit
+"The above exception was the direct cause of" instead of "During handling of
+the above exception". Setting the cause to `None` explicitly (i.e., `raise X
+from None`) clears `suppress_context`, which suppresses the `__context__`
+display entirely — a common pattern for translating internal exceptions into
+clean public ones without a chained traceback.
+
+`PyException_SetContext` does _not_ touch `suppress_context`; it is a plain
+field write used by the implicit chaining logic in `Python/errors.c`.
+
+### `_PyErr_SetFromPyException` (lines 156 to 180)
+
+<CpyLink path="Python/exceptions.c" lines="156-180" />
+
+```c
+void
+_PyErr_SetFromPyException(PyThreadState *tstate, PyObject *exc)
+{
+    assert(exc != NULL);
+    Py_INCREF(exc);
+    _PyErr_SetRaisedException(tstate, exc);
+}
+```
+
+The function is the inverse of `_PyErr_GetRaisedException`: instead of moving
+the thread-state exception into a local variable, it moves a local variable
+into the thread state. It is used in two scenarios: when C code reconstructs
+an exception from a pickled representation, and when `BaseException.with_traceback`
+needs to reinstall a modified exception. The explicit `Py_INCREF` before the
+call to `_PyErr_SetRaisedException` is required because `SetRaisedException`
+adopts the reference (steals it), so the caller's copy must be retained.
+
+## Notes for the gopy mirror
+
+`objects/exception.go` ports all five pairs of accessors plus `AddNote` and
+`SetFromPyException`. The `suppress_context` field maps to the
+`SuppressContext bool` field on the Go `BaseException` struct. `AddNote` calls
+`GetAttr` / `SetAttr` using the same lazy-create pattern as the C version.
+
+## CPython 3.14 changes worth noting
+
+`__notes__` and `_PyException_AddNote` were introduced in 3.11 and are
+unchanged in 3.14. The `PyException_Get/Set*` accessors are stable since 3.1.
+In 3.12 the underlying `PyBaseExceptionObject` struct gained the single-object
+exception model changes (the `traceback` field now lives on the instance rather
+than the thread state), but the accessor functions here were not affected.

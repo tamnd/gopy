@@ -1,0 +1,178 @@
+---
+title: Python/traceback.c
+description: Traceback object creation, printing, and source-line display. Implements PyTraceBack_Here, _PyTraceBack_Print, and the PEP 657 caret underline.
+cpython_path: Python/traceback.c
+cpython_version: "3.14"
+lines: 1000
+status: annotated
+ported_to: pythonrun/traceback.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Python/traceback.c`
+
+<CpyLink path="Python/traceback.c" />
+
+Traceback object lifecycle and display. Every time an exception crosses a
+frame boundary, `PyTraceBack_Here` prepends a new `PyTracebackObject` to
+`tstate->current_exception.__traceback__`, building a linked list that walks
+from the most recent frame outward. When the exception is finally printed,
+`_PyTraceBack_Print` traverses the chain and calls `_Py_DisplaySourceLine`
+for each entry to show the offending source text and, since PEP 657, a `^`
+underline that highlights the exact expression that raised.
+
+The upper half of the file (lines 1 to 450) covers object creation, the
+`types.TracebackType` type object, and the `tb_new` constructor that lets
+Python code build synthetic tracebacks. The lower half (lines 450 to 1000)
+covers display: formatting the "Traceback (most recent call last):" header,
+iterating the chain, opening source files, and rendering the caret underline.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Python/traceback.c" lines="1-80">1-80</Cpy> | `PyTracebackObject` allocation helpers | Allocate and initialize a `PyTracebackObject`; set `tb_frame`, `tb_lasti`, `tb_lineno`, `tb_next`. | `pythonrun/traceback.go:newTracebackObject` |
+| <Cpy path="Python/traceback.c" lines="81-160">81-160</Cpy> | `PyTraceBack_Here` | Create a traceback entry for the current frame and prepend it to the exception's `__traceback__`. | `pythonrun/traceback.go:Here` |
+| <Cpy path="Python/traceback.c" lines="161-280">161-280</Cpy> | `tb_new` / `PyTraceBack_Type` | `types.TracebackType.__new__`; validates args so synthetic tracebacks are well-formed. Type object registration. | `pythonrun/traceback.go:TracebackType` |
+| <Cpy path="Python/traceback.c" lines="281-450">281-450</Cpy> | `tb_getattro` / `tb_traverse` / `tb_clear` / `tb_dealloc` | GC slots and attribute access for `PyTracebackObject`. | `pythonrun/traceback.go:tracebackObject` |
+| <Cpy path="Python/traceback.c" lines="451-700">451-700</Cpy> | `_Py_DisplaySourceLine` | Open the source file via token path or `linecache`, read the numbered line, strip leading whitespace, print it and the `^` caret underline. | `pythonrun/traceback.go:DisplaySourceLine` |
+| <Cpy path="Python/traceback.c" lines="701-1000">701-1000</Cpy> | `_PyTraceBack_Print` / `_PyTraceBack_Print_Lookup` | Print "Traceback (most recent call last):", walk the `tb_next` chain (capping at `Py_TracebackLimit`), and call `_Py_DisplaySourceLine` per frame. | `pythonrun/traceback.go:Print` |
+
+## Reading
+
+### `PyTraceBack_Here` (lines 81 to 160)
+
+<CpyLink path="Python/traceback.c" lines="81-160" />
+
+```c
+int
+PyTraceBack_Here(PyFrameObject *frame)
+{
+    PyObject *exc = PyErr_GetRaisedException();
+    PyTracebackObject *oldtb = (PyTracebackObject *)
+                               PyException_GetTraceback(exc);
+    PyTracebackObject *newtb = newtracebackobject(oldtb, frame);
+    if (newtb == NULL) {
+        _PyErr_ChainExceptions1(exc);
+        return -1;
+    }
+    PyException_SetTraceback(exc, (PyObject *)newtb);
+    Py_XDECREF(oldtb);
+    Py_DECREF(newtb);
+    PyErr_SetRaisedException(exc);
+    return 0;
+}
+```
+
+The function is called from `_PyEval_EvalFrameDefault` whenever the exception
+handler search in `get_exception_handler` fails and the frame must unwind.
+`newtracebackobject` fills `tb_frame` with the current frame, `tb_lasti` with
+the last instruction offset, and `tb_lineno` from
+`_PyCode_InitAddressRange`/`PyCode_Addr2Line`. The old traceback becomes
+`newtb->tb_next`, so the chain grows toward earlier frames on each unwind.
+
+In the 3.12+ single-object model the traceback is an attribute of the
+exception instance, not a separate thread-state slot, so `PyErr_GetRaisedException`
+and `PyException_GetTraceback` replace the old `_PyErr_Fetch` / triple
+pattern.
+
+### `_PyTraceBack_Print` (lines 701 to 1000)
+
+<CpyLink path="Python/traceback.c" lines="701-1000" />
+
+```c
+int
+_PyTraceBack_Print(PyObject *v, PyObject *f)
+{
+    ...
+    if (err == 0) {
+        err = PyFile_WriteString("Traceback (most recent call last):\n", f);
+    }
+    /* Limit the traceback depth to avoid insane memory usage */
+    int depth = 0;
+    PyTracebackObject *tb1 = (PyTracebackObject *)v;
+    while (tb1 != NULL) {
+        depth++;
+        tb1 = tb1->tb_next;
+    }
+    while (v != Py_None && v != NULL) {
+        if (depth > _Py_TracebackLimit) {
+            ...
+            /* skip middle entries */
+        }
+        err = tb_print_line(v, f);
+        ...
+        v = (PyObject *)((PyTracebackObject *)v)->tb_next;
+        depth--;
+    }
+    return err;
+}
+```
+
+The function prints the "Traceback (most recent call last):" header, then
+iterates the `tb_next` chain. When the chain is longer than
+`sys.tracebacklimit` (default 1000), the middle entries are suppressed and a
+`"[Previous line repeated N more times]"` message is emitted instead. Each
+surviving entry is handed to `tb_print_line`, which formats the
+`"  File ..., line ..., in ..."` header and delegates source display to
+`_Py_DisplaySourceLine`.
+
+In gopy, `pythonrun/traceback.go:Print` mirrors this function. It is called
+from the exception display path in `pythonrun/runstring.go` when an exception
+escapes the top-level eval.
+
+### Source-line display and PEP 657 carets (lines 451 to 700)
+
+<CpyLink path="Python/traceback.c" lines="451-700" />
+
+```c
+int
+_Py_DisplaySourceLine(PyObject *f, PyObject *filename, int lineno,
+                      int indent, int *truncation,
+                      PyObject *lookup_lines, PyObject *end_lineno,
+                      int col_offset, int end_col_offset)
+{
+    ...
+    /* Read the source line */
+    PyObject *lineobj = _Py_GetSourceLine(filename, lineno, lookup_lines);
+    ...
+    /* Print the line itself */
+    ...
+    /* Print the caret underline */
+    if (col_offset >= 0) {
+        Py_ssize_t start_col = col_offset;
+        Py_ssize_t end_col   = end_col_offset > 0 ? end_col_offset : start_col + 1;
+        /* emit spaces up to start_col, then '^' * (end_col - start_col) */
+        ...
+    }
+}
+```
+
+PEP 657 (3.11) added `col_offset` and `end_col_offset` to bytecode
+instructions. When those offsets are available, `_Py_DisplaySourceLine`
+prints a second line of carets aligned under the exact token range:
+
+```
+    x = foo(bar +
+            ~~~^~~~
+```
+
+The source text is retrieved through `_Py_GetSourceLine`, which first looks
+in a `lookup_lines` dict (a cache keyed by `(filename, lineno)`), then falls
+back to opening the file directly. Compressed or frozen source is handled by
+`linecache` if the direct open fails.
+
+The `indent` parameter controls the leading-space count for nested display
+(e.g., inside `exec`). The `truncation` output parameter signals when a long
+line was clipped so the caret math can compensate.
+
+## CPython 3.14 changes worth noting
+
+The `_Py_DisplaySourceLine` signature grew `end_lineno`, `col_offset`, and
+`end_col_offset` parameters in 3.12 for PEP 657 precision; 3.14 is
+structurally unchanged but carries fixes for multi-line expression highlighting
+(gh-108895) and correct display of decorated class bodies (gh-111367).
+`PyTraceBack_Here` now reads the instruction offset from
+`_PyInterpreterFrame.prev_instr` rather than `f_lasti` (which was removed in
+3.12 from the internal frame struct).

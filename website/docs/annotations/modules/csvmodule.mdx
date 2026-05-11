@@ -1,0 +1,203 @@
+---
+title: Modules/_csv.c
+description: C implementation of the csv module — Dialect configuration object, a state-machine row parser (reader), and a quoting-aware row writer.
+cpython_path: Modules/_csv.c
+cpython_version: "3.14"
+lines: 1200
+status: annotated
+ported_to: module/csv/module.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Modules/_csv.c`
+
+<CpyLink path="Modules/_csv.c" />
+
+The C implementation of the `csv` module. `Lib/csv.py` imports `_csv` (this
+module) and re-exports `reader`, `writer`, `Dialect`, and the `QUOTE_*`
+constants as the public `csv` API.
+
+Three facilities are implemented here:
+
+- `Dialect` — a configuration object holding delimiter, quotechar, escapechar,
+  and quoting mode. Both `reader` and `writer` accept a dialect instance or
+  keyword arguments that are merged into a dialect.
+- `reader` — an iterator that parses rows from a line-iterable using a
+  character-level state machine. Each `__next__` call advances through one CSV
+  row and returns a list of field strings.
+- `writer` — a callable whose `writerow` method escapes a sequence of fields
+  and writes the formatted row to a file-like object.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Modules/_csv.c" lines="1-80">1-80</Cpy> | `QuoteStyle`, `QUOTE_MINIMAL`, `QUOTE_ALL`, `QUOTE_NONNUMERIC`, `QUOTE_NONE` | Quoting-mode enum and constants. | `module/csv/module.go:QuoteStyle` |
+| <Cpy path="Modules/_csv.c" lines="80-350">80-350</Cpy> | `DialectObj`, `dialect_new`, `dialect_check_*` | Dialect type: delimiter, quotechar, escapechar, doublequote, skipinitialspace, lineterminator, quoting. | `module/csv/module.go:Dialect` |
+| <Cpy path="Modules/_csv.c" lines="350-550">350-550</Cpy> | `ReaderObj`, `Reader_iternext` (a.k.a. `csv_iternext`) | `reader.__next__`: state-machine parser producing one row per call. | `module/csv/module.go:Reader` |
+| <Cpy path="Modules/_csv.c" lines="550-800">550-800</Cpy> | `WriterObj`, `csv_writerow`, `csv_writerows` | `writer.writerow`: escapes fields and writes to the output file. | `module/csv/module.go:Writer` |
+| <Cpy path="Modules/_csv.c" lines="800-950">800-950</Cpy> | `csv_reader`, `csv_writer` | Factory functions: validate dialect, allocate reader/writer objects. | `module/csv/module.go:NewReader` |
+| <Cpy path="Modules/_csv.c" lines="950-1100">950-1100</Cpy> | `_csv_module_exec` | Module init: register Dialect, reader, writer types; define QUOTE_* constants. | `module/csv/module.go:Module` |
+| <Cpy path="Modules/_csv.c" lines="1100-1200">1100-1200</Cpy> | `_csvmodule`, `PyInit__csv` | Module definition struct and Python entry point. | `module/csv/module.go:Module` |
+
+## Reading
+
+### `Dialect` field defaults (lines 80 to 350)
+
+<CpyLink path="Modules/_csv.c" lines="80-350" />
+
+`DialectObj` holds eight fields. Each has a hard-coded default:
+
+```c
+typedef struct {
+    PyObject_HEAD
+    int         doublequote;        /* default: 1 */
+    int         skipinitialspace;   /* default: 0 */
+    int         strict;             /* default: 0 */
+    Py_UCS4     delimiter;          /* default: ',' */
+    Py_UCS4     quotechar;          /* default: '"' */
+    Py_UCS4     escapechar;         /* default: 0 (none) */
+    int         quoting;            /* default: QUOTE_MINIMAL */
+    PyObject   *lineterminator;     /* default: "\r\n" */
+} DialectObj;
+```
+
+`dialect_new` merges three sources in priority order: an explicit `dialect`
+positional argument, then keyword arguments, then the built-in defaults.
+`dialect_check_quoting` validates that `quoting` is one of the four legal
+`QUOTE_*` values and raises `csv.Error` otherwise.
+
+When `quoting == QUOTE_NONE` and no `escapechar` is set, `dialect_new` raises
+`csv.Error` immediately because unescaped quotes would make the output
+unparseable.
+
+### `csv_iternext` state machine (lines 350 to 550)
+
+<CpyLink path="Modules/_csv.c" lines="350-550" />
+
+`reader.__next__` processes one CSV row character by character. The parser
+lives in a `while` loop over the input line; a `state` variable drives
+transitions. States:
+
+| State | Meaning |
+|---|---|
+| `START_FIELD` | Beginning of a new field; no characters consumed yet. |
+| `IN_FIELD` | Inside an unquoted field. |
+| `IN_QUOTED_FIELD` | Inside a quoted field (between opening and closing quotechar). |
+| `ESCAPED_CHAR` | The previous character was `escapechar` in an unquoted field. |
+| `ESCAPE_IN_QUOTED_FIELD` | The previous character was `escapechar` inside a quoted field. |
+| `QUOTE_IN_FIELD` | Just saw a quotechar inside a quoted field (possible end or doublequote). |
+
+```c
+static int
+parse_process_char(ReaderObj *self, _csvstate *module_state,
+                   Py_UCS4 c, PyObject **field)
+{
+    switch (self->state) {
+    case START_FIELD:
+        if (c == '\n' || c == '\r' || c == 0) {
+            /* empty field at end of row */
+            if (parse_save_field(self) < 0) return -1;
+            self->state = EAT_CRNL;
+        } else if (c == dialect->quotechar) {
+            self->state = IN_QUOTED_FIELD;
+        } else if (c == dialect->escapechar) {
+            self->state = ESCAPED_CHAR;
+        } else {
+            if (parse_add_char(self, c) < 0) return -1;
+            self->state = IN_FIELD;
+        }
+        break;
+
+    case IN_QUOTED_FIELD:
+        if (c == dialect->escapechar) {
+            self->state = ESCAPE_IN_QUOTED_FIELD;
+        } else if (c == dialect->quotechar) {
+            if (dialect->doublequote)
+                self->state = QUOTE_IN_FIELD;
+            else
+                self->state = IN_FIELD;
+        } else {
+            if (parse_add_char(self, c) < 0) return -1;
+        }
+        break;
+    /* ... other states ... */
+    }
+    return 0;
+}
+```
+
+Each call to `Reader_iternext` fetches one line from the underlying iterator,
+feeds it character by character to `parse_process_char`, and then calls
+`parse_save_field` to append the accumulated field to the output list.
+Multi-line fields (a newline inside a quoted field) are handled by continuing
+across `__next__` calls until the closing quotechar is found.
+
+### `csv_writerow` quoting logic (lines 550 to 800)
+
+<CpyLink path="Modules/_csv.c" lines="550-800" />
+
+`writer.writerow(row)` iterates over the fields in `row`, decides for each
+field whether quoting is needed, assembles a string, and writes it to the
+output file:
+
+```c
+static int
+csv_join_append(WriterObj *self, PyObject *field, int quoted)
+{
+    Py_UCS4 c;
+    /* ... iterate over characters in field ... */
+    for (i = 0; i < field_len; i++) {
+        c = PyUnicode_READ(kind, data, i);
+        if (!quoted && (c == dialect->delimiter ||
+                        c == dialect->escapechar  ||
+                        c == '\n' || c == '\r')) {
+            /* Must quote or escape. */
+            if (dialect->quoting == QUOTE_NONE) {
+                if (dialect->escapechar == 0) {
+                    PyErr_Format(..., "need to escape, but no escapechar set");
+                    return -1;
+                }
+                csv_join_append_data(self, dialect->escapechar);
+            } else {
+                quoted = 1;   /* will wrap with quotechar at the end */
+            }
+        }
+        /* Handle embedded quotechar via doublequote or escapechar. */
+        if (c == dialect->quotechar) {
+            if (dialect->doublequote)
+                csv_join_append_data(self, dialect->quotechar);
+            else if (dialect->escapechar)
+                csv_join_append_data(self, dialect->escapechar);
+            else { /* error */ }
+        }
+        csv_join_append_data(self, c);
+    }
+    if (quoted) {
+        /* Wrap field with quotechar. */
+        ...
+    }
+}
+```
+
+`QUOTE_ALL` sets `quoted = 1` unconditionally before the loop.
+`QUOTE_NONNUMERIC` sets `quoted = 1` for any field that is not a Python `int`
+or `float`. `QUOTE_MINIMAL` (the default) only quotes when a special character
+is encountered. The final assembled row is written to the output object via
+`PyObject_CallMethodOneArg(self->writeline, &_Py_ID(write), str)`.
+
+## gopy mirror
+
+`module/csv/module.go`. `Dialect` is a Go struct with the same eight fields.
+`Reader` wraps a Go string iterator and reproduces the six-state machine.
+`Writer` buffers field output in a `strings.Builder` and follows the same
+quoting precedence. `csv.Error` maps to a gopy exception type.
+
+## CPython 3.14 changes
+
+The `csv` module has been in C since Python 2.3. `QUOTE_NOTNULL` (skip quoting
+`None` as an empty string) was added in 3.12. `QUOTE_STRINGS` (always quote
+string fields) was added in 3.12. Multi-phase module init was adopted in 3.12.
+The `strict` dialect field (raise on bad input) has been present since the
+module's introduction.

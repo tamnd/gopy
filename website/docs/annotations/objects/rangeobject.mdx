@@ -1,0 +1,207 @@
+---
+title: Objects/rangeobject.c
+description: Lazy integer sequence. Arbitrary-precision start/stop/step stored as PyObject*, O(1) item access, containment, and hash.
+cpython_path: Objects/rangeobject.c
+cpython_version: "3.14"
+lines: 1317
+status: annotated
+ported_to: objects/range.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Objects/rangeobject.c`
+
+<CpyLink path="Objects/rangeobject.c" />
+
+`range` is a lazy sequence: it stores only `start`, `stop`, `step`, and
+`length` as Python integer objects (`PyObject*`), never materialising the full
+sequence. Using `PyObject*` rather than C `long` lets `range` handle
+arbitrarily large integers (e.g. `range(2**200)`), though most operations
+special-case the common case where the values fit in a C `long` and skip the
+bignum arithmetic.
+
+`range_item` computes `start + i * step` as a single integer multiply and add.
+`range_contains` skips iteration entirely: it checks in O(1) whether an integer
+`x` satisfies `(x - start) % step == 0` and falls within the half-open interval.
+`range_richcompare` handles the edge cases where two ranges with different
+`start`/`stop`/`step` values nonetheless produce the same sequence (empty
+ranges, single-element ranges). The range iterator (`rangeiter`) is a separate
+object that caches the current index as a C `long` for the common case, with a
+fallback `longrangeiter` for values that overflow `long`.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Objects/rangeobject.c" lines="1-80">1-80</Cpy> | `compute_range_length` | Computes `max(0, ceil((stop - start) / step))` as a Python integer. | `objects/range.go:computeRangeLength` |
+| <Cpy path="Objects/rangeobject.c" lines="80-200">80-200</Cpy> | `range_new` | Validates arguments (step != 0), calls `compute_range_length`, allocates. | `objects/range.go:rangeNew` |
+| <Cpy path="Objects/rangeobject.c" lines="200-350">200-350</Cpy> | `range_item`, `range_as_sequence` | Computes `start + i * step`; negative index wraps via `length + i`. | `objects/range.go:rangeItem` |
+| <Cpy path="Objects/rangeobject.c" lines="350-550">350-550</Cpy> | `range_contains`, `range_count`, `range_index` | O(1) containment for integers; linear fallback for non-integer types. | `objects/range.go:rangeContains` |
+| <Cpy path="Objects/rangeobject.c" lines="550-750">550-750</Cpy> | `range_richcompare` | Sequence-equality ignoring `start`/`stop`/`step` differences. | `objects/range.go:rangeRichcompare` |
+| <Cpy path="Objects/rangeobject.c" lines="750-900">750-900</Cpy> | `range_hash` | Hash based on length, first, and last elements. | `objects/range.go:rangeHash` |
+| <Cpy path="Objects/rangeobject.c" lines="900-1100">900-1100</Cpy> | `rangeiter` object, `range_iter`, `rangeiter_next`, `rangeiter_len` | Short-range iterator using C `long` state; `__length_hint__` for `zip`. | `objects/range.go:rangeIter` |
+| <Cpy path="Objects/rangeobject.c" lines="1100-1317">1100-1317</Cpy> | `longrangeiter`, `longrangeiter_next`, `PyRange_Type` | Bignum iterator fallback; type object. | `objects/range.go:longRangeIter` |
+
+## Reading
+
+### `compute_range_length` (lines 1 to 80)
+
+<CpyLink path="Objects/rangeobject.c" lines="1-80" />
+
+The length formula is `max(0, ceil((stop - start) / step))`. Because `start`,
+`stop`, and `step` are arbitrary Python integers, the arithmetic must use
+`PyNumber_*` calls rather than C division. The implementation avoids a true
+division by using floor division and checking the remainder:
+
+```c
+static PyObject *
+compute_range_length(PyObject *start, PyObject *stop, PyObject *step)
+{
+    /* length = 0 if the range is empty */
+    int cmp_result;
+    PyObject *lo, *hi, *diff, *tmp;
+
+    /* Determine if the range is non-empty */
+    if (_PyObject_RichCompareBool(step, _PyLong_GetZero(), Py_GT) > 0) {
+        lo = start; hi = stop;
+    } else {
+        lo = stop; hi = start;
+    }
+    if (_PyObject_RichCompareBool(lo, hi, Py_GE) >= 1)
+        return PyLong_FromLong(0);
+
+    diff = PyNumber_Subtract(hi, lo);
+    ...
+    /* length = (diff - 1) // |step| + 1 */
+    tmp = PyNumber_FloorDivide(diff, abs_step);
+    ...
+}
+```
+
+The formula `(diff - 1) // |step| + 1` is equivalent to `ceil(diff / step)`
+without floating-point arithmetic and works for arbitrarily large integers.
+
+### `range_item` (lines 200 to 350)
+
+<CpyLink path="Objects/rangeobject.c" lines="200-350" />
+
+`range_item(r, i)` computes `r->start + i * r->step`. Negative indices are
+normalised to `i + r->length` before the calculation. For the common case
+where all values fit in `long`, a fast path uses C arithmetic and calls
+`PyLong_FromLong` at the end:
+
+```c
+static PyObject *
+range_item(PyRangeObject *r, Py_ssize_t i)
+{
+    if (i < 0 || i >= PyLong_AsSsize_t(r->length)) {
+        PyErr_SetString(PyExc_IndexError,
+                        "range object index out of range");
+        return NULL;
+    }
+    return PyNumber_Add(r->start,
+                        PyNumber_Multiply(PyLong_FromSsize_t(i), r->step));
+}
+```
+
+The bignum path calls `PyNumber_Multiply` and `PyNumber_Add` on the stored
+`PyObject*` values, so it works correctly for `range(2**100)[0]`.
+
+### `range_contains` (lines 350 to 550)
+
+<CpyLink path="Objects/rangeobject.c" lines="350-550" />
+
+For integer arguments, containment is O(1):
+
+```c
+static int
+range_contains_long(PyRangeObject *r, PyObject *ob)
+{
+    int cmp1, cmp2, cmp3;
+    PyObject *tmp1, *tmp2;
+    int result = 0;
+
+    /* Check lo <= ob < hi (or hi < ob <= lo for negative step) */
+    cmp1 = PyObject_RichCompareBool(r->step,
+                                    _PyLong_GetZero(), Py_GT);
+    ...
+    /* Check (ob - start) % step == 0 */
+    tmp1 = PyNumber_Subtract(ob, r->start);
+    tmp2 = PyNumber_Remainder(tmp1, r->step);
+    cmp3 = PyObject_RichCompareBool(tmp2,
+                                    _PyLong_GetZero(), Py_EQ);
+    result = (cmp3 > 0);
+    ...
+    return result;
+}
+```
+
+`range_contains` first checks that `ob` is a plain `int` (not a subclass with
+overridden arithmetic) before calling `range_contains_long`. For non-integer
+types (floats, strings, etc.) it falls back to the generic sequence scan,
+which is O(n).
+
+### `range_richcompare` (lines 550 to 750)
+
+<CpyLink path="Objects/rangeobject.c" lines="550-750" />
+
+Two `range` objects are equal if and only if they produce the same sequence.
+The comparison cannot just compare `start`, `stop`, and `step` directly:
+`range(0, 3, 2)` and `range(0, 4, 2)` both produce `[0, 2]`. The correct
+algorithm is:
+
+1. If lengths differ, not equal.
+2. If both have length zero, equal (all empty ranges are equal).
+3. If both have length one, equal iff their first elements are equal.
+4. Otherwise, equal iff their `start` values are equal and their `step`
+   values are equal (length already matched above, so the last elements
+   must then also match).
+
+```c
+static PyObject *
+range_richcompare(PyObject *self, PyObject *other, int op)
+{
+    ...
+    PyObject *same_len = PyObject_RichCompare(r1->length, r2->length, Py_EQ);
+    if (!PyObject_IsTrue(same_len)) { ... /* not equal */ }
+
+    /* empty ranges */
+    if (PyLong_AsSsize_t(r1->length) == 0)
+        return Py_True;  /* both empty */
+
+    /* length-1 ranges */
+    same_start = PyObject_RichCompare(r1->start, r2->start, Py_EQ);
+    if (PyLong_AsSsize_t(r1->length) == 1)
+        return same_start;
+
+    /* general case: same start and same step */
+    same_step = PyObject_RichCompare(r1->step, r2->step, Py_EQ);
+    return PyObject_And(same_start, same_step);
+}
+```
+
+### `range_hash` (lines 750 to 900)
+
+<CpyLink path="Objects/rangeobject.c" lines="750-900" />
+
+`range` is hashable (unlike `list`) because it is immutable. The hash is
+computed from a tuple of `(length, first, last)` using `PyObject_Hash` on a
+temporary `PyTuple`. Empty ranges hash as `hash((0, None, None))`. Length-1
+ranges use `hash((1, start, start))`. This guarantees that equal ranges
+(which have the same length, first, and last) produce equal hashes, satisfying
+the hash/equality contract.
+
+## gopy mirror
+
+`objects/range.go`. `PyObject*` fields map to `*Int` (the gopy arbitrary
+precision integer type). The fast-path integer checks use `IsCompact` to bypass
+bignum arithmetic for small values. `computeRangeLength` is ported
+line-for-line. The `rangeIter` type uses a `int64` counter with a fallback
+`longRangeIter` for values exceeding `math.MaxInt64`.
+
+## CPython 3.14 changes
+
+`range` became hashable in 3.3. The `longrangeiter` fallback was added in 3.2
+when `range` was updated to support bignum arguments. No 3.14-specific changes
+affect `rangeobject.c`.

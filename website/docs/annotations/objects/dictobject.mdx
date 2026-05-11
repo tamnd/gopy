@@ -1,0 +1,181 @@
+---
+title: Objects/dictobject.c
+description: Hash table dict. Split/combined layout, compact ordered insertion, version tag, and watcher API.
+cpython_path: Objects/dictobject.c
+cpython_version: "3.14"
+lines: 7824
+status: annotated
+ported_to: objects/dict.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Objects/dictobject.c`
+
+<CpyLink path="Objects/dictobject.c" />
+
+The dict implementation. CPython dicts use a compact hash table introduced in
+3.6 that preserves insertion order. The layout has two arrays: a sparse
+`dk_indices` array (the hash table proper, storing indices into a dense
+`dk_entries` array), and the dense `dk_entries` array (`hash`, `key`, `value`
+triples in insertion order). This achieves both O(1) lookup and ordered
+iteration without copying. Split tables (shared key structure between instances
+of the same class) optimize memory for many instances with the same attribute
+layout.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Objects/dictobject.c" lines="1-200">1-200</Cpy> | `_Py_dict_lookup`, `find_empty_slot`, `insertion_resize` | Hash table lookup and resize. | `objects/dict.go:lookup` |
+| <Cpy path="Objects/dictobject.c" lines="200-600">200-600</Cpy> | `dict_new_presized`, `PyDict_New`, `PyDict_NewPresized` | Allocation and pre-sizing. | `objects/dict.go:NewDict` |
+| <Cpy path="Objects/dictobject.c" lines="600-1200">600-1200</Cpy> | `PyDict_GetItem`, `PyDict_GetItemWithError`, `_PyDict_GetItemWithError` | Lookup by key. | `objects/dict.go:(*Dict).GetItem` |
+| <Cpy path="Objects/dictobject.c" lines="1200-1800">1200-1800</Cpy> | `PyDict_SetItem`, `insertdict`, `_PyDict_SetItem_KnownHash` | Insert and update. | `objects/dict.go:(*Dict).SetItem` |
+| <Cpy path="Objects/dictobject.c" lines="1800-2200">1800-2200</Cpy> | `PyDict_DelItem`, `dict_del_common` | Deletion. | `objects/dict.go:(*Dict).DelItem` |
+| <Cpy path="Objects/dictobject.c" lines="2200-2800">2200-2800</Cpy> | `PyDict_Update`, `PyDict_Merge`, `dict_merge` | Merge dicts. | `objects/dict_mutate.go:Merge` |
+| <Cpy path="Objects/dictobject.c" lines="2800-3400">2800-3400</Cpy> | `PyDict_Keys`, `PyDict_Values`, `PyDict_Items`, `PyDict_Size` | Views and size. | `objects/dict.go` |
+| <Cpy path="Objects/dictobject.c" lines="3400-4000">3400-4000</Cpy> | `dict_repr`, `dict_iter`, `dictiter_new`, `dictiter_iternextkey`, `dictiter_iternextvalue`, `dictiter_iternextitem` | Repr and iterators. | `objects/dict_iter.go` |
+| <Cpy path="Objects/dictobject.c" lines="4000-4800">4000-4800</Cpy> | `dict_equal`, `dict_richcompare`, `dict_copy`, `dict_clear`, `dict_pop`, `dict_popitem` | Comparison and mutation. | `objects/dict_mutate.go` |
+| <Cpy path="Objects/dictobject.c" lines="4800-5600">4800-5600</Cpy> | `_PyDict_FromKeys`, `dict_fromkeys`, `dict_setdefault`, `dict_get` | Class methods. | `objects/dict.go:FromKeys` |
+| <Cpy path="Objects/dictobject.c" lines="5600-6400">5600-6400</Cpy> | `_PyObject_MakeDictFromInstanceAttributes`, `_PyDict_LoadGlobal`, `_PyDictKeys_DecRef` | Split table and class dict support. | `objects/dict.go:splitTable` |
+| <Cpy path="Objects/dictobject.c" lines="6400-7824">6400-7824</Cpy> | `PyDict_AddWatcher`, `_PyDict_SendEvent`, version tag bookkeeping, `PyDict_Type` | Watcher API and type definition. | `objects/dict.go:AddWatcher` |
+
+## Reading
+
+### Compact layout (lines 1 to 200)
+
+<CpyLink path="Objects/dictobject.c" lines="1-200" />
+
+The two-array structure. `dk_indices` is a typed array (`int8`, `int16`,
+`int32`, or `int64` depending on table size) that maps hash slots to entry
+indices. `dk_entries` is a dense array of `PyDictKeyEntry {hash, key, value}`
+structs in insertion order. Lookup hashes the key, indexes into `dk_indices`
+to get an entry index, then checks the entry for a key match.
+
+Collision resolution uses a perturbation-based probe sequence:
+
+```c
+// Initial probe slot:
+Py_ssize_t i = hash & mask;
+
+// Subsequent probes:
+perturb >>= PERTURB_SHIFT;
+i = (i * 5 + 1 + perturb) & mask;
+```
+
+`PERTURB_SHIFT` is 5. The perturbation term mixes in high bits of the hash so
+that clusters formed by the lower-bit probe sequence eventually disperse. The
+`dk_indices` element at position `i` holds either a non-negative index into
+`dk_entries`, `DKIX_EMPTY` (-1), or `DKIX_DUMMY` (-2, a deleted slot
+sentinel).
+
+### `insertdict` (lines 1200 to 1500)
+
+<CpyLink path="Objects/dictobject.c" lines="1200-1500" />
+
+The insert path. Computes the hash, calls `_Py_dict_lookup` to find the slot,
+then branches on the result:
+
+```c
+static int
+insertdict(PyInterpreterState *interp, PyDictObject *mp,
+           PyObject *key, Py_hash_t hash, PyObject *value)
+{
+    PyObject *old_value;
+    PyDictKeyEntry *ep;
+    Py_ssize_t ix = _Py_dict_lookup(mp, key, hash, &old_value);
+    if (ix == DKIX_ERROR)
+        return -1;
+
+    if (ix == DKIX_EMPTY) {
+        /* Key not present: insert into next free dk_entries slot. */
+        if (mp->ma_keys->dk_usable <= 0) {
+            if (insertion_resize(interp, mp, 1) < 0)
+                return -1;
+            ix = find_empty_slot(mp->ma_keys, hash);
+        }
+        ...
+        ep = &DK_ENTRIES(mp->ma_keys)[mp->ma_keys->dk_nentries];
+        ep->me_key   = Py_NewRef(key);
+        ep->me_hash  = hash;
+        ep->me_value = Py_NewRef(value);
+        ...
+        mp->ma_used++;
+        mp->ma_version_tag = DICT_NEXT_VERSION(interp);
+    } else {
+        /* Key already present: replace value. */
+        Py_SETREF(ep->me_value, Py_NewRef(value));
+        ...
+    }
+    return 0;
+}
+```
+
+If the load factor exceeds 2/3 of `dk_size`, `insertion_resize` doubles the
+table. The new `dk_indices` array is re-allocated and all existing entries are
+re-inserted by walking `dk_entries` in order; the insertion-order property is
+preserved because `dk_entries` is not moved.
+
+### Version tag (lines 6400 to 6600)
+
+<CpyLink path="Objects/dictobject.c" lines="6400-6600" />
+
+Every dict mutation bumps `ma_version_tag`, a 64-bit counter global to the
+interpreter. The eval loop's `LOAD_GLOBAL` inline cache stores the dict's
+version tag at specialization time. A mismatch at runtime forces a real dict
+lookup and re-specialization:
+
+```c
+static inline uint64_t
+DICT_NEXT_VERSION(PyInterpreterState *interp)
+{
+    return ++interp->dict_state.global_version;
+}
+```
+
+`_PyDict_SendEvent` is called on every mutation. Registered watchers receive
+a `PyDict_EVENT_MODIFIED`, `PyDict_EVENT_ADDED`, or `PyDict_EVENT_DELETED`
+notification. `PyDict_AddWatcher` registers a callback and returns a small
+integer watcher ID stored in `ma_version_tag`'s high bits.
+
+### Split tables (lines 5600 to 6000)
+
+<CpyLink path="Objects/dictobject.c" lines="5600-6000" />
+
+When many instances of the same class have the same attribute names (common
+for `__dict__`), CPython shares a single `PyDictKeysObject` between all
+instances. Each instance has only a `dk_values` array with the actual values;
+the keys and hash table are shared. The split layout reduces per-instance
+memory from `O(n*3)` entries to `O(n)` values:
+
+```c
+/* Materialize a full combined dict from a split one.
+   Called when instance attributes diverge from the shared key set. */
+PyObject *
+_PyObject_MakeDictFromInstanceAttributes(PyObject *obj, PyDictValues *values)
+{
+    PyInterpreterState *interp = _PyInterpreterState_GET();
+    PyDictKeysObject *keys = ...;
+    PyDictObject *mp = (PyDictObject *)new_dict(interp, keys, values, 0, 0);
+    ...
+}
+```
+
+Once an instance dict diverges (a new key is added that does not exist in the
+shared key structure), `_PyObject_MakeDictFromInstanceAttributes` materializes
+a full combined dict and the instance switches to the combined layout.
+
+## gopy mirror
+
+`objects/dict.go`, `objects/dict_iter.go`, `objects/dict_mutate.go`. The
+compact layout is preserved with `dk_indices` as a Go byte-slice typed by
+slot size. Version tag is a `uint64` field. Split tables are supported for
+class `__dict__` optimization. Watchers map to Go callbacks registered via
+`(*Dict).AddWatcher`.
+
+## CPython 3.14 changes
+
+Dict watchers (`PyDict_AddWatcher`) added in 3.12. Compact ordered layout
+stable since 3.7. Inline cache version tag check stable since 3.11
+specializing interpreter. The `ma_version_tag` watcher-ID encoding in the
+high bits was added in 3.12 alongside the watcher API.

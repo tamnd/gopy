@@ -1,0 +1,215 @@
+---
+title: Objects/abstract.c
+description: Protocol implementations. number, sequence, mapping, iterator, buffer, and calling protocols. PyNumber_*, PySequence_*, PyMapping_*, PyObject_Call* families.
+cpython_path: Objects/abstract.c
+cpython_version: "3.14"
+lines: 2947
+status: annotated
+ported_to: objects/protocol.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Objects/abstract.c`
+
+<CpyLink path="Objects/abstract.c" />
+
+Abstract object protocol layer. Every operation that Python bytecode performs
+on objects goes through this file (or the type's slot directly).
+`PyObject_Call` and `vectorcallfunc` are the entry points for all Python
+calls; `PyNumber_Add`, `PySequence_GetItem`, `PyMapping_Keys` etc. implement
+the protocol fallbacks and coercions. The file also contains `PyIter_Next` and
+the `aiter`/`anext` async iteration helpers.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Objects/abstract.c" lines="1-80">1-80</Cpy> | `abstract_get_bases`, `abstract_issubclass` | Walk `__bases__` tuples for `issubclass` with abstract classes. | `objects/protocol.go:abstractIssubclass` |
+| <Cpy path="Objects/abstract.c" lines="81-200">81-200</Cpy> | `object_recursive_isinstance`, `PyObject_IsInstance`, `PyObject_IsSubclass` | `isinstance` / `issubclass` with `__instancecheck__` / `__subclasshook__`. | `objects/protocol.go:IsInstance`, `IsSubclass` |
+| <Cpy path="Objects/abstract.c" lines="201-350">201-350</Cpy> | `_PyObject_CallMethod`, `_PyObject_CallMethodIdObjArgs`, `_PyObject_CallMethodOneArg` | Convenience wrappers: look up a method by name and call it. | `objects/protocol.go:CallMethod` |
+| <Cpy path="Objects/abstract.c" lines="351-500">351-500</Cpy> | `PyObject_CallNoArgs`, `PyObject_CallOneArg`, `PyObject_CallFunction` | Thin wrappers that build arg tuples and forward to `PyObject_Call`. | `objects/protocol.go:CallNoArgs`, `CallOneArg` |
+| <Cpy path="Objects/abstract.c" lines="501-700">501-700</Cpy> | `PyObject_Call`, `_PyObject_Call`, `_PyObject_FastCallDict` | Core call dispatch: `tp_call` or `vectorcallfunc`. | `objects/protocol.go:Call` |
+| <Cpy path="Objects/abstract.c" lines="701-900">701-900</Cpy> | `PyObject_Vectorcall`, `PyObject_VectorcallMethod`, `_PyObject_VectorcallTstate` | Vectorcall fast path: C array + kwnames, no tuple allocation. | `objects/protocol.go:Vectorcall` |
+| <Cpy path="Objects/abstract.c" lines="901-1000">901-1000</Cpy> | `binary_op`, `binary_op1` | Engine for all binary numeric operations: try left, then right (reflected). | `objects/protocol.go:binaryOp` |
+| <Cpy path="Objects/abstract.c" lines="1001-1100">1001-1100</Cpy> | `ternary_op` | Engine for `pow(base, exp, mod)` (`nb_power`). | `objects/protocol.go:ternaryOp` |
+| <Cpy path="Objects/abstract.c" lines="1101-1300">1101-1300</Cpy> | `PyNumber_Add`, `PyNumber_Subtract`, `PyNumber_Multiply`, `PyNumber_TrueDivide`, `PyNumber_FloorDivide`, `PyNumber_Remainder`, `PyNumber_Lshift`, `PyNumber_Rshift`, `PyNumber_Or`, `PyNumber_And`, `PyNumber_Xor` | Binary numeric ops, each delegating to `binary_op`. | `objects/protocol.go` |
+| <Cpy path="Objects/abstract.c" lines="1301-1400">1301-1400</Cpy> | `PyNumber_InPlaceAdd`, `PyNumber_InPlaceSubtract`, etc. | In-place numeric ops; try `nb_inplace_*` first, fall back to `nb_*`. | `objects/protocol.go` |
+| <Cpy path="Objects/abstract.c" lines="1401-1600">1401-1600</Cpy> | `PyNumber_Long`, `PyNumber_Float`, `PyNumber_Index`, `PyNumber_AsSsize_t` | Numeric coercions: `__int__`, `__float__`, `__index__`, size clamping. | `objects/protocol.go:NumberLong`, `NumberIndex` |
+| <Cpy path="Objects/abstract.c" lines="1601-1750">1601-1750</Cpy> | `PySequence_Length`, `PySequence_Concat`, `PySequence_Repeat`, `PySequence_GetItem`, `PySequence_SetItem`, `PySequence_DelItem` | Core sequence operations. | `objects/protocol.go:SequenceGetItem`, `SequenceLength` |
+| <Cpy path="Objects/abstract.c" lines="1751-1900">1751-1900</Cpy> | `PySequence_Count`, `PySequence_Contains`, `PySequence_Index` | Sequence search ops; `Contains` falls back to linear scan. | `objects/protocol.go:SequenceContains` |
+| <Cpy path="Objects/abstract.c" lines="1901-2050">1901-2050</Cpy> | `PySequence_List`, `PySequence_Tuple`, `PySequence_Fast` | Materialize an iterable as a list or tuple. | `objects/protocol.go:SequenceList` |
+| <Cpy path="Objects/abstract.c" lines="2051-2200">2051-2200</Cpy> | `PyMapping_Length`, `PyMapping_GetItemString`, `PyMapping_SetItemString`, `PyMapping_DelItemString`, `PyMapping_HasKey` | Mapping protocol entry points. | `objects/protocol.go:MappingGetItem` |
+| <Cpy path="Objects/abstract.c" lines="2201-2400">2201-2400</Cpy> | `PyMapping_Keys`, `PyMapping_Values`, `PyMapping_Items`, `PyMapping_GetOptionalItem` | Mapping view accessors. | `objects/protocol.go:MappingKeys` |
+| <Cpy path="Objects/abstract.c" lines="2401-2600">2401-2600</Cpy> | `PyObject_GetIter`, `PyObject_GetAIter`, `PyIter_Next` | Iterator protocol: `tp_iter` dispatch and `tp_iternext`. | `objects/protocol.go:GetIter`, `IterNext` |
+| <Cpy path="Objects/abstract.c" lines="2601-2750">2601-2750</Cpy> | `PyIter_Send` | Send a value into a generator or coroutine; maps to `tp_iternext` or `am_send`. | `objects/protocol.go:IterSend` |
+| <Cpy path="Objects/abstract.c" lines="2751-2947">2751-2947</Cpy> | `PyObject_GetBuffer`, `PyBuffer_Release`, `PyObject_CopyData`, `PyBuffer_FillInfo` | Buffer protocol: `tp_as_buffer->bf_getbuffer`. | `objects/protocol.go:GetBuffer` |
+
+## Reading
+
+### `PyObject_Call` and vectorcall (lines 501 to 700)
+
+<CpyLink path="Objects/abstract.c" lines="501-700" />
+
+`PyObject_Call(callable, args, kwargs)` is the universal call entry point used
+by the bytecode `CALL_INTRINSIC` and `CALL` instructions when the fast paths
+fail. It checks `Py_TPFLAGS_HAVE_VECTORCALL` first. When the flag is set and
+`kwargs` is NULL or empty, the vectorcall path is taken directly with a C
+array, avoiding allocation of an `args` tuple:
+
+```c
+PyObject *
+PyObject_Call(PyObject *callable, PyObject *args, PyObject *kwargs)
+{
+    ternaryfunc call;
+    PyTypeObject *tp = Py_TYPE(callable);
+
+    if ((tp->tp_flags & Py_TPFLAGS_HAVE_VECTORCALL) &&
+        PyCFunction_CheckExact(callable)) {
+        // Fast path: use vectorcall directly.
+        return _PyObject_VectorcallTstate(tstate, callable, ...);
+    }
+    call = tp->tp_call;
+    if (call == NULL) {
+        PyErr_Format(PyExc_TypeError,
+                     "'%.200s' object is not callable", tp->tp_name);
+        return NULL;
+    }
+    return (*call)(callable, args, kwargs);
+}
+```
+
+`_PyObject_FastCallDict` converts a C array of arguments plus a kwnames tuple
+into the vectorcall convention before forwarding. This is the bridge between
+the old `tp_call(args_tuple, kwargs_dict)` ABI and the newer
+`vectorcallfunc(callable, args, nargs, kwnames)` ABI.
+
+### `binary_op` (lines 901 to 1000)
+
+<CpyLink path="Objects/abstract.c" lines="901-1000" />
+
+The engine behind every `PyNumber_Add`, `PyNumber_Subtract`, etc. Consults the
+numeric slot in the left operand's type, then the right operand's. If
+`type(w)` is a strict subtype of `type(v)`, the reflected slot on `w` is tried
+first to let subclasses override parent arithmetic:
+
+```c
+static PyObject *
+binary_op1(PyObject *v, PyObject *w, const int op_slot, const char *op_name)
+{
+    binaryfunc slotv = NB_BINOP(Py_TYPE(v)->tp_as_number, op_slot);
+    binaryfunc slotw = NB_BINOP(Py_TYPE(w)->tp_as_number, op_slot);
+
+    // If w's type is a subtype of v's, try w's slot first.
+    if (slotw != NULL &&
+        !Py_IS_TYPE(v, Py_TYPE(w)) &&
+        PyType_IsSubtype(Py_TYPE(w), Py_TYPE(v))) {
+        PyObject *x = slotw(v, w);
+        if (x != Py_NotImplemented)
+            return x;
+        Py_DECREF(x);
+        slotw = NULL;
+    }
+    if (slotv != NULL) {
+        PyObject *x = slotv(v, w);
+        if (x != Py_NotImplemented)
+            return x;
+        Py_DECREF(x);
+    }
+    if (slotw != NULL) {
+        PyObject *x = slotw(v, w);
+        if (x != Py_NotImplemented)
+            return x;
+        Py_DECREF(x);
+    }
+    PyErr_Format(PyExc_TypeError,
+                 "unsupported operand type(s) for %s: '%.100s' and '%.100s'",
+                 op_name, Py_TYPE(v)->tp_name, Py_TYPE(w)->tp_name);
+    return NULL;
+}
+```
+
+Both `NotImplemented` results cause a `TypeError`. The `NB_BINOP` macro
+extracts a slot from `tp_as_number` without dereferencing a NULL sub-struct.
+
+### `PyNumber_Index` (lines 1401 to 1500)
+
+<CpyLink path="Objects/abstract.c" lines="1401-1500" />
+
+The `__index__` protocol for slice indices. Calls `nb_index`, checks the
+result is an exact `int` (raises `TypeError` on wrong type), and clamps the
+value into `[PY_SSIZE_T_MIN, PY_SSIZE_T_MAX]` with a `DeprecationWarning`
+when the value is out of range:
+
+```c
+PyObject *
+PyNumber_Index(PyObject *item)
+{
+    if (PyLong_Check(item)) {
+        return Py_NewRef(item);
+    }
+    if (!_PyIndex_Check(item)) {
+        PyErr_Format(PyExc_TypeError,
+                     "'%.200s' object cannot be interpreted as an integer",
+                     Py_TYPE(item)->tp_name);
+        return NULL;
+    }
+    PyObject *result = Py_TYPE(item)->tp_as_number->nb_index(item);
+    if (!result || PyLong_CheckExact(result))
+        return result;
+    if (!PyLong_Check(result)) {
+        PyErr_Format(PyExc_TypeError,
+                     "__index__ returned non-int (type %.200s)",
+                     Py_TYPE(result)->tp_name);
+        Py_DECREF(result);
+        return NULL;
+    }
+    /* Issue a deprecation warning for non-exact int results. */
+    ...
+    return result;
+}
+```
+
+`PyNumber_AsSsize_t` calls `PyNumber_Index` and then saturates to the
+`Py_ssize_t` range, which is how `a[2**100]` avoids overflow in container
+indexing.
+
+### `PySequence_Contains` (lines 1800 to 1900)
+
+<CpyLink path="Objects/abstract.c" lines="1800-1900" />
+
+The `in` operator. Tries `sq_contains` (the `__contains__` slot) first. If
+the slot is absent, falls back to a linear scan: iterate with `PyIter_Next`
+and compare each element via `PyObject_RichCompareBool(item, value, Py_EQ)`.
+This fallback is what makes `in` work on any iterable even without a custom
+`__contains__`:
+
+```c
+int
+PySequence_Contains(PyObject *seq, PyObject *ob)
+{
+    Py_ssize_t result;
+    PySequenceMethods *sqm = Py_TYPE(seq)->tp_as_sequence;
+    if (sqm != NULL && sqm->sq_contains != NULL)
+        return (*sqm->sq_contains)(seq, ob);
+    result = _PySequence_IterSearch(seq, ob, PY_ITERSEARCH_CONTAINS);
+    if (result < 0)
+        return -1;
+    return (int)result;
+}
+```
+
+`_PySequence_IterSearch` is also used by `list.index` and `list.count`.
+
+## gopy mirror
+
+`objects/protocol.go`. `PyObject_Call` maps to `Call(callable, args, kwargs)`.
+Vectorcall is implemented with the same flag check and array-based dispatch.
+Numeric binary operations delegate to `(*Type).NumberMethods`. The async
+iteration helpers (`PyObject_GetAIter`, `PyIter_Send`) are present.
+
+## CPython 3.14 changes
+
+`PyObject_Vectorcall` stabilized as public API in 3.9. `PyIter_Send` added in
+3.10. `PyMapping_GetOptionalItem` added in 3.13. No significant 3.14-specific
+changes in this file.

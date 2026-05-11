@@ -1,0 +1,222 @@
+---
+title: Objects/frameobject.c
+description: PyFrameObject. The Python-visible frame wrapper around _PyInterpreterFrame, including locals materialization, debugger line-number setting, and the fast-locals protocol.
+cpython_path: Objects/frameobject.c
+cpython_version: "3.14"
+lines: 1600
+status: annotated
+ported_to: objects/frame.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Objects/frameobject.c`
+
+<CpyLink path="Objects/frameobject.c" />
+
+Since Python 3.11, frames are split into two layers. The internal layer is
+`_PyInterpreterFrame`, a fixed-size struct allocated inline inside generator
+objects or on the C call stack (for regular calls). It holds the instruction
+pointer, the `localsplus` array (fast locals, cell vars, free vars, and the
+value stack), and bookkeeping like `frame_state`.
+
+`PyFrameObject` is the Python-visible wrapper. It is a heap-allocated object
+created lazily, only when code actually accesses a frame via `sys._getframe()`,
+a traceback, or `frame.f_locals`. The frame object holds a pointer back to the
+`_PyInterpreterFrame` it wraps; while the internal frame is executing the
+`PyFrameObject` may not exist at all.
+
+This file provides: lazy construction (`_PyFrame_New_NoTrack`,
+`PyFrame_New`), attribute getters and setters for `f_locals`, `f_lineno`,
+`f_code`, `f_globals`, `f_builtins`, `f_back`, `f_trace`, and
+`f_generator`, the fast-locals protocol
+(`PyFrame_FastToLocals`/`PyFrame_LocalsToFast`), and `PyFrame_Type`.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Objects/frameobject.c" lines="1-100">1-100</Cpy> | `_PyFrame_New_NoTrack`, `PyFrame_New` | Allocate a `PyFrameObject`; link to caller frame; public API entry point. | `objects/frame.go:NewFrame` |
+| <Cpy path="Objects/frameobject.c" lines="101-300">101-300</Cpy> | `frame_dealloc`, `frame_traverse`, `frame_clear` | Release the internal frame pointer; GC traversal visits code, locals, and the owned `_PyInterpreterFrame` if heap-allocated. | `objects/frame.go` |
+| <Cpy path="Objects/frameobject.c" lines="301-500">301-500</Cpy> | `frame_getlocals`, `PyFrame_FastToLocals`, `_PyFrame_FastToLocalsWithError` | Materialize the fast-locals array into a dict; called on `f_locals` access and by `locals()`. | `objects/frame.go:(*Frame).Locals` |
+| <Cpy path="Objects/frameobject.c" lines="501-700">501-700</Cpy> | `PyFrame_LocalsToFast`, `_PyFrame_LocalsToFast` | Copy `f_locals` dict back into the fast-locals array; used by `exec()` and debuggers. | `objects/frame.go:(*Frame).LocalsToFast` |
+| <Cpy path="Objects/frameobject.c" lines="701-900">701-900</Cpy> | `frame_getlineno`, `frame_setlineno` | Get `f_lineno` from the instruction pointer; set it (debugger jump) by adjusting the instruction pointer. | `objects/frame.go:frameGetLineno`, `frameSetLineno` |
+| <Cpy path="Objects/frameobject.c" lines="901-1100">901-1100</Cpy> | `frame_getgenerator`, `frame_getcode`, `frame_getback`, `frame_getglobals`, `frame_getbuiltins`, `frame_getlasti` | Attribute getters: owner generator/coroutine, code object, caller frame, globals dict, builtins dict, last bytecode index. | `objects/frame.go` |
+| <Cpy path="Objects/frameobject.c" lines="1101-1350">1101-1350</Cpy> | `frame_gettrace`, `frame_settrace`, `frame_gettracing`, `frame_settracing` | `f_trace` and `f_trace_lines`/`f_trace_opcodes` for the sys.settrace API. | `objects/frame.go:frameGetTrace` |
+| <Cpy path="Objects/frameobject.c" lines="1350-1600">1350-1600</Cpy> | `frame_repr`, `PyFrame_Type`, getset/member tables | Repr `<frame at 0x... in file.py:42>`, type object, and the full getset list. | `objects/frame.go:frameRepr`, `FrameType` |
+
+## Reading
+
+### Frame vs interpreter-frame relationship (lines 1 to 100)
+
+<CpyLink path="Objects/frameobject.c" lines="1-100" />
+
+`_PyFrame_New_NoTrack` creates a `PyFrameObject` whose `f_frame` field
+points to a separately allocated `_PyInterpreterFrame`:
+
+```c
+PyFrameObject *
+_PyFrame_New_NoTrack(PyCodeObject *code)
+{
+    PyFrameObject *f = PyObject_GC_New(PyFrameObject, &PyFrame_Type);
+    if (f == NULL)
+        return NULL;
+
+    /* Allocate a heap _PyInterpreterFrame to back this frame object.
+       Generator frames embed theirs inline; for sys._getframe() we
+       allocate one explicitly. */
+    _PyInterpreterFrame *frame = _PyFrame_AllocHeap(code);
+    if (frame == NULL) {
+        Py_DECREF(f);
+        return NULL;
+    }
+    _PyFrame_Initialize(frame, NULL, NULL, code, 0);
+    f->f_frame = frame;
+    frame->owner = FRAME_OWNED_BY_FRAME_OBJECT;
+    return f;
+}
+```
+
+The `owner` field on `_PyInterpreterFrame` controls who is responsible for
+freeing it. Values are:
+
+| `owner` value | Meaning |
+| --- | --- |
+| `FRAME_OWNED_BY_CSTACK` | Stack frame; freed when the C function returns. |
+| `FRAME_OWNED_BY_GENERATOR` | Embedded in a generator; freed with the generator. |
+| `FRAME_OWNED_BY_FRAME_OBJECT` | Heap-allocated by `_PyFrame_New_NoTrack`; freed by `frame_dealloc`. |
+
+For executing frames (e.g., during `sys._getframe(0)` inside a running
+function), the `PyFrameObject` is created on demand and `f_frame` points
+into the running C call stack. `frame_dealloc` checks `frame->owner` and
+only frees the backing `_PyInterpreterFrame` if it is
+`FRAME_OWNED_BY_FRAME_OBJECT`.
+
+### `frame_getlocals` and `_PyFrame_FastToLocalsWithError` (lines 301 to 500)
+
+<CpyLink path="Objects/frameobject.c" lines="301-500" />
+
+The fast-locals array (`frame->localsplus`) stores references without names.
+When Python code reads `f.f_locals` or calls `locals()`, the interpreter
+must build a named dict:
+
+```c
+static PyObject *
+frame_getlocals(PyFrameObject *f, void *Py_UNUSED(ignored))
+{
+    if (_PyFrame_FastToLocalsWithError(f->f_frame) < 0)
+        return NULL;
+    PyObject *locals = f->f_frame->f_locals;
+    if (locals == NULL) {
+        locals = f->f_frame->f_locals = PyDict_New();
+        if (locals == NULL)
+            return NULL;
+    }
+    return Py_NewRef(locals);
+}
+```
+
+`_PyFrame_FastToLocalsWithError` iterates `co_varnames` (the fast-local
+names) alongside `localsplus` and inserts each live variable into
+`f_locals`. Deleted variables (NULL slots) are removed from the dict if
+present. Cell variables and free variables are unwrapped through their
+`PyCellObject` before insertion. The `f_locals` dict is created lazily on
+first access and reused on subsequent calls; it is not kept in sync
+automatically while the frame is executing.
+
+### `frame_setlineno` (lines 701 to 900)
+
+<CpyLink path="Objects/frameobject.c" lines="701-900" />
+
+`f_lineno = n` is the debugger interface for jumping to a different line
+inside an executing frame:
+
+```c
+static int
+frame_setlineno(PyFrameObject *f, PyObject *p_new_lineno, void *Py_UNUSED(ignored))
+{
+    if (p_new_lineno == NULL) {
+        PyErr_SetString(PyExc_AttributeError, "cannot delete f_lineno");
+        return -1;
+    }
+    int new_lineno = (int) PyLong_AsLong(p_new_lineno);
+    if (new_lineno < 0 && PyErr_Occurred())
+        return -1;
+
+    /* Validate: can only set lineno on a suspended frame (e.g. inside
+       a trace function called with 'line' event). */
+    if (f->f_frame->frame_state != FRAME_SUSPENDED) {
+        PyErr_SetString(PyExc_ValueError,
+            "f_lineno can only be set by a trace function");
+        return -1;
+    }
+
+    /* Walk the location table to find the instruction at new_lineno. */
+    int new_lasti = _PyCode_FindFirstLineno(f->f_frame->f_code, new_lineno);
+    if (new_lasti < 0) {
+        PyErr_Format(PyExc_ValueError,
+                     "line %d comes after the end of the code block",
+                     new_lineno);
+        return -1;
+    }
+
+    /* Check for jumps into or out of exception handlers, which are
+       not safe. */
+    ...
+
+    f->f_frame->prev_instr = _PyCode_CODE(f->f_frame->f_code) + new_lasti;
+    return 0;
+}
+```
+
+Setting `prev_instr` is sufficient because the eval loop reads the next
+instruction as `prev_instr + 1` at the top of each dispatch iteration (in
+3.11+). Safety checks prevent jumps into exception handlers, into the
+middle of `CACHE` words, or past the end of the code object. `pdb` uses
+this to implement the `jump` command.
+
+### `PyFrame_LocalsToFast` (lines 501 to 700)
+
+<CpyLink path="Objects/frameobject.c" lines="501-700" />
+
+The reverse direction: copy the `f_locals` dict back into the
+`localsplus` array. Used by `exec()` and by debuggers after modifying
+locals:
+
+```c
+void
+PyFrame_LocalsToFast(PyFrameObject *f, int clear)
+{
+    _PyFrame_LocalsToFast(f->f_frame, clear);
+}
+```
+
+`_PyFrame_LocalsToFast` iterates `co_varnames` and for each name looks up
+the value in `f_locals`. If found, it stores the value into the
+corresponding `localsplus` slot (wrapping through the `PyCellObject` for
+cell/free vars). If not found and `clear` is true, it sets the slot to
+NULL (deletes the variable). If `clear` is false, missing names are left
+unchanged. This asymmetry lets `exec()` inject new bindings without
+inadvertently clearing variables that were never put into `f_locals`.
+
+## gopy mirror
+
+`objects/frame.go`. The two-layer design is preserved: `_PyInterpreterFrame`
+maps to `InterpreterFrame` in `vm/frame.go`, and `PyFrameObject` maps to
+`Frame` in `objects/frame.go`. `Frame.IFrame` holds the `*InterpreterFrame`
+pointer. `owner` is a `FrameOwner` uint8 enum. `(*Frame).Locals()` ports
+`frame_getlocals` + `_PyFrame_FastToLocalsWithError`. `frame_setlineno`
+maps to `(*Frame).SetLineno`. The fast-locals protocol is
+`(*Frame).LocalsToFast` and `(*Frame).FastToLocals`. `FrameType` holds
+the type object.
+
+## CPython 3.14 changes
+
+The `_PyInterpreterFrame` / `PyFrameObject` split was introduced in 3.11
+(PEP 659 / bpo-44590). Before 3.11, `PyFrameObject` was the single frame
+struct allocated on the heap for every call. In 3.11+, `PyFrameObject`
+is created lazily and `PyFrame_GetLocals` (added in 3.13) provides a
+safe public API that does not require a `PyFrameObject` at all.
+`frame_getgenerator` was added in 3.11 to expose the owning
+generator/coroutine via `f_generator`. `f_lasti` now returns a byte
+offset rather than a word offset (changed in 3.10).

@@ -1,0 +1,181 @@
+---
+title: Objects/descrobject.c
+description: All five descriptor types (method, member, getset, wrapper, classmethod), PyDictProxy, and the descr_get protocol.
+cpython_path: Objects/descrobject.c
+cpython_version: "3.14"
+lines: 1800
+status: annotated
+ported_to: objects/descr.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Objects/descrobject.c`
+
+<CpyLink path="Objects/descrobject.c" />
+
+Descriptor types and the dict proxy. This file implements the five core
+descriptor types that back the Python data model for C-defined types:
+`PyMethodDescrObject` (wraps a `PyMethodDef`, produces bound `PyCFunction`
+on instance access), `PyMemberDescrObject` (wraps a `PyMemberDef`, reads and
+writes C struct fields via `PyMember_GetOne`/`SetOne`),
+`PyGetSetDescrObject` (wraps a `PyGetSetDef`, calls C getter/setter
+functions), `PyWrapperDescrObject` (wraps a slot function pointer for
+`slot_tp_*` wrappers exposed as `__add__` etc.), and
+`PyClassMethodDescrObject` (like method but binds the class instead of the
+instance). `PyDictProxy_New` creates an immutable `mappingproxy` view over a
+dict, used for `type.__dict__`. The `tp_descr_get` slot on each type
+implements the descriptor protocol: an instance access returns a bound object
+while a class access returns the descriptor itself. `_PyDescr_Init` registers
+all five descriptor types at interpreter startup.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Objects/descrobject.c" lines="1-120">1-120</Cpy> | `descr_new`, `PyDescr_NewMethod`, `method_repr`, `method_get_doc`, `method_get_text_signature` | Allocate a `PyMethodDescrObject` from a `PyMethodDef`; repr and doc-string accessor. | `objects/descr.go:NewGetSetDescr` |
+| <Cpy path="Objects/descrobject.c" lines="121-280">121-280</Cpy> | `method_descr_get`, `classmethod_get` | `tp_descr_get` for method and classmethod descriptors: instance access creates a `PyCFunctionObject` bound to the instance; class access binds the class. | `objects/descr.go:getsetDescrGet` |
+| <Cpy path="Objects/descrobject.c" lines="281-450">281-450</Cpy> | `PyDescr_NewMember`, `member_get`, `member_set`, `member_repr` | `PyMemberDescrObject` wrapping a `PyMemberDef`; field access via `PyMember_GetOne`/`SetOne` using offset arithmetic into the C struct. | `objects/descr.go` |
+| <Cpy path="Objects/descrobject.c" lines="451-650">451-650</Cpy> | `PyDescr_NewGetSet`, `getset_get`, `getset_set`, `getset_repr` | `PyGetSetDescrObject` wrapping a `PyGetSetDef`; calls `gs_get(obj, gs_closure)` or `gs_set(obj, value, gs_closure)`. | `objects/descr.go:getsetDescrGet` |
+| <Cpy path="Objects/descrobject.c" lines="651-900">651-900</Cpy> | `PyDescr_NewWrapper`, `wrapperdescr_get`, `wrapper_repr`, `PyWrapperDescrObject` | Slot wrappers: `PyWrapperDescrObject` holds a `slotdef*` and exposes the C slot as a Python `slot_wrapper` descriptor. | `objects/descr.go` |
+| <Cpy path="Objects/descrobject.c" lines="901-1050">901-1050</Cpy> | `PyDescr_NewClassMethod`, `classmethod_descr_get`, `PyClassMethodDescrObject` | Class method descriptor; `tp_descr_get` always binds the type, regardless of whether accessed from an instance or the class. | `objects/descr.go` |
+| <Cpy path="Objects/descrobject.c" lines="1051-1250">1051-1250</Cpy> | `PyDictProxy_New`, `mappingproxy_getitem`, `mappingproxy_len`, `mappingproxy_iter`, `mappingproxy_repr`, `mappingproxy_richcompare` | Immutable `mappingproxy` view wrapping any mapping; used for `type.__dict__`. | `objects/mapping_proxy.go:NewMappingProxy` |
+| <Cpy path="Objects/descrobject.c" lines="1251-1450">1251-1450</Cpy> | `PyMemberDef` accessor helpers, `PyDescr_IsData`, `descr_check` | Runtime checks: `descr_check` verifies that the descriptor's `d_type` is in the MRO of the accessing type before binding. | `objects/descr.go:LookupDescriptor` |
+| <Cpy path="Objects/descrobject.c" lines="1451-1650">1451-1650</Cpy> | `PyMethodDef` slot type tables, `PyMemberDescrType`, `PyGetSetDescrType`, `PyMethodDescrType`, `PyWrapperDescrType`, `PyClassMethodDescrType` | Type object definitions for all five descriptor kinds. | `objects/descr.go:GetSetDescrType` |
+| <Cpy path="Objects/descrobject.c" lines="1651-1800">1651-1800</Cpy> | `_PyDescr_Init`, `PyMappingProxyType` | Initializes descriptor types and `mappingproxy` at interpreter startup. | `objects/descr.go`, `objects/mapping_proxy.go` |
+
+## Reading
+
+### Method descriptor and `descr_get` (lines 121 to 280)
+
+<CpyLink path="Objects/descrobject.c" lines="121-280" />
+
+`method_descr_get` is the `tp_descr_get` slot for `PyMethodDescrObject`. The
+descriptor protocol requires that accessing a descriptor from an instance
+binds it to that instance, while class access returns the descriptor itself.
+For method descriptors, instance binding creates a `PyCFunctionObject` with
+`self` set to the instance:
+
+```c
+static PyObject *
+method_descr_get(PyObject *descr, PyObject *obj, PyObject *type)
+{
+    PyMethodDescrObject *d = (PyMethodDescrObject *)descr;
+
+    if (obj == NULL || obj == Py_None) {
+        /* Accessed from the class: return the unbound descriptor. */
+        return Py_NewRef(descr);
+    }
+    if (!descr_check((PyDescrObject *)d, obj))
+        return NULL;
+    return PyCFunction_NewInternal(d->d_method, obj, NULL,
+                                   d->d_common.d_qualname);
+}
+```
+
+`descr_check` verifies that `type(obj)` is a subtype of `d->d_common.d_type`,
+the type the descriptor was defined on. This prevents calling a descriptor
+from an unrelated type that happens to store it in its dict. `classmethod_get`
+is identical except it passes `type` (or `Py_TYPE(obj)`) as the first argument
+rather than `obj`.
+
+### Member and getset descriptors (lines 281 to 650)
+
+<CpyLink path="Objects/descrobject.c" lines="281-650" />
+
+`PyMemberDescrObject` and `PyGetSetDescrObject` are the two data descriptor
+kinds (they define both `tp_descr_get` and `tp_descr_set`, so they shadow
+instance `__dict__` entries). Member descriptors use `PyMemberDef.offset` to
+index directly into the C struct:
+
+```c
+static PyObject *
+member_get(PyObject *descr, PyObject *obj, PyObject *type)
+{
+    PyMemberDescrObject *d = (PyMemberDescrObject *)descr;
+    if (descr_check((PyDescrObject *)d, obj) < 0)
+        return NULL;
+    if (d->d_member->flags & READ_RESTRICTED) {
+        if (PySys_Audit("object.__getattr__", "Os",
+                        obj, d->d_member->name) < 0)
+            return NULL;
+    }
+    return PyMember_GetOne((char *)obj, d->d_member);
+}
+```
+
+`PyMember_GetOne` (in `Python/structmember.c`) reads the field at
+`(char *)obj + offset` and converts it to a Python object according to the
+`T_*` type code (`T_INT`, `T_DOUBLE`, `T_OBJECT_EX`, etc.).
+
+Getset descriptors call C function pointers instead:
+
+```c
+static PyObject *
+getset_get(PyObject *descr, PyObject *obj, PyObject *type)
+{
+    PyGetSetDescrObject *d = (PyGetSetDescrObject *)descr;
+    if (descr_check((PyDescrObject *)d, obj) < 0)
+        return NULL;
+    if (d->d_getset->get == NULL) {
+        PyErr_Format(PyExc_AttributeError, "unreadable attribute");
+        return NULL;
+    }
+    return d->d_getset->get(obj, d->d_getset->closure);
+}
+```
+
+The `closure` pointer lets the same getter function serve multiple attributes
+by carrying a type tag or offset as a `void *`.
+
+### `PyDictProxy_New` (lines 1051 to 1250)
+
+<CpyLink path="Objects/descrobject.c" lines="1051-1250" />
+
+`PyDictProxy_New` wraps any mapping in a `mappingproxy` object that exposes
+read operations but raises `TypeError` on any write. This is used for
+`type.__dict__` to prevent accidental direct mutation of the type's namespace
+(all type mutations must go through `type.__setattr__` so that slot updates
+and watcher notifications fire):
+
+```c
+PyObject *
+PyDictProxy_New(PyObject *mapping)
+{
+    mappingproxyobject *pp;
+
+    if (!PyMapping_Check(mapping)) {
+        PyErr_SetString(PyExc_TypeError,
+            "mappingproxy only wraps mappings");
+        return NULL;
+    }
+    pp = PyObject_GC_New(mappingproxyobject, &PyDictProxy_Type);
+    if (pp == NULL)
+        return NULL;
+    Py_INCREF(mapping);
+    pp->dict = mapping;
+    _PyObject_GC_TRACK(pp);
+    return (PyObject *)pp;
+}
+```
+
+`mappingproxy_setitem` and `mappingproxy_setattr` both return `TypeError:
+'mappingproxy' object does not support item assignment`. The underlying
+mapping is not copied; writes to the original dict are visible through the
+proxy, so `type.__dict__['key']` reflects the live type state.
+
+## gopy mirror
+
+`objects/descr.go` for `GetSetDescr`, `LookupDescriptor`, `SetTypeDescr`, and
+related helpers. `objects/property.go` for the Python-level `property`
+descriptor. `objects/mapping_proxy.go` for `MappingProxy` / `NewMappingProxy`
+(`PyDictProxy_New`). The `descr_check` type validation maps to the MRO walk in
+`LookupDescriptor`.
+
+## CPython 3.14 changes
+
+`PyClassMethodDescrObject` stable since 3.0. `PyGetSetDef.closure` has always
+been present. Slot wrapper infrastructure (`PyWrapperDescrObject`) unchanged
+since the type system rewrite in 2.2. `PyDictProxy_New` accepts any mapping
+(not just dicts) since 3.3. The `READ_RESTRICTED` audit event on member
+descriptors was added in 3.10.

@@ -1,0 +1,188 @@
+---
+title: Modules/_functoolsmodule.c
+description: C backend for functools — reduce, partial, and lru_cache with a doubly-linked LRU list and O(1) dict lookup.
+cpython_path: Modules/_functoolsmodule.c
+cpython_version: "3.14"
+lines: 1200
+status: annotated
+ported_to: module/functools/module.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Modules/_functoolsmodule.c`
+
+<CpyLink path="Modules/_functoolsmodule.c" />
+
+The C backend for `functools`. The pure-Python layer in `Lib/functools.py`
+imports this module as `_functools` and re-exports its objects. Three
+facilities are implemented here:
+
+- `functools.reduce` — fold a binary function over an iterable with an
+  optional initial value.
+- `functools.partial` — a callable object that pre-binds positional and keyword
+  arguments to another callable.
+- `functools.lru_cache` — a memoizing decorator backed by a doubly-linked
+  circular LRU list and a dict, giving O(1) cache lookup and O(1) eviction.
+
+The file also contains `_functools._lru_list_elem` (an internal node type) and
+`_functools.cmp_to_key` (adapts old-style comparison functions to the key
+protocol).
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Modules/_functoolsmodule.c" lines="1-60">1-60</Cpy> | includes, `_functools_state` | Per-interpreter state struct. | `module/functools/module.go:state` |
+| <Cpy path="Modules/_functoolsmodule.c" lines="60-200">60-200</Cpy> | `functools_reduce` | Fold iterable with binary function. | `module/functools/module.go:Reduce` |
+| <Cpy path="Modules/_functoolsmodule.c" lines="200-500">200-500</Cpy> | `partial`, `partial_new`, `partial_call`, `partial_repr`, `partial_reduce` | `functools.partial` type. | `module/functools/module.go:Partial` |
+| <Cpy path="Modules/_functoolsmodule.c" lines="500-620">500-620</Cpy> | `lru_list_elem`, `lru_list_elem_new` | LRU doubly-linked list node. | `module/functools/module.go:lruNode` |
+| <Cpy path="Modules/_functoolsmodule.c" lines="620-900">620-900</Cpy> | `lru_cache_object`, `lru_cache_new`, `lru_cache_call` | `lru_cache` wrapper object and lookup. | `module/functools/module.go:LruCache` |
+| <Cpy path="Modules/_functoolsmodule.c" lines="900-1050">900-1050</Cpy> | `lru_cache_cache_info`, `lru_cache_clear`, `lru_cache_copy` | Cache stats and invalidation. | `module/functools/module.go:CacheInfo` |
+| <Cpy path="Modules/_functoolsmodule.c" lines="1050-1150">1050-1150</Cpy> | `cmp_to_key`, `KeyWrapper` | Key object from comparator. | `module/functools/module.go:CmpToKey` |
+| <Cpy path="Modules/_functoolsmodule.c" lines="1150-1200">1150-1200</Cpy> | `_functoolsmodule`, `PyInit__functools` | Module definition and entry point. | `module/functools/module.go:Module` |
+
+## Reading
+
+### `functools_reduce` (lines 60 to 200)
+
+<CpyLink path="Modules/_functoolsmodule.c" lines="60-200" />
+
+`reduce(function, iterable[, initializer])` works by getting an iterator from
+the iterable and folding left:
+
+```c
+static PyObject *
+functools_reduce(PyObject *self, PyObject *args)
+{
+    PyObject *seq, *func, *result = NULL, *it;
+
+    if (!PyArg_UnpackTuple(args, "reduce", 2, 3, &func, &seq, &result))
+        return NULL;
+
+    it = PyObject_GetIter(seq);
+    if (result != NULL)
+        Py_INCREF(result);
+
+    while ((op2 = iternext(it))) {
+        if (result == NULL) {
+            result = op2;   /* first element becomes seed */
+        } else {
+            newresult = PyObject_CallFunctionObjArgs(func, result, op2, NULL);
+            Py_DECREF(result);
+            Py_DECREF(op2);
+            result = newresult;
+            if (result == NULL) goto Fail;
+        }
+    }
+    ...
+}
+```
+
+If the iterable is empty and no initializer is supplied, `reduce` raises
+`TypeError`. If the iterable has exactly one element and no initializer, that
+element is returned unchanged.
+
+### `partial_call` (lines 200 to 500)
+
+<CpyLink path="Modules/_functoolsmodule.c" lines="200-500" />
+
+A `partial` object stores three fields: `fn` (the wrapped callable), `args`
+(a tuple of pre-bound positional arguments), and `kw` (a dict of pre-bound
+keyword arguments).
+
+`partial_call` prepends the stored positional args and merges the stored kwargs
+with any new kwargs supplied at call time:
+
+```c
+static PyObject *
+partial_call(partialobject *pto, PyObject *args, PyObject *kw)
+{
+    PyObject *ret, *pargs, *pkw;
+
+    /* Prepend stored args. */
+    if (PyTuple_GET_SIZE(pto->args) == 0)
+        pargs = args;
+    else if (PyTuple_GET_SIZE(args) == 0)
+        pargs = pto->args;
+    else
+        pargs = PySequence_Concat(pto->args, args);
+
+    /* Merge stored kwargs. */
+    if (PyDict_GET_SIZE(pto->kw) == 0)
+        pkw = kw;
+    else {
+        pkw = PyDict_Copy(pto->kw);
+        if (kw != NULL && PyDict_Merge(pkw, kw, 1) != 0) { ... }
+    }
+
+    ret = PyObject_Call(pto->fn, pargs, pkw);
+    ...
+    return ret;
+}
+```
+
+`partial.__reduce__` and `partial.__setstate__` implement pickling by storing
+`(fn, args, kw, namespace)` as a four-tuple.
+
+### `lru_cache` lookup and eviction (lines 620 to 900)
+
+<CpyLink path="Modules/_functoolsmodule.c" lines="620-900" />
+
+The `lru_cache` wrapper object holds:
+
+- `cache` — a Python dict mapping cache keys to `lru_list_elem` nodes.
+- `root` — a sentinel `lru_list_elem` whose `next` is the LRU (oldest) entry
+  and whose `prev` is the MRU (most recently used) entry, forming a circular
+  doubly-linked list.
+- `maxsize`, `hits`, `misses`, `currsize` — statistics.
+- `lock` — a `threading.RLock` for thread safety.
+
+The cache key is a tuple constructed from the positional args plus sorted
+keyword-argument items, so `f(a=1, b=2)` and `f(b=2, a=1)` share a cache entry.
+
+```c
+static PyObject *
+lru_cache_call(lru_cache_object *self, PyObject *args, PyObject *kwds)
+{
+    PyObject *key = make_key(self, args, kwds);
+    ...
+    link = PyDict_GetItemWithError(self->cache, key);
+    if (link != NULL) {
+        /* Cache hit: move node to MRU position. */
+        lru_cache_extricate_link(link);
+        lru_cache_append_link(self, link);
+        self->hits++;
+        result = ((lru_list_elem *)link)->result;
+        Py_INCREF(result);
+    } else {
+        /* Cache miss: compute, insert, possibly evict LRU. */
+        result = PyObject_Call(self->func, args, kwds);
+        ...
+        if (self->maxsize > 0 && self->currsize == self->maxsize) {
+            /* Evict LRU: self->root.next */
+            lru_cache_evict_lru(self);
+        }
+        ...
+        self->misses++;
+    }
+    ...
+}
+```
+
+`lru_cache_extricate_link` and `lru_cache_append_link` do pointer surgery on
+the doubly-linked list in O(1). The full list traversal is never needed for
+normal hit/miss/evict paths.
+
+## gopy mirror
+
+`module/functools/module.go`. `partial` maps to a Go struct with `fn`, `args`,
+`kw` fields. The LRU cache uses a Go `map` for O(1) lookup and a doubly-linked
+list struct for eviction order. `sync.Mutex` replaces the CPython `RLock`.
+
+## CPython 3.14 changes
+
+`lru_cache` has been a C type since 3.8. The per-interpreter state struct
+(`_functools_state`) was added in 3.12 to eliminate module-level globals. The
+`partial.__or__` operator (`|`) for function composition is pure Python in
+`Lib/functools.py` and not implemented here.

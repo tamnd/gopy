@@ -1,0 +1,134 @@
+---
+title: Objects/iterobject.c
+description: Sequence iterator and callable iterator objects, including PySeqIter_New, PyCallIter_New, and the shared length-hint protocol.
+cpython_path: Objects/iterobject.c
+cpython_version: "3.14"
+lines: 250
+status: annotated
+ported_to: objects/iter.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Objects/iterobject.c`
+
+<CpyLink path="Objects/iterobject.c" />
+
+Two concrete iterator types live here. `PySeqIter_Type` wraps any object
+whose type implements `sq_item` (the sequence-item slot): it stores the
+object and a monotonically increasing index and calls
+`PySequence_GetItem(seq, index++)` on each `next()`. When `GetItem` raises
+`IndexError` the iterator treats that as exhaustion and clears the error.
+
+`PyCallIter_Type` wraps a zero-argument callable and a sentinel: on each
+`next()` it calls the callable and compares the result to the sentinel via
+`PyObject_RichCompareBool(..., Py_EQ)`; equality stops iteration. This is
+the mechanism behind `iter(callable, sentinel)` (the two-argument form of
+the built-in `iter`). Both types implement `__length_hint__` so that
+`operator.length_hint()` and pre-allocation hints in `list()` work
+correctly.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Objects/iterobject.c" lines="1-50">1-50</Cpy> | `PySeqIter_New`, `iter_dealloc`, `iter_traverse` | Allocate a sequence iterator, release it, GC traversal. | `objects/iter.go:NewSeqIter` |
+| <Cpy path="Objects/iterobject.c" lines="51-120">51-120</Cpy> | `iter_iternext`, `iter_len` | Advance the sequence iterator by calling `PySequence_GetItem`; `__length_hint__` via `sq_length`. | `objects/iter.go:(*SeqIter).Next` |
+| <Cpy path="Objects/iterobject.c" lines="121-160">121-160</Cpy> | `PySeqIter_Type` | Type object for sequence iterators: `tp_iter` returns self, `tp_iternext = iter_iternext`. | `objects/iter.go:SeqIterType` |
+| <Cpy path="Objects/iterobject.c" lines="161-200">161-200</Cpy> | `PyCallIter_New`, `calliter_dealloc`, `calliter_traverse` | Allocate a callable iterator storing callable + sentinel; release and GC traversal. | `objects/iter.go:NewCallIter` |
+| <Cpy path="Objects/iterobject.c" lines="201-250">201-250</Cpy> | `calliter_iternext`, `PyCallIter_Type` | Call `it_callable()`, compare result to sentinel; type object definition. | `objects/iter.go:(*CallIter).Next` |
+
+## Reading
+
+### Sequence iterator (lines 1 to 160)
+
+<CpyLink path="Objects/iterobject.c" lines="1-160" />
+
+`PySeqIter_New` allocates a `seqiterobject`, takes a reference to the
+sequence, and sets `it_index = 0`. `iter_iternext` is the workhorse:
+
+```c
+static PyObject *
+iter_iternext(PyObject *iterator)
+{
+    seqiterobject *it = (seqiterobject *)iterator;
+    PyObject *seq = it->it_seq;
+    PyObject *result;
+
+    if (seq == NULL)
+        return NULL;
+
+    result = PySequence_GetItem(seq, it->it_index);
+    if (result != NULL) {
+        ++it->it_index;
+        return result;
+    }
+    if (PyErr_ExceptionMatches(PyExc_StopIteration)
+        || PyErr_ExceptionMatches(PyExc_IndexError))
+    {
+        PyErr_Clear();
+        Py_CLEAR(it->it_seq);
+    }
+    return NULL;
+}
+```
+
+Two exception types signal exhaustion: `IndexError` (the historical
+sequence protocol) and `StopIteration` (for objects that have already
+been adapted to raise `StopIteration` directly). After exhaustion,
+`it_seq` is cleared to release the reference and to mark the iterator
+as finished, so subsequent calls return NULL immediately without calling
+`PySequence_GetItem` again.
+
+`iter_len` implements `__length_hint__`: it calls `PySequence_Size` on
+the underlying sequence and subtracts `it_index`. If `PySequence_Size`
+returns -1 (the sequence does not know its length), `iter_len` returns
+`PY_ITERSIZEUNKNOWN` (-1), which `operator.length_hint` treats as an
+unknown hint.
+
+### Callable iterator (lines 161 to 250)
+
+<CpyLink path="Objects/iterobject.c" lines="161-250" />
+
+`PyCallIter_New` stores the callable and sentinel and performs no
+validation beyond type-checking that `callable` is actually callable:
+
+```c
+PyObject *
+PyCallIter_New(PyObject *callable, PyObject *sentinel)
+{
+    calliterobject *it;
+    it = PyObject_GC_New(calliterobject, &PyCallIter_Type);
+    if (it == NULL)
+        return NULL;
+    it->it_callable = Py_NewRef(callable);
+    it->it_sentinel = Py_NewRef(sentinel);
+    _PyObject_GC_TRACK(it);
+    return (PyObject *)it;
+}
+```
+
+`calliter_iternext` calls `it->it_callable` with no arguments via
+`PyObject_CallNoArgs`, then compares the result to `it->it_sentinel`
+using `PyObject_RichCompareBool(..., Py_EQ)`. If they compare equal, the
+sentinel is cleared, the callable is cleared, and NULL is returned
+(exhaustion). If the callable raises any exception it propagates as-is;
+the caller of `iter()` is expected to arrange for the sentinel to be
+raised on exhaustion, not an exception.
+
+## gopy mirror
+
+`objects/iter.go`. `seqiterobject` maps to `SeqIter` with fields
+`ItSeq *Object` and `ItIndex int`. `calliterobject` maps to `CallIter`
+with fields `ItCallable *Object` and `ItSentinel *Object`. Both
+`(*SeqIter).Next` and `(*CallIter).Next` return `(Object, error)` with
+`nil, nil` signalling exhaustion (matching CPython's NULL + no-exception
+convention). `__length_hint__` is the `LengthHint() int` method on
+`SeqIter`.
+
+## CPython 3.14 changes
+
+Both iterator types are stable and unchanged since Python 3.0. The
+`__length_hint__` method (`iter_len`) was added in 3.4 (PEP 424). The
+only 3.14-era change is use of `Py_NewRef` and `Py_CLEAR` macros in
+place of the older `Py_INCREF`/`Py_XDECREF` style.

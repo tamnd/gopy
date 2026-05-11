@@ -1,0 +1,162 @@
+---
+title: Include/internal/pycore_code.h
+description: Internal code-object details — _Py_CODEUNIT layout, adaptive cache, location-table iteration, and per-instruction monitoring bitmasks.
+cpython_path: Include/internal/pycore_code.h
+cpython_version: "3.14"
+lines: 300
+status: annotated
+ported_to: objects/code.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Include/internal/pycore_code.h`
+
+<CpyLink path="Include/internal/pycore_code.h" />
+
+The private extension of `PyCodeObject`. The public `Include/code.h`
+exposes only the stable ABI surface; this header carries everything the
+interpreter and optimizer need but extensions must not touch: the 16-bit
+instruction word layout, the inline specialization cache, the PEP 657
+location table, and the PEP 669 monitoring bitmasks.
+
+Three concerns are interleaved here: the *static* code object
+(immutable after `co_code` is written), the *adaptive* specialization
+overlay that the tier-1 optimizer writes into the copy-on-write
+instruction array, and the *monitoring* state that `sys.monitoring`
+attaches to individual instructions at runtime.
+
+gopy mirrors all three in `objects/code.go`, using Go slices for the
+instruction array and byte slices for the location and monitoring
+tables. The adaptive cache entries are represented as `[4]uint16`
+arrays aligned to the instruction they follow.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Include/internal/pycore_code.h" lines="1-40">1-40</Cpy> | `_Py_CODEUNIT` / `_Py_SET_OPCODE` / `_Py_SET_OPARG` | 16-bit instruction word: low byte opcode, high byte arg; mutated by the specializing interpreter. | `objects/code.go` |
+| <Cpy path="Include/internal/pycore_code.h" lines="41-80">41-80</Cpy> | `ADAPTIVE_CACHE_SIZE` / `SpecializedCacheEntry` | Number of inline cache 16-bit words per specializable slot; union over all specialized forms. | `objects/code.go` |
+| <Cpy path="Include/internal/pycore_code.h" lines="81-120">81-120</Cpy> | `_PyCodeObject_CAST` / `_PyCode_CODE` | Safe cast macro and pointer to the instruction array start. | `objects/code.go` |
+| <Cpy path="Include/internal/pycore_code.h" lines="121-180">121-180</Cpy> | `_PyCoLocationInfo` / `_PyCode_InitAddressRange` / `_PyLineTable_NextAddressRange` | PEP 657 packed location entry and the iterator API for the co_linetable column/line data. | `objects/code.go` |
+| <Cpy path="Include/internal/pycore_code.h" lines="181-220">181-220</Cpy> | `_PyCode_GetVarcount` / `_PyCode_GetFirstFree` | Fast accessors for `co_nlocalsplus` partitioned into local, cell, and free variable counts. | `objects/code.go` |
+| <Cpy path="Include/internal/pycore_code.h" lines="221-260">221-260</Cpy> | `_PyCoMonitoringData` | Per-instruction event bitmasks for `sys.monitoring` (PEP 669): `local_monitors`, `per_instruction_opcodes`, `per_instruction_tools`. | `objects/code.go` |
+| <Cpy path="Include/internal/pycore_code.h" lines="261-300">261-300</Cpy> | `_PyCode_GetFirstFree` / `_PyCode_ConstantKey` / `_PyCode_Quicken` | Remaining accessors: free-var offset, constant key for intern table, and the "quicken" step that converts `RESUME` to its adaptive form. | `objects/code.go` |
+
+## Reading
+
+### `_Py_CODEUNIT` layout (lines 1 to 40)
+
+<CpyLink path="Include/internal/pycore_code.h" lines="1-40" />
+
+```c
+typedef uint16_t _Py_CODEUNIT;
+
+static inline uint8_t _Py_OPCODE(_Py_CODEUNIT word) {
+    return (uint8_t)(word & 0xff);
+}
+static inline uint8_t _Py_OPARG(_Py_CODEUNIT word) {
+    return (uint8_t)(word >> 8);
+}
+static inline void _Py_SET_OPCODE(_Py_CODEUNIT *word, uint8_t opcode) {
+    *word = (*word & 0xff00) | opcode;
+}
+static inline void _Py_SET_OPARG(_Py_CODEUNIT *word, uint8_t oparg) {
+    *word = (*word & 0x00ff) | ((uint16_t)oparg << 8);
+}
+```
+
+Each instruction is one `uint16_t`: the low byte is the opcode, the
+high byte is the immediate argument. Multi-word instructions (those
+with `EXTENDED_ARG` prefixes) are stored as two consecutive units. The
+specializing interpreter mutates `opcode` in-place on the copy of the
+instruction array it owns (the "quickened" copy), changing e.g.
+`LOAD_ATTR` to `LOAD_ATTR_MODULE` without touching the canonical
+`co_code_adaptive` bytes.
+
+The `ADAPTIVE_CACHE_SIZE` constant (typically 4) tells the optimizer
+how many consecutive `_Py_CODEUNIT` words follow each specializable
+instruction in the adaptive array. These words are the inline cache:
+typed pointers and version tags for the most-recently-seen type. When
+the cache hits, the specialized instruction can perform a type-check
+and a direct slot lookup with no dictionary traversal.
+
+In gopy, `objects/code.go` stores the instruction array as `[]uint16`
+and exposes `Opcode(i int) byte` / `Oparg(i int) byte` accessors that
+mirror the C inlines above.
+
+### Location-table iteration (lines 121 to 180)
+
+<CpyLink path="Include/internal/pycore_code.h" lines="121-180" />
+
+```c
+typedef struct {
+    int ar_start;
+    int ar_end;
+    int ar_line;
+    int ar_col;
+    int ar_end_line;
+    int ar_end_col;
+} PyCodeAddressRange;
+
+extern void _PyCode_InitAddressRange(
+    PyCodeObject *co, PyCodeAddressRange *bounds);
+
+extern int _PyLineTable_NextAddressRange(PyCodeAddressRange *range);
+```
+
+`co_linetable` encodes PEP 657 source-position data in a variable-
+length byte stream. Each entry covers a half-open range of instruction
+offsets and stores start line, start column, end line, and end column
+as deltas. `_PyCode_InitAddressRange` positions the iterator at the
+beginning of `co_linetable`. Repeated calls to
+`_PyLineTable_NextAddressRange` advance it, filling `ar_start`,
+`ar_end`, `ar_line`, `ar_col`, `ar_end_line`, `ar_end_col` on each
+step.
+
+The encoding uses a tag byte to select a compact form for common
+patterns (same line, one-char token, etc.) so the table is typically
+much smaller than one entry per instruction. The eval loop consults
+this table only when tracing is enabled or an exception is being
+formatted; normal execution ignores it entirely.
+
+In gopy, `objects/code.go` holds `CoLocationInfo` as a byte slice and
+iterates it with `NextAddressRange(*AddressRange) bool`, a direct port
+of the C iterator.
+
+### Monitoring bitmasks (lines 221 to 260)
+
+<CpyLink path="Include/internal/pycore_code.h" lines="221-260" />
+
+```c
+typedef struct _PyCoMonitoringData {
+    /* Bitmask: which monitoring tools are active for this code object. */
+    uint8_t  active_monitors;
+    /* Per-instruction bitmask arrays, allocated lazily. */
+    uint8_t *local_monitors;           /* len == co_firstlineno */
+    uint8_t *per_instruction_opcodes;  /* len == co_code length */
+    uint8_t *per_instruction_tools;    /* len == co_code length */
+} _PyCoMonitoringData;
+```
+
+PEP 669 (`sys.monitoring`) allows up to 8 simultaneous monitoring
+tools. Each tool registers a bitmask of event types it cares about.
+`active_monitors` is the OR of all registered tool masks. On each
+instruction that might fire an event, the eval loop checks
+`active_monitors` first; if it is zero the overhead is a single byte
+load and branch.
+
+`local_monitors` is indexed by line number and holds per-line event
+masks. `per_instruction_opcodes` and `per_instruction_tools` are
+indexed by instruction offset; `per_instruction_opcodes` stores the
+original opcode that was overwritten by a breakpoint, and
+`per_instruction_tools` records which tools set that breakpoint.
+
+All three arrays are heap-allocated lazily when the first monitoring
+tool attaches. A code object with no active tools carries `NULL`
+pointers and a zero `active_monitors`, so the monitoring fast-path adds
+no allocation overhead for normal execution.
+
+In gopy, `objects/code.go` wraps `_PyCoMonitoringData` as a
+`MonitoringData` struct with `[]byte` slices for the three arrays and
+an `ActiveMonitors uint8` field.

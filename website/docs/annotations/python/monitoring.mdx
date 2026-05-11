@@ -1,0 +1,169 @@
+---
+title: Python/instrumentation.c
+description: PEP 669 sys.monitoring — event registration, bytecode rewriting, and callback dispatch for up to six simultaneous tools.
+cpython_path: Python/instrumentation.c
+cpython_version: "3.14"
+lines: 3174
+status: annotated
+ported_to: vm/eval_gen.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Python/instrumentation.c`
+
+<CpyLink path="Python/instrumentation.c" />
+
+The implementation of `sys.monitoring`, the low-overhead instrumentation
+API introduced by PEP 669 in CPython 3.12. The old `sys.settrace` /
+`sys.setprofile` story required one callback per instruction; monitoring
+replaces it with event-bit toggles and shadow bytecode, so the interpreter
+pays near-zero cost when no tool is active.
+
+Up to six tools may monitor a process simultaneously. Each tool occupies a
+slot (IDs 0-5 are user tools; IDs 6-7 are reserved for the debugger and
+the profiler). Every tool registers interest in a set of events via
+`sys.monitoring.set_events`. The runtime tracks per-code-object, per-tool
+event masks in `PyCodeObject.co_monitoring`; a global active-events union
+drives whether the shadow-bytecode pass runs at all.
+
+When at least one event is enabled for a code object, `_Py_Instrument`
+rewrites the bytecode: original opcodes whose event bits are set are
+replaced by their `INSTRUMENTED_*` counterparts. The original opcode is
+saved in a parallel `_co_monitoring->lines` array so the shadow copy can
+be undone. At runtime, an `INSTRUMENTED_*` opcode calls
+`_Py_call_instrumentation`, which looks up the registered callback for each
+active tool, invokes it, and then re-dispatches to the original opcode.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Python/instrumentation.c" lines="1-120">1-120</Cpy> | Includes, constants, `_Py_MONITORING_*` macros | Event-bit definitions, tool-count limits, local macros. | `vm/eval_gen.go` |
+| <Cpy path="Python/instrumentation.c" lines="121-350">121-350</Cpy> | `PyMonitoringState`, `_PyCoMonitoringData` | Per-code monitoring state: event masks, tool-callback tables, saved opcodes. | `vm/eval_gen.go:MonitoringState` |
+| <Cpy path="Python/instrumentation.c" lines="351-650">351-650</Cpy> | `_Py_Instrument` | Rewrites a code object's bytecode to insert `INSTRUMENTED_*` shadow instructions for active events. | `vm/eval_gen.go:instrument` |
+| <Cpy path="Python/instrumentation.c" lines="651-950">651-950</Cpy> | `_Py_call_instrumentation` / `_Py_call_instrumentation_arg` | Dispatched from `INSTRUMENTED_*` opcodes; iterates active tools, calls registered callbacks, re-dispatches the original opcode. | `vm/eval_gen.go:callInstrumentation` |
+| <Cpy path="Python/instrumentation.c" lines="951-1400">951-1400</Cpy> | `_PyMonitoring_SetEvents` / `_PyMonitoring_SetLocalEvents` | Enable or disable event bits for a tool globally or per code object; triggers `_Py_Instrument` on affected code objects. | `vm/eval_gen.go:SetEvents` |
+| <Cpy path="Python/instrumentation.c" lines="1401-1800">1401-1800</Cpy> | `_PyMonitoring_FireCallEvent` / `_PyMonitoring_FireReturnEvent` / `_PyMonitoring_FireYieldEvent` | High-level fire helpers called from opcode bodies; check the event mask before hitting `_Py_call_instrumentation`. | `vm/eval_gen.go:FireCallEvent` |
+| <Cpy path="Python/instrumentation.c" lines="1801-2500">1801-2500</Cpy> | `_PyMonitoring_FireLineEvent` / `_PyMonitoring_FireJumpEvent` / `_PyMonitoring_FireBranchEvent` | Line-granularity and control-flow events; used by `INSTRUMENTED_LINE` and related shadow opcodes. | `vm/eval_gen.go:FireLineEvent` |
+| <Cpy path="Python/instrumentation.c" lines="2501-3174">2501-3174</Cpy> | `sys.monitoring` module methods, `PyUnstable_MonitoringScope_*` | Python-visible API (`set_events`, `register_callback`, `get_events`, etc.) and the `MonitoringScope` context manager. | `vm/eval_gen.go:monitoringModule` |
+
+## Reading
+
+### `_Py_Instrument` bytecode rewriting (lines 351 to 650)
+
+<CpyLink path="Python/instrumentation.c" lines="351-650" />
+
+`_Py_Instrument` is the function that actually modifies a code object's
+bytecode array. It is called whenever `_PyMonitoring_SetEvents` changes the
+active event mask for a code object.
+
+```c
+void
+_Py_Instrument(PyCodeObject *code, PyInterpreterState *interp)
+{
+    if (is_version_up_to_date(code, interp)) {
+        assert(!instrumentation_cross_checks(interp, code));
+        return;
+    }
+    ...
+    _Py_CODEUNIT *instructions = _PyCode_CODE(code);
+    for (int i = 0; i < code->co_size; i++) {
+        int opcode = _Py_GetBaseOpcode(code, i);
+        if (opcode == RESUME) { i++; continue; }
+        int base_opcode = _PyOpcode_Despecialized[opcode];
+        int instrumented = INSTRUMENTED_OPCODE(base_opcode);
+        if (instrumented == -1) {
+            /* no shadow counterpart exists */
+        }
+        else if (should_instrument(interp, code, i)) {
+            SET_OPCODE(instructions + i, instrumented);
+        }
+        else {
+            SET_OPCODE(instructions + i, _Py_GetBaseOpcode(code, i));
+        }
+    }
+}
+```
+
+`INSTRUMENTED_OPCODE` maps every instrumentable opcode to its shadow
+counterpart (e.g. `CALL` to `INSTRUMENTED_CALL`). `should_instrument`
+checks the union of all tool event masks for that instruction offset against
+the event bits for the base opcode. The original opcode is preserved in the
+`_PyCoMonitoringData->lines` side table so that `_Py_GetBaseOpcode` can
+retrieve it even after the bytecode array has been patched.
+
+The version counter (`co_monitoring->version`) is compared against the
+interpreter's global `monitoring_version` to skip the rewrite when nothing
+has changed. This makes `_Py_Instrument` safe to call on every function
+entry without performance cost.
+
+### `_Py_call_instrumentation` callback dispatch (lines 651 to 950)
+
+<CpyLink path="Python/instrumentation.c" lines="651-950" />
+
+Every `INSTRUMENTED_*` opcode handler in `generated_cases.c.h` calls this
+function before executing the original opcode's logic.
+
+```c
+int
+_Py_call_instrumentation(PyThreadState *tstate, int event,
+                         _PyInterpreterFrame *frame, _Py_CODEUNIT *instr,
+                         PyObject *arg)
+{
+    PyInterpreterState *interp = tstate->interp;
+    int offset = (int)(instr - _PyCode_CODE(frame->f_code));
+    uint8_t tools = get_tools_for_instruction(frame->f_code, interp, offset, event);
+    while (tools) {
+        int tool = tools & (-tools);   /* lowest set bit */
+        tools ^= tool;
+        int tool_id = __builtin_ctz(tool);
+        PyObject *callback = interp->monitoring.tools[tool_id].callables[event];
+        if (callback == NULL) continue;
+        int res = call_one_instrument(tstate, frame, instr, event, tool_id, arg, callback);
+        if (res != 0) {
+            return res;
+        }
+    }
+    return 0;
+}
+```
+
+The tool bitmask for an instruction is looked up from the per-code
+`_PyCoMonitoringData` table. Iterating via `tool & (-tool)` isolates each
+active tool in turn without a branch per slot. `call_one_instrument`
+constructs the callback arguments (code object, instruction offset, event
+argument), calls the Python callback, then checks for a `DISABLE` return
+value that removes the event for this tool at this offset without going
+through `set_events` again.
+
+### `_PyMonitoring_SetEvents` (lines 951 to 1400)
+
+<CpyLink path="Python/instrumentation.c" lines="951-1400" />
+
+```c
+int
+_PyMonitoring_SetEvents(int tool_id, _PyMonitoringEventSet events)
+{
+    PyInterpreterState *interp = _PyInterpreterState_GET();
+    assert(0 <= tool_id && tool_id < PY_MONITORING_TOOL_IDS);
+    interp->monitoring.tools[tool_id].events = events;
+    _PyMonitoringEventSet new_events =
+        get_global_events_union(interp);
+    interp->monitoring.events = new_events;
+    return update_instrumentation_data(interp, new_events);
+}
+```
+
+After storing the tool's requested event set, `get_global_events_union`
+recomputes the OR of all six tool masks. If the union changes,
+`update_instrumentation_data` iterates every live code object reachable
+from the interpreter's `co_monitoring` chain and calls `_Py_Instrument` on
+each. This is the potentially expensive step: modifying events forces a
+scan of all loaded code. The cost is paid once per `set_events` call, not
+per instruction.
+
+`_PyMonitoring_SetLocalEvents` is the per-code-object variant. It stores
+the requested mask into the code object's own `_PyCoMonitoringData` instead
+of the interpreter-wide table, then calls `_Py_Instrument` on that single
+code object.

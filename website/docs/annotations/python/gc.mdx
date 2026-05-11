@@ -1,0 +1,174 @@
+---
+title: Python/gc.c
+description: Tri-color mark-sweep cycle collector. Generational with three generations; identifies and collects reference cycles unreachable from GC roots.
+cpython_path: Python/gc.c
+cpython_version: "3.14"
+lines: 2473
+status: annotated
+ported_to: gc/
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Python/gc.c`
+
+<CpyLink path="Python/gc.c" />
+
+CPython uses reference counting for most object lifetime management,
+but reference cycles between objects prevent the refcount from reaching
+zero. `gc.c` implements a supplementary cycle collector. It maintains
+three generations (gen 0/1/2) as doubly-linked `PyGC_Head` lists.
+Collection proceeds in three phases: subtract internal references, find
+unreachable objects, call finalizers and finalize, then sweep. The
+stop-the-world GIL-based collector in this file differs from the
+free-threaded collector (`gc_free_threading.c`).
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Python/gc.c" lines="62-145">62-145</Cpy>      | `gc_is_collecting`, `gc_get_refs`, `gc_set_refs`, `gc_reset_refs`, `gc_decref`, `gc_old_space`, `gc_flip_old_space` | Per-object GC flag accessors using bits in `ob_gc_bits`. | `gc/gc_bits.go` |
+| <Cpy path="Python/gc.c" lines="155-247">155-247</Cpy>    | `_PyGC_InitState`, `_PyGC_Init` | Initialize the three generation linked lists. | `gc/gc.go:Init` |
+| <Cpy path="Python/gc.c" lines="249-393">249-393</Cpy>    | `gc_list_init`, `gc_list_is_empty`, `gc_list_append`, `gc_list_remove`, `gc_list_move`, `gc_list_merge`, `gc_list_size`, `gc_list_clear_collecting` | Doubly-linked list operations on `PyGC_Head`. | `gc/gc_list.go` |
+| <Cpy path="Python/gc.c" lines="437-526">437-526</Cpy>    | `validate_list`, `validate_spaces`, `update_refs` | Debug validation and reference-copy phase. | `gc/gc_validate.go` |
+| <Cpy path="Python/gc.c" lines="527-591">527-591</Cpy>    | `visit_decref`, `_PyGC_VisitStackRef`, `_PyGC_VisitFrameStack`, `subtract_refs` | Subtract internal references phase. | `gc/gc_mark.go:subtractRefs` |
+| <Cpy path="Python/gc.c" lines="593-757">593-757</Cpy>    | `visit_reachable`, `move_unreachable` | Mark reachable objects; isolate the unreachable set. | `gc/gc_mark.go:moveUnreachable` |
+| <Cpy path="Python/gc.c" lines="758-834">758-834</Cpy>    | `untrack_tuples`, `has_legacy_finalizer`, `move_legacy_finalizers` | Finalizer detection and segregation. | `gc/gc_finalizer.go` |
+| <Cpy path="Python/gc.c" lines="835-994">835-994</Cpy>    | `finalize_garbage`, `collect_legacy_finalizers`, `handle_weakrefs` | Weak reference and finalizer callbacks. | `gc/gc_finalizer.go:finalizeGarbage` |
+| <Cpy path="Python/gc.c" lines="995-1200">995-1200</Cpy>  | `debug_cycle`, `gc_collect_main` | Main collection driver. | `gc/gc_collect.go:collectMain` |
+| <Cpy path="Python/gc.c" lines="1200-1600">1200-1600</Cpy>| `gc_collect_young`, `gc_collect_full_heap`, `_PyGC_Collect*` | Generation promotion and full-heap collection. | `gc/gc_collect.go` |
+| <Cpy path="Python/gc.c" lines="1600-2473">1600-2473</Cpy>| `gc_get_count`, `gc_set_threshold`, module methods, `PyGC_*` public API, `_PyObject_GC_New/NewVar/Resize/Track/UnTrack/Del` | Public API and object allocation hooks. | `gc/gc_public.go` |
+
+## Reading
+
+### GC header and generations (lines 62 to 247)
+
+<CpyLink path="Python/gc.c" lines="62-247" />
+
+Every tracked object has a `PyGC_Head` prepended before `ob_refcnt`.
+The `ob_gc_bits` field stores the "collecting" flag, the
+old-space/new-space bit for generational identity, and a reference
+count copy used during the mark phase. `gc_reset_refs` copies the
+live `ob_refcnt` into the gc bits at the start of collection:
+
+```c
+static inline void
+gc_reset_refs(PyGC_Head *g, Py_ssize_t refs)
+{
+    g->_gc_prev = (g->_gc_prev & _PyGC_PREV_MASK_FINALIZED)
+        | PREV_MASK_COLLECTING
+        | ((uintptr_t)(refs) << _PyGC_PREV_SHIFT);
+}
+```
+
+Three generations are doubly-linked lists. Newly allocated objects
+enter gen 0. Objects that survive a collection are promoted to gen 1,
+and survivors of gen 1 are promoted to gen 2. `_PyGC_InitState`
+initializes each generation's sentinel node and zeroes its threshold
+and count. `_PyGC_Init` then loads the default thresholds (700, 10, 10)
+from the interpreter config.
+
+### Mark phase: subtract and visit (lines 527 to 757)
+
+<CpyLink path="Python/gc.c" lines="527-757" />
+
+Collection uses a two-pass mark algorithm. First, `subtract_refs`
+walks every container in the target generation and calls `tp_traverse`,
+decrementing the gc_ref copy for each internal reference found:
+
+```c
+static int
+visit_decref(PyObject *op, void *parent)
+{
+    if (_PyObject_IS_GC(op)) {
+        PyGC_Head *gc = AS_GC(op);
+        if (gc_is_collecting(gc)) {
+            gc_decref(gc);
+        }
+    }
+    return 0;
+}
+```
+
+After this pass, objects with gc_ref == 0 are unreachable from
+anything outside the generation. Then `move_unreachable` walks again.
+Any object still reachable from a non-zero gc_ref object is moved back
+into the "reachable" list by following transitive references via
+`visit_reachable`. What remains in the unreachable list is the
+candidate garbage set.
+
+### Finalizer handling (lines 758 to 834)
+
+<CpyLink path="Python/gc.c" lines="758-834" />
+
+Objects with `__del__` methods cannot be collected immediately. They
+are moved to the `finalizers` list or finalized in order if their
+`tp_finalize` slot supports it. `has_legacy_finalizer` distinguishes
+the old `tp_del` from the modern `tp_finalize`:
+
+```c
+static int
+has_legacy_finalizer(PyObject *op)
+{
+    return Py_TYPE(op)->tp_finalize != NULL;
+}
+```
+
+`move_legacy_finalizers` moves objects with legacy finalizers (and
+everything they reference) out of the unreachable set into a
+`finalizers` list. Legacy finalizers are called, then the formerly
+unreachable objects are re-examined. `untrack_tuples` removes tuples
+that contain no mutable references from GC tracking entirely, since
+pure-data tuples cannot form cycles.
+
+### `gc_collect_main` (lines 995 to 1200)
+
+<CpyLink path="Python/gc.c" lines="995-1200" />
+
+The collection driver. It merges younger generations into the target
+generation, runs the mark/subtract/move-unreachable pipeline, handles
+finalizers and weak references, sweeps, and promotes survivors:
+
+```c
+static Py_ssize_t
+gc_collect_main(PyThreadState *tstate, int generation,
+                _PyGC_Reason reason)
+{
+    ...
+    /* merge younger generations with one we are currently collecting */
+    for (i = 0; i < generation; i++) {
+        gc_list_merge(GEN_HEAD(gcstate, i), &unreachable);
+    }
+    ...
+    subtract_refs(&young);
+    gc_list_init(&unreachable);
+    move_unreachable(&young, &unreachable);
+    ...
+}
+```
+
+The `n_collections` counter per generation triggers inclusion of the
+next generation: gen 1 collects every 10 gen-0 collections, gen 2
+every 10 gen-1 collections (default thresholds 700/10/10). After
+collection, live objects in the target generation are left in place;
+anything from younger generations that survived is promoted by leaving
+it in the merged list.
+
+## Notes for the gopy mirror
+
+`gc/gc.go` mirrors this file. gopy uses Go's GC for most memory
+management, so the Python-level `gc` module is shimmed at the
+collection-trigger level. Objects that participate in Python reference
+cycles still need the `PyGC_Head` tracking metadata. The
+`_PyObject_GC_Track` and `_PyObject_GC_UnTrack` calls are preserved
+for compatibility with extension-object conventions.
+
+## CPython 3.14 changes worth noting
+
+In the GIL-enabled build `gc.c` is used as before. The free-threaded
+build (`Py_GIL_DISABLED`) uses `gc_free_threading.c` instead, which
+has a different incremental algorithm and does not stop the world per
+collection. The old-space/new-space bits (for the young/old collector
+separation introduced experimentally) were stabilized in 3.14 and are
+now the canonical way generational identity is stored in `ob_gc_bits`,
+replacing the previous generation-index stored in `_gc_prev`.

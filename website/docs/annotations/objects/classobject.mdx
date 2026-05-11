@@ -1,0 +1,172 @@
+---
+title: Objects/classobject.c
+description: PyMethodObject (bound method) — construction, vectorcall dispatch, descriptor protocol, and equality semantics.
+cpython_path: Objects/classobject.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+ported_to: objects/method.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Objects/classobject.c`
+
+<CpyLink path="Objects/classobject.c" />
+
+Bound methods and their two siblings: `classmethod` and `staticmethod`. A
+`PyMethodObject` pairs a callable (`im_func`) with the instance it was accessed
+from (`im_self`). The pairing is created lazily by `function.__get__(instance,
+type)` — the function object stored in the class dict is never mutated; a fresh
+`PyMethodObject` is returned on each attribute lookup.
+
+The file also implements `classmethod` and `staticmethod`, the two built-in
+descriptors that alter how `__get__` binds. `classmethod.__get__` passes the
+class rather than the instance; `staticmethod.__get__` returns the wrapped
+function unchanged. Both are handled in `classobject.c` because they share the
+same structural pattern: a thin descriptor wrapper around another callable.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Objects/classobject.c" lines="1-80">1-80</Cpy> | `PyMethod_New`, free-list alloc | Allocate a `PyMethodObject`; uses a per-interpreter free-list for fast recycling of short-lived bound methods. | `objects/method.go:NewBoundMethod` |
+| <Cpy path="Objects/classobject.c" lines="81-160">81-160</Cpy> | `method_getattro`, `method_repr`, `method_hash` | Attribute forwarding to `im_func`; repr as `<bound method T.f of obj>`; hash as XOR of `hash(im_func)` and `hash(im_self)`. | `objects/method.go:boundMethodGetattro` |
+| <Cpy path="Objects/classobject.c" lines="161-220">161-220</Cpy> | `method_richcompare` | Two bound methods compare equal when both `im_func` and `im_self` are equal; ordered comparisons fall back to `im_func` identity. | `objects/method.go` |
+| <Cpy path="Objects/classobject.c" lines="221-300">221-300</Cpy> | `method_call`, `method_vectorcall` | `tp_call` prepends `im_self` to the arg vector then calls `im_func`; the vectorcall path avoids tuple allocation entirely. | `objects/method.go:boundMethodVectorcall` |
+| <Cpy path="Objects/classobject.c" lines="301-400">301-400</Cpy> | `method_descr_get`, `PyMethod_Type` | `__get__` returns `self` unchanged when accessed from an instance; returns an unbound wrapper when accessed from the class. | `objects/method.go:BoundMethodType` |
+| <Cpy path="Objects/classobject.c" lines="401-500">401-500</Cpy> | `classmethod`, `staticmethod`, `PyClassMethod_Type`, `PyStaticMethod_Type` | `classmethod.__get__` binds `type`; `staticmethod.__get__` returns the wrapped function. | `objects/method.go:ClassMethodType`, `objects/method.go:StaticMethodType` |
+
+## Reading
+
+### `PyMethod_New` and the free-list (lines 1 to 80)
+
+<CpyLink path="Objects/classobject.c" lines="1-80" />
+
+`PyMethod_New` is the sole constructor. Every `instance.method` access in the
+interpreter calls it, so allocation speed matters. CPython keeps a singly-linked
+free-list of recycled `PyMethodObject` structs and pops one before falling back
+to `PyObject_GC_New`:
+
+```c
+PyObject *
+PyMethod_New(PyObject *func, PyObject *self)
+{
+    PyMethodObject *im;
+    if (self == NULL) {
+        PyErr_BadInternalCall();
+        return NULL;
+    }
+    im = (PyMethodObject *)free_list;
+    if (im != NULL) {
+        free_list = (PyObject *)(im->im_self);
+        numfree--;
+        (void)PyObject_INIT(im, &PyMethod_Type);
+    }
+    else {
+        im = PyObject_GC_New(PyMethodObject, &PyMethod_Type);
+        if (im == NULL)
+            return NULL;
+    }
+    im->im_weakreflist = NULL;
+    im->im_func = Py_NewRef(func);
+    im->im_self = Py_NewRef(self);
+    im->vectorcall = method_vectorcall;
+    _PyObject_GC_TRACK(im);
+    return (PyObject *)im;
+}
+```
+
+The free-list head is stored in `im_self` of the recycled object, so no extra
+pointer field is needed. `method_dealloc` pushes the object back when the list
+is not full (`numfree < PyMethod_MAXFREELIST`). This recycling matters in tight
+loops such as `for x in items: x.method()` where a fresh bound method is
+created and immediately discarded on every iteration.
+
+### `method_call` and the vectorcall path (lines 221 to 300)
+
+<CpyLink path="Objects/classobject.c" lines="221-300" />
+
+`tp_call` builds a new argument tuple with `im_self` prepended, then delegates
+to `im_func`. The vectorcall path (`method_vectorcall`) avoids this tuple by
+rewriting the stack pointer:
+
+```c
+static PyObject *
+method_vectorcall(PyObject *method, PyObject *const *args,
+                  size_t nargsf, PyObject *kwnames)
+{
+    PyMethodObject *im = (PyMethodObject *)method;
+    PyObject *self = im->im_self;
+
+    Py_ssize_t nargs = PyVectorcall_NARGS(nargsf);
+    /* Use the slot one below args to smuggle self without allocation. */
+    PyObject *const *newargs = args - 1;
+    assert(newargs[0] == self || /* check caller reserved the slot */ 0);
+    ((PyObject **)newargs)[0] = self;   /* overwrite reserved slot */
+    return _PyObject_Vectorcall(im->im_func, newargs, nargs + 1, kwnames);
+}
+```
+
+The caller reserves space for one extra argument before the positional array, so
+`self` can be written there without a heap allocation. This is the same trick
+used by `CALL_METHOD` in the bytecode evaluator: the `LOAD_METHOD` instruction
+leaves a slot open below the stack frame for the bound-method fast path.
+
+### `method_richcompare` (lines 161 to 220)
+
+<CpyLink path="Objects/classobject.c" lines="161-220" />
+
+Two bound methods are equal when both the underlying function and the bound
+instance are equal. This mirrors the documented Python behavior where
+`a.f == a.f` is True but `a.f is a.f` is False (each access creates a new
+object):
+
+```c
+static PyObject *
+method_richcompare(PyObject *self, PyObject *other, int op)
+{
+    PyMethodObject *a, *b;
+    PyObject *res;
+    int eq;
+
+    if ((op != Py_EQ && op != Py_NE) ||
+        !PyMethod_Check(self) ||
+        !PyMethod_Check(other))
+    {
+        Py_RETURN_NOTIMPLEMENTED;
+    }
+    a = (PyMethodObject *)self;
+    b = (PyMethodObject *)other;
+    eq = PyObject_RichCompareBool(a->im_func, b->im_func, Py_EQ);
+    if (eq == 1) {
+        eq = PyObject_RichCompareBool(a->im_self, b->im_self, Py_EQ);
+    }
+    else if (eq < 0)
+        return NULL;
+    if (op == Py_EQ)
+        res = (eq > 0) ? Py_True : Py_False;
+    else
+        res = (eq > 0) ? Py_False : Py_True;
+    return Py_NewRef(res);
+}
+```
+
+`method_hash` follows the same logic: `hash(m)` is `hash(m.__func__) ^ hash(m.__self__)`.
+This makes bound methods usable as dict keys, allowing caches keyed on methods
+to work correctly (provided the instance is hashable).
+
+## gopy mirror
+
+`objects/method.go` for `BoundMethod`, `NewBoundMethod`, `boundMethodVectorcall`,
+`ClassMethod`, and `StaticMethod`. The free-list is not replicated in Go (the
+GC handles short-lived allocations efficiently); `NewBoundMethod` calls the
+allocator directly.
+
+## CPython 3.14 changes
+
+Vectorcall support for bound methods was added in 3.8 (`PY_VECTORCALL_ARGUMENTS_OFFSET`
+convention). `classmethod.__wrapped__` attribute (exposing the wrapped function)
+added in 3.10. `staticmethod.__get__` calling the wrapped descriptor's `__get__`
+when present added in 3.10. The core `PyMethodObject` layout has been stable
+since 2.6.

@@ -1,0 +1,168 @@
+---
+title: Modules/_hashlibmodule.c
+description: C backend for hashlib — wraps OpenSSL EVP_MD_CTX objects as Python hash instances with GIL-releasing update and hex/binary digest.
+cpython_path: Modules/_hashlibmodule.c
+cpython_version: "3.14"
+lines: 1200
+status: annotated
+ported_to: module/hashlib/module.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Modules/_hashlibmodule.c`
+
+<CpyLink path="Modules/_hashlibmodule.c" />
+
+The C backend for `hashlib`. The pure-Python `Lib/hashlib.py` imports this
+module as `_hashlib` and re-exports its objects under the familiar names
+(`hashlib.md5`, `hashlib.sha256`, etc.).
+
+The central type is `EVPobject`, which wraps an OpenSSL `EVP_MD_CTX`
+pointer. Each `EVPobject` instance represents an in-progress hash
+computation: you push data in with `update`, and retrieve the digest with
+`digest` or `hexdigest`. The state is mutable and not thread-safe — callers
+are responsible for locking if the same object is shared across threads.
+
+The module also exposes `_hashlib.new(name, data=b"", *, usedforsecurity=True)`
+to construct a hash object by name, and `_hashlib.openssl_md_meth_names` as
+a frozenset of all algorithm names that the linked OpenSSL library supports.
+
+When OpenSSL is unavailable (rare, usually embedded builds), CPython falls
+back to `Modules/_blake2/` and `Modules/sha*module.c` pure-C
+implementations, but that fallback path is not in this file.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Modules/_hashlibmodule.c" lines="1-80">1-80</Cpy> | includes, `_hashlibstate`, `_hashlib_HASHXOF`, `EVP_MD_CTX` typedefs | Per-interpreter state struct and OpenSSL type aliases. | `module/hashlib/module.go:state` |
+| <Cpy path="Modules/_hashlibmodule.c" lines="80-280">80-280</Cpy> | `EVPobject`, `EVPobject_new`, `EVPobject_dealloc`, `EVPobject_traverse` | Hash-state object wrapping `EVP_MD_CTX *`. Holds `name`, `ctx`, `lock`. | `module/hashlib/module.go:EVPObject` |
+| <Cpy path="Modules/_hashlibmodule.c" lines="280-450">280-450</Cpy> | `EVP_hash`, `_hashlib_HASH_update_impl` | `update(data)` — hashes more data; releases GIL for large inputs. | `module/hashlib/module.go:Update` |
+| <Cpy path="Modules/_hashlibmodule.c" lines="450-620">450-620</Cpy> | `_hashlib_HASH_digest_impl`, `_hashlib_HASH_hexdigest_impl`, `_hashlib_HASH_copy_impl` | `digest()`, `hexdigest()`, and `copy()`. All finalize into a scratch copy so the original state is unchanged. | `module/hashlib/module.go:Digest` |
+| <Cpy path="Modules/_hashlibmodule.c" lines="620-820">620-820</Cpy> | `_hashlib_new_impl`, `EVP_new`, `py_digest_name` | `_hashlib.new(name)` — looks up the algorithm by name via `EVP_get_digestbyname`, allocates and returns an `EVPobject`. | `module/hashlib/module.go:New` |
+| <Cpy path="Modules/_hashlibmodule.c" lines="820-1050">820-1050</Cpy> | `_hashlib_openssl_md_meth_names`, `_hashlib_get_fips_mode`, `_hashlib_compare_digest` | Module-level utilities: algorithm name enumeration, FIPS mode query, and constant-time compare. | `module/hashlib/module.go:AlgorithmsAvailable` |
+| <Cpy path="Modules/_hashlibmodule.c" lines="1050-1200">1050-1200</Cpy> | `_hashlibmodule`, `_hashlib_exec`, `PyInit__hashlib` | Module definition and entry point. Registers `EVPobject` type and module-level functions. | `module/hashlib/module.go:Module` |
+
+## Reading
+
+### `EVPobject` layout (lines 80 to 280)
+
+<CpyLink path="Modules/_hashlibmodule.c" lines="80-280" />
+
+```c
+typedef struct {
+    PyObject_HEAD
+    PyObject          *name;     /* algorithm name as a str, e.g. "sha256" */
+    EVP_MD_CTX        *ctx;      /* OpenSSL digest context — the live state */
+    PyThread_type_lock  lock;    /* NULL unless the object has been shared */
+#ifdef PY_OPENSSL_HAS_SHAKE
+    int                 use_mutex;
+#endif
+} EVPobject;
+```
+
+The `ctx` field is the only mutable state: every call to `update` calls
+`EVP_DigestUpdate(ctx, ...)` in-place. Because `EVP_MD_CTX` is an opaque
+heap struct, `EVPobject_dealloc` must call `EVP_MD_CTX_free` to release it.
+
+`EVPobject` does not subclass any existing Python type; it exposes
+`PyBufferProcs` so that `memoryview(h)` returns the current digest bytes
+without copying.
+
+### `EVP_update` GIL release (lines 280 to 450)
+
+<CpyLink path="Modules/_hashlibmodule.c" lines="280-450" />
+
+The update path releases the GIL when the input is large enough that
+OpenSSL's internal copies would stall other threads:
+
+```c
+static int
+EVP_hash(EVPobject *self, const void *vp, Py_ssize_t len)
+{
+    unsigned int process;
+    const unsigned char *cp = (const unsigned char *)vp;
+
+    while (len > 0) {
+        /* OpenSSL's EVP_DigestUpdate takes an unsigned int, not Py_ssize_t */
+        if (len > (Py_ssize_t)MUNCH_SIZE)
+            process = MUNCH_SIZE;
+        else
+            process = (unsigned int)len;
+        if (!EVP_DigestUpdate(self->ctx, (const void *)cp, process)) {
+            _setException(PyExc_ValueError, ...);
+            return -1;
+        }
+        len -= process;
+        cp  += process;
+    }
+    return 0;
+}
+
+static PyObject *
+_hashlib_HASH_update_impl(EVPobject *self, PyObject *obj)
+{
+    Py_buffer view;
+    if (PyObject_GetBuffer(obj, &view, PyBUF_SIMPLE) < 0) return NULL;
+
+    if (self->lock == NULL && view.len >= HASHXOF_DIGEST_SIZE) {
+        /* Release the GIL for large inputs. */
+        Py_BEGIN_ALLOW_THREADS
+        result = EVP_hash(self, view.buf, view.len);
+        Py_END_ALLOW_THREADS
+    } else {
+        result = EVP_hash(self, view.buf, view.len);
+    }
+    ...
+}
+```
+
+`MUNCH_SIZE` is `INT_MAX` (2^31 - 1) to respect the `unsigned int` argument
+of `EVP_DigestUpdate`. The GIL is released only when the input is large enough
+to make the lock acquisition worth it, currently gated on whether the input
+exceeds the XOF block size. For small inputs the GIL is held throughout to
+avoid the overhead of the Py_BEGIN_ALLOW_THREADS barriers.
+
+### `EVP_digest` finalization (lines 450 to 620)
+
+<CpyLink path="Modules/_hashlibmodule.c" lines="450-620" />
+
+`digest()` must not modify the live `ctx` so that `update` can be called
+again afterwards. It achieves this by copying the context into a temporary:
+
+```c
+static PyObject *
+_hashlib_HASH_digest_impl(EVPobject *self)
+{
+    unsigned int digest_size;
+    unsigned char digest[EVP_MAX_MD_SIZE];
+    EVP_MD_CTX *temp_ctx;
+
+    /* Work on a copy so the original stays live. */
+    temp_ctx = EVP_MD_CTX_new();
+    if (!EVP_MD_CTX_copy_ex(temp_ctx, self->ctx)) { ... }
+
+    if (!EVP_DigestFinal_ex(temp_ctx, digest, &digest_size)) { ... }
+    EVP_MD_CTX_free(temp_ctx);
+
+    return PyBytes_FromStringAndSize((const char *)digest, digest_size);
+}
+```
+
+`hexdigest` calls the same logic and then hex-encodes the resulting bytes
+with `_Py_strhex`. `copy()` calls `EVP_MD_CTX_copy_ex` similarly, but keeps
+the copy alive as a new `EVPobject` rather than finalizing.
+
+`EVP_MAX_MD_SIZE` is 64 bytes (512 bits), which covers SHA-512 and all
+smaller digests. XOF functions (SHAKE128, SHAKE256) use a different path
+that calls `EVP_DigestFinalXOF` with a caller-supplied length.
+
+## CPython 3.14 changes
+
+Python 3.9 added the `usedforsecurity=True` keyword argument to `new` and
+to the constructor functions, allowing FIPS-mode builds to raise an error
+when non-FIPS algorithms are requested in a security context. The
+`_hashlib.compare_digest` function (constant-time comparison) was added in
+3.3 and is unchanged in 3.14. BLAKE2 support moved from this file to a
+separate `Modules/_blake2/` directory in 3.6 and is no longer present here.

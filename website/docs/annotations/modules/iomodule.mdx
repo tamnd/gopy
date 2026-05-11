@@ -1,0 +1,155 @@
+---
+title: Modules/_io/_iomodule.c
+description: Module-init and open() builtin for Python's io module — parses the mode string and selects the right I/O class.
+cpython_path: Modules/_io/_iomodule.c
+cpython_version: "3.14"
+lines: 600
+status: annotated
+ported_to: module/io/module.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Modules/_io/_iomodule.c`
+
+<CpyLink path="Modules/_io/_iomodule.c" />
+
+The `_io` extension is split across several C files under `Modules/_io/`.
+This file, `_iomodule.c`, is the module initializer and the home of the
+`open()` builtin. The other files implement the individual I/O classes:
+
+- `bufferedio.c` — `BufferedReader`, `BufferedWriter`, `BufferedRandom`, `BufferedRWPair`.
+- `bytesio.c` — `BytesIO`.
+- `fileio.c` — `FileIO` (raw unbuffered file).
+- `stringio.c` — `StringIO`.
+- `textio.c` — `TextIOWrapper`.
+
+`_iomodule.c` ties them together: it defines `_PyIO_State` (per-interpreter
+module state holding references to each abstract base type), the `open()`
+implementation, and a companion `open_code()` used by the import system.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Modules/_io/_iomodule.c" lines="1-60">1-60</Cpy> | includes, `_PyIO_State` | Per-interpreter state struct: pointers to the ABC types and `UnsupportedOperation`. | `module/io/module.go:state` |
+| <Cpy path="Modules/_io/_iomodule.c" lines="60-250">60-250</Cpy> | `_io_open_impl` | `open()` builtin: mode parsing and class selection. | `module/io/module.go:Open` |
+| <Cpy path="Modules/_io/_iomodule.c" lines="250-380">250-380</Cpy> | `_io_open_code_impl` | `open_code()` for `importlib`; platform hook. | `module/io/module.go:OpenCode` |
+| <Cpy path="Modules/_io/_iomodule.c" lines="380-480">380-480</Cpy> | `PyDoc_STRVAR` blocks | Module and function docstrings. | — |
+| <Cpy path="Modules/_io/_iomodule.c" lines="480-560">480-560</Cpy> | `_io_exec`, ABC registration | Adds abstract base classes to the module and calls each sub-module's init. | `module/io/module.go:moduleExec` |
+| <Cpy path="Modules/_io/_iomodule.c" lines="560-600">560-600</Cpy> | `PyModuleDef_HEAD_INIT`, `PyInit__io` | Module definition and entry point. | `module/io/module.go:Module` |
+
+## Reading
+
+### `_io_open_impl` mode dispatch (lines 60 to 250)
+
+<CpyLink path="Modules/_io/_iomodule.c" lines="60-250" />
+
+`open()` accepts a `mode` string composed of the flag characters `r`, `w`,
+`a`, `x` (exclusive creation), `b` (binary), `t` (text), and `+`
+(read-write). The implementation walks the string once to extract the flags
+and then rejects invalid combinations:
+
+```c
+static PyObject *
+_io_open_impl(PyObject *module, PyObject *file, const char *mode, ...)
+{
+    int creating = 0, reading = 0, writing = 0,
+        appending = 0, updating = 0;
+    int text = 0, binary = 0;
+
+    for (int i = 0; i < (int)strlen(mode); i++) {
+        switch (mode[i]) {
+        case 'x': creating  = 1; break;
+        case 'r': reading   = 1; break;
+        case 'w': writing   = 1; break;
+        case 'a': appending = 1; break;
+        case '+': updating  = 1; break;
+        case 't': text      = 1; break;
+        case 'b': binary    = 1; break;
+        default:
+            PyErr_Format(PyExc_ValueError,
+                         "invalid mode: '%s'", mode);
+            return NULL;
+        }
+    }
+    if (text && binary) { /* raise ValueError */ }
+    ...
+}
+```
+
+After validation, the function chooses the I/O stack:
+
+1. A `FileIO` object is always created for the raw layer when `file` is a
+   path (string or path-like object).
+2. If `buffering != 0`, the raw object is wrapped in `BufferedReader`,
+   `BufferedWriter`, or `BufferedRandom` depending on the access mode.
+3. If text mode is requested (the default), the buffered object is wrapped in
+   `TextIOWrapper`, which handles encoding, newline translation, and the
+   `errors` argument.
+
+When `file` is already an integer (a file descriptor), `FileIO` is
+constructed directly from it, and the buffered and text layers are stacked
+in the same way.
+
+### `_io_open_code_impl` (lines 250 to 380)
+
+<CpyLink path="Modules/_io/_iomodule.c" lines="250-380" />
+
+`open_code(path)` is the hook the import system calls when it needs to read
+source or bytecode files. It is defined separately from `open()` so that
+embedders can override it via `PyFile_SetOpenCodeHook` to intercept all
+file reads performed by `importlib` (for example, to support encrypted
+source archives).
+
+When no hook is installed, `open_code` simply delegates to `open(path,
+"rb")`, making it equivalent to `open()` in binary read mode. The
+platform-specific optimization hint is that the resulting `FileIO` is
+opened with `O_CLOEXEC` and, on Linux, `O_NOFOLLOW` is not set because
+import paths are trusted.
+
+```c
+static PyObject *
+_io_open_code_impl(PyObject *module, PyObject *path)
+{
+    return _PyObject_CallMethodIdObjArgs(module,
+                                         &PyId_open, path,
+                                         _PyUnicode_FromId(&PyId_rb),
+                                         NULL);
+}
+```
+
+The real dispatch through the hook lives in `Python/pylifecycle.c`;
+`_iomodule.c` only provides the Python-visible `io.open_code` name.
+
+### Module state and ABC types (lines 1 to 60 and 480 to 560)
+
+<CpyLink path="Modules/_io/_iomodule.c" lines="1-60" />
+
+`_PyIO_State` is the per-interpreter state struct allocated by
+`_io_exec`. It holds strong references to:
+
+- `PyExc_BlockingIOError` (a subclass of `OSError`).
+- `UnsupportedOperation` (raised when a method is not supported by a
+  particular I/O class).
+- The six abstract base class type objects: `RawIOBase`, `BufferedIOBase`,
+  `TextIOBase`, `IOBase`, `FileIO`, `BytesIO`, `StringIO`,
+  `BufferedReader`, `BufferedWriter`, `BufferedRandom`, `BufferedRWPair`,
+  `TextIOWrapper`.
+
+Having these in per-interpreter state (rather than global C variables)
+allows multiple sub-interpreters to each have an independent `io` module
+with no shared mutable state.
+
+## gopy mirror
+
+`module/io/module.go`. The Go port wires the same layered class hierarchy:
+`FileIO` for raw, buffered wrappers for binary-buffered, `TextIOWrapper`
+for text. Module state is a Go struct stored on the module object,
+mirroring `_PyIO_State`.
+
+## CPython 3.14 changes
+
+`open()` dropped the deprecated `U` (universal newlines) mode flag in 3.11.
+The per-interpreter state struct has been in place since 3.12. `open_code`
+and its hook mechanism were added in 3.8.

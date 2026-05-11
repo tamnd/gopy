@@ -1,0 +1,153 @@
+---
+title: Lib/weakref.py
+description: Pure-Python weak reference containers and the finalize callback registry; wraps the C _weakref extension.
+cpython_path: Lib/weakref.py
+cpython_version: "3.14"
+lines: 900
+status: annotated
+ported_to: module/weakref/module.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Lib/weakref.py`
+
+<CpyLink path="Lib/weakref.py" />
+
+The pure-Python layer on top of `Modules/_weakref.c`. The C extension
+supplies the two primitive callable types — `ref` (`PyWeakref_NewRef`)
+and `proxy` (`PyWeakref_NewProxy`) — together with
+`getweakrefcount` and `getweakrefs`. Everything else — the dict-like
+containers, the set, and the `finalize` scheduler — is implemented here.
+
+The central device is the _callback_: every `ref` object accepts an
+optional callable that CPython invokes (from the GC finalisation path)
+immediately after the referent is collected. The containers exploit this
+to delete their internal bookkeeping entries without requiring a lock or
+a background thread.
+
+`_IterationGuard` solves a practical problem: deleting entries from a
+dict inside the callback while another thread (or even the same thread in
+a generator) is iterating over the same dict raises
+`RuntimeError: dictionary changed size during iteration`. The guard
+defers all pending removals until the last concurrent iteration exits.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Lib/weakref.py" lines="1-50">1-50</Cpy> | Module header, `ref`, `proxy`, `CallableProxyType`, `ProxyTypes` | Import and re-export the C primitives; define the public type aliases. | `module/weakref/module.go` |
+| <Cpy path="Lib/weakref.py" lines="52-100">52-100</Cpy> | `_IterationGuard` | Context manager that defers `WeakValueDictionary` / `WeakSet` cleanup while the container is being iterated. | `module/weakref/module.go` |
+| <Cpy path="Lib/weakref.py" lines="102-300">102-300</Cpy> | `WeakValueDictionary` | Mapping whose values are weak references; a per-entry callback removes the key on collection. | `module/weakref/module.go` |
+| <Cpy path="Lib/weakref.py" lines="302-450">302-450</Cpy> | `KeyedRef`, `WeakKeyDictionary` | Mapping whose keys are weak references; the `KeyedRef` callback carries the key's hash so the entry can be removed without resurrecting the referent. | `module/weakref/module.go` |
+| <Cpy path="Lib/weakref.py" lines="452-540">452-540</Cpy> | `WeakSet` | Set backed by `WeakKeyDictionary`; used by `abc` to track virtual subclasses. | `module/weakref/module.go` |
+| <Cpy path="Lib/weakref.py" lines="542-720">542-720</Cpy> | `finalize` | Registers a cleanup callback to fire when an object is collected; survives `__del__` errors; tracked in a class-level `WeakKeyDictionary`. | `module/weakref/module.go` |
+| <Cpy path="Lib/weakref.py" lines="722-900">722-900</Cpy> | `finalize` helpers: `_registry_lock`, `_dirty`, `_registered_with_atexit`, `_exitfunc` | Thread-safe atexit integration; calls all live finalizers in reverse registration order at interpreter shutdown. | `module/weakref/module.go` |
+
+## Reading
+
+### `WeakValueDictionary` and `_IterationGuard` (lines 52 to 300)
+
+<CpyLink path="Lib/weakref.py" lines="52-300" />
+
+```python
+class _IterationGuard:
+    def __init__(self, weakcontainer):
+        self.weakcontainer = ref(weakcontainer)
+
+    def __enter__(self):
+        w = self.weakcontainer()
+        if w is not None:
+            w._iterating.add(self)
+        return self
+
+    def __exit__(self, e, t, b):
+        w = self.weakcontainer()
+        if w is not None:
+            s = w._iterating
+            s.discard(self)
+            if not s:
+                w._commit_removals()
+```
+
+`WeakValueDictionary` stores `KeyedRef` objects (weak refs carrying the
+dict key as `.key`). The per-entry callback appends the key to
+`self._pending_removals` rather than deleting from the underlying dict
+immediately; that way the callback is safe to call from inside the GC
+while a `for` loop is running over the dict. `_commit_removals` drains
+the pending list when no `_IterationGuard` is active. Every `__iter__`,
+`keys`, `values`, and `items` implementation wraps its loop in
+`_IterationGuard` so removals are deferred until iteration is finished.
+
+### `WeakKeyDictionary` key cleanup callback (lines 302 to 450)
+
+<CpyLink path="Lib/weakref.py" lines="302-450" />
+
+```python
+class KeyedRef(ref):
+    __slots__ = ('key',)
+
+    def __new__(type, ob, callback, key):
+        self = ref.__new__(type, ob, callback)
+        self.key = key
+        return self
+
+    def __init__(self, ob, callback, key):
+        super().__init__(ob, callback)
+```
+
+The challenge with weak keys is that the callback receives the dead `ref`
+object, not the original key. Because the referent is gone, calling
+`hash(dead_ref)` would require the object to still exist. CPython solves
+this by subclassing `ref` and storing the key's identity hash in
+`KeyedRef.key` at construction time. The callback is a closure over the
+dict's `_pending_removals` list:
+
+```python
+def remove(k, selfref=ref(self)):
+    self = selfref()
+    if self is not None:
+        if self._iterating:
+            self._pending_removals.append(k.key)
+        else:
+            try:
+                del self.data[k.key]
+            except KeyError:
+                pass
+```
+
+The same `_IterationGuard` / `_pending_removals` pattern is used here as
+in `WeakValueDictionary`.
+
+### `finalize` lifecycle (lines 542 to 900)
+
+<CpyLink path="Lib/weakref.py" lines="542-900" />
+
+```python
+class finalize:
+    _registry = {}
+    _shutdown = False
+
+    def __init__(self, obj, func, *args, **kwargs):
+        if not self._registered_with_atexit:
+            finalize._registered_with_atexit = True
+            atexit.register(finalize._exitfunc)
+        self._key = (id(obj), id(self))
+        def callback(wr, _=None):
+            ...
+            try:
+                return info.func(*info.args, **info.kwargs)
+            finally:
+                finalize._registry.pop(self._key, None)
+        self._ref = ref(obj, callback)
+        finalize._registry[self._key] = _Info(...)
+```
+
+`finalize` differs from a raw `ref` callback in two important ways.
+First, it is safe to call manually before the object is collected
+(`__call__` detaches the callback so it fires at most once). Second, it
+registers with `atexit` the first time any `finalize` object is created,
+so that live finalizers are called in reverse registration order at
+interpreter shutdown. The `_exitfunc` sorts `_registry` by key (which
+encodes registration order) and calls each surviving finalizer,
+respecting `atexit=False` overrides.

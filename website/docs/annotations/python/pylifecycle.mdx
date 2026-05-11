@@ -1,0 +1,225 @@
+---
+title: Python/pylifecycle.c
+description: Full interpreter lifecycle: Py_InitializeFromConfig startup sequence, interpreter and thread state allocation, sub-interpreter creation, and Py_Finalize teardown.
+cpython_path: Python/pylifecycle.c
+cpython_version: "3.14"
+lines: 3630
+status: annotated
+ported_to: pythonrun/pylifecycle.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Python/pylifecycle.c`
+
+<CpyLink path="Python/pylifecycle.c" />
+
+Interpreter startup and shutdown. `Py_InitializeFromConfig` is the master
+entry point: it calls `_Py_InitializeCore` to set up allocators, the type
+system, and codec search paths, then `_Py_InitializeMain` to populate `sys`,
+`builtins`, and `__main__`, wire up signal handlers, run `site.py`, and apply
+`PYTHONSTARTUP`. The reverse path, `Py_Finalize`, unwinds in dependency
+order: atexit callbacks, pending calls, GC collection, module teardown, IO
+flush, thread state cleanup, and finally allocator shutdown.
+
+The file owns the `_PyRuntime` global (`PyRuntimeState`), the single
+runtime-wide state struct that every interpreter and thread state hangs
+from. `_PyInterpreterState_New` allocates and links new interpreter states
+into the runtime's interpreter list; `Py_NewInterpreter` is its public
+wrapper for creating sub-interpreters. `Py_EndInterpreter` is the
+corresponding teardown for a sub-interpreter.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Python/pylifecycle.c" lines="1-150">1-150</Cpy> | file header / `_PyRuntime` global | Includes, `_PyRuntime` definition, and `_PyRuntimeState_Init` which zeroes and pre-initializes the runtime struct before any allocator is available. | `pythonrun/pylifecycle.go:runtime` |
+| <Cpy path="Python/pylifecycle.c" lines="151-400">151-400</Cpy> | `_Py_InitializeCore` | First-pass init: runtime lock, allocators, `PyObject` immortal singletons, the type system bootstrap, codec search path registration. | `pythonrun/pylifecycle.go:initCore` |
+| <Cpy path="Python/pylifecycle.c" lines="401-700">401-700</Cpy> | `_Py_InitializeMain` | Second-pass init: finalize `sys`, load `builtins`, create `__main__`, import `site`, process `PYTHONSTARTUP` and `PYTHONPATH`. | `pythonrun/pylifecycle.go:initMain` |
+| <Cpy path="Python/pylifecycle.c" lines="701-1000">701-1000</Cpy> | `Py_InitializeFromConfig` | Public entry point. Validates `PyConfig`, calls `_Py_InitializeCore` then `_Py_InitializeMain`, sets `Py_initialized`. | `pythonrun/pylifecycle.go:InitializeFromConfig` |
+| <Cpy path="Python/pylifecycle.c" lines="1001-1300">1001-1300</Cpy> | `_PyInterpreterState_New` / `PyInterpreterState_New` | Allocate, zero, and link a new `PyInterpreterState` into `_PyRuntime.interpreters`. | `pythonrun/pylifecycle.go:newInterpreterState` |
+| <Cpy path="Python/pylifecycle.c" lines="1301-1600">1301-1600</Cpy> | `Py_NewInterpreter` / `Py_NewInterpreterFromConfig` | Create a full sub-interpreter: new `PyInterpreterState`, new `PyThreadState`, re-run `_Py_InitializeMain` for the new interpreter. | `pythonrun/pylifecycle.go:NewInterpreter` |
+| <Cpy path="Python/pylifecycle.c" lines="1601-1900">1601-1900</Cpy> | `Py_EndInterpreter` / `_Py_FinalizeInterpreter` | Teardown of a single interpreter: run atexit, drain pending calls, collect GC, clear `sys.modules`, drop thread states. | `pythonrun/pylifecycle.go:endInterpreter` |
+| <Cpy path="Python/pylifecycle.c" lines="1901-2400">1901-2400</Cpy> | `Py_FinalizeEx` / `_Py_Finalize` | Full runtime shutdown. Calls `_Py_FinalizeInterpreter` on every interpreter, flushes IO, calls `_PyImport_Cleanup`, unregisters codecs, calls `PyMalloc_GetAllocator` to confirm no leaks in debug builds. | `pythonrun/pylifecycle.go:FinalizeEx` |
+| <Cpy path="Python/pylifecycle.c" lines="2401-2800">2401-2800</Cpy> | signal handler setup / `Py_AtExit` / `_Py_AddAtExit` | Register `SIGINT` → `KeyboardInterrupt` translation. `Py_AtExit` registers C-level atexit callbacks; these fire from `_Py_Finalize` before the Python `atexit` module. | `pythonrun/pylifecycle.go:atExit` |
+| <Cpy path="Python/pylifecycle.c" lines="2801-3630">2801-3630</Cpy> | environment-variable processing / `_Py_SetProgramName` / `_Py_SetPythonHome` / `Py_GetPath` | Read `PYTHONPATH`, `PYTHONSTARTUP`, `PYTHONHOME`, `PYTHONDONTWRITEBYTECODE`, etc. from the environment into `PyConfig`. Also includes the legacy `Py_SetProgramName` / `Py_SetPath` setters. | `pythonrun/pylifecycle.go:applyEnv` |
+
+## Reading
+
+### `Py_InitializeFromConfig` phases (lines 701 to 1000)
+
+<CpyLink path="Python/pylifecycle.c" lines="701-1000" />
+
+```c
+PyStatus
+Py_InitializeFromConfig(const PyConfig *config)
+{
+    ...
+    PyStatus status;
+    PyThreadState *tstate = NULL;
+
+    status = _Py_InitializeCore(&tstate, config);
+    if (_PyStatus_EXCEPTION(status)) {
+        return status;
+    }
+
+    status = _Py_InitializeMain(tstate);
+    if (_PyStatus_EXCEPTION(status)) {
+        return status;
+    }
+
+    return _PyStatus_OK();
+}
+```
+
+The initialization is split into two phases so that embedding applications
+can wedge code between core and main init. `_Py_InitializeCore` runs the
+allocator, the type system, and the codec search-path registration. At the
+end of `_Py_InitializeCore` the interpreter can allocate Python objects and
+call C-extension code, but `sys` and `builtins` are not yet populated.
+`_Py_InitializeMain` fills in `sys`, `builtins`, `__main__`, and runs
+`site.py`.
+
+The `PyStatus` return type (introduced in 3.8) distinguishes three
+outcomes: `_PyStatus_OK()` (success), `_PyStatus_ERR(msg)` (an error that
+should become a `ValueError` at runtime), and `_PyStatus_EXIT(code)` (a
+pre-init error that should call `exit(code)` before the interpreter is
+running). Callers check with `PyStatus_IsError` / `PyStatus_IsExit`.
+
+### `_Py_InitializeCore` detail (lines 151 to 400)
+
+<CpyLink path="Python/pylifecycle.c" lines="151-400" />
+
+`_Py_InitializeCore` performs the following steps in order:
+
+1. `_PyRuntimeState_Init` initializes the `_PyRuntime` struct and its
+   internal locks.
+2. `_PyMem_InitAllocators` sets up the default `PYMALLOC` arena allocator
+   (or the raw `malloc` allocator if `PYTHONMALLOC=malloc`).
+3. `_PyObject_InitState` immortalizes the small integer cache, `None`,
+   `True`, `False`, and `Ellipsis`.
+4. `_PyType_Init` bootstraps `type`, `object`, and `BaseObject` before
+   any other type can be created.
+5. `_PyImport_InitCore` registers the built-in and frozen module finders
+   so that `import _frozen_importlib` is available for the second phase.
+6. `_PyCodec_InitState` registers the UTF-8 and locale codec search paths,
+   needed because `sys.stdin`/`stdout`/`stderr` creation in phase two
+   requires a working codec.
+
+In gopy, `pythonrun/pylifecycle.go:initCore` mirrors these six steps in
+order. Steps 3 and 4 are the most sensitive: the immortal singletons and
+the `type`/`object` bootstrapping must happen before any `PyObject_New`
+call.
+
+### `_PyInterpreterState_New` (lines 1001 to 1200)
+
+<CpyLink path="Python/pylifecycle.c" lines="1001-1200" />
+
+```c
+PyInterpreterState *
+_PyInterpreterState_New(PyThreadState *tstate)
+{
+    ...
+    PyInterpreterState *interp = PyMem_RawCalloc(1, sizeof(PyInterpreterState));
+    if (interp == NULL) {
+        ...
+        return NULL;
+    }
+    ...
+    HEAD_LOCK(runtime);
+    if (runtime->interpreters.next_id < 0) {
+        /* overflow */
+        HEAD_UNLOCK(runtime);
+        ...
+        return NULL;
+    }
+    interp->id = runtime->interpreters.next_id;
+    ++runtime->interpreters.next_id;
+    interp->next = runtime->interpreters.head;
+    runtime->interpreters.head = interp;
+    HEAD_UNLOCK(runtime);
+    ...
+    return interp;
+}
+```
+
+A new interpreter state is a `PyMem_RawCalloc` allocation (so it starts
+zeroed) linked at the head of `_PyRuntime.interpreters.head` under the
+`HEAD_LOCK`. The `interp->id` is a monotonically increasing 64-bit integer
+that never wraps in practice but is checked for overflow.
+
+Sub-interpreters created by `Py_NewInterpreter` get their own `sys.modules`,
+`sys.path`, `builtins`, and GC state. They share the allocator and the
+`_PyRuntime` struct but nothing else. The 3.12 `Py_NewInterpreterFromConfig`
+extension allows creating "isolated" sub-interpreters that also have their
+own GIL (PEP 684).
+
+In gopy, `pythonrun/pylifecycle.go:newInterpreterState` allocates a
+`*InterpreterState` struct and links it into a Go slice protected by a
+`sync.Mutex` rather than the C `HEAD_LOCK` spinlock.
+
+### `Py_Finalize` / `_Py_Finalize` (lines 1901 to 2400)
+
+<CpyLink path="Python/pylifecycle.c" lines="1901-2400" />
+
+```c
+int
+Py_FinalizeEx(void)
+{
+    ...
+    /* 1. Run Python atexit callbacks */
+    _PyAtExit_Call(tstate->interp);
+
+    /* 2. Drain pending calls on all threads */
+    ...
+
+    /* 3. Collect garbage */
+    _PyGC_CollectNoFail(tstate);
+
+    /* 4. Clear sys.modules (destroys extension module state) */
+    _PyImport_Cleanup(tstate);
+
+    /* 5. Final GC pass */
+    _PyGC_CollectNoFail(tstate);
+
+    /* 6. Flush and close sys.stdout / sys.stderr */
+    flush_std_files(tstate);
+
+    /* 7. Clear thread states */
+    ...
+
+    /* 8. Shut down allocators, check for leaks */
+    _PyMem_FinalizeAllocators();
+    ...
+    return status;
+}
+```
+
+The shutdown order is strictly defined to avoid use-after-free. Python
+atexit callbacks fire while all modules are still alive. `_PyImport_Cleanup`
+iterates `sys.modules` in reverse-import order and calls each module's
+`__del__` and `tp_finalize`. The two GC collection passes catch any cycles
+introduced by finalizers. `flush_std_files` closes the buffered IO wrappers
+around stdout/stderr before the underlying file descriptors go away.
+
+The C-level `Py_AtExit` callbacks registered by embedding applications fire
+after step 7 (Python-level teardown is complete) but before step 8
+(allocator shutdown). This ordering means C atexit code can still call
+`PyMem_Free` but must not call `PyObject_New`.
+
+In gopy, `pythonrun/pylifecycle.go:FinalizeEx` follows the same eight-step
+sequence. Steps 3 and 5 delegate to the Go GC rather than CPython's
+reference-counting GC, but the module teardown order in step 4 is
+reproduced exactly.
+
+## CPython 3.14 changes worth noting
+
+`Py_NewInterpreterFromConfig` (PEP 684) was finalized in 3.12; in 3.14 it
+is stable API. The `PyInterpreterConfig.use_main_obmalloc` flag selects
+whether the new interpreter shares the main interpreter's object allocator,
+which is required for extension modules that use the C pymalloc arena.
+`_Py_InitializeCore` in 3.14 no longer calls `_Py_HashRandomization_Init`
+before setting up the allocator; hash randomization is now part of
+`_PyRuntimeState_Init` (gh-102160). `flush_std_files` was moved out of the
+`#ifdef WITH_THREAD` guard in 3.13; it now runs unconditionally on all
+builds (gh-91555).

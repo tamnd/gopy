@@ -1,0 +1,230 @@
+---
+title: Objects/odictobject.c
+description: OrderedDict subclasses dict and layers a doubly-linked list over the hash table to provide order-sensitive equality, move_to_end, and popitem(last).
+cpython_path: Objects/odictobject.c
+cpython_version: "3.14"
+lines: 1600
+status: annotated
+ported_to: objects/odict.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Objects/odictobject.c`
+
+<CpyLink path="Objects/odictobject.c" />
+
+`OrderedDict` is a `dict` subclass that maintains a separate doubly-linked list
+of all keys in insertion order. Since Python 3.7, plain `dict` also preserves
+insertion order as an implementation detail guaranteed by the language spec, but
+`OrderedDict` retains distinct behaviour: `__eq__` is order-sensitive, `popitem`
+accepts `last=False` to remove from the front, and `move_to_end` repositions an
+existing key in O(1).
+
+The linked list consists of `_ODictNode` structs. Each node holds a reference to
+its `key`, a `prev` pointer, and a `next` pointer. The `PyODictObject` extends
+`PyDictObject` with a `od_first` and `od_last` sentinel so that list
+manipulation never needs to special-case the boundary conditions. The nodes
+themselves are stored in a parallel hash table (`od_fast_nodes`) keyed on the
+same hash as the main dict, avoiding a second full hash lookup when updating the
+linked list during `setitem` or `delitem`.
+
+`odict_iter` walks the linked list rather than the dict hash table, so iteration
+order is always the insertion order even after deletions cause hash-table
+re-hashing.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Objects/odictobject.c" lines="1-150">1-150</Cpy> | `_ODictNode`, `od_first`/`od_last`, `od_fast_nodes` | Linked-list node struct and the three bookkeeping fields on `PyODictObject`. | `objects/odict.go` |
+| <Cpy path="Objects/odictobject.c" lines="150-400">150-400</Cpy> | `odict_setitem`, `_odict_setitem_entry` | Calls `dict.__setitem__`; inserts a new node at the tail or leaves an existing node in place. | `objects/odict.go:odictSetItem` |
+| <Cpy path="Objects/odictobject.c" lines="400-600">400-600</Cpy> | `odict_delitem`, `_odict_clear_node` | Calls `dict.__delitem__`; unlinks and frees the corresponding node. | `objects/odict.go:odictDelItem` |
+| <Cpy path="Objects/odictobject.c" lines="600-800">600-800</Cpy> | `odict_iter`, `odictiter_iternext` | Iterates `od_first → od_last` linked list; detects dict mutation during iteration. | `objects/odict.go:odictIter` |
+| <Cpy path="Objects/odictobject.c" lines="800-1000">800-1000</Cpy> | `odict_eq` | Order-sensitive equality: iterates both dicts in parallel via their linked lists. | `objects/odict.go:odictEq` |
+| <Cpy path="Objects/odictobject.c" lines="1000-1200">1000-1200</Cpy> | `odict_move_to_end` | Unlinks a node and re-links it at the head or tail in O(1). | `objects/odict.go:odictMoveToEnd` |
+| <Cpy path="Objects/odictobject.c" lines="1200-1400">1200-1400</Cpy> | `odict_popitem` | Removes and returns `(key, value)` from the tail (`last=True`) or head (`last=False`). | `objects/odict.go:odictPopItem` |
+| <Cpy path="Objects/odictobject.c" lines="1400-1600">1400-1600</Cpy> | `PyODict_Type`, `PyODictItems_Type`, `PyODictKeys_Type`, `PyODictValues_Type` | Type objects for `OrderedDict` and its three view types. | `objects/odict.go:ODictType` |
+
+## Reading
+
+### `_ODictNode` layout (lines 1 to 150)
+
+<CpyLink path="Objects/odictobject.c" lines="1-150" />
+
+Each key in an `OrderedDict` has a corresponding node on the heap:
+
+```c
+typedef struct _ODictNode {
+    PyObject           *key;   /* borrowed ref; key also lives in the dict */
+    Py_hash_t           hash;  /* hash of key; avoids rehashing on lookup */
+    struct _ODictNode  *prev;
+    struct _ODictNode  *next;
+} _ODictNode;
+```
+
+The `PyODictObject` header adds three fields beyond `PyDictObject`:
+
+```c
+typedef struct {
+    PyDictObject od_dict;       /* base dict (must be first) */
+    _ODictNode  *od_first;      /* head of the linked list */
+    _ODictNode  *od_last;       /* tail of the linked list */
+    /* fast_nodes: array of node pointers indexed by dict slot */
+    _ODictNode **od_fast_nodes;
+    Py_ssize_t   od_fast_nodes_size;
+    PyObject    *od_inst_dict;  /* __dict__ for instance attributes */
+    PyObject    *od_weakreflist;
+} PyODictObject;
+```
+
+`od_fast_nodes` is a shadow of the dict's internal hash table: index `i` in
+`od_fast_nodes` corresponds to slot `i` in the dict's `ma_keys` array. This
+lets `odict_setitem` and `odict_delitem` locate the node for a slot in O(1)
+without scanning the linked list.
+
+### `odict_setitem` (lines 150 to 400)
+
+<CpyLink path="Objects/odictobject.c" lines="150-400" />
+
+`odict_setitem` first delegates to the regular dict `setitem`. After the dict
+is updated it checks whether the key was already present. If the key is new, a
+fresh node is appended to the tail of the linked list:
+
+```c
+static int
+odict_setitem(PyObject *od, PyObject *key, PyObject *value)
+{
+    int res = PyDict_SetItem(od, key, value);
+    if (res != 0) return res;
+
+    /* Was this a new key? */
+    if (_odict_find_node_hash((PyODictObject *)od, key,
+                              PyObject_Hash(key)) == NULL) {
+        /* Insert a new node at the tail */
+        _ODictNode *node = PyMem_New(_ODictNode, 1);
+        if (node == NULL) { PyErr_NoMemory(); return -1; }
+        node->key  = key;
+        node->hash = PyObject_Hash(key);
+        node->prev = ((PyODictObject *)od)->od_last;
+        node->next = NULL;
+        if (((PyODictObject *)od)->od_last)
+            ((PyODictObject *)od)->od_last->next = node;
+        else
+            ((PyODictObject *)od)->od_first = node;
+        ((PyODictObject *)od)->od_last = node;
+        _odict_fast_nodes_set((PyODictObject *)od, node);
+    }
+    /* Existing key: linked-list position unchanged */
+    return 0;
+}
+```
+
+A key that already exists keeps its original position in the list, so
+`od['x'] = new_value` does not move `'x'` to the end. Only `move_to_end` does
+that explicitly.
+
+### `odict_eq` (lines 800 to 1000)
+
+<CpyLink path="Objects/odictobject.c" lines="800-1000" />
+
+Regular `dict.__eq__` is order-insensitive. `OrderedDict.__eq__` overrides this
+for comparisons between two `OrderedDict` instances:
+
+```c
+static PyObject *
+odict_richcompare(PyObject *v, PyObject *w, int op)
+{
+    if (op == Py_EQ || op == Py_NE) {
+        if (PyODict_Check(v) && PyODict_Check(w)) {
+            /* Both are OrderedDicts: must agree in value AND order */
+            if (PyObject_Length(v) != PyObject_Length(w))
+                Py_RETURN_FALSE_or_TRUE(op == Py_NE);
+
+            _ODictNode *nv = _odict_FIRST(v);
+            _ODictNode *nw = _odict_FIRST(w);
+            while (nv != NULL && nw != NULL) {
+                /* Keys must match positionally */
+                int key_eq = PyObject_RichCompareBool(nv->key, nw->key, Py_EQ);
+                if (key_eq <= 0) {
+                    if (key_eq == 0) Py_RETURN_FALSE_or_TRUE(op == Py_NE);
+                    return NULL;
+                }
+                /* Values must match */
+                PyObject *val_v = PyObject_GetItem(v, nv->key);
+                PyObject *val_w = PyObject_GetItem(w, nw->key);
+                int val_eq = PyObject_RichCompareBool(val_v, val_w, Py_EQ);
+                Py_DECREF(val_v); Py_DECREF(val_w);
+                if (val_eq <= 0) {
+                    if (val_eq == 0) Py_RETURN_FALSE_or_TRUE(op == Py_NE);
+                    return NULL;
+                }
+                nv = _odict_NODE_NEXT(nv);
+                nw = _odict_NODE_NEXT(nw);
+            }
+            Py_RETURN_TRUE_or_FALSE(op == Py_EQ);
+        }
+    }
+    /* Fall back to dict comparison (order-insensitive) */
+    return PyDict_Type.tp_richcompare(v, w, op);
+}
+```
+
+Comparing an `OrderedDict` to a plain `dict` falls back to the unordered `dict`
+comparison, preserving the rule that `OrderedDict({'a': 1, 'b': 2}) == {'b': 2, 'a': 1}`.
+
+### `odict_move_to_end` (lines 1000 to 1200)
+
+<CpyLink path="Objects/odictobject.c" lines="1000-1200" />
+
+`move_to_end(key, last=True)` is an O(1) linked-list splice. It locates the
+node via `od_fast_nodes`, unlinks it from its current position, and re-links it
+at the head or tail:
+
+```c
+static PyObject *
+odict_move_to_end(PyObject *self, PyObject *args, PyObject *kwds)
+{
+    PyObject *key;
+    int last = 1;  /* default: move to end (tail) */
+    if (!PyArg_ParseTupleAndKeywords(args, kwds, "O|p:move_to_end",
+                                     kwlist, &key, &last))
+        return NULL;
+
+    _ODictNode *node = _odict_find_node((PyODictObject *)self, key);
+    if (node == NULL) {
+        PyErr_SetObject(PyExc_KeyError, key);
+        return NULL;
+    }
+
+    /* Unlink */
+    if (node->prev) node->prev->next = node->next;
+    else ((PyODictObject *)self)->od_first = node->next;
+    if (node->next) node->next->prev = node->prev;
+    else ((PyODictObject *)self)->od_last = node->prev;
+
+    /* Re-link at head or tail */
+    if (last) {
+        node->prev = ((PyODictObject *)self)->od_last;
+        node->next = NULL;
+        if (((PyODictObject *)self)->od_last)
+            ((PyODictObject *)self)->od_last->next = node;
+        else
+            ((PyODictObject *)self)->od_first = node;
+        ((PyODictObject *)self)->od_last = node;
+    } else {
+        node->next = ((PyODictObject *)self)->od_first;
+        node->prev = NULL;
+        if (((PyODictObject *)self)->od_first)
+            ((PyODictObject *)self)->od_first->prev = node;
+        else
+            ((PyODictObject *)self)->od_last = node;
+        ((PyODictObject *)self)->od_first = node;
+    }
+    Py_RETURN_NONE;
+}
+```
+
+The dict hash table is not touched; only the linked-list pointers change. The
+`od_fast_nodes` shadow table does not need updating either because the node
+address is unchanged.

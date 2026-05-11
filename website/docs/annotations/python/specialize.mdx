@@ -1,0 +1,260 @@
+---
+title: Python/specialize.c
+description: Specializing adaptive interpreter. Converts generic bytecode instructions into type-specific fast paths after repeated execution with compatible operand types.
+cpython_path: Python/specialize.c
+cpython_version: "3.14"
+lines: 3500
+status: annotated
+ported_to: vm/eval_gen.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Python/specialize.c`
+
+<CpyLink path="Python/specialize.c" />
+
+The specializing adaptive interpreter is CPython's first JIT-like tier.
+Instead of recompiling code, it rewrites individual bytecode instructions
+in-place inside the code object's instruction array after they are executed
+enough times with operands of a consistent type. A generic opcode like
+`LOAD_ATTR` is replaced by a specialized variant such as `LOAD_ATTR_SLOT`
+that skips the general attribute-lookup machinery entirely.
+
+The mechanism was introduced in CPython 3.11 and extended in 3.12 and 3.13.
+Each specializable instruction carries an inline cache in the instruction
+stream, immediately following the opcode word. The cache holds type version
+tags and offsets so that a specialized instruction can check its guard (one
+comparison) and then read or write the object without going through
+`_PyObject_GenericGetAttrWithDict`.
+
+`specialize.c` contains all of the decision logic: the functions that
+inspect the current operand types and write the specialized variant back
+into `co->co_code_adaptive`. It does not contain the specialized opcode
+bodies themselves; those live in `Python/bytecodes.c` and are generated
+into `generated_cases.c.h`.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Python/specialize.c" lines="1-120">1-120</Cpy> | `_PyAdaptiveEntry`, `SPECIALIZATION_FAIL`, `SPECIALIZATION_SUCCESS`, stats tables | Inline cache layout, return-value constants, and per-opcode miss counters. | `vm/eval_gen.go` |
+| <Cpy path="Python/specialize.c" lines="121-300">121-300</Cpy> | `_Py_Specialize_LoadSuperAttr` | Specializes `LOAD_SUPER_ATTR` when arg 0 is the `type` builtin and arg 1 is a type instance. | `vm/eval_gen.go` |
+| <Cpy path="Python/specialize.c" lines="301-800">301-800</Cpy> | `_Py_Specialize_LoadAttr` | Main attribute-load specializer. Dispatches to `LOAD_ATTR_MODULE`, `LOAD_ATTR_WITH_HINT`, `LOAD_ATTR_SLOT`, `LOAD_ATTR_CLASS`, `LOAD_ATTR_INSTANCE_VALUE`. | `vm/eval_gen.go` |
+| <Cpy path="Python/specialize.c" lines="801-1050">801-1050</Cpy> | `_Py_Specialize_StoreAttr` | Attribute-store specializer. Generates `STORE_ATTR_SLOT`, `STORE_ATTR_WITH_HINT`, `STORE_ATTR_INSTANCE_VALUE`. | `vm/eval_gen.go` |
+| <Cpy path="Python/specialize.c" lines="1051-1450">1051-1450</Cpy> | `_Py_Specialize_Call` | Call specializer. Generates `CALL_PY_EXACT_ARGS`, `CALL_PY_WITH_DEFAULTS`, `CALL_BOUND_METHOD_EXACT_ARGS`, `CALL_BUILTIN_FAST`, `CALL_BUILTIN_O`. | `vm/eval_gen.go` |
+| <Cpy path="Python/specialize.c" lines="1451-1900">1451-1900</Cpy> | `_Py_Specialize_BinaryOp` | Binary operation specializer. Generates `BINARY_OP_ADD_INT`, `BINARY_OP_ADD_FLOAT`, `BINARY_OP_ADD_UNICODE`, `BINARY_OP_MULTIPLY_INT`, `BINARY_OP_MULTIPLY_FLOAT`. | `vm/eval_gen.go` |
+| <Cpy path="Python/specialize.c" lines="1901-2200">1901-2200</Cpy> | `_Py_Specialize_CompareOp` | Comparison specializer. Generates `COMPARE_OP_INT`, `COMPARE_OP_FLOAT`, `COMPARE_OP_STR`. | `vm/eval_gen.go` |
+| <Cpy path="Python/specialize.c" lines="2201-2600">2201-2600</Cpy> | `_Py_Specialize_BinarySubscr` / `_Py_Specialize_StoreSubscr` | Subscript specializers for lists, dicts, and tuples. | `vm/eval_gen.go` |
+| <Cpy path="Python/specialize.c" lines="2601-3000">2601-3000</Cpy> | `_Py_Specialize_ForIter` / `_Py_Specialize_Send` | Iterator and generator-send specializers. | `vm/eval_gen.go` |
+| <Cpy path="Python/specialize.c" lines="3001-3500">3001-3500</Cpy> | `_Py_Quicken`, `_PyCode_Quicken`, stats reset/print helpers | Initial quickening pass that converts all instructions to adaptive variants on first entry. | `vm/eval_gen.go` |
+
+## Reading
+
+### Adaptive inline cache layout (lines 1 to 120)
+
+<CpyLink path="Python/specialize.c" lines="1-120" />
+
+Every specializable instruction reserves a fixed number of cache words
+immediately after the opcode in the instruction stream. The layout is
+defined in `Include/cpython/code.h` and documented per-opcode in
+`Python/bytecodes.c`, but the cache entry type that drives specialization
+decisions is `_PyAdaptiveEntry`:
+
+```c
+typedef struct {
+    uint16_t counter;
+    uint8_t  index;
+    uint8_t  version;
+} _PyAdaptiveEntry;
+```
+
+`counter` starts at a threshold (typically 8) and counts down on each
+miss. When it reaches zero the specialization function is called. If
+specialization succeeds, the opcode word in `co_code_adaptive` is
+overwritten with the specialized variant and `counter` is reset to a
+larger warmup value. If it fails, `counter` is reset to a backoff value
+that grows exponentially, capping how often the runtime retries a
+specialization that keeps failing.
+
+`SPECIALIZATION_FAIL` (value 0) and `SPECIALIZATION_SUCCESS` (value 1)
+are the only return values from specialization functions. Failure increments
+per-opcode-per-fail-reason stat counters; these are printed by
+`_Py_PrintSpecializationStats` at interpreter shutdown when
+`PYTHONSPECIALIZATIONSTATS=1`.
+
+### `_Py_Specialize_LoadAttr` dispatch tree (lines 301 to 800)
+
+<CpyLink path="Python/specialize.c" lines="301-800" />
+
+`_Py_Specialize_LoadAttr` is the most complex specialization function.
+Its decision tree roughly follows the order of `_PyObject_GenericGetAttrWithDict`
+but checks only the conditions needed to justify each specialized opcode:
+
+```c
+int
+_Py_Specialize_LoadAttr(PyObject *owner, _Py_CODEUNIT *instr, PyObject *name)
+{
+    PyTypeObject *type = Py_TYPE(owner);
+    ...
+    if (PyModule_CheckExact(owner)) {
+        return specialize_module_load_attr(owner, instr, name);
+    }
+    if (PyType_Check(owner)) {
+        return specialize_class_load_attr(owner, instr, name);
+    }
+    ...
+    PyObject *descr = NULL;
+    descrgetfunc descr_get = NULL;
+    if (_PyType_Lookup_VersionTag(type, name, &descr, &descr_get) < 0) {
+        SPECIALIZATION_FAIL(LOAD_ATTR, SPEC_FAIL_ATTR_NON_OVERRIDING_DESCRIPTOR);
+        return SPECIALIZATION_FAIL;
+    }
+    ...
+    if (tp_dict_offset > 0 && hint < UINT16_MAX) {
+        write_u32(cache->version, type->tp_version_tag);
+        cache->index = (uint16_t)hint;
+        instr->op.code = LOAD_ATTR_WITH_HINT;
+        return SPECIALIZATION_SUCCESS;
+    }
+    ...
+}
+```
+
+The fast path for module attribute loads (`LOAD_ATTR_MODULE`) is worth
+noting separately. Modules store their globals in a `PyDictObject` with a
+version tag. The cache stores the dict version and a numeric index. The
+specialized opcode reads the value directly out of the dict's split-values
+array by index, bypassing all hash lookups, and re-specializes only if the
+version tag changes.
+
+`LOAD_ATTR_INSTANCE_VALUE` is the path for the common case: an instance
+with no dict and a `__slots__`-like `tp_members` entry storing the value
+inline in the object layout. The cache stores the byte offset from the
+object pointer.
+
+`LOAD_ATTR_WITH_HINT` is for instances that do have a `__dict__` but
+where the attribute was found at a stable dict index on the previous call.
+The guard checks both the type version and the dict's `ma_version_tag`.
+
+### `_Py_Specialize_BinaryOp` type guards (lines 1451 to 1900)
+
+<CpyLink path="Python/specialize.c" lines="1451-1900" />
+
+Binary operations follow a straightforward type-check pattern. The
+specializer inspects both operands and selects a variant:
+
+```c
+int
+_Py_Specialize_BinaryOp(PyObject *lhs, PyObject *rhs, _Py_CODEUNIT *instr,
+                         int oparg, PyObject **locals)
+{
+    assert(ENABLE_SPECIALIZATION);
+    switch (oparg) {
+        case NB_ADD:
+        case NB_INPLACE_ADD:
+            if (!Py_IS_TYPE(lhs, Py_TYPE(rhs))) {
+                SPECIALIZATION_FAIL(BINARY_OP, SPEC_FAIL_BINARY_OP_DIFFERENT_TYPES);
+                return SPECIALIZATION_FAIL;
+            }
+            if (PyUnicode_CheckExact(lhs)) {
+                _Py_CODEUNIT next = instr[INLINE_CACHE_ENTRIES_BINARY_OP + 1];
+                int next_opcode = _Py_OPCODE(next);
+                if (next_opcode == STORE_FAST) {
+                    instr->op.code = BINARY_OP_INPLACE_ADD_UNICODE;
+                    return SPECIALIZATION_SUCCESS;
+                }
+                instr->op.code = BINARY_OP_ADD_UNICODE;
+                return SPECIALIZATION_SUCCESS;
+            }
+            if (PyLong_CheckExact(lhs)) {
+                instr->op.code = BINARY_OP_ADD_INT;
+                return SPECIALIZATION_SUCCESS;
+            }
+            if (PyFloat_CheckExact(lhs)) {
+                instr->op.code = BINARY_OP_ADD_FLOAT;
+                return SPECIALIZATION_SUCCESS;
+            }
+            break;
+        ...
+    }
+    SPECIALIZATION_FAIL(BINARY_OP, SPEC_FAIL_OTHER);
+    return SPECIALIZATION_FAIL;
+}
+```
+
+Two things to note. First, both operands must have the same type; mixed-type
+arithmetic is not specialized. Second, `BINARY_OP_INPLACE_ADD_UNICODE` is a
+further specialization of string add that is only emitted when the next
+instruction is `STORE_FAST`, enabling the `+=` pattern to avoid the
+intermediate string object by mutating the left operand's buffer in
+place when its refcount is 1.
+
+### `_Py_Specialize_Call` (lines 1051 to 1450)
+
+<CpyLink path="Python/specialize.c" lines="1051-1450" />
+
+Call specialization handles the most runtime-critical site in any Python
+program. The function first rules out everything that cannot be specialized:
+keyword arguments (most variants require none), `*args`/`**kwargs` spreading,
+and non-function callables other than `builtin_function_or_method`. For plain
+Python functions the branch splits on whether the argument count matches
+`co_argcount` exactly or whether defaults can cover the gap:
+
+```c
+static int
+specialize_py_call(PyFunctionObject *func, _Py_CODEUNIT *instr,
+                   int nargs, bool bound_method)
+{
+    PyCodeObject *code = (PyCodeObject *)func->func_code;
+    int kind = function_kind(code);
+    ...
+    int argcount = code->co_argcount;
+    if (nargs == argcount) {
+        instr->op.code = bound_method ? CALL_BOUND_METHOD_EXACT_ARGS
+                                      : CALL_PY_EXACT_ARGS;
+    }
+    else if (nargs < argcount && nargs + num_defaults >= argcount) {
+        instr->op.code = CALL_PY_WITH_DEFAULTS;
+    }
+    else {
+        SPECIALIZATION_FAIL(CALL, SPEC_FAIL_CALL_WRONG_NUMBER_ARGUMENTS);
+        return SPECIALIZATION_FAIL;
+    }
+    ...
+    write_u32(cache->func_version, func->func_version);
+    cache->min_args = min_args;
+    return SPECIALIZATION_SUCCESS;
+}
+```
+
+`CALL_PY_EXACT_ARGS` is the hottest path: the guard checks `func->func_version`
+(a monotonically increasing counter bumped when `func.__code__` or
+`func.__defaults__` is replaced), pushes the frame with
+`_PyEvalFramePushAndInit`, and dispatches without a C call. The guard is one
+32-bit comparison. `CALL_BUILTIN_O` specializes single-argument calls to
+C-implemented builtins that use the `METH_O` calling convention, which
+avoids `_PyObject_Vectorcall` entirely.
+
+## gopy mirror
+
+gopy does not rewrite instructions in place. The `vm/eval_gen.go`
+generated dispatch loop includes the specialized opcode bodies but the
+specialization pathway itself (the miss counter, the rewrite) is not yet
+ported. Specialized opcodes are reachable only through explicitly emitted
+test bytecode or through a future port of `_Py_Quicken`.
+
+The inline cache structs are defined in `vm/cache.go`, mirroring
+`Include/cpython/code.h`.
+
+## CPython 3.14 changes worth noting
+
+- `_PyAdaptiveEntry.counter` changed from 8-bit to 16-bit in 3.13 to
+  accommodate longer backoff sequences; 3.14 retains this layout.
+- `LOAD_ATTR_NONDESCRIPTOR_WITH_VALUES` was merged into
+  `LOAD_ATTR_INSTANCE_VALUE` in 3.13; the 3.14 tree has only the latter.
+- `BINARY_OP_INPLACE_ADD_UNICODE` was promoted from experimental to stable
+  in 3.13 and is part of the shipping specialization set in 3.14.
+- The type version tag (`tp_version_tag`) is now checked on every
+  `LOAD_ATTR_WITH_HINT` execution rather than only at miss time, closing a
+  thread-safety hole exposed by the free-threaded build.

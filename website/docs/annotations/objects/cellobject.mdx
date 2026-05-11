@@ -1,0 +1,137 @@
+---
+title: Objects/cellobject.c
+description: PyCellObject. A single-slot mutable container holding one closure variable, created by MAKE_CELL and read/written by LOAD_DEREF/STORE_DEREF.
+cpython_path: Objects/cellobject.c
+cpython_version: "3.14"
+lines: 150
+status: annotated
+ported_to: objects/cell.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Objects/cellobject.c`
+
+<CpyLink path="Objects/cellobject.c" />
+
+Cell objects implement the mutable shared slot that connects an enclosing
+function to the closures it creates. A `PyCellObject` holds exactly one
+`ob_ref` pointer. The enclosing function's frame writes to the cell via
+`STORE_DEREF`; each inner function that closes over the variable reads from
+the same cell object via `LOAD_DEREF`. Because all inner functions share the
+same `PyCellObject` instance, a mutation in one closure is immediately
+visible in all others and in the enclosing scope itself.
+
+Cells are allocated by the `MAKE_CELL` bytecode at function entry. A cell
+may be created empty (`ob_ref = NULL`) for variables that are referenced
+before assignment, matching the `NameError`/`UnboundLocalError` semantics
+of regular locals.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Objects/cellobject.c" lines="1-40">1-40</Cpy> | `PyCell_New`, `cell_dealloc`, `cell_traverse` | Allocate a cell (optionally pre-initialized), release it, GC traversal. | `objects/cell.go:NewCell` |
+| <Cpy path="Objects/cellobject.c" lines="41-80">41-80</Cpy> | `PyCell_Get`, `PyCell_Set` | Read `ob_ref` (returns NULL if empty), write `ob_ref` (may set to NULL to empty the cell). | `objects/cell.go:(*Cell).Get`, `(*Cell).Set` |
+| <Cpy path="Objects/cellobject.c" lines="81-110">81-110</Cpy> | `cell_repr` | `<cell at 0xADDR: TYPE object at 0xADDR>` or `<cell at 0xADDR: empty>`. | `objects/cell.go:cellRepr` |
+| <Cpy path="Objects/cellobject.c" lines="111-130">111-130</Cpy> | `cell_richcompare` | Equality and ordering delegate to `ob_ref`; empty cells compare less than non-empty. | `objects/cell.go:cellRichCompare` |
+| <Cpy path="Objects/cellobject.c" lines="131-150">131-150</Cpy> | `PyCell_Type` | Type object: `tp_name = "cell"`, no `tp_new` (cells are not user-constructible). | `objects/cell.go:CellType` |
+
+## Reading
+
+### Cell layout and `PyCell_New` (lines 1 to 40)
+
+<CpyLink path="Objects/cellobject.c" lines="1-40" />
+
+The struct is minimal by design:
+
+```c
+typedef struct {
+    PyObject_HEAD
+    PyObject *ob_ref; /* Content of the cell or NULL when empty */
+} PyCellObject;
+```
+
+`PyCell_New` allocates with `PyObject_GC_New` and optionally holds an
+initial value:
+
+```c
+PyObject *
+PyCell_New(PyObject *obj)
+{
+    PyCellObject *op;
+
+    op = (PyCellObject *)PyObject_GC_New(PyCellObject, &PyCell_Type);
+    if (op == NULL)
+        return NULL;
+    op->ob_ref = Py_XNewRef(obj);
+
+    _PyObject_GC_TRACK(op);
+    return (PyObject *)op;
+}
+```
+
+`Py_XNewRef` accepts NULL, so `PyCell_New(NULL)` produces an empty cell
+without special-casing. The cell is GC-tracked because `ob_ref` can
+participate in reference cycles (a closure that captures itself, for
+example).
+
+### `PyCell_Get` and `PyCell_Set` (lines 41 to 80)
+
+<CpyLink path="Objects/cellobject.c" lines="41-80" />
+
+```c
+PyObject *
+PyCell_Get(PyObject *op)
+{
+    if (!PyCell_Check(op)) {
+        PyErr_BadInternalCall();
+        return NULL;
+    }
+    return Py_XNewRef(((PyCellObject *)op)->ob_ref);
+}
+
+int
+PyCell_Set(PyObject *op, PyObject *value)
+{
+    PyObject *oldobj;
+    if (!PyCell_Check(op)) {
+        PyErr_BadInternalCall();
+        return -1;
+    }
+    oldobj = ((PyCellObject *)op)->ob_ref;
+    ((PyCellObject *)op)->ob_ref = Py_XNewRef(value);
+    Py_XDECREF(oldobj);
+    return 0;
+}
+```
+
+`PyCell_Get` returns a new reference or NULL (empty cell, no exception
+set). The caller at `LOAD_DEREF` checks for NULL and raises
+`NameError`/`UnboundLocalError` itself. `PyCell_Set(op, NULL)` empties
+the cell: the old reference is decremented and `ob_ref` becomes NULL.
+This is how `del x` inside a closure clears the captured variable.
+
+The eval loop accesses cells via inline macros `PyCell_GET` / `PyCell_SET`
+that skip the type check and operate directly on the struct pointer for
+performance. The public `PyCell_Get`/`PyCell_Set` API is the checked
+version used by the C API and introspection tools.
+
+## gopy mirror
+
+`objects/cell.go`. `PyCellObject` maps to `Cell` with a single `Ref
+*Object` field. `(*Cell).Get()` returns `(*Object, error)` where the
+first return is nil for an empty cell and no error is set (the caller
+raises the `NameError`). `(*Cell).Set(v *Object)` accepts nil to empty
+the cell. `CellType` holds the type object. The `MAKE_CELL` bytecode
+handler in `vm/eval_gen.go` calls `NewCell(nil)` and stores the result
+into the fast-locals array at the cell-variable offset.
+
+## CPython 3.14 changes
+
+`PyCellObject` and its API have been stable since Python 2.2. The
+`MAKE_CELL` instruction was added in 3.11 (previously, cells were
+created lazily). In 3.11, cell objects were also required to be
+pre-initialized in the frame's `localsplus` array before the first
+`STORE_DEREF`, eliminating a class of `SystemError` bugs. No API changes
+in 3.14.

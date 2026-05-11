@@ -1,0 +1,126 @@
+---
+title: Lib/random.py
+description: Pure-Python random number library; wraps the _random C Mersenne Twister and adds all sampling, distribution, and SystemRandom methods.
+cpython_path: Lib/random.py
+cpython_version: "3.14"
+lines: 900
+status: annotated
+ported_to: module/random/module.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Lib/random.py`
+
+<CpyLink path="Lib/random.py" />
+
+All user-visible random-number methods live here. The seeding and
+raw 53-bit integer generation are delegated to `_random.Random`, the C
+Mersenne Twister (MT19937) implementation. `Lib/random.py` wraps that
+type in a Python `Random` class and adds every higher-level algorithm:
+range selection, sequence operations, population sampling, and several
+real-valued distributions.
+
+`SystemRandom` is a subclass that overrides the generator primitives
+with `os.urandom` so the MT state is never used. It cannot be seeded
+or pickled.
+
+A module-level `Random` instance is created at import time and its
+bound methods (`random`, `seed`, `randrange`, `randint`, `choice`,
+`choices`, `shuffle`, `sample`, `gauss`, etc.) are exported as
+module-level functions.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Lib/random.py" lines="1-80">1-80</Cpy> | imports, `__all__`, `BPF`, `RECIP_BPF` | Boilerplate; defines `BPF = 53` (bits per float) and `RECIP_BPF = 2**-53`. | `module/random/module.go` |
+| <Cpy path="Lib/random.py" lines="81-230">81-230</Cpy> | `Random.__init__`, `seed`, `getstate`, `setstate`, `_randbelow_with_getrandbits`, `_randbelow` | MT seeding and state save/restore; `_randbelow` rejection-sampling loop for unbiased integers in `[0, n)`. | `module/random/module.go` |
+| <Cpy path="Lib/random.py" lines="231-340">231-340</Cpy> | `randrange`, `randint`, `_randbelow` | Integer range generation; `randint(a, b)` is `randrange(a, b+1)`; both call `_randbelow`. | `module/random/module.go` |
+| <Cpy path="Lib/random.py" lines="341-470">341-470</Cpy> | `choice`, `choices`, `shuffle`, `sample` | Sequence operations; `shuffle` is Fisher-Yates; `sample` switches algorithm based on population size vs `k`. | `module/random/module.go` |
+| <Cpy path="Lib/random.py" lines="471-620">471-620</Cpy> | `random`, `uniform`, `triangular`, `betavariate`, `expovariate`, `gammavariate`, `gauss`, `normalvariate`, `lognormvariate`, `vonmisesvariate`, `paretovariate`, `weibullvariate` | Real-valued distributions; `gauss` uses the polar form of the Box-Muller transform. | `module/random/module.go` |
+| <Cpy path="Lib/random.py" lines="621-780">621-780</Cpy> | `SystemRandom` | Subclass that overrides `random()` with `int.from_bytes(os.urandom(7)) >> 3` and raises `NotImplementedError` for `seed`/`getstate`/`setstate`. | `module/random/module.go` |
+| <Cpy path="Lib/random.py" lines="781-900">781-900</Cpy> | module-level instance and re-exports | `_inst = Random()`; every public method is bound and assigned at module level. | `module/random/module.go` |
+
+## Reading
+
+### `_randbelow` rejection sampling (lines 81 to 230)
+
+<CpyLink path="Lib/random.py" lines="81-230" />
+
+```python
+def _randbelow_with_getrandbits(self, n):
+    "Return a random int in the range [0,n).  Returns 0 if n==0."
+    if n <= 0:
+        return 0
+    getrandbits = self.getrandbits
+    k = n.bit_length()
+    r = getrandbits(k)
+    while r >= n:
+        r = getrandbits(k)
+    return r
+```
+
+`getrandbits(k)` draws exactly `k` random bits from the MT state,
+producing a uniform integer in `[0, 2**k)`. Because `n` is not
+necessarily a power of two, values in `[n, 2**k)` are rejected and the
+loop redraws. The rejection probability is less than 0.5 per iteration,
+so the expected number of iterations is less than 2. This approach is
+unbiased; the naive `getrandbits(k) % n` would favour smaller residues.
+`_randbelow` is replaced by `_randbelow_with_getrandbits` at instance
+construction when the underlying generator provides `getrandbits`.
+
+### `shuffle` Fisher-Yates (lines 341 to 470)
+
+<CpyLink path="Lib/random.py" lines="341-470" />
+
+```python
+def shuffle(self, x):
+    """Shuffle list x in place, and return None."""
+    randbelow = self._randbelow
+    for i in reversed(range(1, len(x))):
+        j = randbelow(i + 1)
+        x[i], x[j] = x[j], x[i]
+```
+
+A textbook Fisher-Yates (Knuth) shuffle. Starting from the last element
+and working toward index 1, a uniform random index `j` in `[0, i+1)` is
+chosen and `x[i]` is swapped with `x[j]`. Because `_randbelow` is
+unbiased every permutation is equally likely. The Python 2 variant that
+accepted a custom RNG function (`random=`) was removed in 3.11; callers
+that need a seeded shuffle should pass a `Random` instance and call
+`instance.shuffle(x)` directly.
+
+### `gauss` polar form Box-Muller transform (lines 471 to 620)
+
+<CpyLink path="Lib/random.py" lines="471-620" />
+
+```python
+def gauss(self, mu=0.0, sigma=1.0):
+    """Gaussian distribution.
+
+    mu is the mean, and sigma is the standard deviation.
+    """
+    # Uses Kinderman and Monahan method.
+    # Reference: Kinderman, A.J. and Monahan, J.F., "Computer
+    # generation of random variables using the ratio of uniform deviates",
+    # ACM Trans Math Software, 3(3), pp257-260, 1977.
+    random = self.random
+    z = self.gauss_next
+    self.gauss_next = None
+    if z is None:
+        x2pi = random() * TWOPI
+        g2rad = _sqrt(-2.0 * _log(1.0 - random()))
+        z = _cos(x2pi) * g2rad
+        self.gauss_next = _sin(x2pi) * g2rad
+    return mu + z * sigma
+```
+
+The polar form of the Box-Muller transform generates two independent
+standard-normal samples from two uniform random values. One sample is
+returned immediately; the other is stored in `self.gauss_next` and
+consumed on the next call. This halves the number of calls to `random()`
+and avoids the rejection loop of the true polar method. The
+`gauss_next` cache means `gauss` is not thread-safe; use `normalvariate`
+for thread-safe normal-distribution sampling (it pays the rejection loop
+cost instead).

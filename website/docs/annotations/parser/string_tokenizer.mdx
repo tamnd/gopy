@@ -1,0 +1,148 @@
+---
+title: Parser/tokenizer/string_tokenizer.c
+description: Tokenizer backend for in-memory source strings, used by eval(), exec(), and compile().
+cpython_path: Parser/tokenizer/string_tokenizer.c
+cpython_version: "3.14"
+lines: 148
+status: annotated
+ported_to: parser/tokenizer/
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Parser/tokenizer/string_tokenizer.c`
+
+<CpyLink path="Parser/tokenizer/string_tokenizer.c" />
+
+The simplest of the three tokenizer back-ends. The entire source is already in
+memory, so there is no I/O, no line-read callback, and no need for a
+dynamically grown buffer. `str_get_line` returns a pointer into the original
+buffer, advancing `tok->cur` past the next `\n`. The file is 148 lines and
+exposes two public factories: `_PyTokenizer_FromString` (bytes already decoded
+by the caller) and `_PyTokenizer_FromUTF8` (performs UTF-8 validation before
+proceeding).
+
+Both are called from `builtin_compile_impl` and the `ceval` fast-paths for
+`eval()` and `exec()`.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Parser/tokenizer/string_tokenizer.c" lines="1-22">1-22</Cpy>    | `buf_get_line` / `str_get_line` | `underflow` callback: advances `tok->cur` to the next `\n` within the fixed buffer. | `(*StringTokenizer).readline` |
+| <Cpy path="Parser/tokenizer/string_tokenizer.c" lines="24-78">24-78</Cpy>  | `_PyTokenizer_FromString` | Factory: sets `tok->str`, `tok->input`, `tok->end`; installs `str_get_line`. | `NewStringTokenizer` |
+| <Cpy path="Parser/tokenizer/string_tokenizer.c" lines="80-124">80-124</Cpy>| `_PyTokenizer_FromUTF8` | Validates UTF-8 then delegates to `_PyTokenizer_FromString`. | `NewUTF8Tokenizer` |
+| <Cpy path="Parser/tokenizer/string_tokenizer.c" lines="126-148">126-148</Cpy>| encoding header detection | Scans the first two lines of a byte-string for a `coding:` comment; rejects non-UTF-8 encodings. | `detectEncoding` |
+
+## Reading
+
+### `_PyTokenizer_FromString` (lines 24 to 78)
+
+<CpyLink path="Parser/tokenizer/string_tokenizer.c" lines="24-78" />
+
+```c
+struct tok_state *
+_PyTokenizer_FromString(const char *str, int exec_input, int preserve_crlf)
+{
+    struct tok_state *tok = _PyTokenizer_New();
+    if (tok == NULL)
+        return NULL;
+
+    tok->buf = tok->cur = tok->input = str;
+    tok->end = str + strlen(str);
+    tok->inp = tok->end;        /* all input is already present */
+    tok->underflow = str_get_line;
+    tok->encoding = new_string("utf-8", 5, tok);
+    if (!tok->encoding)
+        goto error;
+    ...
+    return tok;
+error:
+    _PyTokenizer_Free(tok);
+    return NULL;
+}
+```
+
+Three pointers into the same buffer: `tok->buf` is the absolute start (never
+changes), `tok->cur` advances as the scanner consumes characters, `tok->end`
+marks one past the last byte. Setting `tok->inp = tok->end` tells the core
+lexer that the buffer is fully loaded: the `underflow` callback will only be
+reached when `tok->cur == tok->inp`, which happens only at EOF.
+
+`exec_input` controls whether a trailing newline is synthesised. CPython
+requires all source to end with `\n`; when the string does not, the factory
+appends one (via a one-byte internal copy) so the lexer always sees a clean
+end-of-file.
+
+`preserve_crlf` suppresses the `\r\n` normalisation that the lexer would
+otherwise apply. The flag is set when the caller is the tokenize module
+operating in round-trip mode.
+
+### `_PyTokenizer_FromUTF8` (lines 80 to 124)
+
+<CpyLink path="Parser/tokenizer/string_tokenizer.c" lines="80-124" />
+
+```c
+struct tok_state *
+_PyTokenizer_FromUTF8(const char *str, int exec_input, int preserve_crlf)
+{
+    if (!PyUnicode_DecodeUTF8(str, strlen(str), NULL)) {
+        /* Let PyUnicode_DecodeUTF8 set the exception */
+        return NULL;
+    }
+    return _PyTokenizer_FromString(str, exec_input, preserve_crlf);
+}
+```
+
+The validation is a full decode-then-discard: `PyUnicode_DecodeUTF8` is called
+with `errors=NULL` (strict mode). Any invalid byte sequence raises
+`UnicodeDecodeError` immediately, before the tokenizer is even allocated.
+
+This is the path taken by `compile(source, ...)` when `source` is a `str`.
+CPython's `str` objects are internally stored as Latin-1, UCS-2, or UCS-4
+depending on the maximum code point, but the source passed to `compile` has
+already been re-encoded to UTF-8 by `builtin_compile_impl` before reaching
+here.
+
+### `str_get_line` (lines 1 to 22)
+
+<CpyLink path="Parser/tokenizer/string_tokenizer.c" lines="1-22" />
+
+```c
+static int
+str_get_line(struct tok_state *tok)
+{
+    const char *end = tok->inp;
+    const char *start = tok->cur;
+    /* find the next newline or end of buffer */
+    while (tok->cur < end && *tok->cur != '\n')
+        tok->cur++;
+    if (tok->cur < end)
+        tok->cur++;   /* consume the '\n' */
+    tok->buf   = start;
+    tok->inp   = tok->cur;
+    tok->line_start = start;
+    return 1;
+}
+```
+
+No allocation, no copy. The function updates `tok->buf` and `tok->inp` to
+delimit the line just found within the original string, then returns 1 to
+indicate a line is available. `tok_nextc` will now walk from `tok->buf` to
+`tok->inp` one byte at a time.
+
+When `tok->cur == end` at entry the function returns 1 with a zero-length
+line, which causes `tok_nextc` to return `EOF` on the very next call. This is
+the clean end-of-string signal.
+
+### Encoding header detection (lines 126 to 148)
+
+<CpyLink path="Parser/tokenizer/string_tokenizer.c" lines="126-148" />
+
+Even in-memory sources may carry a `# coding:` declaration in the first two
+lines. `_PyTokenizer_FromString` scans those lines using the same
+`get_coding_spec` helper as the file back-end. If a coding comment is found
+and the declared encoding is not `utf-8` (or a UTF-8 alias), a `SyntaxError`
+is raised with the message "encoding declaration in Unicode string". The
+string back-end only accepts UTF-8 source; if the caller has non-UTF-8 bytes
+it must use the file tokenizer with explicit encoding.

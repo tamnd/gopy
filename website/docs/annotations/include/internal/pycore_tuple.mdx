@@ -1,0 +1,151 @@
+---
+title: Include/internal/pycore_tuple.h
+description: Internal tuple helpers — ob_item unchecked accessor, per-length free-lists up to size 20, _PyTuple_MaybeUntrack, and _PyTuple_Resize for slice and *args construction.
+cpython_path: Include/internal/pycore_tuple.h
+cpython_version: "3.14"
+lines: 100
+status: annotated
+ported_to: objects/tuple.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Include/internal/pycore_tuple.h`
+
+<CpyLink path="Include/internal/pycore_tuple.h" />
+
+The private companion to `Include/tupleobject.h`. Tuples are immutable
+once constructed, which opens two optimisations that lists cannot use:
+per-length free-lists (a tuple of size 3 is always exactly the same
+allocation size, so recycled headers are interchangeable) and a GC
+untrack pass that removes the cyclic-GC overhead from tuples whose
+elements are all scalars.
+
+Both optimisations are hot paths. Tuple creation dominates many
+workloads (function argument packing, `*args`, comprehension accumulators,
+`struct.unpack` return values) and the per-length free-list means the
+common cases avoid `malloc` entirely.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Include/internal/pycore_tuple.h" lines="1-20">1-20</Cpy> | `_PyTuple_ITEMS(op)` | Unchecked accessor returning `((PyTupleObject *)(op))->ob_item`; used inside the interpreter where the type is already known. | `objects/tuple.go` |
+| <Cpy path="Include/internal/pycore_tuple.h" lines="21-55">21-55</Cpy> | `struct _Py_tuple_freelist` / `_Py_tuple_numfree` | Per-interpreter free-list state: `items[PyTuple_MAXSAVESIZE][PyTuple_MAXFREELIST]` matrix indexed by tuple length; `numfree[i]` tracks depth at each length. | `objects/tuple.go` |
+| <Cpy path="Include/internal/pycore_tuple.h" lines="56-80">56-80</Cpy> | `_PyTuple_MaybeUntrack` | After constructing a tuple from local variables, walks the elements and calls `_PyObject_GC_UNTRACK` on the tuple if no element is itself GC-tracked. | `objects/tuple.go` |
+| <Cpy path="Include/internal/pycore_tuple.h" lines="81-95">81-95</Cpy> | `_PyTuple_Resize` | Internal resize used during `slice` evaluation and `(*args)` packing; re-allocates `ob_item` and adjusts `ob_size`. | `objects/tuple.go` |
+| <Cpy path="Include/internal/pycore_tuple.h" lines="96-100">96-100</Cpy> | `_PyTuple_CompactFreeList` | GC hook to drain the per-interpreter free-list matrix; analogous to `_PyList_CompactFreeList`. | `objects/tuple.go` |
+
+## Reading
+
+### `_PyTuple_ITEMS` (lines 1 to 20)
+
+<CpyLink path="Include/internal/pycore_tuple.h" lines="1-20" />
+
+```c
+static inline PyObject **
+_PyTuple_ITEMS(PyObject *op)
+{
+    return ((PyTupleObject *)op)->ob_item;
+}
+```
+
+`PyTupleObject` embeds its elements in a flexible array `ob_item[]` at
+the end of the struct, so the item array is part of the same allocation
+as the object header. This differs from `PyListObject`, where `ob_item`
+is a separately `malloc`-ed pointer. The consequence is that tuples are
+a single pointer dereference away from their elements with no indirection,
+and that `sizeof(PyTupleObject) + n * sizeof(PyObject *)` is the total
+allocation size for a tuple of length `n`.
+
+`_PyTuple_ITEMS` performs no type check. The public `PyTuple_GET_ITEM`
+macro asserts in debug builds; this unchecked version is used in the
+inner interpreter loop and the free-list allocator where the type is
+already guaranteed.
+
+In gopy, `objects/tuple.go` stores elements as a `[]Object` slice whose
+backing array is allocated alongside the tuple header in a single Go
+allocation. `Items()` returns that slice directly.
+
+### Per-length free-lists (lines 21 to 55)
+
+<CpyLink path="Include/internal/pycore_tuple.h" lines="21-55" />
+
+```c
+#define PyTuple_MAXSAVESIZE   20  /* max tuple length eligible for recycling */
+#define PyTuple_MAXFREELIST   256 /* max recycled tuples per length */
+
+struct _Py_tuple_freelist {
+    /* items[i] is the free-list for tuples of length i (1 <= i < MAXSAVESIZE). */
+    PyTupleObject *items[PyTuple_MAXSAVESIZE][PyTuple_MAXFREELIST];
+    int numfree[PyTuple_MAXSAVESIZE];
+};
+```
+
+CPython maintains a separate free-list for each tuple length from 1 to
+`PyTuple_MAXSAVESIZE - 1` (1 through 19). When a tuple of length `i` is
+deallocated and `numfree[i] < PyTuple_MAXFREELIST`, the header is stashed
+in `items[i][numfree[i]++]` instead of being returned to the system
+allocator. Allocation of a new tuple of length `i` first checks this
+list, avoiding `PyObject_GC_New` entirely for the common case.
+
+Zero-length tuples are handled separately: CPython keeps a single
+`_PyTuple_EMPTY` singleton at the interpreter level and returns it from
+every `PyTuple_New(0)` call. The free-list therefore covers lengths 1-19
+only.
+
+The free-list is per-interpreter, stored in
+`_PyInterpreterState.tuple.freelist`. In the free-threaded build
+(`Py_GIL_DISABLED`) each thread's sub-interpreter state has its own
+copy, so no lock is needed.
+
+`_PyTuple_CompactFreeList` is called during GC to drain all `numfree`
+counters back to zero, releasing the stashed headers to the OS. Without
+this, a workload that builds and discards many tuples of the same length
+would permanently pin up to `19 * 256 = 4864` tuple headers.
+
+In gopy, tuple headers are ordinary Go allocations. The free-list is not
+ported; `struct _Py_tuple_freelist` is defined as an empty placeholder so
+that the interpreter state struct compiles without change.
+
+### `_PyTuple_MaybeUntrack` (lines 56 to 80)
+
+<CpyLink path="Include/internal/pycore_tuple.h" lines="56-80" />
+
+```c
+static inline void
+_PyTuple_MaybeUntrack(PyObject *op)
+{
+    PyTupleObject *t = (PyTupleObject *)op;
+    if (!PyTuple_CheckExact(op) || !_PyObject_GC_IS_TRACKED(op)) {
+        return;
+    }
+    Py_ssize_t i, n = PyTuple_GET_SIZE(op);
+    for (i = 0; i < n; i++) {
+        PyObject *elt = PyTuple_GET_ITEM(op, i);
+        if (_PyObject_IS_GC(elt) && _PyObject_GC_IS_TRACKED(elt)) {
+            return;  /* has a GC-tracked element; keep tracking */
+        }
+    }
+    _PyObject_GC_UNTRACK(op);
+}
+```
+
+All tuples start life as GC-tracked because at construction time their
+elements are not yet filled in. Once the elements are written, this
+function checks whether tracking is actually needed.
+
+A tuple can be safely untracked if none of its elements is itself
+GC-tracked. Scalars (integers, floats, strings, bytes, `None`, booleans)
+do not set `Py_TPFLAGS_HAVE_GC` and are never tracked, so a tuple of
+only scalars can be removed from the GC generation list immediately.
+This reduces collection pressure substantially for workloads dominated
+by data tuples.
+
+The function is called at the end of `BUILD_TUPLE`, after `LOAD_CONST`
+for tuple literals, and after `_PyTuple_FromArraySteal` in the slice
+and argument-packing paths.
+
+In gopy, cyclic GC is handled by Go's runtime, so `_PyTuple_MaybeUntrack`
+is a no-op. The function exists in `objects/tuple.go` as a stub that
+preserves the call site pattern from CPython but returns immediately.

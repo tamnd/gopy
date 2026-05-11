@@ -1,0 +1,219 @@
+---
+title: Lib/threading.py
+description: High-level threading API built on _thread, providing Thread, Lock, RLock, Condition, Semaphore, Event, Barrier, Timer, and thread-local storage.
+cpython_path: Lib/threading.py
+cpython_version: "3.14"
+lines: 1600
+status: annotated
+ported_to: module/threading/module.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Lib/threading.py`
+
+<CpyLink path="Lib/threading.py" />
+
+`threading` is a pure-Python module layered on the `_thread` C extension.
+`_thread` exposes low-level primitives: `start_new_thread`, `allocate_lock`,
+`get_ident`, and a handful of others. `threading` builds the full
+object-oriented API on top of those primitives, adding lifecycle
+management, tracing hooks, and the higher-level synchronization classes.
+
+The module uses a weak-reference registry (`_active`, `_limbo`) to track
+all live threads and to support `enumerate()` and `main_thread()`. Thread
+objects move from `_limbo` (started but not yet scheduled) to `_active`
+(running) inside `_bootstrap`, and are removed from `_active` when the
+thread finishes.
+
+Synchronization classes (`Condition`, `Semaphore`, `Event`, `Barrier`)
+are all pure Python. `Lock` and `RLock` delegate to `_thread.allocate_lock`
+and the C-level `RLock` type respectively, so their `acquire` and
+`release` paths hit no Python bytecode in the fast case.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Lib/threading.py" lines="1-100">1-100</Cpy> | Imports, `settrace`, `setprofile`, `stack_size` | Module prologue; installs per-thread trace/profile hooks that `_bootstrap_inner` picks up for new threads. | `module/threading/module.go` |
+| <Cpy path="Lib/threading.py" lines="101-300">101-300</Cpy> | `Lock`, `RLock` | `Lock` wraps `_thread.allocate_lock`; `RLock` wraps the C `RLock` type and adds reentrant acquisition tracking in Python. | `module/threading/module.go` |
+| <Cpy path="Lib/threading.py" lines="301-500">301-500</Cpy> | `Condition` | Monitor built on an underlying lock; `wait()` appends a waiter lock, releases the main lock, blocks, then re-acquires; `notify()` releases one waiter. | `module/threading/module.go` |
+| <Cpy path="Lib/threading.py" lines="501-620">501-620</Cpy> | `Semaphore`, `BoundedSemaphore` | `Semaphore` wraps a `Condition`; `acquire` decrements the counter or waits; `release` increments and notifies. `BoundedSemaphore` adds an upper-bound check on `release`. | `module/threading/module.go` |
+| <Cpy path="Lib/threading.py" lines="621-720">621-720</Cpy> | `Event` | Thin wrapper around a `Condition`; `set()` calls `notify_all()`, `clear()` resets the flag, `wait()` uses `Condition.wait` with an optional timeout. | `module/threading/module.go` |
+| <Cpy path="Lib/threading.py" lines="721-900">721-900</Cpy> | `Barrier` | Reusable barrier for `n` threads; uses two `Condition` phases (fill and drain) to ensure all threads pass `wait()` before any proceeds. | `module/threading/module.go` |
+| <Cpy path="Lib/threading.py" lines="901-1200">901-1200</Cpy> | `Thread`, `_bootstrap`, `_bootstrap_inner` | Core thread class; `start()` calls `_thread.start_new_thread(_bootstrap, ())`; `_bootstrap_inner` installs trace hooks, calls `run()`, handles `SystemExit`, and cleans up the registry. | `module/threading/module.go` |
+| <Cpy path="Lib/threading.py" lines="1201-1400">1201-1400</Cpy> | `Timer`, `_MainThread`, `_DummyThread` | `Timer` subclasses `Thread` and calls `Event.wait` before invoking the target; `_MainThread` and `_DummyThread` represent the initial thread and threads started outside `threading`. | `module/threading/module.go` |
+| <Cpy path="Lib/threading.py" lines="1401-1600">1401-1600</Cpy> | `local`, `current_thread`, `main_thread`, `enumerate`, `active_count` | `local` uses a per-thread `__dict__` stored in the thread's internal slot; the enumeration functions read from `_active` and `_limbo`. | `module/threading/module.go` |
+
+## Reading
+
+### `Thread._bootstrap_inner` (lines 901 to 1200)
+
+<CpyLink path="Lib/threading.py" lines="901-1200" />
+
+```python
+def _bootstrap_inner(self):
+    try:
+        self._set_ident()
+        self._set_tstate_lock()
+        if _HAVE_THREAD_NATIVE_ID:
+            self._set_native_id()
+        self._started.set()
+        with _active_limbo_lock:
+            _active[self._ident] = self
+            del _limbo[self]
+        try:
+            self.run()
+        except:
+            self._invoke_excepthook(self)
+    finally:
+        with _active_limbo_lock:
+            try:
+                del _active[self._ident]
+            except:
+                pass
+        self._tstate_lock = None
+        self._stop()
+        try:
+            self._delete()
+        except:
+            pass
+```
+
+`_bootstrap_inner` is the function that runs inside the new OS thread.
+It sets `_started` (an `Event`) before touching `_active` so that the
+calling thread's `start()` can return as soon as the new thread is
+registered. Moving `self` from `_limbo` to `_active` is done under
+`_active_limbo_lock` to prevent `enumerate()` from seeing a thread that
+is neither in `_limbo` nor in `_active`.
+
+If `self.run()` raises anything other than `SystemExit` the exception is
+passed to `threading.excepthook` (or `sys.excepthook` if the former is
+missing). `SystemExit` is silently swallowed because it is the normal
+way to terminate a thread via `_thread.exit()`. The `finally` block
+always removes the thread from `_active` and calls `_stop()` to set the
+`_is_stopped` flag and release `_tstate_lock`.
+
+### `Condition.wait` (lines 301 to 500)
+
+<CpyLink path="Lib/threading.py" lines="301-500" />
+
+```python
+def wait(self, timeout=None):
+    if not self._is_owned():
+        raise RuntimeError("cannot wait on un-acquired lock")
+    waiter = _allocate_lock()
+    waiter.acquire()
+    self._waiters.append(waiter)
+    saved_state = self._release_save()
+    gotit = False
+    try:
+        if timeout is None:
+            waiter.acquire()
+            gotit = True
+        else:
+            if waiter.acquire(True, timeout):
+                gotit = True
+        return gotit
+    finally:
+        self._acquire_restore(saved_state)
+        if not gotit:
+            try:
+                self._waiters.remove(waiter)
+            except ValueError:
+                pass
+```
+
+The waiter protocol allocates a new lock, acquires it immediately (so the
+next `acquire` will block), and appends it to `self._waiters`. The
+condition's underlying lock is then released via `_release_save()`, which
+returns the saved acquisition count for re-entrant conditions. The thread
+now blocks on `waiter.acquire()`.
+
+`notify()` removes a waiter from `self._waiters` and calls
+`waiter.release()`, unblocking the waiting thread. The woken thread then
+re-acquires the condition lock via `_acquire_restore()` before returning
+from `wait()`. Using a per-waiter lock rather than a single lock avoids
+the thundering-herd problem: `notify()` unblocks exactly one thread while
+`notify_all()` releases every waiter in one pass.
+
+### `RLock` reentrant acquisition (lines 101 to 300)
+
+<CpyLink path="Lib/threading.py" lines="101-300" />
+
+```python
+class _RLock:
+    def __init__(self):
+        self._block = _allocate_lock()
+        self._owner = None
+        self._count = 0
+
+    def acquire(self, blocking=True, timeout=-1):
+        me = get_ident()
+        if self._owner == me:
+            self._count += 1
+            return True
+        rc = self._block.acquire(blocking, timeout)
+        if rc:
+            self._owner = me
+            self._count = 1
+        return rc
+
+    def release(self):
+        if self._owner != get_ident():
+            raise RuntimeError("cannot release un-acquired lock")
+        self._count -= 1
+        if self._count == 0:
+            self._owner = None
+            self._block.release()
+```
+
+`_RLock` tracks the owning thread's identity (`get_ident()`) and an
+acquisition count. The first `acquire` by a thread takes `_block` and
+sets `_count = 1`. Subsequent `acquire` calls by the same thread
+increment `_count` without touching `_block`, so they never block.
+`release` decrements `_count`; only when `_count` reaches zero is
+`_block` released, allowing another thread to acquire.
+
+In practice CPython uses the C-level `RLock` type from `_thread` (if
+available) for the actual object, so this Python class serves as the
+fallback and as the documented specification of the protocol.
+
+### `local()` thread-local storage (lines 1401 to 1600)
+
+<CpyLink path="Lib/threading.py" lines="1401-1600" />
+
+```python
+class local:
+    __slots__ = '_local__impl', '__dict__'
+
+    def __new__(cls, /, *args, **kw):
+        if (args or kw) and (cls.__init__ is object.__init__):
+            raise TypeError("Initialization arguments are not supported")
+        self = object.__new__(cls)
+        impl = _localimpl()
+        impl.localargs = (args, kw)
+        impl.locallock = RLock()
+        object.__setattr__(self, '_local__impl', impl)
+        # We need to create the thread dict in anticipation of
+        # __init__ being called, to make sure we don't call it
+        # again ourselves.
+        impl.create_dict()
+        return self
+
+    def __getattribute__(self, name):
+        with _patch(self):
+            return object.__getattribute__(self, name)
+```
+
+`local` stores a `_localimpl` object in `_local__impl`. `_localimpl`
+holds a `WeakKeyDictionary` mapping each `Thread` to that thread's
+`__dict__`. The `_patch` context manager swaps `self.__dict__` for the
+calling thread's per-thread dict before every attribute access, then
+restores the previous dict on exit. This means attribute reads and writes
+on a `local` instance transparently operate on thread-private storage
+without any per-access conditional logic in user code.
+
+Thread dicts are stored as weak values keyed by thread identity, so when
+a thread dies its dict is garbage-collected automatically without any
+explicit cleanup hook.

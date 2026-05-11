@@ -1,0 +1,162 @@
+---
+title: Objects/setobject.c
+description: Hash set and frozenset. Open-addressing with linear probing, dummy sentinels, and set algebra operations.
+cpython_path: Objects/setobject.c
+cpython_version: "3.14"
+lines: 2886
+status: annotated
+ported_to: objects/set.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Objects/setobject.c`
+
+<CpyLink path="Objects/setobject.c" />
+
+The `set` and `frozenset` implementation. Sets use open addressing with a hash
+table of `setentry {hash, key}` pairs. Deleted entries become dummy sentinels
+so probe chains are not broken. The initial table is a small inline array of 8
+slots; it moves to heap on overflow. `frozenset` shares most of the
+implementation but is immutable and hashable. Both types share `make_new_set`,
+the iteration machinery, and the set algebra operations.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Objects/setobject.c" lines="1-100">1-100</Cpy> | `set_lookkey`, `set_add_entry`, `set_discard_entry` | Hash table core: probe loop, insert, delete. | `objects/set.go:lookkey` |
+| <Cpy path="Objects/setobject.c" lines="100-300">100-300</Cpy> | `PySet_New`, `PyFrozenSet_New`, `make_new_set` | Construction from an iterable. | `objects/set.go:NewSet` |
+| <Cpy path="Objects/setobject.c" lines="300-600">300-600</Cpy> | `PySet_Add`, `PySet_Discard`, `PySet_Contains` | Element operations. | `objects/set.go:(*Set).Add` |
+| <Cpy path="Objects/setobject.c" lines="600-900">600-900</Cpy> | `set_update_internal`, `PySet_Update` | Bulk add from an iterable. | `objects/set.go:(*Set).Update` |
+| <Cpy path="Objects/setobject.c" lines="900-1200">900-1200</Cpy> | `set_and`, `set_or`, `set_xor`, `set_sub` | Set algebra: `&`, `\|`, `^`, `-`. | `objects/set.go:And` |
+| <Cpy path="Objects/setobject.c" lines="1200-1600">1200-1600</Cpy> | `set_richcompare`, `set_issubset`, `set_issuperset`, `set_isdisjoint` | Comparison and containment. | `objects/set.go:RichCompare` |
+| <Cpy path="Objects/setobject.c" lines="1600-2000">1600-2000</Cpy> | `set_repr`, `set_iter`, `setiter_next`, `set_len` | Repr and iteration. | `objects/set.go:setRepr` |
+| <Cpy path="Objects/setobject.c" lines="2000-2886">2000-2886</Cpy> | `set_pop`, `set_clear`, `set_copy`, `frozenset_hash`, `PySet_Type`, `PyFrozenSet_Type` | Remaining methods and type definitions. | `objects/set.go` |
+
+## Reading
+
+### `set_lookkey` (lines 1 to 100)
+
+<CpyLink path="Objects/setobject.c" lines="1-100" />
+
+The probe loop. Computes the initial slot from the hash and walks the table
+using the same perturbation formula as `dictobject.c`:
+
+```c
+static setentry *
+set_lookkey(PySetObject *so, PyObject *key, Py_hash_t hash)
+{
+    setentry *table = so->table;
+    Py_ssize_t mask = so->mask;
+    Py_ssize_t i = (Py_ssize_t)(hash & mask);
+    setentry *entry = &table[i];
+
+    if (entry->key == NULL)
+        return entry;   /* empty slot: key not present */
+
+    size_t perturb = (size_t)hash;
+    while (1) {
+        if (entry->hash == hash) {
+            PyObject *startkey = entry->key;
+            if (startkey == key)
+                return entry;  /* identity match */
+            if (startkey != dummy) {
+                int cmp = PyObject_RichCompareBool(startkey, key, Py_EQ);
+                if (cmp > 0)
+                    return entry;  /* equality match */
+                ...
+            }
+        }
+        perturb >>= 5;
+        i = (i * 5 + 1 + perturb) & mask;
+        entry = &table[i];
+        if (entry->key == NULL)
+            return entry;  /* found empty: miss */
+    }
+}
+```
+
+Dummy entries (deleted keys replaced by the `dummy` sentinel pointer) are
+skipped during lookup but count as occupied slots during insertion. When the
+number of dummy slots grows too large, `set_table_resize` is called to compact
+the table.
+
+### `frozenset_hash` (lines 2000 to 2200)
+
+<CpyLink path="Objects/setobject.c" lines="2000-2200" />
+
+`frozenset` is hashable. The hash algorithm must be commutative (order of
+elements must not matter) and must produce the same result regardless of
+iteration order. CPython uses a XOR-based accumulation with a rotation:
+
+```c
+static Py_hash_t
+frozenset_hash(PyObject *self)
+{
+    PySetObject *so = (PySetObject *)self;
+    if (so->hash != -1)
+        return so->hash;  /* cached */
+
+    Py_uhash_t hash = 0;
+    Py_uhash_t mask = PyHASH_XXPRIME_5;
+    setentry *entry;
+
+    /* Scan the table and XOR each element's contribution. */
+    Py_ssize_t pos = 0;
+    while (set_next(so, &pos, &entry)) {
+        Py_uhash_t h = entry->hash;
+        /* Mix hash bits; commutative because XOR is commutative. */
+        hash ^= ((h ^ (h << 16) ^ 89869747) * 3644798167) & mask;
+    }
+
+    hash ^= (so->used + 1) * 1927868237;
+    hash ^= (hash >> 11) ^ (hash >> 25);
+    hash = hash * 69069 + 907133923;
+    if (hash == (Py_uhash_t)-1)
+        hash = 590923713;
+
+    so->hash = (Py_hash_t)hash;
+    return so->hash;
+}
+```
+
+The result is cached in `so->hash` (initialized to -1, indicating uncached).
+Because `frozenset` is immutable, the cache is valid for the object's lifetime.
+
+### Set algebra (lines 900 to 1200)
+
+<CpyLink path="Objects/setobject.c" lines="900-1200" />
+
+Each algebra operation produces a new set. The implementations minimize
+element-by-element work by iterating the smaller operand and checking
+membership in the larger:
+
+- `set_and` (`&`): iterates the smaller set, adds each element to the result
+  if it is also in the larger set. Time: `O(min(len(a), len(b)))`.
+- `set_or` (`|`): copies the larger set, then calls `set_update_internal` with
+  the smaller. Time: `O(len(a) + len(b))`.
+- `set_sub` (`-`): copies the first set, then discards every element that
+  appears in the second. Time: `O(len(a) + len(b))`.
+- `set_xor` (`^`): copies the first set, then for each element in the second
+  calls `add` if not present or `discard` if already present. Time:
+  `O(len(a) + len(b))`.
+
+In-place variants (`__iand__`, `__ior__`, `__isub__`, `__ixor__`) reuse the
+left-hand object to avoid an extra allocation. For `__iand__` this requires
+iterating a snapshot of the existing table because the table is being mutated
+during iteration.
+
+## gopy mirror
+
+`objects/set.go`. Probe formula is identical to CPython. The `frozenset_hash`
+algorithm is preserved byte-for-byte. The initial inline table is replaced by a
+small Go array embedded in the struct; growth switches to a heap-allocated
+slice. `frozenset` is a separate Go type that shares all read operations with
+`set`.
+
+## CPython 3.14 changes
+
+No significant changes in 3.14. `set.update` accepting multiple iterables has
+been stable since 2.6. The hash algorithm for `frozenset` has been stable since
+3.3. `set.__class_getitem__` (for `set[T]` type hints) was added in 3.9.

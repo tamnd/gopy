@@ -1,0 +1,181 @@
+---
+title: Objects/unionobject.c
+description: PyUnion_Type — the runtime object behind PEP 604 union type syntax X | Y for type annotations.
+cpython_path: Objects/unionobject.c
+cpython_version: "3.14"
+lines: 400
+status: annotated
+ported_to: objects/union_type.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Objects/unionobject.c`
+
+<CpyLink path="Objects/unionobject.c" />
+
+PEP 604 union type objects. Python 3.10 added `X | Y` as a runtime expression
+that produces a union type object instead of raising `TypeError`. This is
+primarily a type-annotation convenience (`def f(x: int | None)`) but union
+objects are also usable at runtime with `isinstance` and `issubclass`.
+
+A `PyUnionObject` holds an `args` tuple of the constituent types after
+deduplication and flattening: `int | int` reduces to `int | int` (dedup
+happens), and `(int | str) | float` flattens to `int | str | float`. The
+`__or__` and `__ror__` operators on `type` and `NoneType` both delegate to
+`_Py_union_type_or`, the single entry point that constructs union objects.
+
+The file is compact because union objects are deliberately simple: they
+are immutable, their `__args__` are fixed at construction, and the main work
+is the `isinstance`/`issubclass` dispatch which just iterates `args` and
+delegates to each constituent type.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Objects/unionobject.c" lines="1-80">1-80</Cpy> | `make_union`, `union_alloc` | Internal constructor; deduplicates and flattens `args`, then allocates the `PyUnionObject`. | `objects/union_type.go:unionBuilder`, `makeUnion` |
+| <Cpy path="Objects/unionobject.c" lines="81-160">81-160</Cpy> | `_Py_union_type_or`, `union_or` | `__or__` / `__ror__` implementation; entry point from `type.__or__`, `NoneType.__or__`, and existing union objects. | `objects/union_type.go:unionTypeOr`, `unionNbOr` |
+| <Cpy path="Objects/unionobject.c" lines="161-240">161-240</Cpy> | `union_repr`, `union_hash`, `union_richcompare` | Joins args with ` | `; hash as XOR of arg hashes; equality checks args set equivalence. | `objects/union_type.go:unionRepr`, `unionHash`, `unionRichCompare` |
+| <Cpy path="Objects/unionobject.c" lines="241-320">241-320</Cpy> | `union_instancecheck`, `union_subclasscheck` | `isinstance(x, int | str)` and `issubclass(X, int | str)` iterate `args` and delegate to each. | `objects/union_type.go:unionTypeCheck` |
+| <Cpy path="Objects/unionobject.c" lines="321-380">321-380</Cpy> | `union_getattribute`, `union_getitem` | Intercepts `__args__` and `__parameters__`; forwards everything else to `object`; `__getitem__` constructs a new parameterized alias. | `objects/union_type.go:unionGetattro`, `unionGetitem` |
+| <Cpy path="Objects/unionobject.c" lines="381-400">381-400</Cpy> | `PyUnion_Type`, `union_traverse`, `union_dealloc` | Type object definition; GC traversal visits `args`; dealloc releases the args tuple. | `objects/union_type.go:UnionTypeType` |
+
+## Reading
+
+### `_Py_union_type_or` and flattening (lines 81 to 160)
+
+<CpyLink path="Objects/unionobject.c" lines="81-160" />
+
+`_Py_union_type_or` is called whenever `X | Y` is evaluated and at least one
+operand is a type or `None`. It collects both operands into a flat list,
+expanding any existing `PyUnionObject` on either side so that
+`(int | str) | float` becomes `[int, str, float]` rather than a nested union.
+After flattening, duplicates are removed by a simple O(n^2) scan (union types
+are never large enough for a set to be worth the overhead):
+
+```c
+PyObject *
+_Py_union_type_or(PyObject *self, PyObject *other)
+{
+    PyObject *tuple = NULL;
+    PyObject *new_union = NULL;
+
+    /* Collect self's args (or self itself) into a list. */
+    if (PyUnion_Check(self)) {
+        tuple = PySequence_List(((PyUnionObject *)self)->args);
+    } else {
+        tuple = PyList_New(1);
+        if (tuple) PyList_SET_ITEM(tuple, 0, Py_NewRef(self));
+    }
+    if (tuple == NULL) return NULL;
+
+    /* Append other's args (or other itself). */
+    if (PyUnion_Check(other)) {
+        if (_PyList_Extend((PyListObject *)tuple,
+                           ((PyUnionObject *)other)->args) < 0)
+            goto error;
+    } else {
+        if (PyList_Append(tuple, other) < 0)
+            goto error;
+    }
+
+    new_union = make_union(tuple);
+error:
+    Py_DECREF(tuple);
+    return new_union;
+}
+```
+
+`make_union` then deduplicates the list using `PyObject_RichCompareBool(Py_EQ)`
+before wrapping it in a `PyUnionObject`. If deduplication leaves exactly one
+element, `make_union` returns that element directly rather than a
+single-element union.
+
+### `union_instancecheck` (lines 241 to 320)
+
+<CpyLink path="Objects/unionobject.c" lines="241-320" />
+
+`isinstance(x, int | str)` works by iterating over `args` and calling
+`PyObject_IsInstance` on each. The first `True` result short-circuits:
+
+```c
+static PyObject *
+union_instancecheck(PyObject *self, PyObject *instance)
+{
+    PyUnionObject *alias = (PyUnionObject *)self;
+    Py_ssize_t nargs = PyTuple_GET_SIZE(alias->args);
+
+    for (Py_ssize_t i = 0; i < nargs; i++) {
+        PyObject *arg = PyTuple_GET_ITEM(alias->args, i);
+        /* Unwrap None to NoneType for isinstance. */
+        if (arg == Py_None)
+            arg = (PyObject *)&_PyNone_Type;
+        int res = PyObject_IsInstance(instance, arg);
+        if (res < 0)
+            return NULL;
+        if (res) {
+            Py_RETURN_TRUE;
+        }
+    }
+    Py_RETURN_FALSE;
+}
+```
+
+`union_subclasscheck` follows the same pattern but calls `PyObject_IsSubclass`.
+Both functions handle `None` specially: `None` in a union annotation means
+`NoneType`, so it is replaced with `&_PyNone_Type` before the delegation.
+
+### `union_repr` (lines 161 to 200)
+
+<CpyLink path="Objects/unionobject.c" lines="161-200" />
+
+The repr joins each argument's repr with ` | `. Each individual arg is
+formatted using the same `ga_repr_item` logic from `genericaliasobject.c`: the
+`__qualname__` is used when available, with module prefix included unless the
+module is `builtins`. `None` is shown as `None`:
+
+```c
+static PyObject *
+union_repr(PyObject *self)
+{
+    PyUnionObject *alias = (PyUnionObject *)self;
+    Py_ssize_t len = PyTuple_GET_SIZE(alias->args);
+    _PyUnicodeWriter writer;
+    _PyUnicodeWriter_Init(&writer);
+
+    for (Py_ssize_t i = 0; i < len; i++) {
+        if (i > 0 && _PyUnicodeWriter_WriteASCIIString(&writer, " | ", 3) < 0)
+            goto error;
+        PyObject *p = PyTuple_GET_ITEM(alias->args, i);
+        if (union_repr_item(&writer, p) < 0)
+            goto error;
+    }
+    return _PyUnicodeWriter_Finish(&writer);
+error:
+    _PyUnicodeWriter_Dealloc(&writer);
+    return NULL;
+}
+```
+
+The result for `int | str | None` is the string `"int | str | None"`. This repr
+is also used in error messages from `union_instancecheck` and
+`union_subclasscheck`.
+
+## gopy mirror
+
+`objects/union_type.go` for `UnionType`, `UnionTypeType`, `unionTypeOr`,
+`unionNbOr`, `unionRepr`, `unionHash`, `unionRichCompare`, `unionTypeCheck`,
+`unionGetattro`, and `unionGetitem`. The `unionBuilder` struct with its
+`addSingle` / `addTuple` / `makeUnion` methods corresponds to the flattening
+and deduplication logic in `make_union` and `_Py_union_type_or`. The
+`unionClsAttrs` map intercepts `__args__` and `__parameters__` the same way
+`union_getattribute` does.
+
+## CPython 3.14 changes
+
+PEP 604 (`X | Y` union syntax) shipped in 3.10. `NoneType.__or__` wired to
+`_Py_union_type_or` in 3.10 so `None | int` works. `union_getitem`
+(`int | str)[T]`) added in 3.10 for generic union aliases. `__parameters__`
+support for `TypeVarTuple` and `ParamSpec` (PEP 646/612) added in 3.10.
+The `PyUnionObject` struct and `PyUnion_Type` have been stable since 3.10.

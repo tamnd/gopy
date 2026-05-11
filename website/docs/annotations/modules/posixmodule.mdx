@@ -1,0 +1,165 @@
+---
+title: Modules/posixmodule.c
+description: Implements the os module (posix on POSIX, nt on Windows) — stat, listdir, scandir, open/read/write, environ, and multi-phase module init.
+cpython_path: Modules/posixmodule.c
+cpython_version: "3.14"
+lines: 18000
+status: annotated
+ported_to: module/os/module.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Modules/posixmodule.c`
+
+<CpyLink path="Modules/posixmodule.c" />
+
+The largest module file in CPython. It implements `os` (and the `posix` alias on
+POSIX systems, `nt` on Windows) by wrapping the POSIX / Win32 system call
+surface. The file is conditionally compiled: a large fraction of the code is
+guarded by `#ifdef MS_WINDOWS` / `#ifndef MS_WINDOWS` blocks that select
+Win32 equivalents for every POSIX call.
+
+The module is initialized via multi-phase init (PEP 451). `posixmodule_exec` is
+the `Py_mod_exec` slot; it adds constants, stat-result type, `DirEntry` type,
+`environ` proxy, and all method objects to the module dict.
+
+Key subsystems:
+
+- `posix_stat` / `posix_lstat` / `posix_fstat` wrap `stat(2)` and return an
+  `os.stat_result` structseq.
+- `posix_listdir` uses an `opendir`/`readdir` loop (Win32: `FindFirstFile`).
+- `os.scandir` returns an iterator of `DirEntry` objects that cache `stat`
+  lazily, avoiding redundant syscalls when callers only need names.
+- `posix_getcwd` wraps `getcwd(3)` and decodes the result with the filesystem
+  encoding.
+- `posix_open` / `posix_read` / `posix_write` / `posix_close` expose
+  low-level file descriptors to Python.
+- `os_environ` is a `Mapping`-like proxy backed by `putenv(3)` / `unsetenv(3)`
+  (Win32: `SetEnvironmentVariable`).
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Modules/posixmodule.c" lines="1-300">1-300</Cpy> | includes, `stat_result` structseq field defs | Header and `os.stat_result` field table. | `module/os/module.go:StatResult` |
+| <Cpy path="Modules/posixmodule.c" lines="300-1200">300-1200</Cpy> | `posix_stat`, `posix_lstat`, `posix_fstat`, `posix_fstatat` | `stat(2)` family; fill `stat_result`. | `module/os/module.go:Stat` |
+| <Cpy path="Modules/posixmodule.c" lines="1200-2000">1200-2000</Cpy> | `posix_getcwd`, `posix_chdir`, `posix_listdir` | CWD and directory listing. | `module/os/module.go:Getcwd` |
+| <Cpy path="Modules/posixmodule.c" lines="2000-3000">2000-3000</Cpy> | `posix_open`, `posix_close`, `posix_read`, `posix_write`, `posix_lseek` | Low-level file-descriptor I/O. | `module/os/module.go:Open` |
+| <Cpy path="Modules/posixmodule.c" lines="3000-4500">3000-4500</Cpy> | `posix_mkdir`, `posix_rmdir`, `posix_rename`, `posix_unlink`, `posix_link`, `posix_symlink`, `posix_readlink` | File-system mutations. | `module/os/module.go:Mkdir` |
+| <Cpy path="Modules/posixmodule.c" lines="4500-6000">4500-6000</Cpy> | `posix_getpid`, `posix_getuid`, `posix_getenv`, `posix_putenv`, `posix_unsetenv` | Process and environment. | `module/os/module.go:Getpid` |
+| <Cpy path="Modules/posixmodule.c" lines="6000-8000">6000-8000</Cpy> | `posix_scandir`, `ScandirIter`, `DirEntry`, `DirEntry_stat`, `DirEntry_is_dir`, `DirEntry_is_file` | `os.scandir` iterator and `DirEntry`. | `module/os/module.go:Scandir` |
+| <Cpy path="Modules/posixmodule.c" lines="8000-9500">8000-9500</Cpy> | `posix_access`, `posix_chmod`, `posix_chown`, `posix_truncate` | Permission and ownership calls. | `module/os/module.go:Access` |
+| <Cpy path="Modules/posixmodule.c" lines="9500-11000">9500-11000</Cpy> | `posix_pipe`, `posix_fork`, `posix_execv`, `posix_execve`, `posix_waitpid` | Process creation and exec. | `module/os/module.go:Pipe` |
+| <Cpy path="Modules/posixmodule.c" lines="11000-13000">11000-13000</Cpy> | `os_environ` mapping, `putenv_str`, `EnvironIter` | `os.environ` proxy. | `module/os/module.go:Environ` |
+| <Cpy path="Modules/posixmodule.c" lines="13000-15500">13000-15500</Cpy> | `posix_urandom`, `posix_sendfile`, `posix_copy_file_range`, `posix_splice` | I/O extras. | `module/os/module.go:Urandom` |
+| <Cpy path="Modules/posixmodule.c" lines="15500-17000">15500-17000</Cpy> | `posix_cpu_count`, `posix_get_terminal_size`, `posix_strerror` | System introspection. | `module/os/module.go:CpuCount` |
+| <Cpy path="Modules/posixmodule.c" lines="17000-17800">17000-17800</Cpy> | `posixmodule_exec`, constant registration, `DirEntry` type init | Module init (PEP 451 exec slot). | `module/os/module.go:init` |
+| <Cpy path="Modules/posixmodule.c" lines="17800-18000">17800-18000</Cpy> | `PyMODINIT_FUNC PyInit_posix`, `PyMODINIT_FUNC PyInit_nt`, `PyModuleDef` | Module definition and entry points. | `module/os/module.go:Module` |
+
+## Reading
+
+### `posix_stat` and `stat_result` (lines 300 to 1200)
+
+<CpyLink path="Modules/posixmodule.c" lines="300-1200" />
+
+`posix_stat` calls `stat(2)` (or `fstatat` when a `dir_fd` is supplied) and
+packs the result into an `os.stat_result` structseq. The structseq has
+positional fields matching the C `struct stat` members plus platform-specific
+extras accessible by name only:
+
+```c
+static PyStructSequence_Field stat_result_fields[] = {
+    {"st_mode",  "protection bits"},
+    {"st_ino",   "inode"},
+    {"st_dev",   "device"},
+    {"st_nlink", "number of hard links"},
+    {"st_uid",   "user ID of file owner"},
+    {"st_gid",   "group ID of file owner"},
+    {"st_size",  "total size, in bytes"},
+    /* times: st_atime, st_mtime, st_ctime */
+    ...
+};
+```
+
+High-resolution timestamps (`st_atime_ns` etc.) are stored as Python `int`
+with nanosecond precision. The `follow_symlinks` keyword argument switches
+between `stat` and `lstat` without a separate Python-level function.
+
+### `posix_listdir` (lines 1200 to 2000)
+
+<CpyLink path="Modules/posixmodule.c" lines="1200-2000" />
+
+`posix_listdir` opens a directory with `opendir(3)`, iterates `readdir(3)` in
+a loop, and appends each name (after skipping `.` and `..`) to a Python list.
+The byte-or-str output type follows the type of the `path` argument:
+
+```c
+while ((ep = readdir(dirp)) != NULL) {
+    if (ep->d_name[0] == '.' &&
+        (NAMLEN(ep) == 1 ||
+         (ep->d_name[1] == '.' && NAMLEN(ep) == 2)))
+        continue;
+    v = PyUnicode_DecodeFSDefaultAndSize(ep->d_name, NAMLEN(ep));
+    if (v == NULL) { ... }
+    if (PyList_Append(list, v) != 0) { ... }
+    Py_DECREF(v);
+}
+closedir(dirp);
+```
+
+On Windows the loop uses `FindFirstFileW` / `FindNextFileW` and produces `str`
+objects directly because the Win32 API is natively wide-character.
+
+### `os.scandir` and `DirEntry` (lines 6000 to 8000)
+
+<CpyLink path="Modules/posixmodule.c" lines="6000-8000" />
+
+`os.scandir` returns a `ScandirIterator`. Each call to `__next__` invokes
+`readdir` once and wraps the result in a `DirEntry` object without calling
+`stat(2)`. Stat data is fetched lazily only when `DirEntry.stat()` is called:
+
+```c
+static PyObject *
+DirEntry_stat(DirEntry *self, PyObject *args, PyObject *kwargs)
+{
+    if (!self->stat_initialized) {
+        if (fstatat(self->dir_fd, self->d_name, &self->statbuf, ...) != 0)
+            return posix_error();
+        self->stat_initialized = 1;
+    }
+    return _pystat_fromstructstat(self->module_state, &self->statbuf);
+}
+```
+
+`DirEntry.is_dir()` and `DirEntry.is_file()` avoid the `stat` call entirely on
+Linux/macOS because `d_type` in `struct dirent` carries the file type when
+`DT_UNKNOWN` is not returned. On filesystems that always return `DT_UNKNOWN`
+(e.g. some network mounts) the implementation falls back to a `stat` call.
+
+### `posix_open`, `posix_read`, `posix_write` (lines 2000 to 3000)
+
+<CpyLink path="Modules/posixmodule.c" lines="2000-3000" />
+
+These three functions wrap raw POSIX file descriptors. `posix_open` converts a
+Unicode path with `PyUnicode_FSConverter`, calls `open(2)`, and returns the
+integer file descriptor. `posix_read` allocates a `bytes` object of the
+requested size and fills it with a single `read(2)` call. `posix_write` accepts
+a buffer-protocol object and issues a single `write(2)` call, returning the
+number of bytes actually written.
+
+All three release the GIL around the system call to allow other threads to run
+during blocking I/O.
+
+## gopy mirror
+
+`module/os/module.go`. `stat_result` maps to a Go struct implementing the
+structseq protocol. `DirEntry` is a Go struct with a lazy-stat flag. The
+`os.environ` proxy is backed by `os.Getenv` / `os.Setenv` from the Go standard
+library.
+
+## CPython 3.14 changes
+
+`posix_copy_file_range` and `posix_splice` were added in 3.12 / 3.13. The
+multi-phase module init via `Py_mod_exec` replaced the old single-phase init in
+3.12. `DirEntry` gained a `__fspath__` method in 3.6 and has been stable since.

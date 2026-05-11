@@ -1,0 +1,205 @@
+---
+title: Python/optimizer.c
+description: Tier-2 trace-compilation optimizer. Records micro-op traces from backward jumps and installs compiled executor objects into code objects.
+cpython_path: Python/optimizer.c
+cpython_version: "3.14"
+lines: 1500
+status: annotated
+ported_to: vm/eval_gen.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Python/optimizer.c`
+
+<CpyLink path="Python/optimizer.c" />
+
+The tier-2 optimizer is CPython's second compilation tier, introduced
+experimentally in 3.12 and stabilized through 3.13/3.14. Where tier-1
+specialization rewrites individual instructions, tier-2 records entire
+execution traces across loop back-edges, runs peephole passes over the
+trace, and installs an `_PyExecutorObject` into the code object. On
+subsequent loop iterations the tier-1 eval loop detects the executor and
+transfers control to the tier-2 micro-op dispatch (in `ceval.c`) or
+to the JIT-compiled native code (when `_Py_JIT` is defined).
+
+The optimizer operates entirely in terms of `_PyUOpInstruction`, a
+64-bit struct that encodes one micro-op. Micro-ops correspond roughly to
+bytecode instructions but are lower-level: a single bytecode can expand
+into several micro-ops, and some micro-ops are pure optimizer artifacts
+(guards, version checks) with no direct bytecode counterpart.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Python/optimizer.c" lines="1-120">1-120</Cpy> | `_PyUOpInstruction`, `_PyExecutorObject`, executor vtable | Core data types. One micro-op is `{uint16_t opcode, uint8_t oparg, uint8_t format, uint64_t operand}`. | `vm/eval_gen.go` |
+| <Cpy path="Python/optimizer.c" lines="121-280">121-280</Cpy> | `_Py_Optimizer`, optimizer vtable, `_PyOptimizer_NewUOpOptimizer` | Base optimizer object and the default `UOpOptimizer` constructor. | `vm/eval_gen.go` |
+| <Cpy path="Python/optimizer.c" lines="281-500">281-500</Cpy> | `_PyOptimizer_Optimize` | Entry point called from the tier-1 back-edge hot path when the counter fires. Delegates to `opt->optimize`. | `vm/eval_gen.go` |
+| <Cpy path="Python/optimizer.c" lines="501-900">501-900</Cpy> | `translate_bytecode_to_trace` | Converts a bytecode sequence starting at the back-edge target into a `_PyUOpInstruction` array. Handles guards, branches, and loop headers. | `vm/eval_gen.go` |
+| <Cpy path="Python/optimizer.c" lines="901-1100">901-1100</Cpy> | `uop_optimize` | Peephole pass over a recorded trace: dead-guard elimination, constant folding, type propagation. | `vm/eval_gen.go` |
+| <Cpy path="Python/optimizer.c" lines="1101-1300">1101-1300</Cpy> | `make_executor` / `_PyExecutorObject` installation | Allocates the executor, copies the optimized trace, and stores it in `code->co_executors`. | `vm/eval_gen.go` |
+| <Cpy path="Python/optimizer.c" lines="1301-1400">1301-1400</Cpy> | `executor_clear` / `executor_dealloc` | Executor lifecycle: clear back-pointers in `co_executors` and free. | `vm/eval_gen.go` |
+| <Cpy path="Python/optimizer.c" lines="1401-1500">1401-1500</Cpy> | `_PyOptimizer_GetDefaultOptimizer`, `_PyOptimizer_SetDefaultOptimizer`, stats | Public API and per-optimizer statistics. | `vm/eval_gen.go` |
+
+## Reading
+
+### `_Py_Optimizer` interface (lines 121 to 280)
+
+<CpyLink path="Python/optimizer.c" lines="121-280" />
+
+The optimizer is exposed as a C object with a vtable:
+
+```c
+typedef struct _PyOptimizerObject {
+    PyObject_HEAD
+    optimize_func optimize;
+    /* Stats: */
+    uint32_t  calls_to_optimize;
+    uint32_t  optimizations_attempted;
+    uint32_t  optimizations_completed;
+    uint32_t  optimizations_failed;
+} _PyOptimizerObject;
+
+typedef int (*optimize_func)(
+    _PyOptimizerObject *self,
+    PyCodeObject *code,
+    _Py_CODEUNIT *instr,
+    _PyExecutorObject **exec_ptr,
+    int curr_stackdepth,
+    bool progress_needed);
+```
+
+This design lets embedders and test suites swap in a custom optimizer by
+calling `_PyOptimizer_SetDefaultOptimizer`. The default is the
+`UOpOptimizer` created by `_PyOptimizer_NewUOpOptimizer`. Its `optimize`
+pointer is set to `uop_optimize` (which calls `translate_bytecode_to_trace`
+then `uop_optimize`). The interpreter holds a reference to the current
+default optimizer in `_PyRuntime.optimizer`; the back-edge counter
+decrement in `JUMP_BACKWARD` reads this pointer without locking since it
+is only mutated at startup.
+
+### `translate_bytecode_to_trace` (lines 501 to 900)
+
+<CpyLink path="Python/optimizer.c" lines="501-900" />
+
+This is the trace recorder. Starting from the instruction pointed to by the
+back-edge target, it walks forward through the bytecode, emitting one or
+more `_PyUOpInstruction` entries per bytecode. Each bytecode has a
+corresponding `_PyUOps_*` expansion defined in `Python/uop_metadata.h`.
+
+```c
+static int
+translate_bytecode_to_trace(
+    PyCodeObject *code, _Py_CODEUNIT *instr,
+    _PyUOpInstruction *trace, int max_length,
+    _PyBloomFilter *dependencies)
+{
+    ...
+    for (;;) {
+        uint8_t opcode = instr->op.code;
+        uint8_t oparg  = instr->op.arg;
+        ...
+        switch (opcode) {
+        case JUMP_BACKWARD:
+            if (instr + 2 - backwards_jump == trace_length) {
+                ADD_TO_TRACE(_JUMP_TO_TOP, 0, 0);
+            }
+            goto done;
+        case LOAD_FAST:
+            ADD_TO_TRACE(_LOAD_FAST, oparg, 0);
+            break;
+        ...
+        default:
+            if (!opcode_has_uop_expansion(opcode)) {
+                goto cannot_specialize;
+            }
+            emit_uop_expansion(opcode, oparg, instr, trace, ...);
+        }
+        instr++;
+    }
+done:
+    return trace_length;
+}
+```
+
+The function stops recording when it hits a branch that cannot be inlined
+(an `if` that both arms take at runtime), when the trace exceeds
+`UOP_MAX_TRACE_LENGTH`, or when it loops back to the starting instruction,
+at which point it emits `_JUMP_TO_TOP` to close the loop. Branches whose
+target is within the trace are inlined as guards (`_GUARD_*` uops followed
+by the non-taken-branch body).
+
+Type version checks emitted during translation are registered with the
+`dependencies` bloom filter. If a type's version tag changes after the
+executor is installed, `executor_clear` is called to invalidate it.
+
+### `_PyExecutorObject` installation (lines 1101 to 1300)
+
+<CpyLink path="Python/optimizer.c" lines="1101-1300" />
+
+After `translate_bytecode_to_trace` and `uop_optimize` both succeed,
+`make_executor` allocates a variable-length `_PyExecutorObject` whose
+trailing array holds the optimized `_PyUOpInstruction` sequence:
+
+```c
+static _PyExecutorObject *
+make_executor(int length, _PyUOpInstruction *buffer,
+              _PyBloomFilter *dependencies)
+{
+    int size = offsetof(_PyExecutorObject, trace) +
+               length * sizeof(_PyUOpInstruction);
+    _PyExecutorObject *executor = PyObject_GC_NewVar(
+        _PyExecutorObject, &_PyUOpExecutor_Type, length);
+    if (executor == NULL) {
+        return NULL;
+    }
+    memcpy(executor->trace, buffer, length * sizeof(_PyUOpInstruction));
+    ...
+    return executor;
+}
+```
+
+The executor is then stored in `code->co_executors` at the slot
+corresponding to the back-edge instruction's `oparg`. The tier-1 dispatch
+for `JUMP_BACKWARD` checks this slot on every iteration; a non-NULL
+executor causes a branch to `enter_tier_two:` in `ceval.c`, which picks up
+`next_uop = executor->trace` and starts the micro-op dispatch loop.
+
+When a type that the executor depends on is mutated, `executor_clear`
+walks `code->co_executors` and NULLs out any entry whose dependency bloom
+filter intersects the changed type's version. This makes optimization
+invalidation lazy: the slot is cleared but the executor object is not freed
+until its refcount drops to zero, which happens on the next back-edge that
+finds a NULL slot and decrements the old executor reference.
+
+## gopy mirror
+
+`vm/eval_gen.go` contains the tier-2 dispatch loop and the
+`_PyUOpInstruction` struct. The trace recorder and peephole optimizer from
+this file are partially ported. `translate_bytecode_to_trace` is ported
+for a subset of uops covering the 14 micro-ops shipped in v0.12.0. The
+`_PyExecutorObject` and its installation into `code->co_executors` are
+present; invalidation via bloom filter dependencies is stubbed.
+
+The `_Py_JIT` path (which replaces the micro-op dispatch entirely with
+native code) is intentionally not ported. gopy has no JIT; the
+`_Py_JIT` preprocessor symbol is permanently undefined in the Go port.
+
+## CPython 3.14 changes worth noting
+
+- The `_PyUOpInstruction` format field was added in 3.13 to distinguish
+  operand encodings (16-bit oparg vs 64-bit operand vs pointer); 3.14
+  inherits this layout.
+- In 3.14 the default optimizer is no longer installed unconditionally at
+  interpreter startup. It is activated only when
+  `sys.flags.optimize_uops` is non-zero, matching the `-X optimize_uops`
+  flag or the `PYTHON_OPTIMIZATIONS` environment variable.
+- `uop_optimize` gained a type-propagation sub-pass in 3.13 that
+  eliminates redundant `_CHECK_MANAGED_OBJECT_HAS_VALUES` guards; this
+  pass is included in the 3.14 tree.
+- The free-threaded build requires executor invalidation to be
+  thread-safe. In the GIL build a simple `co_executors[i] = NULL` is
+  sufficient; in the free-threaded build a compare-and-swap is used
+  instead to avoid data races with threads that are concurrently
+  executing the tier-2 loop.

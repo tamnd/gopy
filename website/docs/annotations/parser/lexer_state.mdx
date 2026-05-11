@@ -1,0 +1,146 @@
+---
+title: Parser/lexer/state.c
+description: Allocates, clones, resets, and frees the per-tokenizer lx_state struct.
+cpython_path: Parser/lexer/state.c
+cpython_version: "3.14"
+lines: 151
+status: annotated
+ported_to: parser/lexer/state.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Parser/lexer/state.c`
+
+<CpyLink path="Parser/lexer/state.c" />
+
+Owns the lifetime of `lx_state`, the bookkeeping struct that the byte-level
+scanner in `lexer.c` reads and writes on every character. The file is short
+(151 lines) but it defines the memory contract that the rest of the lexer
+depends on: every field touched by `tok_nextc`, the indent stack, and the
+parenthesis counter lives in this struct.
+
+`lx_state` is distinct from `tok_state` (the richer `struct tok_state` in
+`Parser/tokenize.h`). `lx_state` is the inner, reentrant part: a cursor into
+a single physical buffer. `tok_state` wraps it along with encoding, error
+state, and the mode stack.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Parser/lexer/state.c" lines="1-30">1-30</Cpy>   | `lx_state` struct layout | Field declarations: buffer pointers, position, indent stack, paren counter. | `parser/lexer/state.go:State` |
+| <Cpy path="Parser/lexer/state.c" lines="32-68">32-68</Cpy> | `lx_state_init` | Zero-initializes and sets up the indent stack to a single level at column 0. | `(*State).Init` |
+| <Cpy path="Parser/lexer/state.c" lines="70-89">70-89</Cpy> | `lx_state_free` | Releases the indent stack allocation; safe to call on a never-initialized state. | `(*State).Free` |
+| <Cpy path="Parser/lexer/state.c" lines="91-116">91-116</Cpy> | `lx_state_reset` | Restores position fields to a saved snapshot; used after indent-error recovery. | `(*State).Reset` |
+| <Cpy path="Parser/lexer/state.c" lines="118-151">118-151</Cpy> | `lx_state_clone` | Deep-copies the state including the indent stack; used for speculative parsing. | `(*State).Clone` |
+
+## Reading
+
+### `lx_state` fields (lines 1 to 30)
+
+<CpyLink path="Parser/lexer/state.c" lines="1-30" />
+
+```c
+typedef struct {
+    const char *input;      /* start of source buffer */
+    Py_ssize_t  input_len;  /* total byte length */
+    const char *cur;        /* next byte to consume */
+    const char *start;      /* start of current token */
+    const char *end;        /* one past last byte of current token */
+    int         cur_line;   /* 1-based line number of tok->cur */
+    int         cur_col;    /* 0-based column of tok->cur */
+    int        *indent_stack;   /* array of column values, deepest active indent */
+    int        *altindent_stack;/* parallel array using ALTTABSIZE */
+    int         indent;         /* current stack top index */
+    int         indstack_size;  /* allocated length of indent_stack */
+    int         paren_level;    /* net open brackets; 0 = at top level */
+} lx_state;
+```
+
+`cur_line` and `cur_col` are updated by `tok_nextc` on every newline and
+character advance. They feed into `SyntaxError` location reporting. The two
+parallel indent stacks (`indent_stack` and `altindent_stack`) mirror the two
+tab-width computations in `tok_get_normal_mode`: `indent_stack` uses the
+configured `tabsize`, `altindent_stack` always uses `ALTTABSIZE = 1`. A
+mismatch between the two at any indent level is the `TabError`.
+
+`paren_level` is incremented on `(`, `[`, `{` and decremented on the
+matching closers. When it is nonzero, logical newlines are suppressed
+(implicit line joining). The lexer does not balance types; only the net count
+matters.
+
+### `lx_state_init` (lines 32 to 68)
+
+<CpyLink path="Parser/lexer/state.c" lines="32-68" />
+
+```c
+int
+lx_state_init(lx_state *lx, const char *input, Py_ssize_t input_len)
+{
+    memset(lx, 0, sizeof(*lx));
+    lx->input     = input;
+    lx->input_len = input_len;
+    lx->cur       = input;
+    lx->cur_line  = 1;
+
+    lx->indstack_size = INDENT_STACK_INITIAL;
+    lx->indent_stack    = PyMem_New(int, lx->indstack_size);
+    lx->altindent_stack = PyMem_New(int, lx->indstack_size);
+    if (!lx->indent_stack || !lx->altindent_stack) {
+        return -1;
+    }
+    lx->indent_stack[0]    = 0;
+    lx->altindent_stack[0] = 0;
+    lx->indent = 0;
+    return 0;
+}
+```
+
+`INDENT_STACK_INITIAL` is 10, matching CPython's historical limit of 100
+indent levels (the stack is reallocated when exhausted). Columns default to 0
+and are valid even before the first character is read. Line numbering starts
+at 1 to match Python's 1-based `lineno` attribute on `SyntaxError`.
+
+### `lx_state_clone` (lines 118 to 151)
+
+<CpyLink path="Parser/lexer/state.c" lines="118-151" />
+
+```c
+int
+lx_state_clone(lx_state *dst, const lx_state *src)
+{
+    *dst = *src;   /* shallow copy all scalar fields */
+
+    dst->indent_stack    = PyMem_New(int, src->indstack_size);
+    dst->altindent_stack = PyMem_New(int, src->indstack_size);
+    if (!dst->indent_stack || !dst->altindent_stack) {
+        return -1;
+    }
+    memcpy(dst->indent_stack,    src->indent_stack,
+           (src->indent + 1) * sizeof(int));
+    memcpy(dst->altindent_stack, src->altindent_stack,
+           (src->indent + 1) * sizeof(int));
+    return 0;
+}
+```
+
+Used by the PEG parser when it needs to backtrack over an indentation
+boundary. The shallow copy of all scalar fields is correct because `input`,
+`start`, and `end` are pointers into a buffer that neither the original nor
+the clone owns; the deep copy covers only the two heap-allocated stacks.
+
+In the gopy mirror (`parser/lexer/state.go`) the indent stacks are Go slices,
+so `Clone` is a simple `append([]int(nil), src.IndentStack...)` rather than a
+`memcpy`.
+
+### `lx_state_reset` (lines 91 to 116)
+
+<CpyLink path="Parser/lexer/state.c" lines="91-116" />
+
+Called after `_PyTokenizer_indenterror` backtracks the cursor to retry
+tokenization with a corrected indent expectation. It restores `cur`,
+`cur_line`, `cur_col`, `start`, and `end` from a saved snapshot but leaves
+`indent_stack` and `paren_level` intact. This asymmetry is intentional: the
+indent stack correction has already been applied by the error-recovery path;
+only the byte position needs to rewind.
