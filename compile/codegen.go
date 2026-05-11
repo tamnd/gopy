@@ -219,6 +219,23 @@ func (c *Compiler) enterScope(sc *symtable.Entry) {
 	c.varnameCache = map[string]int{}
 	c.freeCache = map[string]int{}
 	c.cellCache = map[string]int{}
+	// Pre-allocate FreeVars slots in a deterministic order so the
+	// outer scope's emitClosure (which pushes cells in the same order)
+	// and the inner's lazy LOAD_DEREF emission agree on slot indices.
+	// Without this, the inner's FreeVars order depends on which free
+	// var is referenced first in the body, while the outer sorts
+	// alphabetically, producing a slot mismatch on COPY_FREE_VARS.
+	var freeNames []string
+	for name, flags := range sc.Symbols {
+		if flags.Scope() == symtable.Free {
+			freeNames = append(freeNames, name)
+		}
+	}
+	sortStrings(freeNames)
+	for _, name := range freeNames {
+		u.FreeVars = append(u.FreeVars, name)
+		c.freeCache[name] = len(u.FreeVars) - 1
+	}
 }
 
 // buildQualname assembles co_qualname from the parent unit stack and
