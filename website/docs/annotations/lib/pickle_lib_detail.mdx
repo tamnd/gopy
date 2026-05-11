@@ -1,0 +1,96 @@
+---
+title: Lib/pickle.py
+description: "Annotated reading: CPython pickle serialization"
+cpython_path: Lib/pickle.py
+cpython_version: "3.14"
+lines: 1900
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/pickle.py" />
+
+The `pickle` module serializes and deserializes arbitrary Python object graphs to a byte stream. It is a pure-Python implementation; a C accelerator (`_pickle`) shadows it at import time but exposes the same public API.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1–100 | module header, constants | protocol version table, opcode imports |
+| 101–200 | `PickleError`, `PicklingError`, `UnpicklingError` | exception hierarchy |
+| 201–500 | `Pickler.__init__`, `Pickler.dump`, `Pickler.save` | entry point and dispatch |
+| 501–750 | `Pickler.save_reduce`, `Pickler.save_pers` | reduce protocol and persistent ID |
+| 751–950 | `Pickler.save_*` family | per-type save methods |
+| 951–1100 | `PickleBuffer`, `Unpickler.__init__` | buffer protocol, unpickler setup |
+| 1101–1450 | `Unpickler.load`, `Unpickler.load_*` | opcode dispatch table |
+| 1451–1650 | memo dict helpers, `_Unframer` | framing and memoization |
+| 1651–1900 | `encode_long`, `decode_long`, module-level helpers | integer encoding utilities |
+
+## Reading
+
+### Pickler.dump and the save dispatch chain
+
+`Pickler.dump` is a thin wrapper that calls `self.save(obj)` and then `self.write(STOP)`. The real work is in `save`, which walks a fixed dispatch table keyed by `type(obj)`. For types not in the table it falls through to `save_reduce`, which queries `__reduce_ex__` then `__reduce__`.
+
+```python
+# CPython: Lib/pickle.py:495 Pickler.save
+    t = type(obj)
+    if t is int:
+        self.save_long(obj)
+        return
+    ...
+    reduce = getattr(obj, "__reduce_ex__", None)
+    if reduce is not None:
+        rv = reduce(self.proto)
+    else:
+        reduce = getattr(obj, "__reduce__", None)
+        rv = reduce()
+    self.save_reduce(obj=obj, *rv)
+```
+
+`save_reduce` then emits the `REDUCE` opcode after pushing the callable and its arguments onto the virtual stack. Protocol 2 and later use `NEWOBJ` instead when `obj.__class__` matches the callable, avoiding a full `__call__` round-trip on unpickling.
+
+### PROTO/FRAME framing (protocols 4 and 5)
+
+Protocol 4 introduced framing: the stream is split into variable-length frames, each prefixed by a `FRAME` opcode and an 8-byte little-endian length. The unpickler reads one frame at a time into a buffer, which allows streaming without seeking. `_Framer` accumulates writes and flushes when the current frame exceeds `_FRAME_SIZE_TARGET` (64 KiB by default).
+
+```python
+# CPython: Lib/pickle.py:211 _Framer.commit_frame
+    if self.current_frame:
+        f = self.current_frame
+        if f.tell() > 0:
+            self.file_write(FRAME)
+            self.file_write(pack("<Q", f.tell()))
+            f.seek(0)
+            self.file_write(f.read())
+        self.current_frame = None
+```
+
+Protocol 5 adds `BYTEARRAY8` and `NEXT_BUFFER` opcodes so that `PickleBuffer` objects can be handed off to an out-of-band `buffer_callback` rather than embedded in the stream.
+
+### Unpickler load dispatch and memo deduplication
+
+`Unpickler.load` is a tight loop: read one opcode byte, look up the handler in `dispatch` (a plain `dict` keyed by opcode integer), call it. The memo dict maps integer keys to already-constructed objects. `PUT`/`BINPUT`/`LONG_BINPUT` write to the memo; `GET`/`BINGET`/`LONG_BINGET` read from it. This is the mechanism that reconstructs shared references and breaks cycles for mutable containers.
+
+```python
+# CPython: Lib/pickle.py:1101 Unpickler.load
+    dispatch = {}
+
+    def load(self):
+        ...
+        while True:
+            key = read(1)
+            assert len(key) == 1
+            dispatch[key[0]](self)
+```
+
+The `persistent_load` hook lets the host application intercept `PERSID`/`BINPERSID` opcodes and substitute domain objects (database rows, file handles, etc.) without encoding them in the pickle stream.
+
+## gopy notes
+
+Status: not yet ported.
+
+Planned package path: `module/pickle/`.
+
+The pure-Python implementation is self-contained and relies only on `struct`, `io`, `builtins`, and `copyreg`. The C accelerator (`Modules/_pickle.c`) implements the same protocol with a hand-rolled mark stack and a C-level memo dict. The gopy port will target the pure-Python semantics first, then expose the same public API (`dumps`, `loads`, `Pickler`, `Unpickler`, `PickleError`). The `PickleBuffer` buffer-protocol path (protocol 5) can be deferred to a follow-on milestone.

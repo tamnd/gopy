@@ -1,0 +1,238 @@
+---
+title: Modules/_sre.c
+description: "CPython C regex engine: SRE_STATE layout, opcode dispatch, scan loop, Python API surface, and group back-references"
+cpython_path: Modules/_sre.c
+cpython_version: "3.14"
+lines: 3800
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/_sre.c" />
+
+`Modules/_sre.c` implements the SRE (Simple Regular Expression) engine that backs the `re` module. It defines `SRE_STATE`, the per-match working state, and the two core functions `sre_match` (backtracking NFA match from a fixed position) and `sre_search` (scan loop that advances the start position). The Python-visible `PatternObject` and `MatchObject` types are also defined here, exposing `match`, `search`, `findall`, `finditer`, and `sub` to Python code.
+
+## Map
+
+| Symbol | Kind | Lines (approx) | Purpose |
+|---|---|---|---|
+| `SRE_STATE` | struct | 60-110 | Per-match state: pattern buffer, string pointers, mark array, repeat stack |
+| `PatternObject` | struct | 130-170 | Compiled pattern: code buffer, group count, group name index |
+| `MatchObject` | struct | 180-220 | Match result: span array, subject string, pattern back-ref |
+| `sre_match` | function | 400-600 | NFA match from fixed start position, opcode dispatch loop |
+| `sre_search` | function | 610-700 | Scan loop: advance start, call sre_match, handle anchors |
+| `sre_at` | function | 240-310 | Anchor checks: BOL, EOL, WORD boundary, UNI_LINEBREAK |
+| `sre_category` | function | 320-395 | Character category tests: digit, space, word (locale/unicode variants) |
+| `pattern_match` | function | 2200-2310 | Python `Pattern.match()`: validate args, call sre_search with MATCH mode |
+| `pattern_search` | function | 2320-2410 | Python `Pattern.search()`: full scan from pos |
+| `pattern_findall` | function | 2420-2560 | Python `Pattern.findall()`: collect all non-overlapping matches |
+| `pattern_sub` | function | 2570-2720 | Python `Pattern.sub()`: replace with string or callable |
+| `match_getitem` | function | 3100-3180 | `Match.__getitem__`: return group by index or name |
+| `REPEAT` handler | inline | 510-570 | Greedy/lazy/possessive repeat with backtrack stack entry |
+| `GROUPREF` handler | inline | 580-600 | Back-reference: compare stored span against current position |
+
+## Reading
+
+### SRE_STATE struct and pattern buffer
+
+`SRE_STATE` is allocated on the C stack for each match attempt. It holds a pointer into the compiled pattern code (a `Py_ssize_t` array of opcodes and operands), two string-pointer pairs for the subject (`beginning`/`end` and `ptr`), and a flat `mark` array that stores group span endpoints as pointer offsets.
+
+```c
+// CPython: Modules/_sre.c:60 SRE_STATE
+typedef struct SRE_STATE {
+    const void *ptr;          /* current position in subject string */
+    const void *beginning;    /* start of subject */
+    const void *start;        /* start of current match attempt */
+    const void *end;          /* end of subject */
+    SRE_CODE *pattern;        /* compiled pattern code array */
+    Py_ssize_t lastindex;     /* index of last matched group */
+    Py_ssize_t lastmark;      /* highest mark index set so far */
+    const void *mark[SRE_MARK_SIZE]; /* group start/end pointers */
+    /* repeat stack */
+    SRE_REPEAT *repeat;
+    /* string kind: SRE_KIND_STR / SRE_KIND_UCS1 / UCS2 / UCS4 */
+    int charsize;
+    int isbytes;
+    /* error flag set on internal limit exceeded */
+    int error;
+} SRE_STATE;
+```
+
+The `mark` array stores pairs of `(start_ptr, end_ptr)` for each capture group, indexed as `mark[2*group]` and `mark[2*group+1]`. Group 0 is the overall match. Group pointers are relative to `beginning`, converted to integer offsets only when building the `MatchObject` result.
+
+### sre_match opcode dispatch
+
+`sre_match` is a tight `switch`-based dispatch loop over the compiled pattern's opcode stream. Each case reads its operand(s) from the pattern buffer, advances `state->ptr` on success, or returns `0` (failure) to trigger backtracking. The function returns `state->ptr` (non-NULL) on success.
+
+```c
+// CPython: Modules/_sre.c:400 sre_match
+static const void *
+sre_match(SRE_STATE *state, SRE_CODE *pattern)
+{
+    const void *ptr = state->ptr;
+    ...
+    for (;;) {
+        switch (*pattern++) {
+        case SRE_OP_LITERAL:
+            if (ptr >= end || SRE_CHAR(ptr) != (SRE_CODE)pattern[0])
+                return NULL;     /* fail */
+            ptr = SRE_NEXT(ptr);
+            pattern++;
+            break;
+
+        case SRE_OP_ANY:
+            /* match any character except newline */
+            if (ptr >= end || SRE_IS_LINEBREAK(SRE_CHAR(ptr)))
+                return NULL;
+            ptr = SRE_NEXT(ptr);
+            break;
+
+        case SRE_OP_AT:
+            if (!sre_at(state, ptr, *pattern++))
+                return NULL;
+            break;
+
+        case SRE_OP_BRANCH: {
+            /* try each branch; restore ptr on failure */
+            const void *saved = ptr;
+            SRE_CODE *branch = pattern;
+            while (*branch) {
+                state->ptr = saved;
+                if (sre_match(state, branch + 1))
+                    return state->ptr;
+                branch += *branch;
+            }
+            return NULL;
+        }
+
+        case SRE_OP_SUCCESS:
+            state->ptr = ptr;
+            return ptr;
+
+        case SRE_OP_FAILURE:
+            return NULL;
+
+        ...
+        }
+    }
+}
+```
+
+`SRE_OP_AT` delegates to `sre_at`, which handles `AT_BEGINNING`, `AT_END`, `AT_WORD_BOUNDARY`, and their Unicode-aware variants. `SRE_OP_BRANCH` is the backtracking core: it saves `ptr` and tries each alternative in the compiled branch list.
+
+### sre_search scan loop and possessive/atomic groups
+
+`sre_search` wraps `sre_match` in a loop that advances the start position one character at a time until the pattern matches or the subject is exhausted. Anchor opcodes (`SRE_OP_AT AT_BEGINNING`) allow an early-exit optimisation that skips the scan entirely.
+
+```c
+// CPython: Modules/_sre.c:610 sre_search
+static const void *
+sre_search(SRE_STATE *state, SRE_CODE *pattern)
+{
+    const void *ptr  = state->start;
+    const void *end  = state->end;
+    int flags = 0;
+
+    /* check for prefix literal that lets us skip ahead */
+    if (pattern[0] == SRE_OP_INFO) {
+        /* INFO block carries prefix string and flags */
+        ...
+    }
+
+    while (ptr <= end) {
+        state->ptr   = ptr;
+        state->start = ptr;
+        if (sre_match(state, pattern))
+            return state->ptr;
+        if (ptr >= end) break;
+        ptr = SRE_NEXT(ptr);
+    }
+    return NULL;
+}
+```
+
+Possessive quantifiers (`?+`, `*+`, `++`) and atomic groups (`(?>...)`) are represented by `SRE_OP_POSSESSIVE_REPEAT` and `SRE_OP_ATOMIC_GROUP`. Both opcodes run the inner pattern exactly once (no backtrack stack entry) and cut off any alternative that would require backing out of the already-consumed input.
+
+```c
+// CPython: Modules/_sre.c:555 SRE_OP_POSSESSIVE_REPEAT handler
+        case SRE_OP_POSSESSIVE_REPEAT: {
+            /* run inner pattern greedily, then commit: no retry */
+            SRE_CODE count_min = pattern[1];
+            SRE_CODE count_max = pattern[2];
+            Py_ssize_t count = 0;
+            while (count < (Py_ssize_t)count_max) {
+                const void *next = sre_match(state, pattern + 3);
+                if (!next) break;
+                ptr = next;
+                count++;
+            }
+            if (count < (Py_ssize_t)count_min) return NULL;
+            /* skip over the inner pattern without pushing backtrack frame */
+            pattern += pattern[0];
+            break;
+        }
+```
+
+### PatternObject Python API and GroupRef back-references
+
+`pattern_match` and `pattern_search` convert Python keyword arguments (`pos`, `endpos`) into C integer offsets, set up `SRE_STATE`, and call `sre_search`. They return a `MatchObject` (or `None`) to the caller.
+
+```c
+// CPython: Modules/_sre.c:2200 pattern_match
+static PyObject *
+pattern_match(PatternObject *self, PyObject *args, PyObject *kw)
+{
+    SRE_STATE state;
+    const void *ptr;
+    PyObject *string;
+    Py_ssize_t pos = 0, endpos = PY_SSIZE_T_MAX;
+    static char *kwlist[] = {"string", "pos", "endpos", NULL};
+
+    if (!PyArg_ParseTupleAndKeywords(args, kw, "O|nn:match", kwlist,
+                                     &string, &pos, &endpos))
+        return NULL;
+
+    if (state_init(&state, self, string, pos, endpos) < 0)
+        return NULL;
+    /* force match to be anchored at pos */
+    ptr = sre_search(&state, PatternObject_GetCode(self));
+    if (ptr == NULL || state.start != state.ptr_before_match) {
+        state_fini(&state);
+        Py_RETURN_NONE;
+    }
+    return match_new(&state, self, string);
+}
+```
+
+Group back-references (`\1`, `(?P=name)`) are handled by `SRE_OP_GROUPREF`. The handler reads the stored span from `state->mark`, then compares the corresponding substring against the current position character by character.
+
+```c
+// CPython: Modules/_sre.c:580 SRE_OP_GROUPREF handler
+        case SRE_OP_GROUPREF: {
+            Py_ssize_t g = pattern[0] * 2;
+            pattern++;
+            const void *p = state->mark[g];
+            const void *e = state->mark[g + 1];
+            if (!p || !e || e < p) return NULL;  /* group not participated */
+            while (p < e) {
+                if (ptr >= end) return NULL;
+                if (SRE_CHAR(p) != SRE_CHAR(ptr)) return NULL;
+                p = SRE_NEXT(p);
+                ptr = SRE_NEXT(ptr);
+            }
+            break;
+        }
+```
+
+`pattern_findall` calls `sre_search` in a loop, advancing `pos` by one on zero-width matches to avoid infinite loops. `pattern_sub` does the same but interleaves subject substrings and replacement strings (or calls the replacement callable) into a list that is joined at the end.
+
+## gopy notes
+
+Status: not yet ported.
+
+Planned package path: `module/re/`.
+
+The compiled pattern code is already a portable `[]uint32` slice in CPython, so porting the opcode dispatch to a Go `switch` over a `uint32` slice is mechanical. `SRE_STATE` becomes a Go struct holding `[]rune` (or `string` + byte offset for pure-ASCII patterns). The `mark` array becomes `[][2]int` of rune-index pairs.
+
+The main complexity is the backtrack stack (`SRE_REPEAT` linked list) and the possessive/atomic group semantics. These require careful mapping to Go's explicit stack allocation before any Python API wiring is attempted. The `pattern_sub` callable-replacement path depends on `objects/function.go` call dispatch being stable, which it is as of v0.12.1.

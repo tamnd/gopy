@@ -1,0 +1,138 @@
+---
+title: Include/cpython/pystate.h
+description: "Annotated reading of Include/cpython/pystate.h"
+cpython_path: Include/cpython/pystate.h
+cpython_version: "3.14"
+lines: 200
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Include/cpython/pystate.h" />
+
+`pystate.h` defines the two most central runtime objects: `PyInterpreterState` and `PyThreadState`. Together they carry every piece of mutable state that the interpreter needs while executing Python code, from the module table and builtins to the current frame pointer and trace hooks.
+
+## Map
+
+| Lines | Symbol | Purpose |
+|-------|--------|---------|
+| 1–15 | guard / includes | Header guard, pulls in `frameobject.h` and `cpython/initconfig.h` |
+| 17–60 | `PyInterpreterState` | Per-interpreter fields: modules, builtins, codec state |
+| 62–90 | `PyInterpreterState` (continued) | `modules_by_index`, import system state, GIL reference |
+| 92–140 | `PyThreadState` | Per-thread fields: frame, recursion depth, GC generation |
+| 142–165 | `PyThreadState` (continued) | Trace/profile hooks, async exception, dict |
+| 167–185 | `Py_tracefunc` | Trace callback typedef and event constants |
+| 187–200 | Accessor functions | `PyThreadState_Get*`, `_PyInterpreterState_Get` |
+
+## Reading
+
+### PyInterpreterState public fields
+
+`PyInterpreterState` owns all state that is shared across threads running in the same interpreter. In a `Py_NewInterpreter` sub-interpreter, a fresh `PyInterpreterState` is allocated; the main interpreter's instance is created during `Py_Initialize`.
+
+```c
+// CPython: Include/cpython/pystate.h:20 PyInterpreterState
+typedef struct _is {
+    struct _is *next;
+    struct _ts *threads.head;
+
+    PyObject *modules;          /* sys.modules dict */
+    PyObject *modules_by_index; /* list: index -> module */
+    PyObject *builtins;         /* builtins dict */
+    PyObject *importlib;        /* importlib._bootstrap module */
+    ...
+} PyInterpreterState;
+```
+
+`modules` is the `sys.modules` mapping. Every import lookup starts here. Because it is a plain `PyObject *`, it can be replaced at runtime (and some test isolation tools do exactly that).
+
+`modules_by_index` is a `list` indexed by a per-module integer ID assigned when the module is first registered via `PyState_AddModule`. Extension modules use this to retrieve their per-interpreter state without a dict lookup.
+
+`builtins` is the `__builtins__` dict. The `LOAD_GLOBAL` fast path checks the frame's globals first, then falls back here. A sub-interpreter gets a fresh `builtins` dict, so each interpreter can shadow built-in names independently.
+
+`importlib` caches the `importlib._bootstrap` module loaded during interpreter startup. The import machinery calls into it for `_find_spec` and related operations.
+
+### PyThreadState public fields
+
+Each OS thread that runs Python code owns a `PyThreadState`. The GIL serializes access, but the struct itself is per-thread, so fields like the frame pointer need no locking.
+
+```c
+// CPython: Include/cpython/pystate.h:95 PyThreadState
+typedef struct _ts {
+    struct _ts *prev;
+    struct _ts *next;
+    PyInterpreterState *interp;
+
+    struct _PyInterpreterFrame *frame;   /* current frame or NULL */
+    int recursion_depth;
+    int recursion_headroom;
+
+    ...
+
+    Py_tracefunc c_tracefunc;    /* C-level trace callback */
+    PyObject    *c_traceobj;     /* argument passed to c_tracefunc */
+    Py_tracefunc c_profilefunc;
+    PyObject    *c_profileobj;
+
+    PyObject *async_exc;         /* pending async exception or NULL */
+    PyObject *dict;              /* thread-local __dict__ */
+    ...
+} PyThreadState;
+```
+
+`interp` links back to the owning interpreter. It is the primary way code running on a thread reaches `sys.modules`, the GIL, and the codec registry.
+
+`frame` is the top of the frame stack. The eval loop updates it on every call and return. Setting it to `NULL` means no Python frame is currently executing on this thread.
+
+`recursion_depth` increments on every `_Py_EnterRecursiveCall` and decrements on `_Py_LeaveRecursiveCall`. When it reaches `Py_GetRecursionLimit()`, the interpreter raises `RecursionError`. `recursion_headroom` reserves a small number of extra slots so that the error handler can itself execute a small amount of Python.
+
+`c_tracefunc` and `c_traceobj` implement `sys.settrace`. The eval loop checks for a non-NULL `c_tracefunc` at each line event and dispatches through it. The profile hook pair (`c_profilefunc` / `c_profileobj`) is analogous but fires on call and return instead.
+
+`async_exc` holds an exception type queued by another thread via `PyThreadState_SetAsyncExc`. The eval loop checks it periodically (every `sys.getswitchinterval()` ticks) and injects it into the current frame.
+
+### Py_tracefunc and accessor functions
+
+```c
+// CPython: Include/cpython/pystate.h:168 Py_tracefunc
+typedef int (*Py_tracefunc)(
+    PyObject *obj,
+    PyFrameObject *frame,
+    int what,
+    PyObject *arg);
+
+#define PyTrace_CALL       0
+#define PyTrace_EXCEPTION  1
+#define PyTrace_LINE       2
+#define PyTrace_RETURN     3
+#define PyTrace_C_CALL     4
+#define PyTrace_C_EXCEPTION 5
+#define PyTrace_C_RETURN   6
+#define PyTrace_OPCODE     7
+```
+
+The callback receives the object stored in `c_traceobj`, the current frame, an event code, and an event-specific argument (the return value for `PyTrace_RETURN`, the exception tuple for `PyTrace_EXCEPTION`, `None` for `PyTrace_LINE`). Returning `-1` raises an exception; returning `0` continues execution.
+
+The accessor functions provide safe, version-stable ways to read fields that may move between releases.
+
+```c
+// CPython: Include/cpython/pystate.h:188 PyThreadState_GetFrame
+PyAPI_FUNC(PyFrameObject *) PyThreadState_GetFrame(PyThreadState *);
+
+// CPython: Include/cpython/pystate.h:192 PyThreadState_GetInterpreter
+PyAPI_FUNC(PyInterpreterState *) PyThreadState_GetInterpreter(PyThreadState *);
+
+// CPython: Include/cpython/pystate.h:196 PyThreadState_GetID
+PyAPI_FUNC(uint64_t) PyThreadState_GetID(PyThreadState *);
+
+// CPython: Include/cpython/pystate.h:200 _PyInterpreterState_Get
+PyAPI_FUNC(PyInterpreterState *) _PyInterpreterState_Get(void);
+```
+
+`PyThreadState_GetFrame` returns a new reference to the topmost frame, or `NULL` if the thread is not inside an eval loop. Callers must `Py_XDECREF` the result. `PyThreadState_GetID` returns a monotonically increasing integer that uniquely identifies the thread state within the process lifetime. `_PyInterpreterState_Get` is a private but widely used shortcut that returns the interpreter of the calling thread's current `PyThreadState`.
+
+## gopy notes
+
+Status: not yet ported.
+
+The gopy equivalent will live in two packages. The interpreter-level fields from `PyInterpreterState` map to the `Interpreter` struct planned for `vm/interpreter.go`. The thread-level fields from `PyThreadState` map to `vm/thread.go`. The trace-hook machinery (`Py_tracefunc`, event constants) will go into `vm/trace.go` once the eval loop reaches the point where `sys.settrace` needs to work. `_PyInterpreterState_Get` will be a package-level function in `vm` that reads a goroutine-local (or context-carried) pointer.

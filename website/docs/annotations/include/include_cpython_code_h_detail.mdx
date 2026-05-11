@@ -1,0 +1,129 @@
+---
+title: Include/cpython/code.h
+description: "Annotated reading of Include/cpython/code.h"
+cpython_path: Include/cpython/code.h
+cpython_version: "3.14"
+lines: 140
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Include/cpython/code.h" />
+
+`code.h` exposes the public C API for Python code objects. Every `def`, `lambda`, and class body compiles to a `PyCodeObject`. This header is the canonical description of what the interpreter and tooling can read from those objects.
+
+## Map
+
+| Lines | Symbol | Purpose |
+|-------|--------|---------|
+| 1–10 | guard / includes | Header guard, pulls in `object.h` |
+| 12–55 | `PyCodeObject` | Public struct fields for argument counts, stack, flags |
+| 57–90 | `PyCodeObject` (continued) | Bytecode buffer, constants, names, varnames, cells, freevars |
+| 92–110 | `PyCodeObject` (continued) | Filename, qualified name, first line number |
+| 112–130 | `CO_*` constants | Bitmask flags for code object properties |
+| 132–140 | `PyCode_New` / `PyCode_NewWithPosOnlyArgs` | Factory function declarations |
+
+## Reading
+
+### PyCodeObject public fields
+
+The struct is split into several logical groups. The argument-count fields come first.
+
+```c
+// CPython: Include/cpython/code.h:14 PyCodeObject
+typedef struct {
+    PyObject_HEAD
+    int co_argcount;            /* #arguments, except *args */
+    int co_posonlyargcount;     /* #positional only arguments */
+    int co_kwonlyargcount;      /* #keyword only arguments */
+    int co_nlocals;             /* #local variables */
+    int co_stacksize;           /* #entries needed for evaluation stack */
+    int co_flags;               /* CO_..., see below */
+    ...
+} PyCodeObject;
+```
+
+`co_argcount` counts every parameter that can receive a positional argument, including those that also accept keyword form. `co_posonlyargcount` is the subset that must be passed positionally (those before the `/` separator). `co_kwonlyargcount` counts parameters after the `*` that can only be named. The sum `co_argcount + co_kwonlyargcount` gives the total named slots before `**kwargs`.
+
+`co_nlocals` is the number of local variable slots the frame must allocate. It equals the number of distinct names that the compiler decided to store in fast locals, including parameters.
+
+`co_stacksize` is the peak operand stack depth, computed by the compiler's stack-depth analysis pass. The frame allocator uses it to know how many `PyObject *` slots to reserve beyond the fast-local array.
+
+`co_flags` is a bitmask. The important bits are described in the `CO_*` constants section below.
+
+The second group holds the bytecode and its associated data tables.
+
+```c
+// CPython: Include/cpython/code.h:35 PyCodeObject
+    PyObject *co_code;          /* instruction opcodes (bytes) */
+    PyObject *co_consts;        /* list (constants used) */
+    PyObject *co_names;         /* list of strings (names used) */
+    PyObject *co_varnames;      /* tuple of strings (local variable names) */
+    PyObject *co_freevars;      /* tuple of strings (free variable names) */
+    PyObject *co_cellvars;      /* tuple of strings (cell variable names) */
+```
+
+`co_code` is a `bytes` object. In CPython 3.6 and later each instruction is exactly two bytes (opcode + arg); extended args chain additional two-byte pairs before the primary instruction.
+
+`co_consts` is a `tuple` holding every constant referenced by a `LOAD_CONST` instruction. The compiler deduplicates compatible constants at compile time.
+
+`co_names` holds attribute names, global names, and import names referenced by the code. `co_varnames` covers fast locals (parameters first, then pure locals). `co_freevars` names variables captured from an enclosing scope; `co_cellvars` names variables this scope provides to nested scopes. The cell/free relationship implements closures.
+
+The third group carries source-location metadata.
+
+```c
+// CPython: Include/cpython/code.h:55 PyCodeObject
+    PyObject *co_filename;      /* unicode (where it was loaded from) */
+    PyObject *co_name;          /* unicode (name, for display) */
+    PyObject *co_qualname;      /* unicode (qualname, for display) */
+    int       co_firstlineno;   /* first source line number */
+```
+
+`co_filename` is the path string passed to `compile()`. `co_name` is the simple function or class name. `co_qualname` is the dotted qualified name (e.g. `Foo.bar` for a method). `co_firstlineno` is the one-based source line of the `def` or `class` keyword, used by tracebacks and `inspect`.
+
+### CO_* flag constants
+
+```c
+// CPython: Include/cpython/code.h:112 CO_OPTIMIZED
+#define CO_OPTIMIZED    0x0001
+#define CO_NEWLOCALS    0x0002
+#define CO_VARARGS      0x0004
+#define CO_VARKEYWORDS  0x0008
+#define CO_NESTED       0x0010
+#define CO_GENERATOR    0x0020
+#define CO_NOFREE       0x0040
+#define CO_COROUTINE            0x0100
+#define CO_ITERABLE_COROUTINE   0x0200
+#define CO_ASYNC_GENERATOR      0x0400
+```
+
+`CO_OPTIMIZED` means the compiler chose fast-local storage for all variables (always set for normal functions). `CO_NEWLOCALS` tells the frame builder to create a fresh locals dict if `locals()` is called. `CO_VARARGS` and `CO_VARKEYWORDS` indicate the presence of `*args` and `**kwargs` parameters. `CO_NOFREE` is set when both `co_freevars` and `co_cellvars` are empty, allowing the interpreter to skip cell machinery.
+
+`CO_GENERATOR`, `CO_COROUTINE`, and `CO_ASYNC_GENERATOR` distinguish the three kinds of generator-like objects that the `RETURN_GENERATOR` opcode can produce.
+
+### PyCode_New and PyCode_NewWithPosOnlyArgs
+
+```c
+// CPython: Include/cpython/code.h:132 PyCode_New
+PyAPI_FUNC(PyCodeObject *) PyCode_New(
+    int, int, int, int, int, PyObject *, PyObject *,
+    PyObject *, PyObject *, PyObject *, PyObject *,
+    PyObject *, PyObject *, PyObject *, int, PyObject *,
+    PyObject *);
+
+// CPython: Include/cpython/code.h:138 PyCode_NewWithPosOnlyArgs
+PyAPI_FUNC(PyCodeObject *) PyCode_NewWithPosOnlyArgs(
+    int, int, int, int, int, int, PyObject *, PyObject *,
+    PyObject *, PyObject *, PyObject *, PyObject *,
+    PyObject *, PyObject *, PyObject *, int, PyObject *,
+    PyObject *);
+```
+
+`PyCode_New` is the original factory. `PyCode_NewWithPosOnlyArgs` adds the `posonlyargcount` parameter inserted in 3.8 when positional-only syntax (`/`) was added. The compiler always uses the newer form. Extension modules that create synthetic code objects (e.g. for decorators or trampolines) use these functions as well. Both return a new reference or `NULL` on error.
+
+## gopy notes
+
+Status: not yet ported.
+
+The compile package will eventually need a Go counterpart for `PyCodeObject`. The planned home is `compile/code.go`, holding a `Code` struct mirroring the public fields above. The `CO_*` constants will live alongside it as typed bit-flag constants. Factory helpers will be added when the compiler front-end produces real bytecode objects rather than the current in-memory flowgraph representation.

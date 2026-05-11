@@ -1,0 +1,95 @@
+---
+title: Lib/json/__init__.py
+description: "Annotated reading: CPython json package entry points"
+cpython_path: Lib/json/__init__.py
+cpython_version: "3.14"
+lines: 360
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/json/__init__.py" />
+
+`Lib/json/__init__.py` is the public face of the `json` package. It exposes six entry-point functions (`dump`, `dumps`, `load`, `loads`, `JSONEncoder`, `JSONDecoder`) and manages a module-level singleton encoder to avoid repeated object construction for the common case. The actual encoding and decoding logic lives in `json/encoder.py` and `json/decoder.py`; this file is coordination and public API only.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1–40 | module header, docstring | public API summary |
+| 41–55 | imports | `JSONEncoder`, `JSONDecoder`, `JSONDecodeError` |
+| 56–75 | `_default_encoder` | module-level singleton |
+| 76–140 | `dump` | serialize to file object |
+| 141–200 | `dumps` | serialize to string |
+| 201–260 | `load` | deserialize from file object |
+| 261–330 | `loads` | deserialize from string |
+| 331–360 | `__all__`, version note | public exports |
+
+## Reading
+
+### The _default_encoder singleton
+
+When none of the formatting parameters are customized, `dumps` and `dump` delegate to a pre-built `_default_encoder` instance rather than constructing a fresh `JSONEncoder` on each call. The singleton is created at module import time with all defaults.
+
+```python
+# CPython: Lib/json/__init__.py:56 _default_encoder
+_default_encoder = JSONEncoder(
+    skipkeys=False,
+    ensure_ascii=True,
+    check_circular=True,
+    allow_nan=True,
+    indent=None,
+    separators=None,
+    default=None,
+)
+```
+
+If any argument other than `cls` differs from the defaults, the fast path is bypassed and a new encoder is constructed for that call only. This pattern avoids the overhead of `__init__` in the hot path without making callers aware of the caching.
+
+### dumps/loads entry points, separators, and sort_keys
+
+`dumps` is the primary string-serialization entry point. When `indent` is `None` the separators default to `(', ', ': ')`; when `indent` is set they default to `(',', ': ')` to suppress trailing spaces after commas in pretty-printed output. `sort_keys` is forwarded straight to `JSONEncoder`, which sorts `dict` keys via `sorted(dct.items())` in `encoder.py`.
+
+```python
+# CPython: Lib/json/__init__.py:183 dumps
+def dumps(obj, *, skipkeys=False, ensure_ascii=True,
+          check_circular=True, allow_nan=True, cls=None,
+          indent=None, separators=None, default=None,
+          sort_keys=False, **kw):
+    if (not skipkeys and ensure_ascii and
+        check_circular and allow_nan and
+        cls is None and indent is None and separators is None and
+        default is None and not sort_keys and not kw):
+        return _default_encoder.encode(obj)
+    if cls is None:
+        cls = JSONEncoder
+    return cls(
+        skipkeys=skipkeys, ensure_ascii=ensure_ascii,
+        check_circular=check_circular, allow_nan=allow_nan,
+        indent=indent, separators=separators,
+        default=default, sort_keys=sort_keys, **kw).encode(obj)
+```
+
+`loads` follows the same singleton pattern in reverse: if no keyword arguments are customized and the input is a plain `str`, it delegates to `_default_decoder.decode(s)`.
+
+### JSONEncoder.default() as the extension hook
+
+`JSONEncoder.default` raises `TypeError` unconditionally. Callers that need to serialize non-standard types (dates, UUIDs, dataclass instances, etc.) subclass `JSONEncoder` and override `default` to return a JSON-serializable proxy. The encoder calls `default` only when it encounters an object whose type is not in the built-in dispatch table (dict, list, tuple, str, int, float, bool, None).
+
+```python
+# CPython: Lib/json/encoder.py:179 JSONEncoder.default
+    def default(self, o):
+        raise TypeError(f'Object of type {o.__class__.__name__} '
+                        f'is not JSON serializable')
+```
+
+The hook is documented as the sole stable extension point; monkey-patching the dispatch table in `encoder.py` is not supported and breaks across CPython versions.
+
+## gopy notes
+
+Status: not yet ported.
+
+Planned package path: `module/json/`.
+
+The entry-point file is straightforward to port: it is pure coordination with no C-level dependencies. The harder work is in `json/encoder.py` (the chunk-based string encoder, `ESCAPE_DCT` table, float NaN/Inf handling) and `json/decoder.py` (the recursive-descent parser, scanstring, and `JSONDecodeError` with position tracking). Go's standard `encoding/json` package can serve as a backend for an early milestone, exposing the same `dumps`/`loads` signatures, with full CPython-compatible error messages and the `default` hook filled in later.
