@@ -1,0 +1,339 @@
+---
+title: Modules/_bz2module.c
+description: bz2 compression module. Wraps libbzip2 BZ2_bzCompress/BZ2_bzDecompress as BZ2Compressor and BZ2Decompressor objects with GIL-releasing compress and flush.
+cpython_path: Modules/_bz2module.c
+cpython_version: "3.14"
+lines: 641
+status: annotated
+ported_to: module/bz2/
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Modules/_bz2module.c`
+
+<CpyLink path="Modules/_bz2module.c" />
+
+The C backend for the `bz2` module. The pure-Python `Lib/bz2.py` imports this
+module as `_bz2` and wraps `BZ2Compressor` and `BZ2Decompressor` in
+higher-level `BZ2File` and `open()` helpers.
+
+The file is self-contained at 641 lines. It registers two types:
+`BZ2Compressor`, a write-only object that feeds data through
+`BZ2_bzCompress` in `BZ_RUN` mode and finalises the stream with `BZ_FINISH`
+on a call to `flush()`; and `BZ2Decompressor`, a read-only object that drives
+`BZ2_bzDecompress` with an internal input buffer, tracking `eof`,
+`unused_data`, and `needs_input` in the same pattern as `zlib._ZlibDecompressor`
+and `lzma.LZMADecompressor`.
+
+Both types use `PyMutex` for thread safety and release the GIL around the
+compression/decompression calls via `Py_BEGIN_ALLOW_THREADS`.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Modules/_bz2module.c" lines="1-107">1-107</Cpy> | includes, `_bz2_state`, `BZ2Compressor`, `BZ2Decompressor` structs, output-buffer helpers | Module state struct, both object structs, and `_BlocksOutputBuffer` wrappers. | `module/bz2/` |
+| <Cpy path="Modules/_bz2module.c" lines="108-212">108-212</Cpy> | `compress`, `catch_bz2_error`, `BZ2_Malloc`, `BZ2_Free` | Core compress loop (used by both `compress()` and `flush()`); error-code mapper; custom allocator wrappers. | `module/bz2/` |
+| <Cpy path="Modules/_bz2module.c" lines="213-314">213-314</Cpy> | `_bz2_BZ2Compressor_compress_impl`, `_bz2_BZ2Compressor_flush_impl`, `_bz2_BZ2Compressor_impl`, `BZ2Compressor_dealloc` | `BZ2Compressor` methods and constructor. `compress()` calls the shared `compress` loop with `BZ_RUN`; `flush()` calls it with `BZ_FINISH` and marks the object flushed. | `module/bz2/` |
+| <Cpy path="Modules/_bz2module.c" lines="315-496">315-496</Cpy> | `decompress_buf`, `decompress` | Inner decompression engine. `decompress_buf` drives `BZ2_bzDecompress` until input is exhausted or `BZ_STREAM_END` is reached. `decompress` manages the internal input buffer and sets `needs_input`/`eof`. | `module/bz2/` |
+| <Cpy path="Modules/_bz2module.c" lines="497-544">497-544</Cpy> | `_bz2_BZ2Decompressor_decompress_impl`, `_bz2_BZ2Decompressor_impl`, `BZ2Decompressor_dealloc`, `BZ2Decompressor_unused_data_get` | `BZ2Decompressor` methods, constructor, destructor, and the `unused_data` property getter. | `module/bz2/` |
+| <Cpy path="Modules/_bz2module.c" lines="545-641">545-641</Cpy> | `_bz2_exec`, `_bz2_traverse`, `_bz2_clear`, `_bz2_free`, `PyInit__bz2` | Module init. Registers both types in per-interpreter state; no module-level constants (bz2 has no user-visible integer flags). | `module/bz2/` |
+
+## Reading
+
+### `BZ2Compressor` struct layout (lines 1 to 107)
+
+<CpyLink path="Modules/_bz2module.c" lines="1-107" />
+
+```c
+typedef struct {
+    PyObject_HEAD
+    bz_stream bzs;    /* libbzip2 stream state */
+    int       flushed;  /* 1 after flush() is called; compress() checks this */
+    PyMutex   mutex;
+} BZ2Compressor;
+```
+
+`bz_stream` is the libbzip2 analogue of zlib's `z_stream`. It holds
+`next_in`/`avail_in`/`next_out`/`avail_out` pointer-and-length pairs that
+`BZ2_bzCompress` advances on each call. `flushed` is a one-way latch: once
+`flush()` has sent `BZ_FINISH`, any further call to `compress()` raises
+`ValueError("Compressor has been flushed")`.
+
+```c
+typedef struct {
+    PyObject_HEAD
+    bz_stream bzs;
+    char      eof;               /* set when BZ_STREAM_END is seen */
+    PyObject *unused_data;       /* bytes after the compressed stream */
+    char      needs_input;       /* True if internal buffer is empty */
+    char     *input_buffer;      /* heap-allocated unconsumed input */
+    size_t    input_buffer_size;
+    size_t    bzs_avail_in_real; /* 64-bit count of bytes in input_buffer */
+    PyMutex   mutex;
+} BZ2Decompressor;
+```
+
+`bzs_avail_in_real` is the authoritative count of bytes waiting to be
+consumed. `bzs.avail_in` is a truncated `unsigned int` copy used for each
+individual `BZ2_bzDecompress` call; the real count is reconciled after each
+call via `d->bzs_avail_in_real += bzs->avail_in`.
+
+### `BZ2Compressor.compress()` GIL-free loop (lines 108 to 212)
+
+<CpyLink path="Modules/_bz2module.c" lines="108-212" />
+
+Both `compress()` and `flush()` delegate to the static `compress` helper:
+
+```c
+static PyObject *
+compress(BZ2Compressor *c, char *data, size_t len, int action)
+{
+    _BlocksOutputBuffer buffer = {.writer = NULL};
+    OutputBuffer_InitAndGrow(&buffer, -1, &c->bzs.next_out, &c->bzs.avail_out);
+
+    c->bzs.next_in  = data;
+    c->bzs.avail_in = 0;
+
+    for (;;) {
+        int bzerror;
+
+        /* Clip to UINT_MAX because avail_in is unsigned int. */
+        if (c->bzs.avail_in == 0 && len > 0) {
+            c->bzs.avail_in = (unsigned int)Py_MIN(len, UINT_MAX);
+            len -= c->bzs.avail_in;
+        }
+
+        /* In BZ_RUN mode, stop when all input is consumed. */
+        if (action == BZ_RUN && c->bzs.avail_in == 0)
+            break;
+
+        if (c->bzs.avail_out == 0)
+            OutputBuffer_Grow(&buffer, &c->bzs.next_out, &c->bzs.avail_out);
+
+        Py_BEGIN_ALLOW_THREADS
+        bzerror = BZ2_bzCompress(&c->bzs, action);
+        Py_END_ALLOW_THREADS
+
+        if (catch_bz2_error(bzerror))
+            goto error;
+
+        /* In BZ_FINISH mode, stop when the stream end marker is written. */
+        if (action == BZ_FINISH && bzerror == BZ_STREAM_END)
+            break;
+    }
+
+    return OutputBuffer_Finish(&buffer, c->bzs.avail_out);
+error:
+    OutputBuffer_OnError(&buffer);
+    return NULL;
+}
+```
+
+The single loop handles both modes. When `action == BZ_RUN`, the break
+condition is `avail_in == 0` after all input has been fed in. When
+`action == BZ_FINISH`, the break condition is `BZ_STREAM_END` from
+`BZ2_bzCompress`, which means the compressor has written the end-of-stream
+block; `len` is 0 in that case because `flush()` passes `NULL`/0 as the
+input.
+
+`_bz2_BZ2Compressor_compress_impl` and `_bz2_BZ2Compressor_flush_impl` are
+thin wrappers that acquire the mutex, check `flushed`, then call `compress`:
+
+```c
+static PyObject *
+_bz2_BZ2Compressor_compress_impl(BZ2Compressor *self, Py_buffer *data)
+{
+    PyObject *result = NULL;
+    PyMutex_Lock(&self->mutex);
+    if (self->flushed)
+        PyErr_SetString(PyExc_ValueError, "Compressor has been flushed");
+    else
+        result = compress(self, data->buf, data->len, BZ_RUN);
+    PyMutex_Unlock(&self->mutex);
+    return result;
+}
+
+static PyObject *
+_bz2_BZ2Compressor_flush_impl(BZ2Compressor *self)
+{
+    PyObject *result = NULL;
+    PyMutex_Lock(&self->mutex);
+    if (self->flushed)
+        PyErr_SetString(PyExc_ValueError, "Repeated call to flush()");
+    else {
+        self->flushed = 1;
+        result = compress(self, NULL, 0, BZ_FINISH);
+    }
+    PyMutex_Unlock(&self->mutex);
+    return result;
+}
+```
+
+`compresslevel` (1-9, default 9) is passed to `BZ2_bzCompressInit` in the
+constructor. Level 9 gives the best compression ratio; level 1 is the fastest.
+There are no strategy flags in bzip2 (unlike zlib's `Z_HUFFMAN_ONLY` etc.).
+
+### `BZ2Decompressor.decompress()` eof and needs_input (lines 315 to 496)
+
+<CpyLink path="Modules/_bz2module.c" lines="315-496" />
+
+`decompress_buf` is the inner engine. It drives `BZ2_bzDecompress` in a loop,
+growing the output buffer as needed, and sets `d->eof` atomically when it
+sees `BZ_STREAM_END`:
+
+```c
+static PyObject*
+decompress_buf(BZ2Decompressor *d, Py_ssize_t max_length)
+{
+    _BlocksOutputBuffer buffer = {.writer = NULL};
+    bz_stream *bzs = &d->bzs;
+
+    OutputBuffer_InitAndGrow(&buffer, max_length,
+                             &bzs->next_out, &bzs->avail_out);
+    for (;;) {
+        int bzret;
+
+        /* Clip to UINT_MAX for the same reason as the compressor. */
+        bzs->avail_in = (unsigned int)Py_MIN(d->bzs_avail_in_real, UINT_MAX);
+        d->bzs_avail_in_real -= bzs->avail_in;
+
+        Py_BEGIN_ALLOW_THREADS
+        bzret = BZ2_bzDecompress(bzs);
+        Py_END_ALLOW_THREADS
+
+        d->bzs_avail_in_real += bzs->avail_in;  /* add back unconsumed */
+
+        if (catch_bz2_error(bzret))
+            goto error;
+
+        if (bzret == BZ_STREAM_END) {
+            FT_ATOMIC_STORE_CHAR_RELAXED(d->eof, 1);
+            break;
+        } else if (d->bzs_avail_in_real == 0) {
+            break;  /* all input consumed, not yet at end */
+        } else if (bzs->avail_out == 0) {
+            if (OutputBuffer_GetDataSize(&buffer, bzs->avail_out) == max_length)
+                break;  /* output cap reached */
+            OutputBuffer_Grow(&buffer, &bzs->next_out, &bzs->avail_out);
+        }
+    }
+    return OutputBuffer_Finish(&buffer, bzs->avail_out);
+error:
+    OutputBuffer_OnError(&buffer);
+    return NULL;
+}
+```
+
+The outer `decompress` function handles the input buffer logic: if
+`bzs->next_in` is non-NULL (there was leftover input from a previous call),
+it appends the new data to the internal buffer, possibly reallocating it. If
+there was no leftover input, it sets `bzs->next_in` directly to the caller's
+buffer without copying. After `decompress_buf` returns, `decompress` updates
+`needs_input` and `unused_data`:
+
+```c
+if (d->eof) {
+    /* Stream finished. Save any trailing bytes as unused_data. */
+    d->needs_input = 0;
+    if (d->bzs_avail_in_real > 0) {
+        d->unused_data = PyBytes_FromStringAndSize(
+            bzs->next_in, d->bzs_avail_in_real);
+    }
+}
+else if (d->bzs_avail_in_real == 0) {
+    bzs->next_in = NULL;
+    d->needs_input = 1;  /* caller must provide more data */
+}
+else {
+    d->needs_input = 0;  /* internal buffer still has bytes */
+    /* Copy tail from caller's buffer into internal buffer
+       so we own it across the call boundary. */
+    if (!input_buffer_in_use) {
+        /* allocate / resize input_buffer, then memcpy */
+    }
+}
+```
+
+`needs_input = True` means the decompressor has consumed everything it was
+given and cannot make progress until the caller passes new data.
+`needs_input = False` after a non-EOF call means unconsumed bytes remain in
+the internal buffer; calling `decompress(b"")` will drain them.
+
+### Error handling: `catch_bz2_error` (lines 131 to 171)
+
+<CpyLink path="Modules/_bz2module.c" lines="131-171" />
+
+libbzip2 returns integer status codes. `catch_bz2_error` maps them to Python
+exceptions:
+
+```c
+static int
+catch_bz2_error(int bzerror)
+{
+    switch (bzerror) {
+    case BZ_OK:
+    case BZ_RUN_OK:
+    case BZ_FLUSH_OK:
+    case BZ_FINISH_OK:
+    case BZ_STREAM_END:
+        return 0;  /* not an error */
+    case BZ_CONFIG_ERROR:
+        PyErr_SetString(PyExc_SystemError,
+                        "libbzip2 was not compiled correctly");
+        return 1;
+    case BZ_PARAM_ERROR:
+        PyErr_SetString(PyExc_ValueError,
+                        "Internal error - "
+                        "invalid parameters passed to libbzip2");
+        return 1;
+    case BZ_DATA_ERROR:
+    case BZ_DATA_ERROR_MAGIC:
+        /* BZ_DATA_ERROR_MAGIC fires when the stream does not start
+           with the "BZh" magic bytes. */
+        PyErr_SetString(PyExc_OSError, "Invalid data stream");
+        return 1;
+    case BZ_MEM_ERROR:
+        PyErr_SetNone(PyExc_MemoryError);
+        return 1;
+    case BZ_SEQUENCE_ERROR:
+        /* Raised when BZ2_bzCompress is called after BZ_FINISH. */
+        PyErr_SetString(PyExc_RuntimeError,
+                        "Internal error - libbzip2 state machine in "
+                        "wrong state");
+        return 1;
+    default:
+        PyErr_Format(PyExc_OSError,
+                     "Unrecognized error from libbzip2: %d", bzerror);
+        return 1;
+    }
+}
+```
+
+`BZ_DATA_ERROR_MAGIC` is worth calling out: it is the code libbzip2 returns
+when the first bytes of the stream are not `"BZh"`. This surfaces as
+`OSError("Invalid data stream")` at the Python level, consistent with how
+zlib and lzma report format errors. `BZ_SEQUENCE_ERROR` can only occur if the
+C code passes the wrong `action` argument to `BZ2_bzCompress` after
+`BZ_FINISH`; it is a gopy-side bug guard, not a user error.
+
+## gopy mirror
+
+gopy ports `Modules/_bz2module.c` into `module/bz2/`. Go's `compress/bzip2`
+package provides a decompressor (`bzip2.NewReader`), but it has no compressor;
+compression requires the third-party `dsnet/compress/bzip2` package or CGo
+bindings to libbzip2. The porting strategy is:
+
+1. `BZ2Compressor` uses CGo to call `BZ2_bzCompressInit`, `BZ2_bzCompress`,
+   and `BZ2_bzCompressEnd` directly, preserving the GIL-release pattern by
+   calling into C outside the Go runtime lock.
+2. `BZ2Decompressor` wraps `bzip2.NewReader` for the pure-Go path, adding the
+   `input_buffer`, `needs_input`, and `eof` bookkeeping in Go, mirroring
+   CPython's `decompress` function.
+
+Thread safety uses `sync.Mutex` in both types. The `compresslevel` parameter
+maps to libbzip2's `blockSize100k` argument (1-9), with 9 as the default.
+`catch_bz2_error` is mirrored as a Go helper that maps libbzip2 return codes
+to `OSError`, `ValueError`, or `MemoryError`, preserving the exact exception
+types CPython raises.

@@ -1,0 +1,277 @@
+---
+title: Python/pytime.c
+description: Internal time conversion utilities; PyTime_t nanosecond representation, rounding, struct timeval/timespec conversion, and clock backends.
+cpython_path: Python/pytime.c
+cpython_version: "3.14"
+lines: 1356
+status: annotated
+ported_to: pytime/pytime.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Python/pytime.c`
+
+<CpyLink path="Python/pytime.c" />
+
+The low-level time subsystem. Every clock value in CPython from the GIL
+switch timer to `time.time()` to asyncio deadline math passes through
+`PyTime_t`, an `int64_t` that counts nanoseconds. This file defines how
+values enter that type (from integers, floats, `struct timespec`, and
+`struct timeval`), how they leave it (back to those same platform types),
+and which OS clocks supply the raw ticks.
+
+There are three public clock functions (`PyTime_Time`,
+`PyTime_Monotonic`, `PyTime_PerfCounter`) and their `*Raw` variants
+that can be called without holding the GIL. The `_PyTimeFraction` type
+calibrates platform clocks that deliver ticks at non-nanosecond
+resolution (most notably Windows `QueryPerformanceCounter` and macOS
+`mach_absolute_time`). Two deadline helpers,
+`_PyDeadline_Init` / `_PyDeadline_Get`
+(<Cpy path="Python/pytime.c" lines="1339-1356">1339-1356</Cpy>),
+implement the timeout-arithmetic pattern used by every
+blocking call that accepts a timeout argument.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Python/pytime.c" lines="1-60">1-60</Cpy> | file header, scale constants | `SEC_TO_NS`, `NS_TO_MS`, `NS_TO_US` and friends; `PyTime_MIN`/`PyTime_MAX` assertions. | `pytime/pytime.go` |
+| <Cpy path="Python/pytime.c" lines="61-96">61-96</Cpy> | `_PyTime_GCD`, `_PyTimeFraction_Set`, `_PyTimeFraction_Resolution` | GCD and the reduced-fraction clock calibration type; compute resolution in seconds. | `pytime/pytime.go` |
+| <Cpy path="Python/pytime.c" lines="98-240">98-240</Cpy> | `pytime_time_t_overflow`, `pytime_overflow`, `_PyTime_Add`, `_PyTime_Mul`, `_PyTimeFraction_Mul` | Overflow detection, saturating arithmetic, and fraction-scaled tick multiply. | `pytime/pytime.go` |
+| <Cpy path="Python/pytime.c" lines="281-396">281-396</Cpy> | `pytime_round_half_even`, `pytime_round`, `pytime_double_to_denominator`, `pytime_object_to_denominator` | Float rounding (floor/ceiling/half-even/round-up) and the generic object-to-denominator helper used by `ObjectToTimeval` / `ObjectToTimespec`. | `pytime/pytime.go` |
+| <Cpy path="Python/pytime.c" lines="396-470">396-470</Cpy> | `_PyTime_ObjectToTime_t`, `_PyTime_ObjectToTimespec`, `_PyTime_ObjectToTimeval`, `_PyTime_FromSeconds`, `_PyTime_FromMicrosecondsClamp` | Conversion from Python objects and from integer seconds/microseconds. | `pytime/pytime.go` |
+| <Cpy path="Python/pytime.c" lines="472-672">472-672</Cpy> | `_PyTime_FromLong`, `_PyTime_FromTimespec`, `_PyTime_FromTimeval`, `pytime_from_double`, `pytime_from_object`, `_PyTime_FromSecondsObject`, `_PyTime_FromMillisecondsObject`, `PyTime_AsSecondsDouble`, `_PyTime_FromSecondsDouble` | Full conversion surface: from Python int/float objects and from C platform structs into `PyTime_t`; and back to `double`. | `pytime/pytime.go` |
+| <Cpy path="Python/pytime.c" lines="674-900">674-900</Cpy> | `pytime_divide`, `_PyTime_AsMilliseconds`, `_PyTime_AsMicroseconds`, `_PyTime_AsTimeval`, `_PyTime_AsTimeval_clamp`, `_PyTime_AsTimespec`, `_PyTime_AsTimespec_clamp` | Convert `PyTime_t` to the platform struct types expected by POSIX `select`, `nanosleep`, and `pthread_cond_timedwait`. | `pytime/pytime.go` |
+| <Cpy path="Python/pytime.c" lines="900-1035">900-1035</Cpy> | `py_get_system_clock`, `PyTime_Time`, `PyTime_TimeRaw`, `_PyTime_TimeWithInfo` | Wall-clock backend: `gettimeofday` (macOS), `clock_gettime(CLOCK_REALTIME)` (Linux), `GetSystemTimePreciseAsFileTime` (Windows). | `pytime/clocks.go`, `pytime/info_*.go` |
+| <Cpy path="Python/pytime.c" lines="1038-1135">1038-1135</Cpy> | `py_win_perf_counter_frequency`, `py_get_win_perf_counter`, `py_mach_timebase_info`, `_PyTime_Init` | Per-platform calibration for `QueryPerformanceCounter` (Windows) and `mach_absolute_time` (macOS); initialize `_PyRuntime.time.base`. | `pytime/clocks.go`, `pytime/info_*.go` |
+| <Cpy path="Python/pytime.c" lines="1136-1270">1136-1270</Cpy> | `py_get_monotonic_clock`, `PyTime_Monotonic`, `PyTime_MonotonicRaw`, `_PyTime_MonotonicWithInfo`, `_PyTime_PerfCounterWithInfo`, `PyTime_PerfCounter`, `PyTime_PerfCounterRaw` | Monotonic clock backend: `mach_absolute_time` (macOS), `clock_gettime(CLOCK_MONOTONIC)` (Linux), `QueryPerformanceCounter` (Windows). Perf counter aliases monotonic on all platforms. | `pytime/clocks.go`, `pytime/info_*.go` |
+| <Cpy path="Python/pytime.c" lines="1273-1356">1273-1356</Cpy> | `_PyTime_localtime`, `_PyTime_gmtime`, `_PyDeadline_Init`, `_PyDeadline_Get` | Thread-safe `localtime_r`/`gmtime_r` wrappers and the two deadline helpers. | `pytime/pytime.go` |
+
+## Reading
+
+### `PyTime_t`: the nanosecond integer type (lines 1 to 60)
+
+<CpyLink path="Python/pytime.c" lines="1-60" />
+
+`PyTime_t` is `int64_t` (defined in `Include/cpython/pytime.h`). It
+holds nanoseconds relative to some epoch that depends on the clock that
+produced the value. The wall-clock functions use the Unix epoch
+(1970-01-01 00:00:00 UTC). The monotonic clock functions use a
+process-local epoch (process start on most platforms). Mixing values
+from different clocks without converting first is always wrong.
+
+The practical range is about 292 years in each direction from the epoch
+(`int64_t` holds roughly +/-9.2e18 nanoseconds). CPython asserts at
+compile time that `PyTime_t` is a two's-complement integer with no trap
+representation so that overflow detection with `LLONG_MAX` is safe.
+
+```c
+#if PyTime_MIN + PyTime_MAX != -1
+#  error "PyTime_t is not a two's complement integer type"
+#endif
+```
+
+Scale constants set the tone for the whole file. `SEC_TO_NS` is
+`1_000_000_000`. `NS_TO_MS` is `1_000_000`. The conversions `As*`
+divide by these constants; the conversions `From*` multiply.
+
+### `_PyTimeFraction`: clock calibration (lines 61 to 96)
+
+<CpyLink path="Python/pytime.c" lines="61-96" />
+
+```c
+int
+_PyTimeFraction_Set(_PyTimeFraction *frac, PyTime_t numer, PyTime_t denom)
+{
+    if (numer < 1 || denom < 1) {
+        return -1;
+    }
+    PyTime_t gcd = _PyTime_GCD(numer, denom);
+    frac->numer = numer / gcd;
+    frac->denom = denom / gcd;
+    return 0;
+}
+```
+
+Not all OS clocks tick in nanoseconds. `QueryPerformanceCounter` on
+Windows ticks at a frequency that varies by hardware (typically 10 MHz
+or 3.6 MHz). `mach_absolute_time` on macOS ticks at the bus frequency
+(typically 125 MHz). `_PyTimeFraction` holds the conversion ratio
+`numer/denom` in lowest terms. `_PyTimeFraction_Mul` multiplies a
+raw tick count by that fraction with overflow detection, yielding
+nanoseconds. `_PyTimeFraction_Resolution` converts the fraction to a
+`double` in seconds for `time.get_clock_info()`.
+
+gopy stores this as the `ClockInfo` struct in `pytime/pytime.go`.
+The calibration functions are in the per-platform `pytime/info_*.go`
+files, which fill a `ClockInfo` with hard-coded values that match what
+CPython populates dynamically.
+
+### Rounding modes (lines 281 to 315)
+
+<CpyLink path="Python/pytime.c" lines="281-315" />
+
+Four rounding modes are defined in `Include/internal/pycore_time.h`:
+`_PyTime_ROUND_FLOOR`, `_PyTime_ROUND_CEILING`, `_PyTime_ROUND_HALF_EVEN`,
+and `_PyTime_ROUND_UP`. Most callers use `ROUND_FLOOR` (truncate toward
+negative infinity) or `ROUND_HALF_EVEN` (banker's rounding) for display.
+`ROUND_UP` (away from zero) is used for timeout computations so that a
+tiny positive timeout always waits at least one tick.
+
+```c
+static double
+pytime_round_half_even(double x)
+{
+    double rounded = round(x);
+    if (fabs(x - rounded) == 0.5) {
+        /* halfway case: round to even */
+        rounded = 2.0 * round(x / 2.0);
+    }
+    return rounded;
+}
+```
+
+The half-even adjustment: `round(x)` (C99) ties away from zero. The
+code then checks whether the input was exactly at a half-integer and, if
+so, replaces the result with `2 * round(x/2)`, which rounds to the
+nearest even integer. gopy's `pytimeRoundHalfEven` in
+`pytime/pytime.go` translates this exactly, with `math.Round` standing
+in for C99 `round`.
+
+### `_PyTime_FromSecondsObject` and `pytime_from_object` (lines 585 to 629)
+
+<CpyLink path="Python/pytime.c" lines="585-629" />
+
+```c
+static int
+pytime_from_object(PyTime_t *tp, PyObject *obj, _PyTime_round_t round,
+                   long unit_to_ns)
+{
+    if (PyFloat_Check(obj)) {
+        double d = PyFloat_AsDouble(obj);
+        if (isnan(d)) {
+            PyErr_SetString(PyExc_ValueError, "Invalid value NaN (not a number)");
+            return -1;
+        }
+        return pytime_from_double(tp, d, round, unit_to_ns);
+    }
+    long long sec = PyLong_AsLongLong(obj);
+    ...
+    PyTime_t ns = (PyTime_t)sec;
+    if (pytime_mul(&ns, unit_to_ns) < 0) {
+        pytime_overflow();
+        return -1;
+    }
+    *tp = ns;
+    return 0;
+}
+```
+
+`pytime_from_object` is the workhorse for accepting time values from
+Python code. It dispatches on type: floats go through
+`pytime_from_double` (which converts to nanoseconds with rounding),
+integers go through a straight multiply with overflow detection.
+NaN is rejected before the multiply so that the overflow path is never
+reached with an undefined float. The `unit_to_ns` parameter lets the
+same function serve `_PyTime_FromSecondsObject` (`unit_to_ns = SEC_TO_NS =
+1_000_000_000`) and `_PyTime_FromMillisecondsObject` (`unit_to_ns = MS_TO_NS`).
+
+gopy exposes this as `pytime.FromSeconds(s float64, round Rounding)` in
+`pytime/pytime.go`, with the NaN guard and the overflow check translated
+directly.
+
+### Clock backends: `py_get_system_clock` and `py_get_monotonic_clock` (lines 900 to 1270)
+
+<CpyLink path="Python/pytime.c" lines="900-1270" />
+
+Both clock backends follow the same three-layer pattern:
+
+1. The platform `#ifdef` chain calls the OS API and reads raw ticks.
+2. `pytime_fromtimespec` / `pytime_fromtimeval` (or a Windows-specific
+   path) converts platform ticks to `PyTime_t` nanoseconds.
+3. If `info != NULL`, the `_Py_clock_info_t` fields are filled in.
+
+```c
+static int
+py_get_system_clock(PyTime_t *tp, _Py_clock_info_t *info, int raise_exc)
+{
+#ifdef MS_WINDOWS
+    FILETIME system_time;
+    GetSystemTimePreciseAsFileTime(&system_time);
+    ...
+    PyTime_t ns = (large.QuadPart - 116444736000000000) * 100;
+    *tp = ns;
+#else
+#ifdef HAVE_CLOCK_GETTIME
+    struct timespec ts;
+    err = clock_gettime(CLOCK_REALTIME, &ts);
+    pytime_fromtimespec(tp, &ts, raise_exc);
+    ...
+#else /* fallback */
+    struct timeval tv;
+    err = gettimeofday(&tv, (struct timezone *)NULL);
+    pytime_fromtimeval(tp, &tv, raise_exc);
+#endif
+#endif
+}
+```
+
+The `*Raw` variants pass `raise_exc=0`, which suppresses Python
+exceptions and allows the function to run without a thread state. gopy
+uses Go's `time.Now()` and `time.Since(processStart)` in
+`pytime/clocks.go`, which call the same OS APIs under the hood.
+
+### `_PyDeadline_Init` and `_PyDeadline_Get` (lines 1339 to 1356)
+
+<CpyLink path="Python/pytime.c" lines="1339-1356" />
+
+```c
+PyTime_t
+_PyDeadline_Init(PyTime_t timeout)
+{
+    PyTime_t now;
+    (void)PyTime_MonotonicRaw(&now);
+    return _PyTime_Add(now, timeout);
+}
+
+PyTime_t
+_PyDeadline_Get(PyTime_t deadline)
+{
+    PyTime_t now;
+    (void)PyTime_MonotonicRaw(&now);
+    return deadline - now;
+}
+```
+
+The two-function deadline pattern separates concerns cleanly.
+`_PyDeadline_Init` is called once at the start of a timed wait; it
+captures `now + timeout` as an absolute monotonic timestamp. The loop
+body then calls `_PyDeadline_Get(deadline)` on each iteration to find
+out how many nanoseconds remain. A non-positive return means the
+deadline has passed. Both functions swallow errors from
+`PyTime_MonotonicRaw` (the `(void)` cast) because they are called in
+contexts where raising an exception is not possible.
+
+gopy mirrors this with `pytime.Deadline(timeout Time) Time` in
+`pytime/pytime.go`.
+
+## gopy mirror
+
+`pytime/pytime.go` holds the `Time` type (an alias for `int64`),
+`MinTime`, `MaxTime`, `Rounding` constants, `FromSeconds`,
+`FromNanoseconds`, `AsSecondsDouble`, the rounding helpers, and
+`Deadline`. `pytime/clocks.go` provides `Time_`, `Monotonic`,
+`PerfCounter`, and their `WithInfo` variants. Platform-specific
+`ClockInfo` values live in `pytime/info_darwin.go`,
+`pytime/info_linux.go`, and `pytime/info_windows.go`.
+
+The gopy port omits `_PyTimeFraction_Mul` as a first-class function
+because Go's `time` package handles the platform calibration
+internally. The `ClockInfo` struct is populated with hard-coded
+strings that match what CPython's dynamic calibration produces on each
+platform.
+
+`_PyTime_AsTimeval` and `_PyTime_AsTimespec` are not yet ported; they
+will be needed when gopy implements `select`-based I/O waiting and
+`time.sleep` with sub-millisecond precision.

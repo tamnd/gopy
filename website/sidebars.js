@@ -197,6 +197,7 @@ const sidebars = {
         'annotations/python/pystate',
         'annotations/python/structmember',
         'annotations/python/ceval_executor',
+        'annotations/python/pytime',
       ],
     },
     {
@@ -331,6 +332,8 @@ const sidebars = {
         'annotations/modules/bisectmodule_c',
         'annotations/modules/gcmodule',
         'annotations/modules/unicodedatamodule',
+        'annotations/modules/zlibmodule',
+        'annotations/modules/bz2module',
       ],
     },
     {
@@ -413,6 +416,10 @@ const sidebars = {
         'annotations/lib/linecache',
         'annotations/lib/copyreg',
         'annotations/lib/site',
+        'annotations/lib/opcode',
+        'annotations/lib/codecs',
+        'annotations/lib/keyword',
+        'annotations/lib/code',
       ],
     },
   ],

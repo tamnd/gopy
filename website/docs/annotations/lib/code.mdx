@@ -1,0 +1,267 @@
+---
+title: Lib/code.py
+description: Interactive interpreter utilities; InteractiveInterpreter, InteractiveConsole, the readline loop, and compile_command integration.
+cpython_path: Lib/code.py
+cpython_version: "3.14"
+lines: 396
+status: annotated
+ported_to: (stdlib pending)
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Lib/code.py`
+
+<CpyLink path="Lib/code.py" />
+
+The pure-Python machinery behind Python's REPL. `code.py` provides two
+classes and one convenience function that together implement a
+self-contained interactive interpreter embeddable in any application.
+
+`InteractiveInterpreter`
+(<Cpy path="Lib/code.py" lines="16-175">16-175</Cpy>)
+owns the compile-and-execute logic and the error display hooks.
+`InteractiveConsole`
+(<Cpy path="Lib/code.py" lines="177-341">177-341</Cpy>)
+adds input buffering, prompt management, and a complete `interact()`
+loop on top of it. The module-level `interact()` function
+(<Cpy path="Lib/code.py" lines="358-382">358-382</Cpy>)
+is the one-call entry point used by `python -i` and `python -c`.
+
+The module depends on `codeop.CommandCompiler`, which wraps
+`compile()` with incomplete-input detection: it returns `None` when
+more input is needed, raises `SyntaxError` on bad input, and returns
+a code object when the statement is complete.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Lib/code.py" lines="16-38">16-38</Cpy> | `InteractiveInterpreter.__init__` | Initialize the local namespace dict and a `CommandCompiler` instance. | stdlib pending |
+| <Cpy path="Lib/code.py" lines="39-76">39-76</Cpy> | `InteractiveInterpreter.runsource` | Three-state compile-and-run: `True` for incomplete input, `False` for error or clean execution. | stdlib pending |
+| <Cpy path="Lib/code.py" lines="78-96">78-96</Cpy> | `InteractiveInterpreter.runcode` | `exec(code, self.locals)` with `SystemExit` re-raised and all other exceptions sent to `showtraceback`. | stdlib pending |
+| <Cpy path="Lib/code.py" lines="97-175">97-175</Cpy> | `showsyntaxerror`, `showtraceback`, `_showtraceback`, `_excepthook`, `write` | Error display pipeline: extract the current exception via `sys.exc_info`, set `sys.last_*` attributes, delegate to `sys.excepthook` or the default `_excepthook`. | stdlib pending |
+| <Cpy path="Lib/code.py" lines="177-203">177-203</Cpy> | `InteractiveConsole.__init__`, `resetbuffer` | Extend `InteractiveInterpreter` with a filename, `local_exit` flag, and the line buffer. | stdlib pending |
+| <Cpy path="Lib/code.py" lines="204-305">204-305</Cpy> | `InteractiveConsole.interact` | The main REPL loop: print the banner, set `sys.ps1`/`sys.ps2` if absent, read lines, call `push`, handle `EOFError` and `KeyboardInterrupt`. | stdlib pending |
+| <Cpy path="Lib/code.py" lines="306-341">306-341</Cpy> | `InteractiveConsole.push`, `InteractiveConsole.raw_input` | Accumulate lines in `self.buffer`, join with `\n`, call `runsource`; reset buffer on completion. `raw_input` delegates to the builtin `input()`. | stdlib pending |
+| <Cpy path="Lib/code.py" lines="343-356">343-356</Cpy> | `Quitter` | A helper class that raises `SystemExit` when called; used by `local_exit` mode to intercept `exit()` and `quit()` without closing `sys.stdin`. | stdlib pending |
+| <Cpy path="Lib/code.py" lines="358-382">358-382</Cpy> | `interact` (module-level) | Backwards-compatible entry point: creates an `InteractiveConsole`, optionally replaces `raw_input`, tries to import `readline`, then calls `console.interact()`. | stdlib pending |
+
+## Reading
+
+### `runsource`: the three-state return (lines 39 to 76)
+
+<CpyLink path="Lib/code.py" lines="39-76" />
+
+```python
+def runsource(self, source, filename="<input>", symbol="single"):
+    try:
+        code = self.compile(source, filename, symbol)
+    except (OverflowError, SyntaxError, ValueError):
+        # Case 1: bad input
+        self.showsyntaxerror(filename, source=source)
+        return False
+
+    if code is None:
+        # Case 2: incomplete input
+        return True
+
+    # Case 3: complete input
+    self.runcode(code)
+    return False
+```
+
+`self.compile` is a `codeop.CommandCompiler` instance. Its three
+outcomes map onto the three cases in the docstring:
+
+* A `SyntaxError` (or `OverflowError`) means the source is syntactically
+  invalid. `showsyntaxerror` is called and `False` is returned so the
+  prompt resets to `sys.ps1`.
+* `None` means the source is syntactically valid but incomplete (e.g. an
+  unclosed `if` block). Returning `True` tells the console to show
+  `sys.ps2` and wait for more input.
+* A code object means the statement is complete and was compiled
+  successfully. `runcode` executes it and `False` is returned to reset
+  the prompt.
+
+`InteractiveConsole.push` checks the return value of `runsource` and
+keeps `self.buffer` populated only while `runsource` returns `True`.
+
+### `showsyntaxerror` and `_showtraceback` (lines 97 to 165)
+
+<CpyLink path="Lib/code.py" lines="97-165" />
+
+```python
+def showsyntaxerror(self, filename=None, **kwargs):
+    try:
+        typ, value, tb = sys.exc_info()
+        if filename and issubclass(typ, SyntaxError):
+            value.filename = filename
+        source = kwargs.pop('source', "")
+        self._showtraceback(typ, value, None, source)
+    finally:
+        typ = value = tb = None
+
+def _showtraceback(self, typ, value, tb, source):
+    sys.last_type = typ
+    sys.last_traceback = tb
+    value = value.with_traceback(tb)
+    lines = source.splitlines()
+    if (source and typ is SyntaxError
+            and not value.text and value.lineno is not None
+            and len(lines) >= value.lineno):
+        value.text = lines[value.lineno - 1]
+    sys.last_exc = sys.last_value = value
+    if sys.excepthook is sys.__excepthook__:
+        self._excepthook(typ, value, tb)
+    else:
+        try:
+            sys.excepthook(typ, value, tb)
+        except SystemExit:
+            raise
+        except BaseException as e:
+            ...
+```
+
+`showsyntaxerror` passes `tb=None` to `_showtraceback` because syntax
+errors have no runtime traceback. The `filename` override corrects the
+`<string>` that the parser uses for all string-compiled code to the
+actual source label.
+
+`_showtraceback` sets `sys.last_type`, `sys.last_value`,
+`sys.last_traceback`, and `sys.last_exc` before delegating to
+`sys.excepthook`. These attributes let interactive users inspect the
+most recent unhandled exception via `_` or `sys.last_exc`. The
+`value.text` injection fills in the source line on `SyntaxError` when
+the `compile()` call did not already set it (which happens when the
+source string is passed in from the REPL buffer rather than read from a
+file).
+
+If `sys.excepthook` has been replaced (e.g. by a debugger or IDE), the
+custom hook is called. Errors from the custom hook are printed to stderr
+and the original exception is also printed, so no information is lost.
+
+### `interact`: the readline loop (lines 204 to 305)
+
+<CpyLink path="Lib/code.py" lines="204-305" />
+
+```python
+def interact(self, banner=None, exitmsg=None):
+    try:
+        sys.ps1
+        delete_ps1_after = False
+    except AttributeError:
+        sys.ps1 = ">>> "
+        delete_ps1_after = True
+    ...
+    while True:
+        try:
+            if more:
+                prompt = sys.ps2
+            else:
+                prompt = sys.ps1
+            try:
+                line = self.raw_input(prompt)
+            except EOFError:
+                self.write("\n")
+                break
+            else:
+                more = self.push(line)
+        except KeyboardInterrupt:
+            self.write("\nKeyboardInterrupt\n")
+            self.resetbuffer()
+            more = 0
+        except SystemExit as e:
+            if self.local_exit:
+                self.write("\n")
+                break
+            else:
+                raise e
+```
+
+`sys.ps1` and `sys.ps2` are set to `">>> "` and `"... "` only when
+they are not already defined; the `delete_ps1_after` / `delete_ps2_after`
+flags ensure they are removed on exit so the namespace is not polluted.
+This matches the behavior of the C REPL in `Python/pythonrun.c`, where
+`sys.ps1` is written by the tokenizer on the first interactive read.
+
+`more` tracks the three-state return from `push` (which mirrors
+`runsource`). When `more` is truthy the next iteration shows `sys.ps2`.
+On `EOFError` (Ctrl-D / Ctrl-Z) the loop breaks cleanly. On
+`KeyboardInterrupt` the buffer is reset and the loop continues from a
+fresh `>>>` prompt.
+
+When `self.local_exit` is `True`, the loop installs `Quitter` instances
+over `builtins.exit` and `builtins.quit`. Those raise `SystemExit`
+without closing `sys.stdin`, and the `SystemExit` handler in the loop
+breaks out instead of propagating.
+
+### `push`: buffer management (lines 306 to 328)
+
+<CpyLink path="Lib/code.py" lines="306-328" />
+
+```python
+def push(self, line, filename=None, _symbol="single"):
+    self.buffer.append(line)
+    source = "\n".join(self.buffer)
+    if filename is None:
+        filename = self.filename
+    more = self.runsource(source, filename, symbol=_symbol)
+    if not more:
+        self.resetbuffer()
+    return more
+```
+
+Lines accumulate in `self.buffer` as a list of strings. They are joined
+with `"\n"` (not `os.linesep`) before passing to `runsource`. When
+`runsource` returns `False` (either success or error), the buffer is
+cleared. The `_symbol` parameter is normally `"single"` (which compiles
+with `Py_single_input` mode, passing expression values through
+`sys.displayhook`), but callers such as
+`InteractiveConsole` can pass `"cell"` for IPython-style cell execution.
+
+### Module-level `interact` and `readline` import (lines 358 to 382)
+
+<CpyLink path="Lib/code.py" lines="358-382" />
+
+```python
+def interact(banner=None, readfunc=None, local=None, exitmsg=None, local_exit=False):
+    console = InteractiveConsole(local, local_exit=local_exit)
+    if readfunc is not None:
+        console.raw_input = readfunc
+    else:
+        try:
+            import readline  # noqa: F401
+        except ImportError:
+            pass
+    console.interact(banner, exitmsg)
+```
+
+The `readline` import is a side-effect import: loading the module
+registers its `input()` hook, enabling GNU Readline history and
+completion in the REPL without any further configuration. If `readline`
+is absent (e.g. a minimal build) the import is silently suppressed. A
+caller that supplies its own `readfunc` skips this entirely, which is
+the mechanism used by embedded Python and by test code that wants to
+feed canned input.
+
+## gopy mirror
+
+`Lib/code.py` is on the stdlib porting roadmap but not yet shipped.
+The closest existing gopy code is `pythonrun/repl.go`, which implements
+the `C`-level REPL loop from `Python/pythonrun.c`. The pure-Python
+`InteractiveConsole` layer sits above that and is needed for
+`code.interact()` calls from user code.
+
+Key behaviours to preserve in the port:
+
+* `runsource` must return `True` (not raise) on incomplete input.
+  The three-state contract between `runsource` and `push` is the core
+  invariant; getting it wrong causes either premature execution or
+  infinite buffering.
+* `sys.last_exc`, `sys.last_value`, and `sys.last_type` must be set
+  before `sys.excepthook` is called.
+* `sys.ps1` / `sys.ps2` must be read dynamically on each iteration
+  (users can reassign them mid-session).
+* The `local_exit` path requires monkey-patching `builtins.exit` and
+  `builtins.quit`; the originals must be restored in a `finally` block.
