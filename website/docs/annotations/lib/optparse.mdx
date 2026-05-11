@@ -1,0 +1,142 @@
+---
+title: Lib/optparse.py
+description: A flexible command-line option parser with support for typed options, option groups, callbacks, and formatted help output.
+cpython_path: Lib/optparse.py
+cpython_version: "3.14"
+lines: 1700
+status: annotated
+ported_to: ""
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Lib/optparse.py`
+
+<CpyLink path="Lib/optparse.py" />
+
+`optparse` is a full-featured command-line parsing library that predates `argparse` by several years. It models a parser as a collection of `Option` objects, each of which carries its own type, action, destination variable, and help text. Parsing consumes `sys.argv[1:]` (or any list the caller provides) and populates a `Values` object whose attributes correspond to option destinations. Positional arguments left over after option processing are returned alongside the `Values` object.
+
+The library is built around an explicit action vocabulary. Each option declares one of eight built-in actions: `store`, `store_const`, `store_true`, `store_false`, `append`, `append_const`, `count`, or `callback`. The `callback` action hands control to a caller-supplied function, making it possible to implement arbitrarily complex option interactions without subclassing. Type coercion covers `string`, `int`, `long`, `float`, `complex`, and `choice`, and callers can register additional types via `OptionParser.register()`.
+
+Although `argparse` is the recommended module for new code, `optparse` remains widely used in legacy codebases and in CPython's own tooling. The module is approximately 1700 lines of pure Python and carries no runtime dependencies outside the standard library. It has been in maintenance-only mode since Python 3.2 and is formally deprecated as of Python 3.12, but it will not be removed in the 3.x series.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| 1-100 | module header, `__all__` | Imports, version string, public API list | |
+| 101-300 | `Option` | Represents one command-line switch, validates attrs on construction | |
+| 301-500 | `OptionContainer`, `OptionGroup` | Mixin for containers; `OptionGroup` groups options under a heading | |
+| 501-900 | `OptionParser` | Core parser: adds options, parses argv, emits help/version text | |
+| 901-1050 | `Values` | Holds parsed option values as attributes; supports `ensure_value` | |
+| 1051-1200 | `HelpFormatter`, `IndentedHelpFormatter`, `TitledHelpFormatter` | Formats the help string for `--help` output | |
+| 1201-1400 | built-in option actions | `store`, `append`, `count`, `callback` dispatch implementations | |
+| 1401-1700 | type checkers, `OptionValueError`, `BadOptionError` | Coercion helpers and exception hierarchy | |
+
+## Reading
+
+### `Option` construction and validation (lines 101 to 300)
+
+<CpyLink path="Lib/optparse.py" lines="101-300" />
+
+`Option.__init__` accepts option strings (e.g. `'-v'`, `'--verbose'`) and keyword arguments that control its behaviour. The constructor calls `_check_opt_strings`, `_check_action`, `_check_type`, and `_check_dest` in sequence, raising `OptionError` for any inconsistency. For example, passing `type='choice'` without a `choices` list is an error caught at construction time rather than at parse time.
+
+```python
+class Option:
+    ACTIONS = ('store', 'store_const', 'store_true', 'store_false',
+               'append', 'append_const', 'count', 'callback',
+               'help', 'version')
+    TYPED_ACTIONS = ('store', 'append', 'callback')
+    ALWAYS_TYPED_ACTIONS = ('store', 'append')
+
+    def __init__(self, *opts, **attrs):
+        self._short_opts = []
+        self._long_opts = []
+        self.dest = self.type = self.action = None
+        ...
+        self._set_attrs(attrs)
+        self._check_opt_strings(opts)
+        self._check_action()
+        self._check_type()
+        self._check_dest()
+```
+
+### `OptionParser` setup and `add_option` (lines 501 to 700)
+
+<CpyLink path="Lib/optparse.py" lines="501-700" />
+
+`OptionParser.__init__` builds the default `--help` and optionally `--version` options, then attaches a `HelpFormatter`. `add_option` accepts either an `Option` object directly or the same positional and keyword arguments as the `Option` constructor. Options are indexed in two dicts, `_short_opt` and `_long_opt`, for O(1) lookup during parsing. `add_option_group` registers an `OptionGroup` so its options appear in a labelled section of the help output.
+
+```python
+def add_option(self, *opts, **attrs):
+    if type(opts[0]) is types.StringType:
+        option = self.option_class(*opts, **attrs)
+    elif len(opts) == 1 and not attrs:
+        option = opts[0]
+        ...
+    self._init_parsing_state()
+    return self._process_long_opt(option) or \
+           self._process_short_opts(option)
+```
+
+### `parse_args` and the parsing loop (lines 701 to 900)
+
+<CpyLink path="Lib/optparse.py" lines="701-900" />
+
+`parse_args(args=None, values=None)` is the main entry point. If `args` is `None`, it uses `sys.argv[1:]`. The inner loop classifies each token as a long option (`--foo` or `--foo=bar`), a short option cluster (`-xyz`), or a positional argument. Long options are dispatched to `_process_long_opt` and short option clusters are expanded left-to-right by `_process_short_opts`. Unrecognised options raise `BadOptionError` unless `allow_interspersed_args` is false, in which case the first non-option token stops option processing.
+
+```python
+def parse_args(self, args=None, values=None):
+    if args is None:
+        args = sys.argv[1:]
+    if values is None:
+        values = self.get_default_values()
+    self.rargs = args = args[:]
+    self.largs = largs = []
+    self.values = values
+    self._process_args(largs, args, values)
+    return (values, largs)
+```
+
+### `Values` and `ensure_value` (lines 901 to 1050)
+
+<CpyLink path="Lib/optparse.py" lines="901-1050" />
+
+`Values` is a simple namespace object. Its `__repr__` prints all attributes for debugging. The `ensure_value(attr, value)` helper is used by `append` and `append_const` actions: if the destination attribute is currently `None`, it sets it to `value` before appending, avoiding an `AttributeError` on the first append. This removes boilerplate from action implementations that need to accumulate into a list.
+
+```python
+class Values:
+    def __init__(self, defaults=None):
+        if defaults:
+            for key, val in defaults.items():
+                setattr(self, key, val)
+
+    def ensure_value(self, attr, value):
+        if not hasattr(self, attr) or getattr(self, attr) is None:
+            setattr(self, attr, value)
+        return getattr(self, attr)
+```
+
+### Help formatters (lines 1051 to 1200)
+
+<CpyLink path="Lib/optparse.py" lines="1051-1200" />
+
+`HelpFormatter` is an abstract base that defines the layout contract. `IndentedHelpFormatter` (the default) wraps option strings and description text at `max_help_position` columns, indenting continuation lines. `TitledHelpFormatter` uses section titles instead of indentation, suited for man-page-style output. Both formatters call `format_option`, `format_heading`, and `format_description` in sequence; overriding any of these methods is the intended customisation point.
+
+```python
+class IndentedHelpFormatter(HelpFormatter):
+    def __init__(self, indent_increment=2, max_help_position=24,
+                 width=None, short_first=1):
+        HelpFormatter.__init__(
+            self, indent_increment, max_help_position, width, short_first)
+
+    def format_usage(self, usage):
+        return "Usage: %s\n" % usage
+
+    def format_heading(self, heading):
+        return "%*s%s:\n" % (self.current_indent, "", heading)
+```
+
+## gopy mirror
+
+Not yet ported.

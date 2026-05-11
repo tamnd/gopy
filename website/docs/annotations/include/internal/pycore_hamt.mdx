@@ -1,0 +1,111 @@
+---
+title: Include/internal/pycore_hamt.h
+description: Internal Hash Array Mapped Trie (HAMT) API used by contextvars, declaring node type objects, the iterator machinery, and the core mutation and lookup functions.
+cpython_path: Include/internal/pycore_hamt.h
+cpython_version: "3.14"
+lines: 113
+status: annotated
+ported_to: ""
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Include/internal/pycore_hamt.h`
+
+<CpyLink path="Include/internal/pycore_hamt.h" />
+
+`pycore_hamt.h` exposes the internal API for CPython's Hash Array Mapped Trie,
+a persistent immutable mapping structure that backs `contextvars.Context`.
+A HAMT organises keys by consuming five bits of each key's hash at every tree
+level, giving O(log32 n) worst-case performance for lookup, insertion, and
+deletion. Because no node is ever mutated after creation, "modified" versions
+of the map share structure with the original, which makes context inheritance
+and copy-on-write patterns cheap. The full algorithmic description lives in
+`Python/hamt.c`; this header is only the declarations needed by
+`Modules/_contextvarsmodule.c` and the few other build-core files that
+manipulate HAMT objects directly.
+
+The tree can have at most `_Py_HAMT_MAX_TREE_DEPTH` (8) levels: seven levels
+cover 7 x 5 = 35 bits of the 32-bit hash, and the eighth level is a
+"collision node" that holds keys whose hashes are fully identical. Three
+concrete node types cover the space: `BitmapNode` (sparse, up to 16 children,
+uses a popcount bitmap), `ArrayNode` (dense, exactly 32 children), and
+`CollisionNode` (linear array of key/value pairs with equal hashes). The
+header declares a `PyTypeObject` extern for each so that `isinstance` checks
+and type-dispatch in the iterator can reference them.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| 21 | `_Py_HAMT_MAX_TREE_DEPTH` | Constant 8: maximum tree depth (7 hash levels plus one collision level); sizes the iterator stack | `module/contextlib/module.go` |
+| 24-30 | Six `PyTypeObject` externs | Public type objects for `_PyHamt_Type`, the three node types, and the three iterator types | `objects/usertype.go` |
+| 35 | `PyHamt_Check` | Macro: `Py_IS_TYPE(o, &_PyHamt_Type)`; fast isinstance check for HAMT objects | `objects/usertype.go` |
+| 50-54 | `PyHamtIteratorState` | Stack-allocated depth-first traversal state: `i_nodes[8]`, `i_pos[8]`, `i_level` | `module/contextlib/module.go` |
+| 65-70 | `PyHamtIterator` | Base iterator object embedding `PyHamtIteratorState` plus `hi_obj` and a `binaryfunc hi_yield` dispatch pointer | `module/contextlib/module.go` |
+| 74-112 | Seven API functions | `_PyHamt_New`, `_PyHamt_Assoc`, `_PyHamt_Without`, `_PyHamt_Find`, `_PyHamt_Eq`, `_PyHamt_Len`, plus three iterator constructors | `module/contextlib/module.go` |
+
+## Reading
+
+### Tree depth and node types
+
+`_Py_HAMT_MAX_TREE_DEPTH` at line 21 drives the size of `i_nodes` and `i_pos`
+inside `PyHamtIteratorState`. Having a compile-time constant means the
+iterator needs no heap allocation; the entire traversal stack fits in the
+iterator struct. The three node `PyTypeObject` externs (lines 25-27) are the
+only way build-core code outside `hamt.c` can distinguish node kinds, since the
+node structs themselves are not exposed in the header.
+
+### Persistent mutation API
+
+Lines 74-90 declare the four core operations. `_PyHamt_New` returns a fresh
+empty HAMT. `_PyHamt_Assoc` and `_PyHamt_Without` each return a new root
+object that shares as many nodes as possible with the input; neither touches
+the original. `_PyHamt_Find` is the only non-allocating call: it returns -1
+on error, 0 for a miss, and 1 for a hit with `*val` set to a borrowed
+reference. This three-valued int convention (used throughout CPython) avoids
+the need to distinguish "not found" from "found None" at the call site.
+
+### Iterator design
+
+`PyHamtIteratorState` (lines 50-54) stores two parallel arrays indexed by
+depth: `i_nodes` holds a borrowed pointer to each ancestor node on the path
+to the current position, and `i_pos` holds the current child index within
+that node. The `i_level` field is signed (`int8_t`) so that decrementing past
+zero is well defined when the traversal unwinds back to the root. The three
+concrete iterator types (`_PyHamtKeys_Type`, `_PyHamtValues_Type`,
+`_PyHamtItems_Type`) all embed `PyHamtIterator` as their first field and
+differ only in the `hi_yield` function pointer, which is set at construction
+time by `_PyHamt_NewIterKeys`, `_PyHamt_NewIterValues`, and
+`_PyHamt_NewIterItems` (lines 105-111).
+
+### `PyHamt_Check` and equality
+
+The `PyHamt_Check` macro at line 35 uses `Py_IS_TYPE` rather than
+`PyObject_TypeCheck`, which means it does not accept subclasses. HAMT objects
+are internal; `contextvars.Context` wraps them but never exposes the raw type
+to user code, so exact-type checks are sufficient. `_PyHamt_Eq` (line 99)
+performs a structural equality check rather than identity; it is used by
+`Context.__eq__` and by the `copy_context` fast path.
+
+```c
+// Include/internal/pycore_hamt.h (lines 50-70, condensed)
+#define _Py_HAMT_MAX_TREE_DEPTH 8
+
+typedef struct {
+    PyHamtNode *i_nodes[_Py_HAMT_MAX_TREE_DEPTH];
+    Py_ssize_t  i_pos[_Py_HAMT_MAX_TREE_DEPTH];
+    int8_t      i_level;
+} PyHamtIteratorState;
+
+typedef struct {
+    PyObject_HEAD
+    PyHamtObject       *hi_obj;
+    PyHamtIteratorState hi_iter;
+    binaryfunc          hi_yield;   // keys / values / items dispatch
+} PyHamtIterator;
+```
+
+## gopy mirror
+
+Not yet ported.

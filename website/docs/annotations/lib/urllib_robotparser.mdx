@@ -1,0 +1,54 @@
+---
+title: Lib/urllib/robotparser.py
+description: RFC 9309 robots.txt parser that answers can-fetch queries and exposes crawl-delay and request-rate directives.
+cpython_path: Lib/urllib/robotparser.py
+cpython_version: "3.14"
+lines: 210
+status: annotated
+ported_to: ""
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Lib/urllib/robotparser.py`
+
+<CpyLink path="Lib/urllib/robotparser.py" />
+
+`urllib/robotparser.py` implements a full `robots.txt` parser following RFC 9309. The public surface is a single class, `RobotFileParser`, which handles fetching the file over HTTP, parsing its directives, and answering permission queries for a given user-agent and URL. The module also exposes a small `RequestRate` named tuple for the `Request-rate` directive.
+
+The parser recognises the standard directives: `User-agent`, `Disallow`, `Allow`, `Crawl-delay`, `Request-rate`, and `Sitemap`. Rule matching follows the RFC 9309 precedence rules, where `Allow` beats `Disallow` when both match, and longer patterns take priority over shorter ones. The wildcard character `*` in a `User-agent` line matches any crawler not covered by a more specific group.
+
+At about 210 lines the module is self-contained and has no external dependencies beyond `urllib.request` and `urllib.parse`. It is the canonical way to respect `robots.txt` in Python programs that fetch web content, and it is used by several higher-level crawling libraries as their underlying robots-checking backend.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| 1-20 | module header | Imports, `__all__`, `RequestRate` namedtuple | |
+| 21-65 | `RobotFileParser.__init__`, `set_url`, `read` | State setup, URL assignment, HTTP fetch via `urllib.request` | |
+| 66-130 | `RobotFileParser.parse` | Line-by-line directive parsing, group accumulation, rule list construction | |
+| 131-175 | `RobotFileParser.can_fetch` | Agent lookup, pattern matching, Allow vs Disallow precedence | |
+| 176-195 | `RobotFileParser.crawl_delay`, `request_rate` | Per-agent accessor returning the stored float or `RequestRate` | |
+| 196-210 | `RobotFileParser.site_maps`, `__str__` | Sitemap list accessor and round-trip text representation | |
+
+## Reading
+
+### Fetching and state management
+
+`set_url` stores the robots.txt URL and resets the parser state. `read` calls `urllib.request.urlopen` and handles the three relevant HTTP status classes: 2xx triggers `parse`, 401 and 403 set a disallow-all sentinel, and 404 sets an allow-all sentinel. The caller must invoke `read` before calling `can_fetch`; the class does not auto-fetch on demand.
+
+### `parse` and the group model
+
+`parse` iterates over lines, strips comments, and builds a list of `_RuleLineEntry` objects grouped by `User-agent`. Each entry stores a path pattern and a boolean indicating whether it is an Allow or Disallow rule. Blank lines between groups act as group terminators, matching the RFC 9309 BNF. The `Crawl-delay` and `Request-rate` directives are stored in per-agent dicts keyed by the lowercased agent name.
+
+### `can_fetch` matching rules
+
+`can_fetch` lowercases the agent name, then looks for an exact agent group before falling back to the `*` wildcard group. For each candidate rule it percent-decodes the stored pattern, applies the path-prefix test from RFC 9309 section 2.2.2, and tracks the longest matching rule length. When two rules of the same length conflict, `Allow` wins. The method returns `True` when no rule matches, matching the RFC default-allow posture.
+
+### `crawl_delay` and `request_rate`
+
+These accessors return `None` when the directive is absent, a `float` for `Crawl-delay`, and a `RequestRate(requests, seconds)` named tuple for `Request-rate`. Callers should check for `None` before using the value rather than relying on truthiness, because a crawl delay of `0.0` is a valid directive with real meaning.
+
+## gopy mirror
+
+Not yet ported.

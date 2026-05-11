@@ -1,0 +1,60 @@
+---
+title: Lib/wsgiref/simple_server.py
+description: Reference WSGI server implementation for development and testing.
+cpython_path: Lib/wsgiref/simple_server.py
+cpython_version: "3.14"
+lines: 220
+status: annotated
+ported_to: ""
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Lib/wsgiref/simple_server.py`
+
+<CpyLink path="Lib/wsgiref/simple_server.py" />
+
+`wsgiref.simple_server` provides a minimal HTTP server that speaks the WSGI protocol defined in PEP 3333. It is intentionally single-threaded and single-request: one connection is served to completion before the next is accepted. That makes it suitable for local development and for running test suites, but not for any production load.
+
+The module layers three stdlib classes. `WSGIServer` extends `http.server.HTTPServer` (which itself extends `socketserver.TCPServer`) with a `set_app` / `get_app` pair that stores the WSGI callable. `WSGIRequestHandler` extends `BaseHTTPRequestHandler` to override `handle` so that every HTTP request is dispatched through a `ServerHandler`. `ServerHandler` fills the `environ` dictionary with CGI-style variables derived from the parsed HTTP headers and delegates to the stored application.
+
+The public entry point is the single helper `make_server(host, port, app)`, which binds a `WSGIServer`, registers the application, and returns the ready-to-use server object. Callers typically follow up with `serve_forever()` or a single `handle_request()` call, both inherited from `socketserver.BaseServer`.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| 1-30 | module header | Imports and `__version__` | — |
+| 31-80 | `ServerHandler` | Builds `environ`, calls WSGI app, writes response | — |
+| 81-120 | `WSGIServer` | Extends `HTTPServer` with app storage | — |
+| 121-175 | `WSGIRequestHandler` | Parses request line, delegates to `ServerHandler` | — |
+| 176-195 | `demo_app` | Tiny example WSGI application for smoke testing | — |
+| 196-220 | `make_server` | Factory: bind socket, set app, return server | — |
+
+## Reading
+
+### ServerHandler and environ
+
+`ServerHandler` inherits from `wsgiref.handlers.SimpleHandler` and overrides `server_name`, `server_port`, and `http_version`. Its `get_environ()` method merges the base environ with headers from the HTTP request, translating header names to `HTTP_*` keys. The resulting dict is the single argument passed to the WSGI application callable.
+
+### WSGIServer
+
+`WSGIServer` calls `server_bind` and `server_activate` from `HTTPServer`, then overrides `server_bind` to record `server_name` and `server_port` on the instance. Two methods, `set_app` and `get_app`, act as a trivial registry so that `WSGIRequestHandler` can retrieve the application without a global variable.
+
+### WSGIRequestHandler
+
+The handler overrides `get_environ` to add `SERVER_NAME`, `SERVER_PORT`, `SCRIPT_NAME`, `PATH_INFO`, and `QUERY_STRING` from the parsed URL. It overrides `handle` to construct a `ServerHandler` for each request and call its `run(app)` method. Logging is routed through `log_message` to stderr with a timestamp.
+
+### make_server factory
+
+`make_server(host, port, app)` is the recommended entry point. It constructs a `WSGIServer((host, port), WSGIRequestHandler)`, calls `set_app(app)`, and returns the bound server. No threads or subprocesses are created; the caller owns the event loop.
+
+```python
+# Typical usage
+server = make_server('127.0.0.1', 8000, my_wsgi_app)
+server.serve_forever()
+```
+
+## gopy mirror
+
+Not yet ported.

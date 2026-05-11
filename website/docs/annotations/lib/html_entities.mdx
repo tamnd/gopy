@@ -1,0 +1,53 @@
+---
+title: Lib/html/entities.py
+description: Static mapping tables for HTML 4 and HTML5 named character references, including name-to-codepoint and codepoint-to-name lookups.
+cpython_path: Lib/html/entities.py
+cpython_version: "3.14"
+lines: 2300
+status: annotated
+ported_to: ""
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Lib/html/entities.py`
+
+<CpyLink path="Lib/html/entities.py" />
+
+`html/entities.py` is a pure data module. It defines three module-level dictionaries that map between HTML entity names and Unicode codepoints. The module has no functions and no classes. It exists solely so that `html.parser`, `html.unescape`, and third-party libraries can share a single authoritative copy of the entity tables rather than each embedding their own.
+
+The bulk of the file is `html5`, which contains 2231 entries corresponding to the named character references listed in the HTML5 specification. This dict includes both the semicolon-terminated forms such as `"amp;"` and the legacy bare forms such as `"amp"` that browsers accept without a trailing semicolon. Values are Unicode strings rather than integer codepoints because some HTML5 references map to multi-character sequences. The two HTML 4 dicts, `name2codepoint` and `codepoint2name`, cover the smaller set of 252 entities defined by HTML 4.01 and use integer codepoints throughout.
+
+The file is generated offline from the HTML5 spec and committed verbatim. Developers should not edit it by hand. The generation script is not shipped in the CPython repository, but the source of truth is the WHATWG named character references JSON file at `https://html.spec.whatwg.org/entities.json`.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| 1-10 | module header | Docstring and `__all__` declaration | |
+| 11-20 | `html5` dict open | Start of the 2231-entry HTML5 named character reference table | |
+| 21-2250 | `html5` dict body | Entries mapping `"name;"` and `"name"` to Unicode strings | |
+| 2251-2265 | `name2codepoint` | 252 HTML 4 entity names mapped to integer codepoints | |
+| 2266-2300 | `codepoint2name` | Inverse of `name2codepoint`, codepoints mapped to HTML 4 entity names | |
+
+## Reading
+
+### `html5` structure and semicolon duality
+
+Each key in `html5` is a bare string without the leading ampersand. Semicolon-terminated keys such as `"AElig;"` coexist with bare keys such as `"AElig"` in the same dict. The HTML5 tokenizer in `html.parser` strips the leading `&` and then probes both forms. Values are Unicode strings, not ints, because a handful of references like `"nGt;"` expand to two-character sequences.
+
+### `name2codepoint` and its scope
+
+`name2codepoint` covers only the 252 entities standardised in HTML 4.01 Annex D. Keys are bare names without ampersand or semicolon. Values are Python ints. This dict is what `html.unescape` uses internally for the legacy code path, and it is what most HTML 4-era tooling expects when it imports from this module.
+
+### `codepoint2name`
+
+`codepoint2name` is the inverse of `name2codepoint`. Where two HTML 4 names share a codepoint, exactly one name is kept. The chosen name follows the original HTML 4 spec ordering, so `160` maps to `"nbsp"` rather than any alias. This dict is used by `html.escape` and by XML serialisers that need to emit named references instead of numeric character references.
+
+### Using the module
+
+To check whether a name is a valid HTML5 reference, look it up in `html5` with a semicolon appended. To convert a codepoint to a name for output, use `codepoint2name.get(cp)` and fall back to a numeric reference if the result is `None`. Never mutate any of the three dicts at runtime; they are module globals and mutations would affect all importers in the same process.
+
+## gopy mirror
+
+Not yet ported.

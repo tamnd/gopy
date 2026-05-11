@@ -1,0 +1,61 @@
+---
+title: bytes_methods.c
+description: Shared implementation of string-style methods for bytes and bytearray objects.
+cpython_path: Objects/bytes_methods.c
+cpython_version: "3.14"
+lines: 550
+status: annotated
+ported_to: ""
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Objects/bytes_methods.c`
+
+<CpyLink path="Objects/bytes_methods.c" />
+
+This file collects the method implementations shared between `bytes` and `bytearray`. Rather than duplicating logic in `Objects/bytesobject.c` and `Objects/bytearrayobject.c`, both call the `_Py_bytes_*` family of C functions defined here. The functions operate on raw `const char *` buffers and lengths, so they are independent of the containing Python object type.
+
+The predicate group (`isalpha`, `isdigit`, `isspace`, `islower`, `isupper`, `isalnum`, `istitle`, `isascii`) all follow the same pattern: iterate the buffer byte by byte, apply the corresponding `<ctype.h>` test via the `Py_ISXXX` macros, and return a Python `True` or `False`. The macros use a 256-entry lookup table so the per-byte cost is a single indexed load with no branch.
+
+Case conversion and title-casing (`upper`, `lower`, `capitalize`, `swapcase`, `title`) allocate a fresh buffer of the same length, transform bytes in place using the same lookup table, and return a new `bytes` or `bytearray` via the caller-supplied type slot. Search and replace (`find`, `rfind`, `count`, `replace`) delegate to the `fastsearch` two-way string search algorithm in `Objects/stringlib/fastsearch.h` for substrings longer than one byte.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| ~30   | `_Py_bytes_isspace` | Returns True if every byte satisfies `Py_ISSPACE` | |
+| ~60   | `_Py_bytes_isalpha` | Returns True if every byte satisfies `Py_ISALPHA` | |
+| ~90   | `_Py_bytes_isdigit` | Returns True if every byte satisfies `Py_ISDIGIT` | |
+| ~160  | `_Py_bytes_upper` | Allocates a new buffer and uppercases every byte | |
+| ~220  | `_Py_bytes_lower` | Allocates a new buffer and lowercases every byte | |
+| ~280  | `_Py_bytes_title` | Title-cases runs of alpha bytes separated by non-alpha bytes | |
+| ~360  | `_Py_bytes_count` | Counts non-overlapping occurrences using `fastsearch` | |
+| ~440  | `_Py_bytes_find` | Finds first occurrence; delegates to `fastsearch` with `FAST_SEARCH` mode | |
+| ~490  | `_Py_bytes_replace` | Builds a new buffer replacing up to `count` occurrences of a subsequence | |
+
+## Reading
+
+### Predicate pattern
+
+Each predicate iterates the buffer with a plain `for` loop and returns `Py_False` on the first failing byte. An empty buffer returns `Py_False` for all predicates except `isascii`, which returns `Py_True` for empty input, matching Python semantics. The `Py_ISXXX` macros cast through `unsigned char` before the table lookup so high-byte values (128-255) are handled without undefined behavior.
+
+### Case conversion allocation
+
+`_Py_bytes_upper` and `_Py_bytes_lower` call the caller-supplied `new_func` (either `PyBytes_FromStringAndSize` or `PyByteArray_FromStringAndSize`) to create the result object, then fill it with `_Py_ToUpperFull` or `_Py_ToLowerFull`. This avoids a copy through a temporary C buffer.
+
+### `_Py_bytes_title` state machine
+
+Title-casing is not just `upper` on the first byte of each word. The function tracks a `previous_is_alpha` flag and uppercases only the first alpha byte after a non-alpha byte. Bytes that are not alphabetic are copied unchanged, so punctuation and digits act as word separators without being transformed themselves.
+
+### Search via fastsearch
+
+`_Py_bytes_find` and `_Py_bytes_count` call `stringlib_find` from `Objects/stringlib/fastsearch.h`, which implements a combination of Boyer-Moore-Horspool and Sunday's quick-search. For single-byte patterns the function short-circuits to `memchr` before entering the general path. The `replace` function calls `_Py_bytes_count` first to preallocate the exact result length, then fills it in a single pass.
+
+### Docstrings
+
+Each public function has a `PyDoc_STRVAR` docstring defined at the top of the file and exposed via `PyMethodDef` entries in the calling object's method table. The docstrings are shared by both `bytes` and `bytearray` since the semantics are identical.
+
+## gopy mirror
+
+Not yet ported.

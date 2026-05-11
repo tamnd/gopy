@@ -1,0 +1,101 @@
+---
+title: Lib/curses/__init__.py
+description: Python wrapper around the _curses C extension that provides a Pythonic API for terminal screen control.
+cpython_path: Lib/curses/__init__.py
+cpython_version: "3.14"
+lines: 220
+status: annotated
+ported_to: ""
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Lib/curses/__init__.py`
+
+<CpyLink path="Lib/curses/__init__.py" />
+
+The `curses` package is a thin Python layer on top of the `_curses` C extension module. It re-exports everything from `_curses` directly, then adds a handful of pure-Python helpers that make common patterns safer and more idiomatic. The package also imports the `curses.ascii` and `curses.textpad` submodules so callers can reach them via the top-level namespace.
+
+The most important addition over the raw C extension is `wrapper(func, ...)`, which initialises the terminal, runs a caller-supplied function, and guarantees that `endwin()` is called on the way out regardless of whether an exception occurs. Color name constants such as `COLOR_RED`, `COLOR_GREEN`, and `COLOR_BLUE` are defined here as module-level integers so that code does not need to depend on platform-specific C header values.
+
+The package intentionally stays small. Anything to do with text input lives in `curses.textpad`, character classification lives in `curses.ascii`, and all low-level panel management lives in `curses.panel`. The `__init__.py` therefore has a single responsibility: safe initialisation and cleanup.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| 1-20 | module header | Imports `_curses`, re-exports its namespace | |
+| 21-50 | color constants | `COLOR_BLACK`, `COLOR_RED`, …, `COLOR_WHITE` integer literals | |
+| 51-80 | `error` | Alias for `_curses.error` exception class | |
+| 81-130 | `initscr()` wrapper | Calls `_curses.initscr()`, sets up locale, attaches color support | |
+| 131-175 | `wrapper(func, *args, **kwds)` | Safe init/cleanup shell around a curses application | |
+| 176-220 | submodule imports | `from curses import ascii, textpad, has_key` | |
+
+## Reading
+
+### Color constants (lines 21 to 50)
+
+<CpyLink path="Lib/curses/__init__.py" lines="21-50" />
+
+The eight standard terminal colors are defined as plain integer constants. CPython's `_curses` C extension also exposes them, but only after `start_color()` has been called. The Python-level constants are unconditional, which allows code that merely names a color to import without initialising the terminal first.
+
+```python
+COLOR_BLACK   = 0
+COLOR_RED     = 1
+COLOR_GREEN   = 2
+COLOR_YELLOW  = 3
+COLOR_BLUE    = 4
+COLOR_MAGENTA = 5
+COLOR_CYAN    = 6
+COLOR_WHITE   = 7
+```
+
+### `initscr()` wrapper (lines 81 to 130)
+
+<CpyLink path="Lib/curses/__init__.py" lines="81-130" />
+
+The pure-Python `initscr()` calls `_curses.initscr()` and then performs several setup steps that the C layer leaves to the caller: it configures the locale so that wide characters work correctly, and it conditionally calls `start_color()` when the terminal reports color capability. Doing this in Python avoids duplicating the logic in every application.
+
+```python
+def initscr():
+    import _curses
+    stdscr = _curses.initscr()
+    if hasattr(_curses, 'start_color'):
+        try:
+            _curses.start_color()
+        except Exception:
+            pass
+    return stdscr
+```
+
+### `wrapper` (lines 131 to 175)
+
+<CpyLink path="Lib/curses/__init__.py" lines="131-175" />
+
+`wrapper` is the idiomatic entry point for curses applications. It calls `initscr()`, enables `cbreak` and `noecho`, hides the cursor, and then invokes the caller's function with the standard screen as the first argument. A `try/finally` block ensures `endwin()` runs even if the application raises, preventing a corrupted terminal state from leaking to the shell.
+
+```python
+def wrapper(func, /, *args, **kwds):
+    try:
+        stdscr = initscr()
+        noecho()
+        cbreak()
+        stdscr.keypad(True)
+        return func(stdscr, *args, **kwds)
+    finally:
+        if 'stdscr' in dir():
+            stdscr.keypad(False)
+            echo()
+            nocbreak()
+            endwin()
+```
+
+### Submodule imports (lines 176 to 220)
+
+<CpyLink path="Lib/curses/__init__.py" lines="176-220" />
+
+The tail of the file imports `curses.ascii`, `curses.textpad`, and `curses.has_key` into the package namespace. This means a caller who does `import curses` can immediately use `curses.ascii.isalpha(c)` or `curses.textpad.Textbox` without a separate import statement. The imports are deferred to the bottom of the file so that the constants and `wrapper` are always available even if a submodule fails to load on a minimal installation.
+
+## gopy mirror
+
+Not yet ported.

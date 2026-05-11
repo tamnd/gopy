@@ -1,0 +1,64 @@
+---
+title: Lib/xml/dom/minidom.py
+description: Lightweight DOM Level 2 Core implementation backed by the expat parser.
+cpython_path: Lib/xml/dom/minidom.py
+cpython_version: "3.14"
+lines: 1700
+status: annotated
+ported_to: ""
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Lib/xml/dom/minidom.py`
+
+<CpyLink path="Lib/xml/dom/minidom.py" />
+
+`xml.dom.minidom` is CPython's built-in DOM implementation. It covers the core of DOM Level 2 Core: element, attribute, text, CDATA section, comment, processing instruction, entity reference, document type, and document nodes. The interface is intentionally minimal. There is no XPath, no CSS selector, and no HTML5-specific extension. The goal is a correct, readable implementation that handles real-world XML without external dependencies.
+
+Parsing is handled by `xml.dom.expatbuilder`, which drives the expat C extension. The two public entry points, `parse(file)` and `parseString(string)`, delegate immediately to that builder and return a `Document` node. Every node in the resulting tree is a Python object that holds its children in a plain list. Serialization walks that list recursively. No lazy loading or streaming is used: the entire document lives in memory as Python objects.
+
+The file is large (roughly 1700 lines) because every node type is represented by its own class, and each class carries serialization, cloning, and namespace methods inline. The design mirrors the W3C interface names closely, which makes the W3C DOM specification a reliable companion when reading the code.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| 1-80 | `Node` base class | Common tree operations: `appendChild`, `removeChild`, `cloneNode`, `normalize` | — |
+| 81-280 | `Document` | Root node, factory methods for all other node types, `getElementsByTagName` | — |
+| 281-500 | `Element` | Attribute storage, `getAttribute`, `setAttribute`, `getElementsByTagName` | — |
+| 501-620 | `Attr` | Attribute node, value, owner element back-pointer | — |
+| 621-750 | `Text`, `CDATASection`, `Comment` | Character-data nodes, `splitText` on `Text` | — |
+| 751-900 | `NodeList`, `NamedNodeMap` | Sequence and map wrappers over Python lists/dicts | — |
+| 901-1200 | `_write_data`, `_serialize_*` helpers | Recursive serialization to a writer object | — |
+| 1201-1500 | `Node.toxml`, `Node.toprettyxml` | Public serialization API with indent and encoding options | — |
+| 1501-1700 | `parse`, `parseString` | Entry points, call into `expatbuilder` | — |
+
+## Reading
+
+### Node base class and tree operations
+
+`Node` defines the structural API shared by every node type. `appendChild`, `insertBefore`, `replaceChild`, and `removeChild` each update both the `childNodes` list and the `parentNode` back-pointer atomically. `cloneNode(deep)` copies the node and, when `deep` is true, recursively copies the entire subtree. `normalize` merges adjacent `Text` nodes, which expat can produce when CDATA sections are involved.
+
+### Document and factory methods
+
+`Document` is the root node and acts as a factory for every other node type. Methods like `createElement`, `createTextNode`, `createComment`, and `createAttributeNS` all return nodes whose `ownerDocument` is set to the calling `Document`. This enforces the DOM invariant that a node can only belong to one document. `importNode` and `adoptNode` transfer nodes between documents.
+
+### Element and attribute handling
+
+`Element` stores attributes in a `NamedNodeMap` keyed by `(namespaceURI, localName)` pairs. `getAttribute` and `getAttributeNS` look up attribute values directly from that map. `setAttribute` replaces or inserts an `Attr` node. Namespace-unaware and namespace-aware methods coexist: the unaware ones pass `None` as the namespace URI and rely on the `NamedNodeMap` to handle the lookup gracefully.
+
+### Serialization
+
+`toxml(encoding=None, standalone=None)` writes the node and its descendants to a string or bytes object. `toprettyxml(indent='\t', newl='\n', encoding=None)` adds indentation by walking the tree and inserting text nodes. Both methods delegate to internal `_serialize_*` functions that dispatch on node type. The `_write_data` helper escapes `&`, `<`, `>`, and quotes as required by the XML specification.
+
+```python
+# Round-trip example
+from xml.dom.minidom import parseString
+doc = parseString('<root><child attr="v">text</child></root>')
+print(doc.toprettyxml(indent='  '))
+```
+
+## gopy mirror
+
+Not yet ported.

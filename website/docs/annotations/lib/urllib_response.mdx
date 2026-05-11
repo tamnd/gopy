@@ -1,0 +1,53 @@
+---
+title: Lib/urllib/response.py
+description: Thin wrapper classes that attach URL and header metadata to file-like objects returned by urllib.request.
+cpython_path: Lib/urllib/response.py
+cpython_version: "3.14"
+lines: 70
+status: annotated
+ported_to: ""
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Lib/urllib/response.py`
+
+<CpyLink path="Lib/urllib/response.py" />
+
+`urllib/response.py` provides a small set of wrapper classes that layer URL and header information on top of raw file objects. The module is almost exclusively an implementation detail of `urllib.request`: `urlopen()` assembles an `addinfourl` instance before handing it back to the caller.
+
+The design uses a chain of thin adapters rather than a single class. `addbase` handles the core delegation to the underlying file object. `addclosehook` layers in an optional teardown callback. `addinfo` tacks on an `info()` method. `addinfourl` combines all three and also exposes `url`, `status`, and `reason` attributes that map to the HTTP response metadata.
+
+At roughly 70 lines the module is intentionally small. The heavy lifting, such as actually reading from a socket or decompressing content, is left entirely to the wrapped object. The wrappers only add bookkeeping so that callers can inspect where a response came from and what headers it carried.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| 1-10 | module header | Imports and `__all__` | |
+| 11-30 | `addbase` | Base wrapper delegating reads and context management to the inner file | |
+| 31-42 | `addclosehook` | Extends `addbase` with a user-supplied callable invoked on `close()` | |
+| 43-52 | `addinfo` | Extends `addbase` with `info()` returning the response headers mapping | |
+| 53-70 | `addinfourl` | Composite class combining close hook, info, and `url`/`status`/`reason` | |
+
+## Reading
+
+### `addbase` and the delegation pattern
+
+`addbase.__init__` stores the wrapped file as `self.fp` and then copies across `read`, `readline`, `readlines`, `fileno`, and `__iter__` by direct attribute assignment. This is simpler than `__getattr__` delegation because it avoids the overhead of attribute lookup on every call and makes the interface explicit. The `__enter__` and `__exit__` methods forward to `self.fp` so that `addinfourl` instances can be used in `with` statements directly.
+
+### `addclosehook`
+
+The close hook pattern lets `urllib.request` register teardown logic, such as returning a connection to a pool, without subclassing. `addclosehook.close()` calls `super().close()` first, then invokes the hook and clears the reference to prevent double-firing. The hook receives no arguments.
+
+### `addinfo`
+
+`addinfo` adds a single `info()` method that returns whatever mapping was passed at construction time. In practice this is an `http.client.HTTPMessage` instance, but the class accepts any object. This separation lets `addinfo` be unit-tested without a live HTTP response.
+
+### `addinfourl` as the public surface
+
+`addinfourl` is the only class that callers of `urllib.request.urlopen()` actually see. Its constructor accepts `(fp, headers, url, code=None)` and wires up all four layers. The `status` and `reason` properties are set by `urllib.request` after the fact, once the HTTP status line has been parsed, because the lower-level connection machinery produces the file object before the status is available.
+
+## gopy mirror
+
+Not yet ported.
