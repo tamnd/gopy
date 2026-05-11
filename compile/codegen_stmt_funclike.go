@@ -286,15 +286,24 @@ func (c *Compiler) emitClosure(inner *symtable.Entry, l ast.Pos) (int32, error) 
 		return 0, nil
 	}
 	for _, name := range freeNames {
-		// Each free var is a cell or free in the outer scope.
+		// Each free var is a cell or free in the outer scope. Push the
+		// outer's cell (not its contents) onto the stack so BUILD_TUPLE
+		// collects it into the closure. LOAD_CLOSURE reads
+		// LocalsPlus[NLocals + oparg]; oparg is the cellvar index for
+		// cells and NCells+freevar_index for frees, matching the same
+		// deref-index space LOAD_DEREF uses.
+		//
+		// CPython: Python/codegen.c:923 codegen_make_closure (the
+		// LOAD_CLOSURE arm)
 		scope := c.scope.GetScope(name)
 		switch scope {
 		case symtable.Cell:
 			pool := poolCellVars
-			c.addOpName(LOAD_FAST, &pool, name, l)
+			c.addOpName(LOAD_CLOSURE, &pool, name, l)
 		case symtable.Free:
 			pool := poolFreeVars
-			c.addOpName(LOAD_FAST, &pool, name, l)
+			idx := c.poolIndex(&pool, name)
+			c.addOpI(LOAD_CLOSURE, int32(len(c.unit().CellVars)+idx), l)
 		default:
 			return 0, fmt.Errorf("compile: free var %q in nested scope %q has scope %v in outer %q",
 				name, inner.Name, scope, c.scope.Name)

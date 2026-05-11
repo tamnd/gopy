@@ -253,9 +253,10 @@ func TestLambdaEmitsInnerCodeAndMakeFunction(t *testing.T) {
 
 // TestNestedFunctionClosureEmitsLoadFast covers the closure path:
 // `def outer(x):\n  def inner():\n    return x` should leave the
-// outer's `x` as a cell, and emit LOAD_FAST x / BUILD_TUPLE 1 in
+// outer's `x` as a cell, and emit LOAD_CLOSURE x / BUILD_TUPLE 1 in
 // outer before MAKE_FUNCTION, with SET_FUNCTION_ATTRIBUTE 0x08
-// stamping the closure tuple onto the new function.
+// stamping the closure tuple onto the new function. The assembler
+// later lowers LOAD_CLOSURE to LOAD_FAST against the cell slot.
 func TestNestedFunctionClosureEmitsLoadFast(t *testing.T) {
 	inner := &ast.FunctionDef{
 		Name: "inner",
@@ -275,7 +276,7 @@ func TestNestedFunctionClosureEmitsLoadFast(t *testing.T) {
 	// + SET_FUNCTION_ATTRIBUTE sequence inside outer.
 	found := false
 	for i := 0; i+4 < len(got); i++ {
-		if got[i] == "LOAD_FAST" && got[i+1] == "BUILD_TUPLE" &&
+		if got[i] == "LOAD_CLOSURE" && got[i+1] == "BUILD_TUPLE" &&
 			got[i+2] == "LOAD_CONST" && got[i+3] == "MAKE_FUNCTION" &&
 			got[i+4] == "SET_FUNCTION_ATTRIBUTE" {
 			found = true
