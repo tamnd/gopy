@@ -62,6 +62,13 @@ import (
 	// CPython: Modules/config.c.in:45 {"_functools", PyInit__functools}
 	_ "github.com/tamnd/gopy/module/_functools"
 
+	// Built-in module: _operator. Registers itself via
+	// module/_operator/module.go init(). Backs Lib/operator.py with
+	// the fast paths for arithmetic, comparisons, item access, plus
+	// the itemgetter/attrgetter/methodcaller callable types.
+	// CPython: Modules/config.c.in:44 {"_operator", PyInit__operator}
+	_ "github.com/tamnd/gopy/module/_operator"
+
 	// Go-backed Python modules: not in CPython's config.c.in (those
 	// are pure-Python in Lib/), but until the corresponding Lib/*.py
 	// vendoring lands the import system needs something to satisfy
