@@ -1,0 +1,149 @@
+---
+title: "Lib/enum.py"
+description: "The enum module implements Python's enumeration types via a metaclass-driven member creation pipeline, auto-value generation, and flag arithmetic."
+cpython_path: "Lib/enum.py"
+cpython_version: "3.14"
+lines: 2500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# Lib/enum.py
+
+<CpyLink path="Lib/enum.py" />
+
+`enum.py` is the pure-Python implementation of Python's enumeration types. Its core
+mechanism is `EnumType`, a metaclass that intercepts class creation to turn plain
+class-body assignments into immutable member objects. Members are stored in
+`_value2member_map_` for O(1) reverse lookup and in `_member_map_` for ordered access.
+Specialised subclasses (`IntEnum`, `StrEnum`, `Flag`, `IntFlag`) layer coercion and
+bitwise algebra on top of the base machinery.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| <Cpy path="Lib/enum.py" lines="1-80">1-80</Cpy> | module imports, `__all__` | Public API declaration and sentinel values |
+| <Cpy path="Lib/enum.py" lines="81-280">81-280</Cpy> | `_EnumDict` | Descriptor-aware namespace proxy used during class body execution |
+| <Cpy path="Lib/enum.py" lines="281-600">281-600</Cpy> | `EnumType.__new__` | Metaclass `__new__`: member creation loop, `_value2member_map_` construction |
+| <Cpy path="Lib/enum.py" lines="601-750">601-750</Cpy> | `EnumType.__prepare__` | Returns a fresh `_EnumDict` to intercept name binding |
+| <Cpy path="Lib/enum.py" lines="751-900">751-900</Cpy> | `Enum.__new__` / `Enum.__init__` | Instance construction split between value assignment and post-init hooks |
+| <Cpy path="Lib/enum.py" lines="901-1000">901-1000</Cpy> | `_generate_next_value_` | Default `auto()` strategy (sequential integers starting at 1) |
+| <Cpy path="Lib/enum.py" lines="1001-1200">1001-1200</Cpy> | `IntEnum`, `StrEnum` | Coercion mixins that inherit from `int` or `str` |
+| <Cpy path="Lib/enum.py" lines="1201-1600">1201-1600</Cpy> | `Flag`, `IntFlag` | Bitwise composition, pseudo-members, boundary handling |
+| <Cpy path="Lib/enum.py" lines="1601-1700">1601-1700</Cpy> | `Flag._missing_` | Boundary policy: `KEEP`, `EJECT`, `STRICT`, `CONFORM` |
+| <Cpy path="Lib/enum.py" lines="1701-1800">1701-1800</Cpy> | `unique` | Decorator that rejects duplicate values |
+| <Cpy path="Lib/enum.py" lines="1801-1900">1801-1900</Cpy> | `member` / `nonmember` | Wrappers (3.12+) to force or suppress member treatment |
+| <Cpy path="Lib/enum.py" lines="1901-2500">1901-2500</Cpy> | `EnumCheck`, `FlagBoundary`, helpers | Support enums and utility functions |
+
+## Reading
+
+### _EnumDict: the namespace proxy
+
+During class body execution Python calls `EnumType.__prepare__`, which returns an
+`_EnumDict` instance instead of a plain `dict`. `_EnumDict.__setitem__` intercepts
+every name binding and decides whether the name is a member candidate, a descriptor,
+or a plain class attribute.
+
+```python
+# CPython: Lib/enum.py:150 _EnumDict.__setitem__
+def __setitem__(self, key, value):
+    if _is_sunder(key):
+        ...  # special names like _name_, _value_
+    elif _is_dunder(key):
+        ...  # __dunder__ names pass through
+    elif _is_descriptor(value):
+        self._member_names.discard(key)
+        super().__setitem__(key, value)
+    else:
+        # Record as a member candidate; auto() is resolved here
+        if isinstance(value, auto):
+            value = self._generate_next_value(
+                key, 1, len(self._member_names), [...]
+            )
+        self._member_names.add(key)
+        super().__setitem__(key, value)
+```
+
+### EnumType.__new__: member creation loop
+
+After the class body finishes, `EnumType.__new__` iterates `_member_names` in
+definition order. For each name it calls `cls.__new__(cls, value)` to produce the
+member instance, sets `_name_` and `_value_`, registers the member in
+`_value2member_map_`, and makes the name a class-level attribute.
+
+```python
+# CPython: Lib/enum.py:310 EnumType.__new__ member loop
+for key in body._member_names:
+    value = body[key]
+    enum_member = cls.__new__(cls, value)
+    enum_member._name_ = key
+    enum_member._value_ = value
+    cls._member_map_[key] = enum_member
+    try:
+        cls._value2member_map_[value] = enum_member
+    except TypeError:
+        pass   # unhashable value; reverse lookup not supported
+    setattr(cls, key, enum_member)
+```
+
+### auto() and _generate_next_value_
+
+`auto()` defers value assignment until `_EnumDict.__setitem__` resolves it by calling
+`_generate_next_value_`. The default implementation returns `max(last_values) + 1`
+(falling back to `len(names)` when no previous values exist). Subclasses override this
+to implement strategies such as string-name lowercasing in `StrEnum`.
+
+```python
+# CPython: Lib/enum.py:901 Enum._generate_next_value_
+@staticmethod
+def _generate_next_value_(name, start, count, last_values):
+    for last_value in reversed(last_values):
+        try:
+            return last_value + 1
+        except TypeError:
+            pass
+    return start
+```
+
+### Flag boundary handling
+
+`Flag._missing_` is called when a bitwise combination does not correspond to a named
+member. The `FlagBoundary` setting on the class controls the outcome: `STRICT` raises
+`ValueError`, `CONFORM` masks off undefined bits, `EJECT` returns a plain `int`, and
+`KEEP` creates an unnamed pseudo-member.
+
+```python
+# CPython: Lib/enum.py:1620 Flag._missing_
+@classmethod
+def _missing_(cls, value):
+    flag_boundary = cls._boundary_
+    if flag_boundary is STRICT:
+        raise ValueError(f"{value!r} is not a valid {cls.__name__!r}")
+    elif flag_boundary is EJECT:
+        return value   # plain int falls out
+    elif flag_boundary is KEEP:
+        # synthesise a pseudo-member
+        pseudo = object.__new__(cls)
+        pseudo._name_ = None
+        pseudo._value_ = value
+        return pseudo
+    # CONFORM: strip bits not in _flag_mask_
+    return cls(value & cls._flag_mask_)
+```
+
+## gopy notes
+
+gopy does not yet port `enum.py`. The relevant tracked items are:
+
+- `module/enum/` does not exist; enum types surface in the VM only through
+  `objects/type.go` and `objects/usertype.go`.
+- `EnumType.__new__` relies on metaclass `__prepare__`, which requires the VM's `CALL`
+  path to pass the `metaclass=` keyword argument and a working `type.__prepare__`
+  dispatch. That path exists in `vm/eval_call.go` but is not exercised by any current
+  test.
+- `Flag` bitwise pseudo-members require `__or__` and `__and__` on types that subclass
+  `int`, which depends on `IntEnum` coercion (also unported).
+- The `@unique` decorator and `member`/`nonmember` wrappers are straightforward and
+  could be ported independently once the metaclass foundation is in place.

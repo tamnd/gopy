@@ -1,0 +1,167 @@
+---
+title: "Lib/copy.py"
+description: "The copy module provides shallow and deep copy operations with cycle detection, a dispatch table for type-specific copying, and protocol hooks for custom objects."
+cpython_path: "Lib/copy.py"
+cpython_version: "3.14"
+lines: 300
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# Lib/copy.py
+
+<CpyLink path="Lib/copy.py" />
+
+`copy.py` is a small but subtly complex module. `copy()` performs a shallow copy by
+consulting a type-keyed dispatch table (`_copy_dispatch`) and then falling back to
+`__copy__` or a pickle-style reduction. `deepcopy()` adds a `memo` dict threaded
+through every recursive call to handle cycles and to ensure that each object is
+copied exactly once even when it is referenced from multiple places. The module also
+implements the `replace()` protocol introduced for dataclasses in PEP 695.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| <Cpy path="Lib/copy.py" lines="1-60">1-60</Cpy> | imports, `__all__`, `Error` | Module bootstrap and the single public exception |
+| <Cpy path="Lib/copy.py" lines="61-110">61-110</Cpy> | `_copy_dispatch` | Type-to-copier dict for atomic and container types |
+| <Cpy path="Lib/copy.py" lines="111-170">111-170</Cpy> | `copy()` | Shallow copy with `__copy__` and `_reconstruct` fallback |
+| <Cpy path="Lib/copy.py" lines="171-230">171-230</Cpy> | `_deepcopy_dispatch` | Type-to-copier dict for deepcopy fast paths |
+| <Cpy path="Lib/copy.py" lines="231-290">231-290</Cpy> | `deepcopy()` | Deep copy driver: memo lookup, dispatch, `__deepcopy__` protocol |
+| <Cpy path="Lib/copy.py" lines="291-340">291-340</Cpy> | `_deepcopy_list`, `_deepcopy_tuple`, `_deepcopy_dict` | Recursive helpers for built-in containers |
+| <Cpy path="Lib/copy.py" lines="341-390">341-390</Cpy> | `_reconstruct` | Pickle-compatible reduction via `copyreg.dispatch_table` |
+| <Cpy path="Lib/copy.py" lines="391-430">391-430</Cpy> | `replace()` | PEP 695 `__replace__` protocol for dataclasses and named tuples |
+
+## Reading
+
+### copy(): shallow dispatch table
+
+`copy()` first checks `_copy_dispatch`, a `dict` mapping types to copy functions
+pre-populated with identity-return entries for all atomic types (`int`, `str`,
+`bytes`, `float`, `bool`, `type`, etc.). If the type is not in the table, it looks
+for `__copy__` on the instance, then falls through to `_reconstruct`.
+
+```python
+# CPython: Lib/copy.py:120 copy
+def copy(x):
+    cls = type(x)
+
+    copier = _copy_dispatch.get(cls)
+    if copier:
+        return copier(x)
+
+    if issubclass(cls, type):
+        # treat it as a regular class
+        return _copy_immutable(x)
+
+    copier = getattr(cls, "__copy__", None)
+    if copier is not None:
+        return copier()
+
+    reductor = getattr(cls, "__reduce_ex__", None)
+    rv = reductor(4)
+    return _reconstruct(x, None, *rv)
+```
+
+The `_copy_dispatch` pre-registration for atomic types means that `copy(42)` returns
+`42` itself without going through `__copy__` or pickling, matching the invariant that
+immutable scalars need not be duplicated.
+
+### deepcopy(): memo dict and cycle detection
+
+Every call to `deepcopy()` that produces a new object must store the result in `memo`
+under `id(x)` before recursing into the object's contents. This two-step
+(pre-register then fill) pattern breaks cycles: if the same object is encountered
+again during the fill step, `memo` already contains a reference to the (partially
+constructed) copy.
+
+```python
+# CPython: Lib/copy.py:153 deepcopy
+def deepcopy(x, memo=None, _nil=[]):
+    if memo is None:
+        memo = {}
+
+    d = id(x)
+    y = memo.get(d, _nil)
+    if y is not _nil:
+        return y          # already copied; return the cached copy
+
+    cls = type(x)
+    copier = _deepcopy_dispatch.get(cls)
+    if copier is not None:
+        y = copier(x, memo)
+    else:
+        ...
+        copier = getattr(cls, "__deepcopy__", None)
+        if copier is not None:
+            y = copier(memo)
+        ...
+    memo[d] = y
+    _keep_alive(x, memo)  # prevent GC of x during copy
+    return y
+```
+
+### Recursive container helpers
+
+Lists and dicts are copied element-by-element, with each element passed back through
+`deepcopy()` so that nested structures are handled uniformly. Lists pre-register an
+empty list in `memo` before iterating so that self-referential lists (e.g.
+`a = []; a.append(a)`) resolve correctly.
+
+```python
+# CPython: Lib/copy.py:221 _deepcopy_list
+def _deepcopy_list(x, memo):
+    y = []
+    memo[id(x)] = y       # pre-register before recursing
+    append = y.append
+    for a in x:
+        append(deepcopy(a, memo))
+    return y
+
+# CPython: Lib/copy.py:231 _deepcopy_dict
+def _deepcopy_dict(x, memo):
+    y = {}
+    memo[id(x)] = y
+    for key, value in x.items():
+        y[deepcopy(key, memo)] = deepcopy(value, memo)
+    return y
+```
+
+Tuples do not pre-register because they are immutable: if a tuple contains only
+objects already in `memo`, the copy can be the original tuple (the
+`_deepcopy_tuple` implementation checks this and returns `x` unchanged when all
+elements are identity-copies).
+
+### replace(): PEP 695 protocol
+
+`replace(obj, **changes)` looks for `__replace__` on the object's type. Dataclasses
+and `NamedTuple` subclasses generated by the standard library define `__replace__` to
+return a new instance with the specified fields overridden.
+
+```python
+# CPython: Lib/copy.py:295 replace
+def replace(obj, /, **changes):
+    cls = type(obj)
+    replacer = getattr(cls, "__replace__", None)
+    if replacer is None:
+        raise TypeError(
+            f"replace() does not support objects of type {cls.__name__!r}"
+        )
+    return replacer(obj, **changes)
+```
+
+## gopy notes
+
+gopy does not yet port `copy.py`. Observations:
+
+- `_copy_dispatch` and `_deepcopy_dispatch` are module-level dicts populated at
+  import time. Their Go equivalent would be a `map[*objects.Type]copyFn` initialised
+  in `module/copy/module.go`.
+- The `memo` dict must use `id(x)` as the key. In Go, object identity is the pointer
+  value, so the map key would be `uintptr(unsafe.Pointer(obj))` or an `objects.Object`
+  interface pointer cast to `uintptr`.
+- `_reconstruct` calls `__reduce_ex__` which requires pickle-level protocol support;
+  this is the deepest dependency and should be left as a stub initially.
+- `replace()` has no dependencies beyond attribute lookup and is straightforward to
+  port as a built-in function in `module/copy/`.

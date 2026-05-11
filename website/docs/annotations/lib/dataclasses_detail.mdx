@@ -1,0 +1,188 @@
+---
+title: "dataclasses.py: Data class decorator and helpers"
+description: "The `@dataclass` decorator and its supporting machinery: field descriptors, code generation for __init__/__repr__/__eq__/__hash__, slots mode, and recursive converters."
+cpython_path: "Lib/dataclasses.py"
+cpython_version: "3.14"
+lines: 1804
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Lib/dataclasses.py`
+
+<CpyLink path="Lib/dataclasses.py" />
+
+`dataclasses` is pure Python. The decorator reads class annotations at decoration time, builds `Field` objects, generates source code for `__init__` and other dunder methods as strings, and `exec`s them into the class namespace. The `slots=True` path goes further: it constructs an entirely new class with `__slots__` set, then patches up closures that referenced the original class.
+
+## Map
+
+| Lines | Symbol | Role |
+|---|---|---|
+| <Cpy path="Lib/dataclasses.py" lines="171-175">171-175</Cpy> | `FrozenInstanceError` | `AttributeError` subclass raised by generated `__setattr__`/`__delattr__` in frozen classes |
+| <Cpy path="Lib/dataclasses.py" lines="176-196">176-196</Cpy> | `_HAS_DEFAULT_FACTORY_CLASS` / `_MISSING_TYPE` / `_KW_ONLY_TYPE` | Sentinel singletons used as default-factory marker, missing-value marker, and keyword-only field marker |
+| <Cpy path="Lib/dataclasses.py" lines="252-277">252-277</Cpy> | `InitVar` | Pseudo-field that appears in `__init__` but is not stored as an attribute; carries a type annotation |
+| <Cpy path="Lib/dataclasses.py" lines="279-344">279-344</Cpy> | `Field` | Descriptor holding `default`, `default_factory`, `init`, `repr`, `hash`, `compare`, `metadata`, `kw_only`; constructed by `field()` |
+| <Cpy path="Lib/dataclasses.py" lines="346-389">346-389</Cpy> | `_DataclassParams` | Stores the decorator flags (`init`, `repr`, `eq`, `order`, `unsafe_hash`, `frozen`, `match_args`, `kw_only`, `slots`, `weakref_slot`) on the class as `__dataclass_params__` |
+| <Cpy path="Lib/dataclasses.py" lines="391-413">391-413</Cpy> | `field()` | Public constructor for `Field`; validates that `default` and `default_factory` are not both set |
+| <Cpy path="Lib/dataclasses.py" lines="436-534">436-534</Cpy> | `_FuncBuilder` | Accumulates generated method source, calls `exec`, and installs methods on the class via `add_fns_to_class` |
+| <Cpy path="Lib/dataclasses.py" lines="579-648">579-648</Cpy> | `_field_init` | Produces the assignment line for one field inside the generated `__init__` body |
+| <Cpy path="Lib/dataclasses.py" lines="651-667">651-667</Cpy> | `_init_param` | Produces the parameter declaration (`name`, `name=default`, or `name=HAS_DEFAULT_FACTORY`) for one field |
+| <Cpy path="Lib/dataclasses.py" lines="670-727">670-727</Cpy> | `_init_fn` | Assembles the complete `__init__` source; checks no non-default follows default; injects `__post_init__` call if present |
+| <Cpy path="Lib/dataclasses.py" lines="728-749">728-749</Cpy> | `_frozen_set_del_attr` | Generates `__setattr__` / `__delattr__` that raise `FrozenInstanceError` |
+| <Cpy path="Lib/dataclasses.py" lines="986-1248">986-1248</Cpy> | `_process_class` | Core decorator logic: walks MRO for inherited fields, calls `_get_field` per annotation, generates all dunder methods, optionally calls `_add_slots` |
+| <Cpy path="Lib/dataclasses.py" lines="1250-1327">1250-1327</Cpy> | `_dataclass_getstate` / `_dataclass_setstate` / `_get_slots` / `_update_func_cell_for__class__` / `_create_slots` | Helpers used only by `_add_slots` |
+| <Cpy path="Lib/dataclasses.py" lines="1329-1412">1329-1412</Cpy> | `_add_slots` | Rebuilds the class with `__slots__`, fixes `__class__` cells in closures, re-runs annotation resolution |
+| <Cpy path="Lib/dataclasses.py" lines="1414-1443">1414-1443</Cpy> | `dataclass` | Public decorator; handles both `@dataclass` and `@dataclass(...)` calling conventions |
+| <Cpy path="Lib/dataclasses.py" lines="1445-1473">1445-1473</Cpy> | `fields` / `_is_dataclass_instance` / `is_dataclass` | Introspection helpers |
+| <Cpy path="Lib/dataclasses.py" lines="1475-1565">1475-1565</Cpy> | `asdict` / `_asdict_inner` | Recursive conversion to plain dicts; handles nested dataclasses, lists, dicts, tuples, and namedtuples |
+| <Cpy path="Lib/dataclasses.py" lines="1567-1625">1567-1625</Cpy> | `astuple` / `_astuple_inner` | Same recursion strategy as `asdict` but produces nested tuples |
+| <Cpy path="Lib/dataclasses.py" lines="1754-1804">1754-1804</Cpy> | `replace` / `_replace` | Shallow copy with field overrides; validates that changed names are real `init` fields |
+
+## Reading
+
+### `_field_init`: per-field init line generation
+
+`_field_init` decides which assignment expression to emit for one field. The three main cases are: `default_factory` present (call it or use the passed argument), plain `default` (reference a pre-injected global), and no default at all (use the parameter name directly). `InitVar` fields return `None` to signal that no assignment should be emitted even though they appear in the parameter list.
+
+```python
+# CPython: Lib/dataclasses.py:591 _field_init
+def _field_init(f, frozen, globals, self_name, slots):
+    default_name = f'__dataclass_dflt_{f.name}__'
+    if f.default_factory is not MISSING:
+        if f.init:
+            globals[default_name] = f.default_factory
+            value = (f'{default_name}() '
+                     f'if {f.name} is __dataclass_HAS_DEFAULT_FACTORY__ '
+                     f'else {f.name}')
+        else:
+            globals[default_name] = f.default_factory
+            value = f'{default_name}()'
+    else:
+        if f.init:
+            if f.default is MISSING:
+                value = f.name
+            elif f.default is not MISSING:
+                globals[default_name] = f.default
+                value = f.name
+        else:
+            if slots and f.default is not MISSING:
+                globals[default_name] = f.default
+                value = default_name
+            else:
+                return None
+    if f._field_type is _FIELD_INITVAR:
+        return None
+    return _field_assign(frozen, f.name, value, self_name)
+```
+
+### `_process_class`: decorator core
+
+`_process_class` is the engine behind `@dataclass`. It uses `annotationlib.get_annotations` (new in 3.14, replacing `typing.get_type_hints` on the fast path) to collect annotations in MRO order. It delegates method generation to `_FuncBuilder.add_fn` for each dunder, then optionally replaces the class entirely if `slots=True`.
+
+```python
+# CPython: Lib/dataclasses.py:986 _process_class
+def _process_class(cls, init, repr, eq, order, unsafe_hash, frozen,
+                   match_args, kw_only, slots, weakref_slot):
+    fields = {}
+    if cls.__module__ in sys.modules:
+        globals = sys.modules[cls.__module__].__dict__
+    else:
+        globals = {}
+
+    setattr(cls, _PARAMS, _DataclassParams(init, repr, eq, order,
+                                           unsafe_hash, frozen,
+                                           match_args, kw_only,
+                                           slots, weakref_slot))
+    # Walk MRO to inherit fields from base dataclasses.
+    for b in cls.__mro__[-1:0:-1]:
+        base_fields = getattr(b, _FIELDS, None)
+        if base_fields is not None:
+            for f in base_fields.values():
+                fields[f.name] = f
+
+    cls_annotations = annotationlib.get_annotations(
+        cls, format=annotationlib.Format.FORWARDREF)
+
+    cls_fields = []
+    for name, type in cls_annotations.items():
+        cls_fields.append(_get_field(cls, name, type, kw_only))
+    # ... method generation and optional _add_slots call follows ...
+```
+
+### `_add_slots`: rebuild class with `__slots__`
+
+Because `__slots__` must be set before the class object exists, `slots=True` triggers a full class rebuild. The original class dict is copied (minus field attributes, which would conflict with slots), `__slots__` is injected, and `type(cls)(name, bases, dict)` creates the replacement. Closures that reference `__class__` via a cell variable are patched to point at the new class so that zero-argument `super()` continues to work.
+
+```python
+# CPython: Lib/dataclasses.py:1329 _add_slots
+def _add_slots(cls, is_frozen, weakref_slot, defined_fields):
+    if '__slots__' in cls.__dict__:
+        raise TypeError(f'{cls.__name__} already specifies __slots__')
+
+    sys._clear_type_descriptors(cls)
+
+    cls_dict = dict(cls.__dict__)
+    field_names = tuple(f.name for f in fields(cls))
+    inherited_slots = set(
+        itertools.chain.from_iterable(map(_get_slots, cls.__mro__[1:-1]))
+    )
+    cls_dict["__slots__"] = _create_slots(
+        defined_fields, inherited_slots, field_names, weakref_slot,
+    )
+    for field_name in field_names:
+        cls_dict.pop(field_name, None)
+
+    qualname = getattr(cls, '__qualname__', None)
+    newcls = type(cls)(cls.__name__, cls.__bases__, cls_dict)
+    if qualname is not None:
+        newcls.__qualname__ = qualname
+    # Patch __class__ cells so super() works.
+    for member in newcls.__dict__.values():
+        member = inspect.unwrap(member)
+        if isinstance(member, types.FunctionType):
+            if _update_func_cell_for__class__(member, cls, newcls):
+                break
+    return newcls
+```
+
+### `_asdict_inner`: recursive conversion
+
+`_asdict_inner` checks for atomic types first (a module-level frozenset), then for the `_FIELDS` marker that identifies dataclass instances. Lists, dicts, plain tuples, and namedtuples are each handled with a type-exact check before falling back to `issubclass` for subclasses.
+
+```python
+# CPython: Lib/dataclasses.py:1499 _asdict_inner
+def _asdict_inner(obj, dict_factory):
+    obj_type = type(obj)
+    if obj_type in _ATOMIC_TYPES:
+        return obj
+    elif hasattr(obj_type, _FIELDS):
+        if dict_factory is dict:
+            return {
+                f.name: _asdict_inner(getattr(obj, f.name), dict)
+                for f in fields(obj)
+            }
+        else:
+            return dict_factory([
+                (f.name, _asdict_inner(getattr(obj, f.name), dict_factory))
+                for f in fields(obj)
+            ])
+    elif obj_type is list:
+        return [_asdict_inner(v, dict_factory) for v in obj]
+    elif obj_type is dict:
+        return {
+            _asdict_inner(k, dict_factory): _asdict_inner(v, dict_factory)
+            for k, v in obj.items()
+        }
+    elif obj_type is tuple:
+        return tuple([_asdict_inner(v, dict_factory) for v in obj])
+    # namedtuple and dict subclasses handled below...
+```
+
+## gopy notes
+
+- `_FuncBuilder.add_fn` at line 446 calls `exec` with a hand-built source string and a `globals` dict that holds default values. gopy cannot replicate `exec` directly; the generated `__init__` must be translated to a Go function that performs the same default-injection logic at call time.
+- `_process_class` in 3.14 uses `annotationlib.get_annotations` with `Format.FORWARDREF` instead of the older `typing.get_type_hints`. gopy's annotation resolution path must handle the new `annotationlib` module.
+- The `__hash__` policy (lines 936-985) is a 4-cell truth table over `(eq, frozen, unsafe_hash, existing __hash__)`. All four Boolean flags must be tracked on `_DataclassParams` and evaluated exactly as the table shows.
+- `replace()` at line 1754 raises `TypeError` for unknown field names and `ValueError` for fields with `init=False`. Both error paths must be preserved.
+- `_add_slots` calls `sys._clear_type_descriptors` at line 1340, a CPython internal. gopy's type system does not carry the same descriptor machinery, so this call can be a no-op, but the class-replacement loop must still run to keep `super()` working.

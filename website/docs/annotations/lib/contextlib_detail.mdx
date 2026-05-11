@@ -1,0 +1,172 @@
+---
+title: "contextlib.py: Context manager utilities"
+description: "The standard library module that provides ABCs, decorators, and concrete context managers for the `with` statement protocol."
+cpython_path: "Lib/contextlib.py"
+cpython_version: "3.14"
+lines: 814
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Lib/contextlib.py`
+
+<CpyLink path="Lib/contextlib.py" />
+
+`contextlib` is pure Python (no C backing module). It wires together the `with`-statement protocol (`__enter__` / `__exit__`) and the async variant (`__aenter__` / `__aexit__`) with a set of decorators and concrete helpers that cover the most common patterns. The module is self-contained and has no dependencies outside the standard library.
+
+## Map
+
+| Lines | Symbol | Role |
+|---|---|---|
+| <Cpy path="Lib/contextlib.py" lines="17-40">17-40</Cpy> | `AbstractContextManager` | ABC with default `__enter__` (return self) and abstract `__exit__`; `__subclasshook__` checks for `__enter__`/`__exit__` |
+| <Cpy path="Lib/contextlib.py" lines="41-64">41-64</Cpy> | `AbstractAsyncContextManager` | Async counterpart; default `__aenter__`, abstract `__aexit__` |
+| <Cpy path="Lib/contextlib.py" lines="66-103">66-103</Cpy> | `ContextDecorator` / `AsyncContextDecorator` | Mix-in that lets a context manager double as a function decorator via `_recreate_cm` |
+| <Cpy path="Lib/contextlib.py" lines="105-128">105-128</Cpy> | `_GeneratorContextManagerBase` | Stores the generator, copies `__doc__`; shared by sync and async variants |
+| <Cpy path="Lib/contextlib.py" lines="129-200">129-200</Cpy> | `_GeneratorContextManager` | `__enter__` calls `next(gen)`; `__exit__` calls `gen.throw(value)` on exception or `next(gen)` on clean exit |
+| <Cpy path="Lib/contextlib.py" lines="202-275">202-275</Cpy> | `_AsyncGeneratorContextManager` | Async variant using `anext` and `gen.athrow` |
+| <Cpy path="Lib/contextlib.py" lines="276-340">276-340</Cpy> | `contextmanager` / `asynccontextmanager` | Decorator factories that wrap a generator function into a `_GeneratorContextManager` |
+| <Cpy path="Lib/contextlib.py" lines="342-391">342-391</Cpy> | `closing` / `aclosing` | Call `.close()` / `.aclose()` on exit |
+| <Cpy path="Lib/contextlib.py" lines="393-431">393-431</Cpy> | `_RedirectStream` / `redirect_stdout` / `redirect_stderr` | Temporarily replace `sys.stdout` or `sys.stderr` |
+| <Cpy path="Lib/contextlib.py" lines="433-470">433-470</Cpy> | `suppress` | Silently swallow a tuple of exception types |
+| <Cpy path="Lib/contextlib.py" lines="472-554">472-554</Cpy> | `_BaseExitStack` | `deque` of `(is_sync, callback)` pairs; `enter_context`, `push`, `callback`, `_push_exit_callback` |
+| <Cpy path="Lib/contextlib.py" lines="557-628">557-628</Cpy> | `ExitStack` | Synchronous stack; `__exit__` unwinds in LIFO order, chains exception contexts |
+| <Cpy path="Lib/contextlib.py" lines="631-773">631-773</Cpy> | `AsyncExitStack` | Async stack; handles mixed sync/async callbacks in `__aexit__` |
+| <Cpy path="Lib/contextlib.py" lines="775-800">775-800</Cpy> | `nullcontext` | No-op context manager, optionally yields a fixed value |
+| <Cpy path="Lib/contextlib.py" lines="802-814">802-814</Cpy> | `chdir` | Temporarily change the working directory |
+
+## Reading
+
+### `_GeneratorContextManager.__exit__`: throw into generator
+
+On a clean exit, `__exit__` advances the generator one more step and expects `StopIteration`. On an exception, it calls `gen.throw(value)`. The subtle bookkeeping ensures that a `StopIteration` raised inside the `with` block is not swallowed, and that a `RuntimeError` wrapping a passed-in `StopIteration` (PEP 479) is handled correctly.
+
+```python
+# CPython: Lib/contextlib.py:145 _GeneratorContextManager.__exit__
+def __exit__(self, typ, value, traceback):
+    if typ is None:
+        try:
+            next(self.gen)
+        except StopIteration:
+            return False
+        else:
+            try:
+                raise RuntimeError("generator didn't stop")
+            finally:
+                self.gen.close()
+    else:
+        if value is None:
+            value = typ()
+        try:
+            self.gen.throw(value)
+        except StopIteration as exc:
+            return exc is not value
+        except RuntimeError as exc:
+            if exc is value:
+                exc.__traceback__ = traceback
+                return False
+            if (isinstance(value, StopIteration) and exc.__cause__ is value):
+                value.__traceback__ = traceback
+                return False
+            raise
+        except BaseException as exc:
+            if exc is not value:
+                raise
+            exc.__traceback__ = traceback
+            return False
+        try:
+            raise RuntimeError("generator didn't stop after throw()")
+        finally:
+            self.gen.close()
+```
+
+### `_BaseExitStack`: the exit callback chain
+
+`_push_exit_callback` appends `(is_sync, cb)` to a `deque`. `enter_context` looks up `__enter__`/`__exit__` on the type (not the instance) to match `with`-statement semantics, calls `__enter__`, then pushes `__exit__` wrapped via `_create_exit_wrapper` (a `MethodType` binding).
+
+```python
+# CPython: Lib/contextlib.py:476 _BaseExitStack._create_exit_wrapper
+@staticmethod
+def _create_exit_wrapper(cm, cm_exit):
+    return MethodType(cm_exit, cm)
+
+# CPython: Lib/contextlib.py:515 _BaseExitStack.enter_context
+def enter_context(self, cm):
+    cls = type(cm)
+    try:
+        _enter = cls.__enter__
+        _exit = cls.__exit__
+    except AttributeError:
+        raise TypeError(
+            f"'{cls.__module__}.{cls.__qualname__}' object does "
+            f"not support the context manager protocol"
+        ) from None
+    result = _enter(cm)
+    self._push_cm_exit(cm, _exit)
+    return result
+```
+
+### `ExitStack.__exit__`: LIFO unwinding with exception chaining
+
+Callbacks are popped from the right of the deque (LIFO). A suppressed exception sets `exc = None`; a newly raised exception is threaded into `__context__` via `_fix_exception_context` so the chain reflects the logical nesting rather than the actual frame chain.
+
+```python
+# CPython: Lib/contextlib.py:571 ExitStack.__exit__
+def __exit__(self, *exc_details):
+    exc = exc_details[1]
+    received_exc = exc is not None
+    frame_exc = sys.exception()
+    def _fix_exception_context(new_exc, old_exc):
+        while 1:
+            exc_context = new_exc.__context__
+            if exc_context is None or exc_context is old_exc:
+                return
+            if exc_context is frame_exc:
+                break
+            new_exc = exc_context
+        new_exc.__context__ = old_exc
+
+    suppressed_exc = False
+    pending_raise = False
+    while self._exit_callbacks:
+        is_sync, cb = self._exit_callbacks.pop()
+        assert is_sync
+        try:
+            if exc is None:
+                exc_details = None, None, None
+            else:
+                exc_details = type(exc), exc, exc.__traceback__
+            if cb(*exc_details):
+                suppressed_exc = True
+                pending_raise = False
+                exc = None
+        except BaseException as new_exc:
+            _fix_exception_context(new_exc, exc)
+            pending_raise = True
+            exc = new_exc
+
+    if pending_raise:
+        try:
+            fixed_ctx = exc.__context__
+            raise exc
+        except BaseException:
+            exc.__context__ = fixed_ctx
+            raise
+    return received_exc and suppressed_exc
+```
+
+### `suppress.__exit__`: one-liner exception filter
+
+```python
+# CPython: Lib/contextlib.py:450 suppress.__exit__
+def __exit__(self, exctype, excinst, exctb):
+    return exctype is not None and issubclass(exctype, self._exceptions)
+```
+
+## gopy notes
+
+- `_GeneratorContextManager` is the only type that calls `gen.throw()`. gopy must implement `throw` on its generator objects before this module can run correctly.
+- `ExitStack._fix_exception_context` walks `__context__` chains. gopy's exception model stores `__context__` as a field on `BaseException`; chain walking must be O(depth) and cycle-safe.
+- `AsyncExitStack` mixes sync and async callbacks in one deque. The `is_sync` flag at position 0 of each tuple drives the dispatch. gopy's coroutine scheduler must handle the interleaved `await` calls inside `__aexit__`.
+- `suppress` at line 433 only handles `BaseException` subclasses; it does not catch `KeyboardInterrupt` or `SystemExit` unless explicitly listed. gopy must match this exactly.
+- `nullcontext` at line 775 implements both `AbstractContextManager` and `AbstractAsyncContextManager`, so it works in both `with` and `async with` blocks with no extra code.

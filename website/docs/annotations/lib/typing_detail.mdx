@@ -1,0 +1,163 @@
+---
+title: "Lib/typing.py"
+description: "The typing module provides runtime support for PEP 484 type hints, including generic aliases, TypeVar constraints, Protocol checkability, Union flattening, and forward-reference resolution."
+cpython_path: "Lib/typing.py"
+cpython_version: "3.14"
+lines: 3500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# Lib/typing.py
+
+<CpyLink path="Lib/typing.py" />
+
+`typing.py` is the pure-Python implementation of Python's static type system as
+exposed at runtime. It defines type variable kinds (`TypeVar`, `ParamSpec`,
+`TypeVarTuple`), the generic alias machinery (`_GenericAlias`, `_SpecialForm`),
+runtime-checkable protocols, `Union` deduplication, `get_type_hints()` with
+forward-reference resolution, and a collection of special forms (`Annotated`,
+`Literal`, `TypedDict`, `overload`).
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| <Cpy path="Lib/typing.py" lines="1-120">1-120</Cpy> | imports, `__all__`, `_SpecialForm` scaffolding | Module bootstrap and sentinel types |
+| <Cpy path="Lib/typing.py" lines="121-400">121-400</Cpy> | `TypeVar`, `ParamSpec`, `TypeVarTuple` | Type variable kinds with constraint and bound storage |
+| <Cpy path="Lib/typing.py" lines="401-700">401-700</Cpy> | `_GenericAlias`, `_SpecialGenericAlias` | Generic alias objects returned by `Generic[T]` subscript |
+| <Cpy path="Lib/typing.py" lines="701-900">701-900</Cpy> | `Generic.__class_getitem__` | Creates `_GenericAlias`; enforces unique type-param rules |
+| <Cpy path="Lib/typing.py" lines="901-1100">901-1100</Cpy> | `_UnionGenericAlias`, `Union` | Flattening and deduplication of union operands |
+| <Cpy path="Lib/typing.py" lines="1101-1400">1101-1400</Cpy> | `Protocol`, `runtime_checkable` | `__protocol_attrs__`, `_is_runtime_protocol`, `isinstance` hook |
+| <Cpy path="Lib/typing.py" lines="1401-1700">1401-1700</Cpy> | `get_type_hints` | Forward-reference resolution via `eval` in caller's namespace |
+| <Cpy path="Lib/typing.py" lines="1701-1900">1701-1900</Cpy> | `overload`, `get_overloads` | Decorator registry keyed by qualified name |
+| <Cpy path="Lib/typing.py" lines="1901-2200">1901-2200</Cpy> | `Annotated` | Metadata wrapper; preserves origin and strips on `get_type_hints` |
+| <Cpy path="Lib/typing.py" lines="2201-2500">2201-2500</Cpy> | `Literal`, `Final`, `ClassVar` | Special forms with value-set deduplication |
+| <Cpy path="Lib/typing.py" lines="2501-3000">2501-3000</Cpy> | `TypedDict` | Class-based typed dict via `__init_subclass__` and `__annotations__` |
+| <Cpy path="Lib/typing.py" lines="3001-3500">3001-3500</Cpy> | Utility helpers, `TYPE_CHECKING`, `cast`, `assert_never` | Miscellaneous runtime support |
+
+## Reading
+
+### TypeVar: constraint and bound storage
+
+`TypeVar` records its constraints as a tuple and its upper bound as a single type.
+The two modes are mutually exclusive: a `TypeVar` with constraints restricts the
+type to one of the listed alternatives, while a bound restricts it to subtypes of
+the bound.
+
+```python
+# CPython: Lib/typing.py:200 TypeVar.__init__
+def __init__(self, name, *constraints, bound=None,
+             covariant=False, contravariant=False,
+             infer_variance=False, default=NoDefault):
+    self.__name__ = name
+    if constraints and bound is not None:
+        raise TypeError("Constraints cannot be combined with bound=")
+    if len(constraints) == 1:
+        raise TypeError("A single constraint is not allowed")
+    self.__constraints__ = tuple(constraints)
+    self.__bound__ = bound
+    self.__covariant__ = bool(covariant)
+    self.__contravariant__ = bool(contravariant)
+    self.__infer_variance__ = bool(infer_variance)
+```
+
+### Generic.__class_getitem__ and _GenericAlias
+
+Subscripting a generic class (e.g. `List[int]`) calls `__class_getitem__`, which
+constructs a `_GenericAlias`. The alias records the origin class and the argument
+tuple. Subsequent subscript calls on the alias (`_GenericAlias.__getitem__`) allow
+nested generics such as `Dict[str, List[int]]`.
+
+```python
+# CPython: Lib/typing.py:720 Generic.__class_getitem__
+def __class_getitem__(cls, params):
+    if not isinstance(params, tuple):
+        params = (params,)
+    ...
+    return _GenericAlias(cls, params)
+
+# CPython: Lib/typing.py:480 _GenericAlias.__getitem__
+def __getitem__(self, params):
+    if not isinstance(params, tuple):
+        params = (params,)
+    params = tuple(_type_check(p, msg) for p in params)
+    ...
+    return _GenericAlias(self.__origin__, self.__args__ + params)
+```
+
+### Union flattening and deduplication
+
+`Union[X, Union[Y, Z]]` must flatten to `Union[X, Y, Z]`, and duplicate types must
+be removed. The logic lives in `_UnionGenericAlias` and is applied at construction
+time so that `Union[int, int]` returns `int` directly.
+
+```python
+# CPython: Lib/typing.py:950 Union.__getitem__ (via _SpecialForm)
+def __getitem__(self, parameters):
+    ...
+    # Flatten nested Unions
+    params = []
+    for p in parameters:
+        if get_origin(p) is Union:
+            params.extend(get_args(p))
+        else:
+            params.append(p)
+    # Deduplicate while preserving order
+    seen = set()
+    deduped = []
+    for p in params:
+        if p not in seen:
+            seen.add(p)
+            deduped.append(p)
+    if len(deduped) == 1:
+        return deduped[0]
+    return _UnionGenericAlias(Union, tuple(deduped))
+```
+
+### Protocol runtime checkability
+
+`@runtime_checkable` sets `_is_runtime_protocol = True` on the class. When
+`isinstance(obj, proto)` is called, `Protocol.__instancecheck__` checks
+`__protocol_attrs__` (the set of non-dunder members defined in the protocol body)
+against the instance's attributes, using `hasattr` rather than MRO traversal.
+
+```python
+# CPython: Lib/typing.py:1250 Protocol.__instancecheck__
+def __instancecheck__(cls, instance):
+    if (not getattr(cls, '_is_runtime_protocol', False) and
+            cls is not Protocol):
+        raise TypeError(
+            "Protocols with non-method members don't support issubclass()"
+        )
+    return abc.ABCMeta.__instancecheck__(cls, instance)
+
+# CPython: Lib/typing.py:1180 __protocol_attrs__ construction
+def _get_protocol_attrs(cls):
+    attrs = set()
+    for base in cls.__mro__[:-1]:   # skip object
+        if base.__name__ in ('Protocol', 'Generic', 'ABC', 'object'):
+            continue
+        for attr in base.__dict__:
+            if not attr.startswith('_'):
+                attrs.add(attr)
+    return attrs
+```
+
+## gopy notes
+
+gopy does not yet port `typing.py`. Relevant observations:
+
+- `TypeVar` objects are created at import time as module-level constants. The VM
+  sees them as plain class instances; no special dispatch is needed until a
+  type-checker integration layer is added.
+- `_GenericAlias.__class_getitem__` depends on `__class_getitem__` being routed
+  correctly through `BINARY_SUBSCR` on type objects. `vm/eval_gen.go` handles
+  `BINARY_SUBSCR` but the `__class_getitem__` fallback path is not yet tested.
+- `get_type_hints()` calls `eval()` on string annotations in the caller's global
+  namespace. gopy's `eval` support (`pythonrun/runstring.go`) would need a
+  namespace-injection variant.
+- `TypedDict` uses `__init_subclass__` hooks, which requires the class creation
+  path in `objects/type_call.go` to call `__init_subclass__` on base classes.
+  That mechanism exists in `objects/usertype.go` but is not covered by tests yet.

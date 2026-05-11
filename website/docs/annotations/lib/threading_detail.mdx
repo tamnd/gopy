@@ -1,0 +1,184 @@
+---
+title: "Lib/threading.py"
+description: "High-level threading API wrapping the _thread C extension, providing Thread lifecycle management, synchronization primitives, thread-local storage, and interpreter shutdown coordination."
+cpython_path: Lib/threading.py
+cpython_version: "3.14"
+lines: 1308
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# Lib/threading.py
+
+<CpyLink path="Lib/threading.py" />
+
+The module is a pure-Python layer over the low-level `_thread` C extension. It
+adds object-oriented synchronization primitives, a `Thread` class with a full
+lifecycle, thread-local storage via `local()`, and the `_shutdown()` join loop
+that holds the interpreter alive until all non-daemon threads finish.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| <Cpy path="Lib/threading.py" lines="44-53">44-53</Cpy> | `settrace` / `setprofile` | Register trace/profile hooks applied to every new thread before `run()` |
+| <Cpy path="Lib/threading.py" lines="80-80">80</Cpy> | `Lock` | Alias for `_thread.LockType`, the primitive non-reentrant mutex |
+| <Cpy path="Lib/threading.py" lines="98-108">98-108</Cpy> | `RLock` | Factory that returns `_CRLock` (C) or `_PyRLock` (pure-Python fallback) |
+| <Cpy path="Lib/threading.py" lines="109-242">109-242</Cpy> | `_RLock` | Pure-Python reentrant lock implementation |
+| <Cpy path="Lib/threading.py" lines="243-342">243-342</Cpy> | `Condition` | Monitor built on top of `Lock` |
+| <Cpy path="Lib/threading.py" lines="343-426">343-426</Cpy> | `Semaphore` | Counting semaphore |
+| <Cpy path="Lib/threading.py" lines="427-474">427-474</Cpy> | `BoundedSemaphore` | Semaphore that raises `ValueError` on over-release |
+| <Cpy path="Lib/threading.py" lines="475-559">475-559</Cpy> | `Event` | One-shot boolean flag built on `Condition` |
+| <Cpy path="Lib/threading.py" lines="560-695">560-695</Cpy> | `Barrier` | Rendezvous point coordinating exactly N threads |
+| <Cpy path="Lib/threading.py" lines="696-752">696-752</Cpy> | `BrokenBarrierError` | Raised when a barrier is aborted |
+| <Cpy path="Lib/threading.py" lines="753-874">753-874</Cpy> | `Thread.__init__` | Allocate thread state, daemon flag, context snapshot |
+| <Cpy path="Lib/threading.py" lines="875-910">875-910</Cpy> | `Thread.start` / `Thread.run` | Spawn OS thread, invoke target callable |
+| <Cpy path="Lib/threading.py" lines="921-948">921-948</Cpy> | `Thread._bootstrap` | Entry point executed inside the new OS thread |
+| <Cpy path="Lib/threading.py" lines="959-967">959-967</Cpy> | `Thread._delete` | Remove finished thread from `_active` registry |
+| <Cpy path="Lib/threading.py" lines="1138-1165">1138-1165</Cpy> | `Timer` | `Thread` subclass that fires a callable after a delay |
+| <Cpy path="Lib/threading.py" lines="1160-1193">1160-1193</Cpy> | `_MainThread` | Singleton representing the interpreter main thread |
+| <Cpy path="Lib/threading.py" lines="1194-1226">1194-1226</Cpy> | `_DummyThread` | Placeholder for threads not started by `threading` |
+| <Cpy path="Lib/threading.py" lines="1235-1260">1235-1260</Cpy> | `current_thread` / `active_count` | Public introspection helpers |
+| <Cpy path="Lib/threading.py" lines="1262-1284">1262-1284</Cpy> | `_shutdown` | Interpreter teardown join loop |
+| <Cpy path="Lib/threading.py" lines="1286-1293">1286-1293</Cpy> | `main_thread` | Return the `_MainThread` singleton |
+| <Cpy path="Lib/threading.py" lines="1295-1303">1295-1303</Cpy> | `enumerate` | Snapshot of all live `Thread` objects |
+
+## Reading
+
+### settrace and setprofile hooks
+
+The module keeps two module-level hook variables. Every new thread reads them
+at startup and installs them with `sys.settrace` / `sys.setprofile` before
+calling `run()`. The `*_all_threads` variants also retroactively apply to
+already-running threads via a C-level call.
+
+```python
+# CPython: Lib/threading.py:44 settrace
+def settrace(func):
+    global _trace_hook
+    _trace_hook = func
+
+# CPython: Lib/threading.py:54 setprofile
+def setprofile(func):
+    global _profile_hook
+    _profile_hook = func
+```
+
+### Thread lifecycle: start, run, _bootstrap, _delete
+
+`start()` places the thread in `_limbo`, optionally copies the calling
+context depending on `sys.flags.thread_inherit_context`, then calls
+`_start_joinable_thread` (a thin C wrapper) and waits for the OS thread
+to confirm it is running by calling `self._started.wait()`. `_bootstrap`
+is the entry point executed inside the new OS thread. It delegates to
+`_bootstrap_inner`, which installs the trace/profile hooks, calls `run()`,
+and finally calls `_delete()`. `run()` is the user-overridable method; by
+default it calls `self._target`.
+
+```python
+# CPython: Lib/threading.py:875 Thread.start
+def start(self):
+    if self._started.is_set():
+        raise RuntimeError("threads can only be started once")
+    with _active_limbo_lock:
+        _limbo[self] = self
+    if self._context is None:
+        if _sys.flags.thread_inherit_context:
+            self._context = _contextvars.copy_context()
+        else:
+            self._context = _contextvars.Context()
+    _start_joinable_thread(self._bootstrap, handle=self._os_thread_handle,
+                           daemon=self.daemon)
+    self._started.wait()
+
+# CPython: Lib/threading.py:911 Thread.run
+def run(self):
+    try:
+        if self._target is not None:
+            self._target(*self._args, **self._kwargs)
+    finally:
+        del self._target, self._args, self._kwargs
+
+# CPython: Lib/threading.py:928 Thread._bootstrap
+def _bootstrap(self):
+    try:
+        self._bootstrap_inner()
+    except:
+        if self._daemonic and _sys is None:
+            return
+        raise
+
+# CPython: Lib/threading.py:959 Thread._delete
+def _delete(self):
+    with _active_limbo_lock:
+        del _active[get_ident()]
+```
+
+### Barrier synchronization primitive
+
+`Barrier` coordinates exactly `parties` threads at a single rendezvous point.
+The internal `_state` field encodes the phase: 0 filling, 1 draining, -1
+resetting, -2 broken. A `Condition` backed by a plain `Lock` provides the
+wait/notify mechanism. When the last thread arrives it runs the optional
+`action` callback before releasing all waiters.
+
+```python
+# CPython: Lib/threading.py:560 Barrier.__init__
+class Barrier:
+    def __init__(self, parties, action=None, timeout=None):
+        if parties < 1:
+            raise ValueError("parties must be >= 1")
+        self._cond = Condition(Lock())
+        self._action = action
+        self._timeout = timeout
+        self._parties = parties
+        self._state = 0   # 0 filling, 1 draining, -1 resetting, -2 broken
+        self._count = 0
+```
+
+### Interpreter shutdown (_shutdown and enumerate)
+
+`_shutdown()` is registered with `atexit` and also called directly by
+`Py_Finalize`. It sets `_SHUTTING_DOWN`, fires threading atexit callbacks,
+marks the main thread handle done, then calls the C-level `_thread_shutdown()`
+which blocks until every non-daemon thread exits. `enumerate()` returns a
+combined snapshot of `_active` (running) and `_limbo` (starting) threads.
+
+```python
+# CPython: Lib/threading.py:1262 _shutdown
+def _shutdown():
+    if _main_thread._os_thread_handle.is_done() and _is_main_interpreter():
+        return
+    global _SHUTTING_DOWN
+    _SHUTTING_DOWN = True
+    for atexit_call in reversed(_threading_atexits):
+        atexit_call()
+    if _is_main_interpreter():
+        _main_thread._os_thread_handle._set_done()
+    _thread_shutdown()
+
+# CPython: Lib/threading.py:1295 enumerate
+def enumerate():
+    with _active_limbo_lock:
+        return list(_active.values()) + list(_limbo.values())
+```
+
+## gopy notes
+
+- `_thread` primitives map to Go's `sync.Mutex` and `sync.RWMutex`. The
+  `Lock` alias at line 80 and the `RLock` factory at line 98 must resolve to
+  gopy equivalents rather than the C extension objects.
+- `Thread._bootstrap` suppresses errors only for daemonic threads when
+  `_sys is None` (interpreter shutting down). gopy's shutdown path must set an
+  equivalent sentinel before tearing down module state.
+- `local()` at line 80 is imported from `_threading_local` (a C module). The
+  gopy port stores per-goroutine data in a `sync.Map` keyed by goroutine ID.
+- `_DummyThread` wraps OS threads not started by `threading`. gopy creates
+  these when Python C-API callbacks fire on goroutines that the scheduler did
+  not launch.
+- `TIMEOUT_MAX` (line 78) is taken from `_thread.TIMEOUT_MAX`. gopy exposes
+  `math.MaxFloat64` via the same name.
+- The daemon flag is stored on `Thread` but its enforcement happens in
+  `_shutdown`. Goroutines are all non-daemon by default; a separate tracking
+  set is needed to replicate the daemon join-skip behaviour.

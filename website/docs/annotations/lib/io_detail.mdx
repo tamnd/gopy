@@ -1,0 +1,191 @@
+---
+title: "_pyio.py: Pure-Python I/O implementation"
+description: "The pure-Python reference implementation of Python's I/O stack, covering every class from IOBase through TextIOWrapper."
+cpython_path: "Lib/_pyio.py"
+cpython_version: "3.14"
+lines: 2754
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Lib/_pyio.py`
+
+<CpyLink path="Lib/_pyio.py" />
+
+`_pyio` is the pure-Python mirror of the C extension `_io`. Python imports the C version at runtime; `_pyio` exists so the I/O semantics can be read, tested, and ported without a C toolchain. Every class here has a one-to-one counterpart in `Modules/_io/`.
+
+## Map
+
+| Lines | Symbol | Role |
+|---|---|---|
+| <Cpy path="Lib/_pyio.py" lines="306-591">306-591</Cpy> | `IOBase` | Abstract base for all I/O objects; close/flush lifecycle, context manager, readline/readlines/writelines, iterator protocol |
+| <Cpy path="Lib/_pyio.py" lines="592-654">592-654</Cpy> | `RawIOBase` | Unbuffered binary base; read, readall, readinto stubs |
+| <Cpy path="Lib/_pyio.py" lines="655-760">655-760</Cpy> | `BufferedIOBase` | Buffered binary base; read/read1/readinto/readinto1/_readinto helper |
+| <Cpy path="Lib/_pyio.py" lines="761-871">761-871</Cpy> | `_BufferedIOMixin` | Shared seek/tell/truncate/flush/close/detach for concrete buffered classes |
+| <Cpy path="Lib/_pyio.py" lines="872-1014">872-1014</Cpy> | `BytesIO` | In-memory buffered I/O backed by a `bytearray` |
+| <Cpy path="Lib/_pyio.py" lines="1015-1214">1015-1214</Cpy> | `BufferedReader` | Read-ahead buffer; `_read_unlocked` fast/slow path, `peek`/`read1` lookahead |
+| <Cpy path="Lib/_pyio.py" lines="1215-1319">1215-1319</Cpy> | `BufferedWriter` | Write buffer; `_flush_unlocked` drain loop, `BlockingIOError` partial-write handling |
+| <Cpy path="Lib/_pyio.py" lines="1320-1392">1320-1392</Cpy> | `BufferedRWPair` | Separate reader + writer combined into one object |
+| <Cpy path="Lib/_pyio.py" lines="1393-1465">1393-1465</Cpy> | `BufferedRandom` | Seekable read/write buffer; undo-readahead on write |
+| <Cpy path="Lib/_pyio.py" lines="1478-1870">1478-1870</Cpy> | `FileIO` | Raw file I/O via `os.open`/`os.read`/`os.write` syscalls |
+| <Cpy path="Lib/_pyio.py" lines="1938-2021">1938-2021</Cpy> | `IncrementalNewlineDecoder` | Codec wrapper that translates `\r\n` and `\r` to `\n` and tracks seen newline types |
+| <Cpy path="Lib/_pyio.py" lines="2023-2754">2023-2754</Cpy> | `TextIOWrapper` | Text layer over `BufferedIOBase`; encoding, errors, newline translation, readline state machine, tell/seek cookie, `reconfigure()` |
+
+## Reading
+
+### IOBase: close and context manager
+
+`close()` is idempotent via the private `__closed` flag. `__enter__` returns `self` after checking `_checkClosed`. `__exit__` always calls `close()`.
+
+```python
+# CPython: Lib/_pyio.py:387 IOBase.close
+def close(self):
+    if not self.__closed:
+        try:
+            self.flush()
+        finally:
+            self.__closed = True
+
+# CPython: Lib/_pyio.py:484 IOBase.__exit__
+def __exit__(self, *args):
+    self.close()
+```
+
+### IOBase.readline: byte-at-a-time scan
+
+The base `readline` reads one byte at a time until it finds `b"\n"` or hits EOF. Concrete subclasses (especially `TextIOWrapper`) override this with a much faster state machine.
+
+```python
+# CPython: Lib/_pyio.py:509 IOBase.readline
+def readline(self, size=-1):
+    # For backwards compatibility, a (slowish) readline().
+    if hasattr(self, "peek"):
+        def nreadahead():
+            readahead = self.peek(1)
+            if not readahead:
+                return 1
+            n = (readahead.find(b"\n") + 1) or len(readahead)
+            if size >= 0:
+                n = min(n, size)
+            return n
+    else:
+        def nreadahead():
+            return 1
+    if size is None:
+        size = -1
+    else:
+        try:
+            size_index = size.__index__
+        except AttributeError:
+            raise TypeError(f"{size!r} is not an integer")
+        else:
+            size = size_index()
+    res = bytearray()
+    while size < 0 or len(res) < size:
+        b = self.read(nreadahead())
+        if not b:
+            break
+        res += b
+        if res.endswith(b"\n"):
+            break
+    return bytes(res)
+```
+
+### BufferedReader._read_unlocked: fast and slow paths
+
+The fast path returns directly from the in-memory buffer when enough bytes are already present. The slow path issues raw reads in `max(buffer_size, n)` chunks and trims the remainder back into `_read_buf`.
+
+```python
+# CPython: Lib/_pyio.py:1059 BufferedReader._read_unlocked
+def _read_unlocked(self, n=None):
+    nodata_val = b""
+    empty_values = (b"", None)
+    buf = self._read_buf
+    pos = self._read_pos
+
+    if n is None or n == -1:
+        self._reset_read_buf()
+        if hasattr(self.raw, 'readall'):
+            chunk = self.raw.readall()
+            if chunk is None:
+                return buf[pos:] or None
+            else:
+                return buf[pos:] + chunk
+        chunks = [buf[pos:]]
+        current_size = 0
+        while True:
+            chunk = self.raw.read()
+            if chunk in empty_values:
+                nodata_val = chunk
+                break
+            current_size += len(chunk)
+            chunks.append(chunk)
+        return b"".join(chunks) or nodata_val
+
+    avail = len(buf) - pos
+    if n <= avail:
+        self._read_pos += n
+        return buf[pos:pos+n]
+    chunks = [buf[pos:]]
+    wanted = max(self.buffer_size, n)
+    while avail < n:
+        chunk = self.raw.read(wanted)
+        if chunk in empty_values:
+            nodata_val = chunk
+            break
+        avail += len(chunk)
+        chunks.append(chunk)
+    n = min(n, avail)
+    out = b"".join(chunks)
+    self._read_buf = out[n:]
+    self._read_pos = 0
+    return out[:n] if out else nodata_val
+```
+
+### TextIOWrapper.readline: universal newline state machine
+
+`readline` accumulates decoded text in `line`, searching for `\n`, bare `\r`, or `\r\n` depending on the `_readtranslate`/`_readuniversal`/`_readnl` flags. Each iteration calls `_read_chunk` to pull more bytes from the buffer and feed them through the incremental decoder.
+
+```python
+# CPython: Lib/_pyio.py:2604 TextIOWrapper.readline
+def readline(self, size=None):
+    # ...size normalization omitted for brevity...
+    line = self._get_decoded_chars()
+    start = 0
+    if not self._decoder:
+        self._get_decoder()
+    pos = endpos = None
+    while True:
+        if self._readtranslate:
+            pos = line.find('\n', start)
+            if pos >= 0:
+                endpos = pos + 1
+                break
+            else:
+                start = len(line)
+        elif self._readuniversal:
+            nlpos = line.find("\n", start)
+            crpos = line.find("\r", start)
+            if crpos == -1:
+                if nlpos == -1:
+                    start = len(line)
+                else:
+                    endpos = nlpos + 1
+                    break
+            # ... \r\n disambiguation continues ...
+        if not self._read_chunk():
+            # EOF
+            self._set_decoded_chars('')
+            self._snapshot = None
+            return line
+        line += self._get_decoded_chars()
+```
+
+## gopy notes
+
+- `IOBase` maps to `objects/object.go` (`IOBase` interface) and concrete lifecycle in `objects/instance.go`.
+- `BufferedReader._read_unlocked` is the hottest path for binary reads; gopy ports it as `bufio.Reader`-backed logic with the same fast/slow split.
+- `IncrementalNewlineDecoder` is re-implemented in the text codec pipeline rather than as a standalone Go type.
+- `TextIOWrapper.tell` uses a 320-bit packed cookie (`_pack_cookie` / `_unpack_cookie` at lines 2358-2373) to encode decoder state. This is unusual and needs a dedicated `int.big` encoding in Go.
+- `reconfigure()` at line 2167 calls `_configure()` after flushing; gopy must invalidate any cached encoder/decoder handles on that path.
