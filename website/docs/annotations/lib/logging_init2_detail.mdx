@@ -1,0 +1,107 @@
+---
+title: Lib/logging/__init__.py
+description: "Core logging framework: Logger hierarchy, Handler dispatch, Formatter, Filter, and the LogRecord factory that backs Python's logging module."
+cpython_path: Lib/logging/__init__.py
+cpython_version: "3.14"
+lines: 2200
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Lib/logging/__init__.py`
+
+<CpyLink path="Lib/logging/__init__.py" />
+
+`Lib/logging/__init__.py` is the main module of Python's logging framework. It defines the
+`Logger` class and its hierarchy (rooted at the `root` logger), `Handler` and its subclasses
+that direct records to destinations, `Formatter` that turns `LogRecord` objects into strings,
+and the `Filter` protocol. The design follows the Java Log4j model: loggers propagate records
+up the hierarchy, each handler formats and emits independently.
+
+## Map
+
+| Lines | Symbol | Role |
+| ----- | ------ | ---- |
+| 1-80 | constants, `BASIC_FORMAT` | Level integers, level name maps |
+| 81-200 | `LogRecord` | Data object created for each logged event |
+| 201-350 | `Formatter` | `format()`, `formatTime()`, `formatException()` |
+| 351-500 | `Filter`, `Filterer` | Filtering protocol and mixin |
+| 501-750 | `Handler` | Abstract handler with lock, `emit()`, `handle()` |
+| 751-1100 | `StreamHandler`, `FileHandler` | Console and file output handlers |
+| 1101-1500 | `Logger` | Logger class with level check, propagation, `makeRecord` |
+| 1501-1800 | `Manager`, `PlaceHolder` | Logger hierarchy registry |
+| 1801-2200 | module-level functions | `getLogger`, `basicConfig`, `disable`, `captureWarnings` |
+
+## Reading
+
+### `LogRecord`: the event data object
+
+Every logging call (`logger.info(...)`, `logger.error(...)`) ultimately creates a
+`LogRecord` instance. It captures the timestamp, level, message, filename, line number,
+thread id, and process id at the point of the call. The `getMessage()` method applies
+`%`-style formatting lazily, only when the record is actually emitted.
+
+```python
+# CPython: Lib/logging/__init__.py:290 LogRecord.getMessage
+def getMessage(self):
+    msg = str(self.msg)
+    if self.args:
+        msg = msg % self.args
+    return msg
+```
+
+### `Logger.handle`: level check and propagation
+
+`Logger.callHandlers` walks up the logger hierarchy calling each handler in turn, stopping
+at the first logger with `propagate=False` or when the root is reached. The level check
+in `Logger.isEnabledFor` uses a cached `_cache` dict to avoid repeated walks.
+
+```python
+# CPython: Lib/logging/__init__.py:1340 Logger.callHandlers
+def callHandlers(self, record):
+    c = self
+    found = 0
+    while c:
+        for hdlr in c.handlers:
+            found = found + 1
+            if record.levelno >= hdlr.level:
+                hdlr.handle(record)
+        if not c.propagate:
+            c = None
+        else:
+            c = c.parent
+```
+
+### `basicConfig`: one-shot setup
+
+`basicConfig` is a convenience that installs a `StreamHandler` on the root logger if no
+handlers are present. It is idempotent: a second call is a no-op if handlers already
+exist. The `force=True` keyword removes existing handlers before reconfiguring.
+
+```python
+# CPython: Lib/logging/__init__.py:1940 basicConfig
+def basicConfig(**kwargs):
+    _acquireLock()
+    try:
+        force = kwargs.pop('force', False)
+        if force:
+            for h in root.handlers[:]:
+                root.removeHandler(h)
+                h.close()
+        if len(root.handlers) == 0:
+            ...
+```
+
+## gopy notes
+
+`module/logging/` is not yet ported. gopy's own diagnostic output currently uses Go's
+`log/slog` package directly. A full `logging` port is a significant undertaking because
+it requires thread-safe handler registration, the `Manager` hierarchy, and `Formatter`
+string interpolation. The `LogRecord` dataclass maps naturally to a Go struct.
+
+## CPython 3.14 changes
+
+3.14 added `logging.getLevelNamesMapping()` to expose the internal level-to-name map.
+`Logger.isEnabledFor` gained a fast path using the new `_cache` weakref mechanism.
+`captureWarnings` now uses a dedicated `warnings` logger rather than the root logger.

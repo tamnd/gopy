@@ -1155,6 +1155,8 @@ const sidebars = {
         'annotations/lib/shlex_lib_detail',
         'annotations/lib/copy_lib_detail',
         'annotations/lib/typing_lib_detail',
+        'annotations/lib/logging_init2_detail',
+        'annotations/lib/unittest_loader_detail',
       ],
     },
   ],
