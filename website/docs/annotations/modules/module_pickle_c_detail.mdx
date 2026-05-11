@@ -1,0 +1,87 @@
+---
+title: Modules/_pickle.c
+description: "C accelerator for pickle: Pickler/Unpickler state machines, the memo dict for cycle detection, dispatch tables for built-in types, and the framing protocol."
+cpython_path: Modules/_pickle.c
+cpython_version: "3.14"
+lines: 7000
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/_pickle.c" />
+
+`Modules/_pickle.c` is the C accelerator that backs `pickle.Pickler` and `pickle.Unpickler`. The pure-Python fallback in `Lib/pickle.py` provides the same interface; `_pickle` replaces it for performance. The file contains the full serialization and deserialization state machines, the memo dict for handling object cycles, dispatch tables for common built-in types, and the framing protocol introduced in protocol 4.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-500 | types, opcodes, constants | `PicklerObject`, `UnpicklerObject` structs; opcode enum |
+| 501-2000 | `Pickler` methods | `dump`, `save`, `save_reduce`, type-specific `save_*` |
+| 2001-3500 | `Unpickler` methods | `load`, opcode dispatch, `load_reduce`, stack management |
+| 3501-5000 | Memo and dispatch | Memo dict helpers, `dispatch_table` lookup |
+| 5001-7000 | Module init | `_pickle` module, `PickleError` hierarchy |
+
+## Reading
+
+### Pickler state and the memo
+
+```c
+// Modules/_pickle.c:501 Pickler_dump
+static int
+Pickler_dump(PicklerObject *self, PyObject *obj)
+{
+    if (self->proto >= 2)
+        if (write_header(self) < 0) return -1;
+    if (save(self, obj, 0) < 0) return -1;
+    if (dump_write(self, &stop_opcode, 1) < 0) return -1;
+    return commit_frame(self);
+}
+```
+
+The memo dict maps object `id()` to a memo index. When `save()` encounters an object already in the memo it emits a `BINGET` opcode instead of serializing the object again, which handles shared references and cycles.
+
+### Dispatch for built-in types
+
+`save()` checks `ob_type` against a static dispatch table to call the optimal serializer. For example, `save_long` emits `LONG1` or `LONG4` depending on the integer's byte length, and `save_bytes` emits `SHORT_BINBYTES` for short byte strings.
+
+```c
+// Modules/_pickle.c:1800 save (type dispatch excerpt)
+static int
+save(PicklerObject *self, PyObject *obj, int pers_save)
+{
+    PyTypeObject *type = Py_TYPE(obj);
+    if (type == &PyLong_Type)   return save_long(self, obj);
+    if (type == &PyFloat_Type)  return save_float(self, obj);
+    if (type == &PyBytes_Type)  return save_bytes(self, obj);
+    if (type == &PyUnicode_Type) return save_unicode(self, obj);
+    ...
+}
+```
+
+### Unpickler stack and `load_reduce`
+
+The unpickler maintains an explicit value stack. `REDUCE` pops a callable and an args tuple from the stack and calls `callable(*args)`, pushing the result back. This is the general mechanism for reconstructing arbitrary objects.
+
+```c
+// Modules/_pickle.c:2900 load_reduce
+static int
+load_reduce(UnpicklerObject *self)
+{
+    PyObject *callable, *argtup, *obj;
+    PDATA_POP(self->stack, argtup);
+    PDATA_POP(self->stack, callable);
+    obj = PyObject_CallObject(callable, argtup);
+    PDATA_PUSH(self->stack, obj, -1);
+    return 0;
+}
+```
+
+### Framing protocol (protocol 4+)
+
+Protocol 4 wraps the pickle stream in frames. Each frame is prefixed with an 8-byte length, allowing deserializers to pre-allocate buffers and parallelize decompression. `commit_frame` flushes the current frame buffer to the underlying file object.
+
+## gopy notes
+
+Not yet ported. The planned package path is `module/pickle/`. A Go port would implement the protocol 2+ binary format; pure-Go serialization libraries like `encoding/gob` are not wire-compatible. The memo dict maps to a `map[uintptr]int` keyed on pointer identity.

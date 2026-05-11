@@ -273,6 +273,7 @@ const sidebars = {
         'annotations/python/pylifecycle_c_detail',
         'annotations/python/pythonrun_c_detail',
         'annotations/python/sysmodule_c_detail',
+        'annotations/python/specialize_c_detail',
       ],
     },
     {
@@ -407,6 +408,7 @@ const sidebars = {
         'annotations/objects/namespaceobject_c_detail',
         'annotations/objects/floatobject_c_detail',
         'annotations/objects/boolobject_c_detail',
+        'annotations/objects/memoryobject_c_detail',
       ],
     },
     {
@@ -606,6 +608,7 @@ const sidebars = {
         'annotations/include/include_pycore_ast_h_detail',
         'annotations/include/include_pycore_compile_h_detail',
         'annotations/include/include_pycore_opcode_metadata_h_detail',
+        'annotations/include/include_pycore_call_h_detail',
       ],
     },
     {
@@ -781,6 +784,7 @@ const sidebars = {
         'annotations/modules/module_ctypes_h_detail',
         'annotations/modules/module_ctypes_callproc_c_detail',
         'annotations/modules/module_ctypes_stgdict_c_detail',
+        'annotations/modules/module_pickle_c_detail',
       ],
     },
     {
@@ -1170,6 +1174,9 @@ const sidebars = {
         'annotations/lib/glob_lib_detail',
         'annotations/lib/cookiejar_lib_detail',
         'annotations/lib/asyncio_queues_detail',
+        'annotations/lib/cf_thread_detail',
+        'annotations/lib/cf_process_detail',
+        'annotations/lib/cf_base_detail',
       ],
     },
   ],

@@ -1,0 +1,84 @@
+---
+title: Python/specialize.c
+description: "Adaptive specializer: rewrites LOAD_ATTR, BINARY_OP, CALL, and COMPARE_OP bytecodes in-place after observing the types seen at each site, enabling the tier-1 inline cache mechanism."
+cpython_path: Python/specialize.c
+cpython_version: "3.14"
+lines: 2200
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Python/specialize.c" />
+
+`Python/specialize.c` implements CPython's adaptive specializer. Starting in Python 3.11, every instruction carries a counter. When the counter reaches zero the interpreter calls a specialization function from this file, which rewrites the instruction in the bytecode array with a faster variant (e.g. `LOAD_ATTR_INSTANCE_VALUE`) if the runtime types match a known pattern. If specialization fails the instruction is set to a "miss" variant that re-enters the generic path and increments a backoff counter.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-200 | helpers, `_PyAdaptiveEntry` | Cache entry structs, stats counters |
+| 201-600 | `_Py_Specialize_LoadAttr` | Specialize `LOAD_ATTR` for instances, modules, types, slots |
+| 601-900 | `_Py_Specialize_StoreAttr` | Specialize `STORE_ATTR` for instance dict and slots |
+| 901-1200 | `_Py_Specialize_BinaryOp` | Specialize `BINARY_OP` for int/float/str/bytes |
+| 1201-1600 | `_Py_Specialize_Call` | Specialize `CALL` for Python functions, C functions, classes |
+| 1601-2200 | `_Py_Specialize_CompareOp`, misc | Comparison and remaining opcodes |
+
+## Reading
+
+### Inline cache layout
+
+Each specializable instruction reserves inline cache entries immediately after itself in the bytecode array. The number of cache entries per instruction is recorded in `Include/internal/pycore_opcode_metadata.h`. Specializers write the observed type version tag and offset into these entries.
+
+```c
+// Python/specialize.c:1 _PyAdaptiveEntry (cache entry)
+typedef struct {
+    uint32_t tp_version;   // PyTypeObject.tp_version_tag
+    uint16_t index;        // dict offset or slot index
+    uint16_t keys_version; // dict keys version (for instance attrs)
+} _PyAttrCache;
+```
+
+### `_Py_Specialize_LoadAttr`
+
+The most complex specializer. It checks whether the attribute lives in the instance `__dict__` at a known offset (`LOAD_ATTR_INSTANCE_VALUE`), in the type's `__dict__` as a data descriptor (`LOAD_ATTR_WITH_HINT`), or in a split dict. If the object's type has been modified since the cache was written, the version tag check fails and the interpreter deoptimizes.
+
+```c
+// Python/specialize.c:201 _Py_Specialize_LoadAttr
+int
+_Py_Specialize_LoadAttr(PyObject *owner, _Py_CODEUNIT *instr, PyObject *name)
+{
+    PyTypeObject *type = Py_TYPE(owner);
+    if (tp_version_tag == 0) {
+        SPECIALIZATION_FAIL(LOAD_ATTR, SPEC_FAIL_OUT_OF_VERSIONS);
+        return -1;
+    }
+    ...
+    if (/* instance dict offset fits in uint16 */) {
+        _Py_SET_OPCODE(*instr, LOAD_ATTR_INSTANCE_VALUE);
+        cache->index = (uint16_t)index;
+        cache->tp_version = type->tp_version_tag;
+        return 0;
+    }
+    ...
+}
+```
+
+### Deoptimization and backoff
+
+When a specialized instruction observes a type mismatch it rewrites itself to the `_ADAPTIVE` variant (e.g. `LOAD_ATTR_ADAPTIVE`) and increments a backoff counter. After enough misses the counter stops decrementing and the instruction stays in the slow path permanently for that site.
+
+```c
+// Python/specialize.c (deopt helper)
+static void
+SPECIALIZATION_FAIL(int opcode, int kind) {
+#ifdef Py_STATS
+    _py_stats->opcode_stats[opcode].specialization.failure++;
+    _py_stats->opcode_stats[opcode].specialization.failure_kinds[kind]++;
+#endif
+}
+```
+
+## gopy notes
+
+The gopy tier-2 optimizer in `vm/` dispatches on type version tags using Go type switches rather than inline cache rewriting. The inline cache mechanism in `specialize.c` is not directly ported; gopy instead relies on Go's native type dispatch for the equivalent fast paths. Relevant gopy files: `vm/eval_gen.go`, `vm/eval_call.go`.
