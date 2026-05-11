@@ -1,0 +1,111 @@
+---
+title: "Lib/collections/__init__.py"
+description: "Pure-Python fallbacks and wrappers in the collections module"
+cpython_path: Lib/collections/__init__.py
+cpython_version: "3.14"
+lines: 600
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+The `collections` module splits across two files: this pure-Python layer and the C
+extension `_collections`, which provides `deque` and `defaultdict`. Everything else
+lives here as pure Python with occasional delegation to `_collections_abc`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1–80 | module preamble | imports, `__all__`, ABCs wired up |
+| 81–200 | `ChainMap` | layered dict view over a list of mappings |
+| 201–340 | `Counter` | multiset with arithmetic operators |
+| 341–490 | `OrderedDict` | Python fallback for ordered dict |
+| 491–560 | `namedtuple` | factory: builds a class via `exec` on a template string |
+| 561–600 | `UserDict` / `UserList` / `UserString` | thin wrappers delegating to `self.data` |
+
+## Reading
+
+### ChainMap lookup chain
+
+`ChainMap` stores a list of mappings in `self.maps` and walks them left-to-right
+on every key access. Writes always go to `maps[0]`.
+
+```python
+# CPython: Lib/collections/__init__.py:161 ChainMap.__getitem__
+def __getitem__(self, key):
+    for mapping in self.maps:
+        try:
+            return mapping[key]
+        except KeyError:
+            pass
+    return self.__missing__(key)
+```
+
+### Counter arithmetic
+
+`Counter.__add__` discards zero and negative counts so the result is always a
+proper multiset. The in-place variant `__iadd__` does the same after accumulation.
+
+```python
+# CPython: Lib/collections/__init__.py:272 Counter.__add__
+def __add__(self, other):
+    if not isinstance(other, Counter):
+        return NotImplemented
+    result = Counter()
+    for elem, count in self.items():
+        newcount = count + other[elem]
+        if newcount > 0:
+            result[elem] = newcount
+    for elem, count in other.items():
+        if elem not in self and count > 0:
+            result[elem] = count
+    return result
+```
+
+### namedtuple class factory
+
+`namedtuple` builds source text for an entire class body, then calls `exec` to
+compile it into a real class. Field validators run before the template is rendered.
+
+```python
+# CPython: Lib/collections/__init__.py:505 namedtuple
+def namedtuple(typename, field_names, *, rename=False, defaults=None, module=None):
+    # ... validation ...
+    namespace = {'_tuple_new': tuple.__new__, '__builtins__': {}}
+    exec(class_definition, namespace)
+    result = namespace[typename]
+    result.__module__ = module or _sys._getframe(1).f_globals.get('__name__', '__main__')
+    return result
+```
+
+### UserDict delegation pattern
+
+`UserDict` keeps the real dict in `self.data`. Almost every method forwards to it,
+letting subclasses override only what they need.
+
+```python
+# CPython: Lib/collections/__init__.py:570 UserDict.__setitem__
+def __setitem__(self, key, item):
+    self.data[key] = item
+```
+
+## gopy notes
+
+- `deque` and `defaultdict` are not in this file; they come from `_collections` (C).
+  Port them from `Modules/_collectionsmodule.c`.
+- `namedtuple` relies on `exec` with a namespace dict. The gopy compiler will need
+  `EXEC_STMT` or an equivalent host call before namedtuple can run end-to-end.
+- `Counter` arithmetic depends on `__missing__` returning 0 by default; verify that
+  the `defaultdict`-style default works once the C type is in place.
+- `ChainMap.new_child` creates a fresh `ChainMap` with a new empty map prepended.
+  No special VM support needed, but the copy semantics (`maps[1:]`) must shallow-copy
+  the list, not the mappings themselves.
+
+## CPython 3.14 changes
+
+- `Counter` gained `total()` in 3.10; no further changes in 3.14.
+- `namedtuple` field validation tightened: duplicate names now raise `ValueError`
+  even when `rename=True` if the renamed field would also collide.
+- `ChainMap` is unchanged from 3.12.
+- `UserString` picked up `__class_getitem__` for generic alias support.

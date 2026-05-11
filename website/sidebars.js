@@ -247,6 +247,7 @@ const sidebars = {
         'annotations/python/intrinsics_detail',
         'annotations/python/wordcode_helpers_detail',
         'annotations/python/exception_hierarchy_detail',
+        'annotations/python/pystrtod_detail',
       ],
     },
     {
@@ -333,6 +334,8 @@ const sidebars = {
         'annotations/objects/sliceobject_detail',
         'annotations/objects/typeobject_call_detail',
         'annotations/objects/longobject_bits_detail',
+        'annotations/objects/capsuleobject_detail',
+        'annotations/objects/fileobject_detail',
       ],
     },
     {
@@ -486,6 +489,9 @@ const sidebars = {
         'annotations/include/pystate_h_detail',
         'annotations/include/import_h_detail',
         'annotations/include/eval_h_detail',
+        'annotations/include/cpython_object_h_detail',
+        'annotations/include/pycore_pylifecycle_h_detail',
+        'annotations/include/pycore_traceback_h_detail',
       ],
     },
     {
@@ -597,6 +603,7 @@ const sidebars = {
         'annotations/modules/module_asyncio_detail',
         'annotations/modules/module_contextvars_detail',
         'annotations/modules/module_queue_detail',
+        'annotations/modules/module_math_detail',
       ],
     },
     {
@@ -872,6 +879,8 @@ const sidebars = {
         'annotations/lib/http_client_detail',
         'annotations/lib/xmlrpc_client_detail',
         'annotations/lib/html_parser_detail',
+        'annotations/lib/os_module_detail',
+        'annotations/lib/collections_module_detail',
       ],
     },
   ],

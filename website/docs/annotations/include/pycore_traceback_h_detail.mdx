@@ -1,0 +1,83 @@
+---
+title: "Include/internal/pycore_traceback.h"
+description: "Internal declarations for the traceback subsystem"
+cpython_path: Include/internal/pycore_traceback.h
+cpython_version: "3.14"
+lines: 80
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`Include/internal/pycore_traceback.h` is the internal header for CPython's traceback machinery. It declares the `_PyTracebackObject` struct and the small set of C functions that build, print, and walk traceback chains. Nothing here is part of the public stable ABI — all symbols carry a leading underscore.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1–15 | guard / includes | `Py_BUILD_CORE` guard, forward decls |
+| 16–30 | `_PyTracebackObject` | Struct layout: `tb_next`, `tb_frame`, `tb_lasti`, `tb_lineno` |
+| 31–45 | `_PyTraceBack_Here` | Prepend the current frame to the active exception's traceback |
+| 46–58 | `_PyTraceBack_Print` | Format a full traceback chain to a file object |
+| 59–70 | `_Py_DisplaySourceLine` | Read one source line from disk or linecache and write it |
+| 71–80 | `_Py_UnhandledKeyboardInterrupt` | Flag tested by the signal handler after `KeyboardInterrupt` |
+
+## Reading
+
+### `_PyTracebackObject` struct
+
+The struct mirrors the Python-visible `types.TracebackType`. `tb_frame` holds a strong reference; `tb_next` is the older frame further down the stack.
+
+```c
+// CPython: Include/internal/pycore_traceback.h:16 _PyTracebackObject
+typedef struct _PyTracebackObject {
+    PyObject_HEAD
+    struct _PyTracebackObject *tb_next;
+    PyFrameObject             *tb_frame;
+    int                        tb_lasti;
+    int                        tb_lineno;
+} _PyTracebackObject;
+```
+
+`tb_lasti` is the byte offset of the last executed instruction inside the code object, not a line number. `tb_lineno` caches the result of `PyCode_Addr2Line(tb_lasti)` for fast display.
+
+### `_PyTraceBack_Here`
+
+Called by the eval loop every time an exception propagates through a frame boundary. It allocates a new `_PyTracebackObject`, fills in the current frame and `f_lasti`, then chains it onto `exc->__traceback__`.
+
+```c
+// CPython: Include/internal/pycore_traceback.h:31 _PyTraceBack_Here
+/* Append a new traceback entry for the current frame.
+   Returns 0 on success, -1 on allocation failure. */
+PyAPI_FUNC(int) _PyTraceBack_Here(PyFrameObject *frame);
+```
+
+The function is defined in `Python/traceback.c`. The header declaration is what the eval loop and `ceval.c` include.
+
+### `_Py_DisplaySourceLine`
+
+This is the helper that produces the "arrow line" under the filename and line number in a traceback. It tries the in-memory `linecache` first, then falls back to opening the file with `tokenize.open` (to respect encoding cookies).
+
+```c
+// CPython: Include/internal/pycore_traceback.h:59 _Py_DisplaySourceLine
+/* Write source line number `lineno` from `filename` to `f`.
+   `indent` spaces are prepended. Returns 0 on success, -1 on error. */
+PyAPI_FUNC(int) _Py_DisplaySourceLine(PyObject *f, PyObject *filename,
+                                       int lineno, int indent,
+                                       int *truncation, PyObject **line);
+```
+
+The `truncation` out-parameter was added in 3.12 to support the fine-grained caret underlining (`^~~~~`) in `SyntaxError` tracebacks.
+
+## gopy notes
+
+- `_PyTracebackObject` maps to `objects/traceback.go`. The `tb_frame` field must use gopy's `*Frame` type rather than CPython's `PyFrameObject`.
+- `_PyTraceBack_Here` is called from `vm/eval_unwind.go` whenever an exception unwinds through a frame. The gopy equivalent prepends a `TracebackObject` to `exc.Traceback`.
+- `_Py_DisplaySourceLine` is deferred: gopy's error printer currently uses `runtime.Callers` style output. A full port requires linecache integration (spec 1700).
+- `_Py_UnhandledKeyboardInterrupt` is a plain `int` flag in CPython. In gopy it can be an `atomic.Int32` to avoid data races with the signal goroutine.
+
+## CPython 3.14 changes
+
+- `tb_lineno` is now populated lazily via `PyCode_Addr2Line` only when the traceback is printed, reducing overhead on hot exception paths.
+- The `truncation` and `line` out-parameters of `_Py_DisplaySourceLine` gained `PyObject **line` in 3.13; 3.14 uses this to power `colorize` output in the default traceback formatter.
+- `_Py_UnhandledKeyboardInterrupt` moved from `pystate.h` into this header in 3.14 to consolidate signal-related traceback state.

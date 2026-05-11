@@ -1,0 +1,172 @@
+---
+title: "os.py"
+description: "OS interface module: environ mapping, path alias, walk generator, scandir, and filesystem encoding helpers"
+cpython_path: Lib/os.py
+cpython_version: "3.14"
+lines: 1100
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`Lib/os.py` is the Python-level face of the `os` module. The C extension
+`posix` (or `nt` on Windows) is imported first; `os.py` then wraps, augments,
+and re-exports those symbols. The three biggest pieces of pure-Python code are
+the `_Environ` mapping, the `walk` generator, and the `fsencode`/`fsdecode`
+filesystem-encoding helpers.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1–40 | Imports and `__all__` | Pulls in `posix`/`nt`, sets `name`, `sep`, `linesep` |
+| 41–90 | `os.path` alias | Imports `posixpath` or `ntpath` and re-exports as `path` |
+| 91–180 | `fsencode`, `fsdecode` | Convert between `str` and `bytes` using the filesystem codec |
+| 181–260 | `_check_methods`, `_Environ` | `MutableMapping` over `putenv`/`unsetenv`; `environ` instance |
+| 261–290 | `getenv`, `putenv`, `unsetenv` wrappers | Thin helpers that delegate to `_Environ` or libc |
+| 291–380 | `SEEK_SET`, `SEEK_CUR`, `SEEK_END` | Seek constants re-exported from `posix` |
+| 381–500 | `walk` | Top-down or bottom-up directory tree generator |
+| 501–560 | `scandir` | Returns `DirEntry` iterator via `posix.scandir` |
+| 561–640 | `makedirs`, `removedirs`, `renames` | Recursive directory creation and deletion helpers |
+| 641–720 | `execv`, `execve`, `execvp`, `execvpe` | `exec*` family wrappers with PATH search |
+| 721–830 | `popen`, `fdopen` | File-like wrappers over `subprocess` and `posix.open` |
+| 831–940 | `get_terminal_size` | Queries `os.get_terminal_size` with `COLUMNS`/`LINES` env fallback |
+| 941–1100 | `urandom`, `cpu_count`, misc | Remaining posix wrappers and utilities |
+
+## Reading
+
+### `_Environ`: the environment as a `MutableMapping`
+
+`_Environ` stores a reference to the underlying `putenv`/`unsetenv`
+callables passed at construction. Every `__setitem__` calls `putenv` and
+every `__delitem__` calls `unsetenv`, keeping the C environment block in
+sync. Keys and values are encoded through a `encodekey`/`decodekey` pair so
+both `str` and `bytes` environments can be represented.
+
+```python
+# CPython: Lib/os.py:181 _Environ
+class _Environ(MutableMapping):
+    def __init__(self, data, encodekey, decodekey, encodevalue, decodevalue):
+        self.encodekey = encodekey
+        self.decodekey = decodekey
+        self.encodevalue = encodevalue
+        self.decodevalue = decodevalue
+        self._data = data
+
+    def __setitem__(self, key, value):
+        key = self.encodekey(key)
+        value = self.encodevalue(value)
+        putenv(key, value)
+        self._data[key] = value
+
+    def __delitem__(self, key):
+        key = self.encodekey(key)
+        unsetenv(key)
+        try:
+            del self._data[key]
+        except KeyError:
+            pass
+```
+
+### `fsencode` and `fsdecode`
+
+These two helpers are the standard way to cross the `str`/`bytes` boundary
+for filenames. They use `sys.getfilesystemencoding()` (typically `utf-8` on
+modern POSIX) with `sys.getfilesystemencodeerrors()` as the error handler.
+
+```python
+# CPython: Lib/os.py:91 fsencode
+def fsencode(filename):
+    encoding = sys.getfilesystemencoding() or 'utf-8'
+    errors = sys.getfilesystemencodeerrors() or 'surrogateescape'
+    if isinstance(filename, str):
+        return filename.encode(encoding, errors)
+    elif isinstance(filename, bytes):
+        return filename
+    else:
+        raise TypeError("expect bytes or str, not %s" % type(filename).__name__)
+```
+
+### `walk`: top-down and bottom-up tree traversal
+
+`walk` wraps `scandir` in a generator. In top-down mode it yields the
+current directory before recursing into subdirectories, so the caller can
+prune `dirnames` in-place to skip branches. In bottom-up mode it recurses
+first, yielding the parent only after all children.
+
+```python
+# CPython: Lib/os.py:381 walk
+def walk(top, topdown=True, onerror=None, followlinks=False):
+    sys.audit("os.walk", top, topdown, onerror, followlinks)
+    return _walk(fspath(top), topdown, onerror, followlinks)
+
+def _walk(top, topdown, onerror, followlinks):
+    dirs = []
+    nondirs = []
+    walk_dirs = []
+    try:
+        scandir_it = scandir(top)
+    except OSError as error:
+        if onerror is not None:
+            onerror(error)
+        return
+    with scandir_it:
+        for entry in scandir_it:
+            if entry.is_dir(follow_symlinks=followlinks):
+                dirs.append(entry.name)
+                walk_dirs.append(entry.path)
+            else:
+                nondirs.append(entry.name)
+    if topdown:
+        yield top, dirs, nondirs
+        for new_path in walk_dirs:
+            yield from _walk(new_path, topdown, onerror, followlinks)
+    else:
+        for new_path in walk_dirs:
+            yield from _walk(new_path, topdown, onerror, followlinks)
+        yield top, dirs, nondirs
+```
+
+### `get_terminal_size`
+
+The public `get_terminal_size` first tries `os.get_terminal_size` on the
+three standard streams, then falls back to the `COLUMNS` and `LINES`
+environment variables, and finally to a hard-coded `(80, 24)` default.
+
+```python
+# CPython: Lib/os.py:1097 get_terminal_size
+def get_terminal_size(fallback=(80, 24)):
+    columns = fallback[0]
+    lines   = fallback[1]
+    for fd in (STDOUT_FILENO, STDERR_FILENO, STDIN_FILENO):
+        try:
+            columns, lines = get_terminal_size(fd)
+            break
+        except OSError:
+            pass
+    columns = int(environ.get('COLUMNS', columns))
+    lines   = int(environ.get('LINES', lines))
+    return terminal_size((columns, lines))
+```
+
+## gopy notes
+
+- `_Environ` is a near-complete port target. gopy already has a `MutableMapping`
+  protocol stub; wiring `putenv`/`unsetenv` through it is straightforward.
+- `fsencode`/`fsdecode` depend on `sys.getfilesystemencoding`. In gopy that
+  codec name must come from the Go runtime's locale detection.
+- `walk` is a generator; the gopy port should return an iterator object that
+  holds internal state rather than collecting the whole tree eagerly.
+- `os.path` is a platform alias. The gopy module layer should expose
+  `posixpath` by default and allow `ntpath` to be substituted on Windows builds.
+
+## CPython 3.14 changes
+
+- `walk` was updated to use `scandir` internally in 3.12 (replacing the older
+  `listdir`-based loop), improving performance and enabling `DirEntry` reuse.
+- `os.process_cpu_count` was added in 3.13 to return the number of CPUs
+  available to the current process (respecting CPU affinity masks).
+- `os.timerfd_create` and related timer fd helpers were added in 3.13 for
+  Linux timerfd integration.
+- `fsencode`/`fsdecode` now reference `sys.getfilesystemencodeerrors` rather
+  than hard-coding `'surrogateescape'`, making the error handler configurable.

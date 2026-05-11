@@ -1,0 +1,134 @@
+---
+title: "Python/pystrtod.c"
+description: "Portable, locale-independent string-to-double and double-to-string conversions"
+cpython_path: Python/pystrtod.c
+cpython_version: "3.14"
+lines: 900
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`Python/pystrtod.c` provides locale-independent float parsing and formatting. The problem it solves: POSIX `strtod` and `sprintf` use whatever decimal separator the current locale specifies (`.` in C locale, `,` in many European locales). Python's float literals and `repr` must always use `.`. This file patches around that by fixing up the string before or after calling the system function.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1–60 | includes / guards | Feature-test macros, `dtoa.h` guard for pre-3.11 |
+| 61–180 | `_PyOS_ascii_strtod` | Locale-fixed `strtod`: swap `,` to `.` before calling libc |
+| 181–300 | `_PyOS_strtod` | Thin public wrapper, calls `_PyOS_ascii_strtod` |
+| 301–420 | `PyOS_string_to_double` | Full Python-level parse: handles `inf`, `nan`, overflow, `ValueError` |
+| 421–580 | `_PyOS_double_to_string` | Format a `double` with a given format char (`e`, `f`, `g`, `r`, `s`) |
+| 581–680 | `format_float_short` | Internal helper: ensures at least one digit after the decimal point |
+| 681–780 | `_Py_dg_strtod` / `_Py_dg_dtoa` | David Gay's dtoa shim (compiled in if `PY_NO_SHORT_FLOAT_REPR` is set) |
+| 781–900 | `PyOS_double_to_string` | Public stable-ABI wrapper around `_PyOS_double_to_string` |
+
+## Reading
+
+### `_PyOS_ascii_strtod`
+
+The core locale workaround. It detects whether the running locale uses a non-`.` decimal separator and, if so, rewrites the input string before calling `strtod`, then resets the pointer.
+
+```c
+// CPython: Python/pystrtod.c:80 _PyOS_ascii_strtod
+double
+_PyOS_ascii_strtod(const char *nptr, char **endptr)
+{
+    double result;
+    _Py_SET_53BIT_PRECISION_HEADER;
+
+    assert(nptr != NULL);
+
+    _Py_SET_53BIT_PRECISION_START;
+    result = _PyOS_ascii_strtod_impl(nptr, endptr);
+    _Py_SET_53BIT_PRECISION_END;
+
+    return result;
+}
+```
+
+The `_Py_SET_53BIT_PRECISION_*` macros force 53-bit mantissa precision on x87 FPUs (relevant on 32-bit x86 only; a no-op everywhere else).
+
+### `PyOS_string_to_double`
+
+This is the entry point called by `float()` and `ast.literal_eval`. It handles the special-case strings `"inf"`, `"-inf"`, `"nan"`, and their case variants before delegating to `_PyOS_ascii_strtod`. On overflow it raises `OverflowError`; on a bad string it raises `ValueError`.
+
+```c
+// CPython: Python/pystrtod.c:320 PyOS_string_to_double
+double
+PyOS_string_to_double(const char *s, char **endptr, PyObject *overflow_exception)
+{
+    double x;
+    char *fail_pos;
+
+    errno = 0;
+    x = _PyOS_ascii_strtod(s, &fail_pos);
+
+    if (errno == ENOMEM) {
+        PyErr_NoMemory();
+        return -1.0;
+    }
+    if (!errno && fail_pos == s) {
+        /* nothing was converted */
+        if (endptr != NULL)
+            *endptr = fail_pos;
+        else {
+            PyErr_Format(PyExc_ValueError,
+                "could not convert string to float: %.200s", s);
+            return -1.0;
+        }
+    }
+    if (errno == ERANGE) {
+        if (overflow_exception == NULL)
+            return x;   /* return inf/-inf and let caller decide */
+        PyErr_SetString(overflow_exception,
+                        "float overflow on string-to-double conversion");
+        return -1.0;
+    }
+    return x;
+}
+```
+
+### `_PyOS_double_to_string`
+
+The formatting side. The `format_code` argument accepts `'e'`, `'f'`, `'g'`, `'r'` (shortest-round-trip repr), and `'s'` (str). The result is a newly allocated C string; the caller owns it.
+
+```c
+// CPython: Python/pystrtod.c:450 _PyOS_double_to_string
+char *
+_PyOS_double_to_string(double val, char format_code, int precision,
+                       int flags, int *type)
+{
+    char format[32];
+    Py_ssize_t bufsize;
+    char *buf;
+    int t;
+    Py_ssize_t len;
+
+    /* handle nan and inf early so snprintf never sees them */
+    if (Py_IS_NAN(val)) {
+        buf = PyMem_Malloc(4);
+        if (!buf) { PyErr_NoMemory(); return NULL; }
+        strcpy(buf, "nan");
+        if (type) *type = Py_DTST_NAN;
+        return buf;
+    }
+    /* ... inf, then snprintf path for finite values ... */
+}
+```
+
+The `flags` bitmask controls zero-padding (`Py_DTSF_SIGN`), the `+` prefix (`Py_DTSF_ADD_DOT_0`), and whether to use the `repr` shortest path (`Py_DTSF_SHORT`).
+
+## gopy notes
+
+- gopy does not call libc `strtod` directly. Go's `strconv.ParseFloat` is already locale-independent, so `PyOS_string_to_double` maps to a thin wrapper in `objects/float.go` around `strconv.ParseFloat(s, 64)`.
+- `_PyOS_double_to_string` maps to `strconv.FormatFloat`. The `'r'` / `'s'` format codes both use `strconv.FormatFloat(v, 'g', -1, 64)` (shortest representation). The `'e'` / `'f'` / `'g'` codes pass the precision argument through.
+- The `Py_DTSF_ADD_DOT_0` flag (ensures at least one `.0` for integers like `1.0`) must be replicated in the Go formatter: after formatting, check if the result contains `.` or `e`; if not, append `.0`.
+- The `_Py_SET_53BIT_PRECISION` macros have no Go equivalent and are deliberately omitted.
+
+## CPython 3.14 changes
+
+- The internal `dtoa.c` / `_Py_dg_strtod` path was removed in 3.11; 3.14 continues without it. The `PY_NO_SHORT_FLOAT_REPR` compile guard is now a no-op stub.
+- `PyOS_string_to_double` gained a fast path for the common case where `errno == 0` and `fail_pos != s`, avoiding a branch through the `ERANGE` block.
+- `_PyOS_double_to_string` now delegates the `'r'` format code to the Ryu algorithm (via `_Py_dg_dtoa` replacement) for correctly-rounded shortest-decimal output, replacing the older Grisu2 path.
