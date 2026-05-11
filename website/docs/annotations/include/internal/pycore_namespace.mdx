@@ -1,0 +1,147 @@
+---
+title: Include/internal/pycore_namespace.h
+description: Internal namespace object API declaring _PyNamespace_New, the C constructor for types.SimpleNamespace.
+cpython_path: Include/internal/pycore_namespace.h
+cpython_version: "3.14"
+lines: 30
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Include/internal/pycore_namespace.h`
+
+<CpyLink path="Include/internal/pycore_namespace.h" />
+
+A small header with one public symbol: `_PyNamespace_New(kwds)`. The function
+allocates a `_PyNamespaceObject` and populates its internal dict from the
+`kwds` mapping. It is the C-level entry point that the interpreter uses when it
+needs a `types.SimpleNamespace` without going through the full `tp_call` /
+`tp_new` / `tp_init` chain.
+
+The primary callers are the import system (`Python/import.c`) and the
+`pkgutil` bootstrap code, both of which create namespace packages whose
+`__spec__` attributes are `SimpleNamespace` instances. Because those paths run
+before user code and during interpreter startup, they need a lean allocation
+path that bypasses Python-level argument validation.
+
+The public Python name is `types.SimpleNamespace`, exposed through
+`Objects/namespaceobject.c` and the `types` module. `pycore_namespace.h` gives
+other C translation units access to the allocation function without pulling in
+the full `_PyNamespaceObject` struct layout.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Include/internal/pycore_namespace.h" lines="1-10">1-10</Cpy> | include guards, `#include "object.h"` | Standard guard and forward declaration of `PyObject`. | n/a |
+| <Cpy path="Include/internal/pycore_namespace.h" lines="11-20">11-20</Cpy> | `_PyNamespaceObject` forward declaration | Opaque struct tag so callers can hold pointers without seeing the internals. | `objects/namespace.go:Namespace` |
+| <Cpy path="Include/internal/pycore_namespace.h" lines="21-30">21-30</Cpy> | `_PyNamespace_New(PyObject *kwds)` | Allocate a `_PyNamespaceObject` and copy `kwds` into its internal dict; `kwds` may be `NULL` for an empty namespace. | `objects/namespace.go:NewNamespace` |
+
+## Reading
+
+### `_PyNamespace_New` signature and semantics (lines 21 to 30)
+
+<CpyLink path="Include/internal/pycore_namespace.h" lines="21-30" />
+
+```c
+/* Allocate a new SimpleNamespace and populate it from kwds.
+   kwds may be NULL to create an empty namespace. */
+PyAPI_FUNC(PyObject *) _PyNamespace_New(PyObject *kwds);
+```
+
+The implementation in `Objects/namespaceobject.c` allocates a
+`_PyNamespaceObject`, creates an empty `PyDictObject` for `ns_dict`, and then
+calls `PyDict_Update(ns->ns_dict, kwds)` if `kwds` is non-NULL:
+
+```c
+PyObject *
+_PyNamespace_New(PyObject *kwds)
+{
+    PyObject *ns = namespace_new(&_PyNamespace_Type, NULL, NULL);
+    if (ns == NULL)
+        return NULL;
+    if (kwds != NULL && PyDict_Update(
+            ((_PyNamespaceObject *)ns)->ns_dict, kwds) != 0) {
+        Py_DECREF(ns);
+        return NULL;
+    }
+    return ns;
+}
+```
+
+The key difference from calling `types.SimpleNamespace(**kwds)` at the Python
+level is that `_PyNamespace_New` accepts any mapping as `kwds`, not just
+`**kwargs` dicts. The import system passes `__spec__` dicts directly from its
+internal finders.
+
+### Namespace packages and `__spec__` (lines 21 to 30)
+
+<CpyLink path="Include/internal/pycore_namespace.h" lines="21-30" />
+
+The main call site for `_PyNamespace_New` inside CPython is the namespace
+package finder in `Python/import.c`. When a namespace package is located, the
+import machinery assembles a dict of spec attributes (`name`, `submodule_search_locations`,
+`origin`, `loader`) and calls `_PyNamespace_New` to wrap it in a
+`SimpleNamespace` that becomes the module's `__spec__`:
+
+```c
+/* Python/import.c -- namespace package spec creation */
+spec = _PyNamespace_New(spec_dict);
+if (spec == NULL)
+    goto error;
+if (PyObject_SetAttrString(mod, "__spec__", spec) < 0) {
+    Py_DECREF(spec);
+    goto error;
+}
+Py_DECREF(spec);
+```
+
+Using a `SimpleNamespace` rather than a bespoke struct means `__spec__` is
+readable and writable from Python with no special-casing, and third-party import
+hooks that inspect or modify `__spec__` work without additional machinery.
+
+### `_PyNamespaceObject` forward declaration (lines 11 to 20)
+
+<CpyLink path="Include/internal/pycore_namespace.h" lines="11-20" />
+
+The forward declaration keeps the struct opaque to callers that only need to
+store or pass the pointer:
+
+```c
+/* Forward declared; full definition in Objects/namespaceobject.c */
+typedef struct {
+    PyObject_HEAD
+    PyObject *ns_dict;
+} _PyNamespaceObject;
+```
+
+The actual definition is in `Objects/namespaceobject.c`, not in this header.
+This is the same pattern used by `PyDictObject` (defined in `dictobject.c`,
+forward-declared in `cpython/dictobject.h`). It prevents accidental direct
+access to `ns_dict` from translation units that should go through
+`_PyNamespace_New` and the generic attribute protocol.
+
+## gopy mirror
+
+`objects/namespace.go`. `NewNamespace()` allocates an empty `Namespace` and
+creates its `dict *Dict`. The combined `tp_new`/`tp_init` entry
+`namespaceNew` processes keyword arguments and populates the dict, matching the
+`namespace_new` + `namespace_init` sequence in CPython. `namespaceGetattr` and
+`namespaceSetattr` delegate to dict operations, mirroring
+`PyObject_GenericGetAttr`/`PyObject_GenericSetAttr`. `namespaceRepr` sorts keys
+and formats the `namespace(key=val, ...)` string. `namespaceCompare` handles
+`==` and `!=` by comparing dicts.
+
+The gopy port does not yet expose a `NewNamespaceFromDict` function that maps
+directly to `_PyNamespace_New(kwds)`. The import machinery in gopy creates
+namespace dicts through `namespaceNew`, which takes `map[string]Object` kwargs
+rather than a `*Dict`.
+
+## CPython 3.14 changes
+
+`_PyNamespace_New` and `types.SimpleNamespace` were added in Python 3.3 as
+part of PEP 420 (withdrawn) / PEP 382 (namespace packages). The header was
+moved from `Include/namespaceobject.h` to `Include/internal/pycore_namespace.h`
+in Python 3.9 when the internal header reorganization separated public from
+private APIs. No 3.14-specific changes affect this header.

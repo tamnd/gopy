@@ -210,6 +210,8 @@ const sidebars = {
         'annotations/python/mysnprintf',
         'annotations/python/pytime_impl',
         'annotations/python/ast_unparse',
+        'annotations/python/ast_opt',
+        'annotations/python/python_ast',
       ],
     },
     {
@@ -278,6 +280,9 @@ const sidebars = {
         'annotations/include/cpython_listobject',
         'annotations/include/cpython_tupleobject',
         'annotations/include/cpython_frame',
+        'annotations/include/cpython_abstract',
+        'annotations/include/cpython_bytesobject',
+        'annotations/include/cpython_setobject',
         {
           label: 'internal/',
           type: 'category',
@@ -331,6 +336,9 @@ const sidebars = {
             'annotations/include/internal/pycore_traceback',
             'annotations/include/internal/pycore_sysmodule',
             'annotations/include/internal/pycore_initconfig',
+            'annotations/include/internal/pycore_bytes_methods',
+            'annotations/include/internal/pycore_complexobject',
+            'annotations/include/internal/pycore_namespace',
           ],
         },
       ],
@@ -409,6 +417,7 @@ const sidebars = {
         'annotations/modules/codecsmodule',
         'annotations/modules/interpretersmodule',
         'annotations/modules/interpchannels',
+        'annotations/modules/interpqueues',
       ],
     },
     {

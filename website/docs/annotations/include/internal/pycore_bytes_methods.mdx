@@ -1,0 +1,154 @@
+---
+title: Include/internal/pycore_bytes_methods.h
+description: Shared byte-string method table declaring the _Py_bytes_* helpers used by both bytes and bytearray.
+cpython_path: Include/internal/pycore_bytes_methods.h
+cpython_version: "3.14"
+lines: 80
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Include/internal/pycore_bytes_methods.h`
+
+<CpyLink path="Include/internal/pycore_bytes_methods.h" />
+
+Declares the `_Py_bytes_*` family of functions that are shared between
+`bytesobj` and `bytearrayobj`. Neither type duplicates its method
+implementations; instead both reference a common method table and call into
+`Objects/bytes_methods.c`. The split is deliberate: the public header
+`Include/cpython/bytesobject.h` exposes only the Python-level API, while this
+internal header gives other C translation units access to the raw helpers
+without pulling in the full `PyBytesObject` struct layout.
+
+The key consumers are `Objects/bytesobject.c` (which owns `bytes_methods`
+at line 2664) and `Objects/bytearrayobject.c` (which mirrors it with its own
+method table that delegates to the same `_Py_bytes_*` implementations).
+String-template headers in `Objects/stringlib/` -- `find.h`, `split.h`,
+`transmogrify.h`, `partition.h`, and `fastsearch.h` -- are the actual
+implementations instantiated by a set of `#define` macros before each
+`#include`. The `pycore_bytes_methods.h` declarations let all callers
+agree on the shared signatures without seeing those templates.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Include/internal/pycore_bytes_methods.h" lines="1-20">1-20</Cpy> | `_Py_bytes_lower`, `_Py_bytes_upper`, `_Py_bytes_title`, `_Py_bytes_capitalize`, `_Py_bytes_swapcase` | Case-conversion helpers; operate on a raw `const char *` + `Py_ssize_t` pair. | not yet ported |
+| <Cpy path="Include/internal/pycore_bytes_methods.h" lines="21-40">21-40</Cpy> | `_Py_bytes_find`, `_Py_bytes_rfind`, `_Py_bytes_index`, `_Py_bytes_rindex`, `_Py_bytes_count` | Substring search and count with `[start:end]` slice arguments. | `objects/bytes_methods_wrap.go` (as `Find`, `RFind`, `Index`, `RIndex`, `Count`) |
+| <Cpy path="Include/internal/pycore_bytes_methods.h" lines="41-55">41-55</Cpy> | `_Py_bytes_split`, `_Py_bytes_rsplit`, `_Py_bytes_splitlines`, `_Py_bytes_partition`, `_Py_bytes_rpartition` | Splitting and partitioning family. | `objects/bytes_methods_wrap.go` (as `Split`, `RSplit`, `SplitLines`, `Partition`, `RPartition`) |
+| <Cpy path="Include/internal/pycore_bytes_methods.h" lines="56-70">56-70</Cpy> | `_Py_bytes_strip`, `_Py_bytes_lstrip`, `_Py_bytes_rstrip`, `_Py_bytes_maketrans` | Strip family and translation-table builder. | `objects/bytes_methods_wrap.go` (as `Strip`, `LStrip`, `RStrip`, `MakeBytesTrans`) |
+| <Cpy path="Include/internal/pycore_bytes_methods.h" lines="71-80">71-80</Cpy> | `_Py_bytes_isalpha`, `_Py_bytes_isdigit`, `_Py_bytes_isspace`, `_Py_bytes_islower`, `_Py_bytes_isupper`, `_Py_bytes_istitle` | Predicate methods; each returns `PyObject *` (`True` or `False`). | not yet ported |
+
+## Reading
+
+### Declaration convention (lines 1 to 40)
+
+<CpyLink path="Include/internal/pycore_bytes_methods.h" lines="1-40" />
+
+Every helper follows the same C signature shape: the first two arguments are
+the receiver byte array (`const char *`, `Py_ssize_t`), followed by the Python
+argument objects already converted by Argument Clinic. The functions return
+`PyObject *` (new reference) rather than raw C primitives so the calling method
+table entry can return them directly to the interpreter:
+
+```c
+PyObject* _Py_bytes_find(const char *str, Py_ssize_t len,
+                          PyObject *args);
+PyObject* _Py_bytes_count(const char *str, Py_ssize_t len,
+                           PyObject *args);
+PyObject* _Py_bytes_split(const char *str, Py_ssize_t len,
+                           PyObject *args);
+```
+
+Both `bytes.find` and `bytearray.find` in their respective method tables
+produce wrappers that extract `self->ob_val` and `Py_SIZE(self)`, then call the
+same `_Py_bytes_find`. The duplication that would otherwise exist across the two
+type implementations is eliminated entirely.
+
+### Template instantiation in `Objects/stringlib/` (referenced by lines 21 to 55)
+
+<CpyLink path="Include/internal/pycore_bytes_methods.h" lines="21-55" />
+
+The implementations of `_Py_bytes_find`, `_Py_bytes_split`, and their siblings
+are not written in `bytes_methods.c` as ordinary functions. Instead
+`Objects/bytesobject.c` sets a block of `#define` macros -- `STRINGLIB_CHAR`,
+`STRINGLIB_LEN`, `STRINGLIB_NEW`, `STRINGLIB_ISSPACE` and so on -- that
+parameterize the shared templates, then `#include`s them:
+
+```c
+/* In Objects/bytesobject.c, before each stringlib include: */
+#define STRINGLIB_CHAR            char
+#define STRINGLIB_ISSPACE         Py_ISSPACE
+#define STRINGLIB_ISLINEBREAK(c)  ((c) == '\n' || (c) == '\r')
+#define STRINGLIB_NEW             PyBytes_FromStringAndSize
+#define STRINGLIB_LEN             PyBytes_GET_SIZE
+...
+#include "stringlib/fastsearch.h"
+#include "stringlib/split.h"
+#include "stringlib/find.h"
+#include "stringlib/partition.h"
+#include "stringlib/transmogrify.h"
+```
+
+`Objects/bytearrayobject.c` repeats the pattern with `STRINGLIB_NEW` pointing
+to `PyByteArray_FromStringAndSize` and `STRINGLIB_LEN` to
+`PyByteArray_GET_SIZE`. The two translation units thus each compile a separate
+copy of the template code, tuned to their own allocation and size macros, while
+sharing the declaration contract from `pycore_bytes_methods.h`.
+
+### `_Py_bytes_maketrans` and the 256-byte table contract (lines 56 to 70)
+
+<CpyLink path="Include/internal/pycore_bytes_methods.h" lines="56-70" />
+
+`_Py_bytes_maketrans` is the only helper in this header that is not a
+template instantiation. It lives entirely in `Objects/bytes_methods.c` and
+builds a 256-element `bytes` object that maps `frm[i]` to `to[i]` for every
+pair, leaving all other byte values as identity:
+
+```c
+PyObject *
+_Py_bytes_maketrans(Py_buffer *frm, Py_buffer *to)
+{
+    Py_ssize_t n = frm->len;
+    if (n != to->len) {
+        PyErr_SetString(PyExc_ValueError,
+            "maketrans arguments must have same length");
+        return NULL;
+    }
+    /* Build a 256-byte identity table first. */
+    char *buf;
+    PyObject *res = PyBytes_FromStringAndSize(NULL, 256);
+    ...
+    buf = PyBytes_AS_STRING(res);
+    for (int i = 0; i < 256; i++) buf[i] = (char)i;
+    for (Py_ssize_t i = 0; i < n; i++)
+        buf[((const unsigned char *)frm->buf)[i]] =
+            ((const unsigned char *)to->buf)[i];
+    return res;
+}
+```
+
+The resulting object is passed straight to `_Py_bytes_translate` (the
+underlying implementation of `bytes.translate`), which indexes the table once
+per input byte. Both `bytes.maketrans` and `bytearray.maketrans` call this
+single C function.
+
+## gopy mirror
+
+`objects/bytes_methods_wrap.go` covers the search, split, strip, pad, hex, and
+translation methods. The file applies the same receiver/helper split as CPython:
+raw `[]byte` helpers (`clampBytesSlice`, `splitWhitespace`, `stripPredicate`,
+`padFill`, `hexDigit`) are package-level functions; the `*Bytes` methods
+(`Find`, `Split`, `Strip`, `Translate`, `MakeBytesTrans`, etc.) wrap them
+exactly as CPython's method-table entries wrap `_Py_bytes_*`. The case-
+conversion methods (`Lower`, `Upper`, `Title`, `Capitalize`, `Swapcase`) and the
+`Is*` predicates are not yet ported.
+
+## CPython 3.14 changes
+
+The header and `Objects/bytes_methods.c` have been stable in structure since
+Python 3.0. In 3.12 the Argument Clinic machinery was applied to most
+`bytes`/`bytearray` methods, replacing hand-written argument parsing with
+generated code; the `_Py_bytes_*` signatures themselves did not change. No
+structural changes affect this header in 3.14.

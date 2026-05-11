@@ -1,0 +1,167 @@
+---
+title: Include/internal/pycore_complexobject.h
+description: Internal complex arithmetic header declaring Py_complex and the _Py_c_* low-level math helpers.
+cpython_path: Include/internal/pycore_complexobject.h
+cpython_version: "3.14"
+lines: 40
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Include/internal/pycore_complexobject.h`
+
+<CpyLink path="Include/internal/pycore_complexobject.h" />
+
+Declares the `Py_complex` C struct and the seven C-level arithmetic helpers
+`_Py_c_sum`, `_Py_c_diff`, `_Py_c_neg`, `_Py_c_prod`, `_Py_c_quot`,
+`_Py_c_pow`, and `_Py_c_abs`. These are the low-level building blocks used by
+`Objects/complexobject.c` to implement every numeric slot on the Python
+`complex` type.
+
+The header exists because `Py_complex` and the `_Py_c_*` helpers serve two
+distinct audiences. Extension modules that implement their own numeric types
+can reach `Py_complex` through the stable public API in
+`Include/cpython/complexobject.h`. The interpreter's own C translation units
+(`Objects/complexobject.c`, the ceval loop) need the internal versions to avoid
+the overhead of the public-ABI indirection and to gain access to the
+`_Py_c_neg` and `_Py_c_abs` functions that the public header does not expose.
+Keeping the declarations in this internal header lets CPython evolve the struct
+layout or the function signatures without breaking the stable ABI.
+
+The design mirrors the approach used for `_Py_HashDouble` in
+`pycore_floatobject.h`: a thin internal header gives the interpreter privileged
+access to a type's internals while the public header maintains a stable surface.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Include/internal/pycore_complexobject.h" lines="1-15">1-15</Cpy> | `Py_complex` struct | Plain C struct with `double real` and `double imag`; passed by value throughout the arithmetic layer. | `objects/complex.go` (`Complex.v complex128`) |
+| <Cpy path="Include/internal/pycore_complexobject.h" lines="16-22">16-22</Cpy> | `_Py_c_sum`, `_Py_c_diff`, `_Py_c_neg` | Componentwise addition, subtraction, and negation. | `objects/complex.go` (`complexAdd`, `complexSub`, `complexNeg`) |
+| <Cpy path="Include/internal/pycore_complexobject.h" lines="23-28">23-28</Cpy> | `_Py_c_prod` | Schoolbook multiplication: four multiplies, two adds. | `objects/complex.go` (`complexMul`) |
+| <Cpy path="Include/internal/pycore_complexobject.h" lines="29-33">29-33</Cpy> | `_Py_c_quot` | Smith's algorithm for numerically stable division. | `objects/complex.go` (`complexTrueDiv`) |
+| <Cpy path="Include/internal/pycore_complexobject.h" lines="34-37">34-37</Cpy> | `_Py_c_pow` | Complex exponentiation; delegates to `cpow` for the general case and handles edge cases (zero base, real exponent). | `objects/complex.go` (`complexPower`) |
+| <Cpy path="Include/internal/pycore_complexobject.h" lines="38-40">38-40</Cpy> | `_Py_c_abs` | Magnitude as a `double`; uses `hypot` to avoid intermediate overflow. | `objects/complex.go` (`complexAbs`) |
+
+## Reading
+
+### `Py_complex` struct (lines 1 to 15)
+
+<CpyLink path="Include/internal/pycore_complexobject.h" lines="1-15" />
+
+The struct is intentionally minimal. Both components are `double` (IEEE 754
+binary64), and the struct is passed by value rather than by pointer throughout
+the arithmetic layer. Passing by value avoids aliasing concerns, keeps the
+calling convention register-friendly on x86-64, and lets the compiler inline
+the arithmetic functions and eliminate the struct copies entirely:
+
+```c
+typedef struct {
+    double real;
+    double imag;
+} Py_complex;
+```
+
+The public header `Include/cpython/complexobject.h` repeats this typedef so
+extension authors can use `Py_complex` in their own code. The struct layout is
+part of the stable ABI and has been frozen since Python 2.
+
+In gopy, `objects/complex.go` stores the value as Go's built-in `complex128`,
+which is also two IEEE 754 `float64` fields. The real and imaginary parts are
+extracted with Go's `real()` and `imag()` builtins wherever CPython code
+accesses `.real` and `.imag`.
+
+### `_Py_c_quot` and Smith's algorithm (lines 29 to 33)
+
+<CpyLink path="Include/internal/pycore_complexobject.h" lines="29-33" />
+
+The signature is:
+
+```c
+PyAPI_FUNC(Py_complex) _Py_c_quot(Py_complex a, Py_complex b);
+```
+
+The implementation in `Objects/complexobject.c` applies Robert L. Smith's 1962
+algorithm to avoid intermediate overflow when `b.real` and `b.imag` differ
+greatly in magnitude. Instead of computing `(a.real*b.real + a.imag*b.imag)
+/ (b.real**2 + b.imag**2)` directly (which overflows when either component is
+near `DBL_MAX`), the algorithm divides through by the larger component first:
+
+```c
+Py_complex
+_Py_c_quot(Py_complex a, Py_complex b)
+{
+    Py_complex r;
+    double abs_breal = b.real < 0 ? -b.real : b.real;
+    double abs_bimag = b.imag < 0 ? -b.imag : b.imag;
+    if (abs_breal >= abs_bimag) {
+        double ratio = b.imag / b.real;
+        double denom = b.real + b.imag * ratio;
+        r.real = (a.real + a.imag * ratio) / denom;
+        r.imag = (a.imag - a.real * ratio) / denom;
+    } else {
+        double ratio = b.real / b.imag;
+        double denom = b.real * ratio + b.imag;
+        r.real = (a.real * ratio + a.imag) / denom;
+        r.imag = (a.imag * ratio - a.real) / denom;
+    }
+    if (PyErr_Occurred())
+        return r;   /* propagate FP exception */
+    return r;
+}
+```
+
+The gopy port in `objects/complex.go` delegates to Go's built-in `/` operator
+on `complex128`, which the Go runtime implements with the same Smith's-algorithm
+approach for the `complex128` case.
+
+### `_Py_c_pow` edge cases (lines 34 to 37)
+
+<CpyLink path="Include/internal/pycore_complexobject.h" lines="34-37" />
+
+The declaration:
+
+```c
+PyAPI_FUNC(Py_complex) _Py_c_pow(Py_complex a, Py_complex b);
+```
+
+The implementation handles three special cases before delegating to the C99
+`cpow`:
+
+1. If `b` is zero (`b.real == 0 && b.imag == 0`) the result is `1+0j`
+   regardless of `a`, including `0**0`.
+2. If `a` is zero and `b.real` is negative, a `ZeroDivisionError` is raised
+   via `PyErr_SetString` and `errno = EDOM`.
+3. If `b.imag == 0` and `b.real` is an integer in range, a fast-path uses the
+   repeated-squaring integer power to avoid calling `cpow` at all.
+
+These edge cases matter for Python semantics: `0**0` must return `1+0j`, and
+raising zero to a negative real power must signal an error rather than silently
+producing `inf`.
+
+In gopy, `objects/complex.go:complexPower` delegates to Go's `cmplx.Pow`,
+which handles the IEEE 754 edge cases consistent with C99 `cpow`. The `0**0 ==
+1` invariant holds because `cmplx.Pow(0, 0)` returns `(1+0i)` by the Go spec.
+
+## gopy mirror
+
+`objects/complex.go`. The `Py_complex` struct maps to Go's `complex128` stored
+in `Complex.v`. The seven arithmetic helpers map to Go operator expressions or
+`math/cmplx` calls: `+`, `-`, unary `-`, `*`, `/`, `cmplx.Pow`, and
+`cmplx.Abs`. The type is fully ported including the numeric slot table, hash,
+rich-compare, and repr.
+
+The one structural difference is that gopy has no separate C-level
+`_Py_c_*` layer. In CPython the split exists because other C modules (`cmath`,
+the parser, `struct`) call `_Py_c_pow` directly without going through the
+Python object layer. In gopy those callers do not yet exist, so the arithmetic
+is inlined into the method implementations.
+
+## CPython 3.14 changes
+
+`Py_complex` and the `_Py_c_*` functions have been stable since Python 2.
+In 3.11 the internal header was renamed from `complexobject.h` to
+`pycore_complexobject.h` to follow the `pycore_*` naming convention for all
+internal headers. The function signatures and the struct layout did not change.
+No 3.14-specific changes affect this header.

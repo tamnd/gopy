@@ -1,0 +1,132 @@
+---
+title: Include/cpython/abstract.h
+description: CPython-internal abstract object protocol extensions, including the vectorcall ABI and private call helpers beyond Include/abstract.h.
+cpython_path: Include/cpython/abstract.h
+cpython_version: "3.14"
+lines: 120
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Include/cpython/abstract.h`
+
+<CpyLink path="Include/cpython/abstract.h" />
+
+<overview>
+This header is the CPython-internal extension of the public `Include/abstract.h`.
+It adds private call helpers, the vectorcall ABI constant, and helpers that
+C extension authors should not call directly. The most important symbol it
+introduces is `PY_VECTORCALL_ARGUMENTS_OFFSET`, the high-bit flag at the
+heart of PEP 590.
+</overview>
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| ~24 | `PY_VECTORCALL_ARGUMENTS_OFFSET` | High bit of `nargsf`; signals caller reserved `args[-1]` | `objects/call.go` `VectorcallArgumentsOffset` |
+| ~28 | `PyVectorcall_NARGS` | Strip the offset flag; return positional count | `objects/call.go` `VectorcallNargs` |
+| ~35 | `PyObject_VectorcallDict` | Vectorcall with a `*dict` kwarg side instead of kwnames | `objects/call.go` `VectorcallDict` |
+| ~55 | `_PyObject_FastCallDict` | Legacy fast-call shim before PEP 590 landed | not ported |
+| ~70 | `_PyStack_AsDict` | Convert a trailing `args` slice + `kwnames` tuple into a new dict | not ported |
+| ~85 | `_PyObject_CallMethodIdOneArg` | Call a method by `_Py_Identifier` with one positional arg | not ported |
+| ~100 | `_PyObject_CallMethodIdObjArgs` | Call a method by `_Py_Identifier` with variadic `PyObject*` args | not ported |
+| ~115 | `_PySequence_BytesToCharpArray` | Convert a Python sequence of bytes objects to a `char**` array | not ported |
+
+## Reading
+
+### PY_VECTORCALL_ARGUMENTS_OFFSET and nargsf encoding
+
+The vectorcall convention passes arguments as a C array `PyObject **args` together
+with a single `size_t nargsf`. The low 63 bits of `nargsf` are the positional argument
+count. The high bit is `PY_VECTORCALL_ARGUMENTS_OFFSET`, a flag that means the caller
+has allocated one extra slot at `args[-1]` which the callee may borrow (typically to
+overwrite with `self` for method calls, avoiding a full stack copy).
+
+```c
+// Include/cpython/abstract.h:24
+#define PY_VECTORCALL_ARGUMENTS_OFFSET \
+    ((size_t)1 << (8 * sizeof(size_t) - 1))
+
+static inline Py_ssize_t
+PyVectorcall_NARGS(size_t n)
+{
+    return n & ~PY_VECTORCALL_ARGUMENTS_OFFSET;
+}
+```
+
+gopy mirrors this exactly in `objects/call.go`:
+
+```go
+// objects/call.go
+const VectorcallArgumentsOffset uint = 1 << 63
+
+func VectorcallNargs(nargsf uint) int {
+    return int(nargsf & ^VectorcallArgumentsOffset)
+}
+```
+
+The flag is set by callers like `CallOneArg` whenever they can pre-allocate the
+extra slot:
+
+```go
+// objects/call.go CallOneArg
+stack := []Object{nil, arg}
+return Vectorcall(callable, stack[1:], 1|VectorcallArgumentsOffset, nil)
+```
+
+### PyObject_VectorcallDict
+
+`PyObject_VectorcallDict` is the public entry point when the caller already holds
+its keyword arguments in a dict rather than as a `(kwnames, trailing-values)` pair.
+When the callable advertises a vectorcall slot, the implementation unpacks the dict
+into the standard layout on a fresh stack so the slot never has to handle two kwargs
+shapes.
+
+```c
+// Objects/call.c:110  _PyObject_VectorcallDictTstate
+PyObject *
+_PyObject_VectorcallDictTstate(PyThreadState *tstate, PyObject *callable,
+                               PyObject *const *args, size_t nargsf,
+                               PyObject *kwargs)
+```
+
+gopy's `VectorcallDict` in `objects/call.go` follows the same two-path logic:
+when `kwargs` is nil or empty it calls the slot directly; otherwise it copies
+positional args and dict values into one contiguous `stack`, builds a `kwnames`
+tuple, and dispatches through `fn`.
+
+### _PyStack_AsDict (not yet ported)
+
+`_PyStack_AsDict` is a small utility used by `CALL_FUNCTION_KW` and the
+`_PyObject_FastCallDict` shim. It takes the trailing keyword values from the
+vectorcall `args` slice together with their names in `kwnames` and builds a fresh
+`dict`. gopy avoids this pattern by keeping kwargs in the `(kwnames, trailing-values)`
+form throughout `vm/eval_simple.go` and only materialising a dict when `**kwargs`
+is captured into a function frame.
+
+## gopy mirror
+
+| CPython symbol | Go identifier | File |
+| -------------- | ------------- | ---- |
+| `PY_VECTORCALL_ARGUMENTS_OFFSET` | `VectorcallArgumentsOffset` | `objects/call.go` |
+| `PyVectorcall_NARGS` | `VectorcallNargs` | `objects/call.go` |
+| `PyObject_Vectorcall` | `Vectorcall` | `objects/call.go` |
+| `PyObject_VectorcallDict` | `VectorcallDict` | `objects/call.go` |
+| `_PyObject_MakeTpCall` | `MakeTpCall` | `objects/call.go` |
+| `_PyVectorcall_Call` | `vectorcallCall` (unexported) | `objects/call.go` |
+| `_PyObject_CallMethodIdOneArg` | (not ported) | |
+| `_PyObject_CallMethodIdObjArgs` | (not ported) | |
+| `_PyStack_AsDict` | (not ported) | |
+| `_PyObject_FastCallDict` | (not ported) | |
+| `_PySequence_BytesToCharpArray` | (not ported) | |
+
+## CPython 3.14 changes
+
+3.14 removes the deprecated `_Py_Identifier` family (`_PyObject_CallMethodIdOneArg`,
+`_PyObject_CallMethodIdObjArgs`) from the public stable ABI and routes all callers
+through `PyObject_CallMethodOneArg` / `PyObject_CallMethodObjArgs` instead. The
+`_PyStack_AsDict` helper was moved to `Include/internal/pycore_call.h` and is no
+longer part of the semi-public cpython/ tier. `PY_VECTORCALL_ARGUMENTS_OFFSET` and
+`PyVectorcall_NARGS` remain unchanged.
