@@ -1,0 +1,150 @@
+---
+title: Modules/_interpchannelsmodule.c
+description: Cross-interpreter channel primitives (PEP 734): create, send, recv, and close typed data channels between sub-interpreters.
+cpython_path: "Modules/_interpchannelsmodule.c"
+cpython_version: "3.14"
+lines: 1200
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Modules/_interpchannelsmodule.c`
+
+`_interpchannelsmodule.c` implements the low-level channel API that lets two
+sub-interpreters exchange Python values without sharing object identity.
+It is the C backing for `Lib/interpreters/channel.py` (PEP 734).
+
+A channel is a directed FIFO queue. The producer calls `channel_send`; the
+consumer calls `channel_recv`. Items cross the interpreter boundary as
+`_PyCrossInterpreterData` blobs: the sending side serialises the object into
+a format that does not embed any Python object pointer, and the receiving side
+deserialises it into a fresh object in its own heap. The queue is a singly
+linked list of `_channelitem` nodes guarded by a single `PyMutex`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-60 | includes, forward declarations | `_channel_state`, `_channelitem`, `_channelqueue`, `_channels` runtime table |
+| 61-130 | `_channelitem` / `_channelqueue` | Linked-list node holding `_PyCrossInterpreterData *`; queue struct with `head`, `tail`, `count` |
+| 131-200 | `_channelqueue_put`, `_channelqueue_get` | Append to tail / pop from head; caller must hold the channel mutex |
+| 201-280 | `_channel_state` | Per-channel struct: `_channelqueue queue`, `PyMutex mutex`, `int64_t id`, open/closed flag |
+| 281-360 | `_channels` global table | Hash map from `int64_t` channel ID to `_channel_state *`; protected by a separate `PyMutex` |
+| 361-430 | `_channel_create` | Allocates and zero-inits a `_channel_state`; inserts into the global table; returns new ID |
+| 431-490 | `_channel_destroy` | Drains remaining items (releasing cross-interpreter data), removes from table, frees memory |
+| 491-570 | `_channel_send` | Serialises `obj` to `_PyCrossInterpreterData` via `_PyObject_GetCrossInterpreterData`; acquires mutex; appends to queue |
+| 571-650 | `_channel_recv` | Acquires mutex; pops head item; calls `_PyCrossInterpreterData_NewObject` to materialise in current interpreter; releases data blob |
+| 651-720 | `_channel_close` | Sets closed flag; optionally drains queue; wakes any blocked receivers via condition variable |
+| 721-800 | `ChannelID` Python type | Opaque `int64_t` handle with `__repr__`, `__eq__`, `__hash__`; returned by `channel_create` |
+| 801-880 | `_interpchannels_create` | Python-callable wrapper around `_channel_create`; returns a `ChannelID` |
+| 881-940 | `_interpchannels_destroy` | Python-callable wrapper around `_channel_destroy`; verifies channel is not in use |
+| 941-1020 | `_interpchannels_send` | Python-callable wrapper: resolves `ChannelID`, acquires sending-side interpreter, calls `_channel_send` |
+| 1021-1100 | `_interpchannels_recv` | Python-callable wrapper: resolves `ChannelID`, calls `_channel_recv`, raises `ChannelEmptyError` on empty queue |
+| 1101-1150 | `_interpchannels_close` | Python-callable wrapper around `_channel_close`; accepts `force=` keyword |
+| 1151-1200 | `module_exec`, `PyInit__interpchannels` | Module slot init: registers `ChannelID` type and exception subclasses |
+
+## Reading: cross-interpreter data serialisation
+
+The key invariant is that no raw `PyObject *` pointer ever appears in the queue.
+Each item is a `_PyCrossInterpreterData` blob allocated on the C heap:
+
+```c
+// Modules/_interpchannelsmodule.c:491
+static int
+_channel_send(_channel_state *chan, PyObject *obj)
+{
+    /* Serialise obj into a heap-allocated cross-interpreter data blob.
+       This calls obj's __reduce_ex__-style C hook if registered, or
+       falls back to marshal for simple types. */
+    _PyCrossInterpreterData *data = PyMem_NEW(_PyCrossInterpreterData, 1);
+    if (data == NULL) return -1;
+
+    if (_PyObject_GetCrossInterpreterData(obj, data) < 0) {
+        PyMem_Free(data);
+        return -1;
+    }
+
+    _channelitem *item = PyMem_NEW(_channelitem, 1);
+    if (item == NULL) {
+        _PyCrossInterpreterData_Release(data);
+        PyMem_Free(data);
+        return -1;
+    }
+    item->data = data;
+    item->next = NULL;
+
+    PyMutex_Lock(&chan->mutex);
+    _channelqueue_put(&chan->queue, item);
+    PyMutex_Unlock(&chan->mutex);
+    return 0;
+}
+```
+
+On the receiving side, `_PyCrossInterpreterData_NewObject` reconstructs a
+fresh Python object in the current interpreter's heap, then
+`_PyCrossInterpreterData_Release` frees the blob:
+
+```c
+// Modules/_interpchannelsmodule.c:571
+static PyObject *
+_channel_recv(_channel_state *chan)
+{
+    PyMutex_Lock(&chan->mutex);
+    _channelitem *item = _channelqueue_get(&chan->queue);
+    PyMutex_Unlock(&chan->mutex);
+
+    if (item == NULL) {
+        /* Queue was empty. */
+        return NULL;
+    }
+
+    PyObject *obj = _PyCrossInterpreterData_NewObject(item->data);
+    _PyCrossInterpreterData_Release(item->data);
+    PyMem_Free(item->data);
+    PyMem_Free(item);
+    return obj;  /* may be NULL if deserialisation failed */
+}
+```
+
+## Reading: channel lifecycle and the global table
+
+All live channels are tracked in a process-wide `_channels` table so that any
+interpreter can look up a channel by its numeric ID. The table itself is guarded
+by a separate mutex from the per-channel mutex to keep the two lock levels
+distinct and avoid deadlocks:
+
+```c
+// Modules/_interpchannelsmodule.c:361
+static int64_t
+_channel_create(_channels *channels)
+{
+    _channel_state *chan = PyMem_NEW(_channel_state, 1);
+    if (chan == NULL) return -1;
+
+    chan->queue  = (_channelqueue){0};
+    chan->closed = 0;
+    PyMutex_Init(&chan->mutex);
+
+    PyMutex_Lock(&channels->mutex);
+    chan->id = channels->next_id++;
+    /* Insert into the open-addressed hash table. */
+    if (_channels_add(channels, chan) < 0) {
+        PyMutex_Unlock(&channels->mutex);
+        PyMem_Free(chan);
+        return -1;
+    }
+    PyMutex_Unlock(&channels->mutex);
+    return chan->id;
+}
+```
+
+The two-level locking (global table mutex, then per-channel mutex) means that
+`channel_send` and `channel_recv` on different channels never contend with each
+other.
+
+## Port status
+
+Not yet ported to gopy. Porting depends on the cross-interpreter data
+serialisation protocol (`_PyCrossInterpreterData`) and the sub-interpreter
+model from `_interpretersmodule.c` both being in place first.

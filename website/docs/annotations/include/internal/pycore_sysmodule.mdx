@@ -1,0 +1,72 @@
+---
+title: Include/internal/pycore_sysmodule.h
+description: Internal sys module interface including id-based fast-path attribute accessors and audit hook management.
+cpython_path: Include/internal/pycore_sysmodule.h
+cpython_version: "3.14"
+lines: ~50
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Include/internal/pycore_sysmodule.h`
+
+<CpyLink path="Include/internal/pycore_sysmodule.h" />
+
+This header exposes the interpreter-internal view of `sys`. The public `sys` module is a normal Python module object, but the interpreter accesses many of its attributes at high frequency (e.g., `sys.stdout`, `sys.exc_info`, `sys.audit`). Reading these through the full `PyObject_GetAttr` path on every call is expensive. The id-based accessors in this header skip the dictionary lookup by using a pre-computed interned string id. The header also declares the audit hook interface and the startup-attribute registry used during interpreter initialization.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| ~10-18 | `_PySys_ModuleInfoKey` | Struct pairing an attribute name with its default factory | not ported |
+| ~20 | `_PySys_GetObjectId` | Fetch a `sys` attribute by interned id, no dict lookup | not ported |
+| ~22 | `_PySys_SetObjectId` | Set a `sys` attribute by interned id | not ported |
+| ~26 | `_Py_SetLocaleFromEnv` | Set LC_ALL/LC_CTYPE from the environment early in init | not ported |
+| ~30 | `_PySys_Audit` | Fire an audit event (calls all registered audit hooks) | not ported |
+| ~36 | `_PySys_ClearAuditHooks` | Remove all audit hooks (called at interpreter shutdown) | not ported |
+
+## Reading
+
+### Id-based fast-path accessors (lines ~20 to 26)
+
+The id-based accessors are the core performance trick in this header. `_Py_Identifier` is a struct that caches the address of an interned string object. The first call pays the interning cost; subsequent calls read straight from the cached pointer without touching the string intern table or the module dict:
+
+```c
+PyObject* _PySys_GetObjectId(_Py_Identifier *key);
+int       _PySys_SetObjectId(_Py_Identifier *key, PyObject *v);
+```
+
+Usage in CPython always goes through the `_Py_IDENTIFIER(name)` macro which declares a static `_Py_Identifier` local and passes its address. For example, `_Py_IDENTIFIER(stdout)` declares `static _Py_Identifier PyId_stdout`. The get/set pair then operate on `tstate->interp->sysdict` directly, bypassing the module's `__dict__` proxy layer. This matters because `sys` attributes are read on virtually every `print()` call and every raised exception.
+
+### Audit hook interface (lines ~28 to 40)
+
+The audit subsystem was added in 3.8 (PEP 578) and the internal interface has grown since. `_PySys_Audit` is the entry point called by the interpreter whenever a security-relevant event occurs (imports, `exec`, file opens, socket connections, and so on):
+
+```c
+int _PySys_Audit(PyThreadState *tstate, const char *event,
+                 const char *argFormat, ...);
+```
+
+The `argFormat` string is a `Py_BuildValue`-style format that describes the variadic arguments. Returning `-1` from any hook causes `_PySys_Audit` to propagate an exception and return `-1` to the caller, which then aborts the guarded operation. `_PySys_ClearAuditHooks` is called from `Py_FinalizeEx` before the GC sweep; it must run while the interpreter is still live because hooks are arbitrary Python callables.
+
+### `_PySys_ModuleInfoKey` and startup attributes (lines ~10 to 18)
+
+`_PySys_ModuleInfoKey` pairs a C string attribute name with a function pointer that creates the default value:
+
+```c
+typedef struct {
+    const char *name;
+    PyObject *(*init)(void);
+} _PySys_ModuleInfoKey;
+```
+
+An array of these is iterated during `_PySys_InitCore` to populate `sys` before any user code runs. This means attributes like `sys.version`, `sys.platform`, and `sys.byteorder` are created by dedicated factory functions rather than by importing the module. The design lets the interpreter use `sys` before the import system is ready.
+
+## gopy mirror
+
+The `sys` module in gopy lives at `module/sys/module.go`. Attributes are stored as regular fields on the module struct and exposed via the normal attribute-lookup protocol. The id-based fast-path (`_PySys_GetObjectId` / `_PySys_SetObjectId`) has no equivalent yet: every `sys` attribute read goes through the standard dict path. The audit hook mechanism (`_PySys_Audit`, `_PySys_ClearAuditHooks`) is not ported. Adding the id-based accessors would require a global interned-id registry similar to the `_Py_Identifier` mechanism, which is not yet in the codebase.
+
+## CPython 3.14 changes
+
+3.14 deprecates `_Py_Identifier` in favour of `_PyUnicodeObject`-keyed lookups backed by the new per-interpreter string caches. The `_PySys_GetObjectId` / `_PySys_SetObjectId` signatures are unchanged at the source level, but the underlying `_Py_Identifier` struct layout changed. The audit hook interface gains a new `_PySys_AuditTstate` variant that accepts an explicit `PyThreadState *` argument so subinterpreters can fire hooks without touching the global thread state.

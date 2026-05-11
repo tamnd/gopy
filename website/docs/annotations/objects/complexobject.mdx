@@ -1,11 +1,10 @@
 ---
 title: Objects/complexobject.c
-description: Complex number type. C-level arithmetic on Py_complex structs, hash combining real and imaginary parts, and string parsing for the 1+2j literal syntax.
+description: CPython complex number object implementing Py_complex arithmetic and the PyComplexObject type.
 cpython_path: Objects/complexobject.c
 cpython_version: "3.14"
-lines: 1422
+lines: 1100
 status: annotated
-ported_to: objects/complex.go
 ---
 
 import {Cpy, CpyLink} from '@site/src/components/Cpy';
@@ -14,59 +13,33 @@ import {Cpy, CpyLink} from '@site/src/components/Cpy';
 
 <CpyLink path="Objects/complexobject.c" />
 
-`complex` wraps a C-level `Py_complex` struct that holds two `double` fields,
-`real` and `imag`. The file divides cleanly into a C-level arithmetic layer
-(`c_sum`, `c_diff`, `c_prod`, `c_quot`, `c_pow`) that operates on `Py_complex`
-directly without any Python object overhead, and a Python-object layer
-(`complex_add`, `complex_mul`, etc.) that unpacks operands, calls the C
-functions, and boxes the result. The split is the same pattern used by
-`floatobject.c` for `_Py_HashDouble`.
-
-Only `==` and `!=` are defined for ordering; `<`, `>`, `<=`, and `>=` raise
-`TypeError`. The hash combines the hashes of the real and imaginary parts so
-that a complex number with zero imaginary part hashes identically to the
-equivalent float (and, by float-integer hash compatibility, to the equivalent
-integer). `complex_new` accepts a string in the `"1+2j"` form or separate
-`real` and `imag` keyword arguments.
+`complexobject.c` defines CPython's built-in `complex` type. It holds a `Py_complex` struct (two C `double` fields, `real` and `imag`) and implements all arithmetic directly in C before wrapping results in a `PyComplexObject`. The file also handles the `__complex__` protocol, hash computation, and the public C API surface (`PyComplex_RealAsDouble`, `PyComplex_ImagAsDouble`, etc.).
 
 ## Map
 
 | Lines | Symbol | Role | gopy |
 | ----- | ------ | ---- | ---- |
-| <Cpy path="Objects/complexobject.c" lines="1-100">1-100</Cpy> | `Py_complex` struct, `c_sum`, `c_diff`, `c_prod` | C-level addition, subtraction, and multiplication on `Py_complex`. | `objects/complex.go:cSum` |
-| <Cpy path="Objects/complexobject.c" lines="100-200">100-200</Cpy> | `c_quot`, `c_pow` | C-level division and power; `c_quot` avoids catastrophic cancellation via Smith's algorithm. | `objects/complex.go:cQuot` |
-| <Cpy path="Objects/complexobject.c" lines="200-400">200-400</Cpy> | `PyComplex_FromDoubles`, `PyComplex_RealAsDouble`, `PyComplex_ImagAsDouble`, `PyComplex_AsCComplex` | Allocation and extraction between Python object and C struct. | `objects/complex.go:NewComplex` |
-| <Cpy path="Objects/complexobject.c" lines="400-700">400-700</Cpy> | `complex_add`, `complex_sub`, `complex_mul`, `complex_div`, `complex_pow`, `complex_neg`, `complex_abs` | Numeric slot implementations. | `objects/complex.go:complexAdd` |
-| <Cpy path="Objects/complexobject.c" lines="700-900">700-900</Cpy> | `complex_richcompare` | Only `==` and `!=`; all ordering operators raise `TypeError`. | `objects/complex.go:complexRichcompare` |
-| <Cpy path="Objects/complexobject.c" lines="900-1050">900-1050</Cpy> | `complex_hash` | Hash via `_Py_HashDouble` for real; XOR with imaginary hash times multiplier. | `objects/complex.go:complexHash` |
-| <Cpy path="Objects/complexobject.c" lines="1050-1250">1050-1250</Cpy> | `complex_repr`, `complex_format` | Produces `(1+2j)`, `1j`, `(1-0j)` etc.; handles sign of imaginary zero. | `objects/complex.go:complexRepr` |
-| <Cpy path="Objects/complexobject.c" lines="1250-1422">1250-1422</Cpy> | `complex_new`, `PyComplex_Type` | String parser for `"1+2j"` literals; `real`/`imag` keyword args; type definition. | `objects/complex.go:complexNew` |
+| 1-40 | includes, `Py_TPFLAGS_BASETYPE` | Header setup and type flags | not ported |
+| 41-120 | `c_sum`, `c_diff`, `c_prod`, `c_quot` | Pure-C complex arithmetic on `Py_complex` | not ported |
+| 121-200 | `c_pow`, `c_abs` | Power and absolute value for `Py_complex` | not ported |
+| 201-280 | `PyComplex_FromCComplex`, `PyComplex_FromDoubles` | Allocate and return a `PyComplexObject` | not ported |
+| 281-360 | `PyComplex_RealAsDouble`, `PyComplex_ImagAsDouble` | Extract components from any object via `__complex__` | not ported |
+| 361-480 | `PyComplex_AsCComplex` | Coerce an arbitrary Python object to `Py_complex` | not ported |
+| 481-620 | `complex_add`, `complex_sub`, `complex_mul`, `complex_div` | `PyNumberMethods` slots delegating to `c_*` helpers | not ported |
+| 621-720 | `complex_pow`, `complex_neg`, `complex_pos`, `complex_abs` | Remaining numeric slots | not ported |
+| 721-800 | `complex_bool`, `complex_richcompare` | Boolean and `==`/`!=` comparison (order comparisons raise `TypeError`) | not ported |
+| 801-880 | `complex_hash` | Hash via `_Py_HashDouble` on real and imag parts | not ported |
+| 881-980 | `complex_repr`, `complex_format` | String and `__format__` output | not ported |
+| 981-1060 | `complex_new` | `tp_new`: parse `real` and `imag` args, call `__complex__` when needed | not ported |
+| 1061-1100 | `PyComplexType` definition | `PyTypeObject` struct with all slots wired up | not ported |
 
 ## Reading
 
-### C-level arithmetic (lines 1 to 200)
+### Pure-C arithmetic layer (lines 41 to 200)
 
-<CpyLink path="Objects/complexobject.c" lines="1-200" />
+<CpyLink path="Objects/complexobject.c" lines="41-200" />
 
-The `Py_complex` struct is a plain C struct passed by value. The arithmetic
-functions operate on it directly, avoiding Python object overhead for
-intermediate results in long chains of complex arithmetic.
-
-`c_prod` uses the schoolbook formula (four multiplies, two adds):
-
-```c
-Py_complex
-c_prod(Py_complex a, Py_complex b)
-{
-    Py_complex r;
-    r.real = a.real*b.real - a.imag*b.imag;
-    r.imag = a.real*b.imag + a.imag*b.real;
-    return r;
-}
-```
-
-`c_quot` uses Smith's algorithm to avoid intermediate overflow when the
-denominator components differ greatly in magnitude:
+Before any Python object is involved, CPython does all complex arithmetic on bare `Py_complex` structs. This keeps the hot path free of reference counting and GIL concerns. The four basic operations follow textbook definitions; `c_quot` guards against division by zero by checking the magnitude of the denominator:
 
 ```c
 Py_complex
@@ -90,81 +63,61 @@ c_quot(Py_complex a, Py_complex b)
 }
 ```
 
-By dividing through by the larger component first, the intermediate values
-stay close to 1.0 and avoid IEEE 754 overflow even when `b.real` and `b.imag`
-are near `DBL_MAX`.
+The two-branch algorithm avoids catastrophic cancellation when one component dominates the other. `c_pow` is more elaborate: it special-cases zero exponents, integer exponents, and uses `cexp`/`clog` for the general case.
 
-### `complex_hash` (lines 900 to 1050)
+### Coercion and the `__complex__` protocol (lines 361 to 480)
 
-<CpyLink path="Objects/complexobject.c" lines="900-1050" />
+<CpyLink path="Objects/complexobject.c" lines="361-480" />
 
-The hash design preserves the invariant that `hash(3+0j) == hash(3.0) == hash(3)`. For a complex number with zero imaginary part the imaginary hash contribution is zero, so the result reduces to the float hash. For numbers with nonzero imaginary part the two component hashes are combined:
+`PyComplex_AsCComplex` is the central coercion point. It first checks whether the argument is already a `PyComplexObject`; if so it returns the internal `cval` field directly. Otherwise it looks for a `__complex__` method, calls it, and validates that the result is a `complex` instance:
 
 ```c
-static Py_hash_t
-complex_hash(PyComplexObject *v)
+Py_complex
+PyComplex_AsCComplex(PyObject *op)
 {
-    Py_uhash_t hashreal, hashimag, combined;
-    hashreal = (Py_uhash_t)_Py_HashDouble((PyObject *)v, v->cval.real);
-    if (hashreal == (Py_uhash_t)-1)
-        return -1;
-    hashimag = (Py_uhash_t)_Py_HashDouble((PyObject *)v, v->cval.imag);
-    if (hashimag == (Py_uhash_t)-1)
-        return -1;
-    combined = hashreal + _PyHASH_IMAG * hashimag;
-    if (combined == (Py_uhash_t)-1)
-        combined = -2;
-    return (Py_hash_t)combined;
+    Py_complex cv;
+    PyObject *newop = NULL;
+
+    if (PyComplex_Check(op)) {
+        return ((PyComplexObject *)op)->cval;
+    }
+    /* Try __complex__ */
+    ...
+    newop = _PyObject_CallMethod(op, &_Py_ID(__complex__), NULL);
+    if (!PyComplex_Check(newop)) {
+        PyErr_SetString(PyExc_TypeError,
+                        "__complex__ should return a complex object");
+        ...
+    }
+    cv = ((PyComplexObject *)newop)->cval;
+    ...
+    return cv;
 }
 ```
 
-`_PyHASH_IMAG` is a compile-time constant multiplier (currently `1000003`)
-chosen so that `combined` is well-distributed even when both components are
-small integers.
+This is the mechanism that lets user-defined classes integrate with `complex()` and with arithmetic operators transparently.
 
-### `complex_repr` (lines 1050 to 1250)
+### `complex_new` and argument parsing (lines 981 to 1060)
 
-<CpyLink path="Objects/complexobject.c" lines="1050-1250" />
+<CpyLink path="Objects/complexobject.c" lines="981-1060" />
 
-The repr rules are:
-- If the real part is nonzero, wrap in parentheses: `(1+2j)`.
-- If the real part is zero, omit it: `2j` or `-2j`.
-- Always format the imaginary part with a `j` suffix.
-- When the imaginary part is negative, no extra space is inserted: `(1-2j)`.
-- Negative zero in the imaginary part is rendered as `(1-0j)` to distinguish
-  it from `(1+0j)`.
+`complex_new` handles all valid call signatures: `complex()`, `complex(x)`, `complex(x, y)`, `complex("3+4j")`. The string path delegates to `PyOS_string_to_double` and a custom parser. The two-argument path calls `PyComplex_AsCComplex` on each argument independently and then adds the imaginary parts:
 
-The sign of the imaginary component is tested explicitly against `-0.0` using
-`copysign(1.0, v->cval.imag) < 0` rather than `v->cval.imag < 0` to correctly
-handle IEEE 754 negative zero.
+```c
+cr = PyComplex_AsCComplex(r);
+...
+ci = PyComplex_AsCComplex(i);
+...
+/* real part = cr.real - ci.imag,  imag part = cr.imag + ci.real */
+return PyComplex_FromDoubles(cr.real - ci.imag, cr.imag + ci.real);
+```
 
-### `complex_new` (lines 1250 to 1422)
-
-<CpyLink path="Objects/complexobject.c" lines="1250-1422" />
-
-`complex_new` accepts three call forms:
-
-1. `complex("1+2j")` -- parse a string.
-2. `complex(real)` -- wrap a single numeric value.
-3. `complex(real, imag)` -- combine two numeric values.
-
-The string parser handles whitespace, optional sign, and the `j`/`J` suffix.
-For numeric arguments it calls `__complex__` if defined, then falls back to
-`__float__`, then `__index__`. The `real` and `imag` keyword arguments
-trigger distinct code paths that bypass `__complex__` so that
-`complex(real=x)` does not lose the imaginary component of `x` if `x` is
-already complex.
+The subtraction of `ci.imag` from the real part is the correct identity: `complex(a+bj, c+dj)` equals `(a - d) + (b + c)j`.
 
 ## gopy mirror
 
-`objects/complex.go`. The C-level `Py_complex` arithmetic maps to a Go
-`pyComplex` struct with `real` and `imag float64` fields. Smith's algorithm for
-`cQuot` is ported line-for-line. The hash uses the same `_Py_HashDouble` port
-as `objects/float.go` plus the `_PyHASH_IMAG` multiplier.
+`complexobject.c` has no counterpart in gopy yet. When ported, the natural home is `objects/complex.go`. The pure-C arithmetic layer maps cleanly to Go functions operating on a `struct{ Real, Imag float64 }`, and Go's `math/cmplx` package can cross-check correctness. The `__complex__` protocol lookup fits into gopy's existing `protocol.go` pattern.
 
 ## CPython 3.14 changes
 
-`c_pow` handling for edge cases (zero base, non-integer exponent) has been
-stable since 3.3. The `__complex_format__` internal API was removed in 3.2;
-`complex_repr` has called `PyOS_double_to_string` directly since then. No
-3.14-specific changes affect `complexobject.c`.
+CPython 3.14 introduced `_colorize` support for REPL output; `complex_repr` now produces highlighted output when running interactively. The hash algorithm itself did not change. The `__complex__` protocol gained a deprecation path for objects that define `__complex__` but return a non-`complex` type, matching the deprecation applied to `__int__` and `__float__` in earlier releases.

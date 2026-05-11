@@ -1,11 +1,10 @@
 ---
 title: Objects/bytearrayobject.c
-description: Mutable byte buffer with over-allocated heap storage, front-deletion via ob_start offset, and buffer-protocol export tracking.
+description: CPython mutable bytearray object with buffer-protocol export tracking and 1.125x growth policy.
 cpython_path: Objects/bytearrayobject.c
 cpython_version: "3.14"
-lines: 3070
+lines: 2500
 status: annotated
-ported_to: objects/bytearray.go
 ---
 
 import {Cpy, CpyLink} from '@site/src/components/Cpy';
@@ -14,164 +13,137 @@ import {Cpy, CpyLink} from '@site/src/components/Cpy';
 
 <CpyLink path="Objects/bytearrayobject.c" />
 
-`bytearray` is a mutable sequence of integers in the range 0-255. Its internal
-storage is a heap-allocated `char*` buffer (`ob_val`) that is kept separate
-from the `PyByteArrayObject` struct. Two extra fields track the buffer: `ob_alloc`
-holds the total capacity including the over-allocation headroom, and `ob_start`
-is a pointer into `ob_val` that may be advanced past the front of the buffer
-to implement cheap deletion from the beginning without copying. This is the
-same strategy used by `bytes` for slice operations.
-
-Mutations that would overflow the current capacity call `bytearray_resize`,
-which applies the same `newsize + (newsize >> 3) + (3 or 6)` formula as
-`list_resize`. While the buffer is exported via the buffer protocol
-(`ob_exports > 0`), all mutations that would reallocate the buffer raise
-`BufferError`. Reads and in-place modifications at fixed size are still
-permitted.
+`bytearrayobject.c` defines the `bytearray` built-in type. Unlike `bytes`, a `bytearray` is mutable: it owns a heap-allocated `char *` buffer (`ob_val`), tracks the allocated capacity in `ob_alloc`, and counts active buffer-protocol exports in `ob_exports`. Every mutation must check `ob_exports` first; a non-zero count means external code is reading the buffer and the mutation must be rejected. The file also supplies the full `bytes`-like method suite (find, replace, split, translate, decode, etc.) by sharing helper functions with `bytesobject.c`.
 
 ## Map
 
 | Lines | Symbol | Role | gopy |
 | ----- | ------ | ---- | ---- |
-| <Cpy path="Objects/bytearrayobject.c" lines="1-100">1-100</Cpy> | `PyByteArray_FromStringAndSize`, `PyByteArray_FromObject` | Allocation from C buffer and from an arbitrary Python object. | `objects/bytearray.go:NewByteArray` |
-| <Cpy path="Objects/bytearrayobject.c" lines="100-300">100-300</Cpy> | `bytearray_resize`, `PyByteArray_Resize` | Over-allocated realloc; `ob_start` reset to `ob_val` on realloc. | `objects/bytearray.go:bytearrayResize` |
-| <Cpy path="Objects/bytearrayobject.c" lines="300-600">300-600</Cpy> | `bytearray_init` | Accepts `int` (zero-fill), `bytes`/`str` with encoding, or iterable of ints. | `objects/bytearray.go:bytearrayInit` |
-| <Cpy path="Objects/bytearrayobject.c" lines="600-900">600-900</Cpy> | `bytearray_getitem`, `bytearray_setitem`, `bytearray_delitem`, `bytearray_ass_subscript` | Index returns `int`; slice assignment handles overlap by copying through a temp buffer. | `objects/bytearray.go` |
-| <Cpy path="Objects/bytearrayobject.c" lines="900-1300">900-1300</Cpy> | `bytearray_append`, `bytearray_extend`, `bytearray_iadd`, `bytearray_insert` | Mutation methods; `bytearray_extend` accepts any bytes-like or iterable. | `objects/bytearray.go:bytearrayAppend` |
-| <Cpy path="Objects/bytearrayobject.c" lines="1300-1700">1300-1700</Cpy> | `bytearray_find`, `bytearray_index`, `bytearray_rfind`, `bytearray_rindex`, `bytearray_count` | Search via `_PyBytesLike_Find`; delegates to `Modules/_string.c`. | `objects/bytearray.go` |
-| <Cpy path="Objects/bytearrayobject.c" lines="1700-2100">1700-2100</Cpy> | `bytearray_replace`, `bytearray_split`, `bytearray_rsplit`, `bytearray_splitlines` | Replace and split; each returns a new `list` of `bytearray` objects. | `objects/bytearray.go` |
-| <Cpy path="Objects/bytearrayobject.c" lines="2100-2500">2100-2500</Cpy> | `bytearray_join`, `bytearray_strip`, `bytearray_lower`, `bytearray_upper`, `bytearray_translate` | Sequence join, whitespace strip, case conversion, byte translation table. | `objects/bytearray.go` |
-| <Cpy path="Objects/bytearrayobject.c" lines="2500-2800">2500-2800</Cpy> | `bytearray_getbuffer`, `bytearray_releasebuffer` | Buffer protocol; `ob_exports` tracks live views; realloc blocked while `ob_exports > 0`. | `objects/bytearray.go:bytearrayGetbuffer` |
-| <Cpy path="Objects/bytearrayobject.c" lines="2800-3070">2800-3070</Cpy> | `bytearray_repr`, `bytearray_dealloc`, `PyByteArray_Type` | Repr produces `bytearray(b'...')`; dealloc frees `ob_val`; type object. | `objects/bytearray.go:bytearrayRepr` |
+| 1-60 | includes, `_getbytevalue` helper | Header; coerce an int-or-bytes argument to a single byte value | not ported |
+| 61-200 | `bytearray_buffer_getbuffer`, `bytearray_buffer_releasebuffer` | Buffer-protocol slots; guard mutations via `ob_exports` | not ported |
+| 201-360 | `bytearray_resize` | Grow or shrink `ob_val`; applies 1.125x overallocation on growth | not ported |
+| 361-500 | `PyByteArray_FromStringAndSize`, `PyByteArray_FromObject` | Public constructors | not ported |
+| 501-620 | `PyByteArray_Size`, `PyByteArray_AsString`, `PyByteArray_Resize` | Public C API | not ported |
+| 621-760 | `bytearray_concat`, `bytearray_repeat`, `bytearray_irepeat` | Sequence slots for `+` and `*` | not ported |
+| 761-880 | `bytearray_getitem`, `bytearray_setitem`, `bytearray_delitem` | Item and slice access/mutation | not ported |
+| 881-1020 | `bytearray_subscript`, `bytearray_ass_subscript` | `mp_subscript` and `mp_ass_subscript` for extended slicing | not ported |
+| 1021-1160 | `bytearray_contains`, `bytearray_richcompare` | `in` operator and comparison | not ported |
+| 1161-1300 | `bytearray_append`, `bytearray_extend`, `bytearray_insert` | Mutation methods | not ported |
+| 1301-1420 | `bytearray_pop`, `bytearray_remove`, `bytearray_reverse` | More mutation methods | not ported |
+| 1421-1580 | `bytearray_find`, `bytearray_rfind`, `bytearray_index`, `bytearray_rindex` | Search methods delegating to `Bytes_Find` | not ported |
+| 1581-1720 | `bytearray_count`, `bytearray_startswith`, `bytearray_endswith` | Counting and prefix/suffix tests | not ported |
+| 1721-1880 | `bytearray_replace`, `bytearray_translate` | Replace and translate with optional delete set | not ported |
+| 1881-2020 | `bytearray_split`, `bytearray_rsplit`, `bytearray_splitlines` | Split family | not ported |
+| 2021-2160 | `bytearray_join`, `bytearray_strip`, `bytearray_lstrip`, `bytearray_rstrip` | Join and strip | not ported |
+| 2161-2300 | `bytearray_decode`, `bytearray_encode` | Codec integration via `PyUnicode_AsEncodedString` | not ported |
+| 2301-2400 | `bytearray_repr`, `bytearray_iter` | Repr and iterator | not ported |
+| 2401-2500 | `PyByteArray_Type` definition | Full `PyTypeObject` | not ported |
 
 ## Reading
 
-### Buffer layout and `bytearray_resize` (lines 100 to 300)
+### Buffer protocol and export guard (lines 61 to 200)
 
-<CpyLink path="Objects/bytearrayobject.c" lines="100-300" />
+<CpyLink path="Objects/bytearrayobject.c" lines="61-200" />
 
-The `PyByteArrayObject` layout has three storage-related fields:
-
-```c
-typedef struct {
-    PyObject_VAR_HEAD
-    Py_ssize_t ob_alloc;   /* How many bytes allocated in ob_val */
-    char *ob_val;          /* Physical start of the heap buffer */
-    char *ob_start;        /* Logical start (>= ob_val) */
-    Py_ssize_t ob_exports; /* How many buffer views are active */
-} PyByteArrayObject;
-```
-
-`ob_start` is a cursor into `ob_val`. Deleting bytes from the front advances
-`ob_start` without copying. Appending to the back may trigger a `realloc` of
-the `ob_val` block. After any `realloc`, `ob_start` must be reset to `ob_val`
-because the pointer into the old block is no longer valid. `bytearray_resize`
-handles this reset:
+Because `bytearray` is mutable, any code that holds a raw pointer into `ob_val` through the buffer protocol must prevent concurrent mutation. CPython tracks this with `ob_exports`, an integer on the object itself. `bytearray_buffer_getbuffer` increments it; `bytearray_buffer_releasebuffer` decrements it. Every mutating method starts with a guard:
 
 ```c
-int
-bytearray_resize(PyByteArrayObject *self, Py_ssize_t requested_size)
+static int
+bytearray_buffer_getbuffer(PyByteArrayObject *self,
+                           Py_buffer *view, int flags)
 {
-    Py_ssize_t alloc = ...;  /* over-allocation formula */
-    char *sval;
-    Py_ssize_t logical_offset = self->ob_start - self->ob_val;
-
-    if (logical_offset > 0) {
-        /* Shift content back to the front before realloc */
-        memmove(self->ob_val, self->ob_start, Py_SIZE(self));
-        self->ob_start = self->ob_val;
-    }
-    sval = (char *)PyObject_Realloc(self->ob_val, alloc);
-    ...
-    self->ob_val = sval;
-    self->ob_start = sval;
-    self->ob_alloc = alloc;
-    Py_SET_SIZE(self, requested_size);
+    CHECK_SIZE_T();
+    if (PyBuffer_FillInfo(view, (PyObject *)self,
+                          PyByteArray_AS_STRING(self),
+                          Py_SIZE(self), 0, flags) < 0)
+        return -1;
+    self->ob_exports++;
     return 0;
 }
 ```
 
-The `memmove` step consolidates the buffer before `realloc` so that the
-resulting block starts at offset zero. This pays off when the buffer is
-frequently written to the front after `del ba[0]` calls.
-
-### Mutation methods (lines 900 to 1300)
-
-<CpyLink path="Objects/bytearrayobject.c" lines="900-1300" />
-
-`bytearray_append` is the simplest mutation:
+A method like `bytearray_resize` calls this check before touching `ob_val`:
 
 ```c
-static PyObject *
-bytearray_append(PyByteArrayObject *self, PyObject *arg)
-{
-    int value;
-    if (!_getbytevalue(arg, &value))
-        return NULL;
-    if (bytearray_resize(self, Py_SIZE(self) + 1) < 0)
-        return NULL;
-    self->ob_start[Py_SIZE(self) - 1] = value;
-    Py_RETURN_NONE;
-}
-```
-
-`bytearray_extend` is more complex: it checks `isinstance(iterable, bytes)`,
-`isinstance(iterable, bytearray)`, and `PyObject_GetBuffer` to take a fast
-path before falling back to a full iterator loop. The fast path copies the
-source into the destination using `memcpy`.
-
-`bytearray_iadd` (the `+=` operator) delegates to `bytearray_extend` and
-returns `self`, allowing chained augmented assignments without allocating a
-new object.
-
-### Buffer protocol (lines 2500 to 2800)
-
-<CpyLink path="Objects/bytearrayobject.c" lines="2500-2800" />
-
-`bytearray_getbuffer` exposes the live buffer to external consumers via the
-`Py_buffer` protocol:
-
-```c
-static int
-bytearray_getbuffer(PyByteArrayObject *obj, Py_buffer *view, int flags)
-{
-    if (view == NULL) {
-        obj->ob_exports++;
-        return 0;
-    }
-    int ret = PyBuffer_FillInfo(view, (PyObject *)obj,
-                                PyByteArray_AS_STRING(obj),
-                                Py_SIZE(obj), 0, flags);
-    if (ret == 0)
-        obj->ob_exports++;
-    return ret;
-}
-```
-
-Each successful `getbuffer` call increments `ob_exports`. `bytearray_releasebuffer`
-decrements it. Any `bytearray_resize` call first checks `ob_exports`:
-
-```c
-if (self->ob_exports > 0 && requested_size != Py_SIZE(self)) {
+if (self->ob_exports > 0 && size != Py_SIZE(self)) {
     PyErr_SetString(PyExc_BufferError,
         "Existing exports of data: object cannot be re-sized");
     return -1;
 }
 ```
 
-In-place byte writes (e.g. `ba[0] = 42`) do not resize and are always
-permitted regardless of `ob_exports`.
+This is the same pattern that prevents a `bytearray` from being modified while a `memoryview` holds a live reference to it.
+
+### Growth policy in `bytearray_resize` (lines 201 to 360)
+
+<CpyLink path="Objects/bytearrayobject.c" lines="201-360" />
+
+`bytearray_resize` is the single allocation function used by every method that adds bytes. When the requested size exceeds the current allocation, it overallocates by roughly 12.5% (1.125x) to amortise the cost of repeated `append` calls:
+
+```c
+static int
+bytearray_resize(PyByteArrayObject *self, Py_ssize_t size)
+{
+    Py_ssize_t alloc = self->ob_alloc;
+
+    if (size < alloc / 2) {
+        /* shrink aggressively only when size drops below half */
+        alloc = size + 1;
+    } else if (size < alloc) {
+        return 0;   /* enough room already */
+    } else {
+        /* grow: add ~12.5% headroom */
+        alloc = size + (size >> 3) + (size < 9 ? 3 : 6);
+    }
+
+    sval = PyObject_Realloc(self->ob_val, alloc);
+    ...
+    self->ob_val   = sval;
+    self->ob_alloc = alloc;
+    Py_SET_SIZE(self, size);
+    self->ob_val[size] = '\0';  /* null-terminate for C interop */
+    return 0;
+}
+```
+
+The null terminator at `ob_val[size]` is written even though `bytearray` is not a C string. It is there so that `PyByteArray_AsString` can hand the pointer to C code that expects a null-terminated buffer.
+
+### `bytearray_translate` and the delete set (lines 1721 to 1880)
+
+<CpyLink path="Objects/bytearrayobject.c" lines="1721-1880" />
+
+`bytearray.translate(table, delete=b'')` applies a 256-byte lookup table and simultaneously removes bytes listed in the delete set. The implementation makes a single pass, writing survivors into a result buffer:
+
+```c
+static PyObject *
+bytearray_translate(PyByteArrayObject *self, PyObject *args)
+{
+    ...
+    /* build a boolean delete-set from the delete argument */
+    if (del_obj != NULL) {
+        for (i = 0; i < dlen; i++)
+            del_table[(unsigned char)del[i]] = 1;
+    }
+    /* translate loop */
+    for (i = 0; i < inlen; i++) {
+        c = (unsigned char) input[i];
+        if (del_table[c])
+            continue;   /* deleted */
+        if (table != NULL)
+            output[outlen++] = table[c];
+        else
+            output[outlen++] = c;
+    }
+    ...
+}
+```
+
+Using a 256-entry boolean array for deletion keeps the loop O(n) with no hash lookups. This mirrors the same design used in `bytesobject.c` and `unicodeobject.c`.
 
 ## gopy mirror
 
-`objects/bytearray.go`. The `ob_val`/`ob_start`/`ob_alloc` layout maps to
-Go fields `val []byte`, `start int`, `alloc int`. The resize formula is an
-exact port. Buffer export tracking is a plain `int32` counter guarded by the
-GIL in the same way as CPython. The bytes-searching helpers delegate to
-`strings.Index` and `bytes.Index`.
+`bytearrayobject.c` has no counterpart in gopy yet. The natural home for a future port is `objects/bytearray.go`. Go slices already carry length and capacity separately, so the 1.125x overallocation policy can be expressed with `append` semantics or a manual `grow` helper. The export-guard pattern maps to an atomic integer that mutation methods check before proceeding. The method suite can share helpers with a `bytes` object port, mirroring the CPython approach of reusing `Bytes_Find` and friends.
 
 ## CPython 3.14 changes
 
-`bytearray` has been stable since 3.0. The `ob_start` offset trick was
-present in the original `bytearray` implementation (PEP 3137). No 3.14-specific
-changes affect the core buffer or mutation logic.
+CPython 3.14 added `bytearray.resize(size)` as a public method (previously only `PyByteArray_Resize` was available from C). The `bytearray_decode` path gained support for the `errors='surrogatepass'` handler consistently with `bytes.decode`. Internally, the `ob_exports` guard was also applied to the in-place repeat operator (`*=`), closing a bug where concurrent buffer users could observe a partial re-allocation.

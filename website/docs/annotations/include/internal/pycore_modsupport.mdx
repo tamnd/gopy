@@ -1,0 +1,112 @@
+---
+title: Include/internal/pycore_modsupport.h
+description: Internal helpers for C extension module creation, argument parsing, and attribute setting used by the module init machinery.
+cpython_path: Include/internal/pycore_modsupport.h
+cpython_version: "3.14"
+lines: 80
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Include/internal/pycore_modsupport.h`
+
+<CpyLink path="Include/internal/pycore_modsupport.h" />
+
+This header exposes the internal layer beneath the public `PyModule_*` and `PyArg_*` APIs. Where the public headers declare the stable ABI surface, `pycore_modsupport.h` declares the versions that CPython itself calls internally: they accept `_PyThreadState *` directly, skip some reference-count bookkeeping that is only needed for external callers, and include stricter argument validation used by built-in modules. The implementation lives in `Python/modsupport.c`.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| ~10-20 | `_PyModule_CreateInitialized` | Allocate and populate a module from a `PyModuleDef`, marking it initialized | partial (module init helpers) |
+| ~22-35 | `_PyModule_SetAttr` | Set a module attribute, raising `SystemError` on failure instead of returning silently | partial |
+| ~37-50 | `_PyArg_NoKeywords` | Raise `TypeError` if a C function received any keyword arguments | not ported as unit |
+| ~52-58 | `_PyArg_NoPositional` | Raise `TypeError` if a C function received any positional arguments | not ported as unit |
+| ~60-68 | `_PyArg_BadArgument` | Emit a standardized "bad argument type" `TypeError` message | not ported as unit |
+| ~70-75 | `_PyArg_CheckPositional` | Validate positional argument count against min/max | not ported as unit |
+| ~77-80 | `_PyArg_ParseStack` / `_PyArg_ParseStackAndKeywords` | Internal `PyArg_Parse` variants that read from a C stack pointer rather than a `PyObject *` tuple | not ported |
+
+## Reading
+
+### Module creation (lines 10 to 35)
+
+<CpyLink path="Include/internal/pycore_modsupport.h" lines="10-35" />
+
+`_PyModule_CreateInitialized` is what the import machinery actually calls when loading a built-in or extension module. It wraps the public `PyModule_Create2` but also sets the initialization state flag so that `sys.modules` bookkeeping can distinguish a module mid-init from one that completed successfully:
+
+```c
+PyAPI_FUNC(PyObject *) _PyModule_CreateInitialized(
+    PyModuleDef *def,
+    int module_api_version);
+```
+
+`_PyModule_SetAttr` is the internal counterpart to `PyModule_AddObject`. The key difference is error handling: the public function returns `-1` silently on a bad module pointer, while the internal version raises `SystemError` immediately so that bugs in built-in module init code surface as exceptions rather than silent corruption:
+
+```c
+PyAPI_FUNC(int) _PyModule_SetAttr(PyObject *mod, const char *name, PyObject *value);
+```
+
+gopy's module init helpers in `objects/module.go` implement the core behavior but do not yet go through a single `_PyModule_CreateInitialized` code path; each module package under `module/` calls its own init sequence.
+
+### Argument validation helpers (lines 37 to 75)
+
+<CpyLink path="Include/internal/pycore_modsupport.h" lines="37-75" />
+
+The four validation helpers are thin wrappers that produce consistent `TypeError` messages across all built-in modules. `_PyArg_NoKeywords` and `_PyArg_NoPositional` are called at the top of C functions that accept no arguments at all:
+
+```c
+PyAPI_FUNC(int) _PyArg_NoKeywords(const char *funcname, PyObject *kwargs);
+PyAPI_FUNC(int) _PyArg_NoPositional(const char *funcname, PyObject *args);
+```
+
+`_PyArg_BadArgument` produces the canonical "argument N must be T, not U" message format that appears throughout CPython's exception output:
+
+```c
+PyAPI_FUNC(int) _PyArg_BadArgument(
+    const char *fname,
+    const char *displayname,
+    const char *expected,
+    PyObject *got);
+```
+
+`_PyArg_CheckPositional` bounds-checks the positional argument count and raises `TypeError` with the function name embedded in the message if the count is outside `[min, max]`:
+
+```c
+PyAPI_FUNC(int) _PyArg_CheckPositional(
+    const char *name,
+    Py_ssize_t nargs,
+    Py_ssize_t min,
+    Py_ssize_t max);
+```
+
+### Stack-based parse variants (lines 77 to 80)
+
+<CpyLink path="Include/internal/pycore_modsupport.h" lines="77-80" />
+
+The `_PyArg_ParseStack` family reads arguments from a raw C pointer-to-`PyObject *` array rather than a `PyTuple`. This avoids allocating a tuple object for the argument list in hot paths such as `CALL_METHOD`:
+
+```c
+PyAPI_FUNC(int) _PyArg_ParseStack(
+    PyObject *const *args,
+    Py_ssize_t nargs,
+    const char *format,
+    ...);
+
+PyAPI_FUNC(int) _PyArg_ParseStackAndKeywords(
+    PyObject *const *args,
+    Py_ssize_t nargs,
+    PyObject *kwnames,
+    struct _PyArg_Parser *parser,
+    ...);
+```
+
+The `_PyArg_Parser` struct (defined in `pycore_tuple.h`) caches the parsed format string so repeated calls on the same format do not re-scan it.
+
+## gopy mirror
+
+gopy implements module creation and attribute setting through helpers in `objects/module.go` and each module package under `module/`. The argument validation helpers (`_PyArg_NoKeywords`, `_PyArg_BadArgument`, etc.) are not ported as a coherent unit; equivalent checks are inlined at call sites in Go. The stack-based parse variants have no direct equivalent yet because gopy's calling convention passes arguments as a Go slice rather than a C stack array. Unifying these into a single ported `pycore_modsupport` layer is future work.
+
+## CPython 3.14 changes
+
+3.14 adds `_PyModule_SetAttrString`, a variant of `_PyModule_SetAttr` that accepts a `const char *` name rather than a pre-built `PyObject *` string, reducing boilerplate in built-in module init functions. The `_PyArg_ParseStack` family is otherwise unchanged, but the `_PyArg_Parser` struct gains a `pos_only` field to support positional-only parameter declarations in format strings.

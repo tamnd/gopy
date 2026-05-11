@@ -1,0 +1,123 @@
+---
+title: Lib/tabnanny.py
+description: Whitespace inconsistency detector that flags source files mixing tabs and spaces in indentation.
+cpython_path: Lib/tabnanny.py
+cpython_version: "3.14"
+lines: 320
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Lib/tabnanny.py`
+
+<CpyLink path="Lib/tabnanny.py" />
+
+`tabnanny` scans Python source files for ambiguous indentation. A line is considered ambiguous when its leading whitespace contains a mix of tabs and spaces that would look correct under one tab-stop width but wrong under another. The module tokenizes each file using the `tokenize` module, feeds `INDENT` and `DEDENT` tokens through a state machine, and raises `NannyNag` when an inconsistency is detected. It ships as a runnable script (`python -m tabnanny`) and also exposes a `check` function for programmatic use.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| 1-40 | module docstring, imports, `__all__` | Imports `os`, `sys`, `tokenize`, `argparse`. Exports `check`, `NannyNag`, `process_tokens`. | not ported |
+| 42-65 | `NannyNag` exception | Carries `lineno`, `msg`, and the offending `line` string. Three read-only accessors. | not ported |
+| 67-100 | `check(file_or_dir)` | Public entry point. Recurses into directories; calls `process_tokens` for each `.py` file. | not ported |
+| 102-140 | `_is_python_file(fname)` | Returns `True` if the file ends in `.py` or has a Python shebang on line 1. | not ported |
+| 142-195 | `process_tokens(tokens)` | State machine. Iterates token stream; tracks indentation stack; raises `NannyNag` on ambiguity. | not ported |
+| 197-240 | `_check_equal(id, cook, raw)` | Compares cooked (expanded) and raw indentation strings. Raises `NannyNag` if they disagree. | not ported |
+| 242-285 | `expand_indent(line)` | Expands leading tabs to the next multiple of 8 spaces. Returns the expanded-length integer. | not ported |
+| 287-320 | `__main__` block (`main()`) | Parses `-q` / `--filename` arguments via `argparse`, calls `check` for each operand. | not ported |
+
+## Reading
+
+### `NannyNag` exception (lines 42 to 65)
+
+<CpyLink path="Lib/tabnanny.py" lines="42-65" />
+
+`NannyNag` is a lightweight exception that bundles the three pieces of information a caller needs to report a problem: where the line is, what went wrong, and what the offending text looks like. The three accessor methods (`get_lineno`, `get_msg`, `get_line`) are part of the public API documented in the module docstring.
+
+```python
+class NannyNag(Exception):
+    def __init__(self, lineno, msg, line):
+        self.lineno = lineno
+        self.msg = msg
+        self.line = line
+
+    def get_lineno(self):
+        return self.lineno
+
+    def get_msg(self):
+        return self.msg
+
+    def get_line(self):
+        return self.line
+```
+
+Because `NannyNag` is raised (and caught) inside `process_tokens`, callers of `check` see it re-raised with the file name prepended to the message. Direct callers of `process_tokens` receive the raw exception.
+
+### `process_tokens` state machine (lines 142 to 195)
+
+<CpyLink path="Lib/tabnanny.py" lines="142-195" />
+
+`process_tokens` is the algorithmic core. It maintains a stack of `(indent_level, cooked, raw)` triples. `cooked` is the indentation string with tabs expanded to 8-space stops; `raw` is the literal characters from the source. On each `INDENT` token the new level is pushed; on each `DEDENT` the stack is popped back to the matching level. The inconsistency check fires when the cooked and raw representations of the current level do not match what was seen at the same depth earlier.
+
+```python
+def process_tokens(tokens):
+    INDENT = tokenize.INDENT
+    DEDENT = tokenize.DEDENT
+    NEWLINE = tokenize.NEWLINE
+    NL = tokenize.NL
+    indents = [0]
+    check_equal = False
+
+    for token_type, token_string, start, end, line in tokens:
+        if token_type == NEWLINE:
+            check_equal = False
+        elif token_type == INDENT:
+            check_equal = True
+            cooked = expand_indent(token_string)
+            _check_equal(start[0], cooked, token_string)
+            indents.append(cooked)
+        elif token_type == DEDENT:
+            indents.pop()
+            check_equal = False
+```
+
+The `check_equal` flag prevents the same line from being checked twice when a `NEWLINE` immediately follows an `INDENT` (which can happen in certain token stream layouts).
+
+### `expand_indent` and `_check_equal` (lines 197 to 285)
+
+<CpyLink path="Lib/tabnanny.py" lines="197-285" />
+
+`expand_indent` converts a raw indentation string into its visual width under 8-space tabs. It is the reference expansion used by both the state machine and the command-line verbose output.
+
+```python
+def expand_indent(line):
+    """Return the amount of indentation.
+
+    Tabs are expanded to the next multiple of 8 spaces.
+    """
+    if '\t' not in line:
+        return len(line)
+    result = 0
+    for char in line:
+        if char == '\t':
+            result = (result // 8 + 1) * 8
+        elif char == ' ':
+            result += 1
+        else:
+            break
+    return result
+```
+
+`_check_equal` receives the expanded integer depth (`id`), the cooked (expanded) string, and the raw string, then checks them against the top of the indent stack. A mismatch means the file uses both tabs and spaces for indentation at the same logical level, which is the condition tabnanny is designed to catch.
+
+## gopy mirror
+
+Not yet ported.
+
+`tabnanny` depends on the `tokenize` module to drive its analysis. Once `tokenize` is available in gopy, the port is straightforward: `NannyNag` becomes a Go error type with three fields, `process_tokens` becomes a function that accepts a token iterator, and `expand_indent` is a pure string function with no external dependencies.
+
+## CPython 3.14 changes
+
+The CPython 3.14 cycle replaced the old `getopt`-based command-line parser in `tabnanny` with `argparse`, bringing it in line with the rest of the standard library. The public API (`check`, `NannyNag`, `process_tokens`) is unchanged. A minor cleanup removed the module-level `verbose` and `filename_only` globals in favour of function-local variables, eliminating a class of import-order side-effect bugs when the module was imported before being run as `__main__`.

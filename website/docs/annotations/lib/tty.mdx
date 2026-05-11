@@ -1,0 +1,92 @@
+---
+title: Lib/tty.py
+description: Terminal raw and cbreak mode helpers built on the termios module.
+cpython_path: Lib/tty.py
+cpython_version: "3.14"
+lines: 70
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Lib/tty.py`
+
+<CpyLink path="Lib/tty.py" />
+
+`tty.py` is a thin convenience layer over `termios`. It provides three functions that put a terminal file descriptor into raw or cbreak mode. Raw mode disables virtually all terminal line-discipline processing (echo, canonical buffering, signal generation, output post-processing). Cbreak mode is the same except that signal-generating characters (Ctrl-C, Ctrl-Z) are still processed. Both modes are reversible by saving the original `termios` attribute list before calling into this module. `cfmakeraw` encapsulates the flag arithmetic so callers do not have to remember which bits to clear.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| 1-8 | module docstring, imports | Imports `termios` and `tty` constants (`IFLAG`, `OFLAG`, `CFLAG`, `LFLAG`, `ISPEED`, `OSPEED`, `CC`) | not ported |
+| 10-18 | `cfmakeraw(mode)` | Mutates a `termios` attribute list in-place to raw settings. No I/O. | not ported |
+| 20-30 | `setraw(fd, when=TCSAFLUSH)` | Reads current termios, calls `cfmakeraw`, applies with `tcsetattr`. | not ported |
+| 32-42 | `setcbreak(fd, when=TCSAFLUSH)` | Like `setraw` but leaves `ISIG` set so Ctrl-C/Z still work. | not ported |
+
+## Reading
+
+### Module-level constants (lines 1 to 8)
+
+<CpyLink path="Lib/tty.py" lines="1-8" />
+
+The file imports the six index constants (`IFLAG`, `OFLAG`, `CFLAG`, `LFLAG`, `ISPEED`, `OSPEED`, `CC`) from `termios` and re-exports them. These are positional indices into the list returned by `termios.tcgetattr`. Using named constants rather than bare integers makes the flag manipulation in `cfmakeraw` and `setcbreak` readable at a glance.
+
+```python
+from termios import (
+    IFLAG, OFLAG, CFLAG, LFLAG, ISPEED, OSPEED, CC,
+    TCSAFLUSH, tcgetattr, tcsetattr,
+)
+```
+
+### `cfmakeraw` (lines 10 to 18)
+
+<CpyLink path="Lib/tty.py" lines="10-18" />
+
+`cfmakeraw` mirrors the POSIX `cfmakeraw(3)` C function. It receives the list that `tcgetattr` returns, clears the relevant bits, and returns the mutated list. The caller is responsible for the actual `tcsetattr` call, which keeps the function pure and easy to test.
+
+```python
+def cfmakeraw(mode):
+    mode[IFLAG] = mode[IFLAG] & ~(IGNBRK | BRKINT | PARMRK | ISTRIP |
+                                   INLCR | IGNCR | ICRNL | IXON)
+    mode[OFLAG] = mode[OFLAG] & ~OPOST
+    mode[CFLAG] = (mode[CFLAG] & ~(CSIZE | PARENB)) | CS8
+    mode[LFLAG] = mode[LFLAG] & ~(ECHO | ECHONL | ICANON | ISIG | IEXTEN)
+    mode[CC][VMIN] = 1
+    mode[CC][VTIME] = 0
+    return mode
+```
+
+The key effect is that reads return as soon as one byte arrives (`VMIN=1`, `VTIME=0`) and no characters are echoed or interpreted by the kernel.
+
+### `setraw` and `setcbreak` (lines 20 to 42)
+
+<CpyLink path="Lib/tty.py" lines="20-42" />
+
+Both functions follow the same pattern: save the old attribute list, build a modified copy, apply it. The only difference is that `setcbreak` omits clearing `ISIG`, so SIGINT and SIGTSTP are still raised on Ctrl-C and Ctrl-Z.
+
+```python
+def setraw(fd, when=TCSAFLUSH):
+    mode = tcgetattr(fd)
+    mode = cfmakeraw(mode)
+    tcsetattr(fd, when, mode)
+
+def setcbreak(fd, when=TCSAFLUSH):
+    mode = tcgetattr(fd)
+    mode[LFLAG] = mode[LFLAG] & ~(ECHO | ICANON | IEXTEN)
+    mode[CC][VMIN] = 1
+    mode[CC][VTIME] = 0
+    tcsetattr(fd, when, mode)
+```
+
+`when=TCSAFLUSH` means the change takes effect after all pending output has been written and any unread input is discarded. Callers that want an immediate change pass `TCSANOW`.
+
+## gopy mirror
+
+Not yet ported.
+
+The `termios` module is a thin wrapper over the POSIX `<termios.h>` C API. gopy does not yet expose that API, so `tty.py` cannot be ported until a `termios` module is available. When that work lands, `cfmakeraw`, `setraw`, and `setcbreak` translate directly as Go functions accepting a file descriptor integer.
+
+## CPython 3.14 changes
+
+CPython 3.14 extracted the flag arithmetic into the new `cfmakeraw` function (previously the bit manipulation was inlined inside `setraw`). The public signatures of `setraw` and `setcbreak` are unchanged. The addition of `cfmakeraw` as a named export makes the module testable without a real terminal file descriptor.
