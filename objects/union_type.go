@@ -22,10 +22,10 @@ import (
 // CPython: Objects/unionobject.c:10 unionobject
 type UnionType struct {
 	Header
-	args            *Tuple
-	hashableArgs    *Set
-	unhashableArgs  *Tuple
-	parameters      *Tuple
+	args           *Tuple
+	hashableArgs   *Set
+	unhashableArgs *Tuple
+	parameters     *Tuple
 }
 
 // UnionTypeType is the type singleton for types.UnionType. Mirrors
@@ -275,7 +275,7 @@ func (ub *unionBuilder) addSingleUnchecked(arg Object) error {
 // CPython: Objects/unionobject.c:549 make_union
 func (ub *unionBuilder) makeUnion() (Object, error) {
 	if len(ub.args) == 0 {
-		return nil, fmt.Errorf("TypeError: Cannot take a Union of no types.")
+		return nil, fmt.Errorf("TypeError: Cannot take a Union of no types")
 	}
 	if len(ub.args) == 1 {
 		return ub.args[0], nil
@@ -374,7 +374,7 @@ func unionFromTuple(args Object) (Object, error) {
 	return ub.makeUnion()
 }
 
-// unionTypeCheck is the analogue of type_check in unionobject.c. The
+// unionTypeCheck is the analog of type_check in unionobject.c. The
 // gopy slice does not call into typing._type_check (typing.py is not
 // runnable yet), so anything that is not directly unionable raises
 // the same TypeError CPython would surface.
@@ -387,7 +387,7 @@ func unionTypeCheck(arg Object, msg string) (Object, error) {
 	if isUnionable(arg) {
 		return arg, nil
 	}
-	return nil, fmt.Errorf("TypeError: %s Got %s.", msg, typeNameOf(arg))
+	return nil, fmt.Errorf("TypeError: %s Got %s", msg, typeNameOf(arg))
 }
 
 // unionGetitem implements `union[args]` (the typevar-substitution
@@ -399,11 +399,7 @@ func unionTypeCheck(arg Object, msg string) (Object, error) {
 func unionGetitem(o, item Object) (Object, error) {
 	u := o.(*UnionType)
 	if u.parameters == nil {
-		params, err := makeParameters(u.args)
-		if err != nil {
-			return nil, err
-		}
-		u.parameters = params
+		u.parameters = makeParameters(u.args)
 	}
 	if u.parameters.Len() == 0 {
 		repr, err := Repr(o)
@@ -451,11 +447,7 @@ func init() {
 	SetTypeDescr(UnionTypeType, "__parameters__", NewGetSetDescr("__parameters__", func(o Object) (Object, error) {
 		u := o.(*UnionType)
 		if u.parameters == nil {
-			p, err := makeParameters(u.args)
-			if err != nil {
-				return nil, err
-			}
-			u.parameters = p
+			u.parameters = makeParameters(u.args)
 		}
 		return u.parameters, nil
 	}, nil))

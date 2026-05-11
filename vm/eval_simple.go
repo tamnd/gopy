@@ -1757,7 +1757,7 @@ func typeSubscript(cls *objects.Type, key objects.Object) (objects.Object, error
 		// callable installed via SetTypeDescr) sees the class as its
 		// implicit first argument.
 		dt := descr.Type()
-		var bound objects.Object = descr
+		bound := descr
 		if dt.DescrGet != nil {
 			v, err := dt.DescrGet(descr, cls, cls)
 			if err != nil {
@@ -1890,7 +1890,7 @@ func setItem(container, key, value objects.Object) error {
 
 // mappingAndSequence walks t's MRO and returns the first Mapping and
 // Sequence bundles found. Either return value may be nil. Lets a
-// subclass inherit container behaviour without copying slot tables at
+// subclass inherit container behavior without copying slot tables at
 // class-creation time.
 func mappingAndSequence(t *objects.Type) (*objects.MappingMethods, *objects.SequenceMethods) {
 	var mp *objects.MappingMethods

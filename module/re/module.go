@@ -110,19 +110,24 @@ func init() {
 func patternMatch(args []objects.Object, kw map[string]objects.Object) (objects.Object, error) {
 	return reMatch(args, kw)
 }
+
 func patternFullmatch(args []objects.Object, kw map[string]objects.Object) (objects.Object, error) {
 	return reFullmatch(args, kw)
 }
+
 func patternSearch(args []objects.Object, kw map[string]objects.Object) (objects.Object, error) {
 	return reSearch(args, kw)
 }
+
 func patternFindall(args []objects.Object, kw map[string]objects.Object) (objects.Object, error) {
 	return reFindall(args, kw)
 }
+
 func patternSub(args []objects.Object, kw map[string]objects.Object) (objects.Object, error) {
 	// Pattern.sub signature: (self, repl, string) -> module sub is (pattern, repl, string).
 	return reSub(args, kw)
 }
+
 func patternSplit(args []objects.Object, kw map[string]objects.Object) (objects.Object, error) {
 	return reSplit(args, kw)
 }
@@ -151,9 +156,11 @@ func matchGroup(args []objects.Object, _ map[string]objects.Object) (objects.Obj
 	}
 	return v, nil
 }
+
 func matchGroups(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
 	return objects.NewTuple(nil), nil
 }
+
 func matchStart(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
 	if len(args) < 1 {
 		return nil, fmt.Errorf("TypeError: descriptor 'start' of 'Match' needs an argument")
@@ -164,6 +171,7 @@ func matchStart(args []objects.Object, _ map[string]objects.Object) (objects.Obj
 	}
 	return inst.Dict().GetItem(objects.NewStr("start"))
 }
+
 func matchEnd(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
 	if len(args) < 1 {
 		return nil, fmt.Errorf("TypeError: descriptor 'end' of 'Match' needs an argument")
@@ -174,6 +182,7 @@ func matchEnd(args []objects.Object, _ map[string]objects.Object) (objects.Objec
 	}
 	return inst.Dict().GetItem(objects.NewStr("end"))
 }
+
 func matchSpan(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
 	s, err := matchStart(args, nil)
 	if err != nil {

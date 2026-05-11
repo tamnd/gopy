@@ -138,7 +138,7 @@ func (e *evalState) execReturnGenerator() (genResult, error) {
 	// Skip the POP_TOP that insert_prefix_instructions emits right
 	// after RETURN_GENERATOR. The two together have a net stack
 	// effect of zero (RETURN_GENERATOR pushed an item that POP_TOP
-	// drops); we never materialise the push, so we also skip the pop.
+	// drops); we never materialize the push, so we also skip the pop.
 	//
 	// CPython: Python/flowgraph.c:3760 insert_prefix_instructions
 	// (the RETURN_GENERATOR + POP_TOP pair)

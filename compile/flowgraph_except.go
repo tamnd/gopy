@@ -108,10 +108,9 @@ func insertPrefixInstructions(seq *Sequence, codeFlags uint32) {
 		return
 	}
 	loc := seq.Instrs[0].Loc
-	prefix := []Instr{
-		{Op: RETURN_GENERATOR, Oparg: 0, Loc: loc, Handler: ExceptHandlerInfo{Label: -1, StartDepth: -1, PreserveLasti: -1}},
-		{Op: POP_TOP, Oparg: 0, Loc: loc, Handler: ExceptHandlerInfo{Label: -1, StartDepth: -1, PreserveLasti: -1}},
-	}
+	prefix := make([]Instr, 2, 2+len(seq.Instrs))
+	prefix[0] = Instr{Op: RETURN_GENERATOR, Oparg: 0, Loc: loc, Handler: ExceptHandlerInfo{Label: -1, StartDepth: -1, PreserveLasti: -1}}
+	prefix[1] = Instr{Op: POP_TOP, Oparg: 0, Loc: loc, Handler: ExceptHandlerInfo{Label: -1, StartDepth: -1, PreserveLasti: -1}}
 	seq.Instrs = append(prefix, seq.Instrs...)
 	for i := range seq.Instrs {
 		ins := &seq.Instrs[i]

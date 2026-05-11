@@ -310,7 +310,7 @@ var gaAttrOwn = map[string]struct{}{
 	"__reduce__":                     {},
 }
 
-// gaGetattro fulfils the attr-exceptions / attr-blocked dispatch: own
+// gaGetattro fulfills the attr-exceptions / attr-blocked dispatch: own
 // attrs and blocked names go through GenericGetAttr (which finds the
 // member / getset / method descriptors registered below), everything
 // else proxies to origin so list[int].append still works.
@@ -343,17 +343,12 @@ func gaGetattro(o Object, name Object) (Object, error) {
 func gaSubscript(o, item Object) (Object, error) {
 	ga := o.(*GenericAlias)
 	if ga.parameters == nil {
-		params, err := makeParameters(ga.args)
-		if err != nil {
-			return nil, err
-		}
-		ga.parameters = params
+		ga.parameters = makeParameters(ga.args)
 	}
-	newargs, err := subsParameters(o, ga.args, ga.parameters, item)
-	if err != nil {
+	if err := subsParameters(o, ga.parameters); err != nil {
 		return nil, err
 	}
-	res := NewGenericAlias(ga.origin, newargs)
+	res := NewGenericAlias(ga.origin, ga.args)
 	res.starred = ga.starred
 	return res, nil
 }
@@ -391,8 +386,8 @@ func gaIter(o Object) (Object, error) {
 // in subsParameters can detect "no parameters".
 //
 // CPython: Objects/genericaliasobject.c:186 _Py_make_parameters
-func makeParameters(args *Tuple) (*Tuple, error) {
-	return NewTuple(nil), nil
+func makeParameters(_ *Tuple) *Tuple {
+	return NewTuple(nil)
 }
 
 // subsParameters substitutes typevars in args with the values in item.
@@ -401,19 +396,19 @@ func makeParameters(args *Tuple) (*Tuple, error) {
 // of _Py_subs_parameters and raises the same TypeError CPython does.
 //
 // CPython: Objects/genericaliasobject.c:404 _Py_subs_parameters
-func subsParameters(self Object, args *Tuple, parameters *Tuple, item Object) (*Tuple, error) {
+func subsParameters(self Object, parameters *Tuple) error {
 	if parameters.Len() == 0 {
 		repr, err := Repr(self)
 		if err != nil {
-			return nil, err
+			return err
 		}
-		return nil, fmt.Errorf("TypeError: %s is not a generic class", repr)
+		return fmt.Errorf("TypeError: %s is not a generic class", repr)
 	}
 	// Typevar substitution path is not implemented in this slice. We
 	// keep the function so the dispatcher's shape matches CPython and
 	// later TypeVar work can fill it in without touching the call
 	// sites.
-	return nil, fmt.Errorf("TypeError: parameterized generic substitution is not supported")
+	return fmt.Errorf("TypeError: parameterized generic substitution is not supported")
 }
 
 // gaMroEntries returns (origin,) so a class statement that subclasses
@@ -447,11 +442,7 @@ func init() {
 	SetTypeDescr(GenericAliasType, "__parameters__", NewGetSetDescr("__parameters__", func(o Object) (Object, error) {
 		ga := o.(*GenericAlias)
 		if ga.parameters == nil {
-			p, err := makeParameters(ga.args)
-			if err != nil {
-				return nil, err
-			}
-			ga.parameters = p
+			ga.parameters = makeParameters(ga.args)
 		}
 		return ga.parameters, nil
 	}, nil))

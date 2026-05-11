@@ -119,11 +119,10 @@ func (e *evalState) run() (objects.Object, error) {
 			return retVal, retErr
 		}
 		if err != nil {
-			v, handled := e.handleException(err)
-			if handled {
+			if e.handleException(err) {
 				continue
 			}
-			return v, err
+			return nil, err
 		}
 		e.f.PrevInstr = e.f.InstrPtr
 		e.f.InstrPtr = next

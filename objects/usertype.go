@@ -25,6 +25,8 @@ import "fmt"
 // list explicitly includes "__dict__".
 //
 // CPython: Objects/typeobject.c:4153 type_new
+//
+//nolint:gocognit // mirrors CPython's type_new body
 func NewUserType(name string, bases []*Type, ns *Dict) *Type {
 	if len(bases) == 0 {
 		bases = []*Type{objectType}
@@ -165,55 +167,55 @@ func lookupOnType(t *Type, name string) (Object, bool) {
 //
 // CPython: Objects/typeobject.c:9874 fixup_slot_dispatchers
 func fixupSlotDispatchers(t *Type) {
-	if _, ok := lookupDunderCallable(t, "__call__"); ok {
+	if lookupDunderCallable(t, "__call__") {
 		t.Call = slotTpCall
 		t.Vectorcall = nil
 	}
-	if _, ok := lookupDunderCallable(t, "__repr__"); ok {
+	if lookupDunderCallable(t, "__repr__") {
 		t.Repr = slotTpRepr
 	}
-	if _, ok := lookupDunderCallable(t, "__str__"); ok {
+	if lookupDunderCallable(t, "__str__") {
 		t.Str = slotTpStr
 	} else if t.Repr != nil && t.Str == nil {
 		t.Str = t.Repr
 	}
-	if _, ok := lookupDunderCallable(t, "__hash__"); ok {
+	if lookupDunderCallable(t, "__hash__") {
 		t.Hash = slotTpHash
 	} else if t.Hash == nil {
 		t.Hash = identityHash
 	}
-	if _, ok := lookupDunderCallable(t, "__iter__"); ok {
+	if lookupDunderCallable(t, "__iter__") {
 		t.Iter = slotTpIter
 	}
-	if _, ok := lookupDunderCallable(t, "__next__"); ok {
+	if lookupDunderCallable(t, "__next__") {
 		t.IterNext = slotTpIterNext
 	}
 	if hasAnyDunder(t, "__eq__", "__ne__", "__lt__", "__le__", "__gt__", "__ge__") {
 		t.RichCmp = slotTpRichCompare
 	}
-	if _, ok := lookupDunderCallable(t, "__bool__"); ok {
+	if lookupDunderCallable(t, "__bool__") {
 		ensureNumberMethods(t).Bool = slotNbBool
-	} else if _, ok := lookupDunderCallable(t, "__len__"); ok {
+	} else if lookupDunderCallable(t, "__len__") {
 		ensureNumberMethods(t).Bool = slotNbBoolFromLen
 	}
-	if _, ok := lookupDunderCallable(t, "__len__"); ok {
+	if lookupDunderCallable(t, "__len__") {
 		m := ensureMappingMethods(t)
 		m.Length = slotMpLength
 		s := ensureSequenceMethods(t)
 		s.Length = slotMpLength
 	}
-	if _, ok := lookupDunderCallable(t, "__getitem__"); ok {
+	if lookupDunderCallable(t, "__getitem__") {
 		ensureMappingMethods(t).GetItem = slotMpSubscript
 		ensureSequenceMethods(t).GetItem = slotSqGetItem
 	}
-	if _, ok := lookupDunderCallable(t, "__setitem__"); ok {
+	if lookupDunderCallable(t, "__setitem__") {
 		ensureMappingMethods(t).SetItem = slotMpSubscriptSet
 		ensureSequenceMethods(t).SetItem = slotSqSetItem
 	}
-	if _, ok := lookupDunderCallable(t, "__delitem__"); ok {
+	if lookupDunderCallable(t, "__delitem__") {
 		ensureMappingMethods(t).DelItem = slotMpSubscriptDel
 	}
-	if _, ok := lookupDunderCallable(t, "__contains__"); ok {
+	if lookupDunderCallable(t, "__contains__") {
 		ensureSequenceMethods(t).Contains = slotSqContains
 	}
 }
@@ -224,7 +226,7 @@ func fixupSlotDispatchers(t *Type) {
 // dunder is defined.
 func hasAnyDunder(t *Type, names ...string) bool {
 	for _, n := range names {
-		if _, ok := lookupDunderCallable(t, n); ok {
+		if lookupDunderCallable(t, n) {
 			return true
 		}
 	}
@@ -261,15 +263,15 @@ func ensureSequenceMethods(t *Type) *SequenceMethods {
 // MRO via a real descriptor (Function, BuiltinFunction, etc.). Plain
 // data attributes are ignored: `__hash__ = None` on the class means
 // the type is explicitly unhashable.
-func lookupDunderCallable(t *Type, name string) (Object, bool) {
+func lookupDunderCallable(t *Type, name string) bool {
 	d, _ := LookupDescriptor(t, name)
 	if d == nil {
-		return nil, false
+		return false
 	}
 	if d == None() {
-		return nil, false
+		return false
 	}
-	return d, true
+	return true
 }
 
 // slotTpCall is the generic tp_call dispatcher: look up __call__ via

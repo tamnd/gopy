@@ -336,10 +336,8 @@ func newCacheInfoType() *objects.Type {
 func makeLruCache(cacheInfoType *objects.Type) func(args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error) {
 	return func(args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error) {
 		// Default maxsize is 128, typed is False.
-		var (
-			maxsize objects.Object = objects.NewInt(128)
-			typed   objects.Object = objects.NewBool(false)
-		)
+		var maxsize objects.Object = objects.NewInt(128)
+		typed := objects.NewBool(false)
 		// Disambiguate: lru_cache(user_function) hands us a single
 		// callable as args[0]; lru_cache(maxsize=N) hands us a single
 		// int (or None) as args[0]; lru_cache() hands us nothing.

@@ -95,7 +95,7 @@ type fieldObj struct {
 	objects.Header
 	name           string
 	tp             objects.Object // type annotation, often None
-	default_       objects.Object
+	defaultVal     objects.Object
 	defaultFactory objects.Object
 	repr           bool
 	hash           objects.Object // True, False, or None
@@ -119,15 +119,16 @@ func init() {
 	FieldType.Setattro = fieldSetattro
 }
 
-func newField(default_, defaultFactory objects.Object, init, repr bool,
-	hash objects.Object, compare bool, metadata, kwOnly, doc objects.Object) *fieldObj {
+func newField(defaultVal, defaultFactory objects.Object, init, repr bool,
+	hash objects.Object, compare bool, metadata, kwOnly, doc objects.Object,
+) *fieldObj {
 	if metadata == nil {
 		metadata = objects.NewDict()
 	}
 	f := &fieldObj{
 		name:           "",
 		tp:             objects.None(),
-		default_:       default_,
+		defaultVal:     defaultVal,
 		defaultFactory: defaultFactory,
 		init:           init,
 		repr:           repr,
@@ -145,7 +146,7 @@ func newField(default_, defaultFactory objects.Object, init, repr bool,
 func fieldRepr(o objects.Object) (string, error) {
 	f := o.(*fieldObj)
 	return fmt.Sprintf("Field(name=%q,default=%s,default_factory=%s,init=%v,repr=%v,kw_only=%s)",
-		f.name, mustRepr(f.default_), mustRepr(f.defaultFactory), f.init, f.repr, mustRepr(f.kwOnly)), nil
+		f.name, mustRepr(f.defaultVal), mustRepr(f.defaultFactory), f.init, f.repr, mustRepr(f.kwOnly)), nil
 }
 
 func mustRepr(o objects.Object) string {
@@ -174,7 +175,7 @@ func fieldGetattro(o objects.Object, name objects.Object) (objects.Object, error
 	case "type":
 		return f.tp, nil
 	case "default":
-		return f.default_, nil
+		return f.defaultVal, nil
 	case "default_factory":
 		return f.defaultFactory, nil
 	case "init":
@@ -244,7 +245,7 @@ func fieldBuiltin(args []objects.Object, kwargs map[string]objects.Object) (obje
 	if v, ok := kwargs["repr"]; ok {
 		repr = objects.IsTrue(v)
 	}
-	var hash objects.Object = objects.None()
+	hash := objects.None()
 	if v, ok := kwargs["hash"]; ok {
 		hash = v
 	}
@@ -252,15 +253,15 @@ func fieldBuiltin(args []objects.Object, kwargs map[string]objects.Object) (obje
 	if v, ok := kwargs["compare"]; ok {
 		compare = objects.IsTrue(v)
 	}
-	var metadata objects.Object = objects.None()
+	metadata := objects.None()
 	if v, ok := kwargs["metadata"]; ok {
 		metadata = v
 	}
-	var kwOnly objects.Object = missingValue
+	kwOnly := missingValue
 	if v, ok := kwargs["kw_only"]; ok {
 		kwOnly = v
 	}
-	var doc objects.Object = objects.None()
+	doc := objects.None()
 	if v, ok := kwargs["doc"]; ok {
 		doc = v
 	}
@@ -462,10 +463,7 @@ func dataclassBuiltin(args []objects.Object, kwargs map[string]objects.Object) (
 //
 // CPython: Lib/dataclasses.py:986 _process_class
 func processClass(cls *objects.Type, flags dataclassFlags) (*objects.Type, error) {
-	fields, err := collectFields(cls, flags)
-	if err != nil {
-		return nil, err
-	}
+	fields := collectFields(cls, flags)
 
 	if flags.init {
 		initFn := makeInit(cls, fields, flags)
@@ -488,7 +486,7 @@ func processClass(cls *objects.Type, flags dataclassFlags) (*objects.Type, error
 			if op != objects.CompareEQ && op != objects.CompareNE {
 				return objects.NotImplemented(), nil
 			}
-			eq, err := instanceEq(a, b, cls, fields)
+			eq, err := instanceEq(a, b, fields)
 			if err != nil {
 				return nil, err
 			}
@@ -550,7 +548,9 @@ func processClass(cls *objects.Type, flags dataclassFlags) (*objects.Type, error
 // cls.__dict__.get('__annotations__', {}).
 //
 // CPython: Lib/dataclasses.py:1041 _process_class field collection
-func collectFields(cls *objects.Type, flags dataclassFlags) ([]*fieldInfo, error) {
+//
+//nolint:gocognit,gocyclo // mirrors CPython's monolithic _process_class
+func collectFields(cls *objects.Type, flags dataclassFlags) []*fieldInfo {
 	own := objects.TypeOwnDescrs(cls)
 	// Inherit fields from base dataclasses, in MRO reverse order.
 	inherited := map[string]*fieldObj{}
@@ -689,10 +689,10 @@ func collectFields(cls *objects.Type, flags dataclassFlags) ([]*fieldInfo, error
 		// attribute, and Field() sentinels must never resolve as the
 		// final value.
 		if classDef != nil {
-			if _, isField := classDef.(*fieldObj); !isField {
-				// Keep simple non-mutable defaults on the class as
-				// CPython does (after rebinding them).
-			}
+			// Keep simple non-mutable defaults on the class as
+			// CPython does (after rebinding them). Field() sentinels
+			// are handled by the own-name branch below.
+			_ = classDef
 		} else if _, hasOwn := own[name]; hasOwn {
 			if _, isField := own[name].(*fieldObj); isField {
 				objects.DelTypeDescr(cls, name)
@@ -701,7 +701,7 @@ func collectFields(cls *objects.Type, flags dataclassFlags) ([]*fieldInfo, error
 		out = append(out, &fieldInfo{name: name, f: fo, classDefVal: classDef})
 	}
 
-	return out, nil
+	return out
 }
 
 func isDunder(name string) bool {
@@ -722,6 +722,8 @@ func indexOfName(names []string, name string) (int, bool) {
 // installs each field on the instance.
 //
 // CPython: Lib/dataclasses.py:670 _init_fn
+//
+//nolint:gocognit,gocyclo,gocritic // mirrors CPython's _init_fn body
 func makeInit(cls *objects.Type, fields []*fieldInfo, flags dataclassFlags) *objects.MethodDescr {
 	posFields := []*fieldInfo{}
 	kwOnlyFields := []*fieldInfo{}
@@ -738,7 +740,7 @@ func makeInit(cls *objects.Type, fields []*fieldInfo, flags dataclassFlags) *obj
 	// Sentinel: a non-default field must not follow a defaulted one.
 	hasDefault := false
 	for _, fi := range posFields {
-		hasOwn := fi.f.default_ != missingValue || fi.f.defaultFactory != missingValue
+		hasOwn := fi.f.defaultVal != missingValue || fi.f.defaultFactory != missingValue
 		if hasOwn {
 			hasDefault = true
 		} else if hasDefault {
@@ -769,8 +771,8 @@ func makeInit(cls *objects.Type, fields []*fieldInfo, flags dataclassFlags) *obj
 				val = kv
 				consumed[fi.name] = true
 				delete(kwargs, fi.name)
-			} else if fi.f.default_ != missingValue {
-				val = fi.f.default_
+			} else if fi.f.defaultVal != missingValue {
+				val = fi.f.defaultVal
 			} else if fi.f.defaultFactory != missingValue {
 				v, err := objects.CallNoArgs(fi.f.defaultFactory)
 				if err != nil {
@@ -785,7 +787,7 @@ func makeInit(cls *objects.Type, fields []*fieldInfo, flags dataclassFlags) *obj
 			}
 		}
 		// Reject extra positional that didn't match a field name.
-		for i := len(posFields); i < len(posArgs); i++ {
+		if len(posArgs) > len(posFields) {
 			return nil, fmt.Errorf("TypeError: __init__() takes %d positional arguments but %d were given", len(posFields)+1, len(args))
 		}
 		// kw-only fields.
@@ -794,8 +796,8 @@ func makeInit(cls *objects.Type, fields []*fieldInfo, flags dataclassFlags) *obj
 			if kv, ok := kwargs[fi.name]; ok {
 				val = kv
 				delete(kwargs, fi.name)
-			} else if fi.f.default_ != missingValue {
-				val = fi.f.default_
+			} else if fi.f.defaultVal != missingValue {
+				val = fi.f.defaultVal
 			} else if fi.f.defaultFactory != missingValue {
 				v, err := objects.CallNoArgs(fi.f.defaultFactory)
 				if err != nil {
@@ -894,7 +896,7 @@ func makeRepr(cls *objects.Type, fields []*fieldInfo) *objects.MethodDescr {
 	})
 }
 
-func instanceEq(a, b objects.Object, cls *objects.Type, fields []*fieldInfo) (bool, error) {
+func instanceEq(a, b objects.Object, fields []*fieldInfo) (bool, error) {
 	if a.Type() != b.Type() {
 		return false, nil
 	}
@@ -926,7 +928,7 @@ func makeEq(cls *objects.Type, fields []*fieldInfo) *objects.MethodDescr {
 		if len(args) != 2 {
 			return objects.NotImplemented(), nil
 		}
-		eq, err := instanceEq(args[0], args[1], cls, fields)
+		eq, err := instanceEq(args[0], args[1], fields)
 		if err != nil {
 			return nil, err
 		}

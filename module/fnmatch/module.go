@@ -263,6 +263,8 @@ func reEscape(s string) string {
 // star positions into atomic groups.
 //
 // CPython: Lib/fnmatch.py:109 _translate
+//
+//nolint:gocognit,gocyclo // mirrors CPython's _translate body
 func translateParts(pat, star, questionMark string) ([]string, []int) {
 	var res []string
 	add := func(s string) { res = append(res, s) }
@@ -272,16 +274,16 @@ func translateParts(pat, star, questionMark string) ([]string, []int) {
 	for i < n {
 		c := pat[i]
 		i++
-		switch {
-		case c == '*':
+		switch c {
+		case '*':
 			starIndices = append(starIndices, len(res))
 			add(star)
 			for i < n && pat[i] == '*' {
 				i++
 			}
-		case c == '?':
+		case '?':
 			add(questionMark)
-		case c == '[':
+		case '[':
 			j := i
 			if j < n && pat[j] == '!' {
 				j++
@@ -314,7 +316,7 @@ func translateParts(pat, star, questionMark string) ([]string, []int) {
 						}
 						chunks = append(chunks, pat[iLocal:k])
 						iLocal = k + 1
-						k = k + 3
+						k += 3
 					}
 					chunk := pat[iLocal:j]
 					if chunk != "" {
@@ -339,16 +341,17 @@ func translateParts(pat, star, questionMark string) ([]string, []int) {
 					stuff = strings.Join(escaped, "-")
 				}
 				i = j + 1
-				switch {
-				case stuff == "":
+				switch stuff {
+				case "":
 					add(`(?!)`)
-				case stuff == "!":
+				case "!":
 					add(`.`)
 				default:
 					stuff = reSetops.ReplaceAllString(stuff, `\$1`)
-					if stuff[0] == '!' {
+					switch stuff[0] {
+					case '!':
 						stuff = "^" + stuff[1:]
-					} else if stuff[0] == '^' || stuff[0] == '[' {
+					case '^', '[':
 						stuff = `\` + stuff
 					}
 					add("[" + stuff + "]")
@@ -506,7 +509,7 @@ func compileGlob(pat string) []globToken {
 // (negated empty range) and `[]` => never match (empty range).
 func parseClass(body string) globClass {
 	cls := globClass{chars: map[byte]struct{}{}}
-	if len(body) > 0 && body[0] == '!' {
+	if body != "" && body[0] == '!' {
 		cls.negate = true
 		body = body[1:]
 	}
@@ -515,9 +518,8 @@ func parseClass(body string) globClass {
 			// `[!]` matches any byte: emit a class that always returns true.
 			cls.ranges = []byteRange{{0, 255}}
 			cls.negate = false
-		} else {
-			// `[]` never matches: empty positive class.
 		}
+		// `[]` never matches: empty positive class, returned as-is.
 		return cls
 	}
 	i, n := 0, len(body)

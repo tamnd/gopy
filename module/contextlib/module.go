@@ -177,8 +177,8 @@ func genCMExit(args []objects.Object, _ map[string]objects.Object) (objects.Obje
 	}
 	typArg := args[1]
 	valArg := args[2]
-	genObj, err := inst.Dict().GetItem(objects.NewStr("gen"))
-	if err != nil || genObj == nil {
+	genObj, _ := inst.Dict().GetItem(objects.NewStr("gen"))
+	if genObj == nil {
 		return objects.NewBool(false), nil
 	}
 	gen, ok := genObj.(*objects.Generator)
@@ -217,7 +217,7 @@ func genCMExit(args []objects.Object, _ map[string]objects.Object) (objects.Obje
 		// to suppress.
 		return objects.NewBool(true), nil
 	}
-	if thrErr == throwErr {
+	if errors.Is(thrErr, throwErr) {
 		// Same Go-level error round-tripped. Do not suppress, the with
 		// machinery will re-raise the original.
 		return objects.NewBool(false), nil
@@ -306,8 +306,8 @@ func suppressExit(args []objects.Object, _ map[string]objects.Object) (objects.O
 	if !ok {
 		return objects.NewBool(false), nil
 	}
-	excTup, err := inst.Dict().GetItem(objects.NewStr("_exceptions"))
-	if err != nil {
+	excTup, _ := inst.Dict().GetItem(objects.NewStr("_exceptions"))
+	if excTup == nil {
 		return objects.NewBool(false), nil
 	}
 	tup, ok := excTup.(*objects.Tuple)
@@ -342,7 +342,7 @@ func newNullcontextType() *objects.Type {
 	t.Getattro = objects.GenericGetAttr
 	t.TpNew = func(cls *objects.Type, args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
 		inst := objects.NewInstance(cls)
-		enterResult := objects.Object(objects.None())
+		enterResult := objects.None()
 		if len(args) >= 1 {
 			enterResult = args[0]
 		}
@@ -424,8 +424,8 @@ func closingExit(args []objects.Object, _ map[string]objects.Object) (objects.Ob
 	if thing == nil {
 		return objects.NewBool(false), nil
 	}
-	closeFn, err := objects.GetAttr(thing, objects.NewStr("close"))
-	if err != nil {
+	closeFn, _ := objects.GetAttr(thing, objects.NewStr("close"))
+	if closeFn == nil {
 		return objects.NewBool(false), nil
 	}
 	if _, err := objects.Call(closeFn, objects.NewTuple(nil), nil); err != nil {
@@ -513,9 +513,9 @@ func redirectExit(args []objects.Object, _ map[string]objects.Object) (objects.O
 	if stack == nil || stack.Len() == 0 {
 		return objects.NewBool(false), nil
 	}
-	old, err := stack.Pop(stack.Len() - 1)
-	if err != nil {
-		return objects.NewBool(false), nil
+	old, popErr := stack.Pop(stack.Len() - 1)
+	if popErr != nil {
+		return nil, popErr
 	}
 	if sn, ok := streamName.(*objects.Unicode); ok {
 		if err := objects.SetAttr(sysMod, objects.NewStr(sn.Value()), old); err != nil {

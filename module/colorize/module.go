@@ -44,7 +44,7 @@ func buildModule() (*objects.Module, error) {
 
 // themeType backs the top-level Theme. Attribute access on a theme
 // returns one of its sections (argparse / syntax / traceback / unittest);
-// each section in turn exposes the named colour slots as strings. The
+// each section in turn exposes the named color slots as strings. The
 // stub matches the no-colors variant of CPython's get_theme: every slot
 // is the empty string, which makes the f-string interpolation in
 // runner.py / traceback render uncolored output.
@@ -54,7 +54,7 @@ var themeType = newThemeType()
 
 // sectionType is shared by argparse / syntax / traceback / unittest
 // sections. Attribute access returns the empty string for every name,
-// matching the no_colors() theme variant where all colour codes are
+// matching the no_colors() theme variant where all color codes are
 // disabled.
 //
 // CPython: Lib/_colorize.py:115 ThemeSection

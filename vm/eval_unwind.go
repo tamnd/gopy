@@ -81,14 +81,14 @@ func synthesizeException(err error) *pyerrors.Exception {
 // dispatch); (nil, false) on miss (caller propagates).
 //
 // CPython: Python/ceval.c:L1815 get_exception_handler + exception_unwind
-func (e *evalState) handleException(err error) (objects.Object, bool) {
+func (e *evalState) handleException(err error) bool {
 	co := e.f.Code
 	if co == nil || len(co.ExceptionTable) == 0 {
-		return nil, false
+		return false
 	}
 	entry, ok := findExcHandler(co.ExceptionTable, e.f.InstrPtr)
 	if !ok {
-		return nil, false
+		return false
 	}
 
 	// Pull the live exception off the thread state. raiseValue / the
@@ -124,7 +124,7 @@ func (e *evalState) handleException(err error) (objects.Object, bool) {
 
 	e.f.InstrPtr = entry.target
 	e.f.PrevInstr = entry.target
-	return nil, true
+	return true
 }
 
 // unwind is invoked when the eval-breaker handler errors. It pops
