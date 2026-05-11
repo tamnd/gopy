@@ -6,9 +6,12 @@
 package vm
 
 import (
+	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/tamnd/gopy/compile"
+	pyerrors "github.com/tamnd/gopy/errors"
 	"github.com/tamnd/gopy/frame"
 	"github.com/tamnd/gopy/imp"
 	"github.com/tamnd/gopy/objects"
@@ -86,6 +89,17 @@ func (e *evalState) tryImport(op compile.Opcode, oparg uint32) (next int, ok boo
 		exec := &vmExecutor{ts: e.ts, builtins: callerBuiltins(e.f)}
 		mod, ierr := imp.ImportModuleLevel(exec, modname, pkgname, level)
 		if ierr != nil {
+			// Promote Go-level ErrModuleNotFound into a typed
+			// ModuleNotFoundError so `try: ... except ImportError:`
+			// in Python catches the miss. The unwind path otherwise
+			// wraps the Go error in a bare Exception, which defeats
+			// the import-machinery contract.
+			//
+			// CPython: Python/import.c:1759 import_name (sets ImportError)
+			if errors.Is(ierr, imp.ErrModuleNotFound) {
+				pyerrors.SetString(e.ts, pyerrors.PyExc_ModuleNotFoundError,
+					fmt.Sprintf("No module named %q", modname))
+			}
 			return 0, true, ierr
 		}
 
@@ -99,7 +113,8 @@ func (e *evalState) tryImport(op compile.Opcode, oparg uint32) (next int, ok boo
 	case compile.IMPORT_FROM:
 		// TOS remains the module (not popped); push the attribute.
 		// oparg = index into co.Names.
-		// CPython: Python/bytecodes.c IMPORT_FROM
+		// CPython: Python/bytecodes.c IMPORT_FROM dispatches to
+		// _PyEval_ImportFrom (Python/ceval.c:3154).
 		mod := e.popObject()
 
 		co := e.f.Code
@@ -108,29 +123,10 @@ func (e *evalState) tryImport(op compile.Opcode, oparg uint32) (next int, ok boo
 		}
 		attrname := co.Names[oparg]
 
-		attr, gerr := objects.GetAttr(mod, objects.NewStr(attrname))
-		if gerr != nil {
-			// Submodule fallback: when the parent module has __name__
-			// and __path__, treat AttributeError as "submodule not yet
-			// imported as an attribute" and force the import. After the
-			// import the cached entry under "<parent>.<name>" wins on
-			// retry. CPython's import_from does the same dance after
-			// PyObject_GetAttr returns NULL with AttributeError set.
-			//
-			// CPython: Python/import.c:3722 import_from
-			sub, subErr := importSubmoduleFallback(e, mod, attrname)
-			if subErr == nil && sub != nil {
-				e.pushObject(mod)
-				e.pushObject(sub)
-				return e.advance(), true, nil
-			}
-			if subErr != nil {
-				return 0, true, fmt.Errorf("vm: ImportError: cannot import name %q: %w", attrname, subErr)
-			}
-			return 0, true, fmt.Errorf("vm: ImportError: cannot import name %q: %w", attrname, gerr)
+		attr, aerr := evalImportFrom(e, mod, attrname)
+		if aerr != nil {
+			return 0, true, aerr
 		}
-
-		// IMPORT_FROM leaves the module on the stack under the attribute.
 		e.pushObject(mod)
 		e.pushObject(attr)
 		return e.advance(), true, nil
@@ -255,35 +251,90 @@ func globalName(globals objects.Object) string {
 	return ""
 }
 
-// importSubmoduleFallback retries IMPORT_FROM for the case where mod is
-// a package whose submodule "name" was registered in sys.modules under
-// "<package>.<name>" but never bound as an attribute on the parent.
-// CPython does this in import_from when PyObject_GetAttr returns
-// AttributeError: read parent.__name__, look up the joined name in
-// sys.modules, and import it if missing. Returns (subModule, nil) on
-// success, (nil, err) if the submodule load itself failed, and
-// (nil, nil) when there is no parent package to query.
+// getOptionalAttr ports CPython's PyObject_GetOptionalAttr. It calls
+// GetAttr and on a missing-attribute outcome (AttributeError) returns
+// (nil, false, nil) with the thread-state exception cleared. Any other
+// error propagates as (nil, false, err). On success returns
+// (val, true, nil).
 //
-// CPython: Python/import.c:3722 import_from
-func importSubmoduleFallback(e *evalState, mod objects.Object, name string) (objects.Object, error) {
-	parentName := ""
-	if pn, perr := objects.GetAttr(mod, objects.NewStr("__name__")); perr == nil && pn != nil {
-		if s, serr := objects.Str(pn); serr == nil {
-			parentName = s
-		}
+// CPython: Objects/object.c:1324 PyObject_GetOptionalAttr
+func getOptionalAttr(e *evalState, o objects.Object, name string) (objects.Object, bool, error) {
+	v, err := objects.GetAttr(o, objects.NewStr(name))
+	if err == nil {
+		return v, true, nil
 	}
-	if parentName == "" {
-		return nil, nil
+	// AttributeError set into ts by a user-defined __getattr__ wins
+	// over the Go error string; either way, treat AttributeError as
+	// "not found" and let other exception types propagate.
+	if exc := pyerrors.Occurred(e.ts); exc != nil {
+		if pyerrors.Match(exc, pyerrors.PyExc_AttributeError) {
+			pyerrors.Clear(e.ts)
+			return nil, false, nil
+		}
+		return nil, false, err
+	}
+	if isAttributeErrorMsg(err) {
+		return nil, false, nil
+	}
+	return nil, false, err
+}
+
+// isAttributeErrorMsg detects the legacy "AttributeError: ..." Go error
+// shape still produced by callsites that have not been routed through
+// pyerrors.SetString. Mirrors the prefix table used by
+// synthesizeException.
+func isAttributeErrorMsg(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	if rest, ok := strings.CutPrefix(msg, "vm: "); ok {
+		msg = rest
+	}
+	return strings.HasPrefix(msg, "AttributeError:")
+}
+
+// evalImportFrom ports _PyEval_ImportFrom. It tries to fetch `name` as
+// an attribute of `v`; on miss it consults sys.modules under
+// "<parent>.<name>" using the parent's __name__. As a gopy-specific
+// extension (we lack importlib's _handle_fromlist plumbing), it
+// force-imports the submodule when sys.modules has not cached it yet.
+//
+// CPython: Python/ceval.c:3154 _PyEval_ImportFrom
+func evalImportFrom(e *evalState, v objects.Object, name string) (objects.Object, error) {
+	if x, found, err := getOptionalAttr(e, v, name); err != nil {
+		return nil, err
+	} else if found {
+		return x, nil
+	}
+
+	// Issue #17636 fallback: read parent.__name__ and look up
+	// "<parent>.<name>" in sys.modules.
+	modNameObj, found, err := getOptionalAttr(e, v, "__name__")
+	if err != nil {
+		return nil, err
+	}
+	if !found {
+		return nil, fmt.Errorf("vm: ImportError: cannot import name %q from <unknown module name>", name)
+	}
+	parentName, serr := objects.Str(modNameObj)
+	if serr != nil {
+		return nil, fmt.Errorf("vm: ImportError: cannot import name %q from <unknown module name>", name)
 	}
 	full := parentName + "." + name
 
 	if cached, ok := imp.GetModule(full); ok {
 		return cached, nil
 	}
+	// gopy extension: no _handle_fromlist runs during IMPORT_NAME, so
+	// the submodule may never have entered sys.modules. Force-import
+	// it here. CPython's _handle_fromlist (Lib/importlib/_bootstrap.py)
+	// performs the same _call_with_frames_removed(import_, ...) per
+	// fromlist entry.
 	exec := &vmExecutor{ts: e.ts, builtins: callerBuiltins(e.f)}
-	sub, err := imp.ImportModuleLevel(exec, full, "", 0)
-	if err != nil {
-		return nil, err
+	sub, ierr := imp.ImportModuleLevel(exec, full, "", 0)
+	if ierr != nil {
+		return nil, fmt.Errorf("vm: ImportError: cannot import name %q from %q: %w", name, parentName, ierr)
 	}
 	return sub, nil
 }

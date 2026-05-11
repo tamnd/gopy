@@ -88,6 +88,29 @@ func currentThread() *state.Thread {
 
 func init() {
 	objects.FunctionType.Call = callPyFunction
+	// Expose the current Python frame to objects/ for super() zero-arg.
+	// The frame stack lives on the active thread's threadVM; this hook
+	// avoids an objects -> vm import edge.
+	//
+	// CPython: pycore_frame.h _PyThreadState_GetFrame is the same shape.
+	objects.CurrentFrameHook = currentInterpreterFrame
+}
+
+// currentInterpreterFrame returns the top of the active thread's frame
+// stack, or nil when no Python frame is live on this goroutine. Used by
+// objects.superInitNoArgs to read __class__ and self off the caller.
+//
+// CPython: pycore_frame.h _PyThreadState_GetFrame
+func currentInterpreterFrame() objects.InterpreterFrame {
+	ts := currentThread()
+	if ts == nil {
+		return nil
+	}
+	f := frameStackFor(ts).Top()
+	if f == nil {
+		return nil
+	}
+	return f
 }
 
 // callPyFunction pushes a frame for the function's code, binds args
