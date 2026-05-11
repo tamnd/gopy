@@ -73,10 +73,25 @@ func (c *Compiler) compileComprehension(name string, kind compKind,
 	if innerScope == nil {
 		return fmt.Errorf("compile: no symtable entry for comprehension %s", name)
 	}
+	// Inlined comprehensions (PEP 709) have their free vars folded
+	// into the outer scope's locals by the symtable; emitting a
+	// closure tuple here would fail since those names are not Cell in
+	// the outer scope. Gopy still builds a separate function for the
+	// comp body (the real inlining happens with spec 1696), so the
+	// runtime behaviour matches the pre-fix path: skip the closure
+	// surface and let LOAD_DEREF surface the missing cell.
+	var closureFlag int32
+	if !innerScope.CompInlined {
+		flag, err := c.emitClosure(innerScope, loc(key))
+		if err != nil {
+			return err
+		}
+		closureFlag = flag
+	}
 	if err := c.emitInnerComprehensionCode(innerScope, name, kind, gens, elt, val, key); err != nil {
 		return err
 	}
-	c.addOpI(MAKE_FUNCTION, 0, loc(key))
+	c.emitMakeFunction(closureFlag, loc(key))
 
 	// Outermost iterable evaluates in the outer scope and is passed
 	// as the implicit .0 argument.
@@ -118,6 +133,15 @@ func (c *Compiler) emitInnerComprehensionCode(innerScope *symtable.Entry,
 
 	// Implicit .0 parameter: the outermost iter.
 	c.declareArg(".0")
+
+	if !innerScope.CompInlined {
+		if err := c.emitMakeCellAndCopyFree(innerScope, loc(key)); err != nil {
+			c.scope = outerScope
+			c.fblocks = outerFblocks
+			c.restoreCaches(outerCaches)
+			return err
+		}
+	}
 
 	switch kind {
 	case compListComp:
