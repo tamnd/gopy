@@ -1,15 +1,27 @@
-// contextlib module: minimal Go-backed surface. Lib/contextlib.py
-// covers contextmanager, asynccontextmanager, ExitStack, suppress,
-// nullcontext, redirect_stdout/stderr, AbstractContextManager. unittest
-// pulls in `suppress` (case.py) and `contextmanager` decorator
-// (assertWarns / assertLogs); this stub exposes the public names so
-// the imports resolve. Real ports follow.
+// contextlib module: Go port of Lib/contextlib.py. Provides
+// @contextmanager wrapping generator functions into context managers,
+// plus the supporting classes ExitStack, suppress, nullcontext,
+// closing, redirect_stdout, redirect_stderr, and the abstract base
+// classes. Async surface (asynccontextmanager, AsyncExitStack,
+// aclosing) ships as a no-op alias of the sync surface for now;
+// gopy's async runtime does not yet drive these.
 //
-// CPython: Lib/contextlib.py the public surface
+// CPython: Lib/contextlib.py:276 contextmanager
+// CPython: Lib/contextlib.py:105 _GeneratorContextManagerBase
+// CPython: Lib/contextlib.py:129 _GeneratorContextManager
+// CPython: Lib/contextlib.py:342 closing
+// CPython: Lib/contextlib.py:393 _RedirectStream
+// CPython: Lib/contextlib.py:433 suppress
+// CPython: Lib/contextlib.py:472 _BaseExitStack
+// CPython: Lib/contextlib.py:557 ExitStack
+// CPython: Lib/contextlib.py:716 nullcontext
 
 package contextlib
 
 import (
+	"errors"
+	"fmt"
+
 	"github.com/tamnd/gopy/imp"
 	"github.com/tamnd/gopy/objects"
 )
@@ -32,10 +44,13 @@ func buildModule() (*objects.Module, error) {
 		{"ExitStack", exitStackType},
 		{"AsyncExitStack", exitStackType},
 		{"closing", closingType},
-		{"redirect_stdout", redirectType},
-		{"redirect_stderr", redirectType},
+		{"aclosing", closingType},
+		{"redirect_stdout", redirectStdoutType},
+		{"redirect_stderr", redirectStderrType},
 		{"AbstractContextManager", abstractCMType},
 		{"AbstractAsyncContextManager", abstractCMType},
+		{"ContextDecorator", contextDecoratorType},
+		{"AsyncContextDecorator", contextDecoratorType},
 	}
 	for _, e := range entries {
 		if err := d.SetItem(objects.NewStr(e.name), e.val); err != nil {
@@ -45,62 +60,641 @@ func buildModule() (*objects.Module, error) {
 	return m, nil
 }
 
-// contextManager is a stand-in for @contextmanager: returns the
-// generator function unchanged. The real Lib/contextlib.contextmanager
-// wraps the generator into a _GeneratorContextManager class; the
-// simplification keeps decorated names callable for import-time code.
+// abstractCMType is the AbstractContextManager / AbstractAsyncContextManager
+// shared abstract base. CPython defines two; for gopy we expose one Type
+// that any concrete CM can list as a base.
 //
-// CPython: Lib/contextlib.py:308 contextmanager
-func contextManager(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
-	if len(args) >= 1 {
-		return args[0], nil
-	}
-	return objects.None(), nil
+// CPython: Lib/contextlib.py:35 AbstractContextManager
+var abstractCMType = objects.NewType("AbstractContextManager", []*objects.Type{objects.ObjectType()})
+
+// contextDecoratorType backs ContextDecorator / AsyncContextDecorator.
+// The CPython class only adds a __call__ that wraps a function so it
+// re-enters the context on every call; unittest does not exercise that
+// path. The type is a no-op subclass of object so isinstance checks
+// succeed.
+//
+// CPython: Lib/contextlib.py:73 ContextDecorator
+var contextDecoratorType = objects.NewType("ContextDecorator", []*objects.Type{objects.ObjectType()})
+
+// genCMType is _GeneratorContextManager: the class @contextmanager
+// builds an instance of every time the decorated function is called.
+// Each instance owns a generator suspended at its first yield. __enter__
+// drives the generator to that yield and returns the yielded value;
+// __exit__ resumes the generator, optionally throwing in the active
+// exception, and translates the generator's response back into the
+// context-manager protocol.
+//
+// CPython: Lib/contextlib.py:129 _GeneratorContextManager
+var genCMType = newGenCMType()
+
+func newGenCMType() *objects.Type {
+	t := objects.NewType("_GeneratorContextManager", []*objects.Type{abstractCMType})
+	t.HasDict = true
+	t.Getattro = objects.GenericGetAttr
+	objects.SetTypeDescr(t, "__enter__", objects.NewMethodDescr(t, "__enter__", genCMEnter))
+	objects.SetTypeDescr(t, "__exit__", objects.NewMethodDescr(t, "__exit__", genCMExit))
+	return t
 }
 
-var (
-	suppressType    = newPassThroughCM("suppress")
-	nullcontextType = newPassThroughCM("nullcontext")
-	exitStackType   = newPassThroughCM("ExitStack")
-	closingType     = newPassThroughCM("closing")
-	redirectType    = newPassThroughCM("redirect")
-	abstractCMType  = objects.NewType("AbstractContextManager", []*objects.Type{objects.ObjectType()})
-)
-
-// newPassThroughCM builds a Type whose instances act as no-op context
-// managers: __enter__ returns self (or the captured arg), __exit__
-// returns False (suppresses nothing). Mirrors the surface unittest
-// reaches for at module-load.
+// contextManager implements @contextmanager. Decorating `func` returns
+// a wrapper that, when called with the same arguments, drives `func`
+// into a generator and hands it to _GeneratorContextManager.
 //
-// CPython: Lib/contextlib.py:475 suppress / Lib/contextlib.py:728 nullcontext
-func newPassThroughCM(name string) *objects.Type {
-	t := objects.NewType(name, []*objects.Type{objects.ObjectType()})
+// CPython's helper is a `def helper(*args, **kwds)` Python function and
+// therefore inherits PyFunction's descriptor protocol: bound on
+// instance access, returned unchanged on class access. gopy's
+// BuiltinFunction (PyCFunction-equivalent) does not bind, so a helper
+// returned that way breaks `@contextmanager` on methods. Wrap the
+// helper in a MethodDescr with owner=object instead; method_descriptor
+// shares PyFunction's bind-on-instance semantics, and an owner of
+// `object` keeps the descriptor type-check open for any self.
+//
+// CPython: Lib/contextlib.py:276 contextmanager
+// CPython: Objects/funcobject.c:1057 func_descr_get
+func contextManager(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+	if len(args) != 1 {
+		return nil, fmt.Errorf("TypeError: contextmanager() takes exactly one argument (%d given)", len(args))
+	}
+	fn := args[0]
+	helper := objects.NewMethodDescr(objects.ObjectType(), "helper", func(hArgs []objects.Object, hKwargs map[string]objects.Object) (objects.Object, error) {
+		genObj, err := objects.Call(fn, objects.NewTuple(hArgs), kwargsToDict(hKwargs))
+		if err != nil {
+			return nil, err
+		}
+		inst := objects.NewInstance(genCMType)
+		if err := inst.Dict().SetItem(objects.NewStr("gen"), genObj); err != nil {
+			return nil, err
+		}
+		return inst, nil
+	})
+	return helper, nil
+}
+
+// genCMEnter sends None into the wrapped generator and returns the
+// yielded value. A generator that returns immediately without yielding
+// surfaces as RuntimeError per CPython.
+//
+// CPython: Lib/contextlib.py:136 _GeneratorContextManager.__enter__
+func genCMEnter(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+	if len(args) < 1 {
+		return nil, fmt.Errorf("TypeError: __enter__() missing self")
+	}
+	inst, ok := args[0].(*objects.Instance)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: __enter__ self not Instance")
+	}
+	genObj, err := inst.Dict().GetItem(objects.NewStr("gen"))
+	if err != nil || genObj == nil {
+		return nil, fmt.Errorf("RuntimeError: _GeneratorContextManager has no generator")
+	}
+	gen, ok := genObj.(*objects.Generator)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: @contextmanager function did not return a generator")
+	}
+	v, err := gen.Send(objects.None())
+	if err != nil {
+		if errors.Is(err, objects.ErrStopIteration) {
+			return nil, fmt.Errorf("RuntimeError: generator didn't yield")
+		}
+		return nil, err
+	}
+	return v, nil
+}
+
+// genCMExit resumes the wrapped generator. With no active exception we
+// expect StopIteration, otherwise the generator must catch or swap the
+// exception. The return value drives whether the with-statement
+// suppresses the exception.
+//
+// CPython: Lib/contextlib.py:145 _GeneratorContextManager.__exit__
+func genCMExit(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+	if len(args) < 4 {
+		return nil, fmt.Errorf("TypeError: __exit__() takes 3 args (%d given)", len(args)-1)
+	}
+	inst, ok := args[0].(*objects.Instance)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: __exit__ self not Instance")
+	}
+	typArg := args[1]
+	valArg := args[2]
+	genObj, err := inst.Dict().GetItem(objects.NewStr("gen"))
+	if err != nil || genObj == nil {
+		return objects.NewBool(false), nil
+	}
+	gen, ok := genObj.(*objects.Generator)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: stored generator is not a generator")
+	}
+	if objects.IsNone(typArg) {
+		_, err := gen.Send(objects.None())
+		if err != nil {
+			if errors.Is(err, objects.ErrStopIteration) {
+				return objects.NewBool(false), nil
+			}
+			return nil, err
+		}
+		_ = gen.Close()
+		return nil, fmt.Errorf("RuntimeError: generator didn't stop")
+	}
+	// Exception path: throw it back into the generator. The error we
+	// hand to gen.Throw carries the exception text; if the generator
+	// re-raises the same error, gen.Throw returns it back to us and we
+	// propagate to the caller (return False).
+	throwErr := errorFromException(valArg, typArg)
+	val, thrErr := gen.Throw(throwErr)
+	if thrErr == nil {
+		// Generator caught the exception and yielded. Close it and
+		// raise RuntimeError per CPython "generator didn't stop after
+		// throw()".
+		_ = val
+		_ = gen.Close()
+		return nil, fmt.Errorf("RuntimeError: generator didn't stop after throw()")
+	}
+	if errors.Is(thrErr, objects.ErrStopIteration) {
+		// Generator exited cleanly: exception was swallowed (truthy
+		// return) unless it was the same StopIteration we threw, which
+		// we cannot identity-compare across the boundary. Return True
+		// to suppress.
+		return objects.NewBool(true), nil
+	}
+	if thrErr == throwErr {
+		// Same Go-level error round-tripped. Do not suppress, the with
+		// machinery will re-raise the original.
+		return objects.NewBool(false), nil
+	}
+	return nil, thrErr
+}
+
+// errorFromException turns a Python-level exception value into a Go
+// error suitable for Generator.Throw. The generator side has no shared
+// exception object yet; we encode type + str(value) into the error.
+func errorFromException(val, typ objects.Object) error {
+	name := "Exception"
+	if t, ok := typ.(*objects.Type); ok {
+		name = t.Name
+	} else if typ != nil && !objects.IsNone(typ) {
+		name = typ.Type().Name
+	}
+	msg := ""
+	if val != nil && !objects.IsNone(val) {
+		if s, sErr := objects.Str(val); sErr == nil {
+			msg = s
+		}
+	}
+	if msg == "" {
+		return fmt.Errorf("%s", name)
+	}
+	return fmt.Errorf("%s: %s", name, msg)
+}
+
+// kwargsToDict converts a Go kwargs map into a Python *Dict for Call.
+// Returns nil when the map is empty.
+func kwargsToDict(kw map[string]objects.Object) *objects.Dict {
+	if len(kw) == 0 {
+		return nil
+	}
+	d := objects.NewDict()
+	for k, v := range kw {
+		_ = d.SetItem(objects.NewStr(k), v)
+	}
+	return d
+}
+
+// suppressType backs contextlib.suppress(*exceptions). Stores the
+// allowed exception types and ignores them in __exit__.
+//
+// CPython: Lib/contextlib.py:433 suppress
+var suppressType = newSuppressType()
+
+func newSuppressType() *objects.Type {
+	t := objects.NewType("suppress", []*objects.Type{abstractCMType})
 	t.HasDict = true
 	t.Getattro = objects.GenericGetAttr
 	t.TpNew = func(cls *objects.Type, args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
 		inst := objects.NewInstance(cls)
-		if len(args) >= 1 {
-			_ = inst.Dict().SetItem(objects.NewStr("enter_result"), args[0])
+		if err := inst.Dict().SetItem(objects.NewStr("_exceptions"), objects.NewTuple(args)); err != nil {
+			return nil, err
 		}
-		objects.SetTypeDescr(cls, "__enter__", objects.NewMethodDescr(cls, "__enter__", cmEnter))
-		objects.SetTypeDescr(cls, "__exit__", objects.NewMethodDescr(cls, "__exit__", cmExit))
 		return inst, nil
 	}
+	objects.SetTypeDescr(t, "__enter__", objects.NewMethodDescr(t, "__enter__", suppressEnter))
+	objects.SetTypeDescr(t, "__exit__", objects.NewMethodDescr(t, "__exit__", suppressExit))
 	return t
 }
 
-func cmEnter(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
-	if len(args) >= 1 {
-		if inst, ok := args[0].(*objects.Instance); ok {
-			if v, err := inst.Dict().GetItem(objects.NewStr("enter_result")); err == nil && v != nil {
-				return v, nil
-			}
+// suppressEnter is the no-op __enter__; suppress yields nothing.
+//
+// CPython: Lib/contextlib.py:447 suppress.__enter__
+func suppressEnter(_ []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+	return objects.None(), nil
+}
+
+// suppressExit returns True when the active exception's type is a
+// subclass of any registered exception class, swallowing it. Other
+// exception types pass through.
+//
+// CPython: Lib/contextlib.py:450 suppress.__exit__
+func suppressExit(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+	if len(args) < 4 {
+		return objects.NewBool(false), nil
+	}
+	typArg := args[1]
+	if objects.IsNone(typArg) {
+		return objects.NewBool(false), nil
+	}
+	inst, ok := args[0].(*objects.Instance)
+	if !ok {
+		return objects.NewBool(false), nil
+	}
+	excTup, err := inst.Dict().GetItem(objects.NewStr("_exceptions"))
+	if err != nil {
+		return objects.NewBool(false), nil
+	}
+	tup, ok := excTup.(*objects.Tuple)
+	if !ok {
+		return objects.NewBool(false), nil
+	}
+	typ, ok := typArg.(*objects.Type)
+	if !ok {
+		return objects.NewBool(false), nil
+	}
+	for i := 0; i < tup.Len(); i++ {
+		base, ok := tup.Item(i).(*objects.Type)
+		if !ok {
+			continue
 		}
-		return args[0], nil
+		if objects.IsSubtype(typ, base) {
+			return objects.NewBool(true), nil
+		}
+	}
+	return objects.NewBool(false), nil
+}
+
+// nullcontextType backs contextlib.nullcontext(enter_result=None). The
+// enter result is stashed on the instance; __exit__ does nothing.
+//
+// CPython: Lib/contextlib.py:716 nullcontext
+var nullcontextType = newNullcontextType()
+
+func newNullcontextType() *objects.Type {
+	t := objects.NewType("nullcontext", []*objects.Type{abstractCMType})
+	t.HasDict = true
+	t.Getattro = objects.GenericGetAttr
+	t.TpNew = func(cls *objects.Type, args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+		inst := objects.NewInstance(cls)
+		enterResult := objects.Object(objects.None())
+		if len(args) >= 1 {
+			enterResult = args[0]
+		}
+		if err := inst.Dict().SetItem(objects.NewStr("enter_result"), enterResult); err != nil {
+			return nil, err
+		}
+		return inst, nil
+	}
+	objects.SetTypeDescr(t, "__enter__", objects.NewMethodDescr(t, "__enter__", nullcontextEnter))
+	objects.SetTypeDescr(t, "__exit__", objects.NewMethodDescr(t, "__exit__", nullcontextExit))
+	return t
+}
+
+func nullcontextEnter(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+	if len(args) < 1 {
+		return objects.None(), nil
+	}
+	if inst, ok := args[0].(*objects.Instance); ok {
+		if v, err := inst.Dict().GetItem(objects.NewStr("enter_result")); err == nil {
+			return v, nil
+		}
 	}
 	return objects.None(), nil
 }
 
-func cmExit(_ []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+func nullcontextExit(_ []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
 	return objects.NewBool(false), nil
+}
+
+// closingType backs contextlib.closing(thing). __exit__ calls
+// thing.close().
+//
+// CPython: Lib/contextlib.py:342 closing
+var closingType = newClosingType()
+
+func newClosingType() *objects.Type {
+	t := objects.NewType("closing", []*objects.Type{abstractCMType})
+	t.HasDict = true
+	t.Getattro = objects.GenericGetAttr
+	t.TpNew = func(cls *objects.Type, args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+		if len(args) != 1 {
+			return nil, fmt.Errorf("TypeError: closing() takes exactly 1 argument (%d given)", len(args))
+		}
+		inst := objects.NewInstance(cls)
+		if err := inst.Dict().SetItem(objects.NewStr("thing"), args[0]); err != nil {
+			return nil, err
+		}
+		return inst, nil
+	}
+	objects.SetTypeDescr(t, "__enter__", objects.NewMethodDescr(t, "__enter__", closingEnter))
+	objects.SetTypeDescr(t, "__exit__", objects.NewMethodDescr(t, "__exit__", closingExit))
+	return t
+}
+
+func closingEnter(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+	if len(args) < 1 {
+		return objects.None(), nil
+	}
+	inst, ok := args[0].(*objects.Instance)
+	if !ok {
+		return objects.None(), nil
+	}
+	v, _ := inst.Dict().GetItem(objects.NewStr("thing"))
+	if v == nil {
+		return objects.None(), nil
+	}
+	return v, nil
+}
+
+func closingExit(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+	if len(args) < 1 {
+		return objects.NewBool(false), nil
+	}
+	inst, ok := args[0].(*objects.Instance)
+	if !ok {
+		return objects.NewBool(false), nil
+	}
+	thing, _ := inst.Dict().GetItem(objects.NewStr("thing"))
+	if thing == nil {
+		return objects.NewBool(false), nil
+	}
+	closeFn, err := objects.GetAttr(thing, objects.NewStr("close"))
+	if err != nil {
+		return objects.NewBool(false), nil
+	}
+	if _, err := objects.Call(closeFn, objects.NewTuple(nil), nil); err != nil {
+		return nil, err
+	}
+	return objects.NewBool(false), nil
+}
+
+// redirectStdoutType / redirectStderrType back redirect_stdout and
+// redirect_stderr. __enter__ swaps sys.stdout/stderr, __exit__ restores.
+//
+// CPython: Lib/contextlib.py:411 redirect_stdout
+var (
+	redirectStdoutType = newRedirectType("redirect_stdout", "stdout")
+	redirectStderrType = newRedirectType("redirect_stderr", "stderr")
+)
+
+func newRedirectType(name, stream string) *objects.Type {
+	t := objects.NewType(name, []*objects.Type{abstractCMType})
+	t.HasDict = true
+	t.Getattro = objects.GenericGetAttr
+	streamName := stream
+	t.TpNew = func(cls *objects.Type, args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+		if len(args) != 1 {
+			return nil, fmt.Errorf("TypeError: %s() takes exactly 1 argument (%d given)", name, len(args))
+		}
+		inst := objects.NewInstance(cls)
+		_ = inst.Dict().SetItem(objects.NewStr("_new_target"), args[0])
+		_ = inst.Dict().SetItem(objects.NewStr("_stream"), objects.NewStr(streamName))
+		_ = inst.Dict().SetItem(objects.NewStr("_old_targets"), objects.NewList(nil))
+		return inst, nil
+	}
+	objects.SetTypeDescr(t, "__enter__", objects.NewMethodDescr(t, "__enter__", redirectEnter))
+	objects.SetTypeDescr(t, "__exit__", objects.NewMethodDescr(t, "__exit__", redirectExit))
+	return t
+}
+
+func redirectEnter(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+	if len(args) < 1 {
+		return objects.None(), nil
+	}
+	inst, ok := args[0].(*objects.Instance)
+	if !ok {
+		return objects.None(), nil
+	}
+	sysMod, ok := imp.GetModule("sys")
+	if !ok {
+		return objects.None(), nil
+	}
+	streamName, _ := inst.Dict().GetItem(objects.NewStr("_stream"))
+	target, _ := inst.Dict().GetItem(objects.NewStr("_new_target"))
+	oldTargets, _ := inst.Dict().GetItem(objects.NewStr("_old_targets"))
+	stack, _ := oldTargets.(*objects.List)
+	if stack == nil {
+		stack = objects.NewList(nil)
+	}
+	cur, err := objects.GetAttr(sysMod, streamName)
+	if err == nil {
+		stack.Append(cur)
+	}
+	_ = inst.Dict().SetItem(objects.NewStr("_old_targets"), stack)
+	if sn, ok := streamName.(*objects.Unicode); ok {
+		if err := objects.SetAttr(sysMod, objects.NewStr(sn.Value()), target); err != nil {
+			return nil, err
+		}
+	}
+	return target, nil
+}
+
+func redirectExit(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+	if len(args) < 1 {
+		return objects.NewBool(false), nil
+	}
+	inst, ok := args[0].(*objects.Instance)
+	if !ok {
+		return objects.NewBool(false), nil
+	}
+	sysMod, ok := imp.GetModule("sys")
+	if !ok {
+		return objects.NewBool(false), nil
+	}
+	streamName, _ := inst.Dict().GetItem(objects.NewStr("_stream"))
+	oldTargets, _ := inst.Dict().GetItem(objects.NewStr("_old_targets"))
+	stack, _ := oldTargets.(*objects.List)
+	if stack == nil || stack.Len() == 0 {
+		return objects.NewBool(false), nil
+	}
+	old, err := stack.Pop(stack.Len() - 1)
+	if err != nil {
+		return objects.NewBool(false), nil
+	}
+	if sn, ok := streamName.(*objects.Unicode); ok {
+		if err := objects.SetAttr(sysMod, objects.NewStr(sn.Value()), old); err != nil {
+			return nil, err
+		}
+	}
+	return objects.NewBool(false), nil
+}
+
+// exitStackType backs ExitStack. The callback list lives in the
+// instance __dict__ as a plain Python list of objects; sync vs async
+// is collapsed since gopy treats both the same.
+//
+// CPython: Lib/contextlib.py:557 ExitStack
+var exitStackType = objects.NewType("ExitStack", []*objects.Type{abstractCMType})
+
+func init() {
+	t := exitStackType
+	t.HasDict = true
+	t.Getattro = objects.GenericGetAttr
+	t.TpNew = func(cls *objects.Type, _ []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+		inst := objects.NewInstance(cls)
+		_ = inst.Dict().SetItem(objects.NewStr("_exit_callbacks"), objects.NewList(nil))
+		return inst, nil
+	}
+	objects.SetTypeDescr(t, "__enter__", objects.NewMethodDescr(t, "__enter__", exitStackEnter))
+	objects.SetTypeDescr(t, "__exit__", objects.NewMethodDescr(t, "__exit__", exitStackExit))
+	objects.SetTypeDescr(t, "enter_context", objects.NewMethodDescr(t, "enter_context", exitStackEnterContext))
+	objects.SetTypeDescr(t, "push", objects.NewMethodDescr(t, "push", exitStackPush))
+	objects.SetTypeDescr(t, "callback", objects.NewMethodDescr(t, "callback", exitStackCallback))
+	objects.SetTypeDescr(t, "pop_all", objects.NewMethodDescr(t, "pop_all", exitStackPopAll))
+	objects.SetTypeDescr(t, "close", objects.NewMethodDescr(t, "close", exitStackClose))
+}
+
+func exitStackEnter(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+	if len(args) < 1 {
+		return objects.None(), nil
+	}
+	return args[0], nil
+}
+
+func exitStackEnterContext(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+	if len(args) < 2 {
+		return nil, fmt.Errorf("TypeError: enter_context() takes 1 argument")
+	}
+	self, ok := args[0].(*objects.Instance)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: enter_context self is not Instance")
+	}
+	cm := args[1]
+	enterFn, err := objects.GetAttr(cm, objects.NewStr("__enter__"))
+	if err != nil {
+		return nil, fmt.Errorf("TypeError: object does not support the context manager protocol")
+	}
+	exitFn, err := objects.GetAttr(cm, objects.NewStr("__exit__"))
+	if err != nil {
+		return nil, fmt.Errorf("TypeError: object does not support the context manager protocol")
+	}
+	result, err := objects.Call(enterFn, objects.NewTuple(nil), nil)
+	if err != nil {
+		return nil, err
+	}
+	cbList, _ := self.Dict().GetItem(objects.NewStr("_exit_callbacks"))
+	list, _ := cbList.(*objects.List)
+	if list == nil {
+		list = objects.NewList(nil)
+		_ = self.Dict().SetItem(objects.NewStr("_exit_callbacks"), list)
+	}
+	list.Append(exitFn)
+	return result, nil
+}
+
+func exitStackPush(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+	if len(args) < 2 {
+		return nil, fmt.Errorf("TypeError: push() takes 1 argument")
+	}
+	self, ok := args[0].(*objects.Instance)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: push self is not Instance")
+	}
+	exit := args[1]
+	exitFn, err := objects.GetAttr(exit, objects.NewStr("__exit__"))
+	cb := exit
+	if err == nil {
+		cb = exitFn
+	}
+	cbList, _ := self.Dict().GetItem(objects.NewStr("_exit_callbacks"))
+	list, _ := cbList.(*objects.List)
+	if list == nil {
+		list = objects.NewList(nil)
+		_ = self.Dict().SetItem(objects.NewStr("_exit_callbacks"), list)
+	}
+	list.Append(cb)
+	return exit, nil
+}
+
+func exitStackCallback(args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error) {
+	if len(args) < 2 {
+		return nil, fmt.Errorf("TypeError: callback() takes at least 1 argument")
+	}
+	self, ok := args[0].(*objects.Instance)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: callback self is not Instance")
+	}
+	cb := args[1]
+	rest := args[2:]
+	// Wrap the (cb, args, kwargs) trio in a builtin that ignores its
+	// exc_info arguments so it sits in the same callback list as
+	// __exit__ methods.
+	captured := rest
+	capturedKw := kwargs
+	wrapper := objects.NewBuiltinFunction("exit_callback", func(_ []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+		return objects.Call(cb, objects.NewTuple(captured), kwargsToDict(capturedKw))
+	})
+	cbList, _ := self.Dict().GetItem(objects.NewStr("_exit_callbacks"))
+	list, _ := cbList.(*objects.List)
+	if list == nil {
+		list = objects.NewList(nil)
+		_ = self.Dict().SetItem(objects.NewStr("_exit_callbacks"), list)
+	}
+	list.Append(wrapper)
+	return cb, nil
+}
+
+func exitStackPopAll(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+	if len(args) < 1 {
+		return objects.None(), nil
+	}
+	self, ok := args[0].(*objects.Instance)
+	if !ok {
+		return objects.None(), nil
+	}
+	newStack := objects.NewInstance(exitStackType)
+	cur, _ := self.Dict().GetItem(objects.NewStr("_exit_callbacks"))
+	_ = newStack.Dict().SetItem(objects.NewStr("_exit_callbacks"), cur)
+	_ = self.Dict().SetItem(objects.NewStr("_exit_callbacks"), objects.NewList(nil))
+	return newStack, nil
+}
+
+func exitStackExit(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+	if len(args) < 1 {
+		return objects.NewBool(false), nil
+	}
+	self, ok := args[0].(*objects.Instance)
+	if !ok {
+		return objects.NewBool(false), nil
+	}
+	cbList, _ := self.Dict().GetItem(objects.NewStr("_exit_callbacks"))
+	list, _ := cbList.(*objects.List)
+	if list == nil {
+		return objects.NewBool(false), nil
+	}
+	suppress := false
+	for list.Len() > 0 {
+		cb, err := list.Pop(list.Len() - 1)
+		if err != nil {
+			return nil, err
+		}
+		// Exit callbacks are called with (exc_type, exc_val, exc_tb).
+		var callArgs []objects.Object
+		if len(args) >= 4 {
+			callArgs = []objects.Object{args[1], args[2], args[3]}
+		} else {
+			callArgs = []objects.Object{objects.None(), objects.None(), objects.None()}
+		}
+		res, err := objects.Call(cb, objects.NewTuple(callArgs), nil)
+		if err != nil {
+			return nil, err
+		}
+		if objects.IsTrue(res) {
+			suppress = true
+		}
+	}
+	return objects.NewBool(suppress), nil
+}
+
+func exitStackClose(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+	if len(args) < 1 {
+		return objects.None(), nil
+	}
+	return exitStackExit([]objects.Object{args[0], objects.None(), objects.None(), objects.None()}, nil)
 }
