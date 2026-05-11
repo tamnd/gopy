@@ -78,7 +78,7 @@ func (c *Compiler) compileComprehension(name string, kind compKind,
 	// closure tuple here would fail since those names are not Cell in
 	// the outer scope. Gopy still builds a separate function for the
 	// comp body (the real inlining happens with spec 1696), so the
-	// runtime behaviour matches the pre-fix path: skip the closure
+	// runtime behavior matches the pre-fix path: skip the closure
 	// surface and let LOAD_DEREF surface the missing cell.
 	var closureFlag int32
 	if !innerScope.CompInlined {
