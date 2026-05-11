@@ -1,0 +1,143 @@
+---
+title: Include/internal/pycore_structseq.h
+description: Internal struct-sequence type creation and teardown API beyond the public structseq.h surface.
+cpython_path: Include/internal/pycore_structseq.h
+cpython_version: "3.14"
+lines: 60
+status: annotated
+ported_to: objects/structseq.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Include/internal/pycore_structseq.h`
+
+<CpyLink path="Include/internal/pycore_structseq.h" />
+
+<overview>
+Struct sequences are CPython's named-tuple equivalent for built-in types such
+as `os.stat_result`, `sys.version_info`, and `time.struct_time`. The public
+header `structseq.h` exposes `PyStructSequence_NewType` and the descriptor
+structs; this internal header adds the pieces only the interpreter core needs:
+
+- **`_PyStructSequence_InitType`** -- initialises a struct-sequence type in
+  place from a `PyStructSequence_Desc` without allocating a new type object.
+  Used for the handful of built-in types that are pre-allocated in static
+  storage.
+- **`_PyStructSequence_FiniBuiltin`** -- tears down one of those static types
+  on interpreter shutdown, releasing field name strings without freeing the
+  type object itself.
+- **`PyStructSequence_UnnamedField`** -- the sentinel string `"unnamed field"`
+  used as the name of hidden (non-sequence) fields in the descriptor array.
+  Hidden fields are accessible by index but do not appear in `repr` or
+  `_fields`.
+
+The public `PyStructSequence_NewType` allocates and returns a heap type;
+`_PyStructSequence_InitType` fills a caller-owned type in place, which is how
+`sys.version_info` and friends are bootstrapped before the heap allocator is
+ready.
+</overview>
+
+## Map
+
+| Symbol | Kind | Notes |
+|--------|------|-------|
+| `PyStructSequence_UnnamedField` | `extern const char *` | Sentinel for hidden fields. |
+| `_PyStructSequence_InitType` | function decl | In-place init on a pre-allocated type. |
+| `_PyStructSequence_FiniBuiltin` | function decl | Shutdown helper for static types. |
+
+## Reading
+
+### Hidden fields and `PyStructSequence_UnnamedField`
+
+A struct-sequence descriptor lists every field, visible or not. Fields named
+`PyStructSequence_UnnamedField` are counted in `n_in_sequence` (they are real
+tuple slots) but are excluded from `_fields` and from `repr`. The check is a
+pointer comparison, not a string comparison:
+
+```c
+// Objects/structseq.c (abridged)
+static PyObject *
+make_fieldnames_tuple(PyStructSequence_Desc *desc)
+{
+    for (int i = 0; i < desc->n_in_sequence; i++) {
+        if (desc->fields[i].name == PyStructSequence_UnnamedField)
+            continue;   // skip hidden slots
+        PyTuple_SET_ITEM(tup, j++, PyUnicode_FromString(desc->fields[i].name));
+    }
+}
+```
+
+This pointer-identity rule means that substituting a different string with the
+same content will not hide the field; the exact sentinel pointer must be used.
+
+### `_PyStructSequence_InitType` vs the public API
+
+`PyStructSequence_NewType` (public) allocates a heap type, fills it, and
+returns it. `_PyStructSequence_InitType` (internal) writes into a type object
+the caller already owns. The internal variant is used during interpreter
+startup for types that must be ready before the allocator is fully initialised:
+
+```c
+// CPython: Objects/structseq.c (illustrative)
+int
+_PyStructSequence_InitType(PyTypeObject *type,
+                           PyStructSequence_Desc *desc,
+                           unsigned long tp_flags)
+{
+    type->tp_name    = desc->name;
+    type->tp_doc     = desc->doc;
+    type->tp_basicsize = sizeof(PyStructSequence) +
+                         sizeof(PyObject *) * desc->n_in_sequence;
+    /* ... install tp_new, tp_repr, tp_richcompare ... */
+    return PyType_Ready(type);
+}
+```
+
+The extra `tp_flags` argument (absent from the public `PyStructSequence_NewType`
+signature) lets the caller mark the type as `Py_TPFLAGS_BASETYPE` or add the
+immortal flag introduced in 3.12.
+
+### Shutdown with `_PyStructSequence_FiniBuiltin`
+
+Static struct-sequence types are not freed on shutdown (they live in the
+interpreter's `.data` segment), but the strings they hold must be released to
+keep leak-checkers quiet. `_PyStructSequence_FiniBuiltin` decrefs the field
+name strings and the type's `tp_members` array, then zeros the type so a
+subsequent `Py_InitializeEx` can re-initialise it cleanly:
+
+```c
+// CPython: Objects/structseq.c (abridged)
+void
+_PyStructSequence_FiniBuiltin(PyInterpreterState *interp,
+                              PyTypeObject *type)
+{
+    Py_CLEAR(type->tp_dict);
+    PyMem_Free((void *)type->tp_members);
+    type->tp_members = NULL;
+}
+```
+
+## gopy mirror
+
+gopy implements struct sequences in `objects/structseq.go`. The Go
+implementation covers:
+
+- The `PyStructSequenceObject` layout (a fixed-length slice of `Object`
+  plus a type pointer).
+- `NewStructSequenceType` (equivalent to `PyStructSequence_NewType`).
+- Hidden-field exclusion using the same sentinel-pointer pattern.
+
+`_PyStructSequence_InitType` and `_PyStructSequence_FiniBuiltin` are not
+ported as separate functions. In gopy the equivalent static types are
+initialised in package `init()` functions and torn down by the GC, so the
+in-place init and explicit fini paths are not needed.
+
+## CPython 3.14 changes
+
+- `_PyStructSequence_InitType` gained the `tp_flags` parameter in 3.12 to
+  support immortal types (PEP 683). The signature is unchanged in 3.14.
+- `_PyStructSequence_FiniBuiltin` gained an `interp` argument in 3.12 as part
+  of the per-interpreter type isolation work; it is stable in 3.14.
+- `PyStructSequence_UnnamedField` was changed from a `char *` to a
+  `const char *` in 3.13 to allow the string to live in read-only memory.

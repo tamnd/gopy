@@ -1,0 +1,122 @@
+---
+title: Modules/_multiprocessingmodule.c
+description: Thin C accelerator for multiprocessing providing AuthenticationString, Connection helpers, and SemLock.
+cpython_path: Modules/_multiprocessingmodule.c
+cpython_version: "3.14"
+lines: 250
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Modules/_multiprocessingmodule.c`
+
+<CpyLink path="Modules/_multiprocessingmodule.c" />
+
+<overview>
+`_multiprocessingmodule.c` is the C entry point for `import _multiprocessing`.
+It is deliberately small. The multiprocessing package's logic lives in
+`Lib/multiprocessing/`; this module provides only the three things that must be
+in C for correctness or performance:
+
+1. **`AuthenticationString`** - a `bytes` subclass whose `repr` is redacted so
+   that secret keys do not leak into tracebacks or logs.
+2. **Connection send/recv helpers** - `recv_bytes` and `send_bytes` implement
+   the length-prefixed framing protocol used by `Connection` objects without
+   going through Python-level loops.
+3. **`SemLock`** - a named process-level semaphore. On POSIX it wraps
+   `sem_open` / `sem_wait` / `sem_post` / `sem_close` / `sem_unlink`. On
+   Windows it wraps `CreateSemaphore` / `WaitForSingleObject` /
+   `ReleaseSemaphore`. `SemLock` backs `multiprocessing.Lock`,
+   `multiprocessing.Semaphore`, and `multiprocessing.BoundedSemaphore`.
+
+The rest of the package (`Pool`, `Queue`, `Manager`, `Process`, pipes,
+shared memory) is pure Python.
+</overview>
+
+## Map
+
+```
+_multiprocessingmodule.c
+├── module init                         (~line   1)
+├── AuthenticationString type           (~line  30)
+│   └── __repr__ (redacted)             (~line  45)
+├── Connection helpers                  (~line  80)
+│   ├── recv_bytes                      (~line  90)
+│   └── send_bytes                      (~line 130)
+└── SemLock type                        (~line 170)
+    ├── SemLock_new / acquire / release (~line 180)
+    ├── _rebuild / _after_fork          (~line 210)
+    └── platform guards: POSIX / Win32  (~line 170)
+```
+
+## Reading
+
+### AuthenticationString repr redaction
+
+The subclass overrides `__repr__` to return a fixed placeholder string. Without
+this, passing an `AuthenticationString` to `str.format` or logging would print
+the raw secret bytes in plaintext.
+
+```c
+// CPython: Modules/_multiprocessingmodule.c:47 AuthenticationString_repr
+static PyObject *
+AuthenticationString_repr(PyObject *self)
+{
+    return PyUnicode_FromString(
+        "<AuthenticationString: censored for security reasons>");
+}
+```
+
+### SemLock platform dispatch
+
+The `SemLock` implementation is guarded by `#ifdef HAVE_SEM_OPEN` (POSIX) and
+`#ifdef MS_WINDOWS` (Win32). On POSIX, named semaphores are created with a
+`/mp-` prefix to keep them in the semaphore namespace. The semaphore is unlinked
+immediately after creation so that it disappears when the last process releases
+it, avoiding leaks on crash.
+
+```c
+// CPython: Modules/_multiprocessingmodule.c:188 _multiprocessing_SemLock_impl
+self->handle = sem_open(name, O_CREAT | O_EXCL, 0600, value);
+if (self->handle == SEM_FAILED) { ... }
+if (unlink_now) {
+    sem_unlink(name);
+}
+```
+
+### send_bytes length-prefix framing
+
+`send_bytes` writes a 4-byte little-endian length header followed by the
+payload. `recv_bytes` reads the header first, allocates a buffer of exactly that
+size, then reads the payload in a loop until the full frame arrives. This framing
+lets `Connection.recv` reconstruct whole messages from a stream socket without
+requiring any Python-level logic.
+
+```c
+// CPython: Modules/_multiprocessingmodule.c:131 send_bytes
+/* write 4-byte length prefix */
+Py_BEGIN_ALLOW_THREADS
+res = _Py_write(handle, &length, 4);
+if (res == 4)
+    res = _Py_write(handle, buf.buf, buf.len);
+Py_END_ALLOW_THREADS
+```
+
+## gopy mirror
+
+Not yet ported. When ported, the natural home is `module/multiprocessing/`.
+
+`AuthenticationString` is a straightforward `bytes` subtype. The
+send/recv framing helpers are pure I/O and translate directly to Go. `SemLock`
+is the most involved piece: Go's `sync` package covers in-process locking but
+not cross-process named semaphores. A POSIX port would call `sem_open` via
+`cgo` or `syscall`, mirroring the CPython approach.
+
+## CPython 3.14 changes
+
+- No significant changes between 3.12 and 3.14. The file has been stable since
+  the module-state refactor in 3.11.
+- `Lib/multiprocessing/shared_memory.py` received changes in 3.13 (POSIX
+  shared memory naming) but that is pure Python and does not affect this file.
+- Windows: `SemLock` continues to use `CreateSemaphoreW` unchanged.

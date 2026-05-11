@@ -1,0 +1,138 @@
+---
+title: Modules/_blake2module.c
+description: BLAKE2 cryptographic hash functions (blake2b and blake2s) backed by the bundled reference implementation.
+cpython_path: Modules/_blake2module.c
+cpython_version: "3.14"
+lines: 1400
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Modules/_blake2module.c`
+
+<CpyLink path="Modules/_blake2module.c" />
+
+<overview>
+`_blake2module.c` registers two type objects, `blake2b` and `blake2s`, each
+implementing the full BLAKE2 hash interface defined in RFC 7693. The module is
+the C backend for `hashlib.blake2b` and `hashlib.blake2s`.
+
+Key capabilities beyond plain hashing:
+
+- **Keyed hashing** - BLAKE2 doubles as a MAC; `blake2b` accepts keys up to 64
+  bytes, `blake2s` up to 32 bytes.
+- **Salting** - a per-invocation random salt modifies the hash without
+  affecting the key.
+- **Personalization** - a fixed string that binds the hash to an application.
+- **Tree hashing** - fan-out, depth, leaf size, node offset, node depth, and
+  inner hash length parameters for parallel/incremental tree modes.
+
+The actual compression function lives in `Modules/_blake2/` (the BLAKE2
+reference C implementation, vendored). `_blake2module.c` is a thin wrapper
+that maps the CPython `hashlib`-style API (`update`, `digest`, `hexdigest`,
+`copy`) onto the reference library's state structs.
+</overview>
+
+## Map
+
+```
+_blake2module.c
+├── module init / clinic glue          (~line   1)
+├── blake2b type
+│   ├── blake2b_new / __init__         (~line  80)
+│   │   └── keyword args: data, key, salt, person,
+│   │       fanout, depth, leaf_size, node_offset,
+│   │       node_depth, inner_size, last_node
+│   ├── blake2b_update                 (~line 250)
+│   ├── blake2b_digest                 (~line 310)
+│   ├── blake2b_hexdigest              (~line 360)
+│   ├── blake2b_copy                   (~line 410)
+│   └── getset: digest_size, block_size, name, ... (~line 470)
+├── blake2s type (mirrors blake2b)     (~line 600)
+│   ├── blake2s_new / __init__
+│   ├── blake2s_update
+│   ├── blake2s_digest
+│   ├── blake2s_hexdigest
+│   ├── blake2s_copy
+│   └── getset
+└── Modules/_blake2/
+    ├── blake2b-ref.c                  (reference compression)
+    ├── blake2s-ref.c
+    └── blake2.h
+```
+
+## Reading
+
+### Construction and parameter validation
+
+`blake2b.__init__` (and the equivalent `blake2s` version) validates every
+tree-hashing parameter before touching the reference library state. Key length,
+salt length, and personalization length are each checked against compile-time
+constants from `blake2.h`. Out-of-range values raise `ValueError` rather than
+silently truncating.
+
+```c
+// CPython: Modules/_blake2module.c:120 py_blake2b_init_impl
+if (key_obj != NULL) {
+    GET_BUFFER_VIEW_OR_ERROR(key_obj, &key_buf, goto error);
+    if (key_buf.len > BLAKE2B_KEYBYTES) {
+        PyErr_SetString(PyExc_ValueError,
+            "maximum key length is " Py_STRINGIFY(BLAKE2B_KEYBYTES));
+        goto error;
+    }
+}
+```
+
+### Thread-safe update
+
+`blake2b_update` acquires the GIL only around the Python buffer extraction and
+result packaging. The actual `blake2b_update` call from the reference library
+runs with the GIL released so that large data blocks do not stall other threads.
+
+```c
+// CPython: Modules/_blake2module.c:258 py_blake2b_update_impl
+Py_BEGIN_ALLOW_THREADS
+ENTER_HASHXOF(self)
+blake2b_update(&self->param, &self->state, buf.buf, buf.len);
+LEAVE_HASHXOF(self)
+Py_END_ALLOW_THREADS
+```
+
+### Hex digest via a shared helper
+
+`hexdigest` calls `digest` internally and then converts the raw bytes to a hex
+string using `_Py_strhex`, which is the same helper used across all `hashlib`
+types. This avoids duplicating the hex-conversion logic in every hash module.
+
+```c
+// CPython: Modules/_blake2module.c:372 py_blake2b_hexdigest_impl
+digest = py_blake2b_digest_impl(self);
+if (digest == NULL)
+    return NULL;
+retval = _Py_strhex(
+    (const char *)((PyBytesObject *)digest)->ob_val,
+    PyBytes_GET_SIZE(digest));
+Py_DECREF(digest);
+return retval;
+```
+
+## gopy mirror
+
+Not yet ported. When ported, the natural home is `module/blake2/`.
+
+Go's `golang.org/x/crypto/blake2b` and `golang.org/x/crypto/blake2s` packages
+implement the same RFC 7693 algorithm and expose keying, salting, and
+personalization via `New` constructors. The keyed-MAC and tree parameters map
+directly to the `x/crypto` API, so no hand-ported compression function is
+needed.
+
+## CPython 3.14 changes
+
+- The module was converted to use the per-module-state (`Py_mod_exec`) pattern
+  in 3.12, removing all global mutable state.
+- 3.14 adds no algorithmic changes. The `hashlib` interface contract
+  (`usedforsecurity`, `string` keyword alias for `data`) introduced in 3.9 is
+  fully supported.
+- The bundled `_blake2/` reference code tracks the upstream BLAKE2 reference
+  implementation and is unchanged between 3.13 and 3.14.

@@ -1,0 +1,142 @@
+---
+title: Modules/binascii.c
+description: Binary-to-ASCII encoding conversions (hex, base64, uuencoding, quoted-printable, HQX, CRC).
+cpython_path: Modules/binascii.c
+cpython_version: "3.14"
+lines: 1800
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Modules/binascii.c`
+
+<CpyLink path="Modules/binascii.c" />
+
+<overview>
+`binascii` exposes low-level binary-to-ASCII conversion routines. Every function
+accepts or returns `bytes`. The module is entirely self-contained in C with no
+Python fallback; there is no `Lib/binascii.py` counterpart.
+
+Encoding families covered:
+
+| Family | encode | decode |
+|---|---|---|
+| Hexadecimal | `b2a_hex` (`hexlify`) | `a2b_hex` (`unhexlify`) |
+| Base64 | `b2a_base64` | `a2b_base64` |
+| UU (uuencoding) | `b2a_uu` | `a2b_uu` |
+| Quoted-Printable | `b2a_qp` | `a2b_qp` |
+| HQX (BinHex 4.0) | `b2a_hqx`, `rlecode_hqx` | `a2b_hqx`, `rledecode_hqx` |
+| CRC | `crc_hqx` | `crc32` (wraps `zlib_crc32`) |
+
+`crc32` delegates to zlib and returns a signed 32-bit integer so that its result
+matches `zlib.crc32` exactly.
+</overview>
+
+## Map
+
+```
+binascii.c
+├── module state (Error / Incomplete exception types)
+├── hex family
+│   ├── a2b_hex / unhexlify          (~line  80)
+│   └── b2a_hex / hexlify            (~line 140)
+├── base64 family
+│   ├── a2b_base64                   (~line 220)
+│   └── b2a_base64                   (~line 320)
+├── uu family
+│   ├── a2b_uu                       (~line 430)
+│   └── b2a_uu                       (~line 520)
+├── quoted-printable family
+│   ├── a2b_qp                       (~line 600)
+│   └── b2a_qp                       (~line 720)
+├── HQX family
+│   ├── crc_hqx                      (~line 860)
+│   ├── a2b_hqx                      (~line 920)
+│   ├── b2a_hqx                      (~line 1020)
+│   ├── rlecode_hqx                  (~line 1110)
+│   └── rledecode_hqx                (~line 1180)
+└── crc32                            (~line 1300)
+```
+
+## Reading
+
+### Hex round-trip
+
+`a2b_hex` walks the input two characters at a time, converts each nibble pair
+with a lookup table, and writes a single output byte. `b2a_hex` does the
+reverse, emitting two hex characters per input byte. Both functions share the
+same nibble table defined near the top of the file.
+
+```c
+// CPython: Modules/binascii.c:82 table_hex
+static const char table_hex[] =
+    "0123456789abcdef";
+
+// CPython: Modules/binascii.c:140 binascii_b2a_hex_impl
+while (arglen--) {
+    unsigned int top = (*argbuf >> 4) & 0xf;
+    unsigned int bot = *argbuf++ & 0xf;
+    *retbuf++ = table_hex[top];
+    *retbuf++ = table_hex[bot];
+}
+```
+
+### Base64 line length and padding
+
+`b2a_base64` encodes exactly one line. The caller is responsible for chunking
+input into 57-byte blocks (which produce 76-character output lines) to match the
+MIME recommendation. Padding with `=` is always emitted so the output is always
+a multiple of four characters.
+
+```c
+// CPython: Modules/binascii.c:368 binascii_b2a_base64_impl
+/* Encode 3 bytes at a time */
+while (bin_len >= 3) {
+    *ascii_data++ = table_b2a_base64[(*bin_data >> 2) & 0x3f];
+    *ascii_data++ = table_b2a_base64[((*bin_data << 4) | (*(bin_data+1) >> 4)) & 0x3f];
+    *ascii_data++ = table_b2a_base64[((*(bin_data+1) << 2) | (*(bin_data+2) >> 6)) & 0x3f];
+    *ascii_data++ = table_b2a_base64[*(bin_data+2) & 0x3f];
+    bin_data += 3;
+    bin_len -= 3;
+}
+```
+
+### UU encoding: 3-to-4 byte expansion
+
+UU encoding packs three input bytes into four 6-bit characters in the printable
+range `' '` (0x20) through `'_'` (0x5f). Each output line is prefixed with the
+encoded line length, and `b2a_uu` appends a trailing newline so the output is
+directly writable to a `uu`-format file.
+
+```c
+// CPython: Modules/binascii.c:555 binascii_b2a_uu_impl
+#define UU_ENC(c) ((c) ? ((c) & 077) + ' ' : '`')
+
+while (num >= 3) {
+    *out++ = UU_ENC((*in >> 2));
+    *out++ = UU_ENC(((*in << 4) | (in[1] >> 4)));
+    *out++ = UU_ENC(((in[1] << 2) | (in[2] >> 6)));
+    *out++ = UU_ENC((in[2]));
+    in += 3;
+    num -= 3;
+}
+```
+
+## gopy mirror
+
+Not yet ported. When ported, the natural home is `module/binascii/`.
+
+The hex and base64 halves are straightforward: Go's `encoding/hex` and
+`encoding/base64` packages cover the same ground and can back the implementation
+directly. UU encoding has no standard Go library equivalent and will need a
+hand-ported loop. HQX is legacy and can be ported last.
+
+## CPython 3.14 changes
+
+- `a2b_base64` gained a `strict_mode` keyword argument (3.11) that rejects
+  non-canonical padding and stray whitespace. The argument is present in 3.14
+  with no further change.
+- No significant algorithmic changes relative to 3.12 or 3.13.
+- The module still uses the per-module-state pattern introduced in 3.11 to store
+  the `Error` and `Incomplete` exception types, avoiding global state.

@@ -1,0 +1,115 @@
+---
+title: Include/cpython/descrobject.h
+description: CPython-internal descriptor API covering method, member, getset, and wrapper descriptor structs and their factory functions.
+cpython_path: Include/cpython/descrobject.h
+cpython_version: "3.14"
+lines: 80
+status: annotated
+ported_to: objects/descr.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Include/cpython/descrobject.h`
+
+<CpyLink path="Include/cpython/descrobject.h" />
+
+<overview>
+This header declares the internal struct layouts and factory functions for CPython's four built-in descriptor types: method descriptors, member descriptors, getset descriptors, and slot wrapper descriptors. These objects are created at type-creation time (by `type_new` and `PyType_Ready`) and placed into the type's `tp_dict`. When attribute lookup finds one of these in the MRO, the descriptor protocol invokes `tp_descr_get` (and optionally `tp_descr_set`) to mediate access.
+</overview>
+
+## Map
+
+| Symbol | Kind | Purpose |
+|---|---|---|
+| `PyDescrObject` | struct | Common prefix shared by all descriptor types |
+| `PyMemberDescrObject` | struct | Descriptor for `PyMemberDef` (struct-offset members) |
+| `PyMethodDescrObject` | struct | Descriptor for `PyMethodDef` (C functions) |
+| `PyWrapperDescrObject` | struct | Descriptor wrapping a `slotdef` (special method slot) |
+| `PyGetSetDescrObject` | struct | Descriptor for `PyGetSetDef` (getter/setter pairs) |
+| `d_type` | field | The type that owns this descriptor |
+| `d_name` | field | `__name__` of the attribute |
+| `d_qualname` | field | `__qualname__` (computed lazily) |
+| `PyDescr_NewMethod` | function | Create a `PyMethodDescrObject` |
+| `PyDescr_NewMember` | function | Create a `PyMemberDescrObject` |
+| `PyDescr_NewGetSet` | function | Create a `PyGetSetDescrObject` |
+| `PyDescr_NewWrapper` | function | Create a `PyWrapperDescrObject` |
+| `PyDescr_IsData` | macro | True if the descriptor defines `tp_descr_set` |
+
+## Reading
+
+### PyDescrObject: the shared prefix
+
+All four descriptor types begin with the same three fields. The common prefix allows descriptor protocol code in `Objects/object.c` to read `d_type` and `d_name` without knowing the concrete type.
+
+```c
+typedef struct {
+    PyObject_HEAD
+    PyTypeObject *d_type;    /* type that owns this descriptor */
+    PyObject     *d_name;    /* __name__ */
+    PyObject     *d_qualname; /* __qualname__, NULL until first access */
+} PyDescrObject;
+```
+
+Concrete structs extend this prefix. For example:
+
+```c
+typedef struct {
+    PyDescrObject d_common;
+    PyMethodDef  *d_method;
+    vectorcallfunc vectorcall;
+} PyMethodDescrObject;
+
+typedef struct {
+    PyDescrObject d_common;
+    PyGetSetDef  *d_getset;
+} PyGetSetDescrObject;
+```
+
+The `d_type` back-pointer is the key difference between descriptors and ordinary callables. It is used by `PyDescr_NewMethod` and friends to bind `__objclass__`, and by `tp_descr_get` to enforce that the descriptor is only invoked on compatible instances.
+
+### Data descriptors vs. non-data descriptors
+
+The descriptor protocol distinguishes two classes of descriptor: data descriptors (those that define both `tp_descr_get` and `tp_descr_set`) and non-data descriptors (those that define only `tp_descr_get`). This distinction controls lookup priority relative to the instance `__dict__`.
+
+```c
+/* Returns 1 if descr is a data descriptor (has tp_descr_set). */
+#define PyDescr_IsData(descr) \
+    (Py_TYPE(descr)->tp_descr_set != NULL)
+```
+
+`PyMemberDescrObject` and `PyGetSetDescrObject` are data descriptors when the underlying `PyGetSetDef` provides a setter. `PyMethodDescrObject` and `PyWrapperDescrObject` are always non-data descriptors because C methods cannot intercept assignment.
+
+`Objects/object.c:_PyObject_GenericGetAttrWithDict` consults `PyDescr_IsData` to decide whether to check the instance dict before calling `tp_descr_get`.
+
+### Factory functions and type ownership
+
+Each factory takes the owning type and the definition struct:
+
+```c
+PyAPI_FUNC(PyObject *) PyDescr_NewMethod(
+    PyTypeObject *type, PyMethodDef *meth);
+PyAPI_FUNC(PyObject *) PyDescr_NewMember(
+    PyTypeObject *type, PyMemberDef *meth);
+PyAPI_FUNC(PyObject *) PyDescr_NewGetSet(
+    PyTypeObject *type, PyGetSetDef *meth);
+PyAPI_FUNC(PyObject *) PyDescr_NewWrapper(
+    PyTypeObject *type, struct wrapperbase *base, void *wrapped);
+```
+
+All four are called from `PyType_Ready` as it iterates `tp_methods`, `tp_members`, `tp_getset`, and the internal `slotdefs` table. The resulting descriptor objects are inserted directly into `type->tp_dict`. Subtype creation inherits them through normal MRO lookup rather than copying.
+
+## gopy mirror
+
+gopy represents all four descriptor types in `objects/descr.go`:
+
+- `MethodDescr` mirrors `PyMethodDescrObject`. It holds a `*MethodDef` and implements `tp_descr_get` by returning a bound method.
+- `MemberDescr` mirrors `PyMemberDescrObject`. It uses field offset information to read and write struct fields on Go-backed objects.
+- `GetSetDescr` mirrors `PyGetSetDescrObject`. It stores Go getter and setter functions of type `func(*Object) (*Object, error)` and `func(*Object, *Object) error`.
+- `WrapperDescr` mirrors `PyWrapperDescrObject`. It wraps slot functions from Go type definitions, enabling special method lookup via the standard MRO.
+
+The `DescrObject` base struct in `objects/descr.go` carries `dType` and `dName`, matching the `PyDescrObject` prefix.
+
+## CPython 3.14 changes
+
+CPython 3.14 adds vectorcall support to `PyMethodDescrObject` (the `vectorcall` field in the struct layout above). This allows `CALL` bytecode to invoke method descriptors without creating a bound method object as an intermediate step, providing a measurable speedup for `obj.method(args)` call sites. The `d_qualname` lazy-computation field was added in 3.3 alongside `__qualname__` support for classes; before that, method descriptors reported only `__name__`.

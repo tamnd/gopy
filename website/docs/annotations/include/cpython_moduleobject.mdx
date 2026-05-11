@@ -1,0 +1,101 @@
+---
+title: Include/cpython/moduleobject.h
+description: CPython-internal module object API including the PyModuleObject struct and multi-phase init helpers.
+cpython_path: Include/cpython/moduleobject.h
+cpython_version: "3.14"
+lines: 100
+status: annotated
+ported_to: objects/module.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Include/cpython/moduleobject.h`
+
+<CpyLink path="Include/cpython/moduleobject.h" />
+
+<overview>
+This header exposes the internal layout of `PyModuleObject` and the CPython-internal functions used by the import machinery and the multi-phase initialisation protocol introduced in PEP 451. The public stable API (`PyModule_New`, `PyModule_GetDict`, etc.) lives in `Include/moduleobject.h`; this header adds the fields and functions that extension authors rarely need but the import system uses constantly.
+</overview>
+
+## Map
+
+| Symbol | Kind | Purpose |
+|---|---|---|
+| `PyModuleObject` | struct | Backing store for module objects |
+| `md_dict` | field | The module's `__dict__` |
+| `md_def` | field | Pointer to the `PyModuleDef` that created this module |
+| `md_state` | field | Opaque per-module state blob (PEP 451) |
+| `md_weaklist` | field | Weak reference list head |
+| `md_name` | field | Cached `__name__` as a C string |
+| `PyModule_GetFilenameObject` | function | Return `__spec__.origin` as a Python string |
+| `_PyModule_GetDef` | function | Return the `PyModuleDef *` for a module |
+| `_PyModule_GetState` | function | Return the `md_state` pointer |
+| `_PyModule_IsInitialized` | function | Test whether multi-phase init has completed |
+| `PyModule_ExecDef` | function | Run exec slots from a `PyModuleDef` |
+| `PyModuleDef_Init` | function | Initialise a static `PyModuleDef` before first use |
+
+## Reading
+
+### PyModuleObject layout
+
+```c
+typedef struct {
+    PyObject_HEAD
+    PyObject *md_dict;        /* __dict__ of the module */
+    struct PyModuleDef *md_def;  /* definition, or NULL for built-ins */
+    void *md_state;           /* per-module C state (PEP 451) */
+    PyObject *md_weaklist;    /* weak reference list */
+    PyObject *md_name;        /* __name__ string, for faster lookups */
+} PyModuleObject;
+```
+
+`md_state` is an opaque heap allocation whose size is declared in `PyModuleDef.m_size`. The import machinery calls `PyModule_ExecDef` which zeroes and attaches this blob before running any `Py_mod_exec` slots. Extension code retrieves it with `PyModule_GetState` (public) or `_PyModule_GetState` (internal, no type check overhead).
+
+### Multi-phase init: ExecDef and the slot chain
+
+PEP 451 splits module initialisation into a create phase (returns the module object) and one or more exec phases (populate it). `PyModule_ExecDef` drives the exec side:
+
+```c
+/* Runs all Py_mod_exec slots defined in def against mod. */
+PyAPI_FUNC(int) PyModule_ExecDef(PyObject *mod, PyModuleDef *def);
+```
+
+A typical multi-phase extension defines:
+
+```c
+static PyModuleDef_Slot mymod_slots[] = {
+    {Py_mod_exec, mymod_exec},
+    {0, NULL}
+};
+```
+
+`PyModule_ExecDef` iterates the slot array and calls each `Py_mod_exec` function in order. If any slot returns non-zero the import fails and the partially-initialised module is discarded.
+
+### _PyModule_GetState and accessing per-module data
+
+Single-phase extensions store state in static C variables (fragile for sub-interpreters). Multi-phase extensions store it in the `md_state` blob and access it with:
+
+```c
+static inline void *_PyModule_GetState(PyObject *mod) {
+    /* No type check - caller must ensure mod is a module object */
+    return ((PyModuleObject *)mod)->md_state;
+}
+```
+
+The public `PyModule_GetState` adds a `PyModule_Check` guard and sets an error on failure. `_PyModule_GetState` skips the check for hot paths inside the module's own C code where the type is guaranteed.
+
+## gopy mirror
+
+gopy represents modules in `objects/module.go`. The Go struct fields correspond as follows:
+
+- `mdDict` (`*Dict`) mirrors `md_dict`.
+- `mdDef` (a Go interface or struct pointer) mirrors `md_def`; gopy uses a Go-native module definition type rather than the C `PyModuleDef`.
+- `mdState` (`any`) mirrors the opaque `md_state` blob. Go modules store their per-module state as a typed Go value rather than an unsafe pointer.
+- `mdName` (`*Str`) mirrors `md_name`.
+
+`PyModule_ExecDef` corresponds to the `ExecDef` method on the module type in `objects/module.go`, which iterates registered exec callbacks in registration order.
+
+## CPython 3.14 changes
+
+CPython 3.14 adds `Py_mod_multiple_interpreters` and `Py_mod_gil` slots to `PyModuleDef`, tightening sub-interpreter isolation. The `_PyModule_IsInitialized` predicate was introduced alongside these slots so the import machinery can distinguish a freshly created (create-phase) module from one that has completed exec-phase initialisation. The `md_name` caching field was added in 3.3 alongside PEP 328 relative imports; before that, every attribute lookup on a module had to go through `md_dict`.

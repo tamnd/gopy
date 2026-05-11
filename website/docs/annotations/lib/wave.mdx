@@ -1,0 +1,122 @@
+---
+title: Lib/wave.py
+description: Read and write WAV audio files by parsing RIFF/WAVE headers and managing fmt and data chunks.
+cpython_path: Lib/wave.py
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Lib/wave.py`
+
+<CpyLink path="Lib/wave.py" />
+
+<overview>
+`wave` provides two classes for reading and writing uncompressed PCM audio in the RIFF/WAVE container format. `Wave_read` wraps a readable binary stream and parses the header on open, exposing metadata getters and a `readframes` method. `Wave_write` accumulates audio parameters set by the caller, writes the RIFF and fmt chunks on the first `writeframes` call, and patches the size fields in the header when the file is closed. Both classes are usable as context managers. The module-level `open` function dispatches to the right class based on the mode string.
+</overview>
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| 1-30 | module header, imports | `builtins`, `struct`, `sys`, `chunk`; `__all__` | - |
+| 31-50 | `Error` exception, `_wave_params` namedtuple | Named exception for format errors; parameter bundle | - |
+| 51-110 | `Wave_read.__init__`, `__enter__`, `__exit__`, `__del__` | Open file or accept file-like object; parse RIFF header | - |
+| 111-150 | `Wave_read._read_fmt_chunk` | Parse the `fmt ` chunk: channels, sample width, frame rate, compression | - |
+| 151-170 | `Wave_read._read_data_chunk` | Locate the `data` chunk; record frame count | - |
+| 171-220 | `Wave_read` getters | `getnchannels`, `getsampwidth`, `getframerate`, `getnframes`, `getcomptype`, `getcompname`, `getparams` | - |
+| 221-260 | `Wave_read.readframes`, `rewind`, `setpos`, `tell`, `close` | Decode and return raw PCM bytes; seek support | - |
+| 261-310 | `Wave_write.__init__`, `__enter__`, `__exit__`, `__del__` | Initialise write state; defer header until params are known | - |
+| 311-360 | `Wave_write` setters | `setnchannels`, `setsampwidth`, `setframerate`, `setnframes`, `setcomptype`, `setparams` | - |
+| 361-400 | `Wave_write._write_header` | Emit RIFF, WAVE, fmt chunk using `struct.pack`; record patch offsets | - |
+| 401-450 | `Wave_write.writeframes`, `writeframesraw` | Validate params, write header on first call, append PCM data | - |
+| 451-480 | `Wave_write._patchheader`, `close` | Seek back and overwrite chunk sizes; flush and close | - |
+| 481-500 | `open` module function | Mode-dispatch factory; returns `Wave_read` or `Wave_write` | - |
+
+## Reading
+
+### Parsing the RIFF/WAVE header (lines 51 to 150)
+
+<CpyLink path="Lib/wave.py" lines="51-150" />
+
+`Wave_read.__init__` uses the `chunk` module to walk the top-level RIFF container. After confirming the `WAVE` form type it scans sub-chunks, looking for `fmt ` and `data` by their four-character IDs. The `fmt ` chunk is mandatory and must appear before `data`. Unknown chunks are skipped. `_read_fmt_chunk` unpacks the fields with `struct.unpack_from`:
+
+```python
+def _read_fmt_chunk(self, chunk):
+    wFormatTag, nChannels, nSamplesPerSec, nAvgBytesPerSec, nBlockAlign = \
+        struct.unpack_from('<HHLLH', chunk.read(14))
+    if wFormatTag == WAVE_FORMAT_PCM:
+        sampwidth = struct.unpack_from('<H', chunk.read(2))[0]
+        self._sampwidth = (sampwidth + 7) // 8
+    else:
+        raise Error('unknown format: %r' % (wFormatTag,))
+    self._framerate = nSamplesPerSec
+    self._nchannels = nChannels
+    self._framesize = nChannels * self._sampwidth
+```
+
+All multi-byte fields are little-endian (`<`), matching the RIFF specification. `sampwidth` is stored in bits in the file but converted to bytes immediately.
+
+### Writing the RIFF header (lines 361 to 400)
+
+<CpyLink path="Lib/wave.py" lines="361-400" />
+
+`_write_header` is deferred until the first `writeframes` call so the caller has time to set channel count, sample width, and frame rate. Once called it writes the skeleton header with placeholder sizes, then records the file positions of the two size fields so they can be patched on close.
+
+```python
+def _write_header(self, initlength):
+    assert not self._headerwritten
+    self._file.write(b'RIFF')
+    if not self._nframes:
+        self._nframes = initlength // (self._nchannels * self._sampwidth)
+    self._datalength = self._nframes * self._nchannels * self._sampwidth
+    try:
+        self._form_length_pos = self._file.tell()
+    except OSError:
+        self._form_length_pos = None
+    self._file.write(struct.pack('<L4s4sLHHLLHH4s',
+        36 + self._datalength, b'WAVE', b'fmt ', 16,
+        WAVE_FORMAT_PCM, self._nchannels, self._framerate,
+        self._nchannels * self._framerate * self._sampwidth,
+        self._nchannels * self._sampwidth,
+        self._sampwidth * 8, b'data'))
+    if self._form_length_pos is not None:
+        self._data_length_pos = self._file.tell() - 4
+    self._file.write(struct.pack('<L', self._datalength))
+    self._headerwritten = True
+```
+
+The `struct.pack` call emits the entire fmt chunk in one shot. If the output stream is not seekable (`OSError` on `tell`), `_form_length_pos` is set to `None` and `_patchheader` skips the fixup silently.
+
+### Patching sizes on close (lines 451 to 480)
+
+<CpyLink path="Lib/wave.py" lines="451-480" />
+
+`_patchheader` is called from `close` (and `__exit__`). It seeks back to the two positions recorded by `_write_header` and overwrites the RIFF form length and data chunk length with the actual byte counts accumulated during `writeframes`. This two-pass approach is necessary because the total frame count is not known until writing is finished.
+
+```python
+def _patchheader(self):
+    assert self._headerwritten
+    if self._datalength == self._datawritten:
+        return  # nothing changed, skip the seek
+    datalength = self._datawritten
+    riff_length = 36 + datalength
+    self._file.seek(self._form_length_pos, 0)
+    self._file.write(struct.pack('<L', riff_length))
+    self._file.seek(self._data_length_pos, 0)
+    self._file.write(struct.pack('<L', datalength))
+    self._file.seek(0, 2)  # restore position to end of file
+    self._datalength = datalength
+```
+
+If the stream is not seekable, `_form_length_pos` is `None` and this method is never called, leaving the placeholder sizes in the header. That produces a technically malformed WAV file, but it is still playable by decoders that trust the `data` chunk size over the RIFF form length.
+
+## gopy mirror
+
+`wave` has not been ported to gopy. The module is self-contained (its only runtime dependency inside CPython is the `chunk` module and `struct`), so it is a reasonable candidate for a direct port once `struct.pack`/`struct.unpack` and `chunk` are available in gopy.
+
+## CPython 3.14 changes
+
+CPython 3.14 deprecated the `getmark`, `setmark`, and `getmarkers` methods inherited from the original AIFF/WAVE dual-module design. These methods were stubs that always returned `None` or raised `Error`; they will be removed in a future release. The `open` function now also accepts `pathlib.Path` objects in addition to strings and file-like objects.

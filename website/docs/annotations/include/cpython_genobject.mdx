@@ -1,0 +1,111 @@
+---
+title: Include/cpython/genobject.h
+description: Public C API for generator, coroutine, and async generator objects in CPython 3.14.
+cpython_path: Include/cpython/genobject.h
+cpython_version: "3.14"
+lines: 120
+status: annotated
+ported_to: objects/gen.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Include/cpython/genobject.h`
+
+<CpyLink path="Include/cpython/genobject.h" />
+
+<overview>
+This header exposes the internal layout and public factory functions for the three generator-like object types in CPython: `PyGenObject` (plain generators), `PyCoroObject` (coroutines created with `async def`), and `PyAsyncGenObject` (async generators). All three share the same physical struct prefix, which allows the interpreter to treat them uniformly in the frame execution loop while exposing distinct Python-level types.
+</overview>
+
+## Map
+
+| Symbol | Kind | Purpose |
+|---|---|---|
+| `PyGenObject` | struct | Backing store for generator objects |
+| `PyCoroObject` | struct | Backing store for coroutine objects |
+| `PyAsyncGenObject` | struct | Backing store for async generator objects |
+| `PyGen_Type` | `PyTypeObject` | Type for plain generators |
+| `PyCoro_Type` | `PyTypeObject` | Type for coroutines |
+| `PyAsyncGen_Type` | `PyTypeObject` | Type for async generators |
+| `PyGen_CheckExact` | macro | Fast type check for generators |
+| `PyCoro_CheckExact` | macro | Fast type check for coroutines |
+| `PyAsyncGen_CheckExact` | macro | Fast type check for async generators |
+| `PyGen_New` | function | Create a generator from a frame |
+| `PyGen_NewWithQualName` | function | Create a generator with explicit `__qualname__` |
+| `PyCoro_New` | function | Create a coroutine from a frame |
+| `PyAsyncGen_New` | function | Create an async generator from a frame |
+
+## Reading
+
+### PyGenObject layout
+
+The struct carries everything the eval loop needs to suspend and resume execution of a generator frame.
+
+```c
+typedef struct {
+    PyObject_HEAD
+    /* The frame state: CREATED, SUSPENDED, RUNNING, COMPLETED */
+    int gi_frame_state;
+    /* The code object (kept alive for the lifetime of the generator) */
+    PyObject *gi_code;
+    /* Weak reference list head */
+    PyObject *gi_weakreflist;
+    /* __name__ attribute */
+    PyObject *gi_name;
+    /* __qualname__ attribute */
+    PyObject *gi_qualname;
+    /* Exception state saved across yields */
+    _PyErr_StackItem gi_exc_state;
+} PyGenObject;
+```
+
+`gi_frame_state` is an integer enum rather than a pointer so that the frame can be embedded directly in the generator object without an extra heap allocation in the common case.
+
+### Factory functions and qualname
+
+Every factory takes an already-created frame object and two name strings. `PyGen_New` is a thin wrapper around `PyGen_NewWithQualName` that passes `NULL` for the qualname, letting the runtime fall back to the code object's own `co_qualname`.
+
+```c
+PyAPI_FUNC(PyObject *) PyGen_New(PyFrameObject *);
+PyAPI_FUNC(PyObject *) PyGen_NewWithQualName(
+    PyFrameObject *,
+    PyObject *name,      /* __name__, or NULL */
+    PyObject *qualname   /* __qualname__, or NULL */
+);
+PyAPI_FUNC(PyObject *) PyCoro_New(
+    PyFrameObject *,
+    PyObject *name,
+    PyObject *qualname
+);
+PyAPI_FUNC(PyObject *) PyAsyncGen_New(PyFrameObject *);
+```
+
+The compiler emits `GEN_START` / `RETURN_GENERATOR` bytecode rather than calling these functions directly. They are called from `_PyEval_EvalFrameDefault` at the point where a `RETURN_GENERATOR` opcode is executed.
+
+### Type checks and the common prefix trick
+
+All three types begin with the same `PyGenObject` prefix fields. The `CheckExact` macros therefore compare against three separate type pointers rather than a single base type, because there is no C-level inheritance between them despite the shared layout.
+
+```c
+#define PyGen_CheckExact(op)      Py_IS_TYPE((op), &PyGen_Type)
+#define PyCoro_CheckExact(op)     Py_IS_TYPE((op), &PyCoro_Type)
+#define PyAsyncGen_CheckExact(op) Py_IS_TYPE((op), &PyAsyncGen_Type)
+```
+
+Code that needs to handle all three uniformly (such as `_PyGen_Finalize`) casts to `PyGenObject *` after confirming the object is one of the three types via `PyGen_Check`, `PyCoro_Check`, or `PyAsyncGen_Check`.
+
+## gopy mirror
+
+gopy represents all three types in `objects/gen.go`. The Go struct mirrors the essential fields:
+
+- `giFrameState` (int) maps to `gi_frame_state`.
+- `giCode` (`*CodeObject`) maps to `gi_code`.
+- `giName` / `giQualName` (`*Str`) map to `gi_name` / `gi_qualname`.
+- `giExcState` maps to `gi_exc_state` and is used when a generator is suspended inside an `except` block.
+
+The factory functions `GenNew`, `CoroNew`, and `AsyncGenNew` in `objects/gen.go` correspond to `PyGen_NewWithQualName`, `PyCoro_New`, and `PyAsyncGen_New` respectively.
+
+## CPython 3.14 changes
+
+CPython 3.14 inlines the frame into the generator object for the common non-tracing case, eliminating one allocation per generator creation. The `gi_frame_state` field was added in 3.11 as part of the per-opcode specialization work; before that, frame state was tracked through the frame's `f_lasti` and a separate `gi_running` flag. The `gi_exc_state` field (added in 3.7) replaced the previous approach of threading the exception state through C stack variables, making generator-scoped exception handling safe across `yield`.

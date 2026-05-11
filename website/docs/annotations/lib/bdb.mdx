@@ -1,0 +1,121 @@
+---
+title: Lib/bdb.py
+description: Python debugger base class providing breakpoint management and sys.settrace dispatch hooks.
+cpython_path: Lib/bdb.py
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Lib/bdb.py`
+
+<CpyLink path="Lib/bdb.py" />
+
+<overview>
+`bdb` is the foundation for Python's interactive debugger. It owns the low-level wiring: installing a `sys.settrace` hook, routing the four trace events (call, line, return, exception) through the `Bdb` class, and maintaining a table of `Breakpoint` objects keyed by file and line number. `pdb` inherits from `Bdb` and adds the user-facing REPL on top. Nothing here touches I/O directly; it only calls the `user_*` callbacks that a subclass overrides.
+</overview>
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| 1-30 | module header, imports | `os`, `sys`, `fnmatch`, `reprlib` imports; `__all__` | - |
+| 31-60 | `Breakpoint` class (fields) | `number`, `file`, `line`, `enabled`, `hits`, `temporary`, `cond`, `funcname` | - |
+| 61-100 | `Breakpoint` class (methods) | `deleteMe`, `enable`, `disable`, `bpformat`, `bpprint` | - |
+| 101-130 | `Breakpoint` class (statics) | `checkfuncname`, `effectivebp`; class-level `bpbynumber`, `bplist` dicts | - |
+| 131-180 | `Bdb.__init__`, `canonic` | Canonicalise file paths; initialise break/watch tables | - |
+| 181-230 | `Bdb.reset`, `Bdb.trace_dispatch` | Top-level `sys.settrace` callback; routes by event string | - |
+| 231-290 | `Bdb.dispatch_call`, `dispatch_line`, `dispatch_return`, `dispatch_exception` | Per-event routing; check breaks, call `user_*` hooks | - |
+| 291-340 | `Bdb.user_call`, `user_line`, `user_return`, `user_exception` | Default no-op hooks for subclasses to override | - |
+| 341-380 | `Bdb.set_step`, `set_next`, `set_return`, `set_until` | Move the single-step cursor; set `stopframe`/`returnframe` | - |
+| 381-420 | `Bdb.set_trace`, `set_continue`, `set_quit` | Arm/disarm `sys.settrace`; raise `BdbQuit` | - |
+| 421-460 | `Bdb.set_break`, `clear_break`, `clear_all_breaks` | Create/remove `Breakpoint` entries; validate file/line | - |
+| 461-490 | `Bdb.get_breaks`, `get_file_breaks`, `get_all_breaks` | Query the breakpoint table | - |
+| 491-500 | `BdbQuit` exception, module footer | Sentinel raised by `set_quit`; caught by `run`/`runcall` | - |
+
+## Reading
+
+### Trace dispatch loop (lines 181 to 230)
+
+<CpyLink path="Lib/bdb.py" lines="181-230" />
+
+`trace_dispatch` is installed as the per-frame trace function via `sys.settrace`. Python calls it on every trace event with `(frame, event, arg)`. The method branches on the event string and delegates to one of the four `dispatch_*` methods. It also decides whether to return itself (keep tracing) or `None` (stop tracing this frame), which is the mechanism for stepping out of a frame.
+
+```python
+def trace_dispatch(self, frame, event, arg):
+    if self.quitting:
+        return  # stop tracing entirely
+    if event == 'line':
+        return self.dispatch_line(frame)
+    if event == 'call':
+        return self.dispatch_call(frame, arg)
+    if event == 'return':
+        return self.dispatch_return(frame, arg)
+    if event == 'exception':
+        return self.dispatch_exception(frame, arg)
+    # 'opcode' and unknown events fall through; keep tracing
+    return self.trace_dispatch
+```
+
+The returned callable is what CPython stores as `frame.f_trace` for the next event. Returning `self.trace_dispatch` keeps the hook alive; returning `None` removes it for that frame.
+
+### Breakpoint resolution (lines 101 to 130)
+
+<CpyLink path="Lib/bdb.py" lines="101-130" />
+
+`effectivebp` is a class method that walks every `Breakpoint` registered for a `(file, line)` pair and decides whether any of them should fire. It checks three things in order: whether the breakpoint is enabled, whether its `cond` expression (if any) evaluates to true in the current frame, and whether a `ignore` count has been exhausted. A temporary breakpoint is deleted after it fires once.
+
+```python
+@staticmethod
+def effectivebp(file, line, frame):
+    possibles = Breakpoint.bplist.get((file, line), [])
+    for b in possibles:
+        if not b.enabled:
+            continue
+        if b.cond:
+            try:
+                val = eval(b.cond, frame.f_globals, frame.f_locals)
+            except SyntaxError:
+                return b, False  # condition error stops here
+            if not val:
+                continue
+        if b.ignore > 0:
+            b.ignore -= 1
+            continue
+        b.hits += 1
+        if b.temporary:
+            b.deleteMe()
+        return b, True
+    return None, False
+```
+
+The two-element return `(breakpoint_or_None, should_stop)` lets the caller distinguish "no breakpoint here" from "breakpoint present but still ignoring."
+
+### Setting a breakpoint (lines 421 to 460)
+
+<CpyLink path="Lib/bdb.py" lines="421-460" />
+
+`set_break` validates that the requested file and line actually exist before creating a `Breakpoint`. It calls `canonic` on the filename (resolving symlinks and normalising case) so that lookups from the trace hook always match lookups from user commands. If the line is not executable, it returns an error string rather than raising, which lets `pdb` report the problem without crashing the session.
+
+```python
+def set_break(self, filename, lineno, temporary=False, cond=None, funcname=None):
+    filename = self.canonic(filename)
+    import linecache
+    line = linecache.getline(filename, lineno)
+    if not line:
+        return 'Line %s:%d does not exist' % (filename, lineno)
+    bp = Breakpoint(filename, lineno, temporary, cond, funcname)
+    return bp
+```
+
+The returned value is either a `Breakpoint` instance or an error string. Callers check `isinstance(result, str)` to detect failure.
+
+## gopy mirror
+
+`bdb` has not been ported to gopy. The module depends on `sys.settrace`, which requires a per-frame callback mechanism tied to the CPython evaluation loop. A gopy port would need an equivalent hook in the `vm` package before `Bdb` could be wired up meaningfully.
+
+## CPython 3.14 changes
+
+CPython 3.14 added `opcode` as a recognised trace event alongside `call`, `line`, `return`, and `exception`. `trace_dispatch` now passes `opcode` events through to a new `dispatch_opcode` method, which calls `user_opcode`. This enables per-bytecode-instruction breakpoints, used by the new `sys.monitoring` API. The class-level `bpbynumber` list was also switched to a dict to avoid linear scans when breakpoints are deleted by number.

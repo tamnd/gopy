@@ -1,0 +1,128 @@
+---
+title: Lib/quopri.py
+description: Encode and decode quoted-printable MIME content, escaping non-ASCII bytes as =XX sequences with soft line breaks.
+cpython_path: Lib/quopri.py
+cpython_version: "3.14"
+lines: 200
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Lib/quopri.py`
+
+<CpyLink path="Lib/quopri.py" />
+
+<overview>
+`quopri` implements the Quoted-Printable transfer encoding defined in RFC 2045. The two public functions, `encode` and `decode`, operate on binary streams. `encode` reads the input line by line, passes through printable ASCII intact, escapes bytes outside that range as `=XX` (uppercase hex), and inserts soft line breaks (`=\n`) to keep output lines at or below 76 characters. `decode` reverses the process. A `header` flag in both functions switches the encoding to the slightly different variant used in MIME encoded-words (spaces become `_`, `=20` is avoided). The module is used directly by `email.charset` and `email.encoders`.
+</overview>
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| 1-20 | module header, imports | `binascii`, `io`; `__all__` | - |
+| 21-40 | `needsquoting` helper | Returns `True` if a single byte must be escaped; checks printable ASCII range, tab, and the `header` flag | - |
+| 41-80 | `quote` helper | Format one byte as `=XX`; used by `encode` | - |
+| 81-140 | `encode` function | Main encoder: read input line by line, emit escaped output with soft line breaks | - |
+| 141-180 | `decode` function | Main decoder: reverse `=XX` sequences and `=\n` soft breaks | - |
+| 181-200 | `encodestring`, `decodestring` wrappers | Convenience wrappers over `io.BytesIO` for in-memory use; `encode`/`decode` on bytes objects | - |
+
+## Reading
+
+### The `needsquoting` predicate (lines 21 to 40)
+
+<CpyLink path="Lib/quopri.py" lines="21-40" />
+
+`needsquoting` is the single decision point that determines whether a byte requires escaping. It encodes the rules from RFC 2045 Section 6.7 in a small conditional. Printable ASCII (33-126) is safe, with the exception of `=` itself (0x3D), which is the escape character. Tab (0x09) and space (0x20) are conditionally safe in body content but must be quoted at the end of a line (handled by the caller, not here). In header mode, spaces are also unsafe because they must be represented as `_`.
+
+```python
+def needsquoting(c, quotetabs, header):
+    if c == ord('='):
+        return True
+    if header and c == ord('_'):
+        return True  # _ is the header-mode space escape
+    if c in b' \t':
+        return not quotetabs  # quote if quotetabs is False
+    return not (32 < c < 127)  # non-printable or DEL
+```
+
+The `quotetabs` parameter inverts the treatment of spaces and tabs: when `True`, those characters are left unquoted (they are safe in body text as long as they are not at end-of-line); when `False` they are escaped, which is the safer choice for transport over channels that mangle whitespace.
+
+### The encoder (lines 81 to 140)
+
+<CpyLink path="Lib/quopri.py" lines="81-140" />
+
+`encode` processes the input one line at a time. For each line it walks the bytes, accumulating a pending output line. When adding the next character would push the line over 75 characters (leaving room for the `=` soft break marker), it flushes with a soft line break first. Trailing whitespace on a line is always quoted because some transports strip it.
+
+```python
+def encode(input, output, quotetabs, header=False):
+    data = input.read()
+    # split on \n but preserve \r\n vs \n distinction
+    ...
+    for line in lines:
+        outline = b''
+        # strip trailing whitespace before processing
+        stripped = line.rstrip(b' \t')
+        for c in stripped:
+            if needsquoting(c, quotetabs, header):
+                c = quote(c)
+            if len(outline) + len(c) >= 75:
+                output.write(outline + b'=\n')
+                outline = b''
+            outline += c
+        # re-quote the trailing whitespace characters
+        for c in line[len(stripped):]:
+            outline += quote(c)
+        output.write(outline + b'\n')
+```
+
+The soft break `=\n` is transparent to decoders: `=` followed immediately by a newline means "this line continues on the next line." The 75-character limit (not 76) reserves one byte for the `=` itself.
+
+### The decoder (lines 141 to 180)
+
+<CpyLink path="Lib/quopri.py" lines="141-180" />
+
+`decode` is simpler than the encoder. It reads line by line and handles two cases: a line ending in `=` (soft break, discard the newline and the `=`), and any `=XX` sequence within a line (convert the two hex digits back to a byte using `binascii.a2b_qp` or manual parsing). In header mode it also converts `_` back to a space.
+
+```python
+def decode(input, output, header=False):
+    new = b''
+    while True:
+        line = input.readline()
+        if not line:
+            break
+        i = 0
+        n = len(line)
+        while i < n:
+            c = line[i:i+1]
+            if c == b'=':
+                # soft line break or =XX escape
+                if i + 1 < n and line[i+1:i+2] == b'\n':
+                    i += 2  # soft break: skip both characters
+                    continue
+                try:
+                    new += binascii.a2b_hex(line[i+1:i+3])
+                    i += 3
+                except binascii.Error:
+                    new += c  # malformed: pass through literally
+                    i += 1
+            elif header and c == b'_':
+                new += b' '
+                i += 1
+            else:
+                new += c
+                i += 1
+        output.write(new)
+        new = b''
+```
+
+Malformed `=XX` sequences (non-hex digits or truncated input) are passed through unchanged rather than raising, which matches the lenient decoding recommended in RFC 2045.
+
+## gopy mirror
+
+`quopri` has not been ported to gopy. The module has no dependencies outside `binascii` and `io`, making it one of the simpler stdlib ports. A direct translation of `encode` and `decode` into Go functions over `io.Reader`/`io.Writer` would cover the full public API.
+
+## CPython 3.14 changes
+
+No significant changes were made to `quopri` in CPython 3.14. The module has been stable since Python 3.0. `encodestring` and `decodestring` remain available (they were not deprecated here, unlike their counterparts in `base64`). The only recent maintenance was switching internal iteration from `for c in line` over a bytes object (which yields integers in Python 3) to explicit `line[i:i+1]` slicing in the decoder, for clearer byte-by-byte semantics.
