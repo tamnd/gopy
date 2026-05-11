@@ -61,6 +61,10 @@ func init() {
 	//
 	// CPython: Objects/unicodeobject.c:11556 unicode_repeat
 	strType.Sequence = &SequenceMethods{
+		Length: func(o Object) (int, error) {
+			s := o.(*Unicode)
+			return s.length, nil
+		},
 		Repeat: func(o Object, n int) (Object, error) {
 			s := o.(*Unicode)
 			if n <= 0 {
@@ -175,8 +179,9 @@ func unicodeHash(o Object) (int64, error) {
 	return h, nil
 }
 
-// unicodeRichCmp implements equality comparison. Ordering (<, <=, >,
-// >=) lands when 1677-B brings the full method surface in.
+// unicodeRichCmp implements all six rich comparisons. The lexicographic
+// ordering for <, <=, >, >= compares the underlying Go strings, which
+// matches CPython for ASCII and well-formed UTF-8 byte ordering.
 //
 // CPython: Objects/unicodeobject.c:L11297 unicode_richcompare
 func unicodeRichCmp(a, b Object, op CompareOp) (Object, error) {
@@ -190,6 +195,14 @@ func unicodeRichCmp(a, b Object, op CompareOp) (Object, error) {
 		return NewBool(as.v == bs.v), nil
 	case CompareNE:
 		return NewBool(as.v != bs.v), nil
+	case CompareLT:
+		return NewBool(as.v < bs.v), nil
+	case CompareLE:
+		return NewBool(as.v <= bs.v), nil
+	case CompareGT:
+		return NewBool(as.v > bs.v), nil
+	case CompareGE:
+		return NewBool(as.v >= bs.v), nil
 	}
 	return NotImplemented(), nil
 }

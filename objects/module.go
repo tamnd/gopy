@@ -80,6 +80,16 @@ func (m *Module) SetState(s any) { m.state = s }
 func moduleGetattr(o Object, name Object) (Object, error) {
 	m := o.(*Module)
 	key := attrNameStr(name)
+	// __dict__ is the canonical module attribute that exposes the
+	// backing namespace. CPython sets it via module_init_dict and
+	// answers tp_getattro by checking the slot before the dict; gopy
+	// keeps __dict__ off the dict to avoid the obvious self-reference,
+	// so satisfy the lookup here.
+	//
+	// CPython: Objects/moduleobject.c:88 module_init_dict
+	if key == "__dict__" {
+		return m.dict, nil
+	}
 	v, err := m.dict.GetItem(name)
 	if err == nil {
 		return v, nil

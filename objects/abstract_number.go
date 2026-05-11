@@ -10,11 +10,21 @@ package objects
 
 import "fmt"
 
-// numberSlot fetches op from the type's NumberMethods, or nil when the
-// type does not opt into the protocol.
+// numberSlot fetches op from the type's NumberMethods. Walks the MRO
+// so subclasses without their own NumberMethods inherit the parent's
+// slot table. CPython does the equivalent via inherit_slots() during
+// PyType_Ready, copying parent slot pointers when the child leaves them
+// NULL; here we resolve the inheritance lazily on each lookup.
+//
+// CPython: Objects/typeobject.c:7895 inherit_slots
 func numberSlot(o Object, op func(*NumberMethods) func(a, b Object) (Object, error)) func(a, b Object) (Object, error) {
-	if n := o.Type().Number; n != nil {
-		return op(n)
+	for _, base := range o.Type().MRO {
+		if base == nil || base.Number == nil {
+			continue
+		}
+		if fn := op(base.Number); fn != nil {
+			return fn
+		}
 	}
 	return nil
 }

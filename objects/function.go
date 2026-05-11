@@ -67,9 +67,116 @@ func init() {
 	//
 	// CPython: Objects/funcobject.c:1057 func_descr_get
 	FunctionType.DescrGet = functionDescrGet
+	FunctionType.Getattro = GenericGetAttr
+	registerFunctionGetSets()
 	// FunctionType.Call is wired by the vm package on init since the
 	// call needs to push a frame and drive Eval; doing that from
 	// objects would be a circular import.
+}
+
+// registerFunctionGetSets exposes the introspection attributes
+// CPython publishes on function objects. The setters that exist on
+// the function struct (SetCode, SetDefaults, SetKwDefaults,
+// SetClosure, SetAnnotations) become write-through; the remaining
+// names are read-only.
+//
+// CPython: Objects/funcobject.c:806 func_getsetlist
+func registerFunctionGetSets() {
+	noneIfNil := func(o Object) Object {
+		if o == nil {
+			return None()
+		}
+		return o
+	}
+	SetTypeDescr(FunctionType, "__doc__", NewGetSetDescr("__doc__",
+		func(o Object) (Object, error) { return noneIfNil(o.(*Function).Doc), nil },
+		func(o Object, v Object) error { o.(*Function).Doc = v; return nil }))
+	SetTypeDescr(FunctionType, "__name__", NewGetSetDescr("__name__",
+		func(o Object) (Object, error) { return NewStr(o.(*Function).Name), nil },
+		func(o Object, v Object) error {
+			s, ok := v.(*Unicode)
+			if !ok {
+				return fmt.Errorf("TypeError: __name__ must be set to a string object")
+			}
+			o.(*Function).Name = s.Value()
+			return nil
+		}))
+	SetTypeDescr(FunctionType, "__qualname__", NewGetSetDescr("__qualname__",
+		func(o Object) (Object, error) { return NewStr(o.(*Function).Qualname), nil },
+		func(o Object, v Object) error {
+			s, ok := v.(*Unicode)
+			if !ok {
+				return fmt.Errorf("TypeError: __qualname__ must be set to a string object")
+			}
+			o.(*Function).Qualname = s.Value()
+			return nil
+		}))
+	SetTypeDescr(FunctionType, "__module__", NewGetSetDescr("__module__",
+		func(o Object) (Object, error) { return noneIfNil(o.(*Function).Module), nil },
+		func(o Object, v Object) error { o.(*Function).Module = v; return nil }))
+	SetTypeDescr(FunctionType, "__defaults__", NewGetSetDescr("__defaults__",
+		func(o Object) (Object, error) {
+			f := o.(*Function)
+			if f.Defaults == nil {
+				return None(), nil
+			}
+			return f.Defaults, nil
+		},
+		nil))
+	SetTypeDescr(FunctionType, "__kwdefaults__", NewGetSetDescr("__kwdefaults__",
+		func(o Object) (Object, error) {
+			f := o.(*Function)
+			if f.KwDefaults == nil {
+				return None(), nil
+			}
+			return f.KwDefaults, nil
+		},
+		nil))
+	SetTypeDescr(FunctionType, "__closure__", NewGetSetDescr("__closure__",
+		func(o Object) (Object, error) {
+			f := o.(*Function)
+			if f.Closure == nil {
+				return None(), nil
+			}
+			return f.Closure, nil
+		},
+		nil))
+	SetTypeDescr(FunctionType, "__code__", NewGetSetDescr("__code__",
+		func(o Object) (Object, error) {
+			c := o.(*Function).Code
+			if c == nil {
+				return None(), nil
+			}
+			return c, nil
+		},
+		nil))
+	SetTypeDescr(FunctionType, "__globals__", NewGetSetDescr("__globals__",
+		func(o Object) (Object, error) { return noneIfNil(o.(*Function).Globals), nil },
+		nil))
+	SetTypeDescr(FunctionType, "__builtins__", NewGetSetDescr("__builtins__",
+		func(o Object) (Object, error) { return noneIfNil(o.(*Function).Builtins), nil },
+		nil))
+	SetTypeDescr(FunctionType, "__annotations__", NewGetSetDescr("__annotations__",
+		func(o Object) (Object, error) {
+			d, err := o.(*Function).GetAnnotations()
+			if err != nil {
+				return nil, err
+			}
+			if d == nil {
+				return NewDict(), nil
+			}
+			return d, nil
+		},
+		nil))
+	SetTypeDescr(FunctionType, "__type_params__", NewGetSetDescr("__type_params__",
+		func(o Object) (Object, error) {
+			t := o.(*Function).Typeparams
+			if t == nil {
+				return NewTuple(nil), nil
+			}
+			return t, nil
+		},
+		nil))
 }
 
 // functionDescrGet implements the function descriptor protocol:
@@ -79,7 +186,7 @@ func init() {
 //
 // CPython: Objects/funcobject.c:1057 func_descr_get
 func functionDescrGet(descr Object, owner Object, _ *Type) (Object, error) {
-	if owner == nil || owner == None() {
+	if owner == nil {
 		return descr, nil
 	}
 	return NewBoundMethod(descr, owner), nil

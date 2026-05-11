@@ -1,6 +1,7 @@
 package objects
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 )
@@ -29,6 +30,7 @@ type dictEntry struct {
 type Dict struct {
 	Header
 	entries    []dictEntry
+	order      []int       // slot indices in insertion order; one entry per live key
 	used       int         // active entries
 	fill       int         // active entries + dummies; only resets on resize
 	kind       dictKind    // DictKeysKind: gates the four lookup variants
@@ -138,10 +140,8 @@ func dictContainsMethod(args []Object, _ map[string]Object) (Object, error) {
 // CPython: Objects/dictobject.c:4022 dict_traverse
 func dictTraverse(o Object, visit Visitor) error {
 	d := o.(*Dict)
-	for _, e := range d.entries {
-		if !e.used {
-			continue
-		}
+	for _, slot := range d.order {
+		e := &d.entries[slot]
 		if e.key != nil {
 			if err := visit(e.key); err != nil {
 				return err
@@ -176,10 +176,8 @@ func (d *Dict) Len() int { return d.used }
 // CPython: Objects/dictobject.c PyDict_Keys
 func (d *Dict) Keys() []Object {
 	out := make([]Object, 0, d.used)
-	for _, e := range d.entries {
-		if e.used {
-			out = append(out, e.key)
-		}
+	for _, slot := range d.order {
+		out = append(out, d.entries[slot].key)
 	}
 	return out
 }
@@ -243,7 +241,27 @@ func (d *Dict) lookup(h int64, key Object) (idx int, found bool, err error) {
 
 func dictLen(o Object) (int, error) { return o.(*Dict).Len(), nil }
 
-func dictMappingGet(o, key Object) (Object, error) { return o.(*Dict).GetItem(key) }
+// dictMappingGet is the type-level __getitem__. Mirrors dict_subscript:
+// on miss it raises KeyError with the key as the value, so user code
+// `except KeyError` catches the failure instead of seeing the raw
+// errKeyNotFound sentinel.
+//
+// CPython: Objects/dictobject.c:2229 dict_subscript
+func dictMappingGet(o, key Object) (Object, error) {
+	d := o.(*Dict)
+	v, err := d.GetItem(key)
+	if err != nil {
+		if errors.Is(err, errKeyNotFound) {
+			repr, rerr := Repr(key)
+			if rerr != nil {
+				repr = "?"
+			}
+			return nil, fmt.Errorf("KeyError: %s", repr)
+		}
+		return nil, err
+	}
+	return v, nil
+}
 
 func dictMappingSet(o, key, value Object) error { return o.(*Dict).SetItem(key, value) }
 
@@ -254,10 +272,8 @@ func dictRepr(o Object) (string, error) {
 	var b strings.Builder
 	b.WriteByte('{')
 	first := true
-	for _, e := range d.entries {
-		if !e.used {
-			continue
-		}
+	for _, slot := range d.order {
+		e := &d.entries[slot]
 		if !first {
 			b.WriteString(", ")
 		}
