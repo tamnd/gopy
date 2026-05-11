@@ -1,0 +1,154 @@
+---
+title: "cmathmodule.c — complex math functions"
+description: "Annotated reading of Modules/cmathmodule.c, the C backend for Python's cmath module"
+cpython_path: Modules/cmathmodule.c
+cpython_version: "3.14"
+lines: 900
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`Modules/cmathmodule.c` implements all functions in the `cmath` module. It operates on
+`Py_complex` structs (a `re`/`im` double pair) and delegates arithmetic helpers to
+`Objects/complexobject.c`. The file is compact at roughly 900 lines because the actual
+IEEE arithmetic is handled by the C99 `<complex.h>` functions beneath a thin Python wrapper.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1–60 | includes, `Py_complex` usage | Setup; `M_PI`, `M_E` constants |
+| 61–180 | `cmath_phase`, `cmath_polar`, `cmath_rect` | Coordinate conversion functions |
+| 181–340 | `cmath_log` | Complex logarithm with optional base argument |
+| 341–500 | `cmath_sqrt` | Square root with branch cut on negative real axis |
+| 501–620 | `cmath_exp`, `cmath_sin`, `cmath_cos`, etc. | Transcendental wrappers |
+| 621–720 | `cmath_isfinite`, `cmath_isinf`, `cmath_isnan` | Classification predicates |
+| 721–820 | `cmath_isclose` | PEP 485 approximate equality |
+| 821–900 | method table, `PyModuleDef` | Module registration |
+
+## Reading
+
+### `Py_complex` struct and arithmetic helpers
+
+All functions receive and return `Py_complex`. The four arithmetic helpers live in
+`Objects/complexobject.c` and are declared in `cpython/complexobject.h`.
+
+```c
+// CPython: Include/cpython/complexobject.h:14 Py_complex
+typedef struct {
+    double real;
+    double imag;
+} Py_complex;
+```
+
+Addition and multiplication are defined as:
+
+```c
+// CPython: Objects/complexobject.c:22 _Py_c_sum
+Py_complex
+_Py_c_sum(Py_complex left, Py_complex right)
+{
+    Py_complex r;
+    r.real = left.real + right.real;
+    r.imag = left.imag + right.imag;
+    return r;
+}
+```
+
+Division (`_Py_c_quot`) uses Smith's algorithm to avoid unnecessary overflow on large imaginary
+parts, which is why it is not a naive four-multiplication formula.
+
+### `cmath_log` with optional base
+
+`cmath.log(z)` computes the principal value of the natural log. The two-argument form
+`cmath.log(z, base)` divides by `log(base)`, matching the real `math.log` signature.
+
+```c
+// CPython: Modules/cmathmodule.c:193 cmath_log_impl
+static PyObject *
+cmath_log_impl(PyObject *module, Py_complex x, PyObject *y_obj)
+{
+    Py_complex y;
+    errno = 0;
+    x = c_log(x);          /* principal value */
+    if (y_obj != NULL) {
+        y = PyComplex_AsCComplex(y_obj);
+        if (PyErr_Occurred()) return NULL;
+        y = c_log(y);
+        x = _Py_c_quot(x, y);
+    }
+    if (errno != 0)
+        return math_error();
+    return PyComplex_FromCComplex(x);
+}
+```
+
+The `c_log` helper (a file-static function a few lines above) applies the standard formula
+`log(r) + i*theta` where `r = hypot(re, im)` and `theta = atan2(im, re)`.
+
+### Branch cut in `cmath_sqrt`
+
+Complex square root is defined with a branch cut along the negative real axis. CPython's
+implementation follows Kahan's algorithm to preserve accuracy near the branch cut.
+
+```c
+// CPython: Modules/cmathmodule.c:358 c_sqrt
+static Py_complex
+c_sqrt(Py_complex z)
+{
+    Py_complex r;
+    double s, d;
+    if (z.imag == 0.0) {
+        if (z.real < 0.0) {
+            r.real = 0.0;
+            r.imag = copysign(sqrt(-z.real), z.imag);
+        } else {
+            r.real = sqrt(z.real);
+            r.imag = z.imag;
+        }
+        return r;
+    }
+    /* general case via Kahan */
+    s = sqrt(0.5 * (fabs(z.real) + hypot(z.real, z.imag)));
+    d = 0.5 * z.imag / s;
+    if (z.real >= 0.0) { r.real = s;  r.imag = d; }
+    else               { r.real = fabs(d); r.imag = copysign(s, z.imag); }
+    return r;
+}
+```
+
+The `copysign` calls on the `imag == 0` path ensure that `sqrt(-1+0j)` and `sqrt(-1-0j)` land
+on opposite sides of the branch cut.
+
+### Classification predicates
+
+`cmath.isfinite`, `cmath.isinf`, and `cmath.isnan` each test both components independently.
+
+```c
+// CPython: Modules/cmathmodule.c:638 cmath_isfinite_impl
+static PyObject *
+cmath_isfinite_impl(PyObject *module, Py_complex z)
+{
+    return PyBool_FromLong(
+        (long)(Py_IS_FINITE(z.real) && Py_IS_FINITE(z.imag)));
+}
+```
+
+## gopy notes
+
+gopy represents complex numbers as Go's built-in `complex128`. Conversion to/from `Py_complex`
+is a straight field copy; no helper port is needed. The branch-cut behaviour of `cmath_sqrt` is
+worth noting for any future port of `math/cmplx` compatibility tests: Go's `cmplx.Sqrt` follows
+the same Kahan algorithm so results should agree bit-for-bit.
+
+`_Py_c_quot` (Smith's division) has no direct equivalent in Go's runtime; gopy should port it
+verbatim if it ever needs to expose Python-compatible complex division semantics in C callbacks.
+
+## CPython 3.14 changes
+
+- `cmath.exp2(z)` and `cmath.log2(z)` were added in 3.11 and remain stable in 3.14.
+- `cmath.isclose` gained a fast path for identical objects (same pointer) in 3.13, matching the
+  `math.isclose` optimisation.
+- The internal `c_log` helper was inlined in 3.14 to allow the compiler to constant-fold the
+  base-2 and base-10 specialisations.

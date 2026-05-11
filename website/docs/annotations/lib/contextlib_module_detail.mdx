@@ -1,0 +1,128 @@
+---
+title: "Lib/contextlib.py"
+description: "CPython context manager utilities — contextmanager, ExitStack, suppress, nullcontext"
+cpython_path: Lib/contextlib.py
+cpython_version: "3.14"
+lines: 600
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`Lib/contextlib.py` provides the standard toolkit for writing and composing
+context managers in pure Python. It has no C accelerator; every class and
+decorator is implemented here.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1–30 | module preamble | imports, `__all__` |
+| 31–60 | `AbstractContextManager` | ABC; default `__enter__`/`__exit__` |
+| 61–90 | `AbstractAsyncContextManager` | async variant |
+| 91–160 | `_GeneratorContextManager` | base for generator-backed CMs |
+| 161–210 | `contextmanager` | decorator; wraps a generator |
+| 211–260 | `asynccontextmanager` | async variant |
+| 261–290 | `closing` | calls `close()` on exit |
+| 291–330 | `nullcontext` | no-op context manager |
+| 331–370 | `suppress` | swallows listed exception types |
+| 371–420 | `redirect_stdout` / `redirect_stderr` | rebind `sys.stdout`/`sys.stderr` |
+| 421–600 | `ExitStack` / `AsyncExitStack` | composable stack of CMs and callbacks |
+
+## Reading
+
+### contextmanager and GeneratorContextManager.__enter__
+
+`contextmanager` wraps a generator function. `__enter__` advances the
+generator to its first `yield` and returns the yielded value.
+
+```python
+# CPython: Lib/contextlib.py:161 contextmanager
+def contextmanager(func):
+    @wraps(func)
+    def helper(*args, **kwds):
+        return _GeneratorContextManager(func, args, kwds)
+    return helper
+```
+
+```python
+# CPython: Lib/contextlib.py:119 _GeneratorContextManager.__enter__
+def __enter__(self):
+    try:
+        return next(self.gen)
+    except StopIteration:
+        raise RuntimeError("generator didn't yield") from None
+```
+
+### GeneratorContextManager.__exit__
+
+`__exit__` must handle three cases: normal exit (send `None`, expect
+`StopIteration`), exception suppression (throw into generator, expect
+`StopIteration`), and exception propagation (generator raises a different or
+the same exception).
+
+```python
+# CPython: Lib/contextlib.py:128 _GeneratorContextManager.__exit__
+def __exit__(self, typ, value, traceback):
+    if typ is None:
+        try:
+            next(self.gen)
+        except StopIteration:
+            return False
+        raise RuntimeError("generator didn't stop")
+    else:
+        try:
+            self.gen.throw(value)
+        except StopIteration as exc:
+            return exc is not value
+        except RuntimeError as exc:
+            # avoid suppressing if StopIteration is raised inside the cm
+            if exc is value:
+                return False
+            raise
+        except BaseException as exc:
+            if exc is not value:
+                raise
+            return False
+        raise RuntimeError("generator didn't stop after throw()")
+```
+
+### suppress
+
+Catches the listed types in `__exit__` and returns `True` to swallow them.
+
+```python
+# CPython: Lib/contextlib.py:331 suppress.__exit__
+def __exit__(self, exctype, excinst, exctb):
+    return exctype is not None and issubclass(exctype, self._exceptions)
+```
+
+### ExitStack
+
+`ExitStack` maintains a deque of callbacks. `__exit__` pops and calls each one
+in LIFO order, accumulating exceptions via `__context__` chaining.
+
+```python
+# CPython: Lib/contextlib.py:500 ExitStack._push_exit_callback
+def _push_exit_callback(self, callback, is_sync=True):
+    self._exit_callbacks.append((is_sync, callback))
+```
+
+## gopy notes
+
+- `_GeneratorContextManager` requires `generator.throw(value)` semantics.
+  gopy routes generator throw through `vm/eval_unwind.go`.
+- `ExitStack.__exit__` walks a deque of callbacks and must preserve exception
+  chaining (`__context__`). gopy tracks the chain in `objects/instance.go`.
+- `suppress` is simple enough that gopy ports it as a thin struct with an
+  `__exit__` method rather than importing the Python source.
+- `redirect_stdout` writes to `sys.stdout`; gopy resolves `sys` through the
+  module registry in `module/sys/module.go`.
+
+## CPython 3.14 changes
+
+- `nullcontext` gained `async` support in 3.10; no interface change in 3.14.
+- `contextmanager` and `asynccontextmanager` now preserve the `__wrapped__`
+  attribute via `functools.wraps` (behaviour unchanged from 3.12).
+- `ExitStack.push` now accepts any callable with a compatible signature, not
+  just context managers; documented explicitly in 3.14.

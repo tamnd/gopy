@@ -1,0 +1,118 @@
+---
+title: Include/internal/pycore_signal.h
+description: "Internal signal handling declarations: wakeup fd, pending-call check, and post-fork reset"
+cpython_path: Include/internal/pycore_signal.h
+cpython_version: "3.14"
+lines: 80
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`Include/internal/pycore_signal.h` declares the C-internal signal handling
+infrastructure. The public API (`signal.signal`, `signal.set_wakeup_fd`) is
+in `Modules/signalmodule.c`. This header covers the pieces that the eval loop
+and runtime init touch directly: the eval-breaker check, the wakeup fd
+initializer, post-fork cleanup, and the per-signal handler table.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-20 | `NSIG` / `Py_NSIG` | Maximum signal number; platform-derived with Windows fallback |
+| 21-35 | `_Py_SignalHandler_t` / `Handlers` array | Per-signal struct holding the `PyObject *` handler and `tripped` flag |
+| 36-48 | `_PySignal_Wakeup_Init` | Initializes the self-pipe / eventfd wakeup file descriptor |
+| 49-60 | `_Py_HandlePending` | Checks `_Py_eval_breaker` and dispatches pending calls and signals |
+| 61-72 | `_PySignal_AfterFork` | Resets signal state in the child process after `os.fork` |
+| 73-80 | `_Py_SET_53BIT_SIZE_T_OVERFLOW` | Windows guard for 53-bit `size_t` truncation in signal masks |
+
+## Reading
+
+### NSIG and the Handlers array
+
+```c
+// CPython: Include/internal/pycore_signal.h:12 Py_NSIG
+#ifndef NSIG
+#  define NSIG 64
+#endif
+#define Py_NSIG NSIG
+
+typedef struct {
+    PyObject *func;   /* Python handler or SIG_DFL / SIG_IGN sentinel */
+    _Py_atomic_int tripped; /* set to 1 by the C signal handler */
+} _Py_SignalHandlerInfo;
+
+extern _Py_SignalHandlerInfo _Py_Handlers[Py_NSIG];
+```
+
+The C signal handler (installed via `sigaction`) writes only to
+`_Py_Handlers[signum].tripped` using an atomic store, then sets the eval
+breaker. The eval loop reads the table and dispatches to the Python handler
+without holding the GIL in the C handler itself.
+
+### `_Py_HandlePending`
+
+```c
+// CPython: Include/internal/pycore_signal.h:52 _Py_HandlePending
+PyAPI_FUNC(int) _Py_HandlePending(PyThreadState *tstate);
+```
+
+Called from `_PyEval_EvalFrameDefault` when `_Py_eval_breaker` is non-zero.
+It iterates over every set bit in the breaker word and dispatches:
+- `_PY_SIGNALS_PENDING_BIT`: walks `_Py_Handlers`, calls Python handlers for
+  any `tripped` signal.
+- `_PY_CALLS_TO_DO_BIT`: drains `tstate->interp->calls_to_do` (pending calls
+  registered via `Py_AddPendingCall`).
+- `_PY_ASYNC_EXCEPTION_BIT`: raises a pending asynchronous exception set by
+  `PyThreadState_SetAsyncExc`.
+
+The function returns 0 on success or -1 if it sets an exception, at which
+point the eval loop unwinds.
+
+### `_PySignal_Wakeup_Init`
+
+```c
+// CPython: Include/internal/pycore_signal.h:38 _PySignal_Wakeup_Init
+PyAPI_FUNC(int) _PySignal_Wakeup_Init(int fd);
+```
+
+Sets the wakeup fd used by `signal.set_wakeup_fd`. On Linux an `eventfd` is
+preferred; on other POSIX systems a non-blocking `write` to a self-pipe is
+used. On Windows, a socket pair is used instead. The fd is written to (with
+the signal byte) by the C signal handler so that `select`/`poll`/`epoll`
+event loops wake up immediately.
+
+### `_PySignal_AfterFork`
+
+```c
+// CPython: Include/internal/pycore_signal.h:61 _PySignal_AfterFork
+PyAPI_FUNC(void) _PySignal_AfterFork(void);
+```
+
+Called in the child process by `os.fork` via `pthread_atfork`. It resets
+`_Py_Handlers[i].tripped` for all signals, clears the wakeup fd, and
+re-installs default C handlers for signals that had Python handlers in the
+parent. This prevents the child from invoking a Python callable that was only
+valid in the parent's address space.
+
+## gopy notes
+
+- `vm/eval_gen.go` checks a `pendingCalls` channel rather than an atomic
+  eval-breaker word. The effect is the same: the eval loop yields to pending
+  work at safe points.
+- Signal handling is not yet implemented in gopy; `signal.signal` raises
+  `NotImplementedError`. The `_Py_HandlePending` equivalent exists as a
+  stub in `vm/eval_simple.go`.
+- `_PySignal_AfterFork` has no counterpart yet; `os.fork` is also a stub.
+  Both are tracked as v0.12.1 tasks.
+
+## CPython 3.14 changes
+
+- 3.12 replaced the single global `eval_breaker` int with a per-interpreter
+  bitfield (`_PyEval_BreakerBits`), making `_Py_HandlePending` per-interpreter
+  rather than per-process.
+- 3.13 changed `_PySignal_Wakeup_Init` to accept a wakeup fd per
+  sub-interpreter so that multiple sub-interpreters can each have an
+  independent event-loop integration.
+- 3.14 has no changes to this header beyond internal renaming to align with
+  the `_Py_atomic_*` macro family introduced in 3.12.

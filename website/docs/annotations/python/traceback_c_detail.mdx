@@ -1,0 +1,131 @@
+---
+title: "Python/traceback.c"
+description: "Traceback formatting and display in CPython 3.14"
+cpython_path: Python/traceback.c
+cpython_version: "3.14"
+lines: 1300
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`Python/traceback.c` builds and renders the familiar `Traceback (most recent call last):` output. It reads source lines via a `PyDict` cache, computes column offsets introduced in 3.11, and renders the squiggly-underline carets that pinpoint the exact token that raised.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| ~40–120 | `_PyTraceBack_Here` | Inserts a new `PyTracebackObject` at the head of `tstate->current_exception.__traceback__` |
+| ~130–210 | `PyTraceBack_Here` | Public alias; calls `_PyTraceBack_Here` and attaches to current exception |
+| ~220–350 | `PyTraceBack_Print` | Iterates the chain and calls `tb_printinternal` for each frame |
+| ~360–500 | `tb_printinternal` | Formats `File "x", line N, in func` header lines |
+| ~510–720 | `tb_displayline` | Reads source text and renders the caret underline |
+| ~730–900 | `_Py_DisplaySourceLine` | Fetches one source line from the `linecache`-style `PyDict` cache |
+| ~910–1050 | `_PyTraceBack_WriteIndented` | Low-level writer with indent prefix; used by `tb_displayline` |
+| ~1060–1300 | `_Py_RemoveTracebackHere` | Strips the innermost traceback entry (used by context-manager cleanup) |
+
+## Reading
+
+### Inserting a traceback frame
+
+Every time Python raises an exception while executing bytecode, `PUSH_EXC_INFO` calls `_PyTraceBack_Here` to prepend a new frame record.
+
+```c
+// CPython: Python/traceback.c:58 _PyTraceBack_Here
+int
+_PyTraceBack_Here(PyFrameObject *frame)
+{
+    PyObject *exc = PyErr_GetRaisedException();
+    PyTracebackObject *tb = (PyTracebackObject *)
+        PyObject_GC_New(PyTracebackObject, &PyTraceBack_Type);
+    if (tb == NULL) { PyErr_SetRaisedException(exc); return -1; }
+    tb->tb_next    = (PyTracebackObject *)PyException_GetTraceback(exc);
+    tb->tb_frame   = (PyFrameObject *)Py_NewRef(frame);
+    tb->tb_lasti   = PyFrame_GetLasti(frame);
+    tb->tb_lineno  = PyFrame_GetLineNumber(frame);
+    PyException_SetTraceback(exc, (PyObject *)tb);
+    Py_DECREF(tb);
+    PyErr_SetRaisedException(exc);
+    return 0;
+}
+```
+
+The chain grows forward (most recent call is at `tb->tb_next == NULL`), but `PyTraceBack_Print` reverses the display order.
+
+### Printing the full chain
+
+`PyTraceBack_Print` iterates every `PyTracebackObject` link and delegates per-frame formatting to `tb_printinternal`. It caps recursion at `Py_GetRecursionLimit()` to avoid infinite loops in self-referential tracebacks.
+
+```c
+// CPython: Python/traceback.c:250 PyTraceBack_Print
+int
+PyTraceBack_Print(PyObject *v, PyObject *f)
+{
+    if (v == NULL || !PyTraceBack_Check(v))
+        return 0;
+    int depth = 0;
+    PyTracebackObject *tb = (PyTracebackObject *)v;
+    while (tb != NULL) { depth++; tb = tb->tb_next; }
+    tb = (PyTracebackObject *)v;
+    if (depth > _Py_TRACEBACKLIMIT) {
+        /* skip oldest frames with a "..." message */
+    }
+    return tb_printinternal(tb, f, depth);
+}
+```
+
+### Rendering a source line with carets
+
+`tb_displayline` fetches the raw source text for a given line number and then prints a second line of `^` characters aligned to the column offset range stored in the code object. This was added in 3.11.
+
+```c
+// CPython: Python/traceback.c:545 tb_displayline
+static int
+tb_displayline(PyTracebackObject *tb, PyObject *f, PyObject *filename,
+               int lineno)
+{
+    PyObject *line = _Py_DisplaySourceLine(filename, lineno, 4, NULL);
+    if (line == NULL) return -1;
+    /* Write the source line */
+    if (PyFile_WriteObject(line, f, Py_PRINT_RAW) < 0) goto error;
+    /* Write the caret line using column info from the code object */
+    int col_start = ..., col_end = ...;
+    for (int i = 0; i < col_end; i++)
+        PyFile_WriteString(i >= col_start ? "^" : " ", f);
+    PyFile_WriteString("\n", f);
+    error:
+    Py_DECREF(line);
+    return 0;
+}
+```
+
+### Source line cache
+
+`_Py_DisplaySourceLine` keeps a module-level `PyDict` mapping `(filename, lineno)` to `PyUnicode` source lines. On a cache miss it opens the file with `io.open_code` to honour import hooks.
+
+```c
+// CPython: Python/traceback.c:760 _Py_DisplaySourceLine
+PyObject *
+_Py_DisplaySourceLine(PyObject *filename, int lineno, int indent,
+                      int *truncated)
+{
+    PyObject *cache = _PyImport_GetModuleAttrString("linecache", "cache");
+    PyObject *key   = PyTuple_Pack(2, filename, PyLong_FromLong(lineno));
+    PyObject *hit   = PyDict_GetItemWithError(cache, key);
+    /* ... fallback to file read on miss ... */
+    return hit;
+}
+```
+
+## gopy notes
+
+- `_PyTraceBack_Here` must be called by the VM whenever `PUSH_EXC_INFO` fires. In gopy this is `vm.pushExcInfo` in `vm/eval_unwind.go`.
+- Column offset data lives in `co_exceptiontable` (3.11+). gopy stores this in `compile.Code.ExceptionTable` and exposes it through `objects/code.go`.
+- The `linecache`-style `PyDict` maps to a `map[cacheKey]string` in gopy's `pythonrun` package. Cache invalidation on file change is not required for the v0.12.1 gate.
+- `_Py_RemoveTracebackHere` is called by `contextlib.contextmanager`; gopy must implement it before `module/contextlib` passes the e2e suite.
+
+## CPython 3.14 changes
+
+- 3.11 introduced `co_qualname` in frame display (`in <module>` vs `in ClassName.method`). `tb_printinternal` uses `co_qualname` in 3.14.
+- Column offset encoding moved from `co_linetable` to a dedicated `co_exceptiontable` in 3.11. The 3.14 format is unchanged from 3.12.
+- `_Py_DisplaySourceLine` gained a `truncated` out-parameter in 3.12 to signal that a very long source line was cut. Callers that previously ignored this parameter are not broken.

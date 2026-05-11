@@ -1,0 +1,119 @@
+---
+title: enum.py
+description: "EnumType metaclass, Flag boundary system, and auto() numbering"
+cpython_path: Lib/enum.py
+cpython_version: "3.14"
+lines: 1000
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`Lib/enum.py` is a pure-Python module that implements `Enum`, `Flag`, `IntEnum`,
+`IntFlag`, and `StrEnum`. The metaclass `EnumType` drives class creation; a
+custom `_EnumDict` accumulates member definitions before `__new__` runs.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1–120 | `_EnumDict` | Collects member names and values during class body execution |
+| 121–300 | `EnumType.__new__` | Creates the enum class, resolves `auto()`, freezes members |
+| 301–420 | `Enum.__new__` / `__init__` | Creates each member instance; `__init__` may attach extra attrs |
+| 421–540 | `_generate_next_value_` | Default `auto()` numbering (last value + 1) |
+| 541–700 | `Flag` / `_boundary_` | Bitwise enum with `KEEP`, `EJECT`, `CONFORM`, `STRICT` modes |
+| 701–820 | `IntEnum`, `IntFlag` | Mix-in subclasses that inherit `int` |
+| 821–1000 | `StrEnum`, helpers | Mix-in subclass inheriting `str`; added in 3.11 |
+
+## Reading
+
+### `_EnumDict` and member collection
+
+`_EnumDict` is a plain `dict` subclass whose `__setitem__` intercepts every
+assignment made inside a class body. Assignments that look like enum members
+(not dunder, not descriptor) are saved into `_member_names` in order.
+
+```python
+# CPython: Lib/enum.py:100 _EnumDict.__setitem__
+class _EnumDict(dict):
+    def __setitem__(self, key, value):
+        if _is_sunder(key):
+            ...
+        elif _is_dunder(key):
+            ...
+        elif _is_descriptor(value):
+            ...
+        else:
+            self._member_names[key] = None
+            super().__setitem__(key, value)
+```
+
+### `EnumType.__new__` and class freezing
+
+After the class body runs, `EnumType.__new__` iterates `_member_names`,
+calls `__new__` on the enum base to create each member, then stores the
+members in `_value2member_map_` and replaces the class `__dict__` with a
+read-only proxy.
+
+```python
+# CPython: Lib/enum.py:210 EnumType.__new__
+for key in enum_dict._member_names:
+    value = enum_dict[key]
+    if isinstance(value, auto):
+        value = enum_class._generate_next_value_(
+            key, 1, len(enum_members), last_values)
+    member = new_class.__new__(new_class, value)
+    member._name_ = key
+    member._value_ = value
+    enum_class._value2member_map_[value] = member
+```
+
+### Flag boundary modes
+
+`Flag` members can be combined with `|`. The `_boundary_` class attribute
+controls what happens when a value outside the defined set is used.
+
+```python
+# CPython: Lib/enum.py:600 Flag._missing_
+if boundary is EJECT:
+    return value   # demote to plain int
+elif boundary is KEEP:
+    pass           # keep as Flag even if unknown bits set
+elif boundary is CONFORM:
+    value &= flag_mask
+elif boundary is STRICT:
+    raise ValueError(f"{value!r} is not a valid {cls.__name__}")
+```
+
+### `StrEnum` convenience class
+
+`StrEnum` inherits from both `str` and `Enum`. The default
+`_generate_next_value_` is overridden to return the lowercased member name,
+matching the convention established in 3.11.
+
+```python
+# CPython: Lib/enum.py:900 StrEnum._generate_next_value_
+@staticmethod
+def _generate_next_value_(name, start, count, last_values):
+    return name.lower()
+```
+
+## gopy notes
+
+- `EnumType.__new__` performs heavy use of `type.__new__` and namespace
+  surgery that requires `objects/type.go` and `objects/namespace.go` to
+  support writable-then-frozen `__dict__` proxies.
+- `_value2member_map_` is a plain dict; the gopy port maps it to a Go
+  `map[any]*EnumMember` inside the type object.
+- `Flag` bitwise ops depend on `__or__`, `__and__`, `__xor__`, and
+  `__invert__` being defined on the class, not just the instance.
+
+## CPython 3.14 changes
+
+- `StrEnum` and `_boundary_` arrived in 3.11; the 3.14 file consolidates
+  the boundary dispatch and removes several deprecated aliases.
+- `type` statement support (`type Color = Enum[...]`) wired through
+  `EnumType.__class_getitem__` landed in 3.12 and is present unchanged
+  in 3.14.
+- `auto()` now accepts a `start` keyword argument forwarded to
+  `_generate_next_value_`.

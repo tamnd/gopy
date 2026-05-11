@@ -1,0 +1,163 @@
+---
+title: "Objects/object.c"
+description: "Core object protocol in CPython 3.14"
+cpython_path: Objects/object.c
+cpython_version: "3.14"
+lines: 2000
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`Objects/object.c` is the foundation of CPython's object model. It implements `repr`, `str`, rich comparison, hashing, attribute access through the descriptor protocol, and the emergency `_PyObject_Dump` helper used by debuggers. The `Py_REFCNT` and `Py_TYPE` accessor macros are defined in `Include/object.h` but their invariants are enforced here.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| ~50–180 | `PyObject_Repr` | Calls `tp_repr`; guards against recursive repr and non-string return |
+| ~190–280 | `PyObject_Str` | Calls `tp_str`, falls back to `tp_repr`; enforces string return type |
+| ~290–350 | `PyObject_ASCII` | Calls `PyObject_Repr` then escapes non-ASCII codepoints |
+| ~360–520 | `PyObject_RichCompare` | Dispatches to `tp_richcompare`; implements reflected retry |
+| ~530–620 | `PyObject_RichCompareBool` | Wraps `PyObject_RichCompare` and converts to C int |
+| ~630–720 | `PyObject_Hash` | Dispatches `tp_hash`; detects `__hash__ = None` sentinel |
+| ~730–900 | `PyObject_GetAttr` | Descriptor protocol: data descriptor then instance dict then non-data descriptor |
+| ~910–1050 | `PyObject_SetAttr` | Descriptor `__set__`; falls back to `tp_setattro` |
+| ~1060–1200 | `PyObject_GenericGetAttr` | Default `tp_getattro` used by most Python-defined types |
+| ~1210–1350 | `PyObject_GenericSetAttr` | Default `tp_setattro`; writes to `__dict__` slot |
+| ~1360–1500 | `_PyObject_Dump` | Emergency stderr dump of type, refcnt, and repr for crash diagnosis |
+| ~1510–2000 | Refcount helpers, `Py_Is` | `Py_INCREF`, `Py_DECREF`, identity tests |
+
+## Reading
+
+### Repr and the recursion guard
+
+`PyObject_Repr` maintains a per-thread set of objects currently being repr-ed. If an object appears in the set, it returns `...` to break the cycle.
+
+```c
+// CPython: Objects/object.c:62 PyObject_Repr
+PyObject *
+PyObject_Repr(PyObject *v)
+{
+    if (PyErr_CheckSignals()) return NULL;
+    if (Py_EnterRecursiveCall(" while getting the repr of an object"))
+        return NULL;
+    res = (*Py_TYPE(v)->tp_repr)(v);
+    Py_LeaveRecursiveCall();
+    if (res == NULL) return NULL;
+    if (!PyUnicode_Check(res)) {
+        PyErr_Format(PyExc_TypeError,
+            "__repr__ returned non-string (type %.200s)",
+            Py_TYPE(res)->tp_name);
+        Py_DECREF(res);
+        return NULL;
+    }
+    return res;
+}
+```
+
+### Rich comparison with reflected retry
+
+`PyObject_RichCompare` first tries the left operand's `tp_richcompare`. If that returns `Py_NotImplemented` and the right operand is a different type, it retries with the reflected operation on the right operand.
+
+```c
+// CPython: Objects/object.c:385 do_richcompare
+static PyObject *
+do_richcompare(PyObject *v, PyObject *w, int op)
+{
+    richcmpfunc f;
+    PyObject *res;
+
+    if (!Py_IS_TYPE(v, Py_TYPE(w)) &&
+        PyType_IsSubtype(Py_TYPE(w), Py_TYPE(v)) &&
+        (f = Py_TYPE(w)->tp_richcompare) != NULL) {
+        res = (*f)(w, v, _Py_SwappedOp[op]);
+        if (res != Py_NotImplemented) return res;
+        Py_DECREF(res);
+    }
+    if ((f = Py_TYPE(v)->tp_richcompare) != NULL) {
+        res = (*f)(v, w, op);
+        if (res != Py_NotImplemented) return res;
+        Py_DECREF(res);
+    }
+    /* Fall back to identity comparison for == and != */
+    switch (op) {
+    case Py_EQ: res = (v == w) ? Py_True : Py_False; break;
+    case Py_NE: res = (v != w) ? Py_True : Py_False; break;
+    default:
+        PyErr_Format(PyExc_TypeError, "'%s' not supported between ...",
+                     Py_TYPE(v)->tp_name);
+        return NULL;
+    }
+    return Py_NewRef(res);
+}
+```
+
+### Descriptor protocol in GetAttr
+
+`PyObject_GenericGetAttr` is the workhorse. It searches the MRO for a data descriptor first, then checks the instance `__dict__`, then falls back to a non-data descriptor.
+
+```c
+// CPython: Objects/object.c:1080 _PyObject_GenericGetAttrWithDict
+PyObject *
+_PyObject_GenericGetAttrWithDict(PyObject *obj, PyObject *name,
+                                 PyObject *dict, int suppress)
+{
+    PyTypeObject *tp = Py_TYPE(obj);
+    /* 1. Search MRO for a descriptor */
+    PyObject *descr = _PyType_Lookup(tp, name);
+    descrgetfunc f = NULL;
+    if (descr != NULL) {
+        f = Py_TYPE(descr)->tp_descr_get;
+        if (f != NULL && PyDescr_IsData(descr))  /* data descriptor wins */
+            return f(descr, obj, (PyObject *)tp);
+    }
+    /* 2. Instance __dict__ */
+    if (dict != NULL) {
+        PyObject *res = PyDict_GetItemWithError(dict, name);
+        if (res != NULL) return Py_NewRef(res);
+    }
+    /* 3. Non-data descriptor or plain attribute from MRO */
+    if (f != NULL) return f(descr, obj, (PyObject *)tp);
+    if (descr != NULL) return Py_NewRef(descr);
+    /* Not found */
+    if (!suppress)
+        PyErr_Format(PyExc_AttributeError, "...", tp->tp_name, name);
+    return NULL;
+}
+```
+
+### Hash and the __hash__ = None sentinel
+
+Setting `__hash__ = None` in a class body stores `PyObject_HashNotImplemented` in `tp_hash`. `PyObject_Hash` checks for this sentinel and raises `TypeError` before dispatching.
+
+```c
+// CPython: Objects/object.c:650 PyObject_Hash
+Py_hash_t
+PyObject_Hash(PyObject *v)
+{
+    PyTypeObject *tp = Py_TYPE(v);
+    if (tp->tp_hash == NULL) {
+        if (tp->tp_richcompare != NULL) {
+            PyErr_Format(PyExc_TypeError, "unhashable type: '%.200s'",
+                         tp->tp_name);
+            return -1;
+        }
+        return _Py_HashPointer(v);
+    }
+    return tp->tp_hash(v);
+}
+```
+
+## gopy notes
+
+- `PyObject_RichCompare` is the entry point for all comparison opcodes (`COMPARE_OP`). In gopy the dispatch lives in `objects/protocol.go` as `RichCompare`.
+- The MRO walk in `_PyObject_GenericGetAttrWithDict` is reproduced in `objects/type.go` as `TypeLookup`. Data descriptor detection uses `DescrIsData` in `objects/descr.go`.
+- `_PyObject_Dump` is a debugging aid only. gopy exposes a similar helper in `objects/object.go` gated behind a build tag so it never ships in production builds.
+- `Py_REFCNT` and `Py_TYPE` are inlined accessor macros. gopy models them as methods `Object.RefCnt()` and `Object.Type()` on the base struct.
+
+## CPython 3.14 changes
+
+- `PyObject_GetOptionalAttr` and `PyObject_GetOptionalAttrId` were added in 3.13 as non-raising variants. Both are available in 3.14 and should be used instead of `PyObject_GetAttr` plus manual `AttributeError` clearing.
+- `Py_TYPE` became an inline function rather than a macro in 3.10, completing the stable-ABI isolation. No further changes in 3.14.
+- The reflected comparison path in `do_richcompare` gained a subtype-priority check in 3.0 that is unchanged through 3.14. The rule is: if the right operand is a strict subtype of the left, the right operand's reflected method is tried first.

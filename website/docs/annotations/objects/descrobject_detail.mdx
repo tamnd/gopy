@@ -1,139 +1,136 @@
 ---
-title: "descrobject.c: Descriptor Types and Binding Protocol"
-description: "Annotation of CPython Objects/descrobject.c covering method, member, and getset descriptor layouts, descr_get invocation, classmethod and staticmethod wrappers, and 3.14 changes"
+title: descrobject.c
+description: "C descriptor types: method, member, getset, slot, and classmethod wrappers"
 cpython_path: Objects/descrobject.c
 cpython_version: "3.14"
-lines: 1400
+lines: 1200
 status: annotated
-ported_to: objects/descr.go
 ---
 
 import {Cpy, CpyLink} from '@site/src/components/Cpy';
 
-`Objects/descrobject.c` defines the four built-in descriptor types that CPython
-exposes from C: `PyMethodDescrObject` (wraps a C function as a method),
-`PyMemberDescrObject` (exposes a C struct field), `PyGetSetDescrObject` (exposes
-a getter/setter pair), and `PyWrapperDescrObject` (wraps a slot wrapper). It also
-implements `classmethod` and `staticmethod` as first-class Python types.
+`Objects/descrobject.c` implements the five built-in descriptor types that
+back Python's method resolution, slot access, and `property`-like get/set
+on C-defined types. All five share the descriptor protocol: a `__get__` slot
+that returns a bound object when accessed through an instance.
 
 ## Map
 
-| Region | Lines (approx) | Topic | gopy file |
-|--------|---------------|-------|-----------|
-| `PyMethodDescrObject` struct | 1-40 | C layout: `d_method` points to `PyMethodDef` | `objects/descr.go` |
-| `PyMemberDescrObject` struct | 41-60 | `d_member` points to `PyMemberDef` | `objects/descr.go` |
-| `PyGetSetDescrObject` struct | 61-80 | `d_getset` points to `PyGetSetDef` | `objects/descr.go` |
-| `method_get` | 210-260 | Bind a method descriptor to an instance | `objects/descr.go` |
-| `getset_get` | 340-380 | Call `get` from `PyGetSetDef`, raise `AttributeError` if absent | `objects/descr.go` |
-| `descr_get` generic dispatch | 400-430 | Entry point: delegate to method/member/getset variant | `objects/descr.go` |
-| `classmethod_get` | 720-760 | Bind to the type rather than the instance | `objects/descr.go` |
-| `staticmethod_get` | 820-850 | Return wrapped function unchanged | `objects/descr.go` |
-| 3.14 `__class_getitem__` path | 1350-1390 | Delegate through `classmethod` for PEP 560 | `objects/descr.go` |
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1–120 | `PyMethodDescrObject` / `method_get` | Wraps a `PyCFunction`; `__get__` returns a bound method |
+| 121–280 | `PyClassMethodDescrObject` / `classmethod_get` | Like method but binds to the type, not the instance |
+| 281–480 | `PyMemberDescrObject` / `member_get` / `member_set` | Reads and writes C struct fields via `PyMemberDef` |
+| 481–700 | `PyGetSetDescrObject` / `getset_get` / `getset_set` | Calls C getter/setter functions from `PyGetSetDef` |
+| 701–900 | `PyWrapperDescrObject` / `wrapperdescr_get` | Wraps a type slot function (e.g. `tp_richcompare`) |
+| 901–1050 | `slot_tp_descr_get` | Default `__get__` for types that have none; produces `method-wrapper` |
+| 1051–1200 | `PyDescr_NewMethod` etc. | Factory functions used by `type_ready` to populate `tp_dict` |
 
 ## Reading
 
-### Descriptor layouts and the `descr_get` entry point
+### `method_get` and bound method creation
 
-Each descriptor type stores a pointer to a C definition struct (`PyMethodDef`,
-`PyMemberDef`, `PyGetSetDef`). The `tp_descr_get` slot on each descriptor type
-points to a type-specific binding function. The generic dispatch simply reads
-`Py_TYPE(descr)->tp_descr_get` and calls it.
+When Python evaluates `obj.method`, the attribute lookup finds a
+`PyMethodDescrObject` in the type's `tp_dict` and calls its `tp_descr_get`
+slot. If `obj` is not `NULL` (instance access rather than class access), it
+allocates a `PyCFunctionObject` that captures both the C function pointer and
+`obj` as `self`.
 
 ```c
-// Objects/descrobject.c:401 descr_get (method variant shown)
+// CPython: Objects/descrobject.c:90 method_get
 static PyObject *
 method_get(PyObject *self, PyObject *obj, PyObject *type)
 {
     PyMethodDescrObject *descr = (PyMethodDescrObject *)self;
-    if (obj == NULL || obj == Py_None) {
-        /* accessed on the class: return the descriptor itself */
-        Py_INCREF(self);
-        return self;
-    }
-    if (!_PyObject_RealIsInstance(obj, descr->d_common.d_type)) {
-        PyErr_Format(PyExc_TypeError,
-            "descriptor '%V' for '%.100s' objects "
-            "doesn't apply to a '%.100s' object",
-            descr->d_common.d_name, "?",
-            descr->d_common.d_type->tp_name,
-            Py_TYPE(obj)->tp_name);
+    if (obj == Py_None || obj == NULL)
+        return Py_NewRef(self);
+    if (!descr_check((PyDescrObject *)descr, obj))
         return NULL;
-    }
     return PyCFunction_NewEx(descr->d_method, obj, NULL);
 }
 ```
 
-When `obj` is `NULL` the descriptor is being accessed on the class itself, so
-the descriptor is returned as-is. Otherwise a bound `PyCFunction` object is
-created pairing the method with the instance.
+### `member_get` and struct field access
 
-### classmethod and staticmethod wrappers
-
-`classmethod` stores the wrapped callable in `cm_callable`. Its `tp_descr_get`
-slot (`classmethod_get`) binds the callable to the type rather than the
-instance, passing the type as the first argument.
+`PyMemberDescrObject` stores a `PyMemberDef` that records the byte offset
+and type code of a C struct field. `member_get` calls `PyMember_GetOne`,
+which adds the offset to the object pointer and casts according to type code
+(`T_INT`, `T_DOUBLE`, `T_OBJECT_EX`, etc.).
 
 ```c
-// Objects/descrobject.c:722 classmethod_get
+// CPython: Objects/descrobject.c:350 member_get
 static PyObject *
-classmethod_get(PyObject *self, PyObject *obj, PyObject *type)
+member_get(PyObject *self, PyObject *obj, PyObject *type)
 {
-    PyClassMethodObject *cm = (PyClassMethodObject *)self;
-    if (type == NULL)
-        type = (PyObject *)Py_TYPE(obj);
-    if (Py_TYPE(cm->cm_callable)->tp_descr_get != NULL) {
-        return Py_TYPE(cm->cm_callable)->tp_descr_get(
-            cm->cm_callable, type,
-            (PyObject *)Py_TYPE(type));
+    PyMemberDescrObject *descr = (PyMemberDescrObject *)self;
+    if (descr_check((PyDescrObject *)descr, obj) < 0)
+        return NULL;
+    if (descr->d_member->flags & READ_RESTRICTED)
+        if (PySys_Audit("object.__getattr__", "Os",
+                        obj, descr->d_member->name) < 0)
+            return NULL;
+    return PyMember_GetOne((char *)obj, descr->d_member);
+}
+```
+
+### `getset_get` and C-level property
+
+`PyGetSetDescrObject` holds a `PyGetSetDef` with a `get` function pointer and
+an optional `set` function pointer plus a `closure` void pointer passed to
+both. This is the mechanism used by `property` on C extension types.
+
+```c
+// CPython: Objects/descrobject.c:550 getset_get
+static PyObject *
+getset_get(PyObject *self, PyObject *obj, PyObject *type)
+{
+    PyGetSetDescrObject *descr = (PyGetSetDescrObject *)self;
+    if (obj == NULL || obj == Py_None)
+        return Py_NewRef(self);
+    if (descr->d_getset->get == NULL) {
+        PyErr_SetString(PyExc_AttributeError, "unreadable attribute");
+        return NULL;
     }
-    return PyMethod_New(cm->cm_callable, type);
-}
-
-// Objects/descrobject.c:822 staticmethod_get
-static PyObject *
-staticmethod_get(PyObject *self, PyObject *obj, PyObject *type)
-{
-    PyStaticMethodObject *sm = (PyStaticMethodObject *)self;
-    Py_INCREF(sm->sm_callable);
-    return sm->sm_callable;   /* no binding at all */
+    return descr->d_getset->get(obj, descr->d_getset->closure);
 }
 ```
 
-`staticmethod_get` is the simplest `tp_descr_get` implementation in CPython: it
-ignores both `obj` and `type` and returns the wrapped callable with a bumped
-reference count.
+### `slot_tp_descr_get` as fallback binding
 
-### 3.14 `__class_getitem__` routing through classmethod
-
-PEP 560 requires that `__class_getitem__` behave as an implicit `classmethod`
-when defined as a plain function on the type. In 3.14 this path is enforced in
-`descrobject.c` by wrapping bare function descriptors in a classmethod at type
-creation time.
+Types that do not define a custom `tp_descr_get` inherit this function from
+`PyBaseObject_Type`. It produces a `method-wrapper` object that binds the
+slot function to the instance, enabling Python-level calls like
+`obj.__add__(other)` to work even for C slot functions.
 
 ```c
-// Objects/descrobject.c:1352 (3.14) _PyClassMethod_Wrap helper
-PyObject *
-_PyClassMethod_Wrap(PyObject *callable)
+// CPython: Objects/descrobject.c:970 slot_tp_descr_get
+static PyObject *
+slot_tp_descr_get(PyObject *self, PyObject *obj, PyObject *type)
 {
-    /* used by type_new_impl for __class_getitem__ */
-    return PyClassMethod_New(callable);
+    if (obj == NULL || obj == Py_None)
+        return Py_NewRef(self);
+    return PyWrapper_New(self, obj);
 }
 ```
-
-Callers in `typeobject.c` invoke `_PyClassMethod_Wrap` for any
-`__class_getitem__` definition that is not already a classmethod instance.
 
 ## gopy notes
 
-- `objects/descr.go` models `PyMethodDescrObject` as `methodDescriptor` with a
-  `method` field of type `*goMethod` (a Go function pointer plus arity metadata).
-- The `descr_get` binding protocol is implemented on the `Descriptor` interface:
-  types that expose a `Get(obj, objType Object) (Object, error)` method
-  participate in the MRO walk inside `type_getattro`.
-- `classmethod_get` is ported as `classmethodGet`; the inner
-  `tp_descr_get`-on-callable recursion becomes a type assertion to `Descriptor`.
-- `staticmethod_get` is a one-liner in Go: return the wrapped value directly.
-- Member descriptors (`PyMemberDescrObject`) are not yet ported. The `d_member`
-  offset arithmetic is C-specific and has no direct equivalent in Go's object
-  model. Struct fields are instead exposed via explicit getter/setter pairs,
-  matching the `PyGetSetDef` pattern.
+- `method_get` maps to `objects/method.go` `BoundMethod`; the Go port stores
+  `fn` and `self` and implements `__call__` by forwarding to the underlying
+  `objects/function.go` callable.
+- `member_get` / `member_set` are not needed for pure-Python types; they
+  become relevant when exposing Go struct fields to Python via `PyGetSetDef`
+  equivalents in `objects/descr.go`.
+- `getset_get` is the backing model for `objects/property.go`; the `closure`
+  pointer maps to a Go `any` carried on the `GetSetDescriptor` struct.
+- `wrapperdescr_get` (slot wrappers) currently surfaces as
+  `objects/protocol.go` helper stubs; full binding is tracked separately.
+
+## CPython 3.14 changes
+
+- The audit event `object.__getattr__` on restricted members was added in
+  3.10 and is unchanged in 3.14.
+- `PyDescr_NewGetSet` and `PyDescr_NewMember` gained `Py_TPFLAGS_IMMUTABLETYPE`
+  guards in 3.12 to prevent mutation of descriptors on immutable types.
+- No structural changes to the five descriptor types between 3.13 and 3.14;
+  the file received only minor const-correctness and annotation patches.
