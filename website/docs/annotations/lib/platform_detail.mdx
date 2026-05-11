@@ -1,0 +1,131 @@
+---
+title: platform.py
+description: "CPython Lib/platform.py: system platform detection"
+cpython_path: Lib/platform.py
+cpython_version: "3.14"
+lines: 900
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`platform.py` collects machine, OS, and Python runtime facts into a single
+portable API. Most results are cached on first call.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1–60 | module header, imports | stdlib imports, `_UNIXCONFDIR` constant |
+| 61–120 | `_platform_cache` | module-level dict caching expensive calls |
+| 121–200 | `uname()` | wraps `os.uname` / `platform.uname` into a named tuple |
+| 201–260 | `system()` `node()` `release()` `version()` `machine()` `processor()` | thin accessors over `uname()` fields |
+| 261–340 | `platform()` | assembles the human-readable platform string |
+| 341–430 | `mac_ver()` | parses `sw_vers` output on macOS |
+| 431–510 | `win32_ver()` | reads Windows version from the registry |
+| 511–600 | `freedesktop_os_release()` | parses `/etc/os-release` on Linux |
+| 601–700 | `python_version()` `python_version_tuple()` | exposes `sys.version_info` |
+| 701–760 | `python_implementation()` | returns `sys.implementation.name` |
+| 761–900 | `architecture()` `java_ver()` `system_alias()` | misc platform probes |
+
+## Reading
+
+### uname and the field accessors
+
+`uname()` is the central call. Every single-field accessor delegates to it and
+pulls one attribute from the named tuple.
+
+```python
+# CPython: Lib/platform.py:206 system
+def system():
+    return uname().system
+```
+
+`uname()` itself tries `os.uname()` and falls back gracefully on Windows where
+that call is absent:
+
+```python
+# CPython: Lib/platform.py:160 uname
+def uname():
+    global _uname_cache
+    if _uname_cache is not None:
+        return _uname_cache
+    ...
+    try:
+        system, node, release, version, machine, processor = \
+            os.uname()
+    except AttributeError:
+        ...
+```
+
+### platform() string assembly
+
+`platform()` concatenates the most useful fields and optionally appends the
+processor name. The result is stored in `_platform_cache`.
+
+```python
+# CPython: Lib/platform.py:276 platform
+def platform(aliased=False, terse=False):
+    result = _platform_cache.get((aliased, terse), None)
+    if result is not None:
+        return result
+    ...
+    _platform_cache[(aliased, terse)] = result
+    return result
+```
+
+### freedesktop_os_release on Linux
+
+On Linux, `freedesktop_os_release()` opens `/etc/os-release` (falling back to
+`/usr/lib/os-release`) and returns a plain dict of key-value pairs. The parser
+strips shell-style quoting.
+
+```python
+# CPython: Lib/platform.py:543 freedesktop_os_release
+def freedesktop_os_release():
+    for candidate in ("/etc/os-release", "/usr/lib/os-release"):
+        try:
+            with open(candidate, encoding="utf-8") as f:
+                return _parse_os_release(f)
+        except OSError:
+            pass
+    raise OSError("...")
+```
+
+### mac_ver
+
+`mac_ver()` shells out to `sw_vers` and parses its output. A cached result
+is returned on repeated calls.
+
+```python
+# CPython: Lib/platform.py:370 mac_ver
+def mac_ver(release='', versioninfo=('', '', ''), machine=''):
+    ...
+    try:
+        info = subprocess.check_output(['sw_vers'], text=True)
+    except OSError:
+        return release, versioninfo, machine
+    ...
+```
+
+## gopy notes
+
+- `uname()` maps directly to `syscall.Uname` (Linux) or `syscall.Sysctl`
+  variants (macOS). Cache with a `sync.Once`.
+- `freedesktop_os_release()` can be ported as a plain file parser; no C
+  dependency.
+- `win32_ver()` reads the Windows registry; skip or stub for non-Windows
+  builds via a build tag.
+- `_platform_cache` should use a `sync.Map` or a mutex-guarded `map` keyed
+  on the `(aliased, terse)` pair.
+- `python_version()` and `python_implementation()` have no direct
+  counterpart; expose gopy's own version constants instead.
+
+## CPython 3.14 changes
+
+- `linux_distribution()` was removed in 3.8; it does not appear in 3.14.
+- `uname_result` became a proper `typing.NamedTuple` subclass with default
+  values, making all fields optional for callers that construct it directly.
+- `freedesktop_os_release()` gained stricter quote-stripping to match the
+  `os-release` spec more closely.
+- No new functions were added between 3.13 and 3.14 for this module.

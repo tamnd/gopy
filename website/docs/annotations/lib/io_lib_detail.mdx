@@ -1,0 +1,80 @@
+---
+title: "Lib/io.py"
+description: "Thin Python shim that re-exports the _io C extension module"
+cpython_path: Lib/io.py
+cpython_version: "3.14"
+lines: 100
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`Lib/io.py` is a thin Python shim. All real I/O logic lives in the `_io` C extension (`Modules/_io/`). The shim exists so that `import io` resolves correctly, `io.__doc__` is populated, and the public names are importable from the `io` namespace.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1–30 | module docstring, imports | Sets `__doc__`, imports `_io` and `_abc` |
+| 31–55 | `DEFAULT_BUFFER_SIZE` | Re-exports the 8 KiB default from `_io` |
+| 56–70 | `open` | Aliases `_io.open`; this is the same object as the built-in `open` |
+| 71–90 | exception re-exports | `BlockingIOError`, `UnsupportedOperation` |
+| 91–100 | class re-exports | All ABC and concrete classes from `_io` |
+
+## Reading
+
+### The re-export pattern
+
+The entire file is essentially one long series of assignments pulled from `_io`:
+
+```python
+# CPython: Lib/io.py:56 open
+from _io import (
+    DEFAULT_BUFFER_SIZE,
+    BlockingIOError,
+    UnsupportedOperation,
+    open,
+    FileIO,
+    BytesIO,
+    StringIO,
+    BufferedReader,
+    BufferedWriter,
+    BufferedRandom,
+    BufferedRWPair,
+    TextIOWrapper,
+    IncrementalNewlineDecoder,
+    IOBase,
+    RawIOBase,
+    BufferedIOBase,
+    TextIOBase,
+)
+```
+
+### Why a shim at all
+
+CPython needs `io.open` to be the same object as the built-in `open`. Placing the assignment in a pure-Python file lets the interpreter bootstrap before the C module is fully initialised, and gives `help(io)` a human-readable docstring without embedding it in C source.
+
+### `UnsupportedOperation`
+
+```python
+# CPython: Lib/io.py:71 UnsupportedOperation
+# UnsupportedOperation inherits from both OSError and ValueError.
+# Defined in _io, re-exported here so users can catch it as io.UnsupportedOperation.
+from _io import UnsupportedOperation
+```
+
+### Abstract base classes
+
+`IOBase`, `RawIOBase`, `BufferedIOBase`, and `TextIOBase` are C-level types that also register as `abc.ABC` subclasses. The shim re-exports them so code can write `isinstance(f, io.IOBase)` without touching `_io` directly.
+
+## gopy notes
+
+- gopy will need a `module/io/` package that re-exports from the internal `_io` implementation, mirroring this shim pattern.
+- `DEFAULT_BUFFER_SIZE` should be a Go constant set to 8192.
+- `open` must be the same callable object exposed as the built-in `open`; share the pointer rather than wrapping it.
+- The four ABCs (`IOBase`, `RawIOBase`, `BufferedIOBase`, `TextIOBase`) must be registered with the ABC machinery so `isinstance` checks work across the hierarchy.
+
+## CPython 3.14 changes
+
+- No significant changes to `Lib/io.py` in 3.14; the file remains a pure re-export shim.
+- The underlying `_io` C module gained incremental fixes for `TextIOWrapper` newline handling (bpo-83434) and a `closefd` validation tightening in `FileIO.__init__`.

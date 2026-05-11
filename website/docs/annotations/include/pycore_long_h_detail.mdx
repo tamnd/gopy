@@ -1,0 +1,117 @@
+---
+title: pycore_long.h
+description: "Internal: compact integer representation helpers and digit-limb macros"
+cpython_path: Include/internal/pycore_long.h
+cpython_version: "3.14"
+lines: 120
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`pycore_long.h` exposes the fast-path inline helpers for CPython's integer
+objects. Python 3.12 introduced a compact representation that stores small
+integers without allocating a separate digit array, and this header is the
+primary interface to that representation.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1–20 | includes | `pycore_object.h`, `longintrepr.h` |
+| 22–35 | `_PyLong_IsZero` | true when `ob_digit[0] == 0` and tag bits indicate zero |
+| 37–50 | `_PyLong_IsCompact` | true when the value fits in the inline word (no heap digit array) |
+| 52–65 | `_PyLong_IsNonNegativeCompact` | compact and non-negative; used in hot attribute-lookup paths |
+| 67–80 | `_PyLong_CompactValue` | extracts a `Py_ssize_t` from a compact int in O(1) |
+| 82–95 | `_PyLong_DigitCount` | returns the number of 30-bit limbs in the digit array |
+| 97–108 | `_PyLong_SetSignAndDigitCount` | writes tag word encoding sign + digit count |
+| 110–120 | `_PyLong_GetSmallInt_internal` | retrieves a pre-allocated singleton for `-5` through `256` |
+
+## Reading
+
+### Compact check and value extraction
+
+```c
+// CPython: Include/internal/pycore_long.h:37 _PyLong_IsCompact
+static inline int
+_PyLong_IsCompact(const PyLongObject *op) {
+    assert(PyLong_Check(op));
+    return op->long_value.lv_tag < (2 << _PyLong_NON_SIZE_BITS);
+}
+```
+
+```c
+// CPython: Include/internal/pycore_long.h:67 _PyLong_CompactValue
+static inline Py_ssize_t
+_PyLong_CompactValue(const PyLongObject *op) {
+    assert(_PyLong_IsCompact(op));
+    Py_ssize_t sign = 1 - (op->long_value.lv_tag & _PyLong_SIGN_MASK);
+    return sign * (Py_ssize_t)op->long_value.ob_digit[0];
+}
+```
+
+When `_PyLong_IsCompact` is true, the value lives in `ob_digit[0]` and a sign
+bit encoded in `lv_tag`. No heap indirection is needed, making operations like
+slice indexing and loop counters allocation-free.
+
+### Sign and digit count encoding
+
+```c
+// CPython: Include/internal/pycore_long.h:97 _PyLong_SetSignAndDigitCount
+static inline void
+_PyLong_SetSignAndDigitCount(PyLongObject *op, int sign, Py_ssize_t digit_count)
+{
+    assert(digit_count >= 0);
+    assert(-1 <= sign && sign <= 1);
+    op->long_value.lv_tag =
+        ((uintptr_t)digit_count << _PyLong_NON_SIZE_BITS) |
+        (sign == -1 ? _PyLong_SIGN_MASK : 0);
+}
+```
+
+The tag word packs the digit count in the high bits and the sign flag in a
+reserved low bit. This avoids a separate `ob_size` field with its dual-use
+sign/magnitude encoding from older CPython.
+
+### Small int singleton retrieval
+
+```c
+// CPython: Include/internal/pycore_long.h:110 _PyLong_GetSmallInt_internal
+static inline PyObject *
+_PyLong_GetSmallInt_internal(int value)
+{
+    PyInterpreterState *interp = _PyInterpreterState_GET();
+    assert(-_PY_NSMALLNEGINTS <= value
+           && value < _PY_NSMALLPOSINTS);
+    size_t index = (size_t)(value + _PY_NSMALLNEGINTS);
+    PyObject *obj = (PyObject *)interp->small_ints[index];
+    assert(obj != NULL);
+    return obj;
+}
+```
+
+The range `-5` to `256` is guaranteed to return a singleton. Callers at the
+`PyLong_FromLong` level check this range first and skip allocation entirely.
+
+## gopy notes
+
+gopy represents Python integers as `*objects.Int`, backed by Go's `math/big.Int`
+for arbitrary precision. The compact-int concept maps roughly to the fast path
+in `objects.IntFromInt64` which returns a pre-allocated singleton for the
+`-5..256` range (matching `_PY_NSMALLNEGINTS` / `_PY_NSMALLPOSINTS`).
+
+`_PyLong_IsCompact` / `_PyLong_CompactValue` have no direct Go counterpart
+because Go does not use tagged-pointer tricks; the equivalent is a type
+assertion to a `smallInt` wrapper when the value is in the singleton pool.
+
+`_PyLong_SetSignAndDigitCount` is internal to CPython's allocator and has no
+gopy analog.
+
+## CPython 3.14 changes
+
+- The compact representation stabilised in 3.12 and is unchanged in 3.14; the
+  header remains largely the same.
+- `_PyLong_IsNonNegativeCompact` gained use in the specialising adaptive
+  interpreter for `BINARY_SUBSCR` and `STORE_SUBSCR` guards.
+- `_PyLong_GetSmallInt_internal` moved from `pycore_interp.h` into this header
+  in 3.14 to co-locate all integer fast-path helpers.

@@ -1,0 +1,91 @@
+---
+title: "Modules/atexitmodule.c"
+description: "C implementation of atexit: LIFO callback registration called from Py_FinalizeEx"
+cpython_path: Modules/atexitmodule.c
+cpython_version: "3.14"
+lines: 200
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`Modules/atexitmodule.c` is the C implementation of the `atexit` module. The thin `Lib/atexit.py` shim simply re-exports from this module. Callbacks are stored per-interpreter in `atexit_state` and run in LIFO order during `Py_FinalizeEx`. Errors are printed to `sys.stderr` but do not abort the shutdown sequence.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1–40 | includes, `atexit_callback` struct | Struct holding `func`, `args`, `kwargs` for one registration |
+| 41–80 | `atexit_state` struct | Per-interpreter state: callback array, count, allocated size |
+| 81–110 | `atexit_register` | Appends a callback triple to the state array |
+| 111–145 | `atexit__run_exitfuncs` | Iterates callbacks in LIFO order, calls each, prints errors |
+| 146–170 | `atexit_unregister` | Removes every entry whose `func` compares equal to the argument |
+| 171–200 | module init, `PyModuleDef` | Wires up the Python-visible methods and per-interpreter state |
+
+## Reading
+
+### Callback storage
+
+Each registered callback is stored as a plain C struct rather than a Python tuple, which avoids reference-counting overhead during the hot path at shutdown:
+
+```python
+# CPython: Modules/atexitmodule.c:41 atexit_state
+# atexit_state holds:
+#   callbacks: pointer to atexit_callback array
+#   ncallbacks: number of registered callbacks
+#   callback_len: allocated capacity
+```
+
+### `atexit_register`
+
+```python
+# CPython: Modules/atexitmodule.c:81 atexit_register
+def register(func, /, *args, **kwargs):
+    # Appends (func, args, kwargs) to the per-interpreter callback list.
+    # Grows the array with realloc when ncallbacks == callback_len.
+    # Returns func unchanged so the decorator form works:
+    #   @atexit.register
+    #   def cleanup(): ...
+    ...
+    return func
+```
+
+The return-value contract (returning `func`) is what makes `atexit.register` usable as a decorator without a wrapper.
+
+### `atexit__run_exitfuncs`
+
+```python
+# CPython: Modules/atexitmodule.c:111 atexit__run_exitfuncs
+def _run_exitfuncs():
+    # Called by Py_FinalizeEx. Iterates ncallbacks-1 down to 0 (LIFO).
+    # For each callback: calls func(*args, **kwargs).
+    # On exception: calls PyErr_WriteUnraisable, then clears the error
+    #               and continues to the next callback.
+    ...
+```
+
+Errors are swallowed deliberately: a failing atexit handler must not prevent subsequent handlers from running.
+
+### `atexit_unregister`
+
+```python
+# CPython: Modules/atexitmodule.c:146 atexit_unregister
+def unregister(func, /):
+    # Walks the full callback array.
+    # Removes every entry where entry.func == func (by identity, not equality).
+    # Compacts the array in place. Returns None.
+    ...
+```
+
+## gopy notes
+
+- Store callbacks in a per-interpreter slice of `atexitCallback` structs `(fn, args, kwargs)`.
+- `Register` must return the `fn` argument unchanged so decorator syntax works.
+- `RunExitFuncs` iterates in reverse, calls each callback, and uses `errors.WriteUnraisable` on failure rather than propagating.
+- `Unregister` must use pointer identity (`fn == entry.fn`) not value equality.
+- Hook `RunExitFuncs` into the interpreter finalise path, not into a Go `defer`.
+
+## CPython 3.14 changes
+
+- The module was converted to use per-interpreter state (`Py_mod_multiple_interpreters`) in 3.12; no further structural changes in 3.14.
+- A minor fix was applied to ensure `atexit_unregister` correctly handles the case where `func` is not registered at all (returns `None` silently rather than raising).

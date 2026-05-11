@@ -1,0 +1,139 @@
+---
+title: _collectionsmodule.c
+description: "C implementation of deque and defaultdict"
+cpython_path: Modules/_collectionsmodule.c
+cpython_version: "3.14"
+lines: 2400
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`_collectionsmodule.c` provides the C implementations of `collections.deque`
+and `collections.defaultdict`. The pure-Python `collections/__init__.py` layer
+imports these and re-exports them under the public names.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1–60 | includes, `BLOCKLEN` macro | block size constant (64) and setup |
+| 61–220 | `block`, `dequeobject` | deque struct definitions |
+| 221–900 | `deque_append`, `deque_appendleft`, `deque_pop`, `deque_popleft` | O(1) end operations |
+| 901–1200 | `deque_rotate`, `deque_item`, `deque_ass_item` | rotation and random access |
+| 1201–1500 | `deque_iter`, `dequeiterobject` | forward and reverse iterators |
+| 1501–1900 | `deque_index`, `deque_count`, `deque_remove` | search operations |
+| 1901–2100 | `ddictobject`, `defdict_missing`, `defdict_*` | `defaultdict` |
+| 2101–2400 | module init, `_collections_state` | module bootstrap |
+
+## Reading
+
+### Block-based deque storage
+
+`deque` allocates memory in fixed-size blocks of `BLOCKLEN=64` items. Each
+block is a simple array of `PyObject*` pointers linked into a doubly-linked
+list. `leftblock`/`rightblock` point to the active end blocks; `leftindex` and
+`rightindex` track the first and last live slots within those blocks.
+
+```c
+// CPython: Modules/_collectionsmodule.c:40 block definition
+#define BLOCKLEN 64
+#define CENTER ((BLOCKLEN - 1) / 2)
+
+typedef struct BLOCK {
+    struct BLOCK *leftlink;
+    PyObject *data[BLOCKLEN];
+    struct BLOCK *rightlink;
+} block;
+```
+
+Append to the right is O(1) unless `rightindex == BLOCKLEN - 1`, in which case
+a new block is allocated and linked in.
+
+### deque_rotate
+
+Rotation moves items from one end to the other, reusing the block pointer
+arithmetic. For rotations larger than `BLOCKLEN`, it moves whole blocks
+rather than individual items.
+
+```c
+// CPython: Modules/_collectionsmodule.c:993 deque_rotate
+static PyObject *
+deque_rotate(dequeobject *deque, PyObject *const *args, Py_ssize_t nargs)
+{
+    ...
+    while (n > 0) {
+        item = deque_pop(deque, NULL);
+        ...
+        rv = deque_appendleft(deque, item);
+        ...
+        n--;
+    }
+```
+
+For large `n`, CPython uses a block-pointer swap that avoids touching each
+element; the snippet above is the simplified single-element path.
+
+### indexsplit for random access
+
+`deque_item` computes which block an index falls in and the offset within it.
+The `indexsplit` macro does the arithmetic in one step.
+
+```c
+// CPython: Modules/_collectionsmodule.c:1058 deque_item
+    i += deque->leftindex;
+    n = (Py_ssize_t)(i / BLOCKLEN);
+    i %= BLOCKLEN;
+    if (index >= 0) {
+        b = deque->leftblock;
+        while (n--)
+            b = b->rightlink;
+    } else { ...
+```
+
+Random access is O(n) because it must walk the block chain. The deque API
+documents this; callers that need O(1) access should use a list.
+
+### defaultdict missing key
+
+`defaultdict.__missing__` is called by the inherited `dict.__getitem__` when a
+key is absent. It invokes `default_factory` with no arguments, stores the
+result under the missing key, and returns it.
+
+```c
+// CPython: Modules/_collectionsmodule.c:1950 defdict_missing
+static PyObject *
+defdict_missing(defdictobject *dd, PyObject *key)
+{
+    ...
+    if (dd->default_factory == NULL) {
+        /* no factory: raise KeyError like a plain dict */
+        ...
+    }
+    value = PyObject_CallNoArgs(dd->default_factory);
+    if (value == NULL) return NULL;
+    if (PyObject_SetItem((PyObject *)dd, key, value) < 0) { ... }
+    return value;
+}
+```
+
+## gopy notes
+
+- gopy's deque port is in `objects/` and uses a Go slice of fixed-size arrays
+  to mimic the block structure. `BLOCKLEN=64` is preserved so cache-line
+  behaviour matches.
+- `deque_rotate` with `n >= len` is defined as equivalent to `n % len`
+  rotations; gopy normalizes `n` before the loop.
+- `defaultdict` is a thin wrapper around `objects.Dict`; the `__missing__`
+  hook is wired through `dict_subscript` in `objects/dict.go`.
+- `deque_item` is intentionally O(n); gopy does not add an index cache.
+
+## CPython 3.14 changes
+
+- `deque.__class_getitem__` was added for PEP 585 generic alias support
+  (`deque[int]`). The C implementation delegates to `Py_GenericAlias`.
+- `defaultdict` now preserves keyword arguments in `__copy__` and
+  `__deepcopy__`, fixing a long-standing inconsistency with `dict` subclasses.
+- Thread-safety annotations were added throughout `deque` operations under the
+  free-threaded build; individual append/pop operations on the same end are now
+  documented as atomic.

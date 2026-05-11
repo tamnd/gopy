@@ -1,0 +1,129 @@
+---
+title: pycore_runtime.h
+description: "Internal: the single global _PyRuntimeState struct"
+cpython_path: Include/internal/pycore_runtime.h
+cpython_version: "3.14"
+lines: 300
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`pycore_runtime.h` defines `_PyRuntimeState`, the one global structure that
+holds state which cannot be scoped to a single interpreter. Since Python 3.12
+everything that can live per-interpreter moved to `PyInterpreterState`; what
+remains here is truly process-wide.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1–40 | includes / forward decls | pulls in `pycore_gil.h`, `pycore_atexit.h`, etc. |
+| 41–80 | `_PyRuntimeState.initialized` | set after `Py_Initialize` completes |
+| 82 | `_PyRuntimeState.core_initialized` | set after the core (codecs, warnings) is ready |
+| 85–90 | `_PyRuntimeState.main_thread` | OS thread ID of the thread that called `Py_Initialize` |
+| 92–100 | `_PyRuntimeState.interpreters` | linked list head + count of all sub-interpreters |
+| 105–130 | `_PyRuntimeState.gilstate` | per-process GIL bookkeeping for `PyGILState_Ensure` |
+| 132–150 | `_PyRuntimeState.preconfig` | `_PyPreConfig` snapshot (UTF-8 mode, allocator choice) |
+| 152–160 | `_PyRuntimeState.open_code_hook` | callback for `io.open_code()` |
+| 162–175 | `_PyRuntimeState.audit_hooks` | singly-linked list of `sys.addaudithook` callbacks |
+| 177–200 | `_PyRuntimeState.atexit` | registered `atexit` callbacks (moved here from interpreter) |
+| 202–220 | `_PyRuntimeState._id_objs` | `_Py_ID` table of immortal interned strings |
+| 222–260 | `_PyRuntimeState.ceval` | eval breaker word, pending calls queue |
+| 262–300 | accessor macros | `_PyRuntime`, `_Py_CURRENTLY_FINALIZING`, etc. |
+
+## Reading
+
+### The struct declaration
+
+```c
+// CPython: Include/internal/pycore_runtime.h:41 _PyRuntimeState
+typedef struct pyruntimestate {
+    /* Is running Py_Initialize() or Py_FinalizeEx()? */
+    int preinitializing;
+    int preinitialized;
+    int core_initialized;
+    int initialized;
+
+    /* The main OS thread that called Py_Initialize(). */
+    unsigned long main_thread;
+
+    /* All active interpreters. */
+    struct {
+        PyThread_type_lock mutex;
+        PyInterpreterState *head;
+        int64_t next_id;
+    } interpreters;
+    ...
+} _PyRuntimeState;
+```
+
+The `initialized` / `core_initialized` split lets embedders that only need the
+codec layer stop short of a full `Py_Initialize`.
+
+### GIL state bookkeeping
+
+```c
+// CPython: Include/internal/pycore_runtime.h:105 _PyRuntimeState.gilstate
+struct _gilstate_runtime_state {
+    int check_enabled;
+    /* Assuming the current thread holds the GIL, this is the
+       PyThreadState for that thread. */
+    Py_tss_t autoTSSkey;
+    PyInterpreterState *autoInterpreterState;
+} gilstate;
+```
+
+`PyGILState_Ensure` walks this to decide whether the calling C thread already
+owns the GIL.  The field lives here (not in `PyInterpreterState`) because GIL
+ownership is process-wide.
+
+### Audit hooks
+
+```c
+// CPython: Include/internal/pycore_runtime.h:162 _PyRuntimeState.audit_hooks
+struct {
+    _Py_AuditHookEntry *head;
+    PyThread_type_lock mutex;
+} audit_hooks;
+```
+
+`sys.addaudithook` prepends to `audit_hooks.head`. The list is intentionally
+append-only at runtime: once a hook is registered it cannot be removed, which
+prevents an attacker from unhooking after gaining code execution.
+
+### `_Py_ID` interned strings
+
+```c
+// CPython: Include/internal/pycore_runtime.h:202 _Py_ID
+struct _Py_cached_objects {
+    /* Each entry is an immortal unicode object created at startup. */
+    PyObject *_Py_ID(__abs__);
+    PyObject *_Py_ID(__add__);
+    /* ... ~700 entries ... */
+};
+```
+
+Accessing a dunder name through `_Py_ID(name)` avoids a dict lookup on every
+attribute access in the interpreter loop.
+
+## gopy notes
+
+gopy does not replicate the C-level `_PyRuntimeState` struct; it uses Go
+package-level variables grouped by concern (e.g. `vm.Runtime`,
+`objects.SmallInts`). The conceptual mapping is:
+
+- `initialized` / `core_initialized` -- `pythonrun.Initialized` bool
+- `audit_hooks` -- not yet ported (no `sys.addaudithook` support)
+- `_Py_ID` table -- `objects.InternedStrings` map (lazily populated)
+- `gilstate` -- not applicable; Go goroutines replace the GIL
+
+## CPython 3.14 changes
+
+- The `ceval.pending` queue gained a per-interpreter fast path; only the
+  truly-global pending calls remain in `_PyRuntimeState.ceval`.
+- `_PyRuntimeState` gained `_Py_DebugOffsets` to support external debuggers
+  (the `sys._debuggertool_get_offsets()` API introduced in 3.14).
+- `open_code_hook` type changed from `Py_OpenCodeHookFunction` to a struct
+  holding both the hook pointer and user data, enabling safer cleanup on
+  `Py_Finalize`.

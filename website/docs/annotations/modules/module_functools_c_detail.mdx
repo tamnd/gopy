@@ -1,0 +1,129 @@
+---
+title: _functoolsmodule.c
+description: "C accelerator for the functools module: lru_cache, partial, reduce, cmp_to_key"
+cpython_path: Modules/_functoolsmodule.c
+cpython_version: "3.14"
+lines: 1500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`_functoolsmodule.c` is the C accelerator that backs `functools`. Python falls
+back to the pure-Python `functools.py` for anything not covered here, but the
+four main objects — `partial`, `reduce`, `cmp_to_key`, and `lru_cache` — are
+all implemented in C for performance.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1–80 | module init, includes | module bootstrap |
+| 81–280 | `partial_object`, `partial_*` | `functools.partial` implementation |
+| 281–420 | `functools_reduce` | `functools.reduce` loop |
+| 421–560 | `KeyWrapper`, `cmp_to_key_object` | `cmp_to_key` adapter |
+| 561–1500 | `lru_cache_object`, `lru_list_elem` | `lru_cache` with ring-buffer eviction |
+
+## Reading
+
+### partial
+
+`partial_object` stores a `func`, an `args` tuple, and a `kw` dict. On call,
+it merges caller args with stored args, then merges caller kwargs over stored
+kwargs, and delegates to `func`.
+
+```c
+// CPython: Modules/_functoolsmodule.c:145 partial_call
+static PyObject *
+partial_call(partialobject *pto, PyObject *args, PyObject *kw)
+{
+    PyObject *ret;
+    PyObject *argappl, *kwappl;
+    ...
+    argappl = PySequence_Concat(pto->args, args);
+    ...
+    ret = PyObject_Call(pto->fn, argappl, kwappl);
+```
+
+When `partial` wraps another `partial`, `__new__` flattens the chain so that
+the stored `func` is always the innermost non-partial callable.
+
+### reduce
+
+`functools_reduce` mirrors the semantics of `builtins.reduce`. When no
+initializer is supplied, the first element of the iterable is consumed as the
+accumulator.
+
+```c
+// CPython: Modules/_functoolsmodule.c:301 functools_reduce
+    op2 = (*Py_TYPE(seq)->tp_iternext)(it);
+    if (op2 == NULL) { ... /* StopIteration or error */ }
+    if (result == NULL)
+        result = op2;   /* first element becomes accumulator */
+    else {
+        newresult = PyObject_CallFunctionObjArgs(func, result, op2, NULL);
+```
+
+### cmp_to_key
+
+`KeyWrapper` stores a single `object` and a `cmp` callable. Its rich-compare
+slot calls the user comparison function and maps the integer result to
+`True`/`False`.
+
+```c
+// CPython: Modules/_functoolsmodule.c:462 KeyWrapper_richcompare
+static PyObject *
+KeyWrapper_richcompare(PyObject *v, PyObject *w, int op)
+{
+    ...
+    res = PyObject_CallFunctionObjArgs(gv->cmp, gv->object, gw->object, NULL);
+    ...
+    c = PyLong_AsLong(res);
+    /* map c < 0 / == 0 / > 0 onto the requested op */
+```
+
+### lru_cache
+
+The cache is a doubly-linked ring of `lru_list_elem` nodes with a sentinel
+`root`. On a hit, the node is unlinked and re-inserted at the front (MRU end).
+When the cache is full, the node at `root->next` (LRU end) is evicted.
+
+```c
+// CPython: Modules/_functoolsmodule.c:872 lru_cache_update_lock_held
+    /* Move the node to the front of the recency list. */
+    lru_list_elem *oldprev = node->prev;
+    lru_list_elem *oldnext = node->next;
+    oldprev->next = oldnext;
+    oldnext->prev = oldprev;
+    node->next = root;
+    node->prev = root->prev;
+    root->prev->next = node;
+    root->prev = node;
+```
+
+When `typed=True`, the cache key includes a tuple of `type(arg)` values
+appended after the argument tuple, so `f(1)` and `f(1.0)` map to distinct
+entries.
+
+## gopy notes
+
+- `lru_cache_object` uses a `PyDict` as the hash map and a separate ring for
+  ordering. gopy's port lives in `module/_functools/` and replicates both
+  structures.
+- `partial_call`'s arg-merge pattern is O(n); gopy mirrors this exactly rather
+  than pre-allocating.
+- The sentinel `root` trick makes eviction branchless — worth preserving in the
+  Go port rather than using a conditional `if len == maxsize` check.
+- `reduce` raises `TypeError` with the CPython message text when the sequence
+  is empty and no initializer is given; gopy copies that string verbatim.
+
+## CPython 3.14 changes
+
+- `lru_cache` gained per-thread GIL-free fast paths under the free-threaded
+  build; the lock held/unheld variants (`lru_cache_update_lock_held` vs the
+  outer wrapper) split in 3.13 and were refined in 3.14.
+- `partial.__or__` and `partial.__ror__` were removed after the union-type
+  syntax was stabilized elsewhere; the `|` operator on partials no longer
+  compiles.
+- `cmp_to_key` now exposes `__wrapped__` pointing at the original comparator,
+  matching the behaviour added to `functools.wraps` decorated functions.

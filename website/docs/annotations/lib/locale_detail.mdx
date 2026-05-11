@@ -1,0 +1,122 @@
+---
+title: locale.py
+description: "CPython Lib/locale.py: locale-aware string formatting"
+cpython_path: Lib/locale.py
+cpython_version: "3.14"
+lines: 700
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`locale.py` wraps the C locale API and adds a pure-Python layer for
+number formatting, monetary display, and locale-aware comparisons.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1–50 | imports, `CODESET` constant | C extension import, category constants |
+| 51–100 | `setlocale()` | wraps `_locale.setlocale`, busts `_localeconv` cache |
+| 101–160 | `localeconv()` | returns LC_NUMERIC / LC_MONETARY dict, cached |
+| 161–230 | `format_string()` | locale-aware `%`-style formatting |
+| 231–290 | `currency()` | formats a float as a monetary string |
+| 291–360 | `str()` `atof()` `atoi()` | locale-aware string/number conversions |
+| 361–440 | `_group()` `_strip_padding()` | internal helpers for digit grouping |
+| 441–520 | `getlocale()` `getdefaultlocale()` | read current / default locale |
+| 521–600 | `getpreferredencoding()` | wraps `_locale.getpreferredencoding` |
+| 601–700 | `normalize()` `resetlocale()` `locale_alias` dict | alias table and reset helper |
+
+## Reading
+
+### setlocale and cache invalidation
+
+`setlocale()` is the only function that may change the process locale. After
+each successful call it clears `_localeconv` so the next `localeconv()` call
+fetches fresh data from the C library.
+
+```python
+# CPython: Lib/locale.py:61 setlocale
+def setlocale(category, locale=None):
+    global _localeconv
+    result = _locale.setlocale(category, locale)
+    if locale is not None:
+        _localeconv = None   # bust the cache
+    return result
+```
+
+### localeconv
+
+`localeconv()` caches the entire struct returned by the C function. The cache
+is a module-level variable that starts as `None`.
+
+```python
+# CPython: Lib/locale.py:112 localeconv
+def localeconv():
+    global _localeconv
+    if _localeconv is None:
+        _localeconv = _locale.localeconv()
+    return _localeconv
+```
+
+The returned dict includes keys such as `decimal_point`, `thousands_sep`,
+`grouping`, `currency_symbol`, `int_curr_symbol`, and `frac_digits`.
+
+### format_string
+
+`format_string()` reimplements `%`-formatting with locale-aware number
+rendering. It finds every `%` conversion spec in the format string, formats
+the matching argument with the standard `%` operator, then passes numeric
+results through `_format()` to apply grouping and the locale decimal point.
+
+```python
+# CPython: Lib/locale.py:174 format_string
+def format_string(f, val, grouping=False, monetary=False):
+    ...
+    result = ""
+    for fmtstr, arguments, groupingflag, ... in _percent_re.finditer(f):
+        ...
+        result += _format(fmtstr, arguments, groupingflag, monetary)
+    return result
+```
+
+### currency
+
+`currency()` combines `localeconv()` data with sign, symbol position, and
+separator logic. The `international` flag switches between `currency_symbol`
+and `int_curr_symbol`.
+
+```python
+# CPython: Lib/locale.py:251 currency
+def currency(val, symbol=True, grouping=False, international=False):
+    conv = localeconv()
+    ...
+    s = format_string("%%.%sf" % digits, abs(val), grouping)
+    ...
+    return sign + smb + separated + s + sign
+```
+
+## gopy notes
+
+- `_locale` is the C extension module (`Modules/_localemodule.c`). In gopy,
+  `setlocale`/`localeconv` should call `C.setlocale` and `C.localeconv`
+  directly via `cgo`.
+- The `_localeconv` cache needs a mutex because locale operations are
+  process-global and goroutines may race.
+- `format_string()` is pure Python and can be ported as-is once the
+  `localeconv` dict is available.
+- `getdefaultlocale()` is deprecated in 3.11 and scheduled for removal; do
+  not prioritize it.
+- `locale_alias` is a large static dict (400+ entries). Embed it as a Go
+  `map[string]string` generated from the CPython source.
+
+## CPython 3.14 changes
+
+- `getdefaultlocale()` emits `DeprecationWarning` since 3.11; the function
+  body still exists in 3.14 but removal is planned for 3.15.
+- `format_string()` replaced the old `format()` function (renamed/aliased in
+  3.1). Only `format_string` should be used in new ports.
+- `resetlocale()` is deprecated since 3.11 and may be removed. Prefer
+  `setlocale(LC_ALL, "")` directly.
+- Encoding handling in `getpreferredencoding()` now uses
+  `sys.flags.utf8_mode` to honour the UTF-8 mode flag consistently.
