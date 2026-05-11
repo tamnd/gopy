@@ -1,0 +1,178 @@
+---
+title: Lib/datetime.py
+description: "Pure-Python date, time, datetime, timedelta, timezone, and tzinfo hierarchy; Julian day arithmetic, timedelta normalization, isoformat round-tripping, and the UTC singleton."
+cpython_path: Lib/datetime.py
+cpython_version: "3.14"
+lines: 2700
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Lib/datetime.py`
+
+<CpyLink path="Lib/datetime.py" />
+
+`Lib/datetime.py` is the pure-Python reference implementation of the
+`datetime` module. At runtime CPython prefers the C accelerator in
+`Modules/_datetimemodule.c`, but the Python file is the authoritative
+specification and the fallback when the C extension is absent.
+
+The file has six user-facing classes: `date`, `time`, `datetime`
+(a subclass of `date`), `timedelta`, `timezone` (a concrete subclass of
+`tzinfo`), and the abstract base `tzinfo`. The `UTC` singleton at the
+bottom of the file is `timezone(timedelta(0))`. There is also a small
+collection of module-level helpers: `_ymd2ord`, `_ord2ymd`,
+`_days_in_month`, `_is_leap`, and `_format_time`.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Lib/datetime.py" lines="1-100">1-100</Cpy> | module docstring, imports, `MINYEAR`/`MAXYEAR`, `_MAXORDINAL` | Constants and the handful of `math` / `re` imports the pure-Python path needs. | not yet ported |
+| <Cpy path="Lib/datetime.py" lines="101-200">101-200</Cpy> | `_is_leap`, `_days_before_year`, `_days_in_month`, `_days_before_month` | Gregorian calendar helpers used by ordinal arithmetic. | not yet ported |
+| <Cpy path="Lib/datetime.py" lines="201-280">201-280</Cpy> | `_ymd2ord`, `_ord2ymd` | Bidirectional Julian day (proleptic Gregorian ordinal) conversion. | not yet ported |
+| <Cpy path="Lib/datetime.py" lines="281-400">281-400</Cpy> | `_check_date_fields`, `_check_time_fields`, `_check_tzinfo_arg`, `_check_tzname`, `_check_utc_offset` | Field validation helpers called by constructors. | not yet ported |
+| <Cpy path="Lib/datetime.py" lines="401-500">401-500</Cpy> | `_format_time`, `_format_offset`, `_parse_isoformat_date`, `_parse_isoformat_time` | ISO 8601 formatting and parsing helpers shared by `date`, `time`, and `datetime`. | not yet ported |
+| <Cpy path="Lib/datetime.py" lines="501-700">501-700</Cpy> | `timedelta.__new__`, `timedelta._getstate`, normalisation arithmetic | `timedelta` constructor and the days/seconds/microseconds normalization loop. | not yet ported |
+| <Cpy path="Lib/datetime.py" lines="700-900">700-900</Cpy> | `timedelta` arithmetic methods, `__str__`, `__repr__`, `total_seconds` | Operator overloads and string representation for `timedelta`. | not yet ported |
+| <Cpy path="Lib/datetime.py" lines="901-1100">901-1100</Cpy> | `date.__new__`, `date.fromtimestamp`, `date.today`, `date.fromordinal`, `date.fromisoformat` | `date` constructors and alternate constructors. | not yet ported |
+| <Cpy path="Lib/datetime.py" lines="1100-1300">1100-1300</Cpy> | `date.timetuple`, `date.toordinal`, `date.weekday`, `date.isoweekday`, `date.isoformat`, `date.strftime`, `date.__str__`, `date.__repr__` | `date` instance methods. | not yet ported |
+| <Cpy path="Lib/datetime.py" lines="1300-1500">1300-1500</Cpy> | `time.__new__`, `time.fromisoformat`, `time.isoformat`, `time.utcoffset`, `time.tzname`, `time.dst` | `time` class. | not yet ported |
+| <Cpy path="Lib/datetime.py" lines="1500-1900">1500-1900</Cpy> | `datetime.__new__`, `datetime.combine`, `datetime.fromisoformat`, `datetime.fromtimestamp`, `datetime.utcnow`, `datetime.astimezone` | `datetime` constructors and timezone-conversion methods. | not yet ported |
+| <Cpy path="Lib/datetime.py" lines="1900-2200">1900-2200</Cpy> | `datetime` arithmetic, `datetime.timetuple`, `datetime.timestamp`, `datetime.isoformat`, `datetime.strptime` | `datetime` instance methods and format round-trip. | not yet ported |
+| <Cpy path="Lib/datetime.py" lines="2200-2450">2200-2450</Cpy> | `timezone.__new__`, `timezone.utcoffset`, `timezone.tzname`, `timezone.fromutc`, `timezone.__repr__`, `timezone.__str__` | Concrete fixed-offset timezone class. | not yet ported |
+| <Cpy path="Lib/datetime.py" lines="2450-2700">2450-2700</Cpy> | `UTC`, `_EPOCH` constants, `datetime.min`/`max`/`resolution`, `date.min`/`max`/`resolution`, `time.min`/`max`/`resolution`, `timedelta.min`/`max`/`resolution` | Class-level sentinel objects and the module-level `UTC` singleton. | not yet ported |
+
+## Reading
+
+### `_ymd2ord` and `_ord2ymd`: Julian day arithmetic (lines 201 to 280)
+
+<CpyLink path="Lib/datetime.py" lines="201-280" />
+
+CPython represents every `date` internally as a proleptic Gregorian
+ordinal: an integer counting days from `date(1, 1, 1)` (ordinal 1).
+Two functions convert between (year, month, day) triples and ordinals.
+
+```python
+# CPython: Lib/datetime.py:201 _ymd2ord
+def _ymd2ord(year, month, day):
+    assert 1 <= month <= 12, month
+    dim = _days_in_month(year, month)
+    assert 1 <= day <= dim, day
+    return (_days_before_year(year) +
+            _days_before_month(year, month) +
+            day)
+```
+
+`_days_before_year(y)` counts the total days in all years before `y`
+using the Gregorian rule: 365 * (y-1) plus one day for each leap year
+before `y`. `_days_before_month` sums the days in months 1 through
+`month-1` for the given year, using the `_DAYS_BEFORE_MONTH` lookup
+table (which encodes cumulative day counts for a non-leap year and
+adjusts February by one for leap years). The reverse, `_ord2ymd`, uses
+a 400-year / 100-year / 4-year cycle decomposition to recover the
+year, then walks forward through months.
+
+The ordinal representation is what makes `date` arithmetic cheap:
+`d2 - d1` is just `d2.toordinal() - d1.toordinal()`. The ordinal is
+never stored directly in the object; `date._ymd` holds the canonical
+(year, month, day) tuple and `toordinal` recomputes on demand.
+
+### `timedelta` normalization (lines 501 to 600)
+
+<CpyLink path="Lib/datetime.py" lines="501-600" />
+
+`timedelta.__new__` accepts up to seven keyword arguments (weeks, days,
+hours, minutes, seconds, milliseconds, microseconds) and normalizes
+them all into exactly three fields: `days` (integer), `seconds`
+(integer in `[0, 86400)`), and `microseconds` (integer in `[0, 1e6)`).
+
+```python
+# CPython: Lib/datetime.py:501 timedelta.__new__
+def __new__(cls, days=0, seconds=0, microseconds=0,
+            milliseconds=0, minutes=0, hours=0, weeks=0):
+    ...
+    d = s = us = 0
+    days += weeks*7
+    seconds += minutes*60 + hours*3600
+    microseconds += milliseconds*1000
+    # Normalize
+    d, s, us = _normalize_pair(days, seconds, 24*3600)
+    ...
+```
+
+The key invariant is that after normalization, `seconds` and
+`microseconds` are non-negative even when the total `timedelta` is
+negative. A `timedelta` of -1 microsecond is stored as
+`days=-1, seconds=86399, microseconds=999999`, not as
+`days=0, seconds=0, microseconds=-1`. This matches the Euclidean
+division rule used throughout the file: `divmod(total_s, 86400)` always
+yields a non-negative remainder.
+
+### `datetime.combine`, `datetime.astimezone`, and `isoformat` round-tripping (lines 1500 to 2200)
+
+<CpyLink path="Lib/datetime.py" lines="1500-2200" />
+
+`datetime.combine(date, time, tzinfo=self.tzinfo)` constructs a new
+`datetime` by merging the calendar fields of a `date` object with the
+clock fields of a `time` object. The optional `tzinfo` argument
+overrides whatever `tzinfo` the `time` object carries.
+
+```python
+# CPython: Lib/datetime.py:1567 datetime.combine
+@classmethod
+def combine(cls, date, time, tzinfo=True):
+    ...
+    if tzinfo is True:
+        tzinfo = time.tzinfo
+    return cls(date.year, date.month, date.day,
+               time.hour, time.minute, time.second,
+               time.microsecond, tzinfo)
+```
+
+`astimezone(tz)` converts a `datetime` to a different timezone.
+The algorithm is: convert to UTC (by subtracting `self.utcoffset()`),
+then apply the target `tz.fromutc()`. For naive datetimes it assumes the
+system local timezone, calling `datetime.fromtimestamp(self.timestamp())`
+to get the local interpretation and then re-applying `tz`.
+
+`isoformat(sep, timespec)` and `fromisoformat` form a round-trip pair.
+`isoformat` renders the date in `YYYY-MM-DD` form, appends `sep`
+(default `"T"`), then formats the time to the precision requested by
+`timespec` (`"auto"`, `"hours"`, `"minutes"`, `"seconds"`,
+`"milliseconds"`, or `"microseconds"`). `fromisoformat` parses the
+same format and also accepts the extended ISO 8601 forms that Python
+3.11 added (week dates, ordinal dates, compact forms without separators).
+
+The UTC singleton at the bottom of the file:
+
+```python
+# CPython: Lib/datetime.py:2452 UTC
+UTC = timezone.utc = timezone(timedelta(0))
+```
+
+`timezone.utc` is a class attribute and `UTC` is a module-level alias.
+Both refer to the same object. Code that tests `dt.tzinfo is UTC` relies
+on the identity guarantee: there is exactly one `UTC` object per
+interpreter.
+
+## gopy notes
+
+Status: not yet ported.
+
+The `datetime` module is planned under `module/datetime/`. The pure-Python
+fallback in `Lib/datetime.py` will serve as the primary reference during
+porting because the C accelerator in `Modules/_datetimemodule.c` inlines
+many of the same algorithms but spreads them across C macros that are
+harder to follow. Key areas that need careful translation:
+
+- The ordinal arithmetic in `_ymd2ord` / `_ord2ymd` must match
+  CPython exactly because `date.fromordinal(d.toordinal()) == d` is a
+  guaranteed identity.
+- `timedelta` normalization must produce the same `(days, seconds, microseconds)`
+  triple for every input, including very large and very negative values,
+  because `pickle` serializes those three fields directly.
+- The `isoformat` / `fromisoformat` round-trip must handle all
+  `timespec` values and all the ISO 8601 extensions added in Python 3.11.
+- `timezone` and `UTC` must be singletons so that `is` comparisons work.

@@ -1,0 +1,182 @@
+---
+title: Lib/time.py (pure-Python stubs)
+description: "Thin Lib/time.py shim and the key C-module functions it exposes: time/time_ns, perf_counter, monotonic, sleep, struct_time, localtime/gmtime/mktime/strftime/strptime."
+cpython_path: Lib/time.py
+cpython_version: "3.14"
+lines: 30
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Lib/time.py` (pure-Python stubs)
+
+<CpyLink path="Lib/time.py" />
+
+`Lib/time.py` is a tiny shim. It exists so that the standard `import
+time` path can find a Python file when the C extension is absent (for
+example, during a very early bootstrap stage or in certain embedding
+scenarios). The real implementation lives in `Modules/timemodule.c`,
+which is a built-in extension that CPython loads before any `.py` file
+in normal operation.
+
+The shim typically contains only a docstring and a comment noting that
+the actual module is in C. This page therefore focuses on what the C
+extension exposes through the `time` module public API, with citations
+into `Modules/timemodule.c`.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Lib/time.py" lines="1-30">1-30</Cpy> | module docstring, stub comment | Placeholder so Python's import machinery can locate a `time` module file. | not yet ported |
+| `Modules/timemodule.c` | `time_time`, `time_time_ns` | Wall-clock seconds and nanoseconds since Unix epoch. | `module/time/` (planned) |
+| `Modules/timemodule.c` | `time_monotonic`, `time_monotonic_ns` | Monotonic clock that cannot go backward. | `module/time/` (planned) |
+| `Modules/timemodule.c` | `time_perf_counter`, `time_perf_counter_ns` | Highest-resolution clock for benchmarking. | `module/time/` (planned) |
+| `Modules/timemodule.c` | `time_sleep` | Suspend the current thread for a given number of seconds. | `module/time/` (planned) |
+| `Modules/timemodule.c` | `time_localtime`, `time_gmtime` | Convert a Unix timestamp to a `struct_time` in local or UTC time. | `module/time/` (planned) |
+| `Modules/timemodule.c` | `time_mktime` | Inverse of `localtime`: convert a `struct_time` (local) to a Unix timestamp. | `module/time/` (planned) |
+| `Modules/timemodule.c` | `time_strftime`, `time_strptime` | Format and parse time strings using `strftime`/`strptime` directives. | `module/time/` (planned) |
+| `Modules/timemodule.c` | `struct_time` | Named-tuple subclass with nine fields plus `tm_gmtoff` and `tm_zone`. | `module/time/` (planned) |
+
+## Reading
+
+### The `Lib/time.py` shim (lines 1 to 30)
+
+<CpyLink path="Lib/time.py" lines="1-30" />
+
+The file is essentially documentation:
+
+```python
+# CPython: Lib/time.py:1 module docstring
+"""This module provides various functions to manipulate time values.
+
+There are two standard representations of time.  One is the number
+of seconds since the Epoch, in UTC (a.k.a. Unix time).  This is a
+floating-point number returned by time().  ...
+"""
+# The actual implementation is in Modules/timemodule.c.
+```
+
+When CPython starts, `Modules/timemodule.c` is compiled in as a
+built-in module and its `PyInit_time` runs before the first `import
+time` statement. The `.py` file is never executed in a normal build.
+It matters only if CPython is built without the `time` extension (for
+example, with `--without-builtin-hashlib` style flags that exclude it)
+or when tooling like `mypy` or `sphinx` imports the module in a
+pure-Python environment.
+
+### `time()`, `time_ns()`, and wall-clock functions
+
+The wall-clock functions call `PyTime_Time` from `Python/pytime.c`,
+which selects the best OS API available:
+`GetSystemTimePreciseAsFileTime` on Windows,
+`clock_gettime(CLOCK_REALTIME)` on Linux, and `gettimeofday` on
+platforms that lack `clock_gettime`.
+
+```c
+// CPython: Modules/timemodule.c:233 time_time
+static PyObject *
+time_time(PyObject *module, PyObject *unused)
+{
+    PyTime_t t;
+    if (PyTime_Time(&t, NULL) < 0) {
+        return NULL;
+    }
+    return PyFloat_FromDouble(PyTime_AsSecondsDouble(t));
+}
+```
+
+`time_ns` is identical except it returns a Python `int` with the raw
+nanosecond value, avoiding the float precision loss that affects
+`time()` for timestamps past 2^53 nanoseconds from the epoch (roughly
+year 2255).
+
+`perf_counter` and `perf_counter_ns` call `PyTime_PerfCounter`, which
+aliases `PyTime_Monotonic` on all current platforms. The `_ns` variants
+return `int` to preserve full nanosecond resolution.
+
+### `sleep()` and its interaction with signals
+
+```c
+// CPython: Modules/timemodule.c:581 time_sleep
+static PyObject *
+time_sleep(PyObject *self, PyObject *args)
+{
+    double secs;
+    if (!PyArg_ParseTuple(args, "d:sleep", &secs))
+        return NULL;
+    if (pysleep(secs) != 0)
+        return NULL;
+    Py_RETURN_NONE;
+}
+```
+
+`pysleep` converts the float to a `PyTime_t` (using
+`_PyTime_ROUND_TIMEOUT` so that small positive values always wait at
+least one OS tick), then calls `select` or `nanosleep` in a loop. The
+loop retries on `EINTR` after calling `PyErr_CheckSignals` so that
+`KeyboardInterrupt` can interrupt a long sleep. On Windows it uses
+`WaitForSingleObjectEx` in an alertable wait.
+
+### `struct_time`, `localtime`, `gmtime`, `mktime`, `strftime`, and `strptime`
+
+`struct_time` is a named-tuple subclass with nine positional fields
+(`tm_year`, `tm_mon`, `tm_mday`, `tm_hour`, `tm_min`, `tm_sec`,
+`tm_wday`, `tm_yday`, `tm_isdst`) and two sequence-only extras
+(`tm_gmtoff`, `tm_zone`) that hold the UTC offset in seconds and the
+timezone abbreviation string. The extras are not part of the 9-tuple
+used by `mktime`.
+
+```c
+// CPython: Modules/timemodule.c:89 tmtotuple
+static PyObject *
+tmtotuple(struct tm *p, const char *zone, time_t gmtoff)
+{
+    PyObject *v = PyStructSequence_New(&StructTimeType);
+    ...
+    SET(0, PyLong_FromLong((long)p->tm_year + 1900));
+    SET(1, PyLong_FromLong((long)p->tm_mon + 1));
+    SET(2, PyLong_FromLong((long)p->tm_mday));
+    ...
+    SET(9, PyLong_FromLong((long)gmtoff));
+    SET(10, zone ? PyUnicode_DecodeLocale(zone, "surrogateescape")
+                 : Py_NewRef(Py_None));
+    return v;
+}
+```
+
+Note the `+1900` for the year and `+1` for the month: `struct tm` uses
+years-since-1900 and zero-based months; `struct_time` uses full years
+and one-based months.
+
+`strptime` is not implemented in `Modules/timemodule.c`. It delegates
+to `_strptime.py` via a lazy import, which parses the format string
+with a compiled regular expression. Only `strftime` lives in C.
+
+## gopy notes
+
+Status: not yet ported.
+
+The `time` module is planned under `module/time/`. An early skeleton
+already exists at `/Users/apple/github/tamnd/gopy/module/time/` but
+the public API functions are not yet wired up.
+
+Key areas for the port:
+
+- `time()` and `time_ns()` wrap `pytime.Time_()` from `pytime/clocks.go`,
+  which is already implemented.
+- `perf_counter()` and `perf_counter_ns()` wrap `pytime.PerfCounter()`.
+- `monotonic()` and `monotonic_ns()` wrap `pytime.Monotonic()`.
+- `sleep()` needs a signal-interruptible sleep loop. The Go
+  `time.Sleep` call is not interruptible by Python signals, so the
+  port must break the sleep into chunks and call the signal-check
+  path between iterations, matching `pysleep` in `Modules/timemodule.c`.
+- `struct_time` must be a `PyStructSequence` equivalent: a named tuple
+  that also supports positional indexing. gopy's `objects/` layer will
+  need a `StructSequence` type before `struct_time` can be fully
+  implemented.
+- `localtime` and `gmtime` depend on `struct_time` and on the Go
+  `time.Local` and `time.UTC` location objects for timezone information.
+- `strptime` can delegate to a future `module/_strptime/` port the same
+  way CPython does, keeping the C-module port clean.

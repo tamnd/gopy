@@ -1,0 +1,114 @@
+---
+title: Objects/weakrefobject.c
+description: "PyWeakReference layout, callback invocation on object death, proxy liveness checks, and weakref hash delegation."
+cpython_path: Objects/weakrefobject.c
+cpython_version: "3.14"
+lines: 700
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Objects/weakrefobject.c`
+
+<CpyLink path="Objects/weakrefobject.c" />
+
+`weakrefobject.c` implements the `weakref.ref` and proxy types that let Python code hold a reference to an object without preventing its collection. The file has two distinct concerns: the data structure that backs each weakref, and the machinery that fires callbacks and clears the weakref chain when the referent is deallocated.
+
+A `PyWeakReference` carries four fields: `wr_object` (the referent, or `Py_None` when dead), `wr_callback` (a callable or `NULL`), `hash` (a cached copy of the referent's hash so a dead weakref can still serve as a dict key), and a doubly-linked list threaded through the referent's `tp_weaklistoffset` slot so all weakrefs to the same object can be found in O(n) time. The list is anchored in the referent and walked by `PyObject_ClearWeakRefs` at dealloc time.
+
+The proxy types (`weakproxy` and `weakcallableproxy`) wrap almost every slot in `PyNumberMethods`, `PySequenceMethods`, and `PyMappingMethods` with a small thunk that calls `proxy_checkref` to verify the referent is still alive before forwarding the operation. A dead proxy raises `ReferenceError` on any attribute access.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| 1-60 | `PyWeakReference` struct, type forward decls | Layout: `wr_object`, `wr_callback`, `hash`, prev/next links | |
+| 61-160 | `insert_head`, `insert_after`, `_PyWeakref_GetWeakrefCount` | List management helpers for the per-object weakref chain | |
+| 161-270 | `PyWeakref_NewRef`, `PyWeakref_NewProxy` | Allocators: find an existing ref with the same callback or create a new one; thread into the chain | |
+| 271-340 | `weakref_hash` | Delegates to the referent's hash; caches the result in `wr_hash`; raises `TypeError` on dead ref | |
+| 341-420 | `weakref_repr`, `weakref_richcompare` | Repr shows the referent address or "dead"; equality compares by referent identity | |
+| 421-520 | `proxy_checkref` | Raises `ReferenceError` if `wr_object` is `Py_None`; used by every proxy slot | |
+| 521-620 | proxy number/sequence/mapping slots | Thin wrappers: call `proxy_checkref`, then forward to the referent's corresponding slot | |
+| 621-700 | `PyObject_ClearWeakRefs` | Called from `tp_dealloc`; walks the chain, nulls `wr_object`, and invokes each `wr_callback` | |
+
+## Reading
+
+### `PyWeakReference` layout and chain management (lines 1 to 160)
+
+<CpyLink path="Objects/weakrefobject.c" lines="1-160" />
+
+The doubly-linked list is embedded inside the `PyWeakReference` struct via `wr_object_weakrefs` (the referent side) and `wr_prev`/`wr_next` (the weakref side). When a new weakref is created, `insert_head` or `insert_after` splices it in O(1). The referent's `tp_weaklistoffset` slot holds the byte offset of the list head inside the referent's memory, so no external table is needed.
+
+```c
+// CPython: Objects/weakrefobject.c:61 insert_head
+static void
+insert_head(PyWeakReference *newref, PyWeakReference **list)
+{
+    PyWeakReference *next = *list;
+    newref->wr_prev = NULL;
+    newref->wr_next = next;
+    if (next != NULL)
+        next->wr_prev = newref;
+    *list = newref;
+}
+```
+
+`_PyWeakref_GetWeakrefCount` traverses the same chain to return the total number of live weakrefs to an object. The function is O(n) but is only called in slow paths (repr, `weakref.getweakrefs`).
+
+### `weakref_hash` and `PyWeakref_NewRef` (lines 161 to 340)
+
+<CpyLink path="Objects/weakrefobject.c" lines="161-340" />
+
+`PyWeakref_NewRef` first scans the existing chain for a weakref whose callback compares equal to the requested callback. If one is found it is returned with an incremented refcount, so two calls with the same object and callback yield the same weakref object. This deduplication is load-bearing: it makes `weakref.ref(x) is weakref.ref(x)` true when no callback is given.
+
+`weakref_hash` copies the referent's hash into `wr_hash` on the first call so the hash remains stable after the referent dies. A dead weakref with a cached hash can still be used as a dict key, which is important for caches that store `weakref.ref` objects as keys.
+
+```c
+// CPython: Objects/weakrefobject.c:271 weakref_hash
+static Py_hash_t
+weakref_hash(PyWeakReference *self)
+{
+    if (self->hash != -1)
+        return self->hash;
+    PyObject *obj = PyWeakref_GET_OBJECT(self);
+    if (obj == Py_None) {
+        PyErr_SetString(PyExc_TypeError, "weak object has gone away");
+        return -1;
+    }
+    Py_hash_t hash = PyObject_Hash(obj);
+    if (hash != -1)
+        self->hash = hash;
+    return hash;
+}
+```
+
+### `proxy_checkref` and `PyObject_ClearWeakRefs` (lines 421 to 700)
+
+<CpyLink path="Objects/weakrefobject.c" lines="421-700" />
+
+Every proxy slot begins with `proxy_checkref`. The check is a one-liner: if `PyWeakref_GET_OBJECT(proxy)` is `Py_None`, raise `ReferenceError` and return the error sentinel. The macro reads `wr_object` without a function call, so live proxies pay essentially no overhead.
+
+`PyObject_ClearWeakRefs` is called from the referent's `tp_dealloc` before any fields are freed. It must fire all callbacks in a well-defined order and must not allow a resurrected referent to escape. The implementation walks the chain twice: first to null every `wr_object` (making all weakrefs dead atomically), then to call each `wr_callback` under a temporarily borrowed reference to the referent. Callbacks receive the weakref, not the referent, so they cannot prevent collection.
+
+```c
+// CPython: Objects/weakrefobject.c:621 PyObject_ClearWeakRefs
+void
+PyObject_ClearWeakRefs(PyObject *object)
+{
+    PyWeakReference **list = GET_WEAKREFS_LISTPTR(object);
+    /* ... snapshot the chain, clear wr_object for all entries ... */
+    while (/* entries with callbacks remain */) {
+        PyWeakReference *current = /* next entry */;
+        PyObject *callback = current->wr_callback;
+        current->wr_callback = NULL;
+        PyObject *cbresult = PyObject_CallOneArg(callback, (PyObject *)current);
+        Py_XDECREF(cbresult);
+        Py_DECREF(callback);
+    }
+}
+```
+
+## gopy notes
+
+Not yet ported. Planned package path: `objects/weakref.go`. The chain management helpers map naturally to a doubly-linked list in Go; `PyObject_ClearWeakRefs` will need to integrate with gopy's object lifecycle hooks at the point where a managed object's refcount reaches zero.

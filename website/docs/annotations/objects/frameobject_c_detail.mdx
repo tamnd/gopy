@@ -1,0 +1,126 @@
+---
+title: Objects/frameobject.c
+description: "PyFrameObject as the Python-visible wrapper over _PyInterpreterFrame, including locals proxy, lineno computation, and debugger hooks."
+cpython_path: Objects/frameobject.c
+cpython_version: "3.14"
+lines: 800
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Objects/frameobject.c`
+
+<CpyLink path="Objects/frameobject.c" />
+
+`frameobject.c` defines the Python-visible `frame` object, which since CPython 3.11 is a thin wrapper around the internal `_PyInterpreterFrame` structure that lives on the C stack (or in a heap-allocated shim for generators and coroutines). The split exists for performance: the eval loop works entirely with `_PyInterpreterFrame` and never touches the heap wrapper unless user code calls `sys._getframe()`, `inspect.currentframe()`, or a debugger accesses `f_locals`.
+
+The public frame object exposes `f_code`, `f_locals`, `f_globals`, `f_builtins`, `f_lineno`, and `f_back`. Most of these are cheap reads from the underlying `_PyInterpreterFrame`, but two require non-trivial work: `f_locals` must materialize a snapshot of the fast locals array, and `f_lineno` must decode the positions table to translate a bytecode offset into a source line number.
+
+Debuggers use `frame_setlineno` to reposition execution inside a running frame, which requires validating the target line and adjusting `prev_instr` to a safe instruction boundary. The function refuses jumps that would cross into an exception handler or a `with` block, matching the restrictions that `sys.settrace`-based debuggers have always imposed.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| 1-80 | `PyFrameObject` type struct, `_PyFrame_New_NoTrack` | Allocate a frame wrapper; link to `_PyInterpreterFrame` | |
+| 81-200 | `frame_getlocals`, `_PyFrame_FastToLocalsWithError` | Copy fast-locals array into a `dict`; handle cells and free vars | |
+| 201-320 | `frame_setlineno` | Debugger hook: validate and apply a lineno jump inside the frame | |
+| 321-430 | `frame_getback` | Walk `f_back` chain, skipping internal shim frames | |
+| 431-560 | `frame_getlineno`, `PyFrame_GetLineNumber` | Decode positions table to get the current source line | |
+| 561-660 | `f_locals` proxy (`FrameLocalsProxy`) | Lazy proxy object that reflects mutations back into fast locals | |
+| 661-800 | `PyFrame_Type`, `frame_dealloc`, GC slots | Type object registration, GC traverse, clear, dealloc | |
+
+## Reading
+
+### `frame_getlocals` and `_PyFrame_FastToLocalsWithError` (lines 81 to 200)
+
+<CpyLink path="Objects/frameobject.c" lines="81-200" />
+
+Fast locals are stored as a raw `PyObject *` array inside `_PyInterpreterFrame`. Variables that are captured by a closure additionally live in `PyCell` objects. `_PyFrame_FastToLocalsWithError` copies each slot into a `dict`, unwrapping cells along the way and skipping slots that are `NULL` (unbound locals).
+
+```c
+// CPython: Objects/frameobject.c:110 _PyFrame_FastToLocalsWithError
+int
+_PyFrame_FastToLocalsWithError(_PyInterpreterFrame *frame)
+{
+    PyObject *locals = frame->f_locals;
+    if (locals == NULL) {
+        locals = frame->f_locals = PyDict_New();
+        if (locals == NULL)
+            return -1;
+    }
+    PyCodeObject *co = (PyCodeObject *)frame->f_executable;
+    int n = co->co_nlocalsplus;
+    for (int i = 0; i < n; i++) {
+        _PyLocals_Kind kind = _PyLocals_GetKind(co->co_localspluskinds, i);
+        PyObject *value = frame->localsplus[i];
+        if (kind & CO_FAST_CELL) {
+            if (value == NULL || !PyCell_Check(value))
+                continue;
+            value = PyCell_GET(value);
+        }
+        if (value == NULL) {
+            PyObject *name = PyTuple_GET_ITEM(co->co_localsplusnames, i);
+            if (PyObject_DelItem(locals, name) != 0)
+                PyErr_Clear();
+        } else {
+            PyObject *name = PyTuple_GET_ITEM(co->co_localsplusnames, i);
+            if (PyObject_SetItem(locals, name, value) != 0)
+                return -1;
+        }
+    }
+    return 0;
+}
+```
+
+The reverse direction (`_PyFrame_LocalsToFast`) writes a modified `f_locals` dict back into the fast-locals array, which is how `exec` and debugger variable injection work.
+
+### `frame_setlineno` (lines 201 to 320)
+
+<CpyLink path="Objects/frameobject.c" lines="201-320" />
+
+`frame_setlineno` is the write handler for the `f_lineno` attribute. Setting `f_lineno` on a suspended frame (inside a `sys.settrace` callback) is how debuggers implement "jump to line". The function must find a safe instruction at or near the target line and update `frame->prev_instr` so the eval loop resumes at the right place.
+
+The safety checks refuse jumps that cross a `with` block entry (`BEFORE_WITH` instruction), would land inside an exception handler range, or would skip over a `RESUME` at the top of the frame. These restrictions mirror the equivalent checks in `bdb.py` and exist because skipping over `__enter__` without a matching `__exit__` would leak context manager state.
+
+```c
+// CPython: Objects/frameobject.c:201 frame_setlineno
+static int
+frame_setlineno(PyFrameObject *f, PyObject *p_new_lineno, void *Py_UNUSED(ignored))
+{
+    /* ... validate type, extract int ... */
+    int new_lineno = (int)PyLong_AsLong(p_new_lineno);
+    /* ... find target instruction via _PyCode_InitAddressRange ... */
+    /* ... check for with-block and exception-table crossings ... */
+    f->f_frame->prev_instr = target_instr;
+    return 0;
+}
+```
+
+### `frame_getback` and `f_lineno` computation (lines 321 to 560)
+
+<CpyLink path="Objects/frameobject.c" lines="321-560" />
+
+`frame_getback` climbs the `_PyInterpreterFrame.previous` chain but skips frames that are marked as "internal" shims (generator throw frames, `_PyEval_EvalFrameDefault` bootstrap frames). This ensures that `frame.f_back` from Python always resolves to another user-visible frame, matching the pre-3.11 behavior where every frame was heap-allocated.
+
+`frame_getlineno` delegates to `PyFrame_GetLineNumber`, which in turn calls `PyCode_Addr2Line`. Given the bytecode offset stored in `frame->prev_instr`, `PyCode_Addr2Line` decodes the compact `co_linetable` positions table (introduced in 3.10 and extended in 3.11 for column information) to recover the source line number. The offset is the byte distance from the start of the code object's bytecode, measured in units of two bytes (each instruction is at least one word).
+
+```c
+// CPython: Objects/frameobject.c:435 frame_getlineno
+static PyObject *
+frame_getlineno(PyFrameObject *f, void *Py_UNUSED(ignored))
+{
+    int lineno = PyFrame_GetLineNumber(f);
+    if (lineno < 0) {
+        Py_RETURN_NONE;
+    }
+    return PyLong_FromLong(lineno);
+}
+```
+
+The `FrameLocalsProxy` (lines 561 to 660) is a mapping object added in 3.13 that replaces the plain dict returned by `frame.f_locals` for executing frames. Reads go through `_PyFrame_FastToLocalsWithError`; writes call `_PyFrame_LocalsToFast`. The proxy ensures that debugger code that does `frame.f_locals['x'] = 42` actually affects the fast slot rather than a stale snapshot dict.
+
+## gopy notes
+
+Not yet ported. Planned package path: `objects/frame.go`. The `_PyInterpreterFrame` counterpart already exists in gopy as the internal frame struct used by `vm/`. The `PyFrameObject` wrapper and the `FrameLocalsProxy` are the remaining pieces needed to pass `inspect.currentframe()` and `sys._getframe()` calls correctly.

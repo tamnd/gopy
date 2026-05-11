@@ -1,0 +1,144 @@
+---
+title: Objects/codeobject.c
+description: "PyCode_New field validation, co_linetable and positions table decoding, exception table parsing, and PyCode_Replace for debugger injection."
+cpython_path: Objects/codeobject.c
+cpython_version: "3.14"
+lines: 1800
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Objects/codeobject.c`
+
+<CpyLink path="Objects/codeobject.c" />
+
+`codeobject.c` owns the `code` type, the most information-dense object in CPython. A `PyCodeObject` carries the bytecode, all compile-time constants, the compact line-number and column-offset table (`co_linetable`), the exception handler table (`co_exceptiontable`), and the name and variable-kind metadata for every local, cell, free, and argument slot. The file also provides the address-range iterators that the eval loop, traceback code, and profilers use to translate a `prev_instr` offset back into a source location.
+
+The file divides cleanly into four zones. The first zone (lines 1 to 400) covers construction: `PyCode_NewWithPosOnlyArgs` validates field shapes and invariants, then `_PyCode_Validate_Opcodes` checks that the bytecode is internally consistent. The second zone (lines 401 to 900) covers the positions table: `_PyCode_InitAddressRange` sets up a stateful iterator and `PyCode_Addr2Line` / `PyCode_Addr2Location` decode it. The third zone (lines 901 to 1400) covers the exception table: `_PyCode_InitExceptionTableReader` and `_PyCode_ExceptionTableAdvance` implement the variable-length encoding that maps any instruction offset to its handler. The fourth zone (lines 1401 to 1800) covers the remaining type machinery: `code_hash`, `code_richcompare`, `PyCode_Replace`, and the `PyCode_Type` object.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| 1-120 | includes, `PyCodeObject` field list | Field layout; `co_localspluskinds` bitmap | |
+| 121-400 | `PyCode_NewWithPosOnlyArgs`, `_PyCode_Validate_Opcodes` | Construction and bytecode validation; raises `ValueError` on bad shape | `compile/compiler.go` |
+| 401-600 | `_PyCode_InitAddressRange`, `scan_varint`, `scan_signed_varint` | Positions table iterator setup; varint decoder | |
+| 601-900 | `PyCode_Addr2Line`, `PyCode_Addr2Location` | Translate bytecode offset to (line, end_line, col, end_col) | |
+| 901-1100 | `_PyCode_InitExceptionTableReader`, `_PyCode_ExceptionTableAdvance` | Exception table iterator; variable-length entry decoder | |
+| 1101-1400 | `_PyCode_CheckLineNumber`, `_PyCode_InitAddressRange` (public) | Higher-level wrappers used by frame and traceback code | |
+| 1401-1600 | `PyCode_Replace` | Produce a modified code object (new consts or bytecode); used by coverage and debuggers | |
+| 1601-1800 | `code_hash`, `code_richcompare`, `PyCode_Type` | Hash and equality based on bytecode content; type object registration | |
+
+## Reading
+
+### `PyCode_NewWithPosOnlyArgs` and field validation (lines 121 to 400)
+
+<CpyLink path="Objects/codeobject.c" lines="121-400" />
+
+`PyCode_NewWithPosOnlyArgs` is the canonical constructor. It accepts the full set of compile-time fields and enforces shape invariants before allocating. The checks include: `co_localsplusnames` and `co_localspluskinds` must have the same length; that length must equal `co_nlocalsplus`; `co_argcount + co_posonlyargcount + co_kwonlyargcount` must not exceed `co_nlocalsplus`; and `co_linetable` must be a `bytes` object.
+
+```c
+// CPython: Objects/codeobject.c:121 PyCode_NewWithPosOnlyArgs
+PyCodeObject *
+PyCode_NewWithPosOnlyArgs(int argcount, int posonlyargcount, int kwonlyargcount,
+                          int nlocals, int stacksize, int flags,
+                          PyObject *code, PyObject *consts, PyObject *names,
+                          PyObject *varnames, PyObject *freevars, PyObject *cellvars,
+                          PyObject *filename, PyObject *name, PyObject *qualname,
+                          int firstlineno, PyObject *linetable, PyObject *exceptiontable)
+{
+    /* ... type checks ... */
+    if (nlocals != PyTuple_GET_SIZE(varnames)) {
+        PyErr_SetString(PyExc_ValueError,
+                        "code: co_nlocals != len(co_varnames)");
+        return NULL;
+    }
+    /* ... allocate and fill PyCodeObject ... */
+}
+```
+
+`_PyCode_Validate_Opcodes` (called at the end of construction) walks the bytecode word by word and verifies that every jump target is a valid instruction boundary, that `RESUME` appears exactly at offset 0, and that no opcode references a constant or name index out of range. Validation failures raise `SystemError` rather than `ValueError` because they indicate a compiler bug rather than user error.
+
+### `co_linetable` positions table and `PyCode_Addr2Line` (lines 401 to 900)
+
+<CpyLink path="Objects/codeobject.c" lines="401-900" />
+
+Since CPython 3.11 the `co_linetable` field encodes not just line numbers but also end-line, column offset, and end-column offset for every instruction, using a compact variable-length format. Each entry covers one or more consecutive instructions and records the delta from the previous entry's values. The format uses unsigned varints for instruction counts and signed varints for line/column deltas, with a sentinel byte pattern to signal "no position information".
+
+`_PyCode_InitAddressRange` initializes a `PyCodeAddressRange` cursor at the start of the table. The cursor tracks the current bytecode offset, the current line number, and a pointer into the raw `co_linetable` bytes. Advancing the cursor calls `scan_varint` and `scan_signed_varint` to decode the next delta.
+
+```c
+// CPython: Objects/codeobject.c:401 _PyCode_InitAddressRange
+void
+_PyCode_InitAddressRange(PyCodeObject *co, PyCodeAddressRange *bounds)
+{
+    bounds->opaque.lo_next = (const char *)PyBytes_AS_STRING(co->co_linetable);
+    bounds->opaque.limit   = bounds->opaque.lo_next + PyBytes_GET_SIZE(co->co_linetable);
+    bounds->ar_start       = -1;
+    bounds->ar_end         = 0;
+    bounds->opaque.computed_line = co->co_firstlineno;
+    bounds->ar_line        = -1;
+}
+```
+
+`PyCode_Addr2Line` is a convenience wrapper that advances the cursor until the target offset falls within `[ar_start, ar_end)`, then returns `ar_line`. For callers that need the full `(line, end_line, col, end_col)` quad, `PyCode_Addr2Location` exposes the underlying `_PyLocationTable_NextEntry` iterator.
+
+### `co_exceptiontable` parsing (lines 901 to 1400)
+
+<CpyLink path="Objects/codeobject.c" lines="901-1400" />
+
+The exception table replaced the old block stack in CPython 3.11. Each entry encodes a bytecode range, a handler target offset, a stack depth at handler entry, and flags (whether a `lasti` value should be pushed and whether the handler is a `LASTI_PUSH` kind). All fields use unsigned varints packed with a "more bytes follow" high bit.
+
+`_PyCode_InitExceptionTableReader` sets up a cursor analogous to the positions table iterator. `_PyCode_ExceptionTableAdvance` decodes one entry into a `_PyHandlerTable` struct and moves the cursor forward. The eval loop calls these from `get_exception_handler` on every unhandled exception to find whether the current instruction offset falls inside any handler range.
+
+```c
+// CPython: Objects/codeobject.c:950 _PyCode_ExceptionTableAdvance
+int
+_PyCode_ExceptionTableAdvance(_PyExceptionTableIterator *iter,
+                               _PyExceptionTableEntry *entry)
+{
+    const uint8_t *p = iter->ptr;
+    if (p >= iter->end)
+        return 0;   /* no more entries */
+    uint32_t start_offset = read_varint(&p) * sizeof(_Py_CODEUNIT);
+    uint32_t size         = (read_varint(&p) + 1) * sizeof(_Py_CODEUNIT);
+    uint32_t target       = read_varint(&p) * sizeof(_Py_CODEUNIT);
+    uint32_t depth_lasti  = read_varint(&p);
+    entry->start_offset   = start_offset;
+    entry->stop_offset    = start_offset + size;
+    entry->target         = target;
+    entry->depth          = depth_lasti >> 1;
+    entry->lasti          = depth_lasti & 1;
+    iter->ptr = p;
+    return 1;
+}
+```
+
+### `PyCode_Replace` and `code_hash` (lines 1401 to 1800)
+
+<CpyLink path="Objects/codeobject.c" lines="1401-1800" />
+
+`PyCode_Replace` creates a modified copy of a code object with selected fields swapped out. Coverage tools use it to substitute a patched bytecode that increments counters; debuggers use it to inject `BREAKPOINT` instructions. The function copies every field from the original, replaces the nominated fields, and calls `PyCode_NewWithPosOnlyArgs` with the new values. It is exposed to Python as `code.replace(**kwargs)`.
+
+```c
+// CPython: Objects/codeobject.c:1401 PyCode_Replace
+PyCodeObject *
+PyCode_Replace(PyCodeObject *co, PyObject *changes)
+{
+    /* Extract optional keyword arguments: co_consts, co_varnames, etc. */
+    /* Fall back to original field for any keyword not present in changes */
+    return PyCode_NewWithPosOnlyArgs(
+        co->co_argcount, co->co_posonlyargcount,
+        /* ... all fields, with replacements applied ... */
+    );
+}
+```
+
+`code_hash` computes a hash from the bytecode bytes, constants tuple, names tuple, and a few integer fields. It does not hash the filename or first-line number, so code objects compiled from identical source at different locations still hash equally. This property is intentional: it lets frozen module caches match code objects across installs.
+
+`code_richcompare` checks equality field by field rather than hashing, comparing bytecode bytes first (the most discriminating and cheapest check) before falling back to constants and names.
+
+## gopy notes
+
+Not yet ported. Planned package path: `objects/code.go`. The `PyCodeObject` fields that gopy's compiler already produces (bytecode, constants, names, co_firstlineno) are currently stored in a gopy-internal struct in `compile/compiler.go`. Porting `codeobject.c` will mean lifting those fields into a proper `CodeObject` type that exposes `Addr2Line` and `ExceptionTableAdvance` to the VM and traceback packages.

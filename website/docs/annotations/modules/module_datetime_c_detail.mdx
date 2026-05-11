@@ -1,65 +1,72 @@
 ---
-title: _datetimemodule.c
-description: "C implementation of the datetime module: constructors, arithmetic, timezone conversion, and the cross-extension C API"
+title: Modules/_datetimemodule.c
+description: "CPython source annotation: Modules/_datetimemodule.c"
 cpython_path: Modules/_datetimemodule.c
 cpython_version: "3.14"
-lines: 6500
+lines: 6600
 status: annotated
 ---
 
 import {Cpy, CpyLink} from '@site/src/components/Cpy';
 
-`_datetimemodule.c` is the C backend for Python's `datetime` standard library. It implements
-`date`, `time`, `datetime`, `timedelta`, and `timezone` as C types, and publishes
-`PyDateTime_CAPI` so that other C extensions can call datetime constructors without going
-through the Python interpreter.
+Source: <CpyLink path="Modules/_datetimemodule.c" />
 
 ## Map
 
-| Lines | Symbol | Role |
-|-------|--------|------|
-| 1–200 | `PyDateTime_CAPI` struct | Cross-extension sharing capsule |
-| 201–800 | `date_new` / `date_fromisoformat` | `date` constructor and ISO parser |
-| 801–1600 | `time_new` | `time` constructor with fold/tzinfo |
-| 1601–2800 | `datetime_new` / `datetime_combine` | `datetime` constructor and combine |
-| 2801–3400 | `datetime_astimezone` | Timezone conversion logic |
-| 3401–3800 | `datetime_strptime` | Delegates parsing to `_strptime` |
-| 3801–4800 | `delta_new` / `delta_add` / `delta_mul` | `timedelta` arithmetic and normalization |
-| 4801–5400 | `timezone_new` / `timezone_utcoffset` | Fixed-offset `timezone` class |
-| 5401–6500 | Module init (`PyInit__datetime`) | Type registration, capsule setup |
+| Lines | Symbol | Purpose |
+|-------|--------|---------|
+| 1–120 | includes, `MINYEAR`/`MAXYEAR` | constants, forward decls |
+| 121–400 | byte-field macros | `PyDateTime_DATE_GET_YEAR`, `GET_MONTH`, `GET_DAY`, etc. |
+| 401–700 | `ymd_to_ord`, `ord_to_ymd` | proleptic Gregorian ordinal arithmetic |
+| 701–1100 | `date_new` | field validation and `date` object allocation |
+| 1101–1800 | `datetime_new` | field validation extended with hour/minute/second/microsecond/tzinfo |
+| 1801–2400 | `timedelta_new` | normalization of days/seconds/microseconds |
+| 2401–2900 | `datetime_combine` | merges a `date` and a `time` into a `datetime` |
+| 2901–3600 | `datetime_astimezone` | UTC conversion via `utcoffset()` protocol |
+| 3601–4400 | `datetime_strftime`, `datetime_strptime` | format string handling |
+| 4401–5200 | arithmetic methods | `__add__`, `__sub__`, `__radd__` for date and timedelta |
+| 5201–5900 | `PyDateTime_CAPI` struct | C-level fast constructors exported via capsule |
+| 5901–6600 | module init | `PyModuleDef`, type registration, capsule export |
 
 ## Reading
 
-### PyDateTime_CAPI: cross-extension capsule
+### PyDateTime_CAPI and C-level fast constructors
 
-Other C extensions (e.g. database drivers) import the capsule at `datetime.datetime_CAPI`
-to call datetime constructors at C speed without touching `PyObject_Call`.
+CPython exports a `PyDateTime_CAPI` struct through a module capsule so that
+third-party C extensions (NumPy, pandas, Arrow) can construct `datetime` objects
+without going through the Python call stack. The struct holds function pointers
+for `Date_FromDate`, `DateTime_FromDateAndTime`, `Time_FromTime`, and
+`Delta_FromDelta`, each bypassing argument parsing and validation.
 
 ```c
-// CPython: Modules/_datetimemodule.c:148 PyDateTime_CAPI
+// CPython: Modules/_datetimemodule.c:5210 PyDateTime_CAPI
 static PyDateTime_CAPI CAPI = {
-    &PyDateTime_DateType,
-    &PyDateTime_TimeType,
-    &PyDateTime_DateTimeType,
-    &PyDateTime_DeltaType,
-    &PyDateTime_TZInfoType,
-    datetime_fromtimestamp,
-    date_fromtimestamp,
-    datetime_fromordinal,
-    datetime_combine,
+    .DateType           = &PyDateTime_DateType,
+    .DateTimeType       = &PyDateTime_DateTimeType,
+    .TimeType           = &PyDateTime_TimeType,
+    .DeltaType          = &PyDateTime_DeltaType,
+    .TZInfoType         = &PyDateTime_TZInfoType,
+    .Date_FromDate      = new_date_ex,
+    .DateTime_FromDateAndTime = new_datetime_ex,
+    .Time_FromTime      = new_time_ex,
+    .Delta_FromDelta    = new_delta_ex,
 };
 ```
 
-The capsule is stored as `datetime.datetime_CAPI` via `PyCapsule_New` and is the
-stable ABI surface other extensions rely on.
+Consumers retrieve the struct with `PyCapsule_Import("datetime.datetime_CAPI", 0)`
+and then call the function pointers directly. The gopy port must export an
+equivalent capsule from `module/datetime/` so that any future C-extension bridge
+can locate it by the same name.
 
-### date_new: range validation
+### date_new and datetime_new field validation
 
-`date_new` checks that year, month, and day are in valid ranges before allocating
-the object. Out-of-range values raise `ValueError` before any memory is touched.
+`date_new` enforces the year/month/day ranges before allocating the object.
+Year must be in [1, 9999], month in [1, 12], and day in [1, days_in_month(year, month)].
+The day upper bound is computed by `days_in_month`, which handles February leap
+years via `is_leap`.
 
 ```c
-// CPython: Modules/_datetimemodule.c:2351 date_new
+// CPython: Modules/_datetimemodule.c:722 date_new
 static PyObject *
 date_new(PyTypeObject *type, PyObject *args, PyObject *kw)
 {
@@ -67,60 +74,58 @@ date_new(PyTypeObject *type, PyObject *args, PyObject *kw)
     if (!PyArg_ParseTupleAndKeywords(args, kw, "iii", date_kws,
                                      &year, &month, &day))
         return NULL;
+    if (check_date_args(year, month, day) < 0)
+        return NULL;
     return new_date_ex(year, month, day, type);
 }
 ```
 
-`new_date_ex` calls `check_date_args` which rejects year outside `[MINYEAR, MAXYEAR]`,
-month outside `[1, 12]`, and day outside `[1, days_in_month(year, month)]`.
+`datetime_new` extends this with four additional fields validated in
+`check_time_args`: hour in [0, 23], minute in [0, 59], second in [0, 59],
+and microsecond in [0, 999999]. The `tzinfo` argument is accepted as-is; its
+`utcoffset()` return value is only checked when conversion methods are called.
 
-### timedelta normalization
+### byte-field macros and timedelta normalization
 
-`timedelta` stores three fields: `days`, `seconds`, `microseconds`. The constructor
-normalizes any combination of inputs into the canonical form where
-`0 <= seconds < 86400` and `0 <= microseconds < 1000000`.
-
-```c
-// CPython: Modules/_datetimemodule.c:3912 delta_new
-    /* Normalize */
-    us2 = microseconds + 1000000 * seconds + (int64_t)86400000000LL * days;
-    days = Py_DivMod(us2, (int64_t)86400000000LL, &us2);
-    seconds = (int)(us2 / 1000000);
-    microseconds = (int)(us2 % 1000000);
-```
-
-Negative timedeltas keep `days` negative but `seconds` and `microseconds` non-negative,
-matching the invariant documented in the language reference.
-
-### datetime_astimezone
-
-Timezone conversion first converts to UTC using the source `utcoffset()`, then applies
-the target `fromutc()`. When the target is `None`, the local timezone is used via
-`local_timezone_from_timestamp`.
+`datetime` objects store date and time components as raw bytes in a fixed layout
+within the Python object struct. The macros extract fields with no overhead.
 
 ```c
-// CPython: Modules/_datetimemodule.c:4623 datetime_astimezone
-    /* Convert self to UTC. */
-    offset = datetime_utcoffset(self, NULL);
-    /* Then convert UTC to target tz. */
-    result = _PyObject_CallMethodIdObjArgs(tz, &PyId_fromutc, self, NULL);
+// CPython: Modules/_datetimemodule.c:142 PyDateTime_DATE_GET_YEAR
+#define PyDateTime_DATE_GET_YEAR(o) \
+    ((((PyDateTime_Date*)(o))->data[0] << 8) | \
+      ((PyDateTime_Date*)(o))->data[1])
+
+// CPython: Modules/_datetimemodule.c:148 PyDateTime_DATE_GET_MONTH
+#define PyDateTime_DATE_GET_MONTH(o) \
+    (((PyDateTime_Date*)(o))->data[2])
+
+// CPython: Modules/_datetimemodule.c:151 PyDateTime_DATE_GET_DAY
+#define PyDateTime_DATE_GET_DAY(o) \
+    (((PyDateTime_Date*)(o))->data[3])
 ```
+
+`timedelta_new` normalizes its three constructor arguments so that seconds is
+always in [0, 86399] and microseconds in [0, 999999], carrying overflow into the
+next coarser unit. The normalization is a simple cascade of integer division and
+remainder, matching the Python-level `timedelta` contract exactly.
+
+`datetime_combine` allocates a new `datetime` by extracting the date fields from
+a `date` argument and the time fields from a `time` argument, then calls
+`new_datetime_ex2` with the combined set. `datetime_astimezone` fetches the
+source `utcoffset()`, subtracts it to get UTC, adds the target offset, and
+returns a new `datetime` stamped with the target `tzinfo`.
 
 ## gopy notes
 
-- `PyDateTime_CAPI` should be published via `objects/capsule.go` once capsule support lands.
-- `timedelta` normalization is pure integer arithmetic: straightforward to port.
-- `datetime_astimezone` relies on `fromutc` being a Python-level method; the gopy port
-  must call it through the normal method dispatch path, not a shortcut.
-- `datetime_strptime` is a thin wrapper that imports `_strptime` and delegates; the gopy
-  port only needs to replicate the delegation, not re-implement the parser.
+Status: not yet ported.
 
-## CPython 3.14 changes
+Planned package path: `module/datetime/`.
 
-- `date.fromisoformat` now accepts the full ISO 8601 extended format including week dates
-  (`2024-W12-3`) and ordinal dates (`2024-083`), backported from the 3.11 release but
-  extended further in 3.14.
-- `datetime.fromtimestamp` raises `OverflowError` on platforms where the C `localtime`
-  would overflow, replacing the previous undefined behaviour.
-- The `PyDateTime_CAPI` struct gained a `timezone_utc` field so extensions can reference
-  `datetime.timezone.utc` without an attribute lookup.
+The byte-field layout will be replicated as a Go struct with explicit field
+offsets, and the macros become inline getter methods. The `PyDateTime_CAPI`
+capsule export requires the capsule mechanism to be functional first (tracked
+separately). Field validation in `date_new` and `datetime_new` translates
+directly to Go range checks before calling the internal allocator. `timedelta`
+normalization is pure arithmetic with no platform dependency and will be ported
+verbatim.

@@ -1,0 +1,173 @@
+---
+title: Lib/calendar.py
+description: "Pure-Python calendar utilities: Calendar/TextCalendar/HTMLCalendar hierarchy, itermonthdates, monthcalendar 2D week grid, isleap/leapdays, setfirstweekday, and locale-aware variants."
+cpython_path: Lib/calendar.py
+cpython_version: "3.14"
+lines: 700
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Lib/calendar.py`
+
+<CpyLink path="Lib/calendar.py" />
+
+`Lib/calendar.py` is the pure-Python implementation of the `calendar`
+module. Unlike `datetime`, there is no C accelerator: this file is what
+runs in every CPython build.
+
+The file defines a three-class hierarchy. `Calendar` is the abstract
+base that drives iteration over weeks and months. `TextCalendar` adds
+plain-text formatting. `HTMLCalendar` adds HTML table output.
+Two locale-aware subclasses, `LocaleTextCalendar` and
+`LocaleHTMLCalendar`, temporarily switch the process locale to format
+day and month names. Module-level helpers (`isleap`, `leapdays`,
+`weekday`, `weekheader`, `monthrange`, `monthcalendar`) delegate to a
+module-level `Calendar` instance named `c`.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Lib/calendar.py" lines="1-50">1-50</Cpy> | imports, `January`, `February`, `MONDAY`...`SUNDAY` constants | Day-of-week and month-number constants exported as module attributes. | not yet ported |
+| <Cpy path="Lib/calendar.py" lines="51-100">51-100</Cpy> | `isleap`, `leapdays`, `weekday`, `weekheader`, `monthrange` | Module-level calendar arithmetic functions. | not yet ported |
+| <Cpy path="Lib/calendar.py" lines="101-200">101-200</Cpy> | `Calendar.__init__`, `Calendar.getfirstweekday`, `Calendar.setfirstweekday`, `Calendar.iterweekdays` | Base class construction and weekday-order helpers. | not yet ported |
+| <Cpy path="Lib/calendar.py" lines="201-300">201-300</Cpy> | `Calendar.itermonthdates`, `Calendar.itermonthdays`, `Calendar.itermonthdays2`, `Calendar.itermonthdays3`, `Calendar.itermonthdays4` | The iterator family that drives all month views. | not yet ported |
+| <Cpy path="Lib/calendar.py" lines="301-370">301-370</Cpy> | `Calendar.monthdatescalendar`, `Calendar.monthdays2calendar`, `Calendar.monthdayscalendar`, `Calendar.yeardatescalendar`, `Calendar.yeardays2calendar`, `Calendar.yeardayscalendar` | 2D-grid builders used by formatters. | not yet ported |
+| <Cpy path="Lib/calendar.py" lines="371-500">371-500</Cpy> | `TextCalendar.formatday`, `TextCalendar.formatweek`, `TextCalendar.formatweekheader`, `TextCalendar.formatmonth`, `TextCalendar.formatyear`, `TextCalendar.prmonth`, `TextCalendar.pryear` | Plain-text month and year formatting. | not yet ported |
+| <Cpy path="Lib/calendar.py" lines="501-620">501-620</Cpy> | `HTMLCalendar.formatday`, `HTMLCalendar.formatweek`, `HTMLCalendar.formatweekheader`, `HTMLCalendar.formatmonth`, `HTMLCalendar.formatyear`, `HTMLCalendar.formatyearpage` | HTML table formatting. | not yet ported |
+| <Cpy path="Lib/calendar.py" lines="621-700">621-700</Cpy> | `LocaleTextCalendar`, `LocaleHTMLCalendar`, module-level `c`, `setfirstweekday`, `monthcalendar`, `prmonth`, `month`, `prcal`, `calendar`, `timegm`, `main` | Locale-aware subclasses, module-level convenience functions, `timegm`, and the `__main__` entry point. | not yet ported |
+
+## Reading
+
+### `isleap`, `leapdays`, and the Gregorian calendar rules (lines 51 to 100)
+
+<CpyLink path="Lib/calendar.py" lines="51-100" />
+
+Two module-level functions encode the Gregorian leap-year rules.
+
+```python
+# CPython: Lib/calendar.py:53 isleap
+def isleap(year):
+    "Return True for leap years, False for non-leap years."
+    return year % 4 == 0 and (year % 100 != 0 or year % 400 == 0)
+```
+
+```python
+# CPython: Lib/calendar.py:58 leapdays
+def leapdays(y1, y2):
+    """Return number of leap years in range [y1, y2).
+    Assumes y1 <= y2."""
+    y1 -= 1
+    y2 -= 1
+    return (y2//4 - y1//4) - (y2//100 - y1//100) + (y2//400 - y1//400)
+```
+
+`leapdays` uses the inclusion-exclusion formula on integer division: the
+count of multiples of 4 in `[1, y)` minus the count of multiples of 100,
+plus the count of multiples of 400. Subtracting 1 from both endpoints
+converts the half-open range `[y1, y2)` into the closed range
+`[1, y2-1]` minus `[1, y1-1]`. The formula avoids iterating over years
+and runs in O(1).
+
+`setfirstweekday(firstweekday)` (line ~650) updates the module-level
+`c` instance and raises `IllegalWeekdayError` if the argument is outside
+`[0, 6]`. The module-level `firstweekday()` function reads
+`c.firstweekday` back out.
+
+### `Calendar.itermonthdates` and the iterator family (lines 201 to 300)
+
+<CpyLink path="Lib/calendar.py" lines="201-300" />
+
+`itermonthdates` is the master iterator. It yields one `date` object
+per day, starting on the Monday (or configured first weekday) of the
+week that contains the 1st of the month and ending on the Sunday of
+the week that contains the last day of the month. Days that belong to
+the adjacent months are included so that every yielded week is exactly
+seven days.
+
+```python
+# CPython: Lib/calendar.py:204 Calendar.itermonthdates
+def itermonthdates(self, year, month):
+    for d in self.itermonthdays(year, month):
+        if d == 0:
+            ...  # skip padding days
+        yield date(year, month, 1) + timedelta(days=d-1)
+```
+
+The family of iterators builds on this core:
+
+- `itermonthdays` yields day-of-month integers with `0` for padding days outside the month.
+- `itermonthdays2` yields `(day_of_month, weekday)` tuples, again with `0` for padding.
+- `itermonthdays3` yields `(year, month, day)` triples with actual dates for padding days instead of zeros.
+- `itermonthdays4` yields `(year, month, day, weekday)` 4-tuples.
+
+`monthcalendar(year, month)` collects `itermonthdays2` into a list of
+7-element week lists, where each element is the day-of-month integer
+(`0` for days outside the month). This is the 2D grid that
+`TextCalendar.formatmonth` and `HTMLCalendar.formatmonth` iterate over.
+
+### `TextCalendar` and `HTMLCalendar` formatters (lines 371 to 620)
+
+<CpyLink path="Lib/calendar.py" lines="371-620" />
+
+Both formatters share the same iteration strategy: call
+`monthdays2calendar` to get a list of weeks, then format each week
+by calling `formatday` on each `(day, weekday)` pair.
+
+`TextCalendar.formatmonth` builds a string by concatenating the week
+header, a newline, and then one formatted week per line:
+
+```python
+# CPython: Lib/calendar.py:383 TextCalendar.formatmonth
+def formatmonth(self, theyear, themonth, w=0, l=0):
+    w = max(2, w)
+    l = max(1, l)
+    s = self.formatmonthname(theyear, themonth, 7 * (w + 1) - 1)
+    s = s.rstrip()
+    s += '\n' * l
+    s += self.formatweekheader(w).rstrip()
+    s += '\n' * l
+    for week in self.monthdays2calendar(theyear, themonth):
+        s += self.formatweek(week, w).rstrip()
+        s += '\n' * l
+    return s
+```
+
+`HTMLCalendar.formatmonth` produces an HTML `<table>` with one `<tr>`
+per week. Each day cell gets the CSS class `mon`, `tue`, ..., `sun` so
+that weekends can be styled independently. `formatyearpage` wraps the
+twelve month tables in a full HTML document with an optional encoding
+declaration.
+
+`LocaleTextCalendar` and `LocaleHTMLCalendar` override `formatweekday`
+and `formatmonthname` to call `locale.getlocale` / `locale.setlocale`
+around `day_abbr` and `month_abbr` lookups. The locale switch is not
+thread-safe (a known CPython limitation documented in the class
+docstring).
+
+## gopy notes
+
+Status: not yet ported.
+
+The `calendar` module is planned under `module/calendar/`. The
+pure-Python implementation has no C accelerator, so `Lib/calendar.py`
+is the sole porting target.
+
+Key areas that need careful translation:
+
+- `isleap` and `leapdays` use the same Gregorian arithmetic as parts of
+  `Lib/datetime.py`. Sharing a helper with `module/datetime/` where
+  possible avoids drift.
+- The iterator family (`itermonthdates`, `itermonthdays`, and the four
+  variants) must produce padding zeros and out-of-month dates in the
+  same positions as CPython, because `monthcalendar` output is a
+  documented public API.
+- `LocaleTextCalendar` and `LocaleHTMLCalendar` depend on `locale`
+  support. That dependency can be stubbed with `time.strftime`-based
+  name lookup in an early port and revisited when `module/locale/` is
+  available.
+- The `timegm` helper (inverse of `time.gmtime`, line ~658) is a
+  simple epoch-offset calculation that can be implemented without
+  depending on `module/time/`.
