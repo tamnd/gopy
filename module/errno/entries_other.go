@@ -9,7 +9,7 @@
 //
 // CPython: Modules/errnomodule.c:121 add_errcode block (all #ifdef arms false)
 
-//go:build !darwin && !linux
+//go:build !darwin && !linux && !windows
 
 package errno
 
