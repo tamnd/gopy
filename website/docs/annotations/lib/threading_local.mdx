@@ -1,0 +1,202 @@
+---
+title: Lib/_threading_local.py
+description: Pure-Python fallback implementation of thread-local storage using a weakref dict keyed by thread ident; used when the C implementation in _thread is unavailable.
+cpython_path: Lib/_threading_local.py
+cpython_version: "3.14"
+lines: 250
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Lib/_threading_local.py`
+
+<CpyLink path="Lib/_threading_local.py" />
+
+`Lib/_threading_local.py` is the pure-Python implementation of
+`threading.local()`. It is only used in environments where the C
+accelerator in `_thread` is not available. In production CPython,
+`threading.local` is the C type; `_threading_local` is the fallback.
+
+The module defines two classes:
+
+- `_localimpl` - the internal storage object attached to each `_local`
+  instance. It holds a `weakref` dict mapping each thread's ident to that
+  thread's local dict.
+- `_local` - the user-facing class whose `__getattr__`, `__setattr__`, and
+  `__delattr__` delegate to the per-thread dict stored in `_localimpl`.
+
+A `_localimpl` instance is stored in the `__dict__` of the `_local` type
+object (not the instance) to avoid triggering the descriptor protocol.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Lib/_threading_local.py" lines="1-60">1-60</Cpy> | module docstring, `__all__` | Explains the difference between the Python and C implementations; declares `local` and `_localimpl`. | (not yet ported) |
+| <Cpy path="Lib/_threading_local.py" lines="62-140">62-140</Cpy> | `_localimpl` | Holds a `weakref.ref`-keyed dict. `create_dict()` allocates a fresh per-thread dict and registers a cleanup callback so the entry is removed when the thread exits. | (not yet ported) |
+| <Cpy path="Lib/_threading_local.py" lines="142-215">142-215</Cpy> | `_local.__new__`, `_local.__getattribute__`, `_local.__setattr__`, `_local.__delattr__` | Each method fetches the `_localimpl` from the type's `__dict__`, calls `impl.get_dict()`, and performs the attribute operation on the result. | (not yet ported) |
+| <Cpy path="Lib/_threading_local.py" lines="215-250">215-250</Cpy> | `local = _local` | Assigns the public name. `threading.py` imports `local` from this module when the C version is absent. | (not yet ported) |
+
+## Reading
+
+### `_localimpl` and the weakref dict (lines 62 to 140)
+
+<CpyLink path="Lib/_threading_local.py" lines="62-140" />
+
+```python
+class _localimpl:
+    """A class managing thread-local dicts"""
+    __slots__ = 'key', 'dicts', 'localargs', 'locallock', '__weakref__'
+
+    def __init__(self):
+        # The key distinguishes dicts for different _local objects
+        # in the same thread.
+        self.key = '_threading_local._localimpl.' + str(id(self))
+        # { id(Thread) -> (ref(Thread), thread_dict) }
+        self.dicts = weakref.WeakValueDictionary()
+
+    def get_dict(self):
+        """Return the dict for the current thread. Raise KeyError if none
+        defined."""
+        thread = current_thread()
+        return self.dicts[id(thread)]
+
+    def create_dict(self):
+        """Create a new dict for the current thread, and return it."""
+        localdict = {}
+        key = self.key
+        thread = current_thread()
+        idt = id(thread)
+
+        def local_deleted(_, key=key):
+            thread = wrthread()
+            if thread is not None:
+                del thread.__dict__[key]
+
+        def thread_deleted(_, idt=idt):
+            local = wrlocal()
+            if local is not None:
+                dct = local.dicts
+                try:
+                    del dct[idt]
+                except KeyError:
+                    pass
+
+        wrlocal = ref(self, local_deleted)
+        wrthread = ref(thread, thread_deleted)
+        thread.__dict__[key] = wrlocal
+        self.dicts[idt] = localdict
+        return localdict
+```
+
+`_localimpl` uses `id(thread)` as the dict key. The weakrefs point in both
+directions:
+
+- `wrthread` is a `weakref.ref` to the thread object with a finalizer that
+  removes the entry from `self.dicts` when the thread is garbage collected.
+- `wrlocal` is a `weakref.ref` to the `_localimpl` itself, stored in
+  `thread.__dict__[key]`, so that if the `_local` object is collected the
+  thread's dict entry is removed.
+
+The `key` includes `id(self)` to avoid collisions when a thread has multiple
+`_local` instances.
+
+### `_local` attribute access (lines 142 to 215)
+
+<CpyLink path="Lib/_threading_local.py" lines="142-215" />
+
+```python
+class _local:
+    __slots__ = '_local__impl', '__dict__'
+
+    def __new__(cls, /, *args, **kw):
+        if (args or kw) and (cls.__init__ is object.__init__):
+            raise TypeError("Initialization arguments are not supported")
+        self = object.__new__(cls)
+        impl = _localimpl()
+        impl.localargs = (args, kw)
+        impl.locallock = RLock()
+        object.__setattr__(self, '_local__impl', impl)
+        # We need to create the thread dict in anticipation of
+        # __init__ being called, to make sure we don't call it
+        # again ourselves.
+        impl.create_dict()
+        return self
+
+    def __getattribute__(self, name):
+        with _patch(self):
+            return object.__getattribute__(self, name)
+
+    def __setattr__(self, name, value):
+        if name == '__dict__':
+            raise AttributeError(
+                "_local object attribute '__dict__' is read-only")
+        with _patch(self):
+            return object.__setattr__(self, name, value)
+
+    def __delattr__(self, name):
+        with _patch(self):
+            return object.__delattr__(self, name)
+```
+
+The key insight is `_patch`. It is a context manager that temporarily
+replaces `self.__dict__` with the calling thread's local dict (retrieved
+from `_localimpl`), runs the attribute operation, and then restores the
+original `__dict__`. Because `__dict__` replacement happens via
+`object.__setattr__` on the instance, the descriptor machinery is bypassed
+for the storage slot.
+
+```python
+@contextmanager
+def _patch(self):
+    impl = object.__getattribute__(self, '_local__impl')
+    try:
+        dct = impl.get_dict()
+    except KeyError:
+        dct = impl.create_dict()
+        args, kw = impl.localargs
+        self.__init__(*args, **kw)
+    with impl.locallock:
+        object.__setattr__(self, '__dict__', dct)
+        yield
+        object.__setattr__(self, '__dict__', impl.dicts)
+```
+
+If `get_dict()` raises `KeyError` the thread has not yet accessed this
+`_local`, so `create_dict()` is called and `__init__` is run to give the
+subclass a chance to populate per-thread defaults. This mirrors the C
+implementation's behaviour exactly.
+
+### Contrast with the C implementation
+
+The C implementation lives in `Modules/_threadmodule.c` (the `local` type).
+It uses a C-level `PyObject *` slot on the thread state (`tstate->dict`)
+rather than `id(thread)`, which avoids creating a Python `Thread` object
+just to use thread-local storage. The C version also avoids the weakref
+overhead and the `__dict__`-swap trick by using a custom `tp_getattro`.
+
+The pure-Python version replicates the observable behaviour with two
+constraints:
+
+1. It requires `threading.current_thread()` to be callable, which depends
+   on `_thread`.
+2. The `__dict__`-swap approach means introspection tools that inspect
+   `instance.__dict__` directly see the wrong dict if they look between the
+   `_patch` entry and exit. This is not an issue in practice because
+   `_patch` is always a very short critical section.
+
+## gopy mirror
+
+`Lib/_threading_local.py` has not yet been ported to gopy. A gopy port
+would follow the same structure:
+
+- `_localimpl` can be represented as a Go struct holding a `sync.Map` keyed
+  by goroutine ID (or by a gopy thread-state pointer).
+- `_local.__getattr__` / `__setattr__` map to Python descriptor calls that
+  delegate to the per-goroutine dict.
+
+The C path (directly using the thread state's dict) is the preferred
+long-term approach in gopy, matching what CPython ships in production. The
+pure-Python fallback is relevant only for test environments that run without
+a native thread module.

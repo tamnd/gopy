@@ -1,0 +1,197 @@
+---
+title: Lib/posixpath.py (POSIX path implementation)
+description: Unix os.path backend covering join, normpath, expanduser (passwd database), and symlink-safe realpath.
+cpython_path: Lib/posixpath.py
+cpython_version: "3.14"
+lines: 510
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`posixpath.py` is the `os.path` implementation used on all POSIX platforms
+(Linux, macOS, BSDs).  It is considerably simpler than `ntpath.py` because POSIX
+paths have a single separator (`/`), no drive letters, and no UNC roots.  The
+complexity that does exist is concentrated in `realpath` (symlink resolution) and
+`expanduser` (passwd database lookup).
+
+## Map
+
+| Function | Lines (approx.) | Notes |
+|---|---|---|
+| `normcase` | ~5 | identity on POSIX (case-sensitive FS) |
+| `isabs` | ~5 | first character is `/` |
+| `join` | ~30 | resets on absolute component |
+| `split` | ~15 | rfind-based head/tail |
+| `splitdrive` | ~5 | always returns `('', path)` on POSIX |
+| `splitroot` | ~10 | 3.12+ public API |
+| `splitext` | ~5 | delegates to `genericpath._splitext` |
+| `basename` | ~5 | tail from split |
+| `dirname` | ~5 | head from split |
+| `commonprefix` | ~3 | delegates to genericpath |
+| `exists` / `lexists` | ~15 | stat / lstat wrapped in try/except |
+| `isfile` / `isdir` / `islink` | ~25 | stat-based |
+| `ismount` | ~20 | device/inode comparison across `..` |
+| `expandvars` | ~40 | `$VAR` and `${VAR}` only (no `%VAR%`) |
+| `expanduser` | ~45 | `~` and `~user` via pwd module |
+| `normpath` | ~45 | collapse `.` and `..` with a stack |
+| `abspath` | ~10 | `os.getcwd()` + join + normpath |
+| `realpath` | ~100 | iterative symlink resolution, cycle detection |
+| `relpath` | ~30 | relative path from a start |
+| `commonpath` | ~10 | delegates to genericpath |
+
+## Reading
+
+### `join`: absolute-path reset semantics
+
+`posixpath.join` must restart the accumulated path whenever it encounters an
+absolute component.  This matches shell `cd` semantics: `join('/a', '/b')` is
+`'/b'`, not `'/a/b'`.
+
+```python
+# CPython: Lib/posixpath.py ~71
+def join(a, *p):
+    """Join two or more pathname components, inserting '/' as needed.
+    If any component is an absolute pathname, all previous components
+    will be discarded.  An empty last part will result in a path that
+    ends with a separator."""
+    a = os.fspath(a)
+    sep = _get_sep(a)
+    path = a
+    try:
+        if not p:
+            path[:0] + sep  #23780: Ensure compatible data types even if p is null.
+        for b in map(os.fspath, p):
+            if b.startswith(sep):
+                path = b
+            elif not path or path.endswith(sep):
+                path += b
+            else:
+                path += sep + b
+    except (TypeError, AttributeError, BytesWarning):
+        ...
+    return path
+```
+
+The `path[:0] + sep` expression is a deliberate type probe: it raises `TypeError`
+for mixed `str`/`bytes` inputs before any allocation happens, matching the error
+contract documented for `os.path.join`.
+
+### `expanduser`: passwd database fallback
+
+On POSIX, `~` expands to `HOME` from the environment, but `~username` and the
+case where `HOME` is unset both require a passwd database lookup via the `pwd`
+module.  The lookup is deliberately lazy (only called when the environment does
+not have the answer) because `pwd.getpwnam` can be slow on systems with remote
+directory services.
+
+```python
+# CPython: Lib/posixpath.py ~228
+def expanduser(path):
+    """Expand ~ and ~user constructions.  If user or $HOME is unknown,
+    do nothing."""
+    path = os.fspath(path)
+    ...
+    if path[:1] != tilde:
+        return path
+    sep = _get_sep(path)
+    i = path.find(sep, 1)
+    if i < 0:
+        i = len(path)
+    if i == 1:
+        if 'HOME' not in os.environ:
+            import pwd
+            try:
+                userhome = pwd.getpwuid(os.getuid()).pw_dir
+            except KeyError:
+                return path
+        else:
+            userhome = os.environ['HOME']
+    else:
+        import pwd
+        name = path[1:i]
+        try:
+            pwent = pwd.getpwnam(name if isinstance(name, str)
+                                 else name.decode())
+        except KeyError:
+            return path
+        userhome = pwent.pw_dir
+    ...
+    return userhome + path[i:]
+```
+
+When porting to gopy, the `pwd` dependency maps to `os/user` in Go's standard
+library.  The error-return-unchanged contract (unknown user leaves the path
+as-is) must be preserved exactly.
+
+### `realpath`: iterative symlink resolution with cycle detection
+
+`realpath` is the most involved function in the module.  It resolves symlinks one
+hop at a time rather than recursively, using a `seen` dict to detect cycles.  The
+iteration limit guards against malicious or broken filesystem layouts.
+
+```python
+# CPython: Lib/posixpath.py ~390
+def realpath(filename, *, strict=False):
+    """Return the canonical path of the specified filename, eliminating any
+    symbolic links encountered in the path."""
+    filename = os.fspath(filename)
+    ...
+    path, ok = _joinrealpath(filename[:0], filename, strict, {})
+    return abspath(path)
+
+def _joinrealpath(path, rest, strict, seen):
+    ...
+    while rest:
+        name, _, rest = rest.partition(sep)
+        ...
+        newpath = join(path, name)
+        try:
+            st = os.lstat(newpath)
+        except OSError:
+            if strict:
+                raise
+            return join(newpath, rest), False
+        if not stat.S_ISLNK(st.st_mode):
+            path = newpath
+            continue
+        # symlink: check for cycle
+        if newpath in seen:
+            if seen[newpath] is None:   # already resolving this link = cycle
+                if strict:
+                    os.stat(newpath)
+                else:
+                    return join(newpath, rest), False
+            path = seen[newpath]
+            continue
+        seen[newpath] = None            # mark as in-progress
+        target = os.readlink(newpath)
+        path, ok = _joinrealpath(path if not isabs(target) else sep[:0],
+                                 target, strict, seen)
+        if not ok:
+            return join(path, rest), False
+        seen[newpath] = path            # record resolved path
+    return path, True
+```
+
+The `seen[newpath] = None` sentinel before the recursive call is what makes cycle
+detection work without an explicit iteration counter: if the same symlink is
+encountered again while its own resolution is still in progress, `seen[newpath]
+is None` is true and the cycle is reported.
+
+## gopy mirror
+
+Not yet ported.  The natural home is `module/posixpath/`.  The functions with
+no external dependencies (`join`, `split`, `normpath`, `isabs`) are
+straightforward to port.  `expanduser` requires gopy's `pwd` module (or a Go
+`os/user` shim).  `realpath` requires `os.lstat` and `os.readlink`, which depend
+on the `os` module port being complete first.
+
+## CPython 3.14 changes
+
+- `splitroot` was added as a public API in 3.12 (`splitdrive` now delegates to
+  it).  On POSIX `splitroot` always returns an empty drive, so the behavioral
+  difference from `splitdrive` is minimal.
+- `realpath` gained the `strict` keyword argument in 3.10; no further changes in
+  3.13 or 3.14.
+- No structural changes between 3.13 and 3.14 for this file.

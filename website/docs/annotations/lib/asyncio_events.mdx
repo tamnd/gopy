@@ -1,0 +1,102 @@
+---
+cpython_path: "Lib/asyncio/events.py"
+---
+
+# asyncio/events.py
+
+**CPython path:** `Lib/asyncio/events.py` (~750 lines)
+
+This module defines the abstract interfaces that all asyncio event loops and loop policies must satisfy. Concrete loop implementations (SelectorEventLoop, ProactorEventLoop, uvloop, etc.) all inherit from `AbstractEventLoop`. The module also owns the global policy mechanism that maps threads to loops.
+
+---
+
+## Reading: AbstractEventLoop and scheduling primitives
+
+`AbstractEventLoop` declares the full event loop interface as abstract methods. The four core scheduling methods are:
+
+- `call_soon(callback, *args)`: schedule `callback(*args)` on the next iteration of the loop. Returns a `Handle`.
+- `call_later(delay, callback, *args)`: schedule after `delay` seconds. Returns a `TimerHandle`.
+- `call_at(when, callback, *args)`: schedule at an absolute loop time. Returns a `TimerHandle`.
+- `call_soon_threadsafe(callback, *args)`: thread-safe variant of `call_soon`, used to submit work from non-loop threads.
+
+```python
+# Lib/asyncio/events.py
+class AbstractEventLoop:
+    def call_soon(self, callback, *args, context=None):
+        raise NotImplementedError
+
+    def call_later(self, delay, callback, *args, context=None):
+        raise NotImplementedError
+
+    def call_at(self, when, callback, *args, context=None):
+        raise NotImplementedError
+
+    def call_soon_threadsafe(self, callback, *args, context=None):
+        raise NotImplementedError
+```
+
+`call_soon_threadsafe` is the only method safe to call from a thread that does not own the loop. Internally, concrete implementations write a byte to a self-pipe or eventfd to wake the selector out of its blocking wait.
+
+---
+
+## Reading: Handle and TimerHandle
+
+`Handle` wraps a scheduled callback and its argument tuple. It provides `cancel()`, which sets `_cancelled = True` so the loop skips the callback when it fires. `TimerHandle` extends `Handle` with a `_when` attribute (absolute loop time in seconds) used to order the heap of pending timers.
+
+```python
+# Lib/asyncio/events.py
+class Handle:
+    def __init__(self, callback, args, loop, context=None):
+        self._callback = callback
+        self._args = args
+        self._cancelled = False
+        self._context = context or contextvars.copy_context()
+
+    def cancel(self):
+        if not self._cancelled:
+            self._cancelled = True
+
+    def _run(self):
+        self._context.run(self._callback, *self._args)
+
+class TimerHandle(Handle):
+    def __init__(self, when, callback, args, loop, context=None):
+        super().__init__(callback, args, loop, context)
+        self._when = when
+```
+
+`_run` executes the callback inside the `contextvars.Context` snapshot that was current at the time the handle was created, preserving PEP 567 context isolation.
+
+---
+
+## Reading: policy and get_event_loop
+
+`AbstractEventLoopPolicy` defines `get_event_loop()`, `set_event_loop(loop)`, and `new_event_loop()`. The module-level functions of the same name delegate to the installed policy object.
+
+```python
+# Lib/asyncio/events.py
+_event_loop_policy = None
+
+def get_event_loop_policy():
+    global _event_loop_policy
+    if _event_loop_policy is None:
+        _event_loop_policy = DefaultEventLoopPolicy()
+    return _event_loop_policy
+
+def get_event_loop():
+    return get_event_loop_policy().get_event_loop()
+
+def set_event_loop(loop):
+    get_event_loop_policy().set_event_loop(loop)
+
+def new_event_loop():
+    return get_event_loop_policy().new_event_loop()
+```
+
+`DefaultEventLoopPolicy` is platform-specific: on Windows it selects `ProactorEventLoop`; on POSIX it selects `SelectorEventLoop`. Each thread that calls `get_event_loop()` through the default policy receives its own loop instance the first time and the same instance on subsequent calls within that thread.
+
+---
+
+## Status in gopy
+
+Not yet ported. gopy does not currently implement an event loop or the policy mechanism. The abstract interface defined here would map naturally to a Go interface, with goroutines and channels providing the underlying scheduling.

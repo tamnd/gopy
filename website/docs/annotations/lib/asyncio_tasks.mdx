@@ -1,0 +1,95 @@
+---
+cpython_path: "Lib/asyncio/tasks.py"
+---
+
+# asyncio/tasks.py
+
+**CPython path:** `Lib/asyncio/tasks.py` (~650 lines)
+
+This module defines `Task`, the central scheduling primitive for asyncio coroutines, along with the high-level helpers `gather`, `wait`, `wait_for`, `shield`, and `create_task`. Everything that "runs" a coroutine in asyncio goes through this file.
+
+---
+
+## Reading: Task and __step
+
+`Task` wraps a coroutine object and drives it to completion through repeated calls to `__step`. Each call does `coro.send(None)` (or `coro.throw(exc)` when cancellation is pending). When the coroutine yields a `Future`, `__step` registers itself as a done callback on that future so it is rescheduled automatically. When the coroutine raises `StopIteration`, the task is resolved with the iteration value.
+
+```python
+# Lib/asyncio/tasks.py
+def __step(self, exc=None):
+    coro = self._coro
+    self.__fut_waiter = None
+
+    _enter_task(self._loop, self)
+    try:
+        if exc is None:
+            result = coro.send(None)
+        else:
+            result = coro.throw(exc)
+    except StopIteration as exc:
+        super().set_result(exc.value)
+    except CancelledError as exc:
+        super().cancel(msg=exc.args[0] if exc.args else None)
+    except (KeyboardInterrupt, SystemExit) as exc:
+        super().set_exception(exc)
+        raise
+    except BaseException as exc:
+        super().set_exception(exc)
+    else:
+        ...  # handle yielded Future or None
+    finally:
+        _leave_task(self._loop, self)
+        self = None
+```
+
+After the coroutine yields, `__step` arranges the next wakeup via `loop.call_soon(__step)` (if `result is None`) or by adding itself as a callback to the yielded `Future`.
+
+---
+
+## Reading: cancel and CancelledError injection
+
+`cancel(msg=None)` does not stop the coroutine immediately. Instead it sets a flag and, if the task is currently waiting on a future, it cancels that future. On the next iteration, `__step` calls `coro.throw(CancelledError(msg))`, which propagates the error into the coroutine at whatever `await` point it is paused on.
+
+```python
+# Lib/asyncio/tasks.py
+def cancel(self, msg=None):
+    self._log_traceback = False
+    if self.done():
+        return False
+    if self.__fut_waiter is not None:
+        if self.__fut_waiter.cancel(msg=msg):
+            return True
+    self._must_cancel = True
+    self._cancel_message = msg
+    return True
+```
+
+A coroutine that catches `CancelledError` and does not re-raise will suppress the cancellation. CPython 3.9+ raises `CancelledError` as a subclass of `BaseException` to make accidental suppression inside bare `except Exception` blocks less likely.
+
+---
+
+## Reading: gather and create_task
+
+`gather(*coros_or_futures)` wraps each argument in a `Task` (if it is a coroutine) or uses it directly (if it is already a `Future`), then returns a new future that resolves to a list of results in input order.
+
+```python
+# Lib/asyncio/tasks.py
+def gather(*coros_or_futures, return_exceptions=False):
+    ...
+    children = []
+    for arg in set(coros_or_futures):
+        task = ensure_future(arg, loop=loop)
+        task.add_done_callback(_done_callback)
+        children.append(task)
+    outer = loop.create_future()
+    ...
+    return outer
+```
+
+`create_task(coro, *, name=None, context=None)` is the recommended public entry point. It calls `loop.create_task`, which instantiates a `Task` and schedules `__step` via `call_soon` before returning. The coroutine does not run until control returns to the event loop.
+
+---
+
+## Status in gopy
+
+Not yet ported. gopy does not currently implement asyncio; coroutine objects exist but no event loop schedules them.

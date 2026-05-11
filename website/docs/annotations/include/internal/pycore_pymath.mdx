@@ -1,0 +1,115 @@
+---
+title: Include/internal/pycore_pymath.h
+description: Internal math utilities covering IEEE-754 predicates, special-value constants, and the David Gay dtoa library used for accurate float formatting.
+cpython_path: Include/internal/pycore_pymath.h
+cpython_version: "3.14"
+lines: 80
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+This header collects the private math helpers that CPython uses internally
+across `floatobject.c`, `complexobject.c`, and the `math` module. The two most
+significant pieces are the IEEE-754 predicate wrappers (finite, infinite, NaN)
+and the David Gay `dtoa`/`strtod` implementation, which gives CPython
+round-trip faithful float-to-string and string-to-float conversions independent
+of the platform's `printf`.
+
+## Map
+
+| Symbol | Kind | Purpose |
+|--------|------|---------|
+| `_Py_IsFinite(x)` | macro | Wraps C99 `isfinite`; returns non-zero if `x` is neither infinite nor NaN |
+| `_Py_IsInfinity(x)` | macro | Wraps C99 `isinf` |
+| `_Py_IsNaN(x)` | macro | Wraps C99 `isnan` |
+| `_Py_INFINITY` | constant | Portable `double` positive infinity (`1.0/0.0` or `__builtin_inf()`) |
+| `_Py_NAN` | constant | Portable `double` NaN (`0.0/0.0` or `__builtin_nan("")`) |
+| `_Py_dg_dtoa` | function | David Gay: converts `double` to a decimal string with shortest-round-trip guarantee |
+| `_Py_dg_strtod` | function | David Gay: converts a decimal string to `double`, correctly rounded |
+| `_Py_dg_freedtoa` | function | Frees the buffer returned by `_Py_dg_dtoa` |
+| `_PyFloat_FormatAdvancedWriter` | function | High-level entry point used by `format(f, spec)` and f-strings to write a formatted float into a `_PyUnicodeWriter` |
+
+## Reading
+
+### IEEE-754 predicate macros
+
+```c
+// Include/internal/pycore_pymath.h (CPython 3.14)
+#ifdef Py_LIMITED_API
+#  define _Py_IsFinite(X)    isfinite(X)
+#  define _Py_IsInfinity(X)  isinf(X)
+#  define _Py_IsNaN(X)       isnan(X)
+#else
+// On MSVC, isfinite/isinf/isnan are macros that do not handle long double
+// correctly.  Provide thin wrappers that normalize to double first.
+static inline int _Py_IsFinite(double x)  { return isfinite(x); }
+static inline int _Py_IsInfinity(double x){ return isinf(x);    }
+static inline int _Py_IsNaN(double x)     { return isnan(x);    }
+#endif
+
+#define _Py_INFINITY  ((double)1e300 * 1e300)
+#define _Py_NAN       (_Py_INFINITY - _Py_INFINITY)
+```
+
+The `static inline` forms exist to avoid MSVC's broken macro expansions for
+non-`double` arguments. The constant definitions use arithmetic rather than
+`__builtin_inf()` for portability across C89-era compilers that CPython still
+targets on some platforms.
+
+### David Gay `dtoa` interface
+
+```c
+// Modules/_io/clinic/... uses this indirectly; direct callers are in
+// Objects/floatobject.c and Python/dtoa.c (CPython 3.14)
+
+// Convert double to shortest decimal representation.
+// The caller must free the result with _Py_dg_freedtoa.
+char *_Py_dg_dtoa(double d, int mode, int ndigits,
+                  int *decpt, int *sign, char **rve);
+
+// Convert decimal string to correctly-rounded double.
+double _Py_dg_strtod(const char *s00, char **se);
+```
+
+`mode=0` with `ndigits=0` gives the shortest decimal that round-trips back to
+the same `double` under IEEE-754. This is what `repr(3.1)` relies on to
+produce `'3.1'` rather than `'3.1000000000000001'`. Before Python 3.1 this
+was not guaranteed; the switch to Gay's algorithm was one of the most visible
+user-facing improvements in that release.
+
+### `_PyFloat_FormatAdvancedWriter`
+
+```c
+// Objects/floatobject.c (CPython 3.14)
+int
+_PyFloat_FormatAdvancedWriter(_PyUnicodeWriter *writer,
+                              PyObject *obj,
+                              PyObject *format_spec,
+                              Py_ssize_t start, Py_ssize_t end)
+```
+
+This function parses the format specification (fill, align, sign, width,
+precision, type character) and dispatches to `_Py_dg_dtoa` or the platform
+`snprintf` as appropriate. It is the single entry point for both `format(f,
+spec)` and the `{f:spec}` f-string slot, keeping float formatting logic in one
+place.
+
+## gopy mirror
+
+Not yet ported. Go's `strconv` package (`strconv.FormatFloat` /
+`strconv.ParseFloat`) provides Grisu3/Ryu-based shortest-round-trip formatting
+that is semantically equivalent to Gay's `dtoa`. When gopy ports
+`floatobject.c` it will call `strconv.FormatFloat(v, 'r', -1, 64)` in place
+of `_Py_dg_dtoa(v, 0, 0, ...)`, which produces the same shortest-round-trip
+decimal. The IEEE-754 predicate wrappers map directly to `math.IsInf`,
+`math.IsNaN`, and the negation of those for finite checks.
+
+## CPython 3.14 changes
+
+- `_PyFloat_FormatAdvancedWriter` was refactored to use `_PyUnicodeWriter`
+  directly rather than building an intermediate Python string, reducing one
+  allocation in the common f-string path.
+- The `_Py_NAN` and `_Py_INFINITY` constant definitions were moved out of
+  `pyport.h` and into this header to keep floating-point concerns in one place.
+- No changes to the Gay `dtoa` code itself; it has been stable since Python 3.1.

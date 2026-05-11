@@ -1,0 +1,130 @@
+---
+title: Lib/genericpath.py (Shared OS-independent path utilities)
+description: Character-by-character path helpers shared by posixpath, ntpath, and other os.path backends.
+cpython_path: Lib/genericpath.py
+cpython_version: "3.14"
+lines: 120
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`genericpath.py` is the common substrate that all of CPython's `os.path` backends
+(posixpath, ntpath, macpath) delegate to for logic that does not depend on path
+separator or drive letter conventions.  It is imported directly by each backend
+rather than being part of the public `os.path` surface.
+
+## Map
+
+| Function | Lines (approx.) | Notes |
+|---|---|---|
+| `exists` | ~10 | `os.stat` wrapped in try/except |
+| `lexists` | ~8 | `os.lstat` variant |
+| `isfile` | ~10 | stat + S_ISREG |
+| `isdir` | ~10 | stat + S_ISDIR |
+| `islink` | ~8 | lstat + S_ISLNK |
+| `isabs` | ~5 | delegated to platform backend |
+| `commonprefix` | ~12 | character-by-character, NOT component |
+| `commonpath` | ~40 | component-aware, raises ValueError on mixed abs/rel |
+| `_check_methods` | ~12 | MRO-based protocol helper used by ABC checks |
+| `_splitext` | ~25 | dot-extension splitting shared by both backends |
+
+## Reading
+
+### `commonprefix`: character-by-character, not path-component-aware
+
+This is the most surprising function in the module.  It operates on raw
+characters, not on path components, which means it can return a string that is
+not itself a valid path prefix.
+
+```python
+# CPython: Lib/genericpath.py ~74
+def commonprefix(m):
+    "Given a list of pathnames, returns the longest common leading component"
+    m = tuple(map(os.fspath, m))
+    if not m: return ''
+    if len(m) == 1:
+        return m[0]
+    s1 = min(m)
+    s2 = max(m)
+    for i, c in enumerate(s1):
+        if c != s2[i]:
+            return s1[:i]
+    return s1
+```
+
+`min`/`max` exploit lexicographic ordering so that only two strings need to be
+compared character by character.  If you pass `['/usr/lib', '/usr/local/lib']`
+you get `'/usr/l'`, not `'/usr/'`.  Use `commonpath` for component-level work.
+
+### `commonpath`: the component-aware alternative
+
+Introduced in Python 3.5, `commonpath` splits each path into components, finds
+the shared prefix of those component lists, then rejoins.  It raises `ValueError`
+for mixed absolute and relative inputs or for paths that cross drive boundaries on
+Windows.
+
+```python
+# CPython: Lib/genericpath.py ~93
+def commonpath(paths):
+    paths = tuple(map(os.fspath, paths))
+    if not paths:
+        raise ValueError('commonpath() arg is an empty sequence')
+    ...
+    split_paths = [path.split(sep) for path in paths]
+    ...
+    common = split_paths[0]
+    for s in split_paths[1:]:
+        common = common[:len(s)]
+        for i, (a, b) in enumerate(zip(common, s)):
+            if a != b:
+                common = common[:i]
+                break
+    prefix = sep.join(common)
+    ...
+```
+
+The key invariant: every element in the returned path is an actual directory
+component that all inputs share.
+
+### `_splitext`: shared dot-extension logic
+
+Both `posixpath.splitext` and `ntpath.splitext` call `genericpath._splitext`
+after stripping a drive or UNC prefix.  The rule is that a leading dot does not
+count as an extension (`.bashrc` has no extension), but a trailing dot does
+(`foo.` splits to `('foo', '.')`).
+
+```python
+# CPython: Lib/genericpath.py ~22
+def _splitext(p, sep, altsep, extsep):
+    sepIndex = p.rfind(sep)
+    if altsep:
+        altsepIndex = p.rfind(altsep)
+        sepIndex = max(sepIndex, altsepIndex)
+
+    dotIndex = p.rfind(extsep)
+    if dotIndex > sepIndex:
+        # skip all leading dots
+        filenameIndex = sepIndex + 1
+        while filenameIndex < dotIndex:
+            if p[filenameIndex:filenameIndex+1] != extsep:
+                return p[:dotIndex], p[dotIndex:]
+            filenameIndex += 1
+    return p, p[:0]
+```
+
+## gopy mirror
+
+Not yet ported.  When ported, the natural home is `module/genericpath/` or as
+unexported helpers inside `module/os/path/`.  Because Go's `path/filepath`
+already provides `filepath.Ext` and `filepath.Dir`, the porting work is mostly
+about matching CPython's exact edge-case behaviour (leading dots, empty inputs,
+mixed separators) rather than reimplementing the algorithms from scratch.
+
+Relevant tasks: none opened yet.
+
+## CPython 3.14 changes
+
+No significant changes to `genericpath.py` between 3.12 and 3.14.  The file is
+intentionally stable; new path features land in the platform-specific modules or
+in `pathlib` instead.

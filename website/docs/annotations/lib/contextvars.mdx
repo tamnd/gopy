@@ -1,0 +1,126 @@
+---
+title: Lib/contextvars.py
+description: Python facade over the _contextvars C extension; re-exports Context, ContextVar, Token, and provides the copy_context() helper at module level.
+cpython_path: Lib/contextvars.py
+cpython_version: "3.14"
+lines: 50
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Lib/contextvars.py`
+
+<CpyLink path="Lib/contextvars.py" />
+
+`Lib/contextvars.py` is a thin facade. Its only job is to import the three
+public types and one helper function from `_contextvars` (a built-in C
+extension) and place them under the `contextvars` namespace. The file
+carries no logic of its own.
+
+```python
+from _contextvars import Context, ContextVar, Token
+
+def copy_context():
+    return _contextvars.copy_context()
+```
+
+All behaviour described in PEP 567 lives in `Python/context.c` on the C
+side. `Lib/contextvars.py` exists so callers write `import contextvars`
+rather than `import _contextvars`, matching the pattern used by `io`,
+`abc`, and other modules that have a pure-Python public name and a C
+back-end.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Lib/contextvars.py" lines="1-5">1-5</Cpy> | `from _contextvars import Context, ContextVar, Token` | Re-exports the three public types. `Context` is an immutable mapping from `ContextVar` keys to values; `ContextVar` is a key with an optional default; `Token` marks a prior value for rollback. | `module/contextvars/` |
+| <Cpy path="Lib/contextvars.py" lines="7-10">7-10</Cpy> | `copy_context()` | Delegates to `_contextvars.copy_context()`, which snapshots the current thread's context as a new `Context` object. | `module/contextvars/module.go` |
+
+## Reading
+
+### The three public types (lines 1 to 5)
+
+<CpyLink path="Lib/contextvars.py" lines="1-5" />
+
+```python
+from _contextvars import Context, ContextVar, Token
+```
+
+`Context` is an immutable mapping backed by a HAMT (hash array mapped
+trie). Each `Context.run(callable, *args)` call temporarily swaps the
+thread's current context, runs the callable, then restores the previous
+context. The immutability means copying is O(1): `Context.copy()` returns
+a new wrapper sharing the same HAMT root.
+
+`ContextVar(name, *, default=missing)` creates a context variable. Calling
+`var.set(value)` in a running context returns a `Token`; calling
+`var.reset(token)` rolls the variable back to the value it held when `set`
+was called. `var.get()` looks up the current thread's context; if the
+variable is absent and a default was supplied, the default is returned.
+
+`Token` is read-only from user code. Attributes:
+- `Token.var` - the `ContextVar` that produced this token.
+- `Token.old_value` - the value before `set()`, or `Token.MISSING` if the
+  variable had no value in that context.
+
+### `copy_context()` (lines 7 to 10)
+
+<CpyLink path="Lib/contextvars.py" lines="7-10" />
+
+```python
+def copy_context():
+    return _contextvars.copy_context()
+```
+
+`copy_context()` snapshots the calling thread's current `Context`. The
+snapshot is independent: subsequent `set()` calls on the original thread do
+not affect the copy, and vice versa. A common pattern is to capture the
+context in the main thread and then call `ctx.run(worker)` from a thread
+pool so the worker sees the same context variables the producer had:
+
+```python
+import contextvars
+import concurrent.futures
+
+ctx = contextvars.copy_context()
+with concurrent.futures.ThreadPoolExecutor() as ex:
+    future = ex.submit(ctx.run, my_function, arg1, arg2)
+```
+
+Because the HAMT root is shared, the copy is O(1) in both time and memory
+regardless of how many variables the context contains.
+
+### Relationship to `asyncio` and `threading`
+
+CPython's `asyncio` event loop calls `copy_context()` once per `Task` at
+creation time and stores the result. Each time the task resumes (i.e., each
+`send` into the coroutine), the loop calls `ctx.run(coro.send, value)` to
+ensure the coroutine runs in its own context snapshot. This means
+`ContextVar` changes inside a coroutine do not leak to sibling coroutines or
+the event loop itself.
+
+`threading.Thread` also copies the spawning thread's context automatically
+when `Thread.start()` is called, giving threads isolation from each other's
+`ContextVar` mutations without any extra user code.
+
+## gopy mirror
+
+In gopy the `_contextvars` module is implemented in `module/contextvars/`.
+The three types are:
+
+- `Context` - `module/contextvars/context.go`, backed by `hamt.Hamt` from
+  the `hamt/` package.
+- `ContextVar` - `module/contextvars/contextvar.go`.
+- `Token` - `module/contextvars/token.go`.
+
+The `copy_context()` built-in is in `module/contextvars/module.go`. It
+currently returns a `RuntimeError` until gopy's lifecycle layer wires
+`_PyThreadState_GET`; callers that need the current context can call
+`contextvars.CopyCurrent(ts)` directly.
+
+The Python-level `Lib/contextvars.py` facade has not yet been ported as a
+separate module entry. The C types are already available under
+`_contextvars`; a small `module/contextvars_py/` shim that re-exports them
+under the public `contextvars` name is the remaining step.
