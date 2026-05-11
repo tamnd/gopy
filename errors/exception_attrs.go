@@ -23,6 +23,7 @@ func init() {
 	objects.SetTypeDescr(t, "__traceback__", objects.NewGetSetDescr("__traceback__", tracebackGet, tracebackSet))
 	objects.SetTypeDescr(t, "__context__", objects.NewGetSetDescr("__context__", contextGet, contextSet))
 	objects.SetTypeDescr(t, "__cause__", objects.NewGetSetDescr("__cause__", causeGet, causeSet))
+	objects.SetTypeDescr(t, "__suppress_context__", objects.NewGetSetDescr("__suppress_context__", suppressGet, suppressSet))
 }
 
 // argsGet returns self->args, or None when args is unset. CPython
@@ -163,5 +164,26 @@ func causeSet(owner objects.Object, value objects.Object) error {
 		e.Cause = exc
 	}
 	e.Suppress = true
+	return nil
+}
+
+// suppressGet exposes the __suppress_context__ bool member.
+//
+// CPython: Objects/exceptions.c:605 BaseException_members
+func suppressGet(owner objects.Object) (objects.Object, error) {
+	e := owner.(*Exception)
+	return objects.NewBool(e.Suppress), nil
+}
+
+// suppressSet accepts any truthy/falsy value, matching Py_T_BOOL
+// semantics (CPython converts via PyObject_IsTrue when writing).
+//
+// CPython: Objects/exceptions.c:605 BaseException_members
+func suppressSet(owner objects.Object, value objects.Object) error {
+	e := owner.(*Exception)
+	if value == nil {
+		return errors.New("TypeError: __suppress_context__ may not be deleted")
+	}
+	e.Suppress = objects.IsTrue(value)
 	return nil
 }
