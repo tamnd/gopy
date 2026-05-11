@@ -1,0 +1,143 @@
+---
+title: Lib/urllib/request.py
+description: High-level URL opener supporting HTTP, HTTPS, FTP, file, and data URLs through a composable handler chain.
+cpython_path: Lib/urllib/request.py
+cpython_version: "3.14"
+lines: 2700
+status: annotated
+ported_to: ""
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Lib/urllib/request.py`
+
+<CpyLink path="Lib/urllib/request.py" />
+
+`urllib.request` is the standard library's high-level URL opener. The module's public entry point is `urlopen`, a thin wrapper that builds a default `OpenerDirector` and calls `open` on it. The opener holds an ordered list of handler objects, each responsible for one protocol or one aspect of HTTP processing (redirects, authentication, cookies, error detection). Callers can replace or extend the default set by constructing a custom `OpenerDirector` via `build_opener`.
+
+The `Request` class is the central data object. It carries the target URL, optional POST body, request headers, and the desired HTTP method. Handlers inspect and mutate `Request` instances as they pass through the chain. On the response side, `http.client.HTTPResponse` is wrapped in an `addinfourl` object so that callers get a uniform file-like interface with `.read()`, `.info()`, and `.geturl()` regardless of which handler served the request.
+
+`AbstractHTTPHandler` does the actual socket work. It prepares the request headers, delegates to `http.client.HTTPConnection` or `HTTPSConnection`, and converts the raw response into the `addinfourl` wrapper. `HTTPSHandler` extends this with TLS context creation, supporting `cafile`, `capath`, and an explicit `ssl.SSLContext`. The FTP and file handlers follow the same protocol but produce their response data from local filesystem reads or FTP data transfers.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| ~1-90 | module-level constants and imports | `MAXFTPCACHE`, default header strings, `localhost()` | |
+| ~91-270 | `Request` | Data object: URL, headers, data, method | |
+| ~271-430 | `OpenerDirector` | Handler chain management, `open()` dispatch | |
+| ~431-530 | `BaseHandler` | Base class; handler priority via `handler_order` | |
+| ~531-680 | `HTTPDefaultErrorHandler`, `HTTPRedirectHandler` | Error detection and 3xx redirect following | |
+| ~681-820 | `HTTPCookieProcessor`, `ProxyHandler` | Cookie jar injection, proxy URL rewriting | |
+| ~821-1100 | `AbstractHTTPHandler`, `HTTPHandler`, `HTTPSHandler` | Socket-level HTTP and HTTPS connections | |
+| ~1101-1400 | `FTPHandler`, `CacheFTPHandler` | FTP URL handling with connection cache | |
+| ~1401-1600 | `FileHandler`, `DataHandler` | `file://` and `data:` URL reading | |
+| ~1601-2700 | `AbstractDigestAuthHandler`, `HTTPBasicAuthHandler`, `HTTPDigestAuthHandler` | Authentication handlers for Basic and Digest schemes | |
+
+## Reading
+
+### Module bootstrap and `urlopen` (lines 1 to 90)
+
+<CpyLink path="Lib/urllib/request.py" lines="1-90" />
+
+The top of the file sets default headers (`User-Agent`, `Accept-Encoding`) and the `MAXFTPCACHE` constant that caps open FTP connections. The `urlopen` function is defined here. It lazily builds a module-level `_opener` on first call using `build_opener`, then delegates to `opener.open(url, data, timeout)`. Passing a custom `context` or `cafile` argument short-circuits the cached opener and builds a fresh one with an `HTTPSHandler` configured from those arguments.
+
+```python
+def urlopen(url, data=None, timeout=socket._GLOBAL_DEFAULT_TIMEOUT,
+            *, cafile=None, capath=None, cadefault=False, context=None):
+    global _opener
+    if cafile or capath or cadefault or context:
+        opener = build_opener(HTTPSHandler(context=context))
+    elif _opener is None:
+        _opener = opener = build_opener()
+    else:
+        opener = _opener
+    return opener.open(url, data, timeout)
+```
+
+### `Request` object (lines 91 to 270)
+
+<CpyLink path="Lib/urllib/request.py" lines="91-270" />
+
+`Request.__init__` parses `url` with `urllib.parse.urlparse` and stores the result. `add_header` and `add_unredirected_header` maintain two separate dicts so that redirect-following can strip headers added for the original host without losing headers the user explicitly set. `get_host` and `host` synthesise the `Host` header value from the parsed URL. `full_url` is a property that rebuilds the URL string from its components after any in-place mutation by a handler.
+
+```python
+class Request:
+    def __init__(self, url, data=None, headers={},
+                 origin_req_host=None, unverifiable=False,
+                 method=None):
+        self.full_url = url
+        self.headers = {}
+        self.unredirected_hdrs = {}
+        self._data = None
+        self.data = data
+        self._tunnel_host = None
+        for key, value in headers.items():
+            self.add_header(key, value)
+        ...
+```
+
+### `OpenerDirector` handler chain (lines 271 to 430)
+
+<CpyLink path="Lib/urllib/request.py" lines="271-430" />
+
+`OpenerDirector.add_handler` introspects each handler for methods matching `<protocol>_open`, `<protocol>_request`, `<protocol>_response`, `http_error_<code>`, and `http_error_default`. It inserts handlers into sorted lists keyed by those method names. `open` calls the `<scheme>_open` chain; each handler can return a response or return `None` to pass control to the next handler. Response processors run after the opener returns, allowing `HTTPDefaultErrorHandler` to convert 4xx/5xx status codes into exceptions.
+
+```python
+def open(self, fullurl, data=None, timeout=socket._GLOBAL_DEFAULT_TIMEOUT):
+    req = fullurl if isinstance(fullurl, Request) else Request(fullurl, data)
+    req.timeout = timeout
+    protocol = req.type
+    meth = getattr(req, 'redirect_dict', None)
+    response = self._call_chain(self.handle_open, protocol, protocol + '_open', req)
+    ...
+    response = self._call_chain(self.handle_response, protocol, protocol + '_response', req, response)
+    return response
+```
+
+### `AbstractHTTPHandler` and TLS setup (lines 821 to 1100)
+
+<CpyLink path="Lib/urllib/request.py" lines="821-1100" />
+
+`AbstractHTTPHandler.do_request_` enforces a `Content-Type` of `application/x-www-form-urlencoded` for POST bodies that have no explicit type and ensures `Content-Length` is set. `do_open` creates an `HTTPConnection` (or `HTTPSConnection` in the subclass), calls `request`, reads the response, and wraps it in `addinfourl`. Connection reuse via `http.client`'s keep-alive support falls out of `do_open` forwarding the connection object rather than closing it immediately. `HTTPSHandler.https_open` creates or receives an `ssl.SSLContext`, configures certificate verification from `cafile`/`capath`, and passes the context to `HTTPSConnection`.
+
+```python
+def do_open(self, http_class, req, **http_conn_args):
+    host = req.host
+    if not host:
+        raise URLError('no host given')
+    h = http_class(host, timeout=req.timeout, **http_conn_args)
+    ...
+    try:
+        h.request(req.get_method(), req.selector, req.data, headers,
+                  encode_chunked=req.has_header('Transfer-encoding'))
+    except OSError as err:
+        raise URLError(err)
+    r = h.getresponse()
+    ...
+    return addinfourl(r, r.msg, req.get_full_url(), r.status)
+```
+
+### Authentication handlers (lines 1601 to 2700)
+
+<CpyLink path="Lib/urllib/request.py" lines="1601-2700" />
+
+`AbstractDigestAuthHandler` holds the shared logic for parsing `WWW-Authenticate` and `Proxy-Authenticate` challenge headers and building the `Authorization` response. It implements RFC 2617 Digest authentication including `qop`, `nonce`, `nc`, and `cnonce` fields. `HTTPDigestAuthHandler` and `ProxyDigestAuthHandler` inherit from it and hook into `http_error_401` and `http_error_407` respectively. `HTTPBasicAuthHandler` is simpler: it base64-encodes `user:password` and injects an `Authorization` header on retry.
+
+```python
+class AbstractDigestAuthHandler:
+    def http_error_auth_reqed(self, authreq, host, req, headers):
+        authreq = headers.get(authreq, None)
+        if authreq:
+            scheme = authreq.split(' ', 1)[0]
+            if scheme.lower() == 'digest':
+                return self.retry_http_digest_auth(req, authreq)
+            elif scheme.lower() != 'basic':
+                raise ValueError("AbstractDigestAuthHandler does not support"
+                                 " the following scheme: '%s'" % scheme)
+```
+
+## gopy mirror
+
+Not yet ported.

@@ -1,0 +1,114 @@
+---
+title: Include/internal/pycore_lock.h
+description: Low-level locking primitives for CPython's free-threaded (no-GIL) build, including a one-byte mutex, a read-write lock, a one-shot event, and parking-lot integration.
+cpython_path: Include/internal/pycore_lock.h
+cpython_version: "3.14"
+lines: 180
+status: annotated
+ported_to: ""
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Include/internal/pycore_lock.h`
+
+<CpyLink path="Include/internal/pycore_lock.h" />
+
+`pycore_lock.h` defines the three synchronization primitives that underpin CPython's free-threaded build: `PyMutex`, `PyRWMutex`, and `PyEvent`. None of these are available in the GIL build. They are conditionally compiled under `Py_GIL_DISABLED` and are invisible to extension authors working against the stable ABI, which is why they live in `Include/internal/` behind the `Py_BUILD_CORE` gate.
+
+The design philosophy follows Linux's futex model rather than wrapping POSIX primitives. Each `PyMutex` is a single `uint8_t`. The common case, an uncontended lock, is handled entirely by an atomic compare-and-swap in the inlined fast path and never touches the kernel. Only when a thread actually blocks does the runtime call into `_PyParkingLot_Park`, which suspends the calling thread on a hash-table bucket keyed by the mutex address. This keeps the uncontended cost near that of a CAS while still providing correct blocking semantics under contention.
+
+`PyRWMutex` extends the idea to shared/exclusive access with writer priority. Writers set a pending-writer flag before blocking, which prevents new readers from acquiring the lock and avoids writer starvation. `PyEvent` is a one-shot signaling primitive: it starts unset, transitions to set exactly once, and any thread that calls `PyEvent_Wait` after the transition returns immediately. Both `PyRWMutex` and `PyEvent` are built on top of `PyMutex` internally.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| 1-30 | include guards, `Py_BUILD_CORE` check, includes | Header boilerplate; pulls in `pycore_time.h` for timeout type | n/a |
+| 31-60 | `PyMutex`, `_PyMutex_Lock`, `_PyMutex_Unlock`, `_PyMutex_LockTimed` | One-byte mutex with fast CAS path and timed-lock variant | n/a |
+| 61-100 | `PyRWMutex`, `_PyRWMutex_RLock`, `_PyRWMutex_RUnlock`, `_PyRWMutex_Lock`, `_PyRWMutex_Unlock` | Reader-writer lock with writer-priority blocking | n/a |
+| 101-130 | `PyEvent`, `PyEvent_Set`, `PyEvent_Wait`, `PyEvent_WaitTimed` | One-shot signaling event; `PyEvent_Wait` returns immediately if already set | n/a |
+| 131-160 | `_PyMutex_LockSlow`, `_PyMutex_UnlockSlow` | Out-of-line slow paths called when the fast CAS fails | n/a |
+| 161-180 | `_Py_LOCKWORD_*` constants, state bit layout comments | Bit definitions for the internal lock-word state machine | n/a |
+
+## Reading
+
+### PyMutex layout and fast-path operations (lines 31 to 60)
+
+<CpyLink path="Include/internal/pycore_lock.h" lines="31-60" />
+
+`PyMutex` is a `struct` containing a single `uint8_t` field named `v`. The lock state is encoded in the low bits of that byte. Bit 0 is the locked flag, bit 1 signals that at least one thread is parked waiting. The inline `_PyMutex_Lock` reads the current value, checks whether it is zero (unlocked and no waiters), and attempts a CAS from `0` to `1`. If the CAS succeeds, the lock is held and the function returns without any system call. If it fails, `_PyMutex_LockSlow` is called to handle spinning, back-off, and parking.
+
+`_PyMutex_LockTimed` accepts a `_PyTime_t` deadline and a `_PyLockFlags` word. It is used by `threading.Lock.acquire(timeout=...)` and by the runtime's own deadlock-detection paths. Passing `_Py_LOCK_DONT_DETACH` prevents the thread from being detached from the GIL state machine during the wait, which matters for signals and garbage-collection checkpoints.
+
+```c
+typedef struct {
+    uint8_t v;
+} PyMutex;
+
+// Inlined fast path: CAS 0 -> 1
+static inline int
+_PyMutex_Lock(PyMutex *m)
+{
+    uint8_t expected = 0;
+    if (_Py_atomic_compare_exchange_uint8(&m->v, &expected, 1)) {
+        return 1;
+    }
+    return _PyMutex_LockSlow(m);
+}
+
+PyAPI_FUNC(PyLockStatus) _PyMutex_LockTimed(
+    PyMutex *m, _PyTime_t timeout, _PyLockFlags flags);
+```
+
+### Parking lot integration (lines 131 to 160)
+
+<CpyLink path="Include/internal/pycore_lock.h" lines="131-160" />
+
+When the fast CAS in `_PyMutex_Lock` loses the race, control passes to `_PyMutex_LockSlow`. This function spins for a small number of iterations, then sets the waiter bit in the lock word and calls `_PyParkingLot_Park`. The parking lot hashes the mutex address to a bucket and puts the calling thread to sleep on a `_PyWaitHandle`. When the lock holder calls `_PyMutex_UnlockSlow`, it clears the locked bit, checks the waiter bit, and calls `_PyParkingLot_Unpark` to wake one parked thread. That thread then retries the CAS. This two-level scheme keeps the hot path allocation-free while still providing fair wakeup ordering.
+
+```c
+// Called when CAS fails; handles spinning and parking
+PyAPI_FUNC(int) _PyMutex_LockSlow(PyMutex *m);
+
+// Called when unlock detects parked waiters
+PyAPI_FUNC(void) _PyMutex_UnlockSlow(PyMutex *m);
+```
+
+### PyRWMutex and writer priority (lines 61 to 100)
+
+<CpyLink path="Include/internal/pycore_lock.h" lines="61-100" />
+
+`PyRWMutex` holds a reader count and an embedded `PyMutex` for the write side. `_PyRWMutex_RLock` atomically increments the reader count if no writer is pending, otherwise it blocks on the write mutex. Writer priority is enforced by a pending-writer flag: when a writer calls `_PyRWMutex_Lock`, it sets this flag before waiting, causing subsequent `_PyRWMutex_RLock` callers to block rather than acquire. The writer then waits for the reader count to reach zero, at which point it acquires the write mutex exclusively. This prevents indefinite reader hold-out of waiting writers at the cost of slightly more complex reader acquisition.
+
+```c
+typedef struct {
+    PyMutex mutex;
+    uint32_t readers;
+} PyRWMutex;
+
+PyAPI_FUNC(void) _PyRWMutex_RLock(PyRWMutex *m);
+PyAPI_FUNC(void) _PyRWMutex_RUnlock(PyRWMutex *m);
+PyAPI_FUNC(void) _PyRWMutex_Lock(PyRWMutex *m);
+PyAPI_FUNC(void) _PyRWMutex_Unlock(PyRWMutex *m);
+```
+
+### PyEvent one-shot signaling (lines 101 to 130)
+
+<CpyLink path="Include/internal/pycore_lock.h" lines="101-130" />
+
+`PyEvent` uses a single `uint8_t` with state values `0` (not set) and `1` (set). `PyEvent_Set` performs a CAS from `0` to `1`; if it wins the race it also unparks all threads waiting on the event address. Because the transition is one-way, `PyEvent_Wait` can check the state with a plain atomic load before deciding whether to park, making the already-set fast path a single load and return. `PyEvent_WaitTimed` adds the same `_PyTime_t` deadline used by the mutex timed variant.
+
+```c
+typedef struct {
+    uint8_t v;
+} PyEvent;
+
+PyAPI_FUNC(void) PyEvent_Set(PyEvent *evt);
+PyAPI_FUNC(void) PyEvent_Wait(PyEvent *evt);
+PyAPI_FUNC(int)  PyEvent_WaitTimed(PyEvent *evt, _PyTime_t timeout);
+```
+
+## gopy mirror
+
+Not yet ported.

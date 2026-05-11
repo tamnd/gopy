@@ -1,0 +1,91 @@
+---
+title: Python/fileutils.c
+description: Low-level file and path utilities providing encoding-aware I/O, wide-character path wrappers, and file-descriptor inheritance control for the CPython runtime.
+cpython_path: Python/fileutils.c
+cpython_version: "3.14"
+lines: 1200
+status: annotated
+ported_to: ""
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Python/fileutils.c`
+
+<CpyLink path="Python/fileutils.c" />
+
+`fileutils.c` collects the low-level OS primitives that CPython needs before the interpreter is fully bootstrapped and that the standard library calls continuously at runtime. The functions here are not exposed directly to Python programs; they are internal C-level helpers used by import, the codec system, the `io` module, and the path configuration layer. Because they must work on Windows, macOS, and every POSIX variant CPython supports, the file is full of `#ifdef` guards and carefully tested fallback paths.
+
+The most important theme running through the file is encoding. Every function that accepts or produces a filesystem path must decide whether the path is a `char *` (narrow, locale-encoded), a `wchar_t *` (wide, UTF-16 on Windows or UTF-32 on POSIX), or a `PyObject *` string (which may be either UTF-8 or surrogateescaped). The UTF-8 mode flag (`Py_UTF8Mode`) changes the answer: when it is set the narrow path functions all assume UTF-8 regardless of the locale, which simplifies most of the encoding gymnastics on modern Linux and macOS.
+
+The second theme is file-descriptor inheritance. POSIX leaves newly opened file descriptors inheritable by child processes by default. CPython sets `O_CLOEXEC` (or the equivalent `FD_CLOEXEC` on older systems) on every fd it opens internally, using `_Py_set_inheritable` for the normal case and `_Py_set_inheritable_async_safe` in signal handlers and the `subprocess` fork path where `fcntl` must be avoided.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| 1-80 | includes, `_Py_GetLocaleEncoding` | Locale and UTF-8 mode init | |
+| 81-250 | `_Py_GetFileSystemEncoding`, `_Py_GetFileSystemErrors` | FS encoding selection | |
+| 251-450 | `_Py_fopen_obj`, `_Py_stat_fields` | Encoding-aware fopen and stat | |
+| 451-650 | `_Py_wgetcwd`, `_Py_wreadlink`, `_Py_wrealpath` | Wide-character path wrappers | |
+| 651-850 | `_Py_set_inheritable`, `_Py_set_inheritable_async_safe` | FD_CLOEXEC management | |
+| 851-1050 | `_Py_get_blocking`, `_Py_set_blocking` | O_NONBLOCK helpers | |
+| 1051-1200 | `_Py_read`, `_Py_write`, `_Py_write_noraise` | Restartable read/write wrappers | |
+
+## Reading
+
+### Locale encoding and UTF-8 mode (lines 1 to 250)
+
+<CpyLink path="Python/fileutils.c" lines="1-250" />
+
+`_Py_GetLocaleEncoding` probes the C library locale to return the canonical encoding name as a `wchar_t *`. On most Linux systems this returns `"utf-8"` or falls back to `"ascii"`. When `Py_UTF8Mode` is non-zero the entire lookup is bypassed and `"utf-8"` is returned unconditionally, which is the default on Python 3.15+ and opt-in via `-X utf8` or `PYTHONUTF8=1` on 3.14.
+
+`_Py_GetFileSystemEncoding` wraps `_Py_GetLocaleEncoding` and handles the Windows case separately, where the filesystem encoding is always `"utf-8"` since Python 3.6. The returned string is owned by the `PyInterpreterState` and must not be freed by the caller.
+
+```c
+const char *
+_Py_GetFileSystemEncoding(PyInterpreterState *interp)
+{
+    return interp->fs_codec.encoding;
+}
+```
+
+### Encoding-aware fopen and stat (lines 251 to 450)
+
+<CpyLink path="Python/fileutils.c" lines="251-450" />
+
+`_Py_fopen_obj` takes a `PyObject *` path (str or bytes), encodes it to the filesystem encoding with surrogateescape error handling, and calls `fopen`. It is the canonical way to open a file whose name came from Python code. The `_Py_stat_fields` helper reads a `struct stat` into a Python tuple in the same field order as `os.stat_result`, shared by `os.stat`, `os.lstat`, and `os.fstat`.
+
+### Wide-character path wrappers (lines 451 to 650)
+
+<CpyLink path="Python/fileutils.c" lines="451-650" />
+
+Windows uses `wchar_t *` for all filesystem calls. The three wrappers `_Py_wgetcwd`, `_Py_wreadlink`, and `_Py_wrealpath` provide a uniform interface that works on both Windows (where they call `_wgetcwd`, `GetFinalPathNameByHandle`, and `_wfullpath`) and POSIX (where they convert to narrow, call the POSIX function, then convert back). This lets the import system and path configuration layer use a single code path.
+
+```c
+wchar_t *
+_Py_wgetcwd(wchar_t *buf, size_t insize)
+{
+#ifdef MS_WINDOWS
+    return _wgetcwd(buf, (int)insize);
+#else
+    /* narrow getcwd + Py_DecodeLocale */
+#endif
+}
+```
+
+### FD_CLOEXEC management (lines 651 to 850)
+
+<CpyLink path="Python/fileutils.c" lines="651-850" />
+
+`_Py_set_inheritable(fd, inheritable, atomic_flag_works)` uses `ioctl(FIOCLEX)` when available (the atomic form that needs no read-modify-write), falling back to `fcntl(F_GETFD)` / `fcntl(F_SETFD)`. The async-safe variant `_Py_set_inheritable_async_safe` avoids `errno`-dependent calls and never allocates memory, making it safe to call from a signal handler or the child side of `fork` before `exec`.
+
+### Restartable read/write (lines 1051 to 1200)
+
+<CpyLink path="Python/fileutils.c" lines="1051-1200" />
+
+`_Py_read` and `_Py_write` wrap `read(2)` and `write(2)` with `EINTR` retry loops that check `PyErr_CheckSignals` on each restart, ensuring that a blocking read on a slow fd does not prevent signal handlers from running. `_Py_write_noraise` is the variant used in the traceback printer and the crash handler where raising a Python exception is not safe.
+
+## gopy mirror
+
+Not yet ported.

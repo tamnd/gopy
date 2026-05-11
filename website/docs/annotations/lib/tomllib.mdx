@@ -1,0 +1,126 @@
+---
+title: Lib/tomllib/_parser.py
+description: Pure-Python TOML 1.0 parser added in Python 3.11, providing read-only load and loads entry points for deserializing TOML documents.
+cpython_path: Lib/tomllib/_parser.py
+cpython_version: "3.14"
+lines: 700
+status: annotated
+ported_to: ""
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Lib/tomllib/_parser.py`
+
+<CpyLink path="Lib/tomllib/_parser.py" />
+
+The `tomllib` package was added in Python 3.11 (PEP 680) as a read-only TOML 1.0 parser. It ships two public entry points: `load(fp, *, parse_float)` for file-like objects and `loads(s, *, parse_float)` for strings. There is deliberately no writer; the stdlib scope is limited to parsing.
+
+The parser is a hand-written recursive-descent implementation. It walks a source string character by character, dispatching on the current byte to branch between scalar types (strings, integers, floats, booleans, datetimes), arrays, and inline tables. Dotted keys and table headers are resolved into a nested dictionary as the parse proceeds, with duplicate-key detection enforced at every level.
+
+RFC 3339 datetime strings are parsed into `datetime.datetime`, `datetime.date`, or `datetime.time` objects depending on which components are present. Timezone offsets, including the special `Z` suffix, are converted to `datetime.timezone` instances. The `parse_float` hook lets callers substitute `decimal.Decimal` or any other type for TOML float values.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| 1-30 | module header, imports | Package setup and `__all__` | - |
+| 31-80 | `loads` / `load` | Public entry points | - |
+| 81-160 | `Parser.__init__`, `Parser.parse` | Top-level document parse loop | - |
+| 161-280 | `parse_value` | Dispatch to scalar or collection parser | - |
+| 281-390 | `parse_basic_string`, `parse_literal_string` | String parsing with escape handling | - |
+| 391-460 | `parse_array`, `parse_inline_table` | Collection parsing | - |
+| 461-560 | `parse_key`, `parse_keyval` | Key path resolution and dotted-key merging | - |
+| 561-630 | `parse_datetime`, `parse_time`, `parse_date` | RFC 3339 temporal value parsing | - |
+| 631-700 | helper regexes, `suffixed_err`, `is_*` predicates | Lexing utilities | - |
+
+## Reading
+
+### Public API (lines 1 to 80)
+
+<CpyLink path="Lib/tomllib/_parser.py" lines="1-80" />
+
+`loads` is the canonical entry point. It takes a `str` and an optional `parse_float` callable (default `float`), constructs a `Parser`, calls `parse()`, and returns the resulting `dict`. `load` wraps `loads` by reading bytes from a binary file object and decoding as UTF-8, raising a clear error if the caller passes a text-mode file.
+
+The `parse_float` parameter threads through every numeric branch so callers never need to post-process the returned dict to replace floats.
+
+```python
+def loads(s: str, /, *, parse_float: ParseFloat = float) -> dict[str, Any]:
+    parser = Parser(s, parse_float)
+    return parser.parse()
+```
+
+### Recursive-descent dispatch (lines 161 to 280)
+
+<CpyLink path="Lib/tomllib/_parser.py" lines="161-280" />
+
+`parse_value` inspects the current character and delegates: `"` or `'` starts a string branch, `[` an array, `{` an inline table, `t`/`f` a boolean, and digits or a leading sign kick off the numeric or datetime branch. The numeric branch attempts datetime parsing first (looking for `-` at position 4), then integer vs float disambiguation via the presence of `.`, `e`, or `E`.
+
+This single dispatch point is the hot path for any document with many values. The character comparisons are intentionally cheap because TOML's grammar is designed to be LL(1) at this level.
+
+```python
+def parse_value(self) -> Any:
+    c = self.src[self.pos]
+    if c == '"':
+        return self.parse_basic_string()
+    if c == "'":
+        return self.parse_literal_string()
+    if c == "[":
+        return self.parse_array()
+    ...
+```
+
+### Key path resolution (lines 461 to 560)
+
+<CpyLink path="Lib/tomllib/_parser.py" lines="461-560" />
+
+TOML keys may be dotted (`a.b.c = 1`), which requires walking into the nested dict structure and creating intermediate tables on demand. The parser tracks which tables were defined explicitly vs implicitly (as a parent of a dotted key) in a parallel `flags` dict. Writing to a key under an explicitly-defined table is an error; writing to a key under an implicit table is allowed only once.
+
+This logic is the most complex part of the parser. The `flags` structure mirrors the shape of the output dict and records `EXPLICIT_TABLE`, `IMPLICIT_TABLE`, and `INLINE_TABLE` states per node.
+
+```python
+def parse_key(self) -> list[str]:
+    key = [self.parse_simple_key()]
+    while self.src[self.pos : self.pos + 1] == ".":
+        self.pos += 1
+        self.skip_whitespace()
+        key.append(self.parse_simple_key())
+    return key
+```
+
+### RFC 3339 datetime parsing (lines 561 to 630)
+
+<CpyLink path="Lib/tomllib/_parser.py" lines="561-630" />
+
+TOML borrows the RFC 3339 subset of ISO 8601. The parser reads the date portion first (YYYY-MM-DD), then checks for a `T` or space separator to decide whether a time component follows. If a time is present, it further checks for a `Z` or `+`/`-` offset to build a `datetime.timezone`. Fractional seconds up to six digits are supported via `datetime.microsecond`.
+
+The four possible result types (`datetime` with zone, `datetime` without zone, `date`, `time`) map directly to the four TOML datetime subtypes defined in the spec.
+
+```python
+def parse_datetime(self, *, offset_allowed: bool) -> ...:
+    # date part
+    year = int(self.src[self.pos : self.pos + 4])
+    ...
+    if self.src[self.pos : self.pos + 1] in ("T", " "):
+        return self.parse_time_part(year, month, day, offset_allowed)
+    return datetime.date(year, month, day)
+```
+
+### Error helpers and predicates (lines 631 to 700)
+
+<CpyLink path="Lib/tomllib/_parser.py" lines="631-700" />
+
+`suffixed_err` computes a human-readable line and column number from the raw byte offset, then raises `TOMLDecodeError` with that context appended. All parse branches call this helper rather than raising directly, keeping error messages consistent.
+
+The predicate functions (`is_bare_key_char`, `is_ascii_digit`, etc.) are inlined checks used throughout the parser to avoid importing `re` for performance-critical paths.
+
+```python
+def suffixed_err(src: str, pos: int, msg: str) -> TOMLDecodeError:
+    line = src.count("\n", 0, pos) + 1
+    col = pos - src.rindex("\n", 0, pos)
+    return TOMLDecodeError(f"{msg} (line {line}, column {col})")
+```
+
+## gopy mirror
+
+Not yet ported.

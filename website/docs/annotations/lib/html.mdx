@@ -1,0 +1,91 @@
+---
+title: Lib/html/__init__.py
+description: HTML character escaping and unescaping utilities backed by the html.entities lookup table.
+cpython_path: Lib/html/__init__.py
+cpython_version: "3.14"
+lines: 60
+status: annotated
+ported_to: ""
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Lib/html/__init__.py`
+
+<CpyLink path="Lib/html/__init__.py" />
+
+`html` is the package initialiser for Python's HTML support. It exposes two utility functions, `escape` and `unescape`, that convert between plain text and HTML-safe character references. These functions are independent of any parser or serialiser; they operate on strings alone and have no I/O or state.
+
+`escape` is the safe direction. It replaces the characters that have special meaning in HTML markup (`<`, `>`, `&`, and optionally `"`) with their named entity equivalents. This is the canonical way to embed untrusted text in an HTML document without creating injection vectors. `unescape` is the inverse: it expands both named entities (such as `&amp;`) and numeric character references (both decimal `&#60;` and hexadecimal `&#x3C;`) back to their Unicode characters. The named-entity table comes from `html.entities.html5`, a dict that maps entity names (without the leading `&` and trailing `;`) to Unicode strings.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| 1-5 | module docstring | Describes the package contents | |
+| 6-10 | imports | `re`, `html.entities` | |
+| 11-30 | `escape(s, quote=True)` | Replaces `<`, `>`, `&`, and optionally `"` | |
+| 31-60 | `unescape(s)` | Expands named and numeric entity references | |
+
+## Reading
+
+### `escape` (lines 11 to 30)
+
+<CpyLink path="Lib/html/__init__.py" lines="11-30" />
+
+`escape` performs three unconditional replacements (always `&` first to avoid double-encoding, then `<`, then `>`), followed by an optional fourth replacement of `"` to `&quot;` when `quote=True`. The `quote` parameter defaults to `True` so the result is safe inside HTML attribute values delimited by double quotes. Single-quote escaping is not included because it is rarely needed and the CPython authors chose to keep the function minimal.
+
+```python
+def escape(s, quote=True):
+    s = s.replace("&", "&amp;")
+    s = s.replace("<", "&lt;")
+    s = s.replace(">", "&gt;")
+    if quote:
+        s = s.replace('"', "&quot;")
+    return s
+```
+
+### `unescape` internals (lines 31 to 60)
+
+<CpyLink path="Lib/html/__init__.py" lines="31-60" />
+
+`unescape` compiles a single regex that matches `&name;`, `&#digits;`, and `&#xhex;`. It passes every match to a local `_replace` closure. For numeric references the closure calls `chr` on the decoded integer. For named references it looks up the name in `html.entities.html5`. When a name is not found the original token is returned unchanged, which matches browser behaviour for unknown entities.
+
+```python
+def unescape(s):
+    if '&' not in s:
+        return s
+    def _replace(match):
+        s = match.group(1)
+        if s[0] == '#':
+            try:
+                if s[1] in ('x', 'X'):
+                    c = chr(int(s[2:], 16))
+                else:
+                    c = chr(int(s[1:]))
+                return c
+            except (ValueError, OverflowError):
+                return match.group(0)
+        try:
+            return html5[s]
+        except KeyError:
+            try:
+                return html5[s + ';']
+            except KeyError:
+                return match.group(0)
+    return _CHARREFS.sub(_replace, s)
+```
+
+### Entity table source (lines 6 to 10)
+
+<CpyLink path="Lib/html/__init__.py" lines="6-10" />
+
+The import at the top of `__init__.py` pulls in `html5` from `html.entities`. That dict is generated from the WHATWG named character references list and contains over 2000 entries. `unescape` uses it without modification, so entity coverage tracks the HTML5 spec rather than the older XHTML/HTML4 entity sets.
+
+```python
+from html.entities import html5
+```
+
+## gopy mirror
+
+Not yet ported.

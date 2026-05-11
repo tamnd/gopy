@@ -1,0 +1,131 @@
+---
+title: Lib/pickletools.py
+description: Introspection and disassembly utilities for Python pickle byte streams.
+cpython_path: Lib/pickletools.py
+cpython_version: "3.14"
+lines: 1100
+status: annotated
+ported_to: ""
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Lib/pickletools.py`
+
+<CpyLink path="Lib/pickletools.py" />
+
+`pickletools` is the standard library module for introspecting and debugging pickle byte streams. It provides a human-readable disassembler, a low-level opcode iterator, and a simple optimizer that removes redundant `PUT`/`GET` pairs. The module does not extend the pickle format; it only reads and explains it.
+
+The opcode table at the heart of the module describes every opcode across all five pickle protocols. Each entry is an `OpcodeInfo` instance carrying the opcode name, one-byte code, argument descriptor, stack precondition, stack postcondition, and a prose docstring. This table is the authoritative reference that `dis` and `genops` both consult.
+
+`optimize` rounds out the public surface by walking the opcode stream, collecting which memo slots are actually read, and rewriting the stream to drop any `PUT` whose slot is never fetched. The result is a shorter, semantically equivalent pickle.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| 1-90 | module header, `ArgumentDescriptor` | Argument type definitions used by opcode table | |
+| 91-200 | `read_*` helpers | Low-level readers for fixed and variable-length fields | |
+| 201-900 | opcode table (`opcodes`, `code2op`) | Full per-protocol opcode catalogue | |
+| 901-970 | `genops(pickle)` | Iterator yielding `(opcode, arg, pos)` triples | |
+| 971-1050 | `dis(pickle, ...)` | Human-readable disassembly printer | |
+| 1051-1100 | `optimize(p)` | Memo-slot dead-code eliminator | |
+
+## Reading
+
+### Argument descriptors (lines 1 to 90)
+
+<CpyLink path="Lib/pickletools.py" lines="1-90" />
+
+The module opens by defining `ArgumentDescriptor`, a named tuple that pairs a `name` with an `n` (byte count or sentinel) and a `read` callable. Every opcode that takes an inline argument names one of the pre-built descriptors such as `uint1`, `uint2`, `int4`, `unicodestring4`, or `decimalnl_short`. The descriptors double as documentation and as the actual parsing logic used by `genops`.
+
+```python
+ArgumentDescriptor = collections.namedtuple(
+    'ArgumentDescriptor',
+    ['name', 'n', 'read', 'doc'])
+```
+
+### Low-level readers (lines 91 to 200)
+
+<CpyLink path="Lib/pickletools.py" lines="91-200" />
+
+A family of `read_*` functions implement the concrete byte-level parsing. `read_uint1` reads one unsigned byte, `read_uint2` reads a two-byte little-endian integer, and so on up through eight-byte variants. Variable-length strings are handled by `read_stringnl` (newline-terminated) and `read_string4` (four-byte length prefix). Each function accepts a file-like object and returns a Python value ready to display.
+
+```python
+def read_uint1(f):
+    r"""
+    >>> import io
+    >>> read_uint1(io.BytesIO(b'\xff'))
+    255
+    """
+    data = f.read(1)
+    if not data:
+        raise ValueError("not enough data in stream to read uint1")
+    return data[0]
+```
+
+### Opcode table (lines 201 to 900)
+
+<CpyLink path="Lib/pickletools.py" lines="201-900" />
+
+The bulk of the file is a list of `OpcodeInfo` instances, one per opcode. Each entry names the opcode, gives its single-character code, specifies which `ArgumentDescriptor` describes its inline argument (or `None`), lists the stack types consumed (`stack_before`), lists the stack types produced (`stack_after`), and carries a multi-line docstring explaining semantics. The list is then indexed into `code2op`, a dict from byte value to `OpcodeInfo`, which is the lookup structure used at runtime.
+
+```python
+I = OpcodeInfo
+opcodes = [
+    I(name='INT',
+      code='I',
+      arg=decimalnl_short,
+      stack_before=[],
+      stack_after=[anyobject],
+      proto=0,
+      doc="""...
+      """),
+    ...
+]
+code2op = {op.code: op for op in opcodes}
+```
+
+### `genops` iterator (lines 901 to 970)
+
+<CpyLink path="Lib/pickletools.py" lines="901-970" />
+
+`genops(pickle)` accepts either a bytes object or a binary file and yields `(opcode, arg, pos)` triples in stream order. It reads one byte to identify the opcode, looks it up in `code2op`, then calls the opcode's argument descriptor to parse any inline argument. The position `pos` is the byte offset of the opcode in the stream, which `dis` uses to annotate output.
+
+```python
+def genops(pickle, memo=None):
+    if isinstance(pickle, bytes_types):
+        pickle = io.BytesIO(pickle)
+    if memo is None:
+        memo = {}
+    while True:
+        pos = pickle.tell()
+        code = pickle.read(1)
+        opcode = code2op.get(code.decode("latin-1"))
+        if opcode is None:
+            raise ValueError("at position %d, opcode %r unknown" % (pos, code))
+        ...
+        yield opcode, arg, pos
+```
+
+### `dis` and `optimize` (lines 971 to 1100)
+
+<CpyLink path="Lib/pickletools.py" lines="971-1100" />
+
+`dis` drives `genops` and formats each triple into a columnar output line showing byte offset, opcode name, argument value, and a running memo annotation. Optional `memo`, `output`, and `indentlevel` parameters let callers share memo state across multiple `dis` calls or redirect output. `optimize` makes a second pass: it collects every memo slot that appears in a `GET` opcode, then copies the stream while dropping any `PUT` whose slot is absent from that set, producing a shorter equivalent pickle.
+
+```python
+def optimize(p):
+    gets = set()
+    puts = []
+    for opcode, arg, pos in genops(p):
+        if 'GET' in opcode.name:
+            gets.add(arg)
+        elif 'PUT' in opcode.name:
+            puts.append((pos, arg))
+    ...
+```
+
+## gopy mirror
+
+Not yet ported.

@@ -1,0 +1,95 @@
+---
+title: Include/internal/pycore_floatobject.h
+description: CPython-private float internals covering free-list recycling, special-value singletons, float formatting, and IEEE 754 binary packing and unpacking.
+cpython_path: Include/internal/pycore_floatobject.h
+cpython_version: "3.14"
+lines: 60
+status: annotated
+ported_to: ""
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Include/internal/pycore_floatobject.h`
+
+<CpyLink path="Include/internal/pycore_floatobject.h" />
+
+`pycore_floatobject.h` is the internal companion to the public `floatobject.h`. It exposes the pieces of `PyFloatObject` management that only the runtime itself needs: the free-list allocator that recycles dead float objects to avoid repeated heap allocation, the interpreter-state slot that holds the free-list head and its length counter, and the `_PyFloat_InitState` / `_PyFloat_ClearFreeList` lifecycle hooks called during interpreter startup and shutdown.
+
+The header also declares `_PyFloat_FormatAdvancedWriter`, which is the low-level entry point used by `format()` and `str.format()` when a format spec targets a float. This function writes directly into a `_PyUnicodeWriter` buffer rather than constructing an intermediate string object, avoiding one allocation per formatted float in tight loops.
+
+The binary packing functions `_PyFloat_Pack2`, `_PyFloat_Pack4`, `_PyFloat_Pack8` and their `Unpack` counterparts implement IEEE 754 half-, single-, and double-precision conversion to and from little-endian or big-endian byte buffers. They underpin the `struct` module, `array` module, and `pickle` protocol 2 float encoding. All three sizes are declared here so that `structmodule.c` and `pickletools` can include a single internal header rather than duplicating the declarations.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| 1-15 | include guards, `Py_BUILD_CORE`, includes | Header boilerplate; pulls in `pycore_freelist.h` for free-list config | n/a |
+| 16-25 | `_Py_FREELIST_FLOATS`, `_PyFloatFreeLists` | Free-list size constant and per-interpreter free-list state struct | n/a |
+| 26-35 | `_PyFloat_InitState`, `_PyFloat_Fini`, `_PyFloat_ClearFreeList` | Interpreter lifecycle hooks: init, shutdown, and GC clear | n/a |
+| 36-44 | `_PyFloat_FormatAdvancedWriter` | Float-to-string formatting into a `_PyUnicodeWriter` | n/a |
+| 45-60 | `_PyFloat_Pack2/4/8`, `_PyFloat_Unpack2/4/8` | IEEE 754 binary pack and unpack for 2-, 4-, and 8-byte formats | n/a |
+
+## Reading
+
+### Free-list configuration (lines 16 to 25)
+
+<CpyLink path="Include/internal/pycore_floatobject.h" lines="16-25" />
+
+`_Py_FREELIST_FLOATS` is the compile-time capacity of the float free list, set to 256 per interpreter. When a `PyFloatObject` is deallocated, `float_dealloc` checks whether the per-interpreter list is below capacity. If so, it links the object through its `ob_type` field (repurposed as a next-pointer) onto the list head stored in `_PyFloatFreeLists.items` and increments `_PyFloatFreeLists.numfree`. A subsequent `PyFloat_FromDouble` pops from the list and reinitialises the object in place, paying only an atomic-free pointer swap rather than a call to `pymalloc`.
+
+```c
+#define _Py_FREELIST_FLOATS 256
+
+struct _Py_float_state {
+    PyFloatObject *free_list;
+    int numfree;
+};
+```
+
+### Interpreter lifecycle hooks (lines 26 to 35)
+
+<CpyLink path="Include/internal/pycore_floatobject.h" lines="26-35" />
+
+`_PyFloat_InitState` is called during `Py_InitializeFromConfig` to zero-initialize the free-list head in the new interpreter state. `_PyFloat_ClearFreeList` is called by the cyclic garbage collector during its final collection pass: it pops every cached float off the list and calls `PyObject_Free`, ensuring that no `PyFloatObject` memory survives into a subsequent interpreter. `_PyFloat_Fini` is the interpreter-shutdown hook and is the only caller of `_PyFloat_ClearFreeList` outside the GC itself.
+
+```c
+PyAPI_FUNC(void) _PyFloat_InitState(PyInterpreterState *);
+PyAPI_FUNC(void) _PyFloat_Fini(PyInterpreterState *);
+PyAPI_FUNC(void) _PyFloat_ClearFreeList(PyInterpreterState *);
+```
+
+### FormatAdvancedWriter (lines 36 to 44)
+
+<CpyLink path="Include/internal/pycore_floatobject.h" lines="36-44" />
+
+`_PyFloat_FormatAdvancedWriter` takes a `_PyUnicodeWriter *`, the float value as a `PyObject *`, and the format-spec string bounds `(const char *start, const char *end)`. It parses the format spec (fill, align, sign, width, precision, type character) and writes the formatted output directly into the writer's pre-allocated buffer. Returning -1 sets an exception; returning 0 means success. The direct-write design means `format(1.5, '.2f')` allocates exactly one string object for the result, rather than a temporary buffer and then a copy.
+
+```c
+PyAPI_FUNC(int) _PyFloat_FormatAdvancedWriter(
+    _PyUnicodeWriter *writer,
+    PyObject *obj,
+    PyObject *format_spec,
+    Py_ssize_t start,
+    Py_ssize_t end);
+```
+
+### IEEE 754 pack and unpack (lines 45 to 60)
+
+<CpyLink path="Include/internal/pycore_floatobject.h" lines="45-60" />
+
+The `_PyFloat_Pack` family converts a C `double` to a fixed-width IEEE 754 byte representation. `_PyFloat_Pack2` produces a 16-bit half-precision float (used by `struct` format character `e`), `_PyFloat_Pack4` produces single precision, and `_PyFloat_Pack8` produces double precision. Each function accepts a `char *p` destination pointer and an `int le` flag selecting little-endian (`le=1`) or big-endian (`le=0`) byte order. The `Unpack` counterparts reconstruct a `double` from the same layouts. All six functions return `-1.0` and set `OverflowError` on out-of-range values, matching the documented `struct.error` semantics.
+
+```c
+PyAPI_FUNC(int) _PyFloat_Pack2(double x, char *p, int le);
+PyAPI_FUNC(int) _PyFloat_Pack4(double x, char *p, int le);
+PyAPI_FUNC(int) _PyFloat_Pack8(double x, char *p, int le);
+
+PyAPI_FUNC(double) _PyFloat_Unpack2(const char *p, int le);
+PyAPI_FUNC(double) _PyFloat_Unpack4(const char *p, int le);
+PyAPI_FUNC(double) _PyFloat_Unpack8(const char *p, int le);
+```
+
+## gopy mirror
+
+Not yet ported.
