@@ -1,6 +1,6 @@
 ---
-title: "Lib/unittest/__init__.py"
-description: "Package init that re-exports all public unittest symbols and lazily loads IsolatedAsyncioTestCase"
+title: Lib/unittest/__init__.py
+description: "Annotation: Lib/unittest/__init__.py"
 cpython_path: Lib/unittest/__init__.py
 cpython_version: "3.14"
 lines: 80
@@ -9,25 +9,25 @@ status: annotated
 
 import {Cpy, CpyLink} from '@site/src/components/Cpy';
 
-`Lib/unittest/__init__.py` is the package entry point for Python's built-in
-test framework. Its only job is to gather public symbols from the five
-sub-modules and expose them as a flat namespace. At 80 lines it is one of the
-shortest files in the stdlib, yet it defines the entire public API surface that
-user code imports.
+<CpyLink path="Lib/unittest/__init__.py" />
+
+The `unittest` package exposes its full public API through this single init module. It re-exports every name from its sub-modules so that callers only need `import unittest` rather than importing individual submodules directly. The file is intentionally thin: its job is assembly, not logic.
 
 ## Map
 
 | Lines | Symbol | Role |
 |-------|--------|------|
-| 47–52 | `__all__` | Canonical list of exported names |
-| 54 | `__unittest = True` | Suppresses this file from tracebacks |
-| 56–64 | import block | Pulls symbols from result, case, suite, loader, main, runner, signals |
-| 72–73 | `__dir__` | Adds `IsolatedAsyncioTestCase` to `dir(unittest)` without importing it |
-| 75–80 | `__getattr__` | Lazy-loads `IsolatedAsyncioTestCase` from `.async_case` on first access |
+| 47-52 | `__all__` | Canonical list of exported public names |
+| 54 | `__unittest` | Sentinel that suppresses this file from test tracebacks |
+| 56-69 | import block | Pulls symbols from result, case, suite, loader, main, runner, signals |
+| 72-73 | `__dir__` | Adds `IsolatedAsyncioTestCase` to `dir(unittest)` without importing it |
+| 75-80 | `__getattr__` | Lazy-loads `IsolatedAsyncioTestCase` from `.async_case` on first access |
 
 ## Reading
 
-### The `__all__` list
+### The `__all__` list and re-exports
+
+`__all__` declares the authoritative contract for `from unittest import *`. Every name listed there has a corresponding binding in the import block below it.
 
 ```python
 # CPython: Lib/unittest/__init__.py:47 __all__
@@ -39,22 +39,7 @@ __all__ = ['TestResult', 'TestCase', 'IsolatedAsyncioTestCase', 'TestSuite',
            'addModuleCleanup', 'doModuleCleanups', 'enterModuleContext']
 ```
 
-Every name here has a corresponding import below it. The list acts as a contract
-for `from unittest import *` and for tools that inspect public APIs.
-
-### The `__unittest` sentinel
-
-```python
-# CPython: Lib/unittest/__init__.py:54 __unittest
-__unittest = True
-```
-
-All unittest sub-modules set this module-level variable. The traceback
-formatter in `result.py` checks for it and hides frames from these files when
-printing test failures, so users see their own code rather than framework
-internals.
-
-### Flat re-exports
+The four foundational classes (`TestCase`, `TestSuite`, `TestLoader`, `TestResult`) come from separate sub-modules but are surfaced here so user code never has to reach into `unittest.case` or `unittest.loader` directly. `defaultTestLoader` is the singleton instance of `TestLoader` that `unittest.main()` uses when no explicit loader is passed.
 
 ```python
 # CPython: Lib/unittest/__init__.py:56 import block
@@ -69,10 +54,18 @@ from .runner import TextTestRunner, TextTestResult
 from .signals import installHandler, registerResult, removeResult, removeHandler
 ```
 
-Each sub-module is imported eagerly at package load time. The one exception is
-`IsolatedAsyncioTestCase`, which pulls in `asyncio` and is therefore deferred.
+### The `__unittest` traceback sentinel
 
-### Lazy async import
+```python
+# CPython: Lib/unittest/__init__.py:54 __unittest
+__unittest = True
+```
+
+Every unittest sub-module sets this module-level variable. The traceback formatter in `result.py` checks for it and hides frames from these files when printing test failures, so users see their own code rather than framework internals.
+
+### Lazy async import via `__getattr__`
+
+`IsolatedAsyncioTestCase` pulls in `asyncio` at import time, so loading it eagerly would slow down every program that imports `unittest`. PEP 562 module `__getattr__` defers that cost until the name is first accessed.
 
 ```python
 # CPython: Lib/unittest/__init__.py:75 __getattr__
@@ -84,25 +77,12 @@ def __getattr__(name):
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 ```
 
-Python calls `__getattr__` on a module when a normal attribute lookup fails.
-This pattern, introduced in PEP 562, lets packages defer expensive imports
-until the name is actually used. The `global` statement caches the result so
-the import only fires once.
+The `global` statement caches the result so the import fires only once. `__dir__` at line 72 ensures `IsolatedAsyncioTestCase` appears in `dir(unittest)` even before `__getattr__` has run.
 
 ## gopy notes
 
-The gopy port needs to replicate the flat re-export structure. Go does not
-have a direct equivalent of `__all__`, but the exported symbol list maps onto
-Go's package-level exported identifiers. The lazy-load pattern for
-`IsolatedAsyncioTestCase` can be deferred entirely since gopy does not yet
-support `asyncio`.
+Status: not yet ported.
 
-The `__unittest = True` sentinel matters for traceback filtering. The gopy
-traceback printer should check a similar flag on frame objects so framework
-frames are hidden.
+Planned package path: `module/unittest/`.
 
-## CPython 3.14 changes
-
-3.14 added `_colorize` integration in `runner.py`, which affects the output
-symbols (`TextTestResult`) re-exported here. The `__init__.py` itself is
-unchanged from 3.13. No new names were added to `__all__` in this release.
+The init module itself requires no Go logic. It will be shipped as a pure-Python file loaded from the stdlib bundle, once the sub-modules (`case`, `suite`, `loader`, `result`, `runner`) are ported. The `__unittest` traceback-filter sentinel must be respected by the gopy traceback formatter when printing test failure output. The `IsolatedAsyncioTestCase` lazy-load can be deferred indefinitely since gopy does not yet support `asyncio`.

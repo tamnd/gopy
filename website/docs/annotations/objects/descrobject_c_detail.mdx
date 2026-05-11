@@ -1,0 +1,142 @@
+---
+title: Objects/descrobject.c
+description: "Descriptor object implementations: member, method, wrapper, getset, classmethod, and property"
+cpython_path: Objects/descrobject.c
+cpython_version: "3.14"
+lines: 1400
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Objects/descrobject.c" />
+
+## Map
+
+| Lines | Symbol | Purpose |
+|-------|--------|---------|
+| 1–80 | `PyMemberDescrObject` layout | Struct embedding `PyDescrObject` plus a `PyMemberDef *` pointer |
+| 81–160 | `member_get` / `member_set` | Read/write struct fields at fixed byte offsets |
+| 161–280 | `methoddescr_call` | Dispatch for `PyMethodDef`-backed descriptors |
+| 281–420 | `wrapperdescr_call` | Dispatch for C slot wrappers (`slot_tp_descr_get`) |
+| 421–560 | `classmethoddescr_call` | Pass type as first argument instead of instance |
+| 561–720 | `getset_get` / `getset_set` | Call `PyGetSetDef.get` / `.set` with closure pointer |
+| 721–950 | `property_descr_get` | Three-way branch on instance vs. class vs. None owner |
+| 951–1100 | `property_descr_set` | Route to `fset` or `fdel` depending on value presence |
+| 1101–1300 | `property_copy` / `property_init` | Constructor and `property()` keyword handling |
+| 1301–1400 | `PyDescr_NewMember` etc. | Public factory functions for all descriptor kinds |
+
+## Reading
+
+### PyMemberDescrObject and slot_tp_descr_get
+
+`PyMemberDescrObject` is the runtime object for a field declared with
+`PyMemberDef`. It stores a pointer back to the def so `member_get` can
+locate the field by byte offset relative to the instance pointer.
+
+`slot_tp_descr_get` is the `tp_descr_get` slot installed on every
+descriptor type. It checks whether the owner is `None` (class-level
+access) and returns the descriptor itself in that case, otherwise it
+calls the type-specific get implementation.
+
+```c
+// CPython: Objects/descrobject.c:165 slot_tp_descr_get
+static PyObject *
+slot_tp_descr_get(PyObject *self, PyObject *obj, PyObject *type)
+{
+    PyTypeObject *tp = Py_TYPE(self);
+    descrgetfunc f = tp->tp_descr_get;
+    if (f == NULL) {
+        return Py_NewRef(self);
+    }
+    return f(self, obj, type);
+}
+```
+
+`member_get` reads raw memory using `PyMember_GetOne`, which switches on
+the `type` field in the `PyMemberDef` to decide how many bytes to read
+and how to box them as a Python object.
+
+```c
+// CPython: Objects/descrobject.c:92 member_get
+static PyObject *
+member_get(PyMemberDescrObject *descr, PyObject *obj, PyObject *type)
+{
+    if (descr_check((PyDescrObject *)descr, obj, &res) < 0)
+        return NULL;
+    return PyMember_GetOne((char *)obj, descr->d_member);
+}
+```
+
+### wrapperdescr for C slot wrappers
+
+Wrapper descriptors bridge the Python descriptor protocol to raw C slots
+such as `tp_hash` or `nb_add`. Each `PyWrapperDescrObject` records a
+`slotdef *` that carries the wrapper function and a stack-effect offset.
+
+When called, `wrapperdescr_call` creates a `PyMethodWrapper` (a bound
+wrapper) if called on an instance, or invokes the underlying slot
+directly when dispatched as an unbound call from the type.
+
+```c
+// CPython: Objects/descrobject.c:322 wrapperdescr_call
+static PyObject *
+wrapperdescr_call(PyWrapperDescrObject *descr, PyObject *args, PyObject *kwds)
+{
+    Py_ssize_t nargs = PyTuple_GET_SIZE(args);
+    if (nargs < 1) {
+        PyErr_Format(PyExc_TypeError,
+                     "descriptor '%V' needs an argument",
+                     descr_name((PyDescrObject *)descr), "?");
+        return NULL;
+    }
+    PyObject *self = PyTuple_GET_ITEM(args, 0);
+    /* ... type check, then call wrapper ... */
+    return (*descr->d_wrapped)(self, args, kwds);
+}
+```
+
+### property descriptor (property_descr_get / property_descr_set)
+
+The pure-C `property` type stores three optional callables (`fget`,
+`fset`, `fdel`) plus a `__doc__` string. `property_descr_get` has a
+three-way branch.
+
+- `obj is None` means the access came from the class, so the property
+  object itself is returned.
+- Otherwise `fget` is called with the instance.
+- If `fget` is `NULL`, `AttributeError` is raised.
+
+```c
+// CPython: Objects/descrobject.c:773 property_descr_get
+static PyObject *
+property_descr_get(PyObject *self, PyObject *obj, PyObject *type)
+{
+    propertyobject *gs = (propertyobject *)self;
+    if (obj == NULL || obj == Py_None) {
+        return Py_NewRef(self);
+    }
+    if (gs->prop_get == NULL) {
+        PyErr_SetString(PyExc_AttributeError, "unreadable attribute");
+        return NULL;
+    }
+    return PyObject_CallOneArg(gs->prop_get, obj);
+}
+```
+
+`property_descr_set` distinguishes deletion (value is `NULL`) from
+assignment, routing to `fdel` or `fset` accordingly. Both raise
+`AttributeError` if the matching callable is absent.
+
+## gopy notes
+
+Status: not yet ported.
+
+Planned package path: `objects/` (files `descr.go`, `property.go`).
+
+The existing `objects/descr.go` stub in the repo defines the descriptor
+interface but does not yet implement `MemberDescr`, `WrapperDescr`, or
+`GetSetDescr`. `property_descr_get`/`set` logic is partially sketched in
+`objects/property.go`. Full port requires `PyMember_GetOne` byte-offset
+reads, which depend on the Go `unsafe.Pointer` offset helpers being
+wired up first.

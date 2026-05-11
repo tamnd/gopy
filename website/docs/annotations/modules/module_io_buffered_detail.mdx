@@ -1,0 +1,138 @@
+---
+title: Modules/_io/bufferedio.c
+description: "CPython source annotation: bufferedio.c"
+cpython_path: Modules/_io/bufferedio.c
+cpython_version: "3.14"
+lines: 2800
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/_io/bufferedio.c" />
+
+`bufferedio.c` implements `BufferedReader`, `BufferedWriter`, `BufferedRandom`, and `BufferedRWPair`. These classes wrap a raw binary stream and add an in-process buffer to amortize the cost of small reads and writes. The file is one of the largest in the `_io` extension, covering both the buffering logic and a lock-based thread safety model.
+
+## Map
+
+| Symbol | Kind | Lines (approx) | Purpose |
+|---|---|---|---|
+| `buffered` | struct | 80 | Shared state: buffer pointer, pos, raw length, lock, snapshot |
+| `_bufferedreader_raw_read` | function | 60 | Issues one `raw.read()` call; fills internal buffer |
+| `_bufferedreader_read_generic` | function | 120 | Top-level read dispatch: fast path vs. slow path |
+| `_bufferedwriter_write` | function | 100 | Copies data into write buffer; flushes on overflow |
+| `_bufferedwriter_flush_locked` | function | 80 | Drains write buffer to raw stream under lock |
+| `buffered_flush_and_rewind_unlocked` | function | 40 | Pre-seek flush for `BufferedRandom` |
+| `buffered_seek` | method | 90 | Seek with mode 0/1/2; resets read buffer |
+| `buffered_tell` | method | 30 | Returns adjusted position accounting for buffered bytes |
+| `buffered_close` | method | 50 | Flush + close raw; idempotent |
+| `bufferedreader_read` | method | 60 | Entry point for `BufferedReader.read(n)` |
+
+## Reading
+
+### BufferedReader: filling and draining the buffer
+
+`BufferedReader` maintains a contiguous byte buffer and two cursors: `raw_pos` (how many bytes from the raw stream are in the buffer) and `pos` (the logical read position within those bytes). A read request first checks if enough bytes are already buffered; if so it copies them out without touching the raw stream.
+
+```c
+// CPython: Modules/_io/bufferedio.c:974 _bufferedreader_read_generic
+Py_ssize_t have = Py_SAFE_DOWNCAST(READAHEAD(self), Py_off_t, Py_ssize_t);
+if (n <= have) {
+    memcpy(out, self->buffer + self->pos, n);
+    self->pos += n;
+    return n;
+}
+```
+
+When buffered data is exhausted, `_bufferedreader_raw_read` is called to refill. It always attempts to fill the entire buffer (default 8 KiB), not just the bytes the caller asked for, so subsequent small reads are served from memory.
+
+```c
+// CPython: Modules/_io/bufferedio.c:912 _bufferedreader_raw_read
+res = PyObject_CallMethodObjArgs(self->raw, _PyIO_str_readinto,
+                                  memobj, NULL);
+...
+n = PyLong_AsOff_t(res, NULL);
+self->raw_pos = 0;
+self->read_end = n;   /* how many bytes are now valid */
+```
+
+If `readinto` returns 0 (EOF), `read_end` is set to 0 and subsequent calls return `b""` without hitting the raw stream again.
+
+### BufferedWriter: accumulating writes and flushing
+
+`_bufferedwriter_write` copies the caller's bytes into the write buffer. If the incoming data would overflow the buffer, it calls `_bufferedwriter_flush_locked` first, then either appends to the freshly empty buffer or (for very large writes that exceed one buffer) passes the data directly to the raw stream.
+
+```c
+// CPython: Modules/_io/bufferedio.c:1496 _bufferedwriter_write
+if (self->write_pos + n > self->buffer_size) {
+    if (_bufferedwriter_flush_locked(self) < 0)
+        goto error;
+}
+if (n <= self->buffer_size) {
+    memcpy(self->buffer + self->write_pos, data, n);
+    self->write_pos += n;
+} else {
+    /* bypass: write directly to raw */
+    res = _bufferedwriter_raw_write(self, data, n);
+}
+```
+
+`_bufferedwriter_flush_locked` iterates until all buffered bytes are accepted by `raw.write()`. A partial write (short write from the raw layer) shifts the remaining bytes to the front of the buffer rather than losing them.
+
+```c
+// CPython: Modules/_io/bufferedio.c:1418 _bufferedwriter_flush_locked
+while (self->write_pos < self->write_end) {
+    written = _bufferedwriter_raw_write(
+                  self,
+                  self->buffer + self->write_pos,
+                  self->write_end - self->write_pos);
+    if (written < 0)
+        goto error;
+    self->write_pos += written;
+}
+self->write_pos = 0;
+self->write_end = -1;
+```
+
+### BufferedRandom seek and tell
+
+`BufferedRandom` adds seek/tell on top of the read+write buffers. Before seeking, any pending write buffer is flushed and the read buffer is discarded, since the new position may make buffered bytes irrelevant.
+
+```c
+// CPython: Modules/_io/bufferedio.c:1840 buffered_seek
+if (_bufferedwriter_flush_locked(self) < 0)
+    goto end;
+_bufferedreader_reset_buf(self);
+res = PyObject_CallMethodObjArgs(self->raw, _PyIO_str_seek,
+                                  posobj, whenceobj, NULL);
+```
+
+`buffered_tell` must account for bytes already read from the raw stream but not yet consumed by the caller (they are "pre-buffered"), so it subtracts the unconsumed read-ahead from the raw stream's position.
+
+```c
+// CPython: Modules/_io/bufferedio.c:1790 buffered_tell
+raw_pos = _PyIO_str_tell(self->raw);
+...
+return raw_pos - READAHEAD(self);
+```
+
+### Lock-based thread safety
+
+Every public method acquires `self->lock` (a `PyThread_type_lock`) before mutating buffer state. The pattern is consistent: lock on entry, unlock on every exit path including errors.
+
+```c
+// CPython: Modules/_io/bufferedio.c:1063 bufferedreader_read
+ENTER_BUFFERED(self)
+res = _bufferedreader_read_generic(self, n);
+LEAVE_BUFFERED(self)
+```
+
+`ENTER_BUFFERED` calls `PyThread_acquire_lock` and sets `self->owner` to the current thread id. Recursive calls from the same thread detect the owner match and skip the acquire, making the methods re-entrant for internal use.
+
+## gopy notes
+
+Status: not yet ported.
+
+Planned package path: `module/io/`.
+
+The buffer can be a `[]byte` slice with two integer cursors. `_bufferedwriter_flush_locked` translates directly to a loop calling the raw stream's `Write` method. The lock wraps a `sync.Mutex`; the owner-thread re-entrancy trick is reproducible with a goroutine-id field. `BufferedRandom` composes reader and writer state into one struct, mirroring the C `buffered` union. Seek and tell require the raw stream to implement `io.Seeker`. The 8 KiB default buffer size is a constant in CPython and should be preserved for compatibility with code that inspects `buffer_size`.

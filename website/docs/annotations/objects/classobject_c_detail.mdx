@@ -1,0 +1,157 @@
+---
+title: Objects/classobject.c
+description: "Bound method, staticmethod, and classmethod descriptor implementations"
+cpython_path: Objects/classobject.c
+cpython_version: "3.14"
+lines: 600
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Objects/classobject.c" />
+
+## Map
+
+| Lines | Symbol | Purpose |
+|-------|--------|---------|
+| 1–60 | `PyMethod_New` | Allocate and initialise a bound method object |
+| 61–120 | `im_func` / `im_self` getters | Expose `__func__` and `__self__` attributes |
+| 121–220 | `method_call` | Prepend `self` to args tuple and forward to `tp_call` |
+| 221–300 | `method_getattro` | Descriptor access; falls through to `__func__` attrs |
+| 301–380 | `method_richcompare` | Equality by `(func, self)` pair |
+| 381–460 | `staticmethod_get` | Return the wrapped function unchanged (no binding) |
+| 461–540 | `classmethod_get` | Return a bound method with the class as first argument |
+| 541–600 | `PyClassMethod_New` / `PyStaticMethod_New` | Public factory functions |
+
+## Reading
+
+### PyMethod_New and im_func / im_self
+
+`PyMethod_New` is the single entry point for creating a bound method.
+It takes a callable and an instance, stores them in `im_func` and
+`im_self`, and returns a freshly allocated `PyMethodObject`. The
+allocator fast-paths through a free list to avoid repeated `malloc`
+pressure in tight call loops.
+
+```c
+// CPython: Objects/classobject.c:40 PyMethod_New
+PyObject *
+PyMethod_New(PyObject *func, PyObject *self)
+{
+    PyMethodObject *im;
+    if (self == NULL) {
+        PyErr_BadInternalCall();
+        return NULL;
+    }
+    im = free_list;
+    if (im != NULL) {
+        free_list = (PyMethodObject *)(im->im_self);
+        (void)PyObject_Init((PyObject *)im, &PyMethod_Type);
+    } else {
+        im = PyObject_GC_New(PyMethodObject, &PyMethod_Type);
+        if (im == NULL)
+            return NULL;
+    }
+    im->im_weakreflist = NULL;
+    im->im_func = Py_NewRef(func);
+    im->im_self = Py_NewRef(self);
+    PyObject_GC_Track(im);
+    return (PyObject *)im;
+}
+```
+
+The `im_func` and `im_self` getters are trivial one-liners; they exist
+so that Python-level code can read `method.__func__` and
+`method.__self__` without going through `__dict__`.
+
+### method_call dispatching to tp_call
+
+When a bound method is called, `method_call` builds a new argument tuple
+with `self` prepended, then forwards to the underlying function's
+`tp_call` slot. For the common case where the underlying callable is a
+Python function, CPython bypasses the tuple construction via
+`_PyFunction_Vectorcall`, but the general path is:
+
+```c
+// CPython: Objects/classobject.c:153 method_call
+static PyObject *
+method_call(PyObject *method, PyObject *args, PyObject *kwds)
+{
+    PyObject *self = PyMethod_GET_SELF(method);
+    PyObject *func = PyMethod_GET_FUNCTION(method);
+    PyObject *result;
+    Py_ssize_t nargs = PyTuple_GET_SIZE(args);
+
+    PyObject *newargs = PyTuple_New(nargs + 1);
+    if (newargs == NULL)
+        return NULL;
+    PyTuple_SET_ITEM(newargs, 0, Py_NewRef(self));
+    for (Py_ssize_t i = 0; i < nargs; i++)
+        PyTuple_SET_ITEM(newargs, i + 1,
+                         Py_NewRef(PyTuple_GET_ITEM(args, i)));
+    result = PyObject_Call(func, newargs, kwds);
+    Py_DECREF(newargs);
+    return result;
+}
+```
+
+`method_getattro` first checks the method object's own `tp_dict` for the
+attribute name; if not found, it delegates to `im_func` so that
+`method.some_attr` transparently returns `func.some_attr`.
+
+### staticmethod_get and classmethod_get
+
+`staticmethod_get` is the `tp_descr_get` slot for `staticmethod`. It
+ignores both the instance and the owner class and returns the wrapped
+callable unchanged. This lets `@staticmethod` functions be retrieved
+from either an instance or the class without binding.
+
+```c
+// CPython: Objects/classobject.c:415 staticmethod_get
+static PyObject *
+sm_descr_get(PyObject *self, PyObject *obj, PyObject *type)
+{
+    staticmethodobject *sm = (staticmethodobject *)self;
+    if (sm->sm_callable == NULL) {
+        PyErr_SetString(PyExc_RuntimeError,
+                        "uninitialized staticmethod object");
+        return NULL;
+    }
+    return Py_NewRef(sm->sm_callable);
+}
+```
+
+`classmethod_get` binds the class (owner) rather than the instance as
+the first argument. It calls `PyMethod_New(func, type)`, meaning the
+resulting bound method carries the class in `im_self`.
+
+```c
+// CPython: Objects/classobject.c:490 classmethod_get
+static PyObject *
+cm_descr_get(PyObject *self, PyObject *obj, PyObject *type)
+{
+    classmethodobject *cm = (classmethodobject *)self;
+    if (cm->cm_callable == NULL) {
+        PyErr_SetString(PyExc_RuntimeError,
+                        "uninitialized classmethod object");
+        return NULL;
+    }
+    if (type == NULL)
+        type = (PyObject *)(Py_TYPE(obj));
+    return PyMethod_New(cm->cm_callable, type);
+}
+```
+
+## gopy notes
+
+Status: not yet ported.
+
+Planned package path: `objects/` (files `method.go`, `usertype.go`).
+
+The repo already has `objects/method.go` and `objects/instance.go`. The
+bound-method free list is not planned for the initial port; the
+allocator will use standard Go allocation. `staticmethod` and
+`classmethod` descriptor logic is partially covered by
+`objects/descr.go` but `cm_descr_get` / `sm_descr_get` are not yet
+wired to the type's `TpDescrGet` slot.

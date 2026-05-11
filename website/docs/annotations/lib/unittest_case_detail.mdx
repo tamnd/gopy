@@ -1,41 +1,42 @@
 ---
-title: "Lib/unittest/case.py"
-description: "TestCase class, assertion family, skip decorators, subTest context manager, and the _Outcome accumulator"
+title: Lib/unittest/case.py
+description: "Annotation: Lib/unittest/case.py"
 cpython_path: Lib/unittest/case.py
 cpython_version: "3.14"
-lines: 1628
+lines: 1600
 status: annotated
 ---
 
 import {Cpy, CpyLink} from '@site/src/components/Cpy';
 
-`Lib/unittest/case.py` is the largest file in the unittest package. It defines
-`TestCase`, the base class every test suite subclasses, along with the full
-assertion library, skip decorators, `subTest`, and the internal `_Outcome`
-object that accumulates per-method results.
+<CpyLink path="Lib/unittest/case.py" />
+
+`Lib/unittest/case.py` is the largest file in the unittest package. It defines `TestCase`, the base class every test suite subclasses, along with the full assertion library, skip decorators, `subTest`, and the internal `_Outcome` object that accumulates per-method results.
 
 ## Map
 
 | Lines | Symbol | Role |
 |-------|--------|------|
-| 26–32 | `SkipTest` | Exception raised by skip decorators and `skipTest()` |
-| 34–37 | `_ShouldStop` | Internal signal to abort a test run |
-| 39–42 | `_UnexpectedSuccess` | Raised when `@expectedFailure` test passes |
-| 45–83 | `_Outcome` | Accumulates success/failure/skip state for one test method |
-| 86–100 | `_addSkip`, `_addError` | Module-level helpers called from `_Outcome.testPartExecutor` |
-| 157–195 | `skip`, `skipIf`, `skipUnless`, `expectedFailure` | Public decorators |
-| 253–289 | `_AssertRaisesContext` | Context manager backing `assertRaises` |
-| 371–end | `TestCase` | Main test case class |
-| 420–451 | `TestCase.__init__` | Registers type-equality functions |
-| 494–500 | `setUp`, `tearDown` | Override hooks |
-| 546–575 | `subTest` | Context manager for parameterized sub-cases |
-| 634–697 | `run` | Full test execution lifecycle |
-| 785–816 | `assertRaises` | Raises-assertion entry point |
-| 752–783 | `assertFalse`, `assertTrue`, `_formatMessage` | Core boolean assertions |
+| 26-32 | `SkipTest` | Exception raised by skip decorators and `skipTest()` |
+| 34-37 | `_ShouldStop` | Internal signal to abort a test run |
+| 39-42 | `_UnexpectedSuccess` | Raised when an `@expectedFailure` test passes |
+| 45-83 | `_Outcome` | Accumulates success/failure/skip state for one test method |
+| 86-100 | `_addSkip`, `_addError` | Module-level helpers called from `testPartExecutor` |
+| 157-195 | `skip`, `skipIf`, `skipUnless`, `expectedFailure` | Public decorators |
+| 253-289 | `_AssertRaisesContext` | Context manager backing `assertRaises` |
+| 371-end | `TestCase` | Main test case class |
+| 420-451 | `TestCase.__init__` | Registers type-equality functions in `_type_equality_funcs` |
+| 494-500 | `setUp`, `tearDown` | Override hooks called before and after each test method |
+| 546-575 | `subTest` | Context manager for parameterized sub-cases |
+| 634-697 | `run` | Full test execution lifecycle |
+| 785-816 | `assertRaises` | Raises-assertion entry point (call form and context-manager form) |
+| 752-783 | `assertTrue`, `assertFalse`, `_formatMessage` | Core boolean assertions |
 
 ## Reading
 
 ### `_Outcome` and `testPartExecutor`
+
+`_Outcome` is a private accumulator. One instance is created per call to `TestCase.run()`. The `testPartExecutor` context manager wraps each phase (setUp, the test method, tearDown) and routes exceptions to the appropriate `result.addXxx` method.
 
 ```python
 # CPython: Lib/unittest/case.py:45 _Outcome
@@ -78,13 +79,11 @@ class _Outcome(object):
             self.success = self.success and old_success
 ```
 
-`_Outcome` is a private accumulator. One instance is created per call to
-`TestCase.run()`. The `testPartExecutor` context manager wraps each phase
-(setUp, the test method, tearDown) and routes exceptions to the right
-`result.addXxx` method. The `old_success` save-and-restore lets tearDown
-failures mark the test failed even if setUp succeeded.
+The `old_success` save-and-restore pattern means that a tearDown failure marks the test failed even if setUp and the method both succeeded. `KeyboardInterrupt` is re-raised unconditionally so Ctrl-C always aborts the run.
 
 ### `TestCase.run` lifecycle
+
+The three phases (setUp, method, tearDown) are each wrapped by `testPartExecutor`. If setUp fails, the method and tearDown are skipped, but `doCleanups` always runs. The `expecting_failure` flag is toggled only around the method call, so a failure in setUp is never silenced as an expected failure.
 
 ```python
 # CPython: Lib/unittest/case.py:634 TestCase.run
@@ -92,7 +91,6 @@ def run(self, result=None):
     ...
     result.startTest(self)
     try:
-        ...
         outcome = _Outcome(result)
         try:
             self._outcome = outcome
@@ -106,7 +104,6 @@ def run(self, result=None):
                 with outcome.testPartExecutor(self):
                     self._callTearDown()
             self.doCleanups()
-            ...
             if outcome.success:
                 if expecting_failure:
                     if outcome.expectedFailure:
@@ -124,80 +121,58 @@ def run(self, result=None):
         result.stopTest(self)
 ```
 
-The three phases (setUp, method, tearDown) are each wrapped by
-`testPartExecutor`. If setUp fails, the method and tearDown are skipped, but
-`doCleanups` always runs. The `expecting_failure` flag is toggled around the
-method call only, so a failure in setUp is never treated as an expected failure.
+`_callTestMethod` was promoted to its own override hook in CPython 3.14 (previously inlined). Async subclasses override just that step to run the coroutine through an event loop.
 
-### `subTest` context manager
+### `assertEqual` dispatch via `_type_equality_funcs`
+
+`TestCase.__init__` registers type-specific equality functions in a dict keyed by type. `assertEqual` looks up the types of both operands and, if a specialized function exists, calls it to produce a richer failure message.
 
 ```python
-# CPython: Lib/unittest/case.py:546 TestCase.subTest
-@contextlib.contextmanager
-def subTest(self, msg=_subtest_msg_sentinel, **params):
-    if self._outcome is None or not self._outcome.result_supports_subtests:
-        yield
-        return
-    parent = self._subtest
-    if parent is None:
-        params_map = _OrderedChainMap(params)
-    else:
-        params_map = parent.params.new_child(params)
-    self._subtest = _SubTest(self, msg, params_map)
+# CPython: Lib/unittest/case.py:420 TestCase.__init__
+self._type_equality_funcs = {}
+self.addTypeEqualityFunc(dict, 'assertDictEqual')
+self.addTypeEqualityFunc(list, 'assertListEqual')
+self.addTypeEqualityFunc(tuple, 'assertTupleEqual')
+self.addTypeEqualityFunc(set, 'assertSetEqual')
+self.addTypeEqualityFunc(frozenset, 'assertSetEqual')
+self.addTypeEqualityFunc(str, 'assertMultiLineEqual')
+```
+
+The values are method name strings rather than bound methods so that subclasses can override the individual assertXxxEqual methods without re-registering the types.
+
+### `assertRaises` as call form and context manager
+
+`assertRaises` is overloaded. With a callable argument it calls immediately and checks for the exception. Without a callable it returns an `_AssertRaisesContext` instance for use in a `with` block.
+
+```python
+# CPython: Lib/unittest/case.py:785 assertRaises
+def assertRaises(self, expected_exception, *args, **kwargs):
+    context = _AssertRaisesContext(expected_exception, self)
     try:
-        with self._outcome.testPartExecutor(self._subtest, subTest=True):
-            yield
-        ...
-    finally:
-        self._subtest = parent
+        return context.handle('assertRaises', args, kwargs)
+    except:
+        raise
 ```
 
-`subTest` allows multiple independent assertions within one test method. Each
-sub-test gets its own `_SubTest` instance. Failures are reported individually
-but do not abort the enclosing test method. If `result` does not implement
-`addSubTest`, the whole block degrades to a no-op yield.
+`_AssertRaisesContext.handle` inspects `args`: if a callable was passed it calls it inside `testPartExecutor` and returns; otherwise it returns `self` so the caller can use it as a context manager. Both forms set `context.exception` on success so tests can inspect the caught exception.
 
-### Skip decorators
+### `setUp`, `tearDown`, and `addCleanup`
+
+`setUp` and `tearDown` are empty hooks that subclasses override. `addCleanup` pushes callables onto `self._cleanups`, a stack that `doCleanups` drains in LIFO order after tearDown regardless of test outcome.
 
 ```python
-# CPython: Lib/unittest/case.py:157 skip
-def skip(reason):
-    def decorator(test_item):
-        if not isinstance(test_item, type):
-            @functools.wraps(test_item)
-            def skip_wrapper(*args, **kwargs):
-                raise SkipTest(reason)
-            test_item = skip_wrapper
-        test_item.__unittest_skip__ = True
-        test_item.__unittest_skip_why__ = reason
-        return test_item
-    if isinstance(reason, types.FunctionType):
-        test_item = reason
-        reason = ''
-        return decorator(test_item)
-    return decorator
-```
+# CPython: Lib/unittest/case.py:494 setUp
+def setUp(self):
+    "Hook method for setting up the test fixture before exercising it."
 
-`skip` can be used as `@skip("reason")` or bare `@skip`. The bare form is
-detected by checking whether `reason` is a function. The `__unittest_skip__`
-attribute is read by `TestCase.run` at line 648 before the lifecycle begins.
+def tearDown(self):
+    "Hook method for deconstructing the test fixture after testing it."
+```
 
 ## gopy notes
 
-The `_Outcome` accumulator is a central porting target. gopy needs an
-equivalent Go struct that holds success state and routes panics or returned
-errors to `TestResult`. The `testPartExecutor` wrapping pattern maps onto
-a Go `defer`-based recovery block, but the `subTest` nesting (via `_subtest`
-pointer and `_OrderedChainMap`) requires a linked-list of sub-test contexts.
+Status: not yet ported.
 
-The `__unittest_skip__` attribute protocol is a good candidate for a Go
-interface method rather than an attribute check, since Go has no
-`getattr`-style dynamic dispatch.
+Planned package path: `module/unittest/`.
 
-## CPython 3.14 changes
-
-3.14 added `_callTestMethod` at line 614 as a proper override hook (previously
-it was inlined). This lets async subclasses override just that step.
-`_AssertNotWarnsContext` was added in 3.13 and is present here unchanged.
-The `@skip` decorator gained bare-decorator support (no parentheses) in 3.12
-and is unchanged in 3.14.
+`_Outcome` is the central porting target. A Go equivalent is a struct holding a success flag and a pointer to the current `TestResult`. The `testPartExecutor` wrapping maps onto a deferred recovery block, though the `subTest` nesting (via `_subtest` pointer and `_OrderedChainMap`) requires a linked list of sub-test contexts. The `__unittest_skip__` attribute protocol is a good candidate for a Go interface method rather than a dynamic attribute check.

@@ -1,0 +1,154 @@
+---
+title: Include/internal/pycore_pystate.h
+description: "Internal thread-state header: _PyThreadState layout, eval_breaker, tracing hooks, and _PyErr_StackItem exception chain"
+cpython_path: Include/internal/pycore_pystate.h
+cpython_version: "3.14"
+lines: 220
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Include/internal/pycore_pystate.h" />
+
+`Include/internal/pycore_pystate.h` is the private companion to the public `Include/cpython/pystate.h`. It exposes the full field layout of `_PyThreadState` and the inline accessors that the eval loop and the GIL machinery use. Extension code should never include this file directly.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1–30 | file prologue | Guard macros, includes of `pycore_runtime.h`, `pycore_frame.h` |
+| 31–55 | `_PyThreadState_GET()` | Inline accessor returning the current thread state from TLS |
+| 56–85 | `_PyThreadState` layout (links) | `prev`, `next`, `interp` fields forming the per-interpreter thread list |
+| 86–115 | Frame and stack fields | `current_frame`, `datastack_chunk`, `datastack_top`, `datastack_limit` |
+| 116–145 | Exception state | `exc_info` inline node and `exc_state` pointer to the active `_PyErr_StackItem` |
+| 146–172 | Tracing fields | `c_tracefunc`, `c_profilefunc`, `c_traceobj`, `c_profileobj`, `tracing` |
+| 173–198 | Eval-breaker and pending | `eval_breaker` bitmask, `_py_trampoline_runpy_frame` |
+| 199–220 | `PyThreadState_EnterTracing` / `LeaveTracing` | Inline helpers that increment and decrement the tracing depth counter |
+
+## Reading
+
+### `_PyThreadState_GET`: fast TLS access
+
+The macro expands to a platform-specific thread-local read. On most platforms it compiles to a single load from a TLS slot; on others it calls `_PyThreadState_GetCurrent()`.
+
+```c
+// CPython: Include/internal/pycore_pystate.h:38 _PyThreadState_GET
+static inline PyThreadState *
+_PyThreadState_GET(void)
+{
+#ifdef HAVE_THREAD_LOCAL
+    return _Py_tss_tstate;
+#else
+    return _PyThreadState_GetCurrent();
+#endif
+}
+```
+
+The result is used at the top of the eval loop, in exception machinery, and anywhere that needs the current frame without going through a function argument. In free-threading builds the TLS variable is always present; in the main-thread-only build it falls back to a global.
+
+### Thread-state links and the interpreter pointer
+
+Every `_PyThreadState` belongs to exactly one interpreter and lives on a doubly-linked list rooted at `interp->threads.head`.
+
+```c
+// CPython: Include/internal/pycore_pystate.h:58 _PyThreadState links
+struct _ts {
+    struct _ts *prev;
+    struct _ts *next;
+    PyInterpreterState *interp;
+
+    /* current executing frame */
+    struct _PyInterpreterFrame *current_frame;
+    /* ... */
+};
+```
+
+`prev` and `next` are protected by `HEAD_LOCK(runtime)`. The list is traversed during interpreter finalisation to signal all threads to exit and during `sys._current_frames()` to snapshot each thread's top frame.
+
+### Frame and data-stack fields
+
+CPython 3.11 introduced a contiguous C stack for frame data. The thread state owns the stack via three pointers.
+
+```c
+// CPython: Include/internal/pycore_pystate.h:91 datastack fields
+    _PyStackChunk *datastack_chunk;     /* current allocation chunk */
+    PyObject    **datastack_top;        /* next free slot */
+    PyObject    **datastack_limit;      /* end of current chunk */
+```
+
+When `datastack_top` reaches `datastack_limit`, a new chunk is allocated and linked from `datastack_chunk`. Frame objects are carved out of this contiguous region, which eliminates per-frame `malloc` calls on the critical path.
+
+### `exc_info` and the `_PyErr_StackItem` chain
+
+Each `try` block pushes one `_PyErr_StackItem` onto the thread's exception stack. The inline `exc_info` node holds the outermost active exception; deeper handlers grow a singly-linked list through `previous_item`.
+
+```c
+// CPython: Include/internal/pycore_pystate.h:119 exc_info
+    _PyErr_StackItem  exc_info;      /* base node for the exception chain */
+    _PyErr_StackItem *exc_state;     /* pointer to the innermost active item */
+```
+
+`_PyErr_StackItem` is defined in the public header as:
+
+```c
+// CPython: Include/cpython/pystate.h:57 _PyErr_StackItem
+typedef struct _PyErr_StackItem {
+    PyObject                *exc_value;
+    struct _PyErr_StackItem *previous_item;
+} _PyErr_StackItem;
+```
+
+`exc_value` holds the live exception object (or `NULL` when none is active). The single-object design replaced the older `(type, value, traceback)` triple in 3.11; `exc_value` always carries a normalised exception instance that embeds its own traceback.
+
+### Tracing fields and `PyThreadState_EnterTracing`
+
+The `c_tracefunc` and `c_profilefunc` slots hold the C-level callbacks registered by `sys.settrace` and `sys.setprofile`. The `tracing` counter tracks how deeply nested the tracer is to suppress re-entrant trace calls.
+
+```c
+// CPython: Include/internal/pycore_pystate.h:148 tracing fields
+    Py_tracefunc  c_tracefunc;
+    Py_tracefunc  c_profilefunc;
+    PyObject     *c_traceobj;
+    PyObject     *c_profileobj;
+    int           tracing;        /* > 0: inside a trace/profile call */
+    int           tracing_what;   /* bitmask of active event types */
+```
+
+`PyThreadState_EnterTracing` and `PyThreadState_LeaveTracing` are the RAII-style helpers that increment and decrement `tracing`:
+
+```c
+// CPython: Include/internal/pycore_pystate.h:205 PyThreadState_EnterTracing
+static inline void
+PyThreadState_EnterTracing(PyThreadState *tstate)
+{
+    tstate->tracing++;
+    tstate->tracing_what = 0;
+}
+
+// CPython: Include/internal/pycore_pystate.h:212 PyThreadState_LeaveTracing
+static inline void
+PyThreadState_LeaveTracing(PyThreadState *tstate)
+{
+    tstate->tracing--;
+}
+```
+
+### `eval_breaker`: the async interrupt mechanism
+
+`eval_breaker` is a bitmask tested at every backward branch and function entry in the eval loop. Any subsystem that needs to interrupt the running thread (signal delivery, GIL release, pending calls) sets one or more bits atomically.
+
+```c
+// CPython: Include/internal/pycore_pystate.h:176 eval_breaker
+    uintptr_t eval_breaker;
+```
+
+The macro `_Py_HandlePending(tstate)` is called when the loop detects a non-zero value and dispatches to the appropriate handler for each set bit. In 3.14, `eval_breaker` moved into `_PyThreadState` (from the per-interpreter `ceval` substructure) so that each thread can be interrupted independently in free-threading builds.
+
+## gopy notes
+
+Status: not yet ported.
+
+Planned package path: `vm/tstate.go`.
+
+`_PyThreadState` maps conceptually to the `EvalContext` struct in `vm/eval_gen.go`. The `current_frame` field corresponds to the frame pointer threaded through gopy's eval functions as a Go argument. The `exc_info` / `exc_state` chain is replicated in `objects/` as a linked-list node via `ExcInfo` in `vm/eval_unwind.go`. The `eval_breaker` bitmask is the highest-priority piece because the eval loop in `vm/eval_gen.go` already performs interrupt checks on backward branches. The tracing callbacks (`c_tracefunc`, `c_profilefunc`) are deferred until a tracing milestone; the `tracing` counter needs a stub so that recursive-trace suppression works when tracing is eventually added.

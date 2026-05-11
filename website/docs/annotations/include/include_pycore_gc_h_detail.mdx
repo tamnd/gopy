@@ -1,0 +1,111 @@
+---
+title: Include/internal/pycore_gc.h
+description: "Internal GC header: PyGC_Head doubly-linked node, generation structs, tracking macros, and finalization flags"
+cpython_path: Include/internal/pycore_gc.h
+cpython_version: "3.14"
+lines: 180
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Include/internal/pycore_gc.h" />
+
+`Include/internal/pycore_gc.h` is the private header that defines the bookkeeping layer the cyclic garbage collector attaches to every tracked heap object. The public allocation API lives in `Include/cpython/objimpl.h`; this file is the part that extension code is not permitted to touch directly.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1–28 | file prologue | Guard macros, includes of `pycore_runtime.h` and `object.h` |
+| 29–52 | `PyGC_Head` | Two-word struct prepended before every tracked `PyObject` |
+| 53–78 | `_PyGCHead_PREV` / `_PyGCHead_NEXT` | Accessor macros that strip tag bits from the low pointer word |
+| 79–100 | `_PyGC_PREV_MASK_FINALIZED`, `_PyGC_PREV_MASK_COLLECTING` | Tag-bit constants packed into the low two bits of `_gc_prev` |
+| 101–122 | `_PyGC_generation` struct | Per-generation sentinel head node, threshold, and count |
+| 123–145 | `_PyObject_GC_IS_TRACKED` | Tests whether an object is on any generation list |
+| 146–165 | `Py_TPFLAGS_HAVE_GC` | Type-flag bit that signals a type participates in GC |
+| 166–180 | `_PyGCHead_SET_FINALIZED` / `_PyGCHead_FINALIZED` | Mark and query the finalized-flag bit in `_gc_prev` |
+
+## Reading
+
+### PyGC_Head: the hidden prefix
+
+Every object allocated with `PyObject_GC_New` receives a `PyGC_Head` placed immediately before the visible `PyObject` header. The two fields form a doubly-linked intrusive list that the collector walks during each generation sweep.
+
+```c
+// CPython: Include/internal/pycore_gc.h:29 PyGC_Head
+typedef struct {
+    uintptr_t _gc_next;
+    uintptr_t _gc_prev;
+} PyGC_Head;
+```
+
+`uintptr_t` is used instead of a typed pointer so that the implementation can pack status bits into the low bits of each word without invoking undefined behaviour from strict-aliasing rules. The macro `_Py_AS_GC(op)` recovers the `PyGC_Head *` from any `PyObject *` by subtracting `sizeof(PyGC_Head)`.
+
+### Tag-bit encoding and the PREV/NEXT macros
+
+The low two bits of `_gc_prev` carry flags. Bit 0 (`PREV_MASK_FINALIZED`) marks an object whose `tp_finalize` slot has already been called in the current collection. Bit 1 (`PREV_MASK_COLLECTING`) marks an object that is inside an active collection pass. Real pointer values are recovered by masking those bits off with `_PyGC_PREV_MASK` (`~0x3UL`).
+
+```c
+// CPython: Include/internal/pycore_gc.h:55 _PyGCHead_PREV
+#define _PyGCHead_PREV(g) \
+    ((PyGC_Head*)((g)->_gc_prev & _PyGC_PREV_MASK))
+
+// CPython: Include/internal/pycore_gc.h:60 _PyGCHead_SET_PREV
+#define _PyGCHead_SET_PREV(g, p) \
+    do { (g)->_gc_prev = ((g)->_gc_prev & ~_PyGC_PREV_MASK) \
+                         | ((uintptr_t)(p)); } while (0)
+```
+
+`_PyGCHead_NEXT` is simpler: `_gc_next` carries no tag bits in the current implementation, so it is cast directly.
+
+### Generation struct and thresholds
+
+The collector maintains three generations. Each is represented by a `_PyGC_generation` containing a sentinel `PyGC_Head` node (the list head) and two integers for the collection threshold and running count.
+
+```c
+// CPython: Include/internal/pycore_gc.h:101 _PyGC_generation
+struct _PyGC_generation {
+    PyGC_Head head;   /* sentinel; _gc_next points to first object */
+    int threshold;    /* collect when count exceeds this */
+    int count;        /* objects allocated since last collection */
+};
+```
+
+When an object is allocated via `_PyObject_GC_New`, `generation0.count` is incremented. Once it exceeds `generation0.threshold`, a collection is triggered. After `threshold[1]` generation-0 sweeps, generation 1 is promoted into the sweep as well, and so on up to generation 2.
+
+### `_PyObject_GC_IS_TRACKED`
+
+This macro tests whether an object already lives on a generation list, primarily to guard against double-tracking bugs during allocation.
+
+```c
+// CPython: Include/internal/pycore_gc.h:128 _PyObject_GC_IS_TRACKED
+#define _PyObject_GC_IS_TRACKED(o) \
+    (_Py_AS_GC(o)->_gc_bits != 0)
+```
+
+In 3.14 the field name was briefly `_gc_bits` in the incremental-GC prototype before stabilising. The semantic check is: a zero `_gc_next` word means the object is not linked into any list.
+
+### `_PyGCHead_SET_FINALIZED` and the finalized flag
+
+After `tp_finalize` runs on an unreachable object, `_PyGCHead_SET_FINALIZED` stamps bit 0 of `_gc_prev` so that a subsequent collection pass does not call the finalizer a second time.
+
+```c
+// CPython: Include/internal/pycore_gc.h:168 _PyGCHead_SET_FINALIZED
+#define _PyGCHead_SET_FINALIZED(g) \
+    ((g)->_gc_prev |= _PyGC_PREV_MASK_FINALIZED)
+
+// CPython: Include/internal/pycore_gc.h:172 _PyGCHead_FINALIZED
+#define _PyGCHead_FINALIZED(g) \
+    (((g)->_gc_prev & _PyGC_PREV_MASK_FINALIZED) != 0)
+```
+
+`Py_TPFLAGS_HAVE_GC` (bit 14 of `tp_flags`) is the type-level gate. The collector only appends objects whose type carries this flag to the generation lists. Types that cannot form cycles (integers, bytes, most immutable objects) omit the flag and are never tracked.
+
+## gopy notes
+
+Status: not yet ported.
+
+Planned package path: `objects/gc.go` (tracking helpers) and `vm/gc.go` (generation driver).
+
+gopy delegates memory management to the Go runtime and therefore has no direct equivalent of `PyGC_Head`. The `_PyObject_GC_TRACK` / `_PyObject_GC_UNTRACK` call sites in CPython allocation paths are omitted or replaced with no-ops during porting. If Python-level `__del__` ordering around reference cycles becomes necessary in a later milestone, the planned approach is a pure-Go reachability pass over the `objects.Object` graph rather than a port of this header. The `_PyGCHead_SET_FINALIZED` semantics do need a partial equivalent because gopy must avoid double-calling `__del__` on objects that are resurrected during finalization.
