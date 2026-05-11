@@ -1,0 +1,102 @@
+---
+title: "_posixsubprocess.c"
+description: "Low-level fork-exec helper for subprocess.py: fd cleanup, exec, and vfork fast path"
+cpython_path: Modules/_posixsubprocess.c
+cpython_version: "3.14"
+lines: 1200
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`Modules/_posixsubprocess.c` is the C underpinning of `subprocess.Popen` on POSIX. It handles everything between `fork()` and `execve()` in the child process, a span where Python's GC and allocator must not be touched.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1–80 | includes, constants | platform guards, `POSIX_SPAWN_*` |
+| 81–200 | `_Py_open_cloexec_noinherit` helpers | fd-flag utilities |
+| 201–380 | `close_fds_by_brute_force` | iterate 0..maxfd and close each |
+| 381–480 | `close_fds_by_proc_self_fd` | scan `/proc/self/fd` entries instead |
+| 481–560 | `child_exec` | core child body: dup2 pipes, setsid, exec |
+| 561–700 | `subprocess_fork_exec_impl` | Python-visible entry point, fork path |
+| 701–820 | vfork / `posix_spawn` fast path | exec-only case without full fork overhead |
+| 821–1000 | error pipe protocol | child reports errno back through a pipe |
+| 1001–1200 | method table, `PyModuleDef` | module plumbing |
+
+## Reading
+
+### The error pipe protocol
+
+Before forking, `subprocess_fork_exec_impl` creates a `CLOEXEC` pipe. In the child, any error writes `(errno, function_index)` as two `int`s to the write end and then calls `_exit`. In the parent, after `waitpid`, a non-empty read from the read end means the child failed; the errno is re-raised as `OSError`.
+
+```c
+// CPython: Modules/_posixsubprocess.c:601 subprocess_fork_exec_impl
+if (pipe2(errpipe, O_CLOEXEC) != 0) { ... }
+...
+child_pid = fork();
+if (child_pid == 0) {
+    close(errpipe[0]);
+    child_exec(exec_array, argv, envp, cwd,
+               p2cread, p2cwrite, c2pread,
+               c2pwrite, errread, errwrite,
+               errpipe[1], ...);
+    _exit(255); /* unreachable */
+}
+```
+
+### Closing file descriptors in the child
+
+Two strategies exist. `close_fds_by_brute_force` iterates from 3 to `max_fd` and closes every descriptor not in the `py_fds_to_keep` sorted tuple. On Linux, if `/proc/self/fd` is readable, `close_fds_by_proc_self_fd` opens that directory with `opendir` and reads only the fds that actually exist, which is faster for processes with a high `RLIMIT_NOFILE`.
+
+```c
+// CPython: Modules/_posixsubprocess.c:310 close_fds_by_brute_force
+for (i = start_fd; i < end_fd; ++i) {
+    if (Py_IsNone(PySequence_Fast_GET_ITEM(py_fds_to_keep, keep_seq_idx))) break;
+    if (i == keep_fd) { ++keep_seq_idx; continue; }
+    while (close(i) < 0 && errno == EINTR) ;
+}
+```
+
+### Setting up pipe redirections in `child_exec`
+
+`child_exec` uses `dup2` to map the caller-supplied read/write ends of the stdin, stdout, and stderr pipes onto fd 0, 1, 2. It checks each dup2 call and writes the errno to the error pipe on failure.
+
+```c
+// CPython: Modules/_posixsubprocess.c:503 child_exec
+POSIX_CALL(dup2(p2cread,  0));  /* stdin  */
+POSIX_CALL(dup2(c2pwrite, 1));  /* stdout */
+POSIX_CALL(dup2(errwrite, 2));  /* stderr */
+if (setsid_requested) POSIX_CALL(setsid());
+POSIX_CALL(execve(exec_name, argv, envp));
+```
+
+### vfork fast path
+
+When no fd manipulation, `cwd` change, or `preexec_fn` is needed, `subprocess_fork_exec_impl` may call `vfork` (or `posix_spawn` on platforms without `vfork`). The child address space is shared with the parent, so only async-signal-safe functions are called before `execve`. Python 3.9 made vfork opt-in; 3.14 still uses it but only when the caller sets `close_fds=False` and passes no extra configuration.
+
+```c
+// CPython: Modules/_posixsubprocess.c:743 subprocess_fork_exec_impl
+if (use_vfork) {
+    child_pid = vfork();
+    if (child_pid == 0) {
+        execve(exec_array[0], argv, envp);
+        _exit(127);
+    }
+}
+```
+
+## gopy notes
+
+- The error pipe is the single most important invariant to replicate. Any Go port of `subprocess.Popen` must implement the same `(errno, funcid)` protocol to surface child-side failures.
+- `close_fds_by_proc_self_fd` reads a Linux-specific procfs path. A Go port should gate this on `runtime.GOOS == "linux"` and fall back to brute force elsewhere.
+- `child_exec` must not call any Go runtime function after `fork()`. Use `syscall.RawSyscall` or the `syscall.ForkExec` family, which already implements most of this logic.
+- `setsid` is called unconditionally when `start_new_session=True`; ensure the Go side maps that argument correctly before exec.
+
+## CPython 3.14 changes
+
+- 3.9 introduced the vfork fast path behind an internal flag; before that every `Popen` used a full `fork`.
+- 3.12 added `/proc/self/fd` scanning on Linux to replace brute-force fd closing, cutting startup time for processes with large `RLIMIT_NOFILE`.
+- 3.13 fixed a race where the error pipe write end was not closed in the parent before reading, causing the parent to block if the child inherited it.
+- 3.14 renames the internal `_posixsubprocess` module to remain private (`_Py_...` prefix on exported symbols) and tightens `O_CLOEXEC` enforcement on all internally opened fds.

@@ -1,0 +1,115 @@
+---
+title: abstract.h (cpython/)
+description: "CPython-internal abstract protocol extensions: vectorcall, fast-call, and result validation"
+cpython_path: Include/cpython/abstract.h
+cpython_version: "3.14"
+lines: 150
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`Include/cpython/abstract.h` extends the public `Include/abstract.h` with declarations
+reserved for CPython's own C code and for embedding applications that opt into the
+internal ABI. The central theme is **vectorcall** (PEP 590): a calling convention that
+passes arguments as a C array instead of a Python tuple, cutting allocation overhead on
+every Python-to-Python and Python-to-C call.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 20–40 | `_PyObject_Vectorcall` | PEP 590 core dispatcher; routes to `tp_vectorcall` or falls back |
+| 42–55 | `PyVectorcall_Call` | Converts a `(args, kwargs)` pair into a vectorcall |
+| 57–70 | `_PyObject_FastCallDict` | Positional array plus optional kwargs dict, no tuple |
+| 72–88 | `_PyObject_CallMethodIdOneArg` | One-arg method call via deprecated `_Py_Identifier` |
+| 90–105 | `_PyObject_CallMethodIdObjArgs` | Varargs method call via `_Py_Identifier` |
+| 107–120 | `_Py_CheckFunctionResult` | Validates that a callable returned exactly one of: value or exception |
+
+## Reading
+
+### Vectorcall dispatch
+
+`_PyObject_Vectorcall` is the lowest-cost general call path. Callers pass a pointer to
+the first argument in a C array, the count encoded with the `PY_VECTORCALL_ARGUMENTS_OFFSET`
+flag, and an optional tuple of keyword names.
+
+```c
+// CPython: Include/cpython/abstract.h:22 _PyObject_Vectorcall
+static inline PyObject *
+_PyObject_Vectorcall(PyObject *callable,
+                     PyObject *const *args,
+                     size_t nargsf,
+                     PyObject *kwnames);
+```
+
+When `callable` has `Py_TPFLAGS_HAVE_VECTORCALL` set and `tp_vectorcall_offset` is
+non-zero, the call is dispatched through the slot with zero heap allocation. Otherwise it
+falls back to `PyObject_Call` which must build a tuple.
+
+### Converting a classic call to vectorcall
+
+`PyVectorcall_Call` goes the other direction: it takes the `(args_tuple, kwargs_dict)`
+pair that `PyObject_Call` provides and feeds it to a vectorcall-capable callable without
+re-wrapping in another tuple.
+
+```c
+// CPython: Include/cpython/abstract.h:42 PyVectorcall_Call
+PyAPI_FUNC(PyObject *) PyVectorcall_Call(PyObject *callable,
+                                         PyObject *tuple,
+                                         PyObject *dict);
+```
+
+### Fast-call with a keyword dict
+
+`_PyObject_FastCallDict` is the bridge used by `functools` and `inspect` internals where
+the keyword arguments are already in a dict rather than a names-tuple.
+
+```c
+// CPython: Include/cpython/abstract.h:57 _PyObject_FastCallDict
+PyObject *
+_PyObject_FastCallDict(PyObject *callable,
+                       PyObject *const *args, size_t nargsf,
+                       PyObject *kwargs);
+```
+
+### Return-value validation
+
+`_Py_CheckFunctionResult` enforces the invariant that every callable either returns a
+non-NULL object with no exception set, or returns NULL with exactly one exception set.
+Any other combination indicates a bug in the callable's C code.
+
+```c
+// CPython: Include/cpython/abstract.h:107 _Py_CheckFunctionResult
+PyObject *
+_Py_CheckFunctionResult(PyThreadState *tstate,
+                        PyObject *callable,
+                        PyObject *result,
+                        const char *where);
+```
+
+Passing a non-NULL `callable` causes the error message to name the callable; passing NULL
+uses the `where` string instead (useful for slot wrappers that have no Python object).
+
+## gopy notes
+
+- `_PyObject_Vectorcall` is the model for `vm.VectorCall` in `vm/eval_call.go`. gopy
+  checks `tp_vectorcall_offset` via the `VectorcallOffset` field on `TypeObject`.
+- `_Py_CheckFunctionResult` has a direct equivalent in `objects/protocol.go` as
+  `CheckFunctionResult`; the semantics match except gopy uses Go error values rather than
+  the thread-state exception slot.
+- `_PyObject_CallMethodIdOneArg` and `_PyObject_CallMethodIdObjArgs` use `_Py_Identifier`
+  which is deprecated in 3.12+. gopy skips `_Py_Identifier` and calls method lookup
+  directly by interned string.
+- `_PyObject_FastCallDict` is not yet a distinct symbol in gopy; call sites use
+  `VectorCall` with a manual keyword expansion.
+
+## CPython 3.14 changes
+
+- `_PyObject_CallMethodIdOneArg` and `_PyObject_CallMethodIdObjArgs` are retained for
+  backward compatibility but marked deprecated in 3.13 and will be removed in 3.15. New
+  internal code uses `PyObject_CallMethodOneArg` instead.
+- The `PY_VECTORCALL_ARGUMENTS_OFFSET` flag was stabilized as a public constant in 3.12;
+  `_PyObject_Vectorcall` itself remains in the cpython/ tier in 3.14.
+- `_Py_CheckFunctionResult` gained the `PyThreadState` parameter in 3.11 to remove the
+  implicit `_PyThreadState_GET()` call from hot paths.

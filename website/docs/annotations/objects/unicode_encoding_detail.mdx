@@ -1,0 +1,161 @@
+---
+title: "Objects/unicodeobject.c — encoding section"
+description: "Annotation of the encoding and decoding functions in CPython's Unicode object implementation"
+cpython_path: Objects/unicodeobject.c
+cpython_version: "3.14"
+lines: 15000
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+CPython's `unicodeobject.c` is one of the largest files in the runtime. This page covers the encoding and decoding surface: how a Python `str` becomes `bytes` and vice versa.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| ~4100 | `PyUnicode_AsEncodedString` | Top-level encode dispatch; calls codec registry |
+| ~4300 | `PyUnicode_EncodeUTF8` | Encode str to UTF-8 bytes object |
+| ~4450 | `_PyUnicode_AsUTF8AndSize` | Return cached UTF-8 view; fills `utf8_cache` |
+| ~5200 | `PyUnicode_DecodeUTF8Stateful` | Incremental UTF-8 decode with surrogate support |
+| ~6100 | `PyUnicode_AsASCIIString` | Strict ASCII encode; raises on non-ASCII |
+| ~6400 | `PyUnicode_FromEncodedObject` | Decode bytes-like via `__bytes__` protocol |
+
+## Reading
+
+### PyUnicode_AsEncodedString
+
+`PyUnicode_AsEncodedString` is the central dispatch point for all `str.encode()` calls. It resolves the codec name, looks it up in the codec registry, and calls the encode function.
+
+```c
+// CPython: Objects/unicodeobject.c:4102 PyUnicode_AsEncodedString
+PyObject *
+PyUnicode_AsEncodedString(PyObject *unicode,
+                          const char *encoding,
+                          const char *errors)
+{
+    PyObject *v;
+    char buflower[11];
+
+    if (!PyUnicode_Check(unicode)) {
+        PyErr_BadArgument();
+        return NULL;
+    }
+    if (encoding == NULL) {
+        return _PyUnicode_AsUTF8String(unicode, errors);
+    }
+    /* Normalize encoding name to lowercase */
+    ...
+    v = _PyCodec_EncodeInternal(unicode, encoding, errors);
+    return v;
+}
+```
+
+When `encoding` is `NULL`, the call fast-paths straight to the UTF-8 encoder without a codec lookup. All other encodings go through `_PyCodec_EncodeInternal`.
+
+### _PyUnicode_AsUTF8AndSize and the utf8_cache
+
+Since Python 3.3 every compact unicode object carries a `utf8_cache` pointer. `_PyUnicode_AsUTF8AndSize` fills this cache on first access and returns a raw `const char *` without allocating a new `bytes` object.
+
+```c
+// CPython: Objects/unicodeobject.c:4452 _PyUnicode_AsUTF8AndSize
+const char *
+_PyUnicode_AsUTF8AndSize(PyObject *unicode, Py_ssize_t *psize)
+{
+    PyCompactUnicodeObject *compact = (PyCompactUnicodeObject *)unicode;
+
+    if (!PyUnicode_IS_ASCII(unicode)) {
+        if (compact->utf8 == NULL) {
+            if (_PyUnicode_UTF8(unicode) == NULL) {
+                if (unicode_fill_utf8(unicode) < 0)
+                    return NULL;
+            }
+        }
+    }
+    if (psize)
+        *psize = PyUnicode_UTF8_LENGTH(unicode);
+    return PyUnicode_UTF8(unicode);
+}
+```
+
+The cache is stored inline for ASCII strings (the `data` pointer doubles as UTF-8). For non-ASCII compact strings the `utf8` field of `PyCompactUnicodeObject` is filled lazily by `unicode_fill_utf8`.
+
+### PyUnicode_DecodeUTF8Stateful
+
+The stateful decoder lets callers supply a partial byte stream and resume later. The `consumed` output parameter reports how many bytes were actually used, leaving the rest for the next chunk.
+
+```c
+// CPython: Objects/unicodeobject.c:5204 PyUnicode_DecodeUTF8Stateful
+PyObject *
+PyUnicode_DecodeUTF8Stateful(const char *s, Py_ssize_t size,
+                              const char *errors, Py_ssize_t *consumed)
+{
+    _PyUnicodeWriter writer;
+    const char *starts = s;
+    const char *end = s + size;
+    Py_UCS4 ch;
+    int kind;
+
+    _PyUnicodeWriter_Init(&writer);
+    writer.min_length = size;
+
+    while (s < end) {
+        ch = (unsigned char)*s;
+        if (ch < 0x80) {
+            /* ASCII fast path */
+            ...
+        }
+        /* multi-byte sequence handling + surrogate error modes */
+        ...
+    }
+    if (consumed)
+        *consumed = s - starts;
+    return _PyUnicodeWriter_Finish(&writer);
+}
+```
+
+Surrogate code points (`0xD800`-`0xDFFF`) are accepted only when `errors="surrogatepass"`. The `surrogateescapedecode` error handler maps ill-formed bytes to surrogate code points in the private-use range.
+
+### PyUnicode_FromEncodedObject
+
+This function implements the `__bytes__` protocol path: it accepts a `bytes`, `bytearray`, or any object that exports the buffer protocol, then decodes with the given encoding.
+
+```c
+// CPython: Objects/unicodeobject.c:6401 PyUnicode_FromEncodedObject
+PyObject *
+PyUnicode_FromEncodedObject(PyObject *obj,
+                             const char *encoding,
+                             const char *errors)
+{
+    Py_buffer buffer;
+    PyObject *v;
+
+    if (PyUnicode_Check(obj)) {
+        PyErr_SetString(PyExc_TypeError,
+            "decoding str is not supported");
+        return NULL;
+    }
+    if (PyObject_GetBuffer(obj, &buffer, PyBUF_SIMPLE) < 0)
+        return NULL;
+    v = PyUnicode_Decode((const char *)buffer.buf,
+                         buffer.len, encoding, errors);
+    PyBuffer_Release(&buffer);
+    return v;
+}
+```
+
+Passing a `str` raises `TypeError` immediately, matching the Python-level rule that you cannot decode a string.
+
+## gopy notes
+
+- `_PyUnicode_AsUTF8AndSize` is called heavily by the C API. In gopy the equivalent is `objects.Str.UTF8()`, which caches the result in the same way.
+- The stateful decoder maps to `objects.Str.DecodeUTF8Stateful`. The `consumed` output becomes a second return value.
+- `PyUnicode_AsEncodedString` codec dispatch currently goes through `module/codecs`; the fast-path for `"utf-8"` avoids that table.
+- The `utf8_cache` concept is represented in gopy by a `utf8 []byte` field on the interned string struct.
+
+## CPython 3.14 changes
+
+- The `utf8_cache` field was promoted to a first-class slot in `PyCompactUnicodeObject` in 3.12; 3.14 adds a validity flag so the cache can be invalidated without freeing memory.
+- `PyUnicode_DecodeUTF8Stateful` gained an explicit fast path for pure-ASCII input that skips the writer entirely and calls `PyUnicode_New` directly.
+- The codec registry lookup in `PyUnicode_AsEncodedString` now checks the `_codecinfo` cache before calling `_PyCodec_Lookup`, reducing overhead for hot encodings like `"utf-8"` and `"ascii"`.

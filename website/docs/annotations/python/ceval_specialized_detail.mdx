@@ -1,0 +1,160 @@
+---
+title: "Python/specialize.c — adaptive specialization engine"
+description: "Annotation of the instruction specialization machinery introduced in CPython 3.12"
+cpython_path: Python/specialize.c
+cpython_version: "3.14"
+lines: 2500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`specialize.c` contains the adaptive specialization engine that replaces bytecode instructions with faster variants at runtime. It was split out of `ceval.c` in CPython 3.12. This page covers the two main specialization sites (`LOAD_ATTR` and `BINARY_OP`) plus the counter and backoff infrastructure.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| ~180  | `_Py_Specialize_LoadAttr` | Install `LOAD_ATTR_*` specializations |
+| ~520  | `_Py_Specialize_BinaryOp` | Install `BINARY_OP_*` specializations |
+| ~90   | `_PyAdaptiveEntry` | Cached type version tags and index for a specialization |
+| ~60   | `_Py_BackoffCounter` | Exponential back-off counter for deoptimization |
+| ~140  | `specialize_attr_loadmethod` | Sub-helper for method-descriptor specialization |
+| ~460  | `_Py_Specialize_Call` | Install `CALL_*` specializations |
+
+## Reading
+
+### Specialization threshold and the counter field
+
+Every adaptive instruction carries a `counter` embedded in the instruction word. The eval loop decrements it on each execution. When it reaches zero the runtime calls into `specialize.c` to attempt a specialization.
+
+```c
+// CPython: Python/specialize.c:92 SPEC_FAIL
+#define SPEC_FAIL(kind) \
+    do { \
+        STAT_INC(opcode, failure); \
+        STAT_INC(opcode, kind); \
+    } while (0)
+
+/* Initial counter value before first specialization attempt */
+#define ADAPTIVE_INITIAL_VALUE 8
+```
+
+Eight executions of an unspecialized instruction trigger the first attempt. If specialization fails, `_Py_BackoffCounter` doubles the interval so subsequent retries are progressively less frequent.
+
+### _Py_Specialize_LoadAttr
+
+`_Py_Specialize_LoadAttr` inspects the type of the object on the stack and installs one of several specialized opcodes. The most common targets are instance slots (stored in `tp_members`), module globals, and type-level class attributes.
+
+```c
+// CPython: Python/specialize.c:183 _Py_Specialize_LoadAttr
+void
+_Py_Specialize_LoadAttr(PyObject *owner, _Py_CODEUNIT *instr,
+                         PyObject *name)
+{
+    PyTypeObject *tp = Py_TYPE(owner);
+    uint32_t tp_version = tp->tp_version_tag;
+
+    if (tp_version == 0) {
+        SPECIALIZATION_FAIL(LOAD_ATTR, SPEC_FAIL_ATTR_NO_DICT);
+        return;
+    }
+    if (PyModule_CheckExact(owner)) {
+        _Py_Specialize_LoadAttrModule(owner, instr, name, tp_version);
+        return;
+    }
+    PyObject *descr = NULL;
+    DescriptorClassification kind =
+        analyze_descriptor(tp, name, &descr, 0);
+
+    switch (kind) {
+    case INSTANCE_VALUE:
+        specialize_instance_value(owner, instr, name, descr, tp_version);
+        break;
+    case SLOT:
+        specialize_slot(instr, descr, tp_version);
+        break;
+    case MUTABLE:
+    case GETSET_OVERRIDDEN:
+        SPECIALIZATION_FAIL(LOAD_ATTR, SPEC_FAIL_ATTR_MUTABLE_CLASS);
+        break;
+    default:
+        SPECIALIZATION_FAIL(LOAD_ATTR, SPEC_FAIL_OTHER);
+    }
+}
+```
+
+Each successful path writes a new opcode into `instr->op.code` and stores the type version tag into the accompanying `_PyAdaptiveEntry` cache so the specialized instruction can verify the type at execution time.
+
+### _Py_Specialize_BinaryOp
+
+`_Py_Specialize_BinaryOp` covers arithmetic and string concatenation. It checks the types of both operands and installs a monomorphic handler.
+
+```c
+// CPython: Python/specialize.c:521 _Py_Specialize_BinaryOp
+void
+_Py_Specialize_BinaryOp(PyObject *lhs, PyObject *rhs,
+                          _Py_CODEUNIT *instr, int oparg,
+                          PyObject **locals)
+{
+    assert(oparg == NB_ADD || oparg == NB_SUBTRACT ||
+           oparg == NB_MULTIPLY || ...);
+
+    if (PyLong_CheckExact(lhs) && PyLong_CheckExact(rhs)) {
+        _Py_SET_OPCODE(*instr, BINARY_OP_ADD_INT);
+        return;
+    }
+    if (PyFloat_CheckExact(lhs) && PyFloat_CheckExact(rhs)) {
+        _Py_SET_OPCODE(*instr, BINARY_OP_ADD_FLOAT);
+        return;
+    }
+    if (PyUnicode_CheckExact(lhs) && PyUnicode_CheckExact(rhs)
+        && oparg == NB_ADD) {
+        _Py_SET_OPCODE(*instr, BINARY_OP_ADD_UNICODE);
+        return;
+    }
+    SPECIALIZATION_FAIL(BINARY_OP, SPEC_FAIL_BINARY_OP_OTHER);
+}
+```
+
+The specialized opcodes bypass the `nb_add` slot dispatch entirely and call the C-level addition functions directly, eliminating two indirect calls per arithmetic operation.
+
+### _Py_BackoffCounter and deoptimization
+
+When a specialized instruction encounters an object whose type does not match the cached version tag, it deoptimizes back to the adaptive opcode and arms the backoff counter.
+
+```c
+// CPython: Python/specialize.c:64 _Py_BackoffCounter
+static inline int
+_Py_BackoffCounter_Backoff(_Py_BackoffCounter *counter)
+{
+    uint8_t val = counter->value;
+    if (val > 0) {
+        counter->value = val - 1;
+        return 0;   /* still backing off */
+    }
+    /* Reset with doubled interval, capped at BACKOFF_MAX */
+    uint8_t interval = counter->backoff;
+    if (interval < BACKOFF_MAX) {
+        counter->backoff = interval + 1;
+    }
+    counter->value = (uint8_t)(1 << counter->backoff);
+    return 1;   /* ready to re-specialize */
+}
+```
+
+The doubling cap (`BACKOFF_MAX = 16`) means a polymorphic site will retry roughly every 65 000 executions rather than thrashing the specialization logic on every call.
+
+## gopy notes
+
+- gopy does not yet implement `specialize.c`. The adaptive instructions are present in the opcode table but all execute the generic fallback path.
+- `_PyAdaptiveEntry` would map to a cache slot embedded in the compiled instruction stream. The type version tag corresponds to `objects.Type.Version` in gopy.
+- When specialization is added, `_Py_BackoffCounter` should be a direct struct translation; the bit-field encoding fits in a `uint16` as in CPython.
+- `LOAD_ATTR_INSTANCE_VALUE` is the highest-value target: gopy's attribute lookup currently calls `objects.Type.FindAttr` on every access, so a version-tag check with a direct slot index would be a large win.
+
+## CPython 3.14 changes
+
+- `specialize.c` was introduced in 3.12 by extracting specialization logic from `ceval.c`. In 3.14 the file gains coverage for `FOR_ITER`, `CONTAINS_OP`, and `COMPARE_OP` specialized variants.
+- The `_PyAdaptiveEntry` struct is expanded with a second cache word for two-level type checks, enabling specialization of methods inherited through a chain of two types without a full `tp_mro` walk.
+- `_Py_BackoffCounter` replaces the earlier flat `specialization_counter` field in 3.14, giving per-site deoptimization state rather than a shared counter.
+- Stats collection (`STAT_INC`) is now compiled in under `Py_STATS` and is off by default in release builds, reducing the overhead of failed specialization attempts.

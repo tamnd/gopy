@@ -1,0 +1,147 @@
+---
+title: asyncio/events.py
+description: "Event loop interface: ABCs, Handle, TimerHandle, and loop policy"
+cpython_path: Lib/asyncio/events.py
+cpython_version: "3.14"
+lines: 750
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`events.py` defines the public contract that every asyncio event loop must
+satisfy. Concrete implementations live in `selector_events.py`,
+`unix_events.py`, and `proactor_events.py`; this file contains only ABCs,
+callback wrappers, and the global policy machinery.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1–40 | imports | threading, contextvars, heapq, socket |
+| 41–110 | `Handle` | wraps a callback plus its `contextvars.Context` |
+| 111–180 | `TimerHandle` | `Handle` subclass with a `_when` field for the heap |
+| 181–480 | `AbstractEventLoop` | ABC declaring every public loop method |
+| 481–560 | `AbstractEventLoopPolicy` | ABC: `get/set/new_event_loop` |
+| 561–640 | `DefaultEventLoopPolicy` | base policy using a per-thread loop |
+| 641–700 | `get_event_loop` / `set_event_loop` | module-level convenience wrappers |
+| 701–750 | `_get_running_loop` / `get_running_loop` | returns the loop for the current OS thread |
+
+## Reading
+
+### `Handle`: callbacks with context
+
+Every `call_soon`, `call_later`, and `add_reader` callback is wrapped in a
+`Handle`. Crucially, `Handle` snapshots the current `contextvars.Context` at
+construction time and runs the callback inside it via `Context.run`. This is
+what makes `contextvars` propagate naturally across `await` points.
+
+```python
+# CPython: Lib/asyncio/events.py:41 Handle.__init__
+class Handle:
+    __slots__ = ('_callback', '_args', '_context', '_loop',
+                 '_source_traceback', '_repr', '_cancelled')
+
+    def __init__(self, callback, args, loop, context=None):
+        if context is None:
+            context = contextvars.copy_context()
+        self._context = context
+        self._callback = callback
+        self._args = args
+        self._loop = loop
+        self._cancelled = False
+```
+
+`Handle._run` calls `self._context.run(self._callback, *self._args)`. Exceptions
+are caught and reported via `loop.call_exception_handler` rather than
+propagated.
+
+### `TimerHandle` and the scheduled heap
+
+`TimerHandle` adds `_when` (a float from `loop.time()`) and implements
+`__lt__` so the heap in `loop._scheduled` stays ordered. `cancel` marks the
+handle and leaves it in the heap; `_run_once` skips cancelled handles during
+drain.
+
+```python
+# CPython: Lib/asyncio/events.py:111 TimerHandle.__init__
+class TimerHandle(Handle):
+    __slots__ = ('_when', '_scheduled')
+
+    def __init__(self, when, callback, args, loop, context=None):
+        super().__init__(callback, args, loop, context)
+        self._when = when
+        self._scheduled = False
+
+    def __lt__(self, other):
+        if self._when == other._when:
+            return id(self) < id(other)
+        return self._when < other._when
+```
+
+### `AbstractEventLoop` stub structure
+
+Every method raises `NotImplementedError`. Groupings by concern (in order of
+appearance in the file):
+
+- Running and stopping: `run_forever`, `run_until_complete`, `stop`, `is_running`, `is_closed`, `close`
+- Scheduling: `call_soon`, `call_later`, `call_at`, `call_soon_threadsafe`
+- Tasks and futures: `create_future`, `create_task`
+- I/O registration: `add_reader`, `remove_reader`, `add_writer`, `remove_writer`
+- Networking: `create_connection`, `create_server`, `create_datagram_endpoint`
+- DNS: `getaddrinfo`, `getnameinfo`
+- Subprocess: `subprocess_exec`, `subprocess_shell`
+- Executor: `run_in_executor`, `set_default_executor`
+
+```python
+# CPython: Lib/asyncio/events.py:215 AbstractEventLoop.run_until_complete
+def run_until_complete(self, future):
+    """Run until the future (an instance of Future) has completed."""
+    raise NotImplementedError
+```
+
+### Loop policy and `get_event_loop`
+
+`get_event_loop` returns the running loop if one exists, otherwise asks the
+current policy for a loop. In 3.10+ a `DeprecationWarning` fires when no loop
+is running and no explicit loop has been set for the current thread, nudging
+users toward explicit `asyncio.run` usage.
+
+```python
+# CPython: Lib/asyncio/events.py:660 get_event_loop
+def get_event_loop():
+    running = _get_running_loop()
+    if running is not None:
+        return running
+    return get_event_loop_policy().get_event_loop()
+```
+
+`_get_running_loop` reads a module-level `threading.local` slot that
+`BaseEventLoop.run_forever` sets on entry and clears on exit.
+
+## gopy notes
+
+- `Handle` maps to a Go struct holding a `func()` and a `context.Context`
+  snapshot. The `contextvars` copy-on-snapshot semantics correspond to passing
+  a derived `context.Context` into a goroutine.
+- `TimerHandle._when` maps to `time.Time`; the scheduled heap is a
+  `container/heap` of `*TimerHandle`.
+- `AbstractEventLoop` defines the interface a Go `EventLoop` interface type
+  must satisfy. Many methods with `create_` prefixes correspond to Go functions
+  returning `(Transport, error)`.
+- The thread-local running loop corresponds to a `goroutine-local` value stored
+  in a `sync.Map` keyed by goroutine ID (or passed explicitly through
+  `context.Context`).
+
+## CPython 3.14 changes
+
+- `get_event_loop` no longer emits a `DeprecationWarning` when called with no
+  running loop in 3.12; instead it creates a new loop silently only when a
+  policy is explicitly set. The 3.14 behaviour matches 3.12.
+- `AbstractEventLoop.shutdown_default_executor` gained an optional `timeout`
+  parameter in 3.12 (`asyncio.Runner` uses it). The stub is present in 3.14
+  with the same signature.
+- `Handle.__repr__` now omits the source traceback from the default string to
+  reduce noise in logs; `repr(handle)` shows the callback name and args only.
+- `create_task` gained a `context` keyword argument in 3.7 to allow passing an
+  explicit `contextvars.Context`; the 3.14 signature is unchanged.

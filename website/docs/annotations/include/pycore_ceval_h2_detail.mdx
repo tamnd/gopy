@@ -1,0 +1,123 @@
+---
+title: pycore_ceval.h
+description: "Internal ceval declarations: eval-breaker, frame dispatch, and pending-call machinery"
+cpython_path: Include/internal/pycore_ceval.h
+cpython_version: "3.14"
+lines: 200
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`Include/internal/pycore_ceval.h` is the private counterpart to `ceval.h`. It exposes the
+declarations that the interpreter core uses internally but never publishes to extension authors.
+The two most important concerns here are the **eval-breaker** atomic bitfield and the
+**frame evaluation** entry points.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 30–60 | `_Py_eval_breaker` | Atomic word; each bit signals a pending async event |
+| 62–70 | `_PyEval_EvalFrameDefault` | Main dispatch loop; one frame per call |
+| 72–80 | `_PyEval_EvalCode` | Compile-then-eval helper used by `exec`/`eval` builtins |
+| 82–90 | `_PyEval_Vector` | Vectorcall entry point for Python-to-Python calls |
+| 100–110 | `_Py_HandlePending` | Called when any eval-breaker bit is set |
+| 112–118 | `_PyEval_SignalReceived` | Sets `SIGNALS_PENDING` bit; safe from signal handler |
+| 120–130 | `_PyEval_AddPendingCall` | Enqueues a C callback for the main thread |
+
+## Reading
+
+### The eval-breaker bitfield
+
+The eval-breaker is a single `_Py_atomic_int` that the dispatch loop tests after every
+backward-branch or function call. Setting any bit causes the loop to detour through
+`_Py_HandlePending` before resuming bytecode execution.
+
+```c
+// CPython: Include/internal/pycore_ceval.h:35 _Py_eval_breaker
+#define _PY_SIGNALS_PENDING_BIT       0
+#define _PY_CALLS_TO_DO_BIT           1
+#define _PY_GIL_DROP_REQUEST_BIT      2
+#define _PY_PENDING_CALLS_TO_DO_BIT   3
+
+typedef struct _eval_breaker_bits {
+    unsigned int signals_pending    : 1;
+    unsigned int calls_to_do        : 1;
+    unsigned int gil_drop_request   : 1;
+    unsigned int pending_calls      : 1;
+} _Py_eval_breaker_bits;
+```
+
+Each bit has a dedicated setter so that signal handlers and other threads can raise exactly
+one concern at a time without a compare-and-swap loop over the whole word.
+
+### Frame evaluation entry points
+
+`_PyEval_EvalFrameDefault` is the hot function. It receives a `_PyInterpreterFrame`
+already pushed onto the C stack and runs until the frame returns or raises.
+
+```c
+// CPython: Include/internal/pycore_ceval.h:62 _PyEval_EvalFrameDefault
+PyObject *
+_PyEval_EvalFrameDefault(PyThreadState *tstate,
+                         _PyInterpreterFrame *frame,
+                         int throwflag);
+```
+
+`_PyEval_Vector` is the fast path for Python-to-Python calls. It allocates the frame in
+the per-thread frame allocator and jumps directly into `_PyEval_EvalFrameDefault`, bypassing
+the argument-tuple construction that `PyObject_Call` would perform.
+
+```c
+// CPython: Include/internal/pycore_ceval.h:82 _PyEval_Vector
+PyObject *
+_PyEval_Vector(PyThreadState *tstate,
+               PyFunctionObject *func,
+               PyObject *locals,
+               PyObject *const *args, Py_ssize_t argcount,
+               PyObject *kwnames);
+```
+
+### Pending-call enqueue
+
+Any thread may call `_PyEval_AddPendingCall` to schedule work on the main interpreter
+thread. The call is stored in a fixed-size ring buffer; `_PyEval_AddPendingCall` then sets
+the `PENDING_CALLS_TO_DO` bit so the dispatch loop drains the buffer at the next safe point.
+
+```c
+// CPython: Include/internal/pycore_ceval.h:120 _PyEval_AddPendingCall
+int _PyEval_AddPendingCall(PyInterpreterState *interp,
+                           _Py_pending_call_func func,
+                           void *arg,
+                           int mainthreadonly);
+```
+
+### Signal delivery
+
+`_PyEval_SignalReceived` is async-signal-safe. It performs a single atomic-or into the
+eval-breaker word and returns. The actual Python-level signal dispatch happens later inside
+`_Py_HandlePending` on the interpreter thread.
+
+```c
+// CPython: Include/internal/pycore_ceval.h:112 _PyEval_SignalReceived
+void _PyEval_SignalReceived(PyInterpreterState *interp);
+```
+
+## gopy notes
+
+- `_PyEval_EvalFrameDefault` maps to `vm.EvalFrame` in gopy. The eval-breaker equivalent
+  is the `threadState.sigPending` flag checked at every `JUMP_BACKWARD` in `vm/eval_gen.go`.
+- `_PyEval_Vector` maps to `vm.VectorCall` introduced in the vectorcall work.
+- Pending calls are not yet implemented; `_PyEval_AddPendingCall` has no gopy counterpart.
+- The GIL-drop-request bit has no meaning in gopy's goroutine model; the other three bits
+  do need equivalents once signal handling lands.
+
+## CPython 3.14 changes
+
+- The eval-breaker was refactored from a plain `int` to the named bitfield struct in 3.13.
+  In 3.14 the field names are stable and `_Py_HandlePending` is now a declared extern rather
+  than a static inline, making it easier to call from the tier-2 executor.
+- `_PyEval_EvalFrameDefault` gained a `throwflag` parameter in 3.11; the signature is
+  unchanged in 3.14 but the interior was reorganized for the specializing adaptive
+  interpreter and the tier-2 uop dispatch path.

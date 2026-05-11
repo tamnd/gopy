@@ -1,0 +1,145 @@
+---
+title: optimizer.c
+description: "Tier-2 uop optimizer: trace construction, type guards, and constant-folding passes"
+cpython_path: Python/optimizer.c
+cpython_version: "3.14"
+lines: 2000
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`Python/optimizer.c` implements CPython's **tier-2 optimizer**, the JIT pipeline that
+sits behind the specializing adaptive interpreter. When a backward branch is taken enough
+times, the optimizer traces the hot loop into a linear sequence of micro-ops (uops), runs
+simplification passes over that sequence, and installs an executor object that the tier-1
+dispatch loop can jump into directly on subsequent iterations.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 80–140 | `_PyOptimizer_NewUOpOptimizer` | Allocates and returns the default uop optimizer |
+| 200–380 | `translate_bytecode_to_trace` | Converts tier-1 bytecodes to uops, inserting type guards |
+| 400–550 | `_Py_Optimize_Uops` | Entry point: traces a hot counter, calls translate, installs executor |
+| 560–720 | `_Py_uop_optimize` | Constant-folding and dead-code-elimination passes over a trace |
+| 730–900 | `executor_iternext` / `executor_dealloc` | Executor object protocol: `tp_iternext` drives uop dispatch |
+| 900–1200 | per-opcode uop emitters | One emitter per tier-1 opcode; some expand to multiple uops |
+| 1200–1600 | type-guard insertion helpers | `emit_type_guard`, `specialize_load_attr`, etc. |
+| 1600–1800 | `_PyUOpInstruction` array helpers | Resize, append, and finalize the instruction buffer |
+| 1800–2000 | statistics and debug hooks | `_Py_uop_stats`, `OPT_STAT_INC` macros |
+
+## Reading
+
+### Creating the optimizer
+
+`_PyOptimizer_NewUOpOptimizer` constructs the singleton optimizer that `_PyInterpreterState`
+holds. It sets the hot-threshold counter and wires the `optimize` function pointer to
+`_Py_Optimize_Uops`.
+
+```c
+// CPython: Python/optimizer.c:95 _PyOptimizer_NewUOpOptimizer
+_PyOptimizerObject *
+_PyOptimizer_NewUOpOptimizer(void)
+{
+    _PyUOpOptimizerObject *opt = PyObject_New(
+        _PyUOpOptimizerObject, &_PyUOpOptimizer_Type);
+    if (opt == NULL) {
+        return NULL;
+    }
+    opt->base.optimize = _Py_Optimize_Uops;
+    opt->base.resume_threshold  = RESUME_BACK_EDGE_THRESHOLD;
+    opt->base.backedge_threshold = JUMP_BACKWARD_INITIAL_VALUE;
+    return (_PyOptimizerObject *)opt;
+}
+```
+
+### Tracing: bytecode to uops
+
+`translate_bytecode_to_trace` walks forward from a hot backward-branch target, converting
+each tier-1 instruction to one or more uops. Instructions that cannot be expressed as uops
+(rare opcodes, unresolvable `CALL` targets) abort the trace. Type guards are inserted
+whenever a specialization assumption must be checked at runtime.
+
+```c
+// CPython: Python/optimizer.c:210 translate_bytecode_to_trace
+static int
+translate_bytecode_to_trace(
+    PyCodeObject *code,
+    _Py_CODEUNIT *instr,
+    _PyUOpInstruction *trace,
+    int buffer_size,
+    _PyBloomFilter *dependencies)
+{
+    /* Walk instructions; for each opcode emit uops into trace[]. */
+    ...
+}
+```
+
+The function returns the number of uops written, or a negative value on abort. The caller
+in `_Py_Optimize_Uops` retries with a larger buffer on `TRACE_TOO_LONG`.
+
+### Optimization passes
+
+`_Py_uop_optimize` runs two passes over the raw trace in place. The first pass propagates
+known constants through `_Py_UNARY_NUMERIC_OVERLOAD` uops and eliminates branches whose
+condition is statically determined. The second pass removes any uop whose output is never
+consumed (dead stores inside the trace window).
+
+```c
+// CPython: Python/optimizer.c:562 _Py_uop_optimize
+int
+_Py_uop_optimize(
+    _PyInterpreterFrame *frame,
+    _PyUOpInstruction *buffer,
+    int length,
+    _PyBloomFilter *dependencies,
+    int curr_stacklen)
+{
+    ...
+    /* Pass 1: constant folding */
+    /* Pass 2: dead-code elimination */
+    return new_length;
+}
+```
+
+### The executor object
+
+The executor is a heap object whose `tp_iternext` slot drives the uop dispatch loop.
+`executor_iternext` advances through the `_PyUOpInstruction` array and returns `NULL`
+(with no exception) when the trace exits back to the tier-1 loop.
+
+```c
+// CPython: Python/optimizer.c:735 executor_iternext
+static PyObject *
+executor_iternext(_PyExecutorObject *self)
+{
+    _PyUOpInstruction *pc = self->trace + self->current;
+    ...
+}
+```
+
+## gopy notes
+
+- gopy's tier-2 work lives in `compile/flowgraph_passes.go` and `vm/eval_gen.go`. The
+  dispatcher in `vm/eval_gen.go` checks `frame.Executor` before entering the tier-1 loop,
+  mirroring the `RESUME` fast-path in CPython's `ceval.c`.
+- `_PyOptimizer_NewUOpOptimizer` has no direct gopy equivalent yet; the optimizer is
+  instantiated inline in `pythonrun/runstring.go` during interpreter setup.
+- Type guards emitted by `translate_bytecode_to_trace` correspond to the `GUARD_TYPE`
+  and `GUARD_BOTH_INT` uops listed in `compile/flowgraph.go`.
+- The `_PyBloomFilter` dependency tracking has no gopy equivalent; invalidation is
+  currently deferred to a later milestone.
+
+## CPython 3.14 changes
+
+- The tier-2 optimizer was marked non-experimental in 3.13; `--enable-experimental-jit`
+  is no longer required to activate it at runtime.
+- In 3.14 `translate_bytecode_to_trace` gained loop-unrolling support: a trace may now
+  include two iterations of the hot loop when the loop body is short enough to fit within
+  the buffer limit.
+- `_Py_uop_optimize` was split from a single monolithic pass into the two-pass structure
+  described above, making it easier to add further passes (e.g., range analysis) in future
+  releases.
+- The `_PyUOpInstruction` struct gained a `opcode_metadata` pointer in 3.14 to allow
+  passes to query per-opcode stack effects without a separate table lookup.

@@ -1,0 +1,112 @@
+---
+title: "contextlib.py — async context managers"
+description: "Async context manager machinery: AbstractAsyncContextManager, asynccontextmanager, aclosing, and AsyncExitStack cleanup ordering."
+cpython_path: Lib/contextlib.py
+cpython_version: "3.14"
+lines: 814
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`contextlib.py` covers both sync and async context managers. This page focuses on the async half: the abstract base classes, the `@asynccontextmanager` decorator, `aclosing`, and `AsyncExitStack`. For the sync side (`@contextmanager`, `ExitStack`, `suppress`, `redirect_stdout`) see the companion page.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 41–63 | `AbstractAsyncContextManager` | ABC enforcing `__aenter__`/`__aexit__`; default `__aenter__` returns `self` |
+| 89–102 | `AsyncContextDecorator` | Mixin letting an async CM double as a decorator |
+| 202–273 | `_AsyncGeneratorContextManager` | Engine behind `@asynccontextmanager` |
+| 309–339 | `asynccontextmanager` | Public decorator factory |
+| 367–390 | `aclosing` | Async CM that calls `aclose()` on exit |
+| 393–408 | `_RedirectStream` | Re-entrant stream swap (shared by sync/async world) |
+| 631–772 | `AsyncExitStack` | Dynamic stack of async and sync exit callbacks |
+| 707–711 | `AsyncExitStack._push_async_cm_exit` | Binds a CM's `__aexit__` into the callback deque |
+| 716–772 | `AsyncExitStack.__aexit__` | Drains callbacks in LIFO order, awaiting async ones |
+
+## Reading
+
+### AbstractAsyncContextManager — the default implementations
+
+The abstract base provides a concrete `__aenter__` that just returns `self`. Subclasses only must implement `__aexit__`; everything else comes for free.
+
+```python
+# CPython: Lib/contextlib.py:49 AbstractAsyncContextManager.__aenter__
+async def __aenter__(self):
+    """Return `self` upon entering the runtime context."""
+    return self
+
+@abc.abstractmethod
+async def __aexit__(self, exc_type, exc_value, traceback):
+    """Raise any exception triggered within the runtime context."""
+    return None
+```
+
+`__subclasshook__` accepts any class that has both `__aenter__` and `__aexit__`, so duck-typed objects register automatically with `isinstance`.
+
+### asynccontextmanager and the generator bridge
+
+`@asynccontextmanager` wraps an async generator function in `_AsyncGeneratorContextManager`. The `__aenter__` advances the generator once using `anext()`; `__aexit__` either lets it finish or injects the exception via `athrow()`.
+
+```python
+# CPython: Lib/contextlib.py:209 _AsyncGeneratorContextManager.__aenter__
+async def __aenter__(self):
+    del self.args, self.kwds, self.func
+    try:
+        return await anext(self.gen)
+    except StopAsyncIteration:
+        raise RuntimeError("generator didn't yield") from None
+```
+
+The error handling in `__aexit__` mirrors the sync version but uses `athrow()` instead of `throw()` and catches `StopAsyncIteration` instead of `StopIteration`. PEP 479 wrapping applies here too: a `StopIteration` or `StopAsyncIteration` re-raised inside an async generator becomes a `RuntimeError`.
+
+### aclosing — safe async generator teardown
+
+`aclosing` is the async counterpart of `closing`. It guarantees `aclose()` is awaited even when the caller breaks out of the loop early.
+
+```python
+# CPython: Lib/contextlib.py:385 aclosing.__aenter__ / __aexit__
+async def __aenter__(self):
+    return self.thing
+async def __aexit__(self, *exc_info):
+    await self.thing.aclose()
+```
+
+Without `aclosing`, a `break` inside `async for` over an async generator would leave the generator suspended; the GC might never drive it to completion.
+
+### AsyncExitStack — mixed sync/async callback drain
+
+`_push_async_cm_exit` registers an async CM's `__aexit__` as an unbound `MethodType`, tagged `is_sync=False` in the deque.
+
+```python
+# CPython: Lib/contextlib.py:707 AsyncExitStack._push_async_cm_exit
+def _push_async_cm_exit(self, cm, cm_exit):
+    _exit_wrapper = self._create_async_exit_wrapper(cm, cm_exit)
+    self._push_exit_callback(_exit_wrapper, False)
+```
+
+`__aexit__` pops callbacks in LIFO order. The `is_sync` flag drives whether to call or await:
+
+```python
+# CPython: Lib/contextlib.py:748 AsyncExitStack.__aexit__ dispatch
+if is_sync:
+    cb_suppress = cb(*exc_details)
+else:
+    cb_suppress = await cb(*exc_details)
+```
+
+This lets a single `AsyncExitStack` manage both ordinary context managers and async ones in the same stack, in the correct cleanup order.
+
+## gopy notes
+
+- `AbstractAsyncContextManager` maps to a Go interface with `AEnter() (Object, error)` and `AExit(excType, excVal, tb Object) (bool, error)`. The `__subclasshook__` virtual registration has no Go equivalent; gopy checks method presence at wrapping time.
+- `_AsyncGeneratorContextManager` requires async generator support (`vm/eval_gen.go`). The `athrow`/`aclose`/`anext` builtins must be in place before this class is usable.
+- `AsyncExitStack._push_exit_callback` stores `(is_sync bool, cb Callable)` pairs; the drain loop in `__aexit__` is straightforward to port but the `_fix_exception_context` chain walk depends on `__context__` being a first-class field on exception objects.
+- `aclosing` is trivial once async generator `aclose()` works.
+
+## CPython 3.14 changes
+
+- No structural changes to the async CM machinery in 3.14. The file grew from ~600 to 814 lines mainly due to `chdir` (added in 3.11) and accumulated inline comments.
+- `suppress.__exit__` gained `BaseExceptionGroup` handling (3.11): it splits the group and re-raises the non-matching remainder, rather than either swallowing everything or nothing.
+- `_BaseExitStack.push` and `enter_context` now look up `__exit__` on `type(exit)` rather than on the instance, matching the actual `with` statement semantics introduced in bpo-12029.

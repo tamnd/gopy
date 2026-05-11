@@ -1,0 +1,140 @@
+---
+title: asyncio/selector_events.py
+description: "Selector-based event loop: fd polling, transport I/O, and SSL wrapping"
+cpython_path: Lib/asyncio/selector_events.py
+cpython_version: "3.14"
+lines: 1100
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`selector_events.py` implements the default event loop on POSIX and Windows
+(non-IOCP) platforms. It sits on top of Python's `selectors` module, which
+wraps `epoll`, `kqueue`, or `select` depending on the OS.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1–60 | module imports / `__all__` | selectors, ssl, socket imports |
+| 61–120 | `BaseSelectorEventLoop.__init__` | creates the `DefaultSelector`, wakes self-pipe |
+| 121–210 | `BaseSelectorEventLoop._run_once` | core polling loop, calls `selectors.select` |
+| 211–260 | `BaseSelectorEventLoop._process_events` | dispatches read/write `Handle` objects |
+| 261–340 | `add_reader` / `add_writer` / `remove_reader` / `remove_writer` | fd handler registration |
+| 341–500 | `_SelectorSocketTransport` | TCP transport: `write`, `_write_ready`, `_read_ready` |
+| 501–600 | `_SelectorDatagramTransport` | UDP transport |
+| 601–720 | `_SelectorSslTransport` | deprecated shim; real SSL handled via `SSLProto` |
+| 721–820 | `_make_ssl_transport` | wraps a plain transport with `SSLProto` |
+| 821–900 | `_SelectorMapping` | maps fds to `(reader, writer)` handle pairs |
+| 901–1100 | helper functions | `_check_ssl_params`, wakeup-pipe utilities |
+
+## Reading
+
+### The polling heart: `_run_once`
+
+`_run_once` is called on every iteration of `run_forever`. It computes the
+timeout from the earliest `TimerHandle`, calls `selectors.select`, then feeds
+ready events into `_process_events`.
+
+```python
+# CPython: Lib/asyncio/selector_events.py:121 BaseSelectorEventLoop._run_once
+def _run_once(self):
+    ...
+    event_list = self._selector.select(timeout)
+    self._process_events(event_list)
+    # scheduled callbacks whose deadline passed
+    end_time = self.time() + self._clock_resolution
+    while self._scheduled:
+        handle = self._scheduled[0]
+        if handle._when >= end_time:
+            break
+        handle = heapq.heappop(self._scheduled)
+        handle._scheduled = False
+        self._ready.append(handle)
+```
+
+The selector returns `(key, events)` pairs. `key.data` holds a
+`(reader_handle, writer_handle)` tuple stored by `_SelectorMapping`.
+
+### Fd handler registration
+
+`add_reader` and `add_writer` call `selector.register` (or `modify` if the fd
+is already watched). Both store a `Handle` wrapping the user callback.
+
+```python
+# CPython: Lib/asyncio/selector_events.py:265 BaseSelectorEventLoop.add_reader
+def add_reader(self, fd, callback, *args):
+    if self.is_closed():
+        raise RuntimeError(...)
+    handle = events.Handle(callback, args, self, None)
+    try:
+        key = self._selector.get_key(fd)
+    except KeyError:
+        self._selector.register(fd, selectors.EVENT_READ, (handle, None))
+    else:
+        mask, (reader, writer) = key.events, key.data
+        self._selector.modify(fd, mask | selectors.EVENT_READ, (handle, writer))
+        if reader is not None:
+            reader.cancel()
+```
+
+### Socket transport write path
+
+`_SelectorSocketTransport.write` attempts an immediate `sock.send`. Bytes that
+could not be sent are buffered; `add_writer` is called so `_write_ready` drains
+the buffer on the next writable event.
+
+```python
+# CPython: Lib/asyncio/selector_events.py:370 _SelectorSocketTransport.write
+def write(self, data):
+    ...
+    if not self._buffer:
+        try:
+            n = self._sock.send(data)
+        except (BlockingIOError, InterruptedError):
+            n = 0
+        if n == len(data):
+            return
+        data = memoryview(data)[n:]
+    self._buffer.extend(data)
+    self._loop.add_writer(self._sock_fd, self._write_ready)
+```
+
+### SSL transport construction
+
+`_make_ssl_transport` creates a plain `_SelectorSocketTransport` for the raw
+bytes, then hands it to `SSLProto` from `ssl_proto.py`. The SSL handshake runs
+entirely inside the protocol layer; the selector loop sees only encrypted bytes.
+
+```python
+# CPython: Lib/asyncio/selector_events.py:721 BaseSelectorEventLoop._make_ssl_transport
+def _make_ssl_transport(self, rawsock, protocol, sslcontext, waiter=None, *,
+                        server_side=False, server_hostname=None, ...):
+    ssl_protocol = sslproto.SSLProto(
+        self, protocol, sslcontext, waiter,
+        server_side=server_side, server_hostname=server_hostname, ...)
+    _SelectorSocketTransport(self, rawsock, ssl_protocol, ...)
+    return ssl_protocol._app_transport
+```
+
+## gopy notes
+
+- `BaseSelectorEventLoop._run_once` is the main porting target. The Go
+  equivalent uses `golang.org/x/sys/unix.EpollWait` or `syscall.Select`
+  directly rather than going through a `selectors` abstraction.
+- `_SelectorMapping` is a thin dict-like wrapper. In Go this can be a plain
+  `map[int][2]*Handle` guarded by a mutex.
+- Transport `write` buffering maps naturally to a `[]byte` slice plus a
+  registered writable-fd callback.
+- SSL wrapping is deferred; `crypto/tls` in Go replaces `SSLProto`.
+
+## CPython 3.14 changes
+
+- The long-deprecated `_SelectorSslTransport` class was fully removed in 3.12;
+  3.14 carries only the `SSLProto`-based path.
+- `_run_once` gained a `_clock_resolution` guard in 3.12 to avoid re-entering
+  the selector too quickly on platforms where `time.monotonic` has coarse
+  granularity. The guard is unchanged in 3.14.
+- Structured-concurrency task groups (PEP 654) do not touch this file directly;
+  `_run_once` remains the stable, un-grouped core.
