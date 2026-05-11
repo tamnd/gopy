@@ -1,5 +1,10 @@
 package objects
 
+import (
+	"reflect"
+	"unsafe"
+)
+
 // CompareOp identifies the six comparison operators Python exposes
 // through __lt__/__le__/__eq__/__ne__/__gt__/__ge__. Numeric values
 // match the C macros Py_LT..Py_GE so direct ports of slot
@@ -196,6 +201,16 @@ func init() {
 	typeType.refcnt.Store(1)
 	typeType.Bases = []*Type{}
 	typeType.MRO = []*Type{typeType}
+	typeType.Hash = identityHash
+}
+
+// identityHash hashes an object by its pointer address. Mirrors
+// CPython's _Py_HashPointer, which is what type / object inherit
+// when no user-defined __hash__ exists.
+//
+// CPython: Python/pyhash.c:152 _Py_HashPointer
+func identityHash(o Object) (int64, error) {
+	return int64(uintptr(unsafe.Pointer(reflect.ValueOf(o).Pointer()))), nil
 }
 
 // TypeType returns the type singleton for `type` itself. Mirrors

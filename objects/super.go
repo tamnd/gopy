@@ -176,10 +176,72 @@ func superDescrGet(descr Object, owner Object, _ *Type) (Object, error) {
 	return NewSuper(su.typ, owner)
 }
 
-// superCall handles `super(...)` invocation: zero-arg form is left to
-// the future compiler-driven path; the one- and two-arg forms route
-// through NewSuper. Keyword arguments are rejected to match
-// _PyArg_NoKeywords in super_init.
+// CurrentFrameHook returns the currently executing interpreter frame,
+// or nil when no Python frame is active. vm.init wires this up so
+// objects/ can find the calling frame without importing vm/. Used by
+// the zero-arg super() path to recover __class__ and self.
+var CurrentFrameHook func() InterpreterFrame
+
+// superInitNoArgs implements the zero-arg `super()` form. It looks at
+// the calling frame: self comes from local 0 (the method's first
+// positional arg), and __class__ is read from the matching free-var
+// cell. The compiler/symtable already stamp __class__ as a free var of
+// any method that references super, and as an implicit cell on the
+// surrounding class scope.
+//
+// CPython: Objects/typeobject.c:12054 super_init_without_args
+func superInitNoArgs() (*Type, Object, error) {
+	if CurrentFrameHook == nil {
+		return nil, nil, fmt.Errorf("RuntimeError: super(): no current frame")
+	}
+	f := CurrentFrameHook()
+	if f == nil {
+		return nil, nil, fmt.Errorf("RuntimeError: super(): no current frame")
+	}
+	code := f.FrameCode()
+	if code == nil {
+		return nil, nil, fmt.Errorf("RuntimeError: super(): no code object")
+	}
+	if code.Argcount == 0 {
+		return nil, nil, fmt.Errorf("RuntimeError: super(): no arguments")
+	}
+	self := f.FrameFastLocal(0)
+	if self == nil {
+		return nil, nil, fmt.Errorf("RuntimeError: super(): arg[0] deleted")
+	}
+	// __class__ lives in the free-var slot of the same name. CPython
+	// walks co_freevars; gopy keeps the free-var names on Code.Freevars
+	// and the corresponding cells in FrameFreeLocal(i).
+	var classObj Object
+	for i, n := 0, f.FrameNumFrees(); i < n; i++ {
+		if i >= len(code.Freevars) {
+			break
+		}
+		if code.Freevars[i] != "__class__" {
+			continue
+		}
+		cv := f.FrameFreeLocal(i)
+		cell, ok := cv.(*Cell)
+		if !ok || cell.Contents == nil {
+			return nil, nil, fmt.Errorf("RuntimeError: super(): empty __class__ cell")
+		}
+		classObj = cell.Contents
+		break
+	}
+	if classObj == nil {
+		return nil, nil, fmt.Errorf("RuntimeError: super(): __class__ cell not found")
+	}
+	t, ok := classObj.(*Type)
+	if !ok {
+		return nil, nil, fmt.Errorf("RuntimeError: super(): __class__ is not a type")
+	}
+	return t, self, nil
+}
+
+// superCall handles `super(...)` invocation. The zero-arg form reads
+// __class__ and self from the calling frame via superInitNoArgs; the
+// one- and two-arg forms route through NewSuper. Keyword arguments are
+// rejected to match _PyArg_NoKeywords in super_init.
 //
 // CPython: Objects/typeobject.c:12132 super_init
 func superCall(callable Object, args []Object, kwargs map[string]Object) (Object, error) {
@@ -188,7 +250,11 @@ func superCall(callable Object, args []Object, kwargs map[string]Object) (Object
 	}
 	switch len(args) {
 	case 0:
-		return nil, fmt.Errorf("RuntimeError: super(): no arguments (zero-arg form not yet supported)")
+		t, obj, err := superInitNoArgs()
+		if err != nil {
+			return nil, err
+		}
+		return NewSuper(t, obj)
 	case 1:
 		t, ok := args[0].(*Type)
 		if !ok {

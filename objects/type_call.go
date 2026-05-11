@@ -54,8 +54,11 @@ func typeCall(callable Object, args []Object, kwargs map[string]Object) (Object,
 		return cls.TpNew(cls, args, kwargs)
 	}
 	// Some built-ins still expose construction through Call (super
-	// landed before TpNew did); honor it as a fallback.
-	if cls.Call != nil {
+	// landed before TpNew did); honor it as a fallback. Skip the
+	// fallback for user classes, where cls.Call is the slotTpCall
+	// dispatcher installed by fixupSlotDispatchers for instances and
+	// would otherwise re-enter __call__ at construction time.
+	if cls.Call != nil && !cls.IsUser {
 		return cls.Call(callable, args, kwargs)
 	}
 

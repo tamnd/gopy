@@ -61,7 +61,7 @@ func methodDescrRepr(o Object) (string, error) {
 //
 // CPython: Objects/descrobject.c:230 method_get
 func methodDescrGet(descr Object, owner Object, _ *Type) (Object, error) {
-	if owner == nil || owner == None() {
+	if owner == nil {
 		return descr, nil
 	}
 	return NewBoundMethod(descr, owner), nil
