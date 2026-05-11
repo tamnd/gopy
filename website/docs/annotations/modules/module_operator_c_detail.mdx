@@ -1,127 +1,157 @@
 ---
-title: _operatormodule.c
-description: "C implementation of the operator module: arithmetic wrappers and callable objects"
+title: "Modules/_operatormodule.c"
+description: "Annotation of CPython's _operatormodule.c: attrgetter, itemgetter, methodcaller, and comparison dispatch"
 cpython_path: Modules/_operatormodule.c
 cpython_version: "3.14"
-lines: 900
+lines: 800
 status: annotated
 ---
 
 import {Cpy, CpyLink} from '@site/src/components/Cpy';
 
-`_operatormodule.c` implements `operator` as a thin C wrapper around the
-CPython abstract object API. Most functions are one-liners that call
-`PyNumber_*`, `PyObject_*`, or `PySequence_*` and return the result. The
-interesting complexity lives in `attrgetter`, `itemgetter`, and
-`methodcaller`, which are proper callable objects with `__call__` and
-`__reduce__`.
+Source: <CpyLink path="Modules/_operatormodule.c" />
+
+`_operatormodule.c` implements the `operator` standard library module entirely in C. Most of
+its surface area is a thin mapping from Python function calls to the CPython abstract object
+API (`PyNumber_*`, `PyObject_*`, `PySequence_*`). The non-trivial work lives in three callable
+object types: `attrgetter`, `itemgetter`, and `methodcaller`.
 
 ## Map
 
-| Lines | Symbol | Role |
-|-------|--------|------|
-| 1–60 | includes, module state | setup |
-| 61–350 | `op_*` functions | arithmetic, bitwise, and comparison wrappers |
-| 351–500 | `attrgetter_object`, `attrgetter_*` | dotted-attribute getter |
-| 501–650 | `itemgetter_object`, `itemgetter_*` | subscript getter |
-| 651–820 | `methodcaller_object`, `methodcaller_*` | bound-method caller |
-| 821–900 | module init, method table | module bootstrap |
+| Symbol | Kind | Lines (approx) | Purpose |
+|---|---|---|---|
+| `op_add_impl` through `op_xor_impl` | functions | 60-350 | Arithmetic, bitwise, and sequence wrappers |
+| `operator_eq_impl` through `operator_le_impl` | functions | 351-420 | Comparison wrappers via `PyObject_RichCompareBool` |
+| `attrgetter_object` | struct | 421-460 | Dotted attribute getter state |
+| `attrgetter_new` | function | 461-510 | Split dotted name on `.`, store parts tuple |
+| `attrgetter_call` | function | 511-560 | Chain `PyObject_GetAttr` over parts |
+| `itemgetter_object` | struct | 561-600 | Single-item or multi-item subscript getter |
+| `itemgetter_call` | function | 601-650 | Single vs tuple return variant |
+| `methodcaller_new` | function | 651-710 | Store name, args, kwargs |
+| `methodcaller_call` | function | 711-760 | Look up name, call with stored args |
+| `PyMemberDef` tables | data | 761-800 | Module method registration |
 
 ## Reading
 
-### Arithmetic and comparison wrappers
+### eq/ne/lt and the PyObject_RichCompareBool mapping
 
-Every operator function follows the same pattern: validate argument count,
-call the matching abstract API function, return the result. The macro
-`BINARY_OP` generates most of them.
+Comparison functions in `_operatormodule.c` are the thinnest wrappers in the file. Each one
+calls `PyObject_RichCompareBool` with a fixed `op` constant and converts the C int result back
+to a Python bool.
 
 ```c
-// CPython: Modules/_operatormodule.c:78 operator_add_impl
+// CPython: Modules/_operatormodule.c:356 operator_eq_impl
 static PyObject *
-operator_add_impl(PyObject *module, PyObject *a, PyObject *b)
+operator_eq_impl(PyObject *module, PyObject *a, PyObject *b)
 {
-    return PyNumber_Add(a, b);
+    return PyBool_FromLong(PyObject_RichCompareBool(a, b, Py_EQ));
 }
 ```
 
-`operator.index` maps to `PyNumber_Index`, which enforces the `__index__`
-protocol and rejects floats, unlike `int()`.
+`ne`, `lt`, `le`, `gt`, and `ge` follow the same pattern, each passing the corresponding
+`Py_NE`, `Py_LT`, etc. constant. `PyObject_RichCompareBool` handles `None` comparisons and
+calls `__eq__` (or the appropriate slot) on the left operand with a fallback to the right.
+
+### attrgetter_new: dotted path splitting
+
+When the name string contains a `.`, `attrgetter_new` splits it and stores the parts as a
+Python tuple of interned strings. A plain name is stored as a single string object, not a
+tuple, so the common case remains allocation-free at call time.
 
 ```c
-// CPython: Modules/_operatormodule.c:201 operator_index_impl
+// CPython: Modules/_operatormodule.c:468 attrgetter_new
 static PyObject *
-operator_index_impl(PyObject *module, PyObject *a)
+attrgetter_new(PyTypeObject *type, PyObject *args, PyObject *kwds)
 {
-    return PyNumber_Index(a);
+    ...
+    if (PyUnicode_Find(attr, dot, 0, PyUnicode_GET_LENGTH(attr), 1) < 0) {
+        /* No dot: store the name directly */
+        ag->attr = Py_NewRef(attr);
+        ag->nattrs = 1;
+    } else {
+        ag->attr = PyUnicode_Split(attr, dot, -1);
+        ag->nattrs = PyList_GET_SIZE(ag->attr);
+    }
+    ...
 }
 ```
 
-### attrgetter with dotted names
+### attrgetter_call: chained PyObject_GetAttr
 
-When the attribute name contains a dot, `attrgetter_new` splits it on `.` and
-stores a tuple of name parts. `attrgetter_call` iterates the tuple, calling
-`PyObject_GetAttr` once per segment.
+At call time the getter walks the stored parts tuple, feeding the output of one `GetAttr` as
+the input to the next. An error on any segment short-circuits the loop and propagates the
+`AttributeError` unchanged.
 
 ```c
-// CPython: Modules/_operatormodule.c:414 attrgetter_call
+// CPython: Modules/_operatormodule.c:524 attrgetter_call
 static PyObject *
 attrgetter_call(attrgetterobject *ag, PyObject *args, PyObject *kw)
 {
     PyObject *obj = PyTuple_GET_ITEM(args, 0);
-    ...
-    for (i = 0; i < ag->nattrs; i++) {
+    Py_INCREF(obj);
+    for (Py_ssize_t i = 0; i < ag->nattrs; i++) {
         PyObject *attr = PyTuple_GET_ITEM(ag->attr, i);
-        obj = PyObject_GetAttr(obj, attr);
-        ...
+        PyObject *newobj = PyObject_GetAttr(obj, attr);
+        Py_DECREF(obj);
+        if (newobj == NULL) return NULL;
+        obj = newobj;
     }
     return obj;
 }
 ```
 
-A plain (non-dotted) `attrgetter` stores a single string rather than a tuple,
-so the common case avoids the loop entirely.
+### itemgetter_call: single vs tuple variant
 
-### itemgetter and methodcaller
-
-`itemgetter` wraps `PyObject_GetItem`. When constructed with multiple items it
-returns a tuple; with one item it returns the item directly.
+`itemgetter` dispatches on `nitems` at construction time to choose between two call paths.
+The single-item path calls `PyObject_GetItem` and returns the result directly. The multi-item
+path allocates a fresh tuple and fills it with one `GetItem` call per stored key.
 
 ```c
-// CPython: Modules/_operatormodule.c:560 itemgetter_call
+// CPython: Modules/_operatormodule.c:614 itemgetter_call
+static PyObject *
+itemgetter_call(itemgetterobject *ig, PyObject *args, PyObject *kw)
+{
+    PyObject *obj = PyTuple_GET_ITEM(args, 0);
     if (ig->nitems == 1) {
         return PyObject_GetItem(obj, ig->item);
     }
-    ...
-    for (i = 0; i < ig->nitems; i++) {
-        result = PyObject_GetItem(obj, PyTuple_GET_ITEM(ig->items, i));
-        PyTuple_SET_ITEM(retval, i, result);
+    PyObject *retval = PyTuple_New(ig->nitems);
+    if (retval == NULL) return NULL;
+    for (Py_ssize_t i = 0; i < ig->nitems; i++) {
+        PyObject *item = PyObject_GetItem(obj, PyTuple_GET_ITEM(ig->items, i));
+        if (item == NULL) { Py_DECREF(retval); return NULL; }
+        PyTuple_SET_ITEM(retval, i, item);
     }
     return retval;
+}
 ```
 
-`methodcaller` stores a name and a pre-built `args` tuple plus `kwargs` dict.
-Its `__call__` looks up the named method via `PyObject_GetAttr`, then calls it
-with the stored arguments merged with any extra ones passed at call time.
+### methodcaller_new and methodcaller_call
+
+`methodcaller_new` interns the method name string and stores the positional arguments as a
+tuple and keyword arguments as a dict. `methodcaller_call` resolves the attribute on the
+passed object and calls it with the stored arguments using `PyObject_Call`.
+
+```c
+// CPython: Modules/_operatormodule.c:720 methodcaller_call
+static PyObject *
+methodcaller_call(methodcallerobject *mc, PyObject *args, PyObject *kw)
+{
+    PyObject *obj = PyTuple_GET_ITEM(args, 0);
+    PyObject *method = PyObject_GetAttr(obj, mc->name);
+    if (method == NULL) return NULL;
+    PyObject *result = PyObject_Call(method, mc->args, mc->kwds);
+    Py_DECREF(method);
+    return result;
+}
+```
 
 ## gopy notes
 
-- All `op_*` wrappers are generated via `compile/codegen_stmt.go` from the
-  method table; there is no hand-written Go for these.
-- `attrgetter` dotted-name splitting is replicated in `module/operator/` using
-  `strings.Split`.
-- `operator.contains` calls `PySequence_Contains`, which returns `-1` on error,
-  `0` for absent, `1` for present. gopy maps this to `(bool, error)`.
-- `methodcaller.__reduce__` reconstructs itself as
-  `methodcaller(name, *args, **kwargs)`. The gopy port must implement
-  `__reduce__` to pass pickle round-trip tests.
+Status: not yet ported.
 
-## CPython 3.14 changes
-
-- `operator.call` was promoted from a provisional function to a stable public
-  API; its C implementation now appears directly in the method table rather
-  than behind a `#ifdef`.
-- `attrgetter`, `itemgetter`, and `methodcaller` each gained `__class_getitem__`
-  for PEP 585 subscript support, delegating to `Py_GenericAlias`.
-- `operator.matmul` and `operator.imatmul` (in-place matrix multiply) are now
-  covered by the shared `BINARY_OP` macro path rather than hand-written
-  functions, reducing code size.
+Planned package path: `module/operator/`. The arithmetic and comparison wrappers are
+mechanical and can be generated from the `PyMemberDef` table. `attrgetter` dotted-name
+splitting will use `strings.SplitN`. `operator.contains` calls `PySequence_Contains`, which
+returns -1 on error, 0 for absent, 1 for present; the Go port maps this to `(bool, error)`.
+`methodcaller.__reduce__` must be ported to pass pickle round-trip tests.

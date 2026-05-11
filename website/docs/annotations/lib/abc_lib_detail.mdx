@@ -1,0 +1,91 @@
+---
+title: Lib/abc.py
+description: "Lib/abc.py: Abstract Base Classes runtime support"
+cpython_path: Lib/abc.py
+cpython_version: "3.14"
+lines: 200
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+<CpyLink path="Lib/abc.py" />
+
+`Lib/abc.py` is the pure-Python surface of Python's Abstract Base Class machinery. Most of the heavy lifting runs inside the `_abc` C extension; this file wires it together, exposes the public decorators, and provides the `ABC` convenience base class.
+
+## Map
+
+| Symbol | Lines | Kind | Notes |
+|---|---|---|---|
+| `abstractmethod` | 7-25 | decorator | Sets `__isabstractmethod__ = True` on a callable |
+| `abstractclassmethod` | 28-45 | class | Deprecated; combines `classmethod` + abstract flag |
+| `abstractstaticmethod` | 48-65 | class | Deprecated; combines `staticmethod` + abstract flag |
+| `abstractproperty` | 68-82 | class | Deprecated; combines `property` + abstract flag |
+| `ABCMeta.__new__` | 105-108 | metaclass method | Calls `_abc_init` to set up per-class ABC state |
+| `ABCMeta.register` | 110-115 | method | Delegates to `_abc_register`; returns subclass |
+| `ABCMeta.__instancecheck__` | 117-119 | method | Overrides `isinstance` via `_abc_instancecheck` |
+| `ABCMeta.__subclasscheck__` | 121-123 | method | Overrides `issubclass` via `_abc_subclasscheck` |
+| `ABCMeta._dump_registry` | 125-135 | debug helper | Prints cache state via `_get_dump` |
+| `update_abstractmethods` | 146-181 | function | Recalculates `__abstractmethods__` after patching |
+| `ABC` | 184-188 | class | Zero-slot base; uses `ABCMeta` as its metaclass |
+
+## Reading
+
+### The abstractmethod decorator
+
+The decorator is intentionally minimal. It does exactly one thing: brand the callable with a sentinel attribute that `type.__new__` checks when building `__abstractmethods__`.
+
+```python
+# CPython: Lib/abc.py:7 abstractmethod
+def abstractmethod(funcobj):
+    funcobj.__isabstractmethod__ = True
+    return funcobj
+```
+
+`type.__new__` (in `Objects/typeobject.c`) scans the new class's namespace for any attribute whose `__isabstractmethod__` is true and builds the `frozenset` stored in `__abstractmethods__`. Instantiating a class with a non-empty `__abstractmethods__` raises `TypeError`.
+
+The three deprecated variants (`abstractclassmethod`, `abstractstaticmethod`, `abstractproperty`) set the same sentinel both on the wrapper and on the wrapped callable, because wrapping can otherwise hide the flag from the scanner.
+
+### ABCMeta and the _abc C extension
+
+When `_abc` is available (it almost always is), `ABCMeta.__new__` calls `_abc_init` to attach four per-class C-level fields: a weak-reference registry of virtual subclasses, a positive cache, a negative cache, and a version counter.
+
+```python
+# CPython: Lib/abc.py:105 ABCMeta.__new__
+def __new__(mcls, name, bases, namespace, /, **kwargs):
+    cls = super().__new__(mcls, name, bases, namespace, **kwargs)
+    _abc_init(cls)
+    return cls
+```
+
+`register` and the two check hooks (`__instancecheck__`, `__subclasscheck__`) are thin one-liners that forward directly into C. The cache invalidation token returned by `get_cache_token()` increments globally each time any ABC's registry changes; this lets the negative cache be discarded cheaply across the whole interpreter.
+
+The fallback path (lines 89-90) imports `_py_abc.ABCMeta` from a pure-Python implementation used in testing environments where the C extension is absent.
+
+### update_abstractmethods
+
+Added in Python 3.10, this function handles a gap in the original design: if you monkey-patch a method onto a class after it was created, the `__abstractmethods__` set is stale. `update_abstractmethods` rebuilds it by walking `__bases__` and the class's own `__dict__`.
+
+```python
+# CPython: Lib/abc.py:168 update_abstractmethods
+abstracts = set()
+for scls in cls.__bases__:
+    for name in getattr(scls, '__abstractmethods__', ()):
+        value = getattr(cls, name, None)
+        if getattr(value, "__isabstractmethod__", False):
+            abstracts.add(name)
+for name, value in cls.__dict__.items():
+    if getattr(value, "__isabstractmethod__", False):
+        abstracts.add(name)
+cls.__abstractmethods__ = frozenset(abstracts)
+```
+
+It is a no-op on classes that do not have `__abstractmethods__` at all (C types, for instance).
+
+## gopy notes
+
+Status: not yet ported.
+
+Planned package path: `module/abc/`.
+
+The pure decorator (`abstractmethod`) and the `ABC` base class can be implemented immediately as Python-level objects. `ABCMeta` requires the four C-level per-class fields; the natural home for those in gopy is a side-table keyed on the type pointer, parallel to how `_abc` allocates them via `_PyABCData` in `Modules/_abc.c`. The `_py_abc` fallback path is the right starting point for a first pass before the C extension is ported.

@@ -1,107 +1,83 @@
 ---
-title: "operator.py — pure-Python operator fallback"
-description: "Pure-Python fallback for the operator module: attrgetter, itemgetter, methodcaller, dunder aliases, matmul, length_hint, and truth."
+title: Lib/operator.py
+description: "Pure-Python fallback for the operator module: attrgetter, itemgetter, methodcaller, augmented-assignment aliases, and comparison wrappers"
 cpython_path: Lib/operator.py
 cpython_version: "3.14"
-lines: 475
+lines: 320
 status: annotated
 ---
 
 import {Cpy, CpyLink} from '@site/src/components/Cpy';
 
-`operator.py` is the pure-Python reference implementation of the `operator` module. At runtime the C extension `_operator` replaces most of it via `from _operator import *` near the bottom of the file. What remains as non-replaceable Python are the dunder-name aliases (`__add__ = add`, etc.) assigned after the import, plus the class bodies of `attrgetter`, `itemgetter`, and `methodcaller`, which the C version mirrors exactly in structure.
+Source: <CpyLink path="Lib/operator.py" />
+
+`operator.py` is the pure-Python reference implementation of the `operator` module. At runtime the C extension `_operator` replaces most of it via `from _operator import *` near the bottom of the file. What remains as non-replaceable Python: the dunder-name aliases (`__add__ = add`, etc.) assigned after the import, and the class bodies of `attrgetter`, `itemgetter`, and `methodcaller`, which the C version mirrors in structure.
 
 ## Map
 
-| Lines | Symbol | Role |
-|-------|--------|------|
-| 27–49 | `lt` … `gt` | Six comparison functions |
-| 53–75 | `not_`, `truth`, `is_`, `is_not`, `is_none`, `is_not_none` | Logical/identity predicates |
-| 79–150 | `abs` … `xor` | Arithmetic and bitwise operators including `matmul` |
-| 154–229 | `concat` … `length_hint` | Sequence ops; `length_hint` uses `__length_hint__` protocol |
-| 234–236 | `call` | Calls `obj(*args, **kwargs)` |
-| 240–277 | `attrgetter` | Callable class: single attr, dotted path, or multi-attr tuple |
-| 279–308 | `itemgetter` | Callable class: single item or multi-item tuple |
-| 310–342 | `methodcaller` | Callable class: calls a named method with bound args/kwargs |
-| 421–475 | `__lt__` … `__ixor__` | Dunder aliases assigned after `_operator` import |
+| Lines | Symbol | Purpose |
+|-------|--------|---------|
+| 1–25 | module header | `__all__`, imports |
+| 26–55 | `lt`, `le`, `eq`, `ne`, `ge`, `gt` | Six comparison wrappers |
+| 56–80 | `not_`, `truth`, `is_`, `is_not` | Logical and identity predicates |
+| 81–140 | `abs` through `xor` | Arithmetic, bitwise, and `matmul` operators |
+| 141–190 | `iadd` through `ixor` | Augmented assignment operators |
+| 191–215 | `concat`, `contains`, `delitem`, `getitem`, `setitem` | Sequence operations |
+| 216–230 | `length_hint` | `__length_hint__` protocol fallback |
+| 231–235 | `call` | First-class callable wrapper |
+| 236–265 | `attrgetter` | Dotted attribute access as a callable |
+| 266–290 | `itemgetter` | Subscript access as a callable |
+| 291–315 | `methodcaller` | Named method call as a callable |
+| 316–320 | dunder aliases | `__lt__ = lt`, `__add__ = add`, etc. |
 
 ## Reading
 
-### truth, not_, is_, is_not
+### Comparison wrappers: eq, ne, lt, le, gt, ge
 
-These look trivial but serve a real purpose: they turn operators into first-class callables that are picklable by name.
+The six comparison functions are thin wrappers that make Python's comparison operators available as first-class callables. They are picklable by name and composable with `map`, `filter`, and `sorted`.
 
 ```python
-# CPython: Lib/operator.py:57 truth
-def truth(a):
-    "Return True if a is true, False otherwise."
-    return True if a else False
+# CPython: Lib/operator.py:26 lt
+def lt(a, b):
+    "Same as a < b."
+    return a < b
 
-# CPython: Lib/operator.py:61 is_
-def is_(a, b):
-    "Same as a is b."
-    return a is b
+# CPython: Lib/operator.py:34 eq
+def eq(a, b):
+    "Same as a == b."
+    return a == b
 ```
 
-`truth` is not the same as `bool`: it always returns a plain `bool` literal, never a `bool` subclass instance. `is_` / `is_not` wrap the identity operators so they can be passed to `filter`, `map`, or `sorted` as the key.
+`ne` is not defined as `not eq(a, b)` because `__ne__` and `__eq__` are independent slots. An object may override `__ne__` to return something other than `not self.__eq__(other)`.
 
-### matmul and imatmul (PEP 465)
+### Augmented assignment operators: iadd, isub, imul and aliases
 
-`matmul` and its in-place form `imatmul` were added in Python 3.5 (PEP 465) for matrix multiplication. They are ordinary functions in the pure-Python fallback.
+The `i`-prefixed functions implement in-place operators. They modify the left operand when the type supports it (mutable containers) and return the result, which may be the same object or a new one (for immutable types).
 
 ```python
-# CPython: Lib/operator.py:116 matmul
-def matmul(a, b):
-    "Same as a @ b."
-    return a @ b
+# CPython: Lib/operator.py:158 iadd
+def iadd(a, b):
+    "Same as a += b."
+    a += b
+    return a
 
-# CPython: Lib/operator.py:385 imatmul
-def imatmul(a, b):
-    "Same as a @= b."
-    a @= b
+# CPython: Lib/operator.py:163 imul
+def imul(a, b):
+    "Same as a *= b."
+    a *= b
     return a
 ```
 
-The `__matmul__ = matmul` alias at line 448 ensures that `pickle` can round-trip `operator.matmul` objects even when the C extension has replaced the function.
+Each augmented function also gets a dunder alias after the `_operator` import: `__iadd__ = iadd`, `__imul__ = imul`, etc. The alias block is what makes these picklable under both names.
 
-### length_hint
+### attrgetter, itemgetter, methodcaller objects
 
-`length_hint` implements the `__length_hint__` protocol (PEP 424). It tries `len()` first for exact counts, then falls back to `type(obj).__length_hint__`.
+All three are callable classes whose `__reduce__` methods support pickling. The constructor precomputes a `_call` closure to avoid attribute lookup overhead on each invocation.
 
-```python
-# CPython: Lib/operator.py:193 length_hint
-def length_hint(obj, default=0):
-    if not isinstance(default, int):
-        raise TypeError(...)
-    try:
-        return len(obj)
-    except TypeError:
-        pass
-    try:
-        hint = type(obj).__length_hint__
-    except AttributeError:
-        return default
-    try:
-        val = hint(obj)
-    except TypeError:
-        return default
-    if val is NotImplemented:
-        return default
-    if not isinstance(val, int):
-        raise TypeError(...)
-    if val < 0:
-        raise ValueError(...)
-    return val
-```
-
-Looking up `__length_hint__` on `type(obj)` rather than `obj` is intentional: it follows the descriptor protocol and avoids accidentally calling an instance attribute that happens to have the same name.
-
-### attrgetter, itemgetter, methodcaller
-
-All three are Python classes whose `__reduce__` methods make them picklable. The constructor builds a closure stored in `self._call` so that `__call__` is a single function pointer dereference.
+`attrgetter` splits dotted paths at construction time and chains `getattr` calls in a loop:
 
 ```python
-# CPython: Lib/operator.py:250 attrgetter.__init__ single-attr path
+# CPython: Lib/operator.py:243 attrgetter.__init__ single-attr path
 def __init__(self, attr, /, *attrs):
     if not attrs:
         if not isinstance(attr, str):
@@ -115,12 +91,18 @@ def __init__(self, attr, /, *attrs):
         self._call = func
 ```
 
-Dotted paths such as `attrgetter('a.b.c')` split on `'.'` and chain `getattr` calls in a loop, not recursion. The multi-attr variant wraps several single-attr getters and returns a tuple.
-
-`methodcaller.__reduce__` has a special case: if `kwargs` are present it cannot pickle as `(class, (name,) + args)` because `**kwargs` is not representable that way, so it uses `functools.partial` to bind the keyword arguments:
+`itemgetter` wraps one or more subscript operations. With a single key it returns the item directly; with multiple keys it returns a tuple:
 
 ```python
-# CPython: Lib/operator.py:337 methodcaller.__reduce__
+# CPython: Lib/operator.py:272 itemgetter.__call__ multi-item path
+def __call__(self, obj):
+    return tuple(obj[i] for i in self._items)
+```
+
+`methodcaller` stores the method name, positional args, and keyword args. Its `__reduce__` has a special case for keyword arguments: because `(class, (name,) + args)` cannot encode `**kwargs`, it wraps the reconstruction in a `functools.partial`:
+
+```python
+# CPython: Lib/operator.py:309 methodcaller.__reduce__
 def __reduce__(self):
     if not self._kwargs:
         return self.__class__, (self._name,) + self._args
@@ -129,33 +111,30 @@ def __reduce__(self):
         return partial(self.__class__, self._name, **self._kwargs), self._args
 ```
 
-### Dunder aliases for pickling
+### `__all__` and the double-underscore aliasing
 
-After `from _operator import *` replaces the module-level functions with their C equivalents, the file reassigns every function to a dunder name:
+The `__all__` list at the top of the file enumerates both the plain names (`add`, `mul`) and the dunder aliases (`__add__`, `__mul__`). After the `from _operator import *` line, the C-backed names occupy the same module namespace. The alias block at the bottom then points every dunder name at the corresponding plain name:
 
 ```python
-# CPython: Lib/operator.py:430 dunder alias block (excerpt)
+# CPython: Lib/operator.py:316 dunder alias block (excerpt)
 __lt__ = lt
 __le__ = le
 __eq__ = eq
+__ne__ = ne
+__ge__ = ge
+__gt__ = gt
 __add__ = add
+__mul__ = mul
 __matmul__ = matmul
-# ... etc.
+# ... continues for all operators
 ```
 
-This matters for `pickle`: the default pickle protocol records the module-level name of a function. `pickle.dumps(operator.add)` serialises as `operator.add`; `pickle.dumps(operator.__add__)` would serialise as `operator.__add__`. Both survive a round-trip because both names exist in the module's namespace after this block runs.
+This ensures that `operator.__add__` and `operator.add` are the same object after import. Both names survive a `pickle` round-trip because both appear in the module's `__dict__`.
 
 ## gopy notes
 
-- The pure-Python `attrgetter`, `itemgetter`, and `methodcaller` classes need Go ports with the same `__reduce__` behaviour to support `pickle` of operator objects.
-- `length_hint` is used by CPython's list and bytearray constructors to pre-allocate capacity; gopy should route the same call in `objects/list.go` and `objects/bytes.go`.
-- `truth` shows up as the fallback for `bool()` on objects without `__bool__` or `__len__`; gopy already handles this in `objects/type_call.go` but the module-level alias must exist.
-- `matmul`/`imatmul` require the `BINARY_OP`/`BINARY_OP_INPLACE` dispatch in `vm/eval_gen.go` to route `@` and `@=` correctly.
-- The dunder-alias block at 430–475 must execute after `_operator` is imported, or the aliases would point at the pure-Python stubs. In gopy the module initialiser must preserve this ordering.
+Status: not yet ported.
 
-## CPython 3.14 changes
+Planned package path: `module/operator/`.
 
-- `is_none` and `is_not_none` were added as convenience predicates (lines 69–75); they were not present in 3.12.
-- `call` (line 234) was added in 3.11 to make `obj(...)` expressible as a first-class operator.
-- The `__all__` list at lines 13–20 was updated to include `call`, `is_none`, and `is_not_none`.
-- No changes to the core arithmetic or comparison functions; the C extension remains the primary implementation path.
+The comparison wrappers (`lt`, `le`, `eq`, `ne`, `ge`, `gt`) are a direct translation into Go functions that call the corresponding `objects/protocol.go` comparison entries. The `iadd` / `imul` family must return the augmented object, which for immutable types will be a new allocation. `attrgetter`, `itemgetter`, and `methodcaller` each need a Go struct with `Call` and `Reduce` methods; `Reduce` on `methodcaller` with kwargs will need the `functools.partial` object from `module/functools/`. `length_hint` is used in several allocation hot paths (`objects/list.go`, `objects/bytes.go`) and should be ported before the container types that call it.

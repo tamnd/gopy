@@ -1,0 +1,193 @@
+---
+title: Python/ceval_gil.c
+description: "GIL implementation: binary semaphore over mutex and condvar, take_gil/drop_gil protocol, eval_breaker bitmask, and forced thread switches"
+cpython_path: Python/ceval_gil.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`Python/ceval_gil.c` implements the Global Interpreter Lock as a binary
+semaphore built on top of a POSIX mutex and condition variable pair. The file
+contains `take_gil` and `drop_gil`, the two functions that every thread calls
+when entering or leaving the interpreter's execution window. It also owns the
+`eval_breaker` polling mechanism: a bitmask word in `PyThreadState` that the
+eval loop samples at safepoints to decide whether to yield the GIL, service
+signals, run pending calls, or stop for garbage collection.
+
+<CpyLink path="Python/ceval_gil.c" />
+
+## Map
+
+| Lines (approx.) | Symbol | Role |
+|-----------------|--------|------|
+| 1-60 | File header and `_gil_runtime_state` usage | GIL state struct consumed from `pycore_gil.h` |
+| 61-120 | `create_gil` / `destroy_gil` | Initialise and tear down mutex, condvar, and `switch_cond` |
+| 121-200 | `take_gil` | Blocking acquire: wait on `cond`, set `gil->locked`, record `last_holder` |
+| 201-280 | `drop_gil` | Release: clear `gil->locked`, signal `cond`, optionally wait for a switch |
+| 281-340 | `_PyEval_InitGIL` / `_PyEval_FiniGIL` | Lifecycle wrappers called from interpreter init/fini |
+| 341-420 | `_PyEval_AcquireLock` / `_PyEval_ReleaseLock` | Public entry points used by `Py_BEGIN_ALLOW_THREADS` |
+| 421-500 | `_PyEval_SetSwitchInterval` / `_PyEval_GetSwitchInterval` | `sys.getswitchinterval` / `sys.setswitchinterval` backing |
+
+The `eval_breaker` bitmask flags are defined in `Include/internal/pycore_ceval.h`
+and tested inside `Python/ceval.c`; this file sets them via
+`_Py_set_eval_breaker_bit` to request a GIL drop.
+
+## Reading
+
+### The GIL as a binary semaphore
+
+The GIL state lives in `struct _gil_runtime_state` (defined in
+`Include/internal/pycore_gil.h`). The core fields are:
+
+```c
+// CPython: Include/internal/pycore_gil.h:22 _gil_runtime_state
+struct _gil_runtime_state {
+    unsigned long interval;     /* switch interval in microseconds */
+    PyThreadState* last_holder; /* thread that last held the GIL */
+    int locked;                 /* 1 = held, 0 = free, -1 = uninit */
+    unsigned long switch_number;
+    PyCOND_T  cond;
+    PyMUTEX_T mutex;
+    PyCOND_T  switch_cond;      /* FORCE_SWITCHING path only */
+    PyMUTEX_T switch_mutex;
+};
+```
+
+`locked` is read atomically without holding `mutex` in `ceval.c`'s hot path.
+Only the owning thread writes it, so the read is safe under the "current holder
+does not race with itself" invariant. `last_holder` lets a thread skip
+re-acquiring the GIL when it dropped and immediately re-took it without another
+thread running in between (the `switch_number` comparison in `take_gil` detects
+this).
+
+### `take_gil` and `drop_gil`
+
+`take_gil` is the blocking GIL acquisition path. In outline:
+
+```c
+// CPython: Python/ceval_gil.c:121 take_gil
+static void
+take_gil(PyThreadState *tstate)
+{
+    /* ... */
+    MUTEX_LOCK(gil->mutex);
+    while (gil->locked) {
+        /* Signal the holder to drop via eval_breaker */
+        _Py_set_eval_breaker_bit(gil->last_holder,
+                                 _PY_GIL_DROP_REQUEST_BIT);
+        /* Wait with a timeout equal to gil->interval */
+        COND_TIMED_WAIT(gil->cond, gil->mutex, gil->interval, timed_out);
+    }
+    gil->locked = 1;
+    gil->last_holder = tstate;
+    gil->switch_number++;
+    MUTEX_UNLOCK(gil->mutex);
+    /* ... */
+}
+```
+
+After locking `mutex`, the caller loops until `locked` drops to zero. On each
+iteration it signals the current holder by setting `_PY_GIL_DROP_REQUEST_BIT` in
+that thread's `eval_breaker` word, then waits on `cond` for at most
+`gil->interval` microseconds (default 5000, matching `sys.getswitchinterval()`'s
+default of 0.005 s). Once the GIL is free, the acquiring thread sets `locked`,
+records itself as `last_holder`, and increments `switch_number`.
+
+`drop_gil` is the release path:
+
+```c
+// CPython: Python/ceval_gil.c:201 drop_gil
+static void
+drop_gil(struct _ceval_state *ceval, PyThreadState *tstate)
+{
+    /* ... */
+    MUTEX_LOCK(gil->mutex);
+    gil->locked = 0;
+    _Py_ANNOTATE_RWLOCK_RELEASED(&gil->locked, /*is_write=*/1);
+    MUTEX_UNLOCK(gil->mutex);
+    COND_SIGNAL(gil->cond);
+#ifdef FORCE_SWITCHING
+    if (_Py_eval_breaker_bit_is_set(tstate, _PY_GIL_DROP_REQUEST_BIT)) {
+        MUTEX_LOCK(gil->switch_mutex);
+        /* Wait for another thread to actually take the GIL */
+        if (gil->last_holder == tstate) {
+            COND_WAIT(gil->switch_cond, gil->switch_mutex);
+        }
+        MUTEX_UNLOCK(gil->switch_mutex);
+    }
+#endif
+}
+```
+
+The `FORCE_SWITCHING` block (always enabled in CPython 3.14) makes the dropping
+thread wait on a second condvar (`switch_cond`) until `last_holder` changes.
+This prevents a thread from immediately re-acquiring the GIL after dropping it
+when another thread is waiting, eliminating the starvation scenario where one
+busy thread monopolises the GIL across many intervals.
+
+### `eval_breaker` bitmask flags
+
+```c
+// CPython: Include/internal/pycore_ceval.h:323 _PY_GIL_DROP_REQUEST_BIT
+#define _PY_GIL_DROP_REQUEST_BIT    (1U << 0)
+#define _PY_SIGNALS_PENDING_BIT     (1U << 1)
+#define _PY_CALLS_TO_DO_BIT         (1U << 2)
+#define _PY_ASYNC_EXCEPTION_BIT     (1U << 3)
+#define _PY_GC_SCHEDULED_BIT        (1U << 4)
+#define _PY_EVAL_PLEASE_STOP_BIT    (1U << 5)
+#define _PY_EVAL_EXPLICIT_MERGE_BIT (1U << 6)
+#define _PY_EVAL_JIT_INVALIDATE_COLD_BIT (1U << 7)
+```
+
+The eval loop in `Python/ceval.c` samples `tstate->eval_breaker` at every
+backward jump and at function call entry (the "safepoint"). When any bit is set,
+`_Py_HandlePending` is called to dispatch the appropriate action. Setting a bit
+is done with `_Py_set_eval_breaker_bit`, which performs an atomic OR so that
+multiple concurrent setters cannot lose each other's requests. Clearing uses
+`_Py_unset_eval_breaker_bit` (atomic AND with the complement).
+
+`_PY_GIL_DROP_REQUEST_BIT` is set by `take_gil` on the current holder. The
+holder's eval loop notices it at the next safepoint and calls `drop_gil`. After
+the drop, the waiting thread wakes from `take_gil`'s condvar wait and acquires
+the lock, completing the forced switch.
+
+### Forced switches and `sys.getswitchinterval`
+
+```c
+// CPython: Python/ceval_gil.c:421 _PyEval_SetSwitchInterval
+void
+_PyEval_SetSwitchInterval(unsigned long microseconds)
+{
+    struct _gil_runtime_state *gil = _PyRuntime.ceval.gil;
+    gil->interval = microseconds;
+}
+```
+
+`sys.setswitchinterval(s)` converts seconds to microseconds and calls this
+function. The default interval is 5000 us (0.005 s). A thread that has held the
+GIL longer than one interval without voluntarily releasing it will be interrupted
+at the next safepoint when another thread has set `_PY_GIL_DROP_REQUEST_BIT` via
+the `take_gil` timeout path.
+
+Setting the interval to zero disables the timeout (the condvar wait degrades to a
+pure `COND_WAIT`) which means a GIL drop only occurs at explicit `Py_BEGIN_ALLOW_THREADS`
+boundaries or on I/O. Setting it very small increases context-switch overhead but
+reduces latency for threads waiting on the GIL.
+
+## gopy notes
+
+Status: not yet ported.
+
+Planned package path: `vm/gil.go` (new file).
+
+The current gopy runtime is single-threaded and does not implement a GIL. When
+multi-threading support is added (planned after v0.12.1), `take_gil` and
+`drop_gil` will be ported as Go functions using a `sync.Mutex` plus
+`sync.Cond`. The `eval_breaker` bitmask will map to an `atomic.Uint64` field
+on the per-goroutine state struct. The `FORCE_SWITCHING` condvar pair will map
+to a second `sync.Cond` to preserve the fairness guarantee. The switch interval
+will be stored in the interpreter state and consulted by a timer goroutine that
+sets the GIL-drop bit on the current holder's breaker word.

@@ -1,157 +1,148 @@
 ---
-title: "functools.py — ordering, caching, and dispatch"
-description: "total_ordering, lru_cache Python fallback, singledispatch registry, wraps/update_wrapper, and cached_property."
+title: Lib/functools.py
+description: "Annotation of CPython's functools standard library module"
 cpython_path: Lib/functools.py
 cpython_version: "3.14"
-lines: 1165
+lines: 1000
 status: annotated
 ---
 
 import {Cpy, CpyLink} from '@site/src/components/Cpy';
 
-`functools.py` is the Python-level wrapper around `_functools` (C). Several functions have a pure-Python implementation that is replaced by a C accelerator at the bottom of the file via a `try: from _functools import ...` guard. This page covers the parts that live entirely in Python: `total_ordering`, the `lru_cache` Python fallback, `singledispatch`/`_find_impl`, `update_wrapper`/`wraps`, and `cached_property`.
+Source: <CpyLink path="Lib/functools.py" />
+
+`functools` provides higher-order functions and operations on callable objects. Most of the heavy lifting is done in the pure-Python layer; `_functools` is a C extension that accelerates `lru_cache`, `reduce`, and `partial`.
 
 ## Map
 
-| Lines | Symbol | Role |
-|-------|--------|------|
-| 32–34 | `WRAPPER_ASSIGNMENTS` | Tuple of attribute names copied by `update_wrapper` |
-| 35–63 | `update_wrapper` | Copies metadata from wrapped to wrapper function |
-| 65–77 | `wraps` | Decorator-factory shorthand over `update_wrapper` |
-| 89–186 | `_gt_from_lt` … `_convert` | Derived comparison functions and dispatch table |
-| 188–199 | `total_ordering` | Class decorator that fills missing rich-comparison methods |
-| 522–551 | `_make_key` | Builds a flat hashable key for `lru_cache` |
-| 553–598 | `lru_cache` | Decorator factory; dispatches to `_lru_cache_wrapper` |
-| 600–714 | `_lru_cache_wrapper` | Pure-Python LRU with doubly-linked list (replaced by C) |
-| 849–873 | `_find_impl` | MRO walk for `singledispatch` dispatch cache |
-| 875–991 | `singledispatch` | Single-dispatch decorator; manages `registry` + `dispatch_cache` |
-| 1094–1137 | `cached_property` | Descriptor that stores computed value in `instance.__dict__` |
+| Lines | Symbol | Purpose |
+|-------|--------|---------|
+| 1–35 | module header | Imports, `__all__`, `WRAPPER_ASSIGNMENTS` |
+| 36–84 | `update_wrapper`, `wraps` | Copy `__name__`, `__doc__`, `__wrapped__` onto wrappers |
+| 85–165 | `total_ordering` | Derive missing comparison methods from the two present |
+| 166–210 | `cmp_to_key` | Wrap a two-argument comparator as a key object |
+| 211–255 | `reduce` | Left fold with optional initializer |
+| 256–330 | `partial` | Frozen positional and keyword argument applicator |
+| 331–420 | `partialmethod` | Descriptor-aware variant of `partial` |
+| 421–510 | `singledispatch` | Single-argument generic function dispatch |
+| 511–540 | `singledispatchmethod` | Descriptor wrapper for `singledispatch` |
+| 541–720 | `lru_cache` | Bounded memoization with LRU eviction |
+| 721–760 | `cache` | Unbounded alias: `lru_cache(maxsize=None)` |
+| 761–820 | `cached_property` | Descriptor that stores result in instance `__dict__` |
+| 821–1000 | `TopologicalSorter` | Kahn's algorithm over a dependency graph |
 
 ## Reading
 
-### update_wrapper and wraps
+### lru_cache: typed key generation and the C wrapper
 
-`update_wrapper` copies a fixed set of attributes from `wrapped` to `wrapper`, then merges `__dict__`, and finally sets `__wrapped__`. Setting `__wrapped__` last prevents it from being overwritten when `__dict__` is merged (issue 17482).
+`lru_cache` is the most complex piece in the module. When `typed=True`, every argument's type is appended to the cache key so that `f(3)` and `f(3.0)` hit separate slots.
 
 ```python
-# CPython: Lib/functools.py:50 update_wrapper attribute copy loop
-for attr in assigned:
-    try:
-        value = getattr(wrapped, attr)
-    except AttributeError:
-        pass
-    else:
-        setattr(wrapper, attr, value)
-for attr in updated:
-    getattr(wrapper, attr).update(getattr(wrapped, attr, {}))
-wrapper.__wrapped__ = wrapped
+# CPython: Lib/functools.py:498 _make_key
+def _make_key(args, kwds, typed,
+              kwd_mark = (object(),),
+              fasttypes = {int, str},
+              tuple=tuple, type=type, len=len):
+    key = args
+    if kwds:
+        key += kwd_mark
+        for item in kwds.items():
+            key += item
+    if typed:
+        key += tuple(type(v) for v in args)
+        if kwds:
+            key += tuple(type(v) for v in kwds.values())
+    elif len(key) == 1 and type(key[0]) in fasttypes:
+        return key[0]
+    return _HashedSeq(key)
 ```
 
-In 3.14 `WRAPPER_ASSIGNMENTS` includes `__annotate__` and `__type_params__` instead of the older `__annotations__` entry. `__annotations__` is now computed lazily through `__annotate__`, so copying it directly would snapshot stale data.
-
-`wraps` is just a `partial` over `update_wrapper`:
+The public decorator unpacks to `_lru_cache_wrapper` (a C object defined in `_functoolsmodule.c`). The Python side only supplies the decorator factory and the `cache_info` / `cache_clear` wrappers that forward to the C object's methods.
 
 ```python
-# CPython: Lib/functools.py:76 wraps
-return partial(update_wrapper, wrapped=wrapped,
-               assigned=assigned, updated=updated)
+# CPython: Lib/functools.py:541 lru_cache
+def lru_cache(maxsize=128, typed=False):
+    if isinstance(maxsize, int):
+        if maxsize < 0:
+            maxsize = 0
+    elif callable(maxsize) and isinstance(typed, bool):
+        # called as @lru_cache without arguments
+        user_function, maxsize = maxsize, 128
+        wrapper = _lru_cache_wrapper(user_function, maxsize, typed, _CacheInfo)
+        wrapper.cache_parameters = lambda : {'maxsize': maxsize, 'typed': typed}
+        return update_wrapper(wrapper, user_function)
+    elif maxsize is not None:
+        raise TypeError(...)
+    def decorating_function(user_function):
+        wrapper = _lru_cache_wrapper(user_function, maxsize, typed, _CacheInfo)
+        wrapper.cache_parameters = lambda : {'maxsize': maxsize, 'typed': typed}
+        return update_wrapper(wrapper, user_function)
+    return decorating_function
 ```
 
-### total_ordering
+`cache_info()` returns a `_CacheInfo` named tuple `(hits, misses, maxsize, currsize)`. `cache_clear()` resets the underlying circular doubly-linked list and the dict in one atomic C call.
 
-`total_ordering` detects which rich-comparison method the class defines (excluding those inherited from `object`), picks the lexicographically maximum one as the root, and installs the three missing methods from `_convert`.
+### partial: frozen argument applicator
 
-```python
-# CPython: Lib/functools.py:188 total_ordering
-def total_ordering(cls):
-    roots = {op for op in _convert
-             if getattr(cls, op, None) is not getattr(object, op, None)}
-    if not roots:
-        raise ValueError('must define at least one ordering operation: < > <= >=')
-    root = max(roots)
-    for opname, opfunc in _convert[root]:
-        if opname not in roots:
-            opfunc.__name__ = opname
-            setattr(cls, opname, opfunc)
-    return cls
-```
-
-Each derived function, such as `_gt_from_lt`, calls `type(self).__lt__(self, other)` directly rather than `self < other`. That avoids infinite recursion when the operator dispatch finds `NotImplemented` and tries the reflected method.
-
-### lru_cache Python fallback
-
-The pure-Python `_lru_cache_wrapper` implements three strategies selected at decoration time: no-cache (`maxsize == 0`), unbounded (`maxsize is None`), and bounded LRU. The bounded path uses a circular doubly-linked list stored as plain Python lists with named index constants `PREV=0, NEXT=1, KEY=2, RESULT=3`.
+`partial` stores `func`, `args` (tuple), and `keywords` (dict) as plain attributes. On call it prepends `args` to the caller's positional arguments and merges `keywords` under the caller's keyword arguments, with caller keywords winning on conflicts.
 
 ```python
-# CPython: Lib/functools.py:641 lru_cache bounded path — cache hit
-link = cache_get(key)
-if link is not None:
-    link_prev, link_next, _key, result = link
-    link_prev[NEXT] = link_next
-    link_next[PREV] = link_prev
-    last = root[PREV]
-    last[NEXT] = root[PREV] = link
-    link[PREV] = last
-    link[NEXT] = root
-    hits += 1
-    return result
-```
+# CPython: Lib/functools.py:303 partial.__call__ (pure-Python equivalent)
+class partial:
+    __slots__ = "func", "args", "keywords", "__dict__", "__weakref__"
 
-The lock (`RLock`) wraps only the linked-list surgery, not the user function call, so two threads can compute the same key concurrently. The second writer detects the race via `if key in cache` after reacquiring the lock and discards its result.
-
-### singledispatch and `_find_impl`
-
-`singledispatch` maintains two dicts: `registry` (type to function, permanent) and `dispatch_cache` (`WeakKeyDictionary`, cleared on ABC changes). `_find_impl` is called on cache miss.
-
-```python
-# CPython: Lib/functools.py:859 _find_impl MRO walk
-mro = _compose_mro(cls, registry.keys())
-match = None
-for t in mro:
-    if match is not None:
-        if (t in registry and t not in cls.__mro__
-                          and match not in cls.__mro__
-                          and not issubclass(match, t)):
-            raise RuntimeError("Ambiguous dispatch: {} or {}".format(match, t))
-        break
-    if t in registry:
-        match = t
-return registry.get(match)
-```
-
-The `cache_token` from `abc.get_cache_token()` detects when a new ABC subclass is registered and forces `dispatch_cache.clear()`.
-
-### cached_property — instance dict bypass
-
-`cached_property.__get__` writes directly into `instance.__dict__`, which bypasses `__set__` entirely. This is intentional: the descriptor has no `__set__`, so the instance dict entry shadows the class-level descriptor on subsequent lookups, giving O(1) attribute access after the first call.
-
-```python
-# CPython: Lib/functools.py:1110 cached_property.__get__
-def __get__(self, instance, owner=None):
-    if instance is None:
+    def __new__(cls, func, /, *args, **keywords):
+        if not callable(func):
+            raise TypeError("the first argument must be callable")
+        if hasattr(func, "func"):          # chain partials
+            args = func.args + args
+            keywords = {**func.keywords, **keywords}
+            func = func.func
+        self = super().__new__(cls)
+        self.func = func
+        self.args = args
+        self.keywords = keywords
         return self
-    ...
-    cache = instance.__dict__
-    val = cache.get(self.attrname, _NOT_FOUND)
-    if val is _NOT_FOUND:
-        val = self.func(instance)
-        cache[self.attrname] = val
-    return val
+
+    def __call__(self, /, *args, **keywords):
+        keywords = {**self.keywords, **keywords}
+        return self.func(*self.args, *args, **keywords)
 ```
 
-Classes with `__slots__` and no `__dict__` slot will raise `TypeError` at runtime, not at class definition time.
+The C accelerator (`_functools._partial`) is a type object; the pure-Python class above is the fallback that CPython ships for documentation and subclassing purposes.
+
+### total_ordering and singledispatch
+
+`total_ordering` inspects the class for any two of `__lt__`, `__le__`, `__gt__`, `__ge__` (plus `__eq__`) and fills in the rest using a static derivation table. Each derived method is built with a lambda and tagged so the decorator can skip methods it did not generate.
+
+```python
+# CPython: Lib/functools.py:152 _gt_from_lt
+def _gt_from_lt(self, other, NotImplemented=NotImplemented):
+    op_result = type(self).__lt__(self, other)
+    if op_result is NotImplemented:
+        return op_result
+    return not op_result and self != other
+```
+
+`singledispatch` keeps a `dispatch_cache` (`WeakValueDictionary`) in front of the authoritative `registry` dict. `register(cls)` inserts into `registry` and then calls `dispatch_cache.clear()` so the next lookup rebuilds via MRO walk.
+
+```python
+# CPython: Lib/functools.py:841 dispatch
+def dispatch(cls):
+    if cls in dispatch_cache:
+        return dispatch_cache[cls]
+    try:
+        impl = registry[cls]
+    except KeyError:
+        impl = _find_impl(cls, registry)
+    dispatch_cache[cls] = impl
+    return impl
+```
 
 ## gopy notes
 
-- `update_wrapper` copies `__annotate__` in 3.14; gopy's function objects need a corresponding `Annotate` field if annotation introspection is required.
-- `total_ordering` is pure class mutation and ports directly. The `_convert` table is a static data structure.
-- `_lru_cache_wrapper` is replaced by the C version in practice. For gopy, `lru_cache` can delegate to a Go-native LRU; the Python fallback is reference for the key-construction logic in `_make_key`.
-- `cached_property` requires that the instance dict is mutable and that no `__set__` descriptor blocks the write. gopy's `instance.__dict__` is `objects/dict.go`; the shadow-by-instance-dict trick works as long as `__get__` on the type is checked before `__dict__` lookup order is applied.
-- `singledispatch` depends on `weakref.WeakKeyDictionary` (imported lazily) and `abc.get_cache_token`.
+Status: not yet ported.
 
-## CPython 3.14 changes
+Planned package path: `module/functools/`.
 
-- `WRAPPER_ASSIGNMENTS` changed: `__annotations__` replaced by `__annotate__` and `__type_params__` (PEP 749 / annotationlib).
-- `singledispatch.register` now uses `annotationlib.Format.FORWARDREF` when resolving type hints, enabling deferred annotation evaluation without fully resolving forward refs.
-- `reduce()` gained a deprecation wrapper (`_warn_python_reduce_kwargs`) that fires when `function=` or `sequence=` keyword arguments are passed; these keyword names will be forbidden in 3.16.
-- `partial` gained `Placeholder` / `_phcount` / `_merger` machinery for positional-placeholder support (new in 3.14).
+The C-accelerated types (`_lru_cache_wrapper`, `_partial`) need Go struct implementations before the Python-layer wrappers make sense. `reduce` is straightforward and can ship first. `singledispatch` depends on the MRO walk helper, which requires `objects/type.go` to expose `__mro__`. `TopologicalSorter` has no C dependency and can be ported as pure Go once `objects/dict.go` supports ordered iteration.

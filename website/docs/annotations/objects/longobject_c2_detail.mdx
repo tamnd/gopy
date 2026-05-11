@@ -1,0 +1,132 @@
+---
+title: "Objects/longobject.c (arithmetic)"
+description: "Arithmetic internals of CPython's integer object — digit arrays, Karatsuba multiplication, school division, fast exponentiation, and bitwise operations"
+cpython_path: Objects/longobject.c
+cpython_version: "3.14"
+lines: 6500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Objects/longobject.c" />
+
+## Map
+
+| Symbol | Approx. lines | Role |
+|---|---|---|
+| `long_add` | ~3200 | Digit-array addition, dispatches on sign |
+| `long_sub` | ~3260 | Digit-array subtraction, sign bookkeeping |
+| `long_mul` | ~3350 | Grade-school and Karatsuba multiply |
+| `long_divrem` | ~3600 | School long division, quotient + remainder |
+| `long_pow` | ~4100 | Sliding-window fast exponentiation |
+| `long_bitwise` | ~4800 | AND / OR / XOR over two's-complement digits |
+| `long_invert` | ~4900 | Two's-complement bitwise NOT |
+
+## Reading
+
+### Addition and subtraction (`long_add`, `long_sub`)
+
+Both functions work directly on the `digit` array stored inside `PyLongObject`. Addition reduces to a single pass that accumulates carry across digits; subtraction borrows in the same direction. The sign of each operand determines which branch is taken, so the inner loop always sees two non-negative magnitudes.
+
+```c
+// CPython: Objects/longobject.c:3200 long_add
+static PyObject *
+long_add(PyObject *a, PyObject *b)
+{
+    PyLongObject *z;
+    CHECK_BINOP(a, b);
+    if (IS_MEDIUM_VALUE(a) && IS_MEDIUM_VALUE(b))
+        return _PyLong_FromSTwoDigits(
+            medium_value((PyLongObject *)a) +
+            medium_value((PyLongObject *)b));
+    z = x_add((PyLongObject *)a, (PyLongObject *)b);
+    ...
+}
+```
+
+The `IS_MEDIUM_VALUE` fast path avoids heap allocation for integers that fit in two digits (roughly -2^60 to 2^60 on 64-bit builds). Only the slow path calls `x_add` / `x_sub`, which loop over the full digit arrays.
+
+### Multiplication and the Karatsuba threshold (`long_mul`)
+
+For operands below `KARATSUBA_CUTOFF` digits (70 as of CPython 3.14), `long_mul` falls back to the O(n^2) grade-school algorithm. Above that threshold it recurses with Karatsuba's identity, splitting each operand at the midpoint and performing three recursive multiplications instead of four.
+
+```c
+// CPython: Objects/longobject.c:3450 k_mul
+static PyLongObject *
+k_mul(PyLongObject *a, PyLongObject *b)
+{
+    Py_ssize_t asize = _PyLong_DigitCount(a);
+    Py_ssize_t bsize = _PyLong_DigitCount(b);
+    ...
+    if (asize <= KARATSUBA_CUTOFF) {
+        if (asize == 0)
+            return (PyLongObject *)PyLong_FromLong(0);
+        return x_mul(a, b);
+    }
+    ...
+}
+```
+
+The recursive split creates temporaries on the heap. `k_lopsided_mul` handles cases where one operand is substantially longer than the other by breaking the longer one into chunks rather than halving both.
+
+### School division (`long_divrem`)
+
+Division uses the classical multi-precision algorithm from Knuth vol. 2, section 4.3.1. The divisor is normalised (shifted left so its top digit has its high bit set), the quotient digits are estimated one at a time using a two-digit approximation, and each estimate is corrected by at most two subtractions.
+
+```c
+// CPython: Objects/longobject.c:3620 x_divrem
+static int
+x_divrem(PyLongObject *v1, PyLongObject *w1,
+         PyLongObject **prem)
+{
+    ...
+    /* normalize */
+    d = PyLong_SHIFT - bit_length_digit(w->long_value.ob_digit[size_w - 1]);
+    ...
+}
+```
+
+`long_divrem` wraps `x_divrem` and restores signs. `PyLong_DivMod` and the `//` / `%` operators all funnel through this path.
+
+### Fast exponentiation (`long_pow`)
+
+`long_pow` implements a left-to-right sliding-window exponentiation. The window size is chosen based on the bit length of the exponent. For modular exponentiation (`pow(a, b, m)`), it reduces after every multiply so intermediate values stay bounded.
+
+```c
+// CPython: Objects/longobject.c:4100 long_pow
+static PyObject *
+long_pow(PyObject *v, PyObject *w, PyObject *x)
+{
+    ...
+    /* table[i] = a**(2i+1) % c, i=0, 1, ..., 2**(FIVEARY_CUTOFF-1)-1 */
+    ...
+}
+```
+
+The modular path calls `long_divrem` after every window step. The non-modular path accumulates the result with `long_mul`.
+
+### Bitwise operations and two's-complement inversion
+
+`long_bitwise` handles AND, OR, and XOR by converting each operand to a logical two's-complement digit array (negative numbers are stored sign-magnitude internally), applying the operation, then converting back. `long_invert` implements `~x` as `-(x+1)`.
+
+```c
+// CPython: Objects/longobject.c:4850 long_bitwise
+static PyObject *
+long_bitwise(PyLongObject *a, char op, PyLongObject *b)
+{
+    digit maska, maskb;   /* 0 or PyLong_MASK */
+    int negz;
+    ...
+}
+```
+
+The sign-magnitude-to-two's-complement conversion inside `long_bitwise` is a notable source of allocation pressure on tight loops over large integers.
+
+## gopy notes
+
+Status: not yet ported.
+
+Planned package path: `objects/` (alongside `objects/int.go`).
+
+The digit-array arithmetic will be backed by Go's `math/big.Int` for correctness, with a thin wrapper that matches CPython's `PyLongObject` API surface (`long_add`, `long_mul`, `long_divrem`, `long_pow`, `long_bitwise`). The Karatsuba path can delegate to `big.Int.Mul` since the Go runtime already selects the algorithm automatically. The two's-complement handling in `long_bitwise` needs an explicit port because `math/big` uses sign-magnitude storage, matching CPython's internal layout.
