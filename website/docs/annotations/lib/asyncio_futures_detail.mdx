@@ -1,34 +1,36 @@
 ---
-title: "futures.py — Future"
-description: "Annotated reading of the Future class in CPython 3.14 asyncio"
+title: Lib/asyncio/futures.py
+description: "Annotated reading: Future state machine, callbacks, and the yield protocol in CPython 3.14 asyncio"
 cpython_path: Lib/asyncio/futures.py
 cpython_version: "3.14"
-lines: 420
+lines: 400
 status: annotated
 ---
 
 import {Cpy, CpyLink} from '@site/src/components/Cpy';
 
-`futures.py` defines `Future`, the primitive awaitable that underpins every asyncio coroutine suspension. `Task` is a `Future` subclass. Understanding `Future` state transitions is prerequisite to reading the task step loop.
+Source: <CpyLink path="Lib/asyncio/futures.py" />
+
+`futures.py` defines `Future`, the primitive awaitable that underpins every asyncio coroutine suspension. `Task` is a `Future` subclass. Understanding `Future` state transitions is a prerequisite to reading the task step loop. At import time the C accelerator (`_asyncio` extension module) shadows this pure-Python class; this file remains the canonical reference for porting.
 
 ## Map
 
 | Lines | Symbol | Role |
 |-------|--------|------|
-| 1–30 | module prologue | imports, `_PENDING`, `_CANCELLED`, `_FINISHED` sentinel strings |
-| 31–80 | `isfuture` / `_get_loop` | type-check helpers |
-| 81–150 | `Future.__init__` | state, callbacks list, loop reference, debug traceback |
-| 151–200 | `cancel` | transition to `_CANCELLED`, schedule callbacks |
-| 201–260 | `set_result` / `set_exception` | transition to `_FINISHED`, schedule callbacks |
-| 261–310 | `result` / `exception` | retrieve stored value or re-raise |
-| 311–360 | `add_done_callback` / `_schedule_callbacks` | callback registration and firing |
-| 361–420 | `__iter__` / `__await__` | yield protocol used by `Task._step` |
+| 1-30 | module prologue | imports, `_PENDING`, `_CANCELLED`, `_FINISHED` sentinels |
+| 31-80 | `isfuture`, `_get_loop` | type-check helpers |
+| 81-150 | `Future.__init__` | state, callbacks list, loop reference, debug traceback |
+| 151-200 | `Future.cancel` | transition to `_CANCELLED`, schedule callbacks |
+| 201-260 | `Future.set_result`, `Future.set_exception` | transition to `_FINISHED`, schedule callbacks |
+| 261-310 | `Future.result`, `Future.exception` | retrieve stored value or re-raise |
+| 311-360 | `Future.add_done_callback`, `Future._schedule_callbacks` | callback registration and dispatch |
+| 361-400 | `Future.__iter__`, `Future.__await__` | yield protocol consumed by `Task.__step` |
 
 ## Reading
 
-### State machine
+### State machine: PENDING, CANCELLED, FINISHED
 
-A `Future` moves through states in one direction only: `_PENDING` to either `_CANCELLED` or `_FINISHED`. No transition goes backward. `set_result` and `set_exception` both require `_PENDING`; a second call raises `InvalidStateError`.
+A `Future` moves through states in one direction only: `_PENDING` to either `_CANCELLED` or `_FINISHED`. No transition goes backward. `set_result` and `set_exception` both require `_PENDING`; a second call raises `InvalidStateError`. The same guard applies to `cancel`: calling it on a finished future is a no-op that returns `False`.
 
 ```python
 # CPython: Lib/asyncio/futures.py:201 Future.set_result
@@ -39,11 +41,30 @@ def set_result(self, result):
     self._result = result
     self._state = _FINISHED
     self.__schedule_callbacks()
+
+# CPython: Lib/asyncio/futures.py:213 Future.set_exception
+def set_exception(self, exception):
+    if self._state != _PENDING:
+        raise exceptions.InvalidStateError(
+            f'{self._state}: {self!r}')
+    if isinstance(exception, type):
+        exception = exception()
+    if isinstance(exception, StopIteration):
+        raise TypeError(
+            'StopIteration interacts badly with generators '
+            'and cannot be raised into a Future')
+    self._exception = exception
+    self._exception_tb = exception.__traceback__
+    self._state = _FINISHED
+    self.__schedule_callbacks()
+    self.__log_traceback = True
 ```
 
-### `cancel` and `_must_cancel`
+Note that `set_exception` explicitly rejects `StopIteration` subclasses. A `StopIteration` propagating through an async generator would silently terminate the iteration; this guard converts the mistake into a `TypeError` at the call site.
 
-`cancel` is more subtle than `set_result`. If the future is already done, it is a no-op and returns `False`. Otherwise it sets `_state = _CANCELLED` and schedules callbacks. `Task` overrides `cancel` to set `_must_cancel` and inject a `CancelledError` into the running coroutine on the next step.
+### `set_result` / `set_exception` / `cancel` and `__schedule_callbacks`
+
+All three terminal transitions end by calling the private `__schedule_callbacks` method (name-mangled to `_Future__schedule_callbacks`). That method appends each registered callback to the event loop's ready queue via `loop.call_soon`, then clears `self._callbacks`. Callbacks therefore run on the next loop iteration, not synchronously inside `set_result`.
 
 ```python
 # CPython: Lib/asyncio/futures.py:175 Future.cancel
@@ -55,11 +76,33 @@ def cancel(self, msg=None):
     self._cancel_message = msg
     self.__schedule_callbacks()
     return True
+
+# CPython: Lib/asyncio/futures.py:155 Future._Future__schedule_callbacks
+def __schedule_callbacks(self):
+    callbacks = self._callbacks[:]
+    if not callbacks:
+        return
+    self._callbacks[:] = []
+    for callback, ctx in callbacks:
+        self._loop.call_soon(callback, self, context=ctx)
+```
+
+`add_done_callback` registers callbacks that fire when the future completes. If the future is already done at registration time, the callback is scheduled immediately via `call_soon` rather than stored.
+
+```python
+# CPython: Lib/asyncio/futures.py:323 Future.add_done_callback
+def add_done_callback(self, fn, *, context=None):
+    if self._state != _PENDING:
+        self._loop.call_soon(fn, self, context=context)
+    else:
+        if context is None:
+            context = contextvars.copy_context()
+        self._callbacks.append((fn, context))
 ```
 
 ### `result` and exception unwrapping
 
-`result()` is the only way to retrieve the value. If the future was cancelled, it raises `CancelledError`. If `set_exception` was called, it re-raises the stored exception. This means `await fut` either returns the value or propagates the exception directly into the waiting coroutine frame.
+`result()` is the only way to retrieve the stored value. If the future was cancelled, it raises `CancelledError`. If `set_exception` was called, it re-raises the stored exception. This means `await fut` either returns the value or propagates the exception directly into the waiting coroutine frame.
 
 ```python
 # CPython: Lib/asyncio/futures.py:261 Future.result
@@ -77,33 +120,29 @@ def result(self):
     return self._result
 ```
 
-### `__await__` and the yield protocol
+### `__await__` and the generator yield protocol
 
-`Task._step` drives the coroutine by calling `send(None)`. When the coroutine hits `await fut`, Python calls `fut.__await__()`. The generator yields `self` back to `_step`, which registers a wakeup callback on the future. When the future completes, the callback calls `_step` again and the coroutine resumes via `send(result)`.
+When a coroutine reaches `await fut`, Python calls `fut.__await__()`, which is aliased to `__iter__`. The generator yields `self` back to `Task.__step`. The task sees the yielded object, checks `_asyncio_future_blocking`, adds `Task.__wakeup` as a done-callback, and suspends. When the future completes, `__schedule_callbacks` fires `__wakeup` via `call_soon`, which calls `Task.__step` again. The next `coro.send(None)` resumes at the `yield` statement, and `return self.result()` raises `StopIteration(result)`, which `__step` catches to call `super().set_result(exc.value)`.
 
 ```python
 # CPython: Lib/asyncio/futures.py:390 Future.__iter__
 def __iter__(self):
     if not self.done():
         self._asyncio_future_blocking = True
-        yield self   # <-- received by Task._step
+        yield self   # received by Task.__step
     if not self.done():
-        raise RuntimeError(
-            "await wasn't used with future")
+        raise RuntimeError("await wasn't used with future")
     return self.result()
 
 __await__ = __iter__
 ```
 
+The flag `_asyncio_future_blocking` on the yielded object is how `Task.__step` distinguishes a legitimate future yield from an accidental bare `yield` inside a coroutine.
+
 ## gopy notes
 
-- The three sentinel strings (`_PENDING`, `_CANCELLED`, `_FINISHED`) should become a Go `iota` enum. State transitions are the same four one-way edges.
-- `_schedule_callbacks` appends each callback to `loop._ready` via `loop.call_soon`; gopy must do the same (append to the ready queue, not call directly) to preserve ordering guarantees.
-- `_Future__log_traceback` (name-mangled) controls whether an unhandled-exception warning is emitted on GC. gopy should hook a finalizer for the same purpose when debug mode is on.
-- The `_asyncio_future_blocking` flag on the yielded object is how `Task._step` distinguishes a legitimate future yield from an accidental raw `yield`.
+Status: not yet ported.
 
-## CPython 3.14 changes
+Planned package path: `module/asyncio/`.
 
-- `Future.cancel` now accepts a `msg` keyword argument (added in 3.9, stabilised). The message is forwarded to `CancelledError` and appears in tracebacks.
-- The C accelerator (`_asyncio` extension module) shadows this pure-Python class at import time. The pure-Python version remains the canonical reference; gopy ports from it.
-- `set_exception` now rejects `StopIteration` subclasses explicitly, raising `TypeError`, to prevent the exception from silently terminating a `for` loop over an async iterator.
+The three sentinel strings (`_PENDING`, `_CANCELLED`, `_FINISHED`) should become a Go `iota` enum. State transitions are the same four one-way edges. `_Future__schedule_callbacks` appends each callback to `loop._ready` via `loop.call_soon`; the Go port must do the same (append to the ready queue, not call directly) to preserve ordering guarantees. `_Future__log_traceback` controls whether an unhandled-exception warning is emitted on GC; the Go port should attach a finalizer for the same purpose when debug mode is on. The `_asyncio_future_blocking` attribute is a runtime tag on the yielded value; in Go it becomes a type assertion against an interface that futures implement and plain coroutine yields do not.

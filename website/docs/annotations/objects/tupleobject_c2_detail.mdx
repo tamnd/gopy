@@ -1,0 +1,167 @@
+---
+title: "Objects/tupleobject.c (hashing and free list)"
+description: "Annotated reading of CPython tuple internals: ob_item layout, free-list allocator, hashing, and the immutable iterator"
+cpython_path: Objects/tupleobject.c
+cpython_version: "3.14"
+lines: 600
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`Objects/tupleobject.c` implements the `tuple` built-in type. Because tuples are immutable,
+the file can make several structural commitments that lists cannot: a trailing inline item
+array (`ob_item[ob_size]`), a per-size free list that avoids repeated `malloc`/`free` for
+small short-lived tuples, and a hash computed once and cached for the lifetime of the object.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1–50  | `PyTupleObject` struct, `ob_item` | Trailing flexible array holds item pointers inline after the header |
+| 51–130 | `NumFreeListTuple`, `free_list` | Per-size singly-linked free lists for sizes 0 through 19 |
+| 131–210 | `tupledealloc` | Destructor: decrefs items, returns object to free list or `PyObject_GC_Del` |
+| 211–290 | `tuple_new`, `tuple_subtype_new` | Allocation path: pulls from free list or calls `PyObject_GC_NewVar` |
+| 291–390 | `tuple_hash` | xxHash/FNV mix over `hash(item)` for each slot; result cached in `ob_shash` |
+| 391–480 | `tupleiter`, `tupleiter_next` | Immutable iterator; safe without a mutation guard because tuples cannot change |
+| 481–600 | `tuple_richcompare`, `tuple_repr`, protocol slots | Comparison, `repr`, sequence protocol wiring |
+
+## Reading
+
+### `PyTupleObject` and the inline `ob_item` array
+
+The defining feature of `PyTupleObject` is that items are stored in an array that lives
+immediately after the object header in the same allocation. `ob_size` is fixed at creation
+time and never changes.
+
+```c
+// CPython: Objects/tupleobject.c:20 PyTupleObject
+typedef struct {
+    PyObject_VAR_HEAD
+    Py_hash_t ob_shash;
+    PyObject *ob_item[1];   /* flexible array: real size is ob_size */
+} PyTupleObject;
+```
+
+The `[1]` declaration is the classic C89 flexible-array idiom. The allocation in
+`tuple_new` requests `sizeof(PyTupleObject) + (n - 1) * sizeof(PyObject *)` bytes so all
+`n` slots fit in the single block. This layout makes `PyTuple_GET_ITEM` a direct pointer
+offset with no indirection, which matters because tuple indexing is on every hot path in
+the interpreter.
+
+### Free-list allocator
+
+CPython maintains 20 per-size free lists (`NumFreeListTuple = 20`). Each list holds
+deallocated tuples of exactly that length. `tupledealloc` pushes objects back; `tuple_new`
+pops them. The free lists survive across GC cycles but are cleared on interpreter shutdown.
+
+```c
+// CPython: Objects/tupleobject.c:55 free list arrays
+#define PyTuple_MAXSAVESIZE  20
+#define PyTuple_MAXFREELIST  2000
+
+static PyTupleObject *free_list[PyTuple_MAXSAVESIZE];
+static int numfree[PyTuple_MAXSAVESIZE];
+```
+
+`tupledealloc` checks whether the tuple's size is under `MAXSAVESIZE` and whether the
+list for that size has fewer than `MAXFREELIST` entries before recycling.
+
+```c
+// CPython: Objects/tupleobject.c:148 tupledealloc (free-list branch)
+if (len < PyTuple_MAXSAVESIZE &&
+    numfree[len] < PyTuple_MAXFREELIST) {
+    op->ob_item[0] = (PyObject *)free_list[len];
+    numfree[len]++;
+    free_list[len] = op;
+    goto done;
+}
+```
+
+The `ob_item[0]` slot is repurposed as a next-pointer while the object is on the free list.
+This is safe because the object is no longer live and the slot holds no reference.
+
+### `tuple_hash`: item hash accumulation
+
+Tuples are hashable because their contents are frozen. `tuple_hash` iterates over every
+item, calls `PyObject_Hash`, and folds the results together using the `_Py_HashDouble`-style
+mix that CPython also uses for frozensets. The final value is cached in `ob_shash` so
+subsequent `hash()` calls are O(1).
+
+```c
+// CPython: Objects/tupleobject.c:310 tuple_hash
+static Py_hash_t
+tuple_hash(PyTupleObject *v)
+{
+    if (v->ob_shash != -1)
+        return v->ob_shash;
+
+    Py_uhash_t acc = _PyHASH_XXPRIME_5;
+    for (Py_ssize_t i = 0; i < Py_SIZE(v); i++) {
+        Py_uhash_t lane = PyObject_Hash(v->ob_item[i]);
+        if (lane == (Py_uhash_t)-1)
+            return -1;
+        acc += lane * _PyHASH_XXPRIME_2;
+        acc  = _PyHASH_XXROTATE(acc);
+        acc *= _PyHASH_XXPRIME_1;
+    }
+    acc += Py_SIZE(v) ^ (_PyHASH_XXPRIME_5 ^ 3527539UL);
+    if (acc == (Py_uhash_t)-1)
+        acc = 590923713;
+    v->ob_shash = acc;
+    return acc;
+}
+```
+
+The constants `_PyHASH_XXPRIME_1/2/5` and `_PyHASH_XXROTATE` are the same ones used by
+CPython's xxHash-derived string hash so that `hash((x,)) == hash(x)` does not hold in
+general, avoiding accidental collisions between one-element tuples and their sole element.
+
+### `tupleiter`: mutation-safe by construction
+
+The tuple iterator stores only the tuple pointer and a current index. Because tuples are
+immutable it never needs to compare `ob_size` against a saved snapshot; there is no
+version counter or length guard in `tupleiter_next`.
+
+```c
+// CPython: Objects/tupleobject.c:430 tupleiter_next
+static PyObject *
+tupleiter_next(tupleiterobject *it)
+{
+    PyTupleObject *seq = it->it_seq;
+    if (seq == NULL)
+        return NULL;
+    if (it->it_index < PyTuple_GET_SIZE(seq)) {
+        PyObject *item = PyTuple_GET_ITEM(seq, it->it_index);
+        ++it->it_index;
+        Py_INCREF(item);
+        return item;
+    }
+    it->it_seq = NULL;
+    Py_DECREF(seq);
+    return NULL;
+}
+```
+
+Setting `it_seq = NULL` after exhaustion lets the tuple be freed even if the iterator
+object lingers in a live reference.
+
+## gopy notes
+
+Status: not yet ported.
+
+Planned package path: `objects/tuple.go` for `PyTupleObject` layout, free-list logic, and
+hash; `objects/tuple_iter.go` for `tupleiter`.
+
+Key porting decisions to resolve:
+
+- The free list is a global interpreter-level structure. In gopy's interpreter model it will
+  likely live on the `Interpreter` struct rather than as a package-level variable, matching
+  how other free lists are handled in `objects/`.
+- `ob_shash` maps to a `hash int64` field on the Go tuple struct, initialized to `-1` (the
+  CPython sentinel for "not yet computed").
+- The inline `ob_item` array becomes a `[]Object` slice field. The allocation optimization
+  is not directly replicated in Go since the runtime controls struct layout, but the free
+  list reclaim logic can still be ported to reduce GC pressure.
+- `tuple_hash` must use the same xxHash constants as the Go string hash so that cross-type
+  hash consistency is preserved where the Python data model requires it.

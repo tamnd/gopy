@@ -1,6 +1,6 @@
 ---
 title: Modules/_abc.c
-description: "CPython C accelerator for the abc module: ABCMeta caching and subclass checks"
+description: "C accelerator for abc.ABCMeta: _ABCData layout with four WeakSet fields, _abc_init, _abc_register, _abc_instancecheck cache fast path, _abc_caches_clear, and the global version counter"
 cpython_path: Modules/_abc.c
 cpython_version: "3.14"
 lines: 600
@@ -9,97 +9,206 @@ status: annotated
 
 import {Cpy, CpyLink} from '@site/src/components/Cpy';
 
-`Modules/_abc.c` is the C accelerator for `abc.ABCMeta`. The pure-Python fallback in `Lib/_py_abc.py` is identical in behavior but slower. The C layer speeds up `isinstance` and `issubclass` checks against abstract base classes by caching results keyed on a global version counter.
+`Modules/_abc.c` is the C accelerator for `abc.ABCMeta`. The pure-Python
+fallback lives in `Lib/_py_abc.py` and is behaviorally identical. The C layer
+exists because `isinstance` and `issubclass` checks against ABCs appear on hot
+paths in much of the standard library, and the cache lookups benefit
+significantly from avoiding Python frame overhead.
+
+The file is self-contained: it defines one internal struct (`_ABCData`), a
+per-module state struct, and roughly a dozen exported functions that
+`Lib/abc.py` calls via `_abc._abc_init`, `_abc._abc_register`, and so on.
+
+<CpyLink path="Modules/_abc.c" />
 
 ## Map
 
-| Lines | Symbol | Role |
-|-------|--------|------|
-| 1–80 | `_ABCData`, `_get_impl` | per-class state struct and accessor |
-| 81–200 | `_abc_register`, `_abc_reset_caches` | registry mutation |
-| 201–380 | `_abc_instancecheck` | `isinstance` fast and slow paths |
-| 381–520 | `_abc_subclasscheck` | `issubclass` with MRO walk |
-| 521–600 | `_abc_get_cache_token`, module init | version counter and module def |
+| Lines (approx) | Symbol | Kind | Purpose |
+|---|---|---|---|
+| 1-80 | `_ABCData` | struct | Per-class cache: four WeakSet fields plus `_abc_negative_cache_version` |
+| 81-130 | `_abc_data_new`, `_abc_data_dealloc` | functions | Allocation, GC traverse, and clear for the sidecar object |
+| 131-200 | module state struct | struct | Holds the global `abc_invalidation_counter` |
+| 201-260 | `_abc_init` | function | Creates and attaches a fresh `_ABCData` to a new ABCMeta class |
+| 261-330 | `_abc_register` | function | Adds a class to `_abc_registry`, bumps the invalidation counter |
+| 331-430 | `_abc_instancecheck` | function | Cache lookup (fast path), subclass hook, registry check (slow path) |
+| 431-520 | `_abc_subclasscheck` | function | MRO walk with negative-cache short-circuit |
+| 521-560 | `_abc_caches_clear` | function | Clears all four WeakSet fields on demand |
+| 561-600 | `_abc_get_cache_token`, module init | functions | Returns current counter as Python int; registers types and functions |
 
 ## Reading
 
-### _ABCData: per-class cache struct
+### _ABCData: the four-WeakSet layout
 
-Each `ABCMeta` class carries a `_ABCData` capsule attached as `__abc_impl__`. It holds four fields: the virtual-subclass registry, a positive cache, a negative cache, and the cache version at which the caches were last valid.
+Each `ABCMeta` class carries an `_ABCData` sidecar object stored as its
+`__abc_impl__` attribute. The struct holds four `WeakSet` references and a
+version field:
 
 ```c
 // CPython: Modules/_abc.c:43 _ABCData
 typedef struct {
-    PyObject *_abc_registry;       /* set of explicitly registered classes */
-    PyObject *_abc_cache;          /* positive isinstance results */
-    PyObject *_abc_negative_cache; /* negative isinstance results */
-    unsigned long long _abc_cache_version;
+    PyObject_HEAD
+    PyObject          *_abc_registry;       /* WeakSet of explicitly registered classes */
+    PyObject          *_abc_cache;          /* WeakSet: positive isinstance results */
+    PyObject          *_abc_negative_cache; /* WeakSet: negative isinstance results */
+    PyObject          *_abc_subclasses;     /* WeakSet: direct ABC subclasses */
+    unsigned long long _abc_negative_cache_version;
 } _ABCData;
 ```
 
-### _abc_register: adding a virtual subclass
+All four sets use `weakref` entries so that dynamically created types do not
+keep each other alive through the cache. Dead references are silently ignored
+by `PySet_Contains` because the `WeakSet` implementation filters them on
+access.
 
-`_abc_register` inserts the new subclass into `_abc_registry`, then increments the global `_abc_invalidation_counter` so that all cached results across every ABCMeta class become stale simultaneously.
+`_abc_negative_cache_version` is a per-instance shadow of the module-level
+`abc_invalidation_counter`. When the two values differ the negative cache is
+stale and must be cleared before the next check. This design lets `register()`
+on any class invalidate all negative caches across every ABCMeta instance with
+a single counter increment, without touching any individual instance.
+
+### _abc_init and _abc_register
+
+`_abc_init` is called from `ABCMeta.__new__`. It allocates a fresh `_ABCData`,
+initializes all four sets to empty `WeakSet` objects, sets
+`_abc_negative_cache_version` to the current counter value, and attaches the
+object as `cls.__abc_impl__`.
 
 ```c
-// CPython: Modules/_abc.c:153 _abc_register
+// CPython: Modules/_abc.c:201 _abc_init
+static PyObject *
+_abc_init(PyObject *module, PyObject *cls)
+{
+    _ABCData *impl = PyObject_GC_New(_ABCData, &_ABCData_Type);
+    if (impl == NULL) return NULL;
+
+    impl->_abc_registry       = PyObject_CallNoArgs((PyObject *)&_PyWeakrefSet_Type);
+    impl->_abc_cache          = PyObject_CallNoArgs((PyObject *)&_PyWeakrefSet_Type);
+    impl->_abc_negative_cache = PyObject_CallNoArgs((PyObject *)&_PyWeakrefSet_Type);
+    impl->_abc_subclasses     = PyObject_CallNoArgs((PyObject *)&_PyWeakrefSet_Type);
+    impl->_abc_negative_cache_version = get_state(module)->abc_invalidation_counter;
+
+    if (PyObject_SetAttr(cls, &_Py_ID(__abc_impl__), (PyObject *)impl) < 0) {
+        Py_DECREF(impl); return NULL;
+    }
+    return Py_None;
+}
+```
+
+`_abc_register` adds the new virtual subclass to `_abc_registry` and then
+increments the module-level counter. Because every living `_ABCData` instance
+caches the counter at the time its negative cache was last valid, a single
+increment makes all negative caches stale at once.
+
+```c
+// CPython: Modules/_abc.c:268 _abc_register
 static PyObject *
 _abc_register(PyObject *module, PyObject *const *args, Py_ssize_t nargs)
 {
-    /* add subclass to impl->_abc_registry */
-    if (PySet_Add(impl->_abc_registry, subclass) < 0)
+    /* ... extract cls and subclass from args ... */
+    if (PyObject_CallMethodOneArg(impl->_abc_registry,
+                                   &_Py_ID(add), subclass) == NULL)
         return NULL;
-    /* bump global version */
     get_state(module)->abc_invalidation_counter++;
+    Py_INCREF(subclass);
+    return subclass;
+}
+```
+
+### _abc_instancecheck: cache lookup, subclass hook, registry check
+
+`_abc_instancecheck(cls, instance)` is the implementation of
+`ABCMeta.__instancecheck__`. It proceeds in three stages:
+
+1. **Fast path.** If `impl->_abc_negative_cache_version` equals the module
+   counter, the caches are valid. Check `_abc_cache` for `type(instance)` via
+   `PySet_Contains`. A hit returns `True` immediately without calling any Python
+   code.
+
+2. **Subclass hook.** Call `cls.__subclasshook__(type(instance))`. If it
+   returns anything other than `NotImplemented`, use that as the answer and
+   update the appropriate cache.
+
+3. **Registry check.** Walk `type(instance).__mro__` and test each entry
+   against `_abc_registry`. A hit adds `type(instance)` to `_abc_cache`.
+
+```c
+// CPython: Modules/_abc.c:331 _abc_instancecheck
+static PyObject *
+_abc_instancecheck(PyObject *module, PyObject *const *args, Py_ssize_t nargs)
+{
+    PyObject *subtype = (PyObject *)Py_TYPE(instance);
+    _abcmodule_state *state = get_state(module);
+
+    /* fast path: check positive cache */
+    if (impl->_abc_negative_cache_version == state->abc_invalidation_counter) {
+        int r = PyObject_CallMethodOneArg(
+            impl->_abc_cache, &_Py_ID(__contains__), subtype);
+        if (r) Py_RETURN_TRUE;
+    }
+
+    /* subclass hook */
+    PyObject *ok = PyObject_CallMethodOneArg(
+        (PyObject *)cls, &_Py_ID(__subclasshook__), subtype);
+    if (ok != Py_NotImplemented)
+        return ok;
+
+    /* registry walk via _abc_subclasscheck */
+    return _abc_subclasscheck_impl(module, cls, subtype);
+}
+```
+
+After a confirmed negative result, `type(instance)` is added to
+`_abc_negative_cache` and `_abc_negative_cache_version` is updated to match
+the current counter, so the next check can short-circuit at the fast path.
+
+### _abc_caches_clear and the version counter
+
+`_abc_caches_clear` empties `_abc_cache` and `_abc_negative_cache` on demand.
+It does not touch `_abc_registry` or `_abc_subclasses`, which are not caches
+but authoritative membership sets.
+
+```c
+// CPython: Modules/_abc.c:521 _abc_caches_clear
+static PyObject *
+_abc_caches_clear(PyObject *module, PyObject *cls)
+{
+    _ABCData *impl = _get_impl(module, cls);
+    if (impl == NULL) return NULL;
+
+    if (PyObject_CallMethodNoArgs(impl->_abc_cache,
+                                   &_Py_ID(clear)) == NULL) return NULL;
+    if (PyObject_CallMethodNoArgs(impl->_abc_negative_cache,
+                                   &_Py_ID(clear)) == NULL) return NULL;
+
+    /* Reset the version so the next check skips the stale fast path */
+    get_state(module)->abc_invalidation_counter++;
+    impl->_abc_negative_cache_version =
+        get_state(module)->abc_invalidation_counter;
     Py_RETURN_NONE;
 }
 ```
 
-### _abc_instancecheck: two-level isinstance
-
-The check has a fast path and a slow path. The fast path compares `_abc_cache_version` against the global counter; on a match it consults `_abc_cache` and `_abc_negative_cache` with a `PySet_Contains` call. On a miss it falls through to the slow path, which calls the Python-level `__subclasshook__` and walks `_abc_registry`.
-
-```c
-// CPython: Modules/_abc.c:258 _abc_instancecheck
-static PyObject *
-_abc_instancecheck(PyObject *module, PyObject *const *args, Py_ssize_t nargs)
-{
-    if (impl->_abc_cache_version == abc_invalidation_counter) {
-        /* fast path: check cache sets */
-        int r = PySet_Contains(impl->_abc_cache, subtype);
-        if (r > 0) Py_RETURN_TRUE;
-        r = PySet_Contains(impl->_abc_negative_cache, subtype);
-        if (r > 0) Py_RETURN_FALSE;
-    }
-    /* slow path: __subclasshook__ + registry walk */
-}
-```
-
-### _abc_subclasscheck: MRO walk
-
-`_abc_subclasscheck` iterates the MRO of the candidate class. For each entry it repeats the registry and cache logic. If `__subclasshook__` returns `NotImplemented` the walk continues up the MRO before giving up.
-
-```c
-// CPython: Modules/_abc.c:390 _abc_subclasscheck
-static PyObject *
-_abc_subclasscheck(PyObject *module, PyObject *const *args, Py_ssize_t nargs)
-{
-    mro = PyType_GetMRO((PyTypeObject *)subclass);
-    for (i = 0; i < PyTuple_GET_SIZE(mro); i++) {
-        PyObject *mro_entry = PyTuple_GET_ITEM(mro, i);
-        /* check registry for mro_entry */
-    }
-}
-```
+The global counter increment here ensures that any other ABCMeta instance that
+had a valid negative cache will now see a version mismatch and rebuild before
+its next check. This is conservative but correct: an explicit cache clear on
+one class invalidates the negative results for all classes, which matches the
+documented contract of `ABCMeta._abc_caches_clear`.
 
 ## gopy notes
 
-- The Go port lives in `module/abc/`. `_ABCData` maps to an `abcImpl` struct stored on the type object via `objects.Type.SetExtra`.
-- The global version counter is a module-level `uint64` in `module/abc/module.go`, incremented under a mutex to match CPython's assumption that the GIL serializes writes.
-- `_abc_instancecheck` cache lookups use `objects.SetContains`; the positive and negative caches are `*objects.Set` values held by `abcImpl`.
+Status: not yet ported. Planned package path: `module/abc/`.
 
-## CPython 3.14 changes
+Translation decisions for the Go port:
 
-- `_abc_get_cache_token` now returns a `int` subclass (`ABCToken`) rather than a raw `int`, making it easier to distinguish cache tokens from ordinary integers in debugging.
-- The `_abc_reset_caches` helper was made accessible from Python as `ABCMeta._abc_caches_clear()`, replacing the previous name `_reset_caches` that was considered semi-private.
-- `_ABCData` gained a `_abc_negative_cache_version` field separate from `_abc_cache_version`, allowing negative results to be invalidated independently when a new virtual subclass is registered.
+- `_ABCData` maps to an `abcData` struct stored as a field on the `ABCMeta`
+  type object via `objects.Type.Extra`. It holds four `*objects.Set` values
+  (using weak-reference semantics) plus a `uint64` version field.
+- The global `abc_invalidation_counter` becomes a package-level `uint64` in
+  `module/abc/module.go`, incremented with `atomic.AddUint64` so that
+  concurrent `register()` calls under a free-threaded build are safe.
+- `_abc_instancecheck` cache lookups use `objects.SetContains` on the positive
+  set, checking the version field first before any set operation.
+- `_abc_caches_clear` calls `objects.SetClear` on both cache sets and
+  increments the counter, matching CPython's conservative invalidation policy.
+- WeakSet semantics are approximated with `map[uintptr]*weakRef` keyed on
+  `objects.TypeID(t)`, with dead entries pruned during type deallocation.

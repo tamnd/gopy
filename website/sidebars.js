@@ -389,6 +389,8 @@ const sidebars = {
         'annotations/objects/weakrefobject_c_detail',
         'annotations/objects/frameobject_c_detail',
         'annotations/objects/codeobject_c_detail',
+        'annotations/objects/tupleobject_c2_detail',
+        'annotations/objects/listobject_c2_detail',
       ],
     },
     {
@@ -581,6 +583,8 @@ const sidebars = {
         'annotations/include/include_pycore_long_h_detail',
         'annotations/include/include_pycore_ceval_h_detail',
         'annotations/include/include_pycore_import_h_detail',
+        'annotations/include/include_pycore_typeobject_h_detail',
+        'annotations/include/include_pycore_weakref_h_detail',
       ],
     },
     {
@@ -738,6 +742,8 @@ const sidebars = {
         'annotations/modules/module_io_stringio_detail',
         'annotations/modules/module_time_c_detail',
         'annotations/modules/module_signal_c_detail',
+        'annotations/modules/module_asyncio_c_detail',
+        'annotations/modules/module_contextvars_c2_detail',
       ],
     },
     {
@@ -1107,6 +1113,9 @@ const sidebars = {
         'annotations/lib/time_lib_detail',
         'annotations/lib/threading_lib_detail',
         'annotations/lib/queue_lib_detail',
+        'annotations/lib/contextlib2_lib_detail',
+        'annotations/lib/inspect_lib_detail',
+        'annotations/lib/traceback_lib_detail',
       ],
     },
   ],

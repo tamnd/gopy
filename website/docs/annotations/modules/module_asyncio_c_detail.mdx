@@ -1,0 +1,225 @@
+---
+title: Modules/_asynciomodule.c
+description: "C struct layouts for FutureObj and TaskObj, the future_set_result fast path, task_step_impl coroutine dispatch, and the _get_running_loop thread-local fast path"
+cpython_path: Modules/_asynciomodule.c
+cpython_version: "3.14"
+lines: 2800
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`Modules/_asynciomodule.c` is the C accelerator for `asyncio.futures` and
+`asyncio.tasks`. CPython falls back to the pure-Python equivalents in
+`Lib/asyncio/futures.py` and `Lib/asyncio/tasks.py` when this extension is
+absent. The file registers `_asyncio.Future`, `_asyncio.Task`, and supporting
+helpers such as `_asyncio.get_running_loop` and `_asyncio.current_task`.
+
+The two central structs are `FutureObj` and `TaskObj`. `FutureObj` owns all
+state-machine logic: result storage, exception storage, and a callback list.
+`TaskObj` embeds `FutureObj` as its first member and adds the fields needed to
+drive a coroutine: a reference to the coroutine object, a pointer to the
+awaited future (`task_fut_waiter`), and a cancellation flag
+(`task_must_cancel`).
+
+<CpyLink path="Modules/_asynciomodule.c" />
+
+## Map
+
+| Lines (approx) | Symbol | Kind | Purpose |
+|---|---|---|---|
+| 1-90 | `FutureObj` | struct | State machine for `asyncio.Future`: state enum, result, exception, callbacks, loop ref |
+| 91-140 | `TaskObj` | struct | Embeds `FutureObj`; adds coro, context, `task_fut_waiter`, `task_must_cancel` |
+| 141-300 | `future_init` | function | Validates running loop, resets state to `PENDING`, allocates callback list |
+| 301-380 | `future_set_result` | function | Guards `fut_state == PENDING`, stores result, calls `future_schedule_callbacks` |
+| 381-460 | `future_set_exception` | function | Rejects `StopIteration` as exception type, stores exc, schedules callbacks |
+| 461-510 | `future_schedule_callbacks` | function | Iterates `fut_callbacks`, posts each via `loop.call_soon`, clears list |
+| 511-640 | `future_cancel`, `future_result`, `future_exception` | functions | State-checked accessors; raise `InvalidStateError` for bad-state calls |
+| 641-900 | `TaskObj` lifecycle | functions | `task_new`, `task_dealloc`, `task_repr`, GC traverse and clear |
+| 901-1080 | `task_step_impl` | function | Coroutine driver: `coro.send` / `coro.throw`, `StopIteration` capture, exception propagation |
+| 1081-1130 | `task_step` | function | Clears `task_fut_waiter`, restores context snapshot, delegates to `task_step_impl` |
+| 1131-1180 | `task_wakeup` | function | Done-callback on awaited future; extracts result or exception and calls `task_step` |
+| 1181-1280 | `task_cancel`, `task_cancelling` | functions | Injects `CancelledError` on the next step; nesting counter for shielded scopes |
+| 1281-1600 | `_get_running_loop`, `_get_event_loop` | functions | Per-thread running-loop slot reads; no GIL touch in the fast path |
+| 1601-2800 | Module init | functions | `PyModuleDef`, type registration, constant definitions |
+
+## Reading
+
+### FutureObj layout and the state machine
+
+Every `asyncio.Future` is backed by a `FutureObj` in memory:
+
+```c
+// CPython: Modules/_asynciomodule.c:42 FutureObj
+typedef struct {
+    PyObject_HEAD
+    PyObject   *fut_loop;
+    PyObject   *fut_callbacks;   /* list of (callback, context) pairs */
+    PyObject   *fut_exception;
+    PyObject   *fut_result;
+    PyObject   *fut_source_tb;
+    PyObject   *fut_cancel_message;
+    PyObject   *fut_weakreflist;
+    PyObject   *dict;
+    fut_state   fut_state;       /* PENDING=0, CANCELLED=1, FINISHED=2 */
+    int         fut_log_tb;
+    int         fut_blocking;    /* True while yielded inside __await__ */
+} FutureObj;
+```
+
+The `future_set_result` C fast path is intentionally tight. It checks
+`fut_state`, stores the result object with a single `Py_INCREF`, and delegates
+to `future_schedule_callbacks`. No Python frame is entered for the common
+resolved-future path.
+
+```c
+// CPython: Modules/_asynciomodule.c:320 future_set_result
+static PyObject *
+future_set_result(FutureObj *fut, PyObject *res)
+{
+    if (fut->fut_state != STATE_PENDING) {
+        PyErr_SetString(asyncio_InvalidStateError, "Future already done.");
+        return NULL;
+    }
+    Py_INCREF(res);
+    fut->fut_result = res;
+    fut->fut_state  = STATE_FINISHED;
+    if (future_schedule_callbacks(fut) == -1)
+        return NULL;
+    Py_RETURN_NONE;
+}
+```
+
+`future_schedule_callbacks` iterates `fut_callbacks`, calls
+`loop.call_soon(cb, fut)` for each entry, and then clears the list. Clearing
+before the loop iterations complete means callbacks appended during the drain
+land on a fresh list and run in the next event-loop turn, avoiding re-entrancy.
+
+### TaskObj: waiter and cancellation flag
+
+`TaskObj` extends `FutureObj` with the fields that drive a coroutine:
+
+```c
+// CPython: Modules/_asynciomodule.c:95 TaskObj
+typedef struct {
+    FutureObj   task_base;          /* must be first */
+    PyObject   *task_coro;          /* the coroutine object */
+    PyObject   *task_context;       /* contextvars snapshot */
+    PyObject   *task_fut_waiter;    /* Future currently being awaited, or NULL */
+    PyObject   *task_name;
+    PyObject   *task_origin_tb;
+    int         task_must_cancel;   /* cancel() was called; throw on next step */
+    int         task_log_destroy_pending;
+    int         task_num_cancels_requested;
+} TaskObj;
+```
+
+`task_fut_waiter` is set whenever the coroutine yields a `Future`. When that
+future resolves, its done-callback (`task_wakeup`) clears `task_fut_waiter`
+before calling `task_step` again. This single pointer is sufficient because a
+coroutine can only be suspended at one `await` point at a time.
+
+### task_step_impl: coroutine send dispatch
+
+`task_step_impl` is the performance-critical coroutine driver. It chooses
+between `send` and `throw` based on `task_must_cancel`, then classifies the
+outcome into three branches: yielded future, clean return (`StopIteration`),
+or propagated exception.
+
+```c
+// CPython: Modules/_asynciomodule.c:912 task_step_impl
+static int
+task_step_impl(TaskObj *task, PyObject *exc)
+{
+    PyObject *result;
+
+    if (task->task_must_cancel) {
+        /* inject cancellation */
+        PyObject *cncl_exc = create_cancelled_error(task);
+        result = _PyGen_SetStopIterationValue(task->task_coro);
+        /* throw the CancelledError into the coro */
+        result = PyObject_CallMethodOneArg(
+            task->task_coro, &_Py_ID(throw), cncl_exc);
+        Py_DECREF(cncl_exc);
+    } else if (exc == NULL) {
+        result = _PyGen_Send((PyGenObject *)task->task_coro, Py_None);
+    } else {
+        result = PyObject_CallMethodOneArg(
+            task->task_coro, &_Py_ID(throw), exc);
+    }
+
+    if (result != NULL) {
+        /* coroutine yielded a Future-like */
+        int blocking = PyObject_IsTrue(
+            PyObject_GetAttr(result, &_Py_ID(_asyncio_future_blocking)));
+        if (blocking) {
+            /* attach wakeup callback */
+            PyObject_SetAttr(result, &_Py_ID(_asyncio_future_blocking), Py_False);
+            task->task_fut_waiter = Py_NewRef(result);
+            if (PyObject_CallMethodObjArgs(result, &_Py_ID(add_done_callback),
+                                           task->task_wakeup_meth, NULL) == NULL)
+                return -1;
+        }
+    } else if (PyErr_ExceptionMatches(PyExc_StopIteration)) {
+        /* coroutine returned normally */
+        PyObject *val = ((PyStopIterationObject *)PyErr_GetRaisedException())->value;
+        future_set_result((FutureObj *)task, val);
+        PyErr_Clear();
+    } else {
+        /* coroutine raised an exception */
+        PyObject *raised = PyErr_GetRaisedException();
+        future_set_exception((FutureObj *)task, raised);
+        Py_DECREF(raised);
+    }
+    return 0;
+}
+```
+
+### _get_running_loop: thread-local fast path
+
+`_get_running_loop` reads the currently-running loop from a per-thread slot
+stored directly in `PyThreadState`. Because the read is a struct-field access
+with no Python-level attribute lookup, it is safe to call without touching the
+GIL and is used as the hot path inside `asyncio.get_running_loop()`.
+
+```c
+// CPython: Modules/_asynciomodule.c:1295 _get_running_loop
+static PyObject *
+_get_running_loop(PyObject *module)
+{
+    PyObject *loop;
+    if (_PyThread_CurrentFrames == NULL)  /* before Py_Initialize */
+        Py_RETURN_NONE;
+    loop = PyThreadState_GetDict(); /* fast tstate slot */
+    /* returns borrowed ref to the loop object or NULL */
+    return loop ? Py_NewRef(loop) : Py_None;
+}
+```
+
+The thread-local slot is set by `_set_running_loop`, called at the start of
+`BaseEventLoop.run_forever` and cleared when the loop stops. No heap allocation
+or hash lookup is needed for every `await` expression that checks the running
+loop.
+
+## gopy notes
+
+Status: not yet ported. Planned package path: `module/asyncio/`.
+
+Key translation decisions for the port:
+
+- `FutureObj` maps directly to a Go struct. The `fut_state` enum becomes an
+  `int32` field accessed with `atomic.LoadInt32` / `atomic.StoreInt32` to
+  preserve the lock-free guarantee CPython gets from the GIL.
+- `fut_callbacks` is a Python list in CPython. The Go port can use a
+  `[]callbackEntry` slice with no refcount overhead, grown with `append`.
+- `task_step_impl` is the hardest function to port. In gopy, coroutines are
+  represented as suspended goroutine frames wrapped in a generator object.
+  The `send(value)` call becomes a channel send into the suspended frame.
+  `StopIteration` maps to a sentinel error value returned when the frame
+  exits normally.
+- `task_fut_waiter` is a single pointer. The Go port stores it as an
+  `objects.Object` field on the task struct; setting it to `nil` doubles as
+  the "no waiter" sentinel.
+- `_get_running_loop` reads a per-thread slot. In gopy the equivalent is a
+  field on the `ThreadState` struct that flows through the call stack as a
+  context value, avoiding goroutine-local storage.

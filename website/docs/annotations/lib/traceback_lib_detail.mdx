@@ -1,0 +1,161 @@
+---
+title: Lib/traceback.py
+description: "Traceback formatting: format_exception, TracebackException chaining, StackSummary, and did-you-mean suggestions"
+cpython_path: Lib/traceback.py
+cpython_version: "3.14"
+lines: 900
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/traceback.py" />
+
+## Map
+
+| Lines | Symbol | Purpose |
+|-------|--------|---------|
+| 1–40 | module header | Imports: `sys`, `linecache`, `itertools`, `collections` |
+| 41–100 | `print_tb` / `print_exc` / `print_exception` | Convenience wrappers that write to a file-like object |
+| 101–180 | `format_tb` / `format_exc` / `format_exception` | String-producing variants of the print_* family |
+| 181–260 | `format_list` | Formats a pre-captured list of `(filename, lineno, name, text)` tuples |
+| 261–380 | `FrameSummary` | Lightweight frame snapshot: file, lineno, name, locals |
+| 381–480 | `StackSummary` | List subclass; `from_frame_generator`, `from_list`, `format` |
+| 481–600 | `TracebackException.__init__` | Captures exception info; walks `__cause__` / `__context__` chains |
+| 601–700 | `TracebackException.format` | Renders chained exceptions with `During handling` / `The above` headers |
+| 701–790 | `TracebackException._format_syntax_error` | Special path for `SyntaxError` with caret underlining |
+| 791–860 | suggestion integration | `_compute_suggestion_error` called from `format_exception_only` |
+| 861–900 | module-level helpers | `_some_str`, `_parse_value_tb`, misc utilities |
+
+## Reading
+
+### format_exception, format_tb, and the functional API
+
+The functional API (`format_tb`, `format_exception`, `print_exception`) is a
+thin layer over `TracebackException`. Each function constructs a
+`TracebackException` from the raw `(exc_type, exc_value, exc_tb)` triple and
+then calls `.format()` on it.
+
+```python
+# CPython: Lib/traceback.py:121 format_exception
+def format_exception(exc, value=_sentinel, tb=_sentinel,
+                     limit=None, chain=True):
+    value, tb = _parse_value_tb(exc, value, tb)
+    te = TracebackException(type(value), value, tb, limit=limit)
+    return list(te.format(chain=chain))
+```
+
+`format_tb` is equivalent to calling `format_list(extract_tb(tb))`. Both paths
+ultimately call `StackSummary.format`, which iterates `FrameSummary` objects
+and applies `linecache.getline` to fetch source text for each frame.
+
+`format_list` exists for callers that serialise and reconstruct frame data
+(for example, across process boundaries). It accepts a list of
+`(filename, lineno, name, line)` tuples and returns formatted strings without
+touching the live process.
+
+### TracebackException: chaining and StackSummary
+
+`TracebackException.__init__` is the core capture path. It recursively
+constructs `TracebackException` instances for `__cause__` and `__context__`,
+respecting `__suppress_context__` to decide which chain link to follow.
+
+```python
+# CPython: Lib/traceback.py:497 TracebackException.__init__ (chain walk)
+if cause is not None:
+    self.__cause__ = TracebackException(
+        type(cause), cause, cause.__traceback__, limit=limit,
+        lookup_lines=lookup_lines, capture_locals=capture_locals,
+        compact=compact, _seen=_seen)
+elif context is not None and not suppress:
+    self.__context__ = TracebackException(
+        type(context), context, context.__traceback__, limit=limit,
+        lookup_lines=lookup_lines, capture_locals=capture_locals,
+        compact=compact, _seen=_seen)
+```
+
+The `_seen` set prevents infinite loops when exception chains contain cycles
+(which can happen with `raise X from X`).
+
+`StackSummary.from_frame_generator` lazily captures frames from a generator
+produced by `walk_tb` or `walk_stack`. Each frame is stored as a
+`FrameSummary`. Source lines are fetched immediately unless
+`lookup_lines=False` is passed, in which case they are deferred to
+`.format()` time.
+
+```python
+# CPython: Lib/traceback.py:421 StackSummary.from_frame_generator
+@classmethod
+def from_frame_generator(klass, frame_gen, limit=None,
+                         lookup_lines=True, capture_locals=False):
+    result = klass()
+    for f, lineno in itertools.islice(frame_gen, limit):
+        co = f.f_code
+        filename = co.co_filename
+        name = co.co_name
+        result.append(FrameSummary(
+            filename, lineno, name,
+            lookup_line=lookup_lines,
+            locals=f.f_locals if capture_locals else None))
+    return result
+```
+
+### SyntaxError formatting and did-you-mean suggestions
+
+`SyntaxError` gets special treatment in `_format_syntax_error`. The method
+emits the filename and line number on a separate line, then reproduces the
+offending source line followed by a caret (`^`) line that underlines the
+precise token range using `col_offset` and `end_col_offset`.
+
+```python
+# CPython: Lib/traceback.py:718 TracebackException._format_syntax_error
+def _format_syntax_error(self, stype):
+    ...
+    remark = self.text
+    if remark is not None:
+        yield '  {}\n'.format(remark.rstrip())
+        col = self.offset
+        end_col = self.end_offset
+        if col is not None:
+            caretspace = ' ' * (col - 1)
+            yield '  {}^\n'.format(caretspace)
+```
+
+The did-you-mean suggestion is injected by `_compute_suggestion_error`, which
+is called from `format_exception_only`. For `AttributeError` it uses
+`difflib.get_close_matches` against the object's `dir()`. For `NameError` it
+searches local and global scopes plus builtins. The result is appended as a
+hint line: `Did you mean: 'foo'?`.
+
+```python
+# CPython: Lib/traceback.py:810 _compute_suggestion_error (NameError path)
+def _compute_suggestion_error(exc_value, tb):
+    if isinstance(exc_value, AttributeError):
+        obj = exc_value.obj
+        name = exc_value.name
+        ...
+        suggestions = difflib.get_close_matches(name, dir(obj), n=1)
+        ...
+    elif isinstance(exc_value, NameError):
+        name = exc_value.name
+        ...
+```
+
+The suggestion is gated on a minimum similarity threshold (the default
+`cutoff=0.6` from `difflib`) so only genuinely close matches are shown.
+
+## gopy notes
+
+Status: not yet ported.
+
+Planned package path: `module/traceback/`.
+
+The functional API (`format_exception`, `format_tb`, `print_exception`) is
+the highest-priority target because gopy already raises Python exceptions and
+needs to render them. `TracebackException` with exception chaining depends on
+`__cause__`, `__context__`, and `__suppress_context__` being set correctly on
+exception objects, which is tracked separately in the exceptions milestone.
+`StackSummary` and `FrameSummary` depend on frame objects being exposed to
+Python code, which requires VM support for `sys._getframe` and
+`frame.f_code`/`frame.f_locals`. The did-you-mean suggestion path depends on
+`difflib`, which is not yet ported.

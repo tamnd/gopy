@@ -1,92 +1,69 @@
 ---
-title: symtable.c
-description: "Symbol table builder: scope analysis, closure detection, DEF/FREE flags"
+title: Python/symtable.c
+description: "Annotated reading of CPython's symbol table builder: AST walk, name mangling, scope analysis, free-variable propagation, and the top-level build call."
 cpython_path: Python/symtable.c
 cpython_version: "3.14"
-lines: 1800
+lines: 1900
 status: annotated
 ---
 
 import {Cpy, CpyLink} from '@site/src/components/Cpy';
 
-`symtable.c` is the compiler pass that walks the AST before bytecode generation
-and answers the question: for every name in every block, is it local, global,
-free (closed over from an enclosing scope), or a cell (captured by an inner
-function)? The compiler in `Python/compile.c` reads the result to emit
-`LOAD_FAST`, `LOAD_DEREF`, `LOAD_GLOBAL`, etc.
+`Python/symtable.c` builds the symbol table that the compiler queries to choose between
+`LOAD_FAST`, `LOAD_DEREF`, `LOAD_GLOBAL`, and related opcodes. It runs a two-pass
+analysis over the AST. Pass one visits every statement and expression to record how each
+name is used in each scope. Pass two propagates free variables upward from inner scopes
+to outer scopes, resolving each name to one of the binding kinds (`LOCAL`, `CELL`,
+`FREE`, `GLOBAL_EXPLICIT`, `GLOBAL_IMPLICIT`). The compiler holds the resulting
+`struct symtable *` alive for the entire compilation of one module.
+
+<CpyLink path="Python/symtable.c" />
 
 ## Map
 
 | Lines | Symbol | Role |
 |-------|--------|------|
-| 1–80 | includes, forward decls | `symtable.h`, `ast.h`, error helpers |
-| 81–200 | `_PySymtable_Build` | entry point; creates root block, drives `symtable_visit_stmt` |
-| 201–400 | `symtable_add_def` | records a name with `DEF_*` flags in the current block |
-| 401–700 | `symtable_visit_stmt` | AST statement walker |
-| 701–950 | `symtable_visit_expr` | AST expression walker |
-| 951–1200 | `analyze_block` | recursive closure analysis; promotes FREE to CELL |
-| 1201–1400 | `analyze_name` | per-name scope decision inside `analyze_block` |
-| 1401–1600 | `_PyST_GetScope` | public API: scope of a name in a block |
-| 1601–1800 | helpers, error reporting | `symtable_warn`, `symtable_exit_block` |
+| ~85   | `PySymtable_BuildObject` | Top-level entry point; allocates the `symtable` struct and launches the AST walk |
+| ~200  | `symtable_enter_block` | Pushes a new `_symtable_entry` for a scope-introducing node |
+| ~260  | `symtable_exit_block` | Pops the current entry and restores the parent |
+| ~310  | `symtable_add_def` | Records a name flag (bound, used, global, nonlocal) on the current entry |
+| ~420  | `_Py_Mangle` | Rewrites `__name` to `_ClassName__name` for class-body name mangling |
+| ~480  | `symtable_visit_stmt` | Recursive AST walker for statement nodes |
+| ~750  | `symtable_visit_expr` | Recursive AST walker for expression nodes |
+| ~1050 | `analyze_block` | Pass two: resolves binding kinds and propagates free-variable sets |
+| ~1200 | `analyze_name` | Assigns `LOCAL`, `FREE`, `CELL`, `GLOBAL_EXPLICIT`, or `GLOBAL_IMPLICIT` to one name |
+| ~1350 | `update_symbols` | Rewrites per-name flags after free-variable propagation completes |
+| ~1500 | class scope handling in `symtable_exit_block` | Marks names that cross a class boundary as `FREE_CLASS` |
+| ~1700 | `symtable_visit_params` | Records all parameter names as bound in the function entry |
+| ~1800 | `symtable_implicit_arg` | Handles the hidden `.0` argument for comprehension scopes |
 
 ## Reading
 
-### `symtable_add_def`
+### `symtable_visit_stmt` and `symtable_visit_expr`: pass one AST walk
 
-Every time the walker encounters a binding occurrence of a name it calls
-`symtable_add_def` with one or more `DEF_*` flag bits. The function ORs the
-new flags into the name's existing entry in the current block's `ste_symbols`
-dict (a `long` stored as a Python int).
-
-```c
-// CPython: Python/symtable.c:368 symtable_add_def
-static int
-symtable_add_def(struct symtable *st, PyObject *name, int flag,
-                 int lineno, int col_offset,
-                 int end_lineno, int end_col_offset)
-{
-    PyObject *o;
-    long val;
-    /* ... look up name in ste_symbols ... */
-    val = PyLong_AS_LONG(o);
-    if ((flag & DEF_PARAM) && (val & DEF_PARAM)) {
-        /* duplicate parameter */
-        PyErr_Format(...);
-        return 0;
-    }
-    val |= flag;
-    /* store updated flags back */
-}
-```
-
-Key flag constants (defined in `symtable.h`):
-
-| Flag | Meaning |
-|------|---------|
-| `DEF_LOCAL` | name bound in this block |
-| `DEF_GLOBAL_EXPLICIT` | `global` statement |
-| `DEF_GLOBAL_IMPLICIT` | referenced at module scope |
-| `DEF_PARAM` | function parameter |
-| `DEF_IMPORT` | bound by an `import` statement |
-| `DEF_FREE` | referenced but not bound here |
-| `DEF_CELL` | captured by an inner function |
-
-### `symtable_visit_stmt`
-
-The recursive statement walker. Covers all AST statement node types. Entering a
-`FunctionDef` or `ClassDef` node calls `symtable_enter_block`, which pushes a
-new `PySTEntryObject` onto the block stack.
+Pass one is a straightforward recursive descent over the AST. `symtable_visit_stmt`
+handles the statement node kinds defined in `Python/Python.asdl`; for each
+scope-introducing kind (`FunctionDef`, `AsyncFunctionDef`, `ClassDef`, `Lambda`, and the
+four comprehension kinds) it calls `symtable_enter_block`, recurses, then calls
+`symtable_exit_block`. Every `Name` node is handed to `symtable_add_def` with the
+appropriate flag bits.
 
 ```c
-// CPython: Python/symtable.c:512 symtable_visit_stmt
+// CPython: Python/symtable.c:480 symtable_visit_stmt
 static int
 symtable_visit_stmt(struct symtable *st, stmt_ty s)
 {
     switch (s->kind) {
     case FunctionDef_kind:
-        VISIT(st, expr, s->v.FunctionDef.args->defaults);
-        if (!symtable_enter_block(st, s->v.FunctionDef.name, ...))
+        VISIT_IN_BLOCK(st, expr, s->v.FunctionDef.name, s);
+        VISIT_SEQ(st, expr, s->v.FunctionDef.args->defaults);
+        VISIT_SEQ(st, expr, s->v.FunctionDef.decorator_list);
+        if (!symtable_enter_block(st, s->v.FunctionDef.name,
+                                  FunctionBlock, (void *)s,
+                                  s->lineno, s->col_offset,
+                                  s->end_lineno, s->end_col_offset))
             return 0;
+        VISIT(st, arguments, s->v.FunctionDef.args);
         VISIT_SEQ(st, stmt, s->v.FunctionDef.body);
         if (!symtable_exit_block(st))
             return 0;
@@ -97,73 +74,148 @@ symtable_visit_stmt(struct symtable *st, stmt_ty s)
 }
 ```
 
-### `analyze_block`
+For `Name` nodes the flag depends on the expression context. `Load` context adds
+`DEF_USE`; `Store` context adds `DEF_LOCAL`; `Del` context adds both. `global` and
+`nonlocal` statements add `DEF_GLOBAL` and `DEF_NONLOCAL` respectively, before any
+`Name` visit, so that a later use in the same scope picks up the declaration.
 
-The second pass over the block tree. After all `DEF_*` flags are set,
-`analyze_block` recurses into child blocks and promotes names:
+### `_Py_Mangle`: name mangling for `__dunder`-style names
 
-- A name that appears free in an inner block and is locally defined in an outer
-  block becomes a `DEF_CELL` in the outer block.
-- The inner block gets `DEF_FREE` for the same name, which causes the compiler
-  to emit `LOAD_DEREF` rather than `LOAD_FAST`.
+Any identifier that starts with two underscores and does not end with two underscores,
+referenced inside a class body, is mangled by prepending `_ClassName`. This prevents
+accidental override of private attributes in subclasses.
 
 ```c
-// CPython: Python/symtable.c:1012 analyze_block
+// CPython: Python/symtable.c:420 _Py_Mangle
+PyObject *
+_Py_Mangle(PyObject *privateobj, PyObject *ident)
+{
+    /* Skip names that start with __ and end with __ */
+    const char *p = PyUnicode_AsUTF8(ident);
+    if (p == NULL) return NULL;
+    if (!p[0] || !p[1] || p[0] != '_' || p[1] != '_') return Py_NewRef(ident);
+    Py_ssize_t nlen = PyUnicode_GET_LENGTH(ident);
+    if (nlen > 2 && p[nlen-2] == '_' && p[nlen-1] == '_')
+        return Py_NewRef(ident);  /* dunder, leave alone */
+
+    /* Build _ClassName__ident */
+    const char *name = PyUnicode_AsUTF8(privateobj);
+    /* ... strip leading underscores from class name, format result ... */
+}
+```
+
+The mangling happens in `symtable_add_def` before the name is stored in the entry's
+`ste_symbols` dict, so the mangled form is what the compiler sees when it queries the
+symbol table. The same `_Py_Mangle` call is repeated in the compiler's `compiler_lookup`
+path to ensure name-mangled loads and stores use the same mangled key.
+
+### `analyze_block`: free-variable propagation
+
+Pass two starts from `PySymtable_BuildObject` after the full AST walk completes. It
+calls `analyze_block` on the module entry, which recurses depth-first into child entries.
+
+```c
+// CPython: Python/symtable.c:1050 analyze_block
 static int
-analyze_block(PySTEntryObject *ste, PyObject *bound, PyObject *free,
-              PyObject *global, PyObject *type_params, struct symtable *st)
+analyze_block(PySTEntryObject *entry, PyObject *bound,
+              PyObject *free, PyObject *global)
 {
-    /* For each child scope, collect its free vars.
-       Any free var that is bound in this scope becomes a cell. */
-    if (!analyze_child_block(c, newbound, newfree, newglobal,
-                             new_type_params, st))
-        return 0;
-    /* Merge newfree into cells for this block */
+    PyObject *newglobal = NULL, *newbound = NULL, *newfree = NULL;
+    /* ... initialise per-scope sets ... */
+
+    /* Resolve each name in this scope */
+    if (!analyze_name(entry, newbound, newglobal, ...))
+        goto error;
+
+    /* Recurse into child scopes */
+    for (int i = 0; i < PyList_GET_SIZE(entry->ste_children); i++) {
+        PySTEntryObject *c = (PySTEntryObject *)
+                             PyList_GET_ITEM(entry->ste_children, i);
+        if (!analyze_block(c, newbound, newfree, newglobal))
+            goto error;
+    }
+
+    /* Any name that is free in a child and bound here becomes CELL here */
+    if (!update_symbols(entry, newbound, newfree, ...))
+        goto error;
+    /* Propagate remaining free names upward */
+    if (!PySet_Update(free, newfree))
+        goto error;
+    /* ... */
 }
 ```
 
-### `_PyST_GetScope`
+After `analyze_block` returns to the caller, names that were free in the child and
+present in the caller's `newbound` set are reclassified from `LOCAL` to `CELL` in the
+caller's entry. The child entry's flags for those same names are set to `FREE`. Names
+that remain unresolved after bubbling up to module scope are treated as
+`GLOBAL_IMPLICIT`.
 
-Public query function used by `compile.c` to decide which opcode to emit.
+### `analyze_name`: binding kind assignment
+
+`analyze_name` records the final scope decision for each name. The five main cases are:
+
+| Flag combination | Assigned kind |
+|-----------------|---------------|
+| `DEF_GLOBAL` set | `GLOBAL_EXPLICIT` |
+| `DEF_NONLOCAL` set | marked for upward free-variable propagation |
+| `DEF_LOCAL` set (in function scope) | `LOCAL` (may later become `CELL`) |
+| Not bound here, found in enclosing `bound` set | `FREE` |
+| Not bound anywhere | `GLOBAL_IMPLICIT` |
 
 ```c
-// CPython: Python/symtable.c:1432 _PyST_GetScope
-int
-_PyST_GetScope(PySTEntryObject *ste, PyObject *name)
+// CPython: Python/symtable.c:1200 analyze_name
+static int
+analyze_name(PySTEntryObject *ste, PyObject *scopes,
+             PyObject *name, long flags,
+             PyObject *bound, PyObject *local,
+             PyObject *free, PyObject *global)
 {
-    PyObject *v = PyDict_GetItemWithError(ste->ste_symbols, name);
-    if (!v) return 0;
-    long flags = PyLong_AS_LONG(v);
-    return (flags >> SCOPE_OFFSET) & SCOPE_MASK;
+    if (flags & DEF_GLOBAL) {
+        SET_SCOPE(scopes, name, GLOBAL_EXPLICIT);
+        /* ... */
+        return 1;
+    }
+    if (flags & DEF_NONLOCAL) {
+        /* must find in bound; bubble as FREE */
+        /* ... */
+        return 1;
+    }
+    if (flags & DEF_BOUND) {
+        SET_SCOPE(scopes, name, LOCAL);
+        if (PySet_Add(local, name) < 0) return 0;
+        if (PySet_Discard(global, name) < 0) return 0;
+        return 1;
+    }
+    if (bound && PySet_Contains(bound, name)) {
+        SET_SCOPE(scopes, name, FREE);
+        if (PySet_Add(free, name) < 0) return 0;
+        return 1;
+    }
+    SET_SCOPE(scopes, name, GLOBAL_IMPLICIT);
+    return 1;
 }
 ```
-
-Return values map to `LOCAL`, `GLOBAL_IMPLICIT`, `GLOBAL_EXPLICIT`, `FREE`,
-`CELL`, or `0` (unknown / module-level global).
 
 ## gopy notes
 
-gopy's symbol table lives in `compile/`. The pass runs between parsing and
-`codegen_stmt.go`. Key alignment points:
+Status: not yet ported.
 
-- `DEF_*` flag constants in `compile/compiler.go` must match CPython's values
-  because the flag integers are compared with bitwise ops, not by name.
-- `analyze_block` logic is in `compile/flowgraph_passes.go`. The free-to-cell
-  promotion loop must run bottom-up (inner blocks before outer) to match
-  CPython's traversal order; reversing the order produces wrong `CELL` sets.
-- `_PyST_GetScope` corresponds to the `scopeOf` helper in `compile/compiler.go`.
-  The `SCOPE_OFFSET` shift must equal CPython's value (currently 11 bits).
-- `symtable_visit_stmt` for comprehensions requires a synthetic function block
-  (CPython creates an implicit function scope for `[x for x in ...]`). This is
-  handled in `compile/codegen_expr_name.go`.
+Planned package path: `compile/symtable.go` (the existing `compile/` package hosts the
+compiler; the symbol table builder belongs there as a pre-pass before code generation).
 
-## CPython 3.14 changes
+Key mapping targets:
 
-- 3.12: `LOAD_GLOBAL` became a two-word instruction; `symtable.c` gained a
-  `DEF_GLOBAL_IMPLICIT` flag to distinguish unqualified module-level names from
-  explicitly-declared `global` names so the compiler emits the right cache slot.
-- 3.13: Type parameter scopes (`type X = ...`, PEP 695) introduced a new block
-  kind `TypeParam_kind`; `analyze_block` gained the `type_params` argument to
-  thread type-param free vars correctly.
-- 3.14: `symtable_visit_expr` extended for PEP 701 f-string sub-expressions,
-  which can now contain arbitrary expressions that must be analysed for closures.
+- `PySymtable_BuildObject` maps to a `BuildSymtable(mod ast.ModNode) (*Symtable, error)`
+  function in `compile/symtable.go`.
+- `_symtable_entry` maps to a `STEntry` struct carrying a name-to-flags map and a slice
+  of child entries.
+- `_Py_Mangle` maps to a `Mangle(className, name string) string` helper. The current
+  compiler in `compile/compiler.go` does not yet implement name mangling for class
+  bodies.
+- `analyze_block` and the free-variable propagation logic map to a recursive
+  `analyzeBlock` function. The gopy compiler currently walks the AST directly in the
+  code-generation pass; the symbol table pre-pass is a prerequisite for correct
+  `LOAD_DEREF` emission for nested functions and closures.
+- `CELL` promotion after child analysis maps to a second walk over the parent entry
+  after all children are processed, matching the `update_symbols` call in CPython.
