@@ -599,6 +599,7 @@ const sidebars = {
         'annotations/include/include_pycore_tuple_h_detail',
         'annotations/include/include_pycore_ast_h_detail',
         'annotations/include/include_pycore_compile_h_detail',
+        'annotations/include/include_pycore_opcode_metadata_h_detail',
       ],
     },
     {
@@ -769,6 +770,7 @@ const sidebars = {
         'annotations/modules/module_fileio_c_detail',
         'annotations/modules/module_bufferedio_c_detail',
         'annotations/modules/module_textio_c_detail',
+        'annotations/modules/module_sqlite_conn_c_detail',
       ],
     },
     {
@@ -1152,6 +1154,7 @@ const sidebars = {
         'annotations/lib/getopt_lib_detail',
         'annotations/lib/shlex_lib_detail',
         'annotations/lib/copy_lib_detail',
+        'annotations/lib/typing_lib_detail',
       ],
     },
   ],

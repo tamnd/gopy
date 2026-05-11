@@ -1,0 +1,94 @@
+---
+title: Include/internal/pycore_opcode_metadata.h
+description: "Generated opcode metadata table: per-opcode stack effect, instruction format, and operand type annotations used by the compiler, bytecode verifier, and specializing adaptive interpreter."
+cpython_path: Include/internal/pycore_opcode_metadata.h
+cpython_version: "3.14"
+lines: 680
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Include/internal/pycore_opcode_metadata.h`
+
+<CpyLink path="Include/internal/pycore_opcode_metadata.h" />
+
+`Include/internal/pycore_opcode_metadata.h` is a machine-generated header that encodes
+per-opcode properties used at runtime. It is produced by `Tools/cases_generator/` from the
+opcode definitions in `Python/bytecodes.c`. Every entry in the `_PyOpcode_opcode_metadata`
+array describes one opcode: its stack effect (inputs consumed, outputs produced), its
+instruction format (how many cache entries follow), and whether it is a pseudo-opcode or a
+specialization of a base opcode.
+
+## Map
+
+| Lines | Symbol | Role |
+| ----- | ------ | ---- |
+| 1-30 | guard and includes | `#ifndef` guard, `pycore_opcode.h` inclusion |
+| 31-120 | `_PyOpcode_Caches` array | Number of cache words each opcode consumes |
+| 121-300 | `_PyOpcode_Deopt` array | Maps specialized opcodes back to their base opcode |
+| 301-500 | `_PyOpcode_opcode_metadata` array | Per-opcode `_PyOpcodeMetadata` structs |
+| 501-600 | `_PyOpcode_num_popped`, `_PyOpcode_num_pushed` | Stack-depth helpers |
+| 601-680 | `_PyOpcode_macro_expansion` | Macro expansion table for superinstructions |
+
+## Reading
+
+### `_PyOpcodeMetadata` struct
+
+Each array entry is a `_PyOpcodeMetadata` value carrying three fields used by the
+interpreter and tools.
+
+```c
+// CPython: Include/internal/pycore_opcode_metadata.h:310 _PyOpcodeMetadata
+struct _PyOpcodeMetadata {
+    int8_t  n_popped;
+    int8_t  n_pushed;
+    uint8_t valid_entry;
+    uint8_t instr_format;
+};
+```
+
+`n_popped` and `n_pushed` encode the static stack effect. `valid_entry` is 1 for real
+opcodes and 0 for unused slots. `instr_format` names the operand layout (e.g., `IF_AB`
+means two 8-bit operands).
+
+### `_PyOpcode_Caches`: cache-word counts
+
+The specializing adaptive interpreter stores cache words immediately after the opcode
+word in the bytecode stream. `_PyOpcode_Caches[opcode]` gives the number of 16-bit cache
+words for that opcode. `LOAD_ATTR` carries 4 cache words; `CALL` carries 3; simple opcodes
+like `POP_TOP` carry 0.
+
+```c
+// CPython: Include/internal/pycore_opcode_metadata.h:40 _PyOpcode_Caches
+extern const uint8_t _PyOpcode_Caches[256];
+// e.g. _PyOpcode_Caches[LOAD_ATTR] == 4
+//      _PyOpcode_Caches[CALL]      == 3
+//      _PyOpcode_Caches[POP_TOP]   == 0
+```
+
+### `_PyOpcode_Deopt`: specialization base mapping
+
+When a specialized opcode (e.g., `LOAD_ATTR_MODULE`) needs to deoptimize back to the
+generic form, the interpreter looks up `_PyOpcode_Deopt[specialized]` to find the base
+opcode (`LOAD_ATTR`). This avoids a switch statement in the deoptimization path.
+
+```c
+// CPython: Include/internal/pycore_opcode_metadata.h:180 _PyOpcode_Deopt
+extern const uint8_t _PyOpcode_Deopt[256];
+// e.g. _PyOpcode_Deopt[LOAD_ATTR_MODULE]  == LOAD_ATTR
+//      _PyOpcode_Deopt[BINARY_OP_ADD_INT]  == BINARY_OP
+```
+
+## gopy notes
+
+gopy's `compile/` package maintains its own opcode metadata in `compile/flowgraph_passes.go`
+and the instruction format tables in `vm/eval_gen.go`. The `_PyOpcode_Caches` data is
+replicated in `compile/codegen_stmt.go` as `cacheSize` constants per opcode. The generated
+header is the authoritative source for these constants when porting new opcodes.
+
+## CPython 3.14 changes
+
+3.14 added cache entries for `CALL_KW` and extended `_PyOpcode_macro_expansion` to cover
+new superinstruction combinations. The `instr_format` encoding was widened from 4 to 5
+bits to accommodate new instruction shapes introduced by the Tier-2 optimizer.

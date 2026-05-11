@@ -1,0 +1,104 @@
+---
+title: Lib/typing.py
+description: "typing module: runtime support for PEP 484 type annotations, providing Generic, Protocol, TypeVar, Union, and the full suite of type aliases and special forms."
+cpython_path: Lib/typing.py
+cpython_version: "3.14"
+lines: 3800
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Lib/typing.py`
+
+<CpyLink path="Lib/typing.py" />
+
+`Lib/typing.py` is the pure-Python portion of the `typing` module. It defines the
+metaclasses and descriptor machinery for `Generic`, `Protocol`, and their subscript forms.
+Many core types (`TypeVar`, `ParamSpec`, `TypeVarTuple`, `Union`) are backed by C
+implementations in `Objects/typevarobject.c` and `Objects/unionobject.c`; `typing.py`
+re-exports those and adds the pure-Python generics machinery on top.
+
+## Map
+
+| Lines | Symbol | Role |
+| ----- | ------ | ---- |
+| 1-120 | imports, `__all__` | C-backed type imports, public names |
+| 121-400 | `_SpecialForm`, `_LiteralSpecialForm` | Descriptor for `Any`, `Union`, `Optional`, `ClassVar`, `Final` |
+| 401-700 | `TypeVar`, `ParamSpec`, `TypeVarTuple` | Re-exported C types with Python-level helpers |
+| 701-1100 | `_GenericAlias`, `_SpecialGenericAlias` | Subscriptable alias types returned by `Generic[T]` |
+| 1101-1600 | `Generic` | Base class for generic types with `__class_getitem__` and `__init_subclass__` |
+| 1601-2100 | `Protocol` | Structural subtyping base with `_is_protocol`, `_check_methods` |
+| 2101-2600 | `get_type_hints`, `get_origin`, `get_args` | Introspection helpers |
+| 2601-3800 | remaining special forms | `Annotated`, `TypeGuard`, `Never`, `Self`, `Unpack`, `TypedDict`, `NamedTuple` |
+
+## Reading
+
+### `_SpecialForm`: descriptor for special syntax
+
+`Any`, `Union`, `Optional`, and similar keywords that look like types but have no runtime
+type object are implemented as instances of `_SpecialForm`. The descriptor protocol's
+`__getitem__` allows `Optional[int]` to work.
+
+```python
+# CPython: Lib/typing.py:140 _SpecialForm.__getitem__
+class _SpecialForm(_Final, _root=True):
+    def __getitem__(self, parameters):
+        if not isinstance(parameters, tuple):
+            parameters = (parameters,)
+        return self._getitem(self, parameters)
+```
+
+Each `_SpecialForm` instance carries a `_getitem` callable set at construction that
+implements the specific semantics (e.g., `Union._getitem` flattens nested unions).
+
+### `_GenericAlias`: subscripted generics
+
+When `Generic[T]` is subscripted with `List[int]`, the result is a `_GenericAlias` holding
+the origin type and the argument tuple. `_GenericAlias` supports `__origin__`, `__args__`,
+and equality comparison so that `List[int] == List[int]` works correctly.
+
+```python
+# CPython: Lib/typing.py:760 _GenericAlias.__init__
+class _GenericAlias(_BaseGenericAlias, _root=True):
+    def __init__(self, origin, args, *, name=None, inst=True):
+        super().__init__(origin, args, name=name, inst=inst)
+        if not isinstance(args, tuple):
+            args = (args,)
+        self.__args__ = tuple(... if a is _TypingEllipsis else
+                              () if a is _TypingEmpty else
+                              a for a in args)
+```
+
+### `Protocol` and structural subtyping
+
+`Protocol` implements structural subtyping by recording annotated members in
+`__protocol_attrs__` at class creation time. `isinstance` checks delegate to
+`_check_methods`, which verifies that all protocol members exist on the tested object.
+
+```python
+# CPython: Lib/typing.py:1720 _is_callable_members_only
+def _check_methods(C, *mro):
+    mro = set(mro)
+    for B in C.__mro__:
+        if B in mro:
+            continue
+        for method in B.__dict__:
+            if method in mro:
+                mro.discard(method)
+    return not mro
+```
+
+## gopy notes
+
+Not yet ported. The `typing` module is needed for gopy's type annotation support, but most
+of its runtime behaviour is introspection-only. The C-backed types (`TypeVar`, `ParamSpec`,
+`GenericAlias`) are partially implemented in `objects/`. The pure-Python `Protocol`
+machinery and `get_type_hints` require full `__annotations__` support.
+
+## CPython 3.14 changes
+
+3.14 added `typing.ReadOnly`, `typing.TypeIs`, and `typing.NoDefault`. `TypeVar` gained
+`__default__` (PEP 696). `Annotated` subscript now supports `TypeVar` in the annotation
+metadata position. `get_type_hints` gained a `format` parameter supporting the new
+`annotationlib` evaluation modes.
