@@ -1,0 +1,117 @@
+---
+title: Modules/termiosmodule.c
+description: POSIX terminal I/O attribute access via tcgetattr and tcsetattr.
+cpython_path: Modules/termiosmodule.c
+cpython_version: "3.14"
+lines: 280
+status: annotated
+ported_to: ""
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Modules/termiosmodule.c`
+
+<CpyLink path="Modules/termiosmodule.c" />
+
+`termiosmodule.c` wraps the POSIX terminal I/O interface defined in `<termios.h>`. The module is intentionally small, around 280 lines, because the underlying POSIX API is itself narrow: a handful of functions operating on a single `struct termios` that describes baud rate, line discipline flags, and special character mappings for a terminal file descriptor.
+
+The central pair of functions is `tcgetattr` and `tcsetattr`. `tcgetattr(fd)` reads the current terminal attributes from a file descriptor and returns them as a Python list of seven elements matching the `struct termios` layout: `iflag`, `oflag`, `cflag`, `lflag`, `ispeed`, `ospeed`, and a list of `cc` special characters. `tcsetattr(fd, when, attrs)` takes that same list structure back and applies it, with the `when` argument controlling whether the change is immediate (`TCSANOW`), deferred until the output queue drains (`TCSADRAIN`), or deferred and the input queue flushed (`TCSAFLUSH`).
+
+The remaining four functions, `tcsendbreak`, `tcdrain`, `tcflush`, and `tcflow`, map directly to the POSIX functions of the same names. The module also registers all the `TCSANOW`, `TCSADRAIN`, `TCSAFLUSH`, `B0`-through-`B4000000` baud-rate constants, and the `VEOF`/`VINTR`/`VMIN` family of `cc` index constants so callers can avoid hardcoding numeric offsets.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| 1-40 | includes, module docstring | Platform headers, `struct termios` use | |
+| 41-120 | `termios_tcgetattr` | Read attrs; pack `struct termios` into Python list | |
+| 121-200 | `termios_tcsetattr` | Unpack Python list into `struct termios`; call `tcsetattr` | |
+| 201-230 | `tcsendbreak`, `tcdrain`, `tcflush`, `tcflow` | Thin wrappers for remaining POSIX line-control calls | |
+| 231-280 | `PyInit_termios`, constants table | Baud, `TCSA*`, `TC*`, `V*` constant registration | |
+
+## Reading
+
+### `tcgetattr` (lines 41 to 120)
+
+<CpyLink path="Modules/termiosmodule.c" lines="41-120" />
+
+`tcgetattr` calls the C `tcgetattr(fd, &mode)` and then manually constructs a Python list. The first four elements are Python integers built from `mode.c_iflag`, `c_oflag`, `c_cflag`, and `c_lflag`. Elements four and five are the input and output baud rates retrieved with `cfgetispeed` and `cfgetospeed`. The seventh element is a nested list of `NCCS` bytes, one per entry in `mode.c_cc`. If `tcgetattr` returns `-1` the function raises `termios.error` with `errno` and `strerror`.
+
+```c
+static PyObject *
+termios_tcgetattr(PyObject *module, PyObject *args)
+{
+    int fd;
+    struct termios mode;
+    if (!PyArg_ParseTuple(args, "O&:tcgetattr",
+                          fdconv, &fd))
+        return NULL;
+    if (tcgetattr(fd, &mode) == -1)
+        return PyErr_SetFromErrno(TermiosError);
+    /* build list: [iflag, oflag, cflag, lflag, ispeed, ospeed, [cc...]] */
+    ...
+}
+```
+
+### `tcsetattr` (lines 121 to 200)
+
+<CpyLink path="Modules/termiosmodule.c" lines="121-200" />
+
+`tcsetattr` reverses the packing. It accepts a Python list of exactly seven elements and unpacks them back into the fields of a local `struct termios`. The `cc` sub-list must have exactly `NCCS` entries; each entry is coerced to a `cc_t` (typically `unsigned char`). The `when` argument is passed directly to `tcsetattr(fd, when, &mode)`. Any structural mismatch in the list raises `TypeError` before the system call is made.
+
+```c
+static PyObject *
+termios_tcsetattr(PyObject *module, PyObject *args)
+{
+    int fd, when;
+    struct termios mode;
+    PyObject *term, *cc;
+    if (!PyArg_ParseTuple(args, "O&iO:tcsetattr",
+                          fdconv, &fd, &when, &term))
+        return NULL;
+    /* unpack term list into mode fields ... */
+    if (tcsetattr(fd, when, &mode) == -1)
+        return PyErr_SetFromErrno(TermiosError);
+    Py_RETURN_NONE;
+}
+```
+
+### Line-control wrappers (lines 201 to 230)
+
+<CpyLink path="Modules/termiosmodule.c" lines="201-230" />
+
+`tcsendbreak(fd, duration)` transmits a stream of zero bits for `duration` tenths of a second (or a system-defined interval when `duration` is zero). `tcdrain(fd)` blocks until all pending output is written. `tcflush(fd, queue)` discards either the input queue, the output queue, or both depending on the `queue` constant. `tcflow(fd, action)` suspends or resumes transmission or reception. All four raise `termios.error` on failure.
+
+```c
+static PyObject *
+termios_tcdrain(PyObject *module, PyObject *args)
+{
+    int fd;
+    if (!PyArg_ParseTuple(args, "O&:tcdrain", fdconv, &fd))
+        return NULL;
+    if (tcdrain(fd) == -1)
+        return PyErr_SetFromErrno(TermiosError);
+    Py_RETURN_NONE;
+}
+```
+
+### Module init and constants (lines 231 to 280)
+
+<CpyLink path="Modules/termiosmodule.c" lines="231-280" />
+
+`PyInit_termios` creates the module, registers `termios.error` as a subclass of `OSError`, and then walks a static table of `{name, value}` pairs to add every relevant POSIX constant. The table includes the `TCSANOW`, `TCSADRAIN`, `TCSAFLUSH` action codes, the `TCIFLUSH`/`TCOFLUSH`/`TCIOFLUSH` flush-selector codes, the `TCOOFF`/`TCOON`/`TCIOFF`/`TCION` flow-action codes, the full `B0`-through-`B4000000` baud-rate set, and the `VEOF` through `VWERASE` `c_cc` index names. Missing constants are silently skipped so the module compiles on platforms that lack certain baud rates.
+
+```c
+static struct PyModuleDef termiosmodule = {
+    PyModuleDef_HEAD_INIT,
+    "termios",
+    termios__doc__,
+    -1,
+    termios_methods,
+};
+```
+
+## gopy mirror
+
+Not yet ported.

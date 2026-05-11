@@ -1,0 +1,189 @@
+---
+title: Lib/mailbox.py
+description: Reading and writing email mailboxes in Maildir, mbox, MH, Babyl, and MMDF formats.
+cpython_path: Lib/mailbox.py
+cpython_version: "3.14"
+lines: 1950
+status: annotated
+ported_to: ""
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Lib/mailbox.py`
+
+<CpyLink path="Lib/mailbox.py" />
+
+`mailbox` provides a uniform Python API for reading and writing mail folders stored in the five most common on-disk formats: Maildir, mbox, MH, Babyl, and MMDF. Each format has its own `Mailbox` subclass that handles the on-disk layout, locking strategy, and iteration order while exposing a common dict-like interface. Callers use `add`, `remove`, `get`, `keys`, `__iter__`, and `__contains__` regardless of which format is in use.
+
+The message side mirrors the mailbox side. A parallel hierarchy of `Message` subclasses wraps the standard `email.message.Message` with format-specific metadata. `MaildirMessage` tracks the Maildir flags stored in the filename suffix (the `info` field). `mboxMessage` exposes the `From ` envelope line and the `Status` and `X-Status` headers as structured flag sets. `MHMessage` maps sequences to flag names. All `Message` subclasses implement `set_subdir`, `get_flags`, `set_flags`, and similar helpers so that format-specific state is never embedded in raw headers by accident.
+
+Locking is handled per-format. `mbox`, `MMDF`, and `Babyl` use `fcntl`-style file locking through the internal `_lock_file` and `_unlock_file` helpers, with a `.lock` dotfile fallback on platforms where `fcntl` is unavailable. Maildir uses atomic file renaming and does not need a lock. MH uses a `.mh_sequences` directory-level lock. Every `Mailbox` subclass is a context manager so that callers can use `with mailbox.mbox(path) as mb:` and rely on flush and close being called on exit.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Lib/mailbox.py" lines="1-60">1-60</Cpy> | imports, `__all__`, constants | Module header, locking constants, `linesep` | - |
+| <Cpy path="Lib/mailbox.py" lines="61-300">61-300</Cpy> | `Mailbox` | Abstract base class: `add`, `remove`, `get`, `__setitem__`, `keys`, `values`, `__iter__`, `__len__`, flush, close, context manager | - |
+| <Cpy path="Lib/mailbox.py" lines="301-600">301-600</Cpy> | `Maildir` | Maildir implementation: `cur`/`new`/`tmp` subdirectory management, unique filename generation, flag encoding in filename suffix | - |
+| <Cpy path="Lib/mailbox.py" lines="601-900">601-900</Cpy> | `_mboxMMDF`, `mbox`, `MMDF` | Shared mbox/MMDF base class and the two concrete subclasses; `From ` line parsing; file-level locking | - |
+| <Cpy path="Lib/mailbox.py" lines="901-1100">901-1100</Cpy> | `MH`, `Babyl` | MH numbered-file layout and `.mh_sequences`; Babyl label and attribute lines | - |
+| <Cpy path="Lib/mailbox.py" lines="1101-1400">1101-1400</Cpy> | `Message`, `MaildirMessage`, `mboxMessage` | Base message class; Maildir and mbox message subclasses with flag and status helpers | - |
+| <Cpy path="Lib/mailbox.py" lines="1401-1650">1401-1650</Cpy> | `MHMessage`, `BabylMessage`, `MMDFMessage` | Remaining message subclasses; Babyl label set; MMDF message (same as mbox) | - |
+| <Cpy path="Lib/mailbox.py" lines="1651-1800">1651-1800</Cpy> | `_lock_file`, `_unlock_file`, `_create_carefully`, `_create_temporary` | Low-level locking helpers and safe file creation utilities | - |
+| <Cpy path="Lib/mailbox.py" lines="1801-1950">1801-1950</Cpy> | `Error`, `NoSuchMailboxError`, `NotEmptyError`, `ExternalClashError`, `FormatError` | Exception hierarchy | - |
+
+## Reading
+
+### `Mailbox` abstract base (lines 61 to 300)
+
+<CpyLink path="Lib/mailbox.py" lines="61-300" />
+
+`Mailbox` is the abstract base that all five format classes inherit from. The constructor stores the path and an optional factory callable used to construct message objects on read. The dict-like interface is defined here: `add(message)` returns a new key, `remove(key)` deletes by key, `__getitem__(key)` returns a message object, and `update(arg)` accepts dicts or iterables of `(key, message)` pairs. Subclasses must implement `_generate_toc` (build an in-memory table of contents) and the low-level `_get_message` and `_store_message` methods.
+
+```python
+class Mailbox:
+    def __init__(self, path, factory=None, create=True):
+        self._path = os.path.abspath(path)
+        self._factory = factory
+
+    def add(self, message):
+        """Add message and return assigned key."""
+        raise NotImplementedError('Method must be implemented by subclass')
+
+    def remove(self, key):
+        """Remove the keyed message; raise KeyError if it doesn't exist."""
+        raise NotImplementedError('Method must be implemented by subclass')
+
+    def __setitem__(self, key, message):
+        """Replace the keyed message; raise KeyError if it doesn't exist."""
+        raise NotImplementedError('Method must be implemented by subclass')
+
+    def get(self, key, default=None):
+        try:
+            return self.__getitem__(key)
+        except KeyError:
+            return default
+```
+
+### `Maildir` unique filename and flag encoding (lines 301 to 600)
+
+<CpyLink path="Lib/mailbox.py" lines="301-600" />
+
+Maildir stores each message as a separate file. The filename in `new/` has the form `timestamp.pid.hostname`. When the MUA moves the file to `cur/`, a `:2,flags` suffix is appended where `flags` is a sorted string of single-character flag letters (`D`, `F`, `P`, `R`, `S`, `T`). `Maildir.add` writes to a temporary file in `tmp/`, then hard-links or renames it into `new/`. The `_refresh` method re-reads the directory listing to rebuild the internal key-to-filename map, which is necessary because external processes can add or remove files at any time.
+
+```python
+class Maildir(Mailbox):
+    colon = ':'
+
+    def add(self, message):
+        """Add message and return assigned key."""
+        tmp_file = self._create_tmp()
+        try:
+            self._dump_message(message, tmp_file)
+        except BaseException:
+            tmp_file.close()
+            os.remove(tmp_file.name)
+            raise
+        ...
+        new_path = os.path.join(self._path, 'new', uniq)
+        os.rename(tmp_file.name, new_path)
+        return uniq
+
+    def get_flags(self, key):
+        """Return as a string the standard flags that are set."""
+        ...
+        subpath = self._lookup(key)
+        if self.colon in subpath:
+            return subpath.split(self.colon)[-1][2:]
+        return ''
+```
+
+### `_mboxMMDF` file locking and message boundary parsing (lines 601 to 900)
+
+<CpyLink path="Lib/mailbox.py" lines="601-900" />
+
+`_mboxMMDF` holds the shared logic for the two formats that pack messages into a single flat file. The table of contents (`_toc`) is a list of `(start, stop)` byte offsets, rebuilt by `_generate_toc` which scans for `From ` separator lines (mbox) or `\x01\x01\x01\x01` control sequences (MMDF). Because both formats use file-level locks, every mutating method acquires the lock at entry and releases it in a `finally` block. The `flush` method rewrites the entire file from the in-memory message list when any modification has occurred, which means it is O(n) in file size.
+
+```python
+class _mboxMMDF(Mailbox):
+    def get_message(self, key):
+        """Return a Message representation or raise a KeyError."""
+        start, stop = self._lookup(key)
+        self._file.seek(start)
+        from_line = self._file.readline().replace(os.linesep, '\n')
+        string = self._file.read(stop - self._file.tell())
+        msg = self._message_factory(email.message_from_bytes(
+            string.replace(os.linesep, '\n')))
+        msg.set_from(from_line[5:].rstrip('\n'))
+        return msg
+
+    def flush(self):
+        """Write any pending changes to disk."""
+        if not self._pending:
+            ...
+            return
+        ...
+```
+
+### `MaildirMessage` flag helpers (lines 1101 to 1300)
+
+<CpyLink path="Lib/mailbox.py" lines="1101-1300" />
+
+`MaildirMessage` extends `Message` with helpers that read and write the Maildir info field. The info field is the part of the filename after the colon. When it starts with `2,` the rest of the string is a sorted set of flag characters. `get_flags` returns that string directly. `set_flags` sorts the input and writes it back. `add_flag` and `remove_flag` are convenience wrappers. The subdir (`new` or `cur`) is tracked as an instance attribute, not in the filename, so callers can move a message between subdirs by calling `set_subdir('cur')` before writing it back to the mailbox.
+
+```python
+class MaildirMessage(Message):
+    def get_flags(self):
+        """Return as a string the flags that are set."""
+        if self._info.startswith('2,'):
+            return self._info[2:]
+        else:
+            return ''
+
+    def set_flags(self, flags):
+        """Set the given flags and unset all others."""
+        self._info = '2,' + ''.join(sorted(flags))
+
+    def add_flag(self, flag):
+        """Set the given flag(s) without changing others."""
+        self.set_flags(''.join(set(self.get_flags()) | set(flag)))
+
+    def remove_flag(self, flag):
+        """Unset the given string flag(s) without changing others."""
+        if self.get_flags():
+            self.set_flags(''.join(set(self.get_flags()) - set(flag)))
+```
+
+### Locking helpers (lines 1651 to 1800)
+
+<CpyLink path="Lib/mailbox.py" lines="1651-1800" />
+
+`_lock_file(f, dotlock=True)` tries `fcntl.lockf` first, then falls back to creating a `.lock` file by exclusive `open`. `_unlock_file` releases both locks if they were acquired. `_create_carefully(path)` opens a file with `O_CREAT | O_EXCL` to guarantee that two writers never clobber each other on creation. `_create_temporary(path)` generates a unique filename in the same directory and returns an open file handle, which `Maildir.add` and `mbox.add` use to stage new messages safely before making them visible.
+
+```python
+def _lock_file(f, dotlock=True):
+    """Lock file f using lockf and dot locking."""
+    try:
+        import fcntl
+        fcntl.lockf(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except ImportError:
+        pass
+    except OSError as e:
+        if e.errno in (errno.EAGAIN, errno.EACCES, errno.EROFS):
+            raise ExternalClashError('lockf: file is locked')
+        raise
+    if dotlock:
+        try:
+            pre_lock = _create_carefully(f.name + '.lock')
+            pre_lock.close()
+        except OSError as e:
+            if e.errno in (errno.EACCES, errno.EROFS):
+                return   # skip dotlock on read-only filesystem
+            raise
+```
+
+## gopy mirror
+
+Not yet ported.

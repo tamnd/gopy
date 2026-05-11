@@ -1,0 +1,157 @@
+---
+title: Modules/grpmodule.c
+description: POSIX group database module exposing getgrgid, getgrnam, and getgrall as Python functions.
+cpython_path: Modules/grpmodule.c
+cpython_version: "3.14"
+lines: 230
+status: annotated
+ported_to: ""
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Modules/grpmodule.c`
+
+<CpyLink path="Modules/grpmodule.c" />
+
+`grpmodule.c` implements the `grp` module, which wraps the POSIX group database
+routines defined in `<grp.h>`. The module exposes three functions: `getgrgid`,
+`getgrnam`, and `getgrall`. Each one calls the corresponding C library function,
+converts the returned `struct group` into a Python named-tuple, and returns it
+to the caller. On platforms without `<grp.h>` (Windows) the module is not built
+at all.
+
+The Python-side representation is a `struct_group` named-tuple with five fields:
+`gr_name` (string), `gr_passwd` (string), `gr_gid` (integer), and `gr_mem`
+(list of strings). `gr_mem` is the most expensive field to build because it
+requires iterating a NULL-terminated `char **` array and constructing a Python
+list. The other three fields map directly to `PyUnicode_DecodeFSDefault` or
+`PyLong_FromLong` calls.
+
+The module is intentionally minimal. It defines no classes beyond the named
+tuple, holds no module state across calls, and has no interaction with the GIL
+other than the implicit hold that all C extension functions carry. The three
+functions are registered in the module's method table and the named-tuple type
+is created once during `PyInit_grp`.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| 1-35 | includes + `struct_group` named-tuple definition | module setup, type creation | not ported |
+| 36-80 | `mkgrent` | convert `struct group *` to Python `struct_group` | not ported |
+| 81-120 | `grp_getgrgid_impl` | look up a group by numeric GID | not ported |
+| 121-160 | `grp_getgrnam_impl` | look up a group by name string | not ported |
+| 161-200 | `grp_getgrall_impl` | iterate all groups via `setgrent`/`getgrent`/`endgrent` | not ported |
+| 201-215 | method table + `PyInit_grp` | module registration | not ported |
+
+## Reading
+
+### Named-tuple type creation (lines 1 to 35)
+
+<CpyLink path="Modules/grpmodule.c" lines="1-35" />
+
+The file opens with the standard POSIX includes and then constructs the
+`struct_group` named-tuple type by calling `PyStructSequence_NewType` with a
+descriptor table. The descriptor lists the five field names in order: `gr_name`,
+`gr_passwd`, `gr_gid`, `gr_mem`. The resulting type object is stored in a
+module-level static and reused for every conversion. Using a named-tuple rather
+than a plain tuple means field access by name works from Python without any
+extra `__getattr__` overhead.
+
+```c
+static PyStructSequence_Field struct_group_type_fields[] = {
+    {"gr_name",   "group name"},
+    {"gr_passwd", "password"},
+    {"gr_gid",    "group id"},
+    {"gr_mem",    "group members"},
+    {NULL}
+};
+```
+
+### mkgrent: struct group to Python (lines 36 to 80)
+
+<CpyLink path="Modules/grpmodule.c" lines="36-80" />
+
+`mkgrent` is the single conversion helper used by all three public functions. It
+calls `PyStructSequence_New` to allocate a zero-filled named-tuple, then sets
+each field with `PyStructSequence_SET_ITEM`. The string fields go through
+`PyUnicode_DecodeFSDefault` so that non-UTF-8 system encodings are handled
+correctly. The `gr_mem` field is built by walking the NULL-terminated
+`char **p` array and appending each decoded string to a new list before handing
+ownership to the tuple slot.
+
+```c
+static PyObject *
+mkgrent(struct group *p)
+{
+    PyObject *v = PyStructSequence_New(&StructGrpType);
+    ...
+    PyStructSequence_SET_ITEM(v, 0, PyUnicode_DecodeFSDefault(p->gr_name));
+    PyStructSequence_SET_ITEM(v, 1, PyUnicode_DecodeFSDefault(p->gr_passwd));
+    PyStructSequence_SET_ITEM(v, 2, PyLong_FromLong((long)p->gr_gid));
+    PyStructSequence_SET_ITEM(v, 3, members_list);
+    return v;
+}
+```
+
+### getgrgid and getgrnam (lines 81 to 160)
+
+<CpyLink path="Modules/grpmodule.c" lines="81-160" />
+
+`grp_getgrgid_impl` accepts either an integer GID or an object that implements
+`__index__`. It converts the argument to `gid_t` with `_Py_Uid_Converter`, calls
+`getgrgid(gid)`, and raises `KeyError` when the result is NULL. `grp_getgrnam_impl`
+follows the same pattern but accepts a `str` and calls `getgrnam` after encoding
+it through the filesystem codec. Both functions call `mkgrent` on success and
+return `None` if the entry is not found and the caller passed a non-existing key,
+matching the documented contract of raising `KeyError`.
+
+```c
+static PyObject *
+grp_getgrgid_impl(PyObject *module, PyObject *id)
+{
+    gid_t gid;
+    struct group *p;
+    if (!_Py_Gid_Converter(id, &gid)) return NULL;
+    if ((p = getgrgid(gid)) == NULL) {
+        PyErr_Format(PyExc_KeyError, "getgrgid(): gid not found: %ld", (long)gid);
+        return NULL;
+    }
+    return mkgrent(p);
+}
+```
+
+### getgrall: full database scan (lines 161 to 200)
+
+<CpyLink path="Modules/grpmodule.c" lines="161-200" />
+
+`grp_getgrall_impl` opens the group database with `setgrent`, iterates with
+repeated `getgrent` calls until it returns NULL, converts each entry via
+`mkgrent`, and appends the result to a Python list. It closes the database with
+`endgrent` in all paths, including the error path, to avoid leaking the
+underlying file descriptor. If `mkgrent` or `PyList_Append` fails, the partially
+built list is released and NULL is returned after `endgrent` runs.
+
+```c
+static PyObject *
+grp_getgrall_impl(PyObject *module)
+{
+    PyObject *d = PyList_New(0);
+    struct group *p;
+    setgrent();
+    while ((p = getgrent()) != NULL) {
+        PyObject *v = mkgrent(p);
+        if (v == NULL || PyList_Append(d, v) != 0) {
+            Py_XDECREF(v); Py_DECREF(d); endgrent(); return NULL;
+        }
+        Py_DECREF(v);
+    }
+    endgrent();
+    return d;
+}
+```
+
+## gopy mirror
+
+Not yet ported.

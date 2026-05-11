@@ -1,0 +1,142 @@
+---
+title: Modules/pwdmodule.c
+description: POSIX password database access via getpwuid, getpwnam, and getpwall.
+cpython_path: Modules/pwdmodule.c
+cpython_version: "3.14"
+lines: 270
+status: annotated
+ported_to: ""
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Modules/pwdmodule.c`
+
+<CpyLink path="Modules/pwdmodule.c" />
+
+`pwdmodule.c` provides Python access to the POSIX `/etc/passwd`-style user database through the three C library entry points: `getpwuid`, `getpwnam`, and `getpwall` (via `setpwent`/`getpwent`/`endpwent`). The module is short, roughly 270 lines, because its job is almost entirely structural: fetch a `struct passwd` from libc and translate its seven fields into a Python named-tuple subclass called `struct_passwd`.
+
+`struct_passwd` is a `structseq` type, CPython's mechanism for named tuples defined in C. Its seven fields map directly to the `struct passwd` members: `pw_name` (login name), `pw_passwd` (encrypted password or `x`), `pw_uid` (user ID), `pw_gid` (primary group ID), `pw_gecos` (GECOS / real-name field), `pw_dir` (home directory), and `pw_shell` (login shell). All three lookup functions return instances of this same type.
+
+The module has no mutable state and holds no open file descriptors between calls. `getpwall` is the only function that requires internal iteration: it opens the password database with `setpwent`, loops with `getpwent` until the database is exhausted, collects the results into a Python list, and calls `endpwent` to release the database handle. Error handling is minimal since `getpwuid` and `getpwnam` signal failure by returning `NULL`, which the module translates into `KeyError`.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| 1-50 | `struct_passwd` structseq definition | Named-tuple type with 7 `pw_*` fields | |
+| 51-110 | `mkpwent` helper | Convert `struct passwd *` to `struct_passwd` instance | |
+| 111-160 | `pwd_getpwuid` | Lookup by numeric UID; raise `KeyError` on miss | |
+| 161-210 | `pwd_getpwnam` | Lookup by name string; raise `KeyError` on miss | |
+| 211-250 | `pwd_getpwall` | Iterate full database; return list of `struct_passwd` | |
+| 251-270 | `PyInit_pwd`, module definition | Register type and three functions | |
+
+## Reading
+
+### `struct_passwd` structseq type (lines 1 to 50)
+
+<CpyLink path="Modules/pwdmodule.c" lines="1-50" />
+
+`struct_passwd` is declared as a `PyStructSequence_Desc` with seven fields. Each field descriptor pairs the Python attribute name (`pw_name`, `pw_passwd`, etc.) with a doc string. The type is created at module init time with `PyStructSequence_NewType` and stored on the module as `pwd.struct_passwd`. Because `structseq` types are both indexable (like tuples) and attribute-accessible, callers can unpack them positionally or access fields by name.
+
+```c
+static PyStructSequence_Field struct_passwd_type_fields[] = {
+    {"pw_name",   "user name"},
+    {"pw_passwd", "password"},
+    {"pw_uid",    "user id"},
+    {"pw_gid",    "group id"},
+    {"pw_gecos",  "real name"},
+    {"pw_dir",    "home directory"},
+    {"pw_shell",  "shell program"},
+    {0}
+};
+```
+
+### `mkpwent` conversion helper (lines 51 to 110)
+
+<CpyLink path="Modules/pwdmodule.c" lines="51-110" />
+
+`mkpwent` takes a `struct passwd *` and returns a new `struct_passwd` Python object. It allocates a `structseq` tuple of size 7 and fills each slot: string fields (`pw_name`, `pw_passwd`, `pw_gecos`, `pw_dir`, `pw_shell`) are converted with `PyUnicode_DecodeFSDefault` so that non-UTF-8 filenames on the filesystem round-trip correctly. Numeric fields (`pw_uid`, `pw_gid`) are wrapped with `_PyLong_FromUid` and `_PyLong_FromGid` respectively, which are thin wrappers that handle the sign extension of `uid_t` and `gid_t`.
+
+```c
+static PyObject *
+mkpwent(PyObject *module, struct passwd *p)
+{
+    PyObject *v = PyStructSequence_New(&PwdType);
+    if (v == NULL)
+        return NULL;
+    PyStructSequence_SET_ITEM(v, 0, PyUnicode_DecodeFSDefault(p->pw_name));
+    /* ... remaining fields ... */
+    PyStructSequence_SET_ITEM(v, 2, _PyLong_FromUid(p->pw_uid));
+    return v;
+}
+```
+
+### `getpwuid` and `getpwnam` (lines 111 to 210)
+
+<CpyLink path="Modules/pwdmodule.c" lines="111-210" />
+
+`pwd_getpwuid` accepts either an integer UID or an object implementing `__index__`. It calls `getpwuid((uid_t)uid)` and, if the result is `NULL`, raises `KeyError` with the numeric UID as the key. `pwd_getpwnam` accepts a `str` or `bytes` filename-encoding-compatible string, calls `getpwnam(name)`, and raises `KeyError` with the name string on miss. Both functions delegate the actual struct conversion to `mkpwent`. Neither sets `errno` on a not-found miss, so the module checks only for `NULL` return rather than `errno == 0`.
+
+```c
+static PyObject *
+pwd_getpwuid(PyObject *module, PyObject *uidobj)
+{
+    struct passwd *p;
+    uid_t uid;
+    /* ... extract uid ... */
+    if ((p = getpwuid(uid)) == NULL) {
+        PyErr_Format(PyExc_KeyError,
+                     "getpwuid(): uid not found: %lu",
+                     (unsigned long)uid);
+        return NULL;
+    }
+    return mkpwent(module, p);
+}
+```
+
+### `getpwall` (lines 211 to 250)
+
+<CpyLink path="Modules/pwdmodule.c" lines="211-250" />
+
+`pwd_getpwall` opens the password database with `setpwent()`, then calls `getpwent()` in a loop until it returns `NULL`. Each non-NULL result is converted with `mkpwent` and appended to a Python list. `endpwent()` is called unconditionally via a cleanup path so the database handle is released even if `mkpwent` or `PyList_Append` raises an exception mid-iteration. The function is not available on all platforms; the module uses `#ifdef HAVE_GETPWENT` to omit it where libc does not provide `getpwent`.
+
+```c
+static PyObject *
+pwd_getpwall(PyObject *module, PyObject *ignored)
+{
+    PyObject *d = PyList_New(0);
+    struct passwd *p;
+    setpwent();
+    while ((p = getpwent()) != NULL) {
+        PyObject *v = mkpwent(module, p);
+        if (v == NULL || PyList_Append(d, v) != 0) {
+            endpwent();
+            return NULL;
+        }
+        Py_DECREF(v);
+    }
+    endpwent();
+    return d;
+}
+```
+
+### Module init (lines 251 to 270)
+
+<CpyLink path="Modules/pwdmodule.c" lines="251-270" />
+
+`PyInit_pwd` creates the module, calls `PyStructSequence_NewType` to register `struct_passwd`, and sets it as `pwd.struct_passwd`. The method table is static and lists only `getpwuid`, `getpwnam`, and (conditionally) `getpwall`. No constants are registered because the module exposes no symbolic values; all semantics are carried by the `struct_passwd` field names and the `KeyError` convention.
+
+```c
+static struct PyModuleDef pwdmodule = {
+    PyModuleDef_HEAD_INIT,
+    "pwd",
+    pwd__doc__,
+    -1,
+    pwd_methods,
+};
+```
+
+## gopy mirror
+
+Not yet ported.

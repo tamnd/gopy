@@ -1,0 +1,106 @@
+---
+title: Lib/trace.py
+description: Traces Python program execution at the line level, recording coverage counts, call graphs, and optional timing data.
+cpython_path: Lib/trace.py
+cpython_version: "3.14"
+lines: 660
+status: annotated
+ported_to: ""
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Lib/trace.py`
+
+<CpyLink path="Lib/trace.py" />
+
+`trace.py` instruments Python programs at the line level using `sys.settrace`. Each time the interpreter moves to a new source line, the registered trace hook fires. The module accumulates hit counts per `(filename, lineno)` pair and, optionally, records which functions called which other functions during the run.
+
+The public surface has two layers. The `Trace` class wraps the tracing machinery and exposes `run`, `runctx`, and `runfunc` for executing arbitrary code objects or callables under observation. After the run, `results()` returns a `CoverageResults` instance that can write annotated source files or summary reports. The second layer is a `__main__` entry point that accepts `--count`, `--trace`, `--report`, and `--no-report` flags, letting users trace scripts from the command line without modifying source.
+
+Coverage results are stored in plain dictionaries: `counts` maps `(filename, lineno)` to an integer hit count, `calledfuncs` maps `(file, module, funcname)` triples to `1`, and `callers` maps pairs of such triples to `1`. `CoverageResults.update` merges a second result set by simple addition, which makes it straightforward to aggregate coverage across several test runs before writing the final report.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| 1-60 | module header, imports | Imports, constants, helper `_modname` | |
+| 61-130 | `CoverageResults` | Stores counts/calledfuncs/callers; `update`, `write_results`, `write_results_file` | |
+| 131-200 | `Trace.__init__` | Accepts count/trace/countfuncs/countcallers/timing/ignoremods/ignoredirs | |
+| 201-310 | `Trace.localtrace_*`, `Trace.globaltrace_*` | Four hook variants selected at init time | |
+| 311-390 | `Trace.run`, `Trace.runctx`, `Trace.runfunc` | Execute code under tracing | |
+| 391-450 | `Trace.results` | Returns a `CoverageResults` snapshot | |
+| 451-660 | `main()`, `__main__` block | CLI argument parsing, report generation | |
+
+## Reading
+
+### Module-level helpers (lines 1 to 60)
+
+<CpyLink path="Lib/trace.py" lines="1-60" />
+
+The file opens with a handful of small utilities. `_modname(path)` strips a filesystem path down to a dotted module name by walking `sys.path` entries. `_fullmodname(path)` does the same but also trims the `.py` suffix. These two functions are called inside the trace hooks to decide whether a given frame belongs to an ignored module or directory, keeping the hot path free of repeated path arithmetic.
+
+```python
+# Lib/trace.py (approx.)
+def _modname(path):
+    for dir in sys.path:
+        if path.startswith(dir):
+            return path[len(dir)+1:].replace(os.sep, '.')
+    return None
+```
+
+### `CoverageResults` (lines 61 to 130)
+
+<CpyLink path="Lib/trace.py" lines="61-130" />
+
+`CoverageResults` is a plain data container. Its `__init__` receives pre-populated dicts so that `Trace.results()` can hand off its internal state cheaply. `update(other)` merges a second `CoverageResults` by iterating `other.counts` and adding hit counts, making multi-run aggregation a single method call.
+
+`write_results` iterates the recorded filenames, calls `write_results_file` for each, and optionally prints a summary to stdout. `write_results_file` reads the original source, prefixes each line with its hit count or a blank, and writes the annotated copy to a `.cover` file beside the original.
+
+```python
+def update(self, other):
+    counts = self.counts
+    calledfuncs = self.calledfuncs
+    for key, count in other.counts.items():
+        counts[key] = counts.get(key, 0) + count
+    calledfuncs.update(other.calledfuncs)
+```
+
+### `Trace.__init__` and hook selection (lines 131 to 310)
+
+<CpyLink path="Lib/trace.py" lines="131-310" />
+
+The constructor records which combination of features the caller requested and selects the matching pair of global/local trace hooks. There are four local hook variants: one that only counts lines (`localtrace_count`), one that prints each line (`localtrace_trace`), one that does both, and a no-op. The global hook (`globaltrace_lt`) fires on `call` events and decides whether to return a local hook for that frame or `None`, which suppresses tracing inside ignored modules entirely.
+
+Timing is optional. When `timing=True`, a `time.time()` call is inserted into each local hook invocation and the elapsed delta is recorded alongside the line count.
+
+```python
+if count and trace:
+    self.localtrace = self.localtrace_count_and_trace
+elif count:
+    self.localtrace = self.localtrace_count
+elif trace:
+    self.localtrace = self.localtrace_trace
+else:
+    self.localtrace = self.localtrace_pass
+```
+
+### `run`, `runctx`, `runfunc` (lines 311 to 390)
+
+<CpyLink path="Lib/trace.py" lines="311-390" />
+
+`runfunc(func, *args, **kw)` is the simplest entry point. It installs `self.globaltrace` via `sys.settrace`, calls `func`, and restores the previous trace function in a `finally` block. `runctx(cmd, globals, locals)` does the same but executes a code string via `exec`. `run(cmd)` is a thin wrapper around `runctx` that passes the caller's `__main__` namespace.
+
+All three methods share the same finally-restore pattern, ensuring `sys.settrace` is always cleaned up even when the traced code raises an exception.
+
+### `main()` and CLI (lines 451 to 660)
+
+<CpyLink path="Lib/trace.py" lines="451-660" />
+
+`main()` builds an `argparse.ArgumentParser` with mutually exclusive mode flags (`--count`, `--trace`, `--listfuncs`, `--trackcalls`) plus modifier flags (`--report`, `--no-report`, `--timing`, `--ignore-module`, `--ignore-dir`). After parsing, it constructs a `Trace` instance, uses `runpy.run_path` to load the target script into a fresh namespace, calls `t.runfunc`, and finally writes results if requested.
+
+The `--report` mode can be used without re-running the script: it reads a previously saved `.cover` database and regenerates the annotated files, which is useful when coverage collection and report rendering happen in separate CI steps.
+
+## gopy mirror
+
+Not yet ported.
