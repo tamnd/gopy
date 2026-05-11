@@ -88,6 +88,16 @@ type Builder struct {
 //
 // CPython: Python/flowgraph.c:L3659 _PyCfg_OptimizeCodeUnit
 func Optimize(seq *Sequence, consts *[]any, nlocals, _ int) (*Info, error) {
+	return OptimizeWithFlags(seq, consts, nlocals, 0)
+}
+
+// OptimizeWithFlags is Optimize plus a code_flags input. CO_GENERATOR
+// (and its async/coroutine siblings) drives insert_prefix_instructions
+// to prepend the RETURN_GENERATOR + POP_TOP generator entry stub.
+//
+// CPython: Python/flowgraph.c:L4026 _PyCfg_OptimizedCfgToInstructionSequence
+// (code_flags parameter)
+func OptimizeWithFlags(seq *Sequence, consts *[]any, nlocals int, codeFlags uint32) (*Info, error) {
 	if seq == nil {
 		return nil, fmt.Errorf("compile: Optimize called with nil sequence")
 	}
@@ -111,12 +121,25 @@ func Optimize(seq *Sequence, consts *[]any, nlocals, _ int) (*Info, error) {
 	// PASS 2: resolve symbolic jump labels to instruction offsets.
 	// CPython does this on the CFG; we exploit instrseq's existing
 	// ApplyLabelMap so the post-pass Sequence has resolved opargs.
-	// HasTarget(JUMP) and HasTarget(JUMP_NO_INTERRUPT) are false
-	// because the pseudo opcodes have no metadata row, so we resolve
-	// their labels by hand.
+	// HasTarget is false for JUMP / JUMP_NO_INTERRUPT and for the
+	// SETUP_X family because none of those pseudo opcodes carry the
+	// jump flag in the opcode metadata, so we resolve their labels by
+	// hand here.
 	seq.ApplyLabelMap(func(op Opcode) bool {
-		return HasTarget(op) || op == JUMP || op == JUMP_NO_INTERRUPT
+		switch op {
+		case JUMP, JUMP_NO_INTERRUPT, SETUP_FINALLY, SETUP_WITH, SETUP_CLEANUP:
+			return true
+		}
+		return HasTarget(op)
 	})
+
+	// PASS 2b: walk SETUP_X / POP_BLOCK to attribute each in-region
+	// instruction with its handler. POP_BLOCK is rewritten to NOP
+	// here; SETUP_X survives until convertPseudoOps so the stackdepth
+	// pass can still see its exception edge.
+	//
+	// CPython: Python/flowgraph.c:885 label_exception_targets
+	labelExceptionTargets(seq)
 
 	// PASS 3a: thread chains of unconditional jumps and re-target any
 	// POP_JUMP_IF_X that lands on a trampoline. CPython runs these on
@@ -139,10 +162,35 @@ func Optimize(seq *Sequence, consts *[]any, nlocals, _ int) (*Info, error) {
 	// because the dataflow needs jump opargs as absolute target
 	// indices; once offsets are converted to relative byte deltas the
 	// successor walk can no longer follow them.
-	depth, err := calculateStackdepth(seq)
+	depth, startDepth, err := calculateStackdepth(seq)
 	if err != nil {
 		return nil, err
 	}
+
+	// PASS 11b: now that the dataflow has reached every handler block
+	// via the SETUP_X exception edge, stamp Handler.StartDepth on
+	// every in-region instruction so AssembleExceptionTable can emit
+	// the encoded outer-depth term. CPython reads
+	// handler_block->b_startdepth at emission time; gopy threads it
+	// here.
+	stampHandlerStartDepths(seq, startDepth)
+
+	// PASS 11b2: prepend the generator entry stub (RETURN_GENERATOR +
+	// POP_TOP) if this is a generator / coroutine / async generator.
+	// CPython does this inside prepare_localsplus, after
+	// calculate_stackdepth and before convert_pseudo_ops, so jump
+	// opargs (still absolute indices at this point) and Handler.Label
+	// indices both shift by 2.
+	//
+	// CPython: Python/flowgraph.c:3760 insert_prefix_instructions
+	insertPrefixInstructions(seq, codeFlags)
+
+	// PASS 11c: lower the SETUP_X pseudo opcodes to NOP now that the
+	// exception table is fully described on ExceptHandlerInfo. After
+	// this pass the sequence contains only real opcodes.
+	//
+	// CPython: Python/flowgraph.c:3520 convert_pseudo_ops
+	convertPseudoOps(seq)
 
 	// PASS 4: lower the pseudo unconditional jumps (`JUMP`,
 	// `JUMP_NO_INTERRUPT`) to their forward / backward counterparts,

@@ -290,14 +290,20 @@ func stackdepthPush(stack []int, sp int, startDepth []int, idx, depth int) (int,
 }
 
 // calculateStackdepth performs the forward dataflow over seq and
-// returns the maximum running stack height. Mirrors CPython's CFG-based
-// `calculate_stackdepth` with the basicblock list flattened to a
-// worklist of instruction indices.
+// returns the maximum running stack height plus the per-instruction
+// entry depth. Mirrors CPython's CFG-based `calculate_stackdepth` with
+// the basicblock list flattened to a worklist of instruction indices.
+//
+// CPython visits the exception edge from each block_push opcode with
+// the jump-taken stack effect (push the exception, plus the lasti for
+// SETUP_WITH / SETUP_CLEANUP). gopy does the same when it walks past
+// a SETUP_X, so the handler block's entry depth ends up in the
+// returned slice and stampHandlerStartDepths can read it from there.
 //
 // CPython: Python/flowgraph.c:808 calculate_stackdepth
-func calculateStackdepth(seq *Sequence) (int, error) {
+func calculateStackdepth(seq *Sequence) (int, []int, error) {
 	if len(seq.Instrs) == 0 {
-		return 0, nil
+		return 0, nil, nil
 	}
 	startDepth := make([]int, len(seq.Instrs))
 	for i := range startDepth {
@@ -309,7 +315,7 @@ func calculateStackdepth(seq *Sequence) (int, error) {
 	var err error
 	sp, err = stackdepthPush(stack, sp, startDepth, 0, 0)
 	if err != nil {
-		return 0, err
+		return 0, nil, err
 	}
 	for sp > 0 {
 		sp--
@@ -323,25 +329,35 @@ func calculateStackdepth(seq *Sequence) (int, error) {
 			ins := &seq.Instrs[j]
 			var effects stackEffects
 			if err := getStackEffects(ins.Op, ins.Oparg, false, &effects); err != nil {
-				return 0, fmt.Errorf("compile: invalid stack effect for opcode=%s arg=%d: %w",
+				return 0, nil, fmt.Errorf("compile: invalid stack effect for opcode=%s arg=%d: %w",
 					ins.Op.Name(), ins.Oparg, err)
 			}
 			newDepth := depth + effects.Net
 			if newDepth < 0 {
-				return 0, fmt.Errorf("compile: invalid CFG, stack underflow at %d (%s)",
+				return 0, nil, fmt.Errorf("compile: invalid CFG, stack underflow at %d (%s)",
 					j, ins.Op.Name())
 			}
 			if depth > maxdepth {
 				maxdepth = depth
 			}
-			if HasTarget(ins.Op) && ins.Op != END_ASYNC_FOR {
+			// Pseudo JUMP / JUMP_NO_INTERRUPT do not carry the HAS_JUMP
+			// flag in gopy's opcode metadata (they get lowered to
+			// JUMP_FORWARD / JUMP_BACKWARD later by
+			// resolveUnconditionalJumps), but they ARE unconditional
+			// branches with absolute-index opargs. The dataflow has to
+			// propagate to their target the same way it does for
+			// HAS_JUMP opcodes, otherwise blocks only reachable through
+			// a pseudo JUMP get startDepth == -1.
+			hasJumpTarget := HasTarget(ins.Op) && ins.Op != END_ASYNC_FOR
+			pseudoJump := ins.Op == JUMP || ins.Op == JUMP_NO_INTERRUPT
+			if hasJumpTarget || pseudoJump {
 				if err := getStackEffects(ins.Op, ins.Oparg, true, &effects); err != nil {
-					return 0, fmt.Errorf("compile: invalid stack effect for opcode=%s arg=%d (jump): %w",
+					return 0, nil, fmt.Errorf("compile: invalid stack effect for opcode=%s arg=%d (jump): %w",
 						ins.Op.Name(), ins.Oparg, err)
 				}
 				targetDepth := depth + effects.Net
 				if targetDepth < 0 {
-					return 0, fmt.Errorf("compile: invalid CFG, target stackdepth %d at %d (%s)",
+					return 0, nil, fmt.Errorf("compile: invalid CFG, target stackdepth %d at %d (%s)",
 						targetDepth, j, ins.Op.Name())
 				}
 				if depth > maxdepth {
@@ -351,7 +367,34 @@ func calculateStackdepth(seq *Sequence) (int, error) {
 				if targetIdx >= 0 && targetIdx < len(seq.Instrs) {
 					sp, err = stackdepthPush(stack, sp, startDepth, targetIdx, targetDepth)
 					if err != nil {
-						return 0, err
+						return 0, nil, err
+					}
+				}
+			}
+			// Exception-edge propagation for the SETUP_X pseudo-ops.
+			// SETUP_FINALLY: handler entry pushes exc (net +1 from
+			// SETUP_FINALLY's running depth). SETUP_WITH: handler entry
+			// restores the stack to before __enter__'s result and pushes
+			// (lasti, exc), so net +1 (drop enter_result, push 2).
+			// SETUP_CLEANUP: handler entry pushes (lasti, exc) on top
+			// of the current stack, net +2. gopy's opcode metadata
+			// flags don't carry the jump bit for these pseudo-ops, so
+			// the propagation is open-coded here.
+			//
+			// CPython: Python/flowgraph.c:782 get_stack_effects branch
+			// for IS_BLOCK_PUSH_OPCODE
+			// CPython: Python/bytecodes.c:3568 pseudo SETUP_WITH
+			if isBlockPushOpcode(ins.Op) {
+				bonus := 1
+				if ins.Op == SETUP_CLEANUP {
+					bonus = 2
+				}
+				targetDepth := depth + bonus
+				targetIdx := int(ins.Oparg)
+				if targetIdx >= 0 && targetIdx < len(seq.Instrs) {
+					sp, err = stackdepthPush(stack, sp, startDepth, targetIdx, targetDepth)
+					if err != nil {
+						return 0, nil, err
 					}
 				}
 			}
@@ -366,9 +409,9 @@ func calculateStackdepth(seq *Sequence) (int, error) {
 		if j < len(seq.Instrs) {
 			sp, err = stackdepthPush(stack, sp, startDepth, j, depth)
 			if err != nil {
-				return 0, err
+				return 0, nil, err
 			}
 		}
 	}
-	return maxdepth, nil
+	return maxdepth, startDepth, nil
 }

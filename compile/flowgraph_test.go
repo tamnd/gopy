@@ -40,7 +40,7 @@ func TestStackDepthSimplePush(t *testing.T) {
 	seq := &Sequence{}
 	seq.Addop(LOAD_CONST, 0, ast.Pos{})
 	seq.Addop(RETURN_VALUE, 0, ast.Pos{})
-	d, err := calculateStackdepth(seq)
+	d, _, err := calculateStackdepth(seq)
 	if err != nil {
 		t.Fatalf("calculateStackdepth: %v", err)
 	}
@@ -57,7 +57,7 @@ func TestStackDepthBuildTuple(t *testing.T) {
 	seq.Addop(LOAD_CONST, 0, ast.Pos{})
 	seq.Addop(BUILD_TUPLE, 3, ast.Pos{})
 	seq.Addop(RETURN_VALUE, 0, ast.Pos{})
-	d, err := calculateStackdepth(seq)
+	d, _, err := calculateStackdepth(seq)
 	if err != nil {
 		t.Fatalf("calculateStackdepth: %v", err)
 	}

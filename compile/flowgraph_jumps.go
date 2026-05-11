@@ -318,7 +318,14 @@ func walkReachable(seq *Sequence, start int, marks []bool) {
 		}
 		marks[i] = true
 		ins := seq.Instrs[i]
-		if HasTarget(ins.Op) {
+		// hasJumpTarget includes the pseudo-ops (JUMP / JUMP_NO_INTERRUPT
+		// and the SETUP_X family) which are not in the metadata jump
+		// flag but whose opargs still encode a target the reachability
+		// walk must follow. Without this the JUMP_NO_INTERRUPT at the
+		// end of a try body would leave its `end` label unreached,
+		// which removeUnreachableBlocks then NOPs out along with the
+		// implicit `return None` epilogue.
+		if hasJumpTarget(ins.Op) {
 			stack = append(stack, int(ins.Oparg))
 		}
 		if isTerminator(ins.Op) {

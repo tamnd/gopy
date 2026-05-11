@@ -168,7 +168,11 @@ func eliminateDeadCodeAfterTerminator(seq *Sequence) int {
 // row. HasTarget alone returns false for the pseudo forms, which would
 // leave their opargs unrewritten by the NOP-compaction pass.
 func hasJumpTarget(op Opcode) bool {
-	return HasTarget(op) || op == JUMP || op == JUMP_NO_INTERRUPT
+	switch op {
+	case JUMP, JUMP_NO_INTERRUPT, SETUP_FINALLY, SETUP_WITH, SETUP_CLEANUP:
+		return true
+	}
+	return HasTarget(op)
 }
 
 // removeRedundantNops compacts the sequence by deleting NOP
