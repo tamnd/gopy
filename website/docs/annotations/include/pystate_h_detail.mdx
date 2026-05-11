@@ -1,0 +1,97 @@
+---
+title: "Include/cpython/pystate.h: Thread and Interpreter State"
+description: "Struct layout for PyThreadState, PyInterpreterState, and the _PyErr_StackItem exception chain; covers 3.14 field changes"
+cpython_path: Include/cpython/pystate.h
+cpython_version: "3.14"
+lines: 300
+status: annotated
+ported_to: objects/type.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`pystate.h` is the canonical layout file for per-thread and per-interpreter
+runtime state. Almost every subsystem touches these structs. The 3.14 cycle
+reorganised several fields that were previously in `Include/cpython/pystate.h`
+into the internal header `Include/internal/pycore_tstate.h`, so the public
+header is now a thinner view.
+
+## Map
+
+| Lines | Symbol | Kind | Notes |
+|-------|--------|------|-------|
+| 1-30 | guards, includes | macro | Standard `#ifndef` guard plus `pyframe.h` include |
+| 31-55 | `Py_tracefunc` | typedef | Callback type for `sys.settrace` and `sys.setprofile` |
+| 56-90 | `_PyErr_StackItem` | struct | Singly-linked list node holding one active exception |
+| 91-160 | `PyThreadState` | struct | Full per-thread state (frame pointer, exc chain, GIL counter) |
+| 161-200 | `PyInterpreterState` | struct | Minimal public view; full layout lives in `pycore_interp.h` |
+| 201-230 | thread-state accessors | inline/macro | `PyThreadState_GET`, `_PyThreadState_GET` |
+| 231-260 | GIL helpers | function decl | `PyEval_SaveThread`, `PyEval_RestoreThread` |
+| 261-300 | misc flags | macro | `Py_TPFLAGS_*` overflow, `gilstate_counter` semantics |
+
+## Reading
+
+### PyThreadState core fields
+
+```c
+struct _ts {
+    struct _ts       *prev;
+    struct _ts       *next;
+    PyInterpreterState *interp;
+
+    struct _PyInterpreterFrame *current_frame;
+
+    _PyErr_StackItem  exc_info;      /* current exception */
+
+    int               gilstate_counter;
+    /* ... many internal fields follow in pycore_tstate.h ... */
+};
+```
+
+`current_frame` replaced the older `frame` field in 3.11 when the frame
+representation switched to `_PyInterpreterFrame`. In 3.14 the remaining
+`c_tracefunc` / `c_profilefunc` fields moved to the internal header.
+`gilstate_counter` tracks the nesting depth for `PyGILState_Ensure` calls on
+this thread.
+
+### _PyErr_StackItem exception chain
+
+```c
+typedef struct _PyErr_StackItem {
+    PyObject                *exc_value;
+    struct _PyErr_StackItem *previous_item;
+} _PyErr_StackItem;
+```
+
+Each `try` block pushes one node onto the thread's exception stack via
+`_PyErr_StackPush`. The `previous_item` pointer links back to the enclosing
+handler. `exc_value` holds the live exception object (or `NULL` when none is
+active). This replaced the old triple `(type, value, traceback)` in 3.11.
+
+### Py_tracefunc typedef
+
+```c
+typedef int (*Py_tracefunc)(
+    PyObject  *obj,      /* trace object passed to sys.settrace */
+    PyFrameObject *frame,
+    int        what,     /* PyTrace_CALL, PyTrace_LINE, etc. */
+    PyObject  *arg
+);
+```
+
+The `what` constants (`PyTrace_CALL`, `PyTrace_RETURN`, `PyTrace_LINE`,
+`PyTrace_EXCEPTION`, `PyTrace_OPCODE`) are defined in `Include/cpython/pystate.h`
+alongside this typedef. In gopy these callbacks are surfaced through the
+`TraceFunc` interface in `vm/`.
+
+## gopy notes
+
+- `PyThreadState` maps to `vm.ThreadState` (or the `EvalContext` struct in
+  `vm/eval_gen.go`). The `exc_info` chain is replicated as `ExcInfo` in
+  `objects/` using a Go linked-list node.
+- `gilstate_counter` has no direct equivalent because gopy does not implement
+  the GIL. The field is tracked as a no-op counter for C-extension
+  compatibility stubs.
+- The 3.14 split between the public header and `pycore_tstate.h` is useful for
+  gopy: only public fields need stable Go counterparts; internal fields can be
+  kept unexported.

@@ -1,0 +1,91 @@
+---
+title: "functools.py: Higher-Order Function Utilities"
+description: "lru_cache Python wrapper, partial class __call__, reduce accumulator, singledispatch registry, total_ordering fill logic, and cached_property descriptor"
+cpython_path: Lib/functools.py
+cpython_version: "3.14"
+lines: 900
+status: annotated
+ported_to: module/functools
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`functools.py` is the pure-Python layer of the `functools` module. Several of
+its symbols (`reduce`, `partial`, `lru_cache`) have C accelerators in
+`_functools`. The Python implementations serve as readable references and as
+fallbacks when the C extension is unavailable.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-60 | module preamble | `__all__`, `_CacheInfo` namedtuple, C-accelerator imports with fallback |
+| 61-130 | `reduce` | Pure-Python accumulator loop; raises `TypeError` on empty sequence with no initial value |
+| 131-220 | `partial` | Class with `func`, `args`, `keywords`; `__call__` merges positional and keyword args |
+| 221-280 | `partialmethod` | Descriptor variant; `__get__` returns a bound `partial` |
+| 281-360 | `total_ordering` | Class decorator; builds missing comparison methods from the two provided |
+| 361-430 | `cmp_to_key` | Wraps a two-argument comparator in a key class with `__lt__`, `__eq__`, etc. |
+| 431-560 | `lru_cache` | Python wrapper; delegates to `_lru_cache_wrapper` from C; handles `typed` flag |
+| 561-630 | `cache` | `lru_cache(maxsize=None)` alias added in 3.9 |
+| 631-720 | `cached_property` | Descriptor using instance `__dict__` as the backing store; thread-safety note |
+| 721-830 | `singledispatch` | Registry dict, `dispatch` lookup with MRO walk, `register` decorator |
+| 831-900 | `singledispatchmethod` | Descriptor variant of `singledispatch` for methods |
+
+## Reading
+
+### `partial.__call__` argument merging
+
+`partial` stores `self.args` (tuple) and `self.keywords` (dict) at construction
+time. `__call__` builds the final call as `self.func(*self.args + args,
+**{**self.keywords, **kwargs})`. Keyword arguments supplied at call time
+override those stored in `self.keywords`. The C accelerator mirrors this
+exactly; the Python version is in `functools.py` around line 175.
+
+### `total_ordering` fill logic
+
+`total_ordering` first identifies which of `__lt__`, `__le__`, `__gt__`,
+`__ge__` the class defines (it requires at least one plus `__eq__`). It then
+picks the appropriate reflection or negation to fill the remaining three slots.
+The table of fill functions lives in `_convert` (a module-level dict). Each
+entry is a lambda that derives the missing method from the one that is present.
+The decorator injects each missing method only if it is not already defined on
+the class or any base other than `object`.
+
+### `singledispatch` registry and MRO walk
+
+The registry maps types to implementation functions. `dispatch(cls)` first does
+an exact-key lookup. On a miss it walks `cls.__mro__` and picks the first type
+that has a registered implementation. The result is cached in a secondary
+`dispatch_cache` dict. When `register` is called, `dispatch_cache` is cleared.
+Abstract base classes are handled separately: `_find_impl` checks
+`cls.__mro__` against `registry` keys using `issubclass`, preferring more
+specific types.
+
+### `cached_property` descriptor
+
+`cached_property` is a non-data descriptor (it defines `__get__` but not
+`__set__`). On first access, `__get__` calls the wrapped function, stores the
+result in `instance.__dict__[self.attrname]`, and returns it. Subsequent
+accesses hit `instance.__dict__` directly, bypassing the descriptor entirely.
+The 3.12 release added `__set_name__` so that the attribute name is recorded
+reliably even when the class is defined dynamically.
+
+### 3.14 changes
+
+`lru_cache` gained a `__notes__` passthrough so that annotated wrappers
+preserve decorator metadata correctly. `singledispatch` received a fix for
+virtual subclasses registered via `ABCMeta.register` not being found during the
+MRO walk when the cache was warm.
+
+## gopy notes
+
+- `reduce` is ported in `module/functools` and exercises the iterator protocol.
+- `partial` is a Python-visible type in `module/_functools`; its `__call__`
+  delegates to `vm` frame creation with merged args.
+- `lru_cache` depends on a hash-keyed cache keyed on `(args, tuple(kwargs.items()))`.
+  The `typed` flag requires per-type buckets, which adds a branch in the key
+  construction step.
+- `singledispatch` is not yet ported. It requires `ABCMeta` virtual subclass
+  lookup, which in turn depends on `module/abc` being complete.
+- `cached_property` requires `__set_name__` support on descriptor types, tracked
+  as part of the descriptor protocol work in `objects/descr.go`.

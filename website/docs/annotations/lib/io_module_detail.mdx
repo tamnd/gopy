@@ -1,0 +1,86 @@
+---
+title: "_pyio.py: Pure-Python I/O Implementation"
+description: "IOBase ABC, the RawIOBase/BufferedIOBase/TextIOBase hierarchy, BufferedWriter/BufferedRandom, and the C-extension fallback pattern"
+cpython_path: Lib/_pyio.py
+cpython_version: "3.14"
+lines: 2000
+status: annotated
+ported_to: module/io
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`_pyio` is the pure-Python reference implementation of the `io` module. CPython
+ships the same interface in C as `_io`, then does a runtime fallback: if `_io`
+fails to import, `io` re-exports everything from `_pyio`. Reading this file
+gives the authoritative description of every guarantee the abstract base classes
+make.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | module preamble | `DEFAULT_BUFFER_SIZE`, `BlockingIOError` alias, `UnsupportedOperation` |
+| 81-300 | `IOBase` | ABC root: `readline`, `readlines`, `writelines`, `__iter__`, `close`, `closed` property, `__del__` |
+| 301-430 | `RawIOBase` | `read` / `readall` built from `readinto`; default `write` raises `UnsupportedOperation` |
+| 431-580 | `BufferedIOBase` | `read`, `read1`, `readinto`, `readinto1`, `write`, `detach` stubs with docstrings |
+| 581-750 | `BytesIO` | In-memory raw stream; `getvalue`, `getbuffer`, `seek`, `truncate` |
+| 751-950 | `BufferedWriter` | Write-through buffer; `flush` drains `_write_buf` in a loop to handle short writes |
+| 951-1100 | `BufferedReader` | Peek, read-ahead buffer; `read1` returns at most one raw read worth of data |
+| 1101-1250 | `BufferedRandom` | Combines reader and writer with a single shared position; `seek` flushes then resets |
+| 1251-1380 | `BufferedRWPair` | Wraps separate reader/writer raw streams; no shared seek |
+| 1381-1600 | `TextIOBase` / `TextIOWrapper` | Encoding, `newlines` translation, `line_buffering`, incremental codec wiring |
+| 1601-1750 | `StringIO` | In-memory text stream backed by a `str` buffer |
+| 1751-2000 | `FileIO` | `os.open` wrapper; `readinto` via `os.readv` / `os.read`; `write` via `os.write` |
+
+## Reading
+
+### IOBase contract
+
+`IOBase` is the only class that owns the `closed` state. Every subclass
+delegates `close` upward. The `__del__` hook calls `close` so that garbage
+collection is safe. `readline` is implemented entirely in terms of `read(1)`,
+which makes it a correct (if slow) default for any raw stream.
+
+### BufferedWriter flush loop
+
+The flush at lines 830-870 retries `raw.write` until the internal buffer is
+empty. A single `raw.write` call is allowed to return a short count (common on
+non-blocking descriptors), so the loop is not optional. `BufferedRandom` must
+call `flush` before every `seek` to keep the raw file position consistent with
+the logical position.
+
+### C-extension fallback pattern
+
+`Lib/io.py` contains only:
+
+```python
+try:
+    from _io import *
+    from _io import (_RawIOBase, _BufferedIOBase, _TextIOBase,
+                     _IOBase, open, open_code, BlockingIOError)
+except ImportError:
+    from _pyio import *
+    ...
+```
+
+`_pyio` is therefore never imported in a normal CPython run. Its value is as a
+readable spec and as the fallback for platforms where the C extension cannot be
+built.
+
+### 3.14 changes
+
+`FileIO` gained a `closefd` check that raises `ValueError` when `closefd=False`
+is combined with a file-name string (previously a silent no-op). `TextIOWrapper`
+received a `_CHUNK_SIZE` tuning for the incremental decoder path.
+
+## gopy notes
+
+- `IOBase`, `RawIOBase`, `BufferedIOBase`, and `TextIOBase` are registered in
+  `module/io` as Go types that implement the corresponding Python ABCs.
+- The `BufferedWriter` flush loop is ported verbatim; short-write handling is
+  exercised by `Lib/test/test_io.py` in the e2e gate.
+- `FileIO` relies on `os.open` semantics; gopy delegates to `os.OpenFile` with
+  flag translation matching CPython's `_Py_Modeflags`.
+- `StringIO` and `BytesIO` are in-memory and have no OS dependency, making them
+  the first targets for the e2e gate.

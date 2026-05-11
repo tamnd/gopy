@@ -1,0 +1,196 @@
+---
+title: "exceptions.c + bltinmodule.c: exception class tree"
+description: "Annotation of the 60-plus exception hierarchy from BaseException to concrete leaves, ExceptionGroup, OSError errno subclasses, and Python 3.14 additions"
+cpython_path: Python/bltinmodule.c
+cpython_version: "3.14"
+lines: 900
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+## Overview
+
+Python's exception hierarchy is defined across two files. `Objects/exceptions.c`
+declares every class from `BaseException` down to the concrete leaf types and
+wires up `__init__`, `__str__`, and pickling support. `Python/bltinmodule.c`
+installs these classes into the builtins namespace and exposes
+`ExceptionGroup` and `BaseExceptionGroup` introduced in PEP 654.
+
+This annotation maps the full tree, explains the OSError errno-subclass
+dispatch mechanism, and notes the `StopIteration`/`StopAsyncIteration`
+distinction that the frame evaluation loop depends on.
+
+## Map
+
+| C symbol | File | Purpose |
+|---|---|---|
+| `SimpleExtendsException` | exceptions.c | Macro: class with no extra fields |
+| `MiddlingExtendsException` | exceptions.c | Macro: class that adds a `msg` attribute |
+| `_PyExc_InitTypes` | exceptions.c | Registers all exception types on interpreter init |
+| `OSError_init` | exceptions.c | Parses `(errno, strerror, filename)` tuple |
+| `_PyExc_CreateExceptionGroup` | exceptions.c | Factory for `ExceptionGroup` / `BaseExceptionGroup` |
+| `builtin_excepthook` | bltinmodule.c | Default `sys.excepthook` implementation |
+| `_PyBuiltin_Init` | bltinmodule.c | Installs exception classes into builtins dict |
+
+## Reading
+
+### The exception tree
+
+The full tree rooted at `BaseException` (condensed):
+
+```
+BaseException
+  SystemExit
+  KeyboardInterrupt
+  GeneratorExit
+  Exception
+    StopIteration          (.value attribute)
+    StopAsyncIteration
+    ArithmeticError
+      FloatingPointError
+      OverflowError
+      ZeroDivisionError
+    AssertionError
+    AttributeError
+    BufferError
+    EOFError
+    ImportError
+      ModuleNotFoundError
+    LookupError
+      IndexError
+      KeyError
+    MemoryError
+    NameError
+      UnboundLocalError
+    OSError  (aliases: EnvironmentError, IOError)
+      BlockingIOError        (errno EAGAIN/EWOULDBLOCK/EINPROGRESS)
+      BrokenPipeError        (errno EPIPE/ESHUTDOWN)
+      ChildProcessError      (errno ECHILD)
+      ConnectionError
+        ConnectionAbortedError
+        ConnectionRefusedError
+        ConnectionResetError
+      FileExistsError        (errno EEXIST)
+      FileNotFoundError      (errno ENOENT)
+      InterruptedError       (errno EINTR)
+      IsADirectoryError      (errno EISDIR)
+      NotADirectoryError     (errno ENOTDIR)
+      PermissionError        (errno EACCES/EPERM)
+      ProcessLookupError     (errno ESRCH)
+      TimeoutError           (errno ETIMEDOUT)
+    ReferenceError
+    RuntimeError
+      NotImplementedError
+      RecursionError
+    SyntaxError
+      IndentationError
+        TabError
+    SystemError
+    TypeError
+    ValueError
+      UnicodeError
+        UnicodeDecodeError
+        UnicodeEncodeError
+        UnicodeTranslateError
+    Warning
+      BytesWarning
+      DeprecationWarning
+      EncodingWarning
+      FutureWarning
+      ImportWarning
+      PendingDeprecationWarning
+      ResourceWarning
+      RuntimeWarning
+      SyntaxWarning
+      UnicodeWarning
+      UserWarning
+  BaseExceptionGroup          (PEP 654, 3.11+)
+    ExceptionGroup            (subtype, all members must be Exception subclasses)
+```
+
+Python 3.14 added no new exception classes in the stable ABI, but it
+deprecated several `DeprecationWarning` sites and tightened the
+`EncodingWarning` machinery.
+
+### OSError errno-to-subclass dispatch
+
+When `OSError.__new__` receives two or three positional arguments,
+`OSError_new` inspects the first argument (errno) and substitutes a more
+specific subclass. This means `OSError(errno.ENOENT, ...)` actually returns a
+`FileNotFoundError` instance, not a plain `OSError`.
+
+```c
+// Objects/exceptions.c:870  OSError_new (excerpt)
+static PyObject *
+OSError_new(PyTypeObject *type, PyObject *args, PyObject *kwds)
+{
+    PyObject *myerrno = NULL;
+    if (type == (PyTypeObject *)PyExc_OSError) {
+        /* Substitute a concrete subtype based on errno */
+        if (PyArg_UnpackTuple(args, "OSError", 0, 3,
+                              &myerrno, ...) && myerrno) {
+            type = _PyExc_OSErrorFromErrno(PyLong_AsLong(myerrno));
+        }
+    }
+    return BaseException_new(type, args, kwds);
+}
+```
+
+`_PyExc_OSErrorFromErrno` is a switch over POSIX errno values. Platforms that
+lack certain errno constants (Windows) fall through to plain `OSError`.
+
+### StopIteration vs StopAsyncIteration
+
+`StopIteration` carries a `.value` attribute used by `yield from` and `return`
+inside generators to pass the return value to the delegating frame. The
+`RETURN_VALUE` opcode in `ceval.c` stores the return object there when
+unwinding a generator frame.
+
+`StopAsyncIteration` has no `.value`. It signals the end of an async iterator
+(`__anext__` exhausted) and is explicitly forbidden from propagating out of an
+`async for` body (that would be a `RuntimeError`). The eval loop checks the
+exception type after each `SEND` / `FOR_ITER` to enforce this.
+
+```c
+// Objects/exceptions.c:440  StopIteration_init
+static int
+StopIteration_init(PyStopIterationObject *self,
+                   PyObject *args, PyObject *kwds)
+{
+    Py_ssize_t size = PyTuple_GET_SIZE(args);
+    PyObject *v = size > 0 ? PyTuple_GET_ITEM(args, 0) : Py_None;
+    Py_XSETREF(self->value, Py_NewRef(v));
+    return BaseException_init((PyBaseExceptionObject *)self, args, kwds);
+}
+```
+
+### ExceptionGroup and BaseExceptionGroup (PEP 654)
+
+`BaseExceptionGroup` can wrap any `BaseException` subclass. `ExceptionGroup`
+is a subtype restricted to `Exception` subclasses (enforced in `__new__`).
+The split/subgroup protocol (`split`, `subgroup`, `derive`) is implemented
+entirely in Python via `Lib/` but the C layer provides the concrete type
+objects and `__new__`/`__init__` with validation.
+
+```c
+// Objects/exceptions.c:2900  ExceptionGroup_new (excerpt)
+if (!_is_exception_class(exc_type)) {
+    /* reject if any member is not an Exception subclass */
+    PyErr_SetString(PyExc_TypeError,
+        "second argument (exceptions) must be a sequence "
+        "of exceptions, not base exceptions");
+    return NULL;
+}
+```
+
+## gopy notes
+
+- All exception classes through the `Warning` subtree are registered in
+  `objects/type.go` and `objects/instance.go` using `registerBuiltinType`.
+- `OSError_new` errno dispatch is ported in `objects/type_call.go`
+  `osErrorNew`; the errno-to-subtype map covers POSIX values only.
+- `StopIteration.value` is tracked in `objects/instance.go`; the eval loop
+  reads it in `vm/eval_unwind.go` during generator frame teardown.
+- `BaseExceptionGroup` and `ExceptionGroup` type objects exist in
+  `objects/type.go` but `split`/`subgroup` are not yet ported.

@@ -1,0 +1,121 @@
+---
+title: "typeobject.c: type_call and slot inheritance"
+description: "Annotation of type_call dispatch, slot_tp_new vectorcall, inherit_slots, _PyType_Lookup MRO scan, and type_ready slot filling"
+cpython_path: Objects/typeobject.c
+cpython_version: "3.14"
+lines: 2000
+status: annotated
+ported_to: objects/type_call.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+## Overview
+
+`Objects/typeobject.c` implements `PyTypeObject` machinery: calling a type to
+create an instance, filling in inherited slots when a subtype is created, and
+looking up attributes through the MRO. This annotation focuses on the stretch
+from roughly line 1000 to 3000.
+
+## Map
+
+| C symbol | Lines (approx) | Purpose |
+|---|---|---|
+| `type_call` | 1063-1120 | Entry point when a type is called as a constructor |
+| `slot_tp_new` | 1450-1490 | Vectorcall-compatible wrapper around `__new__` |
+| `type_ready` | 2100-2280 | Fills empty slots in a freshly created type |
+| `inherit_slots` | 2310-2490 | Copies slot pointers from base to subtype |
+| `_PyType_Lookup` | 2600-2660 | MRO linear scan for attribute lookup |
+| `type_hash` | 1870-1880 | Delegates to `_Py_HashPointer` for types |
+| `type_richcompare` | 1885-1900 | Identity comparison used when no `__eq__` defined |
+
+## Reading
+
+### type_call: __new__ then __init__
+
+`type_call` is the `tp_call` slot for metatypes. It calls `tp_new` first,
+checks that the result is an instance of the type, then calls `tp_init` only
+when `tp_new` returned a proper subtype instance.
+
+```c
+// Objects/typeobject.c:1063  type_call
+static PyObject *
+type_call(PyTypeObject *type, PyObject *args, PyObject *kwds)
+{
+    PyObject *obj = type->tp_new(type, args, kwds);
+    if (obj == NULL)
+        return NULL;
+    if (!PyType_IsSubtype(Py_TYPE(obj), type))
+        return obj;
+    type = Py_TYPE(obj);
+    if (type->tp_init != NULL) {
+        int res = type->tp_init(obj, args, kwds);
+        if (res < 0) {
+            Py_DECREF(obj);
+            return NULL;
+        }
+    }
+    return obj;
+}
+```
+
+The guard `PyType_IsSubtype` is important: if `__new__` returned something of
+an unrelated type (valid for `int.__new__` returning a `bool`), `__init__` is
+skipped entirely.
+
+### inherit_slots: propagating tp_hash and tp_richcompare
+
+When a new subtype is registered, `inherit_slots` walks the slot table and
+copies non-NULL base slots into the subtype only when the subtype slot is
+still NULL. `tp_hash` and `tp_richcompare` get special treatment: if a type
+defines `__eq__` but not `__hash__`, CPython sets `tp_hash` to
+`PyObject_HashNotImplemented` rather than inheriting the base hash.
+
+```c
+// Objects/typeobject.c:2360  inherit_slots (excerpt)
+if (base->tp_hash != NULL && type->tp_hash == NULL) {
+    if (type->tp_richcompare != NULL ||
+        /* type defines __eq__ */ ...) {
+        type->tp_hash = PyObject_HashNotImplemented;
+    } else {
+        COPYSLOT(tp_hash);
+    }
+}
+```
+
+### _PyType_Lookup: MRO scan
+
+`_PyType_Lookup` iterates `type->tp_mro` (a tuple) left to right, checks each
+base's `tp_dict`, and returns the first hit. Results are cached in the type's
+version-tagged attribute cache. Cache entries are invalidated by bumping the
+global `_PyType_CacheTag` whenever any type's dict is mutated.
+
+```c
+// Objects/typeobject.c:2600  _PyType_Lookup
+PyObject *
+_PyType_Lookup(PyTypeObject *type, PyObject *name)
+{
+    PyObject *mro = type->tp_mro;
+    Py_ssize_t n = PyTuple_GET_SIZE(mro);
+    for (Py_ssize_t i = 0; i < n; i++) {
+        PyObject *base = PyTuple_GET_ITEM(mro, i);
+        PyObject *dict = ((PyTypeObject *)base)->tp_dict;
+        PyObject *res = PyDict_GetItemWithError(dict, name);
+        if (res != NULL)
+            return res;
+    }
+    return NULL;
+}
+```
+
+## gopy notes
+
+- `objects/type_call.go` ports `type_call` as `typeCall` and `slot_tp_new` as
+  `slotTpNew`. The vectorcall path is not yet wired; calls fall back through
+  the `tp_call` wrapper.
+- `inherit_slots` is partially ported: the `tp_hash` / `__eq__` interaction is
+  handled in `objects/type.go` `inheritSlots`.
+- `_PyType_Lookup` is ported without the version-tag attribute cache; every
+  lookup does a fresh MRO scan. A caching layer is deferred.
+- `type_ready` slot filling runs in `objects/usertype.go` `typeReady`, called
+  from class definition finalization.

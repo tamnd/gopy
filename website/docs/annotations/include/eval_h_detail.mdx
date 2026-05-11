@@ -1,0 +1,107 @@
+---
+title: "Include/cpython/eval.h: Frame Evaluation and Code Execution"
+description: "Signatures for _PyEval_EvalFrameDefault, PyEval_EvalCode, the compile-mode input constants, and the CallObject family"
+cpython_path: Include/cpython/eval.h
+cpython_version: "3.14"
+lines: 60
+status: annotated
+ported_to: vm/eval_gen.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`eval.h` (cpython variant) declares the handful of functions that sit at the
+boundary between the compiler output and the interpreter main loop. It is one
+of the smallest headers in CPython but one of the most performance-critical:
+every Python call ultimately routes through one of these entry points.
+
+## Map
+
+| Lines | Symbol | Kind | Notes |
+|-------|--------|------|-------|
+| 1-8 | guard | macro | `#ifndef Py_CPYTHON_EVAL_H` |
+| 9-15 | `Py_eval_input` | const int | Compile mode: expression (used by `eval()`) |
+| 16-18 | `Py_file_input` | const int | Compile mode: module/file (used by `exec()`) |
+| 19-21 | `Py_single_input` | const int | Compile mode: interactive single statement |
+| 22-35 | `_PyEval_EvalFrameDefault` | function decl | The main interpreter loop entry point |
+| 36-45 | `PyEval_EvalCode` | function decl | Execute a code object in a given frame/globals |
+| 46-52 | `PyEval_EvalCodeEx` | function decl | Extended form with explicit args, kw, globals, locals |
+| 53-57 | `PyEval_CallObject` | function decl | Deprecated alias for `PyObject_Call` |
+| 58-60 | `_Py_MakeRecursionError` | function decl | Raise `RecursionError` when the call stack is full |
+
+## Reading
+
+### _PyEval_EvalFrameDefault
+
+```c
+PyAPI_FUNC(PyObject *) _PyEval_EvalFrameDefault(
+    PyThreadState              *tstate,
+    struct _PyInterpreterFrame *frame,
+    int                         throwflag
+);
+```
+
+This is the real interpreter loop, defined in `Python/ceval.c`. It is not
+part of the stable ABI. The `throwflag` parameter is non-zero when the frame
+was resumed by `generator.throw()`, which causes the loop to raise the
+pending exception immediately rather than executing the next opcode.
+`frame->prev_instr` points to the last executed instruction on entry; the
+loop advances it at the top of each iteration.
+
+### PyEval_EvalCode and PyEval_EvalCodeEx
+
+```c
+PyAPI_FUNC(PyObject *) PyEval_EvalCode(
+    PyObject *co,
+    PyObject *globals,
+    PyObject *locals
+);
+
+PyAPI_FUNC(PyObject *) PyEval_EvalCodeEx(
+    PyObject  *co,
+    PyObject  *globals,
+    PyObject  *locals,
+    PyObject **args,    int argcount,
+    PyObject **kws,     int kwcount,
+    PyObject **defs,    int defcount,
+    PyObject  *kwdefs,
+    PyObject  *closure
+);
+```
+
+`EvalCode` is the public API used by `exec()` and `compile()` consumers.
+It builds a new `_PyInterpreterFrame` on the C stack (or the frame freelist)
+and calls `_PyEval_EvalFrameDefault`. `EvalCodeEx` is the older extended form
+that accepts pre-split argument arrays; it is still used internally by
+`function_call` machinery for keyword-heavy calls.
+
+### Compile-mode constants and _Py_MakeRecursionError
+
+```c
+#define Py_eval_input   258
+#define Py_file_input   257
+#define Py_single_input 256
+
+PyAPI_FUNC(PyObject *) _Py_MakeRecursionError(void);
+```
+
+The three input-mode constants are passed to `PyCompile_OpcodeStackEffect`
+and `Py_CompileString`. Their numeric values correspond to token grammar
+non-terminals in the PEG grammar. `_Py_MakeRecursionError` constructs
+(but does not raise) a `RecursionError` instance with a pre-formatted message;
+callers set it with `PyErr_SetRaisedException` and return NULL.
+
+## gopy notes
+
+- `_PyEval_EvalFrameDefault` corresponds to the `evalFrame` function in
+  `vm/eval_gen.go`. The `throwflag` behaviour is handled by the `throw`
+  parameter in `vm/eval_unwind.go` when resuming generators.
+- `PyEval_EvalCode` maps to `pythonrun.RunCode` in `pythonrun/runstring.go`,
+  which wraps the Go eval entry point with globals/locals setup.
+- The three compile-mode constants are defined in `compile/compiler.go` as
+  `ModeEval`, `ModeExec`, and `ModeSingle`.
+- `_Py_MakeRecursionError` is approximated by the recursion-depth check in
+  `vm/eval_call.go`; gopy uses a configurable depth limit rather than the
+  CPython `C_RECURSION_LIMIT` constant.
+- `PyEval_CallObject` is not ported; all call sites in gopy go through the
+  `objects/protocol.go` call protocol helpers directly.

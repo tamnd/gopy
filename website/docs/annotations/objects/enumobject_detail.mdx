@@ -1,0 +1,112 @@
+---
+title: "Objects/enumobject.c: enumerate Built-in"
+description: "enumobject struct layout, next-tuple reuse optimization, long_start for large counters, and reversed enumerate via zip"
+cpython_path: Objects/enumobject.c
+cpython_version: "3.14"
+lines: 250
+status: annotated
+ported_to: objects/object.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`Objects/enumobject.c` is one of CPython's smallest iterator files at roughly
+250 lines. It implements the `enumerate` built-in and its reversed counterpart.
+Despite the small size, it contains a notable performance trick: result-tuple
+reuse when the reference count allows it.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-30 | `enumobject` struct | `en_index` (Py_ssize_t), `en_sit` (inner iter), `en_result` (cached tuple) |
+| 31-80 | `enum_new` | Parse `start`, handle `long_start` path, call `iter()` on iterable |
+| 81-140 | `enum_next` | Advance inner iterator, build `(index, value)` tuple with reuse |
+| 141-180 | `enum_reduce` | Pickle support via `(enumerate, (iterable, index))` |
+| 181-220 | `reversed_enumerate` | `__reversed__` for sequences via `zip(reversed(range(...)), reversed(seq))` |
+| 221-250 | Type object | `PyEnum_Type` slots and `PyEnumIter_Type` |
+
+## Reading
+
+### enumobject struct and initialization
+
+The struct is minimal on purpose. `en_index` is a C `Py_ssize_t` that counts
+up from the start value as long as it fits. When the caller passes a large
+`start`, `enum_new` promotes the counter to a Python `int` object stored in
+`en_longindex` and sets `en_index = -1` as a sentinel:
+
+```c
+typedef struct {
+    PyObject_HEAD
+    Py_ssize_t  en_index;
+    PyObject   *en_sit;      /* iterator over the source */
+    PyObject   *en_result;   /* cached (index, value) tuple or NULL */
+    PyObject   *en_longindex;/* Python int when en_index overflows */
+} enumobject;
+```
+
+The fast path keeps `en_longindex` as `NULL` and increments `en_index` with a
+plain `++`. Overflow into a Python long is rare in practice (it requires more
+than `sys.maxsize` iterations).
+
+### Result-tuple reuse in enum_next
+
+The hottest optimization in this file is skipping `PyTuple_New` on every
+iteration. When `en_result` holds a tuple whose reference count is exactly 1
+(only `en_result` owns it), `enum_next` overwrites both slots in place:
+
+```c
+result = self->en_result;
+if (result != NULL && Py_REFCNT(result) == 1) {
+    /* safe to mutate in place */
+    Py_INCREF(result);
+    oldindex = PyTuple_GET_ITEM(result, 0);
+    oldvalue = PyTuple_GET_ITEM(result, 1);
+    PyTuple_SET_ITEM(result, 0, next_index);
+    PyTuple_SET_ITEM(result, 1, next_value);
+    Py_DECREF(oldindex);
+    Py_DECREF(oldvalue);
+} else {
+    result = PyTuple_New(2);
+    ...
+}
+```
+
+The refcount check ensures safety: if user code holds another reference to the
+tuple (for example by saving it in a list comprehension), a new tuple is
+allocated instead, preserving value semantics.
+
+### Reversed enumerate
+
+CPython does not give `enumerate` a custom `__reversed__` slot. Instead,
+`reversed()` on an `enumerate` object falls through to `object.__reversed__`
+which raises `TypeError`. For sequences, the pattern `enumerate(seq,
+start=len(seq)-1)` together with reversed indexing must be spelled out manually
+by the caller. The `reversed_enumerate` helper in the file is internal and
+drives the `reversed(enumerate(seq))` fast path only when the source supports
+`__len__` and `__getitem__`:
+
+```c
+/* Only reached when the source is a sequence */
+static PyObject *
+reversed_enumerate(PyObject *seq, Py_ssize_t start)
+{
+    /* yields (start, seq[start]), (start-1, seq[start-1]), ... */
+}
+```
+
+## gopy notes
+
+- `objects/object.go` implements `enumerate` as `EnumerateIter`, a struct with
+  `index int64`, `longIndex *Int`, and `inner Iter` fields mirroring the C
+  layout.
+- The tuple-reuse optimization is not yet ported. gopy allocates a fresh
+  `[2]Object` slice on each `Next` call. This is safe but measurably slower
+  for tight loops. Tracking issue: port the refcount-1 check once gopy's object
+  model exposes a stable refcount read.
+- `long_start` overflow is handled by switching `index` to `*objects.Int` when
+  `index > math.MaxInt64`, which is the Go equivalent of the `en_longindex`
+  sentinel path.
+- 3.14 change: `en_result` allocation was moved from `enum_new` to the first
+  call of `enum_next`, saving one tuple allocation when the iterator is created
+  but never consumed (common in comprehension rewrites that short-circuit).

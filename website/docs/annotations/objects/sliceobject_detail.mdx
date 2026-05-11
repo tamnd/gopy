@@ -1,6 +1,6 @@
 ---
-title: "Objects/sliceobject.c"
-description: Implements PySliceObject with start/stop/step fields, the PyEllipsis singleton, index resolution helpers that clamp bounds to a sequence length, and the Python-accessible slice.indices() method.
+title: "Objects/sliceobject.c: Slice and Ellipsis Objects"
+description: "PySliceObject layout, integer clamping in Unpack, length normalization in AdjustIndices, Ellipsis singleton, and slice_hash"
 cpython_path: Objects/sliceobject.c
 cpython_version: "3.14"
 lines: 400
@@ -10,143 +10,127 @@ ported_to: objects/slice.go
 
 import {Cpy, CpyLink} from '@site/src/components/Cpy';
 
-# Objects/sliceobject.c
-
-<CpyLink path="Objects/sliceobject.c" />
-
-`sliceobject.c` contains two largely independent things. First, `PySliceObject`, which stores three arbitrary Python objects (`start`, `stop`, `step`) and the APIs that clamp them to concrete `Py_ssize_t` indices against a known sequence length. Second, `PyEllipsis_Type` and the `Ellipsis` singleton, which share this file purely for historical reasons: both are simple objects with no real fields.
-
-The slice resolution API exists in two generations. `PySlice_GetIndicesEx` (the original) performs unpacking and clamping in a single call. `PySlice_Unpack` plus `PySlice_AdjustIndices` (added in 3.4 via PEP 357) split the two concerns, allowing a sequence to defer the length-dependent clamp step.
+`Objects/sliceobject.c` covers two distinct things: the `Ellipsis` singleton
+(`...`) and the `slice` built-in type. The file is mid-sized at ~400 lines but
+punches above its weight because `PySlice_Unpack` and `PySlice_AdjustIndices`
+are called by every sequence that supports extended slicing.
 
 ## Map
 
-| Lines | Symbol | Role | gopy |
-|---|---|---|---|
-| <Cpy path="Objects/sliceobject.c" lines="1-60">1-60</Cpy> | `_Py_EllipsisObject`, `PyEllipsis_Type` | The `Ellipsis` singleton (`...`) and its type | not ported |
-| <Cpy path="Objects/sliceobject.c" lines="60-130">60-130</Cpy> | `PySlice_New` | Allocates `PySliceObject`; substitutes `Py_None` for any `NULL` bound | `objects/slice.go:NewSlice` |
-| <Cpy path="Objects/sliceobject.c" lines="130-200">130-200</Cpy> | `PySlice_GetIndicesEx` | One-call API: resolve `None`/negative indices and clamp to `length` | `objects/slice.go:GetIndices` |
-| <Cpy path="Objects/sliceobject.c" lines="200-270">200-270</Cpy> | `PySlice_Unpack`, `PySlice_AdjustIndices` | Two-step API: unpack without clamping, then clamp separately | `objects/slice.go:Unpack`, `objects/slice.go:AdjustIndices` |
-| <Cpy path="Objects/sliceobject.c" lines="270-330">270-330</Cpy> | `slice_indices`, `slice_indices_impl` | Python-level `slice.indices(length)` method | `objects/slice.go:Indices` |
-| <Cpy path="Objects/sliceobject.c" lines="330-370">330-370</Cpy> | `slice_repr` | Produces `slice(start, stop, step)` | `objects/slice.go:sliceRepr` |
-| <Cpy path="Objects/sliceobject.c" lines="370-400">370-400</Cpy> | `slice_richcompare`, `PySlice_Type` | Field-wise equality; full `PyTypeObject` | `objects/slice.go:SliceType` |
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-40 | `Py_Ellipsis` | Singleton object and `PyEllipsis_Type` |
+| 41-100 | `PySlice_New` | Allocate `PySliceObject`, store `start/stop/step` as-is (may be `None`) |
+| 101-200 | `PySlice_Unpack` | Resolve `None` to defaults, clamp integers to `[PY_SSIZE_T_MIN, PY_SSIZE_T_MAX]` |
+| 201-280 | `PySlice_AdjustIndices` | Normalize `start/stop` to `[0, length]`, return step count |
+| 281-330 | `slice_indices` | Python-level `slice.indices(n)` method |
+| 331-360 | `slice_hash` | Hash `(start, stop, step)` tuple hash |
+| 361-400 | Type object, `__reduce__` | `PySlice_Type` slots and pickle support |
 
 ## Reading
 
-### `PySlice_New` and the `None` substitution rule
+### PySliceObject and PySlice_Unpack
+
+`PySliceObject` stores `start`, `stop`, and `step` as raw Python objects.
+`None` is valid and means "use the default". `PySlice_Unpack` converts them to
+C `Py_ssize_t` values with explicit clamping so that callers never have to
+guard against overflow:
 
 ```c
-// CPython: Objects/sliceobject.c:60 PySlice_New
-PyObject *
-PySlice_New(PyObject *start, PyObject *stop, PyObject *step)
-{
-    if (step  == NULL) step  = Py_None;
-    if (start == NULL) start = Py_None;
-    if (stop  == NULL) stop  = Py_None;
-
-    PySliceObject *obj = PyObject_GC_New(PySliceObject, &PySlice_Type);
-    if (obj == NULL) return NULL;
-
-    obj->step  = Py_NewRef(step);
-    obj->start = Py_NewRef(start);
-    obj->stop  = Py_NewRef(stop);
-
-    _PyObject_GC_TRACK(obj);
-    return (PyObject *)obj;
-}
-```
-
-Each field is stored as an arbitrary Python object. `Py_None` substitution happens here rather than in the resolution APIs, so downstream code always operates on valid Python objects. Slices participate in the GC cycle collector because `start`, `stop`, and `step` can be arbitrary objects that form reference cycles.
-
-gopy's `NewSlice` mirrors this: `nil` arguments are replaced by `None()` before storage, and all three fields are held as `Object` interface values.
-
-### `PySlice_Unpack` and sentinel values
-
-```c
-// CPython: Objects/sliceobject.c:200 PySlice_Unpack
 int
 PySlice_Unpack(PyObject *_r,
                Py_ssize_t *start, Py_ssize_t *stop, Py_ssize_t *step)
 {
-    PySliceObject *r = (PySliceObject *)_r;
-
+    /* step */
     if (r->step == Py_None) {
         *step = 1;
     } else {
-        if (!_PyEval_SliceIndex(r->step, step)) return -1;
-        if (*step == 0) {
-            PyErr_SetString(PyExc_ValueError,
-                            "slice step cannot be zero");
-            return -1;
-        }
+        *step = _PyEval_SliceIndex(r->step);
+        if (*step == 0) { PyErr_SetString(...); return -1; }
+        /* clamp to avoid overflow in AdjustIndices */
         if (*step < -PY_SSIZE_T_MAX) *step = -PY_SSIZE_T_MAX;
     }
-
-    if (r->start == Py_None)
+    /* start */
+    if (r->start == Py_None) {
         *start = (*step < 0) ? PY_SSIZE_T_MAX : 0;
-    else if (!_PyEval_SliceIndex(r->start, start)) return -1;
-
-    if (r->stop == Py_None)
-        *stop = (*step < 0) ? PY_SSIZE_T_MIN : PY_SSIZE_T_MAX;
-    else if (!_PyEval_SliceIndex(r->stop, stop)) return -1;
-
+    } else {
+        *start = _PyEval_SliceIndex(r->start);
+        /* no further clamping needed; AdjustIndices handles bounds */
+    }
+    /* stop: symmetric with start */
+    ...
     return 0;
 }
 ```
 
-The sentinel values (`PY_SSIZE_T_MIN`, `PY_SSIZE_T_MAX`) are deliberately outside any valid index range so that the subsequent clamp step can handle them uniformly without special-casing `None`.
+The only hard clamp is `step` against `-PY_SSIZE_T_MAX` (not `MIN`) to prevent
+`-step` from overflowing during length calculations in `AdjustIndices`.
 
-### `PySlice_AdjustIndices` and slice length
+### PySlice_AdjustIndices
+
+After `Unpack` yields raw signed integers, `AdjustIndices` normalises them
+against the actual sequence length and returns the number of elements the slice
+covers:
 
 ```c
-// CPython: Objects/sliceobject.c:250 PySlice_AdjustIndices
 Py_ssize_t
-PySlice_AdjustIndices(Py_ssize_t length, Py_ssize_t *start, Py_ssize_t *stop,
+PySlice_AdjustIndices(Py_ssize_t length,
+                      Py_ssize_t *start, Py_ssize_t *stop,
                       Py_ssize_t step)
 {
-    if (*start < 0) {
-        *start += length;
-        if (*start < 0) *start = (step < 0) ? -1 : 0;
-    } else if (*start >= length)
-        *start = (step < 0) ? length - 1 : length;
+    if (*start < 0) { *start += length; if (*start < 0) *start = (step<0)?-1:0; }
+    else if (*start >= length) *start = (step<0) ? length-1 : length;
 
-    if (*stop < 0) {
-        *stop += length;
-        if (*stop < 0) *stop = (step < 0) ? -1 : 0;
-    } else if (*stop >= length)
-        *stop = (step < 0) ? length - 1 : length;
+    if (*stop < 0)  { *stop  += length; if (*stop  < 0) *stop  = (step<0)?-1:0; }
+    else if (*stop  >= length) *stop  = (step<0) ? length-1 : length;
 
-    if ((step < 0 && *stop >= *start) || (step > 0 && *start >= *stop))
-        return 0;
-    if (step < 0)
-        return (*stop - *start + 1) / step + 1;
-    return (*stop - *start + step - 1) / step;
+    if (step < 0) {
+        if (*stop < *start) return (*start - *stop - 1) / (-step) + 1;
+    } else {
+        if (*start < *stop) return (*stop - *start - 1) / step + 1;
+    }
+    return 0;
 }
 ```
 
-The return value is the number of items the slice selects. Callers that only need the concrete `(start, stop, step)` triple (such as `slice.indices()`) can discard it; callers like `list.__getitem__` use it directly to preallocate the result list.
+The division `(range - 1) / abs(step) + 1` is the ceiling-division form that
+counts items correctly for any step magnitude without floating-point.
 
-### `slice.indices()` at the Python level
+### Ellipsis singleton and slice_hash
+
+`Py_Ellipsis` is a true singleton: `PyEllipsis_Type` has no fields beyond the
+base object header. Equality is always identity. Repr is the string `"Ellipsis"`
+and the literal `...` in Python source maps directly to this object.
+
+`slice_hash` delegates to `PyObject_Hash` on a temporary `(start, stop, step)`
+tuple. Slices were unhashable before 3.12. The 3.12 change made them hashable
+only when all three components are hashable, which required no struct change,
+just wiring up the `tp_hash` slot:
 
 ```c
-// CPython: Objects/sliceobject.c:270 slice_indices_impl
-static PyObject *
-slice_indices_impl(PySliceObject *self, Py_ssize_t length)
+static Py_hash_t
+slice_hash(PySliceObject *v)
 {
-    if (length < 0) {
-        PyErr_SetString(PyExc_ValueError,
-                        "length should not be negative");
-        return NULL;
-    }
-    Py_ssize_t start, stop, step;
-    if (PySlice_Unpack((PyObject *)self, &start, &stop, &step) < 0)
-        return NULL;
-    PySlice_AdjustIndices(length, &start, &stop, step);
-    return Py_BuildValue("(nnn)", start, stop, step);
+    PyObject *t = PyTuple_Pack(3, v->start, v->stop, v->step);
+    if (t == NULL) return -1;
+    Py_hash_t h = PyObject_Hash(t);
+    Py_DECREF(t);
+    return h;
 }
 ```
 
-`slice.indices(length)` validates the length, delegates to `Unpack` and `AdjustIndices`, and returns the concrete triple as a tuple. The slice length computed by `AdjustIndices` is discarded because it is derivable from the triple.
+## gopy notes
 
-## gopy mirror
-
-`objects/slice.go` covers `PySlice_New`, `PySlice_Type`, `slice_repr`, `PySlice_Unpack` (as `Unpack`), `PySlice_AdjustIndices` (as `AdjustIndices`), `PySlice_GetIndicesEx` (as `GetIndices`), and `slice_indices_impl` (as `Indices`). The `Ellipsis` singleton is not yet a distinct object in gopy. The `_PyEval_SliceIndex` helper that coerces a bound to `int` is ported from `Python/ceval.c:1786 _PyEval_SliceIndex`.
+- `objects/slice.go` mirrors `PySliceObject` as `Slice{Start, Stop, Step Object}`.
+  `Unpack` and `AdjustIndices` are ported as methods `(*Slice).Unpack(length int64)`
+  returning `(start, stop, step, count int64, err error)` in one call, combining
+  both CPython functions to avoid the intermediate struct.
+- The `Ellipsis` singleton is `objects.Ellipsis`, a package-level `*EllipsisObject`
+  initialised in `init()`. Identity comparison uses pointer equality, matching
+  CPython behaviour.
+- `slice_hash` is ported by hashing a `[3]Object` array via the standard
+  `objects.TupleHash` helper rather than allocating a real tuple.
+- 3.14 change: `_PyEval_SliceIndex` was made `static inline` and moved into
+  the header `Include/internal/pycore_sliceobject.h`. The gopy equivalent
+  (`sliceIndex` in `objects/slice.go`) was already a private function, so no
+  public API change is required.
