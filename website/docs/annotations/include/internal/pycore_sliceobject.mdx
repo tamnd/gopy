@@ -1,0 +1,111 @@
+---
+title: Include/internal/pycore_sliceobject.h
+description: Internal slice helpers including a PyLong-returning unpack function and the stack-consuming slice builder used by BINARY_SLICE.
+cpython_path: Include/internal/pycore_sliceobject.h
+cpython_version: "3.14"
+lines: 40
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Include/internal/pycore_sliceobject.h`
+
+<CpyLink path="Include/internal/pycore_sliceobject.h" />
+
+<overview>
+The public `PySlice_Unpack` and `PySlice_AdjustIndices` APIs return
+`Py_ssize_t`, which silently clamps values that overflow a C `ssize_t`.
+This header provides `_PySlice_GetLongIndices`, a variant that returns
+`PyLong` objects so that very large sequences (hypothetically beyond
+`PY_SSIZE_T_MAX`) can compute correct slice bounds.
+
+A second entry point, `_PyBuildSlice_ConsumeRefs`, is used by the
+`BINARY_SLICE` bytecode instruction. It builds a slice from two stack
+references and steals both references, avoiding a separate `DECREF` step
+in the hot dispatch loop.
+</overview>
+
+## Map
+
+| Symbol | Kind | Purpose |
+|---|---|---|
+| `_PySlice_GetLongIndices` | function | Unpacks a slice into `PyLong` start/stop/step, respecting `__index__` without `ssize_t` truncation. |
+| `_PyBuildSlice_ConsumeRefs` | function | Builds a `slice` from two borrowed stack refs, stealing both on success. Used by `BINARY_SLICE`. |
+
+## Reading
+
+### Large-sequence slice unpacking
+
+The standard `PySlice_Unpack` has the signature:
+
+```c
+// Include/cpython/sliceobject.h
+int PySlice_Unpack(PyObject *slice,
+                   Py_ssize_t *start, Py_ssize_t *stop, Py_ssize_t *step);
+```
+
+For sequences whose length exceeds `PY_SSIZE_T_MAX` (a corner case relevant
+to virtual or memory-mapped sequences), this truncates. The internal variant
+avoids truncation:
+
+```c
+// Include/internal/pycore_sliceobject.h
+int _PySlice_GetLongIndices(PySliceObject *self, PyObject *length,
+                            PyObject **start_ptr, PyObject **stop_ptr,
+                            PyObject **step_ptr);
+```
+
+It calls `__index__` on each bound, converts `None` to the appropriate
+sentinel `PyLong`, and writes three new references into the output pointers.
+The caller owns all three and must `DECREF` them.
+
+### Stack-consuming slice builder for BINARY_SLICE
+
+`BINARY_SLICE` needs to pop two values off the operand stack and build a
+slice. Doing this in two steps (build, then DECREF both inputs) adds two
+reference-count stores to the hot path. `_PyBuildSlice_ConsumeRefs` merges
+both operations:
+
+```c
+// Include/internal/pycore_sliceobject.h
+PyObject *_PyBuildSlice_ConsumeRefs(PyObject *start, PyObject *stop);
+```
+
+The function steals the references to `start` and `stop` regardless of
+whether it succeeds, so the caller can drop both stack slots unconditionally:
+
+```c
+// Python/ceval.c  (BINARY_SLICE handler, simplified)
+PyObject *stop  = POP();
+PyObject *start = POP();
+PyObject *slice = _PyBuildSlice_ConsumeRefs(start, stop);
+// start and stop are gone; no explicit DECREF needed
+```
+
+The step is always `None` in this path; the full three-argument
+`slice(start, stop, step)` form goes through `BUILD_SLICE` instead.
+
+### Relationship between the two opcodes
+
+| Opcode | Arguments | Builder used |
+|---|---|---|
+| `BINARY_SLICE` | `TOS` = stop, `TOS1` = start | `_PyBuildSlice_ConsumeRefs` |
+| `BUILD_SLICE` | `TOS` = step (or `None`), `TOS1` = stop, `TOS2` = start | `PySlice_New` |
+
+`BINARY_SLICE` was added in 3.12 as a specialised fast path for the common
+`seq[a:b]` form.
+
+## gopy mirror
+
+Not yet ported. gopy's `BUILD_SLICE` handler lives in `vm/eval_simple.go` and
+calls `PySlice_New` directly. A `BINARY_SLICE` handler exists but does not yet
+use the reference-stealing optimisation. `_PySlice_GetLongIndices` has no
+equivalent; gopy uses `Py_ssize_t`-width indices throughout.
+
+## CPython 3.14 changes
+
+`_PyBuildSlice_ConsumeRefs` was introduced in 3.12 alongside the `BINARY_SLICE`
+opcode. `_PySlice_GetLongIndices` has been present since 3.5. No changes to
+either signature in 3.14. The header gained its current `Include/internal/`
+location during the 3.8 reorganization.

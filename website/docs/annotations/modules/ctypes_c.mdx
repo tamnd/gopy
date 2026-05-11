@@ -1,0 +1,105 @@
+---
+title: Modules/_ctypes/_ctypes.c
+description: Core of the ctypes foreign function library, defining the type hierarchy and C/Python marshalling layer.
+cpython_path: Modules/_ctypes/_ctypes.c
+cpython_version: "3.14"
+lines: 5000
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Modules/_ctypes/_ctypes.c`
+
+<CpyLink path="Modules/_ctypes/_ctypes.c" />
+
+<overview>
+
+This file is the heart of the `ctypes` extension module. It defines the complete type hierarchy that lets Python code describe and call native C functions without writing any C. The hierarchy roots at `_CData`, and every concrete ctypes type (Structure, Union, Array, SimpleType, PointerType, FunctionType) descends from it. On top of the type hierarchy sits the marshalling engine: a table of `getfunc`/`setfunc` pairs that convert between Python objects and raw C memory for every primitive C type. At the lowest level, marshalled arguments are handed off to [libffi](https://sourceware.org/libffi/) via `ffi_call`, which handles the platform ABI details.
+
+</overview>
+
+## Map
+
+| Region | Lines (approx.) | What it does |
+|---|---|---|
+| Module init and type registration | 1-150 | Initialises the `_ctypes` module, registers all type objects with the interpreter. |
+| `_CData` base type | 150-400 | `PyCData_Type`, `PyCData_NewInternal`, `_CData_set` / `_CData_get`. |
+| `SimpleType` metaclass | 400-700 | Creates scalar ctypes types (`c_int`, `c_double`, etc.) at class-creation time; installs `getfunc`/`setfunc`. |
+| `PointerType` | 700-1000 | Type metaclass for pointer types; `_Pointer_set_contents`, dereference via `__getitem__`. |
+| `ArrayType` | 1000-1300 | Fixed-length array metaclass; bounds-checked `__getitem__` and `__setitem__`. |
+| `StructureType` / `UnionType` | 1300-2000 | Metaclasses that parse `_fields_`, compute layout, and build `CField` descriptors. |
+| `CField` descriptor | 2000-2500 | `CField_get` / `CField_set` read and write struct members through bit-field-aware masks. |
+| `FunctionType` | 2500-3200 | Wraps a function pointer; builds the `ffi_cif` call-info struct; drives `ffi_call`. |
+| `getfunc` / `setfunc` table | 3200-4000 | One entry per C primitive; covers signed/unsigned integers of all widths, float, double, `char *`, `void *`, `PyObject *`. |
+| Miscellaneous helpers | 4000-5000 | `CastFunc`, `PointerObj`, `byref`, buffer-protocol helpers, `_unpickle`. |
+
+## Reading
+
+### The `_CData` base and memory ownership
+
+Every ctypes instance owns (or borrows) a block of raw C memory tracked by the `CDataObject` struct:
+
+```c
+// Modules/_ctypes/_ctypes.c:172
+typedef struct {
+    PyObject_HEAD
+    char *b_ptr;        /* pointer to memory block */
+    int   b_needsfree;  /* b_ptr must be freed */
+    CDataObject *b_base;/* base object that owns b_ptr, or NULL */
+    Py_ssize_t b_size;  /* size of memory block in bytes */
+    Py_ssize_t b_offset;/* offset of this object into b_base */
+    Py_ssize_t b_index; /* index of this object into b_base */
+    PyObject  *b_objects;/* references we need to keep alive */
+} CDataObject;
+```
+
+When `b_base` is non-NULL the instance is a view into another object's buffer and `b_needsfree` is 0. When `b_base` is NULL the instance allocated its own block and is responsible for freeing it. This dual-ownership model is what lets `Structure` fields hand back references into the parent's memory without copying.
+
+### `getfunc` / `setfunc` dispatch
+
+For each primitive C type, `SimpleType_new` looks up an entry in the static `fielddesc_list` table and stores the pair on the type object:
+
+```c
+// Modules/_ctypes/_ctypes.c:3241
+static struct fielddesc *
+_ctypes_get_fielddesc(const char *proto)
+{
+    struct fielddesc *table = fielddesc_list;
+    for (; table->code; ++table)
+        if (table->code == proto[0])
+            return table;
+    return NULL;
+}
+```
+
+At instance `__set__` time, `_CData_set` calls `stginfo->setfunc(ptr, value, size)` directly, no Python attribute lookup involved. The symmetry between `getfunc` (memory to Python object) and `setfunc` (Python object to memory) is the key abstraction that makes the entire marshalling layer extensible: adding a new primitive type means adding one row to `fielddesc_list`.
+
+### `ffi_call` integration in `FunctionType`
+
+When a `FunctionType` instance is called, `_CallProc` in `_ctypes.c` marshals each argument through its registered `setfunc`, builds an array of `void *` pointers, and delegates to libffi:
+
+```c
+// Modules/_ctypes/_ctypes.c:2874
+result = ffi_call(&self->cif,
+                  (void (*)(void))self->restype,
+                  resmem,
+                  avalues);
+if (result != FFI_OK) {
+    PyErr_SetString(PyExc_RuntimeError,
+                    "ffi_call failed");
+    goto cleanup;
+}
+```
+
+The `ffi_cif` is built once at type-creation time by `FunctionType_new`, so repeated calls pay no setup cost. After `ffi_call` returns, the return value is converted back to a Python object via the `restype`'s `getfunc`.
+
+## gopy mirror
+
+Not yet ported to gopy. ctypes requires deep integration with platform calling conventions (via libffi) and raw memory management that has no direct Go equivalent. A future port would need to decide between wrapping libffi via cgo, using a pure-Go foreign-function mechanism, or restricting ctypes to a subset that gopy can express natively.
+
+## CPython 3.14 changes
+
+- `_ctypes` gained a vectorcall fast path for `FunctionType.__call__` to reduce per-call overhead on the marshalling hot path.
+- `StructureType` layout now respects PEP 749 annotations (lazy evaluation), so `_fields_` entries that reference forward-declared ctypes types resolve correctly.
+- Several `getfunc`/`setfunc` entries for wide-character types were updated to handle the Windows / POSIX `wchar_t` size difference more consistently.

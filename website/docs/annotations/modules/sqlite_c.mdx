@@ -1,0 +1,110 @@
+---
+title: Modules/_sqlite/module.c
+description: Entry point for the _sqlite3 C extension; registers types, maps error codes, and exports the top-level connect() function.
+cpython_path: Modules/_sqlite/module.c
+cpython_version: "3.14"
+lines: 400
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Modules/_sqlite/module.c`
+
+Entry point for the `_sqlite3` C extension module. It wires together the
+type objects defined in the sibling `.c` files, maps every SQLite error code
+to a Python exception, and publishes the handful of names that user code
+imports directly from `sqlite3`.
+
+## Map
+
+| Region | Lines (approx.) | What it does |
+|---|---|---|
+| `_sqlite3_exec` / helpers | 1-60 | Internal utility, runs a single SQL string without a cursor |
+| `converters` table | 61-130 | `sqlite3.Error` hierarchy, one `PyErr_NewException` call per code |
+| `module_methods` | 131-210 | `connect()`, `register_adapter()`, `register_converter()`, `complete_statement()`, `enable_callback_tracebacks()` |
+| `module_exec` | 211-330 | Calls `PyType_Ready` for Connection, Cursor, Row, PrepareProtocol; sets `sqlite_version` and `sqlite_version_info` |
+| `_sqlite3module` struct + `PyInit__sqlite3` | 331-400 | Standard `PyModuleDef` plus the `PyInit` entry point |
+
+The actual logic for each type lives in `connection.c`, `cursor.c`,
+`prepare_protocol.c`, and `row.c`. This file is purely bootstrapping.
+
+## Reading
+
+### Error hierarchy setup
+
+CPython creates the `sqlite3.Error` family with chained `PyErr_NewException`
+calls inside `module_exec`. Each entry stores the new exception object as a
+module attribute and also into a slot on the module state struct so that
+`cursor.c` can raise them without importing the module again.
+
+```c
+// Modules/_sqlite/module.c:243  module_exec
+state->error = PyErr_NewException(
+    MODULE_NAME ".Error", PyExc_Exception, NULL);
+if (!state->error) return -1;
+if (PyModule_AddObjectRef(module, "Error", state->error) < 0) return -1;
+
+state->programming_error = PyErr_NewException(
+    MODULE_NAME ".ProgrammingError", state->error, NULL);
+```
+
+The chain goes: `Exception -> Error -> DatabaseError ->
+{OperationalError, IntegrityError, DataError, ...}`. The hierarchy matches
+the DB-API 2.0 spec (PEP 249).
+
+### Type registration in `module_exec`
+
+All four type objects are heap types allocated fresh each time the module is
+imported (important for sub-interpreters). `module_exec` calls
+`PyType_FromModuleAndSpec` for each one, stores the result on the module
+state, and adds it as a public module attribute.
+
+```c
+// Modules/_sqlite/module.c:271  module_exec
+state->ConnectionType = (PyTypeObject *)
+    PyType_FromModuleAndSpec(module, &connection_spec, NULL);
+if (!state->ConnectionType) return -1;
+if (PyModule_AddType(module, state->ConnectionType) < 0) return -1;
+```
+
+Using heap types (rather than static `PyTypeObject` globals) means each
+interpreter instance gets its own copy, avoiding cross-interpreter state
+contamination.
+
+### `connect()` delegation
+
+The module-level `connect()` is a thin wrapper: it simply calls
+`ConnectionType(...)` with the same arguments. There is no logic here beyond
+forwarding.
+
+```c
+// Modules/_sqlite/module.c:155  pysqlite_connect
+static PyObject *
+pysqlite_connect(PyObject *module, PyObject *args, PyObject *kwargs)
+{
+    pysqlite_state *state = pysqlite_get_state(module);
+    return PyObject_Call(
+        (PyObject *)state->ConnectionType, args, kwargs);
+}
+```
+
+This means `sqlite3.connect(...)` and `sqlite3.Connection(...)` are
+equivalent at the C level.
+
+## gopy mirror
+
+Not yet ported. When this module is ported, the natural home is
+`module/sqlite3/` following the project's module layout convention. The error
+hierarchy would be constructed with `objects.NewException` calls inside the
+module's `Exec` function, mirroring the `module_exec` pattern above.
+
+## CPython 3.14 changes
+
+- Module state is now accessed through `pysqlite_get_state(module)` using the
+  per-module state API (`Py_mod_multiple_interpreters` support added in 3.12
+  and extended in 3.14).
+- `PyType_FromModuleAndSpec` replaces the older static type approach that was
+  still present in 3.10 and earlier.
+- `sqlite_version_info` is now built from `sqlite3_libversion_number()` rather
+  than string-splitting `sqlite3_libversion()`.

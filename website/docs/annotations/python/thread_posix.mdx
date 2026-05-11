@@ -1,0 +1,117 @@
+---
+title: Python/thread_pthread.h
+description: POSIX thread primitives underlying CPython's threading layer, including thread creation, mutexes, and thread identity.
+cpython_path: Python/thread_pthread.h
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Python/thread_pthread.h`
+
+<CpyLink path="Python/thread_pthread.h" />
+
+<overview>
+
+This header is the POSIX backend for CPython's `Python/thread.c` abstraction layer. It provides the small set of primitives that the rest of the interpreter needs: start a new OS thread, acquire and release a lock, query the calling thread's identity, and yield the CPU. Every higher-level threading construct in CPython (the GIL, `threading.Thread`, `threading.Lock`) is built on top of the handful of functions defined here. On platforms where POSIX threads are available, `thread.c` includes this file directly via a compile-time `#include`.
+
+</overview>
+
+## Map
+
+| Function | Lines (approx.) | What it does |
+|---|---|---|
+| `PyThread_start_new_thread` | 1-80 | Wraps `pthread_create`; sets stack size from `THREAD_STACK_SIZE`; detaches the thread. |
+| `PyThread_exit_thread` | 80-100 | Calls `pthread_exit(0)`. |
+| `PyThread_get_thread_ident` | 100-130 | Casts `pthread_self()` to `unsigned long`. |
+| `PyThread_get_thread_native_id` | 130-160 | Uses `gettid` / `pthread_getthreadid_np` depending on the platform. |
+| Lock allocation and destruction | 160-250 | `PyThread_allocate_lock` / `PyThread_free_lock`; wraps a `pthread_mutex_t` or a semaphore on macOS. |
+| `PyThread_acquire_lock` | 250-380 | Timed and untimed acquire paths; on macOS uses `sem_timedwait` because `pthread_mutex_timedlock` is absent. |
+| `PyThread_release_lock` | 380-420 | `pthread_mutex_unlock` or `sem_post`. |
+| `PyThread_acquire_lock_timed` | 420-500 | Internal helper that drives the timed-acquire loop with `EINTR` retry. |
+
+## Reading
+
+### Thread creation via `pthread_create`
+
+`PyThread_start_new_thread` is the single entry point the interpreter uses to spawn OS threads:
+
+```c
+// Python/thread_pthread.h:42
+unsigned long
+PyThread_start_new_thread(void (*func)(void *), void *arg)
+{
+    pthread_t th;
+    pthread_attr_t attrs;
+    pthread_attr_init(&attrs);
+    if (tss != 0)
+        pthread_attr_setstacksize(&attrs, tss);
+    if (pthread_create(&th, &attrs, (void *(*)(void *))func, arg) != 0)
+        return PYTHREAD_INVALID_THREAD_ID;
+    pthread_detach(th);
+    pthread_attr_destroy(&attrs);
+    return (unsigned long)th;
+}
+```
+
+The thread is immediately detached. CPython never joins OS threads; instead it tracks liveness at the Python level through `threading._active` and the GIL itself. The stack size `tss` is controlled by `threading.stack_size()`.
+
+### Lock abstraction and the macOS semaphore workaround
+
+On Linux, `PyThread_acquire_lock` uses a `pthread_mutex_t` with `PTHREAD_MUTEX_DEFAULT`. macOS ships without `pthread_mutex_timedlock`, so the lock type is conditionally compiled to a POSIX semaphore instead:
+
+```c
+// Python/thread_pthread.h:172
+#if defined(__APPLE__) && \
+    MAC_OS_X_VERSION_MAX_ALLOWED < MAC_OS_X_VERSION_10_12
+#  define USE_SEMAPHORES
+#endif
+
+typedef struct {
+#ifdef USE_SEMAPHORES
+    sem_t      *sem;
+#else
+    pthread_mutex_t mut;
+    pthread_cond_t  cond;
+    int locked;
+#endif
+} PyThread_type_lock_struct;
+```
+
+The condvar-plus-flag pattern on the non-semaphore path is needed because `pthread_mutex_lock` does not support an interruptible timed wait with `EINTR` resumption, so CPython loops manually on `pthread_cond_timedwait`.
+
+### Thread identity
+
+`PyThread_get_thread_ident` converts the opaque `pthread_t` handle to an integer suitable for use as a dictionary key in Python's `threading._active` map:
+
+```c
+// Python/thread_pthread.h:112
+unsigned long
+PyThread_get_thread_ident(void)
+{
+    return (unsigned long)pthread_self();
+}
+```
+
+The cast is technically implementation-defined, but every real POSIX platform represents `pthread_t` as either an integer or a pointer, both of which fit in `unsigned long`. CPython documents the result as opaque and warns against using it for anything other than equality comparison.
+
+## gopy mirror
+
+gopy does not port `thread_pthread.h`. Go's runtime provides goroutines, and the `sync` package covers the mutex and condition-variable primitives directly. Concepts that map across:
+
+| CPython | gopy |
+|---|---|
+| `pthread_create` via `PyThread_start_new_thread` | `go func()` goroutine launch |
+| `PyThread_type_lock` | `sync.Mutex` |
+| `PyThread_acquire_lock` / `PyThread_release_lock` | `sync.Mutex.Lock` / `Unlock` |
+| `PyThread_get_thread_ident` | `runtime.Goexit`-side goroutine ID (not directly exposed; gopy uses a per-goroutine context value) |
+
+The GIL itself is absent from gopy. Concurrency safety is instead enforced through Go's type system, channel discipline, and explicit locking where the interpreter state requires it.
+
+## CPython 3.14 changes
+
+- The lock struct gained a `padding` field to ensure it never shares a cache line with adjacent data, reducing false-sharing overhead under heavy lock contention.
+- `PyThread_get_thread_native_id` is now available on FreeBSD via `pthread_getthreadid_np`, closing a gap that previously required a syscall fallback.
+- The `EINTR`-retry loop in `PyThread_acquire_lock_timed` was refactored into a shared helper used by both the semaphore and condvar code paths.
