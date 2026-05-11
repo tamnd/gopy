@@ -1,0 +1,133 @@
+---
+title: pycore_dict.h
+description: "Internal dict helpers: split/combined tables, DictKeysObject layout, lookup indices, and watcher events"
+cpython_path: Include/internal/pycore_dict.h
+cpython_version: "3.14"
+lines: 412
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Internal-only header guarded by `Py_BUILD_CORE`. Defines the `_dictkeysobject`
+struct and its companion `_dictvalues`, the `DK_SIZE` / `DK_ENTRIES` accessor
+macros, index sentinel values, and the watcher notification inline used by the
+specializing interpreter to invalidate cached global lookups.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 56 | `_PyDict_HasSplitTable` | True when `ma_values != NULL` (split table mode) |
+| 70-73 | `_PyDictViewObject` | Backing struct for dict\_keys/values/items views |
+| 80-90 | `PyDictKeyEntry` / `PyDictUnicodeEntry` | Per-entry layout (general vs. unicode-only) |
+| 111 | `_PyDict_KeysSize` | Byte size of a `PyDictKeysObject` allocation |
+| 115-120 | `_Py_dict_lookup` variants | Core probe function; returns entry index or sentinel |
+| 167-169 | `DKIX_EMPTY` / `DUMMY` / `ERROR` | Index sentinel values |
+| 172-176 | `DictKeysKind` enum | GENERAL / UNICODE / SPLIT |
+| 179-223 | `struct _dictkeysobject` | Hash table header with `dk_indices[]` flexible array |
+| 235-241 | `struct _dictvalues` | Value array for split tables with insertion-order prefix |
+| 243-248 | `DK_LOG_SIZE` / `DK_SIZE` | Hash table capacity from log2 field |
+| 256-263 | `DK_ENTRIES` / `DK_UNICODE_ENTRIES` | Typed entry-array accessors |
+| 281-294 | `_PyDict_NotifyEvent` | Inline watcher dispatch on mutation |
+
+## Reading
+
+### Combined vs. Split Tables
+
+Before 3.11, every dict had a single allocation: the `PyDictKeysObject` held both
+the hash index and the entry array. 3.11 introduced two optimisation modes:
+
+- **Combined** (`ma_values == NULL`): `dk_indices` and `dk_entries` live in one
+  contiguous block. Used for most dicts.
+- **Split** (`ma_values != NULL`): Multiple instances of the same class share one
+  `PyDictKeysObject` for their attribute keys while each instance owns its own
+  `_dictvalues` array. `_PyDict_HasSplitTable` tests this.
+
+```c
+// CPython: Include/internal/pycore_dict.h:56 _PyDict_HasSplitTable
+#define _PyDict_HasSplitTable(d) ((d)->ma_values != NULL)
+```
+
+### The `_dictkeysobject` Header
+
+```c
+// CPython: Include/internal/pycore_dict.h:179 _dictkeysobject
+struct _dictkeysobject {
+    Py_ssize_t dk_refcnt;
+    uint8_t dk_log2_size;
+    uint8_t dk_log2_index_bytes;
+    uint8_t dk_kind;
+    uint32_t dk_version;
+    Py_ssize_t dk_usable;
+    Py_ssize_t dk_nentries;
+    char dk_indices[];
+};
+```
+
+`dk_log2_size` encodes the hash table capacity as a power of two. `dk_indices` is
+a flexible array of variable-width integers: 1 byte when capacity fits in a
+`uint8_t`, scaling up to 8 bytes for very large dicts. Entries follow immediately
+after the index array, accessed via `DK_ENTRIES` or `DK_UNICODE_ENTRIES`.
+
+### Index Sentinels
+
+```c
+// CPython: Include/internal/pycore_dict.h:167 DKIX_EMPTY
+#define DKIX_EMPTY (-1)
+#define DKIX_DUMMY (-2)  /* Used internally */
+#define DKIX_ERROR (-3)
+#define DKIX_KEY_CHANGED (-4) /* Used internally */
+```
+
+`DKIX_EMPTY` marks a never-used slot. `DKIX_DUMMY` marks a deleted slot (tombstone).
+`_Py_dict_lookup` returns `DKIX_ERROR` when the key comparison raises an exception.
+`DKIX_KEY_CHANGED` is used in free-threaded builds to signal a concurrent mutation.
+
+### Watcher Notification
+
+```c
+// CPython: Include/internal/pycore_dict.h:281 _PyDict_NotifyEvent
+static inline void
+_PyDict_NotifyEvent(PyInterpreterState *interp,
+                    PyDict_WatchEvent event,
+                    PyDictObject *mp,
+                    PyObject *key,
+                    PyObject *value)
+{
+    int watcher_bits = FT_ATOMIC_LOAD_UINT64_ACQUIRE(mp->_ma_watcher_tag)
+                       & DICT_WATCHER_MASK;
+    if (watcher_bits) {
+        _PyDict_SendEvent(watcher_bits, event, mp, key, value);
+    }
+}
+```
+
+The specializing interpreter watches builtins and globals dicts. On any mutation
+the watcher fires, invalidating inline caches that reference the changed key.
+In the common (unwatched) case the inline resolves to a single atomic load and
+a branch-not-taken.
+
+## gopy notes
+
+gopy represents `PyDictObject` as a Go struct with a `keys` pointer and an
+optional `values` slice for split tables. `_Py_dict_lookup` is ported verbatim:
+the probe sequence, `DKIX_*` sentinels, and the `dk_indices` width logic are all
+preserved. The watcher mechanism maps to Go channel notifications used by the
+inline-cache invalidation pass added in v0.12.
+
+`DK_SIZE` uses `int64_t` shifts on 64-bit platforms to avoid overflow on large
+dicts; the Go port uses `int64` for the same reason.
+
+`SHARED_KEYS_MAX_SIZE` (30) caps split-table key count. gopy enforces this limit
+when materialising managed-dict attribute tables for user-defined classes.
+
+## CPython 3.14 changes
+
+- `DKIX_KEY_CHANGED (-4)` was added for the free-threaded build to handle
+  concurrent key mutations during lockless lookups.
+- `_PyDict_EnsureSharedOnRead` (line 164, `Py_GIL_DISABLED` only) marks a dict
+  as shared so that readers in other threads can observe it consistently.
+- `_PyDict_GetMethodStackRef` (line 122) replaces the older `_PyType_Lookup`
+  path for method resolution, returning a `_PyStackRef` directly to reduce
+  reference-count churn in the LOAD_ATTR specialization.

@@ -1,0 +1,108 @@
+---
+title: "Lib/unittest/__init__.py"
+description: "Package init that re-exports all public unittest symbols and lazily loads IsolatedAsyncioTestCase"
+cpython_path: Lib/unittest/__init__.py
+cpython_version: "3.14"
+lines: 80
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`Lib/unittest/__init__.py` is the package entry point for Python's built-in
+test framework. Its only job is to gather public symbols from the five
+sub-modules and expose them as a flat namespace. At 80 lines it is one of the
+shortest files in the stdlib, yet it defines the entire public API surface that
+user code imports.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 47–52 | `__all__` | Canonical list of exported names |
+| 54 | `__unittest = True` | Suppresses this file from tracebacks |
+| 56–64 | import block | Pulls symbols from result, case, suite, loader, main, runner, signals |
+| 72–73 | `__dir__` | Adds `IsolatedAsyncioTestCase` to `dir(unittest)` without importing it |
+| 75–80 | `__getattr__` | Lazy-loads `IsolatedAsyncioTestCase` from `.async_case` on first access |
+
+## Reading
+
+### The `__all__` list
+
+```python
+# CPython: Lib/unittest/__init__.py:47 __all__
+__all__ = ['TestResult', 'TestCase', 'IsolatedAsyncioTestCase', 'TestSuite',
+           'TextTestRunner', 'TestLoader', 'FunctionTestCase', 'main',
+           'defaultTestLoader', 'SkipTest', 'skip', 'skipIf', 'skipUnless',
+           'expectedFailure', 'TextTestResult', 'installHandler',
+           'registerResult', 'removeResult', 'removeHandler',
+           'addModuleCleanup', 'doModuleCleanups', 'enterModuleContext']
+```
+
+Every name here has a corresponding import below it. The list acts as a contract
+for `from unittest import *` and for tools that inspect public APIs.
+
+### The `__unittest` sentinel
+
+```python
+# CPython: Lib/unittest/__init__.py:54 __unittest
+__unittest = True
+```
+
+All unittest sub-modules set this module-level variable. The traceback
+formatter in `result.py` checks for it and hides frames from these files when
+printing test failures, so users see their own code rather than framework
+internals.
+
+### Flat re-exports
+
+```python
+# CPython: Lib/unittest/__init__.py:56 import block
+from .result import TestResult
+from .case import (addModuleCleanup, TestCase, FunctionTestCase, SkipTest, skip,
+                   skipIf, skipUnless, expectedFailure, doModuleCleanups,
+                   enterModuleContext)
+from .suite import BaseTestSuite, TestSuite
+from .loader import TestLoader, defaultTestLoader
+from .main import TestProgram, main
+from .runner import TextTestRunner, TextTestResult
+from .signals import installHandler, registerResult, removeResult, removeHandler
+```
+
+Each sub-module is imported eagerly at package load time. The one exception is
+`IsolatedAsyncioTestCase`, which pulls in `asyncio` and is therefore deferred.
+
+### Lazy async import
+
+```python
+# CPython: Lib/unittest/__init__.py:75 __getattr__
+def __getattr__(name):
+    if name == 'IsolatedAsyncioTestCase':
+        global IsolatedAsyncioTestCase
+        from .async_case import IsolatedAsyncioTestCase
+        return IsolatedAsyncioTestCase
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+```
+
+Python calls `__getattr__` on a module when a normal attribute lookup fails.
+This pattern, introduced in PEP 562, lets packages defer expensive imports
+until the name is actually used. The `global` statement caches the result so
+the import only fires once.
+
+## gopy notes
+
+The gopy port needs to replicate the flat re-export structure. Go does not
+have a direct equivalent of `__all__`, but the exported symbol list maps onto
+Go's package-level exported identifiers. The lazy-load pattern for
+`IsolatedAsyncioTestCase` can be deferred entirely since gopy does not yet
+support `asyncio`.
+
+The `__unittest = True` sentinel matters for traceback filtering. The gopy
+traceback printer should check a similar flag on frame objects so framework
+frames are hidden.
+
+## CPython 3.14 changes
+
+3.14 added `_colorize` integration in `runner.py`, which affects the output
+symbols (`TextTestResult`) re-exported here. The `__init__.py` itself is
+unchanged from 3.13. No new names were added to `__all__` in this release.

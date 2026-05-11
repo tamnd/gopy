@@ -1,0 +1,117 @@
+---
+title: _weakref.c
+description: "Thin C module exposing the weakref C API to Python: ref, proxy, getweakrefcount, getweakrefs"
+cpython_path: Modules/_weakref.c
+cpython_version: "3.14"
+lines: 100
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`_weakref.c` is a minimal C module whose only job is to expose four functions from
+the internal weakref C API to Python-land. All substantive logic lives in
+`Objects/weakrefobject.c`; this file is essentially a method table plus
+`PyInit__weakref`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1–20 | Includes and forward declarations | Boilerplate |
+| 21–40 | `_weakref_ref_impl` | Wraps `PyWeakref_NewRef` |
+| 41–60 | `_weakref_proxy_impl` | Wraps `PyWeakref_NewProxy` |
+| 61–75 | `_weakref_getweakrefcount_impl` | Wraps `PyWeakref_GetWeakrefCount` |
+| 76–90 | `_weakref_getweakrefs_impl` | Wraps `PyWeakref_GetWeakrefs` |
+| 91–100 | `PyInit__weakref` | Module definition |
+
+## Reading
+
+### ref: creating a weak reference
+
+`_weakref.ref` is the public `weakref.ref` type exposed to Python. The C-level
+entry point calls `PyWeakref_NewRef`, which allocates a `PyWeakReference` struct
+and links it into the referent object's weakref list.
+
+```c
+// CPython: Modules/_weakref.c:25 _weakref_ref_impl
+static PyObject *
+_weakref_ref_impl(PyObject *module, PyObject *object, PyObject *callback)
+{
+    return PyWeakref_NewRef(object, callback);
+}
+```
+
+If the referent does not support weak references (its type lacks `tp_weaklistoffset`),
+`PyWeakref_NewRef` raises `TypeError`. The optional `callback` is invoked when the
+referent is finalized.
+
+### proxy: creating a weak proxy
+
+A proxy forwards attribute access and most operators to the referent transparently.
+Accessing a dead proxy raises `ReferenceError`.
+
+```c
+// CPython: Modules/_weakref.c:45 _weakref_proxy_impl
+static PyObject *
+_weakref_proxy_impl(PyObject *module, PyObject *object, PyObject *callback)
+{
+    return PyWeakref_NewProxy(object, callback);
+}
+```
+
+`PyWeakref_NewProxy` chooses between `PyWeakref_ProxyType` and
+`PyWeakref_CallableProxyType` depending on whether the referent is callable, so
+that `proxy(f)(args)` works correctly.
+
+### getweakrefcount and getweakrefs
+
+`getweakrefcount` returns the number of weak references currently pointing at an
+object. `getweakrefs` returns the full list. Both are primarily useful for testing
+and debugging reference cycles.
+
+```c
+// CPython: Modules/_weakref.c:65 _weakref_getweakrefcount_impl
+static PyObject *
+_weakref_getweakrefcount_impl(PyObject *module, PyObject *object)
+{
+    return PyLong_FromSsize_t(PyWeakref_GetWeakrefCount(object));
+}
+```
+
+```c
+// CPython: Modules/_weakref.c:78 _weakref_getweakrefs_impl
+static PyObject *
+_weakref_getweakrefs_impl(PyObject *module, PyObject *object)
+{
+    return PyWeakref_GetWeakrefs(object);
+}
+```
+
+`PyWeakref_GetWeakrefs` walks the singly-linked list at
+`object->ob_type->tp_weaklistoffset` and collects every live `PyWeakReference`
+into a new list.
+
+## gopy notes
+
+- The gopy equivalent is `module/weakref/module.go`. The four exported functions
+  map directly to calls in `objects/weakref.go` (to be ported from
+  `Objects/weakrefobject.c`).
+- `PyWeakref_NewRef` and `PyWeakref_NewProxy` require that the object's type
+  carries a weakref list offset. In gopy this is the `WeakrefList` field on
+  `UserType`; all user-defined classes get it automatically.
+- `getweakrefs` returns a snapshot list, not a live view. The gopy port must
+  copy the slice under a lock to avoid races with GC finalization.
+- Callbacks are stored on the `PyWeakReference` struct and called during
+  `Objects/object.c:PyObject_ClearWeakRefs`. Port that function before wiring
+  up callback support here.
+
+## CPython 3.14 changes
+
+- `_weakref.c` itself is essentially unchanged between 3.12 and 3.14. The file
+  is a stable wrapper with no version-specific logic.
+- The underlying `Objects/weakrefobject.c` gained free-threaded (no-GIL) safety
+  in 3.13 via per-object locks on the weakref list; `_weakref.c` is unaffected
+  because it delegates entirely to the C API functions.
+- `weakref.finalize` (pure Python, in `Lib/weakref.py`) gained a
+  `atexit` registration fix in 3.14 but that is unrelated to this C file.

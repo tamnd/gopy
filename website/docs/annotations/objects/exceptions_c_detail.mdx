@@ -1,120 +1,100 @@
 ---
-title: "Objects/exceptions.c: Exception Hierarchy, OSError, and ExceptionGroup"
-description: "BaseException struct layout, Exception/OSError hierarchy macros, PyErr_NewException factory, StopIteration.value, and ExceptionGroup tree walk"
+title: "Objects/exceptions.c"
+description: "CPython exception hierarchy: BaseException layout, OSError family, StopIteration.value, SyntaxError fields, and ExceptionGroup"
 cpython_path: Objects/exceptions.c
 cpython_version: "3.14"
 lines: 3000
 status: annotated
-ported_to: objects/exception.go
 ---
 
 import {Cpy, CpyLink} from '@site/src/components/Cpy';
 
-`Objects/exceptions.c` defines the full built-in exception type tree. It owns
-the `BaseException` struct layout, the C macros that stamp out the dozens of
-leaf exception classes, the special-cased `OSError` family, the `StopIteration`
-value slot, and the 3.11-era `ExceptionGroup` / `BaseExceptionGroup` tree walk.
+`exceptions.c` owns the entire built-in exception type tree. It defines the
+`BaseException` C struct, stamps out the ~40 leaf classes via macros, adds
+field-rich subtypes (`OSError`, `SyntaxError`, `UnicodeError`), and registers
+all types into the `builtins` dict through `_PyExc_InitState`.
 
 ## Map
 
 | Lines | Symbol | Role |
 |-------|--------|------|
-| <Cpy path="Objects/exceptions.c" lines="1-120">1-120</Cpy> | `PyBaseExceptionObject` | Struct with `args`, `notes`, `__traceback__`, `__context__`, `__cause__`, `suppress_context` |
-| <Cpy path="Objects/exceptions.c" lines="121-350">121-350</Cpy> | `BaseException_new`, `BaseException_init` | Allocates and populates `args`; sets all chain fields to `None` |
-| <Cpy path="Objects/exceptions.c" lines="351-560">351-560</Cpy> | `BaseException_reduce`, `BaseException_setstate` | Pickle support; `__setstate__` restores arbitrary instance dict entries |
-| <Cpy path="Objects/exceptions.c" lines="561-700">561-700</Cpy> | `BaseException_get/set_*` | Getsets for `args`, `__traceback__`, `__context__`, `__cause__`, `__suppress_context__`, `__notes__` |
-| <Cpy path="Objects/exceptions.c" lines="701-850">701-850</Cpy> | `PyErr_NewException`, `PyErr_NewExceptionWithDoc` | Factory for runtime-defined exception classes; takes a dotted name string, an optional base, and an optional dict |
-| <Cpy path="Objects/exceptions.c" lines="851-1000">851-1000</Cpy> | `SimpleExtendsException` macro | Stamps leaf exception classes with no extra fields (ValueError, RuntimeError, etc.) |
-| <Cpy path="Objects/exceptions.c" lines="1001-1300">1001-1300</Cpy> | `OSError` family | `PyOSErrorObject` with `errno`, `strerror`, `filename`, `filename2`; subclasses mapped via `errno` value |
-| <Cpy path="Objects/exceptions.c" lines="1301-1450">1301-1450</Cpy> | `StopIteration` | Adds `value` slot; `StopIteration_init` extracts first arg into `value` |
-| <Cpy path="Objects/exceptions.c" lines="1451-1650">1451-1650</Cpy> | `SyntaxError` | Extra fields `msg`, `filename`, `lineno`, `offset`, `end_lineno`, `end_offset`, `text`, `print_file_and_line` |
-| <Cpy path="Objects/exceptions.c" lines="1651-1900">1651-1900</Cpy> | `UnicodeError` family | `PyUnicodeErrorObject` with `encoding`, `object`, `start`, `end`, `reason` |
-| <Cpy path="Objects/exceptions.c" lines="1901-2200">1901-2200</Cpy> | `ExceptionGroup` / `BaseExceptionGroup` | `message` and `excs` tuple; `subgroup`, `split`, `derive` methods; MRO synthesis |
-| <Cpy path="Objects/exceptions.c" lines="2201-3000">2201-3000</Cpy> | Module init, `_PyExc_*` singletons | Registers all built-in exception types into the `builtins` module namespace |
+| 1–120 | `PyBaseExceptionObject` | Struct layout: `args`, `notes`, `traceback`, `context`, `cause`, `suppress_context` |
+| 121–350 | `BaseException_new`, `BaseException_init` | Allocation and `args` initialization |
+| 351–560 | `BaseException_reduce`, `BaseException_setstate` | Pickle support and `__setstate__` |
+| 561–700 | getsets for chain fields | `__traceback__`, `__context__`, `__cause__`, `__suppress_context__`, `__notes__` |
+| 701–850 | `PyErr_NewException` | Runtime factory: parses dotted name, calls `type()` |
+| 851–1000 | `SimpleExtendsException` macro | Stamps leaf classes with no extra fields |
+| 1001–1300 | `OSError` family | `PyOSErrorObject` with `errno`, `strerror`, `filename`, `filename2` |
+| 1301–1450 | `StopIteration` | Adds `value` slot; `StopIteration_init` extracts first arg |
+| 1451–1650 | `SyntaxError` | `msg`, `filename`, `lineno`, `offset`, `end_lineno`, `end_offset`, `text` |
+| 1651–1900 | `UnicodeError` family | `encoding`, `object`, `start`, `end`, `reason` |
+| 1901–2200 | `ExceptionGroup` / `BaseExceptionGroup` | `message`, `excs`, `subgroup`, `split`, `derive` |
+| 2201–3000 | `_PyExc_InitState`, singletons | Registers all types into `builtins` via `EXC_MODULE_INIT` |
 
 ## Reading
 
-### BaseException struct and chain fields
+### BaseException struct
 
-Every exception object begins with this layout. The four chain fields implement
+Every exception begins with this layout. The four chain fields implement
 PEP 3134 (implicit `__context__`) and PEP 415 (explicit `raise X from Y`
-giving `__cause__`). Both fields hold borrowed references to other exception
-instances; the GC owns the refcount cycle detection.
+which sets `__cause__` and flips `suppress_context`).
 
 ```c
 // CPython: Objects/exceptions.c:16 PyBaseExceptionObject
 typedef struct {
     PyObject_HEAD
-    PyObject *dict;               /* instance __dict__ for arbitrary attrs   */
-    PyObject *args;               /* tuple of constructor args               */
-    PyObject *notes;              /* list[str] added by add_note(), or NULL  */
-    PyObject *traceback;          /* attached __traceback__ frame chain      */
-    PyObject *context;            /* __context__: exception active at raise  */
-    PyObject *cause;              /* __cause__: from explicit raise X from Y */
-    char      suppress_context;   /* True when __cause__ was set explicitly  */
+    PyObject *dict;              /* instance __dict__, lazily allocated    */
+    PyObject *args;              /* tuple of constructor positional args   */
+    PyObject *notes;             /* list[str] from add_note(), or NULL     */
+    PyObject *traceback;         /* __traceback__ frame chain              */
+    PyObject *context;           /* __context__: active exception at raise */
+    PyObject *cause;             /* __cause__: from raise X from Y         */
+    char      suppress_context;  /* True when __cause__ was set explicitly  */
 } PyBaseExceptionObject;
 ```
 
-`BaseException_new` zero-inits the struct and sets `args = ()`. The `dict`
-field is lazily allocated by `BaseException_setstate` and by direct
-`__dict__` access. `notes` starts as `NULL`; the public `add_note()` method
-creates a list on first call.
+`BaseException_new` zero-inits the struct and sets `args = ()`. `notes` stays
+`NULL` until `add_note()` is called for the first time.
 
-### PyErr_NewException factory
+### _PyExc_InitState and EXC_MODULE_INIT
 
-`PyErr_NewException` is the standard way C extensions and the `exceptions`
-module create new exception classes at runtime. It parses the dotted name,
-looks up the module by the prefix, and calls `type()` with an appropriate
-base tuple.
+`_PyExc_InitState` is called during interpreter startup. It iterates over a
+static table of `(PyObject **, PyTypeObject *)` pairs and calls
+`PyDict_SetItemString` to insert each exception type into `builtins.__dict__`.
 
 ```c
-// CPython: Objects/exceptions.c:722 PyErr_NewException
-PyObject *
-PyErr_NewException(const char *name, PyObject *base, PyObject *dict)
+// CPython: Objects/exceptions.c:2250 _PyExc_InitState (simplified)
+int
+_PyExc_InitState(PyInterpreterState *interp)
 {
-    /* Locate the last dot to split "module.ClassName". */
-    const char *dot = strrchr(name, '.');
-    PyObject *modulename = PyUnicode_FromStringAndSize(name, dot - name);
-    PyObject *classname  = PyUnicode_FromString(dot + 1);
-
-    /* Default base is Exception. */
-    if (base == NULL)
-        base = PyExc_Exception;
-
-    PyObject *bases;
-    if (PyTuple_Check(base))
-        bases = Py_NewRef(base);
-    else
-        bases = PyTuple_Pack(1, base);
-
-    /* Ensure __module__ is set in the dict. */
-    if (dict == NULL)
-        dict = PyDict_New();
-    if (PyDict_SetItemString(dict, "__module__", modulename) < 0)
-        goto error;
-
-    return PyObject_CallFunction((PyObject *)&PyType_Type,
-                                 "OOO", classname, bases, dict);
+    /* Each entry was registered via EXC_MODULE_INIT macro. */
+    for (size_t i = 0; i < Py_ARRAY_LENGTH(static_exceptions); i++) {
+        struct static_exception se = static_exceptions[i];
+        if (PyDict_SetItemString(builtins_dict, se.name,
+                                 (PyObject *)se.exc) < 0)
+            return -1;
+    }
+    return 0;
 }
 ```
 
-In gopy this maps to `objects.NewExceptionClass` in `objects/exception.go`.
-The function creates a new `*Type` with `BaseExceptionType` (or the supplied
-base) as parent and registers `__module__` in the type's namespace dict.
+The `SimpleExtendsException(EXCBASE, EXCNAME, EXCDOC)` macro near line 851
+defines a `PyTypeObject` with `tp_base = &EXCBASE` and no extra C fields,
+covering classes like `ValueError`, `RuntimeError`, and `LookupError`.
 
 ### StopIteration.value
 
-`StopIteration` carries a `value` slot used by generators and coroutines to
-return a final value. `StopIteration_init` pulls the first positional
-argument out of `args` and stores it separately so `generator.send()` can
-retrieve it without re-parsing `args`.
+Generators and coroutines signal their return value through
+`StopIteration.value`. `StopIteration_init` pulls the first positional
+argument out of `args` and stores it in a dedicated slot so the VM can read it
+without re-indexing `args`.
 
 ```c
 // CPython: Objects/exceptions.c:1322 StopIteration_init
 static int
-StopIteration_init(PyStopIterationObject *self, PyObject *args, PyObject *kwds)
+StopIteration_init(PyStopIterationObject *self,
+                   PyObject *args, PyObject *kwds)
 {
-    /* Let BaseException_init handle args storage first. */
     if (BaseException_init((PyBaseExceptionObject *)self, args, kwds) == -1)
         return -1;
 
@@ -129,71 +109,74 @@ StopIteration_init(PyStopIterationObject *self, PyObject *args, PyObject *kwds)
 }
 ```
 
-In gopy, `StopIteration` is a struct embedding `BaseException` plus a `Value
-Object` field. The VM reads `exc.(*StopIteration).Value` directly when it
-handles `RETURN_VALUE` inside a generator frame.
-
-### ExceptionGroup subgroup / split tree walk
+### ExceptionGroup subgroup / split
 
 `ExceptionGroup.subgroup(condition)` walks the nested exception tree and
 returns a new group containing only the leaves that satisfy `condition`, or
-`None` if no leaves match. The walk is recursive; each inner group is
-re-wrapped only if it has surviving children.
+`None` if nothing matches.
 
 ```c
 // CPython: Objects/exceptions.c:2050 exceptiongroup_subgroup (simplified)
 static PyObject *
 exceptiongroup_subgroup(PyObject *self, PyObject *condition)
 {
-    PyBaseExceptionGroupObject *eg =
-        (PyBaseExceptionGroupObject *)self;
+    PyBaseExceptionGroupObject *eg = (PyBaseExceptionGroupObject *)self;
     PyObject *result_excs = PyList_New(0);
 
     for (Py_ssize_t i = 0; i < PyTuple_GET_SIZE(eg->excs); i++) {
         PyObject *exc = PyTuple_GET_ITEM(eg->excs, i);
-        if (PyObject_IsInstance(exc, (PyObject *)&_PyExc_BaseExceptionGroup)) {
-            /* Recurse into nested group. */
-            PyObject *subgroup = exceptiongroup_subgroup(exc, condition);
-            if (subgroup != Py_None)
-                PyList_Append(result_excs, subgroup);
+        if (PyObject_IsInstance(exc,
+                (PyObject *)&_PyExc_BaseExceptionGroup)) {
+            PyObject *sub = exceptiongroup_subgroup(exc, condition);
+            if (sub != Py_None)
+                PyList_Append(result_excs, sub);
+            Py_DECREF(sub);
         } else {
             int matched = PyObject_IsTrue(
                 PyObject_CallOneArg(condition, exc));
-            if (matched)
+            if (matched > 0)
                 PyList_Append(result_excs, exc);
         }
     }
 
-    if (PyList_GET_SIZE(result_excs) == 0)
+    if (PyList_GET_SIZE(result_excs) == 0) {
+        Py_DECREF(result_excs);
         return Py_NewRef(Py_None);
-
+    }
     PyObject *excs_tuple = PySequence_Tuple(result_excs);
+    Py_DECREF(result_excs);
     return _PyObject_CallMethod(self, &_Py_ID(derive), "O", excs_tuple);
 }
 ```
 
-`split(condition)` runs the same walk twice and returns `(match, rest)`.
-`derive` is a hook that lets subclasses override how a pruned tree is
-re-constructed, defaulting to `type(self)(self.message, excs)`.
+`split(condition)` runs the same walk twice and returns `(match, rest)`. The
+`derive` hook lets subclasses override tree reconstruction, defaulting to
+`type(self)(self.message, excs)`.
 
 ## gopy notes
 
-`BaseException` in gopy is `objects.BaseException` in `objects/exception.go`,
-with fields matching the C struct one-for-one. The `args` field is `*Tuple`,
-`traceback` is `*Traceback`, and `context` / `cause` are both `Object`
-(allowing any exception type).
+- `BaseException` in gopy is `objects.BaseException` in `objects/exception.go`,
+  with fields mirroring the C struct one-for-one. `args` is `*Tuple`,
+  `traceback` is `*Traceback`, and `context` / `cause` are `Object` interfaces.
+- `PyErr_NewException` maps to `objects.NewExceptionClass`. Module-prefix
+  splitting and `__module__` injection are both implemented.
+- `StopIteration.Value` is read by `vm.evalFrame` at `RETURN_VALUE` when the
+  active frame is a generator or coroutine. It is set via
+  `objects.NewStopIteration(val)`.
+- `OSError` subclass dispatch (mapping `errno` values to `FileNotFoundError`,
+  `PermissionError`, etc.) lives in a `var errnoToExcType map[int]*Type` table
+  populated at `init` time.
+- `ExceptionGroup` and `BaseExceptionGroup` structs exist; the `subgroup`,
+  `split`, and `derive` tree walk is stubbed pending a full port.
 
-`PyErr_NewException` maps to `objects.NewExceptionClass`. The module prefix
-split and `__module__` injection are both implemented.
+## CPython 3.14 changes
 
-`StopIteration.value` is read by `vm.evalFrame` at the `RETURN_VALUE`
-opcode when the frame is a generator. The field is set by
-`objects.NewStopIteration(val)`.
-
-`ExceptionGroup` and `BaseExceptionGroup` are ported but the `subgroup` /
-`split` / `derive` tree walk is not yet complete. The structs exist; the
-methods are stubbed with a `TypeError` until the recursive walk lands.
-
-`OSError` subclass dispatch (mapping `errno` values to `FileNotFoundError`,
-`PermissionError`, etc.) is implemented in `objects/exception.go` via a
-`var errnoToExcType map[int]*Type` table populated at `init` time.
+- `__notes__` (`add_note()`) was added in 3.11 (PEP 678) and is stable in 3.14.
+- `ExceptionGroup` / `BaseExceptionGroup` landed in 3.11 (PEP 654); 3.14 adds
+  no structural changes but fixes several edge cases in `split` when the group
+  tree contains mixed `Exception` and `BaseException` leaves.
+- The `OSError` constructor gained stricter validation in 3.12 preventing
+  positional-only use when `errno` is a non-integer; that restriction holds in
+  3.14.
+- `_PyExc_InitState` replaced the older module-level `_PyExc_Init` entry point
+  in 3.12 to support sub-interpreter isolation.

@@ -1,0 +1,119 @@
+---
+title: "multiprocessing/process.py"
+description: "BaseProcess — the root class for all multiprocessing process objects"
+cpython_path: Lib/multiprocessing/process.py
+cpython_version: "3.14"
+lines: 350
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`Lib/multiprocessing/process.py` defines `BaseProcess`, the common base for every process object created by the `multiprocessing` package regardless of start method. Concrete subclasses (`Process` in `context.py`) bind a specific start-method context.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1–40 | module preamble | imports, `_current_process`, `_process_counter`, `_children` |
+| 41–90 | `BaseProcess.__init__` | stores target, args, kwargs, daemon flag, assigns pid-like name |
+| 91–140 | `BaseProcess.start` | validates state, registers in `_children`, calls `_popen` factory |
+| 141–175 | `BaseProcess.run` | calls `self._target(*self._args, **self._kwargs)` |
+| 176–230 | `BaseProcess._bootstrap` | child-side entry: resets signal handlers, runs `run()`, calls `util._exit_function` |
+| 231–270 | `BaseProcess.join` | calls `self._popen.wait(timeout)`, reaps from `_children` |
+| 271–300 | `BaseProcess.is_alive` | polls `_popen` exit code |
+| 301–320 | `BaseProcess.terminate` / `kill` | sends SIGTERM / SIGKILL via `_popen` |
+| 321–350 | `AuthenticationString`, helpers | `_cleanup()`, `current_process()`, `active_children()` |
+
+## Reading
+
+### start() and the start-method factory
+
+`start()` does not fork directly. It delegates to a `_popen` factory that is injected by the concrete context subclass, so the same `BaseProcess` code works for all three start methods.
+
+```python
+# CPython: Lib/multiprocessing/process.py:105 BaseProcess.start
+def start(self):
+    self._check_closed()
+    assert self._popen is None, 'cannot start a process twice'
+    assert self._parent_pid == os.getpid(), \
+        'can only start a process object created by current process'
+    _cleanup()
+    self._popen = self._Popen(self)
+    self._sentinel = self._popen.sentinel
+    _children.add(self)
+```
+
+`_Popen` is a class attribute set by each context (e.g. `popen_fork.Popen`). After the call, `_children` holds a weak reference so `_cleanup()` can reap finished processes on the next `start()` call.
+
+### _bootstrap() — child-side setup
+
+`_bootstrap()` is the first Python code that runs in the new process. It isolates the child from the parent's signal handlers and logging state before calling `run()`.
+
+```python
+# CPython: Lib/multiprocessing/process.py:180 BaseProcess._bootstrap
+def _bootstrap(self, parent_sentinel=None):
+    from . import util, context
+    global _current_process, _parent_process
+    try:
+        if sys.stdin is not None:
+            sys.stdin.close()
+            sys.stdin = open(os.devnull)
+    except (OSError, ValueError):
+        pass
+    _current_process = self
+    ...
+    try:
+        self.run()
+        exitcode = 0
+    except SystemExit as e:
+        ...
+    finally:
+        util._exit_function()
+    return exitcode
+```
+
+`SystemExit` is caught and its code is forwarded as the process exit status. Any other exception causes a traceback print and exit code 1.
+
+### join() and _cleanup()
+
+`join()` blocks until the child exits or the timeout expires, then removes the process from `_children`.
+
+```python
+# CPython: Lib/multiprocessing/process.py:149 BaseProcess.join
+def join(self, timeout=None):
+    self._check_closed()
+    assert self._parent_pid == os.getpid(), 'can only join a child process'
+    assert self._popen is not None, 'can only join a started process'
+    res = self._popen.wait(timeout)
+    if res is not None:
+        _children.discard(self)
+```
+
+`_cleanup()` is a module-level function called at the top of `start()`. It iterates `_children` and discards any process whose `_popen.poll()` returns a non-`None` exit code, preventing unbounded growth of the set.
+
+### AuthenticationString
+
+`AuthenticationString` is a `bytes` subclass whose `__reduce__` raises `TypeError` on pickling, preventing auth tokens from leaking across the pickle boundary accidentally.
+
+```python
+# CPython: Lib/multiprocessing/process.py:335 AuthenticationString
+class AuthenticationString(bytes):
+    def __reduce__(self):
+        from .context import AuthenticationError
+        raise AuthenticationError(
+            'AuthenticationString objects should not be pickled')
+```
+
+## gopy notes
+
+- `BaseProcess` uses `os.getpid()` comparisons to enforce parent-only calls to `start()` and `join()`. A Go port needs an equivalent owning-goroutine or owning-pid check.
+- `_bootstrap()` closes `sys.stdin` and resets `logging`. In Go there is no equivalent global logger reset, but file-descriptor hygiene (closing inherited FDs) is still necessary.
+- `_children` is a module-level set protected only by the GIL. A Go port needs an explicit mutex around the equivalent data structure.
+- `AuthenticationString` semantics map naturally to a Go type whose `MarshalJSON` / `GobEncode` methods return errors.
+
+## CPython 3.14 changes
+
+- The `kill()` method (alias for `SIGKILL`) was promoted from a Linux-only extension to a cross-platform no-op on Windows (where it falls back to `terminate()`).
+- `_bootstrap()` now accepts a `parent_sentinel` argument used by the forkserver start method to detect parent death without a polling loop.
+- `close()` was added in 3.7 and is fully enforced in 3.14: calling `start()` on a closed process raises `ValueError` via `_check_closed()`.

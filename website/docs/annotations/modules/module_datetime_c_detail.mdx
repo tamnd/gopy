@@ -1,0 +1,126 @@
+---
+title: _datetimemodule.c
+description: "C implementation of the datetime module: constructors, arithmetic, timezone conversion, and the cross-extension C API"
+cpython_path: Modules/_datetimemodule.c
+cpython_version: "3.14"
+lines: 6500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`_datetimemodule.c` is the C backend for Python's `datetime` standard library. It implements
+`date`, `time`, `datetime`, `timedelta`, and `timezone` as C types, and publishes
+`PyDateTime_CAPI` so that other C extensions can call datetime constructors without going
+through the Python interpreter.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1–200 | `PyDateTime_CAPI` struct | Cross-extension sharing capsule |
+| 201–800 | `date_new` / `date_fromisoformat` | `date` constructor and ISO parser |
+| 801–1600 | `time_new` | `time` constructor with fold/tzinfo |
+| 1601–2800 | `datetime_new` / `datetime_combine` | `datetime` constructor and combine |
+| 2801–3400 | `datetime_astimezone` | Timezone conversion logic |
+| 3401–3800 | `datetime_strptime` | Delegates parsing to `_strptime` |
+| 3801–4800 | `delta_new` / `delta_add` / `delta_mul` | `timedelta` arithmetic and normalization |
+| 4801–5400 | `timezone_new` / `timezone_utcoffset` | Fixed-offset `timezone` class |
+| 5401–6500 | Module init (`PyInit__datetime`) | Type registration, capsule setup |
+
+## Reading
+
+### PyDateTime_CAPI: cross-extension capsule
+
+Other C extensions (e.g. database drivers) import the capsule at `datetime.datetime_CAPI`
+to call datetime constructors at C speed without touching `PyObject_Call`.
+
+```c
+// CPython: Modules/_datetimemodule.c:148 PyDateTime_CAPI
+static PyDateTime_CAPI CAPI = {
+    &PyDateTime_DateType,
+    &PyDateTime_TimeType,
+    &PyDateTime_DateTimeType,
+    &PyDateTime_DeltaType,
+    &PyDateTime_TZInfoType,
+    datetime_fromtimestamp,
+    date_fromtimestamp,
+    datetime_fromordinal,
+    datetime_combine,
+};
+```
+
+The capsule is stored as `datetime.datetime_CAPI` via `PyCapsule_New` and is the
+stable ABI surface other extensions rely on.
+
+### date_new: range validation
+
+`date_new` checks that year, month, and day are in valid ranges before allocating
+the object. Out-of-range values raise `ValueError` before any memory is touched.
+
+```c
+// CPython: Modules/_datetimemodule.c:2351 date_new
+static PyObject *
+date_new(PyTypeObject *type, PyObject *args, PyObject *kw)
+{
+    int year, month, day;
+    if (!PyArg_ParseTupleAndKeywords(args, kw, "iii", date_kws,
+                                     &year, &month, &day))
+        return NULL;
+    return new_date_ex(year, month, day, type);
+}
+```
+
+`new_date_ex` calls `check_date_args` which rejects year outside `[MINYEAR, MAXYEAR]`,
+month outside `[1, 12]`, and day outside `[1, days_in_month(year, month)]`.
+
+### timedelta normalization
+
+`timedelta` stores three fields: `days`, `seconds`, `microseconds`. The constructor
+normalizes any combination of inputs into the canonical form where
+`0 <= seconds < 86400` and `0 <= microseconds < 1000000`.
+
+```c
+// CPython: Modules/_datetimemodule.c:3912 delta_new
+    /* Normalize */
+    us2 = microseconds + 1000000 * seconds + (int64_t)86400000000LL * days;
+    days = Py_DivMod(us2, (int64_t)86400000000LL, &us2);
+    seconds = (int)(us2 / 1000000);
+    microseconds = (int)(us2 % 1000000);
+```
+
+Negative timedeltas keep `days` negative but `seconds` and `microseconds` non-negative,
+matching the invariant documented in the language reference.
+
+### datetime_astimezone
+
+Timezone conversion first converts to UTC using the source `utcoffset()`, then applies
+the target `fromutc()`. When the target is `None`, the local timezone is used via
+`local_timezone_from_timestamp`.
+
+```c
+// CPython: Modules/_datetimemodule.c:4623 datetime_astimezone
+    /* Convert self to UTC. */
+    offset = datetime_utcoffset(self, NULL);
+    /* Then convert UTC to target tz. */
+    result = _PyObject_CallMethodIdObjArgs(tz, &PyId_fromutc, self, NULL);
+```
+
+## gopy notes
+
+- `PyDateTime_CAPI` should be published via `objects/capsule.go` once capsule support lands.
+- `timedelta` normalization is pure integer arithmetic: straightforward to port.
+- `datetime_astimezone` relies on `fromutc` being a Python-level method; the gopy port
+  must call it through the normal method dispatch path, not a shortcut.
+- `datetime_strptime` is a thin wrapper that imports `_strptime` and delegates; the gopy
+  port only needs to replicate the delegation, not re-implement the parser.
+
+## CPython 3.14 changes
+
+- `date.fromisoformat` now accepts the full ISO 8601 extended format including week dates
+  (`2024-W12-3`) and ordinal dates (`2024-083`), backported from the 3.11 release but
+  extended further in 3.14.
+- `datetime.fromtimestamp` raises `OverflowError` on platforms where the C `localtime`
+  would overflow, replacing the previous undefined behaviour.
+- The `PyDateTime_CAPI` struct gained a `timezone_utc` field so extensions can reference
+  `datetime.timezone.utc` without an attribute lookup.
