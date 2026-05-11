@@ -195,6 +195,8 @@ const sidebars = {
         'annotations/python/format',
         'annotations/python/bytecodes',
         'annotations/python/pystate',
+        'annotations/python/structmember',
+        'annotations/python/ceval_executor',
       ],
     },
     {
@@ -254,6 +256,8 @@ const sidebars = {
         'annotations/include/listobject',
         'annotations/include/pyerrors',
         'annotations/include/cpython_object',
+        'annotations/include/cpython_code',
+        'annotations/include/cpython_funcobject',
         {
           label: 'internal/',
           type: 'category',
@@ -325,6 +329,8 @@ const sidebars = {
         'annotations/modules/cmathmodule',
         'annotations/modules/jsonmodule_c',
         'annotations/modules/bisectmodule_c',
+        'annotations/modules/gcmodule',
+        'annotations/modules/unicodedatamodule',
       ],
     },
     {
@@ -403,6 +409,10 @@ const sidebars = {
         'annotations/lib/pprint',
         'annotations/lib/uuid',
         'annotations/lib/dis',
+        'annotations/lib/tokenize',
+        'annotations/lib/linecache',
+        'annotations/lib/copyreg',
+        'annotations/lib/site',
       ],
     },
   ],

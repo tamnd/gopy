@@ -1,0 +1,146 @@
+---
+title: Lib/copyreg.py
+description: Registration hooks for pickle reduction functions, the _reconstructor helper, NEWOBJ support, and the extension opcode registry.
+cpython_path: Lib/copyreg.py
+cpython_version: "3.14"
+lines: 130
+status: annotated
+ported_to: (stdlib pending)
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Lib/copyreg.py`
+
+<CpyLink path="Lib/copyreg.py" />
+
+`copyreg` provides the dispatch table that `pickle` consults when it
+serializes an object. It is a pure-Python module with no C accelerator.
+Three separate concerns live here: the `dispatch_table` dict (used by
+`Pickler` instances to look up per-type reduction functions), the
+`_reconstructor` helper (called by `__reduce_ex__` on new-style classes
+to build a minimal reconstruction tuple), and the extension registry
+(a two-way mapping between `(module, name)` pairs and small integers for
+the `EXT1`/`EXT2`/`EXT4` opcodes).
+
+`copy` imports `dispatch_table` from this module and uses it with the
+same protocol as `pickle`.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Lib/copyreg.py" lines="1-50">1-50</Cpy> | `dispatch_table`, `pickle` | `dispatch_table` is a plain `dict` mapping `type` to a unary reduce callable; `pickle(ob_type, reduce_func, constructor=None)` registers an entry after validating the constructor is callable. | `(stdlib pending)` |
+| <Cpy path="Lib/copyreg.py" lines="50-100">50-100</Cpy> | `_reconstructor`, `__newobj__`, `__newobj_ex__` | `_reconstructor(cls, base, state)` creates an instance via `base.__new__(cls)` and optionally calls `base.__init__(state)`; `__newobj__(cls, *args)` calls `cls.__new__(cls, *args)` and is used by the `NEWOBJ` opcode; `__newobj_ex__` adds keyword arguments for `NEWOBJ_EX`. | `(stdlib pending)` |
+| <Cpy path="Lib/copyreg.py" lines="100-130">100-130</Cpy> | `add_extension`, `remove_extension`, `_extension_registry`, `_inverted_registry`, `_extension_cache` | `add_extension((module, name), code)` records a bi-directional mapping so the pickler can emit a compact `EXT1`/`EXT2`/`EXT4` opcode instead of the full `GLOBAL` opcode string. | `(stdlib pending)` |
+
+## Reading
+
+### `dispatch_table` and `pickle()` (lines 1 to 50)
+
+<CpyLink path="Lib/copyreg.py" lines="1-50" />
+
+```python
+dispatch_table = {}
+
+def pickle(ob_type, reduce_func, constructor=None):
+    if not callable(reduce_func):
+        raise TypeError("reduce_func must be callable")
+    if constructor is not None:
+        if not callable(constructor):
+            raise TypeError("constructor must be callable")
+        constructor_for(ob_type, constructor)
+    dispatch_table[ob_type] = reduce_func
+```
+
+`dispatch_table` is a module-level dict. `pickle.Pickler` checks
+`self.dispatch_table` first (an instance-level override), then falls back
+to `copyreg.dispatch_table`. The `pickle()` function here is the
+registration helper, not the stdlib module. The optional `constructor`
+argument is a legacy CPython 2 concept (for `__safe_for_unpickling__`)
+and is ignored in practice, but the callable check is still enforced.
+
+### `_reconstructor` usage in pickle (lines 50 to 100)
+
+<CpyLink path="Lib/copyreg.py" lines="50-100" />
+
+```python
+def _reconstructor(cls, base, state):
+    if base is object:
+        obj = object.__new__(cls)
+    else:
+        obj = base.__new__(cls, state)
+        if base.__init__ != object.__init__:
+            base.__init__(obj, state)
+    return obj
+
+def __newobj__(cls, *args):
+    return cls.__new__(cls, *args)
+
+def __newobj_ex__(cls, args, kwargs):
+    return cls.__new__(cls, *args, **kwargs)
+```
+
+`_reconstructor` is the callable that `object.__reduce_ex__` places as
+the first element of the reduce tuple for new-style classes. When
+`base is object`, `object.__new__(cls)` is sufficient. When `base` is a
+C type (e.g., `int`, `list`) the state value must be passed to `__new__`
+and possibly to `__init__` as well so the C-level fields are populated.
+
+`__newobj__` is placed in the reduce tuple when the pickler emits the
+`NEWOBJ` opcode (protocol 2+). The unpickler calls
+`copyreg.__newobj__(cls, *args)` which is equivalent to
+`cls.__new__(cls, *args)`. This avoids the overhead of a `GLOBAL` opcode
+for the constructor name on every object. `__newobj_ex__` (protocol 4+)
+extends this to support keyword arguments via `NEWOBJ_EX`.
+
+### `add_extension` and the extension registry (lines 100 to 130)
+
+<CpyLink path="Lib/copyreg.py" lines="100-130" />
+
+```python
+_extension_registry = {}   # (module, name) -> code
+_inverted_registry  = {}   # code -> (module, name)
+_extension_cache    = {}   # code -> object (populated by unpickler)
+
+def add_extension(module, name, code):
+    key = (module, name)
+    if not 1 <= code <= 0x7fffffff:
+        raise ValueError("code out of range")
+    if key in _extension_registry:
+        if _extension_registry[key] == code:
+            return   # already registered
+        raise ValueError("key %s is already registered with code %s" %
+                         (key, _extension_registry[key]))
+    if code in _inverted_registry:
+        raise ValueError("code %s is already used for key %s" %
+                         (code, _inverted_registry[code]))
+    _extension_registry[key] = code
+    _inverted_registry[code] = key
+
+def remove_extension(module, name, code):
+    key = (module, name)
+    if _extension_registry.get(key) != code:
+        raise ValueError("key %s is not registered with code %s" %
+                         (key, code))
+    del _extension_registry[key]
+    del _inverted_registry[code]
+    _extension_cache.pop(code, None)
+```
+
+When the pickler encounters a global name that has been registered with
+`add_extension`, it emits `EXT1` (1-byte code, values 1-255), `EXT2`
+(2-byte code, values 256-65535), or `EXT4` (4-byte code) instead of the
+verbose `GLOBAL opcode + module_name\nattr_name\n` sequence. The
+unpickler reverses the lookup via `_inverted_registry` and caches the
+resolved object in `_extension_cache` for subsequent unpickling.
+`remove_extension` also clears `_extension_cache` so stale resolved
+objects are not returned.
+
+## gopy mirror
+
+`copyreg` is a prerequisite for gopy's `pickle` port. The three dicts
+(`dispatch_table`, `_extension_registry`, `_inverted_registry`) are
+module-level globals that the `pickle` module imports by reference;
+gopy's module system must expose them as mutable Python dicts that
+`pickle` can read and write after import.

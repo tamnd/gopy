@@ -1,0 +1,280 @@
+---
+title: Modules/unicodedata.c
+description: C implementation of the unicodedata module. Unicode character name lookup, category/combining/bidirectional properties, normalization (NFC/NFD/NFKC/NFKD), and the versioned UCD class.
+cpython_path: Modules/unicodedata.c
+cpython_version: "3.14"
+lines: 1800
+status: annotated
+ported_to: module/unicodedata/
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Modules/unicodedata.c`
+
+<CpyLink path="Modules/unicodedata.c" />
+
+The `unicodedata` module provides access to the Unicode Character Database
+(UCD). It exposes character properties, a bidirectional name-to-codepoint
+index, canonical and compatibility decomposition tables, and the normalization
+algorithm (NFC, NFD, NFKC, NFKD).
+
+All static data (decomposition tables, combining-class arrays, name trie) is
+generated from `Tools/unicode/makeunicodedata.py` and lives in
+`Modules/unicodedata_db.h` and `Modules/unicodename_db.h`, which are
+`#include`d directly into this file. The C code in `unicodedata.c` contains
+only the lookup and algorithm logic; no table data is defined here.
+
+Two database versions are exposed: the default database matches the Unicode
+version shipped with the running CPython build, and `unicodedata.ucd_3_2_0`
+(the `UCD` class instance pinned to Unicode 3.2) exists for backward
+compatibility with codecs that normalise to that older standard.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Modules/unicodedata.c" lines="1-300">1-300</Cpy> | `unicodedata_lookup`, `unicodedata_name`, name trie helpers | Bidirectional name database: `unicodedata.name(chr)` and `unicodedata.lookup(name)`. | `module/unicodedata/` |
+| <Cpy path="Modules/unicodedata.c" lines="300-600">300-600</Cpy> | `unicodedata_category`, `unicodedata_bidirectional`, `unicodedata_combining`, `unicodedata_east_asian_width`, `unicodedata_mirrored`, `unicodedata_decomposition` | Single-character property accessors. | `module/unicodedata/` |
+| <Cpy path="Modules/unicodedata.c" lines="600-1000">600-1000</Cpy> | `unicodedata_normalize`, `is_normalized`, decomposition engine, canonical ordering, canonical/compatibility composition | NFC / NFD / NFKC / NFKD normalization algorithm. | `module/unicodedata/` |
+| <Cpy path="Modules/unicodedata.c" lines="1000-1400">1000-1400</Cpy> | `unicodedata_digit`, `unicodedata_decimal`, `unicodedata_numeric`, `unicodedata_east_asian_width` (impl), `unicodedata_is_normalized` | Numeric value accessors and `is_normalized` fast path. | `module/unicodedata/` |
+| <Cpy path="Modules/unicodedata.c" lines="1400-1800">1400-1800</Cpy> | `UCD` type, `UCD_methods[]`, `unicodedata_3_2_0`, module method table, `PyInit_unicodedata` | Versioned UCD object, `ucd_3_2_0` singleton, module definition and entry point. | `module/unicodedata/` |
+
+## Reading
+
+### `lookup()` trie search (lines 1 to 300)
+
+<CpyLink path="Modules/unicodedata.c" lines="1-300" />
+
+`unicodedata.lookup(name)` maps a Unicode character name string to a
+codepoint. The name database is a compressed trie stored in
+`Modules/unicodename_db.h`. The trie nodes encode the character set
+of valid name characters and the transitions compactly to keep the table
+small enough to ship in every CPython binary.
+
+`_getucodepoint` drives the lookup:
+
+```c
+static int
+_getucodepoint(const char *name, int namelen, Py_UCS4 *code)
+{
+    unsigned int h, v;
+    unsigned int mask = CODE_SIZE - 1;
+    unsigned int i, incr;
+
+    /* Perfect hash into the name hash table. */
+    h = (unsigned int) _PyUnicode_Name_HASH(name, namelen);
+    i = (~h) & mask;
+    v = name_hash[i];
+    if (v == 0 || !_PyUnicode_Name_EQ(name, namelen, v))  {
+        incr = (h ^ (h >> 3)) & mask;
+        if (!incr) incr = mask;
+        do {
+            i = (i + incr) & mask;
+            v = name_hash[i];
+            if (v == 0)
+                return 0;
+        } while (!_PyUnicode_Name_EQ(name, namelen, v));
+    }
+    *code = name_code[i];
+    return 1;
+}
+```
+
+The hash table uses open addressing with a quadratic-like probe sequence
+(`i = (i + incr) & mask`). `_PyUnicode_Name_EQ` compares the candidate entry
+in the compressed name array against the caller-supplied string without
+allocating a temporary buffer.
+
+`unicodedata_name()` is the inverse path. It uses `_PyUnicode_GetUcName` which
+walks a separate index array keyed by codepoint to recover the official Unicode
+name string. Both directions raise `ValueError` on failure: `lookup` for an
+unknown name, `name` for a codepoint with no assigned name (control characters
+in the U+0000-U+001F range, surrogates, and unassigned codepoints).
+
+### `normalize()` canonical decomposition (lines 600 to 1000)
+
+<CpyLink path="Modules/unicodedata.c" lines="600-1000" />
+
+`unicodedata.normalize(form, unistr)` implements all four Unicode
+normalization forms. The algorithm has three phases:
+
+1. Decompose: replace each codepoint with its canonical (NFD/NFC) or
+   compatibility (NFKD/NFKC) decomposition sequence, recursively.
+2. Reorder: apply the canonical ordering algorithm, sorting adjacent combining
+   characters by their combining class (property `ccc`) using a stable
+   insertion sort.
+3. Compose (NFC/NFKC only): scan the reordered string and replace starter +
+   combining-character sequences with their precomposed form where the Unicode
+   composition table provides one.
+
+Decomposition is driven by `decompose_data` in `unicodedata_db.h`. Each entry
+encodes whether the decomposition is canonical or compatibility, the length of
+the replacement sequence, and an index into the codepoint array:
+
+```c
+static Py_ssize_t
+nfc_nfkc(PyObject *self, PyObject *input, int k)
+{
+    /* ... allocate output buffer ... */
+
+    /* Phase 1: decompose every codepoint. */
+    for (i = 0; i < len; i++) {
+        Py_UCS4 c = PyUnicode_READ(kind, data, i);
+        decompose(self, c, k, &buf, &buflen, &outpos);
+    }
+
+    /* Phase 2: canonical ordering (sort by ccc). */
+    canonical_ordering(buf, outpos);
+
+    /* Phase 3 (NFC/NFKC): compose. */
+    if (!k)
+        outpos = canonical_composition(self, buf, outpos);
+
+    return PyUnicode_FromKindAndData(PyUnicode_4BYTE_KIND, buf, outpos);
+}
+```
+
+`decompose` is recursive: it looks up the decomposition entry for `c`, and if
+the first replacement codepoint itself has a decomposition it recurses. The
+maximum decomposition depth for any single Unicode codepoint is bounded by the
+standard (no canonical decomposition chain exceeds 30 codepoints in practice).
+
+Canonical ordering uses an insertion sort keyed by `ccc` (combining class).
+The combining class of a codepoint is read from the `ccc_data` table. A
+codepoint with `ccc == 0` is a "starter" and is never reordered past other
+starters:
+
+```c
+static void
+canonical_ordering(Py_UCS4 *string, Py_ssize_t length)
+{
+    Py_ssize_t i;
+    int swap;
+    do {
+        swap = 0;
+        for (i = 0; i + 1 < length; i++) {
+            int ccc1 = _getrecord_ex(string[i])->combining;
+            int ccc2 = _getrecord_ex(string[i+1])->combining;
+            if (ccc1 > 0 && ccc2 > 0 && ccc1 > ccc2) {
+                Py_UCS4 tmp = string[i];
+                string[i]   = string[i+1];
+                string[i+1] = tmp;
+                swap = 1;
+            }
+        }
+    } while (swap);
+}
+```
+
+Composition scans for a non-blocked starter followed by a combining character
+and checks the composition table (a hash indexed by the starter and the
+combiner). A combining character is "blocked" from a starter if any character
+between them has a combining class greater than or equal to the combiner's own
+class.
+
+### `category()` Unicode category codes (lines 300 to 600)
+
+<CpyLink path="Modules/unicodedata.c" lines="300-600" />
+
+`unicodedata.category(chr)` returns a two-character string from the set
+defined in the Unicode standard (e.g. `"Lu"` for uppercase letter, `"Nd"` for
+decimal digit, `"Zs"` for space separator).
+
+The property is stored as a small integer index in `_PyUnicode_TypeRecord`
+and decoded through the `_PyUnicode_CategoryNames` string table:
+
+```c
+static PyObject *
+unicodedata_UCD_category(PyObject *self, PyObject *args)
+{
+    int kind;
+    Py_UCS4 c;
+    const _PyUnicode_TypeRecord *rec;
+
+    if (!PyArg_ParseTuple(args, "C:category", &c))
+        return NULL;
+
+    rec = _getrecord_ex(c);
+    return PyUnicode_FromString(
+        _PyUnicode_CategoryNames[rec->category]);
+}
+```
+
+`_getrecord_ex` performs a two-level table lookup. The first level maps
+the high 8 bits of the codepoint to a page index; the second level maps
+the low 8 bits within that page to a `_PyUnicode_TypeRecord` struct. This
+gives O(1) property lookup for any codepoint without a linear search.
+
+`unicodedata.bidirectional(chr)` uses the same `_getrecord_ex` path but
+reads the `bidirectional` field and decodes it through
+`_PyUnicode_BidirectionalNames`. `unicodedata.combining(chr)` returns
+`rec->combining` directly as an integer (the canonical combining class, 0 for
+non-combining characters). `unicodedata.mirrored(chr)` returns
+`rec->mirrored` as a 0 or 1 integer. `unicodedata.east_asian_width(chr)`
+decodes `rec->east_asian_width` through `_PyUnicode_EastAsianWidthNames`.
+
+All six property accessors share the same two-level table structure and the
+same argument parsing pattern (`"C:"` format character, which extracts a
+single Unicode codepoint from a length-1 string without allocating).
+
+### `UCD` versioned database class (lines 1400 to 1800)
+
+<CpyLink path="Modules/unicodedata.c" lines="1400-1800" />
+
+The `UCD` type is a Python object whose only field is a pointer to the
+database version descriptor `unicodedata_db`. Every method on `UCD` accepts
+`self` as a `UCD *` and threads the version pointer through to the table
+lookup functions, allowing `unicodedata.ucd_3_2_0` to return Unicode 3.2
+property values from the same code paths as the default module-level functions:
+
+```c
+typedef struct {
+    PyObject_HEAD
+    const _PyUnicode_Database *db;
+} UCD;
+
+static PyObject *
+UCD_category(UCD *self, PyObject *args)
+{
+    Py_UCS4 c;
+    if (!PyArg_ParseTuple(args, "C:category", &c))
+        return NULL;
+    /* self->db->type_records differs from the default db for ucd_3_2_0. */
+    const _PyUnicode_TypeRecord *rec = _getrecord_v(self->db, c);
+    return PyUnicode_FromString(
+        _PyUnicode_CategoryNames[rec->category]);
+}
+```
+
+`unicodedata.ucd_3_2_0` is a module-level `UCD` instance created at module
+init time, pointing at a separate set of generated tables built from the
+Unicode 3.2 data files. Its existence lets libraries like `encodings.idna`
+perform IDNA 2003 normalisation (which is defined relative to Unicode 3.2)
+without shipping their own copy of the property tables.
+
+The module-level functions (`unicodedata.category`, `unicodedata.normalize`,
+etc.) are thin wrappers that call the corresponding `UCD` method with the
+default database instance.
+
+## gopy mirror
+
+`module/unicodedata/` (pending). The two-level codepoint property table ports
+directly to Go as a `[256]*[256]typeRecord` array (or equivalent compact
+representation). `Normalize` implements the three-phase NFC/NFD/NFKC/NFKD
+algorithm above. `Lookup` and `Name` use the same hash-table strategy as
+`_getucodepoint`. The `UCD` Python type maps to a Go struct holding a pointer
+to the database version, allowing `ucd_3_2_0` to be a module-level singleton
+that routes through the same method implementations with a different table
+pointer.
+
+## CPython 3.14 changes
+
+The Unicode database version bundled with CPython is updated with each minor
+release; 3.14 ships Unicode 16.0. The `unicodedata.is_normalized()` function
+was added in 3.10 as a fast path that avoids computing the full normalized
+form when the input is already in normal form. The `UCD` type gained
+`__class_getitem__` (for type hints) in 3.9. The decomposition and name
+tables are regenerated from scratch for each release by
+`Tools/unicode/makeunicodedata.py`; the algorithm in `unicodedata.c` has been
+stable since Python 2.

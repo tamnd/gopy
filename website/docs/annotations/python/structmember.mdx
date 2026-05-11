@@ -1,0 +1,253 @@
+---
+title: Python/structmember.c
+description: Offset-based C struct field access exposed to Python. Implements PyMember_GetOne and PyMember_SetOne for the full Py_T_* type code set.
+cpython_path: Python/structmember.c
+cpython_version: "3.14"
+lines: 382
+status: annotated
+ported_to: objects/member.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Python/structmember.c`
+
+<CpyLink path="Python/structmember.c" />
+
+The struct-member layer maps a C struct field to a Python attribute using only
+three pieces of information: the base address of the struct object, an integer
+byte offset, and a type code. No reflection, no vtable. Given those three
+inputs `PyMember_GetOne` reads the field and boxes it as a Python object;
+`PyMember_SetOne` unboxes a Python value and writes it back.
+
+This mechanism predates the C extension module era. Every `tp_members` array
+in the Python runtime, from `PyFrameObject` to `PyCodeObject`, uses it.
+In 3.14 the public names were updated to `Py_T_*` (previously bare `T_*` in
+the now-deprecated `structmember.h`), and the `Py_RELATIVE_OFFSET` flag was
+added so extension modules whose struct layout changes across ABI versions can
+declare offsets relative to a known anchor rather than to the raw object
+pointer.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Python/structmember.c" lines="1-22">1-22</Cpy> | `member_get_object` | Helper: atomic load of `PyObject *` slot; raises `AttributeError` when the pointer is `NULL` (implements `Py_T_OBJECT_EX` semantics). | `objects/member.go:memberDescrGet` |
+| <Cpy path="Python/structmember.c" lines="23-135">23-135</Cpy> | `PyMember_GetOne` | Read one field by type code and offset; boxes the C value as a Python object. | `objects/member.go:memberDescrGet` |
+| <Cpy path="Python/structmember.c" lines="137-141">137-141</Cpy> | `WARN` macro | Emit a `RuntimeWarning` for truncating integer stores. | implicit in `memberDescrSet` |
+| <Cpy path="Python/structmember.c" lines="143-382">143-382</Cpy> | `PyMember_SetOne` | Write one field: check `Py_READONLY`, unbox the Python value, atomic-store it; emit warnings on truncation. | `objects/member.go:memberDescrSet` |
+
+## Reading
+
+### `PyMemberDef` layout (defined in `Include/descrobject.h`)
+
+<CpyLink path="Include/descrobject.h" lines="41-86" />
+
+```c
+struct PyMemberDef {
+    const char *name;
+    int         type;    /* Py_T_INT, Py_T_OBJECT_EX, ... */
+    Py_ssize_t  offset;  /* byte offset from struct base */
+    int         flags;   /* Py_READONLY, Py_AUDIT_READ, Py_RELATIVE_OFFSET */
+    const char *doc;
+};
+
+/* Type codes */
+#define Py_T_SHORT      0
+#define Py_T_INT        1
+#define Py_T_LONG       2
+#define Py_T_FLOAT      3
+#define Py_T_DOUBLE     4
+#define Py_T_STRING     5
+#define _Py_T_OBJECT    6   /* deprecated, use Py_T_OBJECT_EX */
+#define Py_T_CHAR       7
+#define Py_T_BYTE       8
+#define Py_T_UBYTE      9
+#define Py_T_USHORT     10
+#define Py_T_UINT       11
+#define Py_T_ULONG      12
+#define Py_T_STRING_INPLACE 13
+#define Py_T_BOOL       14
+#define Py_T_OBJECT_EX  16
+#define Py_T_LONGLONG   17
+#define Py_T_ULONGLONG  18
+#define Py_T_PYSSIZET   19
+
+/* Flags */
+#define Py_READONLY         1
+#define Py_AUDIT_READ       2
+#define Py_RELATIVE_OFFSET  8
+```
+
+A `PyMemberDef` is a row in a statically allocated, NULL-terminated table
+(the old `tp_members` field on `PyTypeObject`). At type construction time
+`PyDescr_NewMember` walks the table and builds one `PyMemberDescrObject` per
+row. At attribute access time the descriptor's `__get__` calls
+`PyMember_GetOne` with the instance's address and the row.
+
+The `offset` field is always a byte count from the start of the C struct. For
+the common case the struct starts at the same address as the Python object
+header, so `obj_addr + offset` reaches the field directly. The
+`Py_RELATIVE_OFFSET` flag changes the base; CPython's own code fills it from
+a helper `Py_offsetof` macro that adjusts for the header size of the
+owning sub-struct. `PyMember_GetOne` and `PyMember_SetOne` reject
+`Py_RELATIVE_OFFSET` with `SystemError`; the flag is only meaningful when the
+descriptor layer resolves the anchor before calling the two public functions.
+
+### `PyMember_GetOne` type dispatch (lines 23 to 135)
+
+<CpyLink path="Python/structmember.c" lines="23-135" />
+
+```c
+PyObject *
+PyMember_GetOne(const char *obj_addr, PyMemberDef *l)
+{
+    PyObject *v;
+    if (l->flags & Py_RELATIVE_OFFSET) {
+        PyErr_SetString(PyExc_SystemError,
+                        "PyMember_GetOne used with Py_RELATIVE_OFFSET");
+        return NULL;
+    }
+
+    const char *addr = obj_addr + l->offset;
+    switch (l->type) {
+    case Py_T_BOOL:
+        v = PyBool_FromLong(FT_ATOMIC_LOAD_CHAR_RELAXED(*(char*)addr));
+        break;
+    case Py_T_BYTE:
+        v = PyLong_FromLong(FT_ATOMIC_LOAD_CHAR_RELAXED(*(char*)addr));
+        break;
+    ...
+    case Py_T_OBJECT_EX:
+        v = member_get_object(addr, obj_addr, l);
+        /* incref with critical section under GIL-disabled builds */
+        break;
+    case Py_T_LONGLONG:
+        v = PyLong_FromLongLong(
+            FT_ATOMIC_LOAD_LLONG_RELAXED(*(long long *)addr));
+        break;
+    ...
+    default:
+        PyErr_SetString(PyExc_SystemError, "bad memberdescr type");
+        v = NULL;
+    }
+    return v;
+}
+```
+
+All loads go through `FT_ATOMIC_LOAD_*_RELAXED` macros. In the GIL-enabled
+build these expand to plain reads; in the free-threaded build they emit
+hardware atomic loads. The relaxed ordering is enough because field access is
+always guarded by the descriptor's `__get__`, which holds at least an
+implicit reference to the owner object.
+
+The split between `_Py_T_OBJECT` (type code 6, deprecated) and
+`Py_T_OBJECT_EX` (type code 16) is behaviorally significant. `_Py_T_OBJECT`
+returns `None` when the stored pointer is `NULL`. `Py_T_OBJECT_EX` raises
+`AttributeError` instead via `member_get_object`, matching the semantics that
+`__slots__` attributes need: an unset slot should look absent, not `None`.
+New code should always use `Py_T_OBJECT_EX`.
+
+### `PyMember_SetOne` and `Py_READONLY` guard (lines 143 to 382)
+
+<CpyLink path="Python/structmember.c" lines="143-382" />
+
+```c
+int
+PyMember_SetOne(char *addr, PyMemberDef *l, PyObject *v)
+{
+    if (l->flags & Py_RELATIVE_OFFSET) {
+        PyErr_SetString(PyExc_SystemError,
+                        "PyMember_SetOne used with Py_RELATIVE_OFFSET");
+        return -1;
+    }
+    addr += l->offset;
+
+    if (l->flags & Py_READONLY) {
+        PyErr_SetString(PyExc_AttributeError, "readonly attribute");
+        return -1;
+    }
+    if (v == NULL) {
+        if (l->type == Py_T_OBJECT_EX) {
+            if (*(PyObject **)addr == NULL) {
+                PyErr_SetString(PyExc_AttributeError, l->name);
+                return -1;
+            }
+        }
+        else if (l->type != _Py_T_OBJECT) {
+            PyErr_SetString(PyExc_TypeError,
+                            "can't delete numeric/char attribute");
+            return -1;
+        }
+    }
+    switch (l->type) {
+    case Py_T_BOOL:
+        if (!PyBool_Check(v)) {
+            PyErr_SetString(PyExc_TypeError,
+                            "attribute value type must be bool");
+            return -1;
+        }
+        FT_ATOMIC_STORE_CHAR_RELAXED(*(char*)addr,
+                                     v == Py_True ? 1 : 0);
+        break;
+    case Py_T_BYTE: {
+        long long_val = PyLong_AsLong(v);
+        if ((long_val == -1) && PyErr_Occurred())
+            return -1;
+        FT_ATOMIC_STORE_CHAR_RELAXED(*(char*)addr, (char)long_val);
+        if ((long_val > CHAR_MAX) || (long_val < CHAR_MIN))
+            WARN("Truncation of value to char");
+        break;
+    }
+    ...
+    case Py_T_STRING:
+    case Py_T_STRING_INPLACE:
+        PyErr_SetString(PyExc_TypeError, "readonly attribute");
+        return -1;
+    ...
+    }
+    return 0;
+}
+```
+
+The `Py_READONLY` check happens before the offset adjustment. String fields
+(`Py_T_STRING`, `Py_T_STRING_INPLACE`) are always read-only regardless of the
+`flags` field; the function returns `TypeError` for them even if `Py_READONLY`
+is clear. This is a long-standing policy: C extension authors who need a
+writable string field must use `Py_T_OBJECT_EX` instead and manage the memory
+themselves.
+
+Truncation warnings on integer types (`Py_T_BYTE`, `Py_T_UBYTE`,
+`Py_T_SHORT`, `Py_T_USHORT`, `Py_T_INT`) exist for backwards compatibility.
+Earlier CPython silently truncated; 3.x adds the `RuntimeWarning` but does
+not promote it to an error, because doing so would break C extensions that
+rely on the truncating behaviour.
+
+Under the free-threaded build, object stores use a critical section and
+`FT_ATOMIC_STORE_PTR_RELEASE` to give the garbage collector a safe
+read path without holding the GIL.
+
+## Notes for the gopy mirror
+
+`objects/member.go` ports the descriptor half (`PyMemberDescr_Type`,
+`PyDescr_NewMember`) rather than the raw `PyMember_GetOne` /
+`PyMember_SetOne` functions. The reason: gopy instances do not lay out
+fields at known byte offsets. Fields are stored in a `[]Object` slots array;
+the descriptor holds the slot index rather than a byte offset. The
+`memberDescrGet` / `memberDescrSet` functions index into that array and
+replicate the `Py_T_OBJECT_EX` `AttributeError`-on-nil policy. The numeric
+type codes (`Py_T_INT`, `Py_T_FLOAT`, etc.) are not used in gopy because
+Go fields are always `objects.Object`; there is no C-level primitive to box.
+
+## CPython 3.14 changes worth noting
+
+The `Py_T_*` constants moved from `structmember.h` to `Include/descrobject.h`
+in 3.12. `structmember.h` now only provides backward-compatible `#define`
+aliases. New extension code should include `<Python.h>` (which pulls in
+`descrobject.h`) and use `Py_T_*` directly.
+
+The `Py_RELATIVE_OFFSET` flag was added in 3.10 and is present and checked
+in 3.14. The free-threading `FT_ATOMIC_*` wrappers around every load and
+store in this file were added in 3.13 (gh-116012) as part of the no-GIL
+rollout; the GIL-enabled build sees no semantic difference because the macros
+expand to plain memory accesses.

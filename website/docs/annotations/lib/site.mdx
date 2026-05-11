@@ -1,0 +1,192 @@
+---
+title: Lib/site.py
+description: Interpreter startup customization; adds site-packages to sys.path, processes .pth files, and runs sitecustomize/usercustomize hooks.
+cpython_path: Lib/site.py
+cpython_version: "3.14"
+lines: 600
+status: annotated
+ported_to: (stdlib pending)
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Lib/site.py`
+
+<CpyLink path="Lib/site.py" />
+
+`site.py` is the first module the interpreter imports after the core
+bootstrap. Its `main()` function runs automatically at startup (unless
+`-S` is passed) and is responsible for expanding `sys.path` with all
+site-packages directories, processing `.pth` path-configuration files,
+and running the `sitecustomize` and `usercustomize` hooks that allow
+administrators and individual users to extend the environment.
+
+The module also exposes `getsitepackages()` and `getusersitepackages()`
+as public functions for tools that need to locate the package directories
+without performing a full startup sequence.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Lib/site.py" lines="1-100">1-100</Cpy> | `addsitedir`, `addpackage` | `addsitedir` lists a directory for `.pth` files and calls `addpackage` on each; `addpackage` opens a `.pth` file, processes its lines, and appends valid path entries or executes `import` lines. | `(stdlib pending)` |
+| <Cpy path="Lib/site.py" lines="100-250">100-250</Cpy> | `.pth` file processing inside `addpackage` | Line-by-line `.pth` parser: blank lines and `#` comments are skipped; lines beginning with `import` are executed via `exec`; all other lines are treated as path entries and appended to `sys.path` if they exist on disk. | `(stdlib pending)` |
+| <Cpy path="Lib/site.py" lines="250-400">250-400</Cpy> | `getsitepackages`, `getusersitepackages`, `PREFIXES` | `getsitepackages` returns the platform-specific list of site-packages directories derived from `sys.prefix` and `sys.exec_prefix`; `getusersitepackages` returns the user-specific site directory under `~/.local`; `PREFIXES` is the deduplicated prefix list. | `(stdlib pending)` |
+| <Cpy path="Lib/site.py" lines="400-500">400-500</Cpy> | `execsitecustomize`, `execusercustomize` | Each function imports and runs the corresponding customization module (`sitecustomize` or `usercustomize`) in a `try/except ImportError` block; other exceptions propagate unless `-I` (isolated) mode is active. | `(stdlib pending)` |
+| <Cpy path="Lib/site.py" lines="500-600">500-600</Cpy> | `main`, `ENABLE_USER_SITE`, startup flags | `main()` calls the above functions in order: build prefix list, call `addsitedir` on each site-packages directory, call `execsitecustomize`, optionally call `execusercustomize` when `ENABLE_USER_SITE` is true, and register `_Printer` objects on `sys` for `help`, `copyright`, and `license`. | `(stdlib pending)` |
+
+## Reading
+
+### `addpackage` .pth file processing (lines 100 to 250)
+
+<CpyLink path="Lib/site.py" lines="100-250" />
+
+```python
+def addpackage(sitedir, name, known_paths):
+    if known_paths is None:
+        known_paths = _init_pathinfo()
+        reset = True
+    else:
+        reset = False
+    fullname = os.path.join(sitedir, name)
+    try:
+        f = io.TextIOWrapper(io.open_code(fullname))
+    except OSError:
+        return
+    with f:
+        for n, line in enumerate(f):
+            if line.startswith('#'):
+                continue
+            try:
+                if line.startswith(('import ', 'import\t')):
+                    exec(line)
+                    continue
+                line = line.rstrip()
+                if not line:
+                    continue
+                dir, dircase = makepath(sitedir, line)
+                if not dircase in known_paths and os.path.exists(dir):
+                    sys.path.append(dir)
+                    known_paths.add(dircase)
+            except Exception:
+                print("Error processing line {:d} of {}:\n".format(n+1, fullname),
+                      file=sys.stderr)
+                import traceback
+                for record in traceback.format_exception(*sys.exc_info()):
+                    for line in record.splitlines():
+                        print('  '+line, file=sys.stderr)
+                print("\nRemainder of file ignored", file=sys.stderr)
+                break
+    if reset:
+        known_paths = None
+    return known_paths
+```
+
+The `.pth` format has exactly two active line types: lines that begin with
+`import ` or `import\t` are executed via `exec(line)` in the caller's
+global namespace (not a fresh namespace), which is how packages like
+`setuptools` inject their import hooks at startup. All other non-blank,
+non-comment lines are resolved relative to `sitedir` with `makepath` and
+appended to `sys.path` when the resulting directory exists on disk.
+
+The `known_paths` set (lowercased paths on case-insensitive file systems)
+deduplicates entries; a path is added to `sys.path` only if its
+case-folded form is not already present. An exception inside the loop
+prints a diagnostic and breaks out of the file immediately ("Remainder of
+file ignored"), preventing a malformed `.pth` from silently corrupting the
+path.
+
+### `getsitepackages` platform paths (lines 250 to 400)
+
+<CpyLink path="Lib/site.py" lines="250-400" />
+
+```python
+def getsitepackages(prefixes=None):
+    sitepackages = []
+    seen = set()
+    if prefixes is None:
+        prefixes = PREFIXES
+    for prefix in prefixes:
+        if not prefix or prefix in seen:
+            continue
+        seen.add(prefix)
+        if os.sep == '/':
+            libdirs = [sys.platlibdir, "lib"]
+            for libdir in libdirs:
+                path = os.path.join(prefix, libdir,
+                                    "python%d.%d" % sys.version_info[:2],
+                                    "site-packages")
+                sitepackages.append(path)
+        else:
+            # Windows
+            sitepackages.append(prefix)
+            sitepackages.append(os.path.join(prefix, "Lib", "site-packages"))
+    return sitepackages
+```
+
+On POSIX the function constructs two paths per prefix: one under
+`sys.platlibdir` (which is `lib64` on some Linux distributions) and one
+under `lib`. The version component is `pythonX.Y` using the two-tuple
+`sys.version_info[:2]`. On Windows the prefix itself and
+`<prefix>/Lib/site-packages` are returned. `PREFIXES` is built at module
+load time from `sys.prefix` and `sys.exec_prefix` with duplicates
+removed.
+
+`getusersitepackages` appends a version-tagged path under `site.USER_BASE`
+(which defaults to `~/.local` on POSIX and `%APPDATA%\Python` on
+Windows). It is suppressed when `ENABLE_USER_SITE` is `False`, which
+happens in virtual environments and when running with `-I`.
+
+### `main()` startup sequence (lines 500 to 600)
+
+<CpyLink path="Lib/site.py" lines="500-600" />
+
+```python
+def main():
+    """Add standard site-specific directories to the module search path."""
+    global ENABLE_USER_SITE
+
+    abs_paths()
+    known_paths = removeduppaths()
+    if ENABLE_USER_SITE is None:
+        ENABLE_USER_SITE = check_enableusersite()
+    known_paths = addpackagesdir(known_paths)    # site-packages
+    if ENABLE_USER_SITE:
+        usersitepackages = getusersitepackages()
+        if os.path.isdir(usersitepackages):
+            addsitedir(usersitepackages, known_paths)
+    if ENABLE_USER_SITE:
+        setquit()
+        setcopyright()
+        sethelper()
+    execsitecustomize()
+    if ENABLE_USER_SITE:
+        execusercustomize()
+```
+
+`main()` is called unconditionally from `Py_InitializeFromConfig` unless
+`Py_NoSiteFlag` is set (the `-S` command-line flag). The call sequence is:
+
+1. `abs_paths()` converts relative entries already in `sys.path` to
+   absolute paths.
+2. `removeduppaths()` deduplicates `sys.path` while preserving order.
+3. `addpackagesdir` calls `addsitedir` on each directory returned by
+   `getsitepackages`, which processes `.pth` files.
+4. The user site directory is added when `ENABLE_USER_SITE` is `True`.
+5. `execsitecustomize()` imports and runs `sitecustomize` if it exists.
+6. `execusercustomize()` imports and runs `usercustomize` if it exists
+   and `ENABLE_USER_SITE` is `True`.
+
+`ENABLE_USER_SITE` starts as `None` and is set by `check_enableusersite`
+which returns `False` inside a virtual environment (where
+`sys.prefix != sys.base_prefix`) or when the real and effective user IDs
+differ (setuid scripts).
+
+## gopy mirror
+
+`site.py` is not yet bundled in `stdlib/MANIFEST.txt`. For gopy, `main()`
+must be called by the interpreter startup sequence in
+`pythonrun/runstring.go` after the core modules are initialized. The `.pth`
+file `exec` path requires that gopy's `exec` built-in is functional before
+`site.main()` runs. `ENABLE_USER_SITE` defaults to `False` in gopy's
+embedded contexts where there is no user home directory.

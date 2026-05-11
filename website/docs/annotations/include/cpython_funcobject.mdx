@@ -1,9 +1,9 @@
 ---
 title: Include/cpython/funcobject.h
-description: Exposes the internal PyFunctionObject layout and fast-accessor macros to C extensions that need to inspect or construct function objects outside the stable ABI.
+description: Internal function-object layout: PyFunctionObject fields, func_version specialization counter, and GET_* accessor macros.
 cpython_path: Include/cpython/funcobject.h
 cpython_version: "3.14"
-lines: 105
+lines: 120
 status: annotated
 ported_to: objects/function.go
 ---
@@ -14,160 +14,166 @@ import {Cpy, CpyLink} from '@site/src/components/Cpy';
 
 <CpyLink path="Include/cpython/funcobject.h" />
 
-The CPython-internal companion to the stable `funcobject.h`. While the
-public API exposes `PyFunction_NewWithQualName` and typed attribute getters
-and setters, this header reveals the full `PyFunctionObject` struct layout
-and the zero-overhead accessor macros that the interpreter evaluator uses
-on every function call.
+The cpython-tier header for Python-defined function objects. The public
+`Include/funcobject.h` exposes only type checks and the constructor;
+this header adds the full `PyFunctionObject` struct, the `func_version`
+specialization counter, and the `PyFunction_GET_*` accessor macros the
+interpreter uses in its call fast-path.
 
-Function objects are the primary carrier of callable state in Python. Each
-`def` statement allocates a `PyFunctionObject` that binds a `PyCodeObject`
-(the compiled bytecode) to a globals dict and, optionally, a closure tuple,
-default argument tuple, keyword-only defaults dict, and annotation dict.
+Every Python `def` statement produces one `PyFunctionObject`. It bundles
+a code object (`func_code`) with the execution environment captured at
+definition time: `func_globals`, `func_closure`, and optional
+`func_defaults` / `func_kwdefaults`. The remaining fields (`func_doc`,
+`func_name`, `func_dict`, `func_annotations`, `func_typeparams`) serve
+introspection and the descriptor protocol.
 
-The `func_version` field added in 3.12 is particularly important for
-performance: the specialising interpreter stamps a version into the function
-at creation time and writes a `CALL_PY_EXACT_ARGS` specialisation that
-checks this version on every call. A mismatch (e.g. because `__defaults__`
-was mutated) deoptimises back to the generic path.
-
-In gopy, `objects/function.go` mirrors `PyFunctionObject` as the Go struct
-`FunctionObject`. Each field maps directly to a Go field with the same
-capitalised name. The accessor macros (`PyFunction_GET_CODE`, etc.) become
-inline Go helpers or direct field accesses in the evaluator hot path.
+In gopy the equivalent is `objects/function.go`'s `Function` struct.
+Each CPython field maps directly to a public Go field.
 
 ## Map
 
 | Lines | Symbol | Role | gopy |
 | ----- | ------ | ---- | ---- |
-| <Cpy path="Include/cpython/funcobject.h" lines="1-15">1-15</Cpy> | Include guard / forward declarations | `PyFunctionObject` forward declaration; `Py_LIMITED_API` guard. | — |
-| <Cpy path="Include/cpython/funcobject.h" lines="16-65">16-65</Cpy> | `PyFunctionObject` struct | All fields: `func_code`, `func_globals`, `func_defaults`, `func_kwdefaults`, `func_closure`, `func_doc`, `func_name`, `func_dict`, `func_weakreflist`, `func_module`, `func_annotations`, `func_qualname`, `func_version`. | `objects/function.go:FunctionObject` |
-| <Cpy path="Include/cpython/funcobject.h" lines="66-85">66-85</Cpy> | `PyFunction_GET_CODE` / `PyFunction_GET_GLOBALS` / `PyFunction_GET_MODULE` / `PyFunction_GET_DEFAULTS` / `PyFunction_GET_KW_DEFAULTS` / `PyFunction_GET_CLOSURE` / `PyFunction_GET_ANNOTATIONS` | Zero-overhead cast-and-dereference accessor macros. | `objects/function.go` — direct field access |
-| <Cpy path="Include/cpython/funcobject.h" lines="86-105">86-105</Cpy> | `PyFunction_NewWithQualName` / `PyFunction_GET_WEAKREFS` / versioning constants | Constructor and remaining public API. | `objects/function.go:FunctionNewWithQualName` |
+| <Cpy path="Include/cpython/funcobject.h" lines="1-60">1-60</Cpy> | `PyFunctionObject` struct | All function fields: `func_code`, `func_globals`, `func_builtins`, `func_name`, `func_qualname`, `func_doc`, `func_dict`, `func_defaults`, `func_kwdefaults`, `func_closure`, `func_annotations`, `func_annotate`, `func_typeparams`, `func_weakreflist`, `func_version`. | `objects/function.go` |
+| <Cpy path="Include/cpython/funcobject.h" lines="60-100">60-100</Cpy> | `PyFunction_GET_CODE` / `PyFunction_GET_GLOBALS` / `PyFunction_GET_DEFAULTS` / `PyFunction_GET_CLOSURE` / `PyFunction_GET_QUALNAME` | Unchecked accessor macros for hot call-site paths; skip type verification. | `objects/function.go` |
+| <Cpy path="Include/cpython/funcobject.h" lines="100-120">100-120</Cpy> | `PyFunction_New` / `PyFunction_NewWithQualName` / `func_version` notes | Constructors and the specialization-counter semantics. | `objects/function.go` |
 
 ## Reading
 
-### `PyFunctionObject` struct layout (lines 16 to 65)
+### `PyFunctionObject` field layout (lines 1 to 60)
 
-<CpyLink path="Include/cpython/funcobject.h" lines="16-65" />
+<CpyLink path="Include/cpython/funcobject.h" lines="1-60" />
 
 ```c
 typedef struct {
     PyObject_HEAD
 
-    PyObject *func_code;        /* A code object, the __code__ attribute */
-    PyObject *func_globals;     /* A dictionary (globals namespace) */
-    PyObject *func_defaults;    /* NULL or a tuple */
-    PyObject *func_kwdefaults;  /* NULL or a dict */
-    PyObject *func_closure;     /* NULL or a tuple of cell objects */
+    PyObject *func_globals;      /* __globals__: module dict (borrowed ref) */
+    PyObject *func_builtins;     /* __builtins__: builtins dict (borrowed ref) */
+    PyObject *func_name;         /* __name__: str */
+    PyObject *func_qualname;     /* __qualname__: str, e.g. "Cls.method" */
+    PyObject *func_code;         /* __code__: PyCodeObject (strong ref) */
+    PyObject *func_defaults;     /* __defaults__: tuple or NULL */
+    PyObject *func_kwdefaults;   /* __kwdefaults__: dict or NULL */
+    PyObject *func_closure;      /* __closure__: tuple of cells or NULL */
+    PyObject *func_doc;          /* __doc__: str or NULL */
+    PyObject *func_dict;         /* __dict__: instance dict or NULL */
+    PyObject *func_weakreflist;  /* for weakref support */
+    PyObject *func_module;       /* __module__: str or NULL */
+    PyObject *func_annotations;  /* __annotations__: dict or NULL */
+    PyObject *func_annotate;     /* __annotate__: callable or NULL (PEP 563) */
+    PyObject *func_typeparams;   /* __type_params__: tuple (PEP 695) */
 
-    PyObject *func_doc;         /* The __doc__ attribute, can be anything */
-    PyObject *func_name;        /* The __name__ attribute, a string object */
-    PyObject *func_dict;        /* The __dict__ attribute, a dict or NULL */
-    PyObject *func_weakreflist; /* List of weak references */
-    PyObject *func_module;      /* The __module__ attribute, can be anything */
-    PyObject *func_annotations; /* Annotations, a dict or NULL */
-    PyObject *func_typeparams;  /* Tuple of active type params, or NULL */
-    PyObject *func_qualname;    /* The qualified name */
-
-    uint32_t func_version;      /* Specialization version */
+    uint32_t  func_version;      /* specialization invalidation counter */
 } PyFunctionObject;
 ```
 
-`func_code` is always a `PyCodeObject *`; it may be replaced at runtime
-(e.g. by a debugger or by `functools.wraps`), which is why the field is
-`PyObject *` rather than `PyCodeObject *`.
+The field ordering is significant: `func_globals`, `func_builtins`,
+`func_name`, and `func_qualname` appear first so that the `CALL`
+specializer can locate them at fixed offsets from the object header
+without a dictionary lookup.
 
-`func_globals` is the module namespace that was current when the `def`
-statement executed. It is not the same as the enclosing scope: closures
-over locals are carried in `func_closure` as cell objects, not via globals.
+`func_annotate` is the deferred annotation callable introduced in
+PEP 563. When `__future__.annotations` is active the compiler stores a
+`lambda` here instead of materializing the annotation dict eagerly.
+`func_annotations` is filled in lazily on the first `__annotations__`
+access by calling `func_annotate(1)`.
 
-`func_closure` is `NULL` for functions with no free variables. When
-non-NULL, it is a tuple whose length equals `co_nfreevars`, with each
-element a `cell` object wrapping the closed-over variable. The evaluator
-uses `LOAD_DEREF` and `STORE_DEREF` to read and write through these cells.
+`func_typeparams` holds the `TypeVar` / `ParamSpec` / `TypeVarTuple`
+tuple for PEP 695 generic functions. It is `None`-equivalent (empty
+tuple) for ordinary functions.
 
-`func_version` is stamped by `_PyFunction_SetVersion` when the function is
-created and is cleared to zero whenever `__defaults__`, `__kwdefaults__`,
-or `__code__` is mutated. The specialising evaluator checks this version at
-call time and deoptimises if it does not match.
+In gopy, `Function` in `objects/function.go` mirrors every field. The
+`Module` field is `Object` rather than `*Unicode` to accommodate the
+case where `globals['__name__']` is absent or non-string. `Builtins` is
+populated eagerly from `globals['__builtins__']` at construction time
+rather than lazily.
 
-In gopy, `FunctionObject` in `objects/function.go` mirrors every field.
-`FuncClosure` is a `*TupleObject` (nullable), and `FuncVersion` is `uint32`.
+### `func_version` specialization counter (lines 100 to 120)
 
-### Accessor macros (lines 66 to 85)
-
-<CpyLink path="Include/cpython/funcobject.h" lines="66-85" />
+<CpyLink path="Include/cpython/funcobject.h" lines="100-120" />
 
 ```c
-#define PyFunction_GET_CODE(func) \
-    (((PyFunctionObject *)(func))->func_code)
+/* func_version is reset to 0 whenever any of the "shape" fields change:
+   func_code, func_defaults, func_kwdefaults, func_closure, func_annotations.
+   The CALL specializer stamps a copy of func_version into its inline cache.
+   On the next call it compares the cached version to the live value; a
+   mismatch means the function was mutated and the specialized form must
+   be deoptimized back to CALL. */
+```
 
-#define PyFunction_GET_GLOBALS(func) \
-    (((PyFunctionObject *)(func))->func_globals)
+`func_version` is a 32-bit monotone counter maintained by the C setters
+for `func_code`, `func_defaults`, `func_kwdefaults`, `func_closure`, and
+`func_annotations`. Any write to those fields zeros the version. The
+specializer allocates a new version number and stores it in the `CALL`
+inline cache; mismatch on a subsequent call triggers deopt to the
+unspecialized `CALL` opcode.
 
-#define PyFunction_GET_MODULE(func) \
-    (((PyFunctionObject *)(func))->func_module)
+The version counter does not track `func_doc`, `func_dict`,
+`func_module`, `func_qualname`, or `func_typeparams` because those
+fields do not affect call dispatch.
+
+In gopy, `Function.Version uint32` mirrors `func_version`. The setters
+`SetCode`, `SetDefaults`, `SetKwDefaults`, and `SetClosure` each call
+`f.Version = 0`. `SetAnnotations` also zeros `Version` (matching
+CPython) and clears `Annotate`. The Tier-2 optimizer reads the version
+via `GetVersionForCurrentState()`, a direct port of
+`_PyFunction_GetVersionForCurrentState`.
+
+### `PyFunction_GET_*` accessor macros (lines 60 to 100)
+
+<CpyLink path="Include/cpython/funcobject.h" lines="60-100" />
+
+```c
+#define PyFunction_GET_CODE(func)     \
+    (((PyFunctionObject *)func)->func_code)
+
+#define PyFunction_GET_GLOBALS(func)  \
+    (((PyFunctionObject *)func)->func_globals)
 
 #define PyFunction_GET_DEFAULTS(func) \
-    (((PyFunctionObject *)(func))->func_defaults)
+    (((PyFunctionObject *)func)->func_defaults)
 
-#define PyFunction_GET_KW_DEFAULTS(func) \
-    (((PyFunctionObject *)(func))->func_kwdefaults)
+#define PyFunction_GET_CLOSURE(func)  \
+    (((PyFunctionObject *)func)->func_closure)
 
-#define PyFunction_GET_CLOSURE(func) \
-    (((PyFunctionObject *)(func))->func_closure)
-
-#define PyFunction_GET_ANNOTATIONS(func) \
-    (((PyFunctionObject *)(func))->func_annotations)
+#define PyFunction_GET_QUALNAME(func) \
+    (((PyFunctionObject *)func)->func_qualname)
 ```
 
-These macros exist because the evaluator calls them on every function
-invocation. Bypassing the type-checked `PyFunction_GetCode` accessor and
-going straight to the struct field avoids a `PyErr_BadInternalCall` check
-and an extra function call frame, which matters in tight loops.
+These macros exist because the call fast-path and the optimizer's
+`LOAD_ATTR_METHOD_*` stubs need to extract individual fields with no
+overhead beyond a pointer dereference. They skip every null check and
+type assertion. Callers are responsible for ensuring `func` is a
+genuine `PyFunctionObject *` before using them.
 
-The cast to `PyFunctionObject *` is safe because the evaluator already
-verified `PyFunction_Check(func)` on the slower first call before
-specialising. Subsequent specialised calls hit the macro directly.
+The C interpreter uses `PyFunction_GET_CODE` to reach the code object
+from the function without going through `Py_TYPE` dispatch. It uses
+`PyFunction_GET_GLOBALS` to prime the new frame's `f_globals`.
+`PyFunction_GET_CLOSURE` is consulted by `MAKE_CELL` and `COPY_FREE_VARS`
+to install captured cells into the frame's `localsplus` region.
 
-In gopy, the hot path in `vm/eval_call.go` accesses `fo.FuncCode` and
-`fo.FuncGlobals` directly on the `*FunctionObject` pointer, matching
-the macro expansion.
+In gopy there are no macros; direct field access (`f.Code`, `f.Globals`,
+`f.Closure`) replaces all five. The `getset` descriptors registered by
+`registerFunctionGetSets` in `objects/function.go` provide the same
+introspection surface as the Python-level `__code__`, `__globals__`, and
+`__closure__` attributes.
 
-### Constructor and versioning (lines 86 to 105)
+## gopy mirror
 
-<CpyLink path="Include/cpython/funcobject.h" lines="86-105" />
+`objects/function.go` is a full port of `PyFunctionObject`. Key
+differences from CPython:
 
-```c
-PyAPI_FUNC(PyObject *) PyFunction_NewWithQualName(
-    PyObject *code, PyObject *globals, PyObject *qualname);
-
-PyAPI_FUNC(int) _PyFunction_SetVersion(
-    PyFunctionObject *func, uint32_t version);
-
-#define FUNC_MAX_WATCHERS 8
-
-PyAPI_FUNC(int) PyFunction_AddWatcher(PyFunction_WatchCallback callback);
-PyAPI_FUNC(int) PyFunction_ClearWatcher(int watcher_id);
-```
-
-`PyFunction_NewWithQualName` is the standard constructor. It sets
-`func_qualname` from the `qualname` argument (or falls back to
-`((PyCodeObject *)code)->co_name` if `qualname` is `NULL`). It also calls
-`_PyFunction_SetVersion` to stamp the initial version.
-
-`_PyFunction_SetVersion` assigns a monotonically increasing version number
-drawn from the per-interpreter specialization counter. The caller is
-responsible for clearing the version to zero before any mutation that would
-invalidate a specialised call site.
-
-The watcher API (`PyFunction_AddWatcher`, `PyFunction_ClearWatcher`)
-is the 3.12 mechanism that allows debuggers and JIT compilers to register
-a callback that fires whenever a function object is modified. Up to
-`FUNC_MAX_WATCHERS` (8) watchers may be active simultaneously.
-
-In gopy, `FunctionNewWithQualName` in `objects/function.go` is a line-for-line
-port of `Objects/funcobject.c:PyFunction_NewWithQualName`, including the
-version-stamping call. The watcher infrastructure is stubbed pending the
-monitoring subsystem port.
+- `func_weakreflist` is omitted; Go's GC handles weak references through
+  the `weakref` module port in `module/weakref/`.
+- `func_globals` and `func_builtins` are typed `Object` (the general
+  interface) rather than `*PyObject`. In practice they are always
+  `*Dict` and are asserted at call time in `vm/eval_call.go`.
+- `func_annotations` lazy evaluation (`func_annotate` calling convention)
+  is preserved exactly: `GetAnnotations()` calls `f.Annotate` with
+  argument `1` on first access and caches the returned dict in
+  `f.Annotations`, matching `func_get_annotation_dict` in
+  `Objects/funcobject.c`.
+- `CoHasDocstring` (`0x4000000`) is defined in `objects/function.go`
+  because the docstring extraction from `co_consts[0]` at construction
+  is a `PyFunctionObject` concern, not a `PyCodeObject` one.
