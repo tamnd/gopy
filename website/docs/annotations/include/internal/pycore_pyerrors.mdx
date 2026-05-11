@@ -1,0 +1,99 @@
+---
+title: Include/internal/pycore_pyerrors.h
+description: CPython-private error API covering tstate-threaded raise, format, chain, and PEP 678 note helpers.
+cpython_path: Include/internal/pycore_pyerrors.h
+cpython_version: "3.14"
+lines: 213
+status: annotated
+ported_to: ""
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Include/internal/pycore_pyerrors.h`
+
+<CpyLink path="Include/internal/pycore_pyerrors.h" />
+
+`pycore_pyerrors.h` exposes the internal error-handling API that C code inside the interpreter uses instead of the public `PyErr_*` family. The main difference is that every function takes an explicit `PyThreadState *tstate` argument, which avoids a thread-local lookup on each call and makes the error path cheaper in tight loops. The header also declares helpers that have no public counterpart, such as `_PyErr_FormatFromCause` (which saves the current exception as both `__context__` and `__cause__`), `_PyException_AddNote` (PEP 678), and the signal-checking entry points.
+
+The exception stack is represented by `_PyErr_StackItem`, a linked-list node that holds the currently handled exception during a bare `except` clause. `_PyErr_GetTopmostException` walks the frame chain to find the innermost active handler. The two inline helpers at lines 74 and 83 (`_PyErr_Occurred` and `_PyErr_ClearExcState`) are the hot paths; they read or clear `tstate->current_exception` without any function-call overhead.
+
+The bottom third of the header (lines 155 onwards) covers normalization, chaining, suggestion generation, and UTF-8 edit-distance scoring. `_Py_Offer_Suggestions` and `_Py_CalculateSuggestions` power the "did you mean?" messages on `NameError` and `AttributeError`. `_Py_UTF8_Edit_Cost` provides the underlying Levenshtein bound, exported for `_testinternalcapi`.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| 14-17 | `_PyErr_GetTopmostException`, `_PyErr_GetHandledException`, `_PyErr_SetHandledException` | Exception stack accessors | not ported |
+| 26-30 | `_PyErr_FormatFromCause` | Format with implicit `__cause__` chaining | not ported |
+| 32-34 | `_PyException_AddNote` | Attach a PEP 678 note to an exception | not ported |
+| 74-86 | `_PyErr_Occurred`, `_PyErr_ClearExcState` | Inline hot-path read and clear | not ported |
+| 97-157 | `_PyErr_GetRaisedException`, `_PyErr_SetRaisedException`, `_PyErr_SetString`, `_PyErr_Format`, `_PyErr_Clear`, `_PyErr_SetNone` | Core tstate-threaded raise API | not ported |
+| 182-190 | `_Py_CalculateSuggestions`, `_Py_Offer_Suggestions`, `_Py_UTF8_Edit_Cost` | "Did you mean?" suggestion engine | not ported |
+
+## Reading
+
+### Exception stack accessors (lines 14 to 20)
+
+The `_PyErr_StackItem` chain tracks which exception is being handled at each `except` frame. `_PyErr_GetTopmostException` is called by `sys.exc_info()` and by the `PUSH_EXC_INFO` / `POP_EXCEPT` bytecodes. `_PyErr_GetHandledException` and `_PyErr_SetHandledException` replaced the old three-field `exc_info` style in 3.11 when the exception value became the single source of truth on `tstate`.
+
+```c
+extern _PyErr_StackItem* _PyErr_GetTopmostException(PyThreadState *tstate);
+extern PyObject* _PyErr_GetHandledException(PyThreadState *);
+extern void _PyErr_SetHandledException(PyThreadState *, PyObject *);
+```
+
+### Chaining and PEP 678 notes (lines 22 to 34)
+
+`_PyErr_FormatFromCause` is the internal equivalent of `raise X from Y` when the "Y" is the exception that is already pending. It saves the current exception, clears it, formats the new message, and restores the saved exception as both `__context__` and `__cause__`. `_PyException_AddNote` appends a string note to `exc.__notes__`, creating the list if it does not exist yet.
+
+```c
+PyAPI_FUNC(PyObject*) _PyErr_FormatFromCause(
+    PyObject *exception,
+    const char *format,
+    ...);
+
+extern int _PyException_AddNote(PyObject *exc, PyObject *note);
+```
+
+### Inline hot paths (lines 74 to 86)
+
+These two `static inline` helpers avoid a function-call on the read-and-check path. `_PyErr_Occurred` returns the type of the current exception (or NULL) by reading `tstate->current_exception` directly. `_PyErr_ClearExcState` calls `Py_CLEAR` on the stack item's `exc_value` field, which is the only field that needs cleanup.
+
+```c
+static inline PyObject* _PyErr_Occurred(PyThreadState *tstate)
+{
+    assert(tstate != NULL);
+    if (tstate->current_exception == NULL) {
+        return NULL;
+    }
+    return (PyObject *)Py_TYPE(tstate->current_exception);
+}
+
+static inline void _PyErr_ClearExcState(_PyErr_StackItem *exc_state)
+{
+    Py_CLEAR(exc_state->exc_value);
+}
+```
+
+### Core tstate-threaded raise API (lines 97 to 157)
+
+The bulk of the header declares the tstate-aware equivalents of the public `PyErr_Set*` family. `_PyErr_SetString`, `_PyErr_SetNone`, `_PyErr_Format`, and `_PyErr_Clear` all require a `tstate` argument. `_PyErr_GetRaisedException` and `_PyErr_SetRaisedException` are the 3.12+ single-exception accessors that replaced the three-field `(type, value, traceback)` model. `_PyErr_Restore` and `_PyErr_Fetch` remain for code that was ported before the 3.12 model and has not been updated.
+
+```c
+PyAPI_FUNC(void) _PyErr_SetString(
+    PyThreadState *tstate, PyObject *exception, const char *string);
+
+PyAPI_FUNC(PyObject*) _PyErr_Format(
+    PyThreadState *tstate, PyObject *exception, const char *format, ...);
+
+PyAPI_FUNC(void) _PyErr_Clear(PyThreadState *tstate);
+extern void _PyErr_SetNone(PyThreadState *tstate, PyObject *exception);
+
+PyAPI_FUNC(PyObject*) _PyErr_GetRaisedException(PyThreadState *tstate);
+PyAPI_FUNC(void) _PyErr_SetRaisedException(PyThreadState *tstate, PyObject *exc);
+```
+
+## gopy mirror
+
+Not yet ported.

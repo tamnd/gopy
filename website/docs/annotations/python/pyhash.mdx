@@ -1,0 +1,95 @@
+---
+title: Python/pyhash.c
+description: Hash seed initialization, randomization, and the core hash algorithms for CPython's built-in hash protocol.
+cpython_path: Python/pyhash.c
+cpython_version: "3.14"
+lines: 360
+status: annotated
+ported_to: ""
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Python/pyhash.c`
+
+<CpyLink path="Python/pyhash.c" />
+
+`pyhash.c` owns the two concerns that underpin Python's hash security story: seeding and dispatching. At interpreter startup it reads `PYTHONHASHSEED` from the environment (or falls back to OS entropy) and writes a 128-bit secret into the `_Py_HashSecret` global. Every subsequent hash computation reads from that secret, so hash values are unpredictable across processes even for the same input.
+
+The file also implements the two hash algorithms CPython supports. When compiled with hash randomization enabled (the default since 3.3), `_Py_HashBytes` uses SipHash 1-3, a fast and collision-resistant PRF keyed on `_Py_HashSecret`. Builds that disable randomization fall back to FNV-1a. Both paths share the same public API so callers in `Objects/` never need to know which algorithm is active.
+
+Beyond bytes, the file handles numeric hashes. `_Py_HashDouble` converts a C `double` to a Python `Py_hash_t` following the rule that equal numeric values must produce equal hashes. The function has an explicit special case for NaN: NaN is not equal to anything, so it is assigned the sentinel value `-1` (which CPython uses to signal an error hash) shifted to `0x...ffffffff` to avoid the reserved slot.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| 1-50 | includes, `_Py_HashSecret` | Global 128-bit seed union; zeroed at link time, filled at startup | |
+| 51-110 | `_Py_HashRandomization_Init` | Reads `PYTHONHASHSEED`, fills `_Py_HashSecret` from OS entropy or fixed seed | |
+| 111-180 | SipHash 1-3 implementation | Portable C implementation of SipHash-1-3 keyed on `_Py_HashSecret.siphash` | |
+| 181-230 | FNV-1a fallback | Used when `Py_HASH_ALGORITHM == Py_HASH_FNV`; no key material needed | |
+| 231-280 | `_Py_HashBytes` | Dispatcher: calls SipHash or FNV based on compile-time config | |
+| 281-330 | `_Py_HashDouble` | Hashes a C double; special-cases infinity, NaN, and integral floats | |
+| 331-360 | `_Py_HashPointer`, utilities | Hashes a raw pointer; used by `id()`-based fallback hash | |
+
+## Reading
+
+### Seed initialization (lines 1 to 110)
+
+<CpyLink path="Python/pyhash.c" lines="1-110" />
+
+`_Py_HashSecret` is a union with two named views: `siphash` (two 64-bit halves `k0` and `k1`) and `fnv` (one `prefix` and one `suffix`). This lets each algorithm read its key material from the same memory without casting.
+
+`_Py_HashRandomization_Init` runs once during `Py_InitializeEx`. If `PYTHONHASHSEED=0`, it zeroes the secret and clears `Py_HashRandomizationFlag`. For any other value it parses the decimal string and writes the 32-bit seed into both halves. When the variable is absent (the normal case), it calls `_PyOS_URandom` to fill the union from `/dev/urandom` or `CryptGenRandom` on Windows.
+
+```c
+void
+_Py_HashRandomization_Init(const _PyCoreConfig *config)
+{
+    if (config->use_hash_seed && config->hash_seed == 0) {
+        /* disable randomization */
+        memset(&_Py_HashSecret, 0, sizeof(_Py_HashSecret));
+        return;
+    }
+    /* fill from OS entropy */
+    _PyOS_URandom((void *)&_Py_HashSecret, sizeof(_Py_HashSecret));
+}
+```
+
+### SipHash 1-3 (lines 111 to 180)
+
+<CpyLink path="Python/pyhash.c" lines="111-180" />
+
+The SipHash block is a self-contained portable C implementation of SipHash with parameters `c=1, d=3` (one compression round, three finalization rounds). This is a deliberate deviation from the original SipHash-2-4 paper: CPython trades a small amount of collision resistance for speed, accepting that the hash seed already makes birthday attacks impractical.
+
+The key is read directly from `_Py_HashSecret.siphash.k0` and `k1` at the start of each call, so no per-call key setup is needed. The result is truncated to `Py_hash_t` width and the reserved value `-1` is mapped to `-2`.
+
+### `_Py_HashDouble` (lines 281 to 330)
+
+<CpyLink path="Python/pyhash.c" lines="281-330" />
+
+Hashing floats correctly requires that `hash(x) == hash(int(x))` whenever `x` is an integral float. The implementation achieves this by decomposing the double with `frexp`, scaling the mantissa to an integer, and then reducing modulo `_PyHASH_MODULUS` (`2^61 - 1` on 64-bit platforms). Infinity maps to `_PyHASH_INF`, and NaN maps to `0` (after the `-1` sentinel is avoided).
+
+```c
+Py_hash_t
+_Py_HashDouble(PyObject *inst, double v)
+{
+    if (!Py_IS_FINITE(v)) {
+        if (Py_IS_INFINITY(v))
+            return v > 0 ? _PyHASH_INF : -_PyHASH_INF;
+        else
+            return _PyHASH_NAN;  /* NaN -> 0, never -1 */
+    }
+    /* ... frexp decomposition and modular reduction ... */
+}
+```
+
+### `_Py_HashPointer` and utilities (lines 331 to 360)
+
+<CpyLink path="Python/pyhash.c" lines="331-360" />
+
+`_Py_HashPointer` provides the default `tp_hash` for types that do not define their own. It mixes the raw pointer value with a multiplicative hash and masks the result to `Py_hash_t`. The mapping is deterministic within one process run but unpredictable across runs because ASLR varies the pointer layout.
+
+## gopy mirror
+
+Not yet ported.

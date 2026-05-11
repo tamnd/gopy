@@ -1,0 +1,89 @@
+---
+title: Include/internal/pycore_time.h
+description: Internal nanosecond-precision time representation and clock API used throughout the CPython runtime.
+cpython_path: Include/internal/pycore_time.h
+cpython_version: "3.14"
+lines: 334
+status: annotated
+ported_to: ""
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Include/internal/pycore_time.h`
+
+<CpyLink path="Include/internal/pycore_time.h" />
+
+`pycore_time.h` is the single source of truth for CPython's internal time representation. The public `PyTime_t` type is a fixed `int64_t` counting nanoseconds, chosen because nanosecond resolution fits every platform clock without floating-point rounding. All conversion helpers, overflow policies, and clock readers that the runtime uses internally are declared here; extension modules that need sub-millisecond timing import a small stable subset through `PyAPI_FUNC` exports.
+
+The header defines four rounding modes (`_PyTime_round_t`) that control how nanosecond values are rounded when converted to coarser units such as microseconds or seconds. The modes cover floor, ceiling, half-even (banker's), and round-away-from-zero, the last of which is aliased as `_PyTime_ROUND_TIMEOUT` and used whenever a caller must wait *at least* N nanoseconds. Choosing the wrong mode in timeout code caused bpo-31786, which is why the alias exists.
+
+Three logical clock families appear: the system wall clock (`_PyTime_TimeWithInfo`), the monotonic clock (`_PyTime_MonotonicWithInfo`), and the performance counter (`_PyTime_PerfCounterWithInfo`). Each returns a `PyTime_t` and optionally fills a `_Py_clock_info_t` struct used by `time.get_clock_info()`. The deadline helpers (`_PyDeadline_Init`, `_PyDeadline_Get`) wrap the monotonic clock and provide safe timeout tracking for `_ssl` and similar extensions that need to measure elapsed time across blocking calls.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| 68-92 | `_PyTime_round_t` | Enum of rounding modes for unit conversions | not ported |
+| 133-167 | `_PyTime_FromSeconds`, `_PyTime_FromSecondsObject`, `_PyTime_FromMillisecondsObject` | Constructors from Python objects and C integers | not ported |
+| 169-238 | `_PyTime_AsMilliseconds`, `_PyTime_AsTimeval`, `_PyTime_AsTimespec` | Destructors to OS struct types | not ported |
+| 243 | `_PyTime_Add` | Clamping addition on `PyTime_t` | not ported |
+| 253-293 | `_PyTime_TimeWithInfo`, `_PyTime_MonotonicWithInfo`, `_PyTime_PerfCounterWithInfo` | Clock readers | not ported |
+| 298-306 | `_PyDeadline_Init`, `_PyDeadline_Get` | Monotonic deadline helpers | not ported |
+| 311-327 | `_PyTimeFraction_Set`, `_PyTimeFraction_Mul`, `_PyTimeFraction_Resolution` | Rational tick-to-ns scaling | not ported |
+
+## Reading
+
+### Type definition and rounding modes (lines 1 to 92)
+
+The file opens with a long block comment that records every supported time unit and the overflow contract: arithmetic clamps to `[PyTime_MIN; PyTime_MAX]` so callers that do not hold the GIL can still call `_PyTime_Add` safely. The `_PyTime_round_t` enum follows at line 68.
+
+```c
+typedef enum {
+    _PyTime_ROUND_FLOOR=0,
+    _PyTime_ROUND_CEILING=1,
+    _PyTime_ROUND_HALF_EVEN=2,
+    _PyTime_ROUND_UP=3,
+    _PyTime_ROUND_TIMEOUT = _PyTime_ROUND_UP
+} _PyTime_round_t;
+```
+
+### Object-to-timestamp constructors (lines 95 to 167)
+
+The first cluster of functions bridges Python objects (int or float seconds) and C types (`time_t`, `timeval`, `timespec`) into `PyTime_t`. These are exported for `_datetime`, `_socket`, and `select`. The companion macros `_PYTIME_FROMSECONDS` and `_PyTime_FromMicrosecondsClamp` handle the common case where the value is a compile-time constant or known to be in range.
+
+```c
+PyAPI_FUNC(int) _PyTime_FromSecondsObject(PyTime_t *t,
+    PyObject *obj,
+    _PyTime_round_t round);
+```
+
+### Conversion to OS structs (lines 169 to 238)
+
+The second cluster converts a `PyTime_t` back to `struct timeval` (microsecond resolution) and `struct timespec` (nanosecond resolution). Each function has a clamping variant (suffix `_clamp`) that never raises an exception, for use in signal handlers and other contexts where raising is forbidden.
+
+```c
+PyAPI_FUNC(int) _PyTime_AsTimeval(PyTime_t t,
+    struct timeval *tv,
+    _PyTime_round_t round);
+
+PyAPI_FUNC(void) _PyTime_AsTimeval_clamp(PyTime_t t,
+    struct timeval *tv,
+    _PyTime_round_t round);
+```
+
+### Deadline and fraction helpers (lines 242 to 329)
+
+`_PyTime_Add` performs saturating addition. `_PyTimeFraction` is a rational number (`numer / denom`) used to convert raw hardware tick counts from `QueryPerformanceCounter` or `clock_gettime` into nanoseconds without losing precision through intermediate floating-point.
+
+```c
+extern PyTime_t _PyTime_Add(PyTime_t t1, PyTime_t t2);
+
+extern PyTime_t _PyTimeFraction_Mul(
+    PyTime_t ticks,
+    const _PyTimeFraction *frac);
+```
+
+## gopy mirror
+
+Not yet ported.

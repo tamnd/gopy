@@ -1,0 +1,91 @@
+---
+title: Parser/asdl.py
+description: The ASDL grammar tool that reads Python.asdl and produces the AST node definitions used throughout the CPython compiler pipeline.
+cpython_path: Parser/asdl.py
+cpython_version: "3.14"
+lines: 470
+status: annotated
+ported_to: ""
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Parser/asdl.py`
+
+<CpyLink path="Parser/asdl.py" />
+
+`asdl.py` is the meta-tool that bootstraps CPython's AST. It reads `Parser/Python.asdl`, a grammar file written in Zephyr ASDL notation, and produces a structured in-memory representation of every node type. Code generators in `Parser/asdl_c.py` then walk that representation to emit `Include/cpython/Python-ast.h` and `Python/Python-ast.c`, the files that define the actual `PyAST_*` C structs.
+
+The grammar file `Parser/Python.asdl` declares every syntactic form CPython can parse. It uses two kinds of definitions. Sum types (written `A = B | C | D`) represent a tagged union where a node is exactly one of several alternatives, each called a constructor. Product types (written `A = (fields)`) represent a plain record. Fields carry a type name drawn from a small set of primitives (`identifier`, `int`, `string`, `object`, `singleton`) plus user-defined node names, and they may be marked optional (`?`) or sequence (`*`).
+
+`asdl.py` itself is a pure Python module with no runtime dependency on the rest of CPython. It can be run standalone during the build to regenerate the C header and source. The three main classes are `ASDLParser`, which tokenizes and parses the `.asdl` text into a tree of `Type` and `Field` objects; `ASDLVisitor`, a base class for tree-walking passes; and `ASDLPrinter`, a visitor that serializes the parsed tree back to a canonical ASDL text for debugging.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| 1-50 | module docstring, imports | Explains ASDL notation; imports `re`, `sys`, `textwrap` | |
+| 51-120 | `Field`, `Constructor`, `Sum`, `Product` | Data model classes; each ASDL node type maps to one of these | |
+| 121-200 | `ASDLParser.__init__`, `tokenize` | Regex-based lexer that splits the `.asdl` text into tokens | |
+| 201-310 | `ASDLParser.parse` and sub-parsers | Recursive-descent parser: `parse_type`, `parse_sum`, `parse_product`, `parse_fields` | |
+| 311-390 | `ASDLVisitor` | Base visitor with `visit` dispatch and `generic_visit`; subclasses override per-node methods | |
+| 391-440 | `ASDLPrinter` | Visitor subclass that pretty-prints a parsed ASDL tree back to text | |
+| 441-470 | `check` and `__main__` block | Validates field type references and runs the parser when invoked directly | |
+
+## Reading
+
+### Data model (lines 51 to 120)
+
+<CpyLink path="Parser/asdl.py" lines="51-120" />
+
+The data model is a small hierarchy of plain Python objects. `Field` holds a type name, a field name, and two boolean flags (`opt` for `?`, `seq` for `*`). `Constructor` holds a name and a list of `Field` objects. `Sum` holds a list of `Constructor` objects plus an optional list of shared attribute fields (the `attributes` clause in ASDL). `Product` holds a list of fields directly, with no constructor indirection.
+
+```python
+class Field:
+    def __init__(self, type, name=None, opt=False, seq=False):
+        self.type = type
+        self.name = name
+        self.opt = opt
+        self.seq = seq
+```
+
+### Lexer and parser (lines 121 to 310)
+
+<CpyLink path="Parser/asdl.py" lines="121-310" />
+
+`ASDLParser.tokenize` uses a single compiled regex to split input into token kinds: `ConstructorId` (capitalized), `TypeId` (lowercase), punctuation, and `*`/`?` modifiers. The token stream is consumed by a recursive-descent parser whose top-level rule is `parse_dfns`, which loops over `TypeId "=" ( sum | product )` definitions.
+
+`parse_sum` delegates to `parse_constructor` for each `|`-separated alternative. When it sees the `attributes` keyword it parses an extra field list and attaches it to the `Sum` object. `parse_product` is simpler: it just calls `parse_fields` and wraps the result.
+
+```python
+def parse_sum(self, name):
+    constructors = [self.parse_constructor()]
+    while self.check('|'):
+        self.expect('|')
+        constructors.append(self.parse_constructor())
+    attributes = []
+    if self.check('attributes'):
+        self.expect('attributes')
+        attributes = self.parse_fields()
+    return Sum(constructors, attributes)
+```
+
+### `ASDLVisitor` (lines 311 to 390)
+
+<CpyLink path="Parser/asdl.py" lines="311-390" />
+
+`ASDLVisitor` follows the standard visitor pattern. `visit(node)` looks up a method named `visit_<classname>` and calls it, falling back to `generic_visit` if none is defined. `generic_visit` iterates over the node's children so that subclasses that only override a few node types still traverse the full tree.
+
+Downstream tools like `asdl_c.py` subclass `ASDLVisitor` to emit C code. Each `visit_Constructor` override writes out a `PyAST_` function prototype; each `visit_Field` override emits the corresponding struct member. The visitor design keeps all code-generation policy out of `asdl.py` itself.
+
+### Validation and entry point (lines 441 to 470)
+
+<CpyLink path="Parser/asdl.py" lines="441-470" />
+
+The `check` function walks the parsed tree and verifies that every field type is either a builtin primitive or a name defined elsewhere in the same `.asdl` file. It collects unknown type names and reports them as errors. This catches typos in `Python.asdl` before the C generator runs.
+
+When invoked as `python asdl.py Python.asdl`, the `__main__` block parses the file, runs `check`, and optionally prints the canonical representation via `ASDLPrinter`. This makes the tool useful as a quick sanity check during grammar edits without triggering a full CPython build.
+
+## gopy mirror
+
+Not yet ported.

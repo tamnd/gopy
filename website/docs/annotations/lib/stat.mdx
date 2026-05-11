@@ -1,0 +1,96 @@
+---
+title: Lib/stat.py
+description: Constants and helper functions for interpreting os.stat() mode fields and file permission bits.
+cpython_path: Lib/stat.py
+cpython_version: "3.14"
+lines: 170
+status: annotated
+ported_to: ""
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Lib/stat.py`
+
+<CpyLink path="Lib/stat.py" />
+
+`stat.py` provides symbolic names for the integer constants baked into POSIX `stat(2)` mode words, along with a small set of predicate functions and a human-readable mode formatter. Most of the constants map one-to-one to C macros from `<sys/stat.h>`, letting Python code work with `os.stat()` results without hard-coding magic numbers.
+
+The module is deliberately thin. CPython ships a C accelerator (`_stat`) that supplies the same names at near-zero overhead; `stat.py` falls back gracefully when the accelerator is absent. User code almost never imports the pure-Python layer directly, but it serves as the authoritative reference for what every name means.
+
+Beyond the permission bit constants (`S_IRUSR`, `S_IWGRP`, etc.) and file-type predicates (`S_ISREG`, `S_ISDIR`, `S_ISLNK`), the module also exposes BSD extended flags such as `UF_NODUMP` and `UF_IMMUTABLE`, which appear in the `st_flags` field on macOS and BSDs.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| 1-20 | module header | Docstring, `_stat` accelerator import | |
+| 21-60 | `S_IF*` constants | File-type bits (`S_IFREG`, `S_IFDIR`, `S_IFLNK`, ...) | |
+| 61-100 | `S_IS*` predicates | `S_ISREG`, `S_ISDIR`, `S_ISLNK`, `S_ISSOCK`, `S_ISBLK`, `S_ISCHR`, `S_ISFIFO` | |
+| 101-130 | permission constants | `S_IRUSR`, `S_IWUSR`, `S_IXUSR`, `S_IRWXU`, `S_IRGRP`, etc. | |
+| 131-150 | `filemode()` | Format mode integer as `-rwxr-xr-x` string | |
+| 151-165 | BSD flags | `UF_NODUMP`, `UF_IMMUTABLE`, `UF_APPEND`, `SF_ARCHIVED`, ... | |
+| 166-170 | `ST_*` indices | Numeric indices into a plain-tuple stat result | |
+
+## Reading
+
+### Module bootstrap and accelerator (lines 1 to 20)
+
+<CpyLink path="Lib/stat.py" lines="1-20" />
+
+The module attempts to import `_stat`, a C extension that re-exports every constant and function defined here. If the import succeeds the pure-Python definitions are overwritten, so the C versions are always preferred at runtime. The pattern is identical to the one used in `os.py` and `posixpath.py`.
+
+```python
+try:
+    from _stat import *
+except ImportError:
+    pass
+```
+
+### File-type constants and predicates (lines 21 to 100)
+
+<CpyLink path="Lib/stat.py" lines="21-100" />
+
+The `S_IF*` block defines the raw type mask (`S_IFMT = 0o170000`) and each file-type value. The `S_IS*` predicates each mask `mode` with `S_IFMT` and compare against the corresponding `S_IF*` constant, returning a plain `bool`.
+
+```python
+S_IFMT  = 0o170000
+S_IFREG = 0o100000
+
+def S_ISREG(mode):
+    return S_IFMT(mode) == S_IFREG
+```
+
+### Permission bit constants (lines 101 to 130)
+
+<CpyLink path="Lib/stat.py" lines="101-130" />
+
+Nine standard POSIX permission bits are defined as octal literals grouped by owner, group, and other. The combined masks (`S_IRWXU`, `S_IRWXG`, `S_IRWXO`) are derived by OR-ing the three individual bits. The set-UID, set-GID, and sticky bits round out the section.
+
+```python
+S_IRUSR = 0o0400   # owner read
+S_IWUSR = 0o0200   # owner write
+S_IXUSR = 0o0100   # owner execute
+S_IRWXU = S_IRUSR | S_IWUSR | S_IXUSR
+```
+
+### `filemode()` formatter (lines 131 to 150)
+
+<CpyLink path="Lib/stat.py" lines="131-150" />
+
+`filemode(mode)` converts a raw integer mode into the familiar ten-character string used by `ls -l`. It builds a list of characters by testing successive bit masks and appends `r`, `w`, `x` (or `-`) for each of the nine permission slots, prepended by a single character encoding the file type.
+
+```python
+def filemode(mode):
+    perm = []
+    for table in _filemode_table:
+        for bit, char in table:
+            if mode & bit == bit:
+                perm.append(char)
+                break
+    return "".join(perm)
+```
+
+## gopy mirror
+
+Not yet ported.

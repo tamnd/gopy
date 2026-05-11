@@ -1,0 +1,103 @@
+---
+title: Include/internal/pycore_context.h
+description: Internal struct layouts and lifecycle API for PEP 567 context variables.
+cpython_path: Include/internal/pycore_context.h
+cpython_version: "3.14"
+lines: 60
+status: annotated
+ported_to: ""
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Include/internal/pycore_context.h`
+
+<CpyLink path="Include/internal/pycore_context.h" />
+
+This header exposes the concrete struct layouts for the three PEP 567 context-variable objects: `PyContext` (a running context snapshot), `PyContextVar` (a per-variable descriptor), and `PyContextToken` (a revert handle). All three are opaque in the public API; only code built with `Py_BUILD_CORE` can see the fields.
+
+The key data structure behind `PyContext` is a persistent, hash-array-mapped trie (`PyHamtObject`, aliased as `ctx_vars`). When a thread enters a context it snapshots the current HAMT root. On exit, `ctx_prev` is used to restore the previous context. This copy-on-write design lets nested `contextvars.copy_context()` calls share structure without defensive copying.
+
+`PyContextVar` optionally carries an inline single-entry cache (`var_cached`, `var_cached_tsid`, `var_cached_tsver`) that is active only in the GIL build. In the free-threaded (`Py_GIL_DISABLED`) build those fields are omitted and every lookup goes through the HAMT directly.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| 14 | `_PyContext_Init` | Interpreter-level init for the context subsystem | not ported |
+| 19-21 | `_PyContextTokenMissing` | Sentinel object returned when a var has no value | not ported |
+| 23-29 | `_pycontextobject` | Full layout of `PyContext`: prev-link, HAMT, weakrefs, entered flag | not ported |
+| 32-42 | `_pycontextvarobject` | Layout of `PyContextVar`: name, default, optional GIL-only cache, hash | not ported |
+| 45-51 | `_pycontexttokenobject` | Layout of `PyContextToken`: owning context, var, old value, used flag | not ported |
+| 56 | `_PyContext_NewHamtForTests` | Test helper that exposes a raw HAMT snapshot | not ported |
+
+## Reading
+
+### Guard and imports (lines 1 to 8)
+
+<CpyLink path="Include/internal/pycore_context.h" lines="1-8" />
+
+The standard `Py_BUILD_CORE` guard prevents accidental inclusion from extension code. The only dependency is `pycore_structs.h`, which provides the forward declarations for `PyContext`, `PyContextVar`, and `PyContextToken` used throughout the rest of the interpreter.
+
+```c
+#ifndef Py_BUILD_CORE
+#  error "this header requires Py_BUILD_CORE define"
+#endif
+#include "pycore_structs.h"
+```
+
+### Context object layout (lines 23 to 29)
+
+<CpyLink path="Include/internal/pycore_context.h" lines="23-29" />
+
+`ctx_vars` is a pointer to the HAMT root representing the entire variable mapping at the moment this context is active. `ctx_prev` forms a singly-linked stack so `PyContext_Exit` can walk back to the caller's context. `ctx_entered` is a boolean guard that prevents re-entering an already-active context.
+
+```c
+struct _pycontextobject {
+    PyObject_HEAD
+    PyContext       *ctx_prev;
+    PyHamtObject    *ctx_vars;
+    PyObject        *ctx_weakreflist;
+    int              ctx_entered;
+};
+```
+
+### ContextVar layout and GIL cache (lines 32 to 42)
+
+<CpyLink path="Include/internal/pycore_context.h" lines="32-42" />
+
+The optional `var_cached` / `var_cached_tsid` / `var_cached_tsver` triplet is a thread-state-level single-entry cache. `var_cached_tsid` identifies which `PyThreadState` owns the cached value and `var_cached_tsver` is a version counter that is invalidated on every `contextvars.Context.run()` entry. In the free-threaded build the fields are compiled away entirely.
+
+```c
+struct _pycontextvarobject {
+    PyObject_HEAD
+    PyObject  *var_name;
+    PyObject  *var_default;
+#ifndef Py_GIL_DISABLED
+    PyObject  *var_cached;
+    uint64_t   var_cached_tsid;
+    uint64_t   var_cached_tsver;
+#endif
+    Py_hash_t  var_hash;
+};
+```
+
+### Token layout (lines 45 to 51)
+
+<CpyLink path="Include/internal/pycore_context.h" lines="45-51" />
+
+A token records the variable it belongs to (`tok_var`), the context in which `set()` was called (`tok_ctx`), and `tok_oldval`, which is the value that should be restored on `reset()`. `tok_used` is set to 1 after `reset()` fires so the token cannot be reused.
+
+```c
+struct _pycontexttokenobject {
+    PyObject_HEAD
+    PyContext    *tok_ctx;
+    PyContextVar *tok_var;
+    PyObject     *tok_oldval;
+    int           tok_used;
+};
+```
+
+## gopy mirror
+
+Not yet ported.

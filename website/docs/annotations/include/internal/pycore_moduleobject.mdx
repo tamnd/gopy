@@ -1,0 +1,111 @@
+---
+title: Include/internal/pycore_moduleobject.h
+description: Internal struct layout and accessor inlines for PyModuleObject beyond the public PyModuleDef API.
+cpython_path: Include/internal/pycore_moduleobject.h
+cpython_version: "3.14"
+lines: 63
+status: annotated
+ported_to: ""
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Include/internal/pycore_moduleobject.h`
+
+<CpyLink path="Include/internal/pycore_moduleobject.h" />
+
+This header reveals the concrete layout of `PyModuleObject`, the C struct that backs every `types.ModuleType` instance. The public API in `moduleobject.h` only exposes `PyModuleDef`; this file adds the remaining fields (`md_dict`, `md_state`, `md_weaklist`, `md_name`) and the three inline accessors (`_PyModule_GetDef`, `_PyModule_GetState`, `_PyModule_GetDict`) that the import machinery and extension helpers use to avoid redundant pointer casts.
+
+The import system uses `_PyModuleSpec_IsInitializing` and `_PyModuleSpec_GetFileOrigin` to query a module spec object during the two-phase initialisation protocol introduced in PEP 489. `_PyModule_IsPossiblyShadowing` is a heuristic used by the loader to detect whether a module name shadows a stdlib entry. In the free-threaded build, an additional `md_gil` pointer records per-module GIL state for multi-phase extension modules.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| 11-17 | `_PyModule_Clear`, `_PyModule_ClearDict`, `_PyModuleSpec_IsInitializing`, `_PyModuleSpec_GetFileOrigin`, `_PyModule_IsPossiblyShadowing`, `_PyModule_IsExtension` | Import-machinery helpers: clear, spec query, shadow detection | not ported |
+| 19-30 | `PyModuleObject` | Full struct layout: dict, def, state, weaklist, name, optional GIL ptr | not ported |
+| 32-35 | `_PyModule_GetDef` | Inline accessor: cast + assert + return `md_def` | not ported |
+| 37-40 | `_PyModule_GetState` | Inline accessor: cast + assert + return `md_state` | not ported |
+| 42-48 | `_PyModule_GetDict` | Inline accessor: cast + assert non-NULL + return `md_dict` (borrowed) | not ported |
+| 50-58 | `_PyModule_GetFilenameObject`, `_PyModule_GetFilenameUTF8`, `_Py_module_getattro_impl`, `_Py_module_getattro` | Filename helpers and `__getattr__` backend | not ported |
+
+## Reading
+
+### Extern declarations (lines 11 to 17)
+
+<CpyLink path="Include/internal/pycore_moduleobject.h" lines="11-17" />
+
+These six `extern` declarations cover the functions called by `importlib._bootstrap` and the C import machinery. `_PyModuleSpec_IsInitializing` returns non-zero while a module is mid-way through its `exec_module` phase, allowing circular-import guards to distinguish a fully-loaded module from one still being populated.
+
+```c
+extern void _PyModule_Clear(PyObject *);
+extern void _PyModule_ClearDict(PyObject *);
+extern int  _PyModuleSpec_IsInitializing(PyObject *);
+extern int  _PyModuleSpec_GetFileOrigin(PyObject *, PyObject **);
+extern int  _PyModule_IsPossiblyShadowing(PyObject *);
+extern int  _PyModule_IsExtension(PyObject *obj);
+```
+
+### PyModuleObject struct (lines 19 to 30)
+
+<CpyLink path="Include/internal/pycore_moduleobject.h" lines="19-30" />
+
+`md_dict` is the module's `__dict__`. `md_def` points to the static `PyModuleDef` table that describes the module's methods and slots. `md_state` is the per-interpreter state block allocated by `PyModuleDef.m_size`. `md_name` is kept alive after `md_dict` is cleared so that finalization error messages can still identify the module.
+
+```c
+typedef struct {
+    PyObject_HEAD
+    PyObject     *md_dict;
+    PyModuleDef  *md_def;
+    void         *md_state;
+    PyObject     *md_weaklist;
+    PyObject     *md_name;
+#ifdef Py_GIL_DISABLED
+    void         *md_gil;
+#endif
+} PyModuleObject;
+```
+
+### Inline accessors (lines 32 to 48)
+
+<CpyLink path="Include/internal/pycore_moduleobject.h" lines="32-48" />
+
+All three inlines follow the same pattern: assert the type check, cast the generic `PyObject *` to `PyModuleObject *`, and return the target field. `_PyModule_GetDict` additionally asserts that `md_dict` is non-NULL, enforcing the documented rule that callers must not call it after `module_clear` has run.
+
+```c
+static inline PyModuleDef* _PyModule_GetDef(PyObject *mod) {
+    assert(PyModule_Check(mod));
+    return ((PyModuleObject *)mod)->md_def;
+}
+
+static inline void* _PyModule_GetState(PyObject *mod) {
+    assert(PyModule_Check(mod));
+    return ((PyModuleObject *)mod)->md_state;
+}
+
+static inline PyObject* _PyModule_GetDict(PyObject *mod) {
+    assert(PyModule_Check(mod));
+    PyObject *dict = ((PyModuleObject *)mod)->md_dict;
+    assert(dict != NULL);
+    return dict;  // borrowed reference
+}
+```
+
+### Filename helpers and getattro (lines 50 to 58)
+
+<CpyLink path="Include/internal/pycore_moduleobject.h" lines="50-58" />
+
+`_PyModule_GetFilenameObject` returns `__file__` as a `PyObject *`. `_PyModule_GetFilenameUTF8` is a lower-level variant that writes directly into a caller-supplied buffer, avoiding a heap allocation for the common case of logging or error formatting. `_Py_module_getattro_impl` is the shared `__getattr__` backend that handles the `__getattr__` hook and the missing-attribute error message.
+
+```c
+extern PyObject *  _PyModule_GetFilenameObject(PyObject *);
+extern Py_ssize_t  _PyModule_GetFilenameUTF8(
+        PyObject *module, char *buffer, Py_ssize_t maxlen);
+
+PyObject* _Py_module_getattro_impl(PyModuleObject *m, PyObject *name, int suppress);
+PyObject* _Py_module_getattro(PyObject *m, PyObject *name);
+```
+
+## gopy mirror
+
+Not yet ported.
