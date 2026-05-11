@@ -1,0 +1,116 @@
+---
+title: pycore_hamt.h
+description: "HAMT internal declarations: node types, iterator state, and the public API"
+cpython_path: Include/internal/pycore_hamt.h
+cpython_version: "3.14"
+lines: 113
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Public-facing internal header for CPython's Hash Array Mapped Trie (HAMT)
+implementation. HAMT is used exclusively by `contextvars.Context` as an
+immutable mapping with O(log N) structural sharing on every write.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 10–20 | Block comment | HAMT tree depth explanation; 5-bit hash slices |
+| 21 | `_Py_HAMT_MAX_TREE_DEPTH` | Maximum tree depth (8) including collision level |
+| 24–30 | `_PyHamt_Type`, `_PyHamt_ArrayNode_Type`, etc. | `PyTypeObject` externs for the five HAMT types |
+| 35 | `PyHamt_Check(o)` | Type check macro |
+| 50–54 | `PyHamtIteratorState` | Stack-allocated depth-first traversal state |
+| 65–70 | `PyHamtIterator` | Base iterator object with yield-function pointer |
+| 74 | `_PyHamt_New` | Construct an empty HAMT |
+| 78 | `_PyHamt_Assoc` | Copy-on-write insert returning a new root |
+| 81 | `_PyHamt_Without` | Copy-on-write delete returning a new root |
+| 90 | `_PyHamt_Find` | Lookup; returns -1/0/1 |
+| 99 | `_PyHamt_Eq` | Structural equality |
+| 102 | `_PyHamt_Len` | `len()` equivalent |
+| 105–111 | `_PyHamt_NewIterKeys/Values/Items` | Iterator constructors |
+
+## Reading
+
+### Depth constant and node type externs (lines 21–30)
+
+```c
+// CPython: Include/internal/pycore_hamt.h:21 _Py_HAMT_MAX_TREE_DEPTH
+#define _Py_HAMT_MAX_TREE_DEPTH 8
+
+extern PyTypeObject _PyHamt_Type;
+extern PyTypeObject _PyHamt_ArrayNode_Type;
+extern PyTypeObject _PyHamt_BitmapNode_Type;
+extern PyTypeObject _PyHamt_CollisionNode_Type;
+extern PyTypeObject _PyHamtKeys_Type;
+extern PyTypeObject _PyHamtValues_Type;
+extern PyTypeObject _PyHamtItems_Type;
+```
+
+The maximum depth of 8 comes from six 5-bit hash slices (covering a 30-bit
+prefix of a 32-bit hash) plus one additional level for collision nodes when
+two keys share the same full hash.
+
+### Iterator state (lines 50–54)
+
+```c
+// CPython: Include/internal/pycore_hamt.h:50 PyHamtIteratorState
+typedef struct {
+    PyHamtNode *i_nodes[_Py_HAMT_MAX_TREE_DEPTH];
+    Py_ssize_t i_pos[_Py_HAMT_MAX_TREE_DEPTH];
+    int8_t i_level;
+} PyHamtIteratorState;
+```
+
+Because HAMT is immutable and all nodes hold strong references to their
+children, iteration requires no heap allocations. The state fits in 8
+pointer slots plus 8 `ssize_t` positions on the call stack.
+
+### Base iterator object (lines 65–70)
+
+```c
+// CPython: Include/internal/pycore_hamt.h:65 PyHamtIterator
+typedef struct {
+    PyObject_HEAD
+    PyHamtObject *hi_obj;
+    PyHamtIteratorState hi_iter;
+    binaryfunc hi_yield;
+} PyHamtIterator;
+```
+
+The `hi_yield` function pointer lets the three iterator variants (Keys,
+Values, Items) share one traversal engine while differing only in what
+they return per step.
+
+### Public mutating API (lines 74–90)
+
+```c
+// CPython: Include/internal/pycore_hamt.h:74 _PyHamt_New
+PyHamtObject * _PyHamt_New(void);
+PyHamtObject * _PyHamt_Assoc(PyHamtObject *o, PyObject *key, PyObject *val);
+PyHamtObject * _PyHamt_Without(PyHamtObject *o, PyObject *key);
+int _PyHamt_Find(PyHamtObject *o, PyObject *key, PyObject **val);
+```
+
+`_PyHamt_Assoc` and `_PyHamt_Without` never modify `o`; they always
+return a fresh `PyHamtObject` that shares unchanged subtrees with `o`
+via reference counting. Old snapshots remain valid.
+
+## gopy notes
+
+The gopy port lives in `module/contextlib/` for the `Context` type and
+relies on a Go struct equivalent to `PyHamtObject`. The five node types
+(`ArrayNode`, `BitmapNode`, `CollisionNode`, plus the HAMT root and
+iterators) are ported in `objects/` per the flat layout convention.
+
+`_PyHamt_Find` returns -1/0/1; gopy maps this to `(found bool, err error)`
+following the standard Go two-return convention.
+
+## CPython 3.14 changes
+
+The header is largely unchanged since the HAMT was introduced in Python
+3.7 for PEP 567 (`contextvars`). In 3.14 the only structural change is
+the relocation of `PyHamtNode`, `PyHamtObject`, and the `PyHamtNode_*`
+structs into `pycore_structs.h`, which is why line 8 now includes
+`pycore_structs.h` instead of declaring them inline.

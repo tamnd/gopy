@@ -1,0 +1,105 @@
+---
+title: numbers.py
+description: "Numeric ABCs (PEP 3141) — the Number tower from Complex down to Integral"
+cpython_path: Lib/numbers.py
+cpython_version: "3.14"
+lines: 350
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`Lib/numbers.py` defines the abstract base class hierarchy described in PEP 3141. No arithmetic is implemented here; the file is pure interface. The real work lives in built-in types (`int`, `float`, `complex`) and third-party libraries that register against these ABCs.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1–30 | module docstring, `__all__` | public surface |
+| 32–60 | `Number` | root ABC, no methods |
+| 63–140 | `Complex` | `__complex__`, `real`, `imag`, `conjugate`, arithmetic ops |
+| 143–210 | `Real` | `__float__`, `__trunc__`, `__floor__`, `__ceil__`, `__round__`, comparisons |
+| 213–260 | `Rational` | `numerator`, `denominator`, default `__float__` |
+| 263–350 | `Integral` | `__int__`, `__index__`, bit ops (`__lshift__`, `__and__`, etc.) |
+
+## Reading
+
+### The tower root
+
+`Number` is intentionally empty. Its only job is to give `isinstance` a common anchor for anything numeric.
+
+```python
+# CPython: Lib/numbers.py:32 Number
+class Number(metaclass=ABCMeta):
+    """All numbers inherit from this class."""
+    __slots__ = ()
+    __hash__ = None
+```
+
+### Complex and default implementations
+
+`Complex` is the first level that carries real methods. Abstract methods must be overridden; concrete helpers are derived from them so subclasses get them for free.
+
+```python
+# CPython: Lib/numbers.py:97 Complex.__pos__
+def __pos__(self):
+    return +self
+
+# CPython: Lib/numbers.py:107 Complex.conjugate
+@abstractmethod
+def conjugate(self):
+    """(x+y*i).conjugate() returns (x-y*i)."""
+
+# CPython: Lib/numbers.py:112 Complex.__bool__
+def __bool__(self):
+    return self != 0
+```
+
+### Real adds ordering and rounding hooks
+
+`Real` extends `Complex` with the four rounding dunders used by `math` and the built-in `round()`. It also provides a default `__complex__` built from `__float__`.
+
+```python
+# CPython: Lib/numbers.py:167 Real.__complex__
+def __complex__(self):
+    return complex(float(self))
+
+# CPython: Lib/numbers.py:172 Real.__ceil__
+@abstractmethod
+def __ceil__(self):
+    """Finds the least Integral >= self."""
+
+# CPython: Lib/numbers.py:178 Real.__round__
+@abstractmethod
+def __round__(self, ndigits=None):
+    """Rounds self to ndigits decimal places, defaulting to 0."""
+```
+
+### Integral and bit operations
+
+`Integral` adds `__index__`, which is the protocol that lets an object be used as a slice index or passed to `bin()`/`oct()`/`hex()`.
+
+```python
+# CPython: Lib/numbers.py:283 Integral.__index__
+@abstractmethod
+def __index__(self):
+    """Called whenever an index is needed, e.g. in slicing."""
+
+# CPython: Lib/numbers.py:294 Integral.__lshift__
+@abstractmethod
+def __lshift__(self, other):
+    ...
+```
+
+## gopy notes
+
+- The ABCs are registered via `ABCMeta`; gopy does not need to port the registration machinery to use the tower as a type-check guide.
+- `Rational.numerator` and `Rational.denominator` are abstract properties, not abstract methods. The distinction matters when generating descriptor stubs.
+- `Complex.__hash__ = None` deliberately makes `Number` unhashable by default; concrete subclasses must re-declare `__hash__` if they want to be hashable.
+- None of these classes appear in `stdlibinit`; they are imported on demand by `fractions`, `decimal`, and user code.
+
+## CPython 3.14 changes
+
+- No structural changes to the tower in 3.14.
+- PEP 3141 itself is frozen; additions go through a separate PEP process.
+- The `__slots__ = ()` idiom is present on every class to avoid per-instance `__dict__` overhead when the ABC is used as a mixin.

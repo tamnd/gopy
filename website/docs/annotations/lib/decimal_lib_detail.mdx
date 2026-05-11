@@ -1,0 +1,90 @@
+---
+title: "_decimal.c"
+description: "C accelerator for the decimal module — wraps libmpdec for arbitrary-precision decimal arithmetic"
+cpython_path: Modules/_decimal/_decimal.c
+cpython_version: "3.14"
+lines: 9000
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`Modules/_decimal/_decimal.c` is the C extension that powers `import decimal` since Python 3.3. It wraps [libmpdec](https://www.bytereef.org/mpdecimal/), a standalone arbitrary-precision decimal library. `Lib/decimal.py` exists only to re-export names when the C accelerator is unavailable; in practice it is never used.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1–200 | headers, `libmpdec` includes | build scaffold |
+| 201–600 | signal mapping tables | Python exceptions to `mpd` trap bits |
+| 601–1400 | `PyDecType`, `PyContextType` | type object definitions |
+| 1401–3000 | `decimal_new`, `decimal_from_*` | constructors and coercions |
+| 3001–5500 | `decimal_add`, `decimal_mul`, etc. | arithmetic dispatch to `mpd_qadd`, `mpd_qmul`, ... |
+| 5501–7000 | `Context_new`, `localcontext` | thread-local context management |
+| 7001–8500 | `PyDec_ToIntegralValue`, rounding | rounding modes wired to `MPD_ROUND_*` |
+| 8501–9000 | module init, `PyInit__decimal` | slot registration |
+
+## Reading
+
+### Signal flags and trap bits
+
+Each Python-level signal (`DivisionByZero`, `InvalidOperation`, `Overflow`, etc.) maps to an `mpd` bit constant. The table drives both raising exceptions and setting status flags on the context.
+
+```python
+# CPython: Modules/_decimal/_decimal.c:223 signal_map
+# (Python-side view of the mapping table)
+# signal_map[] = {
+#   {"InvalidOperation", MPD_Invalid_operation},
+#   {"DivisionByZero",   MPD_Division_by_zero},
+#   {"Overflow",         MPD_Overflow},
+#   ...
+# }
+```
+
+### Arithmetic dispatch
+
+Every binary operation follows the same pattern: convert operands to `mpd_t`, call the `mpd_q*` fast variant, check the status word, then convert back to a Python `Decimal`.
+
+```python
+# CPython: Modules/_decimal/_decimal.c:3120 decimal_add
+# static PyObject *
+# decimal_add(PyObject *v, PyObject *w)
+# {
+#     mpd_qadd(mpd(result), mpd(a), mpd(b), CTX(ctx), &status);
+#     if (dec_addstatus(ctx, status)) { ... raise ... }
+# }
+```
+
+The `mpd_q*` family never raises C exceptions; it returns status bits that `dec_addstatus` converts to Python exceptions or flag sets depending on the context traps.
+
+### Thread-local context via `localcontext`
+
+`localcontext()` is a context manager that saves and restores the per-thread `mpd_context_t`. CPython stores this in the thread state using `PyThread_tss_*` keys.
+
+```python
+# CPython: Modules/_decimal/_decimal.c:5620 PyDec_SetCurrentContext
+# Sets the context pointer stored in the thread-local TSS slot.
+# Called by Context.__enter__ and restored in Context.__exit__.
+```
+
+### Rounding modes
+
+Rounding constants (`ROUND_HALF_EVEN`, `ROUND_CEILING`, etc.) are integer slots on the module object that map 1-to-1 to `MPD_ROUND_*` enum values. `Context.rounding` is validated against this set on assignment.
+
+```python
+# CPython: Modules/_decimal/_decimal.c:7045 PyDec_ToIntegralValue
+# Dispatches to mpd_qround_to_intx with the context rounding mode.
+```
+
+## gopy notes
+
+- gopy does not link libmpdec directly. The port should target the pure-Python `decimal` semantics using Go's `math/big.Int` for coefficient storage and a manually tracked exponent, or defer to a Go decimal library such as `shopspring/decimal`.
+- The signal-to-trap mapping table is the authoritative source for which conditions raise vs. set a flag. Port it verbatim rather than guessing from the Python docs.
+- `localcontext()` depends on goroutine-local storage; Go has no built-in equivalent. A `context.Context` key or a `sync.Map` keyed on `goroutine ID` are the two practical options.
+- `decimal_new` handles strings, integers, tuples, and `Decimal` copies in one constructor; keep the dispatch order identical to avoid subtle coercion differences.
+
+## CPython 3.14 changes
+
+- `Modules/_decimal` was updated to libmpdec 4.0.0, which improves thread safety and removes several deprecated internal APIs.
+- The `localcontext` context manager now accepts keyword arguments for individual context fields, matching the long-standing pure-Python fallback behavior.
+- `InvalidOperation` subclasses (`ConversionSyntax`, `DivisionImpossible`, `DivisionUndefined`, `InvalidContext`) are now always available as attributes of the module, not just on the context object.

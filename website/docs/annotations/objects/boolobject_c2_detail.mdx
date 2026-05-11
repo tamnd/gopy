@@ -1,0 +1,127 @@
+---
+title: "Objects/boolobject.c"
+description: "CPython 3.14 annotation: bool type as a statically allocated int subclass"
+cpython_path: Objects/boolobject.c
+cpython_version: "3.14"
+lines: 200
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`Objects/boolobject.c` implements the `bool` type. At roughly 200 lines it is
+one of the smallest type files in CPython. `True` and `False` are statically
+allocated singletons; no heap allocation ever occurs during normal bool
+operations. `bool` is a subclass of `int`, so almost every numeric slot
+delegates upward.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1–30 | `Py_True`, `Py_False` definitions | Statically allocated `PyLongObject` singletons |
+| 31–60 | `PyBool_FromLong` | Canonical C API: returns `Py_True` or `Py_False` by value |
+| 61–90 | `bool_new_impl` | `bool(x)` constructor; calls `PyObject_IsTrue` then returns singleton |
+| 91–120 | `bool_repr` | Returns interned strings `"True"` or `"False"` |
+| 121–160 | `bool_and`, `bool_or`, `bool_xor` | Delegate to `int` logic but wrap result in `PyBool_FromLong` |
+| 161–200 | `PyBool_Type` spec | Type object; `tp_base = &PyLong_Type`, most slots `NULL` or inherited |
+
+## Reading
+
+### Statically allocated singletons
+
+`Py_True` and `Py_False` are defined as `PyLongObject` with their digit arrays
+embedded in the object body. Because they are static, `PyBool_FromLong` never
+calls `malloc`.
+
+```c
+// CPython: Objects/boolobject.c:18 Py_False definition
+PyLongObject _Py_FalseStruct = {
+    .long_value = {
+        .lv_tag = (0 << _PyLong_NON_SIZE_BITS),
+        { 0 }
+    }
+};
+
+PyLongObject _Py_TrueStruct = {
+    .long_value = {
+        .lv_tag = (1 << _PyLong_NON_SIZE_BITS),
+        { 1 }
+    }
+};
+```
+
+### Canonical constructor
+
+`PyBool_FromLong` is the only allocation-free object "constructor" in CPython:
+it just picks between the two singletons.
+
+```c
+// CPython: Objects/boolobject.c:31 PyBool_FromLong
+PyObject *
+PyBool_FromLong(long ok)
+{
+    return Py_NewRef(ok ? Py_True : Py_False);
+}
+```
+
+### Python-level bool()
+
+`bool_new_impl` calls `PyObject_IsTrue` on the argument, which traverses
+`__bool__` then `__len__`, and returns the appropriate singleton.
+
+```c
+// CPython: Objects/boolobject.c:70 bool_new_impl
+static PyObject *
+bool_new_impl(PyTypeObject *type, PyObject *x)
+{
+    int res = PyObject_IsTrue(x);
+    if (res < 0)
+        return NULL;
+    return PyBool_FromLong(res);
+}
+```
+
+### Bitwise ops returning bool
+
+`bool_and`, `bool_or`, and `bool_xor` call the corresponding `int` operation
+and pass the result through `PyBool_FromLong`, preserving the invariant that
+`True & False` is `False` rather than `0`.
+
+```c
+// CPython: Objects/boolobject.c:130 bool_and
+static PyObject *
+bool_and(PyObject *a, PyObject *b)
+{
+    if (!PyBool_Check(a) || !PyBool_Check(b))
+        return PyLong_Type.tp_as_number->nb_and(a, b);
+    return PyBool_FromLong((a == Py_True) & (b == Py_True));
+}
+```
+
+## gopy notes
+
+- Model `Py_True` and `Py_False` as two package-level `*boolObject` vars
+  initialized once in `init()`. `PyBool_FromLong` becomes a simple pointer
+  return.
+- `bool_new_impl` depends on `PyObject_IsTrue`; make sure `IsTrue` is fully
+  implemented before wiring up `bool.__new__`.
+- Because `bool` is a subclass of `int`, the gopy `boolObject` struct should
+  embed `intObject` (or the equivalent `longObject`). Inherited slots must
+  be wired through the type hierarchy, not copied.
+- `bool_and`/`or`/`xor` short-circuit to direct bit ops when both operands
+  are `*boolObject`; the general `int` path is the fallback.
+- `bool_repr` can return pre-interned string singletons `trueStr` and
+  `falseStr` to avoid allocation in repr-heavy workloads.
+
+## CPython 3.14 changes
+
+- The internal layout of `_Py_TrueStruct` and `_Py_FalseStruct` changed when
+  `PyLongObject` switched from the old `ob_digit` array to the new
+  `long_value.lv_tag` compact representation introduced in 3.12 and refined
+  in 3.14.
+- `bool.__new__` now raises `DeprecationWarning` when called on a subclass
+  with extra constructor arguments, matching the same tightening applied to
+  `int.__new__`.
+- `PyBool_Check` is now a `static inline` function rather than a macro in
+  the public C API headers.

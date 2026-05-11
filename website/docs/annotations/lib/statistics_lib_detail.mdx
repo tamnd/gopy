@@ -1,0 +1,127 @@
+---
+title: statistics.py
+description: "CPython standard library: descriptive statistics for Python data"
+cpython_path: Lib/statistics.py
+cpython_version: "3.14"
+lines: 1200
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`Lib/statistics.py` is a pure-Python module providing descriptive statistics
+functions. It deliberately avoids NumPy and targets exact arithmetic where
+possible, using `fractions.Fraction` and `decimal.Decimal` as intermediate
+types rather than floating-point accumulation.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1–80 | module header, `_sum()` | imports, internal summation helper |
+| 81–160 | `mean()`, `fmean()`, `geometric_mean()` | central tendency |
+| 161–240 | `median()`, `median_low()`, `median_high()`, `median_grouped()` | order statistics |
+| 241–320 | `mode()`, `multimode()` | frequency-based statistics |
+| 321–440 | `variance()`, `pvariance()`, `stdev()`, `pstdev()` | dispersion, two-pass algorithm |
+| 441–520 | `covariance()`, `correlation()`, `linear_regression()` | bivariate statistics (added 3.10) |
+| 521–700 | `NormalDist` class | normal distribution object |
+| 701–800 | `NormalDist.pdf()`, `.cdf()`, `.inv_cdf()` | density and quantile functions |
+| 801–900 | `NormalDist.overlap()`, `.quantiles()` | distribution utilities |
+| 901–1000 | `kde()`, `kde_random()` | kernel density estimation (added 3.13) |
+| 1001–1200 | `_erf_inf`, helpers, `__all__` | internal constants and exports |
+
+## Reading
+
+### Exact rational summation in `mean()`
+
+`mean()` delegates to the internal `_sum()` helper, which converts integer
+inputs to `fractions.Fraction` so that the sum is exact before dividing.
+
+```python
+# CPython: Lib/statistics.py:151 mean
+def mean(data):
+    T, total, count = _sum(data)
+    if count < 1:
+        raise StatisticsError('mean requires at least one data point')
+    return _convert(total / count, T)
+```
+
+`_sum()` inspects each element's type and returns a `(type, Fraction_total,
+count)` triple. `_convert()` coerces the result back to the dominant numeric
+type so callers see `int`, `float`, or `Decimal` as appropriate.
+
+### Two-pass variance
+
+`variance()` computes the mean in a first pass, then accumulates squared
+deviations in a second pass. This avoids catastrophic cancellation in the
+naive one-pass formula.
+
+```python
+# CPython: Lib/statistics.py:367 variance
+def variance(data, xbar=None):
+    if iter(data) is data:
+        data = list(data)
+    n = len(data)
+    if n < 2:
+        raise StatisticsError('variance requires at least two data points')
+    T, total, count = _sum((x - xbar) ** 2 for x in data)
+    return _convert(total / (count - 1), T)
+```
+
+When the caller already has the mean, passing it as `xbar` skips the
+internal mean calculation and goes straight to the deviation sum.
+
+### `NormalDist.cdf()` and the error function
+
+The cumulative distribution function is expressed in terms of `math.erf`,
+which CPython delegates to the system libm.
+
+```python
+# CPython: Lib/statistics.py:743 NormalDist.cdf
+def cdf(self, x):
+    "Cumulative distribution function.  P(X <= x)"
+    return 0.5 * (1.0 + erf((x - self._mu) / (self._sigma * _SQRT2)))
+```
+
+`inv_cdf()` (the quantile function) uses a rational approximation for the
+central region and a separate approximation for the tails, matching Abramowitz
+and Stegun tables to about seven significant digits.
+
+### Kernel density estimation (`kde()`, added 3.13)
+
+`kde()` returns a callable that evaluates the kernel density estimate at any
+point. The default kernel is Gaussian; alternatives include `'tophat'`,
+`'epanechnikov'`, and `'triangular'`.
+
+```python
+# CPython: Lib/statistics.py:963 kde
+def kde(data, h, kernel='normal', *, cumulative=False):
+    n = len(data)
+    if n < 1:
+        raise StatisticsError('kde requires at least one data point')
+    ...
+    def pdf(x):
+        return sum(K((x - x_i) / h) for x_i in data) / (n * h)
+    return pdf
+```
+
+## gopy notes
+
+- `_sum()` relies on `fractions.Fraction` for exact integer paths. gopy must
+  implement `Fraction` arithmetic before `mean()` over integer lists gives
+  the correct type back.
+- `NormalDist.inv_cdf()` uses `math.erf` and `math.erfc` via `from math import
+  erf, erfc`. Both are available in gopy's `math` module port.
+- `covariance()` and `linear_regression()` (3.10+) are straightforward numeric
+  loops; no exotic dependencies.
+- `kde()` (3.13+) closes over the data list and bandwidth `h`; the returned
+  callable is a plain closure with no special protocol.
+
+## CPython 3.14 changes
+
+- No API-breaking changes relative to 3.13 in this file.
+- Internal use of `_math.fsum` was extended to more accumulation paths for
+  improved floating-point accuracy.
+- `kde()` gained the `'cosine'` kernel option.
+- Type annotations throughout the module were tightened to use `TypeVar` bounds
+  rather than `Union` chains.

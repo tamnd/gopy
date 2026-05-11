@@ -1,0 +1,133 @@
+---
+title: "_ssl.c — OpenSSL TLS wrapper"
+description: "Annotation of CPython Modules/_ssl.c, the OpenSSL TLS extension backing the ssl module"
+cpython_path: Modules/_ssl.c
+cpython_version: "3.14"
+lines: 7000
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`_ssl.c` is the largest single C file in CPython's `Modules/` directory. It wraps
+OpenSSL's `SSL_CTX` and `SSL` objects to provide `ssl.SSLContext` and `ssl.SSLSocket`.
+`Lib/ssl.py` is a thin Python veneer that re-exports these types with extra convenience
+methods. The file also implements `MemoryBIO`, which lets callers drive TLS over any
+transport, not just a TCP socket.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1–200 | includes / version guards | OpenSSL headers, LibreSSL compat macros |
+| 201–600 | `PySSLContext` struct + slots | Wraps `SSL_CTX*`; type object `_ssl._SSLContext` |
+| 601–1200 | `_ssl__SSLContext_impl` | Create and configure an `SSL_CTX` |
+| 1201–1600 | cert-chain / verify-location loaders | `load_cert_chain`, `load_verify_locations`, DER/PEM handling |
+| 1601–2100 | `PySSLSocket` struct + slots | Wraps `SSL*` bound to a socket fd |
+| 2101–2600 | `_ssl__SSLObject_impl` | Associate an `SSL*` with an existing socket |
+| 2601–3000 | `do_handshake` | `SSL_do_handshake` with `WANT_READ`/`WANT_WRITE` retry |
+| 3001–3600 | `SSL_read` / `SSL_write` wrappers | Non-blocking I/O loop, GIL release |
+| 3601–4200 | certificate dict builder | Parse `X509*` into a Python dict |
+| 4201–4700 | `MemoryBIO` type | In-memory BIO pair for async/sans-I/O TLS |
+| 4701–7000 | constants, method tables, `PyInit__ssl` | Cipher lists, protocol flags, module init |
+
+## Reading
+
+### _ssl__SSLContext_impl: building an SSL_CTX
+
+The context object is the root of all TLS state. It configures protocol versions,
+cipher suites, and certificate authorities once, then stamps out `SSL` objects per
+connection.
+
+```c
+// CPython: Modules/_ssl.c:601 _ssl__SSLContext_impl
+static PyObject *
+_ssl__SSLContext_impl(PyTypeObject *type, int proto_version)
+{
+    SSL_CTX *ctx = SSL_CTX_new(TLS_method());
+    if (ctx == NULL) return _setSSLError(state, NULL, 0, __FILE__, __LINE__);
+    SSL_CTX_set_options(ctx, SSL_OP_NO_SSLv2 | SSL_OP_NO_SSLv3);
+    SSL_CTX_set_mode(ctx, SSL_MODE_ENABLE_PARTIAL_WRITE);
+    ...
+}
+```
+
+### do_handshake: WANT_READ / WANT_WRITE retry loop
+
+OpenSSL is non-blocking at the record layer. `SSL_do_handshake` returns
+`SSL_ERROR_WANT_READ` or `SSL_ERROR_WANT_WRITE` when it needs more socket data.
+CPython retries after selecting on the fd.
+
+```c
+// CPython: Modules/_ssl.c:2601 _ssl__SSLObject_do_handshake_impl
+    do {
+        Py_BEGIN_ALLOW_THREADS
+        ret = SSL_do_handshake(self->ssl);
+        err = SSL_get_error(self->ssl, ret);
+        Py_END_ALLOW_THREADS
+        if (err == SSL_ERROR_WANT_READ || err == SSL_ERROR_WANT_WRITE) {
+            if (timeout == 0) break;
+            rc = select_wait(self->Socket, err, timeout);
+        }
+    } while (err == SSL_ERROR_WANT_READ || err == SSL_ERROR_WANT_WRITE);
+```
+
+### Certificate dict builder
+
+`SSLSocket.getpeercert()` converts an `X509*` to a Python dict with fields like
+`subject`, `issuer`, `notBefore`, `notAfter`, and `subjectAltName`. The builder
+walks X.509 name entries using `X509_NAME_get_entry`.
+
+```c
+// CPython: Modules/_ssl.c:3601 _decode_certificate
+static PyObject *
+_decode_certificate(PySSLSocket *self, int full_match)
+{
+    X509 *certificate = SSL_get_peer_certificate(self->ssl);
+    PyObject *retval = PyDict_New();
+    PyObject *peer = _create_tuple_for_X509_NAME(
+            state, X509_get_subject_name(certificate));
+    PyDict_SetItemString(retval, "subject", peer);
+    ...
+}
+```
+
+### MemoryBIO
+
+`ssl.MemoryBIO` wraps an OpenSSL memory BIO pair, exposing `read()`, `write()`,
+and `eof` on the Python side. It enables sans-I/O TLS: the caller drives reads and
+writes manually and feeds raw TLS bytes over any transport.
+
+```c
+// CPython: Modules/_ssl.c:4210 _ssl_MemoryBIO_impl
+static PyObject *
+_ssl_MemoryBIO_impl(PyTypeObject *type)
+{
+    BIO *bio = BIO_new(BIO_s_mem());
+    if (bio == NULL) return _setSSLError(state, NULL, 0, __FILE__, __LINE__);
+    BIO_set_mem_eof_return(bio, -1);
+    ...
+}
+```
+
+## gopy notes
+
+- The gopy port will wrap Go's `crypto/tls` package rather than OpenSSL, so the
+  C-level `SSL_CTX` / `SSL` structs have no direct equivalent. Map `SSLContext` to
+  `tls.Config` and `SSLSocket` to `tls.Conn`.
+- `MemoryBIO` maps cleanly to a `bytes.Buffer` pair with `tls.Server`/`tls.Client`
+  wrapping a `net.Pipe`.
+- `getpeercert()` requires walking `tls.ConnectionState.PeerCertificates`; the x509
+  field names differ from OpenSSL's.
+- Protocol-version constants (`PROTOCOL_TLS_CLIENT` etc.) should be re-expressed as
+  `tls.Config.MinVersion` / `MaxVersion` settings.
+
+## CPython 3.14 changes
+
+- 3.10: `PROTOCOL_TLSv1` and `PROTOCOL_TLSv1_1` deprecated; `TLS_CLIENT` /
+  `TLS_SERVER` added as replacements.
+- 3.12: Minimum OpenSSL version raised to 1.1.1; LibreSSL 3.3+ required.
+- 3.13: `ssl.create_default_context` enables hostname-checking by default for
+  server-side contexts.
+- 3.14: OpenSSL 1.1.x support removed; OpenSSL 3.x is the only supported backend.
+  `SSL_OP_IGNORE_UNEXPECTED_EOF` wired by default.

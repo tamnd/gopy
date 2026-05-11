@@ -1,0 +1,139 @@
+---
+title: "Objects/floatobject.c"
+description: "CPython 3.14 annotation: float type with dtoa formatting and int-aligned hash"
+cpython_path: Objects/floatobject.c
+cpython_version: "3.14"
+lines: 1800
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`Objects/floatobject.c` implements the `float` type. It covers construction
+from strings and integers, shortest-representation formatting via David Gay's
+`dtoa`, a freelist allocator, rich comparison against integers, and a hash
+function that keeps `hash(1.0) == hash(1)`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1–80 | freelist, `float_alloc` | Per-interpreter freelist (256 entries) for `PyFloatObject` |
+| 81–200 | `PyFloat_FromDouble` | Allocates or recycles a float object from the freelist |
+| 201–380 | `float_new_impl`, `PyFloat_FromString` | `float()` constructor; string path via `_Py_dg_strtod` |
+| 381–560 | `float_repr`, `_PyFloat_FormatAdvancedWriter` | Shortest-round-trip repr using Gay's dtoa |
+| 561–760 | `float_richcompare` | Handles `==`/`<` against int with `PyLong_AsDouble` overflow check |
+| 761–900 | `float_hash` | Hash aligned with `int` hash so `hash(1.0) == hash(1)` |
+| 901–1100 | `float_pow` | `**` operator; dispatches to `pow(3)` with special-case table |
+| 1101–1400 | arithmetic slots | `float_add`, `float_sub`, `float_mul`, `float_div`, `float_mod` |
+| 1401–1800 | `float_as_integer_ratio`, `float_is_integer`, `PyFloat_Type` spec | Utility methods and type object |
+
+## Reading
+
+### Construction and the freelist
+
+`PyFloat_FromDouble` recycles objects through a per-interpreter freelist of up
+to 256 entries, avoiding `malloc` on tight numeric loops.
+
+```c
+// CPython: Objects/floatobject.c:100 PyFloat_FromDouble
+PyObject *
+PyFloat_FromDouble(double fval)
+{
+    struct _Py_float_state *state = &_PyInterpreterState_GET()->float_state;
+    PyFloatObject *op = state->free_list;
+    if (op != NULL) {
+        state->free_list = (PyFloatObject *) Py_TYPE(op);
+        state->numfree--;
+        _Py_NewReference((PyObject *) op);
+    } else {
+        op = PyObject_Malloc(sizeof(PyFloatObject));
+        /* ... error check ... */
+    }
+    op->ob_fval = fval;
+    return (PyObject *) op;
+}
+```
+
+### String-to-float conversion
+
+`PyFloat_FromString` calls `_Py_dg_strtod` (a CPython-internal copy of
+David Gay's `strtod`) rather than the platform `strtod`, guaranteeing
+round-trip accuracy on every supported platform.
+
+```c
+// CPython: Objects/floatobject.c:310 PyFloat_FromString
+PyObject *
+PyFloat_FromString(PyObject *v)
+{
+    const char *s;
+    /* ... decode to UTF-8 ... */
+    double x = _Py_dg_strtod(s, &end);
+    if (end == s || *end != '\0')
+        goto error;
+    return PyFloat_FromDouble(x);
+}
+```
+
+### Repr and shortest representation
+
+`float_repr` calls `_PyFloat_FormatAdvancedWriter` which uses
+`_Py_dg_dtoa` to produce the shortest decimal string that round-trips
+back to the same `double`. The result never has trailing zeros beyond
+the decimal point.
+
+```c
+// CPython: Objects/floatobject.c:400 float_repr
+static PyObject *
+float_repr(PyFloatObject *v)
+{
+    PyObject *result;
+    _PyUnicodeWriter writer;
+    _PyUnicodeWriter_Init(&writer);
+    if (_PyFloat_FormatAdvancedWriter(&writer, (PyObject *)v,
+                                      NULL, 0, 0) < 0) {
+        _PyUnicodeWriter_Dealloc(&writer);
+        return NULL;
+    }
+    return _PyUnicodeWriter_Finish(&writer);
+}
+```
+
+### Hash aligned with int
+
+`float_hash` decomposes the value with `frexp` and reconstructs an integer
+hash so that any float equal to a Python `int` produces the same hash.
+
+```c
+// CPython: Objects/floatobject.c:800 float_hash
+static Py_hash_t
+float_hash(PyFloatObject *v)
+{
+    return _Py_HashDouble((PyObject *)v, v->ob_fval);
+}
+```
+
+`_Py_HashDouble` (in `Python/pyhash.c`) handles infinities, NaN, and the
+`frexp`-based reconstruction, ensuring `hash(1.0) == hash(1) == 1`.
+
+## gopy notes
+
+- The freelist maps to a per-goroutine or per-interpreter slab; a simple
+  `sync.Pool` of `*floatObject` is the nearest Go equivalent.
+- `_Py_dg_strtod` and `_Py_dg_dtoa` are bundled in `Python/dtoa.c`.
+  For gopy, `strconv.ParseFloat` and `strconv.FormatFloat` with `'g'` and
+  prec `-1` give equivalent shortest-round-trip behaviour.
+- `float_richcompare` against `int` is subtle: values outside the
+  representable `double` range must be handled without converting the int to
+  float first (to avoid false equality). Port the overflow-check branch exactly.
+- `_Py_SET_53BIT_DOUBLE_PRECISION` guards are only relevant on x87 FPU (32-bit
+  x86); they can be no-ops in gopy on amd64/arm64.
+
+## CPython 3.14 changes
+
+- The freelist was moved from a global to `PyInterpreterState.float_state`,
+  enabling independent freelists per sub-interpreter.
+- `float.__format__` gained stricter validation for the `z` flag (coerce
+  negative zero) introduced in 3.11 but corrected for edge cases in 3.14.
+- `_Py_HashDouble` now explicitly sets `errno = 0` before calling `frexp` to
+  comply with C99 requirements on platforms where `frexp` may set `errno`.

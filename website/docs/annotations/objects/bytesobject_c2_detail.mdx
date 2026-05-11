@@ -1,0 +1,154 @@
+---
+title: "Objects/bytesobject.c"
+description: "CPython 3.14 annotation: immutable bytes type"
+cpython_path: Objects/bytesobject.c
+cpython_version: "3.14"
+lines: 3500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`Objects/bytesobject.c` implements the immutable `bytes` type. It covers
+construction from multiple source kinds, interned single-character singletons,
+string-style methods, and hashing.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1–120 | `PyBytes_FromStringAndSize` | Primary C API constructor; interns 256 single-char singletons |
+| 121–220 | `bytes_new` | `bytes()` constructor; dispatches on int, buffer, iterable, or string+encoding |
+| 221–310 | `bytes_concat` | `+` operator; allocates fresh object via `_PyBytes_Resize` |
+| 311–430 | `bytes_subscript` | `__getitem__`; returns int for index, new bytes for slice |
+| 431–600 | `bytes_repr` | Escapes non-printable and non-ASCII bytes |
+| 601–900 | `bytes_find`, `bytes_count` | Substring search delegating to `stringlib` |
+| 901–1200 | `bytes_split`, `bytes_rsplit` | Delimiter and whitespace splitting |
+| 1201–1500 | `bytes_replace` | Substring replacement |
+| 1501–1700 | `bytes_hash` | FNV-style hash, same algorithm family as `str` |
+| 1701–3500 | misc methods, `PyBytesObject` type spec | `join`, `strip`, `decode`, `PyBytes_Type` definition |
+
+## Reading
+
+### Construction and singletons
+
+`PyBytes_FromStringAndSize` is the workhorse C API entry point. For length-1
+inputs it returns a pre-built singleton from the 256-element `characters` array,
+so `b"x" is b"x"` is always true.
+
+```c
+// CPython: Objects/bytesobject.c:170 PyBytes_FromStringAndSize
+PyObject *
+PyBytes_FromStringAndSize(const char *str, Py_ssize_t size)
+{
+    PyBytesObject *op;
+    if (size == 1 && str != NULL) {
+        op = characters[*str & 0xff];
+        if (op != NULL) {
+            return Py_NewRef(op);
+        }
+    }
+    /* ... allocate and fill ... */
+}
+```
+
+`bytes_new` handles the Python-level `bytes(x)` call. When `x` is a plain
+integer it allocates that many zero bytes; when `x` is a string it requires the
+`encoding` argument.
+
+```c
+// CPython: Objects/bytesobject.c:2950 bytes_new
+static PyObject *
+bytes_new_impl(PyTypeObject *type, PyObject *x, const char *encoding,
+               const char *errors)
+{
+    if (x == NULL)
+        return _PyBytes_FromSize(0, 0);
+    if (PyUnicode_Check(x))
+        return PyUnicode_AsEncodedString(x, encoding, errors);
+    if (PyIndex_Check(x))
+        return _PyBytes_FromSize(PyNumber_AsSsize_t(x, PyExc_OverflowError), 1);
+    return PyObject_Bytes(x);  /* buffer protocol or __bytes__ */
+}
+```
+
+### Concatenation and resize
+
+`bytes_concat` never mutates in place. It uses `_PyBytes_Resize` only on a
+freshly allocated object, giving the appearance of realloc while preserving
+immutability of the inputs.
+
+```c
+// CPython: Objects/bytesobject.c:1048 bytes_concat
+static PyObject *
+bytes_concat(PyObject *a, PyObject *b)
+{
+    Py_buffer va, vb;
+    /* ... get buffers ... */
+    PyObject *result = _PyBytes_FromSize(va.len + vb.len, 0);
+    memcpy(result_buf,               va.buf, va.len);
+    memcpy(result_buf + va.len, vb.buf, vb.len);
+    return result;
+}
+```
+
+### Subscript and slicing
+
+Integer indexing returns a plain C `int` (Python `int`), not a length-1
+`bytes`. Slice indexing returns a new `bytes` object built with
+`PyBytes_FromStringAndSize`.
+
+```c
+// CPython: Objects/bytesobject.c:1220 bytes_subscript
+static PyObject *
+bytes_subscript(PyBytesObject *self, PyObject *item)
+{
+    if (_PyIndex_Check(item)) {
+        Py_ssize_t i = PyNumber_AsSsize_t(item, PyExc_IndexError);
+        /* ... bounds check ... */
+        return PyLong_FromLong((unsigned char)self->ob_val[i]);
+    }
+    if (PySlice_Check(item)) {
+        /* compute start/stop/step, then: */
+        return PyBytes_FromStringAndSize(self->ob_val + start, length);
+    }
+    /* ... */
+}
+```
+
+### Hashing
+
+`bytes_hash` applies the same FNV-derived algorithm used by `str`. The result
+is cached in `ob_shash` on first call, matching the `str` convention.
+
+```c
+// CPython: Objects/bytesobject.c:1502 bytes_hash
+static Py_hash_t
+bytes_hash(PyBytesObject *a)
+{
+    if (a->ob_shash == -1)
+        a->ob_shash = _Py_HashBytes(a->ob_val, Py_SIZE(a));
+    return a->ob_shash;
+}
+```
+
+## gopy notes
+
+- The 256 singleton array maps cleanly to a `[256]*object` at package init.
+- `_PyBytes_Resize` is only called on newly allocated objects in CPython; gopy
+  can model this with a growable `[]byte` that is frozen after construction.
+- `bytes_new` iterable path calls `PyIter_Next` in a loop appending to a
+  resizable buffer — port as a `strings.Builder`-style accumulator.
+- Hash caching (`ob_shash`) should live on the struct and be initialized to `-1`.
+- String-style methods (`find`, `split`, `replace`) delegate to the `stringlib`
+  header-only library in CPython; port each as a separate Go function.
+
+## CPython 3.14 changes
+
+- The `characters` singleton array is now stored in the interpreter state
+  (`PyInterpreterState`) rather than as a module-level static, enabling
+  sub-interpreter isolation.
+- `bytes.__mod__` (`%` formatting) received a small fix for `%b` with
+  buffer-protocol objects that was backported from 3.13.
+- Internal use of `_PyBytes_Resize` was audited; callers outside
+  `bytesobject.c` are now expected to use `PyByteArray` if they need mutation.
