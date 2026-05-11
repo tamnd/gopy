@@ -48,7 +48,23 @@ var (
 )
 
 func newExcType(name string, bases []*objects.Type) *objects.Type {
-	return objects.NewType(name, bases)
+	t := objects.NewType(name, bases)
+	t.Call = excCall
+	return t
+}
+
+// excCall is the tp_call slot for every built-in exception type. It
+// mirrors BaseException_new + BaseException_init: store positional args
+// on .args, ignore keyword arguments (CPython's BaseException_init also
+// rejects them, but tolerating them here keeps stdlib call sites that
+// pass `name=` / `path=` from blowing up before the proper ImportError
+// init lands).
+//
+// CPython: Objects/exceptions.c:L42 BaseException_new
+// CPython: Objects/exceptions.c:L84 BaseException_init
+func excCall(callable objects.Object, args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+	cls, _ := callable.(*objects.Type)
+	return New(cls, objects.NewTuple(args)), nil
 }
 
 // IsSubtype reports whether sub inherits from super, walking the MRO.
