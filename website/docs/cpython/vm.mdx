@@ -1,0 +1,152 @@
+---
+title: VM
+description: The eval loop. How CPython runs bytecode one instruction at a time.
+---
+
+# VM
+
+The Virtual Machine is a register-light, stack-heavy interpreter.
+Each frame carries a value stack; each opcode pops, computes, and
+pushes. The dispatch loop runs in `Python/ceval.c`.
+
+## Source map
+
+| File                                    | Role                                            |
+| --------------------------------------- | ----------------------------------------------- |
+| `Python/ceval.c`                        | The dispatch loop and the entry points.         |
+| `Python/bytecodes.c`                    | The opcode definitions (DSL form).              |
+| `Python/generated_cases.c.h`            | C generated from `bytecodes.c`.                 |
+| `Python/ceval_macros.h`                 | Dispatch macros.                                |
+| `Python/ceval_gil.c`                    | The GIL handshake.                              |
+| `Include/internal/pycore_frame.h`       | Frame layout.                                   |
+
+## Entry points
+
+The eval loop is invoked through a public entry point:
+
+```c
+PyObject *
+_PyEval_EvalFrameDefault(PyThreadState *tstate,
+                         _PyInterpreterFrame *frame,
+                         int throwflag);
+```
+
+`tstate` is the calling thread's state. `frame` is a freshly
+allocated frame pointing at the code object to run. `throwflag`
+tells the loop to immediately throw an exception inside the frame
+(used to resume a generator that received `throw`).
+
+Higher-level wrappers call this: `PyEval_EvalCode`, `PyObject_Call`
+when the callable is a Python function, and the generator / async
+machinery on `send` / `__next__`.
+
+## The dispatch loop
+
+The loop body in `ceval.c` looks, in spirit, like:
+
+```c
+for (;;) {
+    NEXTOPARG();          // read opcode and oparg
+    PRE_DISPATCH_GOTO();  // tracing / eval-breaker checks
+    switch (opcode) {
+        TARGET(LOAD_FAST):  { ... DISPATCH(); }
+        TARGET(STORE_FAST): { ... DISPATCH(); }
+        // ...
+    }
+}
+```
+
+`DISPATCH` is a macro that, on platforms that support it, expands
+to a computed goto (`goto *opcode_targets[NEXTOP()]`). The
+computed-goto path replaces the `switch` with a jump table and
+spreads the indirect branch across all dispatch sites, which is
+faster on modern branch predictors. On platforms without GCC
+extensions, it falls back to a `switch` inside the `for`.
+
+The opcode bodies are generated from `bytecodes.c` by the tool in
+`Tools/cases_generator/`. That DSL spells out each opcode with its
+inputs, outputs, side effects, and inline cache shape; the
+generator emits the C body, the stack-effect table, the
+specializer hook, and the metadata table.
+
+## Frame layout
+
+`_PyInterpreterFrame` lives at the bottom of the value stack. It
+holds:
+
+* `f_code` -- the `PyCodeObject` being executed.
+* `f_executable` -- the executor pointer for Tier-2 (see
+  [Tier-2](tier2)).
+* `f_func_obj` -- the calling function, when the frame is a
+  function call frame.
+* `f_globals`, `f_builtins`, `f_locals` -- name dictionaries.
+* `prev_instr` -- the next instruction to fetch (it points one
+  word **before** the next op, hence "prev").
+* `localsplus[]` -- the fast-locals slab, immediately followed by
+  the cell variables, the free variables, and finally the value
+  stack.
+
+Frames are allocated on a per-thread frame chunk allocator. New
+frames slot into the next aligned chunk slot; pops decrement the
+chunk pointer. The allocator avoids `malloc` on every call.
+
+## Opcode taxonomy
+
+| Group            | Examples                                              |
+| ---------------- | ----------------------------------------------------- |
+| Stack            | `NOP`, `POP_TOP`, `COPY`, `SWAP`, `PUSH_NULL`.        |
+| Constants        | `LOAD_CONST`, `RETURN_CONST`.                         |
+| Locals           | `LOAD_FAST`, `STORE_FAST`, `DELETE_FAST`.             |
+| Cells            | `LOAD_DEREF`, `STORE_DEREF`, `LOAD_CLASSDEREF`.       |
+| Globals          | `LOAD_GLOBAL`, `STORE_GLOBAL`, `DELETE_GLOBAL`.       |
+| Names            | `LOAD_NAME`, `STORE_NAME`, `DELETE_NAME`.             |
+| Numeric          | `BINARY_OP`, `UNARY_NEGATIVE`, `UNARY_NOT`.            |
+| Comparison       | `COMPARE_OP`, `IS_OP`, `CONTAINS_OP`.                 |
+| Container build  | `BUILD_LIST`, `BUILD_TUPLE`, `BUILD_MAP`, `BUILD_SET`. |
+| Container access | `BINARY_SUBSCR`, `STORE_SUBSCR`, `DELETE_SUBSCR`.     |
+| Attributes       | `LOAD_ATTR`, `STORE_ATTR`, `DELETE_ATTR`.             |
+| Calls            | `CALL`, `CALL_KW`, `CALL_FUNCTION_EX`.                |
+| Control flow     | `JUMP_FORWARD`, `JUMP_BACKWARD`, `POP_JUMP_IF_*`.     |
+| Exceptions       | `RAISE_VARARGS`, `RERAISE`, `CHECK_EXC_MATCH`, `CLEANUP_THROW`. |
+| Frames           | `RESUME`, `RETURN_VALUE`, `RETURN_GENERATOR`, `YIELD_VALUE`. |
+| Imports          | `IMPORT_NAME`, `IMPORT_FROM`, `IMPORT_STAR`.          |
+| Iteration        | `GET_ITER`, `FOR_ITER`, `END_FOR`.                    |
+| Generators       | `SEND`, `END_SEND`, `GET_YIELD_FROM_ITER`.            |
+| Instrumentation  | `INSTRUMENTED_*` shadow variants.                     |
+
+## The eval breaker
+
+On every back-edge (any `JUMP_BACKWARD`, plus `RESUME`) the loop
+checks the **eval breaker**: a bitmask of pending events. Bits
+include "a signal arrived", "another thread wants the GIL", "a
+pending call is queued", "the gc is asking to run", "a profile
+hook should fire". The loop services the bits in priority order
+and re-enters dispatch.
+
+This is also where the GIL is released and re-acquired on the
+"yield to other threads" pattern. See [GIL](gil) for the lock
+protocol.
+
+## Errors
+
+A C function that fails sets the per-thread exception state and
+returns a sentinel (`NULL` for `PyObject *`, `-1` for `int`). The
+opcode body checks the sentinel and jumps to `error`. The `error`
+label runs the unwind protocol:
+
+1. Look up the bytecode offset of the failing instruction in
+   `co_exceptiontable`.
+2. If a handler is found, drop the value stack to the handler's
+   recorded depth, push the exception object, jump to the
+   handler's target offset, and continue dispatch.
+3. If no handler is found, pop the frame, propagate the exception
+   to the caller frame, and repeat.
+
+See [Exceptions](exceptions) for the full protocol.
+
+## Reading order
+
+The specializer ([Specializer](specializer)) rewrites Tier-1
+opcodes into variants. The Tier-2 trace projector ([Tier-2](tier2))
+collects hot loops into uop traces. Both layer on top of this
+dispatch loop without changing its shape.

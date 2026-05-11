@@ -1,0 +1,30 @@
+---
+title: Modules/
+description: Annotations for the CPython 3.14 Modules/ entries gopy ports.
+---
+
+# `Modules/`
+
+CPython ships 116+ C-implemented modules under `Modules/`. gopy
+selectively ports the ones used by realistic Python programs and the
+ones the rest of the stdlib depends on. Pure-Python modules live under
+[`Lib/`](../lib/).
+
+## Port-relevant entries
+
+| File | Lines | Page | gopy port |
+| ---- | ----: | ---- | --------- |
+
+## Skipped (host-specific or out of scope)
+
+CPython modules gopy does not port: `_curses*`, `_dbm*`, `_lzma`,
+`_bz2`, `_hashopenssl`, `_ssl`, `_tkinter`, `_sqlite`, `_decimal`,
+`_pickle` (replaced by Python implementation), `_asyncio` (replaced),
+`_cursesmodule`, all GUI / DB / native-codec bindings. These are
+either platform-specific or live in CPython's `Modules/` only because
+Python lacks the primitives; gopy provides those primitives directly.
+
+## Full Modules/ inventory
+
+For reference, the complete list of files in CPython's `Modules/`:
+100 .c files total.

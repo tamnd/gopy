@@ -1,0 +1,249 @@
+---
+title: Python/compile.c
+description: AST to bytecode driver. Scopes, constant pool, codegen entry, and the optimize and assemble bridge.
+cpython_path: Python/compile.c
+cpython_version: "3.14"
+lines: 1741
+status: annotated
+ported_to: compile/
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Python/compile.c`
+
+<CpyLink path="Python/compile.c" />
+
+The compiler driver. Walks the AST module returned by the parser,
+manages a stack of `compiler_unit` scopes (one per module, function,
+class, comprehension), interns constants, and produces an
+`instr_sequence` that is then handed to the CFG optimizer
+([`flowgraph.c`](flowgraph)) and the assembler
+([`assemble.c`](assemble)). The actual emit-an-opcode logic for each
+AST node kind moved out of this file in 3.13 and now lives in
+[`codegen.c`](codegen); `compile.c` keeps the lifecycle, the constant
+cache, and the symbol-table glue.
+
+Three public entry points: `_PyAST_Compile` (full path),
+`_PyCompile_CodeGen` (codegen only, used by `compiler.codegen` in
+tests), `_PyCompile_Assemble` (assembler only, used by `dis`
+round-trips and by `compile()` with a pre-built CFG).
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Python/compile.c" lines="110-178">110-178</Cpy>     | `compiler_setup` / `compiler_free` / `new_compiler` | Top-level compiler lifecycle. | `compile/compiler.go` |
+| <Cpy path="Python/compile.c" lines="180-202">180-202</Cpy>     | `compiler_unit_free` | Per-scope teardown. | `compile/unit.go` |
+| <Cpy path="Python/compile.c" lines="229-316">229-316</Cpy>     | `compiler_set_qualname` | Compute `__qualname__` from the scope stack. | `compile/qualname.go` |
+| <Cpy path="Python/compile.c" lines="318-434">318-434</Cpy>     | `const_cache_insert` / `merge_consts_recursive` | Deduplicate constants across compile units. | `compile/const_cache.go` |
+| <Cpy path="Python/compile.c" lines="436-473">436-473</Cpy>     | `_PyCompile_DictAddObj` / `_PyCompile_AddConst` | Add to the per-unit constants dict. | `compile/unit.go:AddConst` |
+| <Cpy path="Python/compile.c" lines="475-573">475-573</Cpy>     | `list2dict` / `dictbytype` | Turn symtable lists into ordered dicts for varnames / cellvars / freevars. | `compile/symbols.go` |
+| <Cpy path="Python/compile.c" lines="575-712">575-712</Cpy>     | `_PyCompile_EnterScope` | Push a new `compiler_unit`. Build varnames, cellvars, freevars. | `compile/compiler.go:EnterScope` |
+| <Cpy path="Python/compile.c" lines="713-754">713-754</Cpy>     | `_PyCompile_ExitScope` | Pop and discard a unit. | `compile/compiler.go:ExitScope` |
+| <Cpy path="Python/compile.c" lines="755-796">755-796</Cpy>     | `_PyCompile_PushFBlock` / `PopFBlock` / `TopFBlock` | Frame-block stack for `try`/`with`/`for`/loops. | `compile/fblock.go` |
+| <Cpy path="Python/compile.c" lines="822-864">822-864</Cpy>     | `compiler_codegen` / `compiler_mod` | Dispatch to `codegen.c` per module type. | `compile/compiler.go:codegenMod` |
+| <Cpy path="Python/compile.c" lines="866-947">866-947</Cpy>     | `_PyCompile_GetRefType` / `dict_lookup_arg` / `LookupCellvar` / `LookupArg` | Symbol-table queries used by codegen. | `compile/lookup.go` |
+| <Cpy path="Python/compile.c" lines="965-1013">965-1013</Cpy>   | `_PyCompile_ResolveNameop` | Pick `LOAD_FAST` / `LOAD_DEREF` / `LOAD_GLOBAL` / `LOAD_NAME` for a name. | `compile/codegen_expr_name.go:resolveName` |
+| <Cpy path="Python/compile.c" lines="1015-1190">1015-1190</Cpy> | `_PyCompile_TweakInlinedComprehensionScopes` / `Revert*` | Inline comprehension scope mangling (PEP 709). | `compile/inlined_comp.go` |
+| <Cpy path="Python/compile.c" lines="1191-1229">1191-1229</Cpy> | `_PyCompile_Error` / `_PyCompile_Warn` | SyntaxError / SyntaxWarning emission. | `compile/errors.go` |
+| <Cpy path="Python/compile.c" lines="1230-1241">1230-1241</Cpy> | `_PyCompile_Mangle` / `MaybeMangle` | Private-name (`__x`) mangling. | `compile/mangle.go` |
+| <Cpy path="Python/compile.c" lines="1354-1411">1354-1411</Cpy> | `consts_dict_keys_inorder` / `compute_code_flags` | Materialize the consts tuple; compute code object flags. | `compile/finalize.go` |
+| <Cpy path="Python/compile.c" lines="1412-1475">1412-1475</Cpy> | `optimize_and_assemble_code_unit` / `_PyCompile_OptimizeAndAssemble` | Wire codegen output to CFG optimizer and assembler. | `compile/pipeline.go` |
+| <Cpy path="Python/compile.c" lines="1477-1509">1477-1509</Cpy> | `_PyAST_Compile` / `_PyCompile_AstPreprocess` | Public entry. | `compile/api.go:Compile` |
+| <Cpy path="Python/compile.c" lines="1516-1607">1516-1607</Cpy> | `_PyCompile_CleanDoc` | Equivalent of `inspect.cleandoc` for docstrings. | `compile/cleandoc.go` |
+| <Cpy path="Python/compile.c" lines="1608-1736">1608-1736</Cpy> | `_PyCompile_CodeGen` / `_PyCompile_Assemble` | Half-step entries used by tests. | `compile/api.go` |
+| <Cpy path="Python/compile.c" lines="1737-1741">1737-1741</Cpy> | `PyCode_Optimize` | Legacy stub kept for ABI. | n/a |
+
+## Reading
+
+### Scope entry (lines 575 to 712)
+
+<CpyLink path="Python/compile.c" lines="575-712" />
+
+```c
+int
+_PyCompile_EnterScope(compiler *c, identifier name, int scope_type,
+                       void *key, int lineno, PyObject *private,
+                      _PyCompile_CodeUnitMetadata *umd)
+{
+    struct compiler_unit *u;
+    u = (struct compiler_unit *)PyMem_Calloc(1, sizeof(struct compiler_unit));
+    ...
+    u->u_ste = _PySymtable_Lookup(c->c_st, key);
+    ...
+    u->u_metadata.u_varnames = list2dict(u->u_ste->ste_varnames);
+    u->u_metadata.u_cellvars = dictbytype(u->u_ste->ste_symbols, CELL, DEF_COMP_CELL, 0);
+    ...
+    if (u->u_ste->ste_needs_class_closure) {
+        res = _PyCompile_DictAddObj(u->u_metadata.u_cellvars, &_Py_ID(__class__));
+        ...
+    }
+    if (u->u_ste->ste_needs_classdict) {
+        res = _PyCompile_DictAddObj(u->u_metadata.u_cellvars, &_Py_ID(__classdict__));
+        ...
+    }
+```
+
+A `compiler_unit` is one bytecode-emitting context: one constants
+dict, one names dict, one `instr_sequence`. The symtable is queried
+once per scope via `_PySymtable_Lookup` and its results are turned
+into the four-way dict layout the rest of the file expects
+(varnames, cellvars, freevars, fasthidden). The three implicit cells
+cooked up here, `__class__`, `__classdict__`, and the 3.14-new
+`__conditional_annotations__`, are not declared by user code; the
+symtable flags them and the compiler materialises the cell slot.
+
+Inline comprehension support (PEP 709) is grafted on at the bottom of
+`EnterScope` and reversed at `ExitScope`: when a comprehension is
+inlined into its enclosing function the comprehension's locals are
+temporarily hoisted into the parent's `u_varnames`, then removed when
+the comprehension body finishes emitting. The actual rename dance
+lives in `_PyCompile_TweakInlinedComprehensionScopes` (lines
+1015 to 1094).
+
+### Constant deduplication (lines 318 to 434)
+
+<CpyLink path="Python/compile.c" lines="318-434" />
+
+```c
+PyObject *
+const_cache_insert(PyObject *const_cache, PyObject *o, bool recursive)
+{
+    if (o == Py_None || o == Py_Ellipsis) {
+        return o;
+    }
+    PyObject *key = _PyCode_ConstantKey(o);
+    ...
+    PyObject *t;
+    int res = PyDict_SetDefaultRef(const_cache, key, key, &t);
+    ...
+    if (PyTuple_CheckExact(o)) {
+        Py_ssize_t len = PyTuple_GET_SIZE(o);
+        for (Py_ssize_t i = 0; i < len; i++) {
+            PyObject *item = PyTuple_GET_ITEM(o, i);
+            PyObject *u = const_cache_insert(const_cache, item, recursive);
+            ...
+        }
+    }
+```
+
+The `const_cache` is shared across all units of one compilation. The
+key is `_PyCode_ConstantKey(o)`, which folds `1` and `True` to
+distinct keys (a constant must compare equal *and* have the same
+type) and wraps containers so equal-but-distinct frozensets do not
+collide. Tuples and frozensets are walked recursively so that
+`((1, 2), (1, 2))` ends up with a single inner tuple in the cache;
+this matters for code-object marshal size and for `is`-checks against
+constants emitted by `LOAD_CONST`.
+
+### Codegen dispatch (lines 822 to 864)
+
+<CpyLink path="Python/compile.c" lines="822-864" />
+
+```c
+static int
+compiler_codegen(compiler *c, mod_ty mod)
+{
+    assert(c->u->u_scope_type == COMPILE_SCOPE_MODULE);
+    switch (mod->kind) {
+    case Module_kind:
+        if (_PyCodegen_Body(c, start_location(mod->v.Module.body),
+                            mod->v.Module.body, false) < 0) {
+            return ERROR;
+        }
+        break;
+    case Interactive_kind:
+        ...
+    case Expression_kind:
+        ...
+    case FunctionType_kind:
+        PyErr_SetString(PyExc_SystemError,
+                        "FunctionType ast cannot be compiled");
+        return ERROR;
+    }
+    return SUCCESS;
+}
+```
+
+Four module kinds match the four parser top rules (`file_input`,
+`single_input`, `eval_input`, `func_type_input`). `FunctionType_kind`
+appears only in `ast.parse(..., type_comments=True)` output and has no
+runtime form, so the compiler rejects it explicitly. Everything else
+delegates to `_PyCodegen_Body` or `_PyCodegen_Expression` in
+[`codegen.c`](codegen).
+
+### Optimize and assemble (lines 1412 to 1475)
+
+<CpyLink path="Python/compile.c" lines="1412-1475" />
+
+```c
+static PyCodeObject *
+optimize_and_assemble_code_unit(struct compiler_unit *u, PyObject *const_cache,
+                                int code_flags, PyObject *filename)
+{
+    ...
+    PyObject *consts = consts_dict_keys_inorder(u->u_metadata.u_consts);
+    g = _PyCfg_FromInstructionSequence(u->u_instr_sequence);
+    ...
+    if (_PyCfg_OptimizeCodeUnit(g, consts, const_cache, nlocals,
+                                nparams, u->u_metadata.u_firstlineno) < 0) {
+        goto error;
+    }
+    int stackdepth;
+    int nlocalsplus;
+    if (_PyCfg_OptimizedCfgToInstructionSequence(g, &u->u_metadata, code_flags,
+                                                 &stackdepth, &nlocalsplus,
+                                                 &optimized_instrs) < 0) {
+        goto error;
+    }
+    co = _PyAssemble_MakeCodeObject(&u->u_metadata, const_cache, consts,
+                                    stackdepth, &optimized_instrs, nlocalsplus,
+                                    code_flags, filename);
+```
+
+Five-stage pipeline per code unit. Convert the consts dict into a
+tuple in insertion order; build a CFG from the linear
+`instr_sequence`; run all peephole and dataflow passes
+([`_PyCfg_OptimizeCodeUnit`](flowgraph)); flatten back to a linear
+sequence while computing `stackdepth` and `nlocalsplus`; assemble
+into a `PyCodeObject`. The split keeps `compile.c` agnostic of the
+optimizer's internal representation; it only sees `cfg_builder *`.
+
+### `_PyCompile_CleanDoc` (lines 1516 to 1607)
+
+<CpyLink path="Python/compile.c" lines="1516-1607" />
+
+C reimplementation of `inspect.cleandoc` that runs at compile time
+when a function or class has a docstring. Differs from the
+Python-level helper in one place: leading and trailing blank lines
+are kept so that lineno attribution stays accurate. The actual
+indent-removal algorithm is identical to the Python source modulo
+PyUnicode quirks.
+
+## Notes for the gopy mirror
+
+* `compile/compiler.go` mirrors `_PyCompile_EnterScope` / `ExitScope`
+  and owns the unit stack. The `_PyCompile_*` C symbols become
+  exported methods on `*Compiler`.
+* The constant cache lives in `compile/const_cache.go` and uses a Go
+  map keyed by the result of a `constantKey` function that mirrors
+  `_PyCode_ConstantKey` byte for byte.
+* All AST-walking moved to `compile/codegen_*.go` files in 3.13
+  upstream; gopy preserves that split.
+* `compile/pipeline.go` is the analogue of
+  `optimize_and_assemble_code_unit`; it is the one function the test
+  suite reaches for when round-tripping `dis` output.
+
+## CPython 3.14 changes worth noting
+
+* PEP 649 deferred annotations introduce a third implicit cell,
+  `__conditional_annotations__`, materialised in
+  `_PyCompile_EnterScope` lines 630 to 639.
+* PEP 709 inline comprehensions added the `_PyCompile_Tweak*` /
+  `Revert*` scope-shuffling helpers in 3.12, but in 3.14 the inline
+  decision moved fully into the symtable so this file only applies
+  the rename rather than choosing the transform.
+* The `_PyCompile_CodeGen` and `_PyCompile_Assemble` entries are new:
+  they let `dis` test cases exercise individual pipeline stages
+  without round-tripping through `compile()`.

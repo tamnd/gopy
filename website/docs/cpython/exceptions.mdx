@@ -1,0 +1,130 @@
+---
+title: Exceptions
+description: How CPython raises, catches, chains, and groups exceptions.
+---
+
+# Exceptions
+
+Exceptions in CPython are ordinary objects. They are raised by
+setting per-thread state, propagated by the eval loop's unwind
+protocol, and caught by the exception table baked into each code
+object.
+
+## Source map
+
+| File                                | Role                                              |
+| ----------------------------------- | ------------------------------------------------- |
+| `Python/errors.c`                   | `PyErr_SetString`, `PyErr_Format`, fetch/restore. |
+| `Python/ceval.c`                    | The `error` label and unwind loop.                |
+| `Objects/exceptions.c`              | Built-in exception classes.                       |
+| `Modules/_codecsmodule.c`           | Codec errors.                                     |
+| `Lib/traceback.py`                  | Python-side formatting.                           |
+
+## Raising
+
+A C function raises by calling `PyErr_SetString(type, msg)` or
+`PyErr_Format(type, "...", args)`. Both write three slots on the
+current thread state:
+
+* `curexc_type` -- the class of the exception.
+* `curexc_value` -- the exception instance (allocated if it was
+  not given as an instance).
+* `curexc_traceback` -- the traceback object, attached as the
+  exception's `__traceback__`.
+
+Then the C function returns its failure sentinel. The eval loop
+sees the sentinel, looks at the thread state, and jumps to the
+`error` label.
+
+From Python, `raise X` compiles to `RAISE_VARARGS 1`. The opcode
+pops the exception, stores it in the thread state, and jumps to
+the `error` label.
+
+## Unwind protocol
+
+`error:` runs the following loop:
+
+```c
+for (;;) {
+    int handler = lookup_exception_handler(frame, lasti);
+    if (handler >= 0) {
+        truncate_value_stack(frame, handler.depth);
+        push_exception(frame, exc);
+        frame->prev_instr = code + handler.target;
+        goto resume_dispatch;
+    }
+    pop_frame();
+    if (no_more_frames) {
+        raise_unhandled(exc);
+        return NULL;
+    }
+}
+```
+
+`lookup_exception_handler` binary-searches `co_exceptiontable`
+for an entry whose `[start, end)` byte range covers the current
+`lasti`. The entry tells the loop where to jump and what to leave
+on the stack.
+
+`truncate_value_stack` drops everything down to the recorded
+depth. `push_exception` puts the exception object back on top so
+the handler can bind it.
+
+## Chaining
+
+When an exception is raised inside an `except` arm or a `finally`
+clause, the original exception is preserved as `__context__` on
+the new exception. The eval loop wires this up at the
+`CHECK_EXC_MATCH` step (it stashes the in-flight exception in a
+hidden slot, then later threads it into `__context__` on a new
+raise).
+
+`raise X from Y` sets `__cause__` instead of (or in addition to)
+`__context__`.
+
+## Exception groups (PEP 654)
+
+`ExceptionGroup` lets a handler catch a tree of exceptions and
+selectively re-raise the part it does not handle.
+
+The `except*` syntax compiles to `CHECK_EG_MATCH`, which
+partitions an `ExceptionGroup` into the matched leaves and the
+unmatched leaves. The matched leaves are passed to the handler;
+the unmatched leaves are re-raised as a new (smaller) group.
+
+This is implemented in `_PyExc_PrepReraiseStar` in
+`Python/errors.c`. The opcode `CLEANUP_THROW` finalises the
+group state on exit.
+
+## Re-raising
+
+`raise` with no operand compiles to `RERAISE`, which reads the
+currently-bound exception from the value stack (left there by the
+handler's entry) and jumps back into the unwind loop. The
+exception's traceback is extended with the line where `RERAISE`
+ran.
+
+## Traceback objects
+
+A `PyTracebackObject` is a linked list of `(frame, lasti)` pairs.
+Each unwind step prepends one entry. `traceback.format_exc()`
+walks the chain and renders it; `traceback.print_exception()` adds
+the chained `__context__` / `__cause__` chains.
+
+## Suppressing exceptions
+
+Setting `__suppress_context__ = True` on an exception makes the
+chained context invisible in tracebacks. The `from None` form of
+`raise` sets that flag automatically.
+
+## Exit codes
+
+When an exception escapes the top frame, the interpreter prints
+the traceback via `sys.excepthook` and exits with code 1 (or the
+code given to `sys.exit`).
+
+## Reading order
+
+[Generators](generators) is the next page. Generators tunnel
+exceptions through `gen.throw`, which uses the same unwind
+protocol with `throwflag = 1`.

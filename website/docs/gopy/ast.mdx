@@ -1,0 +1,37 @@
+---
+title: uast
+description: gopy's ast subsystem. Mirrors CPython's design.
+---
+
+# uast
+
+This page describes how gopy implements **ast**. The design follows
+CPython page-for-page. For the upstream reference see
+[`cpython/ast`](../cpython/ast).
+
+## Source map
+
+The Go code lives at the module root in flat packages.
+
+| Package        | Role                                                  |
+| -------------- | ----------------------------------------------------- |
+| (TBD)          | Mirror of the matching CPython source file.           |
+
+## Differences from CPython
+
+```
+Notes on places where gopy intentionally diverges from CPython.
+```
+
+* Go's GC owns memory. There is no `Py_INCREF` / `Py_DECREF`.
+* Bytecode layout, opcodes, and error messages match CPython 3.14 byte for byte.
+* Goroutines back the C threads model where it shows through.
+
+## Status
+
+See the [status table](../manual/status) for which functions in this subsystem are ported and which are pending.
+
+## Cross reference
+
+* CPython companion: [cpython/ast](../cpython/ast).
+* Spec: see `~/notes/Spec/1700/` for the port spec covering this subsystem.

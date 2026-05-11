@@ -1,0 +1,70 @@
+---
+title: Parity
+description: How gopy is held to CPython behaviour, and the test suites that enforce it.
+---
+
+# Parity
+
+gopy is a behavioural twin of CPython. The line that defines
+behavioural parity is intentionally tight: every observable side
+effect should match. That includes return values, exception types,
+exception messages, bytecode emitted, location columns, `.pyc`
+output, and the order in which side effects happen.
+
+## How parity is enforced
+
+### Function-level translation
+
+Every Go function under gopy has a `// CPython:` citation pointing
+to the C function it ports. Reviewers reject patches that add
+helper functions without a CPython counterpart, because divergence
+starts with one extra abstraction.
+
+```go
+// CPython: Python/compile.c:L353 _PyAST_Compile
+func Compile(mod ast.Mod, filename string, optimize int) (*Code, error) {
+    // ...
+}
+```
+
+### Unit tests with golden fixtures
+
+Each subsystem has a corpus of fixtures stored as `.py` input with
+golden output: tokens, AST dumps, disassemblies, `.pyc` bytes,
+program stdout. The fixture is generated once from CPython, then
+gopy is required to reproduce it byte for byte.
+
+### Parity tests
+
+`parser/parity_test.go`, `compile/compiler_test.go`, and
+`vm/eval_test.go` re-run a curated set of programs against both
+gopy and CPython at test time, then diff the results. Anything
+that differs is a parity bug.
+
+### The Python test suite
+
+The `Lib/test/` directory from CPython is vendored under
+`stdlib/test/`. The runner under `v05test/` walks that tree and
+checks pass / fail against the upstream expected status. The
+sweep is the truth of record for parity at the language level.
+
+## Where the bar is
+
+Behaviour that is documented in the language reference is
+load-bearing: same value, same type, same message. Behaviour that
+the language reference calls implementation-defined still has to
+match CPython on byte-equal output unless the spec explicitly says
+the result is unspecified.
+
+CPython implementation details with no Python-visible behaviour
+(internal allocation strategy, header layout, the precise
+addresses returned by `id`) do not need to match.
+
+## What changes when there is a mismatch
+
+Bug in gopy. Fix gopy.
+
+The only carve-out is the surface API style. Go callers see Go
+idioms (interface satisfaction over duck-typing, `error` returns,
+package layout that follows the Go standard library). The
+Python-visible behaviour is unaffected.

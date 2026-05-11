@@ -1,0 +1,74 @@
+---
+title: Objects/
+description: Annotations for CPython 3.14 Objects/ source files (~120k lines, 46 files).
+---
+
+# `Objects/`
+
+The catalogue of built-in types and the protocol dispatch layer. Each
+type has a file: `int` is `longobject.c`, `str` is `unicodeobject.c`,
+`dict` is `dictobject.c`, etc. The spine is `object.c`,
+`typeobject.c`, `abstract.c`.
+
+## File inventory
+
+| File | Lines | Page | Type |
+| ---- | ----: | ---- | ---- |
+| `Objects/abstract.c` | 2947 | [abstract](abstract) | spine |
+| `Objects/boolobject.c` | 227 | (pending) | bool |
+| `Objects/bytearrayobject.c` | 3070 | (pending) | bytearray |
+| `Objects/bytes_methods.c` | 740 | (pending) | bytes/str helpers |
+| `Objects/bytesobject.c` | 3736 | (pending) | bytes |
+| `Objects/call.c` | 1130 | (pending) | call protocol |
+| `Objects/capsule.c` | 366 | (pending) | capsule |
+| `Objects/cellobject.c` | 212 | (pending) | cell |
+| `Objects/classobject.c` | 518 | (pending) | bound method |
+| `Objects/codeobject.c` | 3666 | [codeobject](codeobject) | code |
+| `Objects/complexobject.c` | 1422 | (pending) | complex |
+| `Objects/descrobject.c` | 2082 | (pending) | spine |
+| `Objects/dictobject.c` | 7824 | [dictobject](dictobject) | dict |
+| `Objects/enumobject.c` | 585 | (pending) | enumerate |
+| `Objects/exceptions.c` | 4586 | [exceptions](exceptions) | exceptions |
+| `Objects/fileobject.c` | 548 | (pending) | file |
+| `Objects/floatobject.c` | 2642 | (pending) | float |
+| `Objects/frameobject.c` | 2446 | (pending) | frame |
+| `Objects/funcobject.c` | 1907 | (pending) | function |
+| `Objects/genericaliasobject.c` | 1053 | (pending) | list[int] etc. |
+| `Objects/genobject.c` | 2419 | [genobject](genobject) | generator/coro |
+| `Objects/interpolationobject.c` | 231 | (pending) | interpolation |
+| `Objects/iterobject.c` | 541 | (pending) | zip/map/filter |
+| `Objects/listobject.c` | 4262 | [listobject](listobject) | list |
+| `Objects/longobject.c` | 6871 | [longobject](longobject) | int |
+| `Objects/memoryobject.c` | 3612 | (pending) | memoryview |
+| `Objects/methodobject.c` | 578 | (pending) | method |
+| `Objects/moduleobject.c` | 1440 | (pending) | module |
+| `Objects/namespaceobject.c` | 332 | (pending) | SimpleNamespace |
+| `Objects/object.c` | 3395 | [object](object) | spine |
+| `Objects/obmalloc.c` | 3662 | (pending) | allocator |
+| `Objects/odictobject.c` | 2371 | (pending) | OrderedDict |
+| `Objects/picklebufobject.c` | 224 | (pending) | PickleBuffer |
+| `Objects/rangeobject.c` | 1317 | (pending) | range |
+| `Objects/setobject.c` | 2886 | (pending) | set |
+| `Objects/sliceobject.c` | 708 | (pending) | slice |
+| `Objects/structseq.c` | 795 | (pending) | structseq |
+| `Objects/templateobject.c` | 412 | (pending) | template |
+| `Objects/tupleobject.c` | 1214 | (pending) | tuple |
+| `Objects/typeobject.c` | 12302 | [typeobject](typeobject) | spine |
+| `Objects/typevarobject.c` | 2388 | (pending) | TypeVar etc. |
+| `Objects/unicodectype.c` | 287 | (pending) | str helpers |
+| `Objects/unicodeobject.c` | 16798 | [unicodeobject](unicodeobject) | str |
+| `Objects/unionobject.c` | 599 | (pending) | int | str |
+| `Objects/weakrefobject.c` | 1134 | (pending) | weakref |
+
+Total: 46 files, ~120k lines. `unicodeobject.c` alone is 16k lines
+(PEP 393 kind machinery + all string methods); `typeobject.c` is 12k
+(the metaclass + slot inheritance + `PyType_Ready`); `dictobject.c` is
+8k (combined + split layouts, the watcher hooks).
+
+## Reading order
+
+1. [`object.c`](object): the generic operations and refcount macros.
+2. [`typeobject.c`](typeobject): the metaclass, slot inheritance,
+   `PyType_Ready`.
+3. [`abstract.c`](abstract): the protocol dispatch layer.
+4. Then the per-type files in any order.

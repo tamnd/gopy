@@ -1,0 +1,111 @@
+---
+title: GIL
+description: The global interpreter lock. Acquire and release, the eval breaker, the free-threading build.
+---
+
+# GIL
+
+The global interpreter lock serialises Python-level execution on
+the CPython VM. Only one OS thread can run Python bytecode at a
+time; threads release the lock when they make a syscall or
+explicitly yield, and other threads can pick it up.
+
+## Source map
+
+| File                                  | Role                                          |
+| ------------------------------------- | --------------------------------------------- |
+| `Python/ceval_gil.c`                  | The lock implementation.                      |
+| `Python/ceval.c`                      | The eval-breaker drainer.                     |
+| `Include/internal/pycore_ceval.h`     | The internal hooks.                           |
+| `Python/pystate.c`                    | Thread state and interpreter state.           |
+
+## What the lock protects
+
+The lock protects "the eval loop is running on this thread's
+frame". Concretely, the GIL holder is the only thread allowed to:
+
+* Mutate reference counts of objects shared between threads.
+* Run Python bytecode.
+* Touch the global per-interpreter mutable state (sys.modules,
+  the GC's tracking lists, etc.).
+
+C extensions that want to release the lock around a blocking call
+use the `Py_BEGIN_ALLOW_THREADS` / `Py_END_ALLOW_THREADS` macros.
+Between those macros, the lock is held by no one and other
+threads can run.
+
+## Acquire and release
+
+`take_gil(tstate)` does roughly:
+
+```c
+while (gil_locked && current_holder != tstate) {
+    wait_on_gil_condition(tstate);
+}
+gil_locked = 1;
+current_holder = tstate;
+```
+
+Where `wait_on_gil_condition` is a `pthread_cond_wait` on POSIX
+or a `WaitForSingleObject` on Windows. The condition is signalled
+by `drop_gil`.
+
+`drop_gil(tstate)` does the inverse:
+
+```c
+current_holder = NULL;
+gil_locked = 0;
+signal_one_waiter();
+```
+
+The "switch interval" controls how aggressively the running
+thread yields to a waiter. By default it is 5 ms. When the eval
+breaker bit `_PY_GIL_DROP_REQUESTED_BIT` is set, the eval loop
+will call `drop_gil` then `take_gil` on its next dispatch, giving
+other threads a chance to run.
+
+## The eval breaker
+
+The eval breaker is a per-interpreter bitfield checked on every
+back-edge of the eval loop. Bits:
+
+| Bit                              | Meaning                                       |
+| -------------------------------- | --------------------------------------------- |
+| `_PY_GIL_DROP_REQUESTED_BIT`     | Another thread wants the lock.                |
+| `_PY_SIGNALS_PENDING_BIT`        | A signal handler is waiting to run.           |
+| `_PY_PENDING_CALLS_BIT`          | A pending call (e.g., `Py_AddPendingCall`) is queued. |
+| `_PY_GC_SCHEDULED_BIT`           | The cyclic GC asked to run.                   |
+| `_PY_ASYNC_EXCEPTION_BIT`        | Another thread requested an async exception.  |
+| `_PY_PROFILE_BIT`                | The profiler should fire.                     |
+| `_PY_EVAL_PLEASE_STOP_BIT`       | The interpreter is shutting down.             |
+
+`eval_frame_handle_pending` walks the bitfield in priority order
+on each yield and services each set bit.
+
+## Free-threading (PEP 703)
+
+CPython 3.13 ships an optional **free-threading** build
+(`--disable-gil`). In that build, the GIL is replaced with per-object
+synchronisation (mostly biased reference counts and dict-level
+mutexes) and the eval loop runs concurrently on all threads.
+
+The free-threading build is selectable at compile time and is
+incompatible with C extensions that assume the GIL is held. The
+language semantics are unchanged: the same program produces the
+same result.
+
+## Per-interpreter GIL (PEP 684)
+
+CPython 3.12 introduced sub-interpreters with their own GIL. Each
+`PyInterpreterState` has its own lock. Two threads in different
+sub-interpreters can run Python at the same time even on the
+GIL-equipped build.
+
+The lock state lives on `PyInterpreterState.ceval.gil`. Thread
+states migrate between interpreters by `PyThreadState_Swap`.
+
+## Reading order
+
+[Exceptions](exceptions) is the next piece of the runtime puzzle.
+For the side table that drives the eval breaker on the monitoring
+side, see [Monitor](monitor).

@@ -1,0 +1,268 @@
+---
+title: Parser/lexer/lexer.c
+description: The byte-level scanner. State machine that turns source bytes into tokens.
+cpython_path: Parser/lexer/lexer.c
+cpython_version: "3.14"
+lines: 1635
+status: annotated
+ported_to: parser/lexer/
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Parser/lexer/lexer.c`
+
+<CpyLink path="Parser/lexer/lexer.c" />
+
+The byte-level scanner. Consumes from `tok->cur`, produces `struct
+token` records, drives indent/dedent emission, and handles the
+f-string / t-string mode stack added in 3.12+. Everything is keyed off
+a single `struct tok_state` (defined in `Parser/lexer/state.h`).
+
+Three top-level entry points (`tok_get_normal_mode`,
+`tok_get_fstring_mode`, and the public `_PyTokenizer_Get`) plus a
+collection of helpers.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Parser/lexer/lexer.c" lines="9-23">9-23</Cpy>         | `is_potential_identifier_*` | ASCII + utf-8-lead classification. | `parser/lexer/ident.go` |
+| <Cpy path="Parser/lexer/lexer.c" lines="25-39">25-39</Cpy>       | `TOK_GET_MODE` / `TOK_NEXT_MODE` | F-string mode stack accessors. | `(*Tokenizer).mode` |
+| <Cpy path="Parser/lexer/lexer.c" lines="41-46">41-46</Cpy>       | `FTSTRING_*`, `MAKE_TOKEN` | Common token-emit macros. | `emit*` helpers |
+| <Cpy path="Parser/lexer/lexer.c" lines="59-96">59-96</Cpy>       | `tok_nextc` | Pull next char; refills the line buffer. | `(*Tokenizer).nextc` |
+| <Cpy path="Parser/lexer/lexer.c" lines="99-225">99-225</Cpy>     | `tok_backup` | Push back one char. | `(*Tokenizer).backup` |
+| <Cpy path="Parser/lexer/lexer.c" lines="227-280">227-280</Cpy>   | `_PyLexer_update_ftstring_expr` | Track current f-string expression. | `updateFTStringExpr` |
+| <Cpy path="Parser/lexer/lexer.c" lines="282-362">282-362</Cpy>   | `lookahead` | Multi-char lookahead without consuming. | `lookahead` |
+| <Cpy path="Parser/lexer/lexer.c" lines="364-411">364-411</Cpy>   | `verify_identifier` | UCD check via `unicodedata`. | `verifyIdentifier` |
+| <Cpy path="Parser/lexer/lexer.c" lines="413-499">413-499</Cpy>   | `tok_decimal_tail` | Scan integer/float tail. | `decimalTail` |
+| <Cpy path="Parser/lexer/lexer.c" lines="501-1391">501-1391</Cpy> | `tok_get_normal_mode` | The main scanner. ~890 lines. | `(*Tokenizer).normalMode` |
+| <Cpy path="Parser/lexer/lexer.c" lines="1393-1614">1393-1614</Cpy> | `tok_get_fstring_mode` | Scan inside an f-string / t-string body. | `(*Tokenizer).fstringMode` |
+| <Cpy path="Parser/lexer/lexer.c" lines="1616-1624">1616-1624</Cpy> | `tok_get` | Dispatch on mode stack top. | `(*Tokenizer).Next` |
+| <Cpy path="Parser/lexer/lexer.c" lines="1626-1635">1626-1635</Cpy> | `_PyTokenizer_Get` | Public entry; coerces decode errors to `ERRORTOKEN`. | `(*Tokenizer).Get` |
+
+## Reading
+
+### identifier-character macros (lines 9-23)
+
+<CpyLink path="Parser/lexer/lexer.c" lines="9-23" />
+
+```c
+#define is_potential_identifier_start(c) (\
+              (c >= 'a' && c <= 'z')\
+               || (c >= 'A' && c <= 'Z')\
+               || c == '_'\
+               || (c >= 128))
+
+#define is_potential_identifier_char(c) (\
+              (c >= 'a' && c <= 'z')\
+               || (c >= 'A' && c <= 'Z')\
+               || (c >= '0' && c <= '9')\
+               || c == '_'\
+               || (c >= 128))
+```
+
+The `>= 128` clause is the lead byte of a UTF-8 sequence. The lexer
+admits any non-ASCII byte as a possible identifier character at this
+stage; whether the full code point is actually allowed is checked
+afterwards in `verify_identifier` (<Cpy path="Parser/lexer/lexer.c" lines="364-411">364-411</Cpy>)
+using the Unicode character database.
+
+### `tok_nextc` (lines 59-96)
+
+<CpyLink path="Parser/lexer/lexer.c" lines="59-96" />
+
+```c
+static int
+tok_nextc(struct tok_state *tok)
+{
+    int rc;
+    for (;;) {
+        if (tok->cur != tok->inp) {
+            if ((unsigned int) tok->col_offset >= (unsigned int) INT_MAX) {
+                tok->done = E_COLUMNOVERFLOW;
+                return EOF;
+            }
+            tok->col_offset++;
+            return Py_CHARMASK(*tok->cur++); /* Fast path */
+        }
+        if (tok->done != E_OK) {
+            return EOF;
+        }
+        rc = tok->underflow(tok);
+        ...
+        if (!rc) {
+            tok->cur = tok->inp;
+            return EOF;
+        }
+        tok->line_start = tok->cur;
+
+        if (contains_null_bytes(tok->line_start, tok->inp - tok->line_start)) {
+            _PyTokenizer_syntaxerror(tok, "source code cannot contain null bytes");
+            tok->cur = tok->inp;
+            return EOF;
+        }
+    }
+    Py_UNREACHABLE();
+}
+```
+
+Fast path is one increment of `tok->cur` plus a `Py_CHARMASK` to
+coerce to unsigned. Slow path calls `tok->underflow`, the polymorphic
+refill function installed by the tokenizer factory (file, string,
+readline, utf-8). Two failure modes:
+
+* `col_offset` exceeds `INT_MAX`, which sets `E_COLUMNOVERFLOW`. The
+  column counter wraps at INT_MAX so absurdly long lines are rejected
+  cleanly.
+* The refilled buffer contains a NUL byte. Python source may not
+  contain NUL; the lexer emits `SyntaxError` and stops.
+
+### `verify_identifier` (lines 364-411)
+
+<CpyLink path="Parser/lexer/lexer.c" lines="364-411" />
+
+After we've collected what we thought might be a NAME, decode it as
+UTF-8 and check every code point against the UCD's `XID_Start` /
+`XID_Continue` properties. Bad code points produce a `SyntaxError`
+with a pointer at the offending character. This is what makes `café`
+legal and `¬x` not.
+
+### `tok_get_normal_mode` (lines 501-1391)
+
+<CpyLink path="Parser/lexer/lexer.c" lines="501-1391" />
+
+The bulk of the file. A single function with a `nextline:` label at
+the top and a colossal `switch (c)` over the next character. Inside
+each case it consumes the longest legal token then jumps to `MAKE_TOKEN`.
+
+The indentation block at the head of the function (<Cpy path="Parser/lexer/lexer.c" lines="514-580">514-580</Cpy>):
+
+```c
+/* Get indentation level */
+if (tok->atbol) {
+    int col = 0;
+    int altcol = 0;
+    tok->atbol = 0;
+    int cont_line_col = 0;
+    for (;;) {
+        c = tok_nextc(tok);
+        if (c == ' ') {
+            col++, altcol++;
+        }
+        else if (c == '\t') {
+            col = (col / tok->tabsize + 1) * tok->tabsize;
+            altcol = (altcol / ALTTABSIZE + 1) * ALTTABSIZE;
+        }
+        else if (c == '\014')  {/* Control-L (formfeed) */
+            col = altcol = 0;
+        }
+        ...
+    }
+    ...
+    if (col == tok->indstack[tok->indent]) {
+        /* No change */
+        if (altcol != tok->altindstack[tok->indent]) {
+            return MAKE_TOKEN(_PyTokenizer_indenterror(tok));
+        }
+    }
+    else if (col > tok->indstack[tok->indent]) {
+        ...
+```
+
+Two parallel columns are tracked: `col` uses the configured tab size,
+`altcol` uses `ALTTABSIZE = 1`. They must agree at every indent level;
+disagreement is the classic "inconsistent use of tabs and spaces"
+`TabError`.
+
+Order of operations inside the main switch:
+
+1. **Leading whitespace and indentation.** Tabs and spaces are
+   counted; when the first non-whitespace character of a logical line
+   is reached, the column is compared against the indent stack. A
+   deeper column pushes one INDENT token; a shallower column pops and
+   emits one DEDENT per level.
+2. **Comment handling.** A `#` starts a comment; the lexer either
+   skips to end of line or emits a `TYPE_COMMENT` if the comment begins
+   with `# type:`.
+3. **Newlines.** A real `\n` outside brackets emits NEWLINE; inside
+   brackets it is silently consumed (implicit line joining).
+4. **String prefixes.** `r`, `b`, `u`, `f`, `t`, plus all the
+   case-insensitive combos. After parsing the prefix the lexer peeks
+   for `'` or `"`; if neither, it backs up and falls through to NAME.
+5. **f-strings and t-strings.** When the prefix is `f` or `t` the
+   lexer emits `FSTRING_START` / `TSTRING_START` and pushes a new
+   `tokenizer_mode` onto the stack. The next call to
+   `_PyTokenizer_Get` dispatches to `tok_get_fstring_mode`.
+6. **Numbers.** Hex/oct/bin prefixes are handled inline; otherwise
+   `tok_decimal_tail` consumes digits and underscores, plus optional
+   `.`, exponent, and `j` suffix.
+7. **Operators.** The lexer probes one, then two, then three
+   characters via `_PyToken_OneChar` / `_PyToken_TwoChars` /
+   `_PyToken_ThreeChars` (see [`token.c`](token)), keeping the longest
+   match.
+
+### `tok_get_fstring_mode` (lines 1393-1614)
+
+<CpyLink path="Parser/lexer/lexer.c" lines="1393-1614" />
+
+Scans inside an f-string body. The tricky part is the alternation
+between `FSTRING_MIDDLE` chunks (raw text and `{{` / `}}` escapes) and
+the embedded expressions inside `{...}`. Each `{` pops back to normal
+mode (with the f-string mode still on the stack underneath); each
+matching `}` pops the normal mode back off and resumes scanning the
+template. The function also handles `!r/!s/!a` conversion and
+`:format` format-spec.
+
+PEP 750 t-strings reuse the same function via the `string_kind` field
+on `tokenizer_mode`; the only difference is which token kinds get
+emitted (`FTSTRING_MIDDLE` / `FTSTRING_END` macros at <Cpy path="Parser/lexer/lexer.c" lines="41-42">41-42</Cpy>).
+
+### `tok_get` and `_PyTokenizer_Get` (lines 1616-1635)
+
+<CpyLink path="Parser/lexer/lexer.c" lines="1616-1635" />
+
+```c
+static int
+tok_get(struct tok_state *tok, struct token *token)
+{
+    tokenizer_mode *current_tok = TOK_GET_MODE(tok);
+    if (current_tok->kind == TOK_REGULAR_MODE) {
+        return tok_get_normal_mode(tok, current_tok, token);
+    } else {
+        return tok_get_fstring_mode(tok, current_tok, token);
+    }
+}
+
+int
+_PyTokenizer_Get(struct tok_state *tok, struct token *token)
+{
+    int result = tok_get(tok, token);
+    if (tok->decoding_erred) {
+        result = ERRORTOKEN;
+        tok->done = E_DECODE;
+    }
+    return result;
+}
+```
+
+The public entry coerces a decode error to `ERRORTOKEN` with
+`E_DECODE`. Keeping the coercion here means every internal caller can
+ignore the decode-error flag.
+
+## Notes for the gopy mirror
+
+* `parser/lexer/lexer.go` follows the same structure: one `normalMode`
+  method and one `fstringMode` method.
+* The `tok_state` -> `Tokenizer` rename is the only structural change.
+* gopy uses `rune` for character classification but keeps the byte
+  cursor; the `>= 128` lead-byte trick still applies.
+* The indent stack is a `[]int`; the f-string mode stack is a slice
+  of `mode` structs.
+
+## CPython 3.14 changes worth noting
+
+* `EXCLAMATION` token added for f-string conversion syntax.
+* `TSTRING_*` triplet added for PEP 750.
+* `# type: ignore[code]` form is recognised; the bracketed code is
+  captured in `token.type_ignores`.

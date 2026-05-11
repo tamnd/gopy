@@ -1,0 +1,124 @@
+---
+title: sys.monitoring
+description: PEP 669 monitoring. How CPython instruments bytecode in place to fire profiling events.
+---
+
+# `sys.monitoring`
+
+PEP 669 introduces a uniform monitoring API. It replaces the
+historical `sys.settrace` / `sys.setprofile` pair with a faster,
+more granular system that instruments bytecode in place.
+
+## Source map
+
+| File                                       | Role                                             |
+| ------------------------------------------ | ------------------------------------------------ |
+| `Python/instrumentation.c`                 | Shadow-walk, instrumented opcode rewrites.       |
+| `Python/legacy_tracing.c`                  | Bridge from `sys.settrace` to `sys.monitoring`.  |
+| `Modules/sysmodule.c`                      | The Python-visible API.                          |
+| `Include/internal/pycore_instruments.h`    | Tool slots and event flags.                      |
+
+## Mental model
+
+`sys.monitoring` exposes:
+
+* **Tools.** A tool is a registered profiler. Up to 8 tools can be
+  active at once, identified by integers 0 through 7. CPython
+  reserves IDs 5 (debugger), 6 (coverage), and 7 (profiler).
+* **Events.** A fixed enumeration of 19 event kinds: PY_START,
+  PY_RESUME, PY_RETURN, PY_YIELD, CALL, C_CALL, C_RETURN,
+  C_RAISE, LINE, INSTRUCTION, JUMP, BRANCH, STOP_ITERATION,
+  EXCEPTION_HANDLED, RAISE, RERAISE, PY_UNWIND, PY_THROW,
+  PY_ABORT.
+* **Callbacks.** A tool registers a Python function for an
+  (event, code object) pair. The function is called when the
+  event fires inside that code object.
+
+## How firing works
+
+Without monitoring, the eval loop runs the Tier-1 opcodes
+directly. When a code object's instrumentation is enabled,
+`_Py_Instrument` walks its bytecode and rewrites each opcode that
+could fire an event into its `INSTRUMENTED_*` shadow variant.
+Examples:
+
+* `RESUME` -> `INSTRUMENTED_RESUME`.
+* `RETURN_VALUE` -> `INSTRUMENTED_RETURN_VALUE`.
+* `JUMP_BACKWARD` -> `INSTRUMENTED_JUMP_BACKWARD`.
+* `FOR_ITER` -> `INSTRUMENTED_FOR_ITER`.
+* `LINE` itself is a synthetic event fired on line transitions
+  detected at runtime by walking `co_linetable`.
+
+The shadow variant runs the same logic plus a call into
+`_Py_call_instrumentation`, which looks up the per-tool callbacks
+for the firing event and dispatches them.
+
+## Per-code tool slots
+
+Each `PyCodeObject` has a `_co_monitoring` substructure with:
+
+* A bitset of active tools.
+* A per-event bitset of active tools for that event.
+* A pointer to the original (non-instrumented) bytecode, so the
+  shadow walk can be undone.
+
+`use_tool_id` reserves a tool slot for a (code, event) pair;
+`free_tool_id` releases it. The slot bitset is read on every
+shadow-opcode dispatch.
+
+## The shadow walk
+
+`_Py_Instrument` walks the bytecode once per change. For each
+position whose opcode kind matches one of the events the tools
+care about, it:
+
+1. Looks up the matching `INSTRUMENTED_*` opcode in
+   `instrumented_opcodes[]`.
+2. Writes that opcode in place of the original.
+3. Stores the original in `_co_monitoring->original_opcodes` so
+   that a later "disable" can restore it.
+
+Because the shadow variant has the same operand layout as the
+original, the inline caches survive the rewrite.
+
+## Line and branch events
+
+Line events fire on every line transition. The shadow opcode is
+`INSTRUMENTED_LINE`; its body walks the location table from the
+previous `lasti` to the current `lasti` and fires `LINE` once for
+each line crossed.
+
+Branch events fire on every conditional jump. `BRANCH_LEFT` and
+`BRANCH_RIGHT` flavours distinguish the taken arm from the
+fall-through arm.
+
+## Legacy tracing bridge
+
+`sys.settrace(fn)` and `sys.setprofile(fn)` are still supported.
+The bridge in `legacy_tracing.c` registers a synthetic tool that
+forwards each fired event to the registered trace / profile
+function with the call shape the legacy API expects (frame, event
+name, arg).
+
+This means the new instrumentation pays for the legacy contract
+too: when `sys.settrace` is on, every line transition fires a
+LINE event that the bridge turns into a `('line', frame, None)`
+call.
+
+## Cost
+
+When no tool is registered, `_co_monitoring` is `NULL`, no shadow
+walk has been done, and the eval loop dispatches the original
+opcodes. The cost is one pointer load per code object on
+allocation and nothing else.
+
+When a tool is registered, the cost is one branch per shadow
+opcode plus one Python-level call per fire. The branch is
+predicted very accurately by modern CPUs because the per-event
+slot is 0 most of the time.
+
+## Reading order
+
+[GIL](gil) covers the lock-and-yield protocol the monitor relies
+on, in the case where one thread instruments while another is
+running.

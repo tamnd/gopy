@@ -1,0 +1,302 @@
+---
+title: Python/ceval.c
+description: The bytecode eval loop. Frame setup, recursion check, tier-2 entry, exception unwinding.
+cpython_path: Python/ceval.c
+cpython_version: "3.14"
+lines: 3725
+status: annotated
+ported_to: vm/
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Python/ceval.c`
+
+<CpyLink path="Python/ceval.c" />
+
+The bytecode interpreter. `_PyEval_EvalFrameDefault` is the function
+that runs Python code; everything else in the file exists to set up,
+support, or unwind from that loop. The opcode switch itself is not
+written by hand. It lives in
+[`generated_cases.c.h`](generated-cases), produced from
+`Python/bytecodes.c` by `Tools/cases_generator/`. `ceval.c` includes
+that file inline at <Cpy path="Python/ceval.c" lines="1254">line 1254</Cpy>.
+
+In 3.14 the file also contains the tier-2 micro-op interpreter (the
+`enter_tier_two:` block), the recursion-limit machinery, the
+generator-throw plumbing, the exception-table search, and the
+argument-binding code used when a Python function is called.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Python/ceval.c" lines="144-195">144-195</Cpy>    | `dump_item` / `dump_stack` | Debug printers for the value stack. | `vm/lltrace.go` |
+| <Cpy path="Python/ceval.c" lines="197-281">197-281</Cpy>    | `lltrace_*` | `PYTHONLLTRACE` per-instruction trace. | `vm/lltrace.go` |
+| <Cpy path="Python/ceval.c" lines="310-330">310-330</Cpy>    | `Py_GetRecursionLimit` / `Py_SetRecursionLimit` | Public C limit accessors. | `vm/recursion.go` |
+| <Cpy path="Python/ceval.c" lines="332-401">332-401</Cpy>    | `_Py_ReachedRecursionLimitWithMargin` / `_Py_EnterRecursiveCallUnchecked` | C-stack reserve check. | `vm/recursion.go` |
+| <Cpy path="Python/ceval.c" lines="442-549">442-549</Cpy>    | `hardware_stack_limits` / `tstate_set_stack` / `_Py_InitializeRecursionLimits` | Read pthread guard size into `tstate`. | `vm/recursion_init.go` |
+| <Cpy path="Python/ceval.c" lines="586-724">586-724</Cpy>    | `_Py_CheckRecursiveCall` | The slow path: trampoline / signal handling on overflow. | `vm/recursion.go` |
+| <Cpy path="Python/ceval.c" lines="728-948">728-948</Cpy>    | `_PyEval_MatchKeys` / `_PyEval_MatchClass` | `match` statement helpers. | `vm/match.go` |
+| <Cpy path="Python/ceval.c" lines="956-1003">956-1003</Cpy>  | `PyEval_EvalCode` / `PyEval_EvalFrame` / `PyEval_EvalFrameEx` | Public entry points; thin wrappers. | `vm/eval_public.go` |
+| <Cpy path="Python/ceval.c" lines="1145-1255">1145-1255</Cpy>| `_PyEval_EvalFrameDefault` head | Recursion enter, entry-frame push, throwflag, jump to `start_frame`. | `vm/eval.go` |
+| <Cpy path="Python/ceval.c" lines="1258-1385">1258-1385</Cpy>| `enter_tier_two:` block | Tier-2 micro-op dispatch loop. | `vm/uop_exec.go` |
+| <Cpy path="Python/ceval.c" lines="1386-1610">1386-1610</Cpy>| `format_missing` / `missing_arguments` / `too_many_positional` / `positional_only_passed_as_keyword` | Call-error diagnostics. | `vm/call_errors.go` |
+| <Cpy path="Python/ceval.c" lines="1611-1675">1611-1675</Cpy>| `get_exception_handler` | Binary-then-linear search over `co_exceptiontable`. | `vm/eval_unwind.go:findHandler` |
+| <Cpy path="Python/ceval.c" lines="1678-1925">1678-1925</Cpy>| `initialize_locals` | Bind positional, keyword, `*args`, `**kwargs` into the frame. | `vm/eval_call.go:initLocals` |
+| <Cpy path="Python/ceval.c" lines="1927-1966">1927-1966</Cpy>| `clear_thread_frame` / `clear_gen_frame` / `_PyEval_FrameClearAndPop` | Frame teardown. | `vm/frame_pop.go` |
+| <Cpy path="Python/ceval.c" lines="1968-2113">1968-2113</Cpy>| `_PyEvalFramePushAndInit*` / `_PyEval_Vector` | Build a frame for a Python call. | `vm/eval_call.go` |
+| <Cpy path="Python/ceval.c" lines="2191-2288">2191-2288</Cpy>| `do_raise` | Implements the `raise` statement. | `vm/eval_unwind.go:doRaise` |
+| <Cpy path="Python/ceval.c" lines="2295-2386">2295-2386</Cpy>| `_PyEval_ExceptionGroupMatch` | `except*` matching. | `vm/eval_unwind.go:groupMatch` |
+| <Cpy path="Python/ceval.c" lines="2387-2490">2387-2490</Cpy>| `_PyEval_UnpackIterableStackRef` | `UNPACK_SEQUENCE` / `UNPACK_EX` runtime. | `vm/eval_simple.go:unpack` |
+| <Cpy path="Python/ceval.c" lines="2491-2605">2491-2605</Cpy>| `do_monitor_exc` / `monitor_*` | PEP 669 monitoring callbacks. | `vm/monitor.go` |
+| <Cpy path="Python/ceval.c" lines="2606-2710">2606-2710</Cpy>| `PyEval_SetProfile` / `PyEval_SetTrace` (+`AllThreads`) | Legacy sys.settrace / setprofile hooks. | `vm/trace_legacy.go` |
+
+The remaining ~1000 lines after 2720 cover the rest of the monitoring
+API, the eval-breaker pending-call queue, and the cross-interpreter
+audit hooks.
+
+## Reading
+
+### Public entry points (lines 956 to 1003)
+
+<CpyLink path="Python/ceval.c" lines="956-1003" />
+
+```c
+PyObject *
+PyEval_EvalCode(PyObject *co, PyObject *globals, PyObject *locals)
+{
+    ...
+    PyObject *res = PyEval_EvalCodeEx(co, globals, locals,
+                                      NULL, 0, NULL, 0, NULL, 0, NULL,
+                                      NULL);
+    ...
+    return res;
+}
+
+PyObject *
+PyEval_EvalFrame(PyFrameObject *f)
+{
+    return _PyEval_EvalFrame(_PyThreadState_GET(), f->f_frame, 0);
+}
+
+PyObject *
+PyEval_EvalFrameEx(PyFrameObject *f, int throwflag)
+{
+    return _PyEval_EvalFrame(_PyThreadState_GET(), f->f_frame, throwflag);
+}
+```
+
+These exist for backward compatibility. `PyEval_EvalCode` is what the
+`exec()` builtin and `PyRun_*` reach for; both legacy frame entries
+hop straight to `_PyEval_EvalFrame`, which itself just calls the
+interpreter's `eval_frame` hook. The hook is `_PyEval_EvalFrameDefault`
+unless a debugger has replaced it.
+
+### `_PyEval_EvalFrameDefault` head (lines 1145 to 1255)
+
+<CpyLink path="Python/ceval.c" lines="1145-1255" />
+
+```c
+PyObject* _Py_HOT_FUNCTION _PyEval_EvalFrameDefault(
+        PyThreadState *tstate, _PyInterpreterFrame *frame, int throwflag)
+{
+    _Py_EnsureTstateNotNULL(tstate);
+    CALL_STAT_INC(pyeval_calls);
+    ...
+    _PyEntryFrame entry;
+
+    if (_Py_EnterRecursiveCallTstate(tstate, "")) {
+        assert(frame->owner != FRAME_OWNED_BY_INTERPRETER);
+        _PyEval_FrameClearAndPop(tstate, frame);
+        return NULL;
+    }
+```
+
+Three things happen up front. First, the C recursion counter is bumped
+and checked against the stack-guard reservation computed by
+`_Py_InitializeRecursionLimits` (<Cpy path="Python/ceval.c" lines="536-549">536-549</Cpy>);
+overflow tears the frame down without entering the loop. Second, an
+`_PyEntryFrame` is laid down on the C stack as a sentinel. Its
+`instr_ptr` points at
+`_Py_INTERPRETER_TRAMPOLINE_INSTRUCTIONS + 1`, an instruction stream
+ending in `INTERPRETER_EXIT` which is what eventually returns control
+to the C caller. Third, if `throwflag` is set (the caller is
+`generator.throw`) the code skips the `RESUME` opcode by jumping
+straight to `error`, having first re-armed instrumentation via
+`_Py_Instrument`.
+
+The tier-1 dispatch loop lives in `generated_cases.c.h`; it is
+included inline below `goto start_frame;` (<Cpy path="Python/ceval.c" lines="1253-1254">1253-1254</Cpy>),
+so the cases compile as part of this function rather than as a
+separate translation unit. That is what makes computed-goto dispatch
+possible: every opcode body is a label in `_PyEval_EvalFrameDefault`.
+
+### Tier-2 entry (lines 1258 to 1385)
+
+<CpyLink path="Python/ceval.c" lines="1258-1385" />
+
+Tier 2 is entered from a `_TIER2_RESUME_CHECK` uop emitted into the
+tier-1 stream by the optimizer. The block at `enter_tier_two:` sets
+`next_uop` to the executor's first micro-op then drops into a dispatch
+loop that switches on `uop->opcode`. The bodies for those uops are
+included from
+[`executor_cases.c.h`](executor-cases), the tier-2 analogue of
+`generated_cases.c.h`.
+
+When `_Py_JIT` is defined the block compiles to `assert(0);`: the JIT
+takes over the executor dispatch entirely and `enter_tier_two:` is
+unreachable.
+
+### `get_exception_handler` (lines 1628 to 1675)
+
+<CpyLink path="Python/ceval.c" lines="1628-1675" />
+
+```c
+static int
+get_exception_handler(PyCodeObject *code, int index,
+                      int *level, int *handler, int *lasti)
+{
+    unsigned char *start = (unsigned char *)PyBytes_AS_STRING(code->co_exceptiontable);
+    unsigned char *end = start + PyBytes_GET_SIZE(code->co_exceptiontable);
+    if (end - start > MAX_LINEAR_SEARCH) {
+        int offset;
+        parse_varint(start, &offset);
+        if (offset > index) {
+            return 0;
+        }
+        do {
+            unsigned char * mid = start + ((end-start)>>1);
+            mid = scan_back_to_entry_start(mid);
+            parse_varint(mid, &offset);
+            if (offset > index) {
+                end = mid;
+            }
+            else {
+                start = mid;
+            }
+        } while (end - start > MAX_LINEAR_SEARCH);
+    }
+    ...
+}
+```
+
+`co_exceptiontable` is a varint-encoded byte string laid out as
+(`start`, `size`, `handler`, `depth<<1 | lasti`) per entry. Entries
+are not fixed width, so random access starts with a binary chop that
+brackets the index, then a linear scan up to `MAX_LINEAR_SEARCH = 32`
+bytes from the bracket. `scan_back_to_entry_start`
+(<Cpy path="Python/ceval.c" lines="1611-1616">1611-1616</Cpy>) finds
+the entry boundary by walking backwards over bytes whose high bit is
+clear, the varint terminator bit. The two-stage search keeps the hot
+path branchless on small functions.
+
+### `initialize_locals` (lines 1678 to 1925)
+
+<CpyLink path="Python/ceval.c" lines="1678-1925" />
+
+The argument-binding rules. Given a `PyFunctionObject`, an argument
+array, a keyword names tuple, and the new `_PyInterpreterFrame`, it
+copies positional arguments into `frame->localsplus[0..argcount]`,
+builds the `*args` tuple from the overflow, walks the keyword names
+calling `PyDict_SetItem` into `**kwargs` if the slot is not a known
+parameter, then applies defaults from `func->func_defaults` and
+`func->func_kwdefaults`. Failure cases dispatch into
+`missing_arguments`, `too_many_positional`, or
+`positional_only_passed_as_keyword`, each formatting a `TypeError`
+message that matches CPython's reference exactly.
+
+The function is the single source of truth for Python's calling
+convention. Anyone porting the eval loop must reproduce it byte for
+byte; small deviations (default ordering, name precedence between
+positional and keyword) show up as message-level test failures.
+
+### `do_raise` (lines 2191 to 2288)
+
+<CpyLink path="Python/ceval.c" lines="2191-2288" />
+
+```c
+static int
+do_raise(PyThreadState *tstate, PyObject *exc, PyObject *cause)
+{
+    PyObject *type = NULL, *value = NULL;
+
+    if (exc == NULL) {
+        /* Reraise */
+        _PyErr_StackItem *exc_info = _PyErr_GetTopmostException(tstate);
+        exc = exc_info->exc_value;
+        if (Py_IsNone(exc) || exc == NULL) {
+            _PyErr_SetString(tstate, PyExc_RuntimeError,
+                             "No active exception to reraise");
+            return 0;
+        }
+        Py_INCREF(exc);
+        assert(PyExceptionInstance_Check(exc));
+        _PyErr_SetRaisedException(tstate, exc);
+        return 1;
+    }
+    ...
+}
+```
+
+Three input shapes. `raise` with no expression looks at
+`tstate->exc_info` for the currently handled exception; a bare reraise
+outside an except block is the canonical `RuntimeError`. `raise Cls`
+calls the class with no arguments to get an instance, then re-checks
+that the call actually returned a `BaseException` subclass (a user
+`__new__` is free to return anything). `raise inst` accepts the
+instance directly. The `cause` arm handles `raise X from Y`, which
+sets `__cause__` and (in the eval loop, not here) `__suppress_context__`.
+
+Return value contract: 1 means the active exception was restored (the
+reraise path); 0 means a new exception was set in `tstate` via
+`_PyErr_SetObject`. The caller, the `RAISE_VARARGS` opcode, treats
+both the same for unwinding purposes; the distinction matters for
+PEP 657 location attribution.
+
+### `_PyEval_ExceptionGroupMatch` (lines 2295 to 2386)
+
+<CpyLink path="Python/ceval.c" lines="2295-2386" />
+
+Implements `except*`. Given an exception value and a type tuple,
+returns a `(matched, rest)` pair where `matched` is a new
+`ExceptionGroup` containing the leaves whose type matches and `rest`
+is the residual group (or `Py_None` if everything matched). The split
+delegates to `BaseExceptionGroup.split` on the value, which lives in
+`Objects/exceptions.c`. The wrapper here exists because the bytecode
+(`CHECK_EG_MATCH`) needs cause/context propagation onto the matched
+subgroup that the Python-level API does not provide.
+
+## gopy mirror
+
+The Go port lays the file out as several files under `vm/`:
+
+* `vm/eval.go` holds the dispatch loop. The opcode switch is generated
+  by `gen/bytecodes/` from a hand-maintained `vm/bytecodes.txt` that
+  tracks `Python/bytecodes.c` opcode by opcode.
+* `vm/eval_call.go` mirrors `initialize_locals` and the frame-push
+  helpers.
+* `vm/eval_unwind.go` mirrors `get_exception_handler`, `do_raise`,
+  and the `except*` group match.
+* `vm/recursion.go` mirrors the stack-guard / margin logic but uses
+  goroutine stack semantics: the C-stack check becomes a counter
+  compared against `runtime.Stack`'s sampled size.
+
+The tier-2 micro-op interpreter lives at `vm/uop_exec.go`. The JIT
+fork is intentionally not ported (gopy has no JIT yet); the equivalent
+of `_Py_JIT` is permanently undefined.
+
+## CPython 3.14 changes worth noting
+
+* `_PyEntryFrame` replaces the 3.13 sentinel allocation; an entry
+  frame is now zero-allocation on the C stack.
+* `_PyEval_MatchKeys` switched from `PyDict_Contains` per key to a
+  single pass over the subject dict, fixing O(n*m) match-statement
+  worst case.
+* `monitor_throw` (PEP 669) is invoked from the `throwflag` arm. In
+  3.13 the throw path skipped instrumentation; that was a bug fixed by
+  gh-119180.
+* The PEP 657 `do_raise` instrumentation hook (`PY_RAISE` event) fires
+  from `_PyErr_SetRaisedException`, not from here, so this function is
+  unchanged from 3.13 on the surface but its callers report different
+  locations.

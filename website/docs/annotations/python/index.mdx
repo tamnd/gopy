@@ -1,0 +1,144 @@
+---
+title: Python/
+description: Annotations for CPython 3.14 Python/ source files (~166k lines, 114 files).
+---
+
+# `Python/`
+
+The heart of CPython. Contains the compiler chain (`compile.c`,
+`codegen.c`, `flowgraph.c`, `assemble.c`, `symtable.c`, `ast.c`), the
+eval loop (`ceval.c`, `bytecodes.c`, `generated_cases.c.h`), the
+specializer (`specialize.c`), the Tier-2 optimizer (`optimizer.c`),
+sys.monitoring (`instrumentation.c`), the GIL (`ceval_gil.c`), the GC
+(`gc.c`, `gc_free_threading.c`), and the import machinery
+(`import.c`).
+
+## File inventory
+
+| File | Lines | Page | Subsystem |
+| ---- | ----: | ---- | --------- |
+| `Python/_contextvars.c` | 68 | (pending) | misc |
+| `Python/_warnings.c` | 1691 | (pending) | misc |
+| `Python/asdl.c` | 6 | (pending) | compile |
+| `Python/assemble.c` | 802 | (pending) | compile |
+| `Python/ast_preprocess.c` | 990 | (pending) | compile |
+| `Python/ast_unparse.c` | 1029 | (pending) | compile |
+| `Python/ast.c` | 1091 | (pending) | compile |
+| `Python/bltinmodule.c` | 3497 | (pending) | runtime |
+| `Python/bootstrap_hash.c` | 598 | (pending) | misc |
+| `Python/brc.c` | 208 | (pending) | gc-threading |
+| `Python/bytecodes.c` | 5550 | [bytecodes](bytecodes) | eval |
+| `Python/ceval_gil.c` | 1434 | [ceval-gil](ceval-gil) | eval |
+| `Python/ceval.c` | 3725 | [ceval](ceval) | eval |
+| `Python/codecs.c` | 1708 | (pending) | misc |
+| `Python/codegen.c` | 6483 | [codegen](codegen) | compile |
+| `Python/compile.c` | 1753 | [compile](compile) | compile |
+| `Python/context.c` | 1359 | (pending) | misc |
+| `Python/critical_section.c` | 205 | (pending) | gc-threading |
+| `Python/crossinterp.c` | 3304 | (pending) | misc |
+| `Python/dtoa.c` | 2843 | (pending) | misc |
+| `Python/dup2.c` | 37 | (pending) | misc |
+| `Python/dynamic_annotations.c` | 154 | (pending) | misc |
+| `Python/dynload_hpux.c` | 76 | (pending) | misc |
+| `Python/dynload_shlib.c` | 113 | (pending) | misc |
+| `Python/dynload_stub.c` | 9 | (pending) | misc |
+| `Python/dynload_win.c` | 329 | (pending) | misc |
+| `Python/emscripten_signal.c` | 54 | (pending) | misc |
+| `Python/emscripten_syscalls.c` | 319 | (pending) | misc |
+| `Python/emscripten_trampoline_inner.c` | 38 | (pending) | misc |
+| `Python/emscripten_trampoline.c` | 118 | (pending) | misc |
+| `Python/errors.c` | 2069 | [errors](errors) | runtime |
+| `Python/fileutils.c` | 3112 | (pending) | runtime |
+| `Python/flowgraph.c` | 4165 | [flowgraph](flowgraph) | compile |
+| `Python/formatter_unicode.c` | 1726 | (pending) | runtime |
+| `Python/frame.c` | 159 | (pending) | eval |
+| `Python/frozen.c` | 132 | (pending) | runtime |
+| `Python/frozenmain.c` | 99 | (pending) | runtime |
+| `Python/future.c` | 119 | (pending) | compile |
+| `Python/gc_free_threading.c` | 3006 | (pending) | gc-threading |
+| `Python/gc_gil.c` | 17 | (pending) | gc-threading |
+| `Python/gc.c` | 2057 | [gc](gc) | gc-threading |
+| `Python/getargs.c` | 2863 | (pending) | runtime |
+| `Python/getcompiler.c` | 27 | (pending) | runtime |
+| `Python/getcopyright.c` | 23 | (pending) | runtime |
+| `Python/getopt.c` | 163 | (pending) | runtime |
+| `Python/getplatform.c` | 12 | (pending) | runtime |
+| `Python/getversion.c` | 34 | (pending) | runtime |
+| `Python/hamt.c` | 2885 | (pending) | misc |
+| `Python/hashtable.c` | 424 | (pending) | misc |
+| `Python/import.c` | 4956 | [import](import) | runtime |
+| `Python/importdl.c` | 520 | (pending) | runtime |
+| `Python/index_pool.c` | 197 | (pending) | gc-threading |
+| `Python/initconfig.c` | 4751 | (pending) | runtime |
+| `Python/instruction_sequence.c` | 483 | (pending) | compile |
+| `Python/instrumentation.c` | 3174 | (pending) | eval |
+| `Python/interpconfig.c` | 269 | (pending) | runtime |
+| `Python/intrinsics.c` | 287 | (pending) | eval |
+| `Python/jit.c` | 523 | (pending) | eval |
+| `Python/legacy_tracing.c` | 781 | (pending) | eval |
+| `Python/lock.c` | 638 | (pending) | gc-threading |
+| `Python/marshal.c` | 2163 | (pending) | compile |
+| `Python/modsupport.c` | 673 | (pending) | runtime |
+| `Python/mysnprintf.c` | 80 | (pending) | misc |
+| `Python/mystrtoul.c` | 297 | (pending) | misc |
+| `Python/object_stack.c` | 66 | (pending) | gc-threading |
+| `Python/optimizer_analysis.c` | 656 | (pending) | eval |
+| `Python/optimizer_bytecodes.c` | 1107 | (pending) | eval |
+| `Python/optimizer_symbols.c` | 880 | (pending) | eval |
+| `Python/optimizer.c` | 1755 | [optimizer](optimizer) | eval |
+| `Python/parking_lot.c` | 442 | (pending) | gc-threading |
+| `Python/pathconfig.c` | 471 | (pending) | runtime |
+| `Python/perf_jit_trampoline.c` | 1363 | (pending) | misc |
+| `Python/perf_trampoline.c` | 634 | (pending) | misc |
+| `Python/preconfig.c` | 978 | (pending) | runtime |
+| `Python/pyarena.c` | 207 | (pending) | misc |
+| `Python/pyctype.c` | 214 | (pending) | misc |
+| `Python/pyfpe.c` | 18 | (pending) | misc |
+| `Python/pyhash.c` | 498 | (pending) | misc |
+| `Python/pylifecycle.c` | 3630 | (pending) | runtime |
+| `Python/pymath.c` | 19 | (pending) | misc |
+| `Python/pystate.c` | 3261 | (pending) | misc |
+| `Python/pystrcmp.c` | 30 | (pending) | misc |
+| `Python/pystrhex.c` | 171 | (pending) | misc |
+| `Python/pystrtod.c` | 1286 | (pending) | misc |
+| `Python/Python-ast.c` | 18485 | (pending) | compile |
+| `Python/Python-tokenize.c` | 445 | (pending) | misc |
+| `Python/pythonrun.c` | 1737 | (pending) | runtime |
+| `Python/pytime.c` | 1356 | (pending) | misc |
+| `Python/qsbr.c` | 290 | (pending) | gc-threading |
+| `Python/remote_debugging.c` | 401 | (pending) | misc |
+| `Python/specialize.c` | 3232 | [specialize](specialize) | eval |
+| `Python/stackrefs.c` | 219 | (pending) | eval |
+| `Python/structmember.c` | 382 | (pending) | runtime |
+| `Python/suggestions.c` | 206 | (pending) | runtime |
+| `Python/symtable.c` | 3266 | [symtable](symtable) | compile |
+| `Python/sysmodule.c` | 4522 | (pending) | runtime |
+| `Python/thread.c` | 301 | (pending) | gc-threading |
+| `Python/traceback.c` | 1473 | (pending) | runtime |
+| `Python/tracemalloc.c` | 1489 | (pending) | misc |
+| `Python/uniqueid.c` | 232 | (pending) | gc-threading |
+| `Python/ceval_macros.h` | 439 | (pending) | eval |
+| `Python/condvar.h` | 315 | (pending) | gc-threading |
+| `Python/config_common.h` | 36 | (pending) | misc |
+| `Python/crossinterp_data_lookup.h` | 835 | (pending) | misc |
+| `Python/crossinterp_exceptions.h` | 199 | (pending) | misc |
+| `Python/executor_cases.c.h` | 7164 | (pending) | eval |
+| `Python/generated_cases.c.h` | 12528 | (pending) | eval |
+| `Python/opcode_targets.h` | 766 | (pending) | eval |
+| `Python/optimizer_cases.c.h` | 2520 | (pending) | eval |
+| `Python/remote_debug.h` | 1190 | (pending) | misc |
+| `Python/stdlib_module_names.h` | 302 | (pending) | misc |
+| `Python/thread_nt.h` | 532 | (pending) | gc-threading |
+| `Python/thread_pthread_stubs.h` | 191 | (pending) | gc-threading |
+| `Python/thread_pthread.h` | 1002 | (pending) | gc-threading |
+
+Subsystem legend: **compile** (AST through bytecode), **eval** (the
+interpreter and its optimizers), **runtime** (errors, imports,
+configuration), **gc-threading** (memory and concurrency), **misc**
+(arena, hashing, string conversion, perf, host glue).
+
+Total: 114 files, ~166k lines. The two largest files
+(`Python-ast.c` 18k, `generated_cases.c.h` 12k) are generated; the
+generator pages are the canonical reading. See
+[`Tools/cases_generator/`](https://github.com/python/cpython/tree/main/Tools/cases_generator)
+and [`Parser/asdl_c.py`](https://github.com/python/cpython/blob/main/Parser/asdl_c.py).

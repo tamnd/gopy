@@ -1,0 +1,72 @@
+---
+title: CPython internals
+description: A complete, self-contained walk through how CPython 3.14 works internally.
+---
+
+# CPython internals
+
+These pages are a self-contained tour of CPython 3.14. They are
+written so that you can finish them with the CPython source tree
+open and understand what every important piece does, without ever
+opening the gopy source.
+
+CPython is the reference implementation of Python. It is a tree
+of C source under [`python/cpython`](https://github.com/python/cpython)
+plus a Python-side standard library under `Lib/`. The interpreter
+runs in four big phases.
+
+## The four phases
+
+| Phase     | Input                          | Output                          | Source root      |
+| --------- | ------------------------------ | ------------------------------- | ---------------- |
+| Parse     | `.py` source bytes              | An AST.                          | `Parser/`        |
+| Compile   | An AST.                         | A `PyCodeObject` with bytecode.  | `Python/`        |
+| Run       | A `PyCodeObject` and arguments. | Program output, side effects.    | `Python/ceval.c` |
+| Garbage collect | Live objects.             | Released cycles, finalisers run. | `Modules/gcmodule.c` |
+
+The "Pipeline" sidebar covers Parse and Compile. The "Execution"
+sidebar covers Run. The "Runtime" sidebar covers the object model
+and the garbage collector. The pages are arranged so that reading
+them in order matches the order CPython executes them.
+
+## What to read
+
+If you are new to the source, read the pages in this order:
+
+1. [Pipeline overview](pipeline)
+2. [Parser](parser) -> [AST](ast) -> [Symbol table](symtable)
+3. [Compiler](compiler) -> [Flow graph](flowgraph) -> [Assembler](assembler)
+4. [VM](vm) -> [Frames](frames) -> [Specializer](specializer) -> [Tier-2](tier2)
+5. [Objects](objects) -> [Types](types) -> [GC](gc)
+6. [Imports](imports) -> [Generators](generators) -> [Exceptions](exceptions) -> [GIL](gil) -> [Monitor](monitor)
+
+Every page cites C files with `file:line` triples that point at
+the current `main` branch of upstream CPython. No commit pins,
+because the lines slide as upstream refactors.
+
+## Reading the C
+
+The CPython source uses a handful of conventions that are worth
+internalising before diving in.
+
+* **Naming.** Public C API functions start with `Py`, internal
+  ones start with `_Py`. Static helpers have no prefix. Types end
+  in `_type` if they are the `PyTypeObject`, e.g. `PyLong_Type`.
+* **Refcount discipline.** Every `PyObject *` carries a reference
+  count. Functions document whether they "steal" (transfer
+  ownership of) a reference, "borrow" (do not change it), or
+  "return a new reference" (the caller owns the result).
+* **The GIL.** The interpreter holds a single lock while running
+  Python code. Releasing it is done explicitly via
+  `Py_BEGIN_ALLOW_THREADS` / `Py_END_ALLOW_THREADS`.
+* **`include/cpython/`.** This directory holds the public-but-not-stable
+  surface. `include/internal/` holds private headers. Files end in
+  `.h` for normal C and `.h` for declarations CPython itself ships;
+  generated headers end in `.h.in`.
+
+## Bibliography
+
+* The [CPython developer guide](https://devguide.python.org).
+* Brandt Bucher's PEP 659 explainer.
+* Mark Shannon's PEP 744 trace projector notes.
+* The "Python under the hood" series on the Tenthousandmeters blog.

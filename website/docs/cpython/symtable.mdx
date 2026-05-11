@@ -1,0 +1,120 @@
+---
+title: Symbol table
+description: Two-pass name resolution that the compiler relies on to choose name-handling opcodes.
+---
+
+# Symbol table
+
+Before the code generator can emit `LOAD_FAST` versus `LOAD_NAME`
+versus `LOAD_GLOBAL`, it needs to know which scope each name
+belongs to. That is the job of the symbol table.
+
+## Source map
+
+| File                                      | Role                                      |
+| ----------------------------------------- | ----------------------------------------- |
+| `Python/symtable.c`                       | The builder and the resolver.             |
+| `Include/internal/pycore_symtable.h`      | Struct definitions for `symtable`, `_symtable_entry`. |
+| `Lib/symtable.py`                         | The Python-side wrapper module.           |
+
+## Output shape
+
+The output of `PySymtable_Build` is a `struct symtable *` that
+holds a tree of `_symtable_entry` records. The root is the module
+scope. Each entry tracks:
+
+* The scope's kind: module, function, class, lambda, comprehension,
+  annotation.
+* The set of names referenced in that scope.
+* Per-name flags: assigned, parameter, global, nonlocal, used,
+  free, cell, comprehension iteration variable.
+* The set of child scopes nested inside it.
+
+## Two passes
+
+### Pass 1: discover scopes and uses
+
+`symtable_visit_*` walks the AST. Each scope-introducing node
+(`FunctionDef`, `AsyncFunctionDef`, `ClassDef`, `Lambda`,
+`ListComp`, `SetComp`, `DictComp`, `GeneratorExp`) pushes a new
+entry onto a stack. Every `Name` reference, every `Assign` target,
+every `global` / `nonlocal` declaration, every parameter list adds
+a flag to the entry at the top of the stack.
+
+At the end of pass 1 the tree of scopes is built but names are not
+yet resolved. The flags say "x is used somewhere" and "x is bound
+somewhere" but they do not say what `x` refers to.
+
+### Pass 2: analyse and resolve
+
+`symtable_analyze` walks the tree and resolves each name to a
+**binding kind**. CPython distinguishes:
+
+| Kind     | Meaning                                                |
+| -------- | ------------------------------------------------------ |
+| LOCAL    | Bound in the current function scope. Use `LOAD_FAST`. |
+| CELL     | Bound here and captured by a nested function. Use `LOAD_DEREF` to read. |
+| FREE     | Captured from an enclosing function. Use `LOAD_DEREF`. |
+| GLOBAL_EXPLICIT | Declared `global`. Use `LOAD_GLOBAL`.           |
+| GLOBAL_IMPLICIT | Not bound here, not in any enclosing function. Use `LOAD_GLOBAL`. |
+| FREE_CLASS | A class-scope free that bridges to an enclosing function. |
+
+`symtable_analyze_block` propagates free-variable sets upward. A
+name that is free in a nested function "exports" itself to the
+enclosing scope. If the enclosing scope binds it, the enclosing
+scope's entry is marked CELL. If it does not, the name continues
+to bubble until either a function binding catches it (CELL) or it
+reaches the module scope (GLOBAL_IMPLICIT).
+
+## Comprehensions
+
+In Python 3.12+ comprehensions run inline in the enclosing frame,
+not in a hidden function. But the symbol table still treats each
+comprehension as its own scope so that the iteration variable does
+not leak. The codegen pass inlines the comprehension body while
+respecting the scope boundary the symtable recorded.
+
+## Class scopes
+
+Class bodies have their own scope, but it is not a function. Names
+bound in a class body are not visible to nested functions inside
+that body. CPython implements that by treating the class scope as
+"transparent" to the free-variable bubble: nested functions can
+see the enclosing module / function bindings, skipping over the
+class.
+
+## The `__class__` cell
+
+When a method body uses `super()` with no arguments, CPython needs
+the class object at call time. The compiler synthesises a closure
+cell named `__class__` that holds the class, and the codegen pass
+emits a `LOAD_CLASSDEREF`. The symbol table is responsible for
+allocating this cell when it sees a `super` reference inside a
+method.
+
+## Type parameter scopes
+
+PEP 695 adds `class Foo[T]:` and `def f[T]():` syntax. The type
+parameter list introduces a hidden scope that contains the type
+variables. The symbol table builds this scope so that codegen can
+emit `LOAD_LOCAL` for type vars without leaking them into the
+function body.
+
+## API
+
+```c
+struct symtable *
+PySymtable_Build(mod_ty mod, PyObject *filename,
+                 PyFutureFeatures *ff);
+PySTEntryObject *
+PySymtable_Lookup(struct symtable *st, void *key);
+```
+
+The `key` is the AST node pointer. The compiler keeps the
+`symtable *` alive for the duration of `compile` and looks up each
+scope it enters.
+
+## Reading order
+
+The compiler ([Compiler](compiler)) is the only consumer of the
+symbol table. Read that next.

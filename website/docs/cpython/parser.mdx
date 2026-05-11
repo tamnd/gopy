@@ -1,0 +1,131 @@
+---
+title: Parser
+description: The CPython tokenizer and PEG parser. From bytes to AST.
+---
+
+# Parser
+
+CPython's frontend has two pieces. The tokenizer turns source
+bytes into a flat stream of tokens. The parser turns that stream
+into an AST. Both pieces live under `Parser/` in the source tree.
+
+## Source map
+
+| File                                | Role                                                |
+| ----------------------------------- | --------------------------------------------------- |
+| `Parser/tokenizer.c`                | The hand-written tokenizer.                         |
+| `Parser/tokenizer.h`                | The `tok_state` struct.                             |
+| `Parser/lexer/lexer.c`              | The low-level character pump used by the tokenizer. |
+| `Parser/pegen.c`                    | The PEG parser core (memoization, packrat tables).  |
+| `Parser/parser.c`                   | Generated from `Grammar/python.gram`.               |
+| `Grammar/python.gram`               | The grammar source.                                 |
+| `Tools/peg_generator/`              | The PEG generator that builds `parser.c`.           |
+
+## Tokenizer
+
+The tokenizer is a state machine. Each call to `tok_get` reads
+characters until it can return one token. The state includes the
+file position, the indentation stack, the f-string nesting stack,
+the encoding declaration, and a small pushback buffer.
+
+The token kinds are listed in `Grammar/Tokens`. The big ones are
+`NAME`, `NUMBER`, `STRING`, `OP`, `NEWLINE`, `INDENT`, `DEDENT`,
+plus the soft-keyword variants like `ASYNC` and `AWAIT` that turn
+into `NAME` in some grammar positions.
+
+### Indentation
+
+CPython does not use whitespace insensitivity tricks. The
+tokenizer maintains an explicit stack of indentation widths. When
+a line's leading whitespace is wider than the top of the stack, it
+pushes and emits `INDENT`. When narrower, it pops and emits
+`DEDENT` for each level popped, raising `IndentationError` if the
+new width does not match any prior level.
+
+### F-strings
+
+F-strings are tokenized as a separate sub-language. Inside an
+f-string, the tokenizer switches mode to emit `FSTRING_START`,
+`FSTRING_MIDDLE`, `FSTRING_END`, and `{` / `}` braces that mark
+embedded expressions. Each embedded expression is parsed with the
+regular grammar via a recursive call into `pegen_parse`.
+
+### Encoding
+
+The tokenizer reads the encoding declaration in the first two
+lines of the file (PEP 263) and decodes bytes through that codec
+before tokenizing. The default is UTF-8.
+
+## PEG parser
+
+CPython moved to a PEG parser in PEP 617. The grammar lives in
+`Grammar/python.gram`. The PEG generator under `Tools/peg_generator/`
+emits `Parser/parser.c`.
+
+### What "PEG" means here
+
+A Parsing Expression Grammar matches input by ordered choice:
+alternatives are tried left to right and the first match wins.
+This removes ambiguity at the cost of making grammar rules
+order-sensitive. PEG is paired with **packrat memoization**: each
+rule, evaluated at each position, caches its result. That makes
+worst-case linear time achievable.
+
+### Memoization
+
+`pegen.c` keeps a memo table indexed by `(rule, position)`. On
+re-entry it returns the cached result. The memo table is also how
+the parser detects and aborts left-recursive descents that would
+otherwise loop.
+
+### Left recursion
+
+PEP 617 supports left-recursive rules through a fixed-point trick.
+A left-recursive rule is initially memoized as "fail". The parser
+then iteratively retries the rule, replacing the memo with the
+longest successful parse, until the result stabilises.
+
+### Actions
+
+Each grammar rule has an attached **action**, written in C inside
+curly braces. The action allocates AST nodes from the per-parse
+`PyArena`. The generator turns the action into a C function in
+`parser.c`. Helper macros like `RAISE_SYNTAX_ERROR`,
+`CHECK`, `CHECK_VERSION`, and `Constant` simplify the action
+bodies. The set of helpers is in `Parser/action_helpers.c`.
+
+### Error recovery
+
+When the parser fails, it does not stop at the first failure. It
+reruns the failed rule with an "invalid" branch enabled that
+matches almost anything and produces a tuned `SyntaxError`
+message. Examples are the suggestions you see for missing colons,
+unmatched brackets, and walrus operators in the wrong context.
+
+## Arena allocation
+
+Every AST node and intermediate object is allocated in a `PyArena`.
+The arena is freed wholesale when parsing finishes. This keeps the
+parser pointer-stable and removes the need for per-node reference
+counting during construction.
+
+## Putting it together
+
+```c
+// Parser/peg_api.c
+mod_ty
+_PyParser_ASTFromString(const char *str, PyObject *filename,
+                        int mode, PyCompilerFlags *flags,
+                        PyArena *arena);
+```
+
+That function spins up a tokenizer over `str`, calls the generated
+`file_rule` (or `eval_rule`, etc.) in `parser.c`, and returns a
+`mod_ty` AST. From there control passes to `Python/ast.c` for
+validation.
+
+## Reading order
+
+For the validator and the AST shape, continue to [AST](ast).
+For an end-to-end picture of how parse output feeds compile,
+return to [Pipeline overview](pipeline).

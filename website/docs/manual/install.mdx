@@ -1,0 +1,75 @@
+---
+title: Install
+description: Install gopy with go install, a prebuilt binary, or build it from source.
+---
+
+# Install
+
+gopy is a single static Go binary. There is no C extension ABI,
+no dynamic library, and no Python runtime to install alongside it.
+Pick the path that matches your environment.
+
+## With `go install`
+
+Requires Go 1.26 or newer.
+
+```bash
+go install github.com/tamnd/gopy/cmd/gopy@latest
+```
+
+The binary lands in `$GOPATH/bin/gopy` (or `$HOME/go/bin/gopy`
+under the default Go layout). Add that directory to your `$PATH`.
+
+Confirm the install:
+
+```bash
+$ gopy --version
+gopy 0.12.0 (3.14.0+) [go1.26 darwin/arm64]
+```
+
+## Prebuilt binary
+
+Releases ship as a tar archive per platform on the
+[releases page](https://github.com/tamnd/gopy/releases). Each
+archive contains a single executable.
+
+```bash
+curl -L -o gopy.tar.gz \
+  https://github.com/tamnd/gopy/releases/latest/download/gopy-$(uname -s)-$(uname -m).tar.gz
+tar xzf gopy.tar.gz
+sudo install -m 0755 gopy /usr/local/bin/gopy
+```
+
+## From source
+
+Clone the repository and build with the bundled Makefile.
+
+```bash
+git clone https://github.com/tamnd/gopy
+cd gopy
+make build
+./bin/gopy --version
+```
+
+Common developer targets:
+
+| Target       | What it does                                      |
+| ------------ | ------------------------------------------------- |
+| `make build` | Build the `gopy` binary into `./bin/gopy`         |
+| `make test`  | Run the unit tests with the race detector         |
+| `make cover` | Produce `coverage.txt` and print total coverage   |
+| `make vet`   | Run `go vet`                                      |
+| `make lint`  | Run `golangci-lint`                               |
+| `make tidy`  | Run `go mod tidy`                                 |
+
+## What gets installed
+
+Just one binary. There are no companion files, no `site-packages`
+directory, no shebang trampolines. gopy reads `.py` source from
+disk, compiles it in process, and runs it on its own VM. The
+standard library that gopy serves comes from the Go packages under
+`module/`, not from the Python files that CPython ships in `Lib/`.
+
+The pyc-format implementation under `marshal/` is wire-compatible
+with CPython: a `.pyc` produced by gopy loads in CPython 3.14 and
+vice versa. That property is exercised by the parity test suite.

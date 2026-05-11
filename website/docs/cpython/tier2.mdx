@@ -1,0 +1,161 @@
+---
+title: Tier-2 trace projector
+description: PEP 744. How CPython projects hot traces of uops and runs them on a separate executor.
+---
+
+# Tier-2 trace projector
+
+PEP 744 introduces a second tier of interpretation. The first
+tier is the bytecode loop you already know. The second tier
+projects hot loops into a **trace of uops** (micro-ops), runs
+analysis passes over it, and executes it on a separate dispatch
+loop that is friendlier to a JIT backend.
+
+Tier-2 ships in CPython 3.13 as an experimental opt-in
+(`PYTHON_JIT=1`) and is being hardened toward a default-on JIT.
+
+## Source map
+
+| File                                      | Role                                              |
+| ----------------------------------------- | ------------------------------------------------- |
+| `Python/optimizer.c`                      | Trace projection, executor lifecycle.             |
+| `Python/optimizer_analysis.c`             | The three-phase analysis orchestrator.            |
+| `Python/optimizer_bytecodes.c`            | The uop DSL definitions.                          |
+| `Python/executor_cases.c.h`               | The generated uop dispatch loop.                  |
+| `Include/internal/pycore_optimizer.h`     | `_PyExecutorObject`, side tables.                 |
+| `Python/jit.c`                            | The JIT backend (when enabled).                   |
+
+## The big picture
+
+```
+Tier-1 loop (ceval.c)
+   │
+   │  hits JUMP_BACKWARD or back-edge in a hot loop
+   │
+   ▼ try_warmup_tier2
+trace projector (optimizer.c)
+   │
+   │  walks Tier-1 bytecode, expands each op into uops
+   │
+   ▼
+uop trace ([_START_EXECUTOR, _MAKE_WARM, ...uops, _JUMP_TO_TOP])
+   │
+   ▼ analysis passes (optimizer_analysis.c)
+   │   remove unneeded _SET_IP and _CHECK_VALIDITY
+   │   abstract interpretation
+   │   guard removal
+   │
+   ▼
+Executor object
+   │
+   ▼ enterExecutor / JIT
+```
+
+The Tier-1 loop installs `ENTER_EXECUTOR` at the back-edge of the
+hot loop. Subsequent iterations skip directly into the Tier-2
+dispatch loop. If the trace deopts, control returns to Tier-1 at
+the same byte offset.
+
+## Trace projection
+
+`_Py_uop_translate_bytecode_to_trace` walks the Tier-1 bytecode
+starting from a hot back-edge. For each Tier-1 opcode it consults
+the **expansion table** (auto-generated from `optimizer_bytecodes.c`)
+to emit one or more uops. Examples:
+
+* `LOAD_FAST oparg` -> `_LOAD_FAST oparg`.
+* `BINARY_OP_ADD_INT` -> `_GUARD_BOTH_INT`, `_BINARY_OP_ADD_INT`.
+* `CALL_PY_EXACT_ARGS` -> `_CHECK_FUNCTION_EXACT_ARGS`,
+  `_CHECK_STACK_SPACE`, `_INIT_CALL_PY_EXACT_ARGS`,
+  `_SAVE_RETURN_OFFSET`, `_PUSH_FRAME`.
+
+The projection stops when it hits a side exit (unsupported op, a
+deopt to Tier-1, or trace-length limit). The terminator is
+`_JUMP_TO_TOP` (loop forever) or `_EXIT_TRACE` (fall back).
+
+Around the trace the projector inserts a prelude
+(`_START_EXECUTOR`, `_MAKE_WARM`) and an epilogue (`_JUMP_TO_TOP`).
+
+## Uops
+
+A uop is a (op, oparg, operand, target) tuple. The set of uops is
+described in `optimizer_bytecodes.c` in the same DSL used for
+Tier-1, with these differences:
+
+* No inline caches.
+* Every input and output is explicit on the stack signature.
+* Side exits are explicit `DEOPT_IF` macros.
+
+The full uop list lives in `pycore_uop_ids.h` (one ID per uop) and
+`pycore_uop_metadata.h` (per-uop tables: stack effects, escape
+analysis flags, deopt targets).
+
+## Analysis
+
+The analysis pipeline runs three phases:
+
+1. **remove_unneeded_uops**. Drops `_SET_IP` and `_CHECK_VALIDITY`
+   rows where escapes can be proved out of reach since the most
+   recent `_START_EXECUTOR`. Also collapses `_PUSH_NULL` followed
+   by `_POP_TOP`.
+2. **Abstract interpretation**. Walks the trace with a
+   `JitOptContext` lattice that tracks known types, known
+   constants, and known immortality of each stack slot. The
+   lattice lets later passes elide redundant guards.
+3. **Guard elimination**. A guard whose precondition is implied by
+   the lattice is dropped.
+
+The lattice values include `BOTTOM` (unreachable), `TYPE(T)` (the
+value is known to be a T), `INT_CONST(n)`, `STR_CONST(s)`,
+`IMMORTAL`, and `TOP` (unknown).
+
+## Executor
+
+An `_PyExecutorObject` is a heap object with:
+
+* The compiled uop trace.
+* A pointer back to the install site in the Tier-1 bytecode.
+* A list of dependent guards (type version, dict keys version).
+* A bloom filter of code object dependencies, for fast
+  invalidation when any of those objects mutates.
+
+Executors are stored in a per-code-object **side table**
+(`co_executors`), allowing many install sites per function.
+
+## Lifecycle
+
+| Step                | What happens                                          |
+| ------------------- | ----------------------------------------------------- |
+| `AllocateExecutor`  | malloc + GC tracking.                                 |
+| `ExecutorInit`      | Copies the trace, registers dependents, hooks watchers. |
+| `detach`            | Disconnects from `co_executors`. Trace remains live until refs drop. |
+| `clear`             | Empties the trace and zeroes the prelude.             |
+| `pending deletion`  | Linked into a thread-local list. Freed after the eval loop returns. |
+
+The deferred-free pattern is necessary because executors can be
+running on the stack when they need to be invalidated. The eval
+loop unlinks them eagerly but waits for the call chain to
+unwind before reclaiming the memory.
+
+## Watchers
+
+The same watcher mechanism that drives Tier-1 specialization
+serves Tier-2: type version tags and dict keys versions. An
+executor that depends on a tag is invalidated when the tag moves.
+
+## JIT
+
+When `--enable-experimental-jit` was used at build time, the uop
+trace is fed to a tiny JIT in `jit.c` that emits machine code
+using the copy-and-patch technique from PEP 744. The output is a
+thin shim per uop that calls the same C helper the interpreted
+form would call, but inlined and pipelined.
+
+When the JIT is off, the trace runs on the **uop interpreter** in
+`executor_cases.c.h`, which is the same generator that produces
+Tier-1's dispatch loop but applied to the uop set.
+
+## Reading order
+
+[Monitor](monitor) covers `sys.monitoring`, which lives on top of
+both Tier-1 and Tier-2 through the instrumented opcode set.
