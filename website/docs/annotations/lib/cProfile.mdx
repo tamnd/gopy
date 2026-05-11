@@ -1,0 +1,123 @@
+---
+title: Lib/cProfile.py
+description: Thin Python wrapper over the _lsprof C extension that provides deterministic profiling of Python programs.
+cpython_path: Lib/cProfile.py
+cpython_version: "3.14"
+lines: 210
+status: annotated
+ported_to: ""
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Lib/cProfile.py`
+
+<CpyLink path="Lib/cProfile.py" />
+
+`cProfile` is the recommended profiler for most Python code. It is a thin Python wrapper around `_lsprof`, a C extension implementing Robert Kern's lsprof algorithm. Because the heavy lifting happens in C, the per-call overhead is small enough for use on real programs without distorting results badly.
+
+The module exposes a `Profile` class that mirrors the interface of the older `profile` module. You call `enable()` and `disable()` around the code you want to measure, or use the higher-level `runcall` and `runctx` helpers. After profiling, `create_stats()` populates internal data and `dump_stats` serialises the result to a file for later analysis by `pstats`.
+
+Two module-level convenience functions, `run` and `runctx`, let you profile a string statement without instantiating `Profile` directly. Both accept an optional `filename` argument; when supplied the stats are written to disk rather than printed immediately.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| 1-30 | module header | Imports, `__all__`, author note | |
+| 31-60 | `Profile.__init__` | Wraps `_lsprof.Profiler`, stores timer | |
+| 61-80 | `Profile.enable` / `Profile.disable` | Delegate to the C profiler | |
+| 81-110 | `Profile.runcall` | Profile a callable with arguments | |
+| 111-135 | `Profile.runctx` | Profile a string in explicit namespaces | |
+| 136-160 | `Profile.run` | Profile a string in caller's globals | |
+| 161-185 | `Profile.create_stats` / `print_stats` / `dump_stats` | Results post-processing | |
+| 186-210 | `run` / `runctx` | Module-level convenience wrappers | |
+
+## Reading
+
+### Module header and imports (lines 1 to 30)
+
+<CpyLink path="Lib/cProfile.py" lines="1-30" />
+
+The file is deliberately short. It imports `_lsprof` from the C layer, re-exports a small `__all__`, and records the original author credit for Robert Kern's lsprof.
+
+```python
+import _lsprof
+import profile as _pyprofile
+
+__all__ = ["run", "runctx", "Profile"]
+```
+
+### `Profile.__init__` and timer setup (lines 31 to 60)
+
+<CpyLink path="Lib/cProfile.py" lines="31-60" />
+
+The constructor creates a `_lsprof.Profiler` instance and optionally installs a custom timer function. When no timer is supplied the C extension uses `perf_counter`-style wall time. The `subcalls` and `builtins` flags are forwarded straight to the C layer.
+
+```python
+class Profile(_pyprofile.Profile):
+    def __init__(self, timer=None, timeunit=0.0, subcalls=True, builtins=True):
+        self.profiler = _lsprof.Profiler(timer, timeunit, subcalls, builtins)
+```
+
+### `enable` and `disable` (lines 61 to 80)
+
+<CpyLink path="Lib/cProfile.py" lines="61-80" />
+
+These are one-liners that delegate to the C profiler. `enable` installs the C-level trace hook; `disable` removes it and leaves the accumulated stats intact.
+
+```python
+def enable(self):
+    self.profiler.enable()
+
+def disable(self):
+    self.profiler.disable()
+```
+
+### `runcall` and `runctx` (lines 81 to 135)
+
+<CpyLink path="Lib/cProfile.py" lines="81-135" />
+
+`runcall` wraps any callable: it enables the profiler, calls the function, then disables regardless of exception. `runctx` compiles and executes a string statement inside caller-supplied `globals` and `locals` dicts, which is useful for profiling module-level code without polluting the interactive namespace.
+
+```python
+def runcall(self, func, /, *args, **kw):
+    self.enable()
+    try:
+        return func(*args, **kw)
+    finally:
+        self.disable()
+
+def runctx(self, cmd, globals, locals):
+    self.enable()
+    try:
+        exec(cmd, globals, locals)
+    finally:
+        self.disable()
+```
+
+### Module-level `run` and `runctx` (lines 186 to 210)
+
+<CpyLink path="Lib/cProfile.py" lines="186-210" />
+
+These functions are the public entry points most users reach for. They create a temporary `Profile`, run the statement, then either print the stats or dump them to `filename`. The `sort` parameter is forwarded to `pstats.Stats.sort_stats`.
+
+```python
+def run(statement, filename=None, sort=-1):
+    prof = Profile()
+    result = None
+    try:
+        prof = prof.run(statement)
+    except SystemExit:
+        pass
+    finally:
+        if filename is not None:
+            prof.dump_stats(filename)
+        else:
+            result = prof.print_stats(sort)
+    return result
+```
+
+## gopy mirror
+
+Not yet ported.

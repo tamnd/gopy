@@ -1,0 +1,148 @@
+---
+title: Python/suggestions.c
+description: Fuzzy name matching for NameError, AttributeError, and ImportError hints using Levenshtein edit distance.
+cpython_path: Python/suggestions.c
+cpython_version: "3.14"
+lines: 370
+status: annotated
+ported_to: ""
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Python/suggestions.c`
+
+<CpyLink path="Python/suggestions.c" />
+
+`suggestions.c` powers the "Did you mean X?" hints that CPython 3.10+ appends to `NameError`, `AttributeError`, and `ImportError` messages. When the interpreter raises one of these exceptions it calls into this file, which walks the relevant name namespace and computes Levenshtein edit distance between the failing name and every candidate. The closest match below a distance threshold is returned as a borrowed C string and formatted into the exception note.
+
+The file is intentionally self-contained. It implements its own Levenshtein distance function rather than pulling in an external library, keeping the code auditable and avoiding a build dependency. The algorithm uses the standard two-row DP approach and caps the row length at a small constant to bound memory use for long names.
+
+The distance threshold adapts to the length of the name being looked up. For a name of length `n` the threshold is `min(3, n/3 + 1)`. This means very short names (one or two characters) only accept exact or near-exact matches, while longer names allow proportionally more edits. The design prevents spurious suggestions where a three-letter name would otherwise match almost anything.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| 1-40 | (includes, constants) | Headers and threshold constant | |
+| 41-100 | `levenshtein_distance` | Two-row DP edit distance | |
+| 101-150 | `calculate_suggestions_threshold` | Compute per-name cutoff | |
+| 151-220 | `_Py_Offer_Suggestions_For_NameError` | Walk locals, globals, builtins | |
+| 221-300 | `_Py_Offer_Suggestions_For_AttributeError` | Check `__dict__` and `dir()` output | |
+| 301-340 | `_Py_Offer_Suggestions_For_ImportError` | Walk `sys.modules` keys | |
+| 341-370 | (helpers) | String extraction utilities | |
+
+## Reading
+
+### Levenshtein distance implementation (lines 41 to 100)
+
+<CpyLink path="Python/suggestions.c" lines="41-100" />
+
+The function allocates two stack-allocated rows of length `(b_len + 1)`. It iterates over each character of string `a`, updating the current row in place using the standard recurrence. Substitution, insertion, and deletion costs are all 1. The function returns `SIZE_MAX` early if the shorter string is empty, and caps computation at a maximum name length to keep the inner loop bounded.
+
+```c
+static Py_ssize_t
+levenshtein_distance(const char *a, Py_ssize_t a_len,
+                     const char *b, Py_ssize_t b_len,
+                     Py_ssize_t max_cost)
+{
+    /* two rows, each of length b_len+1 */
+    Py_ssize_t *row1 = ..., *row2 = ...;
+    for (Py_ssize_t i = 0; i < a_len; i++) {
+        row2[0] = i + 1;
+        for (Py_ssize_t j = 0; j < b_len; j++) {
+            Py_ssize_t cost = (a[i] != b[j]);
+            row2[j+1] = Py_MIN(row2[j] + 1,
+                        Py_MIN(row1[j+1] + 1,
+                               row1[j] + cost));
+        }
+        /* swap rows */
+    }
+    return row1[b_len];
+}
+```
+
+### Threshold calculation (lines 101 to 150)
+
+<CpyLink path="Python/suggestions.c" lines="101-150" />
+
+The threshold function takes the length of the name that was not found and returns the maximum edit distance that will be treated as a plausible suggestion. The formula `min(3, len/3 + 1)` ensures that single-character names require an exact match (threshold 1), three-character names allow one edit (threshold 2), and names of six or more characters allow up to three edits (the cap).
+
+```c
+static Py_ssize_t
+calculate_suggestions_threshold(Py_ssize_t name_len)
+{
+    return Py_MIN(3, name_len / 3 + 1);
+}
+```
+
+### `_Py_Offer_Suggestions_For_NameError` (lines 151 to 220)
+
+<CpyLink path="Python/suggestions.c" lines="151-220" />
+
+This function receives the `NameError` exception object and extracts the missing name from its `name` attribute. It then iterates three namespaces in priority order: locals (frame fast locals), globals (the module `__dict__`), and builtins. For each candidate name it calls `levenshtein_distance` and tracks the minimum. If the minimum distance is below the threshold, the candidate is returned as the suggestion. The function returns `NULL` with no exception set when no good candidate is found.
+
+```c
+PyObject *suggestion = NULL;
+Py_ssize_t min_dist = PY_SSIZE_T_MAX;
+Py_ssize_t threshold = calculate_suggestions_threshold(name_len);
+
+/* walk locals, then globals, then builtins */
+for each candidate_name in namespaces:
+    Py_ssize_t dist = levenshtein_distance(name, name_len,
+                                           cand, cand_len,
+                                           threshold);
+    if (dist < min_dist) {
+        min_dist = dist;
+        suggestion = candidate_key;
+    }
+
+if (min_dist <= threshold)
+    return suggestion;
+return NULL;
+```
+
+### `_Py_Offer_Suggestions_For_AttributeError` (lines 221 to 300)
+
+<CpyLink path="Python/suggestions.c" lines="221-300" />
+
+Attribute suggestions require iterating the attribute namespace of an arbitrary object. The function calls `PyObject_Dir` to get the full list (equivalent to `dir(obj)` from Python), then applies the same distance loop over the resulting list of strings. Using `PyObject_Dir` rather than inspecting `__dict__` directly ensures that attributes inherited from base classes and those defined by `__dir__` overrides are included.
+
+```c
+PyObject *dir = PyObject_Dir(obj);
+if (dir == NULL)
+    return NULL;
+
+Py_ssize_t n = PyList_GET_SIZE(dir);
+for (Py_ssize_t i = 0; i < n; i++) {
+    PyObject *item = PyList_GET_ITEM(dir, i);
+    const char *cand = PyUnicode_AsUTF8AndSize(item, &cand_len);
+    if (!cand) continue;
+    Py_ssize_t dist = levenshtein_distance(name, name_len,
+                                           cand, cand_len,
+                                           threshold);
+    /* track minimum */
+}
+Py_DECREF(dir);
+```
+
+### `_Py_Offer_Suggestions_For_ImportError` (lines 301 to 340)
+
+<CpyLink path="Python/suggestions.c" lines="301-340" />
+
+Import suggestions walk the keys of `sys.modules` to find a close match for the module name that was not found. The function obtains `sys.modules` via `_PyImport_GetModuleDict` rather than through the public `sys` attribute to avoid re-importing and to work correctly during interpreter shutdown when `sys` may be partially torn down.
+
+```c
+PyObject *modules = _PyImport_GetModuleDict(tstate->interp);
+PyObject *key;
+Py_ssize_t pos = 0;
+while (PyDict_Next(modules, &pos, &key, NULL)) {
+    if (!PyUnicode_Check(key)) continue;
+    const char *cand = PyUnicode_AsUTF8AndSize(key, &cand_len);
+    /* compute distance, track best */
+}
+```
+
+## gopy mirror
+
+Not yet ported.

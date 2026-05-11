@@ -1,0 +1,165 @@
+---
+title: Lib/codeop.py
+description: Helpers for implementing Python read-eval-print loops that detect incomplete versus erroneous input.
+cpython_path: Lib/codeop.py
+cpython_version: "3.14"
+lines: 170
+status: annotated
+ported_to: ""
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Lib/codeop.py`
+
+<CpyLink path="Lib/codeop.py" />
+
+`codeop` is the machinery that lets interactive Python consoles distinguish between three
+outcomes when the user has typed something: the input is syntactically complete and can be
+executed, the input is incomplete and the console should prompt for another line, or the
+input contains an error that should be reported immediately. The central function
+`compile_command` returns a code object when the source is complete, returns `None` when
+more input is needed, and raises `SyntaxError` (or `OverflowError`/`ValueError`) when the
+source is outright invalid.
+
+The detection strategy relies on the standard `compile()` built-in. `compile_command`
+compiles the source twice: once as-is, and once with a sentinel newline appended. If the
+first compilation raises `SyntaxError` with the message "unexpected EOF while parsing",
+the source is incomplete. If the second compilation succeeds but the first does not, the
+source is also considered incomplete. Only when both compilations succeed (or the first
+raises a non-EOF error) is the outcome determined to be complete or erroneous.
+
+Two classes layer state on top of `compile_command`. `Compile` accumulates `__future__`
+import flags across successive compilations so that a `from __future__ import division`
+entered at the prompt takes effect for all subsequent statements in the same session.
+`CommandCompiler` wraps a `Compile` instance and presents the same callable interface as
+the bare `compile_command` function, making it the preferred object to hand to REPL
+frameworks.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| 1-30 | module docstring, imports, `_features` | Setup: future-flag extraction from `__future__` module | |
+| 31-80 | `_compile()` | Internal helper that calls `compile()` and normalises errors | |
+| 81-120 | `compile_command()` | Public function: incomplete/complete/error triage | |
+| 121-150 | `Compile` | Stateful compiler accumulating `__future__` flags | |
+| 151-170 | `CommandCompiler` | REPL-facing wrapper combining `Compile` with `compile_command` logic | |
+
+## Reading
+
+### Feature flag extraction (lines 1 to 30)
+
+<CpyLink path="Lib/codeop.py" lines="1-30" />
+
+At import time, `codeop` introspects the `__future__` module to build `_features`, a list
+of `_Feature` objects. Each `_Feature` carries a `compiler_flag` integer that maps to one
+of the `CO_FUTURE_*` constants in `compile()`. This list is used later by `Compile` to
+detect which future flags a compiled code object has activated.
+
+```python
+import __future__
+
+_features = [getattr(__future__, fname)
+             for fname in __future__.all_feature_names]
+```
+
+### _compile: normalising compile() errors (lines 31 to 80)
+
+<CpyLink path="Lib/codeop.py" lines="31-80" />
+
+`_compile(source, filename, symbol)` is a thin wrapper around `compile()` that translates
+the three possible outcomes into a form `compile_command` can reason about. A clean
+compilation returns the code object. An `OverflowError` or `ValueError` is re-raised
+immediately. A `SyntaxError` is caught; if its `msg` attribute looks like an
+end-of-input marker the function returns a sentinel, otherwise the error is re-raised.
+
+```python
+def _compile(source, filename, symbol):
+    try:
+        return compile(source, filename, symbol)
+    except SyntaxError as err:
+        if "unexpected EOF" in str(err) or "EOF in multi-line" in str(err):
+            return None  # sentinel: input is incomplete
+        raise
+```
+
+### compile_command: the three-outcome triage (lines 81 to 120)
+
+<CpyLink path="Lib/codeop.py" lines="81-120" />
+
+`compile_command` calls `_compile` twice. The first call uses `source` verbatim. The
+second appends `"\n\n"` to force the parser past any end-of-block ambiguity. If the first
+call returns `None` (incomplete sentinel), the second call is used to determine whether
+adding more input could ever make the source valid. If both return `None`, `compile_command`
+returns `None`. If the first call succeeds, that code object is returned. A `SyntaxError`
+from the first call that is not an EOF error propagates to the caller.
+
+```python
+def compile_command(source, filename="<input>", symbol="single"):
+    r"""Compile a command, determining if it is incomplete.
+
+    Returns a code object on success, None if the input is incomplete,
+    and raises SyntaxError if the input is erroneous.
+    """
+    code1 = _compile(source,         filename, symbol)
+    code2 = _compile(source + "\n",  filename, symbol)
+    code3 = _compile(source + "\n\n", filename, symbol)
+
+    if code1 is None:
+        return None
+    if code2 is None:
+        return None
+    return code1
+```
+
+### Compile: accumulating __future__ flags (lines 121 to 150)
+
+<CpyLink path="Lib/codeop.py" lines="121-150" />
+
+`Compile` stores a `flags` integer that is OR-ed into every `compile()` call. After each
+successful compilation it inspects the returned code object's `co_flags` field and OR-es
+in any new future-feature bits found there. This means that once the user types
+`from __future__ import annotations` at the REPL, all subsequent compilations in the same
+`Compile` instance automatically include `CO_FUTURE_ANNOTATIONS`.
+
+```python
+class Compile:
+    def __init__(self):
+        self.flags = ast.PyCF_DONT_IMPLY_DEDENT
+
+    def __call__(self, source, filename, symbol):
+        codeob = compile(source, filename, symbol, self.flags, True)
+        for feature in _features:
+            if codeob.co_flags & feature.compiler_flag:
+                self.flags |= feature.compiler_flag
+        return codeob
+```
+
+### CommandCompiler: the REPL-facing wrapper (lines 151 to 170)
+
+<CpyLink path="Lib/codeop.py" lines="151-170" />
+
+`CommandCompiler` holds a single `Compile` instance and exposes a `__call__` method with
+the same signature as `compile_command`. Its `__call__` delegates to `compile_command` but
+passes `self.compiler` (the `Compile` instance) in place of the raw `compile` built-in.
+REPL frameworks such as `code.InteractiveConsole` instantiate one `CommandCompiler` per
+session and call it for every line of input.
+
+```python
+class CommandCompiler:
+    def __init__(self):
+        self.compiler = Compile()
+
+    def __call__(self, source, filename="<input>", symbol="single"):
+        r"""Compile a command; return a code object or None.
+
+        Uses the stored Compile instance so __future__ flags persist
+        across calls within the same interactive session.
+        """
+        return compile_command(source, filename, symbol, self.compiler)
+```
+
+## gopy mirror
+
+Not yet ported.

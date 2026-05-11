@@ -1,0 +1,133 @@
+---
+title: Include/internal/pycore_symtable.h
+description: Symbol table internals including scope entry objects, per-symbol binding flags, and the build and free entry points used by the compiler front-end.
+cpython_path: Include/internal/pycore_symtable.h
+cpython_version: "3.14"
+lines: 110
+status: annotated
+ported_to: ""
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Include/internal/pycore_symtable.h`
+
+<CpyLink path="Include/internal/pycore_symtable.h" />
+
+The symbol table is the first major analysis pass the compiler runs after parsing. It walks the
+AST once and records, for every name in every scope, how that name is bound: as a local
+variable, a free variable captured from an enclosing scope, a cell variable exported to a
+nested scope, a global, or a parameter. The results drive cell allocation, the `LOAD_DEREF` vs
+`LOAD_FAST` vs `LOAD_GLOBAL` opcode selection, and the `co_varnames`/`co_freevars`/`co_cellvars`
+tuples on the finished code object.
+
+The top-level structure is a `symtable` handle that owns a tree of `PySTEntryObject` nodes,
+one per scope (module, class, function, comprehension, type alias). Each entry holds a
+dictionary mapping identifier strings to integer flag words. The flag bits come in two
+families: `DEF_*` bits record how a name is defined within the scope, and `USE` records that
+the name is read. A second pass over the tree propagates free-variable information from inner
+scopes outward.
+
+Name mangling (`_Py_Mangle`) is handled here rather than in the AST or the code generator
+because the decision of whether a name is mangled depends on the enclosing class scope, which
+the symbol table already tracks. Mangling rewrites `__foo` to `_ClassName__foo` for names
+appearing inside a class body.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| 1-20 | `DEF_GLOBAL`, `DEF_LOCAL`, `DEF_PARAM`, `DEF_NONLOCAL`, `DEF_FREE`, `USE`, `DEF_IMPORT`, `DEF_BOUND`, `DEF_ANNOT` | Per-symbol binding flag bits stored in the entry dict | not ported |
+| 21-40 | `SCOPE_*` constants (`LOCAL`, `GLOBAL_IMPLICIT`, `GLOBAL_EXPLICIT`, `FREE`, `CELL`) | Scope-resolution codes written during the propagation pass | not ported |
+| 41-65 | `PySTEntryObject` | Scope node: `ste_id`, `ste_name`, `ste_symbols` dict, `ste_children` list, `ste_type`, `ste_nested`, `ste_free`, `ste_child_free`, `ste_generator`, `ste_coroutine` | not ported |
+| 66-75 | `struct symtable` | Top-level handle: `st_top` entry, `st_blocks` dict, filename, `st_stack` | not ported |
+| 76-85 | `_PySymtable_Build` | Main entry: walks AST, returns populated `symtable *` | not ported |
+| 86-95 | `_PySymtable_Free` | Releases the `symtable` and all child entries | not ported |
+| 96-110 | `_Py_Mangle` | Name-mangling transform for double-underscore identifiers | not ported |
+
+## Reading
+
+### Binding flag bits (lines 1 to 20)
+
+<CpyLink path="Include/internal/pycore_symtable.h" lines="1-20" />
+
+Each name in a scope is represented by a single `long` flag word. The `DEF_*` bits record what
+kinds of definitions the name has within that scope; `USE` records any read reference. After
+the propagation pass the upper bits of the word are filled in with the resolved `SCOPE_*`
+code, which is what the code generator consults when picking a load or store opcode.
+
+```c
+#define DEF_GLOBAL    1   /* global stmt */
+#define DEF_LOCAL     2   /* assignment, import, for target, etc. */
+#define DEF_PARAM     4   /* formal parameter */
+#define DEF_NONLOCAL  8   /* nonlocal stmt */
+#define USE          16   /* any read reference */
+#define DEF_FREE     64   /* name is free in this scope */
+#define DEF_IMPORT  128   /* bound by import */
+#define DEF_ANNOT   256   /* annotated name */
+```
+
+### PySTEntryObject (lines 41 to 65)
+
+<CpyLink path="Include/internal/pycore_symtable.h" lines="41-65" />
+
+Every lexical scope gets one `PySTEntryObject`. The `ste_symbols` dict maps `str` identifier
+to `long` flag word. `ste_children` is a list of child `PySTEntryObject` entries for nested
+scopes, in source order. `ste_type` distinguishes `FunctionBlock`, `ClassBlock`, and
+`ModuleBlock`. The boolean fields (`ste_generator`, `ste_coroutine`, `ste_nested`) are set
+during the walk and used later when constructing `co_flags`.
+
+```c
+typedef struct _PySTEntryObject {
+    PyObject_HEAD
+    PyObject   *ste_id;        /* id of AST node */
+    PyObject   *ste_name;      /* function/class name or "<module>" */
+    PyObject   *ste_symbols;   /* dict: str -> long */
+    PyObject   *ste_children;  /* list of PySTEntryObject */
+    _Py_block_ty ste_type;
+    int         ste_nested;
+    unsigned    ste_free       : 1;
+    unsigned    ste_child_free : 1;
+    unsigned    ste_generator  : 1;
+    unsigned    ste_coroutine  : 1;
+} PySTEntryObject;
+```
+
+### Build and free (lines 76 to 95)
+
+<CpyLink path="Include/internal/pycore_symtable.h" lines="76-95" />
+
+`_PySymtable_Build` is called by the compiler immediately after the AST is validated. It
+returns a heap-allocated `struct symtable` whose lifetime matches the compiler arena. On
+success the caller passes it unchanged into the code-generation phase and then calls
+`_PySymtable_Free` to release it. The function sets a `SyntaxError` and returns `NULL` on any
+binding violation it detects, such as a name declared both `global` and `nonlocal` in the same
+scope.
+
+```c
+struct symtable *
+_PySymtable_Build(struct _mod *mod, PyObject *filename,
+                  PyFutureFeatures *future);
+
+void _PySymtable_Free(struct symtable *);
+```
+
+### Name mangling (lines 96 to 110)
+
+<CpyLink path="Include/internal/pycore_symtable.h" lines="96-110" />
+
+`_Py_Mangle` rewrites a bare identifier according to Python's double-underscore name-mangling
+rule. Given the current class name and the identifier, it returns a new string of the form
+`_ClassName__attr` if the identifier starts with two underscores and does not end with two
+underscores. The symbol table calls this for every name it records inside a `ClassBlock` so
+that all later passes, including the code generator and the `dis` module, see the mangled form
+consistently.
+
+```c
+PyObject *
+_Py_Mangle(PyObject *classname, PyObject *name);
+```
+
+## gopy mirror
+
+Not yet ported.

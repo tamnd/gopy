@@ -1,0 +1,138 @@
+---
+title: Lib/fileinput.py
+description: Iterates over lines from multiple input files as a single sequential stream.
+cpython_path: Lib/fileinput.py
+cpython_version: "3.14"
+lines: 430
+status: annotated
+ported_to: ""
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Lib/fileinput.py`
+
+<CpyLink path="Lib/fileinput.py" />
+
+`fileinput` presents a list of files (or `sys.stdin`) as a single flat stream of lines. The top-level `input()` function creates and returns a module-level `FileInput` instance; subsequent calls to `filename()`, `lineno()`, `filelineno()`, and `isfirstline()` operate on that shared instance. Callers that prefer explicit lifetime management can construct `FileInput` directly and use it as a context manager.
+
+The `inplace` flag turns the module into a simple line-filter harness. When it is set, each input file is renamed to a backup, the original name is reopened as stdout, and the caller's loop writes transformed lines back. The `backup` parameter controls the backup suffix (default `.bak`). `hook_compressed` and `hook_encoded` are factory functions that return open-hook callables for transparent decompression and encoding, respectively.
+
+`FileInput` is a lazy iterator. It opens at most one file at a time and advances to the next only when the current one is exhausted. The class tracks per-file line numbers (`_filelineno`) and a global line counter (`_lineno`) separately. The `fileno()` method returns the underlying file descriptor, or `-1` when reading from stdin or between files.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Lib/fileinput.py" lines="1-50">1-50</Cpy> | module header | Docstring, imports, `__all__` | - |
+| <Cpy path="Lib/fileinput.py" lines="51-100">51-100</Cpy> | `input()` + module-level helpers | Creates/returns `_state`, delegates `filename`, `lineno`, `filelineno`, `fileno`, `isfirstline`, `isstdin`, `nextfile`, `close` | - |
+| <Cpy path="Lib/fileinput.py" lines="101-170">101-170</Cpy> | `FileInput.__init__` | Validates args, stores file list, mode, hook, inplace/backup settings | - |
+| <Cpy path="Lib/fileinput.py" lines="171-230">171-230</Cpy> | `FileInput.__iter__` / `__next__` | Drives the line-fetch loop, opens next file when current is exhausted | - |
+| <Cpy path="Lib/fileinput.py" lines="231-290">231-290</Cpy> | `FileInput._open` | Opens a single file: handles stdin, inplace rename, backup, openhook | - |
+| <Cpy path="Lib/fileinput.py" lines="291-350">291-350</Cpy> | `FileInput` property methods | `filename`, `fileno`, `lineno`, `filelineno`, `isfirstline`, `isstdin` | - |
+| <Cpy path="Lib/fileinput.py" lines="351-395">351-395</Cpy> | `FileInput.nextfile` / `close` | Skip rest of current file, restore stdout for inplace, close file handle | - |
+| <Cpy path="Lib/fileinput.py" lines="396-430">396-430</Cpy> | `hook_compressed`, `hook_encoded` | Open-hook factories for gzip/bz2/xz and encoding wrappers | - |
+
+## Reading
+
+### Module-level `input()` and helpers (lines 51 to 100)
+
+<CpyLink path="Lib/fileinput.py" lines="51-100" />
+
+`input()` stores the new `FileInput` in the module-level `_state` variable and returns it. All the module-level convenience functions (`filename()`, `lineno()`, etc.) just proxy to `_state`, raising `RuntimeError` if no instance exists. This design allows scripts to use `for line in fileinput.input(...)` without keeping an explicit reference.
+
+```python
+def input(files=None, inplace=False, backup='', *, mode='r', openhook=None,
+          encoding=None, errors=None):
+    global _state
+    if _state and _state._file:
+        raise RuntimeError("input() already active")
+    _state = FileInput(files, inplace, backup, mode=mode, openhook=openhook,
+                       encoding=encoding, errors=errors)
+    return _state
+```
+
+### `FileInput.__init__` (lines 101 to 170)
+
+<CpyLink path="Lib/fileinput.py" lines="101-170" />
+
+The constructor normalises the `files` argument: a bare string is wrapped in a tuple, `None` triggers a fallback to `sys.argv[1:]` or `('-',)` for stdin. Incompatible option combinations (e.g. `inplace` with `openhook`) raise `ValueError` early.
+
+```python
+def __init__(self, files=None, inplace=False, backup='', *,
+             mode='r', openhook=None, encoding=None, errors=None):
+    if isinstance(files, (str, bytes, os.PathLike)):
+        files = (files,)
+    elif files is None:
+        files = sys.argv[1:] or ('-',)
+    else:
+        files = tuple(files)
+    self._files = files
+    self._inplace = inplace
+    self._backup = backup
+    # ... stores mode, openhook, encoding, errors; resets counters
+```
+
+### `__next__` and file advancement (lines 171 to 230)
+
+<CpyLink path="Lib/fileinput.py" lines="171-230" />
+
+`__next__` reads from `self._file`. When that file is exhausted (returns `''`), it calls `nextfile()` to close it and sets `self._file = None`, then advances `self._fileindex` and opens the next entry via `_open()`. The loop continues until a non-empty line is returned or the file list runs out and `StopIteration` is raised.
+
+```python
+def __next__(self):
+    while True:
+        line = self._readline()
+        if line:
+            self._lineno += 1
+            self._filelineno += 1
+            return line
+        if not self._file:
+            raise StopIteration
+        self.nextfile()
+        # opens next file on the following iteration
+```
+
+### `_open`: inplace mode and open hooks (lines 231 to 290)
+
+<CpyLink path="Lib/fileinput.py" lines="231-290" />
+
+When `inplace=True`, `_open` renames the source file to `name + backup_suffix`, opens the renamed file for reading, and replaces `sys.stdout` with the original name opened for writing. On exit (`nextfile` / `close`), stdout is restored. If an `openhook` is provided it is called instead of the built-in `open`, enabling transparent compressed or encoded input.
+
+```python
+if self._inplace:
+    self._backupfilename = self._filename + (self._backup or '.bak')
+    os.rename(self._filename, self._backupfilename)
+    self._file = open(self._backupfilename, self._mode,
+                      encoding=self._encoding, errors=self._errors)
+    self._output = open(self._filename, 'w',
+                        encoding=self._encoding, errors=self._errors)
+    self._savestdout, sys.stdout = sys.stdout, self._output
+```
+
+### `hook_compressed` and `hook_encoded` (lines 396 to 430)
+
+<CpyLink path="Lib/fileinput.py" lines="396-430" />
+
+`hook_compressed` inspects the filename extension and delegates to `gzip.open`, `bz2.open`, or `lzma.open` as appropriate, falling back to `builtins.open` for unrecognised extensions. `hook_encoded` returns a closure that passes `encoding` and `errors` to `builtins.open`. The two can be composed by wrapping one inside the other.
+
+```python
+def hook_compressed(filename, mode, *, encoding=None, errors=None):
+    ext = os.path.splitext(filename)[1]
+    if ext == '.gz':
+        import gzip
+        return gzip.open(filename, mode, encoding=encoding, errors=errors)
+    elif ext == '.bz2':
+        import bz2
+        return bz2.open(filename, mode, encoding=encoding, errors=errors)
+    # ... xz / lzma, then fallback to open()
+
+def hook_encoded(encoding, errors=None):
+    def openhook(filename, mode):
+        return open(filename, mode, encoding=encoding, errors=errors)
+    return openhook
+```
+
+## gopy mirror
+
+Not yet ported.

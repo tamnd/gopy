@@ -1,0 +1,135 @@
+---
+title: Lib/pstats.py
+description: Analysis and pretty-printing of profiler output produced by cProfile and the pure-Python profile module.
+cpython_path: Lib/pstats.py
+cpython_version: "3.14"
+lines: 590
+status: annotated
+ported_to: ""
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Lib/pstats.py`
+
+<CpyLink path="Lib/pstats.py" />
+
+`pstats` is the analysis front-end for Python's profiling infrastructure. It consumes the binary stats files written by `cProfile.dump_stats` (or the equivalent from the older `profile` module) and presents them as sorted, filtered, human-readable tables. The module is also the right place to merge results from multiple independent profiling runs via the `add` method.
+
+The central class is `Stats`. Its constructor accepts a filename, an open file object, or an already-populated `Profile` instance. Internally all stats are stored in a flat dict keyed by `(filename, lineno, funcname)` tuples. Each value is a six-element tuple carrying primitive call count, total call count, inline time, cumulative time, and a sub-dict of callers.
+
+Sorting is done by a small set of named keys. The constants are defined in the `SortKey` enum introduced in 3.7, but the older string aliases such as `"cumulative"` and `"time"` are still accepted. Filtering with `print_stats` takes either an integer row limit or a regex pattern applied against the formatted function name.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| 1-40 | module header, `SortKey` enum | Public sort-key constants | |
+| 41-110 | `Stats.__init__` / `load_stats` | Deserialise one or more profile sources | |
+| 111-160 | `Stats.add` | Merge a second Stats into this one | |
+| 161-220 | `Stats.sort_stats` | Order the internal dict by one or more keys | |
+| 221-290 | `Stats.print_stats` | Filtered columnar output to a stream | |
+| 291-370 | `Stats.print_callers` / `print_callees` | Per-function caller and callee tables | |
+| 371-430 | `Stats.strip_dirs` | Remove directory prefix from filenames | |
+| 431-510 | Formatting helpers (`f8`, `func_std_string`, etc.) | Low-level number and name formatting | |
+| 511-590 | `Stats.dump_stats` / `reverse_order` / misc | Serialisation and utility methods | |
+
+## Reading
+
+### `SortKey` enum and sort-key aliases (lines 1 to 40)
+
+<CpyLink path="Lib/pstats.py" lines="1-40" />
+
+The `SortKey` enum gives each sort criterion a stable programmatic name. The older string aliases are kept in a separate mapping so that both `SortKey.CUMULATIVE` and the plain string `"cumulative"` resolve to the same internal tuple index.
+
+```python
+class SortKey(str, enum.Enum):
+    CALLS       = 'calls', 'ncalls'
+    CUMULATIVE  = 'cumulative', 'cumtime'
+    FILENAME    = 'filename', 'module'
+    LINE        = 'line'
+    NAME        = 'name'
+    NFL         = 'nfl'
+    PCALLS      = 'pcalls'
+    STDNAME     = 'stdname'
+    TIME        = 'time', 'tottime'
+```
+
+### `Stats.__init__` and `load_stats` (lines 41 to 110)
+
+<CpyLink path="Lib/pstats.py" lines="41-110" />
+
+The constructor iterates over its positional arguments. Each argument can be a filename string, a `Profile` object, or another `Stats` instance. Filenames are unpickled; live `Profile` objects have `create_stats()` called on them first. The `stream` keyword argument controls where text output is written (default `sys.stdout`).
+
+```python
+def __init__(self, *args, stream=None):
+    self.stream = stream or sys.stdout
+    if not len(args):
+        arg = None
+    else:
+        arg = args[0]
+        args = args[1:]
+    self.init(arg)
+    self.add(*args)
+```
+
+### `Stats.add` for merging runs (lines 111 to 160)
+
+<CpyLink path="Lib/pstats.py" lines="111-160" />
+
+`add` accepts the same argument types as the constructor. It walks the incoming stats dict and, for each key already present in `self.stats`, adds element-wise: primitive calls, total calls, inline time, and cumulative time. Callers sub-dicts are merged with the same logic. This makes it straightforward to combine profiles from parallel worker processes.
+
+```python
+def add(self, *arg_list):
+    for item in arg_list:
+        if type(item) == type(self):
+            item_stats = item.stats
+        else:
+            item_stats = Stats(item).stats
+        for func, (cc, nc, tt, ct, callers) in item_stats.items():
+            if func in self.stats:
+                ...  # element-wise add
+            else:
+                self.stats[func] = cc, nc, tt, ct, callers.copy()
+    return self
+```
+
+### `sort_stats` and sort key resolution (lines 161 to 220)
+
+<CpyLink path="Lib/pstats.py" lines="161-220" />
+
+`sort_stats` accepts one or more keys, validates them against the alias table, and stores the resulting sort tuple. The actual sort happens lazily the first time output is requested. Passing `-1` restores the original insertion order, which is useful when you want to call `print_stats` with no particular ordering.
+
+```python
+def sort_stats(self, *field):
+    if not field:
+        self.fcn_list = 0
+        return self
+    ...
+    self.fcn_list = fcn_list = []
+    for func in sorted(self.stats.keys(), key=...):
+        fcn_list.append(func)
+    return self
+```
+
+### `print_stats`, `print_callers`, `print_callees` (lines 221 to 370)
+
+<CpyLink path="Lib/pstats.py" lines="221-370" />
+
+`print_stats` accepts an integer row limit and zero or more regex restrictions. Each restriction is applied as a `re.search` against the formatted function name string, so multiple patterns narrow the output step by step. `print_callers` and `print_callees` reuse the same filtering logic but pivot the display to show the call graph edges adjacent to each matching function.
+
+```python
+def print_stats(self, *amount):
+    for filename in self.files:
+        print(filename, file=self.stream)
+    ...
+    for func in fcn_list:
+        if self.fcn_list:
+            ...
+        cc, nc, tt, ct, callers = self.stats[func]
+        ...
+```
+
+## gopy mirror
+
+Not yet ported.

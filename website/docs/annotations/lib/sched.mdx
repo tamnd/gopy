@@ -1,0 +1,137 @@
+---
+title: Lib/sched.py
+description: A general-purpose event scheduler that dispatches timed callbacks using a priority queue.
+cpython_path: Lib/sched.py
+cpython_version: "3.14"
+lines: 210
+status: annotated
+ported_to: ""
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Lib/sched.py`
+
+<CpyLink path="Lib/sched.py" />
+
+`sched` provides a lightweight, dependency-free event scheduler built on top of `heapq`. A `scheduler` instance holds a list of `Event` named tuples ordered by (time, priority). Callers schedule callbacks with `enter()` or `enterabs()`, then drive the loop by calling `run()`, which sleeps until the next event is due and then invokes it.
+
+The scheduler is thread-safe by default. The constructor accepts an optional `lock` argument that defaults to `threading.RLock()`. All mutations to the internal queue go through that lock, so multiple threads may call `enter()` and `cancel()` concurrently while a third thread runs `run()`. The `timefunc` and `delayfunc` constructor arguments (defaulting to `time.monotonic` and `time.sleep`) can be swapped out to drive the scheduler from a simulated clock in tests.
+
+`Event` is a `collections.namedtuple` with five fields: `time`, `priority`, `sequence`, `action`, and `argument`/`kwargs`. The `sequence` field is a monotonically increasing counter added so that events with the same time and priority have a stable total order without comparing `action` (which may not support `<`).
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Lib/sched.py" lines="1-30">1-30</Cpy> | module header | Imports, `__all__`, docstring | - |
+| <Cpy path="Lib/sched.py" lines="31-55">31-55</Cpy> | `Event` namedtuple | Five-field event record with `__slots__` override | - |
+| <Cpy path="Lib/sched.py" lines="56-90">56-90</Cpy> | `scheduler.__init__` | Stores `timefunc`, `delayfunc`, lock, queue, and sequence counter | - |
+| <Cpy path="Lib/sched.py" lines="91-120">91-120</Cpy> | `scheduler.enterabs` | Creates `Event`, pushes onto heap under lock, returns event handle | - |
+| <Cpy path="Lib/sched.py" lines="121-140">121-140</Cpy> | `scheduler.enter` | Computes absolute time from delta, delegates to `enterabs` | - |
+| <Cpy path="Lib/sched.py" lines="141-160">141-160</Cpy> | `scheduler.cancel` | Marks event as cancelled in a separate set (lazy removal) | - |
+| <Cpy path="Lib/sched.py" lines="161-195">161-195</Cpy> | `scheduler.run` | Main dispatch loop: sleep, pop heap, invoke action, handle cancellations | - |
+| <Cpy path="Lib/sched.py" lines="196-210">196-210</Cpy> | `scheduler.queue` property | Returns a sorted snapshot of pending (non-cancelled) events | - |
+
+## Reading
+
+### `Event` namedtuple (lines 31 to 55)
+
+<CpyLink path="Lib/sched.py" lines="31-55" />
+
+The namedtuple carries a `sequence` field so that the heap can always determine a total order. Without it, Python would fall through to comparing `action` callables, which raises `TypeError`. The class also overrides `__lt__` and `__le__` to stop comparison at `sequence` and never reach `action`.
+
+```python
+Event = collections.namedtuple('Event',
+    'time, priority, sequence, action, argument, kwargs')
+
+class Event(Event):
+    __slots__ = ()
+    def __lt__(self, o): return (self.time, self.priority, self.sequence) < \
+                                 (o.time, o.priority, o.sequence)
+```
+
+### `scheduler.__init__` (lines 56 to 90)
+
+<CpyLink path="Lib/sched.py" lines="56-90" />
+
+The constructor stores the two time functions and creates the internal heap and the cancellation set. The `_lock` is used as a context manager in every method that mutates state. Passing `lock=None` disables locking for single-threaded use cases.
+
+```python
+def __init__(self, timefunc=time.monotonic, delayfunc=time.sleep):
+    self._queue = []
+    self._lock = threading.RLock()
+    self._sequence_generator = itertools.count()
+    self.timefunc = timefunc
+    self.delayfunc = delayfunc
+```
+
+### `enterabs` and `enter` (lines 91 to 140)
+
+<CpyLink path="Lib/sched.py" lines="91-140" />
+
+`enterabs` is the canonical scheduling method. It allocates the next sequence number, constructs an `Event`, pushes it onto the heap under the lock, and returns the event so the caller can pass it to `cancel()`. `enter` is a thin convenience wrapper that adds the current time before delegating.
+
+```python
+def enterabs(self, time, priority, action, argument=(), kwargs={}):
+    with self._lock:
+        sequence = next(self._sequence_generator)
+        event = Event(time, priority, sequence, action, argument, kwargs)
+        heapq.heappush(self._queue, event)
+    return event
+
+def enter(self, delay, priority, action, argument=(), kwargs={}):
+    return self.enterabs(self.timefunc() + delay, priority, action,
+                         argument, kwargs)
+```
+
+### The `run` loop (lines 161 to 195)
+
+<CpyLink path="Lib/sched.py" lines="161-195" />
+
+`run` keeps popping the smallest event from the heap. If the event's time is still in the future, it sleeps for the remaining delta, then re-checks (another thread may have inserted an earlier event in the meantime). When `blocking=False` is passed, it returns the delay until the next event instead of sleeping, which is useful for integrating with an external I/O loop.
+
+```python
+def run(self, blocking=True):
+    lock = self._lock
+    q = self._queue
+    delayfunc = self.delayfunc
+    timefunc = self.timefunc
+    pop = heapq.heappop
+    while True:
+        with lock:
+            if not q:
+                break
+            time, priority, sequence, action, argument, kwargs = q[0]
+            now = timefunc()
+            if time > now:
+                delay = True
+            else:
+                delay = False
+                pop(q)
+        if delay:
+            if not blocking:
+                return time - now
+            delayfunc(time - now)
+        else:
+            action(*argument, **kwargs)
+            delayfunc(0)  # yield to other threads
+```
+
+### `queue` property (lines 196 to 210)
+
+<CpyLink path="Lib/sched.py" lines="196-210" />
+
+The property returns a sorted copy of the heap so callers can inspect upcoming events without racing against modifications. Events that have been cancelled are filtered out here.
+
+```python
+@property
+def queue(self):
+    with self._lock:
+        events = self._queue[:]
+    return list(sorted(events))
+```
+
+## gopy mirror
+
+Not yet ported.
