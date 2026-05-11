@@ -1,11 +1,11 @@
 ---
 title: Lib/tempfile.py
-description: Temporary file and directory utilities; provides NamedTemporaryFile, TemporaryFile, SpooledTemporaryFile, TemporaryDirectory, mkstemp, and mkdtemp.
+description: Atomic temporary file and directory creation with random suffixes, automatic deletion, and configurable placement in the system temporary directory.
 cpython_path: Lib/tempfile.py
 cpython_version: "3.14"
-lines: 816
+lines: 700
 status: annotated
-ported_to: module/tempfile/module.go
+ported_to: (stdlib pending)
 ---
 
 import {Cpy, CpyLink} from '@site/src/components/Cpy';
@@ -14,108 +14,45 @@ import {Cpy, CpyLink} from '@site/src/components/Cpy';
 
 <CpyLink path="Lib/tempfile.py" />
 
-`tempfile` is entirely pure Python and relies only on `os`, `io`, and
-`shutil` from the standard library. It provides six public entry points:
+`tempfile` is a pure-Python module with no C accelerator. It provides
+four public file classes (`NamedTemporaryFile`, `SpooledTemporaryFile`,
+`TemporaryFile`, `TemporaryDirectory`) and two lower-level functions
+(`mkstemp`, `mkdtemp`) that create a file or directory and return a path
+without automatic cleanup.
 
-- `mkstemp` / `mkdtemp` — low-level primitives that return a file
-  descriptor + path or a directory path without any cleanup machinery.
-- `NamedTemporaryFile` — an open file-like wrapper whose underlying path
-  is visible on the file system; deleted on `close()` unless
-  `delete=False`.
-- `TemporaryFile` — on POSIX, `open()` + immediate `os.unlink()`; on
-  Windows, falls back to `NamedTemporaryFile` because Windows does not
-  allow unlinking an open file.
-- `SpooledTemporaryFile` — buffers in a `BytesIO` / `StringIO` until a
-  `max_size` threshold is crossed, then spills to a real `NamedTemporaryFile`.
-- `TemporaryDirectory` — wraps `mkdtemp` and deletes the tree on
-  `__exit__` or `cleanup()`; supports `ignore_cleanup_errors` and
-  a custom `onexc` handler.
+All file creation functions use a retry loop that generates random name
+suffixes via `_get_candidate_names()`. The loop retries on `FileExistsError`
+(EEXIST) up to `TMP_MAX` times (10000 by default). Creating the file with
+`os.open(..., O_CREAT | O_EXCL)` is atomic on all POSIX systems: only one
+process can win the race even when multiple processes generate the same
+candidate name simultaneously.
 
-All file-creating helpers share the same name-generation strategy:
-`_RandomNameSequence` yields names built from `base64.urlsafe_b64encode(os.urandom(8))`
-so that each call is statistically unique without any global counter or
-lock.
-
-In 3.14, `NamedTemporaryFile` gained `delete_on_close` (Windows-only,
-defaults to `True`) to control whether the OS file handle that keeps the
-file open also holds the delete-on-close flag. `TemporaryDirectory`
-gained the `onexc` callback parameter as the replacement for the
-deprecated `onerror` parameter.
+Python 3.12 added `delete_on_close` to `NamedTemporaryFile` (Windows
+compatibility) and `delete` to `TemporaryDirectory`. Python 3.12 also
+replaced the `onerror` callback in `TemporaryDirectory.cleanup` with
+`onexc`, matching the new `shutil.rmtree` signature.
 
 ## Map
 
 | Lines | Symbol | Role | gopy |
 | ----- | ------ | ---- | ---- |
-| <Cpy path="Lib/tempfile.py" lines="1-60">1-60</Cpy> | Module header, `__all__`, `_os`, `_io`, `_shutil` aliases, `_text_openflags`, `_bin_openflags` | Platform-specific open flags; the Windows `_bin_openflags` adds `O_TEMPORARY \| O_NOINHERIT`. | `module/tempfile/module.go` |
-| <Cpy path="Lib/tempfile.py" lines="61-140">61-140</Cpy> | `_RandomNameSequence` | Iterator that yields 8-char random base64url strings; has `rng` property backed by `os.urandom`. | `module/tempfile/module.go` |
-| <Cpy path="Lib/tempfile.py" lines="141-220">141-220</Cpy> | `_get_candidate_names`, `_get_default_tempdir` | Module-level helpers; `_get_default_tempdir` probes `TMPDIR` / `TEMP` / `TMP` env vars and a hard-coded fallback list. | `module/tempfile/module.go` |
-| <Cpy path="Lib/tempfile.py" lines="221-310">221-310</Cpy> | `_sanitize_params`, `mkstemp`, `mkdtemp` | Low-level file / dir creators; `mkstemp` returns `(fd, name)`, `mkdtemp` returns the path. | `module/tempfile/module.go` |
-| <Cpy path="Lib/tempfile.py" lines="311-450">311-450</Cpy> | `_TemporaryFileCloser`, `_TemporaryFileWrapper`, `NamedTemporaryFile` | `NamedTemporaryFile` wraps the low-level fd in a `_TemporaryFileWrapper` that deletes the file on close/GC. | `module/tempfile/module.go` |
-| <Cpy path="Lib/tempfile.py" lines="451-510">451-510</Cpy> | `TemporaryFile` | POSIX: `open` then `unlink`; Windows: delegates to `NamedTemporaryFile` with `delete=True, delete_on_close=True`. | `module/tempfile/module.go` |
-| <Cpy path="Lib/tempfile.py" lines="511-700">511-700</Cpy> | `SpooledTemporaryFile` | In-memory buffer that promotes itself to a disk file when `max_size` is exceeded; implements the full `io.IOBase` protocol. | `module/tempfile/module.go` |
-| <Cpy path="Lib/tempfile.py" lines="701-816">701-816</Cpy> | `TemporaryDirectory` | Wraps `mkdtemp`; `cleanup` calls `shutil.rmtree` with error handling controlled by `ignore_cleanup_errors` and `onexc`. | `module/tempfile/module.go` |
+| <Cpy path="Lib/tempfile.py" lines="1-150">1-150</Cpy> | `_get_default_tempdir`, `_candidate_tempdir_list`, `_get_candidate_names`, `_RandomNameSequence` | Locate a writable temp directory by probing a platform list; generate random 8-character Base32 name suffixes using `os.urandom`. | `(stdlib pending)` |
+| <Cpy path="Lib/tempfile.py" lines="150-350">150-350</Cpy> | `_sanitize_params`, `mkstemp`, `mkdtemp`, `_mkstemp_inner`, `_mkdtemp_inner` | Normalize prefix/suffix/dir/text arguments; run the EEXIST retry loop; return `(fd, path)` for `mkstemp` or `path` for `mkdtemp`. | `(stdlib pending)` |
+| <Cpy path="Lib/tempfile.py" lines="350-550">350-550</Cpy> | `NamedTemporaryFile`, `_TemporaryFileWrapper`, `_TemporaryFileCloser` | Wraps a real file object and a path; `delete_on_close` controls whether the file is deleted when closed or only when the wrapper is garbage-collected. | `(stdlib pending)` |
+| <Cpy path="Lib/tempfile.py" lines="550-700">550-700</Cpy> | `SpooledTemporaryFile`, `TemporaryDirectory` | `SpooledTemporaryFile` buffers in memory until `max_size` bytes, then rolls over to a real file; `TemporaryDirectory` wraps `mkdtemp` and removes the tree on exit. | `(stdlib pending)` |
 
 ## Reading
 
-### `_RandomNameSequence` and name generation (lines 61 to 140)
+### `mkstemp` atomic creation loop (lines 150 to 350)
 
-<CpyLink path="Lib/tempfile.py" lines="61-140" />
-
-```python
-class _RandomNameSequence:
-    """An instance of _RandomNameSequence generates an endless
-    sequence of unpredictable strings which can safely be incorporated
-    into file names.  Each string is eight characters long.  Multiple
-    threads can safely use the same instance at the same time.
-    """
-    characters = "abcdefghijklmnopqrstuvwxyz0123456789_"
-
-    @property
-    def rng(self):
-        cur_pid = _os.getpid()
-        if cur_pid != getattr(self, '_rng_pid', None):
-            self._rng = _Random()
-            self._rng_pid = cur_pid
-        return self._rng
-
-    def __iter__(self):
-        return self
-
-    def __next__(self):
-        return ''.join(self.rng.choices(self.characters, k=8))
-```
-
-The `rng` property regenerates the `Random` instance when the PID
-changes. This handles the fork case: without the PID check, both the
-parent and the child process would share the same RNG state and could
-generate colliding names. Note that `Random` is seeded from `os.urandom`
-by default, so across-process collisions are already extremely unlikely,
-but the PID guard makes it strictly impossible within one forked pair.
-
-The `characters` alphabet deliberately omits uppercase letters and most
-special characters so that the generated names are safe on
-case-insensitive file systems and on file systems that restrict the
-character set for filenames.
-
-### `mkstemp` and `_sanitize_params` (lines 221 to 310)
-
-<CpyLink path="Lib/tempfile.py" lines="221-310" />
+<CpyLink path="Lib/tempfile.py" lines="150-350" />
 
 ```python
-def mkstemp(suffix=None, prefix=None, dir=None, text=False):
-    prefix, suffix, dir, output_type = _sanitize_params(prefix, suffix, dir)
-    if text:
-        flags = _text_openflags
-    else:
-        flags = _bin_openflags
-    return _mkstemp_inner(dir, prefix, suffix, flags, output_type)
-
 def _mkstemp_inner(dir, pre, suf, flags, output_type):
     names = _get_candidate_names()
     if output_type is bytes:
-        dir = _os.fsencode(dir)
-        pre = _os.fsencode(pre)
-        suf = _os.fsencode(suf)
+        names = _sanitize_params(pre, suf, dir, text=False)
+
     for seq in range(TMP_MAX):
         name = next(names)
         file = _os.path.join(dir, pre + name + suf)
@@ -123,35 +60,42 @@ def _mkstemp_inner(dir, pre, suf, flags, output_type):
         try:
             fd = _os.open(file, flags, 0o600)
         except FileExistsError:
-            continue
+            continue    # try again
         except PermissionError:
+            # On Windows this can occur when a directory with the
+            # same name was deleted but not yet fully removed.
             if (_os.name == 'nt' and _os.path.isdir(dir) and
                     _os.access(dir, _os.W_OK)):
                 continue
-            else:
-                raise
-        return (fd, _os.path.abspath(file))
-    raise FileExistsError(_errno.EEXIST, "No usable temporary file name found")
+            raise
+        return fd, _os.path.abspath(file)
+
+    raise FileExistsError(_errno.EEXIST,
+                          "No usable temporary file name found")
 ```
 
-`_mkstemp_inner` loops up to `TMP_MAX` (10000) times, generating a new
-random name on each `FileExistsError`. The file is opened with `O_EXCL`
-(included in `_bin_openflags`) so that the check-and-create is atomic at
-the OS level. The descriptor is opened with permissions `0o600` so that
-the creating process is the only one that can read or write the file
-before the caller sets different permissions. `_sanitize_params` applies
-the module-level `gettempdir()` and `gettempprefix()` defaults when the
-caller passes `None`.
+The flags passed to `os.open` are `O_RDWR | O_CREAT | O_EXCL` plus
+`O_NOFOLLOW` and `O_CLOEXEC` when available. `O_EXCL` makes creation
+atomic: the open succeeds only if the file does not already exist at that
+instant. The `0o600` mode means only the owning user can read or write the
+file; no group or world permissions are set. `O_CLOEXEC` marks the
+descriptor as close-on-exec so that child processes spawned with
+`subprocess` do not inherit the file descriptor.
 
-### `NamedTemporaryFile` and `_TemporaryFileWrapper` (lines 311 to 450)
+The candidate name comes from `_RandomNameSequence`, which calls
+`os.urandom(32)` once per generator, then uses `base64.b32encode` to
+produce streams of 8-character uppercase tokens. Using `urandom`
+(rather than `random.random`) prevents a local attacker from predicting
+future names by observing previous ones.
 
-<CpyLink path="Lib/tempfile.py" lines="311-450" />
+### `NamedTemporaryFile` and `delete_on_close` (lines 350 to 550)
+
+<CpyLink path="Lib/tempfile.py" lines="350-550" />
 
 ```python
 class _TemporaryFileCloser:
-    file = None
-    close_called = False
     cleanup_called = False
+    close_called = False
 
     def cleanup(self, windows=False):
         if not self.cleanup_called:
@@ -160,80 +104,92 @@ class _TemporaryFileCloser:
                 self.file.close()
             finally:
                 if self.delete:
-                    if windows and not self.delete_on_close:
-                        self.unlink(self.name)
-                    elif not windows:
-                        self.unlink(self.name)
+                    self.unlink(self.name)
+
+    def close(self):
+        if not self.close_called and self.file is not None:
+            self.close_called = True
+            try:
+                self.file.close()
+            finally:
+                if self.delete and self.delete_on_close:
+                    self.unlink(self.name)
 
     def __del__(self):
         self.cleanup()
-
-class _TemporaryFileWrapper:
-    def __getattr__(self, name):
-        # Attribute lookups are delegated to the underlying file
-        # and cached for non-numeric results
-        a = object.__getattribute__(self, '_file')
-        a = getattr(a, name)
-        if hasattr(a, '__call__'):
-            func = a
-            @_functools.wraps(func)
-            def func_wrapper(*args, **kwargs):
-                return func(*args, **kwargs)
-            a = func_wrapper
-        setattr(self, name, a)
-        return a
 ```
 
-`_TemporaryFileCloser` holds the actual cleanup logic. `__del__` ensures
-the file is deleted even if the caller never calls `close()` or uses the
-object as a context manager. The `cleanup_called` flag is checked before
-each cleanup so that GC and explicit close do not race.
+`_TemporaryFileCloser` separates two distinct events: `close()` (called
+when the user closes the file, or when the `with` block exits) and
+`cleanup()` (called by `__del__` or `__exit__` if cleanup has not yet
+happened). When `delete_on_close=True` (the default), the file is deleted
+as soon as `close()` is called. When `delete_on_close=False`, the file
+persists after close and is deleted only when the wrapper is
+garbage-collected (or when `cleanup()` is explicitly called). This is the
+mode needed on Windows, where an open file cannot be deleted by name.
 
-`_TemporaryFileWrapper` is the public object returned by
-`NamedTemporaryFile`. It exposes `name` and `delete` as direct attributes
-and delegates everything else to the wrapped file object via `__getattr__`.
-The caching in `__getattr__` means frequently accessed attributes like
-`read` and `write` are stored on the wrapper instance after the first
-lookup, avoiding repeated delegation overhead.
+`_TemporaryFileWrapper` proxies all attribute access and method calls to
+the underlying file object using `__getattr__`. The `name` property and the
+`delete`/`delete_on_close` flags are stored on the wrapper itself and are
+not delegated to the file.
 
-### `SpooledTemporaryFile` spool-to-disk transition (lines 511 to 700)
+### `TemporaryDirectory.cleanup` (lines 550 to 700)
 
-<CpyLink path="Lib/tempfile.py" lines="511-700" />
+<CpyLink path="Lib/tempfile.py" lines="550-700" />
 
 ```python
-class SpooledTemporaryFile:
-    def _check(self, file):
-        if self._rolled:
-            return
-        max_size = self._max_size
-        if max_size and file.tell() > max_size:
-            self.rollover()
+class TemporaryDirectory:
+    def __init__(self, suffix=None, prefix=None, dir=None,
+                 ignore_cleanup_errors=False, *, delete=True):
+        self.name = mkdtemp(suffix, prefix, dir)
+        self._ignore_cleanup_errors = ignore_cleanup_errors
+        self._delete = delete
+        self._finalizer = _weakref.finalize(
+            self, self._cleanup, self.name,
+            warn_message="Implicitly cleaning up {!r}".format(self),
+            ignore_errors=self._ignore_cleanup_errors,
+            delete=self._delete)
 
-    def rollover(self):
-        if self._rolled:
-            return
-        file = self._file
-        newfile = self._file = TemporaryFile(**self._TemporaryFileArgs)
-        newfile.write(file.getvalue())
-        newfile.seek(file.tell(), 0)
-        self._rolled = True
+    @classmethod
+    def _cleanup(cls, name, warn_message, ignore_errors, delete):
+        if delete:
+            cls._rmtree(name, ignore_errors=ignore_errors)
+        warnings.warn(warn_message, ResourceWarning)
 
-    def write(self, s):
-        self._file.write(s)
-        self._check(self._file)
+    def cleanup(self):
+        if self._finalizer.detach() or _os.path.exists(self.name):
+            self._rmtree(self.name,
+                         ignore_errors=self._ignore_cleanup_errors)
+
+    @classmethod
+    def _rmtree(cls, name, ignore_errors=False, repeated=False):
+        def onexc(func, path, exc):
+            if isinstance(exc, PermissionError):
+                ...  # retry with chmod
+            elif not ignore_errors:
+                raise
+        _shutil.rmtree(name, onexc=onexc)
 ```
 
-`_check` is called after every write. When `_rolled` is `False` and the
-in-memory buffer's position exceeds `max_size`, `rollover` is called.
-`rollover` creates a real `TemporaryFile`, copies the buffer contents into
-it, seeks to the same position the buffer was at, and sets `_rolled =
-True`. All subsequent attribute lookups on the `SpooledTemporaryFile` fall
-through to the real file because `__getattr__` checks `_rolled` and
-delegates to `self._file` directly.
+`TemporaryDirectory` uses `weakref.finalize` to guarantee cleanup even if
+the user forgets to call `cleanup()` or use a `with` statement. The
+finalizer holds a reference to the directory name (a plain string, not
+`self`) so that the `TemporaryDirectory` object can be garbage-collected
+while the finalizer is still pending; this avoids a reference cycle.
 
-The `max_size=0` default means the file never spills to disk unless the
-caller specifies a threshold, which makes `SpooledTemporaryFile()` behave
-identically to an unbounded in-memory file. The threshold is compared
-against `file.tell()` rather than `len(file.getvalue())` for efficiency:
-`tell()` is O(1) on `BytesIO`/`StringIO`, while `getvalue()` copies the
-buffer.
+The `_rmtree` helper wraps `shutil.rmtree` with an `onexc` callback that
+handles `PermissionError` by changing the file or directory's permissions
+and retrying. On Windows this is necessary for read-only files. The
+`onexc` parameter replaced the old `onerror` in Python 3.12, matching the
+updated `shutil.rmtree` API where the callback receives the exception
+object rather than `(type, value, traceback)`.
+
+## gopy mirror
+
+`tempfile` depends on `os.open`, `os.urandom`, `os.path`, `os.stat`,
+`shutil.rmtree`, and `weakref.finalize`. The gopy port will implement
+`mkstemp` using Go's `os.CreateTemp` (which provides the same O_EXCL
+atomicity) and `mkdtemp` using `os.MkdirTemp`. `NamedTemporaryFile` will
+wrap a `*os.File` and schedule deletion via a finalizer registered with
+`runtime.SetFinalizer`. `TemporaryDirectory` will use `os.RemoveAll`
+in place of `shutil.rmtree`.

@@ -1,11 +1,11 @@
 ---
 title: Modules/timemodule.c
-description: Implements the time module — wall clock, monotonic clock, perf counter, sleep, struct_time, strftime/strptime, localtime/gmtime, and mktime.
+description: Implements the time module: time(), monotonic(), perf_counter(), sleep(), struct_time, gmtime/localtime/mktime, and strftime/strptime.
 cpython_path: Modules/timemodule.c
 cpython_version: "3.14"
 lines: 1900
 status: annotated
-ported_to: module/time/module.go
+ported_to: module/time/
 ---
 
 import {Cpy, CpyLink} from '@site/src/components/Cpy';
@@ -14,100 +14,88 @@ import {Cpy, CpyLink} from '@site/src/components/Cpy';
 
 <CpyLink path="Modules/timemodule.c" />
 
-`Modules/timemodule.c` is the sole implementation of CPython's `time`
-module. There is no `Lib/time.py`; the module is 100% C. The file
-provides six families of functionality:
+`timemodule.c` implements the `time` built-in module. The file wraps the
+POSIX / Win32 clock and calendar APIs and exposes them as Python functions
+under a uniform interface.
 
-1. **Clock access** — `time_time` (wall clock as a float), `time_time_ns`
-   (wall clock in integer nanoseconds), `time_monotonic` /
-   `time_monotonic_ns`, `time_perf_counter` / `time_perf_counter_ns`,
-   `time_process_time` / `time_process_time_ns`, and `time_thread_time` /
-   `time_thread_time_ns`. Each pair shares a backend that returns a
-   `_PyTime_t` (64-bit nanosecond integer) and then converts to a float
-   for the non-`_ns` variant.
+Three groups of functions live here:
 
-2. **Sleep** — `time_sleep` which calls `pysleep()`. `pysleep` loops on
-   `nanosleep(2)` on POSIX (restarting if interrupted by a non-signal
-   `EINTR`) and on `WaitForSingleObjectEx` on Windows.
+- **Clock functions**: `time.time()` (wall clock), `time.monotonic()` (never
+  goes backward), `time.perf_counter()` (highest available resolution).
+  Each has a `_ns` variant that returns an integer nanosecond count rather
+  than a float to avoid floating-point rounding.
+- **Calendar functions**: `gmtime()`, `localtime()`, `mktime()`, and
+  `asctime()` wrap `gmtime_r(3)` / `localtime_r(3)` / `mktime(3)` and
+  produce or consume `struct_time` structseq objects.
+- **Format functions**: `strftime()` wraps the platform `strftime(3)`;
+  `strptime()` delegates to `_strptime.py`.
 
-3. **`struct_time`** — a `structseq` with nine integer fields
-   (`tm_year`, `tm_mon`, `tm_mday`, `tm_hour`, `tm_min`, `tm_sec`,
-   `tm_wday`, `tm_yday`, `tm_isdst`) plus two optional named extras
-   (`tm_gmtoff`, `tm_zone`). It is a subclass of `tuple`.
-
-4. **Calendar conversion** — `time_localtime` and `time_gmtime` convert
-   seconds-since-epoch to `struct_time`; `time_mktime` goes the other
-   direction.
-
-5. **Formatting** — `time_strftime` wraps `strftime(3)`;
-   `time_strptime` is a thin wrapper that delegates to
-   `_strptime.strptime_time` (pure Python in `Lib/_strptime.py`).
-
-6. **Timezone** — `time_tzset` calls `tzset(3)` on POSIX to reload the
-   `TZ` environment variable; `time_timezone`, `time_altzone`, `time_daylight`,
-   and `time_tzname` expose the C `extern` timezone globals.
-
-Clock resolution on each platform:
-
-| Platform | Wall (`CLOCK_REALTIME`) | Monotonic | Perf counter |
-| --- | --- | --- | --- |
-| Linux | `clock_gettime` | `CLOCK_MONOTONIC` | `CLOCK_MONOTONIC` |
-| macOS | `gettimeofday` | `mach_absolute_time` | `mach_absolute_time` |
-| Windows | `GetSystemTimeAsFileTime` | `QueryPerformanceCounter` | `QueryPerformanceCounter` |
+`pysleep()` is the implementation of `time.sleep()`. On POSIX it uses
+`clock_nanosleep(2)` or `nanosleep(2)` in a retry loop that handles
+`EINTR` by checking for pending Python signals between retries.
 
 ## Map
 
 | Lines | Symbol | Role | gopy |
 | ----- | ------ | ---- | ---- |
-| <Cpy path="Modules/timemodule.c" lines="1-80">1-80</Cpy> | includes, `_PyTime_t` helpers, `floattime` | Platform detection macros and the internal `_PyTime_AsSecondsDouble` conversion used by `time_time`. | `module/time/module.go` |
-| <Cpy path="Modules/timemodule.c" lines="80-250">80-250</Cpy> | `time_time`, `time_time_ns` | Wall clock read via `_PyTime_GetSystemClock`; convert to float seconds or return raw ns integer. | `module/time/module.go:Time` |
-| <Cpy path="Modules/timemodule.c" lines="250-450">250-450</Cpy> | `time_monotonic`, `time_monotonic_ns`, `time_perf_counter`, `time_perf_counter_ns` | Monotonic and high-resolution performance clocks via `_PyTime_GetMonotonicClock` / `_PyTime_GetPerfCounter`. | `module/time/module.go:Monotonic` |
-| <Cpy path="Modules/timemodule.c" lines="450-600">450-600</Cpy> | `pysleep`, `time_sleep` | Sleep with nanosecond precision; `pysleep` loops on `nanosleep`/`WaitForSingleObjectEx` and checks signals on `EINTR`. | `module/time/module.go:Sleep` |
-| <Cpy path="Modules/timemodule.c" lines="600-800">600-800</Cpy> | `PyStructSequence_Desc tmfields`, `struct_time_type`, `structtime_new` | `struct_time` type: 9 required + 2 optional fields; subclass of `tuple`. | `module/time/module.go:StructTime` |
-| <Cpy path="Modules/timemodule.c" lines="800-1050">800-1050</Cpy> | `time_gmtime`, `time_localtime`, `time_mktime` | Epoch-to-calendar and calendar-to-epoch conversions via `gmtime_r`/`localtime_r`/`mktime`. | `module/time/module.go:Localtime` |
-| <Cpy path="Modules/timemodule.c" lines="1050-1350">1050-1350</Cpy> | `time_strftime`, `time_strptime` | `strftime(3)` wrapper; `strptime` delegates to `_strptime.strptime_time`. | `module/time/module.go:Strftime` |
-| <Cpy path="Modules/timemodule.c" lines="1350-1600">1350-1600</Cpy> | `time_process_time`, `time_thread_time` | CPU-time clocks via `CLOCK_PROCESS_CPUTIME_ID` / `CLOCK_THREAD_CPUTIME_ID`. | `module/time/module.go:ProcessTime` |
-| <Cpy path="Modules/timemodule.c" lines="1600-1900">1600-1900</Cpy> | `time_tzset`, timezone globals, `time_methods[]`, `timemodule`, `PyInit_time` | Timezone reload, method table, constants (`timezone`, `altzone`, `daylight`, `tzname`), and module init. | `module/time/module.go:Module` |
+| <Cpy path="Modules/timemodule.c" lines="1-300">1-300</Cpy> | `_PyTime_t` helpers, `time_time`, `time_time_ns`, `time_monotonic`, `time_monotonic_ns`, `time_perf_counter`, `time_perf_counter_ns` | Wall clock, monotonic clock, and performance counter, each as float and integer-ns variant. | `module/time/` |
+| <Cpy path="Modules/timemodule.c" lines="300-700">300-700</Cpy> | `pysleep`, `time_sleep`, `struct_time` structseq definition, `time_from_tm`, `tm_from_time` | `time.sleep()` with EINTR retry and signal check; `struct_time` type definition and conversions. | `module/time/` |
+| <Cpy path="Modules/timemodule.c" lines="700-1200">700-1200</Cpy> | `time_gmtime`, `time_localtime`, `time_mktime`, `time_asctime`, `time_ctime` | Calendar conversion functions wrapping `gmtime_r`/`localtime_r`/`mktime`. | `module/time/` |
+| <Cpy path="Modules/timemodule.c" lines="1200-1900">1200-1900</Cpy> | `time_strftime`, `time_strptime`, `time_get_clock_info`, `time_methods[]`, `timemodule`, `PyInit_time`, clock constant registration | `strftime`/`strptime`, clock info introspection, method table, and module init. | `module/time/` |
 
 ## Reading
 
-### `time_time` wall-clock read (lines 80 to 250)
+### Monotonic clock selection (lines 1 to 300)
 
-<CpyLink path="Modules/timemodule.c" lines="80-250" />
+<CpyLink path="Modules/timemodule.c" lines="1-300" />
+
+CPython selects the best available monotonic clock at compile time with a
+cascade of `#ifdef` guards:
 
 ```c
-static PyObject *
-time_time(PyObject *module, PyObject *unused)
+static int
+pymonotonic(struct timespec *tp)
 {
-    _PyTime_t t;
-    if (_PyTime_GetSystemClock(&t) < 0)
-        return NULL;
-    return _PyTime_AsSecondsDouble_Object(t);
-}
-
-static PyObject *
-time_time_ns(PyObject *module, PyObject *unused)
-{
-    _PyTime_t t;
-    if (_PyTime_GetSystemClock(&t) < 0)
-        return NULL;
-    return _PyTime_AsNanosecondsObject(t);
+#if defined(MS_WINDOWS)
+    /* QueryPerformanceCounter on Windows */
+    LARGE_INTEGER now;
+    QueryPerformanceCounter(&now);
+    ...
+#elif defined(__APPLE__)
+    /* mach_absolute_time on macOS */
+    tp->tv_sec  = ...;
+    tp->tv_nsec = ...;
+#elif defined(CLOCK_HIGHRES)
+    /* Solaris CLOCK_HIGHRES */
+    clock_gettime(CLOCK_HIGHRES, tp);
+#else
+    /* POSIX CLOCK_MONOTONIC (Linux, *BSD) */
+    clock_gettime(CLOCK_MONOTONIC, tp);
+#endif
+    return 0;
 }
 ```
 
-`_PyTime_t` is a `int64_t` holding nanoseconds since the Unix epoch.
-`_PyTime_GetSystemClock` fills it using the best available platform call:
-`clock_gettime(CLOCK_REALTIME)` on Linux, `gettimeofday` on older POSIX,
-and `GetSystemTimeAsFileTime` on Windows (adjusted from the 100-ns Windows
-epoch to the Unix epoch). `_PyTime_AsSecondsDouble_Object` divides by
-`1e9` and boxes the result into a Python `float`.
+`time.monotonic()` wraps `pymonotonic` and converts the `timespec` to a
+Python `float` (seconds). `time.monotonic_ns()` returns the raw nanosecond
+count as a Python `int`, preserving the full precision that the OS provides.
 
-The `_ns` variant skips the float conversion and returns the raw integer
-via `_PyTime_AsNanosecondsObject`, which calls `PyLong_FromLongLong`.
+`time.perf_counter()` uses the same backend as `time.monotonic()` on most
+platforms. The difference is semantic: `perf_counter` is documented as
+"the highest resolution clock available for measuring a short duration"
+while `monotonic` is documented as "suitable for measuring elapsed wall
+time between events that may span OS sleep".
 
-### `pysleep` and signal-interrupted sleep (lines 450 to 600)
+`time.time()` calls `gettimeofday(2)` on POSIX or `GetSystemTimeAsFileTime`
+on Windows and converts to seconds since the Unix epoch as a `float`. The
+epoch is always 1970-01-01 00:00 UTC regardless of the local timezone.
 
-<CpyLink path="Modules/timemodule.c" lines="450-600" />
+### `pysleep` with signal interruption (lines 300 to 700)
+
+<CpyLink path="Modules/timemodule.c" lines="300-700" />
+
+`time.sleep(secs)` must not block the interpreter indefinitely when a
+signal arrives. `pysleep` handles this with a retry loop:
 
 ```c
 static int
@@ -116,121 +104,98 @@ pysleep(_PyTime_t timeout)
     _PyTime_t deadline = _PyTime_GetMonotonicClock() + timeout;
 
     do {
-        struct timespec timeout_abs;
-        _PyTime_AsTimespec(timeout, &timeout_abs);
-
+        /* Release the GIL for the actual sleep. */
         Py_BEGIN_ALLOW_THREADS
-        int ret = nanosleep(&timeout_abs, NULL);
+#ifdef HAVE_CLOCK_NANOSLEEP
+        clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &timeout_abs, NULL);
+#elif defined(HAVE_NANOSLEEP)
+        nanosleep(&ts, NULL);
+#else
+        select(0, NULL, NULL, NULL, &tv);
+#endif
         Py_END_ALLOW_THREADS
 
-        if (ret == 0)
-            break;
+        /* Did a signal interrupt us? */
+        if (PyErr_CheckSignals() < 0)
+            return -1;   /* propagate exception (e.g. KeyboardInterrupt) */
 
-        if (errno != EINTR) {
-            PyErr_SetFromErrno(PyExc_OSError);
-            return -1;
-        }
-
-        /* EINTR: check for signals, then re-compute remaining sleep time */
-        if (Py_MakePendingCalls() < 0)
-            return -1;
-
+        /* Recompute remaining time. */
         timeout = deadline - _PyTime_GetMonotonicClock();
-        if (timeout <= 0)
-            break;
-    } while (1);
+    } while (timeout > 0);
+
     return 0;
 }
 ```
 
-The loop accounts for early wakeup from `EINTR`: after calling
-`Py_MakePendingCalls` (which dispatches any pending signals, including
-`KeyboardInterrupt`), it recomputes the remaining duration against the
-`deadline` so the full requested sleep time is honoured even across
-multiple signal interruptions. On Windows the inner call is replaced by
-`WaitForSingleObjectEx(NULL, ms, TRUE)` which already handles the
-alertable wait needed for APCs.
+Three details matter here:
 
-### `struct_time` type and field layout (lines 600 to 800)
+1. The GIL is released around the system call so other threads run during
+   the sleep. This means signal delivery can happen on another thread's
+   behalf, but `PyErr_CheckSignals` is only effective in the main thread.
+2. On Linux, `clock_nanosleep` with `TIMER_ABSTIME` is preferred over
+   `nanosleep` with a relative timeout so that repeated EINTR retries do
+   not drift: each retry targets the original deadline rather than sleeping
+   for the remaining delta computed from an imprecise `clock_gettime` call.
+3. `PyErr_CheckSignals` runs the Python-level signal handlers (including
+   raising `KeyboardInterrupt` for SIGINT) and returns `-1` on exception,
+   which unwinds the retry loop immediately.
 
-<CpyLink path="Modules/timemodule.c" lines="600-800" />
+### `time_strftime` (lines 1200 to 1900)
 
-```c
-static PyStructSequence_Field struct_time_fields[] = {
-    {"tm_year",   "year, for example, 1993"},
-    {"tm_mon",    "month of year, range [1, 12]"},
-    {"tm_mday",   "day of month, range [1, 31]"},
-    {"tm_hour",   "hours, range [0, 23]"},
-    {"tm_min",    "minutes, range [0, 59]"},
-    {"tm_sec",    "seconds, range [0, 61]"},    /* 60-61 for leap seconds */
-    {"tm_wday",   "day of week, range [0, 6], Monday is 0"},
-    {"tm_yday",   "day of year, range [1, 366]"},
-    {"tm_isdst",  "1 if summer time is in effect, 0 if not, and -1 if unknown"},
-    {"tm_gmtoff", "offset from UTC in seconds"},  /* optional */
-    {"tm_zone",   "abbreviation of timezone name"},  /* optional */
-    {0}
-};
-```
+<CpyLink path="Modules/timemodule.c" lines="1200-1900" />
 
-`struct_time` is built with `PyStructSequence_NewType`. The first nine
-fields are always present; `tm_gmtoff` and `tm_zone` are set only when
-the platform `localtime_r` fills `tm_gmtoff` / `tm_zone` in `struct tm`
-(i.e., glibc / BSD / macOS). Accessing them on a Windows `struct_time`
-raises `AttributeError`.
-
-### `time_strftime` format-string expansion (lines 1050 to 1350)
-
-<CpyLink path="Modules/timemodule.c" lines="1050-1350" />
+`time.strftime(format[, t])` validates the `struct_time` argument, converts
+it to a C `struct tm`, then calls the platform `strftime(3)`:
 
 ```c
 static PyObject *
 time_strftime(PyObject *module, PyObject *args)
 {
-    const char *fmt;
-    struct tm buf = {0};
-    char *outbuf;
-    size_t bufsize;
-
-    if (!PyArg_ParseTuple(args, "s|O:strftime", &fmt, &tup))
-        return NULL;
-
-    /* fill buf from tup, or use localtime() of current time */
+    struct tm buf;
+    char *fmt;
+    PyObject *tup = NULL;
+    ...
+    /* Convert struct_time to struct tm. */
+    buf.tm_year  = ...;
+    buf.tm_mon   = ...;   /* 0-based in struct tm */
     ...
 
-    /* grow outbuf until strftime fills it completely */
-    for (bufsize = 1024; ; bufsize *= 2) {
-        outbuf = PyMem_Malloc(bufsize);
-        size_t n = strftime(outbuf, bufsize, fmt, &buf);
-        if (n > 0 || bufsize > 256*1024) break;
+    /* Double the output buffer until strftime succeeds. */
+    for (bufsize = 1024; ; bufsize += bufsize) {
+        outbuf = (char *)PyMem_Malloc(bufsize);
+        ...
+        n = strftime(outbuf, bufsize, fmt, &buf);
+        if (n > 0 || bufsize >= 256 * 1024)
+            break;
         PyMem_Free(outbuf);
     }
-    return PyUnicode_DecodeLocale(outbuf, "surrogateescape");
+    ret = PyUnicode_DecodeLocale(outbuf, "surrogateescape");
+    PyMem_Free(outbuf);
+    return ret;
 }
 ```
 
-`time_strftime` passes control entirely to the platform `strftime(3)`. The
-doubling loop is needed because `strftime` returns `0` both when the
-output buffer is too small and when the format string legitimately
-produces an empty result (e.g., `%Z` on a system with no timezone set).
-The loop caps at 256 KB to prevent runaway allocation from a pathological
-format string.
+The doubling loop is needed because `strftime` returns `0` on both
+truncation and genuine empty output (e.g. `strftime("%p", ...)` on some
+locales). The loop stops at 256 KB to guard against runaway expansion.
 
-`time_strptime` is a one-liner that imports `_strptime` on demand and
-calls `_strptime.strptime_time(string, format)`. All parsing logic is
-pure Python.
+`time.strptime` delegates entirely to `_strptime._strptime_time` in
+`Lib/_strptime.py`; `timemodule.c` only provides the Python-visible name.
 
 ## gopy mirror
 
-`module/time/module.go` (pending). Clock reads use `time.Now()`,
-`time.Since`, and `runtime/pprof.Do` in place of `CLOCK_MONOTONIC` /
-`CLOCK_PROCESS_CPUTIME_ID`. Sleep is `time.Sleep` with an interruptible
-wrapper that checks the eval-breaker channel. `struct_time` maps to a
-fixed-size Go struct that implements the `tuple` protocol.
+`module/time/` (pending). `time.time()` maps to `time.Now().UnixNano()`.
+`time.monotonic()` uses `runtime_nanotime` via `time.Since` with a fixed
+epoch. `pysleep` maps to `time.Sleep` inside a loop that selects on the
+interpreter's signal channel between retries. `strftime` calls Go's
+`time.Format` with a converted format string; `strptime` delegates to the
+Python `_strptime` module as in CPython.
 
 ## CPython 3.14 changes
 
-`_PyTime_t` was renamed to `PyTime_t` and made public in 3.13 as part of
-the limited C API extension (PEP 697). `time.time_ns` was added in 3.7.
-`time.thread_time` was added in 3.7. `time.perf_counter_ns` was added in
-3.7. The `tm_gmtoff` / `tm_zone` extras on `struct_time` have been
-available since 3.3.
+`time.time_ns()`, `time.monotonic_ns()`, and `time.perf_counter_ns()` were
+added in Python 3.7 (PEP 564). `clock_nanosleep` with `TIMER_ABSTIME` was
+adopted for `pysleep` in 3.11 to eliminate drift on EINTR retries. The
+`time.get_clock_info(name)` function was added in 3.3. On Windows,
+`QueryPerformanceCounter` replaced `GetSystemTimeAsFileTime` for
+`perf_counter` in 3.3 to achieve sub-microsecond resolution.

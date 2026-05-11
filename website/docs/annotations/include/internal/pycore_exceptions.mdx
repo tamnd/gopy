@@ -1,11 +1,11 @@
 ---
 title: Include/internal/pycore_exceptions.h
-description: Internal exception helpers — _PyErr_StackItem linked list, active-exception accessors, PEP 654 group predicates, and except* re-raise support.
+description: Internal exception state. _PyErr_StackItem linked list, _PyBaseExceptionObject field layout, exception chaining fields, and exc_info helpers.
 cpython_path: Include/internal/pycore_exceptions.h
 cpython_version: "3.14"
-lines: 150
+lines: 180
 status: annotated
-ported_to: objects/exception.go
+ported_to: errors/exception.go
 ---
 
 import {Cpy, CpyLink} from '@site/src/components/Cpy';
@@ -14,147 +14,194 @@ import {Cpy, CpyLink} from '@site/src/components/Cpy';
 
 <CpyLink path="Include/internal/pycore_exceptions.h" />
 
-The private counterpart to `Include/pyerrors.h`. The public header
-declares the stable `PyErr_*` API surface; this file adds the
-per-thread exception stack, the group predicates introduced by PEP 654,
-and the `except*` re-raise helper that the bytecode interpreter calls at
-runtime.
+The private companion to `Include/pyerrors.h`. The public header declares the
+functions that raise and clear exceptions; this file exposes the structs that
+hold exception state inside `PyThreadState` and the internal fields of
+`BaseException` instances that are hidden from extension modules.
 
-The key design choice that this header exposes is that each Python
-frame does not own its exception directly. Instead, a linked list of
-`_PyErr_StackItem` nodes lives off the thread state, and each
-`PUSH_EXC_INFO` / `POP_EXCEPT` bytecode pair pushes and pops one node.
-This makes exception save/restore across nested `try` blocks a
-constant-time operation.
+The central type is `_PyErr_StackItem`. Each Python frame's `PUSH_EXC_INFO`
+bytecode allocates a stack item on the C stack and links it into a singly-linked
+list rooted at `tstate->exc_info`. When the frame exits (via `POP_EXCEPT`), the
+item is unlinked. This design gives each `except:` block its own exception slot
+without heap allocation, and the linked list makes it straightforward for
+`sys.exc_info()` to walk back to the innermost active exception.
 
-In gopy, `objects/exception.go` holds the exception type hierarchy and
-helper functions. The `_PyErr_StackItem` linked list is mirrored by the
-`ExcInfo` stack on `vm.ThreadState`, and `_PyErr_GetTopmostException`
-maps to `tstate.ExcInfo()`.
+The `_PyBaseExceptionObject` struct exposes the internal fields of every Python
+exception instance. The public `BaseException` class maps these to `args`,
+`__traceback__`, `__cause__`, `__context__`, and `__suppress_context__`
+attributes. The C fields are accessed directly by the eval loop and the
+`except*` handler for exception groups (PEP 654).
+
+In gopy, `errors.Exception` in `errors/exception.go` is a direct port of
+`_PyBaseExceptionObject`. The `_PyErr_StackItem` linked list is replaced by
+gopy's frame-local exception slot on `state.Thread`, which serves the same
+role without needing a C-stack-allocated struct.
 
 ## Map
 
 | Lines | Symbol | Role | gopy |
 | ----- | ------ | ---- | ---- |
-| <Cpy path="Include/internal/pycore_exceptions.h" lines="1-30">1-30</Cpy> | `_PyErr_StackItem` | Per-frame saved exception: `exc_value` (`PyObject *`) and `previous_item` pointer forming a singly-linked list. | `objects/exception.go` |
-| <Cpy path="Include/internal/pycore_exceptions.h" lines="31-55">31-55</Cpy> | `_PyErr_GetTopmostException` | Returns `tstate->exc_info`, the head of the active exception stack. | `objects/exception.go` |
-| <Cpy path="Include/internal/pycore_exceptions.h" lines="56-80">56-80</Cpy> | `_PyErr_SetNone` | Shorthand for `_PyErr_SetObject(tstate, type, Py_None)` — raises an exception with no associated value. | `objects/exception.go` |
-| <Cpy path="Include/internal/pycore_exceptions.h" lines="81-105">81-105</Cpy> | `_PyException_IsGroup` / `_PyException_IsBaseGroup` | PEP 654 predicates: `IsGroup` checks for `ExceptionGroup`; `IsBaseGroup` checks for `BaseExceptionGroup`. | `objects/exception.go` |
-| <Cpy path="Include/internal/pycore_exceptions.h" lines="106-130">106-130</Cpy> | `_PyExc_PrepReraiseStar` | Constructs the re-raise value for `except*` clauses from the matched sub-group and the unmatched remainder. | `objects/exception.go` |
-| <Cpy path="Include/internal/pycore_exceptions.h" lines="131-150">131-150</Cpy> | Miscellaneous helpers | `_PyErr_FormatFromCause`, `_PyException_AddNote`, `_PyException_SetCause` — supplementary exception helpers used in Objects/ and Python/. | `objects/exception.go` |
+| <Cpy path="Include/internal/pycore_exceptions.h" lines="1-30">1-30</Cpy> | `_PyErr_StackItem` | One node of the per-frame exception stack: `exc_value` (`PyObject *`) and `previous_item` pointer. `PyThreadState.exc_info` points at the topmost node. | `state/thread.go` (exception slot) |
+| <Cpy path="Include/internal/pycore_exceptions.h" lines="31-60">31-60</Cpy> | `_PyErr_GetTopmostException` / `_PyErr_SetTopmostException` | Inline accessors that read/write `tstate->exc_info->exc_value`. Used by `PUSH_EXC_INFO` / `POP_EXCEPT` bytecodes. | `errors/api.go` (`Occurred`, `Raise`) |
+| <Cpy path="Include/internal/pycore_exceptions.h" lines="61-100">61-100</Cpy> | `_PyBaseExceptionObject` | Internal layout of every `BaseException` instance: `args` tuple, `notes` list, `traceback`, `context`, `cause`, `suppress_context` bit. | `errors/exception.go` (`Exception`) |
+| <Cpy path="Include/internal/pycore_exceptions.h" lines="101-130">101-130</Cpy> | `_PyException_AddNote` | Appends a string to the exception's `__notes__` list (PEP 678). Creates the list on first call. | `errors/exception.go` (`Exception.Notes`) |
+| <Cpy path="Include/internal/pycore_exceptions.h" lines="131-160">131-160</Cpy> | `_PyBaseExceptionGroup_Create` / `_PyExcStopIteration_GetValue` | Internal constructors and accessors for `ExceptionGroup` (PEP 654) and `StopIteration.value`. | (pending) |
+| <Cpy path="Include/internal/pycore_exceptions.h" lines="161-180">161-180</Cpy> | `_PyErr_WriteUnraisableMsgWithExc` / `_PyErr_FormatNote` | Print-path helpers called when an exception cannot be propagated (e.g. in a finalizer). | `errors/print.go` |
 
 ## Reading
 
-### `_PyErr_StackItem` linked list (lines 1 to 55)
+### The `exc_info` stack (lines 1 to 60)
 
-<CpyLink path="Include/internal/pycore_exceptions.h" lines="1-55" />
+<CpyLink path="Include/internal/pycore_exceptions.h" lines="1-60" />
 
 ```c
 typedef struct _PyErr_StackItem {
-    /* The saved current exception for this frame, or NULL if none. */
-    PyObject *exc_value;
+    /* The exception currently handled in this frame, or NULL.
+       In 3.11+ this is always a normalized BaseException instance. */
+    PyObject          *exc_value;
+    /* Link to the enclosing frame's stack item, or
+       &tstate->exc_info_root for the outermost frame. */
     struct _PyErr_StackItem *previous_item;
 } _PyErr_StackItem;
+```
 
-static inline _PyErr_StackItem *
-_PyErr_GetTopmostException(PyThreadState *tstate)
-{
-    _PyErr_StackItem *exc_info = tstate->exc_info;
-    while ((exc_info->exc_value == NULL || exc_info->exc_value == Py_None) &&
-           exc_info->previous_item != NULL)
-    {
-        exc_info = exc_info->previous_item;
+`PyThreadState` carries `exc_info`, a pointer to the topmost `_PyErr_StackItem`.
+The root item is `PyThreadState.exc_info_root`, which holds `exc_value = NULL`
+and `previous_item = NULL`, acting as a sentinel.
+
+When a frame executes `PUSH_EXC_INFO`, the bytecode:
+1. Allocates a `_PyErr_StackItem` on the C stack of `_PyEval_EvalFrameDefault`.
+2. Moves `tstate->current_exception` into `new_item->exc_value`.
+3. Links `new_item->previous_item = tstate->exc_info`.
+4. Sets `tstate->exc_info = &new_item`.
+
+`POP_EXCEPT` reverses this: it pops `tstate->exc_info` back to
+`previous_item` and decrements the outgoing `exc_value`.
+
+`sys.exc_info()` walks the chain to find the first non-NULL `exc_value`,
+which is the exception currently being handled in the innermost active
+`except` clause.
+
+```c
+static inline PyObject *
+_PyErr_GetTopmostException(PyThreadState *tstate) {
+    _PyErr_StackItem *item = tstate->exc_info;
+    while ((item->exc_value == NULL || item->exc_value == Py_None)
+           && item->previous_item != NULL) {
+        item = item->previous_item;
     }
-    return exc_info;
+    return item->exc_value;
 }
 ```
 
-Each time the bytecode interpreter executes `PUSH_EXC_INFO` (entering a
-`try` block's handler), it allocates a `_PyErr_StackItem` on the C stack
-frame and links it onto `tstate->exc_info`. `POP_EXCEPT` unlinks and
-discards it. The list therefore mirrors the nesting depth of active
-exception handlers, not the Python call stack depth; a function that
-never catches an exception contributes no nodes.
+The walk stops at the first non-empty slot. `Py_None` is a legacy marker used
+by pre-3.11 code that set `exc_value` to `Py_None` instead of `NULL` for
+"no exception". The loop skips these for backward compatibility.
 
-`exc_value` holds the current exception instance (the value, not the
-type or traceback). CPython 3.12 unified the (type, value, traceback)
-triple into a single `exc_value` after PEP 3134 made the traceback and
-cause chain fields of the exception instance itself. Reading
-`tstate->exc_info->exc_value` is therefore sufficient to obtain the full
-active exception.
+In gopy, there is no C-stack-allocated struct. Each frame communicates with the
+thread's exception slot directly via `state.Thread.SetException` and
+`state.Thread.CurrentException`. The linked-list structure is not reproduced
+because gopy frames are Go goroutine frames, not C stack frames, so the
+per-frame allocations are handled by Go's stack growth mechanism.
 
-`_PyErr_GetTopmostException` skips past any `NULL` or `Py_None` entries
-at the top of the stack (frames that entered a handler but whose saved
-exception was already cleared) to return the most recent real exception.
-This is the function that `sys.exc_info()` calls internally.
+### `_PyBaseExceptionObject` layout and exception chaining (lines 61 to 130)
 
-In gopy, `vm.ThreadState` carries an `excInfoStack []*ExcInfo` slice.
-`PushExcInfo` and `PopExcInfo` manage it, and `TopmostException` walks
-the slice from the top to match `_PyErr_GetTopmostException`.
-
-### `_PyException_IsGroup` and `_PyException_IsBaseGroup` (lines 81 to 105)
-
-<CpyLink path="Include/internal/pycore_exceptions.h" lines="81-105" />
+<CpyLink path="Include/internal/pycore_exceptions.h" lines="61-130" />
 
 ```c
-/* PEP 654 — Exception Groups */
-static inline int
-_PyException_IsGroup(PyObject *exc)
-{
-    return PyObject_TypeCheck(exc, (PyTypeObject *)PyExc_ExceptionGroup);
-}
-
-static inline int
-_PyException_IsBaseGroup(PyObject *exc)
-{
-    return PyObject_TypeCheck(exc, (PyTypeObject *)PyExc_BaseExceptionGroup);
-}
+typedef struct {
+    PyObject_HEAD
+    PyObject *args;               /* positional args tuple */
+    PyObject *notes;              /* list[str] or NULL (PEP 678) */
+    PyObject *traceback;          /* PyTracebackObject * or NULL */
+    PyObject *context;            /* __context__: the active exc when this was raised */
+    PyObject *cause;              /* __cause__: explicit `raise X from Y` target */
+    char      suppress_context;   /* 1 when `raise X from Y` was used */
+} _PyBaseExceptionObject;
 ```
 
-PEP 654 (Python 3.11) introduced `ExceptionGroup` and
-`BaseExceptionGroup` to carry multiple concurrent exceptions, and `except*`
-to match them. The two predicates are used throughout the interpreter to
-branch between the single-exception path and the group path:
+These five fields implement Python's exception chaining model (PEP 3134, 3.0):
 
-- `_PyException_IsBaseGroup` is the broader check. `BaseExceptionGroup`
-  can wrap any `BaseException` subclass, including `KeyboardInterrupt`
-  and `SystemExit`. Most interpreter paths use this predicate to guard
-  against accidentally treating a group as a scalar exception.
-- `_PyException_IsGroup` is the narrower check. `ExceptionGroup`
-  inherits from both `BaseExceptionGroup` and `Exception`, so it only
-  matches groups whose members are all `Exception` subclasses. User code
-  typically creates `ExceptionGroup` instances; library code that
-  processes signals creates `BaseExceptionGroup`.
+- `__context__` (`context`) is set automatically by the raise machinery. When
+  an exception is raised while another exception is active, the eval loop
+  stores the active exception as `context` on the new exception. This is the
+  "implicit chaining" used for error messages like
+  "During handling of the above exception, another exception occurred".
 
-In gopy, `objects/exception.go` defines `IsExceptionGroup` and
-`IsBaseExceptionGroup` as methods that delegate to `PyObject_TypeCheck`
-via the `TypeCheck` helper on the gopy `Type`.
+- `__cause__` (`cause`) is set explicitly by `raise X from Y`. It overrides
+  `context` in the printed traceback with the message
+  "The above exception was the direct cause of the following exception".
 
-### `_PyExc_PrepReraiseStar` (lines 106 to 130)
+- `__suppress_context__` (`suppress_context`) is set to `1` by `raise X from Y`,
+  telling the traceback printer to use `__cause__` and hide `__context__`. It
+  is also set to `1` by `raise X from None`, in which case `cause` is `NULL`
+  and both chaining displays are suppressed.
 
-<CpyLink path="Include/internal/pycore_exceptions.h" lines="106-130" />
+- `__notes__` (`notes`) holds a list of strings appended via `add_note()` (PEP 678,
+  3.11+). The interpreter does not use this field; it is purely for the
+  `traceback` module and `str()` display.
 
 ```c
-PyAPI_FUNC(PyObject *)
-_PyExc_PrepReraiseStar(PyObject *orig, PyObject *excs);
+/* Set by PUSH_EXC_INFO in the raise path */
+if (prev_exc != NULL) {
+    exc->context = prev_exc;   /* implicit chain */
+}
+
+/* Set by RAISE_VARARGS with a cause operand */
+if (cause != NULL) {
+    exc->cause = cause;
+    exc->suppress_context = 1;
+}
 ```
 
-`_PyExc_PrepReraiseStar` is called at the end of an `except*` handler
-to produce the exception value that `RERAISE` will raise. It takes two
-arguments:
+In gopy, `errors.Exception` mirrors all five fields directly:
+`Context *Exception`, `Cause *Exception`, `Suppress bool`, `Notes *objects.List`,
+and `TB *traceback.Traceback`. `errors.Raise` implements the implicit chaining
+(if a previous exception is active and `exc.Context == nil`, it sets
+`exc.Context = prev`). `errors.RaiseFrom` sets `exc.Cause = cause` and
+`exc.Suppress = true`.
 
-- `orig`: the original `ExceptionGroup` that was caught.
-- `excs`: a list of exception values collected from each `except*`
-  branch — some may be `None` (matched and handled), some may be a
-  re-raised sub-group or a new exception raised inside the handler.
+### `_PyException_AddNote` (lines 101 to 130)
 
-The function reconstructs a new `ExceptionGroup` (or `None` if all
-branches handled their exceptions) by combining the unhandled remainder
-from `orig` with any newly raised exceptions in `excs`. The result is
-what propagates up the call stack.
+<CpyLink path="Include/internal/pycore_exceptions.h" lines="101-130" />
 
-The corresponding bytecode is `CALL_INTRINSIC_2` with the
-`INTRINSIC_PREP_RERAISE_STAR` argument, emitted by the compiler for
-`except*` clause epilogues. In gopy, `objects/exception.go` implements
-`PrepReraiseStar` following the same two-phase algorithm: collect
-unmatched members, then re-wrap or return `None`.
+```c
+int _PyException_AddNote(PyObject *exc, PyObject *note);
+```
+
+`add_note()` is the Python-level method on `BaseException` that appends a
+string to `__notes__`. The C implementation (`_PyException_AddNote`) creates
+the `notes` list on first call with `PyList_New(0)`, then calls
+`PyList_Append`. The method raises `TypeError` if `note` is not a `str`.
+
+The notes are printed after the exception message and traceback by
+`traceback.TracebackException`. They are particularly useful in frameworks that
+catch exceptions at a boundary and add contextual information before
+re-raising:
+
+```python
+try:
+    process(item)
+except Exception as exc:
+    exc.add_note(f"Occurred while processing {item!r}")
+    raise
+```
+
+In gopy, `errors.Exception` carries `Notes *objects.List`. The `add_note`
+method on gopy's exception type calls `listAppend` on that field, creating it
+on first use in the same pattern as the C implementation.
+
+## gopy mirror
+
+The full correspondence is:
+
+| CPython C field | gopy Go field |
+| --------------- | ------------- |
+| `_PyBaseExceptionObject.args` | `errors.Exception.Args *objects.Tuple` |
+| `_PyBaseExceptionObject.notes` | `errors.Exception.Notes *objects.List` |
+| `_PyBaseExceptionObject.traceback` | `errors.Exception.TB *traceback.Traceback` |
+| `_PyBaseExceptionObject.context` | `errors.Exception.Context *Exception` |
+| `_PyBaseExceptionObject.cause` | `errors.Exception.Cause *Exception` |
+| `_PyBaseExceptionObject.suppress_context` | `errors.Exception.Suppress bool` |
+| `_PyErr_StackItem.exc_value` | `state.Thread` exception slot |
+| `tstate->exc_info` linked list | goroutine stack (implicit) |

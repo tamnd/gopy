@@ -1,11 +1,11 @@
 ---
 title: Lib/urllib/parse.py
-description: RFC 3986 URL parsing, splitting, joining, and percent-encoding utilities; the foundation for all URL manipulation in the standard library.
+description: RFC 3986 URL decomposition, joining, and percent-encoding; pure Python with no C accelerator.
 cpython_path: Lib/urllib/parse.py
 cpython_version: "3.14"
-lines: 1399
+lines: 1100
 status: annotated
-ported_to: module/urllib/parse.go
+ported_to: (stdlib pending)
 ---
 
 import {Cpy, CpyLink} from '@site/src/components/Cpy';
@@ -14,130 +14,127 @@ import {Cpy, CpyLink} from '@site/src/components/Cpy';
 
 <CpyLink path="Lib/urllib/parse.py" />
 
-`urllib/parse.py` is the canonical URL manipulation module for CPython.
-It implements RFC 3986 parsing, RFC 3986 resolution (joining), and the
-`application/x-www-form-urlencoded` encoding format used by HTML forms.
-Everything in `urllib.request`, `http.client`, and most third-party HTTP
-libraries depends on it.
+`urllib.parse` is a pure-Python module that implements RFC 3986 URL parsing
+and RFC 3987 IRI handling. It provides two layers of decomposition:
+`urlsplit` (five components: scheme, netloc, path, query, fragment) and
+`urlparse` (six components: the five from `urlsplit` plus `params` separated
+by `;` in the path). Named-tuple result types (`SplitResult`, `ParseResult`)
+expose components as both positional elements and named attributes, and add
+`geturl()` to reassemble the URL.
 
-The module draws a careful line between `str` and `bytes` input. Every
-public function accepts both and returns the same type it received.
-`_coerce_args` normalizes the handling internally: it detects `bytes`
-input, decodes to `str` with `latin-1`, processes as `str`, then
-re-encodes the result parts before returning. This round-trip is lossless
-for percent-encoded URL components because percent-encoded bytes all fall
-in the ASCII range.
-
-The two core parse functions differ in one dimension: `urlparse` treats
-the path component for schemes like `http` and `ftp` as having an
-optional `;params` suffix (RFC 2396 legacy), while `urlsplit` does not.
-All modern callers use `urlsplit`. Both cache their results in a
-module-level `_parse_cache` dict keyed by `(urlstring, scheme, allow_fragments)`.
+The module also handles percent-encoding (`quote`/`unquote`) and query-string
+serialisation (`urlencode`/`parse_qs`/`parse_qsl`). A `_coerce_args` helper
+unifies bytes and str inputs by converting bytes to str internally and
+converting the result back, so every function works symmetrically on both types.
 
 ## Map
 
 | Lines | Symbol | Role | gopy |
 | ----- | ------ | ---- | ---- |
-| <Cpy path="Lib/urllib/parse.py" lines="1-100">1-100</Cpy> | Module header, constants, `_parse_cache` | `uses_netloc`, `uses_params`, `uses_query`, `uses_fragment` scheme sets; `_parse_cache` LRU dict; `MAX_CACHE_SIZE`. | `module/urllib/parse.go` |
-| <Cpy path="Lib/urllib/parse.py" lines="101-220">101-220</Cpy> | `ParseResult`, `SplitResult`, `DefragResult` named tuples | Result types with `geturl()` reconstruction methods; `bytes` variants `ParseResultBytes` etc. | `module/urllib/parse.go` |
-| <Cpy path="Lib/urllib/parse.py" lines="221-380">221-380</Cpy> | `urlparse`, `urlsplit`, `_splitnetloc`, `_checknetloc` | Core parse/split logic; netloc extraction; `_coerce_args` adapter; scheme canonicalization. | `module/urllib/parse.go` |
-| <Cpy path="Lib/urllib/parse.py" lines="381-500">381-500</Cpy> | `urlunsplit`, `urlunparse`, `urljoin` | URL reconstruction and RFC 3986 relative reference resolution. | `module/urllib/parse.go` |
-| <Cpy path="Lib/urllib/parse.py" lines="501-650">501-650</Cpy> | `urldefrag`, `urlencode`, `_noop`, `_encode_result`, `_coerce_args` | Fragment splitting; query string encoding for dicts, sequences, and generators. | `module/urllib/parse.go` |
-| <Cpy path="Lib/urllib/parse.py" lines="651-900">651-900</Cpy> | `quote`, `quote_plus`, `quote_from_bytes` | Percent-encoding; `_ALWAYS_SAFE` bit set; byte-by-byte encoding with `_safe_quoters` cache. | `module/urllib/parse.go` |
-| <Cpy path="Lib/urllib/parse.py" lines="901-1100">901-1100</Cpy> | `unquote`, `unquote_plus`, `unquote_to_bytes` | Percent-decoding; `_unquote_impl` handles UTF-8 surrogate-escape for malformed sequences; `_Quoter` callable class. | `module/urllib/parse.go` |
-| <Cpy path="Lib/urllib/parse.py" lines="1100-1399">1100-1399</Cpy> | `splittype`, `splithost`, `splituser`, `splitpasswd`, `splitport`, `splitquery`, `splittag`, `splitattr`, `splitvalue` | Legacy `urllib.parse` split helpers (deprecated since 3.9, kept for backward compat). | `module/urllib/parse.go` |
+| <Cpy path="Lib/urllib/parse.py" lines="1-100">1-100</Cpy> | `uses_netloc`, `uses_params`, `uses_query`, `uses_fragment`, `uses_relative` | Registry sets that control which schemes get netloc/params/query/fragment treatment in `urlsplit`/`urlparse`. | `(stdlib pending)` |
+| <Cpy path="Lib/urllib/parse.py" lines="100-300">100-300</Cpy> | `SplitResult`, `ParseResult`, `SplitResultBytes`, `ParseResultBytes`, `urlsplit`, `urlparse` | Named-tuple result types plus the two main decomposition functions; `urlparse` calls `urlsplit` and then peels off the `;params` suffix from the path. | `(stdlib pending)` |
+| <Cpy path="Lib/urllib/parse.py" lines="300-450">300-450</Cpy> | `urlunparse`, `urlunsplit`, `urldefrag`, `urljoin` | Reassembly and joining. `urljoin` implements the RFC 3986 reference-resolution algorithm using the base URL's components as fallbacks. | `(stdlib pending)` |
+| <Cpy path="Lib/urllib/parse.py" lines="450-600">450-600</Cpy> | `quote`, `quote_plus`, `quote_from_bytes`, `_ALWAYS_SAFE` | Percent-encoding. `_ALWAYS_SAFE` is a `frozenset` of unreserved characters. `quote_from_bytes` encodes each byte not in `safe` as `%XX`. | `(stdlib pending)` |
+| <Cpy path="Lib/urllib/parse.py" lines="600-750">600-750</Cpy> | `unquote`, `unquote_plus`, `unquote_to_bytes` | Percent-decoding. `unquote_to_bytes` splits on `%` and decodes each two-hex-digit sequence; `unquote` then decodes the resulting bytes with an error handler that preserves malformed sequences. | `(stdlib pending)` |
+| <Cpy path="Lib/urllib/parse.py" lines="750-900">750-900</Cpy> | `urlencode`, `parse_qs`, `parse_qsl` | Query-string encoding and parsing. `parse_qsl` returns a list of `(name, value)` pairs; `parse_qs` folds duplicates into lists. `urlencode` handles dicts, sequences, and the `doseq` flag. | `(stdlib pending)` |
+| <Cpy path="Lib/urllib/parse.py" lines="900-1100">900-1100</Cpy> | `_coerce_args`, `_noop`, `_encode_result`, `_decode_args` | Bytes/str unification layer. `_coerce_args` detects bytes input, converts to str, and returns a result encoder that converts back. Every public function wraps its str implementation with this pair. | `(stdlib pending)` |
 
 ## Reading
 
-### `urlsplit` and the parse cache (lines 221 to 320)
+### `urlsplit` netloc extraction (lines 100 to 300)
 
-<CpyLink path="Lib/urllib/parse.py" lines="221-320" />
+<CpyLink path="Lib/urllib/parse.py" lines="100-300" />
 
 ```python
-def urlsplit(urlstring, scheme='', allow_fragments=True):
-    url, scheme, _coerce_result = _coerce_args(urlstring, scheme)
+def urlsplit(url, scheme='', allow_fragments=True):
+    url, scheme, _coerce_result = _coerce_args(url, scheme)
     allow_fragments = bool(allow_fragments)
-    key = url, scheme, allow_fragments, type(url)
+    key = url, scheme, allow_fragments, type(url), type(scheme)
     cached = _parse_cache.get(key, None)
     if cached:
         return _coerce_result(cached)
     ...
     netloc = query = fragment = ''
     i = url.find(':')
-    if i > 0 and url[0] in scheme_chars:
+    if i > 0:
         ...
-        scheme, url = url[:i].lower(), url[i+1:]
+        rest = url[i+1:]
+        if not rest or any(c not in '0123456789' for c in rest):
+            scheme, url = url[:i].lower(), rest
     if url[:2] == '//':
         netloc, url = _splitnetloc(url, 2)
-        ...
+        if (('[' in netloc and ']' not in netloc) or
+                (']' in netloc and '[' not in netloc)):
+            raise ValueError("Invalid IPv6 URL")
     if allow_fragments and '#' in url:
         url, fragment = url.split('#', 1)
     if '?' in url:
         url, query = url.split('?', 1)
-    ...
     v = SplitResult(scheme, netloc, url, query, fragment)
     _parse_cache[key] = v
     return _coerce_result(v)
 ```
 
-`urlsplit` processes the URL in a single left-to-right pass. Scheme
-detection requires the first character of the candidate scheme to be an
-ASCII letter (the `url[0] in scheme_chars` guard prevents mistaking a
-Windows drive letter like `C:` for a scheme). Netloc extraction only
-fires when the remaining URL starts with `//`. Fragment and query
-splitting use `str.split(..., 1)` with the appropriate delimiter.
-Results are cached in `_parse_cache`; the cache is pruned to
-`MAX_CACHE_SIZE = 20` entries by clearing it entirely when it overflows,
-which is intentionally simple and avoids the cost of an LRU eviction.
+The scheme is extracted by finding the first `:` and validating that everything
+before it is a valid scheme character. The netloc is extracted only if the
+remaining string starts with `//`; `_splitnetloc` scans for the first `/`,
+`?`, or `#` that ends the authority. Fragment is split off before the query
+so that a `#` inside a query is treated as a fragment delimiter (RFC 3986
+section 3.4 permits `#` in a query only when percent-encoded). Results are
+cached in `_parse_cache` (a plain dict, not LRU) keyed by the full argument
+tuple including types so that bytes and str calls never collide.
 
-### `urljoin` RFC 3986 resolution (lines 381 to 480)
+### `urljoin` RFC 3986 resolution algorithm (lines 300 to 450)
 
-<CpyLink path="Lib/urllib/parse.py" lines="381-480" />
+<CpyLink path="Lib/urllib/parse.py" lines="300-450" />
 
 ```python
 def urljoin(base, url, allow_fragments=True):
-    ...
-    bscheme, bnetloc, bpath, bparams, bquery, bfragment = \
-        urlparse(base, '', allow_fragments)
-    scheme, netloc, path, params, query, fragment = \
-        urlparse(url, bscheme, allow_fragments)
-
+    if not base:
+        return url
+    if not url:
+        return base
+    base, url, _coerce_result = _coerce_args(base, url)
+    bscheme, bnetloc, bpath, bparams, bquery, bfragment = urlparse(base, '', allow_fragments)
+    scheme,  netloc,  path,  params,  query,  fragment  = urlparse(url,  bscheme, allow_fragments)
     if scheme != bscheme or scheme not in uses_relative:
-        ...
-        return _coerce_result(urlunparse((scheme, netloc, path, params, query, fragment)))
-    if netloc:
-        path = _remove_dot_segments(path)
-        return _coerce_result(urlunparse((scheme, netloc, path, params, query, fragment)))
+        _coerce_result(urlunparse((scheme, netloc, path, params, query, fragment)))
+        return ...
+    if scheme in uses_netloc:
+        netloc = netloc or bnetloc
     if not path and not params:
         path = bpath
         params = bparams
         if not query:
             query = bquery
-        ...
+        return _coerce_result(urlunparse((scheme, netloc, path, params, query, fragment)))
+    base_parts = bpath.split('/')
+    if base_parts[-1] != '':
+        del base_parts[-1]
+    if path[:1] == '/':
+        segments = path.split('/')
     else:
-        base_parts = bpath.split('/')
-        if base_parts[-1] != '':
-            del base_parts[-1]
-        ...
-        path = '/'.join(base_parts) + '/' + path
-        path = _remove_dot_segments(path)
+        segments = base_parts + path.split('/')
+    resolved = []
+    for seg in segments:
+        if seg == '..':
+            if resolved[1:]:
+                resolved.pop()
+        elif seg != '.':
+            resolved.append(seg)
     ...
-    return _coerce_result(urlunparse((scheme, netloc, path, params, query, fragment)))
 ```
 
-`urljoin` implements RFC 3986 Section 5.2 reference resolution. The
-priority rules are: if the reference has a scheme that differs from the
-base, return the reference as-is. If it has an authority (`netloc`),
-remove dot segments from the path and return. Otherwise merge the base
-path and reference path, then remove dot segments. `_remove_dot_segments`
-implements the RFC 3986 algorithm verbatim, collapsing `.` and `..`
-components without touching the authority. The function correctly handles
-the edge cases in RFC 3986 Section 5.4 including empty paths, root-relative
-references, and paths ending with `/..`.
+The algorithm follows RFC 3986 section 5.2 literally. If the reference has a
+different scheme it is returned verbatim. Otherwise netloc, path, and query
+are resolved in order: a non-empty reference netloc overrides the base netloc;
+an absolute reference path overrides the base path entirely; a relative path
+is appended to the base path after removing the last segment. Dot segments
+(`.` and `..`) are removed in a single pass over the merged segment list.
 
-### `quote` and the `_safe_quoters` cache (lines 651 to 800)
+### `quote` percent-encoding (lines 450 to 600)
 
-<CpyLink path="Lib/urllib/parse.py" lines="651-800" />
+<CpyLink path="Lib/urllib/parse.py" lines="450-600" />
 
 ```python
 _ALWAYS_SAFE = frozenset(
@@ -145,70 +142,46 @@ _ALWAYS_SAFE = frozenset(
     'abcdefghijklmnopqrstuvwxyz'
     '0123456789'
     '_.-~')
-_ALWAYS_SAFE_BYTES = bytes(_ALWAYS_SAFE_CODES)
 
-def quote(string, safe='/', encoding=None, errors=None):
-    ...
-    if isinstance(string, str):
-        string = string.encode(encoding or 'utf-8',
-                               errors or 'strict')
-    return quote_from_bytes(string, safe)
+_safe_quoters = {}
 
 def quote_from_bytes(bs, safe='/'):
-    ...
-    safe = _ALWAYS_SAFE.union(safe)
-    quoter = _safe_quoters.get(safe)
-    if quoter is None:
+    if not isinstance(bs, (bytes, bytearray)):
+        raise TypeError('quote_from_bytes() expected bytes or bytearray, '
+                        'not %s' % bs.__class__.__name__)
+    if not bs:
+        return ''
+    if isinstance(safe, str):
+        safe = safe.encode('ascii', 'ignore')
+    else:
+        safe = bytes([c for c in safe if c < 128])
+    if not bs.rstrip(_ALWAYS_SAFE_BYTES + safe):
+        return bs.decode()
+    try:
+        quoter = _safe_quoters[safe]
+    except KeyError:
         _safe_quoters[safe] = quoter = Quoter(safe).__getitem__
     return ''.join([quoter(char) for char in bs])
 ```
 
-`_ALWAYS_SAFE` holds the 66 unreserved characters that RFC 3986 says
-must never be percent-encoded. `quote_from_bytes` first builds a
-`safe` set by unioning `_ALWAYS_SAFE` with the caller-supplied safe
-characters, then looks up or creates a `Quoter` for that set. `Quoter`
-is a `dict` subclass that lazily populates itself: on the first lookup
-for a byte value, it checks the safe set and either stores the raw
-character or the `%XX` encoding. This means the fast path for
-already-safe bytes is a single dict lookup and the slow path pays the
-percent-encoding cost exactly once per (byte, safe-set) pair.
+`quote_from_bytes` converts each byte outside `_ALWAYS_SAFE | safe` to
+`%XX` using a `Quoter` object (a `dict` subclass that generates entries on
+demand via `__missing__`). Results for each `safe` set are cached in
+`_safe_quoters` to avoid rebuilding the table on every call. The fast-path
+`rstrip` check skips encoding entirely when every byte in the input is
+already safe.
 
-### `unquote_to_bytes` and surrogate-escape (lines 901 to 1000)
+`quote(string, safe, encoding, errors)` encodes the string to bytes first
+using the specified encoding (default `utf-8`) and then calls
+`quote_from_bytes`. `quote_plus` additionally replaces spaces with `+`
+after calling `quote`, matching the `application/x-www-form-urlencoded`
+format used in HTML forms.
 
-<CpyLink path="Lib/urllib/parse.py" lines="901-1000" />
+## gopy mirror
 
-```python
-def unquote_to_bytes(string):
-    if not string:
-        return b''
-    if isinstance(string, str):
-        string = string.encode('utf-8')
-    bits = string.split(b'%')
-    if len(bits) == 1:
-        return string
-    res = [bits[0]]
-    append = res.append
-    for item in bits[1:]:
-        try:
-            append(bytes([int(item[:2], 16)]))
-            append(item[2:])
-        except (ValueError, IndexError):
-            append(b'%')
-            append(item)
-    return b''.join(res)
-
-def unquote(string, encoding='utf-8', errors='replace'):
-    ...
-    return unquote_to_bytes(string).decode(encoding, errors)
-```
-
-`unquote_to_bytes` splits on `%` and interprets each two-character hex
-sequence that follows. Malformed sequences (not two hex digits, or `%`
-at the end of the string) are passed through unchanged, preserving
-round-trip fidelity for inputs that contain literal `%` characters.
-`unquote` decodes the resulting bytes with the given encoding; the
-default `errors='replace'` substitutes the Unicode replacement character
-`U+FFFD` for byte sequences that are not valid UTF-8, which is the safe
-choice for URLs received from external sources. For internal round-trips
-where the original encoding is known, callers can pass `errors='surrogatepass'`
-to preserve byte values outside the BMP.
+`urllib.parse` has no C accelerator. The only external dependency is the
+`re` module (used in `parse_qsl` to split on `&` or `;` separators). A
+gopy port needs a working `str.encode`/`bytes.decode`, `str.split`, and
+the `_ALWAYS_SAFE` frozenset. The `_parse_cache` dict is module-global and
+shared across calls, so a port must replicate it to achieve comparable
+performance on repeated calls to `urlsplit`.

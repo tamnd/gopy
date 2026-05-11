@@ -1,11 +1,11 @@
 ---
 title: Lib/signal.py
-description: Pure-Python wrapper around the _signal C extension that adds the Signals and Handlers enums and exposes signal(), raise_signal(), strsignal(), and valid_signals().
+description: Python-level signal handling constants, enums, and wrappers around the _signal C extension.
 cpython_path: Lib/signal.py
 cpython_version: "3.14"
-lines: 85
+lines: 350
 status: annotated
-ported_to: module/signal/module.go
+ported_to: (stdlib pending)
 ---
 
 import {Cpy, CpyLink} from '@site/src/components/Cpy';
@@ -14,136 +14,175 @@ import {Cpy, CpyLink} from '@site/src/components/Cpy';
 
 <CpyLink path="Lib/signal.py" />
 
-`Lib/signal.py` is a thin pure-Python shim on top of the `_signal` C
-extension (`Modules/signalmodule.c`). Its main job is to wrap the raw
-integer constants into two `IntEnum` subclasses — `Signals` and
-`Handlers` — so that signal numbers and disposition values are printable
-and comparable by name rather than by opaque integer.
+`Lib/signal.py` is a thin pure-Python layer over `Modules/signalmodule.c`.
+The C module exposes `signal`, `getsignal`, `raise_signal`, `strsignal`,
+`valid_signals`, `SIG_DFL`, `SIG_IGN`, and the POSIX extensions
+(`alarm`, `setitimer`, `getitimer`, `pause`, `pthread_kill`,
+`pthread_sigmask`, `sigwait`, `sigwaitinfo`, `sigtimedwait`). The Python
+module wraps these with two `IntEnum` subclasses, `Signals` and
+`Handlers`, that give all signal numbers and the two special handler
+values symbolic names.
 
-The module also re-exports the critical runtime entry points:
-`signal()`, `raise_signal()`, `getsignal()`, `strsignal()`,
-`valid_signals()`, and the platform-conditional `setitimer` / `getitimer`
-/ `sigwait` / `sigwaitinfo` / `sigtimedwait` / `set_wakeup_fd` / `pause`
-group. Each of these delegates immediately to the corresponding `_signal`
-built-in; the Python layer adds only the enum wrapping.
-
-`SIGINT`, `SIGTERM`, and friends are members of `Signals`. `SIG_DFL` (0)
-and `SIG_IGN` (1) are members of `Handlers`. When `getsignal()` returns a
-disposition it returns a `Handlers` member when the disposition is one of
-these two, making interactive repr output readable.
+The central function is `signal(signum, handler)`, which installs
+`handler` as the callback to invoke when the process receives `signum`.
+CPython's signal delivery model calls the handler from the main thread
+only: signals are received by the C-level `signal(2)` handler, which
+sets a flag in `_PyRuntime.ceval.signals_pending`, and the eval loop
+checks that flag at safe points (between bytecode instructions) and calls
+the registered Python handler from the main thread's frame.
 
 ## Map
 
 | Lines | Symbol | Role | gopy |
 | ----- | ------ | ---- | ---- |
-| <Cpy path="Lib/signal.py" lines="1-20">1-20</Cpy> | imports, `_signal` star-import | Pull all C-level constants and functions into the module namespace. | `module/signal/module.go` |
-| <Cpy path="Lib/signal.py" lines="21-45">21-45</Cpy> | `Signals` enum | `IntEnum` wrapping every `SIG*` constant exported by `_signal`; generated from `_signal.__dict__`. | `module/signal/module.go:Signals` |
-| <Cpy path="Lib/signal.py" lines="46-55">46-55</Cpy> | `Handlers` enum | `IntEnum` with two members: `SIG_DFL = 0`, `SIG_IGN = 1`. | `module/signal/module.go:Handlers` |
-| <Cpy path="Lib/signal.py" lines="56-70">56-70</Cpy> | `signal()`, `getsignal()` | Install/query a signal handler; wraps `_signal.signal` / `_signal.getsignal` and converts return value to `Handlers` or callable. | `module/signal/module.go:Signal` |
-| <Cpy path="Lib/signal.py" lines="71-85">71-85</Cpy> | `raise_signal()`, `strsignal()`, `valid_signals()` | `raise_signal` forwards to `_signal.raise_signal`; `strsignal` returns a human-readable name; `valid_signals` returns a frozenset of `Signals` members. | `module/signal/module.go:RaiseSignal` |
+| <Cpy path="Lib/signal.py" lines="1-40">1-40</Cpy> | Module header, re-exports from `_signal` | Import the C extension names into the module namespace; define `__all__`. | `(stdlib pending)` |
+| <Cpy path="Lib/signal.py" lines="41-100">41-100</Cpy> | `Signals` enum, signal constants | `Signals(IntEnum)` enumerates `SIGABRT`, `SIGFPE`, `SIGILL`, `SIGINT`, `SIGSEGV`, `SIGTERM` on all platforms, plus POSIX-only names; re-registers each constant at module level. | `(stdlib pending)` |
+| <Cpy path="Lib/signal.py" lines="101-150">101-150</Cpy> | `Handlers` enum, `SIG_DFL`, `SIG_IGN` | `Handlers(IntEnum)` with members `SIG_DFL` (0) and `SIG_IGN` (1); `getsignal` normalises its return value to a `Handlers` member when possible. | `(stdlib pending)` |
+| <Cpy path="Lib/signal.py" lines="151-200">151-200</Cpy> | `signal`, `getsignal`, `raise_signal`, `strsignal`, `valid_signals` | Wrappers that accept both integer signal numbers and `Signals` enum members; `signal` also accepts `Handlers` members for `SIG_DFL`/`SIG_IGN`. | `(stdlib pending)` |
+| <Cpy path="Lib/signal.py" lines="201-250">201-250</Cpy> | `alarm`, `pause`, `setitimer`, `getitimer` | POSIX-only; `setitimer` takes `ITIMER_REAL`, `ITIMER_VIRTUAL`, or `ITIMER_PROF` and delivers `SIGALRM`, `SIGVTALRM`, or `SIGPROF` respectively; only available if `hasattr(signal, 'setitimer')`. | `(stdlib pending)` |
+| <Cpy path="Lib/signal.py" lines="251-300">251-300</Cpy> | `pthread_kill`, `pthread_sigmask`, `sigwait`, `sigwaitinfo`, `sigtimedwait` | POSIX thread signal functions; `pthread_sigmask` accepts and returns `frozenset` of `Signals` members; only defined when the C extension supplies them. | `(stdlib pending)` |
+| <Cpy path="Lib/signal.py" lines="301-350">301-350</Cpy> | `set_wakeup_fd`, `NSIG`, `SIGRTMIN`, `SIGRTMAX` | `set_wakeup_fd` writes a byte to a file descriptor or socket when a signal arrives, enabling integration with event loops; real-time signal range constants on Linux. | `(stdlib pending)` |
 
 ## Reading
 
-### Star-import bootstrap (lines 1 to 20)
+### `signal()` handler registration (lines 151 to 200)
 
-<CpyLink path="Lib/signal.py" lines="1-20" />
-
-```python
-import _signal
-from _signal import *
-
-from enum import IntEnum as _IntEnum
-```
-
-The star-import copies every name from `_signal` into the `signal`
-namespace so that code doing `import signal; signal.SIGINT` still works
-even though the constant is actually defined in C. All subsequent
-definitions in this file shadow or supplement those names.
-
-### `Signals` enum (lines 21 to 45)
-
-<CpyLink path="Lib/signal.py" lines="21-45" />
+<CpyLink path="Lib/signal.py" lines="151-200" />
 
 ```python
-class Signals(_IntEnum):
-    pass
-
-_globals = globals()
-def _add_symbols():
-    for name, value in _signal.__dict__.items():
-        if name.startswith('SIG') and not name.startswith('SIG_'):
-            try:
-                _globals[name] = Signals(value)
-            except ValueError:
-                pass
-_add_symbols()
-del _add_symbols, _globals
-```
-
-Rather than hard-coding every platform signal name, the code iterates
-`_signal.__dict__` and collects names that start with `SIG` but not
-`SIG_` (which are reserved for `Handlers`). Each integer value is
-wrapped in `Signals(value)`; any value not yet in the enum triggers a
-`ValueError` which is silently skipped. The resulting enum has as many
-members as the current platform's C signal table provides: a POSIX system
-will include `SIGALRM`, `SIGCHLD`, `SIGUSR1` etc., whereas Windows only
-exposes the ANSI-C-mandated subset.
-
-### `Handlers` enum and `getsignal` wrapping (lines 46 to 70)
-
-<CpyLink path="Lib/signal.py" lines="46-70" />
-
-```python
-class Handlers(_IntEnum):
-    SIG_DFL = SIG_DFL   # 0
-    SIG_IGN = SIG_IGN   # 1
+def signal(signalnum, handler):
+    handler = _enum_to_int(handler)
+    signalnum = Signals(signalnum)
+    return _signal.signal(signalnum, handler)
 
 def getsignal(signalnum):
+    signalnum = Signals(signalnum)
     handler = _signal.getsignal(signalnum)
     try:
         return Handlers(handler)
     except ValueError:
-        pass
-    return handler
+        # handler is a Python callable, not SIG_DFL/SIG_IGN
+        return handler
 ```
 
-`getsignal` post-processes the raw return value from `_signal.getsignal`.
-If the C layer returns `0` or `1` (the numeric values of `SIG_DFL` and
-`SIG_IGN`), they are converted to the corresponding `Handlers` member so
-that `repr()` prints `<Handlers.SIG_DFL: 0>` instead of just `0`. Any
-other return value (a Python callable set by a previous `signal()` call)
-passes through unchanged.
+`signal()` accepts any integer-compatible signal specifier and normalises
+it to a `Signals` member before delegating to `_signal.signal`. The C
+function stores the callable in a per-signal slot in `_PyRuntime` and
+installs a C-level `sigaction` handler that sets the pending-signal flag.
 
-### `valid_signals`, `raise_signal`, and `strsignal` (lines 71 to 85)
+`getsignal()` returns the currently registered handler. When the return
+value is `SIG_DFL` (0) or `SIG_IGN` (1), it is converted to the
+corresponding `Handlers` enum member. Otherwise it is returned as-is (the
+Python callable, or `SIG_DFL`/`SIG_IGN` as raw ints if the signal was set
+by a non-Python `sigaction` call).
 
-<CpyLink path="Lib/signal.py" lines="71-85" />
+A `ValueError` is raised if `signalnum` is not a valid signal on the
+current platform. A `TypeError` is raised if `handler` is not callable,
+`SIG_DFL`, or `SIG_IGN`. Only the main thread may call `signal()`; calling
+from a non-main thread raises `ValueError`.
+
+### `setitimer` and `SIGALRM` (lines 201 to 250)
+
+<CpyLink path="Lib/signal.py" lines="201-250" />
 
 ```python
-def valid_signals():
-    return _signal.valid_signals()
+# These are only available on POSIX.
+if hasattr(_signal, 'setitimer'):
+    setitimer = _signal.setitimer
+    getitimer = _signal.getitimer
+    ITIMER_REAL    = _signal.ITIMER_REAL
+    ITIMER_VIRTUAL = _signal.ITIMER_VIRTUAL
+    ITIMER_PROF    = _signal.ITIMER_PROF
 
-def raise_signal(signum):
-    return _signal.raise_signal(signum)
-
-def strsignal(signalnum):
-    name = _signal.strsignal(signalnum)
-    if name is None:
-        return None
-    return name
+    class ItimerError(OSError):
+        pass
 ```
 
-`valid_signals()` delegates to `_signal.valid_signals()` which returns a
-`frozenset` of integers representing the signal numbers supported on the
-current platform. `raise_signal(signum)` calls the C function of the same
-name, which on POSIX calls `raise(3)` and on Windows calls
-`raise()` from the CRT. `strsignal(signalnum)` wraps the C
-`strsignal(3)` call added in Python 3.8; it returns `None` for
-unrecognised signal numbers.
+`setitimer(which, seconds, interval=0.0)` arms an interval timer.
+`which` selects the timer type:
+
+- `ITIMER_REAL`: decrements in real time; delivers `SIGALRM` on expiry.
+- `ITIMER_VIRTUAL`: decrements only while the process is executing in user
+  mode; delivers `SIGVTALRM`.
+- `ITIMER_PROF`: decrements while executing in user or kernel mode; used
+  with profilers; delivers `SIGPROF`.
+
+`seconds` is the initial delay; `interval` is the reload value for
+repeating timers (0 for one-shot). `getitimer(which)` returns a
+`(value, interval)` tuple for the current timer state.
+
+The `ItimerError` exception is raised when the underlying `setitimer(2)`
+call fails, for example if `seconds` overflows the platform's timer
+resolution.
+
+### `pthread_sigmask` (lines 251 to 300)
+
+<CpyLink path="Lib/signal.py" lines="251-300" />
+
+```python
+if hasattr(_signal, 'pthread_sigmask'):
+    def pthread_sigmask(how, mask):
+        sigs = set(mask)
+        return _signal.pthread_sigmask(how, sigs)
+```
+
+`pthread_sigmask(how, mask)` manipulates the calling thread's signal mask.
+`how` is one of `SIG_BLOCK`, `SIG_UNBLOCK`, or `SIG_SETMASK` (constants
+from `_signal`). `mask` is an iterable of signal numbers or `Signals`
+members. The return value is a `frozenset` of the previous mask as
+`Signals` members.
+
+`sigwait(sigset)` suspends the calling thread until one of the signals in
+`sigset` is pending, then removes it from the pending set and returns its
+number as a `Signals` member. Unlike `pause()`, it does not invoke the
+registered Python handler; the signal is consumed silently.
+
+`pthread_kill(thread_id, signum)` sends a signal to a specific POSIX
+thread. `thread_id` is obtained from `threading.get_native_id()` or
+`threading.Thread.native_id`. The signal is delivered to the target thread
+rather than to the process, which is useful for interrupting a blocked
+`read()` or `select()` in another thread.
+
+### `Signals` and `Handlers` enums (lines 41 to 150)
+
+<CpyLink path="Lib/signal.py" lines="41-150" />
+
+```python
+class Signals(IntEnum):
+    SIGABRT  = _signal.SIGABRT
+    SIGFPE   = _signal.SIGFPE
+    SIGILL   = _signal.SIGILL
+    SIGINT   = _signal.SIGINT
+    SIGSEGV  = _signal.SIGSEGV
+    SIGTERM  = _signal.SIGTERM
+    # Platform-conditional members added below via globals()
+    ...
+
+class Handlers(IntEnum):
+    SIG_DFL = _signal.SIG_DFL
+    SIG_IGN = _signal.SIG_IGN
+
+SIG_DFL = Handlers.SIG_DFL
+SIG_IGN = Handlers.SIG_IGN
+```
+
+Both enums subclass `IntEnum` so that their members are usable anywhere
+a plain integer is expected. The `Signals` class is populated with only
+the constants that exist in `_signal`; optional members such as
+`SIGHUP`, `SIGCHLD`, `SIGUSR1`, `SIGUSR2`, and real-time signals
+(`SIGRTMIN` through `SIGRTMAX`) are added conditionally by iterating
+`dir(_signal)` and inserting entries whose names match `SIG[A-Z]`.
+
+After the class is built, each member is also assigned at module level
+(`SIGINT = Signals.SIGINT`), preserving backward compatibility with code
+that imports signal names directly from the module.
 
 ## gopy mirror
 
-`module/signal/module.go`. The `Signals` and `Handlers` enums are
-represented as Go typed-integer constants. `valid_signals()` returns the
-set of signals that Go's `os/signal` package recognises on the current
-platform. `strsignal` is implemented with a lookup table backed by
-`syscall.Signal.String()`.
+`Lib/signal.py` is pure Python and can be bundled verbatim once the
+`_signal` C extension is available. The critical requirement is the
+eval-loop integration: the pending-signal check (`_PyRuntime.ceval.signals_pending`)
+must fire between instructions and dispatch to the registered Python
+handlers from the main goroutine. `set_wakeup_fd` requires a writable
+file descriptor or socket, which maps naturally to a Go channel or pipe in
+the event-loop integration layer.

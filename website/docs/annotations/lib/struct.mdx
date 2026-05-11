@@ -1,11 +1,11 @@
 ---
 title: Lib/struct.py
-description: Thin re-export shim for the _struct C extension, which packs and unpacks C-layout binary data according to format strings.
+description: Binary struct packing and unpacking; thin Python shim over Modules/_struct.c with pack/unpack/pack_into/unpack_from/iter_unpack and a compiled Struct cache.
 cpython_path: Lib/struct.py
 cpython_version: "3.14"
-lines: 20
+lines: 50
 status: annotated
-ported_to: module/struct/module.go
+ported_to: (stdlib pending)
 ---
 
 import {Cpy, CpyLink} from '@site/src/components/Cpy';
@@ -14,71 +14,170 @@ import {Cpy, CpyLink} from '@site/src/components/Cpy';
 
 <CpyLink path="Lib/struct.py" />
 
-`struct.py` contains almost no logic. Its entire job is to import the `_struct`
-C extension and re-export its public API under the `struct` package name. The
-real implementation lives in `Modules/_struct.c`.
+`Lib/struct.py` is a two-line shim:
 
-The C extension provides:
+```python
+from _struct import *
+from _struct import _clearcache, pack, pack_into, unpack, unpack_from, \
+    iter_unpack, calcsize, error, Struct
+```
 
-- `pack(fmt, v1, v2, ...)` / `pack_into(fmt, buffer, offset, ...)` — encode Python values into a `bytes` object or writable buffer.
-- `unpack(fmt, buffer)` / `unpack_from(fmt, buffer, offset=0)` — decode bytes back into a tuple of Python values.
-- `iter_unpack(fmt, buffer)` — iterator that repeatedly unpacks from a buffer.
-- `calcsize(fmt)` — return the number of bytes required by a format string.
-- `Struct(fmt)` — compiled format object that pre-parses the format string, avoiding repeated parsing in tight loops.
-- `error` — exception raised on format or data errors.
+All real logic lives in `Modules/_struct.c`. The Python file's only job is
+to make the C module's symbols available under the `struct` namespace and
+to ensure `error` and the private `_clearcache` function are exported even
+though they are not in `_struct.__all__`.
 
-Format strings use a one-character byte-order prefix (`<` little-endian, `>`
-big-endian, `=` native byte order, `@` native with alignment, `!` network /
-big-endian) followed by type codes (`b`, `B`, `h`, `H`, `i`, `I`, `l`, `L`,
-`q`, `Q`, `f`, `d`, `s`, `p`, `x`).
+This annotation therefore covers `Modules/_struct.c` directly, treating
+the C source as the authoritative implementation.
+
+`Struct` is a compiled format object. Calling `Struct(fmt)` parses the
+format string once and caches the result; subsequent `pack`/`unpack` calls
+reuse the parsed representation. Module-level functions `pack`, `unpack`,
+etc. maintain an internal LRU cache of `Struct` objects keyed by format
+string, so repeated calls with the same format are as fast as using an
+explicit `Struct`.
 
 ## Map
 
 | Lines | Symbol | Role | gopy |
 | ----- | ------ | ---- | ---- |
-| <Cpy path="Lib/struct.py" lines="1-5">1-5</Cpy> | `from _struct import *` | Bulk re-export of every public name from the C extension. | `module/struct/module.go` |
-| <Cpy path="Lib/struct.py" lines="6-15">6-15</Cpy> | `from _struct import (pack, pack_into, unpack, unpack_from, iter_unpack, calcsize, Struct, error)` | Explicit re-export to populate `__all__` and satisfy static analysis tools. | `module/struct/module.go` |
-| <Cpy path="Lib/struct.py" lines="16-20">16-20</Cpy> | Module docstring / `__doc__` | Docstring referencing `Modules/_struct.c` as the implementation. | `module/struct/module.go` |
+| <Cpy path="Lib/struct.py" lines="1-50">1-50</Cpy> | `from _struct import *`, `__all__` | Full re-export; the Python layer adds no logic. All symbols originate in `Modules/_struct.c`. | `(stdlib pending)` |
+| `_struct.c` format parser | byte-order prefixes, format codes | `@`, `=`, `<`, `>`, `!` set byte order and alignment; `x c b B h H i I l L q Q e f d s p P n N ?` are the format codes with defined size and alignment. | `(stdlib pending)` |
+| `_struct.c` Struct type | `Struct.__init__`, `Struct.pack`, `Struct.unpack`, `Struct.pack_into`, `Struct.unpack_from`, `Struct.iter_unpack`, `Struct.size`, `Struct.format` | Compiled format object; `size` is computed once at compile time; `iter_unpack` returns an iterator that advances through a buffer in `size`-byte steps. | `(stdlib pending)` |
+| `_struct.c` module-level | `pack`, `unpack`, `pack_into`, `unpack_from`, `iter_unpack`, `calcsize` | Convenience wrappers that compile the format string through an internal LRU cache and delegate to the matching `Struct` method. | `(stdlib pending)` |
 
 ## Reading
 
-### This is a thin wrapper (lines 1 to 20)
+### Byte-order prefix semantics
 
-<CpyLink path="Lib/struct.py" lines="1-20" />
+<CpyLink path="Lib/struct.py" lines="1-50" />
+
+The first character of a format string selects byte order and alignment:
+
+| Prefix | Byte order | Size | Alignment |
+|--------|-----------|------|-----------|
+| `@` (default) | native | native | native |
+| `=` | native | standard | none |
+| `<` | little-endian | standard | none |
+| `>` | big-endian | standard | none |
+| `!` | network (big-endian) | standard | none |
+
+"Native" size means the C compiler's `sizeof` for the corresponding type.
+"Standard" size is the fixed width mandated by the format code table.
+"Native alignment" inserts padding bytes before each field so it falls on
+its natural boundary. No prefix other than `@` inserts padding.
 
 ```python
-"""Functions to convert between Python values and C structs.
-Python bytes objects are used to hold the data representing the C struct
-and also as format strings (explained below) to describe the layout of
-data in the C struct.
+import struct
 
-The optional first format char indicates byte order, size and alignment:
-  @: native order, size & alignment (default)
-  =: native order, std. size & alignment
-  <: little-endian, std. size & alignment
-  >: big-endian, std. size & alignment
-  !: same as >
+# native byte order, native sizes, native alignment
+struct.pack('@ii', 1, 2)   # may have padding; size is platform-dependent
 
-...
-"""
+# little-endian, standard sizes (4 bytes each), no padding
+struct.pack('<ii', 1, 2)   # always 8 bytes
 
-from _struct import *
-from _struct import (pack, pack_into, unpack, unpack_from,
-                     iter_unpack, calcsize, Struct, error)
+# big-endian (network order), same as >
+struct.pack('!H', 0x0102)  # b'\x01\x02'
 ```
 
-There is no Python logic in this file beyond the `import` statements. Any
-behavioural change to `struct` must be made in `Modules/_struct.c`. The gopy
-port in `module/struct/module.go` implements the same format-string parser and
-binary encoding/decoding in Go, following the C source rather than this file.
+### Format code table
 
-Format strings are parsed once by `Struct.__init__` (or lazily on first use by
-the module-level functions) into an internal representation that stores the
-byte-order prefix and a list of `(count, code, size)` triples. `pack` iterates
-this list, converts each Python argument to the C type, and writes the bytes in
-the requested byte order. `unpack` does the reverse: reads `size` bytes, casts
-to the C type, and converts to a Python value.
+| Code | C type | Python type | Standard size (bytes) |
+| ---- | ------ | ----------- | --------------------- |
+| `x` | pad byte | no value | 1 |
+| `c` | `char` | bytes of length 1 | 1 |
+| `b` | `signed char` | int | 1 |
+| `B` | `unsigned char` | int | 1 |
+| `?` | `_Bool` | bool | 1 |
+| `h` | `short` | int | 2 |
+| `H` | `unsigned short` | int | 2 |
+| `i` | `int` | int | 4 |
+| `I` | `unsigned int` | int | 4 |
+| `l` | `long` | int | 4 |
+| `L` | `unsigned long` | int | 4 |
+| `q` | `long long` | int | 8 |
+| `Q` | `unsigned long long` | int | 8 |
+| `n` | `ssize_t` | int | (native only) |
+| `N` | `size_t` | int | (native only) |
+| `e` | half-float | float | 2 |
+| `f` | `float` | float | 4 |
+| `d` | `double` | float | 8 |
+| `s` | `char[]` | bytes | 1 per character |
+| `p` | Pascal string | bytes | 1 per character |
+| `P` | `void *` | int | (native only) |
 
-The `error` exception class is defined in C and is a subclass of `Exception`.
-It is raised when a format string is invalid (unknown code, bad count) or when
-a value does not fit (e.g., packing 300 into a `b` field).
+A repeat count may precede any code: `4H` is four unsigned shorts. For `s`
+the count is the byte length of the string, not a repeat: `10s` is one
+10-byte field.
+
+### `pack` and `unpack` usage
+
+```python
+import struct
+
+# module-level convenience (implemented in _struct.c):
+struct.pack('>IH', 0xDEAD, 0xBEEF)    # => b'\x00\x00\xde\xad\xbe\xef'
+struct.unpack('>IH', b'\x00\x00\xde\xad\xbe\xef')  # => (0xDEAD, 0xBEEF)
+struct.calcsize('>IH')                 # => 6
+
+# pack_into writes into an existing writable buffer at offset
+buf = bytearray(8)
+struct.pack_into('<I', buf, 2, 0xDEADBEEF)
+# buf[2:6] = b'\xef\xbe\xad\xde'
+
+# unpack_from reads from offset without slicing
+(val,) = struct.unpack_from('<I', buf, 2)
+# val = 0xDEADBEEF
+```
+
+`pack` returns a `bytes` object whose length equals `calcsize(fmt)`.
+`unpack` always returns a tuple, even for a single-field format.
+`pack_into` writes into any writable buffer that supports the buffer
+protocol (`bytearray`, `memoryview`). `unpack_from` accepts an optional
+`offset` parameter so callers avoid an intermediate slice.
+
+### `Struct` compiled format cache
+
+```python
+s = struct.Struct('>IH')
+data = s.pack(0xDEAD, 0xBEEF)
+values = s.unpack(data)
+s.pack_into(buf, offset, 0xDEAD, 0xBEEF)
+```
+
+`Struct.__init__` parses the format string in C and stores an internal list
+of `(code, count, offset)` triples plus the total `size`. `Struct.size`
+equals `calcsize(fmt)`. `pack`, `unpack`, `pack_into`, and `unpack_from`
+on a `Struct` instance skip the parse step, making them faster than the
+module-level functions for hot paths.
+
+### `iter_unpack` streaming
+
+```python
+fmt = struct.Struct('<HH')   # compile once
+data = b'\x01\x00\x02\x00\x03\x00\x04\x00'
+
+for a, b in fmt.iter_unpack(data):
+    print(a, b)
+# 1 2
+# 3 4
+```
+
+`iter_unpack(fmt, buffer)` returns a lazy iterator that yields successive
+`unpack` results stepping by `calcsize(fmt)` bytes. The buffer length must
+be an exact multiple of the step size; otherwise `struct.error` is raised
+on the first call to `__next__`. The iterator holds a reference to the
+original buffer, so mutating it between iterations produces undefined
+results. The module-level `struct.iter_unpack` compiles the format string
+through the internal LRU cache before delegating to the same mechanism.
+
+## gopy mirror
+
+`encoding/binary` in Go handles fixed-size integer encoding and decoding
+with explicit byte-order values (`binary.LittleEndian`, `binary.BigEndian`).
+For a full `struct` port, gopy needs to implement the format-string parser,
+the format-code table above, padding/alignment logic for `@`-prefixed
+formats, and the `Struct` compiled cache. `iter_unpack` maps naturally to
+a Go iterator over a byte slice. The `e` (half-float) code requires IEEE 754
+binary16 conversion since Go's `encoding/binary` does not handle `float16`
+natively; a small bit-manipulation helper is needed.

@@ -1,9 +1,9 @@
 ---
 title: Include/internal/pycore_import.h
-description: Internal import-system helpers — the per-interpreter import lock, sys.modules accessors, extension module cache, and __import__ retrieval.
+description: Import system internals: the per-interpreter import lock, sys.modules accessors, frozen module registry, and extension module cache.
 cpython_path: Include/internal/pycore_import.h
 cpython_version: "3.14"
-lines: 100
+lines: 240
 status: annotated
 ported_to: vm/eval_import.go
 ---
@@ -14,130 +14,202 @@ import {Cpy, CpyLink} from '@site/src/components/Cpy';
 
 <CpyLink path="Include/internal/pycore_import.h" />
 
-Declares the C-internal API for CPython's import machinery. The public
-`Python.h` surface (`PyImport_ImportModule`, `PyImport_AddModule`, etc.)
-is built on top of these primitives; this header exposes the primitives
-directly to code inside the interpreter that needs finer control.
+`pycore_import.h` collects the internal interfaces for CPython's import
+machinery that are not exposed through the public `Python/import.h` API.
+It declares the per-interpreter recursive import lock, the low-level
+`sys.modules` dict accessors used inside `import.c`, the frozen module
+registry (`_PyImport_FrozenBootstrap` and friends), and the extension
+module cache that tracks `.so`-backed modules across sub-interpreters.
 
-The most important item is the import lock. CPython's import system is
-protected by a single per-interpreter recursive mutex. Any code path that
-reads or writes `sys.modules`, initialises a module, or touches the
-extension module cache must hold this lock. The lock is recursive so that
-`importlib` can call back into `__import__` without deadlocking.
+The import lock (`_PyImport_AcquireLock`) is a per-interpreter recursive
+mutex. It is taken at the start of `PyImport_ImportModuleLevelObject` and
+released after the module is fully initialized. Recursive imports by the
+same thread (which happen constantly during `importlib` bootstrap) are
+allowed: an internal depth counter tracks the recursion level, and the lock
+is only released when the depth returns to zero.
 
-The extension module cache (`_PyImport_FindExtensionObject` /
-`_PyImport_FixupExtensionObject`) is a second-level lookup table for
-modules implemented in C. After a C extension is loaded the first time,
-its `PyModuleDef` is stored in the cache keyed by `(name, filename)`.
-Subsequent imports of the same module bypass `dlopen` entirely and
-re-execute only the per-interpreter init phase (for multi-phase-init
-modules) or return the cached module object directly (for single-phase).
+The `sys.modules` dict is stored on `PyInterpreterState.modules` (declared
+in `pycore_interp_structs.h`). The accessors here (`_PyImport_GetModule`,
+`_PyImport_SetModule`) wrap the raw dict with the interpreter argument so
+that sub-interpreter isolation is maintained: each sub-interpreter has its
+own `sys.modules` dict and cannot see modules cached by another
+sub-interpreter.
 
 ## Map
 
 | Lines | Symbol | Role | gopy |
 | ----- | ------ | ---- | ---- |
-| <Cpy path="Include/internal/pycore_import.h" lines="1-20">1-20</Cpy> | `_PyImport_AcquireLock` / `_PyImport_ReleaseLock` | Acquire/release the per-interpreter import lock; returns 0 on success, -1 if the lock is held by a different thread. | `vm/eval_import.go` |
-| <Cpy path="Include/internal/pycore_import.h" lines="21-40">21-40</Cpy> | `_PyImport_GetModule` / `_PyImport_SetModule` | `sys.modules.get(name)` and `sys.modules[name] = module` with proper locking. | `vm/eval_import.go` |
-| <Cpy path="Include/internal/pycore_import.h" lines="41-60">41-60</Cpy> | `_PyImport_GetModuleAttrString` | `__import__(module_name).attr_name` in one call; used by bootstrapping code that cannot use normal attribute syntax. | `vm/eval_import.go` |
-| <Cpy path="Include/internal/pycore_import.h" lines="61-75">61-75</Cpy> | `_PyImport_FindExtensionObject` / `_PyImport_FixupExtensionObject` | Check and populate the C-extension module cache keyed by `(name, filename)`. | `vm/eval_import.go` |
-| <Cpy path="Include/internal/pycore_import.h" lines="76-88">76-88</Cpy> | `_PyImport_GetImportFunc` | Retrieve `__import__` from the current builtins dict; cached in `tstate->interp->import_func`. | `vm/eval_import.go` |
-| <Cpy path="Include/internal/pycore_import.h" lines="89-100">89-100</Cpy> | `_PyImport_IsInitialized` / `_PyImport_ReInitLock` | Check whether the import system has been bootstrapped; re-initialise the lock after `fork`. | `vm/eval_import.go` |
+| <Cpy path="Include/internal/pycore_import.h" lines="1-30">1-30</Cpy> | include guard + `_PyImport_ImportLock` struct | Per-interpreter lock: `mutex`, `thread` owner id, `level` depth counter. | `imp/sysmodules.go` `sysModulesMu` |
+| <Cpy path="Include/internal/pycore_import.h" lines="31-80">31-80</Cpy> | `_PyImport_AcquireLock` / `_PyImport_ReleaseLock` / `_PyImport_IsInitialized` | Lock/unlock with recursion depth; initialized predicate. | `imp/import.go` |
+| <Cpy path="Include/internal/pycore_import.h" lines="81-120">81-120</Cpy> | `_PyImport_GetModule` / `_PyImport_SetModule` / `_PyImport_RemoveModule` | sys.modules dict wrappers taking an `PyInterpreterState *`. | `imp/sysmodules.go` `GetModule` / `AddModule` / `RemoveModule` |
+| <Cpy path="Include/internal/pycore_import.h" lines="121-160">121-160</Cpy> | `_PyImport_GetModuleAttr` / `_PyImport_GetModuleAttrString` | Fetch an attribute from a named module in sys.modules; used by `_io`, `warnings`, etc. | n/a |
+| <Cpy path="Include/internal/pycore_import.h" lines="161-200">161-200</Cpy> | `_PyImport_FrozenBootstrap` / `_PyImport_FrozenStdlib` / `_PyImport_FrozenTest` | Null-terminated arrays of `struct _frozen` for the three frozen module sets. | `imp/frozen.go` |
+| <Cpy path="Include/internal/pycore_import.h" lines="201-240">201-240</Cpy> | `_PyImport_FindExtensionObject` / `_PyImport_FixupExtensionObject` | Cache and retrieve `PyModuleDef`-backed `.so` modules; keyed by `(name, path)`. | n/a (no .so loading in gopy) |
 
 ## Reading
 
-### Import lock (lines 1 to 20)
+### Import lock protocol (lines 1 to 80)
 
-<CpyLink path="Include/internal/pycore_import.h" lines="1-20" />
-
-```c
-/* Returns 1 on success, 0 if tstate->interp->import_lock is held
-   by a different thread, -1 on error. */
-PyAPI_FUNC(int) _PyImport_AcquireLock(PyInterpreterState *interp);
-
-/* Returns 1 if the lock was released, 0 if the calling thread did
-   not hold the lock (caller must treat this as an error). */
-PyAPI_FUNC(int) _PyImport_ReleaseLock(PyInterpreterState *interp);
-```
-
-The import lock is a per-interpreter recursive mutex stored as
-`interp->imports.lock`. "Recursive" means the same thread can acquire it
-multiple times without deadlocking; each `AcquireLock` call increments a
-depth counter that `ReleaseLock` decrements. The lock is actually released
-only when the counter reaches zero.
-
-CPython drops the GIL before blocking on the import lock and reacquires
-it after. This prevents the import lock from being a source of
-GIL-related deadlocks in multi-threaded code where one thread calls
-`PyEval_SaveThread` while another thread is inside an import.
-
-In gopy, `vm/eval_import.go` uses a `sync.Mutex` per interpreter stored
-in `interp.ImportLock`. The recursive semantics are emulated with an
-owner goroutine ID and a depth counter, matching CPython's behaviour for
-re-entrant imports from `importlib`.
-
-### `_PyImport_GetModuleAttrString` (lines 41 to 60)
-
-<CpyLink path="Include/internal/pycore_import.h" lines="41-60" />
+<CpyLink path="Include/internal/pycore_import.h" lines="1-80" />
 
 ```c
-/* Equivalent to:
- *     import <module_name>
- *     return <module_name>.<attr_name>
- * Returns a new reference, or NULL on error. */
-PyAPI_FUNC(PyObject *)
-_PyImport_GetModuleAttrString(const char *module_name,
-                               const char *attr_name);
+struct _import_lock {
+    PyThread_type_lock lock;
+    unsigned long thread;   /* OS thread id of the current owner, or 0 */
+    int level;              /* recursion depth for the current owner */
+};
+
+int
+_PyImport_AcquireLock(PyInterpreterState *interp)
+{
+    unsigned long me = PyThread_get_thread_ident();
+    struct _import_lock *import_lock = &interp->imports.lock;
+
+    if (import_lock->thread == me) {
+        /* Recursive acquire by the same thread: just bump the depth. */
+        import_lock->level++;
+        return 1;
+    }
+
+    /* Blocking acquire by a different thread. */
+    if (PyThread_acquire_lock(import_lock->lock, WAIT_LOCK) == PY_LOCK_FAILURE) {
+        return -1;
+    }
+    assert(import_lock->thread == 0 && import_lock->level == 0);
+    import_lock->thread = me;
+    import_lock->level = 1;
+    return 1;
+}
+
+int
+_PyImport_ReleaseLock(PyInterpreterState *interp)
+{
+    struct _import_lock *import_lock = &interp->imports.lock;
+    if (import_lock->thread != PyThread_get_thread_ident() || import_lock->level < 1) {
+        return -1;  /* not owner */
+    }
+    import_lock->level--;
+    if (import_lock->level == 0) {
+        import_lock->thread = 0;
+        PyThread_release_lock(import_lock->lock);
+    }
+    return 0;
+}
 ```
 
-This helper is the preferred way for C code inside the interpreter to
-bootstrap itself before `importlib` is fully available. It is used, for
-example, to retrieve `_warnings.warn` during interpreter startup before
-the `warnings` module is added to `sys.modules` under its public name.
+The import lock prevents two threads from simultaneously initializing the
+same module. Without it, a second thread that reaches `import foo` while
+the first thread is mid-way through executing `foo.py` would see a
+partially-initialized module in `sys.modules` and proceed to use it.
 
-The implementation calls `_PyImport_GetModule` first; if `sys.modules`
-does not contain the module yet it falls back to `PyImport_ImportModule`
-(which acquires the import lock). The attribute is then fetched with
-`PyObject_GetAttrString`. All three steps are protected by the caller's
-responsibility to hold the GIL.
+The `level` counter allows the same thread to re-enter the lock during
+bootstrap. The importlib bootstrap itself does `import _frozen_importlib`
+which recursively calls into `PyImport_ImportModuleLevelObject`. Without
+the recursion check, importing any module would deadlock immediately.
 
-In gopy, the equivalent is `importGetModuleAttrString` in
-`vm/eval_import.go`. It follows the same two-step pattern: check the
-interpreter's `sys.modules` dict first, then fall through to the full
-import path.
+In gopy, the `imp` package uses a `sync.RWMutex` (`sysModulesMu` in
+`imp/sysmodules.go`) to serialize writes to `sys.modules`. There is no
+separate import lock struct; Go's `sync.RWMutex` already permits recursive
+read-locks, and the single-interpreter constraint means only one goroutine
+runs Python bytecode at a time in v0.12.
 
-### Extension module cache (lines 61 to 75)
+### `sys.modules` dict access pattern (lines 81 to 160)
 
-<CpyLink path="Include/internal/pycore_import.h" lines="61-75" />
+<CpyLink path="Include/internal/pycore_import.h" lines="81-160" />
 
 ```c
-/* Look up (name, filename) in the extension module cache.
-   Returns a borrowed reference to the cached PyModuleDef, or NULL. */
-PyAPI_FUNC(PyObject *)
-_PyImport_FindExtensionObject(PyObject *name, PyObject *filename);
+PyObject *
+_PyImport_GetModule(PyInterpreterState *interp, PyObject *name)
+{
+    PyObject *modules = interp->modules;
+    if (modules == NULL) {
+        return NULL;
+    }
+    PyObject *m;
+    (void)PyDict_GetItemRef(modules, name, &m);
+    return m;  /* new reference, or NULL if not found */
+}
 
-/* Store mod in the extension module cache under (name, filename),
-   and also add it to the modules dict. */
-PyAPI_FUNC(int)
-_PyImport_FixupExtensionObject(PyObject *mod, PyObject *name,
-                                PyObject *filename, PyObject *modules);
+int
+_PyImport_SetModule(PyInterpreterState *interp, PyObject *name, PyObject *module)
+{
+    PyObject *modules = interp->modules;
+    if (modules == NULL) {
+        PyErr_SetString(PyExc_RuntimeError, "no sys.modules");
+        return -1;
+    }
+    return PyObject_SetItem(modules, name, module);
+}
 ```
 
-The extension module cache is a dict stored in
-`_PyRuntime.imports.extensions` keyed by `(name, filename)` tuples. It
-maps each key to the `PyModuleDef *` of the extension, not to the module
-object itself. This distinction matters for multi-phase-init modules
-(PEP 451): the `PyModuleDef` is shared across sub-interpreters, but each
-interpreter creates its own module object by calling
-`PyModuleDef.m_init()` again during the fixup step.
+Every import path bottlenecks through these two functions rather than
+accessing `interp->modules` directly. The indirection means that a
+sub-interpreter can swap out its `modules` dict (e.g. to run with an
+isolated import state) without any call-site changes.
 
-Single-phase-init extensions bypass this and store the module object
-directly; any attempt to import a single-phase extension into a
-sub-interpreter raises `ImportError` unless
-`Py_TPFLAGS_BASETYPE`-style isolation is disabled.
+`_PyImport_GetModuleAttr` and `_PyImport_GetModuleAttrString` are
+convenience wrappers used heavily by the standard library. For example, the
+`warnings` module implementation calls
+`_PyImport_GetModuleAttrString(interp, "warnings", "_filters_mutated")` to
+notify filters rather than importing `warnings` itself, avoiding a circular
+import risk.
 
-In gopy, built-in modules (implemented in Go rather than loaded via
-`dlopen`) are registered in `stdlibinit/registry.go`. The extension cache
-lookup is bypassed for built-ins; `_PyImport_FindExtensionObject` is
-only exercised when running against a real CPython extension `.so` file,
-which is outside gopy's current scope.
+In gopy, `imp/sysmodules.go` provides `GetModule`, `AddModule`, and
+`RemoveModule` as direct ports, using the package-level `sysModules *Dict`
+rather than `interp->modules` because gopy has only one interpreter in
+v0.12. The `vm/eval_import.go` IMPORT_NAME arm calls `imp.ImportModuleLevel`
+which checks `GetModule` as its first cache hit step.
+
+### Frozen module registry (lines 161 to 200)
+
+<CpyLink path="Include/internal/pycore_import.h" lines="161-200" />
+
+```c
+/* Each entry describes one frozen module. */
+struct _frozen {
+    const char *name;
+    const unsigned char *code;  /* marshalled PyCodeObject bytes */
+    int size;
+    int is_package;
+    const char *get_code;       /* optional thunk name for lazy loading */
+};
+
+/* Three separate arrays, all NULL-terminated. */
+extern const struct _frozen _PyImport_FrozenBootstrap[];
+extern const struct _frozen _PyImport_FrozenStdlib[];
+extern const struct _frozen _PyImport_FrozenTest[];
+```
+
+CPython ships three sets of frozen modules:
+
+- `_PyImport_FrozenBootstrap`: the importlib bootstrap modules
+  (`_frozen_importlib`, `_frozen_importlib_external`, `zipimport`). These
+  are imported before the file-system finder is available.
+- `_PyImport_FrozenStdlib`: selected stdlib modules frozen for startup
+  speed (e.g. `abc`, `codecs`, `encodings.utf_8`).
+- `_PyImport_FrozenTest`: test helpers frozen only in debug builds.
+
+The import machinery in `import.c` searches all three arrays in order
+during `_PyImport_FindFrozenObject`. A frozen module is loaded by
+unmarshalling the embedded `code` bytes with `PyMarshal_ReadObjectFromString`,
+then executing the resulting code object with `PyImport_ExecCodeModule`.
+
+In gopy, `imp/frozen.go` holds the equivalent `FrozenModule` registry and
+`imp/bootstrap.go` registers the importlib bootstrap. The frozen module
+bytes are stored as Go `[]byte` constants generated by the `stdlibinit`
+package during the `MANIFEST.txt`-driven build step.
+
+## gopy mirror
+
+The gopy import pipeline in `imp/` maps to this header as follows:
+
+- `_PyImport_AcquireLock` / `_PyImport_ReleaseLock`: replaced by
+  `sysModulesMu sync.RWMutex` in `imp/sysmodules.go`.
+- `_PyImport_GetModule` / `_PyImport_SetModule`: `GetModule` / `AddModule`
+  in `imp/sysmodules.go`.
+- `_PyImport_FrozenBootstrap`: `FindFrozen` in `imp/frozen.go`.
+- `_PyImport_FindExtensionObject`: not ported; gopy has no `.so` loader.
+
+The IMPORT_NAME bytecode arm in `vm/eval_import.go` mirrors
+`PyImport_ImportModuleLevelObject` (`Python/import.c:1561`) by checking
+the sys.modules cache first, then delegating to `imp.ImportModuleLevel`.

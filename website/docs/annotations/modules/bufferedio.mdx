@@ -1,11 +1,11 @@
 ---
 title: Modules/_io/bufferedio.c
-description: Implements BufferedReader, BufferedWriter, BufferedRandom, and BufferedRWPair — the four buffered binary I/O classes with an internal byte buffer and thread lock.
+description: BufferedReader, BufferedWriter, BufferedRandom, and BufferedRWPair C implementations with a shared buffered struct, fill_buffer read-ahead, and flush_unlocked write-drain.
 cpython_path: Modules/_io/bufferedio.c
 cpython_version: "3.14"
-lines: 3000
+lines: 2773
 status: annotated
-ported_to: module/io/module.go
+ported_to: module/io/
 ---
 
 import {Cpy, CpyLink} from '@site/src/components/Cpy';
@@ -14,178 +14,200 @@ import {Cpy, CpyLink} from '@site/src/components/Cpy';
 
 <CpyLink path="Modules/_io/bufferedio.c" />
 
-`bufferedio.c` implements the four buffered binary I/O classes:
-`BufferedReader`, `BufferedWriter`, `BufferedRandom`, and `BufferedRWPair`.
-All four share a common `BufferedObject` C struct that holds the internal
-fixed-size byte buffer, position cursors, and a reentrant lock for thread
-safety.
+`bufferedio.c` implements all four buffered I/O classes defined by PEP 3116:
+`BufferedReader`, `BufferedWriter`, `BufferedRandom`, and `BufferedRWPair`. The
+first three share a single C struct (`buffered`) and most of their method
+implementations, with `readable` / `writable` flags routing to the appropriate
+code paths at runtime. `BufferedRWPair` is a thin wrapper that holds a
+`BufferedReader` and a `BufferedWriter` side by side.
 
-The design is a write-through/read-ahead buffer layered on top of any raw
-`RawIOBase` object (typically a `FileIO`). Reads first satisfy requests
-from the in-memory buffer; when the buffer is exhausted, `raw.readinto`
-refills it in one system call. Writes accumulate in the buffer and are
-flushed to the raw layer either when the buffer is full, when `flush()` is
-called explicitly, or when the object is closed.
+The central design choice is the single shared buffer. `BufferedRandom`, which
+must support both reads and writes on a seekable stream, reuses the exact same
+buffer memory for both directions. The `read_end` and `write_end` fields
+delimit which portion of the buffer holds valid read-ahead data versus pending
+write data. A reentrant lock (`lock`, `owner`) protects all buffer mutations
+against concurrent access from threads calling the same stream object.
 
-`BufferedReader` and `BufferedWriter` handle the two unidirectional cases.
-`BufferedRandom` inherits from both and supports seeking, which requires
-flushing the write buffer before repositioning the raw stream.
-`BufferedRWPair` wraps two separate raw streams (one for reading, one for
-writing) and does not support `seek`.
+Three internal helpers carry most of the logic: `_bufferedreader_raw_read`
+(wraps the underlying raw `readinto`), `_bufferedreader_fill_buffer` (fills the
+read-ahead region), and `_bufferedwriter_flush_unlocked` (drains the write
+region to the raw stream).
 
 ## Map
 
 | Lines | Symbol | Role | gopy |
 | ----- | ------ | ---- | ---- |
-| <Cpy path="Modules/_io/bufferedio.c" lines="1-120">1-120</Cpy> | `BufferedObject` struct, includes | Internal C struct definition: `raw`, `buffer`, `buffer_size`, `readable`, `writable`, `pos`, `raw_pos`, `read_pos`, `write_pos`, `lock`. | `module/io/module.go:BufferedObject` |
-| <Cpy path="Modules/_io/bufferedio.c" lines="120-450">120-450</Cpy> | `buffered_flush_and_rewind_unlocked` / `_bufferedwriter_flush_unlocked` | Write-flush path: calls `raw.write(buffer[write_pos:pos])` in a loop until all pending bytes are drained; handles short writes. | `module/io/module.go:bufferedFlush` |
-| <Cpy path="Modules/_io/bufferedio.c" lines="450-900">450-900</Cpy> | `BufferedReader._read_unlocked` / `buffered_read` | Read path: serves from buffer; on miss, calls `raw.readinto` to refill; handles short-read retries and EOF. | `module/io/module.go:bufferedRead` |
-| <Cpy path="Modules/_io/bufferedio.c" lines="900-1400">900-1400</Cpy> | `buffered_write` / `_bufferedwriter_write_unlocked` | Write path: copies data into write buffer; flushes when buffer full; falls back to direct write for large inputs. | `module/io/module.go:bufferedWrite` |
-| <Cpy path="Modules/_io/bufferedio.c" lines="1400-1800">1400-1800</Cpy> | `buffered_seek` / `buffered_tell` | Seek/tell: flushes write buffer, resets read buffer, delegates to `raw.seek`; `tell` adjusts `raw_pos` by `read_pos - pos`. | `module/io/module.go:bufferedSeek` |
-| <Cpy path="Modules/_io/bufferedio.c" lines="1800-2200">1800-2200</Cpy> | `BufferedReader` type object / `BufferedWriter` type object | `PyType_Spec` definitions, `__init__`, `close`, `readable`/`writable`, `__repr__`, `__sizeof__`. | `module/io/module.go:BufferedReaderType` |
-| <Cpy path="Modules/_io/bufferedio.c" lines="2200-2700">2200-2700</Cpy> | `BufferedRandom` type object / `BufferedRWPair` type object | `BufferedRandom` combines read and write paths with a single lock; `BufferedRWPair` delegates to two independent raw objects. | `module/io/module.go:BufferedRandomType` |
-| <Cpy path="Modules/_io/bufferedio.c" lines="2700-3000">2700-3000</Cpy> | `buffered_close` / `buffered_ioclosed` / module state helpers | Close sequence: flushes write buffer, releases lock, marks object closed; helpers for per-interpreter type lookup. | `module/io/module.go:bufferedClose` |
+| <Cpy path="Modules/_io/bufferedio.c" lines="1-220">1-220</Cpy> | `bufferediobase_doc`, `_bufferediobase_readinto_generic`, `_io__BufferedIOBase_*` | Abstract base `_BufferedIOBase` methods: `read`, `read1`, `readinto`, `readinto1`, `write`, `detach`. | `module/io/` |
+| <Cpy path="Modules/_io/bufferedio.c" lines="222-400">222-400</Cpy> | `buffered` struct, `_enter_buffered_busy`, `ENTER_BUFFERED`, `LEAVE_BUFFERED` | Shared struct definition and reentrant-lock macros used by every method. | `module/io/` |
+| <Cpy path="Modules/_io/bufferedio.c" lines="400-900">400-900</Cpy> | `buffered_flush_and_rewind_unlocked`, `_buffered_raw_seek`, `_buffered_raw_tell`, `buffered_tell`, `buffered_seek`, `buffered_close`, `buffered_detach` | Seek/tell/close/detach shared by all three classes. | `module/io/` |
+| <Cpy path="Modules/_io/bufferedio.c" lines="900-1560">900-1560</Cpy> | `buffered_readinto_generic`, `buffered_peek_impl`, `_io_BufferedReader_read1_impl`, `_io_BufferedReader_read_impl`, `_io_BufferedReader_readline_impl` | BufferedReader read methods: peek, read1, read, readline. | `module/io/` |
+| <Cpy path="Modules/_io/bufferedio.c" lines="1560-1912">1560-1912</Cpy> | `_io_BufferedReader___init___impl`, `_bufferedreader_raw_read`, `_bufferedreader_fill_buffer`, `_bufferedreader_read_all`, `_bufferedreader_read_fast`, `_bufferedreader_read_generic` | BufferedReader construction and the read-ahead fill loop. | `module/io/` |
+| <Cpy path="Modules/_io/bufferedio.c" lines="1912-2225">1912-2225</Cpy> | `_io_BufferedWriter___init___impl`, `_bufferedwriter_raw_write`, `_bufferedwriter_flush_unlocked`, `_io_BufferedWriter_write_impl` | BufferedWriter construction, raw write wrapper, flush drain loop, and write method. | `module/io/` |
+| <Cpy path="Modules/_io/bufferedio.c" lines="2223-2455">2223-2455</Cpy> | `rwpair`, `_io_BufferedRWPair___init___impl`, `bufferedrwpair_*` | BufferedRWPair: wraps a BufferedReader and a BufferedWriter with forwarding methods. | `module/io/` |
+| <Cpy path="Modules/_io/bufferedio.c" lines="2454-2773">2454-2773</Cpy> | `_io_BufferedRandom___init___impl`, type slot tables, `PyType_Spec` definitions for all four classes | BufferedRandom construction (sets both `readable` and `writable`) and all four type specs. | `module/io/` |
 
 ## Reading
 
-### Buffer layout (lines 1 to 120)
+### The `buffered` struct (lines 222 to 265)
 
-<CpyLink path="Modules/_io/bufferedio.c" lines="1-120" />
+<CpyLink path="Modules/_io/bufferedio.c" lines="222-265" />
 
-The internal state of every buffered object is carried in `BufferedObject`:
+All three concrete classes allocate a `buffered` instance. The key fields are:
 
 ```c
 typedef struct {
     PyObject_HEAD
-    PyObject *raw;          /* underlying RawIOBase */
-    Py_buffer buffer;       /* the fixed-size byte buffer */
-    Py_ssize_t buffer_size; /* capacity */
-    Py_ssize_t pos;         /* current logical position in buffer */
-    Py_ssize_t raw_pos;     /* where raw stream thinks it is */
-    Py_ssize_t read_pos;    /* start of unconsumed read data */
-    Py_ssize_t write_pos;   /* end of pending write data */
-    PyObject *lock;         /* RLock for thread safety */
-    int readable, writable;
+
+    PyObject *raw;
+    int ok;        /* Initialized? */
+    int readable;
+    int writable;
+
+    Py_off_t abs_pos;  /* absolute position in raw stream, or -1 */
+
+    char *buffer;      /* static buffer of size buffer_size */
+    Py_off_t pos;      /* current logical position in buffer */
+    Py_off_t raw_pos;  /* where the raw stream thinks it is */
+
+    Py_off_t read_end;   /* one past last valid read-ahead byte, or -1 */
+    Py_off_t write_pos;  /* start of pending write data */
+    Py_off_t write_end;  /* one past last pending write byte, or -1 */
+
+    PyThread_type_lock lock;
+    volatile unsigned long owner;
+
+    Py_ssize_t buffer_size;
+    Py_ssize_t buffer_mask;
 } buffered;
 ```
 
-`pos` is the offset within `buffer` of the next byte to be consumed by a
-read (or the next byte to be filled by a write). `raw_pos` tracks where the
-underlying raw stream's file position actually is, which may differ from
-`pos` because the buffer may hold data not yet flushed or data already read
-from raw but not yet consumed by the caller.
+`read_end` and `write_end` are sentinel values: `-1` means the corresponding
+region is not valid. `VALID_READ_BUFFER(self)` and `VALID_WRITE_BUFFER(self)`
+check these sentinels. `raw_pos` tracks where the OS file offset currently
+sits, allowing seeks to be elided when the desired position is already in the
+buffer.
 
-The buffer is allocated once in `__init__` as a plain C array of
-`buffer_size` bytes. `buffer_size` defaults to `DEFAULT_BUFFER_SIZE` (8192
-on most platforms) and cannot be changed after construction.
+### `_bufferedreader_fill_buffer` (lines 1659 to 1673)
 
-### `buffered_read` miss path (lines 450 to 900)
+<CpyLink path="Modules/_io/bufferedio.c" lines="1659-1673" />
 
-<CpyLink path="Modules/_io/bufferedio.c" lines="450-900" />
-
-When there are insufficient bytes in the buffer to satisfy a read request,
-`BufferedReader._read_unlocked` is called:
+`_bufferedreader_fill_buffer` is the innermost fill routine. It appends
+directly after the existing valid read-ahead data (if any), or resets to
+position 0 if the buffer is empty:
 
 ```c
-static PyObject *
-_bufferedreader_read_unlocked(buffered *self, Py_ssize_t n)
+static Py_ssize_t
+_bufferedreader_fill_buffer(buffered *self)
 {
-    /* If there is data left in the buffer, copy it out first. */
-    Py_ssize_t current_size = READAHEAD(self);  /* pos - read_pos */
-    ...
-    /* Refill: call raw.readinto(buffer) */
-    res = PyObject_CallMethodObjArgs(self->raw, _PyIO_str_readinto,
-                                     memobj, NULL);
-    if (res == NULL || res == Py_None)
-        ...  /* EOF or error */
-    Py_ssize_t n_filled = PyLong_AsSsize_t(res);
-    self->raw_pos  = 0;
-    self->read_pos = 0;
-    self->pos      = 0;
-    ...
+    Py_ssize_t start, len, n;
+    if (VALID_READ_BUFFER(self))
+        start = Py_SAFE_DOWNCAST(self->read_end, Py_off_t, Py_ssize_t);
+    else
+        start = 0;
+    len = self->buffer_size - start;
+    n = _bufferedreader_raw_read(self, self->buffer + start, len);
+    if (n <= 0)
+        return n;
+    self->read_end = start + n;
+    self->raw_pos = start + n;
+    return n;
 }
 ```
 
-`READAHEAD(self)` is the macro `self->pos - self->read_pos`, giving the
-number of unconsumed bytes already in the buffer. After copying those out,
-the function resets both `read_pos` and `pos` to zero and calls
-`raw.readinto` with a writable memoryview of `buffer`. The return value is
-the number of bytes actually placed into `buffer`, which may be less than
-`buffer_size` on a short read. Short reads are retried up to a bounded
-number of times before the partial fill is accepted.
+The raw read calls the underlying stream's `readinto` through a `memoryview`
+wrapper. Returns `-2` when the raw stream would block (non-blocking mode),
+`0` for EOF, and a positive byte count on success.
 
-### `buffered_write` and flush (lines 900 to 1400)
+### `_bufferedwriter_flush_unlocked` write path (lines 2014 to 2067)
 
-<CpyLink path="Modules/_io/bufferedio.c" lines="900-1400" />
+<CpyLink path="Modules/_io/bufferedio.c" lines="2014-2067" />
 
-The write path is handled by `_bufferedwriter_write_unlocked`:
+Flushing a `BufferedWriter` first rewinds the raw stream to align with the
+start of the write buffer (`write_pos`), then drains the pending region in a
+loop to handle partial writes from the raw layer:
 
 ```c
 static PyObject *
-_bufferedwriter_write_unlocked(buffered *self, Py_buffer *data)
+_bufferedwriter_flush_unlocked(buffered *self)
 {
-    Py_ssize_t written = 0;
-    Py_ssize_t avail = self->buffer_size - self->write_pos;
+    Py_off_t n, rewind;
 
-    if (data->len > self->buffer_size) {
-        /* Large write: flush then write directly to raw. */
-        if (_bufferedwriter_flush_unlocked(self) < 0)
-            return NULL;
-        ...
-        return PyObject_CallMethodObjArgs(self->raw, _PyIO_str_write,
-                                          dataobj, NULL);
+    if (!VALID_WRITE_BUFFER(self) || self->write_pos == self->write_end)
+        goto end;
+
+    /* First, rewind */
+    rewind = RAW_OFFSET(self) + (self->pos - self->write_pos);
+    if (rewind != 0) {
+        n = _buffered_raw_seek(self, -rewind, 1);
+        if (n < 0) {
+            goto error;
+        }
+        self->raw_pos -= rewind;
     }
-    if (data->len > avail) {
-        /* Buffer full: flush before copying new data in. */
-        if (_bufferedwriter_flush_unlocked(self) < 0)
-            return NULL;
+
+    while (self->write_pos < self->write_end) {
+        n = _bufferedwriter_raw_write(self,
+            self->buffer + self->write_pos,
+            Py_SAFE_DOWNCAST(self->write_end - self->write_pos,
+                             Py_off_t, Py_ssize_t));
+        if (n == -1) {
+            goto error;
+        }
+        else if (n == -2) {
+            _set_BlockingIOError("write could not complete without blocking", 0);
+            goto error;
+        }
+        self->write_pos += n;
+        self->raw_pos = self->write_pos;
+        if (PyErr_CheckSignals() < 0)
+            goto error;
     }
-    memcpy(self->buffer.buf + self->write_pos,
-           data->buf, data->len);
-    self->write_pos += data->len;
-    ...
+
+end:
+    _bufferedwriter_reset_buf(self);
+    Py_RETURN_NONE;
+
+error:
+    return NULL;
 }
 ```
 
-Writes smaller than the remaining buffer capacity are simply copied with
-`memcpy`; the raw stream is not touched. When the incoming data would
-overflow the buffer, the write buffer is flushed first. When the write is
-larger than `buffer_size` altogether, the implementation skips the buffer
-entirely and calls `raw.write` directly, avoiding a double copy.
+The `PyErr_CheckSignals` call inside the loop lets signal handlers run between
+partial writes, which matters for streams that can block (such as pipes).
 
-`_bufferedwriter_flush_unlocked` drains the buffer by calling `raw.write`
-in a loop. Because `raw.write` is permitted to return a short count, the
-loop continues until `write_pos` reaches zero.
+### `BufferedWriter.write` fast path (lines 2077 to 2115)
 
-### `buffered_seek` and `buffered_tell` (lines 1400 to 1800)
+<CpyLink path="Modules/_io/bufferedio.c" lines="2077-2115" />
 
-<CpyLink path="Modules/_io/bufferedio.c" lines="1400-1800" />
-
-Seeking is non-trivial because the buffer and the raw stream's position may
-be out of sync. For a `BufferedWriter`, any pending write data must be
-flushed before the seek so that the raw stream's position is consistent:
+The write method has a fast path for data that fits entirely within the
+remaining buffer space without requiring a flush. It calls `memcpy` directly
+into the buffer and updates `write_pos` / `write_end`:
 
 ```c
-static PyObject *
-buffered_seek(buffered *self, PyObject *args)
-{
-    ...
-    ENTER_BUFFERED(self)
-    /* Flush write buffer if any. */
-    if (self->writable) {
-        res = _bufferedwriter_flush_unlocked(self);
-        if (res == NULL) goto end;
+avail = Py_SAFE_DOWNCAST(self->buffer_size - self->pos, Py_off_t, Py_ssize_t);
+if (buffer->len <= avail && buffer->len < self->buffer_size) {
+    memcpy(self->buffer + self->pos, buffer->buf, buffer->len);
+    if (!VALID_WRITE_BUFFER(self) || self->write_pos > self->pos) {
+        self->write_pos = self->pos;
     }
-    /* Invalidate read buffer. */
-    self->pos = self->read_pos = 0;
-    self->raw_pos = -1;
-    res = PyObject_CallMethodObjArgs(self->raw, _PyIO_str_seek,
-                                     posobj, whenceobj, NULL);
-    ...
+    ADJUST_POSITION(self, self->pos + buffer->len);
+    if (self->pos > self->write_end)
+        self->write_end = self->pos;
+    written = buffer->len;
+    goto end;
 }
 ```
 
-`buffered_tell` does not call `raw.tell` unconditionally. Instead it
-computes the logical position as `raw_pos - (pos - read_pos)`: the raw
-stream's known position minus the unread bytes still sitting in the buffer.
-This avoids a system call on every `tell()` invocation.
+If the data is larger than available space (or larger than the whole buffer),
+the slow path calls `_bufferedwriter_flush_unlocked` first, then issues the
+remainder directly to the raw stream, bypassing the buffer entirely.
+
+## gopy mirror
+
+`module/io/` (pending). The Go port represents `buffered` as a single struct
+with `readable` / `writable` booleans, matching CPython's shared-struct
+approach. The `buffer` field becomes a `[]byte` slice with `pos`, `rawPos`,
+`readEnd`, `writePos`, and `writeEnd` fields carrying the same semantics. The
+reentrant lock maps to a `sync.Mutex` with an owner goroutine ID checked on
+entry. `_bufferedreader_fill_buffer` and `_bufferedwriter_flush_unlocked` are
+ported one-to-one with the same loop structure and sentinel handling.

@@ -1,11 +1,11 @@
 ---
 title: Lib/fnmatch.py
-description: Unix shell-style wildcard matching; translates glob patterns to compiled regular expressions with optional case folding.
+description: Shell wildcard matching using translate() to convert glob patterns to regex, plus fnmatch/fnmatchcase/filter/filterfalse entry points.
 cpython_path: Lib/fnmatch.py
 cpython_version: "3.14"
-lines: 130
+lines: 150
 status: annotated
-ported_to: module/fnmatch/module.go
+ported_to: module/fnmatch/
 ---
 
 import {Cpy, CpyLink} from '@site/src/components/Cpy';
@@ -14,148 +14,148 @@ import {Cpy, CpyLink} from '@site/src/components/Cpy';
 
 <CpyLink path="Lib/fnmatch.py" />
 
-`fnmatch` is a small pure-Python module that implements the subset of
-shell glob matching used by `ls`, `find`, and similar tools. It does not
-expand path separators or tilde — that is `glob`'s job — it only tests
-whether a single filename matches a pattern.
+`fnmatch` is a small pure-Python module. Its four public functions cover
+shell-style pattern matching against filenames. The core primitive is
+`translate(pat)`, which converts a glob pattern into a Python regex
+string; the matching functions compile that regex through `re` with an
+`lru_cache` wrapper (`_compile_pattern`) to avoid recompiling the same
+pattern on every call.
 
-The module's core device is `translate`, which rewrites a glob pattern
-into a regular expression string. `*` becomes `.*`, `?` becomes `.`, and
-`[seq]` / `[!seq]` become character classes. The resulting regex is
-anchored with `\Z` (end-of-string) so partial matches are rejected.
-`_compile_pattern` wraps `translate` and `re.compile` with
-`functools.lru_cache` so repeated calls with the same `(pat, is_case_sensitive)`
-pair cost nothing after the first.
+The metacharacter set is intentionally simpler than `glob`: `*` matches
+any run of characters (including the empty string, and including `/`),
+`?` matches exactly one character, and `[seq]`/`[!seq]` work like
+POSIX bracket expressions. Unlike shell `glob`, there is no special
+treatment of leading dots or path separators.
 
-On Windows, `fnmatch` folds both name and pattern to lower case before
-matching (via `os.path.normcase`); `fnmatchcase` always performs a
-case-sensitive match regardless of platform.
+In CPython 3.14 the internal helpers were reorganized into `_translate`
+(the per-character scanner) and `_join_translated_parts` (the
+star-position folding step that inserts atomic groups). The public API
+did not change.
 
 ## Map
 
 | Lines | Symbol | Role | gopy |
 | ----- | ------ | ---- | ---- |
-| <Cpy path="Lib/fnmatch.py" lines="1-20">1-20</Cpy> | Module docstring, imports | Imports `os`, `re`, `functools`; declares `__all__`. | `module/fnmatch/module.go` |
-| <Cpy path="Lib/fnmatch.py" lines="21-45">21-45</Cpy> | `fnmatch(name, pat)` | Normalises case via `os.path.normcase`, delegates to `_compile_pattern`. | `module/fnmatch/module.go` |
-| <Cpy path="Lib/fnmatch.py" lines="46-60">46-60</Cpy> | `fnmatchcase(name, pat)` | Case-sensitive match; calls `_compile_pattern` directly without normalisation. | `module/fnmatch/module.go` |
-| <Cpy path="Lib/fnmatch.py" lines="61-80">61-80</Cpy> | `filter(names, pat)` | Returns the subset of `names` matching `pat`; compiles the pattern once and applies it to each name. | `module/fnmatch/module.go` |
-| <Cpy path="Lib/fnmatch.py" lines="81-95">81-95</Cpy> | `_compile_pattern(pat, is_case_sensitive)` | `lru_cache`-backed helper that calls `translate` then `re.compile`. | `module/fnmatch/module.go` |
-| <Cpy path="Lib/fnmatch.py" lines="96-130">96-130</Cpy> | `translate(pat)` | Converts glob syntax to a regex string: `*` → `.*`, `?` → `.`, `[seq]` → character class, everything else literal-escaped. | `module/fnmatch/module.go` |
+| <Cpy path="Lib/fnmatch.py" lines="1-21">1-21</Cpy> | module docstring, imports | Sets up `os`, `posixpath`, `re`, `functools`. | `module/fnmatch/module.go` |
+| <Cpy path="Lib/fnmatch.py" lines="22-52">22-52</Cpy> | `fnmatch` | Normalizes name and pattern via `os.path.normcase`, then delegates to `fnmatchcase`. | `module/fnmatch/module.go` |
+| <Cpy path="Lib/fnmatch.py" lines="53-69">53-69</Cpy> | `filter` | Returns the subset of `names` that match `pat`; shares the compiled pattern across all names. | `module/fnmatch/module.go` |
+| <Cpy path="Lib/fnmatch.py" lines="70-84">70-84</Cpy> | `filterfalse` | Returns the subset of `names` that do not match `pat`. | `module/fnmatch/module.go` |
+| <Cpy path="Lib/fnmatch.py" lines="85-94">85-94</Cpy> | `fnmatchcase` | Case-sensitive match; compiles `pat` through `_compile_pattern` and calls `.match(name)`. | `module/fnmatch/module.go` |
+| <Cpy path="Lib/fnmatch.py" lines="95-108">95-108</Cpy> | `_compile_pattern`, `_re_setops_sub`, `_re_escape` | LRU-cached compiler; `_re_escape` is `lru_cache(re.escape)`, `_re_setops_sub` escapes `&~|` inside bracket expressions. | `module/fnmatch/module.go` |
+| <Cpy path="Lib/fnmatch.py" lines="109-185">109-185</Cpy> | `_translate` | Per-character scanner that converts `*`, `?`, `[...]` into regex parts and records star positions. | `module/fnmatch/module.go` |
+| <Cpy path="Lib/fnmatch.py" lines="186-220">186-220</Cpy> | `_join_translated_parts`, `translate` | Folds star positions into atomic groups `(?>.*?)` and wraps the whole pattern in `(?s:...)\z`. | `module/fnmatch/module.go` |
 
 ## Reading
 
-### `fnmatch` and `fnmatchcase` (lines 21 to 60)
+### `fnmatch` and `fnmatchcase` (lines 22 to 94)
 
-<CpyLink path="Lib/fnmatch.py" lines="21-60" />
+<CpyLink path="Lib/fnmatch.py" lines="22-94" />
 
 ```python
 def fnmatch(name, pat):
-    """Test whether NAME matches PATTERN."""
     name = os.path.normcase(name)
     pat = os.path.normcase(pat)
     return fnmatchcase(name, pat)
 
 def fnmatchcase(name, pat):
-    """Test whether NAME matches PATTERN, including case."""
-    match = _compile_pattern(pat, os.path is posixpath)
+    match = _compile_pattern(pat)
     return match(name) is not None
+
+@functools.lru_cache(maxsize=256)
+def _compile_pattern(pat):
+    regex = translate(pat)
+    return re.compile(regex).match
 ```
 
-`fnmatch` defers the case question to `os.path.normcase`: on Windows that
-folds both strings to lower case; on POSIX it is a no-op. By doing the
-fold on the pattern as well as the name, the compiled regex cache stays
-consistent across mixed-case calls. `fnmatchcase` bypasses normalisation
-entirely and passes `os.path is posixpath` to `_compile_pattern` so the
-cached key reflects whether the OS file system is case-sensitive.
+`fnmatch` applies `os.path.normcase` to both arguments before delegating.
+On POSIX `normcase` is the identity function, so `fnmatch` and
+`fnmatchcase` behave identically there. On Windows it lower-cases and
+replaces forward slashes, making filename matching case-insensitive.
 
-### `filter` (lines 61 to 80)
+`_compile_pattern` is cached with `lru_cache(maxsize=256)`. It stores the
+compiled `re.Pattern.match` method directly, so the hot path in
+`fnmatchcase` is a single cached function call with no attribute lookup.
 
-<CpyLink path="Lib/fnmatch.py" lines="61-80" />
+### `translate()` and wildcard-to-regex conversion (lines 95 to 220)
 
-```python
-def filter(names, pat):
-    """Construct a list from those elements of the iterable NAMES
-    that match PAT."""
-    result = []
-    pat = os.path.normcase(pat)
-    match = _compile_pattern(pat, os.path is posixpath)
-    if os.path is posixpath:
-        # normcase on posix is NOP. Optimize it away from the loop.
-        for name in names:
-            if match(name):
-                result.append(name)
-    else:
-        for name in names:
-            if match(os.path.normcase(name)):
-                result.append(name)
-    return result
-```
-
-`filter` compiles the pattern once and then iterates. On POSIX the inner
-loop skips `normcase` altogether since it is a no-op, which matters for
-large name lists. The split into two loops avoids a per-element branch in
-the hot path.
-
-### `translate` (lines 96 to 130)
-
-<CpyLink path="Lib/fnmatch.py" lines="96-130" />
+<CpyLink path="Lib/fnmatch.py" lines="95-220" />
 
 ```python
 def translate(pat):
-    """Translate a shell PATTERN to a regular expression."""
+    parts, star_indices = _translate(pat, '*', '.')
+    return _join_translated_parts(parts, star_indices)
+
+def _translate(pat, star, question_mark):
+    res = []
+    add = res.append
     i, n = 0, len(pat)
-    res = ''
     while i < n:
         c = pat[i]
-        i = i + 1
+        i += 1
         if c == '*':
-            res = res + '.*'
+            # compress consecutive stars
+            while i < n and pat[i] == '*':
+                i += 1
+            add(star)
         elif c == '?':
-            res = res + '.'
+            add(question_mark)
         elif c == '[':
             j = i
-            # The following two checks handle corner cases:
-            # [!] should not be treated as negation
-            # [] should not be treated as empty character class
             if j < n and pat[j] == '!':
-                j = j + 1
+                j += 1
             if j < n and pat[j] == ']':
-                j = j + 1
+                j += 1
             while j < n and pat[j] != ']':
-                j = j + 1
+                j += 1
             if j >= n:
-                res = res + '\\['
+                add(r'\[')
             else:
                 stuff = pat[i:j]
-                ...
-                res = '%s[%s]' % (res, stuff)
-                i = j + 1
+                # ... bracket processing, set-op escaping ...
+                add('[' + stuff + ']')
         else:
-            res = res + re.escape(c)
-    return r'(?s:%s)\Z' % res
+            add(_re_escape(c))
+    return res, star_indices
+
+def _join_translated_parts(parts, star_indices):
+    if not star_indices:
+        return r'(?s:' + ''.join(parts) + r')\Z'
+    # fold each interior star into an atomic group (?>.*?)
+    ...
+    return r'(?s:' + ''.join(buffer) + r')\Z'
 ```
 
-The character-class parser handles the edge cases `[!]` and `[]` that
-would otherwise be mis-parsed as negation or empty class. All literal
-characters go through `re.escape`. The final `(?s:...)` wrapper enables
-`re.DOTALL` inline so `.*` matches newlines, matching bash behaviour for
-filenames that contain unusual bytes. The `\Z` anchor ensures the entire
-name must match, not just a prefix.
+`_translate` walks the pattern character by character. `*` is replaced by
+the `star` argument (the string `'*'` in `translate`, which later becomes
+`.*` inside the final regex). Consecutive stars are collapsed into one.
+`?` becomes `question_mark` (the string `'.'`, matching any character).
 
-### `_compile_pattern` cache (lines 81 to 95)
+Bracket expressions receive the most complex handling. An unterminated
+`[` is escaped to `\[`. Inside a bracket, the `_re_setops_sub` regex
+escapes Python's set-operation characters `&`, `~`, and `|` so they are
+treated as literals. A leading `!` becomes `^` for negation. The special
+cases `[!]` (match any character) and `[]` (never match, rendered as
+`(?!)`) are handled explicitly.
 
-<CpyLink path="Lib/fnmatch.py" lines="81-95" />
+`_join_translated_parts` transforms the flat parts list into the final
+regex. If there are no stars the result is simply `(?s:...)\Z`. When
+stars are present, each `STAR fixed-content` pair is wrapped in an atomic
+group `(?>.*?)` so that backtracking cannot jump past a literal segment
+once it has been matched. The trailing `.*` after the last star absorbs
+the rest of the input. The `(?s:...)` wrapper enables `DOTALL` without
+affecting the rest of the calling pattern, and `\Z` anchors to the true
+end of the string (not just before a final newline).
 
-```python
-@functools.lru_cache(maxsize=256)
-def _compile_pattern(pat, is_case_sensitive):
-    if is_case_sensitive:
-        return re.compile(translate(pat)).match
-    else:
-        return re.compile(translate(pat), re.IGNORECASE).match
-```
+## gopy mirror
 
-The cache is keyed on `(pat, is_case_sensitive)` and stores the bound
-`.match` method directly so the hot path is a single callable with no
-attribute lookup. The `maxsize=256` cap prevents unbounded memory growth
-when code generates patterns dynamically.
+`module/fnmatch/module.go` ships `fnmatch`, `fnmatchcase`, `filter`,
+`filterfalse`, and `translate` under their CPython names.
+
+Because gopy's `re` port does not yet accept atomic groups `(?>...)` or
+the `\Z` end anchor, the module uses a two-track design. `translate`
+produces output that is byte-identical to CPython's (verified in
+`module/fnmatch/module_test.go`). The four matching functions bypass the
+regex engine and run a direct glob interpreter (`matchGlob` /
+`compileGlob` / `runGlob`) that applies the same metacharacter semantics.
+When the `re` port gains full Python regex support the matching functions
+can be collapsed to a simple `re.compile(translate(pat)).match` wrapper.

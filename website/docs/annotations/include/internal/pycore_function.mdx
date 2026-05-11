@@ -1,9 +1,9 @@
 ---
 title: Include/internal/pycore_function.h
-description: Internal function-object helpers used by the compiler, class body machinery, and the specializing adaptive interpreter's version tagging system.
+description: Internal function-object details: func_version monotone counter, specialization invalidation, event callbacks, and the _Py_FUNC_DISABLE_INLINING annotation.
 cpython_path: Include/internal/pycore_function.h
 cpython_version: "3.14"
-lines: 82
+lines: 160
 status: annotated
 ported_to: objects/function.go
 ---
@@ -14,169 +14,191 @@ import {Cpy, CpyLink} from '@site/src/components/Cpy';
 
 <CpyLink path="Include/internal/pycore_function.h" />
 
-Internal function-object interface used by the compiler, the VM, and
-the specializing adaptive interpreter. The public `funcobject.h`
-header exposes only the stable `PyFunction_*` API; this file adds the
-version tagging mechanism, the watcher callback table, the stateless
-function verifier introduced by PEP 764, and the constructor bypass
-used by class body compilation.
-
-The version tag (`func_version`) is the key coupling between
-`PyFunctionObject` and the specializing interpreter. Every time a
-function's `__code__` or `__defaults__` changes, the tag is
-invalidated. Specialized opcodes such as `CALL_PY_EXACT_ARGS` record
-the tag at specialization time and re-check it on every invocation;
-a mismatch triggers deoptimization back to the generic call path.
-
-The watcher mechanism (up to `FUNC_MAX_WATCHERS = 8` registered
-callbacks) lets embedders and internal subsystems like the optimizer
-receive notifications whenever a function object changes, without
-polling.
+The private extension of `PyFunctionObject`. The public
+`Include/cpython/funcobject.h` exposes the struct layout for
+Py_LIMITED_API users; this header adds the interpreter-private
+details: the `func_version` monotone counter that the specializing
+interpreter uses to guard call-site caches, the `PyFunction_Event`
+enum and callback mechanism for `sys.monitoring`, the
+`_PyFunction_FromConstructor` constructor shortcut, and the
+`_Py_FUNC_DISABLE_INLINING` hint that prevents the tier-2 optimizer
+from inlining a specific function's bytecode.
 
 ## Map
 
 | Lines | Symbol | Role | gopy |
 | ----- | ------ | ---- | ---- |
-| <Cpy path="Include/internal/pycore_function.h" lines="1-18">1-18</Cpy> | `FUNC_MAX_WATCHERS` / `PyFunctionObject` internal fields | Maximum watcher count (8); `func_version` (specializer tag) and `func_watchers` (bitmask of registered watchers). | `objects/function.go` |
-| <Cpy path="Include/internal/pycore_function.h" lines="19-34">19-34</Cpy> | `_PyFunction_FromConstructor` | Creates a `PyFunctionObject` bypassing the normal `MAKE_FUNCTION` path; used by the class body compiler when the code object is already available. | `objects/function.go` |
-| <Cpy path="Include/internal/pycore_function.h" lines="35-50">35-50</Cpy> | `_PyFunction_SetVersion` / `_PyFunction_GetVersionForCurrentState` | Writes and reads the specializer version tag; the getter fails with `0` if the function has been mutated since the tag was set. | `objects/function.go` |
-| <Cpy path="Include/internal/pycore_function.h" lines="51-64">51-64</Cpy> | `_PyFunction_VerifyStateless` | Checks that the function captures no free variables; called by the PEP 764 stateless function decorator to enforce the no-closure contract. | `objects/function.go` |
-| <Cpy path="Include/internal/pycore_function.h" lines="65-75">65-75</Cpy> | `_PyFunction_NotifyEvent` | Dispatches a `PyFunction_WatchEvent` to all registered watcher callbacks after any mutation; always called by `_PyFunction_SetVersion`. | `objects/function.go` |
-| <Cpy path="Include/internal/pycore_function.h" lines="76-82">76-82</Cpy> | `_PyFunction_WatchersSupportVersioning` | Returns true when all registered watchers are compatible with version-tag caching; used to decide whether specialization is safe. | `objects/function.go` |
+| <Cpy path="Include/internal/pycore_function.h" lines="1-60">1-60</Cpy> | `FUNC_VERSION_*` constants, `_PyFunction_SetVersion`, `_PyFunction_GetVersionForCurrentState` | A 32-bit monotone counter per function; stamped into call-site inline caches so the specialized `CALL_PY_EXACT_ARGS` instruction can validate without inspecting the full function. | `objects/function.go` |
+| <Cpy path="Include/internal/pycore_function.h" lines="60-120">60-120</Cpy> | `PyFunction_Event`, `PyFunction_WatchCallback`, `PyFunction_AddWatcher`, `PyFunction_ClearWatcher` | Event dispatch layer: watchers registered via `sys.monitoring` or C extension are called when a function is created, modified, or destroyed. | `objects/function.go` |
+| <Cpy path="Include/internal/pycore_function.h" lines="120-160">120-160</Cpy> | `_PyFunction_FromConstructor`, `_Py_FUNC_DISABLE_INLINING` | Constructor shortcut for `type.__new__` that avoids the slower `PyFunction_NewWithQualName` path; and a compiler hint that suppresses tier-2 inlining for specific C-level helpers. | `objects/function.go` |
 
 ## Reading
 
-### `func_version` and `FUNC_MAX_WATCHERS` (lines 1 to 18)
+### `func_version` counter (lines 1 to 60)
 
-<CpyLink path="Include/internal/pycore_function.h" lines="1-18" />
-
-```c
-#define FUNC_MAX_WATCHERS 8
-
-struct PyFunctionObject {
-    PyObject_HEAD
-    PyObject *func_globals;
-    PyObject *func_builtins;
-    PyObject *func_name;
-    PyObject *func_qualname;
-    PyObject *func_code;        /* PyCodeObject */
-    PyObject *func_defaults;    /* NULL or tuple */
-    PyObject *func_kwdefaults;  /* NULL or dict */
-    PyObject *func_closure;     /* NULL or tuple of cells */
-    PyObject *func_doc;
-    PyObject *func_dict;
-    PyObject *func_weakreflist;
-    PyObject *func_annotations;
-    PyObject *func_typeparams;
-    uint32_t func_version;      /* specializer version tag */
-    uint16_t func_watchers;     /* bitmask of registered watcher IDs */
-};
-```
-
-`func_version` is a 32-bit monotonically increasing counter. It
-starts at a non-zero value assigned by `_PyFunction_SetVersion` when
-the function is first specialized. Any mutation to `func_code`,
-`func_defaults`, or `func_kwdefaults` calls `_PyFunction_SetVersion`
-with `0`, which marks the function as unversioned and notifies all
-watchers.
-
-`func_watchers` is a 16-bit bitmask where bit `i` is set when watcher
-ID `i` is registered. `FUNC_MAX_WATCHERS = 8` limits the bitmask to
-the lower 8 bits. The upper 8 bits are reserved.
-
-In gopy, `objects/function.go` carries `FuncVersion uint32` and
-`FuncWatchers uint16` on `FunctionObject`. The watcher dispatch table
-is stored on the interpreter state rather than the function object.
-
-### `_PyFunction_FromConstructor` (lines 19 to 34)
-
-<CpyLink path="Include/internal/pycore_function.h" lines="19-34" />
+<CpyLink path="Include/internal/pycore_function.h" lines="1-60" />
 
 ```c
-PyAPI_FUNC(PyObject *)
-_PyFunction_FromConstructor(PyObject *globals, PyObject *code);
-```
+/* Upper limit: when the counter wraps here, all cached versions are
+   invalidated by setting every function's func_version to 0. */
+#define FUNC_VERSION_MAX      UINT32_MAX
+#define FUNC_VERSION_UNSET    0
 
-The normal path for creating a function in bytecode is the
-`MAKE_FUNCTION` opcode, which pops the code object and optional
-default tuples from the stack and calls `PyFunction_NewWithQualName`.
-`_PyFunction_FromConstructor` is a lower-level variant used by the
-class body compiler: when the class statement is compiled to a
-`__build_class__` call, the metaclass machinery needs to create the
-class body function before a proper enclosing scope is established.
+/* Atomically increment the interpreter-global function version
+   counter and assign the result to func->func_version. */
+extern void _PyFunction_SetVersion(PyFunctionObject *func, uint32_t version);
 
-The function skips `__qualname__` inference and sets `func_globals`
-directly from the caller-supplied `globals` mapping rather than
-inheriting from an enclosing frame. It does not call
-`_PyFunction_NotifyEvent` because no specialization has occurred yet.
-
-In gopy, `objects/function.go` exports `FunctionFromConstructor(globals, code Object) *FunctionObject`
-which mirrors this exact behavior: globals is stored directly and the
-version tag is left at zero.
-
-### Version tag read/write (lines 35 to 50)
-
-<CpyLink path="Include/internal/pycore_function.h" lines="35-50" />
-
-```c
-static inline void
-_PyFunction_SetVersion(PyFunctionObject *func, uint32_t version)
-{
-    func->func_version = version;
-    if (func->func_watchers) {
-        _PyFunction_NotifyEvent(
-            _PyInterpreterState_GET(),
-            func,
-            PyFunction_EVENT_MODIFY_CODE,
-            NULL);
-    }
+/* Return the current func_version.  The caller compares this against
+   a value stored in an inline cache; mismatch triggers despecialization. */
+static inline uint32_t
+_PyFunction_GetVersionForCurrentState(PyFunctionObject *func) {
+    return func->func_version;
 }
-
-extern int
-_PyFunction_GetVersionForCurrentState(
-    PyThreadState *tstate,
-    PyFunctionObject *func,
-    uint32_t *version_out);
 ```
 
-`_PyFunction_SetVersion` is the single write point for `func_version`.
-It always calls `_PyFunction_NotifyEvent` when any watcher is
-registered, ensuring that caches depending on the old version are
-invalidated synchronously before the caller proceeds.
+`func_version` is a 32-bit integer that serves as a guard tag for
+call-site inline caches. When the specializing interpreter rewrites a
+`CALL` instruction to `CALL_PY_EXACT_ARGS`, it records the current
+`func_version` of the callee in the instruction's inline cache words.
+On each subsequent call the specialized instruction reads the cache and
+compares it against the live `func->func_version`. If they match, the
+call proceeds with no further checks. If they differ, the instruction
+despecializes back to the generic `CALL` and the slow path runs.
 
-`_PyFunction_GetVersionForCurrentState` fills `*version_out` and
-returns 0 on success, or returns -1 and leaves `*version_out`
-unchanged if the function is currently being modified on another
-thread (free-threaded build only). The specializing interpreter calls
-this at `CALL_PY_EXACT_ARGS` to obtain the version it will store in
-the inline cache entry.
+`_PyFunction_SetVersion` is called only from `Objects/funcobject.c`
+whenever a mutable attribute changes: `__code__`, `__defaults__`,
+`__kwdefaults__`, `__closure__`, or `__annotations__`. The new version
+value comes from an interpreter-global monotone counter that starts at
+1 and never resets (wrapping to 0 effectively invalidates every cache).
+Setting `func_version = 0` is the explicit invalidation signal: since
+`FUNC_VERSION_UNSET = 0`, any cache that was stamped with a non-zero
+version will fail the comparison.
 
-In gopy, `objects/function.go` implements `SetVersion(v uint32)` as a
-method and `GetVersion() (uint32, bool)` returning `(0, false)` when
-the function is mid-mutation, matching the C -1 / 0 convention.
+The version counter is per-interpreter, not per-thread, so all
+threads sharing an interpreter state see a consistent versioning of
+all functions. In the free-threaded build the global counter is
+incremented with an atomic fetch-and-add.
 
-### `_PyFunction_VerifyStateless` (lines 51 to 64)
+In gopy, `objects/function.go` holds `Version uint32` on the `Function`
+struct. Every setter (`SetCode`, `SetDefaults`, `SetKwDefaults`,
+`SetClosure`) zeros it, matching the CPython invalidation contract.
+`GetVersionForCurrentState` is ported as a direct one-line method.
+gopy does not yet run the tier-1 specializer, so no inline cache
+actually reads the version; the field tracks the same invariants so
+the specializer can be wired in later.
 
-<CpyLink path="Include/internal/pycore_function.h" lines="51-64" />
+### Specialization invalidation pattern
+
+A changed `__defaults__` invalidates every call site that was
+specialized against that function. The sequence in CPython is:
+
+1. `func_set_defaults` (in `Objects/funcobject.c`) stores the new
+   tuple, then calls `_PyFunction_SetVersion(func, 0)`.
+2. `_PyFunction_SetVersion` writes `func->func_version = version`.
+3. On the next call, the specialized instruction reads the cached
+   version from its inline cache words, finds `0 != cached_version`,
+   and falls back to the generic handler, which re-specializes (or
+   leaves it generic if the shape keeps changing).
+
+The pattern ensures that no lock is needed: the version write is
+visible to any thread that subsequently reads the cache, because the
+specialized instruction reads `func_version` after the function pointer
+comparison, and the function pointer cannot change without going
+through `func_set_code` (which also zeroes the version).
+
+### `PyFunction_Event` and watchers (lines 60 to 120)
+
+<CpyLink path="Include/internal/pycore_function.h" lines="60-120" />
 
 ```c
-PyAPI_FUNC(int)
-_PyFunction_VerifyStateless(PyThreadState *tstate, PyObject *func);
+typedef enum {
+    PyFunction_EVENT_CREATE,
+    PyFunction_EVENT_DESTROY,
+    PyFunction_EVENT_MODIFY_CODE,
+    PyFunction_EVENT_MODIFY_DEFAULTS,
+    PyFunction_EVENT_MODIFY_KWDEFAULTS,
+} PyFunction_Event;
+
+typedef int (*PyFunction_WatchCallback)(
+    PyFunction_Event event,
+    PyFunctionObject *func,
+    PyObject *new_value);
+
+PyAPI_FUNC(int) PyFunction_AddWatcher(PyFunction_WatchCallback callback);
+PyAPI_FUNC(int) PyFunction_ClearWatcher(int watcher_id);
 ```
 
-Added for PEP 764 (stateless functions). A stateless function must
-carry no free variables: `func_closure` must be `NULL` or an empty
-tuple. The verifier also checks that `func_defaults` and
-`func_kwdefaults` are absent, because mutable default values introduce
-implicit state shared across calls.
+The watcher mechanism lets C extensions and `sys.monitoring`
+observe function lifecycle events without patching CPython's internal
+call paths. Up to 8 watchers can be registered simultaneously. When
+any watched event fires, CPython iterates the registered callbacks and
+calls each with the event type, the function object, and (for
+`MODIFY_*` events) the incoming new value before it is installed.
 
-If any of these conditions fails the function raises a `TypeError`
-with a descriptive message and returns `-1`. On success it returns `0`.
+`PyFunction_EVENT_CREATE` fires at the end of
+`PyFunction_NewWithQualName`, after all fields are initialized but
+before the function is returned to the caller. A watcher that stamps
+the version for the first time does so here.
 
-The check is applied by the `@stateless` decorator at decoration time,
-not at call time, so the overhead is paid once per function definition
-rather than on every invocation.
+`PyFunction_EVENT_DESTROY` fires at the start of `func_dealloc`, while
+the function object is still fully valid. After the callbacks return,
+`func_version` is zeroed to prevent stale cache hits if the memory is
+reused for another function that happens to land at the same address.
 
-In gopy, `objects/function.go` does not yet gate on a `@stateless`
-decorator but `VerifyStateless(*Function) error` is stubbed and
-returns nil pending the PEP 764 watcher integration.
+`MODIFY_CODE`, `MODIFY_DEFAULTS`, and `MODIFY_KWDEFAULTS` fire after
+the validation checks in the setter but before the new value is
+stored. `new_value` is the incoming object; if the callback returns
+nonzero, the setter aborts and raises the exception the callback set.
+
+In gopy, `objects/function.go` does not implement the watcher registry.
+The mechanism is needed only when `sys.monitoring` is active or when
+a C extension explicitly calls `PyFunction_AddWatcher`; gopy defers
+both until the monitoring subsystem is ported.
+
+### `_PyFunction_FromConstructor` and `_Py_FUNC_DISABLE_INLINING` (lines 120 to 160)
+
+<CpyLink path="Include/internal/pycore_function.h" lines="120-160" />
+
+```c
+/* Faster constructor used by type_new_impl to avoid keyword-argument
+   parsing overhead when building a function for __init__ or __new__. */
+extern PyObject *_PyFunction_FromConstructor(PyFrameConstructor *constr);
+
+/* Suppress tier-2 inlining for a specific function.  Used on C-level
+   helpers that are too large or too polymorphic to inline profitably. */
+#define _Py_FUNC_DISABLE_INLINING(func) \
+    do { (func)->func_version = FUNC_VERSION_MAX; } while (0)
+```
+
+`_PyFunction_FromConstructor` is the fast path that `type.__new__`
+takes when building the implicit `__init__` and `__new__` wrappers for
+a new class. It accepts a `PyFrameConstructor` (a pre-filled struct of
+the code object, globals, and builtins pointers) and avoids the full
+keyword-argument dispatch that `PyFunction_NewWithQualName` handles.
+
+`_Py_FUNC_DISABLE_INLINING` sets `func_version = FUNC_VERSION_MAX`
+(i.e. `UINT32_MAX`). The tier-2 optimizer reserves version `UINT32_MAX`
+as a sentinel meaning "never inline this function". By convention, any
+function whose version reaches `UINT32_MAX` is skipped by the inliner
+regardless of its call frequency. The macro is applied to a small set
+of C-level built-ins (like `functools.reduce` and `itertools.chain`)
+that the optimizer is not equipped to inline.
+
+In gopy, `_PyFunction_FromConstructor` is not yet ported; class
+construction goes through the general `NewFunctionWithQualName` path.
+`_Py_FUNC_DISABLE_INLINING` has no counterpart because gopy does not
+yet run the tier-2 optimizer.
+
+## gopy mirror
+
+The central field is `Version uint32` on `objects.Function`. All
+setters that CPython invalidates by zeroing `func_version` do the same
+in gopy: `SetCode`, `SetDefaults`, `SetKwDefaults`, and `SetClosure`
+each assign `f.Version = 0` before returning. The
+`GetVersionForCurrentState` method is a direct port.
+
+The event watcher subsystem (`PyFunction_Event`, `PyFunction_AddWatcher`,
+`PyFunction_ClearWatcher`) is not yet implemented. When `sys.monitoring`
+is ported, the watcher registry will live alongside the function type
+initialization in `objects/function.go`, mirroring the C layout where
+the callback table is stored on the interpreter state struct.

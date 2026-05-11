@@ -1,11 +1,11 @@
 ---
 title: Modules/mathmodule.c
-description: C implementation of the math module. IEEE 754 wrappers for every trig, log, and rounding function, plus exact-integer operations like factorial, gcd, comb, and perm, and Shewchuk compensated summation for fsum.
+description: The math module. libm delegation for trig/exp/log, fsum exact summation, factorial/comb/perm combinatorics, hypot multi-argument, and numeric predicates.
 cpython_path: Modules/mathmodule.c
 cpython_version: "3.14"
-lines: 3700
+lines: 3200
 status: annotated
-ported_to: module/math/module.go
+ported_to: module/math/
 ---
 
 import {Cpy, CpyLink} from '@site/src/components/Cpy';
@@ -14,208 +14,229 @@ import {Cpy, CpyLink} from '@site/src/components/Cpy';
 
 <CpyLink path="Modules/mathmodule.c" />
 
-`mathmodule.c` is the C implementation of the `math` standard-library module.
-It wraps the C99 `<math.h>` functions for floating-point arithmetic and adds
-several higher-level operations that CPython implements directly in C for
-exactness or performance.
+The `math` module. A thin Go-side port is pending; the module currently
+falls back to the pure-Python equivalent for any function not yet bridged.
 
-The file splits naturally into three groups. The first group is the IEEE 754
-wrappers: `sin`, `cos`, `tan`, `asin`, `acos`, `atan`, `atan2`, `exp`, `log`,
-`log2`, `log10`, `sqrt`, `hypot`, `pow`, `fabs`, `fmod`, `modf`, `frexp`,
-`ldexp`, `copysign`, `ceil`, `floor`, `trunc`, `erf`, `erfc`, `gamma`, and
-`lgamma`. Each of these is a thin wrapper that converts Python floats to C
-`double`, calls the C99 function, handles domain errors (setting the right
-Python exception for `ValueError` or `OverflowError`), and converts the result
-back. Most are generated via Argument Clinic macros.
+The file is organized around three implementation strategies:
 
-The second group covers exact-integer operations: `factorial`, `gcd`, `lcm`,
-`comb`, and `perm`. These work on `PyLong` objects directly and never pass
-through `double`, which avoids the rounding that would occur for large integers.
+- **libm delegation.** Most trig, exponential, and logarithm functions
+  call the C standard library directly (`sin`, `cos`, `exp`, `log`, etc.)
+  through a uniform `math_1` / `math_2` dispatch shim that converts Python
+  floats to `double`, checks `errno`, and converts `NaN`/`inf` results to
+  Python exceptions or special values.
+- **Pure-integer algorithms.** `factorial`, `comb`, and `perm` operate on
+  Python integers without floating-point rounding. `factorial` uses a
+  divide-and-conquer prime-swing or partial-product method; `comb` uses
+  the multiplicative formula with intermediate reduction.
+- **Compensated summation.** `fsum` maintains an adaptive list of
+  partial sums (Shewchuk's algorithm) to return an exactly-rounded result
+  even for inputs that would lose precision in a naive accumulation.
 
-The third group holds two specialised summation routines: `fsum`, which
-implements Shewchuk's compensated summation algorithm to return a result
-correctly rounded to the nearest float, and `prod`, a variadic product with
-fast paths for integer and float inputs.
+`math.floor`, `math.ceil`, and `math.trunc` are special: they try the
+`nb_floor`, `nb_ceil`, and `__trunc__` special methods first (to support
+`Decimal` and `Fraction`), and only call `libm` on plain `float` objects.
 
 ## Map
 
 | Lines | Symbol | Role | gopy |
 | ----- | ------ | ---- | ---- |
-| <Cpy path="Modules/mathmodule.c" lines="1-120">1-120</Cpy> | includes, `DOUBLE_EXCESS`, `PYCFUNCTION_FAST` | Portability macros and `<math.h>` / `<float.h>` setup. | `module/math/module.go` (preamble) |
-| <Cpy path="Modules/mathmodule.c" lines="120-400">120-400</Cpy> | `math_1`, `math_2` helper macros; `loghelper`; `math_log_impl` | Generic one- and two-arg float wrappers with domain-error and overflow translation. `math_log` handles the optional base argument. | `module/math/module.go:mathLog` |
-| <Cpy path="Modules/mathmodule.c" lines="400-700">400-700</Cpy> | `math_ceil_impl`, `math_floor_impl`, `math_trunc_impl`, `math_isnan_impl`, `math_isinf_impl`, `math_isfinite_impl`, `math_isclose_impl` | Rounding and IEEE predicate functions. `ceil`/`floor`/`trunc` call `__ceil__`/`__floor__`/`__trunc__` protocol methods if defined. | `module/math/module.go:Ceil` |
-| <Cpy path="Modules/mathmodule.c" lines="700-1000">700-1000</Cpy> | `math_fsum_impl` | Shewchuk compensated summation; grows a `partials` list of non-overlapping floats. | `module/math/module.go:Fsum` |
-| <Cpy path="Modules/mathmodule.c" lines="1000-1300">1000-1300</Cpy> | `math_factorial_impl` | Iterative exact factorial using `PyLong` arithmetic; rejects negative and non-integer inputs. | `module/math/module.go:Factorial` |
-| <Cpy path="Modules/mathmodule.c" lines="1300-1600">1300-1600</Cpy> | `math_gcd_impl`, `math_lcm_impl` | Variadic GCD and LCM via `_PyLong_GCD`; handle zero, negative, and non-integer arguments. | `module/math/module.go:Gcd` |
-| <Cpy path="Modules/mathmodule.c" lines="1600-2000">1600-2000</Cpy> | `math_comb_impl`, `math_perm_impl` | Binomial coefficient and permutation count; iterative `PyLong` multiply/divide with fast small-integer paths. | `module/math/module.go:Comb` |
-| <Cpy path="Modules/mathmodule.c" lines="2000-2400">2000-2400</Cpy> | `math_hypot_impl`, `math_dist_impl` | Variadic `hypot(*coords)` and Euclidean `dist(p, q)` using a two-pass scale-and-sum algorithm for numerical stability. | `module/math/module.go:Hypot` |
-| <Cpy path="Modules/mathmodule.c" lines="2400-2800">2400-2800</Cpy> | `math_prod_impl`, `math_nextafter_impl`, `math_ulp_impl` | Variadic product with integer/float fast paths; `nextafter` via `nextafter(3)`; `ulp` via bit manipulation on `double`. | `module/math/module.go:Prod` |
-| <Cpy path="Modules/mathmodule.c" lines="2800-3700">2800-3700</Cpy> | `math_methods[]`, `mathmodule`, `PyInit_math` | Method table, module docstrings, constant registration (`pi`, `e`, `tau`, `inf`, `nan`), and entry point. | `module/math/module.go:Module` |
+| <Cpy path="Modules/mathmodule.c" lines="1-120">1-120</Cpy> | includes, `math_1`, `math_2`, `is_error` | Uniform libm-call dispatch and error-checking shims. | `module/math/module.go:math1` |
+| <Cpy path="Modules/mathmodule.c" lines="120-400">120-400</Cpy> | `math_sin`, `math_cos`, `math_tan`, `math_asin`, `math_acos`, `math_atan`, `math_atan2`, `math_exp`, `math_expm1`, `math_log`, `math_log1p`, `math_log2`, `math_log10`, `math_pow`, `math_sqrt` | libm-delegated trig, exponential, and log functions. | `module/math/module.go:Sin` … `Sqrt` |
+| <Cpy path="Modules/mathmodule.c" lines="400-900">400-900</Cpy> | `math_fsum` | Exact floating-point summation via partial sums list (Shewchuk). | `module/math/module.go:Fsum` |
+| <Cpy path="Modules/mathmodule.c" lines="900-1500">900-1500</Cpy> | `math_factorial`, `factorial_partial_product`, `factorial_odd_part`, `math_comb`, `math_perm` | Integer combinatorics. No floating-point is used. | `module/math/module.go:Factorial` |
+| <Cpy path="Modules/mathmodule.c" lines="1500-1800">1500-1800</Cpy> | `math_floor`, `math_ceil`, `math_trunc` | Delegate to `nb_floor` / `nb_ceil` / `__trunc__` first, then libm. | `module/math/module.go:Floor` |
+| <Cpy path="Modules/mathmodule.c" lines="1800-2200">1800-2200</Cpy> | `math_isfinite`, `math_isinf`, `math_isnan`, `math_isclose`, `math_copysign`, `math_fabs`, `math_fmod`, `math_modf`, `math_frexp`, `math_ldexp` | Numeric predicates and low-level float manipulation. | `module/math/module.go:IsFinite` |
+| <Cpy path="Modules/mathmodule.c" lines="2200-2700">2200-2700</Cpy> | `math_hypot`, `vector_norm` | Multi-argument hypot with compensated accumulation to avoid intermediate overflow. | `module/math/module.go:Hypot` |
+| <Cpy path="Modules/mathmodule.c" lines="2700-2950">2700-2950</Cpy> | `math_prod`, `math_gcd`, `math_lcm` | Integer-aware product, GCD (Euclidean), and LCM. | `module/math/module.go:Prod` |
+| <Cpy path="Modules/mathmodule.c" lines="2950-3200">2950-3200</Cpy> | `math_methods` table, constant definitions, `PyInit_math` | Module definition. Registers `pi`, `e`, `tau`, `inf`, `nan`. | `module/math/module.go:Module` |
 
 ## Reading
 
-### `math_1` wrapper pattern and domain-error handling (lines 120 to 400)
+### `fsum` partial sums algorithm (lines 400 to 900)
 
-<CpyLink path="Modules/mathmodule.c" lines="120-400" />
+<CpyLink path="Modules/mathmodule.c" lines="400-900" />
 
-Almost every single-argument float function is generated by the `math_1` macro
-or a close variant. The macro calls a C99 function and then translates C
-`errno` / IEEE 754 exceptional values into Python exceptions:
-
-```c
-static PyObject *
-math_1(PyObject *arg, double (*func) (double), int can_overflow)
-{
-    double x, r;
-    x = PyFloat_AsDouble(arg);
-    if (x == -1.0 && PyErr_Occurred())
-        return NULL;
-    errno = 0;
-    r = (*func)(x);
-    if (Py_IS_NAN(r) && !Py_IS_NAN(x)) {
-        PyErr_SetString(PyExc_ValueError,
-            "math domain error");
-        return NULL;
-    }
-    if (Py_IS_INFINITY(r) && Py_IS_FINITE(x)) {
-        if (can_overflow)
-            PyErr_SetString(PyExc_OverflowError,
-                "math range error");
-        else
-            PyErr_SetString(PyExc_ValueError,
-                "math domain error");
-        return NULL;
-    }
-    if (errno && is_error(r))
-        return NULL;
-    return PyFloat_FromDouble(r);
-}
-```
-
-The `can_overflow` flag distinguishes functions where a finite input
-legitimately produces infinity (`exp`, `pow`) from those where infinity would
-indicate a domain error (`sqrt` of a negative). `is_error` inspects `errno`
-for `EDOM` and `ERANGE` as a fallback for platforms that do not set IEEE 754
-exception flags reliably.
-
-`math_log_impl` is slightly different: when called as `math.log(x, base)` it
-computes `loghelper(x) / loghelper(base)` using either `log` or `log2` or
-`log10` depending on the base, to preserve precision for the common cases
-`log(x, 2)` and `log(x, 10)`.
-
-### `math_fsum_impl`: Shewchuk compensated summation (lines 700 to 1000)
-
-<CpyLink path="Modules/mathmodule.c" lines="700-1000" />
-
-`fsum` produces a correctly-rounded sum of a sequence of floats. The core
-algorithm maintains a list `partials` of non-overlapping floats whose exact
-sum equals the running total. Adding each new value calls `xsum_add_value`,
-which performs Neumaier/Shewchuk two-sum corrections:
-
-```c
-static int
-xsum_add_value(PyObject *x_obj, PartialSum *ps)
-{
-    double x = PyFloat_AS_DOUBLE(x_obj);
-    Py_ssize_t i, j, n = ps->n;
-    double *p = ps->ps;
-
-    for (i = j = 0; j < n; j++) {
-        double y = p[j];
-        double hi = x + y;
-        /* two_sum: extract the rounding error */
-        double lo = fabs(x) < fabs(y) ? x - (hi - y) : y - (hi - x);
-        if (lo != 0.0)
-            p[i++] = lo;
-        x = hi;
-    }
-    ps->n = i;
-    /* grow partials if necessary */
-    p[ps->n++] = x;
-    return 0;
-}
-```
-
-The `two_sum` step (the `lo = ...` line) recovers the exact rounding error
-from the floating-point addition `hi = x + y`. The error is kept in `partials`
-instead of being discarded. At the end `xsum_round` folds `partials` from
-largest to smallest, applying one final round-to-even correction. The result
-is bit-for-bit identical to what you would get with infinite-precision
-arithmetic followed by a single rounding step.
-
-### `math_factorial_impl`: exact integer factorial (lines 1000 to 1300)
-
-<CpyLink path="Modules/mathmodule.c" lines="1000-1300" />
-
-`factorial(n)` rejects floats, negative integers, and non-integers, then
-computes the product iteratively using `PyLong` arithmetic:
+`math.fsum` returns the exact sum of a finite iterable of floats, rounded
+once to the nearest representable `double`. The core is Shewchuk's
+expansion-summation algorithm, which maintains a growing list of partial
+sums such that their exact mathematical sum equals the true sum of all
+inputs processed so far.
 
 ```c
 static PyObject *
-math_factorial_impl(PyObject *module, PyObject *arg)
+math_fsum_impl(PyObject *module, PyObject *seq)
 {
-    PyObject *result, *factor;
-    Py_ssize_t i, n;
-
-    /* ... validate: integer, non-negative, fits Py_ssize_t ... */
-    n = PyLong_AsSsize_t(arg);
-
-    result = PyLong_FromLong(1);
-    for (i = 2; i <= n; i++) {
-        factor = PyLong_FromSsize_t(i);
-        PyObject *tmp = PyNumber_Multiply(result, factor);
-        Py_DECREF(result);
-        Py_DECREF(factor);
-        result = tmp;
-        if (result == NULL) return NULL;
+    PyObject *item, *iter;
+    Py_ssize_t i, j, n = 0, m = NUM_PARTIALS;
+    double x, y, t, *p = ps;
+    double xsave, special_sum = 0.0, inf_sum = 0.0;
+    ...
+    iter = PyObject_GetIter(seq);
+    while ((item = PyIter_Next(iter))) {
+        x = PyFloat_AsDouble(item);
+        ...
+        /* Merge x into the partials list */
+        for (i = j = 0; j < n; j++) {
+            y = p[j];
+            if (fabs(x) < fabs(y)) { double tmp = x; x = y; y = tmp; }
+            /* Two-sum: hi + lo = x + y exactly */
+            t = x + y;
+            if (fabs(t) >= fabs(x)) {
+                y = y - (t - x);
+            } else {
+                y = x - (t - y);
+                x = t;
+            }
+            if (y != 0.0)
+                p[i++] = y;
+            x = t;
+        }
+        n = i;
+        if (x != 0.0) {
+            if (n >= m) { /* grow partials array */ ... }
+            p[n++] = x;
+        }
     }
+    /* Round-to-nearest from the partials list */
+    ...
+}
+```
+
+The two-sum trick (`t = x + y` plus the error term) is the key: it splits
+each addition into a "hi" part stored back as `x` and a "lo" error term
+stored as a new partial. At the end, the partials list is collapsed
+right-to-left using the same careful rounding to produce a correctly-rounded
+final result.
+
+The result is identical to computing the sum in arbitrary precision and then
+rounding once: IEEE 754 guarantees this if the partial list is maintained
+correctly. The list grows dynamically but is pre-allocated to 32 slots
+(`NUM_PARTIALS`) to avoid allocation for short iterables.
+
+### `factorial` divide-and-conquer (lines 900 to 1200)
+
+<CpyLink path="Modules/mathmodule.c" lines="900-1200" />
+
+`math.factorial(n)` raises `ValueError` for negative inputs and `OverflowError`
+for inputs that do not fit in a C `long`. For small `n` (up to ~20) a simple
+loop suffices. For large `n`, CPython uses a split-radix recursive algorithm:
+
+```c
+static PyObject *
+factorial_partial_product(unsigned long start, unsigned long stop,
+                          unsigned long step)
+{
+    unsigned long midpoint, num_operands;
+    PyObject *left = NULL, *right = NULL, *result = NULL;
+    ...
+    num_operands = (stop - start) / step;
+    if (num_operands <= 8) {
+        /* Base case: multiply directly */
+        result = PyLong_FromUnsignedLong(start);
+        for (u = start + step; u < stop; u += step) {
+            factor = PyLong_FromUnsignedLong(u);
+            tmp = PyNumber_Multiply(result, factor);
+            Py_DECREF(result); Py_DECREF(factor);
+            result = tmp;
+        }
+        return result;
+    }
+    midpoint = start + step * (num_operands / 2);
+    left = factorial_partial_product(start, midpoint, step);
+    right = factorial_partial_product(midpoint, stop, step);
+    result = PyNumber_Multiply(left, right);
+    ...
     return result;
 }
 ```
 
-Because the loop uses `PyLong` multiply, the result is exact for any `n`
-that fits in memory. CPython 3.14 uses a divide-and-conquer helper for large
-`n` (splitting the range into halves and multiplying the halves together
-recursively) to reduce the number of big-integer multiplications from O(n)
-to O(n log n). The simple iterative form above is the conceptual model;
-the actual implementation delegates to `_PyLong_Factorial` in
-`Objects/longobject.c`.
+Multiplying two numbers of similar size is faster than repeated
+multiplication of one growing accumulator against small factors, because
+Python's big-integer multiply uses Karatsuba (O(n^1.585)) and the balanced
+split keeps both operands near the same bit-length throughout.
 
-### `math_comb_impl` and `math_perm_impl`: combinatorics (lines 1600 to 2000)
+`math_comb` and `math_perm` use the multiplicative formula
+`n * (n-1) * ... * (n-k+1) / k!` with GCD reduction at each step to keep
+intermediate values small and avoid a final big-integer division.
 
-<CpyLink path="Modules/mathmodule.c" lines="1600-2000" />
+### `math.hypot` multi-argument compensated norm (lines 2200 to 2700)
 
-`comb(n, k)` computes the binomial coefficient without computing factorials
-separately. It uses the identity C(n, k) = C(n, n-k) to ensure `k <= n/2`,
-then iterates:
+<CpyLink path="Modules/mathmodule.c" lines="2200-2700" />
+
+Since Python 3.8, `math.hypot` accepts any number of arguments and computes
+the Euclidean norm `sqrt(sum(x**2 for x in args))` without intermediate
+overflow or underflow.
 
 ```c
-static PyObject *
-math_comb_impl(PyObject *module, PyObject *n, PyObject *k)
+static double
+vector_norm(Py_ssize_t n, double *vec, double max, int found_nan)
 {
-    /* ... validate: integers, 0 <= k <= n ... */
-    /* use smaller k */
-    if (PyObject_RichCompareBool(k, n_minus_k, Py_GT))
-        k = n_minus_k;
-
-    result = PyLong_FromLong(1);
-    for (Py_ssize_t i = 0; i < ki; i++) {
-        /* result = result * (n - i) // (i + 1) */
-        factor = PyNumber_Subtract(n, PyLong_FromSsize_t(i));
-        result = PyNumber_Multiply(result, factor);
-        divisor = PyLong_FromSsize_t(i + 1);
-        result = PyNumber_FloorDivide(result, divisor);
-        /* ... */
+    double x, scale, oldcmax, csum = 1.0, frac = 0.0;
+    ...
+    if (Py_IS_INFINITY(max)) return max;
+    if (found_nan) return Py_NAN;
+    if (max == 0.0 || n <= 1) return max;
+    /* Scale all inputs by 1/max so that max^2 == 1, preventing overflow */
+    scale = 1.0 / max;
+    for (i = 0; i < n; i++) {
+        x = vec[i];
+        x *= scale;      /* x = x_i / max */
+        x *= x;          /* x = (x_i/max)^2 */
+        csum += x;       /* compensated accumulation */
+        ...
     }
-    return result;
+    return max * sqrt(csum);
 }
 ```
 
-The intermediate `result * (n - i)` is always divisible by `i + 1` because
-the product of any `i+1` consecutive integers is divisible by `(i+1)!`. This
-guarantees the integer division is exact at every step with no remainder,
-keeping intermediate values as small as possible.
+The "scale by max" trick ensures `(x_i / max)^2` is always in `[0, 1]`,
+so no intermediate value exceeds 1. The final result is `max *
+sqrt(csum)`, which recovers the true magnitude. A separate compensated
+accumulation (similar to Kahan summation) is used for `csum` so that the
+squared terms do not lose low bits.
 
-`perm(n, k)` is simpler: it computes the falling factorial `n * (n-1) * ... *
-(n-k+1)` as a straight `PyLong` product loop, using the same integer-exactness
-property.
+### `math.floor` / `math.ceil` / `math.trunc` dispatch (lines 1500 to 1800)
+
+<CpyLink path="Modules/mathmodule.c" lines="1500-1800" />
+
+```c
+static PyObject *
+math_floor(PyObject *module, PyObject *number)
+{
+    PyObject *method;
+    ...
+    method = _PyObject_LookupSpecial(number, &_Py_ID(__floor__));
+    if (method != NULL)
+        return PyObject_CallNoArgs(method);
+    /* Fall back to C floor() for plain float */
+    ...
+    x = PyFloat_AsDouble(number);
+    ...
+    return PyLong_FromDouble(floor(x));
+}
+```
+
+For `Decimal`, `Fraction`, and any other type that defines `__floor__`,
+`__ceil__`, or `__trunc__`, the method is called directly. This is the
+mechanism that lets `math.floor(Decimal('3.7'))` return `Decimal('3')`
+rather than `int(3)`. For bare `float`, the libm function is called and the
+result is converted to `int` (CPython's `math.floor` always returns `int`
+for `float` inputs; it is the slot that may return the original type).
+
+## gopy mirror
+
+`module/math/module.go` (pending). The libm-delegation functions are
+straightforward wrappers around Go's `math` package. `Fsum` requires a
+careful port of the Shewchuk partial-sum loop; Go's `float64` is IEEE 754
+`double`, so the algorithm translates directly. `Factorial` will use
+`math/big.Int` for inputs above the native integer threshold.
+
+## CPython 3.14 changes
+
+`math.hypot` gained the multi-argument form in 3.8. `math.prod` was added
+in 3.8. `math.comb` and `math.perm` were added in 3.8. `math.isclose` was
+added in 3.5. `math.gcd` accepted multiple arguments starting in 3.9, and
+`math.lcm` was added in 3.9. The `fsum` implementation has been stable
+since 2.6. In 3.12, `math.factorial` began raising `TypeError` (not
+`ValueError`) for non-integer `float` inputs to align with the rest of the
+numeric tower.

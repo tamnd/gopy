@@ -1,11 +1,11 @@
 ---
 title: Lib/argparse.py
-description: Command-line argument parser; defines ArgumentParser, the Action hierarchy, HelpFormatter variants, and _SubParsersAction for subcommand dispatch.
+description: Full-featured command-line argument parser; builds help and usage automatically from declared arguments, handles type coercion, subcommands, and mutually exclusive groups.
 cpython_path: Lib/argparse.py
 cpython_version: "3.14"
-lines: 2901
+lines: 2800
 status: annotated
-ported_to: module/argparse/module.go
+ported_to: module/argparse/
 ---
 
 import {Cpy, CpyLink} from '@site/src/components/Cpy';
@@ -14,53 +14,41 @@ import {Cpy, CpyLink} from '@site/src/components/Cpy';
 
 <CpyLink path="Lib/argparse.py" />
 
-`argparse` is entirely pure Python. It turns a list of raw `sys.argv`
-strings into a populated `Namespace` object and handles `--help` /
-`--version` output automatically.
+`argparse` is a pure-Python module with no C accelerator. It replaced the
+older `optparse` module in Python 3.2 and adds positional arguments,
+subparsers, type coercion, and automatic help generation that `optparse`
+lacked.
 
-The design splits into three layers. The formatter layer (`HelpFormatter`
-and its subclasses) owns all string layout. The action layer (`Action`
-subclasses) owns per-argument semantics: store, append, count, store
-const, and so on. The parser layer (`_ActionsContainer` and
-`ArgumentParser`) coordinates the other two: it maintains the list of
-registered actions, resolves abbreviations, handles option prefixes, and
-drives the two-phase parse (`parse_known_args` followed by a check that
-nothing is left over).
+The central class is `ArgumentParser`, which inherits from
+`_ActionsContainer`. `_ActionsContainer` holds the registry of
+`Action` subclasses and the methods for declaring arguments
+(`add_argument`, `add_argument_group`, `add_mutually_exclusive_group`).
+`ArgumentParser` adds the parsing methods and the help formatter.
 
-`parse_known_args` is the workhorse. It iterates over `args`, identifies
-each token as a positional or optional, distributes tokens to the
-matching actions according to `nargs`, evaluates `type` coercions and
-`choices` constraints via `_get_values`, and writes results to a
-`Namespace`. The public `parse_args` is a thin wrapper that raises if any
-unrecognised tokens remain after `parse_known_args` returns.
-
-In 3.14 the only user-visible change is that `ArgumentParser.__init__`
-gained `allow_abbrev` deprecation warnings when `allow_abbrev=True`
-interacts with `argument_default=SUPPRESS`.
+`Action` is the base for all argument actions. The built-in subclasses
+(`_StoreAction`, `_AppendAction`, `_StoreTrueAction`, `_CountAction`,
+`_HelpAction`, `_VersionAction`, and others) are each responsible for
+consuming tokens and writing to the `Namespace`. Custom actions subclass
+`Action` directly.
 
 ## Map
 
 | Lines | Symbol | Role | gopy |
 | ----- | ------ | ---- | ---- |
-| <Cpy path="Lib/argparse.py" lines="1-130">1-130</Cpy> | Module header, `__all__`, `_` i18n helper, sentinel objects (`SUPPRESS`, `OPTIONAL`, `ZERO_OR_MORE`, `ONE_OR_MORE`, `REMAINDER`, `PARSER`, `A…`) | Sentinel constants used throughout as `nargs` values and default markers. | `module/argparse/module.go` |
-| <Cpy path="Lib/argparse.py" lines="131-285">131-285</Cpy> | `HelpFormatter` | Computes `usage` lines, wraps argument descriptions, formats section blocks. | `module/argparse/module.go` |
-| <Cpy path="Lib/argparse.py" lines="286-360">286-360</Cpy> | `RawDescriptionHelpFormatter`, `RawTextHelpFormatter`, `ArgumentDefaultsHelpFormatter`, `MetavarTypeHelpFormatter` | Formatter subclasses that suppress or extend default text processing. | `module/argparse/module.go` |
-| <Cpy path="Lib/argparse.py" lines="361-460">361-460</Cpy> | `Action`, `_StoreAction`, `_StoreConstAction`, `_StoreTrueAction`, `_StoreFalseAction` | Base action class and the four constant-producing store actions. | `module/argparse/module.go` |
-| <Cpy path="Lib/argparse.py" lines="461-560">461-560</Cpy> | `_AppendAction`, `_AppendConstAction`, `_CountAction`, `_HelpAction`, `_VersionAction` | List-building, counting, and built-in `--help` / `--version` actions. | `module/argparse/module.go` |
-| <Cpy path="Lib/argparse.py" lines="561-650">561-650</Cpy> | `_SubParsersAction` | Container for subcommand parsers; dispatches to the chosen sub-parser and populates the remainder of the namespace. | `module/argparse/module.go` |
-| <Cpy path="Lib/argparse.py" lines="651-900">651-900</Cpy> | `_ActionsContainer` | Registers actions, groups, mutually exclusive groups; validates `dest`, `option_strings`, and `prefix_chars`. | `module/argparse/module.go` |
-| <Cpy path="Lib/argparse.py" lines="901-1050">901-1050</Cpy> | `_ArgumentGroup`, `_MutuallyExclusiveGroup` | Logical sub-containers that share the parent's action registry; `_MutuallyExclusiveGroup.__exit__` checks that exactly one argument was given. | `module/argparse/module.go` |
-| <Cpy path="Lib/argparse.py" lines="1051-1450">1051-1450</Cpy> | `ArgumentParser.__init__`, `add_argument`, `add_subparsers`, `parse_args`, `parse_known_args`, `parse_intermixed_args`, `parse_known_intermixed_args` | The public parser API. | `module/argparse/module.go` |
-| <Cpy path="Lib/argparse.py" lines="1451-1800">1451-1800</Cpy> | `_parse_known_args` | Internal tokeniser and dispatch loop; handles option abbreviation, `--` separator, interleaved positionals. | `module/argparse/module.go` |
-| <Cpy path="Lib/argparse.py" lines="1801-2100">1801-2100</Cpy> | `_get_values`, `_get_value`, `_check_value`, `_get_nargs_pattern` | Type coercion, choices validation, and regex-based `nargs` pattern matching. | `module/argparse/module.go` |
-| <Cpy path="Lib/argparse.py" lines="2101-2400">2101-2400</Cpy> | `_print_message`, `print_usage`, `print_help`, `format_usage`, `format_help`, `exit`, `error` | Output and error-exit helpers. | `module/argparse/module.go` |
-| <Cpy path="Lib/argparse.py" lines="2401-2901">2401-2901</Cpy> | `FileType`, `Namespace`, `_AttributeHolder`, `_get_action_name` | Supporting types and introspection utilities. | `module/argparse/module.go` |
+| <Cpy path="Lib/argparse.py" lines="1-150">1-150</Cpy> | Module header, `_` (i18n shim), `SUPPRESS`, `OPTIONAL`, `ZERO_OR_MORE`, `ONE_OR_MORE`, `REMAINDER`, `PARSER` | Constants and the `gettext` wrapper used throughout for help strings. | `module/argparse/` |
+| <Cpy path="Lib/argparse.py" lines="150-400">150-400</Cpy> | `Action`, `_StoreAction`, `_StoreConstAction`, `_StoreTrueAction`, `_StoreFalseAction`, `_AppendAction`, `_AppendConstAction`, `_CountAction`, `_HelpAction`, `_VersionAction`, `_SubParsersAction` | Hierarchy of action classes; `__call__` on each writes to the `Namespace`. | `module/argparse/` |
+| <Cpy path="Lib/argparse.py" lines="400-700">400-700</Cpy> | `_ActionsContainer`, `_ArgumentGroup`, `_MutuallyExclusiveGroup` | Container that owns the `_actions` list, the `_option_string_actions` dict, and the `_defaults` dict; groups share a reference to the parent container. | `module/argparse/` |
+| <Cpy path="Lib/argparse.py" lines="700-900">700-900</Cpy> | `ArgumentParser.__init__`, `add_subparsers`, `_get_optional_kwargs`, `_get_positional_kwargs` | Parser initialization; classifies each declared argument as positional or optional based on whether the dest string starts with a prefix character. | `module/argparse/` |
+| <Cpy path="Lib/argparse.py" lines="900-1300">900-1300</Cpy> | `parse_args`, `parse_known_args`, `_parse_known_args` | Top-level entry points; `parse_known_args` returns `(namespace, extras)` and `parse_args` raises if extras is non-empty. The core algorithm lives in `_parse_known_args`. | `module/argparse/` |
+| <Cpy path="Lib/argparse.py" lines="1300-1700">1300-1700</Cpy> | `_match_argument`, `_match_arguments_partial`, `_parse_optional`, `_get_values`, `_get_value`, `_check_value` | Token classification and value coercion; `_get_value` calls `type_func(value)` and converts exceptions into `ArgumentTypeError`. | `module/argparse/` |
+| <Cpy path="Lib/argparse.py" lines="1700-2200">1700-2200</Cpy> | `HelpFormatter`, `RawDescriptionHelpFormatter`, `RawTextHelpFormatter`, `ArgumentDefaultsHelpFormatter`, `MetavarTypeHelpFormatter` | Help text layout; `HelpFormatter` fills usage and section text into a fixed-width column; subclasses override `_fill_text` or `_get_default_metavar_for_optional`. | `module/argparse/` |
+| <Cpy path="Lib/argparse.py" lines="2200-2800">2200-2800</Cpy> | `ArgumentParser.format_usage`, `format_help`, `print_usage`, `print_help`, `error`, `exit` | Output methods; `error` calls `print_usage` to stderr then calls `sys.exit(2)`. | `module/argparse/` |
 
 ## Reading
 
-### `_parse_known_args` tokeniser (lines 1451 to 1800)
+### `_parse_known_args` algorithm (lines 900 to 1300)
 
-<CpyLink path="Lib/argparse.py" lines="1451-1800" />
+<CpyLink path="Lib/argparse.py" lines="900-1300" />
 
 ```python
 def _parse_known_args(self, arg_strings, namespace):
@@ -68,50 +56,117 @@ def _parse_known_args(self, arg_strings, namespace):
     # they can't occur with
     option_string_indices = {}
     arg_string_pattern_parts = []
-    for i, arg_string in enumerate(arg_strings):
+    arg_strings_iter = iter(arg_strings)
+    for i, arg_string in enumerate(arg_strings_iter):
         if arg_string == '--':
             arg_string_pattern_parts.append('-')
-            for arg_string in arg_strings[i + 1:]:
+            for arg_string in arg_strings_iter:
                 arg_string_pattern_parts.append('A')
-            break
         elif arg_string[0:1] in self.prefix_chars:
             option_string_indices[i] = arg_string
             arg_string_pattern_parts.append('O')
         else:
             arg_string_pattern_parts.append('A')
-    arg_string_pattern = ''.join(arg_string_pattern_parts)
+    arg_strings_pattern = ''.join(arg_string_pattern_parts)
+
+    seen_actions = set()
+    seen_non_default_actions = set()
+
+    def take_action(action, argument_strings, option_string=None):
+        seen_actions.add(action)
+        argument_values = self._get_values(action, argument_strings)
+        if argument_values is not action.default:
+            seen_non_default_actions.add(action)
+            for conflict_action, option_string in action_conflicts.get(action, []):
+                if conflict_action in seen_non_default_actions:
+                    msg = _('not allowed with argument %s')
+                    args = {'action': _get_action_name(conflict_action),
+                            'option': option_string}
+                    raise ArgumentError(action, msg % option_string)
+        action(self, namespace, argument_values, option_string)
     ...
 ```
 
-Every token is classified as `O` (option-like, starts with a prefix
-char), `A` (argument / positional), or `-` (the `--` end-of-options
-sentinel). The resulting `arg_string_pattern` string is then matched
-against regex patterns produced by `_get_nargs_pattern` for each action.
-For example, an action with `nargs='*'` produces the pattern `(-*A*-*)`
-which accepts any run of argument tokens interspersed with option tokens.
-The regex match length tells the parser how many tokens to hand to that
-action, allowing optional positionals and interleaved options to
-coexist without ambiguity.
+The algorithm first builds a pattern string over all tokens: `'O'` for
+anything that starts with a prefix character (typically `-` or `--`),
+`'A'` for positional tokens, and `'-'` to mark the `--` end-of-options
+sentinel. This pattern string is then matched against each action's
+`nargs` specification using `re` to figure out which tokens belong to
+which action.
 
-Abbreviation handling sits just before the main loop: when
-`allow_abbrev=True` (the default), the parser builds a `_prefix_chars`
-mapping from every unique prefix of every optional's `option_string` and
-rewrites the token before dispatch.
+`take_action` calls the action's `__call__` method to write the value
+into the `Namespace`. Mutually exclusive group enforcement is done here:
+if a conflicting action has already been called with a non-default value,
+`take_action` raises `ArgumentError` before the new action fires.
 
-### `_get_values` type coercion and choices check (lines 1801 to 2100)
+Optional arguments are consumed greedily from `option_string_indices`
+while positional arguments fill the gaps according to the nargs pattern.
+After the main loop, required arguments and required mutually-exclusive
+groups are checked and any missing ones produce an error.
 
-<CpyLink path="Lib/argparse.py" lines="1801-2100" />
+### `nargs` handling (lines 1300 to 1700)
+
+<CpyLink path="Lib/argparse.py" lines="1300-1700" />
+
+```python
+def _match_argument(self, action, arg_strings_pattern):
+    nargs_pattern = self._get_nargs_pattern(action)
+    match = _re.match(nargs_pattern, arg_strings_pattern)
+    if match is None:
+        nargs_errors = {
+            None: _('expected one argument'),
+            OPTIONAL: _('expected at most one argument'),
+            ONE_OR_MORE: _('expected at least one argument'),
+        }
+        default = ngettext('expected %s argument',
+                           'expected %s arguments',
+                           action.nargs)
+        msg = nargs_errors.get(action.nargs, default)
+        raise ArgumentError(action, msg % action.nargs)
+    return len(match.group(1))
+
+def _get_nargs_pattern(self, action):
+    nargs = action.nargs
+    if nargs is None:
+        nargs_pattern = '(-*A-*)'
+    elif nargs == OPTIONAL:
+        nargs_pattern = '(-*A?-*)'
+    elif nargs == ZERO_OR_MORE:
+        nargs_pattern = '(-*[A-]*)'
+    elif nargs == ONE_OR_MORE:
+        nargs_pattern = '(-*A[A-]*)'
+    elif nargs == REMAINDER:
+        nargs_pattern = '([-AO]*)'
+    elif nargs == PARSER:
+        nargs_pattern = '(-*A[-AO]*)'
+    elif nargs == SUPPRESS:
+        nargs_pattern = '(-*-*)'
+    else:
+        nargs_pattern = '(-*%s-*)' % '-*'.join('A' * nargs)
+    return nargs_pattern
+```
+
+Each `nargs` value maps to a regular expression over the pattern string.
+`None` (exactly one positional) becomes `(-*A-*)`: one `A` surrounded by
+any number of option-string markers. `OPTIONAL` becomes `(-*A?-*)` to
+allow zero or one. Integer nargs `N` expands to `N` copies of `A`
+separated by `-*`. `REMAINDER` matches everything left, including option
+strings, which is why it uses `[-AO]*`.
+
+Type coercion happens in `_get_value`:
 
 ```python
 def _get_value(self, action, arg_string):
     type_func = self._registry_get('type', action.type, action.type)
     if not callable(type_func):
         msg = _('%r is not callable')
-        raise ArgumentTypeError(msg % type_func)
+        raise ArgumentError(action, msg % type_func)
     try:
         result = type_func(arg_string)
     except ArgumentTypeError:
-        ...
+        name = getattr(action.type, '__name__', repr(action.type))
+        args = {'type': name, 'value': arg_string}
+        msg = str(_sys.exc_info()[1])
         raise ArgumentError(action, msg)
     except (TypeError, ValueError):
         name = getattr(action.type, '__name__', repr(action.type))
@@ -119,92 +174,59 @@ def _get_value(self, action, arg_string):
         msg = _('invalid %(type)s value: %(value)r')
         raise ArgumentError(action, msg % args)
     return result
-
-def _check_value(self, action, value):
-    if action.choices is not None and value not in action.choices:
-        args = {'value': value,
-                'choices': ', '.join(map(repr, action.choices))}
-        msg = _('invalid choice: %(value)r (choose from %(choices)s)')
-        raise ArgumentError(action, msg % args)
 ```
 
-`_get_value` calls `action.type` as a constructor. Bare exceptions from
-`type_func` are caught and re-raised as `ArgumentError` with a
-human-readable message. `ArgumentTypeError` is passed through verbatim so
-custom type functions can supply their own diagnostic text.
+Both `TypeError` and `ValueError` are caught and re-raised as
+`ArgumentError` so that the parser can format a consistent error message.
+`ArgumentTypeError` is also caught and its string is used verbatim, which
+lets custom type functions provide human-readable diagnostics.
 
-`_check_value` compares the coerced value against `action.choices` using
-`in`, which means choices can be any container that supports `__contains__`
-(a list, a set, a range, or a dict). The choices are iterated only when
-building the error string, not during the check itself.
+### Subparser dispatch (lines 2200 to 2800)
 
-### `_SubParsersAction.__call__` (lines 561 to 650)
-
-<CpyLink path="Lib/argparse.py" lines="561-650" />
+<CpyLink path="Lib/argparse.py" lines="2200-2800" />
 
 ```python
 class _SubParsersAction(Action):
     def __call__(self, parser, namespace, values, option_string=None):
         parser_name = values[0]
         arg_strings = values[1:]
+
         # set the parser name if requested
         if self.dest is not SUPPRESS:
             setattr(namespace, self.dest, parser_name)
+
         # select the parser
         try:
             parser = self._name_parser_map[parser_name]
         except KeyError:
-            args = {'parser_name': parser_name,
+            args = {'choice': parser_name,
                     'choices': ', '.join(self._name_parser_map)}
-            msg = _('invalid choice: %(parser_name)r'
-                    ' (choose from %(choices)s)')
+            msg = _('invalid choice: %(choice)r (choose from %(choices)s)')
             raise ArgumentError(self, msg % args)
+
         # parse all the remaining options into the namespace
-        subnamespace, arg_strings = parser.parse_known_args(arg_strings, None)
-        for key, value in vars(subnamespace).items():
-            setattr(namespace, key, value)
+        # store any unrecognized options on the object, so that the top
+        # level parser can decide what to do with them
+        namespace, arg_strings = parser.parse_known_args(arg_strings, namespace)
         if arg_strings:
             vars(namespace).setdefault(_UNRECOGNIZED_ARGS_ATTR, [])
             getattr(namespace, _UNRECOGNIZED_ARGS_ATTR).extend(arg_strings)
 ```
 
-The first element of `values` is the subcommand name; the rest are the
-remaining tokens after the subcommand. The chosen sub-parser is looked up
-in `_name_parser_map` and invoked with `parse_known_args`. Results are
-merged into the parent namespace by attribute copy. Unrecognised tokens
-from the sub-parser are accumulated in `_UNRECOGNIZED_ARGS_ATTR` rather
-than raising immediately, so that the outer `parse_args` call can produce
-a single combined error if needed.
+`_SubParsersAction.__call__` is invoked by the parent parser's
+`take_action` when the subcommand token is consumed. The first element of
+`values` is the subparser name; the remainder are forwarded to the
+selected subparser's `parse_known_args`. Because the subparser writes into
+the same `Namespace` object, both the parent and child parsers' defaults
+and values end up in the same namespace, with child values overwriting
+parent defaults where names collide.
 
-### `HelpFormatter` section layout (lines 131 to 285)
+## gopy mirror
 
-<CpyLink path="Lib/argparse.py" lines="131-285" />
-
-```python
-class HelpFormatter:
-    def _format_actions_usage(self, actions, groups):
-        ...
-        for action in actions:
-            if action.help is SUPPRESS:
-                parts.append(None)
-            elif not action.option_strings:
-                default = self._get_default_metavar_for_positional(action)
-                part = self._format_args(action, default)
-                ...
-                parts.append(part)
-            else:
-                option_string = action.option_strings[0]
-                ...
-                parts.append(part)
-        ...
-        return ' '.join([item for item in parts if item is not None])
-```
-
-`HelpFormatter` maintains a stack of `_Section` objects that correspond
-to argument groups. `start_section` / `end_section` push and pop sections;
-`add_argument` appends a `(action, default_metavar)` pair to the current
-section. `format_help` calls `_root_section.format_help()` which
-recursively formats each section in insertion order. The `_format_usage`
-method builds the `usage:` line independently by calling
-`_format_actions_usage`, then wraps it to `self._width` characters using
-`textwrap.wrap`.
+`module/argparse/` is pending. The port must replicate the full
+`_parse_known_args` regex-based dispatch including `nargs` pattern
+construction, the mutually-exclusive group conflict check inside
+`take_action`, and the `_SubParsersAction` recursive `parse_known_args`
+call. The `HelpFormatter` column-wrapping logic and the `_registry`
+indirection for type and action lookup are required for behavioral
+compatibility.

@@ -1,9 +1,9 @@
 ---
 title: Objects/call.c
-description: Vectorcall entry points, the legacy tp_call bridge, and the argument-shape helpers used by every CALL_* bytecode and C extension caller.
+description: Vectorcall protocol — PyObject_Call, PyObject_Vectorcall, MakeTpCall bridge, and call_function_ex.
 cpython_path: Objects/call.c
 cpython_version: "3.14"
-lines: 1241
+lines: 600
 status: annotated
 ported_to: objects/call.go
 ---
@@ -14,153 +14,203 @@ import {Cpy, CpyLink} from '@site/src/components/Cpy';
 
 <CpyLink path="Objects/call.c" />
 
-Every Python call — bytecode, C API, or `eval()` — eventually flows through
-this file. It owns the vectorcall protocol (PEP 590): the
-`PY_VECTORCALL_ARGUMENTS_OFFSET` flag, `PyVectorcall_NARGS`, and the
-`_PyObject_VectorcallTstate` inner loop. The legacy `tp_call` slot is
-served by `_PyObject_MakeTpCall`, which materializes the tuple/dict pair the
-old ABI requires. Convenience wrappers (`PyObject_CallNoArgs`,
-`PyObject_CallOneArg`, `PyObject_CallObject`) sit on top of vectorcall and
-avoid allocations for the common low-arity cases.
-`_PyStack_UnpackDict` and `_PyObject_VectorcallDict` bridge the two
-calling conventions for callers that already have a `**kwargs` dict.
-`call_function_ex` handles `CALL_FUNCTION_EX` by coercing `*args` to a tuple
-and `**kwargs` to a dict before handing off.
+The call protocol dispatch layer. Every Python `f(args)` expression in the
+eval loop eventually routes through one of the public entry points here.
+PEP 590 (vectorcall, 3.8) is the dominant path: any type that advertises a
+`tp_vectorcall` slot receives calls as a C array plus a `nargsf` count,
+avoiding the heap allocation of a positional tuple. Types that only implement
+the older `tp_call` slot are bridged through `_PyObject_MakeTpCall`, which
+builds the expected tuple/dict shape and dispatches through `tp_call`.
+
+The file also contains `call_function_ex`, the backend for the
+`CALL_FUNCTION_EX` opcode used when `f(*args, **kwargs)` unpacking is
+present. `call_function_ex` handles the normalization of the starred argument
+into a tuple and the double-star argument into a dict before handing off to
+`PyObject_Call`. A small `_Py_CheckFunctionResult` helper at the bottom
+enforces the contract that a call must either return a non-NULL value or leave
+a set exception, never both and never neither.
 
 ## Map
 
 | Lines | Symbol | Role | gopy |
 | ----- | ------ | ---- | ---- |
-| <Cpy path="Objects/call.c" lines="1-100">1-100</Cpy> | `PyObject_CallNoArgs`, `_PyObject_VectorcallDictTstate` | Zero-arg fast path and the dict-kwargs vectorcall variant. | `objects/call.go:CallNoArgs`, `VectorcallDict` |
-| <Cpy path="Objects/call.c" lines="101-200">101-200</Cpy> | `PyObject_VectorcallDict`, `object_is_not_callable` | Public dict-kwargs entry; not-callable TypeError helper. | `objects/call.go:VectorcallDict`, `objectIsNotCallable` |
-| <Cpy path="Objects/call.c" lines="200-260">200-260</Cpy> | `_PyObject_MakeTpCall` | Slow path: converts C array + kwnames to tuple/dict and calls `tp_call`. | `objects/call.go:MakeTpCall` |
-| <Cpy path="Objects/call.c" lines="260-330">260-330</Cpy> | `PyVectorcall_Function`, `_PyVectorcall_Call` | Slot accessor and tuple/dict-to-vectorcall bridge. | `objects/call.go:vectorcallFunction`, `vectorcallCall` |
-| <Cpy path="Objects/call.c" lines="330-470">330-470</Cpy> | `PyObject_Vectorcall`, `PyObject_Call`, `_PyObject_Call`, `PyObject_CallObject` | Public call entry points. | `objects/call.go:Vectorcall`, `Call`, `CallObject` |
-| <Cpy path="Objects/call.c" lines="470-560">470-560</Cpy> | `PyObject_CallOneArg`, `_PyObject_Call_Prepend`, `_PyObject_CallMethodIdObjArgs` | Single-arg and prepend-arg helpers; method call via `_Py_Identifier`. | `objects/call.go:CallOneArg`, `CallPrepend` |
-| <Cpy path="Objects/call.c" lines="560-700">560-700</Cpy> | `PyObject_CallFunctionObjArgs`, `PyObject_CallMethodObjArgs` | Variadic va_list callers; build a stack array from the NULL-terminated list. | (not ported — va_list not available in Go) |
-| <Cpy path="Objects/call.c" lines="700-830">700-830</Cpy> | `_Py_CheckFunctionResult`, `call_function_ex` | Result integrity check (NULL iff error set) and the `CALL_FUNCTION_EX` handler. | `objects/call_args.go:CoerceStarArgs`, `CoerceStarKwargs` |
-| <Cpy path="Objects/call.c" lines="830-950">830-950</Cpy> | `_PyObject_VectorcallPrepend`, `_PyObject_FastCallDict` | Prepend-self helper; C-array + dict bridge. | `objects/call.go:VectorcallPrepend` |
-| <Cpy path="Objects/call.c" lines="950-1100">950-1100</Cpy> | `_PyObject_VectorcallMethod`, `PyObject_CallMethodOneArg`, `PyObject_CallMethodNoArgs` | Method-lookup + vectorcall in one step. | `objects/protocol.go:CallMethod` |
-| <Cpy path="Objects/call.c" lines="1000-1241">1000-1241</Cpy> | `_PyStack_UnpackDict`, `_PyStack_UnpackDict_FreeNoDecRef`, `PyVectorcall_NARGS` | Dict unpacking into (kwnames, values) layout; public nargs accessor. | `objects/call_args.go:UnpackKwargs`, `objects/call.go:VectorcallNargs` |
+| <Cpy path="Objects/call.c" lines="1-150">1-150</Cpy> | `PyObject_Call`, `_PyObject_Call`, `_PyObject_CallNoArgsTstate` | Legacy `tp_call` entry; validates callable, checks for vectorcall fast path, delegates; `CallNoArgs` is a zero-allocation convenience wrapper. | `objects/call.go:Call`, `CallNoArgs` |
+| <Cpy path="Objects/call.c" lines="150-350">150-350</Cpy> | `PyObject_Vectorcall`, `_PyObject_VectorcallTstate`, `PyVectorcall_Function`, `_PyObject_MakeTpCall`, `_PyVectorcall_Call` | Core vectorcall dispatch; `MakeTpCall` converts vectorcall args to tuple/dict for `tp_call`; `_PyVectorcall_Call` converts tuple/dict to vectorcall for `tp_vectorcall`. | `objects/call.go:Vectorcall`, `MakeTpCall`, `VectorcallDict` |
+| <Cpy path="Objects/call.c" lines="350-500">350-500</Cpy> | `call_function_ex`, `CALL_FUNCTION_EX` helper | Normalizes `*args` into a tuple, `**kwargs` into a dict, then calls `PyObject_Call`; used by the `CALL_FUNCTION_EX` opcode. | `objects/call.go:CallFunctionEx` (via `vm/eval_call.go`) |
+| <Cpy path="Objects/call.c" lines="500-600">500-600</Cpy> | `_Py_CheckFunctionResult`, `handle_func_event`, convenience wrappers (`PyObject_CallOneArg`, `PyObject_CallMethodObjArgs`, `_PyObject_VectorcallPrepend`) | Result invariant check; tracing hook dispatch; single-arg and method-call shortcuts. | `objects/call.go:CallOneArg`, `VectorcallPrepend` |
 
 ## Reading
 
-### `_PyObject_MakeTpCall` — the legacy slow path (lines 200 to 260)
+### Vectorcall protocol (lines 150 to 350)
 
-<CpyLink path="Objects/call.c" lines="200-260" />
+<CpyLink path="Objects/call.c" lines="150-350" />
 
-When a callable's type does not set `Py_TPFLAGS_HAVE_VECTORCALL`, the C
-array of arguments must be materialized into the `(args_tuple, kwargs_dict)`
-shape the `tp_call` slot expects. `_PyObject_MakeTpCall` builds the tuple
-from the first `nargs` elements of the stack array, then builds a dict from
-the trailing `nkwargs` values whose keys come from the `kwnames` tuple:
+`PyObject_Vectorcall` is the preferred entry point from the eval loop. The
+`nargsf` parameter carries the positional count in the low bits plus an
+optional `PY_VECTORCALL_ARGUMENTS_OFFSET` flag in the high bit. The flag
+signals that the caller reserved one extra slot at `args[-1]` so the callee
+can overwrite it with `self` without a new allocation:
 
 ```c
 PyObject *
-_PyObject_MakeTpCall(PyThreadState *tstate,
-                     PyObject *callable,
+_PyObject_VectorcallTstate(PyThreadState *tstate, PyObject *callable,
+                           PyObject *const *args, size_t nargsf,
+                           PyObject *kwnames)
+{
+    assert(kwnames == NULL || PyTuple_Check(kwnames));
+    vectorcallfunc func = _PyVectorcall_FunctionInline(callable);
+    if (func == NULL) {
+        Py_ssize_t nargs = PyVectorcall_NARGS(nargsf);
+        return _PyObject_MakeTpCall(tstate, callable, args, nargs, kwnames);
+    }
+    PyObject *res = func(callable, args, nargsf, kwnames);
+    return _Py_CheckFunctionResult(tstate, callable, res, NULL);
+}
+```
+
+`_PyVectorcall_FunctionInline` checks `tp_vectorcall_offset` on the type and
+reads the slot from the object's memory at that offset. Types that do not
+expose the slot return `NULL`, routing to `_PyObject_MakeTpCall`.
+
+`_PyObject_MakeTpCall` builds the legacy `(args_tuple, kwargs_dict)` shape.
+The keyword names come in as a `kwnames` tuple while their values live in
+the trailing slots of `args`. `MakeTpCall` constructs an `args` tuple from
+`args[0:nargs]` and a `kwargs` dict from `zip(kwnames, args[nargs:])`:
+
+```c
+PyObject *
+_PyObject_MakeTpCall(PyThreadState *tstate, PyObject *callable,
                      PyObject *const *args, Py_ssize_t nargs,
                      PyObject *keywords)
 {
-    Py_ssize_t nkwargs = (keywords == NULL ? 0 : PyTuple_GET_SIZE(keywords));
-    ...
-    PyObject *argstuple = _PyTuple_FromArraySteal(args, nargs);
-    ...
+    /* Build positional tuple. */
+    PyObject *argstuple = _PyTuple_FromArray(args, nargs);
+    if (argstuple == NULL) return NULL;
+
+    /* Build keyword dict from (kwnames, values) or existing dict. */
     PyObject *kwdict = NULL;
-    if (nkwargs > 0) {
-        kwdict = _PyDict_FromKeys(tstate, keywords, args + nargs, nkwargs);
-        ...
+    if (keywords != NULL && PyTuple_GET_SIZE(keywords)) {
+        kwdict = _PyStack_AsDict(args + nargs, keywords);
+        if (kwdict == NULL) { Py_DECREF(argstuple); return NULL; }
+    }
+
+    ternaryfunc call = Py_TYPE(callable)->tp_call;
+    if (call == NULL) {
+        PyErr_Format(PyExc_TypeError,
+                     "'%.200s' object is not callable",
+                     Py_TYPE(callable)->tp_name);
+        Py_DECREF(argstuple);
+        Py_XDECREF(kwdict);
+        return NULL;
     }
     PyObject *result = call(callable, argstuple, kwdict);
-    ...
+    Py_DECREF(argstuple);
+    Py_XDECREF(kwdict);
+    return _Py_CheckFunctionResult(tstate, callable, result, NULL);
+}
+```
+
+### `_PyObject_MakeTpCall` bridge (lines 200 to 260)
+
+<CpyLink path="Objects/call.c" lines="200-260" />
+
+The bridge is symmetrical in both directions. `_PyVectorcall_Call` (the
+inverse of `MakeTpCall`) converts an existing `(tuple, dict)` pair into a
+vectorcall so that calling `tuple.__add__((1,2))` goes through vectorcall
+even though the caller started with a tuple. It extracts positional items from
+the tuple, appends keyword values from the dict, assembles a `kwnames` tuple,
+and dispatches through `tp_vectorcall`:
+
+```c
+static PyObject *
+_PyVectorcall_Call(PyThreadState *tstate, vectorcallfunc func,
+                   PyObject *callable, PyObject *tuple, PyObject *kwargs)
+{
+    Py_ssize_t nargs = PyTuple_GET_SIZE(tuple);
+    Py_ssize_t nkwargs = (kwargs == NULL) ? 0 : PyDict_GET_SIZE(kwargs);
+    Py_ssize_t totalargs = nargs + nkwargs;
+
+    PyObject *const *args;
+    PyObject *kwnames;
+    /* fast path: no kwargs */
+    if (nkwargs == 0) {
+        args = _PyTuple_ITEMS(tuple);
+        return func(callable, args, nargs, NULL);
+    }
+    /* slow path: pack kwargs into trailing slots + kwnames tuple */
+    PyObject **stack = PyMem_Malloc(totalargs * sizeof(PyObject *));
+    /* ... copy positionals, then iterate dict ... */
+    PyObject *res = func(callable, stack, nargs, kwnames);
+    PyMem_Free(stack);
+    return res;
+}
+```
+
+### `call_function_ex` (lines 350 to 500)
+
+<CpyLink path="Objects/call.c" lines="350-500" />
+
+`call_function_ex` handles the `f(*args, **kwargs)` case from the
+`CALL_FUNCTION_EX` opcode. It must normalize `*args` into a tuple (it might
+be any iterable) and merge any `**kwargs` dict into the keyword side. The
+merge step copies an existing dict if it is already the right shape:
+
+```c
+static PyObject *
+call_function_ex(PyThreadState *tstate, PyObject *func,
+                 PyObject *callargs, PyObject *kwargs)
+{
+    PyObject *result;
+    if (!PyTuple_Check(callargs)) {
+        /* Materialize any iterable into a tuple. */
+        callargs = PySequence_Tuple(callargs);
+        if (callargs == NULL) return NULL;
+    }
+    else {
+        Py_INCREF(callargs);
+    }
+
+    if (kwargs == NULL || PyDict_GET_SIZE(kwargs) == 0) {
+        result = PyObject_Call(func, callargs, NULL);
+    }
+    else {
+        if (!PyDict_CheckExact(kwargs)) {
+            /* Coerce a dict subclass to a plain dict to avoid __setitem__ side-effects. */
+            kwargs = PyDict_Copy(kwargs);
+            if (kwargs == NULL) { Py_DECREF(callargs); return NULL; }
+            result = PyObject_Call(func, callargs, kwargs);
+            Py_DECREF(kwargs);
+        }
+        else {
+            result = PyObject_Call(func, callargs, kwargs);
+        }
+    }
+    Py_DECREF(callargs);
     return result;
 }
 ```
 
-gopy's `MakeTpCall` in `objects/call.go` replicates this exactly, switching
-on the `keywords` type: a `*Tuple` means kwnames + trailing values (vectorcall
-layout), while a `*Dict` means the caller already has a materialized dict and
-the copy step is skipped.
+## gopy mirror
 
-### `PyObject_Vectorcall` and `PyObject_Call` (lines 323 to 430)
+`objects/call.go` for `Call`, `CallNoArgs`, `CallOneArg`, `CallObject`,
+`Vectorcall`, `VectorcallDict`, `VectorcallPrepend`, `MakeTpCall`, and
+`CallPrepend`. The `_Py_CheckFunctionResult` invariant is enforced at the
+call sites in `vm/eval_call.go` rather than inside every dispatch function.
+`CallFunctionEx` lives in `vm/eval_call.go` because it needs the frame's
+namespace for `**kwargs` merging.
 
-<CpyLink path="Objects/call.c" lines="323-430" />
+The `VectorcallArgumentsOffset` constant mirrors `PY_VECTORCALL_ARGUMENTS_OFFSET`
+from `Include/cpython/abstract.h`. The Go implementation does not exploit
+the offset optimization (writing into `args[-1]`) because Go slice bounds
+checking prevents addressing before the start of a sub-slice. `VectorcallPrepend`
+therefore always allocates a fresh stack, which is correct but slightly slower
+than the C path.
 
-`PyObject_Vectorcall` is the preferred public entry. It checks for the
-`Vectorcall` slot first; if absent it falls through to `_PyObject_MakeTpCall`:
+## CPython 3.14 changes
 
-```c
-PyObject *
-PyObject_Vectorcall(PyObject *callable, PyObject *const *args,
-                    size_t nargsf, PyObject *kwnames)
-{
-    PyThreadState *tstate = _PyThreadState_GET();
-    return _PyObject_VectorcallTstate(tstate, callable, args, nargsf, kwnames);
-}
-```
-
-`PyObject_Call` — the old ABI used by C extensions — inverts the flow: if
-the callable has a vectorcall slot it converts the tuple/dict into C-array
-form via `_PyVectorcall_Call`; only otherwise does it invoke `tp_call`
-directly. This means vectorcall-capable types never go through `tp_call`
-even when called from legacy code.
-
-### `PyObject_CallOneArg` and `_PyObject_Call_Prepend` (lines 386 to 480)
-
-<CpyLink path="Objects/call.c" lines="386-480" />
-
-`PyObject_CallOneArg` reserves the slot before the argument array using the
-`PY_VECTORCALL_ARGUMENTS_OFFSET` flag, letting vectorcall callees overwrite
-`args[-1]` without allocation:
-
-```c
-PyObject *
-PyObject_CallOneArg(PyObject *func, PyObject *arg)
-{
-    assert(arg != NULL);
-    PyObject *const args[2] = {NULL, arg};  /* args[-1] reserved */
-    size_t tstate_offset = (size_t)(PY_VECTORCALL_ARGUMENTS_OFFSET);
-    return _PyObject_VectorcallTstate(tstate, func, &args[1],
-                                      1 | tstate_offset, NULL);
-}
-```
-
-`_PyObject_Call_Prepend` is the same pattern but for methods: it builds a
-stack with `self` at slot 0 and the existing positional args behind it, then
-calls `_PyObject_VectorcallDict` so keyword arguments from a dict are also
-honored. gopy's `CallPrepend` in `objects/call.go` matches this behavior.
-
-### `_PyStack_UnpackDict` (lines 1038 to 1120)
-
-<CpyLink path="Objects/call.c" lines="1038-1120" />
-
-Converts a `**kwargs` dict into the vectorcall `(kwnames, values)` layout
-where kwnames is a tuple and values are appended to the positional portion
-of the stack. All keys must be `str`; any non-string key raises
-`TypeError: keywords must be strings`:
-
-```c
-static int
-_PyStack_UnpackDict(PyThreadState *tstate,
-                    PyObject *const *args, Py_ssize_t nargs,
-                    PyObject *kwargs,
-                    PyObject ***p_stack, PyObject **p_kwnames)
-{
-    ...
-    Py_ssize_t nkwargs = PyDict_GET_SIZE(kwargs);
-    PyObject **stack = PyMem_Malloc((nargs + nkwargs) * sizeof(*stack));
-    ...
-    while ((key = PyIter_Next(keys)) != NULL) {
-        if (!PyUnicode_Check(key)) {
-            PyErr_SetString(PyExc_TypeError,
-                            "keywords must be strings");
-            ...
-        }
-        ...
-    }
-}
-```
-
-gopy's `UnpackKwargs` in `objects/call_args.go` is a direct port of this
-function, with the Go `*Dict` iteration replacing the CPython
-`PyDict_Next` loop.
+The vectorcall protocol (PEP 590) shipped in 3.8. `tp_vectorcall_offset` was
+added to `PyTypeObject` in 3.8 and back-ported to `PyCFunctionObject`,
+`PyMethodObject`, and `PyFunctionObject`. `handle_func_event` (the `sys.monitoring`
+hook for `CALL` events) was added in 3.12. The `_Py_CheckFunctionResult`
+function has been present since 3.0 but was moved to `call.c` in 3.8 when
+vectorcall was introduced.

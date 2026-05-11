@@ -1,11 +1,11 @@
 ---
 title: Modules/_queuemodule.c
-description: C implementation of queue.SimpleQueue — an unbounded thread-safe FIFO backed by a deque and a condition variable.
+description: C implementation of queue.SimpleQueue using a ring buffer and a parking-lot-based blocking get, replacing the earlier deque-plus-lock design.
 cpython_path: Modules/_queuemodule.c
 cpython_version: "3.14"
-lines: 600
+lines: 626
 status: annotated
-ported_to: module/queue/module.go
+ported_to: module/queue/
 ---
 
 import {Cpy, CpyLink} from '@site/src/components/Cpy';
@@ -14,132 +14,161 @@ import {Cpy, CpyLink} from '@site/src/components/Cpy';
 
 <CpyLink path="Modules/_queuemodule.c" />
 
-The C backend for `queue.SimpleQueue`, the unbounded, thread-safe FIFO
-introduced in Python 3.7. The full `Queue`, `LifoQueue`, `PriorityQueue`,
-`Empty`, and `Full` classes remain in `Lib/queue.py`; only `SimpleQueue`
-gets a C acceleration because it is the one used most often by the standard
-library itself (e.g., by `logging`).
+`_queuemodule.c` provides the C accelerator for `queue.SimpleQueue`. Unlike
+the full `queue.Queue`, `SimpleQueue` is unbounded and never blocks on `put`.
+It is designed for producer-consumer patterns where the producer must never
+stall.
 
-`SimpleQueue` stores items in a `collections.deque` and uses a
-`threading.Condition` (wrapping a `threading.Lock`) to block `get` callers
-when the deque is empty and to wake them when `put` adds an item. The lock
-is held only long enough to append or pop and to signal the condition; the
-design avoids holding the GIL across the `Condition.wait` call by releasing
-it inside CPython's `PyObject_CallMethodObjArgs` path.
+The implementation in CPython 3.14 replaced the earlier `collections.deque`
+plus `threading.Lock` design with a ring buffer (`RingBuf`) and the internal
+parking-lot API (`pycore_parking_lot.h`). The ring buffer halves per-item
+overhead compared to a deque node, and the parking lot provides lock-free
+hand-off: a `put` that arrives while a thread is blocked in `get` transfers
+the item directly without touching the ring buffer at all.
+
+The module state (`simplequeue_state`) holds only two values: the type object
+for `SimpleQueue` and the `Empty` exception class. Both are per-interpreter,
+consistent with the `Py_MOD_PER_INTERPRETER_GIL_SUPPORTED` flag.
 
 ## Map
 
 | Lines | Symbol | Role | gopy |
 | ----- | ------ | ---- | ---- |
-| <Cpy path="Modules/_queuemodule.c" lines="1-80">1-80</Cpy> | includes, `simplequeueobject` struct | Type struct: `sq_queue` (deque), `sq_mutex` (Lock), `sq_cond` (Condition), `sq_count` (semaphore for `get`). | `module/queue/module.go:SimpleQueue` |
-| <Cpy path="Modules/_queuemodule.c" lines="80-250">80-250</Cpy> | `simplequeue_new`, `simplequeue_init`, `simplequeue_dealloc` | Allocation: creates the deque and condition objects from the `_collections` and `threading` C APIs. | `module/queue/module.go:NewSimpleQueue` |
-| <Cpy path="Modules/_queuemodule.c" lines="250-400">250-400</Cpy> | `simplequeue_put_impl`, `simplequeue_put_nowait` | Append item to deque; call `Condition.notify()` to wake one blocked `get`. `put_nowait` is an alias with `block=False, timeout=None`. | `module/queue/module.go:Put` |
-| <Cpy path="Modules/_queuemodule.c" lines="400-530">400-530</Cpy> | `simplequeue_get_impl`, `simplequeue_get_nowait` | Pop from deque; if empty and `block=True`, call `Condition.wait(timeout)`. Raises `Empty` on timeout or when `block=False` and queue is empty. | `module/queue/module.go:Get` |
-| <Cpy path="Modules/_queuemodule.c" lines="530-600">530-600</Cpy> | `simplequeue_qsize`, `simplequeue_empty`, `_queuemodule`, `PyInit__queue` | Size queries, module def, and entry point. | `module/queue/module.go:Module` |
+| <Cpy path="Modules/_queuemodule.c" lines="1-50">1-50</Cpy> | `simplequeue_state`, `simplequeue_get_state`, `INITIAL_RING_BUF_CAPACITY` | Module state struct and initial ring-buffer capacity constant (8). | `module/queue/` |
+| <Cpy path="Modules/_queuemodule.c" lines="33-200">33-200</Cpy> | `RingBuf`, `RingBuf_Init`, `RingBuf_Fini`, `RingBuf_Get`, `RingBuf_Put`, `RingBuf_Len`, `RingBuf_IsEmpty`, `resize_ringbuf` | Ring-buffer data structure: dynamic circular array with 4x shrink / 2x grow policy. | `module/queue/` |
+| <Cpy path="Modules/_queuemodule.c" lines="190-270">190-270</Cpy> | `simplequeueobject`, `simplequeue_new_impl`, `simplequeue_clear`, `simplequeue_dealloc`, `simplequeue_traverse` | SimpleQueue object layout and lifecycle. | `module/queue/` |
+| <Cpy path="Modules/_queuemodule.c" lines="268-345">268-345</Cpy> | `maybe_handoff_item`, `_queue_SimpleQueue_put_impl`, `_queue_SimpleQueue_put_nowait_impl` | Put path: direct hand-off to waiting thread via parking lot, or RingBuf_Put. | `module/queue/` |
+| <Cpy path="Modules/_queuemodule.c" lines="347-475">347-475</Cpy> | `empty_error`, `_queue_SimpleQueue_get_impl`, `_queue_SimpleQueue_get_nowait_impl` | Get path: non-blocking fast check, then blocking park with optional timeout. | `module/queue/` |
+| <Cpy path="Modules/_queuemodule.c" lines="476-626">476-626</Cpy> | `_queue_SimpleQueue_empty_impl`, `_queue_SimpleQueue_qsize_impl`, `simplequeue_methods`, `simplequeue_spec`, `queuemodule_exec`, `queuemodule` | Ancillary methods, type spec, module init. | `module/queue/` |
 
 ## Reading
 
-### `simplequeue_put` and condition variable notify (lines 250 to 400)
+### SimpleQueue internal layout (lines 33 to 200)
 
-<CpyLink path="Modules/_queuemodule.c" lines="250-400" />
+<CpyLink path="Modules/_queuemodule.c" lines="33-200" />
 
-`put` never blocks. It appends to the deque under the condition lock and
-then signals one waiter:
+The ring buffer uses two indices (`put_idx`, `get_idx`) into a flat
+`PyObject **` array. Items wrap around when an index reaches `items_cap`. The
+grow policy doubles capacity on full; the shrink policy halves when occupancy
+drops below 25 percent:
 
 ```c
-static PyObject *
-simplequeue_put_impl(simplequeueobject *self, PyObject *item,
-                     int block, PyObject *timeout)
-{
-    /* block and timeout are accepted for API compatibility but ignored;
-       SimpleQueue is unbounded so put never blocks. */
-
-    /* Acquire the condition, append, notify, release. */
-    if (_PyObject_CallMethodIdNoArgs((PyObject *)self->sq_cond,
-                                     &PyId_acquire) == NULL)
-        return NULL;
-
-    if (PyObject_CallMethodObjArgs(self->sq_queue,
-                                   _Py_ID(append), item, NULL) == NULL)
-        goto error;
-
-    /* notify() wakes exactly one thread waiting in get(). */
-    if (_PyObject_CallMethodIdNoArgs((PyObject *)self->sq_cond,
-                                     &PyId_notify) == NULL)
-        goto error;
-
-    if (_PyObject_CallMethodIdNoArgs((PyObject *)self->sq_cond,
-                                     &PyId_release) == NULL)
-        return NULL;
-
-    Py_RETURN_NONE;
-error:
-    _PyObject_CallMethodIdNoArgs((PyObject *)self->sq_cond, &PyId_release);
-    return NULL;
-}
+typedef struct {
+    Py_ssize_t put_idx;
+    Py_ssize_t get_idx;
+    PyObject **items;
+    Py_ssize_t items_cap;
+    Py_ssize_t num_items;
+} RingBuf;
 ```
 
-`block` and `timeout` are accepted for interface symmetry with `Queue.put`
-but are silently ignored — an unbounded queue never needs to block the
-producer.
+`RingBuf_Get` shrinks eagerly before returning the item so that a queue that
+empties after a burst immediately reclaims memory. Shrink failures are silently
+ignored because they are an optimization, not a correctness requirement.
 
-### `simplequeue_get` timed wait (lines 400 to 530)
-
-<CpyLink path="Modules/_queuemodule.c" lines="400-530" />
-
-`get` is more involved because it must handle blocking with an optional
-deadline:
+The `simplequeueobject` wraps a `RingBuf` and a single `bool` flag
+`has_threads_waiting` that tells `put` whether to attempt a parking-lot
+hand-off:
 
 ```c
-static PyObject *
-simplequeue_get_impl(simplequeueobject *self, int block, PyObject *timeout)
-{
-    /* Acquire condition. */
-    if (_PyObject_CallMethodIdNoArgs((PyObject *)self->sq_cond,
-                                     &PyId_acquire) == NULL)
-        return NULL;
+typedef struct {
+    PyObject_HEAD
+    bool has_threads_waiting;
+    RingBuf buf;
+    PyObject *weakreflist;
+} simplequeueobject;
+```
 
-    /* If the deque is empty and block=True, wait (possibly with timeout). */
-    while (PyObject_IsTrue(
-               PyObject_CallMethodNoArgs(self->sq_queue, &PyId___len__)) == 0) {
-        if (!block) {
-            /* Non-blocking: raise Empty immediately. */
-            _PyObject_CallMethodIdNoArgs(self->sq_cond, &PyId_release);
-            PyErr_SetNone(EmptyError);
-            return NULL;
-        }
-        /* Condition.wait(timeout) releases the lock, sleeps, reacquires. */
-        PyObject *rc = PyObject_CallMethodOneArg(
-            (PyObject *)self->sq_cond, &PyId_wait, timeout);
-        if (rc == NULL) goto error;
-        if (rc == Py_False) {
-            /* wait() returned False: timeout expired. */
-            Py_DECREF(rc);
-            _PyObject_CallMethodIdNoArgs(self->sq_cond, &PyId_release);
-            PyErr_SetNone(EmptyError);
-            return NULL;
-        }
-        Py_DECREF(rc);
+### Blocking get with timeout (lines 378 to 453)
+
+<CpyLink path="Modules/_queuemodule.c" lines="378-453" />
+
+`_queue_SimpleQueue_get_impl` combines a non-blocking ring-buffer check with
+a parking-lot block. The loop retries after signals to handle `EINTR`:
+
+```c
+for (;;) {
+    if (!RingBuf_IsEmpty(&self->buf)) {
+        return RingBuf_Get(&self->buf);
     }
 
-    /* Deque has at least one item: pop from the left. */
-    PyObject *item = PyObject_CallMethodNoArgs(self->sq_queue,
-                                               &PyId_popleft);
-    _PyObject_CallMethodIdNoArgs(self->sq_cond, &PyId_release);
-    return item;
+    if (!block) {
+        return empty_error(cls);
+    }
 
-error:
-    _PyObject_CallMethodIdNoArgs(self->sq_cond, &PyId_release);
-    return NULL;
+    int64_t timeout_ns = -1;
+    if (endtime != 0) {
+        timeout_ns = _PyDeadline_Get(endtime);
+        if (timeout_ns < 0) {
+            return empty_error(cls);
+        }
+    }
+
+    bool waiting = 1;
+    self->has_threads_waiting = waiting;
+
+    PyObject *item = NULL;
+    int st = _PyParkingLot_Park(&self->has_threads_waiting, &waiting,
+                                sizeof(bool), timeout_ns, &item,
+                                /* detach */ 1);
+    switch (st) {
+        case Py_PARK_OK:
+            return item;          /* item was handed off by put() */
+        case Py_PARK_TIMEOUT:
+            return empty_error(cls);
+        case Py_PARK_INTR:
+            if (Py_MakePendingCalls() < 0) return NULL;
+            break;                /* retry */
+        case Py_PARK_AGAIN:
+            break;                /* spurious wake, retry */
+    }
 }
 ```
 
-The `while` loop re-checks the length after each `wait` return to guard
-against spurious wakeups. `Condition.wait` releases the underlying lock
-before sleeping, so other threads can call `put` while a `get` is blocked.
-`timeout` is passed directly to `Condition.wait`; `threading` converts it
-from seconds to an absolute deadline internally.
+When `Py_PARK_OK` is returned, the item pointer was written directly by
+`maybe_handoff_item` inside the put-side callback, so the ring buffer was
+never touched. This is the hand-off fast path.
 
-In gopy, `module/queue/module.go` mirrors this pattern using a Go channel
-and `time.After` for the timeout path, achieving the same semantics without
-the explicit condition variable.
+### put and the hand-off callback (lines 268 to 345)
+
+<CpyLink path="Modules/_queuemodule.c" lines="268-345" />
+
+`_queue_SimpleQueue_put_impl` checks `has_threads_waiting` before writing to
+the ring buffer. If it is set, `_PyParkingLot_Unpark` invokes
+`maybe_handoff_item`, which either writes the item pointer into the waiting
+thread's `item` slot (hand-off) or sets `handed_off = false` (no waiter after
+all). If no hand-off occurred, the item goes into the ring buffer normally:
+
+```c
+static PyObject *
+_queue_SimpleQueue_put_impl(simplequeueobject *self, PyObject *item,
+                            int block, PyObject *timeout)
+{
+    HandoffData data = {
+        .handed_off = 0,
+        .item = Py_NewRef(item),
+        .queue = self,
+    };
+    if (self->has_threads_waiting) {
+        _PyParkingLot_Unpark(&self->has_threads_waiting,
+                             maybe_handoff_item, &data);
+    }
+    if (!data.handed_off) {
+        if (RingBuf_Put(&self->buf, item) < 0) {
+            return NULL;
+        }
+    }
+    Py_RETURN_NONE;
+}
+```
+
+The `block` and `timeout` arguments are accepted but ignored on put, for
+compatibility with `queue.Queue`.
+
+## gopy mirror
+
+`module/queue/` (pending). The ring buffer maps to a Go slice with `putIdx`
+and `getIdx` fields. The parking-lot hand-off maps to a Go channel send: the
+get goroutine parks on a channel receive, and put sends on that channel when a
+receiver is waiting. The `has_threads_waiting` flag maps to a non-nil channel
+pointer. The grow/shrink thresholds are preserved exactly.

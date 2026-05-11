@@ -1,11 +1,11 @@
 ---
 title: Lib/asyncio/__init__.py
-description: Top-level asyncio package init; re-exports all public names from coroutines, tasks, futures, events, runners, queues, locks, and streams submodules.
+description: Cooperative multitasking framework; provides the event loop, Task/Future coroutine protocol, high-level networking, and synchronization primitives.
 cpython_path: Lib/asyncio/__init__.py
 cpython_version: "3.14"
-lines: 80
+lines: 2800
 status: annotated
-ported_to: module/asyncio/module.go
+ported_to: module/asyncio/
 ---
 
 import {Cpy, CpyLink} from '@site/src/components/Cpy';
@@ -14,156 +14,216 @@ import {Cpy, CpyLink} from '@site/src/components/Cpy';
 
 <CpyLink path="Lib/asyncio/__init__.py" />
 
-The `asyncio` package init. The file itself is short (~80 lines) and does
-almost nothing except import from the submodules and assemble `__all__`.
-The actual implementation is split across a dozen files under
-`Lib/asyncio/`; this page covers the public surface exported by the top-
-level package and the key implementation patterns in the submodules that
-back each export.
+`asyncio` is a package split across many files. `__init__.py` re-exports
+everything from the sub-modules under a flat public namespace. The key
+files for the runtime are:
 
-`asyncio.run(coro)` (added in 3.7, finalized in 3.11 via `runners.py`)
-is the canonical entry point. It creates a fresh `EventLoop`, drives it
-until `coro` completes, then closes and finalizes the loop. Everything
-else in the package exists to support the event loop, the two primitive
-awaitable types (`Future` and `Task`), and the I/O and synchronization
-abstractions layered on top of them.
+- `Lib/asyncio/base_events.py` -- `BaseEventLoop` with `_run_once` and all
+  scheduling primitives.
+- `Lib/asyncio/tasks.py` -- `Task` and the coroutine-driving state machine.
+- `Lib/asyncio/futures.py` -- `Future` and the result/exception protocol.
+- `Lib/asyncio/queues.py` -- `Queue`, `LifoQueue`, `PriorityQueue`.
+- `Lib/asyncio/locks.py` -- `Lock`, `Event`, `Condition`, `Semaphore`, `BoundedSemaphore`.
 
-The key design constraint is that `Future` and `Task` are tightly coupled
-to a single event loop and must not be shared across threads. The public
-API surface deliberately makes it easy to run one coroutine per loop and
-hard to do anything that crosses loop boundaries.
+In 3.14, `asyncio.run()` gained a `loop_factory` parameter, and
+`TaskGroup` (added in 3.11) received structured-concurrency improvements.
+The `_asyncio` C extension accelerates `Future` and `Task`.
 
 ## Map
 
 | Lines | Symbol | Role | gopy |
 | ----- | ------ | ---- | ---- |
-| <Cpy path="Lib/asyncio/__init__.py" lines="1-20">1-20</Cpy> | Package header / `from .coroutines import *` | Imports `iscoroutine`, `iscoroutinefunction` from `coroutines.py`; `@asyncio.coroutine` removed in 3.11. | `module/asyncio/module.go` |
-| <Cpy path="Lib/asyncio/__init__.py" lines="21-35">21-35</Cpy> | `from .futures import *` | Re-exports `Future`, `wrap_future`, `isfuture`. `Future` is the primitive awaitable; `wrap_future` bridges `concurrent.futures.Future` to asyncio. | `module/asyncio/module.go` |
-| <Cpy path="Lib/asyncio/__init__.py" lines="36-50">36-50</Cpy> | `from .tasks import *` | Re-exports `Task`, `create_task`, `gather`, `shield`, `wait`, `wait_for`, `as_completed`, `current_task`, `all_tasks`. | `module/asyncio/module.go` |
-| <Cpy path="Lib/asyncio/__init__.py" lines="51-60">51-60</Cpy> | `from .events import *` | Re-exports `AbstractEventLoop`, `get_event_loop`, `set_event_loop`, `new_event_loop`, `get_running_loop`, `get_event_loop_policy`. | `module/asyncio/module.go` |
-| <Cpy path="Lib/asyncio/__init__.py" lines="61-68">61-68</Cpy> | `from .runners import *` | Re-exports `run(coro, *, debug=None)`: the preferred high-level entry point since 3.11. | `module/asyncio/module.go` |
-| <Cpy path="Lib/asyncio/__init__.py" lines="69-74">69-74</Cpy> | `from .queues import *` / `from .locks import *` | Re-exports `Queue`, `PriorityQueue`, `LifoQueue`; `Lock`, `Event`, `Condition`, `Semaphore`, `BoundedSemaphore`. | `module/asyncio/module.go` |
-| <Cpy path="Lib/asyncio/__init__.py" lines="75-80">75-80</Cpy> | `from .streams import *` | Re-exports `open_connection`, `start_server`, `StreamReader`, `StreamWriter`, `open_unix_connection`, `start_unix_server`. | `module/asyncio/module.go` |
+| <Cpy path="Lib/asyncio/futures.py" lines="1-200">futures.py 1-200</Cpy> | `Future`, `_PENDING`, `_CANCELLED`, `_FINISHED`, `InvalidStateError` | Core result/exception container; `result()` raises `CancelledError` or the stored exception; `add_done_callback` schedules callbacks via the loop. | `module/asyncio/` |
+| <Cpy path="Lib/asyncio/tasks.py" lines="1-300">tasks.py 1-300</Cpy> | `Task`, `Task.__step`, `Task.__step_run_and_handle_result`, `Task.cancel` | Coroutine driver; `__step` sends a value (or throws) into the coroutine and processes the yielded `Future`. | `module/asyncio/` |
+| <Cpy path="Lib/asyncio/tasks.py" lines="300-600">tasks.py 300-600</Cpy> | `gather`, `shield`, `wait`, `wait_for`, `sleep`, `ensure_future` | High-level coroutine combinators; `gather` wraps each awaitable in a `Task` and collects results; `wait_for` adds a timeout via `loop.call_later`. | `module/asyncio/` |
+| <Cpy path="Lib/asyncio/base_events.py" lines="1-400">base_events.py 1-400</Cpy> | `BaseEventLoop.__init__`, `run_forever`, `run_until_complete`, `stop`, `close`, `_run_once` | Event loop core; `_run_once` selects I/O events, fires timed callbacks, and dispatches ready handles. | `module/asyncio/` |
+| <Cpy path="Lib/asyncio/base_events.py" lines="400-800">base_events.py 400-800</Cpy> | `call_soon`, `call_later`, `call_at`, `call_soon_threadsafe`, `_scheduled`, `_ready` | Callback scheduling; `call_later` inserts a `TimerHandle` into the `_scheduled` heap; `call_soon` appends a `Handle` to `_ready`. | `module/asyncio/` |
+| <Cpy path="Lib/asyncio/queues.py" lines="1-200">queues.py 1-200</Cpy> | `Queue`, `LifoQueue`, `PriorityQueue`, `QueueEmpty`, `QueueFull` | Producer-consumer queue; `get` and `put` are coroutines that wait on internal `Event`-like machinery when the queue is empty or full. | `module/asyncio/` |
+| <Cpy path="Lib/asyncio/locks.py" lines="1-400">locks.py 1-400</Cpy> | `Lock`, `Event`, `Condition`, `Semaphore`, `BoundedSemaphore` | Async synchronization; all use `asyncio.Future` objects on an internal waiters deque rather than OS primitives. | `module/asyncio/` |
 
 ## Reading
 
-### `asyncio.run` lifecycle (runners.py)
+### `BaseEventLoop._run_once` (base_events.py lines 1 to 400)
 
-<CpyLink path="Lib/asyncio/runners.py" />
+<CpyLink path="Lib/asyncio/base_events.py" lines="1-400" />
 
 ```python
-def run(main, *, debug=None, loop_factory=None):
-    if events._get_running_loop() is not None:
-        raise RuntimeError(
-            "asyncio.run() cannot be called when another event loop is "
-            "running in the same thread")
-    loop = (loop_factory or events.new_event_loop)()
-    try:
-        if debug is not None:
-            loop.set_debug(debug)
-        return loop.run_until_complete(main)
-    finally:
-        try:
-            _cancel_all_tasks(loop)
-            loop.run_until_complete(loop.shutdown_asyncgens())
-            loop.run_until_complete(loop.shutdown_default_executor())
-        finally:
-            events.set_event_loop(None)
-            loop.close()
+def _run_once(self):
+    """Run one full iteration of the event loop."""
+    sched_count = len(self._scheduled)
+    if (sched_count > _MIN_SCHEDULED_TIMER_HANDLES and
+        self._timer_cancelled_count / sched_count > _MIN_CANCELLED_TIMER_HANDLES_FRACTION):
+        # Remove cancelled handles
+        new_scheduled = []
+        for handle in self._scheduled:
+            if handle._cancelled:
+                handle._scheduled = False
+            else:
+                new_scheduled.append(handle)
+        heapq.heapify(new_scheduled)
+        self._scheduled = new_scheduled
+        self._timer_cancelled_count = 0
+
+    end_time = self.time() + self._clock_resolution
+    while self._scheduled:
+        handle = self._scheduled[0]
+        if handle._when >= end_time:
+            break
+        handle = heapq.heappop(self._scheduled)
+        handle._scheduled = False
+        self._ready.append(handle)
+
+    timeout = None
+    if self._ready or self._stopping:
+        timeout = 0
+    elif self._scheduled:
+        when = self._scheduled[0]._when
+        timeout = min(max(0, when - self.time()), MAXIMUM_SELECT_TIMEOUT)
+
+    event_list = self._selector.select(timeout)
+    self._process_events(event_list)
+    # ... dispatch self._ready handles
+    ntodo = len(self._ready)
+    for i in range(ntodo):
+        handle = self._ready.popleft()
+        if handle._cancelled:
+            continue
+        handle._run()
+    handle = None  # Needed to break cycles when an exception occurs.
 ```
 
-`asyncio.run` enforces a strict lifecycle: one coroutine, one loop, one
-call. It raises `RuntimeError` if a loop is already running on the
-current thread (preventing nested calls). Before closing, `_cancel_all_tasks`
-cancels every running `Task` and drives the loop once more so each task
-can handle its `CancelledError`. `shutdown_asyncgens` finalizes any
-asynchronous generators that are still alive. Only then is the loop
-closed.
+`_run_once` is the innermost loop body. It does four things in sequence.
+First, it prunes cancelled `TimerHandle` objects from the `_scheduled`
+heap when the fraction of cancelled handles exceeds a threshold (avoiding
+O(n) scans on every iteration while keeping the heap compact). Second, it
+moves any due timer handles from `_scheduled` into `_ready` by popping
+from the min-heap until the next handle is in the future. Third, it
+computes the I/O select timeout: zero if there are ready callbacks,
+`None` (block indefinitely) if there are no timers, or the time until the
+next scheduled handle otherwise. Fourth, it processes I/O events from
+`_selector.select`, then drains `_ready` by calling `handle._run()` on
+each handle. The `ntodo = len(self._ready)` snapshot is important: any
+callbacks added during this drain (by `call_soon` inside a handler) are
+deferred to the next iteration, preventing starvation of I/O.
 
-The `loop_factory` parameter (added in 3.12) allows substituting a
-custom loop type, which is the integration point for third-party event
-loop implementations like `uvloop`.
+### `Task.__step` coroutine driver (tasks.py lines 1 to 300)
 
-### `Task` vs `Future`
-
-<CpyLink path="Lib/asyncio/futures.py" />
-<CpyLink path="Lib/asyncio/tasks.py" />
+<CpyLink path="Lib/asyncio/tasks.py" lines="1-300" />
 
 ```python
-# Future: a container for a result that does not yet exist.
-class Future:
-    _state = _PENDING   # -> _CANCELLED or _FINISHED
-
-    def set_result(self, result):
-        if self._state != _PENDING:
-            raise exceptions.InvalidStateError(...)
-        self._result = result
-        self._state = _FINISHED
-        self.__schedule_callbacks()
-
-# Task: drives a coroutine step by step.
 class Task(futures._PyFuture):
     def __step(self, exc=None):
         coro = self._coro
-        ...
+        self._fut_waiter = None
+
+        _enter_task(self._loop, self)
+        # Call either coro.throw(exc) or coro.send(None).
         try:
             if exc is None:
                 result = coro.send(None)
             else:
                 result = coro.throw(exc)
         except StopIteration as exc:
-            self.set_result(exc.value)
-        except ...:
-            ...
+            if self._must_cancel:
+                self._must_cancel = False
+                super().cancel(self._cancel_message)
+            else:
+                super().set_result(exc.value)
+        except exceptions.CancelledError as exc:
+            self._cancelled_message = exc.args[0] if exc.args else None
+            super().cancel(self._cancel_message)
+        except (KeyboardInterrupt, SystemExit) as exc:
+            super().set_exception(exc)
+            raise
+        except BaseException as exc:
+            super().set_exception(exc)
         else:
-            # result is the object yielded by `await`
-            result.add_done_callback(self.__step_run_and_handle_result)
+            # The coroutine yielded a Future-like object.
+            blocking = getattr(result, '_asyncio_future_blocking', None)
+            if blocking is not None:
+                result._asyncio_future_blocking = False
+                result.add_done_callback(self.__step_run_and_handle_result)
+                self._fut_waiter = result
+                if self._must_cancel:
+                    if self._fut_waiter.cancel(msg=self._cancel_message):
+                        self._must_cancel = False
+            elif result is None:
+                self._loop.call_soon(self.__step)
+            else:
+                self._loop.call_soon(self.__step,
+                    context=self._context)
+        finally:
+            _leave_task(self._loop, self)
+            self = None
 ```
 
-`Future` is a pure result container: it holds a pending value, a
-cancellation flag, and a list of done callbacks. It does not drive any
-coroutine. `Task` subclasses `Future` and adds the step-dispatch logic.
-Each call to `__step` sends `None` into the coroutine (or throws the
-pending exception), receives the next awaitable (a `Future` yielded by
-`await`), and registers `__step` as a done callback on it. When the
-coroutine raises `StopIteration`, the task calls `set_result` with the
-return value, completing the `Future`.
+`__step` is the coroutine driver. It calls `coro.send(None)` to advance
+the coroutine. If the coroutine raises `StopIteration`, the task is
+resolved with the exception's `value` (the `return` value of the `async
+def`). If it raises `CancelledError`, the task is cancelled. Any other
+exception sets the task's exception state.
 
-This design means every `await some_future` expression in user code
-suspends the coroutine by yielding `some_future` up to `__step`, which
-then registers `__step` as the callback. The event loop never directly
-touches coroutine frames; it only calls `Task.__step` when a `Future`
-completes.
+When the coroutine yields (the `else` branch), the yielded object is
+inspected for `_asyncio_future_blocking`. A `Future` sets this flag to
+`True` before yielding itself with `yield self`. `__step` clears the flag,
+registers `__step_run_and_handle_result` as a done callback on the
+future, and stores the future in `_fut_waiter` so that `Task.cancel` can
+propagate a cancellation into it. When the future completes, the callback
+fires and calls `__step` again with the result or exception.
 
-### `gather` aggregation
+### `Future` result/exception protocol (futures.py lines 1 to 200)
 
-<CpyLink path="Lib/asyncio/tasks.py" />
+<CpyLink path="Lib/asyncio/futures.py" lines="1-200" />
 
 ```python
-def gather(*coros_or_futures, return_exceptions=False):
-    ...
-    outer = loop.create_future()
-    nfinished = 0
-    nfuts = len(children)
-    ...
-    def _done_callback(fut):
-        nonlocal nfinished
-        nfinished += 1
-        if nfinished == nfuts:
-            results = []
-            for fut in children:
-                ...
-                results.append(fut.result())
-            outer.set_result(results)
-    for child in children:
-        child.add_done_callback(_done_callback)
-    return outer
+class Future:
+    _state = _PENDING
+    _result = None
+    _exception = None
+    _exception_tb_future = None
+
+    def result(self):
+        if self._state == _CANCELLED:
+            exc = self._make_cancelled_error()
+            raise exc
+        if self._state != _FINISHED:
+            raise InvalidStateError('Result is not ready.')
+        self.__log_traceback = False
+        if self._exception is not None:
+            raise self._exception.with_traceback(self._exception_tb)
+        return self._result
+
+    def set_result(self, result):
+        if self._state != _PENDING:
+            raise InvalidStateError(f'{self._state}: {self!r}')
+        self._result = result
+        self._state = _FINISHED
+        self.__schedule_callbacks()
+
+    def add_done_callback(self, fn, *, context=None):
+        if self._state != _PENDING:
+            self._loop.call_soon(fn, self, context=context)
+        else:
+            if context is None:
+                context = contextvars.copy_context()
+            self._callbacks.append((fn, context))
 ```
 
-`gather` wraps each argument in a `Task` (if not already a `Future`) and
-attaches a shared counter callback to all of them. When the last child
-finishes, `_done_callback` collects all results in order and resolves the
-outer `Future`. If `return_exceptions=False` (the default) and any child
-raises, `gather` immediately cancels all remaining children and propagates
-the first exception. Because the outer `Future` is itself awaitable,
-`await asyncio.gather(...)` suspends until every child has completed.
+`Future` is a three-state machine: `_PENDING`, `_CANCELLED`, `_FINISHED`.
+`set_result` and `set_exception` both transition from `_PENDING` to
+`_FINISHED` and call `__schedule_callbacks`, which posts all registered
+callbacks to the loop with `call_soon`. `add_done_callback` either
+enqueues the callback if the future is still pending, or schedules it
+immediately if the future has already resolved. Each callback carries a
+`contextvars.Context` snapshot so that `ContextVar` values are isolated
+per-task.
+
+## gopy mirror
+
+`module/asyncio/` is pending. The event loop requires a platform I/O
+selector (wrapping `epoll`/`kqueue`/`select`). `Task.__step` and
+`Future`'s state machine are pure logic and can be ported as Go structs.
+The coroutine protocol (`send`/`throw`/`close` on a generator object) maps
+to gopy's existing generator machinery. `_asyncio` C acceleration can be
+skipped initially; the pure-Python classes in `tasks.py` and `futures.py`
+are behavioral references.

@@ -1,11 +1,11 @@
 ---
 title: Include/internal/pycore_long.h
-description: Internal compact-integer layout and fast arithmetic helpers for PyLongObject, exposing the lv_tag sign/digit encoding used by the specializing interpreter.
+description: Internal integer representation: lv_tag bit layout, compact-integer predicates, digit type, PyLong_SHIFT, and the _PyLong_FastAdd fast path.
 cpython_path: Include/internal/pycore_long.h
 cpython_version: "3.14"
-lines: 105
+lines: 200
 status: annotated
-ported_to: objects/long.go
+ported_to: objects/long_arith.go
 ---
 
 import {Cpy, CpyLink} from '@site/src/components/Cpy';
@@ -14,176 +14,226 @@ import {Cpy, CpyLink} from '@site/src/components/Cpy';
 
 <CpyLink path="Include/internal/pycore_long.h" />
 
-Exposes the compact-integer internal layout to C files inside the
-interpreter that need to read or manipulate integer bits without going
-through the public `PyLong_AsLong()` path. Extension authors never
-include this directly; it is consumed by `Objects/longobject.c`,
-the specializing adaptive interpreter in `Python/specialize.c`, and
-the compile-time constant folding pass.
+The private extension of `PyLongObject`. Since CPython 3.12 the integer
+representation was restructured around `_PyLongValue`, a struct that
+packs the sign, the digit count, and two flag bits into a single
+`uintptr_t` tag word (`lv_tag`) alongside the digit array. Extension
+code sees only an opaque `PyObject *`; this header exposes the tag
+layout, the compact-integer fast path, and the arithmetic helpers the
+eval loop calls without going through the number protocol.
 
-The central idea is the "compact integer" representation introduced
-in CPython 3.12. A `PyLongObject` whose absolute value fits in a
-single 30-bit digit stores that digit inline in the `lv_tag` word
-rather than in a heap-allocated digits array. The `lv_tag` field's
-low two bits encode the sign (0 = positive, 2 = negative, 1 = zero
-tag), and the upper bits encode the digit count. For compact integers
-the digit count is exactly 1 and the value sits in the first (and
-only) element of `long_value.ob_digit`.
+The design has two tiers. "Compact" integers are small enough that
+the value fits in a single signed machine word extracted from `lv_tag`
+itself: no digit array is needed and the value is available with a
+single right-shift. "Non-compact" integers carry a full digit array of
+`uint32_t` limbs in base 2^30.
 
-This layout lets the `BINARY_OP_ADD_INT` specialized opcode add two
-small integers with a handful of register operations, completely
-bypassing the general `_PyLong_Add` path.
+gopy uses `math/big.Int` for all magnitudes, so the compact-integer
+fast path and the digit array are not ported at the struct level.
+Instead, gopy mirrors the *predicates* and *arithmetic fast paths* as
+ordinary Go functions that test whether a `big.Int` fits a machine
+word and take the cheap branch when it does.
 
 ## Map
 
 | Lines | Symbol | Role | gopy |
 | ----- | ------ | ---- | ---- |
-| <Cpy path="Include/internal/pycore_long.h" lines="1-20">1-20</Cpy> | `_PyLong_IsCompact` | Returns true when `lv_tag` encodes a single-digit integer; gate for every fast path. | `objects/long.go` |
-| <Cpy path="Include/internal/pycore_long.h" lines="21-38">21-38</Cpy> | `_PyLong_CompactValue` | Extracts the signed `Py_ssize_t` value from a compact integer; undefined behaviour if called on a non-compact object. | `objects/long.go` |
-| <Cpy path="Include/internal/pycore_long.h" lines="39-52">39-52</Cpy> | `_PyLong_IsNonNegativeCompact` | Combines the compact check with a sign check; used by `range` and `slice` index fast paths. | `objects/long.go` |
-| <Cpy path="Include/internal/pycore_long.h" lines="53-65">53-65</Cpy> | `_PyLong_IsZero` / `_PyLong_IsOne` / `_PyLong_IsMinusOne` | Identity predicates that inspect `lv_tag` and the first digit without a full extraction. | `objects/long.go` |
-| <Cpy path="Include/internal/pycore_long.h" lines="66-78">66-78</Cpy> | `_PyLong_BothAreCompact` | Checks that both arguments are compact in one branch; enables SIMD-friendly two-operand fast arithmetic. | `objects/long.go` |
-| <Cpy path="Include/internal/pycore_long.h" lines="79-92">79-92</Cpy> | `_PyLong_FastAdd` / `_PyLong_FastSub` | Compact-only addition and subtraction returning a new compact `PyLongObject` without heap allocation for the common small-integer case. | `objects/long.go` |
-| <Cpy path="Include/internal/pycore_long.h" lines="93-105">93-105</Cpy> | `lv_tag` bit-field constants | `_PyLong_SIGN_MASK`, `_PyLong_NOF_DIGITS_SHIFT`, `_PyLong_TAG_ZERO` — constants for encoding and decoding the sign/digit-count field. | `objects/long.go` |
+| <Cpy path="Include/internal/pycore_long.h" lines="1-60">1-60</Cpy> | `lv_tag` bit layout, `NON_SIZE_BITS`, `SIGN_*` constants, `digit` typedef | Defines how sign, digit count, and flag bits share one `uintptr_t`; `digit` is `uint32_t`; `PyLong_SHIFT` is 30. | `objects/int.go` |
+| <Cpy path="Include/internal/pycore_long.h" lines="60-130">60-130</Cpy> | `_PyLong_IsCompact`, `_PyLong_IsNonNegativeCompact`, `_PyLong_CompactValue` | Inline predicates that test the tag word and extract a compact value with a single arithmetic shift. | `objects/int.go` |
+| <Cpy path="Include/internal/pycore_long.h" lines="130-200">130-200</Cpy> | `_PyLong_FastAdd`, `_PyLong_FastSub`, `_PyLong_IsZero`, `_PyLong_IsPositive`, `_PyLong_IsNegative` | Arithmetic fast paths: add/subtract two compact integers without allocating a digit array when the result stays compact. | `objects/long_arith.go` |
 
 ## Reading
 
-### `lv_tag` encoding (lines 93 to 105)
+### `lv_tag` encoding (lines 1 to 60)
 
-<CpyLink path="Include/internal/pycore_long.h" lines="93-105" />
+<CpyLink path="Include/internal/pycore_long.h" lines="1-60" />
 
 ```c
-/* Bottom two bits of lv_tag encode sign. */
-#define _PyLong_SIGN_MASK       3
-#define _PyLong_TAG_ZERO        1   /* the integer 0 */
-#define _PyLong_TAG_POSITIVE    0
-#define _PyLong_TAG_NEGATIVE    2
+/* Digits are stored in base 2^PyLong_SHIFT. */
+#define PyLong_SHIFT  30
+#define PyLong_BASE   ((digit)1 << PyLong_SHIFT)
+#define PyLong_MASK   ((digit)(PyLong_BASE - 1))
 
-/* Upper bits encode the number of digits. */
-#define _PyLong_NOF_DIGITS_SHIFT 2
+typedef uint32_t digit;
 
-/* Reconstruct the digit count from lv_tag. */
+/* lv_tag layout (uintptr_t):
+ *   bits [0:1]  = sign (SIGN_ZERO=1, SIGN_NEGATIVE=2, SIGN_POSITIVE=4)
+ *   bit  [2]    = NON_SIZE_BITS start (reserved flags)
+ *   bits [NON_SIZE_BITS:...]  = digit count (ndigits)
+ */
+#define NON_SIZE_BITS  3
+
+#define SIGN_ZERO      1
+#define SIGN_NEGATIVE  2
+#define SIGN_POSITIVE  4
+
+/* Compact: value fits in one signed Py_ssize_t.
+   lv_tag has ndigits == 1 and no reserved bits set. */
+#define _PyLong_IsCompact(op) \
+    ((op)->long_value.lv_tag < (2 << NON_SIZE_BITS))
+
 static inline Py_ssize_t
-_PyLong_DigitCount(const PyLongObject *op) {
-    return (Py_ssize_t)(op->long_value.lv_tag >> _PyLong_NOF_DIGITS_SHIFT);
+_PyLong_CompactValue(const PyLongObject *op)
+{
+    Py_ssize_t sign = 1 - (op->long_value.lv_tag & 3);
+    return sign * (Py_ssize_t)(op->long_value.ob_digit[0]);
 }
 ```
 
-The `lv_tag` word packs two pieces of information so that the
-common predicate "is this a compact positive integer?" compiles to a
-single compare-and-mask. Bit 0 and bit 1 hold the sign tag: 0 means
-positive (non-zero), 1 means the special zero value, and 2 means
-negative. The remaining upper bits store the digit count, which for a
-compact integer is always 1.
+`lv_tag` is a `uintptr_t` that encodes three things: the sign of the
+integer (via the two-bit field in positions 0-1), a set of reserved
+flag bits in positions 1 through `NON_SIZE_BITS-1`, and the digit count
+(`ndigits`) starting at bit `NON_SIZE_BITS`. This packing lets CPython
+determine sign and digit count with pure bitwise operations, avoiding an
+indirect struct field read.
 
-Zero is a special case: it has sign tag 1 and digit count 0, so
-`lv_tag == 1`. The identity predicate `_PyLong_IsZero` exploits this
-by checking `lv_tag == 1` directly rather than extracting a value.
+The sign encoding is unusual: `SIGN_ZERO = 1` (not 0) so that a zero
+`lv_tag` does not collide with a valid compact one-digit positive. The
+actual sign multiplier extracted by `_PyLong_CompactValue` is
+`1 - (lv_tag & 3)`, which maps: tag-bits=00 to +1 (positive),
+tag-bits=01 to 0 (zero), tag-bits=10 to -1 (negative).
 
-In gopy, `objects/long.go` mirrors this with `lvTag uint` and the same
-three constant values (`lvTagZero`, `lvTagPositive`, `lvTagNegative`).
-The digit count is extracted via `lvTag >> 2`.
+A "compact" integer is one whose `lv_tag < (2 << NON_SIZE_BITS)`, which
+means at most one digit and no reserved flag bits set. The value is then
+simply `sign * ob_digit[0]`, extractable without any loop over the digit
+array. CPython uses this predicate in `BINARY_OP_ADD_INT` and similar
+specialized instructions to skip the general `PyLong_AsLong` call.
 
-### `_PyLong_IsCompact` and `_PyLong_CompactValue` (lines 1 to 38)
+`PyLong_SHIFT = 30` means each `digit` holds 30 bits of magnitude.
+Using 30 rather than 32 leaves two zero bits at the top of each limb,
+which lets the schoolbook multiplication routines accumulate products
+into `uint64_t` without overflow before reducing modulo 2^30.
 
-<CpyLink path="Include/internal/pycore_long.h" lines="1-38" />
+In gopy, `objects/int.go` uses `math/big.Int` for all magnitudes and
+does not expose `lv_tag` or the digit array directly. The compact-integer
+concept maps to `big.Int.IsInt64()`: when a value fits a 64-bit signed
+word, the arithmetic paths take the cheap branch.
+
+### `_PyLong_IsCompact` and `_PyLong_CompactValue` (lines 60 to 130)
+
+<CpyLink path="Include/internal/pycore_long.h" lines="60-130" />
 
 ```c
 static inline bool
-_PyLong_IsCompact(const PyLongObject *op) {
+_PyLong_IsNonNegativeCompact(const PyLongObject *op) {
     assert(PyLong_Check(op));
-    return op->long_value.lv_tag < (2 << _PyLong_NOF_DIGITS_SHIFT);
+    return op->long_value.lv_tag <= (1 << NON_SIZE_BITS);
 }
 
-static inline Py_ssize_t
-_PyLong_CompactValue(const PyLongObject *op) {
-    assert(_PyLong_IsCompact(op));
-    Py_ssize_t sign = 1 - (op->long_value.lv_tag & _PyLong_SIGN_MASK);
-    return sign * (Py_ssize_t)op->long_value.ob_digit[0];
-}
-```
-
-`_PyLong_IsCompact` tests whether the digit count encoded in
-`lv_tag >> 2` is 0 or 1. Digit count 0 means the integer is zero;
-digit count 1 means the value fits in one 30-bit digit. Both cases
-are "compact" because the value is directly accessible without
-iterating a multi-digit array.
-
-`_PyLong_CompactValue` converts the sign tag to `+1` or `-1` using
-`1 - tag`. For the zero tag (`tag == 1`), `sign` evaluates to `0`,
-which multiplies `ob_digit[0]` to zero regardless of its content.
-For a positive tag (`tag == 0`), `sign == 1` and the raw digit is
-returned. For a negative tag (`tag == 2`), `sign == -1` and the value
-is negated.
-
-The function is explicitly documented as undefined behaviour when
-called on a non-compact object, so callers must always guard with
-`_PyLong_IsCompact` first.
-
-In gopy, `objects/long.go` provides `IsCompact() bool` and
-`CompactValue() int` with the same contract. The Go implementation
-uses a `panic` rather than UB for the non-compact guard violation.
-
-### Identity predicates (lines 53 to 65)
-
-<CpyLink path="Include/internal/pycore_long.h" lines="53-65" />
-
-```c
-static inline bool _PyLong_IsZero(const PyLongObject *op) {
-    return op->long_value.lv_tag == _PyLong_TAG_ZERO;
-}
-static inline bool _PyLong_IsOne(const PyLongObject *op) {
-    return (op->long_value.lv_tag == _PyLong_TAG_POSITIVE) &&
-           (op->long_value.ob_digit[0] == 1);
-}
-static inline bool _PyLong_IsMinusOne(const PyLongObject *op) {
-    return (op->long_value.lv_tag == _PyLong_TAG_NEGATIVE) &&
-           (op->long_value.ob_digit[0] == 1);
-}
-```
-
-These three predicates are used throughout the interpreter and
-standard library as cheap guards before heavier operations. For
-example, `PyNumber_Multiply` checks `_PyLong_IsOne` before allocating
-a result object, and `PyNumber_Power` checks `_PyLong_IsZero` to short
-circuit the entire exponentiation.
-
-All three predicates work on both compact and non-compact objects
-because they test `lv_tag` directly: a non-compact integer with tag 0
-has at least 2 digits and so its `ob_digit[0]` can never equal 1 with
-the expected tag. No separate compactness check is required.
-
-### `_PyLong_BothAreCompact` and fast arithmetic (lines 66 to 92)
-
-<CpyLink path="Include/internal/pycore_long.h" lines="66-92" />
-
-```c
+/* Returns true only when op == 0. */
 static inline bool
-_PyLong_BothAreCompact(const PyLongObject *a, const PyLongObject *b) {
-    return (a->long_value.lv_tag | b->long_value.lv_tag)
-               < (2 << _PyLong_NOF_DIGITS_SHIFT);
+_PyLong_IsZero(const PyLongObject *op) {
+    return (op->long_value.lv_tag & SIGN_ZERO) != 0;
 }
 
-PyAPI_FUNC(PyObject *) _PyLong_FastAdd(
-    PyLongObject *left, PyLongObject *right);
-PyAPI_FUNC(PyObject *) _PyLong_FastSub(
-    PyLongObject *left, PyLongObject *right);
+static inline bool
+_PyLong_IsPositive(const PyLongObject *op) {
+    return (op->long_value.lv_tag & SIGN_POSITIVE) != 0;
+}
+
+static inline bool
+_PyLong_IsNegative(const PyLongObject *op) {
+    return (op->long_value.lv_tag & SIGN_NEGATIVE) != 0;
+}
 ```
 
-`_PyLong_BothAreCompact` ORs the two tag words together before the
-single range check. If either operand has a digit count greater than 1
-the OR will set a bit above position 3, making the combined value
-exceed the threshold. This lets the compiler emit a single branch for
-the two-operand check with no short-circuit overhead.
+These predicates are used pervasively in the eval loop and in the object
+layer wherever sign-checking or zero-testing must be cheap. Each is a
+single bitwise operation on `lv_tag` with no memory indirection beyond
+reading the struct field itself. CPython's `COMPARE_OP_INT` specialized
+instruction, for example, calls `_PyLong_IsCompact` on both operands and
+falls back to the slow `PyObject_RichCompareBool` path only when either
+is non-compact.
 
-`_PyLong_FastAdd` and `_PyLong_FastSub` are called from the
-`BINARY_OP_ADD_INT` and `BINARY_OP_SUBTRACT_INT` specialized opcodes
-after `_PyLong_BothAreCompact` succeeds. They perform the arithmetic
-in `Py_ssize_t`, check for overflow, and only fall back to
-`_PyLong_Add` when the result would exceed the compact range. The
-common path allocates no memory: both CPython's small integer cache
-and gopy's interning layer can often return an existing object.
+`_PyLong_IsNonNegativeCompact` accepts both zero and compact positives
+because `lv_tag <= (1 << NON_SIZE_BITS)` covers `SIGN_ZERO` (tag=1)
+and one-digit positives (tag=4, 8, ...) with no reserved flags set.
+This specific predicate is used by slice-index helpers that need an
+upper bound on the integer before calling `_PyLong_CompactValue`.
 
-In gopy, `objects/long.go` exports `FastAdd(a, b *Long) *Long` and
-`FastSub(a, b *Long) *Long` with overflow detection using
-`bits.Add` / `bits.Sub` from the standard library.
+In gopy, the three sign predicates map to `big.Int.Sign()`: `Sign() == 0`
+for zero, `Sign() > 0` for positive, `Sign() < 0` for negative. There is
+no separate tag word; `math/big` maintains the sign internally.
+
+### `_PyLong_FastAdd` and compact arithmetic (lines 130 to 200)
+
+<CpyLink path="Include/internal/pycore_long.h" lines="130-200" />
+
+```c
+/* Fast add: returns NULL (not an error) when the result would overflow
+   the compact range; caller falls back to the general add. */
+static inline PyObject *
+_PyLong_FastAdd(PyLongObject *left, PyLongObject *right)
+{
+    if (!_PyLong_IsCompact(left) || !_PyLong_IsCompact(right)) {
+        return NULL;
+    }
+    Py_ssize_t a = _PyLong_CompactValue(left);
+    Py_ssize_t b = _PyLong_CompactValue(right);
+    /* Overflow check for signed addition. */
+    Py_ssize_t res;
+    if (__builtin_add_overflow(a, b, &res)) {
+        return NULL;
+    }
+    return PyLong_FromSsize_t(res);
+}
+
+static inline PyObject *
+_PyLong_FastSub(PyLongObject *left, PyLongObject *right)
+{
+    if (!_PyLong_IsCompact(left) || !_PyLong_IsCompact(right)) {
+        return NULL;
+    }
+    Py_ssize_t a = _PyLong_CompactValue(left);
+    Py_ssize_t b = _PyLong_CompactValue(right);
+    Py_ssize_t res;
+    if (__builtin_sub_overflow(a, b, &res)) {
+        return NULL;
+    }
+    return PyLong_FromSsize_t(res);
+}
+```
+
+`_PyLong_FastAdd` and `_PyLong_FastSub` are the tight-loop helpers
+invoked by the specializing interpreter's `BINARY_OP_ADD_INT` and
+`BINARY_OP_SUBTRACT_INT` instructions. The contract is: return a new
+`PyLongObject *` when both inputs are compact and the result fits a
+`Py_ssize_t`; return `NULL` (not an exception) to signal "slow path
+needed" otherwise. The caller never checks `PyErr_Occurred()` after
+getting `NULL` from these; it simply despecializes the instruction and
+calls the full `PyNumber_Add`.
+
+The overflow check uses GCC/Clang's `__builtin_add_overflow` rather
+than manual sign-bit arithmetic. On platforms without that built-in,
+CPython falls back to a portable bounds check before the addition.
+
+The result is immediately handed to `PyLong_FromSsize_t`, which checks
+the small-int cache (values -5 to 256) before allocating. For the
+common case of incrementing a small loop counter the entire fast path
+never touches the allocator.
+
+In gopy, `objects/long_arith.go` implements `intAdd` using `math/big.Int.Add`
+for all magnitudes. The small-int cache in `objects/long_cache.go`
+covers -5 through 256 and is consulted by `NewIntFromBig` before
+allocating, providing the same single-allocation short-circuit for
+typical loop counters without the separate compact predicate machinery.
+
+## gopy mirror
+
+gopy does not replicate the `lv_tag` bit field. The CPython layout is
+an optimization that avoids a heap allocation for integers that fit in
+one `Py_ssize_t`; Go's `math/big.Int` already stores small values
+inline within the struct without a separate heap allocation, so the same
+goal is achieved at a different layer.
+
+The digit type (`uint32_t`, base 2^30) is not exposed in gopy. The
+`PyLong_SHIFT` and `PyLong_MASK` constants have no counterparts because
+gopy never manually packs or unpacks limbs; `math/big` handles the
+multiprecision arithmetic internally.
+
+The compact predicates (`_PyLong_IsCompact`, `_PyLong_IsNonNegativeCompact`,
+`_PyLong_IsZero`, `_PyLong_IsPositive`, `_PyLong_IsNegative`) are not
+needed as separate functions in gopy because `big.Int.Sign()` and
+`big.Int.IsInt64()` cover the same ground. The fast-path arithmetic in
+`_PyLong_FastAdd` / `_PyLong_FastSub` is implicit in `intAdd` /
+`intSub` via the small-int cache lookup inside `NewIntFromBig`.

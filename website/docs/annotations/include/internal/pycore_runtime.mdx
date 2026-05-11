@@ -1,11 +1,11 @@
 ---
 title: Include/internal/pycore_runtime.h
-description: Defines PyRuntimeState — the single global runtime struct holding the interpreter list, allocators, hash secret, audit hooks, and Unicode intern table.
+description: _PyRuntimeState, the process-wide singleton holding all interpreters, signal state, atexit hooks, and initialization flags.
 cpython_path: Include/internal/pycore_runtime.h
 cpython_version: "3.14"
-lines: 250
+lines: 420
 status: annotated
-ported_to: pythonrun/pylifecycle.go
+ported_to: pythonrun/runstring.go
 ---
 
 import {Cpy, CpyLink} from '@site/src/components/Cpy';
@@ -14,159 +14,163 @@ import {Cpy, CpyLink} from '@site/src/components/Cpy';
 
 <CpyLink path="Include/internal/pycore_runtime.h" />
 
-Declares `PyRuntimeState`, the single process-wide runtime struct, and
-the `_PyRuntime` global that points to it. Every `Python/` and
-`Objects/` file that needs process-level state reads or writes
-`_PyRuntime` rather than relying on OS thread-locals; per-thread state
-lives one level down in `PyThreadState` (declared in
-`Include/internal/pycore_pystate.h`) and per-interpreter state in
-`PyInterpreterState` (`Include/internal/pycore_interp.h`).
+`pycore_runtime.h` declares `_PyRuntimeState`, the one-per-process struct
+that acts as the root of the entire CPython runtime. There is exactly one
+instance of it: the global `_PyRuntime` variable defined in
+`Python/pylifecycle.c`. Everything the interpreter touches, including the
+list of sub-interpreters, the signal queue, the atexit registry, and the
+main-thread lock, hangs off this single struct.
 
-The struct grew significantly in CPython 3.12 and again in 3.13/3.14
-with free-threaded support. Key additions in recent versions include
-`stoptheworld` (a lock used during stop-the-world GC pauses),
-`mimalloc` arena fields, and the `xidregistry` for cross-interpreter
-data sharing. None of those affect the fields annotated below, which
-are the subset gopy ports.
+The file also defines the three coarse initialization flags
+(`preinitialized`, `core_initialized`, `initialized`) that guard the
+startup sequence in `Py_InitializeFromConfig`. Code that runs before
+`Py_Initialize` completes must check these flags before calling any API
+that assumes a live runtime. In gopy the equivalent gate is the package
+`init` ordering: the `state`, `objects`, and `pythonrun` packages must be
+fully initialized before the first `RunString` call.
 
-In gopy, `pythonrun/pylifecycle.go` holds a `Runtime` struct that
-mirrors `PyRuntimeState` at the granularity gopy needs. Fields that
-are GIL-specific, mimalloc-specific, or relate to features not yet
-ported (e.g. sub-interpreters) are omitted.
+A third concern carried here is `_Py_IDENTIFIER`, the mechanism that
+pre-interns frequently-used string names (like `"__name__"` or
+`"__init__"`) at startup so repeated attribute lookups avoid calling
+`PyUnicode_InternInPlace` on every call. gopy replaces this with
+`objects.NewStr` whose intern cache is managed by the Go runtime.
 
 ## Map
 
 | Lines | Symbol | Role | gopy |
 | ----- | ------ | ---- | ---- |
-| <Cpy path="Include/internal/pycore_runtime.h" lines="1-40">1-40</Cpy> | `PyRuntimeState` header + `initialized` / `core_initialized` | Boolean flags written by `_PyRuntimeState_Init`; read by `Py_IsInitialized`. | `pythonrun/pylifecycle.go` |
-| <Cpy path="Include/internal/pycore_runtime.h" lines="41-80">41-80</Cpy> | `finalizing` / `_finalizing_id` | `PyThreadState *` set to the finalising thread when `Py_FinalizeEx` runs; other threads poll this to detect shutdown. | `pythonrun/pylifecycle.go` |
-| <Cpy path="Include/internal/pycore_runtime.h" lines="81-120">81-120</Cpy> | `interpreters` | Linked list of all `PyInterpreterState` structs; `interpreters.main` is the pointer to the main interpreter. | `pythonrun/pylifecycle.go` |
-| <Cpy path="Include/internal/pycore_runtime.h" lines="121-155">121-155</Cpy> | `allocators` | Four `PyMemAllocatorEx` slots: `standard`, `debug`, `obj`, `pymem` — one per allocation domain. | `pythonrun/pylifecycle.go` |
-| <Cpy path="Include/internal/pycore_runtime.h" lines="156-185">156-185</Cpy> | `unicode_state` | Interned-string table (`PyObject *interned`), latin-1 singletons, and the small-integer Unicode cache. | `pythonrun/pylifecycle.go` |
-| <Cpy path="Include/internal/pycore_runtime.h" lines="186-215">186-215</Cpy> | `hash_secret` / `_Py_HashSecret` | The per-process random seed for `PYTHONHASHSEED`; read by `PyObject_Hash` and the `hash()` builtin. | `pythonrun/pylifecycle.go` |
-| <Cpy path="Include/internal/pycore_runtime.h" lines="216-250">216-250</Cpy> | `_PyRuntime` declaration / `_PyRuntimeState_Init` / `_PyRuntimeState_Fini` | Global variable declaration and init/fini functions called from `Py_InitializeFromConfig`. | `pythonrun/pylifecycle.go` |
+| <Cpy path="Include/internal/pycore_runtime.h" lines="1-40">1-40</Cpy> | include guard + forward decls | `#include` chain for `pycore_atomic.h`, `pycore_gil.h`, `pycore_interp.h`; forward-declares `_PyRuntimeState`. | n/a |
+| <Cpy path="Include/internal/pycore_runtime.h" lines="41-100">41-100</Cpy> | `struct pyruntimestate` top fields | `preinitialized`, `core_initialized`, `initialized` flags; `_PyRuntimeState.xidregistry` (cross-interpreter data); `finalizing` thread pointer; `open_code_hook`. | `pythonrun/runstring.go` |
+| <Cpy path="Include/internal/pycore_runtime.h" lines="101-180">101-180</Cpy> | `_PyRuntimeState.interpreters` sub-struct | `mutex`, `next_id`, `head` (linked list of `PyInterpreterState`), `main` pointer to the main interpreter. | `pythonrun/runstring.go` |
+| <Cpy path="Include/internal/pycore_runtime.h" lines="181-230">181-230</Cpy> | `_PyRuntimeState.signals` sub-struct | `is_tripped` flag, `handlers[NSIG]` array, `wakeup` socket fd, `main_thread` id. | n/a (signals.go in vm/) |
+| <Cpy path="Include/internal/pycore_runtime.h" lines="231-280">231-280</Cpy> | `_PyRuntimeState.atexit` sub-struct | `callbacks` list of `(func, args, kwargs)` triples, `mutex` protecting them. | n/a |
+| <Cpy path="Include/internal/pycore_runtime.h" lines="281-350">281-350</Cpy> | `_PyRuntimeState_GetFinalizing` / `_PyRuntimeState_SetFinalizing` | Atomic getter/setter for the `finalizing` field; non-zero means `Py_Finalize` is running. | n/a |
+| <Cpy path="Include/internal/pycore_runtime.h" lines="351-420">351-420</Cpy> | `_Py_IDENTIFIER` / `_PyRuntime` declaration | `_Py_IDENTIFIER(name)` macro expands to a static `_Py_Identifier` struct; `_PyRuntime` is declared `extern`. | `objects/str.go` intern cache |
 
 ## Reading
 
-### `PyRuntimeState` fields overview (lines 1 to 80)
+### `_PyRuntimeState` layout (lines 41 to 180)
 
-<CpyLink path="Include/internal/pycore_runtime.h" lines="1-80" />
+<CpyLink path="Include/internal/pycore_runtime.h" lines="41-180" />
 
 ```c
 struct pyruntimestate {
-    /* Non-zero when the runtime is fully initialised. */
-    int initialized;
+    /* 1 if Py_PreInitialize() has completed, 0 otherwise. */
+    int preinitialized;
+    /* 1 if _PyRuntime_Initialize() / Py_InitializeFromConfig() partial
+       core init done. */
     int core_initialized;
+    /* 1 if Py_Initialize() completed fully. */
+    int initialized;
 
-    /* Set to the thread finalising the interpreter, or NULL. */
+    /* Thread that called Py_Finalize(), NULL otherwise. Used to detect
+       re-entrant finalization and to guard daemon threads. */
     PyThreadState *finalizing;
-    unsigned long _finalizing_id;
+    unsigned long finalizing_id;
 
     struct {
-        PyInterpreterState *head;       /* all interpreters (linked list) */
-        PyInterpreterState *main;       /* the main interpreter */
+        PyThread_type_lock mutex;
+        /* Linked list of all live PyInterpreterState objects. */
+        PyInterpreterState *head;
+        PyInterpreterState *main;
         int64_t next_id;
     } interpreters;
 
-    /* ... many more fields ... */
+    struct {
+        /* Set to 1 by the signal handler, cleared by _PyEval_SignalReceived. */
+        Py_atomic_int is_tripped;
+        PyOS_sighandler_t handlers[NSIG];
+        /* Wakeup file descriptor written by the signal handler. */
+        struct {
+            int fd;
+            int warn_on_full_buffer;
+        } wakeup;
+        unsigned long main_thread;
+    } signals;
+
+    struct {
+        struct _atexit_callback *callbacks;
+        PyThread_type_lock mutex;
+    } atexit;
+
+    /* Hook called by io.open() and open(). */
+    PyObject *(*open_code_hook)(PyObject *path, void *userData);
+    void *open_code_userdata;
 };
 ```
 
-`initialized` and `core_initialized` are written by
-`_PyRuntimeState_Init` in two phases: `core_initialized` is set after
-the low-level allocator, hash secret, and thread state are ready;
-`initialized` is set only after the full `Py_InitializeFromConfig`
-sequence completes (including importing `site`, setting up
-`sys.path`, etc.). Code that needs to check "is Python running at all"
-tests `initialized`; code that needs only the allocator or GC tests
-`core_initialized`.
+The three flags (`preinitialized`, `core_initialized`, `initialized`) form
+a state machine. Code in `Objects/` and `Python/` that runs before full
+initialization checks `_PyRuntime.initialized` before calling APIs like
+`PyErr_SetString` or `PyObject_Call`. The startup sequence in
+`Py_InitializeFromConfig` advances through the three stages in order,
+never skipping one.
 
-`finalizing` is set to a non-NULL `PyThreadState *` pointer when
-`Py_FinalizeEx` is running. Threads that poll `_Py_IsFinalizing()`
-check this field. The `_finalizing_id` stores the OS thread ID of the
-finalising thread so that the check is safe to make without holding any
-lock.
+The `interpreters` sub-struct owns the linked list of all live
+`PyInterpreterState` objects. The `head` field points to the most recently
+created interpreter; `main` always points to the very first one created
+during `Py_Initialize`. `next_id` is a monotonically increasing counter:
+each new interpreter gets `next_id++` as its `id` field, which Python code
+can read via `interpreters.get_current()` in the `_interpreters` module.
 
-In gopy, `pythonrun/pylifecycle.go` declares a `Runtime` value with
-`Initialized bool`, `CoreInitialized bool`, and `Finalizing bool` fields.
-The `Finalize()` function sets `Finalizing = true` before tearing down the
-interpreter list.
+### Initialized flags lifecycle (lines 41 to 100)
 
-### `interpreters` linked list (lines 81 to 120)
-
-<CpyLink path="Include/internal/pycore_runtime.h" lines="81-120" />
+<CpyLink path="Include/internal/pycore_runtime.h" lines="41-100" />
 
 ```c
-struct {
-    PyThread_type_lock mutex;
-    PyInterpreterState *head;
-    PyInterpreterState *main;
-    int64_t next_id;
-} interpreters;
+/* Sequence enforced in Py_InitializeFromConfig:
+   1. _PyRuntime_Initialize()      -> preinitialized = 1
+   2. _Py_InitializeCore()         -> core_initialized = 1
+   3. _Py_InitializeMain()         -> initialized = 1
+*/
+static inline int
+_PyRuntime_IsInitialized(void) {
+    return _PyRuntime.initialized;
+}
 ```
 
-Every `PyInterpreterState` is linked into this list via its `next`
-field. `head` points to the most recently created interpreter;
-`main` is a stable pointer to the interpreter created by
-`_PyInterpreterState_New` during `Py_InitializeFromConfig`.
+A crash inside `PyErr_SetString` during very early startup is often caused
+by calling an API before `core_initialized = 1`. CPython guards against
+this with `_Py_IsInitialized()` checks scattered through `Objects/`. The
+sequence must be respected by any embedder that calls low-level internal
+APIs directly rather than going through `Py_InitializeFromConfig`.
 
-Sub-interpreters are created with `Py_NewInterpreter` and destroyed
-with `Py_EndInterpreter`. Each has its own `sys.modules`, its own
-`builtins`, and (in the free-threaded build) its own GIL. The `mutex`
-serialises insertion and removal from the list; reading `head` or
-`main` without the mutex is unsafe in the multi-interpreter case.
+In gopy, the equivalent gate is the package `init` graph. The `objects`
+package initializes the built-in type hierarchy before `pythonrun` can call
+`RunString`. There is no explicit `preinitialized` flag; instead, Go's
+package-level `var` initialization provides the ordering guarantee.
 
-`Py_TPFLAGS_BASETYPE` is checked when constructing a type in a
-sub-interpreter: types defined in the main interpreter that do not set
-this flag are not permitted as base classes in sub-interpreters because
-their `tp_new` / `tp_init` slots may hold pointers into the main
-interpreter's heap. This is the primary isolation guard for
-sub-interpreter safety.
+### `_PyRuntimeState_GetFinalizing` (lines 281 to 350)
 
-In gopy, the multi-interpreter case is not yet ported. `pythonrun/pylifecycle.go`
-holds a single `*Interpreter` value rather than a linked list, and the
-`mutex` has no counterpart. When sub-interpreter support is added, the
-list pattern from this struct will be the model.
-
-### `allocators` four-slot design (lines 121 to 155)
-
-<CpyLink path="Include/internal/pycore_runtime.h" lines="121-155" />
+<CpyLink path="Include/internal/pycore_runtime.h" lines="281-350" />
 
 ```c
-struct {
-    /* Allocator used for PyMem_RawMalloc (no GIL required). */
-    PyMemAllocatorEx standard;
-    /* Debug wrapper that records alloc/free for -W default. */
-    PyMemAllocatorEx debug;
-    /* Allocator used for PyObject_Malloc (objects, holds GIL). */
-    PyMemAllocatorEx obj;
-    /* Allocator used for PyMem_Malloc (buffers, holds GIL). */
-    PyMemAllocatorEx pymem;
-} allocators;
+static inline PyThreadState *
+_PyRuntimeState_GetFinalizing(PyRuntimeState *runtime) {
+    return (PyThreadState *)_Py_atomic_load_ptr_relaxed(&runtime->_finalizing);
+}
+
+static inline void
+_PyRuntimeState_SetFinalizing(PyRuntimeState *runtime, PyThreadState *tstate) {
+    _Py_atomic_store_ptr_relaxed(&runtime->_finalizing, (void *)tstate);
+}
 ```
 
-CPython separates allocation into four domains:
+`SetFinalizing` is called by `Py_FinalizeEx` before tearing down
+interpreters. Any thread that calls `_PyThreadState_MustExit` after this
+point will see a non-NULL `finalizing` and exit its eval loop rather than
+continuing to execute bytecodes. This prevents daemon threads from running
+arbitrary Python after `atexit` callbacks have fired and modules have begun
+unloading.
 
-1. `standard` (raw): no GIL required, used for data structures that
-   may be allocated before or after `Py_Initialize`. Maps to
-   `PyMem_RawMalloc`.
-2. `debug`: a wrapper that optionally inserts red zones and tracks
-   allocations for the `-W` memory-debug mode.
-3. `obj`: the object allocator, which sits on top of CPython's
-   `obmalloc` arena system (or mimalloc in 3.14). Used by
-   `PyObject_Malloc` / `PyObject_Free`. Requires the GIL (or per-thread
-   arena ownership in the free-threaded build).
-4. `pymem`: the buffer allocator, used by `PyMem_Malloc` for byte
-   buffers, `bytes` internal storage, and similar. Also requires the GIL
-   in the GIL build.
+## gopy mirror
 
-Each `PyMemAllocatorEx` is a struct of four function pointers (`malloc`,
-`calloc`, `realloc`, `free`) plus a `ctx` void pointer, making the
-allocator fully replaceable via `PyMem_SetAllocator`. The `ctx` pointer
-lets a custom allocator carry its own state without globals.
+gopy has no `_PyRuntimeState` struct. The global runtime state that CPython
+packs into this one struct is spread across Go package-level variables: the
+`imp` package owns `sys.modules`; the `gil` package owns the eval-breaker
+and the GIL; `pythonrun` drives the initialization sequence.
 
-In gopy, all four domains collapse to Go's built-in allocator (`new`,
-`make`). `pythonrun/pylifecycle.go` does not replicate the four-slot
-layout, but notes the domain boundaries as comments where they affect
-object construction semantics (for example, `PyObject_Malloc` size
-limits that CPython enforces in `obmalloc`).
+The `initialized` flag is replaced by Go's package-level `init` ordering.
+The `atexit` callbacks list is not yet ported (spec 1700 scope). Signal
+handling (`signals` sub-struct) is partially mapped in `vm/gil/signals.go`
+via `gil.BreakerSignalsPending`.

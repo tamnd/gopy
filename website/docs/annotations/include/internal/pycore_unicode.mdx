@@ -1,9 +1,9 @@
 ---
 title: Include/internal/pycore_unicode.h
-description: Internal Unicode helpers — compact layout structs, state bitfields, fast predicates, and inline data access for str objects.
+description: Unicode object internals. PyASCIIObject/PyCompactUnicodeObject/PyUnicodeObject struct layout, _PyUnicodeWriter, interning table, and fast-path copy macros.
 cpython_path: Include/internal/pycore_unicode.h
 cpython_version: "3.14"
-lines: 200
+lines: 280
 status: annotated
 ported_to: objects/str.go
 ---
@@ -14,137 +14,182 @@ import {Cpy, CpyLink} from '@site/src/components/Cpy';
 
 <CpyLink path="Include/internal/pycore_unicode.h" />
 
-The private extension to `Include/unicodeobject.h`. The public header
-exposes only the stable API surface for constructing and decoding strings;
-this file gives CPython's own C code access to the two compact struct
-layouts, the `state` bitfield, and the inline-data accessor that all
-live inside the same allocation as the object header.
+The private companion to `Include/unicodeobject.h`. The public header declares
+the stable C API (`PyUnicode_FromString`, `PyUnicode_AsUTF8`, etc.), while this
+file exposes the three-tier struct layout from PEP 393, the `_PyUnicodeWriter`
+incremental builder, fast-path data accessors, the interning table, and
+internal consistency checks.
 
-CPython 3.12 completed the removal of the legacy (non-compact) Unicode
-representation. Every `PyUnicodeObject` is now either a compact ASCII
-string (`PyASCIIObject`, where the character data sits in the bytes
-immediately following the header) or a compact Unicode string
-(`PyCompactUnicodeObject`, which extends `PyASCIIObject` with a UTF-8
-cache pointer and a UTF-8 byte length). There is no longer a
-`PyUnicodeObject` with a separate heap allocation for the character data
-in new code; the macros in this header reflect that single-allocation
-guarantee.
+PEP 393 (3.3) replaced the UCS-2 / UCS-4 dual representation with a compact
+scheme: strings whose maximum code point fits in one byte use a
+`PyCompactUnicodeObject` with 1-byte (`Latin-1`) code units; those that fit in
+two bytes use 2-byte (`UCS-2`) units; those requiring four bytes use 4-byte
+(`UCS-4`) units. Pure ASCII strings use the smallest variant,
+`PyASCIIObject`, which omits even the `wstr` and `utf8` cache fields.
 
-In gopy, `str` is represented as a Go `string` (always valid UTF-8) in
-`objects/str.go`. Because Go strings carry their length and are always
-UTF-8, many of the fields that `PyASCIIObject` and `PyCompactUnicodeObject`
-track explicitly (`length`, `utf8_length`, `hash`) collapse to either a
-trivial field read or a no-op.
+CPython 3.12 completed the removal of the `wstr` and `wstr_length` fields that
+existed through 3.11 as a migration aid from pre-PEP-393 code. The structs here
+reflect the final 3.12+ layout.
+
+In gopy, all three tiers collapse into a single `objects.Unicode` struct backed
+by a Go `string` (always valid UTF-8). The `kind`, `ascii`, `length`, and
+`hash` fields pin the PEP 393 metadata. `_PyUnicodeWriter` maps to Go's
+`strings.Builder`.
 
 ## Map
 
 | Lines | Symbol | Role | gopy |
 | ----- | ------ | ---- | ---- |
-| <Cpy path="Include/internal/pycore_unicode.h" lines="1-40">1-40</Cpy> | `PyASCIIObject` | Base compact struct: `ob_base`, `length`, `hash`, `state` bitfield, `wstr` (removed in 3.12). | `objects/str.go` |
-| <Cpy path="Include/internal/pycore_unicode.h" lines="41-70">41-70</Cpy> | `PyCompactUnicodeObject` | Extension of `PyASCIIObject` for non-ASCII compact strings: adds `utf8_length` and `utf8` cache pointer. | `objects/str.go` |
-| <Cpy path="Include/internal/pycore_unicode.h" lines="71-100">71-100</Cpy> | `PyUnicode_IS_ASCII` / `PyUnicode_IS_COMPACT` / `PyUnicode_GET_LENGTH` | Fast layout predicates and character-count accessor. | `objects/str.go` |
-| <Cpy path="Include/internal/pycore_unicode.h" lines="101-130">101-130</Cpy> | `_PyUnicode_COMPACT_DATA` | Returns a pointer to the inline character data for a compact string. | `objects/str.go` |
-| <Cpy path="Include/internal/pycore_unicode.h" lines="131-155">131-155</Cpy> | `_PyUnicode_EqualToASCIIString` / `_PyUnicode_EqualToASCIIId` | Fast equality tests against a C string or `_Py_Identifier` without encoding overhead. | `objects/str.go` |
-| <Cpy path="Include/internal/pycore_unicode.h" lines="156-180">156-180</Cpy> | `_Py_UNICODE_NEXT` | Advance a UTF-16 buffer pointer one code point, handling surrogate pairs. | `objects/str.go` |
-| <Cpy path="Include/internal/pycore_unicode.h" lines="181-200">181-200</Cpy> | `_PyUnicode_CheckConsistency` | Debug-mode validator that checks all struct fields are internally consistent. | `objects/str.go` |
+| <Cpy path="Include/internal/pycore_unicode.h" lines="1-40">1-40</Cpy> | `PyASCIIObject` | Smallest representation: `ob_base` + `length` + `hash` + packed `state` bits (interned, kind, compact, ascii, ready). No separate data pointer; character data follows immediately in memory. | `objects/str.go` (`Unicode.ascii`, `Unicode.ready`) |
+| <Cpy path="Include/internal/pycore_unicode.h" lines="41-80">41-80</Cpy> | `PyCompactUnicodeObject` | Extends `PyASCIIObject` with a `utf8_length` and `utf8` cache pointer for non-ASCII strings. Character data (1-, 2-, or 4-byte units) follows in memory. | `objects/str.go` (`Unicode.v`) |
+| <Cpy path="Include/internal/pycore_unicode.h" lines="81-120">81-120</Cpy> | `PyUnicodeObject` | Legacy "legacy string" wrapper that adds `data.any` and `wstr` pointers. Kept for `Py_UNICODE *` API compatibility; `compact` bit distinguishes this from the compact forms. | (not ported; pre-3.12 layout) |
+| <Cpy path="Include/internal/pycore_unicode.h" lines="121-160">121-160</Cpy> | `_PyUnicode_STATE` / `PyUnicode_IS_ASCII` / `PyUnicode_IS_COMPACT` / `PyUnicode_KIND` / `PyUnicode_GET_LENGTH` | Accessor macros that read the `state` bitfield inline without an indirect call. | `objects/str.go` (`Unicode.IsASCII`, `Unicode.Kind`, `Unicode.Length`) |
+| <Cpy path="Include/internal/pycore_unicode.h" lines="161-200">161-200</Cpy> | `_PyUnicodeWriter` struct | Incremental string builder: pre-allocated buffer, current write position, minimum character kind, and overallocation strategy. | (Go `strings.Builder`) |
+| <Cpy path="Include/internal/pycore_unicode.h" lines="201-240">201-240</Cpy> | `_PyUnicodeWriter_Init` / `_PyUnicodeWriter_Prepare` / `_PyUnicodeWriter_WriteStr` / `_PyUnicodeWriter_WriteChar` / `_PyUnicodeWriter_Finish` / `_PyUnicodeWriter_Dealloc` | Writer lifecycle: initialize, grow buffer on demand, append string/char, finalize into a `str`. | (Go `strings.Builder`) |
+| <Cpy path="Include/internal/pycore_unicode.h" lines="241-280">241-280</Cpy> | `_PyUnicode_FastCopyCharacters` / `_PyUnicode_EqualToASCIIString` / `_PyUnicode_CheckConsistency` | Fast bulk copy between compatible-kind buffers; ASCII equality shortcut; debug consistency checker. | `objects/str.go` |
 
 ## Reading
 
-### Compact vs non-compact layout (lines 1 to 70)
+### Three-tier unicode object layout (lines 1 to 120)
 
-<CpyLink path="Include/internal/pycore_unicode.h" lines="1-70" />
+<CpyLink path="Include/internal/pycore_unicode.h" lines="1-120" />
 
 ```c
+/* Tier 1: ASCII-only strings */
 typedef struct {
     PyObject_HEAD
-    Py_ssize_t length;          /* number of code points */
-    Py_hash_t  hash;            /* -1 if not set */
+    Py_ssize_t  length;   /* number of code points */
+    Py_hash_t   hash;     /* -1 if not set */
     struct {
         unsigned int interned:2;
-        unsigned int kind:3;    /* PyUnicode_1BYTE_KIND etc. */
+        unsigned int kind:3;      /* 1 = Latin-1, 2 = UCS-2, 4 = UCS-4 */
         unsigned int compact:1;
         unsigned int ascii:1;
         unsigned int ready:1;
     } state;
+    /* character data follows immediately */
 } PyASCIIObject;
 
+/* Tier 2: non-ASCII compact strings */
 typedef struct {
     PyASCIIObject _base;
-    Py_ssize_t utf8_length;    /* bytes in the UTF-8 cache, 0 means not set */
-    char      *utf8;           /* UTF-8 representation, or NULL */
+    Py_ssize_t    utf8_length;  /* byte length of UTF-8 cache */
+    char         *utf8;        /* NULL until first AsUTF8 call */
+    /* character data (kind * length bytes) follows immediately */
 } PyCompactUnicodeObject;
+
+/* Tier 3: legacy non-compact strings (pre-3.12 migration aid) */
+typedef struct {
+    PyCompactUnicodeObject _base;
+    union {
+        void      *any;
+        Py_UCS1   *latin1;
+        Py_UCS2   *ucs2;
+        Py_UCS4   *ucs4;
+    } data;
+} PyUnicodeObject;
 ```
 
-`PyASCIIObject` is the base layout for every compact string. For
-pure-ASCII content (`state.ascii == 1`) the character data is stored
-in the bytes immediately following the `PyASCIIObject` header in the
-same allocation, so no second pointer is needed. For non-ASCII compact
-strings, `PyCompactUnicodeObject` adds a `utf8` cache: the first call
-to `PyUnicode_AsUTF8` encodes the string to a fresh `malloc` buffer and
-stores it here; subsequent calls return the cached pointer.
-
-The `state.kind` field records the storage width of each code unit:
-`PyUnicode_1BYTE_KIND` (Latin-1), `PyUnicode_2BYTE_KIND` (UCS-2), or
-`PyUnicode_4BYTE_KIND` (UCS-4). The "compact" path always picks the
-narrowest kind that covers the string's code point range.
-
-In gopy, `StrObject` in `objects/str.go` stores a single Go `string`
-field. Go strings are always UTF-8, so `length` (code-point count) is
-obtained via `utf8.RuneCountInString`, `hash` is computed lazily on
-first use, and the `state` bitfield has no equivalent; the Go type
-system handles the invariants that the bitfield guards.
-
-### `state` bitfields (lines 1 to 40)
-
-<CpyLink path="Include/internal/pycore_unicode.h" lines="1-40" />
-
-The four most-used flag bits:
-
-- `state.compact`: always `1` in CPython 3.12+ because the legacy
-  non-compact representation was removed.
-- `state.ascii`: `1` when the string contains only codepoints
-  `U+0000`-`U+007F`. Compact ASCII strings store their data inline after
-  `PyASCIIObject`; no `PyCompactUnicodeObject` header is needed.
-- `state.ready`: `1` once the string has been fully initialised and its
-  `length`, `hash`, and character data are valid. Code may not read any
-  other field unless this bit is set.
-- `state.interned`: a two-bit field encoding whether the string is
-  mortal (`SSTATE_NOT_INTERNED = 0`), interned-mortal
-  (`SSTATE_INTERNED_MORTAL = 1`), or immortal
-  (`SSTATE_INTERNED_IMMORTAL = 2`). Immortal interned strings (keyword
-  names, small integer str forms) skip refcount updates entirely.
-
-The `state` word is read by `PyUnicode_IS_ASCII` and `PyUnicode_IS_COMPACT`
-without any allocation or string scan, making them the zero-cost predicates
-that the interpreter uses on the hot attribute-lookup path.
-
-### `_PyUnicode_COMPACT_DATA` (lines 101 to 130)
-
-<CpyLink path="Include/internal/pycore_unicode.h" lines="101-130" />
+The three structs form a strict prefix chain. Code that only inspects `length`,
+`hash`, and `state` can accept any of the three via a `PyASCIIObject *` pointer.
+Code that needs the character data uses `PyUnicode_DATA(op)`, which computes
+the pointer past the end of the appropriate header:
 
 ```c
-static inline const void *
-_PyUnicode_COMPACT_DATA(PyObject *op)
-{
-    if (PyUnicode_IS_ASCII(op)) {
-        return (PyASCIIObject *)op + 1;
+static inline void *
+PyUnicode_DATA(PyObject *op) {
+    if (PyUnicode_IS_COMPACT(op)) {
+        /* Data starts immediately after the header */
+        return (char *)op + (PyUnicode_IS_ASCII(op)
+            ? sizeof(PyASCIIObject)
+            : sizeof(PyCompactUnicodeObject));
     }
-    return (PyCompactUnicodeObject *)op + 1;
+    /* Legacy path: explicit data pointer */
+    return ((PyUnicodeObject *)op)->data.any;
 }
 ```
 
-Pointer arithmetic past the header gives the address of the inline
-character buffer. For ASCII strings, the buffer starts one
-`PyASCIIObject` past `op`; for non-ASCII compact strings, one
-`PyCompactUnicodeObject` past `op` (the wider header means the data
-starts slightly further in). Both cases live in the same `malloc` block
-as the header, so no indirection through a separate data pointer is
-needed.
+The `compact` bit in `state` distinguishes the two allocation strategies. For
+the compact (3.3+) path the object and its character data are a single
+`PyObject_Malloc` call; there is no separate `ob_item`-style pointer. This
+eliminates one pointer indirection on every character access and improves cache
+locality.
 
-This is used by `PyUnicode_DATA` (the public macro) and by the
-specialising adaptive interpreter when scanning string data at speed.
+The `kind` field encodes the bytes-per-code-unit: 1 for Latin-1 (ASCII is a
+subset of this tier), 2 for BMP strings that need UCS-2, 4 for strings that
+contain supplementary-plane code points. `PyUnicode_KIND` reads this field.
+`PyUnicode_MAX_CHAR_VALUE` returns the maximum code point representable in the
+given kind.
 
-In gopy, the equivalent is reading the underlying byte slice of a Go
-`string` with `unsafe.StringData`; because Go strings are immutable
-and heap-allocated by the runtime, no explicit offset arithmetic is
-needed.
+In gopy, `objects.Unicode` stores the canonical UTF-8 Go string and derives
+`kind`, `ascii`, and `length` in `classify()` by scanning the runes once on
+construction. There is no separate character data buffer; all three tiers
+collapse into the Go string.
+
+### `_PyUnicodeWriter` init/write/finish (lines 161 to 240)
+
+<CpyLink path="Include/internal/pycore_unicode.h" lines="161-240" />
+
+```c
+typedef struct {
+    PyObject  *buffer;      /* current PyUnicodeObject being built */
+    void      *data;        /* write pointer into buffer->data */
+    int        kind;        /* kind of buffer: 1, 2, or 4 */
+    Py_UCS4    maxchar;     /* largest char written so far */
+    Py_ssize_t size;        /* allocated capacity in code units */
+    Py_ssize_t pos;         /* next write position in code units */
+    Py_ssize_t min_length;  /* hint for initial allocation */
+    Py_UCS4    min_char;    /* hint for minimum kind */
+    unsigned char overallocate;  /* 1 = use geometric growth */
+    unsigned char readonly;      /* 1 = buffer is borrowed */
+} _PyUnicodeWriter;
+```
+
+`_PyUnicodeWriter` is the workhorse for all CPython code that builds strings
+incrementally: `str.join`, `str % args`, `str.format`, `repr()` for containers,
+and the `+` concatenation operator when the operand count is not known upfront.
+
+The lifecycle is:
+
+```c
+_PyUnicodeWriter writer;
+_PyUnicodeWriter_Init(&writer);
+writer.overallocate = 1;   /* geometric growth for long builds */
+
+/* append pieces */
+if (_PyUnicodeWriter_WriteStr(&writer, piece) < 0) goto error;
+if (_PyUnicodeWriter_WriteChar(&writer, sep) < 0) goto error;
+
+/* finalize: returns ownership of a new str */
+PyObject *result = _PyUnicodeWriter_Finish(&writer);
+goto done;
+
+error:
+    _PyUnicodeWriter_Dealloc(&writer);
+done:
+```
+
+`_PyUnicodeWriter_Prepare` is the growth step. When the current buffer's `kind`
+is too narrow for a new character (e.g. adding a UCS-2 character to a Latin-1
+buffer), it reallocates and widens all previously written code units. This
+widening is paid at most twice (1 to 2, then 2 to 4) over the lifetime of any
+writer.
+
+`_PyUnicodeWriter_Finish` trims the buffer to `pos` code units, sets the
+`ready` bit, and returns the result. If the buffer was over-allocated, the
+trailing bytes are reclaimed with `_PyObject_Realloc`.
+
+In gopy, `strings.Builder` covers the `_PyUnicodeWriter` use-case. The kind
+widening is unnecessary because Go's `string` type is always UTF-8. The
+`Finish` step is `builder.String()`.
+
+## gopy mirror
+
+`objects/str.go` pins the PEP 393 metadata (`kind`, `length`, `ascii`, `ready`,
+`hash`) as fields on `objects.Unicode`. `NewStr` corresponds to
+`PyUnicode_FromString` plus the compact-allocation plus the `classify()` kind
+scan. `StrKind1Byte`, `StrKind2Byte`, and `StrKind4Byte` mirror
+`PyUnicode_1BYTE_KIND`, `PyUnicode_2BYTE_KIND`, and `PyUnicode_4BYTE_KIND`.
+The interning table is a `sync.Map` from Go string to `*Unicode` and
+corresponds to `_Py_interned` (a `PyDictObject` in CPython, a `sync.Map` in
+gopy to avoid import cycles).

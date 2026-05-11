@@ -1,11 +1,11 @@
 ---
 title: Modules/_io/fileio.c
-description: FileIO — the unbuffered raw file I/O class that wraps POSIX open/read/write/lseek/close with an optional opener callable.
+description: FileIO, the raw unbuffered file object wrapping open(2)/read(2)/write(2) with O_CLOEXEC, fd inheritance flags, and EINTR retry.
 cpython_path: Modules/_io/fileio.c
 cpython_version: "3.14"
 lines: 900
 status: annotated
-ported_to: module/io/fileio.go
+ported_to: module/io/
 ---
 
 import {Cpy, CpyLink} from '@site/src/components/Cpy';
@@ -14,194 +14,193 @@ import {Cpy, CpyLink} from '@site/src/components/Cpy';
 
 <CpyLink path="Modules/_io/fileio.c" />
 
-`fileio.c` implements `io.FileIO`, the unbuffered raw binary file I/O class.
-It sits at the bottom of the `io` stack: `open()` wraps a `FileIO` in a
-`BufferedReader` or `BufferedWriter`, which in turn may be wrapped by a
-`TextIOWrapper`. Code that wants byte-level access without any buffering uses
-`FileIO` directly.
+`fileio.c` implements `io.FileIO`, the raw unbuffered layer at the bottom
+of the I/O stack. It wraps a single POSIX file descriptor and provides
+`read`, `readall`, `readinto`, `write`, `seek`, `tell`, and `truncate`
+methods that map directly to `read(2)`, `write(2)`, `lseek(2)`, and
+`ftruncate(2)`.
 
-The central object is the `fileio` C struct. It holds a file descriptor
-(`fd`), mode flags (`readable`, `writable`, `appending`, `created`), a
-`closefd` flag that controls whether `close()` will call `close(2)`, and an
-optional `opener` callable. When `opener` is provided it is called instead of
-`open(2)`, which is how `os.open` with custom flags is threaded through the
-`open()` built-in.
+`FileIO` is not buffered. Each `read` or `write` call translates to exactly
+one system call (or one retry loop around `EINTR`). The buffered wrappers
+`BufferedReader` and `BufferedWriter` in `bufferedio.c` sit on top of
+`FileIO` and provide the larger read-ahead and write-behind buffers visible
+to application code.
 
-All blocking system calls (`read`, `write`, `lseek`) use
-`Py_BEGIN_ALLOW_THREADS` / `Py_END_ALLOW_THREADS` to release the GIL for the
-duration of the call. `EINTR` retries are handled by
-`_Py_COMP_DIAG_IGNORE_DEPR_DECLS` wrappers that call `PyErr_CheckSignals` on
-each retry, matching POSIX SA_RESTART semantics at the Python level.
+Key responsibilities:
+
+- **`open` flags mapping**: the Python `mode` string (`"r"`, `"w"`, `"a"`,
+  `"x"`, `"+"`", `"b"`) is mapped to the `O_RDONLY`, `O_WRONLY`,
+  `O_RDWR`, `O_CREAT`, `O_TRUNC`, `O_APPEND`, `O_EXCL` flag set.
+- **fd inheritance**: every new file descriptor is opened with `O_CLOEXEC`
+  (or the `FD_CLOEXEC` fcntl flag as a fallback) so that child processes
+  do not accidentally inherit open files.
+- **EINTR retry**: the `_Py_EINTR_RETRY` macro wraps each system call in a
+  `do { ... } while (errno == EINTR && !(PyErr_CheckSignals()))` loop to
+  restart on signal interruption.
 
 ## Map
 
 | Lines | Symbol | Role | gopy |
 | ----- | ------ | ---- | ---- |
-| <Cpy path="Modules/_io/fileio.c" lines="1-60">1-60</Cpy> | `fileio` struct, includes, mode constants | C struct: `fd`, `created`, `readable`, `writable`, `appending`, `seekable`, `closefd`, `finalizing`; mode string constants. | `module/io/fileio.go:FileIO` |
-| <Cpy path="Modules/_io/fileio.c" lines="61-200">61-200</Cpy> | `fileio_init` (open path) | Parse mode string; resolve `name` to a path or integer fd; call `open(2)` or `opener`; set `O_CLOEXEC`. | `module/io/fileio.go:fileioInit` |
-| <Cpy path="Modules/_io/fileio.c" lines="201-350">201-350</Cpy> | `fileio_init` (mode flags, fd validation) | Map mode chars to `O_RDONLY`/`O_WRONLY`/`O_RDWR`/`O_APPEND`/`O_CREAT`/`O_TRUNC`; validate fd on integer-name path. | `module/io/fileio.go:fileioInit` |
-| <Cpy path="Modules/_io/fileio.c" lines="351-480">351-480</Cpy> | `fileio_read`, `fileio_readall` | `read(2)` in a loop retrying `EINTR`; `readall` uses `fstat` to preallocate and drains until EOF. | `module/io/fileio.go:fileioRead` |
-| <Cpy path="Modules/_io/fileio.c" lines="481-570">481-570</Cpy> | `fileio_readinto` | Accepts a writable buffer and calls `read(2)` directly into it; avoids a copy compared with `fileio_read`. | `module/io/fileio.go:fileioReadInto` |
-| <Cpy path="Modules/_io/fileio.c" lines="571-660">571-660</Cpy> | `fileio_write` | Calls `write(2)`, retries on `EINTR`, returns bytes written (may be less than requested). | `module/io/fileio.go:fileioWrite` |
-| <Cpy path="Modules/_io/fileio.c" lines="661-760">661-760</Cpy> | `fileio_seek`, `fileio_tell`, `fileio_truncate` | `lseek(2)` for seek/tell; `ftruncate(2)` for truncate; seekable flag cached after first successful `lseek`. | `module/io/fileio.go:fileioSeek` |
-| <Cpy path="Modules/_io/fileio.c" lines="761-840">761-840</Cpy> | `fileio_close`, `fileio_isatty`, `fileio_readable`, `fileio_writable` | Close calls `close(2)` if `closefd`; `isatty` calls `isatty(3)`; readable/writable return the mode flags. | `module/io/fileio.go:fileioClose` |
-| <Cpy path="Modules/_io/fileio.c" lines="841-900">841-900</Cpy> | `fileio_repr`, `FileIO_Type` spec, slot table | `tp_repr` returns `<_io.FileIO name=... mode=... closefd=...>`; type spec registered in the `_io` module state. | `module/io/fileio.go:FileIOType` |
+| <Cpy path="Modules/_io/fileio.c" lines="1-200">1-200</Cpy> | `fileio` struct, `fileio_new`, `fileio_init` / `fileio_open` | Type struct (fd, mode flags, closefd), constructor: parse mode string, call `open(2)`, set `O_CLOEXEC`. | `module/io/` |
+| <Cpy path="Modules/_io/fileio.c" lines="200-400">200-400</Cpy> | `fileio_read`, `fileio_readall`, `fileio_readinto` | Read path: single `read(2)` call inside `_Py_EINTR_RETRY`, `readall` in a loop growing a `bytearray`. | `module/io/` |
+| <Cpy path="Modules/_io/fileio.c" lines="400-600">400-600</Cpy> | `fileio_write` | Write path: single `write(2)` call inside `_Py_EINTR_RETRY`, returns bytes written. | `module/io/` |
+| <Cpy path="Modules/_io/fileio.c" lines="600-900">600-900</Cpy> | `fileio_seek`, `fileio_tell`, `fileio_truncate`, `fileio_close`, `fileio_finalize`, method table, `FileIO_Type` | Seek/tell/truncate wrapping `lseek(2)` and `ftruncate(2)`; `close` that optionally closes the fd; type definition. | `module/io/` |
 
 ## Reading
 
-### `fileio_init` — mode parsing and `open(2)` (lines 61 to 350)
+### Open flags mapping (lines 1 to 200)
 
-<CpyLink path="Modules/_io/fileio.c" lines="61-350" />
+<CpyLink path="Modules/_io/fileio.c" lines="1-200" />
 
-`fileio_init` is the longest function in the file. It parses the mode string
-one character at a time, checking for contradictions (`r` and `w` together,
-duplicate characters), then maps the result to POSIX flags:
+`fileio_open` converts the Python mode string into POSIX flags. The mapping
+is stricter than `fopen(3)`: each character is checked individually and
+invalid combinations are rejected:
 
 ```c
-/* Build the flags for open(2). */
-if (readable && writable)
-    flags = O_RDWR;
-else if (readable)
-    flags = O_RDONLY;
-else
-    flags = O_WRONLY;
-if (creating)  flags |= O_CREAT | O_EXCL;
-if (writable)  flags |= O_CREAT;
-if (appending) flags |= O_APPEND;
-if (truncating && !appending) flags |= O_TRUNC;
+static int
+fileio_init(PyObject *oself, PyObject *args, PyObject *kwds)
+{
+    int flags = 0;
+    int readable = 0, writable = 0, appending = 0, creating = 0;
+
+    for (const char *s = mode; *s; s++) {
+        switch (*s) {
+        case 'r': readable  = 1; break;
+        case 'w': writable  = 1; break;
+        case 'a': appending = 1; break;
+        case 'x': creating  = 1; break;
+        case 'b':               break;  /* binary: no-op for FileIO */
+        case '+': readable = writable = 1; break;
+        default:
+            PyErr_Format(PyExc_ValueError,
+                         "invalid mode: '%.200s'", mode);
+            return -1;
+        }
+    }
+
+    if (readable && writable)  flags = O_RDWR;
+    else if (readable)         flags = O_RDONLY;
+    else                       flags = O_WRONLY;
+
+    if (creating)  flags |= O_EXCL  | O_CREAT;
+    if (writable && !appending && !creating)
+                   flags |= O_CREAT | O_TRUNC;
+    if (appending) flags |= O_APPEND | O_CREAT;
+
 #ifdef O_CLOEXEC
-flags |= O_CLOEXEC;
+    flags |= O_CLOEXEC;
 #endif
-```
 
-When `name` is an integer the value is used directly as an fd (and
-`closefd` defaults to `False`). When `opener` is given it is called as
-`opener(name, flags)` and must return a non-negative integer:
-
-```c
-if (opener != Py_None) {
-    PyObject *fdobj = PyObject_CallFunctionObjArgs(opener, nameobj,
-                                                   PyLong_FromLong(flags), NULL);
+    do {
+        fd = open(name, flags, 0666);
+    } while (fd < 0 && errno == EINTR && !(PyErr_CheckSignals()));
     ...
-    self->fd = PyLong_AsInt(fdobj);
-} else {
-    Py_BEGIN_ALLOW_THREADS
-    self->fd = open(name_str, flags, 0666);
-    Py_END_ALLOW_THREADS
 }
 ```
 
-### `fileio_read` and `fileio_readall` (lines 351 to 480)
+After `open` succeeds, if `O_CLOEXEC` was not available at compile time,
+`fileio_open` sets `FD_CLOEXEC` with `fcntl(fd, F_SETFD, FD_CLOEXEC)` as
+a fallback. This matches CPython's policy that file descriptors opened by
+Python are close-on-exec by default (PEP 446).
 
-<CpyLink path="Modules/_io/fileio.c" lines="351-480" />
+When `file` is an integer rather than a path, `FileIO` accepts the existing
+fd directly and skips the `open` call. In that case, the `closefd` flag
+controls whether `FileIO.close()` will call `close(2)` on the fd.
 
-`fileio_read` handles the common case of reading up to `size` bytes:
+### `_Py_EINTR_RETRY` around syscalls (lines 200 to 600)
+
+<CpyLink path="Modules/_io/fileio.c" lines="200-600" />
+
+Every blocking system call in `fileio.c` is wrapped in `_Py_EINTR_RETRY`.
+The macro expands to a loop that retries on `EINTR` and checks for pending
+Python signals between retries:
+
+```c
+/* From cpython/Include/cpython/fileutils.h */
+#define _Py_EINTR_RETRY(result, expression) \
+    do {                                    \
+        errno = 0;                          \
+        result = (expression);              \
+    } while (result < 0 && errno == EINTR && \
+             !(PyErr_CheckSignals()))
+```
+
+Applied to `read` and `write`:
 
 ```c
 static PyObject *
 fileio_read(fileio *self, PyObject *args)
 {
+    Py_ssize_t n;
+    PyObject *bytes;
     ...
     bytes = PyBytes_FromStringAndSize(NULL, size);
     ...
-    do {
-        Py_BEGIN_ALLOW_THREADS
-        errno = 0;
-        n = read(self->fd, PyBytes_AS_STRING(bytes), size);
-        Py_END_ALLOW_THREADS
-    } while (n < 0 && errno == EINTR &&
-             !(res = PyErr_CheckSignals()));
-    ...
-    if (n < size)
+    Py_BEGIN_ALLOW_THREADS
+    _Py_EINTR_RETRY(n, read(self->fd,
+                            PyBytes_AS_STRING(bytes),
+                            (size_t)size));
+    Py_END_ALLOW_THREADS
+
+    if (n < 0) {
+        Py_DECREF(bytes);
+        return PyErr_SetFromErrno(PyExc_OSError);
+    }
+    if (n != size)
         _PyBytes_Resize(&bytes, n);
     return bytes;
 }
 ```
 
-`fileio_readall` first calls `fstat` on `self->fd` to learn the file size,
-pre-allocates a `PyBytes` buffer of that size, and then reads in a loop until
-EOF. On pipes and devices where `fstat` returns `st_size == 0`, it falls back
-to a 8192-byte incremental read loop.
+The GIL is released around the entire retry loop so that other threads
+can run during blocking I/O. `PyErr_CheckSignals` is safe to call from
+the main thread even without the GIL on CPython's reference implementation
+because it only reads `Handlers[].tripped` without modifying Python objects.
 
-### `fileio_write` and EINTR handling (lines 571 to 660)
+`fileio_readall` uses a different strategy: it calls `fstat` first to
+determine the file size, allocates a `bytearray` of that size, and fills
+it with a single `read(2)` call. If `fstat` is unavailable or the size is
+unknown (e.g. a pipe), it falls back to repeated `read` calls doubling a
+`bytearray` until EOF.
 
-<CpyLink path="Modules/_io/fileio.c" lines="571-660" />
-
-`fileio_write` calls `write(2)` once and returns the actual byte count to the
-caller. It does not loop to complete a short write; that is the responsibility
-of the buffered layer above. EINTR is retried in a do-while loop consistent
-with the read path:
+`fileio_write` follows the same pattern as `fileio_read`:
 
 ```c
 static PyObject *
 fileio_write(fileio *self, PyObject *args)
 {
-    Py_buffer pbuf;
     Py_ssize_t n;
-    int res;
-
-    if (!PyArg_ParseTuple(args, "y*", &pbuf))
-        return NULL;
+    Py_buffer pbuf;
     ...
-    do {
-        Py_BEGIN_ALLOW_THREADS
-        errno = 0;
-        n = write(self->fd, pbuf.buf, pbuf.len);
-        Py_END_ALLOW_THREADS
-    } while (n < 0 && errno == EINTR &&
-             !(res = PyErr_CheckSignals()));
+    Py_BEGIN_ALLOW_THREADS
+    _Py_EINTR_RETRY(n, write(self->fd, pbuf.buf, (size_t)pbuf.len));
+    Py_END_ALLOW_THREADS
 
     PyBuffer_Release(&pbuf);
-    if (n < 0) return PyErr_SetFromErrno(PyExc_OSError);
+    if (n < 0)
+        return PyErr_SetFromErrno(PyExc_OSError);
     return PyLong_FromSsize_t(n);
 }
 ```
 
-### `fileio_seek`, `fileio_tell`, and `fileio_truncate` (lines 661 to 760)
+`write` may return fewer bytes than requested (short write). `FileIO` does
+not retry in that case; returning `n < len(buf)` is correct per POSIX, and
+`BufferedWriter` above it handles looping.
 
-<CpyLink path="Modules/_io/fileio.c" lines="661-760" />
+## gopy mirror
 
-Seek delegates directly to `lseek(2)`. The `seekable` flag is probed once on
-first call: if `lseek` succeeds, the flag is set to `1` and cached:
+`module/io/` (pending). The Go port wraps an `*os.File`. `read` calls
+`file.Read`, `write` calls `file.Write`. EINTR is transparent in Go's
+runtime on Linux (Go syscalls restart automatically); on other platforms
+the retry loop is explicit. `O_CLOEXEC` is set by `syscall.O_CLOEXEC`
+when opening. The `closefd` flag is honored in `FileIO.Close`.
 
-```c
-static PyObject *
-fileio_seek(fileio *self, PyObject *args)
-{
-    PyObject *posobj;
-    off_t pos;
-    int whence;
+## CPython 3.14 changes
 
-    if (!PyArg_ParseTuple(args, "Oi", &posobj, &whence))
-        return NULL;
-    pos = PyLong_AsOff_t(posobj);
-    ...
-    Py_BEGIN_ALLOW_THREADS
-    pos = lseek(self->fd, pos, whence);
-    Py_END_ALLOW_THREADS
-    if (pos == -1)
-        return PyErr_SetFromErrno(PyExc_OSError);
-    return PyLong_FromOff_t(pos);
-}
-```
-
-`fileio_tell` is `lseek(fd, 0, SEEK_CUR)`. `fileio_truncate` calls
-`ftruncate(2)` if a size is given, otherwise it calls `fileio_tell` first
-to get the current position and truncates there.
-
-## Notes for the gopy mirror
-
-`module/io/fileio.go` is planned for v0.14 as part of raw file I/O support.
-On the Go side `os.File` provides all the underlying syscalls; `fileio_init`
-maps to `os.OpenFile(name, flags, perm)`. The `opener` callable path will be
-supported by accepting a Go `func(name string, flag int) (int, error)`. The
-GIL-release annotations (`Py_BEGIN_ALLOW_THREADS`) have no counterpart in
-gopy since Go goroutines cooperate with the scheduler natively.
-
-## CPython 3.14 changes worth noting
-
-`O_CLOEXEC` is now set unconditionally where available, superseding the
-earlier per-platform `#ifdef` ladder. The `blksize` optimization in
-`fileio_readall` (using `st_blksize` from `fstat` instead of a fixed 8192)
-was tightened in 3.14 to clamp the block size to a 1 MiB maximum, avoiding
-excess allocation on network file systems that report enormous block sizes.
+`O_CLOEXEC` as the default for all Python-opened file descriptors was
+established by PEP 446 in Python 3.4. `_Py_EINTR_RETRY` replaced
+hand-written `errno == EINTR` loops in 3.5 as part of PEP 475. `FileIO`
+gained the `opener` keyword argument in 3.3, which allows a custom callable
+to replace `open(2)`. The `blksize` attribute (for `readall` buffer sizing)
+was added in 3.12. Multi-phase init for `_io` was adopted in 3.12.

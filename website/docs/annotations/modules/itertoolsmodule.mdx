@@ -1,11 +1,11 @@
 ---
 title: Modules/itertoolsmodule.c
-description: C implementation of the itertools module. Covers count, cycle, repeat, chain, compress, islice, dropwhile, takewhile, filterfalse, starmap, accumulate, groupby, zip_longest, product, permutations, combinations, combinations_with_replacement, and pairwise.
+description: All 18 itertools types as C extension types, each with __next__, __iter__, __reduce__, and __setstate__ for pickling and re-entrant resumption.
 cpython_path: Modules/itertoolsmodule.c
 cpython_version: "3.14"
-lines: 4000
+lines: 4500
 status: annotated
-ported_to: module/itertools/module.go
+ported_to: module/itertools/
 ---
 
 import {Cpy, CpyLink} from '@site/src/components/Cpy';
@@ -14,222 +14,240 @@ import {Cpy, CpyLink} from '@site/src/components/Cpy';
 
 <CpyLink path="Modules/itertoolsmodule.c" />
 
-`itertoolsmodule.c` implements the entire `itertools` standard-library module
-in C. Every object is a distinct C struct with a `tp_iternext` slot; none of
-them hold the full sequence in memory; each produces the next value on demand.
+The `itertools` module. Every public object is a C extension type, not a
+Python class. Each type stores only the state needed for `__next__` and
+exposes `__reduce__` / `__setstate__` so that a partially-consumed iterator
+can be pickled and resumed.
 
-The module contains 18 iterator types. They divide into three groups by
-structure. The *infinite iterators* (`count`, `cycle`, `repeat`) run without
-a termination condition unless the caller stops pulling. The *filtering and
-mapping iterators* (`compress`, `islice`, `dropwhile`, `takewhile`,
-`filterfalse`, `starmap`, `accumulate`, `groupby`) each wrap exactly one
-source iterator and apply a transformation or predicate per step. The
-*combinatoric iterators* (`product`, `permutations`, `combinations`,
-`combinations_with_replacement`, `pairwise`, `zip_longest`, `chain`) operate
-over a pool of elements captured at construction time or merge several
-iterators.
+The 18 types split into four groups by function:
 
-Each iterator type follows the same shape: a `*_new` / `*_init` function that
-validates arguments and sets initial state, a `*_next` function registered as
-`tp_iternext`, a `*_dealloc` function, and optional `*_reduce` / `*_setstate`
-for pickling support.
+- **Infinite iterators.** `count`, `cycle`, `repeat` never stop (unless
+  `repeat` is given a `times` argument).
+- **Filtering and slicing.** `compress`, `filterfalse`, `islice`, `takewhile`,
+  `dropwhile`.
+- **Combining.** `chain`, `starmap`.
+- **Grouping and accumulation.** `groupby`, `accumulate`.
+- **Combinatoric.** `product`, `permutations`, `combinations`,
+  `combinations_with_replacement`, `pairwise`, `batched`.
+
+All 18 types follow the same structural template: a `struct` with
+`PyObject_HEAD` plus state fields; a `_new` function that validates and
+stores arguments; an `iternext` function implementing `__next__`; a
+`__reduce__` that returns `(type, constructor_args, state)` as a 3-tuple;
+and a `__setstate__` that restores the mutable state fields.
 
 ## Map
 
 | Lines | Symbol | Role | gopy |
 | ----- | ------ | ---- | ---- |
-| <Cpy path="Modules/itertoolsmodule.c" lines="1-100">1-100</Cpy> | includes, `Py_ITERSEARCH_*` | Preamble and shared helpers. | `module/itertools/module.go` (preamble) |
-| <Cpy path="Modules/itertoolsmodule.c" lines="100-350">100-350</Cpy> | `count`, `count_new`, `count_next`, `count_repr` | Infinite arithmetic counter with `start` and `step` of arbitrary numeric type. | `module/itertools/module.go:Count` |
-| <Cpy path="Modules/itertoolsmodule.c" lines="350-600">350-600</Cpy> | `cycle`, `cycle_new`, `cycle_next` | Save source elements to a list on the first pass; loop over the saved list on subsequent passes. | `module/itertools/module.go:Cycle` |
-| <Cpy path="Modules/itertoolsmodule.c" lines="600-750">600-750</Cpy> | `repeat`, `repeat_new`, `repeat_next`, `repeat_len` | Repeat one object N times or infinitely; `__length_hint__` returns the remaining count. | `module/itertools/module.go:Repeat` |
-| <Cpy path="Modules/itertoolsmodule.c" lines="750-1000">750-1000</Cpy> | `chain`, `chain_new`, `chain_next`, `chain_from_iterable` | Iterate through each sub-iterable in turn; `from_iterable` lazily fetches the next sub-iterable. | `module/itertools/module.go:Chain` |
-| <Cpy path="Modules/itertoolsmodule.c" lines="1000-1200">1000-1200</Cpy> | `compress`, `compress_new`, `compress_next` | Yield `data[i]` when `selectors[i]` is truthy; advance both iterators in lockstep. | `module/itertools/module.go:Compress` |
-| <Cpy path="Modules/itertoolsmodule.c" lines="1200-1500">1200-1500</Cpy> | `islice`, `islice_new`, `islice_next` | Lazy slice with `start`, `stop`, `step`; tracks a `cnt` position and skips items without materialising them. | `module/itertools/module.go:ISlice` |
-| <Cpy path="Modules/itertoolsmodule.c" lines="1500-1750">1500-1750</Cpy> | `dropwhile`, `takewhile`, `filterfalse` | Predicate-controlled pass-through iterators; `dropwhile` has a `start` flag that flips once the predicate becomes false. | `module/itertools/module.go:Dropwhile` |
-| <Cpy path="Modules/itertoolsmodule.c" lines="1750-2000">1750-2000</Cpy> | `starmap`, `accumulate` | `starmap` unpacks each item as args before calling the function; `accumulate` maintains a running `total` with an optional `initial`. | `module/itertools/module.go:Starmap` |
-| <Cpy path="Modules/itertoolsmodule.c" lines="2000-2300">2000-2300</Cpy> | `groupby`, `_grouper` | Group consecutive equal-key items; `_grouper` is a subordinate iterator that yields the current group's elements. | `module/itertools/module.go:Groupby` |
-| <Cpy path="Modules/itertoolsmodule.c" lines="2300-2600">2300-2600</Cpy> | `zip_longest`, `zip_longest_new`, `zip_longest_next` | Zip N iterators, filling exhausted ones with `fillvalue` until all are done. | `module/itertools/module.go:ZipLongest` |
-| <Cpy path="Modules/itertoolsmodule.c" lines="2600-3000">2600-3000</Cpy> | `product`, `product_new`, `product_next` | Cartesian product; captures a tuple-of-tuples pool at construction, then steps through mixed-radix indices. | `module/itertools/module.go:Product` |
-| <Cpy path="Modules/itertoolsmodule.c" lines="3000-3400">3000-3400</Cpy> | `permutations`, `combinations`, `combinations_with_replacement` | Combinatoric iterators over an index array; advance the rightmost index that can still increment, then fill right. | `module/itertools/module.go:Permutations` |
-| <Cpy path="Modules/itertoolsmodule.c" lines="3400-3600">3400-3600</Cpy> | `pairwise`, `pairwise_new`, `pairwise_next` | Buffer the previous element; yield `(prev, item)` for every step after the first. | `module/itertools/module.go:Pairwise` |
-| <Cpy path="Modules/itertoolsmodule.c" lines="3600-4000">3600-4000</Cpy> | `itertools_methods[]`, `itertoolsmodule`, `PyInit_itertools` | Method table (empty, since all objects are types not module functions), type object registrations, and entry point. | `module/itertools/module.go:Module` |
+| <Cpy path="Modules/itertoolsmodule.c" lines="1-120">1-120</Cpy> | includes, `_itertoolsmodule` state, helper macros | Per-interpreter state and internal utilities. | `module/itertools/module.go:state` |
+| <Cpy path="Modules/itertoolsmodule.c" lines="120-300">120-300</Cpy> | `count`, `count_new`, `count_next`, `count_repr` | Infinite arithmetic sequence. Stores start and step as Python objects. | `module/itertools/module.go:Count` |
+| <Cpy path="Modules/itertoolsmodule.c" lines="300-500">300-500</Cpy> | `cycle`, `cycle_new`, `cycle_next` | Infinite repetition of an iterable. Buffers the first pass in a list. | `module/itertools/module.go:Cycle` |
+| <Cpy path="Modules/itertoolsmodule.c" lines="500-600">500-600</Cpy> | `repeat`, `repeat_new`, `repeat_next` | Emit a single object `times` times (or infinitely). | `module/itertools/module.go:Repeat` |
+| <Cpy path="Modules/itertoolsmodule.c" lines="600-800">600-800</Cpy> | `chain`, `chain_new`, `chain_from_iterable`, `chain_next` | Chain multiple iterables end-to-end. | `module/itertools/module.go:Chain` |
+| <Cpy path="Modules/itertoolsmodule.c" lines="800-1000">800-1000</Cpy> | `compress`, `compress_new`, `compress_next` | Filter `data` by `selectors`. | `module/itertools/module.go:Compress` |
+| <Cpy path="Modules/itertoolsmodule.c" lines="1000-1200">1000-1200</Cpy> | `filterfalse`, `filterfalse_new`, `filterfalse_next`, `islice`, `islice_new`, `islice_next` | Predicate-false filter and step-slicing. | `module/itertools/module.go:FilterFalse` |
+| <Cpy path="Modules/itertoolsmodule.c" lines="1200-1600">1200-1600</Cpy> | `starmap`, `starmap_new`, `starmap_next`, `takewhile`, `takewhile_new`, `takewhile_next`, `dropwhile`, `dropwhile_new`, `dropwhile_next` | Map with unpacking, and predicate-based take/drop. | `module/itertools/module.go:Starmap` |
+| <Cpy path="Modules/itertoolsmodule.c" lines="1600-2000">1600-2000</Cpy> | `groupby`, `groupby_new`, `groupby_next`, `_grouper`, `_grouper_next` | Group consecutive equal-key elements. Stores `tgtkey`, `currkey`, `currvalue`. | `module/itertools/module.go:GroupBy` |
+| <Cpy path="Modules/itertoolsmodule.c" lines="2000-2400">2000-2400</Cpy> | `accumulate`, `accumulate_new`, `accumulate_next` | Running total with optional binary function. | `module/itertools/module.go:Accumulate` |
+| <Cpy path="Modules/itertoolsmodule.c" lines="2400-3000">2400-3000</Cpy> | `product`, `product_new`, `product_next` | Cartesian product of input iterables. Stores pool arrays and index array. | `module/itertools/module.go:Product` |
+| <Cpy path="Modules/itertoolsmodule.c" lines="3000-3500">3000-3500</Cpy> | `permutations`, `permutations_new`, `permutations_next` | Successive r-length permutations from a pool. | `module/itertools/module.go:Permutations` |
+| <Cpy path="Modules/itertoolsmodule.c" lines="3500-4000">3500-4000</Cpy> | `combinations`, `combinations_new`, `combinations_next`, `cwr`, `cwr_new`, `cwr_next` | r-length combinations and combinations-with-replacement. | `module/itertools/module.go:Combinations` |
+| <Cpy path="Modules/itertoolsmodule.c" lines="4000-4200">4000-4200</Cpy> | `pairwise`, `pairwise_new`, `pairwise_next` | Emit overlapping pairs `(a, b), (b, c), ...`. | `module/itertools/module.go:Pairwise` |
+| <Cpy path="Modules/itertoolsmodule.c" lines="4200-4400">4200-4400</Cpy> | `batched`, `batched_new`, `batched_next` | Collect `n` items at a time into tuples. | `module/itertools/module.go:Batched` |
+| <Cpy path="Modules/itertoolsmodule.c" lines="4400-4500">4400-4500</Cpy> | `itertoolsmodule`, `PyInit_itertools` | Module definition and type registration. | `module/itertools/module.go:Module` |
 
 ## Reading
 
-### `cycle`: two-phase infinite loop (lines 350 to 600)
+### `groupby` key tracking (lines 1600 to 2000)
 
-<CpyLink path="Modules/itertoolsmodule.c" lines="350-600" />
+<CpyLink path="Modules/itertoolsmodule.c" lines="1600-2000" />
 
-`cycle` has two phases controlled by its `firstpass` flag. During the first
-pass it both forwards items and appends them to a `saved` list. Once the
-source is exhausted it loops over `saved` indefinitely:
-
-```c
-static PyObject *
-cycle_next(cycleobject *lz)
-{
-    if (lz->it != NULL) {
-        /* First pass: pull from source. */
-        PyObject *item = (*Py_TYPE(lz->it)->tp_iternext)(lz->it);
-        if (item != NULL) {
-            if (lz->firstpass == 0) {
-                if (PyList_Append(lz->saved, item) < 0) {
-                    Py_DECREF(item);
-                    return NULL;
-                }
-            }
-            return item;
-        }
-        /* Source exhausted — switch to saved list. */
-        Py_CLEAR(lz->it);
-        if (PyList_GET_SIZE(lz->saved) == 0)
-            return NULL;   /* empty input: stop */
-        lz->index = 0;
-    }
-
-    /* Subsequent passes: index through saved. */
-    PyObject *item = PyList_GET_ITEM(lz->saved, lz->index);
-    lz->index++;
-    if (lz->index >= PyList_GET_SIZE(lz->saved))
-        lz->index = 0;
-    Py_INCREF(item);
-    return item;
-}
-```
-
-`firstpass` is set when the object is unpickled via `__setstate__`, indicating
-that the `saved` list is already complete and the first-pass accumulation
-should be skipped.
-
-### `islice`: lazy slicing with a positional counter (lines 1200 to 1500)
-
-<CpyLink path="Modules/itertoolsmodule.c" lines="1200-1500" />
-
-`islice` tracks a `cnt` integer (the current source position) and a `next`
-integer (the source position of the next value to yield). Between `cnt` and
-`next` it calls `iternext` and discards:
+`groupby` is the most stateful type in the file. It advances the underlying
+iterator lazily, sharing elements between the outer `groupby` iterator and
+the inner `_grouper` subiterator for the current group. The trickiest part
+is that advancing the outer `groupby` to the next group must exhaust (or
+discard) the current `_grouper`.
 
 ```c
+typedef struct {
+    PyObject_HEAD
+    PyObject   *it;          /* underlying iterator */
+    PyObject   *keyfunc;     /* None or callable */
+    PyObject   *tgtkey;      /* key for the next group to be yielded */
+    PyObject   *currkey;     /* key of the element in currvalue */
+    PyObject   *currvalue;   /* most recently fetched element */
+    const       _groupby_module_state *gs;
+} groupbyobject;
+
 static PyObject *
-islice_next(isliceobject *lz)
+groupby_next(groupbyobject *lz, PyObject *Py_UNUSED(ignored))
 {
-    PyObject *item;
-    Py_ssize_t stop = lz->stop;
-
-    if (lz->cnt >= stop)
-        return NULL;
-
-    /* Skip items between last yield and next target. */
-    while (lz->cnt < lz->next) {
-        item = (*Py_TYPE(lz->it)->tp_iternext)(lz->it);
-        if (item == NULL) return NULL;
-        Py_DECREF(item);
-        lz->cnt++;
-    }
-
-    item = (*Py_TYPE(lz->it)->tp_iternext)(lz->it);
-    if (item == NULL) return NULL;
-    lz->cnt++;
-    lz->next += lz->step;
-    return item;
-}
-```
-
-The skip loop never stores the discarded items. `stop = -1` encodes "no stop"
-(the `islice(it, start, None)` form). `step` defaults to 1. The constructor
-converts the Python `None`-or-int arguments into C `Py_ssize_t` fields,
-raising `ValueError` for negative values and `TypeError` for non-integers.
-
-### `groupby` and `_grouper` (lines 2000 to 2300)
-
-<CpyLink path="Modules/itertoolsmodule.c" lines="2000-2300" />
-
-`groupby` yields `(key, group_iterator)` pairs. Consecutive elements with
-equal keys form one group. The tricky part is that advancing the outer
-`groupby` iterator must exhaust the previous `_grouper` before pulling the
-next element from the source:
-
-```c
-static PyObject *
-groupby_next(groupbyobject *gbo)
-{
-    PyObject *newvalue, *newkey, *r;
-
-    /* Exhaust the previous grouper before fetching the next key. */
-    if (gbo->currgroupe != NULL) {
-        for (;;) {
-            r = grouper_next((grouperobject *)gbo->currgroupe);
-            if (r == NULL) break;
-            Py_DECREF(r);
-        }
-        PyErr_Clear();
-        Py_CLEAR(gbo->currgroupe);
-    }
-
-    if (gbo->tgtkey == NULL) {
-        /* First call: fetch the first element. */
-        newvalue = (*Py_TYPE(gbo->it)->tp_iternext)(gbo->it);
+    PyObject *newvalue, *newkey, *r, *grouper;
+    ...
+    /* Advance past the current group */
+    while (lz->currkey != NULL) {
+        int rcmp = PyObject_RichCompareBool(lz->tgtkey, lz->currkey, Py_EQ);
+        if (rcmp <= 0) break;   /* new key or error */
+        /* Still in the old group: consume one more element */
+        newvalue = (*Py_TYPE(lz->it)->tp_iternext)(lz->it);
         if (newvalue == NULL) return NULL;
-        Py_XSETREF(gbo->currvalue, newvalue);
-        /* ... compute new key ... */
+        ...
+        if (lz->keyfunc == Py_None)
+            newkey = newvalue;
+        else
+            newkey = PyObject_CallOneArg(lz->keyfunc, newvalue);
+        Py_XDECREF(lz->currkey);
+        lz->currkey = newkey;
+        Py_XDECREF(lz->currvalue);
+        lz->currvalue = newvalue;
     }
-    /* ... compare tgtkey to currkey, advance until different ... */
-
-    r = PyTuple_Pack(2, gbo->currkey, gbo->currgroupe);
+    /* Establish the new target key */
+    Py_XINCREF(lz->currkey);
+    Py_XDECREF(lz->tgtkey);
+    lz->tgtkey = lz->currkey;
+    ...
+    grouper = _grouper_create(lz, lz->tgtkey);
+    r = PyTuple_Pack(2, lz->tgtkey, grouper);
     return r;
 }
 ```
 
-Each `_grouper` holds a back-reference to the parent `groupby` object and
-calls `groupby_next_value` (an internal helper) instead of `tp_iternext` on
-the source, so that both the outer and inner iterator share the same source
-position. This means that holding onto a `_grouper` after the outer iterator
-has advanced gives an already-exhausted iterator, not stale data.
+`lz->tgtkey` is the key of the group being consumed now. Each call to
+`groupby_next` advances past any remaining elements of the previous `_grouper`
+by comparing `currkey` against `tgtkey` in a `while` loop. The `_grouper`
+subiterator just reads `lz->currvalue` and advances `lz->it` until `currkey`
+changes; it holds a borrowed reference to the parent `groupbyobject` so that
+the two share state.
 
-### `product`: Cartesian product with mixed-radix indices (lines 2600 to 3000)
+This means the `_grouper` subiterators are invalidated when the outer `groupby`
+advances: the documented behavior that a previous group's iterator must be
+fully consumed (or discarded) before calling `next(groupby_iter)` again.
 
-<CpyLink path="Modules/itertoolsmodule.c" lines="2600-3000" />
+### `product` cartesian product (lines 2400 to 3000)
 
-`product` captures copies of all input iterables as tuples at construction
-time, then maintains an `indices` array of length `npools` (one entry per
-pool, counting from the rightmost):
+<CpyLink path="Modules/itertoolsmodule.c" lines="2400-3000" />
+
+`product` materializes all input iterables into tuple pools at construction
+time. It then maintains an index array of length `npools`, where
+`indices[i]` is the current position within `pools[i]`.
 
 ```c
 static PyObject *
-product_next(productobject *lz)
+product_next(productobject *lz, PyObject *Py_UNUSED(ignored))
 {
-    PyObject **pools = lz->pools;
+    PyObject *pool, *elem, *oldelem, **pools, **result;
+    Py_ssize_t npools = PyTuple_GET_SIZE(lz->pools);
     Py_ssize_t *indices = lz->indices;
-    Py_ssize_t npools = lz->npools;
-
-    /* Build result tuple from current indices. */
-    PyObject *result = PyTuple_New(npools);
-    for (Py_ssize_t i = 0; i < npools; i++) {
-        PyObject *pool = pools[i];
-        PyObject *item = PyTuple_GET_ITEM(pool, indices[i]);
-        Py_INCREF(item);
-        PyTuple_SET_ITEM(result, i, item);
-    }
-
-    /* Advance indices right-to-left (mixed-radix increment). */
-    Py_ssize_t i = npools - 1;
-    while (i >= 0) {
-        indices[i]++;
-        if (indices[i] == PyTuple_GET_SIZE(pools[i])) {
-            indices[i] = 0;
-            i--;
-        } else {
-            break;
+    ...
+    /* Build the current result tuple */
+    if (lz->stopped)
+        return NULL;
+    result = lz->result;
+    if (result == NULL) {
+        /* First call: construct the initial tuple */
+        ...
+    } else {
+        /* Increment the rightmost index that has not overflowed */
+        Py_ssize_t i = npools - 1;
+        while (i >= 0) {
+            pool = PyTuple_GET_ITEM(lz->pools, i);
+            indices[i]++;
+            if (indices[i] == PyTuple_GET_SIZE(pool)) {
+                indices[i] = 0;   /* wrap and carry */
+                i--;
+            } else {
+                break;
+            }
+        }
+        if (i < 0) {
+            lz->stopped = 1;
+            return NULL;
+        }
+        /* Update only the changed suffix of result */
+        for (; i < npools; i++) {
+            pool = PyTuple_GET_ITEM(lz->pools, i);
+            elem = PyTuple_GET_ITEM(pool, indices[i]);
+            oldelem = result[i];
+            Py_INCREF(elem);
+            result[i] = elem;
+            Py_DECREF(oldelem);
         }
     }
-    if (i < 0) {
-        lz->stopped = 1;   /* carry propagated past leftmost pool */
-    }
-    return result;
+    ...
 }
 ```
 
-The `repeat` keyword argument multiplies each pool `repeat` times by
-repeating the pool tuple that many times during construction. The total
-iteration count is the product of all pool sizes, which can be very large;
-`product` is fully lazy and computes nothing until `next()` is called.
+The "increment rightmost, carry left" pattern is identical to incrementing a
+mixed-radix counter where each digit's radix is the size of its pool. The
+optimization of updating only the changed suffix (`for (; i < npools; i++)`)
+avoids rebuilding the entire result tuple on each step.
+
+### `permutations` and `combinations` pool rotation (lines 3000 to 4000)
+
+<CpyLink path="Modules/itertoolsmodule.c" lines="3000-4000" />
+
+`permutations` stores a pool (copy of input), an index array, and a cycles
+array. The cycles array implements the factorial number system used to
+enumerate permutations without recursion:
+
+```c
+static PyObject *
+permutations_next(permutationsobject *po, PyObject *Py_UNUSED(ignored))
+{
+    Py_ssize_t i, j, k, r = po->r, n;
+    Py_ssize_t *indices = po->indices, *cycles = po->cycles;
+    ...
+    /* Advance cycles from the right */
+    i = r - 1;
+    while (i >= 0) {
+        cycles[i]--;
+        if (cycles[i] == 0) {
+            /* Rotate indices[i:] left by one */
+            PyObject *tmp = pool[indices[i]];
+            for (j = i; j < n - 1; j++)
+                indices[j] = indices[j+1];
+            indices[n-1] = i;   /* not pool index; see CPython note */
+            cycles[i] = n - i;
+            i--;
+        } else {
+            j = cycles[i];
+            /* Swap indices[i] with indices[n-j] */
+            k = indices[i]; indices[i] = indices[n-j]; indices[n-j] = k;
+            /* Emit current r-prefix */
+            ...
+            return result;
+        }
+    }
+    po->stopped = 1;
+    return NULL;
+}
+```
+
+The `cycles[i]` counter counts down from `n - i` to 1. When it hits 0,
+the element at position `i` has been paired with every element to its right,
+so the sub-array is rotated to bring the next candidate into position `i`.
+This is Heap's-algorithm-like but for partial permutations of length `r`.
+
+`combinations` is simpler: it maintains a single index array and advances
+the rightmost index that can still be incremented, then fills the suffix
+with consecutive values. `combinations_with_replacement` differs only in
+that each index can repeat the value of its predecessor (the non-strict
+monotone constraint instead of the strict monotone constraint).
+
+## gopy mirror
+
+`module/itertools/module.go` (pending). Each type maps to a Go struct
+implementing the `objects.Iter` interface. The state fields translate
+directly: Go slices replace `PyObject*` pool arrays, and `int` or `int64`
+replaces `Py_ssize_t` index arrays. `__reduce__` / `__setstate__` will be
+implemented via Go's `Pickler` interface.
+
+## CPython 3.14 changes
+
+`pairwise` was added in Python 3.10. `batched` was added in Python 3.12,
+with the `strict` keyword argument added in 3.13 to raise `ValueError` when
+the last batch is shorter than `n`. `accumulate` gained the `initial`
+keyword argument in 3.8. `chain.from_iterable` has been available since
+2.6 but was moved to a classmethod slot in 3.3. The `__reduce__` /
+`__setstate__` protocol is stable across 3.x.

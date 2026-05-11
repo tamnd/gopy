@@ -1,11 +1,11 @@
 ---
 title: Lib/subprocess.py
-description: Full-featured subprocess spawning and communication layer; wraps POSIX fork+exec and Windows CreateProcess behind a single Popen class.
+description: High-level and low-level process spawning API; wraps posix_spawn/fork+exec on POSIX and CreateProcess on Windows with deadlock-safe pipe I/O.
 cpython_path: Lib/subprocess.py
 cpython_version: "3.14"
-lines: 2700
+lines: 2600
 status: annotated
-ported_to: module/subprocess/module.go
+ported_to: (stdlib pending)
 ---
 
 import {Cpy, CpyLink} from '@site/src/components/Cpy';
@@ -14,201 +14,162 @@ import {Cpy, CpyLink} from '@site/src/components/Cpy';
 
 <CpyLink path="Lib/subprocess.py" />
 
-`subprocess` provides the `Popen` class and a handful of convenience
-wrappers for launching child processes, wiring up their stdio streams, and
-collecting their results. It replaced the older `os.popen`, `os.system`,
-and `commands` APIs, and remains the lowest-level process-spawning
-interface available in pure Python without dropping into `os.fork` and
-`os.execvp` directly.
+`subprocess` is a pure-Python module with a small C helper
+(`_posixsubprocess`) for the fork/exec path on POSIX. It provides two
+layers of API: the high-level convenience functions (`run`, `call`,
+`check_call`, `check_output`) that each create a `Popen` object, wait
+for it, and return or raise; and the low-level `Popen` class that gives
+full control over file descriptors, environment, working directory, and
+process group setup.
 
-The file has two large `_execute_child` implementations guarded by
-`if mswindows:` / `else:`. The POSIX path uses `os.fork()`, optionally
-runs `preexec_fn` in the child, then calls `os.execvpe`. The Windows path
-calls `CreateProcess` via the `_winapi` C extension. Both paths share the
-same pipe setup logic (`PIPE = -1`, `STDOUT = -2`, `DEVNULL`) and the same
-`communicate`/`wait` API above them.
-
-The module also provides `run`, `check_call`, and `check_output` as
-high-level one-shot helpers, plus the result and exception types
-`CompletedProcess`, `CalledProcessError`, and `TimeoutExpired`.
+Sentinel constants `PIPE`, `DEVNULL`, and `STDOUT` are negative integers
+recognized by `Popen.__init__` to create pipes, redirect to `/dev/null`,
+or merge stderr into stdout. On POSIX, `_execute_child` chooses between
+`os.posix_spawn` (when no incompatible options are set) and a
+`fork`+`exec` sequence. On Windows the entire path goes through
+`_winapi.CreateProcess`.
 
 ## Map
 
 | Lines | Symbol | Role | gopy |
 | ----- | ------ | ---- | ---- |
-| <Cpy path="Lib/subprocess.py" lines="1-120">1-120</Cpy> | Module header, `PIPE`, `STDOUT`, `DEVNULL`, `STD_INPUT_HANDLE` | Constants, platform detection, `mswindows` flag. | `module/subprocess/module.go` |
-| <Cpy path="Lib/subprocess.py" lines="121-200">121-200</Cpy> | `CompletedProcess` | Holds `args`, `returncode`, `stdout`, `stderr`; `check_returncode()` raises `CalledProcessError`. | `module/subprocess/module.go` |
-| <Cpy path="Lib/subprocess.py" lines="201-310">201-310</Cpy> | `CalledProcessError`, `TimeoutExpired`, `SubprocessError` | Exception hierarchy. `CalledProcessError` carries `cmd`, `returncode`, `output`, `stderr`. | `module/subprocess/module.go` |
-| <Cpy path="Lib/subprocess.py" lines="311-430">311-430</Cpy> | `run(args, *, input, capture_output, timeout, check, **kwargs)` | One-shot convenience wrapper around `Popen`; raises `CalledProcessError` when `check=True` and exit code is nonzero. | `module/subprocess/module.go` |
-| <Cpy path="Lib/subprocess.py" lines="431-520">431-520</Cpy> | `check_call`, `check_output` | Legacy wrappers kept for backwards compatibility; both delegate to `run`. | `module/subprocess/module.go` |
-| <Cpy path="Lib/subprocess.py" lines="521-820">521-820</Cpy> | `Popen.__init__` | Constructor; resolves arguments, opens pipes, spawns via `_execute_child`. | `module/subprocess/module.go` |
-| <Cpy path="Lib/subprocess.py" lines="821-1050">821-1050</Cpy> | `Popen._execute_child` (POSIX) | Fork + optional `preexec_fn` + `execvpe`. Pipe error reporting via a private fd pair. | `module/subprocess/module.go` |
-| <Cpy path="Lib/subprocess.py" lines="1051-1250">1051-1250</Cpy> | `Popen._execute_child` (Windows) | `CreateProcess` call via `_winapi`; `STARTUPINFO`, `creationflags`, and handle inheritance. | `module/subprocess/module.go` |
-| <Cpy path="Lib/subprocess.py" lines="1251-1450">1251-1450</Cpy> | `Popen.communicate(input, timeout)` | Sends `input` to stdin, reads stdout and stderr, returns `(stdout, stderr)`; uses threads on Windows, `select`/`poll` on POSIX. | `module/subprocess/module.go` |
-| <Cpy path="Lib/subprocess.py" lines="1451-1620">1451-1620</Cpy> | `Popen.wait(timeout)`, `Popen.poll()`, `Popen.send_signal`, `Popen.terminate`, `Popen.kill` | Process lifecycle after spawn. `wait` blocks; `poll` checks without blocking. | `module/subprocess/module.go` |
-| <Cpy path="Lib/subprocess.py" lines="1621-1800">1621-1800</Cpy> | `Popen._communicate` (POSIX select/poll path) | Non-blocking I/O loop using `select.select` or `select.poll`; avoids deadlock when both stdout and stderr are `PIPE`. | `module/subprocess/module.go` |
-| <Cpy path="Lib/subprocess.py" lines="1801-1950">1801-1950</Cpy> | `Popen._readerthread`, `Popen._communicate` (Windows thread path) | Spawns two daemon threads to drain stdout/stderr into `BytesIO` buffers; joins them after `wait`. | `module/subprocess/module.go` |
-| <Cpy path="Lib/subprocess.py" lines="1951-2100">1951-2100</Cpy> | `Popen.__enter__`, `__exit__`, `__del__`, `_internal_poll` | Context manager protocol and finalizer; `__exit__` waits only if the process has already exited. | `module/subprocess/module.go` |
-| <Cpy path="Lib/subprocess.py" lines="2101-2300">2101-2300</Cpy> | `getstatusoutput`, `getoutput` | POSIX-only legacy helpers; return `(status, output)` via `run(..., shell=True)`. | `module/subprocess/module.go` |
-| <Cpy path="Lib/subprocess.py" lines="2301-2700">2301-2700</Cpy> | `list2cmdline`, `Handle`, POSIX helpers (`_posixsubprocess`, `_args_from_interpreter_flags`) | Windows command-line quoting; low-level fd operations. | `module/subprocess/module.go` |
+| <Cpy path="Lib/subprocess.py" lines="1-100">1-100</Cpy> | Module header, sentinel constants, `CompletedProcess` | `PIPE=-1`, `STDOUT=-2`, `DEVNULL=-3`; `CompletedProcess` is a simple result container with `check_returncode()`. | `(stdlib pending)` |
+| <Cpy path="Lib/subprocess.py" lines="100-300">100-300</Cpy> | `SubprocessError`, `CalledProcessError`, `TimeoutExpired` | Exception hierarchy; `CalledProcessError` carries `returncode`, `cmd`, `output`, and `stderr`; `TimeoutExpired` carries `timeout` and captured I/O. | `(stdlib pending)` |
+| <Cpy path="Lib/subprocess.py" lines="300-700">300-700</Cpy> | `Popen.__init__`, `_get_handles` (POSIX), `_execute_child` (POSIX) | Argument normalization, pipe creation, `posix_spawn` fast path, and full `fork`+`exec` fallback via `_posixsubprocess.fork_exec`. | `(stdlib pending)` |
+| <Cpy path="Lib/subprocess.py" lines="700-1100">700-1100</Cpy> | `Popen.communicate`, `_communicate`, `_readerthread`, `_wait` | Deadlock-safe bidirectional I/O using threads or `select`; `_wait` polls `os.waitpid` in a loop with `WNOHANG`. | `(stdlib pending)` |
+| <Cpy path="Lib/subprocess.py" lines="1100-1600">1100-1600</Cpy> | `run`, `call`, `check_call`, `check_output` | High-level wrappers; `run` adds `input`, `capture_output`, `timeout`, and `check` parameters; the others are compatibility shims delegating to `run`. | `(stdlib pending)` |
+| <Cpy path="Lib/subprocess.py" lines="1600-2600">1600-2600</Cpy> | `Popen.__init__` (Windows), `_execute_child` (Windows), `_winapi` path | `CreateProcess` call, handle duplication via `DuplicateHandle`, `_handle` wrapper, and Windows-only parameters `creationflags`, `startupinfo`. | `(stdlib pending)` |
 
 ## Reading
 
-### `Popen.__init__` and pipe setup (lines 521 to 820)
+### `_execute_child` fork/exec sequence (lines 300 to 700)
 
-<CpyLink path="Lib/subprocess.py" lines="521-820" />
-
-```python
-class Popen:
-    def __init__(self, args, bufsize=-1, executable=None,
-                 stdin=None, stdout=None, stderr=None,
-                 preexec_fn=None, close_fds=True, shell=False,
-                 cwd=None, env=None, universal_newlines=None,
-                 startupinfo=None, creationflags=0,
-                 restore_signals=True, start_new_session=False,
-                 pass_fds=(), *, user=None, group=None,
-                 extra_groups=None, encoding=None, errors=None,
-                 text=None, umask=-1, pipesize=-1,
-                 process_group=None):
-        ...
-        # Set up std{in,out,err} pipes.
-        if stdin is None:
-            p2cread = -1; p2cwrite = -1
-        elif stdin == PIPE:
-            p2cread, p2cwrite = os.pipe()
-        elif stdin == DEVNULL:
-            p2cread = self._get_devnull()
-        ...
-        self._execute_child(args, executable, preexec_fn, close_fds,
-                            pass_fds, cwd, env,
-                            startupinfo, creationflags, shell,
-                            p2cread, p2cwrite,
-                            c2pread, c2pwrite,
-                            errread, errwrite,
-                            restore_signals,
-                            gid, gids, uid, umask,
-                            start_new_session, process_group)
-```
-
-The constructor resolves all the stdio arguments to file-descriptor pairs
-before calling `_execute_child`. `PIPE` causes `os.pipe()` to be called,
-giving two ends of a new pipe. `DEVNULL` opens `/dev/null` (or `nul` on
-Windows) lazily via `_get_devnull`. `STDOUT` (value `-2`) is only valid
-for `stderr` and redirects it to the same fd as stdout. After `_execute_child`
-returns, the parent closes the child-side fds (e.g. `p2cread`, `c2pwrite`,
-`errwrite`) so that reads on the parent's end of the pipe will see EOF when
-the child closes its end.
-
-### POSIX `_execute_child`: fork and exec (lines 821 to 1050)
-
-<CpyLink path="Lib/subprocess.py" lines="821-1050" />
+<CpyLink path="Lib/subprocess.py" lines="300-700" />
 
 ```python
 def _execute_child(self, args, executable, preexec_fn, close_fds,
                    pass_fds, cwd, env, ...):
-    # Error pipe: child writes errno+traceback, parent reads it.
+    # Fast path: use posix_spawn when possible
+    if (not close_fds and
+            not pass_fds and
+            not preexec_fn and
+            not cwd and
+            not env):
+        try:
+            os.posix_spawn(executable, args, env, ...)
+            return
+        except (AttributeError, OSError):
+            pass
+
+    # Slow path: fork + exec
     errpipe_read, errpipe_write = os.pipe()
     try:
         self.pid = _posixsubprocess.fork_exec(
             args, executable_list,
-            close_fds, tuple(sorted(map(int, pass_fds))),
-            cwd, env_list,
-            p2cread, p2cwrite, c2pread, c2pwrite, errread, errwrite,
+            close_fds, sorted(pass_fds or []), cwd, env or os.environ,
+            p2cread, p2cwrite,
+            c2pread, c2pwrite,
+            errread, errwrite,
             errpipe_read, errpipe_write,
             restore_signals, start_new_session,
-            gid, extra_groups, uid, umask,
+            gid, extra_groups, uid, child_umask,
             child_umask,
-            preexec_fn)
+            preexec_fn,
+        )
     finally:
         os.close(errpipe_write)
-    # Read any exec/preexec_fn error from child.
-    errpipe_data = bytearray()
-    while True:
-        part = os.read(errpipe_read, 50000)
-        ...
-    if errpipe_data:
-        ...
-        raise child_exec_never_called and ... or OSError(errno_num, ...)
+    # Read any exec error from child via errpipe
+    exception_name, hex_errno, err_msg = (
+        errpipe_data.split(b':', 2))
+    if exception_name:
+        child_exec_never_called = ...
+        raise child_exception_type(...)
 ```
 
-The actual `fork()` + `exec()` call is in the C extension `_posixsubprocess`
-to avoid running any Python code between `fork` and `exec` (which is unsafe
-with threads). An error pipe carries any failure from the child: if `preexec_fn`
-raises or `execvpe` fails, the child writes `errno` plus a pickle of the
-exception to `errpipe_write` before exiting. The parent reads from
-`errpipe_read` after `fork_exec` returns and re-raises accordingly.
+`_execute_child` first attempts `os.posix_spawn` when no incompatible
+options are requested. `posix_spawn` is significantly faster because it
+avoids copying the parent's entire address space; the kernel sets up file
+descriptors and executes the target atomically. When `posix_spawn` is
+unavailable or an incompatible option is set (such as `preexec_fn`, custom
+`cwd`, or `close_fds=True` with `pass_fds`), the code falls back to
+`_posixsubprocess.fork_exec`.
 
-`pass_fds` is sorted and deduplicated before being passed to the C layer,
-which keeps those fds open across `exec` while closing all others
-(unless `close_fds=False`).
+`fork_exec` is a C function that forks, sets up file descriptors in the
+child, runs `preexec_fn` if provided, and calls `execve`. Errors in the
+child process are communicated back to the parent through `errpipe`: the
+child writes the exception class name, errno, and message as ASCII bytes
+before exiting, and the parent reads and re-raises them. This two-pipe
+design (one for the child's stdout/stderr, one for exec errors) means exec
+failures are reported as Python exceptions rather than as mysterious
+non-zero exit codes.
 
-### `communicate` and deadlock avoidance (lines 1251 to 1620)
+### `communicate` deadlock avoidance (lines 700 to 1100)
 
-<CpyLink path="Lib/subprocess.py" lines="1251-1620" />
+<CpyLink path="Lib/subprocess.py" lines="700-1100" />
 
 ```python
 def communicate(self, input=None, timeout=None):
-    ...
     if self._communication_started and input:
         raise ValueError("Cannot send input after starting communication")
-    ...
+
     if timeout is not None:
         endtime = _time() + timeout
+    else:
+        endtime = None
+
     try:
         stdout, stderr = self._communicate(input, endtime, timeout)
     except:
         ...
     finally:
         self._communication_started = True
-    sts = self.wait(timeout=self._remaining_time(endtime))
-    ...
-    return (stdout, stderr)
 
-# POSIX path inside _communicate:
-def _communicate(self, input, endtime, timeout):
-    ...
-    if self.stdin and not self._communication_started:
-        self._fileobj2output[self.stdin] = []
-    ...
-    while self._fileobj2output:
-        rlist = [x for x in (self.stdout, self.stderr) if x]
-        wlist = [self.stdin] if input_view else []
-        rlist, wlist, _ = select.select(rlist, wlist, [], timeout)
-        if self.stdin in wlist:
-            chunk = input_view[:_PIPE_BUF]
-            bytes_written = os.write(self.stdin.fileno(), chunk)
-            input_view = input_view[bytes_written:]
-            if not input_view:
-                self.stdin.close()
-        for key in rlist:
-            data = os.read(key.fileno(), 32768)
-            if not data:
-                key.close()
-                self._fileobj2output.pop(key)
-            else:
-                self._fileobj2output[key].append(data)
+    sts = self.wait(timeout=self._remaining_time(endtime))
+    return (stdout, stderr)
 ```
 
-The POSIX `_communicate` uses `select.select` to multiplex stdin writes
-with stdout and stderr reads. Mixing blocking reads on stdout with blocking
-reads on stderr in two separate calls would deadlock when the child fills
-the stderr pipe buffer while the parent is blocked reading from stdout. The
-`select`-based loop interleaves writes and reads so neither pipe fills up.
-On Windows the same problem is avoided by running two daemon threads, one
-for each pipe, which drain concurrently into `BytesIO` buffers.
+```python
+def _communicate(self, input, endtime, timeout):
+    # Use threads on all platforms; use select on POSIX when no input
+    if self.stdin and not self._communication_started:
+        self.stdin_thread = threading.Thread(
+            target=self._readerthread,
+            args=(self.stdin, input_view))
+        self.stdin_thread.daemon = True
+        self.stdin_thread.start()
+    ...
+    if self.stdout:
+        self.stdout_thread = ...
+    if self.stderr:
+        self.stderr_thread = ...
+    # Wait with timeout
+    self.stdout_thread.join(self._remaining_time(endtime))
+    ...
+```
 
-### `run`, `check_call`, `check_output` (lines 311 to 520)
+The classic deadlock scenario is: parent writes to child's stdin while the
+child's stdout pipe fills its kernel buffer, blocking the child from
+writing, which prevents it from reading from stdin, deadlocking both
+sides. `communicate` avoids this by reading stdout and stderr in
+background daemon threads while the main thread writes stdin (or waits for
+completion if there is no input). On POSIX without input, `select`-based
+polling is used instead of threads to reduce overhead. The `_readerthread`
+approach is always used on Windows because `select` does not work on
+pipes there.
 
-<CpyLink path="Lib/subprocess.py" lines="311-520" />
+### `run` timeout and process cleanup (lines 1100 to 1600)
+
+<CpyLink path="Lib/subprocess.py" lines="1100-1600" />
 
 ```python
 def run(*popenargs, input=None, capture_output=False,
         timeout=None, check=False, **kwargs):
     if capture_output:
-        if kwargs.get('stdout') is not None or kwargs.get('stderr') is not None:
+        if ('stdout' in kwargs or 'stderr' in kwargs):
             raise ValueError(...)
         kwargs['stdout'] = PIPE
         kwargs['stderr'] = PIPE
+
     with Popen(*popenargs, **kwargs) as process:
         try:
             stdout, stderr = process.communicate(input, timeout=timeout)
@@ -226,14 +187,21 @@ def run(*popenargs, input=None, capture_output=False,
     return CompletedProcess(process.args, retcode, stdout, stderr)
 ```
 
-`run` is the recommended high-level entry point for one-shot process
-execution. `capture_output=True` is a shorthand for
-`stdout=PIPE, stderr=PIPE`. On timeout, the process is killed and
-`communicate` is called a second time to drain any buffered output before
-re-raising `TimeoutExpired`. On any other exception the process is also
-killed but the exception propagates without wrapping. This ensures the child
-is never left running if the caller handles the exception.
+`run` wraps `Popen` in a context manager so that file descriptors are
+always closed on exit. On `TimeoutExpired`, it kills the process with
+`SIGKILL` (on POSIX) and then calls `communicate()` once more to drain any
+buffered output before re-raising. This second `communicate` call is
+essential: without it the pipe buffers may still hold data and the child
+process would remain a zombie until the buffers are consumed. The `check`
+flag turns a non-zero return code into a `CalledProcessError`, which
+carries the captured stdout and stderr for diagnostic use.
 
-`check_call` and `check_output` predate `run` and are kept only for
-backwards compatibility. Both are implemented as thin calls to `run` with
-`check=True`.
+## gopy mirror
+
+`subprocess` depends on `os.fork`, `os.execve`, `os.pipe`, `os.waitpid`,
+`os.posix_spawn`, `select.select`, and `threading.Thread`, all of which
+map to Go's `syscall` and `os/exec` packages. The gopy port will expose
+`Popen` as a Go struct wrapping `*exec.Cmd`, implement `communicate` using
+goroutines in place of threads, and raise `TimeoutExpired` /
+`CalledProcessError` as gopy exception objects. The Windows `_winapi` path
+is out of scope for the initial port.

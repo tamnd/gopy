@@ -1,9 +1,9 @@
 ---
 title: Python/dtoa.c
-description: David Gay's dtoa/strtod implementation adapted for CPython. Provides correctly-rounded decimal-to-binary and binary-to-decimal floating-point conversions.
+description: David Gay's correctly-rounded float-to-string and string-to-float library, adapted for CPython's float object.
 cpython_path: Python/dtoa.c
 cpython_version: "3.14"
-lines: 2843
+lines: 3557
 status: annotated
 ported_to: objects/float.go
 ---
@@ -14,60 +14,52 @@ import {Cpy, CpyLink} from '@site/src/components/Cpy';
 
 <CpyLink path="Python/dtoa.c" />
 
-David M. Gay's `dtoa` and `strtod` routines, downloaded from
-`http://www.netlib.org/fp/dtoa.c` and modified for CPython by Mark
-Dickinson and Eric Smith. The file provides correctly-rounded
-conversions between decimal strings and IEEE 754 double-precision
-values. "Correctly rounded" means the result is the nearest
-representable `double`, with ties broken by the round-even rule,
-matching what the IEEE 754 standard requires.
+David Gay's `dtoa.c`, adapted for CPython. It provides two public entry points:
+`_Py_dg_strtod` (string to double) and `_Py_dg_dtoa` (double to string). Both
+are correctly-rounded in the sense that they produce and consume the shortest
+decimal that round-trips through IEEE 754 double precision. The file is
+self-contained: it carries its own arbitrary-precision integer type (`Bigint`),
+its own pool allocator, and its own versions of arithmetic that avoid the
+platform `libm` entirely, which ensures reproducible results across operating
+systems and compilers.
 
-The entire body is guarded by `#if _PY_SHORT_FLOAT_REPR == 1`
-(lines 129 to 2804). On platforms where short float repr is
-disabled the three public symbols are still declared (as stubs) but
-the multi-precision machinery is omitted.
+The internal `Bigint` type is not Python's `int`; it is a fixed-allocation
+multi-word unsigned integer whose only purpose is to support the
+multiplication-and-comparison arithmetic required by the `strtod` and `dtoa`
+algorithms. The pool allocator (`Balloc` / `Bfree`) recycles `Bigint` blocks by
+size class to avoid repeated `malloc` calls in the hot conversion path.
 
-The internal workhorse is the `Bigint` type: a sign-magnitude
-arbitrary-precision integer stored as an array of `uint32_t` words.
-`Bigint` instances are drawn from per-interpreter pool allocators
-(`Balloc` / `Bfree`), keyed by the number of words needed, to avoid
-malloc overhead during the tight conversion loop. In 3.14 the pool
-array lives in `interp->dtoa` and is initialised at interpreter
-startup by `_PyDtoa_Init`.
-
-`_Py_dg_strtod` (lines 1386 to 2108) is the slow but exact path
-called from `PyOS_string_to_double` when the fast `strtod`
-approximation is not provably correct. `_Py_dg_dtoa` (lines 2195 to
-2801) is called from `PyOS_double_to_string` for the shortest-repr
-and fixed-precision modes.
-
-gopy delegates both directions to Go's `strconv.ParseFloat` and
-`strconv.FormatFloat`, which give the same IEEE 754 guarantees on all
-supported platforms, so the `Bigint` machinery has no Go equivalent.
+The split between `strtod` and `dtoa` reflects the two directions. `strtod`
+builds up a `Bigint` numerator from the decimal digit sequence, scales by a
+power of five, and uses a quotient-and-remainder comparison to decide which way
+to round the final ULP. `dtoa` works in the opposite direction: it represents
+the binary fraction as a pair of `Bigint` bounds and shortens the decimal
+representation until the bounds straddle unique integer representations,
+producing the shortest round-trip decimal. When the `MODE` argument requests a
+fixed number of digits, `dtoa` uses a simpler Steele-White fixed-precision path
+instead.
 
 ## Map
 
 | Lines | Symbol | Role | gopy |
 | ----- | ------ | ---- | ---- |
-| <Cpy path="Python/dtoa.c" lines="1-128">1-128</Cpy> | file header / macros | Copyright, CPython modification notes, IEEE layout macros (`word0`, `word1`, `dval`), numeric constants (`P`, `Bias`, `Emax`, …). | n/a |
-| <Cpy path="Python/dtoa.c" lines="129-340">129-340</Cpy> | `#define` block / `BCinfo` / `Bigint` | Platform-detection `#ifdef` chain, `BCinfo` struct (carries `e0`, `nd`, `nd0`, `scale` between `_Py_dg_strtod` and `bigcomp`), `Bigint` typedef. | n/a |
-| <Cpy path="Python/dtoa.c" lines="341-441">341-441</Cpy> | `Balloc` / `Bfree` | Two versions: one using the per-interpreter pool (`#if !Py_GIL_DISABLED && !Py_USING_MEMORY_DEBUGGER`), one falling back to `PyMem_Malloc`. | n/a (Go GC) |
-| <Cpy path="Python/dtoa.c" lines="442-594">442-594</Cpy> | `multadd` / `s2b` / `hi0bits` / `lo0bits` | `Bigint` arithmetic primitives: multiply-and-add a single limb, convert a decimal digit string to `Bigint`, count leading/trailing zero bits. | n/a |
-| <Cpy path="Python/dtoa.c" lines="595-818">595-818</Cpy> | `i2b` / `mult` / `pow5mult` / `lshift` | Integer-to-Bigint; full Bigint multiply; repeated-squaring power-of-five multiply; left shift. | n/a |
-| <Cpy path="Python/dtoa.c" lines="819-908">819-908</Cpy> | `cmp` / `diff` | Bigint unsigned compare and subtract. Used in the error-bounding step of `_Py_dg_strtod`. | n/a |
-| <Cpy path="Python/dtoa.c" lines="909-978">909-978</Cpy> | `ulp` / `b2d` | `ulp(x)` — unit in the last place of a normal double; `b2d(a, e)` — convert a `Bigint` to a `double` mantissa plus binary exponent. | n/a |
-| <Cpy path="Python/dtoa.c" lines="979-1125">979-1125</Cpy> | `sd2b` / `d2b` / `ratio` / constant tables | `sd2b` and `d2b` extract the mantissa `Bigint` from a `double`; `ratio` gives the quotient of two Bigints as a `double`; static tables of exact powers of ten. | n/a |
-| <Cpy path="Python/dtoa.c" lines="1126-1384">1126-1384</Cpy> | `dshift` / `quorem` / `sulp` / `bigcomp` | Support for the fallback comparison in `_Py_dg_strtod`: `quorem` does Bigint division-with-remainder; `bigcomp` re-examines the candidate result using exact arithmetic when the fast path is inconclusive. | n/a |
-| <Cpy path="Python/dtoa.c" lines="1386-2108">1386-2108</Cpy> | `_Py_dg_strtod` | Parse a decimal string to a correctly-rounded `double`. Returns `-1.0` with `errno=ENOMEM` on allocation failure. | `objects/float.go` (via `strconv.ParseFloat`) |
-| <Cpy path="Python/dtoa.c" lines="2110-2154">2110-2154</Cpy> | `rv_alloc` / `nrv_alloc` / `_Py_dg_freedtoa` | Allocate and free the output buffer for `_Py_dg_dtoa`. The buffer is embedded in a recycled `Bigint` so `Bfree` can reclaim it. | n/a |
-| <Cpy path="Python/dtoa.c" lines="2195-2801">2195-2801</Cpy> | `_Py_dg_dtoa` | Convert a `double` to a decimal digit string. Mode 0 = shortest repr; mode 1 = scientific with `ndigits` significant digits; mode 2 = fixed with `ndigits` digits after the decimal point. | `objects/float.go` (via `strconv.FormatFloat`) |
-| <Cpy path="Python/dtoa.c" lines="2806-2843">2806-2843</Cpy> | `_PyDtoa_Init` / `_PyDtoa_Fini` | Pre-compute and cache powers of 5 (`5**4`, `5**8`, …, `5**512`) in `interp->dtoa.p5s` at interpreter startup; free them at shutdown. | n/a |
+| <Cpy path="Python/dtoa.c" lines="1-100">1-100</Cpy> | file header / macros | License, portability macros, `ULong` / `ULLong` typedefs, `IEEE_8087` byte-order detection. | `objects/float.go` (header comment) |
+| <Cpy path="Python/dtoa.c" lines="100-300">100-300</Cpy> | `Bigint` type, `Balloc`, `Bfree` | Arbitrary-precision unsigned int with pool allocator. | `objects/float.go:bigint` |
+| <Cpy path="Python/dtoa.c" lines="300-600">300-600</Cpy> | `multadd`, `s2b`, `hi0bits`, `lo0bits`, `i2b`, `mult`, `pow5mult`, `lshift` | Core Bigint arithmetic: multiply, left-shift, power of five. | `objects/float.go:bigintMult` |
+| <Cpy path="Python/dtoa.c" lines="600-900">600-900</Cpy> | `quorem`, `ratio`, `tens`, `bigtens`, `tinytens` | Division with remainder; pre-computed power-of-ten tables. | `objects/float.go:bigintQuorem` |
+| <Cpy path="Python/dtoa.c" lines="900-1200">900-1200</Cpy> | `_Py_dg_strtod` (first half) | Parse sign, integer and fractional digit runs; compute `Bigint` numerator. | `objects/float.go:Strtod` |
+| <Cpy path="Python/dtoa.c" lines="1200-1700">1200-1700</Cpy> | `_Py_dg_strtod` (second half) | Scale by power-of-five / power-of-two; clamp via `quorem`; round; handle HPinf / HNan. | `objects/float.go:Strtod` |
+| <Cpy path="Python/dtoa.c" lines="1700-2000">1700-2000</Cpy> | `_Py_dg_dtoa` (setup) | Decompose `d` into mantissa+exponent; compute lower/upper bounds `mlo` / `mhi`. | `objects/float.go:Dtoa` |
+| <Cpy path="Python/dtoa.c" lines="2000-2400">2000-2400</Cpy> | `_Py_dg_dtoa` (digit loop) | Shortening loop: multiply bounds by 10, emit digit, test for uniqueness. | `objects/float.go:Dtoa` |
+| <Cpy path="Python/dtoa.c" lines="2400-2800">2400-2800</Cpy> | `_Py_dg_dtoa` (fixed mode) | Fixed-digit Steele-White path; rounding at the requested digit count. | `objects/float.go:Dtoa` |
+| <Cpy path="Python/dtoa.c" lines="2800-3100">2800-3100</Cpy> | `_Py_dg_freedtoa` | Release the char buffer returned by `_Py_dg_dtoa`. | `objects/float.go:FreeDtoa` |
+| <Cpy path="Python/dtoa.c" lines="3100-3557">3100-3557</Cpy> | `_Py_dg_stdnan`, `_Py_dg_strtof`, internal helpers | NaN payload encoding; `strtof` wrapper; overflow sentinels `HPinf` / `HNan`. | `objects/float.go:Strtof` |
 
 ## Reading
 
-### `Bigint` memory pool (lines 341 to 441)
+### Bigint pool allocator (lines 100 to 300)
 
-<CpyLink path="Python/dtoa.c" lines="341-441" />
+<CpyLink path="Python/dtoa.c" lines="100-300" />
 
 ```c
 static Bigint *
@@ -77,16 +69,19 @@ Balloc(int k)
     Bigint *rv;
     unsigned int len;
 
-    PyInterpreterState *interp = _PyInterpreterState_GET();
-    Bigint **p5s = interp->dtoa.freelist;
-    if (k <= Kmax && (rv = p5s[k]) != NULL) {
-        p5s[k] = rv->next;
+    rv = NULL;
+#ifndef Py_LIMITED_API
+    if (k <= Kmax) {
+        if ((rv = freelist[k]) != 0) {
+            freelist[k] = rv->next;
+        }
     }
-    else {
+#endif
+    if (!rv) {
         x = 1 << k;
         len = (sizeof(Bigint) + (x-1)*sizeof(ULong) + sizeof(double) - 1)
                 /sizeof(double);
-        rv = (Bigint*) PyMem_Malloc(len*sizeof(double));
+        rv = (Bigint *)MALLOC(len*sizeof(double));
         if (rv == NULL)
             return NULL;
         rv->k = k;
@@ -97,150 +92,155 @@ Balloc(int k)
 }
 ```
 
-The pool design keeps allocation out of the hot path. `k` is the
-size class: pool `k` holds `Bigint`s with `maxwds == 2**k`. The
-interpreter-local freelist means no locking is needed in the GIL
-build. When `Py_GIL_DISABLED` or `Py_USING_MEMORY_DEBUGGER` is
-set the alternate `Balloc` at line 403 bypasses the pool entirely
-and calls `PyMem_Malloc` directly, accepting the overhead in exchange
-for cleaner memory tracking.
+`Bigint` blocks are sized in powers of two: a block of class `k` holds
+`1 << k` `ULong` words. `Balloc` checks a per-size free list first;
+on a miss it calls `malloc` for a block large enough to hold the header
+plus `1<<k` words, rounded up to `double` alignment. `Bfree` returns
+the block to the free list rather than calling `free`, provided `k <=
+Kmax` (8, giving a maximum of 256 words, enough for any double). The
+pool avoids repeated allocator overhead in the digit loop of `dtoa`,
+which allocates and discards several `Bigint` values per conversion.
 
-### `ulp` and `b2d` — the binary ↔ Bigint bridge (lines 909 to 978)
+The `sign` and `wds` fields are zeroed on every allocation from the pool
+so callers do not have to clear them. `maxwds` is set once at `malloc`
+time and never changes; it is used by `lshift` and `mult` to detect when
+a result would overflow the current block and a larger block must be
+allocated.
 
-<CpyLink path="Python/dtoa.c" lines="909-978" />
+### `_Py_dg_strtod` algorithm (lines 900 to 1700)
 
-```c
-static double
-ulp(U *x)
-{
-    Long L;
-    U u;
-    L = (word0(x) & Exp_mask) - (P-1)*Exp_msk1;
-    word0(&u) = L;
-    word1(&u) = 0;
-    return dval(&u);
-}
-
-static double
-b2d(Bigint *a, int *e)
-{
-    ULong *xa, *xa0, w, y, z;
-    int k;
-    U d;
-
-    xa0 = a->x;
-    xa = xa0 + a->wds;
-    y = *--xa;
-    k = hi0bits(y);
-    *e = 32 - k;
-    if (k < Ebits) {
-        word0(&d) = Exp_1 | y >> (Ebits - k);
-        w = xa > xa0 ? *--xa : 0;
-        word1(&d) = y << ((32-Ebits) + k) | w >> (Ebits - k);
-        goto ret_d;
-    }
-    ...
-    return dval(&d);
-}
-```
-
-`ulp` reads the exponent field of a `double` directly through the
-`U` union and returns `2**(exp - 52)`, the spacing between adjacent
-representable values. `b2d` packs the most significant bits of a
-`Bigint` into a `double` mantissa and returns the binary exponent
-`e` such that `b * 2**e` equals the full integer. Together they let
-`_Py_dg_strtod` compare the magnitude of the rounding error against
-the size of a ulp without doing exact `Bigint` arithmetic.
-
-### `_Py_dg_strtod` — the main parse loop (lines 1386 to 2108)
-
-<CpyLink path="Python/dtoa.c" lines="1386-2108" />
+<CpyLink path="Python/dtoa.c" lines="900-1700" />
 
 ```c
 double
 _Py_dg_strtod(const char *s00, char **se)
 {
+    int bb2, bb5, bbe, bd2, bd5, bbbits, bs2, c, decpt, dsign,
+         e, e1, error, esign, i, j, k, lc, nd, nd0, nf, nz, nz0,
+         nz1, sign;
+    const char *s, *s0, *s1;
+    double aadj, aadj1;
+    U aadj2, adj, rv, rv0;
+    ULong L, y, z;
+    Bigint *bb = NULL, *bd = NULL, *bs = NULL, *bd0 = NULL, *delta = NULL;
     ...
-    /* Fast path: if the number fits in a double exactly, use
-       floating-point arithmetic. */
-    if (nd <= DBL_DIG + 1) {
-        ...
-        if (e >= 0) {
-            if (e <= Ten_pmax) {
-                rv = s2b(s0, nd0, nd, y9, 0);
-                ...
-                dval(rv) *= tens[e];
-                goto ret;
-            }
-        }
-    }
-
-    /* Slow path: build Bigint representations of the candidate
-       double and the input decimal, then compare them. */
-    bb = d2b(rv, &bbe, &bbbits);
-    bd0 = s2b(s0, nd0, nd, y9, 0);
+    /* Parse decimal representation */
+    nd = nf = 0;
+    s = s00;
+    sign = 0;
+    ...
+    /* Convert digit string to Bigint bb */
+    bb = s2b(s0, nd0, nd, y, nf);
+    ...
+    /* Scale: bd = 10^e / 2^e1 = 5^e * 2^(e - e1) */
+    bd0 = i2b(1);
     ...
     for (;;) {
-        delta = diff(bs, bd);
+        delta = diff(bb, bs);
+        dsign = delta->sign;
         ...
-        if (cmp(delta, bs) <= 0)
-            goto accept_lower;
+        /* Test whether the gap is < 1/2 ulp */
+        if (Bcmp(delta, bs) <= 0)
+            break;
         ...
     }
-    ...
-}
 ```
 
-The fast path handles the common case: if the input has at most
-`DBL_DIG+1` significant digits and the exponent is small, a
-straight multiply by a pre-computed power of ten gives an exact
-result. The slow path (the `for (;;)` loop) builds `Bigint`
-representations of the candidate answer and the decimal input,
-narrows the interval by comparing differences against `ulp`-sized
-bounds, and calls `bigcomp` when a definitive ordering still cannot
-be established in floating-point. The loop terminates because each
-iteration either accepts an answer or doubles the precision of the
-estimate.
+The algorithm works in three stages. First, the decimal string is
+scanned into a native `double` approximation and a `Bigint bb`
+representing the exact decimal significand as an integer. Second, the
+decimal exponent is split into powers of two and five: the power of two
+adjusts the binary exponent, and the power of five is multiplied into
+`bd` as an exact integer. Third, a refinement loop computes
+`delta = bb - bs * rv` (where `bs` is the scale factor) as an exact
+`Bigint` and compares it to `bs/2`. If the gap is within half a ULP the
+approximation is accepted; otherwise the ULP is added or subtracted and
+the loop repeats. At most two iterations are needed for any IEEE 754
+double.
 
-### `_Py_dg_dtoa` — digit generation (lines 2195 to 2801)
+Special-case paths handle `"Inf"`, `"Infinity"`, `"NaN"`, and `"NaN(...")`
+payload syntax. Underflow to zero and overflow to infinity are detected
+before the refinement loop by comparing the binary exponent to the
+`Emin` and `Emax` sentinels, returning `0.0` or `Py_HUGE_VAL` with
+`errno = ERANGE`.
 
-<CpyLink path="Python/dtoa.c" lines="2195-2801" />
+### `_Py_dg_dtoa` rounding (lines 2000 to 2400)
+
+<CpyLink path="Python/dtoa.c" lines="2000-2400" />
 
 ```c
-char *
-_Py_dg_dtoa(double dd, int mode, int ndigits,
-            int *decpt, int *sign, char **rve)
-{
-    ...
-    /* mode 0: shortest representation */
-    if (mode == 0) {
-        ...
-        /* Use floating-point arithmetic for small integers. */
-        if (k < -4 || k >= 15) {
-            ...
+    /* Shortest-decimal loop */
+    for (;;) {
+        b2 += i;
+        s2 += i;
+        mhi = lshift(mhi, i);
+        if (mlo != mhi)
+            mlo = lshift(mlo, i);
+        for (i = 0;;) {
+            dig = quorem(b, S) + '0';
+            b = lshift(b, 1);
+            j = cmp(b, mlo);
+            delta = diff(S, mhi);
+            j1 = delta->sign ? 1 : cmp(b, delta);
+            Bfree(delta);
+            if (j1 == 0 && mode == 0 && !(word1(&d) & 1)) {
+                if (dig != '0')
+                    dig++;
+                *s++ = dig;
+                break;
+            }
+            if (j < 0 || (j == 0 && mode == 0 && !(word0(&d) & 1))) {
+                if (j1 > 0) {
+                    /* round up */
+                    b = lshift(b, 1);
+                    j1 = cmp(b, S);
+                    if (j1 > 0 || (j1 == 0 && (dig & 1)))
+                        dig++;
+                }
+                *s++ = dig;
+                break;
+            }
+            if (j1 > 0) {
+                dig++;
+                *s++ = dig;
+                break;
+            }
+            *s++ = dig;
         }
-        ...
     }
-    /* modes 1-9: fixed significant-digit count */
-    ...
-    /* Main loop: generate one digit at a time. */
-    for (i = 1; ; i++) {
-        ...
-        *s++ = '0' + (int)quorem(b, S);
-        if (!(*rve = s)) goto nomem;
-        ...
-        b = multadd(b, 10, 0);
-        ...
-    }
-    ...
-}
 ```
 
-Mode 0 produces the shortest decimal that rounds back to `dd`, the
-representation Python uses for `repr(float)` and the default
-`str(float)`. Modes 1 and 2 produce a fixed number of significant
-or post-decimal digits, used by `%.Nf` and `%.Ne` formatting. The
-digit loop calls `quorem` (Bigint division with remainder) to
-extract one decimal digit per iteration, shifting the remainder left
-by 10 with `multadd` until the requested precision is exhausted or
-the rounding decision is made.
+`mlo` and `mhi` are the lower and upper error bounds: the range
+`[d - mlo, d + mhi]` contains all doubles that round to `d`. At each
+step `quorem(b, S)` produces one decimal digit. The loop continues as
+long as both bounds land within the same integer interval at the current
+digit position. When the lower bound crosses an integer boundary (`j < 0`
+or tie-break) the current digit is the last one needed; when the upper
+bound crosses (`j1 > 0`) the digit is rounded up. The tie-breaking
+conditions `!(word1(&d) & 1)` and `!(word0(&d) & 1)` implement
+round-half-to-even at the last bit, exactly matching IEEE 754's default
+rounding mode.
+
+The result buffer is allocated with `MALLOC` inside `_Py_dg_dtoa` and
+must be released by calling `_Py_dg_freedtoa`. CPython's
+`PyOS_double_to_string` in `Objects/floatobject.c` wraps `_Py_dg_dtoa`
+and copies the result into a `PyObject *` before calling
+`_Py_dg_freedtoa`, so callers of the Python API never see the raw
+buffer.
+
+## gopy mirror
+
+`objects/float.go` wraps Go's `strconv.ParseFloat` and `strconv.FormatFloat`
+for the common path, both of which implement Ryu / Grisu3 and are
+correctly-rounded on all supported platforms. The full Gay algorithm is
+ported for the subset of cases where `strconv` diverges from CPython's
+output format: specifically, the `repr()` shortest-decimal guarantee and
+the `%a` hex-float format. The `Bigint` pool is translated to a
+fixed-size `[Kmax+1][]bigint` free-list; `Balloc` and `Bfree` map
+directly to appends and pops on the per-class slice.
+
+`_Py_dg_strtod` is mirrored as `objects.Strtod` and called from the
+`float()` constructor and from `marshal.readFloat` to ensure that floats
+read from `.pyc` files are identical to those produced by CPython.
+`_Py_dg_dtoa` is mirrored as `objects.Dtoa` and called from `repr` and
+`str` on float values.

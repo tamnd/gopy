@@ -1,116 +1,146 @@
 ---
-title: Modules/_contextvarsmodule.c
-description: Thin C wrapper that exposes the context variable API from Python/context.c to Python as the contextvars module.
-cpython_path: Modules/_contextvarsmodule.c
+title: Python/_contextvars.c
+description: Thin C module glue for the contextvars package, registering Context, ContextVar, and Token types and exposing copy_context(). The real logic lives in Python/context.c.
+cpython_path: Python/_contextvars.c
 cpython_version: "3.14"
-lines: 200
+lines: 68
 status: annotated
-ported_to: module/contextlib/module.go
+ported_to: module/contextlib/
 ---
 
 import {Cpy, CpyLink} from '@site/src/components/Cpy';
 
-# `Modules/_contextvarsmodule.c`
+# `Python/_contextvars.c`
 
-<CpyLink path="Modules/_contextvarsmodule.c" />
+<CpyLink path="Python/_contextvars.c" />
 
-A thin C glue file. The real implementation of context variables lives in
-`Python/context.c`; this file does nothing beyond registering the three
-public types (`ContextVar`, `Context`, `Token`) with the module and
-forwarding each method call to the corresponding `PyContextVar_*` or
-`PyContext_*` C API function.
+`_contextvars.c` is intentionally minimal. It is a multi-phase module that
+does three things on exec: registers `PyContext_Type`, `PyContextVar_Type`,
+and `PyContextToken_Type` with the module, and exposes `copy_context()` as the
+only module-level function. The actual type implementations are in
+`Python/context.c`, which is compiled directly into the interpreter core.
 
-`Lib/contextvars.py` re-exports everything from `_contextvars`, so user code
-sees the C-backed types from day one without any Pure-Python fallback path.
+The separation exists because the context-variable machinery must be available
+before any module import machinery runs, so it cannot live in an extension
+module. `_contextvars.c` is therefore only the public-name entry point; it
+delegates every call to the core C API (`PyContext_CopyCurrent`, etc.).
 
-The file is short enough that every non-trivial function maps to a single
-Argument Clinic `/*[clinic input]*/` block and a one-line body.
+The public `contextvars` module (`Lib/contextvars.py`) re-exports names from
+`_contextvars`, so importing `contextvars` in Python code ultimately calls
+into the types defined in `Python/context.c`.
 
 ## Map
 
 | Lines | Symbol | Role | gopy |
 | ----- | ------ | ---- | ---- |
-| <Cpy path="Modules/_contextvarsmodule.c" lines="1-40">1-40</Cpy> | includes, clinic output | Header includes and Argument Clinic generated code for all three methods. | `module/contextlib/module.go:clinicArgs` |
-| <Cpy path="Modules/_contextvarsmodule.c" lines="40-90">40-90</Cpy> | `contextvar_get_impl`, `contextvar_set_impl`, `contextvar_reset_impl` | `ContextVar.get`, `ContextVar.set`, `ContextVar.reset` — delegate to `PyContextVar_Get`, `PyContextVar_Set`, `PyContextVar_Reset`. | `module/contextlib/module.go:ContextVar` |
-| <Cpy path="Modules/_contextvarsmodule.c" lines="90-140">90-140</Cpy> | `context_run_impl`, `context_copy_impl` | `Context.run` and `Context.copy` — delegate to `PyContext_Enter`/`PyContext_Exit` and `PyContext_CopyCurrent`. | `module/contextlib/module.go:Context` |
-| <Cpy path="Modules/_contextvarsmodule.c" lines="140-180">140-180</Cpy> | `_contextvars_methods`, type registrations | `PyMethodDef` table and the three `PyType_Ready` calls for `PyContextVar_Type`, `PyContext_Type`, `PyContextToken_Type`. | `module/contextlib/module.go:Types` |
-| <Cpy path="Modules/_contextvarsmodule.c" lines="180-200">180-200</Cpy> | `_contextvarsmodule`, `PyInit__contextvars` | Module `PyModuleDef` and entry point. | `module/contextlib/module.go:Module` |
+| <Cpy path="Python/_contextvars.c" lines="1-20">1-20</Cpy> | `_contextvars_copy_context_impl` | Implements `copy_context()` by forwarding to `PyContext_CopyCurrent()`. | `module/contextlib/` |
+| <Cpy path="Python/_contextvars.c" lines="20-50">20-50</Cpy> | `_contextvars_methods`, `_contextvars_exec` | Method table (only `copy_context`) and exec slot: registers the three types. | `module/contextlib/` |
+| <Cpy path="Python/_contextvars.c" lines="50-68">50-68</Cpy> | `_contextvars_slots`, `_contextvarsmodule`, `PyInit__contextvars` | Module definition, multi-phase init slots, and the export symbol. | `module/contextlib/` |
 
 ## Reading
 
-### Module method table and type registration (lines 140 to 200)
+### Module type registration (lines 31 to 43)
 
-<CpyLink path="Modules/_contextvarsmodule.c" lines="140-200" />
+<CpyLink path="Python/_contextvars.c" lines="31-43" />
 
-The module init function registers three C types by calling `PyType_Ready`
-and then `PyModule_AddType` for each:
+The exec function is the only non-trivial code in this file:
 
 ```c
 static int
-_contextvars_exec(PyObject *module)
+_contextvars_exec(PyObject *m)
 {
-    if (PyModule_AddType(module, &PyContextVar_Type) < 0)   return -1;
-    if (PyModule_AddType(module, &PyContext_Type) < 0)      return -1;
-    if (PyModule_AddType(module, &PyContextToken_Type) < 0) return -1;
+    if (PyModule_AddType(m, &PyContext_Type) < 0) {
+        return -1;
+    }
+    if (PyModule_AddType(m, &PyContextVar_Type) < 0) {
+        return -1;
+    }
+    if (PyModule_AddType(m, &PyContextToken_Type) < 0) {
+        return -1;
+    }
     return 0;
 }
 ```
 
-The type objects themselves (slots, `tp_methods`, `tp_new`, `tp_repr`,
-`tp_hash`) are defined in `Python/context.c`. This file only imports and
-re-registers them; it adds no methods of its own beyond the Argument Clinic
-wrappers.
+The three type objects (`PyContext_Type`, `PyContextVar_Type`,
+`PyContextToken_Type`) are defined as global variables inside
+`Python/context.c` and are therefore already fully initialized when this exec
+function runs. `PyModule_AddType` adds them under their short names (`Context`,
+`ContextVar`, `Token`).
 
-### `contextvar_set` token creation (lines 40 to 90)
+### PyContextVar_Get / PyContextVar_Set (Python/context.c lines 274 to 367)
 
-<CpyLink path="Modules/_contextvarsmodule.c" lines="40-90" />
-
-`ContextVar.set(value)` returns a `Token` that remembers the previous value
-(or `Token.MISSING` if there was none):
+The lookup path for `ContextVar.get()` reads the current context from the
+thread state, queries the HAMT for the variable's key, and falls back to the
+per-variable default if the key is absent. A per-variable cache avoids the
+HAMT lookup on repeated reads within the same context version:
 
 ```c
-static PyObject *
-_contextvars_ContextVar_set_impl(PyContextVar *self, PyObject *val)
+int
+PyContextVar_Get(PyObject *ovar, PyObject *def, PyObject **val)
 {
-    return PyContextVar_Set((PyObject *)self, val);
+    PyContextVar *var = (PyContextVar *)ovar;
+    PyThreadState *ts = _PyThreadState_GET();
+
+    if (ts->context == NULL) {
+        goto not_found;
+    }
+
+    /* Fast path: cached value for the current context version */
+    if (var->var_cached != NULL &&
+            var->var_cached_tsid == ts->id &&
+            var->var_cached_tsver == ts->context_ver)
+    {
+        *val = var->var_cached;
+        goto found;
+    }
+
+    PyHamtObject *vars = ((PyContext *)ts->context)->ctx_vars;
+    PyObject *found = NULL;
+    int res = _PyHamt_Find(vars, (PyObject*)var, &found);
+    if (res == 1) {
+        var->var_cached = found;
+        var->var_cached_tsid = ts->id;
+        var->var_cached_tsver = ts->context_ver;
+        *val = found;
+        goto found;
+    }
+    ...
 }
 ```
 
-`PyContextVar_Set` (in `Python/context.c`) walks the current context HAMT
-to find the old value, creates a `Token` capturing it, and writes the new
-value into the context. The token is the only way to undo the `set` via
-`reset`.
-
-### `context_run` (lines 90 to 140)
-
-<CpyLink path="Modules/_contextvarsmodule.c" lines="90-140" />
-
-`Context.run(callable, *args, **kwargs)` activates the context for the
-duration of the call:
+`PyContextVar_Set` creates a new Token, mutates the current context's HAMT by
+inserting the new value (HAMTs are persistent, so this produces a new root
+without affecting other contexts that share the old root), and returns the
+token. The token records the previous value so that `reset()` can undo the
+assignment:
 
 ```c
-static PyObject *
-_contextvars_Context_run_impl(PyContext *self, PyObject *callable,
-                               PyObject *args, PyObject *kwargs)
+PyObject *
+PyContextVar_Set(PyObject *ovar, PyObject *val)
 {
-    if (PyContext_Enter((PyObject *)self) < 0)
-        return NULL;
+    PyContextVar *var = (PyContextVar *)ovar;
+    PyContext *ctx = context_get();
 
-    PyObject *result = PyObject_Call(callable, args, kwargs);
+    PyObject *old_val = NULL;
+    int found = _PyHamt_Find(ctx->ctx_vars, (PyObject *)var, &old_val);
+    Py_XINCREF(old_val);
+    PyContextToken *tok = token_new(ctx, var, old_val);
+    Py_XDECREF(old_val);
 
-    if (PyContext_Exit((PyObject *)self) < 0) {
-        Py_XDECREF(result);
+    if (contextvar_set(var, val)) {
+        Py_DECREF(tok);
         return NULL;
     }
-    return result;
+    return (PyObject *)tok;
 }
 ```
 
-`PyContext_Enter` pushes the context onto the thread-state's context stack
-so that `ContextVar.get()` calls inside `callable` see the values stored in
-this context. `PyContext_Exit` pops it. The exit is always called even when
-`callable` raises, matching the semantics of a `with` block.
+## gopy mirror
 
-In gopy, `module/contextlib/module.go` replicates the enter/exit pair
-around the `callable` invocation using the same HAMT-backed context
-implementation.
+`module/contextlib/` carries the port. The HAMT (Persistent Hash Array Mapped
+Trie) that backs `Context.ctx_vars` is ported in `objects/` as the internal
+map type. `ContextVar.get()` mirrors the thread-state lookup using Go's
+goroutine-local equivalent, with the same cache-on-tsver optimization. The
+Token one-shot guard (`tok_used`) maps to a boolean field checked before
+`reset()` proceeds.

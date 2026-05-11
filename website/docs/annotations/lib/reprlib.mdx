@@ -1,11 +1,11 @@
 ---
 title: Lib/reprlib.py
-description: Configurable repr with depth and length limits, plus the recursive_repr decorator that prevents infinite recursion in __repr__ implementations.
+description: Truncating repr() with configurable depth and per-type length limits, plus the recursive_repr guard decorator.
 cpython_path: Lib/reprlib.py
 cpython_version: "3.14"
-lines: 300
+lines: 250
 status: annotated
-ported_to: module/reprlib/module.go
+ported_to: (stdlib pending)
 ---
 
 import {Cpy, CpyLink} from '@site/src/components/Cpy';
@@ -14,153 +14,132 @@ import {Cpy, CpyLink} from '@site/src/components/Cpy';
 
 <CpyLink path="Lib/reprlib.py" />
 
-`reprlib` provides a `Repr` class whose instances produce abbreviated
-string representations of objects. Every container type has a
-configurable maximum length (`maxlist`, `maxdict`, `maxset`, etc.) and
-there is an overall depth limit (`maxlevel`) that prevents deeply nested
-structures from producing exponentially long output. Long strings and
-integers are also truncated at configurable thresholds (`maxstring`,
-`maxlong`).
+`reprlib` provides a `repr()` variant that never produces unbounded
+output. The central class is `Repr`, which implements `repr1` as a
+type-dispatching method and exposes per-type length limits as plain
+integer attributes. The module ships a singleton `aRepr` and a
+module-level `repr` function that delegates to it.
 
-A module-level instance `aRepr` is created with default limits and
-exposed as `reprlib.repr`. Most callers use that shortcut rather than
-constructing a `Repr` themselves.
+The class is used internally by the `logging` module (to avoid printing
+enormous objects in log messages) and by the interactive `help` system.
 
-The `recursive_repr` decorator, originally written for `collections`
-containers, lives here in 3.14. It maintains a per-thread set of object
-ids currently being repr'd and returns a configurable `fillvalue` (default
-`'...'`) when the same id is encountered again, preventing infinite
-recursion in `__repr__` methods.
+`recursive_repr` is a stand-alone decorator, also used by
+`collections.OrderedDict.__repr__` and `dict.__repr__` in CPython, that
+prevents infinite recursion when a container holds a reference to itself.
 
 ## Map
 
 | Lines | Symbol | Role | gopy |
 | ----- | ------ | ---- | ---- |
-| <Cpy path="Lib/reprlib.py" lines="1-30">1-30</Cpy> | module header, `__all__` | Imports `sys`, `re`, `collections`; declares public names. | `module/reprlib/module.go` |
-| <Cpy path="Lib/reprlib.py" lines="31-65">31-65</Cpy> | `recursive_repr` | Decorator that detects reentrant `__repr__` calls and returns `fillvalue` to break cycles. | `module/reprlib/module.go` |
-| <Cpy path="Lib/reprlib.py" lines="67-100">67-100</Cpy> | `Repr.__init__` | Sets all limit attributes to their defaults. | `module/reprlib/module.go` |
-| <Cpy path="Lib/reprlib.py" lines="101-120">101-120</Cpy> | `Repr.repr` | Dispatches to a `repr_TYPE` method; falls back to `repr_instance`. | `module/reprlib/module.go` |
-| <Cpy path="Lib/reprlib.py" lines="121-145">121-145</Cpy> | `Repr.repr_str` / `Repr.repr_bytes` | Truncate strings and bytes at `maxstring`; append `'...'` + closing quote. | `module/reprlib/module.go` |
-| <Cpy path="Lib/reprlib.py" lines="146-185">146-185</Cpy> | `Repr.repr_list` / `repr_tuple` / `repr_set` / `repr_frozenset` / `repr_deque` / `repr_array` | Depth-limited sequence and set reprs; shared helper `_repr_iterable`. | `module/reprlib/module.go` |
-| <Cpy path="Lib/reprlib.py" lines="186-225">186-225</Cpy> | `Repr.repr_dict` | Key-value repr; sorts keys to give deterministic output. | `module/reprlib/module.go` |
-| <Cpy path="Lib/reprlib.py" lines="226-255">226-255</Cpy> | `Repr.repr_int` / `repr_float` / `repr_complex` | Truncate long integers at `maxlong`; floats and complex pass through `builtins.repr`. | `module/reprlib/module.go` |
-| <Cpy path="Lib/reprlib.py" lines="256-280">256-280</Cpy> | `Repr.repr_instance` | Fallback: calls `obj.__repr__()` in a try/except; on error returns `<ClassName instance>`. | `module/reprlib/module.go` |
-| <Cpy path="Lib/reprlib.py" lines="281-300">281-300</Cpy> | `aRepr`, module-level `repr` | Shared `Repr()` instance; `reprlib.repr = aRepr.repr`. | `module/reprlib/module.go` |
+| <Cpy path="Lib/reprlib.py" lines="1-30">1-30</Cpy> | Module header, `recursive_repr` | Decorator that returns a fill string on re-entrant calls from the same thread; uses a `set` in thread-local storage to track active calls. | `(stdlib pending)` |
+| <Cpy path="Lib/reprlib.py" lines="31-80">31-80</Cpy> | `Repr.__init__`, limit attributes | Constructor sets `maxlevel`, `maxstring`, `maxbytes`, `maxdict`, `maxlist`, `maxtuple`, `maxset`, `maxfrozenset`, `maxarray`, `maxlong`, `maxother`. | `(stdlib pending)` |
+| <Cpy path="Lib/reprlib.py" lines="81-120">81-120</Cpy> | `Repr.repr`, `Repr.repr1` | `repr(x)` calls `repr1(x, self.maxlevel)`; `repr1` dispatches to `repr_TYPE` via `type(x).__name__` lookup, falling back to `repr_instance`. | `(stdlib pending)` |
+| <Cpy path="Lib/reprlib.py" lines="121-180">121-180</Cpy> | `repr_str`, `repr_bytes`, `repr_int`, `repr_list`, `repr_tuple`, `repr_set`, `repr_frozenset`, `repr_deque`, `repr_array` | Per-type truncation methods; sequences truncate to `maxTYPE` items and append `'...'`; strings are sliced to `maxstring` characters. | `(stdlib pending)` |
+| <Cpy path="Lib/reprlib.py" lines="181-220">181-220</Cpy> | `repr_dict`, `repr_instance` | `repr_dict` sorts keys and limits entries; `repr_instance` tries `__repr__` and on recursion returns `<CLASS object at ADDR>`. | `(stdlib pending)` |
+| <Cpy path="Lib/reprlib.py" lines="221-250">221-250</Cpy> | `aRepr`, module-level `repr()` | Singleton instance with default limits; module-level `repr` is `aRepr.repr`. | `(stdlib pending)` |
 
 ## Reading
 
-### `recursive_repr` (lines 31 to 65)
+### `repr1` dispatch (lines 81 to 120)
 
-<CpyLink path="Lib/reprlib.py" lines="31-65" />
-
-```python
-def recursive_repr(fillvalue='...'):
-    def decorating_function(user_function):
-        wrapper = _recursive_repr_helper(user_function, fillvalue)
-        wrapper.__wrapped__ = user_function
-        return wrapper
-    return decorating_function
-
-def _recursive_repr_helper(user_function, fillvalue):
-    repr_running = set()
-
-    @wraps(user_function)
-    def wrapper(self):
-        key = id(self), get_ident()
-        if key in repr_running:
-            return fillvalue
-        repr_running.add(key)
-        try:
-            result = user_function(self)
-        finally:
-            repr_running.discard(key)
-        return result
-    return wrapper
-```
-
-The guard set `repr_running` is closed over by the wrapper so it is
-per-function (not per-instance or per-thread). The key combines
-`id(self)` with `threading.get_ident()` so that two threads can repr
-the same object concurrently without interfering. `id` reuse is safe
-here because the object is kept alive by the call stack for the entire
-duration of the outer repr.
-
-### `Repr.repr` dispatch (lines 101 to 120)
-
-<CpyLink path="Lib/reprlib.py" lines="101-120" />
+<CpyLink path="Lib/reprlib.py" lines="81-120" />
 
 ```python
-def repr(self, x):
-    return self.repr1(x, self.maxlevel)
-
 def repr1(self, x, level):
     typename = type(x).__name__
-    # replace any character that is not alphanumeric with '_'
-    typename = re.sub(r'[^\w]', '_', typename)
+    if ' ' in typename:
+        parts = typename.split()
+        typename = '_'.join(parts)
     if hasattr(self, 'repr_' + typename):
         return getattr(self, 'repr_' + typename)(x, level)
     else:
         return self.repr_instance(x, level)
 ```
 
-The dispatch is purely name-based: `repr_list` handles `list`,
-`repr_defaultdict` would handle `defaultdict`, and so on. Subclasses
-add `repr_MyType` methods to handle new types without overriding the
-dispatch loop. Any character that is not a word character in the type
-name is replaced by `_` so the method name is always a valid Python
-identifier. Types with no matching `repr_*` method fall through to
-`repr_instance`.
+`repr1` constructs a method name from the type's `__name__`, replacing
+spaces with underscores to handle types like `"NoneType"` or
+`"builtin_function_or_method"`. This means subclasses can add support for
+a new type by simply defining `repr_MyType`. The `level` parameter is
+decremented on each recursive call; when it reaches zero the truncation
+methods emit a short placeholder rather than recursing further, which
+bounds total output size even for deeply nested structures.
 
-### Depth-limited container helper (lines 146 to 185)
+### Truncation pattern in sequence methods (lines 121 to 180)
 
-<CpyLink path="Lib/reprlib.py" lines="146-185" />
+<CpyLink path="Lib/reprlib.py" lines="121-180" />
 
 ```python
-def _repr_iterable(self, x, level, left, right, maxiter, trail=''):
+def repr_list(self, x, level):
+    return self._repr_iterable(x, level, '[', ']', self.maxlist)
+
+def _repr_iterable(self, x, level, left, right, maxitems, trail=''):
     n = len(x)
-    if level <= 0 and n:
-        s = '...'
-    else:
-        newlevel = level - 1
-        repr1 = self.repr1
-        pieces = [repr1(elem, newlevel) for elem in islice(x, maxiter)]
-        if n > maxiter:
+    if n == 0:
+        return left + right
+    if level <= 0:
+        return left + '...' + right
+    newlevel = level - 1
+    pieces = []
+    for i, item in enumerate(x):
+        if i >= maxitems:
             pieces.append('...')
-        s = ', '.join(pieces)
-        if n == 1 and trail:
-            s += trail
+            break
+        pieces.append(self.repr1(item, newlevel))
+    s = ', '.join(pieces)
+    if n == 1 and trail:
+        s += trail
     return '%s%s%s' % (left, s, right)
 ```
 
-The depth check happens first: when `level` reaches zero the entire
-contents are replaced by `'...'`. The length check (`n > maxiter`)
-appends an extra `'...'` item after the first `maxiter` elements.
-`trail` carries the trailing comma for single-element tuples
-(`repr_tuple` passes `','`). Both limits are respected independently,
-so a list with 1000 items at depth 2 will truncate at `maxlist` items,
-not at depth zero.
+`_repr_iterable` is the shared implementation for lists, tuples, sets,
+frozensets, and deques. It caps the number of items at `maxitems` and
+inserts `'...'` as the final element if more items exist. Passing
+`newlevel = level - 1` into each recursive `repr1` call ensures that
+each nesting layer consumes one level counter, so the total depth is
+bounded by `maxlevel` regardless of how wide each level is.
 
-### `Repr.repr_instance` fallback (lines 256 to 280)
+Strings use a different path: `repr_str` slices the string to
+`self.maxstring` characters and calls the built-in `repr()`, then
+replaces the tail of the quoted form with `"...'"` to signal truncation.
 
-<CpyLink path="Lib/reprlib.py" lines="256-280" />
+### `recursive_repr` guard (lines 1 to 30)
+
+<CpyLink path="Lib/reprlib.py" lines="1-30" />
 
 ```python
-def repr_instance(self, x, level):
-    try:
-        s = builtins.repr(x)
-        # ... limit to maxother characters
-        if len(s) > self.maxother:
-            i = max(0, (self.maxother - 3) // 2)
-            j = max(0, self.maxother - 3 - i)
-            s = s[:i] + '...' + s[len(s)-j:]
-    except:
-        s = '<%s instance>' % x.__class__.__name__
-    return s
+def recursive_repr(fillvalue='...'):
+    def decorating_function(user_function):
+        wrapper_set = set()
+        @wraps(user_function)
+        def wrapper(self):
+            key = id(self), get_ident()
+            if key in wrapper_set:
+                return fillvalue
+            wrapper_set.add(key)
+            try:
+                result = user_function(self)
+            finally:
+                wrapper_set.discard(key)
+            return result
+        return wrapper
+    return decorating_function
 ```
 
-The fallback calls the real `builtins.repr` and then truncates the
-result at `maxother` characters using the same symmetric
-`head...tail` pattern used for strings. The bare `except:` is
-intentional: a broken `__repr__` should never prevent a debugger or
-logging call from completing, so all exceptions are silenced and a
-placeholder string is returned instead.
+The guard key is `(id(object), thread_id)`, so recursion detection is
+per-object per-thread. Using the thread id means two threads can safely
+repr the same object simultaneously without false positives. The
+`wrapper_set` is a closure variable, not thread-local storage, so it is
+shared across threads; however, since the key includes the thread id,
+the only interaction between threads is a set lookup on a key the other
+thread can never produce.
+
+`fillvalue` defaults to `'...'`; `collections.OrderedDict.__repr__` uses
+`'{...}'` to match the dict display convention.
+
+## gopy mirror
+
+`reprlib.py` is pure Python with no C dependency and is a straightforward
+bundle candidate under `stdlib/reprlib.py`. The `recursive_repr` decorator
+relies on `threading.get_ident()`, which gopy maps to goroutine identity.
+`aRepr` and the module-level `repr` function must be initialized at module
+load time as the singleton instance.

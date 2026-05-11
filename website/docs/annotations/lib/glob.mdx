@@ -1,11 +1,11 @@
 ---
 title: Lib/glob.py
-description: Shell-style pathname expansion including recursive ** globbing, root-dir/dir-fd anchoring, and special-character escaping.
+description: Filesystem pattern matching with shell-style wildcards, including recursive ** traversal and regex-backed translate().
 cpython_path: Lib/glob.py
 cpython_version: "3.14"
-lines: 230
+lines: 350
 status: annotated
-ported_to: module/glob/module.go
+ported_to: (stdlib pending)
 ---
 
 import {Cpy, CpyLink} from '@site/src/components/Cpy';
@@ -14,152 +14,141 @@ import {Cpy, CpyLink} from '@site/src/components/Cpy';
 
 <CpyLink path="Lib/glob.py" />
 
-`glob` expands a pathname pattern into a list of matching filesystem
-paths. It is built on top of `fnmatch` and `os.scandir`/`os.listdir`
-and handles three pattern features that `fnmatch` alone does not:
-path separators, the `**` recursive wildcard, and `root_dir`/`dir_fd`
-anchoring added in Python 3.10.
+`glob` provides `glob()` and `iglob()` for expanding shell-style
+wildcards against the real filesystem. Patterns follow POSIX shell rules:
+`*` matches any sequence of characters within a path component, `?`
+matches exactly one character, and `[seq]` matches any character in the
+set. The special token `**` when used as a complete path component matches
+zero or more directory levels recursively.
 
-The public entry point is `glob`; `iglob` is the iterator form that
-`glob` wraps. Both accept the same arguments: `pathname` (the pattern),
-`root_dir` (an alternative working directory for relative patterns),
-`dir_fd` (a directory file descriptor), and `recursive` (enables `**`).
+Internally the path is split into a directory part and a pattern part.
+If the pattern contains no magic characters the path is returned directly
+(after an existence check). If the directory part itself contains magic
+characters `iglob` recurses into itself. The `_glob1` function uses
+`os.scandir` via `_iterdir` to list a directory and filters names with
+`fnmatch.fnmatch`.
 
-Internally, the pattern is split into a `dirname` / `basename` pair.
-Each path segment is tested for magic characters (`*?[`); segments
-without magic are resolved as literal names. When `**` is encountered
-and `recursive=True`, `glob2` performs a full `os.walk`; otherwise the
-segment is treated as a literal `**` directory name.
+`translate(pattern)` converts a glob pattern into a regular expression
+string suitable for `re.compile`. It is also used by `pathlib._GlobWildcardSelector`.
 
 ## Map
 
 | Lines | Symbol | Role | gopy |
 | ----- | ------ | ---- | ---- |
-| <Cpy path="Lib/glob.py" lines="1-25">1-25</Cpy> | Module header, `__all__` | Imports `os`, `re`, `fnmatch`; declares the public API. | `module/glob/module.go` |
-| <Cpy path="Lib/glob.py" lines="26-65">26-65</Cpy> | `glob(pathname, ...)`, `iglob(pathname, ...)` | Public API; `iglob` is the lazy generator; `glob` collects into a list. | `module/glob/module.go` |
-| <Cpy path="Lib/glob.py" lines="66-110">66-110</Cpy> | `_iglob(pathname, recursive, dironly, ...)` | Recursive workhorse: splits dirname/basename, dispatches to `glob0`/`glob1`/`glob2`. | `module/glob/module.go` |
-| <Cpy path="Lib/glob.py" lines="111-135">111-135</Cpy> | `glob0(dirname, basename, dironly)` | Literal basename lookup in `dirname`; returns a one-element list if the entry exists. | `module/glob/module.go` |
-| <Cpy path="Lib/glob.py" lines="136-160">136-160</Cpy> | `glob1(dirname, pattern, dironly)` | `os.listdir` + `fnmatch.filter` for a single directory level. | `module/glob/module.go` |
-| <Cpy path="Lib/glob.py" lines="161-190">161-190</Cpy> | `glob2(dirname, pattern, dironly)` | Recursive `**` expansion using `_rlistdir`. | `module/glob/module.go` |
-| <Cpy path="Lib/glob.py" lines="191-210">191-210</Cpy> | `_iterdir(dirname, dironly)`, `_rlistdir(dirname, dironly)` | Yield directory entries; `_rlistdir` recurses into subdirectories for `**`. | `module/glob/module.go` |
-| <Cpy path="Lib/glob.py" lines="211-230">211-230</Cpy> | `_isdir`, `_islink`, `has_magic`, `_ishidden`, `escape` | Predicates and the `escape` helper that backslash-quotes `*?[]` in literal path components. | `module/glob/module.go` |
+| <Cpy path="Lib/glob.py" lines="1-100">1-100</Cpy> | `glob`, `iglob` | Public API; split magic from literal directory prefix; dispatch to `_glob0` / `_glob1` / `_glob2`. | `(stdlib pending)` |
+| <Cpy path="Lib/glob.py" lines="100-200">100-200</Cpy> | `_glob0`, `_glob1`, `_iterdir` | `_glob0` checks exact existence; `_glob1` lists a directory and filters with `fnmatch`; `_iterdir` wraps `os.scandir`. | `(stdlib pending)` |
+| <Cpy path="Lib/glob.py" lines="200-300">200-300</Cpy> | `_glob2`, `_rlistdir` | Recursive `**` implementation: `_rlistdir` yields every subdirectory depth-first; `_glob2` chains with `_glob1`. | `(stdlib pending)` |
+| <Cpy path="Lib/glob.py" lines="300-350">300-350</Cpy> | `translate`, `escape`, `_has_magic`, `_ishidden` | `translate` converts a glob pattern to a regex; `escape` quotes magic chars; `_has_magic` tests via a compiled magic regex. | `(stdlib pending)` |
 
 ## Reading
 
-### `iglob` entry point (lines 26 to 65)
+### `iglob` recursive `**` walk (lines 1 to 200)
 
-<CpyLink path="Lib/glob.py" lines="26-65" />
+<CpyLink path="Lib/glob.py" lines="1-200" />
 
 ```python
 def iglob(pathname, *, root_dir=None, dir_fd=None, recursive=False,
           include_hidden=False):
-    """Return an iterator which yields the paths matching a pathname pattern."""
     sys.audit("glob.glob", pathname, recursive)
     sys.audit("glob.glob/2", pathname, recursive, root_dir, dir_fd)
-    if root_dir is not None:
-        cwd = os.fspath(root_dir)
-    else:
-        cwd = None
-    it = _iglob(pathname, recursive, False, cwd=cwd, dir_fd=dir_fd,
-                include_hidden=include_hidden)
-    if recursive and _isrecursive(basename):
-        yield from it
+    if not pathname:
         return
-    ...
-    for dirname in glob_in_dir(dirname, dirs_pattern, dironly=True):
-        for name in glob_in_dir(os.path.join(dirname, basename), ...):
-            yield os.path.join(dirname, name)
-```
-
-`iglob` fires two `sys.audit` events — the second carrying `root_dir` and
-`dir_fd` — so security-conscious embedders can intercept filesystem
-access. The `root_dir` argument is converted to an `os.fspath` string
-early; all subsequent `os.listdir` / `os.scandir` calls receive `cwd` as
-their directory anchor. When `dir_fd` is set the module uses the
-`*at`-family syscalls, which avoids TOCTOU races for trusted callers.
-
-### `_iglob` dispatch (lines 66 to 110)
-
-<CpyLink path="Lib/glob.py" lines="66-110" />
-
-```python
-def _iglob(pathname, recursive, dironly, *, cwd=None, dir_fd=None,
-           include_hidden=False):
     dirname, basename = os.path.split(pathname)
     if not has_magic(pathname):
-        ...
+        # No magic: check existence and yield if present
         if basename:
-            if _lexists(_join(cwd, pathname), dir_fd):
+            if os.path.lexists(pathname):
                 yield pathname
         else:
-            if _isdir(_join(cwd, dirname), dir_fd):
+            if os.path.isdir(pathname):
                 yield pathname
         return
     if _isrecursive(basename):
-        glob_in_dir = glob2
-    elif has_magic(basename):
-        glob_in_dir = glob1
+        yield from _glob2(dirname, basename, dironly, ...)
     else:
-        glob_in_dir = glob0
-    ...
+        dirs = iglob(dirname, ...) if has_magic(dirname) else [dirname]
+        glob_in_dir = _glob1 if has_magic(basename) else _glob0
+        for dirname in dirs:
+            for name in glob_in_dir(dirname, basename, ...):
+                yield os.path.join(dirname, name) if dirname else name
 ```
 
-The dispatch table is simple: a literal basename goes to `glob0`, a
-pattern basename to `glob1`, and the `**` token to `glob2`. If `dirname`
-also contains magic the function recurses, passing `dironly=True` so only
-directories are enumerated at intermediate levels. The `dironly` flag is
-threaded all the way down to `_iterdir` to avoid `stat` calls on
-non-directory entries.
+`iglob` works by splitting the pattern at the last `os.sep`. If the
+directory part also contains magic characters, it recurses so that
+`/tmp/*/foo/*.py` expands both wildcard segments correctly. The basename
+is then dispatched to one of three helpers: `_glob0` for literal names
+(just an existence test), `_glob1` for single-component patterns, and
+`_glob2` for the recursive `**` case. Because `iglob` is a generator,
+the entire tree walk is lazy. The `root_dir` and `dir_fd` parameters
+redirect the root of the search without changing the returned paths.
 
-### `glob1` and `glob2` (lines 136 to 190)
+### `_glob1` magic vs literal split and `translate` (lines 100 to 350)
 
-<CpyLink path="Lib/glob.py" lines="136-190" />
+<CpyLink path="Lib/glob.py" lines="100-350" />
 
 ```python
-def glob1(dirname, pattern, dironly):
+def _glob1(dirname, pattern, dironly, include_hidden=False):
+    names = list(_iterdir(dirname, dironly))
+    if not include_hidden and _ishidden(pattern):
+        names = [x for x in names if not _ishidden(x)]
+    return fnmatch.filter(names, pattern)
+
+
+def _iterdir(dirname, dironly):
     if not dirname:
         dirname = os.curdir
     try:
-        names = _listdir(dirname, dironly)
+        with os.scandir(dirname) as it:
+            for entry in it:
+                try:
+                    if not dironly or entry.is_dir():
+                        yield entry.name
+                except OSError:
+                    pass
     except OSError:
-        return []
-    if not _ishidden(pattern):
-        names = (x for x in names if not _ishidden(x))
-    return fnmatch.filter(names, pattern)
+        return
 
-def glob2(dirname, pattern, dironly):
-    assert _isrecursive(pattern)
-    yield pattern[:0]   # b'' or '' depending on type
-    yield from _rlistdir(dirname, dironly)
+
+def translate(pat):
+    """Translate a shell pattern to a regular expression."""
+    i, n = 0, len(pat)
+    res = ''
+    while i < n:
+        c = pat[i]
+        i += 1
+        if c == '*':
+            # compress consecutive stars
+            j = i
+            if j < n and pat[j] == '*':
+                res += '.*'
+                i = j + 1
+            else:
+                res += '[^/]*'
+        elif c == '?':
+            res += '[^/]'
+        elif c == '[':
+            # character class: copy verbatim until ']'
+            ...
+        else:
+            res += re.escape(c)
+    return r'(?s:%s)\Z' % res
 ```
 
-`glob1` silently swallows `OSError` from unreadable directories rather
-than propagating it, matching historical shell behaviour. Hidden entries
-(those starting with `.`) are excluded unless the pattern itself starts
-with `.`, implemented by the `_ishidden` predicate. `glob2` yields an
-empty string first (representing the current directory match for bare
-`**`), then delegates to `_rlistdir` which walks the tree recursively
-via `os.scandir`.
+`_iterdir` wraps `os.scandir` and absorbs per-entry `OSError` exceptions
+(e.g. from broken symlinks or permission errors), which lets a single
+bad entry not abort the entire listing. `fnmatch.filter` applies the
+shell pattern using `translate` internally.
 
-### `escape` (lines 211 to 230)
+`translate` converts `*` to `[^/]*` (matching within one path component)
+and `**` to `.*` (matching across separators). `?` becomes `[^/]`.
+Character classes (`[abc]`, `[!abc]`) are copied verbatim after adjusting
+`!` to `^` for regex syntax. The result is wrapped in `(?s:...)\Z` so
+`.` matches newlines and the anchor is at the true end of string.
 
-<CpyLink path="Lib/glob.py" lines="211-230" />
+## gopy mirror
 
-```python
-_magic_check    = re.compile('([*?[])')
-_magic_check_bytes = re.compile(b'([*?[])')
-
-def escape(pathname):
-    """Escape all special characters."""
-    if isinstance(pathname, bytes):
-        match = _magic_check_bytes
-    else:
-        match = _magic_check
-    return match.sub(r'[\1]', pathname)
-```
-
-`escape` wraps each magic character inside a `[…]` character class, which
-`fnmatch.translate` preserves as a literal. This is the correct approach
-because `\*` is not valid in a character class and some regex engines
-treat it differently. Both `str` and `bytes` pathnames are handled via
-separate pre-compiled regexes to avoid per-call type dispatch overhead.
+`glob` depends on `os.scandir`, `fnmatch.filter`, and `os.path` utilities.
+All three are either already ported or in scope for the stdlib layer.
+The pure-Python `translate` function can be vendored directly.
+The `sys.audit` calls can be no-ops in gopy until the audit hook
+infrastructure is in place.
