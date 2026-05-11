@@ -1,0 +1,62 @@
+---
+title: Python/mystrtoul.c
+description: Portable string-to-integer conversion providing C89-compatible strtoul and strtol for all CPython platforms.
+cpython_path: Python/mystrtoul.c
+cpython_version: "3.14"
+lines: 150
+status: annotated
+ported_to: ""
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Python/mystrtoul.c`
+
+<CpyLink path="Python/mystrtoul.c" />
+
+`mystrtoul.c` provides `_Py_strtoul` and `_Py_strtol`, portable replacements for the C standard library's `strtoul` and `strtol`. The motivation is that early C89 implementations had inconsistent behavior around overflow, sign handling, and prefix recognition, so CPython ships its own authoritative version rather than relying on whatever the host OS provides.
+
+The unsigned entry point `_Py_strtoul` accepts bases 2 through 36, plus the special value 0 which triggers automatic prefix detection. A leading `0x` or `0X` selects base 16, `0b` or `0B` selects base 2, `0o` or `0O` selects base 8, and a plain leading `0` also implies octal. The signed wrapper `_Py_strtol` is a thin layer on top that handles the optional leading sign character and maps the unsigned result back into the signed range, raising `ERANGE` on overflow.
+
+Within CPython, this file surfaces wherever the interpreter needs to parse an integer string in a way that must be OS-independent. The `int()` built-in's radix-parsing fallback calls these routines, as does the tokenizer when it needs to evaluate integer literals without assuming a particular libc quality level.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| 1-30 | file header, includes | Guards and macro definitions for portability | n/a |
+| 31-110 | `_Py_strtoul` | Core unsigned conversion, handles prefix detection and digit accumulation | not ported |
+| 111-140 | `_Py_strtol` | Signed wrapper: sign char, delegates to `_Py_strtoul`, clamps to LONG range | not ported |
+| 141-150 | `PyOS_strtoul`, `PyOS_strtol` | Public API aliases that expose the internal symbols | not ported |
+
+## Reading
+
+### Prefix detection
+
+When `base == 0`, the function inspects the first one or two characters after optional whitespace and sign. The two-character prefixes `0x`, `0b`, `0o` are checked before falling back to the single-character `0` prefix for plain octal. This ordering matters: `0b` must be tested before `0` so that binary literals are not mistakenly treated as octal zero followed by a trailing `b`.
+
+### Digit accumulation loop
+
+The main loop converts each character to a digit value via a lookup that handles both `0-9` and `a-z`/`A-Z` ranges, rejects digits outside the current base, and checks for overflow before each multiply-and-add step. Overflow is detected by comparing the running accumulator against `ULONG_MAX / base` before multiplying, mirroring the classic safe-multiply idiom.
+
+### Overflow and error signaling
+
+On overflow `_Py_strtoul` sets `errno = ERANGE` and returns `ULONG_MAX`, matching POSIX `strtoul` semantics. `_Py_strtol` additionally maps values above `LONG_MAX` or below `LONG_MIN` to those sentinel constants, also with `ERANGE`, so callers that already check the signed strtol contract do not need changes.
+
+### Public aliases
+
+`PyOS_strtoul` and `PyOS_strtol` are simple forwarding macros or inline wrappers that expose the internal `_Py_` symbols under the stable `PyOS_` namespace. This keeps the public API stable even if the internal implementation is renamed.
+
+```c
+unsigned long
+_Py_strtoul(const char *str, char **ptr, int base)
+{
+    /* skip leading whitespace */
+    /* detect 0x / 0b / 0o prefixes when base == 0 */
+    /* accumulate digits with overflow check */
+}
+```
+
+## gopy mirror
+
+Not yet ported.

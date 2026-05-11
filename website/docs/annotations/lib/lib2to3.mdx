@@ -1,0 +1,97 @@
+---
+title: Lib/lib2to3/main.py
+description: Entry point for the 2to3 command-line tool that automatically migrates Python 2 source code to Python 3.
+cpython_path: Lib/lib2to3/main.py
+cpython_version: "3.14"
+lines: 120
+status: annotated
+ported_to: ""
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Lib/lib2to3/main.py`
+
+<CpyLink path="Lib/lib2to3/main.py" />
+
+`lib2to3/main.py` is the entry point for the `2to3` command-line tool. It parses flags, discovers fixer classes from the `lib2to3.fixes` package, instantiates a `RefactoringTool`, and drives it over each file or package directory the user names on the command line. The module is deliberately thin: all the AST walking and source rewriting lives in `lib2to3.refactor`.
+
+Fixers are plain Python classes, one per transformation, collected under `Lib/lib2to3/fixes/`. Each class declares a `PATTERN` (a lib2to3 pattern-language expression that selects AST nodes) and a `transform()` method that returns a replacement node or `None`. Common fixers handle `print` statements, `except E, e` syntax, `.has_key()`, `dict.iteritems()`, and dozens of other Python 2 idioms. The tool applies every enabled fixer in a single pass over the AST.
+
+The `main()` function wires together the option parser, fixer selection, and `RefactoringTool`. When `-w` is given, the tool writes modified files back in place (optionally keeping a `.bak` backup unless `-n` suppresses it). `--list-fixes` exits early after printing the canonical fixer names. The whole `lib2to3` package is around 8 000 lines; this entry-point file is about 120 of them.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| 1-20 | imports | stdlib imports plus `lib2to3.refactor` | n/a |
+| 21-40 | `warn()` | emit a `DeprecationWarning` for the package itself | n/a |
+| 41-70 | `main()` | parse argv, select fixers, build `RefactoringTool` | not ported |
+| 71-90 | fixer discovery | iterate `lib2to3.fixes` to collect fixer names | not ported |
+| 91-110 | file loop | call `refactor_file()` or `refactor_dir()` per path | not ported |
+| 111-120 | `__main__` guard | `sys.exit(main())` entry point | not ported |
+
+## Reading
+
+### Package deprecation warning (lines 21 to 40)
+
+<CpyLink path="Lib/lib2to3/main.py" lines="21-40" />
+
+`lib2to3` was deprecated in Python 3.11 and is scheduled for removal. The first thing `main.py` does on import is call `warn()` with `DeprecationWarning` so that any tool embedding the package receives a visible heads-up. Users are directed toward `ast` plus third-party tools such as `libcst`.
+
+```python
+# warn() is called at module import time
+warn("lib2to3 package is deprecated and may be removed in a future version",
+     DeprecationWarning, stacklevel=2)
+```
+
+### Option parsing (lines 41 to 70)
+
+<CpyLink path="Lib/lib2to3/main.py" lines="41-70" />
+
+`main()` builds an `optparse.OptionParser` with flags for controlling fixer selection (`-f`, `-x`), write-back (`-w`), backup suppression (`-n`), diff-only mode (`--no-diffs`), and verbosity (`-v`). The `--list-fixes` flag short-circuits the rest of the function, printing every available fixer name and returning 0.
+
+```python
+parser.add_option("-w", "--write", action="store_true",
+                  help="Write back modified files")
+parser.add_option("-n", "--nobackups", action="store_true",
+                  help="Don't write backups for modified files")
+```
+
+### Fixer discovery (lines 71 to 90)
+
+<CpyLink path="Lib/lib2to3/main.py" lines="71-90" />
+
+The tool assembles a list of fixer names by inspecting the `lib2to3.fixes` package directory for modules whose names start with `fix_`. The `-f all` shorthand expands to every discovered fixer; individual fixers can be excluded with `-x`. The resulting list is handed to `RefactoringTool` as the `fixer_names` argument.
+
+```python
+fixer_names = lib2to3.refactor.get_fixers_from_package("lib2to3.fixes")
+```
+
+### File-level refactoring loop (lines 91 to 110)
+
+<CpyLink path="Lib/lib2to3/main.py" lines="91-110" />
+
+For each path provided on the command line, `main()` calls either `refactor_file()` or `refactor_dir()` on the `RefactoringTool` instance. The tool walks directories recursively, skipping non-`.py` files. Diffs are printed to stdout unless `--no-diffs` is set; files are overwritten only when `-w` is active.
+
+```python
+if os.path.isdir(py_source):
+    rt.refactor_dir(py_source, write=options.write, ...)
+else:
+    rt.refactor_file(py_source, write=options.write, ...)
+```
+
+### Entry-point guard (lines 111 to 120)
+
+<CpyLink path="Lib/lib2to3/main.py" lines="111-120" />
+
+The standard `if __name__ == "__main__"` block calls `sys.exit(main())` so that the process exit code reflects whether any errors occurred. The `2to3` console script installed by the CPython build system points directly at this guard.
+
+```python
+if __name__ == "__main__":
+    sys.exit(main())
+```
+
+## gopy mirror
+
+Not yet ported.

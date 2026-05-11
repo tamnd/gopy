@@ -1,0 +1,113 @@
+---
+title: Modules/readline.c
+description: GNU readline integration for line editing and history in the interactive Python interpreter.
+cpython_path: Modules/readline.c
+cpython_version: "3.14"
+lines: 620
+status: annotated
+ported_to: ""
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Modules/readline.c`
+
+<CpyLink path="Modules/readline.c" />
+
+`readline.c` is a C extension module that wraps the GNU Readline library (or the BSD libedit library on macOS when built with `--with-editline`). It gives the interactive Python interpreter line editing, persistent command history, and tab completion. The module is imported automatically by `site.py` when available, and its presence enables arrow-key navigation and `Ctrl-R` history search in the REPL without any user action.
+
+The module exports roughly 25 functions organized into four areas: history management (`read_history_file`, `write_history_file`, `get_history_length`, `set_history_length`, `clear_history`, `get_history_item`, `get_current_history_length`, `remove_history_item`, `replace_history_item`), key binding (`parse_and_bind`, `read_init_file`), completion hooks (`set_completer`, `get_completer`, `set_completer_delims`, `get_completer_delims`, `set_completion_display_matches_hook`), and startup/teardown (`set_startup_hook`, `set_pre_input_hook`). A C-level completion callback bridges Readline's C calling convention to the Python callable registered by `set_completer`.
+
+The module also integrates with the `atexit` mechanism to write history on interpreter exit, and it installs a `SIGWINCH` handler (on POSIX) to notify Readline of terminal resize events. State is kept in a single static `readlinestate` struct that holds references to the Python callables for completion, display, startup, and pre-input hooks, as well as the history filename and the file descriptor for the readline input stream.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| 1-80 | includes, `readlinestate`, module init boilerplate | static state struct; conditional includes for GNU readline vs libedit | |
+| 81-200 | history API: `get/set_history_length`, `read/write_history_file`, `clear_history`, `get_history_item` | thin wrappers around `readline/history.h` functions; encode filenames to filesystem encoding | |
+| 201-320 | `parse_and_bind`, `read_init_file` | key binding; `parse_and_bind` calls `rl_parse_and_bind`; `read_init_file` calls `rl_read_init_file` | |
+| 321-460 | `set_completer`, `get_completer`, `set_completer_delims`, `get_completer_delims`, C-level `on_completion` callback | routes Readline's `rl_completion_entry_function` to a Python callable; manages the candidate list across successive calls | |
+| 461-540 | `set_startup_hook`, `set_pre_input_hook`, `set_completion_display_matches_hook` | store Python callables in `readlinestate`; C trampolines invoke them at the appropriate Readline event | |
+| 541-620 | module definition, `PyInit_readline`, atexit handler, `SIGWINCH` handler | registers all method defs; installs history-write atexit callback; calls `rl_initialize` | |
+
+## Reading
+
+### State struct and initialization (lines 1 to 80)
+
+<CpyLink path="Modules/readline.c" lines="1-80" />
+
+The `readlinestate` struct is the single piece of global state for the module. It holds `PyObject *` fields for each Python hook callback, an integer `history_length` for the cap passed to `stifle_history`, and a `char *completion_word` to communicate the current word between completion invocations. Because Readline is a global-state C library, one process can only have one active module instance; CPython does not attempt to make this module subinterpreter-safe.
+
+```c
+typedef struct {
+    PyObject *completion_function;
+    PyObject *startup_hook;
+    PyObject *pre_input_hook;
+    PyObject *display_matches_hook;
+    int history_length;
+    char *completion_word;
+} readlinestate;
+```
+
+### History management (lines 81 to 200)
+
+<CpyLink path="Modules/readline.c" lines="81-200" />
+
+`set_history_length` stores the value in `readlinestate` and calls `stifle_history(n)` immediately if the value is non-negative, or `unstifle_history()` for `-1`. `read_history_file` and `write_history_file` both convert the Python filename argument using `PyUnicode_FSConverter` to get the correct filesystem encoding, then call `read_history` and `write_history` from `history.h`. An empty filename or `None` tells Readline to use its default path (`~/.python_history`).
+
+```c
+static PyObject *
+py_read_history_file(PyObject *self, PyObject *args)
+{
+    char *s = NULL;
+    if (!PyArg_ParseTuple(args, "|O&:read_history_file",
+                          PyUnicode_FSConverter, &s))
+        return NULL;
+    errno = 0;
+    if (read_history(s) != 0) { ... }
+    Py_RETURN_NONE;
+}
+```
+
+### Completion callback bridge (lines 321 to 460)
+
+<CpyLink path="Modules/readline.c" lines="321-460" />
+
+Readline calls `rl_completion_entry_function` repeatedly with an incrementing `state` integer: `state=0` signals the first call for a new word, and subsequent calls ask for the next candidate. The C trampoline `on_completion` translates this protocol into Python calls. On the first call it invokes the registered Python completer with `(text, 0)`, and on subsequent calls with `(text, state)`. The Python callable is expected to return a string for each candidate and `None` when exhausted. The bridge catches Python exceptions, prints them, and returns `NULL` to tell Readline there are no more completions.
+
+```c
+static char *
+on_completion(const char *text, int state)
+{
+    if (readlinestate_global->completion_function == NULL)
+        return NULL;
+    PyObject *result = PyObject_CallFunction(
+        readlinestate_global->completion_function, "si", text, state);
+    if (result == Py_None) { Py_DECREF(result); return NULL; }
+    /* decode result to char* ... */
+}
+```
+
+### Module registration and atexit (lines 541 to 620)
+
+<CpyLink path="Modules/readline.c" lines="541-620" />
+
+`PyInit_readline` calls `rl_initialize()`, sets `rl_readline_name` to `"python"`, installs the `on_completion` C function as `rl_completion_entry_function`, and registers `write_history_atexit` via `Py_AtExit`. The atexit handler respects `history_length` and only writes if a history filename has been configured. On POSIX, the module also chains onto the existing `SIGWINCH` handler so that terminal resize events reach Readline's `rl_resize_terminal`.
+
+```c
+static void
+write_history_atexit(void)
+{
+    readlinestate *state = readlinestate_global;
+    if (state->history_filename == NULL) return;
+    errno = 0;
+    if (state->history_length >= 0)
+        stifle_history(state->history_length);
+    write_history(state->history_filename);
+}
+```
+
+## gopy mirror
+
+Not yet ported.

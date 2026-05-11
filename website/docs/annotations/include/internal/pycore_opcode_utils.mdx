@@ -1,0 +1,62 @@
+---
+title: Include/internal/pycore_opcode_utils.h
+description: Macro predicates and named constants that classify opcodes and encode oparg meanings for the CPython bytecode compiler and interpreter.
+cpython_path: Include/internal/pycore_opcode_utils.h
+cpython_version: "3.14"
+lines: 90
+status: annotated
+ported_to: "compile/flowgraph.go, compile/codegen.go"
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Include/internal/pycore_opcode_utils.h`
+
+<CpyLink path="Include/internal/pycore_opcode_utils.h" />
+
+This header collects every predicate and constant that describes the structural properties of an opcode, as distinct from its execution semantics. The bytecode compiler (`Python/compile.c`, `Python/flowgraph.c`) uses these macros heavily during the optimization and assembly passes: deciding whether a basic block is terminated, whether an instruction has a jump target, whether the assembler should insert a forward or backward jump stub. The interpreter itself uses the `RESUME` oparg constants to distinguish why a generator or coroutine frame was re-entered.
+
+Nothing in this file is an inline function or a variable. Every definition is either a `#define` macro or an integer constant. The macros are pure boolean expressions over the opcode value, which means the compiler can fold them into switch-case labels or dead-code-elimination passes at zero runtime cost. The only dependency is on the opcode tables generated from `Lib/opcode.py`, which supply the individual opcode names used inside the macro bodies.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| 11 | `MAX_REAL_OPCODE` | Upper bound (254) for non-pseudo opcodes | implicit in opcode tables |
+| 13-15 | `IS_WITHIN_OPCODE_RANGE` | True for any valid opcode including pseudo-instructions | not a standalone predicate in gopy |
+| 17-28 | `IS_BLOCK_PUSH_OPCODE`, `HAS_TARGET`, `IS_TERMINATOR_OPCODE` | Block structure predicates used by flowgraph passes | `compile/flowgraph.go:286` |
+| 35-60 | `IS_BACKWARDS_JUMP_OPCODE`, `IS_UNCONDITIONAL_JUMP_OPCODE`, `IS_CONDITIONAL_JUMP_OPCODE`, `IS_SCOPE_EXIT_OPCODE` | Jump classification for the assembler | `compile/flowgraph_jumps.go:111` |
+| 63-76 | `MAKE_FUNCTION_*`, `CONSTANT_*`, `NUM_COMMON_CONSTANTS` | Named oparg bit-fields and index constants | `compile/codegen.go` |
+| 79-85 | `RESUME_AT_FUNC_START`, `RESUME_AFTER_YIELD`, `RESUME_AFTER_YIELD_FROM`, `RESUME_AFTER_AWAIT`, `RESUME_OPARG_*` | Oparg values for the `RESUME` instruction | `compile/codegen.go:41` |
+
+## Reading
+
+### Opcode range and pseudo-instructions
+
+`MAX_REAL_OPCODE` (254) is the largest opcode value that can appear in a `.pyc` file. Values above 254 are pseudo-instructions that exist only inside the compiler's internal `cfg_instr` representation; they are never serialized. `IS_WITHIN_OPCODE_RANGE` accepts both real and pseudo opcodes so that compiler passes can use a single validity check throughout.
+
+### Terminator and jump predicates
+
+The flowgraph optimizer enforces the invariant that each basic block ends with exactly one terminator instruction. `IS_TERMINATOR_OPCODE` is the canonical test: an instruction terminates a block if it has any jump target (`OPCODE_HAS_JUMP`) or exits the current scope (`RETURN_VALUE`, `RAISE_VARARGS`, `RERAISE`). The assembler then uses `IS_UNCONDITIONAL_JUMP_OPCODE` and `IS_BACKWARDS_JUMP_OPCODE` to select between `JUMP_FORWARD` and `JUMP_BACKWARD` stubs when patching symbolic labels to concrete offsets.
+
+### MAKE_FUNCTION oparg bits
+
+`MAKE_FUNCTION` encodes which optional components are present as a bitmask in its oparg. Bit 0 (`MAKE_FUNCTION_DEFAULTS`) means positional defaults are on the stack; bit 1 (`MAKE_FUNCTION_KWDEFAULTS`) means keyword-only defaults; bit 2 (`MAKE_FUNCTION_ANNOTATIONS`) means a `__annotations__` dict; bit 3 (`MAKE_FUNCTION_CLOSURE`) means a closure tuple. Bit 4 (`MAKE_FUNCTION_ANNOTATE`) was added in 3.14 for PEP 649 lazy annotations and pushes an annotation function rather than a pre-built dict.
+
+### RESUME oparg encoding
+
+```c
+#define RESUME_AT_FUNC_START     0
+#define RESUME_AFTER_YIELD       1
+#define RESUME_AFTER_YIELD_FROM  2
+#define RESUME_AFTER_AWAIT       3
+
+#define RESUME_OPARG_LOCATION_MASK  0x3
+#define RESUME_OPARG_DEPTH1_MASK    0x4
+```
+
+The low two bits of the `RESUME` oparg encode where in the generator or coroutine lifecycle the frame is being (re-)entered. `RESUME_AT_FUNC_START` is emitted as the very first instruction of every code object; the interpreter uses it to run `sys.settrace` enter hooks. The `DEPTH1_MASK` bit is set when the `RESUME` is at nesting depth 1 inside a generator, enabling the optimizer to skip redundant tracing checks in inner loops.
+
+## gopy mirror
+
+The jump classification macros are replicated as Go functions in `compile/flowgraph.go` and `compile/flowgraph_jumps.go` with CPython citations. The `RESUME_AT_FUNC_START` and sibling constants are defined in `compile/codegen.go`. The `MAKE_FUNCTION_*` bitmask constants are used inline in `compile/codegen_stmt_funclike.go`. No single Go file mirrors the header as a unit; the constants are distributed across the compiler package wherever they are first needed.

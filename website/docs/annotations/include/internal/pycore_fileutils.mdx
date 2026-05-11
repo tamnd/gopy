@@ -1,0 +1,65 @@
+---
+title: Include/internal/pycore_fileutils.h
+description: Internal API for locale-aware encoding, file descriptor management, portable I/O wrappers, and path utilities used throughout the CPython runtime.
+cpython_path: Include/internal/pycore_fileutils.h
+cpython_version: "3.14"
+lines: 320
+status: annotated
+ported_to: ""
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Include/internal/pycore_fileutils.h`
+
+<CpyLink path="Include/internal/pycore_fileutils.h" />
+
+`pycore_fileutils.h` is one of the widest internal headers in CPython. It declares roughly three overlapping families of functions. The first handles encoding and decoding between the C locale representation and Unicode: `_Py_DecodeLocaleEx`, `_Py_EncodeLocaleEx`, and the UTF-8 variants give the rest of the runtime a single consistent way to cross the C-string / Python-string boundary regardless of platform locale settings. The second family wraps POSIX file operations (`open`, `read`, `write`, `stat`, `fstat`, `dup`, `close`) with CPython error-handling conventions, size-limit capping, and Windows portability shims. The third family provides path manipulation primitives (`_Py_isabs`, `_Py_abspath`, `_Py_normpath`, `_Py_join_relfile`) that the import system and the `sys` module use to canonicalize file names before touching the filesystem.
+
+Several declarations carry `PyAPI_FUNC` and are therefore exported from the shared library for use by extension modules (`mmap`, `select`, `_socket`, `_posixsubprocess`). The rest use `extern` linkage and are available only within the interpreter build itself. The header guards against use outside `Py_BUILD_CORE` via a hard `#error`.
+
+The Windows section is substantial. `_Py_stat_struct` is a full struct definition on Windows (where `struct stat` lacks inode precision and birth time) but collapses to a simple `#define _Py_stat_struct stat` on POSIX. The `_Py_BEGIN_SUPPRESS_IPH` / `_Py_END_SUPPRESS_IPH` macros wrap MSVC CRT calls that would otherwise trigger an invalid-parameter handler and terminate the process on bad arguments.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| 24-42 | `_Py_GetErrorHandler`, `_Py_DecodeLocaleEx`, `_Py_EncodeLocaleEx` | Locale-aware wchar conversion with error-handler policy | not ported |
+| 64-87 | `_Py_stat_struct` | Portable stat fields; full struct on Windows, alias on POSIX | not ported |
+| 90-133 | `_Py_fstat`, `_Py_open`, `_Py_read`, `_Py_write`, `_Py_write_noraise` | POSIX I/O wrappers with CPython error-raising conventions and size caps | not ported |
+| 159-170 | `_Py_get_inheritable`, `_Py_set_inheritable`, `_Py_set_inheritable_async_safe` | FD close-on-exec / inheritable flag management | not ported |
+| 195-209 | `_Py_DecodeUTF8Ex`, `_Py_EncodeUTF8Ex` | UTF-8 encode/decode with `_Py_error_handler` policy | not ported |
+| 237-238 | `_Py_GetLocaleEncoding`, `_Py_GetLocaleEncodingObject` | Query current locale encoding as `wchar_t *` or `PyObject *` | not ported |
+| 252-267 | `_Py_isabs`, `_Py_abspath`, `_Py_normpath`, `_Py_join_relfile` | Path canonicalization for the import system | not ported |
+
+## Reading
+
+### Locale encoding pipeline
+
+The functions `_Py_DecodeLocaleEx` and `_Py_EncodeLocaleEx` are the canonical bridge between the OS and Python's internal Unicode strings. They accept a `_Py_error_handler` (an enum from `pycore_interp_structs.h`) that selects strict, replace, surrogate-escape, or ignore behavior, mirroring the `errors` argument to Python's `str.encode`. `_Py_GetLocaleEncoding` returns the encoding name as a `wchar_t *` allocated with `PyMem_RawMalloc`; the caller owns the memory. `_Py_GetLocaleEncodingObject` wraps that in a Python `str` and is the implementation of `locale.getpreferredencoding()`.
+
+### FD inheritance flags
+
+`_Py_set_inheritable` and its `_async_safe` sibling control whether a file descriptor is inherited across `exec()` (or `CreateProcess` on Windows). The async-safe variant uses only async-signal-safe system calls and is intended for use between `fork` and `exec` in `_posixsubprocess`. Both functions accept an `atomic_flag_works` output parameter: on Linux the kernel supports `O_CLOEXEC` atomically in `open(2)`; setting `*atomic_flag_works = 1` lets the caller skip redundant `fcntl` calls on subsequent opens.
+
+### I/O size limits
+
+```c
+#if defined(MS_WINDOWS) || defined(__APPLE__)
+#   define _PY_READ_MAX   INT_MAX
+#   define _PY_WRITE_MAX  INT_MAX
+#else
+#   define _PY_READ_MAX   PY_SSIZE_T_MAX
+#   define _PY_WRITE_MAX  PY_SSIZE_T_MAX
+#endif
+```
+
+`_Py_read` and `_Py_write` cap every call at `_PY_READ_MAX` / `_PY_WRITE_MAX` bytes. On macOS the kernel rejects `read`/`write` calls larger than `INT_MAX` with `EINVAL` (bpo-24658); on Windows `read()` takes an `int` count. The wrappers loop internally until the full count is transferred or an error occurs, so callers never need to handle short writes.
+
+### Windows stat struct
+
+On Windows `struct stat` uses a 32-bit inode field and lacks `st_birthtime`. `_Py_stat_struct` replaces it with a bespoke struct that has `uint64_t st_ino` plus `st_ino_high` for extended inode values (ReFS/NTFS), nanosecond time fields (`st_atime_nsec` etc.), and `st_file_attributes` / `st_reparse_tag` for junction and symlink handling. On all other platforms the `#define _Py_stat_struct stat` alias means the abstraction disappears entirely after preprocessing.
+
+## gopy mirror
+
+Not yet ported. gopy does not currently implement the Python `os` module or any module that requires locale encoding, FD inheritance control, or the portable I/O wrappers. When those modules are added, the locale and path utilities will most likely live in a new `fileutils` package at the project root, mirroring the flat layout convention used for other runtime support code.
