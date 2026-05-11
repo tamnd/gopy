@@ -39,7 +39,7 @@ small error-status payload from a pipe to learn whether `exec` succeeded.
 | 472-558 | `_close_open_fds_maybe_unsafe` (non-Linux) | Use `opendir`/`readdir` on `/proc/self/fd` or `/dev/fd`; not guaranteed async-signal-safe | - |
 | 560-588 | `_close_open_fds` | Top-level dispatcher: prefers `close_range(2)` on Linux/FreeBSD, falls back to the platform variant | - |
 | 590-631 | `reset_signal_handlers` (VFORK_USABLE) | Reset all non-ignored, non-blocked signal dispositions to `SIG_DFL` before `vfork` child unblocks signals | - |
-| 665-864 | `child_exec` | Child-side work after `(v)fork`: dup2 stdio, chdir, umask, set{sid,pgid,gid,uid}, `preexec_fn`, close fds, `execve`; writes error to pipe on failure | - |
+| 665-864 | `child_exec` | Child-side work after `(v)fork`: dup2 stdio, chdir, umask, `set{sid,pgid,gid,uid}`, `preexec_fn`, close fds, `execve`; writes error to pipe on failure | - |
 | 875-962 | `do_fork_exec` | Wrapper that calls `vfork()` or `fork()`, then `child_exec()` in the child; isolated to prevent compiler clobber of parent stack | - |
 | 964-1326 | `subprocess_fork_exec_impl` | Parent-side implementation of `fork_exec`: validates args, converts argv/envp/fds to C, fires the audit hook, calls `do_fork_exec`, reads back the child pid | - |
 | 1328-1357 | module boilerplate | `module_methods`, `PyModuleDef`, `PyInit__posixsubprocess` | - |

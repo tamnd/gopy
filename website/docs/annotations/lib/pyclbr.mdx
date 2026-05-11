@@ -23,8 +23,8 @@ import {Cpy, CpyLink} from '@site/src/components/Cpy';
 | 32-80 | `class _Object` | Private base for `Class` and `Function`. Holds `module`, `name`, `file`, `lineno`, `parent`, `children`. | not ported |
 | 82-120 | `class Class(_Object)` | Public record for a class definition. Adds `super` (list of base-class names) and `methods` dict. | not ported |
 | 122-140 | `class Function(_Object)` | Public record for a function or method definition. Thin subclass of `_Object`. | not ported |
-| 142-165 | `readmodule(module, path=None)` | Public entry point. Returns a `{name: Class}` dict (functions excluded). | not ported |
-| 167-190 | `readmodule_ex(module, path=None)` | Public entry point. Returns a `{name: Class|Function}` dict (everything included). | not ported |
+| 142-165 | `readmodule(module, path=None)` | Public entry point. Returns a `name: Class` dict dict (functions excluded). | not ported |
+| 167-190 | `readmodule_ex(module, path=None)` | Public entry point. Returns a `name: Class or Function` dict dict (everything included). | not ported |
 | 192-310 | `_readmodule(module, path, parent=None)` | Core implementation. Locates source via `importlib`, parses with `ast`, walks the tree. | not ported |
 | 312-350 | `_create_tree` helper, module-level cache `_modules` | Result cache keyed by module name; `_create_tree` recursively resolves base classes across modules. | not ported |
 
@@ -58,7 +58,7 @@ class Function(_Object):
         _Object.__init__(self, module, name, file, lineno, parent)
 ```
 
-`Class.super` is a list that may contain either string names (when the base class lives in another module and has not been resolved yet) or actual `Class` objects (after `_create_tree` resolves them). `Class.methods` is a `{name: lineno}` dict populated by `_readmodule` as it walks `FunctionDef` nodes inside the class body.
+`Class.super` is a list that may contain either string names (when the base class lives in another module and has not been resolved yet) or actual `Class` objects (after `_create_tree` resolves them). `Class.methods` is a `name: lineno` dict dict populated by `_readmodule` as it walks `FunctionDef` nodes inside the class body.
 
 ### `readmodule` and `readmodule_ex` (lines 142 to 190)
 

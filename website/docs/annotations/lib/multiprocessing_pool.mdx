@@ -14,24 +14,7 @@ import {Cpy, CpyLink} from '@site/src/components/Cpy';
 
 A managed pool of worker processes. `Pool(processes=N)` forks N workers (default: `os.cpu_count()`), each running a task loop that reads from a shared `SimpleQueue`. The public API mirrors the built-in `map` family: `map`, `starmap`, `imap`, `imap_unordered`, `apply`, and `apply_async`. The async variants return `AsyncResult` objects whose `.get()` blocks until the result is ready. Two background threads inside the parent process handle result collection and crashed-worker repopulation.
 
-<Map
-  nodes={[
-    { id: "Pool",              label: "Pool",                kind: "class",    lines: "1-80"    },
-    { id: "Pool_init",         label: "Pool.__init__",       kind: "method",   lines: "81-200"  },
-    { id: "worker",            label: "worker() (top-level)", kind: "function", lines: "201-260" },
-    { id: "map",               label: "map / starmap",       kind: "method",   lines: "261-380" },
-    { id: "imap",              label: "imap / imap_unordered", kind: "method", lines: "381-500" },
-    { id: "apply_async",       label: "apply_async / apply", kind: "method",   lines: "501-600" },
-    { id: "AsyncResult",       label: "AsyncResult",         kind: "class",    lines: "601-720" },
-    { id: "MapResult",         label: "MapResult",           kind: "class",    lines: "721-800" },
-    { id: "IMapIterator",      label: "IMapIterator",        kind: "class",    lines: "801-950" },
-    { id: "handle_results",    label: "_handle_results()",   kind: "function", lines: "951-1050" },
-    { id: "repopulate",        label: "_repopulate_pool()",  kind: "method",   lines: "1051-1150" },
-    { id: "terminate",         label: "terminate / join",    kind: "method",   lines: "1151-1300" },
-    { id: "context_manager",   label: "__enter__ / __exit__", kind: "method",  lines: "1301-1350" },
-    { id: "worker_handler",    label: "_handle_workers()",   kind: "function", lines: "1351-1500" },
-  ]}
-/>
+
 
 ## Reading
 

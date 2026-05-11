@@ -14,18 +14,7 @@ import {Cpy, CpyLink} from '@site/src/components/Cpy';
 
 IPC connection objects for passing Python values between processes. The module wraps file descriptors and sockets with a framing protocol: `send()` pickles an object and writes a 4-byte length prefix, `recv()` reads that length then unpickles. `Pipe()` returns a pair of connected `Connection` objects backed by OS pipes or sockets. `Client()` and `Listener()` layer a socket-based rendezvous on top. Authentication between client and server uses HMAC-SHA256 over a random nonce produced by `os.urandom`.
 
-<Map
-  nodes={[
-    { id: "Connection",      label: "Connection",      kind: "class",    lines: "1-120"  },
-    { id: "Pipe",            label: "Pipe()",           kind: "function", lines: "121-160" },
-    { id: "Listener",        label: "Listener",         kind: "class",    lines: "161-280" },
-    { id: "Client",          label: "Client()",         kind: "function", lines: "281-330" },
-    { id: "AuthProtocol",    label: "answer_challenge / deliver_challenge", kind: "function", lines: "331-420" },
-    { id: "SocketClient",    label: "SocketClient",     kind: "class",    lines: "421-500" },
-    { id: "PipeListener",    label: "PipeListener",     kind: "class",    lines: "501-600" },
-    { id: "wait",            label: "wait()",           kind: "function", lines: "601-700" },
-  ]}
-/>
+
 
 ## Reading
 

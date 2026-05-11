@@ -20,24 +20,7 @@ and `httponly` attributes. `FileCookieJar` is an abstract base; `LWPCookieJar` a
 
 ## Map
 
-<Map
-  nodes={[
-    { id: "Cookie",               kind: "class",    desc: "Single cookie: name, value, domain, path, expires, secure, httponly, …" },
-    { id: "CookieJar",            kind: "class",    desc: "In-memory store; add, clear, and iterate cookies; thread-safe via _cookies_lock" },
-    { id: "DefaultCookiePolicy",  kind: "class",    desc: "RFC 2109 + Netscape policy: domain, path, secure, httponly checks" },
-    { id: "FileCookieJar",        kind: "class",    desc: "Abstract subclass of CookieJar that adds load/save/revert" },
-    { id: "LWPCookieJar",         kind: "class",    desc: "Lynx-compatible Set-Cookie2 / RFC 2965 text format" },
-    { id: "MozillaCookieJar",     kind: "class",    desc: "Netscape cookies.txt format written by Firefox and curl" },
-    { id: "CookiePolicy",         kind: "class",    desc: "Abstract policy base; subclass to override return_ok / set_ok" },
-    { id: "http2time",            kind: "function", desc: "Parse HTTP date string to seconds-since-epoch" },
-    { id: "time2netscape",        kind: "function", desc: "Format epoch time as Netscape cookie date string" },
-    { id: "reach",                kind: "function", desc: "Compute effective domain 'reach' for domain matching" },
-    { id: "is_HDN",               kind: "function", desc: "Test whether a string is a valid HTTP domain name token" },
-    { id: "domain_match",         kind: "function", desc: "Return True if host matches a cookie domain pattern" },
-    { id: "user_domain_match",    kind: "function", desc: "Lenient domain match used for user-supplied domain= values" },
-    { id: "effective_request_host", kind: "function", desc: "Resolve final host from request after redirects" },
-  ]}
-/>
+
 
 ## Reading
 

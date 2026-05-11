@@ -19,18 +19,13 @@ RFC 2109 HTTP cookie header parser and serializer. The module centres on two cla
 
 ## Map
 
-<Map
-  nodes={[
-    { id: "Morsel",            kind: "class",    desc: "One cookie: key, value, coded_value plus attributes (expires, path, domain, secure, httponly, samesite, max-age, comment, version)" },
-    { id: "SimpleCookie",      kind: "class",    desc: "Ordered dict of str -> Morsel; load() parses header strings; output() serializes" },
-    { id: "BaseCookie",        kind: "class",    desc: "Abstract base for SimpleCookie; subclass value_decode/value_encode to customise quoting" },
-    { id: "CookieError",       kind: "class",    desc: "Raised on parse failure or attempts to set an illegal Morsel attribute" },
-    { id: "_quote",            kind: "function", desc: "Translate a cookie value to its quoted form per RFC 2109 safe-char rules" },
-    { id: "_unquote",          kind: "function", desc: "Strip optional double-quote delimiters and unescape backslash sequences" },
-    { id: "_getdate",          kind: "function", desc: "Format an offset in seconds as a Netscape cookie expiry date string" },
-    { id: "_CookiePattern",    kind: "constant", desc: "Pre-compiled regex that tokenises a Cookie: header into name=value pairs" },
-  ]}
-/>
+| Lines | Symbol | Role |
+| ----- | ------ | ---- |
+| 1-60 | `Morsel` | One cookie: key, value, coded\_value plus RFC-defined attributes |
+| 60-250 | `BaseCookie`, `SimpleCookie` | Dict-like container; `load()` parses headers, `output()` serializes |
+| 250-280 | `CookieError` | Raised on parse failure or illegal Morsel attribute |
+| 280-350 | `_quote`, `_unquote` | RFC 2109 safe-char quoting and unquoting helpers |
+| 350-400 | `_getdate`, `_CookiePattern` | Expiry date formatter and pre-compiled tokenizer regex |
 
 ## Reading
 

@@ -15,16 +15,7 @@ Internal header declaring the concrete C structs for PEP 695 type parameter
 objects: `TypeVar`, `ParamSpec`, and `TypeVarTuple`. These are the runtime
 representations of the syntax introduced in Python 3.12 (`type X[T] = ...`).
 
-<Map
-  nodes={[
-    { id: "TypeVarObject",       kind: "struct", ported: true,  target: "objects/typevar.go" },
-    { id: "ParamSpecObject",     kind: "struct", ported: true,  target: "objects/typevar.go" },
-    { id: "TypeVarTupleObject",  kind: "struct", ported: true,  target: "objects/typevar.go" },
-    { id: "_PyTypeVar_Type",     kind: "extern", ported: false  },
-    { id: "_PyParamSpec_Type",   kind: "extern", ported: false  },
-    { id: "_PyTypeVarTuple_Type",kind: "extern", ported: false  },
-  ]}
-/>
+
 
 ## CPython 3.14 changes
 
