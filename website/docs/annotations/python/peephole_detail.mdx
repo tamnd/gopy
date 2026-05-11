@@ -1,0 +1,135 @@
+---
+title: "flowgraph.c: CPython's Peephole Optimizer"
+description: "Annotated guide to Python/flowgraph.c, covering constant folding, unreachable code elimination, LOAD_CONST merging, jump-chain shortening, and 3.14 changes"
+cpython_path: Python/flowgraph.c
+cpython_version: "3.14"
+lines: 2500
+status: annotated
+ported_to: compile/flowgraph.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`Python/flowgraph.c` is CPython's post-AST, pre-assembler optimizer. It
+operates on a control-flow graph (CFG) of basic blocks, each holding a flat
+list of pseudo-instructions. The file grew significantly in 3.11 when the
+classic `Python/peephole.c` was folded in, and again in 3.14 with additional
+constant-folding passes.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1–180 | data structures, `_PyCfgBuilder` | CFG node and edge types |
+| 181–520 | `_PyCompile_OptimizeBasicBlock` | main peephole pass over one basic block |
+| 521–780 | `optimize_and_cleanup_cfg` | driver: iterates passes to fixed point |
+| 781–1050 | `remove_unreachable_code` | dead-block elimination |
+| 1051–1380 | `jump_thread` | jump-chain shortening |
+| 1381–1700 | `merge_const_one`, `merge_consts_recursive` | `LOAD_CONST` deduplication |
+| 1701–2100 | `_PyFlowGraph_Optimize` | top-level entry called by compiler |
+| 2101–2500 | label/block helpers, stack-depth verification | utilities used by assembler |
+
+## Reading
+
+### `_PyCompile_OptimizeBasicBlock` constant folding
+
+The function walks the instruction list of a single basic block. When it sees a
+sequence like `LOAD_CONST x`, `LOAD_CONST y`, `BINARY_OP (+)` and both operands
+are compile-time constants, it folds them into a single `LOAD_CONST (x+y)` and
+NOP-fills the displaced slots.
+
+```c
+/* Python/flowgraph.c:210 _PyCompile_OptimizeBasicBlock */
+static int
+optimize_basic_block(PyObject *const_cache, basicblock *bb, PyObject *consts)
+{
+    struct cfg_instr *inst = bb->b_instr;
+    for (int i = 0; i < bb->b_iused; i++) {
+        /* pattern-match pairs and triples of instructions */
+        switch (opcode) {
+        case BINARY_OP:
+            if (nextopcode == NOP) break;
+            /* fold if both stack tops are LOAD_CONST */
+            ...
+        }
+    }
+}
+```
+
+In 3.14, folding was extended to cover `FORMAT_VALUE` with a constant string
+argument, removing the need for a runtime format call in many f-string
+expressions.
+
+### Unreachable code elimination
+
+After every jump-threading pass, `remove_unreachable_code` walks the CFG from
+the entry block using a simple mark-and-sweep. Any block not reachable from the
+entry is cleared; its instructions are replaced with NOPs and the block is
+unlinked from successor lists.
+
+```c
+/* Python/flowgraph.c:800 remove_unreachable_code */
+static int
+mark_reachable(basicblock *entry)
+{
+    basicblock **stack = ...;
+    entry->b_predecessors = 1;
+    while (sp > stack) {
+        basicblock *b = *--sp;
+        for (int i = 0; i < b->b_iused; i++) {
+            basicblock *target = b->b_instr[i].i_target;
+            if (target && target->b_predecessors == 0) {
+                target->b_predecessors = 1;
+                *sp++ = target;
+            }
+        }
+    }
+}
+```
+
+This cooperates with the constant-folding pass: a folded `if False:` branch
+becomes an unconditional jump to the else-branch, rendering the if-body
+unreachable and eligible for removal.
+
+### Jump-chain shortening
+
+`jump_thread` replaces a jump that targets another unconditional jump with a
+direct jump to the final destination. The function iterates until no further
+shortening is possible, then the dead intermediate blocks are removed by the
+unreachable pass.
+
+```c
+/* Python/flowgraph.c:1060 jump_thread */
+static int
+jump_thread(basicblock *bb, struct cfg_instr *inst, int target_opcode)
+{
+    /* follow chain of unconditional jumps */
+    while (true) {
+        basicblock *target = inst->i_target;
+        if (target->b_iused == 0) break;
+        struct cfg_instr *first = &target->b_instr[0];
+        if (first->i_opcode != target_opcode) break;
+        inst->i_target = first->i_target;
+    }
+    return SUCCESS;
+}
+```
+
+### `LOAD_CONST` / `RETURN_CONST` merging
+
+`merge_consts_recursive` uses a side-table (a `dict` from `PyObject` value to
+index) to ensure identical constants share one slot in `co_consts`. When a
+`LOAD_CONST` immediately precedes a `RETURN_VALUE`, the pair is collapsed to
+`RETURN_CONST`, saving one stack push/pop per function that returns a literal.
+
+## gopy notes
+
+- The CFG data structures and the optimizer driver are ported in
+  `compile/flowgraph.go` and `compile/flowgraph_passes.go`.
+- Constant folding is implemented in `compile/flowgraph_passes.go`; the 3.14
+  `FORMAT_VALUE` fold is tracked in the v0.12.1 scope.
+- `remove_unreachable_code` maps to `removeUnreachable` in
+  `compile/flowgraph.go`.
+- Jump-chain shortening is in `compile/flowgraph_jumps.go`.
+- `RETURN_CONST` merging is present; `merge_consts_recursive` for nested
+  tuples/frozensets is a known gap noted in `compile/flowgraph_passes.go`.

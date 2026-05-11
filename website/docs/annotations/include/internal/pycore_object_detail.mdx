@@ -1,0 +1,93 @@
+---
+title: "pycore_object.h: Object Memory and GC Internals"
+description: "Annotation of CPython Include/internal/pycore_object.h covering immortal objects, debug linked list, GC tracking macros, Py_DECREF fast path, and the 3.14 tagged pointer scheme"
+cpython_path: Include/internal/pycore_object.h
+cpython_version: "3.14"
+lines: 400
+status: annotated
+ported_to: objects/object.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`pycore_object.h` is the low-level object-model header. It defines the bits inside `ob_refcnt` that CPython 3.12+ uses to mark immortal objects, the debug doubly-linked list that threads every live object through `_PyObject_HEAD_EXTRA`, the GC track/untrack macros, the immortal-bypass in `Py_DECREF`, and the 3.14 tagged pointer encoding for compact integers.
+
+## Map
+
+| Lines | Symbol | Kind | Purpose |
+|-------|--------|------|---------|
+| 1-40 | `_PyObject_HEAD_EXTRA` | macro | Debug-mode doubly-linked list fields `ob_next`/`ob_prev` |
+| 41-80 | `_Py_IsImmortal` | inline | Tests the immortal sentinel bit in `ob_refcnt` |
+| 81-120 | `_Py_IMMORTAL_REFCNT` | macro | Sentinel value placed in `ob_refcnt` for immortal objects |
+| 121-160 | `Py_DECREF` | macro | Fast-path that skips decrement when immortal bit is set |
+| 161-210 | `_PyObject_GC_TRACK` | macro | Inserts object into the GC generation-0 list |
+| 211-250 | `_PyObject_GC_UNTRACK` | macro | Removes object from whatever GC list it is in |
+| 251-300 | `_PyGC_FINALIZED` | macro | Tests whether the finalizer has already run |
+| 301-360 | tagged pointer macros | macros | 3.14 compact-int encoding: tag bits, untag accessors |
+| 361-400 | `_PyObject_Init` | inline | Initializes refcnt and type pointer for new allocations |
+
+## Reading
+
+### Immortal objects and `_Py_IsImmortal`
+
+PEP 683 (CPython 3.12) introduced immortal objects: singletons like `None`, `True`, `False`, small integers, and interned strings that must never be freed. The implementation reserves a sentinel value for `ob_refcnt`.
+
+```c
+/* A count this large can never be reached by normal Py_INCREF/Py_DECREF */
+#define _Py_IMMORTAL_REFCNT  (Py_ssize_t)(PY_SSIZE_T_MAX / 2 + 1)
+
+static inline int
+_Py_IsImmortal(PyObject *op)
+{
+#if SIZEOF_VOID_P > 4
+    return (op->ob_refcnt >> 32) != 0;
+#else
+    return op->ob_refcnt == _Py_IMMORTAL_REFCNT;
+#endif
+}
+```
+
+On 64-bit platforms the high 32 bits of `ob_refcnt` are nonzero for immortal objects, so the test is a single right-shift. The `Py_DECREF` macro gates on this before touching the counter, making hot paths through constant objects branch-predictable.
+
+### `_PyObject_HEAD_EXTRA` debug list
+
+In debug builds (`Py_TRACE_REFS`), every object carries two extra pointers that thread it into a global doubly-linked list rooted at `_PyRuntime.object_state.refchain`.
+
+```c
+#ifdef Py_TRACE_REFS
+#  define _PyObject_HEAD_EXTRA  \
+    PyObject *_ob_next;         \
+    PyObject *_ob_prev;
+#else
+#  define _PyObject_HEAD_EXTRA
+#endif
+```
+
+This makes it possible to walk every live object from a debugger or from `gc.get_objects()` in a trace build. Release builds pay no cost because the macro expands to nothing.
+
+### `_PyObject_GC_TRACK` and the 3.14 tagged pointer scheme
+
+GC tracking inserts the object's `PyGC_Head` prefix into generation 0.
+
+```c
+static inline void
+_PyObject_GC_TRACK(PyObject *op)
+{
+    PyGC_Head *gc = _Py_AS_GC(op);
+    assert(!_PyObject_GC_IS_TRACKED(op));
+    PyGC_Head *last = _PyRuntime.gc.generation0.prev;
+    last->_gc_next = (uintptr_t)gc;
+    gc->_gc_prev = (uintptr_t)last;
+    gc->_gc_next = (uintptr_t)&_PyRuntime.gc.generation0;
+    _PyRuntime.gc.generation0.prev = gc;
+}
+```
+
+In 3.14 the `_gc_next` and `_gc_prev` fields are `uintptr_t` rather than raw pointers. The two low bits are reserved as tag bits: bit 0 marks the object as finalized, bit 1 marks it as reachable during the mark phase. All pointer arithmetic must mask these bits before dereferencing.
+
+## gopy notes
+
+- `objects/object.go` defines `Object` with an `immortal bool` field rather than encoding the sentinel in a refcount integer. This is safe because gopy uses Go's garbage collector for memory and does not implement its own reference counting.
+- `_PyObject_HEAD_EXTRA` has no gopy equivalent. Object graph introspection is done through the Go runtime's `runtime.ReadMemStats` and the `pprof` heap profiler rather than a linked list.
+- `_PyObject_GC_TRACK` / `_PyObject_GC_UNTRACK` are mapped to `objects/type.go`'s `gcTrack` / `gcUntrack` helpers, which maintain a per-interpreter slice used only for `gc.get_objects()` compatibility. Actual collection is left to the Go GC.
+- The 3.14 tagged pointer scheme for compact integers is noted in `objects/generic_alias.go` and `objects/union_type.go` as a future optimization target. Currently all integer objects are heap-allocated `IntObject` values.

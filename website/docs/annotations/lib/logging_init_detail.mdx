@@ -1,0 +1,93 @@
+---
+title: "logging/__init__.py: core machinery"
+description: "Logger.callHandlers propagation, LogRecord creation, Manager hierarchy, basicConfig mutex, level inheritance, and the 3.14 taskName field"
+cpython_path: Lib/logging/__init__.py
+cpython_version: "3.14"
+lines: 2100
+status: annotated
+ported_to: module/logging/module.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+## Overview
+
+`Lib/logging/__init__.py` is the heart of the logging package. It defines
+`LogRecord`, the `Logger` class hierarchy rooted in `Manager`, the
+`Handler`/`Formatter`/`Filter` base classes, and `basicConfig`. Everything
+else in the logging package is built on top of these primitives.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-60 | module preamble | version, `__all__`, level constants (`DEBUG` through `CRITICAL`) |
+| 61-130 | `getLevelName` / `addLevelName` | bi-directional level-to-name registry with a `_nameToLevel` dict |
+| 131-310 | `LogRecord` | per-event data container; `__init__` stamps time, thread, process, task |
+| 311-340 | `makeLogRecord` | factory that applies a dict of attributes onto a fresh `LogRecord` |
+| 341-420 | `Formatter` | `format`, `formatTime`, `formatException`, `formatStack` |
+| 421-490 | `BufferingFormatter` | formats a list of records with a header and footer |
+| 491-560 | `Filter` / `Filterer` | name-prefix match; `callFilters` iterates the filter list |
+| 561-680 | `Handler` | `emit`, `handle`, `callHandlers` base; acquire/release lock |
+| 681-760 | `StreamHandler` | writes to a stream, flushes after each record |
+| 761-850 | `FileHandler` | opens a file; `close` flushes and releases the fd |
+| 851-960 | `Manager` | `loggerDict`, `getLogger`, `setLoggerClass`, logger placeholder logic |
+| 961-1060 | `Logger` | `log`, `_log`, `findCaller`, `handle`, `callHandlers`, level-inheritance walk |
+| 1061-1120 | `RootLogger` | singleton; `warning` fallback for uninitialized logging |
+| 1121-1200 | `basicConfig` | one-shot setup protected by `_acquireLock` / `_releaseLock` |
+| 1201-1300 | module-level helpers | `debug`, `info`, `warning`, `error`, `critical`, `exception`, `log` |
+| 1301-2100 | `captureWarnings`, `shutdown`, misc | warnings bridge, `atexit` flush, last-resort handler |
+
+## Reading
+
+### LogRecord and the 3.14 taskName field
+
+`LogRecord.__init__` (<CpyLink file="Lib/logging/__init__.py" line={131} />) collects
+everything that identifies an event: timestamp via `time.time()`, caller frame via
+`currentframe()`, thread name and id, process id, and (since 3.12) the running
+asyncio task name stored in `taskName`. In 3.14 the attribute is always present
+but is `None` when no event loop is running. Porters must not assume the field
+is absent on older records.
+
+The `ct` (created time) is stored as a float and also split into `%(msecs)d` via
+`(ct - int(ct)) * 1000`. `Formatter.formatTime` converts `ct` with
+`time.localtime` unless a `datefmt` is supplied, in which case it delegates to
+`time.strftime`.
+
+### Logger.callHandlers and propagation
+
+`Logger.callHandlers` (<CpyLink file="Lib/logging/__init__.py" line={1006} />) walks
+the `logger.parent` chain. At each step it calls every handler in `logger.handlers`
+then checks `logger.propagate`. The walk stops at the root or at any logger where
+`propagate` is false. If no handler was found at any level, the last-resort
+handler writes directly to `sys.stderr`.
+
+Level inheritance follows a separate walk in `Logger.getEffectiveLevel`: it climbs
+`parent` links until it finds a logger whose `level` is not `NOTSET` (0). The root
+always has a non-zero level, so the walk always terminates.
+
+### Manager hierarchy and basicConfig mutex
+
+`Manager` (<CpyLink file="Lib/logging/__init__.py" line={851} />) owns `loggerDict`,
+a flat dict keyed by dotted name. When `getLogger("a.b.c")` is called, Manager
+inserts `PlaceHolder` nodes for every ancestor that has not yet been requested,
+then wires `parent` pointers. This deferred wiring means the hierarchy is
+consistent even if child loggers are created before their parents.
+
+`basicConfig` (<CpyLink file="Lib/logging/__init__.py" line={1121} />) is
+guarded by `_acquireLock` so that concurrent threads do not race to add
+duplicate handlers to the root logger. The check `if root.handlers` short-circuits
+the entire body when logging was already configured.
+
+## gopy notes
+
+- `LogRecord` carries a `__dict__` that `Formatter.format` reads via `%(key)s`
+  substitution. The gopy port must expose this as a writable namespace object,
+  not a static struct.
+- The `_nameToLevel` and `_levelToName` dicts are module globals mutated by
+  `addLevelName`. Port them as package-level maps protected by a `sync.RWMutex`.
+- `basicConfig` uses `threading.RLock` internally via `_acquireLock`. The Go
+  port can use a `sync.Once` for the one-shot semantics, plus a `sync.Mutex`
+  for the handler-list guard.
+- `taskName` requires reading the running asyncio task. Until `module/asyncio` is
+  ported, return `None` unconditionally from the field accessor.

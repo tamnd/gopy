@@ -1,0 +1,102 @@
+---
+title: "logging/handlers.py: built-in handler classes"
+description: "RotatingFileHandler doRollover, TimedRotatingFileHandler interval math, SocketHandler pickle protocol, and the QueueHandler/QueueListener pattern"
+cpython_path: Lib/logging/handlers.py
+cpython_version: "3.14"
+lines: 1400
+status: annotated
+ported_to: module/logging/handlers.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+## Overview
+
+`Lib/logging/handlers.py` extends the two base file handlers defined in
+`__init__.py` with rotation, network, memory, and queue variants. None of these
+handlers are imported automatically; user code must do `from logging import handlers`
+or `import logging.handlers`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-30 | imports | `os`, `socket`, `pickle`, `struct`, `threading`, `queue`, `re` |
+| 31-90 | `BaseRotatingHandler` | adds `shouldRollover` / `doRollover` protocol; holds `namer` / `rotator` hooks |
+| 91-230 | `RotatingFileHandler` | size-based rotation; `doRollover` renames `.log` to `.log.1` etc. |
+| 231-440 | `TimedRotatingFileHandler` | calendar-aligned rotation; computes `rolloverAt` from `when` string |
+| 441-540 | `WatchedFileHandler` | re-opens file when inode changes (Unix log-rotate friendly) |
+| 541-610 | `NTEventLogHandler` | Windows Event Log via `win32evtlog`; no-op stubs on non-Windows |
+| 611-740 | `SocketHandler` | TCP stream; pickles records; length-prefixed framing |
+| 741-810 | `DatagramHandler` | UDP variant of `SocketHandler`; no length prefix |
+| 811-870 | `SysLogHandler` | BSD syslog over UDP or Unix socket; priority encoding |
+| 871-940 | `NullHandler` | defined here for library authors; `emit` is a no-op |
+| 941-1020 | `HTTPHandler` | POST or GET to an HTTP endpoint; optional credentials |
+| 1021-1120 | `MemoryHandler` | buffers records; flushes to a target when capacity or level trigger fires |
+| 1121-1260 | `QueueHandler` | non-blocking `enqueue` onto a `queue.Queue` or compatible object |
+| 1261-1400 | `QueueListener` | background thread dequeues and dispatches to a list of handlers |
+
+## Reading
+
+### RotatingFileHandler doRollover
+
+`RotatingFileHandler.doRollover` (<CpyLink file="Lib/logging/handlers.py" line={141} />) works
+by closing the current file, then renaming `base.log.N` to `base.log.N+1` for
+each backup slot counting down from `backupCount` to 1, and finally renaming
+`base.log` to `base.log.1`. The rename loop runs under the handler's lock so
+concurrent `emit` calls cannot interleave with the rotation.
+
+If the caller installed a `namer` callable, each destination filename passes
+through it before the OS call. If a `rotator` callable is installed, it replaces
+the default `os.rename`. These two hooks allow transparent gzip compression or
+remote archiving of rolled files.
+
+### TimedRotatingFileHandler interval math
+
+`TimedRotatingFileHandler.__init__` (<CpyLink file="Lib/logging/handlers.py" line={231} />) maps
+the `when` argument to a `(interval, suffix, extMatch)` triple:
+
+| `when` | interval | suffix pattern |
+|--------|----------|----------------|
+| `'S'` | 1 s | `%Y-%m-%d_%H-%M-%S` |
+| `'M'` | 60 s | `%Y-%m-%d_%H-%M` |
+| `'H'` | 3600 s | `%Y-%m-%d_%H` |
+| `'D'` / `'MIDNIGHT'` | 86400 s | `%Y-%m-%d` |
+| `'W0'`-`'W6'` | 604800 s | `%Y-%m-%d` |
+
+`computeRollover` (<CpyLink file="Lib/logging/handlers.py" line={320} />) returns the Unix
+timestamp of the next boundary. For `MIDNIGHT` and weekday modes it adjusts for
+DST transitions by re-computing with `time.localtime`. A porter must replicate
+this DST correction exactly; naive arithmetic produces off-by-one-hour bugs when
+clocks change.
+
+### SocketHandler pickle protocol and QueueHandler/QueueListener
+
+`SocketHandler.makePickle` (<CpyLink file="Lib/logging/handlers.py" line={676} />) serialises
+the record's `__dict__` (not the record object itself) with `pickle.dumps` at
+protocol 1, then prepends a big-endian 4-byte length so the receiver knows how
+many bytes to read. The `exc_info` tuple is stringified before pickling because
+traceback objects are not picklable.
+
+`QueueHandler.enqueue` (<CpyLink file="Lib/logging/handlers.py" line={1180} />) calls
+`self.queue.put_nowait(record)`. Subclasses override `enqueue` to add back-pressure
+or drop semantics. `QueueHandler.prepare` (<CpyLink file="Lib/logging/handlers.py" line={1170} />) is
+the hook for serialising records before they cross a process boundary (for example,
+converting to a dict for a multiprocessing queue).
+
+`QueueListener` runs a daemon thread that loops on `self.queue.get(block=True)`.
+The sentinel value that stops the loop is `None`, sent by `QueueListener.stop`.
+Handlers passed to the listener are called in `_handle`, which invokes each
+handler's `handle` method (not `emit`) so that per-handler filters still run.
+
+## gopy notes
+
+- `doRollover` uses `os.rename` which is atomic on POSIX but not on Windows. The
+  Go port should use `os.Rename` and document the same Windows caveat.
+- The `when='W0'`-`'W6'` weekday math references `time.struct_time.tm_wday`
+  (Monday=0). Go's `time.Weekday` uses Sunday=0; adjust accordingly.
+- `SocketHandler` retries the connection after a configurable `retryStart` delay
+  that doubles up to `retryMax`. Port the full retry-backoff loop from
+  <CpyLink file="Lib/logging/handlers.py" line={625} />, not just the connect call.
+- `QueueListener._monitor` must be a goroutine in the Go port. Use a `chan struct{}`
+  sentinel instead of a `None` queue item to signal shutdown.

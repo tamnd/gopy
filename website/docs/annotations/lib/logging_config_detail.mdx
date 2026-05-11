@@ -1,0 +1,104 @@
+---
+title: "logging/config.py: configuration machinery"
+description: "dictConfig ConfigDictConfigurator, fileConfig SafeConfigParser parsing, incremental config update, and configure_handler factory dispatch"
+cpython_path: Lib/logging/config.py
+cpython_version: "3.14"
+lines: 1000
+status: annotated
+ported_to: module/logging/config.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+## Overview
+
+`Lib/logging/config.py` provides two public entry points: `fileConfig` (INI-style,
+legacy) and `dictConfig` (dict-based, current standard). Both ultimately call into
+`Manager` and `Logger` APIs from `__init__.py`. The module also contains the
+`listen` / `stopListening` socket-based live-reload mechanism.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-40 | imports | `configparser`, `io`, `logging`, `re`, `socket`, `struct`, `threading` |
+| 41-100 | `fileConfig` | reads INI file; instantiates loggers, handlers, formatters in order |
+| 101-180 | helper functions | `_resolve`, `_strip_spaces`, `_encoded` for fileConfig internals |
+| 181-240 | `DictConfigurator.__init__` | validates schema version; stores config dict |
+| 241-340 | `DictConfigurator.configure` | top-level orchestrator: formatters, filters, handlers, loggers, root |
+| 341-430 | `DictConfigurator.configure_formatter` | resolves `class`, `format`, `datefmt`; supports custom formatter classes |
+| 431-520 | `DictConfigurator.configure_filter` | resolves `class` or defaults to `logging.Filter` |
+| 521-640 | `DictConfigurator.configure_handler` | factory dispatch on `class` key; attaches formatter and filters |
+| 641-720 | `DictConfigurator.configure_logger` | sets level, propagate, handlers for a named logger |
+| 721-780 | `DictConfigurator.configure_root` | same as `configure_logger` but targets `logging.root` |
+| 781-840 | `dictConfig` | thin wrapper: constructs `DictConfigurator` and calls `configure` |
+| 841-920 | `listen` | socket server thread; receives length-prefixed JSON or INI config |
+| 921-1000 | `stopListening` | signals the listener thread to exit; joins with a timeout |
+
+## Reading
+
+### dictConfig and ConfigDictConfigurator
+
+`DictConfigurator.configure` (<CpyLink file="Lib/logging/config.py" line={241} />) processes
+the config dict in a fixed order: formatters first, then filters, then handlers,
+then non-root loggers, and finally the root logger. This ordering matters because
+handler configuration references formatter and filter names that must already exist.
+
+The incremental update path is triggered by `config.get('incremental', False)`. When
+true, `configure` only adjusts levels and handler lists on existing loggers and
+skips re-creating formatters, filters, and handlers entirely. This is the mechanism
+used by the socket-based live-reload path to apply a lightweight patch without
+tearing down and rebuilding the handler graph.
+
+The `disable_existing_loggers` key (default `True`) controls whether loggers
+present in `Manager.loggerDict` but absent from the incoming config dict get their
+level set to `NOTSET` and their handler list cleared. Setting it to `False` makes
+`dictConfig` additive, which is safer in library code.
+
+### configure_handler factory dispatch
+
+`DictConfigurator.configure_handler` (<CpyLink file="Lib/logging/config.py" line={521} />) is
+the most complex method in the module. It resolves the `class` key through
+`_resolve`, which does a dotted import (`logging.handlers.RotatingFileHandler`
+becomes an actual class object). Constructor arguments are extracted from the
+remaining keys after removing the reserved ones (`class`, `level`, `formatter`,
+`filters`). The cleaned dict is then unpacked as keyword arguments to the class.
+
+Special-cased keys worth noting:
+
+- `stream`: looked up in `sys.__dict__` if the value starts with `ext://`, or in the
+  existing handler objects if it starts with `cfg://`.
+- `filename`: expanded with `os.path.abspath` before being passed to the handler.
+- `handlers` (for `MemoryHandler` and `SocketHandler` targets): resolved as a
+  `cfg://` reference to an already-configured handler.
+
+The `cfg://` and `ext://` URI schemes are parsed by `DictConfigurator.resolve_value`
+and allow config dicts to cross-reference objects without Python import strings.
+
+### fileConfig and SafeConfigParser parsing
+
+`fileConfig` (<CpyLink file="Lib/logging/config.py" line={41} />) reads sections named
+`[loggers]`, `[handlers]`, and `[formatters]`. Each section lists comma-separated
+keys (e.g. `keys=root,myapp`). Individual objects are then read from sections
+named `[logger_root]`, `[handler_hand1]`, etc.
+
+Handler instantiation inside `fileConfig` uses `eval` on the `args` INI value
+(for example `args=('%(logfilename)s',)`). This is a known security boundary:
+`fileConfig` must only be called with trusted input. `dictConfig` does not use
+`eval` and is the safer choice for untrusted or user-supplied configuration.
+
+## gopy notes
+
+- `_resolve` (<CpyLink file="Lib/logging/config.py" line={101} />) performs a
+  `__import__` plus a chain of `getattr` calls to resolve a dotted class name.
+  The Go port needs a plugin registry (a `map[string]reflect.Type` or similar)
+  because Go has no runtime import-by-string.
+- The `cfg://` resolver walks a nested dict with `/`-separated path components.
+  Port it as a recursive function over `objects.Dict`; do not flatten the path
+  into a single key lookup.
+- The `listen` thread uses `struct.unpack('>L', chunk)` to read a 4-byte
+  big-endian length prefix, then reads that many bytes as a config payload. The
+  Go port should use `encoding/binary.BigEndian.Uint32` for the same framing.
+- `disable_existing_loggers` semantics interact with `Manager.loggerDict`
+  placeholders. Ensure the Go port skips `PlaceHolder` entries (not real loggers)
+  when applying the disable sweep.

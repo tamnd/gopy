@@ -1,0 +1,85 @@
+---
+title: "pycore_code.h: Code Object Internals"
+description: "Annotation of CPython Include/internal/pycore_code.h covering adaptive bytecode, inline caches, specialization counters, and 3.14 co_qualname layout"
+cpython_path: Include/internal/pycore_code.h
+cpython_version: "3.14"
+lines: 400
+status: annotated
+ported_to: compile/compiler.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`pycore_code.h` is the internal header that extends the public `PyCodeObject` with the machinery CPython 3.11+ needs for adaptive specialization. It defines inline cache slots, monitoring data, and the constructor scaffold used by `compile.c`.
+
+## Map
+
+| Lines | Symbol | Kind | Purpose |
+|-------|--------|------|---------|
+| 1-40 | `_PyCoLocationInfo` | struct | Encodes source location deltas for `co_linetable` entries |
+| 41-80 | `_PyCoMonitoringData` | struct | Per-code monitoring bitmask and per-instruction tool arrays |
+| 81-130 | `_PyCodeConstructor` | struct | Transient builder passed into `_PyCode_New` |
+| 131-180 | `INLINE_CACHE_ENTRIES_*` | macros | Cache slot counts for each specializable opcode family |
+| 181-230 | `_PyAdaptiveEntry` | struct | Counter and index fields embedded after `co_code_adaptive` |
+| 231-280 | `_Py_OPCODE`, `_Py_OPARG` | macros | Byte-level accessors into the adaptive instruction array |
+| 281-340 | `co_qualname` vs `co_name` | fields | 3.14 split: dotted qualified name stored separately |
+| 341-400 | specialization stat macros | macros | `SPECIALIZATION_FAIL`, `SPECIALIZATION_SUCCESS` counters |
+
+## Reading
+
+### `_PyCoMonitoringData` and tool arrays
+
+Monitoring was introduced in 3.12 (<CpyLink path="Include/internal/pycore_code.h" />). Each code object carries a small side-table so debuggers and coverage tools can set per-instruction breakpoints without rewriting bytecode globally.
+
+```c
+typedef struct {
+    uint8_t *tools;           /* per-instruction tool bitmask */
+    _PyCoLineInstrumentationData *lines;
+    _PyCoLocalsPlusKinds *local_kinds;
+    uint32_t active_monitors; /* union of all tool bits */
+} _PyCoMonitoringData;
+```
+
+The `active_monitors` word is checked once at the top of the eval loop. If it is zero, the monitoring overhead is zero.
+
+### Inline cache slots and `co_code_adaptive`
+
+After specialization, instructions are rewritten in place inside `co_code_adaptive`, a mutable copy of `co_code`. Each specializable opcode reserves a fixed number of `_PyAdaptiveEntry` words immediately after its instruction word in the word stream.
+
+```c
+#define INLINE_CACHE_ENTRIES_LOAD_ATTR   9
+#define INLINE_CACHE_ENTRIES_STORE_ATTR  5
+#define INLINE_CACHE_ENTRIES_LOAD_GLOBAL 4
+#define INLINE_CACHE_ENTRIES_BINARY_OP   1
+```
+
+The cache is zeroed at code-object creation. The specializer fills it on the first successful specialization attempt.
+
+### 3.14 `co_qualname` split
+
+Before 3.11, `co_name` held the dotted qualified name for nested classes and lambdas. In 3.14 the two are stored in separate fields.
+
+```c
+PyObject *co_name;      /* simple name: "method" */
+PyObject *co_qualname;  /* qualified: "MyClass.method" */
+```
+
+Both are interned strings. The compiler emits `MAKE_FUNCTION` with the qualname as a separate stack argument, and the VM stores it into `func_qualname` on the resulting function object.
+
+`_PyCoLocationInfo` encodes the location table that maps instruction offsets back to source line and column numbers. The table uses a variable-length delta encoding: each entry stores the difference from the previous entry's values, not absolute coordinates. This keeps the table compact for typical code where most instructions advance by one line or less.
+
+```c
+typedef struct {
+    uint8_t code;    /* entry type tag: short form, long form, etc. */
+    /* variable-length delta bytes follow */
+} _PyCoLocationInfo;
+```
+
+The decoder in `Objects/lnotab_notes.txt` documents all tag values. The `co_linetable` bytes are consumed by `PyCode_Addr2Location` to produce `PyCodeLocation` structs with `lineno`, `end_lineno`, `col_offset`, and `end_col_offset`.
+
+## gopy notes
+
+- `compile/compiler.go` builds a `CodeObject` struct that mirrors `_PyCodeConstructor`. The `QualName` field tracks the 3.14 split.
+- Inline cache sizing is encoded in `compile/codegen_expr_name.go` through the opcode metadata table rather than as C macros.
+- `_PyCoMonitoringData` has no gopy equivalent yet. The monitoring hook layer (PEP 669) is out of scope until the specializing interpreter tier is complete.
+- Specialization stat macros compile away to no-ops in release builds and are not ported. gopy records analogous counters via Go's `expvar` package under the `vm.specialize.*` namespace.

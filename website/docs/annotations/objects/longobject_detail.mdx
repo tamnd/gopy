@@ -1,0 +1,93 @@
+---
+title: "Objects/longobject.c: integer object internals"
+description: "Digit array layout, fast paths, Karatsuba multiplication, compact ints, and 3.14 tag bits"
+cpython_path: Objects/longobject.c
+cpython_version: "3.14"
+lines: 7000
+status: annotated
+ported_to: objects/int.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`Objects/longobject.c` is the implementation of Python's `int` type. At roughly 7 000 lines it is one of the largest files in the Objects layer. It covers memory layout, construction from C primitives, arithmetic through Karatsuba, and the compact-int optimisation that arrived in 3.12 and gained tag bits in 3.14.
+
+## Map
+
+| Lines (approx) | Symbol | Purpose |
+|---|---|---|
+| 1-120 | `PyLongObject` layout | digit array, `ob_digit`, sign/size encoding |
+| 121-400 | `PyLong_FromLong` | fast path for small C `long` values |
+| 401-700 | `PyLong_FromDouble` | float-to-int conversion |
+| 701-1 200 | `_PyLong_New` / `_PyLong_Copy` | allocation helpers |
+| 1 201-2 000 | `long_add`, `long_sub` | grade-school addition/subtraction |
+| 2 001-3 200 | `_PyLong_Multiply` | Karatsuba recursive multiply |
+| 3 201-3 800 | `long_divrem` | schoolbook division |
+| 3 801-4 500 | `long_pow` | left-to-right square-and-multiply |
+| 4 501-5 200 | compact int / immortal small ints | single-digit path, `_PyLong_IsCompact` |
+| 5 201-6 000 | tag bits (3.14) | `ob_digit[0]` tag encoding |
+| 6 001-7 000 | `long_richcompare`, `long_hash` | comparison and hash |
+
+## Reading
+
+### Digit array and sign encoding
+
+CPython represents arbitrary-precision integers as an array of 30-bit "digits" (type `digit`, which is `uint32_t`). The number of digits and the sign live in `ob_size`: a negative `ob_size` means the value is negative, zero means the value is zero, and a positive `ob_size` gives the digit count.
+
+```c
+// CPython: Objects/longobject.c:80 PyLongObject
+struct _longobject {
+    PyObject_VAR_HEAD        /* ob_size encodes sign + digit count */
+    digit ob_digit[1];       /* least-significant digit first      */
+};
+```
+
+In 3.14 the first element of `ob_digit` may carry tag bits in its high two bits when the integer is a "compact" single-digit value, letting the runtime skip the allocation entirely for small integers stored inline in another object.
+
+### PyLong_FromLong fast path
+
+For values in `[-5, 256]` CPython returns a pre-allocated immortal object. For values that fit in a single digit it calls `_PyLong_IsCompact` and uses the compact layout. Only values that require two or more digits go through `_PyLong_New`.
+
+```c
+// CPython: Objects/longobject.c:230 PyLong_FromLong
+PyObject *
+PyLong_FromLong(long ival)
+{
+    if (IS_SMALL_INT(ival))
+        return get_small_int((sdigit)ival);   /* immortal, no alloc */
+    ...
+    ndigits = ...;
+    v = _PyLong_New(ndigits);
+    ...
+}
+```
+
+### Karatsuba multiplication
+
+`_PyLong_Multiply` switches from O(n^2) grade-school multiplication to Karatsuba when both operands exceed `KARATSUBA_CUTOFF` (70 digits by default). The recursion splits each operand at the midpoint, computes three sub-products, and combines them with shifts.
+
+```c
+// CPython: Objects/longobject.c:3050 k_mul
+static PyLongObject *
+k_mul(PyLongObject *a, PyLongObject *b)
+{
+    Py_ssize_t asize = Py_ABS(Py_SIZE(a));
+    Py_ssize_t bsize = Py_ABS(Py_SIZE(b));
+    Py_ssize_t shift;
+    PyLongObject *ah = NULL, *al = NULL;
+    PyLongObject *bh = NULL, *bl = NULL;
+    PyLongObject *ret = NULL, *t1, *t2, *t3;
+    ...
+    shift = bsize >> 1;
+    /* split a and b at 'shift' digits, then recurse */
+    ...
+}
+```
+
+## gopy notes
+
+- `objects/int.go` stores the value as a Go `*big.Int` for multi-digit integers, sidestepping the digit-array layout entirely. The compact-int fast path maps onto a plain Go `int64` field guarded by a tag bit in the object header.
+- Immortal small ints (`-5` through `256`) are pre-allocated at init time in `objects/int.go` and returned by pointer comparison, matching CPython's `get_small_int` behaviour.
+- Karatsuba is delegated to `math/big` via `(*big.Int).Mul`; no hand-ported version is needed. The cutoff is therefore determined by `math/big` internally.
+- The 3.14 tag-bit scheme is noted but not replicated structurally. gopy uses a `isCompact bool` field on the internal struct instead.
+- <CpyLink file="Objects/longobject.c" line={230}>PyLong_FromLong</CpyLink> is the canonical reference for the fast-path ordering.
