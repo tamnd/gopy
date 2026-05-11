@@ -120,6 +120,30 @@ func TestRemoveRedundantNopsKeepsPinned(t *testing.T) {
 	}
 }
 
+// TestRemoveRedundantNopsRewritesPseudoJump: the pseudo opcode JUMP has
+// no HasTarget metadata row, but it still carries a label oparg until
+// resolveUnconditionalJumps lowers it. NOP compaction must reindex the
+// pseudo form too, otherwise the oparg points at a stale slot.
+func TestRemoveRedundantNopsRewritesPseudoJump(t *testing.T) {
+	seq := &Sequence{}
+	end := seq.NewLabel()
+	seq.Addop(JUMP, int32(end.ID()), ast.Pos{Lineno: 1})
+	seq.Addop(NOP, 0, ast.Pos{Lineno: 1})
+	seq.UseLabel(end)
+	seq.Addop(RETURN_VALUE, 0, ast.Pos{Lineno: 1})
+
+	seq.ApplyLabelMap(func(op Opcode) bool {
+		return HasTarget(op) || op == JUMP || op == JUMP_NO_INTERRUPT
+	})
+	removeRedundantNops(seq)
+	if len(seq.Instrs) != 2 {
+		t.Fatalf("len after compact = %d, want 2", len(seq.Instrs))
+	}
+	if seq.Instrs[0].Op != JUMP || seq.Instrs[0].Oparg != 1 {
+		t.Errorf("pseudo JUMP oparg not reindexed: %+v", seq.Instrs[0])
+	}
+}
+
 // TestOptimizeRunsPanel: the public Optimize entry runs the panel
 // end-to-end and produces a sane stack depth on a trivial sequence.
 func TestOptimizeRunsPanel(t *testing.T) {

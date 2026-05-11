@@ -163,6 +163,14 @@ func eliminateDeadCodeAfterTerminator(seq *Sequence) int {
 	return dropped
 }
 
+// hasJumpTarget reports whether op carries a label oparg, including the
+// pseudo JUMP / JUMP_NO_INTERRUPT opcodes that have no opcode-metadata
+// row. HasTarget alone returns false for the pseudo forms, which would
+// leave their opargs unrewritten by the NOP-compaction pass.
+func hasJumpTarget(op Opcode) bool {
+	return HasTarget(op) || op == JUMP || op == JUMP_NO_INTERRUPT
+}
+
 // removeRedundantNops compacts the sequence by deleting NOP
 // instructions that no jump or handler points at. Must run AFTER
 // ApplyLabelMap because it rewrites the absolute oparg of every jump
@@ -179,7 +187,7 @@ func removeRedundantNops(seq *Sequence) int {
 	pinned := map[int]bool{}
 	for i := range seq.Instrs {
 		ins := &seq.Instrs[i]
-		if HasTarget(ins.Op) {
+		if hasJumpTarget(ins.Op) {
 			pinned[int(ins.Oparg)] = true
 		}
 		if ins.Handler.Label >= 0 {
@@ -205,7 +213,7 @@ func removeRedundantNops(seq *Sequence) int {
 	// Rewrite jump and handler opargs to reflect the compaction.
 	for i := range out {
 		ins := &out[i]
-		if HasTarget(ins.Op) && int(ins.Oparg) < len(newIdx) {
+		if hasJumpTarget(ins.Op) && int(ins.Oparg) < len(newIdx) {
 			ins.Oparg = int32(newIdx[ins.Oparg])
 		}
 		if ins.Handler.Label >= 0 && ins.Handler.Label < len(newIdx) {
