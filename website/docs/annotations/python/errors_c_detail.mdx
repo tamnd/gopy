@@ -1,0 +1,108 @@
+---
+title: "Python/errors.c: Exception State and Chained Exceptions"
+description: "PyErr_SetObject, PyErr_Fetch/Restore, _PyErr_StackItem, __context__ chaining, and 3.14 changes"
+cpython_path: Python/errors.c
+cpython_version: "3.14"
+lines: 1500
+status: annotated
+ported_to: objects/exception.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`Python/errors.c` is the central bookkeeping layer for Python's exception state. It stores the active exception on the thread state, builds chained exception links, and exposes the C API that extension code and the eval loop depend on.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `PyErr_SetObject` | Sets `tstate->current_exception` to a normalized `(type, value)` pair |
+| 81-130 | `PyErr_SetString` | Convenience wrapper that interns the message as a `PyUnicodeObject` |
+| 131-210 | `PyErr_SetNone` | Raises an exception with no associated value (e.g., `StopIteration`) |
+| 211-320 | `PyErr_Fetch` / `PyErr_Restore` | Legacy 3-tuple API, deprecated in 3.12; forward to `PyErr_GetRaisedException` |
+| 321-430 | `PyErr_GetRaisedException` / `PyErr_SetRaisedException` | 3.12+ single-object API replacing the 3-tuple |
+| 431-560 | `_PyErr_StackItem` | Per-frame exception stack used by `except` blocks and generators |
+| 561-700 | `_PyErr_ChainExceptions1` | Wires `__context__` when a second exception is raised inside an `except` block |
+| 701-850 | `PyErr_NormalizeException` | Instantiates the exception class if only a type was set |
+| 851-1000 | `PyErr_Clear` / `PyErr_Occurred` | Query and reset helpers used throughout the eval loop |
+| 1001-1200 | `PyErr_WriteUnraisable` | Formats and prints exceptions that cannot propagate (finalizers, etc.) |
+| 1201-1500 | Signal / system-exit helpers | `PyErr_CheckSignals`, `PyErr_SetInterrupt`, `PyErr_SetFromErrno` family |
+
+## Reading
+
+### PyErr_SetObject and the current exception slot
+
+Before 3.12 the thread state kept three fields (`curexc_type`, `curexc_value`, `curexc_traceback`). In 3.12 those collapsed into a single `current_exception` field holding a fully-formed exception object. `PyErr_SetObject` is the lowest-level setter.
+
+```c
+// CPython: Python/errors.c:74 PyErr_SetObject
+void
+PyErr_SetObject(PyObject *exception, PyObject *value)
+{
+    PyThreadState *tstate = _PyThreadState_GET();
+    PyObject *exc_value;
+
+    /* Normalize the (type, value) pair into a single exception instance */
+    if (value == NULL || !PyExceptionInstance_Check(value)) {
+        _PyErr_SetObject(tstate, exception, value);
+        return;
+    }
+    exc_value = PyException_GetContext(value);
+    /* ... chaining logic follows ... */
+    _PyErr_SetRaisedException(tstate, Py_NewRef(value));
+}
+```
+
+### _PyErr_StackItem and generator exception state
+
+Each frame that executes an `except` clause pushes an `_PyErr_StackItem` onto `tstate->exc_info`. Generators save and restore this stack when they are suspended and resumed, which is why `sys.exc_info()` returns the right exception inside a generator body.
+
+```c
+// CPython: Python/errors.c:452 _PyErr_StackItem (struct, defined in pystate.h, used here)
+// The push on frame entry:
+tstate->exc_info = &frame->previous_item;
+
+// PyErr_GetRaisedException reads tstate->exc_info->exc_value:
+PyObject *
+PyErr_GetRaisedException(void)
+{
+    PyThreadState *tstate = _PyThreadState_GET();
+    PyObject *exc = tstate->exc_info->exc_value;
+    tstate->exc_info->exc_value = NULL;
+    return exc;
+}
+```
+
+### Chained exceptions via __context__
+
+When a second exception is raised while handling the first, `_PyErr_ChainExceptions1` attaches the original as `__context__` on the new exception. The `__suppress_context__` flag is set to `True` only by an explicit `raise X from Y` (handled in `_PyErr_SetObject`).
+
+```c
+// CPython: Python/errors.c:600 _PyErr_ChainExceptions1
+void
+_PyErr_ChainExceptions1(PyObject *exc)
+{
+    PyThreadState *tstate = _PyThreadState_GET();
+    PyObject *cur_exc = tstate->exc_info->exc_value;
+    if (cur_exc != NULL && cur_exc != Py_None) {
+        /* Avoid reference cycles in the context chain */
+        PyObject *context = cur_exc;
+        for (int i = 0; i < 10; i++) {
+            PyObject *next = PyException_GetContext(context);
+            if (next == NULL) break;
+            if (next == exc) { Py_DECREF(next); goto done; }
+            context = next;
+            Py_DECREF(next);
+        }
+        done:
+        PyException_SetContext(exc, Py_NewRef(cur_exc));
+    }
+}
+```
+
+## gopy notes
+
+- The `_PyErr_StackItem` linked list maps to the `excStack` slice on `vm.Frame` in gopy. Generators swap it via `Frame.SaveExcInfo` / `Frame.RestoreExcInfo`.
+- `PyErr_Fetch` / `PyErr_Restore` are kept as thin shims over `PyErr_GetRaisedException` / `PyErr_SetRaisedException` for any C extension that has not been updated. gopy does not expose these; it uses the single-object form exclusively.
+- `PyErr_WriteUnraisable` is called from finalizers and `__del__` methods. The gopy equivalent lives in `objects/object.go` and writes to `sys.stderr` via the module interface.
+- The cycle-detection loop in `_PyErr_ChainExceptions1` (depth limit 10) is reproduced exactly in `objects/exception.go` to prevent `__context__` reference cycles from hanging the GC.

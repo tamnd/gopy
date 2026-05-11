@@ -1,0 +1,136 @@
+---
+title: "configparser.py: INI-style config parsing"
+description: "RawConfigParser, ConfigParser, interpolation strategies (BasicInterpolation, ExtendedInterpolation), and SectionProxy"
+cpython_path: Lib/configparser.py
+cpython_version: "3.14"
+lines: 1500
+status: annotated
+ported_to: module/configparser/module.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`configparser.py` is a self-contained pure-Python module (~1500 lines). It
+parses `.ini`-style files into a two-level mapping (section, key). The class
+hierarchy separates raw storage (`RawConfigParser`) from value interpolation
+(`BasicInterpolation`, `ExtendedInterpolation`) and exposes a dict-like
+`SectionProxy` view per section.
+
+## Map
+
+| Line range | Symbol | Role |
+|---|---|---|
+| 1-60 | module header, `__all__` | imports, exception classes |
+| 61-130 | `Interpolation`, `BasicInterpolation` | `%(key)s` style substitution |
+| 131-185 | `ExtendedInterpolation` | `${section:key}` style substitution |
+| 186-230 | `_UNSET`, `_default_dict` | sentinel and ordered-dict alias |
+| 231-900 | `RawConfigParser` | core parser: read, write, get, set |
+| 901-1050 | `ConfigParser` | adds interpolation on top of raw |
+| 1051-1150 | `SafeConfigParser` | deprecated alias for `ConfigParser` |
+| 1151-1300 | `SectionProxy` | mapping view over one section |
+| 1301-1500 | `ConverterMapping`, `RawConfigParser._read` | type converters, file parser |
+
+## Reading
+
+### RawConfigParser._read
+
+The file parser is the most complex part of the module. It handles
+multi-line values (continuation lines start with whitespace), inline comments,
+and section headers. It builds an internal `_sections` `OrderedDict` keyed by
+lowercased section name.
+
+```python
+# Lib/configparser.py:1074-1140  (RawConfigParser._read, simplified)
+def _read(self, fp, fpname):
+    elements_added = set()
+    cursect = None
+    sectname = None
+    optname = None
+    lineno = 0
+    indent_level = 0
+    e = None
+    for lineno, line in enumerate(fp, start=1):
+        comment_start = sys.maxsize
+        for prefix in self._inline_comment_prefixes:
+            index = line.find(prefix, 1)
+            if index == 0 or (index > 0 and line[index-1].isspace()):
+                comment_start = min(comment_start, index)
+        value = line[:comment_start].strip()
+        if not value:
+            if self._empty_lines_in_values:
+                if cursect is not None and optname and cursect[optname] is not None:
+                    cursect[optname].append('')
+            else:
+                indent_level = sys.maxsize
+            continue
+        # ... section header, option, or continuation line logic
+```
+
+### Interpolation strategies
+
+`BasicInterpolation` resolves `%(name)s` tokens by repeated lookup within the
+same section (up to `MAX_INTERPOLATION_DEPTH = 10` passes). It raises
+`InterpolationDepthError` if the limit is hit.
+
+`ExtendedInterpolation` extends the syntax to `${section:key}`, allowing
+cross-section references. It uses a single-pass regex substitution via
+`_KEYCRE`.
+
+```python
+# Lib/configparser.py:131-180  (BasicInterpolation.before_get)
+class BasicInterpolation(Interpolation):
+    def before_get(self, parser, section, option, value, vars):
+        L = []
+        self._interpolate_some(parser, option, L, value, section, vars, 1)
+        return ''.join(L)
+
+    def _interpolate_some(self, parser, option, accum, rest, section, map, depth):
+        rawval = parser.get(section, option, raw=True, fallback=rest)
+        if depth > MAX_INTERPOLATION_DEPTH:
+            raise InterpolationDepthError(option, section, rawval)
+        while rest:
+            p = rest.find('%')
+            if p < 0:
+                accum.append(rest)
+                break
+            # ... parse %(key)s token and recurse
+```
+
+### SectionProxy and type converters
+
+`SectionProxy` wraps a single section as a `MutableMapping`. All reads go
+through `ConfigParser.get`, so interpolation and fallback handling are
+inherited automatically.
+
+`ConverterMapping` adds `getint`, `getfloat`, `getboolean` by composing any
+callable registered in `parser.converters` with the raw `get` call.
+
+```python
+# Lib/configparser.py:1200-1240  (SectionProxy.__getitem__)
+class SectionProxy(MutableMapping):
+    def __getitem__(self, key):
+        if not self._parser.has_option(self._name, key):
+            raise KeyError(key)
+        return self._parser.get(self._name, key)
+
+    def get(self, option, fallback=None, *, raw=False, vars=None,
+            **kwargs):
+        return self._parser.get(self._name, option, raw=raw, vars=vars,
+                                fallback=fallback, **kwargs)
+```
+
+## gopy notes
+
+- `_read` accumulates errors and raises `MissingSectionHeaderError` or
+  `ParsingError` at the end of the file, not on the offending line. The Go
+  port must buffer errors the same way.
+- `RawConfigParser` stores multi-line values as lists internally and joins
+  them on read. `_join_multiline_values` is called lazily before any `get`.
+- `configparser` uses `collections.OrderedDict` by default but accepts a
+  custom `dict_type` argument. The Go port should use insertion-ordered maps
+  throughout.
+- `SafeConfigParser` was deprecated in 3.2 and removed in 3.12. Do not port it.
+- `ExtendedInterpolation` cross-section lookup calls `parser.get` recursively,
+  which can trigger another interpolation pass. The depth guard in
+  `BasicInterpolation` does not apply; `ExtendedInterpolation` is bounded only
+  by Python's call stack. Port accordingly.

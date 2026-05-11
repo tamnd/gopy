@@ -1,0 +1,126 @@
+---
+title: "pprint.py: Pretty-Printer Internals"
+description: "Annotation of CPython Lib/pprint.py covering PrettyPrinter, _safe_repr, and the pprint/pformat/pp entry points"
+cpython_path: Lib/pprint.py
+cpython_version: "3.14"
+lines: 600
+status: annotated
+ported_to: module/pprint/module.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+<CpyLink file="Lib/pprint.py" />
+
+`pprint` provides a `PrettyPrinter` class that formats Python objects
+into human-readable multi-line text. The 3.14 release added `underscore_numbers`
+support and a new `depth` sentinel so callers can distinguish "not set" from
+zero.
+
+## Map
+
+| Lines | Symbol | Kind | Notes |
+|-------|--------|------|-------|
+| 1-30 | module header | setup | imports, `__all__`, version note |
+| 32-60 | `pprint` | function | thin wrapper around `PrettyPrinter.pprint` |
+| 62-80 | `pformat` | function | returns formatted string, no newline |
+| 82-95 | `pp` | function | 3.8+ shorthand, `sort_dicts=False` default |
+| 97-120 | `isreadable` | function | delegates to `_safe_repr` readability flag |
+| 122-145 | `isrecursive` | function | delegates to `_safe_repr` recursion flag |
+| 147-220 | `PrettyPrinter.__init__` | method | validates `indent`, `width`, `depth`, `compact`, `sort_dicts`, `underscore_numbers` |
+| 221-260 | `PrettyPrinter.pprint` | method | formats then writes to stream |
+| 261-290 | `PrettyPrinter.pformat` | method | calls `_format`, returns string |
+| 291-350 | `PrettyPrinter._format` | method | dispatch on object type, indentation logic |
+| 351-430 | `PrettyPrinter._pprint_dict` | method | sorts keys when `sort_dicts=True` |
+| 431-480 | `PrettyPrinter._pprint_list` | method | compact mode, wraps at `width` |
+| 481-520 | `PrettyPrinter._pprint_tuple` | method | mirrors list logic, trailing comma on singleton |
+| 521-560 | `_safe_repr` | function | recursive repr with cycle detection |
+| 561-600 | `_recursion`, `_wrap_bytes_repr` | helpers | sentinel string, bytes chunker |
+
+## Reading
+
+### Entry points
+
+The three public entry points delegate immediately to a throw-away
+`PrettyPrinter` instance. `pp` fixes `sort_dicts=False` so insertion
+order is preserved, which is the ergonomic default since Python 3.7 dicts
+became ordered.
+
+```python
+# Lib/pprint.py:32
+def pprint(object, stream=None, indent=1, width=80, depth=None, *,
+           compact=False, sort_dicts=True, underscore_numbers=False):
+    printer = PrettyPrinter(
+        stream=stream, indent=indent, width=width, depth=depth,
+        compact=compact, sort_dicts=sort_dicts,
+        underscore_numbers=underscore_numbers)
+    printer.pprint(object)
+
+# Lib/pprint.py:82
+def pp(object, *args, sort_dicts=False, **kwargs):
+    pprint(object, *args, sort_dicts=sort_dicts, **kwargs)
+```
+
+### `_safe_repr` recursive formatter
+
+`_safe_repr` is the heart of the module. It carries three return values:
+the repr string, a `readable` flag, and a `recursive` flag. Cycle detection
+uses an `allowance` dict keyed by `id(object)`.
+
+```python
+# Lib/pprint.py:521
+def _safe_repr(object, context, maxlevels, level, sort_dicts):
+    typ = type(object)
+    if typ in _builtin_scalars:
+        return repr(object), True, False
+
+    r = getattr(typ, "__repr__", None)
+    # ... cycle guard ...
+    objid = id(object)
+    if objid in context:
+        return _recursion(object), False, True
+    context[objid] = 1
+    # ... recurse into containers ...
+    del context[objid]
+    return repr_string, readable, recursive
+```
+
+### `PrettyPrinter._format` dispatch
+
+`_format` checks whether the repr fits on the current line. If it does, it
+emits it inline. Otherwise it dispatches to a type-specific `_pprint_*`
+method via the `_dispatch` table built at class definition time.
+
+```python
+# Lib/pprint.py:291
+def _format(self, object, stream, indent, allowance, context, level):
+    objid = id(object)
+    if objid in context:
+        stream.write(_recursion(object))
+        ...
+        return
+    rep = self._repr(object, context, level)
+    max_width = self._width - indent - allowance
+    if len(rep) <= max_width:
+        stream.write(rep)
+        return
+    p = self._dispatch.get(type(object).__repr__, None)
+    if p is not None:
+        context[objid] = 1
+        p(self, object, stream, indent, allowance, context, level + 1)
+        del context[objid]
+    else:
+        stream.write(rep)
+```
+
+## gopy notes
+
+- `_safe_repr` must be ported as a standalone Go function; it is not a method.
+- The `_dispatch` class-level dict maps `__repr__` method objects to handler
+  functions. In Go this becomes a `map[reflect.Type]formatFunc` keyed on the
+  Go type.
+- `underscore_numbers` calls `format(n, '_')` internally. The gopy
+  `format` builtin must support the underscore grouping option before this
+  module can pass its test suite.
+- `compact` mode for lists and tuples requires measuring tentative line
+  lengths before committing to write, so buffering is needed.

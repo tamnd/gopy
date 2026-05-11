@@ -1,0 +1,124 @@
+---
+title: "textwrap.py: Text Wrapping and Filling"
+description: "Annotation of CPython Lib/textwrap.py covering TextWrapper, _split_chunks, and the wrap/fill/dedent/indent/shorten entry points"
+cpython_path: Lib/textwrap.py
+cpython_version: "3.14"
+lines: 450
+status: annotated
+ported_to: module/textwrap/module.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+<CpyLink file="Lib/textwrap.py" />
+
+`textwrap` wraps and fills plain text, strips common leading whitespace
+(`dedent`), adds uniform indentation (`indent`), and shortens long strings
+with a placeholder. `TextWrapper` is the stateful class; the module-level
+functions create a throw-away instance per call.
+
+## Map
+
+| Lines | Symbol | Kind | Notes |
+|-------|--------|------|-------|
+| 1-25 | module header | setup | imports, `__all__` |
+| 27-80 | `TextWrapper.__init__` | method | width, initial/subsequent indent, expand tabs, break on hyphens, etc. |
+| 81-130 | `TextWrapper._munge_whitespace` | method | tab expansion, line-end normalisation |
+| 131-180 | `TextWrapper._split` | method | splits text on whitespace and break opportunities |
+| 181-220 | `TextWrapper._split_chunks` | method | calls `_split`, then applies `break_on_hyphens` regex |
+| 221-270 | `TextWrapper._wrap_chunks` | method | greedy line-packing loop |
+| 271-310 | `TextWrapper._handle_long_word` | method | breaks words that exceed `width` |
+| 311-340 | `TextWrapper.wrap` | method | full pipeline, returns list of lines |
+| 341-360 | `TextWrapper.fill` | method | joins `wrap` result with newlines |
+| 361-390 | `wrap`, `fill`, `shorten` | functions | module-level one-shot wrappers |
+| 391-420 | `dedent` | function | strips common leading whitespace via regex |
+| 421-450 | `indent` | function | prepends prefix to selected lines |
+
+## Reading
+
+### `_split_chunks` and the break-on-hyphens regex
+
+`_split_chunks` is the lexer of the pipeline. It splits the input into
+alternating whitespace and non-whitespace tokens, then further subdivides
+non-whitespace on hyphen break opportunities when `break_on_hyphens` is set.
+The compiled regex `wordsep_re` is a module-level constant so it is only
+compiled once.
+
+```python
+# Lib/textwrap.py:64  (wordsep_re, simplified)
+wordsep_re = re.compile(
+    r'(\s+|'                    # any whitespace
+    r'(?<=[\w\!\"\'\&\.\,\?])-{2,}(?=\w))')  # em-dash-like runs
+
+# Lib/textwrap.py:181
+def _split_chunks(self, text):
+    text = self._munge_whitespace(text)
+    return self._split(text)
+```
+
+### `_wrap_chunks` greedy packing
+
+`_wrap_chunks` receives the token list in reverse order (so `pop()` is O(1))
+and builds lines greedily. When a single token is longer than `width` it is
+handed to `_handle_long_word`.
+
+```python
+# Lib/textwrap.py:221
+def _wrap_chunks(self, chunks):
+    lines = []
+    cur_line = []
+    cur_len = 0
+    width = self._width
+
+    while chunks:
+        l = len(chunks[-1])
+        if cur_len + l <= width:
+            cur_line.append(chunks.pop())
+            cur_len += l
+        else:
+            if cur_line:
+                lines.append(indent + ''.join(cur_line))
+            cur_line, cur_len = [], 0
+    if cur_line:
+        lines.append(indent + ''.join(cur_line))
+    return lines
+```
+
+### `dedent` whitespace stripping
+
+`dedent` finds the longest common leading whitespace across all non-empty
+lines using a two-pass approach: first collect candidates, then reduce with
+`str.startswith`.
+
+```python
+# Lib/textwrap.py:391
+def dedent(text):
+    _whitespace_only_re = re.compile('^[ \t]+$', re.MULTILINE)
+    _leading_whitespace_re = re.compile('(^[ \t]*)(?:[^ \t\n])', re.MULTILINE)
+    text = _whitespace_only_re.sub('', text)
+    indents = _leading_whitespace_re.findall(text)
+    if not indents:
+        return text
+    margin = indents[0]
+    for indent in indents[1:]:
+        if indent.startswith(margin):
+            pass
+        elif margin.startswith(indent):
+            margin = indent
+        else:
+            margin = ""
+            break
+    return re.sub(r'(?m)^' + margin, '', text) if margin else text
+```
+
+## gopy notes
+
+- `wordsep_re` and `wordsep_simple_re` are module-level compiled patterns.
+  In Go these become `var` package-level `*regexp.Regexp` values initialised
+  in `init`.
+- `TextWrapper` has 10 constructor parameters. The idiomatic Go port uses a
+  `TextWrapperOptions` struct rather than variadic keyword arguments.
+- `dedent` is called heavily in `doctest` and `inspect`. Port it before those
+  modules, even if `TextWrapper` itself is deferred.
+- `shorten` uses `_wrap_chunks` after collapsing whitespace. The `placeholder`
+  option (added 3.4) must be accounted for in the Go port's line-length budget.

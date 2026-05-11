@@ -1,0 +1,96 @@
+---
+title: "pycore_dict.h: internal dict layout"
+description: "PyDictObject split-table design, hash table internals, watcher events, and inline values optimization in CPython 3.14"
+cpython_path: Include/internal/pycore_dict.h
+cpython_version: "3.14"
+lines: 200
+status: annotated
+ported_to: objects/dict.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`pycore_dict.h` exposes the full internal layout of Python dicts.
+User code sees only `PyDictObject *`; this header reveals the two-level
+design that separates key storage from value storage.
+
+## Map
+
+| Lines | Symbol | Kind | Purpose |
+|-------|--------|------|---------|
+| 1–30 | `PyDictKeysObject` | struct | shared key table (hash array + entries) |
+| 31–70 | `PyDictObject` | struct | per-dict header (ma_keys, ma_values, ma_used) |
+| 71–100 | `PyDictValues` | struct | inline-values array for split-table dicts |
+| 101–130 | `_PyDict_NotifyEvent` | enum | watcher event codes (created, modified, cleared, ...) |
+| 131–160 | `_PyDictKeyEntry` / `_PyDictUnicodeEntry` | structs | key-entry variants for combined vs. unicode-only keys |
+| 161–200 | accessor macros | macros | `DK_ENTRIES`, `DK_UNICODE_ENTRIES`, `DK_IS_UNICODE` |
+
+## Reading
+
+### PyDictKeysObject layout
+
+The hash table lives entirely inside `PyDictKeysObject`.
+The `dk_indices` flexible array holds compact indices; actual entries follow
+in a second region selected by `dk_kind`.
+
+```c
+struct _Py_dict_keys_object {
+    Py_ssize_t dk_refcnt;
+    uint8_t    dk_log2_size;       /* log2 of number of index slots */
+    uint8_t    dk_log2_index_bytes;
+    uint8_t    dk_kind;            /* DICT_KEYS_GENERAL | _UNICODE | _SPLIT */
+    uint32_t   dk_version;
+    Py_ssize_t dk_usable;
+    Py_ssize_t dk_nentries;
+    char       dk_indices[];       /* hash index array, then entry array */
+};
+```
+
+`dk_log2_size` lets the runtime keep the index array as `int8_t`, `int16_t`,
+`int32_t`, or `int64_t` depending on dict size, saving memory for small dicts.
+
+### Split-table (inline values)
+
+When all keys in a class share the same shape, CPython stores values
+separately in a `PyDictValues` array attached to the instance.
+`ma_keys` is then shared across instances; `ma_values` points to the
+per-instance inline array.
+
+```c
+typedef struct {
+    uint8_t  capacity;
+    uint8_t  embedded;
+    uint8_t  valid;
+    PyObject *values[1];   /* flexible, capacity entries */
+} PyDictValues;
+```
+
+The `embedded` flag means the values array was allocated inside the object
+body rather than on a separate heap block, avoiding an extra pointer chase.
+
+### `_PyDict_NotifyEvent` enum
+
+Watchers (PEP 667 / 3.12+) receive one of these codes on every mutation:
+
+```c
+typedef enum {
+    PyDict_EVENT_ADDED,
+    PyDict_EVENT_MODIFIED,
+    PyDict_EVENT_DELETED,
+    PyDict_EVENT_CLONED,
+    PyDict_EVENT_CLEARED,
+    PyDict_EVENT_DEALLOCATED,
+} _PyDict_NotifyEvent;
+```
+
+3.14 adds no new events but tightens the guarantee that `CLONED` fires
+before any modification to the new dict.
+
+## gopy notes
+
+`objects/dict.go` models `PyDictObject` with Go fields `maKeys`, `maValues`,
+and `maUsed`. The split-table path is not yet wired: every dict uses the
+combined-table layout (`DICT_KEYS_GENERAL`). Watcher callbacks map to
+the `DictWatcher` interface but fire only for `ADDED`, `MODIFIED`, and
+`CLEARED` today. The `dk_log2_size` growth schedule matches CPython's
+`GROWTH_RATE` macro (used when load exceeds 2/3).

@@ -1,0 +1,111 @@
+---
+title: "Objects/tupleobject.c: Tuple Internals"
+description: "Allocation, interning, hashing, and macro-vs-checked access for CPython tuples"
+cpython_path: Objects/tupleobject.c
+cpython_version: "3.14"
+lines: 750
+status: annotated
+ported_to: objects/tuple.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`Objects/tupleobject.c` implements `tuple`, one of CPython's most performance-sensitive types.
+It covers allocation, a free-list cache for small tuples, `ob_item[]` layout, hash caching,
+and the unsafe-but-fast `PyTuple_GET_ITEM` macro.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1–40 | `PyTupleObject` struct | Fixed header plus `ob_item[]` flexible array |
+| 41–120 | `tuple_new_impl` | Allocation via `PyObject_GC_NewVar`; zero-fills `ob_item` |
+| 121–200 | `tuple_subtype_new` | Subclass allocation path; copies items from sequence |
+| 201–270 | `_PyTuple_MaybeUntrack` | GC untrack if all items are immortal or atomic |
+| 271–340 | `tupleitem` / `tupleslice` | `sq_item` and `sq_slice` sequence slots |
+| 341–420 | `PyTuple_GET_ITEM` (macro) | Unchecked index; versus `PyTuple_GetItem` with bounds check |
+| 421–520 | `tuplehash` | FNV-style hash over item hashes; result cached in `ob_shash` |
+| 521–620 | Free-list / interning | `free_list[MAXSAVESIZE]` for length-0 and length-1 tuples |
+| 621–750 | `PyTupleType` | `tp_*` slot table; `3.14` adds `tp_vectorcall` for `tuple()` |
+
+## Reading
+
+### Allocation and `ob_item[]`
+
+CPython stores tuple items in a flexible C array appended directly to the object header.
+`tuple_new_impl` calls `PyObject_GC_NewVar` with `nitems` so the allocator sizes the
+block as `sizeof(PyTupleObject) + nitems * sizeof(PyObject*)`.
+
+```c
+// Objects/tupleobject.c:68  tuple_new_impl
+static PyObject *
+tuple_new_impl(PyTypeObject *type, PyObject *iterable)
+{
+    ...
+    op = (PyTupleObject *) PyObject_GC_NewVar(PyTupleObject, type, n);
+    if (op == NULL)
+        return NULL;
+    for (i = 0; i < n; i++) {
+        item = PySequence_Fast_GET_ITEM(it, i);
+        Py_INCREF(item);
+        op->ob_item[i] = item;
+    }
+    ...
+}
+```
+
+The Go port in `objects/tuple.go` mirrors this with a `[]Object` slice allocated once
+at construction; the slice header sits inside the struct rather than a trailing C array.
+
+### Macro vs bounds-checked access
+
+`PyTuple_GET_ITEM` is an unchecked macro used in hot paths inside the interpreter.
+The safe variant `PyTuple_GetItem` adds an index range check and a `NULL` guard.
+
+```c
+// Include/cpython/tupleobject.h  PyTuple_GET_ITEM
+#define PyTuple_GET_ITEM(op, i) \
+    (((PyTupleObject *)(op))->ob_item[i])
+
+// Objects/tupleobject.c:216  PyTuple_GetItem (bounds-checked)
+PyObject *
+PyTuple_GetItem(PyObject *op, Py_ssize_t i)
+{
+    if (!PyTuple_Check(op)) { ... }
+    if (i < 0 || i >= Py_SIZE(op)) {
+        PyErr_SetString(PyExc_IndexError, "tuple index out of range");
+        return NULL;
+    }
+    return ((PyTupleObject *)op)->ob_item[i];
+}
+```
+
+### Hash caching and 3.14 changes
+
+`tuplehash` computes a combined hash from all item hashes and stores the result in
+`ob_shash` (initialized to `-1`). Subsequent calls return the cached value immediately.
+In 3.14, `PyTupleType` gained a `tp_vectorcall` slot so that `tuple(iterable)` avoids
+a `tp_call` wrapper dispatch.
+
+```c
+// Objects/tupleobject.c:435  tuplehash
+static Py_hash_t
+tuplehash(PyTupleObject *v)
+{
+    if (v->ob_shash != -1)
+        return v->ob_shash;
+    ...
+    /* mix item hashes with Py_HashDouble-style accumulation */
+    v->ob_shash = x;
+    return x;
+}
+```
+
+## gopy notes
+
+- `objects/tuple.go` uses `int64` for the cached hash field, matching `ob_shash`.
+- The free-list for length-0/1 tuples is not yet ported; every allocation goes through
+  the GC. This is tracked as a known performance gap.
+- `PyTuple_GET_ITEM` maps to direct slice indexing in Go; bounds-checked access maps
+  to a helper that returns an error on out-of-range.
+- The 3.14 `tp_vectorcall` slot has no direct equivalent yet; the `tp_call` path is used.

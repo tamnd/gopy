@@ -1,0 +1,116 @@
+---
+title: "Python/import.c: Module Loading, Import Lock, and Frozen Bootstrap"
+description: "PyImport_ImportModuleLevelObject, _find_and_load, import lock, sys.modules cache, frozen bootstrap, and 3.14 changes"
+cpython_path: Python/import.c
+cpython_version: "3.14"
+lines: 2500
+status: annotated
+ported_to: vm/eval_import.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`Python/import.c` is the C half of the import system. It owns the per-interpreter import lock, drives the `_find_and_load` fast path, manages the `sys.modules` cache, and bootstraps frozen modules before the file system is accessible.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-120 | Lock primitives | `_PyImport_AcquireLock` / `_PyImport_ReleaseLock`, per-interpreter recursive mutex |
+| 121-280 | `sys.modules` helpers | `import_get_module`, `import_add_module`, `remove_importlib_frames` |
+| 281-500 | `PyImport_ImportModuleLevelObject` | Public entry point for `import X` and `from X import Y`; resolves relative names |
+| 501-700 | `_find_and_load` | Core dispatch: checks `sys.modules`, calls `_bootstrap._find_and_load` in Python space |
+| 701-900 | `_find_and_load_unlocked` | Inner loop: calls finders, handles `ModuleNotFoundError`, populates `sys.modules` |
+| 901-1100 | Frozen module table | `PyImport_FrozenModules`, `import_frozen_module`, `_PyImport_FindFrozenObject` |
+| 1101-1400 | Built-in module init | `_PyImport_FindBuiltin`, `init_builtin`, C extension `PyInit_xxx` dispatch |
+| 1401-1700 | `PyImport_ExecCodeModuleObject` | Executes a code object inside a module namespace (`__spec__` assignment, etc.) |
+| 1701-2000 | Reload helpers | `PyImport_ReloadModule`, frame cleanup, sys.path cache invalidation |
+| 2001-2500 | 3.14 audit and loader hooks | `PyImport_SetImporter`, audit event `import`, `_PyImport_GetImportFunc` |
+
+## Reading
+
+### PyImport_ImportModuleLevelObject: the public entry point
+
+Every `import` statement compiles to `IMPORT_NAME` which calls `PyImport_ImportModuleLevelObject`. The `level` parameter is 0 for absolute imports and positive for relative ones (`from .. import foo` passes `level=2`).
+
+```c
+// CPython: Python/import.c:1554 PyImport_ImportModuleLevelObject
+PyObject *
+PyImport_ImportModuleLevelObject(PyObject *name, PyObject *globals,
+                                  PyObject *locals, PyObject *fromlist,
+                                  int level)
+{
+    PyThreadState *tstate = _PyThreadState_GET();
+    PyObject *abs_name = resolve_name(tstate, name, globals, level);
+    if (abs_name == NULL) return NULL;
+
+    PyObject *mod = import_get_module(tstate, abs_name);
+    if (mod != NULL && mod != Py_None) {
+        /* Fast path: already in sys.modules */
+        PyObject *value = handle_fromlist(tstate, mod, fromlist);
+        Py_DECREF(abs_name);
+        return value;
+    }
+    Py_XDECREF(mod);
+
+    /* Slow path: delegate to _bootstrap._find_and_load */
+    mod = _find_and_load(tstate, abs_name);
+    /* ... */
+}
+```
+
+### _PyImport_AcquireLock: the import lock
+
+The import lock is a per-interpreter recursive mutex. It prevents two threads from loading the same module simultaneously. Recursive acquisition is allowed so that a module's `__init__` can import sub-modules.
+
+```c
+// CPython: Python/import.c:97 _PyImport_AcquireLock
+int
+_PyImport_AcquireLock(PyInterpreterState *interp)
+{
+    struct _import_lock *lock = &interp->imports.lock;
+    PyThread_type_lock lk = lock->mutex;
+    unsigned long me = PyThread_get_thread_ident();
+
+    if (lock->thread == me) {
+        /* Recursive acquisition: just bump the count */
+        lock->count++;
+        return 0;
+    }
+    Py_BEGIN_ALLOW_THREADS
+    PyThread_acquire_lock(lk, WAIT_LOCK);
+    Py_END_ALLOW_THREADS
+    lock->thread = me;
+    lock->count = 1;
+    return 0;
+}
+```
+
+### Frozen module bootstrap
+
+Before `importlib._bootstrap` is available as a file, CPython uses a table of frozen bytecode blobs. `_PyImport_FindFrozenObject` looks up the name in `PyImport_FrozenModules` and returns a code object that can be exec'd directly.
+
+```c
+// CPython: Python/import.c:953 _PyImport_FindFrozenObject
+PyObject *
+_PyImport_FindFrozenObject(PyObject *name)
+{
+    const struct _frozen *p;
+    for (p = PyImport_FrozenModules; p->name != NULL; p++) {
+        if (strcmp(p->name, PyUnicode_AsUTF8(name)) == 0) {
+            /* p->code is a marshalled code object */
+            return PyMarshal_ReadObjectFromString(
+                (const char *)p->code, p->size);
+        }
+    }
+    return NULL;  /* not frozen */
+}
+```
+
+## gopy notes
+
+- `vm/eval_import.go` implements the `IMPORT_NAME` and `IMPORT_FROM` opcodes. It calls into `module/importlib/` which is a Go port of `Lib/importlib/_bootstrap.py`.
+- The import lock is represented by `vm.importLock` (a `sync.Mutex` with a goroutine-id owner field) to match the recursive-acquisition semantics of `_PyImport_AcquireLock`.
+- Frozen modules in gopy are registered in `stdlibinit/registry.go` rather than a C array. The bootstrap sequence (`_frozen_importlib`, `_frozen_importlib_external`) follows the same order as CPython.
+- `PyImport_ExecCodeModuleObject` maps to `vm.execModuleCode` in `vm/eval_import.go`, which sets `__spec__`, `__loader__`, and `__file__` on the module namespace before executing the code object.
+- The 3.14 audit event `import` (raised on every successful load) is tracked under task #485 and not yet wired up in gopy.
