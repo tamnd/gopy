@@ -399,6 +399,8 @@ const sidebars = {
         'annotations/objects/typevarobject_c2_detail',
         'annotations/objects/interpreteridobject_c_detail',
         'annotations/objects/obmalloc_c_detail',
+        'annotations/objects/methodobject_c_detail',
+        'annotations/objects/namespaceobject_c_detail',
       ],
     },
     {
@@ -764,6 +766,9 @@ const sidebars = {
         'annotations/modules/module_hashlib_c_detail',
         'annotations/modules/module_socket_c_detail',
         'annotations/modules/module_select_c_detail',
+        'annotations/modules/module_fileio_c_detail',
+        'annotations/modules/module_bufferedio_c_detail',
+        'annotations/modules/module_textio_c_detail',
       ],
     },
     {
@@ -1146,6 +1151,7 @@ const sidebars = {
         'annotations/lib/argparse_lib_detail',
         'annotations/lib/getopt_lib_detail',
         'annotations/lib/shlex_lib_detail',
+        'annotations/lib/copy_lib_detail',
       ],
     },
   ],

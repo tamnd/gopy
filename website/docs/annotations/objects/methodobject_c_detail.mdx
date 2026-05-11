@@ -1,0 +1,112 @@
+---
+title: Objects/methodobject.c
+description: "PyCFunctionObject and PyCMethodObject: the C-level wrappers for built-in functions and methods, handling METH_VARARGS, METH_FASTCALL, METH_O, and METH_NOARGS calling conventions."
+cpython_path: Objects/methodobject.c
+cpython_version: "3.14"
+lines: 730
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Objects/methodobject.c`
+
+<CpyLink path="Objects/methodobject.c" />
+
+`Objects/methodobject.c` defines `PyCFunctionObject`, the Python-visible wrapper around a
+C function pointer (`PyCFunction`). It also defines `PyCMethodObject`, a subtype that
+carries a `PyObject *cls` for classmethods. The file implements the call dispatch that
+translates Python calling conventions (`*args`, `**kwargs`) into the correct C ABI for
+`METH_VARARGS`, `METH_FASTCALL`, `METH_NOARGS`, and `METH_O` flags.
+
+## Map
+
+| Lines | Symbol | Role |
+| ----- | ------ | ---- |
+| 1-60 | `PyCFunctionObject` struct | ml, self, module, weakreflist fields |
+| 61-180 | `PyCFunction_NewEx`, `PyCMethod_New` | Constructor paths |
+| 181-350 | `meth_call`, `meth_vectorcall` | Call dispatch for all METH_* flags |
+| 351-500 | richcompare, hash, repr | Type slots |
+| 501-620 | `PyCMethodObject`, `PyCMethod_Type` | Classmethod subtype |
+| 621-730 | `PyCFunction_Type` | Type object registration |
+
+## Reading
+
+### `PyCFunctionObject` struct
+
+```c
+// CPython: Objects/methodobject.c:12 PyCFunctionObject
+typedef struct {
+    PyObject_HEAD
+    PyMethodDef *m_ml;      /* Description of the C function */
+    PyObject    *m_self;    /* Passed as 'self' arg to the C func */
+    PyObject    *m_module;  /* The __module__ attribute, can be anything */
+    PyObject    *m_weakreflist; /* List of weak references */
+    vectorcallfunc vectorcall;
+} PyCFunctionObject;
+```
+
+`m_ml` points to a `PyMethodDef` which carries the function name, C pointer, METH_* flags,
+and docstring. `vectorcall` is set at construction time to the appropriate dispatcher based
+on `m_ml->ml_flags`.
+
+### `meth_vectorcall`: calling convention dispatch
+
+The vectorcall entry point inspects `ml_flags` and routes to the correct C ABI.
+`METH_NOARGS` and `METH_O` are the fast paths; `METH_FASTCALL` passes the internal
+argument vector directly.
+
+```c
+// CPython: Objects/methodobject.c:210 meth_vectorcall
+static PyObject *
+meth_vectorcall(PyObject *func, PyObject *const *stack,
+                size_t nargsf, PyObject *kwnames)
+{
+    Py_ssize_t nargs = PyVectorcall_NARGS(nargsf);
+    PyCFunctionObject *m = (PyCFunctionObject *)func;
+    PyMethodDef *ml = m->m_ml;
+
+    switch (ml->ml_flags & (METH_VARARGS | METH_FASTCALL | METH_NOARGS |
+                            METH_O | METH_KEYWORDS | METH_METHOD)) {
+    case METH_NOARGS:
+        ...
+    case METH_O:
+        ...
+    case METH_VARARGS | METH_KEYWORDS:
+        ...
+    }
+}
+```
+
+### `PyCMethod_New`: classmethod variant
+
+`PyCMethodObject` extends `PyCFunctionObject` with a `mm_class` pointer. `PyCMethod_New`
+sets `mm_class` to the defining class so that `super()` inside C classmethods can resolve
+the correct MRO entry.
+
+```c
+// CPython: Objects/methodobject.c:530 PyCMethod_New
+PyObject *
+PyCMethod_New(PyMethodDef *ml, PyObject *self, PyObject *module,
+              PyTypeObject *cls)
+{
+    PyCMethodObject *op = PyObject_GC_New(PyCMethodObject, &PyCMethod_Type);
+    ...
+    op->mm_class = (PyObject *)cls;
+    Py_INCREF(cls);
+    return (PyObject *)op;
+}
+```
+
+## gopy notes
+
+Not yet ported directly. In gopy, built-in functions are represented as Go functions
+registered via `objects/function.go` or as method slots on type objects. The METH_* flag
+dispatch maps to Go function signatures. `PyCMethodObject` is the foundation for
+`super().__init_subclass__` calls, which will be needed when classmethods on user-defined
+types are fully supported.
+
+## CPython 3.14 changes
+
+3.14 added the `METH_COEXIST` flag handling audit and improved the vectorcall fast path for
+`METH_FASTCALL | METH_KEYWORDS` to avoid a tuple allocation in the common case.

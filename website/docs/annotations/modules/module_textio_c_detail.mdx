@@ -1,0 +1,106 @@
+---
+title: Modules/_io/textio.c
+description: "TextIOWrapper C implementation: the encoding/decoding layer over BufferedIO that translates between bytes and str, handling newline translation and the incremental codec protocol."
+cpython_path: Modules/_io/textio.c
+cpython_version: "3.14"
+lines: 3200
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Modules/_io/textio.c`
+
+<CpyLink path="Modules/_io/textio.c" />
+
+`Modules/_io/textio.c` implements `_io.TextIOWrapper`, the encoding layer of CPython's I/O
+stack. It sits above `BufferedReader`/`BufferedWriter` and translates `bytes` to/from `str`
+using a codec's incremental encoder/decoder. It handles universal newline translation
+(`"r"`, `"\r\n"`, `"\r"` to `"\n"`), `write_through` mode, and the tell/seek protocol
+that works across multi-byte encodings.
+
+## Map
+
+| Lines | Symbol | Role |
+| ----- | ------ | ---- |
+| 1-150 | `textio` struct | buffer, codec, pending string, newline flags |
+| 151-400 | `textiowrapper_init` | Codec lookup, newline mode parsing, BOM handling |
+| 401-700 | `_textiowrapper_writeflush`, `textiowrapper_write` | Encode str and pass to buffer |
+| 701-1100 | `textiowrapper_read`, `_textiowrapper_read_chunk` | Decode bytes chunks from buffer |
+| 1101-1400 | `textiowrapper_readline` | Line-oriented read with pending buffer |
+| 1401-1700 | `textiowrapper_tell`, `textiowrapper_seek` | Position encoding for multibyte codecs |
+| 1701-3200 | type object, properties | `PyTextIOWrapper_Type`, `line_buffering`, `encoding` |
+
+## Reading
+
+### Codec initialization and BOM handling
+
+`textiowrapper_init` calls `codecs.lookup(encoding)` to obtain an incremental
+encoder/decoder pair. For `"utf-8-sig"` and UTF-16 variants, it reads and discards the
+BOM on the first `read()` call by inspecting the first decoded characters.
+
+```c
+// CPython: Modules/_io/textio.c:230 textiowrapper_init
+static int
+textiowrapper_init(textio *self, PyObject *args, PyObject *kwds)
+{
+    ...
+    codec_info = _PyCodec_LookupTextEncoding(encoding, "codecs.open()");
+    self->decoder = PyObject_CallMethodObjArgs(codec_info,
+                                              _PyIO_str_incrementaldecoder,
+                                              errors_obj, NULL);
+    self->encoder = PyObject_CallMethodObjArgs(codec_info,
+                                              _PyIO_str_incrementalencoder,
+                                              errors_obj, NULL);
+```
+
+### Write path and `write_through`
+
+`textiowrapper_write` encodes the string argument using the incremental encoder and passes
+the resulting `bytes` to the underlying buffer. In `write_through` mode it immediately
+flushes the buffer layer, bypassing write coalescing.
+
+```c
+// CPython: Modules/_io/textio.c:460 textiowrapper_write_impl
+static PyObject *
+textiowrapper_write_impl(textio *self, PyObject *text)
+{
+    PyObject *b;
+    b = PyObject_CallMethodOneArg(self->encoder, _PyIO_str_encode, text);
+    ...
+    res = PyObject_CallMethodOneArg(self->buffer, _PyIO_str_write, b);
+    if (self->write_through) {
+        PyObject *flushed = PyObject_CallMethodNoArgs(self->buffer, _PyIO_str_flush);
+        ...
+    }
+```
+
+### `tell` and multibyte position encoding
+
+`TextIOWrapper.tell()` cannot simply return the underlying buffer's byte position, because
+a multibyte character may be split across a buffer boundary. The tell implementation
+encodes the pending decoded-but-not-yielded string, computes an offset within the codec
+decoder's state, and packs both into a single integer using `(byte_pos << 64) | decoder_state`.
+
+```c
+// CPython: Modules/_io/textio.c:1430 textiowrapper_tell
+static PyObject *
+textiowrapper_tell(textio *self, PyObject *args)
+{
+    ...
+    /* Pack: position = raw_pos * COOKIE_BASE + dec_flags * ... + ... */
+    position = _textiowrapper_set_decoded_chars(self, NULL);
+```
+
+## gopy notes
+
+Not yet ported. The Go equivalent for text I/O is `bufio.Scanner` and `bufio.NewReader`
+with `golang.org/x/text/encoding` codecs. A full `TextIOWrapper` port targeting
+`module/io/textio` is a significant undertaking because it requires the incremental codec
+protocol, the `tell`/`seek` cookie encoding, and newline translation.
+
+## CPython 3.14 changes
+
+3.14 added `TextIOWrapper.read1()` delegation to the underlying buffer. The `tell()` cookie
+format gained a version field to distinguish pre-3.14 cookies. Line buffering mode now
+flushes after every `\n` in the encoded byte stream rather than the decoded string.

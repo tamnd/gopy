@@ -1,0 +1,96 @@
+---
+title: Objects/namespaceobject.c
+description: "SimpleNamespace object: a thin wrapper around a dict that exposes its items as attributes, used by argparse and types.SimpleNamespace."
+cpython_path: Objects/namespaceobject.c
+cpython_version: "3.14"
+lines: 290
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Objects/namespaceobject.c`
+
+<CpyLink path="Objects/namespaceobject.c" />
+
+`Objects/namespaceobject.c` implements `types.SimpleNamespace`, a lightweight object whose
+attributes live in an internal `__dict__`. It is simpler than a full user-defined class
+because it has no `__slots__`, no inheritance chain beyond `object`, and no custom
+metaclass. `argparse.Namespace` is the most common caller in the standard library.
+
+## Map
+
+| Lines | Symbol | Role |
+| ----- | ------ | ---- |
+| 1-30 | `_PyNamespaceObject` | Struct with `PyObject_HEAD` and `ns_dict` |
+| 31-100 | `namespace_new`, `namespace_init` | Constructor accepting keyword arguments |
+| 101-160 | `namespace_getattro`, `namespace_setattro` | Attribute access via `ns_dict` |
+| 161-220 | `namespace_repr` | Repr using `ns_dict` items in insertion order |
+| 221-260 | `namespace_richcompare` | Equality via dict comparison |
+| 261-290 | `PyNamespace_Type` | Type object |
+
+## Reading
+
+### `namespace_init`: keyword-only construction
+
+`SimpleNamespace` accepts only keyword arguments. Each keyword becomes an attribute backed
+by an entry in `ns_dict`. Positional arguments raise `TypeError`.
+
+```c
+// CPython: Objects/namespaceobject.c:55 namespace_init
+static int
+namespace_init(PyObject *self, PyObject *args, PyObject *kwds)
+{
+    _PyNamespaceObject *ns = (_PyNamespaceObject *)self;
+    if (PyTuple_GET_SIZE(args) != 0) {
+        PyErr_SetString(PyExc_TypeError,
+                        "no positional arguments expected");
+        return -1;
+    }
+    if (kwds == NULL)
+        return 0;
+    return PyDict_Merge(ns->ns_dict, kwds, 1);
+}
+```
+
+### Attribute access through `ns_dict`
+
+`namespace_getattro` delegates to `PyObject_GenericGetAttr`, which looks in `ns_dict` as the
+instance dictionary. `namespace_setattro` calls `PyObject_GenericSetAttr`, also backed by
+`ns_dict`. There is no descriptor machinery beyond what `object` provides.
+
+```c
+// CPython: Objects/namespaceobject.c:120 namespace_getattro
+static PyObject *
+namespace_getattro(PyObject *self, PyObject *name)
+{
+    return PyObject_GenericGetAttr(self, name);
+}
+```
+
+### `namespace_repr`: ordered attribute display
+
+`repr(ns)` iterates `ns_dict` in insertion order and formats each key-value pair. It uses
+a `_PyUnicodeWriter` to build the result string efficiently.
+
+```c
+// CPython: Objects/namespaceobject.c:170 namespace_repr
+static PyObject *
+namespace_repr(PyObject *self)
+{
+    _PyNamespaceObject *ns = (_PyNamespaceObject *)self;
+    ...
+    /* format: namespace(key=value, ...) */
+```
+
+## gopy notes
+
+`types.SimpleNamespace` is partially covered by `objects/namespace.go` in gopy. The Go
+implementation wraps a `map[string]*Object` and exposes `GetAttr`/`SetAttr` backed by
+that map. The `namespace_repr` ordered output is not yet implemented; repr currently
+produces an unordered result.
+
+## CPython 3.14 changes
+
+3.14 added `__replace__` to `SimpleNamespace` (analogous to `dataclasses.replace`), allowing
+keyword-argument-based copy-with-overrides without subclassing.

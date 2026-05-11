@@ -1,0 +1,167 @@
+---
+title: Modules/_io/fileio.c
+description: "Raw unbuffered file I/O implementation backing Python's FileIO type."
+cpython_path: Modules/_io/fileio.c
+cpython_version: "3.14"
+lines: 1339
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Modules/_io/fileio.c`
+
+<CpyLink path="Modules/_io/fileio.c" />
+
+`fileio.c` implements `_io.FileIO`, the raw unbuffered file I/O class that sits at the bottom of Python's I/O stack. It wraps POSIX `open`/`read`/`write`/`lseek`/`close` (and their Win32 equivalents) in a `PyObject` whose `fd` field is the underlying file descriptor. The module was originally authored by Daniel Stutzbach. In CPython 3.14 the struct gained a `stat_atopen` field that caches `fstat` results at open time to accelerate `readall` sizing without additional syscalls.
+
+## Map
+
+| Lines | Symbol | Role |
+| ----- | ------ | ---- |
+| 65–84 | `fileio` (struct) | Per-object state: fd, mode flags, `stat_atopen`, weakref list |
+| 92–96 | `_PyFileIO_closed` | C-API predicate used by buffered layer |
+| 101–117 | `fileio_dealloc_warn` | Emits `ResourceWarning` for unclosed files |
+| 120–145 | `internal_close` | Releases fd and frees `stat_atopen`; called by close and dealloc |
+| 159–194 | `_io_FileIO_close_impl` | Python-visible `close()`: chains RawIOBase.close then `internal_close` |
+| 196–216 | `fileio_new` | `tp_new`: zeroes the struct, sets `fd=-1` |
+| 244–542 | `_io_FileIO___init___impl` | `__init__`: parses mode string, calls `open(2)`, stores `fstat` |
+| 543–601 | `fileio_finalize` / `fileio_dealloc` | GC finalization and dealloc path |
+| 602–703 | `_io_FileIO_readinto_impl` | Bounded read into a writable buffer via `_Py_read` |
+| 705–722 | `new_buffersize` | Amortized growth formula for `readall` buffer |
+| 736–862 | `_io_FileIO_readall_impl` | Read all remaining data; uses `stat_atopen` hint to pre-size buffer |
+| 863–910 | `_io_FileIO_read_impl` | Fixed-size `read(n)` delegating to `readall` when `n < 0` |
+| 925–953 | `_io_FileIO_write_impl` | Single `_Py_write` call; returns `None` on `EAGAIN` |
+| 957–1018 | `portable_lseek` | Cross-platform `lseek` wrapping Win32 `_lseeki64` |
+| 1037–1054 | `_io_FileIO_seek_impl` | Python-visible `seek()` |
+| 1055–1077 | `_io_FileIO_tell_impl` | `tell()` via `portable_lseek(pos=0, SEEK_CUR)` |
+| 1078–1142 | `_io_FileIO_truncate_impl` | `ftruncate`; Win32 uses `SetEndOfFile` |
+| 1143–1167 | `fileio_repr` | Returns `<_io.FileIO name=... mode=... closefd=...>` |
+| 1168–1247 | `fileio_getstate` / `fileio_setstate` | Pickle support via `__dict__` |
+| 1248–1339 | type slots, getsets, members, `PyType_Spec` | Type registration |
+
+## Reading
+
+### Object layout and the `stat_atopen` optimization
+
+The `fileio` struct holds the file descriptor plus a set of single-bit flags that encode the open mode. In 3.14 a new `stat_atopen` pointer was added to hold a heap-allocated copy of the `struct stat` captured immediately after `open(2)` succeeds.
+
+```c
+// CPython: Modules/_io/fileio.c:65 fileio
+typedef struct {
+    PyObject_HEAD
+    int fd;
+    unsigned int created : 1;
+    unsigned int readable : 1;
+    unsigned int writable : 1;
+    unsigned int appending : 1;
+    signed int seekable : 2; /* -1 means unknown */
+    unsigned int closefd : 1;
+    char finalizing;
+    struct _Py_stat_struct *stat_atopen;
+    PyObject *weakreflist;
+    PyObject *dict;
+} fileio;
+```
+
+`readall` consults `stat_atopen->st_size` to pre-allocate the result buffer in one shot rather than growing it incrementally. The comment in the code is careful to note that this is only a hint: TOCTOU races mean the file could change between open and read.
+
+### `__init__` and mode parsing
+
+`_io_FileIO___init___impl` at line 244 is the largest function in the file. It:
+
+1. Parses the mode string character by character, setting `rwa` and `plus` flags.
+2. Builds an `int flags` value for `open(2)` from those flags.
+3. Calls either the `opener` callable (if provided) or `open` directly.
+4. Validates the resulting fd with `fstat` and saves the result in `stat_atopen`.
+5. Sets `self->readable`, `self->writable`, `self->appending`, and `self->seekable`.
+
+The Win32 path uses `_wopen` with a `wchar_t *` name derived from the PyUnicode filename.
+
+```c
+// CPython: Modules/_io/fileio.c:244 _io_FileIO___init___impl
+static int
+_io_FileIO___init___impl(fileio *self, PyObject *nameobj, const char *mode,
+                         int closefd, PyObject *opener)
+```
+
+### `readall` and adaptive buffer sizing
+
+`_io_FileIO_readall_impl` (line 736) decides the initial buffer size using a three-way branch:
+
+- If `stat_atopen` is NULL or reports `st_size == 0`, use `SMALLCHUNK` (8 KiB) and grow on demand.
+- If `st_size` fits in `_PY_READ_MAX`, allocate `st_size + 1` bytes to allow the EOF-detection read without a resize.
+- For large files exceeding `LARGE_BUFFER_CUTOFF_SIZE` (64 KiB), call `lseek(SEEK_CUR)` to find the current position and shrink the allocation to `st_size - pos + 1`.
+
+The growth helper `new_buffersize` (line 705) doubles small buffers and adds one-eighth for buffers above the cutoff, giving amortized O(n) allocation.
+
+```c
+// CPython: Modules/_io/fileio.c:705 new_buffersize
+static size_t
+new_buffersize(fileio *self, size_t currentsize)
+{
+    size_t addend;
+    if (currentsize > LARGE_BUFFER_CUTOFF_SIZE)
+        addend = currentsize >> 3;
+    else
+        addend = 256 + currentsize;
+    if (addend < SMALLCHUNK)
+        addend = SMALLCHUNK;
+    return addend + currentsize;
+}
+```
+
+### `portable_lseek` and platform portability
+
+`portable_lseek` (line 957) is the single seek primitive used by `seek`, `tell`, and internally by `readall`. On Windows it calls `_lseeki64` to support files larger than 2 GB on a 32-bit build. The `suppress_pipe_error` flag lets `__init__` probe seekability on pipes (which return `ESPIPE`) without raising an exception.
+
+```c
+// CPython: Modules/_io/fileio.c:957 portable_lseek
+static PyObject *
+portable_lseek(fileio *self, PyObject *posobj, int whence,
+               bool suppress_pipe_error)
+```
+
+The seekability probe works by calling `portable_lseek(0, SEEK_CUR)` with `suppress_pipe_error=true` immediately after open. If it returns a non-negative value the file is seekable; otherwise `self->seekable` stays 0.
+
+### `internal_close` and resource cleanup
+
+`internal_close` (line 120) is the low-level fd release path shared by `close()` and `tp_finalize`. It sets `self->fd = -1` before the blocking `close(2)` call so a concurrent finalizer cannot double-close the same descriptor. It also calls `PyMem_Free(self->stat_atopen)` and NULLs the pointer.
+
+```c
+// CPython: Modules/_io/fileio.c:120 internal_close
+static int
+internal_close(fileio *self)
+{
+    int err = 0;
+    int save_errno = 0;
+    if (self->fd >= 0) {
+        int fd = self->fd;
+        self->fd = -1;
+        Py_BEGIN_ALLOW_THREADS
+        _Py_BEGIN_SUPPRESS_IPH
+        err = close(fd);
+        if (err < 0)
+            save_errno = errno;
+        _Py_END_SUPPRESS_IPH
+        Py_END_ALLOW_THREADS
+    }
+    PyMem_Free(self->stat_atopen);
+    self->stat_atopen = NULL;
+    ...
+}
+```
+
+## gopy notes
+
+- `stat_atopen` is a CPython 3.12+ optimization. A gopy port can initially leave it nil and always use the slow `readall` growth path.
+- `_Py_read` and `_Py_write` handle `EINTR` retry internally; a port should use equivalent retry logic around `syscall.Read` / `syscall.Write`.
+- `portable_lseek` maps to `syscall.Seek`; the `SEEK_SET/CUR/END` numeric values are stable across platforms.
+- The Win32 `_wopen` path and `_lseeki64` can be left as stubs behind `//go:build windows` tags initially.
+
+## CPython 3.14 changes
+
+- `stat_atopen` field added to the `fileio` struct (gh-109523, gh-121941). `readall` now uses the cached stat size to pre-size the output buffer and avoids an extra `lseek` for small files.
+- `LARGE_BUFFER_CUTOFF_SIZE` constant (65536) introduced alongside `stat_atopen` to gate the position-aware buffer shrinkage.
+- `fileio_dealloc_warn` now calls `PyErr_FormatUnraisable` instead of `PyErr_WriteUnraisable` for richer shutdown diagnostics.
+- `FT_CLEAR_WEAKREFS` macro adopted in the dealloc path as free-threading preparation.
