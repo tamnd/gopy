@@ -15,6 +15,17 @@ import "sync/atomic"
 type Header struct {
 	refcnt atomic.Int64
 	typ    *Type
+
+	// weakrefs is the per-object doubly-linked list of weak references
+	// pointing at this object. CPython stores the head pointer at the
+	// type-configured tp_weaklistoffset inside the instance; gopy keeps
+	// the head + its lock together in a heap-allocated weakrefList so
+	// types do not have to opt-in: every Object can be weakref'd. The
+	// pointer stays nil for the common case where nothing ever creates
+	// a weak reference, so the cost is one word per object.
+	//
+	// CPython: Include/cpython/typeobject.h tp_weaklistoffset
+	weakrefs *weakrefList
 }
 
 // VarHeader extends Header with ob_size for variable-length builtins

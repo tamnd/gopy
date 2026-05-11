@@ -26,8 +26,12 @@ type WeakProxy struct {
 
 	mu       sync.Mutex
 	referent Object
-	callback Object
+	callback Object // nil when no callback was provided
 	callable bool
+
+	// entry is the back-pointer into the referent's weakref list,
+	// kept so Clear can detach in O(1). nil after Clear.
+	entry *weakrefEntry
 }
 
 // WeakProxyType is the type singleton for weakref.ProxyType.
@@ -79,9 +83,47 @@ func NewWeakCallableProxy(referent, callback Object) *WeakProxy {
 }
 
 func newWeakProxy(referent, callback Object, callable bool) *WeakProxy {
-	if callback == nil {
-		callback = None()
+	// Route through the unified C-API path so the proxy is registered
+	// in the referent's weakref list. The caller has already chosen
+	// the callable variant; we just override the kind selection that
+	// PyWeakref_NewProxy does by routing through allocateWeakProxy +
+	// list insert directly when the requested kind disagrees with
+	// the referent's actual callability.
+	if referent == nil {
+		// Match CPython behavior: NewWeakProxy(NULL, ...) raises.
+		// Callers in v0.10 sometimes pass through nil; keep the
+		// legacy shape (return an empty proxy with no list entry)
+		// so existing tests do not have to handle errors here.
+		p := allocateWeakProxy(nil, callback, callable)
+		return p
 	}
+	if cb := callback; cb == None() {
+		callback = nil
+	}
+	list := getOrCreateWeakrefList(referent)
+	kind := weakrefKindProxy
+	if callable {
+		kind = weakrefKindCallableProxy
+	}
+	list.mu.Lock()
+	if callback == nil {
+		if cand := tryReuseBasicRefLocked(list, kind); cand != nil {
+			list.mu.Unlock()
+			return cand.proxy
+		}
+	}
+	p := allocateWeakProxy(referent, callback, callable)
+	insertEntryLocked(list, &weakrefEntry{proxy: p}, nil, p)
+	list.mu.Unlock()
+	armWeakrefFinalizer(referent)
+	return p
+}
+
+// allocateWeakProxy builds a bare WeakProxy. The caller links it
+// into the referent's weakref list under the list mutex.
+//
+// CPython: Objects/weakrefobject.c:400 allocate_weakref (proxy variant)
+func allocateWeakProxy(referent, callback Object, callable bool) *WeakProxy {
 	p := &WeakProxy{referent: referent, callback: callback, callable: callable}
 	if callable {
 		p.init(WeakCallableProxyType)
@@ -101,26 +143,44 @@ func (p *WeakProxy) Referent() Object {
 	return p.referent
 }
 
-// Callback returns the registered callback (or None).
+// Callback returns the registered callback (or None when no
+// callback was installed).
 func (p *WeakProxy) Callback() Object {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	if p.callback == nil {
+		return None()
+	}
 	return p.callback
 }
 
 // Clear drops the referent. Returns the callback for the caller to
 // invoke, or None when no callback was installed. Idempotent.
 //
-// CPython: Objects/weakrefobject.c:107 clear_weakref
+// CPython: Objects/weakrefobject.c:79 clear_weakref_lock_held
 func (p *WeakProxy) Clear() Object {
 	p.mu.Lock()
-	defer p.mu.Unlock()
-	if p.referent == nil {
+	r := p.referent
+	cb := p.callback
+	entry := p.entry
+	if r == nil {
+		p.mu.Unlock()
 		return None()
 	}
 	p.referent = nil
-	cb := p.callback
-	p.callback = None()
+	p.callback = nil
+	p.entry = nil
+	p.mu.Unlock()
+	if entry != nil && r != nil {
+		if list := r.Hdr().weakrefs; list != nil {
+			list.mu.Lock()
+			detachLocked(entry, list)
+			list.mu.Unlock()
+		}
+	}
+	if cb == nil {
+		return None()
+	}
 	return cb
 }
 

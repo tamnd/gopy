@@ -35,7 +35,7 @@ func TestInittabHasSys(t *testing.T) {
 // to registry.go means adding its name here; the test fails loudly
 // on a mismatch.
 func TestInittabSnapshotIncludesAll(t *testing.T) {
-	want := []string{"gc", "_contextvars", "sys"}
+	want := []string{"gc", "_contextvars", "sys", "_weakref"}
 	have := map[string]bool{}
 	for _, e := range imp.InittabSnapshot() {
 		have[e.Name] = true

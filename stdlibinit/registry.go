@@ -82,4 +82,12 @@ import (
 	_ "github.com/tamnd/gopy/module/traceback"
 	_ "github.com/tamnd/gopy/module/warnings"
 	_ "github.com/tamnd/gopy/module/weakref"
+
+	// Built-in module: _weakref. Registers itself via
+	// module/_weakref/module.go init(). Ports Modules/_weakref.c,
+	// publishing ref / ProxyType / CallableProxyType plus the four
+	// module functions getweakrefcount, _remove_dead_weakref,
+	// getweakrefs, proxy.
+	// CPython: Modules/config.c.in:49 {"_weakref", PyInit__weakref}
+	_ "github.com/tamnd/gopy/module/_weakref"
 )
