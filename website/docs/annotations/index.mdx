@@ -1,0 +1,49 @@
+---
+title: Annotations
+description: Line-by-line annotated reading of CPython 3.14 source.
+---
+
+# Annotations
+
+A line-referenced reading guide to CPython 3.14. Every file in the
+subsystems gopy ports has its own page. Each page walks the source top
+to bottom and cites line ranges, so a reader can land on any function,
+struct, or macro and get an explanation that matches the source byte
+for byte.
+
+The goal is total coverage: every file we care about, every line of code.
+
+## What is annotated
+
+* `Parser/`: 10 files, ~43k lines.
+* `Python/`: 114 files, ~166k lines.
+* `Objects/`: 46 files, ~119k lines.
+* `Include/`: public headers and `internal/`.
+* `Modules/`: the entries gopy ports (not all 116).
+* `Lib/`: pure-Python stdlib gopy ships.
+
+Out of scope: build glue, platform-specific stubs, generated files
+where the generator is the canonical source.
+
+## How the pages work
+
+Each page carries frontmatter that pins the CPython revision
+(`cpython_version: "3.14"`), the source path, the line count, and the
+gopy port target. The body has a **Map** table (line range, symbol,
+role, gopy counterpart) followed by **Reading** sections in source
+order. Citations from Go code in the [gopy pillar](../gopy/) point
+into these pages, so renames in CPython are absorbed in one place.
+
+## Reading order
+
+* [`Parser/`](parser/): tokenizer and PEG parser.
+* [`Python/`](python/): compiler, eval loop, GIL, GC, imports.
+* [`Objects/`](objects/): the built-in type catalogue.
+* [`Include/`](include/): the public C API and internal headers.
+* [`Modules/`](modules/): C-implemented modules.
+* [`Lib/`](lib/): pure-Python stdlib.
+
+## Status
+
+This is a long-running effort. Per-subsystem progress lives in
+spec 1913 under `~/notes/Spec/1900/`.

@@ -1,0 +1,37 @@
+---
+title: umonitor
+description: gopy's monitor subsystem. Mirrors CPython's design.
+---
+
+# umonitor
+
+This page describes how gopy implements **monitor**. The design follows
+CPython page-for-page. For the upstream reference see
+[`cpython/monitor`](../cpython/monitor).
+
+## Source map
+
+The Go code lives at the module root in flat packages.
+
+| Package        | Role                                                  |
+| -------------- | ----------------------------------------------------- |
+| (TBD)          | Mirror of the matching CPython source file.           |
+
+## Differences from CPython
+
+```
+Notes on places where gopy intentionally diverges from CPython.
+```
+
+* Go's GC owns memory. There is no `Py_INCREF` / `Py_DECREF`.
+* Bytecode layout, opcodes, and error messages match CPython 3.14 byte for byte.
+* Goroutines back the C threads model where it shows through.
+
+## Status
+
+See the [status table](../manual/status) for which functions in this subsystem are ported and which are pending.
+
+## Cross reference
+
+* CPython companion: [cpython/monitor](../cpython/monitor).
+* Spec: see `~/notes/Spec/1700/` for the port spec covering this subsystem.

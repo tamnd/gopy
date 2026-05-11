@@ -1,0 +1,125 @@
+---
+title: Types
+description: Catalogue of built-in types and their layouts.
+---
+
+# Types
+
+Every built-in type has a dedicated file under `Objects/`. The
+files share a structure: struct definition, allocator, slot
+implementations, method table, type object.
+
+## The catalogue
+
+| Type        | File                          | Notes                                            |
+| ----------- | ----------------------------- | ------------------------------------------------ |
+| `int`       | `Objects/longobject.c`        | Arbitrary precision. Small int cache for -5..256. |
+| `float`     | `Objects/floatobject.c`       | IEEE-754 binary64. Free-list backed.             |
+| `bool`      | `Objects/boolobject.c`        | Singletons. Subclass of `int`.                   |
+| `complex`   | `Objects/complexobject.c`     | Pair of doubles.                                 |
+| `str`       | `Objects/unicodeobject.c`     | UCS-1 / UCS-2 / UCS-4 kinded storage (PEP 393).  |
+| `bytes`     | `Objects/bytesobject.c`       | Immutable byte string. Free-list backed.         |
+| `bytearray` | `Objects/bytearrayobject.c`   | Mutable, exposes the buffer protocol.            |
+| `tuple`     | `Objects/tupleobject.c`       | Immutable, hashable. Free list for short tuples. |
+| `list`      | `Objects/listobject.c`        | Growable, over-allocates on append.              |
+| `dict`      | `Objects/dictobject.c`        | Open-addressed, combined / split layout.         |
+| `set`       | `Objects/setobject.c`         | Open-addressed.                                  |
+| `frozenset` | `Objects/setobject.c`         | Immutable variant of `set`.                      |
+| `range`     | `Objects/rangeobject.c`       | Lazy integer iteration.                          |
+| `slice`     | `Objects/sliceobject.c`       | `start`, `stop`, `step`.                         |
+| `enumerate` | `Objects/enumobject.c`        | Iterator wrapper.                                |
+| `zip`       | `Objects/iterobject.c`        | Iterator wrapper.                                |
+| `map`       | `Objects/iterobject.c`        | Iterator wrapper.                                |
+| `filter`    | `Objects/iterobject.c`        | Iterator wrapper.                                |
+| `function`  | `Objects/funcobject.c`        | A code object plus globals plus defaults.        |
+| `method`    | `Objects/classobject.c`       | A function bound to an instance.                 |
+| `module`    | `Objects/moduleobject.c`      | A namespace plus a `__name__`, `__file__`, ...   |
+| `cell`      | `Objects/cellobject.c`        | Closure cell. Holds one `PyObject *`.            |
+| `code`      | `Objects/codeobject.c`        | Compiled bytecode plus pools.                    |
+| `generator` | `Objects/genobject.c`         | Suspendable frame.                               |
+| `coroutine` | `Objects/genobject.c`         | Awaitable suspendable frame.                     |
+| `async_gen` | `Objects/genobject.c`         | Async generator.                                 |
+| `type`      | `Objects/typeobject.c`        | Metaclass. Builds new classes.                   |
+| `super`     | `Objects/typeobject.c`        | MRO-aware proxy.                                 |
+| `MappingProxy` | `Objects/descrobject.c`    | Read-only view over a dict.                      |
+| `staticmethod` / `classmethod` | `Objects/funcobject.c` | Descriptors.                       |
+| `property`  | `Objects/descrobject.c`       | Data descriptor with `fget`, `fset`, `fdel`.     |
+
+## Highlights
+
+### `str`
+
+PEP 393 packs a string into the narrowest kind that fits all of
+its code points. ASCII goes into one byte each; Latin-1 also fits;
+BMP fits two-byte; full Unicode fits four-byte. A string can also
+be "compact", meaning the body is inlined right after the header
+without an external buffer.
+
+Concatenation that fits the same kind reuses the kind; widening
+forces a copy.
+
+### `int`
+
+Stored as a vector of 30-bit digits (`PyLong_BASE = 2^30`).
+Small ints from `-5` to `256` are cached at startup; every Python
+program shares the same `int(0)` object. Big ints go through a
+schoolbook multiplication up to a threshold, then switch to
+Karatsuba.
+
+### `dict`
+
+Two physical layouts share the same Python type:
+
+* **Combined.** A single `PyDictKeysObject` with `(key, value)`
+  pairs interleaved with a hash-probe sequence. The default for
+  most dicts.
+* **Split.** The keys live in a shared `PyDictKeysObject` and each
+  instance has its own values array. Used for instance
+  dictionaries when every instance has the same key set
+  (typical of `__init__`-shaped classes).
+
+Both layouts carry a `dk_version` that the watcher mechanism
+keys off.
+
+### `list`
+
+Stored as a struct with `ob_item` (the data pointer) and
+`allocated` (the capacity). Append over-allocates by roughly
+`size + (size >> 3)`, giving an amortised O(1) append.
+
+### `tuple`
+
+Hashable. Short tuples (length 1 through 20) come from a per-size
+free list to avoid malloc on common cases.
+
+### `set` / `frozenset`
+
+Open-addressed hash sets, probed with the same linear-then-perturb
+sequence as `dict`. They share `PyHashTable` infrastructure.
+
+### `function`
+
+A `PyFunctionObject` is the runtime callable that wraps a code
+object. It holds:
+
+* `func_code` -- the code object.
+* `func_globals` -- the module's `__dict__`.
+* `func_defaults` -- the tuple of positional defaults.
+* `func_kwdefaults` -- the dict of keyword-only defaults.
+* `func_closure` -- the tuple of cells for free variables.
+* `func_doc`, `func_name`, `func_qualname`, `func_module`.
+
+`function.__get__` builds a bound method. Calls go through
+`function_call` which sets up a frame and enters the eval loop.
+
+### `type`
+
+`type` is its own metaclass. `type.__call__` allocates an instance,
+calls `__new__`, then `__init__`. Subclassing in Python compiles
+to `LOAD_BUILD_CLASS` followed by `CALL`, where `__build_class__`
+sets up the class body and calls the metaclass.
+
+## Reading order
+
+[GC](gc) is next: how the cycle collector handles the types whose
+slots can form reference cycles.

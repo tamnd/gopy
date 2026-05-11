@@ -1,0 +1,222 @@
+---
+title: Python/symtable.c
+description: Two-pass symbol analysis. Builds a tree of PySTEntryObject per scope, then resolves each name to LOCAL, FREE, CELL, or GLOBAL.
+cpython_path: Python/symtable.c
+cpython_version: "3.14"
+lines: 3266
+status: annotated
+ported_to: symtable/
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Python/symtable.c`
+
+<CpyLink path="Python/symtable.c" />
+
+Symbol analysis. Runs after the parser and before the compiler. Two
+passes: a first pass walks every AST node and records every name with
+its bind/use flags into a tree of `PySTEntryObject` (one entry per
+lexical block); a second pass walks the tree top-down and resolves
+each name's *scope* (LOCAL, CELL, FREE, GLOBAL_EXPLICIT,
+GLOBAL_IMPLICIT). The output is consumed by [`compile.c`](compile),
+which uses `ste_symbols` and the resolved scopes to pick load and
+store opcodes.
+
+The block types are `ModuleBlock`, `FunctionBlock`, `ClassBlock`,
+`AnnotationBlock`, `TypeVariableBlock`, `TypeAliasBlock`,
+`TypeParametersBlock`, and the comprehension blocks. Comprehensions
+have their own block because by default they get a private scope; the
+inline-comprehension optimisation (PEP 709) bypasses that at compile
+time but the symtable still builds the nested entry.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Python/symtable.c" lines="93-180">93-180</Cpy>     | `ste_new` / `ste_repr` | Construct and print a `PySTEntryObject`. | `symtable/entry.go` |
+| <Cpy path="Python/symtable.c" lines="182-251">182-251</Cpy>   | `ste_dealloc` / type slot table | `PySTEntry_Type` definition. | `symtable/entry.go` |
+| <Cpy path="Python/symtable.c" lines="284-385">284-385</Cpy>   | `_dump_symtable` / `dump_symtable` | Debug printer (`PYTHONDUMPSYMTABLE`). | `symtable/dump.go` |
+| <Cpy path="Python/symtable.c" lines="387-492">387-492</Cpy>   | `symtable_new` / `_PySymtable_Build` | First-pass driver: per-module entry plus AST walk. | `symtable/build.go` |
+| <Cpy path="Python/symtable.c" lines="493-534">493-534</Cpy>   | `_PySymtable_Free` / `_PySymtable_Lookup` / `LookupOptional` | Lifetime and lookups by AST key pointer. | `symtable/api.go` |
+| <Cpy path="Python/symtable.c" lines="535-575">535-575</Cpy>   | `_PyST_GetSymbol` / `_PyST_GetScope` / `_PyST_IsFunctionLike` | Public accessors used by `compile.c`. | `symtable/query.go` |
+| <Cpy path="Python/symtable.c" lines="576-664">576-664</Cpy>   | `error_at_directive` | `global`/`nonlocal` directive error helper. | `symtable/errors.go` |
+| <Cpy path="Python/symtable.c" lines="666-911">666-911</Cpy>   | `analyze_name` / `is_free_in_any_child` / `inline_comprehension` | Per-name scope decision. | `symtable/analyze_name.go` |
+| <Cpy path="Python/symtable.c" lines="913-1125">913-1125</Cpy> | `analyze_cells` / `drop_class_free` / `update_symbols` | Resolve cell vars; rewrite child symbol flags. | `symtable/cells.go` |
+| <Cpy path="Python/symtable.c" lines="1126-1368">1126-1368</Cpy>| `analyze_block` / `analyze_child_block` | Second-pass recursion. | `symtable/analyze_block.go` |
+| <Cpy path="Python/symtable.c" lines="1369-1400">1369-1400</Cpy>| `symtable_analyze` | Second-pass entry, called from `_PySymtable_Build`. | `symtable/build.go:analyze` |
+| <Cpy path="Python/symtable.c" lines="1401-1478">1401-1478</Cpy>| `symtable_enter_block` / `exit_block` | First-pass scope stack. | `symtable/stack.go` |
+| <Cpy path="Python/symtable.c" lines="1479-1591">1479-1591</Cpy>| `symtable_lookup` / `symtable_add_def_helper` | Add or update a flag bit on a name. | `symtable/stack.go` |
+| <Cpy path="Python/symtable.c" lines="1592-1700">1592-1700</Cpy>| `check_name` / `check_keywords` / `check_kwd_patterns` | Reject `*`, `**`, and keyword-only patterns named like keywords. | `symtable/checks.go` |
+| 1700-3266 (rest) | `symtable_visit_stmt` / `symtable_visit_expr` / ... | The first-pass AST walker, one branch per node kind. | `symtable/visit_*.go` |
+
+## Reading
+
+### Building the tree (lines 413 to 492)
+
+<CpyLink path="Python/symtable.c" lines="413-492" />
+
+```c
+struct symtable *
+_PySymtable_Build(mod_ty mod, PyObject *filename, _PyFutureFeatures *future)
+{
+    struct symtable *st = symtable_new();
+    ...
+    st->st_filename = Py_NewRef(filename);
+    st->st_future = future;
+
+    /* Make the initial symbol information gathering pass */
+
+    if (!symtable_enter_block(st, &_Py_ID(top), ModuleBlock, (void *)mod, 0, 0, 0, 0)) {
+        _PySymtable_Free(st);
+        return NULL;
+    }
+    st->st_top = st->st_cur;
+    switch (mod->kind) {
+    case Module_kind:
+        ...
+        VISIT_SEQ(st, stmt, mod->v.Module.body);
+        break;
+    ...
+    }
+    if (!symtable_exit_block(st)) {
+        _PySymtable_Free(st);
+        return NULL;
+    }
+    /* Make the second symbol analysis pass */
+    if (symtable_analyze(st)) {
+        return st;
+    }
+    _PySymtable_Free(st);
+    return NULL;
+}
+```
+
+The top entry is created with the dummy name `top` and keyed by the
+`mod_ty` pointer itself, which is how `_PySymtable_Lookup` later
+finds it from the compiler. Every other entry is keyed by the AST
+node pointer of its defining construct (the `FunctionDef` node, the
+`Lambda`, the `ListComp`, and so on). Reusing the AST pointer means
+the compiler does not have to thread a separate symtable index
+through codegen: every node that introduces a scope already carries
+the key the symtable was indexed under.
+
+### Per-block analysis (lines 1131 to 1324)
+
+<CpyLink path="Python/symtable.c" lines="1131-1324" />
+
+```c
+static int
+analyze_block(PySTEntryObject *ste, PyObject *bound, PyObject *free,
+              PyObject *global, PyObject *type_params,
+              PySTEntryObject *class_entry)
+{
+    ...
+    local = PySet_New(NULL);
+    scopes = PyDict_New();
+    newglobal = PySet_New(NULL);
+    newfree = PySet_New(NULL);
+    newbound = PySet_New(NULL);
+    inlined_cells = PySet_New(NULL);
+
+    if (ste->ste_type == ClassBlock) {
+        /* Pass down known globals */
+        temp = PyNumber_InPlaceOr(newglobal, global);
+        ...
+        if (bound) {
+            temp = PyNumber_InPlaceOr(newbound, bound);
+            ...
+        }
+    }
+
+    while (PyDict_Next(ste->ste_symbols, &pos, &name, &v)) {
+        long flags = PyLong_AsLong(v);
+        ...
+        if (!analyze_name(ste, scopes, name, flags,
+                          bound, local, free, global, type_params, class_entry))
+            goto error;
+    }
+    ...
+}
+```
+
+`analyze_block` is invoked once per scope, top-down from the module.
+It receives four sets: `bound` (names bound in any enclosing
+function), `free` (names referenced as free in this subtree),
+`global` (names declared global anywhere above), and `type_params`
+(PEP 695 type parameter names). Each name in the current block is
+fed to `analyze_name`, which writes the final scope to the `scopes`
+dict. After all locals are classified, the function recurses into
+child blocks with updated `bound`/`free` sets and finally calls
+`update_symbols` to rewrite this block's flags so the compiler sees
+the resolved scope instead of just the source-level flags.
+
+The `ClassBlock` branch is the well-known oddity: class scope does
+not contribute to enclosing-function name resolution, so
+`newbound`/`newglobal` are pre-populated with the caller's `bound`
+and `global` rather than gaining the class's locals. That is why a
+method body cannot see its class-level names without `cls.` or
+`self.`.
+
+### Per-name resolution (lines 666 to 784)
+
+<CpyLink path="Python/symtable.c" lines="666-784" />
+
+`analyze_name` follows a fixed precedence order:
+
+1. `DEF_GLOBAL` or `DEF_NONLOCAL` directives are honoured first;
+   conflicts (`global x` then `nonlocal x` in the same block) raise.
+2. If the name is bound here, the scope is LOCAL (or CELL if a child
+   block references it).
+3. If the name is bound in an enclosing function and used here, the
+   scope is FREE in this block and the enclosing scope's symbol gets
+   the CELL bit added via `update_symbols` in the next pass.
+4. Otherwise the scope is GLOBAL_IMPLICIT (or GLOBAL_EXPLICIT if
+   `DEF_GLOBAL` was set).
+
+PEP 695 type parameter names use a fourth bucket via the
+`type_params` set; they resolve as LOCAL inside the
+`TypeParametersBlock` and as FREE in the function or class they
+parameterise.
+
+### Inlined comprehensions (lines 802 to 911)
+
+<CpyLink path="Python/symtable.c" lines="802-911" />
+
+`inline_comprehension` runs from `analyze_block` when the symtable
+decides a comprehension can be hoisted into its enclosing function.
+It merges the comprehension's locals into the parent block's symbol
+table, marking each merged name with `DEF_COMP_CELL` so the compiler
+knows to allocate a cell rather than a fast local. The decision is
+gated by:
+
+* No `yield` or `await` inside the comprehension.
+* No assignment expressions writing to a name bound in the parent.
+* The parent is a function-like block.
+
+Failing any of those leaves the comprehension as its own scope.
+
+## Notes for the gopy mirror
+
+* `symtable/build.go` mirrors `_PySymtable_Build` with the same
+  two-pass shape. The AST walker is split per node kind into
+  `symtable/visit_stmt.go` and `symtable/visit_expr.go`.
+* The set operations (`PyNumber_InPlaceOr` over PySet) become Go
+  `map[string]struct{}` unions; the algorithmic shape is preserved.
+* The implicit cells `__class__`, `__classdict__`,
+  `__conditional_annotations__` are marked here, not in compile/.
+  gopy follows the same split.
+
+## CPython 3.14 changes worth noting
+
+* `TypeVariableBlock` / `TypeParametersBlock` / `TypeAliasBlock`
+  (introduced in 3.12 for PEP 695) are now stable; the `type_params`
+  argument to `analyze_block` threads through every recursion.
+* The `ste_has_conditional_annotations` flag is new in 3.14 for
+  PEP 649 deferred annotations; the symtable sets it whenever an
+  annotation appears under a conditional (`if TYPE_CHECKING:` etc.)
+  so the compiler knows to allocate the
+  `__conditional_annotations__` cell.
+* Match-statement patterns can now declare captures inside `class`
+  patterns; the relevant `check_kwd_patterns` rejects keyword
+  arguments named after soft keywords reserved by `match`.

@@ -1,0 +1,217 @@
+---
+title: Parser/pegen.c
+description: PEG parser runtime. Memo table, token feed, top-level entry points, two-pass error recovery.
+cpython_path: Parser/pegen.c
+cpython_version: "3.14"
+lines: 1083
+status: annotated
+ported_to: parser/pegen/
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Parser/pegen.c`
+
+<CpyLink path="Parser/pegen.c" />
+
+Runtime for the generated PEG parser at `Parser/parser.c`. Every grammar
+rule produced by `Tools/peg_generator/` calls into this file. The file
+covers six concerns: packrat memoisation, token buffering, keyword
+classification, lookahead helpers, the `Parser` lifecycle, and the
+two-pass error-recovery driver.
+
+## Map
+
+| Lines | Symbol | Role |
+| ----- | ------ | ---- |
+| <Cpy path="Parser/pegen.c" lines="17-23">17-23</Cpy>      | `_PyPegen_interactive_exit`         | REPL hook for `^D`. |
+| <Cpy path="Parser/pegen.c" lines="26-77">26-77</Cpy>      | `_PyPegen_byte_offset_to_character_offset*` | Byte to character offsets for error messages. |
+| <Cpy path="Parser/pegen.c" lines="80-93">80-93</Cpy>      | `_PyPegen_insert_memo`              | Prepend a `Memo` onto a token's memo list. |
+| <Cpy path="Parser/pegen.c" lines="96-109">96-109</Cpy>    | `_PyPegen_update_memo`              | Update existing memo entry or insert. |
+| <Cpy path="Parser/pegen.c" lines="112-123">112-123</Cpy>  | `init_normalization`                | Lazy import of `unicodedata.normalize`. |
+| <Cpy path="Parser/pegen.c" lines="125-159">125-159</Cpy>  | `growable_comment_array_*`          | Type-comment stash. |
+| <Cpy path="Parser/pegen.c" lines="162-178">162-178</Cpy>  | `_get_keyword_or_name_type`         | NAME vs keyword classification. |
+| <Cpy path="Parser/pegen.c" lines="244-309">244-309</Cpy>  | `_PyPegen_fill_token`               | Pull the next token from the lexer. |
+| <Cpy path="Parser/pegen.c" lines="349-390">349-390</Cpy>  | `_PyPegen_is_memoized`              | Probe the memo table. |
+| <Cpy path="Parser/pegen.c" lines="392-410">392-410</Cpy>  | `LOOKAHEAD1` / `LOOKAHEAD2`         | Generic lookahead helpers. |
+| <Cpy path="Parser/pegen.c" lines="412-462">412-462</Cpy>  | `_PyPegen_expect_token`             | Match next token by type. |
+| <Cpy path="Parser/pegen.c" lines="464-486">464-486</Cpy>  | `_PyPegen_expect_soft_keyword`      | Match `match`, `case`, `type`. |
+| <Cpy path="Parser/pegen.c" lines="502-570">502-570</Cpy>  | `_PyPegen_new_identifier`           | Build interned NFKC-normalised NAME. |
+| <Cpy path="Parser/pegen.c" lines="572-620">572-620</Cpy>  | `_PyPegen_name_from_token`          | Wrap a NAME token in a `Name` AST node. |
+| <Cpy path="Parser/pegen.c" lines="622-694">622-694</Cpy>  | `parsenumber*` / `_PyPegen_number_token` | Numeric literal parsing. |
+| <Cpy path="Parser/pegen.c" lines="754-778">754-778</Cpy>  | `bad_single_statement`              | `single_input` multi-statement diagnostic. |
+| <Cpy path="Parser/pegen.c" lines="780-865">780-865</Cpy>  | `compute_parser_flags`              | Compose parser flags from compiler flags. |
+| <Cpy path="Parser/pegen.c" lines="867-878">867-878</Cpy>  | `_PyPegen_Parser_Free`              | Tear down the parser. |
+| <Cpy path="Parser/pegen.c" lines="879-945">879-945</Cpy>  | `reset_parser_state_for_error_pass` | Reset memo and marks for the second pass. |
+| <Cpy path="Parser/pegen.c" lines="947-994">947-994</Cpy>  | `_PyPegen_run_parser`               | Drive the two-pass parse. |
+| <Cpy path="Parser/pegen.c" lines="996-1042">996-1042</Cpy>| `_PyPegen_run_parser_from_file_pointer` | Top-level file entry. |
+| <Cpy path="Parser/pegen.c" lines="1044-1083">1044-1083</Cpy>| `_PyPegen_run_parser_from_string` | Top-level string entry. |
+
+## Reading
+
+### The memo table (lines 80 to 109)
+
+<CpyLink path="Parser/pegen.c" lines="80-109" />
+
+```c
+int
+_PyPegen_insert_memo(Parser *p, int mark, int type, void *node)
+{
+    Memo *m = _PyArena_Malloc(p->arena, sizeof(Memo));
+    if (m == NULL) {
+        return -1;
+    }
+    m->type = type;
+    m->node = node;
+    m->mark = p->mark;
+    m->next = p->tokens[mark]->memo;
+    p->tokens[mark]->memo = m;
+    return 0;
+}
+```
+
+The `Memo` struct (declared in `pegen.h`) lives in the per-parser
+arena and is keyed by rule type. Each `Token` owns a singly linked
+list of memos. When the generated parser enters rule `R` at token
+position `mark` it calls `_PyPegen_is_memoized`; on a hit the cached
+node is returned and `p->mark` advances to the cached value. On a miss
+the rule runs, then `_PyPegen_insert_memo` or `_PyPegen_update_memo`
+records the result. The linked-list-per-token shape is chosen over a
+global hash because the memo lifetime tracks the token lifetime
+naturally.
+
+### Token feed (lines 244 to 309)
+
+<CpyLink path="Parser/pegen.c" lines="244-309" />
+
+`_PyPegen_fill_token` pulls one token from `_PyTokenizer_Get` into
+`p->tokens[]`. The buffer grows geometrically when full. Comments are
+discarded (the parser never sees `COMMENT`); `TYPE_COMMENT` tokens are
+stashed in `p->type_ignore_comments`. NAME tokens get their keyword
+classification applied here via `_get_keyword_or_name_type`
+(<Cpy path="Parser/pegen.c" lines="162-178">162-178</Cpy>), so `for`
+is `FOR` by the time the parser sees it.
+
+The keyword tables are indexed first by name length, then linearly
+searched on the matching bytes. The generator emits one table per
+length, NULL-terminated, which keeps both the memory and the inner
+loop tight:
+
+```c
+static int
+_get_keyword_or_name_type(Parser *p, struct token *new_token)
+{
+    Py_ssize_t name_len = new_token->end_col_offset - new_token->col_offset;
+    if (name_len >= p->n_keyword_lists ||
+        p->keywords[name_len] == NULL ||
+        p->keywords[name_len]->type == -1) {
+        return NAME;
+    }
+    for (KeywordToken *k = p->keywords[name_len]; k != NULL && k->type != -1; k++) {
+        if (strncmp(k->str, new_token->start, (size_t)name_len) == 0) {
+            return k->type;
+        }
+    }
+    return NAME;
+}
+```
+
+### Identifier construction (lines 502 to 570)
+
+<CpyLink path="Parser/pegen.c" lines="502-570" />
+
+Two concerns shape this function. The first is NFKC normalisation:
+identifiers with any non-ASCII characters are normalised through
+`unicodedata.normalize('NFKC', name)`, which is why `café` (composed)
+and `café` (decomposed) compare equal as identifiers. The second is
+interning. Every NAME PyUnicode object goes through
+`_PyUnicode_InternMortal`, which lets later `LOAD_GLOBAL` lookups
+compare by pointer rather than by string content. `init_normalization`
+(<Cpy path="Parser/pegen.c" lines="112-123">112-123</Cpy>) defers the
+`unicodedata` import until an identifier actually needs it, because
+most parses are pure ASCII.
+
+### Numeric literals (lines 622 to 694)
+
+<CpyLink path="Parser/pegen.c" lines="622-694" />
+
+Three thin layers. `parsenumber_raw` inspects the suffix and dispatches:
+`j` produces a complex, `.` or `e` produces a float, otherwise the
+prefix (`0x`, `0o`, `0b`, or none) selects an integer base.
+Underscores are stripped inline. `parsenumber` wraps the raw helper
+with an error-context string. `_PyPegen_number_token` reads the NUMBER
+token off the stream, decodes its bytes, and returns a `Constant` AST
+node holding the value.
+
+The integer paths bottom out in `_PyLong_FromString`, which has its
+own single-digit cache, so this file does not add a separate fast path
+for small ints.
+
+### The two-pass driver (lines 947 to 994)
+
+<CpyLink path="Parser/pegen.c" lines="947-994" />
+
+```c
+mod_ty
+_PyPegen_run_parser(Parser *p)
+{
+    void *res = _PyPegen_parse(p);
+    assert(p->level == 0);
+    if (res == NULL) {
+        if ((p->flags & PyPARSE_ALLOW_INCOMPLETE_INPUT) &&  _is_end_of_source(p)) {
+            PyErr_Clear();
+            return _PyPegen_raise_error(p, PyExc_IncompleteInputError, 0, "incomplete input");
+        }
+        if (PyErr_Occurred() && !PyErr_ExceptionMatches(PyExc_SyntaxError)) {
+            return NULL;
+        }
+        Token *last_token = p->tokens[p->fill - 1];
+        reset_parser_state_for_error_pass(p);
+        _PyPegen_parse(p);
+        _Pypegen_set_syntax_error(p, last_token);
+        if (PyErr_ExceptionMatches(PyExc_SyntaxError)) {
+            _PyPegen_set_syntax_error_metadata(p);
+        }
+        return NULL;
+    }
+    ...
+}
+```
+
+Three things to notice. The `PyPARSE_ALLOW_INCOMPLETE_INPUT` flag,
+set by the REPL, converts a parse failure at EOF into the dedicated
+`IncompleteInputError` exception so the REPL prompts for another line
+instead of raising. The second pass is gated by
+`reset_parser_state_for_error_pass`
+(<Cpy path="Parser/pegen.c" lines="879-945">879-945</Cpy>), which
+clears the memo table, resets `p->mark`, and sets
+`p->call_invalid_rules = 1`. That flag is what the generated parser
+tests in its `invalid_*` alternatives to enable the heavier diagnostic
+rules. The recovery pass is allowed to fail too;
+`_Pypegen_set_syntax_error` then constructs a `SyntaxError` from the
+error indicator and the failing token.
+
+In debug builds the successful tree is validated through
+`_PyAST_Validate` (<Cpy path="Parser/pegen.c" lines="982-991">982-991</Cpy>),
+which checks invariants the grammar cannot encode, such as
+"starred targets only inside tuples".
+
+### File and string entry points (lines 996 to 1083)
+
+<CpyLink path="Parser/pegen.c" lines="996-1083" />
+
+Two thin wrappers. Both build a `tok_state`, transfer ownership of the
+filename PyObject to the tokenizer, create a `Parser`, run it through
+`_PyPegen_run_parser`, and free both. The file variant additionally
+flips `tok->fp_interactive` when reading from `<stdin>` so the
+tokenizer emits the line-edit cues the REPL needs.
+
+## Notes for the gopy mirror
+
+`parser/pegen/runtime.go` mirrors `_PyPegen_run_parser` with the same
+two-pass structure; the `invalid_*` rules are present in
+`parser/parser_gen.go`. The `Memo` becomes a Go struct kept in a
+slice-per-token rather than a linked list; semantics are unchanged.
+NFKC normalisation goes through `golang.org/x/text/unicode/norm`.
+Name interning uses the `parser/intern` package, a single global
+string set.

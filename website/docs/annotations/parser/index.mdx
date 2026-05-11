@@ -1,0 +1,49 @@
+---
+title: Parser/
+description: Annotations for CPython 3.14 Parser/ source files.
+---
+
+# `Parser/`
+
+The tokenizer and PEG parser. Source for CPython 3.14 lives at
+`cpython/Parser/`. The directory has three layers:
+
+* **`tokenizer/`**: input adapters (file, string, readline, utf-8).
+* **`lexer/`**: the state machine that turns characters into tokens.
+* **`pegen.c` / `parser.c` / `action_helpers.c`**: the PEG parser
+  itself. `parser.c` is generated from `Grammar/python.gram` by
+  `Tools/peg_generator/`.
+
+## File inventory
+
+| File | Lines | Page | gopy port |
+| ---- | ----- | ---- | --------- |
+| `Parser/lexer/lexer.c` | 1635 | [lexer](lexer) | `parser/lexer/` |
+| `Parser/lexer/state.c` | 151 | (pending) | `parser/lexer/state.go` |
+| `Parser/lexer/buffer.c` | 76 | (pending) | `parser/lexer/buffer.go` |
+| `Parser/tokenizer/file_tokenizer.c` | 493 | (pending) | `parser/tokenizer/` |
+| `Parser/tokenizer/helpers.c` | 581 | (pending) | `parser/tokenizer/` |
+| `Parser/tokenizer/string_tokenizer.c` | 148 | (pending) | `parser/tokenizer/` |
+| `Parser/tokenizer/utf8_tokenizer.c` | 55 | (pending) | `parser/tokenizer/` |
+| `Parser/tokenizer/readline_tokenizer.c` | 134 | (pending) | n/a |
+| `Parser/pegen.c` | 1083 | [pegen](pegen) | `parser/pegen/` |
+| `Parser/pegen.h` | 388 | (pending) | `parser/pegen/types.go` |
+| `Parser/pegen_errors.c` | 462 | (pending) | `parser/pegen/errors.go` |
+| `Parser/action_helpers.c` | 1953 | [action-helpers](action-helpers) | `parser/pegen/action_helpers_gen.go` |
+| `Parser/string_parser.c` | 339 | (pending) | `parser/string_parser.go` |
+| `Parser/parser.c` | 38073 | [parser-generated](parser-generated) | `parser/parser_gen.go` |
+| `Parser/token.c` | 250 | [token](token) | `parser/token/` |
+| `Parser/peg_api.c` | 39 | (trivial wrapper) | n/a |
+| `Parser/myreadline.c` | 437 | (host-only) | n/a |
+
+Total: 23 files, ~46k lines (38k of which is the generated `parser.c`).
+
+## Reading order
+
+1. [`token.c`](token): the token kind enum and pretty-printer.
+2. [`lexer.c`](lexer): the byte-level scanner.
+3. [`pegen.c`](pegen): the parser runtime (memo table, error
+   recovery, top-level entry).
+4. [`action_helpers.c`](action-helpers): AST construction helpers
+   invoked from the generated parser.
+5. [`parser.c`](parser-generated): the generated PEG state machine.

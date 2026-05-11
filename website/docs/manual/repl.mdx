@@ -1,0 +1,67 @@
+---
+title: REPL
+description: The interactive prompt and the rules it follows.
+---
+
+# REPL
+
+Running `gopy` with no script drops into the interactive prompt.
+The banner matches CPython's:
+
+```text
+gopy 0.12.0 (3.14.0+) [go1.26 darwin/arm64]
+Type "help", "copyright", "credits" or "license" for more information.
+>>>
+```
+
+## Behaviour
+
+Each line is parsed in `mode="single"`. Expression statements print
+their value via `sys.displayhook`, so
+
+```text
+>>> 2 + 2
+4
+```
+
+is real output, not a `print` call.
+
+A blank line ends a multi-line block. The classic continuation
+prompt is `... `:
+
+```text
+>>> def double(x):
+...     return x * 2
+...
+>>> double(21)
+42
+```
+
+## History
+
+gopy uses `myreadline/` for line editing. The history file path is
+the same one CPython uses: `$XDG_STATE_HOME/python_history`, falling
+back to `~/.python_history`.
+
+## Hooks
+
+The REPL respects `sys.displayhook`, `sys.excepthook`, and
+`sys.__interactivehook__`. Replacing `displayhook` is the canonical
+way to customise how repr-style output is rendered.
+
+```python
+>>> import sys
+>>> def loud(value):
+...     if value is None: return
+...     print(f"=> {value!r}")
+>>> sys.displayhook = loud
+>>> 1 + 1
+=> 2
+```
+
+## Soft and hard exits
+
+`Ctrl-D` on an empty line exits cleanly. `Ctrl-C` raises
+`KeyboardInterrupt` at the current prompt and clears the
+in-progress buffer. `exit()` and `quit()` are real functions that
+raise `SystemExit`.

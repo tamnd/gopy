@@ -1,0 +1,147 @@
+---
+title: Objects
+description: The CPython object model. PyObject, PyTypeObject, slots, and reference counts.
+---
+
+# Objects
+
+Every value in Python is a `PyObject *`. The pointer is to a
+struct whose first field is a "head" that all objects share. The
+head holds a reference count and a pointer to the type. The type
+points to a struct of function pointers that defines what the
+object can do.
+
+## Source map
+
+| File                            | Role                                           |
+| ------------------------------- | ---------------------------------------------- |
+| `Include/object.h`              | `PyObject`, `PyTypeObject`, public macros.     |
+| `Objects/object.c`              | Generic object operations.                     |
+| `Objects/typeobject.c`          | The metaclass `type`. The slot inheritance.    |
+| `Objects/abstract.c`            | Number / sequence / mapping protocols.         |
+
+## The two heads
+
+```c
+typedef struct _object {
+    Py_ssize_t ob_refcnt;
+    PyTypeObject *ob_type;
+} PyObject;
+
+typedef struct {
+    PyObject ob_base;
+    Py_ssize_t ob_size;
+} PyVarObject;
+```
+
+`PyObject` is for fixed-shape objects: `int` (small ints
+notwithstanding), `float`, `bool`, `NoneType` instances.
+`PyVarObject` is for variable-length objects: `tuple`, `str`,
+`bytes`, `list` (the base, not the storage array).
+
+`ob_refcnt` is the reference count. `Py_INCREF` adds, `Py_DECREF`
+subtracts and runs `tp_dealloc` when the count hits zero.
+
+## `PyTypeObject`
+
+A `PyTypeObject` is the metaclass instance for a type. It is
+itself a `PyObject` whose type is `&PyType_Type`. It carries a
+big struct of function pointers called **slots**.
+
+Some important slots:
+
+| Slot                | Purpose                                            |
+| ------------------- | -------------------------------------------------- |
+| `tp_name`           | The type's qualified name.                         |
+| `tp_basicsize`      | Per-instance byte size.                            |
+| `tp_itemsize`       | Per-extra-item size (for `PyVarObject` types).     |
+| `tp_dealloc`        | Called when `ob_refcnt` reaches zero.              |
+| `tp_repr`           | `repr(x)`.                                         |
+| `tp_str`            | `str(x)`.                                          |
+| `tp_hash`           | `hash(x)`.                                         |
+| `tp_call`           | `x(...)`.                                          |
+| `tp_getattro`       | `x.attr` (full attribute resolution).              |
+| `tp_setattro`       | `x.attr = v`.                                      |
+| `tp_richcompare`    | `x < y`, `x == y`, etc.                            |
+| `tp_iter`           | `iter(x)`.                                         |
+| `tp_iternext`       | `next(iter)`.                                      |
+| `tp_descr_get`      | The data-descriptor `__get__`.                     |
+| `tp_descr_set`      | The data-descriptor `__set__`.                     |
+| `tp_new`            | Allocate an instance.                              |
+| `tp_init`           | Initialise an instance.                            |
+| `tp_alloc`          | Raw allocator (default: `PyObject_GC_New`).        |
+| `tp_free`           | Raw deallocator.                                   |
+| `tp_traverse`       | The GC's "walk references" hook.                   |
+| `tp_clear`          | The GC's "drop references" hook.                   |
+| `tp_as_number`      | Pointer to the number-protocol substruct.          |
+| `tp_as_sequence`    | Pointer to the sequence-protocol substruct.        |
+| `tp_as_mapping`     | Pointer to the mapping-protocol substruct.         |
+| `tp_as_async`       | Pointer to the async-protocol substruct.           |
+| `tp_version_tag`    | Bumped when the class's attributes change.         |
+
+The protocol substructs are themselves tables of function pointers.
+`tp_as_number` has `nb_add`, `nb_subtract`, `nb_multiply`, etc.
+
+## Slot inheritance
+
+When a type is created (`PyType_Ready`), CPython walks the MRO and
+fills each unset slot from the closest ancestor that defined it.
+This is why a subclass that only defines `__eq__` still has a
+working `__hash__` slot (because `object.__hash__` is inherited)
+unless the subclass sets `__hash__ = None`.
+
+## Protocol dispatch
+
+`Objects/abstract.c` exposes the high-level operations that the
+eval loop uses. They look up the right slot and dispatch:
+
+* `PyNumber_Add(a, b)` consults `a->ob_type->tp_as_number->nb_add`,
+  then `b->ob_type->tp_as_number->nb_add` for the reflected case.
+* `PySequence_GetItem(a, i)` consults
+  `a->ob_type->tp_as_sequence->sq_item`.
+* `PyMapping_GetItemString(a, k)` consults
+  `a->ob_type->tp_as_mapping->mp_subscript`.
+
+The eval loop calls these directly: `BINARY_OP +` is a call to
+`PyNumber_Add`, `BINARY_SUBSCR` calls `PyObject_GetItem`.
+
+## Descriptors
+
+Attribute access has three layers. For `x.attr`, in order:
+
+1. Look up `attr` on the type's MRO. If found and it is a data
+   descriptor (`tp_descr_set != NULL`), call its `tp_descr_get`
+   with `x` as `self`.
+2. Look up `attr` on the instance's `__dict__`. If found, return
+   it.
+3. If the MRO lookup found a non-data descriptor (`tp_descr_get
+   != NULL` but `tp_descr_set == NULL`), call `tp_descr_get`.
+4. If the MRO lookup found a plain attribute, return it.
+5. Otherwise call `tp_getattr_hook` (`__getattr__`).
+6. Otherwise raise `AttributeError`.
+
+Methods are non-data descriptors. `instance.method` triggers step 3,
+which builds a bound method.
+
+## Reference counts
+
+Refcount discipline is the most pervasive thing about the C API.
+
+* "Return a new reference" -- the caller owns the result and is
+  expected to `Py_DECREF` it when done.
+* "Return a borrowed reference" -- the caller does not own the
+  result; the result is alive only as long as some other owner
+  keeps it.
+* "Steals a reference" -- the function takes ownership of an
+  argument and the caller must not `Py_DECREF` it.
+
+The eval loop is careful to maintain refcount invariants across
+exception unwind. Most opcodes use `Py_DECREF` on pops and
+`Py_INCREF` on duplicates; the generator records this and elides
+the increments when ownership transfer is obvious.
+
+## Reading order
+
+[Types](types) is the catalogue of built-in types. [GC](gc) is
+the cycle collector that complements refcounts. [Generators](generators)
+walks the lifecycle of generator objects.

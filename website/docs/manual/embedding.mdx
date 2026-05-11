@@ -1,0 +1,97 @@
+---
+title: Embedding
+description: Calling the gopy VM from a Go program.
+---
+
+# Embedding
+
+gopy is a Go module. A host Go program can compile and run Python
+source without spawning a subprocess. The surface is small.
+
+## A complete example
+
+```go title="main.go"
+package main
+
+import (
+	"fmt"
+	"log"
+	"os"
+
+	"github.com/tamnd/gopy/compile"
+	"github.com/tamnd/gopy/parser"
+	"github.com/tamnd/gopy/pythonrun"
+	"github.com/tamnd/gopy/state"
+)
+
+func main() {
+	src := `name = "world"
+print(f"hello, {name}")
+`
+	mod, err := parser.ParseString(src, "<embedded>", parser.ModeExec)
+	if err != nil {
+		log.Fatal(err)
+	}
+	code, err := compile.Compile(mod, "<embedded>", 0)
+	if err != nil {
+		log.Fatal(err)
+	}
+	ts := state.NewThreadState()
+	if _, err := pythonrun.Run(ts, code, os.Stdout); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+}
+```
+
+```bash
+$ go run main.go
+hello, world
+```
+
+## What the surface gives you
+
+| Package | Role                                                        |
+| ------- | ----------------------------------------------------------- |
+| `parser` | Tokenize and parse Python source into an AST.              |
+| `compile` | Compile an AST into a `Code` object.                      |
+| `pythonrun` | Run a `Code` object on the VM.                          |
+| `state` | Per-thread interpreter state.                              |
+| `objects` | The runtime value model: `Object`, `Type`, slot tables.  |
+| `errors` | Exception types and the bridge to Go errors.              |
+| `imp` | The import machinery, if you want to register modules.      |
+
+## Adding a built-in module
+
+A host can register a built-in module the same way the gopy stdlib
+modules do, by calling `imp.AppendInittab` from an `init()` block.
+
+```go
+package mybuiltin
+
+import (
+	"github.com/tamnd/gopy/imp"
+	"github.com/tamnd/gopy/objects"
+)
+
+func init() {
+	imp.AppendInittab("mybuiltin", initModule)
+}
+
+func initModule() (*objects.Module, error) {
+	m := objects.NewModule("mybuiltin")
+	m.SetAttr("answer", objects.NewInt(42))
+	return m, nil
+}
+```
+
+Blank-import the package from your `main` and `import mybuiltin`
+becomes available in Python.
+
+## Concurrency
+
+A `ThreadState` is the unit of execution. Each goroutine that calls
+into the VM needs its own `ThreadState`. The GIL lives in the
+`gil/` package and is acquired automatically when the VM enters a
+frame. Multiple `ThreadState`s in the same interpreter take turns
+holding it, exactly as CPython does.

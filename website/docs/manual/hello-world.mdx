@@ -1,0 +1,60 @@
+---
+title: Hello, gopy
+description: The smallest runnable gopy program, with a disassembly of the bytecode it produces.
+---
+
+# Hello, gopy
+
+```python title="hello.py"
+print("Hello, gopy")
+```
+
+```bash
+$ gopy hello.py
+Hello, gopy
+```
+
+## What just happened
+
+1. **Parse.** `parser.ParseFile` reads `hello.py`, runs the
+   tokenizer, and runs the PEG parser. The result is an AST: a
+   single `Module` node containing one `Expr` statement that wraps
+   a `Call` to a `Name` `print` with the string `"Hello, gopy"` as
+   its argument.
+
+2. **Compile.** `compile.Compile` runs the symbol-table builder
+   on the AST, then the code generator, then the flow-graph
+   optimiser, then the assembler. The output is a `Code` object.
+
+3. **Run.** `pythonrun.Run` hands the code object to the VM. The
+   VM creates a frame, pushes it, and enters the dispatch loop.
+
+4. **Print.** `LOAD_NAME` finds `print` in the builtins module.
+   `LOAD_CONST` pushes the string. `CALL` invokes `print`, which
+   writes to `sys.stdout`. `RETURN_VALUE` pops the frame.
+
+## Disassembly
+
+`gopy -d hello.py` prints the bytecode the compiler produced.
+
+```text
+  0           0 RESUME                   0
+
+  1           2 LOAD_NAME                0 (print)
+              4 PUSH_NULL
+              6 LOAD_CONST               0 ('Hello, gopy')
+              8 CALL                     1
+             16 POP_TOP
+             18 RETURN_CONST             1 (None)
+```
+
+This is byte-for-byte identical to what CPython 3.14 produces.
+
+## Where to go from here
+
+The [Run a file](run) page documents every shape of invocation.
+The [CLI](cli) page documents every flag. To learn how the four
+stages above work, jump to the
+[CPython internals pipeline overview](/docs/cpython/pipeline) and
+read down. The [gopy](/docs/gopy/) pillar mirrors each page on the
+CPython side with the Go implementation.

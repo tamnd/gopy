@@ -1,0 +1,251 @@
+---
+title: Include/
+description: Annotations for CPython 3.14 public C API headers and Include/internal/.
+---
+
+# `Include/`
+
+The public C API. `Include/*.h` is what extension authors include via
+`#include <Python.h>`. `Include/internal/` is the private API used by
+CPython itself.
+
+For gopy these headers are the source of truth for **struct layouts**
+(`PyObject`, `PyTypeObject`, `PyDictObject`, ...) and **slot tables**
+(`tp_*`, `nb_*`, `sq_*`, `mp_*`, `am_*`). The gopy mirror types are
+laid out field-for-field where possible so that ported C functions
+translate mechanically.
+
+## Public headers (top level)
+
+| File | Lines | Page |
+| ---- | ----: | ---- |
+| `Include/abstract.h` | 915 | (pending) |
+| `Include/audit.h` | 30 | (pending) |
+| `Include/bltinmodule.h` | 14 | (pending) |
+| `Include/boolobject.h` | 54 | (pending) |
+| `Include/bytearrayobject.h` | 44 | (pending) |
+| `Include/bytesobject.h` | 66 | (pending) |
+| `Include/ceval.h` | 145 | (pending) |
+| `Include/codecs.h` | 176 | (pending) |
+| `Include/compile.h` | 22 | (pending) |
+| `Include/complexobject.h` | 30 | (pending) |
+| `Include/critical_section.h` | 16 | (pending) |
+| `Include/datetime.h` | 267 | (pending) |
+| `Include/descrobject.h` | 100 | (pending) |
+| `Include/dictobject.h` | 108 | (pending) |
+| `Include/dynamic_annotations.h` | 499 | (pending) |
+| `Include/enumobject.h` | 17 | (pending) |
+| `Include/errcode.h` | 45 | (pending) |
+| `Include/exports.h` | 105 | (pending) |
+| `Include/fileobject.h` | 41 | (pending) |
+| `Include/fileutils.h` | 62 | (pending) |
+| `Include/floatobject.h` | 54 | (pending) |
+| `Include/frameobject.h` | 20 | (pending) |
+| `Include/genericaliasobject.h` | 14 | (pending) |
+| `Include/import.h` | 103 | (pending) |
+| `Include/intrcheck.h` | 23 | (pending) |
+| `Include/iterobject.h` | 24 | (pending) |
+| `Include/listobject.h` | 55 | (pending) |
+| `Include/lock.h` | 16 | (pending) |
+| `Include/longobject.h` | 178 | (pending) |
+| `Include/marshal.h` | 31 | (pending) |
+| `Include/memoryobject.h` | 34 | (pending) |
+| `Include/methodobject.h` | 146 | (pending) |
+| `Include/modsupport.h` | 146 | (pending) |
+| `Include/moduleobject.h` | 122 | (pending) |
+| `Include/monitoring.h` | 18 | (pending) |
+| `Include/object.h` | 828 | (pending) |
+| `Include/objimpl.h` | 211 | (pending) |
+| `Include/opcode_ids.h` | 259 | (pending) |
+| `Include/opcode.h` | 43 | (pending) |
+| `Include/osdefs.h` | 57 | (pending) |
+| `Include/osmodule.h` | 17 | (pending) |
+| `Include/patchlevel.h` | 49 | (pending) |
+| `Include/py_curses.h` | 117 | (pending) |
+| `Include/pyatomic.h` | 16 | (pending) |
+| `Include/pybuffer.h` | 145 | (pending) |
+| `Include/pycapsule.h` | 58 | (pending) |
+| `Include/pydtrace.h` | 59 | (pending) |
+| `Include/pyerrors.h` | 335 | (pending) |
+| `Include/pyexpat.h` | 62 | (pending) |
+| `Include/pyframe.h` | 26 | (pending) |
+| `Include/pyhash.h` | 59 | (pending) |
+| `Include/pylifecycle.h` | 80 | (pending) |
+| `Include/pymacconfig.h` | 91 | (pending) |
+| `Include/pymacro.h` | 249 | (pending) |
+| `Include/pymath.h` | 65 | (pending) |
+| `Include/pymem.h` | 110 | (pending) |
+| `Include/pyport.h` | 710 | (pending) |
+| `Include/pystate.h` | 132 | (pending) |
+| `Include/pystats.h` | 28 | (pending) |
+| `Include/pystrcmp.h` | 23 | (pending) |
+| `Include/pystrtod.h` | 37 | (pending) |
+| `Include/Python.h` | 155 | (pending) |
+| `Include/pythonrun.h` | 42 | (pending) |
+| `Include/pythread.h` | 131 | (pending) |
+| `Include/pytypedefs.h` | 30 | (pending) |
+| `Include/rangeobject.h` | 27 | (pending) |
+| `Include/refcount.h` | 555 | (pending) |
+| `Include/setobject.h` | 49 | (pending) |
+| `Include/sliceobject.h` | 69 | (pending) |
+| `Include/structmember.h` | 56 | (pending) |
+| `Include/structseq.h` | 46 | (pending) |
+| `Include/sysmodule.h` | 27 | (pending) |
+| `Include/traceback.h` | 26 | (pending) |
+| `Include/tupleobject.h` | 46 | (pending) |
+| `Include/typeslots.h` | 96 | (pending) |
+| `Include/unicodeobject.h` | 1029 | (pending) |
+| `Include/warnings.h` | 45 | (pending) |
+| `Include/weakrefobject.h` | 46 | (pending) |
+
+## Internal headers (`Include/internal/`)
+
+| File | Lines | Page |
+| ---- | ----: | ---- |
+| `Include/internal/pycore_abstract.h` | 61 | (pending) |
+| `Include/internal/pycore_asdl.h` | 112 | (pending) |
+| `Include/internal/pycore_ast_state.h` | 271 | (pending) |
+| `Include/internal/pycore_ast.h` | 945 | (pending) |
+| `Include/internal/pycore_atexit.h` | 31 | (pending) |
+| `Include/internal/pycore_audit.h` | 35 | (pending) |
+| `Include/internal/pycore_backoff.h` | 133 | (pending) |
+| `Include/internal/pycore_bitutils.h` | 186 | (pending) |
+| `Include/internal/pycore_blocks_output_buffer.h` | 321 | (pending) |
+| `Include/internal/pycore_brc.h` | 73 | (pending) |
+| `Include/internal/pycore_bytes_methods.h` | 82 | (pending) |
+| `Include/internal/pycore_bytesobject.h` | 149 | (pending) |
+| `Include/internal/pycore_c_array.h` | 39 | (pending) |
+| `Include/internal/pycore_call.h` | 214 | (pending) |
+| `Include/internal/pycore_capsule.h` | 17 | (pending) |
+| `Include/internal/pycore_cell.h` | 75 | (pending) |
+| `Include/internal/pycore_ceval_state.h` | 48 | (pending) |
+| `Include/internal/pycore_ceval.h` | 394 | (pending) |
+| `Include/internal/pycore_code.h` | 671 | (pending) |
+| `Include/internal/pycore_codecs.h` | 76 | (pending) |
+| `Include/internal/pycore_compile.h` | 230 | (pending) |
+| `Include/internal/pycore_complexobject.h` | 34 | (pending) |
+| `Include/internal/pycore_condvar.h` | 93 | (pending) |
+| `Include/internal/pycore_context.h` | 59 | (pending) |
+| `Include/internal/pycore_critical_section.h` | 237 | (pending) |
+| `Include/internal/pycore_crossinterp_data_registry.h` | 41 | (pending) |
+| `Include/internal/pycore_crossinterp.h` | 406 | (pending) |
+| `Include/internal/pycore_debug_offsets.h` | 379 | (pending) |
+| `Include/internal/pycore_descrobject.h` | 28 | (pending) |
+| `Include/internal/pycore_dict_state.h` | 28 | (pending) |
+| `Include/internal/pycore_dict.h` | 412 | (pending) |
+| `Include/internal/pycore_dtoa.h` | 40 | (pending) |
+| `Include/internal/pycore_emscripten_signal.h` | 30 | (pending) |
+| `Include/internal/pycore_emscripten_trampoline.h` | 67 | (pending) |
+| `Include/internal/pycore_exceptions.h` | 40 | (pending) |
+| `Include/internal/pycore_faulthandler.h` | 100 | (pending) |
+| `Include/internal/pycore_fileutils_windows.h` | 98 | (pending) |
+| `Include/internal/pycore_fileutils.h` | 320 | (pending) |
+| `Include/internal/pycore_floatobject.h` | 49 | (pending) |
+| `Include/internal/pycore_flowgraph.h` | 47 | (pending) |
+| `Include/internal/pycore_format.h` | 27 | (pending) |
+| `Include/internal/pycore_frame.h` | 61 | (pending) |
+| `Include/internal/pycore_freelist_state.h` | 70 | (pending) |
+| `Include/internal/pycore_freelist.h` | 111 | (pending) |
+| `Include/internal/pycore_function.h` | 64 | (pending) |
+| `Include/internal/pycore_gc.h` | 349 | (pending) |
+| `Include/internal/pycore_genobject.h` | 43 | (pending) |
+| `Include/internal/pycore_getopt.h` | 22 | (pending) |
+| `Include/internal/pycore_gil.h` | 66 | (pending) |
+| `Include/internal/pycore_global_objects_fini_generated.h` | 1592 | (pending) |
+| `Include/internal/pycore_global_objects.h` | 34 | (pending) |
+| `Include/internal/pycore_global_strings.h` | 854 | (pending) |
+| `Include/internal/pycore_hamt.h` | 113 | (pending) |
+| `Include/internal/pycore_hashtable.h` | 150 | (pending) |
+| `Include/internal/pycore_import.h` | 141 | (pending) |
+| `Include/internal/pycore_importdl.h` | 139 | (pending) |
+| `Include/internal/pycore_index_pool.h` | 36 | (pending) |
+| `Include/internal/pycore_initconfig.h` | 197 | (pending) |
+| `Include/internal/pycore_instruction_sequence.h` | 83 | (pending) |
+| `Include/internal/pycore_instruments.h` | 126 | (pending) |
+| `Include/internal/pycore_interp_structs.h` | 994 | (pending) |
+| `Include/internal/pycore_interp.h` | 109 | (pending) |
+| `Include/internal/pycore_interpframe_structs.h` | 95 | (pending) |
+| `Include/internal/pycore_interpframe.h` | 406 | (pending) |
+| `Include/internal/pycore_interpolation.h` | 26 | (pending) |
+| `Include/internal/pycore_intrinsics.h` | 51 | (pending) |
+| `Include/internal/pycore_jit.h` | 29 | (pending) |
+| `Include/internal/pycore_list.h` | 81 | (pending) |
+| `Include/internal/pycore_llist.h` | 106 | (pending) |
+| `Include/internal/pycore_lock.h` | 236 | (pending) |
+| `Include/internal/pycore_long.h` | 336 | (pending) |
+| `Include/internal/pycore_magic_number.h` | 305 | (pending) |
+| `Include/internal/pycore_memoryobject.h` | 20 | (pending) |
+| `Include/internal/pycore_mimalloc.h` | 69 | (pending) |
+| `Include/internal/pycore_modsupport.h` | 99 | (pending) |
+| `Include/internal/pycore_moduleobject.h` | 62 | (pending) |
+| `Include/internal/pycore_namespace.h` | 21 | (pending) |
+| `Include/internal/pycore_object_alloc.h` | 71 | (pending) |
+| `Include/internal/pycore_object_deferred.h` | 32 | (pending) |
+| `Include/internal/pycore_object_stack.h` | 95 | (pending) |
+| `Include/internal/pycore_object_state.h` | 49 | (pending) |
+| `Include/internal/pycore_object.h` | 1032 | (pending) |
+| `Include/internal/pycore_obmalloc_init.h` | 66 | (pending) |
+| `Include/internal/pycore_obmalloc.h` | 702 | (pending) |
+| `Include/internal/pycore_opcode_metadata.h` | 2117 | (pending) |
+| `Include/internal/pycore_opcode_utils.h` | 90 | (pending) |
+| `Include/internal/pycore_optimizer.h` | 318 | (pending) |
+| `Include/internal/pycore_parking_lot.h` | 97 | (pending) |
+| `Include/internal/pycore_parser.h` | 78 | (pending) |
+| `Include/internal/pycore_pathconfig.h` | 26 | (pending) |
+| `Include/internal/pycore_pyarena.h` | 68 | (pending) |
+| `Include/internal/pycore_pyatomic_ft_wrappers.h` | 202 | (pending) |
+| `Include/internal/pycore_pybuffer.h` | 21 | (pending) |
+| `Include/internal/pycore_pyerrors.h` | 213 | (pending) |
+| `Include/internal/pycore_pyhash.h` | 91 | (pending) |
+| `Include/internal/pycore_pylifecycle.h` | 136 | (pending) |
+| `Include/internal/pycore_pymath.h` | 205 | (pending) |
+| `Include/internal/pycore_pymem_init.h` | 103 | (pending) |
+| `Include/internal/pycore_pymem.h` | 145 | (pending) |
+| `Include/internal/pycore_pystate.h` | 339 | (pending) |
+| `Include/internal/pycore_pystats.h` | 21 | (pending) |
+| `Include/internal/pycore_pythonrun.h` | 68 | (pending) |
+| `Include/internal/pycore_pythread.h` | 172 | (pending) |
+| `Include/internal/pycore_qsbr.h` | 173 | (pending) |
+| `Include/internal/pycore_range.h` | 21 | (pending) |
+| `Include/internal/pycore_runtime_init_generated.h` | 1589 | (pending) |
+| `Include/internal/pycore_runtime_init.h` | 233 | (pending) |
+| `Include/internal/pycore_runtime_structs.h` | 320 | (pending) |
+| `Include/internal/pycore_runtime.h` | 63 | (pending) |
+| `Include/internal/pycore_semaphore.h` | 67 | (pending) |
+| `Include/internal/pycore_setobject.h` | 41 | (pending) |
+| `Include/internal/pycore_signal.h` | 108 | (pending) |
+| `Include/internal/pycore_sliceobject.h` | 20 | (pending) |
+| `Include/internal/pycore_stackref.h` | 838 | (pending) |
+| `Include/internal/pycore_stats.h` | 97 | (pending) |
+| `Include/internal/pycore_strhex.h` | 39 | (pending) |
+| `Include/internal/pycore_structs.h` | 88 | (pending) |
+| `Include/internal/pycore_structseq.h` | 40 | (pending) |
+| `Include/internal/pycore_symtable.h` | 201 | (pending) |
+| `Include/internal/pycore_sysmodule.h` | 32 | (pending) |
+| `Include/internal/pycore_template.h` | 26 | (pending) |
+| `Include/internal/pycore_time.h` | 334 | (pending) |
+| `Include/internal/pycore_token.h` | 110 | (pending) |
+| `Include/internal/pycore_traceback.h` | 111 | (pending) |
+| `Include/internal/pycore_tracemalloc.h` | 167 | (pending) |
+| `Include/internal/pycore_tstate.h` | 93 | (pending) |
+| `Include/internal/pycore_tuple.h` | 75 | (pending) |
+| `Include/internal/pycore_typedefs.h` | 18 | (pending) |
+| `Include/internal/pycore_typeobject.h` | 160 | (pending) |
+| `Include/internal/pycore_typevarobject.h` | 28 | (pending) |
+| `Include/internal/pycore_ucnhash.h` | 36 | (pending) |
+| `Include/internal/pycore_unicodeobject_generated.h` | 3132 | (pending) |
+| `Include/internal/pycore_unicodeobject.h` | 308 | (pending) |
+| `Include/internal/pycore_unionobject.h` | 26 | (pending) |
+| `Include/internal/pycore_uniqueid.h` | 57 | (pending) |
+| `Include/internal/pycore_uop_ids.h` | 335 | (pending) |
+| `Include/internal/pycore_uop_metadata.h` | 1204 | (pending) |
+| `Include/internal/pycore_warnings.h` | 21 | (pending) |
+| `Include/internal/pycore_weakref.h` | 133 | (pending) |
+
+Internal headers carry the layout structs the public API hides:
+`pycore_frame.h` for `_PyInterpreterFrame`, `pycore_code.h`
+for code-object internals, `pycore_dict.h` for the watcher and
+split-dict bits, `pycore_interp.h` for `PyInterpreterState`,
+`pycore_runtime.h` for `_PyRuntimeState`,
+`pycore_opcode_metadata.h` / `pycore_uop_metadata.h` for the
+tier-1 and tier-2 opcode tables.

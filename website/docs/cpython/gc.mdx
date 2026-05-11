@@ -1,0 +1,126 @@
+---
+title: Garbage collection
+description: Reference counts plus a generational cycle collector.
+---
+
+# Garbage collection
+
+CPython uses two mechanisms together. **Reference counting** runs
+on every refcount change and reclaims acyclic garbage immediately.
+A **generational cycle collector** runs periodically to break
+reference cycles that refcounting alone cannot reach.
+
+## Source map
+
+| File                                       | Role                                           |
+| ------------------------------------------ | ---------------------------------------------- |
+| `Modules/gcmodule.c`                       | The cycle collector.                           |
+| `Include/internal/pycore_gc.h`             | Per-object GC head, generation lists.          |
+| `Include/object.h`                         | `Py_INCREF`, `Py_DECREF`, refcount macros.     |
+| `Objects/typeobject.c`                     | `tp_traverse`, `tp_clear`.                     |
+
+## Reference counts
+
+Every `PyObject` has an `ob_refcnt`. `Py_INCREF(x)` adds one;
+`Py_DECREF(x)` subtracts one and, when the count reaches zero,
+calls `_Py_Dealloc(x)` which dispatches to `x->ob_type->tp_dealloc`.
+
+This handles most garbage in CPython. The cost is one increment
+or decrement at every pop / push / dup / store.
+
+## The cycle problem
+
+```python
+a = []
+b = []
+a.append(b)
+b.append(a)
+del a, b
+```
+
+After `del`, the two lists still reference each other. Refcounts
+stay at 1. Refcounting alone never frees them.
+
+## The collector
+
+GC tracks objects whose types declare `tp_traverse`. The set of
+tracked objects is partitioned into **generations**: gen0 for
+newborns, gen1 for survivors of a gen0 sweep, gen2 for survivors
+of a gen1 sweep. Younger generations are scanned more often.
+
+A scan of generation `g` proceeds:
+
+1. **Discover.** Move every gen-`g` object into a working list.
+   Also move all younger generations into the same list.
+2. **Subtract internal references.** For each object in the
+   working list, call `tp_traverse` to enumerate the objects it
+   points to. For each pointer that lands inside the working list,
+   subtract one from a per-object "gc refs" tally that started
+   equal to the live refcount.
+3. **Find roots.** Any object with gc refs > 0 is reachable from
+   outside the working list. Mark it and everything it traverses
+   to as reachable.
+4. **Collect the unreachable.** What remains is a set of objects
+   that only reference each other. Move them to a "finalisers"
+   list, run any `__del__` methods (which may resurrect objects),
+   then call `tp_clear` on the still-unreachable objects to break
+   their references. Refcounting then takes over and frees them.
+
+This is the classic "trial deletion" cycle collector described in
+Bacon-Rajan.
+
+## Generations and thresholds
+
+The thresholds are `(700, 10, 10)` by default. A gen0 collection
+runs when `gen0` has 700 more allocations than deallocations.
+After 10 gen0 collections, gen1 is collected. After 10 gen1
+collections, gen2 is collected.
+
+These thresholds are tunable through `gc.set_threshold`.
+
+## `tp_traverse` and `tp_clear`
+
+A type that can participate in a cycle declares both slots. Pure
+"leaf" types (`int`, `float`, `str`, `bytes`) do not declare them
+and are never tracked.
+
+* `tp_traverse(self, visit, arg)` enumerates the object's strong
+  references by calling `visit(child, arg)` for each one. The
+  callback returns 0 to continue or non-zero to stop.
+* `tp_clear(self)` drops every strong reference held by the
+  object, replacing slots with `NULL` (and decref-ing the old
+  values). The object is left as an empty husk that refcounting
+  will then free.
+
+## Finalisers
+
+`__del__` is a Python-level finaliser. If GC discovers an
+unreachable object whose type has `__del__`, it splits those
+objects out and runs their finalisers first. A finaliser can
+resurrect the object by stashing a strong reference somewhere
+visible. Resurrected objects are returned to the live set and the
+collector re-walks.
+
+To avoid the finaliser-order-dependence trap that haunted Python 2,
+each unreachable cycle's finalisers run at most once. If the cycle
+becomes unreachable again, the finaliser does not run a second
+time.
+
+## Weak references
+
+`weakref` is a separate mechanism. A weak reference points to an
+object without bumping its refcount. When the referent dies, the
+weakref is cleared and any associated callback is queued to run.
+Weak references are pre-cleared during GC so callbacks never see
+half-dead objects.
+
+## Free threading
+
+In the `--disable-gil` build, refcounts are **biased**: the owning
+thread's refcount increments are cheap, while cross-thread
+increments go through a small atomic CAS. The cycle collector
+acquires a "stop the world" barrier to scan.
+
+## Reading order
+
+[Imports](imports) is next.

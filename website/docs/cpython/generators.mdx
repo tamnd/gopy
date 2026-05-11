@@ -1,0 +1,116 @@
+---
+title: Generators and coroutines
+description: How CPython suspends and resumes a frame for yield, await, and async iteration.
+---
+
+# Generators and coroutines
+
+A generator is a callable that, when called, returns an object
+whose frame is suspended at the function's first `yield`. Calling
+`next()` on it resumes the frame until the next yield. A coroutine
+is the same machinery with different surface syntax: `await`
+suspends and the event loop drives the resume.
+
+## Source map
+
+| File                                  | Role                                          |
+| ------------------------------------- | --------------------------------------------- |
+| `Objects/genobject.c`                 | `PyGenObject`, `PyCoroObject`, `PyAsyncGenObject`. |
+| `Python/ceval.c`                      | `RESUME`, `YIELD_VALUE`, `SEND`, `RETURN_GENERATOR`. |
+| `Lib/asyncio/`                        | The reference event loop.                     |
+| `Include/internal/pycore_genobject.h` | Layout structures.                            |
+
+## Generator lifecycle
+
+A function compiled with `CO_GENERATOR` set in `co_flags`
+behaves differently when called. Instead of running its body, the
+calling opcode hits `RETURN_GENERATOR` early in the function and
+returns a `PyGenObject` whose `gi_iframe` holds the suspended
+frame.
+
+```python
+def fib():
+    a, b = 0, 1
+    while True:
+        yield a
+        a, b = b, a + b
+
+g = fib()      # returns a generator. Body has not run.
+next(g)        # 0    Body runs to the first yield.
+next(g)        # 1
+next(g)        # 1
+```
+
+Each `next(g)` re-enters the eval loop with the generator's
+suspended frame and `throwflag = 0`. `YIELD_VALUE` pops a value
+off the stack, saves `prev_instr`, and returns out of the loop.
+The next `next` picks up at the same `prev_instr`.
+
+## The four opcodes
+
+| Opcode              | What it does                                           |
+| ------------------- | ------------------------------------------------------ |
+| `RESUME oparg`      | Marks the function entry point, the after-yield point, or the after-await point. Runs the eval-breaker check. |
+| `RETURN_GENERATOR`  | Allocates the generator object and returns it.        |
+| `YIELD_VALUE`       | Pops the yielded value, sets `gi_running = 0`, returns it. |
+| `SEND oparg`        | Calls `gen.send(value)`. Receives the value back into the stack. |
+
+`oparg` of `RESUME` is `0` for function entry, `1` for after a
+yield, `2` for after an await, `3` for after a yield-from.
+
+## `send`, `throw`, `close`
+
+* `gen.send(value)` resumes the generator with `value` as the
+  result of the suspended `yield` expression. `next(g)` is
+  `gen.send(None)`.
+* `gen.throw(exc)` resumes the generator with `throwflag = 1` and
+  the exception state preloaded, so the suspended `yield` raises
+  `exc`.
+* `gen.close()` calls `gen.throw(GeneratorExit)`. The generator is
+  expected to swallow the exception and finish.
+
+## Coroutines
+
+A function compiled with `CO_COROUTINE` is the same machinery
+plus a different surface. `await x` desugars to roughly:
+
+```python
+_iter = x.__await__()
+while True:
+    try:
+        value = _iter.send(None)
+    except StopIteration as e:
+        result = e.value
+        break
+    sent = yield value
+```
+
+The event loop drives the outer `send`. The coroutine yields to
+the event loop, which schedules I/O, and resumes the coroutine
+when the I/O completes.
+
+PEP 492 unified yield-from and await: under the hood they share
+`SEND`, `GET_AWAITABLE`, `GET_YIELD_FROM_ITER`.
+
+## Async generators
+
+`CO_ASYNC_GENERATOR` is yet another flag combination. An async
+generator has both `yield` and `await`. The protocol uses
+`__anext__` (a coroutine) that delivers each yielded value. A
+finaliser `aclose` runs as a coroutine too.
+
+`PyAsyncGenObject` keeps a queue of pending sends and a state
+machine that distinguishes "yielding", "awaiting", "finalising"
+states.
+
+## Cleanup
+
+When a generator object is garbage-collected with the body still
+suspended, the runtime sends it `GeneratorExit`. The body's
+`finally` clauses run before the frame is freed. This is what
+makes `with` inside a generator safe.
+
+## Reading order
+
+This is the last of the per-subsystem CPython pages. For the gopy
+mirror, see the [gopy internals](/docs/gopy/) pillar.

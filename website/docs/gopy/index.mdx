@@ -1,0 +1,28 @@
+---
+title: gopy internals
+description: How gopy is structured. The Go mirror of CPython 3.14.
+---
+
+# gopy internals
+
+gopy is a from-scratch reimplementation of CPython 3.14 in Go. The goal
+is behavioural compatibility: same bytecode, same objects, same error
+messages. The implementation follows CPython page for page, so each
+page in this section has a direct counterpart in the
+[CPython](../cpython/) pillar.
+
+## Layout
+
+Flat packages at the module root, no `internal/` directory.
+
+| Area      | Packages                                          |
+| --------- | ------------------------------------------------- |
+| Pipeline  | `parser/`, `compile/`, `ast/`                     |
+| Execution | `vm/`, `pythonrun/`                               |
+| Runtime   | `objects/`, `module/`, `stdlib/`                  |
+
+## Reading order
+
+Start with [pipeline](pipeline) for an end-to-end tour of how a `.py`
+file becomes running bytecode. Then follow the same per-subsystem pages
+as the CPython pillar.

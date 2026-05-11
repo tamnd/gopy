@@ -1,0 +1,149 @@
+---
+title: AST
+description: How the Python abstract syntax tree is defined, generated, validated, and walked.
+---
+
+# AST
+
+The Abstract Syntax Tree is the data structure the parser emits
+and the compiler consumes. It is defined formally in
+`Parser/Python.asdl` and generated into a set of C structs.
+
+## Source map
+
+| File                              | Role                                              |
+| --------------------------------- | ------------------------------------------------- |
+| `Parser/Python.asdl`              | The grammar of the AST.                           |
+| `Parser/asdl_c.py`                | Generator that emits the C struct definitions.    |
+| `Include/internal/pycore_ast.h`   | The generated header. Defines `mod_ty`, `stmt_ty`, `expr_ty`, etc. |
+| `Python/Python-ast.c`             | Generated C: constructors, the `_ast` module.     |
+| `Python/ast.c`                    | The hand-written validator.                       |
+| `Python/ast_unparse.c`            | The unparser used for annotation string forms.    |
+
+## ASDL
+
+The Zephyr Abstract Syntax Description Language (ASDL) is a tiny
+DSL for describing trees. `Python.asdl` looks like this:
+
+```text
+module Python
+{
+    mod = Module(stmt* body, type_ignore* type_ignores)
+        | Interactive(stmt* body)
+        | Expression(expr body)
+        | FunctionType(expr* argtypes, expr returns)
+
+    stmt = FunctionDef(identifier name, arguments args, stmt* body,
+                       expr* decorator_list, expr? returns, ...)
+         | AsyncFunctionDef(...)
+         | ClassDef(...)
+         | Return(expr? value)
+         ...
+
+    expr = BoolOp(boolop op, expr* values)
+         | NamedExpr(expr target, expr value)
+         | BinOp(expr left, operator op, expr right)
+         | UnaryOp(unaryop op, expr operand)
+         | Lambda(arguments args, expr body)
+         ...
+}
+```
+
+The shapes mean:
+
+* `T*` is a sequence of `T`.
+* `T?` is an optional `T`.
+* `field` is required.
+
+Tagged unions (`mod`, `stmt`, `expr`) are sum types: a `stmt_ty`
+holds one of `FunctionDef`, `AsyncFunctionDef`, `ClassDef`, and
+so on. Each constructor has its own struct of fields. The
+generated C representation uses a discriminator field plus a union
+of payload structs.
+
+## Generated representation
+
+`pycore_ast.h` exposes typedefs like `mod_ty`, `stmt_ty`, `expr_ty`,
+each a pointer to a C struct with a `kind` field and a `v` union.
+
+```c
+struct _stmt {
+    enum _stmt_kind kind;
+    union {
+        struct { identifier name; arguments_ty args;
+                 asdl_stmt_seq *body;
+                 asdl_expr_seq *decorator_list;
+                 expr_ty returns;
+                 string type_comment;
+                 asdl_type_param_seq *type_params;
+        } FunctionDef;
+        // ...
+    } v;
+    int lineno;
+    int col_offset;
+    int end_lineno;
+    int end_col_offset;
+};
+```
+
+The four location fields carry the PEP 657 source location of the
+node. They flow downstream into `co_linetable` so tracebacks point
+to columns.
+
+## Constructors
+
+`Python-ast.c` exposes `_PyAST_FunctionDef`, `_PyAST_ClassDef`, etc.,
+one per constructor. Each takes the field values plus a `PyArena *`
+and returns a freshly allocated `*_ty`. The parser actions call
+these. The constructors do not validate the input.
+
+## Validation
+
+`PyAST_Validate` in `Python/ast.c` is the second pass. It walks
+the tree and rejects shapes that the grammar accepts but the
+language disallows:
+
+* Augmented assignment with non-`Name` / `Attribute` / `Subscript`
+  targets.
+* `yield` / `yield from` / `await` outside the right scope.
+* Starred expressions outside assignment targets and unpacking.
+* `del` of a literal or call.
+* Bad `args` shape (default after a non-default in positional-only
+  args, for example).
+* Invalid decorator expressions on a pattern with parens.
+
+If validation fails, a `SyntaxError` is raised with the offending
+node's location.
+
+## Walking the AST
+
+The compiler walks the tree explicitly. There is no visitor object
+in the C side: the codegen pass switches on `stmt->kind` /
+`expr->kind` and recurses. The Python side (`ast.NodeVisitor`) is
+implemented in `Lib/ast.py` for user code.
+
+The `_ast` module exposes the AST to Python by allocating Python
+objects that mirror the C structs. Each `*_ty` becomes a Python
+class derived from `_ast.AST`.
+
+## `ast.literal_eval`
+
+A safe expression evaluator. It accepts only `Constant`, `Tuple`,
+`List`, `Dict`, `Set`, `Name` (for `True`, `False`, `None`),
+`UnaryOp` (`UAdd`, `USub`), `BinOp` (numeric `+` / `-` for
+complex), and `Call(_PyAST_Constant(...))` of the special
+`set`/`frozenset`/`bytes` constructors. Anything else raises
+`ValueError`.
+
+## Unparsing
+
+`ast.unparse` (Python) and `_PyAST_ExprAsUnicode` (C) round-trip
+an AST back into source. The C unparser is restricted to expression
+nodes and is used for annotation deferral and for the `repr` of
+unevaluated expressions.
+
+## Reading order
+
+The compiler ([Compiler](compiler)) takes the validated AST as
+input. The symbol table ([Symtable](symtable)) builds a parallel
+view of the same tree.

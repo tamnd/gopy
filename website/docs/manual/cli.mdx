@@ -1,0 +1,76 @@
+---
+title: Command line interface
+description: Every flag gopy accepts, with notes on how it maps to CPython.
+---
+
+# Command line interface
+
+```text
+gopy [options] [-c cmd | -m mod | file | -] [arg ...]
+```
+
+Every option below matches the CPython option of the same name.
+The argument parser lives in `getopt/` and mirrors
+`Modules/getpath.c` and `Modules/main.c`.
+
+## Quick reference
+
+| Option | Meaning                                                       |
+| ------ | ------------------------------------------------------------- |
+| `-c cmd`  | Run `cmd` as a single statement. Following arguments go to `sys.argv`. |
+| `-m mod`  | Import `mod` and run it as `__main__`.                       |
+| `-`       | Read the program from stdin.                                 |
+| `-i`      | Drop into the REPL after the script runs.                    |
+| `-q`      | Suppress the startup banner in the REPL.                     |
+| `-u`      | Force unbuffered binary stdout / stderr.                     |
+| `-v`      | Verbose import tracing. Repeat for more detail.              |
+| `-O`      | Strip assertions. `__debug__` becomes false.                 |
+| `-OO`     | Like `-O` but also strip docstrings.                         |
+| `-S`      | Skip implicit `import site` on startup.                      |
+| `-E`      | Ignore `PYTHON*` environment variables.                      |
+| `-I`      | Isolated mode: `-E -s -P` and friends combined.              |
+| `-s`      | Don't add the user site directory to `sys.path`.             |
+| `-d`      | Print the disassembly of the program and exit.               |
+| `-X opt`  | Set an implementation option; see the table below.           |
+| `--version` | Print version and exit.                                    |
+| `--help`  | Print this list and exit.                                    |
+
+## `-X` options
+
+Forwarded to `sys._xoptions`. The names below have observable
+behaviour in gopy today.
+
+| Name                | Effect                                                |
+| ------------------- | ----------------------------------------------------- |
+| `dev`               | Enable runtime checks (PEP 690 dev mode).             |
+| `tracemalloc=N`     | Allocate N frames of malloc traceback per object.     |
+| `pycache_prefix=P`  | Write `__pycache__` under prefix `P`.                 |
+| `int_max_str_digits=N` | Cap the digit count for int-to-str conversions.   |
+| `gil=1`             | Use the global-interpreter-lock build (default).      |
+
+## Environment variables
+
+| Variable                  | Effect                                                |
+| ------------------------- | ----------------------------------------------------- |
+| `PYTHONPATH`              | Prepended to `sys.path`.                              |
+| `PYTHONHOME`              | Override the default install root.                    |
+| `PYTHONSTARTUP`           | File evaluated before the REPL.                       |
+| `PYTHONDONTWRITEBYTECODE` | Disable `.pyc` writing.                               |
+| `PYTHONUNBUFFERED`        | Equivalent to `-u`.                                   |
+| `PYTHONVERBOSE`           | Equivalent to `-v`.                                   |
+| `PYTHONOPTIMIZE`          | Set the same level `-O` would.                        |
+| `PYTHONHASHSEED`          | Seed `str` / `bytes` hashing.                         |
+| `PYTHONIOENCODING`        | Force encoding of standard streams.                   |
+| `PYTHONUTF8`              | Force UTF-8 mode for filesystem and standard streams. |
+
+## gopy-only switches
+
+These flags do not exist in CPython. Each is a runtime knob for the
+gopy implementation itself, not a language extension.
+
+| Flag                          | Effect                                          |
+| ----------------------------- | ----------------------------------------------- |
+| `GOPY_TRACE_SPECIALIZER=1`    | Log every specializer hit / miss / deopt.       |
+| `GOPY_TRACE_TIER2=1`          | Log Tier-2 trace projection and execution.      |
+| `GOPY_TRACE_MONITOR=1`        | Log every `sys.monitoring` fire.                |
+| `GOPY_DUMP_CODE=1`            | Dump every compiled `Code` object.              |

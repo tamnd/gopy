@@ -1,0 +1,68 @@
+---
+title: Run a file
+description: How gopy runs a Python file, reads from stdin, and reports exit codes.
+---
+
+# Run a file
+
+`gopy` takes the same shape of invocation as `python3`: pass a
+filename, pass `-c "code"`, pass `-m module`, or pipe a script on
+stdin. The exit status follows POSIX and CPython conventions.
+
+## A filename
+
+```bash
+gopy hello.py
+```
+
+gopy reads the file, runs `compile.Compile` to produce a `Code`
+object, and hands that code object to `pythonrun.Run`. The module
+runs as `__main__`. `sys.argv[0]` is the filename, and `sys.argv[1:]`
+holds any additional arguments.
+
+```bash
+gopy hello.py one two three
+# inside the script: sys.argv == ["hello.py", "one", "two", "three"]
+```
+
+## A one-liner with `-c`
+
+```bash
+gopy -c 'print(2 ** 10)'
+```
+
+The string passed to `-c` is compiled with `mode="single"`. That
+mode is the same one CPython's REPL uses; it allows expression
+statements to print their value implicitly.
+
+## A module with `-m`
+
+```bash
+gopy -m http.server 8000
+```
+
+`-m` defers to the import machinery. gopy looks up the module on
+`sys.path`, imports it, and runs it as `__main__`. The module sees
+`sys.argv[0]` set to its own `__spec__.origin`, matching CPython.
+
+## Stdin
+
+```bash
+echo 'print("hi from stdin")' | gopy
+```
+
+When stdin is not a TTY and no filename is given, gopy reads stdin
+to EOF and treats the contents as a script.
+
+## Exit codes
+
+| Value | Meaning                                            |
+| ----- | -------------------------------------------------- |
+| 0     | The interpreter terminated cleanly.                |
+| 1     | An unhandled exception escaped the top frame.      |
+| 2     | A bad command-line argument or a missing file.     |
+| n     | `sys.exit(n)` exited with code `n`.                |
+| 130   | The interpreter was interrupted by SIGINT.         |
+
+These numeric codes are the ones CPython documents in
+`Modules/main.c`. gopy emits them from `cmd/gopy/main.go`.

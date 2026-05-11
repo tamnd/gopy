@@ -1,0 +1,114 @@
+---
+title: Pipeline overview
+description: How CPython turns a .py file into a callable PyCodeObject, end to end.
+---
+
+# Pipeline overview
+
+The compile pipeline takes a `.py` file and produces a
+`PyCodeObject`. The `PyCodeObject` is a callable container of
+bytecode that the eval loop runs.
+
+Five stages run in order. Each stage has its own page in the
+sidebar; this page is the high-level map.
+
+```
+source bytes
+   │
+   ▼ Parser/tokenizer.c, Parser/parser.c
+tokens, then AST
+   │
+   ▼ Python/ast.c
+validated AST
+   │
+   ▼ Python/symtable.c
+symbol table
+   │
+   ▼ Python/compile.c
+intermediate "instruction sequence" per scope
+   │
+   ▼ Python/flowgraph.c
+control-flow graph, optimised
+   │
+   ▼ Python/assemble.c
+PyCodeObject
+```
+
+## Entry points
+
+The compiler is reached from three entry points. They all converge
+on `_PyAST_Compile`.
+
+| Function                          | Where called from                          |
+| --------------------------------- | ------------------------------------------ |
+| `Py_CompileStringFlags`           | The public C API.                          |
+| `PyRun_FileExFlags`               | `python file.py`.                          |
+| `builtin_compile`                 | `compile(...)` in Python.                  |
+
+All three call `_PyAST_Compile` in `Python/compile.c`, which is the
+canonical entry point.
+
+```c
+// Python/compile.c
+PyCodeObject *
+_PyAST_Compile(mod_ty mod, PyObject *filename, PyCompilerFlags *flags,
+               int optimize, PyArena *arena);
+```
+
+## What each stage produces
+
+### 1. Parse
+
+The tokenizer in `Parser/tokenizer.c` turns source bytes into a
+stream of `Token` structs. The parser in `Parser/parser.c`
+consumes the token stream and produces a `mod_ty` AST. The AST is
+defined by `Parser/Python.asdl` and generated into
+`Include/internal/pycore_ast.h`.
+
+### 2. AST validate
+
+`PyAST_Validate` in `Python/ast.c` walks the tree and rejects
+malformed shapes that the grammar accepts but the language
+disallows. Things like augmented assignment to a literal, `await`
+outside `async def`, and starred expressions in invalid positions.
+
+### 3. Symbol table
+
+`PySymtable_Build` in `Python/symtable.c` walks the AST and builds
+a tree of scopes. Each scope records every name it sees and
+classifies the name as local, free, cell, global, or implicit
+global. The compiler relies on this for every name-handling opcode
+choice.
+
+### 4. Codegen
+
+`compiler_codegen` in `Python/compile.c` walks the AST top-down
+once per scope. For each statement and expression form, the
+compiler emits a sequence of pseudo-instructions into the current
+"instruction sequence". A nested scope produces a nested
+sequence; the outer sequence references it through a constant
+that holds the inner code object.
+
+### 5. Flow graph
+
+After codegen, the instruction sequence is broken into basic
+blocks in `Python/flowgraph.c`. The block graph runs several
+passes: jump threading, constant folding, dead-block removal,
+stack-depth analysis, exception-table construction.
+
+### 6. Assemble
+
+`assemble` in `Python/assemble.c` linearises the block graph,
+resolves jump targets to byte offsets, encodes the exception table
+(PEP 657 column locations), packs the constant / name / variable
+pools, and emits a `PyCodeObject`.
+
+## Reading order
+
+Read [Parser](parser) for stage 1, [AST](ast) for stage 2,
+[Symtable](symtable) for stage 3, [Compiler](compiler) for stage 4,
+[Flowgraph](flowgraph) for stage 5, and [Assembler](assembler) for
+stage 6.
+
+The output of stage 6, the `PyCodeObject`, is the input to the
+[VM](vm).

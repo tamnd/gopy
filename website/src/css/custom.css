@@ -1,0 +1,764 @@
+/* =========================================================================
+   gopy design tokens. Rose Pine (dark) + Rose Pine Dawn (light).
+   Spec: 1902 gopy rose pine theme.
+   ========================================================================= */
+
+:root {
+  /* Rose Pine Dawn (light) base palette */
+  --rp-base: #faf4ed;
+  --rp-surface: #fffaf3;
+  --rp-overlay: #f2e9e1;
+  --rp-muted: #9893a5;
+  --rp-subtle: #797593;
+  --rp-text: #575279;
+  --rp-love: #b4637a;
+  --rp-gold: #ea9d34;
+  --rp-rose: #d7827e;
+  --rp-pine: #286983;
+  --rp-foam: #56949f;
+  --rp-iris: #907aa9;
+  --rp-hl-low: #f4ede8;
+  --rp-hl-med: #dfdad9;
+  --rp-hl-high: #cecacd;
+
+  /* Brand assignments */
+  --gopy-primary: var(--rp-iris);
+  --gopy-primary-hover: #7d6695;
+  --gopy-primary-strong: #6f5a86;
+  --gopy-primary-fg: #ffffff;
+  --gopy-primary-soft: #efe6f5;
+  --gopy-primary-softer: #f7f2fa;
+  --gopy-primary-border: #d9c9e6;
+  --gopy-accent: var(--rp-foam);
+  --gopy-accent-deep: var(--rp-pine);
+
+  /* Surfaces */
+  --gopy-bg-base: var(--rp-base);
+  --gopy-bg-surface: var(--rp-surface);
+  --gopy-bg-elevated: var(--rp-overlay);
+  --gopy-bg-subtle: var(--rp-hl-low);
+  --gopy-bg-code: #2a273f;
+
+  /* Borders */
+  --gopy-border: rgba(87, 82, 121, 0.10);
+  --gopy-border-strong: rgba(87, 82, 121, 0.18);
+  --gopy-border-subtle: rgba(87, 82, 121, 0.06);
+
+  /* Text */
+  --gopy-text-primary: var(--rp-text);
+  --gopy-text-secondary: #6e6a86;
+  --gopy-text-muted: var(--rp-subtle);
+  --gopy-text-inverse: #faf4ed;
+
+  /* Semantic */
+  --gopy-success: var(--rp-pine);
+  --gopy-warning: var(--rp-gold);
+  --gopy-danger: var(--rp-love);
+  --gopy-info: var(--rp-foam);
+
+  /* Type */
+  --gopy-font-sans:
+    "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui,
+    "Helvetica Neue", Arial, sans-serif;
+  --gopy-font-display: var(--gopy-font-sans);
+  --gopy-font-mono:
+    "JetBrains Mono", "SFMono-Regular", "SF Mono", Menlo,
+    "Roboto Mono", "Courier New", Courier, monospace;
+
+  /* Radius / shadow */
+  --gopy-radius-sm: 0;
+  --gopy-radius-md: 0;
+  --gopy-radius-lg: 0;
+  --gopy-shadow-soft: none;
+  --gopy-shadow-strong: none;
+
+  /* Docusaurus theme variables (light) */
+  --ifm-color-primary: #907aa9;
+  --ifm-color-primary-dark: #806796;
+  --ifm-color-primary-darker: #735c87;
+  --ifm-color-primary-darkest: #5e4c6f;
+  --ifm-color-primary-light: #a08dbb;
+  --ifm-color-primary-lighter: #b09fc7;
+  --ifm-color-primary-lightest: #c0b3d2;
+
+  --ifm-font-family-base: var(--gopy-font-sans);
+  --ifm-heading-font-family: var(--gopy-font-sans);
+  --ifm-font-family-monospace: var(--gopy-font-mono);
+  --ifm-font-size-base: 16.5px;
+  --ifm-heading-font-weight: 500;
+  --ifm-h1-font-size: 2.85rem;
+  --ifm-h2-font-size: 2rem;
+  --ifm-h3-font-size: 1.35rem;
+  --ifm-h4-font-size: 1.1rem;
+  --ifm-line-height-base: 1.65;
+
+  --ifm-background-color: var(--gopy-bg-base);
+  --ifm-background-surface-color: var(--gopy-bg-surface);
+  --ifm-navbar-background-color: rgba(250, 244, 237, 0.88);
+  --ifm-navbar-shadow: inset 0 -1px 0 var(--gopy-border);
+
+  --ifm-code-background: rgba(144, 122, 169, 0.10);
+  --ifm-code-color: var(--gopy-primary-strong);
+  --ifm-code-border-radius: 0;
+  --ifm-code-padding-horizontal: 0.32em;
+  --ifm-code-padding-vertical: 0.12em;
+
+  --ifm-toc-border-color: var(--gopy-border);
+  --ifm-color-emphasis-300: var(--gopy-border-strong);
+  --ifm-link-hover-decoration: none;
+
+  --ifm-table-border-color: var(--gopy-border);
+  --ifm-table-stripe-background: var(--gopy-bg-subtle);
+  --ifm-table-head-background: var(--gopy-bg-elevated);
+
+  --docusaurus-highlighted-code-line-bg: rgba(86, 148, 159, 0.20);
+}
+
+[data-theme='dark'] {
+  /* Rose Pine (main) palette */
+  --rp-base: #191724;
+  --rp-surface: #1f1d2e;
+  --rp-overlay: #26233a;
+  --rp-muted: #6e6a86;
+  --rp-subtle: #908caa;
+  --rp-text: #e0def4;
+  --rp-love: #eb6f92;
+  --rp-gold: #f6c177;
+  --rp-rose: #ebbcba;
+  --rp-pine: #31748f;
+  --rp-foam: #9ccfd8;
+  --rp-iris: #c4a7e7;
+  --rp-hl-low: #21202e;
+  --rp-hl-med: #403d52;
+  --rp-hl-high: #524f67;
+
+  --gopy-primary: var(--rp-iris);
+  --gopy-primary-hover: #d3bcef;
+  --gopy-primary-strong: #d8c4ee;
+  --gopy-primary-fg: #191724;
+  --gopy-primary-soft: #2a2240;
+  --gopy-primary-softer: #211d33;
+  --gopy-primary-border: #3a3252;
+  --gopy-accent: var(--rp-foam);
+  --gopy-accent-deep: var(--rp-pine);
+
+  --gopy-bg-base: var(--rp-base);
+  --gopy-bg-surface: var(--rp-surface);
+  --gopy-bg-elevated: var(--rp-overlay);
+  --gopy-bg-subtle: var(--rp-hl-low);
+  --gopy-bg-code: #1a1828;
+
+  --gopy-border: rgba(224, 222, 244, 0.06);
+  --gopy-border-strong: rgba(224, 222, 244, 0.12);
+  --gopy-border-subtle: rgba(224, 222, 244, 0.03);
+
+  --gopy-text-primary: var(--rp-text);
+  --gopy-text-secondary: #c5c2dc;
+  --gopy-text-muted: var(--rp-subtle);
+  --gopy-text-inverse: #191724;
+
+  --gopy-success: var(--rp-foam);
+  --gopy-warning: var(--rp-gold);
+  --gopy-danger: var(--rp-love);
+  --gopy-info: var(--rp-foam);
+
+  --ifm-color-primary: #c4a7e7;
+  --ifm-color-primary-dark: #b08fdc;
+  --ifm-color-primary-darker: #a481d6;
+  --ifm-color-primary-darkest: #875cca;
+  --ifm-color-primary-light: #d4bff0;
+  --ifm-color-primary-lighter: #ddccf2;
+  --ifm-color-primary-lightest: #ecddf7;
+
+  --ifm-background-color: var(--gopy-bg-base);
+  --ifm-background-surface-color: var(--gopy-bg-surface);
+  --ifm-navbar-background-color: rgba(25, 23, 36, 0.85);
+  --ifm-navbar-shadow: inset 0 -1px 0 var(--gopy-border);
+
+  --ifm-code-background: rgba(196, 167, 231, 0.12);
+  --ifm-code-color: #d8c4ee;
+
+  --ifm-toc-border-color: var(--gopy-border);
+  --ifm-color-emphasis-300: var(--gopy-border-strong);
+
+  --ifm-table-border-color: var(--gopy-border);
+  --ifm-table-stripe-background: var(--gopy-bg-subtle);
+  --ifm-table-head-background: var(--gopy-bg-elevated);
+
+  --docusaurus-highlighted-code-line-bg: rgba(156, 207, 216, 0.16);
+  --gopy-shadow-soft: none;
+  --gopy-shadow-strong: none;
+}
+
+/* =========================================================================
+   Base
+   ========================================================================= */
+
+html {
+  font-feature-settings: "ss01", "cv11";
+}
+
+body {
+  font-family: var(--gopy-font-sans);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  color: var(--gopy-text-primary);
+  background: var(--gopy-bg-base);
+}
+
+::selection {
+  background: var(--gopy-primary-soft);
+  color: var(--gopy-primary-strong);
+}
+
+a {
+  text-underline-offset: 3px;
+  text-decoration-thickness: 1px;
+}
+
+a:hover {
+  text-decoration: underline;
+}
+
+/* =========================================================================
+   Headings
+   ========================================================================= */
+
+h1, h2, h3, h4, h5, h6 {
+  font-family: var(--gopy-font-sans);
+  letter-spacing: -0.025em;
+  color: var(--gopy-text-primary);
+  font-weight: 500;
+}
+
+h1 { letter-spacing: -0.04em; font-weight: 400; }
+h2 { letter-spacing: -0.03em; font-weight: 500; }
+h3 { letter-spacing: -0.02em; font-weight: 600; }
+h4 { font-weight: 600; }
+h5, h6 { font-weight: 600; }
+
+strong, b { font-weight: 600; }
+
+.markdown h1 { margin-bottom: 1.5rem; }
+.markdown h2 { margin-top: 3.5rem; margin-bottom: 1rem; }
+.markdown h3 { margin-top: 2.25rem; margin-bottom: 0.75rem; }
+.markdown h4 { margin-top: 1.75rem; margin-bottom: 0.5rem; }
+
+.markdown > p:first-of-type {
+  font-size: 1.18rem;
+  line-height: 1.55;
+  color: var(--gopy-text-secondary);
+}
+
+.hash-link {
+  color: var(--gopy-text-muted);
+  opacity: 0;
+  margin-left: 0.4rem;
+  transition: opacity 0.15s, color 0.15s;
+}
+
+h2:hover .hash-link,
+h3:hover .hash-link,
+h4:hover .hash-link {
+  opacity: 1;
+}
+
+.hash-link:hover {
+  color: var(--gopy-primary);
+}
+
+/* =========================================================================
+   Navbar
+   ========================================================================= */
+
+.navbar {
+  backdrop-filter: saturate(180%) blur(12px);
+  -webkit-backdrop-filter: saturate(180%) blur(12px);
+  border-bottom: 1px solid var(--gopy-border);
+  box-shadow: none;
+}
+
+.navbar__brand { font-family: var(--gopy-font-display); font-weight: 700; }
+.navbar__title { letter-spacing: -0.01em; }
+.navbar__link {
+  font-weight: 500;
+  color: var(--gopy-text-secondary);
+}
+.navbar__link:hover,
+.navbar__link--active { color: var(--gopy-primary); }
+
+.navbar__items--right .navbar__link[href*="github.com"]::before {
+  content: "";
+  display: inline-block;
+  width: 18px;
+  height: 18px;
+  margin-right: 6px;
+  vertical-align: -3px;
+  background: currentColor;
+  -webkit-mask: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='black'><path d='M12 .5C5.65.5.5 5.65.5 12c0 5.08 3.29 9.39 7.86 10.91.58.11.79-.25.79-.56 0-.28-.01-1.02-.02-2-3.2.69-3.87-1.54-3.87-1.54-.52-1.32-1.27-1.67-1.27-1.67-1.04-.71.08-.7.08-.7 1.15.08 1.76 1.18 1.76 1.18 1.02 1.75 2.69 1.25 3.34.95.1-.74.4-1.25.73-1.54-2.55-.29-5.23-1.28-5.23-5.69 0-1.26.45-2.29 1.18-3.1-.12-.29-.51-1.46.11-3.04 0 0 .96-.31 3.15 1.18a10.93 10.93 0 0 1 5.74 0c2.19-1.49 3.15-1.18 3.15-1.18.62 1.58.23 2.75.11 3.04.74.81 1.18 1.84 1.18 3.1 0 4.42-2.69 5.39-5.25 5.68.41.36.78 1.07.78 2.16 0 1.56-.01 2.82-.01 3.21 0 .31.21.68.8.56C20.21 21.39 23.5 17.08 23.5 12 23.5 5.65 18.35.5 12 .5z'/></svg>") center/contain no-repeat;
+  mask: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='black'><path d='M12 .5C5.65.5.5 5.65.5 12c0 5.08 3.29 9.39 7.86 10.91.58.11.79-.25.79-.56 0-.28-.01-1.02-.02-2-3.2.69-3.87-1.54-3.87-1.54-.52-1.32-1.27-1.67-1.27-1.67-1.04-.71.08-.7.08-.7 1.15.08 1.76 1.18 1.76 1.18 1.02 1.75 2.69 1.25 3.34.95.1-.74.4-1.25.73-1.54-2.55-.29-5.23-1.28-5.23-5.69 0-1.26.45-2.29 1.18-3.1-.12-.29-.51-1.46.11-3.04 0 0 .96-.31 3.15 1.18a10.93 10.93 0 0 1 5.74 0c2.19-1.49 3.15-1.18 3.15-1.18.62 1.58.23 2.75.11 3.04.74.81 1.18 1.84 1.18 3.1 0 4.42-2.69 5.39-5.25 5.68.41.36.78 1.07.78 2.16 0 1.56-.01 2.82-.01 3.21 0 .31.21.68.8.56C20.21 21.39 23.5 17.08 23.5 12 23.5 5.65 18.35.5 12 .5z'/></svg>") center/contain no-repeat;
+}
+
+.navbar__items--right .navbar__link[href*="github.com"] {
+  font-size: 0;
+  padding-left: 0.5rem;
+  padding-right: 0.5rem;
+}
+
+/* =========================================================================
+   Sidebar
+   ========================================================================= */
+
+.theme-doc-sidebar-container {
+  border-right: 1px solid var(--gopy-border);
+}
+
+.menu { font-size: 0.92rem; }
+.menu__link {
+  border-radius: 0;
+  color: var(--gopy-text-secondary);
+}
+.menu__link:hover {
+  background: var(--gopy-bg-elevated);
+  color: var(--gopy-text-primary);
+}
+.menu__link--active {
+  background: var(--gopy-primary-soft);
+  color: var(--gopy-primary-strong);
+  font-weight: 600;
+}
+.menu__list-item-collapsible:hover {
+  background: var(--gopy-bg-elevated);
+}
+
+.sidebar-heading > .menu__link,
+.sidebar-heading > .menu__list-item-collapsible > .menu__link {
+  pointer-events: none;
+  cursor: default;
+  text-transform: uppercase;
+  font-size: 0.7rem;
+  letter-spacing: 0.1em;
+  font-weight: 700;
+  color: var(--gopy-text-muted) !important;
+  padding-top: 1rem;
+  padding-bottom: 0.5rem;
+  background: transparent !important;
+}
+
+.sidebar-heading > .menu__list-item-collapsible:hover {
+  background: transparent !important;
+}
+
+.sidebar-heading .menu__caret { display: none; }
+
+.table-of-contents { font-size: 0.85rem; }
+.table-of-contents__link { color: var(--gopy-text-muted); }
+.table-of-contents__link--active,
+.table-of-contents__link--active:hover { color: var(--gopy-primary); }
+
+/* =========================================================================
+   Buttons
+   ========================================================================= */
+
+.button {
+  border-radius: 0;
+  font-weight: 600;
+  letter-spacing: -0.005em;
+  transition: transform 0.12s, box-shadow 0.12s, background 0.12s,
+              border-color 0.12s;
+}
+
+.button--primary {
+  background: var(--gopy-primary);
+  border-color: var(--gopy-primary);
+  color: var(--gopy-primary-fg);
+  box-shadow: none;
+}
+
+.button--primary:hover {
+  background: var(--gopy-primary-hover);
+  border-color: var(--gopy-primary-hover);
+  color: var(--gopy-primary-fg);
+  box-shadow: none;
+}
+
+.button--secondary {
+  background: var(--gopy-bg-surface);
+  border: 1px solid var(--gopy-border-strong);
+  color: var(--gopy-text-primary);
+}
+
+.button--secondary:hover {
+  background: var(--gopy-bg-elevated);
+  border-color: var(--gopy-primary);
+  color: var(--gopy-text-primary);
+}
+
+/* =========================================================================
+   Code (inline + blocks)
+   ========================================================================= */
+
+code {
+  font-family: var(--gopy-font-mono);
+  font-size: 0.88em;
+  font-weight: 500;
+}
+
+.theme-code-block { border-radius: 0; border: 0; box-shadow: none; }
+.prism-code {
+  font-size: 0.88rem;
+  line-height: 1.6;
+  border-radius: 0;
+}
+
+[data-theme='dark'] .theme-code-block {
+  border: 1px solid var(--gopy-border);
+}
+
+.markdown h2 + .theme-code-block,
+.markdown h3 + .theme-code-block,
+.markdown p + .theme-code-block {
+  margin-top: 0.85rem;
+}
+
+/* =========================================================================
+   Prism token tuning. Rose Pine palette.
+   ========================================================================= */
+
+:root {
+  --gopy-tok-keyword: #907aa9;
+  --gopy-tok-builtin: #286983;
+  --gopy-tok-class:   #ea9d34;
+  --gopy-tok-fn:      #d7827e;
+  --gopy-tok-string:  #ea9d34;
+  --gopy-tok-number:  #d7827e;
+  --gopy-tok-comment: #9893a5;
+  --gopy-tok-operator: #797593;
+  --gopy-tok-punct:   #797593;
+  --gopy-tok-bool:    #d7827e;
+}
+
+[data-theme='dark'] {
+  --gopy-tok-keyword: #c4a7e7;
+  --gopy-tok-builtin: #9ccfd8;
+  --gopy-tok-class:   #f6c177;
+  --gopy-tok-fn:      #ebbcba;
+  --gopy-tok-string:  #f6c177;
+  --gopy-tok-number:  #ebbcba;
+  --gopy-tok-comment: #6e6a86;
+  --gopy-tok-operator: #908caa;
+  --gopy-tok-punct:   #908caa;
+  --gopy-tok-bool:    #ebbcba;
+}
+
+.prism-code .token.keyword,
+.prism-code .token.boolean { font-weight: 600; }
+
+.prism-code .token.keyword       { color: var(--gopy-tok-keyword) !important; }
+.prism-code .token.builtin       { color: var(--gopy-tok-builtin) !important; }
+.prism-code .token.class-name    { color: var(--gopy-tok-class)   !important; }
+.prism-code .token.function-call,
+.prism-code .token.function      { color: var(--gopy-tok-fn)      !important; }
+.prism-code .token.string,
+.prism-code .token.char           { color: var(--gopy-tok-string)  !important; }
+.prism-code .token.number         { color: var(--gopy-tok-number)  !important; }
+.prism-code .token.boolean        { color: var(--gopy-tok-bool)    !important; }
+.prism-code .token.comment        { color: var(--gopy-tok-comment) !important; font-style: italic; }
+.prism-code .token.operator       { color: var(--gopy-tok-operator) !important; }
+.prism-code .token.punctuation    { color: var(--gopy-tok-punct)   !important; }
+.prism-code .token.interpolation-punctuation {
+  color: var(--gopy-tok-keyword) !important;
+}
+
+.theme-code-block .buttonGroup__atx button,
+.theme-code-block .clean-btn {
+  border-radius: 0;
+  background: transparent;
+  color: rgba(224, 222, 244, 0.5);
+  border: 0;
+  opacity: 0;
+  padding: 6px;
+  transition: background 0.15s, color 0.15s, opacity 0.15s;
+}
+
+.theme-code-block:hover .buttonGroup__atx button,
+.theme-code-block:hover .clean-btn,
+.theme-code-block .buttonGroup__atx button:focus-visible,
+.theme-code-block .clean-btn:focus-visible {
+  opacity: 1;
+}
+
+.theme-code-block .buttonGroup__atx button:hover,
+.theme-code-block .clean-btn:hover {
+  background: rgba(224, 222, 244, 0.10);
+  color: #faf4ed;
+}
+
+[data-theme='light'] .theme-code-block .buttonGroup__atx button,
+[data-theme='light'] .theme-code-block .clean-btn {
+  color: rgba(87, 82, 121, 0.4);
+}
+
+[data-theme='light'] .theme-code-block .buttonGroup__atx button:hover,
+[data-theme='light'] .theme-code-block .clean-btn:hover {
+  background: rgba(87, 82, 121, 0.08);
+  color: var(--gopy-primary);
+}
+
+.theme-code-block .buttonGroup__atx button svg,
+.theme-code-block .clean-btn svg {
+  fill: currentColor;
+  stroke: currentColor;
+}
+
+/* =========================================================================
+   Tables
+   ========================================================================= */
+
+.markdown table {
+  display: table;
+  width: 100%;
+  border-collapse: separate;
+  border-spacing: 0;
+  border: 0;
+  margin: 1.25rem 0 1.75rem;
+  font-size: 0.92rem;
+}
+
+.markdown table thead { background: var(--gopy-bg-elevated); }
+.markdown table thead tr { border-bottom: 1px solid var(--gopy-border); }
+.markdown table th {
+  font-family: var(--gopy-font-display);
+  font-weight: 700;
+  text-align: left;
+  color: var(--gopy-text-primary);
+  padding: 0.65rem 0.9rem;
+  border: 0;
+}
+.markdown table td {
+  padding: 0.6rem 0.9rem;
+  border: 0;
+  border-top: 1px solid var(--gopy-border-subtle);
+  color: var(--gopy-text-secondary);
+  vertical-align: top;
+}
+.markdown table td code {
+  background: var(--gopy-primary-softer);
+  color: var(--gopy-primary-strong);
+}
+[data-theme='dark'] .markdown table td code {
+  background: var(--gopy-primary-soft);
+}
+.markdown table tbody tr:nth-child(even) {
+  background: var(--gopy-bg-subtle);
+}
+
+/* =========================================================================
+   Blockquote
+   ========================================================================= */
+
+.markdown blockquote {
+  border-left: 3px solid var(--gopy-primary);
+  background: var(--gopy-primary-softer);
+  color: var(--gopy-text-secondary);
+  padding: 0.6rem 1rem;
+  border-radius: 0;
+}
+
+[data-theme='dark'] .markdown blockquote {
+  background: var(--gopy-bg-elevated);
+}
+
+/* =========================================================================
+   Footer
+   ========================================================================= */
+
+.footer {
+  background: var(--gopy-bg-elevated);
+  border-top: 0;
+  color: var(--gopy-text-secondary);
+  padding-top: 3rem;
+  padding-bottom: 2.5rem;
+}
+
+.footer__title {
+  font-family: var(--gopy-font-display);
+  color: var(--gopy-text-primary);
+  font-weight: 700;
+  letter-spacing: -0.005em;
+}
+
+.footer__link-item { color: var(--gopy-text-secondary); }
+.footer__link-item:hover {
+  color: var(--gopy-primary);
+  text-decoration: none;
+}
+
+.footer__copyright {
+  color: var(--gopy-text-muted);
+  font-size: 0.85rem;
+}
+
+[data-theme='dark'] .footer { background: var(--gopy-bg-surface); }
+
+/* =========================================================================
+   Announcement bar
+   ========================================================================= */
+
+div[class^="announcementBar"] {
+  border-bottom: 1px solid var(--gopy-border);
+  font-weight: 500;
+}
+
+div[class^="announcementBar"] a {
+  color: inherit;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+/* =========================================================================
+   Listing cards
+   ========================================================================= */
+
+.listing-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 1rem;
+  margin: 1.5rem 0;
+}
+
+.listing-card {
+  display: block;
+  padding: 1.4rem 1.5rem;
+  background: var(--gopy-bg-surface);
+  border: 0;
+  border-radius: 0;
+  transition: transform 0.15s, box-shadow 0.15s, background 0.15s;
+  text-decoration: none !important;
+  color: inherit !important;
+  position: relative;
+}
+
+.listing-card:hover {
+  background: var(--gopy-primary-softer);
+  transform: translateY(-2px);
+}
+
+.listing-card__icon {
+  width: 32px;
+  height: 32px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 0;
+  background: var(--gopy-primary-soft);
+  color: var(--gopy-primary-strong);
+  margin-bottom: 0.75rem;
+}
+
+[data-theme='dark'] .listing-card__icon {
+  color: #d8c4ee;
+}
+
+.listing-card__icon svg { width: 20px; height: 20px; }
+
+.listing-card__title {
+  font-family: var(--gopy-font-display);
+  font-weight: 700;
+  font-size: 1.05rem;
+  margin: 0 0 0.4rem 0;
+  color: var(--gopy-text-primary);
+  letter-spacing: -0.01em;
+}
+
+.listing-card__description {
+  margin: 0;
+  font-size: 0.92rem;
+  line-height: 1.55;
+  color: var(--gopy-text-secondary);
+}
+
+/* =========================================================================
+   Badge
+   ========================================================================= */
+
+.badge--primary {
+  background: var(--gopy-primary-soft);
+  color: var(--gopy-primary-strong);
+  border: 1px solid var(--gopy-primary-border);
+}
+
+[data-theme='dark'] .badge--primary {
+  color: #d8c4ee;
+  border-color: var(--gopy-primary-border);
+}
+
+/* =========================================================================
+   Pagination
+   ========================================================================= */
+
+.pagination-nav__link {
+  border: 0;
+  background: var(--gopy-bg-surface);
+  border-radius: 0;
+  padding: 1rem 1.25rem;
+  transition: background 0.15s;
+}
+
+.pagination-nav__link:hover {
+  background: var(--gopy-primary-softer);
+}
+
+.pagination-nav__sublabel {
+  color: var(--gopy-text-muted);
+  font-size: 0.78rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  font-weight: 600;
+}
+
+.pagination-nav__label {
+  color: var(--gopy-text-primary);
+  font-weight: 600;
+}
+
+/* =========================================================================
+   Breadcrumbs
+   ========================================================================= */
+
+.breadcrumbs__item .breadcrumbs__link {
+  color: var(--gopy-text-muted);
+}
+
+.breadcrumbs__item--active .breadcrumbs__link {
+  background: transparent;
+  color: var(--gopy-text-primary);
+  font-weight: 600;
+}
+
+/* =========================================================================
+   Admonition (callouts)
+   ========================================================================= */
+
+.theme-admonition {
+  border: 0;
+  border-left: 3px solid var(--gopy-primary);
+  border-radius: 0;
+  background: var(--gopy-bg-surface);
+}
+
+.theme-admonition--note {
+  border-left-color: var(--gopy-info);
+}
+
+.theme-admonition--tip {
+  border-left-color: var(--gopy-success);
+}
+
+.theme-admonition--warning {
+  border-left-color: var(--gopy-warning);
+}
+
+.theme-admonition--danger {
+  border-left-color: var(--gopy-danger);
+}
