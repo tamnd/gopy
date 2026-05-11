@@ -90,4 +90,9 @@ import (
 	// getweakrefs, proxy.
 	// CPython: Modules/config.c.in:49 {"_weakref", PyInit__weakref}
 	_ "github.com/tamnd/gopy/module/_weakref"
+
+	// Built-in module: _abc. Registers itself via module/_abc/module.go
+	// init(). Ports Modules/_abc.c: ABC machinery backing Lib/abc.py.
+	// CPython: Modules/config.c.in:44 {"_abc", PyInit__abc}
+	_ "github.com/tamnd/gopy/module/_abc"
 )
