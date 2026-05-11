@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 
+	"github.com/tamnd/gopy/imp"
 	"github.com/tamnd/gopy/objects"
 	"github.com/tamnd/gopy/parser"
 	"github.com/tamnd/gopy/state"
@@ -43,7 +44,10 @@ func RunFile(ts *state.Thread, filename string, globals, locals objects.Object) 
 	defer restore()
 
 	// Stamp __name__ = "__main__" on the globals if absent, so
-	// `if __name__ == "__main__"` in the script works.
+	// `if __name__ == "__main__"` in the script works, and register
+	// the script as the __main__ module in sys.modules so code that
+	// does __import__("__main__") (unittest.main, doctest, ...) sees
+	// the test classes the script defined.
 	//
 	// CPython: Python/pythonrun.c:472 set_file_name (paired branch)
 	if dict != nil {
@@ -51,6 +55,10 @@ func RunFile(ts *state.Thread, filename string, globals, locals objects.Object) 
 		if has, _ := dict.Contains(nameKey); !has {
 			_ = dict.SetItem(nameKey, objects.NewStr("__main__"))
 			defer func() { _ = dict.DelItem(nameKey) }()
+		}
+		if _, ok := imp.GetModule("__main__"); !ok {
+			imp.AddModule("__main__", objects.NewModuleWithDict("__main__", dict))
+			defer imp.RemoveModule("__main__")
 		}
 	}
 
