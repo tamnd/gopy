@@ -1,0 +1,101 @@
+---
+title: Lib/glob.py
+description: "Unix shell-style pathname expansion: glob() and iglob() translate wildcard patterns into filesystem matches using fnmatch and os.scandir."
+cpython_path: Lib/glob.py
+cpython_version: "3.14"
+lines: 300
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Lib/glob.py`
+
+<CpyLink path="Lib/glob.py" />
+
+`Lib/glob.py` implements `glob()` and `iglob()`, which expand Unix shell wildcard patterns
+against the filesystem. Patterns can contain `*` (any filename segment), `**` (recursive
+directory walk), `?` (single character), and `[...]` (character class). The implementation
+uses `os.scandir` for directory listing and `fnmatch.filter` for pattern matching.
+
+## Map
+
+| Lines | Symbol | Role |
+| ----- | ------ | ---- |
+| 1-30 | imports, `__all__` | Module setup |
+| 31-80 | `glob`, `iglob` | Public API; `iglob` is a generator, `glob` materializes it |
+| 81-140 | `_iglob` | Core generator; splits pattern on `os.sep` and recurses |
+| 141-200 | `_iterdir`, `_iterdir_dirs` | `os.scandir`-based directory listing with `DirEntry` caching |
+| 201-250 | `_glob1`, `_glob0` | Single-segment match with `fnmatch.filter` |
+| 251-300 | `_rlistdir` | Recursive `**` walk yielding all descendant directories |
+
+## Reading
+
+### Pattern splitting and recursion
+
+`_iglob` splits the pattern on `os.sep` into a head (directory prefix) and tail
+(remaining pattern). It handles the three cases: no magic characters (literal path test),
+`**` (recursive walk via `_rlistdir`), and single-segment with wildcards (`_glob1`).
+
+```python
+# CPython: Lib/glob.py:90 _iglob
+def _iglob(pathname, recursive, dironly):
+    dirname, basename = os.path.split(pathname)
+    if not has_magic(pathname):
+        ...
+        yield pathname
+        return
+    if _isrecursive(basename):
+        yield from _rlistdir(dirname, dironly)
+        return
+    dirs = _iglob(dirname, recursive, True) if has_magic(dirname) else [dirname]
+    for dirname in dirs:
+        for name in _glob1(dirname, basename, dironly):
+            yield os.path.join(dirname, name)
+```
+
+### `_glob1`: fnmatch filtering
+
+`_glob1` lists the directory with `os.scandir` (filtering to dirs-only when `dironly` is
+True) and applies `fnmatch.filter` to the resulting names.
+
+```python
+# CPython: Lib/glob.py:170 _glob1
+def _glob1(dirname, pattern, dironly):
+    if not dirname:
+        dirname = os.curdir
+    try:
+        names = _iterdir(dirname, dironly)
+    except OSError:
+        return
+    if not _ishidden(pattern):
+        names = (x for x in names if not _ishidden(x))
+    yield from fnmatch.filter(names, pattern)
+```
+
+### `_rlistdir`: recursive `**` expansion
+
+`_rlistdir` is a depth-first recursive generator that yields the starting directory and
+all descendants. It is used when `**` appears in the pattern.
+
+```python
+# CPython: Lib/glob.py:255 _rlistdir
+def _rlistdir(dirname, dironly):
+    yield dirname
+    for x in _iterdir_dirs(dirname):
+        path = os.path.join(dirname, x) if dirname else x
+        yield from _rlistdir(path, dironly)
+```
+
+## gopy notes
+
+Not yet ported. The Go standard library's `filepath.Glob` provides basic `*` and `?`
+support. A full port at `module/glob/` would need to implement `**` recursion and the
+`[...]` character class via `filepath.Match` or a custom walker.
+
+## CPython 3.14 changes
+
+3.14 refactored `glob` into a `Glob` class (PEP 428 / pathlib unification) that backs
+both `glob.glob()` and `pathlib.Path.glob()`. The old functional API is preserved as a
+compatibility shim. `iglob` now accepts a `root_dir` keyword argument that sets the
+starting directory without changing the pattern.

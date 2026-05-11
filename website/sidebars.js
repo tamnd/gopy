@@ -269,6 +269,7 @@ const sidebars = {
         'annotations/python/typeobject_c2_detail',
         'annotations/python/flowgraph_c_detail',
         'annotations/python/ast_c_detail',
+        'annotations/python/marshal_c_detail',
       ],
     },
     {
@@ -771,6 +772,7 @@ const sidebars = {
         'annotations/modules/module_bufferedio_c_detail',
         'annotations/modules/module_textio_c_detail',
         'annotations/modules/module_sqlite_conn_c_detail',
+        'annotations/modules/module_semaphore_c_detail',
       ],
     },
     {
@@ -1157,6 +1159,8 @@ const sidebars = {
         'annotations/lib/typing_lib_detail',
         'annotations/lib/logging_init2_detail',
         'annotations/lib/unittest_loader_detail',
+        'annotations/lib/glob_lib_detail',
+        'annotations/lib/cookiejar_lib_detail',
       ],
     },
   ],

@@ -1,0 +1,113 @@
+---
+title: Modules/_multiprocessing/semaphore.c
+description: "SemLock C extension: wraps POSIX named/unnamed semaphores and Windows CreateSemaphore into Python objects for multiprocessing.Semaphore and multiprocessing.Lock."
+cpython_path: Modules/_multiprocessing/semaphore.c
+cpython_version: "3.14"
+lines: 700
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Modules/_multiprocessing/semaphore.c`
+
+<CpyLink path="Modules/_multiprocessing/semaphore.c" />
+
+`Modules/_multiprocessing/semaphore.c` implements `_multiprocessing.SemLock`, the C object
+that backs `multiprocessing.Semaphore`, `multiprocessing.BoundedSemaphore`, and
+`multiprocessing.Lock`. On POSIX it wraps `sem_init`/`sem_open`; on Windows it wraps
+`CreateSemaphoreA`. The `SemLock` object is picklable so it can be passed to child
+processes via `multiprocessing.Process`.
+
+## Map
+
+| Lines | Symbol | Role |
+| ----- | ------ | ---- |
+| 1-60 | includes, `SemLockObject` struct | POSIX/Windows union of semaphore handle |
+| 61-180 | `semlock_new` | Constructor: POSIX `sem_open` or `sem_init`, Windows `CreateSemaphore` |
+| 181-300 | `semlock_acquire`, `semlock_release` | POSIX `sem_timedwait`/`sem_post`, Windows `WaitForSingleObject`/`ReleaseSemaphore` |
+| 301-400 | `semlock_getvalue` | `sem_getvalue` on POSIX; simulated on Windows |
+| 401-500 | `semlock_rebuild` | Pickle/unpickle support by re-opening named semaphore |
+| 501-600 | `semlock_enter`, `semlock_exit` | Context manager protocol wrapping acquire/release |
+| 601-700 | `SemLock_Type`, `PyInit__multiprocessing` | Type registration |
+
+## Reading
+
+### POSIX `sem_timedwait` with GIL release
+
+`semlock_acquire` releases the GIL before blocking on the semaphore, using
+`sem_timedwait` with a computed absolute timeout. It retries on `EINTR`.
+
+```c
+// CPython: Modules/_multiprocessing/semaphore.c:200 semlock_acquire
+static PyObject *
+semlock_acquire(SemLockObject *self, PyObject *args, PyObject *kwds)
+{
+    ...
+    do {
+        Py_BEGIN_ALLOW_THREADS
+        res = sem_timedwait(self->handle, &deadline);
+        Py_END_ALLOW_THREADS
+        if (res == 0)
+            break;
+        if (errno != EINTR)
+            break;
+        ...
+    } while (1);
+```
+
+### `semlock_rebuild`: cross-process sharing
+
+`SemLock` objects are shared between processes by name. `semlock_rebuild` re-opens the
+named semaphore in the child process using the same name passed via pickle, without
+resetting the semaphore state.
+
+```c
+// CPython: Modules/_multiprocessing/semaphore.c:430 semlock_rebuild
+static PyObject *
+semlock_rebuild(PyTypeObject *type, PyObject *args)
+{
+    sem_t *handle;
+    const char *name;
+    ...
+    handle = sem_open(name, 0);
+    if (handle == SEM_FAILED) {
+        PyErr_SetFromErrno(PyExc_OSError);
+        return NULL;
+    }
+    return newsemlockobject(type, handle, kind, maxvalue, name);
+}
+```
+
+### Context manager protocol
+
+`semlock_enter` calls `semlock_acquire` with the default timeout. `semlock_exit` calls
+`semlock_release` and ignores its return value, matching the `Lock.__exit__` contract.
+
+```c
+// CPython: Modules/_multiprocessing/semaphore.c:530 semlock_enter
+static PyObject *
+semlock_enter(SemLockObject *self, PyObject *args)
+{
+    return semlock_acquire(self, args, NULL);
+}
+
+static PyObject *
+semlock_exit(SemLockObject *self, PyObject *args)
+{
+    return semlock_release(self, NULL, NULL);
+}
+```
+
+## gopy notes
+
+Not yet ported. Go's `sync.Mutex` and `sync.WaitGroup` cover intra-process locking.
+Cross-process semaphores as used by `multiprocessing` require OS-level primitives;
+`golang.org/x/sys` exposes `sem_open` on POSIX. A `module/_multiprocessing` port would be
+needed to run `Lib/test/test_multiprocessing_*.py` against gopy.
+
+## CPython 3.14 changes
+
+3.14 added `SemLock._is_zero` to check if a semaphore's value is zero without blocking.
+The Windows path gained `WaitForMultipleObjectsEx` for interrupt handling during long
+waits.

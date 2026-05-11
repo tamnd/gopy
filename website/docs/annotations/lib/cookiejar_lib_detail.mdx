@@ -1,0 +1,107 @@
+---
+title: Lib/http/cookiejar.py
+description: "CookieJar and cookie policy classes for HTTP cookie management: RFC 2965 and Netscape cookie parsing, storage, and filtering against cookie policies."
+cpython_path: Lib/http/cookiejar.py
+cpython_version: "3.14"
+lines: 1900
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Lib/http/cookiejar.py`
+
+<CpyLink path="Lib/http/cookiejar.py" />
+
+`Lib/http/cookiejar.py` implements `CookieJar`, the container for HTTP cookies, and the
+`CookiePolicy` hierarchy that governs which cookies are accepted and returned. It handles
+both the old Netscape cookie format (used by most real servers) and RFC 2965. The jar is
+used by `urllib.request` when a `HTTPCookieProcessor` is installed in the opener chain.
+
+## Map
+
+| Lines | Symbol | Role |
+| ----- | ------ | ---- |
+| 1-100 | imports, constants | RFC 2965 header names, domain suffix helpers |
+| 101-300 | `Cookie` | Immutable cookie data class with 16 attributes |
+| 301-600 | `CookiePolicy`, `DefaultCookiePolicy` | Policy hierarchy controlling accept/return decisions |
+| 601-900 | `CookieJar` | Thread-safe container using `RLock`, `set_cookie`, `clear` |
+| 901-1200 | `_cookies_from_attrs_set` | Parse `Set-Cookie` header values into `Cookie` objects |
+| 1201-1600 | `cookies_for_request`, `http2time` | Cookie selection for outgoing requests |
+| 1601-1900 | `LWPCookieJar`, `MozillaCookieJar` | File-backed subclasses for cookie persistence |
+
+## Reading
+
+### `CookieJar.set_cookie`: domain normalization
+
+`set_cookie` normalizes the cookie domain (stripping leading dots, lower-casing) before
+inserting into the three-level dict `self._cookies[domain][path][name]`. An `RLock`
+protects all mutations.
+
+```python
+# CPython: Lib/http/cookiejar.py:650 CookieJar.set_cookie
+def set_cookie(self, cookie):
+    c = self._cookies
+    self._cookies_lock.acquire()
+    try:
+        if cookie.domain not in c:
+            c[cookie.domain] = {}
+        c2 = c[cookie.domain]
+        if cookie.path not in c2:
+            c2[cookie.path] = {}
+        c2[cookie.path][cookie.name] = cookie
+    finally:
+        self._cookies_lock.release()
+```
+
+### `DefaultCookiePolicy.return_ok`: filtering for outgoing requests
+
+`return_ok` applies a chain of checks before allowing a cookie to be sent with a request:
+domain suffix match, path prefix match, secure flag vs HTTPS, port match, and expiry.
+
+```python
+# CPython: Lib/http/cookiejar.py:430 DefaultCookiePolicy.return_ok
+def return_ok(self, cookie, request):
+    if not self.return_ok_version(cookie, request):
+        return False
+    if not self.return_ok_verifiability(cookie, request):
+        return False
+    if not self.return_ok_type(cookie, request):
+        return False
+    if not self.return_ok_secure(cookie, request):
+        return False
+    if not self.return_ok_expires(cookie, request):
+        return False
+    if not self.return_ok_port(cookie, request):
+        return False
+    if not self.return_ok_domain(cookie, request):
+        return False
+    return True
+```
+
+### `LWPCookieJar`: file persistence
+
+`LWPCookieJar` saves and loads cookies in the libwww-perl format (one cookie per line
+with tab-separated fields). `save` iterates the three-level dict and writes each
+non-session cookie; `load` re-parses the file.
+
+```python
+# CPython: Lib/http/cookiejar.py:1680 LWPCookieJar.save
+def save(self, filename=None, ignore_discard=False, ignore_expires=False):
+    ...
+    with open(filename, "w") as f:
+        f.write("#LWP-Cookies-2.0\n")
+        f.write(self.as_lwp_str(ignore_discard, ignore_expires))
+```
+
+## gopy notes
+
+Not yet ported. Go's `net/http` package has a `CookieJar` interface with a minimal
+`Get`/`Set` API, and `golang.org/x/net/publicsuffix` covers the public suffix list used
+by modern cookie policies. A `module/http/cookiejar` port would wrap these.
+
+## CPython 3.14 changes
+
+3.14 deprecated `CookieJar.as_lwp_str` and the LWP format in favour of JSON persistence.
+`DefaultCookiePolicy` gained `allowed_domains` and `blocked_domains` sets for explicit
+allow/deny lists.
