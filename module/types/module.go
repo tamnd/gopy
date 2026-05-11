@@ -1,52 +1,87 @@
-// types module: minimal Go-backed surface. Lib/types.py is mostly
-// `type(x) for x in some_canonical_sample` — a runtime-introspection
-// table of the canonical Python types. unittest's loader and case
-// poke at FunctionType, ModuleType, MethodType, GenericAlias, and
-// MappingProxyType. Until the real Lib/types port lands, expose the
-// existing gopy type singletons under the same names.
+// _types built-in module. Re-exports the canonical built-in type
+// singletons (function, mappingproxy, simplenamespace, ...) so the
+// vendored Lib/types.py can run its `try: from _types import *`
+// fast path instead of falling through to the introspection-based
+// fallback. The fallback path depends on `_f.__code__`, `type.__dict__`,
+// and `sys.implementation` working end-to-end, which is more runtime
+// surface than gopy ships today; this module keeps types.py upstream-
+// byte-equal by feeding it the type objects directly.
 //
-// CPython: Lib/types.py the public surface
+// CPython: Modules/_typesmodule.c:9 _types_exec
+// CPython: Modules/Setup.bootstrap.in:28 _types _typesmodule.c
 
 package types
 
 import (
 	"github.com/tamnd/gopy/imp"
 	"github.com/tamnd/gopy/objects"
+	"github.com/tamnd/gopy/traceback"
 )
 
 func init() {
-	_ = imp.AppendInittab("types", buildModule)
+	_ = imp.AppendInittab("_types", buildModule)
 }
 
+// buildModule lays out the export table in the same order as
+// _typesmodule.c so a future audit can diff them line-by-line.
+//
+// CPython: Modules/_typesmodule.c:20 EXPORT_STATIC_TYPE list
 func buildModule() (*objects.Module, error) {
-	m := objects.NewModule("types")
+	m := objects.NewModule("_types")
 	d := m.Dict()
+
 	entries := []struct {
 		name string
 		val  objects.Object
 	}{
-		{"FunctionType", objects.FunctionType},
+		// CPython: Modules/_typesmodule.c:20 AsyncGeneratorType
+		{"AsyncGeneratorType", objects.AsyncGeneratorType},
+		// CPython: Modules/_typesmodule.c:21 BuiltinFunctionType
 		{"BuiltinFunctionType", objects.BuiltinFunctionType},
+		// CPython: Modules/_typesmodule.c:23 BuiltinMethodType (aliased)
 		{"BuiltinMethodType", objects.BuiltinFunctionType},
-		{"MethodType", objects.BoundMethodType},
-		{"ModuleType", objects.ModuleType},
-		{"GenericAlias", genericAliasType},
-		{"MappingProxyType", mappingProxyType},
-		{"SimpleNamespace", simpleNamespaceType},
-		{"NoneType", objects.None().Type()},
-		{"NotImplementedType", objects.NotImplemented().Type()},
-		{"EllipsisType", objects.Ellipsis().Type()},
-		{"TracebackType", tracebackTypeStub},
-		{"FrameType", frameTypeStub},
+		// CPython: Modules/_typesmodule.c:24 CapsuleType
+		{"CapsuleType", objects.CapsuleType},
+		// CPython: Modules/_typesmodule.c:25 CellType
+		{"CellType", objects.CellType},
+		// CPython: Modules/_typesmodule.c:27 CodeType
 		{"CodeType", objects.CodeType},
-		{"CellType", cellTypeStub},
-		{"GeneratorType", generatorTypeStub},
-		{"CoroutineType", coroutineTypeStub},
-		{"AsyncGeneratorType", asyncGeneratorTypeStub},
-		{"new_class", objects.NewBuiltinFunction("new_class", newClass)},
-		{"prepare_class", objects.NewBuiltinFunction("prepare_class", prepareClass)},
-		{"resolve_bases", objects.NewBuiltinFunction("resolve_bases", resolveBases)},
-		{"DynamicClassAttribute", dynamicClassAttrType},
+		// CPython: Modules/_typesmodule.c:28 CoroutineType
+		{"CoroutineType", objects.CoroutineType},
+		// CPython: Modules/_typesmodule.c:29 EllipsisType
+		{"EllipsisType", objects.Ellipsis().Type()},
+		// CPython: Modules/_typesmodule.c:30 FrameType
+		{"FrameType", objects.FrameType()},
+		// CPython: Modules/_typesmodule.c:31 FunctionType
+		{"FunctionType", objects.FunctionType},
+		// CPython: Modules/_typesmodule.c:32 GeneratorType
+		{"GeneratorType", objects.GeneratorType},
+		// CPython: Modules/_typesmodule.c:34 GetSetDescriptorType
+		{"GetSetDescriptorType", objects.GetSetDescrType},
+		// CPython: Modules/_typesmodule.c:36 LambdaType (aliased)
+		{"LambdaType", objects.FunctionType},
+		// CPython: Modules/_typesmodule.c:37 MappingProxyType
+		{"MappingProxyType", objects.MappingProxyType},
+		// CPython: Modules/_typesmodule.c:38 MemberDescriptorType
+		{"MemberDescriptorType", objects.MemberDescrType},
+		// CPython: Modules/_typesmodule.c:39 MethodDescriptorType
+		{"MethodDescriptorType", objects.MethodDescrType},
+		// CPython: Modules/_typesmodule.c:40 MethodType
+		{"MethodType", objects.BoundMethodType},
+		// CPython: Modules/_typesmodule.c:42 ModuleType
+		{"ModuleType", objects.ModuleType},
+		// CPython: Modules/_typesmodule.c:43 NoneType
+		{"NoneType", objects.None().Type()},
+		// CPython: Modules/_typesmodule.c:44 NotImplementedType
+		{"NotImplementedType", objects.NotImplemented().Type()},
+		// CPython: Modules/_typesmodule.c:45 SimpleNamespace
+		{"SimpleNamespace", objects.NamespaceType},
+		// CPython: Modules/_typesmodule.c:46 TracebackType
+		{"TracebackType", traceback.Type},
+		// CPython: Modules/_typesmodule.c:33 GenericAlias
+		{"GenericAlias", objects.GenericAliasType},
+		// CPython: Modules/_typesmodule.c:48 UnionType
+		{"UnionType", objects.UnionTypeType},
 	}
 	for _, e := range entries {
 		if err := d.SetItem(objects.NewStr(e.name), e.val); err != nil {
@@ -54,54 +89,4 @@ func buildModule() (*objects.Module, error) {
 		}
 	}
 	return m, nil
-}
-
-var (
-	genericAliasType       = objects.NewType("GenericAlias", []*objects.Type{objects.ObjectType()})
-	mappingProxyType       = objects.NewType("mappingproxy", []*objects.Type{objects.ObjectType()})
-	simpleNamespaceType    = newSimpleNamespaceType()
-	tracebackTypeStub      = objects.NewType("traceback", []*objects.Type{objects.ObjectType()})
-	frameTypeStub          = objects.NewType("frame", []*objects.Type{objects.ObjectType()})
-	cellTypeStub           = objects.NewType("cell", []*objects.Type{objects.ObjectType()})
-	generatorTypeStub      = objects.NewType("generator", []*objects.Type{objects.ObjectType()})
-	coroutineTypeStub      = objects.NewType("coroutine", []*objects.Type{objects.ObjectType()})
-	asyncGeneratorTypeStub = objects.NewType("async_generator", []*objects.Type{objects.ObjectType()})
-	dynamicClassAttrType   = objects.NewType("DynamicClassAttribute", []*objects.Type{objects.ObjectType()})
-)
-
-func newSimpleNamespaceType() *objects.Type {
-	t := objects.NewType("SimpleNamespace", []*objects.Type{objects.ObjectType()})
-	t.HasDict = true
-	t.Getattro = objects.GenericGetAttr
-	t.TpNew = func(cls *objects.Type, args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error) {
-		_ = args
-		inst := objects.NewInstance(cls)
-		for k, v := range kwargs {
-			_ = inst.Dict().SetItem(objects.NewStr(k), v)
-		}
-		return inst, nil
-	}
-	return t
-}
-
-func newClass(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
-	if len(args) >= 1 {
-		return args[0], nil
-	}
-	return objects.None(), nil
-}
-
-func prepareClass(_ []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
-	return objects.NewTuple([]objects.Object{
-		objects.TypeType(),
-		objects.NewDict(),
-		objects.NewDict(),
-	}), nil
-}
-
-func resolveBases(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
-	if len(args) >= 1 {
-		return args[0], nil
-	}
-	return objects.NewTuple(nil), nil
 }

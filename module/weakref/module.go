@@ -31,9 +31,13 @@ func buildModule() (*objects.Module, error) {
 		{"proxy", objects.NewBuiltinFunction("proxy", identity)},
 		{"getweakrefcount", objects.NewBuiltinFunction("getweakrefcount", zeroInt)},
 		{"getweakrefs", objects.NewBuiltinFunction("getweakrefs", emptyList)},
-		{"WeakSet", weakSetType},
-		{"WeakValueDictionary", weakValueDictType},
-		{"WeakKeyDictionary", weakKeyDictType},
+		// The WeakSet / WeakValue / WeakKey shims masquerade as the
+		// real types so unittest.signals and functools.singledispatch
+		// can use them as drop-in containers. They have no actual
+		// weakref semantics yet; that lands when 1517 ports weakref.
+		{"WeakSet", objects.SetType},
+		{"WeakValueDictionary", objects.DictType},
+		{"WeakKeyDictionary", objects.DictType},
 		{"WeakMethod", refType},
 		{"finalize", finalizeType},
 		{"ReferenceType", refType},
