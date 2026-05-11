@@ -11,6 +11,8 @@
 package sys
 
 import (
+	"os"
+
 	"github.com/tamnd/gopy/imp"
 	"github.com/tamnd/gopy/objects"
 )
@@ -87,6 +89,47 @@ func buildModule() (*objects.Module, error) {
 		return nil, err
 	}
 	if err := setItem(md, "path", strListAsList(pendingPath)); err != nil {
+		return nil, err
+	}
+	// sys.modules is the same dict the import machinery writes to. The
+	// pointer-share means Python-side mutations (sys.modules[name] = m,
+	// del sys.modules[name]) drive future cache hits and misses.
+	//
+	// CPython: Python/sysmodule.c:3818 _PySys_InitMain (sys.modules = interp->modules)
+	if err := setItem(md, "modules", imp.SysModules()); err != nil {
+		return nil, err
+	}
+	// sys.exc_info reads the per-thread handled-exception slot the vm
+	// maintains across PUSH_EXC_INFO / POP_EXCEPT. unittest's
+	// _Outcome.testPartExecutor and traceback.format_exc both call it
+	// to capture the active exception for reporting.
+	//
+	// CPython: Python/sysmodule.c:558 sys_exc_info_impl
+	if err := setItem(md, "exc_info", objects.NewBuiltinFunction("exc_info", excInfo)); err != nil {
+		return nil, err
+	}
+	// stdout/stderr/stdin wrap the process file descriptors. CPython
+	// hands these to PyConfig and then PyConfig_InitPythonConfig
+	// stamps them onto sys; gopy's PyConfig port is incomplete so the
+	// inittab build wires the streams directly.
+	//
+	// CPython: Python/sysmodule.c:3795 sys_init_streams
+	if err := setItem(md, "stdin", objects.NewFile(os.Stdin, "<stdin>", "r", false, true, false)); err != nil {
+		return nil, err
+	}
+	if err := setItem(md, "stdout", objects.NewFile(os.Stdout, "<stdout>", "w", false, false, true)); err != nil {
+		return nil, err
+	}
+	if err := setItem(md, "stderr", objects.NewFile(os.Stderr, "<stderr>", "w", false, false, true)); err != nil {
+		return nil, err
+	}
+	if err := setItem(md, "__stdin__", objects.NewFile(os.Stdin, "<stdin>", "r", false, true, false)); err != nil {
+		return nil, err
+	}
+	if err := setItem(md, "__stdout__", objects.NewFile(os.Stdout, "<stdout>", "w", false, false, true)); err != nil {
+		return nil, err
+	}
+	if err := setItem(md, "__stderr__", objects.NewFile(os.Stderr, "<stderr>", "w", false, false, true)); err != nil {
 		return nil, err
 	}
 	return m, nil
