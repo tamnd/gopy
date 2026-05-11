@@ -1,0 +1,189 @@
+---
+title: Python/Python-tokenize.c
+description: The _tokenize C extension module, providing fast encoding detection for tokenize.open().
+cpython_path: Python/Python-tokenize.c
+cpython_version: "3.14"
+---
+
+import Tabs from '@theme/Tabs';
+import TabItem from '@theme/TabItem';
+
+## Overview
+
+`Python/Python-tokenize.c` is a roughly 150-line C file that implements the
+`_tokenize` built-in extension module. Its sole public function exposed to
+Python is `_tokenize.detect_encoding`, which backs the `tokenize.open()`
+convenience function in `Lib/tokenize.py`.
+
+The file exists because encoding detection has to read raw bytes before the
+file is decoded, and the logic (`BOM` recognition plus a two-line scan for a
+`coding:` cookie) is already implemented in the C tokenizer as
+`PyTokenizer_FindEncodingFilename`. Wrapping that function in a small C
+extension avoids duplicating the logic in pure Python and keeps
+`tokenize.detect_encoding` consistent with the encoding rules used by the
+parser itself.
+
+The module is compiled unconditionally (unlike optional extension modules in
+`Modules/`) because the tokenize package is part of the standard library and
+encoding detection is required to run `.py` source files reliably.
+
+## Reading Subsections
+
+### 1. `detect_encoding`: the sole exported function
+
+<Tabs>
+<TabItem value="cpython" label="CPython source (abridged)">
+
+```c
+// Python/Python-tokenize.c (CPython 3.14)
+
+/*[clinic input]
+_tokenize.detect_encoding
+    filename: object
+    /
+Detect the encoding of a Python source file.
+
+Scan the first two lines of `filename` for a BOM or coding cookie
+and return (encoding, lines) where `lines` is a list containing the
+raw bytes of the two lines read.
+[clinic start generated code]*/
+
+static PyObject *
+_tokenize_detect_encoding_impl(PyObject *module, PyObject *filename)
+{
+    PyObject *result = NULL;
+    FILE *fp = NULL;
+    char *encoding = NULL;
+
+    const char *fname = PyUnicode_AsUTF8(filename);
+    if (fname == NULL) {
+        return NULL;
+    }
+    fp = fopen(fname, "rb");
+    if (fp == NULL) {
+        PyErr_SetFromErrnoWithFilenameObject(PyExc_OSError, filename);
+        return NULL;
+    }
+    encoding = PyTokenizer_FindEncodingFilename(fileno(fp), filename);
+    ...
+    result = Py_BuildValue("(sO)", encoding ? encoding : "utf-8", lines);
+    ...
+    return result;
+}
+```
+
+</TabItem>
+<TabItem value="notes" label="Notes">
+
+`PyTokenizer_FindEncodingFilename` is declared in
+`Include/internal/pycore_token.h` and implemented in `Parser/tokenize.c`. It
+reads at most two lines from the open file descriptor, checks for a UTF-8 BOM
+(`\xef\xbb\xbf`), and then scans both lines for a PEP 263 coding declaration
+(`# -*- coding: utf-8 -*-` style). If neither is found it returns `NULL`,
+which the wrapper normalises to `"utf-8"`.
+
+The clinic-generated argument clinic (`[clinic input]` block) auto-generates
+the argument parsing boilerplate. The real logic in the implementation function
+is short: open the file, call the C tokenizer helper, package the result.
+
+</TabItem>
+</Tabs>
+
+### 2. `tokenize.open()` integration in pure Python
+
+<Tabs>
+<TabItem value="cpython" label="Lib/tokenize.py (CPython 3.14, abridged)">
+
+```python
+# Lib/tokenize.py
+
+try:
+    from _tokenize import detect_encoding as _detect_encoding_c
+    def detect_encoding(readline):
+        ...
+except ImportError:
+    # Fallback pure-Python implementation used when running from source.
+    def detect_encoding(readline):
+        ...
+
+def open(filename):
+    """Open a file in read only mode using the encoding detected by
+    detect_encoding()."""
+    encoding, lines = detect_encoding(filename)
+    buffered = io.open(filename, "rb")
+    ...
+    return io.TextIOWrapper(buffered, encoding=encoding,
+                            line_buffering=True)
+```
+
+</TabItem>
+<TabItem value="notes" label="Notes">
+
+`tokenize.open()` is the function that tools like `importlib`, `inspect.getsource`,
+and IDEs use to read `.py` files in a way that respects whatever encoding
+declaration the file declares. The `try/except ImportError` pattern means the
+pure-Python fallback handles cases where the `_tokenize` C extension is not yet
+built (for example, when bootstrapping a new CPython build from source).
+
+The C extension is preferred because it shares the exact BOM and cookie scanning
+logic with the C parser, so there is no risk of the tokenizer and the parser
+disagreeing on what encoding a file is using.
+
+</TabItem>
+</Tabs>
+
+### 3. Module initialisation and method table
+
+<Tabs>
+<TabItem value="cpython" label="CPython source (abridged)">
+
+```c
+// Python/Python-tokenize.c (CPython 3.14)
+
+static PyMethodDef tokenize_methods[] = {
+    _TOKENIZE_DETECT_ENCODING_METHODDEF   /* macro from clinic output */
+    {NULL, NULL}
+};
+
+static struct PyModuleDef tokenize_module = {
+    PyModuleDef_HEAD_INIT,
+    "_tokenize",
+    NULL,  /* docstring */
+    -1,
+    tokenize_methods,
+};
+
+PyMODINIT_FUNC
+PyInit__tokenize(void)
+{
+    return PyModule_Create(&tokenize_module);
+}
+```
+
+</TabItem>
+<TabItem value="notes" label="Notes">
+
+The module table exposes exactly one method. The `_TOKENIZE_DETECT_ENCODING_METHODDEF`
+macro is emitted by the Argument Clinic tool into the companion
+`Python/clinic/Python-tokenize.c.h` file, which is `#include`d at the top of
+the main source. This pattern is used across all clinic-annotated modules in
+CPython 3.14.
+
+Because the module state is stateless (`-1` for `m_size` signals no per-module
+state), `PyInit__tokenize` simply calls `PyModule_Create` and returns. There
+is no `Py_TPFLAGS_BASETYPE`, no custom `tp_new`, and no `PyModule_AddObject`
+call, making this one of the simplest extension modules in the CPython tree.
+
+A gopy port would implement this as a `module/tokenize/` package exporting a
+single `DetectEncoding` Go function that wraps the tokenizer's BOM and cookie
+scanning logic once that tokenizer is ported.
+
+</TabItem>
+</Tabs>
+
+## Port status
+
+Not yet ported to gopy. The dependency is `PyTokenizer_FindEncodingFilename`
+from `Parser/tokenize.c`. Once the gopy tokenizer port reaches the encoding
+detection layer, this module becomes a thin wrapper around it and can be shipped
+as `module/tokenize/`.

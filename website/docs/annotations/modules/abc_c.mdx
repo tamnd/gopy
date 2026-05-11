@@ -1,0 +1,130 @@
+---
+title: Modules/_abc.c
+description: C accelerator for the abstract base class machinery; manages per-class ABC caches and drives subclass/instance checks.
+cpython_path: Modules/_abc.c
+cpython_version: "3.14"
+lines: 600
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Modules/_abc.c`
+
+<CpyLink path="Modules/_abc.c" />
+
+<overview>
+C accelerator that backs the `abc` standard-library module. The pure-Python
+fallback lives in `Lib/_py_abc.py`; this file shadows it when the interpreter
+is built with C extensions. The primary goal is speed: ABC subclass checks are
+on the hot path for `isinstance` and `issubclass` calls throughout the standard
+library, so even a modest speedup has broad impact.
+</overview>
+
+## Map
+
+| Symbol | Kind | Purpose |
+|---|---|---|
+| `_ABCData` | C struct | Per-class bookkeeping: caches + version counter |
+| `_abc_init` | function | Attaches an `_ABCData` block to a new ABC class |
+| `_abc_register` | function | Adds a class to `_abc_cache` (the registered-subclass WeakSet) |
+| `_abc_subclasscheck` | function | Main subclass check; consults caches then `__mro__` and `__subclasshook__` |
+| `_abc_instancecheck` | function | Delegates to `_abc_subclasscheck(type(obj), ...)` |
+| `get_cache_token` | function | Returns the global ABC invalidation counter |
+| `_reset_caches` | function | Test helper; clears both WeakSets and bumps the version |
+
+### Per-class state: `_ABCData`
+
+```c
+typedef struct {
+    PyObject *_abc_registry;          /* unused legacy slot */
+    PyObject *_abc_cache;             /* WeakSet of positively registered types */
+    PyObject *_abc_negative_cache;    /* WeakSet of known non-subclasses */
+    unsigned long long _abc_negative_cache_version;
+} _ABCData;
+```
+
+The `_abc_negative_cache_version` field is compared against the module-level
+`_abc_invalidation_counter`. When they differ the negative cache is stale and
+must be ignored.
+
+## Reading
+
+### Cache lookup in `_abc_subclasscheck`
+
+The fast path checks the positive cache first, then the negative cache, before
+touching `__mro__` or calling Python-level hooks.
+
+```c
+/* Positive cache hit - return True immediately */
+r = _PySet_Contains((PyObject *)data->_abc_cache, subclass);
+if (r > 0) {
+    Py_RETURN_TRUE;
+}
+
+/* Negative cache is only valid when the version matches */
+if (data->_abc_negative_cache_version == _abc_invalidation_counter) {
+    r = _PySet_Contains((PyObject *)data->_abc_negative_cache, subclass);
+    if (r > 0) {
+        Py_RETURN_FALSE;
+    }
+}
+```
+
+A cache miss falls through to the full `__mro__` walk and `__subclasshook__`
+call. If `__subclasshook__` returns `NotImplemented` the check continues with
+the MRO scan.
+
+### `__subclasshook__` dispatch
+
+```c
+ok = PyObject_CallMethodOneArg((PyObject *)cls,
+                               &_Py_ID(__subclasshook__), subclass);
+if (ok != NULL) {
+    if (ok == Py_NotImplemented) {
+        Py_DECREF(ok);
+        /* fall through to MRO walk */
+    } else {
+        int result = PyObject_IsTrue(ok);
+        Py_DECREF(ok);
+        if (result > 0) {
+            /* positive: store in cache and return True */
+        }
+        /* negative: store in negative cache, return False */
+    }
+}
+```
+
+The function populates whichever cache is appropriate so the next call hits the
+fast path.
+
+### `get_cache_token`
+
+```c
+static PyObject *
+_abc__get_dump(PyObject *module, PyObject *self)
+{
+    /* Returns the global counter as a Python int.
+       User code can compare two calls to detect any ABC registration
+       event occurring in between. */
+    _abcmodule_state *state = _abcmodule_get_state(module);
+    return PyLong_FromUnsignedLongLong(state->abc_invalidation_counter);
+}
+```
+
+Every call to `ABCMeta.register()` increments the counter, which invaldiates
+all negative caches across all ABC classes simultaneously. This is intentionally
+coarse-grained: a single counter avoids per-class locking.
+
+## gopy mirror
+
+Not yet ported to gopy. The relevant hook points are `objects/type.go` (for
+`__subclasshook__` dispatch) and a future `module/abc/` package.
+
+## CPython 3.14 changes
+
+- The legacy `_abc_registry` slot (present for pickle compatibility since 3.4)
+  was removed from the public C API surface; the field still exists in the
+  struct for binary compatibility but is no longer accessible from Python.
+- Module state is now stored via the per-module state API (`Py_mod_multiple_interpreters`),
+  making the invalidation counter per-interpreter rather than process-global.

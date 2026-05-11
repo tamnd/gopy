@@ -1,0 +1,141 @@
+---
+title: Lib/importlib/_bootstrap.py
+description: Frozen bootstrap import machinery providing ModuleSpec, _find_and_load, BuiltinImporter, and FrozenImporter.
+cpython_path: Lib/importlib/_bootstrap.py
+cpython_version: "3.14"
+lines: 1000
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Lib/importlib/_bootstrap.py`
+
+<CpyLink path="Lib/importlib/_bootstrap.py" />
+
+`_bootstrap.py` is the innermost layer of CPython's import system. It is compiled to bytecode and then frozen directly into the interpreter image via `Python/frozen.c`, so it is available the moment the interpreter starts without needing any file-system access. The module defines `ModuleSpec`, the two built-in finders (`BuiltinImporter` and `FrozenImporter`), and the core dispatch function `_find_and_load`, which is what `builtins.__import__` ultimately calls.
+
+Because this file runs before the rest of the standard library exists, it is written with extreme care: no use of decorators that call back into import, no class hierarchies that require metaclass machinery not yet loaded, and no reliance on modules that might themselves trigger further imports. The `_bootstrap` prefix signals that assumption throughout: every name starting with `_` in this file is considered private to the import machinery itself.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Lib/importlib/_bootstrap.py" lines="1-60">1-60</Cpy> | module docstring, `_wrap`, `_new_module` | Tiny utilities, `sys` and `_imp` references | n/a |
+| <Cpy path="Lib/importlib/_bootstrap.py" lines="61-150">61-150</Cpy> | `_DeadlockError`, `_ModuleLock`, `_DummyModuleLock`, `_ModuleLockManager` | Per-module import locks | Not yet ported |
+| <Cpy path="Lib/importlib/_bootstrap.py" lines="151-230">151-230</Cpy> | `_get_module_lock`, `_lock_unlock_module`, `_find_and_load_unlocked` helper setup | Lock acquisition helpers | Not yet ported |
+| <Cpy path="Lib/importlib/_bootstrap.py" lines="231-360">231-360</Cpy> | `ModuleSpec` | Data class: name, loader, origin, submodule_search_locations, cached | Not yet ported |
+| <Cpy path="Lib/importlib/_bootstrap.py" lines="361-480">361-480</Cpy> | `_init_module_attrs`, `module_from_spec` | Populate module `__spec__`, `__loader__`, `__package__`, etc. | Not yet ported |
+| <Cpy path="Lib/importlib/_bootstrap.py" lines="481-600">481-600</Cpy> | `_load_unlocked`, `_load_backward_compatible`, `_load` | Execute a module given its spec | Not yet ported |
+| <Cpy path="Lib/importlib/_bootstrap.py" lines="601-700">601-700</Cpy> | `BuiltinImporter` | Finder/loader for built-in extension modules (`_imp.is_builtin`) | Not yet ported |
+| <Cpy path="Lib/importlib/_bootstrap.py" lines="701-800">701-800</Cpy> | `FrozenImporter` | Finder/loader for frozen modules (`_imp.is_frozen`) | Not yet ported |
+| <Cpy path="Lib/importlib/_bootstrap.py" lines="801-900">801-900</Cpy> | `_find_spec`, `_find_and_load_unlocked`, `_find_and_load` | Main import dispatch; walks `sys.meta_path` | Not yet ported |
+| <Cpy path="Lib/importlib/_bootstrap.py" lines="901-1000">901-1000</Cpy> | `_gcd_import`, `_handle_fromlist`, `_calc___package__`, `_resolve_name` | `from x import y` support, relative import resolution | Not yet ported |
+
+## Reading
+
+### ModuleSpec: encoding what a module is (lines 231 to 360)
+
+<CpyLink path="Lib/importlib/_bootstrap.py" lines="231-360" />
+
+`ModuleSpec` is the central data object of the import system. Every finder that participates in `sys.meta_path` returns either `None` (not found) or a `ModuleSpec`. The spec carries the module's fully qualified name, a reference to the loader that will execute it, the filesystem path it came from (`origin`), and, for packages, the list of directories to search for submodules (`submodule_search_locations`). It also holds the path where a `.pyc` cache file would live (`cached`).
+
+```python
+class ModuleSpec:
+    def __init__(self, name, loader, *, origin=None,
+                 loader_state=None, is_package=None):
+        self.name = name
+        self.loader = loader
+        self.origin = origin
+        self.loader_state = loader_state
+        self.submodule_search_locations = [] if is_package else None
+        self._set_fileattr = False
+        self.cached = None
+        self.parent  # property: last dot-prefix of name
+
+    @property
+    def parent(self):
+        if self.submodule_search_locations is not None:
+            return self.name
+        else:
+            return self.name.rpartition('.')[0]
+```
+
+The distinction between `submodule_search_locations` being `None` (a plain module) versus an empty list (a namespace package or regular package) is load-bearing: code that tests `spec.submodule_search_locations is not None` uses it as the canonical "is this a package?" check throughout the import system.
+
+### _find_and_load: the import dispatch loop (lines 801 to 900)
+
+<CpyLink path="Lib/importlib/_bootstrap.py" lines="801-900" />
+
+`_find_and_load` is called by `builtins.__import__` for every import statement. It first checks `sys.modules` for a cached result. On a miss it acquires the per-module lock and calls `_find_and_load_unlocked`, which walks `sys.meta_path` looking for a finder whose `find_spec` returns a non-`None` spec, then calls `_load_unlocked` to execute the module.
+
+```python
+def _find_and_load(name, import_):
+    module = sys.modules.get(name, _NEEDS_LOADING)
+    if module is _NEEDS_LOADING:
+        return _find_and_load_unlocked(name, import_)
+    if module is None:
+        message = ('import of {} halted; '
+                   'use of sys.modules[{!r}] = None'.format(name, name))
+        raise ModuleNotFoundError(message)
+    _lock_unlock_module(name)
+    return module
+
+def _find_and_load_unlocked(name, import_):
+    path = None
+    parent = name.rpartition('.')[0]
+    if parent:
+        if parent not in sys.modules:
+            _call_with_frames_cleaned(import_, parent)
+        parent_module = sys.modules[parent]
+        try:
+            path = parent_module.__path__
+        except AttributeError:
+            msg = ...
+            raise ModuleNotFoundError(msg, name=name) from None
+    spec = _find_spec(name, path, None)
+    if spec is None:
+        raise ModuleNotFoundError(f'No module named {name!r}', name=name)
+    else:
+        module = _load_unlocked(spec)
+    ...
+    return module
+```
+
+The parent import (`import_('http')` before `import_('http.server')`) is triggered recursively through `_call_with_frames_cleaned`, which strips `_bootstrap` frames from tracebacks so users see clean import errors.
+
+### _load_unlocked: two-phase module execution (lines 481 to 600)
+
+<CpyLink path="Lib/importlib/_bootstrap.py" lines="481-600" />
+
+`_load_unlocked` implements the two-phase load mandated by PEP 451. Phase one calls `spec.loader.create_module(spec)` to allow the loader to supply a custom module object (most loaders return `None`, triggering the default `types.ModuleType` creation). Phase two calls `spec.loader.exec_module(module)` to populate the module's namespace. Between phases the partially-initialized module is inserted into `sys.modules` under the key `spec.name`, so circular imports see a live (if incomplete) module rather than triggering infinite recursion.
+
+```python
+def _load_unlocked(spec):
+    module = module_from_spec(spec)
+    sys.modules[spec.name] = module
+    try:
+        if spec.loader is None:
+            if spec.submodule_search_locations is None:
+                raise ImportError('...')
+        else:
+            spec.loader.exec_module(module)
+    except:
+        try:
+            del sys.modules[spec.name]
+        except KeyError:
+            pass
+        raise
+    _verbose_message('import {!r} # {!r}', spec.name, spec.loader)
+    return sys.modules[spec.name]
+```
+
+The `try/except` that removes the partial entry on failure ensures `sys.modules` is always consistent: a name either maps to a fully initialized module or is absent.
+
+## gopy mirror
+
+Not yet ported as a Python module. gopy handles import directly in Go inside `vm/eval_import.go`. The `IMPORT_NAME` opcode handler there performs the equivalent of `_find_and_load` by consulting an internal module registry (built-in modules registered at startup) rather than walking `sys.meta_path`. There is no `ModuleSpec` type in gopy today; the loader/spec split is implicit in how `vm/eval_import.go` constructs module objects. A future port would introduce a `ModuleSpec` struct mirroring the Python class and route import through it, enabling proper support for `importlib.util.find_spec` and dynamic loader registration.
+
+## CPython 3.14 changes
+
+CPython 3.14 hardened `_bootstrap.py` for the free-threaded build (PEP 703). `_ModuleLock` was reworked to use per-module `PyMutex` objects rather than the global import lock, allowing concurrent imports of different top-level modules. The `_find_and_load` path gained a fast-path check using `sys.modules` reads that are safe under free-threading before falling back to the locked slow path. `ModuleSpec` itself gained a `_lock` slot to protect mutation of `submodule_search_locations` during concurrent package imports.

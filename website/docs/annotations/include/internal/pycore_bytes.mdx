@@ -1,0 +1,148 @@
+---
+title: Include/internal/pycore_bytes.h
+description: Internal bytes object helpers for fast join, repeat, equality, and buffered writing.
+cpython_path: Include/internal/pycore_bytes.h
+cpython_version: "3.14"
+---
+
+import Tabs from '@theme/Tabs';
+import TabItem from '@theme/TabItem';
+
+## Overview
+
+`Include/internal/pycore_bytes.h` is a roughly 50-line internal header that declares
+low-level helpers for the `bytes` type. It is distinct from
+`Include/internal/pycore_bytes_methods.h`, which covers the shared
+`bytes`/`bytearray` sequence operations. Everything here is specific to the
+`bytes` object itself: fast construction, repetition, equality testing, and the
+`_PyBytesWriter` buffered-output API.
+
+The public C API surface for `bytes` lives in `Include/bytesobject.h` and
+`Include/cpython/bytesobject.h`. This header fills in the parts that are only
+needed by the interpreter core and should never be called from extension
+modules.
+
+## Reading Subsections
+
+### 1. Fast join and repeat helpers
+
+<Tabs>
+<TabItem value="cpython" label="CPython declaration">
+
+```c
+// Include/internal/pycore_bytes.h (CPython 3.14)
+
+/* Join a list or tuple of bytes objects with sep as the separator.
+   sep may be NULL, which is treated as an empty bytes object.
+   Returns a new reference.  The caller must hold the GIL. */
+PyAPI_FUNC(PyObject *) _PyBytes_Join(PyObject *sep, PyObject *iterable);
+
+/* Return a new bytes object that is ob repeated count times.
+   Handles the count == 0 and count == 1 fast-paths internally. */
+PyAPI_FUNC(PyObject *) _PyBytes_Repeat(PyObject *ob, Py_ssize_t count);
+```
+
+</TabItem>
+<TabItem value="notes" label="Notes">
+
+`_PyBytes_Join` is the engine behind `bytes.join()`. The public method slots
+into `bytesobject.c`; this function does the actual allocation and copy loop.
+Passing `NULL` for `sep` avoids constructing a temporary empty-bytes object and
+is used by several fast paths in the compiler and marshal code.
+
+`_PyBytes_Repeat` mirrors the `*` operator. The important edge cases are
+`count <= 0` (returns `b""`) and `count == 1` (returns the same object with an
+incremented reference count rather than copying).
+
+</TabItem>
+</Tabs>
+
+### 2. Pointer-equality shortcut in `_PyBytes_Equal`
+
+<Tabs>
+<TabItem value="cpython" label="CPython declaration">
+
+```c
+// Include/internal/pycore_bytes.h (CPython 3.14)
+
+/* Return 1 if a and b contain the same bytes, 0 otherwise.
+   Both arguments must be PyBytesObject*.
+   Performs a pointer-equality check before falling back to memcmp,
+   so comparing an object to itself is O(1). */
+PyAPI_FUNC(int) _PyBytes_Equal(PyObject *a, PyObject *b);
+```
+
+</TabItem>
+<TabItem value="notes" label="Notes">
+
+The CPython dict and set implementations call `_PyBytes_Equal` when the hash
+values of two keys match. The pointer check (`a == b`) handles the common case
+where the same interned bytes object appears as both the stored key and the
+lookup key, short-circuiting the `memcmp` entirely.
+
+This is separate from `PyObject_RichCompareBool(a, b, Py_EQ)` because it skips
+the rich-comparison machinery and the type check, making it tighter for the
+one case where both sides are known to be `bytes`.
+
+</TabItem>
+</Tabs>
+
+### 3. The `_PyBytesWriter` API
+
+<Tabs>
+<TabItem value="cpython" label="CPython declaration">
+
+```c
+// Include/internal/pycore_bytes.h (CPython 3.14)
+// (public header Include/cpython/bytesobject.h re-exports the struct;
+//  the internal header adds the low-level init/reset helpers.)
+
+typedef struct {
+    PyObject *buffer;       /* bytes or bytearray accumulator */
+    Py_ssize_t allocated;   /* allocated size of the buffer   */
+    Py_ssize_t min_size;    /* minimum pre-allocation hint    */
+    int use_bytearray;      /* 1 if accumulating into bytearray */
+    int overallocate;       /* 1 if geometric growth is on    */
+    int readonly;           /* 1 if the buffer is read-only   */
+} _PyBytesWriter;
+
+PyAPI_FUNC(void) _PyBytesWriter_Init(_PyBytesWriter *writer);
+PyAPI_FUNC(PyObject *) _PyBytesWriter_Finish(_PyBytesWriter *writer,
+                                              void *str);
+PyAPI_FUNC(void) _PyBytesWriter_Dealloc(_PyBytesWriter *writer);
+PyAPI_FUNC(void *) _PyBytesWriter_Alloc(_PyBytesWriter *writer,
+                                         Py_ssize_t size);
+PyAPI_FUNC(void *) _PyBytesWriter_Prepare(_PyBytesWriter *writer,
+                                           void *str,
+                                           Py_ssize_t size);
+PyAPI_FUNC(void *) _PyBytesWriter_WriteBytes(_PyBytesWriter *writer,
+                                              void *str,
+                                              const void *bytes,
+                                              Py_ssize_t size);
+```
+
+</TabItem>
+<TabItem value="notes" label="Notes">
+
+`_PyBytesWriter` is the standard arena used throughout `Objects/bytesobject.c`,
+`Objects/unicodeobject.c` (for UTF-8 encoding), and the codec machinery whenever
+the total output length is not known upfront.
+
+The workflow is: call `_PyBytesWriter_Init`, then repeatedly call `_PyBytesWriter_Prepare`
+or `_PyBytesWriter_WriteBytes` to append data, and finally call
+`_PyBytesWriter_Finish` to obtain the finished `bytes` (or `bytearray`) object.
+If an error occurs mid-way, `_PyBytesWriter_Dealloc` releases the accumulator
+without leaking memory.
+
+The `overallocate` flag enables geometric growth (similar to `list` internals),
+which is useful when the number of append operations is large and unknown.
+
+</TabItem>
+</Tabs>
+
+## Port status
+
+Not yet ported to gopy. The `_PyBytesWriter` pattern would map to a Go
+`bytes.Buffer` or a pre-allocated `[]byte` slice with manual length tracking.
+`_PyBytes_Join` and `_PyBytes_Repeat` are straightforward ports once the gopy
+`bytes` object representation is stable.

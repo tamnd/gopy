@@ -1,0 +1,156 @@
+---
+title: Include/internal/pycore_memoryobject.h
+description: Internal memoryview helpers, the managed buffer type, and the Py_buffer acquisition interface.
+cpython_path: Include/internal/pycore_memoryobject.h
+cpython_version: "3.14"
+---
+
+import Tabs from '@theme/Tabs';
+import TabItem from '@theme/TabItem';
+
+## Overview
+
+`Include/internal/pycore_memoryobject.h` is a roughly 40-line internal header
+that exposes the private internals of the memoryview machinery. The public API
+(`PyMemoryView_FromObject`, `PyMemoryView_FromMemory`, etc.) lives in
+`Include/memoryobject.h`. This internal header adds:
+
+- `_PyManagedBuffer_Type` -- the hidden object that holds the exporter
+  reference and the `Py_buffer` struct, shared among all views derived from
+  the same export.
+- `_PyMemoryView_FromBufferProc` -- a way to create a memoryview directly from
+  a `Py_buffer` that was filled in by C code rather than by calling
+  `PyObject_GetBuffer`.
+- `_PyMemoryView_GetBuffer` -- an accessor that reaches into the internals of a
+  `memoryview` object to retrieve the underlying `Py_buffer` pointer without
+  going through the public slot.
+
+Understanding the relationship between `_PyManagedBuffer` and `PyMemoryView` is
+essential for anyone porting or reimplementing the buffer protocol.
+
+## Reading Subsections
+
+### 1. The managed buffer object
+
+<Tabs>
+<TabItem value="cpython" label="CPython declaration">
+
+```c
+// Include/internal/pycore_memoryobject.h (CPython 3.14)
+
+/* Flags for _PyManagedBufferObject.flags */
+#define _Py_MANAGED_BUFFER_RELEASED   0x001  /* PyBuffer_Release() was called */
+#define _Py_MANAGED_BUFFER_FREE_FORMAT 0x002 /* format string must be freed   */
+
+typedef struct {
+    PyObject_HEAD
+    int flags;              /* combination of the flags above */
+    Py_ssize_t exports;     /* number of memoryview objects pointing here */
+    Py_buffer master;       /* the Py_buffer obtained from the exporter   */
+} _PyManagedBufferObject;
+
+PyAPI_DATA(PyTypeObject) _PyManagedBuffer_Type;
+```
+
+</TabItem>
+<TabItem value="notes" label="Notes">
+
+When `PyMemoryView_FromObject(obj)` is called, CPython calls
+`PyObject_GetBuffer(obj, &mb->master, flags)` once and stores the result in a
+freshly allocated `_PyManagedBufferObject`. Every subsequent slice or cast of
+that view increments `mb->exports` and stores a pointer to the same managed
+buffer rather than calling `PyObject_GetBuffer` again.
+
+`PyBuffer_Release` is not called on `mb->master` until `exports` drops to zero.
+This guarantees the exporter object (the original `bytes`, `array`, etc.) stays
+alive and its buffer remains valid for as long as any view exists, even after
+the original Python variable goes out of scope.
+
+The `_Py_MANAGED_BUFFER_FREE_FORMAT` flag handles the case where the format
+string was dynamically allocated (e.g., for struct-array views) and must be
+`PyMem_Free`'d rather than simply abandoned.
+
+</TabItem>
+</Tabs>
+
+### 2. Creating a memoryview from a pre-filled `Py_buffer`
+
+<Tabs>
+<TabItem value="cpython" label="CPython declaration">
+
+```c
+// Include/internal/pycore_memoryobject.h (CPython 3.14)
+
+/* Create a new memoryview from a Py_buffer that has already been filled
+   in by the caller.  The memoryview takes ownership of the buffer:
+   PyBuffer_Release() will be called on it when the last view is
+   released.  Returns a new reference, or NULL on error. */
+PyAPI_FUNC(PyObject *)
+_PyMemoryView_FromBufferProc(PyObject *base,
+                              int flags,
+                              getbufferproc bufferproc);
+```
+
+</TabItem>
+<TabItem value="notes" label="Notes">
+
+This function is used inside `Objects/memoryobject.c` when constructing a
+view from a C-level caller that has already arranged a `Py_buffer` (for
+example, when the `pickle` module or the `struct` module creates a read-only
+view over a raw C array). The `getbufferproc` pointer is invoked exactly once
+to fill the managed buffer's `master` field.
+
+The `base` argument becomes the exporter kept alive by the managed buffer. If
+`base` is `NULL`, the buffer is considered to have no Python-level owner and
+will not trigger any reference counting on release (used for static, never-freed
+buffers in extension modules).
+
+Contrast this with `PyMemoryView_FromMemory(ptr, len, flags)`, which is the
+public API for wrapping a raw `char *` pointer without any exporter object.
+
+</TabItem>
+</Tabs>
+
+### 3. Accessing the raw `Py_buffer` from a memoryview
+
+<Tabs>
+<TabItem value="cpython" label="CPython declaration">
+
+```c
+// Include/internal/pycore_memoryobject.h (CPython 3.14)
+
+/* Return the Py_buffer* for the given memoryview object.
+   The caller must ensure mview is a PyMemoryView_Object*.
+   The returned pointer is valid as long as mview is alive. */
+static inline Py_buffer *
+_PyMemoryView_GetBuffer(PyObject *mview)
+{
+    assert(PyMemoryView_Check(mview));
+    return &((_PyMemoryViewObject *)mview)->view;
+}
+```
+
+</TabItem>
+<TabItem value="notes" label="Notes">
+
+The public `PyMemoryView_GET_BUFFER(mview)` macro (in `Include/memoryobject.h`)
+does the same thing, but it is available only to code that includes the
+`cpython/` tier headers. Internal C files use `_PyMemoryView_GetBuffer` so that
+the dependency is explicit and auditable.
+
+The `view` field in `_PyMemoryViewObject` is a copy of the `master` field from
+the underlying `_PyManagedBufferObject`, adjusted for any slicing or casting
+that was applied. Modifying it directly (rather than through the public API)
+risks desynchronising the two, so this accessor is intentionally read-only in
+practice.
+
+</TabItem>
+</Tabs>
+
+## Port status
+
+Not yet ported to gopy. The buffer protocol is a prerequisite for memoryview
+support. A gopy port would represent `_PyManagedBufferObject` as a Go struct
+holding a reference count, an exporter `Object` pointer, and an equivalent of
+`Py_buffer` (shape, strides, format string, and a raw `unsafe.Pointer` to the
+data).
