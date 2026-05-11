@@ -143,6 +143,7 @@ func TestEvalMakeFunctionAndCall(t *testing.T) {
 		Code: append(
 			instr(compile.LOAD_FAST, 0),
 			instr(compile.RETURN_VALUE, 0)...),
+		Argcount:  1,
 		Varnames:  []string{"x"},
 		Stacksize: 4,
 		Name:      "id",
@@ -715,17 +716,21 @@ func TestEvalMatchKeysMissing(t *testing.T) {
 
 func TestEvalGenerator(t *testing.T) {
 	ts := state.NewThread()
-	// A code object representing a generator that yields 42 once. Layout:
-	//   RESUME 0           - initial entry; advances to RETURN_GENERATOR
-	//   RETURN_GENERATOR 0 - detaches frame; first EvalCode call returns the gen
-	//   LOAD_CONST 0 (42)  - body starts here on first Send()
+	// A code object representing a generator that yields 42 once. Layout
+	// matches CPython's insert_prefix_instructions for CO_GENERATOR:
+	//   RETURN_GENERATOR 0 - first instruction; detaches frame
+	//                        and returns the gen to the caller
+	//   POP_TOP 0          - paired with RETURN_GENERATOR; skipped on resume
+	//   RESUME 0           - body entry on first Send()
+	//   LOAD_CONST 0 (42)  - body starts pushing the yielded value
 	//   YIELD_VALUE 0      - yields 42, blocks for next Send()
 	//   RESUME 1           - re-entry after yield
 	//   RETURN_VALUE 0     - returns the sent value (None); goroutine signals StopIteration
 	co := &objects.Code{
 		Code: concat(
-			instr(compile.RESUME, 0),
 			instr(compile.RETURN_GENERATOR, 0),
+			instr(compile.POP_TOP, 0),
+			instr(compile.RESUME, 0),
 			instr(compile.LOAD_CONST, 0),
 			instr(compile.YIELD_VALUE, 0),
 			instr(compile.RESUME, 1),

@@ -52,6 +52,9 @@ func MakeTpCall(callable Object, args []Object, nargs int, keywords Object) (Obj
 	if nargs < 0 {
 		return nil, fmt.Errorf("MakeTpCall: nargs %d < 0", nargs)
 	}
+	if callable == nil {
+		return nil, fmt.Errorf("TypeError: 'NoneType' object is not callable")
+	}
 	t := callable.Type()
 	if t.Call == nil {
 		return nil, objectIsNotCallable(callable)

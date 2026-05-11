@@ -54,6 +54,37 @@ func TestPropagateConditionalJump(t *testing.T) {
 	}
 }
 
+// TestPropagateConditionalJumpSkipsBackward checks that the pass does
+// not retarget a POP_JUMP_IF_X through a JUMP_BACKWARD whose final
+// landing site is behind the conditional. The opcode is forward-only
+// once the assembler resolves offsets; threading it backwards encodes
+// a positive delta past end-of-code. Reproducer pattern: an `if` that
+// is the last statement of a `for` body parks the if's end-label on
+// top of the loop back-edge, and without the guard the conditional
+// gets pulled all the way onto FOR_ITER.
+func TestPropagateConditionalJumpSkipsBackward(t *testing.T) {
+	// 0: FOR_ITER -> 5            (loop entry, header)
+	// 1: LOAD_CONST 0
+	// 2: POP_JUMP_IF_FALSE -> 3   (if cond ...)
+	// 3: JUMP_BACKWARD -> 0       (back to FOR_ITER, also the if-end)
+	// 4: RETURN_VALUE             (cleanup)
+	// 5: RETURN_VALUE
+	seq := &Sequence{Instrs: []Instr{
+		{Op: FOR_ITER, Oparg: 5},
+		{Op: LOAD_CONST, Oparg: 0},
+		{Op: POP_JUMP_IF_FALSE, Oparg: 3},
+		{Op: JUMP_BACKWARD, Oparg: 0},
+		{Op: RETURN_VALUE},
+		{Op: RETURN_VALUE},
+	}}
+	if n := propagateConditionalJumps(seq); n != 0 {
+		t.Fatalf("propagateConditionalJumps rewrote %d, want 0 (backward target)", n)
+	}
+	if got := seq.Instrs[2].Oparg; got != 3 {
+		t.Errorf("POP_JUMP_IF_FALSE oparg = %d, want 3 (left untouched)", got)
+	}
+}
+
 // TestThreadJumpsCycleSafe is a degenerate self-loop that must not
 // hang.
 func TestThreadJumpsCycleSafe(t *testing.T) {

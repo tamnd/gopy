@@ -59,6 +59,21 @@ func RunString(ts *state.Thread, src, filename string, mode parser.Mode, globals
 //
 // CPython: Python/pythonrun.c:592 PyRun_SimpleStringFlags
 func RunSimpleString(ts *state.Thread, command string, globals objects.Object, stderr io.Writer) int {
+	// Stamp __name__ = "__main__" on the globals if absent. CPython
+	// does this through the import-machinery dance in run_command:
+	// _PyImport_AddModuleObject builds the __main__ module, and its
+	// dict is the dict pymain runs the command against. Until 1623
+	// lands the same flow we mirror the visible effect here so class
+	// bodies in the -c source can look up __name__.
+	//
+	// CPython: Modules/main.c:289 pymain_run_command
+	// CPython: Python/pythonrun.c:472 _PyImport_AddModuleObject
+	if d, ok := globals.(*objects.Dict); ok {
+		nameKey := objects.NewStr("__name__")
+		if has, _ := d.Contains(nameKey); !has {
+			_ = d.SetItem(nameKey, objects.NewStr("__main__"))
+		}
+	}
 	if _, err := RunString(ts, command, "<string>", parser.ModeFile, globals, nil); err != nil {
 		return printRunError(ts, err, stderr)
 	}
@@ -84,13 +99,22 @@ func printRunError(ts *state.Thread, err error, w io.Writer) int {
 // will collapse once spec 1687 retires compile.Code.
 func liftCode(c *compile.Code) *objects.Code {
 	return &objects.Code{
-		Code:           c.Code,
-		Consts:         c.Consts,
-		Names:          c.Names,
-		Varnames:       c.VarNames,
-		Freevars:       c.FreeVars,
-		Cellvars:       c.CellVars,
-		Stacksize:      c.Stacksize,
-		ExceptionTable: c.ExceptionTable,
+		Argcount:        c.Argcount,
+		PosonlyArgcount: c.PosOnlyArgCount,
+		KwonlyArgcount:  c.KwOnlyArgCount,
+		Stacksize:       c.Stacksize,
+		Flags:           int(c.Flags),
+		Code:            c.Code,
+		Consts:          c.Consts,
+		Names:           c.Names,
+		Varnames:        c.VarNames,
+		Freevars:        c.FreeVars,
+		Cellvars:        c.CellVars,
+		Filename:        c.Filename,
+		Name:            c.Name,
+		Qualname:        c.Qualname,
+		Firstlineno:     c.Firstlineno,
+		Linetable:       c.Linetable,
+		ExceptionTable:  c.ExceptionTable,
 	}
 }

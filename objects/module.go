@@ -39,6 +39,24 @@ func NewModule(name string) *Module {
 	return m
 }
 
+// NewModuleWithDict wraps an existing dict as a module's __dict__.
+// Used by pythonrun to expose the running script as the __main__
+// module: the script's globals dict IS the module dict, so test
+// frameworks that look up the script's symbols via
+// __import__("__main__") see the same objects user code is touching.
+//
+// CPython: Python/pythonrun.c:1276 pyrun_file sets globals to the
+// __main__ module's dict; gopy keeps the globals dict and adopts it
+// into a Module wrapper.
+func NewModuleWithDict(name string, d *Dict) *Module {
+	m := &Module{dict: d}
+	m.init(ModuleType)
+	if has, _ := d.Contains(NewStr("__name__")); !has {
+		_ = d.SetItem(NewStr("__name__"), NewStr(name))
+	}
+	return m
+}
+
 // Dict returns the module's attribute dict (__dict__).
 //
 // CPython: Objects/moduleobject.c:459 PyModule_GetDict
@@ -62,6 +80,16 @@ func (m *Module) SetState(s any) { m.state = s }
 func moduleGetattr(o Object, name Object) (Object, error) {
 	m := o.(*Module)
 	key := attrNameStr(name)
+	// __dict__ is the canonical module attribute that exposes the
+	// backing namespace. CPython sets it via module_init_dict and
+	// answers tp_getattro by checking the slot before the dict; gopy
+	// keeps __dict__ off the dict to avoid the obvious self-reference,
+	// so satisfy the lookup here.
+	//
+	// CPython: Objects/moduleobject.c:88 module_init_dict
+	if key == "__dict__" {
+		return m.dict, nil
+	}
 	v, err := m.dict.GetItem(name)
 	if err == nil {
 		return v, nil

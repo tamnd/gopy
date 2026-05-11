@@ -1,5 +1,10 @@
 package objects
 
+import (
+	"reflect"
+	"unsafe"
+)
+
 // CompareOp identifies the six comparison operators Python exposes
 // through __lt__/__le__/__eq__/__ne__/__gt__/__ge__. Numeric values
 // match the C macros Py_LT..Py_GE so direct ports of slot
@@ -57,6 +62,16 @@ type Type struct {
 	Iter     func(o Object) (Object, error)
 	IterNext func(o Object) (Object, error)
 	Call     func(o Object, args []Object, kwargs map[string]Object) (Object, error)
+	// TpNew is the tp_new slot: the constructor invoked when the type
+	// is called (e.g. int(x)). typeCall reaches this through the
+	// metaclass tp_call. Built-in primitive types set TpNew rather
+	// than Call so that calling instances of the type stays a TypeError
+	// and callable(obj) keeps returning False; CPython encodes the same
+	// distinction by leaving PyLong_Type.tp_call NULL while wiring
+	// long_new through PyType_Type.tp_call.
+	//
+	// CPython: Include/cpython/typeobject.h tp_new
+	TpNew func(cls *Type, args []Object, kwargs map[string]Object) (Object, error)
 	// Vectorcall is the PEP 590 fast-call slot. When non-nil, the call
 	// machinery uses this instead of going through Call. args is a flat
 	// array of positional values followed by keyword values; nargsf is
@@ -186,6 +201,16 @@ func init() {
 	typeType.refcnt.Store(1)
 	typeType.Bases = []*Type{}
 	typeType.MRO = []*Type{typeType}
+	typeType.Hash = identityHash
+}
+
+// identityHash hashes an object by its pointer address. Mirrors
+// CPython's _Py_HashPointer, which is what type / object inherit
+// when no user-defined __hash__ exists.
+//
+// CPython: Python/pyhash.c:152 _Py_HashPointer
+func identityHash(o Object) (int64, error) {
+	return int64(uintptr(unsafe.Pointer(reflect.ValueOf(o).Pointer()))), nil
 }
 
 // TypeType returns the type singleton for `type` itself. Mirrors

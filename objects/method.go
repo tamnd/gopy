@@ -33,6 +33,32 @@ func init() {
 	BoundMethodType.Str = boundMethodRepr
 	BoundMethodType.Vectorcall = boundMethodVectorcall
 	BoundMethodType.TpTraverse = boundMethodTraverse
+	BoundMethodType.Getattro = boundMethodGetattro
+	SetTypeDescr(BoundMethodType, "__func__", NewGetSetDescr("__func__",
+		func(o Object) (Object, error) { return o.(*BoundMethod).imFunc, nil },
+		nil))
+	SetTypeDescr(BoundMethodType, "__self__", NewGetSetDescr("__self__",
+		func(o Object) (Object, error) { return o.(*BoundMethod).imSelf, nil },
+		nil))
+}
+
+// boundMethodGetattro looks for name on the method type first (so
+// __func__ / __self__ resolve through their getset descriptors),
+// then falls through to GetAttr on the wrapped function. The fall
+// through is what lets m.__doc__, m.__name__, and m.__module__ pull
+// from the underlying function the way CPython exposes them.
+//
+// CPython: Objects/classobject.c:75 method_getattro
+func boundMethodGetattro(o Object, name Object) (Object, error) {
+	m := o.(*BoundMethod)
+	descr, _ := LookupDescriptor(o.Type(), attrNameStr(name))
+	if descr != nil {
+		if dg := descr.Type().DescrGet; dg != nil {
+			return dg(descr, o, o.Type())
+		}
+		return descr, nil
+	}
+	return GetAttr(m.imFunc, name)
 }
 
 // boundMethodTraverse visits imFunc and imSelf. Mirrors method_traverse.
@@ -109,6 +135,21 @@ func init() {
 	ClassMethodType.Str = classMethodRepr
 	ClassMethodType.DescrGet = classMethodDescrGet
 	ClassMethodType.TpTraverse = classMethodTraverse
+	// classmethod(fn): wrap fn so attribute access binds to the class.
+	//
+	// CPython: Objects/funcobject.c:1059 cm_init
+	ClassMethodType.TpNew = func(_ *Type, args []Object, _ map[string]Object) (Object, error) {
+		if len(args) < 1 {
+			return nil, fmt.Errorf("TypeError: classmethod expected 1 argument, got 0")
+		}
+		return NewClassMethod(args[0]), nil
+	}
+	StaticMethodType.TpNew = func(_ *Type, args []Object, _ map[string]Object) (Object, error) {
+		if len(args) < 1 {
+			return nil, fmt.Errorf("TypeError: staticmethod expected 1 argument, got 0")
+		}
+		return NewStaticMethod(args[0]), nil
+	}
 }
 
 // classMethodTraverse visits the wrapped callable. Mirrors cm_traverse.

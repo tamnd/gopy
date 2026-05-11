@@ -62,7 +62,7 @@ func memberDescrRepr(o Object) (string, error) {
 // CPython: Objects/descrobject.c:171 member_get
 func memberDescrGet(descr Object, owner Object, _ *Type) (Object, error) {
 	d := descr.(*MemberDescr)
-	if owner == nil || owner == None() {
+	if owner == nil {
 		return descr, nil
 	}
 	inst, ok := owner.(*Instance)

@@ -99,15 +99,27 @@ func intFloat(o Object) (Object, error) {
 
 // intPair is the operand-coercion helper shared by every binary int
 // slot: returns (nil, nil, false) when either side is not an int so
-// the caller can return NotImplemented.
+// the caller can return NotImplemented. Accepts Bool too, since bool
+// subclasses int and shares the same underlying big.Int layout.
 //
 // CPython: Objects/longobject.c CONVERT_BINOP macro
 func intPair(a, b Object) (ai, bi *Int, ok bool) {
-	aok, bok := false, false
-	ai, aok = a.(*Int)
-	bi, bok = b.(*Int)
+	ai, aok := asInt(a)
+	bi, bok := asInt(b)
 	if !aok || !bok {
 		return nil, nil, false
 	}
 	return ai, bi, true
+}
+
+// asInt unwraps Int / Bool to their underlying *Int. Returns
+// (nil, false) for any other Object so callers signal NotImplemented.
+func asInt(o Object) (*Int, bool) {
+	switch v := o.(type) {
+	case *Int:
+		return v, true
+	case *Bool:
+		return &v.Int, true
+	}
+	return nil, false
 }

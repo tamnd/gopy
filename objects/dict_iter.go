@@ -94,9 +94,10 @@ func (it *dictIterObj) advance() (*dictEntry, error) {
 		it.src = nil
 		return nil, fmt.Errorf("RuntimeError: dictionary changed size during iteration")
 	}
-	for it.pos < len(it.src.entries) {
-		e := &it.src.entries[it.pos]
+	for it.pos < len(it.src.order) {
+		slot := it.src.order[it.pos]
 		it.pos++
+		e := &it.src.entries[slot]
 		if e.used {
 			return e, nil
 		}

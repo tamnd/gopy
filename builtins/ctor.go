@@ -228,6 +228,49 @@ func TupleCtor(args []objects.Object, _ map[string]objects.Object) (objects.Obje
 	return objects.NewTuple(items), nil
 }
 
+// SetCtor ports set_init. 0 args returns an empty set; one positional
+// drains the iterable into a fresh set.
+//
+// CPython: Objects/setobject.c:2284 set_init
+func SetCtor(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+	if len(args) > 1 {
+		return nil, fmt.Errorf("TypeError: set expected at most 1 argument, got %d", len(args))
+	}
+	out := objects.NewSet()
+	if len(args) == 0 {
+		return out, nil
+	}
+	items, err := drainIterable(args[0])
+	if err != nil {
+		return nil, err
+	}
+	for _, item := range items {
+		if err := out.Add(item); err != nil {
+			return nil, err
+		}
+	}
+	return out, nil
+}
+
+// FrozensetCtor ports frozenset_new. 0 args returns the singleton
+// empty frozenset (gopy materializes a fresh one each call); one
+// positional drains the iterable into a frozenset.
+//
+// CPython: Objects/setobject.c:2362 frozenset_new
+func FrozensetCtor(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+	if len(args) > 1 {
+		return nil, fmt.Errorf("TypeError: frozenset expected at most 1 argument, got %d", len(args))
+	}
+	if len(args) == 0 {
+		return objects.NewFrozenset(nil)
+	}
+	items, err := drainIterable(args[0])
+	if err != nil {
+		return nil, err
+	}
+	return objects.NewFrozenset(items)
+}
+
 // DictCtor ports dict_init. Accepts a mapping or an iterable of
 // 2-element iterables, and merges keyword arguments.
 //

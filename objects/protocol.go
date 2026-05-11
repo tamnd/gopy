@@ -58,7 +58,7 @@ func Hash(o Object) (int64, error) {
 	if h := o.Type().Hash; h != nil {
 		return h(o)
 	}
-	return 0, errUnhashable
+	return 0, fmt.Errorf("TypeError: unhashable type: '%s'", o.Type().Name)
 }
 
 // RichCmp dispatches to tp_richcompare. Returns NotImplemented when
@@ -158,7 +158,13 @@ func GetAttr(o Object, name Object) (Object, error) {
 	if tp.Getattro != nil {
 		return tp.Getattro(o, name)
 	}
-	return nil, fmt.Errorf("AttributeError: '%s' object has no attribute '%s'", tp.Name, attrNameStr(name))
+	// CPython inherits tp_getattro from the base type; object's slot is
+	// PyObject_GenericGetAttr. Built-in types that leave Getattro nil
+	// behave the same here so e.g. None.__class__ reaches the getset
+	// installed on object.
+	//
+	// CPython: Objects/typeobject.c inherit_slots (tp_getattro)
+	return GenericGetAttr(o, name)
 }
 
 // SetAttr writes o.name = value. value==nil deletes the attribute

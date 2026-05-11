@@ -7,6 +7,7 @@ package builtins
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/tamnd/gopy/objects"
@@ -76,6 +77,60 @@ func DelAttr(args []objects.Object, _ map[string]objects.Object) (objects.Object
 		return nil, err
 	}
 	return objects.None(), nil
+}
+
+// Dir ports builtin_dir. With one argument, returns the sorted list
+// of attribute names CPython would: instance __dict__ keys, the
+// names registered on the type's MRO, and for modules the module
+// dict keys. Without an argument the current frame's locals are
+// not yet exposed, so callers must pass an explicit object.
+//
+// CPython: Python/bltinmodule.c:1001 builtin_dir
+func Dir(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+	if len(args) == 0 {
+		return nil, fmt.Errorf("TypeError: dir() with no argument is not supported")
+	}
+	if len(args) > 1 {
+		return nil, fmt.Errorf("TypeError: dir expected at most 1 argument, got %d", len(args))
+	}
+	seen := map[string]struct{}{}
+	collect := func(d *objects.Dict) {
+		if d == nil {
+			return
+		}
+		for _, k := range d.Keys() {
+			if s, err := objects.Str(k); err == nil {
+				seen[s] = struct{}{}
+			}
+		}
+	}
+	switch v := args[0].(type) {
+	case *objects.Module:
+		collect(v.Dict())
+	case *objects.Type:
+		for _, name := range objects.TypeDescrNames(v) {
+			seen[name] = struct{}{}
+		}
+	case *objects.Instance:
+		collect(v.Dict())
+		for _, name := range objects.TypeDescrNames(v.Type()) {
+			seen[name] = struct{}{}
+		}
+	default:
+		for _, name := range objects.TypeDescrNames(v.Type()) {
+			seen[name] = struct{}{}
+		}
+	}
+	names := make([]string, 0, len(seen))
+	for n := range seen {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	out := make([]objects.Object, len(names))
+	for i, n := range names {
+		out[i] = objects.NewStr(n)
+	}
+	return objects.NewList(out), nil
 }
 
 // isAttributeError matches the sentinel string the protocol layer

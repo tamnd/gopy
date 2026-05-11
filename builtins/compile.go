@@ -223,13 +223,22 @@ func signedIntArg(o objects.Object, label string) (int, error) {
 // 1687 retires compile.Code in favor of objects.Code directly.
 func liftCompileCode(c *compile.Code) *objects.Code {
 	return &objects.Code{
-		Code:           c.Code,
-		Consts:         c.Consts,
-		Names:          c.Names,
-		Varnames:       c.VarNames,
-		Freevars:       c.FreeVars,
-		Cellvars:       c.CellVars,
-		Stacksize:      c.Stacksize,
-		ExceptionTable: c.ExceptionTable,
+		Argcount:        c.Argcount,
+		PosonlyArgcount: c.PosOnlyArgCount,
+		KwonlyArgcount:  c.KwOnlyArgCount,
+		Stacksize:       c.Stacksize,
+		Flags:           int(c.Flags),
+		Code:            c.Code,
+		Consts:          c.Consts,
+		Names:           c.Names,
+		Varnames:        c.VarNames,
+		Freevars:        c.FreeVars,
+		Cellvars:        c.CellVars,
+		Filename:        c.Filename,
+		Name:            c.Name,
+		Qualname:        c.Qualname,
+		Firstlineno:     c.Firstlineno,
+		Linetable:       c.Linetable,
+		ExceptionTable:  c.ExceptionTable,
 	}
 }

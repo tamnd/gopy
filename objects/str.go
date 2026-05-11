@@ -19,6 +19,8 @@
 
 package objects
 
+import "fmt"
+
 // PEP 393 kind values. Match CPython's PyUnicode_Kind enum.
 //
 // CPython: Include/cpython/unicodeobject.h:L75 PyUnicode_Kind
@@ -54,6 +56,35 @@ func init() {
 	strType.Str = unicodeStr
 	strType.Hash = unicodeHash
 	strType.RichCmp = unicodeRichCmp
+	strType.Getattro = GenericGetAttr
+	// Sequence.Repeat: 'ab' * 3 == 'ababab'.
+	//
+	// CPython: Objects/unicodeobject.c:11556 unicode_repeat
+	strType.Sequence = &SequenceMethods{
+		Length: func(o Object) (int, error) {
+			s := o.(*Unicode)
+			return s.length, nil
+		},
+		Repeat: func(o Object, n int) (Object, error) {
+			s := o.(*Unicode)
+			if n <= 0 {
+				return NewStr(""), nil
+			}
+			b := make([]byte, 0, len(s.v)*n)
+			for i := 0; i < n; i++ {
+				b = append(b, s.v...)
+			}
+			return NewStr(string(b)), nil
+		},
+		Concat: func(a, b Object) (Object, error) {
+			sa, _ := a.(*Unicode)
+			sb, _ := b.(*Unicode)
+			if sa == nil || sb == nil {
+				return nil, fmt.Errorf("TypeError: can only concatenate str to str")
+			}
+			return NewStr(sa.v + sb.v), nil
+		},
+	}
 }
 
 // NewStr wraps s in a Unicode object. The constructor walks the
@@ -148,8 +179,9 @@ func unicodeHash(o Object) (int64, error) {
 	return h, nil
 }
 
-// unicodeRichCmp implements equality comparison. Ordering (<, <=, >,
-// >=) lands when 1677-B brings the full method surface in.
+// unicodeRichCmp implements all six rich comparisons. The lexicographic
+// ordering for <, <=, >, >= compares the underlying Go strings, which
+// matches CPython for ASCII and well-formed UTF-8 byte ordering.
 //
 // CPython: Objects/unicodeobject.c:L11297 unicode_richcompare
 func unicodeRichCmp(a, b Object, op CompareOp) (Object, error) {
@@ -163,6 +195,14 @@ func unicodeRichCmp(a, b Object, op CompareOp) (Object, error) {
 		return NewBool(as.v == bs.v), nil
 	case CompareNE:
 		return NewBool(as.v != bs.v), nil
+	case CompareLT:
+		return NewBool(as.v < bs.v), nil
+	case CompareLE:
+		return NewBool(as.v <= bs.v), nil
+	case CompareGT:
+		return NewBool(as.v > bs.v), nil
+	case CompareGE:
+		return NewBool(as.v >= bs.v), nil
 	}
 	return NotImplemented(), nil
 }

@@ -23,12 +23,6 @@ var errIndexOutOfRange = errors.New("IndexError: index out of range")
 // CPython: Objects/exceptions.c:L2261 PyExc_KeyError
 var errKeyNotFound = errors.New("KeyError")
 
-// errUnhashable signals __hash__ is None or missing. Mirrors
-// PyExc_TypeError raised from PyObject_Hash.
-//
-// CPython: Objects/object.c:L869 PyObject_Hash
-var errUnhashable = errors.New("TypeError: unhashable type")
-
 // ExceptionInstance is the structural interface a Python exception
 // object satisfies so packages outside errors/ can read its type and
 // args without importing errors and creating layering cycles. The

@@ -5,6 +5,8 @@
    8 RETURN_VALUE                   0
 
 Disassembly of f:
-     0 RESUME                         0
-     2 LOAD_CONST                     0
-     4 RETURN_VALUE                   0
+     0 RETURN_GENERATOR               0
+     2 POP_TOP                        0
+     4 RESUME                         0
+     6 LOAD_CONST                     0
+     8 RETURN_VALUE                   0

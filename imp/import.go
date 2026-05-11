@@ -8,6 +8,7 @@
 package imp
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 
@@ -66,6 +67,23 @@ func ImportModuleLevel(exec Executor, name, pkgname string, level int) (*objects
 		}
 		AddModule(absName, mod)
 		return mod, nil
+	}
+
+	// 4. Path-based finder (sys.path).
+	// CPython: Lib/importlib/_bootstrap_external.py:1284 PathFinder.find_spec
+	//
+	// errFinderMiss means "no entry matched"; we fall through to the
+	// final not-found below. Any other error (compile error, exec
+	// error, transitive import failure) is the loader's verdict and
+	// propagates as-is.
+	if f := GetPathFinder(); f != nil {
+		mod, err := f.FindModule(exec, absName)
+		if err == nil {
+			return mod, nil
+		}
+		if !errors.Is(err, errFinderMiss) {
+			return nil, err
+		}
 	}
 
 	return nil, fmt.Errorf("%w: No module named %q", ErrModuleNotFound, absName)

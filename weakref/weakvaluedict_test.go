@@ -8,7 +8,7 @@ package weakref
 import (
 	"testing"
 
-	"github.com/tamnd/gopy/gc"
+	"github.com/tamnd/gopy/module/gc"
 	"github.com/tamnd/gopy/objects"
 )
 

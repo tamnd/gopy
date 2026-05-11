@@ -1,0 +1,28 @@
+# Vendored CPython stdlib modules. byte-identical to upstream.
+# Each row: <relative path> <sha-256> <upstream path>.
+# Source: ~/github/python/cpython/Lib/
+#
+# Update protocol: bump this file and the file together. Never edit
+# the vendored .py. Local overrides go elsewhere.
+#
+# License: stdlib/LICENSE is a verbatim copy of CPython's LICENSE
+# (PSF License Agreement). It governs every .py listed below; the
+# Apache-2.0 LICENSE in the repo root governs gopy's own code.
+LICENSE b0e25a78cffb43f4d92de8b61ccfa1f1f98ecbc22330b54b5251e7b6ba010231 LICENSE
+_colorize.py 15db41bec8e25fd1ba81cf234df2cc7446d0fbc10285fda73186176365efd730 Lib/_colorize.py
+functools.py 046ec9660146db48862c7b22c78e2ef3818eaed6920e5cbf35f551ef09fec6cd Lib/functools.py
+keyword.py 18c2be738c04ad20ad375f6a71db34b3823c7f40b0340f5294d0e89f3c9b093b Lib/keyword.py
+types.py fcfdd1c5ae56a9c35f207743d774e236da0153bf78e6e4629193a8e0e9438a6b Lib/types.py
+unittest/__init__.py 2698f2daf7a02609a6825b89cd459ebaa283dec2403c7b846315a0701bc74a0d Lib/unittest/__init__.py
+unittest/__main__.py ff6b9a100d32001715b40d61bc4d613623b139edb1fdc3566427b83c331caae3 Lib/unittest/__main__.py
+unittest/_log.py 905672317ab26c656c600defce25d477728068f597f00a7f94e22e8128c323b9 Lib/unittest/_log.py
+unittest/async_case.py 5e8265cb20ead3877aef870cda91f2462acf107513933f84b4f3419028e8746f Lib/unittest/async_case.py
+unittest/case.py a79b422eec43c90352e25a54bce8cee106811974c8dea9405199e4caa689ffe9 Lib/unittest/case.py
+unittest/loader.py b715a61e71ad8d23537fde5471067e5c1ca44b266052fdf417c4e1fe3a8d102c Lib/unittest/loader.py
+unittest/main.py 12de7da0fea92dbff8713ebe9904ada6dbd1e0a334d58861c6287ccfc0a261d2 Lib/unittest/main.py
+unittest/mock.py 23ded6089414c66d6ef4ad3a93c485add394e2b32e816517bc838442dc84a269 Lib/unittest/mock.py
+unittest/result.py 813415b331a53acc1bd88ffebadfcb46886dba1ff2bbda2908533e24548db50c Lib/unittest/result.py
+unittest/runner.py 51780085229bd3547a2751e8d75ab1d8f391dd2c9c3ca1d011b54529348faeb4 Lib/unittest/runner.py
+unittest/signals.py f8286e818ca56e10e03745bc056cdfd31147678f9a1dc8cb6b0fe96ef9a4362a Lib/unittest/signals.py
+unittest/suite.py ed2da92bc9f97c53403ee2d3d12cc53b16a96e85d596ebc887b5a93458f3f6bc Lib/unittest/suite.py
+unittest/util.py fdcc640c3505d16deab9c32eae7c3f5f67c3b5e81c563dc6698fa7fcf403854d Lib/unittest/util.py

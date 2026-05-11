@@ -76,6 +76,7 @@ func dictInsert(d *Dict, h int64, key, value Object) error {
 		d.fill++
 	}
 	*slot = dictEntry{hash: h, key: key, value: value, used: true}
+	d.order = append(d.order, idx)
 	d.used++
 	d.downgradeKindOnInsert(key)
 	d.invalidateKeysVersion()
@@ -100,6 +101,12 @@ func dictDelete(d *Dict, key Object) error {
 		return errKeyNotFound
 	}
 	d.entries[idx] = dictEntry{dummy: true}
+	for i, slot := range d.order {
+		if slot == idx {
+			d.order = append(d.order[:i], d.order[i+1:]...)
+			break
+		}
+	}
 	d.used--
 	d.invalidateKeysVersion()
 	return nil
@@ -116,15 +123,14 @@ func dictResize(d *Dict, minNew int) error {
 	if minNew < d.used {
 		minNew = d.used
 	}
-	old := d.entries
+	oldEntries := d.entries
+	oldOrder := d.order
 	d.entries = make([]dictEntry, nextDictPow2(minNew))
+	d.order = make([]int, 0, len(oldOrder))
 	d.used = 0
 	d.fill = 0
-	for i := range old {
-		e := old[i]
-		if !e.used {
-			continue
-		}
+	for _, slot := range oldOrder {
+		e := oldEntries[slot]
 		if err := dictReinsert(d, e.hash, e.key, e.value); err != nil {
 			return err
 		}
@@ -145,6 +151,7 @@ func dictReinsert(d *Dict, h int64, key, value Object) error {
 		return err
 	}
 	d.entries[idx] = dictEntry{hash: h, key: key, value: value, used: true}
+	d.order = append(d.order, idx)
 	d.used++
 	d.fill++
 	return nil

@@ -57,7 +57,7 @@ func (c *Compiler) compileFunctionLike(name string, args *ast.Arguments,
 	// Evaluate decorator expressions (in source order, top-to-bottom)
 	// before the function is created. They wrap the result of
 	// MAKE_FUNCTION in reverse order via CALL.
-	if err := c.visitExprs(decorators); err != nil {
+	if err := c.visitDecorators(decorators); err != nil {
 		return err
 	}
 
@@ -89,10 +89,14 @@ func (c *Compiler) compileFunctionLike(name string, args *ast.Arguments,
 
 	c.emitMakeFunction(flags, loc(scopeKey))
 
-	// Apply decorators. Each is a CALL with one argument (the
-	// function below it on the stack).
+	// Apply decorators. Each emits CALL 0: 3.14 lays out the stack as
+	// [..., decorator, wrapped] and CALL's MAYBE_EXPAND_METHOD path
+	// promotes the non-NULL self_or_null slot (wrapped) into the first
+	// positional arg, yielding decorator(wrapped).
+	//
+	// CPython: Python/codegen.c:976 codegen_apply_decorators
 	for range decorators {
-		c.addOpI(CALL, 1, loc(scopeKey))
+		c.addOpI(CALL, 0, loc(scopeKey))
 	}
 
 	if isLambda {
@@ -120,6 +124,11 @@ func (c *Compiler) emitInnerFunctionCode(innerScope *symtable.Entry,
 	outerCaches := c.savedCaches()
 
 	c.enterScope(innerScope)
+
+	// Pin the docstring at consts[0] before RESUME / declareArgs run,
+	// so the first const slot belongs to the docstring (functions surface
+	// __doc__ via co_consts[0] when CO_HAS_DOCSTRING is set).
+	body = c.consumeDocstring(body)
 
 	// RESUME 0 marks the function entry point for the eval loop.
 	//
@@ -282,15 +291,24 @@ func (c *Compiler) emitClosure(inner *symtable.Entry, l ast.Pos) (int32, error) 
 		return 0, nil
 	}
 	for _, name := range freeNames {
-		// Each free var is a cell or free in the outer scope.
+		// Each free var is a cell or free in the outer scope. Push the
+		// outer's cell (not its contents) onto the stack so BUILD_TUPLE
+		// collects it into the closure. LOAD_CLOSURE reads
+		// LocalsPlus[NLocals + oparg]; oparg is the cellvar index for
+		// cells and NCells+freevar_index for frees, matching the same
+		// deref-index space LOAD_DEREF uses.
+		//
+		// CPython: Python/codegen.c:923 codegen_make_closure (the
+		// LOAD_CLOSURE arm)
 		scope := c.scope.GetScope(name)
 		switch scope {
 		case symtable.Cell:
 			pool := poolCellVars
-			c.addOpName(LOAD_FAST, &pool, name, l)
+			c.addOpName(LOAD_CLOSURE, &pool, name, l)
 		case symtable.Free:
 			pool := poolFreeVars
-			c.addOpName(LOAD_FAST, &pool, name, l)
+			idx := c.poolIndex(&pool, name)
+			c.addOpI(LOAD_CLOSURE, int32(len(c.unit().CellVars)+idx), l)
 		default:
 			return 0, fmt.Errorf("compile: free var %q in nested scope %q has scope %v in outer %q",
 				name, inner.Name, scope, c.scope.Name)
@@ -300,26 +318,53 @@ func (c *Compiler) emitClosure(inner *symtable.Entry, l ast.Pos) (int32, error) 
 	return 0x08, nil
 }
 
-// emitMakeCellAndCopyFree emits MAKE_CELL for each cell-bound
-// parameter at the top of a function body, plus COPY_FREE_VARS if
-// the function captures any free variable.
+// emitMakeCellAndCopyFree emits MAKE_CELL for every cell var in the
+// function and COPY_FREE_VARS when the function captures any free
+// variable.
 //
-// CPython: Python/codegen.c:L1311 codegen_function_body prologue
+// CPython emits MAKE_CELL for every cell var, not only cell-bound
+// parameters: a local that the symtable promoted to Cell scope
+// (because a nested scope captures it) still needs its cell created
+// up front so the eventual STORE_DEREF / LOAD_DEREF has a cell to
+// write into. The arg vs non-arg split only matters for the operand
+// rewrite in fix_cell_offsets; the runtime arm of MAKE_CELL in gopy
+// keys off the cellvars index and looks up the name in Varnames to
+// decide whether to seed the cell from a parameter slot.
+//
+// Ordering: arg cells first in Varnames declaration order, then the
+// remaining cell vars in stable (alphabetical) order. CPython sorts
+// by the cellfixedoffsets table so arg cells come first; gopy's
+// split layout doesn't need the offset fix-up, but matching the
+// emission order keeps the cellvars pool deterministic and aligns
+// the LOAD_DEREF / STORE_DEREF operand with the runtime slot.
+//
+// CPython: Python/flowgraph.c:3792 insert_prefix_instructions
+// (cellvars block) + Python/flowgraph.c:3711 build_cellfixedoffsets
 func (c *Compiler) emitMakeCellAndCopyFree(sc *symtable.Entry, l ast.Pos) error {
-	// Cell vars first: every name flagged as Cell in this function
-	// gets a MAKE_CELL n where n is the varnames index. Skip names
-	// that are not parameters (those are handled by ordinary
-	// STORE_DEREF the first time they get assigned).
+	pool := poolCellVars
+	emitted := make(map[string]bool)
 	for _, name := range sc.Varnames {
-		if sc.GetScope(name) == symtable.Cell {
-			pool := poolVarNames
-			idx := c.poolIndex(&pool, name)
-			c.addOpI(MAKE_CELL, int32(idx), l)
+		if sc.GetScope(name) != symtable.Cell {
+			continue
 		}
+		idx := c.poolIndex(&pool, name)
+		c.addOpI(MAKE_CELL, int32(idx), l)
+		emitted[name] = true
+	}
+	var rest []string
+	for name, flags := range sc.Symbols {
+		if flags.Scope() != symtable.Cell || emitted[name] {
+			continue
+		}
+		rest = append(rest, name)
+	}
+	sortStrings(rest)
+	for _, name := range rest {
+		idx := c.poolIndex(&pool, name)
+		c.addOpI(MAKE_CELL, int32(idx), l)
 	}
 	freeCount := 0
-	for name, flags := range sc.Symbols {
-		_ = name
+	for _, flags := range sc.Symbols {
 		if flags.Scope() == symtable.Free {
 			freeCount++
 		}
@@ -348,13 +393,17 @@ func freeVarsOf(sc *symtable.Entry) []string {
 	return out
 }
 
-// visitExprs evaluates a sequence of expressions in order, leaving
-// each result on the stack.
+// visitDecorators evaluates a decorator list, leaving each callable
+// on the stack in source order. The wrapped value (function or
+// class) is pushed by the caller; each subsequent CALL 0 then
+// consumes [decorator, wrapped] and pushes decorator(wrapped). The
+// 3.14 CALL convention treats a non-NULL self_or_null slot as the
+// first positional arg, so no PUSH_NULL is needed here.
 //
-// CPython: Python/codegen.c VISIT_SEQ(c, expr, seq) macro expansion
-func (c *Compiler) visitExprs(es ast.Seq[ast.Expr]) error {
-	for _, e := range es {
-		if err := c.visitExpr(e); err != nil {
+// CPython: Python/codegen.c:962 codegen_decorators
+func (c *Compiler) visitDecorators(decos ast.Seq[ast.Expr]) error {
+	for _, d := range decos {
+		if err := c.visitExpr(d); err != nil {
 			return err
 		}
 	}

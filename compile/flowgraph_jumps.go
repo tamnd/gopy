@@ -33,7 +33,20 @@ func threadJumps(seq *Sequence) int {
 
 // propagateConditionalJumps re-targets `POP_JUMP_IF_X label` when
 // `label` itself is an unconditional jump, skipping over the trampoline
-// in one hop.
+// in one hop. The rewrite is only safe when the final landing site is
+// still ahead of the conditional jump. POP_JUMP_IF_* opcodes encode a
+// forward-only offset (see resolve_jump_offsets' IS_BACKWARDS_JUMP_OPCODE
+// assertion in CPython's assembler); chasing through a JUMP_BACKWARD
+// trampoline would otherwise leave a forward conditional pointing at
+// an earlier index, which the offset resolver then encodes as a bogus
+// positive delta past end-of-code. The pattern shows up whenever an
+// `if` is the last statement of a `for` body: the if's end label sits
+// on top of the loop back-edge, and without this guard the conditional
+// gets threaded straight onto the FOR_ITER.
+//
+// CPython sidesteps this by inverting the conditional and inserting a
+// JUMP_BACKWARD trampoline; gopy does not do that rewrite yet, so we
+// just leave the conditional pointing at its original (forward) label.
 //
 // CPython: Python/flowgraph.c:L1051 propagate_conditional_branches
 func propagateConditionalJumps(seq *Sequence) int {
@@ -44,10 +57,14 @@ func propagateConditionalJumps(seq *Sequence) int {
 			continue
 		}
 		final := chaseJumpTarget(seq, int(ins.Oparg), i)
-		if final != int(ins.Oparg) {
-			ins.Oparg = int32(final)
-			rewritten++
+		if final == int(ins.Oparg) {
+			continue
 		}
+		if final <= i {
+			continue
+		}
+		ins.Oparg = int32(final)
+		rewritten++
 	}
 	return rewritten
 }
@@ -301,7 +318,14 @@ func walkReachable(seq *Sequence, start int, marks []bool) {
 		}
 		marks[i] = true
 		ins := seq.Instrs[i]
-		if HasTarget(ins.Op) {
+		// hasJumpTarget includes the pseudo-ops (JUMP / JUMP_NO_INTERRUPT
+		// and the SETUP_X family) which are not in the metadata jump
+		// flag but whose opargs still encode a target the reachability
+		// walk must follow. Without this the JUMP_NO_INTERRUPT at the
+		// end of a try body would leave its `end` label unreached,
+		// which removeUnreachableBlocks then NOPs out along with the
+		// implicit `return None` epilogue.
+		if hasJumpTarget(ins.Op) {
 			stack = append(stack, int(ins.Oparg))
 		}
 		if isTerminator(ins.Op) {

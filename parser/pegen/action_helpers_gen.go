@@ -21,6 +21,7 @@ import (
 	"strings"
 
 	"github.com/tamnd/gopy/ast"
+	stringparse "github.com/tamnd/gopy/parser/string"
 	"github.com/tamnd/gopy/token"
 )
 
@@ -1371,51 +1372,35 @@ func parseNumberLiteral(s string) (any, bool) {
 	return bi, true
 }
 
-// decodeStringToken strips quote/prefix wrapping and decodes escapes.
-// v0.6 ships a minimal decoder; the parser/string package is the
-// real path and will replace this once the action surface is wired
-// to it.
+// decodeStringToken strips quote/prefix wrapping and decodes escapes
+// by delegating to parser/string. Escape decoding (e.g. "\n" -> 0x0A)
+// goes through the full CPython-compatible path.
+//
+// CPython: Parser/string_parser.c:253 _PyPegen_parse_string
 func decodeStringToken(s string) (string, bool) {
 	body, _, ok := decodeStringTokenTagged(s)
 	return body, ok
 }
 
-// decodeStringTokenTagged returns the literal body together with a
-// flag that says whether the source had a bytes prefix (b/B). The
-// caller can branch on the flag to wrap the body in `[]byte` so the
-// Constant.Value matches CPython's `bytes` vs `str` distinction.
+// decodeStringTokenTagged returns the decoded body together with a
+// flag that says whether the source had a bytes prefix (b/B). bytes
+// literals are still returned in their decoded form; the caller wraps
+// them in []byte so Constant.Value matches CPython's `bytes` vs `str`
+// distinction.
+//
+// CPython: Parser/string_parser.c:253 _PyPegen_parse_string
 func decodeStringTokenTagged(s string) (string, bool, bool) {
 	if len(s) < 2 {
 		return "", false, false
 	}
-	bytesLit := false
-	for s != "" {
-		c := s[0]
-		if c == '\'' || c == '"' {
-			break
-		}
-		switch c {
-		case 'b', 'B':
-			bytesLit = true
-			s = s[1:]
-		case 'r', 'R', 'u', 'U', 'f', 'F', 't', 'T':
-			s = s[1:]
-		default:
-			return "", false, false
-		}
-	}
-	if len(s) < 2 {
+	res, err := stringparse.ParseString([]byte(s))
+	if err != nil {
 		return "", false, false
 	}
-	q := s[0]
-	if q != s[len(s)-1] {
-		return "", false, false
+	if res.IsBytes {
+		return string(res.Bytes), true, true
 	}
-	body := s[1 : len(s)-1]
-	if len(body) >= 4 && body[:2] == strings.Repeat(string(q), 2) && body[len(body)-2:] == strings.Repeat(string(q), 2) {
-		body = body[2 : len(body)-2]
-	}
-	return body, bytesLit, true
+	return res.Text, false, true
 }
 
 // withitemSeqOf walks v and collects the *ast.Withitem values found

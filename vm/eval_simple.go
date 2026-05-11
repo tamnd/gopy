@@ -15,10 +15,12 @@ import (
 	"strings"
 
 	"github.com/tamnd/gopy/compile"
+	pyerrors "github.com/tamnd/gopy/errors"
 	"github.com/tamnd/gopy/frame"
 	"github.com/tamnd/gopy/intrinsics"
 	"github.com/tamnd/gopy/objects"
 	"github.com/tamnd/gopy/stackref"
+	"github.com/tamnd/gopy/state"
 )
 
 // liftNestedCode mirrors pythonrun.liftCode for inner code objects
@@ -26,15 +28,23 @@ import (
 // class bodies all surface here.
 func liftNestedCode(c *compile.Code) *objects.Code {
 	return &objects.Code{
-		Name:           c.Name,
-		Code:           c.Code,
-		Consts:         c.Consts,
-		Names:          c.Names,
-		Varnames:       c.VarNames,
-		Freevars:       c.FreeVars,
-		Cellvars:       c.CellVars,
-		Stacksize:      c.Stacksize,
-		ExceptionTable: c.ExceptionTable,
+		Argcount:        c.Argcount,
+		PosonlyArgcount: c.PosOnlyArgCount,
+		KwonlyArgcount:  c.KwOnlyArgCount,
+		Stacksize:       c.Stacksize,
+		Flags:           int(c.Flags),
+		Code:            c.Code,
+		Consts:          c.Consts,
+		Names:           c.Names,
+		Varnames:        c.VarNames,
+		Freevars:        c.FreeVars,
+		Cellvars:        c.CellVars,
+		Filename:        c.Filename,
+		Name:            c.Name,
+		Qualname:        c.Qualname,
+		Firstlineno:     c.Firstlineno,
+		Linetable:       c.Linetable,
+		ExceptionTable:  c.ExceptionTable,
 	}
 }
 
@@ -376,10 +386,14 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, retVal
 		return e.cacheAdvance(compile.FOR_ITER), nil, nil, false, true, nil
 
 	case compile.END_FOR:
-		// END_FOR pops the exhausted iterator left by FOR_ITER's
-		// fallthrough path.
-		ref := e.pop()
-		ref.Close()
+		// END_FOR is a no-op for ordinary iterators in CPython 3.14:
+		// the codegen pairs it with POP_ITER (POP_TOP in gopy today),
+		// and FOR_ITER's exhaustion path leaves the iterator on the
+		// stack for that following pop. Generator finalization is the
+		// only case where END_FOR has a real effect, and gopy doesn't
+		// land that path yet.
+		//
+		// CPython: Python/bytecodes.c END_FOR
 		return e.advance(), nil, nil, false, true, nil
 
 	case compile.CALL:
@@ -463,33 +477,67 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, retVal
 
 	case compile.RAISE_VARARGS:
 		// oparg: 0 = re-raise, 1 = raise exc, 2 = raise exc from cause.
-		// v0.6 has no exception object hierarchy yet, so we surface the
-		// raised value as a Go error with its repr; the eval loop's
-		// exception table walker handles the unwind.
+		// Sets the exception on the thread state via errors.Raise so
+		// the unwind path, PrintEx, and HandleSystemExit can all read
+		// it. The Go error returned is just the sentinel that drives
+		// handleException; the real data lives on ts.
+		//
+		// CPython: Python/bytecodes.c:1648 RAISE_VARARGS
 		switch oparg {
 		case 0:
 			return 0, nil, nil, false, true, errors.New("RuntimeError: No active exception to re-raise")
 		case 1:
-			exc := e.popObject()
-			return 0, nil, nil, false, true, fmt.Errorf("%s", objectRepr(exc))
+			val := e.popObject()
+			exc := raiseValue(e.ts, val, nil)
+			return 0, nil, nil, false, true, exc
 		case 2:
 			cause := e.popObject()
-			exc := e.popObject()
-			return 0, nil, nil, false, true, fmt.Errorf("%s (from %s)", objectRepr(exc), objectRepr(cause))
+			val := e.popObject()
+			exc := raiseValue(e.ts, val, cause)
+			return 0, nil, nil, false, true, exc
 		}
 		return 0, nil, nil, false, true, fmt.Errorf("vm: RAISE_VARARGS: invalid oparg %d", oparg)
 
 	case compile.PUSH_EXC_INFO:
-		// Pushes the current exception under the value just pushed.
-		// v0.6 has no per-frame exc info stack yet, so push a None
-		// placeholder under the top.
+		// Save the previously-handled exception under the new top, then
+		// install the new exception as the current handled exception
+		// so sys.exc_info() reads it from inside the except handler.
+		// POP_EXCEPT restores the saved value. The handled slot is
+		// distinct from the raised slot used by the unwind path, so
+		// installing it here does not perturb getOptionalAttr et al.
+		//
+		// CPython: Python/bytecodes.c PUSH_EXC_INFO (push exc_info->exc_value;
+		// exc_info->exc_value = new_exc)
 		top := e.pop()
-		e.pushObject(objects.None())
+		prev := pyerrors.Handled(e.ts)
+		if prev != nil {
+			e.pushObject(prev)
+		} else {
+			e.pushObject(objects.None())
+		}
 		e.push(top)
+		if exc, ok := top.AsObject().(*pyerrors.Exception); ok {
+			pyerrors.SetHandled(e.ts, exc)
+		}
 		return e.advance(), nil, nil, false, true, nil
 
 	case compile.POP_EXCEPT:
+		// Restore the previously-handled exception saved under the
+		// handled-exception ref by PUSH_EXC_INFO. None signals "no
+		// outer handler", which clears the slot. The with-statement
+		// codegen also emits POP_EXCEPT via COPY 3 / POP_EXCEPT /
+		// RERAISE 1 where the popped value is a fresh copy of the
+		// active exception, in which case we install that exception
+		// as handled, which is harmless (the next handler entry will
+		// overwrite, and the RERAISE that follows triggers unwind).
+		//
+		// CPython: Python/bytecodes.c POP_EXCEPT (exc_info->exc_value = saved)
 		ref := e.pop()
+		if exc, ok := ref.AsObject().(*pyerrors.Exception); ok {
+			pyerrors.SetHandled(e.ts, exc)
+		} else {
+			pyerrors.SetHandled(e.ts, nil)
+		}
 		ref.Close()
 		return e.advance(), nil, nil, false, true, nil
 
@@ -617,10 +665,12 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, retVal
 		cellObj := ref.AsObject()
 		cell, ok := cellObj.(*objects.Cell)
 		if !ok || cell == nil {
-			return 0, nil, nil, false, true, fmt.Errorf("LOAD_DEREF: slot %d not a cell, got %T", oparg, cellObj)
+			name := derefName(e.f.Code, int(oparg))
+			return 0, nil, nil, false, true, fmt.Errorf("LOAD_DEREF: %s slot %d not a cell in %s:%s, got %T", name, oparg, e.f.Code.Filename, e.f.Code.Name, cellObj)
 		}
 		if cell.Contents == nil {
-			return 0, nil, nil, false, true, fmt.Errorf("NameError: free variable referenced before assignment")
+			name := derefName(e.f.Code, int(oparg))
+			return 0, nil, nil, false, true, fmt.Errorf("NameError: free variable %q referenced before assignment in %s:%s", name, e.f.Code.Filename, e.f.Code.Name)
 		}
 		e.pushObject(cell.Contents)
 		return e.advance(), nil, nil, false, true, nil
@@ -647,26 +697,44 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, retVal
 		return e.advance(), nil, nil, false, true, nil
 
 	case compile.MAKE_CELL:
-		// Promote fast-local oparg to a fresh cell slot at the cells
-		// region. The slot indexes are aligned: cell variable i lives at
-		// CellsStart + i and shadows local oparg.
+		// Wrap the named local in a fresh cell. oparg is the cellvars
+		// index (in gopy's split layout); the cell var name is looked
+		// up against varnames so that a parameter that's also a cell
+		// var transfers its value into the cell. The cell is stored at
+		// the cell-region slot for LOAD_DEREF, and mirrored back to
+		// the local slot so the LOAD_FAST that emitClosure threads
+		// into the closure tuple picks up the cell rather than the
+		// raw parameter value (CPython 3.14 achieves the same effect
+		// via overlapped localsplus slots).
 		//
-		// CPython: Python/bytecodes.c MAKE_CELL
-		base := frame.NLocalsOf(e.f.Code)
-		idx := base + int(oparg)
+		// CPython: Python/bytecodes.c:1863 MAKE_CELL
+		co := e.f.Code
+		base := frame.NLocalsOf(co)
+		cellIdx := int(oparg)
+		var name string
+		if cellIdx < len(co.Cellvars) {
+			name = co.Cellvars[cellIdx]
+		}
+		localIdx := -1
+		for i, vn := range co.Varnames {
+			if vn == name {
+				localIdx = i
+				break
+			}
+		}
 		var contents objects.Object
-		if idx < base+frame.NCellsOf(e.f.Code) {
-			ref := e.f.LocalsPlus[idx]
+		if localIdx >= 0 {
+			ref := e.f.LocalsPlus[localIdx]
 			if !ref.IsNull() {
-				if existing, ok := ref.AsObject().(*objects.Cell); ok {
-					contents = existing.Contents
-				} else {
-					contents = ref.AsObject()
-				}
+				contents = ref.AsObject()
 			}
 		}
 		cell := objects.NewCell(contents)
-		e.f.LocalsPlus[idx] = stackref.FromObject(cell)
+		cellRef := stackref.FromObject(cell)
+		e.f.LocalsPlus[base+cellIdx] = cellRef
+		if localIdx >= 0 {
+			e.f.LocalsPlus[localIdx] = cellRef
+		}
 		return e.advance(), nil, nil, false, true, nil
 
 	case compile.COPY_FREE_VARS:
@@ -812,11 +880,17 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, retVal
 		// SETUP_ANNOTATIONS: ensure __annotations__ is a dict in the
 		// current local namespace. CPython looks up "__annotations__"
 		// in f_locals, creates it if missing, and leaves the stack
-		// untouched. v0.6 fast-locals frames don't hold a Locals dict,
-		// so we treat this as a no-op for module/function scope and
-		// only honor the dict path when an explicit Locals is present
-		// (class-body frames once 1685 lands).
-		if d, ok := e.f.Locals.(*objects.Dict); ok {
+		// untouched. At module scope f_locals == f_globals; in gopy
+		// f.Locals is nil for modules and the module dict lives in
+		// f.Globals, so route the store there. Class-body frames carry
+		// an explicit Locals dict.
+		//
+		// CPython: Python/bytecodes.c SETUP_ANNOTATIONS
+		ns := e.f.Locals
+		if ns == nil {
+			ns = e.f.Globals
+		}
+		if d, ok := ns.(*objects.Dict); ok {
 			key := objects.NewStr("__annotations__")
 			if v, _ := d.GetItem(key); v == nil {
 				if serr := d.SetItem(key, objects.NewDict()); serr != nil {
@@ -1415,18 +1489,18 @@ func binaryOp(sub int32, a, b objects.Object) (objects.Object, error) {
 		nbSubscr             = 26
 	)
 	switch sub {
-	case nbAdd, nbInplaceAdd:
-		return numericForward(a, b, "+", func(n *objects.NumberMethods) func(a, b objects.Object) (objects.Object, error) {
-			return n.Add
-		})
+	case nbAdd:
+		return objects.NumberAdd(a, b)
+	case nbInplaceAdd:
+		return objects.NumberInPlaceAdd(a, b)
 	case nbSubtract, nbInplaceSubtract:
 		return numericForward(a, b, "-", func(n *objects.NumberMethods) func(a, b objects.Object) (objects.Object, error) {
 			return n.Subtract
 		})
-	case nbMult, nbInplaceMult:
-		return numericForward(a, b, "*", func(n *objects.NumberMethods) func(a, b objects.Object) (objects.Object, error) {
-			return n.Multiply
-		})
+	case nbMult:
+		return objects.NumberMultiply(a, b)
+	case nbInplaceMult:
+		return objects.NumberInPlaceMultiply(a, b)
 	case nbTrueDivide, nbInplaceTrueDivide:
 		return numericForward(a, b, "/", func(n *objects.NumberMethods) func(a, b objects.Object) (objects.Object, error) {
 			return n.TrueDivide
@@ -1499,33 +1573,47 @@ func powerOp(a, b, mod objects.Object) (objects.Object, error) {
 // the first concrete result. A slot that returns the NotImplemented
 // singleton signals "try the other operand" and is treated as a
 // fall-through, matching how CPython's abstract layer steps through
-// the forward / reflected pair.
+// the forward / reflected pair. The lookup walks each operand's MRO
+// so subclasses (e.g. bool, which leaves NumberMethods nil) inherit
+// the parent's slot table.
 //
 // CPython: Objects/abstract.c binary_op1
 func numericForward(a, b objects.Object, sym string, pick func(*objects.NumberMethods) func(a, b objects.Object) (objects.Object, error)) (objects.Object, error) {
-	if n := a.Type().Number; n != nil {
-		if fn := pick(n); fn != nil {
-			out, err := fn(a, b)
-			if err != nil {
-				return nil, err
-			}
-			if !objects.IsNotImplemented(out) {
-				return out, nil
-			}
+	if fn := mroNumberSlot(a, pick); fn != nil {
+		out, err := fn(a, b)
+		if err != nil {
+			return nil, err
+		}
+		if !objects.IsNotImplemented(out) {
+			return out, nil
 		}
 	}
-	if n := b.Type().Number; n != nil {
-		if fn := pick(n); fn != nil {
-			out, err := fn(a, b)
-			if err != nil {
-				return nil, err
-			}
-			if !objects.IsNotImplemented(out) {
-				return out, nil
-			}
+	if fn := mroNumberSlot(b, pick); fn != nil {
+		out, err := fn(a, b)
+		if err != nil {
+			return nil, err
+		}
+		if !objects.IsNotImplemented(out) {
+			return out, nil
 		}
 	}
 	return nil, fmt.Errorf("TypeError: unsupported operand type(s) for %s: '%s' and '%s'", sym, a.Type().Name, b.Type().Name)
+}
+
+// mroNumberSlot resolves a NumberMethods slot via MRO walk, mirroring
+// CPython's slot inheritance from PyType_Ready.
+//
+// CPython: Objects/typeobject.c:7895 inherit_slots
+func mroNumberSlot(o objects.Object, pick func(*objects.NumberMethods) func(a, b objects.Object) (objects.Object, error)) func(a, b objects.Object) (objects.Object, error) {
+	for _, base := range o.Type().MRO {
+		if base == nil || base.Number == nil {
+			continue
+		}
+		if fn := pick(base.Number); fn != nil {
+			return fn
+		}
+	}
+	return nil
 }
 
 func lookupIn(scope objects.Object, key objects.Object) (objects.Object, bool, error) {
@@ -1620,17 +1708,21 @@ func unpackSeq(seq objects.Object, n int) ([]objects.Object, error) {
 // CPython: Objects/abstract.c PyObject_GetItem
 func getItem(container, key objects.Object) (objects.Object, error) {
 	t := container.Type()
-	if t.Mapping != nil && t.Mapping.GetItem != nil {
-		return t.Mapping.GetItem(container, key)
+	mp, sq := mappingAndSequence(t)
+	if mp != nil && mp.GetItem != nil {
+		return mp.GetItem(container, key)
 	}
-	if t.Sequence != nil && t.Sequence.GetItem != nil {
+	if sq != nil && sq.GetItem != nil {
+		if sl, ok := key.(*objects.Slice); ok {
+			return sliceSequence(container, sl)
+		}
 		idx, ok := key.(*objects.Int)
 		if !ok {
 			return nil, fmt.Errorf("TypeError: '%s' indices must be integers, not %s", t.Name, key.Type().Name)
 		}
 		i, _ := idx.Int64()
-		if t.Sequence.Length != nil {
-			n, lerr := t.Sequence.Length(container)
+		if sq.Length != nil {
+			n, lerr := sq.Length(container)
 			if lerr != nil {
 				return nil, lerr
 			}
@@ -1641,9 +1733,88 @@ func getItem(container, key objects.Object) (objects.Object, error) {
 				return nil, fmt.Errorf("IndexError: %s index out of range", t.Name)
 			}
 		}
-		return t.Sequence.GetItem(container, int(i))
+		return sq.GetItem(container, int(i))
+	}
+	if cls, ok := container.(*objects.Type); ok {
+		return typeSubscript(cls, key)
 	}
 	return nil, fmt.Errorf("TypeError: '%s' object is not subscriptable", t.Name)
+}
+
+// typeSubscript implements `cls[args]` by reaching for
+// __class_getitem__ on cls's MRO. Mirrors the trailing PyType_Check
+// branch of PyObject_GetItem. The type singleton itself short-circuits
+// to Py_GenericAlias(type, key) so `type[int]` matches CPython.
+//
+// CPython: Objects/abstract.c:181 PyObject_GetItem (type branch)
+func typeSubscript(cls *objects.Type, key objects.Object) (objects.Object, error) {
+	if cls == objects.TypeType() {
+		return objects.NewGenericAlias(cls, key), nil
+	}
+	descr, _ := objects.LookupDescriptor(cls, "__class_getitem__")
+	if descr != nil {
+		// Bind the descriptor against cls so a classmethod (or a plain
+		// callable installed via SetTypeDescr) sees the class as its
+		// implicit first argument.
+		dt := descr.Type()
+		bound := descr
+		if dt.DescrGet != nil {
+			v, err := dt.DescrGet(descr, cls, cls)
+			if err != nil {
+				return nil, err
+			}
+			bound = v
+		}
+		return objects.Call(bound, objects.NewTuple([]objects.Object{key}), nil)
+	}
+	return nil, fmt.Errorf("TypeError: type '%s' is not subscriptable", cls.Name)
+}
+
+// sliceSequence walks a sequence's GetItem slot once per index in the
+// slice. CPython lists / tuples / strings each have their own
+// PySequence_GetSlice fast path; gopy uses a single generic loop
+// against the int-indexed Sequence.GetItem, then rewraps the result
+// in the source container's type. Negative or zero-length slices
+// produce an empty container.
+//
+// CPython: Objects/abstract.c PyObject_GetItem slice branch +
+// per-type sq_slice routines (list_subscript, tuple_subscript,
+// unicode_subscript)
+func sliceSequence(container objects.Object, sl *objects.Slice) (objects.Object, error) {
+	t := container.Type()
+	if t.Sequence == nil || t.Sequence.Length == nil || t.Sequence.GetItem == nil {
+		return nil, fmt.Errorf("TypeError: '%s' object is not subscriptable", t.Name)
+	}
+	n, err := t.Sequence.Length(container)
+	if err != nil {
+		return nil, err
+	}
+	start, _, step, count, err := sl.GetIndices(n)
+	if err != nil {
+		return nil, err
+	}
+	items := make([]objects.Object, 0, count)
+	for i := 0; i < count; i++ {
+		v, gerr := t.Sequence.GetItem(container, start+i*step)
+		if gerr != nil {
+			return nil, gerr
+		}
+		items = append(items, v)
+	}
+	switch container.(type) {
+	case *objects.List:
+		return objects.NewList(items), nil
+	case *objects.Tuple:
+		return objects.NewTuple(items), nil
+	case *objects.Unicode:
+		var sb strings.Builder
+		for _, it := range items {
+			s, _ := objects.Str(it)
+			sb.WriteString(s)
+		}
+		return objects.NewStr(sb.String()), nil
+	}
+	return objects.NewList(items), nil
 }
 
 // delItem mirrors PyObject_DelItem.
@@ -1651,8 +1822,9 @@ func getItem(container, key objects.Object) (objects.Object, error) {
 // CPython: Objects/abstract.c PyObject_DelItem
 func delItem(container, key objects.Object) error {
 	t := container.Type()
-	if t.Mapping != nil && t.Mapping.DelItem != nil {
-		return t.Mapping.DelItem(container, key)
+	mp, _ := mappingAndSequence(t)
+	if mp != nil && mp.DelItem != nil {
+		return mp.DelItem(container, key)
 	}
 	return fmt.Errorf("TypeError: '%s' object does not support item deletion", t.Name)
 }
@@ -1694,27 +1866,47 @@ func containsItem(haystack, needle objects.Object) (bool, error) {
 }
 
 // setItem mirrors PyObject_SetItem against the v0.6 container surface.
+// Walks the MRO so a subclass of a built-in container picks up the
+// base's mapping/sequence slot when the subclass itself does not
+// override it. Mirrors CPython's inherit_slots running at class
+// readiness; gopy does the walk on each call instead.
 //
 // CPython: Objects/abstract.c PyObject_SetItem
 func setItem(container, key, value objects.Object) error {
-	if d, ok := container.(*objects.Dict); ok {
-		return d.SetItem(key, value)
+	mp, sq := mappingAndSequence(container.Type())
+	if mp != nil && mp.SetItem != nil {
+		return mp.SetItem(container, key, value)
 	}
-	if l, ok := container.(*objects.List); ok {
+	if sq != nil && sq.SetItem != nil {
 		idx, ok := key.(*objects.Int)
 		if !ok {
-			return fmt.Errorf("TypeError: list indices must be integers, not %s", key.Type().Name)
+			return fmt.Errorf("TypeError: %s indices must be integers, not %s", container.Type().Name, key.Type().Name)
 		}
 		i, _ := idx.Int64()
-		if i < 0 || int(i) >= l.Len() {
-			return errors.New("IndexError: list assignment index out of range")
-		}
-		// objects.List doesn't expose a SetItem; route through SequenceMethods.
-		if l.Type().Sequence != nil && l.Type().Sequence.SetItem != nil {
-			return l.Type().Sequence.SetItem(l, int(i), value)
-		}
+		return sq.SetItem(container, int(i), value)
 	}
 	return fmt.Errorf("TypeError: '%s' object does not support item assignment", container.Type().Name)
+}
+
+// mappingAndSequence walks t's MRO and returns the first Mapping and
+// Sequence bundles found. Either return value may be nil. Lets a
+// subclass inherit container behavior without copying slot tables at
+// class-creation time.
+func mappingAndSequence(t *objects.Type) (*objects.MappingMethods, *objects.SequenceMethods) {
+	var mp *objects.MappingMethods
+	var sq *objects.SequenceMethods
+	for _, b := range t.MRO {
+		if mp == nil && b.Mapping != nil {
+			mp = b.Mapping
+		}
+		if sq == nil && b.Sequence != nil {
+			sq = b.Sequence
+		}
+		if mp != nil && sq != nil {
+			break
+		}
+	}
+	return mp, sq
 }
 
 // commonConstantsCache memoises the placeholder Type objects
@@ -1729,6 +1921,87 @@ func commonConstant(name string) *objects.Type {
 	t := objects.NewType(name, nil)
 	commonConstantsCache[name] = t
 	return t
+}
+
+// raiseValue is the do-raise body of RAISE_VARARGS. val is whatever
+// the bytecode pushed for the raise statement: an exception instance,
+// an exception class (CPython instantiates it with no args), or some
+// other object (TypeError). cause is the `from <cause>` value or nil.
+// raiseValue installs the resulting exception on the thread state and
+// returns the Go sentinel that drives the unwind loop.
+//
+// CPython: Python/ceval.c:L3105 do_raise
+func raiseValue(ts *state.Thread, val, cause objects.Object) error {
+	exc, err := normalizeRaise(val)
+	if err != nil {
+		return err
+	}
+	if cause != nil {
+		causeExc, cerr := normalizeCause(cause)
+		if cerr != nil {
+			return cerr
+		}
+		pyerrors.RaiseFrom(ts, exc, causeExc)
+	} else {
+		pyerrors.Raise(ts, exc)
+	}
+	return excSentinel(exc)
+}
+
+// normalizeRaise mirrors the head of do_raise: if val is already an
+// exception instance, keep it; if it is an exception class, call it
+// with no args; otherwise raise TypeError.
+//
+// CPython: Python/ceval.c:L3140 do_raise (the PyExceptionInstance_Check
+// / PyExceptionClass_Check branches)
+func normalizeRaise(val objects.Object) (*pyerrors.Exception, error) {
+	if exc, ok := val.(*pyerrors.Exception); ok {
+		return exc, nil
+	}
+	if t, ok := val.(*objects.Type); ok && pyerrors.IsSubtype(t, pyerrors.PyExc_BaseException) {
+		return pyerrors.New(t, objects.NewTuple(nil)), nil
+	}
+	return nil, fmt.Errorf("TypeError: exceptions must derive from BaseException")
+}
+
+// normalizeCause handles the `from <cause>` operand. None clears the
+// cause; otherwise the same exception-instance-or-class normalization
+// runs.
+//
+// CPython: Python/ceval.c:L3119 do_raise (cause branch)
+func normalizeCause(cause objects.Object) (*pyerrors.Exception, error) {
+	if cause == nil || cause == objects.None() {
+		return nil, nil
+	}
+	return normalizeRaise(cause)
+}
+
+// excSentinel returns the Go error the unwind loop sees once the
+// exception is on the thread state. The text mirrors
+// `repr(exc)`-style output so any test that pins err.Error() before
+// the proper traceback printer lands keeps working.
+func excSentinel(exc *pyerrors.Exception) error {
+	if exc == nil {
+		return errors.New("Exception")
+	}
+	msg := exc.Message()
+	if msg == "" {
+		return fmt.Errorf("%s", exc.TypeName())
+	}
+	return fmt.Errorf("%s: %s", exc.TypeName(), msg)
+}
+
+// derefName returns the cell or free variable name at index idx in
+// the cell+free layout. Used purely for error messages so a failing
+// LOAD_DEREF tells the operator which name is unbound.
+func derefName(co *objects.Code, idx int) string {
+	if idx < len(co.Cellvars) {
+		return co.Cellvars[idx]
+	}
+	if i := idx - len(co.Cellvars); i >= 0 && i < len(co.Freevars) {
+		return co.Freevars[i]
+	}
+	return "<unknown>"
 }
 
 // objectRepr returns repr(o), falling back to a placeholder so error
@@ -1747,6 +2020,16 @@ func objectRepr(o objects.Object) string {
 // the match value is a Type.
 func exceptionMatches(exc, match objects.Object) bool {
 	if t, ok := match.(*objects.Type); ok {
+		// PEP 3134 / CPython give_exception_matches: an exception
+		// matches when its type is a (non-strict) subclass of the
+		// handler type. Plain equality drops ModuleNotFoundError when
+		// the source wrote `except ImportError:`, which breaks every
+		// stdlib module that tries an optional accelerator import.
+		//
+		// CPython: Python/errors.c:218 PyErr_GivenExceptionMatches
+		if pyerrors.IsSubtype(exc.Type(), t) {
+			return true
+		}
 		return exc.Type() == t || exc.Type().Name == t.Name
 	}
 	if tup, ok := match.(*objects.Tuple); ok {

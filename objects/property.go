@@ -32,6 +32,44 @@ func init() {
 	PropertyType.Str = propertyRepr
 	PropertyType.DescrGet = propertyDescrGet
 	PropertyType.DescrSet = propertyDescrSet
+	PropertyType.TpNew = propertyNew
+}
+
+// propertyNew is the tp_new slot. property([fget[, fset[, fdel[, doc]]]])
+// accepts any subset of the four positional arguments, with `doc` also
+// available as a keyword. nil fget gives a write-only property, nil fset
+// gives the read-only flavor that @property emits on its own. The
+// constructor mirrors property_init since the descriptor has no
+// post-init step in CPython either.
+//
+// CPython: Objects/descrobject.c:1736 property_init
+func propertyNew(_ *Type, args []Object, kwargs map[string]Object) (Object, error) {
+	var fget, fset, fdel, doc Object
+	if len(args) >= 1 {
+		fget = args[0]
+	}
+	if len(args) >= 2 {
+		fset = args[1]
+	}
+	if len(args) >= 3 {
+		fdel = args[2]
+	}
+	if len(args) >= 4 {
+		doc = args[3]
+	}
+	if v, ok := kwargs["fget"]; ok {
+		fget = v
+	}
+	if v, ok := kwargs["fset"]; ok {
+		fset = v
+	}
+	if v, ok := kwargs["fdel"]; ok {
+		fdel = v
+	}
+	if v, ok := kwargs["doc"]; ok {
+		doc = v
+	}
+	return NewProperty(fget, fset, fdel, doc), nil
 }
 
 // NewProperty builds a property from up to four arguments. Any of
@@ -80,7 +118,7 @@ func propertyRepr(o Object) (string, error) {
 // CPython: Objects/descrobject.c:1576 property_descr_get
 func propertyDescrGet(descr Object, owner Object, _ *Type) (Object, error) {
 	p := descr.(*Property)
-	if owner == nil || owner == None() {
+	if owner == nil {
 		return descr, nil
 	}
 	if p.fget == nil || p.fget == None() {

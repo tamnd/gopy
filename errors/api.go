@@ -68,6 +68,32 @@ func Fetch(ts *state.Thread) (typ *objects.Type, value *Exception, tb *traceback
 	return exc.ExcType, exc, exc.TB
 }
 
+// Handled returns the currently-handled exception (the one a running
+// except handler is processing), or nil. Mirrors reading
+// exc_info->exc_value off the thread state.
+//
+// CPython: Python/errors.c _PyErr_GetHandledException
+func Handled(ts *state.Thread) *Exception {
+	v := ts.HandledException()
+	if v == nil {
+		return nil
+	}
+	exc, _ := v.(*Exception)
+	return exc
+}
+
+// SetHandled installs exc as the currently-handled exception. PUSH_EXC_INFO
+// and POP_EXCEPT call this so sys.exc_info() can read it.
+//
+// CPython: Python/errors.c _PyErr_SetHandledException
+func SetHandled(ts *state.Thread, exc *Exception) {
+	if exc == nil {
+		ts.SetHandledException(nil)
+		return
+	}
+	ts.SetHandledException(exc)
+}
+
 // Restore atomically installs an exception triple. Mirrors PyErr_Restore.
 //
 // CPython: Python/errors.c:L37 _PyErr_Restore

@@ -54,9 +54,12 @@ func (i *Instance) Dict() *Dict { return i.dict }
 
 // instanceGetAttr is the tp_getattro slot for user-defined types.
 // Lookup order matches CPython: type-level data descriptors win first,
-// then instance __dict__, then type-level non-data descriptors.
+// then instance __dict__, then type-level non-data descriptors. When
+// no attribute is found, falls back to a user-defined __getattr__ hook
+// on the type, mirroring slot_tp_getattr_hook.
 //
 // CPython: Objects/object.c:1932 PyObject_GenericGetAttr
+// CPython: Objects/typeobject.c:8895 slot_tp_getattr_hook
 func instanceGetAttr(o Object, name Object) (Object, error) {
 	inst, ok := o.(*Instance)
 	if !ok {
@@ -85,6 +88,20 @@ func instanceGetAttr(o Object, name Object) (Object, error) {
 			return dt.DescrGet(descr, o, tp)
 		}
 		return descr, nil
+	}
+	// Fall back to __getattr__ if the class defines it. The hook
+	// receives the attribute name as its single argument and is
+	// expected to return the value or raise AttributeError itself.
+	if ga, _ := LookupDescriptor(tp, "__getattr__"); ga != nil {
+		bound := ga
+		if dg := ga.Type().DescrGet; dg != nil {
+			b, err := dg(ga, o, tp)
+			if err != nil {
+				return nil, err
+			}
+			bound = b
+		}
+		return Call(bound, NewTuple([]Object{name}), nil)
 	}
 	return nil, fmt.Errorf("AttributeError: '%s' object has no attribute '%s'", tp.Name, attrNameStr(name))
 }

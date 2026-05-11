@@ -57,7 +57,8 @@ func TestAugAssignNameEmitsLoadInPlaceStore(t *testing.T) {
 // AnnAssign ----------------------------------------------------------
 
 func TestAnnAssignWithValueAssigns(t *testing.T) {
-	// x: int = 1
+	// x: int = 1 — value lands in the local namespace, annotation is
+	// evaluated and pushed to __annotations__["x"].
 	a := &ast.AnnAssign{
 		Target:     nameStore("x"),
 		Annotation: nameLoad("int"),
@@ -65,7 +66,9 @@ func TestAnnAssignWithValueAssigns(t *testing.T) {
 	}
 	u := compileMod(t, module(a))
 	want := []string{
+		"SETUP_ANNOTATIONS",
 		"LOAD_CONST", "STORE_NAME",
+		"LOAD_NAME", "LOAD_NAME", "LOAD_CONST", "STORE_SUBSCR",
 		"LOAD_CONST", "RETURN_VALUE",
 	}
 	if got := opNames(u); !equalStrings(got, want) {
@@ -77,13 +80,18 @@ func TestAnnAssignWithValueAssigns(t *testing.T) {
 }
 
 func TestAnnAssignNoValueRecordsAnnotationOnly(t *testing.T) {
-	// x: int
+	// x: int — no store of x, but the annotation still lands in
+	// __annotations__.
 	a := &ast.AnnAssign{
 		Target:     nameStore("x"),
 		Annotation: nameLoad("int"),
 	}
 	u := compileMod(t, module(a))
-	want := []string{"LOAD_CONST", "RETURN_VALUE"}
+	want := []string{
+		"SETUP_ANNOTATIONS",
+		"LOAD_NAME", "LOAD_NAME", "LOAD_CONST", "STORE_SUBSCR",
+		"LOAD_CONST", "RETURN_VALUE",
+	}
 	if got := opNames(u); !equalStrings(got, want) {
 		t.Errorf("ops = %v, want %v", got, want)
 	}

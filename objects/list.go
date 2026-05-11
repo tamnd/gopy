@@ -1,6 +1,10 @@
 package objects
 
-import "strings"
+import (
+	"errors"
+	"fmt"
+	"strings"
+)
 
 // List is the Python list, a mutable ordered sequence.
 //
@@ -22,9 +26,13 @@ func init() {
 	ListType.RichCmp = listRichCmp
 	ListType.Iter = listIter
 	ListType.Sequence = &SequenceMethods{
-		Length:  listLen,
-		GetItem: listGetItem,
-		SetItem: listSetItem,
+		Length:        listLen,
+		Concat:        listConcat,
+		Repeat:        listRepeat,
+		GetItem:       listGetItem,
+		SetItem:       listSetItem,
+		InPlaceConcat: listInPlaceConcat,
+		InPlaceRepeat: listInPlaceRepeat,
 	}
 	ListType.TpTraverse = listTraverse
 }
@@ -97,6 +105,94 @@ func listGetItem(o Object, i int) (Object, error) {
 		return nil, errIndexOutOfRange
 	}
 	return l.items[i], nil
+}
+
+// listConcat ports list_concat: build a fresh list with a's items
+// followed by b's. b must be a list; mismatched types raise TypeError
+// like CPython does (not NotImplemented; the list slot itself rejects
+// non-lists).
+//
+// CPython: Objects/listobject.c:541 list_concat
+func listConcat(a, b Object) (Object, error) {
+	la := a.(*List)
+	lb, ok := b.(*List)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: can only concatenate list (not \"%s\") to list", b.Type().Name)
+	}
+	out := make([]Object, 0, len(la.items)+len(lb.items))
+	out = append(out, la.items...)
+	out = append(out, lb.items...)
+	return NewList(out), nil
+}
+
+// listRepeat ports list_repeat: produce a fresh list containing n
+// copies of o's items. Negative or zero n produces an empty list,
+// matching the CPython behavior.
+//
+// CPython: Objects/listobject.c:577 list_repeat
+func listRepeat(o Object, n int) (Object, error) {
+	l := o.(*List)
+	if n <= 0 {
+		return NewList(nil), nil
+	}
+	out := make([]Object, 0, len(l.items)*n)
+	for i := 0; i < n; i++ {
+		out = append(out, l.items...)
+	}
+	return NewList(out), nil
+}
+
+// listInPlaceConcat extends a with b's items. b must be iterable; the
+// CPython slot delegates to list_extend, which accepts any iterable.
+//
+// CPython: Objects/listobject.c:838 list_inplace_concat
+func listInPlaceConcat(a, b Object) (Object, error) {
+	la := a.(*List)
+	tp := b.Type()
+	if tp.Iter == nil {
+		return nil, fmt.Errorf("TypeError: '%s' object is not iterable", tp.Name)
+	}
+	it, err := tp.Iter(b)
+	if err != nil {
+		return nil, err
+	}
+	itType := it.Type()
+	if itType.IterNext == nil {
+		return nil, fmt.Errorf("TypeError: iter() returned non-iterator of type '%s'", itType.Name)
+	}
+	for {
+		v, err := itType.IterNext(it)
+		if errors.Is(err, ErrStopIteration) {
+			break
+		}
+		if err != nil {
+			return nil, err
+		}
+		la.Append(v)
+	}
+	return la, nil
+}
+
+// listInPlaceRepeat repeats a's contents n times in place. n<=0 wipes
+// the list, matching list_inplace_repeat.
+//
+// CPython: Objects/listobject.c:626 list_inplace_repeat
+func listInPlaceRepeat(o Object, n int) (Object, error) {
+	l := o.(*List)
+	if n <= 0 {
+		l.items = l.items[:0]
+		l.size = 0
+		return l, nil
+	}
+	if n == 1 {
+		return l, nil
+	}
+	base := append([]Object(nil), l.items...)
+	for i := 1; i < n; i++ {
+		l.items = append(l.items, base...)
+	}
+	l.size = int64(len(l.items))
+	return l, nil
 }
 
 func listSetItem(o Object, i int, v Object) error {

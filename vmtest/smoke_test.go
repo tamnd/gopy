@@ -45,6 +45,7 @@ func TestSmokeReleaseV06(t *testing.T) {
 			instr(compile.BINARY_OP, 0),
 			instr(compile.RETURN_VALUE, 0),
 		),
+		Argcount:  2,
 		Varnames:  []string{"x", "y"},
 		Stacksize: 4,
 		Name:      "add",

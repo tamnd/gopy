@@ -88,15 +88,39 @@ func currentThread() *state.Thread {
 
 func init() {
 	objects.FunctionType.Call = callPyFunction
+	// Expose the current Python frame to objects/ for super() zero-arg.
+	// The frame stack lives on the active thread's threadVM; this hook
+	// avoids an objects -> vm import edge.
+	//
+	// CPython: pycore_frame.h _PyThreadState_GetFrame is the same shape.
+	objects.CurrentFrameHook = currentInterpreterFrame
+}
+
+// currentInterpreterFrame returns the top of the active thread's frame
+// stack, or nil when no Python frame is live on this goroutine. Used by
+// objects.superInitNoArgs to read __class__ and self off the caller.
+//
+// CPython: pycore_frame.h _PyThreadState_GetFrame
+func currentInterpreterFrame() objects.InterpreterFrame {
+	ts := currentThread()
+	if ts == nil {
+		return nil
+	}
+	f := frameStackFor(ts).Top()
+	if f == nil {
+		return nil
+	}
+	return f
 }
 
 // callPyFunction pushes a frame for the function's code, binds args
-// into fast-locals, and runs the eval loop. Supports positional and
-// keyword arguments; positional defaults fill in the tail when the
-// caller provided fewer args than parameters. *args / **kwargs are
-// not yet supported.
+// into fast-locals, and runs the eval loop. Mirrors CPython's
+// initialize_locals: positional bind, *args pack, kw-only bind,
+// **kwargs collect, defaults, kw-defaults, missing-arg check.
 //
 // CPython: Objects/call.c _PyEval_Vector
+//
+//nolint:gocognit,gocyclo // matches CPython's initialize_locals; splitting the steps out hides the linear flow without removing branches.
 func callPyFunction(o objects.Object, args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error) {
 	fn := o.(*objects.Function)
 	co := fn.Code
@@ -104,12 +128,10 @@ func callPyFunction(o objects.Object, args []objects.Object, kwargs map[string]o
 		return nil, fmt.Errorf("TypeError: function %q has no code", fn.Name)
 	}
 	npos := co.Argcount
-	if npos == 0 && len(co.Varnames) > 0 {
-		// v0.6 compiler doesn't always set Argcount yet; fall back to
-		// "all varnames are positional" until that wires up.
-		npos = len(co.Varnames)
-	}
-	if len(args) > npos {
+	nkwonly := co.KwonlyArgcount
+	hasVarargs := co.Flags&int(0x04) != 0
+	hasVarkw := co.Flags&int(0x08) != 0
+	if !hasVarargs && len(args) > npos {
 		return nil, fmt.Errorf("TypeError: %s() takes %d positional arguments but %d were given",
 			fn.Name, npos, len(args))
 	}
@@ -118,23 +140,59 @@ func callPyFunction(o objects.Object, args []objects.Object, kwargs map[string]o
 		ts = state.NewThread()
 	}
 	stack := frameStackFor(ts)
-	f := stack.Push(co, fn.Globals, nil, fn, nil)
+	f := stack.Push(co, fn.Globals, fn.Builtins, fn, nil)
 	defer stack.Pop()
 
-	// Positional bind.
-	for i, a := range args {
-		f.SetLocal(i, stackref.FromObject(a))
+	// Positional bind: first npos args go into slots [0..npos).
+	bound := len(args)
+	if bound > npos {
+		bound = npos
 	}
-	// Keyword bind: scan Varnames for a match, error on unknown name.
+	for i := 0; i < bound; i++ {
+		f.SetLocal(i, stackref.FromObject(args[i]))
+	}
+	// *args: pack any extra positionals into a tuple at the varargs slot.
+	if hasVarargs {
+		extra := args[bound:]
+		items := make([]objects.Object, len(extra))
+		copy(items, extra)
+		f.SetLocal(npos, stackref.FromObject(objects.NewTuple(items)))
+	}
+	// **kwargs: collect unknown keyword args here. Allocate eagerly so
+	// the slot is bound even when no keywords are passed.
+	var kwSlot int
+	var kwDict *objects.Dict
+	if hasVarkw {
+		kwSlot = npos + nkwonly
+		if hasVarargs {
+			kwSlot++
+		}
+		kwDict = objects.NewDict()
+		f.SetLocal(kwSlot, stackref.FromObject(kwDict))
+	}
+	// Keyword bind: scan the positional + kw-only window for a name
+	// match. Names not found land in **kwargs (or error if absent).
+	kwWindow := npos + nkwonly
 	for k, v := range kwargs {
 		idx := -1
-		for i, name := range co.Varnames {
-			if name == k {
+		for i := 0; i < kwWindow; i++ {
+			if i == npos && hasVarargs {
+				// The *args slot sits inside varnames at index npos but
+				// is not eligible for keyword binding.
+				continue
+			}
+			if co.Varnames[i] == k {
 				idx = i
 				break
 			}
 		}
 		if idx < 0 {
+			if hasVarkw {
+				if err := kwDict.SetItem(objects.NewStr(k), v); err != nil {
+					return nil, err
+				}
+				continue
+			}
 			return nil, fmt.Errorf("TypeError: %s() got an unexpected keyword argument %q", fn.Name, k)
 		}
 		if !f.LocalAt(idx).IsNull() {
@@ -142,7 +200,7 @@ func callPyFunction(o objects.Object, args []objects.Object, kwargs map[string]o
 		}
 		f.SetLocal(idx, stackref.FromObject(v))
 	}
-	// Defaults fill any unbound positional tail.
+	// Positional defaults fill any unbound tail of the positional slots.
 	if fn.Defaults != nil {
 		nDefaults := fn.Defaults.Len()
 		for i := 0; i < nDefaults; i++ {
@@ -155,10 +213,38 @@ func callPyFunction(o objects.Object, args []objects.Object, kwargs map[string]o
 			}
 		}
 	}
-	// Verify every positional slot is bound.
+	// Keyword-only defaults fill any unbound kw-only slots.
+	if fn.KwDefaults != nil && nkwonly > 0 {
+		base := npos
+		if hasVarargs {
+			base++
+		}
+		for i := 0; i < nkwonly; i++ {
+			slot := base + i
+			if !f.LocalAt(slot).IsNull() {
+				continue
+			}
+			name := co.Varnames[slot]
+			v, err := fn.KwDefaults.GetItem(objects.NewStr(name))
+			if err == nil && v != nil {
+				f.SetLocal(slot, stackref.FromObject(v))
+			}
+		}
+	}
+	// Verify every positional and kw-only slot is bound.
 	for i := 0; i < npos; i++ {
 		if f.LocalAt(i).IsNull() {
 			return nil, fmt.Errorf("TypeError: %s() missing required argument %q", fn.Name, co.Varnames[i])
+		}
+	}
+	kwOnlyBase := npos
+	if hasVarargs {
+		kwOnlyBase++
+	}
+	for i := 0; i < nkwonly; i++ {
+		slot := kwOnlyBase + i
+		if f.LocalAt(slot).IsNull() {
+			return nil, fmt.Errorf("TypeError: %s() missing required keyword-only argument %q", fn.Name, co.Varnames[slot])
 		}
 	}
 	return Eval(ts, f)

@@ -12,7 +12,9 @@ import (
 	"fmt"
 
 	"github.com/tamnd/gopy/compile"
+	"github.com/tamnd/gopy/frame"
 	"github.com/tamnd/gopy/objects"
+	"github.com/tamnd/gopy/stackref"
 )
 
 // genResult bundles the dispatch outcome for the generator / coroutine
@@ -60,34 +62,110 @@ func (e *evalState) tryGen(op compile.Opcode, oparg uint32) (genResult, error) {
 
 	case compile.WITH_EXCEPT_START:
 		return e.execWithExceptStart()
+
+	case compile.LOAD_SPECIAL:
+		return e.execLoadSpecial(oparg)
 	}
 	return genResult{}, nil
 }
 
-// execReturnGenerator ports RETURN_GENERATOR: detaches the current frame,
-// creates a generator object whose goroutine will drive the body, and
-// returns the generator to the caller.
+// specialMethodNames maps the LOAD_SPECIAL oparg to the dunder name to
+// look up on the owner's type. Order matches CPython's _PySpecialMethod
+// enum (SPECIAL___ENTER__, SPECIAL___EXIT__, SPECIAL___AENTER__,
+// SPECIAL___AEXIT__).
+//
+// CPython: Include/internal/pycore_ceval.h:380 _PySpecialMethod
+var specialMethodNames = [...]string{
+	"__enter__",
+	"__exit__",
+	"__aenter__",
+	"__aexit__",
+}
+
+// execLoadSpecial ports LOAD_SPECIAL: pop owner, look the named dunder
+// up on the owner's type via the MRO walk (not on the instance), bind
+// through tp_descr_get if present, and push the resulting (attr,
+// self_or_null) pair. Lets the CALL handler treat the pair the same as
+// a LOAD_ATTR-with-self-shape produced for ordinary method calls.
+//
+// CPython: Python/bytecodes.c LOAD_SPECIAL
+// CPython: Include/internal/pycore_object.h _PyObject_LookupSpecialMethod
+func (e *evalState) execLoadSpecial(oparg uint32) (genResult, error) {
+	if int(oparg) >= len(specialMethodNames) {
+		return genResult{ok: true}, fmt.Errorf("vm: LOAD_SPECIAL: oparg %d out of range", oparg)
+	}
+	name := specialMethodNames[oparg]
+	owner := e.popObject()
+	t := owner.Type()
+	descr, _ := objects.LookupDescriptor(t, name)
+	if descr == nil {
+		return genResult{ok: true}, fmt.Errorf(
+			"AttributeError: '%s' object has no attribute '%s'", t.Name, name)
+	}
+	// If the descriptor implements __get__, bind it through the
+	// descriptor protocol and push (bound, NULL). Otherwise push the
+	// raw descriptor with the owner as self_or_null so CALL prepends
+	// it before invoking.
+	if dg := descr.Type().DescrGet; dg != nil {
+		bound, err := dg(descr, owner, t)
+		if err != nil {
+			return genResult{ok: true}, err
+		}
+		e.pushObject(bound)
+		e.push(stackref.Null)
+		return genResult{next: e.advance(), ok: true}, nil
+	}
+	e.pushObject(descr)
+	e.pushObject(owner)
+	return genResult{next: e.advance(), ok: true}, nil
+}
+
+// execReturnGenerator ports RETURN_GENERATOR: clones the current frame
+// into a generator-owned heap copy, marks the arena slot so the
+// caller's natural Pop tears it down without clearing locals, and
+// returns the new generator to the caller.
+//
+// Unlike CPython, which pops the running frame off the eval stack
+// inside RETURN_GENERATOR and resumes the caller in-loop, gopy nests
+// Eval calls per Python call. The pending defer in callPyFunction
+// owns the chunk-slot teardown; this opcode just hands off the frame
+// contents to the generator.
 //
 // CPython: Python/bytecodes.c:4982 RETURN_GENERATOR
 func (e *evalState) execReturnGenerator() (genResult, error) {
 	name := e.f.Code.Name
 
-	// Capture the post-RETURN_GENERATOR IP before Detach. Detach zeroes
-	// the arena slot that e.f points at, so reading e.f.InstrPtr after
-	// Detach would yield 0 and the generator goroutine would loop back
-	// onto RETURN_GENERATOR.
-	resumeIP := e.advance()
+	// Skip the POP_TOP that insert_prefix_instructions emits right
+	// after RETURN_GENERATOR. The two together have a net stack
+	// effect of zero (RETURN_GENERATOR pushed an item that POP_TOP
+	// drops); we never materialize the push, so we also skip the pop.
+	//
+	// CPython: Python/flowgraph.c:3760 insert_prefix_instructions
+	// (the RETURN_GENERATOR + POP_TOP pair)
+	resumeIP := e.advance() + 2
 
-	// Detach the frame from the thread's chunk arena. The generator
-	// takes ownership and will run the body lazily.
-	stack := frameStackFor(e.ts)
-	savedFrame := stack.Detach()
+	// Copy the frame state into a heap-owned record the generator
+	// goroutine will run. Mark the arena slot OwnedByGenerator so the
+	// caller's defer Pop in callPyFunction skips the LocalsPlus
+	// teardown that would otherwise race with the live goroutine.
+	savedFrame := &frame.Frame{}
+	*savedFrame = *e.f
 	savedFrame.InstrPtr = resumeIP
+	savedFrame.PrevInstr = e.f.InstrPtr
+	savedFrame.Owner = frame.OwnedByGenerator
+	e.f.Owner = frame.OwnedByGenerator
 	savedTS := e.ts
 
 	gen := objects.NewGenerator(name)
 
 	go func() {
+		// Register the generator's goroutine with the active-thread map
+		// so currentThread() (used by sys.exc_info and friends) resolves
+		// to savedTS. Without this, hook-driven builtins running inside
+		// the generator body see a nil thread and return defaults.
+		prev := setActiveThread(savedTS)
+		defer restoreActiveThread(prev)
+
 		// Block until the first Send() call. The first message must be
 		// None (enforced by Generator.Send); we discard it here because
 		// the generator body begins from the frame's IP, not a yield

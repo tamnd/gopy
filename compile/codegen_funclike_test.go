@@ -253,9 +253,10 @@ func TestLambdaEmitsInnerCodeAndMakeFunction(t *testing.T) {
 
 // TestNestedFunctionClosureEmitsLoadFast covers the closure path:
 // `def outer(x):\n  def inner():\n    return x` should leave the
-// outer's `x` as a cell, and emit LOAD_FAST x / BUILD_TUPLE 1 in
+// outer's `x` as a cell, and emit LOAD_CLOSURE x / BUILD_TUPLE 1 in
 // outer before MAKE_FUNCTION, with SET_FUNCTION_ATTRIBUTE 0x08
-// stamping the closure tuple onto the new function.
+// stamping the closure tuple onto the new function. The assembler
+// later lowers LOAD_CLOSURE to LOAD_FAST against the cell slot.
 func TestNestedFunctionClosureEmitsLoadFast(t *testing.T) {
 	inner := &ast.FunctionDef{
 		Name: "inner",
@@ -275,7 +276,7 @@ func TestNestedFunctionClosureEmitsLoadFast(t *testing.T) {
 	// + SET_FUNCTION_ATTRIBUTE sequence inside outer.
 	found := false
 	for i := 0; i+4 < len(got); i++ {
-		if got[i] == "LOAD_FAST" && got[i+1] == "BUILD_TUPLE" &&
+		if got[i] == "LOAD_CLOSURE" && got[i+1] == "BUILD_TUPLE" &&
 			got[i+2] == "LOAD_CONST" && got[i+3] == "MAKE_FUNCTION" &&
 			got[i+4] == "SET_FUNCTION_ATTRIBUTE" {
 			found = true
@@ -295,6 +296,43 @@ func TestNestedFunctionClosureEmitsLoadFast(t *testing.T) {
 	innerOps := opNames(innermost)
 	if !slices.Contains(innerOps, "LOAD_DEREF") {
 		t.Errorf("expected LOAD_DEREF in inner ops; got %v", innerOps)
+	}
+}
+
+// TestNestedFunctionClosureMultiVarSlotOrder pins the closure-slot
+// alignment when the inner function captures more than one free var.
+// Outer emitClosure sorts free names alphabetically and pushes cells in
+// that order; the inner's FreeVars list must follow the same order so
+// COPY_FREE_VARS lands each cell in the slot the body reads. Without
+// the pre-population in enterScope, the inner would lazily allocate
+// slots in source-reference order and end up reading the wrong cell.
+func TestNestedFunctionClosureMultiVarSlotOrder(t *testing.T) {
+	// def outer(self, cls):
+	//     def helper(a):
+	//         _ = self
+	//         _ = cls
+	//     return helper
+	inner := &ast.FunctionDef{
+		Name: "helper",
+		Args: argsOf("a"),
+		Body: []ast.Stmt{
+			&ast.Assign{Targets: []ast.Expr{nameStore("_")}, Value: nameLoad("self")},
+			&ast.Assign{Targets: []ast.Expr{nameStore("_")}, Value: nameLoad("cls")},
+		},
+	}
+	outer := &ast.FunctionDef{
+		Name: "outer",
+		Args: argsOf("self", "cls"),
+		Body: []ast.Stmt{inner, &ast.Return{Value: nameLoad("helper")}},
+	}
+	u := compileMod(t, module(outer))
+	outerUnit := findInnerUnit(t, u)
+	innerUnit := findInnerUnit(t, outerUnit)
+	// FreeVars must be sorted, matching the LOAD_CLOSURE push order in
+	// the outer.
+	wantFree := []string{"cls", "self"}
+	if !equalStrings(innerUnit.FreeVars, wantFree) {
+		t.Errorf("inner FreeVars = %v, want %v", innerUnit.FreeVars, wantFree)
 	}
 }
 

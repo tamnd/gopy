@@ -58,12 +58,15 @@ func getsetDescrRepr(o Object) (string, error) {
 
 // getsetDescrGet calls fget with the owner instance. Accessing the
 // descriptor on the class itself (owner==nil) returns the descriptor
-// unchanged, matching CPython's getset_get behavior.
+// unchanged, matching CPython's descr_check. Py_None is a regular
+// instance and must not be confused with the C-level NULL that
+// signals class access.
 //
 // CPython: Objects/descrobject.c:153 getset_get
+// CPython: Objects/descrobject.c:115 descr_check
 func getsetDescrGet(descr Object, owner Object, _ *Type) (Object, error) {
 	d := descr.(*GetSetDescr)
-	if owner == nil || owner == None() {
+	if owner == nil {
 		return descr, nil
 	}
 	if d.fget == nil {
@@ -131,6 +134,29 @@ func lookupTypeMember(t *Type, name string) Object {
 // CPython: Objects/typeobject.c:1057 type_dict (analog)
 var typeDescrTable = map[*Type]map[string]Object{}
 
+// TypeDescrNames returns the names registered on t through
+// SetTypeDescr, walking the MRO and de-duplicating. Used by builtins
+// dir() to introspect a class.
+func TypeDescrNames(t *Type) []string {
+	seen := map[string]struct{}{}
+	for _, base := range t.MRO {
+		if base == nil {
+			continue
+		}
+		for name := range typeDescrTable[base] {
+			seen[name] = struct{}{}
+		}
+	}
+	for name := range typeDescrTable[t] {
+		seen[name] = struct{}{}
+	}
+	out := make([]string, 0, len(seen))
+	for name := range seen {
+		out = append(out, name)
+	}
+	return out
+}
+
 // SetTypeDescr installs d as the attribute name on t. Used by built-in
 // type initialisers to expose properties before the typeobject port
 // gives every type a real __dict__.
@@ -143,4 +169,33 @@ func SetTypeDescr(t *Type, name string, d Object) {
 		typeDescrTable[t] = m
 	}
 	m[name] = d
+}
+
+// TypeOwnDescrs returns the names and values registered directly on
+// t (no MRO walk). Iteration order is not stable. Callers must not
+// mutate the returned map; use SetTypeDescr / DelTypeDescr instead.
+// Mirrors a read of tp_dict for a single class.
+//
+// CPython: Objects/typeobject.c:1057 type_dict
+func TypeOwnDescrs(t *Type) map[string]Object {
+	if t == nil {
+		return nil
+	}
+	return typeDescrTable[t]
+}
+
+// DelTypeDescr removes name from t's own descriptor table. Returns
+// true when the entry existed. Mirrors a PyDict_DelItem on tp_dict.
+//
+// CPython: Objects/typeobject.c:6012 type_add_method (inverse path)
+func DelTypeDescr(t *Type, name string) bool {
+	m, ok := typeDescrTable[t]
+	if !ok {
+		return false
+	}
+	if _, ok := m[name]; !ok {
+		return false
+	}
+	delete(m, name)
+	return true
 }

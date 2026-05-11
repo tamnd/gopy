@@ -46,10 +46,19 @@ func typeCall(callable Object, args []Object, kwargs map[string]Object) (Object,
 		return typeMetaCall(args, kwargs)
 	}
 
-	// Built-in types that publish their own constructor (super, ...) get
-	// dispatched through that slot directly. Mirrors the way CPython's
-	// PyType_Type tp_call routes through the subtype's tp_new/tp_init.
-	if cls.Call != nil {
+	// Built-in types that publish a tp_new constructor (int, list,
+	// super, ...) get dispatched through that slot. Mirrors the way
+	// CPython's PyType_Type tp_call calls type->tp_new(type, args, kwds)
+	// before tp_init.
+	if cls.TpNew != nil {
+		return cls.TpNew(cls, args, kwargs)
+	}
+	// Some built-ins still expose construction through Call (super
+	// landed before TpNew did); honor it as a fallback. Skip the
+	// fallback for user classes, where cls.Call is the slotTpCall
+	// dispatcher installed by fixupSlotDispatchers for instances and
+	// would otherwise re-enter __call__ at construction time.
+	if cls.Call != nil && !cls.IsUser {
 		return cls.Call(callable, args, kwargs)
 	}
 

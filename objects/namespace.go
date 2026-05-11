@@ -32,6 +32,26 @@ func init() {
 	NamespaceType.Getattro = namespaceGetattr
 	NamespaceType.Setattro = namespaceSetattr
 	NamespaceType.RichCmp = namespaceCompare
+	NamespaceType.TpNew = namespaceNew
+}
+
+// namespaceNew is the tp_new slot for SimpleNamespace. The CPython
+// constructor takes no positional arguments and copies every keyword
+// argument into the instance dict. types.SimpleNamespace's docstring
+// frames this as "Sets attributes from keyword arguments."
+//
+// CPython: Objects/namespaceobject.c:27 namespace_new
+func namespaceNew(_ *Type, args []Object, kwargs map[string]Object) (Object, error) {
+	if len(args) != 0 {
+		return nil, fmt.Errorf("TypeError: no positional arguments expected")
+	}
+	n := NewNamespace()
+	for k, v := range kwargs {
+		if err := n.dict.SetItem(NewStr(k), v); err != nil {
+			return nil, err
+		}
+	}
+	return n, nil
 }
 
 // NewNamespace creates an empty SimpleNamespace.

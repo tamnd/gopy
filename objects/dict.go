@@ -1,6 +1,10 @@
 package objects
 
-import "strings"
+import (
+	"errors"
+	"fmt"
+	"strings"
+)
 
 // dictEntry is one slot in the dict's open-addressed table. The slot
 // is one of three states: empty (used=false, dummy=false) the probe
@@ -26,6 +30,7 @@ type dictEntry struct {
 type Dict struct {
 	Header
 	entries    []dictEntry
+	order      []int       // slot indices in insertion order; one entry per live key
 	used       int         // active entries
 	fill       int         // active entries + dummies; only resets on resize
 	kind       dictKind    // DictKeysKind: gates the four lookup variants
@@ -68,6 +73,66 @@ func init() {
 		DelItem: dictMappingDel,
 	}
 	DictType.TpTraverse = dictTraverse
+	DictType.Getattro = GenericGetAttr
+	SetTypeDescr(DictType, "keys", NewMethodDescr(DictType, "keys", dictKeysMethod))
+	SetTypeDescr(DictType, "values", NewMethodDescr(DictType, "values", dictValuesMethod))
+	SetTypeDescr(DictType, "items", NewMethodDescr(DictType, "items", dictItemsMethod))
+	SetTypeDescr(DictType, "get", NewMethodDescr(DictType, "get", dictGetMethod))
+	SetTypeDescr(DictType, "__contains__", NewMethodDescr(DictType, "__contains__", dictContainsMethod))
+}
+
+func dictKeysMethod(args []Object, _ map[string]Object) (Object, error) {
+	if len(args) != 1 {
+		return nil, fmt.Errorf("TypeError: keys() takes no arguments (%d given)", len(args)-1)
+	}
+	return args[0].(*Dict).KeysView(), nil
+}
+
+func dictValuesMethod(args []Object, _ map[string]Object) (Object, error) {
+	if len(args) != 1 {
+		return nil, fmt.Errorf("TypeError: values() takes no arguments (%d given)", len(args)-1)
+	}
+	return args[0].(*Dict).ValuesView(), nil
+}
+
+func dictItemsMethod(args []Object, _ map[string]Object) (Object, error) {
+	if len(args) != 1 {
+		return nil, fmt.Errorf("TypeError: items() takes no arguments (%d given)", len(args)-1)
+	}
+	return args[0].(*Dict).ItemsView(), nil
+}
+
+// dictGetMethod ports dict_get_impl: dict.get(key, default=None).
+//
+// CPython: Objects/dictobject.c:3823 dict_get_impl
+func dictGetMethod(args []Object, _ map[string]Object) (Object, error) {
+	if len(args) < 2 || len(args) > 3 {
+		return nil, fmt.Errorf("TypeError: get expected 1 to 2 arguments, got %d", len(args)-1)
+	}
+	d := args[0].(*Dict)
+	v, err := d.GetItem(args[1])
+	if err == nil && v != nil {
+		return v, nil
+	}
+	if len(args) == 3 {
+		return args[2], nil
+	}
+	return None(), nil
+}
+
+// dictContainsMethod backs dict.__contains__.
+//
+// CPython: Objects/dictobject.c:3735 dict_contains
+func dictContainsMethod(args []Object, _ map[string]Object) (Object, error) {
+	if len(args) != 2 {
+		return nil, fmt.Errorf("TypeError: __contains__() takes exactly one argument (%d given)", len(args)-1)
+	}
+	d := args[0].(*Dict)
+	v, err := d.GetItem(args[1])
+	if err != nil {
+		return nil, err
+	}
+	return NewBool(v != nil), nil
 }
 
 // dictTraverse visits every key and every value.
@@ -75,10 +140,8 @@ func init() {
 // CPython: Objects/dictobject.c:4022 dict_traverse
 func dictTraverse(o Object, visit Visitor) error {
 	d := o.(*Dict)
-	for _, e := range d.entries {
-		if !e.used {
-			continue
-		}
+	for _, slot := range d.order {
+		e := &d.entries[slot]
 		if e.key != nil {
 			if err := visit(e.key); err != nil {
 				return err
@@ -113,10 +176,8 @@ func (d *Dict) Len() int { return d.used }
 // CPython: Objects/dictobject.c PyDict_Keys
 func (d *Dict) Keys() []Object {
 	out := make([]Object, 0, d.used)
-	for _, e := range d.entries {
-		if e.used {
-			out = append(out, e.key)
-		}
+	for _, slot := range d.order {
+		out = append(out, d.entries[slot].key)
 	}
 	return out
 }
@@ -180,7 +241,27 @@ func (d *Dict) lookup(h int64, key Object) (idx int, found bool, err error) {
 
 func dictLen(o Object) (int, error) { return o.(*Dict).Len(), nil }
 
-func dictMappingGet(o, key Object) (Object, error) { return o.(*Dict).GetItem(key) }
+// dictMappingGet is the type-level __getitem__. Mirrors dict_subscript:
+// on miss it raises KeyError with the key as the value, so user code
+// `except KeyError` catches the failure instead of seeing the raw
+// errKeyNotFound sentinel.
+//
+// CPython: Objects/dictobject.c:2229 dict_subscript
+func dictMappingGet(o, key Object) (Object, error) {
+	d := o.(*Dict)
+	v, err := d.GetItem(key)
+	if err != nil {
+		if errors.Is(err, errKeyNotFound) {
+			repr, rerr := Repr(key)
+			if rerr != nil {
+				repr = "?"
+			}
+			return nil, fmt.Errorf("KeyError: %s", repr)
+		}
+		return nil, err
+	}
+	return v, nil
+}
 
 func dictMappingSet(o, key, value Object) error { return o.(*Dict).SetItem(key, value) }
 
@@ -191,10 +272,8 @@ func dictRepr(o Object) (string, error) {
 	var b strings.Builder
 	b.WriteByte('{')
 	first := true
-	for _, e := range d.entries {
-		if !e.used {
-			continue
-		}
+	for _, slot := range d.order {
+		e := &d.entries[slot]
 		if !first {
 			b.WriteString(", ")
 		}
