@@ -69,6 +69,13 @@ import (
 	// CPython: Modules/config.c.in:44 {"_operator", PyInit__operator}
 	_ "github.com/tamnd/gopy/module/_operator"
 
+	// Built-in module: _warnings. Registers itself via
+	// module/_warnings/module.go init(). 1:1 port of CPython's
+	// Python/_warnings.c, backing the vendored Lib/warnings.py and
+	// the C-level PyErr_Warn family.
+	// CPython: Modules/config.c.in:51 {"_warnings", _PyWarnings_Init}
+	_ "github.com/tamnd/gopy/module/_warnings"
+
 	// Go-backed Python modules: not in CPython's config.c.in (those
 	// are pure-Python in Lib/), but until the corresponding Lib/*.py
 	// vendoring lands the import system needs something to satisfy
