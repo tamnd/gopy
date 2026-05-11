@@ -1,0 +1,294 @@
+---
+title: Modules/_ssl.c
+description: Python TLS/SSL layer wrapping OpenSSL, providing SSLContext for protocol and certificate configuration, SSLSocket and SSLObject for connection I/O, MemoryBIO for buffer-based I/O, and the SSLError exception hierarchy.
+cpython_path: Modules/_ssl.c
+cpython_version: "3.14"
+lines: 7467
+status: annotated
+ported_to: ""
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Modules/_ssl.c`
+
+<CpyLink path="Modules/_ssl.c" />
+
+The C backend for Python's `ssl` module. It wraps OpenSSL (or a compatible
+alternative such as LibreSSL) and exposes four public types: `SSLContext`,
+`SSLSocket`, `SSLObject`, and `MemoryBIO`, along with the `SSLError` exception
+hierarchy and a set of module-level constants for protocol versions, cipher
+suites, certificate verification modes, and alert codes.
+
+`SSLContext` is the central configuration object. It holds an OpenSSL `SSL_CTX`
+and manages certificate chains (`load_cert_chain`), trust stores
+(`load_verify_locations`, `load_default_certs`), cipher lists (`set_ciphers`),
+ALPN protocols, SNI callbacks, keylog files for Wireshark, and post-handshake
+authentication for TLS 1.3. `SSLSocket` wraps a real network socket: it holds
+an OpenSSL `SSL` object layered over the socket's file descriptor and drives the
+`SSL_do_handshake`, `SSL_read`, `SSL_write`, and `SSL_shutdown` calls with
+non-blocking retry logic that calls back into Python's `select`-based socket
+timeout machinery. `SSLObject` is the socketless counterpart; it uses
+in-memory OpenSSL BIOs and is typically used with `asyncio`. `MemoryBIO` wraps
+a single OpenSSL memory BIO for use as the I/O endpoint of an `SSLObject`.
+
+The file is approximately 7 500 lines. The first quarter handles type and error
+definitions, the middle two quarters implement the four types' methods, and the
+final quarter covers module init, constant registration, and the exception class
+hierarchy.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Modules/_ssl.c" lines="1-400">1-400</Cpy> | includes, macros, `_sslmodulestate`, `PySSL_BEGIN/END_ALLOW_THREADS`, `_PySSLError` | OpenSSL version guards, GIL-release macros, per-interpreter module state holding all cached type and exception objects, `_PySSLError` struct pairing an `ssl` error code with an `errno` snapshot. | - |
+| <Cpy path="Modules/_ssl.c" lines="401-850">401-850</Cpy> | `PySSLContext`, `PySSLSocket`, `PySSLMemoryBIO`, `PySSLSession` structs, enum definitions | Struct layouts for all four types; `enum py_ssl_error`, `enum py_ssl_server_or_client`, `enum py_ssl_cert_requirements`; `enum py_ssl_version` with `PROTOCOL_TLS_CLIENT`, `PROTOCOL_TLS_SERVER`. | - |
+| <Cpy path="Modules/_ssl.c" lines="851-1400">851-1400</Cpy> | `fill_and_set_sslerror`, `PySSL_SetError`, `set_eof_error`, `newPySSLSocket`, `_ssl_configure_hostname`, `get_socket` | Error formatting using `PyUnicodeWriter`; `SSLSocket` constructor; hostname matching and SNI configuration; helper to borrow the underlying `socket` without promoting the weak reference to a strong one. | - |
+| <Cpy path="Modules/_ssl.c" lines="1401-2100">1401-2100</Cpy> | `_asn1obj2py`, `_decode_certificate`, `_get_peer_alt_names`, `_certificate_to_der`, `_create_tuple_for_X509_NAME` | Certificate decoding: X.509 `subject`, `issuer`, `serialNumber`, `notBefore`, `notAfter`, `subjectAltName` (email, DNS, URI, IP, DirName, registered ID), OCSP, CA issuers, CRL distribution points. | - |
+| <Cpy path="Modules/_ssl.c" lines="2101-2900">2101-2900</Cpy> | `_ssl__SSLSocket_do_handshake_impl`, `_ssl__SSLSocket_write_impl`, `_ssl__SSLSocket_read_impl`, `_ssl__SSLSocket_pending_impl`, `_ssl__SSLSocket_shutdown_impl` | Core `SSLSocket` I/O: handshake loop with `SSL_ERROR_WANT_READ`/`WANT_WRITE` retry; `SSL_write` and `SSL_read` with socket-select timeout; clean shutdown via `SSL_shutdown` two-phase exchange. | - |
+| <Cpy path="Modules/_ssl.c" lines="2901-3900">2901-3900</Cpy> | `_ssl__SSLSocket_getpeercert_impl`, `_ssl__SSLSocket_get_verified_chain_impl`, `cipher_to_dict`, `_ssl__SSLSocket_cipher_impl`, `_ssl__SSLSocket_version_impl`, `_ssl__SSLSocket_selected_alpn_protocol_impl` | Post-handshake inspection: peer certificate as dict or DER bytes; verified and unverified chain as tuples; negotiated cipher as dict with `name`, `protocol`, `bits`; TLS version string; ALPN result. | - |
+| <Cpy path="Modules/_ssl.c" lines="3901-5200">3901-5200</Cpy> | `_ssl__SSLContext_load_cert_chain_impl`, `_ssl__SSLContext_load_verify_locations_impl`, `_ssl__SSLContext_load_default_certs_impl`, `_ssl__SSLContext_set_ciphers_impl`, `_ssl__SSLContext__set_alpn_protocols_impl`, `_ssl__SSLContext_wrap_socket_impl`, `_ssl__SSLContext__wrap_bio_impl` | `SSLContext` configuration methods: PEM/DER certificate and key loading; trust-store population from files, directories, and the OS certificate store; cipher string validation; ALPN advertisement; `SSLSocket` and `SSLObject` factory methods. | - |
+| <Cpy path="Modules/_ssl.c" lines="5201-6200">5201-6200</Cpy> | `_ssl_MemoryBIO_impl`, `_ssl_MemoryBIO_read_impl`, `_ssl_MemoryBIO_write_impl`, `_ssl_MemoryBIO_write_eof_impl`, `_ssl__SSLSocket_get_channel_binding_impl`, `_ssl__SSLSocket_verify_client_post_handshake_impl`, `_ssl__SSLSocket_sendfile_impl` | `MemoryBIO` type with BIO read/write/EOF; channel binding (RFC 5929 `tls-unique`); TLS 1.3 post-handshake client authentication; `sendfile` via kernel TLS (`SSL_sendfile`). | - |
+| <Cpy path="Modules/_ssl.c" lines="6201-7467">6201-7467</Cpy> | `_ssl_exec`, `PyInit__ssl`, exception hierarchy, constant tables | Module init: registers all four types, `SSLError` hierarchy, `AlertDescription`, `SSLErrorNumber`, `Options`, `VerifyMode`, `TLSVersion` enums, and OpenSSL version strings. | - |
+
+## Reading
+
+### Type structs (lines 401 to 850)
+
+<CpyLink path="Modules/_ssl.c" lines="401-850" />
+
+`PySSLContext` owns the OpenSSL context and all long-lived configuration:
+
+```c
+typedef struct {
+    PyObject_HEAD
+    SSL_CTX          *ctx;
+    unsigned char    *alpn_protocols;
+    unsigned int      alpn_protocols_len;
+    PyObject         *set_sni_cb;
+    int               check_hostname;
+    int               protocol;
+    int               post_handshake_auth;  /* TLS 1.3 only */
+    PyObject         *msg_cb;
+    PyObject         *keylog_filename;
+    BIO              *keylog_bio;
+    _sslmodulestate  *state;
+    PyObject         *psk_client_callback;
+    PyObject         *psk_server_callback;
+    PyMutex           tstate_mutex;         /* guards tstate-detached SSL_CTX calls */
+} PySSLContext;
+```
+
+`PySSLSocket` is thin: it holds a weak reference to the Python socket, the
+OpenSSL `SSL*`, and a back-pointer to its context:
+
+```c
+typedef struct {
+    PyObject_HEAD
+    PyObject         *Socket;         /* weakref to socket */
+    SSL              *ssl;
+    PySSLContext     *ctx;            /* strong ref */
+    char              shutdown_seen_zero;
+    enum py_ssl_server_or_client socket_type;
+    PyObject         *owner;          /* weakref, for SNI callback */
+    PyObject         *server_hostname;
+    int               got_eof_error;  /* set on PY_SSL_ERROR_EOF */
+} PySSLSocket;
+```
+
+`PySSLMemoryBIO` is minimal: an OpenSSL `BIO` plus an EOF flag:
+
+```c
+typedef struct {
+    PyObject_HEAD
+    BIO *bio;
+    int  eof_written;
+} PySSLMemoryBIO;
+```
+
+### `_ssl__SSLSocket_do_handshake_impl` retry loop (lines 2101 to 2900)
+
+<CpyLink path="Modules/_ssl.c" lines="2101-2900" />
+
+The handshake loop retries until OpenSSL either succeeds or returns a hard
+error. Non-blocking sockets produce `SSL_ERROR_WANT_READ` or
+`SSL_ERROR_WANT_WRITE` on each iteration; the code calls `PySSL_select` to wait
+for socket readiness before retrying.
+
+```c
+do {
+    Py_BEGIN_ALLOW_THREADS
+    ret = SSL_do_handshake(self->ssl);
+    err = _PySSL_errno(ret < 1, self->ssl, ret);
+    Py_END_ALLOW_THREADS
+    _PySSL_FIX_ERRNO;
+
+    exc = PyErr_GetRaisedException();
+    if (exc != NULL)
+        break;
+
+    if (PyErr_CheckSignals())
+        goto error;
+
+    if (has_timeout)
+        timeout = _PyDeadline_Get(deadline);
+
+    if (err.ssl == SSL_ERROR_WANT_READ)
+        sockstate = PySSL_select(sock, 0, timeout);
+    else if (err.ssl == SSL_ERROR_WANT_WRITE)
+        sockstate = PySSL_select(sock, 1, timeout);
+    else
+        sockstate = SOCKET_OPERATION_OK;
+
+    if (sockstate == SOCKET_HAS_TIMED_OUT) {
+        PyErr_SetString(PyExc_TimeoutError,
+                        ERRSTR("The handshake operation timed out"));
+        goto error;
+    }
+} while (err.ssl == SSL_ERROR_WANT_READ ||
+         err.ssl == SSL_ERROR_WANT_WRITE);
+```
+
+The same `WANT_READ`/`WANT_WRITE` pattern repeats in `_ssl__SSLSocket_read_impl`
+and `_ssl__SSLSocket_write_impl`. The `_PySSL_FIX_ERRNO` macro re-reads
+`errno` after `Py_END_ALLOW_THREADS` because the GIL re-acquisition may
+clobber it on some platforms.
+
+### Certificate decoding: `_decode_certificate` (lines 1401 to 2100)
+
+<CpyLink path="Modules/_ssl.c" lines="1401-2100" />
+
+`_decode_certificate` converts an OpenSSL `X509*` into a Python dict. It
+populates `subject`, `issuer`, `version`, `serialNumber`, `notBefore`,
+`notAfter`, `subjectAltName`, `OCSP`, `caIssuers`, and `crlDistributionPoints`
+using a temporary `BIO` as a scratch buffer for ASN.1 printing:
+
+```c
+static PyObject *
+_decode_certificate(_sslmodulestate *state, X509 *certificate)
+{
+    PyObject *retval = PyDict_New();
+
+    PyObject *peer = _create_tuple_for_X509_NAME(
+        state, X509_get_subject_name(certificate));
+    PyDict_SetItemString(retval, "subject", peer);
+
+    PyObject *issuer = _create_tuple_for_X509_NAME(
+        state, X509_get_issuer_name(certificate));
+    PyDict_SetItemString(retval, "issuer", issuer);
+
+    /* Serial number via BIO + i2a_ASN1_INTEGER */
+    BIO *biobuf = BIO_new(BIO_s_mem());
+    i2a_ASN1_INTEGER(biobuf, X509_get_serialNumber(certificate));
+    len = BIO_gets(biobuf, buf, sizeof(buf) - 1);
+    PyDict_SetItemString(retval, "serialNumber",
+                         PyUnicode_FromStringAndSize(buf, len));
+
+    /* notBefore / notAfter */
+    ASN1_TIME_print(biobuf, X509_get0_notBefore(certificate));
+    /* ... */
+
+    /* Subject alt names, OCSP, CRL distribution points */
+    PyObject *peer_alt_names = _get_peer_alt_names(state, certificate);
+    if (peer_alt_names != Py_None)
+        PyDict_SetItemString(retval, "subjectAltName", peer_alt_names);
+
+    BIO_free(biobuf);
+    return retval;
+}
+```
+
+`_get_peer_alt_names` uses `X509_get_ext_d2i(cert, NID_subject_alt_name, ...)`
+to extract a `GENERAL_NAMES` stack and iterates over it, producing a tuple of
+`(type, value)` pairs where `type` is one of `"DNS"`, `"email"`, `"URI"`,
+`"IP Address"`, `"DirName"`, or `"Registered ID"`.
+
+### `SSLContext.load_verify_locations` and system store (lines 3901 to 5200)
+
+<CpyLink path="Modules/_ssl.c" lines="3901-5200" />
+
+`_ssl__SSLContext_load_verify_locations_impl` accepts a `cafile` path, a
+`capath` directory, or a `cadata` bytes/string object containing PEM or DER
+certificates. For PEM strings it creates a memory BIO and calls
+`X509_STORE_add_cert` in a loop; for files and directories it delegates to
+`SSL_CTX_load_verify_locations`.
+
+`_ssl__SSLContext_load_default_certs_impl` integrates the OS certificate store.
+On Windows it opens the `MY`, `CA`, `ROOT`, and `TRUST` system stores and
+imports each certificate via `CertEnumCertificatesInStore`. On macOS it calls
+`SecTrustCopyAnchorCertificates` and converts `SecCertificateRef` objects to
+DER. On other platforms it calls `SSL_CTX_set_default_verify_paths` to use
+OpenSSL's compiled-in path.
+
+```c
+static PyObject *
+_ssl__SSLContext_load_verify_locations_impl(PySSLContext *self,
+    PyObject *cafile, PyObject *capath, PyObject *cadata)
+{
+    /* cadata path: decode PEM string into a memory BIO, then loop */
+    if (cadata != NULL) {
+        BIO *biobuf = BIO_new_mem_buf(data, data_len);
+        while (1) {
+            X509 *cert = PEM_read_bio_X509(biobuf, NULL, NULL, NULL);
+            if (cert == NULL) break;
+            X509_STORE_add_cert(SSL_CTX_get_cert_store(self->ctx), cert);
+            X509_free(cert);
+        }
+        BIO_free(biobuf);
+    }
+    /* cafile / capath path */
+    if (r != 1)
+        _setSSLError(state, NULL, 0, __FILE__, __LINE__);
+    ...
+}
+```
+
+`_ssl__SSLContext_set_ciphers_impl` calls `SSL_CTX_set_cipher_list` (for TLS
+1.2 and below) and `SSL_CTX_set_ciphersuites` (for TLS 1.3). If both calls
+fail, it raises `SSLError("No cipher can be selected")`.
+
+### `SSLError` hierarchy and module constants (lines 6201 to 7467)
+
+<CpyLink path="Modules/_ssl.c" lines="6201-7467" />
+
+`_ssl_exec` builds the exception hierarchy by subclassing `OSError`:
+
+```c
+/* SSLError < OSError */
+state->PySSLErrorObject = PyType_FromSpecWithBases(
+    &sslerror_type_spec, PyExc_OSError);
+
+/* SSLCertVerificationError < SSLError */
+state->PySSLCertVerificationErrorObject = PyErr_NewExceptionWithDoc(
+    "ssl.SSLCertVerificationError",
+    SSLCertVerificationError_doc,
+    state->PySSLErrorObject, NULL);
+
+/* SSLZeroReturnError, SSLWantReadError, SSLWantWriteError,
+   SSLSyscallError, SSLEOFError all inherit SSLError */
+```
+
+Integer constants are added via `PyModule_AddIntConstant` for the `OP_*`
+options (e.g. `OP_NO_SSLv2`, `OP_NO_COMPRESSION`), `VERIFY_*` flags,
+`ALERT_DESCRIPTION_*` codes, `SSL_ERROR_*` numeric codes, and the
+`HAS_*` feature-detection constants (`HAS_ALPN`, `HAS_TLSv1_3`, `HAS_PSK`,
+`HAS_KTLS`, etc.) that let Python code check OpenSSL capabilities at runtime.
+
+```c
+PyModule_AddStringConstant(m, "OPENSSL_VERSION",
+                           OpenSSL_version(OPENSSL_VERSION));
+PyModule_AddIntConstant(m, "OPENSSL_VERSION_NUMBER",
+                        OPENSSL_VERSION_NUMBER);
+PyModule_AddIntConstant(m, "VERIFY_DEFAULT",       SSL_VERIFY_NONE);
+PyModule_AddIntConstant(m, "VERIFY_CRL_CHECK_LEAF", SSL_VERIFY_PEER |
+                            X509_V_FLAG_CRL_CHECK);
+PyModule_AddIntConstant(m, "VERIFY_CRL_CHECK_CHAIN", SSL_VERIFY_PEER |
+                            X509_V_FLAG_CRL_CHECK |
+                            X509_V_FLAG_CRL_CHECK_ALL);
+PyModule_AddIntConstant(m, "VERIFY_X509_STRICT",
+                            X509_V_FLAG_X509_STRICT);
+```
+
+## gopy mirror
+
+Not yet ported.

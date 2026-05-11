@@ -1,0 +1,160 @@
+---
+title: Lib/platform.py
+description: Cross-platform OS and hardware fingerprinting, returning processor, OS release, and Python build metadata.
+cpython_path: Lib/platform.py
+cpython_version: "3.14"
+lines: 1250
+status: annotated
+ported_to: ""
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Lib/platform.py`
+
+<CpyLink path="Lib/platform.py" />
+
+`platform` answers the basic question of "what machine is this code running on". It exposes individual accessor functions (`system`, `node`, `release`, `version`, `machine`, `processor`) and a unified `uname()` call that returns all six values together as a `uname_result` namedtuple. The module normalises platform strings across Linux, macOS, Windows, and a handful of Unix variants so callers get consistent output regardless of the underlying OS APIs.
+
+Python build information is available through a parallel set of functions. `python_version()` returns the dotted version string, `python_implementation()` returns `"CPython"` or `"PyPy"` etc., `python_compiler()` returns the compiler string from `sys.version`, and `python_build()` returns the build number and date. Together these let runtime tools report exactly which Python is executing without parsing `sys.version` manually.
+
+Linux distribution identification went through a significant change between Python 3.7 and 3.8. The old `linux_distribution()` function (removed in 3.8) read `/etc/lsb-release` and distro-specific files. The current code reads `/etc/os-release` and `/usr/lib/os-release`, which is the `freedesktop.org` standard supported by all modern distributions. The raw key-value pairs from that file are exposed through `freedesktop_os_release()`.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| 1-80 | imports, `_cache`, `DEV_NULL` | Module header, result cache dict, sentinel constants | |
+| 81-220 | `uname`, `uname_result` | Core OS fingerprint: wraps `os.uname` / `platform.uname` | |
+| 221-380 | `system`, `node`, `release`, `version`, `machine`, `processor` | Individual uname field accessors, cached via `uname()` | |
+| 381-530 | `python_implementation`, `python_version`, `python_version_tuple`, `python_build`, `python_compiler`, `python_branch`, `python_revision` | Python build metadata extracted from `sys` attributes | |
+| 531-700 | `platform`, `_platform` | Human-readable platform summary string, alias table | |
+| 701-880 | `freedesktop_os_release`, `_parse_os_release` | `/etc/os-release` reader for Linux distro info | |
+| 881-1050 | `win32_ver`, `win32_edition`, `win32_is_iot` | Windows registry and `ctypes` queries | |
+| 1051-1250 | `mac_ver`, `java_ver`, `architecture` | macOS, Jython, and ELF/PE binary architecture probes | |
+
+## Reading
+
+### uname and uname_result (lines 81 to 220)
+
+<CpyLink path="Lib/platform.py" lines="81-220" />
+
+`uname_result` is a `collections.namedtuple` subclass with six fields: `system`, `node`, `release`, `version`, `machine`, `processor`. The `processor` field is not part of POSIX `uname(2)` so it is obtained separately via `os.environ.get('PROCESSOR_IDENTIFIER')` on Windows or a fallback to `machine` on other platforms. Results are cached in the module-level `_uname_cache` variable after the first call.
+
+```python
+# Lib/platform.py ~line 130
+_uname_cache = None
+
+def uname():
+    global _uname_cache
+    if _uname_cache is not None:
+        return _uname_cache
+    ...
+    system, node, release, version, machine, processor = info
+    _uname_cache = uname_result(system, node, release, version,
+                                machine, processor)
+    return _uname_cache
+```
+
+### Individual field accessors (lines 221 to 380)
+
+<CpyLink path="Lib/platform.py" lines="221-380" />
+
+Each of the six primary accessors is a one-liner that delegates to `uname()`. They exist as separate functions because `uname` was added later and many callers already depend on the individual names. The pattern is uniform across all six:
+
+```python
+# ~line 240
+def system():
+    return uname().system
+
+def node():
+    return uname().node
+
+def release():
+    return uname().release
+
+def machine():
+    return uname().machine
+
+def processor():
+    return uname().processor
+```
+
+### Python build metadata (lines 381 to 530)
+
+<CpyLink path="Lib/platform.py" lines="381-530" />
+
+`python_implementation` checks `sys.implementation.name` (available from Python 3.3) and title-cases the result, mapping `"cpython"` to `"CPython"` and so on. `python_version` returns `sys.version_info` formatted as a dotted string. `python_build` extracts the build number and date from `sys.version` by parsing the parenthesised metadata that CPython embeds in that string.
+
+```python
+# ~line 400
+def python_implementation():
+    return sys.implementation.name.capitalize()
+    # CPython normalises to 'CPython' via the capitalize call
+
+def python_version():
+    return '%d.%d.%d' % sys.version_info[:3]
+
+def python_build():
+    return sys.version.split('\n')[1].strip(' ()').split(' ', 1)
+```
+
+### freedesktop_os_release: Linux distro detection (lines 701 to 880)
+
+<CpyLink path="Lib/platform.py" lines="701-880" />
+
+`freedesktop_os_release` reads `/etc/os-release`, falling back to `/usr/lib/os-release`, and parses the shell-style `KEY="value"` lines into a plain dict. Quote stripping and backslash-escape handling follow the `os-release(5)` specification. The function raises `OSError` if neither file exists, which callers can catch to detect non-Linux platforms or containers without the file.
+
+```python
+# ~line 760
+def freedesktop_os_release():
+    for candidate in ('/etc/os-release', '/usr/lib/os-release'):
+        try:
+            with open(candidate, encoding='utf-8') as f:
+                return _parse_os_release(f)
+        except OSError:
+            pass
+    raise OSError('No os-release file found')
+
+def _parse_os_release(f):
+    result = {}
+    for line in f:
+        line = line.strip()
+        if not line or line.startswith('#'):
+            continue
+        k, _, v = line.partition('=')
+        result[k.strip()] = v.strip().strip('"').replace('\\"', '"')
+    return result
+```
+
+### architecture: ELF and PE binary probe (lines 1051 to 1250)
+
+<CpyLink path="Lib/platform.py" lines="1051-1250" />
+
+`architecture` determines whether the running interpreter (or any specified executable) is a 32-bit or 64-bit binary. On Unix it calls `file(1)` via `subprocess` and parses its output for the strings `32-bit` / `64-bit` and the linkage type (`ELF`, `dynamic`, `static`). On Windows it reads the PE header directly from the executable bytes. The function returns a two-tuple `(bits, linkage)` such as `('64bit', 'ELF')`.
+
+```python
+# ~line 1100
+def architecture(executable=sys.executable, bits='', linkage=''):
+    ...
+    if sys.platform == 'win32':
+        # Read PE header at offset 0x3C
+        with open(executable, 'rb') as f:
+            ...
+    else:
+        try:
+            output = subprocess.check_output(['file', executable],
+                                             stderr=subprocess.DEVNULL)
+            fileout = output.decode('latin-1')
+        except (OSError, subprocess.CalledProcessError):
+            fileout = ''
+        if '32-bit' in fileout:
+            bits = '32bit'
+        elif '64-bit' in fileout:
+            bits = '64bit'
+    return bits, linkage
+```
+
+## gopy mirror
+
+Not yet ported.

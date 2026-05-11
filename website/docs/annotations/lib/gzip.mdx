@@ -1,0 +1,127 @@
+---
+title: Lib/gzip.py
+description: Reading and writing gzip-compressed files via a GzipFile wrapper around the zlib module.
+cpython_path: Lib/gzip.py
+cpython_version: "3.14"
+lines: 640
+status: annotated
+ported_to: ""
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Lib/gzip.py`
+
+<CpyLink path="Lib/gzip.py" />
+
+`gzip.py` wraps the `zlib` compression library in an API that reads and writes `.gz` files conforming to RFC 1952. The central class is `GzipFile`, which implements `io.BufferedIOBase` for reading and `io.RawIOBase` for writing. On the write path, `GzipFile` serialises the gzip header (magic bytes, compression method, flags, mtime, OS byte, and optional filename field), feeds data through a `zlib.compressobj`, and appends a CRC32 checksum plus the original uncompressed length in the gzip trailer. On the read path, it parses the header, decompresses through `zlib.decompressobj`, and verifies the trailer.
+
+Multi-member gzip files (produced by concatenating two or more `.gz` streams) are handled transparently on the read path. After `_read_gzip_header` returns EOF, the reader checks whether more bytes are available. If so, it initialises a new decompressor and parses the next member header, continuing seamlessly. This matches the behaviour required by tools like `zcat`. The `BadGzipFile` exception (a subclass of `OSError`) is raised instead of a generic `OSError` when the gzip header magic bytes are wrong, making it possible to distinguish corrupt files from I/O errors.
+
+The module also exposes three convenience functions: `open()` returns a `GzipFile` (or a wrapping `io.TextIOWrapper` when a text mode is requested), `compress()` compresses a `bytes` object in memory, and `decompress()` decompresses one. Both memory functions create a `BytesIO` internally and call `GzipFile.read` or `GzipFile.write`, so they share all header and trailer logic with the file-based API. The `_GzipReader` private class separates the read-side state machine from the write-side so that `GzipFile` can be opened in either mode without carrying dead state.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Lib/gzip.py" lines="1-40">1-40</Cpy> | module header | Imports, `__all__`, constants (`FTEXT`, `FHCRC`, etc.) | - |
+| <Cpy path="Lib/gzip.py" lines="41-80">41-80</Cpy> | `open` | Convenience opener, wraps text mode in `TextIOWrapper` | - |
+| <Cpy path="Lib/gzip.py" lines="81-110">81-110</Cpy> | `BadGzipFile` | `OSError` subclass for invalid magic bytes | - |
+| <Cpy path="Lib/gzip.py" lines="111-230">111-230</Cpy> | `GzipFile.__init__`, `_init_write`, `_init_read` | Open file, choose mode, allocate compressor/decompressor | - |
+| <Cpy path="Lib/gzip.py" lines="231-310">231-310</Cpy> | `GzipFile.write`, `_write_gzip_header`, `_write_mtime` | Serialise header and feed data to `zlib.compressobj` | - |
+| <Cpy path="Lib/gzip.py" lines="311-390">311-390</Cpy> | `GzipFile.read`, `read1`, `peek`, `_read_gzip_header` | Decompress and verify; parse multi-member streams | - |
+| <Cpy path="Lib/gzip.py" lines="391-460">391-460</Cpy> | `GzipFile.close`, `flush`, `fileno`, `seekable`, `seek` | Resource cleanup and partial seek support | - |
+| <Cpy path="Lib/gzip.py" lines="461-540">461-540</Cpy> | `_GzipReader` | Read-side state machine; CRC accumulation; trailer check | - |
+| <Cpy path="Lib/gzip.py" lines="541-590">541-590</Cpy> | `compress`, `decompress` | In-memory one-shot helpers using `BytesIO` | - |
+| <Cpy path="Lib/gzip.py" lines="591-640">591-640</Cpy> | `main` | Command-line interface (`-d` to decompress) | - |
+
+## Reading
+
+### GzipFile initialisation (lines 111 to 230)
+
+<CpyLink path="Lib/gzip.py" lines="111-230" />
+
+The constructor accepts a `filename`, `mode`, `compresslevel`, `fileobj`, and `mtime` parameter. When `fileobj` is `None` it opens `filename` as a raw binary file and takes ownership of it (setting `self.myfileobj`). Mode detection normalises the mode string to one of `'rb'`, `'wb'`, or `'ab'`; append mode rewinds to the end after a header check. Write mode calls `_init_write` which allocates a `zlib.compressobj` at the requested compression level and initialises the CRC and size accumulators to zero. Read mode delegates to `_GzipReader`. The optional `mtime` parameter overrides the timestamp written into the gzip header, which is useful for reproducible builds.
+
+```python
+def __init__(self, filename=None, mode=None, compresslevel=9,
+             fileobj=None, mtime=None):
+    ...
+    if mode.startswith('r'):
+        self.mode = READ
+        raw = self.fileobj.read(10)
+        self._buffer = io.BufferedReader(_GzipReader(self.fileobj))
+    elif mode.startswith(('w', 'a', 'x')):
+        self.mode = WRITE
+        self._write_mtime = mtime
+        self._init_write(filename)
+        self._write_gzip_header(compresslevel)
+```
+
+### Writing the gzip header (lines 231 to 310)
+
+<CpyLink path="Lib/gzip.py" lines="231-310" />
+
+`_write_gzip_header` serialises the 10-byte fixed header followed by an optional NUL-terminated filename field. The magic bytes are `\x1f\x8b`, the compression method is always `8` (deflate), and the flags byte has `FNAME` set when a filename is available. The OS byte is hardcoded to `255` (unknown) for portability. `write` feeds user data through the compressor object and accumulates `crc32` and total byte count for the trailer. `close` finalises by flushing the compressor, writing the CRC32 in little-endian order, and appending the uncompressed size modulo 2^32.
+
+```python
+def _write_gzip_header(self, compresslevel):
+    self.fileobj.write(b'\037\213')  # magic
+    self.fileobj.write(b'\010')      # method: deflate
+    ...
+    mtime = self._write_mtime
+    if mtime is None:
+        mtime = time.time()
+    write32u(self.fileobj, int(mtime))
+```
+
+### Reading and multi-member support (lines 311 to 390)
+
+<CpyLink path="Lib/gzip.py" lines="311-390" />
+
+On the read path, `GzipFile.read` delegates to a `BufferedReader` wrapping a `_GzipReader`. `_GzipReader._read_gzip_header` reads the 10-byte fixed header, validates the magic, skips optional extra fields and the filename field, and raises `BadGzipFile` when the magic does not match. After a member is fully decompressed, `_GzipReader._read_eof` reads the 8-byte trailer, verifies the CRC32, and checks the stored size. If data remains in the underlying file, `_GzipReader` re-enters `_read_gzip_header` to begin the next member, making multi-member streams transparent to the caller.
+
+```python
+def _read_gzip_header(self):
+    magic = self._fp.read(2)
+    if magic == b'':
+        return False
+    if magic != b'\037\213':
+        raise BadGzipFile('Not a gzip file (%r)' % magic)
+    ...
+    return True
+```
+
+### In-memory compress and decompress (lines 541 to 590)
+
+<CpyLink path="Lib/gzip.py" lines="541-590" />
+
+`compress` creates a `BytesIO`, opens a write-mode `GzipFile` over it, writes the input bytes, closes the `GzipFile` to flush the trailer, and returns `getvalue()`. `decompress` does the reverse. Both pass `mtime=0` by default so that the output is deterministic regardless of wall-clock time. The `compresslevel` parameter on `compress` is forwarded directly to `GzipFile.__init__`.
+
+```python
+def compress(data, compresslevel=9, *, mtime=None):
+    buf = io.BytesIO()
+    with GzipFile(fileobj=buf, mode='wb',
+                  compresslevel=compresslevel, mtime=mtime) as f:
+        f.write(data)
+    return buf.getvalue()
+
+def decompress(data):
+    with GzipFile(fileobj=io.BytesIO(data)) as f:
+        return f.read()
+```
+
+### BadGzipFile exception (lines 81 to 110)
+
+<CpyLink path="Lib/gzip.py" lines="81-110" />
+
+`BadGzipFile` subclasses `OSError` so that code catching `OSError` continues to work after the more specific exception was introduced in Python 3.8. It carries no extra attributes; the distinguishing information is in the exception message. Callers that need to differentiate between a corrupt gzip stream and a true I/O error should catch `BadGzipFile` before `OSError`.
+
+```python
+class BadGzipFile(OSError):
+    """Exception raised in some cases for invalid gzip files."""
+```
+
+## gopy mirror
+
+Not yet ported. The Go standard library provides `compress/gzip` which covers the same RFC 1952 functionality. A gopy `module/gzip/` port should wrap `compress/gzip` for the common paths and reimplement the Python-level API surface (`GzipFile`, `open`, `compress`, `decompress`, `BadGzipFile`) so that Python code depending on attribute names and exception types continues to work without modification.

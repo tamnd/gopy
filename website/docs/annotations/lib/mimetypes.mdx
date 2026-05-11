@@ -1,0 +1,119 @@
+---
+title: Lib/mimetypes.py
+description: Maps file extensions and URLs to MIME types and back, consulting both a built-in table and OS-level mime.types files.
+cpython_path: Lib/mimetypes.py
+cpython_version: "3.14"
+lines: 600
+status: annotated
+ported_to: ""
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Lib/mimetypes.py`
+
+<CpyLink path="Lib/mimetypes.py" />
+
+`mimetypes` translates between filenames (or URLs) and MIME content-type strings. The module maintains two parallel dictionaries: one for strict IANA types and one for non-strict (common but unofficial) types. Both map lowercase file extensions to type strings such as `text/html` or `image/png`.
+
+On startup the module seeds its tables from a hard-coded `types_map` tuple, then optionally reads system mime.types files (e.g., `/etc/mime.types` on Linux) and, on Windows, the registry keys under `HKEY_CLASSES_ROOT`. The `MimeTypes` class encapsulates a single such database instance. Module-level convenience functions delegate to a global `MimeTypes` instance that is initialized lazily on first use.
+
+The inverse direction, from type string to extension, is handled by `guess_extension` (returns one canonical extension) and `guess_all_extensions` (returns every known extension for that type). The module also exposes a command-line interface for ad-hoc queries.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| 1-60 | module header, `knownfiles` | Constants: well-known system mime.types paths | - |
+| 61-130 | `types_map` | Built-in extension-to-type table (strict and non-strict) | - |
+| 131-200 | `guess_type` | Guess MIME type from URL or filename | - |
+| 201-240 | `guess_all_extensions`, `guess_extension` | Reverse lookup: type to extension(s) | - |
+| 241-340 | `MimeTypes.__init__`, `MimeTypes.guess_type` | Per-instance database and type resolution | - |
+| 341-430 | `MimeTypes.read`, `MimeTypes.readfp` | Parse mime.types file format | - |
+| 431-500 | `MimeTypes.read_windows_registry` | Harvest types from Windows registry | - |
+| 501-560 | `init`, `_db` | Lazy global initialization | - |
+| 561-600 | `__main__` block | CLI entry point | - |
+
+## Reading
+
+### Module constants and system file list (lines 1 to 60)
+
+<CpyLink path="Lib/mimetypes.py" lines="1-60" />
+
+The module opens with a list called `knownfiles` that enumerates the canonical paths where POSIX systems store MIME mappings (`/etc/mime.types`, `/usr/local/etc/httpd/conf/mime.types`, etc.). These are tried in order during `init()`. The boolean `inited` flag and the `_db` module global together gate the one-time initialization.
+
+```python
+knownfiles = [
+    "/etc/mime.types",
+    "/etc/httpd/mime.types",
+    ...
+]
+inited = False
+_db = None
+```
+
+### Built-in `types_map` (lines 61 to 130)
+
+<CpyLink path="Lib/mimetypes.py" lines="61-130" />
+
+`types_map` is a two-element tuple of dicts. Index 0 holds strictly IANA-registered mappings; index 1 holds common but non-standard ones. Keys are lowercase dotted extensions (`.html`, `.jpg`). At import time these dicts seed every new `MimeTypes` instance before any OS files are consulted.
+
+```python
+types_map = (
+    {'.html': 'text/html', '.png': 'image/png', ...},  # strict
+    {'.mid': 'audio/midi', ...},                        # non-strict
+)
+```
+
+### `guess_type` (lines 131 to 200)
+
+<CpyLink path="Lib/mimetypes.py" lines="131-200" />
+
+`guess_type(url, strict=True)` splits the URL with `urllib.parse.splittype` and `posixpath` utilities to isolate the file extension, strips any encoding suffix (`.gz`, `.bz2`), then looks up the extension in the active database. The return value is a `(type, encoding)` pair where `encoding` is `None` unless a compression suffix was present.
+
+```python
+def guess_type(url, strict=True):
+    ...
+    base, ext = posixpath.splitext(url)
+    while ext in suffix_map:
+        base, ext = posixpath.splitext(base)
+    ...
+    return types_map[not strict].get(ext), encoding
+```
+
+### `MimeTypes.read` and `readfp` (lines 341 to 430)
+
+<CpyLink path="Lib/mimetypes.py" lines="341-430" />
+
+`readfp` parses a mime.types-format stream line by line. Lines beginning with `#` are comments. Each data line has the MIME type as the first token followed by zero or more extensions. `read(filename, strict)` simply opens the file and delegates to `readfp`. Both methods update `self.types_map` and the reverse `types_map_inv` dict.
+
+```python
+def readfp(self, fp, strict=True):
+    while True:
+        line = fp.readline()
+        if not line:
+            break
+        words = line.split()
+        ...
+        for ext in words[1:]:
+            self.add_type(words[0], '.' + ext, strict)
+```
+
+### Windows registry reader (lines 431 to 500)
+
+<CpyLink path="Lib/mimetypes.py" lines="431-500" />
+
+`read_windows_registry(strict=True)` iterates subkeys of `HKEY_CLASSES_ROOT` using `winreg`. For each key whose name starts with a dot it queries the `Content Type` value and calls `add_type`. The method is a no-op on non-Windows platforms because the import of `winreg` is guarded.
+
+```python
+def read_windows_registry(self, strict=True):
+    ...
+    with winreg.OpenKey(winreg.HKEY_CLASSES_ROOT, '') as hkcr:
+        for subkeyname in enum_types(hkcr):
+            ...
+            self.add_type(mimetype, subkeyname, strict)
+```
+
+## gopy mirror
+
+Not yet ported.

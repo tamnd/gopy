@@ -1,0 +1,329 @@
+---
+title: Modules/_lzmamodule.c
+description: Python wrapper around liblzma providing LZMACompressor and LZMADecompressor types plus format and check constants for .xz, .lzma, and raw LZMA streams.
+cpython_path: Modules/_lzmamodule.c
+cpython_version: "3.14"
+lines: 1648
+status: annotated
+ported_to: ""
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Modules/_lzmamodule.c`
+
+<CpyLink path="Modules/_lzmamodule.c" />
+
+The C backend for the `lzma` module. It binds liblzma (the compression library
+shipped with xz-utils) to Python. The pure-Python `Lib/lzma.py` imports this
+extension as `_lzma` and layers `LZMAFile` and `open()` helpers on top of the
+two types exported here: `LZMACompressor` and `LZMADecompressor`.
+
+The file is structured in three broad bands. The first band (roughly the first
+500 lines) handles the data-model plumbing: struct definitions for both types
+and for the per-module state `_lzma_state`, the `catch_lzma_error` error mapper,
+a custom `lzma_allocator` that routes through Python's allocator, and a family
+of functions that parse and build filter-chain specifications. A filter chain is
+the liblzma concept for a sequence of transforms applied in series; the Python
+API surfaces it as a list of dicts, one per filter, and the parsing code
+translates back and forth between those dicts and `lzma_filter` C arrays. The
+second band implements `LZMACompressor`, with its `compress()` and `flush()`
+methods both delegating to a shared `compress` helper that drives `lzma_code`
+in `LZMA_RUN` or `LZMA_FINISH` mode. The third band implements
+`LZMADecompressor` with a `decompress_buf` inner loop and an outer `decompress`
+function that manages an internal input buffer, mirroring the design used by
+`_bz2` and `zlib._ZlibDecompressor`.
+
+Both types store a `PyMutex` and release the GIL around every `lzma_code` call.
+`FORMAT_XZ`, `FORMAT_ALONE`, and `FORMAT_RAW` select the stream wrapper format
+at construction time; `CHECK_CRC32`, `CHECK_CRC64`, and `CHECK_SHA256` select
+the integrity check appended to `.xz` streams.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Modules/_lzmamodule.c" lines="1-130">1-130</Cpy> | includes, `_lzma_state`, `Compressor`, `Decompressor` structs | Module state holding `LZMAError` and cached type objects; struct layouts for both compressor and decompressor. | - |
+| <Cpy path="Modules/_lzmamodule.c" lines="131-320">131-320</Cpy> | `catch_lzma_error`, `PyLzma_Malloc`, `PyLzma_Free`, output-buffer helpers | Error mapper from `lzma_ret` to Python exceptions; custom allocator wrappers forwarded to `PyMem_RawMalloc`; `_BlocksOutputBuffer` initialise/grow/finish wrappers. | - |
+| <Cpy path="Modules/_lzmamodule.c" lines="321-550">321-550</Cpy> | `lzma_vli_converter`, `parse_filter_spec_lzma`, `parse_filter_spec_delta`, `parse_filter_spec_bcj` | Type converter for variable-length integers; per-filter dict-to-C-struct parsers for LZMA1/LZMA2, Delta, and BCJ family filters. | - |
+| <Cpy path="Modules/_lzmamodule.c" lines="551-750">551-750</Cpy> | `build_filter_spec`, `lzma_get_filters_for_encoder`, `encode_filter_list`, `decode_filter_list` | Reverse direction: C `lzma_filter` array to Python dict list, plus convenience wrappers for querying encoder defaults and round-tripping filter chains. | - |
+| <Cpy path="Modules/_lzmamodule.c" lines="751-1000">751-1000</Cpy> | `compress`, `_lzma_LZMACompressor_compress_impl`, `_lzma_LZMACompressor_flush_impl`, `_lzma_LZMACompressor_impl`, `Compressor_dealloc` | `LZMACompressor` core: shared `compress` loop driving `lzma_code`; `compress()` method calling it with `LZMA_RUN`; `flush()` calling it with `LZMA_FINISH`; constructor calling `lzma_easy_encoder` or `lzma_raw_encoder`; destructor calling `lzma_end`. | - |
+| <Cpy path="Modules/_lzmamodule.c" lines="1001-1300">1001-1300</Cpy> | `decompress_buf`, `decompress`, `_lzma_LZMADecompressor_decompress_impl`, `_lzma_LZMADecompressor_impl`, `Decompressor_dealloc` | `LZMADecompressor` core: `decompress_buf` inner loop; `decompress` input-buffer manager setting `needs_input`, `eof`, and `unused_data`; constructor calling `lzma_auto_decoder`, `lzma_alone_decoder`, or `lzma_raw_decoder`; destructor. | - |
+| <Cpy path="Modules/_lzmamodule.c" lines="1301-1450">1301-1450</Cpy> | `_lzma_is_check_supported_impl`, `_lzma__encode_filter_properties_impl`, `_lzma__decode_filter_properties_impl` | Module-level helper functions: check whether a liblzma build supports a given check algorithm; serialise/deserialise filter properties to/from bytes. | - |
+| <Cpy path="Modules/_lzmamodule.c" lines="1451-1648">1451-1648</Cpy> | `lzma_exec`, `PyInit__lzma` | Module init: registers `LZMAError`, `LZMACompressor`, `LZMADecompressor`; adds `FORMAT_*`, `CHECK_*`, `FILTER_*`, `MF_*`, `MODE_*`, and `PRESET_*` integer constants. | - |
+
+## Reading
+
+### Struct layout: `Compressor` and `Decompressor` (lines 1 to 130)
+
+<CpyLink path="Modules/_lzmamodule.c" lines="1-130" />
+
+Both types embed a `lzma_stream` directly (not via pointer), which is the
+liblzma analogue of zlib's `z_stream`. The stream holds the codec's internal
+state and the standard `next_in`/`avail_in`/`next_out`/`avail_out` pointer
+pairs that `lzma_code` advances on each call.
+
+```c
+typedef struct {
+    PyObject_HEAD
+    lzma_allocator alloc;
+    lzma_stream    lzs;
+    int            flushed;
+    PyMutex        mutex;
+} Compressor;
+
+typedef struct {
+    PyObject_HEAD
+    lzma_allocator alloc;
+    lzma_stream    lzs;
+    int            check;         /* integrity check id, set after first block */
+    char           eof;           /* set atomically when LZMA_STREAM_END seen */
+    PyObject      *unused_data;   /* bytes past the compressed stream end */
+    char           needs_input;   /* True when internal buffer is empty */
+    uint8_t       *input_buffer;
+    size_t         input_buffer_size;
+    PyMutex        mutex;
+} Decompressor;
+```
+
+`flushed` on `Compressor` is a one-way latch: once `flush()` has sent
+`LZMA_FINISH`, any subsequent call to `compress()` raises
+`ValueError("Compressor has been flushed")`. `check` on `Decompressor` starts
+at `LZMA_CHECK_UNKNOWN` and is updated atomically when liblzma emits
+`LZMA_GET_CHECK` or `LZMA_NO_CHECK` during decoding.
+
+### `compress` GIL-free loop (lines 751 to 1000)
+
+<CpyLink path="Modules/_lzmamodule.c" lines="751-1000" />
+
+Both `LZMACompressor.compress()` and `LZMACompressor.flush()` delegate to the
+static `compress` helper. The `action` parameter is `LZMA_RUN` for normal
+compression and `LZMA_FINISH` for the final flush.
+
+```c
+static PyObject *
+compress(Compressor *c, uint8_t *data, size_t len, lzma_action action)
+{
+    _BlocksOutputBuffer buffer = {.writer = NULL};
+    _lzma_state *state = ...;
+
+    OutputBuffer_InitAndGrow(&buffer, -1,
+                             &c->lzs.next_out, &c->lzs.avail_out);
+    c->lzs.next_in = data;
+    c->lzs.avail_in = len;
+
+    for (;;) {
+        lzma_ret lzret;
+
+        Py_BEGIN_ALLOW_THREADS
+        lzret = lzma_code(&c->lzs, action);
+        Py_END_ALLOW_THREADS
+
+        /* LZMA_BUF_ERROR with no input and output space left is not
+           a real error; treat it as LZMA_OK. */
+        if (lzret == LZMA_BUF_ERROR && len == 0 && c->lzs.avail_out > 0)
+            lzret = LZMA_OK;
+
+        if (catch_lzma_error(state, lzret))
+            goto error;
+
+        if ((action == LZMA_RUN    && c->lzs.avail_in == 0) ||
+            (action == LZMA_FINISH && lzret == LZMA_STREAM_END))
+            break;
+
+        if (c->lzs.avail_out == 0)
+            OutputBuffer_Grow(&buffer, &c->lzs.next_out, &c->lzs.avail_out);
+    }
+
+    return OutputBuffer_Finish(&buffer, c->lzs.avail_out);
+error:
+    OutputBuffer_OnError(&buffer);
+    return NULL;
+}
+```
+
+`_lzma_LZMACompressor_compress_impl` acquires `self->mutex`, checks `flushed`,
+then calls `compress(self, data->buf, data->len, LZMA_RUN)`.
+`_lzma_LZMACompressor_flush_impl` sets `self->flushed = 1` first, then calls
+`compress(self, NULL, 0, LZMA_FINISH)`.
+
+### `decompress_buf` and `needs_input` bookkeeping (lines 1001 to 1300)
+
+<CpyLink path="Modules/_lzmamodule.c" lines="1001-1300" />
+
+`decompress_buf` drives `lzma_code` in `LZMA_RUN` mode and updates `d->check`
+and `d->eof` atomically:
+
+```c
+static PyObject *
+decompress_buf(Decompressor *d, Py_ssize_t max_length)
+{
+    _BlocksOutputBuffer buffer = {.writer = NULL};
+    lzma_stream *lzs = &d->lzs;
+
+    OutputBuffer_InitAndGrow(&buffer, max_length,
+                             &lzs->next_out, &lzs->avail_out);
+    for (;;) {
+        lzma_ret lzret;
+
+        Py_BEGIN_ALLOW_THREADS
+        lzret = lzma_code(lzs, LZMA_RUN);
+        Py_END_ALLOW_THREADS
+
+        if (lzret == LZMA_BUF_ERROR &&
+            lzs->avail_in == 0 && lzs->avail_out > 0)
+            lzret = LZMA_OK;
+
+        if (catch_lzma_error(state, lzret))
+            goto error;
+
+        if (lzret == LZMA_GET_CHECK || lzret == LZMA_NO_CHECK)
+            FT_ATOMIC_STORE_INT_RELAXED(d->check, lzma_get_check(&d->lzs));
+
+        if (lzret == LZMA_STREAM_END) {
+            FT_ATOMIC_STORE_CHAR_RELAXED(d->eof, 1);
+            break;
+        } else if (lzs->avail_out == 0) {
+            if (OutputBuffer_GetDataSize(&buffer, lzs->avail_out) == max_length)
+                break;
+            OutputBuffer_Grow(&buffer, &lzs->next_out, &lzs->avail_out);
+        } else if (lzs->avail_in == 0) {
+            break;
+        }
+    }
+    return OutputBuffer_Finish(&buffer, lzs->avail_out);
+error:
+    OutputBuffer_OnError(&buffer);
+    return NULL;
+}
+```
+
+The outer `decompress` function manages the internal input buffer and decides
+the value of `needs_input` after `decompress_buf` returns:
+
+```c
+if (d->eof) {
+    d->needs_input = 0;
+    if (lzs->avail_in > 0)
+        d->unused_data = PyBytes_FromStringAndSize(
+            (char *)lzs->next_in, lzs->avail_in);
+} else if (lzs->avail_in == 0) {
+    lzs->next_in = NULL;
+    d->needs_input = 1;
+} else {
+    d->needs_input = 0;
+    /* copy tail into internal buffer so we own it across calls */
+}
+```
+
+`needs_input = True` signals that the caller must supply more compressed bytes
+before progress can be made. `needs_input = False` after a non-EOF call means
+unconsumed bytes remain in the internal buffer; `decompress(b"")` will drain
+them (subject to `max_length`).
+
+### `catch_lzma_error` error mapper (lines 131 to 320)
+
+<CpyLink path="Modules/_lzmamodule.c" lines="131-320" />
+
+liblzma returns `lzma_ret` enum values. `catch_lzma_error` maps them to Python
+exceptions, using the per-module `LZMAError` for library-specific conditions and
+standard Python exception types for memory and parameter errors:
+
+```c
+static int
+catch_lzma_error(_lzma_state *state, lzma_ret lzret)
+{
+    switch (lzret) {
+    case LZMA_OK:
+    case LZMA_GET_CHECK:
+    case LZMA_NO_CHECK:
+    case LZMA_STREAM_END:
+        return 0;   /* not an error */
+    case LZMA_UNSUPPORTED_CHECK:
+        PyErr_SetString(state->error, "Unsupported integrity check");
+        return 1;
+    case LZMA_MEM_ERROR:
+        PyErr_NoMemory();
+        return 1;
+    case LZMA_MEMLIMIT_ERROR:
+        PyErr_SetString(state->error, "Memory usage limit exceeded");
+        return 1;
+    case LZMA_FORMAT_ERROR:
+        PyErr_SetString(state->error,
+                        "Input format not supported by decoder");
+        return 1;
+    case LZMA_OPTIONS_ERROR:
+        PyErr_SetString(state->error,
+                        "Invalid or unsupported options");
+        return 1;
+    case LZMA_DATA_ERROR:
+        PyErr_SetString(state->error, "Corrupt input data");
+        return 1;
+    case LZMA_PROG_ERROR:
+        PyErr_SetString(state->error, "Internal error");
+        return 1;
+    default:
+        PyErr_Format(state->error,
+                     "Unrecognized error from liblzma: %d", lzret);
+        return 1;
+    }
+}
+```
+
+`LZMA_FORMAT_ERROR` is the code liblzma emits when the stream does not start
+with the XZ magic bytes `\xfd7zXZ\x00`. `LZMA_DATA_ERROR` covers both
+corrupted payload data and wrong filter chain on raw streams.
+
+### Module init and constants (lines 1451 to 1648)
+
+<CpyLink path="Modules/_lzmamodule.c" lines="1451-1648" />
+
+`lzma_exec` registers types and integer constants. The full constant set:
+
+```c
+/* Format selection */
+ADD_INT_PREFIX_MACRO(state, FORMAT_AUTO);   /* 0: auto-detect */
+ADD_INT_PREFIX_MACRO(state, FORMAT_XZ);     /* 1: .xz stream  */
+ADD_INT_PREFIX_MACRO(state, FORMAT_ALONE);  /* 2: legacy .lzma */
+ADD_INT_PREFIX_MACRO(state, FORMAT_RAW);    /* 3: raw, no header */
+
+/* Integrity checks */
+ADD_INT_PREFIX_MACRO(state, CHECK_NONE);
+ADD_INT_PREFIX_MACRO(state, CHECK_CRC32);
+ADD_INT_PREFIX_MACRO(state, CHECK_CRC64);
+ADD_INT_PREFIX_MACRO(state, CHECK_SHA256);
+ADD_INT_PREFIX_MACRO(state, CHECK_ID_MAX);
+ADD_INT_PREFIX_MACRO(state, CHECK_UNKNOWN);
+
+/* Filter IDs */
+ADD_INT_PREFIX_MACRO(state, FILTER_LZMA1);
+ADD_INT_PREFIX_MACRO(state, FILTER_LZMA2);
+ADD_INT_PREFIX_MACRO(state, FILTER_DELTA);
+ADD_INT_PREFIX_MACRO(state, FILTER_X86);
+ADD_INT_PREFIX_MACRO(state, FILTER_IA64);
+ADD_INT_PREFIX_MACRO(state, FILTER_ARM);
+ADD_INT_PREFIX_MACRO(state, FILTER_ARMTHUMB);
+ADD_INT_PREFIX_MACRO(state, FILTER_SPARC);
+ADD_INT_PREFIX_MACRO(state, FILTER_POWERPC);
+
+/* Match finders and encoder modes */
+ADD_INT_PREFIX_MACRO(state, MF_HC3);
+ADD_INT_PREFIX_MACRO(state, MF_HC4);
+ADD_INT_PREFIX_MACRO(state, MF_BT2);
+ADD_INT_PREFIX_MACRO(state, MF_BT3);
+ADD_INT_PREFIX_MACRO(state, MF_BT4);
+ADD_INT_PREFIX_MACRO(state, MODE_FAST);
+ADD_INT_PREFIX_MACRO(state, MODE_NORMAL);
+ADD_INT_PREFIX_MACRO(state, PRESET_DEFAULT);   /* 6 */
+ADD_INT_PREFIX_MACRO(state, PRESET_EXTREME);   /* bit 31 set */
+```
+
+`PRESET_DEFAULT` is 6 in liblzma terms. `PRESET_EXTREME` sets the high bit of
+the preset integer to enable the "extreme" encoder setting that sacrifices
+encoding speed for marginally better compression. `FORMAT_ALONE` corresponds to
+the legacy `.lzma` container used by older versions of the `lzma` command-line
+tool before xz replaced it.
+
+## gopy mirror
+
+Not yet ported.

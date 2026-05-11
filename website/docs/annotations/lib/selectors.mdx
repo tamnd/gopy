@@ -1,0 +1,132 @@
+---
+title: Lib/selectors.py
+description: High-level I/O multiplexing abstraction that wraps select, poll, epoll, and kqueue into a uniform interface with automatic platform selection.
+cpython_path: Lib/selectors.py
+cpython_version: "3.14"
+lines: 600
+status: annotated
+ported_to: ""
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Lib/selectors.py`
+
+<CpyLink path="Lib/selectors.py" />
+
+`selectors.py` provides a platform-neutral I/O readiness API built on top of the OS primitives exposed by `select`. It defines `EVENT_READ` and `EVENT_WRITE` bitmask constants, the `SelectorKey` namedtuple that carries a registered file object together with its fd, event mask, and caller-supplied data, and a hierarchy of selector classes. The abstract base `BaseSelector` specifies the contract; each concrete class wraps one OS call.
+
+The class hierarchy from least to most capable is `SelectSelector` (POSIX `select`, universal), `PollSelector` (Linux/macOS `poll`), `EpollSelector` (Linux `epoll`), and `KqueueSelector` (macOS/BSD `kqueue`). At the bottom of the file `DefaultSelector` is bound to whichever class is best for the running platform. Application code imports `DefaultSelector` and gets the fastest available mechanism without any conditionals.
+
+The internal `_SelectorMapping` class implements the `Mapping` ABC over a selector's `_fd_to_key` dictionary so that callers can introspect registered file objects with a dict-like interface. The `BaseSelector` `select` method is abstract; all other public methods (`register`, `unregister`, `modify`, `get_key`, `get_map`, `close`) are concrete and share implementations across subclasses.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Lib/selectors.py" lines="1-40">1-40</Cpy> | imports, `EVENT_READ`, `EVENT_WRITE` | Module header, bitmask constants, helper `_fileobj_to_fd` | - |
+| <Cpy path="Lib/selectors.py" lines="41-80">41-80</Cpy> | `SelectorKey` | Namedtuple with `fileobj`, `fd`, `events`, `data` fields and a docstring | - |
+| <Cpy path="Lib/selectors.py" lines="81-130">81-130</Cpy> | `_SelectorMapping` | Read-only `Mapping` view over a selector's fd-to-key dict | - |
+| <Cpy path="Lib/selectors.py" lines="131-260">131-260</Cpy> | `BaseSelector` | ABC: `register`, `unregister`, `modify`, `select` (abstract), `close`, `get_key`, `get_map` | - |
+| <Cpy path="Lib/selectors.py" lines="261-360">261-360</Cpy> | `SelectSelector` | `select`-based implementation, splits fds into read/write sets | - |
+| <Cpy path="Lib/selectors.py" lines="361-430">361-430</Cpy> | `PollSelector` | `poll`-based implementation, translates event mask to `POLLIN`/`POLLOUT` | - |
+| <Cpy path="Lib/selectors.py" lines="431-510">431-510</Cpy> | `EpollSelector` | `epoll`-based implementation, uses `EPOLLIN`/`EPOLLOUT`, one-shot optional | - |
+| <Cpy path="Lib/selectors.py" lines="511-575">511-575</Cpy> | `KqueueSelector` | BSD/macOS `kqueue`+`kevent` implementation | - |
+| <Cpy path="Lib/selectors.py" lines="576-600">576-600</Cpy> | `DefaultSelector` | Platform binding: assigned to the best available class at import time | - |
+
+## Reading
+
+### SelectorKey and event constants (lines 1 to 80)
+
+<CpyLink path="Lib/selectors.py" lines="1-80" />
+
+`EVENT_READ = 1` and `EVENT_WRITE = 2` are the only event values the public API exposes. They can be OR-ed together when registering a file object for both directions. `SelectorKey` is a namedtuple. The `_fileobj_to_fd` helper accepts either a raw integer fd or any object with a `fileno()` method, raising `ValueError` for invalid inputs.
+
+```python
+EVENT_READ  = (1 << 0)
+EVENT_WRITE = (1 << 1)
+
+SelectorKey = namedtuple('SelectorKey', ['fileobj', 'fd', 'events', 'data'])
+```
+
+### BaseSelector register and unregister (lines 131 to 260)
+
+<CpyLink path="Lib/selectors.py" lines="131-260" />
+
+`register` validates that events is a subset of `EVENT_READ | EVENT_WRITE`, converts the file object to an fd, builds a `SelectorKey`, and stores it in `_fd_to_key`. `unregister` pops the key and returns it. `modify` is implemented as `unregister` followed by `register` at the base level; subclasses may override it for efficiency.
+
+```python
+def register(self, fileobj, events, data=None):
+    if (not events) or (events & ~(EVENT_READ | EVENT_WRITE)):
+        raise ValueError("Invalid events: {!r}".format(events))
+    key = SelectorKey(fileobj=fileobj, fd=self._fileobj_lookup(fileobj),
+                      events=events, data=data)
+    if key.fd in self._fd_to_key:
+        raise KeyError("{!r} is already registered".format(fileobj))
+    self._fd_to_key[key.fd] = key
+    return key
+```
+
+### SelectSelector (lines 261 to 360)
+
+<CpyLink path="Lib/selectors.py" lines="261-360" />
+
+`SelectSelector` maintains two sets, `_readers` and `_writers`, updated on every `register` / `unregister`. Its `select` method passes those sets to `select.select` and then walks the returned ready lists, OR-ing event flags together for fds that appear in both, before yielding `(key, events)` pairs.
+
+```python
+def select(self, timeout=None):
+    ...
+    r, w, _ = self._select(self._readers, self._writers, [], timeout)
+    r = set(r)
+    w = set(w)
+    ready = []
+    for fd in r | w:
+        events = 0
+        if fd in r:
+            events |= EVENT_READ
+        if fd in w:
+            events |= EVENT_WRITE
+        key = self._fd_to_key.get(fd)
+        if key:
+            ready.append((key, events & key.events))
+    return ready
+```
+
+### EpollSelector (lines 431 to 510)
+
+<CpyLink path="Lib/selectors.py" lines="431-510" />
+
+`EpollSelector` creates an `epoll` object in its `__init__`. `register` calls `epoll.register` with the translated flags (`EPOLLIN`, `EPOLLOUT`). `select` calls `epoll.poll` with the timeout in seconds (negative for blocking) and translates returned events back to `EVENT_READ` / `EVENT_WRITE` pairs.
+
+```python
+def register(self, fileobj, events, data=None):
+    key = super().register(fileobj, events, data)
+    epoll_events = 0
+    if events & EVENT_READ:
+        epoll_events |= select.EPOLLIN
+    if events & EVENT_WRITE:
+        epoll_events |= select.EPOLLOUT
+    self._epoll.register(key.fd, epoll_events)
+    return key
+```
+
+### DefaultSelector binding (lines 576 to 600)
+
+<CpyLink path="Lib/selectors.py" lines="576-600" />
+
+The assignment chain at the end of the file picks the best available selector. `epoll` is preferred on Linux, `kqueue` on macOS and BSD, `poll` where available, and `select` as a universal fallback. This means that `DefaultSelector` always resolves to a concrete class at import time with no runtime dispatch overhead.
+
+```python
+if 'KqueueSelector' in globals():
+    DefaultSelector = KqueueSelector
+elif 'EpollSelector' in globals():
+    DefaultSelector = EpollSelector
+elif 'PollSelector' in globals():
+    DefaultSelector = PollSelector
+else:
+    DefaultSelector = SelectSelector
+```
+
+## gopy mirror
+
+Not yet ported.

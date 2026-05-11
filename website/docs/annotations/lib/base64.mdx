@@ -1,0 +1,127 @@
+---
+title: Lib/base64.py
+description: RFC 4648 encoding and decoding for base64, base32, base16, and related alphabets.
+cpython_path: Lib/base64.py
+cpython_version: "3.14"
+lines: 550
+status: annotated
+ported_to: ""
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Lib/base64.py`
+
+<CpyLink path="Lib/base64.py" />
+
+`base64.py` implements the encoding and decoding schemes defined in RFC 4648: base64, base64url, base32, base32hex, base16, and the legacy base85 and ascii85 dialects. Most of the heavy lifting for base64 and base16 is delegated to the `binascii` C extension, which operates directly on bytes objects and avoids Python-level loops. The pure-Python paths in this file add padding validation, alphabet remapping, and the line-wrapping behaviour required for MIME contexts.
+
+The module distinguishes between two usage styles. The one-shot functions (`b64encode`, `b64decode`, etc.) accept and return `bytes` objects and are suitable for in-memory work. The streaming classes `Encoder` and `Decoder` (introduced for incremental use cases) wrap a binary file-like object and feed data through the codec in configurable chunk sizes, buffering incomplete groups across `write` calls.
+
+Key internal invariants: base64 works in groups of 3 input bytes mapping to 4 output characters, base32 in groups of 5 input bytes mapping to 8 output characters, and base16 is a straight hex dump with an uppercase alphabet. The `_bytes_from_decode_data` helper normalises string vs bytes arguments at every public entry point so that callers do not need to pre-encode ASCII strings.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Lib/base64.py" lines="1-30">1-30</Cpy> | module header | Imports, `__all__`, byte-table constants | - |
+| <Cpy path="Lib/base64.py" lines="31-80">31-80</Cpy> | `b64encode`, `b64decode` | Standard base64 encode/decode via `binascii` | - |
+| <Cpy path="Lib/base64.py" lines="81-120">81-120</Cpy> | `urlsafe_b64encode`, `urlsafe_b64decode` | Base64url alphabet (`+/` replaced by `-_`) | - |
+| <Cpy path="Lib/base64.py" lines="121-220">121-220</Cpy> | `b32encode`, `b32decode` | Base32 standard and hex alphabets | - |
+| <Cpy path="Lib/base64.py" lines="221-270">221-270</Cpy> | `b16encode`, `b16decode` | Base16 (hex) encode/decode | - |
+| <Cpy path="Lib/base64.py" lines="271-350">271-350</Cpy> | `b85encode`, `b85decode` | Base85 encode/decode (git/RFC dialect) | - |
+| <Cpy path="Lib/base64.py" lines="351-410">351-410</Cpy> | `a85encode`, `a85decode` | Ascii85 encode/decode (Adobe/btoa dialects) | - |
+| <Cpy path="Lib/base64.py" lines="411-460">411-460</Cpy> | `encodebytes`, `decodebytes` | MIME line-wrapped encode/decode (76-char lines) | - |
+| <Cpy path="Lib/base64.py" lines="461-520">461-520</Cpy> | `Encoder`, `Decoder` | Streaming incremental codec classes | - |
+| <Cpy path="Lib/base64.py" lines="521-550">521-550</Cpy> | `main` | Command-line interface (`-e`/`-d` flags) | - |
+
+## Reading
+
+### Core base64 encode and decode (lines 31 to 80)
+
+<CpyLink path="Lib/base64.py" lines="31-80" />
+
+`b64encode` is a thin wrapper: it calls `binascii.b2a_base64` on the input and strips the trailing newline that `binascii` always appends. An optional `altchars` argument (two bytes) is used to replace `+` and `/` after encoding, enabling non-standard alphabets without a separate code path. `b64decode` reverses the process: it remaps any `altchars` back to `+/`, optionally strips whitespace when `validate=False`, then delegates to `binascii.a2b_base64`. When `validate=True` the input is checked against the standard alphabet before any decoding occurs, raising `binascii.Error` on unknown characters.
+
+```python
+def b64encode(s, altchars=None):
+    encoded = binascii.b2a_base64(s)[:-1]
+    if altchars is not None:
+        altchars = _bytes_from_decode_data(altchars)
+        assert len(altchars) == 2, repr(altchars)
+        return encoded.translate(bytes.maketrans(b'+/', altchars))
+    return encoded
+```
+
+### Base32 encoding (lines 121 to 220)
+
+<CpyLink path="Lib/base64.py" lines="121-220" />
+
+Base32 is implemented entirely in Python because `binascii` does not expose a base32 codec. `b32encode` packs 5 input bytes into a 40-bit integer and then extracts eight 5-bit groups, each indexing into the 32-character alphabet (`A-Z2-7` for the standard alphabet, `0-9A-V` for base32hex). Padding to a multiple of 8 output characters is done with `=` signs. `b32decode` validates each character, rebuilds the 40-bit words, and unpacks 5 bytes per group. The optional `casefold` parameter lowercases the input before lookup, trading a string copy for caller convenience.
+
+```python
+_b32alphabet = b'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567'
+
+def b32encode(s):
+    if not s:
+        return b''
+    quanta, leftover = divmod(len(s), 5)
+    # pad to a multiple of 5 bytes
+    if leftover:
+        s = s + bytes(5 - leftover)
+    ...
+```
+
+### URL-safe base64 (lines 81 to 120)
+
+<CpyLink path="Lib/base64.py" lines="81-120" />
+
+`urlsafe_b64encode` and `urlsafe_b64decode` use `bytes.maketrans` to swap `+` and `/` for `-` and `_` after (or before) the standard base64 operation. This matches the "base64url" alphabet from RFC 4648 section 5, which is safe to embed in URLs and filenames without percent-encoding. The functions intentionally do not strip padding by default because some decoders are strict about the `=` characters.
+
+```python
+def urlsafe_b64encode(s):
+    return b64encode(s).translate(_urlsafe_encode_translation)
+
+def urlsafe_b64decode(s):
+    s = _bytes_from_decode_data(s)
+    s = s.translate(_urlsafe_decode_translation)
+    return b64decode(s)
+```
+
+### MIME line-wrapped encoding (lines 411 to 460)
+
+<CpyLink path="Lib/base64.py" lines="411-460" />
+
+`encodebytes` splits the input into 57-byte chunks (which produce exactly 76 base64 characters each) and encodes each chunk with `binascii.b2a_base64`, which appends a newline automatically. The result is a single `bytes` object with embedded `\n` every 76 characters, matching the MIME content-transfer-encoding requirement. `decodebytes` is the inverse: it strips all whitespace lines and concatenates the decoded chunks.
+
+```python
+def encodebytes(s):
+    if not isinstance(s, bytes_types):
+        raise TypeError("expected bytes, not %s" % s.__class__.__name__)
+    pieces = []
+    for i in range(0, len(s), MAXBINSIZE):
+        chunk = s[i : i + MAXBINSIZE]
+        pieces.append(binascii.b2a_base64(chunk))
+    return b"".join(pieces)
+```
+
+### Streaming encoder and decoder classes (lines 461 to 520)
+
+<CpyLink path="Lib/base64.py" lines="461-520" />
+
+The `Encoder` class buffers incomplete 3-byte groups across `write` calls so that the output stream contains only complete base64 groups until `flush` is called. `flush` pads the remaining buffered bytes and writes the final encoded block. `Decoder` performs the reverse, buffering incomplete 4-character groups and forwarding decoded bytes to the wrapped stream. Both classes implement the `io.RawIOBase` interface so they can be composed with other stream wrappers.
+
+```python
+class Encoder(io.RawIOBase):
+    def write(self, s):
+        if self.buf:
+            s = self.buf + s
+        nchunks, leftover = divmod(len(s), 3)
+        self.buf = s[nchunks * 3:]
+        self.stream.write(b64encode(s[:nchunks * 3]))
+        return len(s) - leftover
+```
+
+## gopy mirror
+
+Not yet ported. The gopy runtime does not yet include a `base64` module. When ported it should live at `module/base64/` and the pure-Python base32 and base85 paths should be translated directly to Go, while the base64 and base16 paths can delegate to the Go standard library `encoding/base64` and `encoding/hex` packages.

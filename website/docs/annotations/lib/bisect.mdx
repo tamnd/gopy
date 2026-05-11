@@ -1,0 +1,125 @@
+---
+title: Lib/bisect.py
+description: Pure-Python binary search and sorted-insertion for sequences, with an optional C accelerator.
+cpython_path: Lib/bisect.py
+cpython_version: "3.14"
+lines: 125
+status: annotated
+ported_to: ""
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Lib/bisect.py`
+
+<CpyLink path="Lib/bisect.py" />
+
+`bisect.py` provides binary search over sorted sequences. The two core search functions, `bisect_left` and `bisect_right`, return the insertion point that keeps the sequence sorted after an insert. The two insert functions, `insort_left` and `insort_right`, call the corresponding search function and then perform the actual `list.insert`. The module exposes `bisect` as an alias for `bisect_right` and `insort` as an alias for `insort_right`, matching the most common use case of finding the rightmost position where an item could be inserted.
+
+The pure-Python implementations use classic binary search with a `lo`/`hi` pair narrowing toward the target. Each iteration computes `mid = (lo + hi) // 2`, compares `a[mid]` to `x`, and advances either `lo` or `hi`. The loop exits when `lo == hi`, at which point `lo` is the insertion index. The `key` parameter, added in Python 3.10, maps each array element through a callable before comparison, mirroring the `key` convention of `sorted` and `list.sort`. When `key` is supplied the implementation precomputes `key(x)` once and applies `key` to each array element during the search.
+
+At the bottom of the file the module attempts `from _bisect import *`, replacing the pure-Python definitions with compiled equivalents from the `_bisect` C extension module. The C versions are faster for large lists because they avoid per-iteration Python attribute lookups and can use the CPython sequence protocol directly. If `_bisect` is not available (e.g. during early bootstrap or on exotic platforms) the pure-Python fallbacks remain active silently.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Lib/bisect.py" lines="1-5">1-5</Cpy> | module header | Docstring and `__all__` declaration | - |
+| <Cpy path="Lib/bisect.py" lines="6-40">6-40</Cpy> | `bisect_right` | Find rightmost insertion point, optional `key` | - |
+| <Cpy path="Lib/bisect.py" lines="41-75">41-75</Cpy> | `bisect_left` | Find leftmost insertion point, optional `key` | - |
+| <Cpy path="Lib/bisect.py" lines="76-95">76-95</Cpy> | `insort_right` | Insert keeping sort order (right bias) | - |
+| <Cpy path="Lib/bisect.py" lines="96-115">96-115</Cpy> | `insort_left` | Insert keeping sort order (left bias) | - |
+| <Cpy path="Lib/bisect.py" lines="116-125">116-125</Cpy> | C accelerator import | `from _bisect import *` with silent fallback | - |
+
+## Reading
+
+### bisect_right (lines 6 to 40)
+
+<CpyLink path="Lib/bisect.py" lines="6-40" />
+
+`bisect_right` returns the index after any existing entries equal to `x`. This is the standard "upper bound" operation. The `lo` and `hi` parameters let callers restrict the search to a sub-range without slicing the list. When `key` is not `None`, each comparison uses `key(a[mid])` rather than `a[mid]` directly. Because the key function is applied to list elements and not to `x`, the caller is expected to pass the pre-mapped value of `x` as needed, matching how `sorted(a, key=...)` works.
+
+```python
+def bisect_right(a, x, lo=0, hi=None, *, key=None):
+    if lo < 0:
+        raise ValueError('lo must be non-negative')
+    if hi is None:
+        hi = len(a)
+    if key is None:
+        while lo < hi:
+            mid = (lo + hi) // 2
+            if x < a[mid]:
+                hi = mid
+            else:
+                lo = mid + 1
+    else:
+        while lo < hi:
+            mid = (lo + hi) // 2
+            if x < key(a[mid]):
+                hi = mid
+            else:
+                lo = mid + 1
+    return lo
+```
+
+### bisect_left (lines 41 to 75)
+
+<CpyLink path="Lib/bisect.py" lines="41-75" />
+
+`bisect_left` returns the leftmost position where `x` could be inserted, meaning any existing equal elements remain to the right of the insertion point. The only structural difference from `bisect_right` is the comparison direction: the inner branch tests `a[mid] < x` (strict less-than) and advances `lo` when true, while `bisect_right` tests `x < a[mid]` and advances `hi`. This single asymmetry produces the left/right split between the two functions.
+
+```python
+def bisect_left(a, x, lo=0, hi=None, *, key=None):
+    if lo < 0:
+        raise ValueError('lo must be non-negative')
+    if hi is None:
+        hi = len(a)
+    if key is None:
+        while lo < hi:
+            mid = (lo + hi) // 2
+            if a[mid] < x:
+                lo = mid + 1
+            else:
+                hi = mid
+    else:
+        while lo < hi:
+            mid = (lo + hi) // 2
+            if key(a[mid]) < x:
+                lo = mid + 1
+            else:
+                hi = mid
+    return lo
+```
+
+### insort helpers (lines 76 to 115)
+
+<CpyLink path="Lib/bisect.py" lines="76-115" />
+
+`insort_right` and `insort_left` are thin wrappers: they call the corresponding `bisect_*` function to find the index, then call `a.insert(index, x)`. The `key` parameter is forwarded to the bisect call, but note that `list.insert` always stores the original `x`, not `key(x)`. This means the key function is purely for the purpose of locating the insertion point; the stored value is unmodified. Both insort functions have an `O(n)` cost because `list.insert` shifts elements.
+
+```python
+def insort_right(a, x, lo=0, hi=None, *, key=None):
+    lo = bisect_right(a, x, lo, hi, key=key)
+    a.insert(lo, x)
+
+def insort_left(a, x, lo=0, hi=None, *, key=None):
+    lo = bisect_left(a, x, lo, hi, key=key)
+    a.insert(lo, x)
+```
+
+### C accelerator override (lines 116 to 125)
+
+<CpyLink path="Lib/bisect.py" lines="116-125" />
+
+The final lines unconditionally import everything from `_bisect`, overwriting the pure-Python names if the C extension is available. The `try/except ImportError` block makes the pure-Python definitions the fallback. This pattern keeps the file self-contained and testable without the C extension while giving fast paths in normal CPython builds.
+
+```python
+try:
+    from _bisect import *
+except ImportError:
+    pass
+```
+
+## gopy mirror
+
+Not yet ported. The pure-Python implementation is straightforward to translate to Go. A natural Go equivalent would be a generic function using `cmp.Ordered` or an explicit comparator, with `sort.SearchInts` / `sort.Search` from the Go standard library as a reference point. When ported it should live at `module/bisect/`.
