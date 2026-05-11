@@ -274,6 +274,7 @@ const sidebars = {
         'annotations/python/pythonrun_c_detail',
         'annotations/python/sysmodule_c_detail',
         'annotations/python/specialize_c_detail',
+        'annotations/python/pystate_c_detail',
       ],
     },
     {
@@ -609,6 +610,7 @@ const sidebars = {
         'annotations/include/include_pycore_compile_h_detail',
         'annotations/include/include_pycore_opcode_metadata_h_detail',
         'annotations/include/include_pycore_call_h_detail',
+        'annotations/include/include_cpython_dictobject_h_detail',
       ],
     },
     {
@@ -785,6 +787,7 @@ const sidebars = {
         'annotations/modules/module_ctypes_callproc_c_detail',
         'annotations/modules/module_ctypes_stgdict_c_detail',
         'annotations/modules/module_pickle_c_detail',
+        'annotations/modules/module_struct_c_detail',
       ],
     },
     {
@@ -1177,6 +1180,9 @@ const sidebars = {
         'annotations/lib/cf_thread_detail',
         'annotations/lib/cf_process_detail',
         'annotations/lib/cf_base_detail',
+        'annotations/lib/email_parser_detail',
+        'annotations/lib/email_feedparser_detail',
+        'annotations/lib/email_generator_detail',
       ],
     },
   ],

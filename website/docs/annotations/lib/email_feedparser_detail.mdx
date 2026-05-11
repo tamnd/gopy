@@ -1,0 +1,174 @@
+---
+title: Lib/email/feedparser.py
+description: "Incremental email parser driven by a generator-based state machine and a push/pop line-buffer"
+cpython_path: Lib/email/feedparser.py
+cpython_version: "3.14"
+lines: 537
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/email/feedparser.py" />
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 31-43 | Module-level regex and sentinel | `NLCRE*`, `headerRE`, `boundaryendRE`, `NeedMoreData` |
+| 46-133 | `BufferedSubFile` | Line-buffer with push/pop false-EOF predicates |
+| 54-63 | `BufferedSubFile.__init__` | Initialises partial buffer, line deque, and EOF stack |
+| 65-69 | `push_eof_matcher` / `pop_eof_matcher` | Manage the false-EOF predicate stack |
+| 71-77 | `BufferedSubFile.close` | Flushes partial data into the main line deque |
+| 79-95 | `BufferedSubFile.readline` | Returns next line, `NeedMoreData`, or `''` (false EOF) |
+| 97-100 | `BufferedSubFile.unreadline` | Pushes a line back to the front of the deque |
+| 102-121 | `BufferedSubFile.push` | Cracks incoming data into lines and buffers them |
+| 136-195 | `FeedParser.__init__` | Wires factory, policy, input buffer, and generator coroutine |
+| 173-182 | `FeedParser.feed` | Public entry point: pushes data and resumes the coroutine |
+| 184-195 | `FeedParser.close` | Drains remaining data, pops root message, checks defects |
+| 218-470 | `FeedParser._parsegen` | Generator that drives the full parse state machine |
+| 472-529 | `FeedParser._parse_headers` | Collects and stores raw headers from a list of lines |
+| 532-536 | `BytesFeedParser` | Subclass that decodes `bytes` before calling `super().feed` |
+
+## Reading
+
+### `NeedMoreData` sentinel and the generator state machine
+
+`NeedMoreData` is a plain `object()` singleton used as an out-of-band value returned by `BufferedSubFile.readline` when the deque is empty and the buffer has not been closed. It signals the generator that it must yield control back to the caller to wait for more data.
+
+The generator `_parsegen` is stored not as a generator object but as its `__next__` method:
+
+```python
+# CPython: Lib/email/feedparser.py:164 FeedParser.__init__
+self._parse = self._parsegen().__next__
+```
+
+Every call to `FeedParser.feed()` calls `self._parse()`, which resumes the generator from where it last yielded. When the generator encounters `NeedMoreData` from a `readline()` call, it re-yields `NeedMoreData` upward through any nested `for retval in self._parsegen()` loops until control exits back through `_call_parse`. The caller's `feed()` then returns, and the generator resumes on the next `feed()` call. This eliminates the need for any explicit state enum or callback machinery.
+
+```python
+# CPython: Lib/email/feedparser.py:173 FeedParser.feed
+def feed(self, data):
+    self._input.push(data)
+    self._call_parse()
+```
+
+```python
+# CPython: Lib/email/feedparser.py:178 FeedParser._call_parse
+def _call_parse(self):
+    try:
+        self._parse()
+    except StopIteration:
+        pass
+```
+
+### `BufferedSubFile`: push/pop false-EOF predicates
+
+`BufferedSubFile` maintains an `_eofstack` list of callable predicates. When `readline` pops a line from the deque, it walks the stack from most-nested to least-nested and tests each predicate against the line. If any predicate matches, the line is pushed back and an empty string is returned, simulating EOF for the current parser level. The real EOF (when the buffer is both empty and closed) also returns `''`.
+
+This design lets a nested multipart sub-parser stop at its boundary line without knowing anything about enclosing boundaries. The outer parser pushed its boundary predicate before entering the nested level, so the nested `_parsegen` invocation simply sees an EOF at the right place.
+
+```python
+# CPython: Lib/email/feedparser.py:79 BufferedSubFile.readline
+def readline(self):
+    if not self._lines:
+        if self._closed:
+            return ''
+        return NeedMoreData
+    line = self._lines.popleft()
+    for ateof in reversed(self._eofstack):
+        if ateof(line):
+            self._lines.appendleft(line)
+            return ''
+    return line
+```
+
+### `BufferedSubFile.push` and partial-line handling
+
+Incoming data may be cut anywhere, including in the middle of a `\r\n` sequence. `push()` accumulates data in a `StringIO` partial buffer. When a newline character is detected, it reads all accumulated text, splits it into lines with `readlines()`, and re-holds any trailing fragment that does not end with `\n`. The check is deliberately `\n`-only because a line ending in `\r` could be the first half of `\r\n` split across two `feed()` calls.
+
+```python
+# CPython: Lib/email/feedparser.py:102 BufferedSubFile.push
+def push(self, data):
+    self._partial.write(data)
+    if '\n' not in data and '\r' not in data:
+        return
+    self._partial.seek(0)
+    parts = self._partial.readlines()
+    self._partial.seek(0)
+    self._partial.truncate()
+    if not parts[-1].endswith('\n'):
+        self._partial.write(parts.pop())
+    self.pushlines(parts)
+```
+
+### `_parsegen`: header phase and `_parse_headers`
+
+The generator starts by collecting raw header lines (lines matching `headerRE`) into a list. A line that does not match ends the header block. If the non-matching line is not a bare newline, it is a defect (`MissingHeaderBodySeparatorDefect`) and the line is pushed back as the start of the body.
+
+After collecting, `_parse_headers` iterates the list to fold continuation lines and call `policy.header_source_parse` on each completed header, storing the result via `msg.set_raw`. Unix-From lines at position zero are stored with `set_unixfrom`.
+
+```python
+# CPython: Lib/email/feedparser.py:472 FeedParser._parse_headers
+def _parse_headers(self, lines):
+    lastheader = ''
+    lastvalue = []
+    for lineno, line in enumerate(lines):
+        if line[0] in ' \t':
+            if not lastheader:
+                defect = errors.FirstHeaderLineIsContinuationDefect(line)
+                self.policy.handle_defect(self._cur, defect)
+                continue
+            lastvalue.append(line)
+            continue
+        if lastheader:
+            self._cur.set_raw(*self.policy.header_source_parse(lastvalue))
+            lastheader, lastvalue = '', []
+        # ... unix-from and colon-split logic follows
+```
+
+### `_parsegen`: multipart boundary detection
+
+When the Content-Type is `multipart/*`, the generator reads a `boundary` parameter from the headers. It creates a closure `boundarymatch(line)` that checks whether the line starts with `--<boundary>` and then uses `boundaryendRE` to decide whether it is a close delimiter (`--`) or an inter-part delimiter.
+
+The preamble is accumulated until the first inter-part boundary is seen. After each boundary, `push_eof_matcher(boundarymatch)` is called, then `_parsegen()` is iterated recursively to parse the subpart. When that sub-generator finishes, `pop_eof_matcher()` removes the predicate and `_pop_message()` closes the subpart's node.
+
+Defects recorded during multipart parsing include:
+
+- `NoBoundaryInMultipartDefect`: `boundary` parameter missing.
+- `StartBoundaryNotFoundDefect`: preamble consumed entire body without finding an opener.
+- `CloseBoundaryNotFoundDefect`: inter-part boundaries found but no close delimiter before EOF.
+- `InvalidMultipartContentTransferEncodingDefect`: CTE is not `7bit`, `8bit`, or `binary`.
+
+```python
+# CPython: Lib/email/feedparser.py:332 _parsegen boundarymatch closure
+separator = '--' + boundary
+def boundarymatch(line):
+    if not line.startswith(separator):
+        return None
+    return boundaryendRE.match(line, len(separator))
+```
+
+### `BytesFeedParser`
+
+`BytesFeedParser` is a one-method subclass. Its `feed()` decodes the incoming `bytes` to `str` using `ascii` with `surrogateescape` and then delegates to `FeedParser.feed`. All state management and generator machinery are inherited unchanged.
+
+```python
+# CPython: Lib/email/feedparser.py:535 BytesFeedParser.feed
+def feed(self, data):
+    super().feed(data.decode('ascii', 'surrogateescape'))
+```
+
+## gopy notes
+
+**Port status:** not started.
+
+**Planned package path:** `module/email/feedparser/`.
+
+**Go implementation notes:**
+
+- The generator-based coroutine has no direct Go equivalent. The cleanest translation is a hand-written state machine with an explicit state enum and a `step()` method that the caller pumps. Each `yield NeedMoreData` in CPython becomes a `return NeedMoreData` from `step()` with the state variable advanced to the next phase. Alternatively, a goroutine writing to a channel can mimic the coroutine, but the state-machine approach avoids scheduling overhead.
+- `BufferedSubFile` translates to a struct with a `bytes.Buffer` for the partial fragment, a `[][]byte` (or `[]string`) deque for complete lines, and a `[]func([]byte) bool` slice for the EOF-matcher stack. The `unreadline` method prepends to the slice.
+- `NeedMoreData` maps to a sentinel error value (`var ErrNeedMoreData = errors.New("need more data")`).
+- The `_msgstack` (a `[]Message` slice) and `_cur`/`_last` pointers translate directly to a Go slice and two pointer fields on the parser struct.
+- Defect handling: CPython calls `policy.handle_defect(msg, defect)`. In Go, policy can be a struct with a `HandleDefect(msg *Message, d Defect)` method, defaulting to appending to `msg.Defects`.
+- `_parse_headers` is a pure line-processing loop with no coroutine interaction; it ports straightforwardly to a Go function.

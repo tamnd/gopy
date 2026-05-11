@@ -1,0 +1,158 @@
+---
+title: Lib/email/generator.py
+description: "Message-tree serializers: Generator (text), BytesGenerator (binary), and DecodedGenerator (non-text stub)"
+cpython_path: Lib/email/generator.py
+cpython_version: "3.14"
+lines: 531
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/email/generator.py" />
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 28-405 | `Generator` | Base text generator; writes a `Message` tree to a text file object |
+| 38-68 | `Generator.__init__` | Stores `outfp`, `mangle_from_`, `maxheaderlen`, `policy` |
+| 74-121 | `Generator.flatten` | Public entry: resolves effective policy, writes Unix-From, calls `_write` |
+| 123-128 | `Generator.clone` | Returns a same-class generator writing to a different buffer |
+| 143-165 | `Generator._write_lines` | Normalises line endings before writing body text |
+| 167-204 | `Generator._write` | Buffers body via `_dispatch`, then writes headers + buffer |
+| 206-220 | `Generator._dispatch` | Resolves and calls the right `_handle_*` method by MIME type |
+| 226-239 | `Generator._write_headers` | Folds and writes each header via `policy.fold`, ends with blank line |
+| 245-267 | `Generator._handle_text` | Handles `text/*`; re-encodes surrogate payloads if needed |
+| 269-325 | `Generator._handle_multipart` | Writes preamble, inter-part boundaries, subparts, epilogue |
+| 327-336 | `Generator._handle_multipart_signed` | Disables header wrapping for signed parts |
+| 338-357 | `Generator._handle_message_delivery_status` | Renders per-block headers with no trailing blank line |
+| 359-377 | `Generator._handle_message` | Renders `message/rfc822` nested messages |
+| 384-400 | `Generator._make_boundary` | Generates a random MIME boundary guaranteed not to appear in the body |
+| 407-463 | `BytesGenerator` | Binary subclass: overrides `write`, `_encode`, `_new_buffer`, `_write_headers`, `_handle_text` |
+| 468-522 | `DecodedGenerator` | Text generator that replaces non-text parts with a format string |
+
+## Reading
+
+### `maxheaderlen`, `policy`, and `_write_headers`
+
+`Generator.__init__` accepts both `maxheaderlen` and `policy`. At `flatten()` time, the two are merged into an effective policy clone so that downstream code only consults `policy`:
+
+```python
+# CPython: Lib/email/generator.py:98 Generator.flatten
+if self.maxheaderlen is not None:
+    policy = policy.clone(max_line_length=self.maxheaderlen)
+```
+
+`_write_headers` iterates `msg.raw_items()` (preserving insertion order) and calls `policy.fold(h, v)` for each header. `policy.fold` is responsible for RFC 5322 line wrapping at `max_line_length` characters. After folding, when `policy.verify_generated_headers` is true, the method checks that the folded string ends with the correct line separator and that no bare newline appears inside (a security hardening added in 3.13).
+
+```python
+# CPython: Lib/email/generator.py:226 Generator._write_headers
+def _write_headers(self, msg):
+    for h, v in msg.raw_items():
+        folded = self.policy.fold(h, v)
+        if self.policy.verify_generated_headers:
+            linesep = self.policy.linesep
+            if not folded.endswith(linesep):
+                raise HeaderWriteError(
+                    f'folded header does not end with {linesep!r}: {folded!r}')
+            if NEWLINE_WITHOUT_FWSP.search(folded.removesuffix(linesep)):
+                raise HeaderWriteError(
+                    f'folded header contains newline: {folded!r}')
+        self.write(folded)
+    self.write(self._NL)
+```
+
+`BytesGenerator` overrides this to call `policy.fold_binary(h, v)`, which returns `bytes` and handles non-ASCII header values (encoded words, UTF-8 with the `utf8` policy) without passing them through the `surrogateescape` codec path.
+
+### The `_write` / `_dispatch` two-phase pattern
+
+A naive implementation would write headers first, then body. That breaks multipart because the boundary string must be chosen based on the body text, and the boundary appears in the `Content-Type` header. `_write` solves this by redirecting `self._fp` to a temporary buffer, calling `_dispatch` (which fills the buffer with the body), then writing the headers to the real output, and finally copying the buffer.
+
+```python
+# CPython: Lib/email/generator.py:167 Generator._write
+def _write(self, msg):
+    oldfp = self._fp
+    try:
+        self._munge_cte = None
+        self._fp = sfp = self._new_buffer()
+        self._dispatch(msg)
+    finally:
+        self._fp = oldfp
+        munge_cte = self._munge_cte
+        del self._munge_cte
+    # ... write headers, then sfp contents
+```
+
+`_dispatch` looks up `_handle_<maintype>_<subtype>` (e.g. `_handle_multipart_signed`), then `_handle_<maintype>`, then falls back to `_writeBody` (which is `_handle_text`).
+
+### `_handle_multipart` and boundary generation
+
+`_handle_multipart` renders each subpart into its own temporary buffer by calling `self.clone(s).flatten(part)`. All buffers are collected in `msgtexts`. If the message has no `boundary` parameter yet, `_make_boundary` generates one by picking a random token and checking that `--<boundary>` does not appear anywhere in the joined subpart text. The boundary is then stored back on the message object before the headers are written.
+
+```python
+# CPython: Lib/email/generator.py:291 Generator._handle_multipart boundary selection
+boundary = msg.get_boundary()
+if not boundary:
+    alltext = self._encoded_NL.join(msgtexts)
+    boundary = self._make_boundary(alltext)
+    msg.set_boundary(boundary)
+```
+
+After boundary selection, the method writes: preamble (if any), opening delimiter, each subpart separated by inter-part delimiters, closing delimiter, and epilogue (if any).
+
+### `BytesGenerator`: re-encoding non-ASCII headers
+
+`BytesGenerator.write` encodes strings to bytes via `ascii` with `surrogateescape`, reversing the escape applied during parsing. `_encode` converts strings to plain ASCII bytes for internal buffer comparisons.
+
+`_write_headers` calls `policy.fold_binary` instead of `policy.fold`. For the `utf8` policy, `fold_binary` emits raw UTF-8 bytes. For `compat32`, it emits RFC 2047 encoded-word sequences. The result is written directly to `self._fp` (a `BytesIO`) rather than through `self.write`, because the bytes are already in final form.
+
+`_handle_text` has a special fast path: if the payload contains surrogate escapes (meaning it came from binary source data) and `policy.cte_type` is not `7bit`, the bytes are written back directly without re-encoding. This avoids lossy re-encoding of already-binary payloads.
+
+```python
+# CPython: Lib/email/generator.py:446 BytesGenerator._handle_text
+def _handle_text(self, msg):
+    if msg._payload is None:
+        return
+    if _has_surrogates(msg._payload) and not self.policy.cte_type == '7bit':
+        if self._mangle_from_:
+            msg._payload = fcre.sub(">From ", msg._payload)
+        self._write_lines(msg._payload)
+    else:
+        super(BytesGenerator, self)._handle_text(msg)
+```
+
+### `mangle_from_` and `_write_lines`
+
+`mangle_from_` defaults to `True` when no policy is given, for mbox compatibility. When set, any line in the body that starts with `From ` is prefixed with `>`. The substitution uses `fcre = re.compile(r'^From ', re.MULTILINE)` so it applies to all lines in the payload string, not just the first.
+
+`_write_lines` normalises any mix of `\n`, `\r\n`, and `\r` to the `policy.linesep` sequence so the output always uses a consistent line ending regardless of what the message object holds.
+
+```python
+# CPython: Lib/email/generator.py:151 Generator._write_lines
+def _write_lines(self, lines):
+    if not lines:
+        return
+    lines = NLCRE.split(lines)
+    for line in lines[:-1]:
+        self.write(line)
+        self.write(self._NL)
+    if lines[-1]:
+        self.write(lines[-1])
+```
+
+## gopy notes
+
+**Port status:** not started.
+
+**Planned package path:** `module/email/generator/`.
+
+**Go implementation notes:**
+
+- `Generator` becomes a struct with `fp io.Writer`, `mangleFrom bool`, `maxHeaderLen int`, and `policy Policy` fields. `Flatten(msg *Message)` is the public entry.
+- The two-phase `_write` pattern maps to writing the body into a `bytes.Buffer`, then writing headers to `fp`, then copying the buffer. Go's `bytes.Buffer` replaces `StringIO`; `bytes.Buffer` (via an adapter) replaces `BytesIO` in `BytesGenerator`.
+- `_dispatch` translates to a method-lookup table (map from MIME type string to handler function) populated at generator construction time, with fallback to a `writeBody` function.
+- `_write_headers` calls `policy.Fold(name, value string) string`. The header-injection check (`NEWLINE_WITHOUT_FWSP`) should be applied unconditionally in the Go port rather than gated on a policy flag, since the safety invariant is more important than backward compatibility.
+- `BytesGenerator` becomes a separate struct (not a subclass). It shares the same handler table logic but overrides `write` to call `w.fp.Write([]byte(...))` and uses `policy.FoldBinary(name, value) []byte` for headers.
+- `_make_boundary` uses `crypto/rand` rather than `math/rand` for boundary tokens to avoid predictability in security-sensitive contexts.
+- `DecodedGenerator` is a low-priority port; its role is covered by `msg.Walk()` combined with `part.GetPayload(decode=false)` at the caller level.

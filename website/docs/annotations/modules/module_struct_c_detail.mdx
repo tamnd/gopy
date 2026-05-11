@@ -1,0 +1,89 @@
+---
+title: Modules/_struct.c
+description: "C accelerator for the struct module: Struct precompiles format strings into formatcode arrays, pack/unpack walk those arrays, and native vs standard size modes control alignment and byte order."
+cpython_path: Modules/_struct.c
+cpython_version: "3.14"
+lines: 1800
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/_struct.c" />
+
+`Modules/_struct.c` implements the C accelerator for Python's `struct` module. A `Struct` object compiles a format string into an array of `formatcode` entries once, then reuses that compiled form for multiple `pack` and `unpack` calls. The file also handles the six byte-order/size prefix characters (`@`, `=`, `<`, `>`, `!`, `s`/`p`) and the alignment padding rules for native mode.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-200 | `formatdef`, `formatcode` | Per-character type descriptor; compiled code list entry |
+| 201-600 | type tables | `native_table`, `standardB_table` (8 tables total) for each byte-order mode |
+| 601-900 | `s_object`, `s_init` | `Struct` constructor; format parsing into `codes` array |
+| 901-1100 | `s_pack`, `s_pack_into` | Pack path; walk `codes`, call `f_pack` per entry |
+| 1101-1400 | `s_unpack`, `s_unpack_from`, `s_iter_unpack` | Unpack paths; walk `codes`, call `f_unpack` per entry |
+| 1401-1800 | `calcsize`, module init, LRU cache | `s_sizeof`, `struct_calcsize`, `_clearcache` |
+
+## Reading
+
+### Format compilation
+
+`s_init` parses the format string once and builds a `codes` C array. Each `formatcode` holds a pointer to the type descriptor (`formatdef`), a repeat count, a byte offset within the packed buffer, and flags.
+
+```c
+// Modules/_struct.c:601 s_init (format parse loop)
+static int
+s_init(PyObject *self, PyObject *args, PyObject *kwds)
+{
+    const char *fmt = ...;
+    /* select byte-order table from prefix char */
+    /* walk remaining chars, build codes[] array */
+    soself->s_size = size;      /* total packed size */
+    soself->s_len  = num_codes; /* number of format codes */
+    return 0;
+}
+```
+
+### Native vs standard size modes
+
+The prefix character selects one of eight `formatdef` tables. Native mode (`@`) uses `sizeof` for sizes and inserts padding bytes to satisfy alignment. Standard mode (`<`, `>`, `!`, `=`) uses fixed sizes regardless of platform and never inserts padding.
+
+```c
+// Modules/_struct.c:201 native_table entry for 'i'
+static formatdef native_table[] = {
+    {'b', sizeof(char),   0, nu_byte,   np_byte},
+    {'h', sizeof(short),  0, nu_short,  np_short},
+    {'i', sizeof(int),    0, nu_int,    np_int},
+    ...
+};
+```
+
+Alignment padding is inserted by `align_size` which rounds the current offset up to the type's alignment requirement.
+
+### Pack and unpack loops
+
+Both `s_pack` and `s_unpack` walk the precompiled `codes` array. For pack, each entry calls `e->pack(p + code->offset, v, e)` where `p` is the output buffer pointer. For unpack, each entry calls `e->unpack(p + code->offset, e)` and appends the result to the output tuple.
+
+```c
+// Modules/_struct.c:901 s_pack_internal
+static int
+s_pack_internal(PyStructObject *soself, PyObject *const *args,
+                int offset, char *buf)
+{
+    formatcode *code = soself->s_codes;
+    for (; code->fmtdef != NULL; code++) {
+        const formatdef *e = code->fmtdef;
+        char *res = buf + code->offset;
+        if (e->pack(res, args[offset++], e) < 0) return -1;
+    }
+    return 0;
+}
+```
+
+### LRU format cache
+
+`struct.pack(fmt, ...)` and `struct.unpack(fmt, ...)` go through a module-level LRU cache that stores compiled `Struct` objects keyed by format string. `_clearcache()` empties this cache, which is useful in memory-constrained environments.
+
+## gopy notes
+
+Not yet ported. The planned package path is `module/struct/`. The Go port would represent `formatcode` as a slice of interface values with `pack`/`unpack` methods, using `encoding/binary` for byte-order-aware integer reads and writes.
