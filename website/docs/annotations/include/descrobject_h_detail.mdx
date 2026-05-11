@@ -1,0 +1,109 @@
+---
+title: "Include/descrobject.h — Descriptor Object Header"
+description: "PyGetSetDef and PyMemberDef structs, member type constants, READONLY and READ_RESTRICTED flags, and descriptor creation functions in CPython 3.14"
+cpython_path: Include/descrobject.h
+cpython_version: "3.14"
+lines: 120
+status: annotated
+ported_to: objects/descr.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Descriptors are the backbone of Python's attribute lookup protocol. This header declares the two
+struct types that C extensions use to expose attributes (`PyMemberDef` for raw struct-field access
+and `PyGetSetDef` for get/set callbacks), the integer constants that name each member type, and
+the factory functions that build live descriptor objects from these definitions.
+
+## Map
+
+| Lines | Symbol | Kind | Notes |
+|-------|--------|------|-------|
+| 1-20 | `PyMemberDef` | struct | name, type, offset, flags, doc |
+| 21-50 | `T_*` constants | defines | Integer codes for member types (`T_INT`, `T_FLOAT`, etc.) |
+| 51-65 | `READONLY`, `READ_RESTRICTED`, `PY_AUDIT_READ` | defines | Access-restriction flags |
+| 66-85 | `PyGetSetDef` | struct | name, get, set, doc, closure |
+| 86-100 | `PyDescr_NewMethod` etc. | declarations | Factory functions for each descriptor kind |
+| 101-120 | `PyDescr_IsData` | declaration | Distinguishes data vs non-data descriptors |
+
+## Reading
+
+### PyMemberDef struct
+
+```c
+struct PyMemberDef {
+    const char *name;   /* attribute name */
+    int         type;   /* T_* type code */
+    Py_ssize_t  offset; /* byte offset into the C struct */
+    int         flags;  /* READONLY etc. */
+    const char *doc;    /* docstring or NULL */
+};
+```
+
+`PyMember_GetOne` and `PyMember_SetOne` use the `type` code plus `offset` to read or write a
+field directly inside the object's C memory. No Python-level getter or setter is involved, making
+this the fastest path for numeric slots.
+
+### T_* member type constants
+
+```c
+#define T_SHORT       0
+#define T_INT         1
+#define T_LONG        2
+#define T_FLOAT       3
+#define T_DOUBLE      4
+#define T_STRING      5
+#define T_OBJECT      6
+#define T_CHAR        7
+#define T_BYTE        8
+#define T_UBYTE       9
+#define T_USHORT     10
+#define T_UINT       11
+#define T_ULONG      12
+#define T_STRING_INPLACE 13
+#define T_BOOL       14
+#define T_OBJECT_EX  16
+#define T_LONGLONG   17
+#define T_ULONGLONG  18
+#define T_PYSSIZET   19
+#define T_NONE       20
+```
+
+`T_OBJECT` allows `None` when the field is `NULL`; `T_OBJECT_EX` raises `AttributeError` for
+`NULL` instead. `T_NONE` marks a slot that always returns `None` (used by sentinel entries).
+
+### PyGetSetDef struct and access flags
+
+```c
+typedef PyObject *(*getter)(PyObject *obj, void *closure);
+typedef int       (*setter)(PyObject *obj, PyObject *value, void *closure);
+
+struct PyGetSetDef {
+    const char *name;
+    getter      get;
+    setter      set;    /* NULL means read-only */
+    const char *doc;
+    void       *closure;
+};
+
+#define READONLY          1
+#define READ_RESTRICTED   2
+#define PY_AUDIT_READ     2   /* alias, triggers sys.audit */
+#define WRITE_RESTRICTED  4
+#define RESTRICTED        (READ_RESTRICTED | WRITE_RESTRICTED)
+```
+
+When `set` is `NULL` the descriptor behaves as read-only regardless of the flags field. `PY_AUDIT_READ`
+causes `PyMember_GetOne` to fire a `sys.audit` event before returning the value, used for sensitive
+fields like `frame.f_locals`.
+
+## gopy notes
+
+- `PyMemberDef` and `PyGetSetDef` are represented as `MemberDef` and `GetSetDef` in
+  `objects/descr.go`.
+- gopy stores member offsets relative to the Go struct via `unsafe.Offsetof`; the `T_*` dispatch
+  table lives in `objects/descr.go` as a switch statement rather than a function-pointer array.
+- `READONLY` is enforced at the descriptor layer before the setter is reached, matching CPython's
+  behaviour in `Objects/descrobject.c`.
+- Data-descriptor priority (`PyDescr_IsData` returning true when `set != NULL`) is implemented in
+  `objects/type.go` inside the MRO attribute lookup loop.

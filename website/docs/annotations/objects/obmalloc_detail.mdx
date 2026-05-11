@@ -1,0 +1,130 @@
+---
+title: "obmalloc.c: Python's three-tier memory allocator"
+description: "pymalloc arena, pool, and block layout; usedpools free list; PyMem_RawMalloc vs PyMem_Malloc vs PyObject_Malloc tiers; mimalloc in 3.13+; and 3.14 changes"
+cpython_path: Objects/obmalloc.c
+cpython_version: "3.14"
+lines: 3000
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`Objects/obmalloc.c` implements the three-tier allocator that underpins every
+Python object allocation. Understanding it is essential for reasoning about
+memory safety, fragmentation, and GC interaction in a faithful port.
+
+The three tiers are:
+
+- **Raw tier** (`PyMem_RawMalloc`): thin wrapper around `malloc`/`free`, safe
+  to call without the GIL.
+- **Mem tier** (`PyMem_Malloc`): same as raw by default but can be redirected
+  by a custom allocator domain; requires the GIL.
+- **Object tier** (`PyObject_Malloc`): routes requests under 512 bytes to
+  pymalloc (arena/pool/block), larger requests fall through to the mem tier.
+
+## Map
+
+| Lines | Symbol | Purpose |
+|-------|--------|---------|
+| 1-80 | Config macros | `WITH_PYMALLOC`, `PYMALLOC_DEBUG`, size thresholds |
+| 81-200 | `PyMem_RawMalloc` / `PyMem_RawFree` | Raw tier: direct `malloc` wrappers |
+| 201-320 | `PyMem_Malloc` / `PyMem_Free` | Mem tier: domain-redirectable wrappers |
+| 321-480 | Arena structs (`arena_object`) | 256 KB arenas tracked in `arenas` array |
+| 481-640 | `new_arena` | `mmap`/`VirtualAlloc` one arena; push to free list |
+| 641-820 | Pool structs (`poolp`, `pool_header`) | 4 KB pools inside arenas, sized by size class |
+| 821-1000 | `usedpools` | 64-entry array of doubly-linked pool lists, indexed by size class |
+| 1001-1200 | `pymalloc_alloc` | Core alloc: find pool, carve block, or call `new_arena` |
+| 1201-1380 | `pymalloc_free` | Return block to pool, possibly return pool to arena |
+| 1381-1560 | `PyObject_Malloc` / `PyObject_Free` | Entry points; size gate to pymalloc or mem tier |
+| 1561-1740 | `PyObject_Realloc` | In-place grow if room, else alloc-copy-free |
+| 1741-1900 | Debug wrappers | Redzone canaries, forbidden-byte fill patterns |
+| 1901-2100 | `_PyMem_DebugCheckAddress` | Validate redzone at free time |
+| 2101-2400 | mimalloc shim (`_PyObject_Malloc_mimalloc`) | 3.13+ per-thread heap via mimalloc |
+| 2401-2600 | `_PyMem_GetAllocatorName` | Introspection API for `sys` module |
+| 2601-3000 | Stats: `_PyObject_DebugMallocStats` | Pool utilisation histogram, arena counts |
+
+## Reading
+
+### Arena, pool, and block layout
+
+The three-level hierarchy keeps fragmentation local. An arena is 256 KB of
+address space obtained from the OS. It is carved into 4 KB pools. Each pool
+serves one size class (multiples of 8 bytes up to 512 bytes). A pool is a
+singly-linked list of same-size blocks; the `freeblock` pointer chains free
+slots together without a separate header per block.
+
+```c
+// Objects/obmalloc.c:660  pool_header
+typedef struct pool_header {
+    union { block *_padding; uint count; } ref;
+    block *freeblock;
+    struct pool_header *nextpool;
+    struct pool_header *prevpool;
+    uint arenaindex;
+    uint szidx;
+    uint nextoffset;
+    uint maxnextoffset;
+} *poolp;
+```
+
+`szidx` is the size-class index (0..63). `nextoffset` tracks the high-water
+mark for blocks that have never been freed; only blocks below that offset are
+on the `freeblock` chain.
+
+### usedpools and the alloc fast path
+
+`usedpools` is a flat array of 128 pool-header sentinels arranged so that
+`usedpools[i+i]` is the head of the doubly-linked list of pools for size class
+`i`. On allocation, pymalloc indexes straight into this array, pops the first
+pool, and returns `pool->freeblock` in a handful of instructions.
+
+```c
+// Objects/obmalloc.c:1050  pymalloc_alloc (fast path)
+poolp pool = usedpools[size + size];
+if (pool != pool->nextpool) {      /* pool available */
+    block *bp = pool->freeblock;
+    pool->freeblock = *(block **)bp;
+    ...
+    return (void *)bp;
+}
+```
+
+When `pool->freeblock` is exhausted, pymalloc advances `nextoffset` to carve
+the next virgin block. When the pool itself is full it is unlinked from
+`usedpools` and a fresh pool is taken from the arena.
+
+### mimalloc integration (3.13+)
+
+Starting in 3.13, CPython ships a vendored copy of mimalloc under
+`Objects/mimalloc/`. When `--with-mimalloc` is passed at configure time,
+`PyObject_Malloc` dispatches to `mi_heap_malloc` on a per-thread mimalloc heap
+instead of the pymalloc arena path. The fallback to pymalloc remains active on
+platforms where mimalloc is not supported. In 3.14 the mimalloc shim gained
+a `_PyMem_MimallocArenaAlloc` hook so the GC can enumerate live objects without
+walking CPython's arena list.
+
+```c
+// Objects/obmalloc.c:2130  _PyObject_Malloc_mimalloc
+void *
+_PyObject_Malloc_mimalloc(void *ctx, size_t nbytes)
+{
+    _PyThreadStateImpl *tstate = (_PyThreadStateImpl *)_PyThreadState_GET();
+    return mi_heap_malloc(tstate->mimalloc.obj_heap, nbytes);
+}
+```
+
+## gopy notes
+
+gopy does not port pymalloc. All object allocation goes through Go's own
+garbage-collected heap via `new(T)` or composite literals. The three CPython
+allocator tiers are therefore irrelevant to the Go runtime.
+
+The main area where obmalloc matters for gopy is the `PyMemAllocatorEx` API
+used by extension modules to intercept allocation. That surface is tracked but
+not yet ported. The mimalloc section is also deferred: mimalloc's per-thread
+heap model conflicts with Go's goroutine scheduler and would require
+significant integration work beyond the current v0.12.1 scope.
+
+`_PyObject_DebugMallocStats` has a partial analogue in the `sys` module port at
+`module/sys/module.go`, which exposes `sys.getallocatedblocks()` returning 0
+as a stub.

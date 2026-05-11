@@ -1,0 +1,112 @@
+---
+title: "codeobject.c: PyCodeObject internals"
+description: "Field layout, validation, line-number encoding, adaptive instruction array, code watcher events, and 3.14 co_qualname"
+cpython_path: Objects/codeobject.c
+cpython_version: "3.14"
+lines: 2000
+status: annotated
+ported_to: compile/compiler.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`Objects/codeobject.c` owns the lifecycle and introspection surface of
+`PyCodeObject`, the compile-time product that the VM consumes. It covers
+allocation and validation (`_PyCode_New`), the compact line-number table
+(`co_linetable`), the mutable adaptive instruction array used by the tier-1
+specializing interpreter, and the code-watcher callback mechanism introduced
+in 3.12.
+
+## Map
+
+| Lines | Symbol | Purpose |
+|-------|--------|---------|
+| 1-60 | Includes / `_Py_SET_53BIT_HASH` | File header and hash seed constant |
+| 61-200 | `_PyCode_New` / `_PyCode_Validate` | Allocation, field count checks, intern constants |
+| 201-380 | `_PyCode_InitAddressRange` | Initialize `co_linetable` cursor for iteration |
+| 381-520 | `_PyLineTable_NextAddressRange` | Decode one varint entry from the compact table |
+| 521-640 | `_PyCode_InitLocalsPlusKinds` | Build the `co_localspluskinds` bitvector |
+| 641-780 | `_PyCode_GetCode` / `_PyCode_GetVarnames` | Accessor helpers that materialise on demand |
+| 781-980 | `_PyCode_MakeWritable` / adaptive array | Copy bytecode into mutable `co_code_adaptive` |
+| 981-1200 | `_PyCode_Quicken` | Tier-1 specialisation: rewrite opcodes in place |
+| 1201-1480 | Code watcher: `PyCode_AddWatcher` / `notify_code_watchers` | Observer pattern for JIT and debuggers |
+| 1481-1700 | `code_richcompare` / `code_hash` | Equality by field-wise compare, hash from `co_qualname` |
+| 1701-2000 | `PyCode_Type` slot table, `co_replace` | Type object and `code.replace()` implementation |
+
+## Reading
+
+### _PyCode_New and field validation
+
+Every code object passes through `_PyCode_New`, which enforces internal
+consistency before the object escapes to the heap. The check that trips most
+often when porting is the locals-plus count: `co_varnames`, `co_cellvars`, and
+`co_freevars` must sum to `co_nlocalsplus` exactly.
+
+```c
+// Objects/codeobject.c:130  _PyCode_New (simplified)
+if (nlocalsplus != (int)(nvarnames + ncellvars + nfreevars)) {
+    PyErr_SetString(PyExc_ValueError,
+        "code: co_nlocalsplus does not match variable counts");
+    return NULL;
+}
+```
+
+In 3.14 the layout grew a `co_qualname` field that `_PyCode_New` populates from
+a new keyword argument. Code built with the older four-argument `PyCode_New`
+shim still compiles but triggers a `DeprecationWarning`.
+
+### co_linetable encoding
+
+The line table stores (bytecode-delta, line-delta) pairs as varints, one entry
+per instruction group. The decoder keeps a cursor struct (`PyCodeAddressRange`)
+that advances lazily, so `co_firstlineno + accumulated_delta` gives the source
+line for any instruction offset in O(n) total.
+
+```c
+// Objects/codeobject.c:420  _PyLineTable_NextAddressRange
+static int
+scan_varint(const uint8_t *ptr, unsigned int *read_p)
+{
+    unsigned int read = *ptr++;
+    unsigned int val = read & 63;
+    unsigned int shift = 0;
+    while (read & 64) {
+        read = *ptr++;
+        shift += 6;
+        val |= (read & 63) << shift;
+    }
+    *read_p = (unsigned int)(ptr - (ptr - 1));
+    return val;
+}
+```
+
+### co_code_adaptive and tier-1 quickening
+
+The canonical bytecode in `co_code` is read-only once created. When the
+specialising interpreter wants to rewrite an opcode (e.g. `LOAD_ATTR` to
+`LOAD_ATTR_SLOT`), it copies the array into `co_code_adaptive` on first write
+and patches only that copy. The original stays intact for pickling and `dis`.
+
+```c
+// Objects/codeobject.c:820  _PyCode_MakeWritable
+if (code->co_code_adaptive == NULL) {
+    code->co_code_adaptive = PyMem_Malloc(code_len);
+    memcpy(code->co_code_adaptive, PyBytes_AS_STRING(code->co_code), code_len);
+}
+```
+
+Code watchers receive a `PY_CODE_EVENT_DESTROY` notification just before the
+adaptive array is freed, giving JIT compilers a chance to evict cached machine
+code.
+
+## gopy notes
+
+The Go equivalent lives in `compile/compiler.go` as `CodeObject`. The
+`co_linetable` encoding is reproduced in `compile/flowgraph.go`
+`emitLineTable`, which walks the instruction list and emits varint deltas in
+the same format. `co_code_adaptive` has no direct equivalent yet. The tier-1
+specialiser (`_PyCode_Quicken`) is intentionally deferred: gopy runs the
+standard opcode dispatch loop and does not mutate bytecode in place.
+
+Code watchers are not ported. The hook registration API (`PyCode_AddWatcher`)
+is marked pending in the v0.12.1 scope.

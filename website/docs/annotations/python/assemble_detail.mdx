@@ -1,0 +1,90 @@
+---
+title: "assemble.c: bytecode assembly detail"
+description: "Label resolution, exception table encoding, line table generation, and code object construction in Python/assemble.c"
+cpython_path: Python/assemble.c
+cpython_version: "3.14"
+lines: 1500
+status: annotated
+ported_to: compile/compiler.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`Python/assemble.c` is the final stage of the CPython compiler. After the
+compiler emits instructions into a `cfg_builder`, `_PyCompile_Assemble` walks
+the control-flow graph, resolves jump labels to concrete offsets, encodes the
+exception table, produces the line-number table, and calls
+`_PyCode_New` to allocate the `PyCodeObject`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | includes, `_Py_CODEUNIT` typedef | Instruction word layout |
+| 81-220 | `assemble_init` / `assemble_free` | Allocate and teardown the `assembler` struct |
+| 221-390 | `assemble_jump_offsets` | Label-to-offset resolution pass |
+| 391-560 | `assemble_exception_table` | Exception handler range encoding |
+| 561-720 | `assemble_emit` / `assemble_emit_op` | Instruction serialisation |
+| 721-900 | `assemble_line_range` / `write_linetable` | 3.14 compact line table |
+| 901-1100 | `dict_keys_inorder` / `makecode` | Constant and name table construction |
+| 1101-1350 | `_PyCompile_Assemble` | Top-level entry point |
+| 1351-1500 | `optimize_basic_block` stubs | Dead-code and peephole prep |
+
+## Reading
+
+### `_PyCompile_Assemble` entry point
+
+`_PyCompile_Assemble` (line 1101) is the public entry called from
+`compiler_mod`. It drives four sequential passes: offset resolution,
+emission, linetable write, and code-object allocation.
+
+```c
+PyCodeObject *
+_PyCompile_Assemble(_PyCompilationUnit *u, PyObject *filename, int optimize)
+{
+    struct assembler a;
+    if (!assemble_init(&a, u, optimize)) goto error;
+    if (!assemble_jump_offsets(&a, u)) goto error;
+    if (!assemble_emit_bytecode(&a, u)) goto error;
+    return makecode(&a, u, filename, optimize);
+error:
+    assemble_free(&a);
+    return NULL;
+}
+```
+
+### Exception table encoding (`assemble_exception_table`)
+
+CPython 3.10 replaced `lnotab`-style exception ranges with a compact table
+stored inside the code object. Each entry covers a half-open instruction
+range `[start, end)`, names a handler offset, and records the stack depth at
+handler entry. `assemble_exception_table` iterates over basic blocks in
+emission order and emits variable-length entries using a 6-bit field with
+`NEXT_OPARG`-style overflow words (lines 391-560).
+
+```c
+static int
+assemble_exception_table(struct assembler *a, _PyCompilationUnit *u)
+{
+    /* For each block that is covered by a handler, emit one entry. */
+}
+```
+
+### Line table generation (`write_linetable`)
+
+3.14 uses a two-column compact linetable where each entry holds a column
+delta as well as a line delta. `write_linetable` (line 721) packs both into
+a single byte when both deltas fit in 3 bits, falling back to multi-byte
+entries otherwise. This replaces the older `lnotab` two-byte scheme entirely.
+
+## gopy notes
+
+- `compile/compiler.go` ports `_PyCompile_Assemble` as the `assemble`
+  function. The label-resolution pass maps directly to `resolveJumps` in
+  `compile/flowgraph_jumps.go`.
+- Exception table encoding is in `compile/flowgraph_except.go`, which was
+  added during the v0.12.1 work.
+- The linetable write is currently stubbed; `positions` are stored on each
+  `instruction` but the compact 3.14 encoding is not yet emitted.
+- `makecode` corresponds to the `makeCodeObject` helper that assembles the
+  final `objects.Code` struct from the flattened slices.

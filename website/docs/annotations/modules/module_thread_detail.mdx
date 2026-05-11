@@ -1,0 +1,129 @@
+---
+title: "Modules/_threadmodule.c: Low-Level Thread Primitives"
+description: "C implementation of the _thread module, covering thread creation, RLock with recursive depth tracking, and thread-local storage via local()"
+cpython_path: Modules/_threadmodule.c
+cpython_version: "3.14"
+lines: 1400
+status: annotated
+ported_to: module/thread
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`_threadmodule.c` provides the thin C layer that `threading.py` builds on. It
+exposes thread creation, a reentrant lock (`RLock`), a simple non-reentrant
+lock (`Lock`), and the `local()` thread-local storage type. Everything
+blocking goes through `Py_BEGIN_ALLOW_THREADS` / `Py_END_ALLOW_THREADS` so
+the GIL is released while waiting.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1–80 | includes, `lockobject` struct | non-reentrant lock wrapping `PyThread_lock` |
+| 81–300 | `lock_acquire`, `lock_release`, `lock_locked` | Lock method implementations |
+| 301–430 | `rlock` struct | RLock with `rlock_count` and `rlock_owner` fields |
+| 431–650 | `rlock_acquire`, `rlock_release` | recursive acquire/release with owner check |
+| 651–750 | `rlock_acquire_restore`, `rlock_release_save` | internal hooks used by `Condition` |
+| 751–900 | `local` struct, `localdict_type` | thread-local storage object |
+| 901–1050 | `local_getattro`, `local_setattro` | attribute access routed through per-thread dict |
+| 1051–1150 | `thread_PyThread_start_new_thread` | argument validation and `PyThread_start_new_thread` call |
+| 1151–1250 | `thread_bootstate`, `t_bootstrap` | per-thread boot struct, calls target callable |
+| 1251–1350 | `thread_get_ident`, `thread_stack_size` | utility functions |
+| 1351–1400 | module init, method tables | `PyModuleDef`, type registrations |
+
+## Reading
+
+### RLock C struct and recursive depth counter
+
+`lockobject` uses a single `PyThread_lock`. `rlock` adds two extra fields:
+`rlock_owner` (the OS thread ID of the current holder) and `rlock_count` (how
+many times that thread has acquired without releasing). Acquire checks
+`rlock_owner == current_thread_id()`; if true it just increments the counter
+and returns. Release decrements and only drops the underlying lock when the
+count reaches zero.
+
+```c
+// CPython: Modules/_threadmodule.c:301 rlockobject
+typedef struct {
+    PyObject_HEAD
+    PyThread_type_lock rlock_lock;
+    unsigned long      rlock_owner;   /* thread id of owner, 0 = unowned */
+    unsigned long      rlock_count;   /* recursion depth */
+    PyObject          *in_weakreflist;
+} rlockobject;
+
+// CPython: Modules/_threadmodule.c:431 rlock_acquire
+static PyObject *
+rlock_acquire(rlockobject *self, PyObject *args, PyObject *kwds)
+{
+    unsigned long tid = PyThread_get_thread_ident();
+    if (self->rlock_count > 0 && self->rlock_owner == tid) {
+        self->rlock_count++;
+        Py_RETURN_TRUE;
+    }
+    /* ... drop GIL and block on self->rlock_lock ... */
+}
+```
+
+### local() via PyObject_GenericGetAttr hook
+
+Each `local` instance carries a `PyObject *dicts` dict that maps thread IDs
+to per-thread attribute dicts. `local_getattro` looks up the current thread's
+ID in `dicts`, falls back to creating a fresh dict on first access, then
+delegates to `PyObject_GenericGetAttr` against that per-thread dict. This
+means `local.__dict__` returns the caller's private namespace, not a shared
+one.
+
+```c
+// CPython: Modules/_threadmodule.c:901 local_getattro
+static PyObject *
+local_getattro(localobject *self, PyObject *name)
+{
+    PyObject *ldict = _ldict(self);  /* get or create per-thread dict */
+    if (ldict == NULL)
+        return NULL;
+    /* swap __dict__ slot to per-thread dict, then call generic getter */
+    ...
+    return PyObject_GenericGetAttr((PyObject *)self, name);
+}
+```
+
+### thread_PyThread_start_new_thread guard
+
+Before calling `PyThread_start_new_thread`, the wrapper validates that the
+first argument is callable, allocates a `thread_bootstate` struct on the heap
+(freed by `t_bootstrap` in the new thread), and increments the interpreter's
+`num_threads` counter under the GIL. If `PyThread_start_new_thread` returns
+`PYTHREAD_INVALID_THREAD_ID`, it frees the boot struct and raises
+`RuntimeError`.
+
+```c
+// CPython: Modules/_threadmodule.c:1051 thread_PyThread_start_new_thread
+static PyObject *
+thread_PyThread_start_new_thread(PyObject *self, PyObject *fargs)
+{
+    /* validate args, build bootstate, then: */
+    ident = PyThread_start_new_thread(t_bootstrap, (void *)boot);
+    if (ident == PYTHREAD_INVALID_THREAD_ID) {
+        PyErr_SetString(ThreadError, "can't start new thread");
+        PyMem_Free(boot);
+        return NULL;
+    }
+    return PyLong_FromUnsignedLong(ident);
+}
+```
+
+## gopy notes
+
+- Go goroutines replace OS threads here. `start_new_thread` maps to
+  `go func()` with a deferred panic-to-exception conversion.
+- `RLock` maps directly to `sync.Mutex` plus a goroutine-ID owner field and
+  an `int` depth counter. Go has no stdlib reentrant mutex, so the owner
+  tracking must be explicit (using `runtime.Goexit` coordination or a
+  goroutine-ID helper).
+- `local()` maps to `sync.Map` keyed by goroutine ID, or more idiomatically
+  to `goroutine`-local state via a context passed through the call stack.
+- 3.14 change: `_thread.local` gained `__class_getitem__` support for type
+  annotation use cases (`local[int]`). This is handled by a new
+  `local_class_getitem` slot pointing at `Py_GenericAlias`.

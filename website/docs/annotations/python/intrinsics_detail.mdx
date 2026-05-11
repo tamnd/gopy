@@ -1,0 +1,84 @@
+---
+title: "intrinsics.c: CALL_INTRINSIC dispatch"
+description: "Dispatch tables and individual implementations for CALL_INTRINSIC_1 and CALL_INTRINSIC_2 in Python/intrinsics.c"
+cpython_path: Python/intrinsics.c
+cpython_version: "3.14"
+lines: 400
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`Python/intrinsics.c` implements the bodies called by the `CALL_INTRINSIC_1`
+and `CALL_INTRINSIC_2` bytecodes. These instructions replace what were
+previously inline opcode sequences for import-star, `print()` during
+interactive use, type-alias creation, and similar one-off operations that do
+not fit neatly into the normal call convention.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-40 | includes | Dependencies on `ceval.h`, `import.h`, `typevarobject.h` |
+| 41-80 | `_PyIntrinsics_UnaryFunctions[]` | Table of unary intrinsic function pointers |
+| 81-120 | `_PyIntrinsics_BinaryFunctions[]` | Table of binary intrinsic function pointers |
+| 121-170 | `intrinsic_print` | Interactive `print` for `PRINT_EXPR` replacement |
+| 171-220 | `intrinsic_import_star` | `from mod import *` expansion |
+| 221-270 | `intrinsic_stopiteration_error` | Raise `StopIteration` from generator return value |
+| 271-320 | `intrinsic_typevar_with_bound` | `TypeVar` with upper bound (PEP 695) |
+| 321-360 | `intrinsic_typevar_with_constraints` | `TypeVar` with constraint tuple |
+| 361-400 | 3.14 additions (`intrinsic_unary_positive`, `intrinsic_set_function_type_params`) | New in 3.14 |
+
+## Reading
+
+### Dispatch tables
+
+The two tables are simple C arrays of `instrinsicfunc1` / `instrinsicfunc2`
+function pointers indexed by the oparg of `CALL_INTRINSIC_1` or
+`CALL_INTRINSIC_2`. The ceval loop just does:
+
+```c
+case CALL_INTRINSIC_1: {
+    PyObject *res = _PyIntrinsics_UnaryFunctions[oparg](tstate, value);
+    ...
+}
+```
+
+Index 0 is reserved as an error sentinel so that an unrecognised oparg
+produces a clear `SystemError` rather than a crash.
+
+### `intrinsic_import_star`
+
+This is the most complex unary intrinsic. It calls `_PyObject_GetAttrId` to
+fetch `__all__` when present, then falls back to iterating over all names
+that do not start with an underscore. The result is merged into the caller's
+locals dict via `PyDict_SetItem`.
+
+```c
+static PyObject *
+intrinsic_import_star(PyThreadState *tstate, PyObject *frommod)
+{
+    PyObject *all = _PyObject_GetAttrIdWithoutError(frommod, &PyId___all__);
+    /* If __all__ missing, enumerate public names from __dict__. */
+    ...
+}
+```
+
+### 3.14 additions
+
+3.14 adds `intrinsic_unary_positive` (oparg `INTRINSIC_UNARY_POSITIVE`) to
+replace the `UNARY_POSITIVE` opcode that was removed from the specialising
+interpreter. It calls `PyNumber_Positive`. `intrinsic_set_function_type_params`
+supports the PEP 695 generic syntax by calling
+`_Py_set_function_type_params` on the callable.
+
+## gopy notes
+
+- `vm/eval_gen.go` dispatches `CALL_INTRINSIC_1` and `CALL_INTRINSIC_2`
+  through Go switch statements rather than function-pointer tables.
+- `intrinsic_import_star` is ported in `vm/eval_import.go` alongside the
+  `IMPORT_NAME` and `IMPORT_FROM` handlers.
+- `intrinsic_typevar_with_bound` and `intrinsic_typevar_with_constraints`
+  are not yet ported; `TypeVar` support is planned for a later milestone.
+- The 3.14 `intrinsic_unary_positive` path is handled directly in the
+  switch arm rather than as a separate function.

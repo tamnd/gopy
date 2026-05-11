@@ -1,0 +1,92 @@
+---
+title: "classobject.c: PyInstanceMethod and PyMethod"
+description: "Bound method and instance-method wrapper objects, vectorcall dispatch, richcompare, and 3.14 changes"
+cpython_path: Objects/classobject.c
+cpython_version: "3.14"
+lines: 600
+status: annotated
+ported_to: objects/method.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`Objects/classobject.c` defines two distinct object types that wrap callables
+with a receiver. `PyInstanceMethod` wraps an unbound function stored on a class
+(exposed via `im_func`). `PyMethod` (the bound method) pairs a function with
+a `self` instance (`im_func` + `im_self`) and is what you get when you look up
+a function through an instance.
+
+## Map
+
+| Lines | Symbol | Purpose |
+|-------|--------|---------|
+| 1-40 | `PyInstanceMethod_New` | Allocate and populate `im_func` for unbound wrappers |
+| 41-90 | `instancemethod_get` / `instancemethod_set` | Descriptor protocol on `im_func` |
+| 91-180 | `PyMethod_New` | Allocate `PyMethodObject`, store `im_func` and `im_self` |
+| 181-260 | `method_vectorcall` | Fast-path call that prepends `self` into the arg vector |
+| 261-340 | `method_call` | Fallback `tp_call` wrapping `method_vectorcall` |
+| 341-420 | `method_richcompare` | `==` compares `im_func` and `im_self`; `hash` combines both |
+| 421-500 | `method_repr` | Human-readable `<bound method X.f of Y>` |
+| 501-600 | Type objects | `PyInstanceMethod_Type` and `PyMethod_Type` slot tables |
+
+## Reading
+
+### method_vectorcall
+
+The vectorcall protocol lets the VM call a bound method without building a
+temporary tuple. `method_vectorcall` shifts the argument stack pointer back by
+one slot, writes `self` there, and forwards the widened vector to the wrapped
+function.
+
+```c
+// Objects/classobject.c:190  method_vectorcall
+static PyObject *
+method_vectorcall(PyObject *method, PyObject *const *args,
+                  size_t nargsf, PyObject *kwnames)
+{
+    PyObject *self = ((PyMethodObject *)method)->im_self;
+    PyObject *func = ((PyMethodObject *)method)->im_func;
+    Py_ssize_t nargs = PyVectorcall_NARGS(nargsf);
+    PyObject **newargs = (PyObject **)args - 1;
+    newargs[0] = self;
+    return _PyObject_Vectorcall(func, newargs, nargs + 1, kwnames);
+}
+```
+
+The `args - 1` trick is valid because CPython reserves one extra slot below
+every call-site argument frame precisely for this prepend pattern.
+
+### method_richcompare
+
+Two bound methods are equal when both their function and their `self` are
+equal. The hash is derived from `XOR(hash(im_func), hash(im_self))` so that
+equal methods hash identically without a dedicated hash table.
+
+```c
+// Objects/classobject.c:350  method_richcompare
+if (op == Py_EQ || op == Py_NE) {
+    eq = PyObject_RichCompareBool(a->im_func, b->im_func, Py_EQ);
+    if (eq == 1)
+        eq = PyObject_RichCompareBool(a->im_self, b->im_self, Py_EQ);
+    ...
+}
+```
+
+### 3.14 changes
+
+Python 3.14 added a `__firstlineno__` slot to method objects and aligned the
+internal layout with the tier-2 optimizer's type version tags. The
+`im_weakreflist` field moved to reduce padding on 64-bit platforms.
+
+## gopy notes
+
+The port lives in `objects/method.go`. `PyMethod_New` maps to `NewBoundMethod`,
+which stores the function and receiver in a `BoundMethodObject` struct. The
+vectorcall optimization is approximated in `vm/eval_call.go` by checking for
+`BoundMethodObject` before the generic call path and prepending the receiver
+to the argument slice. `method_richcompare` is implemented as the `Eq` method
+on `BoundMethodObject` using `ObjectRichCompareBool` from `objects/protocol.go`.
+
+`PyInstanceMethod` (the unbound wrapper) maps to `objects/instance.go`
+`InstanceMethodObject`. It is only created during class body execution and is
+not heap-allocated per lookup.

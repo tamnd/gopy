@@ -1,0 +1,72 @@
+---
+title: "concurrent/futures/_base.py: Future state machine, Executor, wait, and as_completed"
+description: "Annotates Lib/concurrent/futures/_base.py covering the Future PENDING/RUNNING/CANCELLED/FINISHED state machine, Executor.submit/map, wait() and as_completed() set-based tracking, _invoke_callbacks, and 3.14 changes"
+cpython_path: Lib/concurrent/futures/_base.py
+cpython_version: "3.14"
+lines: 600
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+<CpyLink file="Lib/concurrent/futures/_base.py" />
+
+## Map
+
+| Lines | Symbol | Purpose |
+|-------|--------|---------|
+| 1-40 | module preamble | Imports, logger setup, defines state constants `PENDING`, `RUNNING`, `CANCELLED`, `CANCELLED_AND_NOTIFIED`, `FINISHED` |
+| 41-80 | `Error`, `CancelledError`, `TimeoutError`, `InvalidStateError` | Exception hierarchy; `CancelledError` and `TimeoutError` are aliases to builtins in 3.11+ |
+| 81-130 | `_Waiter`, `_AsCompletedWaiter`, `_FirstCompletedWaiter`, `_AllCompletedWaiter` | Internal waiter objects used by `wait()` and `as_completed()` to receive notifications from futures |
+| 131-180 | `_create_and_install_waiters` | Constructs the appropriate `_Waiter` subclass, locks all futures, appends the waiter, returns it |
+| 181-240 | `Future.__init__`, state properties | Allocates `_condition` (`Condition`), `_state`, `_result`, `_exception`, `_waiters`, `_done_callbacks` |
+| 241-300 | `Future.cancel` | Transitions `PENDING` or `RUNNING` to `CANCELLED`; notifies waiters and `_condition` |
+| 301-360 | `Future.result`, `Future.exception` | Blocks on `_condition` until state is `FINISHED` or `CANCELLED`; raises on cancellation or stored exception |
+| 361-400 | `Future.add_done_callback` | Appends callback; calls it immediately if already done |
+| 401-440 | `Future.set_result`, `Future.set_exception` | Executor-side setters; transition to `FINISHED`; call `_invoke_callbacks` |
+| 441-470 | `Future._invoke_callbacks` | Iterates `_done_callbacks` and calls each one, catching and logging any exception |
+| 471-510 | `Executor` (ABC) | Defines `submit`, `map`, `shutdown` interface; default `map` uses `submit` + `as_completed` |
+| 511-560 | `wait` | Locks futures, installs a `_Waiter`, calls `waiter.event.wait(timeout)`, removes waiter, returns named tuple |
+| 561-600 | `as_completed` | Yields futures as they finish using a `_AsCompletedWaiter` and a pending set |
+
+## Reading
+
+### Future state machine
+
+<Cpy file="Lib/concurrent/futures/_base.py" line="181" />
+
+A `Future` moves through at most four states: `PENDING` (just created), `RUNNING` (executor has started the work), `CANCELLED` (cancel was requested and accepted), and `FINISHED` (result or exception is available). There is also `CANCELLED_AND_NOTIFIED`, an internal state used to avoid double-notification: once `_condition.notify_all()` has fired for a cancellation, the state is upgraded so that a second cancel call returns `False` without notifying again.
+
+Transitions are guarded by `_condition` (a `threading.Condition`). Writers (`set_result`, `set_exception`, `cancel`) acquire the condition, mutate `_state`, then release it before calling `_invoke_callbacks`, so callbacks run outside the lock.
+
+### Executor.submit and map
+
+<Cpy file="Lib/concurrent/futures/_base.py" line="471" />
+
+`Executor` is an abstract base class. Concrete subclasses (`ThreadPoolExecutor`, `ProcessPoolExecutor`) implement `submit(fn, *args, **kwargs)`, which must return a `Future`. The default `map` implementation calls `submit` for each item in the iterable, collects the resulting futures into a list, then iterates them with `as_completed` (when `return_exceptions=False`) or directly (when order matters). In 3.14, `map` gained a `bufsize` parameter that limits how far ahead futures are submitted, preventing unbounded memory growth when mapping over a large lazy iterable.
+
+### wait() and as_completed() set-based tracking
+
+<Cpy file="Lib/concurrent/futures/_base.py" line="511" />
+
+`wait(fs, timeout, return_when)` partitions futures into `done` and `not_done` sets before installing a waiter. The waiter object holds its own `threading.Event` and a list into which finished futures are appended as they complete. The `return_when` argument selects one of three waiter subclasses:
+
+- `_FirstCompletedWaiter` fires its event on the first completion.
+- `_AllCompletedWaiter` fires only when all futures are done (or cancelled, depending on the flag).
+- The default `ALL_COMPLETED` mode fires when every future reaches a terminal state.
+
+`as_completed(fs, timeout)` builds a pending set from all non-done futures and yields from `_AsCompletedWaiter.finished_futures` as the waiter's event fires. A local `deadline` variable gates the per-iteration `event.wait(remaining)` call.
+
+### _invoke_callbacks
+
+<Cpy file="Lib/concurrent/futures/_base.py" line="441" />
+
+`_invoke_callbacks` is called by `set_result` and `set_exception` after releasing `_condition`. It iterates `_done_callbacks` and calls each callable with `self` (the future) as the only argument. Any exception raised by a callback is caught and logged at `logging.ERROR` level; it is never propagated, so a misbehaving callback cannot prevent later callbacks from running or corrupt the future's terminal state.
+
+## gopy notes
+
+- `Future._condition` is a `threading.Condition` wrapping a `threading.Lock`. The gopy equivalent is `sync.Cond` plus a `sync.Mutex`. The state variable and result/exception fields must all be written under that mutex.
+- The `CANCELLED_AND_NOTIFIED` state is internal and not part of the public API. gopy can represent it as a separate boolean flag rather than a fifth string constant.
+- `_invoke_callbacks` must run outside the condition lock to avoid deadlocks when a callback calls `Future.result()`. The gopy port must replicate this lock-release-then-call ordering carefully.
+- `wait()` and `as_completed()` lock every future in `fs` to install the waiter atomically. With goroutines, this multi-lock acquisition must follow a consistent lock ordering (e.g. by pointer address) to prevent deadlock.
+- `Executor.map` with `bufsize` (3.14) requires bounded submission. In gopy, a buffered channel of capacity `bufsize` is a natural fit for throttling submit calls.

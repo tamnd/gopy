@@ -1,0 +1,93 @@
+---
+title: "Include/cpython/weakrefobject.h — Weak Reference Object Header"
+description: "PyWeakReference struct fields, PyWeakref_NewRef and NewProxy, the GET_OBJECT macro, the 3.13 safe PyWeakref_GetRef API, and tp_weaklistoffset in CPython 3.14"
+cpython_path: Include/cpython/weakrefobject.h
+cpython_version: "3.14"
+lines: 80
+status: annotated
+ported_to: objects/weakref.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+CPython's weak-reference machinery lives in `Objects/weakrefobject.c` and is exposed through this
+header. A `PyWeakReference` holds a pointer to a referent that is set to `None` when the referent
+is collected. Types that want to be weakly referenceable set `tp_weaklistoffset` to the byte
+offset of their internal weak-reference list head.
+
+## Map
+
+| Lines | Symbol | Kind | Notes |
+|-------|--------|------|-------|
+| 1-15 | `PyWeakReference` | struct | Internal layout: `wr_object`, `wr_callback`, `wr_object_weakrefs` |
+| 16-25 | `PyWeakref_NewRef` | declaration | Create a weak reference with optional callback |
+| 26-35 | `PyWeakref_NewProxy` | declaration | Create a transparent proxy object |
+| 36-45 | `PyWeakref_GET_OBJECT` | macro | Unsafe inline read of `wr_object` (no refcount) |
+| 46-58 | `PyWeakref_GetRef` | declaration | Safe 3.13+ API that returns a strong reference |
+| 59-68 | `_PyWeakref_GetWeakrefCount` | declaration | Count live refs on an object's weakref list |
+| 69-80 | `tp_weaklistoffset` notes | comments | Convention for opting in to weak referencability |
+
+## Reading
+
+### PyWeakReference struct
+
+```c
+struct _PyWeakReference {
+    PyObject_HEAD
+    PyObject       *wr_object;         /* referent or Py_None when dead */
+    PyObject       *wr_callback;       /* callable or NULL */
+    Py_hash_t       hash;              /* cached hash of the referent */
+    PyWeakReference *wr_object_weakrefs; /* intrusive linked list */
+};
+```
+
+The `wr_object` field is either a borrowed pointer to the live referent or a borrowed reference to
+the `Py_None` singleton after the referent has been finalized. Callers must never use this pointer
+without going through the safe API because finalization can happen on any thread in free-threaded
+builds.
+
+### PyWeakref_NewRef, PyWeakref_NewProxy, and PyWeakref_GET_OBJECT
+
+```c
+PyObject *PyWeakref_NewRef(PyObject *ob, PyObject *callback);
+PyObject *PyWeakref_NewProxy(PyObject *ob, PyObject *callback);
+
+/* Unsafe macro -- result is borrowed, may be Py_None */
+#define PyWeakref_GET_OBJECT(ref) \
+    (((PyWeakReference *)(ref))->wr_object)
+```
+
+`PyWeakref_NewRef` returns a new reference to a `PyWeakReference` object. If `callback` is not
+`NULL` it is called with the dead reference as its sole argument during GC finalization.
+`PyWeakref_NewProxy` wraps the referent so that attribute access and most operations are forwarded
+transparently without the caller needing to call `__call__` on the ref.
+
+`PyWeakref_GET_OBJECT` is a bare field read with no locking or liveness check. It is safe only
+when the GIL is held and the caller immediately checks the result against `Py_None`.
+
+### PyWeakref_GetRef (3.13 safe API)
+
+```c
+/* Returns 1 and a strong reference in *pobj if the referent is alive.
+   Returns 0 and sets *pobj to NULL if it is dead.
+   Returns -1 on error. */
+int PyWeakref_GetRef(PyObject *ref, PyObject **pobj);
+```
+
+Added in CPython 3.13 to give callers a race-free path in free-threaded mode. The function
+atomically checks liveness and increments the refcount before returning, so the strong reference
+in `*pobj` cannot be invalidated by a concurrent collection. Older code using
+`PyWeakref_GET_OBJECT` followed by `Py_INCREF` has a window between those two operations.
+
+## gopy notes
+
+- `PyWeakReference` is ported as `WeakRef` in `objects/weakref.go` (file tracked under
+  `module/weakref/`).
+- gopy uses a Go `sync/atomic` pointer for `wr_object` rather than a raw `*PyObject`; this
+  provides the same atomicity guarantee as CPython's free-threaded build without a separate lock.
+- `PyWeakref_GET_OBJECT` is not exposed as a public helper in gopy; call sites use
+  `WeakRef.GetObject()` which mirrors the 3.13 `PyWeakref_GetRef` semantics.
+- `tp_weaklistoffset` is recorded as the `WeakListOffset` field in `objects/type.go`; types set it
+  during `TypeReady` when they embed a `WeakRef` head slot.
+- `_PyWeakref_GetWeakrefCount` is used by the GC sweep phase and is ported in `objects/weakref.go`
+  as `WeakrefCount`.
