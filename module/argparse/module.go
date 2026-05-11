@@ -74,7 +74,7 @@ func newArgParserType() *objects.Type {
 	t.Setattro = objects.GenericSetAttr
 	t.TpNew = func(cls *objects.Type, _ []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
 		inst := objects.NewInstance(cls)
-		objects.SetTypeDescr(cls, "add_argument", objects.NewMethodDescr(cls, "add_argument", noop))
+		objects.SetTypeDescr(cls, "add_argument", objects.NewMethodDescr(cls, "add_argument", addArgument))
 		objects.SetTypeDescr(cls, "add_argument_group", objects.NewMethodDescr(cls, "add_argument_group", returnSelf))
 		objects.SetTypeDescr(cls, "add_mutually_exclusive_group", objects.NewMethodDescr(cls, "add_mutually_exclusive_group", returnSelf))
 		objects.SetTypeDescr(cls, "add_subparsers", objects.NewMethodDescr(cls, "add_subparsers", returnSelf))
@@ -110,15 +110,152 @@ func newNamespaceType() *objects.Type {
 	return t
 }
 
-func parseArgs(_ []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
-	return objects.NewInstance(namespaceType), nil
+// addArgument records the dest/default pair for each registered
+// option on the parser instance so parseArgs can later stamp the
+// caller-supplied namespace. CPython's argparse derives dest from the
+// first long option name when not given; we replicate the minimum
+// needed by unittest: an explicit kwargs["dest"], otherwise the first
+// positional name with leading dashes stripped.
+//
+// CPython: Lib/argparse.py:1453 _ActionsContainer.add_argument
+func addArgument(args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error) {
+	if len(args) < 1 {
+		return objects.None(), nil
+	}
+	self, ok := args[0].(*objects.Instance)
+	if !ok {
+		return objects.None(), nil
+	}
+	dest := destFromArgs(args[1:], kwargs)
+	if dest == "" {
+		return objects.None(), nil
+	}
+	def := kwargs["default"]
+	if def == nil {
+		def = objects.None()
+	}
+	registered, _ := self.Dict().GetItem(registeredKey)
+	lst, _ := registered.(*objects.List)
+	if lst == nil {
+		lst = objects.NewList(nil)
+		_ = self.Dict().SetItem(registeredKey, lst)
+	}
+	lst.Append(objects.NewTuple([]objects.Object{objects.NewStr(dest), def}))
+	return objects.None(), nil
 }
 
-func parseKnownArgs(_ []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
-	return objects.NewTuple([]objects.Object{
-		objects.NewInstance(namespaceType),
-		objects.NewList(nil),
-	}), nil
+var registeredKey = objects.NewStr("_argparse_registered")
+
+func destFromArgs(names []objects.Object, kwargs map[string]objects.Object) string {
+	if d, ok := kwargs["dest"]; ok {
+		if s, ok := d.(*objects.Unicode); ok {
+			return s.Value()
+		}
+	}
+	for _, n := range names {
+		s, ok := n.(*objects.Unicode)
+		if !ok {
+			continue
+		}
+		v := s.Value()
+		if v == "" {
+			continue
+		}
+		if v[0] != '-' {
+			return v
+		}
+	}
+	for _, n := range names {
+		s, ok := n.(*objects.Unicode)
+		if !ok {
+			continue
+		}
+		v := s.Value()
+		for len(v) > 0 && v[0] == '-' {
+			v = v[1:]
+		}
+		if v != "" {
+			return replaceDashes(v)
+		}
+	}
+	return ""
+}
+
+func replaceDashes(s string) string {
+	b := []byte(s)
+	for i := range b {
+		if b[i] == '-' {
+			b[i] = '_'
+		}
+	}
+	return string(b)
+}
+
+// parseArgs returns the caller-supplied namespace (when present)
+// pre-populated with each registered dest's default; otherwise builds
+// a fresh Namespace. Actual argv parsing is not implemented: unittest
+// branches on whether the namespace attrs are truthy, and the
+// defaults are enough to fall through to the discovery path.
+//
+// CPython: Lib/argparse.py:1916 ArgumentParser.parse_args
+func parseArgs(args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error) {
+	ns := namespaceFromCall(args, kwargs)
+	stampDefaults(args, ns)
+	return ns, nil
+}
+
+func parseKnownArgs(args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error) {
+	ns := namespaceFromCall(args, kwargs)
+	stampDefaults(args, ns)
+	return objects.NewTuple([]objects.Object{ns, objects.NewList(nil)}), nil
+}
+
+func namespaceFromCall(args []objects.Object, kwargs map[string]objects.Object) *objects.Instance {
+	// args[0] = self (parser); args[1] = argv; args[2] = namespace.
+	if len(args) >= 3 {
+		if inst, ok := args[2].(*objects.Instance); ok {
+			return inst
+		}
+	}
+	if v, ok := kwargs["namespace"]; ok {
+		if inst, ok := v.(*objects.Instance); ok {
+			return inst
+		}
+	}
+	return objects.NewInstance(namespaceType)
+}
+
+func stampDefaults(args []objects.Object, ns *objects.Instance) {
+	if len(args) < 1 || ns == nil {
+		return
+	}
+	self, ok := args[0].(*objects.Instance)
+	if !ok {
+		return
+	}
+	registered, _ := self.Dict().GetItem(registeredKey)
+	lst, _ := registered.(*objects.List)
+	if lst == nil {
+		return
+	}
+	for i := 0; i < lst.Len(); i++ {
+		entry := lst.Item(i)
+		tup, _ := entry.(*objects.Tuple)
+		if tup == nil || tup.Len() < 2 {
+			continue
+		}
+		nameObj := tup.Item(0)
+		defObj := tup.Item(1)
+		nameStr, ok := nameObj.(*objects.Unicode)
+		if !ok {
+			continue
+		}
+		key := objects.NewStr(nameStr.Value())
+		if has, _ := ns.Dict().Contains(key); has {
+			continue
+		}
+		_ = ns.Dict().SetItem(key, defObj)
+	}
 }
 
 func noop(_ []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
