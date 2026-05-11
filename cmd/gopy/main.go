@@ -25,6 +25,7 @@ import (
 	// registers itself with imp.AppendInittab from its own init().
 	// stdlibinit is the central blank-import surface, equivalent to
 	// CPython's Modules/config.c.in.
+	"github.com/tamnd/gopy/module/sys"
 	_ "github.com/tamnd/gopy/stdlibinit"
 )
 
@@ -93,8 +94,11 @@ opts:
 	}
 
 	if st.OptInd < len(argv) {
-		return runFile(argv[st.OptInd], stdout, stderr)
+		scriptPath := argv[st.OptInd]
+		sys.SetArgv(append([]string{scriptPath}, argv[st.OptInd+1:]...))
+		return runFile(scriptPath, stdout, stderr)
 	}
+	sys.SetArgv([]string{""})
 	return runInteractive(stdout, stderr)
 }
 
