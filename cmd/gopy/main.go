@@ -133,6 +133,7 @@ func installPathFinder(scriptPath string) {
 		Paths:    paths,
 		Compiler: gopyCompile,
 	})
+	sys.SetPath(paths)
 }
 
 // findStdlibRoot locates the vendored gopy stdlib tree. CPython's

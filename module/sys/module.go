@@ -23,12 +23,24 @@ import (
 // through lifecycle yet, so a package-level hand-off is enough.
 var pendingArgv []string
 
+// pendingPath plays the same role for sys.path. unittest.loader walks
+// sys.path during discovery, and the cmd binary owns the same path
+// list it hands to imp.PathFinder, so the two surfaces are kept in
+// sync via this hand-off until initconfig wires up end-to-end.
+var pendingPath []string
+
 // SetArgv records the argv the next sys-module build should expose as
 // sys.argv. Calling more than once before the first import overwrites
 // the previous value; calling after the module has already been built
 // has no effect on the live module.
 func SetArgv(argv []string) {
 	pendingArgv = append(pendingArgv[:0], argv...)
+}
+
+// SetPath records the path entries the next sys-module build should
+// expose as sys.path. Same semantics as SetArgv.
+func SetPath(path []string) {
+	pendingPath = append(pendingPath[:0], path...)
 }
 
 func init() {
@@ -74,5 +86,20 @@ func buildModule() (*objects.Module, error) {
 	if err := setItem(md, "_xoptions", objects.NewDict()); err != nil {
 		return nil, err
 	}
+	if err := setItem(md, "path", strListAsList(pendingPath)); err != nil {
+		return nil, err
+	}
 	return m, nil
+}
+
+// strListAsList returns the path entries as a list (mutable, so user
+// code can sys.path.insert / .remove). UpdateConfig still produces a
+// tuple because the PyConfig-driven shape predates the live-list
+// requirement unittest brings in.
+func strListAsList(items []string) *objects.List {
+	out := make([]objects.Object, len(items))
+	for i, s := range items {
+		out[i] = objects.NewStr(s)
+	}
+	return objects.NewList(out)
 }
