@@ -1,0 +1,159 @@
+---
+title: Objects/floatobject.c
+description: "IEEE 754 double-precision float object implementation: allocation, arithmetic, hashing, formatting, and the PyFloat_Type descriptor."
+cpython_path: Objects/floatobject.c
+cpython_version: "3.14"
+lines: 2642
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Objects/floatobject.c`
+
+<CpyLink path="Objects/floatobject.c" />
+
+`Objects/floatobject.c` implements Python's `float` type. It wraps a C `double`
+in `PyFloatObject`, exposes the full arithmetic slot table, handles
+float-to-integer and integer-to-float coercion with correct IEEE 754 edge
+cases (infinities, NaN, signed zero), provides `__hash__` that is consistent
+with `int.__hash__` for integer-valued floats, drives `PyOS_double_to_string`
+for `repr()` and `str()`, and registers `PyFloat_Type`. The file is 2 642 lines.
+Its most subtle section is `float_richcompare`, which carefully avoids
+rounding errors when comparing a `float` to an `int`.
+
+## Map
+
+| Lines | Symbol | Role |
+| ----- | ------ | ---- |
+| 1-29 | headers | Includes; `clinic/floatobject.c.h` for Argument Clinic |
+| 32-121 | `PyFloat_GetMax`, `PyFloat_GetMin`, `PyFloat_GetInfo` | Public info API; populates `sys.float_info` |
+| 123-136 | `PyFloat_FromDouble` | Primary constructor; serves from freelist |
+| 138-147 | `_PyFloat_FromDouble_ConsumeInputs` | Stackref-consuming variant for the adaptive interpreter |
+| 149-237 | `float_from_string_inner`, `PyFloat_FromString` | String-to-float via `PyOS_string_to_double` |
+| 239-253 | `_PyFloat_ExactDealloc`, `float_dealloc` | Return to freelist or call `tp_free` |
+| 256-313 | `PyFloat_AsDouble` | Extract C double; falls back to `nb_index` for integer types |
+| 348-364 | `float_repr` | Delegates to `PyOS_double_to_string` with `'r'` format |
+| 381-550 | `float_richcompare` | NaN-safe, overflow-safe float/int comparison |
+| 551-623 | `float_add`, `float_sub`, `float_mul`, `float_div`, `float_rem` | Core arithmetic slots |
+| 624-695 | `float_divmod`, `float_floor_div` | `divmod()` and `//` |
+| 696-816 | `float_pow` | `**` with special-case handling for 0.0, -0.0, infinity |
+| 817-972 | `float_neg`, `float_abs`, `float_bool`, `float_int`, `float_trunc` | Unary slots; conversion to int |
+| 973-1162 | `float_new`, `float_vectorcall` | `float.__new__` and vectorcall path |
+| 1163-1490 | `float___format__`, `float_as_integer_ratio` | Formatting and ratio decomposition |
+| 1491-1808 | `float_is_integer`, `float_conjugate`, `float_hex`, `float_fromhex` | Methods |
+| 1810-1844 | `float_as_number` | `PyNumberMethods` slot table |
+| 1846-1888 | `PyFloat_Type` | Type object |
+| 1890-2642 | marshal helpers, freelist init/fini | `PyFloat_Pack*`, `PyFloat_Unpack*`, freelist management |
+
+## Reading
+
+### Allocation and the Float Freelist
+
+`PyFloat_FromDouble` is deliberately minimal: pop one slot from the freelist,
+or call `PyObject_Malloc` for a fresh `PyFloatObject`, initialize it with
+`_PyObject_Init`, store `fval`, and return.
+
+```c
+// CPython: Objects/floatobject.c:123 PyFloat_FromDouble
+PyObject *
+PyFloat_FromDouble(double fval)
+{
+    PyFloatObject *op = _Py_FREELIST_POP(PyFloatObject, floats);
+    if (op == NULL) {
+        op = PyObject_Malloc(sizeof(PyFloatObject));
+        if (!op) {
+            return PyErr_NoMemory();
+        }
+        _PyObject_Init((PyObject*)op, &PyFloat_Type);
+    }
+    op->ob_fval = fval;
+    return (PyObject *) op;
+}
+```
+
+Deallocation mirrors this: `_PyFloat_ExactDealloc` pushes back to the freelist
+via `_Py_FREELIST_FREE`. Subtype instances (where `PyFloat_CheckExact` fails)
+go through `tp_free` instead.
+
+### float_richcompare: Comparing Float to Int
+
+Comparing a `float` to an `int` is one of the trickiest places in CPython.
+Converting the integer to `double` can silently drop bits; converting the
+double to integer discards fractional values. `float_richcompare` (line 381)
+handles both failure modes.
+
+When the float is non-finite (infinity or NaN), the comparison degenerates to
+a sign check against the integer. When the float has a fractional part, it
+cannot equal any integer. For large integers that overflow `double`, CPython
+compares exponents directly. Only when the integer fits exactly in a `double`
+does the code perform `i == j` on two C doubles.
+
+```c
+// CPython: Objects/floatobject.c:381 float_richcompare
+static PyObject*
+float_richcompare(PyObject *v, PyObject *w, int op)
+{
+    double i, j;
+    int r = 0;
+    assert(PyFloat_Check(v));
+    i = PyFloat_AS_DOUBLE(v);
+    /* if w is a float, j = (double)w directly */
+    /* if i is non-finite, compare by sign */
+    /* otherwise, extract integer mantissa and exponent and compare exactly */
+}
+```
+
+### Arithmetic Slots
+
+The five core binary operators (`float_add`, `float_sub`, `float_mul`,
+`float_div`, `float_rem`) all follow the same pattern: expand both operands to
+`double` via the `CONVERT_TO_DOUBLE` macro, compute, and wrap the result with
+`PyFloat_FromDouble`. Division additionally checks for `b == 0.0` and raises
+`ZeroDivisionError`.
+
+```c
+// CPython: Objects/floatobject.c:552 float_add
+static PyObject *
+float_add(PyObject *v, PyObject *w)
+{
+    double a,b;
+    CONVERT_TO_DOUBLE(v, a);
+    CONVERT_TO_DOUBLE(w, b);
+    a = a + b;
+    return PyFloat_FromDouble(a);
+}
+```
+
+`float_pow` (line 696) is the exception: it handles a dozen special cases
+mandated by IEEE 754, including `0**0 == 1.0`, `(-1.0)**inf == 1.0`, and
+negative-base fractional-exponent domain errors.
+
+### `float_hex` and `float_fromhex`
+
+`float_hex` (line 1491) formats a `double` as a C99-style hexadecimal string
+such as `0x1.fffffffffffffp+1023`. `float_fromhex` (line 1562) inverts this,
+carefully reconstructing the sign, mantissa, and biased exponent without
+going through `strtod`, which avoids platform rounding differences.
+
+## gopy notes
+
+- `PyFloat_FromDouble` maps to `objects.NewFloat(fval float64)` in `objects/float.go`.
+- The freelist is tracked in `objects/freelist.go` alongside the int freelist.
+- `float_richcompare` is the most important function to port correctly; the
+  float-vs-int path requires the same exponent-comparison logic.
+- `_PyFloat_FromDouble_ConsumeInputs` is used by the tier-2 optimizer; port it
+  alongside the `BINARY_OP_ADD_FLOAT` uop.
+- `float_hex` / `float_fromhex` correspond to the `float.hex()` and
+  `float.fromhex()` methods; these are not yet ported.
+
+## CPython 3.14 changes
+
+- `_PyFloat_FromDouble_ConsumeInputs` (line 138) was added in 3.14 for the
+  specializing interpreter; it consumes two `_PyStackRef` inputs before
+  constructing the result.
+- `float_vectorcall` was added in 3.11 and remains in 3.14; `PyFloat_Type`
+  sets `.tp_vectorcall = float_vectorcall` directly in the struct initializer.
+- `_Py_TYPE_VERSION_FLOAT` is assigned to `tp_version_tag` at line 1887,
+  enabling the inline caching mechanism introduced in 3.12 for float attribute
+  lookups.

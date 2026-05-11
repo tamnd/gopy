@@ -1,0 +1,104 @@
+---
+title: Modules/_ctypes/stgdict.c
+description: "ctypes StgInfo registry: creates and populates the StgInfo descriptor for Structure, Union, and Array types, computing field offsets, alignment, and ffi_type recursively."
+cpython_path: Modules/_ctypes/stgdict.c
+cpython_version: "3.14"
+lines: 900
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Modules/_ctypes/stgdict.c`
+
+<CpyLink path="Modules/_ctypes/stgdict.c" />
+
+`Modules/_ctypes/stgdict.c` computes the `StgInfo` layout descriptor for composite ctypes
+types: `Structure`, `Union`, and `Array`. When a new `Structure` subclass is defined, its
+`_fields_` sequence is processed here: field offsets and alignment are computed according
+to the target platform's ABI, an `ffi_type` struct is built recursively for `libffi`, and
+`CField` descriptors are attached to the class dict.
+
+## Map
+
+| Lines | Symbol | Role |
+| ----- | ------ | ---- |
+| 1-60 | includes, `StgInfo_FromObject` | Retrieve StgInfo from a ctypes type |
+| 61-200 | `MakeFields` | Process `_fields_` into CField descriptors |
+| 201-400 | `StructUnionType_update_stginfo` | Compute offsets for Structure/Union |
+| 401-600 | `PyCStructType_setattro` | `_fields_` assignment triggers layout computation |
+| 601-750 | `MakeAnonFields` | Expand anonymous nested fields into the parent namespace |
+| 751-900 | `PyCArrayType_from_size_type` | Build Array type with computed total size |
+
+## Reading
+
+### `MakeFields`: offset computation
+
+`MakeFields` iterates `_fields_` tuples and computes each field's byte offset. For
+`Structure` it accumulates offsets with alignment padding; for `Union` all offsets are
+zero and the total size is the maximum field size.
+
+```c
+// CPython: Modules/_ctypes/stgdict.c:100 MakeFields
+static int
+MakeFields(PyObject *type, CFieldObject *fdesc, Py_ssize_t index, Py_ssize_t *pfield_size,
+           int *pbitofs, Py_ssize_t *psize, Py_ssize_t *pAlign, Py_ssize_t *plength)
+{
+    ...
+    stginfo->offset = field_size;   /* current accumulated size becomes offset */
+    field_size += ffi_size;
+    if (ffi_size % align)
+        field_size += align - (ffi_size % align);  /* alignment padding */
+```
+
+### `ffi_type` recursive construction
+
+`StructUnionType_update_stginfo` builds an `ffi_type` struct whose `elements` array
+contains pointers to the `ffi_type` of each field in order. This allows libffi to handle
+structs passed by value in function calls.
+
+```c
+// CPython: Modules/_ctypes/stgdict.c:280 StructUnionType_update_stginfo
+static int
+StructUnionType_update_stginfo(PyObject *type, PyObject *fields, int isStruct)
+{
+    ...
+    ffi_type *fftype = PyMem_Malloc(sizeof(ffi_type));
+    fftype->type = FFI_TYPE_STRUCT;
+    fftype->elements = PyMem_Malloc((nFields+1) * sizeof(ffi_type *));
+    for (i = 0; i < nFields; i++)
+        fftype->elements[i] = field_stginfo->ffi_type_pointer;
+    fftype->elements[nFields] = NULL;  /* sentinel */
+    stginfo->ffi_type_pointer = fftype;
+```
+
+### Anonymous field expansion
+
+When a `_anonymous_` list is present, `MakeAnonFields` flattens the fields of nested
+anonymous structures into the parent namespace as if they were directly declared there.
+
+```c
+// CPython: Modules/_ctypes/stgdict.c:660 MakeAnonFields
+static int
+MakeAnonFields(PyObject *type)
+{
+    PyObject *anon_names = PyObject_GetAttrString(type, "_anonymous_");
+    ...
+    for (i = 0; i < PySequence_Length(anon_names); i++) {
+        PyObject *fname = PySequence_GetItem(anon_names, i);
+        PyObject *fdesc = PyObject_GetAttr(type, fname);
+        /* copy each field of fdesc into type's dict with adjusted offset */
+```
+
+## gopy notes
+
+Not yet ported. ctypes structure layout is a low priority for gopy. When porting, the
+offset computation in `MakeFields` must handle both the default C ABI alignment and the
+`_pack_` override for packed structures. Go's `unsafe.Offsetof` provides the equivalent
+for Go structs.
+
+## CPython 3.14 changes
+
+3.14 moved `StgInfo` from a dict entry to an in-type C struct, eliminating the
+`PyObject *stginfo` dict lookup in `MakeFields`. The `_fields_` validation now uses
+`PySequence_Fast` for better error messages on non-sequence inputs.

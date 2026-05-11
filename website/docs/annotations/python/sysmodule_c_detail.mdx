@@ -1,0 +1,109 @@
+---
+title: Python/sysmodule.c
+description: "sys module C implementation: sys.argv, sys.path, sys.modules, sys.settrace, sys.setrecursionlimit, and all other interpreter-state attributes exposed to Python code."
+cpython_path: Python/sysmodule.c
+cpython_version: "3.14"
+lines: 3400
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Python/sysmodule.c`
+
+<CpyLink path="Python/sysmodule.c" />
+
+`Python/sysmodule.c` implements the `sys` built-in module. It exposes interpreter state
+(thread state, recursion depth, module table) as Python-accessible attributes, implements
+`sys.settrace`/`sys.setprofile` by writing to the thread state, and provides
+`sys.exit`, `sys.getrecursionlimit`, `sys.getframe`, `sys.exc_info`, and other
+inspection functions. The module is initialized very early in `pyinit_core`.
+
+## Map
+
+| Lines | Symbol | Role |
+| ----- | ------ | ---- |
+| 1-100 | includes, type aliases | Platform detection, `UNLIKELY` macro |
+| 101-400 | `sys_settrace_impl`, `sys_setprofile_impl` | Trace/profile hook installation |
+| 401-700 | `sys_getframe_impl`, `sys_exc_info_impl` | Frame and exception introspection |
+| 701-1000 | `sys_exit_impl`, `sys_intern_impl` | Exit and string interning |
+| 1001-1400 | `sys_getrecursionlimit_impl`, `sys_setrecursionlimit_impl` | Recursion guard |
+| 1401-2000 | `sys_getsizeof_impl`, `sys_audit_impl` | Size introspection and audit hooks |
+| 2001-2800 | `_PySys_InitCore`, `_PySys_UpdateConfig` | Module init and config attribute setup |
+| 2801-3400 | `sysmodule_exec`, `PyInit_sys` | Module registration |
+
+## Reading
+
+### `sys.settrace`: trace hook installation
+
+`sys_settrace_impl` stores the trace function in the current thread state. It also sets
+the `c_tracefunc` C-level slot that the eval loop checks before every opcode.
+
+```c
+// CPython: Python/sysmodule.c:140 sys_settrace_impl
+static PyObject *
+sys_settrace_impl(PyObject *module, PyObject *o)
+{
+    PyThreadState *tstate = _PyThreadState_GET();
+    if (o == Py_None)
+        PyEval_SetTrace(NULL, NULL);
+    else
+        PyEval_SetTrace(_PyEval_CallTracing, o);
+    Py_RETURN_NONE;
+}
+```
+
+### `sys.getframe`: frame introspection
+
+`sys_getframe_impl` walks the frame chain `depth` steps back from the caller. It
+returns the `PyFrameObject` at that depth, which exposes `f_locals`, `f_code`, and
+`f_lineno`.
+
+```c
+// CPython: Python/sysmodule.c:430 sys_getframe_impl
+static PyObject *
+sys_getframe_impl(PyObject *module, int depth)
+{
+    _PyInterpreterFrame *f = _PyThreadState_GET()->current_frame;
+    while (f != NULL && depth > 0) {
+        f = f->previous;
+        --depth;
+    }
+    if (f == NULL || depth != 0) {
+        PyErr_SetString(PyExc_ValueError, "call stack is not deep enough");
+        return NULL;
+    }
+    return _PyFrame_GetFrameObject(f);
+}
+```
+
+### `_PySys_InitCore`: attribute wiring
+
+`_PySys_InitCore` populates the `sys` module dict with all the initial attributes:
+`sys.version`, `sys.platform`, `sys.argv`, `sys.path`, `sys.modules`, etc. Most are
+read from `_PyConfig` or constructed from C constants at startup.
+
+```c
+// CPython: Python/sysmodule.c:2050 _PySys_InitCore
+PyStatus
+_PySys_InitCore(PyThreadState *tstate, PyObject *sysdict)
+{
+    ...
+    SET_SYS("version", version_string);
+    SET_SYS("platform", PyUnicode_FromString(Py_GetPlatform()));
+    SET_SYS("modules", tstate->interp->modules);
+    ...
+```
+
+## gopy notes
+
+`module/sys/module.go` in gopy provides a partial `sys` implementation. `sys.argv`,
+`sys.version`, `sys.path`, and `sys.modules` are implemented. `sys.settrace` and
+`sys.setprofile` are stubs; full trace support requires eval-loop changes in
+`vm/eval_gen.go`.
+
+## CPython 3.14 changes
+
+3.14 added `sys.flags.gil_disabled` to report the free-threaded GIL status.
+`sys._monitoring` was promoted to a public `sys.monitoring` API. `sys.getandroidapilevel`
+was added for the Android port. `sys.orig_argv` was exposed as a tuple.

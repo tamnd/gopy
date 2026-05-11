@@ -1,0 +1,109 @@
+---
+title: Python/pythonrun.c
+description: "CPython source-level run functions: PyRun_SimpleFile, PyRun_InteractiveLoop, and the compile-then-eval pipeline for running Python source from C."
+cpython_path: Python/pythonrun.c
+cpython_version: "3.14"
+lines: 1100
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Python/pythonrun.c`
+
+<CpyLink path="Python/pythonrun.c" />
+
+`Python/pythonrun.c` provides the high-level entry points for running Python source
+code from C. `PyRun_SimpleFileObject` reads and compiles a `.py` file;
+`PyRun_InteractiveLoopObject` drives the REPL; `PyRun_StringFlags` compiles and
+evaluates a string. The file is the bridge between the embedding API and the compiler
+and eval loop.
+
+## Map
+
+| Lines | Symbol | Role |
+| ----- | ------ | ---- |
+| 1-80 | includes, `parse_syntax_error` | Error message extraction from `SyntaxError` |
+| 81-250 | `PyRun_SimpleFileObject` | Open, compile, and exec a `.py` file |
+| 251-450 | `PyRun_FileExFlags` | Compile file to AST, then to code object, then eval |
+| 451-650 | `PyRun_StringFlags` | Compile string to code object and eval in given globals/locals |
+| 651-800 | `PyRun_InteractiveLoopObject` | REPL loop: read, compile, eval, repeat |
+| 801-1000 | `Py_CompileStringExFlags` | Public compile-only API |
+| 1001-1100 | `handle_system_exit` | `SystemExit` value extraction for process exit code |
+
+## Reading
+
+### `PyRun_SimpleFileObject`: file execution
+
+`PyRun_SimpleFileObject` opens the file, constructs `__dict__` with `__file__` set,
+then calls `PyRun_FileExFlags` to compile and exec. For `.pyc` files it reads the magic
+number and delegates to `run_pyc_file`.
+
+```c
+// CPython: Python/pythonrun.c:110 PyRun_SimpleFileObject
+int
+PyRun_SimpleFileObject(FILE *fp, PyObject *filename, int closeit,
+                       PyCompilerFlags *flags)
+{
+    ...
+    d = PyModule_GetDict(m);
+    ...
+    if (maybe_pyc_file(fp, filename, closeit)) {
+        v = run_pyc_file(fp, d, d, flags);
+    } else {
+        v = PyRun_FileExFlags(fp, filename_str, Py_file_input, d, d, closeit, flags);
+    }
+```
+
+### `PyRun_StringFlags`: compile-then-eval
+
+`PyRun_StringFlags` is the simplest compile path: it calls `Py_CompileStringExFlags` to
+get a code object, then `PyEval_EvalCode` to execute it in the provided namespace.
+
+```c
+// CPython: Python/pythonrun.c:480 PyRun_StringFlags
+PyObject *
+PyRun_StringFlags(const char *str, int start, PyObject *globals,
+                  PyObject *locals, PyCompilerFlags *flags)
+{
+    PyObject *ret = NULL;
+    PyObject *v;
+    v = Py_CompileStringExFlags(str, "<string>", start, flags, -1);
+    if (v) {
+        ret = PyEval_EvalCode(v, globals, locals);
+        Py_DECREF(v);
+    }
+    return ret;
+}
+```
+
+### Interactive loop
+
+`PyRun_InteractiveLoopObject` calls `PyOS_Readline` to read one logical line (handling
+continuation lines), compiles it with `Py_single_input` mode (which prints the repr of
+the result), and evals it.
+
+```c
+// CPython: Python/pythonrun.c:680 PyRun_InteractiveLoopObject
+int
+PyRun_InteractiveLoopObject(FILE *fp, PyObject *filename, PyCompilerFlags *flags)
+{
+    ...
+    do {
+        ret = PyRun_InteractiveOneObjectEx(fp, filename, flags);
+    } while (ret != E_EOF);
+    return 0;
+}
+```
+
+## gopy notes
+
+`pythonrun/runstring.go` in gopy implements a simplified version of `PyRun_StringFlags`:
+it compiles a source string and evaluates it. The interactive loop and file execution
+paths are not yet implemented.
+
+## CPython 3.14 changes
+
+3.14 added `PyRun_StringFlags` audit event `exec`. `handle_system_exit` now handles
+`BaseExceptionGroup` containing a `SystemExit`. The `.pyc` execution path gained
+validation of the `allow_code` marshal flag.

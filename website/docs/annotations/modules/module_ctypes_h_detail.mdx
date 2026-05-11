@@ -1,0 +1,164 @@
+---
+title: Modules/_ctypes/ctypes.h
+description: "Central internal header for the _ctypes extension, defining module state, the CDataObject hierarchy, StgInfo type-metadata store, and all shared declarations across ctypes C sources."
+cpython_path: Modules/_ctypes/ctypes.h
+cpython_version: "3.14"
+lines: 826
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Modules/_ctypes/ctypes.h`
+
+<CpyLink path="Modules/_ctypes/ctypes.h" />
+
+`ctypes.h` is the internal header shared by every C file in `Modules/_ctypes/`. It defines the per-module state struct (`ctypes_state`), the core object hierarchy (`CDataObject`, `CThunkObject`, `PyCFuncPtrObject`, `CFieldObject`), the type-metadata store (`StgInfo`) that replaced `StgDict` in Python 3.13, and the FFI argument wrapper (`PyCArgObject`). It also carries all shared function declarations and the value-conversion typedef trio (`GETFUNC`, `SETFUNC`, `PARAMFUNC`). Nothing in this header is exposed to Python directly; it is the internal ABI contract among all ctypes C translation units.
+
+## Map
+
+| Lines | Symbol | Role |
+| ----- | ------ | ---- |
+| 1–16 | `alloca` portability block | Ensures `alloca()` is available on SVR4, MSVC, and GCC/Clang |
+| 17–22 | core includes | `pycore_moduleobject.h`, `pycore_typeobject.h`, critical-section and atomic-wrapper headers |
+| 24–38 | `Py_FFI_COMPLEX_AVAILABLE` | Runtime check for C99 complex-type libffi support on Apple platforms (gh-128156) |
+| 40–46 | `PARAMFLAG_*` | POSIX-only in/out/lcid parameter-direction flags |
+| 49–62 | `CTYPES_MAX_ARGCOUNT` | Stack-allocation guard: 1024 args (1000 on Emscripten) |
+| 74–104 | `ctypes_state` | Per-module state: all ctypes `PyTypeObject *` pointers plus shared `PyObject *` caches |
+| 110–130 | `get_module_state()`, `get_module_state_by_class()`, `get_module_state_by_def()` | Inline accessors for `ctypes_state` from a module, type, or metatype |
+| 170–172 | `GETFUNC`, `SETFUNC`, `PARAMFUNC` | Function-pointer typedefs for value-conversion callbacks |
+| 200–207 | `fielddesc` | Predefined primitive-type descriptor: format char, size, alignment, get/set functions |
+| 215–227 | `tagCDataObject` / `CDataObject` | Core ctypes object: raw buffer pointer, ownership flag, base chain, reference dict |
+| 229–239 | `CThunkObject` | FFI closure wrapper: writeable and executable closure pointers, `ffi_cif`, converters |
+| 241–268 | `PyCFuncPtrObject` | Function-pointer object: extends `CDataObject` with argtypes, restype, checker, errcheck |
+| 284–286 | `CDataObject_CheckExact`, `CDataObject_Check`, `_CDataObject_HasExternalBuffer` | Fast type and buffer-location checks |
+| 327–348 | `CFieldObject` | Struct/union field descriptor: byte offset, bit offset, field size, get/set functions |
+| 393–422 | `StgInfo` | Per-type metadata store: size, align, length, `ffi_type`, proto, flags, format, shape |
+| 440–469 | `STGINFO_LOCK`, `STGINFO_UNLOCK`, `stginfo_get_dict_final()`, `stginfo_set_dict_final()` | Thread-safety macros and inline helpers guarding the `dict_final` finalization flag |
+| 502–508 | `FUNCFLAG_*` | Calling-convention flags: `CDECL`, `PYTHONAPI`, `USE_ERRNO`, `USE_LASTERROR`, `STDCALL` |
+| 510–511 | `TYPEFLAG_*` | Type characteristic flags: `ISPOINTER`, `HASPOINTER` |
+| 515–521 | `_ctypes_callproc()` declaration | Central FFI dispatcher signature |
+| 524–540 | `tagPyCArgObject` / `PyCArgObject` | FFI argument wrapper: tag char, value union, owning object reference |
+| 545 | `PyCArgObject_new()` | Constructor declaration for `PyCArgObject` |
+| 548–557 | `PyCData_get()`, `PyCData_set()` | Public get/set accessors for ctypes data values |
+| 577 | `_ctypes_get_ffi_type()` | Returns the `ffi_type *` appropriate for a given restype object |
+| 740–757 | `PyStgInfo_FromType()`, `PyStgInfo_FromObject()`, `PyStgInfo_FromAny()` | `StgInfo` lookup by type, instance, or either |
+| 770–790 | `PyStgInfo_Init()` | Initializes `StgInfo` on freshly created ctypes types |
+
+## Reading
+
+### Module State: `ctypes_state`
+
+The struct at line 74 collects every `PyTypeObject *` needed by the ctypes subsystem alongside shared `PyObject *` caches such as `array_cache`, `error_object_name`, and `PyExc_ArgError`. Keeping all of this in a single per-module struct is the standard CPython pattern for avoiding global state and enabling subinterpreter isolation. Three inline accessors retrieve the state pointer depending on what is available at the call site: a module object (`get_module_state`), a heap type (`get_module_state_by_class`), or a metatype (`get_module_state_by_def`).
+
+```c
+// CPython: Modules/_ctypes/ctypes.h:74 ctypes_state
+typedef struct {
+    PyTypeObject *DictRemover_Type;
+    PyTypeObject *PyCArg_Type;
+    PyTypeObject *PyCField_Type;
+    PyTypeObject *PyCThunk_Type;
+    /* ... 15 more type pointers ... */
+    PyObject *_unpickle;
+    PyObject *array_cache;
+    PyObject *error_object_name;
+    PyObject *PyExc_ArgError;
+    PyObject *swapped_suffix;
+} ctypes_state;
+
+static inline ctypes_state *
+get_module_state(PyObject *module)
+{
+    void *state = _PyModule_GetState(module);
+    assert(state != NULL);
+    return (ctypes_state *)state;
+}
+```
+
+### Core Object Hierarchy
+
+`CDataObject` (line 215) is the base for every concrete ctypes value. `b_ptr` points to the actual C memory. `b_needsfree` controls whether that memory is owned by this object. `b_base` chains sub-objects back to a parent, keeping the parent alive while a pointer into its buffer exists. `b_objects` is a dict of additional Python object references needed to prevent dangling pointers from embedded Python-owned buffers.
+
+`CThunkObject` (line 229) wraps an `ffi_closure` so that Python callables can be passed as C function pointers. It carries two pointers to the same closure memory: `pcl_write` (writeable, for setup time) and `pcl_exec` (executable, for call time), reflecting W^X page-permission restrictions on modern platforms.
+
+`PyCFuncPtrObject` (line 241) extends `CDataObject` to represent a C function pointer. It adds `argtypes`, `restype`, `checker`, and `errcheck` Python attributes alongside COM-specific fields used on Windows.
+
+```c
+// CPython: Modules/_ctypes/ctypes.h:215 tagCDataObject
+struct tagCDataObject {
+    PyObject_HEAD
+    char *b_ptr;                /* pointer to memory block */
+    int   b_needsfree;          /* need _we_ free the memory? */
+    CDataObject *b_base;        /* pointer to base object or NULL */
+    Py_ssize_t b_size;          /* size of memory block in bytes */
+    Py_ssize_t b_length;        /* number of references we need */
+    Py_ssize_t b_index;         /* index into base's b_object list */
+    PyObject *b_objects;        /* dictionary of references we need to keep */
+    union value b_value;
+};
+```
+
+### `StgInfo`: Type Metadata Since 3.13
+
+Before Python 3.13, ctypes stored per-type layout metadata in a custom dict subclass called `StgDict`. Since 3.13 that subclass is gone. Metadata now lives in `StgInfo` (line 393), a plain C struct embedded in each ctypes metatype object. The `ffi_type_pointer` field is the libffi structure descriptor built up during field registration. `dict_final` is an atomic flag set once `_fields_` has been fully processed, after which further modification is rejected.
+
+Thread safety during the finalization window is provided by `STGINFO_LOCK` / `STGINFO_UNLOCK` (line 440), which expand to `Py_BEGIN_CRITICAL_SECTION` / `Py_END_CRITICAL_SECTION` on free-threaded builds and to no-ops on GIL builds. The inline helpers `stginfo_get_dict_final()` and `stginfo_set_dict_final()` use `FT_ATOMIC_LOAD_UINT8_RELAXED` / `FT_ATOMIC_STORE_UINT8_RELAXED` to keep reads and writes safe across both build modes.
+
+```c
+// CPython: Modules/_ctypes/ctypes.h:393 StgInfo
+typedef struct {
+    int initialized;
+    Py_ssize_t size;            /* number of bytes */
+    Py_ssize_t align;           /* alignment requirements */
+    Py_ssize_t length;          /* number of fields */
+    ffi_type ffi_type_pointer;
+    PyObject *proto;            /* for arrays: item type; for pointers: pointed-to type */
+    SETFUNC setfunc;
+    GETFUNC getfunc;
+    PARAMFUNC paramfunc;
+    PyObject *argtypes;
+    PyObject *converters;
+    PyObject *restype;
+    PyObject *checker;
+    PyObject *pointer_type;
+    PyObject *module;
+    int flags;
+    uint8_t dict_final;
+    char *format;
+    int ndim;
+    Py_ssize_t *shape;
+} StgInfo;
+```
+
+### `PyCArgObject`: The FFI Argument Wrapper
+
+`PyCArgObject` (line 524) is an opaque wrapper produced by `from_param()` converters. It carries a single C value in a `union value` tagged by a single character in `tag`. The tag drives the `ffi_type *` selection and the `PyCArg_repr()` format string. The `obj` field keeps the originating Python object alive while the argument is live on the C call stack. The `size` field is used by the `'z'` tag to record the string length including the NUL terminator.
+
+```c
+// CPython: Modules/_ctypes/ctypes.h:524 tagPyCArgObject
+struct tagPyCArgObject {
+    PyObject_HEAD
+    ffi_type *pffi_type;
+    char tag;
+    union {
+        char c;
+        short h;
+        int i;
+        long l;
+        long long q;
+        double d;
+        float f;
+        void *p;
+    } value;
+    PyObject *obj;
+    Py_ssize_t size;
+};
+```
+
+## gopy notes
+
+`StgInfo` replaced `StgDict` in 3.13. A gopy port of ctypes must embed an equivalent metadata struct on each ctypes metatype rather than subclassing a dict type. The `STGINFO_LOCK` / `STGINFO_UNLOCK` pattern maps to a `sync.Mutex` embedded in the equivalent Go struct, conditional on a free-threaded build tag. `CTYPES_MAX_ARGCOUNT` (1024) must be reproduced as a named constant to keep the stack-allocation guard in `callproc.c` faithful to CPython behavior.
+
+## CPython 3.14 changes
+
+`StgInfo` was introduced in 3.13 to replace `StgDict`. In 3.14 free-threaded support added a `PyMutex mutex` field inside `StgInfo` under `Py_GIL_DISABLED`, and the critical-section macros were wired through `pycore_critical_section.h` (line 21). The `pycore_pyatomic_ft_wrappers.h` include (line 22) provides `FT_ATOMIC_LOAD_UINT8_RELAXED` and `FT_ATOMIC_STORE_UINT8_RELAXED` used by the `dict_final` inline helpers. The `Py_FFI_COMPLEX_AVAILABLE` macro block (lines 24-38) was added to handle Apple libffi's runtime-only support for C99 complex types, gated on `__builtin_available(macOS 10.15, *)` where the builtin is available.

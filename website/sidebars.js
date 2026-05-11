@@ -270,6 +270,9 @@ const sidebars = {
         'annotations/python/flowgraph_c_detail',
         'annotations/python/ast_c_detail',
         'annotations/python/marshal_c_detail',
+        'annotations/python/pylifecycle_c_detail',
+        'annotations/python/pythonrun_c_detail',
+        'annotations/python/sysmodule_c_detail',
       ],
     },
     {
@@ -402,6 +405,8 @@ const sidebars = {
         'annotations/objects/obmalloc_c_detail',
         'annotations/objects/methodobject_c_detail',
         'annotations/objects/namespaceobject_c_detail',
+        'annotations/objects/floatobject_c_detail',
+        'annotations/objects/boolobject_c_detail',
       ],
     },
     {
@@ -773,6 +778,9 @@ const sidebars = {
         'annotations/modules/module_textio_c_detail',
         'annotations/modules/module_sqlite_conn_c_detail',
         'annotations/modules/module_semaphore_c_detail',
+        'annotations/modules/module_ctypes_h_detail',
+        'annotations/modules/module_ctypes_callproc_c_detail',
+        'annotations/modules/module_ctypes_stgdict_c_detail',
       ],
     },
     {
@@ -1161,6 +1169,7 @@ const sidebars = {
         'annotations/lib/unittest_loader_detail',
         'annotations/lib/glob_lib_detail',
         'annotations/lib/cookiejar_lib_detail',
+        'annotations/lib/asyncio_queues_detail',
       ],
     },
   ],

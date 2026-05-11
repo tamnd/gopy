@@ -1,0 +1,148 @@
+---
+title: Objects/boolobject.c
+description: "Boolean type implementation as an int subtype with two immortal singleton instances, True and False."
+cpython_path: Objects/boolobject.c
+cpython_version: "3.14"
+lines: 227
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Objects/boolobject.c`
+
+<CpyLink path="Objects/boolobject.c" />
+
+`Objects/boolobject.c` is the smallest numeric object file in CPython at 227
+lines. It implements `bool` as a strict subtype of `int`, with exactly two
+instances (`Py_False` and `Py_True`) that are immortal singletons. The file
+overrides `tp_repr`, `tp_new`, and the bitwise slots (`&`, `|`, `^`, `~`) so
+that operations on two `bool` values return a `bool` rather than an `int`.
+All arithmetic that is not overridden delegates up to `PyLong_Type`.
+
+## Map
+
+| Lines | Symbol | Role |
+| ----- | ------ | ---- |
+| 1-9 | headers | `Python.h`, `pycore_long.h` for `FALSE_TAG`/`TRUE_TAG`, `pycore_runtime.h` for `_Py_ID` |
+| 13-17 | `bool_repr` | Returns interned string `"True"` or `"False"` via `_Py_ID` |
+| 21-24 | `PyBool_FromLong` | Public constructor; returns `Py_True` or `Py_False` |
+| 29-66 | `bool_new`, `bool_vectorcall` | `bool.__new__` and vectorcall; both call `PyObject_IsTrue` |
+| 71-84 | `bool_invert` | Emits `DeprecationWarning` then delegates to `PyLong_Type.nb_invert` |
+| 87-108 | `bool_and`, `bool_or`, `bool_xor` | Return `bool` when both operands are `bool`; otherwise delegate |
+| 112-118 | `bool_doc` | Docstring: `"bool(object=False, /)"` |
+| 122-157 | `bool_as_number` | `PyNumberMethods`; only `nb_invert`, `nb_and`, `nb_xor`, `nb_or` are set |
+| 159-167 | `bool_dealloc` | Re-immortalizes the object instead of freeing it |
+| 171-211 | `PyBool_Type` | Type object with `tp_base = &PyLong_Type` |
+| 215-227 | `_Py_FalseStruct`, `_Py_TrueStruct` | Static storage for the two singleton instances |
+
+## Reading
+
+### Immortal Singletons
+
+`Py_True` and `Py_False` are statically allocated `_longobject` structs. Their
+`lv_tag` fields are set to `_PyLong_TRUE_TAG` and `_PyLong_FALSE_TAG`
+respectively, which are the same compact-int tag values used throughout
+`longobject.c`. The digit array of `_Py_TrueStruct` contains `{1}` and
+`_Py_FalseStruct` contains `{0}`, so arithmetic that reads `ob_digit[0]`
+directly works correctly without any special casing.
+
+```c
+// CPython: Objects/boolobject.c:215 _Py_FalseStruct
+struct _longobject _Py_FalseStruct = {
+    PyObject_HEAD_INIT(&PyBool_Type)
+    { .lv_tag = _PyLong_FALSE_TAG,
+        { 0 }
+    }
+};
+
+struct _longobject _Py_TrueStruct = {
+    PyObject_HEAD_INIT(&PyBool_Type)
+    { .lv_tag = _PyLong_TRUE_TAG,
+        { 1 }
+    }
+};
+```
+
+`bool_dealloc` is a safety net: since the objects are immortal, a runaway
+`Py_DECREF` that reaches zero should not free them. The function calls
+`_Py_SetImmortal` to restore the reference count rather than freeing memory.
+
+### bool_new and bool_vectorcall
+
+Both `bool_new` (line 29) and `bool_vectorcall` (line 45) accept zero or one
+positional argument and no keyword arguments. They delegate truth-testing to
+`PyObject_IsTrue`, which walks the full `nb_bool` / `mp_length` / `sq_length`
+protocol, and then return `PyBool_FromLong(ok)`.
+
+```c
+// CPython: Objects/boolobject.c:29 bool_new
+static PyObject *
+bool_new(PyTypeObject *type, PyObject *args, PyObject *kwds)
+{
+    PyObject *x = Py_False;
+    long ok;
+    if (!_PyArg_NoKeywords("bool", kwds))
+        return NULL;
+    if (!PyArg_UnpackTuple(args, "bool", 0, 1, &x))
+        return NULL;
+    ok = PyObject_IsTrue(x);
+    if (ok < 0)
+        return NULL;
+    return PyBool_FromLong(ok);
+}
+```
+
+`bool_vectorcall` is the faster path used when `bool(x)` is compiled as a
+vectorcall site. It validates argument count with `_PyArg_CheckPositional`,
+then performs the same `PyObject_IsTrue` call.
+
+### Bitwise Operator Overrides
+
+`bool_and`, `bool_or`, and `bool_xor` check whether both operands are `bool`
+before deciding what to return. If either operand is not a `bool`, they
+delegate to the corresponding slot in `PyLong_Type.tp_as_number`, which returns
+an `int`. When both operands are `bool`, they compute the result with bitwise
+C operators on the identity comparison `(a == Py_True)` and wrap it in
+`PyBool_FromLong`.
+
+```c
+// CPython: Objects/boolobject.c:87 bool_and
+static PyObject *
+bool_and(PyObject *a, PyObject *b)
+{
+    if (!PyBool_Check(a) || !PyBool_Check(b))
+        return PyLong_Type.tp_as_number->nb_and(a, b);
+    return PyBool_FromLong((a == Py_True) & (b == Py_True));
+}
+```
+
+`bool_invert` (line 71) was historically silent but in CPython 3.12 gained a
+`DeprecationWarning` because `~True` returns `-2` (the bitwise inversion of 1
+as a signed integer), which surprises almost every caller. The warning message
+explicitly suggests using `not x` for boolean negation. The operator will be
+removed in Python 3.16.
+
+## gopy notes
+
+- `_Py_FalseStruct` and `_Py_TrueStruct` map to package-level `var False, True`
+  values in `objects/bool.go` that are never garbage collected.
+- `PyBool_FromLong` is a trivial `if ok != 0` selector; port it directly.
+- `bool_and`, `bool_or`, `bool_xor` are all ported in `objects/bool.go` and
+  must delegate to `objects/int.go` when either operand is not a `bool`.
+- `bool_invert` deprecation: gopy should issue an equivalent runtime warning
+  when `~` is applied to a `bool`; the Go implementation currently delegates
+  silently.
+- `PyBool_Type.tp_base = &PyLong_Type` means `bool` inherits all unoverridden
+  numeric slots. In gopy, `BoolType` embeds `IntType` for the same purpose.
+
+## CPython 3.14 changes
+
+- `_PyLong_FALSE_TAG` and `_PyLong_TRUE_TAG` (line 4 import comment) replaced
+  the old `ob_size == 0` / `ob_size == 1` encoding when `PyLongObject` was
+  restructured in 3.12. The 3.14 static struct initializers use `.lv_tag`
+  directly.
+- `bool_vectorcall` (line 45) was added in 3.11 and is wired via
+  `.tp_vectorcall = bool_vectorcall` at line 210 of the type initializer.
+- The `bool_invert` deprecation warning was introduced in CPython 3.12 and is
+  still present in 3.14 with the 3.16 removal date named in the message.
