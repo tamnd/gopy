@@ -1,0 +1,180 @@
+---
+title: Lib/html/parser.py
+description: Incremental SAX-like HTML parser that feeds a character stream into handle_starttag/endtag/data/comment callbacks.
+cpython_path: Lib/html/parser.py
+cpython_version: "3.14"
+lines: 500
+status: annotated
+ported_to: (stdlib pending)
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Lib/html/parser.py`
+
+<CpyLink path="Lib/html/parser.py" />
+
+`HTMLParser` is a push-based, event-driven HTML parser. Callers feed
+bytes or a string into `feed()` incrementally; the parser buffers
+incomplete markup and fires callbacks as complete constructs are
+recognized. The public interface consists of eight overridable methods:
+`handle_starttag`, `handle_endtag`, `handle_startendtag`, `handle_data`,
+`handle_comment`, `handle_decl`, `handle_pi`, and `unknown_decl`. The
+base class provides empty implementations so subclasses can override only
+what they need.
+
+The scanner at the heart of the class is `goahead(end)`, a hand-rolled
+loop that uses a compiled regex (`interesting_normal` or
+`interesting_cdata`) to skip literal text and find the next `<` or `&`
+character. From there it dispatches on the character sequence to
+`handle_starttag` (via `handle_startendtag` for void elements),
+`handle_endtag`, `handle_comment`, `handle_decl`, or `handle_pi`.
+
+`HTMLParser` extends `_markupbase.ParserBase` for declaration handling
+(`<!DOCTYPE ...>`, `<!ELEMENT ...>`, etc.). Character references (`&amp;`,
+`&#38;`, `&#x26;`) are resolved by `html.unescape` in the data callback.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Lib/html/parser.py" lines="1-100">1-100</Cpy> | Module header, compiled regexes, `HTMLParser.__init__`, `reset`, `feed` | Compiled patterns for tag scanning; `feed` appends to a buffer and calls `goahead(0)`; `reset` clears state. | `(stdlib pending)` |
+| <Cpy path="Lib/html/parser.py" lines="100-250">100-250</Cpy> | `goahead`, `handle_starttag` dispatch, `handle_endtag` dispatch | Main scanning loop; regex-based tag detection; attribute parsing via `attrfind_tolerant`; void-element detection. | `(stdlib pending)` |
+| <Cpy path="Lib/html/parser.py" lines="250-400">250-400</Cpy> | `handle_data`, `handle_comment`, `handle_decl`, `handle_pi`, CDATA section | Character-data and comment callbacks; `handle_decl` delegates to `_markupbase`; CDATA section scanning for `convert_charrefs=False`. | `(stdlib pending)` |
+| <Cpy path="Lib/html/parser.py" lines="400-500">400-500</Cpy> | `error`, `getpos`, `set_cdata_mode`, `clear_cdata_mode`, overridable stubs | Line/column tracking; CDATA mode toggle for `<script>` and `<style>` raw-text elements; empty stubs for all eight event methods. | `(stdlib pending)` |
+
+## Reading
+
+### `goahead()` main scanning loop (lines 100 to 250)
+
+<CpyLink path="Lib/html/parser.py" lines="100-250" />
+
+```python
+def goahead(self, end):
+    rawdata = self.rawdata
+    i = 0
+    n = len(rawdata)
+    while i < n:
+        if self.convert_charrefs and not self.cdata_elem:
+            j = rawdata.find('<', i)
+            if j < 0:
+                # No more tags; hold the rest for next feed()
+                if end:
+                    handle_data(rawdata[i:n])
+                    i = self.updatepos(i, n)
+                break
+        else:
+            match = self.interesting.search(rawdata, i)
+            j = match.start() if match else -1
+
+        if i < j:
+            if self.convert_charrefs and not self.cdata_elem:
+                handle_data(rawdata[i:j])
+            else:
+                handle_data(unescape(rawdata[i:j]))
+            i = self.updatepos(i, j)
+
+        if i == n:
+            break
+        startswith = rawdata.startswith
+        if startswith('<', i):
+            if starttagopen.match(rawdata, i):   # <letter
+                k = self.handle_starttag_dispatch(i)
+            elif startswith("</", i):
+                k = self.handle_endtag_dispatch(i)
+            elif startswith("<!--", i):
+                k = self.handle_comment_dispatch(i)
+            elif startswith("<!", i):
+                k = self.handle_decl_dispatch(i)
+            elif startswith("<?", i):
+                k = self.handle_pi_dispatch(i)
+            else:
+                handle_data(rawdata[i])
+                k = i + 1
+            if k < 0:
+                # Incomplete tag: stop and wait for more data
+                if not end:
+                    break
+                k = rawdata.find('>', i + 1)
+                if k < 0:
+                    k = rawdata.find('<', i + 1)
+                    if k < 0:
+                        k = i + 1
+                else:
+                    k += 1
+                handle_data(rawdata[i:k])
+            i = self.updatepos(i, k)
+        elif startswith("&", i):
+            ...
+```
+
+`goahead(end=False)` is called after each `feed()`. The `end=False` flag
+means the scanner must stop whenever it cannot confirm that a construct is
+complete (negative `k`), so the unfinished bytes are left in `rawdata`
+for the next `feed()`. `goahead(end=True)` is called by `close()` and
+treats any trailing incomplete markup as literal data.
+
+When `convert_charrefs=True` (the default since Python 3.5), inter-tag
+text is accumulated until the next `<` and then passed as a single
+`handle_data` call, with character references resolved. When
+`convert_charrefs=False`, the `interesting` regex also matches `&`, and
+each character reference is handled inline.
+
+### Starttag attribute parsing (lines 100 to 250)
+
+<CpyLink path="Lib/html/parser.py" lines="100-250" />
+
+```python
+# Regex used to parse attribute key=value pairs tolerantly
+attrfind_tolerant = re.compile(
+    r'((?<=[\'"\s/])[^\s/>][^\s/=>]*)(\s*=+\s*'
+    r'(\'[^\']*\'|"[^"]*"|(?![\'"])[^>\s]*))?(?:\s|/(?!>))*',
+    re.ASCII)
+
+def handle_starttag_dispatch(self, i):
+    rawdata = self.rawdata
+    end = rawdata.find('>', i)
+    if end < 0:
+        return -1   # incomplete
+    tag, attrs = self._parse_starttag_attrs(rawdata, i, end)
+    self.handle_starttag(tag, attrs)
+    ...
+
+def _parse_starttag_attrs(self, rawdata, i, end):
+    attrsd = []
+    match = tagfind_tolerant.match(rawdata, i + 1)
+    tag = match.group(1).lower()
+    k = match.end()
+    while k < end:
+        m = attrfind_tolerant.match(rawdata, k)
+        if not m:
+            break
+        attrname, rest, attrvalue = m.group(1, 2, 3)
+        if not rest:
+            attrvalue = None
+        elif attrvalue[:1] == "'" == attrvalue[-1:]:
+            attrvalue = attrvalue[1:-1]
+        elif attrvalue[:1] == '"' == attrvalue[-1:]:
+            attrvalue = attrvalue[1:-1]
+        attrvalue = unescape(attrvalue) if attrvalue else attrvalue
+        attrsd.append((attrname.lower(), attrvalue))
+        k = m.end()
+    return tag, attrsd
+```
+
+Attribute parsing uses `attrfind_tolerant`, a deliberately permissive
+regex that accepts HTML5's unquoted attribute values, bare flag
+attributes (no `=` sign), and stray `/` characters before `>`. This
+tolerant approach matches browsers, which must parse real-world HTML
+that violates the specification. Values are unquoted (stripping the
+outer `'` or `"`) and then passed through `html.unescape` to resolve
+character references in attribute values.
+
+## gopy mirror
+
+`html.parser` has no C extension dependency. It is pure Python. A gopy
+port will vendor `Lib/html/parser.py` and `Lib/_markupbase.py` together,
+rewriting only the `import html` reference to use the gopy `html.unescape`
+implementation. The compiled regexes are portable and require no changes.
+The `getpos()` line/column tracking uses a simple `rawdata[:i].count('\n')`
+calculation that translates directly.

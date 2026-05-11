@@ -1,0 +1,107 @@
+---
+title: Include/internal/pycore_obmalloc.h
+description: CPython's three-level object memory allocator: pools, arenas, and the usedpools dispatch table.
+cpython_path: Include/internal/pycore_obmalloc.h
+cpython_version: "3.14"
+lines: 200
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Include/internal/pycore_obmalloc.h`
+
+<CpyLink path="Include/internal/pycore_obmalloc.h" />
+
+<overview>
+CPython's small-object allocator sits between the C runtime `malloc` and the Python heap. It organizes memory into three nested levels: **arenas** (256 KB each, sourced from the OS), **pools** (4 KB pages carved from arenas), and **blocks** (fixed-size units within a pool, 8-byte aligned, up to 512 bytes). For requests above 512 bytes the allocator falls through to the system `malloc`.
+
+This header defines the structs and constants that make the allocator tick. The actual allocation logic lives in `Objects/obmalloc.c`, but every key data structure is declared here so the GC and other subsystems can reach internal state.
+
+gopy does not port this file. Go's own garbage-collected runtime manages all allocation, so `PyObject_Malloc` / `PyObject_Free` map to Go's `new` / the GC root mechanism rather than to pool-based bookkeeping.
+</overview>
+
+## Map
+
+| Symbol | Kind | Purpose |
+|---|---|---|
+| `ALIGNMENT` / `ALIGNMENT_SHIFT` | constant | 8-byte block alignment within a pool |
+| `SMALL_REQUEST_THRESHOLD` | constant | 512 bytes; requests above this bypass the allocator |
+| `NB_SMALL_SIZE_CLASSES` | constant | 64 size classes (512 / 8) |
+| `pool_header` | struct | Metadata stored at the head of every 4 KB pool |
+| `poolp` | typedef | Pointer to `pool_header` |
+| `arena_object` | struct | Tracks one 256 KB arena and its pool freelist |
+| `usedpools` | array | `2 * NB_SMALL_SIZE_CLASSES` entries; dispatch table for active pools per size class |
+| `_Py_AllocatedBlocks` | function | Returns total live block count; used by the GC for threshold checks |
+
+## Reading
+
+### Size classes and the `usedpools` table
+
+Every allocation request is rounded up to the next multiple of 8. That rounded value divided by 8 gives a **size-class index** in `[0, 63]`. The allocator then consults `usedpools[idx + idx]` to find the pool currently serving that class.
+
+```c
+/* Include/internal/pycore_obmalloc.h */
+#define ALIGNMENT               8
+#define ALIGNMENT_SHIFT         3
+#define SMALL_REQUEST_THRESHOLD 512
+#define NB_SMALL_SIZE_CLASSES   (SMALL_REQUEST_THRESHOLD / ALIGNMENT)
+
+/* usedpools[2*i] is the doubly-linked list head for size class i */
+extern poolp usedpools[2 * ((NB_SMALL_SIZE_CLASSES + 7) / 8) * 8];
+```
+
+When a pool's free-block list is exhausted, the allocator promotes the next unused pool from the arena and links it in. When a pool empties completely it is removed from `usedpools` and returned to the arena freelist.
+
+### `pool_header`: the per-pool control block
+
+The first bytes of every 4 KB pool are occupied by `pool_header`. The allocator never stores this in a separate heap allocation; it is aliased directly onto the pool page.
+
+```c
+struct pool_header {
+    union { block *_padding; uint count; } ref; /* number of allocated blocks */
+    block         *freeblock;   /* singly-linked list of free blocks          */
+    struct pool_header *nextpool;               /* next pool of same size class */
+    struct pool_header *prevpool;               /* prev pool of same size class */
+    uint           arenaindex;  /* which arena owns this pool                 */
+    uint           szindex;     /* size class index                           */
+    uint           nextoffset;  /* byte offset of the next never-used block   */
+    uint           maxnextoffset; /* first invalid nextoffset value            */
+};
+```
+
+`freeblock` is a singly-linked list threaded through the free blocks themselves; each free block's first word holds the address of the next free block. On `PyObject_Free`, the returned block is prepended to this list in O(1).
+
+### `arena_object`: arena lifecycle
+
+Arenas are allocated in batches. Each arena is described by an `arena_object` kept in a separate array (not inside the arena pages themselves), so the GC can scan all arenas without touching every page.
+
+```c
+struct arena_object {
+    uintptr_t address;          /* base address of the 256 KB arena, or 0    */
+    block    *pool_address;     /* next pool-sized chunk to carve off         */
+    uint      nfreepools;       /* pools not yet handed to usedpools          */
+    uint      ntotalpools;      /* total pools in this arena                  */
+    struct pool_header *freepools; /* pool freelist (pools returned by Free)  */
+    struct arena_object *prevarena; /* linked list of arenas with free pools  */
+    struct arena_object *nextarena;
+};
+```
+
+An arena with `nfreepools == ntotalpools` is completely empty and is released back to the OS via `munmap` / `VirtualFree`, which is the primary mechanism by which CPython returns memory to the system.
+
+## gopy mirror
+
+gopy does not replicate this allocator. All Python objects are Go structs allocated with `new` or composite literals, and the Go GC handles reclamation. The behavioral contract that matters at the gopy level is:
+
+- `PyObject_Malloc(n)` for `n <= 512` behaves like `malloc(n)` but may be faster in CPython. In gopy it is simply `make([]byte, n)` or a typed `new`.
+- `PyObject_Free` is a no-op stub; the Go GC reclaims unreachable objects.
+- `_Py_AllocatedBlocks()` has no gopy equivalent because block counts are not tracked.
+
+The GC threshold logic in `Modules/gcmodule.c` that reads `_Py_AllocatedBlocks` is replaced in gopy by Go's own `runtime.ReadMemStats` integration.
+
+## CPython 3.14 changes
+
+- The `mimalloc` integration (PEP 743) was merged in 3.13 and refined in 3.14. `pycore_obmalloc.h` now conditionally defers to `mimalloc` pool structures when `WITH_MIMALLOC` is defined, keeping the old pool/arena structs only for platforms where mimalloc is disabled.
+- `SMALL_REQUEST_THRESHOLD` remains 512 bytes for the legacy path; mimalloc uses its own size-class table.
+- `_PyObject_VirtualAlloc` / `_PyObject_VirtualFree` helpers were added for arena-level OS calls, replacing direct `mmap`/`VirtualAlloc` calls scattered through `obmalloc.c`.

@@ -1,0 +1,216 @@
+---
+title: Include/cpython/code.h
+description: Internal code-object layout: PyCodeObject fields, _Py_CODEUNIT instruction word, CO_* flag bitmask, and constructor declarations.
+cpython_path: Include/cpython/code.h
+cpython_version: "3.14"
+lines: 250
+status: annotated
+ported_to: objects/code.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Include/cpython/code.h`
+
+<CpyLink path="Include/cpython/code.h" />
+
+The cpython-tier extension of the public `Include/code.h` header. It exposes the
+full `PyCodeObject` struct layout (hidden from the stable ABI), the
+`_Py_CODEUNIT` instruction-word typedef, the `_PyCode_CODE` macro that returns a
+typed pointer to the instruction array, the `CO_*` flag constants, and the
+`PyCode_New` / `PyCode_NewWithPosOnlyArgs` constructors.
+
+The public `Include/code.h` declares only an opaque forward type.
+This header is what the interpreter, compiler, and debuggers include when they
+need to read individual fields. Extensions that target the stable ABI must never
+include it directly.
+
+In gopy the full struct is `objects/code.go`'s `Code` struct. All CPython field
+names translate directly to exported Go fields. The `_Py_CODEUNIT` word and the
+`_PyCode_CODE` macro collapse to Go slice indexing on `Code.Code []byte`.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Include/cpython/code.h" lines="1-80">1-80</Cpy> | `PyCodeObject` struct | Full field layout: argument counts, `co_flags`, `co_code`, `co_consts`, `co_names`, `co_varnames`, `co_freevars`, `co_cellvars`, `co_filename`, `co_name`, `co_qualname`, `co_firstlineno`, `co_linetable`, `co_exceptiontable`, `co_stacksize`. | `objects/code.go` |
+| <Cpy path="Include/cpython/code.h" lines="80-150">80-150</Cpy> | `_Py_CODEUNIT` / `_PyCode_CODE` / `_Py_OPCODE` / `_Py_OPARG` | 16-bit instruction word typedef and pointer macro; opcode in low byte, argument in high byte. | `objects/code.go` |
+| <Cpy path="Include/cpython/code.h" lines="150-200">150-200</Cpy> | `CO_OPTIMIZED` / `CO_NEWLOCALS` / `CO_VARARGS` / `CO_VARKEYWORDS` / `CO_NESTED` / `CO_GENERATOR` / `CO_COROUTINE` / `CO_ASYNC_GENERATOR` / `CO_HAS_DOCSTRING` | Flag constants stored in `co_flags`. | `compile/codegen.go` |
+| <Cpy path="Include/cpython/code.h" lines="200-250">200-250</Cpy> | `PyCode_New` / `PyCode_NewWithPosOnlyArgs` / `_PyCode_NFREEVARS` / `_PyCode_NLOCALS` / `_PyCode_InitAddressRange` | Constructors and fast-accessor macros for local/free-var counts plus linetable iterator bootstrap. | `objects/code.go` |
+
+## Reading
+
+### `_Py_CODEUNIT` instruction word (lines 80 to 150)
+
+<CpyLink path="Include/cpython/code.h" lines="80-150" />
+
+```c
+typedef uint16_t _Py_CODEUNIT;
+
+static inline uint8_t _Py_OPCODE(_Py_CODEUNIT word) {
+    return (uint8_t)(word & 0xff);
+}
+static inline uint8_t _Py_OPARG(_Py_CODEUNIT word) {
+    return (uint8_t)(word >> 8);
+}
+
+/* Pointer to the first instruction in a code object's array. */
+#define _PyCode_CODE(co) \
+    ((_Py_CODEUNIT *)PyBytes_AS_STRING((co)->co_code_adaptive))
+```
+
+Each bytecode instruction occupies one `uint16_t`. The low byte is the opcode;
+the high byte is the immediate argument (`oparg`). Multi-word instructions use
+`EXTENDED_ARG` prefixes: each prefix shifts `oparg` left by 8 bits and the
+final word supplies the low 8 bits.
+
+`_PyCode_CODE` casts the internal `co_code_adaptive` bytes object to a
+`_Py_CODEUNIT *`. The "adaptive" copy is the working image the specializing
+interpreter mutates; the canonical source is `co_code`. The dispatch loop always
+drives the adaptive copy so in-place opcode specialization does not invalidate
+bytecode introspection.
+
+In gopy, `Code.Code` is a `[]byte` and individual instructions are read as
+`uint16` pairs via `binary.LittleEndian.Uint16`. The separate `co_code_adaptive`
+field is not needed because gopy does not modify the bytecode array in place.
+
+### `co_flags` bitmask (lines 150 to 200)
+
+<CpyLink path="Include/cpython/code.h" lines="150-200" />
+
+```c
+/* Flag bits for co_flags */
+#define CO_OPTIMIZED    0x0001  /* uses LOAD_FAST / STORE_FAST */
+#define CO_NEWLOCALS    0x0002  /* new locals dict on each call */
+#define CO_VARARGS      0x0004  /* accepts *args */
+#define CO_VARKEYWORDS  0x0008  /* accepts **kwargs */
+#define CO_NESTED       0x0010  /* defined inside another function */
+#define CO_GENERATOR    0x0020  /* body contains yield */
+#define CO_COROUTINE    0x0100  /* defined with async def */
+#define CO_ASYNC_GENERATOR 0x0200  /* async def + yield */
+```
+
+`CO_OPTIMIZED | CO_NEWLOCALS` is set on every regular function by the
+compiler. The eval loop tests `CO_OPTIMIZED` to decide whether to
+allocate a locals dict (`CO_OPTIMIZED` means no dict; fast locals are
+used instead). `CO_VARARGS` and `CO_VARKEYWORDS` tell the argument-
+binding path how many extra slots to allocate in `localsplus`.
+
+`CO_GENERATOR`, `CO_COROUTINE`, and `CO_ASYNC_GENERATOR` are mutually
+exclusive and control which object the `RETURN_GENERATOR` opcode wraps
+the frame in. The combination of `CO_COROUTINE | CO_ITERABLE_COROUTINE`
+is used for coroutines produced by `types.coroutine()`.
+
+In gopy, `compile/codegen.go` defines the same constants as typed `uint32`
+values (`CoOptimized`, `CoVarargs`, etc.) and OR them into `Unit.Flags`
+during code generation. `objects/code.go` stores them as `Code.Flags int`
+and the vm package tests them before frame setup.
+
+### `PyCodeObject` struct layout (lines 1 to 80)
+
+<CpyLink path="Include/cpython/code.h" lines="1-80" />
+
+```c
+struct PyCodeObject {
+    PyObject_HEAD
+
+    /* Argument shape */
+    int      co_argcount;
+    int      co_posonlyargcount;
+    int      co_kwonlyargcount;
+    int      co_nlocals;
+    int      co_framesize;       /* #slots needed including eval stack */
+    int      co_stacksize;       /* peak eval-stack depth */
+    int      co_flags;
+
+    /* Bytecode and metadata */
+    PyObject *co_code_adaptive;  /* mutable instruction array (bytes) */
+    PyObject *co_consts;         /* tuple of literal values */
+    PyObject *co_names;          /* tuple of name strings */
+    PyObject *co_localsplusnames;/* tuple: varnames + cellvars + freevars */
+    PyObject *co_localspluskinds;/* bytes: CO_FAST_* kind per slot */
+    PyObject *co_filename;       /* source file name (str) */
+    PyObject *co_name;           /* unqualified function name (str) */
+    PyObject *co_qualname;       /* qualified name, e.g. "Cls.method" (str) */
+    int       co_firstlineno;    /* line of first statement */
+    PyObject *co_linetable;      /* PEP 657 location table (bytes) */
+    PyObject *co_exceptiontable; /* compact except table (bytes) */
+};
+```
+
+`co_localsplusnames` is the 3.12+ replacement for the separate
+`co_varnames`, `co_cellvars`, and `co_freevars` tuples. They are
+concatenated into one tuple; `co_localspluskinds` is a parallel byte
+string where each byte holds a `CO_FAST_*` bitmask indicating whether
+the slot is a local, cell, or free variable.
+
+`co_firstlineno` is the anchor for the PEP 626 linetable. Each entry
+in `co_linetable` encodes a delta from the previous entry's line and
+column numbers so the table stays compact.
+
+In gopy, `Code` keeps the older split fields (`Varnames`, `Cellvars`,
+`Freevars` as `[]string`) for simplicity. The linetable and exception
+table are stored as `[]byte` and decoded by helpers in
+`objects/code_tables.go`.
+
+### Constructors and accessor macros (lines 200 to 250)
+
+<CpyLink path="Include/cpython/code.h" lines="200-250" />
+
+```c
+PyAPI_FUNC(PyCodeObject *) PyCode_New(
+    int argcount, int kwonlyargcount,
+    int nlocals, int stacksize, int flags,
+    PyObject *code, PyObject *consts, PyObject *names,
+    PyObject *varnames, PyObject *freevars, PyObject *cellvars,
+    PyObject *filename, PyObject *name,
+    int firstlineno, PyObject *linetable);
+
+PyAPI_FUNC(PyCodeObject *) PyCode_NewWithPosOnlyArgs(
+    int argcount, int posonlyargcount, int kwonlyargcount,
+    int nlocals, int stacksize, int flags,
+    PyObject *code, PyObject *consts, PyObject *names,
+    PyObject *varnames, PyObject *freevars, PyObject *cellvars,
+    PyObject *filename, PyObject *name, PyObject *qualname,
+    int firstlineno, PyObject *linetable, PyObject *exceptiontable);
+
+/* Number of free variables in a code object */
+#define _PyCode_NFREEVARS(co) \
+    ((co)->co_nlocalsplus - (co)->co_nlocals)
+/* Number of fast locals */
+#define _PyCode_NLOCALS(co) \
+    ((co)->co_nlocals)
+```
+
+`PyCode_New` is the pre-3.8 form; `PyCode_NewWithPosOnlyArgs` adds
+`posonlyargcount` and `qualname`. As of 3.11 both are considered
+semi-public; internal code uses `_PyCode_New` which takes a
+`_PyCodeConstructor` struct instead of a long argument list.
+
+`_PyCode_NFREEVARS` and `_PyCode_NLOCALS` are convenience macros over
+`co_nlocalsplus` minus the boundary offsets stored in the code object.
+They are used by frame setup to size the `localsplus` allocation.
+
+`_PyCode_InitAddressRange` primes a `PyCodeAddressRange` iterator over
+`co_linetable` so callers can walk source positions without reading the
+encoding format directly.
+
+In gopy, `NewCode()` fills the `Code` struct directly without a
+constructor call. `len(code.Freevars)` replaces `_PyCode_NFREEVARS` and
+`len(code.Varnames)` replaces `_PyCode_NLOCALS`.
+
+## gopy mirror
+
+`objects/code.go` is a full port. The main differences from CPython are:
+
+- `co_localsplusnames` / `co_localspluskinds` are split back into
+  `Varnames`, `Cellvars`, and `Freevars []string` for readability.
+- `co_code_adaptive` is not maintained; `Code.Code []byte` holds the
+  canonical bytecode.
+- `co_consts` is `[]any` rather than a `PyObject *` tuple, avoiding a
+  double-boxing step.
+- `Code.Flags` is `int` in the struct; the `Co*` constants in
+  `compile/codegen.go` are `uint32` and are cast at assignment sites.
+- The monitoring and executor fields (`MonitoringData`, `Executors`) are
+  stored as `any` to avoid circular imports between `objects`, `monitor`,
+  and `optimizer`.

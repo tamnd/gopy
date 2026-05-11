@@ -1,0 +1,148 @@
+---
+title: Objects/capsule.c
+description: PyCapsule implements an opaque C-pointer container for sharing C-level APIs between extension modules.
+cpython_path: Objects/capsule.c
+cpython_version: "3.14"
+lines: 290
+status: annotated
+ported_to: ""
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Objects/capsule.c`
+
+<CpyLink path="Objects/capsule.c" />
+
+A `PyCapsule` is a thin Python object that wraps an arbitrary `void *` pointer
+together with a string name and an optional destructor callback. The mechanism
+exists so that C extension modules can export internal APIs to other extension
+modules without exposing a public Python interface. NumPy, for example, uses a
+capsule to publish its C-level array API: a consumer calls `PyCapsule_Import`,
+gets back the `void *`, and casts it to a function-pointer table.
+
+The object layout is a four-field C struct: `pointer`, `name`, `destructor`,
+and `context`. The name is an ASCII string literal stored by pointer, not
+copied, so the caller is responsible for keeping it alive. The destructor, if
+set, is called with the capsule itself as argument during `tp_finalize`, giving
+the owner a chance to release the wrapped resource. The context field is a spare
+`void *` slot that the owner can use for any purpose without affecting the
+capsule's identity.
+
+The public API pairs creation with a family of typed getters. Every getter
+validates the capsule name before returning a value, raising `PyCapsuleError`
+when the name does not match. This name check is the primary safety mechanism:
+it prevents a consumer from accidentally reading a pointer created by a
+different library even if both capsules end up in the same module namespace.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| 1-40 | `PyCapsule` struct + `capsule_check` | object layout and internal type guard | not ported |
+| 41-80 | `PyCapsule_New` | allocate and initialise a capsule | not ported |
+| 81-120 | `PyCapsule_GetPointer` | validate name and return `void *` | not ported |
+| 121-155 | `PyCapsule_GetName` / `PyCapsule_SetName` | read/write the name field | not ported |
+| 156-190 | `PyCapsule_GetDestructor` / `PyCapsule_SetDestructor` | read/write the destructor | not ported |
+| 191-230 | `PyCapsule_GetContext` / `PyCapsule_SetContext` | read/write the spare context slot | not ported |
+| 231-290 | `PyCapsule_Import` | resolve `"package.module.attrname"` to a pointer | not ported |
+
+## Reading
+
+### Object layout and allocation (lines 1 to 80)
+
+<CpyLink path="Objects/capsule.c" lines="1-80" />
+
+The `PyCapsule` C struct sits at the top of the file, immediately after the
+includes. It carries four fields: `void *pointer`, `const char *name`,
+`PyCapsule_Destructor destructor`, and `void *context`. `PyCapsule_New`
+allocates the object with `PyObject_New`, then copies all four arguments
+directly into those fields. The name pointer is stored as-is, so callers
+typically pass a string literal with static storage duration.
+
+```c
+typedef struct {
+    PyObject_HEAD
+    void *pointer;
+    const char *name;
+    PyCapsule_Destructor destructor;
+    void *context;
+} PyCapsule;
+```
+
+### Pointer retrieval and name validation (lines 81 to 120)
+
+<CpyLink path="Objects/capsule.c" lines="81-120" />
+
+`PyCapsule_GetPointer` is the most-called function in the file. It first checks
+that the argument is actually a `PyCapsule` with `PyCapsule_CheckExact`, then
+compares the stored name against the requested name. The comparison uses
+`strcmp` when both are non-NULL, accepts a NULL expected name as a wildcard, and
+raises `PyCapsuleError` on any mismatch. Only after both checks pass does it
+return `capsule->pointer`.
+
+```c
+void *
+PyCapsule_GetPointer(PyObject *op, const char *name)
+{
+    PyCapsule *capsule = capsule_check(op);  /* type check + NULL guard */
+    if (!capsule) return NULL;
+    if (name != NULL && capsule->name != NULL) {
+        if (strcmp(name, capsule->name) != 0) {
+            PyErr_SetString(PyExc_PyCapsuleError, "PyCapsule_GetPointer: name mismatch");
+            return NULL;
+        }
+    }
+    return capsule->pointer;
+}
+```
+
+### Context and destructor accessors (lines 156 to 230)
+
+<CpyLink path="Objects/capsule.c" lines="156-230" />
+
+The context and destructor accessors follow the same pattern as the pointer
+getter but skip the name check, since neither field participates in the
+capsule's identity. The setter variants (`PyCapsule_SetContext`,
+`PyCapsule_SetDestructor`) perform the same type check and then write directly
+into the struct. There is no reference counting involved because all four fields
+are raw C pointers, not `PyObject *` references.
+
+```c
+int
+PyCapsule_SetContext(PyObject *op, void *context)
+{
+    PyCapsule *capsule = capsule_check(op);
+    if (!capsule) return -1;
+    capsule->context = context;
+    return 0;
+}
+```
+
+### Import by dotted name (lines 231 to 290)
+
+<CpyLink path="Objects/capsule.c" lines="231-290" />
+
+`PyCapsule_Import` accepts a string of the form `"package.module.attrname"`.
+It splits off the final component as the attribute name, imports the leading
+dotted module path with `PyImport_ImportModule`, then calls `PyObject_GetAttrString`
+to retrieve the capsule attribute. After validating the result with
+`PyCapsule_GetPointer`, it returns the raw pointer. This is the entry point used
+by binary extensions that consume another extension's C API, such as a SciPy
+module importing NumPy's array API capsule.
+
+```c
+void *
+PyCapsule_Import(const char *name, int no_block)
+{
+    /* split "a.b.attr" -> module "a.b", attr "attr" */
+    ...
+    module = PyImport_ImportModule(module_name);
+    object = PyObject_GetAttrString(module, attrs[n_attrs - 1]);
+    return PyCapsule_GetPointer(object, name);
+}
+```
+
+## gopy mirror
+
+Not yet ported.

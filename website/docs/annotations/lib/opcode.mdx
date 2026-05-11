@@ -1,0 +1,187 @@
+---
+title: Lib/opcode.py
+description: Bidirectional opcode tables, has* attribute lists, inline-cache sizes, and the _opcode_metadata generated specialization map.
+cpython_path: Lib/opcode.py
+cpython_version: "3.14"
+lines: 123
+status: annotated
+ported_to: compile/opcodes_gen.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Lib/opcode.py`
+
+<CpyLink path="Lib/opcode.py" />
+
+`opcode.py` is the Python-level view of the bytecode instruction set. It
+imports the ground-truth tables from `_opcode_metadata` (generated from
+`Python/bytecodes.c` by `Tools/cases_generator/py_metadata_generator.py`),
+builds the `opname` reverse list, delegates `stack_effect` to the C
+extension `_opcode`, and filters opcode numbers into per-property
+boolean-like lists (`hasconst`, `hasfree`, etc.). The file is intentionally
+small. Most of the real data lives in `_opcode_metadata.py` (371 lines as
+of 3.14).
+
+`HAVE_ARGUMENT` is imported from `_opcode_metadata` and equals 43 in
+CPython 3.14. Any opcode with a numeric value at or above that constant
+carries an integer argument in the wordcode. Below that threshold the
+argument field is always zero and ignored.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Lib/opcode.py" lines="1-18">1-18</Cpy> | module header, imports | Pulls `_specializations`, `_specialized_opmap`, `opmap`, `HAVE_ARGUMENT`, `MIN_INSTRUMENTED_OPCODE` from `_opcode_metadata`; imports `stack_effect` from `_opcode`. | `compile/opcodes_gen.go` |
+| <Cpy path="Lib/opcode.py" lines="20-23">20-23</Cpy> | `opname` | Builds a 267-element list indexed by opcode number; slots without a name stay as `'<N>'`. Populated from both `opmap` and `_specialized_opmap`. | `compile/opcodes_gen.go` |
+| <Cpy path="Lib/opcode.py" lines="25-25">25</Cpy> | `cmp_op` | Six-element tuple of comparison operator strings: `('<', '<=', '==', '!=', '>', '>=')`. Index matches the `COMPARE_OP` argument. | `compile/opcodes_gen.go` |
+| <Cpy path="Lib/opcode.py" lines="28-36">28-36</Cpy> | `hasarg`, `hasconst`, `hasname`, `hasjump`, `hasjrel`, `hasjabs`, `hasfree`, `haslocal`, `hasexc` | Nine lists; each is a filtered subset of `opmap.values()` using the corresponding `_opcode.has_*` C predicate. `hasjrel` is aliased to `hasjump`; `hasjabs` is always empty in 3.14. | `compile/opcodes_gen.go` |
+| <Cpy path="Lib/opcode.py" lines="39-46">39-46</Cpy> | `_intrinsic_1_descs`, `_intrinsic_2_descs`, `_special_method_names`, `_common_constants`, `_nb_ops`, `hascompare` | Private tuples that `dis` uses for annotation; `hascompare` is the singleton list `[opmap["COMPARE_OP"]]` (value 56). | `compile/opcodes_gen.go` |
+| <Cpy path="Lib/opcode.py" lines="48-122">48-122</Cpy> | `_cache_format`, `_inline_cache_entries` | Per-opcode dicts of cache-field names to word counts; `_inline_cache_entries` collapses each dict to a total word count. Used by `dis` and the frame-evaluation loop. | `compile/opcodes_gen.go` |
+| `Lib/_opcode_metadata.py` lines 1-125 | `_specializations` | Dict mapping each adaptive opcode name to a list of its specialized variants, generated from `Python/bytecodes.c`. | `compile/opcodes_gen.go` |
+| `Lib/_opcode_metadata.py` lines 127-213 | `_specialized_opmap` | Dict mapping specialized opcode names to their numeric codes (129-211). Not in `opmap`; only used to populate `opname`. | `compile/opcodes_gen.go` |
+| `Lib/_opcode_metadata.py` lines 215-371 | `opmap`, `HAVE_ARGUMENT`, `MIN_INSTRUMENTED_OPCODE` | The canonical name-to-number mapping (128 adaptive + pseudo + instrumented opcodes), plus the two sentinel constants. | `compile/opcodes_gen.go` |
+
+## Reading
+
+### `opmap` and `opname`: bidirectional lookup (lines 16 to 23)
+
+<CpyLink path="Lib/opcode.py" lines="16-23" />
+
+```python
+from _opcode_metadata import (_specializations, _specialized_opmap, opmap,
+                              HAVE_ARGUMENT, MIN_INSTRUMENTED_OPCODE)
+EXTENDED_ARG = opmap['EXTENDED_ARG']
+
+opname = ['<%r>' % (op,) for op in range(max(opmap.values()) + 1)]
+for m in (opmap, _specialized_opmap):
+    for op, i in m.items():
+        opname[i] = op
+```
+
+`opmap` is the forward table: name to number. `opname` is the reverse.
+The reverse list is built by first filling every slot with a placeholder
+`'<N>'`, then overwriting with the real name from both `opmap` and
+`_specialized_opmap`. Specialized opcodes (numbers 129-211) share the
+same slot space as regular ones; they appear only in `opname`, not in
+`opmap`, because `dis` uses `opmap` to ask "does this name exist?" and
+specialized names are not valid instruction names a programmer would write.
+
+In gopy the same tables are built at code-generation time by
+`tools/opcodes_go/main.go`, which reads `_opcode_metadata.py` and emits
+`compile/opcodes_gen.go`. The generated file contains the `opmap` map, the
+`opname` slice, and the per-flag constant blocks.
+
+### `has*` attribute lists (lines 28 to 36)
+
+<CpyLink path="Lib/opcode.py" lines="28-36" />
+
+```python
+hasarg   = [op for op in opmap.values() if _opcode.has_arg(op)]
+hasconst = [op for op in opmap.values() if _opcode.has_const(op)]
+hasname  = [op for op in opmap.values() if _opcode.has_name(op)]
+hasjump  = [op for op in opmap.values() if _opcode.has_jump(op)]
+hasjrel  = hasjump   # backward-compat alias
+hasjabs  = []        # always empty in 3.14; absolute jumps were removed
+hasfree  = [op for op in opmap.values() if _opcode.has_free(op)]
+haslocal = [op for op in opmap.values() if _opcode.has_local(op)]
+hasexc   = [op for op in opmap.values() if _opcode.has_exc(op)]
+```
+
+Each list is a filtered view of opcode numbers. The predicates are C
+functions in `_opcode` that test the `HAS_*_FLAG` bits stored in the
+`_PyOpcode_opcode_metadata` table in `Include/internal/pycore_opcode_metadata.h`.
+In gopy the same flag bits are constants in `compile/opcodes_gen.go`
+(`flagArg`, `flagConst`, `flagName`, `flagJump`, etc.) and the
+`OpcodeHas*` helper functions test them.
+
+Note that `hasjabs` is always the empty list. CPython removed all
+absolute-jump instructions in 3.12 (PEP 658 successor work); the name
+is kept for third-party tools that check `if op in opmap.hasjabs`.
+
+### `_cache_format` and `_inline_cache_entries` (lines 48 to 122)
+
+<CpyLink path="Lib/opcode.py" lines="48-122" />
+
+```python
+_cache_format = {
+    "LOAD_GLOBAL": {
+        "counter": 1,
+        "index": 1,
+        "module_keys_version": 1,
+        "builtin_keys_version": 1,
+    },
+    "LOAD_ATTR": {
+        "counter": 1,
+        "version": 2,
+        "keys_version": 2,
+        "descr": 4,
+    },
+    ...
+}
+
+_inline_cache_entries = {
+    name: sum(value.values()) for (name, value) in _cache_format.items()
+}
+```
+
+Every adaptive opcode reserves a fixed number of `CACHE` words immediately
+following its wordcode entry. `_cache_format` names each field and gives
+its size in 16-bit words. `_inline_cache_entries` collapses that to a
+single integer. `LOAD_ATTR` has the largest cache at 9 words (1 + 2 + 2 + 4).
+`dis.get_instructions` uses these counts to skip the `CACHE` pseudo-instructions
+when pretty-printing a code object.
+
+### `_opcode_metadata.py`: specializations (lines 1 to 125)
+
+<CpyLink path="Lib/_opcode_metadata.py" lines="1-125" />
+
+```python
+# This file is generated by Tools/cases_generator/py_metadata_generator.py
+# from: Python/bytecodes.c
+
+_specializations = {
+    "BINARY_OP": [
+        "BINARY_OP_MULTIPLY_INT",
+        "BINARY_OP_ADD_INT",
+        "BINARY_OP_SUBTRACT_INT",
+        "BINARY_OP_MULTIPLY_FLOAT",
+        "BINARY_OP_ADD_FLOAT",
+        "BINARY_OP_SUBTRACT_FLOAT",
+        "BINARY_OP_ADD_UNICODE",
+        ...
+    ],
+    "LOAD_ATTR": [
+        "LOAD_ATTR_INSTANCE_VALUE",
+        "LOAD_ATTR_MODULE",
+        "LOAD_ATTR_WITH_HINT",
+        "LOAD_ATTR_SLOT",
+        "LOAD_ATTR_CLASS",
+        ...
+        "LOAD_ATTR_NONDESCRIPTOR_NO_DICT",
+    ],
+    ...
+}
+```
+
+`_specializations` is the authoritative list of which general opcodes have
+specialized fast paths. The specializer in `Python/specialize.c` replaces a
+general opcode with a specialized variant after a warmup counter fires.
+`LOAD_ATTR` has 13 specializations; `CALL` has 18. In gopy the equivalent
+map is in `specialize/` and `optimizer/uop_meta_gen.go`.
+
+## gopy mirror
+
+`compile/opcodes_gen.go` is generated by `tools/opcodes_go/main.go` from
+`Lib/_opcode_metadata.py`. The file contains:
+
+- The `Opcode` integer type and all opcode constants.
+- `opname [267]string` and `opmap map[string]Opcode` for bidirectional lookup.
+- `flagArg`, `flagConst`, `flagJump`, etc., mirroring `HAS_*_FLAG`.
+- `opcodeInfo [267]opcodeInfoEntry` with the flag word and cache-word count per opcode.
+- `OpcodeHasArg`, `OpcodeHasConst`, `OpcodeHasJump`, `OpcodeHasFree`, `OpcodeHasLocal` helper functions.
+- `CmpOp [6]string` for `COMPARE_OP` argument decoding.
+
+The `_cache_format` field names are not exposed separately in gopy because
+the frame-evaluation loop only needs the total word count, which is
+available via `opcodeInfo[op].CacheWords`.

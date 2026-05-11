@@ -1,0 +1,104 @@
+---
+title: Objects/obmalloc.c
+description: CPython's custom small-object memory allocator, layered over system malloc with arena-based pooling for objects under 512 bytes.
+cpython_path: Objects/obmalloc.c
+cpython_version: "3.14"
+lines: 2800
+status: annotated
+ported_to: ""
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Objects/obmalloc.c`
+
+<CpyLink path="Objects/obmalloc.c" />
+
+CPython does not call `malloc` and `free` directly for most object allocations. Instead it routes them through three allocator domains, each tuned for a different caller contract. The Raw domain (`PyMem_RawMalloc`) is safe to call before the GIL exists and delegates straight to the system allocator or, in 3.14, a mimalloc-compatible backend. The Mem domain (`PyMem_Malloc`) wraps the raw domain with an extra layer that can be redirected by the embedding application. The Object domain (`PyObject_Malloc`) is the hot path: a slab allocator that handles requests up to 512 bytes without touching the OS at all for most calls.
+
+The small-object path carves 256 KB arenas from the OS and subdivides each arena into 4 KB pools. Every pool is dedicated to a single size class, aligned to 8 bytes (size classes 8, 16, 24, ..., 512). Free lists thread through the pools so that a typical allocation and deallocation is a pointer bump or a list-head swap with no system call. When an entire pool empties it is returned to its arena's free list, and when an entire arena empties the memory is released back to the OS.
+
+The file also owns the `tracemalloc` integration. A single `_Py_tracemalloc_config` struct gates whether every allocation and deallocation is recorded to an internal hash table keyed by `(domain, ptr)`. The hook cost is near zero when the feature is disabled because the fast path tests a single integer field before branching.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| 1-120 | domain macros, `_PyMem_RawMalloc` | Raw allocator entry points | |
+| 121-300 | `PyMem_Malloc`, `PyMem_Realloc`, `PyMem_Free` | Mem domain wrappers | |
+| 301-600 | `_PyObject_Malloc`, pool/arena structs | Object domain core | |
+| 601-1100 | `new_arena`, `address_in_range` | Arena lifecycle | |
+| 1101-1500 | `pymalloc_alloc`, `pymalloc_free` | Small-object fast path | |
+| 1501-1900 | `_PyObject_Free`, `_PyObject_Realloc` | Object domain dealloc/resize | |
+| 1901-2200 | `_PyMem_DebugMalloc`, `_PyMem_DebugFree` | Debug allocator wrappers | |
+| 2201-2500 | `tracemalloc_alloc`, `tracemalloc_free` | tracemalloc hooks | |
+| 2501-2800 | `_PyMem_GetAllocatorName`, `_PyMem_SetupAllocators` | Allocator selection API | |
+
+## Reading
+
+### Allocator domains and vtables (lines 1 to 120)
+
+<CpyLink path="Objects/obmalloc.c" lines="1-120" />
+
+Each domain is represented as a `PyMemAllocatorEx` struct holding four function pointers (`malloc`, `calloc`, `realloc`, `free`) plus an opaque context pointer. The three global instances `_PyMem_Raw`, `_PyMem`, and `_PyObject` are filled at startup by `_PyMem_SetupAllocators`. Swapping all three atomically is how the `pymalloc` allocator can be replaced at runtime without a recompile.
+
+```c
+typedef struct {
+    void *ctx;
+    void* (*malloc) (void *ctx, size_t size);
+    void* (*calloc) (void *ctx, size_t nelem, size_t elsize);
+    void* (*realloc)(void *ctx, void *ptr, size_t new_size);
+    void  (*free)   (void *ctx, void *ptr);
+} PyMemAllocatorEx;
+```
+
+### Pool and arena layout (lines 301 to 600)
+
+<CpyLink path="Objects/obmalloc.c" lines="301-600" />
+
+A `poolp` (pool header) lives at the base of each 4 KB pool page. It records the size class (`szidx`), the number of live allocations (`ref.count`), a pointer to the next free block (`freeblock`), and the arena it belongs to. Arenas are 256 KB and tracked in a global `arenas` array. The `address_in_range` predicate checks whether a pointer belongs to a live arena in O(1) by testing the pointer against the arena's base and comparing the arena generation counter.
+
+```c
+struct pool_header {
+    union { block *_padding; uint count; } ref;
+    block       *freeblock;
+    struct pool_header *nextpool;
+    struct pool_header *prevpool;
+    uint         arenaindex;
+    uint         szidx;
+    uint         nextoffset;
+    uint         maxnextoffset;
+};
+```
+
+### Small-object fast path (lines 1101 to 1500)
+
+<CpyLink path="Objects/obmalloc.c" lines="1101-1500" />
+
+`pymalloc_alloc` is the inner loop called by `_PyObject_Malloc`. It round-trips the request size to a size-class index, looks up the `usedpools` table to find a pool with a free slot, and either pops `freeblock` or advances `nextoffset`. The entire happy path is around 20 instructions with no branch into OS code. When `usedpools[i]` is empty the allocator calls `fill_pool`, which either takes a pool from the arena's free list or calls `new_arena` to grow the arena array.
+
+```c
+static void *
+pymalloc_alloc(void *ctx, size_t nbytes)
+{
+    poolp pool;
+    block *bp;
+    /* ... size-class lookup and freeblock pop ... */
+}
+```
+
+### Debug allocator wrappers (lines 1901 to 2200)
+
+<CpyLink path="Objects/obmalloc.c" lines="1901-2200" />
+
+When Python is built with `Py_DEBUG` or the `PYTHONMALLOC=debug` env var, the debug layer wraps every allocation with a header and trailer containing magic bytes, the requested size, and a serial number. On free it checks that no byte in the trailer was overwritten, catching buffer overflows and use-after-free before the corrupt pointer escapes. The wrapper is installed by replacing the vtable pointers rather than by conditional branches in the hot path.
+
+### tracemalloc integration (lines 2201 to 2500)
+
+<CpyLink path="Objects/obmalloc.c" lines="2201-2500" />
+
+`tracemalloc_alloc` and `tracemalloc_free` are thin hooks that delegate to the real allocator and then update a per-domain hash table keyed by `(domain, ptr)` storing the allocation size and a captured traceback. The `_Py_tracemalloc_config.tracing` flag is checked first so that the overhead when the feature is off is a single branch. The module `Modules/_tracemalloc.c` exposes the stored data to Python via `tracemalloc.get_traced_memory()` and friends.
+
+## gopy mirror
+
+Not yet ported.

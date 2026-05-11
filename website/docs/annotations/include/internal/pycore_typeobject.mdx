@@ -1,0 +1,190 @@
+---
+title: Include/internal/pycore_typeobject.h
+description: Type system internals: tp_version_tag cache, _PyType_Lookup MRO walk, slot resolution, and MRO calculation helpers.
+cpython_path: Include/internal/pycore_typeobject.h
+cpython_version: "3.14"
+lines: 320
+status: annotated
+ported_to: objects/type.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Include/internal/pycore_typeobject.h`
+
+<CpyLink path="Include/internal/pycore_typeobject.h" />
+
+This header exposes the internals of `PyTypeObject` that are needed by the
+specializing adaptive interpreter and by the type-creation machinery but
+that `Include/cpython/typeobject.h` deliberately keeps private from
+extension authors.
+
+The most performance-critical piece is the `tp_version_tag` inline cache
+system. Every type carries a 32-bit version counter that the specializing
+adaptive interpreter records alongside a resolved attribute or method
+pointer in an inline cache. On each subsequent access the interpreter
+checks the current `tp_version_tag` against the cached value; if they
+match the slow `_PyType_Lookup` MRO walk is skipped entirely. Any mutation
+that changes a type's observable behaviour (adding or removing a method,
+changing a base class) calls `PyType_Modified`, which zeroes
+`tp_version_tag` on the type and all its subclasses, forcing the inline
+caches to miss and re-specialize.
+
+The file also declares `_PyType_Lookup`, the core routine that walks the
+MRO and returns the first class dict entry matching a name, plus the MRO
+calculation helper `_PyType_CalculateMro` and the slot-filling machinery
+`_Py_type_slots`.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Include/internal/pycore_typeobject.h" lines="1-40">1-40</Cpy> | include guard + `_PyType_CacheTag` struct | Per-type version-tag state: `tp_version_tag` counter, `valid` flag, generation counter for bulk invalidation. | `objects/type.go` `versionTag` field |
+| <Cpy path="Include/internal/pycore_typeobject.h" lines="41-80">41-80</Cpy> | `_PyType_GetVersionTag` / `_PyType_IsValid` / `PyType_Modified` | Allocate a fresh version tag, test validity, and invalidate the whole subtype tree on mutation. | `objects/type.go` `VersionTag()` / `Invalidate()` |
+| <Cpy path="Include/internal/pycore_typeobject.h" lines="81-140">81-140</Cpy> | `_PyType_Lookup` / `_PyType_LookupId` | Walk `tp_mro` looking for `name`; return the raw descriptor without binding. `LookupId` takes a `_Py_Identifier` instead of a `PyObject *`. | `objects/type.go` `Lookup()` |
+| <Cpy path="Include/internal/pycore_typeobject.h" lines="141-180">141-180</Cpy> | `_PyType_GetSlotNames` / `_PyType_GetTextSignatureFromInternalDoc` | Extract `__slots__` name list and function signature strings for `inspect`. | `objects/type.go` `Slots` field |
+| <Cpy path="Include/internal/pycore_typeobject.h" lines="181-240">181-240</Cpy> | `_PyType_CalculateMro` / `_PyType_IsGC` | C3 linearization driver; predicate testing `Py_TPFLAGS_HAVE_GC`. | `objects/type.go` `MRO` field |
+| <Cpy path="Include/internal/pycore_typeobject.h" lines="241-280">241-280</Cpy> | `_Py_type_slots` array + `_PyType_Lookup_ByIndex` | Maps slot index integers to `(offset, default_value)` pairs; used by `PyType_FromSpecWithBases` to fill tp_* slots from a `PyType_Slot[]` array. | n/a (built-in types hand-coded in objects/) |
+| <Cpy path="Include/internal/pycore_typeobject.h" lines="281-320">281-320</Cpy> | `_PyType_GetFullyQualifiedName` / `_PyType_GetModuleName` | Return `module.qualname` string; used by `repr`, `pickle`, and `inspect`. | n/a |
+
+## Reading
+
+### `tp_version_tag` cache (lines 1 to 80)
+
+<CpyLink path="Include/internal/pycore_typeobject.h" lines="1-80" />
+
+```c
+/* Stored in PyTypeObject.tp_version_tag.
+   0 means "not yet assigned or invalidated". */
+static inline unsigned int
+_PyType_GetVersionTag(PyTypeObject *tp)
+{
+    unsigned int tag = tp->tp_version_tag;
+    if (tag == 0) {
+        /* Lazily allocate a fresh version number. */
+        tag = _PyType_AssignVersionTag(tp);
+    }
+    return tag;
+}
+
+/* Called whenever a type's dict is mutated or a base is changed. */
+void
+PyType_Modified(PyTypeObject *type)
+{
+    /* Recursively clear tp_version_tag on all subtypes. */
+    PyObject *subclasses = type->tp_subclasses;
+    /* ... recursive walk omitted for brevity ... */
+    type->tp_version_tag = 0;
+    type->tp_flags &= ~Py_TPFLAGS_VALID_VERSION_TAG;
+}
+```
+
+The version tag is a global counter maintained in
+`Objects/typeobject.c:_Py_next_type_version_tag`. Each call to
+`_PyType_AssignVersionTag` increments this counter and stamps the result
+into `tp_version_tag`. The counter is 32 bits; if it overflows the
+specializing interpreter falls back to always using slow paths rather than
+risk a false positive match.
+
+The adaptive specializing interpreter in CPython 3.12+ stores a copy of
+the version tag alongside a resolved pointer in the inline cache of
+`LOAD_ATTR_SLOT`, `LOAD_ATTR_METHOD_NO_DICT`, and similar specialized
+forms. At execution time it compares the cached tag against the live
+`tp_version_tag`. A mismatch causes a deoptimization back to the generic
+`LOAD_ATTR` and triggers re-specialization.
+
+In gopy, `objects/type.go` carries `versionTag uint32` (unexported) and
+exposes `VersionTag() uint32` which lazily allocates a value from a
+package-level `atomic.Uint32` counter. `Invalidate()` resets the field to
+zero on the type and recursively on its registered subclasses.
+
+### `_PyType_Lookup` MRO walk (lines 81 to 140)
+
+<CpyLink path="Include/internal/pycore_typeobject.h" lines="81-140" />
+
+```c
+/* Search name in type's MRO. Returns a borrowed reference; NULL means
+   not found (no exception set). */
+PyObject *
+_PyType_Lookup(PyTypeObject *type, PyObject *name)
+{
+    /* First check the version-tag cache keyed by (type, name_hash). */
+    PyObject *res = _PyType_LookupCache(type, name);
+    if (res != NULL) {
+        return res;
+    }
+
+    PyObject *mro = type->tp_mro;
+    Py_ssize_t n = PyTuple_GET_SIZE(mro);
+    for (Py_ssize_t i = 0; i < n; i++) {
+        PyObject *base = PyTuple_GET_ITEM(mro, i);
+        PyObject *dict = ((PyTypeObject *)base)->tp_dict;
+        res = PyDict_GetItemWithError(dict, name);
+        if (res != NULL || PyErr_Occurred()) {
+            break;
+        }
+    }
+
+    if (res != NULL) {
+        _PyType_LookupCacheInsert(type, name, res);
+    }
+    return res;
+}
+```
+
+`_PyType_Lookup` is the heart of Python's attribute lookup. It is called
+from `type_getattro` whenever a descriptor is needed from the type
+hierarchy, from `super().__init__` resolution, and from the `LOAD_ATTR`
+deoptimization path in the eval loop.
+
+The function returns a borrowed reference: the caller must not decref the
+result without first incrementing it. The cache layer stores (type, name)
+pairs against the current version tag; `PyType_Modified` clears all cache
+entries for the invalidated type by bumping a global cache version counter,
+not by iterating the cache.
+
+`_PyType_LookupId` is the variant for `_Py_Identifier`-interned names used
+in performance-sensitive internal paths like `type_call` and
+`object.__init__`. In gopy, both forms reduce to `objects/type.go Lookup()`
+which walks the `Type.MRO` slice directly without an additional cache layer.
+
+### MRO calculation (lines 181 to 240)
+
+<CpyLink path="Include/internal/pycore_typeobject.h" lines="181-240" />
+
+```c
+/* Compute the C3 linearization of type's bases. Returns a new tuple
+   on success; sets MemoryError / TypeError on failure. */
+PyObject *
+_PyType_CalculateMro(PyTypeObject *type)
+{
+    /* Collect per-base MRO lists into an array of lists (the "to-merge"
+       set), plus the bases tuple itself as the last list. */
+    /* ... C3 merge algorithm ... */
+}
+```
+
+C3 linearization (PEP 253) guarantees a consistent MRO across multiple
+inheritance. The algorithm merges the per-base MRO tuples by repeatedly
+picking the head of a list that does not appear in the tail of any other
+list, until all lists are exhausted or a conflict is detected. A conflict
+raises `TypeError: Cannot create a consistent method resolution order`.
+
+The resulting MRO tuple is stored in `tp_mro` and is what `_PyType_Lookup`
+iterates. In gopy, `NewUserType` in `objects/usertype.go` computes the MRO
+in Go using the same C3 algorithm and stores it as `Type.MRO []*Type`.
+
+## gopy mirror
+
+`objects/type.go` mirrors `PyTypeObject` as the `Type` struct. Key
+differences from CPython:
+
+- `versionTag uint32` replaces `tp_version_tag`. The lazy allocation uses
+  `atomic.Uint32` instead of `_Py_next_type_version_tag`.
+- `MRO []*Type` replaces the `tp_mro` tuple. Go slices remove the need for
+  `PyTuple_GET_ITEM` casts inside `Lookup`.
+- There is no separate lookup cache. The hot-path inline caches in
+  `vm/adaptive.go` use the `VersionTag` for the same invalidation purpose.
+- The slot-filling machinery (`_Py_type_slots`, `PyType_FromSpec`) has no
+  equivalent because gopy's built-in types wire their slots as Go struct
+  fields at compile time.

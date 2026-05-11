@@ -1,0 +1,119 @@
+---
+title: Lib/locale.py
+description: POSIX locale settings wrapper that exposes libc setlocale, number formatting, and locale-aware string collation to Python programs.
+cpython_path: Lib/locale.py
+cpython_version: "3.14"
+lines: 640
+status: annotated
+ported_to: ""
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Lib/locale.py`
+
+<CpyLink path="Lib/locale.py" />
+
+`locale.py` is the Python-level binding to the C library's locale subsystem. It wraps `setlocale`, `localeconv`, `strcoll`, and `strxfrm` from libc and then builds a substantial pure-Python layer on top for number and currency formatting. The module also includes a hardcoded database of locale aliases that maps informal locale names (e.g. `"german"`) to their canonical POSIX forms (e.g. `"de_DE.ISO8859-1"`).
+
+The formatting layer converts the raw `localeconv` dictionary into human-readable numbers and currency strings. It handles grouping separators, sign conventions, parenthesised negatives, and the full set of fields defined by POSIX. Locale-aware text sorting is surfaced through `strcoll` and `strxfrm`, delegating entirely to libc so that collation tables stay correct for every platform.
+
+Platform detection at import time selects either `_locale` (the C extension) or a pure-Python fallback. The fallback supports only the `"C"` and `"UTF-8"` locales so that the module remains importable everywhere, even when the C extension is absent.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Lib/locale.py" lines="1-80">1-80</Cpy> | imports, constants, `Error` | Module header, `LC_*` constant re-exports, `Error` exception class | - |
+| <Cpy path="Lib/locale.py" lines="81-140">81-140</Cpy> | `setlocale`, `localeconv` | Thin wrappers around `_locale.setlocale` / `_locale.localeconv` | - |
+| <Cpy path="Lib/locale.py" lines="141-200">141-200</Cpy> | `format_string` | Printf-style format string with locale number formatting applied to each `%` conversion | - |
+| <Cpy path="Lib/locale.py" lines="201-280">201-280</Cpy> | `currency` | Format a number as a currency string using `localeconv` fields | - |
+| <Cpy path="Lib/locale.py" lines="281-340">281-340</Cpy> | `atof`, `atoi` | Parse locale-formatted number strings back to float or int | - |
+| <Cpy path="Lib/locale.py" lines="341-390">341-390</Cpy> | `strcoll`, `strxfrm` | Locale-aware string comparison and transform via libc | - |
+| <Cpy path="Lib/locale.py" lines="391-440">391-440</Cpy> | `getdefaultlocale` | Detect the platform default locale from environment variables | - |
+| <Cpy path="Lib/locale.py" lines="441-480">441-480</Cpy> | `getpreferredencoding` | Return the encoding preferred for text I/O on the current platform | - |
+| <Cpy path="Lib/locale.py" lines="481-560">481-560</Cpy> | `normalize`, locale alias DB | Normalise a locale name string; the huge `locale_alias` dictionary | - |
+| <Cpy path="Lib/locale.py" lines="561-640">561-640</Cpy> | `resetlocale`, `getlocale` | Restore default locale; split a locale string into (language, encoding) | - |
+
+## Reading
+
+### Error and constants (lines 1 to 80)
+
+<CpyLink path="Lib/locale.py" lines="1-80" />
+
+The module re-exports every `LC_*` constant from `_locale` so callers never need to import the C extension directly. `Error` is a plain subclass of `Exception` and is the only exception this module raises.
+
+```python
+from _locale import (LC_ALL, LC_COLLATE, LC_CTYPE,
+                     LC_MESSAGES, LC_MONETARY, LC_NUMERIC, LC_TIME,
+                     Error)
+```
+
+### setlocale and localeconv (lines 81 to 140)
+
+<CpyLink path="Lib/locale.py" lines="81-140" />
+
+`setlocale` delegates directly to `_locale.setlocale`. When called with a tuple `(language, encoding)` it first joins them with a dot before passing to libc. `localeconv` returns a plain dict whose keys are the POSIX `lconv` field names: `decimal_point`, `thousands_sep`, `grouping`, `currency_symbol`, and so on.
+
+```python
+def setlocale(category, locale=None):
+    if locale and not isinstance(locale, _builtin_str):
+        # convert to string
+        locale = normalize(_build_localename(locale))
+    return _locale.setlocale(category, locale)
+```
+
+### format_string and currency (lines 141 to 280)
+
+<CpyLink path="Lib/locale.py" lines="141-280" />
+
+`format_string` scans the format string for `%` conversions with the `_percent_re` regular expression, formats each matched conversion with `_format`, then reassembles the pieces. `_format` inserts grouping separators by calling `_group` which walks the `grouping` list from `localeconv` to place commas (or locale equivalents) at the right positions.
+
+`currency` reads `localeconv` once, decides whether the symbol precedes or follows the value, and selects the correct sign format (negative-sign, parentheses, or space) from the `n_sign_posn` / `p_sign_posn` fields.
+
+```python
+def currency(val, symbol=True, grouping=False, international=False):
+    conv = localeconv()
+    # select the symbol
+    if international:
+        s = conv['int_curr_symbol']
+    elif symbol:
+        s = conv['currency_symbol']
+    else:
+        s = ''
+    ...
+```
+
+### Locale-aware collation (lines 341 to 390)
+
+<CpyLink path="Lib/locale.py" lines="341-390" />
+
+`strcoll` and `strxfrm` are direct pass-throughs to the libc functions exposed by `_locale`. No Python logic is added. When the C extension is not available the fallback implementations use plain `<` comparison and the identity function, which is correct only for the `C` locale.
+
+```python
+def strcoll(os1, os2):
+    # Borrowed from _locale.strcoll
+    return _locale.strcoll(os1, os2)
+
+def strxfrm(string):
+    return _locale.strxfrm(string)
+```
+
+### Locale alias normalisation (lines 481 to 560)
+
+<CpyLink path="Lib/locale.py" lines="481-560" />
+
+`normalize` lower-cases the input, strips spaces, and looks it up in `locale_alias`. The alias dictionary is several hundred entries mapping short names and Windows-style locale names to their POSIX canonical equivalents. The lookup is case-insensitive and falls back to the input unchanged if no alias is found.
+
+```python
+def normalize(localename):
+    # Normalize locale name
+    fullname = localename.lower()
+    fullname = fullname.replace(' ', '')
+    ...
+    return locale_alias.get(fullname, localename)
+```
+
+## gopy mirror
+
+Not yet ported.

@@ -1,0 +1,187 @@
+---
+title: Lib/unittest/mock.py
+description: Mock objects, patch decorators, and async mock support for unit testing; the reference implementation for Python's unittest.mock module.
+cpython_path: Lib/unittest/mock.py
+cpython_version: "3.14"
+lines: 3200
+status: annotated
+ported_to: (stdlib pending)
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Lib/unittest/mock.py`
+
+<CpyLink path="Lib/unittest/mock.py" />
+
+`unittest.mock` is a pure-Python module that ships with CPython and provides
+configurable mock objects, a rich assertion API, and a family of `patch`
+helpers for temporarily replacing names in a module's namespace during tests.
+
+The class hierarchy flows from `NonCallableMock` (attributes, spec enforcement,
+recording) through `Mock` (adds `__call__`) to `MagicMock` (adds magic method
+stubs). An independent branch handles async code: `AsyncMockMixin` and
+`AsyncMock` produce awaitables when called. `patch` and its variants are
+thin wrappers around `_patch`, which manages the save/restore lifecycle as
+both a decorator and a context manager.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Lib/unittest/mock.py" lines="1-100">1-100</Cpy> | Module prologue, `_all_magics`, `_non_defaults`, `_return_values` | Sentinel values (`DEFAULT`, `_missing`), the set of all special method names that MagicMock stubs, and the mapping of magic names to sensible default return values. | `(stdlib pending)` |
+| <Cpy path="Lib/unittest/mock.py" lines="100-400">100-400</Cpy> | `CallableMixin`, `NonCallableMock` | Base recording machinery: `_mock_children` dict (auto-child creation on `__getattr__`), `_mock_calls` list, `configure_mock`, `reset_mock`, `attach_mock`, `assert_called_*`. | `(stdlib pending)` |
+| <Cpy path="Lib/unittest/mock.py" lines="400-600">400-600</Cpy> | `Mock`, `MagicMixin`, `MagicMock`, `NonCallableMagicMock` | `Mock` adds `__call__` that records to `call_args` and returns `return_value`. `MagicMixin` installs stubs for all magic methods. `MagicMock` combines both. | `(stdlib pending)` |
+| <Cpy path="Lib/unittest/mock.py" lines="600-800">600-800</Cpy> | `_MockIter`, `_CallList`, `call`, `_Call` | `_Call` is a tuple subclass that compares equal to any call with the same args; `_CallList` uses it to implement `assert_has_calls` with optional `any_order`. | `(stdlib pending)` |
+| <Cpy path="Lib/unittest/mock.py" lines="800-1100">800-1100</Cpy> | `_patch`, `patch`, `patch.object`, `patch.dict`, `patch.multiple` | `_patch` stores the target object, attribute name, and new value; `__enter__` replaces and `__exit__` restores; `decorate_callable` wraps a function so entry/exit bracket each call. | `(stdlib pending)` |
+| <Cpy path="Lib/unittest/mock.py" lines="1100-1400">1100-1400</Cpy> | `patch` specialisations: `patch.stopall`, `start`/`stop`, `_patch_dict` | `patch.dict` saves a copy of the target mapping and restores on exit; `patch.multiple` creates a `_patch` per keyword argument; `_patches` registry enables `stopall`. | `(stdlib pending)` |
+| <Cpy path="Lib/unittest/mock.py" lines="1400-1800">1400-1800</Cpy> | `assert_called_*`, `assert_any_call`, `assert_has_calls`, `call_args_list` | The full assertion surface: `assert_called_once_with`, `assert_any_call` (scans `call_args_list`), `assert_has_calls` (subsequence or ordered match). | `(stdlib pending)` |
+| <Cpy path="Lib/unittest/mock.py" lines="1800-2200">1800-2200</Cpy> | `create_autospec`, `_check_signature`, `SpecState` | Recursively builds a `MagicMock` that mirrors the signature of the real object; uses `inspect.signature` to enforce argument counts on `__call__`. | `(stdlib pending)` |
+| <Cpy path="Lib/unittest/mock.py" lines="2200-2700">2200-2700</Cpy> | `AsyncMockMixin`, `AsyncMock`, `_AwaitEvent` | `AsyncMock.__call__` returns a coroutine; `assert_awaited_*` mirrors the sync assertion API; `_AwaitEvent` records each `await` for later inspection. | `(stdlib pending)` |
+| <Cpy path="Lib/unittest/mock.py" lines="2700-3200">2700-3200</Cpy> | `sentinel`, `ANY`, `PropertyMock`, `ThreadingMixin`, `_MockIter` | `sentinel` manufactures unique attribute objects on demand; `ANY` compares equal to everything; `PropertyMock` is a `MagicMock` that also acts as a data descriptor. | `(stdlib pending)` |
+
+## Reading
+
+### `NonCallableMock.__getattr__` auto-child creation (lines 100 to 400)
+
+<CpyLink path="Lib/unittest/mock.py" lines="100-400" />
+
+```python
+class NonCallableMock(Base):
+    def __getattr__(self, name):
+        if name in {'_mock_methods', '_mock_unsafe'}:
+            raise AttributeError(name)
+        elif self._mock_methods is not None:
+            if name not in self._mock_methods or name.startswith('_'):
+                raise AttributeError("Mock object has no attribute %r" % name)
+        elif _all_magics(name):
+            raise AttributeError(name)
+        if not self._mock_unsafe and (not self._mock_methods or
+            name not in self._mock_methods):
+            if name.startswith(('assert', 'assret', 'asert', 'aseert', 'assrt')):
+                raise AttributeError(
+                    f"{name!r} is not a supported mock method."
+                )
+        result = self._mock_children[name]
+        if result is _deleted:
+            raise AttributeError(name)
+        elif result is None:
+            wraps = None
+            if self._mock_wraps is not None:
+                wraps = getattr(self._mock_wraps, name)
+            return self._get_child_mock(
+                parent=self, name=name, wraps=wraps, _new_name=name,
+                _new_parent=self
+            )
+        return result
+```
+
+Every attribute access on a `NonCallableMock` that hits `__getattr__` either
+raises (if the spec prohibits it, or if the name looks like a misspelled
+`assert_*`) or auto-creates a child mock stored in `self._mock_children[name]`.
+Child mocks carry back-references (`_new_parent`, `_new_name`) used to build
+the dotted call path recorded in `_mock_calls`.
+
+The guard against `assert` prefixes catches common typos such as
+`mock.assert_called()` (note: no parentheses on the wrong name). Previously
+these silently passed because `__getattr__` returned a new child mock that
+was always truthy.
+
+### `patch()` decorator and context manager (lines 800 to 1100)
+
+<CpyLink path="Lib/unittest/mock.py" lines="800-1100" />
+
+```python
+class _patch:
+    def __enter__(self):
+        ...
+        original, local = self.get_original()
+        if self.new is DEFAULT:
+            new = self.new_callable()
+            ...
+        self.temp_original = original
+        self.is_local = local
+        setattr(self.getter(), self.attribute, new)
+        ...
+        return new
+
+    def __exit__(self, *exc_info):
+        ...
+        if self.is_local and self.temp_original is not DEFAULT:
+            setattr(self.getter(), self.attribute, self.temp_original)
+        elif not self.is_local:
+            delattr(self.getter(), self.attribute)
+        ...
+```
+
+`patch(target)` splits the dotted `target` string into a module path and an
+attribute name, imports the module, and stores both in a `_patch` instance.
+`get_original()` looks up the current value via `getattr` and flags whether
+the attribute was defined locally on the object or inherited. On exit,
+`__exit__` restores local attributes with `setattr` and removes temporarily
+injected attributes with `delattr`, preserving the exact pre-patch state.
+
+As a decorator, `decorate_callable` wraps the test function so that
+`__enter__` runs before the function and `__exit__` runs after, with the
+new mock passed as an extra positional argument.
+
+### `MagicMixin` magic method table (lines 400 to 600)
+
+<CpyLink path="Lib/unittest/mock.py" lines="400-600" />
+
+```python
+_return_values = {
+    '__lt__': NotImplemented,
+    '__gt__': NotImplemented,
+    '__le__': NotImplemented,
+    '__ge__': NotImplemented,
+    '__int__': 1,
+    '__contains__': False,
+    '__len__': 0,
+    '__iter__': iter([]),
+    '__exit__': False,
+    '__complex__': 1j,
+    '__float__': 1.0,
+    '__bool__': True,
+    '__index__': 1,
+}
+
+class MagicMixin(Base):
+    def __init__(self, /, *args, **kw):
+        self._mock_set_magics()
+
+    def _mock_set_magics(self):
+        these_magics = self._mock_methods or magic_methods
+        remove_magics = set()
+        remove_magics = magic_methods - these_magics
+        for magic in these_magics:
+            klass = type(self)
+            current = klass.__dict__.get(magic)
+            if current is _get_method(magic, type(self)):
+                # Magics already set up.
+                continue
+            setattr(klass, magic, _get_method(magic, klass))
+        for magic in remove_magics:
+            if magic in type(self).__dict__:
+                delattr(type(self), magic)
+```
+
+Magic methods in Python are looked up on the type, not the instance. To
+support `len(mock)`, `mock + x`, `mock[key]`, and `with mock:`, `MagicMixin`
+installs stub methods directly on a *per-instance subclass* created by
+`_MockIter`. Each stub records the call like any other mock call and returns
+the value from `_return_values` (or a new child mock for methods not listed).
+The `__iter__` default returns `iter([])` so `for x in mock:` terminates
+immediately without raising.
+
+## gopy mirror
+
+`unittest.mock` has no C accelerator and no FFI surface. The entire module
+is pure Python. A gopy port requires a working `inspect.signature`, `functools.wraps`,
+and the `weakref` machinery (used internally by `NonCallableMock` to clean
+up child mock references). The `patch` family also needs a functioning import
+system (`importlib.import_module`) to resolve dotted target strings.
+
+The async surface (`AsyncMock`, `_AwaitEvent`) depends on the coroutine and
+`asyncio` event loop infrastructure and should be deferred until after the
+sync mock layer is complete.

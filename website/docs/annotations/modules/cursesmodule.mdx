@@ -1,0 +1,132 @@
+---
+title: Modules/_cursesmodule.c
+description: Low-level Python bindings for the ncurses terminal interface library.
+cpython_path: Modules/_cursesmodule.c
+cpython_version: "3.14"
+lines: 4500
+status: annotated
+ported_to: ""
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Modules/_cursesmodule.c`
+
+<CpyLink path="Modules/_cursesmodule.c" />
+
+`_cursesmodule.c` is the C extension backing Python's `curses` standard library module. It wraps the system ncurses (or curses) library and exposes screen, window, and color management to Python programs that need direct terminal control. The file is large, roughly 4500 lines, because it provides a nearly complete mapping of the ncurses API surface rather than a thin façade.
+
+The module is structured in two tiers. The top-level functions, exposed on the `_curses` module object itself, handle global terminal state: `initscr` initializes the terminal, `endwin` restores it, `newwin` allocates sub-windows, and color helpers like `start_color` and `init_pair` configure the 256-color or 8-color palette. The second tier lives on `PyCursesWindowObject`, a heap-allocated Python type that wraps a single `WINDOW *` pointer and provides per-window methods such as `addstr`, `refresh`, `getch`, `move`, `getyx`, and `border`.
+
+Error handling throughout the file follows a consistent pattern: ncurses functions return `ERR` on failure, and the module translates that into a `_curses.error` exception raised through the `PyCursesSetupTermCalled` guard and `PyCursesCheckErr` helper. The Clinic-generated argument clinic stubs (`.clinic/_cursesmodule.c.h`) handle most argument parsing, keeping the method bodies short and focused on the ncurses call and its return value.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| 1-120 | module setup, `PyCursesError` | Exception type and init guards | |
+| 121-600 | `PyCursesWindowObject` type + core methods | `addstr`, `move`, `refresh`, `getch`, `getyx` | |
+| 601-1200 | Window drawing methods | `border`, `box`, `hline`, `vline`, `addch`, `insch` | |
+| 1201-2000 | Window attribute + color methods | `attrset`, `bkgd`, `chgat`, `color_set` | |
+| 2001-2800 | Window query methods | `getstr`, `instr`, `inch`, `getbegyx`, `getmaxyx` | |
+| 2801-3600 | Top-level module functions | `initscr`, `endwin`, `newwin`, `wrapper` | |
+| 3601-4200 | Color and key management | `start_color`, `init_pair`, `color_pair`, `has_colors` | |
+| 4201-4500 | Module init, constants table | `PyInit__curses`, key/attr constant registration | |
+
+## Reading
+
+### Exception setup and init guards (lines 1 to 120)
+
+<CpyLink path="Modules/_cursesmodule.c" lines="1-120" />
+
+The file opens by defining `PyCursesError`, the module-level exception subclassing `Exception`. Two macros gate every public function: `PyCursesSetupTermCalled` raises `error` if `initscr` has not yet been called, and `PyCursesInitialised` does the same for the top-level module functions. This ensures ncurses is never called before the terminal is initialized, matching the contract ncurses itself requires.
+
+```c
+static PyObject *PyCursesError;
+
+#define PyCursesSetupTermCalled(X) \
+    if (!initialised_setupterm) { \
+        PyErr_SetString(PyCursesError, \
+            "must call (at least) setupterm() first"); \
+        return X; }
+```
+
+### `PyCursesWindowObject` and core window methods (lines 121 to 600)
+
+<CpyLink path="Modules/_cursesmodule.c" lines="121-600" />
+
+`PyCursesWindowObject` holds a single `WINDOW *win` field and an `encoding` string copied from the locale at window creation. The core methods, `addstr`, `move`, `refresh`, and `getch`, are defined here. Each method follows the same shape: parse Python arguments with Argument Clinic, call the ncurses function, and return `None` on success or raise `_curses.error` on `ERR`. `getch` is the only one that returns a meaningful integer value, the character code or a special-key constant.
+
+```c
+static PyObject *
+PyCurses_window_addstr(PyCursesWindowObject *self, PyObject *args)
+{
+    int rtn;
+    /* ... argument parsing ... */
+    rtn = waddnstr(self->win, str, n);
+    return PyCursesCheckErr(rtn, "addstr");
+}
+```
+
+### Window drawing and border methods (lines 601 to 1200)
+
+<CpyLink path="Modules/_cursesmodule.c" lines="601-1200" />
+
+Box-drawing functions `border`, `box`, `hline`, and `vline` wrap the corresponding ncurses primitives. `border` accepts up to eight character arguments for the left, right, top, bottom, and four corner cells. When no arguments are given the ncurses default box-drawing characters are used. The attribute helpers `addch` and `insch` handle the interaction between Python integer character codes and ncurses `chtype`, which packs a character and its display attributes into a single wide integer.
+
+```c
+static PyObject *
+PyCurses_window_border(PyCursesWindowObject *self, PyObject *args)
+{
+    chtype ls=0, rs=0, ts=0, bs=0,
+           tl=0, tr=0, bl=0, br=0;
+    if (!PyArg_ParseTuple(args, "|kkkkkkkk;ls,rs,ts,bs,tl,tr,bl,br",
+                          &ls, &rs, &ts, &bs, &tl, &tr, &bl, &br))
+        return NULL;
+    return PyCursesCheckErr(wborder(self->win, ls,rs,ts,bs,tl,tr,bl,br),
+                            "border");
+}
+```
+
+### Top-level module functions (lines 2801 to 3600)
+
+<CpyLink path="Modules/_cursesmodule.c" lines="2801-3600" />
+
+`initscr` calls the ncurses `initscr()` C function, sets the module-level `initialised` flag, wraps the returned `stdscr` in a `PyCursesWindowObject`, and stores it as `_curses.initscr_called`. `endwin` is a thin wrapper that clears the `initialised` flag and calls `endwin()`. `newwin` allocates a new `WINDOW *` via `newwin()` and returns a fresh Python window object. The Python-level `wrapper` convenience function is implemented in pure Python in `curses/__init__.py`, not here.
+
+```c
+static PyObject *
+PyCurses_InitScr(PyObject *module, PyObject *noargs)
+{
+    WINDOW *win = initscr();
+    if (win == NULL) {
+        PyErr_SetString(PyCursesError, catchall_NULL);
+        return NULL;
+    }
+    initialised = TRUE;
+    return (PyObject *)PyCursesWindow_New(win, NULL);
+}
+```
+
+### Color management (lines 3601 to 4200)
+
+<CpyLink path="Modules/_cursesmodule.c" lines="3601-4200" />
+
+`start_color` enables terminal color support and must be called after `initscr`. `init_pair(pair, fg, bg)` assigns foreground and background color numbers to a color-pair index. `color_pair(n)` returns the `chtype` attribute value for pair `n`, suitable for OR-ing into `addstr` attribute arguments. `has_colors` and `can_change_color` query terminal capabilities. All six functions validate that `start_color` has been called and that color-pair indices are within the range `[0, COLOR_PAIRS-1]`.
+
+```c
+static PyObject *
+PyCurses_InitPair(PyObject *module, PyObject *args)
+{
+    short pair, f, b;
+    if (!PyArg_ParseTuple(args, "hhh;pair, fg, bg", &pair, &f, &b))
+        return NULL;
+    if (init_pair(pair, f, b) == ERR)
+        return PyCursesCheckErr(ERR, "init_pair");
+    Py_RETURN_NONE;
+}
+```
+
+## gopy mirror
+
+Not yet ported.

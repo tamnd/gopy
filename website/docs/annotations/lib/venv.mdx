@@ -1,0 +1,134 @@
+---
+title: Lib/venv/__init__.py
+description: Virtual environment creation and management via the EnvBuilder class, supporting both symlink and copy modes for the Python interpreter.
+cpython_path: Lib/venv/__init__.py
+cpython_version: "3.14"
+lines: 470
+status: annotated
+ported_to: ""
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Lib/venv/__init__.py`
+
+<CpyLink path="Lib/venv/__init__.py" />
+
+`venv` is the stdlib module behind `python -m venv`. Its central class is `EnvBuilder`, which orchestrates the full lifecycle of a virtual environment: directory layout, `pyvenv.cfg` generation, Python interpreter installation (by symlink or copy), pip bootstrapping, and optional post-setup hooks. The module-level `create` function is a thin convenience wrapper around `EnvBuilder`.
+
+A virtual environment is a self-contained directory tree that contains a Python interpreter, a `site-packages` directory for third-party packages, and activation scripts for several shells. The `pyvenv.cfg` file at the root records the `home` key (the directory of the base interpreter) and flags like `include-system-site-packages`, allowing the embedded interpreter to locate the base stdlib while keeping installed packages isolated.
+
+The implementation deliberately avoids subprocess for interpreter installation. Instead it uses `os.symlink`, `shutil.copy2`, and direct file I/O, which makes venv creation fast and avoids shell-quoting pitfalls. Activation scripts are copied from `Lib/venv/scripts/` in the CPython source tree and patched with the actual environment path at install time.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| 1-30 | imports, `__all__` | Module header | - |
+| 31-80 | `EnvBuilder.__init__` | Constructor, option storage | - |
+| 81-130 | `EnvBuilder.create` | Top-level entry point, calls pipeline methods | - |
+| 131-200 | `EnvBuilder.ensure_directories` | Directory layout and `context` object creation | - |
+| 201-250 | `EnvBuilder.create_configuration` | `pyvenv.cfg` writer | - |
+| 251-320 | `EnvBuilder.setup_python` | Interpreter symlink or copy into `bin/` | - |
+| 321-390 | `EnvBuilder.setup_scripts` | Activation script installation and patching | - |
+| 391-440 | `EnvBuilder.install_scripts`, `post_setup` | pip bootstrap and user hook | - |
+| 441-470 | `create` | Module-level shorthand | - |
+
+## Reading
+
+### EnvBuilder.create (lines 81 to 130)
+
+<CpyLink path="Lib/venv/__init__.py" lines="81-130" />
+
+`create` is the public entry point. It calls the pipeline methods in order: `ensure_directories`, `create_configuration`, `setup_python`, `setup_scripts`, and finally `post_setup`. Each method receives a `context` object (a `SimpleNamespace`) that `ensure_directories` builds and populates with resolved paths. This context travels through the entire pipeline, acting as the shared state record for one environment creation run.
+
+If `clear=True` was passed to the constructor, `create` removes any existing directory before starting. If `upgrade=True`, it skips directory creation and only refreshes the interpreter and scripts.
+
+```python
+def create(self, env_dir):
+    env_dir = os.path.abspath(env_dir)
+    context = self.ensure_directories(env_dir)
+    self.create_configuration(context)
+    self.setup_python(context)
+    if self.with_pip:
+        self._setup_pip(context)
+    if not self.upgrade:
+        self.setup_scripts(context)
+        self.post_setup(context)
+```
+
+### ensure_directories (lines 131 to 200)
+
+<CpyLink path="Lib/venv/__init__.py" lines="131-200" />
+
+`ensure_directories` resolves the base interpreter (following symlinks to find the real executable), determines the platform-specific subdirectory layout (`bin` on Unix, `Scripts` on Windows), creates the directory tree with `os.makedirs`, and returns a populated `SimpleNamespace`. The namespace fields include `env_dir`, `env_name`, `cfg_path`, `bin_path`, `bin_name`, `env_exe`, `python_path`, and several `sys.*` mirrors from the base interpreter.
+
+On Windows the layout differs: the scripts directory is `Scripts\`, the interpreter is `python.exe`, and `site-packages` lives directly under the environment root rather than under a versioned `lib/` path.
+
+```python
+def ensure_directories(self, env_dir):
+    context = types.SimpleNamespace()
+    ...
+    context.cfg_path = venv = os.path.join(env_dir, "pyvenv.cfg")
+    context.bin_path = binpath = os.path.join(env_dir, dirname)
+    os.makedirs(binpath, exist_ok=True)
+    ...
+    return context
+```
+
+### create_configuration (lines 201 to 250)
+
+<CpyLink path="Lib/venv/__init__.py" lines="201-250" />
+
+`create_configuration` writes `pyvenv.cfg` as a plain key=value text file (not an INI file; there is no section header). The mandatory keys are `home` (directory containing the base interpreter), `include-system-site-packages` (true/false), and `version` (the base Python version string). Optional keys added in later Python versions include `executable`, `command`, and `prompt`.
+
+The `home` key is what the embedded interpreter reads at startup to locate the base stdlib. The venv `site.py` uses it to decide which `sys.path` entries to inject.
+
+```python
+def create_configuration(self, context):
+    context.cfg_path = venv = context.cfg_path
+    with open(venv, "w", encoding="utf-8") as f:
+        f.write("home = %s\n" % context.python_dir)
+        f.write("include-system-site-packages = %s\n" %
+                ("true" if self.system_site_packages else "false"))
+        f.write("version = %d.%d.%d\n" % sys.version_info[:3])
+```
+
+### setup_python (lines 251 to 320)
+
+<CpyLink path="Lib/venv/__init__.py" lines="251-320" />
+
+`setup_python` places the Python interpreter into the environment's `bin/` directory. When `symlinks=True` (the default on Unix), it creates a symlink from `bin/python3` to the absolute path of the base interpreter, then adds additional symlinks for the versioned name (`python3.x`) and the unversioned `python`. When `symlinks=False` or on Windows, it copies the interpreter binary with `shutil.copy2`.
+
+The method also handles the `pythonw` variant on Windows (the windowless GUI interpreter) if it is present alongside the main executable.
+
+```python
+def setup_python(self, context):
+    binpath = context.bin_path
+    path = context.env_exe
+    copier = shutil.copy2
+    if self.symlinks:
+        copier = os.symlink
+        ...
+    copier(context.python_path, path)
+    if not os.path.islink(path):
+        os.chmod(path, 0o755)
+```
+
+### setup_scripts and post_setup (lines 321 to 440)
+
+<CpyLink path="Lib/venv/__init__.py" lines="321-440" />
+
+`setup_scripts` copies activation scripts from the `scripts/` subdirectory of the `venv` package itself. It iterates over `common/` and the platform-specific subdirectory (`posix/` or `nt/`), reads each file, replaces the `__VENV_DIR__`, `__VENV_NAME__`, `__VENV_PROMPT__`, and `__VENV_BIN_NAME__` placeholders with the actual values from `context`, and writes the result to the environment's `bin/` directory.
+
+`post_setup` is an intentional no-op hook. Subclasses override it to add extra files or run additional setup steps after the standard pipeline finishes. `install_scripts` is the internal method that actually invokes pip via `subprocess` when `with_pip=True`.
+
+```python
+def post_setup(self, context):
+    """Override in subclasses for custom post-setup."""
+    pass
+```
+
+## gopy mirror
+
+Not yet ported.

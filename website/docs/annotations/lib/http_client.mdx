@@ -1,0 +1,216 @@
+---
+title: Lib/http/client.py
+description: HTTP/1.x client: HTTPConnection and HTTPSConnection manage TCP/TLS sockets, send requests, and parse responses including chunked transfer encoding.
+cpython_path: Lib/http/client.py
+cpython_version: "3.14"
+lines: 1700
+status: annotated
+ported_to: (stdlib pending)
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Lib/http/client.py`
+
+<CpyLink path="Lib/http/client.py" />
+
+`http.client` provides the raw HTTP/1.x client connection layer. The two
+main classes are `HTTPConnection` (plain TCP) and `HTTPSConnection` (TLS
+via `ssl`). Both share the same request/response machinery: `request()`
+assembles and sends a complete HTTP request, and `getresponse()` reads and
+parses the reply into an `HTTPResponse` object.
+
+Connection state is tracked with three constants: `_CS_IDLE`,
+`_CS_REQ_STARTED` (headers being written), and `_CS_REQ_SENT` (body
+sent, waiting for response). Calling methods in the wrong order raises
+`CannotSendHeader` or `CannotSendRequest`.
+
+`HTTPResponse` wraps the socket's `makefile()` reader. It parses the
+status line and headers using `http.client.parse_headers` (which calls
+`email.feedparser` internally), then exposes `read()`, `readline()`,
+`readinto()`, `read1()`, and `peek()` with correct handling of
+Content-Length, chunked Transfer-Encoding, and connection close.
+
+The exception hierarchy (`HTTPException`, `NotConnected`,
+`InvalidURL`, `UnknownProtocol`, `UnknownTransferEncoding`,
+`CannotSendRequest`, `CannotSendHeader`, `ResponseNotReady`,
+`BadStatusLine`, `RemoteDisconnected`) mirrors the RFC 7230 error
+taxonomy.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Lib/http/client.py" lines="1-300">1-300</Cpy> | `HTTPResponse.__init__`, `_read_status`, `begin` | Socket wrapping with `makefile`; status-line parsing; header reading via `http.client.parse_headers`; keep-alive detection. | `(stdlib pending)` |
+| <Cpy path="Lib/http/client.py" lines="300-700">300-700</Cpy> | `HTTPResponse.read`, `readline`, `_read_chunked`, `_safe_read` | Body reading: Content-Length path, chunked decode loop, connection-close path; `_safe_read` guards against truncated responses. | `(stdlib pending)` |
+| <Cpy path="Lib/http/client.py" lines="700-1100">700-1100</Cpy> | `HTTPConnection.__init__`, `connect`, `request`, `putrequest`, `putheader`, `endheaders`, `send` | TCP connection setup; request serialization into `putrequest` / `putheader` / `endheaders` / `send`; auto-chunked body for file-like objects. | `(stdlib pending)` |
+| <Cpy path="Lib/http/client.py" lines="1100-1700">1100-1700</Cpy> | `HTTPSConnection`, `HTTPConnection.getresponse`, exception classes | TLS wrapping via `ssl.wrap_socket`; `getresponse` enforces state machine; full exception hierarchy. | `(stdlib pending)` |
+
+## Reading
+
+### `HTTPConnection.request` flow (lines 700 to 1100)
+
+<CpyLink path="Lib/http/client.py" lines="700-1100" />
+
+```python
+def request(self, method, url, body=None, headers={}, *,
+            encode_chunked=False):
+    self._send_request(method, url, body, headers, encode_chunked)
+
+def _send_request(self, method, url, body, headers, encode_chunked=False):
+    # Determine if we should use chunked transfer encoding
+    header_names = {k.lower() for k in headers}
+    skips = {}
+    if 'host' in header_names:
+        skips['skip_host'] = 1
+    if 'accept-encoding' in header_names:
+        skips['skip_accept_encoding'] = 1
+
+    self.putrequest(method, url, **skips)
+
+    if body is not None:
+        if hasattr(body, 'read'):
+            # file-like: use chunked unless Content-Length provided
+            if 'content-length' not in header_names:
+                if not encode_chunked:
+                    try:
+                        content_length = os.fstat(body.fileno()).st_size
+                    except (AttributeError, OSError):
+                        encode_chunked = True
+                if encode_chunked:
+                    self.putheader('Transfer-Encoding', 'chunked')
+            else:
+                encode_chunked = False
+        elif isinstance(body, str):
+            body = body.encode('iso-8859-1')
+
+    for hdr, value in headers.items():
+        self.putheader(hdr, value)
+
+    if body is not None and 'content-length' not in header_names:
+        if not encode_chunked:
+            self.putheader('Content-Length', str(len(body)))
+
+    self.endheaders(body, encode_chunked=encode_chunked)
+```
+
+`request()` is a one-shot convenience wrapper over the lower-level
+`putrequest` / `putheader` / `endheaders` pipeline. The pipeline exists
+so callers that need fine-grained header control (streaming uploads,
+custom `Expect: 100-continue` flows) can drive it directly.
+
+Auto-chunking logic: if the body is file-like and no `Content-Length`
+header is provided, the code attempts `os.fstat(body.fileno()).st_size`.
+If that fails (e.g., a network stream or `BytesIO` that has no real file
+descriptor), `encode_chunked` is forced to `True` and
+`Transfer-Encoding: chunked` is added.
+
+`endheaders` flushes the header bytes and, if a body was passed,
+calls `send(body)`. `send` then either writes the body in one shot or
+iterates chunks, each preceded by the hex chunk-size line.
+
+### `HTTPResponse._read_status` (lines 1 to 300)
+
+<CpyLink path="Lib/http/client.py" lines="1-300" />
+
+```python
+def _read_status(self):
+    line = str(self.fp.readline(_MAXLINE + 1), "iso-8859-1")
+    if len(line) > _MAXLINE:
+        raise LineTooLong("status line")
+    if self.debuglevel > 0:
+        print("reply:", repr(line))
+    if not line:
+        raise RemoteDisconnected("Remote end closed connection without"
+                                 " response")
+    try:
+        version, status, reason = line.split(None, 2)
+    except ValueError:
+        try:
+            version, status = line.split(None, 1)
+            reason = ""
+        except ValueError:
+            version = ""
+    if not version.startswith("HTTP/"):
+        self._close_conn()
+        raise BadStatusLine(line)
+    try:
+        status = int(status)
+        if status < 100 or status > 999:
+            raise BadStatusLine(line)
+    except ValueError:
+        raise BadStatusLine(line)
+    return version, status, reason.strip()
+```
+
+`_read_status` reads exactly one line (bounded to `_MAXLINE` = 65536
+bytes to guard against denial-of-service via an infinitely long status
+line). It splits on whitespace with `maxsplit=2` so that reason phrases
+containing spaces (`"Not Found"`, `"Internal Server Error"`) are kept
+intact. The `status` integer is range-checked to `[100, 999]`.
+`RemoteDisconnected` (a subclass of `ConnectionResetError`) is raised on
+an empty line, distinguishing a clean TCP close from a protocol violation.
+
+### Chunked transfer-encoding decode (lines 300 to 700)
+
+<CpyLink path="Lib/http/client.py" lines="300-700" />
+
+```python
+def _read_chunked(self, amt):
+    assert self.chunked != _UNKNOWN
+    value = []
+    try:
+        while True:
+            line = self.fp.readline(_MAXLINE + 1)
+            if len(line) > _MAXLINE:
+                raise LineTooLong("chunk size")
+            i = line.find(b";")
+            if i >= 0:
+                line = line[:i]   # strip chunk extensions
+            try:
+                chunk_left = int(line, 16)
+            except ValueError:
+                self._close_conn()
+                raise IncompleteRead(b''.join(value))
+            if chunk_left == 0:
+                break
+            if amt is not None:
+                value.append(self._safe_read(min(amt, chunk_left)))
+                amt -= chunk_left
+                if amt <= 0:
+                    self._safe_read(chunk_left - len(value[-1]))
+                    break
+            else:
+                value.append(self._safe_read(chunk_left))
+            self._safe_read(2)   # consume trailing CRLF after chunk data
+        # Read and discard trailers
+        while True:
+            line = self.fp.readline(_MAXLINE + 1)
+            if not line or line in (b'\r\n', b'\n', b' '):
+                break
+        self.chunk_left = 0
+        return b''.join(value)
+    except IncompleteRead:
+        self._close_conn()
+        raise
+```
+
+Each chunk is preceded by its size in hexadecimal, optionally followed
+by a semicolon-delimited extension (e.g., `name=value`). The extension
+is stripped before parsing the integer. A chunk size of zero signals the
+last chunk. `_safe_read(n)` raises `IncompleteRead` if the socket returns
+fewer than `n` bytes, which can happen if the server closes the connection
+prematurely. The two-byte CRLF after each chunk body is consumed with a
+second `_safe_read(2)` call.
+
+## gopy mirror
+
+`http.client` in gopy will wrap `net/http` from the Go standard library
+for the actual TCP/TLS transport, but expose the CPython-compatible
+`HTTPConnection` / `HTTPResponse` Python API on top. The request
+serialization methods (`putrequest`, `putheader`, `endheaders`) can be
+implemented in pure Python since they only manipulate byte buffers. The
+`HTTPResponse` parsing layer (status line, headers, body reading) maps
+onto `net/http.Response` fields once the initial Go request completes.
+Chunked decoding is handled transparently by Go's `net/http` transport,
+so the gopy `_read_chunked` equivalent will not need the manual loop.

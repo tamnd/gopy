@@ -1,0 +1,129 @@
+---
+title: Include/cpython/weakrefobject.h
+description: CPython-internal weak reference API; declares PyWeakReference layout, ref-count helpers, and the PyWeakref_GET_OBJECT macro.
+cpython_path: Include/cpython/weakrefobject.h
+cpython_version: "3.14"
+lines: 100
+status: annotated
+ported_to: objects/weakref.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Include/cpython/weakrefobject.h`
+
+The CPython-internal header for weak references. The public API lives in
+`Include/weakrefobject.h`; this file adds the struct layout, internal
+helpers, and macros that only C extension authors who opt into the CPython ABI
+(or CPython itself) should touch.
+
+## Map
+
+| Symbol | Kind | What it does |
+|---|---|---|
+| `PyWeakReference` | struct | Full layout of a weak-ref object: `wr_object`, `wr_callback`, hash cache, doubly-linked list pointers |
+| `_PyWeakref_GetWeakrefCount` | function | Returns the number of live weak refs pointing at a given object |
+| `_PyWeakref_ClearRef` | function | Zeroes `wr_object` on a single ref (called by the GC during object finalization) |
+| `PyWeakref_GET_OBJECT` | macro | Reads `wr_object` without a NULL check, faster than `PyWeakref_GetObject()` |
+| `_PyObject_GET_WEAKREFS_LISTPTR` | macro | Given any object, returns the pointer to its `tp_weaklistoffset` slot so the GC can walk the chain |
+
+## Reading
+
+### `PyWeakReference` struct layout
+
+The struct stores everything needed for the GC to walk and clear all refs to
+a dying object. The doubly-linked list (`wr_prev`, `wr_next`) hangs off the
+referent's `tp_weaklistoffset` slot.
+
+```c
+// Include/cpython/weakrefobject.h:10
+struct _PyWeakReference {
+    PyObject_HEAD
+
+    /* The weakly-referenced object, or Py_None if cleared. */
+    PyObject *wr_object;
+
+    /* Optional callable invoked when wr_object is finalized. */
+    PyObject *wr_callback;
+
+    /* Cached hash of wr_object; -1 means not yet computed. */
+    Py_hash_t hash;
+
+    /* Doubly-linked list of all weak refs to the same object. */
+    PyWeakReference *wr_object_prev;
+    PyWeakReference *wr_object_next;
+};
+```
+
+The list is intrusive: no separate node allocation is needed. The GC iterates
+the list starting from the pointer stored at `tp_weaklistoffset` inside the
+referent's memory.
+
+### `PyWeakref_GET_OBJECT` vs `PyWeakref_GetObject`
+
+There are two ways to read the referent from C code. The macro form skips the
+`Py_None` check and returns whatever is in `wr_object` directly. Use it only
+when the caller has already verified the ref is live.
+
+```c
+// Include/cpython/weakrefobject.h:72
+#define PyWeakref_GET_OBJECT(ref) \
+    (((PyWeakReference *)(ref))->wr_object)
+
+/* Safe public version (Include/weakrefobject.h):           */
+/* Returns the referent, or Py_None if the ref was cleared. */
+PyObject *PyWeakref_GetObject(PyObject *ref);
+```
+
+Calling the macro on a cleared ref returns `Py_None` (since `_PyWeakref_ClearRef`
+writes `Py_None` there, not NULL), so a NULL-deref crash is not the typical
+failure mode. The real risk is operating on `Py_None` thinking it is the
+original object.
+
+### GC clearing path via `_PyWeakref_ClearRef`
+
+When the GC determines an object is unreachable it calls
+`_PyWeakref_ClearRef` for every node in the weak-ref list before the
+finalizer runs. This sets `wr_object` to `Py_None`, fires `wr_callback` if
+present, and unlinks the node.
+
+```c
+// Objects/weakrefobject.c (implementation of the header declaration)
+void
+_PyWeakref_ClearRef(PyWeakReference *self)
+{
+    PyObject *callback = self->wr_callback;
+    self->wr_callback = NULL;
+    Py_CLEAR(self->wr_object);        /* sets to NULL, then to Py_None via INCREF */
+    self->wr_object = Py_None;
+    Py_INCREF(Py_None);
+    if (callback != NULL) {
+        /* schedule callback; omitted for brevity */
+    }
+}
+```
+
+The GC then advances to the next node using `wr_object_next` before it was
+cleared, so the list must be walked before any clearing begins.
+
+## gopy mirror
+
+Ported to `objects/weakref.go`. The Go struct mirrors `PyWeakReference` with
+fields `WrObject`, `WrCallback`, `hash`, and a doubly-linked list through
+`prev`/`next` pointers. `_PyWeakref_ClearRef` maps to `(*WeakReference).Clear()`,
+and `PyWeakref_GET_OBJECT` maps to `(*WeakReference).GetObject()` (unchecked)
+alongside a safe `Get()` variant that returns `None` when cleared.
+
+`_PyObject_GET_WEAKREFS_LISTPTR` is handled via the `WeakrefsListPtr()`
+method on `objects.Object`, which reads the weakref-list pointer from the
+type's `WrListOffset` field.
+
+## CPython 3.14 changes
+
+- The doubly-linked list fields were renamed from `wr_prev`/`wr_next` to
+  `wr_object_prev`/`wr_object_next` in 3.13 to clarify that the links follow
+  the object chain, not a per-callback chain.
+- `_PyWeakref_GetWeakrefCount` gained a `Py_ssize_t` return type (was `long`
+  in earlier versions).
+- Internal visibility annotations (`Py_CPYTHON_ONLY`) were added to flag that
+  direct struct access is not stable ABI.

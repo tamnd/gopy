@@ -1,0 +1,176 @@
+---
+title: Lib/selectors.py
+description: Platform-adaptive I/O multiplexing selectors built on select(), poll(), epoll(), and kqueue(), with a uniform BaseSelector ABC.
+cpython_path: Lib/selectors.py
+cpython_version: "3.14"
+lines: 600
+status: annotated
+ported_to: (stdlib pending)
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Lib/selectors.py`
+
+<CpyLink path="Lib/selectors.py" />
+
+`selectors` presents a single `DefaultSelector` class that resolves at
+import time to the most efficient selector available on the current
+platform. All selector classes share the `BaseSelector` ABC, which
+defines `register`, `unregister`, `modify`, `select`, `close`, and
+`get_map`. The `SelectorKey` named tuple carries the registered file
+object, its underlying file descriptor, the event mask, and optional user
+data.
+
+The event constants `EVENT_READ` (1) and `EVENT_WRITE` (4) match the bits
+used by `select.POLLIN` and `select.POLLOUT` so that `PollSelector` can
+pass them directly to `poll.register` without translation.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Lib/selectors.py" lines="1-60">1-60</Cpy> | `EVENT_READ`, `EVENT_WRITE`, `SelectorKey`, `_fileobj_lookup` | Constants and the helper that normalises any file-like object to its integer fd via `fileno()`. | `(stdlib pending)` |
+| <Cpy path="Lib/selectors.py" lines="61-150">61-150</Cpy> | `BaseSelector` | ABC declaring `register`, `unregister`, `modify`, `select`, `close`, `get_key`, `get_map`; implements `__enter__`/`__exit__` and `modify` as `unregister+register`. | `(stdlib pending)` |
+| <Cpy path="Lib/selectors.py" lines="151-230">151-230</Cpy> | `_BaseSelectorImpl` | Concrete base that stores keys in `self._fd_to_key`; supplies the `_fileobj_lookup` normalization and `get_map` implementation used by all subclasses. | `(stdlib pending)` |
+| <Cpy path="Lib/selectors.py" lines="231-300">231-300</Cpy> | `SelectSelector` | Uses `select.select()`; works on every platform including Windows; splits the registered fds into read-set and write-set for the syscall. | `(stdlib pending)` |
+| <Cpy path="Lib/selectors.py" lines="301-370">301-370</Cpy> | `PollSelector` | Uses `select.poll()`; available on Linux and most POSIX systems; a single `poll` object holds all registrations. | `(stdlib pending)` |
+| <Cpy path="Lib/selectors.py" lines="371-450">371-450</Cpy> | `EpollSelector` | Uses `select.epoll()`; Linux only; edge-triggered or level-triggered; `fileno()` returns the epoll fd itself for nested use. | `(stdlib pending)` |
+| <Cpy path="Lib/selectors.py" lines="451-530">451-530</Cpy> | `KqueueSelector` | Uses `select.kqueue()`; macOS and BSD; registers separate `kevent` filters for reads and writes. | `(stdlib pending)` |
+| <Cpy path="Lib/selectors.py" lines="531-600">531-600</Cpy> | `DefaultSelector`, platform resolution | Picks the best available class at import time; order is `EpollSelector`, `KqueueSelector`, `PollSelector`, `SelectSelector`. | `(stdlib pending)` |
+
+## Reading
+
+### `BaseSelector.register` protocol (lines 61 to 150)
+
+<CpyLink path="Lib/selectors.py" lines="61-150" />
+
+```python
+class BaseSelector(metaclass=ABCMeta):
+    @abstractmethod
+    def register(self, fileobj, events, data=None):
+        """Register a file object for I/O events.
+
+        Returns a SelectorKey instance.
+        """
+        raise NotImplementedError
+
+    def modify(self, fileobj, events, data=None):
+        self.unregister(fileobj)
+        return self.register(fileobj, events, data)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        self.close()
+```
+
+`register` returns a `SelectorKey(fileobj, fd, events, data)` named
+tuple. The `fd` field is the integer file descriptor extracted by
+`_fileobj_lookup`; the `fileobj` field retains the original object
+(socket, file, integer) as passed by the caller. Storing both lets
+callers retrieve the original object from the key without needing to
+keep an external mapping.
+
+`modify` is provided as a default implementation that unregisters then
+re-registers. Subclasses with incremental update syscalls (e.g., epoll
+`EPOLL_CTL_MOD`) override it for efficiency.
+
+The ABC is a context manager: `__exit__` calls `close()`, which on
+`EpollSelector` and `KqueueSelector` closes the underlying kernel object.
+
+### `EpollSelector.select` (lines 371 to 450)
+
+<CpyLink path="Lib/selectors.py" lines="371-450" />
+
+```python
+class EpollSelector(_BaseSelectorImpl):
+    def __init__(self):
+        super().__init__()
+        self._epoll = select.epoll()
+
+    def register(self, fileobj, events, data=None):
+        key = super().register(fileobj, events, data)
+        epoll_events = 0
+        if events & EVENT_READ:
+            epoll_events |= select.EPOLLIN
+        if events & EVENT_WRITE:
+            epoll_events |= select.EPOLLOUT
+        try:
+            self._epoll.register(key.fd, epoll_events)
+        except BaseException:
+            super().unregister(fileobj)
+            raise
+        return key
+
+    def select(self, timeout=None):
+        if timeout is None:
+            timeout = -1
+        elif timeout <= 0:
+            timeout = 0
+        else:
+            timeout = math.ceil(timeout * 1e3) * 1e-3
+        max_ev = max(len(self._fd_to_key), 1)
+        ready = []
+        try:
+            fd_event_list = self._epoll.poll(timeout, max_ev)
+        except InterruptedError:
+            return ready
+        for fd, event in fd_event_list:
+            events = 0
+            if event & ~select.EPOLLIN:
+                events |= EVENT_WRITE
+            if event & ~select.EPOLLOUT:
+                events |= EVENT_READ
+            key = self._fd_to_key.get(fd)
+            if key:
+                ready.append((key, events & key.events))
+        return ready
+```
+
+`EpollSelector` translates `EVENT_READ`/`EVENT_WRITE` to `EPOLLIN`/
+`EPOLLOUT` on registration and back again on `select`. The `max_ev`
+argument to `epoll.poll` bounds the number of events returned per call;
+using the current registration count avoids allocating a fixed large
+buffer while still returning all pending events in one syscall.
+
+The `InterruptedError` catch at line 425 (approximately) handles
+`EINTR`: a signal arriving during `epoll_wait` raises
+`InterruptedError` in Python 3.5+. Returning an empty list on interrupt
+is correct; the caller's event loop will call `select` again.
+
+### `DefaultSelector` platform choice (lines 531 to 600)
+
+<CpyLink path="Lib/selectors.py" lines="531-600" />
+
+```python
+# Choose the best implementation, roughly:
+#    epoll|kqueue|devpoll > poll > select.
+# select() also can't accept a FD > FD_SETSIZE (usually around 1024)
+if 'KqueueSelector' in globals():
+    DefaultSelector = KqueueSelector
+elif 'EpollSelector' in globals():
+    DefaultSelector = EpollSelector
+elif 'PollSelector' in globals():
+    DefaultSelector = PollSelector
+else:
+    DefaultSelector = SelectSelector
+```
+
+Each selector class is defined only if the underlying `select` module
+attribute exists. For example, `EpollSelector` is wrapped in
+`if hasattr(select, 'epoll')`. The `DefaultSelector` assignment at the
+bottom picks the best available implementation for the current platform.
+asyncio uses `DefaultSelector` by default, so this choice determines the
+I/O scalability of the event loop on each OS.
+
+## gopy mirror
+
+`selectors.py` is pure Python and depends only on the `select` C
+extension. Porting requires `select.select()` at minimum for
+`SelectSelector`, and `select.epoll()` or `select.kqueue()` for the
+faster backends. Until those are available, `SelectSelector` provides a
+complete cross-platform implementation that passes the test suite.
+`SelectorKey` is a `collections.namedtuple` and requires no special
+treatment.

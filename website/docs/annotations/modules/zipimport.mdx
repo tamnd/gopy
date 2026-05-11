@@ -1,0 +1,132 @@
+---
+title: Modules/zipimport.c
+description: Implements zipimporter, a PEP 302 import hook that finds and loads Python modules directly from zip archives.
+cpython_path: Modules/zipimport.c
+cpython_version: "3.14"
+lines: 900
+status: annotated
+ported_to: ""
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Modules/zipimport.c`
+
+<CpyLink path="Modules/zipimport.c" />
+
+`zipimport` is a C extension module that ships as part of CPython's core and provides `zipimporter`, a fully compliant PEP 302 / importlib finder-loader. It allows Python to treat a zip file on `sys.path` as a package tree, reading `.py` source files and `.pyc` bytecode files directly from the archive without extracting them to disk. The module is bootstrapped very early in interpreter startup so that the standard library itself can be distributed inside a zip.
+
+The implementation maintains a module-level directory cache (`zip_directory_cache`) that maps each zip path to a dictionary of its entries. The cache is populated on first access and reused for subsequent imports from the same archive, making repeated imports fast even for large zip files. Cache entries are keyed by the full path of the zip file on the filesystem.
+
+The `zipimporter` class implements the modern `importlib.abc.MetaPathFinder` and `importlib.abc.Loader` split interface: `find_spec` returns an `importlib.machinery.ModuleSpec`, and `create_module` plus `exec_module` handle the two-phase load. A thin compatibility shim preserves the older `find_module` / `load_module` API for code that still uses it.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| 1-80 | headers, `zip_directory_cache` | Module-level cache dict and include block | |
+| 81-220 | `zipimporter.__new__`, `zipimporter_init` | Constructor: locate zip boundary in path, populate cache | |
+| 221-360 | `zipimporter_find_spec` | Finder: search cache for module, build `ModuleSpec` | |
+| 361-430 | `zipimporter_create_module` | Loader phase 1: return `None` for default module creation | |
+| 431-560 | `zipimporter_exec_module` | Loader phase 2: read bytes, compile or unmarshal, exec | |
+| 561-650 | `get_data`, `get_filename`, `get_source`, `get_code` | Auxiliary loader helpers | |
+| 651-750 | `zip_get_data`, `read_directory` | Low-level zip parsing: central directory walk, cache fill | |
+| 751-850 | `get_module_path`, `is_package` | Path utilities and package detection | |
+| 851-900 | Module def, `PyInit_zipimport` | Extension init, type registration, exception type | |
+
+## Reading
+
+### Module-level cache and init (lines 1 to 80)
+
+<CpyLink path="Modules/zipimport.c" lines="1-80" />
+
+The file opens with standard C includes and declares `zip_directory_cache` as a module-level `PyObject *` (a plain `dict`). This cache is shared across all `zipimporter` instances so that two importers pointing at the same archive share the same directory listing.
+
+```c
+/* Modules/zipimport.c ~line 55 */
+static PyObject *zip_directory_cache = NULL;
+
+static int
+zipimport_exec(PyObject *module)
+{
+    zip_directory_cache = PyDict_New();
+    ...
+}
+```
+
+### Constructor: locating the zip boundary (lines 81 to 220)
+
+<CpyLink path="Modules/zipimport.c" lines="81-220" />
+
+`zipimporter_init` walks the filesystem path from right to left, chopping at each separator until it finds a file that is a valid zip archive (checked by reading the end-of-central-directory signature). The prefix to the right of the zip file becomes `self->prefix`, allowing imports from subdirectories inside the archive.
+
+```c
+/* ~line 130 */
+while (1) {
+    struct stat statbuf;
+    if (stat(path_buf, &statbuf) == 0 && S_ISREG(statbuf.st_mode)) {
+        if (check_is_zip(path_buf))
+            break;  /* found the zip boundary */
+    }
+    /* strip last path component and retry */
+    p = strrchr(path_buf, SEP);
+    if (p == NULL) { /* not found */ ... }
+    *p = '\0';
+}
+```
+
+### find_spec: searching the cache (lines 221 to 360)
+
+<CpyLink path="Modules/zipimport.c" lines="221-360" />
+
+`zipimporter_find_spec` converts the dotted module name to a relative path inside the archive, then looks it up in the pre-populated cache dict. It tries both a plain `.py` entry and a `__init__.py` entry (for packages). On a hit it constructs a `ModuleSpec` via `importlib.util.spec_from_file_location`, setting the loader to `self`.
+
+```c
+/* ~line 270 */
+key = PyUnicode_FromFormat("%U%c%U", self->archive, SEP_CHAR, subpath);
+item = PyDict_GetItemWithError(files, key);
+if (item != NULL) {
+    /* build ModuleSpec */
+    spec = PyObject_CallMethod(util, "spec_from_file_location",
+                               "OOO", fullname, path, self);
+}
+```
+
+### exec_module: reading and executing code (lines 431 to 560)
+
+<CpyLink path="Modules/zipimport.c" lines="431-560" />
+
+`zipimporter_exec_module` is the heart of the loader. It calls `get_code` which returns a `PyCodeObject` either by unmarshaling a `.pyc` file or by compiling the `.py` source retrieved from the archive. The code object is then executed in the module's `__dict__` with `PyEval_EvalCode`.
+
+```c
+/* ~line 490 */
+code = zipimporter_get_code(self, fullname);
+if (code == NULL) return -1;
+res = PyEval_EvalCode(code, module->md_dict, module->md_dict);
+Py_DECREF(code);
+if (res == NULL) return -1;
+Py_DECREF(res);
+return 0;
+```
+
+### read_directory: zip central directory walk (lines 651 to 750)
+
+<CpyLink path="Modules/zipimport.c" lines="651-750" />
+
+`read_directory` opens the zip file, seeks to the end-of-central-directory record to find the start of the central directory, then iterates over every file header. For each entry it stores a tuple `(data_offset, compress_type, data_size, file_size, file_mtime)` into the cache dict under the full path key. This one-time scan makes all subsequent lookups O(1).
+
+```c
+/* ~line 700 */
+for (i = 0; i < count; i++) {
+    /* read 46-byte central directory entry */
+    ...
+    path = PyUnicode_FromFormat("%U%c%s", archive, SEP_CHAR, name_buf);
+    item = Py_BuildValue("(Hhiii)", data_offset,
+                         compress, data_size, file_size, mtime);
+    PyDict_SetItem(files, path, item);
+}
+```
+
+## gopy mirror
+
+Not yet ported.

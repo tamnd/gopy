@@ -1,0 +1,97 @@
+---
+title: Lib/shelve.py
+description: Persistent dict-like object storage backed by a dbm database.
+cpython_path: Lib/shelve.py
+cpython_version: "3.14"
+lines: 260
+status: annotated
+ported_to: ""
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Lib/shelve.py`
+
+<CpyLink path="Lib/shelve.py" />
+
+The `shelve` module provides a persistent, dictionary-like object whose values are arbitrary Python objects serialized with `pickle`. The keys must be strings; the values can be anything `pickle` can handle. The database file is managed by `dbm`, so the exact file format depends on which dbm backend is available (`dbm.gnu`, `dbm.ndbm`, or `dbm.dumb`).
+
+`Shelf` inherits from `collections.abc.MutableMapping` and overrides `__getitem__`, `__setitem__`, `__delitem__`, `__iter__`, and `__len__` to serialize and deserialize values through a `Pickler`/`Unpickler` pair. The `writeback` flag controls a performance trade-off: when `False` (default), only explicit assignment triggers a write; when `True`, every accessed value is cached in memory and the entire cache is flushed to disk on `sync` or `close`.
+
+Two subclasses handle specific use cases. `BsdDbShelf` wraps a Berkeley DB object that exposes `first`, `next`, `previous`, `last`, and `set_location` cursor methods and re-exposes them on the shelf. `DbfilenameShelf` is the class returned by the module-level `open` convenience function; it opens a `dbm` database by filename and manages the underlying connection lifetime.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| 1-40 | module header, `Shelf.__init__` | imports `io`, `collections.abc`, `pickle`, `dbm`; initializes `dict`, `keyencoding`, `writeback` cache | |
+| 41-100 | `Shelf` get/set/del, `__iter__`, `__len__` | core `MutableMapping` overrides; pickle-encodes values to bytes before writing | |
+| 101-140 | `Shelf.keys`, `sync`, `close`, `__del__`, context manager | flushes writeback cache on `sync`; calls `close` on `__exit__` | |
+| 141-180 | `BsdDbShelf` | subclass for Berkeley DB objects; exposes cursor navigation methods | |
+| 181-220 | `DbfilenameShelf` | opens `dbm` by filename; used by the public `open` function | |
+| 221-260 | `open(filename, flag, protocol, writeback)` | convenience factory; returns a `DbfilenameShelf` instance | |
+
+## Reading
+
+### `Shelf` initialization and state (lines 1 to 40)
+
+<CpyLink path="Lib/shelve.py" lines="1-40" />
+
+`Shelf.__init__` accepts the raw dbm dict object (`dict`), a `flag` string for the open mode, a `protocol` number for `pickle` (defaulting to `None`, which means the highest available), and a `writeback` boolean. When `writeback=True` a plain Python `dict` named `cache` is allocated to hold every deserialized value that has been read. The `keyencoding` attribute (default `"utf-8"`) controls how string keys are encoded to bytes for the underlying dbm layer.
+
+```python
+def __init__(self, dict, protocol=None, writeback=False, keyencoding="utf-8"):
+    self.dict = dict
+    self.protocol = protocol
+    self.writeback = writeback
+    self.cache = {}
+    self.keyencoding = keyencoding
+```
+
+### Core `MutableMapping` overrides (lines 41 to 100)
+
+<CpyLink path="Lib/shelve.py" lines="41-100" />
+
+`__getitem__` decodes the key to bytes, fetches the raw bytes from the dbm dict, and unpickles them with `io.BytesIO` and `pickle.Unpickler`. When `writeback` is enabled, the deserialized value is also stored in `self.cache[key]` so that in-place mutations (like appending to a list) are not silently lost. `__setitem__` pickles the value into a `BytesIO` buffer and stores the resulting bytes. `__delitem__` removes the entry from both the dbm dict and the writeback cache.
+
+```python
+def __getitem__(self, key):
+    if key in self.cache:
+        return self.cache[key]
+    f = io.BytesIO(self.dict[key.encode(self.keyencoding)])
+    value = pickle.Unpickler(f).load()
+    if self.writeback:
+        self.cache[key] = value
+    return value
+```
+
+### `sync`, `close`, and context manager (lines 101 to 140)
+
+<CpyLink path="Lib/shelve.py" lines="101-140" />
+
+`sync` is the heart of the writeback mechanism. It iterates over every key in `self.cache` and writes each value back to the dbm dict, then clears the cache. `close` calls `sync` first and then calls `self.dict.close()`. The `__del__` finalizer also calls `close` as a safety net, though relying on it is discouraged. `__enter__` returns `self` and `__exit__` calls `close`, making `Shelf` usable as a context manager.
+
+```python
+def sync(self):
+    if self.writeback and self.cache:
+        for key, entry in self.cache.items():
+            self[key] = entry
+        self.cache = {}
+    if hasattr(self.dict, 'sync'):
+        self.dict.sync()
+```
+
+### `open` factory and `DbfilenameShelf` (lines 181 to 260)
+
+<CpyLink path="Lib/shelve.py" lines="181-260" />
+
+`DbfilenameShelf.__init__` calls `dbm.open(filename, flag)` and passes the resulting object to `Shelf.__init__`. The module-level `open` function is a one-liner that instantiates `DbfilenameShelf` with the caller's arguments. The `flag` parameter mirrors the `dbm.open` flags (`"r"`, `"w"`, `"c"`, `"n"`), and `protocol` is forwarded directly to `pickle`.
+
+```python
+def open(filename, flag='c', protocol=None, writeback=False):
+    return DbfilenameShelf(filename, flag, protocol, writeback)
+```
+
+## gopy mirror
+
+Not yet ported.

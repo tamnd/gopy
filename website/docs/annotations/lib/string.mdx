@@ -1,0 +1,168 @@
+---
+title: Lib/string.py
+description: String constants, the Formatter class (format/vformat/parse pipeline), and Template (safe_substitute with a configurable delimiter regex).
+cpython_path: Lib/string.py
+cpython_version: "3.14"
+lines: 450
+status: annotated
+ported_to: (stdlib pending)
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Lib/string.py`
+
+<CpyLink path="Lib/string.py" />
+
+`Lib/string.py` is a pure-Python module. It has no C accelerator. Its
+contents fall into three groups.
+
+The first group is a set of named character-set constants:
+`ascii_letters`, `ascii_lowercase`, `ascii_uppercase`, `digits`,
+`hexdigits`, `octdigits`, `punctuation`, `whitespace`, and `printable`.
+These are plain strings defined at import time.
+
+The second group is `Formatter`, the class that backs `str.format()` when
+called through the Python-level API. CPython's built-in `str.format` calls
+the C implementation directly and never touches `Formatter`, but
+`Formatter` provides a fully customizable re-implementation of the same
+pipeline via `vformat` and `parse`.
+
+The third group is `Template`, which provides `$`-style substitution with
+a user-overridable `DELIMITER` and `IDPATTERN` regex. It is distinct from
+`str.format` in that it does not support attribute access, indexing, or
+format specs.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Lib/string.py" lines="1-60">1-60</Cpy> | `capwords`, character-set constants | `capwords(s, sep=None)` splits on `sep`, calls `str.capitalize` on each word, and rejoins; constants are plain string literals assigned at module level. | `(stdlib pending)` |
+| <Cpy path="Lib/string.py" lines="61-130">61-130</Cpy> | `Formatter.__init__`, `Formatter.format`, `Formatter.vformat` | `format` packs positional and keyword args; `vformat` calls `_vformat` with a recursion depth counter capped at 2. | `(stdlib pending)` |
+| <Cpy path="Lib/string.py" lines="130-220">130-220</Cpy> | `Formatter._vformat` | Iterates `parse()` output; resolves field names via `get_field`; converts via `convert_field`; formats via `format_field`; recurses for nested braces. | `(stdlib pending)` |
+| <Cpy path="Lib/string.py" lines="220-300">220-300</Cpy> | `Formatter.parse`, `Formatter.get_field`, `Formatter.get_value`, `Formatter.convert_field`, `Formatter.format_field` | `parse` is a generator over `(literal_text, field_name, format_spec, conversion)` tuples from `_string.formatter_field_name_split`; `convert_field` dispatches `!r`, `!s`, `!a`. | `(stdlib pending)` |
+| <Cpy path="Lib/string.py" lines="300-380">300-380</Cpy> | `Formatter.check_unused_args` | Hook called after `_vformat` completes; base implementation is a no-op; subclasses can raise if any positional or keyword argument was not referenced. | `(stdlib pending)` |
+| <Cpy path="Lib/string.py" lines="380-450">380-450</Cpy> | `Template`, `Template.substitute`, `Template.safe_substitute` | `substitute` raises `KeyError` on missing keys; `safe_substitute` leaves unrecognized patterns intact; both use `re.sub` with `_substitute` as the replacement function. | `(stdlib pending)` |
+
+## Reading
+
+### `Formatter._vformat` recursion (lines 130 to 220)
+
+<CpyLink path="Lib/string.py" lines="130-220" />
+
+```python
+def _vformat(self, format_string, args, kwargs, used_args,
+             recursion_depth, auto_arg_index=0):
+    if recursion_depth < 0:
+        raise ValueError('Max string formatting recursion exceeded')
+    result = []
+    for literal_text, field_name, format_spec, conversion in \
+            self.parse(format_string):
+        if literal_text:
+            result.append(literal_text)
+        if field_name is not None:
+            obj, arg_used = self.get_field(field_name, args, kwargs)
+            used_args.add(arg_used)
+            obj = self.convert_field(obj, conversion)
+            # expand the format spec, possibly recursing
+            format_spec, auto_arg_index = self._vformat(
+                format_spec, args, kwargs,
+                used_args, recursion_depth-1,
+                auto_arg_index=auto_arg_index)
+            result.append(self.format_field(obj, format_spec))
+    return ''.join(result), auto_arg_index
+```
+
+`_vformat` is recursive because format specs can themselves contain format
+fields, e.g. `'{:{width}}'.format(value, width=10)`. Each recursive call
+decrements `recursion_depth`; the initial call passes `2`, which allows one
+level of nested braces in the format spec. `auto_arg_index` threads through
+the recursion so that automatically numbered fields (`{}`) are assigned
+indices in left-to-right document order even across recursive calls.
+`used_args` accumulates every field name or index that was looked up, so
+`check_unused_args` can find omissions afterwards.
+
+### `Template.substitute` regex (lines 380 to 450)
+
+<CpyLink path="Lib/string.py" lines="380-450" />
+
+```python
+class Template:
+    delimiter = '$'
+    idpattern = r'(?a:[_a-z][_a-z0-9]*)'
+    braceidpattern = None
+    flags = _re.IGNORECASE
+
+    def __init_subclass__(cls, /, **kwargs):
+        super().__init_subclass__(**kwargs)
+        if 'pattern' not in cls.__dict__:
+            cls._pattern = cls._compile_pattern(cls.pattern)
+
+    pattern = r"""
+    \$(?:
+      (?P<escaped>\$) |         # $$ -> $
+      (?P<named>%(id)s)      |  # $identifier
+      {(?P<braced>%(bid)s)}  |  # ${identifier}
+      (?P<invalid>)             # ill-formed $ is invalid
+    )
+    """
+
+    def substitute(self, mapping={}, /, **kws):
+        if mapping:
+            mapping = ChainMap(kws, mapping)
+        else:
+            mapping = kws
+        def convert(mo):
+            named = mo.group('named') or mo.group('braced')
+            if named is not None:
+                return str(mapping[named])
+            if mo.group('escaped') is not None:
+                return self.delimiter
+            if mo.group('invalid') is not None:
+                self._invalid(mo)
+            raise ValueError('Unrecognized named group in pattern',
+                             self.pattern)
+        return self.pattern.sub(convert, self.template)
+```
+
+The `pattern` regex has four named groups, tried left to right. `escaped`
+matches `$$` and returns a literal `$`. `named` matches a bare
+`$identifier`. `braced` matches `${identifier}`. `invalid` matches a lone
+`$` not followed by any of the above, which causes `_invalid` to raise
+`ValueError` with position information. `safe_substitute` differs only in
+that `_invalid` and missing keys both leave the original text unchanged
+instead of raising.
+
+Subclasses can change the substitution syntax by overriding `delimiter`,
+`idpattern`, `braceidpattern`, or `pattern`. `__init_subclass__` recompiles
+`_pattern` automatically whenever `pattern` is not explicitly set on the
+subclass, so overriding `idpattern` alone is sufficient for the common
+case.
+
+### `parse()` field iteration (lines 220 to 300)
+
+<CpyLink path="Lib/string.py" lines="220-300" />
+
+```python
+def parse(self, format_string):
+    for literal_text, field_name, format_spec, conversion in \
+            _string.formatter_field_name_split(format_string):
+        yield literal_text, field_name, format_spec, conversion
+```
+
+`parse` is a generator that delegates to the C function
+`_string.formatter_field_name_split`. Each yielded tuple carries:
+`literal_text` (the verbatim text before the next `{...}` block, possibly
+empty), `field_name` (the raw field name string, or `None` if there is no
+replacement field), `format_spec` (everything after `:` inside the braces),
+and `conversion` (the single character after `!`, or `None`). Subclasses
+can override `parse` to accept an entirely different format-string syntax
+as long as they yield the same 4-tuple shape.
+
+## gopy mirror
+
+`Formatter` depends on `_string.formatter_field_name_split` (a C helper in
+`Modules/_string.c`) for efficient format-string tokenization. `Template`
+depends only on `re` and `collections.ChainMap`. The constants group has
+no dependencies. A gopy port can ship the constants and `Template` as pure
+Go, then add `Formatter` once `_string` is available.

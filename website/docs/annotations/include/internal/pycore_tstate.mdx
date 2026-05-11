@@ -1,0 +1,232 @@
+---
+title: Include/internal/pycore_tstate.h
+description: _PyThreadStateImpl, extending PyThreadState with the eval-breaker bitmask, exc_info stack, recursion depth counters, and async generator hooks.
+cpython_path: Include/internal/pycore_tstate.h
+cpython_version: "3.14"
+lines: 280
+status: annotated
+ported_to: vm/threadstate.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Include/internal/pycore_tstate.h`
+
+<CpyLink path="Include/internal/pycore_tstate.h" />
+
+`pycore_tstate.h` declares `_PyThreadStateImpl`, the internal extension of
+the public `PyThreadState` struct. The public struct (in
+`Include/cpython/pystate.h`) exposes only the fields that stable-ABI
+extension modules are allowed to read. `_PyThreadStateImpl` is a superset:
+it adds the eval-breaker bitfield, the exception info stack used by `with`
+and `try/except` nesting, the trash deletion list used by the deallocation
+path, recursion depth counters, and the async generator hooks for
+`sys.set_asyncgen_hooks`.
+
+The most performance-critical field is the eval-breaker word at the head of
+`_PyThreadStateImpl`. The inner eval loop reads this word at every `RESUME`
+opcode and at every backward jump. Any of the eight defined bits being set
+causes the loop to leave its fast dispatch path and call `_Py_HandlePending`
+to service whatever request arrived asynchronously: a signal, a pending
+call, a GIL drop request, or a GC cycle.
+
+In gopy the per-thread VM state is split across two locations. The public
+`state.Thread` type (not yet promoted to carry all CPython fields) holds
+the identity; `vm/threadstate.go` stores the VM-private extensions in a
+`sync.Map`-backed `threadVM` struct keyed by `*state.Thread`. This mirrors
+the `_PyThreadStateImpl` extension pattern without requiring `state` to
+import `gil` or `frame`.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Include/internal/pycore_tstate.h" lines="1-50">1-50</Cpy> | `_PyThreadStateImpl` struct header + `eval_breaker` | First field is `Py_atomic_uint32 eval_breaker`; second is the `PyThreadState base` embedding. | `gil/breaker.go` `Breaker` |
+| <Cpy path="Include/internal/pycore_tstate.h" lines="51-100">51-100</Cpy> | `exc_info` / `_PyErr_StackItem` | Exception info stack: `exc_value`, `previous_item`; one item per `with`/`try` block. | `errors/` exc stack |
+| <Cpy path="Include/internal/pycore_tstate.h" lines="101-140">101-140</Cpy> | `trash_delete_later` / `trash_delete_nesting` | Deferred deallocation list and nesting depth guard against re-entrant tp_dealloc. | n/a (Go GC) |
+| <Cpy path="Include/internal/pycore_tstate.h" lines="141-180">141-180</Cpy> | `c_recursion_remaining` / `py_recursion_remaining` | Two separate recursion budgets: one for C frames, one for Python frames. Raise `RecursionError` at zero. | n/a (unbounded in v0.12) |
+| <Cpy path="Include/internal/pycore_tstate.h" lines="181-230">181-230</Cpy> | `async_gen_hooks` / `async_gen_firstiter_object` / `async_gen_finalizer_object` | Hooks set via `sys.set_asyncgen_hooks`; called on first iteration and finalization. | n/a (v0.12 scope) |
+| <Cpy path="Include/internal/pycore_tstate.h" lines="231-280">231-280</Cpy> | `_PyThreadState_GetFrame` / `_PyThreadState_GET` / `_Py_HandlePending` | Inline accessors for current frame and current tstate; the pending-request dispatch function. | `vm/threadstate.go` / `gil/pending.go` |
+
+## Reading
+
+### `_PyThreadStateImpl` struct (lines 1 to 100)
+
+<CpyLink path="Include/internal/pycore_tstate.h" lines="1-100" />
+
+```c
+struct _PyThreadStateImpl {
+    /* eval_breaker MUST be first so the eval loop can reach it with
+       a single load from the tstate pointer, no struct offset needed. */
+    union {
+        Py_atomic_uint32 eval_breaker;
+        /* Free-threaded build splits the word differently; single-threaded
+           build uses the whole word for bits. */
+    };
+
+    PyThreadState base;  /* public fields */
+
+    /* Exception info stack. One item pushed per try/with block. */
+    _PyErr_StackItem exc_info;
+
+    /* Deferred deallocation. Objects whose tp_dealloc calls back into
+       Python are queued here and freed after the outermost dealloc
+       returns. */
+    PyObject *trash_delete_later;
+    int trash_delete_nesting;
+
+    /* Recursion depth limits. Python frames and C frames use
+       separate counters so a deeply recursive C extension does not
+       consume the Python recursion budget. */
+    int c_recursion_remaining;       /* counts down from Py_C_RECURSION_LIMIT */
+    int py_recursion_remaining;      /* counts down from sys.getrecursionlimit() */
+
+    /* Async generator lifecycle callbacks. */
+    PyObject *async_gen_firstiter_object;
+    PyObject *async_gen_finalizer_object;
+};
+```
+
+The `eval_breaker` being placed first is a deliberate ABI decision. The
+eval loop dereferences `tstate` to get the breaker word without any offset
+arithmetic, which matters on tight inner loops where the load latency is
+visible. The `base` field (the public `PyThreadState`) follows immediately.
+
+The `_PyErr_StackItem exc_info` is embedded, not a pointer. When a
+`try/except` block is entered, the compiler pushes a `PUSH_EXC_INFO`
+instruction that saves the current `tstate->exc_info.exc_value` and
+replaces it with the caught exception. `POP_EXCEPT` restores the saved
+value. This makes multi-level exception nesting `O(1)` in allocs: each
+stack item is a tiny struct `{exc_value, *previous_item}` whose lifetime
+matches the bytecode block.
+
+### eval_breaker bitmask (lines 1 to 50 and 231 to 280)
+
+<CpyLink path="Include/internal/pycore_tstate.h" lines="1-50" />
+
+```c
+/* Bit positions in eval_breaker. */
+#define _PY_GIL_DROP_REQUEST_BIT         (1U << 0)
+#define _PY_SIGNALS_PENDING_BIT          (1U << 1)
+#define _PY_CALLS_TO_DO_BIT              (1U << 2)
+#define _PY_ASYNC_EXCEPTION_BIT          (1U << 3)
+#define _PY_GC_SCHEDULED_BIT             (1U << 4)
+#define _PY_EVAL_PLEASE_STOP_BIT         (1U << 5)
+#define _PY_EXPLICIT_MERGE_BIT           (1U << 6)  /* free-threaded only */
+#define _PY_JIT_INVALIDATE_COLD_BIT      (1U << 7)  /* JIT only */
+
+static inline void
+_Py_set_eval_breaker_bit(PyThreadState *tstate, uint32_t bit)
+{
+    _Py_atomic_or_uint32(&tstate->eval_breaker, bit);
+}
+
+static inline void
+_Py_unset_eval_breaker_bit(PyThreadState *tstate, uint32_t bit)
+{
+    _Py_atomic_and_uint32(&tstate->eval_breaker, ~bit);
+}
+```
+
+The eval loop checks `eval_breaker` at every `RESUME` opcode. `RESUME` is
+emitted at the start of every function and generator body. Backward jumps
+(`JUMP_BACKWARD`) also check it so that long-running loops remain
+interruptible.
+
+When the word is non-zero the loop calls `_Py_HandlePending` which reads
+the bits in priority order: stop request first, then GC, then pending
+calls, then signals, then GIL handshake. Each handler clears its bit
+before processing so a concurrent setter does not lose its request.
+
+```c
+int
+_Py_HandlePending(PyThreadState *tstate)
+{
+    uint32_t breaker = _Py_atomic_load_uint32_relaxed(&tstate->eval_breaker);
+
+    if (breaker & _PY_EVAL_PLEASE_STOP_BIT) {
+        _Py_unset_eval_breaker_bit(tstate, _PY_EVAL_PLEASE_STOP_BIT);
+        return _PyEval_HandleEvalBreaker_Stop(tstate);
+    }
+    if (breaker & _PY_GC_SCHEDULED_BIT) {
+        _Py_unset_eval_breaker_bit(tstate, _PY_GC_SCHEDULED_BIT);
+        _PyEval_RunPeriodicHooks(tstate);
+    }
+    if (breaker & _PY_CALLS_TO_DO_BIT) {
+        _Py_unset_eval_breaker_bit(tstate, _PY_CALLS_TO_DO_BIT);
+        _PyEval_MakePendingCalls(tstate);
+    }
+    if (breaker & _PY_SIGNALS_PENDING_BIT) {
+        _Py_unset_eval_breaker_bit(tstate, _PY_SIGNALS_PENDING_BIT);
+        if (handle_signals(tstate) != 0) { return -1; }
+    }
+    if (breaker & _PY_GIL_DROP_REQUEST_BIT) {
+        /* another thread wants the GIL: release and immediately re-acquire */
+        _Py_unset_eval_breaker_bit(tstate, _PY_GIL_DROP_REQUEST_BIT);
+        _PyEval_TakeGIL(tstate);
+    }
+    return 0;
+}
+```
+
+In gopy, the eight CPython bits are mirrored exactly in `gil/bits.go` as
+`BreakerGILDropRequest`, `BreakerSignalsPending`, etc. The `Breaker` struct
+in `gil/breaker.go` wraps an `atomic.Uint32` and exposes `Set`, `Clear`,
+`Load`, and `IsSet`. The eval loop in `vm/eval.go` reads `breaker.Load()`
+at every `RESUME` and backward jump and calls `handlePending` on a non-zero
+result, matching the CPython `_Py_HandlePending` structure above.
+
+### exc_info stack layout (lines 51 to 100)
+
+<CpyLink path="Include/internal/pycore_tstate.h" lines="51-100" />
+
+```c
+struct _PyErr_StackItem {
+    /* The current active exception, or NULL if no exception is active.
+       Owned reference. */
+    PyObject *exc_value;
+
+    /* Link to the previous item in the stack. The base item lives
+       inside _PyThreadStateImpl (not heap-allocated). */
+    struct _PyErr_StackItem *previous_item;
+};
+```
+
+Each `try`/`except` block pushed by `PUSH_EXC_INFO` allocates a new
+`_PyErr_StackItem` on the C stack (inside the eval loop's frame) and chains
+it onto `tstate->exc_info.previous_item`. The block's exception value is
+stored in `exc_value`. When `POP_EXCEPT` runs, it restores `exc_value` from
+`previous_item->exc_value` and pops the link.
+
+The base item embedded in `_PyThreadStateImpl` acts as the sentinel: its
+`previous_item` is `NULL` and its `exc_value` is the thread's current
+unhandled exception. Code that needs to know whether an exception is active
+reads `tstate->exc_info->exc_value`; `PyErr_Occurred` wraps this access.
+
+The stack-based design is efficient because no heap allocation is needed
+for exception handling in the common case. The `_PyErr_StackItem` objects
+live in the C call stack of the eval loop itself, which is already hot in
+the cache.
+
+In gopy, exception state is stored in the `errors` package's per-thread
+map keyed by `*state.Thread`. The `exc_info` link chain is not yet fully
+replicated; `PUSH_EXC_INFO` and `POP_EXCEPT` maintain the active exception
+in the per-thread error slot, which is the behavior of the base
+`_PyErr_StackItem`.
+
+## gopy mirror
+
+`vm/threadstate.go` holds the gopy equivalent of `_PyThreadStateImpl` as
+the `threadVM` struct:
+
+- `breaker *gil.Breaker` maps to `eval_breaker`. The `Breaker` type in
+  `gil/breaker.go` wraps `atomic.Uint32` with the same eight bit constants
+  as CPython.
+- `frames *frame.FrameStack` replaces the `current_frame` pointer chain.
+  CPython stores `tstate->current_frame` as a pointer into `localsplus`;
+  gopy uses a `FrameStack` arena of pre-allocated `Frame` slabs.
+- `pending *gil.Pending` replaces the pending-call queue that CPython
+  stores in `_PyThreadStateImpl` via `_PyEval_MakePendingCalls`.
+- The trash delete list and recursion depth counters are not yet ported.
+  Go's runtime handles object lifetimes; recursion depth enforcement is
+  deferred to spec 1700.

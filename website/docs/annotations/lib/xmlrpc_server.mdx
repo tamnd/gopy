@@ -1,0 +1,73 @@
+---
+title: Lib/xmlrpc/server.py
+description: Server-side XML-RPC framework providing synchronous, multi-path, and CGI-based dispatch.
+cpython_path: Lib/xmlrpc/server.py
+cpython_version: "3.14"
+lines: 700
+status: annotated
+ported_to: ""
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Lib/xmlrpc/server.py`
+
+<CpyLink path="Lib/xmlrpc/server.py" />
+
+`xmlrpc/server.py` is the server half of CPython's built-in XML-RPC support. It builds on `http.server.BaseHTTPRequestHandler` and `xmlrpc.client` marshalling to expose Python callables over HTTP using the XML-RPC wire protocol. The two main concrete classes are `SimpleXMLRPCServer`, which handles all requests on a single path, and `MultiPathXMLRPCServer`, which routes requests to different dispatcher instances depending on the URL path.
+
+The central abstraction is `SimpleXMLRPCDispatcher`. It holds a registry of named functions and an optional "instance" object whose public methods are automatically discoverable. Dispatch logic lives here: unmarshalling the XML payload, looking up the callable, invoking it, and marshalling the response or a fault back to the client. `CGIXMLRPCRequestHandler` reuses the same dispatcher but reads the request body from `sys.stdin` and writes the response to `sys.stdout`, making it suitable for traditional CGI deployment without an embedded HTTP server.
+
+Introspection support (`register_introspection_functions`) adds the `system.listMethods`, `system.methodSignature`, and `system.methodHelp` built-in procedures. Batch execution is available through `system.multicall`, which accepts a list of call descriptors and returns a list of results or per-call fault structs. The module also provides `DocXMLRPCServer` and `DocCGIXMLRPCRequestHandler`, which serve an auto-generated HTML page describing all registered procedures alongside the normal XML-RPC endpoint.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| 1-60 | module header, imports | License block, stdlib imports, `__all__` | |
+| 61-160 | `SimpleXMLRPCDispatcher` | Core registry and dispatch engine | |
+| 161-240 | `SimpleXMLRPCRequestHandler` | HTTP POST handler, Basic Auth hook | |
+| 241-310 | `SimpleXMLRPCServer` | `TCPServer` subclass wiring handler to dispatcher | |
+| 311-380 | `MultiPathXMLRPCServer` | Per-path dispatcher map, `add_dispatcher` | |
+| 381-460 | `CGIXMLRPCRequestHandler` | CGI entry point, stdin/stdout I/O | |
+| 461-560 | `DocXMLRPCServer` / `DocCGIXMLRPCRequestHandler` | HTML introspection pages | |
+| 561-700 | `system.multicall` helpers | Batch call execution and fault packaging | |
+
+## Reading
+
+### Dispatcher core (lines 61 to 160)
+
+`SimpleXMLRPCDispatcher.__init__` sets up `self.funcs` (a plain `dict`) and `self.instance`. `register_function` stores a callable under an explicit name or under `func.__name__`. `register_instance` stores an object; dispatch falls through to it when a name is not in `self.funcs`.
+
+`_dispatch` is the internal entry point. It resolves the method name by first checking `self.funcs`, then calling `_resolve_dotted_attribute` on the instance. If the instance exposes `_dispatch` itself, that override is called instead, giving advanced users full control.
+
+```python
+def _dispatch(self, method, params):
+    try:
+        func = self.funcs[method]
+    except KeyError:
+        if self.instance is not None:
+            ...
+        raise Exception(f'method "{method}" is not supported')
+    return func(*params)
+```
+
+### HTTP request handler (lines 161 to 240)
+
+`SimpleXMLRPCRequestHandler.do_POST` reads `Content-Length` bytes, calls `self.server._marshaled_dispatch`, and writes the XML response with status 200. If `self.server.logRequests` is false the access log is suppressed. The handler also defines `do_GET` for the optional documentation page exposed by `DocXMLRPCServer`.
+
+### Multi-path routing (lines 311 to 380)
+
+`MultiPathXMLRPCServer` overrides `_marshaled_dispatch` to look up `self.dispatchers[path]` before falling back to the default dispatcher. `add_dispatcher(path, dispatcher)` registers a pre-built `SimpleXMLRPCDispatcher` instance under a URL prefix, allowing a single server port to host logically separate XML-RPC APIs.
+
+### CGI handler (lines 381 to 460)
+
+`CGIXMLRPCRequestHandler.handle_request` reads the raw XML from `sys.stdin.buffer`, dispatches through the inherited `_marshaled_dispatch`, then writes HTTP headers and the response body to `sys.stdout.buffer`. Error responses use XML-RPC fault encoding rather than HTTP error codes so that clients using strict XML-RPC parsers receive well-formed payloads.
+
+### Multicall (lines 561 to 700)
+
+`system.multicall` accepts a list of `{"methodName": ..., "params": ...}` dicts. Each call is dispatched independently through `_dispatch`. A successful result is wrapped in a one-element list; any exception is converted to a `{"faultCode": ..., "faultString": ...}` struct. This design means partial success is possible: earlier calls in the batch are not rolled back when a later call raises.
+
+## gopy mirror
+
+Not yet ported.

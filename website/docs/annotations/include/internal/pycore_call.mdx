@@ -1,0 +1,128 @@
+---
+title: Include/internal/pycore_call.h
+description: Internal call protocol header that defines the vectorcall fast path, tp_call fallback, and stack-unpacking utilities used throughout CPython's evaluation loop.
+cpython_path: Include/internal/pycore_call.h
+cpython_version: "3.14"
+lines: 164
+status: annotated
+ported_to: ""
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Include/internal/pycore_call.h`
+
+<CpyLink path="Include/internal/pycore_call.h" />
+
+`pycore_call.h` is the internal face of CPython's calling protocol. It sits below the public `PyObject_Call` and `PyObject_Vectorcall` APIs and exposes the variants that the evaluator and built-in modules use directly, with thread state already in hand. All functions in this header require `Py_BUILD_CORE`, so they are invisible to extension authors working against the stable ABI.
+
+The central concept is the vectorcall protocol, standardised in PEP 590. A callable that sets `Py_TPFLAGS_HAVE_VECTORCALL` on its type and places a `vectorcallfunc` pointer at `tp_vectorcall_offset` bypasses the legacy `(*ternaryfunc)` path entirely. The callee receives a contiguous C array of arguments plus a `nargsf` word that encodes the count and the `PY_VECTORCALL_ARGUMENTS_OFFSET` flag, which allows callees to borrow the slot at `args[-1]` for a prepended `self`. This avoids allocation for the common case of calling a Python function with a small positional argument list.
+
+`_Py_CheckFunctionResult` is the single chokepoint that validates every return value. Any callable that returns a non-`NULL` result while an exception is set, or returns `NULL` without an exception, triggers an assertion in debug builds and a best-effort recovery in release builds. Routing all calls through `_PyObject_VectorcallTstate` guarantees that this check runs exactly once per call.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| 1-23 | include guards, `Py_BUILD_CORE` check, includes | Header boilerplate; pulls in thread-state and stats headers | n/a |
+| 24 | `_PY_FASTCALL_SMALL_STACK` | Constant (5): suggested stack-allocated arg array size | n/a |
+| 27-70 | `_Py_CheckFunctionResult`, `_PyObject_Call_Prepend`, `_PyObject_VectorcallDictTstate`, `_PyObject_Call`, `_PyObject_CallMethod`, `_PyObject_VectorcallPrepend` | Extern function declarations for the main call variants | n/a |
+| 71-99 | `_PyObject_MakeTpCall`, `_PyVectorcall_FunctionInline` | `tp_call` fallback and inline vectorcall-pointer lookup | n/a |
+| 100-142 | `_PyObject_VectorcallTstate`, `_PyObject_CallNoArgsTstate`, `_PyObject_CallNoArgs` | Core inline call path and zero-argument shortcuts | n/a |
+| 143-162 | `_PyStack_UnpackDict`, `_PyStack_UnpackDict_Free`, `_PyStack_UnpackDict_FreeNoDecRef` | Dict-to-stack unpacking for keyword arguments | n/a |
+
+## Reading
+
+### The small-stack constant and extern declarations (lines 15 to 70)
+
+<CpyLink path="Include/internal/pycore_call.h" lines="15-70" />
+
+`_PY_FASTCALL_SMALL_STACK` is defined as 5. Callers that know they have at most five positional arguments can declare `PyObject *stack[_PY_FASTCALL_SMALL_STACK]` on the C stack and pass it directly to a vectorcall function, avoiding a heap allocation. On a 64-bit system this costs 40 bytes of stack space.
+
+The extern declarations that follow cover the call variants needed by different parts of the runtime. `_PyObject_Call` is the thin internal wrapper over `tp_call`. `_PyObject_VectorcallDictTstate` handles the case where keyword arguments arrive as a `dict` rather than a flat `kwnames` tuple, which is the format used by `CALL_FUNCTION_KW` in older bytecode. `_PyObject_Call_Prepend` inserts an extra argument at position zero without copying the rest of the array, using the `PY_VECTORCALL_ARGUMENTS_OFFSET` trick.
+
+```c
+#define _PY_FASTCALL_SMALL_STACK 5
+
+PyAPI_FUNC(PyObject*) _Py_CheckFunctionResult(
+    PyThreadState *tstate,
+    PyObject *callable,
+    PyObject *result,
+    const char *where);
+
+extern PyObject* _PyObject_Call(
+    PyThreadState *tstate,
+    PyObject *callable,
+    PyObject *args,
+    PyObject *kwargs);
+```
+
+### Inline vectorcall-pointer lookup (lines 72 to 99)
+
+<CpyLink path="Include/internal/pycore_call.h" lines="72-99" />
+
+`_PyVectorcall_FunctionInline` is the hot-path version of the public `PyVectorcall_Function`. It checks the type flag, asserts the type is callable, reads the offset from `tp_vectorcall_offset`, and copies the function pointer out via `memcpy` to avoid strict-aliasing violations. Returning `NULL` signals that the object does not support vectorcall and that `_PyObject_MakeTpCall` should be used instead.
+
+`_PyObject_MakeTpCall` is the fallback. It converts the flat `args` array back into a tuple and a dict so it can call the legacy `(*ternaryfunc)` slot. This path is slower but handles any callable, including C types that predate PEP 590.
+
+```c
+static inline vectorcallfunc
+_PyVectorcall_FunctionInline(PyObject *callable)
+{
+    PyTypeObject *tp = Py_TYPE(callable);
+    if (!PyType_HasFeature(tp, Py_TPFLAGS_HAVE_VECTORCALL)) {
+        return NULL;
+    }
+    Py_ssize_t offset = tp->tp_vectorcall_offset;
+    vectorcallfunc ptr;
+    memcpy(&ptr, (char *) callable + offset, sizeof(ptr));
+    return ptr;
+}
+```
+
+### Core vectorcall dispatch (lines 100 to 142)
+
+<CpyLink path="Include/internal/pycore_call.h" lines="100-142" />
+
+`_PyObject_VectorcallTstate` is the function the evaluator calls for almost every `CALL` bytecode. It attempts the fast vectorcall path first; if that fails it falls back to `_PyObject_MakeTpCall`. Either way the result passes through `_Py_CheckFunctionResult` before being returned. `kwnames`, when non-NULL, is a tuple of keyword names whose values follow the positional arguments in the same `args` array.
+
+`_PyObject_CallNoArgs` and `_PyObject_CallNoArgsTstate` are convenience wrappers for the common case of calling a zero-argument callable. They pass `NULL` for `args` and `0` for `nargsf`, which is valid because the protocol requires callees to tolerate a `NULL` args pointer when `nargs` is zero.
+
+```c
+static inline PyObject *
+_PyObject_VectorcallTstate(PyThreadState *tstate, PyObject *callable,
+                           PyObject *const *args, size_t nargsf,
+                           PyObject *kwnames)
+{
+    vectorcallfunc func = _PyVectorcall_FunctionInline(callable);
+    if (func == NULL) {
+        Py_ssize_t nargs = PyVectorcall_NARGS(nargsf);
+        return _PyObject_MakeTpCall(tstate, callable, args, nargs, kwnames);
+    }
+    PyObject *res = func(callable, args, nargsf, kwnames);
+    return _Py_CheckFunctionResult(tstate, callable, res, NULL);
+}
+```
+
+### Dict unpacking utilities (lines 143 to 162)
+
+<CpyLink path="Include/internal/pycore_call.h" lines="143-162" />
+
+`_PyStack_UnpackDict` takes a positional `args` array and a `kwargs` dict and produces an extended `args` array with keyword values appended, plus a `kwnames` tuple. This conversion is needed when a call site has `**kwargs` but the callee expects the flat vectorcall layout. The returned stack is heap-allocated and must be freed by `_PyStack_UnpackDict_Free`. `_PyStack_UnpackDict_FreeNoDecRef` is a variant used when the caller has already decremented the values and only the allocation itself needs to be released.
+
+```c
+PyAPI_FUNC(PyObject *const *)
+_PyStack_UnpackDict(PyThreadState *tstate,
+    PyObject *const *args, Py_ssize_t nargs,
+    PyObject *kwargs, PyObject **p_kwnames);
+
+// Exported for external JIT support
+PyAPI_FUNC(void) _PyStack_UnpackDict_Free(
+    PyObject *const *stack,
+    Py_ssize_t nargs,
+    PyObject *kwnames);
+```
+
+## gopy mirror
+
+Not yet ported.

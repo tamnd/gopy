@@ -1,0 +1,174 @@
+---
+title: Modules/_queuemodule.c
+description: C implementation of queue.SimpleQueue using a ring buffer and a parking-lot-based blocking get, replacing the earlier deque-plus-lock design.
+cpython_path: Modules/_queuemodule.c
+cpython_version: "3.14"
+lines: 626
+status: annotated
+ported_to: module/queue/
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Modules/_queuemodule.c`
+
+<CpyLink path="Modules/_queuemodule.c" />
+
+`_queuemodule.c` provides the C accelerator for `queue.SimpleQueue`. Unlike
+the full `queue.Queue`, `SimpleQueue` is unbounded and never blocks on `put`.
+It is designed for producer-consumer patterns where the producer must never
+stall.
+
+The implementation in CPython 3.14 replaced the earlier `collections.deque`
+plus `threading.Lock` design with a ring buffer (`RingBuf`) and the internal
+parking-lot API (`pycore_parking_lot.h`). The ring buffer halves per-item
+overhead compared to a deque node, and the parking lot provides lock-free
+hand-off: a `put` that arrives while a thread is blocked in `get` transfers
+the item directly without touching the ring buffer at all.
+
+The module state (`simplequeue_state`) holds only two values: the type object
+for `SimpleQueue` and the `Empty` exception class. Both are per-interpreter,
+consistent with the `Py_MOD_PER_INTERPRETER_GIL_SUPPORTED` flag.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Modules/_queuemodule.c" lines="1-50">1-50</Cpy> | `simplequeue_state`, `simplequeue_get_state`, `INITIAL_RING_BUF_CAPACITY` | Module state struct and initial ring-buffer capacity constant (8). | `module/queue/` |
+| <Cpy path="Modules/_queuemodule.c" lines="33-200">33-200</Cpy> | `RingBuf`, `RingBuf_Init`, `RingBuf_Fini`, `RingBuf_Get`, `RingBuf_Put`, `RingBuf_Len`, `RingBuf_IsEmpty`, `resize_ringbuf` | Ring-buffer data structure: dynamic circular array with 4x shrink / 2x grow policy. | `module/queue/` |
+| <Cpy path="Modules/_queuemodule.c" lines="190-270">190-270</Cpy> | `simplequeueobject`, `simplequeue_new_impl`, `simplequeue_clear`, `simplequeue_dealloc`, `simplequeue_traverse` | SimpleQueue object layout and lifecycle. | `module/queue/` |
+| <Cpy path="Modules/_queuemodule.c" lines="268-345">268-345</Cpy> | `maybe_handoff_item`, `_queue_SimpleQueue_put_impl`, `_queue_SimpleQueue_put_nowait_impl` | Put path: direct hand-off to waiting thread via parking lot, or RingBuf_Put. | `module/queue/` |
+| <Cpy path="Modules/_queuemodule.c" lines="347-475">347-475</Cpy> | `empty_error`, `_queue_SimpleQueue_get_impl`, `_queue_SimpleQueue_get_nowait_impl` | Get path: non-blocking fast check, then blocking park with optional timeout. | `module/queue/` |
+| <Cpy path="Modules/_queuemodule.c" lines="476-626">476-626</Cpy> | `_queue_SimpleQueue_empty_impl`, `_queue_SimpleQueue_qsize_impl`, `simplequeue_methods`, `simplequeue_spec`, `queuemodule_exec`, `queuemodule` | Ancillary methods, type spec, module init. | `module/queue/` |
+
+## Reading
+
+### SimpleQueue internal layout (lines 33 to 200)
+
+<CpyLink path="Modules/_queuemodule.c" lines="33-200" />
+
+The ring buffer uses two indices (`put_idx`, `get_idx`) into a flat
+`PyObject **` array. Items wrap around when an index reaches `items_cap`. The
+grow policy doubles capacity on full; the shrink policy halves when occupancy
+drops below 25 percent:
+
+```c
+typedef struct {
+    Py_ssize_t put_idx;
+    Py_ssize_t get_idx;
+    PyObject **items;
+    Py_ssize_t items_cap;
+    Py_ssize_t num_items;
+} RingBuf;
+```
+
+`RingBuf_Get` shrinks eagerly before returning the item so that a queue that
+empties after a burst immediately reclaims memory. Shrink failures are silently
+ignored because they are an optimization, not a correctness requirement.
+
+The `simplequeueobject` wraps a `RingBuf` and a single `bool` flag
+`has_threads_waiting` that tells `put` whether to attempt a parking-lot
+hand-off:
+
+```c
+typedef struct {
+    PyObject_HEAD
+    bool has_threads_waiting;
+    RingBuf buf;
+    PyObject *weakreflist;
+} simplequeueobject;
+```
+
+### Blocking get with timeout (lines 378 to 453)
+
+<CpyLink path="Modules/_queuemodule.c" lines="378-453" />
+
+`_queue_SimpleQueue_get_impl` combines a non-blocking ring-buffer check with
+a parking-lot block. The loop retries after signals to handle `EINTR`:
+
+```c
+for (;;) {
+    if (!RingBuf_IsEmpty(&self->buf)) {
+        return RingBuf_Get(&self->buf);
+    }
+
+    if (!block) {
+        return empty_error(cls);
+    }
+
+    int64_t timeout_ns = -1;
+    if (endtime != 0) {
+        timeout_ns = _PyDeadline_Get(endtime);
+        if (timeout_ns < 0) {
+            return empty_error(cls);
+        }
+    }
+
+    bool waiting = 1;
+    self->has_threads_waiting = waiting;
+
+    PyObject *item = NULL;
+    int st = _PyParkingLot_Park(&self->has_threads_waiting, &waiting,
+                                sizeof(bool), timeout_ns, &item,
+                                /* detach */ 1);
+    switch (st) {
+        case Py_PARK_OK:
+            return item;          /* item was handed off by put() */
+        case Py_PARK_TIMEOUT:
+            return empty_error(cls);
+        case Py_PARK_INTR:
+            if (Py_MakePendingCalls() < 0) return NULL;
+            break;                /* retry */
+        case Py_PARK_AGAIN:
+            break;                /* spurious wake, retry */
+    }
+}
+```
+
+When `Py_PARK_OK` is returned, the item pointer was written directly by
+`maybe_handoff_item` inside the put-side callback, so the ring buffer was
+never touched. This is the hand-off fast path.
+
+### put and the hand-off callback (lines 268 to 345)
+
+<CpyLink path="Modules/_queuemodule.c" lines="268-345" />
+
+`_queue_SimpleQueue_put_impl` checks `has_threads_waiting` before writing to
+the ring buffer. If it is set, `_PyParkingLot_Unpark` invokes
+`maybe_handoff_item`, which either writes the item pointer into the waiting
+thread's `item` slot (hand-off) or sets `handed_off = false` (no waiter after
+all). If no hand-off occurred, the item goes into the ring buffer normally:
+
+```c
+static PyObject *
+_queue_SimpleQueue_put_impl(simplequeueobject *self, PyObject *item,
+                            int block, PyObject *timeout)
+{
+    HandoffData data = {
+        .handed_off = 0,
+        .item = Py_NewRef(item),
+        .queue = self,
+    };
+    if (self->has_threads_waiting) {
+        _PyParkingLot_Unpark(&self->has_threads_waiting,
+                             maybe_handoff_item, &data);
+    }
+    if (!data.handed_off) {
+        if (RingBuf_Put(&self->buf, item) < 0) {
+            return NULL;
+        }
+    }
+    Py_RETURN_NONE;
+}
+```
+
+The `block` and `timeout` arguments are accepted but ignored on put, for
+compatibility with `queue.Queue`.
+
+## gopy mirror
+
+`module/queue/` (pending). The ring buffer maps to a Go slice with `putIdx`
+and `getIdx` fields. The parking-lot hand-off maps to a Go channel send: the
+get goroutine parks on a channel receive, and put sends on that channel when a
+receiver is waiting. The `has_threads_waiting` flag maps to a non-nil channel
+pointer. The grow/shrink thresholds are preserved exactly.

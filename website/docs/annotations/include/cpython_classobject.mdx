@@ -1,0 +1,118 @@
+---
+title: Include/cpython/classobject.h
+description: CPython-internal method object structs for bound methods and instance methods.
+cpython_path: Include/cpython/classobject.h
+cpython_version: "3.14"
+lines: 80
+status: annotated
+ported_to: objects/method.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Include/cpython/classobject.h`
+
+<CpyLink path="Include/cpython/classobject.h" />
+
+<overview>
+This header declares the two method-object types that CPython uses to bind
+functions to instances. `PyMethodObject` represents the ordinary bound method
+you get when you look up a function on a class instance: it holds the
+underlying function (`im_func`) and the instance (`im_self`). `PyInstanceMethod`
+is a thin wrapper used for non-data-descriptor lookup when you need to bind a
+plain callable that was not created via `def` inside a `class` body. The
+structs are internal to the runtime; this header exists so the interpreter
+core and specializing adaptive interpreter can access their fields without
+going through accessor functions.
+</overview>
+
+## Map
+
+| Symbol | Kind | Notes |
+|---|---|---|
+| `PyMethodObject` | struct | Bound method: holds `im_func`, `im_self`, `im_weakreflist`, `im_dict`. |
+| `PyMethod_New(func, self)` | function | Creates a new bound method. |
+| `PyMethod_Function(op)` | macro/function | Returns `im_func`; no type check in the macro form. |
+| `PyMethod_Self(op)` | macro/function | Returns `im_self`; no type check in the macro form. |
+| `PyMethod_GET_FUNCTION(op)` | macro | Unchecked cast directly to `im_func`. |
+| `PyMethod_GET_SELF(op)` | macro | Unchecked cast directly to `im_self`. |
+| `PyInstanceMethod` | struct | Wraps any callable for descriptor-based binding, holds `func`. |
+| `PyInstanceMethod_New(func)` | function | Creates a new instance-method wrapper. |
+| `PyInstanceMethod_GET_FUNCTION(op)` | macro | Direct field access, no type check. |
+
+## Reading
+
+### PyMethodObject layout
+
+```c
+typedef struct {
+    PyObject_HEAD
+    PyObject *im_func;        /* The callable (usually a function) */
+    PyObject *im_self;        /* The instance it is bound to */
+    PyObject *im_weakreflist; /* List of weak references, or NULL */
+    vectorcallfunc vectorcall;
+} PyMethodObject;
+```
+
+`im_func` is not required to be a `PyFunctionObject`; any callable works, which
+is how `PyMethod_New` can wrap C-level callables too. The `vectorcall` field
+was added in 3.8 so the specializing interpreter can call bound methods via
+the fast vectorcall path without constructing argument tuples.
+
+The `im_weakreflist` field means `PyMethodObject` participates in Python's
+weak-reference protocol. The GC visits both `im_func` and `im_self`, so a
+bound method keeps both the function and the instance alive.
+
+### Instance method layout
+
+```c
+typedef struct {
+    PyObject_HEAD
+    PyObject *func; /* The wrapped callable */
+} PyInstanceMethodObject;
+```
+
+`PyInstanceMethod` is intentionally minimal. It is the result of
+`types.MethodType` being applied to a plain non-function callable: a
+descriptor whose `__get__` returns a bound version of whatever callable was
+wrapped. There is no `im_self` here because binding is deferred until
+`__get__` is invoked.
+
+### Unsafe accessor macros
+
+```c
+#define PyMethod_GET_FUNCTION(op)  (((PyMethodObject *)(op))->im_func)
+#define PyMethod_GET_SELF(op)      (((PyMethodObject *)(op))->im_self)
+#define PyInstanceMethod_GET_FUNCTION(op) \
+    (((PyInstanceMethodObject *)(op))->func)
+```
+
+These macros skip the `assert(PyMethod_Check(op))` guard that the safe
+accessor functions perform. They appear in the interpreter's hot dispatch
+paths where the type is already known from an earlier check or specialization
+guard. Do not use them when the type has not been verified.
+
+## gopy mirror
+
+Both types are ported to `objects/method.go`.
+
+| CPython field | Go field | Type |
+|---|---|---|
+| `im_func` | `Func` | `*Object` |
+| `im_self` | `Self` | `*Object` |
+| `im_weakreflist` | not ported | weak refs use Go GC |
+| `vectorcall` | `Vectorcall` | `VectorcallFunc` |
+| `PyInstanceMethodObject.func` | `Func` | `*Object` |
+
+The Go `Method` type implements the vectorcall protocol directly on its
+`Vectorcall` field, matching the 3.8+ fast path. Weak references are omitted
+because Go's garbage collector handles liveness without an explicit weak-ref
+list.
+
+## CPython 3.14 changes
+
+3.13 made `PyMethodObject` immortal for methods on immortal types (those whose
+`tp_flags` include `Py_TPFLAGS_IMMUTABLETYPE`). The 3.14 free-threaded build
+extended this further: bound methods created from immutable-type functions are
+no longer reference-counted at all, reducing contention on hot method-lookup
+paths. The struct layout itself did not change.

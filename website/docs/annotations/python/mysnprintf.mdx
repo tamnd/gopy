@@ -1,0 +1,64 @@
+---
+title: Python/mysnprintf.c
+description: Portable snprintf and vsnprintf wrappers that guarantee NUL termination and correct return values across all CPython platforms.
+cpython_path: Python/mysnprintf.c
+cpython_version: "3.14"
+lines: 80
+status: annotated
+ported_to: ""
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Python/mysnprintf.c`
+
+<CpyLink path="Python/mysnprintf.c" />
+
+`mysnprintf.c` wraps the platform `snprintf` and `vsnprintf` functions into two public entry points: `PyOS_snprintf` and `PyOS_vsnprintf`. The problem this file solves is that Microsoft's MSVC historically shipped `_vsnprintf` instead of the C99 `vsnprintf`, and that non-standard variant does not NUL-terminate the buffer when the output is truncated, nor does it return the number of characters that would have been written. CPython's wrappers iron out both differences so callers throughout the interpreter can use a single, safe interface.
+
+`PyOS_vsnprintf` calls the platform function, then unconditionally writes a NUL byte at `buffer[size-1]` to guarantee termination even after truncation. It also clamps the return value: if the platform returned a negative number (the MSVC behavior on overflow) the wrapper re-maps that to the actual buffer size minus one, giving callers a positive sentinel they can test. `PyOS_snprintf` is a one-line variadic front end that forwards its `...` arguments to `PyOS_vsnprintf` via a `va_list`.
+
+These two functions are used heavily throughout CPython wherever error messages, repr strings, or diagnostic output need to be assembled into a fixed-size buffer. Because they are declared in `cpython/pymem.h` and `pyerrors.h`, extension modules can also call them directly, making portability a public guarantee rather than an internal detail.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| 1-20 | file header, includes | Pulls in `Python.h` and local portability macros | n/a |
+| 21-55 | `PyOS_vsnprintf` | Core wrapper: calls platform vsnprintf, enforces NUL, fixes negative return | not ported |
+| 56-70 | `PyOS_snprintf` | Variadic front end: opens va_list, delegates to `PyOS_vsnprintf` | not ported |
+| 71-80 | `_PyOS_ascii_formatd` (stub) | Historical entry point removed in 3.x, kept as tombstone comment | n/a |
+
+## Reading
+
+### NUL-termination guarantee
+
+The wrapper stores the return value of the underlying platform call in a local variable, then immediately executes `buf[size-1] = '\0'`. This single line is the whole reason the file exists. Callers that pass a size-1 buffer correctly sized for their data can rely on this without adding their own termination guards.
+
+### Return-value normalization
+
+MSVC's `_vsnprintf` returns `-1` when the output is truncated, while C99 `vsnprintf` returns the number of characters that would have been written. The wrapper detects any return value less than zero and replaces it with `(int)(size - 1)`, which is not the C99 would-have-been count but is a safe positive sentinel. Callers that only need to detect truncation (return value `>= size`) are unaffected.
+
+### va_list lifetime
+
+`PyOS_snprintf` opens the `va_list` with `va_start`, calls `PyOS_vsnprintf`, and closes it with `va_end` before returning. This keeps the variadic state entirely within the snprintf family and avoids the undefined behavior that results from passing a partially consumed `va_list` to a second call.
+
+### Deprecation path
+
+Older CPython versions exposed `_PyOS_ascii_formatd` through this file for formatting floating-point numbers with a guaranteed ASCII decimal point. That function was removed once the `_Py_dg_dtoa` path became the standard route, but the comment block remains as documentation of the historical boundary.
+
+```c
+int
+PyOS_vsnprintf(char *str, size_t size, const char *format, va_list va)
+{
+    int len;  /* return value of underlying vsnprintf */
+    /* ... call platform vsnprintf ... */
+    str[size-1] = '\0';  /* guarantee termination */
+    /* normalize negative return values */
+    return len;
+}
+```
+
+## gopy mirror
+
+Not yet ported.

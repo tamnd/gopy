@@ -1,0 +1,95 @@
+---
+title: Include/internal/pycore_bytearray.h
+description: Internal bytearray accessors, the empty-buffer sentinel, and the detach helper used during buffer-protocol exports.
+cpython_path: Include/internal/pycore_bytearray.h
+cpython_version: "3.14"
+lines: 40
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Include/internal/pycore_bytearray.h`
+
+<CpyLink path="Include/internal/pycore_bytearray.h" />
+
+<overview>
+This header exposes three things that the public `bytearray` API deliberately
+hides: the shared empty-buffer sentinel, an unchecked fast-path macro for
+reading the underlying buffer, and the internal resize helper that must be
+called when a buffer-protocol view is still active.
+
+The `ob_exports` counter on `PyByteArrayObject` is the lock. While any
+`Py_buffer` view holds a reference to the bytearray's data, `ob_exports > 0`
+and any attempt to resize must go through `_PyByteArray_Detach`, which
+copies the data out before allowing the live view to dangle safely.
+</overview>
+
+## Map
+
+| Symbol | Kind | Purpose |
+|---|---|---|
+| `_PyByteArray_empty_string` | `extern char[]` | Shared one-byte null-terminated buffer returned for empty bytearrays. |
+| `PyByteArray_AS_STRING` | macro | Returns `ob_val` directly, no NULL check, analogous to `PyBytes_AS_STRING`. |
+| `_PyByteArray_Detach` | function | Detaches the internal buffer when `ob_exports > 0`, called before resize. |
+
+## Reading
+
+### The empty-buffer sentinel
+
+CPython never returns a NULL pointer from `PyByteArray_AS_STRING` even for a
+zero-length bytearray. Instead every empty bytearray points at a single shared
+global:
+
+```c
+// Include/internal/pycore_bytearray.h
+extern char _PyByteArray_empty_string[];
+```
+
+This lets C extensions call `strlen` or pass the pointer to C APIs that require
+a non-NULL buffer without a special-case branch.
+
+### Unchecked buffer access
+
+The public `PyByteArray_AsString` performs a type check and sets an exception
+on failure. The internal macro skips both:
+
+```c
+#define PyByteArray_AS_STRING(self) \
+    (assert(PyByteArray_Check(self)), \
+     Py_SIZE(self) ? ((PyByteArrayObject *)(self))->ob_val \
+                   : _PyByteArray_empty_string)
+```
+
+It is only safe inside the interpreter core where the type is already known.
+
+### Detaching before resize
+
+When a `Py_buffer` view is exported, `ob_exports` is incremented by
+`PyByteArray_GetBuffer`. Any resize path checks this counter and, if nonzero,
+calls `_PyByteArray_Detach` to copy the current contents into a fresh
+allocation before proceeding:
+
+```c
+// Objects/bytearrayobject.c
+int _PyByteArray_Detach(PyByteArrayObject *self);
+```
+
+The caller that holds the old `Py_buffer` continues to see a consistent
+snapshot; the bytearray gets a new private buffer and can be resized freely.
+
+## gopy mirror
+
+Not yet ported. The public `bytearray` type exists in gopy but the internal
+resize/detach path and the buffer-protocol export counter have not been
+implemented. When buffer-protocol support is added, the equivalent of
+`_PyByteArray_Detach` will need to live alongside the bytearray object
+definition.
+
+## CPython 3.14 changes
+
+No structural changes to this header in 3.14. The `_PyByteArray_Detach`
+signature and the `_PyByteArray_empty_string` sentinel have been stable since
+Python 3.3. The header was moved from a scattered set of private declarations
+into the `Include/internal/` tree during the 3.8 reorganization and has not
+changed materially since.

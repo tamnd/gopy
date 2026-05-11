@@ -1,0 +1,120 @@
+---
+title: Lib/tracemalloc.py
+description: Records Python memory allocations by call site and exposes snapshot, filtering, and statistics APIs for diagnosing memory usage.
+cpython_path: Lib/tracemalloc.py
+cpython_version: "3.14"
+lines: 560
+status: annotated
+ported_to: ""
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Lib/tracemalloc.py`
+
+<CpyLink path="Lib/tracemalloc.py" />
+
+`tracemalloc.py` is the pure-Python layer that sits on top of the `_tracemalloc` C extension. The C layer hooks into `PyMem_RawMalloc` and friends so that every allocation is tagged with the call stack at the moment it occurred. The Python layer wraps that raw data in typed objects (`Frame`, `Traceback`, `Statistic`, `StatisticDiff`, `Trace`, `Snapshot`) and provides the aggregation and filtering logic that makes the raw numbers readable.
+
+Starting a trace is one line: `tracemalloc.start(nframe=1)`. The optional `nframe` argument controls how many frames deep each allocation stack is captured. A deeper stack gives more context but uses more memory for the trace data itself. `stop()` tears down the C hook, and `take_snapshot()` copies the current allocation table out of the C layer into a `Snapshot` object so that data is preserved even after the allocator state changes.
+
+`Snapshot.statistics(group_by, cumulative=False)` is the main analysis method. It groups raw traces by `'filename'`, `'lineno'`, or `'traceback'`, sums sizes within each group, and returns a sorted list of `Statistic` objects. Two snapshots can be compared with `Snapshot.compare_to`, which produces `StatisticDiff` objects showing what grew or shrank between the two points in time. `Filter` objects narrow which files or line numbers are included in a snapshot before aggregation, keeping reports focused on the code being investigated.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| 1-50 | module header, imports | Imports from `_tracemalloc`; constants `_UNSET` | |
+| 51-120 | `Frame`, `Traceback` | Immutable value types wrapping C-layer stack data | |
+| 121-200 | `Statistic`, `StatisticDiff` | Aggregated size/count per group key | |
+| 201-290 | `Filter` | `inclusive`, `filename_pattern`, `lineno`, `all_frames` fields | |
+| 291-400 | `Snapshot` | `take_snapshot`, `statistics`, `compare_to`, `filter_traces`, `dump`, `load` | |
+| 401-460 | `Trace` | Single allocation record: `traceback`, `size` | |
+| 461-560 | module-level API | `start`, `stop`, `is_tracing`, `get_traced_memory`, `get_object_traceback` | |
+
+## Reading
+
+### `Frame` and `Traceback` (lines 51 to 120)
+
+<CpyLink path="Lib/tracemalloc.py" lines="51-120" />
+
+`Frame` is a two-field named-tuple-like object holding `filename` and `lineno`. It implements `__repr__`, `__eq__`, `__hash__`, and `__lt__` so that frames sort lexicographically by `(filename, lineno)`. `Traceback` wraps a tuple of `Frame` objects and is also hashable and totally ordered. Its `format` method returns a list of strings suitable for printing, mimicking the output of `traceback.format_stack` but without source code snippets.
+
+Both types are constructed from raw C-layer tuples in `Snapshot._get_traces` and are never meant to be created directly by user code.
+
+```python
+class Frame:
+    __slots__ = ("_frame",)
+    def __init__(self, frame):
+        if len(frame) != 2:
+            raise ValueError("...")
+        self._frame = frame
+
+    @property
+    def filename(self): return self._frame[0]
+
+    @property
+    def lineno(self): return self._frame[1]
+```
+
+### `Statistic` and `StatisticDiff` (lines 121 to 200)
+
+<CpyLink path="Lib/tracemalloc.py" lines="121-200" />
+
+`Statistic` groups allocation data under a single key (a `Traceback`, a `Frame`, or a filename string depending on the `group_by` argument). Its fields are `traceback`, `size` (bytes), and `count` (number of allocations). It sorts by `(-size, -count, traceback)` so the heaviest allocations appear first in a list.
+
+`StatisticDiff` extends that with `size_diff` and `count_diff` fields and an `old_traceback` reference. The `compare_to` call on `Snapshot` builds a `StatisticDiff` for every key that appears in either snapshot, using `size_diff=0` for keys present in only one snapshot.
+
+```python
+class Statistic:
+    __slots__ = ("traceback", "size", "count")
+
+    def __lt__(self, other):
+        if self.size != other.size:
+            return self.size > other.size  # descending
+        ...
+```
+
+### `Filter` (lines 201 to 290)
+
+<CpyLink path="Lib/tracemalloc.py" lines="201-290" />
+
+A `Filter` carries a glob-style `filename_pattern`, an optional `lineno`, a boolean `inclusive` flag, and an `all_frames` flag. When `inclusive=True` the filter keeps only traces that match; when `False` it discards matches. `all_frames=True` makes the filter test every frame in a traceback rather than just the most recent one, which is useful when the allocation happens deep inside a library but you want to restrict by the caller's filename.
+
+`Snapshot.filter_traces(filters)` applies a list of `Filter` objects in sequence by calling `_filter_traces` (a C helper) for each, returning a new `Snapshot` with the reduced trace set.
+
+```python
+class Filter:
+    def __init__(self, inclusive, filename_pattern,
+                 lineno=None, all_frames=False, domain=None):
+        self.inclusive = inclusive
+        self._filename_pattern = os.path.normcase(filename_pattern)
+        self.lineno = lineno
+        self.all_frames = all_frames
+```
+
+### `Snapshot` (lines 291 to 400)
+
+<CpyLink path="Lib/tracemalloc.py" lines="291-400" />
+
+`Snapshot` is the central analysis object. `take_snapshot()` at module level calls `_tracemalloc.get_traces()` (C), wraps each raw record in a `Trace`, and freezes the result. `statistics(group_by, cumulative=False)` groups traces by the chosen key, sums `size` and `count` within each group, and returns a sorted `list[Statistic]`. When `cumulative=True`, every frame in a traceback contributes to its own group entry, so a callee's allocations are also attributed to all its callers.
+
+`dump(filename)` and `load(filename)` use `pickle` to persist and restore a snapshot, enabling offline analysis of allocations captured on a remote host or in a prior run.
+
+```python
+def statistics(self, group_by, cumulative=False):
+    if group_by not in ("filename", "lineno", "traceback"):
+        raise ValueError("...")
+    tracebacks = ...
+    return Statistic._build(group_by, cumulative, tracebacks)
+```
+
+### Module-level API (lines 461 to 560)
+
+<CpyLink path="Lib/tracemalloc.py" lines="461-560" />
+
+The module exports a thin Python wrapper around every `_tracemalloc` function. `start(nframe=1)` validates that `nframe` is a positive integer, then delegates to `_tracemalloc.start`. `get_traced_memory()` returns a `(current_bytes, peak_bytes)` tuple since the last `clear_traces()` call. `get_object_traceback(obj)` looks up an object by identity in the live trace table and returns its `Traceback`, or `None` if tracing was not active when the object was allocated. This last function is especially handy for tracking down reference cycles: you can find the allocation site of an object that has survived longer than expected.
+
+## gopy mirror
+
+Not yet ported.

@@ -1,0 +1,117 @@
+---
+title: Lib/pty.py
+description: Pseudo-terminal creation, fork helpers, and a select-based I/O loop for running subprocesses in a PTY.
+cpython_path: Lib/pty.py
+cpython_version: "3.14"
+lines: 230
+status: annotated
+ported_to: ""
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Lib/pty.py`
+
+<CpyLink path="Lib/pty.py" />
+
+`pty.py` is a thin POSIX-only wrapper around the kernel pseudo-terminal interface. A PTY is a bidirectional pipe where one end (the master) is held by a controlling process and the other end (the slave) is presented to a child process as if it were a real terminal. This lets programs that refuse to run without a tty (interactive shells, `less`, curses apps) be driven programmatically.
+
+The module exposes three public entry points. `openpty()` returns a `(master_fd, slave_fd)` pair, trying `os.openpty()` first and falling back to a System V `ptmx`-style open when that is unavailable. `fork()` combines `openpty()` with `os.fork()` and configures the child's stdio to the slave fd, establishing a new session with `os.setsid()`. `spawn()` is the highest-level call: it runs an arbitrary program in a PTY and relays bytes between the caller's terminal and the child until the child exits.
+
+The I/O relay in `copy()` is built around `select.select()`. It reads from whichever fd becomes readable first, the master side of the PTY or `sys.stdin`, and writes the bytes to the other side. The loop exits cleanly on `OSError` (slave side closed when child exits) and on EOF from stdin.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| 1-30 | module header | Imports, `__all__`, `STDIN_FILENO` and friends | |
+| 31-60 | `openpty()` | Allocate master/slave fd pair with `os.openpty` or `/dev/ptmx` fallback | |
+| 61-100 | `fork()` | Fork child into a new PTY session; return `(pid, master_fd)` | |
+| 101-140 | `spawn()` | High-level: fork, exec argv, relay I/O, return child exit status | |
+| 141-195 | `copy()` | `select`-based read/write loop between master fd and stdin | |
+| 196-230 | `_writen()`, `_read()` | Low-level write-all and read helpers used by `copy()` | |
+
+## Reading
+
+### `openpty()` with fallback (lines 31 to 60)
+
+<CpyLink path="Lib/pty.py" lines="31-60" />
+
+`openpty()` first attempts `os.openpty()`, which is present on Linux and macOS. On platforms that provide only System V PTYs the function opens `/dev/ptmx`, calls `os.grantpt()` and `os.unlockpt()` to ready the slave, resolves the slave path with `os.ptsname()`, and opens it directly. Both paths return a `(master_fd, slave_fd)` tuple with file descriptors ready for `read`/`write`.
+
+```python
+def openpty():
+    try:
+        return os.openpty()
+    except AttributeError:
+        master_fd = os.open("/dev/ptmx", os.O_RDWR)
+        os.grantpt(master_fd)
+        os.unlockpt(master_fd)
+        slave_name = os.ptsname(master_fd)
+        slave_fd = os.open(slave_name, os.O_RDWR | os.O_NOCTTY)
+        return master_fd, slave_fd
+```
+
+### `fork()` and session setup (lines 61 to 100)
+
+<CpyLink path="Lib/pty.py" lines="61-100" />
+
+After `openpty()` allocates the pair, `fork()` calls `os.fork()`. The child closes the master fd, calls `os.setsid()` to become a session leader, and then calls `slave_open()` (an internal helper) to make the slave fd the controlling terminal. It duplicates the slave fd onto file descriptors 0, 1, and 2 with `os.dup2()` and closes the original slave fd. The parent closes the slave fd and returns `(pid, master_fd)`.
+
+```python
+def fork():
+    master_fd, slave_fd = openpty()
+    pid = os.fork()
+    if pid == CHILD:
+        os.close(master_fd)
+        _slave_open(slave_fd)
+    else:
+        os.close(slave_fd)
+    return pid, master_fd
+```
+
+### `spawn()` lifecycle (lines 101 to 140)
+
+<CpyLink path="Lib/pty.py" lines="101-140" />
+
+`spawn()` accepts `argv` and two optional callbacks, `master_read` and `stdin_read`, which default to a plain `os.read` wrapper. It calls `fork()`, and in the child execs `argv[0]` via `os.execlp()`. The parent enters `copy()` with the master fd and the two callbacks. After `copy()` returns the parent calls `os.waitpid()` to reap the child and returns the exit status.
+
+```python
+def spawn(argv, master_read=_read, stdin_read=_read):
+    pid, master_fd = fork()
+    if pid == CHILD:
+        os.execlp(argv[0], *argv)
+    copy(master_fd, master_read, stdin_read)
+    os.close(master_fd)
+    _, status = os.waitpid(pid, 0)
+    return status
+```
+
+### `copy()` select loop (lines 141 to 195)
+
+<CpyLink path="Lib/pty.py" lines="141-195" />
+
+`copy()` runs `select.select()` on `[master_fd, STDIN_FILENO]` with no timeout. When the master fd is readable it calls `master_read(master_fd)` and writes the result to `STDOUT_FILENO`. When stdin is readable it calls `stdin_read(STDIN_FILENO)` and writes the result to `master_fd`. An empty read signals EOF; an `OSError` with `errno.EIO` indicates the slave side has closed, which is the normal exit condition when the child terminates.
+
+```python
+def copy(master_fd, master_read=_read, stdin_read=_read):
+    fds = [master_fd, STDIN_FILENO]
+    while fds:
+        rfds, _, _ = select.select(fds, [], [])
+        if master_fd in rfds:
+            data = master_read(master_fd)
+            if not data:
+                fds.remove(master_fd)
+            else:
+                _writen(STDOUT_FILENO, data)
+        if STDIN_FILENO in rfds:
+            data = stdin_read(STDIN_FILENO)
+            if not data:
+                fds.remove(STDIN_FILENO)
+            else:
+                _writen(master_fd, data)
+```
+
+## gopy mirror
+
+Not yet ported.

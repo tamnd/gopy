@@ -1,0 +1,129 @@
+---
+title: Lib/netrc.py
+description: Parser for the .netrc file format used by FTP clients and other tools to store per-host credentials.
+cpython_path: Lib/netrc.py
+cpython_version: "3.14"
+lines: 180
+status: annotated
+ported_to: ""
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Lib/netrc.py`
+
+<CpyLink path="Lib/netrc.py" />
+
+`netrc` parses the `.netrc` file format originally defined for BSD FTP. A `.netrc` file stores login, password, and account credentials keyed by hostname, with an optional `default` entry that matches any host not listed explicitly. The module is used by `urllib`, test harnesses, and any tool that needs to look up stored credentials without hard-coding them.
+
+The entire public surface is a single class, also named `netrc`. The constructor locates the file (defaulting to `~/.netrc` on POSIX or `~/_netrc` on Windows), opens it, and drives a hand-written tokenizer. Parsed data is stored in two dicts: `hosts` maps a hostname string to a `(login, account, password)` 3-tuple, and `macros` maps a macro name to a list of lines.
+
+Security is a first-class concern. On POSIX systems the constructor checks file permissions and raises `NetrcParseError` if the file is group- or world-readable. This mirrors the behaviour of the `ftp(1)` command, which refuses to read a `.netrc` that is accessible to other users.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| 1-20 | module header | Imports, `__all__`, `NetrcParseError` | |
+| 21-50 | `netrc.__init__` | Locate file, open, call `_parse` | |
+| 51-90 | `netrc._parse` | Tokenizer and state machine | |
+| 91-130 | `netrc._parse` (continued) | Handle `macdef`, `default`, and field pairs | |
+| 131-155 | `netrc.authenticators` | Look up credentials for a host | |
+| 156-180 | `netrc.__repr__` | Reconstruct file text from parsed data | |
+
+## Reading
+
+### `NetrcParseError` and module header (lines 1 to 20)
+
+<CpyLink path="Lib/netrc.py" lines="1-20" />
+
+The only exception class in the module carries `filename` and `lineno` attributes so callers can report exactly where parsing failed. The `__str__` method formats these into a conventional `"msg (filename, line N)"` string.
+
+```python
+class NetrcParseError(Exception):
+    def __init__(self, msg, filename=None, lineno=None):
+        self.filename = filename
+        self.lineno = lineno
+        self.msg = msg
+        Exception.__init__(self, msg)
+
+    def __str__(self):
+        return "%s (%s, line %s)" % (self.msg, self.filename, self.lineno)
+```
+
+### `netrc.__init__` and file location (lines 21 to 50)
+
+<CpyLink path="Lib/netrc.py" lines="21-50" />
+
+When no path is supplied the constructor checks `NETRC` in the environment first, then falls back to `~/.netrc` (or `~/_netrc` on Windows). After opening the file it checks `os.stat` on POSIX: if the mode has group-read or world-read bits set it raises `NetrcParseError` before touching the content.
+
+```python
+def __init__(self, file=None):
+    default_netrc = file is None
+    if file is None:
+        file = os.environ.get("NETRC", os.path.join(os.path.expanduser("~"),
+                              "_netrc" if os.name == "nt" else ".netrc"))
+    ...
+    with open(file) as fp:
+        self._parse(file, fp, default_netrc)
+```
+
+### `_parse` tokenizer and state machine (lines 51 to 130)
+
+<CpyLink path="Lib/netrc.py" lines="51-130" />
+
+The tokenizer uses `shlex` in POSIX mode with comments enabled. It loops over tokens, recognising the keywords `machine`, `default`, `login`, `password`, `account`, and `macdef`. For each `machine` or `default` stanza it collects field tokens until the next `machine`, `default`, `macdef`, or EOF. Unknown keywords raise `NetrcParseError` with the current line number from `lexer.lineno`.
+
+```python
+def _parse(self, file, fp, default_netrc):
+    lexer = shlex.shlex(fp)
+    lexer.wordchars += r"!#$%&'*+,-./:;<=>?@[\]^_`{|}~"
+    lexer.commenters = '#'
+    while True:
+        tt = lexer.get_token()
+        if tt is None or tt == '':
+            break
+        if tt == 'machine':
+            entryname = lexer.get_token()
+        elif tt == 'default':
+            entryname = 'default'
+        elif tt == 'macdef':
+            ...
+```
+
+### `macdef` block handling (lines 91 to 130)
+
+<CpyLink path="Lib/netrc.py" lines="91-130" />
+
+A `macdef` block starts after the macro name and continues until a blank line is encountered. The tokenizer is temporarily bypassed: the parser reads raw lines from the underlying file object until it sees an empty line, collecting them into a list stored in `self.macros`. This is necessary because `shlex` would strip the line structure needed to detect the blank-line terminator.
+
+```python
+elif tt == 'macdef':
+    macro_name = lexer.get_token()
+    macro_lines = []
+    while True:
+        line = fp.readline()
+        if not line or line == '\n':
+            break
+        macro_lines.append(line)
+    self.macros[macro_name] = macro_lines
+```
+
+### `authenticators` and `__repr__` (lines 131 to 180)
+
+<CpyLink path="Lib/netrc.py" lines="131-180" />
+
+`authenticators` does a two-step lookup: exact host match first, then `"default"`. It returns a `(login, account, password)` 3-tuple, or `None` if neither is present. `__repr__` reconstructs a syntactically valid `.netrc` string from `self.hosts` and `self.macros`, which is convenient for round-trip testing.
+
+```python
+def authenticators(self, host):
+    if host in self.hosts:
+        return self.hosts[host]
+    if 'default' in self.hosts:
+        return self.hosts['default']
+    return None
+```
+
+## gopy mirror
+
+Not yet ported.

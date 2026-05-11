@@ -1,0 +1,314 @@
+---
+title: Modules/zlibmodule.c
+description: zlib compression module. Wraps deflate/inflate streams as one-shot compress/decompress functions and stateful Compress/Decompress objects.
+cpython_path: Modules/zlibmodule.c
+cpython_version: "3.14"
+lines: 1531
+status: annotated
+ported_to: module/zlib/
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Modules/zlibmodule.c`
+
+<CpyLink path="Modules/zlibmodule.c" />
+
+The C implementation of the `zlib` module. It provides two usage styles: one-shot
+functions (`zlib.compress`, `zlib.decompress`) that allocate a `z_stream`, drive
+it to completion, and free it; and stateful objects (`zlib.compressobj`,
+`zlib.decompressobj`) that hold a live `z_stream` across multiple
+`compress()`/`decompress()` calls.
+
+The file registers three Python types. `compobject` backs both `Compress` and
+`Decompress`; the distinction is which `z_stream` function (`deflate` or
+`inflate`) the methods call. `ZlibDecompressor` is a newer, separate type that
+adds an internal input buffer, a `needs_input` flag, and an `eof` attribute,
+matching the interface of `bz2.BZ2Decompressor` and `lzma.LZMADecompressor`.
+
+The `wbits` parameter controls the wrapper format. A positive value (8-15)
+produces a zlib-wrapped stream. Negative values (-8 to -15) select raw deflate
+with no header or checksum. Adding 16 to a positive value (e.g. `wbits=31`)
+selects gzip format; adding 32 lets `inflateInit2` auto-detect between zlib and
+gzip on the decompression side. `MAX_WBITS` is 15.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Modules/zlibmodule.c" lines="1-160">1-160</Cpy> | includes, `zlibstate`, `compobject`, `ZlibDecompressor`, `_Uint32Window`, output-buffer helpers | Module state struct, both object structs, and the sliding-window buffer helpers used when a decompression output buffer would exceed `UINT32_MAX`. | `module/zlib/` |
+| <Cpy path="Modules/zlibmodule.c" lines="160-290">160-290</Cpy> | `newcompobject`, `Comp_dealloc`, `Decomp_dealloc`, `arrange_input_buffer` | Object lifecycle helpers. `arrange_input_buffer` clips `avail_in` to `UINT_MAX` to cope with 64-bit `Py_ssize_t`. | `module/zlib/` |
+| <Cpy path="Modules/zlibmodule.c" lines="290-460">290-460</Cpy> | `zlib_compress_impl`, `zlib_decompress_impl` | One-shot compress and decompress. Allocate a local `z_stream`, drive `deflate`/`inflate` to `Z_FINISH`, then free the stream. | `module/zlib/` |
+| <Cpy path="Modules/zlibmodule.c" lines="460-550">460-550</Cpy> | `zlib_compressobj_impl`, `zlib_decompressobj_impl` | Constructors for the stateful objects. Call `deflateInit2`/`inflateInit2` with the caller's `wbits`, `memLevel`, and `strategy`. | `module/zlib/` |
+| <Cpy path="Modules/zlibmodule.c" lines="550-720">550-720</Cpy> | `zlib_Compress_compress_impl`, `zlib_Compress_flush_impl`, `zlib_Compress_copy_impl` | `Compress.compress()`, `Compress.flush()`, `Compress.copy()`. All acquire `self->mutex`. `flush()` calls `deflate` with the caller-supplied mode; `Z_FINISH` also tears down the stream. | `module/zlib/` |
+| <Cpy path="Modules/zlibmodule.c" lines="720-1065">720-1065</Cpy> | `save_unconsumed_input`, `zlib_Decompress_decompress_impl`, `zlib_Decompress_flush_impl`, `zlib_Decompress_copy_impl` | `Decompress` methods. `decompress()` drives `inflate(Z_SYNC_FLUSH)` and stores leftover input in `unconsumed_tail`; `unused_data` holds bytes after the compressed stream ends. | `module/zlib/` |
+| <Cpy path="Modules/zlibmodule.c" lines="1065-1260">1065-1260</Cpy> | `decompress_buf`, `decompress`, `zlib__ZlibDecompressor_decompress_impl`, `zlib__ZlibDecompressor_impl` | `ZlibDecompressor` type. Maintains an internal input buffer so callers feed arbitrary chunks without tracking leftovers themselves. Sets `needs_input` and `eof` atomically. | `module/zlib/` |
+| <Cpy path="Modules/zlibmodule.c" lines="1260-1435">1260-1435</Cpy> | `zlib_adler32_impl`, `zlib_adler32_combine_impl`, `zlib_crc32_impl`, `zlib_crc32_combine_impl` | Checksum functions. Release the GIL for inputs larger than 5 KB. `crc32` loops in 1 GB chunks (`ZLIB_CRC_CHUNK_SIZE = 0x40000000`) to stay within the `unsigned int` argument of the C function. | `module/zlib/` |
+| <Cpy path="Modules/zlibmodule.c" lines="1435-1531">1435-1531</Cpy> | `zlib_exec`, `PyInit_zlib` | Module init. Registers `Compress`, `Decompress`, `_ZlibDecompressor`, `zlib.error`, and all `Z_*`/`MAX_WBITS`/`DEFLATED` constants. | `module/zlib/` |
+
+## Reading
+
+### `wbits` encoding (module init constants)
+
+<CpyLink path="Modules/zlibmodule.c" lines="1435-1531" />
+
+The `wbits` argument to `deflateInit2` and `inflateInit2` encodes both the
+window size and the wrapper format:
+
+| `wbits` range | Format |
+|---|---|
+| 8..15 | zlib (RFC 1950) header and Adler-32 checksum |
+| -8..-15 | raw deflate, no header or trailer |
+| 24..31 (16 + 8..15) | gzip (RFC 1952) header and CRC-32 |
+| 40..47 (32 + 8..15) | auto-detect zlib or gzip (inflate only) |
+
+`MAX_WBITS` is 15. The module exports it as `zlib.MAX_WBITS` so callers can
+write `wbits=zlib.MAX_WBITS + 16` without hard-coding numbers.
+
+The constants registered in `zlib_exec`:
+
+```c
+ZLIB_ADD_INT_MACRO(MAX_WBITS);          /* 15 */
+ZLIB_ADD_INT_MACRO(Z_NO_COMPRESSION);   /* 0 */
+ZLIB_ADD_INT_MACRO(Z_BEST_SPEED);       /* 1 */
+ZLIB_ADD_INT_MACRO(Z_BEST_COMPRESSION); /* 9 */
+ZLIB_ADD_INT_MACRO(Z_DEFAULT_COMPRESSION); /* -1 */
+ZLIB_ADD_INT_MACRO(Z_DEFAULT_STRATEGY);
+ZLIB_ADD_INT_MACRO(Z_FILTERED);
+ZLIB_ADD_INT_MACRO(Z_HUFFMAN_ONLY);
+ZLIB_ADD_INT_MACRO(Z_NO_FLUSH);
+ZLIB_ADD_INT_MACRO(Z_SYNC_FLUSH);
+ZLIB_ADD_INT_MACRO(Z_FULL_FLUSH);
+ZLIB_ADD_INT_MACRO(Z_FINISH);
+```
+
+### `zlib_compress_impl` deflate loop (lines 290 to 460)
+
+<CpyLink path="Modules/zlibmodule.c" lines="290-460" />
+
+The one-shot `zlib.compress(data, level, wbits)` allocates a local `z_stream`,
+calls `deflateInit2`, and drives a nested loop to completion:
+
+```c
+static PyObject *
+zlib_compress_impl(PyObject *module, Py_buffer *data, int level, int wbits)
+{
+    z_stream zst;
+    _BlocksOutputBuffer buffer = {.writer = NULL};
+
+    zst.zalloc = PyZlib_Malloc;
+    zst.zfree  = PyZlib_Free;
+    zst.next_in = ibuf;
+    deflateInit2(&zst, level, DEFLATED, wbits, DEF_MEM_LEVEL,
+                 Z_DEFAULT_STRATEGY);
+
+    do {
+        arrange_input_buffer(&zst, &ibuflen);
+        flush = ibuflen == 0 ? Z_FINISH : Z_NO_FLUSH;
+
+        do {
+            if (zst.avail_out == 0)
+                OutputBuffer_Grow(&buffer, &zst.next_out, &zst.avail_out);
+
+            Py_BEGIN_ALLOW_THREADS
+            err = deflate(&zst, flush);
+            Py_END_ALLOW_THREADS
+
+        } while (zst.avail_out == 0);
+
+    } while (flush != Z_FINISH);
+
+    deflateEnd(&zst);
+    return OutputBuffer_Finish(&buffer, zst.avail_out);
+}
+```
+
+The outer loop advances the input pointer via `arrange_input_buffer`, which
+clips `avail_in` to `UINT_MAX` so each call fits in the `unsigned int` field.
+When all input has been consumed, `flush` becomes `Z_FINISH`, telling `deflate`
+to write the final compressed block and the Adler-32 trailer. The inner loop
+keeps calling `deflate` until `avail_out` is non-zero, growing the output
+buffer with `OutputBuffer_Grow` whenever it fills.
+
+The GIL is released inside the inner loop for each `deflate` call. Because
+`deflate` never calls back into Python and may process large quantities of data,
+releasing the GIL here lets other threads run while a CPU-bound compression is
+in progress.
+
+### `Compress.compress()` stateful deflate (lines 550 to 720)
+
+<CpyLink path="Modules/zlibmodule.c" lines="550-720" />
+
+`compressobj.compress(data)` drives the same loop as the one-shot function, but
+uses `Z_NO_FLUSH` instead of `Z_FINISH`. This means `deflate` may buffer some
+input internally and return less output than a one-shot call would. The buffered
+data is flushed out by a subsequent call to `compress.flush()`.
+
+```c
+static PyObject *
+zlib_Compress_compress_impl(compobject *self, PyTypeObject *cls,
+                            Py_buffer *data)
+{
+    PyMutex_Lock(&self->mutex);
+    self->zst.next_in = data->buf;
+    Py_ssize_t ibuflen = data->len;
+
+    do {
+        arrange_input_buffer(&self->zst, &ibuflen);
+
+        do {
+            if (self->zst.avail_out == 0)
+                OutputBuffer_Grow(&buffer, &self->zst.next_out,
+                                  &self->zst.avail_out);
+
+            Py_BEGIN_ALLOW_THREADS
+            err = deflate(&self->zst, Z_NO_FLUSH);
+            Py_END_ALLOW_THREADS
+
+        } while (self->zst.avail_out == 0);
+
+    } while (ibuflen != 0);
+
+    PyMutex_Unlock(&self->mutex);
+    return OutputBuffer_Finish(&buffer, self->zst.avail_out);
+}
+```
+
+`flush(mode=Z_SYNC_FLUSH)` forces all buffered input through `deflate` with
+the given mode. `Z_FINISH` additionally calls `deflateEnd` and sets
+`self->is_initialised = 0`, after which further `compress()` calls on the
+same object would fail. The mutex ensures only one thread drives the stream at
+a time.
+
+### `Decompress.decompress()` buffer management (lines 720 to 1065)
+
+<CpyLink path="Modules/zlibmodule.c" lines="720-1065" />
+
+`decompressobj.decompress(data, max_length)` drives `inflate(Z_SYNC_FLUSH)`.
+When `max_length` is non-zero, the output buffer is capped; any data that did
+not fit is saved in `unconsumed_tail` for the caller to feed back. Bytes that
+arrive after `Z_STREAM_END` are captured in `unused_data`.
+
+```c
+static PyObject *
+zlib_Decompress_decompress_impl(compobject *self, PyTypeObject *cls,
+                                Py_buffer *data, Py_ssize_t max_length)
+{
+    PyMutex_Lock(&self->mutex);
+    self->zst.next_in = data->buf;
+
+    do {
+        arrange_input_buffer(&self->zst, &ibuflen);
+        do {
+            if (self->zst.avail_out == 0) {
+                if (OutputBuffer_GetDataSize(&buffer, ...) == max_length)
+                    goto save;   /* hit the cap */
+                OutputBuffer_Grow(...);
+            }
+
+            Py_BEGIN_ALLOW_THREADS
+            err = inflate(&self->zst, Z_SYNC_FLUSH);
+            Py_END_ALLOW_THREADS
+
+        } while (self->zst.avail_out == 0 || err == Z_NEED_DICT);
+
+    } while (err != Z_STREAM_END && ibuflen != 0);
+
+save:
+    save_unconsumed_input(self, data, err);  /* sets unconsumed_tail */
+    if (err == Z_STREAM_END)
+        self->eof = 1;
+    PyMutex_Unlock(&self->mutex);
+    return OutputBuffer_Finish(&buffer, self->zst.avail_out);
+}
+```
+
+`save_unconsumed_input` copies `self->zst.next_in[0..avail_in]` into
+`self->unconsumed_tail` (a bytes object) so the caller can pass it to the next
+`decompress()` call. After `Z_STREAM_END`, any further bytes in the source
+buffer go into `self->unused_data` instead.
+
+### `ZlibDecompressor.decompress()` input-buffer design (lines 1065 to 1260)
+
+<CpyLink path="Modules/zlibmodule.c" lines="1065-1260" />
+
+`ZlibDecompressor` (the newer type, accessible as `zlib._ZlibDecompressor`)
+manages an internal byte buffer so callers never handle `unconsumed_tail`
+themselves. The design mirrors `BZ2Decompressor` and `LZMADecompressor`.
+
+`decompress_buf` drives the inflate loop and sets `self->eof` atomically when
+it sees `Z_STREAM_END`. The wrapping `decompress` function prepends any
+previously unconsumed input to the new data, calls `decompress_buf`, then
+decides the value of `needs_input`:
+
+```c
+if (d->eof) {
+    /* stream is done; leftover bytes become unused_data */
+    d->needs_input = 0;
+    d->unused_data = PyBytes_FromStringAndSize(
+        bzs->next_in, d->avail_in_real);
+}
+else if (d->avail_in_real == 0) {
+    /* all input consumed, need more before next call */
+    d->needs_input = 1;
+    bzs->next_in = NULL;
+}
+else {
+    /* partial progress; caller may call again immediately */
+    d->needs_input = 0;
+    /* copy tail into internal buffer for next call */
+}
+```
+
+When `needs_input` is `True`, the next call to `decompress()` must supply new
+data. When it is `False`, the internal buffer still holds unprocessed bytes and
+the caller should call `decompress(b"")` to drain them (subject to
+`max_length`).
+
+### `adler32` and `crc32` (lines 1260 to 1435)
+
+<CpyLink path="Modules/zlibmodule.c" lines="1260-1435" />
+
+Both checksum functions release the GIL when the input exceeds 5 KB, and loop
+in chunks to stay within the `unsigned int` argument accepted by the underlying
+C functions:
+
+```c
+static PyObject *
+zlib_adler32_impl(PyObject *module, Py_buffer *data, unsigned int value)
+{
+    if (data->len > 1024*5) {
+        Py_BEGIN_ALLOW_THREADS
+        while ((size_t)len > UINT_MAX) {
+            value = adler32(value, buf, UINT_MAX);
+            buf += (size_t)UINT_MAX;
+            len -= (size_t)UINT_MAX;
+        }
+        value = adler32(value, buf, (unsigned int)len);
+        Py_END_ALLOW_THREADS
+    } else {
+        value = adler32(value, data->buf, (unsigned int)data->len);
+    }
+    return PyLong_FromUnsignedLong(value & 0xffffffffU);
+}
+```
+
+`crc32` uses an additional chunking constant `ZLIB_CRC_CHUNK_SIZE = 0x40000000`
+(1 GB) because some zlib implementations treat the length as a signed `int`
+internally, making `UINT_MAX` unsafe. Both functions accept a `value` argument
+as a starting checksum, allowing incremental computation over multiple calls.
+
+## gopy mirror
+
+gopy ports `Modules/zlibmodule.c` into `module/zlib/`. The Go standard library
+provides `compress/zlib`, `compress/flate`, `compress/gzip`, `hash/adler32`,
+and `hash/crc32`, which cover all four wire formats. The main porting work is
+wrapping Go's streaming `io.Reader`/`io.Writer` interfaces in the CPython
+object model: each `Compress` object holds a `flate.Writer`, each `Decompress`
+holds a `flate.Reader`, and `ZlibDecompressor` adds the internal input-buffer
+and `needs_input` bookkeeping that CPython implements in the `decompress`
+helper. Thread safety uses a `sync.Mutex` mirroring `PyMutex`.
+
+The `wbits` dispatch happens at construction time: the Go port maps positive
+`wbits` to `zlib`, negative to raw `flate`, and `wbits >= 16+8` to `gzip`.
+`adler32` and `crc32` delegate to `hash/adler32` and `hash/crc32` directly.

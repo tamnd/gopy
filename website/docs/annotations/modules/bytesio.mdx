@@ -1,0 +1,161 @@
+---
+title: Modules/_io/bytesio.c
+description: BytesIO, the in-memory bytes buffer with position pointer, exported-buffer lock, and read/write/seek/truncate operations.
+cpython_path: Modules/_io/bytesio.c
+cpython_version: "3.14"
+lines: 800
+status: annotated
+ported_to: module/io/
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Modules/_io/bytesio.c`
+
+<CpyLink path="Modules/_io/bytesio.c" />
+
+`bytesio.c` implements `io.BytesIO`, the in-memory binary stream. A
+`BytesIO` object holds a single `PyBytesObject` (or a mutable buffer),
+a current position pointer `pos`, and an export count `exports` that
+tracks outstanding `getbuffer` views.
+
+The central design constraint is the exported-buffer lock: once a caller
+has called `getbuffer` to obtain a `memoryview` backed by the internal
+bytes, `BytesIO` must refuse any operation that would reallocate or resize
+that buffer until the view is released. This makes `BytesIO` a compliant
+buffer-protocol provider while still supporting mutation.
+
+For writes that stay within the current buffer length, `BytesIO` modifies
+the bytes in place using `memcpy`. Writes that extend the buffer call
+`_PyBytes_Resize`, which may reallocate.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Modules/_io/bytesio.c" lines="1-150">1-150</Cpy> | `bytesio` struct, `bytesio_get_closed`, `check_closed`, `check_exports` | Type struct: `buf`, `pos`, `string_size`, `exports`. Guard helpers used by every mutating method. | `module/io/` |
+| <Cpy path="Modules/_io/bytesio.c" lines="150-350">150-350</Cpy> | `bytesio_read`, `bytesio_read1`, `bytesio_readline`, `bytesio_readlines`, `bytesio_readinto` | Read path: slice bytes from `buf` starting at `pos`, advance `pos`. | `module/io/` |
+| <Cpy path="Modules/_io/bytesio.c" lines="350-550">350-550</Cpy> | `bytesio_write`, `bytesio_writelines`, `bytesio_truncate` | Write/truncate path: resize or overwrite `buf`, update `string_size`. | `module/io/` |
+| <Cpy path="Modules/_io/bytesio.c" lines="550-800">550-800</Cpy> | `bytesio_seek`, `bytesio_tell`, `bytesio_getvalue`, `bytesio_getbuffer`, `bytesio_releasebuffer`, method table, `BytesIO_Type` | Seek, tell, getvalue, and the buffer-protocol slots `getbuffer`/`releasebuffer`. | `module/io/` |
+
+## Reading
+
+### Internal buffer management (lines 1 to 150 and 350 to 550)
+
+<CpyLink path="Modules/_io/bytesio.c" lines="1-150" />
+
+The `bytesio` struct tracks three sizes:
+
+```c
+typedef struct {
+    PyObject_HEAD
+    PyObject  *buf;          /* PyBytesObject holding the content        */
+    Py_ssize_t pos;          /* current read/write position              */
+    Py_ssize_t string_size;  /* logical length of content (<= len(buf))  */
+    Py_ssize_t exports;      /* number of outstanding getbuffer views    */
+    PyObject  *dict;         /* instance __dict__ for subclasses         */
+    PyObject  *weakreflist;
+} bytesio;
+```
+
+`string_size` can be less than `Py_SIZE(buf)` when the internal bytes
+object was over-allocated to avoid repeated resizes. The public `getvalue`
+and `getbuffer` always slice up to `string_size`, not the full allocation.
+
+`check_exports` is called at the start of every mutating method:
+
+```c
+static int
+check_exports(bytesio *self)
+{
+    if (self->exports > 0) {
+        PyErr_SetString(PyExc_BufferError,
+            "Existing exports of data: object cannot be re-sized");
+        return -1;
+    }
+    return 0;
+}
+```
+
+`bytesio_write` uses a two-step write. If the write fits inside the current
+allocation, it calls `memcpy` directly into the buffer without a resize:
+
+```c
+static PyObject *
+bytesio_write(bytesio *self, PyObject *arg)
+{
+    Py_buffer buf;
+    Py_ssize_t n, orig_size = self->string_size;
+
+    if (check_exports(self) < 0) return NULL;
+    if (PyObject_GetBuffer(arg, &buf, PyBUF_CONTIG_RO) < 0) return NULL;
+
+    if (self->pos + buf.len > PyBytes_GET_SIZE(self->buf)) {
+        /* Need to grow the underlying bytes. */
+        if (_PyBytes_Resize(&self->buf,
+                            self->pos + buf.len) < 0) goto error;
+    }
+    memcpy(PyBytes_AS_STRING(self->buf) + self->pos,
+           buf.buf, (size_t)buf.len);
+    self->pos += buf.len;
+    if (self->pos > self->string_size)
+        self->string_size = self->pos;
+    ...
+}
+```
+
+`bytesio_truncate` sets `string_size` to the requested length without
+freeing the allocation (CPython never shrinks the internal buffer on
+truncate to avoid churn during mixed read/write workloads).
+
+### `getbuffer` exported-buffer lock (lines 550 to 800)
+
+<CpyLink path="Modules/_io/bytesio.c" lines="550-800" />
+
+`getbuffer` exposes the internal bytes as a `Py_buffer`, incrementing
+`exports` so that mutation is blocked while any view is live:
+
+```c
+static int
+bytesio_getbuffer(bytesio *self, Py_buffer *view, int flags)
+{
+    if (self->exports == 0 && SHARED_BUF(self)) {
+        /* Make the buffer writable-private before exporting. */
+        if (unshare_buffer(self, self->string_size) < 0) return -1;
+    }
+    self->exports++;
+    return PyBuffer_FillInfo(view, (PyObject *)self,
+                             PyBytes_AS_STRING(self->buf),
+                             self->string_size, 0, flags);
+}
+
+static void
+bytesio_releasebuffer(bytesio *self, Py_buffer *view)
+{
+    self->exports--;
+}
+```
+
+As long as `exports > 0`, any call to `write`, `truncate`, `seek` (to a
+position beyond `string_size`), or `__init__` raises `BufferError`. This
+matches the contract that Python's buffer protocol requires: a buffer
+provider must keep its memory stable while views exist.
+
+`bytesio_getvalue` does not use the buffer protocol path; it simply slices
+`buf[0:string_size]` into a new `bytes` object each time it is called, so
+it is safe regardless of the `exports` count.
+
+## gopy mirror
+
+`module/io/` (pending). The Go port holds the content as a `[]byte` slice.
+The `exports` counter maps to an `int` field guarded by the same check at
+the start of every mutating method. Buffer-protocol views are modelled as
+`go-python` buffer objects that call back into `releasebuffer` on `Close`.
+
+## CPython 3.14 changes
+
+`BytesIO` has been in `_io` since Python 3.0. The buffer-protocol slots
+(`getbuffer`, `releasebuffer`) were added in 3.2 when `BytesIO.getbuffer()`
+became part of the public API. The `exports` lock was introduced at the same
+time. In 3.12 the module moved to multi-phase init but `BytesIO` itself is
+structurally unchanged since 3.2.

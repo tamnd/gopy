@@ -1,0 +1,92 @@
+---
+title: Lib/ipaddress.py
+description: IPv4 and IPv6 address, network, and interface objects for Python's standard library.
+cpython_path: Lib/ipaddress.py
+cpython_version: "3.14"
+lines: 2700
+status: annotated
+ported_to: ""
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Lib/ipaddress.py`
+
+<CpyLink path="Lib/ipaddress.py" />
+
+`ipaddress` provides immutable value objects that represent individual IPv4 and IPv6 addresses, host-assigned network interfaces, and full network prefixes. Every object is constructed from a string, integer, or bytes value; the two public factory functions `ip_address()` and `ip_network()` dispatch to the right class automatically and are the entry points most callers use.
+
+The module is pure Python and carries no C-extension dependency. Comparison, hashing, arithmetic, and containment operators are all implemented so that address objects work naturally in sets, as dict keys, and in sorted containers. Network objects support iteration over host addresses, subnet splitting, and supernet aggregation, making the module suitable for both simple validation work and more demanding IPAM-style computations.
+
+The design follows RFC 4291 for IPv6 and RFC 950 for IPv4 subnetting. Compressed and exploded string forms, the `::` abbreviation rules for IPv6, and the various address-scope predicates (private, loopback, multicast, link-local, global) are all derived directly from those RFCs and from IANA registry assignments.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Lib/ipaddress.py" lines="1-80">1-80</Cpy> | module preamble | Imports, `__version__`, `__all__`, `AddressValueError`, `NetmaskValueError` exception classes | - |
+| <Cpy path="Lib/ipaddress.py" lines="81-200">81-200</Cpy> | `ip_address()`, `ip_network()`, `ip_interface()` | Public factory functions dispatching on address version | - |
+| <Cpy path="Lib/ipaddress.py" lines="201-500">201-500</Cpy> | `_IPAddressBase`, `_BaseAddress` | Abstract base classes, common `__repr__`, `__str__`, comparison operators, `__hash__` | - |
+| <Cpy path="Lib/ipaddress.py" lines="501-800">501-800</Cpy> | `_BaseNetwork` | Network ABC: `prefixlen`, `netmask`, `hostmask`, `network_address`, `broadcast_address`, containment test | - |
+| <Cpy path="Lib/ipaddress.py" lines="801-1100">801-1100</Cpy> | `_BaseNetwork` (iteration) | `hosts()`, `subnets()`, `supernet()`, `overlaps()`, `address_exclude()`, `collapse_addresses()` | - |
+| <Cpy path="Lib/ipaddress.py" lines="1101-1400">1101-1400</Cpy> | `IPv4Address` | Concrete v4 address: `packed`, `_check_packed_address`, scope predicates, `ipv6_mapped` | - |
+| <Cpy path="Lib/ipaddress.py" lines="1401-1700">1401-1700</Cpy> | `IPv4Network`, `IPv4Interface` | v4 network and interface objects; `with_prefixlen`, `with_netmask`, `with_hostmask` string forms | - |
+| <Cpy path="Lib/ipaddress.py" lines="1701-2000">1701-2000</Cpy> | `IPv6Address` | Concrete v6 address: `compressed`, `exploded`, `_string_from_ip_int`, scope predicates, `teredo`, `sixtofour` | - |
+| <Cpy path="Lib/ipaddress.py" lines="2001-2300">2001-2300</Cpy> | `IPv6Network`, `IPv6Interface` | v6 network and interface objects; subnet-of / supernet-of helpers | - |
+| <Cpy path="Lib/ipaddress.py" lines="2301-2500">2301-2500</Cpy> | `collapse_addresses()` | Module-level generator that collapses an iterable of networks into the minimal covering set | - |
+| <Cpy path="Lib/ipaddress.py" lines="2501-2700">2501-2700</Cpy> | `get_mixed_type_key()`, `summarize_address_range()` | Sorting helpers and range summarisation utilities | - |
+
+## Reading
+
+### Factory functions (lines 81 to 200)
+
+<CpyLink path="Lib/ipaddress.py" lines="81-200" />
+
+`ip_address()`, `ip_network()`, and `ip_interface()` are thin dispatchers. Each tries the IPv4 constructor first; if that raises `ValueError` it tries IPv6; if that also fails it re-raises with a combined message. The pattern avoids a version sniff on the input string and keeps the factories free of version-specific parsing logic.
+
+```python
+def ip_address(address):
+    try:
+        return IPv4Address(address)
+    except (AddressValueError, NetmaskValueError, ValueError):
+        pass
+    try:
+        return IPv6Address(address)
+    except (AddressValueError, NetmaskValueError, ValueError):
+        pass
+    raise ValueError(f'{address!r} does not appear to be an IPv4 or IPv6 address')
+```
+
+### Abstract bases: `_IPAddressBase` and `_BaseAddress` (lines 201 to 500)
+
+<CpyLink path="Lib/ipaddress.py" lines="201-500" />
+
+`_IPAddressBase` owns version-neutral utilities: `__repr__`, `__reduce__` for pickling, and the `_check_int_address` validator that rejects values outside the allowed range for a given address family. `_BaseAddress` adds the numeric comparison mixin using `functools.total_ordering` and a `__hash__` derived from `_ip_int`, so that address objects are usable as dict keys without any extra work from subclasses.
+
+### Network iteration and set algebra (lines 801 to 1100)
+
+<CpyLink path="Lib/ipaddress.py" lines="801-1100" />
+
+`hosts()` yields all addresses between `network_address + 1` and `broadcast_address - 1` (skipping network and broadcast for IPv4 /31 and smaller, but yielding all two addresses for /31 per RFC 3021). `subnets(prefixlen_diff, new_prefix)` generates the child networks by incrementing the prefix length; `supernet()` does the reverse. `overlaps()` is a simple four-way bounds check. `address_exclude()` implements the binary-trie split needed to express "this large block minus this small hole" as a minimal list of prefixes.
+
+### `IPv6Address` string representation (lines 1701 to 2000)
+
+<CpyLink path="Lib/ipaddress.py" lines="1701-2000" />
+
+`compressed` property returns the canonical RFC 5952 form, collapsing the longest run of consecutive all-zero 16-bit groups into `::`. The helper `_string_from_ip_int` converts the 128-bit integer to eight colon-separated hex groups and then applies the longest-run algorithm. `exploded` property always returns all eight groups in full, which is useful when feeding addresses to systems that do not understand `::`.
+
+```python
+@property
+def compressed(self):
+    return self._string_from_ip_int(self._ip)
+```
+
+### `collapse_addresses()` (lines 2301 to 2500)
+
+<CpyLink path="Lib/ipaddress.py" lines="2301-2500" />
+
+The module-level `collapse_addresses()` function accepts a mixed iterable of `IPv4Network` and `IPv6Network` objects (but not both at once) and returns a sorted iterator of the minimal covering prefixes. The algorithm sorts by `(network_address, prefixlen)`, then iterates once, merging each candidate into the last emitted supernet when it is wholly contained, or widening the supernet when a pair of siblings can be joined. The result is equivalent to a prefix-trie compaction without constructing the trie explicitly.
+
+## gopy mirror
+
+Not yet ported.

@@ -1,0 +1,119 @@
+---
+title: Lib/_pyrepl/main.py
+description: Entry point for the new pure-Python interactive REPL introduced in Python 3.13, wiring together curses-based line editing, history, and syntax highlighting.
+cpython_path: Lib/_pyrepl/main.py
+cpython_version: "3.14"
+lines: 120
+status: annotated
+ported_to: ""
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Lib/_pyrepl/main.py`
+
+<CpyLink path="Lib/_pyrepl/main.py" />
+
+`_pyrepl/main.py` is the thin entry point that CPython's `Modules/main.c` calls when it decides to start an interactive session. Before Python 3.13, interactive sessions fell through to the `readline`-backed `code.interact` loop. The new path routes instead through `_pyrepl`, a pure-Python package that gives the REPL curses-based line editing, bracket matching, multiline continuation, and optional syntax highlighting without depending on the system `readline` library.
+
+The file itself is short (around 120 lines) but it coordinates several moving parts. It imports `Reader` and `Console` from the sibling modules inside `_pyrepl`, sets up a history file path (defaulting to `~/.python_history`), and passes everything into `interact`, the main read-eval-print loop. If `curses` is unavailable or the terminal is not a tty, `main.py` falls back gracefully to `code.interact` so the REPL still works in pipes and dumb terminals.
+
+`interactive_console` is the single public function exported from this file. `Modules/main.c` locates it by name via `PyImport_ImportModule` and `PyObject_GetAttr`, then calls it with the interpreter's `__main__` namespace. This design keeps the C side ignorant of the REPL's internal structure: the entire line-editing subsystem can be replaced or updated without touching C code.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| 1-25 | imports | `os`, `sys`, `code`, `_colorize`; conditional `curses` import | |
+| 26-50 | `_get_history_file` | Resolves `~/.python_history` or `$PYTHON_HISTORY` override | |
+| 51-75 | `interactive_console` | Public entry point called from C; sets up `Reader`/`Console`, loads history | |
+| 76-95 | history save/load | `readline`-compatible history read and write wrappers | |
+| 96-110 | fallback path | `code.interact` call when curses or tty is unavailable | |
+| 111-120 | `__main__` guard | Allows `python -m _pyrepl` for direct testing | |
+
+## Reading
+
+### Imports and curses detection (lines 1 to 25)
+
+<CpyLink path="Lib/_pyrepl/main.py" lines="1-25" />
+
+The module tries to import `curses` inside a `try/except ImportError` block. If that succeeds, it also imports `_pyrepl.reader.Reader` and `_pyrepl.console.Console`. If either import fails, a module-level flag `_HAVE_CURSES` is set to `False` and the rest of the file routes around the curses-dependent code paths. `_colorize` is imported unconditionally because syntax highlighting degrades gracefully to a no-op when the terminal does not support color codes.
+
+```python
+try:
+    import curses
+    from _pyrepl.reader import Reader
+    from _pyrepl.console import Console
+    _HAVE_CURSES = True
+except ImportError:
+    _HAVE_CURSES = False
+```
+
+### `_get_history_file` (lines 26 to 50)
+
+<CpyLink path="Lib/_pyrepl/main.py" lines="26-50" />
+
+`_get_history_file()` checks `os.environ` for `PYTHON_HISTORY`. If the variable is set to an empty string the function returns `None`, disabling history persistence entirely. Otherwise it expands `~` via `os.path.expanduser` and returns the resolved path. The default when the variable is absent is `~/.python_history`, matching the path that the old `readline`-based REPL used, so existing history files are preserved when users upgrade to Python 3.13 or later.
+
+```python
+def _get_history_file():
+    path = os.environ.get("PYTHON_HISTORY")
+    if path == "":
+        return None
+    if path is None:
+        path = "~/.python_history"
+    return os.path.expanduser(path)
+```
+
+### `interactive_console` (lines 51 to 95)
+
+<CpyLink path="Lib/_pyrepl/main.py" lines="51-95" />
+
+`interactive_console(mainmodule=None, quiet=False)` is the function CPython's C startup code calls. It resolves the `__main__` module if `mainmodule` is `None`, prints the version banner unless `quiet` is set, and then branches on `_HAVE_CURSES` and `sys.stdin.isatty()`. On the happy path it constructs a `Console` bound to `sys.stdin`/`sys.stdout`, wraps it in a `Reader` with the history file path, and calls `reader.interact(mainmodule.__dict__)`.
+
+The `Reader` object owns the curses window, the key-binding table, bracket-matching state, and the syntax-highlight callback. Passing `mainmodule.__dict__` as the namespace means that definitions typed at the prompt accumulate in `__main__` exactly as they did with the old REPL.
+
+```python
+def interactive_console(mainmodule=None, quiet=False):
+    if mainmodule is None:
+        mainmodule = sys.modules["__main__"]
+    if not quiet:
+        _print_banner()
+    if not _HAVE_CURSES or not sys.stdin.isatty():
+        _fallback_interact(mainmodule)
+        return
+    histfile = _get_history_file()
+    console = Console(sys.stdin, sys.stdout)
+    reader = Reader(console)
+    if histfile:
+        _load_history(reader, histfile)
+    try:
+        reader.interact(mainmodule.__dict__)
+    finally:
+        if histfile:
+            _save_history(reader, histfile)
+```
+
+### History save and load (lines 76 to 110)
+
+<CpyLink path="Lib/_pyrepl/main.py" lines="76-110" />
+
+`_load_history(reader, path)` opens the history file and feeds each non-empty line to `reader.history.append`. Lines are stripped of the trailing newline but otherwise stored verbatim, including multiline continuations joined by `\n`. `_save_history(reader, path)` writes each history entry back, replacing embedded newlines with a literal `\n` escape so the file stays line-oriented and compatible with tools that read `~/.python_history` directly, such as bash's `history` command or IPython.
+
+Both functions swallow `OSError` silently. A missing or unreadable history file is not a fatal condition: the REPL simply starts without prior history.
+
+### Fallback to `code.interact` (lines 96 to 110)
+
+<CpyLink path="Lib/_pyrepl/main.py" lines="96-110" />
+
+`_fallback_interact(mainmodule)` calls `code.interact(local=mainmodule.__dict__, exitmsg="")` and returns. This keeps the REPL functional when the process is attached to a pipe, when curses fails to initialize, or when `TERM` is set to `dumb`. The `exitmsg=""` argument suppresses the `"now exiting..."` line that `code.interact` would otherwise print, matching the behaviour of the curses path.
+
+```python
+def _fallback_interact(mainmodule):
+    import code
+    code.interact(local=mainmodule.__dict__, exitmsg="")
+```
+
+## gopy mirror
+
+Not yet ported.

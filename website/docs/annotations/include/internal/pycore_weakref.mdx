@@ -1,0 +1,249 @@
+---
+title: Include/internal/pycore_weakref.h
+description: Internal weak-reference helpers: doubly-linked weakref list, _PyObject_GET_WEAKREFS_LISTPTR, _PyWeakref_GetWeakrefCount, _PyWeakref_ClearRef, and dead-reference detection.
+cpython_path: Include/internal/pycore_weakref.h
+cpython_version: "3.14"
+lines: 120
+status: annotated
+ported_to: objects/weakref.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Include/internal/pycore_weakref.h`
+
+<CpyLink path="Include/internal/pycore_weakref.h" />
+
+The private companion to `Include/weakrefobject.h`. The public header
+declares `PyWeakReference` and the `PyWeakref_*` family; this file
+adds the interpreter-internal list-management helpers that the garbage
+collector and `tp_dealloc` call during finalization.
+
+When an object is about to be freed, CPython must clear every
+`PyWeakReference` that points at it so that `PyWeakref_GetObject`
+returns `None` rather than a dangling pointer. The mechanism is a
+doubly-linked intrusive list threaded through the `wr_object`,
+`wr_prev`, and `wr_next` fields of `PyWeakReference`. The head of this
+list lives in the referent object's `tp_weaklistoffset` slot. The
+helpers in this header let `tp_dealloc` and the GC walk and clear
+that list without having to know the details of the weakref struct.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Include/internal/pycore_weakref.h" lines="1-50">1-50</Cpy> | `_PyObject_GET_WEAKREFS_LISTPTR`, `_PyObject_IS_WEAKLY_REFERENCED` | Macro to fetch the `PyWeakReference **` list head from a referent object using `tp_weaklistoffset`; predicate that checks whether any weakref to the object exists. | `objects/weakref.go` |
+| <Cpy path="Include/internal/pycore_weakref.h" lines="50-90">50-90</Cpy> | `_PyWeakref_GetWeakrefCount`, `_PyWeakref_ClearRef` | Count the number of weakrefs pointing at an object, and atomically clear one `PyWeakReference` by zeroing its referent pointer and invoking its callback. | `objects/weakref.go` |
+| <Cpy path="Include/internal/pycore_weakref.h" lines="90-120">90-120</Cpy> | `_PyWeakref_IS_DEAD`, `PyObject_ClearWeakRefs` | Fast predicate to test whether a weakref's referent has already been cleared; and the public clear-all helper that `tp_dealloc` calls to drain the list before freeing the object. | `objects/weakref.go` |
+
+## Reading
+
+### Weakref list pointer extraction (lines 1 to 50)
+
+<CpyLink path="Include/internal/pycore_weakref.h" lines="1-50" />
+
+```c
+/* Return a pointer to the PyWeakReference * list-head field embedded
+   in the referent.  tp_weaklistoffset is the byte offset of that
+   field within the object struct; a negative value means the offset
+   is stored at *ob_type->tp_weaklistoffset (for variable-size types). */
+static inline PyWeakReference **
+_PyObject_GET_WEAKREFS_LISTPTR(PyObject *op)
+{
+    Py_ssize_t offset = Py_TYPE(op)->tp_weaklistoffset;
+    if (offset == -1) {
+        /* Variable-size type: read the actual offset from the struct. */
+        offset = *(Py_ssize_t *)((char *)op + Py_TYPE(op)->tp_basicsize - sizeof(Py_ssize_t));
+    }
+    return (PyWeakReference **)((char *)op + offset);
+}
+
+static inline bool
+_PyObject_IS_WEAKLY_REFERENCED(PyObject *op)
+{
+    if (!_PyType_SUPPORTS_WEAKREFS(Py_TYPE(op))) {
+        return false;
+    }
+    PyWeakReference **list = _PyObject_GET_WEAKREFS_LISTPTR(op);
+    return (*list != NULL);
+}
+```
+
+`tp_weaklistoffset` stores the byte offset of the `PyWeakReference *`
+head pointer within the referent object's C struct. A type that wants
+to support weak references reserves a `PyObject *` (or
+`PyWeakReference *`) field at a fixed offset and sets
+`tp_weaklistoffset` to that offset in `PyTypeObject`. The value -1 is
+used for heap types (types created by `type.__new__`) where the offset
+is not known at compile time and must be read from the struct at
+runtime.
+
+`_PyObject_GET_WEAKREFS_LISTPTR` turns the offset into a double
+pointer: `**PyWeakReference` pointing at the head of the list embedded
+in the referent. Every operation that needs to traverse or modify the
+list starts by calling this macro to find the head, then walks the
+`wr_next` chain.
+
+`_PyObject_IS_WEAKLY_REFERENCED` first checks the type flag
+`Py_TPFLAGS_BASETYPE & tp_weaklistoffset` (via `_PyType_SUPPORTS_WEAKREFS`)
+to avoid the offset arithmetic entirely for types that never support
+weakrefs (e.g. `int`, `float`, `bool`). For eligible types it reads
+the list head and returns true when it is non-NULL.
+
+In gopy, `objects/weakref.go` does not use `tp_weaklistoffset` because
+the Go runtime owns object layout. Instead, gopy maintains a
+`sync.Mutex`-protected `referent` pointer on each `Weakref` struct.
+The equivalent of "fetch the list head" is simply reading `w.referent`.
+
+### `_PyWeakref_ClearRef` (lines 50 to 90)
+
+<CpyLink path="Include/internal/pycore_weakref.h" lines="50-90" />
+
+```c
+/* Number of weakrefs pointing at op. */
+static inline Py_ssize_t
+_PyWeakref_GetWeakrefCount(PyObject *op)
+{
+    PyWeakReference **list = _PyObject_GET_WEAKREFS_LISTPTR(op);
+    Py_ssize_t count = 0;
+    PyWeakReference *wr = *list;
+    while (wr != NULL) {
+        ++count;
+        wr = wr->wr_next;
+    }
+    return count;
+}
+
+/* Clear a single weakref: zero its wr_object pointer, unlink it from
+   the list, and return its callback (caller must invoke it).
+   Expects the GIL to be held. */
+static inline PyObject *
+_PyWeakref_ClearRef(PyWeakReference *self)
+{
+    PyObject *callback = self->wr_callback;
+    self->wr_callback = NULL;
+    /* Unlink from the doubly-linked list. */
+    PyWeakReference *next = self->wr_next;
+    PyWeakReference *prev = self->wr_prev;
+    if (prev != NULL) {
+        prev->wr_next = next;
+    } else {
+        /* self was the head; update the referent's list pointer. */
+        *_PyObject_GET_WEAKREFS_LISTPTR(self->wr_object) = next;
+    }
+    if (next != NULL) {
+        next->wr_prev = prev;
+    }
+    self->wr_object = Py_None;   /* sentinel: referent is gone */
+    self->wr_prev = self->wr_next = NULL;
+    return callback;
+}
+```
+
+`_PyWeakref_GetWeakrefCount` is a linear scan of the list. It is not
+called on any hot path; it exists for `weakref.getweakrefcount()` in
+the stdlib and for assertions in debug builds. CPython does not cache
+the count because the list is typically very short (zero or one
+weakrefs per object in production code).
+
+`_PyWeakref_ClearRef` is the core finalization primitive. CPython's
+`PyObject_ClearWeakRefs` (called from `tp_dealloc`) loops over the
+list and calls this function once for each weakref. The contract is:
+
+1. Save and NULL out `wr_callback` so the callback is fired exactly
+   once even if `_PyWeakref_ClearRef` is called multiple times (e.g.
+   if a callback resurrects the object and then it dies again).
+2. Unlink `self` from the doubly-linked list. If `self` was the head,
+   the referent's list-head pointer must be updated to `self->wr_next`.
+3. Set `wr_object = Py_None` as the sentinel that `_PyWeakref_IS_DEAD`
+   and `PyWeakref_GetObject` check.
+4. Return the callback to the caller, who queues it for invocation
+   after all weakrefs have been cleared (so that callbacks see a
+   consistent state where the referent is fully dead).
+
+The caller is responsible for invoking the returned callback. CPython
+does this in `handle_callback` inside `Objects/weakrefobject.c`, which
+calls the callback with the (now-dead) weakref as the only argument,
+then decrefs the callback to release the reference the weakref held.
+
+In gopy, `objects/weakref.go` implements `Clear() Object`, which holds
+`w.mu`, sets `w.referent = nil`, captures and clears `w.callback`, and
+returns the callback for the caller to invoke. This covers the same
+contract: zero the referent, release the callback reference, return it
+for deferred invocation.
+
+### `_PyWeakref_IS_DEAD` and `PyObject_ClearWeakRefs` (lines 90 to 120)
+
+<CpyLink path="Include/internal/pycore_weakref.h" lines="90-120" />
+
+```c
+/* True when the weakref's referent has been cleared (wr_object is
+   Py_None after _PyWeakref_ClearRef ran). */
+static inline bool
+_PyWeakref_IS_DEAD(PyWeakReference *self)
+{
+    return self->wr_object == Py_None;
+}
+
+/* Called from tp_dealloc: clear all weakrefs to op and queue their
+   callbacks for invocation.  Must be called before any fields of op
+   are freed. */
+PyAPI_FUNC(void) PyObject_ClearWeakRefs(PyObject *op);
+```
+
+`_PyWeakref_IS_DEAD` is a one-field comparison. CPython uses `Py_None`
+as the cleared sentinel rather than `NULL` so that `PyWeakref_GetObject`
+can return `Py_None` directly (the public API contract for a dead
+weakref) without a branch on `NULL`. Any weakref for which `wr_object ==
+Py_None` is dead and its `PyWeakref_GET_OBJECT` macro expands to
+`Py_None` with no further test.
+
+`PyObject_ClearWeakRefs` is declared here but defined in
+`Objects/weakrefobject.c`. The typical `tp_dealloc` sequence for a
+weakly-referenceable type is:
+
+```c
+static void
+myobj_dealloc(PyObject *self)
+{
+    if (Py_TYPE(self)->tp_weaklistoffset) {
+        PyObject_ClearWeakRefs(self);  /* must come first */
+    }
+    /* now safe to free fields */
+    Py_XDECREF(((MyObject *)self)->field);
+    Py_TYPE(self)->tp_free(self);
+}
+```
+
+`PyObject_ClearWeakRefs` iterates the list, calls `_PyWeakref_ClearRef`
+on each entry, collects the returned callbacks into a temporary list,
+and then invokes them in order. The two-phase design (clear all, then
+call callbacks) prevents a callback from seeing a partially-cleared
+referent: by the time the first callback runs, every weakref to the
+object already reads `None`.
+
+In gopy, `weakref.go`'s `Clear()` method combined with the `Referent()`
+return-`None`-when-nil contract covers the same observable behaviour.
+Go's garbage collector never calls a `tp_dealloc` equivalent directly;
+instead, gopy registers a finalizer via `runtime.SetFinalizer` that
+calls `Clear()` and then invokes any registered callback.
+
+## gopy mirror
+
+The doubly-linked list (`wr_prev`, `wr_next`) is not ported. CPython
+needs the list because a single object can have many weakrefs and
+`PyObject_ClearWeakRefs` must walk them all without knowing who holds
+references. In gopy each `Weakref` holds its own `referent` pointer
+protected by a `sync.Mutex`; the GC drives finalization through
+`runtime.SetFinalizer`, so there is no list to walk.
+
+`_PyObject_GET_WEAKREFS_LISTPTR` and `tp_weaklistoffset` have no
+counterpart in gopy because Go's type system does not use offset-based
+struct introspection. The predicate `_PyObject_IS_WEAKLY_REFERENCED`
+maps to checking whether any live `Weakref` has a non-nil `referent`
+equal to the object in question; gopy does not maintain that mapping
+in the current implementation.
+
+`_PyWeakref_IS_DEAD` maps to `w.referent == nil`: after `Clear()`
+runs, `Referent()` returns `None` via the nil-check branch, giving the
+same external behaviour as the CPython `Py_None` sentinel.

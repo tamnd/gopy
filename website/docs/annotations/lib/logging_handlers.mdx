@@ -1,0 +1,238 @@
+---
+title: Lib/logging/handlers.py
+description: Extended logging handlers; rotating file, timed rotation, socket/syslog/SMTP delivery, memory buffering, and async queue dispatch.
+cpython_path: Lib/logging/handlers.py
+cpython_version: "3.14"
+lines: 1400
+status: annotated
+ported_to: (stdlib pending)
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Lib/logging/handlers.py`
+
+<CpyLink path="Lib/logging/handlers.py" />
+
+`logging.handlers` is the standard collection of production-grade
+`logging.Handler` subclasses. None require a C extension; the module
+imports `os`, `socket`, `pickle`, `struct`, `time`, `queue`, and
+`threading` for the more complex handlers.
+
+The file contains eight main handler families. `RotatingFileHandler`
+and `TimedRotatingFileHandler` manage log rotation on a single host.
+`SocketHandler` and `DatagramHandler` ship records over the network.
+`SysLogHandler` speaks the BSD syslog protocol. `SMTPHandler` sends
+email on critical events. `MemoryHandler` buffers records and flushes
+to a target handler when a threshold is reached. `QueueHandler` and
+`QueueListener` decouple the logging call site from I/O by using a
+`queue.Queue` and a background thread.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Lib/logging/handlers.py" lines="1-80">1-80</Cpy> | Module imports, `DEFAULT_TCP_LOGGING_PORT`, `DEFAULT_UDP_LOGGING_PORT`, `DEFAULT_HTTP_LOGGING_PORT` | Port constants and `socket`/`pickle`/`struct` imports shared by the network handlers. | `(stdlib pending)` |
+| <Cpy path="Lib/logging/handlers.py" lines="81-250">81-250</Cpy> | `BaseRotatingHandler`, `RotatingFileHandler` | `shouldRollover` checks file size against `maxBytes`; `doRollover` renames `.log` to `.log.1`, shifts `.1` to `.2`, etc., up to `backupCount`. | `(stdlib pending)` |
+| <Cpy path="Lib/logging/handlers.py" lines="251-500">251-500</Cpy> | `TimedRotatingFileHandler` | Computes next rollover time at `__init__`; `shouldRollover` compares `time.time()` against `self.rolloverAt`; `doRollover` renames with a timestamp suffix and recomputes the next deadline. | `(stdlib pending)` |
+| <Cpy path="Lib/logging/handlers.py" lines="501-650">501-650</Cpy> | `SocketHandler`, `makePickle`, `send`, `createSocket` | Pickles the `LogRecord` dict (not the record itself), prefixes a 4-byte big-endian length, and sends over a persistent TCP socket with reconnect on error. | `(stdlib pending)` |
+| <Cpy path="Lib/logging/handlers.py" lines="651-750">651-750</Cpy> | `DatagramHandler` | UDP variant of `SocketHandler`; overrides `send` to call `socket.sendto` without a length prefix; no reconnect needed. | `(stdlib pending)` |
+| <Cpy path="Lib/logging/handlers.py" lines="751-950">751-950</Cpy> | `SysLogHandler` | Encodes the priority (`facility * 8 + severity`), prefixes `<priority>` in RFC 3164 format, and sends over UDP or Unix domain socket; maps Python level names to syslog severities. | `(stdlib pending)` |
+| <Cpy path="Lib/logging/handlers.py" lines="951-1050">951-1050</Cpy> | `SMTPHandler` | Opens an SMTP connection with `smtplib.SMTP`, optionally authenticates and uses TLS, sends one email per `emit` call; subject and `fromaddr` are configurable. | `(stdlib pending)` |
+| <Cpy path="Lib/logging/handlers.py" lines="1051-1200">1051-1200</Cpy> | `MemoryHandler`, `BufferingHandler` | `BufferingHandler` stores records in a list; `shouldFlush` checks buffer length; `MemoryHandler` adds a `target` handler and flushes on `capacity` exceeded or on a configurable `flushLevel`. | `(stdlib pending)` |
+| <Cpy path="Lib/logging/handlers.py" lines="1201-1400">1201-1400</Cpy> | `QueueHandler`, `QueueListener`, `WatchedFileHandler` | `QueueHandler.emit` puts the record on a `queue.Queue`; `QueueListener` runs a daemon thread that calls `handle` on each record; `WatchedFileHandler` re-opens the file if it detects the inode has changed (logrotate support). | `(stdlib pending)` |
+
+## Reading
+
+### `RotatingFileHandler.doRollover` (lines 81 to 250)
+
+<CpyLink path="Lib/logging/handlers.py" lines="81-250" />
+
+```python
+def doRollover(self):
+    if self.stream:
+        self.stream.close()
+        self.stream = None
+    if self.backupCount > 0:
+        for i in range(self.backupCount - 1, 0, -1):
+            sfn = self.rotation_filename("%s.%d" % (self.baseFilename, i))
+            dfn = self.rotation_filename("%s.%d" % (self.baseFilename, i + 1))
+            if os.path.exists(sfn):
+                if os.path.exists(dfn):
+                    os.remove(dfn)
+                os.rename(sfn, dfn)
+        dfn = self.rotation_filename(self.baseFilename + ".1")
+        if os.path.exists(dfn):
+            os.remove(dfn)
+        self.rotate(self.baseFilename, dfn)
+    if not self.delay:
+        self.stream = self._open()
+
+def shouldRollover(self, record):
+    if self.stream is None:
+        self.stream = self._open()
+    if self.maxBytes > 0:
+        msg = "%s\n" % self.format(record)
+        self.stream.seek(0, 2)  # due to non-posix-compliant Windows feature
+        if self.stream.tell() + len(msg) >= self.maxBytes:
+            return 1
+    return 0
+```
+
+The rotation scheme shifts files in reverse order: `.5` is removed,
+`.4` is renamed to `.5`, and so on down to `.1`. Then the active log
+is renamed to `.1` and a new empty file is opened. This is an O(N)
+operation on the backup count, but backup counts are typically small
+(3-10) so the cost is negligible.
+
+`shouldRollover` seeks to the end of the current file to get an
+accurate size even when the file was opened in append mode on a
+non-POSIX system (Windows does not guarantee `tell()` returns the true
+end-of-file position after `open(..., 'a')`). The formatted record
+length is added to the current position to check whether the write
+would exceed `maxBytes`.
+
+The `rotate` and `rotation_filename` hooks allow subclasses to add
+compression (e.g., gzip the rotated file) or custom naming without
+overriding `doRollover` wholesale.
+
+### `TimedRotatingFileHandler` rollover time computation (lines 251 to 500)
+
+<CpyLink path="Lib/logging/handlers.py" lines="251-500" />
+
+```python
+def computeRollover(self, currentTime):
+    result = currentTime + self.interval
+    # If we are rolling over at midnight or weekly, then the interval is already known.
+    # What we need to figure out is WHEN the next interval is.
+    if self.when == 'MIDNIGHT' or self.when.startswith('W'):
+        # This could be done with less code, but I want it to be less (obvious?)
+        # error-prone than just advancing 24 hours.
+        if self.utc:
+            t = time.gmtime(currentTime)
+        else:
+            t = time.localtime(currentTime)
+        currentHour = t[3]
+        currentMinute = t[4]
+        currentSecond = t[5]
+        currentDay = t[6]
+        # r is the number of seconds left between now and the next rotation
+        if self.atTime is None:
+            rotate_ts = _MIDNIGHT
+        else:
+            rotate_ts = ((self.atTime.hour * 60 + self.atTime.minute) * 60 +
+                          self.atTime.second)
+        r = rotate_ts - ((currentHour * 60 + currentMinute) * 60 +
+                          currentSecond)
+        if r < 0:
+            # we have already passed the rotation time today
+            r += _MIDNIGHT
+        result = currentTime + r
+        # If we are rolling over on a certain day, add in the number of days until
+        # the next rollover, but make sure that the first rollover is tonight (or this
+        # weekend depending on the when parameter)
+        if self.when.startswith('W'):
+            day = currentDay  # 0 is Monday
+            if day != self.dayOfWeek:
+                if day < self.dayOfWeek:
+                    daysToWait = self.dayOfWeek - day
+                else:
+                    daysToWait = 6 - day + self.dayOfWeek + 1
+                newRolloverAt = result + (daysToWait * (60 * 60 * 24))
+                ...
+                result = newRolloverAt
+    return result
+```
+
+The complexity here is timezone-safe midnight computation. Simply
+adding 86400 seconds would be wrong on days with DST transitions.
+Instead, `computeRollover` determines the number of seconds remaining
+until the next midnight (or `atTime`) in local time (or UTC if
+`self.utc`), adds that to `currentTime`, and for weekly rotation
+adds the number of days until the target weekday. The result is stored
+as `self.rolloverAt` and compared against `int(time.time())` in
+`shouldRollover` on every `emit` call.
+
+### `QueueListener` dispatch thread (lines 1201 to 1400)
+
+<CpyLink path="Lib/logging/handlers.py" lines="1201-1400" />
+
+```python
+class QueueListener:
+    def __init__(self, queue, *handlers, respect_handler_level=False):
+        self.queue = queue
+        self.handlers = handlers
+        self._thread = None
+        self.respect_handler_level = respect_handler_level
+
+    def dequeue(self, block):
+        return self.queue.get(block)
+
+    def prepare(self, record):
+        return record
+
+    def handle(self, record):
+        record = self.prepare(record)
+        for handler in self.handlers:
+            if not self.respect_handler_level:
+                process = True
+            else:
+                process = record.levelno >= handler.level
+            if process:
+                handler.handle(record)
+
+    def _monitor(self):
+        q = self.queue
+        has_task_done = hasattr(q, 'task_done')
+        while True:
+            try:
+                record = self.dequeue(True)
+                if record is self._sentinel:
+                    if has_task_done:
+                        q.task_done()
+                    break
+                self.handle(record)
+                if has_task_done:
+                    q.task_done()
+            except Exception:
+                import traceback
+                traceback.print_exc(file=sys.stderr)
+
+    def start(self):
+        self._thread = t = threading.Thread(target=self._monitor,
+                                            name='logging-listener',
+                                            daemon=True)
+        t.start()
+
+    def stop(self):
+        self.enqueue(self._sentinel)
+        self._thread.join()
+        self._thread = None
+```
+
+`QueueListener` uses a sentinel object (`self._sentinel`) to signal
+shutdown rather than a separate stop event. When `stop()` is called,
+it enqueues the sentinel and then joins the thread, ensuring all
+records queued before `stop()` are processed before the thread exits.
+
+The `prepare` hook exists for `QueueHandler` to use: when a record is
+enqueued its `exc_info` tuple holds live traceback objects that become
+invalid after the frame exits. `QueueHandler.prepare` converts
+`exc_info` to a pre-formatted string via `self.format(record)` before
+enqueueing, so the listener thread receives a self-contained record
+that can be re-emitted without touching the original call stack.
+
+`respect_handler_level=False` by default because level filtering has
+already happened at the `Logger` level when the record was created.
+Setting it to `True` allows the listener to apply per-handler level
+filtering again on the receiving side, which is useful when the listener
+delivers to multiple handlers with different thresholds.
+
+## gopy mirror
+
+`logging.handlers` depends only on `logging`, `os`, `socket`, `pickle`,
+`struct`, `threading`, `time`, and `queue`. A gopy port can follow the
+same split as CPython: core objects in `logging/__init__.py`, extended
+handlers in `logging/handlers.py`. `QueueHandler` and `QueueListener`
+are the highest-value targets because they are the recommended pattern
+for async-safe logging in production Python services.

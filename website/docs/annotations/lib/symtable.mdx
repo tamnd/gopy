@@ -1,0 +1,90 @@
+---
+title: Lib/symtable.py
+description: Python-level wrapper around the compiler's symbol table, exposing scope and binding information for every name in a module.
+cpython_path: Lib/symtable.py
+cpython_version: "3.14"
+lines: 275
+status: annotated
+ported_to: ""
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Lib/symtable.py`
+
+<CpyLink path="Lib/symtable.py" />
+
+`symtable.py` provides the public Python interface to the symbol table that the compiler builds while parsing source code. It wraps the C-level `_symtable` extension, translating raw integer flag fields into named query methods on `Symbol` objects. The primary entry point is `symtable(code, filename, compile_type)`, which drives a compile pass and returns the top-level `SymbolTable` instance.
+
+The table hierarchy mirrors the nesting of scopes. A `Module` table owns child `Function` and `Class` tables, which can themselves own further `Function` tables for nested functions and comprehensions. Each table exposes its local names as `Symbol` objects whose methods answer questions like `is_global()`, `is_local()`, `is_free()`, `is_assigned()`, and `is_parameter()`.
+
+The module is used by IDEs, linters, and static analysis tools that need authoritative scope information without re-implementing the compiler's name-resolution rules. It is notably used by `py_compile`, `compileall`, and documentation tools.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| 1-30 | module imports, `__all__` | Setup, re-exports from `_symtable` | - |
+| 31-70 | `symtable()` | Entry point: compile source, return root table | - |
+| 71-150 | `SymbolTable` | Base class: name, type, children, lookup | - |
+| 151-185 | `Function` | Subclass: parameters, locals, globals, frees | - |
+| 186-205 | `Class` | Subclass: methods list | - |
+| 206-215 | `Module` | Subclass: thin specialization of `SymbolTable` | - |
+| 216-275 | `Symbol` | Per-name flag wrapper: all `is_*` predicates | - |
+
+## Reading
+
+### Entry point (lines 31 to 70)
+
+<CpyLink path="Lib/symtable.py" lines="31-70" />
+
+`symtable()` accepts source text, a filename, and a compile type string (`"exec"`, `"eval"`, or `"single"`). It calls the C-level `_symtable.symtable()` to trigger a compile, then wraps the resulting raw table objects by walking the child list recursively through `_newSymbolTable()`. The factory dispatches to `Module`, `Function`, or `Class` based on the `type` attribute of the raw table.
+
+```python
+def symtable(code, filename, compile_type):
+    raw = _symtable.symtable(code, filename, compile_type)
+    for top in raw.values():
+        if top.name == "top":
+            return _newSymbolTable(top, filename)
+    raise ValueError("no top-level symbol table found")
+```
+
+### SymbolTable base class (lines 71 to 150)
+
+<CpyLink path="Lib/symtable.py" lines="71-150" />
+
+`SymbolTable` wraps a `_symtable.SymbolTableType` raw object. It exposes `get_type()`, `get_name()`, `get_id()`, `get_lineno()`, and `get_filename()` for table-level metadata. `get_symbols()` iterates the raw table's `_symbols` dict and wraps each entry in a `Symbol`. `get_children()` returns the child tables, already converted by `_newSymbolTable()` during construction.
+
+The class also implements `__repr__` and `lookup(name)`, which retrieves a named `Symbol` or raises `KeyError`.
+
+### Function subclass (lines 151 to 185)
+
+<CpyLink path="Lib/symtable.py" lines="151-185" />
+
+`Function` adds `get_parameters()`, `get_locals()`, `get_globals()`, and `get_frees()`. Each method filters `get_symbols()` through the corresponding `is_*` predicate on `Symbol`. `get_nonlocals()` is the intersection of names that are free in the function but not free in the enclosing module, giving the set of names bound by `nonlocal` declarations.
+
+### Symbol flag predicates (lines 216 to 275)
+
+<CpyLink path="Lib/symtable.py" lines="216-275" />
+
+`Symbol` stores the raw integer flags from `_symtable` and exposes them as boolean properties. The flag constants (`USE`, `DEF_GLOBAL`, `DEF_LOCAL`, `DEF_PARAM`, `DEF_FREE`, `DEF_IMPORTED`, and others) are imported from `_symtable` at module load. Each predicate is a single bitwise AND against the stored flags value.
+
+```python
+def is_global(self):
+    return bool(self.__flags & (DEF_GLOBAL | DEF_FREE_GLOBAL))
+
+def is_free(self):
+    return bool(self.__flags & DEF_FREE)
+```
+
+The predicates are designed so that `is_global() and is_local()` can both be false for a name that is only referenced but never assigned.
+
+### Class subclass and module wrapper (lines 186 to 215)
+
+<CpyLink path="Lib/symtable.py" lines="186-215" />
+
+`Class` adds `get_methods()`, which filters child symbols to those that are functions. `Module` is a minimal subclass with no added methods; its `type` string is `"module"` rather than `"function"` or `"class"`. Both exist mainly so that `type(table).__name__` gives a useful string in repr and isinstance checks downstream.
+
+## gopy mirror
+
+Not yet ported.

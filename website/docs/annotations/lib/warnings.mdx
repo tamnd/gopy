@@ -1,0 +1,206 @@
+---
+title: Lib/warnings.py
+description: Python warning filter machinery, the warn/warn_explicit dispatch loop, and the catch_warnings context manager.
+cpython_path: Lib/warnings.py
+cpython_version: "3.14"
+lines: 500
+status: annotated
+ported_to: (stdlib pending)
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Lib/warnings.py`
+
+<CpyLink path="Lib/warnings.py" />
+
+`warnings.py` is the pure-Python fallback for the warning subsystem. CPython
+normally uses `_warnings.c` (the C implementation), which is loaded at
+interpreter startup and shadows this module. The Python version is used when
+the C extension is unavailable and serves as the canonical documentation of
+the algorithm.
+
+The two central functions are `warn` (called by user code) and `warn_explicit`
+(the inner worker). `warn_explicit` scans `filters` in order, applies the
+matching action, and routes the warning to `showwarnmsg`. The filter list is
+a module-global list of 5-tuples; `_filters_mutated()` notifies the C layer
+that its internal cache must be rebuilt whenever the list changes.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Lib/warnings.py" lines="1-60">1-60</Cpy> | `filters`, `_filters_mutated`, `defaultaction`, `onceregistry` | Module-global filter list (initially set from `-W` flags and `PYTHONWARNINGS`), the cache-invalidation hook, the default action string, and the per-category once-registry dict. | `(stdlib pending)` |
+| <Cpy path="Lib/warnings.py" lines="60-130">60-130</Cpy> | `filterwarnings`, `simplefilter`, `resetwarnings` | Public filter mutators. `filterwarnings` inserts a 5-tuple `(action, message_re, category, module_re, lineno)` at the front of `filters`. `simplefilter` is a shorthand that inserts `(action, None, category, None, 0)`. Both call `_filters_mutated()`. | `(stdlib pending)` |
+| <Cpy path="Lib/warnings.py" lines="130-280">130-280</Cpy> | `warn`, `warn_explicit` | `warn` resolves the caller's frame and category, then delegates to `warn_explicit`. `warn_explicit` runs the filter scan: for each filter tuple it checks action, message regex, category, module regex, and lineno; on a match it executes the action and returns. | `(stdlib pending)` |
+| <Cpy path="Lib/warnings.py" lines="280-380">280-380</Cpy> | `showwarnmsg_impl`, `showwarnmsg`, `formatwarning`, `_showwarning_orig`, `_showwarnmsg_impl` | The display path. `showwarnmsg` calls `showwarnmsg_impl` (or a user-installed `showwarning`). `formatwarning` produces the standard `file:lineno: category: text\n  source_line\n` format. | `(stdlib pending)` |
+| <Cpy path="Lib/warnings.py" lines="380-500">380-500</Cpy> | `catch_warnings`, `WarningMessage` | `catch_warnings` saves and restores `filters`, `showwarning`, and `showwarnmsg` on entry/exit. When `record=True` it installs a collector that appends `WarningMessage` objects to a list instead of printing. | `(stdlib pending)` |
+
+## Reading
+
+### `warn_explicit` filter scan (lines 130 to 280)
+
+<CpyLink path="Lib/warnings.py" lines="130-280" />
+
+```python
+def warn_explicit(message, category, filename, lineno,
+                  module=None, registry=None, module_globals=None,
+                  source=None):
+    lineno = int(lineno)
+    if module is None:
+        module = filename or "<unknown>"
+        if module[-3:].lower() == ".py":
+            module = module[:-3]
+    if registry is None:
+        registry = {}
+    if registry.get('version', 0) != _filters_version:
+        registry.clear()
+        registry['version'] = _filters_version
+    if isinstance(message, Warning):
+        text = str(message)
+        category = message.__class__
+    else:
+        text = message
+        message = category(message)
+    key = (text, category, lineno)
+    if registry.get(key):
+        return
+    for item in filters:
+        action, msg, cat, mod, ln = item
+        if ((msg is None or msg.match(text)) and
+            issubclass(category, cat) and
+            (mod is None or mod.match(module)) and
+            (ln == 0 or lineno == ln)):
+            break
+    else:
+        action = defaultaction
+    ...
+    if action == "error":
+        raise message
+    if action == 'ignore':
+        registry[key] = 1
+        return
+    if action == 'always':
+        pass
+    elif action == 'all':
+        pass
+    elif action in ('default', 'module'):
+        if action == 'module':
+            registry[key] = 1
+        if key in onceregistry:
+            return
+        onceregistry[key] = 1
+    elif action == 'once':
+        if key in onceregistry:
+            return
+        onceregistry[key] = 1
+    else:
+        raise RuntimeError("Unrecognized action: %r" % action)
+    msg = WarningMessage(message, category, filename, lineno, source=source)
+    showwarnmsg(msg)
+    registry[key] = 1
+```
+
+The filter scan iterates `filters` in order. Each entry is a 5-tuple; `None`
+in the message or module position means "match any". The `issubclass` check
+allows category matching to respect inheritance (e.g., a filter on
+`Warning` catches all warning subclasses).
+
+The `registry` argument is the per-module `__warningregistry__` dict. It is
+cleared whenever `_filters_version` changes (i.e., after any call to
+`filterwarnings` or `simplefilter`). The `key` tuple `(text, category,
+lineno)` is inserted into `registry` after the warning is shown, so
+subsequent identical warnings from the same line are suppressed.
+
+The six actions:
+- `error`: raise the warning as an exception.
+- `ignore`: discard silently, record in registry.
+- `always`: show every occurrence.
+- `all`: alias for `always`.
+- `default`: show once per location (file + lineno), record in `onceregistry`.
+- `module`: show once per module, record in `onceregistry`.
+- `once`: show once globally, record in `onceregistry`.
+
+### `catch_warnings` save and restore (lines 380 to 500)
+
+<CpyLink path="Lib/warnings.py" lines="380-500" />
+
+```python
+class catch_warnings(object):
+    def __init__(self, *, record=False, module=None):
+        self._record = record
+        self._module = sys.modules['warnings'] if module is None else module
+        self._entered = False
+
+    def __enter__(self):
+        if self._entered:
+            raise RuntimeError("Cannot enter %r twice" % self)
+        self._entered = True
+        self._filters = self._module.filters
+        self._module.filters = self._filters[:]
+        self._module._filters_mutated()
+        self._showwarning = self._module.showwarning
+        self._showwarnmsg_impl = self._module._showwarnmsg_impl
+        if self._record:
+            log = []
+            self._module._showwarnmsg_impl = log.append
+            self._module.showwarning = self._showwarning_orig
+            return log
+        else:
+            return None
+
+    def __exit__(self, *exc_info):
+        if not self._entered:
+            raise RuntimeError("Cannot exit %r without entering first" % self)
+        self._module.filters = self._filters
+        self._module._filters_mutated()
+        self._module.showwarning = self._showwarning
+        self._module._showwarnmsg_impl = self._showwarnmsg_impl
+```
+
+`catch_warnings` saves three things on `__enter__`: the `filters` list (by
+taking a shallow copy so mutations inside the block do not affect the saved
+original), the `showwarning` hook, and `_showwarnmsg_impl`. All three are
+restored verbatim on `__exit__`, regardless of whether an exception occurred.
+`_filters_mutated()` is called on both entry and exit so the C layer's cache
+is invalidated at the right times.
+
+When `record=True`, `_showwarnmsg_impl` is replaced by `log.append`, so every
+warning that reaches the display path is instead appended to the returned list
+as a `WarningMessage` object. This is the standard pattern in test suites:
+
+```python
+with warnings.catch_warnings(record=True) as w:
+    warnings.simplefilter("always")
+    do_something_that_warns()
+assert len(w) == 1
+assert issubclass(w[0].category, DeprecationWarning)
+```
+
+### `onceregistry` per-module dedup (lines 1 to 130)
+
+<CpyLink path="Lib/warnings.py" lines="1-130" />
+
+```python
+onceregistry = {}
+defaultaction = "default"
+```
+
+`onceregistry` is module-global and shared across all callers. For the
+`"default"` and `"module"` actions, the per-module `__warningregistry__`
+dict (created by the compiler in each module's globals) is the primary
+deduplication store; `onceregistry` is only consulted for the `"once"` and
+`"module"` actions to enforce global-level deduplication on top of per-module
+deduplication. Both dicts are keyed by `(text, category, lineno)` tuples.
+Both are cleared when `resetwarnings()` is called (which also clears the
+`filters` list back to its default state).
+
+## gopy mirror
+
+The Python `warnings` module is shadowed by `_warnings.c` at runtime, but
+the Python code defines the algorithm. A gopy port must implement the filter
+scan and the `__warningregistry__` dict protocol in the VM, and expose
+`filters`, `onceregistry`, `showwarning`, and `_showwarnmsg_impl` as mutable
+module-level attributes so that `catch_warnings` can save and restore them.
+The `_filters_mutated()` hook must notify any internal warning cache in the
+interpreter core.

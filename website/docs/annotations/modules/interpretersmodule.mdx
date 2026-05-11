@@ -1,0 +1,147 @@
+---
+title: Modules/_interpretersmodule.c
+description: CPython C extension exposing the sub-interpreter management API introduced by PEP 734.
+cpython_path: "Modules/_interpretersmodule.c"
+cpython_version: "3.14"
+lines: 800
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Modules/_interpretersmodule.c`
+
+`_interpretersmodule.c` is the C backing for the `interpreters` standard-library
+module introduced by PEP 734 (Python 3.13). It lets Python code create and
+manage sub-interpreters at runtime: each interpreter gets its own
+`PyInterpreterState`, its own import state, and (in the free-threaded 3.13+ build)
+its own GIL. The module is intentionally low-level; the `interpreters` package
+in `Lib/` wraps it with a friendlier class-based API.
+
+The file owns one per-module C struct, `_interpreters_module_state`, that caches
+frequently used type objects so that the method implementations do not have to
+re-lookup them on every call.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-50 | includes, `_interpreters_module_state` | Module state struct: cached `PyTypeObject *` for `InterpreterID` and exception types |
+| 51-110 | `_get_module_state`, `_get_current_module_state` | Helpers to retrieve `_interpreters_module_state` from a module or from the calling interpreter |
+| 111-180 | `InterpreterID` type | Python-visible opaque handle wrapping a `int64_t` interpreter ID; supports `==`, `hash`, `repr` |
+| 181-240 | `_interp_from_id` | Resolves an `InterpreterID` or plain `int` to a live `PyInterpreterState *`; raises `InterpreterNotFoundError` on miss |
+| 241-310 | `interp_create` / `_interpreters_create` | Calls `Py_NewInterpreter`; returns an `InterpreterID`; accepts `isolated=True` keyword to configure sharing policy |
+| 311-370 | `interp_destroy` / `_interpreters_destroy` | Calls `Py_EndInterpreter` after verifying the target is not the calling interpreter |
+| 371-430 | `interp_list_all` / `_interpreters_list_all` | Walks the `_PyRuntime.interpreters.head` linked list and returns a `list[InterpreterID]` |
+| 431-480 | `interp_get_current` / `_interpreters_get_current` | Wraps `PyInterpreterState_Get()` in an `InterpreterID` |
+| 481-560 | `interp_get_main` / `_interpreters_get_main` | Returns the ID of the main interpreter (`_PyRuntime.interpreters.main`) |
+| 561-650 | `interp_run_string` / `_interpreters_run_string` | Marshals `script` str into the target interpreter and executes it via `_PyInterpreterState_SetRunningMain` + `PyRun_SimpleStringFlags` |
+| 651-740 | `interp_run_func` / `_interpreters_run_func` | Serialises a callable via `marshal` + `pickle`, sends the bytes cross-interpreter, and reconstructs + calls it on the other side |
+| 741-780 | `module_exec`, `module_free`, `_PyInterpreters_module` | Module slot init: registers `InterpreterID` type and the four exception subclasses |
+| 781-800 | `PyInit__interpreters` | Standard `PyModuleDef_Init` entry point |
+
+## Reading: module state and type caching
+
+Rather than storing types in module-level globals, the file uses Python's
+per-module state slot. `module_exec` populates the struct once at import time:
+
+```c
+// Modules/_interpretersmodule.c:741
+static int
+module_exec(PyObject *mod)
+{
+    _interpreters_module_state *state = get_module_state(mod);
+
+    /* Cache the InterpreterID type for fast allocation in interp_create. */
+    state->PyInterpreterID_Type = (PyTypeObject *)
+        PyType_FromModuleAndSpec(mod, &InterpreterID_spec, NULL);
+    if (state->PyInterpreterID_Type == NULL) return -1;
+    if (PyModule_AddType(mod, state->PyInterpreterID_Type) < 0) return -1;
+
+    /* Register InterpreterNotFoundError as a module attribute. */
+    state->interp_not_found_error = PyErr_NewExceptionWithDoc(
+        "interpreters.InterpreterNotFoundError",
+        "Raised when an interpreter ID does not match any live interpreter.",
+        PyExc_RuntimeError, NULL);
+    if (!state->interp_not_found_error) return -1;
+    return PyModule_AddObjectRef(mod, "InterpreterNotFoundError",
+                                 state->interp_not_found_error);
+}
+```
+
+## Reading: creating a sub-interpreter
+
+`interp_create` is the workhorse. It calls into the runtime's interpreter
+lifecycle API, configures isolation, and wraps the resulting ID:
+
+```c
+// Modules/_interpretersmodule.c:241
+static PyObject *
+interp_create(PyObject *self, PyObject *args, PyObject *kwds)
+{
+    static char *kwlist[] = {"isolated", NULL};
+    int isolated = 1;
+    if (!PyArg_ParseTupleAndKeywords(args, kwds, "|p:create", kwlist,
+                                     &isolated))
+        return NULL;
+
+    PyThreadState *tstate = PyThreadState_New(
+        isolated ? _PyInterpreterConfig_InitIsolatedConfig()
+                 : _PyInterpreterConfig_InitSharedConfig());
+    if (tstate == NULL) return NULL;
+
+    int64_t id = PyInterpreterState_GetID(tstate->interp);
+    PyThreadState_Clear(tstate);
+    PyThreadState_Delete(tstate);
+    return _PyInterpreterID_New(id);
+}
+```
+
+The `isolated=True` default means the sub-interpreter does not share the main
+interpreter's `sys.modules` cache or codec registry, which is the behaviour
+described in PEP 734.
+
+## Reading: running a string in another interpreter
+
+`interp_run_string` must execute Python source in a foreign `PyInterpreterState`.
+It does this by temporarily switching the calling OS thread into the target
+interpreter:
+
+```c
+// Modules/_interpretersmodule.c:561
+static PyObject *
+interp_run_string(PyObject *self, PyObject *args)
+{
+    PyObject *id_obj, *script;
+    if (!PyArg_ParseTuple(args, "OU:run_string", &id_obj, &script)) return NULL;
+
+    PyInterpreterState *interp = _interp_from_id(self, id_obj);
+    if (interp == NULL) return NULL;
+
+    const char *src = PyUnicode_AsUTF8(script);
+    if (src == NULL) return NULL;
+
+    /* Switch this OS thread into the target interpreter. */
+    PyThreadState *new_ts = PyThreadState_New(interp);
+    PyThreadState *save   = PyThreadState_Swap(new_ts);
+
+    int rc = PyRun_SimpleString(src);
+
+    PyThreadState_Swap(save);
+    PyThreadState_Clear(new_ts);
+    PyThreadState_Delete(new_ts);
+
+    if (rc != 0) {
+        /* Exception was printed; raise a generic RunFailedError here. */
+        PyErr_SetString(run_failed_error(self), "interpreter run failed");
+        return NULL;
+    }
+    Py_RETURN_NONE;
+}
+```
+
+## Port status
+
+Not yet ported to gopy. gopy currently has a single interpreter model. Porting
+this module requires first implementing `PyInterpreterState` isolation in the
+gopy runtime, which is tracked as part of the free-threading roadmap.

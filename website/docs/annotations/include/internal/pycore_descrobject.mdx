@@ -1,0 +1,98 @@
+---
+title: Include/internal/pycore_descrobject.h
+description: Internal descriptor-object layout that extends the public descrobject.h with propertyobject internals and the _PyMethodWrapper_Type export.
+cpython_path: Include/internal/pycore_descrobject.h
+cpython_version: "3.14"
+lines: 28
+status: annotated
+ported_to: ""
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Include/internal/pycore_descrobject.h`
+
+<CpyLink path="Include/internal/pycore_descrobject.h" />
+
+`pycore_descrobject.h` is the internal companion to `Include/descrobject.h` and
+`Include/cpython/descrobject.h`. The public headers declare the four descriptor
+structs (`PyMethodDescrObject`, `PyMemberDescrObject`, `PyGetSetDescrObject`,
+`PyWrapperDescrObject`) and the `PyDescr_COMMON` macro that embeds `PyDescrObject`
+(holding `d_type`, `d_name`, `d_qualname`) at the top of each one. The internal
+header adds two things the public API does not expose: the full layout of
+`propertyobject` (the C backing of the built-in `property` type) and the extern
+declaration for `_PyMethodWrapper_Type`.
+
+`propertyobject` holds all five attributes that make up a Python `property`:
+`prop_get`, `prop_set`, `prop_del`, `prop_doc`, and `prop_name`, plus the
+`getter_doc` flag that records whether the docstring was inherited from the
+getter. Build-core code (the type machinery, `super`, and the optimizer) reads
+these fields directly rather than going through the Python-level attribute
+protocol. `_PyMethodWrapper_Type` is the C type for the bound-method wrapper
+objects returned when you access a slot wrapper on an instance (for example,
+`(1).__add__`). It is exported so that `Objects/typeobject.c` and the
+`_testcapi` extension can reference it without declaring it themselves.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| 11-19 | `propertyobject` | Full C layout of built-in `property`: get/set/del/doc/name callables plus `getter_doc` flag | `objects/property.go` |
+| 21 | `_PyPropertyObject` | Typedef alias for `propertyobject` used internally | `objects/property.go` |
+| 23 | `_PyMethodWrapper_Type` | Extern `PyTypeObject` for bound slot-wrapper objects (`method-wrapper`) | `objects/method.go` |
+| 26-31 | `PyDescrObject` (in cpython/descrobject.h) | Base descriptor layout: `d_type`, `d_name`, `d_qualname`; embedded via `PyDescr_COMMON` | `objects/descr.go` |
+| 38-58 | Four descriptor structs (in cpython/descrobject.h) | `PyMethodDescrObject`, `PyMemberDescrObject`, `PyGetSetDescrObject`, `PyWrapperDescrObject` | `objects/descr.go` |
+
+## Reading
+
+### Guard and build-core requirement
+
+Lines 1-9 apply the standard `Py_BUILD_CORE` guard. This header is never
+included by extension code. Any file that includes it must define
+`Py_BUILD_CORE` first, which limits its users to the interpreter core,
+the `Modules/_testcapi` family, and the JIT.
+
+### `propertyobject` layout
+
+The struct at lines 11-19 gives build-core code direct field access to all
+five callable slots of a `property` plus the `getter_doc` integer flag.
+The `getter_doc` flag is `1` when the property docstring was copied from the
+getter function rather than supplied explicitly; `type.__new__` uses this to
+decide whether a subclass should inherit the doc from a redefined getter.
+
+### `_PyPropertyObject` alias
+
+The `typedef propertyobject _PyPropertyObject` at line 21 lets newer internal
+code use the `_Py`-prefixed name consistently without a rename. Both names
+refer to the same struct; the alias is the preferred spelling in new code added
+after Python 3.12.
+
+### `_PyMethodWrapper_Type` export
+
+Line 23 is a single `extern` that makes the method-wrapper type object
+available across translation units. Method-wrapper instances are created by
+`Objects/descrobject.c:wrapperdescr_get` whenever a slot-wrapper descriptor is
+accessed on an instance. The type object itself lives in that file, and the
+extern here lets `typeobject.c`, `abstract.c`, and test extensions reference it
+without a forward declaration in every file.
+
+```c
+// Include/internal/pycore_descrobject.h (lines 11-23)
+typedef struct {
+    PyObject_HEAD
+    PyObject *prop_get;
+    PyObject *prop_set;
+    PyObject *prop_del;
+    PyObject *prop_doc;
+    PyObject *prop_name;
+    int getter_doc;
+} propertyobject;
+
+typedef propertyobject _PyPropertyObject;
+
+extern PyTypeObject _PyMethodWrapper_Type;
+```
+
+## gopy mirror
+
+Not yet ported.

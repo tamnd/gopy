@@ -1,0 +1,169 @@
+---
+title: Lib/ctypes/__init__.py
+description: Python-level surface of ctypes; wires together the _ctypes C extension with library loaders, fundamental types, Structure/Union, POINTER, CFUNCTYPE, and callback plumbing.
+cpython_path: Lib/ctypes/__init__.py
+cpython_version: "3.14"
+lines: 550
+status: annotated
+ported_to: (stdlib pending)
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Lib/ctypes/__init__.py`
+
+<CpyLink path="Lib/ctypes/__init__.py" />
+
+`ctypes` is a foreign-function interface for Python. The bulk of the
+implementation lives in the `_ctypes` C extension
+(`Modules/_ctypes/_ctypes.c`); `Lib/ctypes/__init__.py` is the thin
+Python layer that re-exports the C types, builds the convenience library
+loader instances (`cdll`, `windll`, `pydll`), and provides the
+`Structure`, `Union`, `BigEndianStructure`, and `LittleEndianStructure`
+subclasses with their metaclass-driven `_fields_` processing.
+
+The module is organized as follows: library loader classes at the top,
+fundamental type aliases in the middle, and structural types plus
+`POINTER`/`cast`/`CFUNCTYPE` at the bottom. The C extension exposes
+`_SimpleCData`, `_Pointer`, `_CFuncPtr`, `_Structure`, `_Union`,
+`Array`, `Structure`, and the low-level `_CData` base; the Python layer
+builds on top of those.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Lib/ctypes/__init__.py" lines="1-60">1-60</Cpy> | imports, `__version__`, `RTLD_*` | Pulls in `_ctypes`, `struct`, `os`; sets `RTLD_GLOBAL` / `RTLD_LOCAL` from `_ctypes`. | (pending) |
+| <Cpy path="Lib/ctypes/__init__.py" lines="61-150">61-150</Cpy> | `LibraryLoader`, `CDLL`, `PyDLL`, `WinDLL`, `OleDLL` | Library handle classes; `__getattr__` returns a `_FuncPtr` bound to the named symbol. | (pending) |
+| <Cpy path="Lib/ctypes/__init__.py" lines="150-180">150-180</Cpy> | `cdll`, `windll`, `pydll` | Module-level `LibraryLoader` instances; `cdll.msvcrt` is syntactic sugar for `CDLL('msvcrt')`. | (pending) |
+| <Cpy path="Lib/ctypes/__init__.py" lines="181-300">181-300</Cpy> | `c_bool`, `c_byte`, `c_ubyte`, `c_short`, `c_ushort`, `c_int`, `c_uint`, `c_long`, `c_ulong`, `c_longlong`, `c_ulonglong`, `c_float`, `c_double`, `c_longdouble`, `c_char`, `c_wchar`, `c_char_p`, `c_wchar_p`, `c_void_p`, `c_size_t`, `c_ssize_t` | Fundamental type aliases exported from `_ctypes`; each wraps a `_SimpleCData` subtype. | (pending) |
+| <Cpy path="Lib/ctypes/__init__.py" lines="300-450">300-450</Cpy> | `Structure`, `Union`, `BigEndianStructure`, `LittleEndianStructure` | Concrete structural types whose `_fields_` list is processed at class-creation time by the `_ctypes` metaclass. | (pending) |
+| <Cpy path="Lib/ctypes/__init__.py" lines="450-550">450-550</Cpy> | `POINTER`, `pointer`, `byref`, `cast`, `CFUNCTYPE`, `WINFUNCTYPE`, `PYFUNCTYPE`, `Array`, `SetPointerType` | Pointer factory, cast, by-reference helper, and callback-type factories. | (pending) |
+
+## Reading
+
+### `CDLL.__getattr__` lazy symbol binding (lines 61 to 150)
+
+<CpyLink path="Lib/ctypes/__init__.py" lines="61-150" />
+
+```python
+class CDLL:
+    def __init__(self, name, mode=DEFAULT_MODE, handle=None,
+                 use_errno=False, use_last_error=False, winmode=None):
+        self._name = name
+        self._handle = _dlopen(self._name, mode) if handle is None else handle
+        self._use_errno = use_errno
+        self._use_last_error = use_last_error
+        self._FuncPtr = CDLL._make_funcptr_type(use_errno, use_last_error)
+
+    def __getattr__(self, name):
+        if name.startswith('__') and name.endswith('__'):
+            raise AttributeError(name)
+        func = self.__getitem__(name)
+        setattr(self, name, func)
+        return func
+
+    def __getitem__(self, name_or_ordinal):
+        func = self._FuncPtr((name_or_ordinal, self))
+        if not isinstance(name_or_ordinal, str):
+            func.__name__ = str(name_or_ordinal)
+        return func
+```
+
+`CDLL.__getattr__` is the lazy-binding mechanism. The first attribute
+access for a symbol name resolves it through the C extension's
+`_FuncPtr((name, self))` constructor, which calls `dlsym` (or
+`GetProcAddress` on Windows). The result is cached via `setattr` on the
+instance so that subsequent accesses skip the lookup entirely.
+
+`__getitem__` also accepts an integer ordinal (Windows DLL ordinal
+exports). Dunder names are explicitly rejected with `AttributeError` to
+avoid interfering with Python's own protocol lookups.
+
+The `_FuncPtr` class is chosen based on `use_errno` and `use_last_error`:
+`CDLL` uses `CFUNCTYPE`-derived function pointers with `cdecl` calling
+convention; `WinDLL` uses `WINFUNCTYPE`-derived ones with `stdcall`. The
+`winmode` parameter on Windows controls whether the library is loaded with
+`LOAD_LIBRARY_AS_DATAFILE` or the default flags.
+
+### `Structure._fields_` metaclass processing (lines 300 to 450)
+
+<CpyLink path="Lib/ctypes/__init__.py" lines="300-450" />
+
+```python
+class Structure(_Structure):
+    pass
+
+# _Structure and its metaclass live in _ctypes; the metaclass fires
+# __init_subclass__ / tp_init which calls _ctypes_simple_field for each
+# entry in _fields_.  The Python side exposes the hook points:
+
+class BigEndianStructure(Structure):
+    """Structure with big-endian byte order."""
+    _swappedbytes_ = _BIG_ENDIAN
+
+class LittleEndianStructure(Structure):
+    """Structure with little-endian byte order."""
+    _swappedbytes_ = _LITTLE_ENDIAN
+```
+
+The real work happens inside `_ctypes`'s `StgInfo` and
+`PyCStructType_Type`. When Python evaluates the class body and sets
+`_fields_`, the metaclass intercepts the attribute write via
+`__setattr__` on the type object. It iterates the field list, computes
+each field's offset (respecting `_pack_` and `_align_`), and installs a
+descriptor (`CField`) for each field on the class.
+
+`_fields_` entries are 2-tuples `(name, type)` or 3-tuples `(name, type,
+bits)` for bit fields. Bit fields must use integer fundamental types.
+Fields can reference pointer types (`POINTER(SomeStructure)`) to form
+recursive structures, but the pointed-to type must be complete by the
+time the pointer is first dereferenced, not at class definition time.
+
+### `CFUNCTYPE` callback factories (lines 450 to 550)
+
+<CpyLink path="Lib/ctypes/__init__.py" lines="450-550" />
+
+```python
+def CFUNCTYPE(restype, *argtypes, use_errno=False, use_last_error=False):
+    """CFUNCTYPE(restype, *argtypes, use_errno=False, use_last_error=False)
+    -> function prototype
+
+    restype: result type; None means void.
+    argtypes: parameter types.
+    """
+    try:
+        return _cfunctype_cache[(restype, argtypes, use_errno, use_last_error)]
+    except KeyError:
+        pass
+    class CFunctionType(_CFuncPtr):
+        _argtypes_ = argtypes
+        _restype_ = restype
+        _flags_ = _FUNCFLAG_CDECL
+        if use_errno:
+            _flags_ |= _FUNCFLAG_USE_ERRNO
+        if use_last_error:
+            _flags_ |= _FUNCFLAG_USE_LASTERROR
+    _cfunctype_cache[(restype, argtypes, use_errno, use_last_error)] = CFunctionType
+    return CFunctionType
+```
+
+`CFUNCTYPE` is a factory: each unique `(restype, argtypes, flags)`
+combination produces a new class derived from `_CFuncPtr`. The classes
+are cached in `_cfunctype_cache` so the same prototype lookup is O(1)
+after the first call.
+
+An instance of the returned class can be constructed from a Python
+callable to produce a C-callable function pointer (`closure`), or from
+an integer address to wrap an existing C function. When called as a
+callback from C, ctypes marshals arguments and return values using the
+`argtypes` and `restype` descriptors. `WINFUNCTYPE` is identical except
+it sets `_FUNCFLAG_STDCALL` instead of `_FUNCFLAG_CDECL`.
+
+## gopy mirror
+
+`ctypes` is not yet ported. The dependency on `_ctypes` (which manages
+platform ABI details, `libffi`, and CPython's `StgInfo` structure) makes
+this one of the heavier C-extension ports. A pure-Go implementation
+would use `cgo` or a Go `libffi` binding. The module entry point and
+public name registry are tracked as a future stdlib task.

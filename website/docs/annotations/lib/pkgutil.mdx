@@ -1,0 +1,157 @@
+---
+title: Lib/pkgutil.py
+description: Utilities for package discovery, namespace package path extension, and legacy importer introspection.
+cpython_path: Lib/pkgutil.py
+cpython_version: "3.14"
+lines: 550
+status: annotated
+ported_to: ""
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Lib/pkgutil.py`
+
+<CpyLink path="Lib/pkgutil.py" />
+
+`pkgutil` provides higher-level tools that sit on top of the import system. Its two most used entry points are `iter_modules` and `walk_packages`, which enumerate every importable top-level or nested module visible from a given list of paths. These functions drive tools like `pytest` plugin discovery, `setuptools` package scanning, and various framework auto-loading mechanisms.
+
+The module also carries the legacy importer helpers `get_loader` and `get_importer`, which pre-date `importlib` and are preserved for backward compatibility. They wrap `importlib.util.find_spec` and `sys.path_hooks` in the older `pkgutil`-style interface. As of Python 3.12 most of these wrappers emit `DeprecationWarning` when called.
+
+`extend_path` handles the PKG-PATH namespace package convention, appending additional directories to a package's `__path__` by scanning every directory on `sys.path` for a matching subdirectory or a `.pth` file. `get_data` rounds out the module by reading arbitrary binary data from a package-relative path using the loader's `get_data` method if available, falling back to `pkgutil_open_resource`.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| 1-40 | imports, `__all__` | Module header, public API list | |
+| 41-120 | `extend_path` | Namespace package path extension via `.pth` scanning | |
+| 121-200 | `get_importer`, `get_loader` | Legacy importer lookup wrappers (deprecated 3.12) | |
+| 201-290 | `iter_importer_modules`, `ImpImporter`, `ImpLoader` | Old-style importer shims for `imp`-based finders | |
+| 291-390 | `iter_importers`, `iter_modules` | Core module enumeration over a path list | |
+| 391-460 | `walk_packages` | Recursive package traversal with `onerror` callback | |
+| 461-510 | `get_data` | Read package-relative data via loader or filesystem | |
+| 511-550 | `resolve_name`, `find_loader` | Dotted-name resolution helper, deprecated `find_loader` | |
+
+## Reading
+
+### extend_path: namespace package support (lines 41 to 120)
+
+<CpyLink path="Lib/pkgutil.py" lines="41-120" />
+
+`extend_path` implements the older PKG-PATH namespace convention. For each directory on `sys.path` it checks whether a subdirectory matching the package name exists and appends it to the incoming `path` list. It also reads `<pkgname>.pth` files in those directories to support indirect path entries. The function is idempotent: it skips entries already present in `path`.
+
+```python
+# Lib/pkgutil.py ~line 75
+for dir in sys.path:
+    if not isinstance(dir, str):
+        continue
+    subdir = os.path.join(dir, pkgname)
+    if os.path.isdir(subdir) and subdir not in path:
+        path.append(subdir)
+    pkgfile = os.path.join(dir, pkgname + os.extsep + 'pth')
+    if os.path.isfile(pkgfile):
+        path = _extend_path_from_pth(path, pkgfile, pkgname)
+```
+
+### iter_modules: flat module enumeration (lines 291 to 390)
+
+<CpyLink path="Lib/pkgutil.py" lines="291-390" />
+
+`iter_modules` iterates over a path list (defaulting to `sys.path`) and yields `(module_finder, name, ispkg)` triples for every importable module at that level. It calls `iter_importer_modules` on each finder. The function deliberately does not recurse; that job belongs to `walk_packages`.
+
+```python
+# ~line 330
+def iter_modules(path=None, prefix=''):
+    if path is None:
+        importers = iter_importers()
+    else:
+        importers = map(get_importer, path)
+    yielded = {}
+    for i in importers:
+        for importer, modname, ispkg in iter_importer_modules(i, prefix):
+            if modname not in yielded:
+                yielded[modname] = 1
+                yield importer, modname, ispkg
+```
+
+### walk_packages: recursive traversal (lines 391 to 460)
+
+<CpyLink path="Lib/pkgutil.py" lines="391-460" />
+
+`walk_packages` calls `iter_modules` at the top level, yields each result, and then for every package it finds it imports that package, reads its `__path__`, and recurses. The optional `onerror` callback receives the package name if importing it raises an exception, allowing callers to continue the walk despite broken sub-packages.
+
+```python
+# ~line 410
+def walk_packages(path=None, prefix='', onerror=None):
+    def seen(p, m={}):
+        if p in m:
+            return True
+        m[p] = True
+
+    for info in iter_modules(path, prefix):
+        yield info
+        if info.ispkg:
+            try:
+                __import__(info.name)
+            except ImportError:
+                if onerror is not None:
+                    onerror(info.name)
+            except Exception:
+                if onerror is not None:
+                    onerror(info.name)
+                else:
+                    raise
+            else:
+                path = getattr(sys.modules[info.name], '__path__', None) or []
+                path = [p for p in path if not seen(p)]
+                yield from walk_packages(path, info.name+'.', onerror)
+```
+
+### get_data: package-relative resource loading (lines 461 to 510)
+
+<CpyLink path="Lib/pkgutil.py" lines="461-510" />
+
+`get_data` resolves a package-relative path to bytes. It uses `get_loader` to find the loader for the package, then calls `loader.get_data(resource_path)` if the loader supports it. If no loader is found it falls back to a direct `open` call. This is a thin compatibility shim; `importlib.resources` is the preferred API from Python 3.9 onward.
+
+```python
+# ~line 475
+def get_data(package, resource):
+    spec = importlib.util.find_spec(package)
+    if spec is None:
+        return None
+    loader = spec.loader
+    if loader is None or not hasattr(loader, 'get_data'):
+        return None
+    mod = sys.modules.get(package) or importlib.util.module_from_spec(spec)
+    parts = resource.split('/')
+    parts.insert(0, os.path.dirname(mod.__file__))
+    resource_name = os.path.join(*parts)
+    return loader.get_data(resource_name)
+```
+
+### resolve_name: dotted attribute lookup (lines 511 to 550)
+
+<CpyLink path="Lib/pkgutil.py" lines="511-550" />
+
+`resolve_name` converts a dotted string like `"os.path.join"` into the live Python object. It splits on the last dot to get the module path and attribute name, imports the module, then walks any remaining attribute chain with `getattr`. It is used by `entry_points` consumers and test frameworks that accept string references to callables.
+
+```python
+# ~line 520
+def resolve_name(name):
+    parts = name.split('.')
+    used = parts.pop(0)
+    found = __import__(used)
+    for part in parts:
+        used += '.' + part
+        try:
+            found = getattr(found, part)
+        except AttributeError:
+            __import__(used)
+            found = getattr(found, part)
+    return found
+```
+
+## gopy mirror
+
+Not yet ported.

@@ -1,0 +1,93 @@
+---
+title: Include/internal/pycore_optimizer.h
+description: Internal API for the CPython tier-2 (uops) optimizer, defining the executor, instruction format, and optimizer object types.
+cpython_path: Include/internal/pycore_optimizer.h
+cpython_version: "3.14"
+lines: 250
+status: annotated
+ported_to: vm/tier2.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Include/internal/pycore_optimizer.h`
+
+<CpyLink path="Include/internal/pycore_optimizer.h" />
+
+CPython 3.13 introduced a tier-2 optimizer that re-compiles hot bytecode traces into micro-operations (uops). This header is the internal contract between the eval loop, the specializing adaptive interpreter, and the optimizer backend. It defines the instruction format that uops traces are built from, the executor object that wraps a compiled trace, and the optimizer object that decides when and how to compile. The eval loop triggers optimization when a backward-jump hot counter crosses a threshold, then hands control to the executor for as long as the guard checks pass.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| ~10-30 | `_PyUOpInstruction` | Single uop: opcode, oparg, operand0, operand1 | `vm/tier2.go` (partial) |
+| ~32-55 | `_PyExecutorObject` | Compiled trace wrapper, linked into the code object | `vm/tier2.go` (partial) |
+| ~57-90 | `_PyOptimizerObject` | Optimizer type with function pointer table | not ported |
+| ~92-110 | `_PyOptimizer_NewUOpOptimizer()` | Factory that creates the default uop optimizer | not ported |
+| ~112-140 | `_PyUOpName()` | Debug helper: maps uop opcode int to string name | not ported |
+| ~142-200 | `_Py_Specialize_*` family | Per-opcode specialization entry points | not ported |
+| ~202-250 | Threshold / counter macros | `JUMP_BACKWARD` hot-counter logic | not ported |
+
+## Reading
+
+### Instruction format (lines 10 to 30)
+
+<CpyLink path="Include/internal/pycore_optimizer.h" lines="10-30" />
+
+Each uop is packed into `_PyUOpInstruction`. The layout is deliberately narrow so that a compiled trace fits in a single cache line burst:
+
+```c
+typedef struct {
+    uint16_t opcode;
+    uint16_t oparg;
+    uint32_t target;   /* bytecode offset this uop was generated from */
+    uint64_t operand0; /* type-specific immediate #0 */
+    uint64_t operand1; /* type-specific immediate #1 */
+} _PyUOpInstruction;
+```
+
+`operand0` and `operand1` carry specialization payloads that would otherwise live in the inline cache of the bytecode stream. When the executor runs a `_LOAD_ATTR_INSTANCE_VALUE` uop, for example, `operand0` is the pre-resolved offset into the instance `__dict__`. Storing it here lets the uop avoid a pointer-chasing lookup on every iteration of the hot loop.
+
+### Executor object (lines 32 to 55)
+
+<CpyLink path="Include/internal/pycore_optimizer.h" lines="32-55" />
+
+`_PyExecutorObject` is a Python heap object (`PyObject_VAR_HEAD`) whose variable-length tail is the `_PyUOpInstruction` array:
+
+```c
+struct _PyExecutorObject {
+    PyObject_VAR_HEAD
+    const _PyInstructionSequence *instr_sequence; /* source bytecode */
+    struct _PyExecutorObject *links[2];            /* LRU list in code object */
+    _PyUOpInstruction trace[1];                    /* flexible array */
+};
+```
+
+The `links` field embeds the executor into a doubly-linked list hanging off the originating `PyCodeObject`. When a code object is deallocated or invalidated, CPython walks this list to deoptimize every executor that references it. The flexible `trace` array holds the linear instruction sequence; there are no branches inside a trace (side exits jump back to the bytecode interpreter).
+
+### Optimizer object and threshold (lines 57 to 110)
+
+<CpyLink path="Include/internal/pycore_optimizer.h" lines="57-110" />
+
+`_PyOptimizerObject` is also a Python heap object, making it inspectable from Python-level tooling:
+
+```c
+typedef struct _PyOptimizerObject {
+    PyObject_HEAD
+    _Py_UopsOptimizer_data_t *data;
+    uint16_t resume_threshold;   /* counter value that re-enables optimization */
+    uint16_t backedge_threshold; /* counter value that triggers a new trace */
+} _PyOptimizerObject;
+```
+
+`_PyOptimizer_NewUOpOptimizer()` constructs the default instance and installs it into `_PyRuntime`. The eval loop decrements `backedge_threshold` on every `JUMP_BACKWARD`; when it reaches zero the loop calls into the optimizer to attempt a trace. If compilation fails the counter is reset to `resume_threshold` so the loop backs off rather than re-attempting on every iteration.
+
+## gopy mirror
+
+gopy has a partial port in `vm/tier2.go`. The `UOpInstruction` struct mirrors `_PyUOpInstruction` and 14 of the roughly 285 uop opcodes are implemented. The executor dispatch loop exists but most guards fall through to the bytecode interpreter. The optimizer object and the specialization family are not yet ported; gopy always uses the tier-1 adaptive interpreter.
+
+The threshold macros are currently hard-coded constants in `vm/tier2.go` rather than being read from an optimizer object, because the optimizer object itself is not ported.
+
+## CPython 3.14 changes
+
+3.14 extends the uop instruction from one operand to two (`operand0`, `operand1`), allowing richer specializations without widening the instruction struct further. The executor link list in `_PyExecutorObject` changed from a singly-linked list (3.13) to a doubly-linked list to make O(1) removal possible during deoptimization. Several `_Py_Specialize_*` entry points were renamed to reflect the introduction of a separate "super-instruction" tier.

@@ -1,0 +1,65 @@
+---
+title: Lib/colorsys.py
+description: Bidirectional conversion functions between RGB and the HSV, HLS, and YIQ color spaces.
+cpython_path: Lib/colorsys.py
+cpython_version: "3.14"
+lines: 165
+status: annotated
+ported_to: ""
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Lib/colorsys.py`
+
+<CpyLink path="Lib/colorsys.py" />
+
+`colorsys.py` provides six pairs of conversion functions covering three color spaces: HSV (hue, saturation, value), HLS (hue, lightness, saturation), and YIQ (luminance plus two chrominance axes used by the NTSC television standard). All functions accept and return floating-point values normalised to the range [0.0, 1.0]. The module has no imports beyond the standard library and carries no C extension.
+
+The three color spaces serve different use cases. HSV maps naturally to the way artists think about color: hue selects the color wheel position, saturation controls vividness, and value controls brightness. HLS is similar but separates lightness so that both white and black are recoverable at extreme lightness values. YIQ separates luminance from chrominance, which is why NTSC could add color to a signal that black-and-white receivers already decoded correctly.
+
+Because all functions are pure arithmetic with no I/O or state, they are straightforward to port to any language. The module is frequently used as a convenience layer over `tkinter` color pickers, image processing pipelines, and data visualization tools that need to manipulate hue or lightness independently of the other components.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| 1-30 | module header | Docstring, `__all__`, ONE_THIRD/ONE_SIXTH constants | |
+| 31-60 | `rgb_to_yiq` / `yiq_to_rgb` | NTSC luminance-chrominance conversions | |
+| 61-90 | `rgb_to_hls` / `hls_to_rgb` | Hue-lightness-saturation round trip | |
+| 91-130 | `rgb_to_hsv` / `hsv_to_rgb` | Hue-saturation-value round trip | |
+| 131-165 | `_v` helper | Shared HLS chroma interpolation | |
+
+## Reading
+
+### Constants and module header (lines 1 to 30)
+
+Three module-level constants avoid repeated division at call time: `ONE_THIRD = 1.0/3.0`, `ONE_SIXTH = 1.0/6.0`, and `TWO_THIRD = 2.0/3.0`. They appear in the HLS sector arithmetic where the hue circle is divided into thirds. `__all__` lists all twelve public names so `from colorsys import *` is well-defined.
+
+### YIQ conversions (lines 31 to 60)
+
+`rgb_to_yiq` applies the NTSC matrix directly. Y (luminance) is a weighted sum of R, G, B with coefficients approximately 0.299, 0.587, and 0.114, reflecting human eye sensitivity. I and Q are linear combinations encoding orange-cyan and purple-green axes respectively. The inverse `yiq_to_rgb` solves the same linear system and clamps each channel to [0.0, 1.0].
+
+```python
+def rgb_to_yiq(r, g, b):
+    y = 0.30*r + 0.59*g + 0.11*b
+    i = 0.60*r - 0.28*g - 0.32*b
+    q = 0.21*r - 0.52*g + 0.31*b
+    return (y, i, q)
+```
+
+### HSV conversions (lines 91 to 130)
+
+`rgb_to_hsv` finds the maximum and minimum channel values. Value is the maximum; saturation is `(max - min) / max` when max is nonzero. Hue is computed from which channel holds the maximum, dividing the result into one of six 60-degree sectors and normalising to [0.0, 1.0]. The inverse `hsv_to_rgb` reconstructs RGB by selecting the sector and interpolating between the floor and ceiling of the chroma ramp.
+
+### HLS conversions and the `_v` helper (lines 61 to 165)
+
+`rgb_to_hls` follows a similar sector decomposition to HSV but computes lightness as `(max + min) / 2` and adjusts the saturation formula depending on whether lightness is above or below 0.5. The private `_v(m1, m2, hue)` function encapsulates the piecewise linear interpolation used by both `hls_to_rgb` channel reconstructions, avoiding repetition across the R, G, and B components.
+
+### Round-trip accuracy
+
+All six conversion pairs are designed to be inverses of each other up to floating-point rounding. The module does not quantise to integer steps, so `hsv_to_rgb(rgb_to_hsv(r, g, b))` reproduces the input to full `float` precision for colors that are not on a sector boundary.
+
+## gopy mirror
+
+Not yet ported.

@@ -1,0 +1,201 @@
+---
+title: Modules/timemodule.c
+description: Implements the time module: time(), monotonic(), perf_counter(), sleep(), struct_time, gmtime/localtime/mktime, and strftime/strptime.
+cpython_path: Modules/timemodule.c
+cpython_version: "3.14"
+lines: 1900
+status: annotated
+ported_to: module/time/
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Modules/timemodule.c`
+
+<CpyLink path="Modules/timemodule.c" />
+
+`timemodule.c` implements the `time` built-in module. The file wraps the
+POSIX / Win32 clock and calendar APIs and exposes them as Python functions
+under a uniform interface.
+
+Three groups of functions live here:
+
+- **Clock functions**: `time.time()` (wall clock), `time.monotonic()` (never
+  goes backward), `time.perf_counter()` (highest available resolution).
+  Each has a `_ns` variant that returns an integer nanosecond count rather
+  than a float to avoid floating-point rounding.
+- **Calendar functions**: `gmtime()`, `localtime()`, `mktime()`, and
+  `asctime()` wrap `gmtime_r(3)` / `localtime_r(3)` / `mktime(3)` and
+  produce or consume `struct_time` structseq objects.
+- **Format functions**: `strftime()` wraps the platform `strftime(3)`;
+  `strptime()` delegates to `_strptime.py`.
+
+`pysleep()` is the implementation of `time.sleep()`. On POSIX it uses
+`clock_nanosleep(2)` or `nanosleep(2)` in a retry loop that handles
+`EINTR` by checking for pending Python signals between retries.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Modules/timemodule.c" lines="1-300">1-300</Cpy> | `_PyTime_t` helpers, `time_time`, `time_time_ns`, `time_monotonic`, `time_monotonic_ns`, `time_perf_counter`, `time_perf_counter_ns` | Wall clock, monotonic clock, and performance counter, each as float and integer-ns variant. | `module/time/` |
+| <Cpy path="Modules/timemodule.c" lines="300-700">300-700</Cpy> | `pysleep`, `time_sleep`, `struct_time` structseq definition, `time_from_tm`, `tm_from_time` | `time.sleep()` with EINTR retry and signal check; `struct_time` type definition and conversions. | `module/time/` |
+| <Cpy path="Modules/timemodule.c" lines="700-1200">700-1200</Cpy> | `time_gmtime`, `time_localtime`, `time_mktime`, `time_asctime`, `time_ctime` | Calendar conversion functions wrapping `gmtime_r`/`localtime_r`/`mktime`. | `module/time/` |
+| <Cpy path="Modules/timemodule.c" lines="1200-1900">1200-1900</Cpy> | `time_strftime`, `time_strptime`, `time_get_clock_info`, `time_methods[]`, `timemodule`, `PyInit_time`, clock constant registration | `strftime`/`strptime`, clock info introspection, method table, and module init. | `module/time/` |
+
+## Reading
+
+### Monotonic clock selection (lines 1 to 300)
+
+<CpyLink path="Modules/timemodule.c" lines="1-300" />
+
+CPython selects the best available monotonic clock at compile time with a
+cascade of `#ifdef` guards:
+
+```c
+static int
+pymonotonic(struct timespec *tp)
+{
+#if defined(MS_WINDOWS)
+    /* QueryPerformanceCounter on Windows */
+    LARGE_INTEGER now;
+    QueryPerformanceCounter(&now);
+    ...
+#elif defined(__APPLE__)
+    /* mach_absolute_time on macOS */
+    tp->tv_sec  = ...;
+    tp->tv_nsec = ...;
+#elif defined(CLOCK_HIGHRES)
+    /* Solaris CLOCK_HIGHRES */
+    clock_gettime(CLOCK_HIGHRES, tp);
+#else
+    /* POSIX CLOCK_MONOTONIC (Linux, *BSD) */
+    clock_gettime(CLOCK_MONOTONIC, tp);
+#endif
+    return 0;
+}
+```
+
+`time.monotonic()` wraps `pymonotonic` and converts the `timespec` to a
+Python `float` (seconds). `time.monotonic_ns()` returns the raw nanosecond
+count as a Python `int`, preserving the full precision that the OS provides.
+
+`time.perf_counter()` uses the same backend as `time.monotonic()` on most
+platforms. The difference is semantic: `perf_counter` is documented as
+"the highest resolution clock available for measuring a short duration"
+while `monotonic` is documented as "suitable for measuring elapsed wall
+time between events that may span OS sleep".
+
+`time.time()` calls `gettimeofday(2)` on POSIX or `GetSystemTimeAsFileTime`
+on Windows and converts to seconds since the Unix epoch as a `float`. The
+epoch is always 1970-01-01 00:00 UTC regardless of the local timezone.
+
+### `pysleep` with signal interruption (lines 300 to 700)
+
+<CpyLink path="Modules/timemodule.c" lines="300-700" />
+
+`time.sleep(secs)` must not block the interpreter indefinitely when a
+signal arrives. `pysleep` handles this with a retry loop:
+
+```c
+static int
+pysleep(_PyTime_t timeout)
+{
+    _PyTime_t deadline = _PyTime_GetMonotonicClock() + timeout;
+
+    do {
+        /* Release the GIL for the actual sleep. */
+        Py_BEGIN_ALLOW_THREADS
+#ifdef HAVE_CLOCK_NANOSLEEP
+        clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &timeout_abs, NULL);
+#elif defined(HAVE_NANOSLEEP)
+        nanosleep(&ts, NULL);
+#else
+        select(0, NULL, NULL, NULL, &tv);
+#endif
+        Py_END_ALLOW_THREADS
+
+        /* Did a signal interrupt us? */
+        if (PyErr_CheckSignals() < 0)
+            return -1;   /* propagate exception (e.g. KeyboardInterrupt) */
+
+        /* Recompute remaining time. */
+        timeout = deadline - _PyTime_GetMonotonicClock();
+    } while (timeout > 0);
+
+    return 0;
+}
+```
+
+Three details matter here:
+
+1. The GIL is released around the system call so other threads run during
+   the sleep. This means signal delivery can happen on another thread's
+   behalf, but `PyErr_CheckSignals` is only effective in the main thread.
+2. On Linux, `clock_nanosleep` with `TIMER_ABSTIME` is preferred over
+   `nanosleep` with a relative timeout so that repeated EINTR retries do
+   not drift: each retry targets the original deadline rather than sleeping
+   for the remaining delta computed from an imprecise `clock_gettime` call.
+3. `PyErr_CheckSignals` runs the Python-level signal handlers (including
+   raising `KeyboardInterrupt` for SIGINT) and returns `-1` on exception,
+   which unwinds the retry loop immediately.
+
+### `time_strftime` (lines 1200 to 1900)
+
+<CpyLink path="Modules/timemodule.c" lines="1200-1900" />
+
+`time.strftime(format[, t])` validates the `struct_time` argument, converts
+it to a C `struct tm`, then calls the platform `strftime(3)`:
+
+```c
+static PyObject *
+time_strftime(PyObject *module, PyObject *args)
+{
+    struct tm buf;
+    char *fmt;
+    PyObject *tup = NULL;
+    ...
+    /* Convert struct_time to struct tm. */
+    buf.tm_year  = ...;
+    buf.tm_mon   = ...;   /* 0-based in struct tm */
+    ...
+
+    /* Double the output buffer until strftime succeeds. */
+    for (bufsize = 1024; ; bufsize += bufsize) {
+        outbuf = (char *)PyMem_Malloc(bufsize);
+        ...
+        n = strftime(outbuf, bufsize, fmt, &buf);
+        if (n > 0 || bufsize >= 256 * 1024)
+            break;
+        PyMem_Free(outbuf);
+    }
+    ret = PyUnicode_DecodeLocale(outbuf, "surrogateescape");
+    PyMem_Free(outbuf);
+    return ret;
+}
+```
+
+The doubling loop is needed because `strftime` returns `0` on both
+truncation and genuine empty output (e.g. `strftime("%p", ...)` on some
+locales). The loop stops at 256 KB to guard against runaway expansion.
+
+`time.strptime` delegates entirely to `_strptime._strptime_time` in
+`Lib/_strptime.py`; `timemodule.c` only provides the Python-visible name.
+
+## gopy mirror
+
+`module/time/` (pending). `time.time()` maps to `time.Now().UnixNano()`.
+`time.monotonic()` uses `runtime_nanotime` via `time.Since` with a fixed
+epoch. `pysleep` maps to `time.Sleep` inside a loop that selects on the
+interpreter's signal channel between retries. `strftime` calls Go's
+`time.Format` with a converted format string; `strptime` delegates to the
+Python `_strptime` module as in CPython.
+
+## CPython 3.14 changes
+
+`time.time_ns()`, `time.monotonic_ns()`, and `time.perf_counter_ns()` were
+added in Python 3.7 (PEP 564). `clock_nanosleep` with `TIMER_ABSTIME` was
+adopted for `pysleep` in 3.11 to eliminate drift on EINTR retries. The
+`time.get_clock_info(name)` function was added in 3.3. On Windows,
+`QueryPerformanceCounter` replaced `GetSystemTimeAsFileTime` for
+`perf_counter` in 3.3 to achieve sub-microsecond resolution.

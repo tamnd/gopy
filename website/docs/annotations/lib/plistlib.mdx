@@ -1,0 +1,191 @@
+---
+title: Lib/plistlib.py
+description: Reads and writes Apple property list files in both XML and binary formats.
+cpython_path: Lib/plistlib.py
+cpython_version: "3.14"
+lines: 770
+status: annotated
+ported_to: ""
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Lib/plistlib.py`
+
+<CpyLink path="Lib/plistlib.py" />
+
+`plistlib` provides a bidirectional mapping between Python objects and Apple Property List
+(plist) files. Two wire formats are supported: `FMT_XML` serialises to an XML document
+validated against Apple's plist DTD, and `FMT_BINARY` serialises to the compact `bplist00`
+binary format used by macOS system software. The public API is four functions: `load`,
+`loads`, `dump`, and `dumps`, mirroring the style of `json` and `pickle`.
+
+The type mapping covers the types that plist natively understands: `dict` becomes a plist
+`<dict>`, `list` becomes an `<array>`, `str` maps to `<string>`, `int` to `<integer>`,
+`float` to `<real>`, `bool` to `<true>` or `<false>`, `bytes` and `bytearray` to `<data>`,
+`datetime.datetime` to `<date>`, and the module-specific `UID` wrapper type to a binary
+UID record. On reading, the process is reversed: each element type is mapped back to the
+corresponding Python type, with `dict_type` controlling what container is used for plist
+dicts (defaults to `dict`, but `collections.OrderedDict` is a common choice for
+round-trip fidelity).
+
+Binary plist serialisation is notably more complex than the XML path. The writer builds an
+in-memory object table, assigns each object a numeric id, computes the minimum byte width
+needed to encode all ids, serialises each object into its binary representation, and finally
+writes a 32-byte trailer carrying the object count, root id, and offset table position.
+Offsets are stored big-endian and can be up to 8 bytes wide for very large files. The
+reader reverses this by parsing the trailer first, reading the offset table, then resolving
+objects lazily by id.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| 1-60 | imports, `FMT_XML`, `FMT_BINARY`, `UID` | Public constants and UID wrapper type | |
+| 61-160 | `load()`, `loads()`, `dump()`, `dumps()` | Public API entry points | |
+| 161-330 | `_PlistWriter`, `_XMLPlistWriter` | XML serialiser using `xml.etree.ElementTree` | |
+| 331-460 | `_XMLPlistParser` | SAX-based XML deserialiser | |
+| 461-590 | `_BinaryPlistWriter` | Binary `bplist00` serialiser with object-table builder | |
+| 591-720 | `_BinaryPlistParser` | Binary deserialiser: trailer, offset table, object resolver | |
+| 721-770 | `InvalidFileException`, helper utilities | Exception type and minor internal helpers | |
+
+## Reading
+
+### Public API: load, loads, dump, dumps (lines 61 to 160)
+
+<CpyLink path="Lib/plistlib.py" lines="61-160" />
+
+All four public functions share the same signature pattern. `load` and `dump` accept a
+file-like object; `loads` and `dumps` work on `bytes`/`bytearray` and return `bytes`
+respectively. Format auto-detection in `load`/`loads` inspects the first eight bytes for
+the `bplist00` magic string and falls back to XML otherwise. When a format is supplied
+explicitly the auto-detection step is skipped.
+
+```python
+def load(fp, *, fmt=None, dict_type=dict):
+    if fmt is None:
+        header = fp.read(32)
+        fp.seek(0)
+        if header[:8] == b'bplist00':
+            fmt = FMT_BINARY
+        else:
+            fmt = FMT_XML
+    if fmt == FMT_XML:
+        p = _XMLPlistParser(dict_type=dict_type)
+    elif fmt == FMT_BINARY:
+        p = _BinaryPlistParser(dict_type=dict_type)
+    else:
+        raise ValueError("unknown format: %r" % fmt)
+    return p.parse(fp)
+```
+
+### XML writer: _XMLPlistWriter (lines 161 to 330)
+
+<CpyLink path="Lib/plistlib.py" lines="161-330" />
+
+`_XMLPlistWriter` builds an `ElementTree` in memory and then serialises it. The `write()`
+method dispatches on the Python type of each value through a chain of `isinstance` checks.
+Because `bool` is a subclass of `int`, the `bool` branch must appear before the `int`
+branch. `bytes` and `bytearray` are base64-encoded into the `<data>` element.
+`datetime.datetime` objects are formatted to ISO 8601 with a trailing `Z`.
+
+```python
+def _write_value(self, value):
+    if isinstance(value, bool):
+        self._root.append(ET.Element('true' if value else 'false'))
+    elif isinstance(value, int):
+        el = ET.SubElement(self._root, 'integer')
+        el.text = '%d' % value
+    elif isinstance(value, float):
+        el = ET.SubElement(self._root, 'real')
+        el.text = repr(value)
+    elif isinstance(value, (bytes, bytearray)):
+        el = ET.SubElement(self._root, 'data')
+        el.text = b64encode(value).decode()
+    ...
+```
+
+### Binary writer: object table construction (lines 461 to 590)
+
+<CpyLink path="Lib/plistlib.py" lines="461-590" />
+
+The binary writer performs two passes. The first pass (`_flatten`) traverses the value
+tree and assigns each unique object an integer id, building an `_objmap` dict for
+deduplication of scalars. The second pass (`_write_object`) serialises each object into
+its binary encoding. After both passes the writer emits the object data, the offset table
+(one entry per object, width chosen to fit the largest offset), and finally the 32-byte
+trailer.
+
+```python
+def _write_size(self, size):
+    if size > 0xE:
+        # encode size as a separate integer object inline
+        self._fp.write(b'\x10')
+        self._fp.write(pack('>B', size))
+    # otherwise size fits in the low nibble of the type byte
+
+def _write_trailer(self, offset_table_offset, num_objects, top_object):
+    # 6 bytes padding, then widths, then counts and offsets
+    self._fp.write(pack('>6xBBQQQ',
+        self._ref_size, self._offset_size,
+        num_objects, top_object, offset_table_offset))
+```
+
+### Binary parser: trailer and object resolution (lines 591 to 720)
+
+<CpyLink path="Lib/plistlib.py" lines="591-720" />
+
+`_BinaryPlistParser.parse()` seeks to the last 32 bytes to read the trailer, extracts the
+offset table position and object count, then reads all offsets into a list. Objects are
+resolved on demand by `_read_object(idx)`, which seeks to the offset for `idx`, reads the
+type byte, and dispatches to a type-specific reader. Container types (array, dict) resolve
+their child ids recursively. The `_ref_size` field from the trailer controls how many bytes
+each object reference occupies inside containers.
+
+```python
+def _read_object(self, idx):
+    offset = self._offsets[idx]
+    self._fp.seek(offset)
+    token = self._fp.read(1)[0]
+    tokenH, tokenL = token >> 4, token & 0x0F
+
+    if token == 0x08:   # false
+        return False
+    elif token == 0x09:  # true
+        return True
+    elif tokenH == 0x1:  # integer
+        return int.from_bytes(self._fp.read(1 << tokenL), 'big')
+    elif tokenH == 0xA:  # array
+        refs = self._read_refs(tokenL)
+        return [self._read_object(r) for r in refs]
+    ...
+```
+
+### UID type and InvalidFileException (lines 721 to 770)
+
+<CpyLink path="Lib/plistlib.py" lines="721-770" />
+
+`UID` is a thin `int` subclass used to round-trip NSKeyedArchiver UID records. It carries
+no extra state beyond its integer value and exists solely to distinguish UIDs from plain
+integers during serialisation. `InvalidFileException` is the single exception type raised
+by both parsers when they encounter malformed input, making it easy for callers to catch
+parse failures without importing implementation-private names.
+
+```python
+class UID(int):
+    """Wrapper for binary plist UID values (NSKeyedArchiver)."""
+    def __new__(cls, integer):
+        if integer < 0 or integer > 0xFFFFFFFF:
+            raise ValueError("UID must be in range 0..2**32-1")
+        return super().__new__(cls, integer)
+    def __repr__(self):
+        return "UID(%d)" % int(self)
+
+class InvalidFileException(ValueError):
+    def __init__(self, message="Invalid file"):
+        super().__init__(message)
+```
+
+## gopy mirror
+
+Not yet ported.

@@ -1,0 +1,141 @@
+---
+title: Include/cpython/bytesobject.h
+description: CPython-internal bytes API covering in-place resize, printf-style formatting, escape decoding, and the _PyBytesWriter incremental builder.
+cpython_path: Include/cpython/bytesobject.h
+cpython_version: "3.14"
+lines: 60
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Include/cpython/bytesobject.h`
+
+<CpyLink path="Include/cpython/bytesobject.h" />
+
+<overview>
+This header exposes the CPython-internal bytes API that extension authors need but
+that is not part of the stable ABI. The most important piece is `_PyBytesWriter`,
+a stack-allocated buffer that grows to the heap only when the initial reservation
+overflows. It is the standard way CPython builds a bytes object without knowing the
+final length up front, used in codec encoders, the `%` formatter, escape decoding,
+and elsewhere.
+</overview>
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| ~7 | `PyBytesObject` | Concrete struct layout (ob_shash + ob_val) | `objects/bytes.go` `Bytes` |
+| ~18 | `PyBytes_AS_STRING` | Macro: unsafe pointer into ob_val without refcount check | `objects/bytes.go` `Bytes.Bytes()` |
+| ~20 | `PyBytes_GET_SIZE` | Macro: ob_size cast directly from PyVarObject | `objects/bytes.go` `Bytes.Len()` |
+| ~25 | `_PyBytes_Resize` | In-place realloc of a bytes object the caller uniquely owns | not ported |
+| ~35 | `_PyBytes_FormatEx` | Core of `bytes % args`; printf-style with full format spec | not ported |
+| ~40 | `_PyBytes_DecodeEscape` | Decode a raw byte string literal with backslash sequences | `parser/string/decode.go` |
+| ~45 | `_PyBytesWriter` | Stack-allocated incremental builder that spills to heap | not ported (uses `strings.Builder`) |
+| ~50 | `_PyBytesWriter_Init` | Zero-initialise a writer | not ported |
+| ~52 | `_PyBytesWriter_Alloc` | Reserve `size` bytes in the writer's buffer | not ported |
+| ~54 | `_PyBytesWriter_Finish` | Freeze the buffer into a `PyBytesObject` | not ported |
+| ~56 | `_PyBytesWriter_Dealloc` | Release the writer without producing an object | not ported |
+| ~58 | `_PyBytesWriter_Prepare` | Ensure at least `size` more bytes fit without reallocation | not ported |
+
+## Reading
+
+### PyBytesObject layout and the AS_STRING / GET_SIZE macros
+
+`PyBytesObject` stores its payload inline: the struct ends with `char ob_val[1]` and
+CPython over-allocates so `ob_val[0..ob_size-1]` holds the actual bytes. The two
+macros skip all safety checks:
+
+```c
+// Include/cpython/bytesobject.h:18-20
+#define PyBytes_AS_STRING(op)  (((PyBytesObject *)(op))->ob_val)
+#define PyBytes_GET_SIZE(op)   (((PyBytesObject *)(op))->ob_base.ob_size)
+```
+
+gopy stores the payload as a Go `[]byte` slice rather than an inline array, so the
+same access is just a field read:
+
+```go
+// objects/bytes.go
+type Bytes struct {
+    VarHeader
+    v []byte
+}
+
+func (b *Bytes) Bytes() []byte { return b.v }
+func (b *Bytes) Len() int      { return len(b.v) }
+```
+
+The trade-off is that `Bytes()` returns a shared slice instead of a raw pointer.
+Callers must not mutate it, matching the CPython rule that `AS_STRING` is read-only
+on a non-builder object.
+
+### _PyBytesWriter: incremental construction
+
+CPython codec writers and the escape decoder avoid repeated `realloc` by using
+`_PyBytesWriter` as a scratch buffer that starts on the C stack:
+
+```c
+// Objects/bytesobject.c (simplified)
+_PyBytesWriter writer;
+_PyBytesWriter_Init(&writer);
+char *p = _PyBytesWriter_Alloc(&writer, estimated_size);
+// ... fill p ...
+return _PyBytesWriter_Finish(&writer, p);
+```
+
+When the initial estimate fits, no heap allocation happens at all. When it overflows,
+`_PyBytesWriter_Prepare` calls `realloc` and updates `p`. gopy achieves the same
+goal with `strings.Builder`, which uses a `[]byte` slice that grows via append:
+
+```go
+// objects/bytes_methods_wrap.go (example pattern)
+var b strings.Builder
+b.Grow(estimated)
+// ... write to b ...
+return NewBytesFromString(b.String()), nil
+```
+
+The difference is that `strings.Builder` always allocates on the heap; the stack
+optimisation is lost. This is acceptable for correctness but may matter in hot paths
+that produce many small bytes objects.
+
+### _PyBytes_DecodeEscape
+
+`_PyBytes_DecodeEscape` processes a raw bytes literal, resolving `\n`, `\t`, `\xNN`,
+`\0oo` octal, and the `\N{...}` / `\uXXXX` / `\UXXXXXXXX` forms that are invalid in
+bytes literals (raising `DeprecationWarning` when they appear). gopy ports this in
+`parser/string/decode.go`:
+
+```go
+// parser/string/decode.go:141
+// CPython: Objects/bytesobject.c _PyBytes_DecodeEscape
+func decodeBytesEscape(src []byte) ([]byte, error) { ... }
+```
+
+## gopy mirror
+
+| CPython symbol | Go identifier | File |
+| -------------- | ------------- | ---- |
+| `PyBytesObject` | `Bytes` | `objects/bytes.go` |
+| `PyBytes_AS_STRING` | `Bytes.Bytes()` | `objects/bytes.go` |
+| `PyBytes_GET_SIZE` | `Bytes.Len()` | `objects/bytes.go` |
+| `PyBytes_FromStringAndSize` | `NewBytes` | `objects/bytes.go` |
+| `PyBytes_FromString` | `NewBytesFromString` | `objects/bytes.go` |
+| `bytes_repr` | `bytesRepr` (unexported) | `objects/bytes.go` |
+| `bytes_hash` | `bytesHash` (unexported) | `objects/bytes.go` |
+| `bytes_richcompare` | `bytesRichCmp` (unexported) | `objects/bytes.go` |
+| `_PyBytes_DecodeEscape` | `decodeBytesEscape` | `parser/string/decode.go` |
+| `_PyBytesWriter` | (not ported; uses `strings.Builder`) | |
+| `_PyBytes_Resize` | (not ported) | |
+| `_PyBytes_FormatEx` | (not ported) | |
+
+## CPython 3.14 changes
+
+3.14 promotes `_PyBytesWriter` internals further into `Include/internal/` and away
+from the semi-public cpython/ tier; extension authors who relied on it are expected
+to switch to `PyBytes_FromStringAndSize` + `PyBytes_Concat`. The `_PyBytes_FormatEx`
+signature gained an extra `Py_ssize_t *` out-parameter for the written length.
+`PyBytes_AS_STRING` and `PyBytes_GET_SIZE` remain stable macros in the cpython/
+header because the stable ABI needs them for inline expansion.

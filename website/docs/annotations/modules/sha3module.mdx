@@ -1,0 +1,131 @@
+---
+title: Modules/_sha3module.c
+description: CPython's SHA-3 hash implementation wrapping the Keccak reference code for sha3_224/256/384/512 and SHAKE variants.
+cpython_path: Modules/_sha3module.c
+cpython_version: "3.14"
+lines: 600
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Modules/_sha3module.c`
+
+<CpyLink path="Modules/_sha3module.c" />
+
+<overview>
+`_sha3module.c` implements Python's `hashlib` SHA-3 family using the Keccak C reference implementation bundled under `Modules/_hacl/` (replacing the older vendored `kcp` tree in CPython 3.12+). It exposes six type objects:
+
+- `sha3_224`, `sha3_256`, `sha3_384`, `sha3_512` (fixed-length output, FIPS 202 compliant)
+- `shake_128`, `shake_256` (variable-length output; `digest(length)` takes an explicit byte count)
+
+All six share a single C struct (`SHA3object`) that wraps a `Hacl_Hash_SHA3_state_t` handle. The module is loaded as `_sha3` and re-exported through `hashlib` under the public names.
+
+gopy has not yet ported this module. The idiomatic replacement would be Go's `golang.org/x/crypto/sha3` package, which provides the same algorithms. Wiring it up requires implementing `sha3_224.update`, `sha3_224.digest`, `sha3_224.hexdigest`, `sha3_224.copy`, and the analogous SHAKE interface.
+</overview>
+
+## Map
+
+| Symbol | Kind | Purpose |
+|---|---|---|
+| `SHA3object` | struct | Per-instance state: HACL handle + lock for thread safety |
+| `py_sha3_new` | function | Common constructor called by all six type's `tp_new` |
+| `SHA3_update` | function | Feeds data into the HACL absorb phase |
+| `SHA3_digest` | function | Squeezes fixed-length output; copies state before finalizing |
+| `SHA3_hexdigest` | function | Hex-encodes `SHA3_digest` output |
+| `SHA3_copy` | function | Deep-copies the HACL handle via `Hacl_Hash_SHA3_copy` |
+| `SHAKE_digest` | function | Variable-length squeeze; takes `length` positional arg |
+| `SHAKE_hexdigest` | function | Hex-encodes `SHAKE_digest` output |
+| `_sha3_sha3_224_impl` | function | `sha3_224(data=b'', *, usedforsecurity=True)` clinic entry point |
+| `_sha3module_methods[]` | table | Module-level methods (empty; types are fetched via `hashlib`) |
+| `_sha3module` | `PyModuleDef` | Module definition registered as `_sha3` |
+
+## Reading
+
+### Object layout and HACL handle lifecycle
+
+Every `hashlib.sha3_*` or `hashlib.shake_*` instance is backed by a single `SHA3object`:
+
+```c
+/* Modules/_sha3module.c */
+typedef struct {
+    PyObject_HEAD
+    // HACL streaming state; opaque pointer
+    Hacl_Hash_SHA3_state_t *hash_state;
+#ifdef WITH_THREAD
+    PyThread_type_lock lock;
+#endif
+} SHA3object;
+```
+
+Construction calls `Hacl_Hash_SHA3_init(algorithm_id)` to allocate the HACL handle, and deallocation calls `Hacl_Hash_SHA3_free`. The `algorithm_id` (an enum value like `Spec_Hash_Definitions_SHA3_256`) is stored in the type object's `tp_alloc` closure so all six types share one constructor function.
+
+The lock is only allocated on the first `update()` call from a second thread, keeping single-threaded use allocation-free.
+
+### `SHA3_digest`: copy-then-squeeze pattern
+
+SHA-3 sponge state is mutable, so producing a digest without consuming the object requires a full state copy:
+
+```c
+static PyObject *
+SHA3_digest(SHA3object *self, PyObject *args)
+{
+    Hacl_Hash_SHA3_state_t *tmp_state;
+    // ...
+    tmp_state = Hacl_Hash_SHA3_copy(self->hash_state);
+    if (tmp_state == NULL) {
+        return PyErr_NoMemory();
+    }
+    digest_size = Hacl_Hash_SHA3_digest_len(self->hash_state);
+    retval = PyBytes_FromStringAndSize(NULL, digest_size);
+    if (retval != NULL) {
+        Hacl_Hash_SHA3_finish(tmp_state,
+                              (uint8_t *)PyBytes_AS_STRING(retval));
+    }
+    Hacl_Hash_SHA3_free(tmp_state);
+    return retval;
+}
+```
+
+This guarantees that calling `.digest()` twice on the same object yields identical results, matching the `hashlib` contract.
+
+### SHAKE variable-length output
+
+SHAKE differs from SHA-3 in that `finish` is replaced by a squeeze call parameterized by output length:
+
+```c
+static PyObject *
+SHAKE_digest(SHA3object *self, PyObject *args, int hex)
+{
+    Py_ssize_t length;
+    // argument clinic parses length ...
+    tmp_state = Hacl_Hash_SHA3_copy(self->hash_state);
+    retval = PyBytes_FromStringAndSize(NULL, length);
+    if (retval != NULL) {
+        Hacl_Hash_SHA3_squeeze(tmp_state,
+                               (uint8_t *)PyBytes_AS_STRING(retval),
+                               (uint32_t)length);
+    }
+    Hacl_Hash_SHA3_free(tmp_state);
+    return retval;
+}
+```
+
+Calling `shake_128().digest(32)` and `shake_128().digest(64)` on the same object both work because the copy is made before squeezing.
+
+## gopy mirror
+
+Not yet ported. The planned approach:
+
+1. Import `golang.org/x/crypto/sha3` for the underlying sponge primitives.
+2. Define a Go struct `sha3Object` embedding a `sha3.State` interface value (which supports `io.Writer` for `update` and `Clone` for `copy`).
+3. Implement `sha3_224Type`, `sha3_256Type`, etc. as `*objects.Type` instances registered under `hashlib._sha3`.
+4. Handle SHAKE's `digest(length)` by calling `state.Read(buf)` after cloning.
+
+The `usedforsecurity` keyword argument (present since 3.9, used by FIPS-restricted deployments to opt out of the module) will be accepted but ignored in gopy.
+
+## CPython 3.14 changes
+
+- The HACL* backend (from `Modules/_hacl/`) replaced the older `kcp` vendored Keccak code in 3.12. In 3.14 the HACL snapshot was updated to add hardware-accelerated Keccak on x86-64 (AVX2 path) and ARM (NEON path), selected at build time.
+- `usedforsecurity` is now enforced on platforms that set `PY_FIPS_MODE`; passing `False` raises `ValueError` instead of being silently ignored.
+- `sha3_224.digest_size` and `.block_size` are now class-level descriptors rather than instance attributes, reducing per-object overhead.

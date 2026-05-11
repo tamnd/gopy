@@ -1,0 +1,152 @@
+---
+title: Lib/pydoc.py
+description: Interactive documentation browser and HTML generator for Python objects and modules.
+cpython_path: Lib/pydoc.py
+cpython_version: "3.14"
+lines: 2200
+status: annotated
+ported_to: ""
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Lib/pydoc.py`
+
+<CpyLink path="Lib/pydoc.py" />
+
+`pydoc` is CPython's built-in documentation browser. It generates plain-text and HTML documentation from live Python objects using the `inspect` module, and exposes everything through the interactive `help()` built-in. Calling `help(obj)` at the REPL dispatches into `pydoc.render_doc`, which chooses a formatter and hands the result to the pager.
+
+The module has two output paths. `TextDoc` produces terminal-friendly output with ANSI-style bold markers. `HTMLDoc` produces a self-contained HTML page with a coloured header, index table, and cross-linked method lists. Both inherit from `Doc`, which holds the shared dispatch logic: `document(thing)` inspects the type of `thing` and routes to the right `doc*` method.
+
+A lightweight HTTP server lives at the bottom of the file. `browse(port)` starts the server and opens a browser tab. `serve(port, callback)` is the lower-level entry point used by the `-b` command-line flag. The server renders each URL path as a module name, calls `HTMLDoc.page`, and streams the bytes back. A separate `apropos(keyword)` function does a keyword scan across every importable module on `sys.path`, printing one-line summaries for anything whose docstring matches.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Lib/pydoc.py" lines="1-80">1-80</Cpy> | imports, `__all__`, helpers | Module header, `plain`, `bold`, `indent`, `section` text-formatting utilities | - |
+| <Cpy path="Lib/pydoc.py" lines="81-200">81-200</Cpy> | `ErrorDuringImport`, `importfile`, `safeimport` | Safe import wrappers that catch and report import errors without crashing the browser | - |
+| <Cpy path="Lib/pydoc.py" lines="201-450">201-450</Cpy> | `Doc`, `TextDoc` | Base formatter class and full plain-text renderer for modules, classes, functions, data | - |
+| <Cpy path="Lib/pydoc.py" lines="451-750">451-750</Cpy> | `HTMLDoc` | HTML renderer: `page`, `heading`, `section`, `bigsection`, `preformat`, `markup` | - |
+| <Cpy path="Lib/pydoc.py" lines="751-950">751-950</Cpy> | `HTMLDoc` (cont.), `doc` | Method and class table rendering; top-level `doc()` dispatcher | - |
+| <Cpy path="Lib/pydoc.py" lines="951-1200">951-1200</Cpy> | `render_doc`, `pager`, `getpager`, `pipepager`, `tempfilepager` | Pager selection and `render_doc` entry point used by `help()` | - |
+| <Cpy path="Lib/pydoc.py" lines="1201-1600">1201-1600</Cpy> | `Helper`, `help` | Interactive help session: `help()` built-in implementation, topic index, keyword lookup | - |
+| <Cpy path="Lib/pydoc.py" lines="1601-1850">1601-1850</Cpy> | `apropos`, `serve`, `browse`, `ServerThread` | Keyword search across all importable modules; built-in HTTP documentation server | - |
+| <Cpy path="Lib/pydoc.py" lines="1851-2200">1851-2200</Cpy> | `cli`, `__main__` block | Command-line interface: `-b`, `-p`, `-k`, `-w` flags and argument dispatch | - |
+
+## Reading
+
+### Text formatting helpers (lines 1 to 80)
+
+<CpyLink path="Lib/pydoc.py" lines="1-80" />
+
+The top of the file defines a small set of string-manipulation helpers used throughout both `TextDoc` and `HTMLDoc`. `plain` strips ANSI bold markers. `bold` wraps a string in backspace-overprint sequences for terminals that support it. `indent` prepends a prefix to every line. `section` combines a heading and a body block with consistent spacing.
+
+```python
+def plain(text):
+    """Remove boldface markers from text."""
+    return re.sub('\x08.', '', text)
+
+def bold(text):
+    """Format a string in bold by overstriking."""
+    return ''.join(ch + '\x08' + ch for ch in text)
+
+def indent(text, prefix='    '):
+    """Indent text by prepending a given prefix to each line."""
+    return re.sub('(?m)^', prefix, text)
+```
+
+### Safe import and error wrapping (lines 81 to 200)
+
+<CpyLink path="Lib/pydoc.py" lines="81-200" />
+
+`safeimport(path, forceload=False)` is the workhorse import wrapper. It catches every exception that can arise during import and wraps the failure in `ErrorDuringImport`, which carries the original traceback. This prevents a broken module on `sys.path` from crashing the documentation browser mid-scan. `importfile` handles the case where the caller passes a filesystem path rather than a dotted module name.
+
+```python
+class ErrorDuringImport(Exception):
+    """Errors that occurred while trying to import something to document."""
+    def __init__(self, filename, exc_info):
+        self.filename = filename
+        self.exc, self.value, self.tb = exc_info
+        ...
+
+def safeimport(path, forceload=0, cache={}):
+    try:
+        ...
+        module = __import__(path)
+    except:
+        raise ErrorDuringImport(path, sys.exc_info())
+    return module
+```
+
+### `TextDoc` renderer (lines 201 to 450)
+
+<CpyLink path="Lib/pydoc.py" lines="201-450" />
+
+`TextDoc` is the formatter used when writing to a terminal or when `render_doc` is called without an HTML flag. The class has one `doc*` method per Python type: `docmodule`, `docclass`, `docroutine`, `docother`, `docproperty`, `docdata`. Each returns a formatted string; `document(thing)` on the base class dispatches to the right one by calling `inspect.ismodule`, `inspect.isclass`, etc.
+
+```python
+class TextDoc(Doc):
+    def docmodule(self, object, name=None, mod=None):
+        """Produce text documentation for a given module object."""
+        name = object.__name__
+        synop, desc = splitdoc(getdoc(object))
+        result = self.bold(name)
+        if synop:
+            result = result + ' - ' + synop
+        ...
+        return result
+```
+
+### `HTMLDoc` markup and page structure (lines 451 to 750)
+
+<CpyLink path="Lib/pydoc.py" lines="451-750" />
+
+`HTMLDoc.markup` is the core HTML renderer. It walks a docstring token by token, hyperlinking identifiers that look like module or class names and wrapping code spans in `<code>` tags. `HTMLDoc.page` wraps the body in a full HTML document with an inline stylesheet. `bigsection` and `section` produce the coloured two-column table layout used for class and module pages.
+
+```python
+class HTMLDoc(Doc):
+    def markup(self, text, escape=None, funcs={}, classes={}, methods={}):
+        """Mark up some plain text, given a context of symbols to look for.
+        Each context dictionary maps object names to anchor tags."""
+        escape = escape or self.escape
+        results = []
+        here = 0
+        pattern = re.compile(r'\b((http|ftp)://\S+[\w/]|'
+                             r'RFC[- ]?(\d+)|'
+                             r'PEP[- ]?(\d+)|'
+                             r'(self\.)?((?:\w|\.)+))\b')
+        ...
+```
+
+### Interactive `help()` session (lines 1201 to 1600)
+
+<CpyLink path="Lib/pydoc.py" lines="1201-1600" />
+
+The `Helper` class implements the interactive help loop. When the user types `help()` with no arguments, Python hands control to `Helper.__call__`, which prints a banner and enters a `while True` input loop. Each input string is classified: a topic keyword, a symbol like `>>`, a module name, or `quit`. The `showtopic` method looks up entries in the `topics` dict, which maps uppercase keyword names to formatted text blocks drawn from the CPython reference manual. The module-level `help` name is bound to `Helper()` so it doubles as both a callable object and an instance that REPL startup code can replace.
+
+```python
+class Helper:
+    def __call__(self, request=None):
+        if request is not None:
+            self.help(request)
+        else:
+            self.intro()
+            self.interact()
+            self.output.write('''
+You are now leaving help and returning to the Python interpreter.
+''')
+
+    def interact(self):
+        self.output.write('\n')
+        while True:
+            try:
+                request = self.getline('help> ')
+            except EOFError:
+                break
+            ...
+```
+
+## gopy mirror
+
+Not yet ported.

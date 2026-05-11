@@ -1,0 +1,103 @@
+---
+title: Include/internal/pycore_refcount.h
+description: Reference count internals for both the GIL build and the free-threaded (PEP 703) build.
+cpython_path: Include/internal/pycore_refcount.h
+cpython_version: "3.14"
+lines: 100
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Include/internal/pycore_refcount.h`
+
+<CpyLink path="Include/internal/pycore_refcount.h" />
+
+<overview>
+This header centralises reference-count primitives that differ between the GIL build and the free-threaded build introduced by PEP 703. It defines `_Py_IsImmortal`, the biased split-count representation used in the free-threaded build, and helper macros such as `_Py_INCREF_IMMORTAL_TOTAL` and `_Py_NormalizeImmortalCount`. `Py_REFCNT` is also defined here in the free-threaded path, where reading the count requires summing per-thread bias values rather than reading a single integer.
+</overview>
+
+## Map
+
+| Symbol | Purpose |
+|---|---|
+| `_Py_IsImmortal` | Returns true when an object's refcount signals immortality |
+| `_Py_IMMORTAL_REFCNT` | The sentinel value (GIL build: large positive; free-threaded: special flag) |
+| `_Py_INCREF_IMMORTAL_TOTAL` | Instrumentation counter tracking no-op increfs on immortal objects |
+| `_Py_NormalizeImmortalCount` | Collapses split per-thread counters back to a canonical value |
+| `Py_REFCNT` | Public macro; reads the effective count from either representation |
+| `ob_refcnt_split` | Free-threaded field: two 32-bit halves encoding local and shared counts |
+
+## Reading
+
+### GIL build: single integer
+
+In the GIL build, `ob_refcnt` is a plain `Py_ssize_t`. Immortality is a simple range check:
+
+```c
+// Include/internal/pycore_refcount.h (GIL build)
+static inline int
+_Py_IsImmortal(PyObject *op)
+{
+    return op->ob_refcnt == _Py_IMMORTAL_REFCNT;
+}
+```
+
+`_Py_IMMORTAL_REFCNT` is chosen large enough that ordinary `Py_INCREF` / `Py_DECREF` cycles can never reach it from a live object with a normal refcount. On 64-bit platforms the value is `UINT_MAX / 2 + 1` (i.e., `0x80000000` on a 32-bit `Py_ssize_t` or a similar high bit on a 64-bit one).
+
+Because the check is a single comparison, `Py_INCREF` in the GIL build compiles to roughly three instructions on x86-64: compare, conditional-jump, increment.
+
+### Free-threaded build: split counters (PEP 703)
+
+PEP 703 removes the GIL and allows multiple threads to hold references to the same object simultaneously. A plain `Py_ssize_t` would require atomic read-modify-write on every increment and decrement, which is expensive. CPython 3.14 instead uses a biased reference count:
+
+```c
+// Include/internal/pycore_refcount.h (free-threaded build, simplified)
+typedef union {
+    Py_ssize_t ob_refcnt;
+    struct {
+        uint32_t local;   /* thread-local bias */
+        uint32_t shared;  /* shared (atomic) count */
+    } ob_refcnt_split;
+} _PyObject_Head_Isolated;
+```
+
+Each thread increments its own `local` counter without any atomic operation. The `shared` counter is only touched when a reference crosses a thread boundary or when the object's count reaches zero. `Py_REFCNT` reconstructs the logical count by adding the two halves:
+
+```c
+static inline Py_ssize_t
+Py_REFCNT(PyObject *ob)
+{
+    uint32_t local  = _Py_atomic_load_uint32_relaxed(&ob->ob_refcnt_split.local);
+    uint32_t shared = _Py_atomic_load_uint32_relaxed(&ob->ob_refcnt_split.shared);
+    return (Py_ssize_t)(local + shared);
+}
+```
+
+`_Py_NormalizeImmortalCount` is called during garbage collection to merge outstanding local counts into `shared`, so the collector sees a consistent view.
+
+### Immortality in the free-threaded build
+
+The immortality signal is encoded in the overflow bit of `shared`. When `shared` has its high bit set, `_Py_IsImmortal` returns true regardless of the `local` value:
+
+```c
+static inline int
+_Py_IsImmortal(PyObject *op)
+{
+    return (op->ob_refcnt_split.shared & _Py_IMMORTAL_REFCNT_LOCAL) != 0;
+}
+```
+
+This means setting an object immortal is a single atomic OR on `shared`; no cooperation from individual threads is required.
+
+## gopy mirror
+
+gopy does not implement reference counting. All object lifetimes are managed by Go's garbage collector. As a result, none of the symbols in this header have direct counterparts in the gopy source tree.
+
+The practical consequence is that gopy objects carry no `ob_refcnt` field at all. Go interfaces and pointers keep objects alive as long as any Go value references them. Immortal singletons (None, True, False, etc.) remain alive because they are referenced by package-level variables, not because of a sentinel refcount.
+
+If gopy ever needs to track ownership across a C extension boundary (for embedding use cases), a thin shim layer would be the appropriate place to introduce explicit retain/release semantics, isolated from the core object model.
+
+## CPython 3.14 changes
+
+CPython 3.14 landed the first production release of the free-threaded build (the experimental `--disable-gil` flag from 3.13 became a fully supported tier-1 configuration). The split-counter design in this header replaced the prototype from 3.13, which used a simpler but more contended atomic. The `_Py_INCREF_IMMORTAL_TOTAL` counter was added for performance profiling: it lets embedders measure how much refcount traffic is being silently discarded on immortal objects.

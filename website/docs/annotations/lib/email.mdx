@@ -1,0 +1,214 @@
+---
+title: Lib/email/__init__.py
+description: Python email package; parsing entry points, Message class, MIME subtypes, FeedParser state machine, Generator, and header registry.
+cpython_path: Lib/email/__init__.py
+cpython_version: "3.14"
+lines: 8000
+status: annotated
+ported_to: (stdlib pending)
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Lib/email/__init__.py`
+
+<CpyLink path="Lib/email/__init__.py" />
+
+The `email` package spans roughly a dozen submodules. This annotation
+covers the four most load-bearing files:
+
+- `email/message.py`: the `Message` class (and its `EmailMessage`
+  subclass from `email.policy`), the header dict and payload storage.
+- `email/feedparser.py`: the `FeedParser` / `BytesFeedParser` state
+  machine that parses an incremental byte or character stream into a
+  `Message` tree.
+- `email/generator.py`: `Generator`, `BytesGenerator`, and
+  `DecodedGenerator`, which serialize `Message` objects back to text.
+- `email/mime/`: the `MIMEText`, `MIMEMultipart`, `MIMEBase`, and
+  related convenience constructors.
+
+`email/__init__.py` itself is a thin re-export layer that exposes the
+convenience functions `message_from_string`, `message_from_bytes`,
+`message_from_file`, and `message_from_binary_file`. All real logic lives
+in the submodules.
+
+The policy system (`email.policy`) controls whether the package operates
+in the legacy `compat32` mode (which tolerates malformed headers and
+returns unstructured strings) or in the modern `EmailPolicy` mode (RFC
+6532, which returns structured header objects from `email.headerregistry`).
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Lib/email/__init__.py" lines="1-30">1-30</Cpy> | `message_from_string`, `message_from_bytes`, `message_from_file`, `message_from_binary_file` | Thin wrappers around `Parser` and `BytesParser`; accept an optional `policy` keyword. | (pending) |
+| <Cpy path="Lib/email/message.py" lines="1-150">message.py 1-150</Cpy> | `Message.__init__`, `_charset`, `_payload` | Sets up the header list, payload slot, and default policy. | (pending) |
+| <Cpy path="Lib/email/message.py" lines="150-400">message.py 150-400</Cpy> | `Message.__str__`, `as_string`, `as_bytes`, `__bytes__`, `is_multipart`, `set_unixfrom`, `get_unixfrom`, `attach`, `get_payload`, `set_payload` | Serialization shims, multipart attachment list, and payload accessor. | (pending) |
+| <Cpy path="Lib/email/message.py" lines="400-700">message.py 400-700</Cpy> | `set_charset`, `get_charset`, `__len__`, `__contains__`, `keys`, `values`, `items`, `get`, `get_all`, `__setitem__`, `__delitem__`, `replace_header` | Header dict emulation over an ordered list of `(name, value)` pairs. | (pending) |
+| <Cpy path="Lib/email/feedparser.py" lines="1-200">feedparser.py 1-200</Cpy> | `BufferedSubFile`, `FeedParser.__init__`, `feed`, `_parse_headers` | Incremental byte feeder and header-parsing entry. | (pending) |
+| <Cpy path="Lib/email/feedparser.py" lines="200-450">feedparser.py 200-450</Cpy> | `_parsegen`, `_parse_message_delivery_status`, `_parse_multipart` | The main generator-coroutine state machine; multipart boundary detection and nesting. | (pending) |
+| <Cpy path="Lib/email/generator.py" lines="1-200">generator.py 1-200</Cpy> | `Generator.__init__`, `flatten`, `clone`, `_write`, `_write_headers`, `_handle_*` | Text serializer; dispatches to per-content-type `_handle_` methods. | (pending) |
+| <Cpy path="Lib/email/generator.py" lines="200-350">generator.py 200-350</Cpy> | `BytesGenerator`, `DecodedGenerator` | Binary serializer (re-encodes headers) and decoded-payload serializer. | (pending) |
+| <Cpy path="Lib/email/mime/text.py" lines="1-50">mime/text.py</Cpy> | `MIMEText` | Convenience constructor: sets `Content-Type`, charset, and encodes the payload. | (pending) |
+| <Cpy path="Lib/email/mime/multipart.py" lines="1-60">mime/multipart.py</Cpy> | `MIMEMultipart` | Sets `Content-Type: multipart/X` and manages the boundary parameter. | (pending) |
+| <Cpy path="Lib/email/headerregistry.py" lines="1-400">headerregistry.py 1-400</Cpy> | `HeaderRegistry`, `Address`, `Group`, structured header classes | Parses raw header strings into typed objects under the modern policy. | (pending) |
+
+## Reading
+
+### `FeedParser` state machine (feedparser.py lines 200 to 450)
+
+<CpyLink path="Lib/email/feedparser.py" lines="200-450" />
+
+```python
+class FeedParser:
+    def __init__(self, _factory=None, *, policy=compat32):
+        self.policy = policy
+        self._factory = _factory or policy.message_factory
+        self._input = BufferedSubFile()
+        self._msgstack = []
+        self._parse = self._parsegen().__next__
+        self._cur = None
+        self._last = None
+        self._headersonly = False
+
+    def feed(self, data):
+        """Feed more data into the parser."""
+        self._input.push(data)
+        self._call_parse()
+
+    def _call_parse(self):
+        try:
+            self._parse()
+        except StopIteration:
+            pass
+
+    def _parsegen(self):
+        # Phase 1: collect the headers.
+        for retval in self._parse_headers(self._input):
+            yield retval
+        # Phase 2: parse the body based on content-type.
+        if self._headersonly:
+            lines = []
+            while True:
+                line = self._input.readline()
+                if line == NeedMoreData:
+                    yield NeedMoreData
+                    continue
+                if not line:
+                    break
+                lines.append(line)
+            self._cur.set_payload(EMPTYSTRING.join(lines))
+            return
+        ...
+        if self._cur.get_content_maintype() == 'multipart':
+            for retval in self._parse_multipart(boundary):
+                yield retval
+        ...
+```
+
+`FeedParser` uses a generator-coroutine pattern. `_parsegen` is a
+generator whose `__next__` method is stored as `self._parse`. Each call
+to `feed()` pushes data into `_input` (a `BufferedSubFile`) and then
+calls `self._parse()` once, which advances the generator one step.
+
+The generator yields `NeedMoreData` whenever it calls `_input.readline()`
+and gets back the sentinel `NeedMoreData` object rather than a real line.
+The outer call to `_call_parse` catches the `StopIteration` that signals
+the generator is done.
+
+`BufferedSubFile` maintains a list of pushed strings and a position
+pointer. `readline()` returns the next newline-terminated chunk or
+`NeedMoreData` if no complete line is buffered yet. This design means the
+caller can feed the parser arbitrary byte chunks (TCP fragments, etc.)
+without worrying about line boundaries.
+
+### `Message.get_payload` encoding (message.py lines 150 to 400)
+
+<CpyLink path="Lib/email/message.py" lines="150-400" />
+
+```python
+def get_payload(self, i=None, decode=False):
+    if self.is_multipart():
+        if decode:
+            return None
+        if i is None:
+            return self._payload
+        else:
+            return self._payload[i]
+    # Non-multipart.
+    if i is not None and not isinstance(self._payload, list):
+        raise TypeError('Expected list, got %s' % type(self._payload))
+    payload = self._payload
+    cte = str(self.get('content-transfer-encoding', '')).lower()
+    if decode:
+        if cte == 'quoted-printable':
+            return quopri.decodestring(payload.encode('raw-unicode-escape'))
+        elif cte == 'base64':
+            try:
+                return _decode_b64(payload)
+            except binascii.Error:
+                return payload.encode('raw-unicode-escape')
+        elif cte in ('x-uuencode', 'uuencode', 'uue', 'x-uue'):
+            ...
+        else:
+            return payload.encode('raw-unicode-escape')
+    return payload
+```
+
+`_payload` holds either a string (for single-part messages) or a list of
+`Message` objects (for multipart). The `decode=True` path decodes the
+`Content-Transfer-Encoding` and always returns `bytes`; the `decode=False`
+path returns the raw (possibly encoded) string.
+
+The `'raw-unicode-escape'` encoding is used as a lossless bridge between
+the 8-bit bytes that arrived from the network and Python's str type: it
+maps each byte value 0x80-0xFF to the corresponding Latin-1 code point,
+preserving the bit pattern exactly. Callers that need decoded text must
+apply the `Content-Type: charset` themselves.
+
+### MIME multipart boundaries (generator.py lines 1 to 200)
+
+<CpyLink path="Lib/email/generator.py" lines="1-200" />
+
+```python
+class Generator:
+    def _handle_multipart(self, msg):
+        msgtexts = []
+        subparts = msg.get_payload()
+        for part in subparts:
+            s = self._new_buffer()
+            g = self.clone(s)
+            g.flatten(part, unixfrom=False, linesep=self._NL)
+            msgtexts.append(s.getvalue())
+        boundary = msg.get_boundary()
+        if not boundary:
+            boundary = _make_boundary(msgtexts)
+            msg.set_boundary(boundary)
+        alltext = self._NL.join([
+            '--' + boundary,
+            *interleave(msgtexts, '--' + boundary),
+            '--' + boundary + '--',
+        ])
+        self.write(alltext)
+```
+
+`Generator.flatten` is the entry point. It calls `_write`, which
+dispatches to a `_handle_` method based on the message's main content
+type. For `multipart/*` the handler recursively flattens each sub-part
+into its own buffer, then joins the buffers with the boundary delimiter.
+
+The boundary is taken from the `Content-Type` header parameter. If the
+header has no boundary (which can happen when building a message
+programmatically), `_make_boundary` generates one by hashing the
+sub-part texts and checking that the result does not appear in any
+sub-part body, a process that retries with progressively longer hashes
+until a unique boundary is found.
+
+## gopy mirror
+
+The `email` package is not yet ported. The parser, generator, and MIME
+constructors are all pure Python with no C extension, but the package
+is large and has many implicit dependencies (`quopri`, `base64`,
+`binascii`, `charset`, `encoders`). A port would need to ship the
+`FeedParser` state machine and `Message` header list as the core, with
+MIME and header registry support added incrementally.

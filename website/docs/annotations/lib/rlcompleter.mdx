@@ -1,0 +1,139 @@
+---
+title: Lib/rlcompleter.py
+description: Tab-completion for Python identifiers in the interactive interpreter via the readline interface.
+cpython_path: Lib/rlcompleter.py
+cpython_version: "3.14"
+lines: 175
+status: annotated
+ported_to: ""
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Lib/rlcompleter.py`
+
+<CpyLink path="Lib/rlcompleter.py" />
+
+`rlcompleter` wires Python identifier completion into the readline library. When the module is imported it creates a `Completer` instance, calls `readline.set_completer(instance.complete)`, and from that point on pressing Tab in the interactive interpreter triggers the completion callback. The design is intentionally minimal: no UI, no fuzzy matching, just the exact callback signature that `readline` expects.
+
+The `Completer` class supports three completion domains. For bare names with no dot, it searches the caller's namespace (passed in at construction time, defaulting to `__main__.__dict__`), then `builtins`. For names containing a dot, it evaluates the prefix expression with `eval` and then lists attributes via `dir`. Keywords from the `keyword` module are included in the bare-name search so that `imp<Tab>` completes to `import`.
+
+The module is short enough to read in a single sitting. The interesting logic is in `global_matches` and `attr_matches`. `global_matches` builds the candidate list by unioning the namespace keys, `builtins.__dict__` keys, and `keyword.kwlist`. `attr_matches` calls `get_class_members` recursively to walk the MRO so that inherited attributes from base classes appear in completion candidates even when they are not present on the instance dict directly.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Lib/rlcompleter.py" lines="1-30">1-30</Cpy> | module docstring, imports | Header: documents the `readline` dependency and lists public names | - |
+| <Cpy path="Lib/rlcompleter.py" lines="31-55">31-55</Cpy> | `get_class_members` | Recursively collects attribute names from a class and all its MRO bases | - |
+| <Cpy path="Lib/rlcompleter.py" lines="56-95">56-95</Cpy> | `Completer.__init__`, `Completer.complete` | Constructor accepting an optional namespace dict; `complete(text, state)` readline callback | - |
+| <Cpy path="Lib/rlcompleter.py" lines="96-135">96-135</Cpy> | `Completer.global_matches` | Candidate list for bare names: namespace keys, builtins, keywords | - |
+| <Cpy path="Lib/rlcompleter.py" lines="136-175">136-175</Cpy> | `Completer.attr_matches` | Candidate list for dotted expressions: `eval` prefix, `dir` result, MRO walk | - |
+
+## Reading
+
+### `get_class_members` (lines 31 to 55)
+
+<CpyLink path="Lib/rlcompleter.py" lines="31-55" />
+
+This helper exists because `dir(obj)` on a class returns only the names visible through normal attribute lookup, but the completion list should also include names inherited from base classes that might be hidden by a subclass attribute. The function collects `dir(klass)` and then recurses into each entry in `klass.__bases__`, accumulating a deduplicated list. The result feeds directly into `attr_matches`.
+
+```python
+def get_class_members(klass):
+    ret = dir(klass)
+    if hasattr(klass, '__bases__'):
+        for base in klass.__bases__:
+            ret = ret + get_class_members(base)
+    return ret
+```
+
+### `Completer.__init__` and `complete` (lines 56 to 95)
+
+<CpyLink path="Lib/rlcompleter.py" lines="56-95" />
+
+The constructor accepts an optional `namespace` dict. When `None` is passed, completion runs against `__main__.__dict__`, which is the live interpreter namespace. Readline calls `complete(text, state)` repeatedly with an incrementing `state` counter starting at zero. On the first call (`state == 0`) the method builds the full candidate list and caches it in `self.matches`. Subsequent calls return `self.matches[state]` or `None` to signal exhaustion.
+
+The dispatch inside `complete` is simple: if `text` contains a `.`, delegate to `attr_matches`; otherwise delegate to `global_matches`. This means `os.path.j<Tab>` will call `attr_matches` on the prefix `os.path` and filter results starting with `j`.
+
+```python
+class Completer:
+    def __init__(self, namespace=None):
+        if namespace and not isinstance(namespace, dict):
+            raise TypeError('namespace must be a dictionary')
+        if namespace is None:
+            self.use_main_ns = True
+        else:
+            self.use_main_ns = False
+            self.namespace = namespace
+
+    def complete(self, text, state):
+        if self.use_main_ns:
+            self.namespace = __main__.__dict__
+        if state == 0:
+            if '.' in text:
+                self.matches = self.attr_matches(text)
+            else:
+                self.matches = self.global_matches(text)
+        try:
+            return self.matches[state]
+        except IndexError:
+            return None
+```
+
+### `global_matches` (lines 96 to 135)
+
+<CpyLink path="Lib/rlcompleter.py" lines="96-135" />
+
+Builds the candidate list for a bare identifier prefix. It iterates over three sources: the current namespace dict, `builtins.__dict__`, and `keyword.kwlist`. Each candidate is kept if it starts with the text prefix. Callable objects get a `(` appended so the user can see at a glance that the completion is a function. Keywords never get the `(` suffix.
+
+```python
+def global_matches(self, text):
+    """Compute matches when text is a simple name."""
+    import keyword
+    matches = []
+    seen = {"__builtins__"}
+    n = len(text)
+    for word in keyword.kwlist + keyword.softkwlist:
+        if word[:n] == text:
+            seen.add(word)
+            matches.append(word)
+    for nspace in [self.namespace, builtins.__dict__]:
+        for word, val in nspace.items():
+            if word[:n] == text and word not in seen:
+                seen.add(word)
+                matches.append(self._callable_postfix(val, word))
+    return matches
+```
+
+### `attr_matches` (lines 136 to 175)
+
+<CpyLink path="Lib/rlcompleter.py" lines="136-175" />
+
+Handles dotted expressions. It splits the input at the last `.` to get an expression prefix and an attribute prefix. The expression is evaluated in the current namespace using `eval`. If evaluation fails (syntax error, name error, etc.) the method returns an empty list quietly. On success it calls `dir` on the result and, for class objects, supplements the list with `get_class_members` to catch inherited names. Each candidate is filtered against the attribute prefix and returned with the full dotted form prepended.
+
+```python
+def attr_matches(self, text):
+    """Compute matches when text contains a dot."""
+    m = re.match(r'(\w+(\.\w+)*)\.(\w*)', text)
+    if not m:
+        return []
+    expr, attr = m.group(1), m.group(3)
+    try:
+        thisobject = eval(expr, self.namespace)
+    except Exception:
+        return []
+    words = set(dir(thisobject))
+    if hasattr(thisobject, '__class__'):
+        words.add('__class__')
+        words.update(get_class_members(thisobject.__class__))
+    matches = []
+    n = len(attr)
+    for word in words:
+        if word[:n] == attr and word != "__builtins__":
+            matches.append('%s.%s' % (expr, word))
+    return matches
+```
+
+## gopy mirror
+
+Not yet ported.

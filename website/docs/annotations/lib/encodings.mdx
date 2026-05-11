@@ -1,0 +1,113 @@
+---
+title: Lib/encodings/__init__.py
+description: Codec registry and lookup machinery for CPython's text encoding system.
+cpython_path: Lib/encodings/__init__.py
+cpython_version: "3.14"
+lines: 200
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Lib/encodings/__init__.py`
+
+<CpyLink path="Lib/encodings/__init__.py" />
+
+`Lib/encodings/__init__.py` is the bootstrap layer between the C-level `codecs` module and the per-encoding Python modules scattered under `Lib/encodings/`. When the interpreter starts, this file registers `search_function` with `codecs.register()`. From that point on, every call to `open(..., encoding='utf-8')`, `str.encode('latin-1')`, or `codecs.lookup('ascii')` eventually calls `search_function`, which normalizes the encoding name and imports the matching submodule (e.g. `encodings.utf_8`). Each submodule exposes a `getregentry()` function that returns a `CodecInfo` namedtuple containing encode, decode, `IncrementalEncoder`, and `IncrementalDecoder` references.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Lib/encodings/__init__.py" lines="1-30">1-30</Cpy> | module docstring, imports | `codecs`, `sys`, `_codecs` (C extension) | n/a |
+| <Cpy path="Lib/encodings/__init__.py" lines="31-60">31-60</Cpy> | `normalize_encoding` | Map arbitrary encoding name strings to canonical module names | Not yet ported |
+| <Cpy path="Lib/encodings/__init__.py" lines="61-100">61-100</Cpy> | `search_function` | Import and cache per-encoding submodules | Not yet ported |
+| <Cpy path="Lib/encodings/__init__.py" lines="101-130">101-130</Cpy> | `codecs.register(search_function)` | Hook registration at import time | Not yet ported |
+| <Cpy path="Lib/encodings/__init__.py" lines="131-160">131-160</Cpy> | `_cache`, `_unknown`, `_aliases` | Lookup cache and alias table | Not yet ported |
+| <Cpy path="Lib/encodings/__init__.py" lines="161-200">161-200</Cpy> | `CodecInfo` usage notes, `__all__` | Package-level exports | n/a |
+
+## Reading
+
+### normalize_encoding: canonicalizing encoding names (lines 31 to 60)
+
+<CpyLink path="Lib/encodings/__init__.py" lines="31-60" />
+
+Python's encoding API accepts a wide range of spelling variants: `"UTF-8"`, `"utf_8"`, `"utf8"`, `"UTF8"` are all valid. `normalize_encoding` converts any such string to the form used as a Python module name (lowercase, spaces and hyphens replaced with underscores, leading and trailing underscores stripped).
+
+```python
+def normalize_encoding(encoding):
+    if isinstance(encoding, bytes):
+        encoding = str(encoding, 'ascii')
+    chars = []
+    punct = False
+    for c in encoding:
+        if c.isalnum() or c == '.':
+            if punct and chars:
+                chars.append('_')
+            chars.append(c)
+            punct = False
+        else:
+            punct = True
+    return ''.join(chars)
+```
+
+The `punct` flag collapses any run of non-alphanumeric characters into a single underscore, so `"utf---8"` and `"utf 8"` both normalize to `"utf_8"`. The `.` special-case preserves version suffixes in names like `"utf-8-sig"` (which normalizes to `"utf_8_sig"`).
+
+### search_function: the codec registry callback (lines 61 to 100)
+
+<CpyLink path="Lib/encodings/__init__.py" lines="61-100" />
+
+`search_function` is the callable passed to `codecs.register()`. The C layer calls it with the raw encoding name whenever a lookup misses the internal C cache. The function first checks `_aliases` (a large dict defined in `Lib/encodings/aliases.py`) to resolve common alternate spellings, then imports the submodule and calls its `getregentry()`.
+
+```python
+def search_function(encoding):
+    entry = _cache.get(encoding, _unknown)
+    if entry is not _unknown:
+        return entry
+    norm_encoding = normalize_encoding(encoding)
+    aliased_encoding = _aliases.get(norm_encoding) or \
+                       _aliases.get(norm_encoding.replace('.', '_'))
+    if aliased_encoding is not None:
+        norm_encoding = aliased_encoding
+    norm_encoding = norm_encoding.lower()
+    try:
+        mod = __import__('encodings.' + norm_encoding,
+                         fromlist=_import_tail,
+                         level=0)
+    except ImportError:
+        mod = None
+    try:
+        getregentry = mod.getregentry
+    except AttributeError:
+        mod = None
+    if mod is None:
+        _cache[encoding] = None
+        return None
+    entry = getregentry()
+    if not isinstance(entry, CodecInfo):
+        ...
+    _cache[encoding] = entry
+    return entry
+```
+
+The result is stored in `_cache` (a plain dict) so subsequent lookups for the same name string are O(1) dictionary reads, without re-importing the submodule.
+
+### Registration at import time (lines 101 to 130)
+
+<CpyLink path="Lib/encodings/__init__.py" lines="101-130" />
+
+The final lines of `__init__.py` call `codecs.register(search_function)` unconditionally at module import time. Because `encodings` is imported during interpreter startup (before user code runs), this registration happens once per interpreter session. The `codecs` C module maintains a per-interpreter linked list of search functions; `codecs.lookup(name)` walks the list until one returns a non-`None` value.
+
+```python
+codecs.register(search_function)
+```
+
+This one line is what connects the pure-Python submodule tree under `Lib/encodings/` to the C-level codec machinery. Removing or deferring it would break `str.encode`, `bytes.decode`, and `open` with an explicit `encoding` argument for all non-ASCII codecs.
+
+## gopy mirror
+
+Not yet ported in full. gopy currently handles ASCII and UTF-8 natively inside the VM and string object layer (`objects/str.go`) without going through a registry. The alias table (`Lib/encodings/aliases.py`) is large enough that it is unlikely to be hand-ported; a future implementation would either vendor it as a generated Go map or call into a CPython subprocess for codec resolution. The `normalize_encoding` function is small and self-contained and would be a straightforward port.
+
+## CPython 3.14 changes
+
+CPython 3.14 added support for the `"locale"` pseudo-encoding name at the `encodings` layer, resolving it to the current locale codec at lookup time rather than at `open()` time. This allows `codecs.lookup("locale")` to return a stable `CodecInfo` entry for the session. Additionally, the alias table in `Lib/encodings/aliases.py` gained several new entries for WHATWG-compatible encoding names to improve compatibility with web content processed through the `http` and `email` stacks.

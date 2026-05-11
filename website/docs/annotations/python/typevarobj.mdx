@@ -1,0 +1,216 @@
+---
+title: Python/typevarobject.c
+description: PEP 695 type parameter objects — TypeVar, TypeVarTuple, ParamSpec, and TypeAliasType.
+cpython_path: Python/typevarobject.c
+cpython_version: "3.14"
+lines: 1800
+status: annotated
+ported_to: objects/typevar.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Python/typevarobject.c`
+
+<CpyLink path="Python/typevarobject.c" />
+
+PEP 695 type parameter objects. Before 3.12, `TypeVar`, `TypeVarTuple`, and
+`ParamSpec` were defined in pure Python inside `typing.py`. PEP 695 promoted
+them to C-level objects in `typevarobject.c`, giving them a stable memory
+layout and making them available at compile time for the new `type X[T] = ...`
+and `def f[T]()` syntax.
+
+The file contains four independent type implementations that share almost no
+code: `TypeVar` (the classic single-type parameter), `TypeVarTuple` (a
+variadic type parameter that matches a variable number of types, written `*Ts`
+in annotations), `ParamSpec` (models the parameter list of a callable), and
+`TypeAliasType` (the object produced by a `type X = Y` statement). A small
+block of shared machinery at the bottom handles the `__type_params__` attribute
+and generic parameter deduplication used by all four.
+
+`TypeAliasType` is the most interesting of the four for an interpreter port
+because its `__value__` field uses lazy evaluation via a PEP 696 callback: the
+right-hand side of a `type` statement is stored as a thunk and called on first
+access. `TypeVar.__bound__` and `TypeVar.__constraints__` support the same
+lazy evaluation pattern so that forward-referenced types in bounds do not need
+to be resolved at class-body parse time.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Python/typevarobject.c" lines="1-300">1-300</Cpy> | `typevar_new`, `typevar_repr`, `typevar_getset`, `TypeVarObject` | `TypeVar` struct layout, constructor from `type[T]` desugaring, `__name__`, `__bound__`, `__constraints__`, `__covariant__`, `__contravariant__`, `__infer_variance__` getsets. | `objects/typevar.go:TypeVar`, `NewTypeVar` |
+| <Cpy path="Python/typevarobject.c" lines="300-600">300-600</Cpy> | `typevartuple_new`, `typevartuple_repr`, `typevartuple_iter`, `TypeVarTupleObject` | `TypeVarTuple` struct, constructor, `__name__`, `__unpacked__` (the `*Ts` form), and the `__iter__` that yields the unpacked form for use in subscriptions. | `objects/typevar.go:TypeVarTuple`, `NewTypeVarTuple` |
+| <Cpy path="Python/typevarobject.c" lines="600-900">600-900</Cpy> | `paramspec_new`, `paramspec_repr`, `paramspec_args`, `paramspec_kwargs`, `ParamSpecObject` | `ParamSpec` struct, `__name__`, `__bound__`, `__covariant__`, `__contravariant__`, `.args` and `.kwargs` synthetic views. | `objects/typevar.go:ParamSpec`, `NewParamSpec` |
+| <Cpy path="Python/typevarobject.c" lines="900-1200">900-1200</Cpy> | `typealias_new`, `typealias_repr`, `typealias_getset`, `TypeAliasObject` | `TypeAliasType` struct, constructor called by `BUILD_TYPE_ALIAS` opcode, `__name__`, `__type_params__`, `__value__` with lazy thunk evaluation, `__module__`. | `objects/typevar.go:TypeAlias`, `NewTypeAlias` |
+| <Cpy path="Python/typevarobject.c" lines="1200-1800">1200-1800</Cpy> | `_Py_make_type_params`, `collect_type_params`, `_Py_typing_type_or`, `_PyTypeVar_Type`, `_PyTypeVarTuple_Type`, `_PyParamSpec_Type`, `_PyTypeAliasType_Type` | Shared machinery: collect free type parameters from an annotation expression, wire `__or__` / `__ror__` on all four types to produce `Union` objects, and the four `PyTypeObject` definitions. | `objects/typevar.go:collectTypeParams`, `TypeVarType`, `TypeVarTupleType`, `ParamSpecType`, `TypeAliasType` |
+
+## Reading
+
+### TypeVar layout and `typevar_new` (lines 1 to 300)
+
+<CpyLink path="Python/typevarobject.c" lines="1-300" />
+
+The `TypeVarObject` struct carries eight fields: `tv_name` (a Unicode object),
+`tv_bound` (an object or a callable thunk), `tv_evaluate_bound` (the thunk
+itself so `evaluate_bound()` can be called explicitly), `tv_constraints` (a
+tuple), `tv_evaluate_constraints`, `tv_default`, `tv_evaluate_default`,
+and three `char` flags for covariance, contravariance, and infer-variance.
+
+`typevar_new` is called directly by the `MAKE_TYPEVAR` opcode emitted for a
+`type[T]` binder. It parses keyword arguments, copies the name, and stores
+bound and constraints as either their resolved value or the thunk, depending on
+whether the caller supplied a callable:
+
+```c
+static PyObject *
+typevar_new(PyTypeObject *type, PyObject *args, PyObject *kwds)
+{
+    static char *kwlist[] = {"name", "bound", "constraints",
+                             "covariant", "contravariant",
+                             "infer_variance", "default", NULL};
+    PyObject *name, *bound = Py_None, *constraints = NULL;
+    PyObject *def = Py_None;
+    int covariant = 0, contravariant = 0, infer_variance = 0;
+
+    if (!PyArg_ParseTupleAndKeywords(args, kwds,
+            "U|OO!pppO:TypeVar", kwlist,
+            &name, &bound, &PyTuple_Type, &constraints,
+            &covariant, &contravariant, &infer_variance, &def))
+        return NULL;
+
+    TypeVarObject *tv = PyObject_GC_New(TypeVarObject, type);
+    if (tv == NULL) return NULL;
+    tv->tv_name = Py_NewRef(name);
+    tv->tv_bound = Py_XNewRef(bound);
+    tv->tv_evaluate_bound = NULL;
+    tv->tv_constraints = constraints ? Py_NewRef(constraints)
+                                     : PyTuple_New(0);
+    /* ... flags ... */
+    _PyObject_GC_TRACK(tv);
+    return (PyObject *)tv;
+}
+```
+
+The `__bound__` getset triggers lazy evaluation when `tv_bound` is a callable
+rather than a resolved type. The first call to the getter calls the thunk,
+caches the result into `tv_bound`, and then returns it. Subsequent accesses
+return the cached value directly. `evaluate_bound()` exposes the thunk call as
+an explicit public method so tools like `typing.get_type_hints` can force
+evaluation without going through attribute access.
+
+### `TypeAliasType` and lazy `__value__` (lines 900 to 1200)
+
+<CpyLink path="Python/typevarobject.c" lines="900-1200" />
+
+`TypeAliasType` is simpler than `TypeVar` in most respects but has one
+important twist: the `__value__` field is always lazy. The `type X = expr`
+statement desugars to a `BUILD_TYPE_ALIAS` opcode that wraps `expr` in a
+zero-argument function before calling `typealias_new`. The struct stores both
+the thunk and the resolved value:
+
+```c
+typedef struct {
+    PyObject_HEAD
+    PyObject *ta_name;
+    PyObject *ta_type_params;  /* tuple of TypeVar/TypeVarTuple/ParamSpec */
+    PyObject *ta_value;        /* resolved, or NULL if not yet called */
+    PyObject *ta_value_compute; /* the thunk, kept for re-evaluation */
+    PyObject *ta_module;
+} TypeAliasObject;
+
+static PyObject *
+typealias_value(PyObject *self, void *unused)
+{
+    TypeAliasObject *ta = (TypeAliasObject *)self;
+    if (ta->ta_value == NULL) {
+        ta->ta_value = PyObject_CallNoArgs(ta->ta_value_compute);
+        if (ta->ta_value == NULL)
+            return NULL;
+    }
+    return Py_NewRef(ta->ta_value);
+}
+```
+
+This lazy evaluation means that a `type X = SomeClass` statement at module
+top level does not require `SomeClass` to exist yet. The value is computed only
+on the first `X.__value__` access, by which time the module body has finished
+executing and all names are bound.
+
+`TypeAliasType` also defines `__getitem__` so that `X[int]` works for generic
+aliases. The subscription delegates to `Py_GenericAlias(self, args)`, making
+`type Alias[T] = list[T]` subscriptable at runtime as `Alias[int]`.
+
+### `__type_params__` and PEP 695 generic tracking (lines 1200 to 1800)
+
+<CpyLink path="Python/typevarobject.c" lines="1200-1800" />
+
+`_Py_make_type_params` is called during function and class definition for any
+PEP 695 generic. It receives the `__type_params__` tuple that the compiler
+gathered while processing the `[T, *Ts, **P]` binder. The tuple is attached
+to the function or class via a `__type_params__` attribute. The compiler emits
+`COPY_FREE_VARS` followed by `LOAD_FAST "__type_params__"` at the start of a
+generic function body to make the parameter tuple available inside the body
+scope.
+
+`collect_type_params` is the inverse operation. Given an arbitrary annotation
+expression, it walks the object graph collecting any object whose type exposes
+`__typing_subst__` (the interface that `TypeVar`, `TypeVarTuple`, and
+`ParamSpec` all implement). The result is the `__parameters__` attribute
+value on generic aliases:
+
+```c
+static int
+collect_type_params(PyObject *obj, PyObject *params)
+{
+    /* Base case: obj is itself a type parameter. */
+    if (PyObject_HasAttr(obj, &_Py_ID(__typing_subst__))) {
+        if (PyList_Append(params, obj) < 0)
+            return -1;
+        return 0;
+    }
+    /* Recurse into __args__ if present (nested generic alias). */
+    PyObject *args = PyObject_GetAttr(obj, &_Py_ID(__args__));
+    if (args == NULL) {
+        PyErr_Clear();
+        return 0;
+    }
+    Py_ssize_t n = PySequence_Length(args);
+    for (Py_ssize_t i = 0; i < n; i++) {
+        PyObject *arg = PySequence_GetItem(args, i);
+        if (arg == NULL || collect_type_params(arg, params) < 0) {
+            Py_XDECREF(arg);
+            Py_DECREF(args);
+            return -1;
+        }
+        Py_DECREF(arg);
+    }
+    Py_DECREF(args);
+    return 0;
+}
+```
+
+`_Py_typing_type_or` wires `__or__` on all four type parameter types so that
+`TypeVar | None` produces a `PyUnionObject` rather than raising `TypeError`.
+The four `PyTypeObject` singletons (`_PyTypeVar_Type`, `_PyTypeVarTuple_Type`,
+`_PyParamSpec_Type`, `_PyTypeAliasType_Type`) are defined with GC support
+because they can form reference cycles through their thunk closures.
+
+## gopy mirror
+
+`objects/typevar.go` for `TypeVar`, `TypeVarTuple`, `ParamSpec`,
+`TypeAlias`, and the four type singletons `TypeVarType`, `TypeVarTupleType`,
+`ParamSpecType`, `TypeAliasType`. The lazy evaluation pattern
+(`ta_value_compute` thunk) is reproduced as a Go function field that is called
+on first access and then replaced with a static value. `collectTypeParams`
+corresponds directly to the C `collect_type_params` recursive walker.
+
+## CPython 3.14 changes
+
+PEP 695 (type parameter syntax, `TypeAliasType`) shipped in 3.12. The file
+was created at that point by migrating the three `typing.py` classes to C.
+`TypeVar.__default__` and `evaluate_default()` (PEP 696 defaults for type
+parameters) were added in 3.13. `TypeVarTuple.__unpacked__` (the `*Ts` view)
+and its `__iter__` were also added in 3.13. The 3.14 additions are minor:
+`__typing_subst__` is now a slot on the type object rather than an attribute
+lookup, speeding up `collect_type_params` traversal.

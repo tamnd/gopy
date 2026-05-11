@@ -1,0 +1,98 @@
+---
+title: Include/internal/pycore_global_objects.h
+description: Interpreter-global singleton objects cache including small ints, latin-1 strings, and immortal singletons.
+cpython_path: Include/internal/pycore_global_objects.h
+cpython_version: "3.14"
+lines: 200
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Include/internal/pycore_global_objects.h`
+
+<CpyLink path="Include/internal/pycore_global_objects.h" />
+
+<overview>
+This header declares the `_PyRuntimeState.global_objects` struct, which holds every interpreter-global singleton object that CPython pre-allocates at startup. Because these objects are immortal (refcount pinned at a sentinel value), no allocation or deallocation ever touches them at runtime. The finalisation companion is `Include/internal/pycore_global_objects_fini.h`, which declares `_Py_global_objects_fini`.
+</overview>
+
+## Map
+
+| Region | Contents |
+|---|---|
+| Small int cache | 262 pre-allocated `PyLongObject` instances, covering the range -5 to 256 inclusive |
+| Latin-1 strings | 256 single-character `PyUnicodeObject` instances, one per code point 0-255 |
+| Empty singletons | `empty_tuple`, `empty_bytes`, `empty_frozenset` |
+| Boolean objects | `_Py_FalseStruct`, `_Py_TrueStruct` |
+| Singleton constants | `_Py_NoneStruct`, `_Py_NotImplementedStruct`, `_Py_EllipsisObject` |
+
+All members live inside `_PyRuntimeState`, which is a single process-wide global. Interpreter-local state (`PyInterpreterState`) does not duplicate these; every interpreter shares the same cache via the runtime pointer.
+
+## Reading
+
+### Small int cache layout
+
+The small int cache is a flat C array embedded directly in the struct:
+
+```c
+// Include/internal/pycore_global_objects.h
+struct _Py_global_objects {
+    struct {
+        /* Small integers [-5, 256] */
+        PyLongObject small_ints[_PY_NSMALLNEGINTS + _PY_NSMALLPOSINTS];
+        /* ... */
+    } singletons;
+};
+```
+
+`_PY_NSMALLNEGINTS` is 5 and `_PY_NSMALLPOSINTS` is 257, giving 262 entries. The index for integer `n` is `n + _PY_NSMALLNEGINTS`. CPython's `_PyLong_GetSmallInt_impl` in `Objects/longobject.c` uses this index directly, returning a borrowed pointer with no allocation.
+
+### Immortality and the refcount sentinel
+
+Every object in this struct is marked immortal during `_PyRuntime_Initialize`. On a 64-bit GIL build, immortal objects carry `ob_refcnt == _Py_IMMORTAL_REFCNT` (a large fixed constant). Any `Py_INCREF` or `Py_DECREF` call that detects this sentinel becomes a no-op:
+
+```c
+// Include/object.h (simplified)
+static inline void _Py_INCREF(PyObject *op) {
+    if (_Py_IsImmortal(op)) {
+        return;
+    }
+    op->ob_refcnt++;
+}
+```
+
+This means code anywhere in the interpreter can hold a reference to `Py_None` without ever calling `Py_INCREF`, and the object will never be freed. The `pycore_global_objects_fini.h` companion tears down only the non-immortal parts of the cache during interpreter shutdown.
+
+### Latin-1 string interning
+
+The 256 latin-1 entries are initialised in `Objects/unicodeobject.c:unicode_latin1`. After initialisation, `PyUnicode_DecodeLatin1` with a single-character input skips allocation entirely:
+
+```c
+// Objects/unicodeobject.c (simplified)
+PyObject *
+PyUnicode_DecodeLatin1(const char *s, Py_ssize_t size, const char *errors)
+{
+    if (size == 1) {
+        return get_latin1_char((unsigned char)s[0]);
+    }
+    /* ... */
+}
+```
+
+`get_latin1_char` returns a new reference to the pre-allocated object, incrementing its refcount (which is a no-op because the object is immortal).
+
+## gopy mirror
+
+gopy does not use reference counting, so there is no need for an immortality sentinel. The singletons are ordinary Go package-level variables:
+
+- `None`, `True`, `False`, `Ellipsis`, `NotImplemented` are declared in `objects/object.go` (or the relevant type file) as `var _ *...`.
+- The small int cache is a `[262]*Int` slice initialised in `objects/long.go`.
+- Latin-1 single-character strings are a `[256]*Str` array initialised in `objects/str.go`.
+- Empty tuple, bytes, and frozenset are single package-level `var` declarations.
+
+Go's garbage collector owns all of these; none of them will ever be collected as long as the package-level variables remain reachable.
+
+## CPython 3.14 changes
+
+CPython 3.14 moved several formerly per-interpreter caches (such as the interned string table) into `_PyRuntimeState` so that sub-interpreters share them, reducing memory overhead. The `global_objects` struct itself gained an `_is_initialized` guard field that `_Py_global_objects_fini` checks before running teardown, preventing double-free during embedding scenarios where the runtime is initialised and finalised more than once in the same process.

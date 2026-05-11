@@ -1,0 +1,98 @@
+---
+title: Include/cpython/dictobject.h
+description: CPython-private dict API exposing compact key-sharing, split-table layout, per-version tags, and dict watchers.
+cpython_path: Include/cpython/dictobject.h
+cpython_version: "3.14"
+lines: 130
+status: annotated
+ported_to: ""
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Include/cpython/dictobject.h`
+
+<CpyLink path="Include/cpython/dictobject.h" />
+
+CPython's dict implementation went through a major compaction redesign in 3.6. The public `dict` object is backed by a `PyDictKeysObject` that stores keys in insertion order, plus an optional `ma_values` array that separates values from keys when the dict is in "split" mode. The `ma_version_tag` field is a globally-monotonic counter that increments on every mutation, enabling cheap staleness checks without walking the hash table.
+
+The `_Py` prefixed symbols in this header are not part of the stable ABI and are only available to CPython internals and extension code that opts in via `Py_BUILD_CORE`. They cover fast-path lookups that skip the full `tp_getattro` dispatch, hash-known insertion helpers, and the watcher callback mechanism introduced in 3.12 for JIT-tier invalidation.
+
+Split tables are only used for type-instance `__dict__` attributes where all instances share the same key layout. Once the dict is modified in a way that diverges from the shared key object (for example by deleting a key present in the shared set), CPython "unsplits" it and falls back to a combined table. gopy tracks this distinction in `objects/dict.go` and `objects/dict_mutate.go`.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| 1-30 | `PyDictObject` | Concrete struct: `ma_version_tag`, `ma_used`, `ma_version_tag`, `ma_keys`, `ma_values` | `objects/dict.go Dict` |
+| 31-55 | `PyDictKeysObject` | Shared key storage: `dk_version`, `dk_size`, `dk_nentries`, hash table entries | `objects/dict.go DictKeys` |
+| 56-70 | `_PyDict_GetItemWithError` | Lookup that propagates `KeyError` (unlike `PyDict_GetItem`) | `objects/dict.go Get` |
+| 71-82 | `_PyDict_SetItem_KnownHash` | Insert when caller already has the hash value | `objects/dict_mutate.go SetKnownHash` |
+| 83-95 | `_PyDict_NewPresized` | Allocate a dict pre-sized to avoid early rehash | `objects/dict.go NewPresized` |
+| 96-112 | `PyDict_AddWatcher` / `PyDict_Watch` | Register a callback invoked on dict mutation (used by specialising adaptive interpreter) | `objects/dict.go AddWatcher` |
+| 113-130 | `_PyDictView_*` | Internal dict-view helpers for keys/values/items iteration | `objects/dict_iter.go` |
+
+## Reading
+
+### Struct layout (lines 1 to 55)
+
+<CpyLink path="Include/cpython/dictobject.h" lines="1-55" />
+
+The two structs at the top of the file are the foundation of every `dict` operation. `PyDictObject` carries `ma_version_tag` (a `uint64_t` bumped on every write), `ma_used` (live entry count), a pointer to `ma_keys`, and a pointer to `ma_values` which is `NULL` for combined tables and non-`NULL` for split tables.
+
+`PyDictKeysObject` stores the actual hash table. `dk_size` is always a power of two. `dk_nentries` counts used slots including deleted (dummy) entries. `dk_version` is a per-keys-object counter that the specialising interpreter uses to validate cached attribute lookups without touching the hash table at all.
+
+```c
+typedef struct {
+    PyObject ob_base;
+    Py_ssize_t ma_used;
+    uint64_t ma_version_tag;
+    PyDictKeysObject *ma_keys;
+    PyObject **ma_values; /* NULL for combined table */
+} PyDictObject;
+```
+
+### Fast-path lookup (lines 56 to 82)
+
+<CpyLink path="Include/cpython/dictobject.h" lines="56-82" />
+
+`_PyDict_GetItemWithError` is the correct internal replacement for `PyDict_GetItem`. The public function swallows `KeyError` and returns `NULL` for both "not found" and "error occurred". The underscore variant propagates errors properly, making it safe to use inside loops that must distinguish the two failure modes.
+
+`_PyDict_SetItem_KnownHash` skips the `PyObject_Hash` call when the hash is already available. This is a meaningful optimisation for inner loops that insert many keys derived from interned strings or type objects where the hash is cached on the object itself.
+
+```c
+PyAPI_FUNC(PyObject *) _PyDict_GetItemWithError(PyObject *mp, PyObject *key);
+PyAPI_FUNC(int) _PyDict_SetItem_KnownHash(PyObject *mp, PyObject *key,
+                                           PyObject *item, Py_hash_t hash);
+```
+
+### Dict watchers (lines 96 to 112)
+
+<CpyLink path="Include/cpython/dictobject.h" lines="96-112" />
+
+Watchers were added in CPython 3.12 to support the specialising adaptive interpreter. A watcher is a callback of type `PyDict_WatchCallback` that fires whenever a watched dict is mutated or cleared. `PyDict_AddWatcher` returns a small integer watcher ID (0-7). `PyDict_Watch` registers that ID against a specific dict instance.
+
+The JIT tier uses this to invalidate inline caches for attribute loads whenever the type's `__dict__` or the instance's `__dict__` changes. gopy mirrors this in `objects/dict.go` with a simple slice of callbacks per dict object rather than a bitmask, which is sufficient for the current tier of optimisation.
+
+```c
+typedef int (*PyDict_WatchCallback)(PyDict_WatchEvent event,
+                                    PyObject *dict,
+                                    PyObject *key,
+                                    PyObject *new_value);
+PyAPI_FUNC(int) PyDict_AddWatcher(PyDict_WatchCallback callback);
+PyAPI_FUNC(int) PyDict_Watch(int watcher_id, PyObject *dict);
+```
+
+### Dict-view internals (lines 113 to 130)
+
+<CpyLink path="Include/cpython/dictobject.h" lines="113-130" />
+
+The `_PyDictView_*` symbols expose iterator factories for the three standard views: `dict.keys()`, `dict.values()`, and `dict.items()`. These are thin wrappers that stash a reference to the underlying dict and a snapshot of `ma_version_tag` at creation time. If the tag changes during iteration the iterator raises `RuntimeError: dictionary changed size during iteration`.
+
+gopy implements the same snapshot-and-check logic in `objects/dict_iter.go`.
+
+## gopy mirror
+
+The primary mirror is `objects/dict.go`, which defines `Dict` (maps to `PyDictObject`), `DictKeys` (maps to `PyDictKeysObject`), and the version-tag field as a `uint64`. Split-table support lives alongside combined-table logic in the same file, with the `ma_values` equivalent represented as a `[]Object` slice that is `nil` for combined tables.
+
+Mutation helpers including `SetKnownHash` are in `objects/dict_mutate.go`. Iteration types are in `objects/dict_iter.go`. The watcher callback list is a `[]DictWatchCallback` field on each `Dict`; the bitmask encoding CPython uses is not replicated because gopy does not currently need the same cache-line compactness.

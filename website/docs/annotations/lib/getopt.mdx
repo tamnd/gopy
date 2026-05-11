@@ -1,0 +1,70 @@
+---
+title: Lib/getopt.py
+description: GNU-style command-line option parser returning a (opts, args) pair from an argument list.
+cpython_path: Lib/getopt.py
+cpython_version: "3.14"
+lines: 220
+status: annotated
+ported_to: ""
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Lib/getopt.py`
+
+<CpyLink path="Lib/getopt.py" />
+
+`getopt.py` is CPython's traditional command-line option parser, modelled directly on the POSIX `getopt(3)` C function and its GNU extension. It predates `optparse` and `argparse` and is retained for backward compatibility with scripts that rely on its simple two-tuple return convention. The public API is deliberately minimal: two parsing functions and one exception class.
+
+`getopt(args, shortopts, longopts=[])` processes `args` left-to-right. Short options are one character each; a trailing colon in `shortopts` means the option takes a required argument. Long options are full words; a trailing `=` in an entry means the option takes a required argument. Parsing stops at the first non-option argument. `gnu_getopt` relaxes that restriction by continuing to scan for options after non-option arguments, matching the GNU libc behaviour.
+
+`GetoptError` is raised for unrecognised options, ambiguous long-option prefixes, or missing required arguments. Its `.opt` attribute carries the offending option string so callers can report it precisely. The module is pure Python with no dependencies outside the standard library.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| 1-40 | module header | Docstring, `__all__`, imports | |
+| 41-60 | `GetoptError` | Exception with `.msg` and `.opt` attributes | |
+| 61-110 | `getopt` | POSIX-style parsing, stops at first non-option | |
+| 111-160 | `gnu_getopt` | GNU-style parsing, intermixes options and operands | |
+| 161-200 | `do_shorts` | Internal short-option scanner | |
+| 201-220 | `do_longs` | Internal long-option scanner with prefix matching | |
+
+## Reading
+
+### GetoptError (lines 41 to 60)
+
+`GetoptError` subclasses `Exception` and stores both a human-readable message and the raw option token that triggered it. The `.opt` attribute is the empty string when the error is not tied to a specific token, matching the interface documented since Python 2.
+
+```python
+class GetoptError(Exception):
+    opt = ''
+    msg = ''
+    def __init__(self, msg, opt=''):
+        self.msg = msg
+        self.opt = opt
+        Exception.__init__(self, msg, opt)
+    def __str__(self):
+        return self.msg
+```
+
+### getopt (lines 61 to 110)
+
+The function iterates `args` in a `while` loop rather than a `for` loop so that `do_shorts` and `do_longs` can consume the next element when they need an option argument. Parsing halts as soon as an element does not start with `-`, or when the sentinel `--` is encountered. The remaining unconsumed elements are appended verbatim to the returned `args` list.
+
+### gnu_getopt (lines 111 to 160)
+
+`gnu_getopt` differs from `getopt` in one respect: a non-option argument does not stop parsing. Instead it is collected into a separate list and processing continues with the next element. At the end the non-option arguments are appended to the tail of the returned list, preserving their relative order. Passing `+` as the first character of `shortopts` reverts to POSIX mode even inside `gnu_getopt`.
+
+### do_longs (lines 201 to 220)
+
+Long-option lookup performs prefix matching: if the supplied option uniquely identifies one entry in `longopts` it is accepted. If two or more entries share the prefix, `GetoptError` is raised with a message identifying the ambiguous token. Exact matches always win over prefix matches, so `--verbose` is unambiguous even when `--verbose-all` is also registered.
+
+### do_shorts (lines 161 to 200)
+
+Short options are read character by character from within a single argv element. If the option requires an argument, the remainder of the current element is used first; if the remainder is empty, the next element of `args` is consumed. This matches the behaviour of POSIX `getopt(3)` for bundled short options such as `-xvf`.
+
+## gopy mirror
+
+Not yet ported.

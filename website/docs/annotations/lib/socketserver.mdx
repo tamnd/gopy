@@ -1,0 +1,176 @@
+---
+title: Lib/socketserver.py
+description: Framework for TCP/UDP/Unix socket servers with optional forking or threading concurrency; provides BaseServer, TCPServer, UDPServer, and the Mixin/Handler hierarchy.
+cpython_path: Lib/socketserver.py
+cpython_version: "3.14"
+lines: 800
+status: annotated
+ported_to: (stdlib pending)
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Lib/socketserver.py`
+
+<CpyLink path="Lib/socketserver.py" />
+
+`socketserver` is a pure-Python server framework. It factors the
+server lifecycle (bind, listen, accept, dispatch, shutdown) away from the
+concurrency policy (serial, forking, threading) and the request handling
+logic.
+
+The class hierarchy has two axes. On the server axis: `BaseServer` holds
+the `serve_forever` loop and the `handle_request` dispatch; `TCPServer`
+and `UDPServer` add socket creation and `server_bind`/`server_activate`;
+`UnixStreamServer` and `UnixDatagramServer` are `AF_UNIX` specializations.
+On the handler axis: `BaseRequestHandler` defines the `setup`/`handle`/
+`finish` template; `StreamRequestHandler` wraps the connection in
+`makefile`-backed `rfile`/`wfile`; `DatagramRequestHandler` supplies a
+`BytesIO` buffer pair.
+
+The two axes are composed by mixing `ForkingMixIn` or `ThreadingMixIn`
+with any server class. The mixin overrides `process_request` so each
+accepted connection is dispatched to a new process or thread.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Lib/socketserver.py" lines="1-100">1-100</Cpy> | Module docstring, imports, `__all__` | Lists the public API; documents the four concrete server classes and the two mixins. | `(stdlib pending)` |
+| <Cpy path="Lib/socketserver.py" lines="100-250">100-250</Cpy> | `BaseServer` | `serve_forever` select loop, `handle_request`, `_handle_request_noblock`, `process_request`, `finish_request`, `shutdown`, `server_close`. | `(stdlib pending)` |
+| <Cpy path="Lib/socketserver.py" lines="250-420">250-420</Cpy> | `TCPServer` | `__init__` creates the socket and calls `server_bind`/`server_activate`; `get_request` calls `accept`; `allow_reuse_address`, `allow_reuse_port` flags; `server_close` closes the socket. | `(stdlib pending)` |
+| <Cpy path="Lib/socketserver.py" lines="420-560">420-560</Cpy> | `UDPServer` | Overrides `get_request` to use `recvfrom`; `socket_type = SOCK_DGRAM`; `server_activate` is a no-op (UDP has no `listen`). | `(stdlib pending)` |
+| <Cpy path="Lib/socketserver.py" lines="420-560">420-560</Cpy> | `UnixStreamServer`, `UnixDatagramServer` | Set `address_family = AF_UNIX`; otherwise inherit `TCPServer` and `UDPServer` respectively. | `(stdlib pending)` |
+| <Cpy path="Lib/socketserver.py" lines="560-660">560-660</Cpy> | `ForkingMixIn` | Overrides `process_request` to `fork()`; parent registers the child PID; `collect_children` reaps zombies via `waitpid`; `block_on_close` joins children on server shutdown. | `(stdlib pending)` |
+| <Cpy path="Lib/socketserver.py" lines="660-730">660-730</Cpy> | `ThreadingMixIn` | Overrides `process_request` to start a `Thread` targeting `process_request_thread`; `daemon_threads` flag controls daemonization; `block_on_close` joins all active threads on shutdown. | `(stdlib pending)` |
+| <Cpy path="Lib/socketserver.py" lines="730-800">730-800</Cpy> | `BaseRequestHandler`, `StreamRequestHandler`, `DatagramRequestHandler` | `BaseRequestHandler.__init__` calls `setup`, `handle`, `finish` in sequence; `StreamRequestHandler.setup` creates `rfile`/`wfile` via `socket.makefile`; `DatagramRequestHandler.setup` uses `BytesIO`. | `(stdlib pending)` |
+
+## Reading
+
+### `serve_forever` select loop (lines 100 to 250)
+
+<CpyLink path="Lib/socketserver.py" lines="100-250" />
+
+```python
+def serve_forever(self, poll_interval=0.5):
+    self.__is_shut_down.clear()
+    try:
+        with _ServerSelector() as selector:
+            selector.register(self, selectors.EVENT_READ)
+            while not self.__shutdown_request:
+                ready = selector.select(poll_interval)
+                # bpo-35017: shutdown() called during select(), exit immediately.
+                if self.__shutdown_request:
+                    break
+                if ready:
+                    self._handle_request_noblock()
+                self.service_actions()
+    finally:
+        self.__shutdown_request = False
+        self.__is_shut_down.set()
+```
+
+`serve_forever` uses `selectors.DefaultSelector` (aliased as
+`_ServerSelector`) to wait for the listening socket to become readable.
+The `poll_interval` cap (default 0.5 s) ensures the `__shutdown_request`
+flag is checked regularly even if no connection arrives. `shutdown()` sets
+the flag from another thread and then blocks on `__is_shut_down.wait()`.
+`service_actions()` is a no-op hook that subclasses can override for
+periodic maintenance (e.g., reaping forked children in `ForkingMixIn`).
+
+### `ThreadingMixIn.process_request_thread` (lines 660 to 730)
+
+<CpyLink path="Lib/socketserver.py" lines="660-730" />
+
+```python
+class ThreadingMixIn:
+    daemon_threads = False
+    block_on_close = True
+    _threads = None
+
+    def process_request_thread(self, request, client_address):
+        try:
+            self.finish_request(request, client_address)
+        except Exception:
+            self.handle_error(request, client_address)
+        finally:
+            self.shutdown_request(request)
+
+    def process_request(self, request, client_address):
+        t = threading.Thread(target=self.process_request_thread,
+                             args=(request, client_address))
+        t.daemon = self.daemon_threads
+        if self.block_on_close:
+            if self._threads is None:
+                with self._threads_lock:
+                    if self._threads is None:
+                        self._threads = []
+            self._threads.append(t)
+        t.start()
+
+    def server_close(self):
+        super().server_close()
+        if self.block_on_close:
+            if self._threads:
+                for thread in self._threads:
+                    thread.join()
+```
+
+`process_request` returns immediately after starting the thread so the
+main `serve_forever` loop can accept the next connection without delay.
+`process_request_thread` calls `finish_request` (which instantiates the
+handler) inside a `try`/`finally` that always calls `shutdown_request` to
+close the connection socket, regardless of whether the handler raised. The
+`block_on_close` flag controls whether `server_close` waits for all in-
+flight threads; setting it to `False` yields a "fire and forget" mode
+where the interpreter may exit before all handlers finish.
+
+### `StreamRequestHandler.setup` (lines 730 to 800)
+
+<CpyLink path="Lib/socketserver.py" lines="730-800" />
+
+```python
+class StreamRequestHandler(BaseRequestHandler):
+    rbufsize = -1
+    wbufsize = 0
+    timeout = None
+    disable_nagle_algorithm = False
+
+    def setup(self):
+        self.connection = self.request
+        if self.timeout is not None:
+            self.connection.settimeout(self.timeout)
+        if self.disable_nagle_algorithm:
+            self.connection.setsockopt(IPPROTO_TCP,
+                                       TCP_NODELAY, True)
+        self.rfile = self.connection.makefile('rb', self.rbufsize)
+        if self.wbufsize == 0:
+            self.wfile = _SocketWriter(self.connection)
+        else:
+            self.wfile = self.connection.makefile('wb', self.wbufsize)
+
+    def finish(self):
+        if not self.wfile.closed:
+            try:
+                self.wfile.flush()
+            except socket.error:
+                pass
+        self.wfile.close()
+        self.rfile.close()
+```
+
+`rbufsize=-1` (fully buffered) and `wbufsize=0` (unbuffered) reflect
+typical stream usage: reads benefit from buffering because application code
+usually reads line-by-line, while writes must reach the peer promptly.
+When `wbufsize=0`, the write side uses the internal `_SocketWriter` helper
+rather than `makefile` to avoid the `BufferedWriter`'s internal buffer
+entirely. `disable_nagle_algorithm` is for latency-sensitive protocols
+where small messages must not be coalesced by TCP.
+
+## gopy mirror
+
+`socketserver` depends only on `socket`, `selectors`, `os`, `sys`,
+`traceback`, `threading`, and `io`. None of those have unusual requirements.
+The forking path (`ForkingMixIn`) calls `os.fork()` and `os.waitpid()`,
+which are Unix-only. The threading path is portable and is the likely first
+target for a gopy port.

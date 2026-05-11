@@ -1,0 +1,95 @@
+---
+title: Modules/_tracemalloc.c
+description: C implementation of the memory allocation tracer that hooks into the Python allocator to record per-allocation tracebacks.
+cpython_path: Modules/_tracemalloc.c
+cpython_version: "3.14"
+lines: 1100
+status: annotated
+ported_to: ""
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Modules/_tracemalloc.c`
+
+<CpyLink path="Modules/_tracemalloc.c" />
+
+`_tracemalloc` is the C layer behind the standard-library `tracemalloc` module. Its core job is to intercept every call to the Python memory allocator and, when tracing is active, record a snapshot of the current call stack alongside the allocated pointer and size. The intercepted data is stored in a pair of `_Py_hashtable` instances: one maps raw pointer addresses to `traceback_t*` objects, and the other interns unique tracebacks so that identical stack frames are deduplicated across thousands of allocations.
+
+The module hooks into the allocator through `Py_tracemalloc_config`, a struct embedded in `pystate.h`. When `_tracemalloc_start` is called it installs wrapper functions over each domain (raw, mem, object) using `PyMem_GetAllocator` / `PyMem_SetAllocator`. The wrappers form the hot path: `_PyTraceMalloc_TraceAlloc` is called on every successful allocation and `_PyTraceMalloc_TraceFree` on every deallocation. Both must be fast because they fire on every object creation and destruction in the entire interpreter.
+
+The Python-facing API is minimal: `start(nframe)`, `stop()`, `get_traces()`, `get_traced_memory()`, `get_object_traceback(obj)`, `reset_peak()`, and a handful of statistics getters. Most of the bulk of the file is the internal machinery for building and interning `frame_t` / `traceback_t` structs, managing the hash tables under the GIL, and converting those structs back into Python `FrameSummary`-style tuples when `get_traces()` is called.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| 1-80 | includes, type defs (`frame_t`, `traceback_t`) | Core data structures for stack snapshots | |
+| 81-300 | traceback intern table, `traceback_get` | Capture and deduplicate call-stack records | |
+| 301-480 | `_PyTraceMalloc_TraceAlloc`, `_PyTraceMalloc_TraceFree` | Hot-path alloc/free interceptors | |
+| 481-650 | allocator domain wrappers, `tracemalloc_alloc` family | Wrap raw/mem/object domains | |
+| 651-820 | `_tracemalloc_start`, `_tracemalloc_stop` | Install and remove allocator hooks | |
+| 821-980 | `_tracemalloc_get_traces`, `_tracemalloc_get_object_traceback` | Convert internal tables to Python objects | |
+| 981-1100 | `_tracemalloc_get_traced_memory`, `reset_peak`, module init | Statistics, peak tracking, `PyInit__tracemalloc` | |
+
+## Reading
+
+### Data structures: `frame_t` and `traceback_t` (lines 1 to 80)
+
+<CpyLink path="Modules/_tracemalloc.c" lines="1-80" />
+
+The two key structs are `frame_t`, which holds a `(filename, lineno)` pair for one stack frame, and `traceback_t`, which is a fixed-length array of `frame_t` values plus a hash and a total size field. Tracebacks are heap-allocated with a flexible-array member so that the frame array sits in the same allocation. Both types are designed to be used as hash-table keys: `traceback_t` carries a precomputed hash so that lookup in the intern table never rehashes.
+
+```c
+typedef struct {
+    PyObject *filename;
+    int lineno;
+} frame_t;
+
+typedef struct traceback_t {
+    int nframe;
+    int total_nframe;
+    Py_uhash_t hash;
+    frame_t frames[1];  /* flexible */
+} traceback_t;
+```
+
+### Traceback interning (lines 81 to 300)
+
+<CpyLink path="Modules/_tracemalloc.c" lines="81-300" />
+
+`traceback_get` walks the current Python frame chain (via `PyThreadState_GetFrame`), builds a temporary `traceback_t` on the stack, and then looks it up in `tracemalloc_tracebacks`, a global `_Py_hashtable`. If no matching entry exists a permanent copy is allocated and inserted. The intern table uses pointer-equality on filenames after interning them through `tracemalloc_intern_filename`, which itself uses a separate hashtable to avoid creating duplicate string objects for the same file path.
+
+### Hot path: `TraceAlloc` and `TraceFree` (lines 301 to 480)
+
+<CpyLink path="Modules/_tracemalloc.c" lines="301-480" />
+
+`_PyTraceMalloc_TraceAlloc(ptr, size)` is called immediately after a successful allocator call. It captures the current traceback, then inserts a `(ptr -> trace_t{traceback, size})` entry into `tracemalloc_traces`. If an existing entry is found for the same pointer (realloc scenario) the old size is subtracted from running totals before the new entry overwrites it. `_PyTraceMalloc_TraceFree(ptr)` performs the symmetric lookup-and-remove, updating the `traced_memory` and `peak_traced_memory` counters.
+
+```c
+int _PyTraceMalloc_TraceAlloc(const void *ptr, size_t size) {
+    traceback_t *traceback = traceback_get(&tstate_local);
+    trace_t trace = {traceback, size};
+    /* upsert into tracemalloc_traces ... */
+    tracemalloc_traced_memory += size;
+    if (tracemalloc_traced_memory > tracemalloc_peak_traced_memory)
+        tracemalloc_peak_traced_memory = tracemalloc_traced_memory;
+    return 0;
+}
+```
+
+### Start and stop (lines 651 to 820)
+
+<CpyLink path="Modules/_tracemalloc.c" lines="651-820" />
+
+`_tracemalloc_start(nframe)` clamps the requested frame depth to `TRACEMALLOC_MAX_NFRAME`, allocates the two main hash tables if they do not already exist, sets `Py_tracemalloc_config.tracing = 1`, and then calls `tracemalloc_set_traceback_limit` followed by three calls to `PyMem_SetAllocator` to install the wrapper functions for all three allocator domains. `_tracemalloc_stop` reverses the process: it restores the original allocators, clears the tables, and sets the tracing flag back to zero.
+
+### `get_traces` and `get_object_traceback` (lines 821 to 980)
+
+<CpyLink path="Modules/_tracemalloc.c" lines="821-980" />
+
+`_tracemalloc_get_traces` iterates the `tracemalloc_traces` hashtable and, for each entry, builds a Python tuple of `((filename, lineno), ...)` frame tuples paired with the allocation size. The iteration holds the GIL throughout and produces a list that is returned to the caller. `_tracemalloc_get_object_traceback(obj)` takes a Python object, recovers its pointer via `PyObject_IsInstance` dispatch, and performs a direct hashtable lookup to return just the traceback for that one object without iterating the whole table.
+
+## gopy mirror
+
+Not yet ported.

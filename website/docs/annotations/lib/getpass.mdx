@@ -1,0 +1,128 @@
+---
+title: Lib/getpass.py
+description: Secure terminal password prompt that suppresses echo on Unix via termios and falls back to plain input on systems without terminal control.
+cpython_path: Lib/getpass.py
+cpython_version: "3.14"
+lines: 180
+status: annotated
+ported_to: ""
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Lib/getpass.py`
+
+<CpyLink path="Lib/getpass.py" />
+
+`getpass` provides two public functions for reading credentials without revealing them in the terminal. `getpass(prompt, stream)` disables terminal echo for the duration of the read and restores it afterward, even if an exception is raised. `getuser()` returns the current login name by probing the environment and, on Unix, falling back to the `pwd` database.
+
+On Unix-like systems the implementation reaches directly into the controlling terminal (`/dev/tty`) rather than relying on `sys.stdin`, so it works even when stdin has been redirected. The termios `ECHO` flag is cleared on entry and restored in a `finally` block. On Windows and other platforms that lack termios or `/dev/tty`, the module falls back to `input()` with a warning printed to the stream.
+
+The module is deliberately small. It has no classes, no configuration, and no state beyond the module-level `getpass` name (which is reassigned to `fallback_getpass` on non-Unix targets). The design reflects the Unix philosophy of doing one thing: read a secret from a human.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| 1-20 | imports, `__all__` | Module header | - |
+| 21-70 | `unix_getpass` | Echo-suppressed read via termios and `/dev/tty` | - |
+| 71-100 | `win_getpass` | Windows `msvcrt.getwch` loop | - |
+| 101-120 | `fallback_getpass` | Plain `input()` fallback with echo warning | - |
+| 121-140 | `getpass` assignment | Platform selection at import time | - |
+| 141-180 | `getuser` | Login name from env vars and `pwd` database | - |
+
+## Reading
+
+### unix_getpass (lines 21 to 70)
+
+<CpyLink path="Lib/getpass.py" lines="21-70" />
+
+`unix_getpass` opens `/dev/tty` directly so that stdin redirection does not interfere. It saves the current termios attributes with `tcgetattr`, clears the `ECHO` flag, and writes the prompt to the stream. The read happens inside a `try` block so that `tcsetattr` in the `finally` branch always runs, restoring the original attributes regardless of whether the read succeeded or raised.
+
+After the read the function appends a newline to the stream to move the cursor past where the hidden input would have appeared.
+
+```python
+def unix_getpass(prompt="Password: ", stream=None):
+    fd = None
+    tty = None
+    try:
+        fd = os.open("/dev/tty", os.O_RDWR | os.O_NOCTTY)
+        tty = io.FileIO(fd, "r+")
+        ...
+        old = termios.tcgetattr(fd)
+        new = old[:]
+        new[3] &= ~termios.ECHO
+        termios.tcsetattr(fd, termios.TCSADRAIN, new)
+        ...
+    finally:
+        if old is not None:
+            termios.tcsetattr(fd, termios.TCSADRAIN, old)
+```
+
+### win_getpass (lines 71 to 100)
+
+<CpyLink path="Lib/getpass.py" lines="71-100" />
+
+The Windows path uses `msvcrt.getwch()` to read wide characters one at a time without echoing them. It handles backspace by popping the last character from an accumulator list and stops on carriage return or newline. This character-by-character loop is the closest Windows equivalent to the Unix `NOECHO` termios flag, since Windows has no general terminal attribute API exposed in the stdlib.
+
+```python
+def win_getpass(prompt="Password: ", stream=None):
+    for c in prompt:
+        msvcrt.putwch(c)
+    pw = []
+    while True:
+        c = msvcrt.getwch()
+        if c in ("\r", "\n"):
+            break
+        if c == "\003":
+            raise KeyboardInterrupt
+        if c == "\b":
+            pw.pop()
+        else:
+            pw.append(c)
+    return "".join(pw)
+```
+
+### fallback_getpass (lines 101 to 120)
+
+<CpyLink path="Lib/getpass.py" lines="101-120" />
+
+On platforms without `/dev/tty` or `msvcrt`, `fallback_getpass` delegates to the built-in `input()` after printing a warning to the stream. The warning informs the user that the password will be visible, which is the correct behavior when there is no way to suppress it. This path is also taken when `unix_getpass` cannot open `/dev/tty`, in which case it catches `OSError` and retries via the fallback.
+
+```python
+def fallback_getpass(prompt="Password: ", stream=None):
+    if stream is None:
+        stream = sys.stderr
+    print("Warning: Password input may be echoed.", file=stream)
+    return _raw_input(prompt, stream)
+```
+
+### getuser (lines 141 to 180)
+
+<CpyLink path="Lib/getpass.py" lines="141-180" />
+
+`getuser` tries the environment variables `LOGNAME`, `USER`, `LNAME`, and `USERNAME` in order. If none is set, it calls `pwd.getpwuid(os.getuid()).pw_name` on Unix. The `pwd` import is deferred inside the function so that the module loads cleanly on Windows where `pwd` does not exist.
+
+The function raises `ImportError` if neither the environment variables nor `pwd` can provide a name, signaling to callers that no reliable identity source is available.
+
+```python
+def getuser():
+    for name in ("LOGNAME", "USER", "LNAME", "USERNAME"):
+        user = os.environ.get(name)
+        if user:
+            return user
+    import pwd
+    return pwd.getpwuid(os.getuid()).pw_name
+```
+
+### Platform selection (lines 121 to 140)
+
+<CpyLink path="Lib/getpass.py" lines="121-140" />
+
+At module import time, a short block selects the right implementation and binds it to the name `getpass`. On Windows (`sys.platform == "win32"`) it assigns `win_getpass`. Otherwise it attempts to import `termios` and assigns `unix_getpass` on success. If the import fails (e.g., on some embedded platforms), `fallback_getpass` is used.
+
+This assignment pattern keeps the public API a plain callable name rather than a wrapper function, which avoids an extra stack frame on every call.
+
+## gopy mirror
+
+Not yet ported.

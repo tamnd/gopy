@@ -1,0 +1,116 @@
+---
+title: Lib/webbrowser.py
+description: Platform-aware browser controller registry with open/open_new/open_new_tab entry points.
+cpython_path: Lib/webbrowser.py
+cpython_version: "3.14"
+lines: 600
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Lib/webbrowser.py`
+
+<CpyLink path="Lib/webbrowser.py" />
+
+`webbrowser` provides a high-level interface for opening URLs in the user's preferred web browser. It maintains a registry of named browser controllers, selects one automatically based on the platform and the `BROWSER` environment variable, and exposes three top-level functions (`open`, `open_new`, `open_new_tab`) that delegate to whichever controller is active. The module is pure Python with no C extension dependency, which makes it straightforward to read in full.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| 1–30 | module header, imports | `subprocess`, `os`, `shlex`, `shutil` imports; `__all__` declaration | |
+| 31–70 | `Error`, `open`, `open_new`, `open_new_tab` | Public API entry points; lazy-initialize `_tryorder` and `_browsers` | |
+| 71–120 | `get`, `register`, `register_standard_browsers` | Registry management; `_tryorder` list and `_browsers` dict | |
+| 121–175 | `BaseBrowser` | Abstract base: `name`, `open`, `open_new`, `open_new_tab` | |
+| 176–220 | `GenericBrowser` | Runs a browser command via `subprocess`; handles `%s` substitution | |
+| 221–260 | `BackgroundBrowser` | Subclass of `GenericBrowser`; adds `&` / detached launch on POSIX | |
+| 261–310 | `Mozilla` | Mozilla family: tries `--new-tab` and `--new-window` flags | |
+| 311–350 | `Galeon`, `Grail`, `Opera` | Legacy POSIX browser subclasses; kept for compatibility | |
+| 351–400 | `Konqueror` | KDE browser; uses `kfmclient` as the open command | |
+| 401–440 | `MacOSX`, `MacOSXOSAScript` | macOS controllers; `MacOSXOSAScript` drives AppleScript via `osascript` | |
+| 441–490 | `WindowsDefault` | Windows controller; delegates to `os.startfile` or `ShellExecute` | |
+| 491–540 | `Edge` | Microsoft Edge subclass; passes `--new-tab` on new-tab requests | |
+| 541–580 | Platform registration block | Calls `register_standard_browsers`; populates `_tryorder` at import time | |
+| 581–600 | `__main__` block | Minimal CLI: `python -m webbrowser <url>` | |
+
+## Reading
+
+### Registry bootstrap (lines 71 to 120)
+
+<CpyLink path="Lib/webbrowser.py" lines="71-120" />
+
+The registry is two module-level variables: `_browsers` maps a lower-cased name to either a callable or an already-constructed controller instance, and `_tryorder` is an ordered list of names used when no explicit browser is requested.
+
+```python
+def register(name, klass, instance=None, *, preferred=False):
+    """Register a browser connector."""
+    if klass is None and instance is None:
+        raise ValueError("at least one of klass or instance must be provided")
+    if instance is None:
+        instance = klass()
+    if preferred or name not in _tryorder:
+        _tryorder.insert(0, name) if preferred else _tryorder.append(name)
+    _browsers[name.lower()] = instance
+```
+
+`get(using=None)` walks `_tryorder` and returns the first controller whose binary can be found on `PATH`. If the `BROWSER` environment variable is set, its colon-separated entries are tried first, so user preference always wins over the platform defaults that `register_standard_browsers` adds.
+
+### GenericBrowser.open (lines 176 to 220)
+
+<CpyLink path="Lib/webbrowser.py" lines="176-220" />
+
+`GenericBrowser` is the workhorse for plain command-line browsers. Its `open` method builds an argument list by substituting `%s` with the URL, then calls `subprocess.call` (blocking) or `subprocess.Popen` (non-blocking depending on the subclass flag).
+
+```python
+def open(self, url, new=0, autoraise=True):
+    sys.audit("webbrowser.open", url)
+    cmdline = [self.name] + [arg.replace("%s", url)
+                              for arg in self.args]
+    try:
+        if sys.platform[:3] == 'win':
+            p = subprocess.Popen(cmdline)
+        else:
+            p = subprocess.Popen(cmdline, close_fds=True)
+        return not p.wait()
+    except OSError:
+        return False
+```
+
+The `sys.audit` call at the top is the security hook added in Python 3.8. Any registered audit hook can veto the call by raising an exception.
+
+### MacOSXOSAScript (lines 401 to 440)
+
+<CpyLink path="Lib/webbrowser.py" lines="401-440" />
+
+On macOS the preferred controller drives the browser through AppleScript so that the OS handles focus, profile selection, and the active-window heuristic. The implementation shells out to `osascript -e`.
+
+```python
+class MacOSXOSAScript(BaseBrowser):
+    def open(self, url, new=0, autoraise=True):
+        if self._name == 'default':
+            script = f'open location "{url}"'
+        else:
+            script = f'''
+                tell application "{self._name}"
+                    activate
+                    open location "{url}"
+                end tell
+            '''
+        osapipe = os.popen("osascript", "w")
+        if osapipe is None:
+            return False
+        osapipe.write(script)
+        rc = osapipe.close()
+        return not rc
+```
+
+The `new` parameter is ignored here because AppleScript's `open location` always lets the browser decide whether to reuse an existing window.
+
+## gopy mirror
+
+`webbrowser` has not been ported to gopy. The module is pure Python and has no numeric-heavy logic, so the most pragmatic path when it is needed is to ship the CPython source verbatim under `stdlib/webbrowser.py` and let the gopy interpreter execute it. The OS-specific controller classes (`MacOSXOSAScript`, `WindowsDefault`) rely on platform APIs that are not yet exposed in gopy's `os` and `subprocess` stubs, so those paths will fall back to `GenericBrowser` until the stubs are filled in.
+
+## CPython 3.14 changes
+
+CPython 3.14 did not introduce breaking changes to `webbrowser`. The main movement in recent cycles was the addition of `Edge` as a registered browser on Windows (3.12) and the `sys.audit` hook on `open` (3.8). The `Grail` browser class, which was already dead code, remains present for historical compatibility. The `register_standard_browsers` refactor that landed in 3.13 extracted the platform-detection block into its own function, making the module-level code cleaner to read.

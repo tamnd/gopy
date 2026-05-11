@@ -1,0 +1,104 @@
+---
+title: Lib/filecmp.py
+description: Shallow and deep file comparison utilities with result caching and recursive directory diffing.
+cpython_path: Lib/filecmp.py
+cpython_version: "3.14"
+lines: 320
+status: annotated
+ported_to: ""
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Lib/filecmp.py`
+
+<CpyLink path="Lib/filecmp.py" />
+
+`filecmp.py` provides two levels of file comparison. The `cmp()` function compares a single pair of files, and `cmpfiles()` compares matching names across two directories, partitioning them into match, mismatch, and error lists. Both functions share a module-level `_cache` dictionary that memoises results by `(f1, f2, shallow, s1, s2)` key, avoiding redundant I/O on repeated calls.
+
+The `dircmp` class builds on those primitives to produce a full structural diff of two directory trees. It populates attributes lazily using `__getattr__` backed by a `methodmap` dispatch table, so expensive comparisons (recursive subdirectory walks, byte-level content checks) are only performed when the corresponding attribute is first accessed. The three `report*` methods print a human-readable summary to stdout.
+
+Shallow comparison (the default for `cmp()`) uses only `os.stat()` metadata: size and modification time. Deep comparison re-reads file content in chunks when the metadata is identical but equality is still uncertain. The caching layer stores the result as `1` (equal) or `0` (not equal) alongside the stat signatures, so a subsequent call with changed mtime correctly bypasses the cache.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| 1-30 | module header, `_cache` | Imports, cache dict, `BUFSIZE` constant | |
+| 31-80 | `cmp()` | Single-pair comparison with cache lookup and update | |
+| 81-120 | `_do_cmp()` | Chunk-by-chunk byte comparison used by `cmp()` for deep mode | |
+| 121-160 | `cmpfiles()` | Partition a list of names into match/mismatch/error lists | |
+| 161-260 | `dircmp` class | Lazy directory-diff object with `methodmap` dispatch | |
+| 261-295 | `dircmp` report methods | `report`, `report_partial_closure`, `report_full_closure` | |
+| 296-320 | `demo()`, module footer | CLI demo and `__all__` declaration | |
+
+## Reading
+
+### Cache design and `cmp()` (lines 31 to 80)
+
+<CpyLink path="Lib/filecmp.py" lines="31-80" />
+
+`cmp()` calls `os.stat()` on both files first, building a result key from the two stat objects and the `shallow` flag. A cache hit returns immediately. On a miss, shallow mode accepts stat-equal files as identical; only deep mode calls `_do_cmp()`. The result is stored before returning so subsequent calls with unchanged files are free.
+
+```python
+def cmp(f1, f2, shallow=True):
+    s1 = _sig(os.stat(f1))
+    s2 = _sig(os.stat(f2))
+    outcome = _cache.get((f1, f2, s1, s2))
+    if outcome is None:
+        outcome = _do_cmp(f1, f2) if not shallow or s1 != s2 else (s1 == s2)
+        _cache[f1, f2, s1, s2] = outcome
+    return outcome
+```
+
+### `cmpfiles()` partitioning (lines 121 to 160)
+
+<CpyLink path="Lib/filecmp.py" lines="121-160" />
+
+`cmpfiles()` iterates over `common`, calling `cmp()` for each name resolved under directories `a` and `b`. Names that raise `OSError` (missing file, permission error) land in `errors`; otherwise the result of `cmp()` routes the name into `match` or `mismatch`. The return value is always a three-tuple of lists, which `dircmp` stores as `same_files`, `diff_files`, and `funny_files`.
+
+```python
+def cmpfiles(a, b, common, shallow=True):
+    res = ([], [], [])
+    for x in common:
+        ax, bx = os.path.join(a, x), os.path.join(b, x)
+        try:
+            res[not cmp(ax, bx, shallow)].append(x)
+        except OSError:
+            res[2].append(x)
+    return res
+```
+
+### `dircmp` lazy attribute dispatch (lines 161 to 260)
+
+<CpyLink path="Lib/filecmp.py" lines="161-260" />
+
+`dircmp.__init__` stores `left`, `right`, and comparison options, but computes nothing. `__getattr__` looks the attribute name up in `methodmap`, calls the corresponding bound method, and caches the result as an instance attribute so `__getattr__` is not triggered a second time. The ordering of methods in `methodmap` encodes data dependencies: `phase0` (directory listings) must run before `phase1` (intersection and difference), which must run before `phase2` (file-level cmp).
+
+```python
+methodmap = dict(
+    subdirs=phase4,
+    same_files=phase3, diff_files=phase3, funny_files=phase3,
+    common_dirs=phase2, common_files=phase2, common_funny=phase2,
+    common=phase1, left_only=phase1, right_only=phase1,
+    left_list=phase0, right_list=phase0,
+)
+```
+
+### Report methods (lines 261 to 295)
+
+<CpyLink path="Lib/filecmp.py" lines="261-295" />
+
+`report()` prints one-line summaries for the immediate directory pair. `report_partial_closure()` extends this to immediate subdirectories only. `report_full_closure()` recurses through the entire `subdirs` tree. All three write to `sys.stdout` and rely on lazy attribute access, so they trigger only as much comparison work as needed.
+
+```python
+def report_full_closure(self):
+    self.report()
+    for sd in self.subdirs.values():
+        print()
+        sd.report_full_closure()
+```
+
+## gopy mirror
+
+Not yet ported.

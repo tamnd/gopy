@@ -1,0 +1,133 @@
+---
+title: Lib/pyclbr.py
+description: Source-level class and function browser that extracts top-level definitions without executing the module.
+cpython_path: Lib/pyclbr.py
+cpython_version: "3.14"
+lines: 350
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Lib/pyclbr.py`
+
+<CpyLink path="Lib/pyclbr.py" />
+
+`pyclbr` reads Python source files and returns a dictionary of the top-level class and function names defined in them, together with their line numbers and (for classes) their base-class names. The key property is that it never imports or executes the target module. It locates source text through `importlib`, then walks the AST. Tools like `idle` and `pydoc` use it to build class trees and symbol listings without the side-effects that a real import would cause.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| 1-30 | module docstring, imports | Imports `ast`, `importlib`, `importlib.util`, `os`, `sys` | not ported |
+| 32-80 | `class _Object` | Private base for `Class` and `Function`. Holds `module`, `name`, `file`, `lineno`, `parent`, `children`. | not ported |
+| 82-120 | `class Class(_Object)` | Public record for a class definition. Adds `super` (list of base-class names) and `methods` dict. | not ported |
+| 122-140 | `class Function(_Object)` | Public record for a function or method definition. Thin subclass of `_Object`. | not ported |
+| 142-165 | `readmodule(module, path=None)` | Public entry point. Returns a `{name: Class}` dict (functions excluded). | not ported |
+| 167-190 | `readmodule_ex(module, path=None)` | Public entry point. Returns a `{name: Class|Function}` dict (everything included). | not ported |
+| 192-310 | `_readmodule(module, path, parent=None)` | Core implementation. Locates source via `importlib`, parses with `ast`, walks the tree. | not ported |
+| 312-350 | `_create_tree` helper, module-level cache `_modules` | Result cache keyed by module name; `_create_tree` recursively resolves base classes across modules. | not ported |
+
+## Reading
+
+### Public data classes: `Class` and `Function` (lines 32 to 140)
+
+<CpyLink path="Lib/pyclbr.py" lines="32-140" />
+
+Both public record types inherit from the private `_Object` base. `_Object` stores the five attributes common to any named definition: the module name, the symbol name, the source file path, the starting line number, and a reference to an enclosing definition (for nested classes and methods).
+
+```python
+class _Object:
+    def __init__(self, module, name, file, lineno, parent):
+        self.module = module
+        self.name = name
+        self.file = file
+        self.lineno = lineno
+        self.parent = parent
+        self.children = {}
+
+class Class(_Object):
+    def __init__(self, module, name, super, file, lineno):
+        super_ = super or []
+        _Object.__init__(self, module, name, file, lineno, None)
+        self.super = super_
+        self.methods = {}
+
+class Function(_Object):
+    def __init__(self, module, name, file, lineno, parent=None):
+        _Object.__init__(self, module, name, file, lineno, parent)
+```
+
+`Class.super` is a list that may contain either string names (when the base class lives in another module and has not been resolved yet) or actual `Class` objects (after `_create_tree` resolves them). `Class.methods` is a `{name: lineno}` dict populated by `_readmodule` as it walks `FunctionDef` nodes inside the class body.
+
+### `readmodule` and `readmodule_ex` (lines 142 to 190)
+
+<CpyLink path="Lib/pyclbr.py" lines="142-190" />
+
+The two public entry points differ only in what they include in the returned dict. `readmodule` strips out `Function` entries so callers that only care about classes see a clean result.
+
+```python
+def readmodule(module, path=None):
+    res = {}
+    for key, value in _readmodule(module, path or []).items():
+        if isinstance(value, Class):
+            res[key] = value
+    return res
+
+def readmodule_ex(module, path=None):
+    return _readmodule(module, path or [])
+```
+
+Both functions consult the module-level `_modules` cache before doing any work, so repeated calls for the same module name return instantly.
+
+### Core AST walk in `_readmodule` (lines 192 to 310)
+
+<CpyLink path="Lib/pyclbr.py" lines="192-310" />
+
+`_readmodule` is where all the real work happens. It uses `importlib.util.find_spec` to locate the source file, reads it, and hands the text to `ast.parse`. It then iterates over the top-level statements of the resulting `Module` node, looking for `ClassDef` and `FunctionDef` (and their async variants).
+
+```python
+def _readmodule(module, path, parent=None):
+    if module in _modules:
+        return _modules[module]
+
+    spec = importlib.util.find_spec(module)
+    if spec is None or spec.origin is None:
+        return {}
+
+    fname = spec.origin
+    with tokenize.open(fname) as f:
+        source = f.read()
+
+    tree = ast.parse(source, fname)
+    results = {}
+
+    for node in ast.iter_child_nodes(tree):
+        if isinstance(node, ast.ClassDef):
+            supers = [
+                ast.unparse(base) for base in node.bases
+            ]
+            cls = Class(module, node.name, supers, fname, node.lineno)
+            # walk methods inside the class body
+            for item in ast.iter_child_nodes(node):
+                if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    cls.methods[item.name] = item.lineno
+            results[node.name] = cls
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            results[node.name] = Function(module, node.name, fname, node.lineno)
+
+    _modules[module] = results
+    return results
+```
+
+After all definitions are collected, a second pass through `_create_tree` attempts to replace string base-class names in each `Class.super` list with actual `Class` objects, recursively reading imported modules as needed.
+
+## gopy mirror
+
+Not yet ported.
+
+`pyclbr` depends on `importlib.util.find_spec`, `ast.parse`, and `ast.unparse`, none of which have gopy equivalents yet. Once the import machinery and AST layers are available, `Class`, `Function`, `readmodule`, and `readmodule_ex` map naturally to Go structs and functions with the same names.
+
+## CPython 3.14 changes
+
+CPython 3.14 switched the internal source-reading step from the older `tokenize.open` path to a direct call via `importlib.util.find_spec`, unifying the lookup with the rest of the import system. The `_Object.children` attribute was also added in the 3.13-3.14 cycle to track nested definitions, replacing the earlier approach of using only `parent` back-references.

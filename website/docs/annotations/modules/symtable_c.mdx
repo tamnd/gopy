@@ -1,0 +1,91 @@
+---
+title: Modules/_symtable.c
+description: C extension module that exposes CPython's internal symbol table to Python as the `_symtable` module.
+cpython_path: Modules/_symtable.c
+cpython_version: "3.14"
+lines: 280
+status: annotated
+ported_to: ""
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Modules/_symtable.c`
+
+<CpyLink path="Modules/_symtable.c" />
+
+`_symtable.c` is the thin C layer that makes CPython's compiler symbol table visible to Python code. It defines a single extension type, `PySTEntry`, and a module-level function `symtable` that drives the full scope analysis pass over a parsed AST. The higher-level `Lib/symtable.py` wraps these primitives into a friendlier public API.
+
+Each `PySTEntry` object corresponds to one lexical scope: a module, class body, function, or comprehension. The entry carries the scope's name, a dictionary mapping identifier strings to flag integers, and a list of child entries for nested scopes. Consumers walk the tree to answer questions like "is `x` a free variable here?" or "does this function reference `__class__`?".
+
+The file is intentionally small. The heavy lifting lives in `Python/symtable.c`, which builds the `struct symtable` and populates `PySTEntry` nodes. This module just wraps those structs with Python getset descriptors so that `symtable.py` can inspect them without calling into C directly.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| 1-40 | module init, includes | Boilerplate and `PySTEntry_Type` forward declaration | |
+| 41-90 | `symtableentry_new` | Allocates a `PySTEntry` wrapper around an internal `PySTEntryObject` | |
+| 91-130 | `ste_get_type` | Getset: returns the integer scope type (function, class, module) | |
+| 131-170 | `ste_get_id`, `ste_get_name` | Getsets: id is the PyObject identity; name is the string scope name | |
+| 171-220 | `ste_get_symbols` | Getset: returns a copy of the symbols dict (name -> flag int) | |
+| 221-260 | `ste_get_children` | Getset: returns list of nested `PySTEntry` objects | |
+| 261-280 | `PyInit__symtable` | Module init: registers `PySTEntry` type and `symtable()` function | |
+
+## Reading
+
+### Module entry point and type registration (lines 1 to 40)
+
+<CpyLink path="Modules/_symtable.c" lines="1-40" />
+
+The file opens with standard CPython module boilerplate. `PySTEntry_Type` is declared but defined later. The `symtable` module method table holds a single entry, `symtable()`, which takes a source string and a `compile_mode` flag and returns the root `PySTEntry` for the parsed code.
+
+```c
+static PyMethodDef symtable_methods[] = {
+    {"symtable", symtable_symtable, METH_VARARGS, symtable_doc},
+    {NULL, NULL}
+};
+```
+
+### `symtableentry_new` (lines 41 to 90)
+
+<CpyLink path="Modules/_symtable.c" lines="41-90" />
+
+This function is the only constructor for `PySTEntry` objects. It receives a pointer to an internal `PySTEntryObject`, increments its reference count, and stores it in the wrapper. The wrapper does not copy any data: all reads go through the live internal struct, so the entry is only valid while the enclosing `struct symtable` is alive.
+
+```c
+static PyObject *
+symtableentry_new(PyTypeObject *type, PySTEntryObject *ste)
+{
+    PySTEntryObject *self = (PySTEntryObject *)type->tp_alloc(type, 0);
+    if (self == NULL) return NULL;
+    Py_INCREF(ste);
+    self->ste_table = ste->ste_table;
+    /* ... copy remaining fields ... */
+    return (PyObject *)self;
+}
+```
+
+### Getset descriptors (lines 91 to 260)
+
+<CpyLink path="Modules/_symtable.c" lines="91-260" />
+
+Five read-only getset descriptors expose the fields that `symtable.py` needs. `ste_get_symbols` returns a fresh `PyDict` copy so callers cannot mutate the compiler's internal table. `ste_get_children` builds a `PyList` of `PySTEntry` wrappers on each access, which keeps the C struct unexposed while still allowing recursive traversal.
+
+```c
+static PyObject *
+ste_get_symbols(PySTEntryObject *self, void *Py_UNUSED(ignored))
+{
+    return PyDict_Copy(self->ste_symbols);
+}
+```
+
+### Module initialization (lines 261 to 280)
+
+<CpyLink path="Modules/_symtable.c" lines="261-280" />
+
+`PyInit__symtable` follows the standard `PyModuleDef` pattern. It registers `PySTEntry_Type` under the name `symtable_entry`, adds the integer flag constants (`SCOPE_LOCAL`, `SCOPE_FREE`, etc.) to the module namespace, and returns the module object. The flag constants mirror those defined in `Include/symtable.h` so Python-level code can compare them symbolically.
+
+## gopy mirror
+
+Not yet ported.

@@ -1,0 +1,203 @@
+---
+title: Lib/textwrap.py
+description: Word-wrapping and whitespace normalization for plain text; provides TextWrapper and the wrap/fill/dedent/indent/shorten convenience functions.
+cpython_path: Lib/textwrap.py
+cpython_version: "3.14"
+lines: 500
+status: annotated
+ported_to: (stdlib pending)
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Lib/textwrap.py`
+
+<CpyLink path="Lib/textwrap.py" />
+
+`textwrap` is a pure-Python module with no C accelerator. Its central
+class is `TextWrapper`, which splits a paragraph of text into lines that
+fit within a specified column width. The wrapping algorithm uses a
+compiled regular expression to locate word boundaries and optional
+hyphenation points, then greedily packs words onto each line.
+
+The module also provides `dedent` (strips uniform leading whitespace from
+a block of lines) and `indent` (adds a prefix to every non-empty line),
+which are independent of `TextWrapper`. The `shorten` function truncates
+a paragraph to a single line of given width, inserting a configurable
+placeholder at the cut point.
+
+`TextWrapper` does not understand Unicode line-break opportunities beyond
+ASCII space and hyphen unless the caller sets `break_on_hyphens=False`.
+For CJK text or other scripts without ASCII spaces, callers must supply
+a custom `wordsep_re` or pre-tokenize the input.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Lib/textwrap.py" lines="1-100">1-100</Cpy> | `TextWrapper.__init__`, attribute defaults | Constructor accepts `width`, `initial_indent`, `subsequent_indent`, `expand_tabs`, `replace_whitespace`, `fix_sentence_endings`, `break_long_words`, `drop_whitespace`, `break_on_hyphens`, `tabsize`, `max_lines`, `placeholder`. | `(stdlib pending)` |
+| <Cpy path="Lib/textwrap.py" lines="100-250">100-250</Cpy> | `wordsep_simple_re`, `wordsep_re`, `_split_chunks`, `_split` | Two compiled regexes split text on whitespace and optional hyphen positions; `_split_chunks` calls `re.split` and filters empty strings; `_split` handles `break_on_hyphens`. | `(stdlib pending)` |
+| <Cpy path="Lib/textwrap.py" lines="250-400">250-400</Cpy> | `_wrap_chunks`, `_handle_long_word`, `wrap` | Greedy line packing: accumulate chunks until the line would exceed `width`, then start a new line; `_handle_long_word` breaks or truncates a single word that exceeds `width`. | `(stdlib pending)` |
+| <Cpy path="Lib/textwrap.py" lines="400-500">400-500</Cpy> | `fill`, `shorten`, `dedent`, `indent` | `fill` joins `wrap` output with newlines; `shorten` collapses whitespace then wraps to one line; `dedent` strips common leading whitespace; `indent` prepends a prefix to selected lines. | `(stdlib pending)` |
+
+## Reading
+
+### `wordsep_re` and `_split_chunks` (lines 100 to 250)
+
+<CpyLink path="Lib/textwrap.py" lines="100-250" />
+
+```python
+wordsep_re = re.compile(
+    r'(\s+|'                    # any whitespace
+    r'(?<=[\w\!\"\'\&\.\,\?])-{2,}(?=\w))'  # em-dash-like: two or more hyphens after word char
+    r'|'
+    r'(?<=\S)-(?=\S)|'          # hyphen between non-whitespace
+    r'\s+$)',                    # trailing whitespace
+    re.UNICODE)
+
+wordsep_simple_re = re.compile(r'(\s+)')
+
+def _split_chunks(self, text):
+    text = self._munge_whitespace(text)
+    return self._split(text)
+
+def _split(self, text):
+    chunks = self.wordsep_re.split(text)
+    chunks = [c for c in chunks if c]
+    return chunks
+```
+
+`wordsep_re` is used when `break_on_hyphens=True`. It splits on four
+kinds of positions: any whitespace run, two-or-more hyphens following a
+word character (treated as a breakable dash sequence), a single hyphen
+between two non-whitespace characters (a hyphenated compound), and
+trailing whitespace. The regex uses `re.split` which includes the matched
+delimiters as separate elements in the result, so both words and the spaces
+or hyphens between them appear as distinct chunks. This lets `_wrap_chunks`
+decide whether a separator chunk is retained or dropped independently of
+the adjacent word chunks.
+
+`wordsep_simple_re` is used when `break_on_hyphens=False`. It only splits
+on whitespace and never introduces breaks inside hyphenated words.
+
+`_munge_whitespace` (called first) optionally expands tabs to spaces and
+replaces all whitespace characters with a plain space, depending on
+`expand_tabs` and `replace_whitespace`.
+
+### `_wrap_chunks` greedy packing (lines 250 to 400)
+
+<CpyLink path="Lib/textwrap.py" lines="250-400" />
+
+```python
+def _wrap_chunks(self, chunks):
+    lines = []
+    if self.width <= 0:
+        raise ValueError("invalid width %r (must be > 0)" % self.width)
+
+    chunks.reverse()        # use as a stack (pop from end = front of text)
+    while chunks:
+        cur_line = []
+        cur_len = 0
+        if lines:
+            indent = self.subsequent_indent
+        else:
+            indent = self.initial_indent
+        width = self.width - len(indent)
+
+        if self.drop_whitespace and chunks[-1].strip() == '' and lines:
+            del chunks[-1]
+
+        while chunks:
+            l = len(chunks[-1])
+            if cur_len + l <= width:
+                cur_len += l
+                cur_line.append(chunks.pop())
+            else:
+                break
+
+        if chunks and len(chunks[-1]) == width and cur_len == 0:
+            # A single word fills the entire line exactly.
+            cur_line.append(chunks.pop())
+
+        if (self.drop_whitespace and
+                cur_line and cur_line[-1].strip() == ''):
+            del cur_line[-1]
+            cur_len -= l
+
+        if cur_line:
+            if (self.max_lines is None or
+                    len(lines) + 1 < self.max_lines or
+                    (not chunks or
+                     self.drop_whitespace and
+                     len(chunks) == 1 and
+                     not chunks[0].strip()) and cur_len <= width):
+                lines.append(indent + ''.join(cur_line))
+            else:
+                # Last line; add placeholder if needed
+                ...
+    return lines
+```
+
+The chunks list is reversed to use Python's `list.pop()` (O(1) from the
+end) as a stack. Each outer iteration builds one output line. The inner
+`while` loop pops chunks from the front of the text as long as they fit
+within the remaining line width. When the next chunk would overflow, the
+inner loop exits and the accumulated `cur_line` is joined with `indent`
+and appended to `lines`.
+
+`drop_whitespace=True` (the default) skips whitespace-only chunks at the
+start of each new line and strips trailing whitespace from the end of each
+line. `_handle_long_word` is called when a single chunk exceeds `width`:
+if `break_long_words=True`, it slices the chunk at the column boundary and
+pushes the remainder back onto the stack; if `break_long_words=False`, the
+entire over-length word is placed on its own line.
+
+### `dedent` common whitespace stripping (lines 400 to 500)
+
+<CpyLink path="Lib/textwrap.py" lines="400-500" />
+
+```python
+def dedent(text):
+    _whitespace_only_re = re.compile('^[ \t]+$', re.MULTILINE)
+    _leading_whitespace_re = re.compile('(^[ \t]*)(?:[^ \t\n])',
+                                        re.MULTILINE)
+    text = _whitespace_only_re.sub('', text)
+    indents = _leading_whitespace_re.findall(text)
+    if not indents:
+        return text
+    margin = indents[0]
+    for indent in indents[1:]:
+        # Find common prefix
+        for i, (x, y) in enumerate(zip(margin, indent)):
+            if x != y:
+                margin = margin[:i]
+                break
+        else:
+            if len(indent) < len(margin):
+                margin = indent
+    if margin:
+        text = re.sub(r'(?m)^' + margin, '', text)
+    return text
+```
+
+`dedent` first replaces whitespace-only lines with empty lines (so they do
+not influence the common-prefix computation). It then finds the leading
+whitespace of every non-empty line and computes the longest common prefix
+by walking character by character through each indent against the current
+`margin`. The `zip` loop exits as soon as characters diverge; the `else`
+clause of the `for` runs only when the entire shorter string matched and
+picks the shorter of the two as the new margin. Finally, `re.sub` strips
+the margin from the start of every line. The common prefix must be
+consistent whitespace (spaces or tabs), so mixing tabs and spaces on
+different lines can produce a zero-length margin and leave the text
+unchanged.
+
+## gopy mirror
+
+`textwrap` has no OS or C dependencies. The gopy port will compile
+`wordsep_re` and `wordsep_simple_re` using Go's `regexp` package (RE2
+syntax), implement `_wrap_chunks` as a direct translation using a
+`[]string` slice as a stack, and expose `wrap`, `fill`, `dedent`,
+`indent`, and `shorten` as module-level functions. The `TextWrapper`
+struct will carry the same fields as the Python class, initialized to
+the same defaults.

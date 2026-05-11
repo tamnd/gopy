@@ -1,11 +1,10 @@
 ---
 title: Objects/memoryobject.c
-description: memoryview wraps a Py_buffer from PEP 3118, providing n-dimensional typed access, cast, and release tracking.
+description: CPython memoryview object implementing the buffer protocol over arbitrary memory regions.
 cpython_path: Objects/memoryobject.c
 cpython_version: "3.14"
-lines: 2400
+lines: 2200
 status: annotated
-ported_to: objects/memory.go
 ---
 
 import {Cpy, CpyLink} from '@site/src/components/Cpy';
@@ -14,167 +13,110 @@ import {Cpy, CpyLink} from '@site/src/components/Cpy';
 
 <CpyLink path="Objects/memoryobject.c" />
 
-`memoryview` exposes a shared-memory window over any object that implements the
-buffer protocol (PEP 3118). The underlying descriptor is a `Py_buffer` struct
-carrying `buf` (the raw pointer), `len`, `itemsize`, `format` (a struct-module
-format string), `ndim`, `shape[]`, `strides[]`, and `suboffsets[]`. A
-`PyMemoryViewObject` bundles that descriptor with an `exports` counter and a
-reference to the exporting object.
-
-The `exports` counter is the key safety mechanism: while any live `memoryview`
-holds a reference, the underlying object may not reallocate its buffer. Each
-call to `PyMemoryView_FromObject` increments the exporting object's export count
-(via `PyObject_GetBuffer`); `memoryview_release` decrements it via
-`PyBuffer_Release`. A second `memoryview` taken from an existing `memoryview`
-bumps the same chain so the root object is protected transitively.
-
-Indexing dispatches on dimensionality. For a 1-D contiguous buffer `memory_getitem`
-returns a scalar Python object by unpacking the raw bytes using the format
-string. For n-D buffers it recurses, returning a sub-view at each step.
-`memory_cast` reinterprets the buffer as a different element type (e.g. a
-`bytearray` viewed as `unsigned short`), checking that the total byte count
-divides evenly.
-
-`PyMemoryView_IsContiguous` tests whether the strides match a C-order or
-Fortran-order traversal so callers can safely use `memcpy` on the backing
-buffer.
+`memoryobject.c` implements CPython's `memoryview` type. A `PyMemoryViewObject` wraps a `Py_buffer` descriptor (pointer to the underlying memory, format string, shape, strides, suboffsets, and an export count). The buffer protocol lets numpy arrays, `bytes`, `bytearray`, and `ctypes` objects share memory without copying. `memoryview` is the user-visible handle into that shared region.
 
 ## Map
 
 | Lines | Symbol | Role | gopy |
 | ----- | ------ | ---- | ---- |
-| <Cpy path="Objects/memoryobject.c" lines="1-150">1-150</Cpy> | `PyMemoryViewObject`, `Py_buffer` layout | Object struct; `exports` counter; shape/strides/suboffsets arrays. | `objects/memory.go` |
-| <Cpy path="Objects/memoryobject.c" lines="150-400">150-400</Cpy> | `PyMemoryView_FromObject`, `PyMemoryView_FromBuffer` | Calls `PyObject_GetBuffer`; wraps a `Py_buffer` in a new `PyMemoryViewObject`. | `objects/memory.go:NewMemoryView` |
-| <Cpy path="Objects/memoryobject.c" lines="400-600">400-600</Cpy> | `PyMemoryView_FromMemory` | Creates a view from a raw C pointer with no Python backing object. | `objects/memory.go:MemoryViewFromMemory` |
-| <Cpy path="Objects/memoryobject.c" lines="600-900">600-900</Cpy> | `memory_getitem`, `memory_setitem` | Index dispatch: scalar unpack for 1-D contiguous; recursive sub-view for n-D. | `objects/memory.go:memoryGetItem` |
-| <Cpy path="Objects/memoryobject.c" lines="900-1200">900-1200</Cpy> | `memory_cast` | Reinterpret buffer as a different format; validates total-byte divisibility. | `objects/memory.go:memoryCast` |
-| <Cpy path="Objects/memoryobject.c" lines="1200-1500">1200-1500</Cpy> | `PyMemoryView_IsContiguous` | Tests C-order and Fortran-order stride patterns; enables safe `memcpy`. | `objects/memory.go:IsContiguous` |
-| <Cpy path="Objects/memoryobject.c" lines="1500-1900">1500-1900</Cpy> | `memory_subscript`, `memory_ass_subscript`, `memory_richcompare` | Slice subscript, slice assignment, and byte-wise equality comparison. | `objects/memory.go` |
-| <Cpy path="Objects/memoryobject.c" lines="1900-2200">1900-2200</Cpy> | `memoryview_release`, `memory_dealloc` | Release decrements export count via `PyBuffer_Release`; dealloc frees shape arrays. | `objects/memory.go:memoryRelease` |
-| <Cpy path="Objects/memoryobject.c" lines="2200-2400">2200-2400</Cpy> | `memory_repr`, method table, `PyMemoryView_Type` | Repr shows format, shape, and address; method table; type object. | `objects/memory.go:MemoryViewType` |
+| 1-60 | includes, `MV_C_CONTIGUOUS` macros | Header and contiguity flag helpers | not ported |
+| 61-180 | `PyBUF_*` flag validation, `init_strides_from_shape` | Buffer layout initialisation | not ported |
+| 181-320 | `memory_alloc`, `mbuf_alloc`, `mbuf_add_view` | Allocation of the managed-buffer layer | not ported |
+| 321-480 | `PyMemoryView_FromObject`, `PyMemoryView_FromBuffer` | Public constructors; call `bf_getbuffer` on the target | not ported |
+| 481-620 | `memory_getbuffer`, `memory_releasebuffer` | Implement `bf_getbuffer`/`bf_releasebuffer` for nested views | not ported |
+| 621-760 | `copy_single`, `copy_rec` | Element-wise copy respecting strides and suboffsets | not ported |
+| 761-900 | `pack_single`, `unpack_single` | Read/write one typed element using the format code | not ported |
+| 901-1040 | `memoryview_getitem`, `memoryview_setitem` | `sq_item`/`sq_ass_item` slots; index into a flat or multi-dimensional view | not ported |
+| 1041-1200 | `memoryview_subscript`, `memoryview_ass_subscript` | Slice and multi-index support via `mp_subscript` | not ported |
+| 1201-1380 | `memory_richcompare` | Element-by-element equality comparison between two views | not ported |
+| 1381-1520 | `memory_hash` | Compute hash over the contiguous byte representation | not ported |
+| 1521-1660 | `memory_tobytes`, `memory_tolist`, `memory_toreadonly` | Conversion methods | not ported |
+| 1661-1800 | `memory_cast` | Reinterpret the buffer under a new format/shape | not ported |
+| 1801-1940 | `memory_repr`, `memory_getattro` | Repr and attribute access for shape/strides/format properties | not ported |
+| 1941-2060 | `memory_enter`, `memory_exit` | Context manager protocol; `__exit__` calls `memory_release` | not ported |
+| 2061-2200 | `PyMemoryView_Type` definition | Full `PyTypeObject` with buffer, sequence, and mapping slots | not ported |
 
 ## Reading
 
-### Buffer layout (lines 1 to 150)
+### Buffer acquisition and the managed-buffer layer (lines 181 to 480)
 
-<CpyLink path="Objects/memoryobject.c" lines="1-150" />
+<CpyLink path="Objects/memoryobject.c" lines="181-480" />
 
-The `Py_buffer` struct is defined in `Include/cpython/object.h`. A
-`PyMemoryViewObject` embeds one and adds bookkeeping fields:
-
-```c
-typedef struct {
-    PyObject_HEAD
-    int      flags;           /* MV_C_CONTIGUOUS | MV_F_CONTIGUOUS | ... */
-    Py_ssize_t exports;       /* Number of child memoryviews keeping us alive */
-    Py_buffer view;           /* buf, len, itemsize, format, ndim, shape, ... */
-    PyObject *mbuf;           /* master buffer object (may be self) */
-    Py_hash_t hash;           /* cached hash; -1 if not yet computed */
-} PyMemoryViewObject;
-```
-
-`shape`, `strides`, and `suboffsets` within `view` point into a variable-length
-array appended after the struct, allocated as one block. When `ndim == 0` all
-three are `NULL`. When `ndim == 1` with contiguous storage only `shape` is
-non-NULL.
-
-### `PyMemoryView_FromObject` (lines 150 to 400)
-
-<CpyLink path="Objects/memoryobject.c" lines="150-400" />
-
-The public constructor calls `PyObject_GetBuffer` on the exporting object, which
-fills a `Py_buffer` and increments the object's internal export counter. If the
-source is itself a `memoryview`, CPython avoids double-wrapping by sharing the
-master buffer:
+CPython introduces a two-level structure to handle nested views safely. A "managed buffer" (`_PyManagedBufferObject`) is an internal reference-counted wrapper that holds the root `Py_buffer` and an export count. Every `memoryview` that points into the same root object shares one managed buffer:
 
 ```c
-PyObject *
-PyMemoryView_FromObject(PyObject *v)
+static _PyManagedBufferObject *
+mbuf_alloc(void)
 {
-    if (PyMemoryView_Check(v)) {
-        /* Share the master buffer; bump exports on the root */
-        return PyMemoryView_FromBuffer(
-            ((PyMemoryViewObject *)v)->view);
-    }
-    Py_buffer view;
-    if (PyObject_GetBuffer(v, &view, PyBUF_FULL_RO) < 0)
+    _PyManagedBufferObject *mbuf;
+    mbuf = (_PyManagedBufferObject *)
+        PyObject_GC_New(_PyManagedBufferObject, &_PyManagedBuffer_Type);
+    if (mbuf == NULL)
         return NULL;
-    PyObject *mv = (PyObject *)memory_alloc(view.ndim);
-    if (mv == NULL) {
-        PyBuffer_Release(&view);
-        return NULL;
-    }
-    ((PyMemoryViewObject *)mv)->view = view;
-    return mv;
+    mbuf->flags = 0;
+    mbuf->exports = 0;
+    memset(&mbuf->master, 0, sizeof(Py_buffer));
+    mbuf->master.obj = NULL;
+    return mbuf;
 }
 ```
 
-`memory_alloc` computes the size of the trailing shape/strides/suboffsets
-arrays from `ndim` and calls `PyObject_GC_NewVar`.
+`PyMemoryView_FromObject` calls `bf_getbuffer` on the source once and stores the result in a new managed buffer. Slicing that view creates a second `PyMemoryViewObject` sharing the same managed buffer, so the underlying `bf_releasebuffer` is called exactly once when all views are released.
 
-### `memory_getitem` (lines 600 to 900)
+### Element access via format codes (lines 761 to 1040)
 
-<CpyLink path="Objects/memoryobject.c" lines="600-900" />
+<CpyLink path="Objects/memoryobject.c" lines="761-1040" />
 
-For a 1-D contiguous buffer, `memory_getitem` computes the byte offset, reads
-`itemsize` bytes, and unpacks them into a Python scalar using the format string:
+`pack_single` and `unpack_single` implement a mini interpreter over the buffer's format string. Each letter maps to a C type; for example `'d'` reads or writes a `double`, `'i'` a signed 32-bit integer. `memoryview_getitem` uses the stride array to compute the byte offset for a linear index and then delegates to `unpack_single`:
 
 ```c
 static PyObject *
-memory_getitem(PyMemoryViewObject *self, Py_ssize_t index)
+memoryview_getitem(PyMemoryViewObject *self, Py_ssize_t index)
 {
     Py_buffer *view = &self->view;
     char *ptr;
 
-    if (view->ndim == 0) {
-        PyErr_SetString(PyExc_TypeError,
-            "invalid indexing of 0-dim memory");
-        return NULL;
-    }
-    if (index < 0) index += view->shape[0];
-    if (index < 0 || index >= view->shape[0]) {
-        PyErr_SetString(PyExc_IndexError, "index out of bounds");
+    CHECK_RELEASED(self);
+    if (view->ndim != 1) {
+        PyErr_SetString(PyExc_NotImplementedError,
+            "multi-dimensional sub-views are not implemented");
         return NULL;
     }
     ptr = (char *)view->buf + view->strides[0] * index;
-    if (view->ndim == 1)
-        return unpack_single(self, ptr, view->format);
-    /* n-D: return a sub-view */
-    return memory_slice(self, index);
+    return unpack_single(self, ptr, view->format);
 }
 ```
 
-`unpack_single` dispatches on the format character (`'B'`, `'h'`, `'f'`, etc.)
-and constructs the appropriate Python int, float, or bytes object.
+Strides allow the view to describe non-contiguous memory such as a column slice of a 2-D array, without moving any data.
 
-### `memory_cast` (lines 900 to 1200)
+### `memory_cast` and format reinterpretation (lines 1661 to 1800)
 
-<CpyLink path="Objects/memoryobject.c" lines="900-1200" />
+<CpyLink path="Objects/memoryobject.c" lines="1661-1800" />
 
-`cast` reinterprets the raw byte buffer as a different element type. It rejects
-non-contiguous buffers and multidimensional targets, then checks that the total
-byte count is divisible by the new `itemsize`:
+`memoryview.cast(format)` is one of the more complex methods. It validates that the total byte length is divisible by the new element size, builds a fresh shape tuple, and returns a new `PyMemoryViewObject` pointing into the same managed buffer with a different format and strides:
 
 ```c
 static PyObject *
 memory_cast(PyMemoryViewObject *self, PyObject *args, PyObject *kwds)
 {
-    const char *format;
-    Py_ssize_t ndim = 1;
     ...
-    Py_ssize_t new_itemsize = get_native_fmtchar(&fmt, format);
-    if (new_itemsize < 0) { /* unsupported format */ ... }
-
-    Py_ssize_t total = self->view.len;
-    if (total % new_itemsize != 0) {
-        PyErr_SetString(PyExc_TypeError,
-            "memoryview: length is not a multiple of itemsize");
-        return NULL;
-    }
-    /* Build a new memoryview sharing the same backing buffer */
+    /* new view shares the same managed buffer */
+    mv = (PyMemoryViewObject *)
+        mbuf_add_incomplete_view(self->mbuf, NULL, ndim == 0 ? 1 : ndim);
+    if (mv == NULL)
+        goto error;
+    mv->view.format = PyBytes_AS_STRING(format_as_bytes);
+    mv->view.itemsize = itemsize;
     ...
 }
 ```
 
-The returned `memoryview` shares the same `mbuf` master so the underlying
-object remains exported for the lifetime of both views.
+Because the managed buffer's export count is incremented, the original source object stays alive as long as any view, regardless of format, references it.
+
+## gopy mirror
+
+`memoryobject.c` has no counterpart in gopy yet. A future port would live in `objects/memoryview.go`. The buffer protocol itself (the `bf_getbuffer` / `bf_releasebuffer` pair) would need to be expressed as a Go interface, likely `BufferProtocol`, that `bytes`, `bytearray`, and array objects implement. The managed-buffer two-level structure maps naturally to a Go struct with a reference count protected by a mutex.
+
+## CPython 3.14 changes
+
+CPython 3.14 added `memoryview.toreadonly()` as a stable API (the method existed in 3.12 but was not in the stable ABI). The `memory_cast` path gained stricter validation rejecting casts that would create views with suboffsets, closing a potential out-of-bounds access. The `Py_buffer.obj` ownership rules were clarified in the documentation but the C code itself is unchanged in structure.

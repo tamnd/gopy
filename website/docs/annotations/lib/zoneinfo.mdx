@@ -1,0 +1,102 @@
+---
+title: Lib/zoneinfo/__init__.py
+description: IANA timezone database access with cache-backed ZoneInfo construction and C-extension transition data.
+cpython_path: Lib/zoneinfo/__init__.py
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Lib/zoneinfo/__init__.py`
+
+<CpyLink path="Lib/zoneinfo/__init__.py" />
+
+`zoneinfo` is the standard library module for IANA timezone database access, introduced in Python 3.9 (PEP 615). The Python file in `Lib/zoneinfo/__init__.py` acts as the public interface: it exports `ZoneInfo`, `ZoneInfoNotFoundError`, `available_timezones`, and `reset_tzpath`. The heavy lifting (binary TZif parsing and UTC offset computation) is delegated to the C extension `_zoneinfo`. When the C extension is absent, a pure-Python fallback in `Lib/zoneinfo/_tzpath.py` and internal helpers take over. The result is that reading this file gives you the full API surface without needing to read C.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| 1–25 | module header, imports | Imports `_zoneinfo` (C ext) with pure-Python fallback path; `__all__` | |
+| 26–60 | `ZoneInfoNotFoundError` | Subclass of `KeyError`; raised when a key is not found in any search path entry | |
+| 61–110 | `ZoneInfo.__new__` | Cache-backed constructor; checks `_strong_cache` and `_common_cache` before disk | |
+| 111–150 | `ZoneInfo.no_cache` | Bypasses both caches; always reads from disk or system tzdata | |
+| 151–190 | `ZoneInfo.from_file` | Constructs from an open file object; key is optional and used only for repr | |
+| 191–240 | `ZoneInfo.clear_cache` | Empties `_strong_cache` and optionally `_common_cache`; accepts `only_keys` filter | |
+| 241–280 | `ZoneInfo.__repr__`, `__str__` | Returns `ZoneInfo('America/New_York')`-style string; uses stored key | |
+| 281–320 | `ZoneInfo.__reduce__` | Pickle support; round-trips through `ZoneInfo(key)` so the reconstructed instance is cache-backed | |
+| 321–370 | `_common_cache` | `WeakValueDictionary` keyed by `(key, tzdata_package)` for instances under normal use | |
+| 371–410 | `_strong_cache` | `OrderedDict` capped at `_CACHE_SIZE` (8) that holds a strong reference to recent instances | |
+| 411–450 | `available_timezones` | Returns a `frozenset` of all IANA keys visible in the active `TZPATH` plus any installed `tzdata` package | |
+| 451–480 | `reset_tzpath`, `TZPATH` | Rebuilds the search path from `PYTHONTZPATH` env var or the platform default | |
+| 481–500 | Module-level init block | Calls `reset_tzpath()` on import so `TZPATH` is always populated | |
+
+## Reading
+
+### ZoneInfo.__new__ and the two-tier cache (lines 61 to 110)
+
+<CpyLink path="Lib/zoneinfo/__init__.py" lines="61-110" />
+
+Construction goes through two caches in sequence. The strong cache (`_strong_cache`) is an `OrderedDict` bounded to 8 entries that keeps hard references so recently used zones are never collected. The common cache (`_common_cache`) is a `WeakValueDictionary` that holds all live instances without preventing garbage collection.
+
+```python
+def __new__(cls, key):
+    instance = cls._strong_cache.get(key)
+    if instance is not None:
+        return instance
+
+    instance = cls._common_cache.get(key)
+    if instance is None:
+        instance = cls.no_cache(key)
+        cls._common_cache[key] = instance
+
+    cls._strong_cache[key] = instance
+    if len(cls._strong_cache) > cls._strong_cache_size:
+        cls._strong_cache.popitem(last=False)
+
+    return instance
+```
+
+The ordering guarantee of `OrderedDict` and `popitem(last=False)` together implement an LRU eviction policy without a separate LRU container. The weak cache underneath ensures that if an application holds its own reference to a `ZoneInfo` instance, the same object is returned rather than a new one being allocated from disk.
+
+### ZoneInfo.from_file (lines 151 to 190)
+
+<CpyLink path="Lib/zoneinfo/__init__.py" lines="151-190" />
+
+`from_file` is the only constructor that does not touch the cache at all. It is intended for loading timezone data from an arbitrary file-like object, for example a resource embedded in a package.
+
+```python
+@classmethod
+def from_file(cls, fobj, /, key=None):
+    instance = super().__new__(cls)
+    instance._key = key
+    instance._file_repr = repr(fobj)
+    instance._from_file = True
+    cls._init_internals(instance, fobj)
+    return instance
+```
+
+Because these instances are not cache-backed, two calls with the same file will produce two distinct objects. The `key` argument is stored only for `repr` and `__reduce__`; passing it does not cause the instance to be inserted into either cache. This is a deliberate design choice documented in PEP 615 to avoid surprises when the file content changes between calls.
+
+### Pickle round-trip via __reduce__ (lines 281 to 320)
+
+<CpyLink path="Lib/zoneinfo/__init__.py" lines="281-320" />
+
+Pickling a `ZoneInfo` instance uses the key string as the sole state. On unpickling, `ZoneInfo(key)` is called, which goes through `__new__` and therefore the cache.
+
+```python
+def __reduce__(self):
+    return (self.__class__, (self._key,))
+```
+
+Instances constructed via `from_file` cannot be pickled unless a `key` was supplied, in which case `__reduce__` returns `(ZoneInfo, (key,))` and the unpickled version will be the cache-backed zone with that key, not the file-backed one. This is called out explicitly in the docs as a known asymmetry: `from_file` objects lose their file identity across pickle boundaries.
+
+## gopy mirror
+
+`zoneinfo` has not been ported to gopy. The module is a useful target because Go's `time` package has its own IANA timezone support via `time.LoadLocation`, which reads the same TZif binary format that `_zoneinfo` parses in C. A gopy port could therefore delegate directly to `time.LoadLocation` and `time.Location` for the transition data, keeping the Python-level cache logic in Go. The `_common_cache` / `_strong_cache` two-tier design maps cleanly to a `sync.Map` (weak tier) plus a fixed-size ring buffer (strong tier). The pure-Python `TZPATH` search and `available_timezones` enumeration would port line-for-line.
+
+## CPython 3.14 changes
+
+CPython 3.14 introduced awareness of the `tzdata` third-party package as a fallback source when no system timezone database is found. The `available_timezones` function now unions keys from both `TZPATH` and any installed `tzdata` package. The `_strong_cache_size` attribute was made a public class variable in 3.13, allowing subclasses to tune the LRU bound. No changes were made to the pickle protocol or the `from_file` semantics in the 3.14 cycle.

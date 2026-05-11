@@ -1,0 +1,190 @@
+---
+title: Modules/arraymodule.c
+description: C implementation of the array module, providing typed homogeneous arrays with a full buffer protocol.
+cpython_path: Modules/arraymodule.c
+cpython_version: "3.14"
+lines: 2400
+status: annotated
+ported_to: module/array/
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Modules/arraymodule.c`
+
+<CpyLink path="Modules/arraymodule.c" />
+
+`arraymodule.c` implements `array.array`, a typed homogeneous sequence that
+stores machine-level values directly rather than boxing each element as a
+Python object. Every array carries a type code that fixes the C element type
+for its lifetime.
+
+The file is structured around three layers:
+
+- `arraydescr`: a static dispatch table that maps each type code to its
+  `itemsize`, `getitem`, and `setitem` function pointers.
+- The `arrayobject` type: mutation methods (`append`, `extend`, `insert`,
+  `pop`, `remove`), I/O methods (`tobytes`, `frombytes`, `tofile`,
+  `fromfile`, `tolist`, `fromlist`), and the `byteswap` operation.
+- The buffer protocol (`getbuffer`, `releasebuffer`): allows zero-copy
+  access from `memoryview`, `struct`, and other C extensions.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Modules/arraymodule.c" lines="1-300">1-300</Cpy> | `arraydescr`, type-code table | Static array of 17 descriptors mapping `b/B/h/H/i/I/l/L/q/Q/f/d/u` to `itemsize`, `getitem`, `setitem`. | `module/array/` |
+| <Cpy path="Modules/arraymodule.c" lines="300-700">300-700</Cpy> | `array_append`, `array_extend`, `array_insert`, `array_pop`, `array_remove` | Mutation methods; `extend` dispatches to a fast path when the argument is another `array` with the same type code. | `module/array/` |
+| <Cpy path="Modules/arraymodule.c" lines="700-1200">700-1200</Cpy> | `array_tobytes`, `array_frombytes`, `array_tounicode`, `array_fromunicode` | Binary serialization to and from `bytes`; `frombytes` validates that the input length is a multiple of `itemsize`. | `module/array/` |
+| <Cpy path="Modules/arraymodule.c" lines="1200-1800">1200-1800</Cpy> | `array_tofile`, `array_fromfile`, `array_tolist`, `array_fromlist` | File and list I/O; `fromfile` reads exactly `n` items using `fread`-equivalent calls. | `module/array/` |
+| <Cpy path="Modules/arraymodule.c" lines="1800-2400">1800-2400</Cpy> | `array_buffer_info`, `array_byteswap`, `array_getbuffer`, `array_releasebuffer`, `Arraytype`, `PyInit_array` | Buffer protocol, `byteswap`, type object, and module initialisation. | `module/array/` |
+
+## Reading
+
+### `arraydescr` type dispatch (lines 1 to 300)
+
+<CpyLink path="Modules/arraymodule.c" lines="1-300" />
+
+Each entry in the `descriptors` array corresponds to one type code and
+carries the element size plus function pointers for element access:
+
+```c
+typedef struct arraydescr {
+    char typecode;
+    int itemsize;
+    PyObject * (*getitem)(struct arrayobject *, Py_ssize_t);
+    int        (*setitem)(struct arrayobject *, Py_ssize_t, PyObject *);
+    const char *formats;    /* struct-module format characters */
+    int is_integer_type;
+    int is_bool_type;
+    int is_signed_type;
+    int is_float_type;
+} arraydescr;
+
+static const arraydescr descriptors[] = {
+    {'b', 1, b_getitem, b_setitem, "b",  1, 0, 1, 0},
+    {'B', 1, BB_getitem, BB_setitem, "B", 1, 0, 0, 0},
+    {'h', 2, h_getitem, h_setitem, "h",  1, 0, 1, 0},
+    {'H', 2, HH_getitem, HH_setitem, "H", 1, 0, 0, 0},
+    {'i', 4, i_getitem, i_setitem, "i",  1, 0, 1, 0},
+    {'I', 4, II_getitem, II_setitem, "I", 1, 0, 0, 0},
+    {'l', 4, l_getitem, l_setitem, "l",  1, 0, 1, 0},
+    {'L', 4, LL_getitem, LL_setitem, "L", 1, 0, 0, 0},
+    {'q', 8, q_getitem, q_setitem, "q",  1, 0, 1, 0},
+    {'Q', 8, QQ_getitem, QQ_setitem, "Q", 1, 0, 0, 0},
+    {'f', 4, f_getitem, f_setitem, "f",  0, 0, 0, 1},
+    {'d', 8, d_getitem, d_setitem, "d",  0, 0, 0, 1},
+    {'\0', 0, 0, 0, 0, 0, 0, 0, 0} /* sentinel */
+};
+```
+
+`array_new` walks `descriptors` to find a matching typecode. If none is
+found it raises `ValueError: bad typecode`. The `itemsize` stored in the
+descriptor is used throughout for pointer arithmetic instead of `sizeof`
+so that the same code path handles every type.
+
+### Buffer protocol: `array_getbuffer` (lines 1800 to 2400)
+
+<CpyLink path="Modules/arraymodule.c" lines="1800-2400" />
+
+`array_getbuffer` fills a `Py_buffer` view so that `memoryview` and the
+`struct` module can access the underlying storage without copying:
+
+```c
+static int
+array_getbuffer(arrayobject *self, Py_buffer *view, int flags)
+{
+    if (view == NULL) {
+        PyErr_SetString(PyExc_BufferError,
+                        "array_getbuffer: view==NULL argument is obsolete");
+        return -1;
+    }
+    view->buf        = (void *)self->ob_item;
+    view->obj        = (PyObject *)self;
+    view->len        = Py_SIZE(self) * self->ob_descr->itemsize;
+    view->itemsize   = self->ob_descr->itemsize;
+    view->ndim       = 1;
+    view->readonly   = 0;
+    view->format     = (char *)self->ob_descr->formats;
+    Py_shape_t shape = (Py_ssize_t)Py_SIZE(self);
+    view->shape      = &shape;
+    view->strides    = &view->itemsize;
+    view->suboffsets = NULL;
+    Py_INCREF(self);
+    return 0;
+}
+```
+
+The `format` field comes directly from `arraydescr.formats`, which contains
+the `struct`-module format character for the element type. This is what
+allows `struct.pack_into` and `ctypes` to interpret a `memoryview` of an
+`array` correctly.
+
+`array_releasebuffer` is a no-op because the array owns its storage and
+never pins it independently; the `Py_INCREF` in `getbuffer` is undone by
+the `Py_DECREF` in `PyBuffer_Release`.
+
+### `array_tobytes` and `array_frombytes` (lines 700 to 1200)
+
+<CpyLink path="Modules/arraymodule.c" lines="700-1200" />
+
+`tobytes` returns a `bytes` object containing a raw copy of the array
+storage. `frombytes` appends elements from a bytes-like object, validating
+alignment first:
+
+```c
+static PyObject *
+array_tobytes(arrayobject *self, PyObject *unused)
+{
+    if (Py_SIZE(self) <= PY_SSIZE_T_MAX / self->ob_descr->itemsize) {
+        return PyBytes_FromStringAndSize(self->ob_item,
+                   Py_SIZE(self) * self->ob_descr->itemsize);
+    }
+    PyErr_SetString(PyExc_OverflowError,
+                    "array too large to export as bytes");
+    return NULL;
+}
+
+static PyObject *
+array_frombytes(arrayobject *self, PyObject *args)
+{
+    Py_buffer buffer;
+    if (!PyArg_ParseTuple(args, "y*:frombytes", &buffer)) return NULL;
+    if (buffer.len % self->ob_descr->itemsize != 0) {
+        PyErr_SetString(PyExc_ValueError,
+            "bytes length not a multiple of item size");
+        PyBuffer_Release(&buffer);
+        return NULL;
+    }
+    Py_ssize_t n = buffer.len / self->ob_descr->itemsize;
+    if (n > 0) {
+        Py_ssize_t old_size = Py_SIZE(self);
+        if (array_resize(self, old_size + n) < 0) goto done;
+        memcpy(self->ob_item + old_size * self->ob_descr->itemsize,
+               buffer.buf, buffer.len);
+    }
+    ...
+}
+```
+
+On little-endian hosts the bytes are platform-native. `byteswap` swaps
+every element in place so the same serialized bytes can be exchanged
+between big-endian and little-endian machines.
+
+## gopy mirror
+
+`module/array/` (pending). The `arraydescr` table maps to a Go slice of
+descriptor structs keyed by typecode. Each descriptor carries an
+`itemSize` field and `getItem`/`setItem` function values. `GetBuffer`
+returns a `objects.Buffer` that wraps the underlying `[]byte` slice
+directly, matching the zero-copy contract. `ToBytes` and `FromBytes`
+mirror the alignment check and `memcpy` pattern.
+
+## CPython 3.14 changes
+
+The `'u'` typecode (Unicode character, `Py_UNICODE`) was deprecated in
+3.3 and removed in 3.13. The type code `'w'` (wide Unicode, `wchar_t`)
+replaced it briefly but was also removed. In 3.14 the valid numeric codes
+are `b B h H i I l L q Q f d` only. The buffer protocol support has been
+present since 3.0 but the `Py_buffer.format` field was aligned with
+`struct` format strings in 3.3.

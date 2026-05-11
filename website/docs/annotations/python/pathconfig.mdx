@@ -1,0 +1,91 @@
+---
+title: Python/pathconfig.c
+description: CPython interpreter path configuration, storing and exposing the program name, prefix, exec-prefix, and module search path used throughout the runtime.
+cpython_path: Python/pathconfig.c
+cpython_version: "3.14"
+lines: 600
+status: annotated
+ported_to: ""
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Python/pathconfig.c`
+
+<CpyLink path="Python/pathconfig.c" />
+
+`pathconfig.c` owns the single `_PyPathConfig` instance that records where the interpreter was installed and where it should look for modules. The struct is populated very early in `Py_InitializeFromConfig`, before any Python code runs, by the platform-specific path calculation in `Modules/getpath.py` (which is frozen into the interpreter binary). Once set, the values are exposed to C code through the legacy `Py_GetPath`, `Py_GetPrefix`, and `Py_GetExecPrefix` functions and to Python code through `sys.path`, `sys.prefix`, and `sys.exec_prefix`.
+
+The file is also the home of `_Py_FindEnvConfigValue`, a small parser for `pyvenv.cfg` files. When the interpreter detects that it is running inside a virtual environment it reads that file to override the base prefix and the module search path before the `site` module runs. This is what makes `import` in a venv find packages installed with `pip install` without any `PYTHONPATH` manipulation.
+
+The interaction with `PYTHONPATH` is straightforward: the environment variable is split on `os.pathsep` and the resulting segments are prepended to `sys.path` after the path configuration is resolved but before `site` runs. This means `PYTHONPATH` entries always win over the installation's `site-packages`, and `site.addsitedir` can still append further directories afterward.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| 1-60 | `_PyPathConfig` struct, global instance | Path config storage | |
+| 61-150 | `_PyPathConfig_Clear`, `_PyPathConfig_Copy` | Lifecycle helpers | |
+| 151-280 | `_PyConfig_InitPathConfig` | Config population entry point | |
+| 281-380 | `_Py_FindEnvConfigValue` | pyvenv.cfg parser | |
+| 381-480 | `Py_GetPath`, `Py_SetPath`, `Py_GetPrefix`, `Py_GetExecPrefix` | Legacy public API | |
+| 481-600 | `_PyPathConfig_ComputeSysPath0` | sys.path[0] from argv | |
+
+## Reading
+
+### The `_PyPathConfig` struct (lines 1 to 60)
+
+<CpyLink path="Python/pathconfig.c" lines="1-60" />
+
+The struct holds all paths as `wchar_t *` so that Windows and POSIX share the same storage type. The fields map directly onto the keys in `sys` that Python code reads most often. `module_search_path` is a colon-separated (or semicolon-separated on Windows) string; `sys.path` is built from it by splitting on `os.pathsep` in `sysmodule.c`.
+
+```c
+typedef struct _PyPathConfig {
+    wchar_t *program_full_path;
+    wchar_t *prefix;
+    wchar_t *exec_prefix;
+    wchar_t *module_search_path;
+    wchar_t *program_name;
+    wchar_t *home;
+    int      isolated;
+    int      site_import;
+    /* ... */
+} _PyPathConfig;
+```
+
+### Config population (lines 151 to 280)
+
+<CpyLink path="Python/pathconfig.c" lines="151-280" />
+
+`_PyConfig_InitPathConfig` copies fields from the `PyConfig` passed to `Py_InitializeFromConfig` into the global `_Py_path_config` instance. If `PyConfig.module_search_paths_set` is zero it calls into the frozen `getpath` module to compute the search paths automatically from the argv[0] binary location, the `PYTHONHOME` environment variable, and compile-time prefix/exec-prefix values. This is the only place where the frozen bytecode module is invoked during interpreter startup.
+
+### pyvenv.cfg parser (lines 281 to 380)
+
+<CpyLink path="Python/pathconfig.c" lines="281-380" />
+
+`_Py_FindEnvConfigValue` opens `pyvenv.cfg` in the directory containing (or one level above) the interpreter binary and scans it line by line for `key = value` pairs. The comparison is case-insensitive and whitespace around `=` is stripped. The function is called twice: once to detect `home` (which identifies the venv's base interpreter) and once to read `include-system-site-packages`. Neither call allocates a Python object, because this runs before the object system is ready.
+
+```c
+int
+_Py_FindEnvConfigValue(FILE *env_file, const wchar_t *key,
+                       wchar_t **value_p)
+{
+    /* line-by-line scan for "key = value" */
+}
+```
+
+### Legacy public API (lines 381 to 480)
+
+<CpyLink path="Python/pathconfig.c" lines="381-480" />
+
+`Py_GetPath`, `Py_SetPath`, `Py_GetPrefix`, and `Py_GetExecPrefix` are the pre-3.8 API that third-party embedding applications still call. They read and write `_Py_path_config` directly and return `wchar_t *` pointers owned by the config struct. `Py_SetPath` additionally clears `sys.path` and rebuilds it from the new value, so the change is immediately visible to running Python code. All four functions acquire the GIL before touching the config struct.
+
+### sys.path[0] from argv (lines 481 to 600)
+
+<CpyLink path="Python/pathconfig.c" lines="481-600" />
+
+`_PyPathConfig_ComputeSysPath0` determines the first entry of `sys.path` from the script path provided in `argv[0]`. If the interpreter is run with a `.py` file the entry is the directory containing that file (realpath-resolved). If run with `-c` or `-m` it is an empty string, which means the current working directory. The result is inserted at index 0 of `sys.path` after the `PYTHONPATH` entries are prepended, which matches the documented precedence order.
+
+## gopy mirror
+
+Not yet ported.

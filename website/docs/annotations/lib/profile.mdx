@@ -1,0 +1,170 @@
+---
+title: Lib/profile.py
+description: Pure-Python deterministic profiler and cProfile C-extension wrapper, with pstats for post-run statistics.
+cpython_path: Lib/profile.py
+cpython_version: "3.14"
+lines: 700
+status: annotated
+ported_to: (stdlib pending)
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Lib/profile.py`
+
+<CpyLink path="Lib/profile.py" />
+
+Two profiler implementations ship together: the pure-Python `Profile` in
+`Lib/profile.py` and the C-backed `cProfile.Profile` in
+`Lib/cProfile.py`, which wraps `Modules/_lsprof.c`. Statistics are
+consumed by `pstats.Stats` in `Lib/pstats.py`.
+
+`profile.Profile` instruments every Python call and return through
+`sys.setprofile`. The callback receives one of six event strings,
+`call`, `return`, `c_call`, `c_return`, `c_exception`, and `exception`.
+For each event the profiler maintains a `self.timings` dict keyed by
+`(filename, lineno, funcname)` and accumulates local time (total minus
+sub-calls) by snapshot-differencing `self.timer()`.
+
+`cProfile.Profile` replaces that pure-Python accounting with the
+`_lsprof` C extension, which hooks the same `sys.setprofile` event
+stream but records data in C structures. Its output is identical but the
+overhead is roughly 10x lower.
+
+`pstats.Stats` consumes the internal timing dict or `_lsprof` data,
+formats columns, and implements sort keys such as `cumulative`, `tottime`,
+`ncalls`, and `filename`.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Lib/profile.py" lines="1-80">1-80</Cpy> | Module header, `Profile.__init__`, `Profile.set_cmd` | Construct the profiler; initialize `timings`, `cur`, `cmd`, and install the timer callable. | `(stdlib pending)` |
+| <Cpy path="Lib/profile.py" lines="81-200">81-200</Cpy> | `Profile.calibrate`, `Profile.bias` | Measure per-call overhead by running a null loop and computing average timer resolution; stores result in `Profile.bias`. | `(stdlib pending)` |
+| <Cpy path="Lib/profile.py" lines="201-400">201-400</Cpy> | `Profile.enable`, `Profile.disable`, `Profile.runcall`, `Profile.runctx`, `run`, `runctx` | Install/remove the `sys.setprofile` hook; module-level convenience wrappers. | `(stdlib pending)` |
+| <Cpy path="Lib/profile.py" lines="400-600">400-600</Cpy> | `Profile.dispatch`, `Profile.trace_dispatch_call`, `Profile.trace_dispatch_return`, `Profile.trace_dispatch_c_call`, `Profile.trace_dispatch_c_return` | Per-event handlers that update `self.timings` entries; the `dispatch` dict maps event string to method. | `(stdlib pending)` |
+| <Cpy path="Lib/cProfile.py" lines="1-80">1-80</Cpy> | `cProfile.Profile.__init__`, `enable`, `disable`, `getstats` | Thin wrapper around `_lsprof.Profiler`; `getstats()` returns a list of `_lsprof.profiler_entry` named tuples. | `(stdlib pending)` |
+| <Cpy path="Lib/cProfile.py" lines="80-150">80-150</Cpy> | `cProfile.run`, `cProfile.runctx`, `cProfile.runcall` | Module-level wrappers mirroring `profile`; accept `sort` parameter and pass to `pstats.Stats.print_stats`. | `(stdlib pending)` |
+| <Cpy path="Lib/pstats.py" lines="1-150">1-150</Cpy> | `Stats.__init__`, `Stats.load_stats`, `Stats.add` | Parse raw profiler output (dict or file); merge multiple runs with `add`; normalize into `(cc, nc, tt, ct, callers)` tuples. | `(stdlib pending)` |
+| <Cpy path="Lib/pstats.py" lines="150-300">150-300</Cpy> | `Stats.print_stats`, `Stats.print_callers`, `Stats.print_callees` | Format and print the statistics table; apply the active `fcn_list` sort order. | `(stdlib pending)` |
+| <Cpy path="Lib/pstats.py" lines="300-500">300-500</Cpy> | `Stats.sort_stats`, `Stats.strip_dirs`, `Stats.reverse_order`, `add_callers`, `count_calls` | Sort by one or more keys; strip directory components from filenames; helper utilities for callers dict. | `(stdlib pending)` |
+
+## Reading
+
+### `sys.setprofile` event types and the dispatch table (lines 400 to 600)
+
+<CpyLink path="Lib/profile.py" lines="400-600" />
+
+```python
+class Profile:
+    def trace_dispatch(self, frame, event, arg):
+        timer = self.timer
+        t = timer()
+        t = t[0] + t[1]   # sum user and sys time from os.times()
+        ...
+        self.dispatch[event](self, frame, t, arg)
+        ...
+
+    dispatch = {
+        "call":        trace_dispatch_call,
+        "exception":   trace_dispatch_exception,
+        "return":      trace_dispatch_return,
+        "c_call":      trace_dispatch_c_call,
+        "c_exception": trace_dispatch_c_exception,
+        "c_return":    trace_dispatch_c_return,
+    }
+```
+
+`sys.setprofile` delivers six event strings. Unlike `sys.settrace`, the
+profile callback receives no per-line events, only call/return pairs.
+The `dispatch` dict avoids an if/elif chain and lets subclasses replace
+individual event handlers without overriding `trace_dispatch`.
+
+`trace_dispatch_call` records a new entry in `self.timings` when a frame
+starts. `trace_dispatch_return` computes the elapsed time for the current
+frame and credits its caller's "total time excluding sub-calls" (tt). The
+cumulative time (ct) accumulates upward through the call chain in
+`self.cur`.
+
+The `c_call`/`c_return`/`c_exception` trio handles calls into C extension
+functions. The `arg` for these events is the C function object itself, so
+the profiler synthesizes a fake frame key using `arg.__name__` and a
+sentinel filename `"~"`.
+
+### `Profile.calibrate` (lines 81 to 200)
+
+<CpyLink path="Lib/profile.py" lines="81-200" />
+
+```python
+def calibrate(self, m, verbose=0):
+    if self.__class__ is not Profile:
+        raise TypeError("Subclasses of Profile must override .calibrate().")
+
+    saved_bias = self.bias
+    self.bias = 0
+    try:
+        return self._calibrate_inner(m, verbose)
+    finally:
+        self.bias = saved_bias
+
+def _calibrate_inner(self, m, verbose):
+    get_time = self.get_time
+
+    # Run a null function m times with profiling on
+    ...
+    p = Profile()
+    p.bias = 0
+    p.run("for i in range(%d): pass" % m)
+    ...
+    total_calls = ...
+    reported_time = ...
+    # bias = overhead per call
+    return reported_time / total_calls
+```
+
+Calibration answers the question: how much time does a single profiler
+event add to the reported times? The procedure runs a tight empty loop
+under the profiler, divides the reported time by the call count, and
+returns that per-call overhead as the `bias`. Passing the result to
+`Profile.bias` before a real run subtracts it from every timing sample.
+The default timer is `os.times()` on POSIX, which measures user plus
+system time. Calibration is necessary because the timer call itself is
+visible in the results.
+
+### `pstats.Stats` sort keys and `print_stats` (lines 150 to 300)
+
+<CpyLink path="Lib/pstats.py" lines="150-300" />
+
+```python
+sort_arg_dict_default = {
+    "calls":     (((1,-1),              ), "call count"),
+    "ncalls":    (((1,-1),              ), "call count"),
+    "cumtime":   (((3,-1),              ), "cumulative time"),
+    "cumulative":(((3,-1),              ), "cumulative time"),
+    "filename":  (((4, 1),              ), "file name"),
+    "line":      (((5, 1),              ), "line number"),
+    "module":    (((4, 1),              ), "file name"),
+    "name":      (((6, 1),              ), "function name"),
+    "nfl":       (((6, 1),(4, 1),(5, 1)), "name/file/line"),
+    "pcalls":    (((0,-1),              ), "primitive call count"),
+    "stdname":   (((7, 1),              ), "standard name"),
+    "time":      (((2,-1),              ), "internal time"),
+    "tottime":   (((2,-1),              ), "internal time"),
+}
+```
+
+Each sort key maps to a tuple of `(column_index, direction)` pairs used
+in `sort_stats`. The columns in the internal stats tuple are
+`(primitive_calls, total_calls, total_time, cumulative_time, callers)`.
+`print_stats` formats three numeric columns and the function identifier,
+then optionally filters rows to those whose `(filename, lineno, name)`
+matches a list of regexes passed as positional arguments.
+
+## gopy mirror
+
+`profile.py`, `cProfile.py`, and `pstats.py` are pure Python and are
+candidates for bundling verbatim under `stdlib/`. The C backend
+`_lsprof` is non-trivial to port; until it is available, `cProfile` can
+delegate to the pure-Python `Profile` as a compatibility shim.
+`sys.setprofile` support is required, which in turn requires the eval
+loop to fire profile events at call and return boundaries.

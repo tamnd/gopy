@@ -1,0 +1,133 @@
+---
+title: Include/internal/pycore_global_strings.h
+description: CPython's pre-interned string table mapping constant identifiers to immortal PyUnicodeObject singletons initialized at interpreter startup.
+cpython_path: Include/internal/pycore_global_strings.h
+cpython_version: "3.14"
+lines: 300
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Include/internal/pycore_global_strings.h`
+
+<CpyLink path="Include/internal/pycore_global_strings.h" />
+
+<overview>
+Every Python attribute lookup, function call, and import involves comparing string identifiers. To avoid repeated heap allocation and hash computation for the most common names, CPython pre-interns a fixed table of strings at interpreter startup. This header declares that table.
+
+There are two families:
+
+- `_Py_ID(name)` expands to `&_PyRuntime.cached_objects.interned_strings.id.name`, a pointer to an immortal `PyUnicodeObject` whose value is `"name"`. Used for identifiers like `__name__`, `__init__`, `append`, `write`, etc.
+- `_Py_STR(name)` expands to `&_PyRuntime.cached_objects.interned_strings.str.name`, used for a small set of special strings that are not valid Python identifiers (`""`, `"\n"`, `"<anonymous>"`, etc.).
+
+Both families are initialized once by `_PyUnicode_InitStaticStrings` during `Py_Initialize`. After that, internal C code can compare against them via `_PyUnicode_EqualToASCIIId` or simply with pointer equality, since there is only one copy of each string in the process.
+
+In gopy, these singletons are replaced by Go string constants or a startup-initialized map from name to `*objects.Str`. Pointer-equality shortcuts are replaced by string equality on Go `string` values, which is O(len) but avoids heap allocation.
+</overview>
+
+## Map
+
+| Symbol | Kind | Purpose |
+|---|---|---|
+| `_Py_ID(name)` | macro | Yields a `*PyUnicodeObject` for the pre-interned identifier `name` |
+| `_Py_STR(name)` | macro | Yields a `*PyUnicodeObject` for a pre-interned special string |
+| `struct _Py_global_strings` | struct | Holds two anonymous structs: `id` (one field per identifier) and `str` (one field per special string) |
+| `_PyUnicode_EqualToASCIIId` | function (declared elsewhere) | Compares any `PyObject*` against a pre-interned id without computing a hash |
+| `_PyUnicode_InitStaticStrings` | function (declared elsewhere) | Populates every field of `_Py_global_strings` at startup |
+
+The `id` struct contains roughly 260 fields in CPython 3.14, covering names like `__abs__`, `__add__`, `__all__`, ..., `zip`. The `str` struct contains around a dozen entries.
+
+## Reading
+
+### Macro expansion and struct layout
+
+The two macros resolve to struct-member addresses inside `_PyRuntime`:
+
+```c
+/* Include/internal/pycore_global_strings.h */
+#define _Py_ID(name) \
+    (&_PyRuntime.cached_objects.interned_strings.id.name)
+
+#define _Py_STR(name) \
+    (&_PyRuntime.cached_objects.interned_strings.str.name)
+
+struct _Py_global_strings {
+    struct {
+        /* one field per pre-interned identifier */
+        PyObject *__abs__;
+        PyObject *__add__;
+        PyObject *__all__;
+        /* ... ~260 more ... */
+        PyObject *__name__;
+        PyObject *append;
+        PyObject *write;
+        /* ... */
+    } id;
+    struct {
+        /* special strings that are not identifiers */
+        PyObject *anon_string;   /* "<anonymous>" */
+        PyObject *empty;         /* ""            */
+        PyObject *newline;       /* "\n"          */
+        /* ... */
+    } str;
+};
+```
+
+Because every field is inside a single contiguous `_PyRuntime` struct, the entire table lives in one allocation and the pointers remain stable for the interpreter's lifetime.
+
+### Pointer-equality fast paths in the attribute machinery
+
+The primary consumer of `_Py_ID` is `Objects/object.c` and the type machinery. A typical use:
+
+```c
+/* Objects/typeobject.c (representative pattern) */
+if (name == _Py_ID(__init__)) {
+    /* fast path: we already know the interned pointer */
+    ...
+}
+/* fallback for non-interned names: */
+if (_PyUnicode_EqualToASCIIString(name, "__init__")) {
+    ...
+}
+```
+
+The pointer comparison `name == _Py_ID(__init__)` is a single instruction and is valid because `PyUnicode_InternInPlace` guarantees that any string whose value matches an already-interned string will be redirected to the canonical object. Code that calls `PyUnicode_InternInPlace` on a string received from Python code can therefore use pointer equality instead of `strcmp`.
+
+### `_Py_STR` for non-identifier constants
+
+`_Py_STR` covers strings that cannot be used as C identifiers. For example the empty string and the anonymous-function display name:
+
+```c
+/* Objects/funcobject.c */
+if (func->func_qualname == NULL) {
+    func->func_qualname = Py_NewRef(_Py_STR(anon_string));
+}
+```
+
+This avoids creating a new `""` or `"<anonymous>"` PyObject every time a lambda or comprehension is constructed without an explicit name.
+
+## gopy mirror
+
+gopy replaces the entire `_Py_global_strings` mechanism with Go-level string constants. There is no `_PyRuntime` struct and no immortality mechanism; instead:
+
+```go
+// objects/global_strings.go (representative)
+const (
+    IdDunder__name__  = "__name__"
+    IdAppend          = "append"
+    IdWrite           = "write"
+    StrAnon           = "<anonymous>"
+    StrEmpty          = ""
+)
+```
+
+Where CPython uses pointer equality after `InternInPlace`, gopy uses Go's built-in string equality (`==`), which compares content and is O(len). For the common short identifiers (under 32 bytes) this is typically two or three instructions on a modern CPU and requires no hash computation.
+
+`_PyUnicode_EqualToASCIIId` has no direct gopy analogue; call sites are translated to plain `s == IdFoo` comparisons.
+
+## CPython 3.14 changes
+
+- The table grew by roughly 20 entries in 3.13-3.14 to cover new dunder names introduced by the type parameter syntax (`__type_params__`, `__value__`) and the new `warnings` module hooks.
+- In 3.12, strings in `_Py_ID` and `_Py_STR` were made **immortal** (reference count set to `_Py_IMMORTAL_REFCNT`) so that `Py_INCREF` / `Py_DECREF` on them become no-ops. This is part of the broader immortalization work that also covers `True`, `False`, `None`, and small integers.
+- The struct fields were sorted alphabetically in 3.13 to make binary-search or SIMD future optimizations easier; the sort order is now enforced by a CI script.

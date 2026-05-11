@@ -1,0 +1,200 @@
+---
+title: Include/cpython/setobject.h
+description: CPython-internal set and frozenset API including the low-level table iterator, bulk update, and the PySet_GET_SIZE / PyFrozenSet_CheckExact macros.
+cpython_path: Include/cpython/setobject.h
+cpython_version: "3.14"
+lines: 80
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Include/cpython/setobject.h`
+
+<CpyLink path="Include/cpython/setobject.h" />
+
+<overview>
+This header exposes the layout of `PySetObject` and four internal helpers that
+C extensions need when they want to iterate or bulk-populate a set without creating
+a Python iterator object. The header also provides the `PySet_GET_SIZE` macro (a
+zero-check-free size read) and `PyFrozenSet_CheckExact` for type-testing without
+calling Python. The set is implemented as an open-addressed hash table with a
+capacity that is always a power of two and a load factor kept below 2/3.
+</overview>
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| ~12 | `setentry` | One slot: hash + key pointer + a dummy sentinel | `objects/set.go` `setEntry` |
+| ~25 | `PySetObject` | The concrete set struct: table pointer, used/fill counts, finger | `objects/set.go` `Set` |
+| ~40 | `PySet_GET_SIZE` | Macro: read `used` without a type check | `objects/set.go` `Set.Len()` |
+| ~45 | `PyFrozenSet_CheckExact` | Macro: `Py_TYPE(op) == &PyFrozenSet_Type` | `objects/set.go` `Set.frozen` field |
+| ~52 | `_PySet_NextEntry` | Walk the table by `pos` index; no Python iterator | not ported (uses `setIter` instead) |
+| ~65 | `_PySet_Update` | Bulk add from any iterable without going through `set.update` | `objects/set_ops.go` `Set.Update` |
+
+## Reading
+
+### PySetObject layout and the open-addressed table
+
+CPython's set is a flat `setentry[]` array whose length is always a power of two.
+Each `setentry` carries the cached hash, the key pointer, and a special dummy
+sentinel used to mark deleted slots (so probing chains are not broken). The struct
+also holds a `finger` field used by `_PySet_NextEntry` to resume iteration cheaply.
+
+```c
+// Include/cpython/setobject.h:12-25 (simplified)
+typedef struct {
+    Py_hash_t hash;
+    PyObject  *key;
+} setentry;
+
+typedef struct {
+    PyObject_HEAD
+    Py_ssize_t  fill;   // used + dummies
+    Py_ssize_t  used;
+    Py_ssize_t  mask;   // table length - 1
+    setentry   *table;
+    Py_hash_t   hash;   // frozenset cached hash, -1 until computed
+    Py_ssize_t  finger; // next pos for _PySet_NextEntry
+    setentry    smalltable[8];  // inline table for small sets
+} PySetObject;
+```
+
+gopy mirrors the table with a `[]setEntry` slice. The inline `smalltable` optimisation
+(8-slot on-struct array that avoids a heap allocation for small sets) is not present;
+gopy always allocates on the heap. The `finger` field is also absent because gopy
+does not port `_PySet_NextEntry`.
+
+```go
+// objects/set.go
+type setEntry struct {
+    hash int64
+    key  Object
+    used bool
+}
+
+type Set struct {
+    Header
+    entries    []setEntry
+    used       int
+    frozen     bool
+    cachedHash int64
+    hashValid  bool
+}
+```
+
+### _PySet_NextEntry: table walking without a Python iterator
+
+`_PySet_NextEntry` is the internal fast-path iterator. It takes a `pos *Py_ssize_t`
+that the caller initialises to zero and advances on each call, returning the next
+live entry's key and hash:
+
+```c
+// Objects/setobject.c:~760 _PySet_NextEntry
+int
+_PySet_NextEntry(PyObject *op, Py_ssize_t *pos,
+                 PyObject **key, Py_hash_t *hash)
+{
+    PySetObject *so = (PySetObject *)op;
+    setentry *entry;
+    Py_ssize_t i = *pos;
+    while (i <= so->mask) {
+        entry = &so->table[i++];
+        if (entry->key != NULL && entry->key != dummy) {
+            *key  = entry->key;
+            *hash = entry->hash;
+            *pos  = i;
+            return 1;
+        }
+    }
+    return 0;
+}
+```
+
+This pattern is critical in C extensions that need to snapshot a set or copy it into
+a C data structure without the overhead of a Python iterator object. gopy does not
+port this function. The equivalent is `setIter` in `objects/set.go`, which snapshots
+all live entries into a `[]setEntry` slice at iterator creation time:
+
+```go
+// objects/set.go setIter
+func setIter(o Object) (Object, error) {
+    s := o.(*Set)
+    snap := make([]setEntry, 0, s.used)
+    for _, e := range s.entries {
+        if e.used {
+            snap = append(snap, e)
+        }
+    }
+    it := &setIterator{entries: snap}
+    it.init(setIterType)
+    return it, nil
+}
+```
+
+The snapshot approach trades a small extra allocation for simpler iterator logic and
+avoids the need to track a `finger` field on the set itself.
+
+### _PySet_Update: bulk add from any iterable
+
+`_PySet_Update` is the C-level analogue of `set.update()`. It accepts any iterable
+and adds all its elements to the target set, creating a Python iterator internally
+only when the source is not itself a set or frozenset (in which case it walks the
+table directly). gopy ports the set-to-set path in `Set.Update`:
+
+```go
+// objects/set_ops.go:214
+// CPython: Objects/setobject.c:1330 set_update_internal
+func (s *Set) Update(others ...*Set) error {
+    if s.frozen {
+        return fmt.Errorf("AttributeError: 'frozenset' object has no attribute 'update'")
+    }
+    for _, other := range others {
+        for _, e := range other.entries {
+            if !e.used {
+                continue
+            }
+            if err := s.add(e.key); err != nil {
+                return err
+            }
+        }
+    }
+    return nil
+}
+```
+
+The iterable-source path (where the source is not a `*Set`) is handled at the call
+sites in the eval loop rather than inside `Update` itself.
+
+## gopy mirror
+
+| CPython symbol | Go identifier | File |
+| -------------- | ------------- | ---- |
+| `setentry` | `setEntry` | `objects/set.go` |
+| `PySetObject` | `Set` | `objects/set.go` |
+| `PySet_Type` | `SetType` | `objects/set.go` |
+| `PyFrozenSet_Type` | `FrozensetType` | `objects/set.go` |
+| `PySet_New` | `NewSet` | `objects/set.go` |
+| `PyFrozenSet_New` | `NewFrozenset` | `objects/set.go` |
+| `PySet_Size` | `Set.Len` | `objects/set.go` |
+| `PySet_GET_SIZE` | `Set.Len()` (method call) | `objects/set.go` |
+| `PyFrozenSet_CheckExact` | `Set.frozen` field check | `objects/set.go` |
+| `set_add_key` | `Set.Add` / `Set.add` | `objects/set.go` |
+| `set_discard_key` | `Set.Discard` | `objects/set.go` |
+| `set_contains_key` | `Set.Contains` | `objects/set.go` |
+| `set_traverse` | `setTraverse` (unexported) | `objects/set.go` |
+| `set_union` | `Set.Union` | `objects/set_ops.go` |
+| `set_intersection` | `Set.Intersection` | `objects/set_ops.go` |
+| `set_update_internal` | `Set.Update` | `objects/set_ops.go` |
+| `_PySet_NextEntry` | (not ported; uses `setIter` snapshot) | |
+
+## CPython 3.14 changes
+
+3.14 moves the `finger` field used by `_PySet_NextEntry` into `PySetObject` proper
+rather than leaving it as a computed offset, making the ABI of `_PySet_NextEntry`
+stable across minor versions for the first time. `PyFrozenSet_CheckExact` is promoted
+to the stable ABI tier. The dummy sentinel pointer (previously a module-level
+`PyObject` called `dummy`) is now a static local inside `setobject.c`, removing a
+symbol that some embedders accidentally relied on. `_PySet_Update` signature is
+unchanged.

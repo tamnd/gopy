@@ -14,7 +14,7 @@ import (
 //
 // CPython: Objects/exceptions.c:508 BaseException_getset
 // CPython: Objects/exceptions.c:605 BaseException_members
-func installBaseExceptionAttrs() {
+func init() {
 	t := PyExc_BaseException
 	t.Getattro = objects.GenericGetAttr
 	t.Setattro = objects.GenericSetAttr

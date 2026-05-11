@@ -1,0 +1,85 @@
+---
+title: Lib/urllib/error.py
+description: Exception hierarchy for urllib, covering network errors, HTTP error responses, and incomplete downloads.
+cpython_path: Lib/urllib/error.py
+cpython_version: "3.14"
+lines: 60
+status: annotated
+ported_to: ""
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Lib/urllib/error.py`
+
+<CpyLink path="Lib/urllib/error.py" />
+
+`urllib.error` defines the three exception types that `urllib.request` raises when a URL operation fails. All three derive from `OSError`, which means callers that already catch `OSError` (for example, socket-level code) will catch urllib exceptions automatically. The hierarchy mirrors the distinction between transport-level failures, protocol-level HTTP failures, and data-integrity failures.
+
+`URLError` is the base class. It wraps whatever reason the lower layer provides, which is typically an `OSError` instance from the socket stack or a plain string describing a configuration problem such as a missing hostname. `HTTPError` extends both `URLError` and `urllib.response.addinfourl`, so it can be used as a response object as well as an exception. This dual role lets handlers pass `HTTPError` objects up the chain where they are both raised and readable. `ContentTooShortError` is narrow in scope: `urllib.request.urlretrieve` raises it when the downloaded data is shorter than the `Content-Length` header declared.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| 1-10 | imports | `urllib.response`, `OSError` dependency | |
+| 11-25 | `URLError` | Base exception; stores `reason`, pretty `__str__` | |
+| 26-50 | `HTTPError` | HTTP status exception and response object in one | |
+| 51-60 | `ContentTooShortError` | Incomplete download detection | |
+
+## Reading
+
+### `URLError` (lines 11 to 25)
+
+<CpyLink path="Lib/urllib/error.py" lines="11-25" />
+
+`URLError.__init__` stores `reason` and, if `reason` is itself an `OSError`, copies its `errno` attribute so that standard `errno`-based error inspection works. `__str__` formats as `<urlopen error REASON>` to distinguish urllib errors from bare `OSError` messages in log output.
+
+```python
+class URLError(OSError):
+    def __init__(self, reason, filename=None):
+        self.reason = reason
+        super().__init__(reason)
+        if filename:
+            self.filename = filename
+
+    def __str__(self):
+        return '<urlopen error %s>' % self.reason
+```
+
+### `HTTPError` (lines 26 to 50)
+
+<CpyLink path="Lib/urllib/error.py" lines="26-50" />
+
+`HTTPError` takes `(url, code, msg, hdrs, fp)`. `code` is the integer HTTP status code; `msg` is the reason phrase; `hdrs` is an `http.client.HTTPMessage` instance; `fp` is a file-like body. Because the class also inherits from `addinfourl`, consumers can call `.read()` on a caught `HTTPError` to retrieve the server's error body. `__str__` returns `HTTP Error CODE: MSG` so the status code is visible in tracebacks without inspecting attributes.
+
+```python
+class HTTPError(URLError, addinfourl):
+    def __init__(self, url, code, msg, hdrs, fp):
+        self.code = code
+        self.msg = msg
+        self.hdrs = hdrs
+        self.fp = fp
+        URLError.__init__(self, msg)
+        addinfourl.__init__(self, fp, hdrs, url)
+
+    def __str__(self):
+        return 'HTTP Error %s: %s' % (self.code, self.msg)
+```
+
+### `ContentTooShortError` (lines 51 to 60)
+
+<CpyLink path="Lib/urllib/error.py" lines="51-60" />
+
+`ContentTooShortError.__init__` calls `URLError.__init__` with a human-readable message and also stores `content`, the partial data already downloaded, so the caller can inspect or save what arrived before the connection dropped.
+
+```python
+class ContentTooShortError(URLError):
+    def __init__(self, message, content):
+        URLError.__init__(self, message)
+        self.content = content
+```
+
+## gopy mirror
+
+Not yet ported.

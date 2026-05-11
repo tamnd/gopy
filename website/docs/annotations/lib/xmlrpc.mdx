@@ -1,0 +1,171 @@
+---
+title: Lib/xmlrpc/client.py
+description: XML-RPC client that makes remote procedure calls over HTTP using the xmlrpclib wire protocol.
+cpython_path: Lib/xmlrpc/client.py
+cpython_version: "3.14"
+lines: 1400
+status: annotated
+ported_to: ""
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Lib/xmlrpc/client.py`
+
+<CpyLink path="Lib/xmlrpc/client.py" />
+
+`xmlrpc.client` provides a client-side implementation of the XML-RPC protocol. The central
+abstraction is `ServerProxy`, a transparent proxy object whose attribute accesses become
+remote method names and whose calls encode arguments as XML, send them over HTTP, and
+decode the response back into Python types. The module handles the full marshalling
+pipeline from Python objects to the `<methodCall>` XML document and back.
+
+Transport is pluggable. The default `Transport` class opens a plain HTTP connection using
+`http.client.HTTPConnection`. `SafeTransport` subclasses it to use HTTPS. Both classes
+expose `request()` as the single entry point that higher layers call, letting callers swap
+in custom transports for proxies, authentication, or testing without touching `ServerProxy`
+itself.
+
+Batch operations are supported through `MultiCall`. A `MultiCall` instance records method
+calls without executing them, then sends all accumulated calls in a single `system.multicall`
+request. The server processes each sub-call independently and returns a list of results or
+faults, which `MultiCall` unpacks into per-call outcomes. This reduces round-trips when
+many independent methods need to be called together.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| 1-80 | module header, `ExpatParser` import guard | Imports and compatibility shims | |
+| 81-220 | `dumps()`, `loads()` | Top-level marshal/unmarshal entry points | |
+| 221-420 | `Marshaller` | Encodes Python objects to XML-RPC `<value>` nodes | |
+| 421-580 | `Unmarshaller` | SAX-driven decoder mapping XML back to Python types | |
+| 581-720 | `Transport`, `SafeTransport` | HTTP/HTTPS connection management and request dispatch | |
+| 721-820 | `ServerProxy` | Transparent proxy; turns attribute access into method calls | |
+| 821-920 | `MultiCall`, `_MultiCallMethod` | Deferred batch-call builder and result iterator | |
+| 921-1050 | `DateTime`, `Binary` | Wrapper types for XML-RPC datetime and base64 values | |
+| 1051-1200 | `Fault`, `ProtocolError`, `ResponseError` | Exception hierarchy for server and transport errors | |
+| 1201-1400 | `boolean`, `_datetime`, helper constants | Sentinel values, format strings, and minor utilities | |
+
+## Reading
+
+### Module-level marshalling entry points (lines 81 to 220)
+
+<CpyLink path="Lib/xmlrpc/client.py" lines="81-220" />
+
+`dumps()` and `loads()` are the public marshal/unmarshal API. `dumps()` accepts a tuple of
+arguments (and an optional method name) and returns a UTF-8 XML string. `loads()` parses
+an XML-RPC response or fault document and returns `(params, methodname)`. Both delegate
+immediately to `Marshaller` and `Unmarshaller` respectively.
+
+```python
+def dumps(params, methodname=None, methodresponse=None,
+          encoding=None, allow_none=False):
+    if isinstance(params, Fault):
+        methodresponse = 1
+    elif methodresponse and isinstance(params, tuple):
+        assert len(params) == 1, "response tuple must be a singleton"
+    ...
+    m = Marshaller(encoding, allow_none)
+    data = m.dumps(params)
+    ...
+```
+
+### Marshaller: encoding Python types (lines 221 to 420)
+
+<CpyLink path="Lib/xmlrpc/client.py" lines="221-420" />
+
+`Marshaller` walks a Python value tree and emits XML-RPC `<value>` elements. It dispatches
+on `type(value)` through a `dispatch` dict that maps each built-in type to a `dump_*`
+method. Unsupported types raise `TypeError`. `bool` must be checked before `int` because
+`bool` is a subclass of `int` in Python.
+
+```python
+dispatch = {}
+
+def dump_int(self, value, write):
+    write("<value><int>%d</int></value>\n" % value)
+dispatch[int] = dump_int
+
+def dump_bool(self, value, write):
+    write("<value><boolean>%d</boolean></value>\n" % bool(value))
+dispatch[bool] = dump_bool
+
+def dump_double(self, value, write):
+    write("<value><double>%r</double></value>\n" % value)
+dispatch[float] = dump_double
+```
+
+### Unmarshaller: SAX-driven decoding (lines 421 to 580)
+
+<CpyLink path="Lib/xmlrpc/client.py" lines="421-580" />
+
+`Unmarshaller` implements the SAX `ContentHandler` interface. It maintains a `_stack` of
+in-progress values and a `_marks` list of stack positions for arrays and structs. On
+`endElement` events the top of the stack is coerced to the typed Python value and pushed
+back. Faults in the response XML become `Fault` exceptions raised from `close()`.
+
+```python
+def end_int(self, data):
+    self.append(int(data))
+    self._value = 0
+
+def end_array(self, data):
+    mark = self._marks.pop()
+    # slice the stack down to the mark, assemble list
+    self._stack[mark:] = [self._stack[mark:]]
+    self._value = 0
+
+def close(self):
+    if self._type is None or self._marks:
+        raise ResponseError()
+    if self._type == "fault":
+        raise Fault(**self._stack[0])
+    return tuple(self._stack)
+```
+
+### Transport and SafeTransport (lines 581 to 720)
+
+<CpyLink path="Lib/xmlrpc/client.py" lines="581-720" />
+
+`Transport.request()` is the single method that `ServerProxy` calls. It builds the HTTP
+headers (Content-Type, Content-Length, User-Agent), opens a connection via
+`make_connection()`, sends the request body, and parses the response with
+`parse_response()`. `SafeTransport` overrides `make_connection()` to return an
+`HTTPSConnection` instead, reusing all other logic.
+
+```python
+def request(self, host, handler, request_body, verbose=False):
+    http_conn = self.send_request(host, handler, request_body, verbose)
+    resp = http_conn.getresponse()
+    if resp.status != 200:
+        raise ProtocolError(host + handler, resp.status,
+                            resp.reason, resp.msg)
+    return self.parse_response(resp)
+```
+
+### ServerProxy and MultiCall (lines 721 to 920)
+
+<CpyLink path="Lib/xmlrpc/client.py" lines="721-920" />
+
+`ServerProxy.__getattr__` returns a `_Method` closure that captures the method name. When
+called, `_Method.__call__` invokes `ServerProxy._ServerProxy__request`, which marshals
+args, calls `Transport.request`, and unmarshals the result. `MultiCall` works similarly
+but stores `_MultiCallMethod` closures that append to a call list instead of sending.
+After all methods are queued, calling the `MultiCall` object sends a single
+`system.multicall` request and returns a generator of per-call results.
+
+```python
+class _Method:
+    def __init__(self, send, name):
+        self.__send = send
+        self.__name = name
+    def __call__(self, *args):
+        return self.__send(self.__name, args)
+    def __getattr__(self, name):
+        return _Method(self.__send, "%s.%s" % (self.__name, name))
+```
+
+## gopy mirror
+
+Not yet ported.

@@ -1,0 +1,235 @@
+---
+title: Modules/_lsprof.c
+description: C backend for cProfile; implements the Profiler type, the sys.setprofile callback, and the rotating hash map used to accumulate per-call timing.
+cpython_path: Modules/_lsprof.c
+cpython_version: "3.14"
+lines: 804
+status: annotated
+ported_to: module/cProfile/module.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Modules/_lsprof.c`
+
+<CpyLink path="Modules/_lsprof.c" />
+
+`_lsprof.c` is the C extension that backs Python's `cProfile` module.
+It exposes a single public type, `_lsprof.Profiler`, which installs itself
+as the interpreter's profile hook via `PyEval_SetProfile`. Every function
+call and return generates a callback into `profiler_callback`; the
+callback accumulates timing data in a custom open-addressed hash map
+(`rotating_node_t`) keyed by `(code object, parent code object)` identity.
+
+The high-level Python API (`cProfile.Profile.enable`, `.disable`,
+`.getstats`) is a thin wrapper in `Lib/cProfile.py` that delegates to this
+C type. The `pstats` module consumes the list of `CastatsEntry` tuples
+returned by `profiler_getstats`.
+
+The name "lsprof" comes from the original author's profiler library
+(Larry Sproul). The module was integrated into CPython in 2.5.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Modules/_lsprof.c" lines="1-55">1-55</Cpy> | `rotating_node_t`, `_ProfilerEntry`, `_ProfilerSubEntry` | Core data structures: hash map node, per-function stats, per-caller stats. | `module/cProfile/module.go` |
+| <Cpy path="Modules/_lsprof.c" lines="56-180">56-180</Cpy> | `RotatingTree_*` | Open-addressed rotating hash map: `Get`, `Set`, `Enum` over `(code, parent)` keys. | `module/cProfile/module.go:rotatingTree` |
+| <Cpy path="Modules/_lsprof.c" lines="181-260">181-260</Cpy> | `_lsprof_GetTimerFrequency`, `hpTimer`, `hpTimerUnit` | Platform high-resolution timer abstraction; computes `factor` (seconds per tick). | `module/cProfile/module.go:timer` |
+| <Cpy path="Modules/_lsprof.c" lines="261-350">261-350</Cpy> | `ProfilerObject`, `profiler_callback` | The `sys.setprofile` hook. Dispatches on `event` string to `ptrace_enter_call` / `ptrace_leave_call`. | `module/cProfile/module.go:callback` |
+| <Cpy path="Modules/_lsprof.c" lines="351-460">351-460</Cpy> | `ptrace_enter_call`, `ptrace_leave_call`, `ptrace_enter_c_call`, `ptrace_leave_c_call` | Per-event handlers: find or create the hash map entry, record start time, accumulate elapsed time on exit. | `module/cProfile/module.go:traceEnter/traceLeave` |
+| <Cpy path="Modules/_lsprof.c" lines="461-560">461-560</Cpy> | `profiler_enable`, `profiler_disable`, `profiler_clear` | Public methods: install / remove the profile hook; zero all accumulated stats. | `module/cProfile/module.go:Enable/Disable/Clear` |
+| <Cpy path="Modules/_lsprof.c" lines="561-680">561-680</Cpy> | `statscallback`, `profiler_getstats` | Walk the hash map and build the Python list of `(key, callcount, reccallcount, totaltime, inlinetime)` tuples. | `module/cProfile/module.go:GetStats` |
+| <Cpy path="Modules/_lsprof.c" lines="681-804">681-804</Cpy> | `ProfilerType`, `_lsprof_module`, `PyInit__lsprof` | Type object, method table, module definition, and entry point. | `module/cProfile/module.go:Module` |
+
+## Reading
+
+### Data structures (lines 1 to 55)
+
+<CpyLink path="Modules/_lsprof.c" lines="1-55" />
+
+Three C structs carry all profiling state:
+
+```c
+/* A node in the rotating hash map. Key is (code, parent). */
+typedef struct _rotating_node {
+    PyObject        *key;          /* the code object (or C callable) */
+    struct _rotating_node *next;   /* collision chain */
+    _ProfilerEntry  *entry;        /* points to the per-function stats */
+} rotating_node_t;
+
+typedef struct {
+    PyObject_HEAD
+    rotating_node_t *calls;        /* hash map root */
+    double           factor;       /* seconds-per-timer-tick */
+    /* ... enable/disable flag, subcalls flag, builtins flag ... */
+} ProfilerObject;
+
+typedef struct {
+    PyObject        *info;         /* (filename, lineno, funcname) tuple */
+    long long        callcount;
+    long long        reccallcount;
+    double           totaltime;
+    double           inlinetime;
+    rotating_node_t *calls;        /* sub-call map for this function */
+} _ProfilerEntry;
+```
+
+`totaltime` counts all time spent in the function and its callees.
+`inlinetime` subtracts the time spent in direct callees, giving the
+function's own contribution. Both are stored in raw timer ticks and
+multiplied by `factor` when `profiler_getstats` materialises the Python
+tuples.
+
+### `profiler_callback`: the profile hook (lines 261 to 350)
+
+<CpyLink path="Modules/_lsprof.c" lines="261-350" />
+
+`profiler_callback` is registered with `PyEval_SetProfile` and receives
+every call and return event in the interpreter:
+
+```c
+static int
+profiler_callback(PyObject *self, PyFrameObject *frame,
+                  int what, PyObject *arg)
+{
+    ProfilerObject *pObj = (ProfilerObject *)self;
+    switch (what) {
+    case PyTrace_CALL:
+        return ptrace_enter_call(pObj, (PyObject *)frame,
+                                 (PyObject *)PyFrame_GetCode(frame));
+    case PyTrace_RETURN:
+        return ptrace_leave_call(pObj, (PyObject *)frame,
+                                 (PyObject *)PyFrame_GetCode(frame));
+    case PyTrace_C_CALL:
+        if (pObj->flags & POF_BUILTINS)
+            return ptrace_enter_c_call(pObj, (PyObject *)frame, arg);
+        break;
+    case PyTrace_C_RETURN:
+    case PyTrace_C_EXCEPTION:
+        if (pObj->flags & POF_BUILTINS)
+            return ptrace_leave_c_call(pObj, (PyObject *)frame, arg);
+        break;
+    }
+    return 0;
+}
+```
+
+The `arg` parameter carries the C function object for `C_CALL` /
+`C_RETURN` / `C_EXCEPTION` events, and `NULL` for Python call/return. The
+`POF_BUILTINS` flag corresponds to `profiler_enable`'s `builtins`
+parameter; when it is off, C extension calls are ignored to reduce
+overhead.
+
+### `ptrace_enter_call` and `ptrace_leave_call`: timing accumulation (lines 351 to 460)
+
+<CpyLink path="Modules/_lsprof.c" lines="351-460" />
+
+On entry the handler records a start timestamp in the hash-map entry;
+on exit it computes elapsed time and distributes it:
+
+```c
+static int
+ptrace_enter_call(ProfilerObject *pObj, PyObject *frame, PyObject *key)
+{
+    _ProfilerEntry *entry = _lsprof_GetEntry(pObj, frame, key);
+    if (entry == NULL) return -1;
+    entry->callcount++;
+    /* detect recursion by checking whether this entry is already active */
+    if (entry->tt_start != 0) {
+        entry->reccallcount++;
+    } else {
+        entry->tt_start = hpTimer();
+    }
+    return 0;
+}
+
+static int
+ptrace_leave_call(ProfilerObject *pObj, PyObject *frame, PyObject *key)
+{
+    _ProfilerEntry *entry = _lsprof_GetEntry(pObj, frame, key);
+    if (entry == NULL || entry->tt_start == 0) return 0;
+    long long tt = hpTimer();
+    long long elapsed = tt - entry->tt_start;
+    entry->tt_start = 0;
+    entry->totaltime += elapsed;
+    /* subtract from the parent's inlinetime */
+    _ProfilerEntry *caller = _lsprof_GetCaller(pObj, frame, key);
+    if (caller != NULL) {
+        caller->inlinetime -= elapsed;
+    }
+    return 0;
+}
+```
+
+Recursion is detected by checking whether `tt_start` is already set.
+Recursive calls increment `reccallcount` but do not restart the timer,
+so the outermost call's elapsed time covers the full recursive stack.
+The parent-subtraction pattern means `inlinetime` is computed
+incrementally rather than in a post-processing step.
+
+### `profiler_getstats`: materialising the stats list (lines 561 to 680)
+
+<CpyLink path="Modules/_lsprof.c" lines="561-680" />
+
+`profiler_getstats` walks the entire hash map and converts each
+`_ProfilerEntry` to a Python tuple:
+
+```c
+static PyObject *
+profiler_getstats(ProfilerObject *pObj, PyObject *noarg)
+{
+    statscallback_data d;
+    d.list = PyList_New(0);
+    if (d.list == NULL) return NULL;
+    d.factor = pObj->factor;
+    if (RotatingTree_Enum(pObj->calls, statscallback, &d) != 0) {
+        Py_DECREF(d.list);
+        return NULL;
+    }
+    return d.list;
+}
+
+static int
+statscallback(void *arg, _ProfilerEntry *entry)
+{
+    statscallback_data *d = (statscallback_data *)arg;
+    /* totaltime and inlinetime are in raw ticks; multiply by factor */
+    PyObject *item = PyTuple_Pack(5,
+        entry->info,
+        PyLong_FromLongLong(entry->callcount),
+        PyLong_FromLongLong(entry->reccallcount),
+        PyFloat_FromDouble(entry->totaltime  * d->factor),
+        PyFloat_FromDouble(entry->inlinetime * d->factor));
+    if (item == NULL) return -1;
+    return PyList_Append(d->list, item);
+}
+```
+
+`entry->info` is a `(filename, lineno, funcname)` tuple built when the
+entry was first created. For C callables it is a 3-tuple of the form
+`('', 0, repr(callable))`. The `factor` conversion produces wall-clock
+seconds as `float`, which is what `pstats.Stats` expects.
+
+## gopy mirror
+
+`module/cProfile/module.go` is pending. The plan is to implement
+`ProfilerObject` using Go's `runtime/pprof` infrastructure for the
+timer, with the `rotating_node_t` hash map replaced by a Go `map` keyed
+on a `[2]uintptr` frame-identity pair. The `profiler_callback` logic
+maps to a `vm.ProfileHook` registered via the interpreter's profile hook
+interface, which mirrors `PyEval_SetProfile`.
+
+The `getstats` output format must match CPython exactly because
+`pstats.Stats` unpacks the tuples by position.
+
+## CPython 3.14 changes
+
+`profiler_callback` was updated in 3.12 to use the new `PyFrameObject`
+deprecation path: the `frame` argument is now a `PyObject *` that may be
+a `_PyInterpreterFrame *` under the hood, accessed via
+`PyFrame_GetCode`. The internal field layout of `_ProfilerEntry` is
+otherwise unchanged since 2.5. In 3.13, `hpTimer` gained a
+`_lsprof_GetTimerFrequency` helper to normalize tick frequency across
+platforms without relying on `QueryPerformanceFrequency` directly on
+Windows.

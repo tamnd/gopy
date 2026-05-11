@@ -1,0 +1,218 @@
+---
+title: Lib/http/server.py
+description: Pure-Python HTTP/1.x server built on socketserver; provides BaseHTTPRequestHandler, SimpleHTTPRequestHandler, and CGIHTTPRequestHandler.
+cpython_path: Lib/http/server.py
+cpython_version: "3.14"
+lines: 1300
+status: annotated
+ported_to: (stdlib pending)
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Lib/http/server.py`
+
+<CpyLink path="Lib/http/server.py" />
+
+`http.server` is a pure-Python module layered on `socketserver`. It
+provides three request-handler classes of increasing capability.
+`BaseHTTPRequestHandler` parses the request line and headers, manages
+the response lifecycle, and logs requests. `SimpleHTTPRequestHandler`
+adds static file serving with directory listings and MIME-type detection
+via `mimetypes`. `CGIHTTPRequestHandler` adds subprocess-based CGI
+execution.
+
+`HTTPServer` is simply `TCPServer` with `allow_reuse_address = True`.
+The real work happens inside the handler class hierarchy.
+`BaseHTTPRequestHandler.handle_one_request` drives the parse/dispatch
+loop: it reads one HTTP request, routes it to `do_METHOD`, and then
+returns. Persistent connections (HTTP/1.1 keep-alive) repeat the loop
+via `handle`, which calls `handle_one_request` in a `while` loop until
+the handler clears `close_connection`.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Lib/http/server.py" lines="1-100">1-100</Cpy> | Module imports, `__version__`, `DEFAULT_ERROR_*` | Module prologue; `mimetypes` import for MIME guessing; default HTML error template strings. | `(stdlib pending)` |
+| <Cpy path="Lib/http/server.py" lines="101-200">101-200</Cpy> | `HTTPServer`, `ThreadingHTTPServer` | Thin `TCPServer` subclasses; `HTTPServer` sets `allow_reuse_address`; `ThreadingHTTPServer` mixes in `socketserver.ThreadingMixIn`. | `(stdlib pending)` |
+| <Cpy path="Lib/http/server.py" lines="201-400">201-400</Cpy> | `BaseHTTPRequestHandler` class body, `parse_request` | Reads the request line, checks protocol version, populates `command`/`path`/`request_version`; validates the HTTP version string. | `(stdlib pending)` |
+| <Cpy path="Lib/http/server.py" lines="401-500">401-500</Cpy> | `send_response`, `send_header`, `end_headers`, `send_error` | Writes status line and header bytes to `wfile`; `end_headers` emits the blank line and flushes. | `(stdlib pending)` |
+| <Cpy path="Lib/http/server.py" lines="501-700">501-700</Cpy> | `SimpleHTTPRequestHandler`, `do_GET`, `do_HEAD` | Maps `path` to a file on disk via `translate_path`; serves the body for GET, headers only for HEAD. | `(stdlib pending)` |
+| <Cpy path="Lib/http/server.py" lines="701-900">701-900</Cpy> | `send_head`, `guess_type`, Range-request support | Opens the file, resolves MIME type, handles `Range:` header for partial content (206); falls back to full 200 on errors. | `(stdlib pending)` |
+| <Cpy path="Lib/http/server.py" lines="901-1100">901-1100</Cpy> | `list_directory` | Builds an HTML page of directory entries using `os.listdir`; sorts case-insensitively; emits `Content-Type: text/html`. | `(stdlib pending)` |
+| <Cpy path="Lib/http/server.py" lines="1100-1300">1100-1300</Cpy> | `CGIHTTPRequestHandler`, `run_cgi` | Forks a subprocess for CGI scripts; sets the CGI environment dict; pipes `rfile` to the child's stdin and the child's stdout back to `wfile`. | `(stdlib pending)` |
+
+## Reading
+
+### `parse_request` HTTP line parsing (lines 201 to 400)
+
+<CpyLink path="Lib/http/server.py" lines="201-400" />
+
+```python
+def parse_request(self):
+    requestline = str(self.raw_requestline, 'iso-8859-1')
+    requestline = requestline.rstrip('\r\n')
+    self.requestline = requestline
+    words = requestline.split()
+    if len(words) == 0:
+        return False
+    if len(words) >= 3:  # Method SP Request-URI SP HTTP-Version
+        version = words[-1]
+        try:
+            if not version.startswith('HTTP/'):
+                raise ValueError
+            base_version_number = version.split('/', 1)[1]
+            version_number = base_version_number.split('.')
+            if len(version_number) != 2:
+                raise ValueError
+            version_number = int(version_number[0]), int(version_number[1])
+        except (ValueError, IndexError):
+            self.send_error(
+                HTTPStatus.BAD_REQUEST,
+                f"Bad request version ({version!r})")
+            return False
+        if version_number >= (2, 0):
+            self.send_error(
+                HTTPStatus.HTTP_VERSION_NOT_SUPPORTED,
+                f"Invalid HTTP version ({base_version_number!r})")
+            return False
+        self.request_version = version
+    if not 2 <= len(words) <= 3:
+        self.send_error(
+            HTTPStatus.BAD_REQUEST,
+            f"Bad HTTP/0.9 request type ({requestline!r})")
+        return False
+    self.command, self.path = words[0], words[1]
+    return True
+```
+
+`parse_request` decodes the raw bytes as ISO-8859-1, which is the
+encoding mandated by RFC 7230 for the request line. It accepts both
+HTTP/1.x (three tokens) and HTTP/0.9 (two tokens, no version). Any
+version of HTTP/2.0 or higher is rejected with 505; that check uses
+a tuple comparison on the two integer components rather than string
+comparison. After a successful parse, `command`, `path`, and
+`request_version` are set on `self` for the `do_METHOD` dispatch.
+
+### `do_GET` file serving (lines 501 to 700)
+
+<CpyLink path="Lib/http/server.py" lines="501-700" />
+
+```python
+def do_GET(self):
+    f = self.send_head()
+    if f:
+        try:
+            self.copyfile(f, self.wfile)
+        finally:
+            f.close()
+
+def send_head(self):
+    path = self.translate_path(self.path)
+    f = None
+    if os.path.isdir(path):
+        parts = urllib.parse.urlsplit(self.path)
+        if not parts.path.endswith('/'):
+            self.send_response(HTTPStatus.MOVED_PERMANENTLY)
+            new_parts = (parts[0], parts[1], parts[2] + '/',
+                         parts[3], parts[4])
+            new_url = urllib.parse.urlunsplit(new_parts)
+            self.send_header("Location", new_url)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return None
+        for index in "index.html", "index.htm":
+            index = os.path.join(path, index)
+            if os.path.isfile(index):
+                path = index
+                break
+        else:
+            return self.list_directory(path)
+    ctype = self.guess_type(path)
+    ...
+    try:
+        f = open(path, 'rb')
+    except OSError:
+        self.send_error(HTTPStatus.NOT_FOUND, "File not found")
+        return None
+```
+
+`do_GET` delegates entirely to `send_head`, which both sends the
+response headers and returns the open file object. `do_HEAD` calls
+`send_head` and discards the file without reading it. Separating
+header logic from body copying lets both methods share one code path.
+
+`translate_path` strips query strings, decodes percent-encoding, and
+resolves relative components against the server's `directory`
+attribute (defaulting to `os.getcwd()`). Directory URLs without a
+trailing slash are redirected to the canonical form with one.
+
+### Directory listing HTML (lines 901 to 1100)
+
+<CpyLink path="Lib/http/server.py" lines="901-1100" />
+
+```python
+def list_directory(self, path):
+    try:
+        list = os.listdir(path)
+    except OSError:
+        self.send_error(
+            HTTPStatus.NOT_FOUND,
+            "No permission to list directory")
+        return None
+    list.sort(key=lambda a: a.lower())
+    r = []
+    try:
+        displaypath = urllib.parse.unquote(self.path,
+                                           errors='surrogatepass')
+    except UnicodeDecodeError:
+        displaypath = urllib.parse.unquote(str(self.path))
+    displaypath = html.escape(displaypath, quote=False)
+    enc = sys.getfilesystemencoding()
+    title = f'Directory listing for {displaypath}'
+    r.append('<!DOCTYPE HTML>')
+    r.append(f'<html>\n<head>\n<meta charset="{enc}">\n'
+             f'<title>{title}</title>\n</head>')
+    r.append(f'<body>\n<h1>{title}</h1>')
+    r.append('<hr>\n<ul>')
+    for name in list:
+        fullname = os.path.join(path, name)
+        displayname = linkname = name
+        if os.path.isdir(fullname):
+            displayname = name + "/"
+            linkname = name + "/"
+        if os.path.islink(fullname):
+            displayname = name + "@"
+        r.append('<li><a href="%s">%s</a></li>'
+                 % (urllib.parse.quote(linkname,
+                                       errors='surrogatepass'),
+                    html.escape(displayname, quote=False)))
+    r.append('</ul>\n<hr>\n</body>\n</html>\n')
+    encoded = '\n'.join(r).encode(enc, 'surrogateescape')
+    f = io.BytesIO()
+    f.write(encoded)
+    f.seek(0)
+    self.send_response(HTTPStatus.OK)
+    self.send_header("Content-type", f"text/html; charset={enc}")
+    self.send_header("Content-Length", str(len(encoded)))
+    self.end_headers()
+    return f
+```
+
+`list_directory` builds the HTML entirely in memory, wraps it in a
+`BytesIO`, and returns it so `do_GET` can call `copyfile` on it. The
+encoding follows `sys.getfilesystemencoding()` with surrogate-escape
+error handling so that non-UTF-8 filenames can still be listed. All
+user-visible strings go through `html.escape` to prevent reflected
+injection from directory or file names. Symlinks get a trailing `@`,
+directories get `/`, in the same style as the Unix `ls -F` flag.
+
+## gopy mirror
+
+`http.server` is not yet in gopy's stdlib bundle. The module has no
+runtime dependency on CPython internals: it only uses `socketserver`,
+`socket`, `os`, `io`, `mimetypes`, `urllib.parse`, and `html`. A gopy
+port would need `socketserver` first, then can layer the handler classes
+on top with straightforward translations of the string-building and file
+I/O paths.

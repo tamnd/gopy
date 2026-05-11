@@ -1,0 +1,174 @@
+---
+title: Modules/_codecsmodule.c
+description: Core C implementation of the codecs module, exporting the codec registry and all built-in encode/decode functions.
+cpython_path: Modules/_codecsmodule.c
+cpython_version: "3.14"
+lines: 1099
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Modules/_codecsmodule.c`
+
+<CpyLink path="Modules/_codecsmodule.c" />
+
+`_codecs` is the C backbone of Python's codec system. `Lib/codecs.py` imports
+this module at startup and re-exports everything under the public `codecs` name.
+The file covers three areas: the codec registry (`register`, `unregister`,
+`lookup`, `encode`, `decode`), the error-handler registry
+(`register_error`, `lookup_error`, `_unregister_error`), and a large set of
+built-in codec wrappers for UTF-8, UTF-16, UTF-32, UTF-7, Latin-1, ASCII,
+charmap, escape, raw-unicode-escape, and (on Windows) MBCS/OEM/code-page codecs.
+Every codec wrapper delegates immediately into `Objects/unicodeobject.c` via the
+`PyUnicode_*` / `_PyUnicode_*` family. The file contains no codec logic of its
+own: it is a pure argument-adaptation and dispatch layer.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| 1-48 | headers, clinic boilerplate | `Python.h`, `pycore_codecs.h`, `pycore_unicodeobject.h`, clinic include | - |
+| 63-71 | `_codecs_register` | Register a codec search function via `PyCodec_Register` | - |
+| 83-92 | `_codecs_unregister` | Remove a codec search function via `PyCodec_Unregister` | - |
+| 102-107 | `_codecs_lookup_impl` | Look up a codec by name; returns a `CodecInfo` object | - |
+| 124-134 | `_codecs_encode_impl` | Encode an object using a named codec (default `utf-8`) | - |
+| 151-161 | `_codecs_decode_impl` | Decode an object using a named codec (default `utf-8`) | - |
+| 165-172 | `codec_tuple` | Helper: wrap a decoded/encoded object and its length into a `(obj, n)` tuple | - |
+| 182-190 | `_codecs_escape_decode_impl` | Decode Python byte-string escape sequences | - |
+| 199-253 | `_codecs_escape_encode_impl` | Encode a `bytes` object as an escaped byte string | - |
+| 264-274 | `_codecs_utf_7_decode_impl` | Stateful UTF-7 decode | - |
+| 284-294 | `_codecs_utf_8_decode_impl` | Stateful UTF-8 decode | - |
+| 304-316 | `_codecs_utf_16_decode_impl` | Stateful UTF-16 decode (native byte order) | - |
+| 326-338 | `_codecs_utf_16_le_decode_impl` | Stateful UTF-16-LE decode | - |
+| 348-360 | `_codecs_utf_16_be_decode_impl` | Stateful UTF-16-BE decode | - |
+| 378-392 | `_codecs_utf_16_ex_decode_impl` | UTF-16 decode, exposes byteorder to caller | - |
+| 401-414 | `_codecs_utf_32_decode_impl` | Stateful UTF-32 decode | - |
+| 424-436 | `_codecs_utf_32_le_decode_impl` | Stateful UTF-32-LE decode | - |
+| 446-458 | `_codecs_utf_32_be_decode_impl` | Stateful UTF-32-BE decode | - |
+| 476-488 | `_codecs_utf_32_ex_decode_impl` | UTF-32 decode, exposes byteorder to caller | - |
+| 498-508 | `_codecs_unicode_escape_decode_impl` | Decode `\uXXXX` / `\UXXXXXXXX` escape sequences | - |
+| 518-528 | `_codecs_raw_unicode_escape_decode_impl` | Decode `\uXXXX` raw escape sequences | - |
+| 537-544 | `_codecs_latin_1_decode_impl` | Latin-1 decode | - |
+| 553-560 | `_codecs_ascii_decode_impl` | ASCII decode | - |
+| 570-582 | `_codecs_charmap_decode_impl` | Decode using an arbitrary charmap mapping | - |
+| 584-644 | `_codecs_mbcs_decode_impl`, `_codecs_oem_decode_impl`, `_codecs_code_page_decode_impl` | Windows-only MBCS/OEM/code-page decoders | - |
+| 656-664 | `_codecs_readbuffer_encode_impl` | Copy a buffer verbatim as bytes (identity encode) | - |
+| 673-680 | `_codecs_utf_7_encode_impl` | UTF-7 encode | - |
+| 689-696 | `_codecs_utf_8_encode_impl` | UTF-8 encode | - |
+| 713-720 | `_codecs_utf_16_encode_impl` | UTF-16 encode with optional BOM | - |
+| 729-736 | `_codecs_utf_16_le_encode_impl` | UTF-16-LE encode | - |
+| 745-752 | `_codecs_utf_16_be_encode_impl` | UTF-16-BE encode | - |
+| 769-776 | `_codecs_utf_32_encode_impl` | UTF-32 encode with optional BOM | - |
+| 785-792 | `_codecs_utf_32_le_encode_impl` | UTF-32-LE encode | - |
+| 801-808 | `_codecs_utf_32_be_encode_impl` | UTF-32-BE encode | - |
+| 817-824 | `_codecs_unicode_escape_encode_impl` | Encode as `\uXXXX` escape sequences | - |
+| 833-840 | `_codecs_raw_unicode_escape_encode_impl` | Encode as raw `\uXXXX` escape sequences | - |
+| 849-856 | `_codecs_latin_1_encode_impl` | Latin-1 encode | - |
+| 865-872 | `_codecs_ascii_encode_impl` | ASCII encode | - |
+| 882-892 | `_codecs_charmap_encode_impl` | Encode using an arbitrary charmap mapping | - |
+| 900-905 | `_codecs_charmap_build_impl` | Build a decoding map from an encoding string | - |
+| 907-955 | `_codecs_mbcs_encode_impl`, `_codecs_oem_encode_impl`, `_codecs_code_page_encode_impl` | Windows-only MBCS/OEM/code-page encoders | - |
+| 972-981 | `_codecs_register_error_impl` | Register a named error handler | - |
+| 1000-1005 | `_codecs__unregister_error_impl` | Remove a named error handler | - |
+| 1018-1023 | `_codecs_lookup_error_impl` | Retrieve a named error handler | - |
+| 1027-1099 | `_codecs_functions`, `_codecs_slots`, `codecsmodule`, `PyInit__codecs` | Method table, module def, init | - |
+
+## Reading
+
+### Registry dispatch: `encode` and `decode` (lines 124 to 161)
+
+<CpyLink path="Modules/_codecsmodule.c" lines="124-161" />
+
+The two generic entry points are deliberately minimal. They exist only to supply
+a default encoding and forward to the registry:
+
+```c
+static PyObject *
+_codecs_encode_impl(PyObject *module, PyObject *obj,
+                    const char *encoding, const char *errors)
+{
+    if (encoding == NULL)
+        encoding = PyUnicode_GetDefaultEncoding();
+    return PyCodec_Encode(obj, encoding, errors);
+}
+
+static PyObject *
+_codecs_decode_impl(PyObject *module, PyObject *obj,
+                    const char *encoding, const char *errors)
+{
+    if (encoding == NULL)
+        encoding = PyUnicode_GetDefaultEncoding();
+    return PyCodec_Decode(obj, encoding, errors);
+}
+```
+
+`PyCodec_Encode` and `PyCodec_Decode` live in `Python/codecs.c`. They look up
+the codec by name, call the appropriate encoder or decoder callable, and validate
+the return type. The `_codecs` module never touches the registry data structures
+directly.
+
+### `codec_tuple` and the (result, length) convention (lines 165 to 172)
+
+<CpyLink path="Modules/_codecsmodule.c" lines="165-172" />
+
+Every built-in codec wrapper returns not just the encoded/decoded object but also
+the number of input units consumed. This is the protocol that `codecs.py`'s
+`IncrementalDecoder` relies on for streaming:
+
+```c
+static PyObject *
+codec_tuple(PyObject *decoded, Py_ssize_t len)
+{
+    if (decoded == NULL)
+        return NULL;
+    return Py_BuildValue("Nn", decoded, len);
+}
+```
+
+`N` means "steal reference" (no extra `Py_DECREF` needed on `decoded`). `n`
+is `Py_ssize_t`. The wrapper functions typically pass `data->len` for
+fixed-length codecs (Latin-1, ASCII) and a `consumed` variable for stateful
+codecs that may stop short of the full buffer.
+
+### Stateful UTF-8 decode (lines 284 to 294)
+
+<CpyLink path="Modules/_codecsmodule.c" lines="284-294" />
+
+The stateful variant is used by `StreamReader` and incremental decoders. When
+`final` is `False`, the decoder stops at the last complete character, leaving
+any trailing partial sequence to be fed in the next call:
+
+```c
+static PyObject *
+_codecs_utf_8_decode_impl(PyObject *module, Py_buffer *data,
+                          const char *errors, int final)
+{
+    Py_ssize_t consumed = data->len;
+    PyObject *decoded = PyUnicode_DecodeUTF8Stateful(
+        data->buf, data->len, errors,
+        final ? NULL : &consumed);
+    return codec_tuple(decoded, consumed);
+}
+```
+
+When `final` is `True`, `consumed` is passed as `NULL` which tells
+`PyUnicode_DecodeUTF8Stateful` to treat a trailing incomplete sequence as an
+error. When `final` is `False`, `consumed` is updated to the number of bytes
+actually decoded, and `codec_tuple` returns that smaller count so the caller
+can resume from the correct position.
+
+## gopy mirror
+
+Basic UTF-8 and ASCII encode/decode is handled natively in the gopy `codecs`
+package. The full codec registry, error-handler registry, and the remaining
+built-in codecs (UTF-16, UTF-32, UTF-7, Latin-1, charmap, escape variants) are
+pending.
+
+## CPython 3.14 changes
+
+3.14 added `_codecs.unregister` (lines 83-92) as the public counterpart to the
+previously private `_PyCodec_Unregister`, letting users remove search functions
+registered at runtime. It also added `_codecs._unregister_error` (lines 1000-1005)
+to complement `register_error`, following the same pattern. Both additions carry
+the `Py_mod_gil = Py_MOD_GIL_NOT_USED` slot introduced for free-threaded builds.

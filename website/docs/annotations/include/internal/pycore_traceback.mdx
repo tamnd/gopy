@@ -1,0 +1,74 @@
+---
+title: Include/internal/pycore_traceback.h
+description: Internal traceback API for creating, printing, and inspecting Python traceback objects.
+cpython_path: Include/internal/pycore_traceback.h
+cpython_version: "3.14"
+lines: ~60
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Include/internal/pycore_traceback.h`
+
+<CpyLink path="Include/internal/pycore_traceback.h" />
+
+This header declares the interpreter-internal traceback API. The public surface (`PyTraceBack_Here`, `PyTraceBack_Print`) is thin; almost all real work goes through the internal symbols here. Traceback objects form a singly-linked list via `tb_next`, with each node pointing to a frozen snapshot of the frame that raised or propagated the exception. The internal functions expose printing with indentation control and direct source-line rendering, both of which the public API wraps.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| ~10-15 | `_PyTracebackObject` | Struct layout (tb_next, tb_frame, tb_lasti, tb_lineno) | not ported |
+| ~18 | `_PyTraceBack_Here` | Prepend a new traceback node for the current frame | partial (see `errors/traceback.go`) |
+| ~22 | `_PyTraceBack_Print_Indented` | Print traceback to a file with a given indent and margin | not ported |
+| ~28 | `_Py_DisplaySourceLine` | Render one source line from a file at a given line number | not ported |
+| ~34 | `_PyTraceback_WriteFilenameAndLine` | Write `File "...", line N` prefix to a writer | not ported |
+
+## Reading
+
+### The traceback struct (lines ~10 to 20)
+
+The `_PyTracebackObject` struct is the concrete layout behind every `PyObject *` that has type `PyTraceBack_Type`. It mirrors the public fields documented in the data model but adds the `tb_lasti` byte-offset field that the printer uses to map back to a source line:
+
+```c
+typedef struct _PyTracebackObject {
+    PyObject_HEAD
+    struct _PyTracebackObject *tb_next;
+    PyFrameObject *tb_frame;
+    int tb_lasti;
+    int tb_lineno;
+} PyTracebackObject;
+```
+
+`tb_next` is the older frame (the one that called into the frame that raised). Traversing `tb_next` to `NULL` therefore walks from the innermost to the outermost frame, which is the reverse of the print order. The printer reverses the list before rendering.
+
+### `_PyTraceBack_Here` (lines ~18 to 24)
+
+`_PyTraceBack_Here` is called at the raise site and at every `RERAISE` / frame-unwind step in the eval loop. It allocates a new `PyTracebackObject`, fills `tb_frame` with the current frame (incrementing its reference count), sets `tb_lasti` and `tb_lineno` from the frame's instruction pointer, then prepends the node to `exc_info->exc_traceback`:
+
+```c
+int _PyTraceBack_Here(PyFrameObject *frame);
+```
+
+The return value is 0 on success, -1 if allocation fails. A `-1` return leaves the existing traceback chain intact; the interpreter checks this and treats allocation failure as a fatal memory error during unwind.
+
+### `_Py_DisplaySourceLine` (lines ~28 to 36)
+
+This function is the low-level source renderer used by both the interactive REPL and the traceback printer. It takes a `PyObject *` filename, an integer line number, and an indent count, then opens the source file, seeks to the correct line, and writes it (with leading whitespace stripped and the caret marker positioned) to `f`:
+
+```c
+int _Py_DisplaySourceLine(PyObject *f, PyObject *filename,
+                          int lineno, int indent,
+                          int *truncation, PyObject **line);
+```
+
+The `truncation` out-parameter is set when the line was clipped to the terminal width. `line` is set to the raw line text so the caller can post-process it (the `_colorize` module uses this path in 3.14 to apply ANSI colour to the caret output).
+
+## gopy mirror
+
+gopy represents traceback information as a `[]TracebackFrame` slice in `errors/traceback.go`. Each `TracebackFrame` holds a filename, function name, and line number. This covers the data that `_PyTracebackObject` stores but does not yet model `tb_lasti` or the frame pointer, and there is no equivalent of `_Py_DisplaySourceLine`. Printing currently formats the slice with a plain string builder rather than routing through the file-display path. A full port would replace the slice with a linked `TracebackObject` and wire `_PyTraceBack_Here` into every unwind path in `vm/eval_unwind.go`.
+
+## CPython 3.14 changes
+
+3.14 adds colour output to the traceback printer via the new `_colorize` module (added in `Lib/_colorize.py`). `_Py_DisplaySourceLine` now accepts the `truncation` and `line` out-parameters to support this. The caret (`^`) underlining introduced in 3.11 is unchanged, but the colour path can annotate the caret in a distinct ANSI colour when stderr is a TTY. The `_PyTraceback_WriteFilenameAndLine` helper is new in 3.14; earlier versions inlined the `File "...", line N` formatting inside the printer loop.

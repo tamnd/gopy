@@ -1,0 +1,62 @@
+---
+title: Include/internal/pycore_cell.h
+description: Thread-safe inline accessors for PyCellObject, the shared reference container used by closures.
+cpython_path: Include/internal/pycore_cell.h
+cpython_version: "3.14"
+lines: 75
+status: annotated
+ported_to: "objects/cell.go"
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Include/internal/pycore_cell.h`
+
+<CpyLink path="Include/internal/pycore_cell.h" />
+
+A cell object holds a single `PyObject *` reference (`ob_ref`) shared between an enclosing function scope and one or more nested closures. At compile time the bytecode compiler identifies every variable that crosses a scope boundary and allocates a cell for it. The outer frame writes the initial value; every inner frame that reads the variable does so through the same cell pointer, so mutations are visible in both directions.
+
+In CPython 3.12+ the implementation gained free-threaded (no-GIL) awareness. `PyCell_GetRef` and `PyCell_SwapTakeRef` wrap the raw field access in a `Py_BEGIN_CRITICAL_SECTION` / `Py_END_CRITICAL_SECTION` pair, and under `Py_GIL_DISABLED` they use `_Py_atomic_load_ptr` and `_Py_TryIncrefCompareStackRef` for lock-free fast paths. The 3.14 header therefore has no truly "simple" accessor: every read is a potential cross-thread operation.
+
+`_PyCell_GetStackRef` is the variant used by the tier-1 interpreter. It returns a `_PyStackRef` rather than a `PyObject *`, which lets the caller avoid a separate incref when the result is pushed directly onto the evaluation stack. The GIL-disabled path tries an atomic compare-and-swap first; if that races it falls back to the critical-section path via `PyCell_GetRef`.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| 19-27 | `PyCell_SwapTakeRef` | Atomically replace `ob_ref`; returns old value as a stolen reference | `objects/cell.go` (partial) |
+| 29-34 | `PyCell_SetTakeRef` | Replace `ob_ref`, decref the old value; steals new reference | not ported |
+| 37-49 | `PyCell_GetRef` | Read `ob_ref` under critical section; returns new reference | not ported |
+| 51-70 | `_PyCell_GetStackRef` | Read `ob_ref` as `_PyStackRef`; GIL-disabled fast path uses atomic CAS | not ported |
+| 4-6 | header includes | Pulls in `pycore_critical_section.h`, `pycore_object.h`, `pycore_stackref.h` | n/a |
+
+## Reading
+
+### PyCellObject layout
+
+The public struct is declared in `Include/cpython/cellobject.h`. It adds one field to the base `PyObject` header:
+
+```c
+typedef struct {
+    PyObject_HEAD
+    PyObject *ob_ref;   /* NULL when cell is empty (unbound) */
+} PyCellObject;
+```
+
+`pycore_cell.h` never redeclares the struct. It only provides the internal-build accessors that read and write `ob_ref` safely.
+
+### Reference ownership model
+
+All write accessors in this header follow a "take ref" contract: the caller transfers ownership of the new value to the cell. `PyCell_SetTakeRef` additionally decrefs whatever was previously stored. The "swap" variant returns the old value as a stolen reference so the caller can decide what to do with it (usually a deferred decref outside the critical section).
+
+### Critical sections vs. atomic ops
+
+Under the GIL a critical section is a no-op macro, so the functions compile down to a plain load or store. Under `Py_GIL_DISABLED` a critical section acquires a per-object mutex. `_PyCell_GetStackRef` goes further and tries `_Py_TryIncrefCompareStackRef`, an atomic CAS that succeeds if the refcount can be bumped while the pointer still matches, avoiding the mutex entirely on the fast path.
+
+### Stack-ref variant
+
+`_PyCell_GetStackRef` is called by `LOAD_DEREF` in the generated interpreter loop (`Python/generated_cases.c.h`). Returning a `_PyStackRef` instead of `PyObject *` is a 3.14 micro-optimisation: the evaluation stack stores `_PyStackRef` values, so skipping the `PyStackRef_FromPyObjectSteal` wrapping saves one function call on the common GIL-on path.
+
+## gopy mirror
+
+`objects/cell.go` defines `Cell` with a `Contents Object` field and `NewCell` / `cellTraverse`. It does not yet implement `PyCell_SwapTakeRef`, `PyCell_SetTakeRef`, `PyCell_GetRef`, or `_PyCell_GetStackRef`. The gopy VM reads cells directly through the struct field; thread-safety wrappers are not yet needed because gopy has no free-threaded mode.

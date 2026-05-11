@@ -1,0 +1,91 @@
+---
+title: Lib/ssl.py
+description: Pure-Python wrapper around the _ssl C extension, providing TLS socket objects and context management.
+cpython_path: Lib/ssl.py
+cpython_version: "3.14"
+lines: 1600
+status: annotated
+ported_to: ""
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Lib/ssl.py`
+
+<CpyLink path="Lib/ssl.py" />
+
+`ssl.py` is the pure-Python facade that sits between application code and the `_ssl` C extension. It defines `SSLContext`, `SSLSocket`, `SSLObject`, and the full exception hierarchy, and re-exports every constant from `_ssl` so that callers never need to import the C module directly. The practical entry point for most users is `create_default_context()`, which builds a `PROTOCOL_TLS_CLIENT` context with certificate verification enabled and system-trusted CAs loaded.
+
+The module distinguishes between two usage patterns. The legacy path wraps a plain `socket.socket` with `SSLContext.wrap_socket()` and returns an `SSLSocket` that can be used as a drop-in for the wrapped socket. The non-blocking and `asyncio` path uses `SSLContext.wrap_bio()` to return a memory-buffer-based `SSLObject` that performs TLS state-machine steps without owning an OS file descriptor, letting the event loop manage I/O separately.
+
+Error handling is layered. `SSLError` is a subclass of `OSError` and carries an `errno`-style `library` and `reason` string sourced from the OpenSSL error queue. Specialised subclasses `SSLZeroReturnError`, `SSLWantReadError`, `SSLWantWriteError`, `SSLSyscallError`, and `SSLCertVerificationError` map to the OpenSSL `SSL_ERROR_*` codes so that callers can distinguish a clean TLS close from a genuine I/O error without inspecting numeric codes.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Lib/ssl.py" lines="1-100">1-100</Cpy> | module preamble | Imports, `__all__`, re-export of `_ssl` constants and `SSLError` subclasses | - |
+| <Cpy path="Lib/ssl.py" lines="101-250">101-250</Cpy> | `SSLError` hierarchy | `SSLZeroReturnError`, `SSLWantReadError`, `SSLWantWriteError`, `SSLSyscallError`, `SSLCertVerificationError` | - |
+| <Cpy path="Lib/ssl.py" lines="251-400">251-400</Cpy> | `DefaultVerifyPaths`, `_ASN1Object`, `Purpose` | Named tuples and enum for CA paths and certificate purpose OIDs | - |
+| <Cpy path="Lib/ssl.py" lines="401-600">401-600</Cpy> | `SSLContext` | Context object wrapping `_ssl.SSLContext`; `load_cert_chain`, `load_verify_locations`, `set_ciphers`, `set_alpn_protocols` | - |
+| <Cpy path="Lib/ssl.py" lines="601-750">601-750</Cpy> | `SSLContext.wrap_socket`, `SSLContext.wrap_bio` | Factory methods that create `SSLSocket` or `SSLObject` from a context | - |
+| <Cpy path="Lib/ssl.py" lines="751-900">751-900</Cpy> | `create_default_context()`, `_create_unverified_context()` | Opinionated factory functions; load system cert store, set hostname checking | - |
+| <Cpy path="Lib/ssl.py" lines="901-1100">901-1100</Cpy> | `SSLSocket` | TLS-aware socket subclass: `read`, `write`, `do_handshake`, `unwrap`, `getpeercert`, shutdown | - |
+| <Cpy path="Lib/ssl.py" lines="1101-1300">1101-1300</Cpy> | `SSLObject` | Memory-BIO TLS object for async use: `read`, `write`, `do_handshake`, `getpeercert`, `selected_alpn_protocol` | - |
+| <Cpy path="Lib/ssl.py" lines="1301-1450">1301-1450</Cpy> | `match_hostname()` (deprecated), `cert_time_to_seconds()` | Legacy hostname matcher now delegated to OpenSSL; cert timestamp parser | - |
+| <Cpy path="Lib/ssl.py" lines="1451-1600">1451-1600</Cpy> | `get_server_certificate()`, `DER_cert_to_PEM_cert()`, `PEM_cert_to_DER_cert()` | Utility helpers for certificate format conversion and one-shot server inspection | - |
+
+## Reading
+
+### `SSLError` hierarchy (lines 101 to 250)
+
+<CpyLink path="Lib/ssl.py" lines="101-250" />
+
+Each subclass maps to one of the OpenSSL `SSL_ERROR_*` return codes that `SSL_get_error()` can produce. `SSLWantReadError` and `SSLWantWriteError` are not real errors; they signal that a non-blocking operation would block and the caller should re-drive the handshake or I/O after the socket becomes ready. `SSLCertVerificationError` adds a `verify_code` and `verify_message` attribute populated from the OpenSSL verification result, which gives the application a structured reason rather than just an error string.
+
+```python
+class SSLCertVerificationError(SSLError):
+    """A certificate could not be verified."""
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.verify_code = kwargs.get('verify_code', 0)
+        self.verify_message = kwargs.get('verify_message', '')
+```
+
+### `SSLContext` setup methods (lines 401 to 600)
+
+<CpyLink path="Lib/ssl.py" lines="401-600" />
+
+`SSLContext` is a thin Python shell around the C-level `_ssl.SSLContext`. The Python layer adds property-based access to options flags, protocol version filtering, and higher-level helpers such as `set_alpn_protocols` (which marshals the list of strings into the wire-format length-prefixed byte string expected by the C layer). `load_default_certs(purpose)` maps the `Purpose` enum to the correct Windows certificate store name on that platform, or falls back to the OpenSSL default paths elsewhere.
+
+### `create_default_context()` (lines 751 to 900)
+
+<CpyLink path="Lib/ssl.py" lines="751-900" />
+
+This function is the recommended way to create a context for outbound TLS connections. It hardcodes `PROTOCOL_TLS_CLIENT`, enables `CERT_REQUIRED`, sets `check_hostname = True`, and calls `load_default_certs()` so that the operating system trust store is used. The result rejects SSLv2, SSLv3, and (since 3.10) TLS 1.0 and 1.1 by default. A `cafile`, `capath`, or `cadata` argument can override the system store when connecting to services with a private CA.
+
+```python
+def create_default_context(purpose=Purpose.SERVER_AUTH, *,
+                            cafile=None, capath=None, cadata=None):
+    context = SSLContext(PROTOCOL_TLS_CLIENT)
+    context.load_default_certs(purpose)
+    if cafile or capath or cadata:
+        context.load_verify_locations(cafile, capath, cadata)
+    return context
+```
+
+### `SSLSocket` I/O methods (lines 901 to 1100)
+
+<CpyLink path="Lib/ssl.py" lines="901-1100" />
+
+`SSLSocket.read()` and `SSLSocket.write()` delegate immediately to the underlying `SSLObject`. The interesting logic is in the retry loop inside `SSLSocket._sslobj.read` and the handshake state guard: if `do_handshake_on_connect` is True the handshake runs inside `connect()` and `accept()`, keeping the interface compatible with plain `socket.socket`. The `unwrap()` method performs a bidirectional TLS close-notify exchange and returns the underlying plaintext socket, which callers can continue to use for non-TLS traffic.
+
+### `SSLObject` for async use (lines 1101 to 1300)
+
+<CpyLink path="Lib/ssl.py" lines="1101-1300" />
+
+`SSLObject` wraps an in-memory BIO pair rather than an OS socket. The caller is responsible for moving bytes between the two BIOs and the actual transport. `read()` pulls plaintext out; `write()` pushes plaintext in; `read_bio` and `write_bio` expose the raw `MemoryBIO` objects that the event loop reads from and writes to. This design lets `asyncio.SSLProtocol` implement TLS without any blocking system calls.
+
+## gopy mirror
+
+Not yet ported.

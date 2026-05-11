@@ -1,0 +1,153 @@
+---
+title: Lib/cmd.py
+description: Simple line-oriented command interpreter base class with do_/help_ dispatch and pre/post hooks.
+cpython_path: Lib/cmd.py
+cpython_version: "3.14"
+lines: 250
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Lib/cmd.py`
+
+<CpyLink path="Lib/cmd.py" />
+
+`cmd` provides `Cmd`, a base class for building interactive line-oriented command interpreters. A subclass defines commands by adding `do_<name>` methods. `Cmd` handles the read-eval loop, command dispatch, help text, and optional `readline` completion automatically. The class is small (under 250 lines) and intentionally minimal: `pdb`, `code.InteractiveConsole`, and several third-party REPL frameworks all build on it. Reading the full file takes about ten minutes and reveals every extension point available to subclasses.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| 1–30 | module header, imports | `readline` import guarded by `ImportError`; `__all__`, constants `PROMPT`, `IDENTCHARS` | |
+| 31–80 | `Cmd.__init__` | Stores `stdin`, `stdout`, `completekey`; sets up `readline` if available | |
+| 81–130 | `Cmd.cmdloop` | Main read-eval loop; calls `precmd`, `onecmd`, `postcmd`; handles `KeyboardInterrupt` and EOF | |
+| 131–155 | `Cmd.onecmd` | Parses one line into `(cmd, args)`; dispatches to `do_<cmd>` or `default` | |
+| 156–175 | `Cmd.default` | Called when no `do_<cmd>` method exists; default prints an error message | |
+| 176–200 | `Cmd.parseline` | Splits a raw input line into `(cmd, args, line)`; strips whitespace and handles `!` shorthand | |
+| 201–215 | `Cmd.precmd`, `Cmd.postcmd` | Hook methods called before and after every command; default implementations are no-ops | |
+| 216–230 | `Cmd.preloop`, `Cmd.postloop` | Hook methods called once at the start and end of `cmdloop`; default implementations are no-ops | |
+| 231–250 | `Cmd.do_help`, `Cmd.print_topics` | Built-in `help` command; lists commands with docstrings; uses `help_<cmd>` methods when present | |
+
+## Reading
+
+### cmdloop: the read-eval loop (lines 81 to 130)
+
+<CpyLink path="Lib/cmd.py" lines="81-130" />
+
+`cmdloop` is the heart of the class. It reads lines one at a time from `self.stdin` (defaulting to `sys.stdin`), runs them through `onecmd`, and calls the pre/post hooks around each command. The loop exits when `onecmd` returns a true value, which by convention means "stop".
+
+```python
+def cmdloop(self, intro=None):
+    self.preloop()
+    if self.use_rawinput and self.completekey:
+        try:
+            import readline
+            self.old_completer = readline.get_completer()
+            readline.set_completer(self.complete)
+            readline.parse_and_bind(self.completekey + ": complete")
+        except ImportError:
+            pass
+    try:
+        if intro is not None:
+            self.intro = intro
+        if self.intro:
+            self.stdout.write(str(self.intro) + "\n")
+        stop = None
+        while not stop:
+            if self.cmdqueue:
+                line = self.cmdqueue.pop(0)
+            else:
+                if self.use_rawinput:
+                    try:
+                        line = input(self.prompt)
+                    except EOFError:
+                        line = 'EOF'
+                else:
+                    self.stdout.write(self.prompt)
+                    self.stdout.flush()
+                    line = self.stdin.readline()
+                    if not len(line):
+                        line = 'EOF'
+                    else:
+                        line = line.rstrip('\r\n')
+            line = self.precmd(line)
+            stop = self.onecmd(line)
+            stop = self.postcmd(stop, line)
+        self.postloop()
+    finally:
+        if self.use_rawinput and self.completekey:
+            try:
+                import readline
+                readline.set_completer(self.old_completer)
+            except ImportError:
+                pass
+```
+
+`cmdqueue` is a list that subclasses can pre-populate with commands to run before the loop starts reading from stdin. `pdb` uses this to inject commands from the `-c` flag. The `finally` block restores the previous `readline` completer so that embedding a `Cmd` session inside a larger application does not permanently change tab-completion behavior.
+
+### onecmd and dispatch (lines 131 to 155)
+
+<CpyLink path="Lib/cmd.py" lines="131-155" />
+
+Dispatch is a direct `getattr` lookup. There is no registry or decorator: if `self` has a method named `do_quit`, then typing `quit` calls it.
+
+```python
+def onecmd(self, line):
+    cmd, arg, line = self.parseline(line)
+    self.lastcmd = line
+    if line == 'EOF':
+        self.lastcmd = ''
+    if not line:
+        return self.default(line)
+    if cmd is None:
+        return self.default(line)
+    self.lastcmd = ''
+    if cmd == '':
+        return self.default(line)
+    else:
+        try:
+            func = getattr(self, 'do_' + cmd)
+        except AttributeError:
+            return self.default(line)
+        return func(arg)
+```
+
+The return value of `do_<cmd>` is passed back to `cmdloop` as the `stop` flag. Returning any truthy value ends the loop. Returning `None` or `False` continues. This is why most `do_` methods end with an implicit `return None` rather than an explicit `return True`.
+
+### do_help and help text discovery (lines 231 to 250)
+
+<CpyLink path="Lib/cmd.py" lines="231-250" />
+
+The built-in `help` command uses three sources in order: a `help_<name>` method if one exists, the docstring of the `do_<name>` method, and a "no help" message as a fallback.
+
+```python
+def do_help(self, arg):
+    'List available commands with "help" or detailed help with "help cmd".'
+    if arg:
+        try:
+            func = getattr(self, 'help_' + arg)
+        except AttributeError:
+            try:
+                doc = getattr(self, 'do_' + arg).__doc__
+                if doc:
+                    self.stdout.write("%s\n" % str(doc))
+                    return
+            except AttributeError:
+                pass
+            self.stdout.write("%s\n" % str(self.nohelp % (arg,)))
+            return
+        func()
+    else:
+        # ... print_topics for all documented and undocumented commands
+```
+
+`print_topics` groups commands into "documented" (those with a docstring on their `do_` method) and "undocumented" (those without). Subclasses that want custom formatting override `print_topics` rather than `do_help`.
+
+## gopy mirror
+
+`cmd` has not been ported to gopy. It is a pure-Python class with no extension module dependency and no numeric logic. When gopy's `readline` and `sys.stdin` stubs are sufficiently complete, `cmd.py` can be shipped verbatim under `stdlib/cmd.py` and executed by the interpreter. The `getattr`-based dispatch requires working `getattr` on user-defined classes, which is already supported in gopy's object model, so the main gap is the `readline` completion integration rather than any semantic issue with the dispatch mechanism.
+
+## CPython 3.14 changes
+
+`cmd.py` is one of the most stable files in the standard library. No functional changes were made in 3.14. The last notable change was in 3.13, where the module gained type annotations in its method signatures as part of the broader stdlib annotation drive. In 3.12 the `cmdqueue` attribute was documented explicitly (it was previously mentioned only in passing). The core logic of `cmdloop`, `onecmd`, and `parseline` has been unchanged since Python 2.3.

@@ -1,0 +1,71 @@
+---
+title: Modules/_struct.c
+description: C implementation of binary data packing and unpacking for the struct module.
+cpython_path: Modules/_struct.c
+cpython_version: "3.14"
+lines: 1600
+status: annotated
+ported_to: ""
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Modules/_struct.c`
+
+<CpyLink path="Modules/_struct.c" />
+
+`_struct.c` is the C accelerator for Python's `struct` module. The public `Lib/struct.py` is a thin shim that imports everything from `_struct` and re-exports it, so all real work happens here. The module converts between Python values and C binary representations described by a compact format string, which is essential for network protocols, binary file formats, and interfacing with C libraries through `ctypes` or `mmap`.
+
+Format strings combine an optional endian/alignment prefix (`<` little-endian, `>` big-endian, `!` network, `=` native, `@` native with alignment) with one or more format characters (`H` unsigned short, `I` unsigned int, `L` unsigned long, `Q` unsigned long long, `s` char array, `f` float, `d` double, and others). The compiled `Struct` object caches the per-format-character pack and unpack function pointers so repeated use of the same format avoids re-parsing.
+
+`Struct(fmt)` is the primary interface. Its `pack`, `unpack`, and `iter_unpack` methods operate on the pre-compiled format. One-shot module-level functions (`struct.pack`, `struct.unpack`, `struct.calcsize`) compile the format on every call and are convenience wrappers around the same underlying machinery.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| 1-120 | `formatdef` table | Maps each format character to a size, pack function, and unpack function | |
+| 121-400 | `s_object` struct + `s_init` | Compiled `Struct` object: format string, size, list of `formatcode` entries | |
+| 401-700 | `pack_into` / `s_pack` | Writes Python values into a writable buffer according to the format | |
+| 701-950 | `unpack_from` / `s_unpack` | Reads a buffer and returns a tuple of Python values | |
+| 951-1150 | `iter_unpack` / `unpackiter` | Iterator that yields successive fixed-size chunks from a buffer | |
+| 1151-1350 | `calcsize` + `s_get_size` | Returns total byte count for a compiled or one-shot format | |
+| 1351-1600 | Module init + method tables | `PyModuleDef`, one-shot wrappers, `Struct` type registration | |
+
+## Reading
+
+### Format compilation
+
+`s_init` walks the format string character by character. For each format character it looks up the corresponding `formatdef` entry, checks alignment requirements, and appends a `formatcode` record to the compiled list. The total size is accumulated so `calcsize` is O(1) on a compiled `Struct`. Repeat counts (e.g. `4H`) are expanded inline into that many `formatcode` entries.
+
+### pack and pack_into
+
+`s_pack` allocates a `bytes` object of `Struct.size` bytes, then calls `s_pack_internal`. The internal function iterates the `formatcode` list and calls each entry's `pack` function pointer, passing the next Python argument and a pointer into the output buffer. Native-endian formats use direct C assignments; byte-swapped formats apply `_Py_bswap16` or `_Py_bswap32` after the store.
+
+### unpack and iter_unpack
+
+`s_unpack` obtains a read-only buffer via `PyBUF_SIMPLE`, verifies its length equals `Struct.size`, and calls each entry's `unpack` function pointer in order, building a tuple. `iter_unpack` wraps the same logic in an iterator object that advances its offset by `Struct.size` on each `__next__` call, stopping when fewer than `size` bytes remain.
+
+### Endian and alignment prefixes
+
+The prefix character is consumed before the format loop and sets two module-global variables: `byteorder` (little, big, or native) and `use_alignment`. When `use_alignment` is set (prefix `@` or absent), each format character's natural C alignment is respected by inserting padding bytes. The `<`, `>`, and `!` prefixes suppress alignment, which is the common case for network and file formats.
+
+### calcsize
+
+`calcsize` on a compiled `Struct` returns the cached `s_object->s_size` field in O(1). The one-shot module-level `struct.calcsize(fmt)` compiles a temporary `Struct`, reads its size, and discards it. Because compilation is cheap for short formats this is acceptable, but callers that invoke `calcsize` in a loop should cache a `Struct` object instead.
+
+```c
+/* _struct.c: unpack one unsigned short (abbreviated) */
+static PyObject *
+bu_ushort(const char *p, const formatdef *f)
+{
+    unsigned short x;
+    memcpy(&x, p, sizeof x);
+    /* byte-swap if big-endian format on little-endian host */
+    return PyLong_FromUnsignedLong(x);
+}
+```
+
+## gopy mirror
+
+Not yet ported.

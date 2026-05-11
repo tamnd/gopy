@@ -1,0 +1,276 @@
+---
+title: Modules/selectmodule.c
+description: The select module. Covers select(), poll(), epoll, kqueue/kevent, and devpoll, each with EINTR retry and platform-conditional compilation.
+cpython_path: Modules/selectmodule.c
+cpython_version: "3.14"
+lines: 2000
+status: annotated
+ported_to: module/select/
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Modules/selectmodule.c`
+
+<CpyLink path="Modules/selectmodule.c" />
+
+The `select` module. A single C file covers five different OS I/O-readiness
+APIs, each guarded by its own `#ifdef`:
+
+- `select(2)` (POSIX, Windows): universal but limited to `FD_SETSIZE` (1024)
+  file descriptors.
+- `poll(2)` (POSIX, not Windows): an array of `pollfd` structs; no FD limit.
+- `epoll` (Linux only): level/edge-triggered, scalable to millions of FDs.
+- `kqueue` / `kevent` (macOS, FreeBSD): event-list model, handles FDs, signals,
+  processes, timers, and more in one call.
+- `/dev/poll` (Solaris/illumos): a device-file-based poll interface.
+
+All five implementations follow the same Python API contract: the caller
+passes file-like objects (anything with a `fileno()` method), and the module
+extracts the underlying integer file descriptor.
+
+Timeout handling is uniform: `None` means block forever, `0` means
+non-blocking, and a positive `float` specifies seconds. EINTR is retried
+transparently in all five paths.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Modules/selectmodule.c" lines="1-100">1-100</Cpy> | includes, `fileno` helper, `fd_set` compat macros | Platform setup and `PyObject_AsFileDescriptor` usage. | `module/select/module.go:fileno` |
+| <Cpy path="Modules/selectmodule.c" lines="100-300">100-300</Cpy> | `select_select`, `seq2set`, `set2list` | `select()` implementation: build `fd_set`, call `select(2)`, decode result. | `module/select/module.go:Select` |
+| <Cpy path="Modules/selectmodule.c" lines="300-500">300-500</Cpy> | `poll`, `poll_new`, `poll_register`, `poll_unregister`, `poll_modify` | `poll` object: wraps a `pollfd` array with a Python dict for FD-to-index lookup. | `module/select/module.go:Poll` |
+| <Cpy path="Modules/selectmodule.c" lines="500-700">500-700</Cpy> | `poll_poll` | Call `poll(2)` with timeout, retry on EINTR, return list of `(fd, event)` tuples. | `module/select/module.go:PollPoll` |
+| <Cpy path="Modules/selectmodule.c" lines="700-1000">700-1000</Cpy> | `pyepoll`, `pyepoll_new`, `pyepoll_register`, `pyepoll_modify`, `pyepoll_unregister` | `epoll` object: wraps an epoll fd from `epoll_create1`. | `module/select/module.go:EPoll` |
+| <Cpy path="Modules/selectmodule.c" lines="1000-1200">1000-1200</Cpy> | `pyepoll_poll` | Call `epoll_wait`, retry on EINTR, return list of `(fd, event)` tuples. | `module/select/module.go:EPollPoll` |
+| <Cpy path="Modules/selectmodule.c" lines="1200-1450">1200-1450</Cpy> | `kqueue`, `kqueue_new`, `kqueue_fileno`, `kqueue_close`, `kevent`, `kevent_new` | `kqueue` and `kevent` types. `kevent` wraps a `struct kevent`. | `module/select/module.go:KQueue` |
+| <Cpy path="Modules/selectmodule.c" lines="1450-1600">1450-1600</Cpy> | `kqueue_control` | Call `kevent(2)` with changelist and eventlist; retry on EINTR. | `module/select/module.go:KQueueControl` |
+| <Cpy path="Modules/selectmodule.c" lines="1600-1800">1600-1800</Cpy> | `devpoll`, `devpoll_new`, `devpoll_register`, `devpoll_poll` | `/dev/poll` object for Solaris. | `module/select/module.go:DevPoll` |
+| <Cpy path="Modules/selectmodule.c" lines="1800-2000">1800-2000</Cpy> | `select_methods` table, constant registrations, `PyInit_select` | Module definition. Registers `POLLIN`, `POLLOUT`, `EPOLLIN`, `KQ_FILTER_READ`, etc. | `module/select/module.go:Module` |
+
+## Reading
+
+### `select()` fd_set building (lines 100 to 300)
+
+<CpyLink path="Modules/selectmodule.c" lines="100-300" />
+
+`select.select(rlist, wlist, xlist[, timeout])` converts each list into an
+`fd_set` bitmap, calls `select(2)`, then rebuilds three Python lists from
+the result sets.
+
+```c
+static PyObject *
+select_select_impl(PyObject *module, PyObject *rlist, PyObject *wlist,
+                   PyObject *xlist, PyObject *timeout_obj)
+{
+    fd_set ifd, ofd, efd;
+    int n = -1, fd;
+    struct timeval tv, *tvp;
+    PyObject *seq, *fast, *o;
+    Py_ssize_t i, len;
+    ...
+    /* Build fd_sets from input lists */
+    FD_ZERO(&ifd); FD_ZERO(&ofd); FD_ZERO(&efd);
+    for (i = 0; i < nfds; i++) {
+        fd = seq2set(rlist, &ifd, &imax);
+        if (fd < 0) return NULL;
+        if (fd > n) n = fd;
+    }
+    /* ... same for wlist -> ofd, xlist -> efd ... */
+
+    /* Convert timeout */
+    if (timeout_obj == Py_None) {
+        tvp = (struct timeval *)NULL;  /* block */
+    } else {
+        ...
+        tv.tv_sec  = (long)timeout;
+        tv.tv_usec = (long)((timeout - tv.tv_sec) * 1e6);
+        tvp = &tv;
+    }
+
+    Py_BEGIN_ALLOW_THREADS
+    n = select(n + 1, &ifd, &ofd, &efd, tvp);
+    Py_END_ALLOW_THREADS
+
+    if (n < 0) {
+        if (errno == EINTR) {
+            if (PyErr_CheckSignals()) return NULL;
+            /* retry handled by caller in Python 3.5+ via PEP 475 */
+        }
+        PyErr_SetFromErrno(SelectError);
+        return NULL;
+    }
+    /* Decode fd_set back to lists */
+    ...
+    return PyTuple_Pack(3, rlist_out, wlist_out, xlist_out);
+}
+```
+
+`seq2set` iterates the input sequence, calls `PyObject_AsFileDescriptor`
+on each element (which invokes `fileno()` if the object is not already an
+int), and calls `FD_SET`. It also validates that no FD exceeds
+`FD_SETSIZE` (1024 on most platforms); exceeding that limit raises
+`ValueError`.
+
+The GIL is released for the `select(2)` syscall. EINTR handling follows
+PEP 475: the C layer checks `PyErr_CheckSignals()` and, if no Python signal
+handler raised an exception, the Python-level caller retries.
+
+### `epoll_wait` with EINTR retry (lines 1000 to 1200)
+
+<CpyLink path="Modules/selectmodule.c" lines="1000-1200" />
+
+`epoll.poll(timeout=-1, maxevents=-1)` calls `epoll_wait` in a loop to
+handle EINTR, adjusting the remaining timeout on each retry:
+
+```c
+static PyObject *
+pyepoll_poll_impl(pyepoll_Object *self, PyObject *timeout_obj,
+                  int maxevents)
+{
+    int nfds, i;
+    PyObject *elist = NULL, *etuple = NULL;
+    struct epoll_event *evs;
+    _PyTime_t timeout, ms, deadline = 0;
+    ...
+    if (timeout_obj == Py_None)
+        ms = -1;
+    else {
+        ...
+        ms = _PyTime_AsMilliseconds(timeout, _PyTime_ROUND_CEILING);
+    }
+    ...
+    if (ms != -1)
+        deadline = _PyDeadline_Init(timeout);
+
+    do {
+        Py_BEGIN_ALLOW_THREADS
+        nfds = epoll_wait(self->epfd, evs, maxevents, (int)ms);
+        Py_END_ALLOW_THREADS
+
+        if (nfds >= 0) break;
+        if (errno != EINTR) {
+            PyErr_SetFromErrno(PyExc_OSError);
+            goto error;
+        }
+        /* EINTR: deliver signals and recalculate remaining timeout */
+        if (PyErr_CheckSignals()) goto error;
+        if (ms != -1) {
+            timeout = _PyDeadline_Get(deadline);
+            if (timeout < 0) {
+                nfds = 0; break;   /* timed out */
+            }
+            ms = _PyTime_AsMilliseconds(timeout, _PyTime_ROUND_CEILING);
+        }
+    } while (1);
+    ...
+    elist = PyList_New(nfds);
+    for (i = 0; i < nfds; i++) {
+        etuple = PyTuple_Pack(2,
+                     PyLong_FromLong(evs[i].data.fd),
+                     PyLong_FromLong(evs[i].events));
+        PyList_SET_ITEM(elist, i, etuple);
+    }
+    return elist;
+    ...
+}
+```
+
+The `_PyDeadline_Init` / `_PyDeadline_Get` helpers (from `Python/pytime.c`)
+track wall-clock time so that after an EINTR-induced signal delivery, the
+remaining timeout is recalculated correctly. Without this, a process
+receiving many signals could wait far longer than requested.
+
+`epoll_create1(EPOLL_CLOEXEC)` is used in `pyepoll_new` (3.6+) to set
+`FD_CLOEXEC` atomically, avoiding a race between `epoll_create` and
+`fcntl(F_SETFD)`.
+
+### `kqueue` / `kevent` batch control (lines 1200 to 1600)
+
+<CpyLink path="Modules/selectmodule.c" lines="1200-1600" />
+
+`kqueue.control(changelist, max_events[, timeout])` submits a batch of
+`kevent` change descriptors and retrieves up to `max_events` ready events
+in a single syscall:
+
+```c
+static PyObject *
+kqueue_queue_control(kqueue_queue_Object *self, PyObject *args)
+{
+    int nevents = 0;
+    int gotevents = 0;
+    int nchanges = 0;
+    int i = 0;
+    PyObject *otimeout = NULL;
+    PyObject *ch = NULL;
+    PyObject *it = NULL, *ei = NULL;
+    PyObject *result = NULL;
+    struct kevent *evl = NULL;
+    struct kevent *chl = NULL;
+    struct timespec timeout = { 0, 0 };
+    struct timespec *ptimeout;
+    ...
+    /* Build the changelist (may be NULL or empty) */
+    if (ch != NULL && ch != Py_None) {
+        it = PyObject_GetIter(ch);
+        while ((ei = PyIter_Next(it))) {
+            chl[i++] = ((kqueue_event_Object *)ei)->e;
+            Py_DECREF(ei);
+        }
+        nchanges = i;
+    }
+
+    Py_BEGIN_ALLOW_THREADS
+    gotevents = kevent(self->kqfd, chl, nchanges,
+                       evl, nevents, ptimeout);
+    Py_END_ALLOW_THREADS
+
+    if (gotevents < 0) {
+        if (errno == EINTR) {
+            if (PyErr_CheckSignals()) goto error;
+            gotevents = 0;
+        } else {
+            PyErr_SetFromErrno(PyExc_OSError);
+            goto error;
+        }
+    }
+
+    result = PyList_New(gotevents);
+    for (i = 0; i < gotevents; i++) {
+        kqueue_event_Object *ch;
+        ch = PyObject_New(kqueue_event_Object, &kqueue_event_Type);
+        ch->e = evl[i];
+        PyList_SET_ITEM(result, i, (PyObject *)ch);
+    }
+    return result;
+    ...
+}
+```
+
+The `kevent` struct can represent file-descriptor events (`EVFILT_READ`,
+`EVFILT_WRITE`), process events (`EVFILT_PROC`), signal events
+(`EVFILT_SIGNAL`), and timer events (`EVFILT_TIMER`). The `kevent` Python
+type wraps the C struct directly; its fields (`ident`, `filter`, `flags`,
+`fflags`, `data`, `udata`) map to the C struct member names.
+
+`max_events=0` is a valid call used purely to submit changes without waiting
+for events.
+
+## gopy mirror
+
+`module/select/module.go` (pending). On Linux, only `select`, `poll`, and
+`epoll` are needed. On macOS, `kqueue`/`kevent` replace `epoll`. The port
+will use Go's `syscall` package (`syscall.Select`, `syscall.Poll`,
+`syscall.EpollCreate1`, `syscall.EpollWait`, `syscall.Kqueue`,
+`syscall.Kevent`) and wrap them in the same Python type hierarchy as the C
+version.
+
+## CPython 3.14 changes
+
+PEP 475 (Python 3.5) added automatic EINTR retry for most syscalls, but
+`select.select` still requires the caller to retry because the `fd_set`
+may have been partially modified. The per-interpreter state was refactored
+in 3.12. `epoll.fileno()` was added in 3.4. The `select.devpoll` type
+is present only on Solaris and is rarely used outside that platform.
+`kqueue` constants (`KQ_FILTER_*`, `KQ_EV_*`, `KQ_NOTE_*`) are registered
+as module-level attributes and as attributes on the `kevent` type.

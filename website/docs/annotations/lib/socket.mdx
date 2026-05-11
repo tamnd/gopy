@@ -1,0 +1,167 @@
+---
+title: Lib/socket.py
+description: Python-level socket wrapper; thin shim over Modules/socketmodule.c that adds create_connection, create_server, makefile, and the full constant namespace.
+cpython_path: Lib/socket.py
+cpython_version: "3.14"
+lines: 1000
+status: annotated
+ported_to: (stdlib pending)
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Lib/socket.py`
+
+<CpyLink path="Lib/socket.py" />
+
+`Lib/socket.py` is the Python-side half of the socket module. The real
+socket type (`socket.socket`) and all address-family constants originate
+in `Modules/socketmodule.c`, which is imported as `_socket`. The Python
+module re-exports everything from `_socket`, then adds pure-Python helpers:
+`create_connection`, `create_server`, `makefile`, `socketpair`, `fromfd`,
+and `fromshare`.
+
+`socket.socket` subclasses `_socket.socket` and overrides `__init__`,
+`__enter__`, `__exit__`, `__repr__`, and `makefile` so that the file-like
+wrapper returned by `makefile()` holds a reference to the socket and closes
+it correctly. The `setblocking` and `settimeout` methods are thin Python
+wrappers that translate the timeout value into a `_socket` call.
+
+Constants (`AF_*`, `SOCK_*`, `IPPROTO_*`, `SOL_*`, `SO_*`, `SHUT_*`) are
+imported wholesale from `_socket` via `from _socket import *`.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Lib/socket.py" lines="1-100">1-100</Cpy> | Imports, `__all__`, re-export from `_socket` | Pulls every constant and the low-level `socket` type out of `_socket`; defines the Python `socket` class that subclasses it. | `(stdlib pending)` |
+| <Cpy path="Lib/socket.py" lines="100-200">100-200</Cpy> | `socket.__init__`, `socket.connect`, `socket.bind`, `socket.listen`, `socket.accept` | Lifecycle methods; `accept` returns a `(socket, address)` pair where the new socket is wrapped in the Python `socket` subclass. | `(stdlib pending)` |
+| <Cpy path="Lib/socket.py" lines="200-400">200-400</Cpy> | `create_connection`, `create_server` | `create_connection` iterates `getaddrinfo` results and connects to each in turn with an optional timeout; `create_server` binds and listens with `SO_REUSEADDR` and optional `SO_REUSEPORT`. | `(stdlib pending)` |
+| <Cpy path="Lib/socket.py" lines="400-600">400-600</Cpy> | `getaddrinfo`, `getnameinfo` | Thin pass-throughs to `_socket.getaddrinfo` / `_socket.getnameinfo`; documented here for the type-narrowing and default-flag annotations added at the Python level. | `(stdlib pending)` |
+| <Cpy path="Lib/socket.py" lines="600-800">600-800</Cpy> | `socket.makefile`, `socket.setblocking`, `socket.settimeout`, `socket.getblocking`, `socket.gettimeout` | `makefile` wraps the socket in a `SocketIO` object and then in a `BufferedReader`/`BufferedWriter`; the timeout methods translate between Python's `None`/float and the C-level timeout representation. | `(stdlib pending)` |
+| <Cpy path="Lib/socket.py" lines="800-1000">800-1000</Cpy> | `socketpair`, `fromfd`, `fromshare`, `has_dualstack_ipv6`, `timeout` exception | `socketpair` creates a connected pair via `_socket.socketpair` and wraps both ends; `fromfd` duplicates a raw file descriptor into a managed socket; `has_dualstack_ipv6` probes at import time. | `(stdlib pending)` |
+
+## Reading
+
+### `create_connection` with timeout (lines 200 to 400)
+
+<CpyLink path="Lib/socket.py" lines="200-400" />
+
+```python
+def create_connection(address, timeout=_GLOBAL_DEFAULT_TIMEOUT,
+                      source_address=None, *,
+                      all_errors=False):
+    host, port = address
+    exceptions = []
+    for res in getaddrinfo(host, port, 0, SOCK_STREAM):
+        af, socktype, proto, canonname, sa = res
+        sock = None
+        try:
+            sock = socket(af, socktype, proto)
+            if timeout is not _GLOBAL_DEFAULT_TIMEOUT:
+                sock.settimeout(timeout)
+            if source_address:
+                sock.bind(source_address)
+            sock.connect(sa)
+            exceptions.clear()
+            return sock
+        except error as exc:
+            if not all_errors:
+                exceptions = [exc]
+            else:
+                exceptions.append(exc)
+            if sock is not None:
+                sock.close()
+    if len(exceptions) == 1:
+        raise exceptions[0]
+    else:
+        # if multiple exceptions occurred, format the messages
+        model = exceptions[0]
+        raise ExceptionGroup(
+            "create_connection failed", exceptions) from model
+```
+
+`create_connection` iterates the full `getaddrinfo` result list so it
+handles both IPv4 and IPv6 transparently. It closes each failed socket
+immediately to avoid descriptor leaks before trying the next address.
+When `all_errors=False` (the default) only the last exception is
+propagated; setting `all_errors=True` collects all of them into an
+`ExceptionGroup`. The sentinel `_GLOBAL_DEFAULT_TIMEOUT` is distinct from
+`None` so that callers can explicitly pass `None` to mean "no timeout"
+without silently inheriting the global default.
+
+### `getaddrinfo` result iteration (lines 400 to 600)
+
+<CpyLink path="Lib/socket.py" lines="400-600" />
+
+```python
+results = socket.getaddrinfo(host, port, proto=IPPROTO_TCP)
+for family, type, proto, canonname, sockaddr in results:
+    # family: AF_INET or AF_INET6
+    # sockaddr: (ip, port) for AF_INET
+    #           (ip, port, flowinfo, scope_id) for AF_INET6
+    print(family, sockaddr)
+```
+
+`getaddrinfo` returns a list of 5-tuples. The `sockaddr` element differs
+by address family: `(host, port)` for `AF_INET` and `(host, port,
+flowinfo, scope_id)` for `AF_INET6`. Callers that pass `sockaddr` directly
+to `connect()` or `bind()` do not need to unpack it because the C layer
+accepts both forms.
+
+### `makefile` buffered I/O bridge (lines 600 to 800)
+
+<CpyLink path="Lib/socket.py" lines="600-800" />
+
+```python
+def makefile(self, mode="r", buffering=None, *,
+             encoding=None, errors=None, newline=None):
+    for c in mode:
+        if c not in {"r", "w", "b"}:
+            raise ValueError("invalid mode %r (only r, w, b allowed)" % (mode,))
+    writing = "w" in mode
+    reading = "r" in mode or not writing
+    assert reading or writing
+    binary = "b" in mode
+    rawmode = ""
+    if reading:
+        rawmode += "r"
+    if writing:
+        rawmode += "w"
+    raw = SocketIO(self, rawmode)
+    self._io_refs += 1
+    if buffering is None:
+        buffering = -1
+    if buffering < 0:
+        buffering = io.DEFAULT_BUFFER_SIZE
+    if buffering == 0:
+        if not binary:
+            raise ValueError("unbuffered streams must be binary")
+        return raw
+    if reading and writing:
+        buffer = io.BufferedRWPair(SocketIO(self, "r"),
+                                   SocketIO(self, "w"), buffering)
+    elif reading:
+        buffer = io.BufferedReader(raw, buffering)
+    else:
+        buffer = io.BufferedWriter(raw, buffering)
+    if binary:
+        return buffer
+    return io.TextIOWrapper(buffer, encoding, errors, newline)
+```
+
+`SocketIO` is a `RawIOBase` that delegates `readinto` and `write` to the
+socket. `makefile` layers `io.Buffered*` on top of it and optionally wraps
+that in `TextIOWrapper`. The `_io_refs` counter tracks how many file
+objects hold a reference to the socket; `socket.close()` defers the actual
+`_socket.close()` call until `_io_refs` reaches zero, preventing "bad file
+descriptor" errors when the file wrapper outlives an explicit socket close.
+
+## gopy mirror
+
+`Lib/socket.py` is a prerequisite for `smtplib`, `http.client`, `ftplib`,
+`urllib`, and many other network modules. The C extension `_socket` must
+provide the raw socket type and all constants. The pure-Python layer
+(`create_connection`, `create_server`, `makefile`) can be ported once
+`_socket` is available. `SocketIO` belongs to `Lib/socket.py` and must be
+ported alongside `makefile`.

@@ -1,0 +1,60 @@
+---
+title: gc_free_threading.c
+description: Incremental garbage collector for the free-threaded (no-GIL) CPython build introduced in Python 3.13.
+cpython_path: Python/gc_free_threading.c
+cpython_version: "3.14"
+lines: 1100
+status: annotated
+ported_to: ""
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Python/gc_free_threading.c`
+
+<CpyLink path="Python/gc_free_threading.c" />
+
+This file implements the garbage collector used when CPython is built without the GIL (`Py_GIL_DISABLED`). It is a completely separate GC from the classic `Python/gc.c` and cannot be swapped in at runtime. The two files share the same public Python-level `gc` module interface but use different internal data structures.
+
+The central insight is that reference counting alone cannot collect cycles when multiple threads are running concurrently. This GC adds a stop-the-world tracing phase that runs incrementally, processing objects in small batches between mutator pauses. Each object carries an `ob_tid` field that records which thread last touched it, allowing the collector to distinguish live references from stale ones without holding a global lock for the entire trace.
+
+Objects are organized into a young generation and an old generation, analogous to `gc.c`, but the promotion policy and the deferred-reference mechanism are unique to this file. Deferred objects are ones whose reference counts are known to be inflated by the runtime (for example, cached small integers held in thread state), and they are tracked separately so the collector can adjust counts without racing against mutator increments.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| ~80   | `gc_collect_main` | Top-level entry point; drives generation selection and calls incremental phases | |
+| ~200  | `mark_reachable` | DFS tracer; follows `tp_traverse` to mark all transitively reachable objects | |
+| ~310  | `_PyObject_SetDeferredRefcount` | Marks an object as deferred-reference and enqueues it on the deferred list | |
+| ~430  | `scan_young_gen` | Scans the young-generation worklist and promotes survivors to old | |
+| ~560  | `handle_weakrefs` | Clears weak references to unreachable objects before finalizers run | |
+| ~680  | `finalize_garbage` | Calls `tp_finalize` on unreachable objects that have finalizers | |
+| ~800  | `_Py_gc_collect_and_shrink` | Public API: runs a full collection then calls `malloc_trim` to return memory | |
+| ~950  | `_PyGC_Collect` | Implements `gc.collect(generation)` from Python | |
+
+## Reading
+
+### Generation structure
+
+Young and old generations are stored as doubly-linked intrusive lists threaded through the `PyGC_Head` header that precedes every tracked object in memory. The young generation is collected frequently; objects that survive a configurable number of collections are moved to old. The deferred queue is a separate singly-linked list and is drained at the start of each old-generation pass.
+
+### Stop-the-world protocol
+
+Before tracing begins, the collector sends a signal to all threads and waits for them to reach a safe point (a function call boundary or a backward branch). This is the same mechanism used for signal delivery, so no new thread-suspension infrastructure is needed. The pause is measured in microseconds for typical heap sizes.
+
+### Deferred reference counts
+
+`_PyObject_SetDeferredRefcount` is called by the runtime for objects that are pinned in thread-local caches. The GC inflates the object's reference count by a sentinel value (`_Py_DEFERRED_REFCNT`) so that normal decref never reaches zero while the object is cached. During collection the collector subtracts the sentinel and checks whether any real references remain.
+
+### Weak reference and finalizer ordering
+
+The ordering of weak-reference clearing, `__del__` calls, and `tp_finalize` callbacks follows the same contract as `gc.c`. Objects with finalizers are moved to a "legacy finalizer" list and not immediately collected; they are retried on the next pass, matching the documented behavior of `gc.collect`.
+
+### `_Py_gc_collect_and_shrink`
+
+This function is called by the `pymalloc` arena reclaimer when the process's resident set is above a threshold. After a full collection it calls `PyMem_RawFree` on empty arenas and then invokes `malloc_trim(0)` on platforms that support it, actually returning pages to the OS rather than just making them reusable within the process.
+
+## gopy mirror
+
+Not yet ported.

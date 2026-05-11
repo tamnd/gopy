@@ -1,0 +1,123 @@
+---
+title: Include/internal/pycore_mimalloc.h
+description: mimalloc integration shims for the free-threaded (PEP 703) build; no-op under the GIL.
+cpython_path: Include/internal/pycore_mimalloc.h
+cpython_version: "3.14"
+lines: 80
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Include/internal/pycore_mimalloc.h`
+
+<CpyLink path="Include/internal/pycore_mimalloc.h" />
+
+<overview>
+This header wires CPython's memory layer into the bundled mimalloc library
+(`Modules/mimalloc/`) when the interpreter is compiled without the GIL
+(`Py_GIL_DISABLED`, PEP 703). Under a GIL build every declaration is
+conditionally compiled away, so the header is effectively a no-op there.
+
+The key concepts are:
+
+- **Per-thread heaps.** Each `PyThreadState` owns an `mi_heap_t *` so that
+  allocation and deallocation of Python objects can proceed without taking
+  a global lock.
+- **`_Py_ThreadStateHeap`.** A small struct bundled into `PyThreadState` that
+  holds the thread-local mimalloc heap handle plus bookkeeping used by the
+  cycle collector.
+- **Destroy helpers.** `_PyMem_mi_heap_destroy` tears down a thread heap when
+  a thread state is finalised, returning any still-live pages to the global
+  mimalloc pool.
+</overview>
+
+## Map
+
+| Symbol | Kind | Notes |
+|--------|------|-------|
+| `mi_heap_t` | typedef (mimalloc) | Opaque per-thread heap handle. |
+| `_Py_ThreadStateHeap` | struct | Embeds `mi_heap_t *` plus GC metadata. |
+| `_PyMem_mi_heap_destroy` | function decl | Tears down a thread heap on thread exit. |
+| `_PyMem_mi_heap_alloc` | inline / macro | Allocates from the calling thread's heap. |
+| `Py_GIL_DISABLED` guard | preprocessor | Entire header content is inside this guard. |
+
+## Reading
+
+### Guard pattern
+
+The entire body of the header is wrapped in `#ifdef Py_GIL_DISABLED`. Translation
+units that include it in a GIL build see nothing but the include guard:
+
+```c
+// Include/internal/pycore_mimalloc.h (simplified)
+#ifndef Py_GIL_DISABLED
+/* Nothing exposed in the GIL build. */
+#else
+#  include "mimalloc.h"
+
+typedef struct _Py_ThreadStateHeap {
+    mi_heap_t *heap;
+    /* ... GC-related fields ... */
+} _Py_ThreadStateHeap;
+
+PyAPI_FUNC(void) _PyMem_mi_heap_destroy(_Py_ThreadStateHeap *heap);
+#endif
+```
+
+This means any code that calls `_PyMem_mi_heap_destroy` must itself be guarded
+by the same macro.
+
+### Thread heap lifetime
+
+A thread heap is created in `_PyThreadState_New` and destroyed in
+`_PyThreadState_DELETE_EXCEPT`. The destroy path runs before the
+`PyThreadState` memory itself is freed so the heap can release object pages
+back to mimalloc's global pool:
+
+```c
+// CPython: Python/pystate.c (free-threaded path)
+void
+_PyThreadState_ClearMimallocHeaps(PyThreadState *tstate)
+{
+    _PyMem_mi_heap_destroy(&tstate->heaps[0]);
+    _PyMem_mi_heap_destroy(&tstate->heaps[1]);
+}
+```
+
+### Allocation fast path
+
+In the free-threaded build, `PyObject_Malloc` resolves to an inline that picks
+the calling thread's heap and calls `mi_heap_malloc`. There is no lock:
+
+```c
+// Conceptual expansion in the free-threaded build
+static inline void *
+_PyObject_Malloc(size_t size)
+{
+    PyThreadState *tstate = _PyThreadState_GET();
+    return mi_heap_malloc(tstate->heaps[0].heap, size);
+}
+```
+
+Under the GIL build the same call routes through pymalloc's arena allocator
+instead (see `pycore_pymem.h`).
+
+## gopy mirror
+
+gopy does not port this header. Go's runtime allocator (via `new`, `make`, and
+the garbage collector) handles all object memory. There is no concept of a
+per-thread heap or an arena allocator in gopy's object model.
+
+If gopy ever gains a free-threaded mode the relevant concept to revisit would be
+goroutine-local bump allocators, not mimalloc.
+
+## CPython 3.14 changes
+
+- PEP 703 (free-threaded CPython) was accepted for 3.13 as an experimental
+  build option. In 3.14 the free-threaded build received further hardening and
+  the mimalloc version bundled under `Modules/mimalloc/` was updated.
+- The `_Py_ThreadStateHeap` struct gained additional fields to support the
+  incremental cyclic GC introduced in 3.14.
+- `_PyMem_mi_heap_destroy` grew a second argument for the allocator domain so
+  the caller can distinguish object-heap destruction from raw-heap destruction.

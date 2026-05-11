@@ -1,0 +1,179 @@
+---
+title: Include/cpython/object.h
+description: CPython-internal extension type API. PyType_Slot, PyType_Spec, Py_TPFLAGS_* bitmask, PyType_FromSpec factory, slot accessors, and misc object macros.
+cpython_path: Include/cpython/object.h
+cpython_version: "3.14"
+lines: 350
+status: annotated
+ported_to: objects/type.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Include/cpython/object.h`
+
+<CpyLink path="Include/cpython/object.h" />
+
+The CPython-internal extension of `Include/object.h`. Whereas the public header
+exposes only `PyObject`, `PyVarObject`, and the protocol function prototypes,
+this file adds everything that extension modules and the interpreter itself need
+to define new types: the `Py_TPFLAGS_*` bitmask, the full `PyTypeObject` layout,
+the `PyType_Slot` / `PyType_Spec` descriptor structs, and the `PyType_FromSpec`
+family that creates types at runtime from a spec.
+
+The `PyType_Spec` / `PyType_FromSpec` mechanism was introduced in PEP 384 (3.2)
+as a way for extension modules to define types without depending on the exact
+layout of `PyTypeObject`, which was not stable across minor releases. In 3.10
+the `PyType_FromModuleAndSpec` variant was added so that `Py_LIMITED_API`
+modules could associate a module reference with a type for use in `__module__`
+and per-module state access via `PyType_GetModuleState`.
+
+In gopy, the equivalent is the `objects.Type` struct in `objects/type.go`. Slots
+are Go function fields (`Repr`, `Hash`, `RichCmp`, `TpNew`, etc.) rather than
+a numbered array, and the `PyType_Spec` factory pattern is replaced by direct
+struct literal initialization.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Include/cpython/object.h" lines="1-80">1-80</Cpy> | `Py_TPFLAGS_*` bitmask constants | Control GC participation, heap-type status, sequence/mapping identity, vectorcall support, and specialization eligibility. | `objects/type.go` (`TpFlags`, `TpFlagMapping`, `TpFlagSequence`) |
+| <Cpy path="Include/cpython/object.h" lines="81-130">81-130</Cpy> | `PyType_Slot` | Maps a slot number (`Py_tp_new`, `Py_nb_add`, etc.) to a function pointer. The array is terminated by `{0, NULL}`. | `objects/type.go` |
+| <Cpy path="Include/cpython/object.h" lines="131-180">131-180</Cpy> | `PyType_Spec` | Carries the type name, `basicsize`, `itemsize`, flags, and a `PyType_Slot` array. Passed to `PyType_FromSpec`. | `objects/type.go` |
+| <Cpy path="Include/cpython/object.h" lines="181-230">181-230</Cpy> | `PyType_FromSpec` / `PyType_FromSpecWithBases` | Allocate a new heap type from a `PyType_Spec`, optionally with explicit base types. | `objects/type.go` (`NewType`) |
+| <Cpy path="Include/cpython/object.h" lines="231-280">231-280</Cpy> | `PyType_FromModuleAndSpec` / `PyType_GetModule` / `PyType_GetModuleState` / `PyType_GetModuleByDef` | Associate a module with a heap type and retrieve per-module state. | (pending) |
+| <Cpy path="Include/cpython/object.h" lines="281-320">281-320</Cpy> | `PyType_GetSlot` / `PyType_GetName` / `PyType_GetQualName` / `PyType_GetFullyQualifiedName` | Slot accessor, name accessors for heap types. | `objects/type.go` |
+| <Cpy path="Include/cpython/object.h" lines="321-350">321-350</Cpy> | `PyObject_IS_GC` / `Py_REFCNT` / `Py_TYPE` / `Py_SIZE` / `_Py_Dealloc` | Internal macros for GC testing, refcount manipulation, and deallocation. | `objects/object.go` |
+
+## Reading
+
+### `Py_TPFLAGS_*` bitmask (lines 1 to 80)
+
+<CpyLink path="Include/cpython/object.h" lines="1-80" />
+
+```c
+/* Bits in tp_flags for PyTypeObject */
+#define Py_TPFLAGS_HEAPTYPE             (1UL <<  9)
+#define Py_TPFLAGS_BASETYPE             (1UL << 10)
+#define Py_TPFLAGS_IMMUTABLETYPE        (1UL <<  8)
+#define Py_TPFLAGS_HAVE_GC              (1UL << 14)
+#define Py_TPFLAGS_SEQUENCE             (1UL <<  5)
+#define Py_TPFLAGS_MAPPING              (1UL <<  6)
+#define Py_TPFLAGS_HAVE_VECTORCALL      (1UL << 11)
+#define Py_TPFLAGS_MANAGED_DICT         (1UL <<  4)
+#define Py_TPFLAGS_MANAGED_WEAKREF      (1UL <<  3)
+#define Py_TPFLAGS_DISALLOW_INSTANTIATION (1UL <<  7)
+#define Py_TPFLAGS_VALID_VERSION_TAG    (1UL << 19)
+```
+
+`Py_TPFLAGS_HEAPTYPE` distinguishes dynamically created types (those whose
+`PyTypeObject` was allocated by `PyType_FromSpec` or by `type()` at the Python
+level) from statically allocated C types. Heap types are reference-counted;
+static types are not. The garbage collector treats them differently: heap types
+participate in the cyclic GC via `Py_TPFLAGS_HAVE_GC`, whereas static types
+typically do not hold back-references to Python objects.
+
+`Py_TPFLAGS_SEQUENCE` and `Py_TPFLAGS_MAPPING` are consulted by the
+`MATCH_SEQUENCE` and `MATCH_MAPPING` structural-pattern-matching bytecodes.
+A type must explicitly set one of these to participate in `case [x, y]:` or
+`case {"key": val}:` patterns.
+
+`Py_TPFLAGS_HAVE_VECTORCALL` tells the call machinery that `tp_vectorcall_offset`
+is valid and the type supports the vectorcall protocol (see PEP 590). The eval
+loop checks this flag before deciding whether to use the fast vectorcall path
+or fall back to building a tuple and calling `tp_call`.
+
+`Py_TPFLAGS_VALID_VERSION_TAG` is a cache-validity bit. The specializing
+adaptive interpreter stores a type version in inline caches; when a type is
+modified the flag is cleared so every cache entry that references the type
+becomes invalid and triggers re-specialization on the next execution.
+
+In gopy, `objects/type.go` exposes `TpFlags uint64` on `objects.Type` and
+defines `TpFlagMapping` and `TpFlagSequence` as package-level constants. The
+`IsUser bool` field replaces `Py_TPFLAGS_HEAPTYPE`. `Py_TPFLAGS_HAVE_GC`
+is not ported because Go's GC handles all objects uniformly.
+
+### `PyType_Spec` and `PyType_FromSpec` (lines 131 to 230)
+
+<CpyLink path="Include/cpython/object.h" lines="131-230" />
+
+```c
+typedef struct PyType_Spec {
+    const char  *name;       /* "module.TypeName" */
+    int          basicsize;  /* sizeof the C struct */
+    int          itemsize;   /* for variable-size types */
+    unsigned int flags;      /* Py_TPFLAGS_* */
+    PyType_Slot *slots;      /* {0, NULL}-terminated */
+} PyType_Spec;
+
+PyAPI_FUNC(PyObject *) PyType_FromSpec(PyType_Spec *spec);
+
+PyAPI_FUNC(PyObject *) PyType_FromSpecWithBases(
+    PyType_Spec *spec,
+    PyObject    *bases);
+
+PyAPI_FUNC(PyObject *) PyType_FromModuleAndSpec(
+    PyObject    *module,
+    PyType_Spec *spec,
+    PyObject    *bases);
+```
+
+`PyType_FromSpec` allocates a new heap `PyTypeObject`, copies the name and size
+fields, iterates the `slots` array to fill in the appropriate `tp_*` pointer for
+each slot number, then calls `PyType_Ready` to build the MRO and inherit
+unset slots from the base class.
+
+The slot numbering is defined in `Include/typeslots.h`. Slot `Py_tp_new` maps
+to `tp_new`, `Py_nb_add` maps to `tp_as_number->nb_add`, and so on. Each slot
+group (`tp_as_number`, `tp_as_sequence`, `tp_as_mapping`, `tp_as_async`,
+`tp_as_buffer`) is heap-allocated on demand when the first slot in that group
+appears in the array.
+
+`PyType_FromModuleAndSpec` stores a reference to `module` in the heap type's
+`ht_module` field, making it accessible via `PyType_GetModule`. This is the
+standard pattern for multi-phase extension module initialization (PEP 489):
+the module creates its types with `PyType_FromModuleAndSpec` and then looks up
+per-module state via `PyType_GetModuleState` from any method on those types.
+
+In gopy, `objects.NewType(name string, bases []*Type)` is the direct
+equivalent of `PyType_FromSpec`. Slots are set as Go function fields directly on
+the returned `*Type`. There is no slot number indirection because Go's type
+system makes it unnecessary.
+
+### Slot numbering (lines 81 to 130)
+
+<CpyLink path="Include/cpython/object.h" lines="81-130" />
+
+```c
+typedef struct {
+    int        slot;    /* one of Py_tp_*, Py_nb_*, Py_sq_*, etc. */
+    void      *pfunc;  /* function pointer, cast to correct type at use */
+} PyType_Slot;
+```
+
+The slot numbers are defined in `Include/typeslots.h` (not here). The split
+between header files is intentional: `typeslots.h` is stable API that extension
+authors include; this file is CPython-internal and carries implementation
+details.
+
+A type spec can omit any slot. `PyType_FromSpec` inherits omitted slots from
+the base class by calling `inherit_slots` (in `typeobject.c`) after
+`PyType_Ready`. The `{0, NULL}` terminator at the end of the slot array is
+mandatory; missing it causes a buffer overread.
+
+`PyType_GetSlot(tp, slot_id)` retrieves a slot by number from a heap type at
+runtime. It is the inverse of the fill loop inside `PyType_FromSpec`. It cannot
+be called on static (non-heap) types and raises `TypeError` if called on
+`PyBaseObject_Type` or `PyType_Type`.
+
+## gopy mirror
+
+`objects/type.go` defines `Type` with named Go function fields for every slot.
+There is no slot number array; each slot is a named field on the struct, which
+makes zero-value initialization clear (nil means "inherit or absent") and
+avoids the cast noise required by the C `void *pfunc` approach.
+
+The `TpFlags` field on `objects.Type` carries the `Py_TPFLAGS_MAPPING`,
+`Py_TPFLAGS_SEQUENCE`, and `Py_TPFLAGS_HAVE_VECTORCALL` bits. The `IsUser`
+boolean replaces `Py_TPFLAGS_HEAPTYPE`. The version-tag mechanism is
+represented by `TpVersionTag uint32`, cleared to 0 on every mutation.

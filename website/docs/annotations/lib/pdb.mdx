@@ -1,0 +1,169 @@
+---
+title: Lib/pdb.py
+description: The Python debugger; subclasses bdb.Bdb and cmd.Cmd to provide an interactive command loop with stepping, breakpoints, watchpoints, stack inspection, and expression evaluation.
+cpython_path: Lib/pdb.py
+cpython_version: "3.14"
+lines: 1800
+status: annotated
+ported_to: (stdlib pending)
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Lib/pdb.py`
+
+<CpyLink path="Lib/pdb.py" />
+
+`pdb.py` implements the interactive Python debugger. It is a subclass of
+two cooperating base classes: `bdb.Bdb` (from `Lib/bdb.py`), which handles
+frame tracing and breakpoint mechanics, and `cmd.Cmd` (from `Lib/cmd.py`),
+which provides the `cmdloop`/`onecmd` REPL. The `Pdb` class wires them
+together so that whenever `bdb` stops execution (at a breakpoint, after a
+step, or on an exception) `Pdb` drops into the `cmd.Cmd` read loop.
+
+The public entry points are:
+
+- `set_trace()` and the `breakpoint()` builtin hook (`sys.breakpointhook`).
+- `run(statement)`, `runeval(expression)`, `runcall(func, *args)`.
+- `post_mortem(traceback)` and `pm()` (post-mortem on `sys.last_exc`).
+
+Command methods follow the `cmd.Cmd` convention: `do_n`, `do_s`, `do_c`,
+`do_r`, `do_l`, `do_b`, `do_cl`, `do_p`, `do_pp`, `do_w`, `do_u`, `do_d`,
+etc. Each `do_*` method parses its argument string and calls the
+corresponding `bdb` method or manipulates debugger state directly.
+
+Python 3.13 added `breakpoint()` as a builtin that calls
+`sys.breakpointhook()`, which defaults to `pdb.set_trace`. The `PYTHONBREAKPOINT`
+environment variable can redirect it to any callable.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Lib/pdb.py" lines="1-100">1-100</Cpy> | Imports, `Restart`, `find_function`, `getsourcelines` | Module prologue; `Restart` exception signals `run()` to restart the debugged program; `find_function` locates source for `do_b`. | `(stdlib pending)` |
+| <Cpy path="Lib/pdb.py" lines="100-300">100-300</Cpy> | `Pdb.__init__`, `reset`, `forget`, `setup`, `interaction` | Core debugger state: `curframe`, `curindex`, `stack`, `lineno`; `interaction` is the per-stop entry into `cmdloop`. | `(stdlib pending)` |
+| <Cpy path="Lib/pdb.py" lines="300-500">300-500</Cpy> | `do_n`, `do_s`, `do_c`, `do_r`, `do_unt`, `do_j` | Stepping commands; delegate to `bdb.set_next`, `set_step`, `set_continue`, `set_return`, `set_until`, `set_jump`. | `(stdlib pending)` |
+| <Cpy path="Lib/pdb.py" lines="500-700">500-700</Cpy> | `do_l`, `do_ll`, `do_a`, `do_source` | Listing commands; `do_l` shows up to 11 lines around the current line; `do_source` decompiles a callable. | `(stdlib pending)` |
+| <Cpy path="Lib/pdb.py" lines="700-1100">700-1100</Cpy> | `do_b`, `do_tbreak`, `do_cl`, `do_disable`, `do_enable`, `do_ignore`, `do_condition`, `do_commands` | Breakpoint management: set, list, clear, enable/disable, set hit-count ignore, attach conditions, record command lists. | `(stdlib pending)` |
+| <Cpy path="Lib/pdb.py" lines="1100-1300">1100-1300</Cpy> | `do_p`, `do_pp`, `do_whatis`, `do_display`, `do_undisplay` | Expression evaluation and display; `do_p` calls `eval` in the current frame's globals/locals; `do_display` registers auto-display expressions. | `(stdlib pending)` |
+| <Cpy path="Lib/pdb.py" lines="1300-1500">1300-1500</Cpy> | `do_w`, `do_bt`, `do_u`, `do_d`, `do_f` | Stack inspection: print stack (`do_w`/`do_bt`), move up/down frames (`do_u`/`do_d`), switch to frame (`do_f`). | `(stdlib pending)` |
+| <Cpy path="Lib/pdb.py" lines="1500-1700">1500-1700</Cpy> | `do_run`, `do_restart`, `do_q`, `do_EOF`, `do_debug`, `do_retval` | Session control: restart, quit, launch a recursive debugger on an expression, print return value. | `(stdlib pending)` |
+| <Cpy path="Lib/pdb.py" lines="1700-1800">1700-1800</Cpy> | `set_trace`, `post_mortem`, `pm`, `run`, `runeval`, `runcall` | Module-level entry points; `set_trace` inserts a trace call in the caller's frame; `post_mortem` attaches to an existing traceback. | `(stdlib pending)` |
+
+## Reading
+
+### Interaction loop (lines 100 to 300)
+
+<CpyLink path="Lib/pdb.py" lines="100-300" />
+
+```python
+def interaction(self, frame, traceback):
+    if self.setup(frame, traceback):
+        # no interaction needed
+        self.forget()
+        return
+    self.print_stack_entry(self.stack[self.curindex])
+    self._cmdloop()
+    self.forget()
+
+def _cmdloop(self):
+    while True:
+        try:
+            # keyboard interrupts allow for an exit from the current
+            # command loop.
+            self.cmdloop()
+            break
+        except KeyboardInterrupt:
+            print('--KeyboardInterrupt--', file=self.stdout)
+
+def setup(self, f, tb):
+    self.forget()
+    self.stack, self.curindex = self.get_stack(f, tb)
+    self.curframe = self.stack[self.curindex][0]
+    self.curframe_locals = self.curframe.f_locals
+    return False
+```
+
+`interaction` is called by `bdb` every time execution stops (after a
+step, at a breakpoint, or on an unhandled exception). It calls `setup`
+to populate `self.stack` and `self.curframe`, prints the current stack
+entry, then drops into `_cmdloop`. `_cmdloop` wraps `cmd.Cmd.cmdloop` in
+a `KeyboardInterrupt` handler so that `Ctrl-C` interrupts the current
+input line rather than exiting the debugger entirely. When the user types
+a continue/quit command, `cmdloop` returns and `forget` clears the
+per-stop state.
+
+### `do_break` command (lines 700 to 1100)
+
+<CpyLink path="Lib/pdb.py" lines="700-1100" />
+
+```python
+def do_break(self, arg, temporary=False):
+    if not arg:
+        if self.breaks:
+            self.message("Num Type         Disp Enb   Where")
+            for bp in bdb.Breakpoint.bpbynumber:
+                if bp:
+                    self.message(bp.bpformat())
+        return
+    # parse filename:lineno or function name
+    err = self.set_break(self.curframe.f_globals['__file__'], lineno,
+                         temporary, cond, funcname)
+    if err:
+        self.error(err)
+    else:
+        bp = self.get_breaks(filename, lineno)[-1]
+        self.message("Breakpoint %d at %s:%d" % (bp.number, bp.file, bp.number))
+```
+
+`do_break` (aliased as `do_b`) parses its argument as either
+`filename:lineno` or a function/method name. When called with no argument
+it lists all current breakpoints using `bdb.Breakpoint.bpbynumber`. The
+actual breakpoint record is managed entirely by `bdb`; `Pdb` only formats
+and displays the result. Temporary breakpoints (`do_tbreak`) pass
+`temporary=True`, causing `bdb` to clear the breakpoint after it fires
+once.
+
+Conditional breakpoints store a condition expression string in
+`bp.cond`; `bdb` evaluates it with `eval` in the stopped frame's
+namespace before deciding whether to stop.
+
+### `post_mortem` entry (lines 1700 to 1800)
+
+<CpyLink path="Lib/pdb.py" lines="1700-1800" />
+
+```python
+def post_mortem(t=None):
+    if t is None:
+        exc = sys.last_exc
+        t = exc.__traceback__
+    if t is None:
+        raise ValueError(
+            "A valid traceback must be passed if no exception is being handled")
+    p = Pdb()
+    p.reset()
+    p.interaction(None, t)
+
+def pm():
+    post_mortem(sys.last_exc.__traceback__)
+```
+
+`post_mortem` creates a fresh `Pdb` instance, resets its state, and calls
+`interaction` with `frame=None` and the provided traceback. `setup` then
+calls `get_stack(None, tb)` which walks `tb.tb_next` to build the stack
+list, placing `curindex` at the innermost frame. From the user's
+perspective this looks identical to stopping at a breakpoint: the full
+stack is available, frames can be traversed with `u`/`d`, and expressions
+can be evaluated in any frame.
+
+`pm()` is a one-liner convenience that reads `sys.last_exc` (set by the
+interactive interpreter when an unhandled exception occurs) so the user
+can simply type `pdb.pm()` after a crash.
+
+## gopy mirror
+
+`pdb` depends on `bdb` and `cmd`, neither of which is ported to gopy. A
+debugger for gopy would also require access to live frame objects
+(`f_locals`, `f_globals`, `f_lineno`) and a sys-level trace hook, which
+map to gopy's `vm.Frame` and the trace callback mechanism. No port is
+planned for the current release cycle.

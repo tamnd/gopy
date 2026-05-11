@@ -1,0 +1,151 @@
+---
+title: Lib/fractions.py
+description: Rational number arithmetic with exact numerator/denominator pairs always kept in lowest terms via math.gcd.
+cpython_path: Lib/fractions.py
+cpython_version: "3.14"
+lines: 800
+status: annotated
+ported_to: (stdlib pending)
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Lib/fractions.py`
+
+<CpyLink path="Lib/fractions.py" />
+
+`fractions.Fraction` is a pure-Python rational number type. Every
+instance stores a numerator and a denominator as integers in lowest terms
+(`gcd(|num|, |denom|) == 1`, `denom > 0`). Normalization happens once,
+in `__new__`, so all arithmetic can rely on the invariant without
+re-checking.
+
+Construction accepts `int`, `float`, `decimal.Decimal`, another
+`Fraction`, or a string such as `"3/4"` or `"0.75"`. Float and Decimal
+inputs go through `as_integer_ratio()` to get an exact integer pair.
+String inputs are matched against a compiled regex that covers integer,
+decimal, and `num/denom` forms.
+
+The arithmetic operators are generated in bulk by `_operator_fallbacks`,
+which takes a forward function (e.g. `_add`) and a reverse function and
+returns a pair `(__add__, __radd__)` that dispatch on operand types and
+fall back to `NotImplemented` for unknown types. This avoids writing
+twelve near-identical dunder methods by hand.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Lib/fractions.py" lines="1-200">1-200</Cpy> | `Fraction.__new__`, `from_float`, `from_decimal` | Construction from all supported types; GCD normalization; `_RATIONAL_FORMAT` regex for string parsing. | `(stdlib pending)` |
+| <Cpy path="Lib/fractions.py" lines="200-400">200-400</Cpy> | `_operator_fallbacks`, `_add`, `_sub`, `_mul`, `_div` | Generator that wires up forward and reverse operator methods; cross-multiply numerator, GCD-reduce denominator. | `(stdlib pending)` |
+| <Cpy path="Lib/fractions.py" lines="400-600">400-600</Cpy> | `__floor__`, `__ceil__`, `__round__`, `__trunc__` | Rounding operations expressed directly in terms of integer division on numerator and denominator. | `(stdlib pending)` |
+| <Cpy path="Lib/fractions.py" lines="600-800">600-800</Cpy> | `limit_denominator`, `__eq__`, `__lt__` etc., `__repr__`, `__str__` | Stern-Brocot / mediants algorithm for best rational approximation; cross-multiply comparisons; string rendering. | `(stdlib pending)` |
+
+## Reading
+
+### `_operator_fallbacks` (lines 200 to 400)
+
+<CpyLink path="Lib/fractions.py" lines="200-400" />
+
+```python
+def _operator_fallbacks(monomorphic_operator, fallback_operator):
+    def forward(a, b):
+        if isinstance(b, (int, Fraction)):
+            return monomorphic_operator(a, b)
+        elif isinstance(b, float):
+            return fallback_operator(float(a), b)
+        elif isinstance(b, complex):
+            return fallback_operator(complex(a), b)
+        else:
+            return NotImplemented
+
+    forward.__name__ = '__' + fallback_operator.__name__ + '__'
+
+    def reverse(b, a):
+        if isinstance(a, numbers.Rational):
+            return monomorphic_operator(a, b)
+        elif isinstance(a, numbers.Complex):
+            return fallback_operator(complex(a), complex(b))
+        else:
+            return NotImplemented
+
+    reverse.__name__ = '__r' + fallback_operator.__name__ + '__'
+    return forward, reverse
+
+
+def _add(a, b):
+    """a + b"""
+    da, db = a.denominator, b.denominator
+    return Fraction(a.numerator * db + b.numerator * da,
+                    da * db)
+
+__add__, __radd__ = _operator_fallbacks(_add, operator.add)
+```
+
+`_operator_fallbacks` accepts a Fraction-only implementation (`_add`,
+`_sub`, `_mul`, `_div`) and an operator module fallback (`operator.add`
+etc.) for mixed-type arithmetic. The forward method dispatches first to
+the Fraction path (covering both `Fraction` and `int` operands), then
+widens to `float` or `complex` by converting `self`. The reverse method
+handles the case where the left operand is a `numbers.Rational` or
+`numbers.Complex` ABC. This gives correct numeric tower behaviour without
+any per-operator boilerplate.
+
+The core arithmetic for same-type operations cross-multiplies:
+
+```python
+# addition:  a/b + c/d = (a*d + c*b) / (b*d)
+# then Fraction.__new__ calls math.gcd to reduce
+result = Fraction(a.numerator * db + b.numerator * da, da * db)
+```
+
+Because `Fraction.__new__` always divides both parts by their GCD, the
+intermediate product `da * db` is automatically reduced even when it is
+larger than necessary.
+
+### `limit_denominator` (lines 600 to 800)
+
+<CpyLink path="Lib/fractions.py" lines="600-800" />
+
+```python
+def limit_denominator(self, max_denominator=10**6):
+    if max_denominator < 1:
+        raise ValueError("max_denominator should be at least 1")
+    if self.denominator <= max_denominator:
+        return Fraction(self)
+
+    p0, q0, p1, q1 = 0, 1, 1, 0
+    n, d = self.numerator, self.denominator
+    while True:
+        a = n // d
+        q2 = q0 + a * q1
+        if q2 > max_denominator:
+            break
+        p0, q0, p1, q1 = p1, q1, p0 + a * p1, q2
+        n, d = d, n - a * d
+
+    k = (max_denominator - q0) // q1
+    bound1 = Fraction(p0 + k * p1, q0 + k * q1)
+    bound2 = Fraction(p1, q1)
+    if abs(bound2 - self) <= abs(bound1 - self):
+        return bound2
+    return bound1
+```
+
+The algorithm runs the continued-fraction expansion of `self` and stops
+when the next convergent denominator would exceed `max_denominator`. At
+that point two candidates exist: the last full convergent (`p1/q1`) and
+the best semi-convergent (`bound1`) reached by taking `k` steps of the
+partial quotient. The one closer to `self` in absolute value is returned.
+This is the standard algorithm from Gosper's continued-fraction
+arithmetic, and CPython's version matches the description in the `fractions`
+module documentation exactly.
+
+## gopy mirror
+
+`fractions.Fraction` will be implemented in `stdlib/fractions.py` as a
+vendored copy of the CPython source with gopy-specific import rewrites.
+The key dependency is `math.gcd`, which is already available in
+`module/math`. The `numbers` ABC tower (`numbers.Rational`,
+`numbers.Complex`) must be reachable via `module/numbers` before the
+arithmetic dispatch in `_operator_fallbacks` can work correctly.

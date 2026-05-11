@@ -1,0 +1,177 @@
+---
+title: Lib/smtplib.py
+description: SMTP/LMTP client; drives EHLO capability negotiation, STARTTLS upgrade, AUTH challenge-response, and the full sendmail envelope.
+cpython_path: Lib/smtplib.py
+cpython_version: "3.14"
+lines: 1200
+status: annotated
+ported_to: (stdlib pending)
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Lib/smtplib.py`
+
+<CpyLink path="Lib/smtplib.py" />
+
+`smtplib` is a pure-Python SMTP client. Its central class `SMTP` holds a
+single TCP socket (wrapped in a `BufferedRWPair` via `socket.makefile`) and
+drives the full RFC 5321 conversation: greeting, `EHLO`/`HELO` capability
+exchange, optional `STARTTLS` upgrade, `AUTH`, `MAIL FROM`, `RCPT TO`,
+`DATA`, and `QUIT`.
+
+`SMTP_SSL` is a thin subclass that wraps the socket in an `ssl.SSLSocket`
+before the greeting. `LMTP` overrides the greeting verb to `LHLO` and adds
+per-recipient status parsing so that a delivery failure for one recipient
+does not abort the entire transaction.
+
+The module defines a fine-grained exception hierarchy rooted at
+`SMTPException`. Individual exceptions carry the server response code and
+message so callers can distinguish transient failures (4xx) from permanent
+ones (5xx) without parsing the string themselves.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Lib/smtplib.py" lines="1-100">1-100</Cpy> | Module constants, `SMTPException` hierarchy | `SMTP_PORT`, `SMTP_SSL_PORT`, and exceptions: `SMTPServerDisconnected`, `SMTPResponseException`, `SMTPSenderRefused`, `SMTPRecipientsRefused`, `SMTPDataError`, `SMTPConnectError`, `SMTPHeloError`, `SMTPAuthenticationError`, `SMTPNotSupportedError`. | `(stdlib pending)` |
+| <Cpy path="Lib/smtplib.py" lines="100-200">100-200</Cpy> | `SMTP.__init__`, `SMTP.connect` | Resolves host/port, opens the TCP socket, reads the greeting line, records server capabilities. | `(stdlib pending)` |
+| <Cpy path="Lib/smtplib.py" lines="200-350">200-350</Cpy> | `SMTP.ehlo`, `SMTP.helo`, `SMTP.ehlo_or_helo_if_needed` | `ehlo` sends `EHLO` and parses the multi-line response into `self.esmtp_features`; `helo` falls back to legacy `HELO`; `ehlo_or_helo_if_needed` picks one lazily. | `(stdlib pending)` |
+| <Cpy path="Lib/smtplib.py" lines="350-500">350-500</Cpy> | `SMTP.starttls`, `SMTP.login`, `SMTP.auth` | `starttls` sends `STARTTLS`, wraps the socket with `ssl.wrap_socket`, and resets the capability cache; `login` selects a mechanism and delegates to `auth`; `auth` drives the SASL challenge-response loop. | `(stdlib pending)` |
+| <Cpy path="Lib/smtplib.py" lines="500-700">500-700</Cpy> | `SMTP.sendmail`, `SMTP.send_message` | `sendmail` issues `MAIL FROM`, iterates `RCPT TO` for each address, sends `DATA`, and returns a dict of refused recipients; `send_message` extracts the envelope from an `email.message.Message` object and delegates to `sendmail`. | `(stdlib pending)` |
+| <Cpy path="Lib/smtplib.py" lines="700-800">700-800</Cpy> | `SMTP.noop`, `SMTP.rset`, `SMTP.vrfy`, `SMTP.expn`, `SMTP.help`, `SMTP.quit` | Thin wrappers around one-shot commands; each sends the verb and calls `getreply()` to validate the numeric code. | `(stdlib pending)` |
+| <Cpy path="Lib/smtplib.py" lines="800-1000">800-1000</Cpy> | `SMTP_SSL` | Subclass that passes an `ssl.SSLContext` to `socket.create_connection` before the greeting; otherwise identical to `SMTP`. | `(stdlib pending)` |
+| <Cpy path="Lib/smtplib.py" lines="1000-1200">1000-1200</Cpy> | `LMTP` | Replaces `EHLO` with `LHLO` and overrides `sendmail` to return per-recipient status codes rather than raising a single exception on partial failure. | `(stdlib pending)` |
+
+## Reading
+
+### `SMTP.sendmail` RCPT loop (lines 500 to 700)
+
+<CpyLink path="Lib/smtplib.py" lines="500-700" />
+
+```python
+def sendmail(self, from_addr, to_addrs, msg, mail_options=(),
+             rcpt_options=()):
+    self.ehlo_or_helo_if_needed()
+    esmtp_opts = []
+    if isinstance(msg, str):
+        msg = _fix_eol(msg)
+    else:
+        msg = _fix_eol(msg.decode('ascii'))
+    if self.does_esmtp:
+        if self.has_extn('size'):
+            esmtp_opts.append("size=%d" % len(msg))
+        for option in mail_options:
+            esmtp_opts.append(option)
+    (code, resp) = self.mail(from_addr, esmtp_opts)
+    if code != 250:
+        if code == 421:
+            self.close()
+        else:
+            self._rset()
+        raise SMTPSenderRefused(code, resp, from_addr)
+    senderrs = {}
+    if isinstance(to_addrs, str):
+        to_addrs = [to_addrs]
+    for each in to_addrs:
+        (code, resp) = self.rcpt(each, rcpt_options)
+        if (code != 250) and (code != 251):
+            senderrs[each] = (code, resp)
+    if len(senderrs) == len(to_addrs):
+        # the server refused all our recipients
+        self._rset()
+        raise SMTPRecipientsRefused(senderrs)
+    (code, resp) = self.data(msg)
+    if code != 250:
+        if code == 421:
+            self.close()
+        else:
+            self._rset()
+        raise SMTPDataError(code, resp)
+    return senderrs
+```
+
+`sendmail` distinguishes two failure modes. If the `MAIL FROM` command is
+refused, it raises `SMTPSenderRefused` immediately. For recipients it
+accumulates failures in `senderrs` and only raises `SMTPRecipientsRefused`
+if every address was rejected; a partial failure means the dict of refused
+addresses is returned to the caller as the function's return value, leaving
+successfully delivered recipients implicit. The 421 code (service
+unavailable) forces `close()` because the connection cannot be reused.
+
+### `STARTTLS` upgrade (lines 350 to 500)
+
+<CpyLink path="Lib/smtplib.py" lines="350-500" />
+
+```python
+def starttls(self, context=None):
+    self.ehlo_or_helo_if_needed()
+    if not self.has_extn('starttls'):
+        raise SMTPNotSupportedError(
+            "STARTTLS extension not supported by server.")
+    (resp, reply) = self.docmd('STARTTLS')
+    if resp == 220:
+        if context is None:
+            context = ssl._create_stdlib_context()
+        self.sock = context.wrap_socket(self.sock,
+                                        server_hostname=self._host)
+        self.file = None
+        # re-do EHLO
+        self.helo_resp = None
+        self.ehlo_resp = None
+        self.esmtp_features = {}
+        self.does_esmtp = False
+    elif resp == 454:
+        raise SMTPNotSupportedError(resp, reply)
+    return (resp, reply)
+```
+
+After the server confirms `220 Ready to start TLS`, the existing socket is
+wrapped in-place. The capability cache (`esmtp_features`, `helo_resp`,
+`ehlo_resp`) is cleared because the server may advertise a different set of
+extensions after the TLS handshake completes. Callers must call `ehlo()`
+again if they need capabilities post-STARTTLS. The `context` parameter
+defaults to `ssl._create_stdlib_context()`, which applies the standard
+library's certificate verification policy.
+
+### AUTH challenge-response (lines 350 to 500)
+
+<CpyLink path="Lib/smtplib.py" lines="350-500" />
+
+```python
+def auth(self, mechanism, authobject, *, initial_response_ok=True):
+    mechanism = mechanism.upper()
+    initial_response = None
+    if initial_response_ok:
+        initial_response = authobject()
+    if initial_response is not None:
+        response = encode_base64(initial_response.encode('ascii'), eol='')
+        (code, resp) = self.docmd('AUTH', mechanism + ' ' + response)
+    else:
+        (code, resp) = self.docmd('AUTH', mechanism)
+    # If 334, the server is asking for more data.
+    if code == 334:
+        challenge = base64.decodebytes(resp)
+        response = encode_base64(
+            authobject(challenge).encode('ascii'), eol='')
+        (code, resp) = self.docmd(response)
+    if code in (235, 503):
+        return (code, resp)
+    raise SMTPAuthenticationError(code, resp)
+```
+
+`auth` implements a generic two-round SASL exchange. The `authobject`
+callable is invoked with no arguments for the initial response (LOGIN
+mechanism uses this to send the username), and with the server challenge
+for the second round (LOGIN sends the password; PLAIN sends nothing and
+returns an empty byte string). XOAUTH2 returns its entire token in the
+initial response and never expects a second round.
+
+## gopy mirror
+
+`smtplib` depends on `socket`, `ssl`, `base64`, `hmac`, `email.message`,
+`email.utils`, `email.base64mime`, and `email.generator`. Those modules
+must be available before `smtplib` can be ported. The SASL mechanisms
+(LOGIN, PLAIN, XOAUTH2) are self-contained callables passed to `auth`, so
+they can be tested in isolation once `SMTP.docmd` and `SMTP.getreply` are
+wired up.

@@ -1,0 +1,232 @@
+---
+title: Python/bytecodes.c
+description: DSL source for all ~300 CPython 3.14 bytecode opcodes; the cases generator reads this file to produce the tier-1 and tier-2 interpreter bodies.
+cpython_path: Python/bytecodes.c
+cpython_version: "3.14"
+lines: 5200
+status: annotated
+ported_to: vm/eval_gen.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Python/bytecodes.c`
+
+<CpyLink path="Python/bytecodes.c" />
+
+`Python/bytecodes.c` is not a C file that compiles directly. It is the
+DSL source that `Tools/cases_generator/` reads to produce two generated
+headers:
+
+* `Python/generated_cases.c.h`, the tier-1 opcode bodies, included
+  inline inside `_PyEval_EvalFrameDefault` in `ceval.c`.
+* `Python/executor_cases.c.h`, the tier-2 micro-op bodies, included
+  inside the `enter_tier_two:` block of the same function.
+
+Every opcode is defined as one of three DSL forms. `inst(OPNAME, (...))
+{ body }` is a pure tier-1 instruction. `op(NAME, (...)) { body }` is a
+reusable fragment that can be composed into a `macro`. `macro(OPNAME) =
+NAME1 + NAME2 + ...;` assembles a tier-1 opcode from named fragments,
+each of which becomes a separate micro-op in the tier-2 executor. The
+`cache` directive inside a body declares how many 16-bit inline-cache
+words the opcode consumes. Specialization families group a base opcode
+with its faster variants via `family(BASE, cache_size) = SPEC_A,
+SPEC_B, ...;`.
+
+The result is that CPython's dispatch loop and its optimizer share a
+single source of truth: every stack effect, every cache layout, and
+every specialization is authored once and mechanically propagated into
+both interpreters.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Python/bytecodes.c" lines="1-100">1-100</Cpy> | DSL preamble, `#include`s, helper macros | Pulls in `pycore_opcode_metadata.h`, `specialization.h`; defines `DEOPT_IF`, `JUMPBY`, `DISPATCH`. | `vm/eval.go` |
+| <Cpy path="Python/bytecodes.c" lines="100-600">100-600</Cpy> | `LOAD_FAST`, `LOAD_FAST_CHECK`, `LOAD_FAST_AND_CLEAR`, `STORE_FAST`, `COPY`, `SWAP`, `LOAD_FAST_BORROW`, `LOAD_FAST_BORROW_LOAD_FAST_BORROW` | Locals frame-slot reads and writes; borrow variants skip reference-counting for temporaries. | `vm/eval_simple.go` |
+| <Cpy path="Python/bytecodes.c" lines="600-1200">600-1200</Cpy> | `LOAD_GLOBAL`, `LOAD_GLOBAL_MODULE`, `LOAD_GLOBAL_BUILTIN`, `LOAD_ATTR`, `STORE_ATTR`, `LOAD_SUPER_ATTR` | Global variable lookup with 2-word inline cache (version + value); attribute specialization via type version tags. | `vm/eval_simple.go`, `vm/adaptive.go` |
+| <Cpy path="Python/bytecodes.c" lines="1200-1800">1200-1800</Cpy> | `BINARY_OP`, `BINARY_OP_ADD_INT`, `BINARY_OP_ADD_FLOAT`, `COMPARE_OP`, `CONTAINS_OP`, `IS_OP`, `BINARY_SUBSCR`, `STORE_SUBSCR` | Arithmetic and comparison with specialization; subscript read and write. | `vm/eval_simple.go`, `vm/adaptive.go` |
+| <Cpy path="Python/bytecodes.c" lines="1800-2600">1800-2600</Cpy> | `CALL`, `CALL_PY_EXACT_ARGS`, `CALL_PY_GENERAL`, `CALL_BOUND_METHOD_EXACT_ARGS`, `CALL_NON_PY_GENERAL`, `CALL_INTRINSIC_1`, `CALL_INTRINSIC_2`, `PUSH_CALL_SHAPE`, `CALL_FUNCTION_EX` | Function call family; vectorcall path; intrinsic dispatch tables for 19 tier-1 operations. | `vm/eval_call.go`, `vm/eval_simple.go` |
+| <Cpy path="Python/bytecodes.c" lines="2600-3400">2600-3400</Cpy> | `JUMP_FORWARD`, `JUMP_BACKWARD`, `POP_JUMP_IF_*`, `FOR_ITER`, `FOR_ITER_LIST`, `FOR_ITER_RANGE`, `PUSH_EXC_INFO`, `POP_EXCEPT`, `RERAISE`, `RAISE_VARARGS`, `CLEANUP_THROW` | Control flow and exception opcodes; iterator specialization for list and range. | `vm/eval_unwind.go`, `vm/eval_simple.go` |
+| <Cpy path="Python/bytecodes.c" lines="3400-4200">3400-4200</Cpy> | `BUILD_LIST`, `BUILD_TUPLE`, `BUILD_MAP`, `BUILD_SET`, `BUILD_CONST_KEY_MAP`, `BUILD_STRING`, `BUILD_SLICE`, `LIST_APPEND`, `SET_ADD`, `MAP_ADD`, `MAKE_FUNCTION`, `SET_FUNCTION_ATTRIBUTE` | Collection constructors; comprehension append helpers; function object construction and attribute wiring. | `vm/eval_simple.go` |
+| <Cpy path="Python/bytecodes.c" lines="4200-5200">4200-5200</Cpy> | `IMPORT_NAME`, `IMPORT_FROM`, `IMPORT_STAR`, `RETURN_GENERATOR`, `YIELD_VALUE`, `SEND`, `GET_YIELD_FROM_ITER`, `GET_AWAITABLE`, `GET_AITER`, `GET_ANEXT`, `RESUME`, `COPY_FREE_VARS`, `END_ASYNC_FOR`, `WITH_EXCEPT_START` | Import machinery; generator and coroutine protocol; frame setup opcodes. | `vm/eval_import.go`, `vm/eval_gen.go` |
+
+## Reading
+
+### DSL `inst()`, `op()`, and `macro()` syntax
+
+<CpyLink path="Python/bytecodes.c" lines="1-100" />
+
+Three construct types define opcode semantics. `inst` is the simplest:
+
+```c
+inst(LOAD_FAST, (-- value)) {
+    value = GETLOCAL(oparg);
+    assert(value != NULL);
+    Py_INCREF(value);
+}
+```
+
+The parenthesised signature `(inputs -- outputs)` declares the opcode's
+stack effect. `--` separates inputs (popped) from outputs (pushed). The
+cases generator uses this signature to compute the stack-depth table and
+to wire up the tier-2 micro-op data-flow edges.
+
+`op` defines a named fragment with no standalone dispatch entry:
+
+```c
+op(_LOAD_FAST_0, (-- value)) {
+    value = GETLOCAL(0);
+}
+```
+
+`macro` composes fragments into a tier-1 opcode, with each fragment
+becoming one micro-op in the tier-2 executor:
+
+```c
+macro(LOAD_FAST) = _LOAD_FAST_0 + _CHECK_VALIDITY;
+```
+
+`cache` directives inside a body reserve inline-cache words:
+
+```c
+inst(LOAD_GLOBAL, (unused/1, unused/2 -- null if (oparg & 1), v)) {
+    // first cache word: dict version; second: cached value
+}
+```
+
+The `family` declaration ties a base opcode to its specializations and
+records the cache size:
+
+```c
+family(LOAD_GLOBAL, INLINE_CACHE_ENTRIES_LOAD_GLOBAL) = {
+    LOAD_GLOBAL_MODULE,
+    LOAD_GLOBAL_BUILTIN,
+};
+```
+
+### `LOAD_FAST` specialization to `LOAD_FAST_BORROW`
+
+<CpyLink path="Python/bytecodes.c" lines="100-600" />
+
+Classic `LOAD_FAST` increments the reference count of the local before
+pushing it. CPython 3.14 introduced borrow semantics for temporaries
+that have a guaranteed lifetime across the opcode boundary:
+
+```c
+inst(LOAD_FAST_BORROW, (-- value)) {
+    value = GETLOCAL(oparg);
+    assert(value != NULL);
+    // No Py_INCREF: the local slot still holds the reference.
+    // The borrowed value must not outlive the next DECREF of the slot.
+}
+```
+
+The adaptive specializer in `specialize.c` rewrites `LOAD_FAST` to
+`LOAD_FAST_BORROW` when static analysis determines the local is not
+cleared before the borrowed value is consumed. The paired
+`LOAD_FAST_BORROW_LOAD_FAST_BORROW` superinstruction collapses two
+consecutive borrows into a single dispatch, halving the dispatch
+overhead for common patterns like `a + b`.
+
+`LOAD_FAST_AND_CLEAR` is a different variant: it reads the local and
+immediately sets the slot to `NULL`, used for comprehension iterator
+variables that must be freed before the comprehension frame is torn
+down.
+
+### `CALL` specialization to `CALL_PY_EXACT_ARGS`
+
+<CpyLink path="Python/bytecodes.c" lines="1800-2600" />
+
+The base `CALL` opcode handles every callable. After a few executions
+the adaptive interpreter rewrites it to a specialized form. The most
+common case is a Python function called with exactly the right number
+of positional arguments and no keywords:
+
+```c
+inst(CALL_PY_EXACT_ARGS, (unused/1, unused/2, callable, self_or_null, args[oparg] -- unused)) {
+    DEOPT_IF(!PyFunction_Check(callable));
+    PyFunctionObject *func = (PyFunctionObject *)callable;
+    PyCodeObject *code = (PyCodeObject *)func->func_code;
+    DEOPT_IF(code->co_argcount != oparg + (self_or_null != NULL));
+    DEOPT_IF(!_PyThreadState_HasStackSpace(tstate, code->co_framesize));
+    ...
+    _PyInterpreterFrame *new_frame = _PyFrame_PushUnchecked(tstate, func, oparg + ...);
+    JUMPBY(INLINE_CACHE_ENTRIES_CALL);
+    DISPATCH_INLINED(new_frame);
+}
+```
+
+`DEOPT_IF` is the guard macro: if the condition is true the opcode
+de-optimizes back to the base form and re-dispatches. `DISPATCH_INLINED`
+transfers control into the callee's frame without returning to the C
+stack, implementing the tail-call inline optimization that eliminates a
+C stack frame per Python call depth level.
+
+The two inline-cache words store the version counter of the callee code
+object (for invalidation) and the callee function pointer (for the
+fast path that skips `PyFunction_Check`).
+
+### `CALL_INTRINSIC_1` dispatch table
+
+<CpyLink path="Python/bytecodes.c" lines="1800-2600" />
+
+`CALL_INTRINSIC_1` executes one of 19 built-in operations that do not
+go through normal function dispatch. `oparg` indexes into a static
+table:
+
+```c
+inst(CALL_INTRINSIC_1, (value -- res)) {
+    assert(oparg < MAX_INTRINSIC_1);
+    res = _Py_Intrinsics[oparg].func(tstate, value);
+    ...
+}
+```
+
+Selected entries from the table:
+
+| oparg | Name | Operation |
+| ----- | ---- | --------- |
+| 1 | `INTRINSIC_PRINT` | `print(value)` for interactive `repr` mode |
+| 2 | `INTRINSIC_IMPORT_STAR` | absorb `*` imports into frame locals |
+| 3 | `INTRINSIC_STOPITERATION_ERROR` | convert `StopIteration` to `RuntimeError` inside generator |
+| 4 | `INTRINSIC_ASYNC_GEN_WRAP` | wrap a value as an async-generator yield |
+| 5 | `INTRINSIC_UNARY_POSITIVE` | `+value` |
+| 6 | `INTRINSIC_LIST_TO_TUPLE` | `tuple(list)` in starred assignment unpack |
+| 7 | `INTRINSIC_TYPEVAR` | create `TypeVar` for PEP 695 |
+| 8 | `INTRINSIC_PARAMSPEC` | create `ParamSpec` for PEP 695 |
+| 9 | `INTRINSIC_TYPEVARTUPLE` | create `TypeVarTuple` for PEP 695 |
+| 10 | `INTRINSIC_SUBSCRIPT_GENERIC` | `Generic[T]` subscript for PEP 695 |
+| 11 | `INTRINSIC_TYPEALIAS` | create `TypeAliasType` for PEP 695 |
+
+`CALL_INTRINSIC_2` is the two-argument variant, covering operations
+like `INTRINSIC_PREP_RERAISE_STAR` (the `except*` re-raise helper) and
+`INTRINSIC_SET_FUNCTION_TYPE_PARAMS` (PEP 695 type parameter binding).
+
+## gopy mirror
+
+gopy does not run `Tools/cases_generator/`. Instead, the eval loop in
+`vm/eval.go` dispatches to Go functions grouped by theme:
+
+* `vm/eval_gen.go` handles the generator and coroutine opcodes
+  (`RETURN_GENERATOR`, `YIELD_VALUE`, `SEND`, `GET_AWAITABLE`,
+  `GET_AITER`, `GET_ANEXT`, `END_ASYNC_FOR`, `CLEANUP_THROW`,
+  `WITH_EXCEPT_START`). Each case calls a named `exec*` method on
+  `evalState`, making the panel independently testable.
+* `vm/eval_simple.go` covers the arithmetic, comparison, collection,
+  and frame-setup opcodes.
+* `vm/eval_call.go` covers the `CALL` family and `initialize_locals`.
+* `vm/eval_import.go` covers `IMPORT_NAME`, `IMPORT_FROM`,
+  `IMPORT_STAR`.
+* `vm/eval_unwind.go` covers the exception and jump opcodes.
+* `vm/adaptive.go` implements the specialization counters and the
+  rewrite logic that mirrors `specialize.c`.
+
+The stack effects in `vm/` are verified against the `co_stacksize`
+values in CPython's test corpus via `compile/flowgraph_stackdepth.go`,
+which re-implements the `stackdepth` pass from `Python/flowgraph.c`.
+
+`LOAD_FAST_BORROW` and its paired superinstruction are planned for
+gopy once the borrow-lifetime analysis lands in `compile/`. Until then,
+gopy emits `LOAD_FAST` for every local read, trading the refcount
+overhead for correctness simplicity.

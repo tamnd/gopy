@@ -1,0 +1,130 @@
+---
+title: Lib/timeit.py
+description: Micro-benchmarking utility that compiles a statement into a callable and measures its execution time over a configurable number of repetitions.
+cpython_path: Lib/timeit.py
+cpython_version: "3.14"
+lines: 330
+status: annotated
+ported_to: ""
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Lib/timeit.py`
+
+<CpyLink path="Lib/timeit.py" />
+
+`timeit.py` provides the `Timer` class together with two module-level convenience functions (`timeit` and `repeat`) and a `main` function that drives the command-line interface. The central idea is to compile a user-supplied statement into a small function using a string template, then call that function in a tight loop and record wall-clock time via `time.perf_counter`.
+
+The template wraps the statement in a `for` loop and pre-fetches anything that might be looked up per iteration (like the timer function itself) into local variables so the loop body is as tight as possible. A separate `setup` string is executed once before the loop starts. Both `stmt` and `setup` can be either a string (compiled and executed) or a plain callable (called directly). When both are callables the loop template is bypassed entirely and the callable is invoked directly in a minimal inner loop.
+
+`autorange` handles the common case where the caller does not know how many iterations are needed for a stable measurement. It starts at 1 and multiplies by 10 until the total elapsed time reaches 0.2 seconds, then returns that iteration count along with the elapsed time. The command-line interface wraps `autorange` and `repeat`, prints results in a human-readable form, and warns when the best time is suspiciously high relative to the minimum.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Lib/timeit.py" lines="1-60">1-60</Cpy> | module docstring, imports, `dummy_src_name`, templates | Header, template strings `template` and `template_func` used for code generation | - |
+| <Cpy path="Lib/timeit.py" lines="61-110">61-110</Cpy> | `Timer.__init__` | Validate stmt and setup, compile string statements, store timer | - |
+| <Cpy path="Lib/timeit.py" lines="111-160">111-160</Cpy> | `Timer.timeit` | Run the inner loop `number` times and return elapsed seconds | - |
+| <Cpy path="Lib/timeit.py" lines="161-200">161-200</Cpy> | `Timer.repeat` | Call `timeit` `repeat` times and return a list of elapsed times | - |
+| <Cpy path="Lib/timeit.py" lines="201-240">201-240</Cpy> | `Timer.autorange` | Probe increasing iteration counts until total time exceeds 0.2 s | - |
+| <Cpy path="Lib/timeit.py" lines="241-260">241-260</Cpy> | `Timer.print_exc` | Re-raise the last exception with the synthesised source in the traceback | - |
+| <Cpy path="Lib/timeit.py" lines="261-285">261-285</Cpy> | `timeit`, `repeat` | Module-level convenience wrappers that construct a `Timer` and delegate | - |
+| <Cpy path="Lib/timeit.py" lines="286-330">286-330</Cpy> | `main` | Argument parsing, `autorange`/`repeat` orchestration, result printing | - |
+
+## Reading
+
+### Template-based code generation (lines 1 to 60)
+
+<CpyLink path="Lib/timeit.py" lines="1-60" />
+
+Two string templates live at the module level. `template` wraps a string statement in a `for _ in _it:` loop with a timing preamble. `template_func` is used when the statement is already a callable: it generates a loop that simply calls `_func()` each iteration. Both templates pre-fetch the timer as `_timer` into a local variable to avoid a global lookup inside the hot loop.
+
+```python
+template = """
+def inner(_it, _timer{init}):
+    {setup}
+    _t0 = _timer()
+    for _i in _it:
+        {stmt}
+    _t1 = _timer()
+    return _t1 - _t0
+"""
+```
+
+### Timer.__init__ and compilation (lines 61 to 110)
+
+<CpyLink path="Lib/timeit.py" lines="61-110" />
+
+`__init__` accepts `stmt`, `setup`, `timer` (defaults to `time.perf_counter`), and `globals`. When `stmt` is a string, `__init__` fills the appropriate template, compiles it with `compile`, and then `exec`s it into a fresh namespace. The resulting `inner` function is stored as `self.inner`. When `stmt` is a callable, `self.src` is left as `None` and the callable is stored directly.
+
+```python
+def __init__(self, stmt="pass", setup="pass", timer=default_timer,
+             globals=None):
+    ...
+    src = template.format(stmt=stmt, setup=setup, init=init)
+    code = compile(src, dummy_src_name, "exec")
+    exec(code, globals(), ns)
+    self.inner = ns["inner"]
+```
+
+### timeit and repeat (lines 111 to 200)
+
+<CpyLink path="Lib/timeit.py" lines="111-200" />
+
+`Timer.timeit` creates a `range(number)` iterator and passes it to `self.inner` together with the timer. The return value is the float elapsed time in seconds. `Timer.repeat` is a simple loop that calls `timeit` `repeat` times and appends each result to a list. Neither method performs any statistics: that is left to the caller.
+
+```python
+def timeit(self, number=default_number):
+    it = itertools.repeat(None, number)
+    gcold = gc.isenabled()
+    gc.disable()
+    try:
+        timing = self.inner(it, self.timer)
+    finally:
+        if gcold:
+            gc.enable()
+    return timing
+```
+
+### autorange (lines 201 to 240)
+
+<CpyLink path="Lib/timeit.py" lines="201-240" />
+
+`autorange` probes iteration counts from 1 upward, multiplying by 10 each step, until the cumulative time for that count reaches or exceeds 0.2 seconds. It returns a `(number, time_taken)` tuple. An optional `callback` is called after each probe so callers can print progress. The 0.2-second threshold is chosen to give a stable reading on most hardware without waiting too long for slow statements.
+
+```python
+def autorange(self, callback=None):
+    i = 1
+    while True:
+        for j in 1, 2, 5:
+            number = i * j
+            time_taken = self.timeit(number)
+            if callback:
+                callback(number, time_taken)
+            if time_taken >= 0.2:
+                return (number, time_taken)
+        i *= 10
+```
+
+### Command-line interface (lines 286 to 330)
+
+<CpyLink path="Lib/timeit.py" lines="286-330" />
+
+`main` parses `sys.argv` with `getopt`, constructs a `Timer`, calls `autorange` to find a good iteration count, then calls `repeat` to collect multiple samples. It prints the best (minimum) time along with a warning if the best is more than four times the worst, which usually indicates OS interference or GC activity during the run.
+
+```python
+def main(args=None, *, _wrap_timer=None):
+    ...
+    t = Timer(stmt, setup, timer, namespace)
+    number, _ = t.autorange()
+    raw_timings = t.repeat(repeat, number)
+    ...
+    best = min(raw_timings) / number
+    print("{} loop{}, best of {}: {} per loop".format(...))
+```
+
+## gopy mirror
+
+Not yet ported.

@@ -1,0 +1,85 @@
+---
+title: Include/cpython/tupleobject.h
+description: CPython-private tuple internals exposing the inline ob_item array, fast access macro, and free-list recycling constants.
+cpython_path: Include/cpython/tupleobject.h
+cpython_version: "3.14"
+lines: 40
+status: annotated
+ported_to: ""
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Include/cpython/tupleobject.h`
+
+<CpyLink path="Include/cpython/tupleobject.h" />
+
+CPython tuples are immutable sequences allocated as a single contiguous block. Unlike lists, the element array is not a separately heap-allocated pointer array. Instead, `ob_item` is a flexible array member at the end of `PyTupleObject`, so the object header and all elements occupy a single `malloc` region. This eliminates one level of pointer indirection and makes tuple access measurably faster than list access for read-only workloads.
+
+Because tuples are immutable and very frequently created in short-lived call frames (argument packing, `RETURN_VALUE` unpacking, comprehension seeds), CPython maintains a per-interpreter free list indexed by tuple length. Tuples of length 0 through `PyTuple_MAXSAVESIZE - 1` are recycled rather than returned to the system allocator. Each length bucket holds up to `PyTuple_MAXFREELIST` objects. The header exposes these two constants so that downstream code can size its own caches consistently.
+
+The `_Py`-prefixed symbols here are used heavily inside `ceval.c` and the specialising interpreter. `_PyTuple_ITEMS` is the innermost building block for argument vector construction and for the `UNPACK_SEQUENCE` family of opcodes.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| 1-18 | `PyTupleObject` | Concrete struct with inline flexible array `ob_item` | `objects/tuple.go Tuple` |
+| 19-24 | `_PyTuple_ITEMS(op)` | Macro returning pointer to inline element array | `objects/tuple.go Items()` |
+| 25-28 | `PyTuple_MAXSAVESIZE` | Maximum tuple length eligible for free-list recycling (20) | `objects/tuple.go maxSaveSize` |
+| 29-32 | `PyTuple_MAXFREELIST` | Maximum number of recycled tuples per length bucket (2000) | `objects/tuple.go maxFreeList` |
+| 33-40 | `_PyTuple_MaybeUntrack` | Hint to the cyclic GC that a tuple containing no tracked objects can be untracked | not ported (GC differs) |
+
+## Reading
+
+### Struct layout (lines 1 to 18)
+
+<CpyLink path="Include/cpython/tupleobject.h" lines="1-18" />
+
+`PyTupleObject` uses a C99 flexible array member for `ob_item`. The length is stored in `ob_base.ob_size` (inherited from `PyVarObject`). Because the array is inline, `sizeof(PyTupleObject) + n * sizeof(PyObject *)` gives the total allocation size for a tuple of length `n`. CPython's `tupleobject.c` allocates exactly this much and never resizes.
+
+The empty tuple `()` is a singleton: CPython allocates it once at interpreter startup and returns the same pointer for every `BUILD_TUPLE 0` instruction. gopy follows the same pattern with a package-level `emptyTuple` variable.
+
+```c
+typedef struct {
+    PyObject_VAR_HEAD
+    PyObject *ob_item[1]; /* flexible array, actual length is ob_size */
+} PyTupleObject;
+```
+
+### Fast item access (lines 19 to 24)
+
+<CpyLink path="Include/cpython/tupleobject.h" lines="19-24" />
+
+`_PyTuple_ITEMS` casts to `PyTupleObject *` and returns `->ob_item`. Because `ob_item` is inline, the returned pointer is just `(char *)op + offsetof(PyTupleObject, ob_item)`. No second dereference is needed, unlike `_PyList_ITEMS` where `ob_item` is itself a pointer to a separate allocation.
+
+The specialising interpreter uses this macro in `LOAD_FAST`, `CALL`, and `UNPACK_SEQUENCE_TWO_TUPLE` to extract elements with a single indexed load from the tuple's memory region.
+
+```c
+#define _PyTuple_ITEMS(op) (((PyTupleObject *)(op))->ob_item)
+```
+
+### Free-list constants (lines 25 to 32)
+
+<CpyLink path="Include/cpython/tupleobject.h" lines="25-32" />
+
+`PyTuple_MAXSAVESIZE` is set to 20, meaning tuples of length 0 through 19 participate in recycling. `PyTuple_MAXFREELIST` is set to 2000, so each length bucket can hold up to 2000 reclaimed objects. Together these constants bound the memory devoted to the free list: at most `20 * 2000 = 40000` tuple headers, though in practice the lists for longer tuples are nearly always empty.
+
+These values are exposed in the header (rather than buried in `.c`) because the tier-2 optimizer and extension modules sometimes pre-allocate their own pools sized to match CPython's.
+
+```c
+#define PyTuple_MAXSAVESIZE 20
+#define PyTuple_MAXFREELIST 2000
+```
+
+### GC untracking hint (lines 33 to 40)
+
+<CpyLink path="Include/cpython/tupleobject.h" lines="33-40" />
+
+`_PyTuple_MaybeUntrack` iterates over the tuple's elements and, if none of them are tracked by the cyclic garbage collector, removes the tuple from the GC's tracked set. This is called after constructing a tuple from stack values to avoid adding pure-scalar tuples (integers, strings, floats) to the GC workload.
+
+gopy does not port this because it relies on Go's tracing garbage collector rather than CPython's reference-counting plus cycle detector. The equivalent concern in gopy is handled automatically by the Go runtime.
+
+## gopy mirror
+
+`objects/tuple.go` defines `Tuple` with an `items []Object` field. Go slices carry their own length, so the flexible-array trick is not replicated; the single allocation benefit is not available in idiomatic Go and is not needed for correctness. `Items()` returns the slice, equivalent to `_PyTuple_ITEMS`. The free-list constants are reflected as unexported package-level constants `maxSaveSize` and `maxFreeList` in the same file, and a per-length `[maxSaveSize][]Tuple` free list is maintained to match CPython's allocation behaviour in benchmarks.

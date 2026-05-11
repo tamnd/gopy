@@ -1,0 +1,65 @@
+---
+title: Python/pytime.c
+description: Platform-specific implementations of CPython's internal time functions, covering monotonic, system, and performance-counter clocks with nanosecond-precision arithmetic.
+cpython_path: Python/pytime.c
+cpython_version: "3.14"
+lines: 700
+status: annotated
+ported_to: ""
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Python/pytime.c`
+
+<CpyLink path="Python/pytime.c" />
+
+`pytime.c` is the implementation file for everything declared in `Include/cpython/pytime.h` (and its internal counterpart `Include/internal/pycore_time.h`). CPython represents all internal timestamps as a signed 64-bit nanosecond count (`_PyTime_t`), and this file is where that abstract type meets the actual OS clocks. The three principal clocks are the monotonic clock (used for timeouts and profiling), the system wall-clock (used for `time.time()`), and the performance counter (used for `time.perf_counter()`). Each clock has a platform-specific backend selected at compile time.
+
+On Linux the monotonic and system clocks call `clock_gettime` with `CLOCK_MONOTONIC` and `CLOCK_REALTIME` respectively, converting the `struct timespec` result to nanoseconds. On macOS, `mach_absolute_time` feeds the monotonic and performance-counter paths, with `mach_timebase_info` used once at startup to build the `_PyTimeFraction` scaling factor that converts raw Mach ticks to nanoseconds. On Windows, `QueryPerformanceCounter` drives the performance counter, and `GetSystemTimeAsFileTime` covers the wall clock. The file contains all three platform branches inside `#ifdef` guards, making it one of the larger platform-adaptation files in `Python/`.
+
+The `_PyTimeFraction` type introduced in 3.12 and refined in 3.14 deserves special attention. It stores a rational multiplier as a numerator-denominator pair and provides `_PyTimeFraction_Mul` for applying it to a tick count without intermediate floating-point. This matters because Mach ticks on Apple Silicon are 41.67 ns each (a 24/1000000000 fraction simplified to 3/125000000), and a naive `double` multiply would lose sub-nanosecond precision over long uptimes.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| 1-60 | includes, type aliases | Platform detection macros and `_PyTime_t` typedef confirmation | n/a |
+| 61-180 | `_PyTimeFraction` helpers | `_PyTimeFraction_Set`, `_PyTimeFraction_Mul`, GCD reduction | not ported |
+| 181-320 | `_PyTime_AsTimeval`, `_PyTime_AsTimespec` | Convert nanosecond timestamp to `struct timeval` / `struct timespec` | not ported |
+| 321-480 | `_PyTime_GetSystemClock`, `_PyTime_GetMonotonicClock` | OS clock reads, platform branches for Linux / macOS / Windows | not ported |
+| 481-580 | `_PyTime_GetPerfCounter` | High-resolution counter, `QueryPerformanceCounter` on Windows | not ported |
+| 581-700 | rounding helpers, `_PyTime_Add`, `_PyTime_Mul` | Overflow-safe arithmetic on `_PyTime_t` values | not ported |
+
+## Reading
+
+### _PyTimeFraction and tick scaling
+
+Before reading any Mach-based clock, the runtime calls `mach_timebase_info` once and stores the resulting numer/denom pair inside a `_PyTimeFraction`. `_PyTimeFraction_Set` reduces the fraction using a GCD loop so subsequent multiplications stay within 64-bit range. `_PyTimeFraction_Mul` then applies the fraction as `(ticks * numer) / denom`, checking for overflow before the multiply. This replaces the old `(double)ticks * factor` approach, which accumulated error over hours of uptime.
+
+### Conversion to struct timeval and timespec
+
+`_PyTime_AsTimeval` and `_PyTime_AsTimespec` share most of their logic. Both split the nanosecond value into a seconds part (integer division by 1e9) and a sub-second remainder, then round the remainder according to a `_PyRound` mode argument (`ROUND_FLOOR`, `ROUND_CEILING`, or `ROUND_HALF_EVEN`). The rounding mode matters for `select()` timeouts: a floor-rounded timeout can expire slightly early, which is acceptable, while a ceiling-rounded deadline can block slightly longer than requested.
+
+### Platform clock dispatch
+
+Each of the three public clock functions (`_PyTime_GetSystemClock`, `_PyTime_GetMonotonicClock`, `_PyTime_GetPerfCounter`) is a thin dispatcher. For Linux the body is a single `clock_gettime` call followed by `(int64_t)ts.tv_sec * 1000000000 + ts.tv_nsec`. For macOS the body calls `mach_absolute_time`, then `_PyTimeFraction_Mul` with the cached fraction. For Windows the body calls the appropriate Win32 API and scales with a pre-computed `_PyTimeFraction` built from `QueryPerformanceFrequency`. All three functions return `-1` on error and write a Python exception.
+
+### Overflow-safe arithmetic
+
+`_PyTime_Add` and `_PyTime_Mul` operate on the 64-bit nanosecond type and must detect overflow without relying on undefined signed-integer wrap. They use the `_Py_SafeAdd` / `_Py_SafeMul` macros (defined in `pymath.h`) which implement the standard "check before compute" idiom. On overflow they set `OverflowError` and return `-1`, matching the error convention of the clock-read functions.
+
+```c
+/* macOS monotonic path */
+uint64_t ticks = mach_absolute_time();
+_PyTime_t ns;
+if (_PyTimeFraction_Mul(&ns, ticks, &_Py_mach_timebase) < 0) {
+    return -1;
+}
+*tp = ns;
+return 0;
+```
+
+## gopy mirror
+
+Not yet ported.

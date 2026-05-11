@@ -1,0 +1,222 @@
+---
+title: Lib/codecs.py
+description: Python Codec Registry: CodecInfo, register/lookup, IncrementalEncoder/Decoder ABCs, StreamWriter/StreamReader, BOM constants, and error-handler aliases.
+cpython_path: Lib/codecs.py
+cpython_version: "3.14"
+lines: 1126
+status: annotated
+ported_to: codecs/
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Lib/codecs.py`
+
+<CpyLink path="Lib/codecs.py" />
+
+`codecs.py` is the Python wrapper around the codec registry that lives in
+`Python/codecs.c`. Its first act is `from _codecs import *`, which pulls in
+the C implementations of `register`, `lookup`, `encode`, `decode`,
+`register_error`, `lookup_error`, and the various `*_encode`/`*_decode`
+functions. Everything else in the file is pure Python.
+
+The module has four distinct layers. First, BOM constants (lines 44-78) are
+byte-string literals for UTF-8/16/32 signatures. Second, the codec class
+hierarchy (lines 83-882) provides `CodecInfo`, `Codec`, `IncrementalEncoder`,
+`IncrementalDecoder`, `StreamWriter`, `StreamReader`, `StreamReaderWriter`,
+and `StreamRecoder`. Third, shortcut helpers (lines 886-1078) wrap `lookup`
+into single-purpose functions. Fourth, named error-handler aliases (lines
+1114-1119) bind the six predefined handler names to their callables.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Lib/codecs.py" lines="15-18">15-18</Cpy> | `from _codecs import *` | Imports `register`, `lookup`, `encode`, `decode`, `register_error`, `lookup_error`, and the C codec functions into the module namespace. | `codecs/registry.go` |
+| <Cpy path="Lib/codecs.py" lines="44-78">44-78</Cpy> | BOM constants | `BOM_UTF8`, `BOM_LE`, `BOM_BE`, `BOM_UTF16`, `BOM_UTF32`, `BOM_UTF32_LE`, `BOM_UTF32_BE`, plus deprecated aliases `BOM32_*`/`BOM64_*`. Native-endian names are aliased to LE or BE based on `sys.byteorder`. | `codecs/builtin.go` |
+| <Cpy path="Lib/codecs.py" lines="83-116">83-116</Cpy> | `CodecInfo` | A `tuple` subclass holding `(encode, decode, streamreader, streamwriter)` with named attributes; `_is_text_encoding` flag distinguishes text codecs from binary-only ones. | `codecs/registry.go` |
+| <Cpy path="Lib/codecs.py" lines="117-181">117-181</Cpy> | `Codec` | Abstract base for stateless codecs; defines `encode(input, errors)` and `decode(input, errors)`, both raise `NotImplementedError`. | `(stdlib pending)` |
+| <Cpy path="Lib/codecs.py" lines="183-255">183-255</Cpy> | `IncrementalEncoder`, `BufferedIncrementalEncoder` | Stateful encoding ABC; `encode(input, final=False)` accumulates state between calls. `BufferedIncrementalEncoder` manages a `self.buffer` string for codecs that cannot emit output on every chunk. | `(stdlib pending)` |
+| <Cpy path="Lib/codecs.py" lines="257-340">257-340</Cpy> | `IncrementalDecoder`, `BufferedIncrementalDecoder` | Stateful decoding ABC; `getstate()`/`setstate(state)` checkpoint the pending-bytes buffer. `BufferedIncrementalDecoder.getstate()` returns `(self.buffer, 0)`. | `(stdlib pending)` |
+| <Cpy path="Lib/codecs.py" lines="349-422">349-422</Cpy> | `StreamWriter` | Inherits from `Codec`; wraps a writable stream with encoding. `write()` calls `self.encode(object, self.errors)` and forwards bytes to `self.stream`. `__getattr__` delegates unknown attributes to the underlying stream. | `(stdlib pending)` |
+| <Cpy path="Lib/codecs.py" lines="425-673">425-673</Cpy> | `StreamReader` | Inherits from `Codec`; wraps a readable stream. `read(size, chars, firstline)` fills `self.charbuffer` from `self.bytebuffer` via `self.decode`. `readline` handles `\r\n` boundary splits across network chunks. | `(stdlib pending)` |
+| <Cpy path="Lib/codecs.py" lines="677-763">677-763</Cpy> | `StreamReaderWriter` | Combines a `StreamReader` and a `StreamWriter` on the same stream; used by `codecs.open()` to return a bidirectional file object. | `(stdlib pending)` |
+| <Cpy path="Lib/codecs.py" lines="767-882">767-882</Cpy> | `StreamRecoder` | Transcodes between two encodings in a pipeline: decode with one codec and re-encode with another. The `encode`/`decode` callables handle the frontend; `Reader`/`Writer` handle the backend. | `(stdlib pending)` |
+| <Cpy path="Lib/codecs.py" lines="886-935">886-935</Cpy> | `open` | Deprecated wrapper around `builtins.open`; forces binary mode and wraps the result in a `StreamReaderWriter`. Emits `DeprecationWarning` since 3.14; callers should use `builtins.open(filename, encoding=...)`. | `(stdlib pending)` |
+| <Cpy path="Lib/codecs.py" lines="975-1078">975-1078</Cpy> | `getencoder`, `getdecoder`, `getincrementalencoder`, `getincrementaldecoder`, `getreader`, `getwriter`, `iterencode`, `iterdecode` | Convenience wrappers that call `lookup(encoding)` and return one field of the resulting `CodecInfo`. `iterencode`/`iterdecode` drive an `IncrementalEncoder`/`Decoder` over a string iterator, flushing with `final=True` at the end. | `(stdlib pending)` |
+| <Cpy path="Lib/codecs.py" lines="1081-1110">1081-1110</Cpy> | `make_identity_dict`, `make_encoding_map` | Charmap helpers: `make_identity_dict` builds `{i: i}` for a range; `make_encoding_map` inverts a decoding map, setting any collision target to `None`. | `(stdlib pending)` |
+| <Cpy path="Lib/codecs.py" lines="1114-1119">1114-1119</Cpy> | Error-handler aliases | `strict_errors`, `ignore_errors`, `replace_errors`, `xmlcharrefreplace_errors`, `backslashreplace_errors`, `namereplace_errors` are bound by calling `lookup_error(name)` at module import time. | `codecs/errors.go` |
+
+## Reading
+
+### `lookup()` and the search-function chain (line 16, implemented in `Python/codecs.c`)
+
+<CpyLink path="Lib/codecs.py" lines="15-18" />
+
+`lookup` is a C function imported from `_codecs`. It normalizes the encoding
+name (lowercase, whitespace and hyphens to underscores) and then walks a
+per-interpreter list of search functions in registration order. The first
+function that returns a non-`None` value wins; the result is cached in a
+`dict` keyed by the normalized name.
+
+```python
+# Example: how lookup and register interact
+import codecs
+
+def my_search(name):
+    if name == 'rot13':
+        return codecs.CodecInfo(
+            name='rot13',
+            encode=rot13_encode,
+            decode=rot13_decode,
+        )
+    return None
+
+codecs.register(my_search)
+info = codecs.lookup('rot_13')   # normalized to 'rot13'
+```
+
+In gopy the same logic is in `codecs/registry.go`. `Register` appends a
+`SearchFunc` to the per-process slice; `Lookup` normalizes with
+`strings.ToLower` and replaces hyphens/spaces with underscores, then walks
+the slice and caches hits in a `map[string]*CodecInfo`.
+
+### `CodecInfo`: the four-tuple (lines 83 to 116)
+
+<CpyLink path="Lib/codecs.py" lines="83-116" />
+
+```python
+class CodecInfo(tuple):
+    def __new__(cls, encode, decode, streamreader=None, streamwriter=None,
+        incrementalencoder=None, incrementaldecoder=None, name=None,
+        *, _is_text_encoding=None):
+        self = tuple.__new__(cls, (encode, decode, streamreader, streamwriter))
+        self.name = name
+        self.encode = encode
+        self.decode = decode
+        self.incrementalencoder = incrementalencoder
+        self.incrementaldecoder = incrementaldecoder
+        self.streamwriter = streamwriter
+        self.streamreader = streamreader
+        ...
+        return self
+```
+
+`CodecInfo` stores the four main callables both as tuple slots (so that
+legacy code unpacking `enc, dec, sr, sw = lookup(name)` still works) and
+as named attributes. `incrementalencoder` and `incrementaldecoder` are not
+in the tuple; they are pure attributes added in Python after the tuple is
+constructed. `_is_text_encoding` defaults to `True`; the standard library
+sets it to `False` for binary codecs such as `hex_codec` to prevent them
+being used in text-mode `open()`.
+
+### `IncrementalEncoder` stateful encoding (lines 183 to 255)
+
+<CpyLink path="Lib/codecs.py" lines="183-255" />
+
+```python
+class IncrementalEncoder:
+    def __init__(self, errors='strict'):
+        self.errors = errors
+        self.buffer = ""
+
+    def encode(self, input, final=False):
+        raise NotImplementedError
+
+    def reset(self):
+        pass
+
+    def getstate(self):
+        return 0
+
+    def setstate(self, state):
+        pass
+
+class BufferedIncrementalEncoder(IncrementalEncoder):
+    def encode(self, input, final=False):
+        data = self.buffer + input
+        (result, consumed) = self._buffer_encode(data, self.errors, final)
+        self.buffer = data[consumed:]
+        return result
+```
+
+The `final=True` signal tells the encoder to flush any pending bytes and
+reset internal state. When `final=False` the encoder may hold back bytes
+that form an incomplete multibyte character. `BufferedIncrementalEncoder`
+implements this pattern by prepending `self.buffer` to each new input and
+keeping whatever the underlying codec did not consume. `getstate` returns
+`self.buffer or 0` so that an empty buffer serializes as the integer `0`
+rather than an empty string, which matters for pickle-based state transfer.
+
+### Error-handler name constants (lines 1114 to 1119)
+
+<CpyLink path="Lib/codecs.py" lines="1114-1119" />
+
+```python
+strict_errors           = lookup_error("strict")
+ignore_errors           = lookup_error("ignore")
+replace_errors          = lookup_error("replace")
+xmlcharrefreplace_errors = lookup_error("xmlcharrefreplace")
+backslashreplace_errors  = lookup_error("backslashreplace")
+namereplace_errors       = lookup_error("namereplace")
+```
+
+`lookup_error` is a C function from `_codecs`. It returns the callable
+registered for the given error-handler name. The six names above are the
+predefined handlers built into the interpreter. Third-party code can add
+more with `register_error(name, handler)`. In gopy the same six handlers
+are bound in `codecs/errors.go` and the registry is in the same file as
+`codecs/registry.go`.
+
+### `StreamReader.read()`: bytebuffer and charbuffer (lines 457 to 535)
+
+<CpyLink path="Lib/codecs.py" lines="457-535" />
+
+```python
+def read(self, size=-1, chars=-1, firstline=False):
+    while True:
+        if chars >= 0 and len(self.charbuffer) >= chars:
+            break
+        newdata = self.stream.read(size if size >= 0 else -1)
+        data = self.bytebuffer + newdata
+        if not data:
+            break
+        try:
+            newchars, decodedbytes = self.decode(data, self.errors)
+        except UnicodeDecodeError as exc:
+            if firstline:
+                newchars, decodedbytes = self.decode(data[:exc.start], self.errors)
+                ...
+            else:
+                raise
+        self.bytebuffer = data[decodedbytes:]
+        self.charbuffer += newchars
+        if not newdata:
+            break
+    ...
+```
+
+`StreamReader` maintains two buffers. `self.bytebuffer` holds raw bytes
+that arrived from the stream but could not yet be decoded (e.g., an
+incomplete multi-byte sequence at a read boundary). `self.charbuffer`
+holds already-decoded characters waiting to be returned. On each iteration
+the method tries to decode `self.bytebuffer + newdata`; the codec returns
+how many bytes it consumed, and the remainder goes back into
+`self.bytebuffer`. `firstline=True` is a readline optimization: on a
+decode error, return whatever decoded before the bad byte on the first
+line rather than raising immediately.
+
+## gopy mirror
+
+The gopy codec layer is in `codecs/`. `codecs/registry.go` implements
+`Register`, `Lookup`, and `CodecInfo` (with `Name`, `Encode`, and `Decode`
+fields; `StreamReader`/`StreamWriter` are deferred). `codecs/builtin.go`
+registers the built-in UTF-8 and UTF-16 codecs. `codecs/errors.go` binds
+the six predefined error-handler names.
+
+`IncrementalEncoder`, `IncrementalDecoder`, `StreamWriter`, `StreamReader`,
+`StreamReaderWriter`, and `StreamRecoder` have not yet been ported; they are
+needed for the `io.TextIOWrapper` layer and are tracked as stdlib pending.
+The BOM constants (`BOM_UTF8`, `BOM_UTF16`, `BOM_UTF32`) are defined in
+`codecs/builtin.go` as `[]byte` variables matching the CPython byte-string
+literals exactly.

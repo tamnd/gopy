@@ -1,0 +1,60 @@
+---
+title: _csv.c
+description: C accelerator module providing csv.reader, csv.writer, and Dialect for the standard-library csv module.
+cpython_path: Modules/_csv.c
+cpython_version: "3.14"
+lines: 1300
+status: annotated
+ported_to: ""
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Modules/_csv.c`
+
+<CpyLink path="Modules/_csv.c" />
+
+This file is the C extension behind `import csv`. It defines three Python types (`Dialect`, `Reader`, `Writer`), four quoting constants, and the module-level `reader()` and `writer()` factory functions. The pure-Python `csv.py` in the standard library is just a thin shim that imports everything from this module; virtually all logic lives here.
+
+`Dialect` encapsulates parsing and formatting preferences: `delimiter`, `quotechar`, `escapechar`, `doublequote`, `skipinitialspace`, `lineterminator`, `quoting`, and `strict`. When `reader()` or `writer()` is called, the supplied keyword arguments are merged with any explicit `Dialect` subclass using `dialect_new` and validated in `dialect_check_quoting`. Bad combinations (for example, `quoting=QUOTE_NONE` with no `escapechar`) raise `csv.Error` at construction time rather than at parse time.
+
+The reader is a state machine over individual characters. The parser advances one character at a time through states named `START_RECORD`, `START_FIELD`, `ESCAPED_CHAR`, `IN_FIELD`, `IN_QUOTED_FIELD`, `ESCAPE_IN_QUOTED_FIELD`, `QUOTE_CHAR`, `EAT_CRNL`, and `AFTER_ESCAPED_CRNL`. Each `__next__` call on the reader iterator fetches one line from the underlying iterable and drives the state machine to completion, appending completed fields to an internal list that becomes the returned Python list.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| ~60   | `Dialect` type and `dialect_new` | Validates and stores all dialect options; shared by reader and writer | |
+| ~280  | `Reader` type and `Reader_iternext` | Per-row state machine; fetches lines and parses character by character | |
+| ~560  | `parse_process_char` | Core dispatch: advances state machine for one input character | |
+| ~720  | `parse_save_field` | Appends the current field buffer to the row list and resets the buffer | |
+| ~780  | `Writer` type and `csv_writerow` | Formats one sequence of fields into a single output line | |
+| ~960  | `csv_writerows` | Iterates an iterable of rows and calls `csv_writerow` for each | |
+| ~1020 | `csv_reader` / `csv_writer` | Module-level factory functions; construct Reader/Writer from iterable + dialect | |
+| ~1100 | `_csv_module` | Module definition; exports constants and registers the three types | |
+
+## Reading
+
+### Dialect validation
+
+`dialect_new` accepts either a `Dialect` subclass as a positional argument or bare keyword arguments, and merges the two sources with keywords taking precedence. `dialect_check_quoting` runs after merging and raises `csv.Error` for illegal combinations. The validation runs once at construction so the hot path in the reader and writer can skip checks entirely.
+
+### Reader state machine
+
+`parse_process_char` is the heart of the reader. It is called once per character inside `Reader_iternext` and switches on the current `state` field. The transitions follow RFC 4180 with extensions for `escapechar` and the `strict` flag. When a field terminator is reached the state machine calls `parse_save_field`, which copies `self->field` (a resizable C buffer) into a Python string or bytes object and appends it to `self->fields`.
+
+### Field buffer management
+
+The reader maintains `self->field` as a heap-allocated `char *` with `self->field_len` and `self->field_size` for length and capacity. `parse_add_char` appends one character, doubling capacity via `realloc` when needed. This avoids per-character Python object allocation during parsing.
+
+### Writer quoting logic
+
+`csv_writerow` iterates the fields of the input sequence and for each field decides whether to quote based on the `quoting` constant. `QUOTE_MINIMAL` quotes only if the field contains the delimiter, quotechar, or a line terminator. `QUOTE_ALL` always quotes. `QUOTE_NONNUMERIC` quotes all non-numeric fields and converts numeric fields to floats on read. `QUOTE_NONE` never quotes and escapes special characters using `escapechar` instead.
+
+### Error handling
+
+`csv.Error` is a subclass of `Exception` registered during module initialization and stored as `module_state->error_obj`. Both reader and writer raise it (not `ValueError`) for malformed input when `strict` mode is on, and also for misconfigured dialects, keeping error handling consistent with the documented module interface.
+
+## gopy mirror
+
+Not yet ported.

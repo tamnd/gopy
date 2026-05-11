@@ -1,0 +1,121 @@
+---
+title: Include/internal/pycore_stackref.h
+description: Tagged reference type for CPython's evaluation stack in the 3.14 free-threaded build, distinguishing owned references from deferred references that the GC manages without an immediate refcount increment.
+cpython_path: Include/internal/pycore_stackref.h
+cpython_version: "3.14"
+lines: 250
+status: annotated
+ported_to: ""
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Include/internal/pycore_stackref.h`
+
+<CpyLink path="Include/internal/pycore_stackref.h" />
+
+`pycore_stackref.h` introduces `_PyStackRef`, the typed slot value used everywhere on CPython's evaluation stack in 3.14. Prior to this header, every stack slot was a raw `PyObject *`. The new type is a union of a `PyObject *` and a `uintptr_t`, where the low bit of the integer word serves as a tag. When the tag is clear the slot holds an ordinary strong reference (refcount incremented on push). When the tag is set the slot holds a deferred reference: the pointer is valid but the refcount has not yet been bumped, and the garbage collector is responsible for keeping the referent alive long enough for the consumer to materialise the reference.
+
+Deferred references exist to reduce refcount traffic on the critical path of the free-threaded evaluator. In the GIL build every `LOAD_FAST` and every `PUSH` increments and decrements a counter, which is cheap because only one thread runs Python at a time. In the free-threaded build those same operations become expensive atomic increments and decrements. Deferred references defer the atomic operation: the stack slot is valid for the duration of the current frame without paying the atomic cost, provided that the GC performs a minor collection before the frame exits if any deferred slots remain live.
+
+The header also defines the full set of stack-ref operations. `PyStackRef_FromPyObjectSteal` transfers ownership of a strong reference into a stack slot. `PyStackRef_AsPyObjectBorrow` extracts the raw pointer without changing any refcount. `PyStackRef_CLOSE` releases a stack slot, either decrementing the refcount for an owned slot or performing a GC handshake for a deferred slot. Predicate inlines `PyStackRef_IsNull` and `PyStackRef_IsDeferred` let the evaluator branch cheaply on slot kind.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| 1-35 | include guards, `Py_BUILD_CORE`, `_PyStackRef` union definition, tag constant | Core type definition and the `DEFERRED_TAG` bit mask | n/a |
+| 36-80 | `PyStackRef_FromPyObjectSteal`, `PyStackRef_FromPyObjectNew`, `PyStackRef_FromPyObjectBorrow` | Constructors: steal, incref, or borrow a `PyObject*` into a slot | n/a |
+| 81-120 | `PyStackRef_AsPyObjectBorrow`, `PyStackRef_AsPyObjectSteal`, `PyStackRef_AsPyObjectNew` | Extractors: borrow, steal out of, or incref out of a slot | n/a |
+| 121-160 | `PyStackRef_CLOSE`, `PyStackRef_DUP` | Slot lifetime management: release and duplicate | n/a |
+| 161-200 | `PyStackRef_IsNull`, `PyStackRef_IsDeferred`, `PyStackRef_IsTrue`, `PyStackRef_TYPE` | Predicate and type-accessor inlines | n/a |
+| 201-250 | `_PyStackRef_NULL`, deferred-conversion helpers, `_PyObject_MakeStackRefDeferred` | Null sentinel, GC-side deferred slot materialisation | n/a |
+
+## Reading
+
+### The _PyStackRef union and tag bit (lines 1 to 35)
+
+<CpyLink path="Include/internal/pycore_stackref.h" lines="1-35" />
+
+The union has two members: `PyObject *bits_object` (used when reading the pointer) and `uintptr_t bits` (used when reading or setting the tag). Bit 0 of `bits` is `DEFERRED_TAG`. Because `PyObject` structures are at least 8-byte aligned on every supported platform, bit 0 of a genuine pointer is always zero, so the tag does not collide with any real address bit. The NULL sentinel `_PyStackRef_NULL` is defined as `{.bits = 0}`, a clear-tagged null pointer, which means `PyStackRef_IsNull` is a single comparison against zero.
+
+```c
+#define DEFERRED_TAG 1
+
+typedef union {
+    uintptr_t   bits;
+    PyObject   *bits_object;
+} _PyStackRef;
+
+static const _PyStackRef _PyStackRef_NULL = { .bits = 0 };
+```
+
+### Constructors: FromPyObjectSteal and friends (lines 36 to 80)
+
+<CpyLink path="Include/internal/pycore_stackref.h" lines="36-80" />
+
+`PyStackRef_FromPyObjectSteal` is the workhorse constructor. It takes a `PyObject *` for which the caller already holds a strong reference and packs it into a `_PyStackRef` with the tag clear, transferring ownership to the slot. No refcount change occurs. `PyStackRef_FromPyObjectNew` additionally calls `Py_INCREF` before packing, for cases where the caller wants to retain its own reference. `PyStackRef_FromPyObjectBorrow` is the deferred variant: it sets `DEFERRED_TAG` in the slot word, indicating that the refcount was not incremented and the slot must be handled by the GC before the frame exits.
+
+The naming convention `Steal`, `New`, `Borrow` mirrors CPython's existing reference-ownership vocabulary used for function return values, making the rules predictable for contributors already familiar with the ownership model.
+
+```c
+static inline _PyStackRef
+PyStackRef_FromPyObjectSteal(PyObject *obj)
+{
+    return (_PyStackRef){ .bits = (uintptr_t)obj };
+}
+
+static inline _PyStackRef
+PyStackRef_FromPyObjectBorrow(PyObject *obj)
+{
+    return (_PyStackRef){ .bits = (uintptr_t)obj | DEFERRED_TAG };
+}
+```
+
+### PyStackRef_CLOSE and lifetime management (lines 121 to 160)
+
+<CpyLink path="Include/internal/pycore_stackref.h" lines="121-160" />
+
+`PyStackRef_CLOSE` is the analogue of `Py_DECREF` for stack slots. For an owned slot (tag clear) it calls `Py_DECREF` on the extracted pointer. For a deferred slot (tag set) it calls `_PyObject_MakeStackRefDeferred` to notify the GC, which may choose to materialise the reference and then decrement, or may simply clear the slot if it already knows the referent is live. `PyStackRef_DUP` is the analogue of `Py_INCREF`: for owned slots it increments the refcount and returns an identical owned slot; for deferred slots it returns a second deferred slot without any refcount operation, under the assumption that both slots fall within the same GC epoch.
+
+```c
+static inline void
+PyStackRef_CLOSE(_PyStackRef ref)
+{
+    if (ref.bits & DEFERRED_TAG) {
+        _PyObject_MakeStackRefDeferred(ref);
+        return;
+    }
+    Py_DECREF(ref.bits_object);
+}
+```
+
+### Predicates and type accessor (lines 161 to 200)
+
+<CpyLink path="Include/internal/pycore_stackref.h" lines="161-200" />
+
+`PyStackRef_IsNull` tests `ref.bits == 0`, which is the zero-initialized state and the value of `_PyStackRef_NULL`. `PyStackRef_IsDeferred` tests `ref.bits & DEFERRED_TAG`. Both are constant-time single-instruction operations in optimised builds. `PyStackRef_IsTrue` extracts the pointer (masking the tag) and checks it against `Py_True`, which the evaluator uses for `POP_JUMP_IF_TRUE` when it can prove the slot holds a bool. `PyStackRef_TYPE` returns `Py_TYPE` of the extracted pointer, used by specialised opcodes that need the type without materialising a full reference.
+
+```c
+static inline int
+PyStackRef_IsNull(_PyStackRef ref)
+{
+    return ref.bits == 0;
+}
+
+static inline int
+PyStackRef_IsDeferred(_PyStackRef ref)
+{
+    return (ref.bits & DEFERRED_TAG) != 0;
+}
+
+static inline PyTypeObject *
+PyStackRef_TYPE(_PyStackRef ref)
+{
+    return Py_TYPE((PyObject *)(ref.bits & ~(uintptr_t)DEFERRED_TAG));
+}
+```
+
+## gopy mirror
+
+Not yet ported.

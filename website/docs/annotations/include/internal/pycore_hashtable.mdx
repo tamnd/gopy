@@ -1,0 +1,120 @@
+---
+title: Include/internal/pycore_hashtable.h
+description: Generic internal hash table used by tracemalloc, pystate, and importlib; not exposed to Python code.
+cpython_path: Include/internal/pycore_hashtable.h
+cpython_version: "3.14"
+lines: 150
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Include/internal/pycore_hashtable.h`
+
+<CpyLink path="Include/internal/pycore_hashtable.h" />
+
+<overview>
+This header declares `_Py_hashtable_t`, a simple open-addressing hash table used internally by CPython for bookkeeping that must not touch the Python object layer (and therefore cannot use `dict`). It supports both string-keyed and pointer-keyed tables through a configurable hash/compare function pair. The main consumers are `tracemalloc` (allocation records keyed by pointer), `pystate` (weak-reference list lookup), and `importlib` (path hook caches). The API is not part of the stable ABI and changes without deprecation notice.
+</overview>
+
+## Map
+
+| Symbol | Role |
+|---|---|
+| `_Py_hashtable_t` | The table struct; holds entry array, load factor, and function pointers |
+| `_Py_hashtable_entry_t` | One slot: key pointer plus opaque value storage |
+| `_Py_hashtable_new` | Allocate a table with custom hash and compare functions |
+| `_Py_hashtable_new_full` | Like `_new` but also accepts custom allocator and destructor |
+| `_Py_hashtable_set` | Insert or overwrite a key/value pair |
+| `_Py_hashtable_get` | Look up a key; returns a pointer to the value storage or NULL |
+| `_Py_hashtable_steal` | Remove and return a key's value |
+| `_Py_hashtable_foreach` | Iterate over all entries; callback may not mutate the table |
+| `_Py_hashtable_destroy` | Free all memory; calls the entry destructor if one was provided |
+| `_Py_hashtable_size` | Return the number of live entries |
+
+Predefined hash/compare helpers: `_Py_hashtable_hash_ptr`, `_Py_hashtable_compare_direct`, `_Py_hashtable_hash_str`, `_Py_hashtable_compare_str`.
+
+## Reading
+
+### Table structure and entry layout
+
+The table is a simple struct with an inline array of `_Py_hashtable_entry_t` slots, a collision chain encoded as a singly-linked list per bucket, and a pair of function pointers for hashing and comparison:
+
+```c
+// Include/internal/pycore_hashtable.h
+struct _Py_hashtable_t {
+    size_t nentries;       /* number of live entries */
+    size_t nbuckets;       /* current bucket count (always a power of two) */
+    _Py_hashtable_entry_t *buckets;
+    _Py_hashtable_hash_func    hash_func;
+    _Py_hashtable_compare_func compare_func;
+    _Py_hashtable_destroy_func destroy_key;
+    _Py_hashtable_destroy_func destroy_value;
+    PyMemAllocatorEx alloc;
+};
+```
+
+Values are stored as `void *` alongside the key pointer. Callers that need to store larger values typically heap-allocate a struct and store a pointer, then supply a `destroy_value` callback so `_Py_hashtable_destroy` frees it.
+
+### tracemalloc usage pattern
+
+`Modules/_tracemalloc.c` keeps one `_Py_hashtable_t` per memory domain, keyed by the raw allocation pointer. Each value is a pointer to a `traceback_t` struct recording the Python stack at allocation time:
+
+```c
+// Modules/_tracemalloc.c (simplified)
+static _Py_hashtable_t *tracemalloc_traces;
+
+static void
+tracemalloc_init(void)
+{
+    tracemalloc_traces = _Py_hashtable_new(
+        _Py_hashtable_hash_ptr,
+        _Py_hashtable_compare_direct);
+}
+
+static void
+tracemalloc_add_trace(void *ptr, traceback_t *tb)
+{
+    _Py_hashtable_set(tracemalloc_traces, ptr, tb);
+}
+```
+
+When `free()` is intercepted, `_Py_hashtable_steal` removes and returns the `traceback_t *` so the frame can be released:
+
+```c
+traceback_t *tb = _Py_hashtable_steal(tracemalloc_traces, ptr);
+if (tb != NULL) {
+    traceback_decref(tb);
+}
+```
+
+### Resizing and load factor
+
+The table doubles in size when the load factor (nentries / nbuckets) exceeds 2/3. Resizing allocates a fresh bucket array, rehashes all live entries into it, and frees the old array. The hash function is called again for each entry during rehash because `_Py_hashtable_t` does not cache hashes. For pointer-keyed tables this is cheap (one shift-and-XOR). For string-keyed tables, callers that are performance-sensitive typically intern the string first so the key pointer is stable.
+
+```c
+// Python/hashtable.c (simplified)
+static int
+_Py_hashtable_rehash(_Py_hashtable_t *ht)
+{
+    size_t new_size = ht->nbuckets * 2;
+    _Py_hashtable_entry_t *new_buckets = ht->alloc.malloc(
+        ht->alloc.ctx,
+        new_size * sizeof(_Py_hashtable_entry_t));
+    /* re-insert all entries ... */
+    ht->alloc.free(ht->alloc.ctx, ht->buckets);
+    ht->buckets  = new_buckets;
+    ht->nbuckets = new_size;
+    return 0;
+}
+```
+
+## gopy mirror
+
+`_Py_hashtable_t` has no direct counterpart in gopy. Go's built-in `map` type covers every use case this struct serves: pointer-keyed lookup, string-keyed lookup, and iteration are all native. gopy uses plain Go maps wherever CPython uses `_Py_hashtable_t`.
+
+If gopy eventually supports `tracemalloc`-style allocation tracking (for embedding diagnostics), the equivalent would be a `sync.Map` or a `map[uintptr]*TracebackEntry` protected by a `sync.Mutex`, depending on whether concurrency is required.
+
+## CPython 3.14 changes
+
+CPython 3.14 added `_Py_hashtable_new_full`, which accepts a custom `PyMemAllocatorEx` so that tables used during interpreter startup (before the default allocator is ready) can use the raw system allocator. Earlier versions always used `PyMem_RawMalloc`, which requires the allocator to be initialised first. The `destroy_key` and `destroy_value` callbacks were also promoted from `_Py_hashtable_new_full` into the main struct, making `_Py_hashtable_destroy` responsible for cleaning up entries unconditionally rather than requiring callers to iterate and free before destroying.

@@ -1,0 +1,113 @@
+---
+title: Include/internal/pycore_compile.h
+description: Internal compiler API declarations for the AST-to-bytecode pipeline, including entry points for code generation, assembly, and docstring normalization.
+cpython_path: Include/internal/pycore_compile.h
+cpython_version: "3.14"
+lines: 90
+status: annotated
+ported_to: ""
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Include/internal/pycore_compile.h`
+
+<CpyLink path="Include/internal/pycore_compile.h" />
+
+This header exposes the internal, non-stable API surface of `Python/compile.c`. It is included
+by the parser (`Python/pythonrun.c`), the frozen module builder, and a handful of test-support
+files. Nothing in the public C API or the stable ABI touches these declarations directly.
+
+The pipeline that produces a `PyCodeObject` from source text has three major phases. The first
+phase walks the AST and builds a control-flow graph (CFG) of basic blocks. The second phase
+runs a set of passes over the CFG (dead-code elimination, exception table construction,
+stack-depth verification) and then serialises the result into a flat bytecode array. A third
+utility, `_PyCompile_CleanDoc`, rewrites raw triple-quoted docstrings into the normalised form
+that `inspect.getdoc` expects. Each phase is accessible through a distinct function declared
+here, which lets the test suite drive individual phases without invoking the full pipeline.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| 1-15 | `#include` guards, forward declarations | `PyCodeObject`, `PyObject`, `mod_ty`, `PyArena` forward types | not ported |
+| 16-30 | `PyCompilerFlags` | Flags struct: `cf_flags` bitmask, `cf_feature_version` | not ported |
+| 31-45 | `_PyAST_Compile` | Main entry: AST node to `PyCodeObject`, used by `compile()` builtin | not ported |
+| 46-58 | `_PyCompile_CodeGen` | AST-to-CFG pass; returns an opaque compiler handle | not ported |
+| 59-70 | `_PyCompile_Assemble` | CFG-to-bytecode pass; consumes the compiler handle | not ported |
+| 71-80 | `_PyCompile_CleanDoc` | Docstring normalisation: strips leading indent, trims trailing whitespace | not ported |
+| 81-90 | `_PyCompile_GetUnderscoreCount` | Helper used by the peephole pass for constant folding | not ported |
+
+## Reading
+
+### PyCompilerFlags (lines 16 to 30)
+
+<CpyLink path="Include/internal/pycore_compile.h" lines="16-30" />
+
+`PyCompilerFlags` is the struct passed from `compile()` and `exec`/`eval` builtins down into
+the compiler. `cf_flags` carries bits from `PyCF_*` constants (e.g., `PyCF_ONLY_AST`,
+`PyCF_TYPE_COMMENTS`). `cf_feature_version` records the `__future__` feature level active in
+the module, which affects whether certain syntax is accepted.
+
+```c
+struct PyCompilerFlags {
+    int cf_flags;
+    int cf_feature_version;
+};
+```
+
+### Main entry point (lines 31 to 45)
+
+<CpyLink path="Include/internal/pycore_compile.h" lines="31-45" />
+
+`_PyAST_Compile` is the single call site that `Python/pythonrun.c` and the `compile()` builtin
+use to turn a fully-validated AST into a ready-to-execute code object. It drives the full
+pipeline internally and is responsible for allocating and freeing the compiler state. On
+failure it returns `NULL` with an exception set.
+
+```c
+PyAPI_FUNC(PyObject *)
+_PyAST_Compile(struct _mod *mod, PyObject *filename,
+               PyCompilerFlags *flags, int optimize,
+               PyArena *arena);
+```
+
+### Code generation and assembly split (lines 46 to 70)
+
+<CpyLink path="Include/internal/pycore_compile.h" lines="46-70" />
+
+`_PyCompile_CodeGen` and `_PyCompile_Assemble` expose the two inner phases as separate calls.
+The test suite (`Lib/test/test_compile.py`) uses this split to inspect the CFG before assembly
+and to inject synthetic CFG structures that would be impossible to produce from valid Python
+source. The opaque handle returned by `CodeGen` is owned by the caller and must be passed to
+`Assemble` or freed explicitly.
+
+```c
+PyAPI_FUNC(PyObject *)
+_PyCompile_CodeGen(PyObject *ast, PyObject *filename,
+                   PyCompilerFlags *flags, int optimize,
+                   int compile_mode);
+
+PyAPI_FUNC(PyObject *)
+_PyCompile_Assemble(PyObject *codegen_object, PyObject *filename,
+                    PyObject *instructions);
+```
+
+### Docstring cleanup (lines 71 to 80)
+
+<CpyLink path="Include/internal/pycore_compile.h" lines="71-80" />
+
+`_PyCompile_CleanDoc` is called by the compiler immediately after it extracts the first
+statement of a function or class body and determines it is a string literal. The normalisation
+removes the common leading whitespace that results from indentation in source, matching the
+behaviour documented for `inspect.cleandoc`. The function takes and returns a `PyObject *`
+string, replacing it in the constants table.
+
+```c
+PyAPI_FUNC(PyObject *)
+_PyCompile_CleanDoc(PyObject *doc);
+```
+
+## gopy mirror
+
+Not yet ported.

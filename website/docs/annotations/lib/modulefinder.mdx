@@ -1,0 +1,109 @@
+---
+title: Lib/modulefinder.py
+description: Traces all modules imported by a script by scanning its bytecode, building a dependency map without executing the code.
+cpython_path: Lib/modulefinder.py
+cpython_version: "3.14"
+lines: 530
+status: annotated
+ported_to: ""
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Lib/modulefinder.py`
+
+<CpyLink path="Lib/modulefinder.py" />
+
+`modulefinder.py` provides `ModuleFinder`, a class that statically traces every module a script imports. Rather than running the script, it disassembles each `.pyc` file (or compiles the `.py` on the fly) and looks for `IMPORT_NAME` and `IMPORT_FROM` opcodes. It then follows those imports recursively, building up a `modules` dict that maps module names to `Module` objects.
+
+The tracer predates `importlib` and does not use the import machinery at runtime. It walks `sys.path` (or a caller-supplied path list) itself, honours `__path__` for packages, and handles relative imports by tracking the parent package context. Missing modules end up in `BADMODULES`, a set that callers can inspect to detect broken dependencies before packaging or freezing an application. `py2exe`, `cx_Freeze`, and similar bundlers built on this foundation.
+
+Two module-level helpers let callers influence path resolution before creating a `ModuleFinder` instance. `AddPackagePath(pkg, path)` appends an extra search directory for a named package, mirroring `.pth` file effects. `ReplacePackage(oldname, newname)` aliases one module name to another, which is useful when platform-specific packages shadow pure-Python ones during static analysis.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| 1-50 | imports, constants | `BADMODULES`, `LOAD_CONST`/`IMPORT_NAME` opcode constants | n/a |
+| 51-80 | `AddPackagePath`, `ReplacePackage` | global path and alias helpers | not ported |
+| 81-180 | `Module` | lightweight container: `__name__`, `__file__`, `__path__` | not ported |
+| 181-350 | `ModuleFinder.__init__`, `run_script` | initialise search paths, kick off recursive scan | not ported |
+| 351-460 | `import_module`, `load_module`, `scan_code` | bytecode disassembly and recursive import following | not ported |
+| 461-530 | `report`, `__main__` guard | pretty-print results and CLI entry point | not ported |
+
+## Reading
+
+### Global path helpers (lines 51 to 80)
+
+<CpyLink path="Lib/modulefinder.py" lines="51-80" />
+
+`AddPackagePath` and `ReplacePackage` mutate two module-level dicts (`packagePathMap` and `replacePackage`). `ModuleFinder.__init__` consults these dicts when building the initial search-path list, so callers must invoke them before constructing the finder. This design predates the `importlib.machinery` metadata API.
+
+```python
+def AddPackagePath(packagename, path):
+    packagePathMap.setdefault(packagename, []).append(path)
+
+def ReplacePackage(oldname, newname):
+    replacePackage[oldname] = newname
+```
+
+### `Module` container (lines 81 to 180)
+
+<CpyLink path="Lib/modulefinder.py" lines="81-180" />
+
+`Module` is a lightweight namespace object. It stores `__name__`, `__file__`, `__path__` (a list for packages, `None` for plain modules), and a `globalnames` dict that records every name the module assigns at module scope. The `globalnames` dict lets `scan_code` resolve `from pkg import *` without executing code.
+
+```python
+class Module:
+    def __init__(self, name, file=None, path=None):
+        self.__name__ = name
+        self.__file__ = file
+        self.__path__ = path
+        self.globalnames = {}
+```
+
+### `run_script` and initialisation (lines 181 to 350)
+
+<CpyLink path="Lib/modulefinder.py" lines="181-350" />
+
+`ModuleFinder.__init__` accepts a `path` list (default `sys.path`), a `debug` level, an `excludes` list, and a `replace_paths` list for source-root rewriting. `run_script(pathname)` compiles the entry-point file with `compile()`, wraps it in a synthetic `Module("__main__")`, and calls `scan_code()` to begin the recursive walk. The `modules` dict accumulates every module seen; `badmodules` records every name that could not be resolved.
+
+```python
+def run_script(self, pathname):
+    self.msg(2, "run_script", pathname)
+    with open(pathname, "rb") as fp:
+        stuff = ("", "rb", imp.PY_SOURCE)
+        self.load_module("__main__", fp, pathname, stuff)
+```
+
+### Bytecode scanning (lines 351 to 460)
+
+<CpyLink path="Lib/modulefinder.py" lines="351-460" />
+
+`scan_code(co, m)` iterates over the code object's `co_consts` list recursively (to handle nested functions and classes) and steps through the opcode stream looking for `IMPORT_NAME`. When it finds one it calls `import_module()`, passing the name, the `fromlist` taken from the preceding `LOAD_CONST`, and the current package context for relative-import resolution. `import_module()` handles the `replacePackage` alias map and delegates to `load_module()` for the actual file search.
+
+```python
+for opcode, oparg in zip(...):
+    if opcode == IMPORT_NAME:
+        name = co.co_names[oparg]
+        self.import_module(name, fqname, m)
+```
+
+### `report()` and CLI (lines 461 to 530)
+
+<CpyLink path="Lib/modulefinder.py" lines="461-530" />
+
+`report()` prints three sections to stdout: modules found (with file paths), modules that were missing, and modules that raised errors during loading. The `__main__` guard at the bottom accepts a script path as `sys.argv[1]` and calls `run_script()` then `report()`, making the module usable as a quick command-line dependency auditor.
+
+```python
+def report(self):
+    print("  %-25s %s" % ("Name", "File"))
+    print("  %-25s %s" % ("----", "----"))
+    for key in keys:
+        m = self.modules[key]
+        print("  %-25s %s" % (key, m.__file__ or ""))
+```
+
+## gopy mirror
+
+Not yet ported.

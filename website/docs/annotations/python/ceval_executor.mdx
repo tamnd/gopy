@@ -1,0 +1,281 @@
+---
+title: Python/ceval.c (tier-2 executor)
+description: The tier-2 uop interpreter embedded in ceval.c. Dispatches micro-ops from an executor's trace array and handles side exits back to tier-1.
+cpython_path: Python/ceval.c
+cpython_version: "3.14"
+lines: 1374
+status: annotated
+ported_to: vm/tier2.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Python/ceval.c` (tier-2 executor)
+
+<CpyLink path="Python/ceval.c" />
+
+CPython 3.12 introduced a two-tier interpreter. Tier-1 is the main adaptive
+specializing loop that runs conventional bytecode. Tier-2 is a uop
+(micro-operation) interpreter that runs a projected linear trace of
+`_PyUOpInstruction` records. The tier-2 loop lives physically inside
+`ceval.c` under an `#ifdef _Py_TIER2` block and is entered via a `goto
+enter_tier_two` label from the `ENTER_EXECUTOR` opcode handler.
+
+This file is annotated only for the tier-2 section. The tier-1 main loop
+(lines 1 to 1240) and the surrounding helpers (lines 1375 onward) are
+covered in other annotation files.
+
+The executor infrastructure lives across three files:
+
+* `Python/ceval.c` (this file) provides the dispatch loop and the macro
+  glue (`GOTO_TIER_TWO`, `GOTO_TIER_ONE`).
+* `Python/optimizer.c` builds executors (`_PyOptimizer_Optimize`,
+  `insert_executor`, `_PyUOpExecutor_Type`), manages the per-code
+  `co_executors` array, and owns `_EXIT_TRACE` / `_DEOPT` logic.
+* `Python/executor_cases.c.h` is generated from `Python/bytecodes.c` and
+  provides the body of the `switch (uopcode)` in the tier-2 loop.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Python/ceval.c" lines="1241-1259">1241-1259</Cpy> | tier-2 local variables (`current_executor`, `next_uop`) | State shared between `enter_tier_two` and the uop loop. | `optimizer/types.go:Executor` + `vm/tier2.go:enterExecutor` |
+| <Cpy path="Python/ceval.c" lines="1261-1290">1261-1290</Cpy> | `enter_tier_two` label | Entry point from `GOTO_TIER_TWO`. Redefines tier-1 macros to no-ops and resets the stats counters. | `vm/tier2.go:enterExecutor` |
+| <Cpy path="Python/ceval.c" lines="1290-1333">1290-1333</Cpy> | `tier2_dispatch` / `for (;;)` loop | Fetches `next_uop->opcode`, increments `next_uop`, dispatches into `executor_cases.c.h` via `switch (uopcode)`. | `vm/tier2.go:enterExecutor` |
+| <Cpy path="Python/ceval.c" lines="1335-1354">1335-1354</Cpy> | `jump_to_error_target` / `jump_to_jump_target` labels | On a guard failure the uop reads its embedded jump-format fields and re-enters `tier2_dispatch` at a different uop index. | `vm/tier2.go` (pending #431) |
+| optimizer.c `34-99` | `has_space_for_executor` / `get_index_for_executor` / `insert_executor` | Grow the per-code `_PyExecutorArray` and patch the bytecode instruction to `ENTER_EXECUTOR`. | `optimizer/optimize.go:Optimize` |
+| optimizer.c `113-163` | `_PyOptimizer_Optimize` | Outer entry: call `uop_optimize`, insert the resulting executor, update `chain_depth`. | `optimizer/optimize.go:Optimize` |
+| optimizer.c `421-433` | `_PyUOpExecutor_Type` | Python type for an executor object; exposes `is_valid()`, `get_opcode()`, `get_oparg()`, and `__len__` / `__getitem__` over the trace array. | `optimizer/pyobject.go` |
+| executor_cases.c.h `7110-7117` | `_START_EXECUTOR` uop | First uop of every trace; wires `current_executor` into the local for the loop. | `optimizer/uops_impl.go` |
+| executor_cases.c.h `6961-7011` | `_EXIT_TRACE` uop | Side-exit back to tier-1; may warm up and chain a new executor at the exit site. | `optimizer/uops_impl.go` |
+| executor_cases.c.h `7133-7136` | `_DEOPT` uop | Unconditional deopt: jump to a tier-1 offset via `GOTO_TIER_ONE`. | `optimizer/uops_impl.go` |
+
+## Reading
+
+### `enter_tier_two` entry condition (lines 1261 to 1290)
+
+<CpyLink path="Python/ceval.c" lines="1261-1290" />
+
+```c
+#ifdef _Py_TIER2
+
+// Tier 2 is also here!
+enter_tier_two:
+
+#ifdef _Py_JIT
+    assert(0);
+#else
+
+#undef LOAD_IP
+#define LOAD_IP(UNUSED) (void)0
+
+    ; // dummy statement after a label, before a declaration
+    uint16_t uopcode;
+
+    assert(next_uop->opcode == _START_EXECUTOR);
+tier2_dispatch:
+    for (;;) {
+        uopcode = next_uop->opcode;
+        next_uop++;
+        OPT_STAT_INC(uops_executed);
+        UOP_STAT_INC(uopcode, execution_count);
+        ...
+        switch (uopcode) {
+#include "executor_cases.c.h"
+            default:
+                Py_UNREACHABLE();
+        }
+    }
+```
+
+The `enter_tier_two` label is the only way into this section of code. It is
+reached from the `GOTO_TIER_TWO(executor)` macro, which sets
+`tstate->current_executor`, points `next_uop` at `executor->trace`, and then
+`goto enter_tier_two`. The assert guarantees that the first uop in every
+trace is `_START_EXECUTOR`, which wires `current_executor` into the
+loop-local variable.
+
+The loop unconditionally increments `next_uop` before the switch. This means
+`CURRENT_OPARG()` and `CURRENT_OPERAND0()` macros read `next_uop[-1]`, not
+`next_uop[0]`. Uop bodies therefore always access the instruction that was
+already consumed.
+
+The `LOAD_IP` redefinition to a no-op reflects the fact that the uop loop
+has no `next_instr` pointer to maintain. Instruction position tracking in
+tier-2 is handled through `frame->instr_ptr` updates inside individual uop
+bodies, not by the loop itself.
+
+The `GOTO_TIER_TWO` macro (non-JIT path, defined in `ceval_macros.h`):
+
+```c
+#define GOTO_TIER_TWO(EXECUTOR)           \
+do {                                      \
+    OPT_STAT_INC(traces_executed);        \
+    _PyExecutorObject *_executor = (EXECUTOR);          \
+    tstate->current_executor = (PyObject *)_executor;   \
+    next_uop = _executor->trace;                        \
+    assert(next_uop->opcode == _START_EXECUTOR);        \
+    goto enter_tier_two;                                \
+} while (0)
+```
+
+### `ENTER_EXECUTOR` and the backoff counter (generated_cases.c.h lines 5559 to 5591)
+
+<CpyLink path="Python/generated_cases.c.h" lines="5559-5591" />
+
+```c
+TARGET(ENTER_EXECUTOR) {
+    PyCodeObject *code = _PyFrame_GetCode(frame);
+    _PyExecutorObject *executor =
+        code->co_executors->executors[oparg & 255];
+    if (_Py_atomic_load_uintptr_relaxed(&tstate->eval_breaker)
+            & _PY_EVAL_EVENTS_MASK) {
+        /* deopt: restore original op/arg and re-dispatch in tier-1 */
+        opcode = executor->vm_data.opcode;
+        oparg  = (oparg & ~255) | executor->vm_data.oparg;
+        next_instr = this_instr;
+        DISPATCH_GOTO();
+    }
+    GOTO_TIER_TWO(executor);
+}
+```
+
+The first thing the `ENTER_EXECUTOR` handler does is check the eval-breaker
+for pending signals or GC requests. If anything is pending, it deopts by
+restoring the original opcode and oparg from `vm_data` and re-entering tier-1
+at the same instruction. This avoids suppressing signals or GC inside a trace.
+
+Executors are installed by `_PyOptimizer_Optimize` (called from
+`JUMP_BACKWARD_JIT`) after the backoff counter on the backward jump warms up.
+The backoff counter mechanism (`_Py_BackoffCounter`) starts at a high value
+and advances toward a trigger threshold on each backward jump. Once the
+trigger fires, `_PyOptimizer_Optimize` runs trace projection and analysis.
+If the projected trace is non-trivial, the instruction at the loop header is
+patched to `ENTER_EXECUTOR` and the executor slot index is written into the
+oparg.
+
+```c
+// From JUMP_BACKWARD_JIT (generated_cases.c.h:7823-7851)
+_Py_BackoffCounter counter = this_instr[1].counter;
+if (backoff_counter_triggers(counter)
+        && this_instr->op.code == JUMP_BACKWARD_JIT) {
+    _PyExecutorObject *executor;
+    int optimized = _PyOptimizer_Optimize(frame, start,
+                                          &executor, 0);
+    if (optimized > 0) {
+        this_instr[1].counter = initial_jump_backoff_counter();
+        GOTO_TIER_TWO(executor);
+    }
+    else {
+        this_instr[1].counter = restart_backoff_counter(counter);
+    }
+}
+else {
+    ADVANCE_ADAPTIVE_COUNTER(this_instr[1].counter);
+}
+```
+
+### Side exits and deoptimization (executor_cases.c.h lines 6961 to 7011)
+
+<CpyLink path="Python/executor_cases.c.h" lines="6961-7011" />
+
+```c
+case _EXIT_TRACE: {
+    _PyExitData *exit = (_PyExitData *)CURRENT_OPERAND0();
+    PyCodeObject *code = _PyFrame_GetCode(frame);
+    _Py_CODEUNIT *target = _PyFrame_GetBytecode(frame) + exit->target;
+
+    if (exit->executor && !exit->executor->vm_data.valid) {
+        exit->temperature = initial_temperature_backoff_counter();
+        Py_CLEAR(exit->executor);
+    }
+    if (exit->executor == NULL) {
+        _Py_BackoffCounter temperature = exit->temperature;
+        if (!backoff_counter_triggers(temperature)) {
+            exit->temperature = advance_backoff_counter(temperature);
+            GOTO_TIER_ONE(target);
+        }
+        /* exit is warm: try to compile a sub-trace */
+        int chain_depth = current_executor->vm_data.chain_depth + 1;
+        int optimized = _PyOptimizer_Optimize(frame, target,
+                                              &executor, chain_depth);
+        ...
+        exit->executor = executor;
+    }
+    GOTO_TIER_TWO(exit->executor);
+}
+```
+
+Every guard uop that can bail appends an `_EXIT_TRACE` to the trace. Each
+`_EXIT_TRACE` owns one `_PyExitData` entry embedded in the executor's
+variable-length `exits[]` array; the operand0 field of the `_EXIT_TRACE` uop
+holds a pointer to that entry.
+
+The exit carries its own `temperature` backoff counter. A cold exit simply
+calls `GOTO_TIER_ONE(target)` to resume tier-1 bytecode at the guard's
+source offset and increments the temperature toward the trigger. Once the
+temperature triggers, the runtime calls `_PyOptimizer_Optimize` to compile a
+sub-trace from that exit point. The sub-trace is stored in
+`exit->executor`; subsequent exits at the same site enter the sub-trace
+directly via `GOTO_TIER_TWO(exit->executor)`, forming a trace tree.
+
+`GOTO_TIER_ONE` is the reverse macro that hands control back to tier-1:
+
+```c
+#define GOTO_TIER_ONE(TARGET)                         \
+do {                                                  \
+    tstate->current_executor = NULL;                  \
+    next_instr = (TARGET);                            \
+    OPT_HIST(trace_uop_execution_counter,             \
+             trace_run_length_hist);                  \
+    _PyFrame_SetStackPointer(frame, stack_pointer);   \
+    stack_pointer = _PyFrame_GetStackPointer(frame);  \
+    if (next_instr == NULL) {                         \
+        next_instr = frame->instr_ptr + 1;            \
+        goto error;                                   \
+    }                                                 \
+    DISPATCH();                                       \
+} while (0)
+```
+
+Clearing `tstate->current_executor` to `NULL` is the definitive signal that
+tier-2 is not active. The tier-1 loop reads this field to decide whether
+finalizer runs and signal checks need to account for a suspended trace.
+
+## Notes for the gopy mirror
+
+`vm/tier2.go` ports the `ENTER_EXECUTOR` and `JUMP_BACKWARD` tier-2 wiring.
+The uop dispatch loop itself (`enter_tier_two` / `tier2_dispatch`) is not yet
+fully ported; issue #431 tracks that work. Instead, `enterExecutor` deopts
+on every entry by reading the original opcode and oparg from `exec.VMData`
+and forwarding to the tier-1 dispatcher via `trySimple`. This means gopy
+runs optimizer-instrumented code correctly (executor installation, backoff
+counters, `_PyOptimizer_Optimize` calls) but executes every instruction
+through tier-1 rather than the uop loop.
+
+`optimizer/types.go` mirrors `_PyExecutorObject`, `_PyUOpInstruction`,
+`_PyExitData`, `_PyVMData`, and `_PyBloomFilter` byte-for-byte. The
+`ExecutorArray` type mirrors the `_PyExecutorArray` side-table that hangs
+off `Code.Executors`.
+
+`optimizer/optimize.go:Optimize` ports `_PyOptimizer_Optimize` including the
+`has_space_for_executor` / `get_index_for_executor` / `insert_executor`
+helpers. Trace projection and abstract interpretation live in
+`optimizer/trace.go` and `optimizer/analysis.go`.
+
+## CPython 3.14 changes worth noting
+
+The tier-2 interpreter moved from a separate `ceval2.c` file (3.12 staging)
+into `ceval.c` under `#ifdef _Py_TIER2` in 3.13. The `_Py_JIT` path compiles
+traces to native code and completely bypasses the `enter_tier_two` section;
+gopy only targets the interpreter path.
+
+The `JUMP_BACKWARD_JIT` specialization (new in 3.14) gates the optimizer call
+behind the backoff counter. Earlier versions always called `_PyOptimizer_Optimize`
+on every backward jump that triggered; 3.14 uses the two-variant
+`JUMP_BACKWARD_NO_JIT` / `JUMP_BACKWARD_JIT` split so builds without tier-2
+pay no cost at all on backward jumps.
+
+Chain-depth tracking (`vm_data.chain_depth`, `MAX_CHAIN_DEPTH = 4`) is a
+3.14 addition to prevent infinite trace-tree growth through cascading side
+exits.

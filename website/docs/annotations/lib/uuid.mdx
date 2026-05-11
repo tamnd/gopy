@@ -1,0 +1,199 @@
+---
+title: Lib/uuid.py
+description: UUID generation (v1 through v8) and the UUID class with full RFC 4122 field decomposition and variant/version validation.
+cpython_path: Lib/uuid.py
+cpython_version: "3.14"
+lines: 800
+status: annotated
+ported_to: (stdlib pending)
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Lib/uuid.py`
+
+<CpyLink path="Lib/uuid.py" />
+
+`uuid` is a pure-Python module (with an optional C accelerator in 3.14+)
+implementing RFC 4122 universally unique identifiers. The `UUID` class stores
+exactly one canonical representation: a 128-bit integer held in `self.__int`.
+All other representations (bytes, bytes\_le, fields, hex, urn) are computed
+properties. Validation of `variant` and `version` is performed at construction
+time when `version` is supplied.
+
+CPython 3.14 added `uuid6`, `uuid7`, and `uuid8` implementing the draft RFC
+(draft-ietf-uuidrev-rfc4122bis). `uuid7` is the most broadly useful: it
+embeds a millisecond-resolution Unix timestamp in the high 48 bits, making
+UUIDs monotonically sortable by default.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Lib/uuid.py" lines="1-100">1-100</Cpy> | Module prologue, `RESERVED_NCS`, `RFC_4122`, `RESERVED_MICROSOFT`, `RESERVED_FUTURE` | The four variant constants, defined as single-element strings matching the RFC 4122 bit pattern names. | `(stdlib pending)` |
+| <Cpy path="Lib/uuid.py" lines="100-300">100-300</Cpy> | `UUID.__init__`, `UUID.__int__`, field properties | Constructor accepts any one of: `hex`, `bytes`, `bytes_le`, `fields`, or `int`; validates that exactly one is given, then stores the canonical integer. Properties `time_low`, `time_mid`, `time_hi_version`, `clock_seq_hi_variant`, `clock_seq_low`, `node` decompose the integer. | `(stdlib pending)` |
+| <Cpy path="Lib/uuid.py" lines="300-400">300-400</Cpy> | `UUID.variant`, `UUID.version`, `UUID.__str__`, `UUID.urn`, `UUID.hex` | `variant` inspects bits 62-63 of the integer; `version` inspects bits 76-79 only when `variant == RFC_4122`. `__str__` formats as `xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx`. | `(stdlib pending)` |
+| <Cpy path="Lib/uuid.py" lines="400-550">400-550</Cpy> | `_get_mac_address`, `_ifconfig_getnode`, `_ipconfig_getnode`, `_uuid_generate_time` | Platform probes for the MAC address used by `uuid1`. Tries `uuid_generate_time` (libc), then `ifconfig`/`ip link` (Linux/macOS), then `ipconfig` (Windows) in order. | `(stdlib pending)` |
+| <Cpy path="Lib/uuid.py" lines="550-620">550-620</Cpy> | `uuid1` | Combines a 60-bit timestamp (100-ns intervals since 1582-10-15), a 14-bit clock sequence, and a 48-bit node (MAC). Thread-safe via a module-level lock around the clock sequence state. | `(stdlib pending)` |
+| <Cpy path="Lib/uuid.py" lines="620-680">620-680</Cpy> | `uuid3`, `uuid5` | Namespace UUIDs using MD5 (version 3) and SHA-1 (version 5). Both hash the namespace UUID bytes concatenated with the name bytes, then truncate to 128 bits and set the variant/version bits. | `(stdlib pending)` |
+| <Cpy path="Lib/uuid.py" lines="680-720">680-720</Cpy> | `uuid4` | Pure random UUID: 16 bytes from `os.urandom`, with bits 62-63 set to `10` (RFC 4122 variant) and bits 76-79 set to `0100` (version 4). | `(stdlib pending)` |
+| <Cpy path="Lib/uuid.py" lines="720-800">720-800</Cpy> | `uuid6`, `uuid7`, `uuid8`, `NAMESPACE_DNS`, `NAMESPACE_URL`, `NAMESPACE_OID`, `NAMESPACE_X500` | New-generation UUIDs from draft-ietf-uuidrev. `uuid7` uses `time.time_ns()` for a sortable timestamp. Predefined namespace UUIDs from RFC 4122 appendix C. | `(stdlib pending)` |
+
+## Reading
+
+### `UUID` int bit layout (lines 100 to 300)
+
+<CpyLink path="Lib/uuid.py" lines="100-300" />
+
+```python
+class UUID:
+    __slots__ = ('int', 'is_safe', '__weakref__')
+
+    def __init__(self, hex=None, bytes=None, bytes_le=None,
+                 fields=None, int=None, version=None,
+                 *, is_safe=SafeUUID.unknown):
+        if [hex, bytes, bytes_le, fields, int].count(None) != 4:
+            raise TypeError('one of the hex, bytes, bytes_le, '
+                            'fields, or int arguments must be given')
+        if hex is not None:
+            hex = hex.replace('urn:', '').replace('uuid:', '')
+            hex = hex.strip('{}').replace('-', '')
+            if len(hex) != 32:
+                raise ValueError('badly formed hexadecimal UUID string')
+            int = builtins.int(hex, 16)
+        if bytes_le is not None:
+            if len(bytes_le) != 16:
+                raise ValueError('bytes_le is not a 16-char string')
+            # bytes_le uses little-endian for the first three fields
+            bytes = (bytes_le[4-1::-1] + bytes_le[6-1:4-1:-1] +
+                     bytes_le[8-1:6-1:-1] + bytes_le[8:])
+            int = int_from_bytes(bytes, 'big')
+        if fields is not None:
+            # fields = (time_low, time_mid, time_hi_version,
+            #           clock_seq_hi_variant, clock_seq_low, node)
+            ...
+            int = (time_low << 96 | time_mid << 80 |
+                   time_hi_version << 64 | clock_seq_hi_variant << 56 |
+                   clock_seq_low << 48 | node)
+        if version is not None:
+            if not 1 <= version <= 8:
+                raise ValueError('illegal version number')
+            # Set the variant to RFC 4122
+            int &= ~(0xc000 << 48)
+            int |=   0x8000 << 48
+            # Set the version number
+            int &= ~(0xf000 << 64)
+            int |=  version << 76
+        object.__setattr__(self, 'int', int)
+```
+
+The integer layout (big-endian, 128 bits) from high to low is:
+
+```
+bits 127-96   time_low          (32 bits)
+bits 95-80    time_mid          (16 bits)
+bits 79-64    time_hi_version   (16 bits, top 4 = version)
+bits 63-56    clock_seq_hi_var  (8 bits,  top 2 = variant)
+bits 55-48    clock_seq_low     (8 bits)
+bits 47-0     node              (48 bits, MAC address)
+```
+
+`bytes_le` is the COM/Windows byte order: `time_low` is little-endian (4
+bytes), `time_mid` is little-endian (2 bytes), `time_hi_version` is
+little-endian (2 bytes), the remaining 8 bytes are big-endian. The
+constructor reverses those fields by slicing before converting to the
+canonical big-endian integer.
+
+### `uuid1` time encoding (lines 550 to 620)
+
+<CpyLink path="Lib/uuid.py" lines="550-620" />
+
+```python
+_last_timestamp = None
+_last_sequence = 0
+_lock = threading.Lock()
+
+def uuid1(node=None, clock_seq=None):
+    global _last_timestamp, _last_sequence
+    with _lock:
+        nanoseconds = time.time_ns()
+        # RFC 4122 timestamp: 100-ns intervals since 1582-10-15T00:00:00
+        timestamp = nanoseconds // 100 + 0x01b21dd213814000
+        if timestamp <= _last_timestamp:
+            _last_sequence = (_last_sequence + 1) & 0x3fff
+        else:
+            _last_sequence = random.getrandbits(14)
+        _last_timestamp = timestamp
+        clock_seq = _last_sequence if clock_seq is None else clock_seq
+    ...
+    time_low = timestamp & 0xffffffff
+    time_mid = (timestamp >> 32) & 0xffff
+    time_hi_version = (timestamp >> 48) & 0x0fff
+    clock_seq_low = clock_seq & 0xff
+    clock_seq_hi_variant = (clock_seq >> 8) & 0x3f
+    return UUID(fields=(time_low, time_mid, time_hi_version,
+                        clock_seq_hi_variant, clock_seq_low, node),
+                version=1)
+```
+
+RFC 4122 timestamps count 100-nanosecond intervals since the Gregorian
+epoch (1582-10-15). The constant `0x01b21dd213814000` is the number of
+such intervals between that epoch and the Unix epoch (1970-01-01). The
+clock sequence protects against duplicate UUIDs when the system clock is
+set backwards or when two calls occur within the same 100-ns tick. It is
+randomised on first call (and whenever the clock advances) and incremented
+when the clock appears to go backwards.
+
+### `uuid4` os.urandom (lines 680 to 720)
+
+<CpyLink path="Lib/uuid.py" lines="680-720" />
+
+```python
+def uuid4():
+    return UUID(bytes=os.urandom(16), version=4)
+```
+
+`uuid4` is the simplest generator: 16 random bytes from the OS CSPRNG,
+with the version and variant bits overwritten by the `UUID` constructor
+when `version=4` is passed. The two overwritten bit fields consume 6 bits
+total (4 for version, 2 for variant), leaving 122 bits of randomness. The
+collision probability for 2^61 UUIDs is approximately 50% (birthday bound),
+making `uuid4` safe for all practical applications.
+
+### `uuid7` sortable timestamp (lines 720 to 800)
+
+<CpyLink path="Lib/uuid.py" lines="720-800" />
+
+```python
+def uuid7():
+    timestamp_ms = time.time_ns() // 10**6
+    rand_a = random.getrandbits(12)
+    rand_b = random.getrandbits(62)
+    int_val = (timestamp_ms << 80 | rand_a << 64 | rand_b)
+    return UUID(int=int_val, version=7)
+```
+
+`uuid7` places a 48-bit millisecond Unix timestamp in bits 127-80, a 12-bit
+random value (`rand_a`) in bits 79-64, and 62 random bits (`rand_b`) in
+bits 63-0. After the `UUID` constructor applies the version (bits 79-76)
+and variant (bits 63-62) masks, the final structure is:
+
+```
+bits 127-80   Unix time in ms  (48 bits)
+bits 79-76    version = 0111   (4 bits)
+bits 75-64    rand_a           (12 bits)
+bits 63-62    variant = 10     (2 bits)
+bits 61-0     rand_b           (62 bits)
+```
+
+Sorting `uuid7` values lexicographically or numerically gives chronological
+order, which is highly beneficial for database index locality.
+
+## gopy mirror
+
+`uuid` depends on `os.urandom`, `time.time_ns`, `hashlib` (MD5 and SHA-1 for
+versions 3 and 5), and `threading.Lock` (for `uuid1` clock sequence state).
+The platform MAC-address probes (`_ifconfig_getnode`, `_ipconfig_getnode`) use
+`subprocess.run` and text parsing; a gopy port can stub these with a random
+node address (as the module itself does when all probes fail). Versions 6, 7,
+and 8 have no external dependencies beyond `time.time_ns` and `random`.

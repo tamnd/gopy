@@ -1,0 +1,200 @@
+---
+title: Lib/pickle.py
+description: Object serialisation and deserialisation; implements Pickler, Unpickler, protocols 0-5, the opcode dispatch table, and the copyreg/reduce customisation hooks.
+cpython_path: Lib/pickle.py
+cpython_version: "3.14"
+lines: 1800
+status: annotated
+ported_to: (stdlib pending)
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Lib/pickle.py`
+
+<CpyLink path="Lib/pickle.py" />
+
+`pickle.py` is the pure-Python implementation of Python's serialisation
+format. A C accelerator (`Modules/_pickle.c`, exposed as `_pickle`) is
+tried at import time and replaces `Pickler`, `Unpickler`, `dump`, `dumps`,
+`load`, and `loads` when available. The Python version is the reference
+implementation and the fallback.
+
+The module defines:
+
+- `Pickler` serialises Python objects to a binary stream using a two-phase
+  dispatch (dispatch table then `__reduce_ex__`).
+- `Unpickler` deserialises a byte stream by executing opcodes one at a
+  time against an internal stack and memo table.
+- Protocols 0 through 5. Protocol 2 added new-style class support.
+  Protocol 4 added large object support and frames. Protocol 5 added
+  out-of-band buffer objects (`PickleBuffer`) for zero-copy `memoryview`
+  transfer.
+- `PicklingError`, `UnpicklingError`, `PickleError` form the exception
+  hierarchy.
+- `copyreg` integration: `dispatch_table` maps types to reduction
+  callables; `copyreg.dispatch_table` is the global fallback.
+
+`HIGHEST_PROTOCOL` is currently 5. `DEFAULT_PROTOCOL` is 5 in CPython 3.14.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Lib/pickle.py" lines="1-100">1-100</Cpy> | Imports, constants, opcode definitions, `PickleError`, `PicklingError`, `UnpicklingError`, `PickleBuffer` | Protocol constants, all opcode byte literals (`MARK`, `STOP`, `EMPTY_DICT`, etc.), and exception classes. | `(stdlib pending)` |
+| <Cpy path="Lib/pickle.py" lines="100-300">100-300</Cpy> | `Pickler.__init__`, `dump`, `clear_memo` | Pickler setup: protocol selection, `memo` dict, `dispatch_table`, `persistent_id` hook wiring. | `(stdlib pending)` |
+| <Cpy path="Lib/pickle.py" lines="300-700">300-700</Cpy> | `Pickler.save`, `save_reduce`, `save_type`, `save_pers`, dispatch table entries | The central dispatch: `save` checks `persistent_id`, then the dispatch table, then `__reduce_ex__`; `save_reduce` encodes the reconstruction recipe. | `(stdlib pending)` |
+| <Cpy path="Lib/pickle.py" lines="700-900">700-900</Cpy> | `save_none`, `save_bool`, `save_long`, `save_float`, `save_bytes`, `save_str`, `save_list`, `save_tuple`, `save_dict`, `save_set`, `save_frozenset` | Type-specific serialisers; many fast-path the C opcode to avoid `__reduce_ex__` overhead. | `(stdlib pending)` |
+| <Cpy path="Lib/pickle.py" lines="900-1100">900-1100</Cpy> | `Unpickler.__init__`, `load`, opcode dispatch table | Unpickler setup: stack, memo, `find_class` hook; `load` runs a tight opcode loop until `STOP`. | `(stdlib pending)` |
+| <Cpy path="Lib/pickle.py" lines="1100-1500">1100-1500</Cpy> | `load_mark`, `load_reduce`, `load_build`, `load_newobj`, `load_newobj_ex`, `load_global`, `load_stack_global`, `load_frame`, `load_bytearray8`, `load_next_buffer` | One method per opcode; `load_reduce` pops callable and args and calls; `load_build` applies `__setstate__`; `load_global` calls `find_class`. | `(stdlib pending)` |
+| <Cpy path="Lib/pickle.py" lines="1500-1700">1500-1700</Cpy> | `_Pickler`, `_Unpickler` aliases, `dump`, `dumps`, `load`, `loads` | Module-level convenience functions; prefer the C-accelerated versions when `_pickle` is available. | `(stdlib pending)` |
+| <Cpy path="Lib/pickle.py" lines="1700-1800">1700-1800</Cpy> | `_compat_pickle`, protocol 5 `PickleBuffer`, `copyreg` hooks | Compatibility name mappings (`_compat_pickle.IMPORT_MAPPING`), `PickleBuffer` for out-of-band protocol-5 buffers, and `copyreg.dispatch_table` linkage. | `(stdlib pending)` |
+
+## Reading
+
+### `save_reduce` dispatch (lines 300 to 700)
+
+<CpyLink path="Lib/pickle.py" lines="300-700" />
+
+```python
+def save(self, obj, save_persistent_id=True):
+    pid = self.persistent_id(obj)
+    if pid is not None and save_persistent_id:
+        self.save_pers(pid)
+        return
+
+    x = self.dispatch.get(t := type(obj))
+    if x is not None:
+        x(self, obj)
+        return
+
+    # Check copyreg.dispatch_table
+    reduce = getattr(self, "dispatch_table", {}).get(t)
+    if reduce is None:
+        reduce = copyreg.dispatch_table.get(t)
+    if reduce is not None:
+        rv = reduce(obj)
+    else:
+        reduce = getattr(obj, "__reduce_ex__", None)
+        if reduce is not None:
+            rv = reduce(self.proto)
+        else:
+            rv = obj.__reduce__()
+    self.save_reduce(obj=obj, *rv)
+
+def save_reduce(self, func, args, state=None,
+                listitems=None, dictitems=None, state_setter=None,
+                obj=None):
+    ...
+    save(func)
+    save(args)
+    write(REDUCE)
+    if obj is not None:
+        if id(obj) not in memo:
+            self.memoize(obj)
+    if state is not None:
+        save(state)
+        write(BUILD)
+    ...
+```
+
+`save` implements the standard pickling protocol. The lookup order is:
+
+1. `persistent_id` hook (caller-defined per-object identity).
+2. `self.dispatch` table (type-specific fast paths for built-in types).
+3. `self.dispatch_table` then `copyreg.dispatch_table` (user-registered
+   reducers).
+4. `__reduce_ex__(protocol)` then `__reduce__()` on the object itself.
+
+`save_reduce` encodes the reconstruction recipe as a `REDUCE` opcode
+followed by optional `BUILD` (for `__setstate__`) and `SETITEMS`/`APPENDS`
+(for list/dict items). The `memoize` call inserts the object into `memo`
+immediately after `REDUCE` so that back-references (`GET`) can be used
+for any subsequent occurrence of the same object.
+
+### Protocol 5 buffer protocol (lines 1700 to 1800)
+
+<CpyLink path="Lib/pickle.py" lines="1700-1800" />
+
+```python
+class PickleBuffer:
+    """Wrapper for a buffer object for out-of-band serialisation."""
+    __slots__ = ('_buffer',)
+
+    def __init__(self, buffer):
+        if not isinstance(buffer, memoryview):
+            buffer = memoryview(buffer)
+        self._buffer = buffer
+
+    def raw(self):
+        m = self._buffer
+        if m.format != 'B':
+            m = m.cast('B')
+        return m
+
+    def release(self):
+        self._buffer.release()
+```
+
+Protocol 5 (`HIGHEST_PROTOCOL`) adds the `BYTEARRAY8` and `NEXT_BUFFER`
+opcodes (PEP 574). When a `Pickler` is constructed with `buffer_callback`,
+any object that implements the buffer protocol can hand its data to the
+callback out-of-band instead of embedding it in the pickle stream. The
+stream records `NEXT_BUFFER`; the unpickler calls `buffers.__next__()` to
+retrieve the corresponding buffer from the iterator passed to
+`Unpickler(buffers=...)`. This allows large `bytes`, `bytearray`, and
+`numpy.ndarray` objects to be transferred without copying into the pickle
+stream.
+
+### `Unpickler.load_reduce` and `load_build` (lines 1100 to 1500)
+
+<CpyLink path="Lib/pickle.py" lines="1100-1500" />
+
+```python
+def load_reduce(self):
+    stack = self.stack
+    args = stack.pop()
+    func = stack[-1]
+    stack[-1] = func(*args)
+dispatch[REDUCE[0]] = load_reduce
+
+def load_build(self):
+    stack = self.stack
+    state = stack.pop()
+    inst = stack[-1]
+    setstate = getattr(inst, "__setstate__", MISSING)
+    if setstate is not MISSING:
+        setstate(state)
+        return
+    slotstate = None
+    if isinstance(state, tuple) and len(state) == 2:
+        state, slotstate = state
+    if state:
+        inst_dict = inst.__dict__
+        intern = sys.intern
+        for k, v in state.items():
+            if type(k) is str:
+                inst_dict[intern(k)] = v
+            else:
+                inst_dict[k] = v
+    if slotstate:
+        for k, v in slotstate.items():
+            setattr(inst, k, v)
+dispatch[BUILD[0]] = load_build
+```
+
+`load_reduce` is a one-liner: pop the args tuple, call the top-of-stack
+callable, replace it with the result. `load_build` is more involved: if the
+object has `__setstate__` it delegates completely. Otherwise it updates
+`__dict__` and handles the two-tuple `(dict_state, slot_state)` convention
+used by classes with `__slots__`. Interning string keys via `sys.intern`
+reuses existing string objects for common attribute names, reducing memory
+overhead for large collections of objects with the same attributes.
+
+## gopy mirror
+
+`pickle` touches nearly every Python object protocol (`__reduce_ex__`,
+`__getstate__`, `__setstate__`, `__dict__`, `__slots__`, `__class__`,
+`copyreg`). A full gopy port requires all of those to work correctly
+first. The module is marked `(stdlib pending)`. Protocol 5 out-of-band
+buffers can be deferred; protocols 0 to 4 cover the common case.

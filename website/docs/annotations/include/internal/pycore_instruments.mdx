@@ -1,0 +1,114 @@
+---
+title: Include/internal/pycore_instruments.h
+description: Internal API for PEP 669 monitoring instrumentation, defining event sets, per-code instrumentation arrays, and eval-loop fire functions.
+cpython_path: Include/internal/pycore_instruments.h
+cpython_version: "3.14"
+lines: 150
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Include/internal/pycore_instruments.h`
+
+<CpyLink path="Include/internal/pycore_instruments.h" />
+
+PEP 669 (low-impact monitoring for CPython) landed in 3.12 and this header is the internal half of that feature. It defines the event bit constants that tools register interest in, the per-thread and per-code-object bookkeeping that tracks which events are active, and the `_PyMonitoring_Fire*` functions that the eval loop calls when an instrumented instruction is reached. The design goal is that zero-overhead applies when no tool has registered: the fast path is a single flag check before any event dispatch logic runs.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| ~10-40 | `_Py_MONITORING_*` constants | Bit positions for each event kind | not ported |
+| ~42-55 | `_PyMonitoringEventSet` | Bitmask typedef combining event bits | not ported |
+| ~57-75 | `_PyCoMonitoringData` | Per-code instrumentation arrays (local monitors, per-instruction opcodes/tools) | not ported |
+| ~77-100 | `_Py_Instrumented_Instructions` | Global flag array: which opcodes have any active tool | not ported |
+| ~102-120 | `_PyMonitoring_FireCallEvent` | Fire a `CALL` event toward registered tools | not ported |
+| ~122-135 | `_PyMonitoring_FireReturnEvent` | Fire a `RETURN` event | not ported |
+| ~137-150 | `_PyMonitoring_FireLineEvent` | Fire a `LINE` event for line-trace tools | not ported |
+
+## Reading
+
+### Event bit constants (lines 10 to 40)
+
+<CpyLink path="Include/internal/pycore_instruments.h" lines="10-40" />
+
+Each observable event has a dedicated bit so that tools can subscribe to any combination with a single OR:
+
+```c
+#define _Py_MONITORING_EVENT_PY_START       0
+#define _Py_MONITORING_EVENT_PY_RESUME      1
+#define _Py_MONITORING_EVENT_PY_RETURN      2
+#define _Py_MONITORING_EVENT_PY_YIELD       3
+#define _Py_MONITORING_EVENT_CALL           4
+#define _Py_MONITORING_EVENT_LINE           5
+#define _Py_MONITORING_EVENT_INSTRUCTION    6
+#define _Py_MONITORING_EVENT_JUMP           7
+#define _Py_MONITORING_EVENT_BRANCH         8
+#define _Py_MONITORING_EVENT_STOP_ITERATION 9
+#define _Py_MONITORING_EVENT_RAISE          10
+#define _Py_MONITORING_EVENT_EXCEPTION_HANDLED 11
+#define _Py_MONITORING_EVENT_PY_UNWIND      12
+#define _Py_MONITORING_EVENT_PY_THROW       13
+#define _Py_MONITORING_EVENT_RERAISE        14
+
+typedef uint32_t _PyMonitoringEventSet;
+```
+
+A tool registers via `sys.monitoring.set_events(tool_id, event_set)`. CPython then rewrites the affected bytecode instructions to their `_INSTRUMENTED_*` variants so the fast path for un-monitored code remains a straight opcode dispatch with no branch.
+
+### Per-code instrumentation data (lines 57 to 75)
+
+<CpyLink path="Include/internal/pycore_instruments.h" lines="57-75" />
+
+Each `PyCodeObject` carries a `_PyCoMonitoringData *` pointer that is `NULL` until the first tool subscribes to any event for that code object:
+
+```c
+typedef struct {
+    /* Bitmask of events any tool wants for this code object as a whole. */
+    _PyMonitoringEventSet local_monitors;
+    /* Per-instruction original opcodes (before replacement with INSTRUMENTED_*). */
+    uint8_t *per_instruction_opcodes;
+    /* Per-instruction bitmask of which tools want INSTRUCTION events here. */
+    uint8_t *per_instruction_tools;
+} _PyCoMonitoringData;
+```
+
+The `per_instruction_opcodes` array is allocated lazily at the same length as `co_code` and stores the original opcode that was replaced so that the Fire functions can report the logical instruction to the tool, not the sentinel `INSTRUMENTED_*` variant.
+
+### Fire functions and the eval-loop check (lines 100 to 150)
+
+<CpyLink path="Include/internal/pycore_instruments.h" lines="100-150" />
+
+The three main fire functions share a common signature shape: they receive the current frame, the current instruction pointer, and event-specific arguments, then fan out to each registered tool:
+
+```c
+int _PyMonitoring_FireCallEvent(
+    PyMonitoringState *state,
+    PyObject *tstate,           /* actually _PyThreadState* */
+    _PyInterpreterFrame *frame,
+    PyObject *callable,
+    PyObject *arg0);
+
+int _PyMonitoring_FireReturnEvent(
+    PyMonitoringState *state,
+    PyObject *tstate,
+    _PyInterpreterFrame *frame,
+    PyObject *retval);
+
+int _PyMonitoring_FireLineEvent(
+    PyMonitoringState *state,
+    PyObject *tstate,
+    _PyInterpreterFrame *frame,
+    int line);
+```
+
+The eval loop calls these only after confirming that `_Py_Instrumented_Instructions[opcode]` is non-zero, keeping the hot path a single indexed byte load followed by a conditional branch.
+
+## gopy mirror
+
+gopy does not yet port the monitoring subsystem. The eval loop in `vm/eval_gen.go` has no `INSTRUMENTED_*` opcode cases and no `sys.monitoring` module. Adding monitoring would require: allocating `_PyCoMonitoringData` during code-object construction, rewriting bytecode instructions on tool registration, and wiring the fire functions into every relevant eval-loop ceval point. This is tracked as future work after the core eval loop stabilizes.
+
+## CPython 3.14 changes
+
+3.14 extends the event set with `BRANCH_RIGHT` and `BRANCH_LEFT` to let coverage tools distinguish taken vs not-taken branches without instrumenting every conditional jump. The `_PyCoMonitoringData` struct gains a `branches` array parallel to `per_instruction_opcodes` to record branch direction history. The fire-function signatures are otherwise unchanged from 3.12.

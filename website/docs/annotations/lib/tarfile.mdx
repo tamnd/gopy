@@ -1,0 +1,207 @@
+---
+title: Lib/tarfile.py
+description: Pure-Python tar archive reader and writer supporting USTAR, GNU, and PAX formats with gz/bz2/xz compression and a security filter API.
+cpython_path: Lib/tarfile.py
+cpython_version: "3.14"
+lines: 2700
+status: annotated
+ported_to: (stdlib pending)
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Lib/tarfile.py`
+
+<CpyLink path="Lib/tarfile.py" />
+
+`tarfile` is a pure-Python module with no C accelerator. It reads and
+writes `.tar`, `.tar.gz`, `.tar.bz2`, and `.tar.xz` archives. The
+module supports three header formats: USTAR (POSIX 1003.1-1988, maximum
+255-byte paths), GNU (long names via extra blocks), and PAX (POSIX.1-2001,
+arbitrary Unicode names and metadata via UTF-8 extended headers).
+
+The two central classes are `TarFile` (the archive handle) and `TarInfo`
+(one member's metadata). `ExFileObject` is a file-like object that serves
+member data from the archive with sparse-file support. Compression is
+handled by wrapping the underlying stream in a `GzipFile`, `BZ2File`, or
+`LZMAFile` before passing it to `TarFile`.
+
+Python 3.12 introduced the `filter` parameter to `extractall` and
+`extract`. The built-in filters (`'fully_trusted'`, `'tar'`, `'data'`)
+apply progressively stricter security checks to extracted members,
+blocking absolute paths, `..` components, and dangerous file types.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Lib/tarfile.py" lines="1-100">1-100</Cpy> | Module constants, format flags, compression flags | `USTAR_FORMAT=0`, `GNU_FORMAT=1`, `PAX_FORMAT=2`; `ENCODING`; `REGTYPE`, `LNKTYPE`, `SYMTYPE`, `CHRTYPE`, `BLKTYPE`, `DIRTYPE`, `FIFOTYPE`, `CONTTYPE`, `GNUTYPE_*`. | `(stdlib pending)` |
+| <Cpy path="Lib/tarfile.py" lines="100-400">100-400</Cpy> | `TarFile.open`, `TarFile.__init__`, format detection | `open` is a class method dispatcher that looks up a `_OPEN_METH` entry and delegates to `taropen`, `gzopen`, `bz2open`, or `xzopen`; format detection reads the first 512-byte block. | `(stdlib pending)` |
+| <Cpy path="Lib/tarfile.py" lines="400-900">400-900</Cpy> | `TarInfo`, `TarInfo.frombuf`, `TarInfo.tobuf`, numeric encoding | `frombuf` parses a 512-byte POSIX header block; `tobuf` serializes one; `nti`/`itn` encode/decode octal numeric fields with overflow detection. | `(stdlib pending)` |
+| <Cpy path="Lib/tarfile.py" lines="900-1500">900-1500</Cpy> | `TarFile.add`, `TarFile.addfile`, `TarFile.gettarinfo` | `add` walks a directory tree calling `gettarinfo` then `addfile`; `addfile` writes the header block and streams the data blocks; `gettarinfo` builds a `TarInfo` from `os.stat`. | `(stdlib pending)` |
+| <Cpy path="Lib/tarfile.py" lines="1500-2200">1500-2200</Cpy> | `TarFile.extract`, `TarFile.extractall`, `TarFile.extractfile`, security filters | `extractall` iterates members and calls `extract`; `extract` calls the active filter then dispatches to `_extract_member`; `extractfile` returns an `ExFileObject` without writing to disk. | `(stdlib pending)` |
+| <Cpy path="Lib/tarfile.py" lines="2200-2700">2200-2700</Cpy> | `ExFileObject`, `_Stream`, compression layer | `ExFileObject` is a `BufferedReader` subclass that tracks position within the archive stream and handles sparse maps; `_Stream` wraps compression codecs for streaming access. | `(stdlib pending)` |
+
+## Reading
+
+### `TarInfo.frombuf` header parsing (lines 400 to 900)
+
+<CpyLink path="Lib/tarfile.py" lines="400-900" />
+
+```python
+@classmethod
+def frombuf(cls, buf, encoding, errors):
+    if len(buf) == 0:
+        raise EmptyHeaderError("empty header")
+    if len(buf) != BLOCKSIZE:
+        raise TruncatedHeaderError("truncated header")
+    if buf.count(NUL) == BLOCKSIZE:
+        raise EOFHeaderError("end-of-file header")
+
+    chksum = nti(buf[148:156])
+    if chksum not in calc_chksums(buf[:148] + bytes(8) + buf[156:]):
+        raise InvalidHeaderError("bad checksum")
+
+    tarinfo = cls()
+    tarinfo.name   = nts(buf[0:100],   encoding, errors)
+    tarinfo.mode   = nti(buf[100:108])
+    tarinfo.uid    = nti(buf[108:116])
+    tarinfo.gid    = nti(buf[116:124])
+    tarinfo.size   = nti(buf[124:136])
+    tarinfo.mtime  = nti(buf[136:148])
+    tarinfo.chksum = chksum
+    tarinfo.type   = buf[156:157]
+    tarinfo.linkname = nts(buf[157:257], encoding, errors)
+    tarinfo.uname  = nts(buf[265:297],  encoding, errors)
+    tarinfo.gname  = nts(buf[297:329],  encoding, errors)
+    tarinfo.devmajor = nti(buf[329:337])
+    tarinfo.devminor = nti(buf[337:345])
+
+    prefix = nts(buf[345:500], encoding, errors)
+    if prefix and tarinfo.type not in GNU_TYPES:
+        tarinfo.name = prefix + "/" + tarinfo.name
+    return tarinfo
+```
+
+The 512-byte USTAR header is a fixed layout: 100-byte name, 8-byte mode,
+8-byte uid, 8-byte gid, 12-byte size, 12-byte mtime, 8-byte checksum,
+1-byte type flag, 100-byte linkname, 6-byte magic, 2-byte version, 32-byte
+uname, 32-byte gname, 8-byte devmajor, 8-byte devminor, 155-byte prefix,
+then 12 bytes of padding. All numeric fields are stored as NUL-terminated
+octal ASCII strings. `nti` (NUL-terminated integer) parses octal, detecting
+the GNU base-256 extension for values that exceed the field width. `nts`
+strips trailing NUL bytes and decodes bytes to str using the archive's
+encoding.
+
+PAX extended headers (type `'x'` for local, `'g'` for global) are
+read before the data member they describe. Their content is a sequence
+of `length key=value\n` lines encoded in UTF-8. `frombuf` does not parse
+them directly; instead `TarFile.next` reads the PAX block, parses it with
+`_proc_pax`, and merges the key-value pairs into the `TarInfo` before
+returning it.
+
+### `extractall` filter parameter (lines 1500 to 2200)
+
+<CpyLink path="Lib/tarfile.py" lines="1500-2200" />
+
+```python
+def extractall(self, path=".", members=None, *,
+               numeric_owner=False, filter=None):
+    directories = []
+    for tarinfo in members or self:
+        if filter is None:
+            tarinfo._legacy_extract_check()
+        else:
+            tarinfo = self._apply_filter_func(tarinfo, path, filter)
+            if tarinfo is None:
+                continue
+        if tarinfo.isdir():
+            directories.append(tarinfo)
+            tarinfo = copy.copy(tarinfo)
+            tarinfo.mode = 0o700
+        self.extract(tarinfo, path, set_attrs=not tarinfo.isdir(),
+                     numeric_owner=numeric_owner)
+
+    # Reverse sort directories and set attributes
+    directories.sort(key=lambda a: a.name)
+    directories.reverse()
+    for tarinfo in directories:
+        dirpath = os.path.join(path, tarinfo.name)
+        try:
+            self.chown(tarinfo, dirpath, numeric_owner=numeric_owner)
+            self.utime(tarinfo, dirpath)
+            self.chmod(tarinfo, dirpath)
+        except ExtractError as e:
+            self._handle_nonfatal_error(e)
+```
+
+```python
+def _apply_filter_func(self, tarinfo, path, filter):
+    if callable(filter):
+        return filter(tarinfo, path)
+    if filter == 'fully_trusted':
+        return tarinfo
+    if filter == 'tar':
+        return _safe_tarinfo(tarinfo, path, allow_symlinks=True)
+    if filter == 'data':
+        return _safe_tarinfo(tarinfo, path, allow_symlinks=False)
+    raise ValueError(f"bad filter {filter!r}")
+```
+
+The `filter` parameter was added in Python 3.12 to address a class of
+path-traversal vulnerabilities in tar archives. Without a filter,
+`extractall` emits a `DeprecationWarning` and uses legacy behavior (no
+checks). With `filter='data'` (the strictest preset), `_safe_tarinfo`
+blocks: absolute paths, paths containing `..`, symlinks, hard links
+pointing outside the destination, and special file types (char/block
+devices, fifos). It also clamps `uid`/`gid` to the extracting user and
+strips the setuid/setgid bits.
+
+Directories are extracted with mode `0o700` first so that subsequent
+member writes can always succeed regardless of the archived mode.
+Directory attributes (ownership, timestamps, permissions) are applied in
+reverse alphabetical order after all other members so that a directory's
+modification time is not reset by later writes into it.
+
+### PAX extended headers (lines 400 to 900)
+
+<CpyLink path="Lib/tarfile.py" lines="400-900" />
+
+```python
+def _proc_pax(self, tarfile):
+    buf = tarfile.fileobj.read(self._block(self.size))
+    pax_headers = {}
+    pos = 0
+    while pos < len(buf):
+        # Each record: "<length> <key>=<value>\n"
+        # length includes itself
+        try:
+            length = int(buf[pos:buf.index(b' ', pos)])
+        except ValueError:
+            raise InvalidHeaderError("invalid extended header")
+        record = buf[pos + len(str(length)) + 1 : pos + length - 1]
+        key, _, value = record.partition(b'=')
+        pax_headers[key.decode('utf-8')] = value.decode('utf-8')
+        pos += length
+    return pax_headers
+```
+
+PAX extended headers allow arbitrary Unicode metadata by encoding fields
+as `length key=value\n` records where `length` is the total byte count of
+the entire record including the length prefix and newline. Standard PAX
+keys include `path`, `linkpath`, `size`, `mtime`, `uname`, `gname`, `uid`,
+`gid`, `atime`, `ctime`, and `hdrcharset`. The `hdrcharset` key specifies
+the encoding used for subsequent PAX keys; if absent, UTF-8 is assumed.
+`TarFile.next` merges parsed PAX headers onto the following member's
+`TarInfo`, overriding the corresponding POSIX header fields.
+
+## gopy mirror
+
+`tarfile` depends on `struct.pack`/`unpack` for fixed-width binary data,
+`io.BufferedReader`, `gzip.GzipFile`, `bz2.BZ2File`, `lzma.LZMAFile`, and
+`os.stat`/`os.makedirs`/`os.symlink`. The gopy port will represent
+`TarInfo` as a Go struct, parse the 512-byte block with `encoding/binary`,
+and use Go's `compress/gzip`, `compress/bzip2`, and `compress/flate`
+packages for the compression layer. The `filter` security API will be
+exposed as a Go function type matching the Python `Callable[[TarInfo, str],
+TarInfo | None]` signature.

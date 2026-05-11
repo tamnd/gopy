@@ -1,0 +1,170 @@
+---
+title: Modules/_bisect.c
+description: C accelerator for the bisect module, implementing O(log n) binary search and sorted-list insertion with an optional key function.
+cpython_path: Modules/_bisect.c
+cpython_version: "3.14"
+lines: 200
+status: annotated
+ported_to: module/bisect/
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Modules/_bisect.c`
+
+<CpyLink path="Modules/_bisect.c" />
+
+`_bisect.c` is the C implementation of the `bisect` module. It provides four
+public functions:
+
+- `bisect_right` / `bisect_left`: return the insertion index that keeps a
+  sorted list in order.
+- `insort_right` / `insort_left`: call the corresponding bisect function
+  and then call `list.insert(index, item)` in place.
+
+There is also a thin pure-Python layer in `Lib/bisect.py` that imports
+`_bisect` and re-exports its names. The file is self-contained: no helper
+types, no module state struct, and no ABCs.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Modules/_bisect.c" lines="1-30">1-30</Cpy> | includes | `Python.h` only. | `module/bisect/` |
+| <Cpy path="Modules/_bisect.c" lines="30-110">30-110</Cpy> | `internal_bisect_right` | Half-open interval binary search returning the rightmost insertion point. | `module/bisect/` |
+| <Cpy path="Modules/_bisect.c" lines="110-170">110-170</Cpy> | `internal_bisect_left` | Same algorithm returning the leftmost insertion point. | `module/bisect/` |
+| <Cpy path="Modules/_bisect.c" lines="170-215">170-215</Cpy> | `insort_right`, `insort_left` | Call the corresponding bisect, then `list.insert`. | `module/bisect/` |
+| <Cpy path="Modules/_bisect.c" lines="215-250">215-250</Cpy> | `_bisectmodule`, `PyInit__bisect` | Module definition and entry point. | `module/bisect/` |
+
+## Reading
+
+### `internal_bisect_right` algorithm (lines 30 to 110)
+
+<CpyLink path="Modules/_bisect.c" lines="30-110" />
+
+The algorithm maintains a half-open interval `[lo, hi)`. On each iteration
+it computes the midpoint and compares the item at that index against the
+search target. The loop terminates when `lo == hi`, at which point `lo` is
+the correct insertion index.
+
+CPython uses unsigned arithmetic for the midpoint to avoid signed-integer
+overflow on very large lists:
+
+```c
+static Py_ssize_t
+internal_bisect_right(PyObject *list, PyObject *item,
+                      Py_ssize_t lo, Py_ssize_t hi,
+                      PyObject *key)
+{
+    while (lo < hi) {
+        /* Unsigned mid avoids overflow when lo + hi > PY_SSIZE_T_MAX. */
+        Py_ssize_t mid = ((size_t)lo + (size_t)hi) / 2;
+
+        PyObject *litem = PySequence_GetItem(list, mid);
+        if (litem == NULL) return -1;
+
+        /* Apply key function if provided. */
+        PyObject *key_item;
+        if (key != Py_None) {
+            key_item = PyObject_CallOneArg(key, litem);
+            Py_DECREF(litem);
+            if (key_item == NULL) return -1;
+        } else {
+            key_item = litem;
+        }
+
+        int cmp = PyObject_RichCompareBool(item, key_item, Py_LT);
+        Py_DECREF(key_item);
+        if (cmp < 0) return -1;
+
+        if (cmp > 0)
+            hi = mid;      /* item < list[mid]: search left half */
+        else
+            lo = mid + 1;  /* item >= list[mid]: search right half */
+    }
+    return lo;
+}
+```
+
+`bisect_right` returns `lo` such that all elements to the left satisfy
+`element <= item` and all elements to the right satisfy `element > item`.
+Duplicate values land to the right of any existing equal elements.
+
+`internal_bisect_left` is identical except the comparison is `Py_LT` with
+the operand order flipped, placing the insertion point to the left of
+any existing equal elements:
+
+```c
+int cmp = PyObject_RichCompareBool(key_item, item, Py_LT);
+/* cmp > 0 means list[mid] < item: search right half */
+if (cmp > 0)
+    lo = mid + 1;
+else
+    hi = mid;
+```
+
+### Key function path (lines 30 to 170)
+
+<CpyLink path="Modules/_bisect.c" lines="30-170" />
+
+The `key` parameter was added in CPython 3.10. When `key` is not `None`,
+it is applied to each `list[mid]` element before comparison. The caller
+is responsible for applying the same transformation to the search item
+before passing it, because `internal_bisect_right` only transforms the
+list elements, not the needle. The public wrappers `bisect_right_impl` and
+`bisect_left_impl` pass `item` through unchanged:
+
+```c
+/* Public wrapper (clinic-generated signature elided). */
+static PyObject *
+bisect_right_impl(PyObject *module, PyObject *a, PyObject *x,
+                  Py_ssize_t lo, Py_ssize_t hi, PyObject *key)
+{
+    /* hi defaults to len(a). */
+    if (hi == -1) {
+        hi = PySequence_Size(a);
+        if (hi < 0) return NULL;
+    }
+    Py_ssize_t index = internal_bisect_right(a, x, lo, hi, key);
+    if (index < 0) return NULL;
+    return PyLong_FromSsize_t(index);
+}
+```
+
+`__length_hint__` is not used by `_bisect.c` itself. The `list.insert`
+call inside `insort_right` / `insort_left` is via `PyObject_CallMethodOneArg`,
+which handles any object that implements `insert`, not just `list`:
+
+```c
+static PyObject *
+insort_right_impl(PyObject *module, PyObject *a, PyObject *x,
+                  Py_ssize_t lo, Py_ssize_t hi, PyObject *key)
+{
+    Py_ssize_t index = internal_bisect_right(a, x, lo, hi, key);
+    if (index < 0) return NULL;
+
+    PyObject *index_obj = PyLong_FromSsize_t(index);
+    if (index_obj == NULL) return NULL;
+
+    PyObject *result = PyObject_CallMethodObjArgs(a,
+                           &_Py_ID(insert), index_obj, x, NULL);
+    Py_DECREF(index_obj);
+    return result;
+}
+```
+
+## gopy mirror
+
+`module/bisect/` (pending). `bisectRight` and `bisectLeft` mirror the
+unsigned-midpoint loop. The `key` parameter path is preserved: when `key`
+is not `None`, `objects.Call(key, litem)` is invoked on each candidate
+element. `InsortRight` and `InsortLeft` call
+`objects.CallMethod(list, "insert", index, item)` after the search,
+matching the CPython pattern exactly.
+
+## CPython 3.14 changes
+
+The `key` parameter for all four public functions was added in 3.10. Prior
+to that, the functions accepted only `(a, x, lo=0, hi=len(a))`. The C
+implementation has been present since Python 2; the file was otherwise
+unchanged between 3.10 and 3.14.

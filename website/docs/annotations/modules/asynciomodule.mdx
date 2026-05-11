@@ -1,0 +1,190 @@
+---
+title: Modules/_asynciomodule.c
+description: C accelerator for asyncio, providing native FutureObj and TaskObj implementations with task scheduling, enter/leave_task tracking, and the coroutine step loop.
+cpython_path: Modules/_asynciomodule.c
+cpython_version: "3.14"
+lines: 4429
+status: annotated
+ported_to: module/asyncio/
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Modules/_asynciomodule.c`
+
+<CpyLink path="Modules/_asynciomodule.c" />
+
+`_asynciomodule.c` is the C accelerator that backs `asyncio.Future` and
+`asyncio.Task`. The pure-Python implementations in `asyncio/futures.py` and
+`asyncio/tasks.py` delegate to these types when the C extension is available,
+which is the default on CPython. The C types are structurally identical to
+their Python counterparts; they exist purely for throughput.
+
+The file defines four allocated types: `FutureObj`, `TaskObj`,
+`futureiterobject` (the iterator returned by `Future.__await__`), and
+`TaskStepMethWrapper` (an internal callable that binds a task to a single
+step invocation). All four share the same per-module state struct
+`asyncio_state`, which caches references to imported helpers such as
+`asyncio.CancelledError` and `asyncio.InvalidStateError`.
+
+`TaskObj` extends `FutureObj` by embedding the same `FutureObj_HEAD` macro,
+so the two types are layout-compatible at their common prefix. External
+debuggers (e.g., `py-spy`) rely on the published `_AsyncioDebug` section that
+exposes field offsets into these structs.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Modules/_asynciomodule.c" lines="1-100">1-100</Cpy> | `FutureObj_HEAD`, `FutureObj`, `TaskObj`, `TaskStepMethWrapper`, `asyncio_state` | Core struct definitions and per-module state. | `module/asyncio/` |
+| <Cpy path="Modules/_asynciomodule.c" lines="100-400">100-400</Cpy> | `_AsyncioDebug`, `get_asyncio_state`, `get_asyncio_state_by_cls`, `get_asyncio_state_by_def` | Debug offset section and state-accessor helpers used by every method in the file. | `module/asyncio/` |
+| <Cpy path="Modules/_asynciomodule.c" lines="400-900">400-900</Cpy> | `future_is_alive`, `future_ensure_alive`, `future_schedule_callbacks`, `future_init`, `future_set_result`, `future_set_exception`, `future_cancel`, `future_add_done_callback` | Internal Future helpers: lifecycle guards, callback dispatch, state transitions. | `module/asyncio/` |
+| <Cpy path="Modules/_asynciomodule.c" lines="900-1800">900-1800</Cpy> | `_asyncio_Future___init__`, `FutureObj_clear`, `FutureObj_traverse`, `_asyncio_Future_result_impl`, `_asyncio_Future_exception_impl`, `_asyncio_Future_add_done_callback_impl`, `_asyncio_Future_cancel_impl`, `FutureType_methods`, `Future_spec`, `FutureObj_dealloc` | All exported Future methods, type slot table, and dealloc. | `module/asyncio/` |
+| <Cpy path="Modules/_asynciomodule.c" lines="1800-2300">1800-2300</Cpy> | `futureiterobject`, `FutureIter_am_send_lock_held`, `future_new_iter`, `FutureIter_spec` | `Future.__await__` iterator: the coroutine protocol bridge. | `module/asyncio/` |
+| <Cpy path="Modules/_asynciomodule.c" lines="2243-2410">2243-2410</Cpy> | `enter_task`, `leave_task`, `swap_current_task` | Running-task tracking on `_PyThreadStateImpl`. | `module/asyncio/` |
+| <Cpy path="Modules/_asynciomodule.c" lines="2310-2700">2310-2700</Cpy> | `_asyncio_Task___init___impl`, `TaskObj_clear`, `TaskObj_traverse`, `task_call_step_soon`, `task_eager_start` | Task construction, GC slots, eager-start fast path. | `module/asyncio/` |
+| <Cpy path="Modules/_asynciomodule.c" lines="3070-3475">3070-3475</Cpy> | `task_step_impl`, `task_step_handle_result_impl`, `task_step`, `task_eager_start`, `task_wakeup_lock_held` | The coroutine step loop. The heart of asyncio scheduling. | `module/asyncio/` |
+| <Cpy path="Modules/_asynciomodule.c" lines="3475-4429">3475-4429</Cpy> | `_asyncio__enter_task_impl`, `_asyncio__leave_task_impl`, `asyncio_methods`, `module_exec`, `_asynciomodule` | Module-level helpers, method table, and `PyInit__asyncio`. | `module/asyncio/` |
+
+## Reading
+
+### FutureObj layout (lines 25 to 100)
+
+<CpyLink path="Modules/_asynciomodule.c" lines="25-100" />
+
+`FutureObj_HEAD` is a macro that stamps the same field set into both
+`FutureObj` and `TaskObj`. The two structs are layout-compatible at their
+common prefix, which lets helper functions accept `FutureObj *` and work
+correctly on a `TaskObj *` via casting:
+
+```c
+#define FutureObj_HEAD(prefix)                                              \
+    PyObject_HEAD                                                           \
+    PyObject *prefix##_loop;                                                \
+    PyObject *prefix##_callback0;                                           \
+    PyObject *prefix##_context0;                                            \
+    PyObject *prefix##_callbacks;                                           \
+    PyObject *prefix##_exception;                                           \
+    PyObject *prefix##_exception_tb;                                        \
+    PyObject *prefix##_result;                                              \
+    PyObject *prefix##_source_tb;                                           \
+    PyObject *prefix##_cancel_msg;                                          \
+    PyObject *prefix##_cancelled_exc;                                       \
+    PyObject *prefix##_awaited_by;                                          \
+    fut_state prefix##_state;                                               \
+    char prefix##_is_task;                                                  \
+    char prefix##_awaited_by_is_set;                                        \
+    unsigned prefix##_log_tb: 1;                                            \
+    unsigned prefix##_blocking: 1;
+```
+
+The `callback0` / `context0` pair is a fast-path inline slot for the common
+case where a Future has exactly one done callback. When a second callback is
+added, the first is moved into `fut_callbacks`, a `list` of `(callable,
+context)` tuples. This avoids a heap allocation for the majority of Futures
+that are awaited by exactly one coroutine.
+
+`TaskObj` adds the coroutine pointer (`task_coro`), a waiter reference
+(`task_fut_waiter`), a cancel request counter, and an `llist_node` so that
+all live tasks are linked into a per-interpreter list for `asyncio.all_tasks`.
+
+### Task.step execution (lines 3070 to 3475)
+
+<CpyLink path="Modules/_asynciomodule.c" lines="3070-3475" />
+
+`task_step` is the public entry point. It calls `enter_task`, delegates to
+`task_step_impl`, then calls `leave_task`:
+
+```c
+static PyObject *
+task_step(asyncio_state *state, TaskObj *task, PyObject *exc)
+{
+    PyObject *res;
+
+    if (enter_task(task->task_loop, (PyObject*)task) < 0) {
+        return NULL;
+    }
+
+    res = task_step_impl(state, task, exc);
+
+    if (res == NULL) {
+        PyObject *exc = PyErr_GetRaisedException();
+        leave_task(task->task_loop, (PyObject*)task);
+        _PyErr_ChainExceptions1(exc);
+        return NULL;
+    }
+    else {
+        if (leave_task(task->task_loop, (PyObject*)task) < 0) {
+            Py_DECREF(res);
+            return NULL;
+        }
+        else {
+            return res;
+        }
+    }
+}
+```
+
+`task_step_impl` drives the coroutine one step. When no exception is pending
+it sends `None` via `PyIter_Send`. When the coroutine raises `StopIteration`
+(i.e., it returned), the task resolves to the stop value. Any other raised
+exception is forwarded to `future_set_exception`. A `PYGEN_YIELD` result lands
+in `task_step_handle_result_impl`, which inspects the yielded object: if it is
+another Future, the task registers itself as a done callback on that Future so
+it will be woken up when the dependency resolves:
+
+```c
+int gen_status = PYGEN_ERROR;
+if (exc == NULL) {
+    gen_status = PyIter_Send(coro, Py_None, &result);
+}
+else {
+    result = PyObject_CallMethodOneArg(coro, &_Py_ID(throw), exc);
+    gen_status = gen_status_from_result(&result);
+}
+```
+
+### enter_task / leave_task (lines 2243 to 2310)
+
+<CpyLink path="Modules/_asynciomodule.c" lines="2243-2310" />
+
+These two functions maintain the `asyncio_running_task` slot on
+`_PyThreadStateImpl`. The slot is checked to prevent re-entering a task while
+another is executing and to associate the running task with the running loop:
+
+```c
+static int
+enter_task(PyObject *loop, PyObject *task)
+{
+    _PyThreadStateImpl *ts = (_PyThreadStateImpl *)_PyThreadState_GET();
+
+    if (ts->asyncio_running_loop != loop) {
+        PyErr_Format(PyExc_RuntimeError,
+                     "loop %R is not the running loop", loop);
+        return -1;
+    }
+    if (ts->asyncio_running_task != NULL) {
+        PyErr_Format(
+            PyExc_RuntimeError,
+            "Cannot enter into task %R while another "
+            "task %R is being executed.",
+            task, ts->asyncio_running_task);
+        return -1;
+    }
+    ts->asyncio_running_task = Py_NewRef(task);
+    return 0;
+}
+```
+
+`leave_task` mirrors this: it validates that the task being left is the one
+currently marked as running, then clears the slot with `Py_CLEAR`.
+
+## gopy mirror
+
+`module/asyncio/` (pending). The Go port represents `FutureObj` and `TaskObj`
+as Go structs with the same field names. The callback fast-path (`callback0` /
+`context0`) carries over directly as inline fields. The `enter_task` /
+`leave_task` invariant is enforced with a per-goroutine context value rather
+than a thread-state slot. The coroutine step loop maps onto Go channels:
+`task_step_impl` becomes a function called from the event loop goroutine, and
+`task_wakeup` posts back to that goroutine via a channel send.

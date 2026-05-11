@@ -1,0 +1,133 @@
+---
+title: Python/ast_unparse.c
+description: Converts an AST back to Python source text; drives the f-string `=` debug format.
+cpython_path: "Python/ast_unparse.c"
+cpython_version: "3.14"
+lines: 1200
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Python/ast_unparse.c`
+
+`ast_unparse.c` walks a Python AST and emits the corresponding source text as a
+`str` object. It is the inverse of the parser: given a `mod_ty`, `stmt_ty`, or
+`expr_ty` node, it produces a canonical string representation. The most visible
+user-facing call-site is the f-string `=` specifier (`f"{x=}"`), which calls
+<Cpy>_PyAST_Unparse</Cpy> to embed the verbatim expression text next to its
+runtime value.
+
+The file is self-contained: it carries its own growable string buffer, operator
+precedence table, and recursive visitor. No Python objects are allocated until
+the final step when the buffer is converted to a `PyObject *` string.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-40 | includes, `_Unparser` struct | Buffer state: `char *buffer`, `Py_ssize_t len`, `Py_ssize_t alloc`, precedence stack |
+| 41-80 | `_PyUnicodeWriter`-based helpers | `append_charp`, `append_str`, `append_char` write into the growable buffer |
+| 81-140 | `maybe_expand_buffer` | Doubles allocation when capacity is exhausted |
+| 141-200 | `unparse_expr` dispatch | Switches on `expr_ty->kind`; calls the per-node helpers below |
+| 201-280 | `unparse_Name`, `unparse_Constant` | Leaf nodes; `Constant` handles int, float, complex, bool, None, bytes, str |
+| 281-370 | `unparse_BinOp`, `unparse_UnaryOp` | Infix/prefix operators; inserts parentheses based on precedence comparison |
+| 371-450 | `unparse_BoolOp` | `and` / `or` chains; left-associativity handled explicitly |
+| 451-530 | `unparse_Compare` | Multiple comparators (`a < b < c`) |
+| 531-620 | `unparse_Call` | Positional args, keyword args, `*args`, `**kwargs` |
+| 621-700 | `unparse_Attribute`, `unparse_Subscript` | Dotted names and index/slice notation |
+| 701-790 | `unparse_Slice`, `unparse_Index` | `a:b:c` slices; bare `Index` wrapper (removed in 3.9 but kept for compat) |
+| 791-870 | `unparse_JoinedStr` | F-string body; recursively unparses nested format specs |
+| 871-940 | `unparse_IfExp`, `unparse_Lambda` | Ternary and lambda; lambda argument list reuses `unparse_arguments` |
+| 941-1020 | `unparse_arguments`, `unparse_arg` | Function argument lists including defaults, `/`, `*`, `**` |
+| 1021-1100 | `unparse_comprehension`, `unparse_ListComp`, `unparse_SetComp`, `unparse_DictComp`, `unparse_GeneratorExp` | Comprehension forms |
+| 1101-1160 | `unparse_Starred`, `unparse_Tuple`, `unparse_List`, `unparse_Set`, `unparse_Dict` | Collection literals |
+| 1161-1200 | `_PyAST_Unparse`, `_PyAST_ExprAsUnicode` | Public entry points; convert buffer to `PyObject *` |
+
+## Reading: entry points
+
+`_PyAST_Unparse` is the sole public entry point for general use. It allocates an
+`_Unparser` on the stack, dispatches to `unparse_expr` or `unparse_stmt`, and
+finalises the buffer into a `PyObject *`:
+
+```c
+// Python/ast_unparse.c:1161
+PyObject *
+_PyAST_Unparse(expr_ty ast, PyArena *arena)
+{
+    _Unparser u;
+    _unparser_init(&u);
+    if (unparse_expr(&u, ast, PR_TEST) < 0) {
+        _unparser_dealloc(&u);
+        return NULL;
+    }
+    return _unparser_finish(&u);
+}
+```
+
+`_PyAST_ExprAsUnicode` is a thin wrapper used by the `compile` module when it
+needs the unparsed form of a default argument expression for error messages.
+
+## Reading: precedence and parenthesisation
+
+The precedence table drives automatic parenthesisation. Each operator level is
+an integer constant (`PR_*`). `unparse_BinOp` compares the current expression's
+precedence against the enclosing context level and wraps with parentheses only
+when necessary:
+
+```c
+// Python/ast_unparse.c:285
+static int
+unparse_BinOp(_Unparser *u, expr_ty e, int level)
+{
+    int pr = get_op_precedence(e->v.BinOp.op);
+    int left_pr  = pr;
+    int right_pr = pr + 1;   /* left-associative: right side needs higher */
+
+    if (level > pr && append_charp(u, "(") < 0) return -1;
+    if (unparse_expr(u, e->v.BinOp.left,  left_pr)  < 0) return -1;
+    if (append_charp(u, operator_string(e->v.BinOp.op)) < 0) return -1;
+    if (unparse_expr(u, e->v.BinOp.right, right_pr) < 0) return -1;
+    if (level > pr && append_charp(u, ")") < 0) return -1;
+    return 0;
+}
+```
+
+## Reading: f-string unparsing
+
+F-string nodes (`JoinedStr`) contain a mix of `Constant` (literal segments) and
+`FormattedValue` (interpolated expressions). `unparse_JoinedStr` reconstructs
+the `f"..."` literal, re-escaping braces and recursing into format specs:
+
+```c
+// Python/ast_unparse.c:793
+static int
+unparse_JoinedStr(_Unparser *u, expr_ty e, int level)
+{
+    if (append_charp(u, "f\"") < 0) return -1;
+    asdl_seq *values = e->v.JoinedStr.values;
+    for (Py_ssize_t i = 0; i < asdl_seq_LEN(values); i++) {
+        expr_ty v = asdl_seq_GET(values, i);
+        if (v->kind == Constant_kind) {
+            /* literal segment - re-escape { and } */
+            if (append_fstring_constant(u, v->v.Constant.value) < 0) return -1;
+        } else {
+            /* FormattedValue: {expr!conv:spec} */
+            if (unparse_FormattedValue(u, v, PR_TEST) < 0) return -1;
+        }
+    }
+    return append_charp(u, "\"");
+}
+```
+
+The `=` debug specifier is handled one level up in `ceval.c`: it calls
+`_PyAST_Unparse` on the `FormattedValue`'s expression and prepends `expr=` to
+the formatted output.
+
+## Port status
+
+Not yet ported to gopy. The gopy compiler currently relies on the parser's
+source-location tracking rather than round-tripping through an unparser.
+Porting will become relevant when gopy needs to reproduce CPython's f-string
+`=` debug output exactly or when the `ast` module's `unparse()` function is
+implemented.

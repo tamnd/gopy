@@ -1,0 +1,93 @@
+---
+title: Lib/statistics.py
+description: Statistical functions for numeric data including central tendency, spread, distributions, and regression.
+cpython_path: Lib/statistics.py
+cpython_version: "3.14"
+lines: 1100
+status: annotated
+ported_to: ""
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Lib/statistics.py`
+
+<CpyLink path="Lib/statistics.py" />
+
+`statistics` is a pure-Python module that provides common single-variable and bivariate statistical functions suitable for everyday use without requiring NumPy or SciPy. All functions accept any iterable of real numbers and support `Decimal` and `Fraction` inputs as well as `int` and `float`, preserving exact arithmetic where possible. The module is intentionally limited in scope: it covers central tendency, spread, quantiles, and a few distribution-related utilities, not matrix algebra or hypothesis testing.
+
+The module uses compensated summation internally to reduce floating-point rounding error in `mean` and related functions. `fmean` is a fast path that uses the C-level `math.fsum` for the same purpose. `geometric_mean` and `harmonic_mean` handle the special cases (negative values, zeros) with explicit `StatisticsError` raises rather than returning `nan`, which makes mistakes obvious rather than silent.
+
+`NormalDist` is the main class-level contribution: an immutable value object that represents a Gaussian distribution by its mean and standard deviation and provides the full set of useful operations. `pdf`, `cdf`, and `inv_cdf` (the percent-point function) are implemented in pure Python using `math.erf` and `math.erfinv`. `overlap` computes the Bhattacharyya coefficient between two normal distributions. `samples` uses the Box-Muller transform via `random.gauss`.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Lib/statistics.py" lines="1-80">1-80</Cpy> | module preamble | Imports, `__all__`, `StatisticsError`, internal `_sum` compensated-summation helper | - |
+| <Cpy path="Lib/statistics.py" lines="81-200">81-200</Cpy> | `mean`, `fmean`, `geometric_mean`, `harmonic_mean` | Central tendency functions for arithmetic, fast-float, geometric, and harmonic means | - |
+| <Cpy path="Lib/statistics.py" lines="201-320">201-320</Cpy> | `median`, `median_low`, `median_high`, `median_grouped` | Median variants including grouped-continuous interpolation | - |
+| <Cpy path="Lib/statistics.py" lines="321-420">321-420</Cpy> | `mode`, `multimode` | Modal value functions; `multimode` returns all modes as a list | - |
+| <Cpy path="Lib/statistics.py" lines="421-540">421-540</Cpy> | `variance`, `stdev`, `pvariance`, `pstdev` | Sample and population variance and standard deviation | - |
+| <Cpy path="Lib/statistics.py" lines="541-640">541-640</Cpy> | `quantiles()` | Percentile computation supporting `inclusive` and `exclusive` interpolation methods | - |
+| <Cpy path="Lib/statistics.py" lines="641-760">641-760</Cpy> | `correlation`, `covariance`, `linear_regression` | Bivariate statistics; `linear_regression` returns a named tuple with slope, intercept, and optional `confidence_interval` | - |
+| <Cpy path="Lib/statistics.py" lines="761-900">761-900</Cpy> | `NormalDist.__init__`, arithmetic operators | Constructor, `mean`, `stdev`, `variance` properties; add, subtract, multiply, divide for affine transforms | - |
+| <Cpy path="Lib/statistics.py" lines="901-1000">901-1000</Cpy> | `NormalDist.pdf`, `cdf`, `inv_cdf`, `samples` | Density, cumulative, and quantile functions; pseudorandom sample generation | - |
+| <Cpy path="Lib/statistics.py" lines="1001-1100">1001-1100</Cpy> | `NormalDist.overlap`, `zscore`, `from_samples` | Distribution overlap coefficient, z-score computation, and constructor from raw data | - |
+
+## Reading
+
+### Compensated summation and `mean` (lines 1 to 200)
+
+<CpyLink path="Lib/statistics.py" lines="1-200" />
+
+The internal `_sum(data)` helper converts each element to a common type (preferring `Fraction` over `Decimal` over `float`) and accumulates using a compensated algorithm modelled after Kahan summation. `mean(data)` calls `_sum`, divides by the count, and converts back to the input type. `fmean` bypasses the type-promotion logic entirely and calls `math.fsum(data) / n`, which is faster for float-only input and still correctly rounded. `geometric_mean` converts to log-space with `math.log`, averages, and exponentiates; it raises `StatisticsError` for any non-positive value.
+
+```python
+def geometric_mean(data):
+    """Convert each value to a log, compute the mean, exponentiate."""
+    try:
+        return math.exp(mean(map(math.log, data)))
+    except ValueError:
+        raise StatisticsError('geometric mean requires a non-empty dataset '
+                              'containing positive numbers')
+```
+
+### Median variants (lines 201 to 320)
+
+<CpyLink path="Lib/statistics.py" lines="201-320" />
+
+`median` sorts the data and returns the middle value for odd-length sequences, or the arithmetic mean of the two middle values for even-length sequences. `median_low` and `median_high` always return an actual data point (the lower or upper of the two middle values). `median_grouped` implements continuous interpolation assuming equally spaced class intervals: the result is `L + interval * (n/2 - cf) / f`, where `L` is the lower class boundary, `cf` is the cumulative frequency below the interval, and `f` is the frequency within it. This matches the grouped-data formula in most statistics textbooks.
+
+### `quantiles()` (lines 541 to 640)
+
+<CpyLink path="Lib/statistics.py" lines="541-640" />
+
+`quantiles(data, n=4, method='exclusive')` partitions the sorted data into `n` equal-probability groups and returns the `n-1` cut points. The `exclusive` method (default) uses the formula `i/(n)` for the virtual index and linearly interpolates between sorted data points, matching the R type-6 quantile. The `inclusive` method uses `i/(n-1)` and matches R type-7. Both methods raise `StatisticsError` for fewer than two data points. Quartiles are the default (`n=4`), but any positive integer `n` is accepted.
+
+```python
+def quantiles(data, *, n=4, method='exclusive'):
+    if n < 1:
+        raise StatisticsError('n must be at least 1')
+    data = sorted(data)
+    ld = len(data)
+    if ld < 2:
+        raise StatisticsError('must have at least two data points')
+    # ...interpolation logic varies by method...
+```
+
+### `NormalDist` core (lines 761 to 1000)
+
+<CpyLink path="Lib/statistics.py" lines="761-1000" />
+
+`NormalDist` stores `_mu` and `_sigma` as plain floats. Arithmetic operators implement the affine-transform rules for Gaussians: adding a constant shifts the mean; multiplying by a constant scales both the mean and the standard deviation. Adding two independent `NormalDist` instances sums their means and adds their variances. `pdf(x)` evaluates the density using `math.exp`; `cdf(x)` uses `math.erfc` for numerical stability in the tails; `inv_cdf(p)` uses `math.erfinv` (added in Python 3.12) to compute the percent-point function.
+
+### `NormalDist.overlap` and bivariate functions (lines 641 to 760 and 1001 to 1100)
+
+<CpyLink path="Lib/statistics.py" lines="641-760" />
+
+`overlap(other)` returns the Bhattacharyya coefficient, which measures how much two normal distributions share. It is computed analytically from the two means and standard deviations and returns a value in [0, 1]. The bivariate functions `correlation` and `covariance` each accept two equal-length sequences and return a single float. `linear_regression` wraps them into a `LinearRegression` named tuple; when `proportional=True` the intercept is forced to zero and only the slope is estimated.
+
+## gopy mirror
+
+Not yet ported.

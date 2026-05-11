@@ -1,0 +1,126 @@
+---
+title: Python/ceval_macros.h
+description: Internal macros that wire together the CPython bytecode evaluation loop.
+cpython_path: Python/ceval_macros.h
+cpython_version: "3.14"
+lines: 200
+status: annotated
+ported_to: ""
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Python/ceval_macros.h`
+
+<CpyLink path="Python/ceval_macros.h" />
+
+`ceval_macros.h` is included once, at the top of `Python/ceval.c`, and is never
+compiled as a standalone translation unit. Every macro defined here is scoped to
+the eval-loop function `_PyEval_EvalFrameDefault`. Because CPython's main eval
+loop is a giant C function, using macros instead of inline helpers keeps the
+compiler's optimizer from generating unnecessary function prologues on hot paths.
+
+The file divides naturally into four groups: stack manipulation (`STACK_PUSH`,
+`STACK_POP`, `PEEK`, `POKE`), control-flow helpers (`JUMPBY`, `DISPATCH`,
+`DISPATCH_GOTO`), error-handling shortcuts (`ERROR_IF`, `DEOPT_IF`), and local
+variable accessors (`GETLOCAL`, `SETLOCAL`). Together they form the vocabulary
+that every instruction body in `ceval.c` and the Tier-1 specialising adaptive
+interpreter uses.
+
+The macros are deliberately low-level. `STACK_PUSH` is a raw pointer increment,
+`JUMPBY` is a signed offset applied to the program counter, and `ERROR_IF`
+expands to a conditional `goto error` that lands at the unified error handler at
+the bottom of the eval loop. This design means that instruction bodies read like
+pseudocode while the real mechanics stay in one reviewed header.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| 1-30 | stack sentinel macros | `STACK_LEVEL`, `EMPTY`, `TOP` | not ported |
+| 31-60 | `STACK_PUSH` / `STACK_POP` | push/pop `PyObject *` on the value stack | not ported |
+| 61-80 | `PEEK` / `POKE` | read/write stack slot at depth N without adjusting SP | not ported |
+| 81-110 | `JUMPBY` / `JUMPTO` | advance or set the program counter | not ported |
+| 111-140 | `DISPATCH` / `DISPATCH_GOTO` | re-enter the opcode dispatch switch | not ported |
+| 141-165 | `ERROR_IF` / `DEOPT_IF` | conditional jump to error or deopt label | not ported |
+| 166-200 | `GETLOCAL` / `SETLOCAL` | access fast-locals array with reference counting | not ported |
+
+## Reading
+
+### Stack sentinel macros (lines 1 to 30)
+
+<CpyLink path="Python/ceval_macros.h" lines="1-30" />
+
+The opening block defines `STACK_LEVEL` as `((int)(stack_pointer - _PyFrame_Stackbase(frame)))`,
+which gives the current depth as a signed integer. `EMPTY()` checks that depth
+is zero. `TOP` is sugar for `PEEK(1)`, reading the object sitting at the top of
+stack without popping it. These three macros appear in assertion guards scattered
+through the instruction bodies.
+
+```c
+#define STACK_LEVEL() ((int)(stack_pointer - _PyFrame_Stackbase(frame)))
+#define EMPTY()       (STACK_LEVEL() == 0)
+#define TOP           (PEEK(1))
+```
+
+### Push, pop, and indexed peek (lines 31 to 80)
+
+<CpyLink path="Python/ceval_macros.h" lines="31-80" />
+
+`STACK_PUSH(v)` increments `stack_pointer` then writes `v` into the new slot.
+`STACK_POP()` decrements first and returns the evicted value. `PEEK(n)` reads
+`stack_pointer[-n]` without moving the pointer, and `POKE(n, v)` writes into
+that same slot. These four macros implement every stack operation in instruction
+bodies without any function-call overhead.
+
+```c
+#define STACK_PUSH(val)   (*stack_pointer++ = (val))
+#define STACK_POP()       (*--stack_pointer)
+#define PEEK(n)           (stack_pointer[-(n)])
+#define POKE(n, val)      (stack_pointer[-(n)] = (val))
+```
+
+### Program-counter helpers (lines 81 to 140)
+
+<CpyLink path="Python/ceval_macros.h" lines="81-140" />
+
+`JUMPBY(x)` applies a signed word offset to `next_instr`, implementing relative
+jumps for `FOR_ITER`, `JUMP_FORWARD`, and the branch instructions. `JUMPTO(x)`
+sets `next_instr` to an absolute instruction index, used by the dispatcher after
+computing a jump target. `DISPATCH` and `DISPATCH_GOTO` re-enter the top of the
+switch: `DISPATCH` is used at the end of non-branching instructions, while
+`DISPATCH_GOTO` is used inside specialised instruction bodies that fall through
+from a different case.
+
+```c
+#define JUMPBY(x)       (next_instr += (x))
+#define JUMPTO(x)       (next_instr = first_instr + (x))
+#define DISPATCH()      goto fast_next_opcode
+#define DISPATCH_GOTO() goto dispatch_opcode
+```
+
+### Error and deopt exits (lines 141 to 200)
+
+<CpyLink path="Python/ceval_macros.h" lines="141-200" />
+
+`ERROR_IF(cond, label)` expands to `if (cond) goto label`, where `label` is
+almost always `error`. This keeps instruction bodies readable: one line per
+possible failure, each reading like a postcondition. `DEOPT_IF(cond, name)`
+jumps to the deoptimisation trampoline for `name`, backing out a specialised
+instruction to its generic form. `GETLOCAL(i)` and `SETLOCAL(i, val)` wrap
+`frame->localsplus[i]` with the necessary `Py_XDECREF` on the outgoing value.
+
+```c
+#define ERROR_IF(cond, label)  do { if (cond) goto label; } while (0)
+#define DEOPT_IF(cond, name)   do { if (cond) goto DEOPT_##name; } while (0)
+#define GETLOCAL(i)            (frame->localsplus[i])
+#define SETLOCAL(i, val)       do { \
+    PyObject *_tmp = GETLOCAL(i); \
+    GETLOCAL(i) = (val);          \
+    Py_XDECREF(_tmp);             \
+} while (0)
+```
+
+## gopy mirror
+
+Not yet ported.

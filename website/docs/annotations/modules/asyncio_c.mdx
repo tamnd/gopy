@@ -1,0 +1,77 @@
+---
+title: Modules/_asynciomodule.c
+description: C accelerator for the asyncio event loop, futures, and tasks.
+cpython_path: Modules/_asynciomodule.c
+cpython_version: "3.14"
+lines: 2500
+status: annotated
+ported_to: ""
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Modules/_asynciomodule.c`
+
+<CpyLink path="Modules/_asynciomodule.c" />
+
+`_asynciomodule.c` is the C accelerator backing `asyncio.futures` and `asyncio.tasks`. CPython ships a pure-Python fallback in `Lib/asyncio/futures.py` and `Lib/asyncio/tasks.py`, but when the C extension is available the interpreter imports the fast path automatically. The module registers `_asyncio.Future`, `_asyncio.Task`, and `_asyncio.get_event_loop` as replacements for their Python counterparts.
+
+`Future` is implemented as a C struct holding state (`PENDING`, `CANCELLED`, `FINISHED`), a result or exception slot, and a list of done-callbacks. All state transitions go through a single inline check so the interpreter never needs to acquire extra locks for the common path. `Task` subclasses `Future` and adds a coroutine reference, a wakeup handle, and the step machinery that drives `send`/`throw` round-trips against the coroutine frame.
+
+`_task_step_impl` is the hot path. It calls `coroutine.send(None)` or `coroutine.throw(exc)`, inspects the yielded value, and reschedules the task via the event loop's `call_soon`. Cancellation is handled by injecting a `CancelledError` on the next step rather than interrupting the running frame, which keeps the coroutine's `finally` blocks intact.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| 1-120 | `FutureObj` struct | C layout for `asyncio.Future` state | |
+| 121-450 | `FutureObj_*` methods | `cancel`, `result`, `exception`, `add_done_callback`, `remove_done_callback` | |
+| 451-620 | `future_schedule_callbacks` | Drains done-callback list into `call_soon` | |
+| 621-900 | `TaskObj` struct + `Task_new` | C layout for `asyncio.Task`, coroutine + step handle | |
+| 901-1300 | `_task_step_impl` | Core coroutine driver: `send`/`throw`, yield inspection, reschedule | |
+| 1301-1550 | `task_cancel` / `task_cancelling` | Cancellation injection and nesting counter | |
+| 1551-1800 | `PyRunningLoopHolder` | Per-thread running-loop fast path | |
+| 1801-2500 | Module init + method tables | `PyModuleDef`, type registration, `get_event_loop` | |
+
+## Reading
+
+### Future state machine
+
+A `Future` begins `PENDING`. `set_result` or `set_exception` moves it to `FINISHED`; `cancel` moves it to `CANCELLED`. Any transition out of `PENDING` drains the done-callback list. The C code guards every transition with an explicit state check and raises `InvalidStateError` on double-resolution, matching the Python fallback exactly.
+
+### Done-callback scheduling
+
+`future_schedule_callbacks` walks the callback list and calls `loop.call_soon(cb, future)` for each entry. The list is cleared before iteration so callbacks added during iteration go onto a fresh list and run in the next turn. This is the same two-phase drain used by the Python implementation.
+
+### Task step loop
+
+`_task_step_impl` is called by the event loop on every iteration. It calls `send(None)` for a normal wakeup or `throw(CancelledError)` when a cancel is pending. If the coroutine yields a `Future`, the task attaches itself as a done-callback on that future so it will be woken when the inner future resolves. If the coroutine raises `StopIteration`, the task captures the `.value` as its result.
+
+### Cancellation protocol
+
+`task_cancel` increments `_must_cancel` and records the optional `msg`. On the next step, `_task_step_impl` checks the flag and calls `coro.throw(CancelledError(msg))` instead of `send`. If the coroutine catches and suppresses the error, the flag is decremented; if it propagates, the task transitions to `CANCELLED`.
+
+### Running-loop fast path
+
+`PyRunningLoopHolder` stores the currently-running loop in a thread-state slot. `get_running_loop` reads this slot without touching the GIL, making it safe for hot inner loops that call `asyncio.get_running_loop()` frequently.
+
+```c
+/* _asynciomodule.c: _task_step_impl (abbreviated) */
+static PyObject *
+_task_step_impl(TaskObj *task, PyObject *exc)
+{
+    PyObject *result;
+    if (exc == NULL) {
+        result = _PyGen_Send((PyGenObject *)task->task_coro, Py_None);
+    } else {
+        result = PyObject_CallMethodOneArg(
+            task->task_coro, &_Py_ID(throw), exc);
+    }
+    /* inspect yielded future, reschedule, or finalise */
+    ...
+}
+```
+
+## gopy mirror
+
+Not yet ported.

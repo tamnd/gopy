@@ -1,0 +1,205 @@
+---
+title: Lib/numbers.py
+description: Abstract numeric tower: Number, Complex, Real, Rational, and Integral ABCs with default operator implementations and virtual-subclass registration for int, float, Decimal, and Fraction.
+cpython_path: Lib/numbers.py
+cpython_version: "3.14"
+lines: 400
+status: annotated
+ported_to: (stdlib pending)
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Lib/numbers.py`
+
+<CpyLink path="Lib/numbers.py" />
+
+`numbers.py` defines the numeric tower described in PEP 3141. The tower
+is a hierarchy of five ABCs: `Number`, `Complex`, `Real`, `Rational`, and
+`Integral`. Each is a strict subtype of the one above it. The ABCs serve
+two purposes: they let code test `isinstance(x, numbers.Real)` without
+knowing the concrete type, and they provide sensible default
+implementations for operators in terms of more primitive operations so
+that a new numeric type only needs to implement a small kernel.
+
+The file is entirely pure Python. The `abstractmethod` decorator marks
+the kernel methods that a concrete type must provide. Default
+implementations are provided as ordinary methods that delegate to those
+abstract ones (e.g., `__ne__` is defined as `not self == other`).
+
+At the bottom of the file, `int`, `float`, `complex`, `numbers.Integral`,
+`fractions.Fraction`, and `decimal.Decimal` are registered as virtual
+subclasses via `ABC.register()`. This means `isinstance(1, numbers.Real)`
+returns `True` even though `int` does not inherit from `numbers.Real`.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Lib/numbers.py" lines="1-40">1-40</Cpy> | Module docstring, `__all__`, imports | Declares `__all__ = ['Number', 'Complex', 'Real', 'Rational', 'Integral']`; imports `ABCMeta`, `abstractmethod`. | `(stdlib pending)` |
+| <Cpy path="Lib/numbers.py" lines="41-80">41-80</Cpy> | `Number` | Root ABC; only `__hash__ = None` to signal that subclasses must define `__hash__` explicitly if they are hashable. | `(stdlib pending)` |
+| <Cpy path="Lib/numbers.py" lines="81-200">81-200</Cpy> | `Complex` | Adds abstract `real`, `imag`, `__complex__`, `__bool__`, `__pos__`, `__neg__`, `__abs__`, `conjugate`, `__add__`/`__radd__`, `__sub__`/`__rsub__`, `__mul__`/`__rmul__`, `__truediv__`/`__rtruediv__`, `__pow__`/`__rpow__`, `__eq__`; default `__ne__` delegates to `__eq__`. | `(stdlib pending)` |
+| <Cpy path="Lib/numbers.py" lines="201-300">201-300</Cpy> | `Real` | Extends `Complex`; adds abstract `__float__`, `__trunc__`, `__floor__`, `__ceil__`, `__round__`, `__floordiv__`/`__rfloordiv__`, `__mod__`/`__rmod__`, `__lt__`, `__le__`; defaults `__complex__` as `complex(float(self), 0)`, `real` as `self`, `imag` as `0`, `conjugate` as `self`. | `(stdlib pending)` |
+| <Cpy path="Lib/numbers.py" lines="301-360">301-360</Cpy> | `Rational` | Extends `Real`; adds abstract `numerator` and `denominator` properties; defaults `__float__` as `self.numerator / self.denominator`. | `(stdlib pending)` |
+| <Cpy path="Lib/numbers.py" lines="361-400">361-400</Cpy> | `Integral`, `register` calls | Extends `Real`; adds abstract `__int__`, `__index__`, bit operations, and `__lshift__`/`__rshift__`; defaults `__float__` as `float(int(self))`, `__index__` as `int(self)`. Bottom of file registers `int`, `float`, `complex`, `fractions.Fraction`, `decimal.Decimal`. | `(stdlib pending)` |
+
+## Reading
+
+### Abstract numeric tower design (lines 41 to 200)
+
+<CpyLink path="Lib/numbers.py" lines="41-200" />
+
+```python
+class Complex(Number):
+    @abstractmethod
+    def __complex__(self):
+        """Return a builtin complex instance."""
+
+    def __bool__(self):
+        return self != 0
+
+    @abstractmethod
+    def real(self):
+        raise NotImplementedError
+
+    @abstractmethod
+    def imag(self):
+        raise NotImplementedError
+
+    @abstractmethod
+    def __add__(self, other):
+        raise NotImplementedError
+
+    @abstractmethod
+    def __radd__(self, other):
+        raise NotImplementedError
+
+    def __neg__(self):
+        return -1 * self
+
+    def __pos__(self):
+        return +self
+
+    def __ne__(self, other):
+        return not (self == other)
+```
+
+The design follows a minimal-kernel principle. Each ABC declares abstract
+methods for the operations that have no simpler expression in terms of
+other operations on that type. Non-abstract methods are provided where a
+correct default can be written purely in terms of the abstract ones.
+`__ne__` is the simplest example: every numeric type that implements
+`__eq__` gets `__ne__` for free. `__neg__` and `__pos__` can similarly be
+derived once multiplication is available.
+
+The `__radd__` / `__rsub__` / `__rmul__` reflected variants are abstract
+because numeric tower implementors must handle the case where the left
+operand does not know about the right operand's type. The standard
+protocol is: try `__add__`; if it returns `NotImplemented`, try
+`__radd__` on the right operand. Both must be implemented independently.
+
+### `NotImplemented` protocol in `__add__` and `__radd__`
+
+```python
+class MyNumber(numbers.Real):
+    def __add__(self, other):
+        if isinstance(other, MyNumber):
+            return MyNumber(self._val + other._val)
+        return NotImplemented   # let Python try other.__radd__(self)
+
+    def __radd__(self, other):
+        return self.__add__(other)
+```
+
+Returning `NotImplemented` (not raising `TypeError`) is the correct
+pattern. Python's binary operator machinery calls `a.__add__(b)`; if that
+returns `NotImplemented` it calls `b.__radd__(a)`. Only if both return
+`NotImplemented` does Python raise `TypeError`. The ABCs therefore declare
+both `__add__` and `__radd__` as abstract to make this two-step protocol
+explicit.
+
+### `Integral` default implementations (lines 361 to 400)
+
+<CpyLink path="Lib/numbers.py" lines="361-400" />
+
+```python
+class Integral(Real):
+    @abstractmethod
+    def __int__(self):
+        """int(self)"""
+
+    def __index__(self):
+        return int(self)
+
+    @abstractmethod
+    def __pow__(self, exponent, modulus=None):
+        """self ** exponent % modulus"""
+
+    @abstractmethod
+    def __lshift__(self, other):
+        raise NotImplementedError
+
+    @abstractmethod
+    def __rlshift__(self, other):
+        raise NotImplementedError
+
+    @abstractmethod
+    def __rshift__(self, other):
+        raise NotImplementedError
+
+    @abstractmethod
+    def __rrshift__(self, other):
+        raise NotImplementedError
+
+    @abstractmethod
+    def __and__(self, other):
+        raise NotImplementedError
+
+    # ... __rand__, __xor__, __rxor__, __or__, __ror__, __invert__
+
+    def __float__(self):
+        return float(int(self))
+
+    @property
+    def numerator(self):
+        return +self
+
+    @property
+    def denominator(self):
+        return 1
+```
+
+`Integral` inherits from `Real` and adds bit operations plus the three-
+argument form of `__pow__` for modular exponentiation. The default
+`__index__` delegates to `__int__`, which is correct because any integer
+type that can convert to `int` satisfies the buffer/slice index protocol.
+`__float__` goes through `int(self)` to avoid infinite recursion: `Real`
+provides `__float__` as abstract, so `Integral` must supply one, and the
+only correct expression is `float(int(self))`.
+
+### `register()` for virtual subclasses (lines 361 to 400)
+
+<CpyLink path="Lib/numbers.py" lines="361-400" />
+
+```python
+Integral.register(int)
+Complex.register(complex)
+Real.register(float)
+```
+
+Calls to `ABC.register()` add a type to the ABC's virtual subclass set
+without modifying the type's MRO. `isinstance(1, numbers.Integral)` returns
+`True` because `int` is registered, not because `int` inherits from
+`numbers.Integral`. This allows third-party numeric types (`decimal.Decimal`,
+`fractions.Fraction`) to participate in the tower without coupling their
+inheritance chains to `numbers`. The `__subclasshook__` mechanism is not
+used here; `numbers` relies entirely on explicit `register()` calls.
+
+## gopy mirror
+
+The `numbers` ABCs are used by `fractions`, `decimal`, and the operator
+module for type dispatch. gopy does not yet port `numbers.py` as a
+module, but the abstract interface is informally implemented wherever
+numeric types define `__add__`, `__radd__`, and the comparison protocol.
+A full port would register gopy's integer and float types with the tower
+at interpreter startup.

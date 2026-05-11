@@ -1,0 +1,113 @@
+---
+title: Lib/hmac.py
+description: Pure-Python implementation of HMAC message authentication codes as defined in RFC 2104, with a constant-time digest comparison helper.
+cpython_path: Lib/hmac.py
+cpython_version: "3.14"
+lines: 200
+status: annotated
+ported_to: ""
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Lib/hmac.py`
+
+<CpyLink path="Lib/hmac.py" />
+
+`hmac.py` implements HMAC (Hash-based Message Authentication Code) as specified in RFC 2104. An HMAC authenticator takes a secret key and a message and produces a fixed-length tag that proves both integrity and authenticity. The algorithm wraps any hash function: it XORs the key with inner and outer padding constants, hashes `(inner_pad + message)`, then hashes `(outer_pad + inner_hash)`. CPython ships a pure-Python fallback here and accelerates it through `_hashlib.hmac_new` when OpenSSL is available.
+
+The public API centres on the `HMAC` class and the `new()` convenience constructor. `digestmod` is required since Python 3.8 and must be a callable (such as `hashlib.sha256`) or a module with a `new()` attribute. The class exposes the same interface as `hashlib` hash objects so that the two can be used interchangeably in code that only needs `update()`, `digest()`, and `hexdigest()`.
+
+`compare_digest(a, b)` is the other notable export. It delegates to `_hashlib.compare_digest` (a C implementation) when available, falling back to a pure-Python loop that reads every byte of both strings before returning. This constant-time property prevents timing side-channels in authentication checks where an attacker might shorten a comparison by submitting a prefix that matches early bytes.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| 1-30 | imports, `__all__` | `hashlib`, `_hashlib` optional import, digest size constants | n/a |
+| 31-80 | `HMAC.__init__` | key padding, inner and outer hash object setup | not ported |
+| 81-120 | `HMAC.update`, `HMAC.copy` | feed message bytes, clone authenticator state | not ported |
+| 121-160 | `HMAC.digest`, `HMAC.hexdigest` | finalise and return raw or hex tag | not ported |
+| 161-180 | `new()` | public constructor, validates `digestmod` argument | not ported |
+| 181-200 | `compare_digest()` | constant-time equality check with C fallback | not ported |
+
+## Reading
+
+### Key setup in `HMAC.__init__` (lines 31 to 80)
+
+<CpyLink path="Lib/hmac.py" lines="31-80" />
+
+The constructor accepts `key`, an optional `msg`, and `digestmod`. If `key` is longer than the hash's block size it is first hashed to reduce it; if shorter it is zero-padded to block size. Two copies of the underlying hash object are then initialised, one fed `key XOR ipad` (the inner state) and one fed `key XOR opad` (the outer state). This separation means `update()` only touches the inner hash until finalisation.
+
+```python
+if len(key) > blocksize:
+    key = digestmod(key).digest()
+key = key.ljust(blocksize, b'\0')
+self._inner = digestmod()
+self._inner.update(key.translate(_trans_36))  # ipad = 0x36
+self._outer = digestmod()
+self._outer.update(key.translate(_trans_5C))  # opad = 0x5C
+```
+
+### `update()` and `copy()` (lines 81 to 120)
+
+<CpyLink path="Lib/hmac.py" lines="81-120" />
+
+`update(msg)` feeds bytes directly to `_inner`, mirroring the `hashlib` hash interface so that callers can build the HMAC incrementally. `copy()` clones both `_inner` and `_outer` into a new `HMAC` instance, preserving the current authentication state. The clone is independent: updating one does not affect the other.
+
+```python
+def update(self, msg):
+    self._inner.update(msg)
+
+def copy(self):
+    other = self.__class__.__new__(self.__class__)
+    other._inner = self._inner.copy()
+    other._outer = self._outer.copy()
+    return other
+```
+
+### `digest()` and `hexdigest()` (lines 121 to 160)
+
+<CpyLink path="Lib/hmac.py" lines="121-160" />
+
+Both methods are non-destructive: they copy the inner hash, finalise it, feed the result into a copy of the outer hash, then return that outer digest. The original `_inner` and `_outer` objects remain intact so that further `update()` calls stay valid. `hexdigest()` is `digest().hex()` with the same copy-based logic.
+
+```python
+def digest(self):
+    h = self._outer.copy()
+    h.update(self._inner.copy().digest())
+    return h.digest()
+```
+
+### `new()` constructor (lines 161 to 180)
+
+<CpyLink path="Lib/hmac.py" lines="161-180" />
+
+`new(key, msg=None, digestmod='')` validates that `digestmod` was supplied (raising `ValueError` if not) and delegates to `_hashlib.hmac_new` when the OpenSSL binding is present. The C path is faster and avoids the Python-level key-padding loop. The pure-Python `HMAC` class is used only when `_hashlib` is unavailable or when the requested hash is not supported by OpenSSL.
+
+```python
+def new(key, msg=None, digestmod=''):
+    if not digestmod:
+        raise ValueError("digestmod argument is required")
+    return HMAC(key, msg, digestmod)
+```
+
+### `compare_digest()` (lines 181 to 200)
+
+<CpyLink path="Lib/hmac.py" lines="181-200" />
+
+The function accepts either two `str` objects or two `bytes`-like objects and returns `True` only when they are equal. The pure-Python fallback XORs every byte pair and ORs the results together, ensuring the loop always runs to completion regardless of where a mismatch occurs. The C implementation in `_hashlib` provides the same guarantee with lower overhead.
+
+```python
+def compare_digest(a, b):
+    if isinstance(a, str):
+        return _builtin_compare_digest(a, b)
+    result = 0
+    for x, y in zip(a, b):
+        result |= x ^ y
+    return result == 0 and len(a) == len(b)
+```
+
+## gopy mirror
+
+Not yet ported.

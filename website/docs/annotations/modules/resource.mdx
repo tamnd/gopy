@@ -1,0 +1,132 @@
+---
+title: Modules/resource.c
+description: Python bindings for Unix process resource limit and usage queries via getrlimit(2), setrlimit(2), and getrusage(2).
+cpython_path: Modules/resource.c
+cpython_version: "3.14"
+lines: 450
+status: annotated
+ported_to: ""
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Modules/resource.c`
+
+<CpyLink path="Modules/resource.c" />
+
+`resource.c` wraps the Unix kernel's process resource accounting surface. It provides three query/control functions (`getrlimit`, `setrlimit`, `getrusage`) and one utility (`getpagesize`). All four are implemented as direct thin wrappers around the corresponding libc calls, with Python-side struct types for the structured return values.
+
+The module defines two Python struct types. `struct_rlimit` carries `(rlim_cur, rlim_max)` and is used as both input and output for the limit calls. `struct_rusage` carries the full `rusage` struct fields (`ru_utime`, `ru_stime`, `ru_maxrss`, etc.) and is returned by `getrusage`. Both types are lightweight sequence-like objects created with `PyStructSequence_NewType`.
+
+Platform portability is handled entirely via `#ifdef` guards on individual `RLIMIT_*` constants and individual `struct rusage` fields. The C code itself is written once against POSIX; the conditional compilation adjusts the constant table and the `struct_rusage` field descriptor array at build time so the module works correctly on Linux, macOS, and BSD variants without branching at runtime.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| 1-50 | (includes, struct descriptors) | Headers, `struct_rusage` field list | |
+| 51-120 | `resource_getrusage_impl` | Wrap getrusage(2); build struct_rusage | |
+| 121-180 | `resource_getrlimit_impl` | Wrap getrlimit(2); return struct_rlimit | |
+| 181-260 | `resource_setrlimit_impl` | Wrap setrlimit(2); parse struct_rlimit arg | |
+| 261-300 | `resource_getpagesize_impl` | Wrap getpagesize(3) | |
+| 301-390 | `resource_exec` | Module init: register constants | |
+| 391-450 | type definitions, `PyInit_resource` | struct_rlimit and struct_rusage type setup | |
+
+## Reading
+
+### `struct_rusage` field descriptor table (lines 1 to 50)
+
+<CpyLink path="Modules/resource.c" lines="1-50" />
+
+The file opens with a `PyStructSequence_Field` array that lists every field of the `rusage` struct. Each entry is a `{field_name, doc_string}` pair. Fields that are absent on a given platform are guarded by `#ifdef` so the resulting Python type has exactly the fields that the host kernel populates.
+
+```c
+static PyStructSequence_Field struct_rusage_fields[] = {
+    {"ru_utime",    "user time used"},
+    {"ru_stime",    "system time used"},
+    {"ru_maxrss",   "max. resident set size"},
+    {"ru_ixrss",    "shared memory size"},
+    /* ... more fields ... */
+    {0}
+};
+```
+
+### `resource_getrusage_impl`: building struct_rusage (lines 51 to 120)
+
+<CpyLink path="Modules/resource.c" lines="51-120" />
+
+The function calls `getrusage(who, &ru)`, then constructs a `struct_rusage` sequence object by setting each indexed slot from the corresponding `ru` field. Time fields (`ru_utime`, `ru_stime`) are converted to Python `float` via `PyFloat_FromDouble` after combining seconds and microseconds. Integer fields use `PyLong_FromLong` or `PyLong_FromUnsignedLong`.
+
+```c
+if (getrusage(who, &ru) == -1)
+    return PyErr_SetFromErrno(PyExc_OSError);
+
+PyObject *result = PyStructSequence_New(&StructRUsageType);
+if (!result)
+    return NULL;
+
+PyStructSequence_SET_ITEM(result, 0,
+    PyFloat_FromDouble(ru.ru_utime.tv_sec +
+                       ru.ru_utime.tv_usec * 1e-6));
+PyStructSequence_SET_ITEM(result, 1,
+    PyFloat_FromDouble(ru.ru_stime.tv_sec +
+                       ru.ru_stime.tv_usec * 1e-6));
+/* integer fields follow */
+```
+
+### `resource_getrlimit_impl` and `resource_setrlimit_impl` (lines 121 to 260)
+
+<CpyLink path="Modules/resource.c" lines="121-260" />
+
+`getrlimit` calls the syscall and packs the two `rlim_t` values into a `struct_rlimit` sequence. `setrlimit` does the reverse: it unpacks a two-element sequence from the Python argument, validates that both values are non-negative (or equal to `RLIM_INFINITY`), and calls `setrlimit(resource, &rl)`. The `RLIM_INFINITY` constant requires special handling because it may not fit in a Python int without a sign extension issue on 32-bit platforms.
+
+```c
+/* getrlimit */
+if (getrlimit(resource, &rl) == -1)
+    return PyErr_SetFromErrno(PyExc_OSError);
+return rlimit_to_obj(&rl);  /* builds struct_rlimit */
+
+/* setrlimit */
+if (obj_to_rlimit(limits, &rl) < 0)
+    return NULL;
+if (setrlimit(resource, &rl) == -1)
+    return PyErr_SetFromErrno(PyExc_OSError);
+Py_RETURN_NONE;
+```
+
+### `resource_getpagesize_impl` (lines 261 to 300)
+
+<CpyLink path="Modules/resource.c" lines="261-300" />
+
+This is the simplest function in the module. It calls `getpagesize()` (or reads `sysconf(_SC_PAGESIZE)` on platforms where `getpagesize` is deprecated) and returns the result as a Python integer. The page size is relevant for interpreting `ru_maxrss` on Linux, where the kernel reports it in kilobytes rather than bytes.
+
+```c
+static PyObject *
+resource_getpagesize_impl(PyObject *module)
+{
+    long pagesize = getpagesize();
+    return PyLong_FromLong(pagesize);
+}
+```
+
+### Constant registration in `resource_exec` (lines 301 to 390)
+
+<CpyLink path="Modules/resource.c" lines="301-390" />
+
+`resource_exec` registers all `RLIMIT_*` and `RUSAGE_*` constants. Each constant is gated by its own `#ifdef` to handle the fact that, for example, `RLIMIT_AS` exists on Linux but not on older macOS releases. The `RLIM_INFINITY` constant is registered as a Python `int` built from the raw `rlim_t` value, which may require `PyLong_FromUnsignedLongLong` when `rlim_t` is 64 bits.
+
+```c
+#ifdef RLIMIT_CPU
+    if (PyModule_AddIntConstant(m, "RLIMIT_CPU", RLIMIT_CPU))
+        return -1;
+#endif
+#ifdef RLIMIT_NOFILE
+    if (PyModule_AddIntConstant(m, "RLIMIT_NOFILE", RLIMIT_NOFILE))
+        return -1;
+#endif
+/* RLIM_INFINITY needs special handling for unsigned 64-bit values */
+```
+
+## gopy mirror
+
+Not yet ported.

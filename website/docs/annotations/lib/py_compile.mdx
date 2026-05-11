@@ -1,0 +1,112 @@
+---
+title: Lib/py_compile.py
+description: Compiles a Python source file to a .pyc bytecode file using importlib machinery.
+cpython_path: Lib/py_compile.py
+cpython_version: "3.14"
+lines: 290
+status: annotated
+ported_to: ""
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Lib/py_compile.py`
+
+<CpyLink path="Lib/py_compile.py" />
+
+`py_compile` provides a single public function, `compile()`, that reads a Python source file, compiles it to bytecode, and writes the result as a `.pyc` file under `__pycache__`. It is the minimal public surface over the same machinery that `importlib` uses when it auto-compiles modules on import.
+
+The module defines `PycInvalidationMode`, an `IntEnum` with three members: `TIMESTAMP` (the historical default), `CHECKED_HASH`, and `UNCHECKED_HASH`. The mode controls what is written into the `.pyc` header so that the import system can decide whether cached bytecode is still valid. It also exposes `PyCompileError`, a thin exception wrapper that formats a friendly message pointing at the offending file and line.
+
+The `compile()` function is the workhorse. It resolves source and cache paths, reads the source bytes, delegates compilation to `importlib.util.source_to_code`, then calls into `importlib._bootstrap_external` to stamp the header and write the `.pyc` atomically. The `quiet` parameter suppresses `PyCompileError` and makes the function return a status integer instead of raising.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Lib/py_compile.py" lines="1-30">1-30</Cpy> | module header | Imports, `__all__`, docstring | - |
+| <Cpy path="Lib/py_compile.py" lines="31-60">31-60</Cpy> | `PyCompileError` | Exception with formatted message and underlying `SyntaxError` | - |
+| <Cpy path="Lib/py_compile.py" lines="61-100">61-100</Cpy> | `PycInvalidationMode` | `IntEnum` with `TIMESTAMP`, `CHECKED_HASH`, `UNCHECKED_HASH` | - |
+| <Cpy path="Lib/py_compile.py" lines="101-140">101-140</Cpy> | `compile()` signature + path setup | Argument defaulting, `cfile` resolution via `importlib.util.cache_from_source` | - |
+| <Cpy path="Lib/py_compile.py" lines="141-180">141-180</Cpy> | `compile()` source read | Opens source with `io.open_code`, reads bytes, handles `OSError` | - |
+| <Cpy path="Lib/py_compile.py" lines="181-230">181-230</Cpy> | `compile()` compilation | Calls `importlib.util.source_to_code`, catches `SyntaxError`, wraps in `PyCompileError` | - |
+| <Cpy path="Lib/py_compile.py" lines="231-265">231-265</Cpy> | `compile()` write | Calls `_bootstrap_external._write_atomic` with magic + header + marshalled code | - |
+| <Cpy path="Lib/py_compile.py" lines="266-290">266-290</Cpy> | `main()` / `__main__` block | CLI: iterates `sys.argv[1:]`, calls `compile()`, prints errors | - |
+
+## Reading
+
+### `PyCompileError` (lines 31 to 60)
+
+<CpyLink path="Lib/py_compile.py" lines="31-60" />
+
+`PyCompileError` wraps any exception raised during compilation and produces a human-readable message that includes the filename and, when the underlying error is a `SyntaxError`, the line number. The `exc_value` attribute preserves the original exception for programmatic inspection.
+
+```python
+class PyCompileError(Exception):
+    def __init__(self, exc_type, exc_value, file, msg=''):
+        self.exc_type_name = exc_type.__name__
+        self.exc_value = exc_value
+        self.file = file
+        # builds self.msg from the above, including lineno when available
+        super().__init__(msg or self.msg)
+```
+
+### `PycInvalidationMode` enum (lines 61 to 100)
+
+<CpyLink path="Lib/py_compile.py" lines="61-100" />
+
+The three members map directly to the `.pyc` header flags defined in `importlib._bootstrap_external`. `TIMESTAMP` stores the source mtime and size. `CHECKED_HASH` stores a hash that the import system verifies on every load. `UNCHECKED_HASH` stores a hash but the import system trusts it without re-checking.
+
+```python
+class PycInvalidationMode(enum.IntEnum):
+    TIMESTAMP = 1
+    CHECKED_HASH = 2
+    UNCHECKED_HASH = 3
+```
+
+### Path resolution in `compile()` (lines 101 to 140)
+
+<CpyLink path="Lib/py_compile.py" lines="101-140" />
+
+When `cfile` is omitted, the cache path is derived from the source path using `importlib.util.cache_from_source`, which inserts the `__pycache__` subdirectory and appends the magic-number suffix. The `dfile` parameter (display filename) lets callers embed a different path in tracebacks, for example when compiling from a temporary copy.
+
+```python
+if cfile is None:
+    if optimize >= 0:
+        cfile = importlib.util.cache_from_source(file, optimization=optimize or '')
+    else:
+        cfile = importlib.util.cache_from_source(file)
+```
+
+### Compilation and error wrapping (lines 181 to 230)
+
+<CpyLink path="Lib/py_compile.py" lines="181-230" />
+
+`importlib.util.source_to_code` is a thin wrapper around the built-in `compile()`. Any `SyntaxError` (or subclass) it raises is caught and re-raised as `PyCompileError`. With `quiet >= 2` the error is swallowed entirely and the function returns `''`.
+
+```python
+try:
+    code = loader.source_to_code(source_bytes, dfile or file,
+                                  _optimize=optimize)
+except SyntaxError as err:
+    py_exc = PyCompileError(err.__class__, err, dfile or file)
+    if quiet < 2:
+        raise py_exc
+    return ''
+```
+
+### Writing the `.pyc` file (lines 231 to 265)
+
+<CpyLink path="Lib/py_compile.py" lines="231-265" />
+
+The header is assembled by `_bootstrap_external` helpers: magic number (4 bytes), flags word, then either mtime+size or hash depending on the invalidation mode. The marshalled code object follows. `_write_atomic` writes to a temp file and renames, so a concurrent reader never sees a partial `.pyc`.
+
+```python
+bytecode = importlib._bootstrap_external._code_to_timestamp_pyc(
+    code, source_mtime, source_size)
+importlib._bootstrap_external._write_atomic(cfile, bytecode, mode)
+```
+
+## gopy mirror
+
+Not yet ported.

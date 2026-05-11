@@ -1,0 +1,351 @@
+---
+title: Python/formatter_unicode.c
+description: String formatting engine. Parses PEP 3101 format specs and renders integers, floats, complex numbers, strings, and characters with fill, align, sign, grouping, and precision.
+cpython_path: Python/formatter_unicode.c
+cpython_version: "3.14"
+lines: 1607
+status: annotated
+ported_to: format/format.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Python/formatter_unicode.c`
+
+<CpyLink path="Python/formatter_unicode.c" />
+
+The implementation of PEP 3101 format specifications for Python's
+`format()` builtin and f-strings. The file has three layers. At the
+bottom is `parse_internal_render_format_spec`, which tokenizes a format
+spec string (fill, align, sign, `z`, `#`, `0`, width, grouping,
+precision, type) into an `InternalFormatSpec` struct. In the middle are
+type-specific renderers: `format_long_internal` for integers,
+`format_float_internal` for floats, `format_complex_internal` for
+complex numbers, and `format_string_internal` for strings and
+characters. At the top are the public entry points `_PyUnicode_FormatLong`,
+`_PyObject_Format`, `_PyFloat_FormatAdvancedWriter`, and
+`_PyComplex_FormatAdvancedWriter` that dispatch into the renderers.
+
+Each renderer goes through a common pipeline: call `calc_number_widths`
+to compute the widths of the sign, prefix, integer part, decimal point,
+fraction, and exponent; allocate an output buffer of the computed size;
+call `fill_number` to write the actual characters in the right order;
+and then apply fill-and-align padding around the number if the field
+width is wider than the number's natural width. String formatting skips
+the `calc_number_widths` pipeline and applies only the width/precision/
+fill logic directly.
+
+The file also owns `_PyUnicode_FormatLong`, which is the path taken by
+the `%d`, `%i`, `%o`, `%x`, and `%X` conversions inside `%`-style
+formatting (`Objects/unicodeobject.c` calls it for the integer
+conversions). That function normalizes the integer representation and
+delegates to `format_long_internal` with a pre-parsed spec.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Python/formatter_unicode.c" lines="1-80">1-80</Cpy> | `InternalFormatSpec`, `ALIGN_*` / `SIGN_*` constants | Format spec struct and enum constants. | `format/format.go:FormatSpec` |
+| <Cpy path="Python/formatter_unicode.c" lines="80-200">80-200</Cpy> | `parse_internal_render_format_spec` | Tokenize fill/align/sign/z/#/0/width/grouping/precision/type from a format spec string. | `format/format.go:parseFormatSpec` |
+| <Cpy path="Python/formatter_unicode.c" lines="200-300">200-300</Cpy> | `calc_padding`, `fill_padding` | Compute and apply fill-and-align padding around a formatted value. | `format/format.go:calcPadding` |
+| <Cpy path="Python/formatter_unicode.c" lines="300-500">300-500</Cpy> | `calc_number_widths`, `fill_number` | Compute the component widths of a formatted number; write components into the output buffer. | `format/format.go:calcNumberWidths` |
+| <Cpy path="Python/formatter_unicode.c" lines="500-700">500-700</Cpy> | `format_long_internal`, `_PyUnicode_FormatLong` | Integer formatting: decimal, binary, octal, hex (upper/lower), `#` prefix, `_` and `,` grouping. | `format/format.go:FormatLong` |
+| <Cpy path="Python/formatter_unicode.c" lines="700-1000">700-1000</Cpy> | `format_float_internal` | Float formatting: `e`, `E`, `f`, `F`, `g`, `G`, `%`, `z` negative-zero coercion. | `format/format.go:FormatFloat` |
+| <Cpy path="Python/formatter_unicode.c" lines="1000-1300">1000-1300</Cpy> | `format_complex_internal` | Complex formatting: apply `format_float_internal` to real and imaginary parts; append `j`. | `format/format.go:FormatComplex` |
+| <Cpy path="Python/formatter_unicode.c" lines="1300-1500">1300-1500</Cpy> | `format_string_internal` | String and `chr()` formatting: precision truncation, width padding, `s` / `c` type. | `format/format.go:FormatString` |
+| <Cpy path="Python/formatter_unicode.c" lines="1500-1607">1500-1607</Cpy> | `_PyObject_Format`, `_PyFloat_FormatAdvancedWriter`, `_PyComplex_FormatAdvancedWriter` | Public dispatch: call `__format__`, float/complex writer entry points. | `format/format.go:ObjectFormat` |
+
+## Reading
+
+### Format spec parsing (lines 80 to 200)
+
+<CpyLink path="Python/formatter_unicode.c" lines="80-200" />
+
+```c
+static int
+parse_internal_render_format_spec(PyObject *obj,
+                                  PyObject *format_spec,
+                                  InternalFormatSpec *format,
+                                  char default_type,
+                                  char default_align)
+{
+    Py_ssize_t i = 0, end;
+    Py_UCS4 *ptr;
+    ...
+    /* fill and align */
+    if (end - i >= 2 && is_alignment_token(ptr[i+1])) {
+        format->fill_char = ptr[i];
+        format->align = ptr[i+1];
+        i += 2;
+    } else if (end - i >= 1 && is_alignment_token(ptr[i])) {
+        format->fill_char = L' ';
+        format->align = ptr[i];
+        i += 1;
+    }
+
+    /* sign */
+    if (i < end && is_sign_element(ptr[i])) {
+        format->sign = ptr[i];
+        i++;
+    }
+
+    /* 'z' for negative-zero coercion */
+    if (i < end && ptr[i] == 'z') {
+        format->no_neg_0 = 1;
+        i++;
+    }
+
+    /* '#' alternate form */
+    if (i < end && ptr[i] == '#') {
+        format->alternate = 1;
+        i++;
+    }
+
+    /* width */
+    ...
+    format->width = get_integer(ptr, &i, end);
+    ...
+
+    /* grouping option */
+    if (i < end && (ptr[i] == '_' || ptr[i] == ',')) {
+        format->thousands_sep = ptr[i];
+        i++;
+    }
+
+    /* .precision */
+    if (i < end && ptr[i] == '.') {
+        i++;
+        format->precision = get_integer(ptr, &i, end);
+        ...
+    }
+
+    /* type character */
+    if (i < end) {
+        format->type = ptr[i];
+        i++;
+    } else {
+        format->type = default_type;
+    }
+    ...
+}
+```
+
+The parser is a single left-to-right scan over a `Py_UCS4 *` view of
+the format spec string. The fill/align lookahead is the trickiest part:
+because the fill character can be any character including one that also
+looks like an alignment token, the parser checks position `i+1` first.
+If `ptr[i+1]` is an alignment token (`<`, `>`, `=`, `^`), then `ptr[i]`
+is the fill character. If only `ptr[i]` is an alignment token, there is
+no explicit fill (space is used). This two-character lookahead is the
+only place in the parser where the cursor jumps more than one position
+in a single step.
+
+`no_neg_0` (the `z` flag, added in Python 3.11 by PEP 682) coerces
+`-0.0` to `0.0` before formatting. It is parsed here but applied inside
+`format_float_internal` after the float-to-string conversion.
+
+### `calc_number_widths` (lines 300 to 430)
+
+<CpyLink path="Python/formatter_unicode.c" lines="300-430" />
+
+```c
+static void
+calc_number_widths(NumberFieldWidths *r, Py_UCS4 actual_sign,
+                   Py_ssize_t n_digits, const InternalFormatSpec *format)
+{
+    r->n_lpadding = 0;
+    r->n_prefix = 0;
+    r->n_spadding = 0;
+    r->n_rpadding = 0;
+    r->sign = '\0';
+
+    /* decide sign character */
+    if (actual_sign == '-') {
+        r->sign = '-';
+        r->n_sign = 1;
+    } else if (format->sign == '+') {
+        r->sign = '+';
+        r->n_sign = 1;
+    } else if (format->sign == ' ') {
+        r->sign = ' ';
+        r->n_sign = 1;
+    } else {
+        r->n_sign = 0;
+    }
+
+    /* prefix: 0b, 0o, 0x, 0X */
+    r->n_prefix = format->n_prefix;
+
+    /* grouping: expand digit count to account for separators */
+    r->n_grouped_digits = n_digits +
+        calc_number_of_groups(n_digits, format->thousands_sep,
+                              format->type);
+
+    /* compute padding */
+    Py_ssize_t n_total = r->n_sign + r->n_prefix +
+                         r->n_grouped_digits + r->n_decimal + r->n_remainder;
+    if (n_total >= format->width) {
+        /* no padding needed */
+    } else if (format->align == '=') {
+        /* zero-fill goes between sign/prefix and digits */
+        r->n_spadding = format->width - n_total;
+    } else if (format->align == '<' || format->align == '^') {
+        r->n_rpadding = format->width - n_total;
+    } else {
+        r->n_lpadding = format->width - n_total;
+    }
+}
+```
+
+`calc_number_widths` computes the width of every component of the
+formatted number without writing any characters. The result is a
+`NumberFieldWidths` struct whose fields map to positions in the output:
+left-padding, sign, prefix, zero-fill (for `=` alignment), grouped digits,
+decimal point, fractional part, exponent, right-padding. `fill_number`
+reads these widths to know how many of each character to copy.
+
+The `=` alignment type is specific to numbers: it places zero-fill
+between the sign/prefix and the digits, producing `+000042` rather
+than `0000+42` or `+42   `. This is the only case where `n_spadding`
+is non-zero.
+
+### `fill_number` (lines 430 to 500)
+
+<CpyLink path="Python/formatter_unicode.c" lines="430-500" />
+
+```c
+static void
+fill_number(PyObject *writer,
+            const NumberFieldWidths *spec,
+            PyObject *digits,        /* integer or float digit string */
+            Py_ssize_t d_start,
+            Py_ssize_t d_end,
+            PyObject *prefix,
+            Py_UCS4 fill_char,
+            Py_UCS4 decimal_point_char,
+            int zeropad)
+{
+    /* left-padding */
+    if (spec->n_lpadding)
+        _PyUnicodeWriter_WriteFill(writer, fill_char, spec->n_lpadding);
+
+    /* sign */
+    if (spec->n_sign == 1)
+        _PyUnicodeWriter_WriteChar(writer, spec->sign);
+
+    /* '0b' / '0o' / '0x' prefix */
+    if (spec->n_prefix)
+        _PyUnicodeWriter_WriteStr(writer, prefix);
+
+    /* zero-fill for '=' alignment */
+    if (spec->n_spadding)
+        _PyUnicodeWriter_WriteFill(writer, '0', spec->n_spadding);
+
+    /* the digit run, interleaved with grouping separators */
+    if (spec->n_grouped_digits != (d_end - d_start))
+        _PyUnicode_InsertThousandsGrouping(writer, NULL,
+            digits, d_start, d_end, spec->n_grouped_digits,
+            spec->thousands_sep, ...);
+    else
+        _PyUnicodeWriter_WriteSubstring(writer, digits, d_start, d_end);
+
+    /* decimal point */
+    if (spec->n_decimal)
+        _PyUnicodeWriter_WriteChar(writer, decimal_point_char);
+
+    /* fraction */
+    if (spec->n_remainder)
+        _PyUnicodeWriter_WriteSubstring(writer, digits,
+                                        d_start + spec->n_decimal, d_end);
+
+    /* right-padding */
+    if (spec->n_rpadding)
+        _PyUnicodeWriter_WriteFill(writer, fill_char, spec->n_rpadding);
+}
+```
+
+`fill_number` is a pure write function: it appends characters to a
+`_PyUnicodeWriter` in the order dictated by `NumberFieldWidths`. The
+grouping path calls `_PyUnicode_InsertThousandsGrouping`, which walks
+the digit string from right to left and inserts the `_` or `,` separator
+every three digits (or four in some locales when `format->type == 'n'`).
+The decimal-point character is locale-dependent for `n`-type formatting
+and always `'.'` otherwise.
+
+The `_PyUnicodeWriter` is a resizable output buffer that avoids repeated
+string concatenation. `fill_number` never allocates; it only calls
+`_PyUnicodeWriter_WriteFill` and `_PyUnicodeWriter_WriteSubstring`, both
+of which advance a cursor into a pre-allocated buffer that
+`format_long_internal` sized with `calc_number_widths`.
+
+### `format_float_internal` (lines 700 to 1000)
+
+<CpyLink path="Python/formatter_unicode.c" lines="700-1000" />
+
+```c
+static int
+format_float_internal(PyObject *value,
+                      const InternalFormatSpec *format,
+                      _PyUnicodeWriter *writer)
+{
+    char *buf = NULL;
+    PyObject *digits = NULL;
+    int result = -1;
+    ...
+    /* 'z': coerce -0.0 to 0.0 */
+    if (format->no_neg_0) {
+        double fval = PyFloat_AS_DOUBLE(value);
+        if (fval == 0.0 && copysign(1.0, fval) == -1.0)
+            value = PyFloat_FromDouble(0.0);
+    }
+
+    /* convert to digit string via PyOS_double_to_string */
+    if (format->type == 'e' || format->type == 'E' || ...) {
+        buf = PyOS_double_to_string(val, format->type, format->precision,
+                                    Py_DTSF_ADD_DOT_0, &type_flags);
+    } else if (format->type == 'g' || format->type == 'G' || ...) {
+        ...
+    }
+    digits = _PyUnicode_FromASCII(buf, strlen(buf));
+    PyMem_Free(buf);
+    ...
+    /* locate sign, decimal, exponent within digits */
+    ...
+    calc_number_widths(&spec, sign_char, n_digits, format);
+    result = fill_number(writer, &spec, digits, d_start, d_end,
+                         NULL, format->fill_char, locale_info.decimal_point,
+                         0);
+    ...
+}
+```
+
+`format_float_internal` delegates the actual float-to-string conversion
+to `PyOS_double_to_string` (which calls `_Py_dg_dtoa` for the shortest
+representation). It then scans the resulting ASCII string to locate the
+sign character, decimal point, and exponent marker. Those positions are
+passed to `calc_number_widths` and `fill_number` as byte offsets into
+the `digits` string, so `fill_number` can copy sub-ranges without
+rescanning.
+
+The `%` type multiplies the float by 100 and appends a `%` suffix after
+the exponent; the multiplication is done before calling
+`PyOS_double_to_string` so that the conversion sees the scaled value.
+The `n` type uses `locale.localeconv()` to obtain the decimal-point
+character and thousands separator, making locale-aware number formatting
+a thin wrapper around the same pipeline.
+
+## gopy mirror
+
+`format/format.go` ports the entire pipeline in the same order: `parseFormatSpec`
+mirrors `parse_internal_render_format_spec`, `calcNumberWidths` mirrors
+`calc_number_widths`, and `fillNumber` mirrors `fill_number`. The `_PyUnicodeWriter`
+is replaced by a `strings.Builder`, which is pre-sized with the total computed
+by `calcNumberWidths`. `FormatFloat` calls Go's `strconv.FormatFloat` for the
+type characters `e`, `E`, `f`, `g`, and `G` and then post-processes the ASCII
+string the same way as CPython to locate the sign and decimal point before
+calling `fillNumber`.
+
+Grouping separator insertion is ported from `_PyUnicode_InsertThousandsGrouping`
+in `Objects/unicodeobject.c` and lives in `format/grouping.go`. The `n` locale
+type delegates to `golang.org/x/text/language` to replicate CPython's use of
+`localeconv`.

@@ -1,0 +1,212 @@
+---
+title: Objects/fileobject.c
+description: PyFile helpers — PyFile_FromFd, PyObject_AsFileDescriptor (fileno protocol), PyFile_WriteObject, and sys stdio accessors.
+cpython_path: Objects/fileobject.c
+cpython_version: "3.14"
+lines: 450
+status: annotated
+ported_to: objects/file.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Objects/fileobject.c`
+
+<CpyLink path="Objects/fileobject.c" />
+
+File descriptor helpers. `Objects/fileobject.c` is not the implementation of
+Python's `open()` or the `_io` module types. Those live in `Modules/_io/`.
+This file is a smaller set of C-API helpers that sit between the interpreter
+core and the I/O layer: `PyFile_FromFd` wraps a raw file descriptor in a
+Python `io.open` object, `PyObject_AsFileDescriptor` extracts an `int` fd
+from any object that implements the `fileno()` protocol, `PyFile_WriteObject`
+and `PyFile_WriteString` write to an arbitrary file-like object using the str
+conversion and `write` method, and `PyFile_GetLine` reads a single line.
+
+The last section of the file provides the `sys.stdin`, `sys.stdout`,
+`sys.stderr` accessors (`_PySys_GetObjectId`-style lookups) that the
+interpreter uses when printing tracebacks, running `print()` without an
+explicit `file=`, and handling `input()`.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Objects/fileobject.c" lines="1-100">1-100</Cpy> | `PyFile_FromFd` | Calls `io.open(fd, mode, ...)` and returns the resulting file object; used by `sys.stdin/stdout/stderr` bootstrapping. | `objects/file.go:NewFile` |
+| <Cpy path="Objects/fileobject.c" lines="100-250">100-250</Cpy> | `PyObject_AsFileDescriptor` | Extracts an `int` file descriptor from an object; tries `ob_as_number->nb_index` first, then falls back to calling `.fileno()`. | `objects/file.go:AsFileDescriptor` |
+| <Cpy path="Objects/fileobject.c" lines="250-400">250-400</Cpy> | `PyFile_WriteObject`, `PyFile_WriteString` | Converts an object to `str` (or `repr` if `flags & Py_PRINT_RAW` is clear) then calls `.write()` on the target file. | `objects/file.go:FileWriteObject`, `FileWriteString` |
+| <Cpy path="Objects/fileobject.c" lines="400-450">400-450</Cpy> | `PyFile_GetLine`, `sys_stdin`, `sys_stdout`, `sys_stderr` helper lookups | `GetLine` reads one line from a file-like via `.readline()`; the stdio helpers fetch `sys.stdin/stdout/stderr` from the thread-state's interp. | `module/sys/module.go:Stdin`, `Stdout`, `Stderr` |
+
+## Reading
+
+### `fileno()` protocol (lines 100 to 250)
+
+<CpyLink path="Objects/fileobject.c" lines="100-250" />
+
+`PyObject_AsFileDescriptor` implements the duck-typed file-descriptor
+protocol: given any Python object, produce an `int` fd or raise `TypeError`.
+The steps are:
+
+1. If the object is already a Python `int`, return it directly.
+2. Otherwise, look up the `.fileno()` method and call it.
+3. If the result of `.fileno()` is not an `int`, raise `TypeError`.
+4. Validate that the fd is non-negative.
+
+```c
+int
+PyObject_AsFileDescriptor(PyObject *o)
+{
+    int fd;
+    PyObject *meth;
+
+    if (PyLong_Check(o)) {
+        fd = _PyLong_AsInt(o);
+    }
+    else if ((meth = PyObject_GetAttr(o, &_Py_ID(fileno))) != NULL) {
+        PyObject *fno = PyObject_CallNoArgs(meth);
+        Py_DECREF(meth);
+        if (fno == NULL)
+            return -1;
+        if (!PyLong_Check(fno)) {
+            PyErr_SetString(PyExc_TypeError,
+                "fileno() returned a non-integer");
+            Py_DECREF(fno);
+            return -1;
+        }
+        fd = _PyLong_AsInt(fno);
+        Py_DECREF(fno);
+    }
+    else {
+        PyErr_SetString(PyExc_TypeError,
+            "argument must be an int, or have a fileno() method.");
+        return -1;
+    }
+
+    if (fd < 0) {
+        PyErr_Format(PyExc_ValueError,
+            "file descriptor cannot be a negative integer (%d)", fd);
+        return -1;
+    }
+    return fd;
+}
+```
+
+The `fileno()` protocol is the standard way CPython bridges Python file
+objects to OS-level file descriptors. It is used by `os.dup`, `os.fstat`,
+`select.select`, and many other system-call wrappers that accept either an
+integer or a file-like object as their first argument.
+
+### `PyFile_WriteObject` encoding (lines 250 to 400)
+
+<CpyLink path="Objects/fileobject.c" lines="250-400" />
+
+`PyFile_WriteObject` is the workhorse behind `print()` and traceback output.
+It converts the object to a string, then calls the file's `.write()` method.
+The `flags` argument controls whether `str()` or `repr()` is used for the
+conversion:
+
+```c
+int
+PyFile_WriteObject(PyObject *v, PyObject *f, int flags)
+{
+    if (f == NULL || f == Py_None) {
+        /* Discard the output silently; matches CPython print behavior
+           when sys.stdout is None (frozen applications). */
+        return 0;
+    }
+
+    PyObject *writer = PyObject_GetAttr(f, &_Py_ID(write));
+    if (writer == NULL)
+        return -1;
+
+    PyObject *value;
+    if (flags & Py_PRINT_RAW) {
+        value = PyObject_Str(v);
+    }
+    else {
+        value = PyObject_Repr(v);
+    }
+    if (value == NULL) {
+        Py_DECREF(writer);
+        return -1;
+    }
+
+    PyObject *result = PyObject_CallOneArg(writer, value);
+    Py_DECREF(value);
+    Py_DECREF(writer);
+    if (result == NULL)
+        return -1;
+    Py_DECREF(result);
+    return 0;
+}
+```
+
+The `Py_PRINT_RAW` flag is set by `print()` for its normal operands so that
+`print(42)` outputs `42` rather than `repr(42)`. The flag is cleared when
+writing exception tracebacks so that unprintable objects still produce
+diagnostic output via their `repr`.
+
+`PyFile_WriteString` is a thin wrapper around `PyFile_WriteObject` that
+accepts a C `const char *` string, converts it to a Python `str`, and
+delegates:
+
+```c
+int
+PyFile_WriteString(const char *s, PyObject *f)
+{
+    PyObject *str = PyUnicode_FromString(s);
+    if (str == NULL) return -1;
+    int err = PyFile_WriteObject(str, f, Py_PRINT_RAW);
+    Py_DECREF(str);
+    return err;
+}
+```
+
+### `sys.stdin/stdout/stderr` accessors (lines 400 to 450)
+
+<CpyLink path="Objects/fileobject.c" lines="400-450" />
+
+The stdio accessors look up `sys.stdin`, `sys.stdout`, and `sys.stderr` from
+the interpreter state. This is a two-step process: first look in the current
+interpreter's `sys` module for the name, then fall back to the original
+`__stdin__` / `__stdout__` / `__stderr__` values if the runtime replacement
+is `None`. The fallback exists so that C-level traceback printing remains
+functional even when user code replaces the standard streams:
+
+```c
+PyObject *
+_PySys_GetObjectId(PyInterpreterState *interp, _Py_Identifier *key)
+{
+    PyObject *sd = interp->sysdict;
+    if (sd == NULL) return NULL;
+    return _PyDict_GetItemIdWithError(sd, key);
+}
+```
+
+The interpreter calls these accessors in `Python/traceback.c`,
+`Python/errors.c`, and the `print` builtin in `Python/bltinmodule.c`. Any of
+them can return `NULL` when running in a subinterpreter that has not yet
+initialized its `sys` module, which is why each call site checks for `NULL`
+before using the result.
+
+## gopy mirror
+
+`objects/file.go` for `File`, `NewFile`, `FileType`, `fileGetattr`,
+`fileSetattr`, `fileRepr`, `fileIter`, `fileIterNext`, `fileMethod`, and
+the `Read`, `Write`, `Readline`, `Close`, `Flush` methods. The `fileno()`
+protocol helper (`AsFileDescriptor`) and `PyFile_WriteObject` analog
+(`FileWriteObject`) are also in `objects/file.go`.
+
+The `sys.stdin/stdout/stderr` accessors are exposed through
+`module/sys/module.go` as `Stdin()`, `Stdout()`, and `Stderr()` functions
+that look up the module attributes by name. This matches the CPython accessor
+pattern without requiring a direct pointer into interpreter state.
+
+## CPython 3.14 changes
+
+`Objects/fileobject.c` has been stable since Python 2. `PyFile_FromFd` was
+added in 3.0 as part of the `io` module overhaul; before that, `PyFile_FromString`
+created a C `FILE *`-based file object. `PyObject_AsFileDescriptor` dates to
+Python 2 and has been unchanged since. `PyFile_WriteObject` grew the `Py_PRINT_RAW`
+flag in 2.6 when `print` became a function. No 3.14-specific changes affect
+this file.

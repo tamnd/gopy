@@ -1,0 +1,95 @@
+---
+title: Lib/gettext.py
+description: GNU gettext message catalog support, providing .mo file parsing, plural-form evaluation, and builtins installation for Python i18n.
+cpython_path: Lib/gettext.py
+cpython_version: "3.14"
+lines: 660
+status: annotated
+ported_to: ""
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Lib/gettext.py`
+
+<CpyLink path="Lib/gettext.py" />
+
+`gettext.py` implements the Python side of GNU gettext internationalization. It reads binary `.mo` catalog files produced by `msgfmt`, exposes translated strings through `gettext()` and `ngettext()`, and can install a `_()` shorthand into the builtins namespace so that marked strings are translated transparently across an application. The module covers both the class-based API (`NullTranslations`, `GNUTranslations`) and the legacy function-based API (`bindtextdomain`, `textdomain`, `gettext`, `ngettext`).
+
+The `.mo` file format is a flat binary structure: a 4-byte magic number (little-endian `0x950412de` or big-endian `0xde120495`) selects the byte order, followed by a revision, a count of message strings, and two offset tables pointing at the original and translated string data. `GNUTranslations._parse()` reads this structure directly using `struct.unpack`, building two dicts keyed by the original string: one for singular translations and one keyed by `(singular, plural, n)` tuples for plurals.
+
+Plural-form selection is handled by compiling the `Plural-Forms` header value into a Python expression. The expression maps an integer `n` to an index into the plural array. `GNUTranslations` extracts the formula string from the catalog metadata, validates it against a safe-expression parser, and stores the compiled code object for fast repeated evaluation at lookup time.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| 1-60 | imports, `__all__`, `_default_localedir` | Setup; locale dir constant; re-exports | - |
+| 61-130 | `NullTranslations` | Base class: `gettext`, `ngettext`, `pgettext`, `install`, `add_fallback` | - |
+| 131-290 | `GNUTranslations._parse()` | Binary .mo parsing: magic, revision, string tables, metadata | - |
+| 291-380 | `GNUTranslations` lookup methods | `gettext`, `ngettext`, `pgettext`, `npgettext` with fallback chain | - |
+| 381-440 | Plural-form compiler | `c2py()`: translate C-style ternary plural expression to Python | - |
+| 441-530 | `translation()` factory | Locale search path, file discovery, caching, class selection | - |
+| 531-580 | `install()` | Install `_()` (and optionally `ngettext`) into `builtins` | - |
+| 581-660 | Legacy function API | Module-level `gettext`, `ngettext`, `bindtextdomain`, `textdomain` | - |
+
+## Reading
+
+### NullTranslations base class (lines 61 to 130)
+
+<CpyLink path="Lib/gettext.py" lines="61-130" />
+
+`NullTranslations` is the identity translation: every `gettext(message)` call returns the message unchanged, and `ngettext(singular, plural, n)` returns `singular` if `n == 1` else `plural`. It exists so that code written against `GNUTranslations` works even when no catalog is available.
+
+The `add_fallback(fallback)` method chains a secondary `NullTranslations` (or subclass) that is tried when the primary catalog does not contain a translation. `install(names)` writes `_` and optionally other names into `builtins.__dict__`, replacing any previous installation. The `names` parameter accepts a list of attribute names to install, allowing callers to also expose `ngettext` as a builtin.
+
+### .mo file parsing (lines 131 to 290)
+
+<CpyLink path="Lib/gettext.py" lines="131-290" />
+
+`GNUTranslations._parse(fp)` is the heart of the module. It reads the full file into a `bytes` object, then uses the magic number to set `unpack` to either `<I` (little-endian) or `>I` (big-endian). The revision word is checked: only revision 0 and revision 1 are accepted; anything else raises `GNUTranslations.ParseError`.
+
+After reading the string count and the two offset arrays, the method iterates over all message pairs. For each pair it calls `unpack` twice to get (length, offset) for the original and translated strings. A message with `\x00` in the original is a plural-form entry; otherwise it is a singular entry. The translated side of plural entries is split on `\x00` into the plural array.
+
+```python
+# Simplified excerpt from _parse
+magic = unpack('<I', buf[:4])[0]
+if magic == LE_MAGIC:
+    unpack = lambda fmt, buf: struct.unpack('<' + fmt, buf)
+elif magic == BE_MAGIC:
+    unpack = lambda fmt, buf: struct.unpack('>' + fmt, buf)
+else:
+    raise GNUTranslations.ParseError(filename)
+```
+
+The metadata entry (original string `""`) is decoded and split into a dict. The `Plural-Forms` value is extracted here and passed to `c2py()` to produce the plural-index function.
+
+### Plural-form compiler (lines 381 to 440)
+
+<CpyLink path="Lib/gettext.py" lines="381-440" />
+
+`c2py(plural)` converts a C-style plural expression such as `"n != 1"` or `"n==1 ? 0 : n==2 ? 1 : 2"` into a callable Python function. The conversion is not a full C parser; it replaces `&&` with `and`, `||` with `or`, `!` with `not`, and rewrites C ternary `a ? b : c` as Python `b if a else c` using a recursive regex substitution.
+
+The resulting expression string is compiled with `compile()` and wrapped in a lambda `lambda n: int(...)`. A safety check scans the compiled code object's `co_names` to ensure no attribute lookups are present, preventing injection through a malicious catalog file.
+
+### translation() factory and locale search (lines 441 to 530)
+
+<CpyLink path="Lib/gettext.py" lines="441-530" />
+
+`translation(domain, localedir, languages, codeset, fallback, class_)` searches for a `.mo` file by walking a prioritized language list. For each language tag it normalizes the locale name (stripping codeset and modifier suffixes in decreasing specificity order), then probes `localedir/lang/LC_MESSAGES/domain.mo`. The first file found is opened and passed to the chosen class (defaulting to `GNUTranslations`).
+
+If no file is found and `fallback` is true, a `NullTranslations` is returned. If `fallback` is false (the default), `FileNotFoundError` is raised, which makes misconfigured deployments fail loudly rather than silently serving untranslated strings.
+
+Multiple calls with the same arguments return the same object because `translation()` maintains a module-level `_translations` cache keyed by `(class_, localedir, codeset, domain, languages_tuple)`.
+
+### install() and the _() convention (lines 531 to 580)
+
+<CpyLink path="Lib/gettext.py" lines="531-580" />
+
+`install(domain, localedir, codeset, names)` is a one-liner convenience that calls `translation()` and then calls `install()` on the result. The net effect is that `builtins._` is set to the `gettext` method of the catalog object, so every module in the process can write `_("Hello")` without importing anything.
+
+The `names` parameter extends the installation to other builtins. Passing `names=["ngettext"]` is the standard way to also make plural-form lookup available as a builtin, following the pattern recommended in the GNU gettext manual for Python applications.
+
+## gopy mirror
+
+Not yet ported.

@@ -1,0 +1,258 @@
+---
+title: Lib/xml/etree/ElementTree.py
+description: The ElementTree XML API: Element tree construction, XPath subset, XMLParser (expat), iterparse streaming, and pretty-print indent.
+cpython_path: Lib/xml/etree/ElementTree.py
+cpython_version: "3.14"
+lines: 1700
+status: annotated
+ported_to: (stdlib pending)
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Lib/xml/etree/ElementTree.py`
+
+<CpyLink path="Lib/xml/etree/ElementTree.py" />
+
+`xml.etree.ElementTree` provides a lightweight, Pythonic API for reading and
+writing XML. The module is split between a pure-Python implementation in this
+file and a C accelerator in `Modules/_elementtree.c`. When the C extension is
+available (the normal case), `Element`, `SubElement`, `TreeBuilder`, and
+`XMLParser` are replaced by their C counterparts at the bottom of the module;
+the Python implementations are documentation references and fallbacks.
+
+The data model centers on `Element`: a mutable node with a `tag` (string),
+`attrib` (dict), `text` and `tail` (inter-element text), and an ordered list
+of child `Element` objects. `ElementTree` is a thin wrapper that adds
+file-level parse/write and root-relative `find`/`findall`. The XPath subset
+handles a small but useful grammar: `tag`, `*`, `.`, `..`, `//`, `[@attr]`,
+`[tag]`, `[.="text"]`, and `[n]` (positional index).
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Lib/xml/etree/ElementTree.py" lines="1-100">1-100</Cpy> | Module prologue, `VERSION`, `XML_NAMESPACE` constants | Version string, the standard XML namespace URI, and imports. The C extension override block lives at the bottom of the file. | `(stdlib pending)` |
+| <Cpy path="Lib/xml/etree/ElementTree.py" lines="100-300">100-300</Cpy> | `Element` | Core node class. `__init__` sets `tag`, `attrib`, `text`, `tail`; child list is inherited from list or stored in `self._children`. `find`, `findall`, `findtext`, `iter`, `itertext` delegate to the `ElementPath` module. | `(stdlib pending)` |
+| <Cpy path="Lib/xml/etree/ElementTree.py" lines="300-450">300-450</Cpy> | `SubElement`, `Comment`, `ProcessingInstruction`, `QName` | `SubElement` creates an `Element` and appends it to a parent in one call. `Comment` and `ProcessingInstruction` are factory functions returning `Element` objects with special tag sentinels. `QName` handles Clark-notation namespace prefixing. | `(stdlib pending)` |
+| <Cpy path="Lib/xml/etree/ElementTree.py" lines="450-650">450-650</Cpy> | `ElementTree` | Wraps a root `Element` plus an optional source URL. `parse` calls `XMLParser.feed` in chunks and closes to get the root. `write` serialises the tree using `_serialize_xml` or `_serialize_html`. `find`/`findall`/`findtext`/`iterfind` all prefix the path with `.//` relative to the root. | `(stdlib pending)` |
+| <Cpy path="Lib/xml/etree/ElementTree.py" lines="650-900">650-900</Cpy> | `XMLParser`, `TreeBuilder` | `XMLParser` wraps `expat.ParserCreate`; `feed` passes chunks to `expat`; `close` calls `expat.Parse("", True)` and returns the root. `TreeBuilder` is the default handler: `start` pushes an `Element`, `end` pops it, `data` appends to `text` or `tail`. | `(stdlib pending)` |
+| <Cpy path="Lib/xml/etree/ElementTree.py" lines="900-1150">900-1150</Cpy> | `ElementPath` XPath subset: `_tokenize`, `_compile_path`, `_select_*` generators | The XPath engine is implemented as a chain of generator-based selectors. Each step function takes an iterable of elements and yields the matching children. | `(stdlib pending)` |
+| <Cpy path="Lib/xml/etree/ElementTree.py" lines="1150-1400">1150-1400</Cpy> | `iterparse`, `_IterParseIterator` | Streaming SAX-like interface. A background `XMLParser` feeds `expat` in a thread (or inline in the iterator's `__next__`); events (`"start"`, `"end"`, `"start-ns"`, `"end-ns"`) are queued and yielded on demand. | `(stdlib pending)` |
+| <Cpy path="Lib/xml/etree/ElementTree.py" lines="1400-1600">1400-1600</Cpy> | `tostring`, `tostringlist`, `fromstring`, `fromstringlist`, `XML`, `XMLID` | Convenience wrappers. `tostring` serialises to a bytes or str object. `fromstring` parses a string without producing a file. `XMLID` also returns a dict mapping `id` attribute values to elements. | `(stdlib pending)` |
+| <Cpy path="Lib/xml/etree/ElementTree.py" lines="1600-1700">1600-1700</Cpy> | `indent` (3.9+), C extension override block | `indent` does a recursive post-order traversal to insert `\n` + indentation strings as `text` and `tail`. The final block imports `_elementtree` and replaces Python classes with C equivalents. | `(stdlib pending)` |
+
+## Reading
+
+### `XMLParser` expat integration (lines 650 to 900)
+
+<CpyLink path="Lib/xml/etree/ElementTree.py" lines="650-900" />
+
+```python
+class XMLParser:
+    def __init__(self, *, encoding=None, html=0, target=None, encoding_=None):
+        if encoding_ is not None:
+            ...
+            encoding = encoding_
+        self.parser = expat.ParserCreate(encoding, "}")
+        if target is None:
+            target = TreeBuilder()
+        self.target = target
+        self._error = expat.error
+        self._names = {}
+        self.parser.DefaultHandlerExpand = self._default
+        if target.start is not None:
+            self.parser.StartElementHandler = self._start
+        if target.end is not None:
+            self.parser.EndElementHandler = self._end
+        if target.start_ns is not None:
+            self.parser.StartNamespaceDeclHandler = self._start_ns
+        if target.end_ns is not None:
+            self.parser.EndNamespaceDeclHandler = self._end_ns
+        if target.data is not None:
+            self.parser.CharacterDataHandler = target.data
+        if target.comment is not None:
+            self.parser.CommentHandler = self._comment
+        if target.pi is not None:
+            self.parser.ProcessingInstructionHandler = self._pi
+        ...
+
+    def feed(self, data):
+        try:
+            self.parser.Parse(data, False)
+        except self._error as v:
+            self._raiseerror(v)
+
+    def close(self):
+        try:
+            self.parser.Parse(b"", True)
+        except self._error as v:
+            self._raiseerror(v)
+        try:
+            return self.target.close()
+        finally:
+            del self.parser, self.target
+```
+
+`XMLParser` creates an `expat` parser with `"}"` as the namespace separator,
+which causes expat to deliver qualified names as `{namespace_uri}local_name`
+rather than prefix-separated strings. Each handler is installed only when
+the target object has the corresponding attribute, allowing lightweight
+targets that ignore events they do not need.
+
+`_start` is not `target.start` directly; it translates the raw expat
+`(tag, attrs)` callback into the Clark-notation tag format and converts the
+flat `attrs` dict into an ordered dict before calling `target.start`. The
+`_names` cache avoids repeated string construction for repeated element names.
+
+### XPath subset evaluation (lines 900 to 1150)
+
+<CpyLink path="Lib/xml/etree/ElementTree.py" lines="900-1150" />
+
+```python
+def _compile_path(path, namespaces):
+    ...
+    ops = []
+    for token in _tokenize(path):
+        if token == '*':
+            ops.append(_select_all)
+        elif token == '.':
+            ops.append(_select_current)
+        elif token == '..':
+            ...  # not supported in all cases
+        elif token[:3] == '[.=':
+            ops.append(_select_text(token[3:-1]))
+        elif token[0] == '[' and token[-1] == ']':
+            key = token[1:-1]
+            if key.isdigit():
+                ops.append(_select_position(int(key)))
+            elif key[0] == '@':
+                ops.append(_select_attrib(key[1:]))
+            else:
+                ops.append(_select_tag(key))
+        elif token[:2] == '//':
+            ops.append(_select_descendants)
+            if token[2:]:
+                ops.append(_select_tag(token[2:]))
+        else:
+            ops.append(_select_tag(token))
+    return ops
+
+def _select_descendants(context, result, next_select, namespaces):
+    for elem in result:
+        yield elem
+        yield from elem.iter()
+
+def iterfind(elem, path, namespaces=None):
+    path, ns = _prepare_path(path, namespaces)
+    result = [elem]
+    for select in _compile_path(path, ns):
+        result = select(result)
+    return result
+```
+
+Each compiled path step is a generator function that takes the current
+element sequence and yields matching elements. `iterfind` chains all steps
+by passing the output of each selector as the input to the next, building
+a lazy pipeline. `_select_descendants` uses `Element.iter()` to produce a
+depth-first traversal including the root element itself, matching the `//`
+semantics from XPath.
+
+The supported grammar covers the vast majority of practical XPath use cases:
+tag name, `*` (any tag), `.` (self), `//` (any descendant), `[@attr]`
+(attribute presence), `[@attr="value"]` (attribute equality), `[tag]`
+(child existence), `[.="text"]` (text equality), and `[n]` (1-based position).
+
+### `iterparse` event streaming (lines 1150 to 1400)
+
+<CpyLink path="Lib/xml/etree/ElementTree.py" lines="1150-1400" />
+
+```python
+class _IterParseIterator:
+    def __init__(self, source, events, parser, close_source=False):
+        self._source = source
+        self._parser = parser
+        self._close_source = close_source
+        self._events_queue = collections.deque()
+        self._root = None
+        self._index = 0
+        self._error = None
+        # patch the builder callbacks
+        parser.target.start = self._start
+        parser.target.end = self._end
+        ...
+
+    def __next__(self):
+        while True:
+            if self._events_queue:
+                return self._events_queue.popleft()
+            if self._error:
+                e = self._error
+                self._error = None
+                raise e
+            if self._parser is None:
+                self.root = self._root
+                raise StopIteration
+            while not self._events_queue:
+                data = self._source.read(65536)
+                if data:
+                    self._parser.feed(data)
+                else:
+                    self._root = self._parser.close()
+                    self._parser = None
+                    break
+```
+
+`_IterParseIterator` patches the `TreeBuilder`'s `start` and `end` callbacks
+so that each element event appends `(event_name, element)` to `_events_queue`
+before returning. `__next__` drains the queue; when it is empty it reads
+another chunk from the source and feeds it to the parser. This design is
+single-threaded and pull-based: parsing only advances when the caller
+requests the next event.
+
+The `"end"` event is fired after an element is fully populated (text, attrib,
+and all children are set), so it is safe to read and even detach the element
+from its parent at that point. The `"start"` event fires before children are
+parsed, so the element has `tag` and `attrib` but no children yet.
+
+### `indent` pretty-print (lines 1600 to 1700)
+
+<CpyLink path="Lib/xml/etree/ElementTree.py" lines="1600-1700" />
+
+```python
+def indent(tree, space="  ", level=0):
+    i = "\n" + level * space
+    j = "\n" + (level - 1) * space
+    if len(tree):
+        if not tree.text or not tree.text.strip():
+            tree.text = i + space
+        if not tree.tail or not tree.tail.strip():
+            tree.tail = i
+        for subtree in tree:
+            indent(subtree, space, level + 1)
+        if not subtree.tail or not subtree.tail.strip():
+            subtree.tail = j
+    else:
+        if level and (not tree.tail or not tree.tail.strip()):
+            tree.tail = j
+    if not level:
+        tree.tail = "\n"
+```
+
+`indent` walks the tree recursively and inserts whitespace-only `text` and
+`tail` strings to produce a human-readable layout. `text` controls the space
+between a parent's opening tag and its first child's opening tag; `tail`
+controls the space between a child's closing tag and the next sibling's
+opening tag (or the parent's closing tag). The function only modifies `text`
+and `tail` that are `None` or purely whitespace, so hand-authored mixed
+content (element text with real words) is left untouched.
+
+## gopy mirror
+
+The Python classes are replaced at import time by the C extension
+`_elementtree`. A gopy port must implement both the Python API (for
+correctness) and the C extension interface (for the expat callbacks). The
+primary dependency is `pyexpat` (`Modules/pyexpat.c`), which wraps the
+`expat` C library. The XPath subset (`ElementPath`) is pure Python and has
+no external dependencies. `iterparse` requires only file-like object
+support and the `XMLParser`/`TreeBuilder` pair.

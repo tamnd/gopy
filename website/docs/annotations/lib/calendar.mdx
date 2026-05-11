@@ -1,0 +1,119 @@
+---
+title: Lib/calendar.py
+description: Generates text and HTML calendars for months and years, with locale-aware variants and utility functions for date arithmetic.
+cpython_path: Lib/calendar.py
+cpython_version: "3.14"
+lines: 680
+status: annotated
+ported_to: ""
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Lib/calendar.py`
+
+<CpyLink path="Lib/calendar.py" />
+
+`calendar` provides a class hierarchy for rendering months and years as formatted text or HTML. The root `Calendar` class handles the date arithmetic: iterating over the weeks of a month, deciding which day a week starts on, and padding weeks so every row has exactly seven entries. Concrete subclasses (`TextCalendar`, `HTMLCalendar`) add rendering logic without reimplementing the iteration.
+
+The module also ships a family of locale-aware subclasses (`LocaleTextCalendar`, `LocaleHTMLCalendar`) that temporarily switch the process locale to produce month and weekday names in a target language. Module-level convenience functions (`month`, `calendar`, `prmonth`, `prcal`) delegate to a shared `TextCalendar` instance so callers do not have to construct objects for simple use cases.
+
+A small set of standalone utility functions covers leap-year logic (`isleap`, `leapdays`), week-of-year calculation, and `monthrange` / `monthcalendar` which are the building blocks used throughout the class hierarchy. The module also exposes a command-line interface for printing calendars directly from a shell.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| 1-50 | module constants, `setfirstweekday` | Weekday constants, locale helpers | - |
+| 51-130 | `isleap`, `leapdays`, `weekday`, `weekheader`, `monthrange` | Date arithmetic utilities | - |
+| 131-210 | `Calendar` base class | `itermonthdates`, `monthdayscalendar`, week iteration | - |
+| 211-320 | `TextCalendar` | Plain-text month and year formatting | - |
+| 321-430 | `HTMLCalendar` | HTML `<table>` month and year formatting | - |
+| 431-510 | `LocaleTextCalendar`, `LocaleHTMLCalendar` | Locale-switched name variants | - |
+| 511-580 | module-level convenience functions | `month`, `calendar`, `prmonth`, `prcal` | - |
+| 581-640 | `monthcalendar`, `timegm` | Additional standalone utilities | - |
+| 641-680 | `__main__` block | CLI argument parsing and output | - |
+
+## Reading
+
+### Utility functions: leap year and month range (lines 51 to 130)
+
+<CpyLink path="Lib/calendar.py" lines="51-130" />
+
+`isleap(year)` applies the Gregorian rule: divisible by 4, except centuries unless also divisible by 400. `leapdays(y1, y2)` counts leap years in the half-open interval `[y1, y2)` using integer division rather than a loop. `monthrange(year, month)` returns a `(weekday_of_first, days_in_month)` pair and is the single place where the calendar grid is anchored to real dates.
+
+```python
+def isleap(year):
+    return year % 4 == 0 and (year % 100 != 0 or year % 400 == 0)
+
+def monthrange(year, month):
+    day1 = weekday(year, month, 1)
+    ndays = mdays[month] + (month == February and isleap(year))
+    return day1, ndays
+```
+
+### `Calendar` base class and `itermonthdates` (lines 131 to 210)
+
+<CpyLink path="Lib/calendar.py" lines="131-210" />
+
+`Calendar.__init__` accepts a `firstweekday` argument (0 = Monday, 6 = Sunday). `itermonthdates(year, month)` yields `datetime.date` objects covering the full display weeks of a month, padding before the first and after the last day so every yielded sequence length is a multiple of seven. `itermonthdays` and `itermonthdays2` are lighter variants that yield integers (day numbers, 0 for padding) or `(day, weekday)` pairs without constructing `date` objects.
+
+```python
+def itermonthdates(self, year, month):
+    for d in self.itermonthdays2(year, month):
+        ...
+        yield datetime.date(year, month, d[0])
+```
+
+### `TextCalendar` formatting (lines 211 to 320)
+
+<CpyLink path="Lib/calendar.py" lines="211-320" />
+
+`TextCalendar.formatmonth(theyear, themonth, w=0, l=0)` builds a multi-line string. It calls `formatweek` for each row returned by `monthdayscalendar`, prepends a two-line header produced by `formatmonthname` and `formatweekheader`, and joins everything with `l` newlines between rows. Column width `w` controls zero-padding of day numbers. `formatyear` tiles twelve months in three columns separated by `c` spaces.
+
+```python
+def formatmonth(self, theyear, themonth, w=0, l=0):
+    v = []
+    ...
+    v.append(self.formatmonthname(theyear, themonth, 7*(w+1)-1))
+    v.append(self.formatweekheader(w).rstrip())
+    for week in self.monthdays2calendar(theyear, themonth):
+        v.append(self.formatweek(week, w).rstrip())
+    return '\n'.join(v)
+```
+
+### `HTMLCalendar` (lines 321 to 430)
+
+<CpyLink path="Lib/calendar.py" lines="321-430" />
+
+`HTMLCalendar` overrides the format methods to emit `<table>`, `<tr>`, and `<td>` tags. Each `<td>` carries a CSS class: the weekday name for ordinary days (`mon`, `tue`, ...) and `noday` for padding cells. `formatyear` wraps the twelve month tables in a single outer table with class `year`. The CSS class names are defined as a class-level tuple so subclasses can override them without reimplementing the rendering methods.
+
+```python
+cssclasses = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
+
+def formatday(self, day, weekday):
+    if day == 0:
+        return '<td class="noday">&nbsp;</td>'
+    else:
+        return '<td class="%s">%d</td>' % (self.cssclasses[weekday], day)
+```
+
+### Locale-aware subclasses (lines 431 to 510)
+
+<CpyLink path="Lib/calendar.py" lines="431-510" />
+
+`LocaleTextCalendar` and `LocaleHTMLCalendar` accept a `locale` argument. They override `formatweekday` and `formatmonthname` to call `locale.setlocale` around `datetime` formatting calls that produce locale-dependent names. A `contextmanager`-based helper restores the original locale even if formatting raises an exception, preventing locale state from leaking across calls.
+
+```python
+class LocaleTextCalendar(TextCalendar):
+    def __init__(self, firstweekday=0, locale=None):
+        super().__init__(firstweekday)
+        ...
+    def formatweekday(self, day, width):
+        with TimeEncoding(self.locale) as encoding:
+            ...
+```
+
+## gopy mirror
+
+Not yet ported.

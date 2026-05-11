@@ -101,10 +101,6 @@ func excRepr(o objects.Object) (string, error) {
 	return name + s, nil
 }
 
-func init() {
-	installBaseExceptionAttrs()
-}
-
 // excCall is the tp_call slot for every built-in exception type. It
 // mirrors BaseException_new + BaseException_init: store positional args
 // on .args, ignore keyword arguments (CPython's BaseException_init also

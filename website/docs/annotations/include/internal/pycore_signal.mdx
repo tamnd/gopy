@@ -1,0 +1,106 @@
+---
+title: Include/internal/pycore_signal.h
+description: Internal signal-handling state for CPython, defining Py_NSIG, the per-signal handler table, the wakeup-fd descriptor, and the _signals_runtime_state struct embedded in _PyRuntime.
+cpython_path: Include/internal/pycore_signal.h
+cpython_version: "3.14"
+lines: 108
+status: annotated
+ported_to: ""
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Include/internal/pycore_signal.h`
+
+<CpyLink path="Include/internal/pycore_signal.h" />
+
+`pycore_signal.h` is the single header that pulls together all of CPython's
+signal-handling state. It defines `Py_NSIG` (the largest valid signal number
+plus one) in a platform-portable way, declares `_signals_runtime_state` (the
+struct that lives inside `_PyRuntime.signals`), and exports the two small
+functions that the `_posixsubprocess` and `_multiprocessing` extensions need.
+Everything else in the signal subsystem (the C-level signal handler, the
+`signal` module, `_Py_HandlePending`) is implemented in `Modules/signalmodule.c`
+and cross-references this header for the shared state.
+
+The central design decision is that signal delivery is split in two: the OS
+signal handler does the minimum safe work (setting `handlers[signum].tripped`
+and writing one byte to `wakeup.fd`), while the Python-level response happens
+later in `_Py_HandlePending` which is called at safe points in the eval loop.
+The `is_tripped` flag provides a fast path so that `sigcheck()` can skip the
+full scan when no signal has fired. On Windows an additional event handle
+(`sigint_event`) allows `time.sleep` and similar blocking calls to be
+interrupted by CTRL+C without polling.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| 20-35 | `Py_NSIG` | Platform-portable upper bound on signal numbers; covers FreeBSD `_SIG_MAXSIG`, POSIX `NSIG`, QNX `_SIGMAX`, and a fallback of 64 | `vm/eval_simple.go` |
+| 37 | `INVALID_FD` | Sentinel value `(-1)` for an unset wakeup file descriptor | internal |
+| 39-80 | `_signals_runtime_state` | Main runtime state: `handlers[]` array, `wakeup` sub-struct, `is_tripped`, `default_handler`, `ignore_handler` | `vm/eval_simple.go` |
+| 43-44 | `handlers[Py_NSIG]` | Per-signal `{tripped, func}` pairs accessed with atomic ops | `vm/eval_simple.go` |
+| 46-61 | `wakeup` | Volatile sub-struct holding the wakeup fd (type varies by platform) and `warn_on_full_buffer` | `vm/eval_simple.go` |
+| 97 | `_PyOS_IsMainThread` | Exported predicate used by `_multiprocessing` to decide whether signals should be processed | internal |
+| 18 | `_Py_RestoreSignals` | Resets interpreter-installed `SIG_IGN` handlers back to `SIG_DFL` before exec; exported for `_posixsubprocess` | internal |
+
+## Reading
+
+### `Py_NSIG` portability ladder
+
+Lines 20-35 resolve `Py_NSIG` with a chain of `#ifdef` checks. The
+FreeBSD branch (lines 20-24) is first because FreeBSD's `NSIG` is 32 and
+omits real-time signals; `_SIG_MAXSIG` (128 on x86-64 FreeBSD 13) is the
+correct ceiling there. Ordinary POSIX systems define `NSIG` and hit the
+second branch. The final fallback of 64 handles exotic embedded targets where
+none of the standard macros are present.
+
+### `_signals_runtime_state` layout
+
+The struct at lines 39-80 is embedded directly in `_PyRuntimeState` (declared
+in `pycore_runtime.h`) at the field `_PyRuntime.signals`. It is
+intentionally flat: no heap allocation and no locks, because the C signal
+handler must be async-signal-safe. The `handlers` array uses `int tripped`
+(read and written with atomics) alongside a `PyObject *func` that the handler
+never touches; only the eval loop dereferences `func` after checking `tripped`.
+
+### Wakeup file descriptor
+
+The `wakeup` sub-struct (lines 46-61) bridges asynchronous OS signal delivery
+into Python's I/O model. When `signal.set_wakeup_fd(fd)` is called,
+`wakeup.fd` is set to that file descriptor. The C-level handler then writes a
+single byte to it, which wakes any `select`/`poll`/`epoll` loop waiting on the
+fd. The field type is `sig_atomic_t` on POSIX and `volatile int` on Windows
+(where a socket handle is stored), with `__VXWORKS__` getting a plain `int`.
+
+### Windows extras
+
+Lines 71-75 add `sigint_event`, a `void *` that is cast to a `HANDLE` where
+needed. This is a Win32 event object that `timemodule.c` and
+`socketmodule.c` wait on alongside their normal I/O, so a CTRL+C can unblock
+them without a dedicated signal thread. Lines 82-88 provide matching
+`_signals_WAKEUP_INIT` macros that include `.use_send = 0` only on Windows,
+keeping the POSIX initializer simpler.
+
+```c
+// Include/internal/pycore_signal.h (lines 39-80, condensed)
+struct _signals_runtime_state {
+    struct {
+        int tripped;        // atomic
+        PyObject* func;
+    } handlers[Py_NSIG];
+
+    volatile struct {
+        sig_atomic_t fd;    // POSIX; SOCKET on Windows
+        int warn_on_full_buffer;
+    } wakeup;
+
+    int is_tripped;         // fast-path atomic flag
+    PyObject *default_handler;
+    PyObject *ignore_handler;
+};
+```
+
+## gopy mirror
+
+Not yet ported.

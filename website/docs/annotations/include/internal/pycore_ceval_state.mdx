@@ -1,0 +1,90 @@
+---
+title: Include/internal/pycore_ceval_state.h
+description: Per-interpreter pending-call limits and perf-trampoline init macros that sit alongside the eval-loop state.
+cpython_path: Include/internal/pycore_ceval_state.h
+cpython_version: "3.14"
+lines: 48
+status: annotated
+ported_to: ""
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Include/internal/pycore_ceval_state.h`
+
+<CpyLink path="Include/internal/pycore_ceval_state.h" />
+
+`pycore_ceval_state.h` is a small configuration header that supplies the numeric limits and initializer macros used by the pending-calls subsystem and the perf trampoline. In CPython 3.14 the `eval_breaker` field and its associated bit flags were moved into `PyThreadState` (declared in `Include/cpython/pystate.h`) and the manipulation helpers were consolidated into `Include/internal/pycore_ceval.h`. What remains here is the set of constants that govern how many pending calls each thread is allowed to drain per eval-loop trip, plus the compile-time initializer for the `_Py_perf_trampoline` runtime struct.
+
+The pending-calls design separates the main thread from worker threads. The main thread uses `MAXPENDINGCALLS_MAIN` (32) to keep the call queue small, and `MAXPENDINGCALLSLOOP_MAIN` is set to 0, meaning the main thread drains all pending calls in one pass. Worker threads inherit the larger `MAXPENDINGCALLS` from `pycore_runtime_structs.h` but are capped at `MAXPENDINGCALLSLOOP` (100 if the array is larger than 100) to prevent any single thread from spending too long on callbacks.
+
+The `_PyEval_RUNTIME_PERF_INIT` macro expands to a struct initializer for the perf trampoline when `PY_HAVE_PERF_TRAMPOLINE` is defined, setting `status`, `extra_code_index`, and `persist_after_fork` to their safe defaults. On platforms without the trampoline it degrades to `{0}`. The macro is consumed once in the runtime-state initializer and nowhere else.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| 14 | `MAXPENDINGCALLS` | Alias for `PENDINGCALLSARRAYSIZE` from runtime structs | not ported |
+| 17-21 | `MAXPENDINGCALLSLOOP` | Per-worker drain limit capped at 100 | not ported |
+| 25 | `MAXPENDINGCALLS_MAIN` | Main-thread queue capacity (32) | not ported |
+| 30 | `MAXPENDINGCALLSLOOP_MAIN` | Main-thread drain limit (0 = drain all) | not ported |
+| 33-42 | `_PyEval_RUNTIME_PERF_INIT` | Compile-time initializer for perf trampoline state | not ported |
+
+## Reading
+
+### Pending-calls capacity constants (lines 14 to 30)
+
+The four macros encode a two-tier design. Worker threads use a larger ring buffer (`MAXPENDINGCALLS`) so that burst traffic from many threads does not overflow. The loop limit (`MAXPENDINGCALLSLOOP`) prevents a pathological thread from looping forever when the buffer stays full. The main thread uses a smaller buffer because nearly all signal-driven pending calls are targeted at it, and they must be handled promptly.
+
+```c
+#define MAXPENDINGCALLS PENDINGCALLSARRAYSIZE
+#if MAXPENDINGCALLS > 100
+#  define MAXPENDINGCALLSLOOP 100
+#else
+#  define MAXPENDINGCALLSLOOP MAXPENDINGCALLS
+#endif
+
+#define MAXPENDINGCALLS_MAIN 32
+#define MAXPENDINGCALLSLOOP_MAIN 0
+```
+
+### Perf trampoline initializer (lines 33 to 42)
+
+`_PyEval_RUNTIME_PERF_INIT` is the only non-constant symbol in this header. When the platform supports the Linux `perf` trampoline, the macro initializes the struct fields that track whether trampoline pages have been allocated and whether they survive a `fork`. On other platforms the whole struct is zero-initialized.
+
+```c
+#ifdef PY_HAVE_PERF_TRAMPOLINE
+# define _PyEval_RUNTIME_PERF_INIT \
+    { \
+        .status = PERF_STATUS_NO_INIT, \
+        .extra_code_index = -1, \
+        .persist_after_fork = 0, \
+    }
+#else
+# define _PyEval_RUNTIME_PERF_INIT {0}
+#endif
+```
+
+### Companion header: pycore_ceval.h
+
+The eval-breaker bits that are conceptually part of ceval state live in `Include/internal/pycore_ceval.h` (394 lines). That header declares `_Py_HandlePending`, the `_PY_GIL_DROP_REQUEST_BIT`, `_PY_SIGNALS_PENDING_BIT`, `_PY_CALLS_TO_DO_BIT`, and the inline helpers `_Py_set_eval_breaker_bit`, `_Py_unset_eval_breaker_bit`, and `_Py_eval_breaker_bit_is_set`. Reading `pycore_ceval_state.h` without `pycore_ceval.h` gives an incomplete picture of the eval-loop interrupt machinery.
+
+```c
+/* From pycore_ceval.h lines 322-329 */
+#define _PY_GIL_DROP_REQUEST_BIT (1U << 0)
+#define _PY_SIGNALS_PENDING_BIT  (1U << 1)
+#define _PY_CALLS_TO_DO_BIT      (1U << 2)
+#define _PY_ASYNC_EXCEPTION_BIT  (1U << 3)
+#define _PY_GC_SCHEDULED_BIT     (1U << 4)
+#define _PY_EVAL_PLEASE_STOP_BIT (1U << 5)
+
+PyAPI_FUNC(int) _Py_HandlePending(PyThreadState *tstate); /* line 268 */
+```
+
+### Relationship to PyThreadState.eval_breaker (cpython/pystate.h line 76)
+
+`eval_breaker` is a `uintptr_t` field on `PyThreadState`. The dispatcher checks it atomically at the top of every eval-loop iteration. A non-zero value causes the loop to call `_Py_HandlePending`, which dispatches on each set bit: signals, pending calls, GIL drop requests, GC, and async exceptions. The constants in `pycore_ceval.h` name each bit; the capacity constants in `pycore_ceval_state.h` bound the work done per `_Py_HandlePending` call for pending calls.
+
+## gopy mirror
+
+Not yet ported.

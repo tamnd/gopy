@@ -1,0 +1,198 @@
+---
+title: Objects/interpolationobject.c
+description: PEP 750 Interpolation object — the value/expression/conversion/format_spec quad inside t-string template literals.
+cpython_path: Objects/interpolationobject.c
+cpython_version: "3.14"
+lines: 250
+status: annotated
+ported_to: objects/interpolation.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Objects/interpolationobject.c`
+
+<CpyLink path="Objects/interpolationobject.c" />
+
+PEP 750 Interpolation objects. Python 3.14 added template string literals
+(`t"hello {name}"`). Unlike f-strings, which are eagerly evaluated to a plain
+`str` at compile time, a t-string produces a `Template` object (see
+`Objects/templateobject.c`) whose interpolated slots are `Interpolation`
+objects rather than already-converted strings. This deferred evaluation lets
+library code inspect the original expression, the conversion flag (`:s`, `:r`,
+`:a`), and the format spec before deciding how to render the value.
+
+An `Interpolation` object is a named quad: `value` (the evaluated expression),
+`expression` (the source text as a `str`, e.g. `"name"`), `conversion` (an
+`int`: `0` for none, `115` for `s`, `114` for `r`, `97` for `a`), and
+`format_spec` (a `str` or `None`). The struct is immutable; all four fields
+are set at construction and exposed as read-only properties.
+
+The file is compact. The bulk of the logic lives in the compiler
+(`Python/codegen.c`) which emits `BUILD_INTERPOLATION` opcodes, and in the
+`string.Template` analog in `Lib/string.py`. `interpolationobject.c` provides
+only the C struct, its constructor, `repr`, richcompare, hash, and the four
+getset descriptors.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Objects/interpolationobject.c" lines="1-80">1-80</Cpy> | `PyInterpolationObject` struct, `interpolation_dealloc`, `interpolation_traverse` | Four-field struct layout; GC traversal visits all four fields; dealloc decrefs them in order. | `objects/interpolation.go:Interpolation` |
+| <Cpy path="Objects/interpolationobject.c" lines="80-180">80-180</Cpy> | `interpolation_new`, `PyInterpolation_New` | Internal and public constructors; validates `conversion` is one of `0`, `115`, `114`, `97`; builds the struct; GC-tracks it. | `objects/interpolation.go:NewInterpolation` |
+| <Cpy path="Objects/interpolationobject.c" lines="180-250">180-250</Cpy> | `interpolation_repr`, `interpolation_richcompare`, `interpolation_hash`, `interpolation_getset`, `PyInterpolation_Type` | Repr as `Interpolation(value=..., expression=..., conversion=..., format_spec=...)`; equality and hash over all four fields; read-only getsets; type object. | `objects/interpolation.go:interpolationRepr`, `InterpolationType` |
+
+## Reading
+
+### Interpolation struct layout (lines 1 to 80)
+
+<CpyLink path="Objects/interpolationobject.c" lines="1-80" />
+
+The struct definition is straightforward. All four fields are `PyObject *`
+pointers; `format_spec` may be `Py_None` rather than a string if no format
+spec was written:
+
+```c
+typedef struct {
+    PyObject_HEAD
+    PyObject *interpolation_value;       /* evaluated expression result */
+    PyObject *interpolation_expression;  /* source text str, e.g. "name" */
+    int       interpolation_conversion;  /* 0, 's', 'r', or 'a' */
+    PyObject *interpolation_format_spec; /* str or None */
+} PyInterpolationObject;
+```
+
+GC traversal visits all three object fields. The `conversion` field is a
+plain `int` and not a Python object, so it is not visited:
+
+```c
+static int
+interpolation_traverse(PyObject *self, visitproc visit, void *arg)
+{
+    PyInterpolationObject *interp = (PyInterpolationObject *)self;
+    Py_VISIT(interp->interpolation_value);
+    Py_VISIT(interp->interpolation_expression);
+    Py_VISIT(interp->interpolation_format_spec);
+    return 0;
+}
+```
+
+### `interpolation_new` (lines 80 to 180)
+
+<CpyLink path="Objects/interpolationobject.c" lines="80-180" />
+
+`PyInterpolation_New` is the public C-level constructor called by the
+`BUILD_INTERPOLATION` opcode handler in `ceval.c`. It validates the
+`conversion` argument against the four legal values before allocating:
+
+```c
+PyObject *
+PyInterpolation_New(PyObject *value, PyObject *expression,
+                    int conversion, PyObject *format_spec)
+{
+    if (conversion != 0 && conversion != 's' &&
+        conversion != 'r' && conversion != 'a')
+    {
+        PyErr_Format(PyExc_ValueError,
+            "Interpolation(): conversion must be 's', 'r', 'a', "
+            "or 0 (no conversion), not %d", conversion);
+        return NULL;
+    }
+
+    PyInterpolationObject *self =
+        PyObject_GC_New(PyInterpolationObject, &PyInterpolation_Type);
+    if (self == NULL) return NULL;
+
+    self->interpolation_value = Py_NewRef(value);
+
+    if (!PyUnicode_Check(expression)) {
+        PyErr_SetString(PyExc_TypeError,
+            "Interpolation(): expression must be a str");
+        Py_DECREF(self);
+        return NULL;
+    }
+    self->interpolation_expression = Py_NewRef(expression);
+    self->interpolation_conversion  = conversion;
+
+    if (format_spec == NULL || format_spec == Py_None) {
+        self->interpolation_format_spec = Py_NewRef(Py_None);
+    }
+    else if (!PyUnicode_Check(format_spec)) {
+        PyErr_SetString(PyExc_TypeError,
+            "Interpolation(): format_spec must be a str or None");
+        Py_DECREF(self);
+        return NULL;
+    }
+    else {
+        self->interpolation_format_spec = Py_NewRef(format_spec);
+    }
+
+    _PyObject_GC_TRACK(self);
+    return (PyObject *)self;
+}
+```
+
+The `expression` string holds the exact source text of the interpolated
+expression before evaluation. For `t"hello {user.name!r:.20}"`, the
+`Interpolation` produced for the `{user.name!r:.20}` slot has
+`expression = "user.name"`, `conversion = 'r'`, and `format_spec = ".20"`.
+The `value` field holds whatever `user.name` evaluated to at runtime.
+
+### PEP 750 t-string semantics (lines 180 to 250)
+
+<CpyLink path="Objects/interpolationobject.c" lines="180-250" />
+
+The `repr` formats all four fields explicitly to make `Interpolation` objects
+useful for debugging t-string processing code:
+
+```c
+static PyObject *
+interpolation_repr(PyObject *self)
+{
+    PyInterpolationObject *interp = (PyInterpolationObject *)self;
+    const char *conv_str;
+    switch (interp->interpolation_conversion) {
+    case 's': conv_str = "'s'"; break;
+    case 'r': conv_str = "'r'"; break;
+    case 'a': conv_str = "'a'"; break;
+    default:  conv_str = "None"; break;
+    }
+    return PyUnicode_FromFormat(
+        "Interpolation(value=%R, expression=%R, "
+        "conversion=%s, format_spec=%R)",
+        interp->interpolation_value,
+        interp->interpolation_expression,
+        conv_str,
+        interp->interpolation_format_spec);
+}
+```
+
+`richcompare` checks all four fields for equality in order: `value`, then
+`expression`, then `conversion`, then `format_spec`. Hash is computed as
+`hash((value, expression, conversion, format_spec))` using a four-element
+tuple, which gives correct hash/equality consistency for use in sets and
+dict keys.
+
+The four getset descriptors (`value`, `expression`, `conversion`,
+`format_spec`) are all read-only. `conversion` is returned as a Python `int`
+(or `None` when `conversion == 0`, to match the documented Python API).
+There is no `__new__` exposed to Python; `Interpolation` objects can only
+be created by the t-string machinery in the compiler and eval loop.
+
+## gopy mirror
+
+`objects/interpolation.go` for `Interpolation`, `InterpolationType`,
+`NewInterpolation`, `interpolationRepr`, `interpolationRichCompare`, and
+`interpolationHash`. The four fields (`Value`, `Expression`, `Conversion`,
+`FormatSpec`) are exported Go fields. `NewInterpolation` enforces the same
+validation as `PyInterpolation_New`. The GC traversal is implicit in Go's
+garbage collector.
+
+## CPython 3.14 changes
+
+PEP 750 (template strings) is a 3.14 addition. `Objects/interpolationobject.c`
+and `Objects/templateobject.c` are new files in 3.14. The `BUILD_INTERPOLATION`
+and `BUILD_TEMPLATE` opcodes were added to `Python/bytecodes.c` at the same
+time. The `t"..."` syntax is guarded by `__future__` in early 3.14 builds and
+enabled unconditionally in the final 3.14 release. There are no prior-version
+equivalents of this type.

@@ -1,0 +1,192 @@
+---
+title: Include/pyerrors.h
+description: Public C API for Python exception handling. Set, clear, fetch, match, normalize, OS error helpers, warnings, and new-exception constructors.
+cpython_path: Include/pyerrors.h
+cpython_version: "3.14"
+lines: 380
+status: annotated
+ported_to: errors/api.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Include/pyerrors.h`
+
+<CpyLink path="Include/pyerrors.h" />
+
+The public header for CPython's exception API. Every C extension that raises
+or catches Python exceptions calls through this surface. The header defines
+the four canonical operations on the per-thread exception state (set, clear,
+fetch, restore), the type-matching predicates, the normalize step that turns
+a raw exception triple into a proper `BaseException` instance, and the
+helper family that converts `errno` values into `OSError` subclass instances.
+
+CPython 3.12 removed the "legacy" three-field exception state
+(`type, value, traceback`). The modern path stores a single `PyObject *` that
+is always a `BaseException` instance. `PyErr_Fetch` and `PyErr_Restore` remain
+for backward compatibility with extension code, but they now operate on a
+normalized object rather than the raw triple. `PyErr_NormalizeException` is
+therefore a near no-op in 3.12+, kept only so that code compiled against older
+headers still links.
+
+In gopy, the equivalent API lives in `errors/api.go`. The per-thread exception
+slot is carried by `state.Thread` and is always an `*errors.Exception`. There
+is no separate traceback field: the traceback is embedded on the exception
+via `errors.Exception.TB`.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Include/pyerrors.h" lines="1-40">1-40</Cpy> | `PyErr_SetObject` / `PyErr_SetString` / `PyErr_SetNone` | Install a new exception on the current thread state. | `errors/api.go` |
+| <Cpy path="Include/pyerrors.h" lines="41-80">41-80</Cpy> | `PyErr_Occurred` / `PyErr_Clear` / `PyErr_PrintEx` / `PyErr_Print` | Read or clear the current exception; print to stderr. | `errors/api.go` |
+| <Cpy path="Include/pyerrors.h" lines="81-130">81-130</Cpy> | `PyErr_Fetch` / `PyErr_Restore` / `PyErr_GetRaisedException` / `PyErr_SetRaisedException` | Atomically transfer the exception in and out of the thread state. | `errors/api.go` |
+| <Cpy path="Include/pyerrors.h" lines="131-160">131-160</Cpy> | `PyErr_ExceptionMatches` / `PyErr_GivenExceptionMatches` | Test whether the current (or a given) exception is a subclass of a target type. | `errors/builtins.go` |
+| <Cpy path="Include/pyerrors.h" lines="161-200">161-200</Cpy> | `PyErr_NormalizeException` | Ensure the exception value is a proper `BaseException` instance; no-op in 3.12+. | `errors/api.go` |
+| <Cpy path="Include/pyerrors.h" lines="201-260">201-260</Cpy> | `PyErr_SetFromErrno` / `PyErr_SetFromErrnoWithFilename` / `PyErr_SetFromErrnoWithFilenameObjects` | Construct `OSError` (or a subclass) from `errno` plus optional filename arguments. | `errors/api.go` |
+| <Cpy path="Include/pyerrors.h" lines="261-320">261-320</Cpy> | `PyErr_Format` / `PyErr_FormatV` | Raise an exception with a `printf`-style message; calls `PyUnicode_FromFormat` internally. | `errors/api.go` |
+| <Cpy path="Include/pyerrors.h" lines="321-380">321-380</Cpy> | `PyErr_WarnEx` / `PyErr_WarnExplicit` / `PyErr_WarnFormat` / `PyErr_NewException` / `PyErr_NewExceptionWithDoc` | Warning dispatch and dynamic exception class creation. | `warnings/warnings.go`, `errors/builtins.go` |
+
+## Reading
+
+### `PyErr_SetString` and `PyErr_Occurred` (lines 1 to 80)
+
+<CpyLink path="Include/pyerrors.h" lines="1-80" />
+
+These two functions are the most-called pair in the entire C API. Nearly every
+slot implementation calls `PyErr_SetString` to report an error and the eval
+loop calls `PyErr_Occurred` after every opcode that might fail.
+
+```c
+/* Python/errors.c */
+PyAPI_FUNC(void) PyErr_SetObject(PyObject *type, PyObject *value);
+PyAPI_FUNC(void) PyErr_SetString(PyObject *exception, const char *string);
+PyAPI_FUNC(void) PyErr_SetNone(PyObject *exception);
+
+PyAPI_FUNC(PyObject *) PyErr_Occurred(void);
+PyAPI_FUNC(void)       PyErr_Clear(void);
+```
+
+`PyErr_SetString` constructs a `PyUnicodeObject` from `string`, wraps it in a
+tuple, instantiates `exception(tuple)`, and stores the result in
+`tstate->current_exception`. `PyErr_SetNone` is shorthand for
+`PyErr_SetObject(exception, Py_None)`, used for exceptions that carry no
+meaningful value (e.g. `KeyboardInterrupt`).
+
+`PyErr_Occurred` reads `tstate->current_exception` and returns a borrowed
+reference to the current exception, or `NULL` if none is set. It is
+intentionally cheap: just a pointer load. The eval loop calls it after every
+`ceval.c` helper that can fail, so the cost matters.
+
+`PyErr_Clear` writes `NULL` into the slot, decrementing the old exception.
+Code that recovers from an expected exception (e.g. `AttributeError` in
+`hasattr`) calls this to reset the thread state before continuing.
+
+In gopy, `errors.SetString` builds an `*errors.Exception` and stores it via
+`state.Thread.SetException`. `errors.Occurred` reads it back. `errors.Clear`
+writes `nil`. The symmetry with CPython is exact.
+
+### `PyErr_Fetch` and `PyErr_Restore` (lines 81 to 130)
+
+<CpyLink path="Include/pyerrors.h" lines="81-130" />
+
+```c
+/* Legacy triple-field form (deprecated in 3.12, still present) */
+PyAPI_FUNC(void) PyErr_Fetch(
+    PyObject **ptype,
+    PyObject **pvalue,
+    PyObject **ptraceback);
+
+PyAPI_FUNC(void) PyErr_Restore(
+    PyObject *type,
+    PyObject *value,
+    PyObject *traceback);
+
+/* Modern single-object form (3.12+) */
+PyAPI_FUNC(PyObject *) PyErr_GetRaisedException(void);
+PyAPI_FUNC(void)       PyErr_SetRaisedException(PyObject *exc);
+```
+
+`PyErr_Fetch` atomically clears the thread-state slot and writes the
+exception's type, value, and traceback into the three output pointers. Callers
+own the three resulting references. `PyErr_Restore` performs the inverse:
+installs a new triple and drops whatever was there before.
+
+The pattern appears throughout CPython's own C code wherever an exception must
+be temporarily removed while another operation runs, then reinstated. The
+destructor for generator objects uses it to suppress `GeneratorExit`; the
+`__exit__` machinery uses it to save the in-flight exception before calling the
+context manager.
+
+`PyErr_GetRaisedException` is the 3.12 single-object replacement. It swaps
+`tstate->current_exception` with `NULL` and returns the previous value.
+`PyErr_SetRaisedException` is the inverse.
+
+In gopy, `errors.Fetch` calls `state.Thread.SwapException(nil)` to atomically
+clear the slot and decompose the result. `errors.Restore` rebuilds the
+`*errors.Exception` and calls `SetException`.
+
+### `PyErr_NormalizeException` (lines 161 to 200)
+
+<CpyLink path="Include/pyerrors.h" lines="161-200" />
+
+```c
+PyAPI_FUNC(void) PyErr_NormalizeException(
+    PyObject **exc,   /* in/out */
+    PyObject **val,   /* in/out */
+    PyObject **tb);   /* in/out */
+```
+
+Before CPython 3.12, exception state was a raw triple of `(type, value, tb)`
+where `value` might be a bare string rather than an exception instance. Normalize
+ensures `value` is an instance of `type` by calling `type(value)` when needed.
+In 3.12+ the store path (`PyErr_SetRaisedException`) already produces a
+normalized instance, so `NormalizeException` is a no-op on the modern path.
+It still calls into `_PyErr_NormalizeException` which early-returns if
+`type(value) == type`, covering the common case in one comparison.
+
+The function also sets the `__traceback__` attribute on the normalized value to
+`tb`, ensuring the traceback is reachable from the exception object even after
+the per-thread triple is torn down.
+
+In gopy, `errors.NormalizeException` is a documented no-op. The gopy set path
+always constructs a proper `*errors.Exception` before storing it, so the
+separation between a raw type and an instance never arises.
+
+### `PyErr_Format` (lines 261 to 320)
+
+<CpyLink path="Include/pyerrors.h" lines="261-320" />
+
+```c
+PyAPI_FUNC(PyObject *) PyErr_Format(
+    PyObject *exception,
+    const char *format,
+    ...);
+```
+
+A convenience wrapper that builds a string via `PyUnicode_FromFormat` and then
+calls `PyErr_SetObject`. The `%T` and `%V` format codes are Python-specific:
+`%T` formats the type name of an object (useful for "expected X, got Y" messages)
+and `%V` formats a `PyObject *` with a fallback C-string when the object is
+`NULL`. Both are handled inside `PyUnicode_FromFormat`; `PyErr_Format` itself is
+a thin two-step wrapper.
+
+`PyErr_FormatV` takes a `va_list` instead of `...` for callers that are
+themselves variadic.
+
+In gopy, `errors.Format` calls `fmt.Sprintf` and passes the result to
+`errors.SetString`. The `%T` and `%V` codes are not needed because Go's
+`%T` operator and pointer checks cover the same cases.
+
+## gopy mirror
+
+The gopy exception API is split across two packages. `errors/api.go` contains
+the thread-state manipulation functions (`Set`, `SetString`, `Format`,
+`Occurred`, `Clear`, `Fetch`, `Restore`, `Raise`, `RaiseFrom`,
+`NormalizeException`, `AttachTraceback`). `errors/builtins.go` contains the
+type singletons (`PyExc_ValueError`, `PyExc_TypeError`, etc.) and the
+`Match` / `IsSubtype` predicates that correspond to `PyErr_ExceptionMatches`.
+
+The `errors.Exception` struct in `errors/exception.go` is a direct port of
+`PyBaseExceptionObject`: it carries `ExcType`, `Args`, `Cause`, `Context`,
+`Suppress`, `Notes`, and `TB`, matching the CPython fields field-for-field.

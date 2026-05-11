@@ -1,0 +1,129 @@
+---
+title: Modules/fcntlmodule.c
+description: Python bindings for POSIX file control and I/O control operations via fcntl(2), ioctl(2), flock(2), and lockf(3).
+cpython_path: Modules/fcntlmodule.c
+cpython_version: "3.14"
+lines: 360
+status: annotated
+ported_to: ""
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Modules/fcntlmodule.c`
+
+<CpyLink path="Modules/fcntlmodule.c" />
+
+`fcntlmodule.c` exposes four POSIX system calls to Python under the `fcntl` module name. Each function accepts a file descriptor (integer or object with a `fileno()` method) and passes through the remaining arguments after light Python-to-C conversion. The module is Unix-only and is conditionally compiled out on Windows.
+
+The four wrapped calls cover the main file-control surface: `fcntl(2)` for descriptor flags and advisory locks, `ioctl(2)` for device control, `flock(2)` for BSD-style whole-file locking, and `lockf(3)` for POSIX byte-range locking. Argument handling is intentionally minimal. Integer commands and arguments pass straight through; bytes/bytearray arguments are used as in-out buffers, mutated in place by the kernel and returned to the caller.
+
+The module also populates a namespace of symbolic constants at import time. It walks a compile-time table of `{name, value}` pairs and calls `PyModule_AddIntConstant` for each. Constants include the `F_*` and `O_*` families that vary by platform, so the table is conditionally assembled with `#ifdef` guards throughout.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| 1-40 | (includes, module doc) | Headers and module docstring | |
+| 41-130 | `fcntl_fcntl_impl` | Wrap fcntl(2); handle int and buffer args | |
+| 131-210 | `fcntl_ioctl_impl` | Wrap ioctl(2); mutate buffer in place | |
+| 211-250 | `fcntl_flock_impl` | Wrap flock(2); integer operation only | |
+| 251-310 | `fcntl_lockf_impl` | Wrap lockf(3); byte-range with start/whence | |
+| 311-340 | `fcntl_exec` | Module init: add constants via loop | |
+| 341-360 | `PyInit_fcntl` | Module object creation | |
+
+## Reading
+
+### Module docstring and includes (lines 1 to 40)
+
+<CpyLink path="Modules/fcntlmodule.c" lines="1-40" />
+
+The file opens with standard CPython headers and the module-level docstring. The docstring is the user-visible text that `help(fcntl)` displays and is kept in sync with the `Lib/fcntl.pyi` stub.
+
+```c
+PyDoc_STRVAR(fcntl__doc__,
+"This module performs file control and I/O control on file\n\
+descriptors.  It is an interface to the fcntl() and ioctl() Unix\n\
+routines.  File descriptors can be obtained with the fileno() method of\n\
+a file or socket object.");
+```
+
+### `fcntl_fcntl_impl`: wrapping fcntl(2) (lines 41 to 130)
+
+<CpyLink path="Modules/fcntlmodule.c" lines="41-130" />
+
+The implementation first converts the `fd` argument via `PyObject_AsFileDescriptor`, which handles both raw integers and objects with `fileno()`. The third argument may be an integer, a bytes object, or a bytearray. For the buffer path the code checks that the buffer is no larger than `FCNTL_MAXARG` bytes, copies it into a local stack buffer, calls `fcntl(fd, code, buf)`, and returns the (possibly modified) buffer content as a new `bytes` object.
+
+```c
+if (!PyArg_ParseTuple(args, "O&i|y*:fcntl",
+                      conv_descriptor, &fd, &code, &arg))
+    return NULL;
+if (arg.buf == NULL) {
+    /* integer argument */
+    ret = fcntl(fd, code, (int)int_arg);
+} else {
+    /* buffer argument: copy in, call, copy out */
+    memcpy(buf, arg.buf, arg.len);
+    ret = fcntl(fd, code, buf);
+}
+```
+
+### `fcntl_ioctl_impl`: in-place buffer mutation (lines 131 to 210)
+
+<CpyLink path="Modules/fcntlmodule.c" lines="131-210" />
+
+`ioctl` follows the same pattern as `fcntl` but adds a `mutate_flag` boolean parameter. When `mutate_flag` is true and the caller passed a writable bytearray, the kernel writes its result directly into the bytearray's internal buffer without making a copy. This is the performance path for device drivers that return data through the same buffer.
+
+```c
+if (mutate_flag && PyByteArray_Check(oarg)) {
+    buf = PyByteArray_AS_STRING(oarg);
+    /* ioctl writes result into buf directly */
+    ret = ioctl(fd, code, buf);
+    if (ret == -1)
+        return PyErr_SetFromErrno(PyExc_OSError);
+    return PyLong_FromLong(ret);
+}
+```
+
+### `fcntl_flock_impl` and `fcntl_lockf_impl` (lines 211 to 310)
+
+<CpyLink path="Modules/fcntlmodule.c" lines="211-310" />
+
+`flock` is the simplest wrapper: one integer `operation` argument, one syscall, error check, return `None`. `lockf` adds `len`, `start`, and `whence` to support byte-range locking. Both functions translate a Python-level `OSError` from `errno` via `PyErr_SetFromErrno`.
+
+```c
+/* flock */
+if (flock(fd, code) == -1)
+    return PyErr_SetFromErrno(PyExc_OSError);
+Py_RETURN_NONE;
+
+/* lockf */
+if (lockf(fd, code, (off_t)len) == -1)
+    return PyErr_SetFromErrno(PyExc_OSError);
+Py_RETURN_NONE;
+```
+
+### Constant registration in `fcntl_exec` (lines 311 to 340)
+
+<CpyLink path="Modules/fcntlmodule.c" lines="311-340" />
+
+All symbolic constants are registered through a static array of `{char *name, long value}` structs. The `fcntl_exec` function iterates the array and calls `PyModule_AddIntConstant`. Platform guards (`#ifdef F_GETFL`) ensure that only constants available on the current system are included in the array, so the module is fully portable across Linux, macOS, and BSDs.
+
+```c
+static const struct {
+    const char *name;
+    long value;
+} fcntl_constants[] = {
+#ifdef F_DUPFD
+    {"F_DUPFD",     F_DUPFD},
+#endif
+#ifdef F_GETFD
+    {"F_GETFD",     F_GETFD},
+#endif
+    /* ... */
+};
+```
+
+## gopy mirror
+
+Not yet ported.

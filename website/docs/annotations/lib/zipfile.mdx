@@ -1,0 +1,153 @@
+---
+title: Lib/zipfile/__init__.py
+description: ZIP archive reader and writer with support for stored, deflated, bzip2, and lzma compression plus zip64 extensions.
+cpython_path: Lib/zipfile/__init__.py
+cpython_version: "3.14"
+lines: 2600
+status: annotated
+ported_to: (stdlib pending)
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Lib/zipfile/__init__.py`
+
+<CpyLink path="Lib/zipfile/__init__.py" />
+
+The standard ZIP archive interface. `ZipFile` wraps a file path or file-like
+object and provides methods for reading, writing, extracting, and inspecting
+entries. `ZipInfo` carries per-entry metadata (filename, timestamps, sizes,
+CRC, compression type). `ZipExtFile` is the read-only file object returned by
+`ZipFile.open()`. The module handles deflate via `zlib`, bzip2 via `bz2`, and
+lzma via `lzma`, and implements zip64 extensions for archives and entries
+larger than 4 GiB.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Lib/zipfile/__init__.py" lines="1-300">1-300</Cpy> | `ZipInfo` | Per-entry metadata container; `from_file()` factory builds it from a real path; `_decodeExtra()` parses the extra field for zip64 sizes. | `(stdlib pending)` |
+| <Cpy path="Lib/zipfile/__init__.py" lines="300-700">300-700</Cpy> | `ZipFile.__init__`, `ZipFile.open` (read path), `_EndRecData` | Constructor opens or creates the archive; `_EndRecData` scans backwards for the End-of-Central-Directory record including the zip64 locator; `open()` in read mode returns a `ZipExtFile`. | `(stdlib pending)` |
+| <Cpy path="Lib/zipfile/__init__.py" lines="700-1200">700-1200</Cpy> | `ZipFile.write`, `ZipFile.writestr`, `_open_to_write` | Write path; `_open_to_write` returns a `_ZipWriteFile` that streams compressed data and finalises the local file header on close. | `(stdlib pending)` |
+| <Cpy path="Lib/zipfile/__init__.py" lines="1200-1900">1200-1900</Cpy> | `ZipFile.extract`, `ZipFile.extractall`, `ZipFile._extract_member` | Extraction logic; resolves destination path, creates directories, and calls `open()` then shutil-copy. | `(stdlib pending)` |
+| <Cpy path="Lib/zipfile/__init__.py" lines="1900-2600">1900-2600</Cpy> | `_ZipWriteFile`, `_SharedFile`, zip64 helpers, compression streams | Streaming compressor wrappers, the shared-seek layer for concurrent reads, and zip64 extra-field encoding/decoding. | `(stdlib pending)` |
+
+## Reading
+
+### `_EndRecData` EOCD scan (lines 300 to 450)
+
+<CpyLink path="Lib/zipfile/__init__.py" lines="300-450" />
+
+```python
+def _EndRecData(fpin):
+    fpin.seek(0, 2)
+    filesize = fpin.tell()
+    try:
+        fpin.seek(-sizeEndCentDir, 2)
+    except OSError:
+        return None
+    data = fpin.read()
+    if len(data) == sizeEndCentDir and data[0:4] == stringEndArchive:
+        endrec = struct.unpack(structEndArchive, data)
+        endrec = list(endrec)
+        endrec.append(b"")
+        endrec.append(filesize - sizeEndCentDir)
+        return _check_zipfile(fp=fpin, endrec=endrec)
+    # Otherwise search last 64k for the signature ...
+```
+
+`_EndRecData` first tries a direct seek to the last `sizeEndCentDir` bytes.
+If the EOCD signature `PK\x05\x06` is found there, the archive has no
+comment and parsing is fast. For archives with an end comment, it reads up
+to 64 KiB from the end and scans backwards for the signature. After finding
+the EOCD record it also checks for the zip64 end-of-central-directory locator
+(`PK\x06\x07`) immediately before it; if present, it parses the zip64 EOCD
+record instead to obtain the true central-directory offset and size.
+
+### `_RealGetContents` central directory parse (lines 450 to 600)
+
+<CpyLink path="Lib/zipfile/__init__.py" lines="450-600" />
+
+```python
+def _RealGetContents(self):
+    fp = self.fp
+    endrec = _EndRecData(fp)
+    ...
+    offset2 = endrec[_ECD_OFFSET]
+    fp.seek(offset2)
+    data = fp.read(size_cd)
+    fp = io.BytesIO(data)
+    total = 0
+    while total < size_cd:
+        centdir = fp.read(sizeCentralDir)
+        ...
+        x = ZipInfo(fname)
+        x.extra = fp.read(centdir[_CD_EXTRA_FIELD_LENGTH])
+        x._decodeExtra()
+        ...
+        self.filelist.append(x)
+        self.NameToInfo[x.filename] = x
+        total += (sizeCentralDir + centdir[_CD_FILENAME_LENGTH]
+                  + centdir[_CD_EXTRA_FIELD_LENGTH]
+                  + centdir[_CD_COMMENT_LENGTH])
+```
+
+After locating the central directory via `_EndRecData`, `_RealGetContents`
+reads it into a `BytesIO` buffer and parses one central directory header at a
+time. Each header produces a `ZipInfo` entry. `_decodeExtra` updates
+`file_size`, `compress_size`, and `header_offset` from the zip64 extra field
+when those values are the `0xFFFFFFFF` sentinel in the 32-bit header slots.
+
+### `_open_to_write` compression chain (lines 700 to 900)
+
+<CpyLink path="Lib/zipfile/__init__.py" lines="700-900" />
+
+```python
+def _open_to_write(self, zinfo, force_zip64=False):
+    ...
+    zef_file = _SharedFile(self.fp, zinfo.header_offset,
+                           self._fpclose, self._lock, lambda: self._writing)
+    ...
+    if zinfo.compress_type == ZIP_DEFLATED:
+        cmpr = zlib.compressobj(self.compresslevel, zlib.DEFLATED, -15)
+    elif zinfo.compress_type == ZIP_BZIP2:
+        cmpr = bz2.BZ2Compressor(self.compresslevel)
+    elif zinfo.compress_type == ZIP_LZMA:
+        cmpr = LZMACompressor()
+    else:
+        cmpr = None
+    return _ZipWriteFile(self, zinfo, zef_file, cmpr)
+```
+
+`_open_to_write` writes a placeholder local file header (sizes and CRC are
+zero because they are unknown until the stream closes), then selects a
+compressor object matching `zinfo.compress_type`. `_ZipWriteFile.write`
+feeds chunks through the compressor and accumulates CRC and uncompressed
+size. On `close`, it either updates the local file header in-place (for
+seekable files) or appends a data descriptor (`PK\x07\x08`) for streaming
+writes. zip64 extra fields are emitted when either size exceeds
+`0xFFFFFFFF` or `force_zip64=True` was passed.
+
+### zip64 extension handling (lines 1900 to 2100)
+
+<CpyLink path="Lib/zipfile/__init__.py" lines="1900-2100" />
+
+zip64 is triggered when `file_size` or `compress_size` exceeds
+`ZIP64_LIMIT` (2 GiB - 1 byte) or when the archive itself would exceed
+that limit. The extra-field encoding stores sizes as 8-byte little-endian
+integers in a sub-block with tag `0x0001`. `_decodeExtra` reads this block
+during parsing and overwrites the 32-bit placeholder values. On write,
+`_ZipWriteFile` emits the zip64 extra field in the local header and the
+central directory entry. The zip64 EOCD record and locator are written by
+`ZipFile.close` when the number of entries or the central-directory offset
+exceeds 32-bit limits.
+
+## gopy mirror
+
+`zipfile` depends on `zlib`, `bz2`, `lzma`, `struct`, `io`, `os`, `shutil`,
+`stat`, and `time`. gopy already ships ports of `io`, `os`, and `struct`
+primitives. The compression backends (`zlib`, `bz2`, `lzma`) will need thin
+wrappers around the corresponding Go standard library packages
+(`compress/zlib`, `compress/bzip2`, `compress/lzma`). The archive logic
+itself is pure Python with no C extension fallback, so it translates
+directly to Go once the dependencies are in place.

@@ -1,0 +1,174 @@
+---
+title: Modules/_elementtree.c
+description: C accelerator for xml.etree.ElementTree, implementing Element, TreeBuilder, and XMLParser.
+cpython_path: Modules/_elementtree.c
+cpython_version: "3.14"
+lines: 3000
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Modules/_elementtree.c`
+
+<CpyLink path="Modules/_elementtree.c" />
+
+`_elementtree.c` is the C accelerator for Python's `xml.etree.ElementTree`
+package. It replaces the pure-Python fallback in
+`Lib/xml/etree/ElementTree.py` with three native types: `Element` (a tree
+node with tag, text, tail, attributes, and a variable-length children array),
+`TreeBuilder` (a SAX-style event sink that constructs an `Element` tree from
+start/end/data/comment events), and `XMLParser` (a thin wrapper around the
+`expat` library that feeds parsed events into a `TreeBuilder` or any object
+with the same interface). The Python fallback is used automatically if the C
+extension is absent or fails to import; otherwise `_elementtree` is imported
+by `ElementTree.py` and its types shadow the pure-Python ones.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| 1-80 | includes, forward declarations | `expat.h`, module state struct | |
+| 81-200 | `Element` struct, memory layout | tag, text, tail, attrib, children vector | |
+| 201-400 | `element_new`, `element_dealloc` | Allocation, reference counting, `__del__` | |
+| 401-600 | `element_richcompare`, `element_repr` | `==` and `repr()` | |
+| 601-800 | `element_getattro`, `element_setattro` | Attribute access: text, tail, tag, attrib | |
+| 801-1000 | `element_append`, `element_extend` | `append()`, `extend()`, children management | |
+| 1001-1100 | `element_insert`, `element_remove` | `insert()`, `remove()` | |
+| 1101-1200 | `element_find`, `element_findall`, `element_findtext` | XPath-lite search | |
+| 1201-1320 | `element_iter`, `element_itertext` | Depth-first iterators | |
+| 1321-1420 | `element_copy`, `element_deepcopy` | `copy()`, `__copy__`, `__deepcopy__` | |
+| 1421-1540 | `element_getitem`, `element_setitem`, `element_length` | Sequence protocol | |
+| 1541-1620 | `element_subscript`, `element_ass_subscript` | Slice support | |
+| 1621-1700 | `element_getset`, `element_methods`, `ElementType` | Method/slot tables, type object | |
+| 1701-1850 | `TreeBuilder` struct, `treebuilder_new` | Builder state: last, this, index, stack | |
+| 1851-1980 | `treebuilder_handle_start`, `treebuilder_handle_end` | SAX start/end element events | |
+| 1981-2060 | `treebuilder_handle_data`, `treebuilder_handle_comment` | CharData and comment events | |
+| 2061-2180 | `treebuilder_handle_pi`, `treebuilder_handle_doctype` | PI and doctype events | |
+| 2181-2260 | `treebuilder_methods`, `TreeBuilderType` | Method table, type object | |
+| 2261-2420 | `XMLParser` struct, `xmlparser_new` | expat parser creation, encoding | |
+| 2421-2580 | `xmlparser_feed`, `xmlparser_close` | Feed bytes, flush expat | |
+| 2581-2700 | expat handler callbacks | `handler_start`, `handler_end`, `handler_data` | |
+| 2701-2820 | `xmlparser_getattr`, `xmlparser_setattr` | `version`, `error_*` attributes | |
+| 2821-2920 | `xmlparser_methods`, `XMLParserType` | Method table, type object | |
+| 2921-3000 | `PyInit__elementtree` | Module init, type registration, expat setup | |
+
+## Reading
+
+### `Element` struct and children vector (lines 81 to 200)
+
+<CpyLink path="Modules/_elementtree.c" lines="81-200" />
+
+The `Element` struct stores `tag`, `text`, and `tail` as `PyObject *` fields
+and keeps `attrib` as a plain Python dict (lazily allocated on first
+attribute assignment). The children list uses a small inline buffer: the
+first four children live in a fixed `extra->children[4]` array embedded in
+the allocation. Only when a fifth child is added does the code `realloc` to a
+heap-allocated vector. This "small-buffer optimisation" keeps the common case
+(leaf nodes and shallow trees) in a single heap allocation and avoids the
+`PyList` overhead entirely.
+
+```c
+typedef struct {
+    PyObject_HEAD
+    PyObject *tag;
+    PyObject *text;
+    PyObject *tail;
+    PyObject *attrib;    /* NULL until first set */
+    ElementObjectExtra *extra; /* NULL until first child */
+} ElementObject;
+
+typedef struct {
+    Py_ssize_t length;
+    Py_ssize_t allocated;
+    PyObject  *children[1]; /* variable-length, starts as [4] inline */
+} ElementObjectExtra;
+```
+
+### `treebuilder_handle_start` and `treebuilder_handle_end` (lines 1851 to 1980)
+
+<CpyLink path="Modules/_elementtree.c" lines="1851-1980" />
+
+`treebuilder_handle_start` is called for every opening tag. It allocates a
+new `ElementObject`, assigns the tag name and the attributes dict (if any),
+pushes the current "this" pointer onto a Python list acting as a stack, and
+makes the new element the current node. A fast path skips the Python-level
+`start` callback when no user-defined `start` handler is registered, which
+eliminates the `PyObject_Call` overhead for the common case.
+
+`treebuilder_handle_end` pops the stack, links the finished element as a
+child of its parent, and optionally fires the `end` callback. The insert into
+the parent uses the same inline-buffer logic as `element_append` so no
+redundant type checks are needed.
+
+```c
+static int
+treebuilder_handle_start(TreeBuilderObject *self,
+                         PyObject *tag, PyObject *attrib)
+{
+    ElementObject *elem = (ElementObject *)
+        element_new(self->element_type, tag, attrib);
+    if (!elem) return -1;
+    /* push this -> stack, set this = elem */
+    if (PyList_Append(self->stack, (PyObject *)self->this_element) < 0)
+        goto error;
+    Py_XDECREF(self->this_element);
+    self->this_element = elem;
+    ...
+}
+```
+
+### `xmlparser_feed` and expat handler wiring (lines 2421 to 2700)
+
+<CpyLink path="Modules/_elementtree.c" lines="2421-2700" />
+
+`xmlparser_feed` accepts a `bytes` or `bytearray` object and passes its
+buffer directly to `XML_Parse` (from expat). The expat library calls back
+into the C functions `handler_start`, `handler_end`, `handler_data`, and
+`handler_comment`, which all forward to the corresponding `treebuilder_handle_*`
+methods. The handler functions are registered once at parser-creation time
+using `XML_SetElementHandler`, `XML_SetCharacterDataHandler`, etc., so there
+is no per-call dispatch overhead. If `XML_Parse` returns
+`XML_STATUS_ERROR`, `xmlparser_feed` raises `ParseError` with the expat
+error message, line number, and column number embedded in the exception.
+
+```c
+static PyObject *
+xmlparser_feed(XMLParserObject *self, PyObject *arg)
+{
+    const char *data;
+    Py_ssize_t  data_len;
+    if (PyBytes_AsStringAndSize(arg, (char **)&data, &data_len) < 0)
+        return NULL;
+    if (!XML_Parse(self->parser, data, (int)data_len, 0)) {
+        expat_set_error(self, ...);
+        return NULL;
+    }
+    Py_RETURN_NONE;
+}
+```
+
+## gopy mirror
+
+`_elementtree.c` has no gopy port. A port would need three new types in a
+`module/xml/etree/` package: an `Element` object with the small-buffer
+children optimisation, a `TreeBuilder` accumulator, and an `XMLParser` type
+backed by Go's `encoding/xml` decoder (or a Go expat binding). The
+`encoding/xml` decoder emits `xml.StartElement` / `xml.EndElement` / `xml.CharData`
+tokens, which map cleanly onto the TreeBuilder event model. The main
+complexity is replicating the `ElementPath` XPath-lite engine (used by
+`find`, `findall`, `findtext`, and `iterfind`), which lives in
+`Lib/xml/etree/ElementPath.py` and would remain pure Python until the
+`module/xml/etree/` port is complete.
+
+## CPython 3.14 changes
+
+CPython 3.14 removed the long-deprecated `html` parameter from
+`XMLParser.__init__` (it had been a no-op since 3.8 but still accepted
+without error). The `Element.__init_subclass__` hook was added to allow
+subclass customisation without overriding `__init__`. The `TreeBuilder`
+gained a `comment_factory` parameter mirroring the existing `element_factory`
+parameter, completing the symmetry between element and comment node
+construction. Several internal allocation paths were updated to use
+`PyObject_GC_NewVar` and `PyObject_GC_IS_TRACKED` to cooperate correctly
+with the incremental GC introduced in CPython 3.14.

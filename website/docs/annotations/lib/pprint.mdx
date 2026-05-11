@@ -1,0 +1,210 @@
+---
+title: Lib/pprint.py
+description: Pretty-printer for Python objects; provides PrettyPrinter, pformat/pprint helpers, recursive object detection, and compact mode for fitting items on one line.
+cpython_path: Lib/pprint.py
+cpython_version: "3.14"
+lines: 600
+status: annotated
+ported_to: (stdlib pending)
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Lib/pprint.py`
+
+<CpyLink path="Lib/pprint.py" />
+
+`pprint.py` is a pure-Python module that formats Python objects as
+human-readable text. Unlike `repr()`, it respects a configurable line
+width, inserts indentation for nested structures, and truncates output at
+a maximum depth. The main class is `PrettyPrinter`; the module also
+exports the convenience functions `pprint`, `pformat`, `isreadable`, and
+`isrecursive`.
+
+Key parameters:
+
+- `width` (default 80): target line width. Objects are broken across
+  multiple lines only when they would exceed this width.
+- `depth` (default `None`): maximum nesting depth; deeper objects are
+  replaced with `...`.
+- `indent` (default 1): number of spaces added per nesting level.
+- `compact` (default `False`): when `True`, list/tuple/set items are
+  packed as many per line as will fit.
+- `sort_dicts` (default `True`): whether dict keys are sorted before
+  output.
+
+Internally, `PrettyPrinter._format` dispatches on the type of the object
+using a `_dispatch` dict that maps types to dedicated `_pprint_*`
+methods. Recursion is detected by tracking object `id` values in a
+`_recursive` set passed through every call.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Lib/pprint.py" lines="1-50">1-50</Cpy> | Imports, `__all__`, `_builtin_scalars` | Module prologue; `_builtin_scalars` is a frozenset of types whose `repr` is always safe and single-line. | `(stdlib pending)` |
+| <Cpy path="Lib/pprint.py" lines="51-150">51-150</Cpy> | `PrettyPrinter.__init__`, `pprint`, `pformat`, `isreadable`, `isrecursive` | Public API: `pformat` returns a string; `pprint` prints it; `isreadable` and `isrecursive` probe an object without formatting. | `(stdlib pending)` |
+| <Cpy path="Lib/pprint.py" lines="151-250">151-250</Cpy> | `PrettyPrinter._format`, `_dispatch` registration | Central dispatch: checks `_builtin_scalars` for fast path, then `_dispatch[type(object)]`, then falls back to `repr`. | `(stdlib pending)` |
+| <Cpy path="Lib/pprint.py" lines="251-350">251-350</Cpy> | `_pprint_dict`, `_pprint_ordered_dict`, `_pprint_list`, `_pprint_tuple` | Per-type formatters for the most common containers; handle the `compact` flag and per-item recursion. | `(stdlib pending)` |
+| <Cpy path="Lib/pprint.py" lines="351-500">351-500</Cpy> | `_pprint_set`, `_pprint_frozenset`, `_pprint_str`, `_pprint_bytes`, `_pprint_bytearray`, `_pprint_mappingproxy`, `_pprint_simplenamespace` | Remaining built-in type formatters; `_pprint_str` and `_pprint_bytes` handle long strings by splitting on whitespace. | `(stdlib pending)` |
+| <Cpy path="Lib/pprint.py" lines="501-560">501-560</Cpy> | `_pprint_dataclass` | Formats `dataclasses.dataclass` instances field-by-field using `dataclasses.fields()`. | `(stdlib pending)` |
+| <Cpy path="Lib/pprint.py" lines="561-600">561-600</Cpy> | `_safe_repr`, recursive detection helpers | `_safe_repr` computes a `repr` string, tracks seen `id`s to detect recursive structures, and marks them with `...`. | `(stdlib pending)` |
+
+## Reading
+
+### `_format` dispatch table (lines 151 to 250)
+
+<CpyLink path="Lib/pprint.py" lines="151-250" />
+
+```python
+def _format(self, object, stream, indent, allowance, context, level):
+    objid = id(object)
+    if objid in context:
+        stream.write(_recursion(object))
+        self._recursive = True
+        self._readable = False
+        return
+    rep = self._repr(object, context, level)
+    max_width = self._width - indent - allowance
+    if len(rep) <= max_width:
+        stream.write(rep)
+        return
+    p = self._dispatch.get(type(object).__repr__, None)
+    if p is not None:
+        context[objid] = 1
+        p(self, object, stream, indent, allowance, context, level + 1)
+        del context[objid]
+    elif ((_len := len(object) if hasattr(object, '__len__') else 0) and
+          isinstance(object, _builtin_scalars)):
+        stream.write(rep)
+    else:
+        stream.write(rep)
+```
+
+`_format` is the core recursive formatter. The guard at the top catches
+objects already in `context` (the `id` set for the current call chain)
+and writes a `<Recursion on TYPE with id=ID>` marker instead of
+recursing infinitely. The fast path writes `rep` directly if it fits
+within `max_width = self._width - indent - allowance`; `allowance` is the
+number of characters that will follow on the same line (e.g., a closing
+bracket), so the check is conservative. When `rep` is too wide and the
+type has a registered `_dispatch` entry, `_format` delegates to the
+type-specific printer. The dispatch key is `type(object).__repr__` rather
+than `type(object)` itself, so subclasses that do not override `__repr__`
+naturally fall through to the parent type's formatter.
+
+### Recursive object detection via `id()` set (lines 151 to 250)
+
+```python
+context[objid] = 1
+p(self, object, stream, indent, allowance, context, level + 1)
+del context[objid]
+```
+
+`context` is a plain dict mapping `id(object)` to `1`. Before calling
+any type-specific formatter, `_format` inserts the current object's id.
+If the same object appears again at any deeper level of the same call
+chain, the guard at the top triggers and the recursion is reported. After
+the type-specific formatter returns, the id is removed. This correctly
+handles mutual recursion (`a` contains `b` which contains `a`) as well
+as direct self-reference (`a.append(a)`).
+
+The id is removed after the formatter returns rather than via `try/finally`
+because `pprint` does not expect the formatter to raise (it is formatting
+for display, not for eval). This is consistent with CPython's
+implementation.
+
+### Compact mode fitting (lines 251 to 350)
+
+<CpyLink path="Lib/pprint.py" lines="251-350" />
+
+```python
+def _pprint_list(self, object, stream, indent, allowance, context, level):
+    stream.write('[')
+    self._format_items(object, stream, indent + 1, allowance + 1,
+                       context, level)
+    stream.write(']')
+
+def _format_items(self, items, stream, indent, allowance, context, level):
+    write = stream.write
+    indent_str = ' ' * indent
+    delimnl = ',\n' + indent_str
+    max_width = self._width - indent
+    current_column = indent
+    # compact mode: try to fit as many items as possible per line
+    if self._compact:
+        items = list(items)
+        pendingnl = False
+        for item in items:
+            rep = self._repr(item, context, level)
+            w = len(rep)
+            if current_column + w > max_width:
+                write(',\n' + indent_str)
+                current_column = indent + w
+            else:
+                if pendingnl:
+                    write(delimnl)
+                    current_column = indent + w
+                else:
+                    current_column += w
+            write(rep)
+            pendingnl = True
+    else:
+        ...
+```
+
+In compact mode, `_format_items` greedily packs item reprs onto the
+current line until adding the next item would exceed `max_width`. When
+the line would overflow, it emits a newline and restarts at the
+indented column. Items are always written as single-line `repr` strings
+in compact mode: if an individual item is itself a container wider than
+the available space, its repr overflows the line, but the formatter does
+not recurse into it. Compact mode is therefore best for homogeneous
+collections of short scalars.
+
+### `_safe_repr` (lines 561 to 600)
+
+<CpyLink path="Lib/pprint.py" lines="561-600" />
+
+```python
+def _safe_repr(object, context, maxlevels, level, sort_dicts):
+    typ = type(object)
+    if typ in _builtin_scalars:
+        return repr(object), True, False
+
+    r = getattr(typ, "__repr__", None)
+    if issubclass(typ, dict) and r is dict.__repr__:
+        ...
+        recursive = False
+        readable = True
+        components = []
+        append = components.append
+        level += 1
+        if id(object) in context:
+            return _recursion(object), False, True
+        context[id(object)] = 1
+        ...
+        del context[id(object)]
+        return '{%s}' % ', '.join(components), readable, recursive
+
+    ...
+    rep = repr(object)
+    return rep, (rep and not rep.startswith('<')), False
+```
+
+`_safe_repr` is a standalone recursive function (not a method) used by
+`isreadable` and `isrecursive`. It mirrors `_format`'s id-based recursion
+detection but instead of writing to a stream it returns a three-tuple:
+`(repr_string, is_readable, is_recursive)`. `is_readable` is `False` when
+the repr starts with `<` (indicating a non-eval-able object such as a
+function or a module) or when a nested object is not readable.
+`is_recursive` is `True` if any recursive reference was found. These two
+flags are what `PrettyPrinter.isreadable()` and `isrecursive()` expose to
+callers.
+
+## gopy mirror
+
+`pprint` depends only on `dataclasses`, `collections`, and `io`, all of
+which are either ported or straightforward to add. The module is marked
+`(stdlib pending)` pending a decision on whether to include formatting
+utilities in the initial stdlib tier.

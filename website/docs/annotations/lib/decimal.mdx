@@ -1,0 +1,181 @@
+---
+title: Lib/_pydecimal.py
+description: Pure-Python fallback implementation of the decimal module; defines Decimal, Context, rounding modes, and IEEE 754-2008 signals.
+cpython_path: Lib/_pydecimal.py
+cpython_version: "3.14"
+lines: 5600
+status: annotated
+ported_to: module/decimal/
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Lib/_pydecimal.py`
+
+<CpyLink path="Lib/_pydecimal.py" />
+
+`Lib/_pydecimal.py` is the pure-Python reference implementation of the
+decimal module. In a normal CPython build the C accelerator
+(`Modules/_decimal/_decimal.c`, backed by `libmpdec`) takes precedence
+and `_pydecimal` is never imported. The file exists as the specification
+that `_decimal` must match, and as the fallback for platforms where
+`libmpdec` is unavailable.
+
+The implementation stores each `Decimal` value as a sign bit, a tuple of
+integer digits (the coefficient), and an integer exponent. Special values
+(`Infinity`, `NaN`, `sNaN`) are represented by sentinel strings in the
+`_int` slot rather than actual digit tuples. Arithmetic is performed
+entirely through Python integer operations on those digit tuples.
+
+`Context` holds a precision (`prec`), a rounding mode, and an `Emax`/
+`Emin` exponent range. Every arithmetic result is rounded and checked for
+signals inside the context. The module-level functions
+`getcontext`/`setcontext`/`localcontext` manage a thread-local default
+context.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Lib/_pydecimal.py" lines="1-200">1-200</Cpy> | module docstring, imports, constants, signal classes | Defines `DecimalException` hierarchy: `Overflow`, `Underflow`, `Inexact`, `InvalidOperation`, `DivisionByZero`, `Clamped`, `Rounded`, `Subnormal`, `FloatOperation`. | `module/decimal/` |
+| <Cpy path="Lib/_pydecimal.py" lines="200-600">200-600</Cpy> | `Decimal.__new__`, `_convert_other`, `from_float` | Parses strings, ints, floats, and tuples into the internal sign/coefficient/exponent form; special-value detection. | `module/decimal/` |
+| <Cpy path="Lib/_pydecimal.py" lines="600-1000">600-1000</Cpy> | `__add__`, `__sub__`, `__mul__`, `__truediv__`, `__floordiv__`, `__mod__`, `__divmod__`, `__pow__` | Arithmetic operators; each calls a context method that applies precision rounding and signal trapping. | `module/decimal/` |
+| <Cpy path="Lib/_pydecimal.py" lines="1000-1500">1000-1500</Cpy> | `_add`, `_sub`, `_multiply`, `_divide` | Core coefficient-level arithmetic helpers that work on aligned digit tuples. | `module/decimal/` |
+| <Cpy path="Lib/_pydecimal.py" lines="1500-2500">1500-2500</Cpy> | comparison, conversion, `__str__`, `__repr__`, `to_eng_string`, `as_tuple`, `as_integer_ratio` | Ordering, `__eq__`/`__lt__` etc., string formatting (standard and engineering notation), and tuple unpacking. | `module/decimal/` |
+| <Cpy path="Lib/_pydecimal.py" lines="2500-3800">2500-3800</Cpy> | `Context.__init__`, `Context.create_decimal`, `Context` arithmetic methods | Context construction, per-operation rounding, signal trapping via `traps` dict, and the context arithmetic mirror methods. | `module/decimal/` |
+| <Cpy path="Lib/_pydecimal.py" lines="3800-4500">3800-4500</Cpy> | rounding functions: `_round_up`, `_round_down`, `_round_ceiling`, `_round_floor`, `_round_half_up`, `_round_half_down`, `_round_half_even`, `_round_05up` | One function per `ROUND_*` constant; each takes `(self, places)` and returns the rounded coefficient. | `module/decimal/` |
+| <Cpy path="Lib/_pydecimal.py" lines="4500-5600">4500-5600</Cpy> | `DefaultContext`, `BasicContext`, `ExtendedContext`, `getcontext`, `setcontext`, `localcontext`, `__all__` | Thread-local context management, pre-built context objects, and module export list. | `module/decimal/` |
+
+## Reading
+
+### Coefficient representation and `Decimal.__new__` (lines 200 to 600)
+
+<CpyLink path="Lib/_pydecimal.py" lines="200-600" />
+
+```python
+class Decimal:
+    __slots__ = ('_exp', '_int', '_sign', '_is_special')
+
+    def __new__(cls, value='0', context=None):
+        self = object.__new__(cls)
+        if isinstance(value, str):
+            m = _parser(value.strip().replace('_', ''))
+            if m is None:
+                raise InvalidOperation(...)
+            if m.group('signal'):
+                self._exp = 'N'; self._is_special = True
+                self._int = str(int(m.group('diag') or 0))
+                self._sign = 1 if m.group('sign') == '-' else 0
+            elif m.group('nan'):
+                self._exp = 'n'; self._is_special = True
+                ...
+            else:
+                intpart = m.group('int')
+                fracpart = m.group('frac') or ''
+                exp = int(m.group('exp') or 0)
+                self._int = str(int(intpart + fracpart))
+                self._exp = exp - len(fracpart)
+                self._sign = 1 if m.group('sign') == '-' else 0
+                self._is_special = False
+        ...
+        return self
+```
+
+The coefficient `_int` is stored as a plain decimal integer in string
+form, not as a digit tuple. This makes it straightforward to apply Python
+integer arithmetic when needed, at the cost of conversions to/from `int`.
+The exponent `_exp` is an integer for finite values, or the string `'n'`
+(NaN), `'N'` (sNaN), or `'F'` (Infinity) for special values.
+
+Parsing uses a single compiled regex `_parser` that covers the full
+numeric string syntax from the General Decimal Arithmetic specification.
+Underscores are stripped before parsing (added in 3.6 to match int/float
+literal syntax). A `context` argument is accepted but only used to trap
+`InvalidOperation` if the string is malformed.
+
+### `Context.create_decimal` and rounding (lines 2500 to 3800)
+
+<CpyLink path="Lib/_pydecimal.py" lines="2500-3800" />
+
+```python
+class Context:
+    def create_decimal(self, num='0'):
+        d = Decimal(num, self)
+        if d._is_special:
+            # NaN payloads are clipped to prec-1 digits
+            ...
+        ans = d._fix(self)
+        return ans
+
+    def _raise_error(self, condition, explanation=None, *args):
+        error = _condition_map.get(condition, condition)
+        if error in self.traps:
+            raise error(explanation)
+        else:
+            self.flags[error] = 1
+            return error().handle(self, *args)
+```
+
+`create_decimal` converts an input to `Decimal` and then calls `_fix` to
+apply precision and exponent range constraints. `_fix` is the central
+normalization routine: it rounds the coefficient to `prec` significant
+digits, detects overflow/underflow, handles subnormal exponents, and
+raises (or records) the appropriate signals.
+
+`_raise_error` distinguishes between trapped signals (which raise an
+exception immediately) and untrapped signals (which set a flag in
+`context.flags` and return a substitute value). The `traps` dict maps
+signal classes to booleans. `InvalidOperation` is trapped by default in
+`DefaultContext`; `BasicContext` traps all signals; `ExtendedContext`
+traps none.
+
+### `ROUND_HALF_EVEN` and the rounding dispatch (lines 3800 to 4500)
+
+<CpyLink path="Lib/_pydecimal.py" lines="3800-4500" />
+
+```python
+def _round(self, places, rounding):
+    if places <= 0:
+        raise ValueError("Cannot round to %d places" % places)
+    if self._is_special or self._int == '0':
+        ...
+    ans = Decimal((self._sign, (), self._exp))
+    # dispatch to the mode function
+    return getattr(self, '_round_' + rounding)(places)
+
+def _round_half_even(self, prec):
+    """Round half to even (banker's rounding)."""
+    if prec >= len(self._int):
+        return Decimal(self)
+    digits = self._int[:prec]
+    halfway = '5' + '0' * (len(self._int) - prec - 1)
+    if self._int[prec:] > halfway:
+        return _round_up(self, prec)
+    elif self._int[prec:] < halfway:
+        return _round_down(self, prec)
+    else:
+        # Exactly halfway: round to even digit.
+        if int(self._int[prec - 1]) % 2 == 0:
+            return _round_down(self, prec)
+        return _round_up(self, prec)
+```
+
+Rounding is dispatched by constructing a method name from the `rounding`
+string constant and looking it up with `getattr`. Each `_round_X` method
+receives the number of significant digits to keep and returns a new
+`Decimal` with the truncated coefficient. The digit comparison against
+the `halfway` string works because the coefficient is a left-aligned
+decimal string: lexicographic comparison of digit strings is equivalent
+to numeric comparison when the strings are the same length.
+
+`ROUND_HALF_EVEN` (banker's rounding) rounds up or down to make the last
+kept digit even, breaking ties without statistical bias. It is the
+default rounding mode.
+
+## gopy mirror
+
+`module/decimal/` tracks this file. The C extension `_decimal` / `libmpdec`
+is the production path in CPython; a Go port would use Go's
+`math/big.Float` or a dedicated decimal library as the coefficient store.
+The module annotation captures the pure-Python semantics so the Go port
+can be validated against them without depending on `libmpdec`.

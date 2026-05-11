@@ -1,0 +1,212 @@
+---
+title: Modules/gcmodule.c
+description: C implementation of the gc module. Cyclic garbage collector with three generations, freeze/unfreeze for immortal objects, and the full gc.* public API.
+cpython_path: Modules/gcmodule.c
+cpython_version: "3.14"
+lines: 1200
+status: annotated
+ported_to: module/gc/
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Modules/gcmodule.c`
+
+<CpyLink path="Modules/gcmodule.c" />
+
+The `gc` module exposes CPython's cyclic garbage collector to Python code.
+CPython's reference-counting engine handles the common case of object
+deallocation, but reference cycles (object A holds a reference to B, which
+holds a reference back to A) keep both objects alive forever under pure
+reference counting. `gcmodule.c` implements the tri-generational mark-and-sweep
+collector that breaks these cycles.
+
+The collector tracks every GC-managed object in one of three doubly-linked
+generation lists. A collection traverses all reachable objects, subtracts
+internal reference counts to find objects that are only referenced from within
+the candidate set, and finalises or frees those with zero external references.
+
+This file also owns the entire `gc.*` Python-visible API: `gc.collect()`,
+`gc.enable()` / `gc.disable()` / `gc.isenabled()`, `gc.get_count()`,
+`gc.get_threshold()` / `gc.set_threshold()`, `gc.get_objects()`,
+`gc.get_referrers()` / `gc.get_referents()`, `gc.freeze()` / `gc.unfreeze()` /
+`gc.get_freeze_count()`, `gc.is_finalized()`, the `gc.garbage` list, and the
+`gc.callbacks` hook list.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Modules/gcmodule.c" lines="1-200">1-200</Cpy> | `GC_NEXT`/`GC_PREV`, `GcState`, `gc_enable`, `gc_disable`, `gc_isenabled`, `gc_collect` | Generation list macros, per-interpreter GC state, enable/disable/collect public API. | `module/gc/` |
+| <Cpy path="Modules/gcmodule.c" lines="200-500">200-500</Cpy> | `gc_get_count`, `gc_get_threshold`, `gc_set_threshold`, `gc_get_stats` | Collection counters, generation thresholds, per-generation statistics. | `module/gc/` |
+| <Cpy path="Modules/gcmodule.c" lines="500-800">500-800</Cpy> | `gc_get_objects`, `gc_get_referrers`, `gc_get_referents` | Object enumeration and reference graph traversal via `tp_traverse`. | `module/gc/` |
+| <Cpy path="Modules/gcmodule.c" lines="800-1000">800-1000</Cpy> | `gc_freeze`, `gc_unfreeze`, `gc_get_freeze_count` | Freeze/unfreeze permanent generation for immortal objects (CPython 3.12+). | `module/gc/` |
+| <Cpy path="Modules/gcmodule.c" lines="1000-1200">1000-1200</Cpy> | `gc_is_finalized`, `gc_callbacks`, `gc_garbage`, `gc_DEBUG_*`, `_gcmodule`, `PyInit_gc` | Finalization query, callback list, uncollectable garbage list, debug flags, module definition. | `module/gc/` |
+
+## Reading
+
+### `gc.collect()` triggering (lines 1 to 200)
+
+<CpyLink path="Modules/gcmodule.c" lines="1-200" />
+
+GC-tracked objects are linked into a doubly-linked list through the
+`PyGC_Head` header that precedes every GC-managed object in memory.
+The macros `GC_NEXT` and `GC_PREV` abstract the list pointer arithmetic:
+
+```c
+#define GC_NEXT(o)   ((PyGC_Head *)(o)->_gc_next)
+#define GC_PREV(o)   ((PyGC_Head *)(o)->_gc_prev)
+```
+
+The per-interpreter `GcState` struct holds three generation lists and the
+threshold counters that control when a collection is triggered:
+
+```c
+struct _gc_runtime_state {
+    PyObject        *trash_delete_later;
+    int              trash_delete_nesting;
+    int              enabled;
+    int              debug;
+    struct gc_generation generations[NUM_GENERATIONS];  /* 0, 1, 2 */
+    PyGC_Head       *generation0;
+    struct gc_generation permanent_generation;           /* frozen objects */
+    struct gc_collection_stats stats[NUM_GENERATIONS];
+    Py_ssize_t       long_lived_pending;
+    Py_ssize_t       long_lived_total;
+};
+```
+
+`gc_collect` drives the collector. When called without arguments it selects
+the highest generation that has crossed its threshold; when called with an
+explicit `generation` argument it collects exactly that generation and all
+younger ones:
+
+```c
+static PyObject *
+gc_collect_impl(PyObject *module, int generation)
+{
+    PyThreadState *tstate = _PyThreadState_GET();
+    GcState *gcstate = &tstate->interp->gc;
+
+    if (gcstate->collecting) {
+        /* Reentrant call; return 0 immediately. */
+        return PyLong_FromSsize_t(0);
+    }
+    gcstate->collecting = 1;
+    Py_ssize_t n = collect_with_callback(tstate, generation);
+    gcstate->collecting = 0;
+    return PyLong_FromSsize_t(n);
+}
+```
+
+`collect_with_callback` invokes each callable in `gc.callbacks` before and
+after the collection, passing a `{"collected": n, "uncollectable": m}` dict.
+
+The allocation counter in generation 0 is incremented by
+`_PyObject_GC_Alloc` on every allocation. When it exceeds
+`gcstate->generations[0].threshold`, CPython schedules a generation-0
+collection at the next safe point.
+
+### `gc.freeze()` and immortal objects (lines 800 to 1000)
+
+<CpyLink path="Modules/gcmodule.c" lines="800-1000" />
+
+`gc.freeze()` moves every object currently in the three normal generations
+into the `permanent_generation` list. Objects in the permanent generation are
+never considered for collection and are never traversed by the collector,
+making them effectively immortal from the GC's perspective.
+
+This is used by Python's `multiprocessing` fork-server to pre-populate the
+parent interpreter's heap before forking. Because frozen objects are not
+tracked by the per-child GC, the child process avoids touching (and thus
+dirtying) the parent's copy-on-write pages:
+
+```c
+static PyObject *
+gc_freeze_impl(PyObject *module)
+{
+    PyThreadState *tstate = _PyThreadState_GET();
+    GcState *gcstate = &tstate->interp->gc;
+
+    for (int i = 0; i < NUM_GENERATIONS; i++) {
+        PyGC_Head *gen_head = GEN_HEAD(gcstate, i);
+        PyGC_Head *perm_head = &gcstate->permanent_generation.head;
+        /* Splice the entire generation list onto the permanent list. */
+        if (!gc_list_is_empty(gen_head)) {
+            gc_list_merge(gen_head, perm_head);
+        }
+        gcstate->generations[i].count = 0;
+    }
+    Py_RETURN_NONE;
+}
+```
+
+`gc_list_merge` does O(1) linked-list surgery: it repoints the tail of the
+source list to the head of the destination and vice versa, then reinitialises
+the source to an empty sentinel.
+
+`gc.unfreeze()` moves all objects back from `permanent_generation` into
+generation 2, allowing them to be collected again. `gc.get_freeze_count()`
+returns `permanent_generation.count` without traversal.
+
+### `get_referrers()` traversal (lines 500 to 800)
+
+<CpyLink path="Modules/gcmodule.c" lines="500-800" />
+
+`gc.get_referrers(*objs)` returns a list of every GC-tracked object that
+holds a reference to any of the given objects. It walks all three generation
+lists and calls each object's `tp_traverse` slot with a custom visitor:
+
+```c
+typedef struct {
+    PyObject    *objs;   /* tuple of target objects */
+    PyObject    *result; /* list being built */
+} TraverseData;
+
+static int
+referrers_traverse(PyObject *obj, void *arg)
+{
+    TraverseData *d = (TraverseData *)arg;
+    if (PySequence_Contains(d->objs, obj)) {
+        /* obj is referenced by the object currently being traversed. */
+        /* The currently-traversed object is passed via the traversal
+           callback's outer context; see collect_referrers_to(). */
+    }
+    return 0;
+}
+```
+
+The outer loop passes each candidate object to `tp_traverse`; if the visitor
+fires for any of the target objects, the candidate is added to the result
+list. Because `tp_traverse` only visits objects that the candidate holds
+direct references to, `get_referrers` returns *direct* referrers only, not
+the full transitive closure.
+
+`gc.get_referents(*objs)` is the inverse: it calls `tp_traverse` on each of
+the given objects and collects everything the visitor is called with, building
+the set of objects directly referenced by the arguments.
+
+`gc.get_objects(generation=None)` walks whichever generation lists are
+requested (or all three if `generation` is `None`) and returns their contents
+as a list, excluding the list object itself.
+
+## gopy mirror
+
+`module/gc/` (pending). The GC state maps to a Go struct with three
+`gcGeneration` slices indexed 0, 1, 2, plus a `permanent` slice for frozen
+objects. Each generation holds a doubly-linked list of `*GcHead` nodes that
+prefix every tracked object. `Collect`, `Enable`, `Disable`, `Freeze`,
+`GetReferrers`, and `GetReferents` port the corresponding CPython functions
+above. The `gc.garbage` and `gc.callbacks` module attributes are plain
+`*objects.List` values stored in the module's namespace dict.
+
+## CPython 3.14 changes
+
+The permanent generation and `gc.freeze()` / `gc.unfreeze()` / `gc.get_freeze_count()`
+were added in CPython 3.12 (bpo-45953). Before 3.12 there were only three
+generations and no freeze API. The per-interpreter `GcState` (formerly global
+in `Modules/gcmodule.c`) moved into `PyInterpreterState` in 3.9 as part of
+the per-interpreter GC work. In 3.13 the GIL-free build introduced an
+incremental collector; the interface seen by Python code (`gc.collect()`,
+thresholds, callbacks) is unchanged, but the internal collection algorithm
+differs when `--disable-gil` is used.

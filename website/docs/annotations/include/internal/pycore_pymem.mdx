@@ -1,0 +1,134 @@
+---
+title: Include/internal/pycore_pymem.h
+description: Internal memory allocator API covering the three allocation domains, arena helpers, and tracemalloc hooks.
+cpython_path: Include/internal/pycore_pymem.h
+cpython_version: "3.14"
+lines: 150
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Include/internal/pycore_pymem.h`
+
+<CpyLink path="Include/internal/pycore_pymem.h" />
+
+<overview>
+This header is the internal face of CPython's layered memory allocator. The
+public `pymem.h` exposes `PyMem_Malloc` and friends; this header exposes the
+machinery underneath: allocator structs with function-pointer tables, arena
+management, profiling hooks, and setup utilities.
+
+Three allocation domains are defined:
+
+- **`PYMEM_DOMAIN_RAW`** -- direct OS malloc. Used for interpreter bootstrap
+  and for allocations that must not be redirected by a custom allocator.
+- **`PYMEM_DOMAIN_MEM`** -- pymalloc, a pool-and-arena allocator tuned for
+  objects under 512 bytes. Sits on top of RAW.
+- **`PYMEM_DOMAIN_OBJ`** -- the object allocator. In a standard build this is
+  pymalloc again; in a free-threaded build it is routed through mimalloc.
+
+The central struct `_PyMemAllocatorEx` holds four function pointers
+(`malloc`, `calloc`, `realloc`, `free`) plus a `void *ctx` so that custom
+allocators set via `PyMem_SetAllocator` can carry their own state.
+</overview>
+
+## Map
+
+| Symbol | Kind | Notes |
+|--------|------|-------|
+| `PYMEM_DOMAIN_RAW` | enum / int constant | OS-level allocation. |
+| `PYMEM_DOMAIN_MEM` | enum / int constant | pymalloc pool allocator. |
+| `PYMEM_DOMAIN_OBJ` | enum / int constant | Object allocator (pymalloc or mimalloc). |
+| `_PyMemAllocatorEx` | struct | Four function pointers plus `ctx`. |
+| `_PyObjectArenaAllocator` | struct | `alloc` / `free` pair for arena pages. |
+| `_PyMem_ArenaAlloc` | function decl | Allocates one arena page from the OS. |
+| `_PyMem_ArenaFree` | function decl | Returns an arena page to the OS. |
+| `_PyMem_SetupAllocators` | function decl | Installs the default allocator set. |
+| `_PyTraceMalloc_Track` | function decl | Records an allocation for tracemalloc. |
+| `_PyTraceMalloc_Untrack` | function decl | Removes a tracked allocation. |
+| `_PyMem_GetCurrentAllocatorName` | function decl | Returns `"pymalloc"`, `"malloc"`, etc. |
+
+## Reading
+
+### `_PyMemAllocatorEx`
+
+Every domain is represented by one instance of this struct. Swapping a custom
+allocator in via `PyMem_SetAllocator` replaces the function pointers for the
+chosen domain:
+
+```c
+// Include/internal/pycore_pymem.h (abridged)
+typedef struct {
+    void *ctx;
+    void *(*malloc)  (void *ctx, size_t size);
+    void *(*calloc)  (void *ctx, size_t nelem, size_t elsize);
+    void *(*realloc) (void *ctx, void *ptr, size_t new_size);
+    void  (*free)    (void *ctx, void *ptr);
+} _PyMemAllocatorEx;
+```
+
+The `ctx` field lets a custom allocator carry private state without a global
+variable. CPython's own allocators pass `NULL` and ignore it.
+
+### Arena allocation
+
+pymalloc manages fixed-size arena pages (256 KB by default). The arena layer is
+separate from the pool layer so the OS-facing calls can be intercepted
+independently:
+
+```c
+// Include/internal/pycore_pymem.h
+typedef struct {
+    void *ctx;
+    void *(*alloc)  (void *ctx, size_t size);
+    void  (*free)   (void *ctx, void *ptr, size_t size);
+} _PyObjectArenaAllocator;
+
+PyAPI_FUNC(void) _PyMem_ArenaAlloc(void);
+PyAPI_FUNC(void) _PyMem_ArenaFree(void *ptr, size_t size);
+```
+
+`_PyMem_ArenaAlloc` calls `mmap` on POSIX systems and `VirtualAlloc` on
+Windows. The size parameter passed to `_PyMem_ArenaFree` lets the OS reclaim
+the exact mapping rather than scanning a free list.
+
+### tracemalloc hooks
+
+`_PyTraceMalloc_Track` is called by the allocator wrappers after every
+successful allocation when tracemalloc is active. It records the pointer, size,
+and current call stack into a hash table keyed by domain:
+
+```c
+// CPython: Modules/_tracemalloc.c (simplified call site)
+void *ptr = raw_malloc(size);
+if (ptr != NULL && _PyTraceMalloc_IsEnabled()) {
+    _PyTraceMalloc_Track(PYMEM_DOMAIN_OBJ, (uintptr_t)ptr, size);
+}
+```
+
+The symmetric `_PyTraceMalloc_Untrack` call is inserted at every `free` site.
+Forgetting either side produces phantom leaks or spurious untrack errors in
+`tracemalloc.get_traced_memory()`.
+
+## gopy mirror
+
+gopy does not port this header. Go's garbage collector tracks all allocations
+automatically. There are no arena pages, no domain splits, and no tracemalloc
+equivalent needed.
+
+If a future gopy diagnostic tool wants allocation statistics at the Python-object
+level, the appropriate hook would be a Go `runtime.SetFinalizer` or a custom
+`sync.Pool`, not a port of pymalloc.
+
+## CPython 3.14 changes
+
+- The `PYMEM_DOMAIN_OBJ` path gained a branch for the free-threaded build that
+  routes through mimalloc instead of pymalloc (see `pycore_mimalloc.h`).
+- `_PyMem_GetCurrentAllocatorName` was added in 3.13 and stabilised in 3.14;
+  it returns a string suitable for embedding in diagnostics.
+- `_PyTraceMalloc_Track` received an additional `domain` argument in 3.12 and
+  kept that signature through 3.14.
+- Arena size is now a runtime parameter (`_Py_GetConfig()->arena_size`) rather
+  than a compile-time constant, enabling embedders to tune memory usage without
+  recompilation.

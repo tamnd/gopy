@@ -1,0 +1,99 @@
+---
+title: Include/internal/pycore_setobject.h
+description: Internal API for set and frozenset iteration, membership testing, and bulk mutation.
+cpython_path: Include/internal/pycore_setobject.h
+cpython_version: "3.14"
+lines: 42
+status: annotated
+ported_to: ""
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Include/internal/pycore_setobject.h`
+
+<CpyLink path="Include/internal/pycore_setobject.h" />
+
+This header declares the non-public entry points into the set implementation. The `PySetObject` struct itself (defined in `Include/cpython/setobject.h`) uses open-addressing with linear probing over an array of `setentry` records, each holding a key pointer and a cached hash. A fixed-size inline table of 8 entries (`smalltable`) avoids heap allocation for small sets; larger sets spill into a separately `malloc`ed block pointed to by `table`.
+
+The dummy sentinel (`_PySet_Dummy`) marks deleted slots. Because probing chains must not be broken by a true NULL, deleted entries are replaced with the dummy rather than cleared. The `fill` counter counts both active and dummy entries so the load-factor resize trigger fires before the table fills with dummies. `finger` is a roving index used by `set.pop()` to avoid rescanning from slot 0 on every pop.
+
+`_PySet_NextEntry` and `_PySet_NextEntryRef` are the iteration primitives consumed by `pickle` and `abc`. `_PySet_Contains` is the membership predicate used by `_abc` to bypass the public `PySequence_Contains` overhead. `_PySet_Update` is the bulk-insert path exported to `pickle` for deserializing frozen sets.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| 12-16 | `_PySet_NextEntry` | Advance a positional iterator, return key and hash (borrowed ref) | not ported |
+| 19-23 | `_PySet_NextEntryRef` | Same as above but returns a new strong reference to the key | not ported |
+| 26 | `_PySet_Update` | Bulk-insert all items from an iterable into a set | not ported |
+| 29 | `_PySet_Dummy` | Global dummy-sentinel object used to mark deleted hash-table slots | not ported |
+| 31 | `_PySet_Contains` | Membership test that bypasses `PyObject_Hash` error overhead | not ported |
+| 34-36 | `_PySet_ClearInternal`, `_PySet_AddTakeRef` | Lock-free clear (used by `_PyCode_Fini`) and a steal-reference add | not ported |
+
+## Reading
+
+### setentry and PySetObject layout (cpython/setobject.h lines 20 to 59)
+
+<CpyLink path="Include/cpython/setobject.h" lines="20-59" />
+
+The `setentry` struct is two words: a key pointer and a cached hash. The `PySetObject` struct wraps this with the standard object header, counters (`fill`, `used`, `mask`), the table pointer, the frozenset hash cache, `finger`, the inline `smalltable[8]`, and a weak-reference list.
+
+```c
+typedef struct {
+    PyObject  *key;
+    Py_hash_t  hash;   /* cached hash of key */
+} setentry;
+
+typedef struct {
+    PyObject_HEAD
+    Py_ssize_t  fill;           /* active + dummy entries */
+    Py_ssize_t  used;           /* active entries only */
+    Py_ssize_t  mask;           /* table size minus 1 (always power-of-2 - 1) */
+    setentry   *table;          /* points to smalltable or heap block */
+    Py_hash_t   hash;           /* frozenset only; -1 for set */
+    Py_ssize_t  finger;         /* pop() roving cursor */
+    setentry    smalltable[PySet_MINSIZE];  /* inline table for small sets */
+    PyObject   *weakreflist;
+} PySetObject;
+```
+
+### Iteration API (lines 12 to 23)
+
+<CpyLink path="Include/internal/pycore_setobject.h" lines="12-23" />
+
+Both iteration functions accept a `Py_ssize_t *pos` cursor that must be initialised to 0. On each call they advance `pos` past empty and dummy slots, write the current key and hash into the caller's pointers, and return 1 until the table is exhausted. `_PySet_NextEntryRef` increments the key's reference count before returning; `_PySet_NextEntry` returns a borrowed reference and is faster when the caller holds the GIL for the entire loop.
+
+```c
+PyAPI_FUNC(int) _PySet_NextEntry(
+    PyObject *set, Py_ssize_t *pos, PyObject **key, Py_hash_t *hash);
+
+PyAPI_FUNC(int) _PySet_NextEntryRef(
+    PyObject *set, Py_ssize_t *pos, PyObject **key, Py_hash_t *hash);
+```
+
+### Dummy sentinel and membership test (lines 29 to 31)
+
+<CpyLink path="Include/internal/pycore_setobject.h" lines="29-31" />
+
+`_PySet_Dummy` is a module-level singleton. Any `setentry` whose `key == _PySet_Dummy` and `hash == -1` is a deleted (tombstone) slot. `_PySet_Contains` takes a typed `PySetObject *` rather than a generic `PyObject *`, which lets the `_abc` module skip the type-check overhead of `PySequence_Contains`.
+
+```c
+PyAPI_DATA(PyObject *) _PySet_Dummy;
+PyAPI_FUNC(int)        _PySet_Contains(PySetObject *so, PyObject *key);
+```
+
+### Bulk mutation helpers (lines 34 to 37)
+
+<CpyLink path="Include/internal/pycore_setobject.h" lines="34-37" />
+
+`_PySet_ClearInternal` drains the table without acquiring any locks; it is called from `_PyCode_Fini` during interpreter shutdown where normal locking is not safe. `_PySet_AddTakeRef` steals the caller's reference to `key`, avoiding a redundant `Py_INCREF`/`Py_DECREF` pair in hot insertion paths.
+
+```c
+extern void _PySet_ClearInternal(PySetObject *so);
+PyAPI_FUNC(int) _PySet_AddTakeRef(PySetObject *so, PyObject *key);
+```
+
+## gopy mirror
+
+Not yet ported.

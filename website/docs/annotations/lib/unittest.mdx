@@ -1,0 +1,224 @@
+---
+title: Lib/unittest/__init__.py
+description: Python's built-in unit testing framework; provides TestCase, TestSuite, TestLoader, TextTestRunner, TestResult, and test decorators.
+cpython_path: Lib/unittest/__init__.py
+cpython_version: "3.14"
+lines: 3500
+status: annotated
+ported_to: (stdlib pending)
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Lib/unittest/__init__.py`
+
+<CpyLink path="Lib/unittest/__init__.py" />
+
+`unittest` is a pure-Python testing framework modeled after JUnit. The
+package is split across several files that `__init__.py` imports and
+re-exports: `case.py` (roughly 1600 lines, `TestCase` and all assertion
+helpers), `suite.py` (~250 lines, `TestSuite`), `loader.py` (~400 lines,
+`TestLoader` and `discover`), `runner.py` (~250 lines, `TextTestRunner`
+and `TextTestResult`), `result.py` (~250 lines, `TestResult`),
+`signals.py` (SIGINT handling), `util.py` (shared helpers), and
+`async_case.py` (`IsolatedAsyncioTestCase`).
+
+The framework follows the xUnit protocol: `TestCase.run` calls `setUp`,
+then the test method, then `tearDown`, routing exceptions into the
+`TestResult` object. `TestSuite.run` iterates members and calls
+`test.run(result)` for each. `TestLoader` discovers tests by inspecting
+modules and classes for names that match a configurable prefix pattern.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Lib/unittest/case.py" lines="1-100">case.py 1-100</Cpy> | `TestCase.__init__`, `setUp`, `tearDown`, `addCleanup`, `doCleanups` | Construction stores the test method name; `addCleanup` appends `(func, args, kwargs)` to a stack popped by `doCleanups` after `tearDown`. | `(stdlib pending)` |
+| <Cpy path="Lib/unittest/case.py" lines="100-400">case.py 100-400</Cpy> | `TestCase.run`, `_callSetUp`, `_callTestMethod`, `_callTearDown`, `_callCleanups` | Core xUnit lifecycle; each step is isolated in a `try/except` so that `tearDown` always runs even if `setUp` fails, and cleanups always run even if `tearDown` fails. | `(stdlib pending)` |
+| <Cpy path="Lib/unittest/case.py" lines="400-900">case.py 400-900</Cpy> | `assertEqual`, `assertNotEqual`, `assertTrue`, `assertFalse`, `assertIs`, `assertIsNone`, `assertIn`, `assertRaises`, `assertWarns`, `assertLogs`, `assertRaisesRegex` | Assertion methods; most delegate to `_baseAssertEqual` which calls `==` and raises `AssertionError` with a diff on failure. | `(stdlib pending)` |
+| <Cpy path="Lib/unittest/case.py" lines="900-1200">case.py 900-1200</Cpy> | `assertRaises` context manager, `_AssertRaisesContext`, `_AssertWarnsContext`, `subTest` | `_AssertRaisesContext.__exit__` checks `issubclass(exc_type, self.expected)` and re-raises or returns as appropriate; `subTest` is a context manager that records sub-test failures without stopping the parent test. | `(stdlib pending)` |
+| <Cpy path="Lib/unittest/case.py" lines="1200-1600">case.py 1200-1600</Cpy> | `@skip`, `@skipIf`, `@skipUnless`, `@expectedFailure`, `_Outcome` | Decorator helpers that raise `SkipTest` or mark a test as `expectedFailure`; `_Outcome` is an internal mutable result collector used inside `run`. | `(stdlib pending)` |
+| <Cpy path="Lib/unittest/suite.py" lines="1-250">suite.py 1-250</Cpy> | `TestSuite`, `_ErrorHolder`, `_call_if_exists` | `addTest` / `addTests` append to an internal list; `run` iterates calling `test.run(result)`; `_ErrorHolder` wraps a class-level setUp/tearDown error as a fake test. | `(stdlib pending)` |
+| <Cpy path="Lib/unittest/loader.py" lines="1-300">loader.py 1-300</Cpy> | `TestLoader`, `loadTestsFromModule`, `loadTestsFromTestCase`, `loadTestsFromName`, `discover` | `loadTestsFromTestCase` introspects a class for methods starting with `testMethodPrefix` (default `'test'`) and sorts them; `discover` walks a directory tree looking for `test*.py` files. | `(stdlib pending)` |
+| <Cpy path="Lib/unittest/runner.py" lines="1-250">runner.py 1-250</Cpy> | `TextTestResult`, `TextTestRunner` | `TextTestResult` extends `TestResult` with stream output and dot/verbose progress; `TextTestRunner.run` creates a `TextTestResult`, calls `suite.run(result)`, prints a summary, and returns the result. | `(stdlib pending)` |
+
+## Reading
+
+### `TestCase.run` lifecycle (case.py lines 100 to 400)
+
+<CpyLink path="Lib/unittest/case.py" lines="100-400" />
+
+```python
+def run(self, result=None):
+    if result is None:
+        result = self.defaultTestResult()
+        startTestRun = getattr(result, 'startTestRun', None)
+        stopTestRun = getattr(result, 'stopTestRun', None)
+        if startTestRun is not None:
+            startTestRun()
+    else:
+        stopTestRun = None
+
+    result.startTest(self)
+    testMethod = getattr(self, self._testMethodName)
+    if (getattr(self.__class__, "__unittest_skip__", False) or
+            getattr(testMethod, "__unittest_skip__", False)):
+        try:
+            skip_why = (getattr(self.__class__,
+                                '__unittest_skip_why__', '')
+                        or getattr(testMethod,
+                                   '__unittest_skip_why__', ''))
+            self._addSkip(result, self.id(), skip_why)
+        finally:
+            result.stopTest(self)
+        return
+    expecting_failure_method = getattr(testMethod,
+        "__unittest_expecting_failure__", False)
+    expecting_failure_class = getattr(self,
+        "__unittest_expecting_failure__", False)
+    expecting_failure = (expecting_failure_class or
+                         expecting_failure_method)
+    outcome = _Outcome(result)
+    try:
+        self._outcome = outcome
+        with outcome.testPartExecutor(self):
+            self._callSetUp()
+        if outcome.success:
+            outcome.expecting_failure = expecting_failure
+            with outcome.testPartExecutor(self, isTest=True):
+                self._callTestMethod()
+            outcome.expecting_failure = False
+            with outcome.testPartExecutor(self):
+                self._callTearDown()
+
+        self.doCleanups()
+        ...
+    finally:
+        outcome = self._outcome
+        result.stopTest(self)
+        if stopTestRun is not None:
+            stopTestRun()
+```
+
+`run` uses `_Outcome` as a mutable result accumulator. Each phase
+(`setUp`, test method, `tearDown`) runs inside a `testPartExecutor`
+context manager that catches exceptions and routes them to the result
+without propagating them. This is what allows `tearDown` to always execute
+even when `setUp` raises, and `doCleanups` to always run regardless of
+what `tearDown` did.
+
+`@skip` and `@expectedFailure` are checked at the start of `run` via
+`__unittest_skip__` and `__unittest_expecting_failure__` attributes. A
+skipped test calls `result.addSkip` and returns immediately without
+executing `setUp` or the test method. An expected failure that unexpectedly
+passes is reported via `result.addUnexpectedSuccess`.
+
+### `assertRaises` context manager (case.py lines 900 to 1200)
+
+<CpyLink path="Lib/unittest/case.py" lines="900-1200" />
+
+```python
+class _AssertRaisesContext(_AssertRaisesBaseContext):
+    _base_type = BaseException
+    _base_type_str = 'BaseException'
+
+    def __exit__(self, exc_type, exc_value, tb):
+        if exc_type is None:
+            # No exception raised
+            try:
+                exc_name = self.expected.__name__
+            except AttributeError:
+                exc_name = str(self.expected)
+            if self.obj_name:
+                self._raiseFailure("{} not raised by {}".format(
+                    exc_name, self.obj_name))
+            else:
+                self._raiseFailure("{} not raised".format(exc_name))
+        else:
+            traceback.clear_frames(tb)
+
+        if not issubclass(exc_type, self.expected):
+            # Let unexpected exceptions propagate
+            return False
+        self.exception = exc_value.with_traceback(None)
+        if self.expected_regex is not None:
+            expected_regex = self.expected_regex
+            if not expected_regex.search(str(exc_value)):
+                self._raiseFailure('"{}" does not match "{}"'.format(
+                    expected_regex.pattern, str(exc_value)))
+        return True
+```
+
+When used as `with self.assertRaises(SomeError):`, the `with` block's
+`__exit__` is called with the exception info if an exception occurred, or
+with three `None` arguments if no exception was raised. The first branch
+handles the no-exception case and calls `_raiseFailure` (which raises
+`AssertionError`). The second branch checks `issubclass(exc_type,
+self.expected)`: returning `False` lets an unrelated exception propagate
+normally; returning `True` suppresses the exception and stores it as
+`self.exception` so that the test can inspect `exc.exception.args` or
+`exc.exception.foo` after the `with` block.
+
+`assertRaisesRegex` works identically but adds a regex check on the string
+representation of the caught exception before returning `True`.
+
+### `TestLoader.discover` (loader.py lines 1 to 300)
+
+<CpyLink path="Lib/unittest/loader.py" lines="1-300" />
+
+```python
+def discover(self, start_dir, pattern='test*.py',
+             top_level_dir=None):
+    set_implicit_top = False
+    if top_level_dir is None and self._top_level_dir is None:
+        set_implicit_top = True
+        top_level_dir = start_dir
+
+    if top_level_dir is not None:
+        self._top_level_dir = os.path.abspath(top_level_dir)
+        if top_level_dir not in sys.path:
+            sys.path.insert(0, top_level_dir)
+
+    start_dir = os.path.abspath(start_dir)
+    tests = list(self._find_tests(start_dir, pattern))
+    suite = self._get_parent_module_tests(tests, start_dir, top_level_dir)
+    if set_implicit_top:
+        self._top_level_dir = None
+    return suite
+
+def _find_tests(self, start_dir, pattern):
+    paths = os.listdir(start_dir)
+    for path in paths:
+        full_path = os.path.join(start_dir, path)
+        if os.path.isfile(full_path):
+            if fnmatch.fnmatch(path, pattern):
+                yield self._get_module_from_path(full_path)
+        elif os.path.isdir(full_path):
+            if (not os.path.isfile(
+                    os.path.join(full_path, '__init__.py'))):
+                continue  # not a package
+            yield from self._find_tests(full_path, pattern)
+```
+
+`discover` uses `fnmatch` to match filenames against `pattern` (default
+`'test*.py'`). It only recurses into directories that contain an
+`__init__.py`, treating them as packages so that import paths are
+constructed correctly. The `top_level_dir` is temporarily inserted at the
+front of `sys.path` so that `import` resolves relative to it; the loader
+records `self._top_level_dir` so that `_get_module_from_path` can
+construct a dotted module name by stripping the top-level prefix.
+
+After loading, each module is passed to `loadTestsFromModule`, which calls
+`dir(module)`, filters names with `isinstance(obj, type) and
+issubclass(obj, TestCase)`, and calls `loadTestsFromTestCase` on each
+matching class.
+
+## gopy mirror
+
+`unittest` depends on `inspect`, `fnmatch`, `os.path`, `sys.path`,
+`traceback`, and `re`. The gopy port is deferred until the stdlib gate
+covers it. When it ships, `TestCase` will be a Go struct with a
+`TestingT`-compatible interface, `TestSuite.run` will use goroutines for
+parallel suites (matching `failfast` semantics), and `discover` will use
+`filepath.WalkDir`. The `@skip` / `@expectedFailure` decorators will be
+Go struct tags or build-tag-equivalent mechanisms applied to test methods.

@@ -1,0 +1,112 @@
+---
+title: Lib/dbm/__init__.py
+description: Unified interface for the dbm family of key-value database backends, selecting the best available implementation at runtime.
+cpython_path: Lib/dbm/__init__.py
+cpython_version: "3.14"
+lines: 170
+status: annotated
+ported_to: ""
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Lib/dbm/__init__.py`
+
+<CpyLink path="Lib/dbm/__init__.py" />
+
+The `dbm` package presents a single, consistent interface over several underlying key-value database implementations that may or may not be present on a given platform. A caller can open a database with `dbm.open()` without knowing which backend is installed, and the module handles discovery and dispatch automatically. The three possible backends are `dbm.gnu` (GNU gdbm), `dbm.ndbm` (the classic ndbm API, often provided by Berkeley DB), and `dbm.dumb` (a portable pure-Python fallback that never fails to import).
+
+Backend priority runs from fastest to most portable. When more than one backend is available, `gnu` is tried first, then `ndbm`, then `dumb`. The `whichdb(filename)` function performs the reverse operation: given a path to an existing database file, it reads the file header and returns the name of the module that originally created it, or `None` if the file cannot be identified.
+
+All three backends expose the same minimal dict-like interface. Keys and values must be byte strings or objects that implement the buffer protocol. The returned object supports `__getitem__`, `__setitem__`, `__delitem__`, `__contains__`, `keys()`, and the context manager protocol. Iteration and `values()` are intentionally absent from the base specification to match the lowest-common-denominator guarantee of the C-level ndbm interface.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| 1-30 | module header | Imports, `__all__`, `error` alias tuple | |
+| 31-70 | `whichdb(filename)` | Reads file magic bytes to identify the backend module | |
+| 71-100 | `_defaultmod`, `_modules` | Backend discovery, builds ordered list at import time | |
+| 101-140 | `open(file, flag, mode)` | Dispatches to the appropriate backend `open()` | |
+| 141-155 | `_Database` abstract notes | Documents the expected interface for backend objects | |
+| 156-170 | `__init__` re-exports | Exposes `error`, `open`, `whichdb` at package level | |
+
+## Reading
+
+### Backend discovery (lines 71 to 100)
+
+<CpyLink path="Lib/dbm/__init__.py" lines="71-100" />
+
+At import time the module attempts to import each backend in priority order and records those that succeed. `_defaultmod` is set to the first backend that imports successfully. `_modules` is a dict mapping module name strings to module objects for all available backends. This eager-import strategy means backend availability is checked once at startup rather than on every call to `open()`.
+
+```python
+_names = ['dbm.gnu', 'dbm.ndbm', 'dbm.dumb']
+_defaultmod = None
+_modules = {}
+
+for _name in _names:
+    try:
+        _mod = __import__(_name, fromlist=['open'])
+    except ImportError:
+        continue
+    if _defaultmod is None:
+        _defaultmod = _mod
+    _modules[_name] = _mod
+```
+
+### `whichdb` (lines 31 to 70)
+
+<CpyLink path="Lib/dbm/__init__.py" lines="31-70" />
+
+`whichdb` opens the database file in binary mode and reads enough bytes to recognise the magic number of each known format. GNU gdbm files start with the bytes `\x13\x57\x9a\xce` (big-endian) or their byte-swapped equivalent. Berkeley DB files carry a different four-byte magic. If the file matches none of the known headers, `whichdb` returns `None`. If the file does not exist or cannot be read, it raises `OSError`.
+
+```python
+def whichdb(filename):
+    # Try dbm.gnu magic
+    with open(filename + '.db', 'rb') as f:
+        ...
+    # Fall back to inspecting raw file
+    ...
+    return None
+```
+
+### `open` (lines 101 to 140)
+
+<CpyLink path="Lib/dbm/__init__.py" lines="101-140" />
+
+`open(file, flag='r', mode=0o666)` is the main entry point. For an existing file it calls `whichdb` to identify the correct backend, then delegates to that backend's own `open()`. For a new file it uses `_defaultmod`. The `flag` argument mirrors the conventions of the C `open()` call: `'r'` for read-only, `'w'` for read-write, `'c'` for create-or-open, and `'n'` for a fresh database. Passing an unrecognised flag raises `error`.
+
+```python
+def open(file, flag='r', mode=0o666):
+    if flag[0] == 'n':
+        mod = _defaultmod
+    else:
+        result = whichdb(file)
+        if result is None:
+            ...
+        mod = _modules.get(result, _defaultmod)
+    return mod.open(file, flag, mode)
+```
+
+### `error` alias (lines 1 to 30)
+
+<CpyLink path="Lib/dbm/__init__.py" lines="1-30" />
+
+`dbm.error` is a tuple of exception classes, one per backend plus the base `OSError`. This allows a single `except dbm.error` clause to catch errors raised by any backend without the caller knowing which one is active. The pattern mirrors how `socket.error` works as a compatibility alias for `OSError`.
+
+```python
+error = (OSError,)
+for _mod in _modules.values():
+    if hasattr(_mod, 'error') and _mod.error not in error:
+        error = error + (_mod.error,)
+```
+
+### Context manager support (lines 141 to 155)
+
+<CpyLink path="Lib/dbm/__init__.py" lines="141-155" />
+
+The module documents, but does not implement, the `__enter__` and `__exit__` methods that each backend is expected to provide. This section exists as a contract note: backend objects must support `with dbm.open(...) as db:` so that the database is closed automatically. The `dumb` backend implements this as a wrapper around its `close()` method, while the C-backed modules handle it natively.
+
+## gopy mirror
+
+Not yet ported.

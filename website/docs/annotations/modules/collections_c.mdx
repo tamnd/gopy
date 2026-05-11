@@ -1,0 +1,80 @@
+---
+title: Modules/_collectionsmodule.c
+description: C implementations of deque and the _tuplegetter descriptor used by namedtuple.
+cpython_path: Modules/_collectionsmodule.c
+cpython_version: "3.14"
+lines: 2000
+status: annotated
+ported_to: ""
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Modules/_collectionsmodule.c`
+
+<CpyLink path="Modules/_collectionsmodule.c" />
+
+`_collectionsmodule.c` provides the C-level implementations that back `collections.deque` and the `_tuplegetter` descriptor used internally by `collections.namedtuple`. The higher-level `ChainMap`, `Counter`, `OrderedDict`, and `defaultdict` types live elsewhere (`Objects/odictobject.c`, `Modules/_collectionsmodule.c` for defaultdict), but `deque` is by far the largest component and the reason this file exists as a C accelerator rather than pure Python.
+
+`deque` is implemented as a doubly-linked list of fixed-size blocks (`BLOCKLEN = 64` items per block). This layout gives O(1) appends and pops at both ends without per-item allocation overhead, and keeps the memory footprint small for short deques. A `maxlen` constraint is enforced at every append: when the deque is full, the element at the opposite end is silently discarded rather than raising an error.
+
+`_tuplegetter` is a lightweight descriptor that stores an integer index and an optional docstring. `namedtuple` creates one per field and installs it on the generated class. Accessing `point.x` then dispatches through `tuplegetter_descr_get`, which calls `PyTuple_GET_ITEM(obj, index)` directly, avoiding the usual attribute lookup chain.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| 1-80 | `block` struct + `BLOCKLEN` | Fixed-size storage node for the doubly-linked block list | |
+| 81-350 | `dequeobject` struct + `deque_new` | Deque header: left/right block, left/right index, length, maxlen, state | |
+| 351-700 | `deque_append` / `deque_appendleft` | Amortised O(1) push with optional maxlen eviction | |
+| 701-950 | `deque_pop` / `deque_popleft` | O(1) pop with empty-check and block recycling | |
+| 951-1200 | `deque_rotate` | In-place rotation using repeated block pointer swaps | |
+| 1201-1550 | `deque_count`, `deque_index`, `deque_contains` | Linear scan helpers not present on `list` | |
+| 1551-1750 | `dequeiter` / `dequereviter` | Forward and reverse iterator objects with invalidation guard | |
+| 1751-2000 | `tuplegetter` descriptor + module init | `namedtuple` field accessor and `PyModuleDef` | |
+
+## Reading
+
+### Block-list memory model
+
+Each `block` holds exactly `BLOCKLEN` (64) `PyObject *` slots. The deque tracks `leftblock`, `leftindex`, `rightblock`, and `rightindex`. A fresh append to the right side increments `rightindex`; when it reaches `BLOCKLEN` a new block is allocated and linked. Pops decrement the index; when a block is emptied it is freed (or recycled into a one-block free list). This design means sequential appends never touch the allocator after the first block fills.
+
+### maxlen eviction
+
+`deque_append` checks `Py_SIZE(deque) == deque->maxlen` before inserting. If the deque is full it calls `deque_popleft` (for `append`) or `deque_pop` (for `appendleft`) to drop the oldest element, then proceeds with the insert. The net result is that `len(d)` never exceeds `maxlen` and no exception is raised.
+
+### rotate implementation
+
+`deque_rotate(n)` moves `abs(n)` elements from one end to the other by calling `append`/`pop` pairs. For large rotations it short-circuits by relinking whole blocks at the pointer level rather than moving items one at a time, keeping the operation O(min(n, len)) rather than O(n).
+
+### Iterator invalidation
+
+Both `dequeiter` and `dequereviter` store a copy of `deque->state` at creation time. Every mutating method on `deque` increments `state`. If `state` has changed when `__next__` is called, the iterator raises `RuntimeError: deque changed size during iteration`, mirroring list iterator behavior.
+
+### _tuplegetter descriptor
+
+`tuplegetter_descr_get(self, obj, type)` checks that `obj` is a tuple and calls `PyTuple_GET_ITEM(obj, self->index)`. The descriptor also implements `__set_name__` to adopt the field name as its `__doc__` prefix when the namedtuple class is built, so `help(Point.x)` shows something useful.
+
+```c
+/* _collectionsmodule.c: append fast path (abbreviated) */
+static int
+deque_append_internal(dequeobject *deque, PyObject *item, Py_ssize_t maxlen)
+{
+    if (deque->rightindex == BLOCKLEN - 1) {
+        block *b = newblock();
+        if (b == NULL) return -1;
+        b->leftlink = deque->rightblock;
+        deque->rightblock->rightlink = b;
+        deque->rightblock = b;
+        deque->rightindex = -1;
+    }
+    Py_SIZE(deque)++;
+    deque->rightindex++;
+    deque->rightblock->data[deque->rightindex] = item;
+    ...
+}
+```
+
+## gopy mirror
+
+Not yet ported.

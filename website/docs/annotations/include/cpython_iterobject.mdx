@@ -1,0 +1,107 @@
+---
+title: Include/cpython/iterobject.h
+description: CPython-internal sequence and call iterator structs and check macros.
+cpython_path: Include/cpython/iterobject.h
+cpython_version: "3.14"
+lines: 40
+status: annotated
+ported_to: objects/seqiter.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Include/cpython/iterobject.h`
+
+<CpyLink path="Include/cpython/iterobject.h" />
+
+<overview>
+This header exposes the two built-in iterator types that CPython creates
+internally. `PySeqIterObject` drives iteration over objects that implement
+`sq_item` (the sequence protocol). `PyCallIterObject` drives iteration via a
+callable plus a sentinel value, as produced by the two-argument form of
+`iter(callable, sentinel)`. Neither struct is part of the stable ABI; they are
+exposed here so the interpreter core and a handful of C extension modules can
+reach inside them without a function call.
+</overview>
+
+## Map
+
+| Symbol | Kind | Notes |
+|---|---|---|
+| `PySeqIterObject` | struct | Holds `si_seq` (the object being iterated) and `si_index` (next index). |
+| `seqiterobject` | typedef | Alias for `PySeqIterObject`. |
+| `PySeqIter_Check(op)` | macro | True when `op` is a sequence iterator. |
+| `PyCallIterObject` | struct | Holds `it_callable` and `it_sentinel`. |
+| `calliterobject` | typedef | Alias for `PyCallIterObject`. |
+| `PyCallIter_Check(op)` | macro | True when `op` is a call iterator. |
+
+Public constructors (`PySeqIter_New`, `PyCallIter_New`) live in
+`Include/abstract.h` and `Objects/iterobject.c`; this header only adds the
+struct layouts and the fast-check macros.
+
+## Reading
+
+### Sequence iterator layout
+
+```c
+typedef struct {
+    PyObject_HEAD
+    Py_ssize_t si_index;
+    PyObject  *si_seq; /* set to NULL when iterator is exhausted */
+} PySeqIterObject;
+```
+
+`si_seq` is set to `NULL` when the iterator is exhausted or the underlying
+sequence is deleted. Every `tp_iternext` implementation must check for this
+before calling `sq_item`. The `si_index` field starts at 0 and is incremented
+after each successful fetch; on `IndexError` the field is left at its last
+value and `si_seq` is cleared.
+
+### Call iterator layout
+
+```c
+typedef struct {
+    PyObject_HEAD
+    PyObject *it_callable;
+    PyObject *it_sentinel;
+} PyCallIterObject;
+```
+
+`tp_iternext` calls `it_callable` with no arguments and compares the result to
+`it_sentinel` using `PyObject_RichCompareBool(result, sentinel, Py_EQ)`. A
+match raises `StopIteration` and drops both references. This is the mechanism
+behind patterns like `iter(file.read, b"")`.
+
+### Fast type checks
+
+```c
+#define PySeqIter_Check(op) Py_IS_TYPE((op), &PySeqIter_Type)
+#define PyCallIter_Check(op) Py_IS_TYPE((op), &PyCallIter_Type)
+```
+
+Both macros use `Py_IS_TYPE`, which does an exact type comparison with no
+subtype walk. That is intentional: neither `seqiterobject` nor
+`calliterobject` is designed to be subclassed.
+
+## gopy mirror
+
+Both iterator structs are ported to `objects/seqiter.go`.
+
+| CPython field | Go field | Type |
+|---|---|---|
+| `si_seq` | `Seq` | `*Object` |
+| `si_index` | `Index` | `int` |
+| `it_callable` | `Callable` | `*Object` |
+| `it_sentinel` | `Sentinel` | `*Object` |
+
+The Go types implement `tp_iternext` via the `Iternext` method on each
+receiver. Exhaustion is represented by setting `Seq` to `nil` (sequence
+iterator) or by returning a `StopIteration` error (call iterator), matching
+CPython's two different exhaustion signals exactly.
+
+## CPython 3.14 changes
+
+No struct layout changes were made between 3.12 and 3.14 for either iterator
+type. The 3.13 free-threading work added per-object locks to many core types,
+but sequence and call iterators were left with the existing `GIL`-based
+protection because they are not shared across threads in practice.

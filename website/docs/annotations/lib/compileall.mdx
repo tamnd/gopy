@@ -1,0 +1,128 @@
+---
+title: Lib/compileall.py
+description: Byte-compiles Python source trees to .pyc files, with support for parallel compilation and both timestamp and hash-based invalidation modes.
+cpython_path: Lib/compileall.py
+cpython_version: "3.14"
+lines: 490
+status: annotated
+ported_to: ""
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Lib/compileall.py`
+
+<CpyLink path="Lib/compileall.py" />
+
+`compileall` walks directory trees and compiles every `.py` file it finds into a corresponding `.pyc` bytecode file placed under `__pycache__`. The three main entry points are `compile_dir` (recurse a directory), `compile_file` (compile a single file), and `compile_path` (compile every directory on `sys.path`). All three share a common option surface: optimization level, quiet mode, force recompilation, and invalidation strategy.
+
+Parallel compilation is available through `concurrent.futures.ProcessPoolExecutor`. When the `workers` argument is greater than one, `compile_dir` submits `compile_file` calls to a pool and collects results asynchronously. A special sentinel mechanism ensures the pool is not created at all when only one worker is requested, avoiding the overhead of spawning subprocesses for small trees.
+
+The invalidation mode (`py_compile.PycInvalidationMode`) controls how the runtime later checks whether a `.pyc` is stale. In `TIMESTAMP` mode the `.pyc` header stores the source modification time and size. In `CHECKED_HASH` mode it stores a hash of the source content. In `UNCHECKED_HASH` mode the hash is written but never verified at import time, trading correctness for speed.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| 1-40 | imports, `_walk_dir` | Directory walker with hidden-file filtering | - |
+| 41-120 | `compile_file` | Compile one .py file, handle errors and quiet levels | - |
+| 121-250 | `compile_dir` | Recursive compilation with optional worker pool | - |
+| 251-300 | `compile_path` | Iterate sys.path and call compile_dir on each entry | - |
+| 301-360 | `_compile_dir_entry` | Pool-safe wrapper used by ProcessPoolExecutor | - |
+| 361-430 | argument parser setup | CLI flags: -r, -j, -q, -b, -d, -s, -p, -x, -i, -f | - |
+| 431-490 | `main`, `__main__` block | Parse args, call compile_dir/compile_file, exit code | - |
+
+## Reading
+
+### `compile_file` (lines 41 to 120)
+
+<CpyLink path="Lib/compileall.py" lines="41-120" />
+
+`compile_file` is the workhorse. It checks whether a `.pyc` already exists and is up to date (unless `force=True`), then delegates to `py_compile.compile`. The `quiet` parameter controls output: `0` prints every file name, `1` suppresses filenames and shows only errors, `2` suppresses everything. Errors from `py_compile.PyCompileError` are caught and reported without aborting the caller's loop.
+
+```python
+def compile_file(fullname, ddir=None, force=False, rx=None, quiet=0,
+                 legacy=False, optimize=-1, invalidation_mode=...):
+    ...
+    try:
+        py_compile.compile(fullname, cfile=cfile, dfile=dfile,
+                           raise_on_error=True,
+                           invalidation_mode=invalidation_mode)
+    except py_compile.PyCompileError as err:
+        ...
+        return False
+    return True
+```
+
+### `compile_dir` and the worker pool (lines 121 to 250)
+
+<CpyLink path="Lib/compileall.py" lines="121-250" />
+
+`compile_dir` uses `os.scandir` via `_walk_dir` to enumerate `.py` files. When `workers > 1` it constructs a `ProcessPoolExecutor` and maps `_compile_dir_entry` over the file list. Results are collected with `as_completed` so a single failing file does not block the rest. The function returns `True` only if every file compiled successfully. The `maxlevels` argument limits recursion depth; the default is no limit.
+
+```python
+def compile_dir(dir, maxlevels=None, ddir=None, force=False, rx=None,
+                quiet=0, legacy=False, optimize=-1, workers=1, ...):
+    ...
+    if workers != 1 and ProcessPoolExecutor is not None:
+        with ProcessPoolExecutor(max_workers=workers) as executor:
+            futures = {executor.submit(_compile_dir_entry, ...): f
+                       for f in files}
+            for future in as_completed(futures):
+                success = success and future.result()
+    ...
+    return success
+```
+
+### `_compile_dir_entry`: pool-safe wrapper (lines 301 to 360)
+
+<CpyLink path="Lib/compileall.py" lines="301-360" />
+
+Worker processes cannot receive closures, so `_compile_dir_entry` is a module-level function that unpacks a plain tuple of arguments and calls `compile_file`. The tuple is constructed in `compile_dir` before submission and contains only picklable values. This is the standard pattern for `ProcessPoolExecutor` in the stdlib: the actual logic stays in `compile_file`, and the wrapper exists solely to satisfy the pickling requirement.
+
+```python
+def _compile_dir_entry(args):
+    return compile_file(*args)
+```
+
+### `compile_path` (lines 251 to 300)
+
+<CpyLink path="Lib/compileall.py" lines="251-300" />
+
+`compile_path` iterates `sys.path` and calls `compile_dir` on each entry that is a real directory. Entries that do not exist or are not directories are silently skipped. This makes it safe to call on any interpreter installation without knowing its layout in advance. The function is the basis of the `python -m compileall` default behavior when no path argument is given.
+
+```python
+def compile_path(skip_curdir=1, maxlevels=0, force=False, quiet=0, ...):
+    success = True
+    for dir in sys.path:
+        if (not dir or dir == os.curdir) and skip_curdir:
+            ...
+            continue
+        success = success and compile_dir(dir, maxlevels, ...)
+    return success
+```
+
+### CLI argument parser and `main` (lines 361 to 490)
+
+<CpyLink path="Lib/compileall.py" lines="361-490" />
+
+The argument parser exposes the full option surface of the library functions. Notable flags: `-j N` sets the worker count, `-x regex` excludes matching paths, `-i file` reads a list of files to compile from a text file, `-b` writes `.pyc` files beside the source instead of under `__pycache__`, and `--invalidation-mode` accepts `timestamp`, `checked-hash`, or `unchecked-hash`. The `main` function maps parsed args to the appropriate library call and exits with code 1 on any compilation failure.
+
+```python
+def main():
+    args = parser.parse_args()
+    ...
+    if args.compile_path:
+        success = compile_path(...)
+    elif args.FILE:
+        for f in args.FILE:
+            ...
+            success = compile_file(f, ...) and success
+    else:
+        success = compile_dir(args.dir, ...)
+    return 0 if success else 1
+```
+
+## gopy mirror
+
+Not yet ported.

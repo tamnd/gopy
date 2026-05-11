@@ -1,0 +1,107 @@
+---
+title: Include/internal/pycore_range.h
+description: Internal range and range-iterator types, including the large-range variant backed by PyLong.
+cpython_path: Include/internal/pycore_range.h
+cpython_version: "3.14"
+lines: 40
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Include/internal/pycore_range.h`
+
+<CpyLink path="Include/internal/pycore_range.h" />
+
+<overview>
+CPython implements range iteration with two concrete C structs rather than one.
+`rangeiterobject` stores `start`, `step`, `len`, and `index` as C `long` values
+and is used whenever all three range parameters fit in a native long.
+`longrangeiterobject` replaces those fields with `PyObject *` (heap-allocated
+`PyLong`) and handles ranges that overflow a C long, such as
+`range(0, 2**63, 1)` on a 64-bit platform.
+
+This header declares both structs and the internal constructor
+`_PyRange_NewInternal`, which bypasses the public argument-parsing logic
+to build a range object directly from already-validated `PyLong` values.
+</overview>
+
+## Map
+
+| Symbol | Kind | Purpose |
+|---|---|---|
+| `rangeiterobject` | struct | Iterator over a range whose bounds fit in `long`. Fields: `index`, `start`, `step`, `len`. |
+| `longrangeiterobject` | struct | Iterator for large ranges. Same logical fields stored as `PyObject *` (`PyLong`). |
+| `_PyRangeIterObject` | typedef | Alias for `rangeiterobject` used in internal headers. |
+| `_PyLongRangeIterObject` | typedef | Alias for `longrangeiterobject`. |
+| `_PyRange_NewInternal` | function | Constructs a `range` from three `PyLong` args without public-API overhead. |
+
+## Reading
+
+### Choosing the iterator type at runtime
+
+When `range.__iter__` is called, CPython checks whether `start`, `stop`, and
+`step` all fit in a C `long`. If they do, it allocates a `rangeiterobject`;
+otherwise it falls back to `longrangeiterobject`:
+
+```c
+// Objects/rangeobject.c
+if (_PyLong_IsNonNegativeCompact(r->start) && ...) {
+    it = PyObject_New(rangeiterobject, &PyRangeIter_Type);
+    /* fill long fields */
+} else {
+    it = PyObject_New(longrangeiterobject, &PyLongRangeIter_Type);
+    /* fill PyObject* fields */
+}
+```
+
+The two types share the same `tp_iternext` calling convention so the rest of
+the interpreter never needs to know which branch was taken.
+
+### The compact iterator struct
+
+`rangeiterobject` keeps all state in plain C integers, making each
+`__next__` call a single addition with no heap allocation:
+
+```c
+typedef struct {
+    PyObject_HEAD
+    long index;
+    long start;
+    long step;
+    long len;
+} rangeiterobject;
+```
+
+`tp_iternext` returns `PyLong_FromLong(it->start + it->index * it->step)` and
+increments `index`. The check `index >= len` raises `StopIteration`.
+
+### Direct construction via `_PyRange_NewInternal`
+
+The public `range()` builtin normalises its arguments through the full
+argument-parsing path. Internal call sites that have already validated
+`PyLong` values use `_PyRange_NewInternal` to skip that work:
+
+```c
+// Include/internal/pycore_range.h
+PyObject *_PyRange_NewInternal(PyObject *start, PyObject *stop,
+                               PyObject *step);
+```
+
+This is used by, for example, the `slice.indices` implementation and certain
+peephole-optimiser rewrites that fold constant ranges at compile time.
+
+## gopy mirror
+
+Range iteration in gopy maps to a native Go loop rather than a heap-allocated
+iterator object. The iterator structs are defined in `objects/range_iter.go`.
+The large-range path using `PyLong` arithmetic has been ported; the compact
+`long` path is handled by a Go `int64` field rather than a separate type.
+
+## CPython 3.14 changes
+
+No ABI-breaking changes in 3.14. The split between `rangeiterobject` and
+`longrangeiterobject` predates Python 3. The header was promoted to
+`Include/internal/` during the 3.8 reorganization. In 3.12, `_PyLong_IsNonNegativeCompact`
+replaced an older `_PyLong_FitsInLong` helper at the iterator-selection site,
+but the struct layouts are unchanged.

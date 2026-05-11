@@ -1,0 +1,160 @@
+---
+title: Lib/linecache.py
+description: Line-by-line source cache used by traceback and inspect to fetch and display source lines without re-reading files on every call.
+cpython_path: Lib/linecache.py
+cpython_version: "3.14"
+lines: 200
+status: annotated
+ported_to: (stdlib pending)
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Lib/linecache.py`
+
+<CpyLink path="Lib/linecache.py" />
+
+`linecache` is a small pure-Python module whose sole job is to hand out
+individual source lines by `(filename, lineno)` cheaply. It is used
+pervasively by `traceback`, `inspect`, `pdb`, and `doctest`. The module
+maintains a single module-level dict called `cache` that maps filenames
+to cached content. A secondary path handles synthetically generated
+source (e.g., `inspect.getsource` on lambdas defined in `exec`), stored
+via `lazycache`.
+
+The cache dict entries have the shape
+`(size, mtime, lines, fullname)` for real files and
+`(None, None, lines, fullname)` for synthetic source. `checkcache`
+distinguishes the two by checking whether `mtime` is `None`.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Lib/linecache.py" lines="1-50">1-50</Cpy> | `cache`, `getline` | Module-level `cache` dict and the primary public API; `getline` calls `getlines` and returns a single element or `''`. | `(stdlib pending)` |
+| <Cpy path="Lib/linecache.py" lines="50-120">50-120</Cpy> | `getlines`, `updatecache` | `getlines` checks `cache` first, then calls `updatecache`; `updatecache` opens the file, reads all lines, stores `(size, mtime, lines, fullname)`, and handles `__loader__`-based source for zipimport and namespace packages. | `(stdlib pending)` |
+| <Cpy path="Lib/linecache.py" lines="120-170">120-170</Cpy> | `checkcache` | Iterates over `cache` and removes entries whose on-disk `mtime` or `size` has changed; skips entries with `mtime is None` (synthetic source). | `(stdlib pending)` |
+| <Cpy path="Lib/linecache.py" lines="170-200">170-200</Cpy> | `lazycache`, `clearcache` | `lazycache` stores a `(None, None, None, loader)` placeholder for a module so `getlines` can later call `loader.get_source(name)` on demand; `clearcache` drops all non-lazy entries. | `(stdlib pending)` |
+
+## Reading
+
+### Cache dict structure and `getline` (lines 1 to 50)
+
+<CpyLink path="Lib/linecache.py" lines="1-50" />
+
+```python
+cache = {}   # filename -> (size, mtime, lines, fullname)
+             #           | (None, None, lines, fullname)   synthetic
+             #           | (None, None, None,  loader)     lazy
+
+def getline(filename, lineno, module_globals=None):
+    lines = getlines(filename, module_globals)
+    if 1 <= lineno <= len(lines):
+        return lines[lineno - 1]
+    return ''
+```
+
+Line numbers are 1-based in `getline` but 0-based in the `lines` list, so
+the index is `lineno - 1`. Returning `''` (empty string, not `None`)
+on a miss is deliberate: callers such as `traceback` display the result
+directly and need a safe string.
+
+The `module_globals` parameter is passed through to `updatecache` so
+that `__loader__` and `__spec__` from a module's global namespace can be
+used to retrieve source for files that are not on the ordinary filesystem
+(e.g., inside a zip archive or a frozen module).
+
+### `updatecache` file read (lines 50 to 120)
+
+<CpyLink path="Lib/linecache.py" lines="50-120" />
+
+```python
+def updatecache(filename, module_globals=None):
+    if filename in cache:
+        if cache[filename][0] is not None:
+            del cache[filename]
+    # Try the module loader first
+    if module_globals and '__loader__' in module_globals:
+        name = module_globals.get('__name__') or ''
+        loader = module_globals['__loader__']
+        get_source = getattr(loader, 'get_source', None)
+        if name and get_source:
+            try:
+                data = get_source(name)
+            except (ImportError, OSError):
+                pass
+            else:
+                if data is None:
+                    return []
+                cache[filename] = (
+                    len(data), None,
+                    [line + '\n' for line in data.splitlines()],
+                    filename,
+                )
+                return cache[filename][2]
+    # Fall back to the filesystem
+    try:
+        stat = os.stat(fullname)
+    except OSError:
+        return []
+    size, mtime = stat.st_size, stat.st_mtime
+    with tokenize.open(fullname) as fp:
+        lines = fp.readlines()
+    cache[filename] = size, mtime, lines, fullname
+    return lines
+```
+
+`updatecache` has two source paths. When `module_globals` provides a
+`__loader__` with a `get_source` method (common for zipimport and frozen
+modules) the loader is tried first and the resulting string is split into
+lines. The `mtime` field is stored as `None` for loader-based entries
+because there is no on-disk file to stat later.
+
+For ordinary files the function uses `tokenize.open` (which respects
+the `# coding:` cookie) rather than the built-in `open`, so that source
+files in non-UTF-8 encodings display correctly in tracebacks. Both `size`
+and `mtime` are captured from `os.stat` and stored so `checkcache` can
+detect staleness without reopening the file.
+
+### `checkcache` mtime comparison (lines 120 to 170)
+
+<CpyLink path="Lib/linecache.py" lines="120-170" />
+
+```python
+def checkcache(filename=None):
+    if filename is None:
+        filenames = list(cache.keys())
+    else:
+        filenames = [filename]
+    for filename in filenames:
+        if filename not in cache:
+            continue
+        entry = cache[filename]
+        if entry[0] is None:
+            # Synthetic or lazy entry; skip stat check
+            continue
+        size, mtime, lines, fullname = entry
+        try:
+            stat = os.stat(fullname)
+        except OSError:
+            del cache[filename]
+            continue
+        if size != stat.st_size or mtime != stat.st_mtime:
+            del cache[filename]
+```
+
+`checkcache` accepts an optional `filename` to validate a single entry;
+when called with no argument it validates every entry in `cache`. Entries
+where `entry[0] is None` are skipped unconditionally because synthetic
+source has no on-disk counterpart. For real files, both `size` and
+`mtime` must match; a discrepancy on either causes the entry to be
+evicted. The next call to `getlines` for the same filename will then
+call `updatecache` to re-read the file.
+
+## gopy mirror
+
+`linecache` is used by gopy's `traceback` port to resolve source lines
+for Python stack frames. The Go side needs a `cache` equivalent (a
+`map[string]cacheEntry` keyed by filename) with the same invalidation
+semantics. Loader-based source retrieval maps to gopy's module loader
+interface in `vm/eval_import.go`.

@@ -1,0 +1,176 @@
+---
+title: Lib/tokenize.py
+description: Lexer for Python source code that yields TokenInfo namedtuples; includes encoding detection, INDENT/DEDENT stack, and untokenize.
+cpython_path: Lib/tokenize.py
+cpython_version: "3.14"
+lines: 650
+status: annotated
+ported_to: (stdlib pending)
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Lib/tokenize.py`
+
+<CpyLink path="Lib/tokenize.py" />
+
+`tokenize` is a pure-Python lexer that operates on a `readline` callable
+rather than a raw string. Every call to `readline` must return a single
+line including its trailing newline, or an empty `bytes`/`str` to signal
+EOF. The module builds a set of compiled regular expressions at import
+time and drives them through a single `_tokenize` generator.
+
+The public API has two entry points. `tokenize(readline)` expects a
+`bytes`-returning callable and auto-detects the source encoding via
+`detect_encoding`. `generate_tokens(readline)` expects a
+`str`-returning callable and skips encoding detection. Both yield
+`TokenInfo` namedtuples. A companion `untokenize` function reconstructs
+source text from a token sequence.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| <Cpy path="Lib/tokenize.py" lines="1-100">1-100</Cpy> | `TokenInfo`, token constants | `TokenInfo` namedtuple (`type`, `string`, `start`, `end`, `line`); re-export of `token` module constants (`COMMENT`, `NL`, `NEWLINE`, `INDENT`, `DEDENT`, `STRING`, `NUMBER`, `NAME`, `OP`, `ENCODING`, `ENDMARKER`). | `(stdlib pending)` |
+| <Cpy path="Lib/tokenize.py" lines="100-250">100-250</Cpy> | `detect_encoding`, `_get_normal_name`, `_get_encoding_from_cookie` | BOM detection for UTF-8/UTF-16/UTF-32; two-line cookie scan using the `coding[=:]\s*([-\w.]+)` regex; returns `(encoding, bom_lines)`. | `(stdlib pending)` |
+| <Cpy path="Lib/tokenize.py" lines="250-450">250-450</Cpy> | `_tokenize` | Inner generator: drives compiled regexes line-by-line, emits `STRING`, `NUMBER`, `NAME`, `OP`, `COMMENT`, `NL`, `NEWLINE`, and `ERRORTOKEN` tokens; handles string prefix detection (`f`, `b`, `r`, `u`, `rb`, `br`, etc.) and multi-line string continuation. | `(stdlib pending)` |
+| <Cpy path="Lib/tokenize.py" lines="450-550">450-550</Cpy> | INDENT/DEDENT stack inside `_tokenize` | Maintains an `indents` list (stack of column widths); emits `INDENT` when the current line's leading whitespace exceeds the top of the stack, and one `DEDENT` per popped level otherwise; raises `IndentationError` on mismatched dedents. | `(stdlib pending)` |
+| <Cpy path="Lib/tokenize.py" lines="550-650">550-650</Cpy> | `untokenize`, `open`, `tokenize`, `generate_tokens` | `untokenize` rebuilds source from `(type, string)` or full `TokenInfo` pairs, inserting whitespace from `(row, col)` positions when available; `open` wraps `detect_encoding` and returns an `io.TextIOWrapper`; public entry points. | `(stdlib pending)` |
+
+## Reading
+
+### `detect_encoding` cookie regex (lines 100 to 250)
+
+<CpyLink path="Lib/tokenize.py" lines="100-250" />
+
+```python
+# coding[=:]\s*([-\w.]+)
+_CODING_SPEC = re.compile(r'coding[=:]\s*([-\w.]+)')
+
+def _get_encoding_from_cookie(first_two_lines):
+    for line in first_two_lines:
+        # Only look at the first two lines
+        m = _CODING_SPEC.search(line)
+        if m:
+            return _get_normal_name(m.group(1))
+    return None
+
+def detect_encoding(readline):
+    bom_enc = None
+    bom = readline()
+    # Check for BOM
+    if bom.startswith(BOM_UTF8):
+        bom_enc = 'utf-8-sig'
+        bom = bom[3:]
+    elif bom.startswith((BOM_UTF32_BE, BOM_UTF32_LE)):
+        bom_enc = 'utf-32'
+    elif bom.startswith((BOM_UTF16_BE, BOM_UTF16_LE)):
+        bom_enc = 'utf-16'
+    # Read second line for cookie
+    second = readline()
+    cookie_enc = _get_encoding_from_cookie(
+        [bom.decode('latin-1'), second.decode('latin-1')]
+    )
+    if bom_enc and cookie_enc:
+        if cookie_enc != bom_enc.replace('-sig', ''):
+            raise SyntaxError('encoding mismatch in coding cookie')
+    return (bom_enc or cookie_enc or 'utf-8'), [bom, second]
+```
+
+`detect_encoding` consumes at most two lines from the `readline`
+callable. It first checks for byte-order marks (BOM) at the start of the
+first line; a UTF-8 BOM is `b'\xef\xbb\xbf'`. It then searches each line
+for the `coding[=:]\s*([-\w.]+)` pattern as required by PEP 263. If both
+a BOM and a cookie are present the encodings must agree (after stripping
+the `-sig` suffix from `utf-8-sig`). The two consumed lines are returned
+alongside the encoding name so the caller can prepend them to the token
+stream as `ENCODING`-type tokens.
+
+`_get_normal_name` normalises aliases: `latin-1`, `latin1`, and
+`iso-8859-1` all map to `iso-8859-1`; `utf-8` and `utf8` both map to
+`utf-8`.
+
+### INDENT/DEDENT stack algorithm (lines 450 to 550)
+
+<CpyLink path="Lib/tokenize.py" lines="450-550" />
+
+```python
+indents = [0]      # stack of indent levels (column widths)
+...
+# At the start of each logical line:
+column = 0
+while pos < max:
+    if line[pos] == ' ':
+        column += 1
+    elif line[pos] == '\t':
+        column = (column // tabsize + 1) * tabsize
+    elif line[pos] == '\x0c':  # form feed
+        column = 0
+    else:
+        break
+    pos += 1
+
+if column > indents[-1]:
+    indents.append(column)
+    yield TokenInfo(INDENT, line[:pos], (lnum, 0), (lnum, pos), line)
+elif column < indents[-1]:
+    while indents[-1] != column:
+        if column > indents[-1]:
+            raise IndentationError(
+                "unindent does not match any outer indentation level",
+                ("<tokenize>", lnum, pos, line),
+            )
+        indents.pop()
+        yield TokenInfo(DEDENT, '', (lnum, pos), (lnum, pos), line)
+```
+
+The `indents` list acts as a stack of column widths for each active
+indentation level. At the start of each non-blank, non-continuation line
+the tokenizer counts leading spaces and tabs (expanding tabs to the next
+multiple of 8 by default). If the resulting column exceeds the stack top,
+one `INDENT` token is emitted and the new level is pushed. If the column
+is smaller, `DEDENT` tokens are emitted for each level popped until the
+stack top matches. A column that is smaller than the current top but not
+present anywhere in the stack raises `IndentationError`.
+
+### `_tokenize` string detection (lines 250 to 450)
+
+<CpyLink path="Lib/tokenize.py" lines="250-450" />
+
+```python
+PseudoExtras = r'(\\\r?\n|\Z|\#[^\r\n]*)'
+PseudoToken  = Whitespace + r'|' + '|'.join([
+    PseudoExtras, Number, Funny, ContStr, Name])
+
+# ContStr matches the opening of a string literal including its prefix:
+#   r'(?i)(?:r|u|rb|br|b|f|fr|rf)?'
+#   followed by either a triple-quoted opener or a single-quoted opener
+# If the closing quote is not found on the same line, _tokenize enters
+# multi-line string continuation mode:
+endprog = _compile(endpats.get(initial) or endpats.get(token[:2]))
+...
+if endmatch:
+    pos = end = endmatch.end(0)
+    yield TokenInfo(STRING, token, spos, (lnum, end), line)
+else:
+    strstart = (lnum, start)
+    contstr = line[start:]
+    contline = line
+    break   # continue reading lines until closing quote found
+```
+
+`_tokenize` applies `PseudoToken` to each line in a loop. When the match
+group corresponds to a string prefix (`r`, `u`, `b`, `f`, `rb`, `br`,
+`fr`, `rf`, case-insensitive) the tokenizer looks up the correct end
+pattern in `endpats`. For triple-quoted strings (`"""` or `'''`) the end
+pattern crosses line boundaries, so `_tokenize` accumulates subsequent
+lines in `contstr` until the closing triple quote is matched, then emits
+the full multi-line `STRING` token.
+
+## gopy mirror
+
+`Lib/tokenize.py` is not yet bundled in `stdlib/MANIFEST.txt`. The Go
+side will need to expose a `readline`-compatible interface so that
+`compile.Tokenize` can be driven by both `bytes`- and `str`-producing
+callables. The `detect_encoding` logic needs to run before the lexer
+proper, matching the two-step approach in CPython.

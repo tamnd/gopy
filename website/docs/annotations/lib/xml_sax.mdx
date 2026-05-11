@@ -1,0 +1,66 @@
+---
+title: Lib/xml/sax/__init__.py
+description: SAX2 event-driven XML parser interface with expat as the default backend.
+cpython_path: Lib/xml/sax/__init__.py
+cpython_version: "3.14"
+lines: 200
+status: annotated
+ported_to: ""
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Lib/xml/sax/__init__.py`
+
+<CpyLink path="Lib/xml/sax/__init__.py" />
+
+`xml.sax` is CPython's implementation of SAX2, the Simple API for XML. Unlike DOM, SAX does not build an in-memory tree. Instead, the parser fires callbacks on a handler object as it streams through the document. That model is well suited to large documents or pipelines where only a subset of events is needed. The `__init__.py` is the public face of the package: it exposes the two entry points `parse` and `parseString`, the factory `make_parser`, and re-exports the key exception types.
+
+The package is organized as a small hierarchy. `xml.sax.handler` defines the abstract base classes (`ContentHandler`, `ErrorHandler`, `DTDHandler`, `EntityResolver`). `xml.sax.xmlreader` defines the protocol types used to pass document sources and location information (`InputSource`, `Locator`, `XMLReader`). The actual parsing is done by `xml.sax._exceptions` and `xml.sax.expatreader`, which wraps the expat C extension behind the `XMLReader` interface. The `__init__.py` ties these together and selects the backend.
+
+`make_parser` accepts an optional list of parser class names and tries each in turn, falling back to `xml.sax.expatreader.ExpatParser` when the list is empty or exhausted. This design lets applications substitute alternative parsers (e.g. a validating parser) without changing the call site. In practice almost every CPython program ends up with expat, but the hook exists for testing and for environments where expat is unavailable.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| 1-20 | module header | Imports, `__all__`, version comment | — |
+| 21-60 | `make_parser` | Tries each name in `parser_list`, falls back to expat | — |
+| 61-100 | `parse` | Opens `InputSource`, calls `make_parser`, wires handler, calls `parse()` | — |
+| 101-130 | `parseString` | Wraps bytes in `io.BytesIO`, delegates to `parse` | — |
+| 131-160 | `ContentHandler` (re-export) | No-op base class: `startElement`, `endElement`, `characters`, etc. | — |
+| 161-200 | `SAXException` family | `SAXParseException`, `SAXNotRecognizedException`, `SAXNotSupportedException` | — |
+
+## Reading
+
+### make_parser and backend selection
+
+`make_parser(parser_list=[])` iterates `parser_list` and for each entry calls `_make_parser(name)`, which does a `__import__` on the module part and then `getattr` for the class. The first successful instantiation is returned. If the list is exhausted, the same machinery is applied to `xml.sax.expatreader.ExpatParser`. This late binding means the expat module is not imported until a parser is actually requested.
+
+### parse and parseString entry points
+
+`parse(source, handler, error_handler=handler.ErrorHandler())` normalizes `source` into an `InputSource` when it is a filename or file object. It then calls `make_parser()`, registers the `ContentHandler` and `ErrorHandler`, and calls `parser.parse(source)`. `parseString(string, handler, error_handler=...)` wraps the bytes argument in a `BytesIO` and delegates to `parse`. Both functions are thin wrappers. The real logic lives in `expatreader.ExpatParser`.
+
+### ContentHandler protocol
+
+`ContentHandler` in `xml.sax.handler` defines no-op implementations of every SAX2 callback. Subclasses override only the events they care about. The most commonly overridden methods are `startElement(name, attrs)`, `endElement(name)`, and `characters(content)`. Namespace-aware variants `startElementNS` and `endElementNS` receive `(uri, localname)` pairs instead of raw tag names, and are only fired when `feature_namespaces` is enabled on the parser.
+
+### ErrorHandler and InputSource protocol types
+
+`ErrorHandler` has three methods: `warning`, `error`, and `fatalError`, each receiving a `SAXParseException`. The default implementation re-raises `fatalError` and ignores the other two. `InputSource` carries a system ID, public ID, encoding hint, and either a byte stream or a character stream. `Locator` is the read-only interface returned by `setDocumentLocator`, providing `getLineNumber()` and `getColumnNumber()` during parsing.
+
+```python
+# Minimal content handler
+from xml.sax import parse
+from xml.sax.handler import ContentHandler
+
+class Printer(ContentHandler):
+    def startElement(self, name, attrs):
+        print('start', name)
+
+parse('data.xml', Printer())
+```
+
+## gopy mirror
+
+Not yet ported.

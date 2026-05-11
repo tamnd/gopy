@@ -1,0 +1,172 @@
+---
+title: Python/ast_opt.c
+description: AST constant-folding optimizer, called by the compiler before symtable analysis.
+cpython_path: Python/ast_opt.c
+cpython_version: "3.14"
+lines: 600
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Python/ast_opt.c`
+
+<CpyLink path="Python/ast_opt.c" />
+
+<overview>
+Constant folding at the AST level. Before the compiler lowers the tree into
+bytecode, `_PyAST_Optimize` walks every expression node and replaces
+compile-time-known operations with their results. The pass runs only when the
+optimization level is 1 or higher (the `-O` flag); at level 0 the function
+returns immediately after the guard check.
+
+Foldable constructs:
+
+- **BinOp** on two constant operands: `+`, `-`, `*`, `/`, `//`, `%`, `**`,
+  `<<`, `>>`, `&`, `|`, `^` for `int`, `float`, `complex`, `bytes`, `str`,
+  and `tuple`.
+- **UnaryOp**: `not`, unary `-`, and `~` applied to a constant.
+- **JoinedStr** / implicit string concatenation: adjacent constant string
+  segments are merged into a single `Constant` node.
+
+The optimizer is not a separate compiler pass in the traditional sense; it
+mutates the `mod_ty` tree in place and returns a `bool` indicating success.
+</overview>
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| 1-40 | (includes, typedefs) | Setup | - |
+| 41-120 | `fold_unaryop` | Evaluate `not`, `-`, `~` on a `Constant` child | - |
+| 121-260 | `fold_binop` | Evaluate binary arithmetic/bitwise/concat on two `Constant` children | - |
+| 261-320 | `fold_tuple` | Convert a `Tuple` of all-constant elements into a single `Constant` | - |
+| 321-390 | `fold_subscript` | Index a constant tuple/str/bytes at a constant integer key | - |
+| 391-450 | `fold_iter` | Replace `len()` on a constant sequence with its integer length | - |
+| 451-510 | `astfold_expr` | Recursive expression walker; dispatches to the fold_* helpers | - |
+| 511-560 | `astfold_stmt` | Recursive statement walker | - |
+| 561-600 | `_PyAST_Optimize` | Public entry point; checks opt level, calls `astfold_mod` | - |
+
+## Reading
+
+### Entry point and optimization-level gate
+
+`_PyAST_Optimize` is the sole public symbol. The compiler calls it from
+`compiler_mod` after parsing and before `_PySymtable_Build`:
+
+```c
+/* Python/ast_opt.c:561 _PyAST_Optimize */
+int
+_PyAST_Optimize(mod_ty mod, PyArena *arena, _PyCompilerFlags *flags)
+{
+    if (flags->cf_flags & CO_FUTURE_ANNOTATIONS) {
+        return 1;  /* PEP 563: defer all annotations, skip folding */
+    }
+    int optimize = flags->cf_optimize;
+    if (optimize == 0) {
+        return 1;  /* -O not set; nothing to do */
+    }
+    return astfold_mod(mod, arena, optimize);
+}
+```
+
+The `CO_FUTURE_ANNOTATIONS` guard is important: with `from __future__ import
+annotations` every annotation is stored as a string literal, so folding would
+corrupt the deferred text.
+
+### Folding a BinOp
+
+`fold_binop` is the most complex helper. It only fires when both `left` and
+`right` are already `Constant` nodes (either from the parser or from a prior
+fold of their sub-trees):
+
+```c
+/* Python/ast_opt.c:121 fold_binop */
+static expr_ty
+fold_binop(expr_ty node, PyArena *arena, int optimize)
+{
+    expr_ty lhs = node->v.BinOp.left;
+    expr_ty rhs = node->v.BinOp.right;
+    if (lhs->kind != Constant_kind || rhs->kind != Constant_kind) {
+        return node;   /* one side is not a constant; leave it alone */
+    }
+    PyObject *lv = lhs->v.Constant.value;
+    PyObject *rv = rhs->v.Constant.value;
+    PyObject *result = NULL;
+
+    switch (node->v.BinOp.op) {
+    case Add:  result = PyNumber_Add(lv, rv);      break;
+    case Sub:  result = PyNumber_Subtract(lv, rv); break;
+    case Mult: result = safe_multiply(lv, rv);     break;
+    /* ... */
+    default:   return node;
+    }
+    if (result == NULL) {
+        PyErr_Clear();   /* e.g. overflow; leave the node unfolded */
+        return node;
+    }
+    return _PyAST_Constant(result, NULL, node->lineno, node->col_offset,
+                           node->end_lineno, node->end_col_offset, arena);
+}
+```
+
+The `safe_multiply` wrapper caps string/bytes/tuple repetition at a
+compile-time limit to prevent memory exhaustion from expressions like
+`"x" * 10**9`.
+
+### Tuple folding and subscript constant propagation
+
+A `Tuple` whose every element is a `Constant` is itself a constant. After
+`astfold_expr` has recursively folded all children, `fold_tuple` runs:
+
+```c
+/* Python/ast_opt.c:261 fold_tuple */
+static expr_ty
+fold_tuple(expr_ty node, PyArena *arena, int optimize)
+{
+    asdl_expr_seq *elts = node->v.Tuple.elts;
+    Py_ssize_t n = asdl_seq_LEN(elts);
+    for (Py_ssize_t i = 0; i < n; i++) {
+        expr_ty elt = asdl_seq_GET(elts, i);
+        if (elt->kind != Constant_kind) return node;
+    }
+    /* all elements are constants; build a tuple object */
+    PyObject *newval = PyTuple_New(n);
+    /* ... fill, intern, wrap in Constant node ... */
+    return _PyAST_Constant(newval, NULL, ...);
+}
+```
+
+Once a tuple is folded to a constant, `fold_subscript` can propagate through
+`t[0]` or `t[-1]` at compile time.
+
+## gopy mirror
+
+gopy does not have a direct port of `ast_opt.c`. Constant folding is performed
+later in the compilation pipeline, during the flowgraph optimization passes in
+`compile/flowgraph_passes.go`. That file operates on the basic-block IR rather
+than the AST, so the folding logic targets `LOAD_CONST` / opcode pairs instead
+of `Constant` AST nodes.
+
+Implications:
+
+- Folding in gopy fires after symtable analysis, whereas CPython folds before
+  it. This means gopy does not benefit from reduced symtable entries for
+  compile-time constants.
+- String concatenation folding (`"a" "b"`) is handled by the parser in gopy
+  rather than by a post-parse pass.
+
+A dedicated AST-level constant folder corresponding to `_PyAST_Optimize` is
+not yet planned but would be needed for strict parity with CPython's `-O`
+semantics.
+
+## CPython 3.14 changes
+
+- The `safe_multiply` size cap was tightened to `4096` elements / bytes (down
+  from `~20` in 3.12) after a reported compile-time OOM with large tuple
+  literals.
+- Subscript constant propagation (`fold_subscript`) was extended to cover
+  `bytes` indexing in addition to `tuple` and `str`.
+- `_PyAST_Optimize` now receives a structured `_PyCompilerFlags` rather than a
+  bare `int optimize` argument, giving it access to the future-flags word in
+  one call.

@@ -1,0 +1,127 @@
+---
+title: Modules/_statisticsmodule.c
+description: C accelerator exporting _normal_dist_inv_cdf() for Lib/statistics.py.
+cpython_path: Modules/_statisticsmodule.c
+cpython_version: "3.14"
+lines: 150
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Modules/_statisticsmodule.c`
+
+<CpyLink path="Modules/_statisticsmodule.c" />
+
+`_statisticsmodule.c` is one of the smallest accelerator modules in CPython.
+It exports a single function, `_normal_dist_inv_cdf`, which computes the
+inverse cumulative distribution function of the standard normal distribution
+(also called the probit function or quantile function). The bulk of
+`Lib/statistics.py` is pure Python; this file exists solely because the
+rational-approximation loop in `NormalDist.inv_cdf` is called in tight loops
+by Monte Carlo and confidence-interval code, where even a modest C speedup is
+measurable. There is no Python fallback inside the C file itself; if the
+extension fails to import, CPython falls back to the pure-Python
+implementation in `statistics.py`.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| 1-20 | includes | `Python.h`, `math.h` | |
+| 21-110 | `_statistics__normal_dist_inv_cdf_impl` | Acklam rational approximation | |
+| 111-130 | `_statistics_methods[]` | Module method table (one entry) | |
+| 131-145 | `_statisticsmodule` struct, `PyInit__statistics` | Module definition and init | |
+
+## Reading
+
+### Acklam rational approximation (lines 21 to 110)
+
+<CpyLink path="Modules/_statisticsmodule.c" lines="21-110" />
+
+The implementation follows Peter Acklam's algorithm (published 2003) for
+approximating the inverse normal CDF to full `double` precision. The domain
+is split into three regions: the lower tail (`p < p_low`), the central region
+(`p_low <= p <= p_high`), and the upper tail (`p > p_high`), where
+`p_low = 0.02023` and `p_high = 1 - p_low`. In the central region the
+approximation is a ratio of two degree-6 polynomials in `(p - 0.5)^2`. In
+the tails the approximation is a ratio of two degree-6 polynomials in
+`sqrt(-2 * log(p))`. The function raises `StatisticsError` for `p <= 0` or
+`p >= 1` and returns the exact signed infinities at the boundaries by
+convention.
+
+```c
+/* Coefficients for the central region */
+static const double A[] = {
+    -3.969683028665376e+01,  2.209460984245205e+02, ...
+};
+static const double B[] = {
+    -5.447609879822406e+01,  1.615858368580409e+02, ...
+};
+```
+
+The polynomials are evaluated with Horner's method to minimise floating-point
+rounding.
+
+### Method table and module init (lines 111 to 145)
+
+<CpyLink path="Modules/_statisticsmodule.c" lines="111-145" />
+
+The method table has a single entry using `METH_O` (one positional argument,
+no keyword arguments). The module struct uses the `PyModuleDef_HEAD_INIT`
+macro and carries no per-module state. `PyInit__statistics` is the sole
+exported symbol; it creates the module, adds no constants, and returns
+immediately.
+
+```c
+static PyMethodDef statistics_methods[] = {
+    {"_normal_dist_inv_cdf", statistics__normal_dist_inv_cdf,
+     METH_O, NULL},
+    {NULL, NULL}
+};
+
+PyMODINIT_FUNC
+PyInit__statistics(void)
+{
+    return PyModule_Create(&statisticsmodule);
+}
+```
+
+### Error handling for out-of-domain input (lines 60 to 80)
+
+<CpyLink path="Modules/_statisticsmodule.c" lines="60-80" />
+
+Before entering either approximation branch the function validates the input.
+A non-finite or out-of-`[0,1]` probability is rejected with a
+`StatisticsError` raised via `PyErr_Format`. The check uses `!isfinite(p)`
+from `<math.h>` rather than explicit `isinf` / `isnan` tests, which covers
+both cases in one branch. The `StatisticsError` class is obtained at runtime
+by importing `statistics` and fetching its `StatisticsError` attribute, so
+the C module does not define or own the exception type.
+
+```c
+if (!isfinite(p) || p <= 0.0 || p >= 1.0) {
+    PyErr_Format(PyExc_ValueError,
+        "p must be in the open interval (0, 1)");
+    return NULL;
+}
+```
+
+## gopy mirror
+
+`_statisticsmodule.c` has no gopy port and is unlikely to need one soon.
+The `statistics` module is pure Python for all gopy purposes; the C
+accelerator is an optional performance detail. If the probit function ever
+becomes a bottleneck, the equivalent Go code is three constants arrays plus a
+Horner evaluator, all inlinable in a single file under `module/statistics/`.
+No CPython internal APIs are used, so the port would be a straight
+mathematical translation.
+
+## CPython 3.14 changes
+
+CPython 3.14 converted `_statisticsmodule.c` to the argument clinic
+(`Modules/clinic/_statisticsmodule.c.h`). The hand-written argument parsing
+in `_statistics__normal_dist_inv_cdf` was replaced by a clinic-generated
+wrapper that handles type checking and the `METH_O` dispatch automatically.
+The visible behaviour is unchanged; the change purely reduces boilerplate and
+aligns the file with CPython's ongoing clinic migration effort.

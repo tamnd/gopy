@@ -1,0 +1,96 @@
+---
+title: Lib/zipapp.py
+description: Create and inspect executable Python zip application archives (.pyz files).
+cpython_path: Lib/zipapp.py
+cpython_version: "3.14"
+lines: 220
+status: annotated
+ported_to: ""
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Lib/zipapp.py`
+
+<CpyLink path="Lib/zipapp.py" />
+
+`zipapp` bundles a directory of Python source files, or an existing zip archive, into a self-contained `.pyz` file that the interpreter can execute directly. The trick relies on two CPython behaviours: the interpreter will run a zip file by executing its `__main__.py` entry point, and a shebang line prepended to the zip remains valid because zip files are identified by a magic number at the end rather than the beginning of the file. The combination lets users distribute single-file Python applications that run with `python app.pyz` or, with a shebang, as `./app.pyz`.
+
+The module is intentionally small. The public surface is two functions. `create_archive` does all the work of assembling the archive, writing the optional shebang, and compressing content. `get_interpreter` reads the shebang back out of an existing archive. The rest of the module is the `__main__` block that exposes both functions via a `python -m zipapp` command-line interface.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| 1-30 | module header, `ZipAppError` | Imports and single exception class | |
+| 31-70 | `_copy_archive` | Internal helper: copy an existing archive, optionally replacing interpreter | |
+| 71-160 | `create_archive` | Main public API: build a `.pyz` from a source directory or zip | |
+| 161-185 | `get_interpreter` | Read the shebang line from an existing archive | |
+| 186-220 | `__main__` block, `_do_create` | CLI argument parser and entry point | |
+
+## Reading
+
+### Exception and module header (lines 1 to 30)
+
+<CpyLink path="Lib/zipapp.py" lines="1-30" />
+
+The module defines a single exception, `ZipAppError`, subclassing `ValueError`. It is raised when `create_archive` detects an invalid combination of arguments, such as specifying both a `main` callable and a source that already contains a `__main__.py`. Keeping the exception in the public namespace lets callers distinguish zipapp failures from unrelated `ValueError` instances.
+
+```python
+class ZipAppError(ValueError):
+    pass
+```
+
+### `create_archive` (lines 71 to 160)
+
+<CpyLink path="Lib/zipapp.py" lines="71-160" />
+
+`create_archive` is the heart of the module. When `source` is a directory it walks the tree and writes each `.py` file into a new `ZipFile`, optionally generating a `__main__.py` that calls the `main` argument (expected in `package.module:callable` form). When `source` is already a zip or `.pyz` file it delegates to `_copy_archive` to clone the content. The `interpreter` argument, if given, is written as a `#!interpreter\n` shebang before the zip bytes so that Unix systems can execute the file directly without naming the interpreter on the command line. The `compressed` flag controls whether stored entries use `ZIP_DEFLATED` or `ZIP_STORED`.
+
+```python
+def create_archive(source, target=None, interpreter=None, main=None,
+                   filter=None, compressed=False):
+    ...
+    if main and has_main:
+        raise ZipAppError(
+            "Cannot specify entry point if the source has __main__.py")
+    ...
+    if interpreter:
+        f.write(b'#!' + interpreter.encode() + b'\n')
+    with zipfile.ZipFile(f, 'w', compression=compression) as z:
+        ...
+```
+
+### `get_interpreter` (lines 161 to 185)
+
+<CpyLink path="Lib/zipapp.py" lines="161-185" />
+
+`get_interpreter` opens the archive in binary mode, reads the first line, and returns it stripped of the `#!` prefix if a shebang is present, or `None` otherwise. It does not validate the interpreter string. The function is useful for tooling that wants to repack an archive with a different interpreter without re-assembling the entire zip content.
+
+```python
+def get_interpreter(archive):
+    with open(archive, 'rb') as f:
+        if f.read(2) == b'#!':
+            return f.readline().strip().decode()
+        return None
+```
+
+### `__main__` block (lines 186 to 220)
+
+<CpyLink path="Lib/zipapp.py" lines="186-220" />
+
+The `__main__` block uses `argparse` to expose `create_archive` and the interpreter-replacement path as a command-line tool invoked with `python -m zipapp`. Positional argument `source` names the input directory or archive. Optional flags map directly to `create_archive` parameters: `--output` sets `target`, `--python` sets `interpreter`, `--main` sets `main`, and `--compress` enables deflate. Passing `--info` instead prints the current shebang line of an existing archive by calling `get_interpreter`.
+
+```python
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser(...)
+    parser.add_argument('--info', action='store_true', ...)
+    parser.add_argument('--python', ...)
+    parser.add_argument('--main', ...)
+    parser.add_argument('--compress', action='store_true')
+    ...
+```
+
+## gopy mirror
+
+Not yet ported.
