@@ -80,6 +80,110 @@ var (
 func init() {
 	patternType.HasDict = true
 	matchType.HasDict = true
+	patternType.Getattro = objects.GenericGetAttr
+	matchType.Getattro = objects.GenericGetAttr
+
+	bindP := func(name string, fn func(args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error)) {
+		objects.SetTypeDescr(patternType, name, objects.NewMethodDescr(patternType, name, fn))
+	}
+	bindP("match", patternMatch)
+	bindP("fullmatch", patternFullmatch)
+	bindP("search", patternSearch)
+	bindP("findall", patternFindall)
+	bindP("finditer", patternFindall)
+	bindP("sub", patternSub)
+	bindP("subn", patternSub)
+	bindP("split", patternSplit)
+
+	bindM := func(name string, fn func(args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error)) {
+		objects.SetTypeDescr(matchType, name, objects.NewMethodDescr(matchType, name, fn))
+	}
+	bindM("group", matchGroup)
+	bindM("groups", matchGroups)
+	bindM("start", matchStart)
+	bindM("end", matchEnd)
+	bindM("span", matchSpan)
+}
+
+// Pattern method dispatchers: prepend self at args[0], delegate to the
+// module-level function which already accepts (pattern, string, ...).
+func patternMatch(args []objects.Object, kw map[string]objects.Object) (objects.Object, error) {
+	return reMatch(args, kw)
+}
+func patternFullmatch(args []objects.Object, kw map[string]objects.Object) (objects.Object, error) {
+	return reFullmatch(args, kw)
+}
+func patternSearch(args []objects.Object, kw map[string]objects.Object) (objects.Object, error) {
+	return reSearch(args, kw)
+}
+func patternFindall(args []objects.Object, kw map[string]objects.Object) (objects.Object, error) {
+	return reFindall(args, kw)
+}
+func patternSub(args []objects.Object, kw map[string]objects.Object) (objects.Object, error) {
+	// Pattern.sub signature: (self, repl, string) -> module sub is (pattern, repl, string).
+	return reSub(args, kw)
+}
+func patternSplit(args []objects.Object, kw map[string]objects.Object) (objects.Object, error) {
+	return reSplit(args, kw)
+}
+
+// Match accessors read the cached fields populated in makeMatch.
+func matchGroup(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+	if len(args) < 1 {
+		return nil, fmt.Errorf("TypeError: descriptor 'group' of 'Match' needs an argument")
+	}
+	inst, ok := args[0].(*objects.Instance)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: group() requires Match")
+	}
+	idx := int64(0)
+	if len(args) >= 2 {
+		if i, ok := args[1].(*objects.Int); ok {
+			idx, _ = i.Int64()
+		}
+	}
+	if idx != 0 {
+		return nil, fmt.Errorf("IndexError: no such group")
+	}
+	v, err := inst.Dict().GetItem(objects.NewStr("group0"))
+	if err != nil {
+		return nil, err
+	}
+	return v, nil
+}
+func matchGroups(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+	return objects.NewTuple(nil), nil
+}
+func matchStart(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+	if len(args) < 1 {
+		return nil, fmt.Errorf("TypeError: descriptor 'start' of 'Match' needs an argument")
+	}
+	inst, ok := args[0].(*objects.Instance)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: start() requires Match")
+	}
+	return inst.Dict().GetItem(objects.NewStr("start"))
+}
+func matchEnd(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+	if len(args) < 1 {
+		return nil, fmt.Errorf("TypeError: descriptor 'end' of 'Match' needs an argument")
+	}
+	inst, ok := args[0].(*objects.Instance)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: end() requires Match")
+	}
+	return inst.Dict().GetItem(objects.NewStr("end"))
+}
+func matchSpan(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+	s, err := matchStart(args, nil)
+	if err != nil {
+		return nil, err
+	}
+	e, err := matchEnd(args, nil)
+	if err != nil {
+		return nil, err
+	}
+	return objects.NewTuple([]objects.Object{s, e}), nil
 }
 
 func noop(_ []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
