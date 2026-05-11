@@ -1,0 +1,186 @@
+---
+title: "_pickle.c — C accelerator for pickle"
+description: "Annotated reading of Modules/_pickle.c, the C-level accelerator that backs the pickle module."
+cpython_path: Modules/_pickle.c
+cpython_version: "3.14"
+lines: 7000
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`Modules/_pickle.c` is the C accelerator for Python's `pickle` module. It implements
+`Pickler`, `Unpickler`, `PickleBuffer`, and the supporting memo and framing machinery.
+When the import succeeds, `pickle.py` replaces its own class references with the C
+versions transparently.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1–200 | headers, macros | Opcode constants, size limits, forward declarations |
+| 201–600 | `Pdata` / `PicklerObject` | Internal write buffer and pickler state struct |
+| 601–900 | `memo_*` helpers | Hash-map from object `id` to memo index |
+| 901–1400 | `_Pickler_Write` / framing | Buffered write path, `FRAME` opcode emission |
+| 1401–2400 | `save_*` family | Per-type dispatch: `save_reduce`, `save_type`, `save_bytes`, etc. |
+| 2401–2700 | `Pickler_dump` | Entry point; calls `save()` which fans out to `save_*` |
+| 2701–3200 | `UnpicklerObject` | Unpickler state: read buffer, stack, memo array |
+| 3201–4800 | `load_*` family | One function per opcode: `load_proto`, `load_frame`, `load_newobj`, etc. |
+| 4801–5100 | `Unpickler_load` | Main dispatch loop over the opcode table |
+| 5101–5500 | `PickleBuffer` | PEP 574 out-of-band buffer object |
+| 5501–7000 | module init, method tables | `PyInit__pickle`, `Pickler_methods`, `Unpickler_methods` |
+
+## Reading
+
+### Framing protocol
+
+Protocol 4+ wraps payload bytes into frames. `_Pickler_CommitFrame` flushes the
+current frame by back-patching the 8-byte length prefix that was reserved before
+the frame body was written.
+
+```c
+// CPython: Modules/_pickle.c:922 _Pickler_CommitFrame
+static int
+_Pickler_CommitFrame(PicklerObject *self)
+{
+    size_t frame_len;
+    char *qdata;
+
+    if (!self->framing || self->frame_start == -1)
+        return 0;
+    frame_len = self->output_len - self->frame_start - FRAME_HEADER_SIZE;
+    qdata = &self->output_buffer[self->frame_start];
+    qdata[0] = FRAME;
+    _write_size64(qdata + 1, frame_len);
+    self->frame_start = -1;
+    return 0;
+}
+```
+
+The `FRAME` opcode byte is written at position `frame_start`; the length is
+filled in after the fact with `_write_size64`, which stores a little-endian
+64-bit integer.
+
+### save() dispatch and memo deduplication
+
+`save()` is the central dispatch function. Before examining the object type it
+checks the memo dict. If the object was already pickled in this session, it
+emits a `GET`/`BINGET` opcode referencing the memo index instead of
+re-serialising.
+
+```c
+// CPython: Modules/_pickle.c:2210 save
+static int
+save(PicklerObject *self, PyObject *obj, int pers_save)
+{
+    PyTypeObject *type;
+    PyObject *reduce_override;
+    int status = 0;
+
+    /* ... persistent_id check elided ... */
+
+    type = Py_TYPE(obj);
+
+    /* Memo check — integers and None are exempt */
+    if (!pers_save && self->memo) {
+        PyObject *memo_id = PyLong_FromVoidPtr(obj);
+        if (memo_id == NULL)
+            return -1;
+        if (PyDict_GetItemWithError(self->memo, memo_id)) {
+            status = memo_get(self, obj);
+            Py_DECREF(memo_id);
+            return status;
+        }
+        Py_DECREF(memo_id);
+    }
+    /* ... type dispatch follows ... */
+}
+```
+
+### Unpickler opcode dispatch loop
+
+`Unpickler_load` reads one byte at a time and indexes into `dispatch_table`,
+a static array of 256 function pointers. Unknown opcodes raise
+`UnpicklingError`.
+
+```c
+// CPython: Modules/_pickle.c:4812 Unpickler_load
+static PyObject *
+Unpickler_load(UnpicklerObject *self, PyObject *args)
+{
+    int s;
+
+    self->read_func = self->peek ? Unpickler_Peek : Unpickler_Read;
+
+    for (;;) {
+        assert(self->read != NULL);
+        s = _Unpickler_ReadOneByte(self);
+        if (s < 0)
+            break;
+        if (dispatch_table[s] == NULL) {
+            PyErr_Format(st->UnpicklingError,
+                         "invalid load key, %R.", PyLong_FromLong(s));
+            return NULL;
+        }
+        if (dispatch_table[s](self) < 0)
+            break;
+    }
+    /* ... EOF / stop-marker handling ... */
+}
+```
+
+### PickleBuffer and PEP 574 out-of-band data
+
+Protocol 5 lets the caller intercept large binary objects before they enter the
+pickle stream. `PickleBuffer` wraps an object that exposes the buffer protocol;
+`save_picklebuffer` emits the `NEXT_BUFFER` or `BYTEARRAY8` opcode depending on
+whether the caller supplied a `buffer_callback`.
+
+```c
+// CPython: Modules/_pickle.c:5110 save_picklebuffer
+static int
+save_picklebuffer(PicklerObject *self, PyObject *obj)
+{
+    if (self->proto < 5) {
+        PyErr_SetString(PyExc_ValueError,
+            "PickleBuffer can only be pickled with protocol >= 5");
+        return -1;
+    }
+    if (self->buffer_callback != NULL) {
+        PyObject *rv = PyObject_CallOneArg(self->buffer_callback, obj);
+        if (rv == NULL)
+            return -1;
+        Py_DECREF(rv);
+        return _Pickler_Write(self, &next_buffer_op, 1);
+    }
+    /* fall back: serialise in-band as BYTEARRAY8 */
+    return save_bytearray(self, obj);
+}
+```
+
+## gopy notes
+
+The pickle accelerator has not been ported to gopy. The pure-Python `pickle.py`
+is vendored from CPython's `Lib/pickle.py` and serves as the runtime
+implementation. A future port would target `Pickler.dump`, the memo map, and the
+framing layer as the highest-value pieces, since those dominate serialisation
+throughput. `PickleBuffer` (PEP 574) can be deferred because out-of-band
+transfers are only needed for very large buffers.
+
+Key integration points when porting:
+
+- The memo dict keyed on `id(obj)` maps cleanly to a Go `map[uintptr]int`.
+- Frame buffering is a straightforward `bytes.Buffer` with a back-patch step.
+- The opcode dispatch table becomes a `[256]func(*Unpickler) error` array.
+
+## CPython 3.14 changes
+
+- The `PickleBuffer` C API gained a `PyPickleBuffer_GetBuffer` helper that
+  returns a `Py_buffer` directly, simplifying callers that previously called
+  `PyObject_GetBuffer` manually.
+- Several `save_*` functions were updated to use `PyObject_Vectorcall` instead
+  of `PyObject_Call` for the `__reduce_ex__` invocation, matching the broader
+  3.13-3.14 vectorcall migration across the CPython core.
+- Protocol 5 framing bounds-check was tightened: frames larger than
+  `0xFFFFFFFFFFFFFFFF` bytes now raise `OverflowError` before writing rather
+  than silently truncating the length field.

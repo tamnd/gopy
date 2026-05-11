@@ -1,0 +1,134 @@
+---
+title: pylifecycle.c
+description: "Interpreter initialization and finalization: Py_InitializeFromConfig, Py_FinalizeEx, sub-interpreters"
+cpython_path: Python/pylifecycle.c
+cpython_version: "3.14"
+lines: 2800
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`pylifecycle.c` owns every stage of interpreter birth and death.
+It wires together the runtime pre-init, the core `PyInterpreterState` setup,
+the `site` module import, and the orderly teardown sequence that runs atexit
+handlers, flushes stdio, and drives a final GC collection.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1–80 | includes + statics | feature guards, `extern` declarations, `_Py_UnhandledKeyboardInterrupt` |
+| 81–200 | `_PyConfig_InitCompatConfig` | fills a `PyConfig` from the legacy `Py_*` global flags for `Py_Initialize()` callers |
+| 201–400 | `pyinit_preinit` | pre-init: locale, memory allocators, hash randomization |
+| 401–700 | `pyinit_core` | core init: runtime state, main interpreter, codec bootstrap |
+| 701–1000 | `pyinit_main` | main init: `sys.path`, `site`, readline, `__main__` |
+| 1001–1100 | `Py_InitializeFromConfig` | public entry: calls pre-init, core, main in sequence |
+| 1101–1200 | `Py_Initialize` / `Py_InitializeEx` | legacy wrappers via `_PyConfig_InitCompatConfig` |
+| 1201–1500 | `Py_FinalizeEx` | atexit, stdio flush, GC final collection, interp teardown |
+| 1501–1700 | `finalize_interp_clear` / `finalize_interp_delete` | per-interpreter cleanup steps |
+| 1701–2000 | `Py_NewInterpreter` / `Py_NewInterpreterFromConfig` | sub-interpreter creation |
+| 2001–2100 | `Py_EndInterpreter` | sub-interpreter teardown |
+| 2101–2400 | signal handling helpers | `PyOS_InitInterrupts`, `_Py_HandleSystemExit` |
+| 2401–2800 | misc helpers | `Py_AtExit`, `_Py_FatalError`, `Py_ExitStatusException` |
+
+## Reading
+
+### Three-phase initialization
+
+`Py_InitializeFromConfig` sequences three internal phases. Each phase returns
+`_PyStatus` so an early error propagates cleanly without unwinding a partially
+initialized interpreter.
+
+```c
+// CPython: Python/pylifecycle.c:1042 Py_InitializeFromConfig
+PyStatus
+Py_InitializeFromConfig(const PyConfig *config) {
+    PyStatus status;
+    status = pyinit_preinit(config);   /* locale, alloc, hash seed */
+    if (_PyStatus_EXCEPTION(status)) { return status; }
+    status = pyinit_core(config);      /* runtime, interp, codecs  */
+    if (_PyStatus_EXCEPTION(status)) { return status; }
+    status = pyinit_main(config);      /* site, readline, __main__ */
+    return status;
+}
+```
+
+### Legacy compatibility shim
+
+`Py_Initialize()` predates `PyConfig`. CPython bridges it through
+`_PyConfig_InitCompatConfig`, which reads the old `Py_VerboseFlag`,
+`Py_NoSiteFlag`, etc. global ints and writes them into a fresh `PyConfig`.
+
+```c
+// CPython: Python/pylifecycle.c:112 _PyConfig_InitCompatConfig
+void _PyConfig_InitCompatConfig(PyConfig *config) {
+    PyConfig_InitPythonConfig(config);
+    config->verbose          = Py_VerboseFlag;
+    config->optimization_level = Py_OptimizeFlag;
+    config->site_import      = !Py_NoSiteFlag;
+    /* ... more flag mappings ... */
+}
+```
+
+### Finalization order
+
+`Py_FinalizeEx` must drain side effects before releasing memory. The ordering
+is critical: atexit callbacks can allocate objects, so GC must still be live
+when they run.
+
+```c
+// CPython: Python/pylifecycle.c:1230 Py_FinalizeEx
+int Py_FinalizeEx(void) {
+    _Py_FinalizeAtExit();           /* run atexit callbacks          */
+    _PyErr_CheckSignals_Finalize(); /* deliver pending signals       */
+    flush_std_files();              /* sys.stdout / sys.stderr       */
+    _PyGC_CollectNoFail(tstate);    /* final GC cycle                */
+    finalize_interp_clear(tstate);  /* clear dicts, builtins, codecs */
+    finalize_interp_delete(tstate); /* free PyInterpreterState       */
+    _PyRuntime_Finalize();          /* free _PyRuntimeState          */
+    return 0;
+}
+```
+
+### Sub-interpreter lifecycle
+
+`Py_NewInterpreterFromConfig` creates an independent `PyInterpreterState`
+with its own `sys.modules`, GC state, and optional GIL (PEP 684). The caller
+must already hold the GIL of an existing interpreter.
+
+```c
+// CPython: Python/pylifecycle.c:1752 Py_NewInterpreterFromConfig
+PyStatus
+Py_NewInterpreterFromConfig(PyThreadState **tstate_p,
+                             const PyInterpreterConfig *config)
+{
+    PyInterpreterState *interp = PyInterpreterState_New();
+    /* ... configure, init modules, import importlib ... */
+    *tstate_p = tstate;
+    return _PyStatus_OK();
+}
+```
+
+## gopy notes
+
+gopy's analog to the three-phase init lives in `pythonrun/runstring.go` and
+the `vm.VM` constructor. The preinit phase (locale, allocator) has no
+equivalent because Go manages memory and locale separately.
+
+`Py_FinalizeEx` teardown order maps to `vm.VM.Close()` (not yet fully
+ported). The atexit mechanism is tracked in the `module/` layer.
+Sub-interpreter support (`Py_NewInterpreterFromConfig`) is out of scope for
+the current v0.12.1 milestone.
+
+## CPython 3.14 changes
+
+- `Py_NewInterpreterFromConfig` and `PyInterpreterConfig` were added in 3.12
+  (PEP 684) and refined in 3.13 to expose `allow_threads` / `own_gil`.
+  In 3.14 the struct gained `allow_exec` to restrict `exec()` in
+  sub-interpreters.
+- `_PyConfig_InitCompatConfig` was renamed from `_Py_InitializeFromConfig`
+  internals in 3.11; signature is stable through 3.14.
+- `flush_std_files` became a separate static function in 3.11; 3.14 adds a
+  check for `sys.stdout` being replaced by a non-file object before calling
+  `PyFile_WriteString`.

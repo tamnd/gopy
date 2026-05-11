@@ -1,0 +1,98 @@
+---
+title: "Lib/dis.py"
+description: "CPython bytecode disassembler: dis, get_instructions, findlinestarts, Instruction"
+cpython_path: Lib/dis.py
+cpython_version: "3.14"
+lines: 600
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`Lib/dis.py` is the pure-Python bytecode disassembler. It reads the binary `co_code` / `co_linetable` fields from code objects and presents them as human-readable text or structured `Instruction` namedtuples. No C extension is required; all decoding logic lives here.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1–50 | imports / constants | `opname`, `opmap`, `HAVE_ARGUMENT` from `opcode` |
+| 51–90 | `Instruction` | Named tuple: `opname`, `opcode`, `arg`, `argval`, `argrepr`, `offset`, `starts_line`, `is_jump_target` |
+| 91–150 | `findlinestarts()` | Yields `(offset, line)` pairs from `co_linetable` |
+| 151–230 | `_get_instructions_bytes()` | Core decoder: yields `Instruction` from raw bytes |
+| 231–310 | `get_instructions()` | Public wrapper: accepts code object, resolves labels |
+| 311–400 | `_disassemble()` | Formats one `Instruction` to stdout |
+| 401–500 | `dis()` | Dispatcher: function/method/code object/string/bytes |
+| 501–600 | `show_code()` / helpers | Prints code object metadata; cache helpers |
+
+## Reading
+
+### dis — the public entry point
+
+`dis()` inspects the argument type and routes to the right helper. A bare string is compiled first. A function unwraps to `__code__`. The actual printing is delegated to `_disassemble_recursive()` so nested code objects (comprehensions, lambdas) are printed too.
+
+```python
+# CPython: Lib/dis.py:401 dis
+def dis(x=None, *, file=None, depth=None, show_caches=False, adaptive=False):
+    if x is None:
+        import sys
+        frame = sys._getframe(1)
+        x = frame.f_code
+    if isinstance(x, str):
+        x = compile(x, '<dis>', 'exec')
+    _disassemble_recursive(x, file=file, depth=depth,
+                           show_caches=show_caches, adaptive=adaptive)
+```
+
+### _get_instructions_bytes — the core decoder
+
+This function iterates over the raw bytecode two bytes at a time (word codes since 3.6). For each opcode it resolves the argument, looks up the human-readable `argval` via `_get_const_info` / `_get_name_info`, and yields an `Instruction`.
+
+```python
+# CPython: Lib/dis.py:151 _get_instructions_bytes
+def _get_instructions_bytes(code, varnames=None, names=None, constants=None,
+                             cells=None, linestarts=None, line_offset=0,
+                             exception_entries=(), co_positions=None,
+                             show_caches=False):
+    labels = set(findlabels(code))
+    for offset, op, arg in _unpack_opargs(code):
+        starts_line = linestarts.get(offset, None)
+        ...
+        yield Instruction(opname[op], op, arg, argval, argrepr,
+                          offset, starts_line, offset in labels)
+```
+
+### findlinestarts — offset-to-line mapping
+
+Since 3.10, line number information is stored in the compact `co_linetable` format. `findlinestarts()` decodes it and yields `(offset, lineno)` pairs. The table uses a variable-length encoding where each entry covers a range of bytecode offsets.
+
+```python
+# CPython: Lib/dis.py:91 findlinestarts
+def findlinestarts(code):
+    lastline = None
+    for start, end, line in code.co_lines():
+        if line is not None and line != lastline:
+            lastline = line
+            yield start, line
+```
+
+### show_caches and inline cache slots
+
+Python 3.13 added `show_caches=True` to expose the inline cache slots that the specializing adaptive interpreter uses. Cache slots are emitted as `CACHE` pseudo-instructions. When `show_caches` is `False` they are silently skipped by checking `opcode.HAVE_ARGUMENT` and the `_inline_cache_entries` table.
+
+```python
+# CPython: Lib/dis.py:180 cache skip
+if not show_caches and op == CACHE:
+    continue
+```
+
+## gopy notes
+
+- gopy's compiler emits its own bytecode format, so `dis.py` is not directly ported. However, a Go-side disassembler for debugging should follow the same `Instruction` struct layout so tooling stays comparable.
+- `findlinestarts()` decodes `co_linetable`. The gopy equivalent lives in `compile/flowgraph.go` where source positions are attached to instructions.
+- The `show_caches` flag is relevant once gopy implements specialization (post-v0.12). Until then the `CACHE` instruction type can be a no-op stub.
+
+## CPython 3.14 changes
+
+- `co_qualname` is now included in `show_code()` output (added in 3.11, surfaced more prominently in 3.13+).
+- `_disassemble()` prints exception table entries alongside the instructions they cover, making structured exception handling visible without a separate `--show-excinfo` flag.
+- The `adaptive` parameter exposes the current specialization state of each instruction when the interpreter has already run the code.

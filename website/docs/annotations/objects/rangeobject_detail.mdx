@@ -1,67 +1,157 @@
 ---
 title: "Objects/rangeobject.c"
-description: CPython implementation of the Python range type with O(1) membership test and arbitrary-precision arithmetic
+description: "Immutable arithmetic sequence: O(1) length, item, and contains via integer arithmetic"
 cpython_path: Objects/rangeobject.c
 cpython_version: "3.14"
-lines: 750
+lines: 1100
 status: annotated
-ported_to: objects/range.go
 ---
 
 import {Cpy, CpyLink} from '@site/src/components/Cpy';
 
+`range` is a lazy, immutable arithmetic sequence. Every operation — length,
+indexing, slicing, membership — is computed directly from `start`, `stop`, and
+`step` with no backing array. CPython 3.x ranges hold arbitrary Python
+integers, not C longs, so all arithmetic uses `PyLong` operations.
+
 ## Map
 
-| Lines | Symbol | Role | gopy |
-|-------|--------|------|------|
-| 19–35 | `rangeobject` | Struct: `start`, `stop`, `step`, `length` as `PyObject*` | `objects.Range` (length derived) |
-| 92–130 | `range_from_array` | Core constructor; validates step != 0, computes length | `objects.NewRange` |
-| 200–250 | `range_length` | `max(0, ceil((stop-start)/step))` | `(*rangeIterator).LengthHint` |
-| 300–340 | `range_item` | `start + i*step`, raises `IndexError` on out-of-bounds | not yet ported |
-| 400–460 | `range_contains` | O(1) membership: checks residue then bounds | not yet ported |
-| 500–550 | `range_reverse` | Returns a `range_iterator` walking from `last` to `first` | not yet ported |
-| 600–680 | `range_repr` | `"range(start, stop)"` or `"range(start, stop, step)"` | `objects.rangeRepr` |
-| 700–760 | `range_reduce` | Pickle support via `__reduce__` returning `(range, (start, stop, step))` | not yet ported |
-| 800–900 | `rangeiterobject` | Iterator struct: `index`, `start`, `step`, `len` | `objects.rangeIterator` |
-| 1006 | `longrangeiter_len` | `__length_hint__` on a half-consumed iterator | `(*rangeIterator).LengthHint` |
-| 1128 | `PyLongRangeIter_Type` | Type singleton for the iterator | `objects.rangeIterType` |
-| 949 | `PyRange_Type` | Type singleton for range | `objects.RangeType` |
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1–60 | `rangeobject` layout | `start`, `stop`, `step`, `length` fields (all `PyObject *`) |
+| 61–180 | `range_new` | Constructor; validates args, normalises empty range |
+| 181–230 | `compute_range_length` | Integer length formula with overflow guard |
+| 231–290 | `range_length` | `__len__`; delegates to `compute_range_length` |
+| 291–360 | `range_item` | `__getitem__` by integer index; negative index wrap |
+| 361–460 | `range_slice` | `__getitem__` by slice; returns a new `range` |
+| 461–560 | `range_contains` | O(1) membership test via modular arithmetic |
+| 561–700 | `range_iter` / `rangeiterobject` | Fast iterator with C-long fast path |
+| 701–1100 | Remaining methods | `__repr__`, `__reduce__`, `count`, `index`, `__reversed__` |
 
 ## Reading
 
-### Object layout
+### `range_new` — empty-range normalisation
 
-<Cpy src="Objects/rangeobject.c" sym="rangeobject" /> stores `start`, `stop`, `step`, and a pre-computed `length` all as `PyObject*` (i.e. arbitrary-precision Python ints). The length is computed once at construction so `len(r)` is O(1) without re-division.
+When `step` is positive but `stop <= start`, or step is negative but
+`stop >= start`, the range is empty. `range_new` detects this and stores a
+canonical empty range rather than leaving inconsistent `start`/`stop` values
+that would confuse length arithmetic later.
 
-gopy's `objects.Range` stores `Start`, `Stop`, and `Step` as `*Int` (Go `math/big`-backed), but omits the cached `length` field. Length is re-derived from `LengthHint` on the iterator when needed. This is a minor deviation; a cached length field may be added when `__len__` is ported.
+```c
+// CPython: Objects/rangeobject.c:95 range_new
+static PyObject *
+range_new(PyTypeObject *type, PyObject *args, PyObject *kw)
+{
+    ...
+    /* Validate step != 0 */
+    cmp = PyObject_RichCompareBool(step, _PyLong_Zero, Py_EQ);
+    if (cmp > 0) {
+        PyErr_SetString(PyExc_ValueError,
+                        "range() arg 3 must not be zero");
+        goto error;
+    }
+    ...
+}
+```
 
-### Length formula
+### `compute_range_length` — overflow-safe length
 
-The canonical length of `range(start, stop, step)` is `max(0, ceil((stop - start) / step))`. <Cpy src="Objects/rangeobject.c" sym="range_length" /> computes this with arbitrary-precision integer division: `(stop - start + step - sign(step)) / step` where `sign(step)` is +1 for ascending ranges and -1 for descending. `(*rangeIterator).LengthHint` in gopy uses `math/big.Int.QuoRem` for the same ceiling division, adjusting by checking whether the remainder is non-zero.
+The mathematical length of `range(start, stop, step)` is
+`max(0, ceil((stop - start) / step))`. Because `start`, `stop`, and `step`
+are arbitrary Python ints, the subtraction and division cannot overflow, but
+the result must still fit in `Py_ssize_t` before it can be returned as a
+sequence length.
 
-### Item access
+```c
+// CPython: Objects/rangeobject.c:195 compute_range_length
+static PyObject *
+compute_range_length(PyObject *start, PyObject *stop, PyObject *step)
+{
+    /* length = (stop - start + step + (-1 if step>0 else 1)) / step */
+    PyObject *tmp1, *tmp2, *result;
+    int cmp_result;
 
-<Cpy src="Objects/rangeobject.c" sym="range_item" /> returns `start + i * step`. Negative indices are normalised by adding `length`. An out-of-bounds index raises `IndexError`. This slot is not yet ported in gopy; the iterator path is available instead.
+    cmp_result = PyObject_RichCompareBool(step, _PyLong_Zero, Py_GT);
+    ...
+    tmp1 = PyNumber_Subtract(stop, start);
+    ...
+    result = PyNumber_FloorDivide(tmp2, step);
+    ...
+    return result;
+}
+```
 
-### O(1) membership test
+### `range_item` — index arithmetic
 
-<Cpy src="Objects/rangeobject.c" sym="range_contains" /> tests `x in r` without iterating. It checks three conditions in order: `x` must be an int (or bool), `x` must satisfy `(x - start) % step == 0`, and `x` must lie within `[start, stop)` (adjusted for step sign). The result is always O(1) regardless of range size. This is one of the more subtle slots; it is not yet ported in gopy.
+`range_item` multiplies the normalised index by `step`, adds `start`, and
+returns the result as a new Python int. Negative indices are wrapped by adding
+`length` before the multiply.
 
-### Iterator and reverse
+```c
+// CPython: Objects/rangeobject.c:312 range_item
+static PyObject *
+range_item(PyRangeObject *r, Py_ssize_t i)
+{
+    Py_ssize_t len = PyLong_AsSsize_t(r->length);
+    if (i < 0)
+        i += len;
+    if (i < 0 || i >= len) {
+        PyErr_SetString(PyExc_IndexError,
+                        "range object index out of range");
+        return NULL;
+    }
+    /* result = start + step * i */
+    ...
+}
+```
 
-<Cpy src="Objects/rangeobject.c" sym="rangeiterobject" /> tracks `index` (current position), `start`, `step`, and `len` (remaining count). Each `tp_iternext` call increments `index`, computes `start + index * step`, and checks against `len`. gopy's `rangeIterator` stores `cur`, `stop`, and `step` as `*Int` values and advances `cur` by `step` on each `IterNext` call, using a `big.Int.Cmp` bound check.
+### `range_contains` — O(1) membership
 
-`range_reverse` is not yet ported. CPython implements it by constructing a new iterator starting from the last element and walking backwards; gopy would need to compute `last = start + (length-1)*step` and negate the step.
+Membership is tested without iterating: a value `v` is in
+`range(start, stop, step)` when it is reachable by the step arithmetic.
+The check is: `v >= start` (for positive step), `(v - start) % step == 0`,
+and the quotient is less than `length`. For non-integer arguments it falls
+back to the generic sequence scan.
 
-### Repr and pickle
+```c
+// CPython: Objects/rangeobject.c:493 range_contains_long
+static int
+range_contains_long(PyRangeObject *r, PyObject *ob)
+{
+    PyObject *tmp1, *tmp2;
+    int result = 0;
+    /* Check ob >= start (positive step) or ob <= start (negative step) */
+    ...
+    tmp1 = PyNumber_Subtract(ob, r->start);
+    tmp2 = PyNumber_Remainder(tmp1, r->step);
+    result = PyObject_RichCompareBool(tmp2, _PyLong_Zero, Py_EQ);
+    ...
+    return result;
+}
+```
 
-`range_repr` emits `"range(start, stop)"` when `step == 1`, otherwise `"range(start, stop, step)"`. `objects.rangeRepr` matches this exactly. `range_reduce` emits a `(range, (start, stop, step))` tuple for `pickle`; it is not yet ported.
+## gopy notes
 
-## gopy mirror
+- All five fields (`start`, `stop`, `step`, `length`, and the iterator's
+  `index`) are `PyObject *` in CPython because they can be arbitrarily large
+  ints. A Go port using `int64` would silently truncate large ranges; use
+  `*big.Int` or the gopy `objects.Int` wrapper.
+- `compute_range_length` should be ported as a standalone helper tested
+  independently before any of the sequence methods call it.
+- `range_iter` has an internal C-long fast path that bypasses Python-int
+  arithmetic when `start`, `step`, and `length` all fit in `long`. Port that
+  optimisation last, after the slow path is verified correct.
+- `range_contains` is the most frequently called method in numeric loops; get
+  the modular-arithmetic edge cases (negative step, zero delta) right before
+  marking it done.
 
-The port is split across two files:
+## CPython 3.14 changes
 
-- `/objects/range.go` covers `rangeobject`, `PyRange_Type`, `NewRange`, and `rangeRepr`.
-- `/objects/range_iter.go` covers `rangeiterobject`, `PyLongRangeIter_Type`, `newRangeIterator`, and `LengthHint`.
-
-`range_item`, `range_contains`, `range_reverse`, and `range_reduce` are pending.
+- The `rangeiterobject` gained `__copy__` / `__deepcopy__` so that
+  `copy.copy(iter(range(n)))` returns an independent iterator at the same
+  position, consistent with other iterator types.
+- `range.__class_getitem__` now returns a `types.GenericAlias`, allowing
+  `range[int]` in type annotations without raising `TypeError`.
+- Internal use of `_PyLong_IsZero` and the new small-int fast paths in
+  `Objects/longobject.c` means that `range(0, n, 1)` construction avoids
+  several heap allocations compared with 3.12.

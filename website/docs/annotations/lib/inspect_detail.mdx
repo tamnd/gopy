@@ -1,0 +1,97 @@
+---
+title: "Lib/inspect.py"
+description: "CPython runtime introspection: signature, getsource, getmembers, predicates"
+cpython_path: Lib/inspect.py
+cpython_version: "3.14"
+lines: 1800
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`Lib/inspect.py` is the standard runtime introspection library. It covers predicate checks for callable kinds, source retrieval via `linecache`, MRO traversal, and the full `Signature`/`Parameter`/`BoundArguments` machinery used by type checkers and documentation generators.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1–80 | imports / `__all__` | Sets up `types`, `linecache`, `tokenize`, `dis` |
+| 81–220 | Predicate functions | `isfunction`, `ismethod`, `isbuiltin`, `isgeneratorfunction`, etc. |
+| 221–310 | `getmembers()` / `getmembers_static()` | Filtered attribute scan with `dir()` |
+| 311–420 | `getmro()` / `classify_class_attrs()` | MRO and per-attribute origin tracing |
+| 421–560 | `getsourcefile()` / `getsource()` / `getsourcelines()` | Source text retrieval via `linecache` |
+| 561–700 | `FullArgSpec` / `getfullargspec()` | Legacy arg-spec API (deprecated but present) |
+| 701–1000 | `Parameter` / `Signature` | Modern signature model |
+| 1001–1300 | `signature()` / `_signature_from_callable()` | Signature construction for all callable kinds |
+| 1301–1500 | `BoundArguments` | Result of `Signature.bind()` |
+| 1501–1800 | `get_annotations()` / frame helpers / `stack()` | Annotations, frames, call stack |
+
+## Reading
+
+### Predicate functions
+
+Each predicate is a one- or two-liner that checks `isinstance` against `types.*` or tests a dunder attribute. `isgeneratorfunction()` is slightly more complex because it must unwrap decorated functions via `__wrapped__` before checking `CO_GENERATOR` in `co_flags`.
+
+```python
+# CPython: Lib/inspect.py:181 isgeneratorfunction
+def isgeneratorfunction(object):
+    return bool((isfunction(object) or ismethod(object)) and
+                object.__code__.co_flags & CO_GENERATOR)
+```
+
+### getsource — source text from linecache
+
+`getsource()` calls `getsourcelines()` and joins the result. `getsourcelines()` finds the file via `getfile()`, loads it through `linecache.getlines()`, then scans forward from the definition line using the `tokenize` module to find the exact end of the block.
+
+```python
+# CPython: Lib/inspect.py:1090 getsourcelines
+def getsourcelines(object):
+    object = unwrap(object)
+    lines, lnum = findsource(object)
+    return getblock(lines[lnum:]), lnum + 1
+```
+
+### signature — unified callable introspection
+
+`signature()` is the public entry point. Internally it delegates to `_signature_from_callable()`, which checks for `__signature__`, then `__text_signature__` (for builtins), then falls back to reading `__code__` for Python functions. Wrapped callables are unwrapped via `__wrapped__` before inspection.
+
+```python
+# CPython: Lib/inspect.py:1200 _signature_from_callable
+def _signature_from_callable(obj, *, follow_wrapper_chains=True,
+                               skip_bound_arg=True, globals=None,
+                               locals=None, eval_str=False, sigcls=None):
+    if not callable(obj):
+        raise TypeError('{!r} is not a callable object'.format(obj))
+    if isinstance(obj, types.MethodType):
+        sig = _get_signature_of(obj.__func__, ...)
+        return _signature_bound_method(sig)
+    ...
+```
+
+### BoundArguments — result of Signature.bind
+
+`Signature.bind()` walks the caller's positional and keyword arguments against the parameter list in order, filling a `BoundArguments.arguments` `OrderedDict`. `apply_defaults()` then fills any missing parameters from their default values, which is useful for frameworks that want a fully-populated call record.
+
+```python
+# CPython: Lib/inspect.py:1480 BoundArguments.apply_defaults
+def apply_defaults(self):
+    arguments = self.arguments
+    new_arguments = []
+    for var_name, var in self._signature.parameters.items():
+        if var_name not in arguments:
+            if var.default is not _empty:
+                arguments[var_name] = var.default
+```
+
+## gopy notes
+
+- `isfunction` / `ismethod` predicates map to type assertions on gopy's `*objects.Function` and `*objects.Method`; they do not need to check `co_flags`.
+- `signature()` is needed for `inspect.signature()` calls in user code (used by `dataclasses`, `functools.wraps`, etc.). The gopy port should implement `__text_signature__` parsing for built-in functions.
+- `getsource()` requires `linecache` support. The gopy `linecache` module is not yet ported; calls to `getsource()` should raise `OSError` with a clear message until then.
+- `get_annotations()` interacts with `__annotations__` dicts and PEP 563 (`from __future__ import annotations`). The gopy type system should track whether annotations are stringified or evaluated.
+
+## CPython 3.14 changes
+
+- `get_annotations()` was added in 3.10 and substantially revised in 3.14 to handle PEP 649 lazy evaluation of annotations. The new implementation defers annotation evaluation until first access.
+- `getmembers_static()` was added in 3.11 as a non-triggering alternative to `getmembers()` that avoids calling descriptors.
+- `Signature` now preserves `ParamSpec` and `TypeVarTuple` parameter kinds introduced by PEP 612/646, visible as `Parameter.PARAM_SPEC` and `Parameter.TYPE_VAR_TUPLE` kinds in 3.13+.

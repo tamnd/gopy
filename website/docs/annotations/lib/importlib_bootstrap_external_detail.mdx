@@ -1,0 +1,128 @@
+---
+title: "_bootstrap_external.py"
+description: "File-system import machinery — loaders, finders, and bytecode validation"
+cpython_path: Lib/importlib/_bootstrap_external.py
+cpython_version: "3.14"
+lines: 1562
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`_bootstrap_external.py` is the second frozen bootstrap module. It is installed
+by `_bootstrap._install_external_importers()` and provides everything that
+touches the file system: path hooks, directory scanning, `.pyc` validation, and
+the concrete loader hierarchy for `.py`, `.pyc`, and `.so`/`.pyd` files.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 224 | `MAGIC_NUMBER` | 4-byte little-endian pyc magic; changes with each incompatible bytecode revision |
+| 239–308 | `cache_from_source` | Derives the `__pycache__/foo.cpython-314.pyc` path from a source path |
+| 310–330 | `source_from_cache` | Inverse of `cache_from_source` |
+| 424–454 | `_classify_pyc` | Reads magic and flags from the first 16 bytes of a `.pyc` |
+| 457–483 | `_validate_timestamp_pyc` | Checks source mtime and size against the cached header |
+| 485–541 | `_validate_hash_pyc` | Checks a SHA-256-derived source hash (PEP 552) |
+| 543–558 | `decode_source` | Decodes bytes to str honouring BOM and `# -*- coding` (PEP 263) |
+| 560–713 | `spec_from_file_location` | Builds a `ModuleSpec` from a file path and optional loader |
+| 737–910 | `_LoaderBasics` | Mixin: `is_package`, `get_code`, `exec_module` |
+| 912–960 | `FileLoader` | Base: `get_filename`, `get_data`, `get_resource_reader` |
+| 962–1005 | `SourceFileLoader` | Reads `.py`, compiles, writes `.pyc` |
+| 1007–1030 | `SourcelessFileLoader` | Reads `.pyc` directly, no source needed |
+| 1032–1075 | `ExtensionFileLoader` | Loads `.so`/`.pyd` via `_imp.create_dynamic` |
+| 1285–1320 | `PathFinder` | Meta-path finder that delegates to `sys.path` hooks |
+| 1322–1458 | `FileFinder` | Per-directory finder; caches `os.listdir` between imports |
+
+## Reading
+
+### Directory cache population
+
+`FileFinder._fill_cache` is called the first time a directory is searched after
+its mtime changes. It stores a plain set of filenames for case-sensitive
+platforms and a lowercased set for case-insensitive ones.
+
+```python
+# CPython: Lib/importlib/_bootstrap_external.py:1408 FileFinder._fill_cache
+def _fill_cache(self):
+    path = self.path
+    try:
+        contents = _os.listdir(path or _os.getcwd())
+    except (FileNotFoundError, PermissionError, NotADirectoryError):
+        contents = []
+    if not sys.platform.startswith('win'):
+        self._path_cache = set(contents)
+    else:
+        ...  # lowercase suffixes for Windows legacy support
+    if sys.platform.startswith(_CASE_INSENSITIVE_PLATFORMS):
+        self._relaxed_path_cache = {fn.lower() for fn in contents}
+```
+
+### Bytecode header classification
+
+Every `.pyc` starts with 16 bytes. `_classify_pyc` reads the magic number and a
+flags word. Bit 0 of the flags word indicates hash-based invalidation (PEP 552);
+bit 1 indicates whether to check the source even when the mode is hash-based.
+
+```python
+# CPython: Lib/importlib/_bootstrap_external.py:424 _classify_pyc
+def _classify_pyc(data, name, exc_details):
+    magic = data[:4]
+    if magic != MAGIC_NUMBER:
+        raise ImportError(f'bad magic number in {name!r}: {magic!r}', **exc_details)
+    if len(data) < 16:
+        raise EOFError(f'reached EOF while reading pyc header of {name!r}')
+    flags = _unpack_uint32(data[4:8])
+    if flags & ~0b11:
+        raise ImportError(f'invalid flags {flags!r} in {name!r}', **exc_details)
+    return flags
+```
+
+### Source loading and pyc writing
+
+`SourceFileLoader.get_code` orchestrates the full source-import pipeline. It
+tries to load the cached `.pyc`, validates it, and falls back to compiling the
+`.py` source. On success it writes a fresh `.pyc` back to `__pycache__`.
+
+```python
+# CPython: Lib/importlib/_bootstrap_external.py:826 _LoaderBasics.get_code
+def get_code(self, fullname):
+    source_path = self.get_filename(fullname)
+    ...
+    try:
+        bytecode_path = cache_from_source(source_path)
+        ...
+        flags = _classify_pyc(data, fullname, exc_details)
+        if hash_based:
+            _validate_hash_pyc(data, source_hash, fullname, exc_details)
+        else:
+            _validate_timestamp_pyc(data, source_mtime, st['size'], fullname, exc_details)
+        ...
+        return _compile_bytecode(bytes_data, ...)
+    except (ImportError, EOFError):
+        pass
+    code_object = self.source_to_code(source_bytes, source_path)
+    ...
+```
+
+## gopy notes
+
+- `MAGIC_NUMBER` must match gopy's own bytecode version token; mismatches cause
+  every cached `.pyc` to be recompiled on the first run after an upgrade.
+- `FileFinder` is the bottleneck for import time on cold caches. The mtime check
+  at line 1368 avoids `listdir` on warm paths; this same short-circuit should be
+  preserved in any Go port.
+- `decode_source` calls `tokenize.detect_encoding` under the hood (via the
+  re-export in `_bootstrap_external`). gopy's parser handles BOM and encoding
+  cookies in `parser/pegen/`.
+- `ExtensionFileLoader` relies on `_imp.create_dynamic`, which is a C built-in.
+  gopy does not yet support `.so` extension modules; this loader is a stub.
+
+## CPython 3.14 changes
+
+- Apple framework support was added via `AppleFrameworkLoader` (lines 1461+),
+  handling `.fwork` redirect files required by the iOS App Store sandbox.
+- `_CASE_INSENSITIVE_PLATFORMS_BYTES_KEY` gained `'ios'`, `'tvos'`, and
+  `'watchos'` entries to match the new Apple mobile targets.
+- PEP 552 hash-based pyc support (`_validate_hash_pyc`, `_code_to_hash_pyc`) is
+  stable; no behavioural changes from 3.13.
