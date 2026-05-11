@@ -1,0 +1,128 @@
+---
+title: "Lib/importlib/abc.py"
+description: Abstract base classes for Python's import system, defining the finder and loader protocols that custom importers must implement.
+cpython_path: Lib/importlib/abc.py
+cpython_version: "3.14"
+lines: 234
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# Lib/importlib/abc.py
+
+<CpyLink path="Lib/importlib/abc.py" />
+
+`importlib.abc` is the public surface for the import system's ABC layer. It
+defines the abstract classes that any custom finder or loader must subclass (or
+register against), and re-exports `Loader` from the internal `_abc` helper so
+that callers need only import from one place.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| <Cpy path="Lib/importlib/abc.py" lines="25-33">25-33</Cpy> | `_register` | Registers concrete classes with an ABC and its frozen mirror |
+| <Cpy path="Lib/importlib/abc.py" lines="36-49">36-49</Cpy> | `MetaPathFinder` | ABC for finders on `sys.meta_path`; registers `BuiltinImporter`, `FrozenImporter`, `PathFinder`, `WindowsRegistryFinder` |
+| <Cpy path="Lib/importlib/abc.py" lines="52-61">52-61</Cpy> | `PathEntryFinder` | ABC for path-entry finders used by `PathFinder`; registers `FileFinder` |
+| <Cpy path="Lib/importlib/abc.py" lines="64-80">64-80</Cpy> | `ResourceLoader` | Loader ABC that adds `get_data(path)` for raw bytes access |
+| <Cpy path="Lib/importlib/abc.py" lines="83-133">83-133</Cpy> | `InspectLoader` | Loader ABC with `get_source`, `get_code`, `source_to_code`, and `exec_module` / `load_module` wired from `_LoaderBasics` |
+| <Cpy path="Lib/importlib/abc.py" lines="136-174">136-174</Cpy> | `ExecutionLoader` | Extends `InspectLoader` with `get_filename`; overrides `get_code` to pass the filename to `source_to_code` |
+| <Cpy path="Lib/importlib/abc.py" lines="177-183">177-183</Cpy> | `FileLoader` | Thin mixin combining `_bootstrap_external.FileLoader` with `ResourceLoader` and `ExecutionLoader` |
+| <Cpy path="Lib/importlib/abc.py" lines="186-234">186-234</Cpy> | `SourceLoader` | Full source-loading ABC; adds `path_mtime` (deprecated), `path_stats`, and `set_data` on top of `ResourceLoader` + `ExecutionLoader` |
+
+## Reading
+
+### MetaPathFinder and PathEntryFinder
+
+These two ABCs sit at the top of the finder hierarchy. Neither declares
+`find_spec()` as an abstract method: doing so would break `hasattr` duck-typing
+that the import machinery relies on to detect old-style finders.
+
+```python
+# CPython: Lib/importlib/abc.py:36 MetaPathFinder
+class MetaPathFinder(metaclass=abc.ABCMeta):
+    """Abstract base class for import finders on sys.meta_path."""
+
+    def invalidate_caches(self):
+        """An optional method for clearing the finder's cache, if any."""
+```
+
+`_register` then wires in the frozen-module mirrors so that
+`isinstance(machinery.BuiltinImporter, MetaPathFinder)` is true even before any
+user code runs:
+
+```python
+# CPython: Lib/importlib/abc.py:48 _register call
+_register(MetaPathFinder, machinery.BuiltinImporter, machinery.FrozenImporter,
+          machinery.PathFinder, machinery.WindowsRegistryFinder)
+```
+
+### exec_module / create_module protocol
+
+`InspectLoader` wires `exec_module` and `load_module` directly from
+`_bootstrap_external._LoaderBasics`, making those methods available on any
+subclass without requiring the subclass to re-implement them.
+
+```python
+# CPython: Lib/importlib/abc.py:130 InspectLoader exec_module binding
+exec_module = _bootstrap_external._LoaderBasics.exec_module
+load_module = _bootstrap_external._LoaderBasics.load_module
+```
+
+The `load_module` binding is kept solely for backward compatibility. New loaders
+should implement `exec_module` (and `create_module` when non-default module
+creation is needed). `exec_module` is the current canonical entry point: the
+import machinery calls `create_module` first, then `exec_module`.
+
+### SourceLoader.path_stats and deprecation of path_mtime
+
+`SourceLoader.path_mtime` and `path_stats` have a mutual-override relationship:
+each detects whether the other has been overridden and forwards or raises
+accordingly. `path_mtime` is formally deprecated in favour of `path_stats`.
+
+```python
+# CPython: Lib/importlib/abc.py:203 SourceLoader.path_mtime
+def path_mtime(self, path):
+    """Return the (int) modification time for the path (str)."""
+    import warnings
+    warnings.warn('SourceLoader.path_mtime is deprecated in favour of '
+                  'SourceLoader.path_stats().',
+                  DeprecationWarning, stacklevel=2)
+    if self.path_stats.__func__ is SourceLoader.path_stats:
+        raise OSError
+    return int(self.path_stats(path)['mtime'])
+```
+
+### ExecutionLoader.get_code
+
+`ExecutionLoader` overrides `InspectLoader.get_code` to pass the physical file
+path as the `path` argument to `source_to_code` (which calls `compile()`). This
+sets `__file__` correctly in tracebacks.
+
+```python
+# CPython: Lib/importlib/abc.py:154 ExecutionLoader.get_code
+def get_code(self, fullname):
+    source = self.get_source(fullname)
+    if source is None:
+        return None
+    try:
+        path = self.get_filename(fullname)
+    except ImportError:
+        return self.source_to_code(source)
+    else:
+        return self.source_to_code(source, path)
+```
+
+## gopy notes
+
+- `Loader` itself lives in `importlib._abc` (a C extension in CPython) and is
+  re-exported here; gopy's equivalent will need to provide that base in the
+  objects layer before wiring the ABC hierarchy.
+- The `_register` helper calls `abstract_cls.register()` which is pure Python
+  ABC machinery; no C involvement. gopy can replicate this with its own type
+  registration step at module init time.
+- `SourceLoader.set_data` intentionally has an empty body (write failure is
+  silenced). gopy should preserve the no-op rather than raising.
+- `exec_module` / `create_module` is the only protocol gopy needs to implement
+  for the loader side; `load_module` wrappers exist only for legacy callers.

@@ -1,0 +1,137 @@
+---
+title: "Lib/fnmatch.py"
+description: Shell-style filename pattern matching via translation to regular expressions, with case normalisation and an lru_cache for compiled patterns.
+cpython_path: Lib/fnmatch.py
+cpython_version: "3.14"
+lines: 209
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# Lib/fnmatch.py
+
+<CpyLink path="Lib/fnmatch.py" />
+
+`fnmatch.py` converts Unix shell patterns (`*`, `?`, `[seq]`, `[!seq]`) to regular expressions, compiles them, and caches the result via an `lru_cache`. The top-level `fnmatch()` function normalises filenames through `os.path.normcase` before matching (important on Windows, a no-op on POSIX). `fnmatchcase()` skips normalisation and is the actual matching workhorse. `filter()` and `filterfalse()` apply the same logic to a whole iterable. The `translate()` / `_translate()` pair is also used by `glob.py` for per-segment pattern expansion.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| <Cpy path="Lib/fnmatch.py" lines="22-39">22-39</Cpy> | `fnmatch()` | Normalises both name and pattern via `os.path.normcase`, then calls `fnmatchcase` |
+| <Cpy path="Lib/fnmatch.py" lines="42-50">42-50</Cpy> | `_compile_pattern()` | `@lru_cache(maxsize=32768, typed=True)` wrapping `translate` and `re.compile` |
+| <Cpy path="Lib/fnmatch.py" lines="53-67">53-67</Cpy> | `filter()` | List of names matching the pattern; skips per-name normcase on POSIX |
+| <Cpy path="Lib/fnmatch.py" lines="70-82">70-82</Cpy> | `filterfalse()` | List of names that do not match the pattern |
+| <Cpy path="Lib/fnmatch.py" lines="85-92">85-92</Cpy> | `fnmatchcase()` | Case-sensitive match via `_compile_pattern(pat)(name)` |
+| <Cpy path="Lib/fnmatch.py" lines="95-102">95-102</Cpy> | `translate()` | Public entry: calls `_translate` then `_join_translated_parts` |
+| <Cpy path="Lib/fnmatch.py" lines="105-106">105-106</Cpy> | `_re_setops_sub` / `_re_escape` | Module-level cached helpers: setops escaper and lru_cache-wrapped `re.escape` |
+| <Cpy path="Lib/fnmatch.py" lines="109-183">109-183</Cpy> | `_translate()` | Core character-by-character pattern translator returning `(parts, star_indices)` |
+| <Cpy path="Lib/fnmatch.py" lines="186-209">186-209</Cpy> | `_join_translated_parts()` | Joins parts list using atomic groups `(?>.*?)` between star anchors |
+
+## Reading
+
+### fnmatch() case normalisation
+
+On Windows, `os.path.normcase` lowercases the string and converts forward slashes to backslashes. On POSIX it is a no-op. Applying it to both `name` and `pat` before matching ensures that `fnmatch("README.TXT", "*.txt")` returns `True` on Windows without requiring the caller to do any case folding.
+
+```python
+# CPython: Lib/fnmatch.py:22 fnmatch
+def fnmatch(name, pat):
+    name = os.path.normcase(name)
+    pat = os.path.normcase(pat)
+    return fnmatchcase(name, pat)
+```
+
+### _compile_pattern() and the lru_cache
+
+`_compile_pattern` is the only place a `re.Pattern` object is created. The cache key is the pattern itself (string or bytes), with `typed=True` so `b"*.py"` and `"*.py"` are distinct entries. Bytes patterns are decoded to ISO-8859-1, translated, and re-encoded before compilation. The result stored in the cache is the bound `.match` method, not the `Pattern` object, eliminating one attribute lookup at every call site.
+
+```python
+# CPython: Lib/fnmatch.py:42 _compile_pattern
+@functools.lru_cache(maxsize=32768, typed=True)
+def _compile_pattern(pat):
+    if isinstance(pat, bytes):
+        pat_str = str(pat, 'ISO-8859-1')
+        res_str = translate(pat_str)
+        res = bytes(res_str, 'ISO-8859-1')
+    else:
+        res = translate(pat)
+    return re.compile(res).match
+```
+
+### _translate() shell-to-regex character loop
+
+`_translate` walks the pattern one character at a time. Stars are compressed: consecutive `*` tokens collapse into a single star entry, and each star's position in the `parts` list is recorded in `star_indices` for later use by `_join_translated_parts`. Character classes `[seq]` and `[!seq]` are parsed by scanning forward for the closing `]`, handling the special cases where `!` or `]` appear immediately after `[`, and then escaping set-operation metacharacters (`&`, `~`, `|`) that are not valid in Python regex character sets.
+
+```python
+# CPython: Lib/fnmatch.py:109 _translate
+def _translate(pat, star, question_mark):
+    res = []
+    add = res.append
+    star_indices = []
+    i, n = 0, len(pat)
+    while i < n:
+        c = pat[i]
+        i = i+1
+        if c == '*':
+            star_indices.append(len(res))
+            add(star)
+            while i < n and pat[i] == '*':
+                i += 1
+        elif c == '?':
+            add(question_mark)
+        elif c == '[':
+            j = i
+            if j < n and pat[j] == '!':
+                j = j+1
+            if j < n and pat[j] == ']':
+                j = j+1
+            while j < n and pat[j] != ']':
+                j = j+1
+            if j >= n:
+                add('\\[')
+            else:
+                stuff = pat[i:j]
+                # ... range and setops handling ...
+                if stuff[0] == '!':
+                    stuff = '^' + stuff[1:]
+                add(f'[{stuff}]')
+        else:
+            add(_re_escape(c))
+    return res, star_indices
+```
+
+### _join_translated_parts() and atomic groups
+
+When a pattern contains stars, the naive join of parts produces a regex with backtracking that can be catastrophically slow on pathological inputs. `_join_translated_parts` addresses this by emitting an atomic group `(?>.*?)` between each pair of star positions. Atomic groups prevent the regex engine from revisiting characters already consumed by a `.*?`, giving linear matching time.
+
+```python
+# CPython: Lib/fnmatch.py:186 _join_translated_parts
+def _join_translated_parts(parts, star_indices):
+    if not star_indices:
+        return fr'(?s:{"".join(parts)})\z'
+    iter_star_indices = iter(star_indices)
+    j = next(iter_star_indices)
+    buffer = parts[:j]
+    append, extend = buffer.append, buffer.extend
+    i = j + 1
+    for j in iter_star_indices:
+        append('(?>.*?')
+        extend(parts[i:j])
+        append(')')
+        i = j + 1
+    append('.*')
+    extend(parts[i:])
+    res = ''.join(buffer)
+    return fr'(?s:{res})\z'
+```
+
+## gopy notes
+
+- `fnmatch()` delegates all work to `fnmatchcase()` after normalisation. In Go, case folding on Windows can use `strings.ToLower`; on POSIX the string is used as-is.
+- `_compile_pattern`'s lru_cache (32768 slots, typed) is the main performance lever. In Go, a `sync.Map` from pattern string to `*regexp.Regexp` (or its compiled `MatchString` closure) serves the same role. Eviction is not needed for the typical use case, but a max-size wrapper avoids unbounded growth.
+- The bytes path in `_compile_pattern` (ISO-8859-1 round-trip) is needed because Go `regexp` only operates on strings. A `[]byte` pattern should be converted to `string` before compiling, and the match result converted back.
+- `_translate` is called by `glob.translate` with `star='*'` and `question_mark='.'` replaced by `not_sep` variants, so the same function serves both modules. The gopy port should keep `_translate` as a shared internal function with `star` and `questionMark` parameters.
+- Atomic groups `(?>...)` are a PCRE/Python 3.11+ regex feature. Go's `regexp` package (RE2) does not support atomic groups. For gopy the equivalent is a possessive quantifier workaround or a rewrite using `regexp/syntax` with a custom engine. Alternatively, the linear-time guarantee can be preserved by using RE2's non-backtracking guarantee (RE2 is already linear) and replacing atomic groups with plain groups, accepting that the translated regex may differ textually but matches identically for valid shell patterns.
+- `filterfalse` is new in 3.14 (`__all__` includes it). Port it alongside `filter` to maintain API parity.

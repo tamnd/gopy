@@ -1,0 +1,167 @@
+---
+title: "Lib/glob.py"
+description: Filename globbing using shell-style wildcards, with recursive ** support, dir_fd, root_dir, and a pathlib-compatible Globber abstraction.
+cpython_path: Lib/glob.py
+cpython_version: "3.14"
+lines: 574
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# Lib/glob.py
+
+<CpyLink path="Lib/glob.py" />
+
+`glob.py` provides shell-style filename expansion. The public `glob()` and `iglob()` functions split the pattern into a dirname and basename, recurse through magic-containing parent directories, and delegate single-directory matching to `_glob1` (wildcard), `_glob0` (literal), or `_glob2` (recursive `**`). A secondary `_GlobberBase` / `_StringGlobber` / `_PathGlobber` class hierarchy (added when `pathlib` was unified into the same engine) provides the same logic as an abstract selector-function pipeline.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| <Cpy path="Lib/glob.py" lines="16-44">16-44</Cpy> | `glob()` | Returns a list; delegates to `iglob()` |
+| <Cpy path="Lib/glob.py" lines="46-88">46-88</Cpy> | `iglob()` | Iterator entry point; emits audit events, handles `root_dir` |
+| <Cpy path="Lib/glob.py" lines="90-129">90-129</Cpy> | `_iglob()` | Recursive inner driver: splits path, dispatches to `_glob0/1/2` |
+| <Cpy path="Lib/glob.py" lines="135-139">135-139</Cpy> | `_glob1()` | Lists a directory via `_listdir`, filters names with `fnmatch.filter` |
+| <Cpy path="Lib/glob.py" lines="141-150">141-150</Cpy> | `_glob0()` | Literal check: tests existence via `_lexists` or `_isdir` |
+| <Cpy path="Lib/glob.py" lines="170-175">170-175</Cpy> | `_glob2()` | Recursive `**` expansion using `_rlistdir` |
+| <Cpy path="Lib/glob.py" lines="179-215">179-215</Cpy> | `_iterdir()` | `os.scandir` wrapper that handles `dir_fd`, bytes paths, and dironly |
+| <Cpy path="Lib/glob.py" lines="213-215">213-215</Cpy> | `_listdir()` | Eagerly materializes `_iterdir` into a list |
+| <Cpy path="Lib/glob.py" lines="218-226">218-226</Cpy> | `_rlistdir()` | Recursively yields relative paths inside a literal directory |
+| <Cpy path="Lib/glob.py" lines="257-265">257-265</Cpy> | `has_magic()` | Detects `*`, `?`, `[` in a path component |
+| <Cpy path="Lib/glob.py" lines="276-286">276-286</Cpy> | `escape()` | Wraps `*`, `?`, `[` in `[...]` to neutralize them |
+| <Cpy path="Lib/glob.py" lines="294-346">294-346</Cpy> | `translate()` | Converts a glob pattern to a regex string; handles `**`, hidden files, multi-separator |
+| <Cpy path="Lib/glob.py" lines="349-355">349-355</Cpy> | `_compile_pattern()` | `@lru_cache(512)` wrapper that compiles the translated regex |
+| <Cpy path="Lib/glob.py" lines="358-542">358-542</Cpy> | `_GlobberBase` | Abstract base providing `selector()`, `wildcard_selector()`, `recursive_selector()`, etc. |
+| <Cpy path="Lib/glob.py" lines="545-557">545-557</Cpy> | `_StringGlobber` | Concrete globber for plain string paths using `os.scandir` |
+| <Cpy path="Lib/glob.py" lines="560-574">560-574</Cpy> | `_PathGlobber` | Concrete globber for `pathlib.Path` objects |
+
+## Reading
+
+### iglob() entry point and audit hooks
+
+`iglob()` fires two `sys.audit` events before doing any filesystem work: `glob.glob` (classic) and `glob.glob/2` (extended, carrying `root_dir` and `dir_fd`). `root_dir` is coerced to a plain string via `os.fspath`. When `root_dir` is `None`, it is set to `pathname[:0]` (an empty string or bytes object of the matching type) so that type-sensitive joins work without branching later.
+
+```python
+# CPython: Lib/glob.py:73 iglob
+sys.audit("glob.glob", pathname, recursive)
+sys.audit("glob.glob/2", pathname, recursive, root_dir, dir_fd)
+if root_dir is not None:
+    root_dir = os.fspath(root_dir)
+else:
+    root_dir = pathname[:0]
+```
+
+### _iglob() pattern dispatch
+
+`_iglob` is the recursive core. It calls `has_magic()` on the whole path first. When no wildcards are present it checks existence directly. Otherwise it splits on `os.path.split`, recurses to collect all matching parent directories, then selects `_glob0`, `_glob1`, or `_glob2` based on whether the basename is literal, has wildcards, or is the recursive `**` sentinel.
+
+```python
+# CPython: Lib/glob.py:90 _iglob
+def _iglob(pathname, root_dir, dir_fd, recursive, dironly,
+           include_hidden=False):
+    dirname, basename = os.path.split(pathname)
+    if not has_magic(pathname):
+        assert not dironly
+        if basename:
+            if _lexists(_join(root_dir, pathname), dir_fd):
+                yield pathname
+        else:
+            if _isdir(_join(root_dir, dirname), dir_fd):
+                yield pathname
+        return
+    if not dirname:
+        if recursive and _isrecursive(basename):
+            yield from _glob2(root_dir, basename, dir_fd, dironly,
+                             include_hidden=include_hidden)
+        else:
+            yield from _glob1(root_dir, basename, dir_fd, dironly,
+                              include_hidden=include_hidden)
+        return
+    if dirname != pathname and has_magic(dirname):
+        dirs = _iglob(dirname, root_dir, dir_fd, recursive, True,
+                      include_hidden=include_hidden)
+    else:
+        dirs = [dirname]
+    if has_magic(basename):
+        if recursive and _isrecursive(basename):
+            glob_in_dir = _glob2
+        else:
+            glob_in_dir = _glob1
+    else:
+        glob_in_dir = _glob0
+    for dirname in dirs:
+        for name in glob_in_dir(_join(root_dir, dirname), basename, dir_fd, dironly,
+                               include_hidden=include_hidden):
+            yield os.path.join(dirname, name)
+```
+
+### _iterdir() with dir_fd support
+
+`_iterdir` is the scandir wrapper that underpins both `_listdir` and `_rlistdir`. When `dir_fd` is provided, it opens the subdirectory via `os.open(..., dir_fd=dir_fd)` and closes it in a `finally` block to avoid file-descriptor leaks. Bytes paths trigger `os.fsencode` wrapping around each yielded name so the caller receives bytes back.
+
+```python
+# CPython: Lib/glob.py:179 _iterdir
+def _iterdir(dirname, dir_fd, dironly):
+    try:
+        fd = None
+        fsencode = None
+        if dir_fd is not None:
+            if dirname:
+                fd = arg = os.open(dirname, _dir_open_flags, dir_fd=dir_fd)
+            else:
+                arg = dir_fd
+            if isinstance(dirname, bytes):
+                fsencode = os.fsencode
+        elif dirname:
+            arg = dirname
+        elif isinstance(dirname, bytes):
+            arg = bytes(os.curdir, 'ASCII')
+        else:
+            arg = os.curdir
+        try:
+            with os.scandir(arg) as it:
+                for entry in it:
+                    try:
+                        if not dironly or entry.is_dir():
+                            if fsencode is not None:
+                                yield fsencode(entry.name)
+                            else:
+                                yield entry.name
+                    except OSError:
+                        pass
+        finally:
+            if fd is not None:
+                os.close(fd)
+    except OSError:
+        return
+```
+
+### translate() glob-to-regex conversion
+
+`translate()` splits the pattern on any path separator, then translates each segment. A bare `*` becomes a "one segment" or "last segment" pattern depending on position. A `**` at the end becomes `any_last_segments` (matching zero or more complete path components). All other characters are forwarded to `fnmatch._translate` for shell-character expansion. The result is wrapped in `(?s:...)\z` so `.` matches newlines and the anchor is absolute.
+
+```python
+# CPython: Lib/glob.py:294 translate
+def translate(pat, *, recursive=False, include_hidden=False, seps=None):
+    if not seps:
+        if os.path.altsep:
+            seps = (os.path.sep, os.path.altsep)
+        else:
+            seps = os.path.sep
+    escaped_seps = ''.join(map(re.escape, seps))
+    any_sep = f'[{escaped_seps}]' if len(seps) > 1 else escaped_seps
+    not_sep = f'[^{escaped_seps}]'
+    # ... segment loop builds results list ...
+    res = ''.join(results)
+    return fr'(?s:{res})\z'
+```
+
+## gopy notes
+
+- `has_magic()` is a two-regex check (`magic_check` / `magic_check_bytes`). In Go a single `strings.ContainsAny(s, "*?[")` suffices for the string case; bytes need an equivalent loop.
+- `_iterdir` opens directories with `O_RDONLY | O_DIRECTORY`. The Go equivalent is `os.Open(dir)` (which returns a `*os.File` pointing at a directory) followed by `Readdirnames` or `ReadDir`.
+- `dir_fd` support requires `openat`/`fdopendir` syscalls. These are available on Linux and Darwin via `golang.org/x/sys/unix` but not on Windows. Match the CPython behavior by returning empty results on platforms where `dir_fd` is unsupported.
+- The `_GlobberBase` selector pipeline is an internal abstraction used by `pathlib`. The gopy port can implement it as a set of closures or an interface with `LexistsFunc`, `ScandirFunc`, and `ConcatPathFunc` fields.
+- `_compile_pattern` is an lru_cache over a `(pat, seps, case_sensitive, recursive)` key. In Go, a `sync.Map` keyed on a struct with those fields works.
+- `escape()` wraps metacharacters in `[...]` rather than backslash-escaping them, which differs from `re.escape`. Port this exactly to avoid double-escaping bugs.

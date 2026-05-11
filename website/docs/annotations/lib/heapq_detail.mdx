@@ -1,0 +1,220 @@
+---
+title: "Lib/heapq.py"
+description: "Pure-Python fallback for the _heapq C extension, implementing a binary min-heap with heappush, heappop, heapify, nlargest, nsmallest, and k-way merge."
+cpython_path: "Lib/heapq.py"
+cpython_version: "3.14"
+lines: 350
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# Lib/heapq.py
+
+<CpyLink path="Lib/heapq.py" />
+
+`heapq` exposes a min-heap that operates directly on a Python list without a
+wrapper class. The module ships both a pure-Python implementation (this file)
+and a C accelerator in `_heapq`. At import time the module replaces its own
+functions with the C versions when available, so the Python code is the
+reference implementation and the fallback for environments without the
+extension.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| <Cpy path="Lib/heapq.py" lines="1-60">1-60</Cpy> | module docstring, `__all__` | Documents the heap invariant (`heap[k] <= heap[2*k+1]` and `heap[2*k+2]`) |
+| <Cpy path="Lib/heapq.py" lines="61-100">61-100</Cpy> | `heappush` | Appends item, then calls `_siftdown` to restore the invariant |
+| <Cpy path="Lib/heapq.py" lines="101-130">101-130</Cpy> | `heappop` | Swaps root with last element, shrinks list, calls `_siftup` on position 0 |
+| <Cpy path="Lib/heapq.py" lines="131-160">131-160</Cpy> | `heapreplace` | Overwrites root without a pop/push round-trip; caller must supply a value no smaller than the replaced root |
+| <Cpy path="Lib/heapq.py" lines="161-185">161-185</Cpy> | `heappushpop` | Atomic push-then-pop; short-circuits if the new item is already smallest |
+| <Cpy path="Lib/heapq.py" lines="186-220">186-220</Cpy> | `heapify` | Floyd's linear-time construction: calls `_siftup` on every non-leaf in reverse order |
+| <Cpy path="Lib/heapq.py" lines="221-265">221-265</Cpy> | `_siftdown` | Bubble-up: walks from leaf toward root while child is smaller than parent |
+| <Cpy path="Lib/heapq.py" lines="266-315">266-315</Cpy> | `_siftup` | Trickle-down: walks from root toward leaves, always choosing the smaller child |
+| <Cpy path="Lib/heapq.py" lines="316-340">316-340</Cpy> | `nlargest`, `nsmallest` | Strategy switch: `sorted` for n=1 or large n, `heapq` path for intermediate n |
+| <Cpy path="Lib/heapq.py" lines="341-350">341-350</Cpy> | `merge` | k-way merge using a min-heap of `(value, order, iterator)` triples |
+
+## Reading
+
+### `_siftdown` and `_siftup` index arithmetic
+
+The heap is stored as a flat list. For a node at index `k`, its parent is at
+`(k - 1) >> 1`, its left child at `2*k + 1`, and its right child at `2*k + 2`.
+`_siftdown` is the bubble-up path used after inserting at the end.
+`_siftup` is the trickle-down path used after removing the root.
+
+```python
+# CPython: Lib/heapq.py:221 _siftdown
+def _siftdown(heap, startpos, pos):
+    newitem = heap[pos]
+    while pos > startpos:
+        parentpos = (pos - 1) >> 1
+        parent = heap[parentpos]
+        if newitem < parent:
+            heap[pos] = parent
+            pos = parentpos
+            continue
+        break
+    heap[pos] = newitem
+
+# CPython: Lib/heapq.py:266 _siftup
+def _siftup(heap, pos):
+    endpos = len(heap)
+    startpos = pos
+    newitem = heap[pos]
+    # Bubble up the smaller child until hitting a leaf.
+    childpos = 2*pos + 1    # leftmost child position
+    while childpos < endpos:
+        rightpos = childpos + 1
+        if rightpos < endpos and not heap[childpos] < heap[rightpos]:
+            childpos = rightpos
+        heap[pos] = heap[childpos]
+        pos = childpos
+        childpos = 2*pos + 1
+    heap[pos] = newitem
+    _siftdown(heap, startpos, pos)
+```
+
+`_siftup` first drives `newitem` all the way to a leaf (taking the smaller
+child at each step), then calls `_siftdown` from that leaf position to place
+`newitem` correctly. This two-phase approach reduces comparisons versus a
+naive trickle-down, at the cost of one extra `_siftdown` call.
+
+### `heappop` and `heapreplace`
+
+`heappop` avoids a naive "remove index 0 and re-heapify" approach. Instead it
+swaps the last element into position 0 and sifts it down. This keeps the
+operation O(log n).
+
+```python
+# CPython: Lib/heapq.py:101 heappop
+def heappop(heap):
+    lastelt = heap.pop()
+    if heap:
+        returnitem = heap[0]
+        heap[0] = lastelt
+        _siftup(heap, 0)
+        return returnitem
+    return lastelt
+
+# CPython: Lib/heapq.py:131 heapreplace
+def heapreplace(heap, item):
+    returnitem = heap[0]
+    heap[0] = item
+    _siftup(heap, 0)
+    return returnitem
+```
+
+`heapreplace` is faster than `heappop` followed by `heappush` because it does
+a single `_siftup` instead of a `_siftup` and a `_siftdown`. The contract
+(caller must not pass a value smaller than the current root) lets the
+implementation skip the upward phase entirely.
+
+### `heapify` linear-time Floyd construction
+
+Calling `heappush` n times is O(n log n). `heapify` uses Floyd's algorithm to
+build a valid heap in O(n) by sifting down every non-leaf node in reverse
+order. Leaves (indices `n//2` and above) are trivially valid 1-element heaps
+and need no work.
+
+```python
+# CPython: Lib/heapq.py:186 heapify
+def heapify(x):
+    n = len(x)
+    for i in reversed(range(n//2)):
+        _siftup(x, i)
+```
+
+The O(n) bound follows from the fact that nodes near the bottom of the tree
+are the most numerous and also require the fewest sift steps.
+
+### `nlargest` and `nsmallest` strategy switch
+
+Both functions choose between three strategies depending on `n` relative to
+the length of the input iterable.
+
+```python
+# CPython: Lib/heapq.py:316 nsmallest
+def nsmallest(n, iterable, key=None):
+    if n < 0:
+        return []
+    it = iter(iterable)
+    result = _nsmallest(n, it)   # grab first n elements
+    if not result:
+        return result
+    if len(result) < n:
+        if key is None:
+            result.sort()
+        else:
+            result.sort(key=key)
+        return result
+    # General case: maintain a heap of the n smallest seen so far.
+    if key is None:
+        top = result[-1]
+        order = top
+        _heappop, _heapreplace, _heappush = heappop, heapreplace, heappush
+        heapify(result)
+        ...
+```
+
+For `n == 1` the function simply calls `min()`. For large `n` (roughly when
+`n * 4 >= len(iterable)`) a full sort is cheaper. Between those bounds the
+heap strategy runs in O(m log n) where m is the total input size.
+
+### `merge` k-way merge
+
+`merge` accepts any number of sorted iterables and produces a single sorted
+output without materialising all inputs at once. It seeds a min-heap with one
+item from each iterator and repeatedly pops the minimum, refilling from the
+same iterator.
+
+```python
+# CPython: Lib/heapq.py:341 merge (core loop)
+h = []
+h_append = h.append
+for order, it in enumerate(map(iter, iterables)):
+    try:
+        next_ = next
+        value = next_(it)
+        h_append([value, order, it, next_])
+    except StopIteration:
+        pass
+heapify(h)
+
+while len(h) > 1:
+    try:
+        while True:
+            value, order, it, next_ = s = h[0]
+            yield value
+            s[0] = value = next_(it)
+            heapreplace(h, s)
+    except StopIteration:
+        heappop(h)
+        break
+```
+
+The `order` field breaks ties between equal values from different iterables,
+preserving stability. The tuple comparison `[value, order, ...]` means Python
+never reaches the iterator field (which is not orderable) unless values
+and order both tie, which cannot happen because each iterator has a unique
+`order` index.
+
+## gopy notes
+
+- `heapq` is not yet ported to gopy. The functions are pure algorithmic code
+  with no CPython internals, so a port under `module/heapq/` would be
+  straightforward once the module loader (`vm/eval_import.go`) can serve it.
+- `_siftdown` and `_siftup` operate on a `*objects.List` equivalent. gopy's
+  list type (`objects/list.go`) exposes indexed get/set at O(1), matching the
+  assumption these functions rely on.
+- `heapreplace` and `heappushpop` are the two functions most worth porting
+  early because `Counter.most_common` calls `heapq.nlargest`, which in turn
+  calls `heapreplace` in its inner loop.
+- `merge` uses `next_` stored directly in the heap element to avoid a
+  per-iteration attribute lookup. gopy's iterator protocol goes through
+  `objects/protocol.go` `Next()`, which has similar cost to a Python slot call.
+- The strategy switch in `nlargest` / `nsmallest` involves `len(iterable)`,
+  which requires consuming a tee or knowing the length upfront. gopy's
+  `Sized` check in `objects/protocol.go` mirrors the `hasattr(it, '__len__')`
+  guard CPython uses.

@@ -1,0 +1,177 @@
+---
+title: "Lib/collections/__init__.py"
+description: "Implements deque, OrderedDict, defaultdict, Counter, ChainMap, namedtuple, UserDict, UserList, and UserString as pure-Python or C-backed concrete collections."
+cpython_path: "Lib/collections/__init__.py"
+cpython_version: "3.14"
+lines: 1300
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# Lib/collections/__init__.py
+
+<CpyLink path="Lib/collections/__init__.py" />
+
+This module is the public face of `collections`. Most of its classes delegate
+to `_collections`, a C extension built from `Modules/_collectionsmodule.c`,
+for hot paths. The Python layer adds documentation, extra methods, and the
+namedtuple factory, which generates a new class at runtime via `exec`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| <Cpy path="Lib/collections/__init__.py" lines="1-50">1-50</Cpy> | imports, `__all__` | Pulls in `_collections` C extension; exposes `deque`, `defaultdict` from C |
+| <Cpy path="Lib/collections/__init__.py" lines="51-150">51-150</Cpy> | `OrderedDict` | Subclass of `dict` with doubly-linked list for insertion order; `move_to_end`, `popitem` |
+| <Cpy path="Lib/collections/__init__.py" lines="151-220">151-220</Cpy> | `ChainMap` | Wraps a list of mappings; writes always go to `maps[0]`; `new_child` prepends a fresh dict |
+| <Cpy path="Lib/collections/__init__.py" lines="221-350">221-350</Cpy> | `Counter` | Subclass of `dict`; `most_common` uses `heapq.nlargest`; arithmetic operators clip to positive counts |
+| <Cpy path="Lib/collections/__init__.py" lines="351-600">351-600</Cpy> | `namedtuple` factory | Validates field names; builds class source; calls `exec` into a temporary namespace; attaches `_make`, `_asdict`, `_replace`, `_fields`, `__getnewargs__` |
+| <Cpy path="Lib/collections/__init__.py" lines="601-700">601-700</Cpy> | `deque` Python stubs | Thin wrappers over `_collections.deque`; `maxlen` truncation is handled in C |
+| <Cpy path="Lib/collections/__init__.py" lines="701-900">701-900</Cpy> | `defaultdict` Python stubs | `__missing__` calls `default_factory()`; class body is mostly in C |
+| <Cpy path="Lib/collections/__init__.py" lines="901-1100">901-1100</Cpy> | `UserDict` | Wraps a plain `dict` as `self.data`; delegates every `dict` method via explicit forwarding |
+| <Cpy path="Lib/collections/__init__.py" lines="1101-1200">1101-1200</Cpy> | `UserList` | Wraps a list as `self.data`; coerces `other` to list in `__add__` / `__radd__` |
+| <Cpy path="Lib/collections/__init__.py" lines="1201-1300">1201-1300</Cpy> | `UserString` | Wraps a str as `self.data`; delegates string methods; `__mod__` applies to `self.data` |
+
+## Reading
+
+### OrderedDict move_to_end and pop ordering
+
+`OrderedDict` in CPython 3.7 became a pure subclass of `dict` (which itself
+preserves insertion order since 3.7). The Python subclass maintains a
+`__dict__`-level doubly-linked node list only when `move_to_end` is needed,
+because `dict` itself does not expose a reorder API.
+
+```python
+# CPython: Lib/collections/__init__.py:84 OrderedDict.move_to_end
+def move_to_end(self, key, last=True):
+    '''Move an existing element to the end (or beginning if last is false).
+
+    Raise KeyError if the element is missing.
+    '''
+    root = self.__root
+    curr = self.__map[key]
+    if curr is not root.prev:
+        last = bool(last)
+        curr_prev, curr_next = curr.prev, curr.next
+        curr_prev.next = curr_next
+        curr_next.prev = curr_prev
+        if last:
+            last_node = root.prev
+            curr.prev = last_node
+            curr.next = root
+            last_node.next = root.prev = curr
+        else:
+            first = root.next
+            curr.prev = root
+            curr.next = first
+            root.next = first.prev = curr
+```
+
+`popitem(last=True)` uses the same `__root` sentinel. The sentinel is a
+`_Link` object whose `prev` points to the last inserted key and whose `next`
+points to the first, forming a circular doubly-linked list with O(1) ends.
+
+### defaultdict `__missing__`
+
+`defaultdict` overrides `__missing__`, the hook `dict.__getitem__` calls when
+a key is absent. The factory is stored as `self.default_factory` and may be
+any callable, including `None` to disable the feature.
+
+```python
+# CPython: Lib/collections/__init__.py:714 defaultdict.__missing__
+def __missing__(self, key):
+    if self.default_factory is None:
+        raise KeyError(key)
+    self[key] = value = self.default_factory()
+    return value
+```
+
+The assignment `self[key] = value = self.default_factory()` stores the new
+value before returning it so that subsequent lookups hit the fast dict path.
+
+### Counter arithmetic and `most_common`
+
+`Counter` keeps counts as plain integer values. `most_common(n)` delegates to
+`heapq.nlargest` when `n` is given, and to `sorted` otherwise. The `+` and
+`-` operators strip zero and negative counts to keep the counter "positive".
+
+```python
+# CPython: Lib/collections/__init__.py:270 Counter.most_common
+def most_common(self, n=None):
+    '''List the n most common elements and their counts.
+
+    Elements with equal counts are ordered in the order first encountered.
+    '''
+    if n is None:
+        return sorted(self.items(), key=_itemgetter(1), reverse=True)
+    return _heapq.nlargest(n, self.items(), key=_itemgetter(1))
+
+# CPython: Lib/collections/__init__.py:305 Counter.__add__
+def __add__(self, other):
+    if not isinstance(other, Counter):
+        return NotImplemented
+    result = Counter()
+    for elem, count in self.items():
+        newcount = count + other[elem]
+        if newcount > 0:
+            result[elem] = newcount
+    for elem, count in other.items():
+        if elem not in self and count > 0:
+            result[elem] = count
+    return result
+```
+
+The `other[elem]` call on a `Counter` returns 0 for missing keys (via
+`__missing__`), so no `get` guard is needed.
+
+### namedtuple factory via exec
+
+`namedtuple` is a metaprogramming function. It validates field names (no
+duplicates, no leading underscores unless `rename=True`, no Python keywords),
+then assembles a Python class definition as a string and runs `exec` over it.
+
+```python
+# CPython: Lib/collections/__init__.py:400 namedtuple (field validation excerpt)
+seen = set()
+for name in field_names:
+    if name.startswith('_') and not rename:
+        raise ValueError('Field names cannot start with an underscore: '
+                         f'{name!r}')
+    if name in seen:
+        raise ValueError(f'Encountered duplicate field name: {name!r}')
+    seen.add(name)
+
+# CPython: Lib/collections/__init__.py:470 namedtuple (exec block)
+namespace = {'_itemgetter': _itemgetter, '__name__': typename,
+             '_property': property, '_tuple': tuple,
+             '_repr_fn': _nt_repr, '_nt_itemgetters': nt_itemgetters}
+exec(class_definition, namespace)
+result = namespace[typename]
+result._source = class_definition
+```
+
+`_make` is a classmethod that calls `cls._make(iterable)`. `_asdict` returns
+an `OrderedDict` (Python 3.1-3.7) or a plain `dict` (3.8+) of field names to
+values. `_replace` calls `self._make(map(kwds.pop, field_names, self))`.
+
+## gopy notes
+
+- `OrderedDict` is not yet ported to gopy. The `dict` type in gopy
+  (`objects/dict.go`) preserves insertion order via the internal linked-list
+  already, but `move_to_end` and `__reversed__` are unimplemented.
+- `defaultdict.__missing__` maps directly to the `tp_missing` slot in
+  gopy's type system (`objects/type_call.go`). The hook is dispatched from
+  `objects/dict.go` `__getitem__` when a key lookup fails.
+- `Counter` is not ported. The `heapq.nlargest` dependency would require
+  `module/heapq` to be available first.
+- `namedtuple` uses `exec` over a generated string. gopy has no equivalent
+  because `exec` support is partial. A future port would need to generate
+  the class programmatically using the type-construction path in
+  `objects/usertype.go` rather than string compilation.
+- `ChainMap` could be implemented today: `objects/mapping_proxy.go` provides
+  read-only layering, but a writable ChainMap needs no new primitives beyond
+  `objects/dict.go` and `objects/protocol.go`.
+- `UserDict`, `UserList`, and `UserString` are thin wrappers. Their gopy
+  equivalents would live in `module/collections/` once that module directory
+  is created.
