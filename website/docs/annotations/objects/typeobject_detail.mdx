@@ -1,0 +1,156 @@
+---
+title: "typeobject.c: Type Creation, MRO, and Slot Inheritance"
+description: "Deep annotation of CPython Objects/typeobject.c covering type_new_impl, C3 MRO linearization, attribute lookup, slot copying, and 3.14 type watcher invalidation"
+cpython_path: Objects/typeobject.c
+cpython_version: "3.14"
+lines: 10000
+status: annotated
+ported_to: objects/type.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+CPython `Objects/typeobject.c` is the largest single file in the interpreter.
+It implements every aspect of type objects: construction from `type.__new__`,
+method resolution order (MRO) computation via C3 linearization, attribute
+lookup walking the MRO, slot inheritance when a subtype is created, and (since
+3.12) a watcher mechanism that invalidates per-type version tags on mutation.
+
+## Map
+
+| Region | Lines (approx) | Topic | gopy file |
+|--------|---------------|-------|-----------|
+| `type_new_impl` | 2900-3200 | Allocate and initialise a new heap type | `objects/type.go` |
+| `mro_internal` | 1500-1650 | C3 linearization driver | `objects/type.go` |
+| `pmerge` | 1650-1730 | C3 merge step (removes heads found in no tail) | `objects/type.go` |
+| `type_getattro` | 3400-3460 | MRO attribute walk with data-descriptor priority | `objects/type.go` |
+| `inherit_slots` | 7200-7500 | Copy tp_* slots from base to subtype | `objects/type.go` |
+| `type_modified_unlocked` | 8800-8850 | Bump version tag, call watchers | `objects/type.go` |
+| `PyType_Watch` / `PyType_Unwatch` | 8900-8950 | Register/deregister watcher callbacks (3.12+) | `objects/type.go` |
+| `tp_watched` field | 9900-9950 | 3.14 per-type watcher bitmask in `PyTypeObject` | `objects/type.go` |
+
+## Reading
+
+### type_new_impl: allocating a heap type
+
+`type_new_impl` is the C implementation of `type.__new__(mcs, name, bases, ns)`.
+The key phases are: validate bases, pick the best `tp_base` (the "winner"),
+allocate a `PyHeapTypeObject`, copy the winner's memory layout, then call
+`type_new_set_slots` to extend it if `__slots__` is present.
+
+```c
+// Objects/typeobject.c:2901 type_new_impl
+static PyObject *
+type_new_impl(PyTypeObject *metatype, PyObject *args, PyObject *kwds)
+{
+    PyObject *name, *bases = NULL, *orig_dict = NULL;
+    PyTypeObject *type = NULL, *base;
+    ...
+    base = best_base(bases);          /* picks layout winner */
+    ...
+    type = (PyTypeObject *)metatype->tp_alloc(metatype, nslots);
+    ...
+    type_new_set_names(type);
+    type_new_init_subclass(type, kwds);
+    ...
+    return (PyObject *)type;
+}
+```
+
+`best_base` walks the bases list and returns the one whose `tp_basicsize` is
+largest (the most derived C layout). If two bases have incompatible layouts the
+function raises `TypeError`.
+
+### mro_internal and pmerge: C3 linearization
+
+`mro_internal` builds the MRO list for a type. It collects the MRO of each
+base plus the bases list itself, then passes all of them to `pmerge`.
+
+```c
+// Objects/typeobject.c:1523 mro_internal
+static PyObject *
+mro_internal(PyTypeObject *type, PyObject **p_old_mro)
+{
+    PyObject *result, *bases;
+    bases = type->tp_bases;
+    /* build list-of-lists for C3 merge */
+    PyObject *to_merge = build_mro_seqs(type, bases);
+    result = mro_implementation(type, to_merge);
+    ...
+}
+
+// Objects/typeobject.c:1657 pmerge
+static int
+pmerge(PyObject *acc, PyObject *to_merge)
+{
+    /* Classic C3: repeatedly pick a head that appears in no tail */
+    for (;;) {
+        PyObject *candidate = NULL;
+        Py_ssize_t i;
+        for (i = 0; i < PyList_GET_SIZE(to_merge); i++) {
+            PyObject *seq = PyList_GET_ITEM(to_merge, i);
+            if (PyList_GET_SIZE(seq) == 0) continue;
+            candidate = PyList_GET_ITEM(seq, 0);
+            if (!tail_contains(to_merge, i, candidate)) break;
+            candidate = NULL;
+        }
+        if (candidate == NULL) break; /* done or error */
+        PyList_Append(acc, candidate);
+        remove_head(to_merge, candidate);
+    }
+    ...
+}
+```
+
+The algorithm is faithful to the Dylan paper. A candidate is accepted when it
+does not appear in the tail (index 1 onward) of any sequence in `to_merge`.
+
+### type_getattro: data-descriptor priority
+
+The MRO walk in `type_getattro` implements Python's descriptor protocol for
+type objects. Data descriptors (those defining `__set__` or `__delete__`) on
+the metatype win over instance `__dict__`, which wins over non-data descriptors.
+
+```c
+// Objects/typeobject.c:3401 type_getattro
+PyObject *
+type_getattro(PyObject *type, PyObject *name)
+{
+    PyTypeObject *metatype = Py_TYPE(type);
+    PyObject *meta_attribute, *attribute;
+    descrgetfunc f;
+
+    /* 1. search metatype MRO for a data descriptor */
+    meta_attribute = _PyType_Lookup(metatype, name);
+    if (meta_attribute != NULL) {
+        f = Py_TYPE(meta_attribute)->tp_descr_get;
+        if (f != NULL && (Py_TYPE(meta_attribute)->tp_descr_set != NULL))
+            return f(meta_attribute, (PyObject *)type, (PyObject *)metatype);
+    }
+    /* 2. search type MRO */
+    attribute = _PyType_Lookup((PyTypeObject *)type, name);
+    if (attribute != NULL) {
+        f = Py_TYPE(attribute)->tp_descr_get;
+        if (f != NULL)
+            return f(attribute, NULL, (PyObject *)type);
+        Py_INCREF(attribute);
+        return attribute;
+    }
+    /* 3. fall back to non-data descriptor on metatype */
+    ...
+}
+```
+
+## gopy notes
+
+- `objects/type.go` ports `type_new_impl` as `typeNew` and `mro_internal` as
+  `computeMRO`. The C3 merge is in `mroMerge`.
+- `inherit_slots` is partially ported. Slots that correspond to Go interface
+  methods (`tp_hash`, `tp_richcompare`, `tp_iter`) are inherited by checking
+  whether the subtype's method table entry is nil and copying the base's.
+- The 3.14 `tp_watched` bitmask is represented as a `uint8` field on
+  `typeObject`. Watcher callbacks are stored in a package-level array indexed
+  by watcher ID, matching CPython's `_PyRuntime.type_watchers` layout.
+- Version tag bumping (`type_modified_unlocked`) is ported but the gopy runtime
+  uses a global monotonic counter rather than per-interpreter counters, which is
+  acceptable for single-interpreter deployments.

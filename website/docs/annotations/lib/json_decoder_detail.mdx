@@ -1,0 +1,144 @@
+---
+title: "json/decoder.py: JSONDecoder internals"
+description: "Deep annotation of JSONDecoder.decode, the py_make_scanner closure, scan_string with py_scanstring, parse_constant, and object_pairs_hook"
+cpython_path: Lib/json/decoder.py
+cpython_version: "3.14"
+lines: 400
+status: annotated
+ported_to: module/json/decoder.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`Lib/json/decoder.py` implements `JSONDecoder`, the default deserializer used by
+`json.loads`. Like the encoder, it replaces its inner scanner with a C version
+(`_json.scanstring`) when available and falls back to a pure-Python path
+(`py_scanstring`) for portability.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-30 | module constants | `NUMBER_RE`, `FLAGS`, `NaN`, `PosInf`, `NegInf` |
+| 32-100 | `py_scanstring` | Pure-Python Unicode string scanner with escape handling |
+| 102-130 | `scanstring` | Alias: `_json.scanstring` when available, else `py_scanstring` |
+| 132-200 | `JSONObject` | Parses a JSON object `{...}` into a dict or via `object_pairs_hook` |
+| 202-250 | `JSONArray` | Parses a JSON array `[...]` into a list |
+| 252-290 | `py_make_scanner` | Constructs the recursive scan closure; replaced by `_json.make_scanner` |
+| 292-340 | `JSONDecoder.__init__` | Wires up hooks, selects scanner |
+| 342-400 | `JSONDecoder.decode` | Public entry: calls scanner, validates no trailing garbage |
+
+## Reading
+
+### decode entry point and trailing-garbage check
+
+`JSONDecoder.decode` is intentionally thin. It calls `raw_decode` and then
+checks that nothing non-whitespace follows the parsed value:
+
+```python
+def decode(self, s, _w=WHITESPACE.match):
+    obj, end = self.raw_decode(s, idx=_w(s, 0).end())
+    end = _w(s, end).end()
+    if end != len(s):
+        raise JSONDecodeError("Extra data", s, end)
+    return obj
+```
+
+`raw_decode` is the lower-level method that returns `(value, end_index)`, used
+directly when the caller wants to consume a prefix of a larger string.
+
+### py_make_scanner closure and parse_constant
+
+`py_make_scanner` constructs a closure that holds all hooks and dispatch logic.
+The `parse_constant` hook handles the three special float literals:
+
+```python
+def py_make_scanner(context):
+    parse_float = context.parse_float or float
+    parse_int = context.parse_int or int
+    parse_constant = context.parse_constant or _CONSTANTS.__getitem__
+
+    # _CONSTANTS maps the literal text to the Python float value:
+    _CONSTANTS = {
+        '-Infinity': NegInf,
+        'Infinity':  PosInf,
+        'NaN':       NaN,
+    }
+
+    def scan_once(string, idx):
+        ...
+        # Detect Infinity / NaN at current position:
+        for c in ('-Infinity', 'Infinity', 'NaN'):
+            if string[idx:idx + len(c)] == c:
+                return parse_constant(c), idx + len(c)
+        raise StopIteration(idx)
+
+    return scan_once
+```
+
+`parse_constant` is intentionally hookable so callers can reject `NaN` or map
+it to `decimal.Decimal('NaN')`.
+
+### py_scanstring and object_pairs_hook
+
+`py_scanstring` advances through a string literal, processing `\uXXXX` escapes
+and surrogate pairs:
+
+```python
+def py_scanstring(s, end, strict=True,
+                  _b=BACKSLASH, _m=WHITESPACE_STR.match):
+    chunks = []
+    while True:
+        chunk = STRING_CHUNK.match(s, end)
+        ...
+        terminator = s[end]
+        if terminator == '"':
+            break
+        if terminator != '\\':
+            if strict:
+                raise JSONDecodeError("Invalid control character", s, end)
+        else:
+            esc = s[end + 1]
+            if esc == 'u':
+                # Handle \uXXXX and surrogate pairs (\uD800-\uDFFF).
+                uni = int(s[end + 2:end + 6], 16)
+                if 0xD800 <= uni <= 0xDBFF:
+                    ...  # read low surrogate \uDC00-\uDFFF
+    return ''.join(chunks), end + 1
+```
+
+`JSONObject` feeds parsed key-value pairs to `object_pairs_hook` when set,
+preserving insertion order and allowing the caller to substitute an
+`OrderedDict` or other mapping:
+
+```python
+def JSONObject(s_and_end, strict, scan_once, object_hook,
+               object_pairs_hook, memo=None, _w=WHITESPACE.match, _ws=WHITESPACE_STR):
+    pairs = []
+    ...
+    pairs.append((key, value))
+    ...
+    if object_pairs_hook is not None:
+        result = object_pairs_hook(pairs)
+        return result, end
+    result = dict(pairs)
+    if object_hook is not None:
+        result = object_hook(result)
+    return result, end
+```
+
+Note that `object_pairs_hook` takes priority over `object_hook` when both are
+set.
+
+## gopy notes
+
+- `py_scanstring` surrogate-pair logic must match CPython exactly. The Go port
+  should use `utf16.DecodeRune` for the pair combination step.
+- `parse_constant` is only called for `NaN`, `Infinity`, and `-Infinity`. JSON
+  proper disallows these; the hook exists for JavaScript compatibility.
+- `object_pairs_hook` receives a list of `(key, value)` pairs, not a dict.
+  Passing a dict copy would break callers that depend on seeing duplicate keys.
+- The `memo` dict in `JSONObject` interns repeated string keys via
+  `memo.setdefault(key, key)`, reducing allocations on large arrays-of-objects.
+  The Go port should replicate this with a string-intern map scoped to the
+  top-level `decode` call.

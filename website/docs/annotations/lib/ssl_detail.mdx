@@ -1,0 +1,133 @@
+---
+title: "ssl.py: TLS/SSL wrapper for socket objects"
+description: "Annotated reading of Lib/ssl.py, covering SSLContext, SSLSocket handshake, SSLObject memory BIO, create_default_context cert verification, ALPN/SNI, and 3.14 post-handshake auth"
+cpython_path: Lib/ssl.py
+cpython_version: "3.14"
+lines: 1500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`Lib/ssl.py` wraps the `_ssl` C extension (OpenSSL bindings) in a Python layer
+that provides `SSLContext`, `SSLSocket`, `SSLObject`, and a set of factory
+functions. The file is almost entirely pure Python. The heavy lifting happens
+in `_ssl`, which exposes `_SSLContext` and `_SSLObject` as C types.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-100 | imports, constants, enums | `Purpose`, `SSLErrorNumber`, `AlertDescription`, `TLSVersion` enums |
+| 101-180 | `SSLError` hierarchy | `SSLCertVerificationError`, `SSLEOFError`, `SSLSyscallError`, `SSLWantWriteError` |
+| 181-350 | `SSLContext` | Wraps `_ssl._SSLContext`; adds `load_default_certs`, `set_alpn_protocols`, `set_npn_protocols` |
+| 351-500 | `SSLContext.wrap_socket` | Builds an `SSLSocket` and, for servers, optionally completes the handshake inline |
+| 501-650 | `SSLSocket` | Subclass of `socket.socket`; overrides `read`, `write`, `send`, `recv`, handshake |
+| 651-720 | `SSLSocket.do_handshake` | Blocking handshake loop; drives `_ssl._SSLObject.do_handshake` until not `WANT_READ`/`WANT_WRITE` |
+| 721-850 | `SSLObject` | Memory-BIO path for non-socket TLS (QUIC, in-process tunnels) |
+| 851-950 | `create_default_context` | Builds a client context with `CERT_REQUIRED`, system CA bundle, hostname checking |
+| 951-1050 | `_create_unverified_context` | Test/internal helper; disables cert verification |
+| 1051-1200 | SNI, ALPN, session tickets | `set_servername_callback`, `session`, `SSLSession` wrapper |
+| 1201-1350 | post-handshake auth (3.14) | `verify_client_post_handshake`, `VERIFY_POST_HANDSHAKE` flag wiring |
+| 1351-1500 | utilities, `PEM`/`DER` helpers, `get_server_certificate` | One-shot helpers for inspection and testing |
+
+## Reading
+
+### SSLContext and create_default_context
+
+`create_default_context` is the recommended entry point for client code. It
+hard-codes safe defaults that the caller can then relax:
+
+```python
+def create_default_context(purpose=Purpose.SERVER_AUTH, *, cafile=None,
+                           capath=None, cadata=None):
+    context = SSLContext(PROTOCOL_TLS_CLIENT)
+    # PROTOCOL_TLS_CLIENT already sets CERT_REQUIRED + check_hostname=True.
+    if cafile or capath or cadata:
+        context.load_verify_locations(cafile, capath, cadata)
+    else:
+        context.load_default_certs(purpose)
+    return context
+```
+
+`SSLContext` is a thin subclass of `_ssl._SSLContext`. Its `__init__` sets
+`check_hostname = True` for client protocols and `False` for server protocols.
+Internally `_ssl._SSLContext` calls `SSL_CTX_new` with the appropriate method.
+
+### SSLSocket handshake
+
+`SSLSocket` stores an `_ssl._SSLObject` internally. `do_handshake` drives it
+with a retry loop so it works over blocking and non-blocking sockets:
+
+```python
+class SSLSocket(socket):
+    def do_handshake(self, block=False):
+        self._check_connected()
+        timeout = self.gettimeout()
+        try:
+            if timeout == 0.0 and block:
+                self.settimeout(None)
+            self._sslobj.do_handshake()
+        finally:
+            self.settimeout(timeout)
+
+    def _real_connect(self, addr, connect_ex):
+        # Sets up _sslobj then calls super().connect / connect_ex.
+        ...
+        if self.do_handshake_on_connect:
+            self.do_handshake()
+```
+
+The `WANT_READ` / `WANT_WRITE` retry logic is pushed down into `_ssl._SSLObject`
+which calls `select` internally when the socket is blocking.
+
+### SSLObject and the memory BIO path
+
+`SSLObject` wraps a TLS engine that reads and writes to in-memory buffers rather
+than a live socket. This is the foundation for QUIC and for test harnesses that
+want to intercept bytes:
+
+```python
+class SSLObject:
+    """TLS over a pair of in-memory buffers (MemoryBIO)."""
+
+    def read(self, len=1024, buffer=None):
+        return self._sslobj.read(len, buffer)
+
+    def write(self, data):
+        return self._sslobj.write(data)
+
+    def do_handshake(self):
+        self._sslobj.do_handshake()
+
+    @property
+    def context(self):
+        return self._context
+
+    @context.setter
+    def context(self, ctx):
+        self._sslobj.context = ctx
+        self._context = ctx
+```
+
+The caller feeds ciphertext into `incoming` (a `MemoryBIO`) and drains
+ciphertext from `outgoing`. Both are `_ssl.MemoryBIO` objects backed by a
+growable C buffer.
+
+## gopy notes
+
+- `_ssl` maps to a Go module wrapping `crypto/tls`. The C extension surface is
+  large: `_SSLContext`, `_SSLObject`, `MemoryBIO`, and the error types all need
+  Go equivalents.
+- `PROTOCOL_TLS_CLIENT` and `PROTOCOL_TLS_SERVER` became the only supported
+  protocols in 3.10. Older constants (`PROTOCOL_SSLv23`, `PROTOCOL_TLSv1`) can
+  be kept as deprecated aliases that raise `DeprecationWarning`.
+- Post-handshake auth (3.14) requires OpenSSL 1.1.1 and `TLS_FALLBACK_SCSV`.
+  In the Go port, this maps to `tls.Config.VerifyConnection` called after the
+  initial handshake completes.
+- `get_server_certificate` is a one-shot helper that opens a connection and
+  returns the PEM cert. It is a good first integration test target because it
+  exercises `create_default_context`, `wrap_socket`, and `do_handshake` end to
+  end.
+- Hostname matching logic in `match_hostname` was removed from this file in 3.7
+  (moved into `_ssl`). The Go port should keep it in the C-equivalent layer.

@@ -1,0 +1,150 @@
+---
+title: "selectors.py: High-level I/O multiplexing"
+description: "Annotated reading of Lib/selectors.py, covering BaseSelector ABC, SelectSelector fd_set construction, EpollSelector and KqueueSelector platform branches, DefaultSelector factory, and EVENT_READ/EVENT_WRITE constants"
+cpython_path: Lib/selectors.py
+cpython_version: "3.14"
+lines: 600
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`Lib/selectors.py` is a pure-Python abstraction over OS I/O multiplexing
+primitives (`select`, `poll`, `epoll`, `kqueue`). It exposes a uniform
+`BaseSelector` ABC so asyncio and other frameworks can pick the best available
+backend at runtime, calling into the `select` C extension for the actual
+syscall wrappers.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-50 | constants, imports | `EVENT_READ = 1`, `EVENT_WRITE = 4`, `SelectorKey` namedtuple |
+| 51-120 | `BaseSelector` ABC | `register`, `unregister`, `modify`, `select` (abstract), `close`, context manager |
+| 121-200 | `_BaseSelectorImpl` | Concrete base; manages `_fd_to_key` dict; implements `register`/`unregister` on top of `_fileobj_lookup` |
+| 201-280 | `SelectSelector` | Uses `select.select`; splits registered fds into read-set and write-set; rebuilds sets on every call |
+| 281-350 | `PollSelector` | Uses `select.poll`; maintains a `_poll` object; translates `EVENT_READ`/`EVENT_WRITE` to `POLLIN`/`POLLOUT` |
+| 351-430 | `EpollSelector` | Uses `select.epoll`; `EPOLLIN`/`EPOLLOUT`; edge-triggered option; `fileno()` delegation |
+| 431-510 | `KqueueSelector` | macOS/BSD; uses `select.kqueue` and `select.kevent`; separate kevent per direction |
+| 511-560 | `DevpollSelector` | Solaris `/dev/poll`; conditionally compiled in `select` |
+| 561-600 | `DefaultSelector` | Picks the best available class at import time; exported as the public name |
+
+## Reading
+
+### BaseSelector ABC and SelectorKey
+
+Every registered file object gets a `SelectorKey` describing its current
+registration state:
+
+```python
+SelectorKey = namedtuple("SelectorKey", ["fileobj", "fd", "events", "data"])
+```
+
+`BaseSelector` defines the contract. Concrete subclasses must implement
+`select(timeout=None)` and return a list of `(key, events)` pairs:
+
+```python
+class BaseSelector(ABC):
+    @abstractmethod
+    def register(self, fileobj, events, data=None):
+        ...
+
+    @abstractmethod
+    def unregister(self, fileobj):
+        ...
+
+    @abstractmethod
+    def select(self, timeout=None):
+        # Returns list of (SelectorKey, events) ready pairs.
+        ...
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        self.close()
+```
+
+`_BaseSelectorImpl._fileobj_lookup` resolves any file-like object (socket, file,
+integer fd) to a raw fd by calling `fileobj.fileno()` when the object is not
+already an integer.
+
+### SelectSelector fd_set construction
+
+`SelectSelector` rebuilds its read and write fd sets on every `select` call
+because `select(2)` consumes them:
+
+```python
+class SelectSelector(_BaseSelectorImpl):
+    def register(self, fileobj, events, data=None):
+        key = super().register(fileobj, events, data)
+        if events & EVENT_READ:
+            self._readers.add(key.fd)
+        if events & EVENT_WRITE:
+            self._writers.add(key.fd)
+        return key
+
+    def select(self, timeout=None):
+        if timeout is not None:
+            timeout = max(timeout, 0)
+        ready = []
+        r, w, _ = self._select(self._readers, self._writers, [], timeout)
+        r = set(r)
+        w = set(w)
+        for fd in r | w:
+            events = 0
+            if fd in r:
+                events |= EVENT_READ
+            if fd in w:
+                events |= EVENT_WRITE
+            key = self._key_from_fd(fd)
+            if key:
+                ready.append((key, events & key.events))
+        return ready
+```
+
+On Windows, `select.select` only accepts socket handles. `SelectSelector` is
+therefore the only portable choice there.
+
+### EpollSelector and KqueueSelector platform branches
+
+`EpollSelector` wraps Linux `epoll`. It registers with `EPOLLIN`/`EPOLLOUT` and
+translates returned event flags back to `EVENT_READ`/`EVENT_WRITE`:
+
+```python
+class EpollSelector(_BaseSelectorImpl):
+    def __init__(self):
+        self._epoll = select.epoll()
+
+    def register(self, fileobj, events, data=None):
+        key = super().register(fileobj, events, data)
+        epoll_events = 0
+        if events & EVENT_READ:
+            epoll_events |= select.EPOLLIN
+        if events & EVENT_WRITE:
+            epoll_events |= select.EPOLLOUT
+        self._epoll.register(key.fd, epoll_events)
+        return key
+
+    def select(self, timeout=None):
+        # Calls self._epoll.poll(); maps EPOLLIN -> EVENT_READ, EPOLLOUT -> EVENT_WRITE.
+        ...
+```
+
+`KqueueSelector` issues two `kevent` registrations per fd (one for read, one
+for write) and must delete both on unregister.
+
+## gopy notes
+
+- `EVENT_READ = 1`, `EVENT_WRITE = 4`. The gap leaves room for a hypothetical
+  `EVENT_ERROR = 2` that was never added to the public API.
+- `DefaultSelector` is picked at import time via `hasattr(select, ...)` checks.
+  In gopy this selection should happen at module init so asyncio gets the right
+  backend on each platform.
+- `EpollSelector.fileno()` delegates to `self._epoll.fileno()` so the epoll fd
+  can be added to another selector (nested event loops). Preserve this in the
+  Go port.
+- `KqueueSelector` issues two `kevent` structs per fd and must set `FD_CLOEXEC`
+  on the kqueue fd at creation.
+- `_BaseSelectorImpl.modify` is `unregister` + `register`. `EpollSelector`
+  could use `EPOLL_CTL_MOD`, but the naive path is correct for the initial port.

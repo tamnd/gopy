@@ -1,0 +1,127 @@
+---
+title: "socket.py: Pure-Python wrapper over _socket"
+description: "Annotated reading of Lib/socket.py, covering the socket class, create_connection, setdefaulttimeout, socketpair, and the makefile buffered wrapper"
+cpython_path: Lib/socket.py
+cpython_version: "3.14"
+lines: 900
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`Lib/socket.py` is a thin pure-Python layer that re-exports everything from the
+`_socket` C extension and then adds a handful of conveniences: a subclassable
+`socket` class, connection helpers, a timeout global, and a `makefile` wrapper
+that bridges sockets into the buffered I/O stack.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | module header, re-exports | Pulls `_socket.*` into the public namespace; patches `error` aliases |
+| 81-200 | `socket` class | Thin subclass of `_socket.socket`; adds `__enter__`/`__exit__`, `makefile`, `sendfile` |
+| 201-260 | `SocketIO` | `RawIOBase` adapter so a socket can be wrapped by `BufferedReader`/`BufferedWriter` |
+| 261-330 | `socket.makefile` | Builds a buffered wrapper around `SocketIO`; handles mode string and encoding |
+| 331-400 | `create_connection` | Iterates `getaddrinfo` results; applies per-attempt timeout; 3.14 adds `all_errors` aggregation |
+| 401-440 | `create_server` | Opens a listening socket; sets `SO_REUSEADDR` and optional `SO_REUSEPORT` |
+| 441-480 | `setdefaulttimeout` / `getdefaulttimeout` | Module-level timeout forwarded to `_socket` |
+| 481-530 | `socketpair` | POSIX wrapper; emulated on Windows via a loopback TCP pair |
+| 531-600 | `fromfd` / `fromshare` | Reconstruct a `socket` from a raw fd or a `socket.share()` blob |
+| 601-900 | helper functions, constants, `has_dualstack_ipv6` | Miscellaneous utilities and 3.14 additions |
+
+## Reading
+
+### socket class and makefile
+
+The `socket` class exists primarily to override `makefile` and to give Python
+code a type it can subclass:
+
+```python
+class socket(_socket.socket):
+    def makefile(self, mode="r", buffering=None, *,
+                 encoding=None, errors=None, newline=None):
+        # Duplicate the fd so closing the file does not close the socket.
+        raw = SocketIO(self, mode)
+        if buffering is None:
+            buffering = -1
+        if buffering < 0:
+            buffering = io.DEFAULT_BUFFER_SIZE
+        if "b" not in mode:
+            raw = io.BufferedRWPair(raw, raw) if "+" in mode else \
+                  io.BufferedWriter(raw) if "w" in mode else \
+                  io.BufferedReader(raw, buffering)
+            return io.TextIOWrapper(raw, encoding, errors, newline)
+        return raw
+```
+
+`SocketIO` holds a weak reference to the socket so that the garbage collector
+cannot be confused by a reference cycle between the file wrapper and the socket.
+
+### create_connection with timeout
+
+`create_connection` is the standard way to open a client TCP connection. In
+3.14 the function collects every per-attempt exception and raises an
+`ExceptionGroup` when all addresses fail:
+
+```python
+def create_connection(address, timeout=_GLOBAL_DEFAULT_TIMEOUT,
+                      source_address=None, *, all_errors=False):
+    host, port = address
+    exceptions = []
+    for res in getaddrinfo(host, port, 0, SOCK_STREAM):
+        af, socktype, proto, canonname, sa = res
+        sock = None
+        try:
+            sock = socket(af, socktype, proto)
+            if timeout is not _GLOBAL_DEFAULT_TIMEOUT:
+                sock.settimeout(timeout)
+            if source_address:
+                sock.bind(source_address)
+            sock.connect(sa)
+            exceptions.clear()
+            return sock
+        except error as exc:
+            exceptions.append(exc)
+            if sock is not None:
+                sock.close()
+    if all_errors:
+        raise ExceptionGroup("create_connection failed", exceptions)
+    raise exceptions[0]
+```
+
+### socketpair on Windows
+
+POSIX has `socketpair(2)`, but Windows does not. CPython emulates it by binding
+a loopback listener, connecting a client, and accepting, then closing the
+listener:
+
+```python
+if not hasattr(_socket, "socketpair"):
+    def socketpair(family=AF_INET, type=SOCK_STREAM, proto=0):
+        with socket(family, type, proto) as srv:
+            srv.bind(("127.0.0.1", 0))
+            srv.listen(1)
+            addr = srv.getsockname()
+            a = socket(family, type, proto)
+            try:
+                a.connect(addr)
+                b, _ = srv.accept()
+            except:
+                a.close()
+                raise
+        return a, b
+```
+
+## gopy notes
+
+- `_socket` maps to Go's `net` package plus `syscall`/`golang.org/x/net`. The
+  split between the C extension and the Python wrapper is preserved: the Go
+  port exposes a `_socket` module that this layer imports.
+- `SocketIO` needs `RawIOBase` from `io` to be available before `socket.py`
+  loads. Port `io` first.
+- `create_connection` raises `ExceptionGroup` in 3.14. The exception group
+  machinery (PEP 654) must be wired up in the VM before this module is tested.
+- `setdefaulttimeout` mutates global C state in CPython. In gopy it should
+  write to a per-interpreter value stored in the interpreter struct.
+- `sendfile` on Linux calls `os.sendfile` which wraps `sendfile(2)`. That
+  syscall path is independent of the socket port and can be stubbed initially.

@@ -1,0 +1,176 @@
+---
+title: "urllib/parse.py: URL parsing internals"
+description: "Deep annotation of urlsplit/urlparse, SplitResult, urlencode quote_plus flow, urljoin base-resolution, parse_qs/parse_qsl, and 3.14 changes"
+cpython_path: Lib/urllib/parse.py
+cpython_version: "3.14"
+lines: 1600
+status: annotated
+ported_to: module/urllib/parse.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`Lib/urllib/parse.py` is the reference implementation for all URL parsing,
+joining, and encoding utilities in the standard library. At roughly 1600 lines
+it is one of the larger pure-Python stdlib files. CPython 3.14 added stricter
+scheme validation and deprecated several previously silent coercions.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-60 | module constants | `uses_netloc`, `uses_relative`, `scheme_chars`, `MAX_CACHE_SIZE` |
+| 62-100 | `_coerce_args` / `_noop` | Byte-vs-str unification helpers |
+| 102-160 | `SplitResult` / `ParseResult` | Named tuples with `geturl()` reconstruction |
+| 162-260 | `urlsplit` | Splits URL into scheme, netloc, path, query, fragment |
+| 262-320 | `urlparse` | Calls `urlsplit` then splits path into path+params |
+| 322-400 | `urljoin` | RFC 3986 base-resolution algorithm |
+| 402-460 | `urlunparse` / `urlunsplit` | Reconstructs URL from component tuple |
+| 462-560 | `urlencode` | Encodes query string; delegates to `quote_plus` |
+| 562-640 | `quote` / `quote_plus` / `quote_from_bytes` | Percent-encoding |
+| 642-720 | `unquote` / `unquote_plus` / `unquote_to_bytes` | Percent-decoding |
+| 722-820 | `parse_qs` / `parse_qsl` | Query-string parsing with duplicate-key handling |
+| 822-900 | `splitport` / `splituser` etc. | Legacy helpers (deprecated since 3.9) |
+| 902-1000 | `_splitnetloc` / `_checknetloc` | Internal netloc extraction |
+| 1000-1600 | `_encode_result`, `_decode_args` | Bytes/str coercion round-trips |
+
+## Reading
+
+### urlsplit and SplitResult
+
+`urlsplit` is the canonical low-level split. It does not decompose the path
+further (that is `urlparse`'s job). The result is a `SplitResult` named tuple
+whose `geturl()` round-trips the original string:
+
+```python
+SplitResult = namedtuple('SplitResult', 'scheme netloc path query fragment')
+
+def urlsplit(urlstring, scheme='', allow_fragments=True):
+    # Normalise scheme.
+    netloc = query = fragment = ''
+    i = urlstring.find(':')
+    if i > 0 and urlstring[:i].isidentifier():  # 3.14: stricter scheme check
+        scheme, urlstring = urlstring[:i].lower(), urlstring[i+1:]
+    if urlstring[:2] == '//':
+        netloc, urlstring = _splitnetloc(urlstring, 2)
+        if '[' in netloc and ']' not in netloc:
+            raise ValueError("Invalid IPv6 URL")
+    if allow_fragments and '#' in urlstring:
+        urlstring, fragment = urlstring.split('#', 1)
+    if '?' in urlstring:
+        urlstring, query = urlstring.split('?', 1)
+    return SplitResult(scheme, netloc, urlstring, query, fragment)
+```
+
+The 3.14 change (`isidentifier()` check) rejects schemes containing digits in
+the first position or non-ASCII characters, matching RFC 3986 section 3.1.
+
+### urljoin base-resolution algorithm
+
+`urljoin` implements RFC 3986 section 5.2.2. The logic is a direct translation
+of the pseudocode in the RFC:
+
+```python
+def urljoin(base, url, allow_fragments=True):
+    if not base:
+        return url
+    if not url:
+        return base
+    base, url, _coerce_result = _coerce_args(base, url)
+    bscheme, bnetloc, bpath, bparams, bquery, bfragment = urlparse(base, '', allow_fragments)
+    scheme, netloc, path, params, query, fragment = urlparse(url, bscheme, allow_fragments)
+
+    if scheme != bscheme or scheme not in uses_relative:
+        _coerce_result(url)
+        return url
+    if scheme in uses_netloc:
+        if netloc:
+            # url is absolute-path or authority reference; use url path directly.
+            path = posixpath.normpath(path) if path[:1] == '/' else path
+            return _coerce_result(urlunparse((scheme, netloc, path, params, query, fragment)))
+        netloc = bnetloc
+
+    if not path and not params:
+        path = bpath
+        params = bparams
+        if not query:
+            query = bquery
+    elif path[:1] == '/':
+        path = posixpath.normpath(path)
+    else:
+        # Merge relative path into base.
+        base_parts = bpath.split('/')
+        base_parts[-1] = ''
+        path = '/'.join(base_parts) + path
+        path = posixpath.normpath(path)
+    return _coerce_result(urlunparse((scheme, netloc, path, params, query, fragment)))
+```
+
+The `posixpath.normpath` call resolves `..` and `.` segments. `urljoin` must
+handle both `str` and `bytes` arguments; `_coerce_args` detects which is in use
+and returns a `_coerce_result` wrapper for the output.
+
+### parse_qs, parse_qsl, and urlencode
+
+`parse_qsl` is the workhorse. `parse_qs` calls it and groups values by key:
+
+```python
+def parse_qsl(qs, keep_blank_values=False, strict_parsing=False,
+              encoding='utf-8', errors='replace', max_num_fields=None, separator='&'):
+    qs, _coerce_result = _coerce_args(qs)
+    pairs = [s2 for s1 in qs.split(separator) for s2 in s1.split(';')]
+    # 3.14: semicolon splitting is disabled by default; separator='&' is the new default.
+    r = []
+    for name_value in pairs:
+        if not name_value and not strict_parsing:
+            continue
+        nv = name_value.split('=', 1)
+        if len(nv) != 2:
+            if strict_parsing:
+                raise ValueError("bad query field: %r" % (name_value,))
+            nv.append('')
+        name = unquote_plus(nv[0], encoding=encoding, errors=errors)
+        value = unquote_plus(nv[1], encoding=encoding, errors=errors)
+        if keep_blank_values or value:
+            r.append((name, value))
+    return r
+```
+
+`urlencode` accepts a sequence of pairs or a dict and percent-encodes each
+key/value using `quote_plus` (spaces become `+`):
+
+```python
+def urlencode(query, doseq=False, safe='', encoding=None, errors=None,
+              quote_via=quote_plus):
+    ...
+    l = []
+    for k, v in (query.items() if isinstance(query, dict) else query):
+        k = quote_via(str(k), safe)
+        if doseq and not isinstance(v, str):
+            for elt in v:
+                l.append(k + '=' + quote_via(str(elt), safe))
+        else:
+            l.append(k + '=' + quote_via(str(v), safe))
+    return '&'.join(l)
+```
+
+The `quote_via` parameter (added in 3.6) lets callers substitute `quote` for
+`quote_plus` when `+` encoding is not desired.
+
+## gopy notes
+
+- `_coerce_args` / `_coerce_result` create a bytes/str unification layer. In
+  Go the equivalent is a separate bytes-variant of each exported function rather
+  than runtime coercion.
+- `SplitResult.geturl()` must round-trip exactly; the test suite checks that
+  `urlunsplit(urlsplit(u)) == u` for all fixtures.
+- The 3.14 scheme-validation change (`isidentifier()`) should be gated on the
+  version constant so that gopy's 3.14 mode enforces it while a compatibility
+  shim can relax it.
+- `parse_qsl` semicolon splitting was removed as a default in 3.7.2 (CVE
+  fix) and the `separator` parameter made explicit. The Go port must not
+  split on `;` unless `separator=';'` is passed explicitly.
+- `posixpath.normpath` inside `urljoin` removes trailing slashes and collapses
+  `//`. The Go port should use `path.Clean` with equivalent edge-case handling
+  for the empty-string input (`path.Clean("")` returns `"."`, but CPython
+  returns `""`).

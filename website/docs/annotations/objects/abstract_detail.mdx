@@ -1,0 +1,193 @@
+---
+title: "abstract.c: The Abstract Object Protocol"
+description: "Annotation of CPython Objects/abstract.c covering PyObject_Call vectorcall path, PySequence_Fast, PyMapping_GetItemString, PyNumber_Add slot resolution, PyObject_GetIter, and 3.14 changes"
+cpython_path: Objects/abstract.c
+cpython_version: "3.14"
+lines: 2700
+status: annotated
+ported_to: objects/protocol.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`Objects/abstract.c` is CPython's universal dispatch layer. It provides the
+`PyObject_*`, `PySequence_*`, `PyMapping_*`, and `PyNumber_*` families of
+functions, each of which resolves the right slot on the operand type and
+invokes it. These functions are the public C API surface; the bytecode evaluator
+calls them for most operations.
+
+## Map
+
+| Region | Lines (approx) | Topic | gopy file |
+|--------|---------------|-------|-----------|
+| `PyObject_Call` | 300-360 | Dispatch to `tp_call` or the vectorcall fast path | `objects/protocol.go` |
+| `_PyObject_Vectorcall` | 360-400 | Vectorcall entry; inlines `PY_VECTORCALL_ARGUMENTS_OFFSET` | `objects/protocol.go` |
+| `PyObject_GetIter` | 540-570 | Return `tp_iter` result or raise `TypeError` | `objects/protocol.go` |
+| `PyNumber_Add` | 900-950 | Try `nb_add` on left, then right; fall back to sequence concat | `objects/protocol.go` |
+| `binary_op1` | 850-900 | Generic left/right slot probe helper | `objects/protocol.go` |
+| `PySequence_Fast` | 1700-1760 | Return list-or-tuple; copy via `PySequence_List` if needed | `objects/protocol.go` |
+| `PyMapping_GetItemString` | 2200-2230 | Build a str key and call `PyObject_GetItem` | `objects/protocol.go` |
+| `PyObject_GetItem` | 2100-2150 | Probe `mp_subscript`, then `sq_item` by integer index | `objects/protocol.go` |
+| 3.14 `PyObject_GetOptionalAttr` | 2600-2650 | New 3.14 API: returns 0 on missing without raising | `objects/protocol.go` |
+
+## Reading
+
+### PyObject_Call and the vectorcall fast path
+
+`PyObject_Call` is the canonical "call this object with args and kwargs" entry.
+Since 3.9, most callables also expose `tp_vectorcall` (a pointer to a function
+that takes a C array of arguments). `PyObject_Call` checks for this slot first.
+
+```c
+// Objects/abstract.c:302 PyObject_Call
+PyObject *
+PyObject_Call(PyObject *callable, PyObject *args, PyObject *kwargs)
+{
+    /* args must be a tuple, kwargs must be a dict or NULL */
+    vectorcallfunc func = _PyVectorcall_Function(callable);
+    if (func != NULL) {
+        return _PyVectorcall_Call(func, callable, args, kwargs);
+    }
+    ternaryfunc call = Py_TYPE(callable)->tp_call;
+    if (call == NULL) {
+        PyErr_Format(PyExc_TypeError,
+            "'%.200s' object is not callable",
+            Py_TYPE(callable)->tp_name);
+        return NULL;
+    }
+    ...
+    return call(callable, args, kwargs);
+}
+
+// Objects/abstract.c:362 _PyObject_Vectorcall
+PyObject *
+_PyObject_Vectorcall(PyObject *callable, PyObject *const *args,
+                     size_t nargsf, PyObject *kwnames)
+{
+    vectorcallfunc func = _PyVectorcall_Function(callable);
+    if (func == NULL) {
+        /* fall back to building a tuple and calling tp_call */
+        return _PyObject_MakeTpCall(callable, args, nargsf, kwnames);
+    }
+    return func(callable, args, nargsf, kwnames);
+}
+```
+
+The `PY_VECTORCALL_ARGUMENTS_OFFSET` flag (bit 63 of `nargsf`) allows the
+callee to write one word before `args[0]` without reallocating, enabling
+`self`-prepend for bound methods at zero cost.
+
+### PyNumber_Add and binary_op1 slot probing
+
+`PyNumber_Add` follows the symmetric binary protocol: try the left operand's
+`nb_add`, then the right operand's `nb_add` if the left returns
+`Py_NotImplemented`. If both fail, it falls through to `sq_concat` for sequence
+types. This is handled by the shared `binary_op1` helper.
+
+```c
+// Objects/abstract.c:852 binary_op1
+static PyObject *
+binary_op1(PyObject *v, PyObject *w, const int op_slot, const char *op_name)
+{
+    binaryfunc slotv = NB_BINOP(Py_TYPE(v)->tp_as_number, op_slot);
+    binaryfunc slotw = NB_BINOP(Py_TYPE(w)->tp_as_number, op_slot);
+
+    if (slotv) {
+        PyObject *x;
+        if (slotv == slotw) slotw = NULL;  /* same type: call once */
+        x = slotv(v, w);
+        if (x != Py_NotImplemented) return x;
+        Py_DECREF(x);
+    }
+    if (slotw) {
+        PyObject *x = slotw(v, w);
+        if (x != Py_NotImplemented) return x;
+        Py_DECREF(x);
+    }
+    Py_RETURN_NOTIMPLEMENTED;
+}
+
+// Objects/abstract.c:903 PyNumber_Add
+PyObject *
+PyNumber_Add(PyObject *v, PyObject *w)
+{
+    PyObject *result = binary_op1(v, w, NB_SLOT(nb_add), "+");
+    if (result == Py_NotImplemented) {
+        /* try sq_concat for sequences */
+        Py_DECREF(result);
+        result = sequence_concat(v, w);
+    }
+    return result;
+}
+```
+
+The optimisation `if (slotv == slotw) slotw = NULL` avoids calling the same
+function twice when both operands share a type, which would otherwise happen
+for homogeneous arithmetic like `1 + 2`.
+
+### PySequence_Fast and PyObject_GetIter
+
+`PySequence_Fast` is the recommended way to iterate a Python object a fixed
+number of times without creating a full iterator. It returns the object
+unchanged if it is already a list or tuple; otherwise it calls
+`PySequence_List` to copy it.
+
+```c
+// Objects/abstract.c:1702 PySequence_Fast
+PyObject *
+PySequence_Fast(PyObject *v, const char *m)
+{
+    PyObject *it;
+    if (v == NULL) { null_error(); return NULL; }
+    if (PyList_CheckExact(v) || PyTuple_CheckExact(v)) {
+        Py_INCREF(v);
+        return v;
+    }
+    it = PyObject_GetIter(v);
+    if (it == NULL) {
+        PyErr_SetString(PyExc_TypeError, m);
+        return NULL;
+    }
+    v = PySequence_List(it);
+    Py_DECREF(it);
+    return v;
+}
+
+// Objects/abstract.c:541 PyObject_GetIter
+PyObject *
+PyObject_GetIter(PyObject *o)
+{
+    PyTypeObject *t = Py_TYPE(o);
+    getiterfunc f = t->tp_iter;
+    if (f == NULL) {
+        if (PySequence_Check(o))
+            return PySeqIter_New(o);
+        PyErr_Format(PyExc_TypeError,
+            "'%.200s' object is not iterable", t->tp_name);
+        return NULL;
+    }
+    return (*f)(o);
+}
+```
+
+`PyObject_GetIter` falls back to `PySeqIter_New` (an index-advancing iterator)
+when the type has no `tp_iter` but does respond to `__getitem__`. This is the
+legacy sequence iteration protocol from Python 1.x.
+
+## gopy notes
+
+- `objects/protocol.go` maps `PyObject_Call` to `ObjectCall(callable, args,
+  kwargs Object) (Object, error)`. The vectorcall fast path is supported via the
+  `Vectorcaller` interface: `Vectorcall(args []Object, kwnames Object)
+  (Object, error)`.
+- `binary_op1` is ported as `binaryOp1` and uses Go method dispatch on the
+  `NumberProtocol` interface rather than slot-offset arithmetic.
+- `PySequence_Fast` is `SequenceFast` in Go. The list/tuple short-circuit checks
+  type assertions against `*listObject` and `*tupleObject` rather than the
+  `PyList_CheckExact` macro.
+- The 3.14 `PyObject_GetOptionalAttr` function (returns `(Object, bool, error)`
+  in Go) avoids the `AttributeError`-then-clear pattern that the old
+  `PyObject_GetAttr` API required for optional-attribute probing.
+- `PyMapping_GetItemString` is ported as `MappingGetItemString`; it interns
+  the key string via the gopy string cache rather than allocating a fresh
+  `PyUnicodeObject` on every call.
