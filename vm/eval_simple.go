@@ -384,10 +384,14 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, retVal
 		return e.cacheAdvance(compile.FOR_ITER), nil, nil, false, true, nil
 
 	case compile.END_FOR:
-		// END_FOR pops the exhausted iterator left by FOR_ITER's
-		// fallthrough path.
-		ref := e.pop()
-		ref.Close()
+		// END_FOR is a no-op for ordinary iterators in CPython 3.14:
+		// the codegen pairs it with POP_ITER (POP_TOP in gopy today),
+		// and FOR_ITER's exhaustion path leaves the iterator on the
+		// stack for that following pop. Generator finalisation is the
+		// only case where END_FOR has a real effect, and gopy doesn't
+		// land that path yet.
+		//
+		// CPython: Python/bytecodes.c END_FOR
 		return e.advance(), nil, nil, false, true, nil
 
 	case compile.CALL:
