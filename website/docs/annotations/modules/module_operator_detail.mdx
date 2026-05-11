@@ -1,0 +1,90 @@
+---
+title: "_operator.c: itemgetter, attrgetter, methodcaller, and operator wrappers"
+description: "Annotations for CPython's _operator C module covering the arithmetic and comparison wrappers, the three callable types (itemgetter, attrgetter, methodcaller), and their dotted-attribute chain walk."
+cpython_path: Modules/_operator.c
+cpython_version: "3.14"
+lines: 800
+status: annotated
+ported_to: module/_operator/module.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`_operator` is the C accelerator imported by `Lib/operator.py` via
+`from _operator import *`. The pure-Python fallbacks defined earlier in that
+file are overwritten by these faster C implementations.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 68–400 | `_operator_*_impl` functions | Binary and unary arithmetic (add, sub, mul, floordiv, …) |
+| 400–600 | In-place variants `_operator_i*_impl` | iadd, isub, imul, … routed through `PyNumber_InPlace*` |
+| 600–700 | Comparison and logical wrappers | eq, ne, lt, le, gt, ge, truth, not\_, is\_, is\_not |
+| 700–800 | `length_hint`, `_compare_digest`, `call` | Misc helpers |
+| 1016–1234 | `itemgetterobject`, `itemgetter_new`, `itemgetter_call_impl` | Single and multi-key subscript callable |
+| 1234–1601 | `attrgetterobject`, `attrgetter_new`, `dotted_getattr`, `attrgetter_call_impl` | Dotted-attribute chain callable |
+| 1601–1942 | `methodcallerobject`, `methodcaller_new`, `methodcaller_call` | Named-method-plus-frozen-args callable |
+| 1951–2000 | `operator_exec` | Module init: register all entries in module dict |
+
+## Reading
+
+### truth, not\_, is\_, is\_not: logical wrappers
+
+<Cpy file="Modules/_operator.c" line={600} />
+
+These four are 1- or 2-argument wrappers around `PyObject_IsTrue` and identity
+comparison. `truth(a)` calls `PyObject_IsTrue(a)` and returns `True` or
+`False`. `not_(a)` negates it. `is_(a, b)` and `is_not(a, b)` compare raw
+pointer identity rather than value equality.
+
+The gopy port wraps each as a `unaryFunc` or `binaryFunc` closure that
+delegates to `objects.IsTruthy` or pointer equality. 3.14 added `is_none` and
+`is_not_none` as optimized variants; both are present in `module/_operator/module.go`
+at the `{"is_none", ...}` and `{"is_not_none", ...}` entries.
+
+### dotted\_getattr and attrgetter\_call\_impl
+
+<Cpy file="Modules/_operator.c" line={1397} />
+
+`attrgetter_new` (line 1262) splits each argument string on `"."` and stores
+the segments. At call time, `dotted_getattr` walks the chain with repeated
+`PyObject_GetAttr` calls:
+
+```c
+for (i = 0 ; i < nattrs; ++i) {
+    tmp = PyObject_GetAttr(obj, PyTuple_GET_ITEM(dotted, i));
+    Py_DECREF(obj);
+    if (tmp == NULL) return NULL;
+    obj = tmp;
+}
+```
+
+A single-attribute `attrgetter` returns the value directly; a multi-attribute
+one returns a tuple, one entry per chain. The gopy `dottedGetattr` helper
+(line 856) is a direct port: iterate `chain []string`, call
+`objects.GetAttr` at each step, propagate errors immediately.
+
+### itemgetter\_call\_impl: single vs. multi key
+
+<Cpy file="Modules/_operator.c" line={1135} />
+
+When constructed with a single key, `itemgetter` stores just that key and
+`itemgetter_call_impl` calls `PyObject_GetItem(obj, key)` directly. With
+multiple keys it stores a tuple and returns a new tuple of
+`PyObject_GetItem(obj, keys[i])` results. The gopy port (`itemgetterCall`,
+line 742) uses the same branch: `len(ig.items) == 1` returns a scalar,
+otherwise a `*objects.Tuple`.
+
+## gopy notes
+
+- All arithmetic operators are fully ported. Each delegates to the
+  corresponding `objects.Number*` function rather than using a custom
+  implementation, keeping the single source of truth in the objects layer.
+- `_compare_digest` performs a constant-time byte comparison to resist timing
+  attacks; the gopy port uses Go's `subtle.ConstantTimeCompare`.
+- 3.14 introduced `is_none` and `is_not_none` as first-class entries; both
+  are registered in `buildModule`.
+- Pickling support (`__reduce__`) is implemented for all three callable types,
+  matching the CPython `itemgetter_reduce`, `attrgetter_reduce`, and
+  `methodcaller_reduce` functions.

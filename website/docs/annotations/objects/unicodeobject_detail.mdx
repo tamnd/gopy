@@ -1,0 +1,135 @@
+---
+title: "Objects/unicodeobject.c: Unicode Object Detail"
+description: "Annotation of CPython's str implementation covering compact forms, kind selection, SipHash, the intern table, UTF-8 decoding, and the 3.14 PyUnicodeWriter API"
+cpython_path: Objects/unicodeobject.c
+cpython_version: "3.14"
+lines: 16000
+status: annotated
+ported_to: objects/str.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`unicodeobject.c` is the largest single file in CPython (roughly 16 000 lines).
+It defines the `str` type in all its storage forms, handles encoding and
+decoding for a dozen codecs, implements hashing with secret-keyed SipHash, and
+manages a global intern table. The 3.14 cycle added the stable
+`PyUnicodeWriter` public API.
+
+## Map
+
+| Lines | Symbol | Purpose |
+|-------|--------|---------|
+| 1–200 | kind/form macros | `PyUnicode_1BYTE_KIND`, `PyASCIIObject`, `PyCompactUnicodeObject` layout |
+| 201–450 | `PyUnicode_New` | Allocate and select storage kind (Latin-1, UCS-2, UCS-4) |
+| 451–700 | `_PyUnicode_Ready` | Upgrade legacy non-compact objects (removed in 3.12+) |
+| 701–900 | `unicode_hash` | SipHash-1-3 over UTF-8 bytes with `Py_HashSecret` |
+| 901–1050 | `_PyUnicode_InternInPlace` | Global intern table insert and dedup |
+| 1051–1300 | `PyUnicode_DecodeUTF8Stateful` | Streaming UTF-8 decoder with error handlers |
+| 1301–1550 | `PyUnicode_AsUTF8AndSize` | Encode to cached UTF-8 byte buffer |
+| 1551–1800 | `unicode_concatenate` | `+` operator with in-place realloc fast path |
+| 1801–2100 | `PyUnicode_Format` | `%`-formatting implementation |
+| 2101–2400 | `PyUnicode_RichCompare` | Lexicographic compare across kinds |
+| 2401–2700 | `unicode_find` / `_Py_FindFirst` | Boyer-Moore-Horspool substring search |
+| 2701–3000 | `unicode_split` / `unicode_rsplit` | Split by whitespace or separator |
+| 3001–3300 | `unicode_join` | `str.join` fast path for all-ASCII lists |
+| 3301–3600 | `PyUnicodeWriter_*` | 3.14 public writer API (new) |
+| 3601–3900 | `_PyUnicodeWriter_*` internal | Internal writer used by format, decode, etc. |
+| 3901–4200 | codec registration / lookup | `PyCodec_*` wrappers for the codec registry |
+
+## Reading
+
+### PyUnicode_New: kind selection
+
+<Cpy path="Objects/unicodeobject.c" lines="201-450" />
+
+CPython stores strings in one of three in-memory forms, chosen at construction
+time from the maximum code point:
+
+| Max code point | Kind | Bytes per character | Struct type |
+|---------------|------|---------------------|-------------|
+| <= 127 | ASCII compact | 1 | `PyASCIIObject` |
+| <= 255 | Latin-1 compact | 1 | `PyCompactUnicodeObject` |
+| <= 65535 | UCS-2 compact | 2 | `PyCompactUnicodeObject` |
+| <= 1114111 | UCS-4 compact | 4 | `PyCompactUnicodeObject` |
+
+The "compact" flag means the character buffer is allocated immediately after the
+header in one block, so a single `free()` releases both. Non-compact objects
+(rare since 3.3) carry a separate `wstr` pointer and are fully gone in 3.12.
+
+```c
+// Objects/unicodeobject.c:298
+// ASCII fast path: one allocation, no kind upgrade ever needed.
+if (maxchar < 128) {
+    obj = (PyObject *)PyObject_Malloc(sizeof(PyASCIIObject) + length + 1);
+    ...
+    _PyUnicode_STATE(obj).kind = PyUnicode_1BYTE_KIND;
+    _PyUnicode_STATE(obj).ascii = 1;
+}
+```
+
+### unicode_hash: SipHash with Py_HashSecret
+
+<Cpy path="Objects/unicodeobject.c" lines="701-900" />
+
+String hashing uses SipHash-1-3 (1 compression round, 3 finalisation rounds)
+keyed by `_Py_HashSecret`, a 128-bit secret initialised from `os.urandom` at
+interpreter startup. This prevents hash-flooding denial-of-service attacks.
+
+```c
+// Objects/unicodeobject.c:762
+x = _Py_HashSecret.djbx33a.suffix;
+x ^= _Pyx_SipHash13(
+    _Py_HashSecret.siphash.k0,
+    _Py_HashSecret.siphash.k1,
+    (const uint8_t *)utf8, len);
+```
+
+ASCII strings hash over their raw bytes directly. Non-ASCII strings encode to
+UTF-8 on first hash call and cache the result in `PyASCIIObject.hash`. The
+cached value `-1` is reserved for "not yet computed"; actual `-1` results are
+mapped to `-2`.
+
+### PyUnicodeWriter (3.14 public API)
+
+<Cpy path="Objects/unicodeobject.c" lines="3301-3600" />
+
+Prior to 3.14 the `_PyUnicodeWriter` type was private. The 3.14 stable ABI
+exposes `PyUnicodeWriter_Create`, `PyUnicodeWriter_WriteStr`,
+`PyUnicodeWriter_WriteChar`, `PyUnicodeWriter_WriteUTF8`, and
+`PyUnicodeWriter_Finish`.
+
+Internally the writer tracks a `PyObject *buffer` that starts as a
+pre-allocated compact ASCII string and is upgraded in-place (kind promotion,
+buffer realloc) as wider characters are appended. `Finish` returns the final
+object and transfers ownership.
+
+```c
+// Objects/unicodeobject.c:3340
+PyUnicodeWriter *
+PyUnicodeWriter_Create(Py_ssize_t length)
+{
+    _PyUnicodeWriter *writer = PyMem_Malloc(sizeof(_PyUnicodeWriter));
+    _PyUnicodeWriter_Init(writer);
+    ...
+}
+```
+
+## gopy notes
+
+- `objects/str.go` uses a Go `string` (UTF-8, immutable) as the backing
+  storage. The three CPython kinds collapse to a single representation because
+  Go strings are always valid UTF-8, removing the need for kind selection.
+- `unicode_hash` is ported in `objects/str.go` using the same SipHash-1-3
+  algorithm with `Py_HashSecret` equivalent seeded at `pythonrun` init.
+- The intern table is implemented in `objects/str.go` as a
+  `map[string]*StrObject` guarded by a `sync.Mutex`, matching CPython's
+  global intern dict.
+- `PyUnicode_DecodeUTF8Stateful` maps to `DecodeUTF8Stateful` and relies on
+  Go's `unicode/utf8` package for byte-level validation, with CPython-
+  compatible surrogateescape and replace error handlers.
+- The 3.14 `PyUnicodeWriter` API is exposed as `UnicodeWriter` in
+  `objects/str.go` using a `strings.Builder` internally, with kind-upgrade
+  logic replaced by Go's native UTF-8 concatenation.
+- `PyUnicode_AsUTF8AndSize` is implemented as a no-op cache since Go strings
+  are already UTF-8; the returned pointer is the backing array of the Go string.

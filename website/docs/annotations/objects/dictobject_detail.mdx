@@ -1,0 +1,112 @@
+---
+title: "Objects/dictobject.c: Dict Object Detail"
+description: "Annotation of CPython's dict implementation covering combined vs split tables, probe sequences, merge, compact ordering, and 3.14 changes"
+cpython_path: Objects/dictobject.c
+cpython_version: "3.14"
+lines: 6000
+status: annotated
+ported_to: objects/dict.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+CPython's `dict` is a compact, ordered hash table introduced in 3.6 and
+substantially reworked in 3.12 and 3.14. The layout separates an index array
+(sparse) from a dense entries array, giving O(1) amortised operations while
+preserving insertion order at near-zero cost.
+
+## Map
+
+| Lines | Symbol | Purpose |
+|-------|--------|---------|
+| 1–120 | layout structs | `PyDictKeysObject`, `PyDictObject`, `PyDictValues` definitions |
+| 121–280 | `new_keys_object` | Allocate combined-table keys block |
+| 281–420 | `insertdict` | Key insertion with quadratic probe sequence |
+| 421–560 | `_Py_dict_lookup` | Lookup with DKIX_EMPTY / DKIX_DUMMY sentinel handling |
+| 561–700 | `dictresize` | Growth policy (factor 2 or 4) and rehash |
+| 701–850 | `dict_merge` / `_PyDict_Merge` | Update/copy path including `__or__` support |
+| 851–1000 | `dict_keys_inorder` | Sorted key iteration for `**kwargs` expansion |
+| 1001–1150 | `dictkeys_get_index` / `dictkeys_set_index` | Index array accessors for 1/2/4-byte widths |
+| 1151–1300 | `split_keys_entry_watch` | Split-table tracking for per-type key sharing |
+| 1301–1500 | `dict_update_common` | `update()` / `__ior__` dispatch |
+| 1501–1680 | `dict_equal` | Recursive equality with guard against re-entrancy |
+| 1681–1850 | `PyDict_Next` | Low-level iteration skipping dummy entries |
+| 1851–2050 | `dictiter_*` | Iterator types (keys, values, items) and `__length_hint__` |
+| 2051–2300 | `dict_dealloc` / `_PyDict_Clear` | Teardown, values decref, keys refcount drop |
+| 2301–2500 | `dict_watcher_*` | Watcher event dispatch (ADDED, MODIFIED, DELETED, CLEARED) |
+| 2501–2700 | 3.14 `_PyDict_SetItemRef` etc. | New strong-ref insertion API |
+
+## Reading
+
+### Combined-table vs split-table layout
+
+<Cpy path="Objects/dictobject.c" lines="1-120" />
+
+Every `PyDictObject` has a pointer to a `PyDictKeysObject` (the keys block) and
+either an inline `ma_values` array (split table, for type instance dicts) or
+`NULL` (combined table, for general dicts).
+
+The keys block holds a sparse index array at the front followed by a dense
+`PyDictKeyEntry` array at the back. Index array entries are 1, 2, or 4 bytes
+wide depending on `dk_size` (up to 255, up to 65535, or larger), saving memory
+for small dicts.
+
+```c
+// Objects/dictobject.c:85
+// dk_indices is a variable-length array of int8/int16/int32 at the end
+// of the PyDictKeysObject allocation.
+```
+
+Split tables allow multiple instances of the same class to share one
+`PyDictKeysObject`, with each instance holding only a compact `PyDictValues`
+array. A key-sharing dict becomes combined on first write that deviates from
+the shared key order.
+
+### insertdict: probe sequence
+
+<Cpy path="Objects/dictobject.c" lines="281-420" />
+
+The probe sequence is:
+
+```c
+// Objects/dictobject.c:310
+perturb = hash;
+i = (size_t)hash & mask;
+// ...
+perturb >>= PERTURB_SHIFT;   // PERTURB_SHIFT = 5
+i = (i * 5 + perturb + 1) & mask;
+```
+
+This is a pseudo-random walk derived from the full hash, avoiding the clustering
+problems of pure linear probing. Deleted slots (`DKIX_DUMMY`) are reused on
+insert but skipped on lookup unless a live entry is found first.
+
+### _PyDict_Merge: update and copy
+
+<Cpy path="Objects/dictobject.c" lines="701-850" />
+
+`_PyDict_Merge` handles three callers: `dict.update()`, the `dict(other)`
+constructor, and `**kwargs` unpacking at a call site. The fast path checks
+whether both operands are exact `dict` instances with no active watchers. When
+true, it copies the dense entries array in a single pass and rebuilds the index
+in bulk, which is substantially faster than repeated `insertdict` calls.
+The `override` parameter controls whether existing keys are kept or replaced,
+matching Python's documented `update()` semantics.
+
+## gopy notes
+
+- `objects/dict.go` uses a Go `map[Object]int` for the index and a
+  `[]dictEntry` slice for the dense ordered entries, approximating CPython's
+  combined-table layout without manual index-array width optimisation.
+- The compact ordering guarantee (insertion order preserved) is maintained
+  by appending to the dense slice and never reordering on resize.
+- `_PyDict_Merge` fast path is replicated in `DictMerge` in
+  `objects/dict_mutate.go`; the slow path falls through to individual
+  `SetItem` calls.
+- `dict_keys_inorder` is used internally when expanding `**kwargs`; gopy
+  replicates this in `vm/eval_call.go` via `DictKeysInOrder`.
+- Watcher events are forwarded through `objects/protocol.go` matching the
+  four CPython event kinds: `ADDED`, `MODIFIED`, `DELETED`, `CLEARED`.
+- 3.14 introduces `_PyDict_SetItemRef` and `_PyDict_GetItemRef` with strong
+  reference semantics. These are mapped to `DictSetItemRef` and
+  `DictGetItemRef` in `objects/dict.go`.

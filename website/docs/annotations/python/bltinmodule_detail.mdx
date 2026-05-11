@@ -1,0 +1,116 @@
+---
+title: "bltinmodule.c: built-in functions"
+description: "Annotation of Python/bltinmodule.c, covering print, iter, sorted, eval, and vars"
+cpython_path: Python/bltinmodule.c
+cpython_version: "3.14"
+lines: 3000
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`Python/bltinmodule.c` implements the `builtins` module. It is one of the largest files in CPython and defines all the built-in functions accessible from Python without an import. This annotation focuses on the five most semantically rich functions.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 180–290 | `builtin_print` | Accepts variadic positional args plus `sep`, `end`, `file`, `flush` kwargs; writes to `sys.stdout` by default |
+| 291–360 | `builtin_iter` | Two-call forms: `iter(obj)` calls `__iter__`; `iter(callable, sentinel)` wraps a callable into a `callable_iterator` |
+| 361–430 | `builtin_next` | Calls `__next__` on an iterator; returns `default` if `StopIteration` is raised and default was given |
+| 431–530 | `builtin_sorted` | Copies the iterable into a list, calls `list.sort` with `key` and `reverse`, then returns the new list |
+| 531–650 | `builtin_eval` | Accepts string or code object; compiles if string; calls `PyEval_EvalCode` with the supplied globals/locals |
+| 651–730 | `builtin_exec` | Same structure as `builtin_eval` but always runs in `exec` mode and returns `None` |
+| 731–810 | `builtin_vars` | No args: returns `PyEval_GetLocals()`; one arg: calls `__dict__` attribute lookup |
+| 811–900 | `builtin_isinstance` | Accepts a type or tuple of types; delegates to `PyObject_IsInstance` |
+| 901–980 | `builtin_issubclass` | Same delegation pattern using `PyObject_IsSubclass` |
+| 981–1100 | `builtin_map` | Returns a `map` iterator object; lazy evaluation via `__next__` |
+| 1101–1200 | `builtin_filter` | Returns a `filter` iterator object; tests each element with the predicate |
+| 1201–1350 | `builtin_zip` | Returns a `zip` object; in 3.10+ accepts `strict` kwarg to error on unequal lengths |
+| 1351–1500 | `builtin_enumerate` | Wraps an iterator; tracks index starting from `start` (default 0) |
+| 1501–1600 | `builtin_range` | Constructs a `range` object; all arithmetic is deferred until iteration |
+| 1601–1750 | `builtin_len` | Calls `sq_length` or `mp_length` slot; errors if result overflows `Py_ssize_t` |
+| 1751–1900 | `builtin_repr` | Calls `__repr__`; guards against recursive repr via `Py_ReprEnter` |
+| 1901–2000 | `builtin_hash` | Calls `tp_hash`; raises `TypeError` for unhashable types |
+| 2001–2100 | `builtin_id` | Returns `(Py_uintptr_t)obj` cast to a Python int |
+| 2101–2200 | `builtin_callable` | Checks `tp_call != NULL` or `__call__` in the MRO |
+| 2201–3000 | misc helpers | `abs`, `divmod`, `pow`, `round`, `chr`, `ord`, `bin`, `hex`, `oct`, `format`, `input`, `open`, `compile`, `globals`, `locals`, `dir`, `delattr`, `getattr`, `setattr`, `hasattr` |
+
+## Reading
+
+### `builtin_print`
+
+`builtin_print` is implemented with `_PyArg_ParseStackAndKeywords`. It iterates over the positional args and writes each one via `PyFile_WriteObject`. Between consecutive args it writes `sep` (defaulting to a single space). After all args it writes `end` (defaulting to `"\n"`). If `flush` is true, it calls `file.flush()`:
+
+```c
+// Python/bltinmodule.c:180  builtin_print
+static PyObject *
+builtin_print(PyObject *module, PyObject *const *args, Py_ssize_t nargs,
+              PyObject *kwnames)
+{
+    ...
+    if (file == NULL || file == Py_None) {
+        file = _PySys_GetAttr(tstate, &_Py_ID(stdout));
+        ...
+    }
+    for (i = 0; i < nargs; i++) {
+        if (i > 0 && PyFile_WriteObject(sep, file, Py_PRINT_RAW) < 0)
+            return NULL;
+        if (PyFile_WriteObject(args[i], file, Py_PRINT_RAW) < 0)
+            return NULL;
+    }
+    if (PyFile_WriteObject(end, file, Py_PRINT_RAW) < 0)
+        return NULL;
+    if (flush && _PyFile_Flush(file) < 0)
+        return NULL;
+    Py_RETURN_NONE;
+}
+```
+
+In 3.14, when `file` is omitted and `sys.stdout` is `None`, CPython raises `RuntimeError` instead of silently discarding output. The `file=` default is resolved at call time, not at import time, so replacing `sys.stdout` after module load takes effect immediately.
+
+### `builtin_iter` and the two-argument sentinel form
+
+The single-argument form simply calls `PyObject_GetIter`. The two-argument form checks that the first argument is callable and wraps it in a `calliter_iternextfunc`:
+
+```c
+// Python/bltinmodule.c:291  builtin_iter
+static PyObject *
+builtin_iter(PyObject *module, PyObject *const *args, Py_ssize_t nargs)
+{
+    if (nargs == 1)
+        return PyObject_GetIter(args[0]);
+    if (nargs == 2) {
+        if (!PyCallable_Check(args[0])) {
+            PyErr_SetString(PyExc_TypeError, "iter(v, w): v must be callable");
+            return NULL;
+        }
+        return PyCallIter_New(args[0], args[1]);
+    }
+    ...
+}
+```
+
+`PyCallIter_New` returns a `calliter` object whose `__next__` calls the callable and compares the result to the sentinel using `PyObject_RichCompareBool(result, sentinel, Py_EQ)`.
+
+### `builtin_eval` and code object caching
+
+`builtin_eval` accepts either a string or an existing `PyCodeObject`. When given a string it calls `Py_CompileStringExFlags` with `Py_eval_input` as the start symbol, which restricts the grammar to a single expression. The resulting code object is not cached by `bltinmodule.c` itself; caching (via `__code__` slots or `linecache`) is the caller's responsibility.
+
+```c
+// Python/bltinmodule.c:531  builtin_eval
+    if (PyUnicode_Check(source)) {
+        ...
+        code = Py_CompileStringExFlags(str, filename, Py_eval_input,
+                                       &cf, -1);
+        if (code == NULL)
+            return NULL;
+    }
+    return PyEval_EvalCode(code, globals, locals);
+```
+
+`builtin_exec` is identical except it uses `Py_file_input` and always returns `None`.
+
+## gopy notes
+
+`builtin_print` is implemented in `objects/module.go` via the `builtins` module registration. The `sep`, `end`, and `flush` kwargs are handled, but `file=` currently always writes to `os.Stdout` rather than resolving `sys.stdout` at call time. The two-argument `iter(callable, sentinel)` form is not yet ported; `objects/protocol.go` only covers the single-argument path. `builtin_eval` and `builtin_exec` are wired through `vm/eval_call.go` but the `globals`/`locals` override path is incomplete. `builtin_vars` with no arguments calls `PyEval_GetLocals`, which depends on frame locals not yet fully exposed in gopy.

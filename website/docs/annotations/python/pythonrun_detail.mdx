@@ -1,0 +1,83 @@
+---
+title: "pythonrun.c: parse-compile-eval pipeline"
+description: "Annotation of Python/pythonrun.c, covering PyRun_StringFlags, run_mod with PyArena, handle_system_exit, and PyErr_PrintEx"
+cpython_path: Python/pythonrun.c
+cpython_version: "3.14"
+lines: 1200
+status: annotated
+ported_to: pythonrun/runstring.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`Python/pythonrun.c` is the top-level execution engine for string and file inputs. It glues the parser, compiler, and eval loop together, and handles exception printing and `SystemExit` unwinding.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 76–120 | `PyRun_StringFlags` | Entry point: parse a C string into an AST, compile it, then call `run_mod` |
+| 121–160 | `PyRun_FileExFlags` | File-path variant; opens the file and delegates to `PyRun_FileObject` |
+| 161–210 | `run_mod` | Allocates a `PyArena`, compiles the mod node to a code object, then calls `run_pyc_file` or `run_eval_code_obj` |
+| 211–260 | `run_eval_code_obj` | Builds the global/local dicts and calls `PyEval_EvalCode` |
+| 261–310 | `handle_system_exit` | Checks for `SystemExit`, extracts the exit code, and calls `Py_Exit` |
+| 311–420 | `PyErr_PrintEx` | Formats a traceback using `PyException_GetTraceback` and writes it to `sys.stderr` |
+| 421–500 | `print_exception` | Formats a single exception frame; calls `PyFile_WriteObject` for each line |
+| 501–560 | `_PyObject_CallMethodIdObjArgs` | Thin helper that resolves a method by `_Py_Identifier` and forwards variadic args |
+| 561–650 | `flush_io` | Flushes `sys.stdout` and `sys.stderr` after execution; swallows `IOError` |
+
+## Reading
+
+### `PyRun_StringFlags` and `run_mod`
+
+`PyRun_StringFlags` is the canonical entry point for `exec`/`eval` from C. It calls `PyParser_ASTFromStringObject` to get a `mod_ty` node, then hands off to `run_mod`:
+
+```c
+// Python/pythonrun.c:76  PyRun_StringFlags
+PyObject *
+PyRun_StringFlags(const char *str, int start, PyObject *globals,
+                  PyObject *locals, PyCompilerFlags *flags)
+{
+    PyObject *ret = NULL;
+    mod_ty mod;
+    PyArena *arena;
+    ...
+    arena = _PyArena_New();
+    mod = PyParser_ASTFromStringObject(str, filename, start, flags, arena);
+    if (mod != NULL)
+        ret = run_mod(mod, filename, globals, locals, flags, arena);
+    _PyArena_Free(arena);
+    return ret;
+}
+```
+
+`run_mod` calls `PyAST_CompileObject` to produce a `PyCodeObject`, then calls `run_eval_code_obj`. The arena owns all AST nodes and is freed after compilation, so the code object holds no dangling pointers.
+
+### `handle_system_exit` and exception printing
+
+When the eval loop raises `SystemExit`, `handle_system_exit` extracts `args[0]` from the exception value. If it is an integer, that becomes the process exit code. If it is `None`, the code is 0. Any other object is printed to `sys.stderr` before exit:
+
+```c
+// Python/pythonrun.c:261  handle_system_exit
+static void
+handle_system_exit(void)
+{
+    PyObject *exc = PyErr_GetRaisedException();
+    ...
+    exitcode = PyException_GetArgs(exc);
+    if (PyLong_Check(exitcode))
+        exitval = (int)PyLong_AsLong(exitcode);
+    ...
+    Py_Exit(exitval);
+}
+```
+
+`PyErr_PrintEx` calls `print_exception` for each chained exception, writing to `sys.stderr` via `PyFile_WriteObject`. In 3.14 the function gained a `colorize` parameter that wraps ANSI escape codes around tracebacks when stderr is a tty.
+
+### 3.14 changes
+
+CPython 3.14 introduced `_colorize.py` and a C helper `_PyErr_WriteUnraisableMsgWithContext` that routes unraisable exceptions through the new colorized formatter. The `flush_io` call was also tightened to catch `Exception` rather than bare `BaseException`, so a `KeyboardInterrupt` during flush still propagates.
+
+## gopy notes
+
+`pythonrun/runstring.go` covers `PyRun_StringFlags` and `run_mod` for the string input path. The file-based variants (`PyRun_FileExFlags`, `run_pyc_file`) are not yet ported. `handle_system_exit` is partially handled in `vm/eval_unwind.go` via `errors.IsSystemExit`. `PyErr_PrintEx` is not ported; tracebacks are currently formatted by `objects/str.go` helpers. The 3.14 colorize path is out of scope for v0.12.1.

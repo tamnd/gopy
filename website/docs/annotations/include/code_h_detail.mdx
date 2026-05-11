@@ -1,0 +1,97 @@
+---
+title: "Include/cpython/code.h: Code Object Layout"
+description: "PyCodeObject field reference, CO_* flag bitmasks, PyCode_New API variants, and the co_linetable lnotab encoding"
+cpython_path: Include/cpython/code.h
+cpython_version: "3.14"
+lines: 200
+status: annotated
+ported_to: objects/function.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`Include/cpython/code.h` exposes the internal layout of `PyCodeObject`, the compiled artifact produced by the compiler for every function, class body, and module. Understanding it is essential for both the compiler and the eval loop, because the interpreter reads `co_consts`, `co_varnames`, and `co_linetable` on every call.
+
+## Map
+
+| Lines | Symbol | Kind | gopy location |
+|-------|--------|------|---------------|
+| 1-30 | `CO_*` flag constants | enum/define | `compile/compiler.go` |
+| 31-95 | `PyCodeObject` struct fields | struct | `objects/function.go` |
+| 96-130 | `PyCode_New` | API fn | `objects/function.go` |
+| 131-155 | `PyCode_NewWithPosOnlyArgs` | API fn | `objects/function.go` |
+| 156-180 | `PyCode_NewEmpty` | API fn | `objects/function.go` |
+| 181-200 | `co_linetable` / `lnotab` accessors | internal fn | `compile/flowgraph.go` |
+
+## Reading
+
+### PyCodeObject field layout
+
+The struct holds both the static metadata set at compile time and mutable fields updated at runtime:
+
+```c
+// Include/cpython/code.h:44
+typedef struct PyCodeObject {
+    int      co_argcount;
+    int      co_posonlyargcount;
+    int      co_kwonlyargcount;
+    int      co_nlocals;
+    int      co_stacksize;
+    int      co_flags;
+    PyObject *co_consts;
+    PyObject *co_names;
+    PyObject *co_varnames;
+    PyObject *co_freevars;
+    PyObject *co_cellvars;
+    PyObject *co_filename;
+    PyObject *co_name;
+    PyObject *co_qualname;
+    int      co_firstlineno;
+    PyObject *co_linetable;
+    /* ... internal fields omitted */
+} PyCodeObject;
+```
+
+`co_linetable` replaced the old `co_lnotab` bytes object in 3.10. It uses a compact variable-length encoding that maps bytecode offsets to source line and column numbers.
+
+### CO_* flag bitmasks
+
+```c
+// Include/cpython/code.h:18
+#define CO_OPTIMIZED    0x0001  /* uses LOAD_FAST */
+#define CO_NEWLOCALS    0x0002  /* new locals dict per call */
+#define CO_VARARGS      0x0004  /* *args present */
+#define CO_VARKEYWORDS  0x0008  /* **kwargs present */
+#define CO_NESTED       0x0010  /* defined inside a function */
+#define CO_GENERATOR    0x0020  /* is a generator */
+#define CO_COROUTINE    0x0100  /* is an async def */
+#define CO_ASYNC_GENERATOR 0x0200
+```
+
+These flags are tested by the eval loop on every `CALL` to decide frame setup (whether to allocate a locals dict, unpack varargs, etc.).
+
+### PyCode_New vs PyCode_NewWithPosOnlyArgs
+
+```c
+// Include/cpython/code.h:100
+PyAPI_FUNC(PyCodeObject *) PyCode_New(
+    int argcount, int nlocals, int stacksize, int flags,
+    PyObject *code, PyObject *consts, PyObject *names,
+    PyObject *varnames, PyObject *freevars, PyObject *cellvars,
+    PyObject *filename, PyObject *name, int firstlineno,
+    PyObject *linetable);
+
+// Include/cpython/code.h:135
+PyAPI_FUNC(PyCodeObject *) PyCode_NewWithPosOnlyArgs(
+    int argcount, int posonlyargcount, int kwonlyargcount,
+    int nlocals, int stacksize, int flags, ...);
+```
+
+`PyCode_New` is the legacy form (pre-3.8); it maps `posonlyargcount` to zero. `PyCode_NewWithPosOnlyArgs` is the canonical form from 3.8 onward. The compiler in gopy always uses the positional-only variant.
+
+## gopy notes
+
+- gopy's `objects.Code` (in `objects/function.go`) mirrors every public field listed above. Fields that CPython marks internal (the specialize cache, the adaptive counter) are omitted.
+- `co_linetable` is stored as a `[]byte` slice. The line-number iterator in `compile/flowgraph.go` decodes it using the same two-byte-pair format CPython uses in `Objects/lnotab_notes.txt`.
+- The `CO_*` constants are re-declared in `compile/compiler.go` with identical numeric values so that bytecode produced by gopy is binary-compatible with CPython `.pyc` files.
+- `co_qualname` was added in 3.3. gopy populates it from the symbol table during class and function compilation, matching the dotted-name semantics CPython uses for `__qualname__`.

@@ -1,0 +1,70 @@
+---
+title: "fractions.py: Rational Number Arithmetic"
+description: "Fraction constructor overloads, GCD normalization, operator implementation via lcm, and limit_denominator algorithm in CPython."
+cpython_path: Lib/fractions.py
+cpython_version: "3.14"
+lines: 700
+status: annotated
+ported_to: module/fractions
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`fractions.py` implements exact rational arithmetic. Every `Fraction` is stored as
+a normalized numerator and denominator pair of arbitrary-precision integers.
+The file has no C accelerator; this single source is the whole implementation.
+
+## Map
+
+| Lines | Symbol | Purpose |
+|-------|--------|---------|
+| 1–40 | imports, `__all__` | `math`, `numbers`, `operator`, `re` |
+| 41–90 | `_RATIONAL_FORMAT` | Regex for parsing fraction strings like `"3/4"` or `"-1.5"` |
+| 91–200 | `Fraction.__new__` | Overloaded constructor for int, float, Decimal, str, Rational |
+| 201–260 | `_gcd`, normalization | Sign canonicalization, `math.gcd` call, zero handling |
+| 261–360 | `from_float`, `from_decimal` | Exact conversion via `float.as_integer_ratio` |
+| 361–450 | `limit_denominator` | Stern-Brocot / best-rational-approximation loop |
+| 451–540 | `__add__`, `__sub__`, `__mul__`, `__truediv__` | Cross-multiply with `math.gcd` reduction via lcm |
+| 541–600 | `__floordiv__`, `__mod__`, `__divmod__` | Delegate to integer floor after exact division |
+| 601–650 | `__floor__`, `__ceil__`, `__round__` | Use `//` and tie-breaking for `__round__` |
+| 651–700 | Comparisons, `__hash__`, `__repr__` | Interop with `float` and `Decimal` comparisons |
+
+## Reading
+
+### Constructor overloads and normalization
+
+`Fraction.__new__` accepts six distinct input shapes. For a `(numerator, denominator)`
+pair it calls `math.gcd` and divides both values, then moves the sign to the
+numerator. For `float` input it delegates to `float.as_integer_ratio()`, which
+returns an exact `(int, int)` pair without any floating-point rounding. For `str`
+input it applies `_RATIONAL_FORMAT` and parses the matched groups.
+
+### Arithmetic via lcm
+
+`__add__` and `__sub__` compute a common denominator using
+`lcm = a_denom // math.gcd(a_denom, b_denom) * b_denom` to minimize intermediate
+integer size before calling `Fraction(numerator, lcm)`. `__mul__` does a
+cross-GCD reduction before multiplying to keep coefficients small throughout
+a chain of operations. These patterns avoid catastrophic coefficient growth in
+long accumulations.
+
+### `limit_denominator`
+
+The algorithm walks the Stern-Brocot tree, maintaining a mediant bracket
+`(p0/q0, p1/q1)` and updating bounds by comparing the target value against the
+mediant. It terminates when `q1 > max_denominator`, then picks whichever endpoint
+is closer to the original value. This gives the best rational approximation for
+any given denominator bound.
+
+## gopy notes
+
+- `Fraction` depends on `math.gcd` (ported in `module/math`) and arbitrary-precision
+  integers. In gopy, big integers go through `objects/int.go` which wraps `math/big`.
+- `__hash__` must satisfy `hash(Fraction(n, 1)) == hash(n)` and
+  `hash(Fraction(x)) == hash(x)` for any `float x` that is an exact integer.
+  The hash formula from `numbers.Rational` must be reproduced exactly.
+- 3.14 deprecated passing a `float` or `Decimal` as the sole positional argument
+  without a keyword; `Fraction(0.5)` now emits `DeprecationWarning`. The port
+  must replicate the warning path.
+- `_RATIONAL_FORMAT` uses named groups (`(?P<sign>...)`) that map directly to
+  Go's `regexp` named submatches via `SubexpIndex`.

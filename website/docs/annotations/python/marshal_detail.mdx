@@ -1,0 +1,118 @@
+---
+title: "marshal.c: bytecode serialization"
+description: "Annotation of Python/marshal.c, covering w_object type-byte dispatch, r_object recursive reader, version-4 reference tables, and code object serialization"
+cpython_path: Python/marshal.c
+cpython_version: "3.14"
+lines: 1600
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`Python/marshal.c` is CPython's binary serialization layer for `.pyc` files and the `marshal` module. It is intentionally narrow: it handles only the object types that can appear in compiled code objects, not the full Python object graph. Version 4 (the current default) added a reference table that lets shared sub-objects be written once and referenced by index on subsequent encounters.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 60–130 | `WFILE` / `RFILE` structs | Writer and reader state; carry buffer, depth counter, and the reference table |
+| 131–200 | `w_byte` / `w_short` / `w_long` | Primitive little-endian write helpers |
+| 201–280 | `w_PyLong` | Writes a Python int as sign + array of 15-bit digits |
+| 281–400 | `w_complex_object` | Handles `TYPE_REF` registration for version-4 shared objects |
+| 401–620 | `w_object` | Main dispatch: writes a type byte (`TYPE_*`) then the payload for each supported type |
+| 621–720 | `r_byte` / `r_short` / `r_long` | Primitive little-endian read helpers |
+| 721–820 | `r_PyLong` | Reads sign + digit array back into a `PyLongObject` |
+| 821–1100 | `r_object` | Recursive reader; switches on the type byte and reconstructs each object |
+| 1101–1200 | `r_ref_reserve` / `r_ref_insert` | Manages the reference table for the `FLAG_REF` bit |
+| 1201–1350 | `r_code` | Deserializes a `PyCodeObject` field by field (name, filename, consts, lnotab, etc.) |
+| 1351–1450 | `PyMarshal_WriteObjectToFile` | Public C API: opens an RFILE and calls `w_object` |
+| 1451–1550 | `PyMarshal_ReadObjectFromFile` | Public C API: opens an RFILE and calls `r_object` |
+| 1551–1600 | `marshal_module` | Python-level `marshal.dumps` / `marshal.loads` / `marshal.dump` / `marshal.load` |
+
+## Reading
+
+### `w_object` type-byte dispatch
+
+Every value is prefixed with a single type byte. For version 4, the high bit (`FLAG_REF`, value `0x80`) is ORed into the type byte when the object is being added to the reference table. The type constants are defined as ASCII characters for readability (`TYPE_INT = 'i'`, `TYPE_STRING = 's'`, `TYPE_CODE = 'c'`, etc.):
+
+```c
+// Python/marshal.c:401  w_object
+static void
+w_object(PyObject *v, WFILE *p)
+{
+    ...
+    if (v == Py_None) { w_byte(TYPE_NONE, p); }
+    else if (v == Py_False) { w_byte(TYPE_FALSE, p); }
+    else if (v == Py_True) { w_byte(TYPE_TRUE, p); }
+    else if (PyLong_CheckExact(v)) {
+        ...
+        w_byte(flag | TYPE_INT, p);
+        w_long((long)PyLong_AsLong(v), p);
+    }
+    ...
+    else if (PyCode_Check(v)) {
+        w_byte(flag | TYPE_CODE, p);
+        w_complex_object(v, flag, p);
+    }
+    ...
+}
+```
+
+The `flag` variable is either 0 or `FLAG_REF` depending on whether the object was freshly added to the write-side reference table via `w_reserve_ref`.
+
+### `r_object` and the `FLAG_REF` reference table
+
+`r_object` reads the type byte and checks the `FLAG_REF` bit before dispatching. If the bit is set, `r_ref_reserve` pre-allocates a slot in the read-side reference list and `r_ref_insert` fills it in once the object is fully constructed. This allows circular-free but shared structures (like interned strings appearing many times in a constants tuple) to be stored once:
+
+```c
+// Python/marshal.c:821  r_object
+static PyObject *
+r_object(RFILE *p)
+{
+    int type = r_byte(p);
+    int flag = type & FLAG_REF;
+    type &= ~FLAG_REF;
+
+    Py_ssize_t idx = -1;
+    if (flag)
+        idx = r_ref_reserve(flag, p);
+
+    PyObject *retval = NULL;
+    switch (type) {
+    case TYPE_NONE:   retval = Py_None; Py_INCREF(retval); break;
+    case TYPE_INT:    retval = PyLong_FromLong(r_long(p)); break;
+    case TYPE_STRING: retval = r_string(p); break;
+    case TYPE_CODE:   retval = r_code(p); break;
+    ...
+    }
+    if (flag && retval != NULL)
+        r_ref_insert(idx, retval, p);
+    return retval;
+}
+```
+
+### `r_code` and code object fields
+
+`r_code` reads fields in a fixed order that must match `w_object`'s write order for `TYPE_CODE`. In CPython 3.14 the field order (simplified) is: `argcount`, `posonlyargcount`, `kwonlyargcount`, `stacksize`, `flags`, `code` (bytes), `consts` (tuple), `names`, `localsplusnames`, `localspluskinds`, `filename`, `name`, `qualname`, `firstlineno`, `lnotab` (now `linetable`), `exceptiontable`, `freevars`, `cellvars`.
+
+In 3.14 the old `lnotab` field was replaced by `linetable` (a more compact encoding), and `exceptiontable` was added to encode the exception handler ranges that were previously embedded in the bytecode stream. Any reader that hard-codes the 3.10 field order will silently misparse 3.14 `.pyc` files.
+
+```c
+// Python/marshal.c:1201  r_code (abbreviated)
+    argcount        = (int)r_long(p);
+    posonlyargcount = (int)r_long(p);
+    kwonlyargcount  = (int)r_long(p);
+    stacksize       = (int)r_long(p);
+    flags           = (int)r_long(p);
+    code            = r_object(p);   /* bytes */
+    consts          = r_object(p);   /* tuple */
+    ...
+    linetable       = r_object(p);   /* bytes, replaces lnotab */
+    exceptiontable  = r_object(p);   /* bytes, new in 3.11 */
+    ...
+    return (PyObject *)PyCode_NewWithPosOnlyArgs(...);
+```
+
+## gopy notes
+
+gopy does not port `marshal.c` directly. `.pyc` parsing is handled in the compiler pipeline via `compile/compiler.go`, which emits bytecode into gopy's own in-memory `flowgraph` representation rather than writing binary `.pyc` files. The reference-table mechanism (`FLAG_REF`) has no counterpart in gopy because code objects are never serialized to disk by the current implementation. If `.pyc` read/write support is added in a future version, `r_code` field ordering for 3.14 (especially `linetable` and `exceptiontable`) will need to be matched exactly.

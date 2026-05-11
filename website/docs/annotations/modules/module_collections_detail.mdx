@@ -1,0 +1,116 @@
+---
+title: "_collectionsmodule.c: deque block-chain, Counter, and namedtuple"
+description: "Annotations for CPython's _collections C module covering the deque block-chain with BLOCKLEN=64, O(1) append/pop from both ends, deque_rotate, maxlen enforcement, and _count_elements for Counter."
+cpython_path: Modules/_collectionsmodule.c
+cpython_version: "3.14"
+lines: 2400
+status: annotated
+ported_to: module/collections/module.go
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`_collectionsmodule.c` backs the `collections` module. It defines `deque`,
+`_count_elements` (used by `Counter`), `_tuplegetter` (used internally by
+`namedtuple`), and `defaultdict`. The pure-Python layer at
+`Lib/collections/__init__.py` imports these and builds the public API on top.
+
+**Port status:** the gopy `module/collections/module.go` is a minimal stub.
+It exposes subclassable `Type` objects for `Counter`, `OrderedDict`,
+`defaultdict`, `deque`, `ChainMap`, `UserDict`, `UserList`, and `UserString`
+so that `import collections` and attribute access resolve, but the full
+C implementations below are not yet ported.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1–60 | `BLOCKLEN`, `block`, `blocklink` | Fixed-size block of 64 slots; blocks chained into deque |
+| 60–200 | `dequeobject` | Struct: leftblock/rightblock pointers, leftindex/rightindex, len, maxlen |
+| 200–400 | `deque_append`, `deque_appendleft` | O(1) push; allocate new block when current block is full |
+| 400–550 | `deque_pop`, `deque_popleft` | O(1) pop; free block when exhausted |
+| 550–750 | `deque_rotate` | Efficient bulk rotation using block-level pointer swaps |
+| 750–900 | `deque_extend`, `deque_extendleft` | Drain iterator into deque, respecting maxlen |
+| 900–1100 | `deque_iter`, `dequeiterobject` | Forward and reverse iterators |
+| 1100–1300 | `deque_richcompare`, `deque_contains`, `deque_count` | Comparison and search |
+| 1300–1500 | `deque_type_spec`, slots | Type registration with sequence protocol |
+| 1500–1700 | `_count_elements_impl` | Fast Counter accumulation: `PyDict_GetItemWithError` then `PyLong_FromLong` |
+| 1700–1900 | `_tuplegetter`, `tuplegetter_descr_get` | Index-based descriptor for `namedtuple` field access |
+| 1900–2100 | `defdict` (defaultdict) | Subclass of dict with `default_factory` and `__missing__` |
+| 2100–2400 | `collections_exec` | Module init |
+
+## Reading
+
+### deque block-chain: append and pop in O(1)
+
+<Cpy file="Modules/_collectionsmodule.c" line={200} />
+
+A `deque` is a doubly-linked list of fixed-size blocks. Each block holds
+`BLOCKLEN = 64` object pointers. The struct tracks `leftblock`, `leftindex`,
+`rightblock`, and `rightindex`. Appending to the right increments
+`rightindex`; when `rightindex == BLOCKLEN` a new block is allocated and
+linked in. Popping from the right decrements `rightindex`; when the block
+becomes empty it is freed and `rightblock` moves to its predecessor.
+
+The left side is symmetric: `appendleft` decrements `leftindex` (allocating a
+new block when it reaches -1) and `popleft` increments it (freeing the block
+when all slots are consumed).
+
+This design avoids per-element allocation and achieves true O(1) amortized
+cost for all four operations, unlike a Python list which copies on growth.
+
+### deque_rotate: block-level pointer swap
+
+<Cpy file="Modules/_collectionsmodule.c" line={550} />
+
+For small rotations `deque_rotate` calls `deque_append` / `deque_pop` in a
+loop. For rotations larger than `BLOCKLEN/2`, CPython switches to moving
+entire blocks by relinking block pointers rather than copying elements one
+by one. The direction of rotation determines whether blocks migrate from the
+left chain to the right or vice versa.
+
+`maxlen` enforcement happens inside `deque_append` and `deque_appendleft`:
+after inserting the new element, if `len > maxlen` the element at the
+opposite end is immediately popped. This keeps the length invariant with no
+separate check.
+
+### _count_elements: Counter fast path
+
+<Cpy file="Modules/_collectionsmodule.c" line={1500} />
+
+`_count_elements(mapping, iterable)` is called by `Counter.__init__` and
+`Counter.update` to avoid the overhead of repeated Python-level
+`mapping[key] = mapping.get(key, 0) + 1` calls. The C loop uses
+`PyDict_GetItemWithError` to probe the dict, increments the existing
+`PyLong` count with `PyLong_FromLong`, and stores the result with
+`PyDict_SetItem`. Because CPython small integers are cached, the
+`+1` incref/decref pattern is cheap in practice.
+
+```c
+while ((key = PyIter_Next(it)) != NULL) {
+    oldval = PyDict_GetItemWithError(mapping, key);
+    if (oldval == NULL) {
+        newval = _PyLong_GetOne();
+        ...
+    } else {
+        newval = PyNumber_Add(oldval, _PyLong_GetOne());
+        ...
+    }
+    PyDict_SetItem(mapping, key, newval);
+    ...
+}
+```
+
+## gopy notes
+
+- The current `module/collections/module.go` stub (242 lines) registers type
+  objects backed by Go's `*objects.Dict` and `*objects.List` so that
+  `from collections import Counter` resolves and common zero-argument
+  construction works. Full block-chain deque and `_count_elements` are pending.
+- `namedtuple` is implemented as a factory that builds a `*objects.Type`
+  subclassing `TupleType`, with `TpNew` binding field names into `__dict__`.
+  The field-name parser handles both whitespace-delimited strings and
+  iterables of strings, matching `Lib/collections/__init__.py:387`.
+- 3.14 changes in `_collectionsmodule.c` include vectorcall support for
+  `deque_append` and a revised `deque_rotate` that handles the block-swap
+  path more carefully for very large rotations. Neither is in the stub yet.
