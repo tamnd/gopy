@@ -58,7 +58,22 @@ func GenericSetAttr(o Object, name Object, value Object) error {
 		if dset := descr.Type().DescrSet; dset != nil {
 			return dset(descr, o, value)
 		}
-		return fmt.Errorf("AttributeError: '%s' object attribute '%s' is read-only", tp.Name, attrNameStr(name))
+		// Non-data descriptor (no __set__): a store on the instance is
+		// allowed and shadows the descriptor in the instance dict. Only
+		// fail here when the type has no instance dict to fall back on.
+		//
+		// CPython: Objects/object.c:2040 PyObject_GenericSetAttr
+		// (the "if (f != NULL) ... else PyObject_GenericSetAttr stores
+		// in dict" arm)
+	}
+	if inst, ok := o.(*Instance); ok && inst.dict != nil {
+		if value == nil {
+			if _, err := inst.dict.GetItem(name); err != nil {
+				return fmt.Errorf("AttributeError: '%s' object has no attribute '%s'", tp.Name, attrNameStr(name))
+			}
+			return inst.dict.DelItem(name)
+		}
+		return inst.dict.SetItem(name, value)
 	}
 	if value == nil {
 		return fmt.Errorf("AttributeError: '%s' object has no attribute '%s'", tp.Name, attrNameStr(name))

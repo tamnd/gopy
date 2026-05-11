@@ -71,6 +71,7 @@ func newArgParserType() *objects.Type {
 	t := objects.NewType("ArgumentParser", []*objects.Type{objects.ObjectType()})
 	t.HasDict = true
 	t.Getattro = objects.GenericGetAttr
+	t.Setattro = objects.GenericSetAttr
 	t.TpNew = func(cls *objects.Type, _ []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
 		inst := objects.NewInstance(cls)
 		objects.SetTypeDescr(cls, "add_argument", objects.NewMethodDescr(cls, "add_argument", noop))
