@@ -1,0 +1,111 @@
+---
+title: Objects/unionobject.c
+description: "Annotation: CPython union type object for int | str syntax"
+cpython_path: Objects/unionobject.c
+cpython_version: "3.14"
+lines: 300
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Objects/unionobject.c" />
+
+## Map
+
+| Lines | Symbol | What it does |
+|-------|--------|--------------|
+| 1-35 | struct unionobject | Struct layout: args tuple, weakreflist |
+| 36-80 | union_new | Allocates a new union from a flattened args tuple |
+| 81-120 | union_args_get | __args__ getter: returns the args tuple |
+| 121-170 | union_instancecheck | __instancecheck__: iterates args, delegates isinstance to each |
+| 171-210 | union_subclasscheck | __subclasscheck__: iterates args, delegates issubclass to each |
+| 211-250 | union_or | __or__: creates a new union by appending another type or union |
+| 251-290 | Py_nb_or slot | nb_or: called for the `|` operator on types |
+| 291-300 | PyUnion_Type | Type object definition |
+
+## Reading
+
+### unionobject layout and construction
+
+`PyUnion_Type` (exposed as `types.UnionType` in Python) represents the result of `int | str`. The struct holds a single `args` tuple with all member types flattened. Nesting is eliminated at construction time: `int | (str | bytes)` becomes `(int, str, bytes)`.
+
+```c
+// CPython: Objects/unionobject.c:12 unionobject
+typedef struct {
+    PyObject_HEAD
+    PyObject *args;
+    PyObject *weakreflist;
+} unionobject;
+```
+
+`union_new` receives a pre-built tuple (assembled by the `|` operator logic) and stores it. The flattening happens in the caller, `union_or`, before `union_new` is called. This keeps the struct itself minimal.
+
+```c
+// CPython: Objects/unionobject.c:41 union_new
+static PyObject *
+union_new(PyObject *args)
+{
+    unionobject *result = PyObject_GC_New(unionobject, &PyUnion_Type);
+    if (result == NULL)
+        return NULL;
+    result->args = Py_NewRef(args);
+    result->weakreflist = NULL;
+    PyObject_GC_Track(result);
+    return (PyObject *)result;
+}
+```
+
+### __instancecheck__ and isinstance iteration
+
+`union_instancecheck` makes `isinstance(x, int | str)` work by iterating the args tuple and calling `PyObject_IsInstance` for each member. It returns `True` as soon as any member matches, and returns `False` if none do.
+
+```c
+// CPython: Objects/unionobject.c:124 union_instancecheck
+static PyObject *
+union_instancecheck(PyObject *self, PyObject *instance)
+{
+    unionobject *alias = (unionobject *)self;
+    Py_ssize_t nargs = PyTuple_GET_SIZE(alias->args);
+    for (Py_ssize_t i = 0; i < nargs; i++) {
+        PyObject *arg = PyTuple_GET_ITEM(alias->args, i);
+        int rc = PyObject_IsInstance(instance, arg);
+        if (rc < 0)
+            return NULL;
+        if (rc)
+            Py_RETURN_TRUE;
+    }
+    Py_RETURN_FALSE;
+}
+```
+
+`union_subclasscheck` follows the same pattern with `PyObject_IsSubclass`.
+
+### __or__ and the nb_or slot
+
+`union_or` builds a new flattened args tuple from the two operands. If either operand is itself a union, its `args` are spliced in rather than nested. The result is passed to `union_new`.
+
+```c
+// CPython: Objects/unionobject.c:214 union_or
+static PyObject *
+union_or(PyObject *self, PyObject *other)
+{
+    /* flatten: collect all args from both sides */
+    PyObject *tuple = make_union_args(self, other);
+    if (tuple == NULL)
+        return NULL;
+    PyObject *result = union_new(tuple);
+    Py_DECREF(tuple);
+    return result;
+}
+```
+
+The `nb_or` slot on `PyUnion_Type` points to `union_or`, so `|` between an existing union and another type goes through this path. For plain types (not yet unions), their `tp_as_number->nb_or` slot is NULL, so Python falls through to the reflected `__ror__`, which also resolves to `union_or` on the union side. The `nb_or` slot on `PyType_Type` itself was added in CPython 3.10 and calls `Py_GenericAlias` or `union_or` depending on whether the result is already a union.
+
+## gopy notes
+
+Status: not yet ported.
+
+Planned package path: `objects/union_type.go`.
+
+A stub file `objects/union_type.go` exists on the current branch but only defines the type struct. The `__instancecheck__` iteration, the `__or__` flattening logic, and the `nb_or` wiring on `PyType_Type` are all pending. The isinstance iteration is a prerequisite for any code that uses `X | Y` in an `isinstance` call, which is common in Python 3.10+ codebases.

@@ -1,0 +1,127 @@
+---
+title: Include/cpython/object.h
+description: "CPython-internal extension of object.h: full PyTypeObject definition, Py_TPFLAGS bitmasks, method sub-structs, and PyHeapTypeObject"
+cpython_path: Include/cpython/object.h
+cpython_version: "3.14"
+lines: 280
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`Include/cpython/object.h` is the internal counterpart to the stable `Include/object.h`. It exposes the full layout of `PyTypeObject` (50-plus slots), the complete `Py_TPFLAGS_*` bitmask set, the method sub-structs (`PyNumberMethods`, `PySequenceMethods`, `PyMappingMethods`, `PyBufferProcs`), and `PyHeapTypeObject` for dynamically created types. Code targeting only the stable ABI should include `object.h` instead.
+
+Source: <CpyLink path="Include/cpython/object.h" />
+
+## Map
+
+| Lines | Symbol | Purpose |
+|-------|--------|---------|
+| 1–25 | `PyObject_HEAD` / `PyObject_VAR_HEAD` | Struct-prefix macros shared by every object layout |
+| 26–50 | `PyObject_INIT` / `PyObject_INIT_VAR` | Inline initializers used by allocators |
+| 51–80 | `PyNumberMethods` | Number protocol slots: `nb_add`, `nb_multiply`, `nb_index`, etc. |
+| 81–110 | `PySequenceMethods` | Sequence protocol slots: `sq_length`, `sq_item`, `sq_ass_item`, etc. |
+| 111–130 | `PyMappingMethods` | Mapping protocol slots: `mp_length`, `mp_subscript`, `mp_ass_subscript` |
+| 131–155 | `PyBufferProcs` | Buffer protocol slots: `bf_getbuffer`, `bf_releasebuffer` |
+| 156–220 | `PyTypeObject` | Full struct definition, all 50-plus slots |
+| 221–255 | `Py_TPFLAGS_*` | Type-flag bitmask constants |
+| 256–280 | `PyHeapTypeObject` | Heap-type wrapper with `ht_name`, `ht_slots`, `ht_module` |
+
+## Reading
+
+### PyTypeObject: full slot layout
+
+`PyTypeObject` is the largest struct in CPython. Slots are grouped by sub-protocol. The excerpt below covers the major groups; the actual struct continues with GC, weakref, iterator, descriptor, init/alloc/free, and versioning slots.
+
+```c
+// CPython: Include/cpython/object.h:156 PyTypeObject
+typedef struct _typeobject {
+    PyObject_VAR_HEAD
+    const char        *tp_name;
+    Py_ssize_t         tp_basicsize;
+    Py_ssize_t         tp_itemsize;
+
+    destructor         tp_dealloc;
+    Py_ssize_t         tp_vectorcall_offset;
+    getattrfunc        tp_getattr;
+    setattrfunc        tp_setattr;
+
+    PyAsyncMethods    *tp_as_async;
+    reprfunc           tp_repr;
+
+    PyNumberMethods   *tp_as_number;
+    PySequenceMethods *tp_as_sequence;
+    PyMappingMethods  *tp_as_mapping;
+
+    hashfunc           tp_hash;
+    ternaryfunc        tp_call;
+    reprfunc           tp_str;
+    getattrofunc       tp_getattro;
+    setattrofunc       tp_setattro;
+
+    PyBufferProcs     *tp_as_buffer;
+    unsigned long      tp_flags;
+    const char        *tp_doc;
+
+    traverseproc       tp_traverse;
+    inquiry            tp_clear;
+    richcmpfunc        tp_richcompare;
+    /* ... 30+ further slots ... */
+} PyTypeObject;
+```
+
+`tp_vectorcall_offset`, placed immediately after `tp_dealloc`, is the field read by `_PyObject_Vectorcall` to find the per-instance function pointer for types that support vectorcall on their instances (functions, methods, `functools.partial`).
+
+### Method sub-structs
+
+Rather than putting every protocol slot directly in `PyTypeObject`, CPython groups related slots into separate structs pointed to by `tp_as_number`, `tp_as_sequence`, and `tp_as_mapping`. This keeps `PyTypeObject` from growing unboundedly and allows NULL pointers for types that do not implement a protocol at all.
+
+```c
+// CPython: Include/cpython/object.h:51 PyNumberMethods
+typedef struct {
+    binaryfunc  nb_add;
+    binaryfunc  nb_subtract;
+    binaryfunc  nb_multiply;
+    binaryfunc  nb_remainder;
+    binaryfunc  nb_divmod;
+    ternaryfunc nb_power;
+    unaryfunc   nb_negative;
+    unaryfunc   nb_positive;
+    unaryfunc   nb_absolute;
+    inquiry     nb_bool;
+    /* ... additional slots including nb_index, nb_matrix_multiply ... */
+} PyNumberMethods;
+```
+
+`PySequenceMethods` carries `sq_length`, `sq_concat`, `sq_repeat`, `sq_item`, `sq_ass_item`, `sq_contains`, and the in-place variants. `PyMappingMethods` holds only three slots: `mp_length`, `mp_subscript`, and `mp_ass_subscript`, reflecting Python's minimal mapping interface.
+
+### Py_TPFLAGS bitmasks
+
+The `tp_flags` field packs many boolean properties into a single `unsigned long`. The flags most relevant to an interpreter port:
+
+```c
+// CPython: Include/cpython/object.h:221 Py_TPFLAGS_HEAPTYPE
+#define Py_TPFLAGS_HEAPTYPE            (1UL << 9)
+#define Py_TPFLAGS_BASETYPE            (1UL << 10)
+#define Py_TPFLAGS_HAVE_VECTORCALL     (1UL << 11)
+#define Py_TPFLAGS_READY               (1UL << 12)
+#define Py_TPFLAGS_HAVE_GC             (1UL << 14)
+#define Py_TPFLAGS_METHOD_DESCRIPTOR   (1UL << 17)
+#define Py_TPFLAGS_HAVE_FINALIZE       (1UL << 18)
+#define Py_TPFLAGS_IMMUTABLETYPE       (1UL << 19)
+#define Py_TPFLAGS_MANAGED_DICT        (1UL << 4)
+```
+
+`Py_TPFLAGS_HEAPTYPE` distinguishes dynamically created class objects from static types compiled into the interpreter binary. Only heap types may have their `tp_dict` mutated after creation. `Py_TPFLAGS_IMMUTABLETYPE` (3.10+) marks the opposite extreme: static built-in types that must never be modified even by C code.
+
+## gopy notes
+
+Status: partially ported.
+
+`PyTypeObject` is mirrored in `objects/type.go` as the `Type` struct. Not every slot has a Go counterpart yet. Current mapping:
+
+- `tp_call` maps to the `Callable` interface on `Type`.
+- `tp_richcompare` is a field `RichCompare func(a, b Object, op int) (Object, error)`.
+- `tp_as_number`, `tp_as_sequence`, `tp_as_mapping` are represented as embedded interface fields (`NumberProtocol`, `SequenceProtocol`, `MappingProtocol`) in `objects/protocol.go`.
+
+`Py_TPFLAGS_*` constants are redeclared as Go `const` values in `objects/type.go`. `Py_TPFLAGS_HEAPTYPE` and `Py_TPFLAGS_IMMUTABLETYPE` are used by `objects/usertype.go` when building class objects from the `class` statement. `PyHeapTypeObject` corresponds to the `UserType` struct in `objects/usertype.go`, which embeds `Type` and adds `HtName`, `HtSlots`, `HtQualname`, and `HtModule`.

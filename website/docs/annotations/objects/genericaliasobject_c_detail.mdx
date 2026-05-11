@@ -1,0 +1,110 @@
+---
+title: Objects/genericaliasobject.c
+description: "Annotation: CPython generic alias object for list[int] style parameterization"
+cpython_path: Objects/genericaliasobject.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Objects/genericaliasobject.c" />
+
+## Map
+
+| Lines | Symbol | What it does |
+|-------|--------|--------------|
+| 1-40 | struct gaobject | Struct layout: origin, args, weakreflist, starred flag |
+| 41-90 | Ga_new | Allocates a new gaobject from (origin, args) pair |
+| 91-150 | ga_origin_get | __origin__ getter: returns origin field (e.g. list) |
+| 151-200 | ga_args_get | __args__ getter: returns args tuple (e.g. (int,)) |
+| 201-270 | ga_getitem | __getitem__: substitutes type variables, returns new gaobject |
+| 271-330 | ga_instancecheck | __instancecheck__: always raises TypeError |
+| 331-380 | ga_subclasscheck | __subclasscheck__: always raises TypeError |
+| 381-430 | ga_class_getitem | __class_getitem__: entry point for list[int] syntax |
+| 431-500 | Py_GenericAlias | Public C API for creating generic alias objects |
+
+## Reading
+
+### gaobject layout and construction
+
+A `gaobject` is the runtime object produced by expressions like `list[int]` or `dict[str, int]`. It holds the origin type and the argument tuple. The starred flag is set for `*args`-style unpacked type expressions introduced in PEP 646.
+
+```c
+// CPython: Objects/genericaliasobject.c:18 gaobject
+typedef struct {
+    PyObject_HEAD
+    PyObject *origin;
+    PyObject *args;
+    PyObject *parameters;   /* cached tuple of free TypeVars */
+    PyObject *weakreflist;
+    int starred;
+} gaobject;
+```
+
+`Ga_new` is the canonical allocator. It accepts an origin object and an args tuple. When called with a single non-tuple argument, it wraps it in a one-element tuple first. The resulting object is immutable: neither field has a setter.
+
+```c
+// CPython: Objects/genericaliasobject.c:52 Ga_new
+PyObject *
+Py_GenericAlias(PyObject *origin, PyObject *args)
+{
+    if (!PyTuple_Check(args)) {
+        args = PyTuple_Pack(1, args);
+        if (args == NULL)
+            return NULL;
+    }
+    ...
+    ga->origin = Py_NewRef(origin);
+    ga->args   = Py_NewRef(args);
+    return (PyObject *)ga;
+}
+```
+
+### __origin__ and __args__ accessors
+
+Both attributes are exposed as plain descriptors on `PyGenericAlias_Type`. The getters simply return the stored field with a new reference. Neither attribute is settable, matching the immutability guarantee of generic alias objects.
+
+```c
+// CPython: Objects/genericaliasobject.c:93 ga_origin_get
+static PyObject *
+ga_origin_get(gaobject *self, void *unused)
+{
+    return Py_NewRef(self->origin);
+}
+
+// CPython: Objects/genericaliasobject.c:154 ga_args_get
+static PyObject *
+ga_args_get(gaobject *self, void *unused)
+{
+    return Py_NewRef(self->args);
+}
+```
+
+### __getitem__, isinstance checks, and __class_getitem__
+
+`ga_getitem` handles nested parameterization (e.g. `list[T][int]`). It substitutes free type variables from `self->parameters` with the supplied arguments, returning a new `gaobject`.
+
+`ga_instancecheck` and `ga_subclasscheck` both unconditionally raise `TypeError`. This is intentional: `isinstance(x, list[int])` is not supported at runtime and the error message tells the user to use `isinstance(x, list)` instead.
+
+```c
+// CPython: Objects/genericaliasobject.c:273 ga_instancecheck
+static PyObject *
+ga_instancecheck(PyObject *self, PyObject *instance)
+{
+    PyErr_SetString(PyExc_TypeError,
+        "isinstance() argument 2 cannot be a parameterized generic");
+    return NULL;
+}
+```
+
+`ga_class_getitem` is the entry point registered as `__class_getitem__` on built-in types like `list` and `dict`. When Python evaluates `list[int]`, the interpreter calls `list.__class_getitem__(int)`, which calls `Py_GenericAlias(list, int)`.
+
+## gopy notes
+
+Status: not yet ported.
+
+Planned package path: `objects/generic_alias.go`.
+
+A stub `GenericAlias` type exists in `objects/generic_alias.go` (added on the current branch) but the full attribute set, `__getitem__` substitution, and the TypeError-raising isinstance checks are not yet implemented. The `__class_getitem__` wiring is needed for `list`, `dict`, `tuple`, and other built-in collection types to accept subscript syntax in type annotations.

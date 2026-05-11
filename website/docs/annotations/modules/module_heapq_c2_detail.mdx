@@ -1,0 +1,155 @@
+---
+title: Modules/_heapqmodule.c
+description: "Annotated reading of CPython's _heapqmodule.c: min-heap push, pop, replace, and nlargest/nsmallest"
+cpython_path: Modules/_heapqmodule.c
+cpython_version: "3.14"
+lines: 600
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/_heapqmodule.c" />
+
+This file implements the `heapq` module in C. The pure-Python fallback lives in `Lib/heapq.py`; the C version is loaded when available and is the default on CPython. All public functions operate on a plain Python list in-place and enforce the min-heap invariant: `heap[k] <= heap[2*k+1]` and `heap[k] <= heap[2*k+2]` for every valid `k`.
+
+## Map
+
+| Symbol | Lines (approx) | Purpose |
+|---|---|---|
+| `_siftdown` | 1-80 | Sift a newly appended item up toward the root |
+| `_siftup` | 81-170 | Sift the root item down after removal |
+| `heapq_heappush` | 171-210 | Append then sift up |
+| `heapq_heappop` | 211-270 | Swap root with last, truncate, sift down |
+| `heapq_heapreplace` | 271-320 | Replace root without resize, sift down |
+| `heapq_heappushpop` | 321-380 | Conditional push-then-pop, faster than two calls |
+| `heapq_heapify` | 381-430 | Build heap in O(n) via bottom-up sift-down |
+| `heapq_nlargest` | 431-510 | Return n largest items using a min-heap of size n |
+| `heapq_nsmallest` | 511-580 | Return n smallest items using a max-heap of size n |
+| module init | 581-600 | `PyInit__heapq` |
+
+## Reading
+
+### The min-heap invariant and _siftdown
+
+`_siftdown` is called after appending a new item. It walks from the leaf toward the root, swapping the new item with its parent whenever the parent is larger.
+
+```c
+// CPython: Modules/_heapqmodule.c:1 _siftdown
+static int
+_siftdown(PyListObject *heap, Py_ssize_t startpos, Py_ssize_t pos)
+{
+    PyObject *newitem, *parent;
+    Py_ssize_t parentpos;
+
+    newitem = PyList_GET_ITEM(heap, pos);
+    while (pos > startpos) {
+        parentpos = (pos - 1) >> 1;
+        parent = PyList_GET_ITEM(heap, parentpos);
+        int cmp = PyObject_RichCompareBool(newitem, parent, Py_LT);
+        if (cmp < 0) return -1;
+        if (cmp == 0) break;
+        /* newitem < parent: swap and continue */
+        PyList_SET_ITEM(heap, pos, parent);
+        PyList_SET_ITEM(heap, parentpos, newitem);
+        pos = parentpos;
+    }
+    return 0;
+}
+```
+
+`startpos` is always 0 for a standard heap push. It is set to a non-zero value only during `heapify` to restrict the sift range to a subtree.
+
+`_siftup` is the mirror operation. After removing the root, the last item is placed at index 0, then sifted down by repeatedly swapping with the smaller child.
+
+### heapq_heappush and heapq_heappop
+
+`heapq_heappush` appends to the list then calls `_siftdown(heap, 0, len-1)`.
+
+```c
+// CPython: Modules/_heapqmodule.c:171 heapq_heappush
+static PyObject *
+heapq_heappush(PyObject *self, PyObject *const *args, Py_ssize_t nargs)
+{
+    PyObject *heap, *item;
+    if (!_PyArg_CheckPositional("heappush", nargs, 2, 2))
+        return NULL;
+    heap = args[0];
+    item = args[1];
+    if (!PyList_Check(heap)) {
+        PyErr_SetString(PyExc_TypeError, "heap argument must be a list");
+        return NULL;
+    }
+    if (PyList_Append(heap, item) < 0)
+        return NULL;
+    if (_siftdown((PyListObject *)heap, 0,
+                  PyList_GET_SIZE(heap) - 1) < 0)
+        return NULL;
+    Py_RETURN_NONE;
+}
+```
+
+`heapq_heappop` swaps index 0 with the last element, pops the last element (now the old minimum), and calls `_siftup` to restore the invariant. Swapping avoids an O(n) list shift.
+
+```c
+// CPython: Modules/_heapqmodule.c:211 heapq_heappop
+static PyObject *
+heapq_heappop(PyObject *self, PyObject *const *args, Py_ssize_t nargs)
+```
+
+When the list has exactly one element, the swap is skipped and the element is returned directly.
+
+### heapq_heapreplace and heapq_heappushpop
+
+`heapq_heapreplace` replaces the root with a new item without changing the list length. It is faster than a pop followed by a push because only one sift-down is needed.
+
+```c
+// CPython: Modules/_heapqmodule.c:271 heapq_heapreplace
+static PyObject *
+heapq_heapreplace(PyObject *self, PyObject *const *args, Py_ssize_t nargs)
+{
+    PyObject *heap, *item, *returnval;
+    /* ... */
+    returnval = PyList_GET_ITEM(heap, 0);
+    Py_INCREF(returnval);
+    PyList_SET_ITEM(heap, 0, Py_NewRef(item));
+    if (_siftup((PyListObject *)heap, 0) < 0) {
+        Py_DECREF(returnval);
+        return NULL;
+    }
+    return returnval;
+}
+```
+
+`heapq_heappushpop` is a further optimisation: if the new item is already smaller than or equal to the current minimum, no heap operations are needed at all and the item is returned immediately.
+
+### heapq_nlargest and heapq_nsmallest
+
+Both functions use a fixed-size heap rather than sorting the entire input.
+
+`heapq_nlargest` builds a min-heap of the first `n` items, then for each remaining item replaces the heap's minimum if the new item is larger. At the end the heap contains the `n` largest items; they are sorted in descending order before being returned.
+
+```c
+// CPython: Modules/_heapqmodule.c:431 heapq_nlargest
+/* Build initial heap from first n items, then scan the rest. */
+for (/* each remaining item */) {
+    /* if item > heap[0]: heapreplace(heap, item) */
+    cmp = PyObject_RichCompareBool(item,
+                                   PyList_GET_ITEM(heap, 0),
+                                   Py_GT);
+    if (cmp > 0)
+        /* replace and sift down */;
+}
+```
+
+`heapq_nsmallest` mirrors this with a max-heap (implemented by negating comparisons) to track the `n` smallest items. Both functions special-case `n >= len(iterable)` by delegating to `sorted()` with a slice.
+
+## gopy notes
+
+Status: not yet ported.
+
+Planned package path: `module/heapq/`.
+
+The Go port can operate directly on `*objects.List` in-place, matching the CPython design. `_siftdown` and `_siftup` translate directly to Go functions taking a `*objects.List` and index arguments.
+
+The `nlargest`/`nsmallest` special cases (n=0, n=1 via `max`/`min`, and n >= len) should be preserved to match CPython's performance profile. The key-function path through `heapify`/`heapreplace` for those helpers also needs the `(priority, count, value)` tuple trick that the Python-level code uses to break ties stably.

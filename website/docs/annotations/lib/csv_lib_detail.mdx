@@ -1,0 +1,98 @@
+---
+title: Lib/csv.py
+description: "CPython 3.14 annotation: Lib/csv.py"
+cpython_path: Lib/csv.py
+cpython_version: "3.14"
+lines: 160
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/csv.py" />
+
+`csv.py` is the pure-Python layer that wraps the C extension `_csv`. The actual parsing and formatting engine lives in C; this file provides the `Dialect` class, dialect registration, and the `DictReader`/`DictWriter` convenience wrappers that CPython ships as the public API.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-16 | module header | imports `_csv`, re-exports constants and `Error` |
+| 17-65 | `Dialect` | pure-Python dialect base with validation in `__init_subclass__` |
+| 66-76 | `register_dialect` | validates and forwards to `_csv.register_dialect` |
+| 77-79 | `unregister_dialect` | thin delegation to `_csv.unregister_dialect` |
+| 80-82 | `get_dialect` | thin delegation to `_csv.get_dialect` |
+| 83-85 | `list_dialects` | thin delegation to `_csv.list_dialects` |
+| 86-96 | `reader` | wraps `_csv.reader`, accepts file-like and dialect kwargs |
+| 97-107 | `writer` | wraps `_csv.writer`, same pattern |
+| 108-145 | `DictReader` | iterates rows as `dict`, handles `fieldnames` lazy-read and `restkey`/`restval` |
+| 146-160 | `DictWriter` | writes `dict` rows, enforces `extrasaction` policy |
+
+## Reading
+
+### Dialect validation
+
+`Dialect` is not instantiated directly. Subclasses (or the `register_dialect` path) pass through `__init_subclass__`, which calls `_csv.register_dialect` under the hood for C-level validation of field types and value ranges. The Python class only holds defaults; the C side owns the truth.
+
+```python
+# CPython: Lib/csv.py:17 Dialect
+class Dialect:
+    """Describe a CSV dialect."""
+    _name = ''
+    _valid = False
+    # ...
+    def __init_subclass__(cls, **kwargs):
+        super().__init_subclass__(**kwargs)
+        _csv.register_dialect(cls._name, cls)
+```
+
+The sentinel `_valid = False` is checked inside `_csv` before any dialect is used for parsing. Setting it to `True` only happens after C-level field validation passes, so a partially constructed subclass cannot be used accidentally.
+
+### reader and writer delegation
+
+Both `reader` and `writer` are thin Python functions. Their only job is to accept a `dialect` keyword (a string name or a `Dialect` subclass) alongside format parameters, then hand everything to the C constructors. All iteration and buffering happens in C.
+
+```python
+# CPython: Lib/csv.py:86 reader
+def reader(csvfile, dialect='excel', **fmtparams):
+    return _csv.reader(csvfile, dialect, **fmtparams)
+```
+
+The `'excel'` default dialect is registered at import time by the C module initialisation, so the string lookup is always valid without any explicit registration in Python code.
+
+### DictReader fieldnames handling
+
+`DictReader` defers reading the header row until the first call to `__next__`. If `fieldnames` is passed explicitly, the first row is treated as data. Otherwise, the first `next(self.reader)` call populates `self.fieldnames` and that row is consumed as a header.
+
+```python
+# CPython: Lib/csv.py:108 DictReader
+class DictReader:
+    def __init__(self, f, fieldnames=None, restkey=None, restval=None,
+                 dialect='excel', *args, **kwds):
+        self._fieldnames = fieldnames
+        self.restkey = restkey
+        self.restval = restval
+        self.reader = reader(f, dialect, *args, **kwds)
+        self.dialect = dialect
+        self.line_num = 0
+
+    @property
+    def fieldnames(self):
+        if self._fieldnames is None:
+            try:
+                self._fieldnames = next(self.reader)
+            except StopIteration:
+                pass
+        self.line_num = self.reader.line_num
+        return self._fieldnames
+```
+
+Rows shorter than `fieldnames` get `restval` filled in; rows longer get the extra values collected under `restkey`. This is handled in `__next__` with a simple length comparison after the underlying `_csv.reader` yields a plain list.
+
+## gopy notes
+
+Status: not yet ported.
+
+Planned package path: `module/csv/`.
+
+The C extension `_csv` must be ported first as `module/_csv/` since it owns the parser, formatter, and dialect registry. The pure-Python layer in `Lib/csv.py` can then be implemented in Go on top of that, or vendored as a stdlib Python file loaded at runtime. `DictReader` and `DictWriter` are pure Python and can ship as a `.py` file under `stdlib/` with no Go wrapper needed.

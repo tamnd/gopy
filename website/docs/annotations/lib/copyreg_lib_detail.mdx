@@ -1,0 +1,87 @@
+---
+title: Lib/copyreg.py
+description: "Dispatch table for pickle reduction, _reconstructor, and copy_reg alias"
+cpython_path: Lib/copyreg.py
+cpython_version: "3.14"
+lines: 130
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/copyreg.py" />
+
+`copyreg` registers constructor and reduction functions that `pickle` uses when serializing objects that do not define their own `__reduce__` method. It is one of the oldest modules in the standard library and predates the current `pickle` protocol hierarchy.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-18 | module header, `dispatch_table` | Module-level dict mapping type to reduction callable |
+| 20-40 | `pickle()` | Register a reduce function for a type |
+| 42-55 | `constructor()` | Register a callable as a safe constructor |
+| 57-90 | `_reconstructor()` | Generic `__reduce__` target used by `object.__reduce_ex__` |
+| 92-108 | `__newobj__()` | Reduction helper calling `cls.__new__(cls, *args)` |
+| 110-120 | `__newobj_ex__()` | Like `__newobj__` but accepts keyword arguments |
+| 122-130 | `copy_reg` alias, `_inverted_registry` | Backward-compat alias and internal registry inverse |
+
+## Reading
+
+### dispatch_table and pickle()
+
+`dispatch_table` is a plain `dict` at module scope. `pickle.Pickler` checks it before falling back to `__reduce_ex__`. Registering a function via `copyreg.pickle()` writes into this dict and also validates the constructor with `constructor()`.
+
+```python
+# CPython: Lib/copyreg.py:18 dispatch_table
+dispatch_table = {}
+
+# CPython: Lib/copyreg.py:20 pickle
+def pickle(ob_type, pickle_function, constructor_ob=None):
+    if constructor_ob is not None:
+        constructor(constructor_ob)
+    dispatch_table[ob_type] = pickle_function
+```
+
+The check in `pickle()` for `constructor_ob` exists for backward compatibility with very old code that passed a separate constructor callable. Modern pickle protocols ignore the constructor and rely solely on the reduction function's return value.
+
+### _reconstructor
+
+`_reconstructor` is the default target placed in pickle streams by `object.__reduce_ex__` when no custom reduction is defined. On unpickling, pickle calls `_reconstructor(cls, base, state)`, which allocates a new instance via `base.__new__(cls)` and then applies `state`.
+
+```python
+# CPython: Lib/copyreg.py:57 _reconstructor
+def _reconstructor(cls, base, state):
+    if base is object:
+        obj = object.__new__(cls)
+    else:
+        obj = base.__new__(cls, state)
+    if base.__init__ != object.__init__:
+        base.__init__(obj, state)
+    return obj
+```
+
+The two-branch logic handles the common case (base is `object`, state is ignored at construction time) separately from the case where the base class has a meaningful `__init__` that must run during reconstruction.
+
+### __newobj__ and __newobj_ex__
+
+These two helpers are placed directly in pickle streams as the callable for protocol 2+ reductions. `__newobj__` covers positional-only construction; `__newobj_ex__` was added in protocol 4 to support keyword arguments.
+
+```python
+# CPython: Lib/copyreg.py:92 __newobj__
+def __newobj__(cls, *args):
+    return cls.__new__(cls, *args)
+
+# CPython: Lib/copyreg.py:110 __newobj_ex__
+def __newobj_ex__(cls, args, kwargs):
+    return cls.__new__(cls, *args, **kwargs)
+```
+
+Pickle stores these functions by name in the stream. The unpickler resolves the name back to the function object, so renaming or moving them would break existing pickle streams.
+
+## gopy notes
+
+Status: not yet ported.
+
+Planned package path: `module/copyreg/`.
+
+The module is small and mostly pure Python. The main integration point is `dispatch_table`, which must be visible to the `pickle` port so that `Pickler` can consult it during `save()`. `_reconstructor` needs to be callable from the VM with the standard three-argument signature. `__newobj__` and `__newobj_ex__` can be registered as built-in functions once the pickle protocol constants are in place.

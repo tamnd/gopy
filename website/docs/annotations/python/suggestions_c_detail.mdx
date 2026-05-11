@@ -1,0 +1,118 @@
+---
+title: Python/suggestions.c
+description: "CPython name suggestion engine: levenshtein_distance, suggest_attribute, suggest_name, and how suggestions appear in NameError and AttributeError messages"
+cpython_path: Python/suggestions.c
+cpython_version: "3.14"
+lines: 320
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+`Python/suggestions.c` implements the "did you mean?" hints that appear in `NameError` and `AttributeError` tracebacks. When CPython raises one of those exceptions it calls into this file to search the relevant namespace for the closest name, measured by Levenshtein edit distance, and attaches the result to the exception object so the traceback formatter can display it.
+
+Source: <CpyLink path="Python/suggestions.c" />
+
+## Map
+
+| Lines | Symbol | Purpose |
+|-------|--------|---------|
+| 1–25 | includes + constants | `MAX_CANDIDATE_ITEMS`, `MAX_STRING_SIZE` thresholds |
+| 26–70 | `levenshtein_distance` | Edit-distance calculation between two C strings |
+| 71–110 | `_Py_Offer_Suggestions` | Entry point called by the exception machinery |
+| 111–175 | `suggest_attribute` | Closest match among an object's attributes |
+| 176–240 | `suggest_name` | Closest match in locals, globals, and builtins |
+| 241–280 | `calculate_suggestions` | Shared scoring loop used by both suggest functions |
+| 281–320 | helper statics | `_PyMemberDef` iteration, guard predicates |
+
+## Reading
+
+### levenshtein_distance: the distance kernel
+
+The implementation uses the standard single-row dynamic programming algorithm with a space cost of O(min(m, n)). CPython caps both string lengths at `MAX_STRING_SIZE` (40 characters) before entering the loop so the worst-case work is bounded regardless of identifier length.
+
+```c
+// CPython: Python/suggestions.c:26 levenshtein_distance
+static Py_ssize_t
+levenshtein_distance(const char *a, Py_ssize_t a_size,
+                     const char *b, Py_ssize_t b_size,
+                     Py_ssize_t max_cost)
+{
+    /* single-row DP; returns early when min row value exceeds max_cost */
+}
+```
+
+The `max_cost` early-exit parameter is set to `(strlen(candidate) / 3) + 1` by the callers. This means a suggestion is only offered when the misspelled name shares enough characters that the hint is plausible rather than misleading.
+
+### suggest_attribute: searching an object's dict
+
+`suggest_attribute` iterates over the type's `tp_dict` and the instance `__dict__` (if present) to find the attribute name closest to the one that was not found. It skips dunder names (names that begin and end with `__`) to avoid noise in the output.
+
+```c
+// CPython: Python/suggestions.c:111 suggest_attribute
+static PyObject *
+suggest_attribute(PyObject *obj, PyObject *name)
+{
+    Py_ssize_t   name_size;
+    const char  *name_str = PyUnicode_AsUTF8AndSize(name, &name_size);
+    if (name_str == NULL) {
+        return NULL;
+    }
+    PyObject *dir = PyObject_Dir(obj);
+    if (dir == NULL) {
+        return NULL;
+    }
+    PyObject *suggestion = calculate_suggestions(dir, name_str, name_size);
+    Py_DECREF(dir);
+    return suggestion;  /* NULL means no good match */
+}
+```
+
+`PyObject_Dir` is used rather than a raw dict walk so that descriptors, `__slots__`, and `__dir__` overrides are all respected. The result is attached to the `AttributeError` via `PyException_SetContext` in 3.11+ or directly via the `name` attribute path in earlier releases.
+
+### suggest_name: locals, globals, and builtins
+
+`suggest_name` is called from the `NameError` path. It checks three namespaces in order: the locals dict of the current frame, the module globals, and finally the builtins dict. The function returns the first match whose distance is below the threshold, preferring the innermost scope.
+
+```python
+# CPython: Python/suggestions.c:176 suggest_name (pseudocode for readability)
+def suggest_name(frame, name):
+    for namespace in (frame.f_locals, frame.f_globals, builtins.__dict__):
+        candidate = calculate_suggestions(namespace.keys(), name)
+        if candidate is not None:
+            return candidate
+    return None
+```
+
+The actual C code calls `PyFrame_GetLocals`, `PyFrame_GetGlobals`, and `PyEval_GetBuiltins` to obtain each namespace, then passes the key sequence to `calculate_suggestions`.
+
+### _Py_Offer_Suggestions: the entry point
+
+`_Py_Offer_Suggestions` is the single public symbol in this file. It dispatches to `suggest_attribute` or `suggest_name` depending on the exception type, then calls `PyException_SetAttrString(exc, "__notes__", ...)` in 3.11+ to add the hint as a note rather than modifying the message string.
+
+```c
+// CPython: Python/suggestions.c:71 _Py_Offer_Suggestions
+PyObject *
+_Py_Offer_Suggestions(PyObject *exception)
+{
+    PyObject *suggestion = NULL;
+    if (PyErr_GivenExceptionMatches(exception, PyExc_AttributeError)) {
+        suggestion = suggest_attribute(
+            ((PyAttributeErrorObject *)exception)->obj,
+            ((PyAttributeErrorObject *)exception)->name);
+    }
+    else if (PyErr_GivenExceptionMatches(exception, PyExc_NameError)) {
+        suggestion = suggest_name(
+            ((PyNameErrorObject *)exception)->name);
+    }
+    return suggestion;
+}
+```
+
+The traceback formatter in `Lib/traceback.py` reads the suggestion back out and appends the "Did you mean: X?" line to the exception display.
+
+## gopy notes
+
+Status: not yet ported.
+
+Planned package path: `vm/` (suggestion helpers) with the distance kernel as an unexported function in `vm/eval_unwind.go` or a dedicated `vm/suggestions.go`. The port should follow the same scope guard (`MAX_CANDIDATE_ITEMS`, `MAX_STRING_SIZE`) to avoid quadratic behaviour on large namespaces. The `_Py_Offer_Suggestions` entry point will be wired into the `NameError` and `AttributeError` raise paths in `vm/eval_unwind.go` once those exception types carry the required `name` and `obj` fields in `objects/`.

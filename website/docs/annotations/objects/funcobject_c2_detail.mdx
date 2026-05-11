@@ -1,0 +1,103 @@
+---
+title: Objects/funcobject.c
+description: "Annotation: CPython function object layout and accessors"
+cpython_path: Objects/funcobject.c
+cpython_version: "3.14"
+lines: 800
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Objects/funcobject.c" />
+
+## Map
+
+| Lines | Symbol | What it does |
+|-------|--------|--------------|
+| 1-50 | struct PyFunctionObject | Struct layout: func_code, func_globals, func_defaults, func_closure, etc. |
+| 51-120 | PyFunction_New | Allocates a new function object from a code object and globals dict |
+| 121-180 | PyFunction_NewWithQualName | Variant that also sets __qualname__ at construction time |
+| 181-250 | func_doc get/set | __doc__ descriptor: reads and writes func_doc field |
+| 251-310 | func_name get/set | __name__ descriptor: validates string type, updates func_name |
+| 311-370 | func_qualname get/set | __qualname__ descriptor: validates string type, updates func_qualname |
+| 371-440 | func_defaults get/set | __defaults__ descriptor: validates tuple or None, updates func_defaults |
+| 441-510 | func_kwdefaults get/set | __kwdefaults__ descriptor: validates dict or None, updates func_kwdefaults |
+| 511-580 | func_annotations get/set | __annotations__ descriptor: lazy dict creation, updates func_annotations |
+| 581-650 | func_closure get/set | __closure__ descriptor: read-only tuple of cell objects |
+| 651-720 | func_call | tp_call slot: extracts defaults and closure, dispatches to _PyEval_EvalCodeWithName |
+| 721-800 | PyFunction_Type | Type object definition with all slots wired |
+
+## Reading
+
+### PyFunctionObject layout
+
+Every Python `def` statement produces a `PyFunctionObject`. The struct carries the compiled code object plus everything the runtime needs to call it: the global namespace, default argument values, keyword-only defaults, annotations, and the closure tuple.
+
+```c
+// CPython: Objects/funcobject.c:20 PyFunctionObject
+typedef struct {
+    PyObject_HEAD
+    PyObject *func_code;       /* A code object, the __code__ attribute */
+    PyObject *func_globals;    /* A dictionary (the __globals__ attribute) */
+    PyObject *func_defaults;   /* NULL or a tuple */
+    PyObject *func_kwdefaults; /* NULL or a dict */
+    PyObject *func_closure;    /* NULL or a tuple of cell objects */
+    PyObject *func_doc;
+    PyObject *func_name;
+    PyObject *func_dict;
+    PyObject *func_weakreflist;
+    PyObject *func_module;
+    PyObject *func_annotations;
+    PyObject *func_qualname;
+    vectorcallfunc vectorcall;
+} PyFunctionObject;
+```
+
+The `func_closure` field is a tuple of `PyCellObject` items, one per free variable in `func_code->co_freevars`. The compiler ensures the lengths always match at call time.
+
+### PyFunction_New and construction
+
+`PyFunction_New` is called by the `MAKE_FUNCTION` bytecode instruction. It receives a code object and the current frame's `f_globals` dict. The qualname variant is used when the compiler knows the qualified name at compile time (class methods, nested functions).
+
+```c
+// CPython: Objects/funcobject.c:63 PyFunction_New
+PyObject *
+PyFunction_New(PyObject *code, PyObject *globals)
+{
+    return PyFunction_NewWithQualName(code, globals, NULL);
+}
+```
+
+After the allocation, `PyFunction_NewWithQualName` copies `co_name` into `func_name` and either the supplied qualname or `co_qualname` into `func_qualname`. Both `func_defaults` and `func_closure` start as NULL; they are filled in by subsequent `SET_FUNCTION_ATTRIBUTE` instructions emitted by the compiler.
+
+### Attribute descriptors and func_call
+
+The get/set descriptors (`func_doc`, `func_name`, `func_qualname`, `func_defaults`, `func_kwdefaults`, `func_annotations`) follow the same shape: the getter returns the stored field (or `None`/empty-dict for annotations), and the setter type-checks the incoming value before storing it. Storing `None` to `func_defaults` clears the field to NULL.
+
+```c
+// CPython: Objects/funcobject.c:375 func_defaults_set
+static int
+func_defaults_set(PyFunctionObject *op, PyObject *value, void *Py_UNUSED(ignored))
+{
+    if (value == Py_None)
+        value = NULL;
+    if (value != NULL && !PyTuple_Check(value)) {
+        PyErr_SetString(PyExc_TypeError,
+                        "__defaults__ must be set to a tuple object");
+        return -1;
+    }
+    Py_XSETREF(op->func_defaults, Py_XNewRef(value));
+    return 0;
+}
+```
+
+`func_call` (the `tp_call` slot) is a thin wrapper. It unpacks `func_defaults` and `func_kwdefaults` from the struct and forwards to `_PyEval_EvalCodeWithName`, which sets up the frame.
+
+## gopy notes
+
+Status: not yet ported.
+
+Planned package path: `objects/` as `objects/function.go` (struct) and `objects/function_attrs.go` (descriptors).
+
+The `PyFunctionObject` struct maps directly onto the existing `FunctionObject` type in `objects/function.go`. The descriptor logic for `__defaults__` and `__kwdefaults__` is needed for keyword argument support in the VM. The `func_closure` get/set pair is required before any closure-bearing function can be called correctly. `func_call` itself is superseded by the vectorcall path in gopy's VM, but the attribute accessors are all needed.
