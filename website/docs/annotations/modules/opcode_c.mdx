@@ -1,0 +1,95 @@
+---
+title: Modules/_opcode.c
+description: C extension module exposing bytecode introspection helpers used by the dis module.
+cpython_path: Modules/_opcode.c
+cpython_version: "3.14"
+lines: 260
+status: annotated
+ported_to: ""
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Modules/_opcode.c`
+
+<CpyLink path="Modules/_opcode.c" />
+
+`_opcode` is the thin C backing layer for Python's `dis` module and `compileall`. It exposes a small set of functions that let Python code ask questions about individual bytecode instructions without needing to parse the interpreter loop itself. The module is intentionally narrow: its job is to surface computed facts (stack effect, cache slot count, opname) that are derived from tables generated at CPython build time from `Python/opcode_metadata.h`.
+
+The most-used entry point is `stack_effect(opcode, oparg=None, jump=None)`, which returns the net change to the value stack produced by one instruction. The optional `jump` flag lets callers distinguish the stack depth taken by the jump branch from the fall-through branch of conditional instructions such as `JUMP_IF_TRUE_OR_POP`. A second entry point, `get_instructions(code)`, returns an iterator of `dis.Instruction` named-tuples for every instruction in a code object, filling in argument values, cache offsets, and source positions.
+
+Two module-level objects, `opname` and `opmap`, are populated directly from the same generated metadata. They provide the canonical name-to-opcode and opcode-to-name mappings that `dis` re-exports to user code. Because all four of these objects are derived from a single source-of-truth header, adding a new opcode to the interpreter automatically makes it visible here without any manual maintenance.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| 1-30 | includes, module init boilerplate | Setup, header includes, `PyModuleDef` scaffolding | |
+| 31-110 | `_opcode_stack_effect_impl` | Compute net stack delta for an opcode/oparg pair | |
+| 111-175 | `_opcode_get_instructions_impl` | Build iterator of `Instruction` objects from a code object | |
+| 176-210 | `_opcode_get_cache_size_impl` | Return number of cache entries consumed by an opcode | |
+| 211-235 | `opname` / `opmap` population | Fill module-level name list and name-to-code dict | |
+| 236-260 | `PyInit__opcode` | Module initialisation and method table registration | |
+
+## Reading
+
+### Module bootstrap and method table (lines 1 to 30)
+
+<CpyLink path="Modules/_opcode.c" lines="1-30" />
+
+The file opens with the usual CPython boilerplate: `Python.h`, the Argument Clinic generated header, and a static `PyMethodDef` array listing the four public functions. Nothing unusual happens here; the pattern mirrors every other `Modules/_*.c` file in the tree.
+
+```c
+static PyMethodDef opcode_functions[] = {
+    _OPCODE_STACK_EFFECT_METHODDEF
+    _OPCODE_GET_INSTRUCTIONS_METHODDEF
+    _OPCODE_GET_CACHE_SIZE_METHODDEF
+    {NULL, NULL}
+};
+```
+
+### `stack_effect` implementation (lines 31 to 110)
+
+<CpyLink path="Modules/_opcode.c" lines="31-110" />
+
+`_opcode_stack_effect_impl` calls into `_PyCompile_OpcodeIsValid` to reject unknown opcodes, then delegates to `PyCompile_OpcodeStackEffectWithJump`. That function lives in `Python/compile.c` and consults the generated `_PyOpcode_num_pushed` / `_PyOpcode_num_popped` tables. The `jump` parameter is forwarded as an integer flag: `-1` means "return the maximum of both branches", `0` means fall-through, `1` means taken branch. The result is returned as a plain Python `int`.
+
+```c
+effect = PyCompile_OpcodeStackEffectWithJump(opcode, oparg, jump);
+if (effect == PY_INVALID_STACK_EFFECT) {
+    PyErr_SetString(PyExc_ValueError, "invalid opcode or oparg");
+    return NULL;
+}
+return PyLong_FromLong(effect);
+```
+
+### `get_instructions` iterator (lines 111 to 175)
+
+<CpyLink path="Modules/_opcode.c" lines="111-175" />
+
+This is the heaviest function in the file. It receives a `PyCodeObject`, iterates over its `co_code` word array, and for each instruction constructs a `dis.Instruction` named-tuple. Cache words are skipped by stepping `i` by `1 + _PyOpcode_Caches[opcode]` rather than by a fixed stride. Source-position information is fetched via `_PyCode_InitAddressRange` and `_PyLineTable_NextAddressRange`, matching what the interpreter uses at runtime.
+
+```c
+for (int i = 0; i < n; ) {
+    int opcode = _Py_OPCODE(code->co_code_adaptive[i]);
+    int oparg  = _Py_OPARG(code->co_code_adaptive[i]);
+    /* ... build Instruction, append to list ... */
+    i += 1 + _PyOpcode_Caches[opcode];
+}
+```
+
+### `get_cache_size` (lines 176 to 210)
+
+<CpyLink path="Modules/_opcode.c" lines="176-210" />
+
+A simple lookup into the `_PyOpcode_Caches` array indexed by opcode. The function validates the opcode, then returns `_PyOpcode_Caches[opcode]` as a Python `int`. It is used by specialisation tooling and test infrastructure to verify that cache slot counts match expectations after an opcode is modified.
+
+### `opname` and `opmap` population (lines 211 to 235)
+
+<CpyLink path="Modules/_opcode.c" lines="211-235" />
+
+At module init time a Python list and dict are built by iterating `_PyOpcode_opname`, the null-entry-padded string table generated from `opcode_metadata.h`. Any slot holding a non-empty string gets an entry in both the list (index is the opcode number) and the dict (name maps to opcode number). Both objects are set as module attributes so `dis` can import them directly.
+
+## gopy mirror
+
+Not yet ported.

@@ -1,0 +1,98 @@
+---
+title: Modules/_heapq.c
+description: C accelerator for the heapq module implementing min-heap push, pop, and sift operations over arbitrary Python sequences.
+cpython_path: Modules/_heapq.c
+cpython_version: "3.14"
+lines: 420
+status: annotated
+ported_to: ""
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Modules/_heapq.c`
+
+<CpyLink path="Modules/_heapq.c" />
+
+`_heapq` is the C speed-up layer for the standard-library `heapq` module. The Python module imports all of its core functions from this extension at startup and falls back to pure-Python implementations only when the C module is absent. The file provides the five main heap operations (`heappush`, `heappop`, `heapify`, `heappushpop`, `heapreplace`) together with `nlargest` and `nsmallest`, which use a bounded heap to find the top-N elements of an iterable in O(n log k) time.
+
+The heap is always a Python list passed in by the caller. The module never owns the backing storage; it only rearranges elements in place using `PyList_GET_ITEM`, `PyList_SET_ITEM`, and `PyList_GET_SIZE`. All comparisons go through `PyObject_RichCompareBool(a, b, Py_LT)` so that any type that defines `__lt__` works correctly, including `(priority, item)` tuples as recommended in the heapq documentation.
+
+The two internal sift helpers, `_siftdownmax` / `_siftdown` and `_siftupmax` / `_siftup`, share code through a preprocessor trick: the file defines the "min-heap" variants first, then redefines a `CMPLT` macro and re-includes a shared block to generate the "max-heap" variants used internally by `nlargest`. This avoids duplicating the sift logic while keeping both flavours in a single translation unit.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| 1-40 | includes, `CMPLT` macro, helper `_siftdown` | Leaf-to-root sift for the min-heap | |
+| 41-100 | `_siftup` | Root-to-leaf sift, used after pop/replace | |
+| 101-180 | `heappush`, `heappop`, `heapify`, `heapreplace`, `heappushpop` | Public min-heap API | |
+| 181-270 | max-heap variants via macro redefinition | `_siftdownmax`, `_siftupmax` for nlargest | |
+| 271-360 | `nsmallest`, `nlargest` | Bounded top-N extraction over an iterable | |
+| 361-420 | method table, `PyInit__heapq` | Module registration | |
+
+## Reading
+
+### `_siftdown`: leaf-to-root repair (lines 1 to 40)
+
+<CpyLink path="Modules/_heapq.c" lines="1-40" />
+
+`_siftdown(heap, startpos, pos)` restores the heap invariant after a new element has been appended at `pos`. It walks from `pos` toward `startpos`, comparing each node to its parent and swapping when the child is smaller. The loop terminates as soon as the new element is not smaller than its parent, which on average takes O(log n) comparisons but often terminates in O(1) for random data.
+
+```c
+static int
+_siftdown(PyListObject *heap, Py_ssize_t startpos, Py_ssize_t pos)
+{
+    while (pos > startpos) {
+        Py_ssize_t parentpos = (pos - 1) >> 1;
+        PyObject *parent = PyList_GET_ITEM(heap, parentpos);
+        PyObject *newitem = PyList_GET_ITEM(heap, pos);
+        int cmp = CMPLT(newitem, parent);
+        if (cmp < 0) return -1;
+        if (cmp == 0) break;
+        /* swap and continue */
+        pos = parentpos;
+    }
+    return 0;
+}
+```
+
+### `_siftup`: root-to-leaf repair (lines 41 to 100)
+
+<CpyLink path="Modules/_heapq.c" lines="41-100" />
+
+`_siftup(heap, pos)` is used after a pop or replace places a new element at the root. It pushes the element down by repeatedly swapping it with the smaller of its two children until it reaches a leaf or is already smaller than both children. A notable optimisation is the "leaf search" phase: the function first descends by always choosing the smaller child without comparing to the current node, then calls `_siftdown` on the element once it has reached the bottom. This reduces the expected number of comparisons roughly by half for random heaps.
+
+### Public min-heap operations (lines 101 to 180)
+
+<CpyLink path="Modules/_heapq.c" lines="101-180" />
+
+`heappush` appends the new item to the list then calls `_siftdown(heap, 0, n)`. `heappop` saves the root, moves the last element to position 0, shrinks the list by one, and calls `_siftup(heap, 0)`. `heapreplace` overwrites position 0 without resizing and immediately calls `_siftup`, avoiding the extra list resize of a pop followed by a push. `heappushpop` is a conditional: if the new item is smaller than the root it is returned immediately (the heap is unchanged), otherwise the root is saved, the new item placed at position 0, `_siftup` called, and the saved root returned.
+
+```c
+static PyObject *
+heappushpop(PyObject *self, PyObject *args)
+{
+    /* fast path: new item is already smaller */
+    if (CMPLT(item, PyList_GET_ITEM(heap, 0)) > 0)
+        Py_RETURN_NEWREF(item);
+    /* replace root and sift down */
+    ...
+}
+```
+
+### Max-heap variants via macro redefinition (lines 181 to 270)
+
+<CpyLink path="Modules/_heapq.c" lines="181-270" />
+
+After the min-heap sifts are defined the file redefines `CMPLT(a, b)` to `PyObject_RichCompareBool(b, a, Py_LT)` (arguments reversed) and defines `_siftdownmax` and `_siftupmax` by copying the same logic. The result is a max-heap used internally by `nlargest`. The approach keeps the two variants textually close and ensures any bugfix to the sift logic applies to both flavours simultaneously.
+
+### `nsmallest` and `nlargest` (lines 271 to 360)
+
+<CpyLink path="Modules/_heapq.c" lines="271-360" />
+
+Both functions accept an iterable and an integer `n`. For small `n` relative to the input length they use a bounded heap strategy: `nsmallest` fills a max-heap of size `n` from the first `n` elements, then iterates the remainder replacing the heap root whenever a smaller element is found, and finally returns a sorted list of the heap contents. `nlargest` is symmetric using a min-heap. For edge cases where `n` equals or exceeds the length of a known-length iterable, both functions fall back to a full sort to avoid the overhead of heap construction.
+
+## gopy mirror
+
+Not yet ported.

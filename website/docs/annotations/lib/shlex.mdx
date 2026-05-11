@@ -1,0 +1,92 @@
+---
+title: Lib/shlex.py
+description: Shell-like lexical analysis for tokenizing strings using configurable quoting, escaping, and word-character rules.
+cpython_path: Lib/shlex.py
+cpython_version: "3.14"
+lines: 351
+status: annotated
+ported_to: ""
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Lib/shlex.py`
+
+<CpyLink path="Lib/shlex.py" />
+
+`shlex` implements a lexical analyzer that tokenizes strings using rules similar to POSIX shell. The core `shlex` class drives a character-level state machine: it reads one character at a time from an input stream (or string) and transitions between states representing whitespace, word, quoted, escape, and punctuation contexts. The result is a stream of tokens that callers consume by iterating or calling `get_token`.
+
+Three convenience functions sit on top of the class. `split` wraps a `shlex` instance with `whitespace_split=True` to produce a plain list of tokens. `quote` escapes an arbitrary string so it round-trips through `split` safely. `join` is the inverse of `split`, reassembling a pre-split command list into a single shell-safe string.
+
+The lexer is highly configurable through instance attributes: `wordchars`, `whitespace`, `quotes`, `escape`, `escapedquotes`, and `punctuation_chars` all control which byte values belong to which token class. POSIX mode (enabled via the `posix` constructor argument) activates stricter quote-stripping and escape handling that matches sh(1) behaviour more closely.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| 15-65 | `shlex.__init__` | Initialize lexer state, deques, and character class attributes | |
+| 66-68 | `shlex.punctuation_chars` | Read-only property exposing `_punctuation_chars` | |
+| 70-74 | `shlex.push_token` | Push a pre-formed token onto the pushback deque | |
+| 76-97 | `shlex.push_source` / `pop_source` | Stack-based input source multiplexing for file inclusion | |
+| 99-129 | `shlex.get_token` | Dispatch: drain pushback, handle `source` inclusion, handle EOF | |
+| 131-275 | `shlex.read_token` | Core state machine: character loop producing a single raw token | |
+| 277-285 | `shlex.sourcehook` | Resolve a filename token to a file object for source stacking | |
+| 304-338 | `split`, `join`, `quote` | Public convenience functions wrapping the class | |
+
+## Reading
+
+### Class initialization (lines 17 to 64)
+
+<CpyLink path="Lib/shlex.py" lines="17-64" />
+
+`__init__` accepts an optional `instream` (string or file-like), `posix` flag, and `punctuation_chars`. When `instream` is a bare string it is wrapped in `StringIO`. The method sets up all character-class strings as instance attributes so callers can mutate them without affecting other instances. The `deque` import is deferred inside `__init__` to avoid paying the import cost when the module is loaded but the class is never instantiated.
+
+```python
+lex = shlex("echo 'hello world'", posix=True)
+lex.whitespace_split = False
+```
+
+### Token pushback and source stack (lines 70 to 97)
+
+<CpyLink path="Lib/shlex.py" lines="70-97" />
+
+`push_token` prepends a token to `self.pushback` (a `deque`). `push_source` saves the current `(infile, instream, lineno)` triple onto `self.filestack` and installs the new stream. `pop_source` reverses that, closing the exhausted stream first. Together they implement a depth-unlimited include stack analogous to shell `source` or cpp `#include`.
+
+```python
+lex.push_source("extra tokens here")
+print(list(lex))  # tokens from the pushed source first
+```
+
+### Core state machine in `read_token` (lines 131 to 275)
+
+<CpyLink path="Lib/shlex.py" lines="131-275" />
+
+The outer `while True` loop reads one character per iteration. A `state` variable encodes the current context: `' '` is whitespace/idle, `'a'` is a plain word, `'c'` is a punctuation run, a quote character (e.g. `'"'`) is inside that quote, and a backslash character is inside an escape sequence. When a token boundary is reached the loop `break`s and returns `self.token`. On EOF with an open quote or escape, `ValueError` is raised immediately.
+
+```python
+# POSIX mode: quotes are stripped, backslash is honoured inside double-quotes
+lex = shlex(r'say "he said \"hi\""', posix=True)
+print(list(lex))  # ['say', 'he said "hi"']
+```
+
+### `get_token` and source inclusion (lines 99 to 129)
+
+<CpyLink path="Lib/shlex.py" lines="99-129" />
+
+`get_token` is the public entry point. It first drains `self.pushback`, then calls `read_token`. If `self.source` is set (a keyword that triggers file inclusion, like shell `source`), the next raw token is treated as a filename and fed through `sourcehook` then `push_source`. EOF handling pops exhausted sources until the root stream is empty.
+
+### Convenience functions (lines 304 to 338)
+
+<CpyLink path="Lib/shlex.py" lines="304-338" />
+
+`split` builds a fresh `shlex` with `whitespace_split=True` and drains it into a list. Setting `comments=False` (the default) strips the `commenters` attribute so `#` is treated as ordinary text. `quote` checks if the string is already safe using `bytes.translate` with a delete-mask of unsafe bytes, then wraps unsafe strings in single quotes with embedded single quotes doubled out. `join` is a one-liner: `' '.join(quote(arg) for arg in split_command)`.
+
+```python
+from shlex import split, quote, join
+cmd = split("ls -l '/my dir'")   # ['ls', '-l', '/my dir']
+safe = join(cmd)                  # "ls -l '/my dir'"
+```
+
+## gopy mirror
+
+Not yet ported.

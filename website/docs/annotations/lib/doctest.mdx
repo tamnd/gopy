@@ -1,0 +1,104 @@
+---
+title: Lib/doctest.py
+description: Extracts and executes interactive Python examples embedded in docstrings, comparing actual output against expected output.
+cpython_path: Lib/doctest.py
+cpython_version: "3.14"
+lines: 2921
+status: annotated
+ported_to: ""
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Lib/doctest.py`
+
+<CpyLink path="Lib/doctest.py" />
+
+`doctest` transforms docstrings into executable test suites. The pipeline is: `DocTestFinder` walks an object (module, class, or function) and its contained objects to collect docstrings, then `DocTestParser` scans each docstring for `>>>` prompts and packages them into `Example` and `DocTest` records, and finally `DocTestRunner` executes the examples in a fresh namespace and compares actual stdout output against the expected strings stored in each `Example`.
+
+The module is divided into eight numbered sections in the source. Sections 1 and 2 define utility helpers and the two core data types (`Example`, `DocTest`). Sections 3 and 4 hold the parser and finder. Section 5 is the runner and output checker. Sections 6 and 7 expose convenient entry points (`testmod`, `testfile`, `run_docstring_examples`) and unittest integration (`DocTestSuite`, `DocFileSuite`). Section 8 provides debugging helpers that convert docstring examples into a runnable script.
+
+Option flags control matching behaviour at both the runner level and the individual-example level via inline `# doctest: +FLAG` directives. Key flags are `ELLIPSIS` (treat `...` in expected output as a wildcard), `NORMALIZE_WHITESPACE` (collapse runs of whitespace before comparing), `SKIP` (skip the example entirely), and `IGNORE_EXCEPTION_DETAIL` (ignore the module path in exception messages). Flags are registered with `register_optionflag`, which allocates a unique power-of-two bit so they compose cleanly as bitmasks.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| 114-128 | `TestResults` | Named tuple with `failed`, `attempted`, `skipped` counts | |
+| 153-181 | `register_optionflag` + flag constants | Bitmask registry for `ELLIPSIS`, `SKIP`, `NORMALIZE_WHITESPACE`, etc. | |
+| 464-530 | `Example` | Data class: `source`, `want`, `exc_msg`, `lineno`, `options` | |
+| 532-607 | `DocTest` | Ordered collection of `Example` objects plus name, filename, lineno | |
+| 609-842 | `DocTestParser` | Regex-based parser turning raw docstrings into `DocTest` instances | |
+| 844-1181 | `DocTestFinder` | Recursive object walker building a list of `DocTest` instances | |
+| 1183-1679 | `DocTestRunner` | Executes examples, captures output, calls `OutputChecker.check_output` | |
+| 1690-1834 | `OutputChecker` | Compares got vs want; implements ellipsis and whitespace matching | |
+| 1836-1983 | `DocTestFailure`, `UnexpectedException`, `DebugRunner` | Exception types and a pdb-integrated runner subclass | |
+| 1986-2243 | `testmod`, `testfile`, `run_docstring_examples` | High-level entry points for common testing workflows | |
+
+## Reading
+
+### Data types: `Example` and `DocTest` (lines 464 to 607)
+
+<CpyLink path="Lib/doctest.py" lines="464-607" />
+
+`Example` stores a single `>>>` block. Its fields are `source` (the Python code, with trailing newline), `want` (expected output, empty string meaning no output expected), `exc_msg` (non-None when the expected output is a traceback), `lineno` (offset inside the docstring), and `options` (a dict of flag overrides). `DocTest` groups a list of `Example` objects with the metadata needed to locate their origin: `name`, `filename`, `lineno`, and the raw `docstring`.
+
+```python
+ex = Example("1 + 1\n", "2\n", lineno=3)
+dt = DocTest([ex], globs={}, name="demo", filename="demo.py",
+             lineno=0, docstring=">>> 1 + 1\n2\n")
+```
+
+### `DocTestParser` (lines 609 to 842)
+
+<CpyLink path="Lib/doctest.py" lines="609-842" />
+
+The parser uses two compiled regexes. `_EXAMPLE_RE` matches a `>>>` prompt line followed by zero or more `...` continuation lines plus the expected output lines that follow. `_DIRECTIVE_RE` matches inline `# doctest: +FLAG` annotations. `parse` splits a raw docstring into a list alternating between plain text strings and `Example` objects. `get_examples` and `get_doctest` are thin wrappers that call `parse` and filter or package the result.
+
+The parser is careful about indentation: it strips the common leading whitespace from both `source` and `want` so that docstrings indented inside class bodies parse correctly.
+
+```python
+parser = DocTestParser()
+dt = parser.get_doctest(">>> 2 + 2\n4\n", {}, "demo", "demo.py", 0)
+print(dt.examples[0].want)  # '4\n'
+```
+
+### `DocTestFinder` (lines 844 to 1181)
+
+<CpyLink path="Lib/doctest.py" lines="844-1181" />
+
+`DocTestFinder.find` accepts a module, class, or function and returns a list of `DocTest` objects by walking contained objects recursively. It tracks visited object ids in a set to handle cycles (e.g., mutually referencing classes). The `recurse` option (default `True`) controls whether nested objects are explored. The `exclude_empty` option (default `True`) drops objects whose docstring has no examples.
+
+Introspection uses `inspect` to iterate a class's `__dict__` rather than `dir()`, preserving order and avoiding inherited attributes. For modules it also inspects module-level objects filtered by `__module__` to avoid pulling in imported symbols.
+
+### `DocTestRunner` and `OutputChecker` (lines 1183 to 1834)
+
+<CpyLink path="Lib/doctest.py" lines="1183-1834" />
+
+`DocTestRunner.run` iterates a `DocTest`'s examples, redirects stdout to a `_SpoofOut` buffer, executes each `source` via `compile` + `exec`, and calls `OutputChecker.check_output` to compare the captured output against `want`. When a check fails it calls `report_failure`, accumulates a fail count, and either continues or stops depending on `FAIL_FAST`. Exceptions are caught, formatted via `traceback`, and compared against `exc_msg`.
+
+`OutputChecker.check_output` first tries exact equality, then applies flag-controlled transforms: `NORMALIZE_WHITESPACE` collapses whitespace tokens, `ELLIPSIS` uses `_ellipsis_match` which splits on `...` and checks that each segment appears in order in `got`.
+
+```python
+runner = DocTestRunner(verbose=True)
+results = runner.run(dt)
+print(results.failed, results.attempted)
+```
+
+### Entry points and unittest integration (lines 1986 to 2638)
+
+<CpyLink path="Lib/doctest.py" lines="1986-2638" />
+
+`testmod` is the canonical one-liner: it calls `DocTestFinder(verbose=verbose).find(m)`, constructs a `DocTestRunner`, runs every discovered `DocTest`, and returns a `TestResults` namedtuple. `testfile` does the same for a plain text file containing interactive examples. `run_docstring_examples` targets a single callable.
+
+`DocTestSuite` and `DocFileSuite` bridge the `unittest` world by wrapping each `DocTest` as a `DocTestCase(unittest.TestCase)`. This means pytest and the standard test runner can discover and execute docstring tests without any special plugin.
+
+```python
+import unittest
+suite = doctest.DocTestSuite("mypackage.mymodule")
+unittest.TextTestRunner(verbosity=2).run(suite)
+```
+
+## gopy mirror
+
+Not yet ported.

@@ -1,0 +1,98 @@
+---
+title: Include/internal/pycore_genobject.h
+description: Internal declarations for CPython's generator, coroutine, and async generator objects, including frame-to-generator recovery, stop-iteration value management, and the async-send protocol.
+cpython_path: Include/internal/pycore_genobject.h
+cpython_version: "3.14"
+lines: 45
+status: annotated
+ported_to: ""
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Include/internal/pycore_genobject.h`
+
+<CpyLink path="Include/internal/pycore_genobject.h" />
+
+`pycore_genobject.h` collects the internal API for the three generator-like object kinds: plain generators (`PyGenObject`), coroutines (`PyCoroObject`), and async generators (`PyAsyncGenObject`). All three share the `PyGenObject` layout at their head, which embeds a `_PyInterpreterFrame` directly in the object so that the frame and the generator travel together in memory. The shared layout is what allows `_PyGen_GetGeneratorFromFrame` to recover the enclosing generator from a live frame with a single pointer subtraction.
+
+The file is deliberately small. Its job is to expose only what other CPython subsystems need. The `_asyncio` extension module uses `_PyGen_SetStopIterationValue` and `_PyGen_FetchStopIterationValue` to implement `Task` cancellation without going through the public exception API. The JIT backend uses `_PyCoro_ComputeOrigin` to reconstruct coroutine origin information from a frame chain.
+
+Async generators add two extra concerns beyond plain generators: wrapping yielded values so the async-for protocol can distinguish them from `StopAsyncIteration`, and providing an asend/athrow mechanism that returns an awaitable. Those are covered by `_PyAsyncGenValueWrapperNew` and the `_PyAsyncGenAThrow_Type` type object exported here.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| 1-13 | include guards and `Py_BUILD_CORE` check | Header boilerplate, restricts use to core build | n/a |
+| 14 | `#include "pycore_interpframe_structs.h"` | Pulls in `_PyInterpreterFrame` and `PyGenObject` layout | n/a |
+| 17-23 | `_PyGen_GetGeneratorFromFrame()` | Inline: recovers `PyGenObject*` from its embedded frame via `offsetof` | n/a |
+| 25-34 | `_PyGen_yf`, `_PyGen_ClearFrame`, `_PyGen_SetStopIterationValue`, `_PyGen_FetchStopIterationValue` | Generator lifecycle and stop-iteration value stash | n/a |
+| 35-38 | `_PyCoro_GetAwaitableIter`, `_PyAsyncGenValueWrapperNew`, `_PyCoro_ComputeOrigin` | Coroutine and async generator helpers | n/a |
+| 39-43 | `_PyCoroWrapper_Type`, `_PyAsyncGenWrappedValue_Type`, `_PyAsyncGenAThrow_Type`, `_PyAsyncGenASend_Send` | Exported type objects and async-send entrypoint | n/a |
+
+## Reading
+
+### Frame-to-generator recovery (lines 17 to 23)
+
+<CpyLink path="Include/internal/pycore_genobject.h" lines="17-23" />
+
+Because `PyGenObject` embeds its frame by value rather than by pointer, the evaluator can always find the owning generator from a suspended frame. The inline function uses `offsetof(PyGenObject, gi_iframe)` to compute how far back to step from the frame pointer. This avoids storing a back-pointer and keeps the generator object contiguous in memory, which matters for cache locality during suspension and resumption.
+
+```c
+static inline
+PyGenObject *_PyGen_GetGeneratorFromFrame(_PyInterpreterFrame *frame)
+{
+    assert(frame->owner == FRAME_OWNED_BY_GENERATOR);
+    size_t offset_in_gen = offsetof(PyGenObject, gi_iframe);
+    return (PyGenObject *)(((char *)frame) - offset_in_gen);
+}
+```
+
+### Stop-iteration value stash (lines 28 to 34)
+
+<CpyLink path="Include/internal/pycore_genobject.h" lines="28-34" />
+
+`_PyGen_SetStopIterationValue(PyObject *value)` stores a value to be raised as `StopIteration` when the generator returns. `_PyGen_FetchStopIterationValue(PyObject **pvalue)` retrieves and clears that stashed value. Both functions are exported for `_asyncio` so that `Task` can propagate return values through `await` chains without raising a real exception into the C stack. The stash lives on the thread state, not on the generator, so only one value can be pending at a time.
+
+```c
+// Export for '_asyncio' shared extension
+PyAPI_FUNC(int) _PyGen_SetStopIterationValue(PyObject *);
+
+// Export for '_asyncio' shared extension
+PyAPI_FUNC(int) _PyGen_FetchStopIterationValue(PyObject **);
+```
+
+### Awaitable and async generator helpers (lines 35 to 38)
+
+<CpyLink path="Include/internal/pycore_genobject.h" lines="35-38" />
+
+`_PyCoro_GetAwaitableIter(PyObject *o)` implements the awaitable protocol check: it returns the coroutine or generator iterator to `await`, or raises `TypeError` if the object is not awaitable. `_PyAsyncGenValueWrapperNew` wraps a value yielded by an async generator in `_PyAsyncGenWrappedValue_Type` so that the async-for machinery can distinguish regular yields from the `StopAsyncIteration` sentinel. `_PyCoro_ComputeOrigin` rebuilds the origin frame chain for coroutine tracebacks, and is exported specifically for JIT backends that reconstruct frame chains independently.
+
+```c
+PyAPI_FUNC(PyObject *)_PyCoro_GetAwaitableIter(PyObject *o);
+PyAPI_FUNC(PyObject *)_PyAsyncGenValueWrapperNew(PyThreadState *state, PyObject *);
+
+// Exported for external JIT support
+PyAPI_FUNC(PyObject *) _PyCoro_ComputeOrigin(int origin_depth,
+    _PyInterpreterFrame *current_frame);
+```
+
+### Exported type objects and async-send (lines 39 to 43)
+
+<CpyLink path="Include/internal/pycore_genobject.h" lines="39-43" />
+
+Three type objects are exported: `_PyCoroWrapper_Type` wraps a coroutine so it can be iterated with `__next__`, `_PyAsyncGenWrappedValue_Type` is the sentinel wrapper described above, and `_PyAsyncGenAThrow_Type` is the object returned by `asend()` / `athrow()` on an async generator. `_PyAsyncGenASend_Send` drives the send operation on an async generator send-object, separating the state machine from the evaluator loop.
+
+```c
+extern PyTypeObject _PyCoroWrapper_Type;
+extern PyTypeObject _PyAsyncGenWrappedValue_Type;
+extern PyTypeObject _PyAsyncGenAThrow_Type;
+
+PyAPI_FUNC(PySendResult) _PyAsyncGenASend_Send(
+    PyObject *iter, PyObject *arg, PyObject **result);
+```
+
+## gopy mirror
+
+Not yet ported.

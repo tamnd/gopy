@@ -1,0 +1,101 @@
+---
+title: Lib/lzma.py
+description: Pure-Python interface to the _lzma C extension, providing file I/O, one-shot compression, and one-shot decompression for XZ and LZMA formats.
+cpython_path: Lib/lzma.py
+cpython_version: "3.14"
+lines: 350
+status: annotated
+ported_to: ""
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Lib/lzma.py`
+
+<CpyLink path="Lib/lzma.py" />
+
+`lzma.py` is the pure-Python layer over `_lzma`, the C extension that wraps liblzma. It re-exports all format and check constants from `_lzma` and adds `LZMAFile`, `open()`, `compress()`, and `decompress()` as the public surface. The file follows the same structural pattern as `gzip.py` and `bz2.py` so that all three compression modules have a consistent API.
+
+`LZMAFile` supports both reading and writing, accepting either a filename string or an existing file-like object. On read, it wraps an `LZMADecompressor` and feeds chunks through it; on write, it wraps an `LZMACompressor` and flushes the stream on close. The class implements the full `io.BufferedIOBase` contract, including `read()`, `read1()`, `readinto()`, `readline()`, `seek()`, and `peek()`.
+
+Three format constants control the on-disk layout: `FORMAT_XZ` (the `.xz` container with integrity checks), `FORMAT_ALONE` (the legacy `.lzma` container used by older tools), and `FORMAT_RAW` (no container at all, requiring explicit filter chains). The `check` parameter selects the integrity check algorithm for `FORMAT_XZ`, with `CHECK_CRC64` as the default.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| 1-30 | imports, `__all__`, constant re-exports | Module setup; pulls FORMAT_*, CHECK_*, FILTER_* from `_lzma` | - |
+| 31-80 | `LZMAFile.__init__` | Open file or wrap file-like object; set up compressor/decompressor | - |
+| 81-180 | `LZMAFile` read path | `read`, `read1`, `readinto`, `readline`, `peek`, buffering logic | - |
+| 181-240 | `LZMAFile` write path | `write`, `flush`, `close`, compressor finalization | - |
+| 241-270 | `LZMAFile` seek and misc | `seek`, `tell`, `seekable`, `readable`, `writable`, `name` | - |
+| 271-300 | `open()` | Convenience opener; handles text-mode wrapping via `io.TextIOWrapper` | - |
+| 301-325 | `compress()` | One-shot: create `LZMACompressor`, feed data, flush, return bytes | - |
+| 326-350 | `decompress()` | One-shot: loop `LZMADecompressor` until all input consumed | - |
+
+## Reading
+
+### LZMAFile construction (lines 31 to 80)
+
+<CpyLink path="Lib/lzma.py" lines="31-80" />
+
+`__init__` resolves whether the caller passed a filename or a file object, then opens the underlying file in binary mode if needed. The mode string is normalized to one of `"r"`, `"rb"`, `"w"`, `"wb"`, `"a"`, `"ab"`, `"x"`, or `"xb"`. For read mode, an `LZMADecompressor` is created immediately. For write/append modes, an `LZMACompressor` is created with the supplied `format`, `check`, `preset`, and `filters` arguments.
+
+A `_buffer` attribute of type `io.BytesIO` holds decompressed data that has been produced but not yet consumed by a `read()` call. This single buffer mediates between the decompressor's chunk-at-a-time output and the caller's arbitrary-length reads.
+
+### Read path and buffering (lines 81 to 180)
+
+<CpyLink path="Lib/lzma.py" lines="81-180" />
+
+`_read_block()` pulls a fixed-size chunk from the underlying stream, passes it to `_lzma.LZMADecompressor.decompress()`, and appends the result to `_buffer`. If the decompressor signals end-of-stream (`eof` attribute), any remaining bytes in the underlying file are checked. For multi-stream XZ files, a new decompressor is created and reading continues.
+
+`read(size)` loops `_read_block()` until either enough bytes are buffered or the stream is exhausted. `read1(size)` performs at most one underlying read, matching the contract of `io.RawIOBase.read1`. This distinction matters for callers that want to avoid blocking when data is already buffered.
+
+```python
+def read(self, size=-1):
+    self._check_can_read()
+    if size == 0:
+        return b""
+    # fill buffer until size bytes available or EOF
+    while size < 0 or len(self._buffer.getvalue()) < size:
+        if not self._read_block():
+            break
+    return self._buffer.read(size)
+```
+
+### Write path and close (lines 181 to 240)
+
+<CpyLink path="Lib/lzma.py" lines="181-240" />
+
+`write(data)` calls `_compressor.compress(data)` and writes whatever bytes are returned to the underlying file. The compressor may buffer internally, so no output bytes are guaranteed on each call. `close()` calls `_compressor.flush(lzma.FLUSH_FINISH)` to drain internal state, writes the final bytes, and then closes the underlying file if `LZMAFile` opened it.
+
+If the file was opened in append mode, the existing content is preserved and the new compressed stream is concatenated. XZ supports multi-stream files natively so the result remains decompressable as a single logical stream.
+
+### One-shot compress and decompress (lines 301 to 350)
+
+<CpyLink path="Lib/lzma.py" lines="301-350" />
+
+`compress(data, format, check, preset, filters)` creates an `LZMACompressor`, feeds the entire input in one call, and concatenates the output with the flush result. `decompress(data, format, memlimit, filters)` loops an `LZMADecompressor`, handling the multi-stream case where `eof` is set before all input bytes are consumed. Both are thin wrappers that expose the full parameter surface without requiring callers to manage compressor objects.
+
+```python
+def decompress(data, format=FORMAT_AUTO, memlimit=None, filters=None):
+    results = []
+    while True:
+        decomp = LZMADecompressor(format, memlimit, filters)
+        results.append(decomp.decompress(data))
+        if not decomp.eof:
+            raise LZMAError("Compressed data ended before EOS token was reached")
+        if not decomp.unused_data:
+            return b"".join(results)
+        data = decomp.unused_data
+```
+
+### open() and text-mode wrapping (lines 271 to 300)
+
+<CpyLink path="Lib/lzma.py" lines="271-300" />
+
+`open()` is a thin factory. For binary modes it returns an `LZMAFile` directly. For text modes (`"rt"`, `"wt"`, etc.) it wraps the `LZMAFile` in `io.TextIOWrapper`, forwarding `encoding`, `errors`, and `newline` parameters. This mirrors the pattern in `gzip.open()` and `bz2.open()` so that all three modules accept the same text-mode keyword arguments.
+
+## gopy mirror
+
+Not yet ported.

@@ -1,0 +1,101 @@
+---
+title: Lib/graphlib.py
+description: Topological sorting of directed acyclic graphs using Kahn's algorithm, with support for both static and parallel-ready iteration.
+cpython_path: Lib/graphlib.py
+cpython_version: "3.14"
+lines: 254
+status: annotated
+ported_to: ""
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Lib/graphlib.py`
+
+<CpyLink path="Lib/graphlib.py" />
+
+`graphlib` provides `TopologicalSorter`, a single class that implements Kahn's algorithm for topologically ordering the nodes of a directed acyclic graph (DAG). The graph is described in terms of predecessors: calling `add(node, *predecessors)` declares that `node` must come after each listed predecessor. Nodes and predecessors must be hashable; any value that can be a dict key works.
+
+The class supports two usage modes. In static mode, `static_order()` handles the full `prepare / get_ready / done` cycle internally and yields nodes one at a time in a valid topological order. In parallel mode the caller drives the cycle manually, calling `get_ready()` to obtain a batch of nodes that are all safe to process concurrently, then `done(*processed)` to unblock their successors. The `is_active()` predicate (also exposed as `__bool__`) tells the caller whether any nodes remain.
+
+If the graph contains a cycle, `prepare()` raises `CycleError` (a `ValueError` subclass). The exception's second `args` element is the detected cycle as a list of nodes where the first and last entries are identical. Partial progress is still possible after catching `CycleError`: `get_ready()` will continue returning non-cyclic nodes until no more can be unblocked.
+
+## Map
+
+| Lines | Symbol | Role | gopy |
+| ----- | ------ | ---- | ---- |
+| 9-23 | `_NodeInfo` | Slotted helper: `node`, `npredecessors`, `successors` | |
+| 26-38 | `CycleError` | `ValueError` subclass; cycle path in `args[1]` | |
+| 44-53 | `TopologicalSorter.__init__` | Initialize node map, ready list, counters; optionally load a dict graph | |
+| 59-84 | `TopologicalSorter.add` | Register a node and its predecessor edges | |
+| 86-110 | `TopologicalSorter.prepare` | Freeze the graph, populate initial ready list, detect cycles | |
+| 112-136 | `TopologicalSorter.get_ready` | Return a tuple of all currently unblocked nodes | |
+| 138-153 | `TopologicalSorter.is_active` | Return True if unsatisfied nodes remain | |
+| 155-200 | `TopologicalSorter.done` | Mark nodes processed; decrement successor predecessor counts | |
+| 202-237 | `TopologicalSorter._find_cycle` | DFS cycle detection; returns cycle path or None | |
+| 239-252 | `TopologicalSorter.static_order` | Generator wrapping the parallel API for simple sequential use | |
+
+## Reading
+
+### `_NodeInfo` and internal state constants (lines 1 to 23)
+
+<CpyLink path="Lib/graphlib.py" lines="1-23" />
+
+Each node in the graph is tracked by a `_NodeInfo` instance stored in `self._node2info`. The `__slots__` declaration keeps memory tight. `npredecessors` starts as the count of unsatisfied predecessors; it is decremented by `done()` as predecessors complete. Two sentinel values signal special states: `_NODE_OUT = -1` means the node was returned by `get_ready` but not yet marked done, and `_NODE_DONE = -2` means it has been fully processed.
+
+### `add` and `prepare` (lines 59 to 110)
+
+<CpyLink path="Lib/graphlib.py" lines="59-110" />
+
+`add(node, *predecessors)` updates two sets of edges at once. For the new node it increments `npredecessors` by the number of predecessors. For each predecessor it appends `node` to `pred_info.successors`. This dual bookkeeping is what makes `done()` O(successors) rather than O(nodes).
+
+`prepare()` collects all nodes where `npredecessors == 0` into `self._ready_nodes` (a plain list used as a queue), then calls `_find_cycle`. The ready-list is populated before cycle detection so that a caller who catches `CycleError` can still drain non-cyclic nodes.
+
+```python
+ts = TopologicalSorter()
+ts.add("C", "A", "B")
+ts.add("D", "B")
+ts.prepare()
+```
+
+### `get_ready` and `done` (lines 112 to 200)
+
+<CpyLink path="Lib/graphlib.py" lines="112-200" />
+
+`get_ready()` snapshots the current `_ready_nodes` list as a tuple, marks each returned node with `_NODE_OUT`, clears the list, and increments `_npassedout`. It always returns a tuple (empty when there is no progress).
+
+`done(*nodes)` validates each node: it must be known, must currently carry `_NODE_OUT` (not still pending or already done), then sets its state to `_NODE_DONE`. For each successor, `npredecessors` is decremented; any successor that reaches zero is appended to `_ready_nodes` and will appear in the next `get_ready()` call. The counter `_nfinished` is incremented per node.
+
+```python
+ts.prepare()
+while ts.is_active():
+    ready = ts.get_ready()
+    # ... process nodes in parallel ...
+    ts.done(*ready)
+```
+
+### Cycle detection with `_find_cycle` (lines 202 to 237)
+
+<CpyLink path="Lib/graphlib.py" lines="202-237" />
+
+`_find_cycle` performs an iterative DFS. It maintains a `stack` of node values, an `itstack` of successor iterators, a `seen` set, and a `node2stacki` dict mapping each node currently on the stack to its stack index. When the iterator for a node yields a successor that is already in `node2stacki`, a cycle is found. The cycle is returned as `stack[node2stacki[successor]:]` plus the successor appended again, so the first and last entries are equal.
+
+The iterative form avoids Python's recursion limit for large graphs. Backtracking pops from both `stack` and `itstack` whenever a node's iterator is exhausted.
+
+### `static_order` and `__class_getitem__` (lines 239 to 254)
+
+<CpyLink path="Lib/graphlib.py" lines="239-254" />
+
+`static_order` is a generator that calls `prepare()`, then loops `while is_active()`: it calls `get_ready()`, yields each node in the returned group, then calls `done(*group)`. This is the simplest way to consume the sorter when parallel processing is not needed.
+
+`__class_getitem__ = classmethod(GenericAlias)` adds PEP 585 support so `TopologicalSorter[str]` is valid as a type hint in Python 3.9+.
+
+```python
+from graphlib import TopologicalSorter
+order = list(TopologicalSorter({"C": {"A", "B"}, "D": {"B"}}).static_order())
+# one valid result: ['A', 'B', 'C', 'D'] (order of A and B may vary)
+```
+
+## gopy mirror
+
+Not yet ported.
