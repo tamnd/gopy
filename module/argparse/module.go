@@ -171,7 +171,7 @@ func destFromArgs(names []objects.Object, kwargs map[string]objects.Object) stri
 			continue
 		}
 		v := s.Value()
-		for len(v) > 0 && v[0] == '-' {
+		for v != "" && v[0] == '-' {
 			v = v[1:]
 		}
 		if v != "" {

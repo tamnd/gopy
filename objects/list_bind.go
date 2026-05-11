@@ -207,12 +207,13 @@ func listSortMethod(args []Object, kwargs map[string]Object) (Object, error) {
 		case "key":
 			keyfunc = v
 		case "reverse":
-			if b, ok := v.(*Bool); ok {
-				reverse = b == True()
-			} else if i, ok := v.(*Int); ok {
-				n, _ := i.Int64()
+			switch x := v.(type) {
+			case *Bool:
+				reverse = x == True()
+			case *Int:
+				n, _ := x.Int64()
 				reverse = n != 0
-			} else {
+			default:
 				reverse = v != nil && !IsNone(v)
 			}
 		default:
