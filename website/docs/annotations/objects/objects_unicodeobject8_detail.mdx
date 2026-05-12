@@ -1,0 +1,107 @@
+---
+title: Objects/unicodeobject.c (part 8)
+description: "Objects/unicodeobject.c part 8: str.encode, str.decode, codec lookup, PyUnicode_AsEncodedString, error handlers."
+cpython_path: Objects/unicodeobject.c
+cpython_version: "3.14"
+lines: 600
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Objects/unicodeobject.c" />
+
+This annotation covers the codec interface. See `objects_unicodeobject7_detail` for `str.__new__`, `str.join`, `str.format`, `str.split`, and internal encodings.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `str.encode` | Encode to `bytes` using a codec |
+| 81-160 | `bytes.decode` | Decode to `str` using a codec |
+| 161-240 | `PyUnicode_AsEncodedString` | C API: encode with explicit error handler |
+| 241-340 | Error handlers | `strict`, `ignore`, `replace`, `xmlcharrefreplace`, `backslashreplace` |
+| 341-600 | Codec search / `codecs.lookup` | Find encoder/decoder for a codec name |
+
+## Reading
+
+### `str.encode`
+
+```c
+// CPython: Objects/unicodeobject.c:11540 unicode_encode_impl
+static PyObject *
+unicode_encode_impl(PyObject *self, const char *encoding, const char *errors)
+{
+    if (encoding == NULL) encoding = "utf-8";
+    if (errors == NULL) errors = "strict";
+    return PyUnicode_AsEncodedString(self, encoding, errors);
+}
+
+PyObject *
+PyUnicode_AsEncodedString(PyObject *unicode, const char *encoding, const char *errors)
+{
+    PyObject *v = _PyCodec_EncodeInternal(unicode, encoding, errors);
+    /* Verify result is bytes */
+    if (!PyBytes_Check(v)) {
+        PyErr_Format(PyExc_TypeError, "encoder did not return a bytes object");
+        Py_DECREF(v);
+        return NULL;
+    }
+    return v;
+}
+```
+
+`'hello'.encode()` defaults to `'utf-8'` with `'strict'` error handling. The codec system is called via `_PyCodec_EncodeInternal`, which looks up the codec by name and calls its encoder function.
+
+### Error handlers
+
+```c
+// CPython: Objects/unicodeobject.c:11200 unicode_translate_call_errorhandler
+static PyObject *
+unicode_call_errorhandler(const char *errors, PyObject **errorHandler,
+                          const char *encoding, const char *reason,
+                          PyObject *unicode, Py_ssize_t *exceptionObject,
+                          Py_ssize_t startpos, Py_ssize_t endpos,
+                          Py_ssize_t *newpos)
+{
+    /* Look up the error handler by name */
+    if (*errorHandler == NULL) {
+        *errorHandler = PyCodec_LookupError(errors);
+    }
+    /* Call handler(UnicodeEncodeError(...)) */
+    PyObject *exc = PyUnicodeEncodeError_Create(encoding, unicode, ...);
+    PyObject *restuple = PyObject_CallOneArg(*errorHandler, exc);
+    /* restuple: (replacement_str_or_bytes, new_position) */
+    ...
+}
+```
+
+Error handlers receive a `UnicodeEncodeError` (or `DecodeError`) and return a `(replacement, position)` tuple. Built-in handlers: `strict` raises, `ignore` returns `('', endpos)`, `replace` returns `('?', endpos)`, `xmlcharrefreplace` returns `('&#N;', endpos)`.
+
+### Codec search
+
+```c
+// CPython: Python/codecs.c:80 _PyCodec_Lookup
+PyObject *
+_PyCodec_Lookup(const char *encoding)
+{
+    /* Normalize: lowercase, replace hyphens/spaces/dots with underscores */
+    PyObject *v = normalizestring(encoding);
+    PyObject *result = PyDict_GetItemWithError(interp->codec_search_cache, v);
+    if (result != NULL) return result;
+    /* Walk sys.codec_search_functions */
+    for each search_function in interp->codec_search_path:
+        result = search_function(v);
+        if (result != NULL) {
+            PyDict_SetItem(interp->codec_search_cache, v, result);
+            return result;
+        }
+    ...
+}
+```
+
+Codec names are normalized: `'UTF-8'`, `'utf8'`, `'UTF_8'` all map to the same codec. The search cache avoids repeated lookups. Custom codecs register via `codecs.register(search_function)`.
+
+## gopy notes
+
+`str.encode` is `objects.StrEncode` in `objects/str.go`. It calls `module/codecs.Encode`. Error handlers are registered in a Go `map[string]objects.ErrorHandler`. The `utf-8`, `ascii`, `latin-1`, and `utf-16` codecs are built in; others are looked up via `sys.codec_search_functions`.

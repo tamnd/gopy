@@ -1,0 +1,115 @@
+---
+title: Python/ceval.c (part 63)
+description: "Python/ceval.c part 63: GET_ITER, FOR_ITER, GET_AITER, GET_ANEXT, BEFORE_ASYNC_WITH."
+cpython_path: Python/ceval.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Python/ceval.c" />
+
+This annotation covers iteration and async iteration opcodes. See `python_ceval62_detail` for `LOAD_ATTR` specializations.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `GET_ITER` | Call `__iter__` or `__getitem__`-based fallback |
+| 81-160 | `FOR_ITER` | Advance iterator; jump on `StopIteration` |
+| 161-240 | `GET_AITER` | Call `__aiter__` for async iteration |
+| 241-320 | `GET_ANEXT` | Call `__anext__` and wrap in awaitable |
+| 321-500 | `BEFORE_ASYNC_WITH` | Set up async context manager entry |
+
+## Reading
+
+### `GET_ITER`
+
+```c
+// CPython: Python/ceval.c:2600 GET_ITER
+inst(GET_ITER, (iterable -- iter)) {
+    iter = PyObject_GetIter(iterable);
+    ERROR_IF(iter == NULL, error);
+    Py_DECREF(iterable);
+}
+```
+
+`PyObject_GetIter` calls `tp_iter` on the object. For objects without `tp_iter` but with `tp_as_sequence->sq_item` (old-style sequences), it creates a `seqiterobject` that calls `__getitem__(0)`, `__getitem__(1)`, etc. until `IndexError`.
+
+### `FOR_ITER`
+
+```c
+// CPython: Python/ceval.c:2640 FOR_ITER
+inst(FOR_ITER, (iter -- iter, next)) {
+    /* oparg = jump offset for when iterator is exhausted */
+    next = (*Py_TYPE(iter)->tp_iternext)(iter);
+    if (next != NULL) {
+        DISPATCH();
+    }
+    if (_PyErr_Occurred(tstate)) {
+        if (!_PyErr_ExceptionMatches(tstate, PyExc_StopIteration)) {
+            goto error;
+        }
+        monitor_raise(tstate, frame, next_instr - 1);
+        _PyErr_Clear(tstate);
+    }
+    JUMPBY(oparg);  /* jump past the loop body */
+    DISPATCH();
+}
+```
+
+`FOR_ITER` calls `tp_iternext` directly (bypassing `PyObject_CallNoArgs`). On `StopIteration`, the exception is cleared and execution jumps past the loop. Any other exception propagates normally.
+
+### `GET_AITER`
+
+```c
+// CPython: Python/ceval.c:2700 GET_AITER
+inst(GET_AITER, (aiter -- aiter)) {
+    unaryfunc getter = Py_TYPE(aiter)->tp_as_async->am_aiter;
+    if (getter == NULL) {
+        _PyErr_Format(tstate, PyExc_TypeError,
+                      "'async for' requires an object with __aiter__ method, got %.100s",
+                      Py_TYPE(aiter)->tp_name);
+        ERROR_IF(true, error);
+    }
+    PyObject *iter = (*getter)(aiter);
+    ERROR_IF(iter == NULL, error);
+    /* Result must have __anext__ */
+    if (Py_TYPE(iter)->tp_as_async == NULL ||
+        Py_TYPE(iter)->tp_as_async->am_anext == NULL) {
+        PyErr_Format(PyExc_TypeError, ...);
+        Py_DECREF(iter);
+        ERROR_IF(true, error);
+    }
+    Py_DECREF(aiter);
+    aiter = iter;
+}
+```
+
+`async for x in obj` requires `obj.__aiter__()` to return an object with `__anext__`. Unlike `__iter__`, `__aiter__` can itself be a coroutine (though that's discouraged). The result must have `am_anext` (the C slot for `__anext__`).
+
+### `GET_ANEXT`
+
+```c
+// CPython: Python/ceval.c:2760 GET_ANEXT
+inst(GET_ANEXT, (aiter -- aiter, awaitable)) {
+    unaryfunc getter = Py_TYPE(aiter)->tp_as_async->am_anext;
+    awaitable = (*getter)(aiter);
+    ERROR_IF(awaitable == NULL, error);
+    /* If result is a coroutine, wrap it; must be awaitable */
+    if (PyCoro_CheckExact(awaitable)) {
+        /* Fine: already a coroutine */
+    } else {
+        /* Try __await__ */
+        ...
+    }
+}
+```
+
+Each iteration of `async for` executes `GET_ANEXT` to get a coroutine for the next value, then `SEND`/`YIELD_VALUE` to run it. On `StopAsyncIteration`, the loop ends.
+
+## gopy notes
+
+`GET_ITER` is in `vm/eval_simple.go`; it calls `objects.GetIter`. `FOR_ITER` calls `objects.IterNext` and jumps on `StopIteration`. `GET_AITER` calls `objects.AIter`. `GET_ANEXT` calls `objects.ANext` via the `am_anext` slot. `BEFORE_ASYNC_WITH` calls `__aenter__` via `objects.AsyncEnter`.

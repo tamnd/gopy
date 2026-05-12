@@ -1,0 +1,97 @@
+---
+title: Lib/typing.py (part 6)
+description: "typing.py part 6: get_type_hints, overload, runtime_checkable, TypeVar.__class_getitem__, ParamSpec."
+cpython_path: Lib/typing.py
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/typing.py" />
+
+This annotation covers runtime type introspection. See `lib_typing5_detail` for `TypeVar`, `Generic`, `Protocol`, `Annotated`, and `get_args`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `get_type_hints` | Resolve string annotations to actual types |
+| 81-160 | `@overload` | Register multiple signatures; last non-overload wins |
+| 161-240 | `@runtime_checkable` | Enable `isinstance` for `Protocol` subclasses |
+| 241-340 | `ParamSpec` | Capture callable parameter specifications |
+| 341-500 | `TypeVarTuple` | Variadic generics (PEP 646) |
+
+## Reading
+
+### `get_type_hints`
+
+```python
+# CPython: Lib/typing.py:2340 get_type_hints
+def get_type_hints(obj, globalns=None, localns=None, include_extras=False):
+    hints = {}
+    if isinstance(obj, type):
+        for base in reversed(obj.__mro__):
+            if getattr(base, '__no_type_check__', None):
+                continue
+            base_globals = getattr(sys.modules.get(base.__module__, None),
+                                   '__dict__', {})
+            ann = base.__dict__.get('__annotations__', {})
+            for name, value in ann.items():
+                if value is None:
+                    value = type(None)
+                if isinstance(value, str):
+                    value = ForwardRef(value)
+                hints[name] = _eval_type(value, base_globals, localns)
+    ...
+    return hints
+```
+
+`get_type_hints` resolves string annotations (PEP 563 `from __future__ import annotations`) by evaluating them in the module's global namespace. The MRO walk means inherited annotations are included. `include_extras=True` preserves `Annotated[...]` metadata.
+
+### `@overload`
+
+```python
+# CPython: Lib/typing.py:2540 overload
+def overload(func):
+    return _overload_dummy
+
+def _overload_dummy(*args, **kwds):
+    raise NotImplementedError(
+        "You should not call an overloaded function. "
+        "A non-overloaded implementation should be provided.")
+```
+
+`@overload` replaces the function with `_overload_dummy`. The final non-`@overload` definition is the actual implementation. At runtime, the overloads are documentation only; `@overload` has no dispatch effect. Type checkers use the overloads to determine the return type.
+
+### `@runtime_checkable`
+
+```python
+# CPython: Lib/typing.py:1780 runtime_checkable
+def runtime_checkable(cls):
+    if not (isinstance(cls, _ProtocolMeta) and cls._is_protocol):
+        raise TypeError('@runtime_checkable can be only applied to protocol classes')
+    cls._is_runtime_protocol = True
+    return cls
+```
+
+Marking a `Protocol` as `@runtime_checkable` enables `isinstance(obj, MyProtocol)`. This checks only the presence of the protocol's methods (not their signatures). Without `@runtime_checkable`, `isinstance` raises `TypeError`.
+
+### `ParamSpec`
+
+```python
+# CPython: Lib/typing.py:1020 ParamSpec
+class ParamSpec(_SpecialForm):
+    def __init__(self, name, *, bound=None, covariant=False, contravariant=False):
+        super().__init__(name)
+        # P.args and P.kwargs are special forms for annotating *args/**kwargs
+        self.__args = ParamSpecArgs(self)
+        self.__kwargs = ParamSpecKwargs(self)
+```
+
+`ParamSpec` captures the full parameter spec of a callable. `Callable[P, R]` means "takes whatever `P` takes, returns `R`". `P.args` annotates `*args` and `P.kwargs` annotates `**kwargs` in the implementing function. Used for decorators that preserve callable signatures.
+
+## gopy notes
+
+`get_type_hints` is `module/typing.GetTypeHints` in `module/typing/module.go`. String annotations are evaluated via `objects.Eval` in the module globals. `@overload` registers in a global map keyed by qualified name. `ParamSpec` is `objects.ParamSpec` with `.args` and `.kwargs` attributes.

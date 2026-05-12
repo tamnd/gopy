@@ -1,0 +1,116 @@
+---
+title: Modules/_sre.c (part 6)
+description: "_sre.c part 6: SRE_Match groups, span, groupdict, expand, lastindex, lastgroup."
+cpython_path: Modules/_sre.c
+cpython_version: "3.14"
+lines: 600
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/_sre.c" />
+
+This annotation covers the match object API. See `modules_re5_detail` for `re.compile`, `Pattern.match`, `Pattern.search`, and the SRE pattern bytecode.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `Match.group` | Return captured group by index or name |
+| 81-160 | `Match.groups` | Return all groups as a tuple |
+| 161-240 | `Match.span` | Return `(start, end)` for a group |
+| 241-320 | `Match.groupdict` | Return named groups as a dict |
+| 321-600 | `Match.expand` | Expand a replacement template |
+
+## Reading
+
+### `Match.group`
+
+```c
+// CPython: Modules/_sre.c:1880 match_group
+static PyObject *
+match_group(PyObject *self, PyObject *args)
+{
+    MatchObject *match = (MatchObject *)self;
+    Py_ssize_t index;
+    if (PyTuple_GET_SIZE(args) == 1) {
+        /* Single group */
+        return match_getslice(match, PyTuple_GET_ITEM(args, 0), Py_None);
+    }
+    /* Multiple groups: return tuple */
+    PyObject *result = PyTuple_New(PyTuple_GET_SIZE(args));
+    for (int i = 0; i < PyTuple_GET_SIZE(args); i++) {
+        PyObject *item = match_getslice(match, PyTuple_GET_ITEM(args, i), Py_None);
+        PyTuple_SET_ITEM(result, i, item);
+    }
+    return result;
+}
+```
+
+`m.group(0)` returns the entire match. `m.group(1)` returns the first captured group. `m.group('name')` uses the named group index from `pattern.groupindex`. `m.group(1, 2)` returns a tuple.
+
+### `Match.span`
+
+```c
+// CPython: Modules/_sre.c:1960 match_span
+static PyObject *
+match_span(MatchObject *self, PyObject *args)
+{
+    Py_ssize_t index = 0;
+    if (PyArg_ParseTuple(args, "|n:span", &index_arg)) {
+        /* resolve name or index */
+    }
+    if (index < 0 || index >= self->groups) {
+        PyErr_SetString(PyExc_IndexError, "no such group");
+        return NULL;
+    }
+    Py_ssize_t i = index * 2;
+    if (self->mark[i] < 0) {
+        return Py_BuildValue("(nn)", -1, -1);
+    }
+    return Py_BuildValue("(nn)", self->mark[i], self->mark[i + 1]);
+}
+```
+
+`mark[i*2]` and `mark[i*2+1]` store the start and end of group `i`. Unmatched optional groups return `(-1, -1)`. `match.start()` and `match.end()` are shorthands for `span()[0]` and `span()[1]`.
+
+### `Match.expand`
+
+```c
+// CPython: Modules/_sre.c:2040 match_expand
+static PyObject *
+match_expand(MatchObject *self, PyObject *ptemplate)
+{
+    /* Process \1, \g<1>, \g<name> backreferences in ptemplate */
+    return _sre_SRE_Match_expand_impl(self, ptemplate);
+}
+```
+
+`m.expand(r'\1 \2')` replaces `\1`, `\2`, `\g<name>` with the corresponding group values. Used by `re.sub` to process replacement templates. `\g<0>` refers to the entire match.
+
+### `Match.groupdict`
+
+```c
+// CPython: Modules/_sre.c:2000 match_groupdict
+static PyObject *
+match_groupdict(MatchObject *self, PyObject *args, PyObject *kwds)
+{
+    PyObject *result = PyDict_New();
+    PyObject *keys = ((PatternObject *)self->pattern)->groupindex;
+    /* keys maps name -> group number */
+    PyObject *key, *value;
+    Py_ssize_t pos = 0;
+    while (PyDict_Next(keys, &pos, &key, &value)) {
+        PyObject *slice = match_getslice_by_index(self, PyLong_AsSsize_t(value), Py_None);
+        PyDict_SetItem(result, key, slice);
+    }
+    return result;
+}
+```
+
+`m.groupdict()` returns all named groups. `default=None` (or a custom value) replaces unmatched optional groups instead of `None`. The `groupindex` dict on the compiled pattern maps names to integers.
+
+## gopy notes
+
+`Match.group` is `module/re.MatchGroup` in `module/re/module.go`. Group offsets are stored in a `[]int` slice. `span` returns a 2-tuple. `expand` processes the template string interpreting `\1`, `\g<name>` via the pattern's `groupindex`. `groupdict` builds a `map[string]objects.Object`.
