@@ -270,10 +270,16 @@ func lookupOnType(t *Type, name string) (Object, bool) {
 // pass, `class C: def __call__(self): ...` instances would raise
 // TypeError on call because the type's Call slot would stay nil.
 //
+// Order matters: inherit_slots runs first so the subclass picks up the
+// base's slot table, then the fixup steps override individual slots
+// when the user namespace supplies an overriding dunder. Mirrors the
+// PyType_Ready -> inherit_slots -> fixup_slot_dispatchers order in
+// CPython.
+//
 // CPython: Objects/typeobject.c:9874 fixup_slot_dispatchers
 func fixupSlotDispatchers(t *Type) {
-	fixupCallReprStr(t)
 	inheritSlotsFromBases(t)
+	fixupCallReprStr(t)
 	fixupHashAndIter(t)
 	fixupRichCmpAndBool(t)
 	fixupSubscriptSlots(t)
@@ -296,10 +302,16 @@ func fixupCallReprStr(t *Type) {
 	}
 }
 
-// inheritSlotsFromBases pulls C-level slots from base types when they
-// are not overridden by a Python-level dunder. Matters for metaclass
-// hierarchies where `class ABCMeta(type)` should inherit type.Repr,
-// type.Call, etc.
+// inheritSlotsFromBases pulls C-level slots from base types when the
+// subclass leaves them nil. CPython's inherit_slots walks the primary
+// base and copies every slot that is not already set on the subclass.
+// The fixup pass that runs after this can still override individual
+// slots when the user namespace supplies a matching dunder.
+//
+// gopy keeps the Getattro / Setattro choice in NewUserType because the
+// dispatcher depends on the concrete instance shape (*Instance versus
+// *Dict versus *Type); the rest of the slot table is straight pointer
+// inheritance.
 //
 // CPython: Objects/typeobject.c:9770 inherit_slots
 func inheritSlotsFromBases(t *Type) {
@@ -315,6 +327,46 @@ func inheritSlotsFromBases(t *Type) {
 		}
 		if t.Hash == nil && base.Hash != nil {
 			t.Hash = base.Hash
+		}
+		if t.TpNew == nil && base.TpNew != nil {
+			t.TpNew = base.TpNew
+		}
+		if t.Iter == nil && base.Iter != nil {
+			t.Iter = base.Iter
+		}
+		if t.IterNext == nil && base.IterNext != nil {
+			t.IterNext = base.IterNext
+		}
+		if t.RichCmp == nil && base.RichCmp != nil {
+			t.RichCmp = base.RichCmp
+		}
+		if t.DescrGet == nil && base.DescrGet != nil {
+			t.DescrGet = base.DescrGet
+		}
+		if t.DescrSet == nil && base.DescrSet != nil {
+			t.DescrSet = base.DescrSet
+		}
+		if t.Format == nil && base.Format != nil {
+			t.Format = base.Format
+		}
+		if t.TpTraverse == nil && base.TpTraverse != nil {
+			t.TpTraverse = base.TpTraverse
+		}
+		if t.Number == nil && base.Number != nil {
+			cp := *base.Number
+			t.Number = &cp
+		}
+		if t.Sequence == nil && base.Sequence != nil {
+			cp := *base.Sequence
+			t.Sequence = &cp
+		}
+		if t.Mapping == nil && base.Mapping != nil {
+			cp := *base.Mapping
+			t.Mapping = &cp
+		}
+		if t.Async == nil && base.Async != nil {
+			cp := *base.Async
+			t.Async = &cp
 		}
 	}
 }

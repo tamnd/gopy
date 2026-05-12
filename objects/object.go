@@ -130,8 +130,15 @@ func objectNew(cls *Type, args []Object, kwargs map[string]Object) (Object, erro
 			return nil, fmt.Errorf("TypeError: %s() takes no arguments", cls.Name)
 		}
 	}
-	// Py_TPFLAGS_IS_ABSTRACT check deferred: abc.ABCMeta has not yet
-	// landed the flag plumbing in gopy.
+	// Abstract instantiation guard: refuse if __abstractmethods__ is
+	// non-empty. gopy does not yet carry the Py_TPFLAGS_IS_ABSTRACT
+	// bit, so the lookup-based version is the equivalent path.
+	//
+	// CPython: Objects/typeobject.c:6854 object_new (the
+	// Py_TPFLAGS_IS_ABSTRACT branch)
+	if err := checkNotAbstract(cls); err != nil {
+		return nil, err
+	}
 	return NewInstance(cls), nil
 }
 

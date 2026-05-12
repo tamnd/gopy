@@ -45,7 +45,7 @@ otherwise. Final gate closes #544.
 | 4 | D `funcobject.c` | PyFunction_Type (all `func_*` functions) | - | done |
 | 5 | C `classobject.c` | PyMethod_Type (all `method_*` functions) | - | done |
 | 6 | B `typeobject.c` | `type_new` pipeline (`type_new_*` functions) | 1,2,3,4,5 | done |
-| 7 | B `typeobject.c` | `inherit_slots` (every slot edge) | 6 | partial |
+| 7 | B `typeobject.c` | `inherit_slots` (every slot edge) | 6 | done |
 | 8 | E `ceval.c` | STORE_NAME / LOAD_NAME / DELETE_NAME | - | partial |
 | Gate | - | enum + re + fnmatch smoke | all | pending |
 
@@ -306,7 +306,7 @@ implementations earlier in the file. Every row must land.
 | `type_getattro` | type attribute lookup | `typeGetAttr` | done |
 | `type_setattro` | type attribute set | `typeSetAttr` | done |
 | `type_qualname` / `type_set_qualname` | `__qualname__` getset | `typeGetQualname` / `typeSetQualname` | done |
-| `fixup_slot_dispatchers` | wire C slots from Python dunders | `fixupSlotDispatchers` | partial (Phase 7 audit) |
+| `fixup_slot_dispatchers` | wire C slots from Python dunders | `fixupSlotDispatchers` | done (Phase 7 widened the inherit pass) |
 
 ### Gates
 
@@ -356,24 +356,45 @@ implementations earlier in the file. Every row must land.
 ### Slots to verify propagation for
 
 Every row from CPython's slotdefs table must propagate from the
-base type when the subclass does not override it.
+base type when the subclass does not override it. `inheritSlotsFromBases`
+runs before `fixupSlotDispatchers` so the subclass picks up the
+base's slot table first, then a user-supplied dunder can override
+individual slot fields. The `Number` / `Sequence` / `Mapping` / `Async`
+tables are copied by value (`*cp := *base.X`) so the per-subclass
+fixup writes never mutate the base.
 
 | Slot group | Slots | Status |
 |------------|-------|--------|
-| Basic | `Repr`, `Str`, `Hash`, `Call`, `Getattro`, `Setattro`, `Iter`, `IterNext`, `RichCmp`, `DescrGet`, `DescrSet` | partial (4 of 11 propagate) |
-| Number | `Add`, `Subtract`, `Multiply`, `Remainder`, `Divmod`, `Power`, `Negative`, `Positive`, `Absolute`, `Bool`, `Invert`, `Lshift`, `Rshift`, `And`, `Xor`, `Or`, `Int`, `Float`, `InPlace*`, `FloorDivide`, `TrueDivide`, `Index`, `MatrixMultiply` | pending |
-| Mapping | `Length`, `GetItem`, `SetItem`, `DelItem` | pending |
-| Sequence | `Length`, `Concat`, `Repeat`, `GetItem`, `SetItem`, `Contains`, `InPlaceConcat`, `InPlaceRepeat` | pending |
-| Async | `Await`, `Aiter`, `Anext` | pending |
-| Buffer | `Getbuffer`, `Releasebuffer` | pending |
+| Basic | `Repr`, `Str`, `Hash`, `Call`, `TpNew`, `Iter`, `IterNext`, `RichCmp`, `DescrGet`, `DescrSet`, `Format`, `TpTraverse` | done |
+| Basic (handled outside `inherit_slots`) | `Getattro`, `Setattro` | done (selected per instance shape in `NewUserTypeKwargs`) |
+| Number | `Add`, `Subtract`, `Multiply`, `Remainder`, `Divmod`, `Power`, `Negative`, `Positive`, `Absolute`, `Bool`, `Invert`, `Lshift`, `Rshift`, `And`, `Xor`, `Or`, `Int`, `Float`, `InPlace*`, `FloorDivide`, `TrueDivide`, `Index`, `MatrixMultiply` | done (table copied as a unit) |
+| Mapping | `Length`, `GetItem`, `SetItem`, `DelItem` | done (table copied as a unit) |
+| Sequence | `Length`, `Concat`, `Repeat`, `GetItem`, `SetItem`, `Contains`, `InPlaceConcat`, `InPlaceRepeat` | done (table copied as a unit) |
+| Async | `Await`, `Aiter`, `Anext` | done (table copied as a unit) |
+| Buffer | `Getbuffer`, `Releasebuffer` | pending (no Buffer subsystem ported yet) |
 
 ### Gates
 
-| Gate | Command | Expected |
-|------|---------|----------|
-| 7.1 | `gopy -c 'class L(list): pass\nl=L([1,2,3])\nprint(len(l), l[1], list(reversed(l)))'` | `3 2 [3, 2, 1]` |
-| 7.2 | `gopy -c 'class D(dict): pass\nd=D({"a":1})\nprint(d["a"], len(d), "a" in d)'` | `1 1 True` |
-| 7.3 | `gopy -c 'class I(int): pass\nprint(I(3)+I(4), I(5)*I(2))'` | `7 10` |
+| Gate | Command | Expected | Status |
+|------|---------|----------|--------|
+| 7.1 | `gopy -c 'class L(list): pass\nl=L([1,2,3])\nprint(len(l), l[1], list(reversed(l)))'` | `3 2 [3, 2, 1]` | pass |
+| 7.2 | `gopy -c 'class D(dict): pass\nd=D({"a":1})\nprint(d["a"], len(d), "a" in d)'` | `1 1 True` | pass |
+| 7.3 | `gopy -c 'class I(int): pass\nprint(I(3)+I(4), I(5)*I(2))'` | `7 10` | pass |
+
+### Side fixes shipped under Phase 7
+
+- `objectNew` now runs the abstract-method guard. Before this phase the
+  guard sat in `typeCall` and only ran when `TpNew` was nil. Now that
+  every user class inherits `TpNew` from `object`, the check has to
+  live where CPython parks it - inside `object_new`.
+- The fixup pass order is `inherit -> fixup` so user dunders override
+  the inherited slot fields. Previously fixup ran first; that worked
+  for the Basic four because they were the only inherited slots, but
+  it would have masked user overrides once the slot tables started
+  propagating.
+- A subclass's slot tables are deep copies of the base's table. Without
+  the copy, any `fixupSubscriptSlots` write through `ensureSequenceMethods`
+  on the subclass would smash the base type's table.
 
 ### CPython citations
 
@@ -381,6 +402,7 @@ base type when the subclass does not override it.
 |---|-----------|
 | 1 | `Objects/typeobject.c:7521` `inherit_slots` |
 | 2 | `Objects/typeobject.c:9770` slotdefs table header |
+| 3 | `Objects/typeobject.c:6854` `object_new` (Py_TPFLAGS_IS_ABSTRACT branch) |
 
 ## Phase 8 - `Python/ceval.c` name ops
 
