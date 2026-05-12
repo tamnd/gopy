@@ -1,0 +1,137 @@
+---
+title: Modules/_datetimemodule.c
+description: "_datetimemodule.c: C implementation of datetime.date, datetime.time, datetime.datetime, datetime.timedelta, datetime.timezone."
+cpython_path: Modules/_datetimemodule.c
+cpython_version: "3.14"
+lines: 6500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/_datetimemodule.c" />
+
+`_datetime` is the C accelerator for `datetime`. It provides all five types: `date`, `time`, `datetime`, `timedelta`, `timezone`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-300 | Date math helpers | `ymd_to_ord`, `ord_to_ymd`, days-in-month, is-leap |
+| 301-700 | `timedelta` type | Construction, normalization, arithmetic |
+| 701-1200 | `date` type | `date(y,m,d)`, `today()`, `fromisoformat()`, `strftime` |
+| 1201-1800 | `time` type | `time(h,m,s,us,tz)`, `isoformat`, comparisons |
+| 1801-2800 | `datetime` type | Combines date and time; `now()`, `utcnow()`, `fromtimestamp()` |
+| 2801-3500 | `timezone` type | Fixed-offset tzinfo subclass |
+| 3501-4500 | Arithmetic | `datetime + timedelta`, subtraction, comparisons |
+| 4501-5500 | Formatting | `strftime`, `strptime` via `time.strptime` |
+| 5501-6500 | `fromisoformat` | Full ISO 8601 parser (3.11+) |
+
+## Reading
+
+### `ymd_to_ord` — Gregorian ordinal
+
+```c
+// CPython: Modules/_datetimemodule.c:180 ymd_to_ord
+static int
+ymd_to_ord(int y, int m, int d)
+{
+    y -= 1;
+    return (y*365 + y/4 - y/100 + y/400
+            + DAYS_BEFORE_MONTH[m] + d);
+}
+```
+
+Day 1 is 0001-01-01. The formula is the standard Gregorian proleptic calendar formula. Used by `date.toordinal()`.
+
+### `timedelta` normalization
+
+```c
+// CPython: Modules/_datetimemodule.c:360 delta_new
+static PyObject *
+delta_new(PyTypeObject *type, PyObject *args, PyObject *kw)
+{
+    /* Accept any combination of days/seconds/microseconds/milliseconds/... */
+    /* Normalize: microseconds in [0, 999999], seconds in [0, 86399] */
+    us = (long long)us_i + ms_i * 1000LL + s_i * 1000000LL;
+    s = d_i * 86400LL + h_i * 3600LL + m_i * 60LL;
+    /* Normalize microseconds into seconds */
+    s += us / 1000000;
+    us %= 1000000;
+    if (us < 0) { s -= 1; us += 1000000; }
+    ...
+}
+```
+
+`timedelta` stores exactly three normalized fields: `days`, `seconds`, `microseconds`. All input combinations collapse into these.
+
+### `datetime.now()`
+
+```c
+// CPython: Modules/_datetimemodule.c:2100 datetime_now
+static PyObject *
+datetime_now(PyObject *cls, PyObject *args, PyObject *kw)
+{
+    PyObject *result;
+    if (tzinfo == Py_None || tzinfo == NULL) {
+        /* Local time */
+        result = datetime_from_timestamp(cls, PyFloat_Type.tp_new, timestamp, tzinfo);
+    } else {
+        /* tz-aware: get UTC, convert to tz */
+        result = datetime_from_timestamp(cls, PyFloat_Type.tp_new, timestamp, tzinfo);
+        result = _PyObject_CallMethodIdOneArg(result, &PyId_astimezone, tzinfo);
+    }
+    return result;
+}
+```
+
+### `fromisoformat` (3.11+)
+
+```c
+// CPython: Modules/_datetimemodule.c:5550 datetime_fromisoformat
+static PyObject *
+datetime_fromisoformat(PyObject *cls, PyObject *dtstr)
+{
+    /* Accepts: YYYY-MM-DD[T HH:MM:SS[.ffffff][+HH:MM[:SS[.ffffff]]]] */
+    /* Also: YYYY-MM-DD (date-only), HH:MM:SS (time-only) */
+    ...
+}
+```
+
+3.11 expanded `fromisoformat` to accept the full ISO 8601 format including UTC `Z` suffix.
+
+### `timedelta` arithmetic
+
+```c
+// CPython: Modules/_datetimemodule.c:4380 delta_add
+static PyObject *
+delta_add(PyObject *left, PyObject *right)
+{
+    PyDateTime_Delta *d1 = (PyDateTime_Delta *)left;
+    PyDateTime_Delta *d2 = (PyDateTime_Delta *)right;
+    return new_delta(
+        GET_TD_DAYS(d1) + GET_TD_DAYS(d2),
+        GET_TD_SECONDS(d1) + GET_TD_SECONDS(d2),
+        GET_TD_MICROSECONDS(d1) + GET_TD_MICROSECONDS(d2),
+        1 /* normalize */
+    );
+}
+```
+
+### `timezone.utc`
+
+```c
+// CPython: Modules/_datetimemodule.c:3100 timezone_new
+/* timezone(timedelta(0)) is the singleton datetime.timezone.utc */
+static PyObject *
+timezone_new(PyTypeObject *type, PyObject *args, PyObject *kw)
+{
+    if (offset == zero_delta)
+        return Py_NewRef(PyDateTime_TimeZone_UTC);
+    ...
+}
+```
+
+## gopy notes
+
+`datetime` objects are in `module/datetime/` using Go structs with packed integer fields mirroring the C `date`, `time`, `datetime`, `timedelta`, `timezone` structs. `ymd_to_ord` uses the same formula. `datetime.now()` calls `time.Now()` (Go) for the local time. `fromisoformat` uses a hand-written parser matching the C version's accepted formats. `strftime`/`strptime` delegate to Go's `time.Format` with a format-string translation table.

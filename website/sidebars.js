@@ -317,6 +317,8 @@ const sidebars = {
         'annotations/python/python_ceval5_detail',
         'annotations/python/python_compile4_detail',
         'annotations/python/python_ceval6_detail',
+        'annotations/python/python_bltinmodule2_detail',
+        'annotations/python/python_frozen_detail',
       ],
     },
     {
@@ -500,6 +502,7 @@ const sidebars = {
         'annotations/objects/objects_mappingproxyobject_detail',
         'annotations/objects/objects_longobject4_detail',
         'annotations/objects/objects_floatobject2_detail',
+        'annotations/objects/objects_bytearrayobject_detail',
       ],
     },
     {
@@ -943,6 +946,9 @@ const sidebars = {
         'annotations/modules/modules_codecs_detail',
         'annotations/modules/modules_signal_detail2',
         'annotations/modules/modules_functools_detail',
+        'annotations/modules/modules_datetime_detail',
+        'annotations/modules/modules_random_detail',
+        'annotations/modules/modules_zlib_detail',
       ],
     },
     {

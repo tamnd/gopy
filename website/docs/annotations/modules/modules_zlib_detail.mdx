@@ -1,0 +1,127 @@
+---
+title: Modules/zlibmodule.c
+description: "zlibmodule.c: Python bindings for zlib — compress, decompress, Compress/Decompress stream objects, crc32, adler32."
+cpython_path: Modules/zlibmodule.c
+cpython_version: "3.14"
+lines: 1400
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/zlibmodule.c" />
+
+`zlib` wraps the zlib C library for deflate compression. It provides one-shot functions and stream objects for incremental compression.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-100 | Constants | `DEFLATED`, `Z_BEST_SPEED`, `Z_BEST_COMPRESSION`, `Z_DEFAULT_COMPRESSION` |
+| 101-300 | `zlib_compress` | One-shot compress: `zlib.compress(data, level)` |
+| 301-500 | `zlib_decompress` | One-shot decompress with wbits and buffer size |
+| 501-700 | `Compress` type | Streaming `compressobj` — deflate incrementally |
+| 701-900 | `Decompress` type | Streaming `decompressobj` — inflate incrementally |
+| 901-1100 | `compress_compress`, `compress_flush` | Feed data, flush remaining |
+| 1101-1300 | `decompress_decompress`, `decompress_flush` | Feed compressed data |
+| 1301-1400 | `zlib_crc32`, `zlib_adler32` | Checksums |
+
+## Reading
+
+### One-shot compress
+
+```c
+// CPython: Modules/zlibmodule.c:140 zlib_compress_impl
+static PyObject *
+zlib_compress_impl(PyObject *module, Py_buffer *data, int level, int wbits)
+{
+    z_stream zst;
+    zst.zalloc = Z_NULL;
+    zst.zfree  = Z_NULL;
+    zst.opaque = Z_NULL;
+    deflateInit2(&zst, level, Z_DEFLATED, wbits, DEF_MEM_LEVEL, Z_DEFAULT_STRATEGY);
+    zst.avail_in = data->len;
+    zst.next_in  = data->buf;
+    /* Allocate output buffer: worst-case bound from deflateBound() */
+    Py_ssize_t obuflen = deflateBound(&zst, data->len);
+    ...
+    deflate(&zst, Z_FINISH);
+    deflateEnd(&zst);
+    return PyBytes_FromStringAndSize(obuf, zst.total_out);
+}
+```
+
+### Stream compression
+
+```c
+// CPython: Modules/zlibmodule.c:620 zlib_Compress_compress_impl
+static PyObject *
+zlib_Compress_compress_impl(compobject *self, Py_buffer *data)
+{
+    self->zst.avail_in = data->len;
+    self->zst.next_in  = data->buf;
+    do {
+        /* Grow output buffer as needed */
+        arrange_input_buffer(&self->zst, &ibuflen);
+        err = deflate(&self->zst, Z_NO_FLUSH);
+        ...
+    } while (self->zst.avail_in != 0);
+    return PyBytes_FromStringAndSize(retbuf, output_len);
+}
+
+// CPython: Modules/zlibmodule.c:680 zlib_Compress_flush_impl
+static PyObject *
+zlib_Compress_flush_impl(compobject *self, int mode)
+{
+    do {
+        err = deflate(&self->zst, mode);  /* Z_FINISH or Z_SYNC_FLUSH */
+        ...
+    } while (err != Z_STREAM_END);
+    deflateEnd(&self->zst);
+    return PyBytes_FromStringAndSize(retbuf, output_len);
+}
+```
+
+### Decompress with unconsumed tail
+
+```c
+// CPython: Modules/zlibmodule.c:820 zlib_Decompress_decompress_impl
+static PyObject *
+zlib_Decompress_decompress_impl(compobject *self, Py_buffer *data,
+                                 Py_ssize_t max_length)
+{
+    self->zst.avail_in = data->len;
+    self->zst.next_in  = data->buf;
+    do {
+        err = inflate(&self->zst, Z_SYNC_FLUSH);
+        if (err == Z_STREAM_END) {
+            /* Store remaining unconsumed bytes */
+            self->unconsumed_tail = PyBytes_FromStringAndSize(
+                (char *)self->zst.next_in, self->zst.avail_in);
+            break;
+        }
+        ...
+    } while (self->zst.avail_out == 0);
+    return retval;
+}
+```
+
+`decompressobj.unconsumed_tail` holds bytes after `Z_STREAM_END` — useful when a zlib stream is embedded in a larger byte sequence.
+
+### `crc32`
+
+```c
+// CPython: Modules/zlibmodule.c:1320 zlib_crc32_impl
+static PyObject *
+zlib_crc32_impl(PyObject *module, Py_buffer *data, unsigned int value)
+{
+    unsigned long crc = crc32(value, data->buf, data->len);
+    return PyLong_FromUnsignedLong(crc & 0xffffffff);
+}
+```
+
+Always returns an unsigned 32-bit value. `zlib.crc32(b'')` is `0`.
+
+## gopy notes
+
+`zlib` is in `module/zlib/` and uses Go's `compress/zlib` and `compress/flate` packages. The stream objects wrap `flate.Writer`/`flate.Reader`. `crc32` and `adler32` use `hash/crc32` and `hash/adler32`. The `wbits` parameter controls format: positive = zlib wrapper, negative = raw deflate, 16+ = gzip wrapper (mapped to Go's `compress/gzip`).

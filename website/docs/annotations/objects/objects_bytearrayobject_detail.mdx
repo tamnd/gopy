@@ -1,0 +1,156 @@
+---
+title: Objects/bytearrayobject.c
+description: "bytearrayobject.c: bytearray type — mutable byte sequences. Construction, resize, getitem/setitem, concat, find/replace, decode, buffer protocol."
+cpython_path: Objects/bytearrayobject.c
+cpython_version: "3.14"
+lines: 2800
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Objects/bytearrayobject.c" />
+
+`bytearray` is the mutable counterpart to `bytes`. It supports in-place modification and the buffer protocol for zero-copy I/O.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-200 | `bytearray_new`, `bytearray_init` | Construction from int (zeroed), bytes, str+encoding, iterable |
+| 201-400 | `bytearray_resize` | Internal resize (may reallocate buffer) |
+| 401-600 | `bytearray_getitem`, `bytearray_setitem` | Index/slice get and in-place set |
+| 601-800 | `bytearray_concat`, `bytearray_repeat` | `+` and `*` operators |
+| 801-1200 | `bytearray_find`, `bytearray_count`, `bytearray_index` | Substring search |
+| 1201-1600 | `bytearray_replace`, `bytearray_split`, `bytearray_join` | Mutation and splitting |
+| 1601-1800 | `bytearray_decode` | `bytearray.decode(encoding)` |
+| 1801-2000 | `bytearray_extend`, `bytearray_append`, `bytearray_insert` | List-like mutation |
+| 2001-2400 | Buffer protocol | `bf_getbuffer`, `bf_releasebuffer` |
+| 2401-2800 | `bytearray_hex`, `bytearray_fromhex` | Hex conversion |
+
+## Reading
+
+### Construction
+
+```c
+// CPython: Objects/bytearrayobject.c:55 bytearray_init
+static int
+bytearray_init(PyByteArrayObject *self, PyObject *args, PyObject *kwds)
+{
+    if (count == 0) {
+        /* bytearray() or bytearray(0) → empty */
+        return 0;
+    }
+    if (PyLong_CheckExact(arg)) {
+        /* bytearray(n) → n zero bytes */
+        count = PyLong_AsSsize_t(arg);
+        if (PyByteArray_Resize((PyObject *)self, count) < 0) return -1;
+        memset(PyByteArray_AS_STRING(self), 0, count);
+    } else if (PyBytes_Check(arg)) {
+        /* bytearray(b'...') → copy */
+        ...
+    } else {
+        /* bytearray(iterable of ints) */
+        ...
+    }
+}
+```
+
+`bytearray(n)` produces `n` null bytes. `bytearray(b'hello')` copies. `bytearray([72, 101, 108])` iterates.
+
+### Resize
+
+```c
+// CPython: Objects/bytearrayobject.c:240 PyByteArray_Resize
+int
+PyByteArray_Resize(PyObject *self, Py_ssize_t size)
+{
+    /* Over-allocate with growth factor to amortize append cost */
+    Py_ssize_t alloc = _Py_SIZE_ROUND_UP(size, 8);
+    if (alloc != ob->ob_alloc) {
+        char *sval = (char *)PyMem_Realloc(ob->ob_start, alloc + 1);
+        ...
+    }
+    ob->ob_val = ob->ob_start;
+    ob->ob_bytes = size;
+    ob->ob_val[size] = '\0';  /* always null-terminated */
+}
+```
+
+`bytearray` is always null-terminated internally (like `bytes`) even though it is mutable.
+
+### In-place setitem
+
+```c
+// CPython: Objects/bytearrayobject.c:430 bytearray_ass_subscript
+static int
+bytearray_ass_subscript(PyByteArrayObject *self, PyObject *index, PyObject *values)
+{
+    if (PyIndex_Check(index)) {
+        /* Single byte assignment */
+        Py_ssize_t i = PyNumber_AsSsize_t(index, PyExc_IndexError);
+        int ival = PyLong_AsLong(values);
+        if (ival < 0 || ival > 255) {
+            PyErr_SetString(PyExc_ValueError, "byte must be in range(0, 256)");
+            return -1;
+        }
+        self->ob_start[i] = (char)ival;
+    } else {
+        /* Slice assignment — may change length */
+        ...
+    }
+}
+```
+
+### `append` / `extend`
+
+```c
+// CPython: Objects/bytearrayobject.c:1820 bytearray_append
+static PyObject *
+bytearray_append(PyByteArrayObject *self, PyObject *arg)
+{
+    int value = PyLong_AsLong(arg);
+    if (value < 0 || value > 255) {
+        PyErr_SetString(PyExc_ValueError, "byte must be in range(0, 256)");
+        return NULL;
+    }
+    if (PyByteArray_Resize((PyObject *)self, Py_SIZE(self) + 1) < 0) return NULL;
+    PyByteArray_AS_STRING(self)[Py_SIZE(self) - 1] = value;
+    Py_RETURN_NONE;
+}
+```
+
+### Buffer protocol
+
+```c
+// CPython: Objects/bytearrayobject.c:2060 bytearray_getbuffer
+static int
+bytearray_getbuffer(PyByteArrayObject *obj, Py_buffer *view, int flags)
+{
+    /* Expose the internal buffer directly — zero-copy */
+    return PyBuffer_FillInfo(view, (PyObject *)obj,
+                             PyByteArray_AS_STRING(obj),
+                             Py_SIZE(obj), 0 /* writable */, flags);
+}
+```
+
+`bytearray` satisfies the writable buffer protocol. Passing one to `socket.recv_into()` avoids a copy.
+
+### `hex` / `fromhex`
+
+```c
+// CPython: Objects/bytearrayobject.c:2450 bytearray_hex_impl
+static PyObject *
+bytearray_hex_impl(PyByteArrayObject *self, int sep, int bytes_per_sep)
+{
+    /* same logic as bytes.hex() */
+    return _Py_strhex_with_sep(PyByteArray_AS_STRING(self),
+                                PyByteArray_GET_SIZE(self), sep, bytes_per_sep);
+}
+```
+
+`bytearray(b'\xde\xad').hex('-', 1)` gives `'de-ad'`.
+
+## gopy notes
+
+`bytearray` is in `objects/bytearray.go`. The mutable buffer is a Go `[]byte` with separate `alloc` tracking for over-allocation. `append`, `extend`, `insert`, `pop`, `remove` are implemented as Go slice operations. The buffer protocol exposes the slice directly via `objects.BufferFill`. `decode` delegates to `codecs.Decode`.

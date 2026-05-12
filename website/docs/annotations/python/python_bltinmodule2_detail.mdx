@@ -1,0 +1,187 @@
+---
+title: Python/bltinmodule.c (part 2)
+description: "bltinmodule.c part 2: sorted, min, max, sum, zip, map, filter, enumerate, reversed, iter, next, all, any."
+cpython_path: Python/bltinmodule.c
+cpython_version: "3.14"
+lines: 3000
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Python/bltinmodule.c" />
+
+This annotation covers the iterator-related builtins and aggregation functions. See `python_bltinmodule_detail` for `print`, `open`, `eval`, `exec`, `compile`, and `__import__`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-200 | `builtin_sorted` | `sorted()` — calls list(), then list.sort() |
+| 201-400 | `builtin_min`, `builtin_max` | Linear scan with key function support |
+| 401-600 | `builtin_sum` | Accumulate with optional start value |
+| 601-800 | `zip_new`, `zip_next` | Lazy zip iterator |
+| 801-1000 | `map_new`, `map_next` | Lazy map iterator |
+| 1001-1200 | `filter_new`, `filter_next` | Lazy filter iterator |
+| 1201-1400 | `enumerate_new`, `enumerate_next` | Counter + item pairs |
+| 1401-1600 | `builtin_reversed` | `reversed()` — calls `__reversed__` or falls back to sequence |
+| 1601-1800 | `builtin_iter`, `builtin_next` | `iter()` / `next()` with optional sentinel |
+| 1801-2000 | `builtin_all`, `builtin_any` | Short-circuit boolean tests |
+
+## Reading
+
+### `sorted`
+
+```c
+// CPython: Python/bltinmodule.c:72 builtin_sorted
+static PyObject *
+builtin_sorted(PyObject *self, PyObject *const *args, Py_ssize_t nargs,
+               PyObject *kwnames)
+{
+    PyObject *newlist = PySequence_List(iterable);
+    if (newlist == NULL) return NULL;
+    v = _PyObject_CallMethodIdOneArg(newlist, &PyId_sort, keyfunc);
+    ...
+    return newlist;
+}
+```
+
+`sorted()` creates a new list from the iterable then calls `.sort()` on it. The `key=` and `reverse=` arguments are forwarded to `.sort()`.
+
+### `min` / `max`
+
+```c
+// CPython: Python/bltinmodule.c:220 min_max
+static PyObject *
+min_max(PyObject *args, PyObject *kwds, int op)
+{
+    PyObject *it = PyObject_GetIter(v);
+    PyObject *val, *item, *maxitem = NULL;
+    while ((item = PyIter_Next(it)) != NULL) {
+        /* Apply key function if present */
+        val = (keyfunc != NULL) ? PyObject_CallOneArg(keyfunc, item) : item;
+        /* Compare val against running max/min */
+        if (maxitem == NULL || PyObject_RichCompareBool(val, maxval, op)) {
+            Py_XDECREF(maxitem);
+            maxitem = item;
+            maxval = val;
+        }
+        ...
+    }
+    return maxitem;
+}
+```
+
+### `zip`
+
+```c
+// CPython: Python/bltinmodule.c:620 zip_new
+static PyObject *
+zip_new(PyTypeObject *type, PyObject *args, PyObject *kwds)
+{
+    /* Store a tuple of iterators */
+    lz->ittuple = PyTuple_New(tuplesize);
+    for (i = 0; i < tuplesize; i++) {
+        PyObject *iter = PyObject_GetIter(PyTuple_GET_ITEM(args, i));
+        PyTuple_SET_ITEM(lz->ittuple, i, iter);
+    }
+    lz->strict = strict;
+    return (PyObject *)lz;
+}
+
+// CPython: Python/bltinmodule.c:680 zip_next
+static PyObject *
+zip_next(zipobject *lz)
+{
+    PyObject *result = PyTuple_New(tuplesize);
+    for (i = 0; i < tuplesize; i++) {
+        PyObject *it = PyTuple_GET_ITEM(lz->ittuple, i);
+        PyObject *item = (*Py_TYPE(it)->tp_iternext)(it);
+        if (item == NULL) {
+            /* strict mode: check all iterators exhausted */
+            ...
+            return NULL;
+        }
+        PyTuple_SET_ITEM(result, i, item);
+    }
+    return result;
+}
+```
+
+`zip(..., strict=True)` (Python 3.10+) raises `ValueError` if iterators have unequal lengths.
+
+### `enumerate`
+
+```c
+// CPython: Python/bltinmodule.c:1250 enumerate_next
+static PyObject *
+enumerate_next(enumobject *en)
+{
+    PyObject *next_index = en->en_index;  /* PyLong */
+    PyObject *next_item = PyIter_Next(en->en_sit);
+    if (next_item == NULL) return NULL;
+    /* Increment counter */
+    en->en_index = PyNumber_Add(next_index, _PyLong_GetOne());
+    return PyTuple_Pack(2, next_index, next_item);
+}
+```
+
+### `reversed`
+
+```c
+// CPython: Python/bltinmodule.c:1420 builtin_reversed
+static PyObject *
+builtin_reversed(PyObject *self, PyObject *seq)
+{
+    PyObject *reversed_meth = _PyObject_LookupSpecial(seq, &_Py_ID(__reversed__));
+    if (reversed_meth != NULL)
+        return PyObject_CallNoArgs(reversed_meth);
+    /* Fall back: need __len__ and __getitem__ */
+    ...
+    return PySeqIter_New(seq);
+}
+```
+
+### `iter` with sentinel
+
+```c
+// CPython: Python/bltinmodule.c:1620 builtin_iter
+static PyObject *
+builtin_iter(PyObject *self, PyObject *const *args, Py_ssize_t nargs)
+{
+    if (nargs == 1)
+        return PyObject_GetIter(args[0]);
+    /* Two-arg form: iter(callable, sentinel) */
+    if (!PyCallable_Check(args[0])) {
+        PyErr_SetString(PyExc_TypeError, "iter(v, w): v must be callable");
+        return NULL;
+    }
+    return PyCallIter_New(args[0], args[1]);
+}
+```
+
+`iter(f, sentinel)` calls `f()` repeatedly until it returns `sentinel`.
+
+### `all` / `any`
+
+```c
+// CPython: Python/bltinmodule.c:1850 builtin_all
+static PyObject *
+builtin_all(PyObject *self, PyObject *iterable)
+{
+    PyObject *it = PyObject_GetIter(iterable);
+    PyObject *item;
+    while ((item = PyIter_Next(it)) != NULL) {
+        int cmp = PyObject_IsTrue(item);
+        Py_DECREF(item);
+        if (cmp == 0) { Py_DECREF(it); Py_RETURN_FALSE; }  /* short-circuit */
+        if (cmp < 0)  { Py_DECREF(it); return NULL; }
+    }
+    Py_DECREF(it);
+    Py_RETURN_TRUE;
+}
+```
+
+## gopy notes
+
+`sorted` is in `vm/eval_simple.go` calling `objects.List` then `.Sort()`. `zip`, `map`, `filter`, `enumerate` are lazy iterator objects in `objects/`. `reversed` calls `__reversed__` or wraps a sequence in a reverse-index iterator. `iter(f, sentinel)` uses `objects.CallIter`. `all`/`any` short-circuit via `objects.IsTrue`.

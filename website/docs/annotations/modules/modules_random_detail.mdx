@@ -1,0 +1,132 @@
+---
+title: Modules/_randommodule.c
+description: "_randommodule.c: Mersenne Twister MT19937 PRNG — seed, genrand, random(), getrandbits(). Lib/random.py builds all higher-level functions on top."
+cpython_path: Modules/_randommodule.c
+cpython_version: "3.14"
+lines: 900
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/_randommodule.c" />
+
+`_random` exposes the Mersenne Twister (MT19937) PRNG as the `Random` type. `Lib/random.py` imports it and adds all the higher-level methods (`randint`, `choice`, `shuffle`, `gauss`, etc.).
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-100 | MT constants | N=624, M=397, matrix A, upper/lower mask |
+| 101-250 | `genrand_uint32` | Generate one 32-bit word, refill state when exhausted |
+| 251-400 | `Random_seed` | Seed from int, float, bytes, str, or `None` (OS entropy) |
+| 401-550 | `Random_random` | Generate a float in `[0.0, 1.0)` using 53 random bits |
+| 551-700 | `Random_getrandbits` | Arbitrary-width integer from k random bits |
+| 701-900 | State get/set | `getstate()`, `setstate()` — serialize 624-word MT state |
+
+## Reading
+
+### MT19937 state
+
+```c
+// CPython: Modules/_randommodule.c:58 RandomObject
+typedef struct {
+    PyObject_HEAD
+    int index;          /* next word to return; 624 = needs refill */
+    uint32_t state[N];  /* N=624 words of state */
+} RandomObject;
+```
+
+### `genrand_uint32`
+
+```c
+// CPython: Modules/_randommodule.c:112 genrand_uint32
+static uint32_t
+genrand_uint32(RandomObject *self)
+{
+    uint32_t y;
+    static uint32_t mag01[2] = {0, MATRIX_A};
+
+    if (self->index >= N) {
+        /* Generate N words at once (twist step) */
+        int kk;
+        for (kk = 0; kk < N - M; kk++) {
+            y = (self->state[kk] & UPPER_MASK) | (self->state[kk+1] & LOWER_MASK);
+            self->state[kk] = self->state[kk+M] ^ (y >> 1) ^ mag01[y & 0x1];
+        }
+        ...
+        self->index = 0;
+    }
+    y = self->state[self->index++];
+    /* Tempering */
+    y ^= (y >> 11);
+    y ^= (y << 7) & 0x9d2c5680UL;
+    y ^= (y << 15) & 0xefc60000UL;
+    y ^= (y >> 18);
+    return y;
+}
+```
+
+The twist recurrence has period 2^19937 - 1. Tempering improves the distribution of low-order bits.
+
+### `Random_random` — 53-bit float
+
+```c
+// CPython: Modules/_randommodule.c:430 Random_random
+static PyObject *
+Random_random(RandomObject *self, PyObject *Py_UNUSED(ignored))
+{
+    uint32_t a = genrand_uint32(self) >> 5;   /* 27 bits */
+    uint32_t b = genrand_uint32(self) >> 6;   /* 26 bits */
+    return PyFloat_FromDouble((a * 67108864.0 + b) * (1.0 / 9007199254740992.0));
+    /* 2^26 = 67108864, 2^53 = 9007199254740992 */
+}
+```
+
+Combines two MT words to get 53 random bits, matching a `double`'s mantissa width. This gives a uniform `[0.0, 1.0)` float.
+
+### `getrandbits`
+
+```c
+// CPython: Modules/_randommodule.c:570 Random_getrandbits
+static PyObject *
+Random_getrandbits(RandomObject *self, PyObject *args)
+{
+    int k;
+    PyArg_ParseTuple(args, "i:getrandbits", &k);
+    int words = (k + 31) / 32;
+    uint32_t *buf = (uint32_t *)PyMem_Malloc(words * sizeof(uint32_t));
+    for (int i = 0; i < words; i++)
+        buf[i] = genrand_uint32(self);
+    /* Mask the top word to exactly k bits */
+    buf[words-1] >>= (words * 32 - k);
+    PyObject *result = _PyLong_FromByteArray((unsigned char *)buf, ...);
+    PyMem_Free(buf);
+    return result;
+}
+```
+
+### Seeding
+
+```c
+// CPython: Modules/_randommodule.c:280 Random_seed
+static PyObject *
+Random_seed(RandomObject *self, PyObject *args)
+{
+    if (n == Py_None) {
+        /* Use OS entropy */
+        if (_PyOS_URandomNonblock(key, sizeof(key)) < 0) ...
+    } else {
+        /* Hash the seed object to get bytes, then init MT state */
+        ...
+    }
+    init_by_array(self, key, keylen);
+    Py_RETURN_NONE;
+}
+```
+
+`random.seed(None)` uses `os.urandom` for unpredictable seeding.
+
+## gopy notes
+
+`_random` is in `module/_functools/` — wait, it's `module/random/`. The MT state is a Go struct with `[624]uint32` and an index. `genrand_uint32` is a direct Go port. `Random_random` uses two 32-bit words shifted as above. `getrandbits` uses `math/big.Int.SetBytes` from the generated words. `seed(None)` calls `crypto/rand.Read`.
