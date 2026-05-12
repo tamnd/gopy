@@ -1,0 +1,104 @@
+---
+title: Lib/traceback.py (part 2)
+description: "Lib/traceback.py part 2: TracebackException, format_exc, print_exc, StackSummary.extract, chained exceptions."
+cpython_path: Lib/traceback.py
+cpython_version: "3.14"
+lines: 600
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/traceback.py" />
+
+This annotation covers structured traceback objects and chaining. See `lib_traceback_detail` for `format_tb`, `print_tb`, `extract_tb`, and `FrameSummary`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-100 | `TracebackException.__init__` | Capture `__cause__`, `__context__`, `__suppress_context__` |
+| 101-220 | `TracebackException.format` | Yield formatted strings including chained exceptions |
+| 221-360 | `StackSummary.extract` | Extract frame info from a traceback or `FrameInfo` list |
+| 361-500 | `format_exc` / `print_exc` | Convenience wrappers around `TracebackException` |
+| 501-600 | Exception notes | `__notes__` formatting (PEP 678) |
+
+## Reading
+
+### `TracebackException.__init__`
+
+```python
+# CPython: Lib/traceback.py:680 TracebackException.__init__
+class TracebackException:
+    def __init__(self, exc_type, exc_value, exc_tb, *,
+                 limit=None, lookup_lines=True, capture_locals=False,
+                 compact=False, _seen=None):
+        if _seen is None:
+            _seen = set()
+        _seen.add(id(exc_value))
+        # Capture chained exceptions
+        if exc_value and exc_value.__cause__ is not None and id(exc_value.__cause__) not in _seen:
+            cause = TracebackException(
+                type(exc_value.__cause__), exc_value.__cause__,
+                exc_value.__cause__.__traceback__, _seen=_seen)
+        else:
+            cause = None
+        self.__cause__ = cause
+        self.__context__ = ...  # Similar for __context__
+        self.stack = StackSummary.extract(
+            walk_tb(exc_tb), limit=limit, lookup_lines=lookup_lines,
+            capture_locals=capture_locals)
+        self.exc_type = exc_type
+        self._str = _safe_string(exc_value, 'exception')
+```
+
+The `_seen` set prevents infinite recursion for circular exception chains. `TracebackException` snapshots the exception at creation time, so the original exception and its traceback can be garbage-collected.
+
+### `TracebackException.format`
+
+```python
+# CPython: Lib/traceback.py:820 TracebackException.format
+def format(self, *, chain=True):
+    """Format the exception, including chained exceptions."""
+    if chain:
+        if self.__cause__ is not None:
+            yield from self.__cause__.format(chain=chain)
+            yield _cause_message  # "The above exception was the direct cause..."
+        elif (self.__context__ is not None and
+              not self.__suppress_context__):
+            yield from self.__context__.format(chain=chain)
+            yield _context_message  # "During handling of the above exception..."
+    yield from self.format_stack()
+    yield from self.format_exception_only()
+```
+
+The recursive `format` call traverses the chain before the current exception. `__cause__` (from `raise X from Y`) prints "direct cause"; `__context__` (from implicit chaining) prints "during handling of".
+
+### `StackSummary.extract`
+
+```python
+# CPython: Lib/traceback.py:560 StackSummary.extract
+@classmethod
+def extract(cls, frame_gen, *, limit=None, lookup_lines=True,
+            capture_locals=False):
+    """Create a StackSummary from a frame generator (walk_stack or walk_tb)."""
+    result = cls()
+    fnames = set()
+    for frame, lineno in islice(frame_gen, limit):
+        co = frame.f_code
+        filename = co.co_filename
+        name = co.co_qualname
+        fnames.add(filename)
+        result.append(FrameSummary(filename, lineno, name,
+                                   lookup_line=lookup_lines,
+                                   locals=frame.f_locals if capture_locals else None))
+    for filename in fnames:
+        linecache.checkcache(filename)
+    return result
+```
+
+`capture_locals=True` snapshots `frame.f_locals` at each frame, enabling post-mortem inspection. `linecache.checkcache` ensures source lines are fresh.
+
+## gopy notes
+
+`TracebackException` is `module/traceback.TracebackException` in `module/traceback/module.go`. The exception chain is walked using `objects.ExceptionCause` and `objects.ExceptionContext`. `StackSummary.extract` uses `vm.WalkTB` to iterate frames. `format` yields formatted strings via a Go channel-based iterator.

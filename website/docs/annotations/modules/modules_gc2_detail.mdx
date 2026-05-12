@@ -1,0 +1,102 @@
+---
+title: Modules/gcmodule.c (part 2)
+description: "Modules/gcmodule.c part 2: gc.collect, generation promotion, unreachable detection, finalizer ordering, gc.get_stats."
+cpython_path: Modules/gcmodule.c
+cpython_version: "3.14"
+lines: 600
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/gcmodule.c" />
+
+This annotation covers the cyclic GC collection algorithm. See `modules_gc_detail` for generation layout, `gc_collect_main` entry, reference count manipulation, and `gc.enable`/`gc.disable`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-100 | `gc.collect` entry | Trigger a full collection of the given generation |
+| 101-220 | `move_unreachable` | Identify unreachable objects by tracing strong references |
+| 221-360 | Finalizer handling | Move objects with `__del__` to `gc.garbage` or run finalizers |
+| 361-480 | Generation promotion | Move surviving objects to the next older generation |
+| 481-600 | `gc.get_stats` | Return per-generation collection statistics |
+
+## Reading
+
+### `move_unreachable`
+
+```c
+// CPython: Modules/gcmodule.c:580 move_unreachable
+static void
+move_unreachable(PyGC_Head *young, PyGC_Head *unreachable)
+{
+    /* Phase 1: Subtract internal references (decrement gc_refs for each
+       object pointed to within the generation). */
+    PyGC_Head *gc = GC_NEXT(young);
+    while (gc != young) {
+        gc->_gc_prev |= PREV_MASK_COLLECTING;
+        /* Visit all objects referenced by gc and decrement their gc_refs */
+        traverseproc traverse = Py_TYPE(FROM_GC(gc))->tp_traverse;
+        traverse(FROM_GC(gc), visit_decref, NULL);
+        gc = GC_NEXT(gc);
+    }
+    /* Phase 2: Objects with gc_refs > 0 are reachable from outside.
+       Move those with gc_refs == 0 to unreachable. */
+    gc = GC_NEXT(young);
+    while (gc != young) {
+        if (_PyGCHead_REFS(gc) == 0) {
+            gc_list_move(gc, unreachable);
+        } else {
+            gc_list_move(gc, still_reachable);
+        }
+        gc = GC_NEXT(gc);
+    }
+}
+```
+
+The two-phase algorithm: first subtract internal references (so only external references keep `gc_refs > 0`), then separate reachable from unreachable. Objects in cycles have `gc_refs == 0` after subtraction.
+
+### Finalizer handling
+
+```c
+// CPython: Modules/gcmodule.c:760 handle_legacy_finalizers
+static void
+handle_legacy_finalizers(PyThreadState *tstate,
+                          GCState *gcstate,
+                          PyGC_Head *finalizers,
+                          PyGC_Head *old)
+{
+    /* Objects with __del__ that are part of a reference cycle cannot
+       be safely finalized: we don't know what order to call __del__.
+       Move them to gc.garbage (the legacy behavior). */
+    PyGC_Head *gc;
+    for (gc = GC_NEXT(finalizers); gc != finalizers; gc = GC_NEXT(gc)) {
+        PyList_Append(gcstate->garbage, FROM_GC(gc));
+    }
+    gc_list_merge(finalizers, old);
+}
+```
+
+Cyclic garbage with `__del__` is moved to `gc.garbage` — a global list that the programmer must manually clear. `weakref.finalize` avoids this issue because it does not use `__del__`.
+
+### Generation promotion
+
+```c
+// CPython: Modules/gcmodule.c:880 gc_collect_main
+/* After collection, survivors are promoted:
+   gen0 survivors -> gen1, gen1 survivors -> gen2.
+   gen2 is only collected when gen1 collection count >= threshold[1]. */
+gc_list_merge(young, old);
+gcstate->generations[generation].count = 0;
+for (int i = 0; i < generation; i++) {
+    gcstate->generations[i].count = 0;
+}
+```
+
+The generational hypothesis: most objects die young. Generation 0 is collected most frequently (every `threshold[0]` allocations). Gen1 is collected when gen0 collection count reaches `threshold[1]`, etc.
+
+## gopy notes
+
+`gc.collect` is `module/gc.Collect` in `module/gc/module.go`. `move_unreachable` is `gc.MoveUnreachable` in `objects/gc.go`. The traversal uses Go's reflect-based graph walk via `objects.Traverse`. Finalizer handling calls `objects.ClearWeakRefs` then invokes `__del__` in a deferred manner. Generation thresholds are configurable via `gc.set_threshold`.

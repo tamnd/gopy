@@ -1,0 +1,94 @@
+---
+title: Lib/pdb.py (part 2)
+description: "Lib/pdb.py part 2: Pdb.do_next, do_step, do_break, do_continue, do_print, settrace interaction."
+cpython_path: Lib/pdb.py
+cpython_version: "3.14"
+lines: 600
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/pdb.py" />
+
+This annotation covers pdb command implementations. See `lib_pdb_detail` for `Pdb.__init__`, `set_trace`, the `cmd.Cmd` base class, and breakpoint management.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-100 | `Pdb.do_next` (`n`) | Step over; continue until the next line in current frame |
+| 101-220 | `Pdb.do_step` (`s`) | Step into; stop at the next line in any frame |
+| 221-360 | `Pdb.do_break` (`b`) | Set a breakpoint at a line or function |
+| 361-480 | `Pdb.do_continue` (`c`) | Resume execution; clear step flags |
+| 481-600 | `Pdb.do_print` (`p`) | Evaluate and print an expression in the current frame |
+
+## Reading
+
+### `Pdb.do_next`
+
+```python
+# CPython: Lib/pdb.py:1580 Pdb.do_next
+def do_next(self, arg):
+    """n(ext): Continue execution until the next line in the current frame."""
+    if arg:
+        self._next_count = int(arg)
+    self.set_next(self.curframe)
+    return 1  # Signal cmdloop to return (resume execution)
+
+def set_next(self, frame):
+    """Stop on the next line in the given frame or any frame that returns to it."""
+    self.stopframe = frame
+    self.returnframe = frame
+    self.set_step()
+    frame.f_trace_lines = True
+```
+
+`set_next` sets `stopframe` so that `trace_dispatch` stops only when execution returns to the current frame or advances a line within it. The trace function is set to `line` mode only for the target frame.
+
+### `Pdb.do_break`
+
+```python
+# CPython: Lib/pdb.py:1040 Pdb.do_break
+def do_break(self, arg, temporary=False):
+    """b(reak) [loc [, condition]]: Set a breakpoint."""
+    ...
+    # Parse filename:lineno or function name
+    bp = self.set_break(filename, lineno, temporary, cond, funcname)
+    if isinstance(bp, str):  # Error message
+        self.error(bp)
+    else:
+        self.message(f"Breakpoint {bp.number} at {filename}:{lineno}")
+```
+
+Breakpoints are stored in `bdb.Breakpoint.bplist` (a dict keyed by `(filename, lineno)`). The trace function checks `bdb.effective` on each `line` event to see if any breakpoint is hit.
+
+### `Pdb.do_print`
+
+```python
+# CPython: Lib/pdb.py:1780 Pdb.do_print
+def do_print(self, arg):
+    """p expression: Print the value of the expression."""
+    if not arg:
+        self.error('Missing argument to print command')
+        return
+    try:
+        val = self._getval(arg)
+    except:
+        return  # Error already printed
+    self.message(repr(val))
+
+def _getval(self, arg):
+    try:
+        return eval(arg, self.curframe.f_globals, self.curframe_locals)
+    except:
+        exc = sys.exception()
+        self.error(traceback.format_exception_only(exc)[-1].strip())
+        raise
+```
+
+`p expr` evaluates `expr` in `curframe.f_globals` and `curframe_locals` (the latter calls `_PyFrame_FastToLocals`). Exceptions during eval are caught and displayed without crashing pdb.
+
+## gopy notes
+
+`pdb` is not yet fully ported in gopy. `set_trace()` is `module/pdb.SetTrace` in `module/pdb/module.go`, which installs `vm.TraceFunction`. `do_next`/`do_step` set `vm.Frame.StopFrame`. `do_break` stores breakpoints in `module/bdb.BreakpointList`. `do_print` calls `vm.EvalExpr` in the current frame's namespace.

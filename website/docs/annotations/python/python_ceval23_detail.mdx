@@ -1,0 +1,101 @@
+---
+title: Python/ceval.c (part 23)
+description: "Python/ceval.c part 23: WITH_EXCEPT_START, PUSH_EXC_INFO, RERAISE, CLEANUP_THROW, exception table lookup."
+cpython_path: Python/ceval.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Python/ceval.c" />
+
+This annotation covers exception handling and context manager opcodes. See `python_ceval22_detail` for attribute access specializations.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `PUSH_EXC_INFO` | Save active exception; push new exc onto the exception stack |
+| 81-180 | `WITH_EXCEPT_START` | Call `__exit__` with current exception info |
+| 181-300 | `RERAISE` | Re-raise the current exception (possibly with lasti adjustment) |
+| 301-420 | `CLEANUP_THROW` | Handle `throw()` into a generator; unwrap `StopIteration` |
+| 421-500 | Exception table lookup | Map bytecode offset to handler target offset |
+
+## Reading
+
+### `PUSH_EXC_INFO`
+
+```c
+// CPython: Python/ceval.c:3820 PUSH_EXC_INFO
+inst(PUSH_EXC_INFO, (new_exc -- prev_exc, new_exc)) {
+    _PyErr_StackItem *exc_info = tstate->exc_info;
+    if (exc_info->current_exception != NULL) {
+        prev_exc = exc_info->current_exception;
+    } else {
+        prev_exc = Py_None;
+        Py_INCREF(prev_exc);
+    }
+    ASSERT_EXC_TYPE_IS_REDUNDANT(new_exc, stack_pointer[-2]);
+    Py_INCREF(new_exc);
+    exc_info->current_exception = new_exc;
+}
+```
+
+`PUSH_EXC_INFO` is generated at each `except` block entry. It saves the current active exception and installs the new one. The stack now contains `(prev_exc, new_exc)`. At `except` block exit, `POP_EXCEPT` restores `prev_exc`.
+
+### `WITH_EXCEPT_START`
+
+```c
+// CPython: Python/ceval.c:3920 WITH_EXCEPT_START
+inst(WITH_EXCEPT_START, (exit_func, lasti, exc --  exit_func, lasti, exc, res)) {
+    /* Call exit_func(type(exc), exc, exc.__traceback__) */
+    PyObject *tp, *val, *tb;
+    if (exc == Py_None) { tp = val = tb = Py_None; }
+    else { tp = (PyObject *)Py_TYPE(exc); val = exc; tb = PyException_GetTraceback(exc); }
+    res = PyObject_CallFunctionObjArgs(exit_func, tp, val, tb, NULL);
+    Py_XDECREF(tb);
+}
+```
+
+`with ctx:` at exception exit calls `ctx.__exit__(type, value, traceback)`. If `__exit__` returns truthy, the exception is suppressed. `WITH_EXCEPT_START` is only reached when an exception escapes the `with` body.
+
+### `RERAISE`
+
+```c
+// CPython: Python/ceval.c:4000 RERAISE
+inst(RERAISE, (val --)) {
+    /* oparg: 0 = reraise current exc, 1 = reraise and update lasti */
+    assert(oparg == 0 || oparg == 1);
+    if (oparg) {
+        frame->f_lasti = Py_SAFE_DOWNCAST(INSTR_OFFSET(), Py_ssize_t, int);
+    }
+    PyObject *exc = val;
+    assert(PyExceptionInstance_Check(exc));
+    _PyErr_SetRaisedException(tstate, Py_NewRef(exc));
+    goto exception_unwind;
+}
+```
+
+`raise` with no argument inside an `except` block compiles to `RERAISE`. The `oparg=1` variant (used in `finally`) updates `f_lasti` so the traceback shows the correct line.
+
+### Exception table lookup
+
+```c
+// CPython: Python/ceval.c:4180 exception_unwind
+exception_unwind:
+    /* Scan the exception table for a handler covering the current offset */
+    for each entry in co->co_exceptiontable:
+        if entry.start <= current_offset < entry.end:
+            /* Jump to entry.target; push lasti, the current exc, etc. */
+            goto handle_exception;
+    /* No handler: unwind this frame and propagate */
+    return NULL;
+```
+
+The exception table replaces the old block stack. It maps bytecode ranges to handler offsets in a compact format. `compile.py` generates entries for `try`/`except`, `try`/`finally`, `with`, and `for`/`while` `else` clauses.
+
+## gopy notes
+
+`PUSH_EXC_INFO` is `vm.PushExcInfo` in `vm/eval_gen.go`. `WITH_EXCEPT_START` calls `objects.CallFunctionObjArgs(exitFunc, tp, val, tb)`. `RERAISE` is `vm.Reraise`. Exception table scanning is `vm.FindHandler` in `vm/eval_unwind.go`.

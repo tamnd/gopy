@@ -1,0 +1,136 @@
+---
+title: Modules/_threadmodule.c (part 2)
+description: "Modules/_threadmodule.c part 2: threading.Thread.run, Thread.join, threading.local, RLock, Condition.wait."
+cpython_path: Modules/_threadmodule.c
+cpython_version: "3.14"
+lines: 600
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/_threadmodule.c" />
+
+This annotation covers the high-level threading API. See `modules_threading_detail` for `threading.Thread.__init__`, the GIL, `_start_new_thread`, and `thread.Lock`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-100 | `Thread.start` / `Thread.run` | Start and execute the target function in a new OS thread |
+| 101-220 | `Thread.join` | Wait for a thread to finish; timeout support |
+| 221-360 | `threading.local` | Thread-local storage: per-thread `__dict__` |
+| 361-480 | `RLock` | Re-entrant lock: same thread can acquire multiple times |
+| 481-600 | `Condition.wait` | Release lock, wait for notify, re-acquire |
+
+## Reading
+
+### `Thread.start`
+
+```python
+# CPython: Lib/threading.py:940 Thread.start
+def start(self):
+    """Start the thread's activity."""
+    with _active_limbo_lock:
+        _limbo[self] = self
+    try:
+        _start_new_thread(self._bootstrap, ())
+    except Exception:
+        with _active_limbo_lock:
+            del _limbo[self]
+        raise
+    self._started.wait()
+
+def _bootstrap_inner(self):
+    try:
+        self.run()
+    except:
+        ...
+    finally:
+        with _active_limbo_lock:
+            _active[get_ident()] = self
+```
+
+`start()` calls `_start_new_thread` (the C-level `_thread.start_new_thread`). The thread is in `_limbo` until it actually starts running; then it moves to `_active`. `self._started` is an `Event` signaled from `_bootstrap`.
+
+### `threading.local`
+
+```c
+// CPython: Modules/_threadmodule.c:420 local_getattro
+static PyObject *
+local_getattro(localobject *self, PyObject *name)
+{
+    /* Get the per-thread dict for the current thread */
+    PyObject *ldict = _ldict(self);
+    if (ldict == NULL) return NULL;
+    return PyObject_GenericGetAttr((PyObject *)ldict, name);
+}
+
+static PyObject *
+_ldict(localobject *self)
+{
+    PyObject *tdict = PyThreadState_GetDict();  /* Per-thread dict */
+    PyObject *ldict = PyDict_GetItem(tdict, self->key);
+    if (ldict == NULL) {
+        ldict = PyDict_New();
+        PyDict_SetItem(tdict, self->key, ldict);
+        /* Call __init__ if first access in this thread */
+    }
+    return ldict;
+}
+```
+
+`threading.local()` stores per-thread data in `PyThreadState_GetDict()`, keyed by a unique object ID. Each thread sees its own `ldict`. The first access in a new thread calls `__init__` with the original arguments.
+
+### `RLock`
+
+```c
+// CPython: Modules/_threadmodule.c:680 rlock_acquire
+static PyObject *
+rlock_acquire(rlockobject *self, PyObject *args, PyObject *kwds)
+{
+    unsigned long tid = PyThread_get_thread_ident();
+    if (self->rlock_count > 0 && self->rlock_owner == tid) {
+        /* Re-entrant: same thread can acquire again */
+        self->rlock_count++;
+        Py_RETURN_TRUE;
+    }
+    /* Acquire underlying lock */
+    int r = PyThread_acquire_lock_timed(self->rlock_lock, ...);
+    if (r) {
+        self->rlock_owner = tid;
+        self->rlock_count = 1;
+    }
+    return PyBool_FromLong(r);
+}
+```
+
+`RLock.acquire()` by the owning thread increments a counter without blocking. `release()` decrements the counter; the lock is released to other threads when the count reaches 0.
+
+### `Condition.wait`
+
+```python
+# CPython: Lib/threading.py:338 Condition.wait
+def wait(self, timeout=None):
+    """Wait until notified or timeout occurs."""
+    waiter = _allocate_lock()
+    waiter.acquire()
+    self._waiters.append(waiter)
+    saved_state = self._release_save()  # Release underlying lock
+    gotit = False
+    try:
+        if timeout is None:
+            waiter.acquire()  # Block until notify releases this waiter
+            gotit = True
+        else:
+            gotit = waiter.acquire(True, timeout)
+        return gotit
+    finally:
+        self._acquire_restore(saved_state)  # Re-acquire underlying lock
+```
+
+`Condition.wait` atomically releases the condition's lock and blocks on a new per-waiter lock. `notify()` releases one waiter lock; `notify_all()` releases all. The GIL is released during the blocking `acquire`.
+
+## gopy notes
+
+`Thread.start` is `module/threading.Thread.Start` in `module/threading/module.go`. It launches a goroutine. `threading.local` uses a `sync.Map` keyed by goroutine ID (obtained via `runtime.Stack`). `RLock` is `module/threading.RLock` backed by `sync.Mutex` plus an owner goroutine ID and count. `Condition.wait` uses `sync.Cond`.

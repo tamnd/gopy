@@ -1,0 +1,88 @@
+---
+title: Objects/cellobject.c (part 2)
+description: "Objects/cellobject.c part 2: cell creation in MAKE_CELL, COPY_FREE_VARS, cell sharing between closures, cell deref."
+cpython_path: Objects/cellobject.c
+cpython_version: "3.14"
+lines: 300
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Objects/cellobject.c" />
+
+This annotation covers cell creation and closure wiring. See `objects_cellobject_detail` for `PyCell_New`, `PyCell_GET`/`PyCell_SET`, and the `PyCellObject` struct.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `MAKE_CELL` opcode | Convert a local variable into a cell at function entry |
+| 81-180 | `COPY_FREE_VARS` opcode | Copy free variables from the closure into the frame's cell array |
+| 181-300 | Deref ops | `LOAD_DEREF`, `STORE_DEREF`, `DELETE_DEREF` |
+
+## Reading
+
+### `MAKE_CELL`
+
+```c
+// CPython: Python/ceval.c:820 MAKE_CELL
+inst(MAKE_CELL, (--)) {
+    /* Convert localsplus[oparg] from a direct value to a cell.
+       Called at function entry for each CO_FAST_CELL variable. */
+    PyObject *val = GETLOCAL(oparg);
+    PyObject *cell = PyCell_New(val);
+    if (cell == NULL) ERROR_IF(true, error);
+    Py_XDECREF(val);
+    SETLOCAL(oparg, cell);
+}
+```
+
+`MAKE_CELL` is emitted for every local variable that is captured by an inner function. It wraps the existing value (which may be a parameter) in a new `PyCellObject`. This happens at function entry, before any user code runs.
+
+### `COPY_FREE_VARS`
+
+```c
+// CPython: Python/ceval.c:860 COPY_FREE_VARS
+inst(COPY_FREE_VARS, (--)) {
+    /* oparg = number of free variables.
+       Copy cells from the closure tuple (passed as __closure__)
+       into the frame's localsplus at the free variable positions. */
+    PyObject *closure = frame->f_func->func_closure;
+    int offset = frame->f_code->co_nlocalsplus - oparg;
+    for (int i = 0; i < oparg; i++) {
+        PyObject *o = PyTuple_GET_ITEM(closure, i);
+        frame->localsplus[offset + i] = Py_NewRef(o);
+    }
+}
+```
+
+`COPY_FREE_VARS` runs at the start of every closure call. It populates the frame's free variable slots from `func.__closure__`. The same `PyCellObject` is shared between the outer and inner frame, so `STORE_DEREF` in the inner function is visible to the outer via `LOAD_DEREF`.
+
+### `LOAD_DEREF` / `STORE_DEREF`
+
+```c
+// CPython: Python/ceval.c:1200 LOAD_DEREF
+inst(LOAD_DEREF, (-- value)) {
+    PyObject *cell = GETLOCAL(oparg);
+    value = PyCell_GET(cell);
+    if (value == NULL) {
+        _PyEval_FormatExcUnbound(tstate, frame->f_code, oparg);
+        ERROR_IF(true, error);
+    }
+    Py_INCREF(value);
+}
+
+inst(STORE_DEREF, (v --)) {
+    PyObject *cell = GETLOCAL(oparg);
+    PyObject *oldobj = PyCell_GET(cell);
+    PyCell_SET(cell, v);
+    Py_XDECREF(oldobj);
+}
+```
+
+`LOAD_DEREF` reads through the cell pointer. If the cell is empty (the local was deleted or not yet assigned), `NameError` is raised with a "free variable referenced before assignment" message.
+
+## gopy notes
+
+`MAKE_CELL` is `vm.MakeCell` in `vm/eval_gen.go`. It calls `objects.NewCell(val)`. `COPY_FREE_VARS` is `vm.CopyFreeVars`, copying cell pointers from `objects.FunctionObject.Closure`. `LOAD_DEREF`/`STORE_DEREF` call `objects.CellGet`/`objects.CellSet`.

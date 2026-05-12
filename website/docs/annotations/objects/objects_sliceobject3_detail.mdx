@@ -1,0 +1,101 @@
+---
+title: Objects/sliceobject.c (part 3)
+description: "Objects/sliceobject.c part 3: slice.indices, PySlice_GetIndicesEx, slice cache, slice.__reduce__, EllipsisType."
+cpython_path: Objects/sliceobject.c
+cpython_version: "3.14"
+lines: 400
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Objects/sliceobject.c" />
+
+This annotation covers slice indices computation and caching. See `objects_sliceobject2_detail` for `slice.__new__`, `__repr__`, and `__eq__`, and `objects_sliceobject_detail` for the `PySliceObject` struct.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-100 | `slice.indices` | Compute concrete start/stop/step for a given length |
+| 101-220 | `PySlice_GetIndicesEx` | C API equivalent; used by sequence types |
+| 221-320 | Slice cache | Cache `None`-start/stop/step slices for reuse |
+| 321-400 | `EllipsisType` | `...` singleton and its type |
+
+## Reading
+
+### `slice.indices`
+
+```c
+// CPython: Objects/sliceobject.c:380 slice_indices
+static PyObject *
+slice_indices(PySliceObject *r, PyObject *seq)
+{
+    Py_ssize_t length = PyNumber_AsSsize_t(seq, PyExc_OverflowError);
+    Py_ssize_t start, stop, step, slicelength;
+    if (PySlice_GetIndicesEx(r, length, &start, &stop, &step, &slicelength) < 0)
+        return NULL;
+    return Py_BuildValue("(nnn)", start, stop, step);
+}
+```
+
+`slice(None, -1, 2).indices(10)` returns `(0, 9, 2)`. Negative indices are resolved relative to `length`; `None` becomes `0` or `length` depending on the direction of `step`.
+
+### `PySlice_GetIndicesEx`
+
+```c
+// CPython: Objects/sliceobject.c:280 PySlice_GetIndicesEx
+int
+PySlice_GetIndicesEx(PyObject *_r, Py_ssize_t length,
+                     Py_ssize_t *start, Py_ssize_t *stop,
+                     Py_ssize_t *step, Py_ssize_t *slicelength)
+{
+    /* Clamp start/stop to [0, length], resolve None, handle negative step. */
+    if (r->step == Py_None) {
+        *step = 1;
+    } else {
+        *step = PyNumber_AsSsize_t(r->step, PyExc_OverflowError);
+        if (*step == 0) { PyErr_SetString(...); return -1; }
+    }
+    /* ... clamp start and stop ... */
+    *slicelength = (*stop - *start + (*step - ((*step > 0) ? 1 : -1))) / *step;
+    if (*slicelength < 0) *slicelength = 0;
+    return 0;
+}
+```
+
+`PySlice_GetIndicesEx` is called by `list.__getitem__`, `bytes.__getitem__`, and any type that implements `sq_slice`. It handles the edge cases: step=0, negative indices, and out-of-range bounds.
+
+### Slice cache
+
+```c
+// CPython: Objects/sliceobject.c:140 slice interning
+/* CPython interns slices with all-None fields:
+   slice(None, None, None) == _Py_SLICE_NONE_NONE_NONE.
+   This is the "full slice" [:] used by NumPy and others. */
+static PySliceObject *noneobj_slice = NULL;  /* Initialized in _PySlice_Init */
+```
+
+`np.array[:]` creates a slice every call. CPython interns `slice(None, None, None)` to avoid repeated allocation for the most common case. Custom `__getitem__` implementations can check `s is slice(None)` (which is the interned singleton) as a fast path.
+
+### `EllipsisType`
+
+```c
+// CPython: Objects/sliceobject.c:480 EllipsisType
+/* The Ellipsis singleton (...) has type ellipsis.
+   Used by NumPy for multi-dimensional indexing: arr[..., 0]
+   and by type hints: Tuple[int, ...] */
+PyTypeObject PyEllipsis_Type = {
+    PyVarObject_HEAD_INIT(&PyType_Type, 0)
+    "ellipsis",
+    0,
+    ...
+};
+PyObject _Py_EllipsisObject = {_PyObject_EXTRA_INIT 1, &PyEllipsis_Type};
+```
+
+`...` is a singleton. `type(...)` is `<class 'ellipsis'>`. In type hints, `Callable[..., int]` means "callable with any arguments returning int". In NumPy, `a[..., 0]` selects the first element along the last axis.
+
+## gopy notes
+
+`slice.indices` is `objects.SliceIndices` in `objects/slice.go`. `PySlice_GetIndicesEx` is `objects.SliceGetIndicesEx`, used by `objects.ListGetSlice` and `objects.BytesGetSlice`. The None-None-None slice is a package-level singleton in `objects/slice.go`. `EllipsisType` is `objects.Ellipsis`.

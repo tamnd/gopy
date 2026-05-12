@@ -1,0 +1,106 @@
+---
+title: Python/compile.c (part 5)
+description: "Python/compile.c part 5: comprehension compilation, lambda compilation, match statement (MATCH_CLASS, MATCH_KEYS), exception table emission."
+cpython_path: Python/compile.c
+cpython_version: "3.14"
+lines: 700
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Python/compile.c" />
+
+This annotation covers special statement forms. See `python_compile4_detail` for `for`/`while`/`with`, `python_compile3_detail` for function/class, and `python_compile2_detail` for imports and assignments.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-100 | Comprehension compilation | List/set/dict/generator in implicit function scopes |
+| 101-240 | Lambda compilation | Single-expression function; no `RETURN_VALUE` |
+| 241-380 | `match` statement | Pattern matching: `MATCH_CLASS`, `MATCH_KEYS`, `MATCH_MAPPING` |
+| 381-500 | Exception table emission | `compiler_push_fblock` / `compiler_pop_fblock` |
+| 501-700 | `COPY_FREE_VARS` emission | Emit at function entry for closures |
+
+## Reading
+
+### Comprehension compilation
+
+```c
+// CPython: Python/compile.c:5180 compiler_listcomp
+static int
+compiler_listcomp(struct compiler *c, expr_ty e)
+{
+    /* Emit a call to a freshly-compiled implicit function.
+       The outermost iterator is evaluated HERE (in the enclosing scope),
+       passed as the single argument. */
+    _Py_IDENTIFIER(<listcomp>);
+    return compiler_comprehension(c, e, COMP_LISTCOMP,
+                                   &PyId__listcomp, e->v.ListComp.generators,
+                                   e->v.ListComp.elt, NULL);
+}
+
+static int
+compiler_comprehension(struct compiler *c, expr_ty e, int type,
+                        _Py_Identifier *name, asdl_comprehension_seq *generators,
+                        expr_ty elt, expr_ty val)
+{
+    /* 1. Compile the implicit function */
+    compiler_enter_scope(c, name, COMPILER_SCOPE_COMPREHENSION, ...);
+    /* ... emit RESUME, loop body with LIST_APPEND/SET_ADD/MAP_ADD ... */
+    compiler_exit_scope(c);
+    /* 2. In outer scope: evaluate outermost iter, MAKE_FUNCTION, CALL */
+    VISIT(c, expr, outermost_iter);
+    compiler_make_closure(c, co, 0, NULL);
+    ADDOP_I(c, CALL, 1);
+}
+```
+
+`[x*2 for x in range(10)]` compiles to an inner function call. The inner function receives `range(10)` as its argument. `LIST_APPEND` accumulates results into a list that is returned.
+
+### `match` statement
+
+```c
+// CPython: Python/compile.c:6240 compiler_match_inner (MATCH_CLASS)
+/* case Point(x, y): compiles to:
+   MATCH_CLASS subject nargs=2 names=('x','y')
+     -> pushes (matched_bool, extracted_tuple)
+   UNPACK_SEQUENCE 2
+   STORE_FAST x
+   STORE_FAST y */
+static int
+compiler_pattern_class(struct compiler *c, pattern_ty p,
+                        pattern_context *pc)
+{
+    ADDOP_LOAD_CONST(c, p->v.MatchClass.kwd_attrs);  /* ('x', 'y') */
+    ADDOP_I(c, MATCH_CLASS, PyList_GET_SIZE(p->v.MatchClass.patterns));
+    ...
+}
+```
+
+`MATCH_CLASS` calls `type.__match_args__` and `type.__match_class__` (or falls back to `__dict__`). It returns a tuple of matched attributes or `None` on mismatch.
+
+### Exception table emission
+
+```c
+// CPython: Python/compile.c:3820 compiler_push_fblock
+static int
+compiler_push_fblock(struct compiler *c, enum fblocktype t,
+                     jump_target_label block_label, ...)
+{
+    /* Record (start, target, depth, type) for exception table generation.
+       On compiler_pop_fblock, emit the range into co_exceptiontable. */
+    struct fblockinfo *f = &c->u->u_fblock[c->u->u_nfblocks++];
+    f->fb_type = t;
+    f->fb_block = block_label;
+    f->fb_start = c->u->u_offset;
+    ...
+}
+```
+
+Every `try` block, `with` statement, and `for`/`while` loop pushes an fblock. At `compiler_pop_fblock`, a range `[start, current_offset)` is emitted to the exception table pointing to the handler label. This replaces the old `SETUP_FINALLY`/`SETUP_WITH` pseudo-instructions.
+
+## gopy notes
+
+Comprehension compilation is `compile.CompilerListComp` in `compile/codegen_expr.go`. The implicit function is compiled as a nested `CodeObject`. `match` pattern compilation is `compile.CompilerMatchClass`. Exception table emission uses `compile.PushFBlock`/`compile.PopFBlock` in `compile/codegen_stmt.go`.
