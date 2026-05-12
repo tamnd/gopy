@@ -1,3 +1,5 @@
+//go:build !windows
+
 // Package _socket is the gopy port of CPython's _socket C module.
 // It backs Lib/socket.py with the low-level socket API using Go's
 // syscall package for fd-based operations that mirror the C code 1:1.
