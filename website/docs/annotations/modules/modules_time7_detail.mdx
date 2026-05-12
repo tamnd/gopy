@@ -1,0 +1,125 @@
+---
+title: Modules/timemodule.c (part 7)
+description: "timemodule.c part 7: time.sleep, time.monotonic, time.perf_counter, time.process_time."
+cpython_path: Modules/timemodule.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/timemodule.c" />
+
+This annotation covers high-resolution timers and `sleep`. See `modules_time6_detail` for `time.time`, `time.gmtime`, `time.mktime`, and `time.strftime`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `time.sleep` | Sleep with signal safety |
+| 81-160 | `time.monotonic` | Monotonically increasing clock |
+| 161-240 | `time.perf_counter` | Highest-resolution clock for benchmarking |
+| 241-360 | `time.process_time` | CPU time used by the process |
+| 361-500 | `time.get_clock_info` | Metadata about each clock |
+
+## Reading
+
+### `time.sleep`
+
+```c
+// CPython: Modules/timemodule.c:480 pysleep
+static int
+pysleep(_PyTime_t timeout)
+{
+    _PyTime_t deadline = _PyTime_Add(_PyTime_GetMonotonicClock(), timeout);
+    do {
+        /* Check for signals between sleep intervals */
+        if (Py_MakePendingCalls() < 0) return -1;
+        _PyTime_t remaining = _PyTime_Add(deadline,
+                                          -_PyTime_GetMonotonicClock());
+        if (remaining <= 0) return 0;
+        /* Platform sleep */
+#ifdef MS_WINDOWS
+        DWORD ms = (DWORD)_PyTime_AsMilliseconds(remaining, _PyTime_ROUND_CEILING);
+        Py_BEGIN_ALLOW_THREADS
+        Sleep(ms);
+        Py_END_ALLOW_THREADS
+#else
+        struct timespec ts;
+        _PyTime_AsTimespec(remaining, &ts);
+        Py_BEGIN_ALLOW_THREADS
+        clock_nanosleep(CLOCK_MONOTONIC, 0, &ts, NULL);
+        Py_END_ALLOW_THREADS
+#endif
+    } while (1);
+}
+```
+
+`time.sleep(1.5)` releases the GIL via `Py_BEGIN_ALLOW_THREADS` while sleeping. If a signal arrives and interrupts the sleep, `Py_MakePendingCalls` processes it and the loop recalculates the remaining time against the deadline.
+
+### `time.monotonic`
+
+```c
+// CPython: Modules/timemodule.c:620 time_monotonic
+static PyObject *
+time_monotonic(PyObject *self, PyObject *unused)
+{
+    _PyTime_t t = _PyTime_GetMonotonicClock();
+    return _PyTime_AsFloat(t);
+}
+```
+
+`time.monotonic()` uses `clock_gettime(CLOCK_MONOTONIC)` on Linux, `mach_absolute_time` on macOS, `QueryPerformanceCounter` on Windows. It never goes backward, even when the system clock is adjusted. Not suitable for wall-clock time differences.
+
+### `time.perf_counter`
+
+```c
+// CPython: Modules/timemodule.c:660 time_perf_counter
+static PyObject *
+time_perf_counter(PyObject *self, PyObject *unused)
+{
+    _PyTime_t t = _PyTime_GetPerfCounter();
+    return _PyTime_AsFloat(t);
+}
+```
+
+`time.perf_counter()` is the highest-resolution clock available. On Linux, it uses `CLOCK_MONOTONIC` (typically nanosecond resolution). On Windows, `QueryPerformanceCounter`. The origin is arbitrary; only differences are meaningful.
+
+### `time.process_time`
+
+```c
+// CPython: Modules/timemodule.c:700 time_process_time
+static PyObject *
+time_process_time(PyObject *self, PyObject *unused)
+{
+    _PyTime_t t;
+#if defined(MS_WINDOWS)
+    FILETIME creation, exit, kernel, user;
+    GetProcessTimes(GetCurrentProcess(), &creation, &exit, &kernel, &user);
+    t = _PyTime_FromWindowsFileTime(&user) + _PyTime_FromWindowsFileTime(&kernel);
+#else
+    struct timespec ts;
+    clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &ts);
+    t = _PyTime_FromTimespec(&ts);
+#endif
+    return _PyTime_AsFloat(t);
+}
+```
+
+`time.process_time()` counts CPU time, not wall-clock time. Sleeping or blocking on I/O does not advance it. Useful for profiling CPU-bound code in the presence of I/O.
+
+### `time.get_clock_info`
+
+```python
+# CPython: Modules/timemodule.c:780 time_get_clock_info
+# Returns a namespace: resolution, implementation, monotonic, adjustable
+# time.get_clock_info('monotonic').resolution → 1e-09 (nanoseconds on Linux)
+# time.get_clock_info('time').adjustable → True (system clock can be changed)
+```
+
+`get_clock_info` returns metadata about each named clock so callers can check resolution and whether the clock is adjustable before relying on it for precision timing.
+
+## gopy notes
+
+`time.sleep` is `module/time.Sleep` in `module/time/module.go`. It calls `time.Sleep(duration)` in Go but checks for pending signals between intervals. `time.monotonic` calls `time.Now().UnixNano()` via a monotonic-clock-backed `time.Time`. `time.perf_counter` uses `runtime.nanotime` via unsafe.

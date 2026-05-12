@@ -1,0 +1,125 @@
+---
+title: Lib/email (part 3)
+description: "email part 3: email.message.Message, get_payload, set_payload, walk, email.mime."
+cpython_path: Lib/email/message.py
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/email/message.py" />
+
+This annotation covers `Message` payload access and MIME composition. See `lib_email2_detail` for `email.parser`, `email.generator`, header parsing, and charset encoding.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `Message.get_payload` | Return body or list of sub-messages |
+| 81-160 | `Message.set_payload` | Set body or MIME parts list |
+| 161-240 | `Message.walk` | Recursive iterator over all MIME parts |
+| 241-360 | `email.mime.text.MIMEText` | Construct a text/plain or text/html part |
+| 361-500 | `email.mime.multipart.MIMEMultipart` | Build a multipart message |
+
+## Reading
+
+### `Message.get_payload`
+
+```python
+# CPython: Lib/email/message.py:220 get_payload
+def get_payload(self, i=None, decode=False):
+    if self.is_multipart():
+        if decode:
+            return None  # multipart has no decoded payload
+        if i is None:
+            return self._payload  # list of sub-Messages
+        return self._payload[i]
+    # Single-part
+    if decode:
+        cte = self.get('content-transfer-encoding', '').lower()
+        if cte == 'quoted-printable':
+            return quopri.decodestring(self._payload.encode())
+        elif cte == 'base64':
+            return base64.decodebytes(self._payload.encode())
+        return self._payload.encode()
+    return self._payload
+```
+
+For multipart messages, `get_payload()` returns a list of `Message` objects. For single-part messages, `decode=True` decodes `Content-Transfer-Encoding` (base64 or quoted-printable) and returns `bytes`.
+
+### `Message.set_payload`
+
+```python
+# CPython: Lib/email/message.py:270 set_payload
+def set_payload(self, payload, charset=None):
+    if hasattr(payload, 'encode') or isinstance(payload, str):
+        if charset is None:
+            self._payload = payload
+        else:
+            if not isinstance(charset, Charset):
+                charset = Charset(charset)
+            payload = charset.body_encode(payload)
+            self._payload = payload
+            self['Content-Type'] = f'text/plain; charset="{charset.get_output_charset()}"'
+    else:
+        self._payload = payload  # bytes or list
+```
+
+`set_payload(text, charset='utf-8')` encodes the text and sets the `Content-Type` header. Calling `set_payload(list_of_messages)` makes the message multipart.
+
+### `Message.walk`
+
+```python
+# CPython: Lib/email/message.py:540 walk
+def walk(self):
+    yield self
+    if self.is_multipart():
+        for subpart in self.get_payload():
+            yield from subpart.walk()
+```
+
+`walk()` is a depth-first pre-order traversal of the MIME tree. `for part in msg.walk(): if part.get_content_type() == 'text/plain': ...` extracts all text parts from a complex multipart message.
+
+### `MIMEText`
+
+```python
+# CPython: Lib/email/mime/text.py:28 MIMEText.__init__
+class MIMEText(MIMENonMultipart):
+    def __init__(self, _text, _subtype='plain', _charset=None, *, policy=None):
+        if _charset is None:
+            try:
+                _text.encode('us-ascii')
+                _charset = 'us-ascii'
+            except UnicodeEncodeError:
+                _charset = 'utf-8'
+        MIMENonMultipart.__init__(self, 'text', _subtype,
+                                  policy=policy,
+                                  charset=str(_charset))
+        self.set_payload(_text, _charset)
+```
+
+`MIMEText` defaults `_charset` to `'us-ascii'` if the text is all-ASCII, otherwise `'utf-8'`. This auto-detection makes it easy to send Unicode content without specifying the charset manually.
+
+### `MIMEMultipart`
+
+```python
+# CPython: Lib/email/mime/multipart.py:28 MIMEMultipart.__init__
+class MIMEMultipart(MIMEBase):
+    def __init__(self, _subtype='mixed', boundary=None, _subparts=None,
+                 *, policy=None, **_params):
+        MIMEBase.__init__(self, 'multipart', _subtype,
+                          policy=policy, **_params)
+        if boundary is not None:
+            self.set_boundary(boundary)
+        if _subparts is not None:
+            for p in _subparts:
+                self.attach(p)
+```
+
+`MIMEMultipart('alternative')` creates a `multipart/alternative` message (HTML + plain text fallback). `attach(part)` appends to `self._payload`. The `boundary` string separates parts in the wire format.
+
+## gopy notes
+
+`Message.get_payload` / `set_payload` are in `module/email/module.go`. `walk` is a recursive method yielding `*Message`. `MIMEText` calls `charset.BodyEncode` then sets headers. `MIMEMultipart.attach` appends to `message.Parts []Message`.

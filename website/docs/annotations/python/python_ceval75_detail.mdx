@@ -1,0 +1,123 @@
+---
+title: Python/ceval.c (part 75)
+description: "Python/ceval.c part 75: LOAD_GLOBAL, LOAD_GLOBAL_MODULE, LOAD_GLOBAL_BUILTIN, STORE_GLOBAL."
+cpython_path: Python/ceval.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Python/ceval.c" />
+
+This annotation covers global variable lookup opcodes and their specializations. See `python_ceval74_detail` for `PUSH_EXC_INFO`, `WITH_EXCEPT_START`, and `RERAISE`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `LOAD_GLOBAL` | Generic global lookup (module dict + builtins) |
+| 81-160 | `LOAD_GLOBAL_MODULE` | Specialization: directly cache module dict value |
+| 161-240 | `LOAD_GLOBAL_BUILTIN` | Specialization: directly cache builtin value |
+| 241-360 | `STORE_GLOBAL` | Assign to global name |
+| 361-500 | `DELETE_GLOBAL` | Delete a global variable |
+
+## Reading
+
+### `LOAD_GLOBAL`
+
+```c
+// CPython: Python/ceval.c:2460 LOAD_GLOBAL
+inst(LOAD_GLOBAL, (-- null_or_self, res)) {
+    PyObject *name = GETITEM(FRAME_CO_NAMES, oparg >> 1);
+    /* Push null if oparg & 1: callable form for CALL */
+    if (oparg & 1) PUSH(NULL);
+    PyObject *v = PyDict_GetItemWithError(GLOBALS(), name);
+    if (v == NULL) {
+        if (_PyErr_Occurred(tstate)) goto error;
+        v = PyDict_GetItemWithError(BUILTINS(), name);
+        if (v == NULL) {
+            if (!_PyErr_Occurred(tstate)) {
+                _PyErr_Format(tstate, PyExc_NameError,
+                              "name '%.200s' is not defined", ...);
+            }
+            goto error;
+        }
+    }
+    res = Py_NewRef(v);
+}
+```
+
+`LOAD_GLOBAL` first checks `__globals__` (the module dict), then `__builtins__`. The `oparg & 1` bit indicates whether this is a call site (which needs a `NULL` pushed for the self slot in `CALL`).
+
+### `LOAD_GLOBAL_MODULE`
+
+```c
+// CPython: Python/ceval.c:2520 LOAD_GLOBAL_MODULE
+inst(LOAD_GLOBAL_MODULE, (-- null_or_self, res)) {
+    /* Inline cache: dict version + offset */
+    _PyLoadGlobalCache *cache = (_PyLoadGlobalCache *)next_instr;
+    PyDictObject *dict = (PyDictObject *)GLOBALS();
+    DEOPT_IF(dict->ma_version_tag != cache->module_version);
+    PyDictUnicodeEntry *entries = DK_UNICODE_ENTRIES(dict->ma_keys);
+    res = Py_NewRef(entries[cache->index].me_value);
+    DEOPT_IF(res == NULL);
+}
+```
+
+Once the adaptive interpreter observes that `LOAD_GLOBAL` for a name always hits the module dict at the same slot, it specializes to `LOAD_GLOBAL_MODULE`. The inline cache stores the dict version tag and entry index. If the dict is modified, `version_tag` changes and the opcode deoptimizes.
+
+### `LOAD_GLOBAL_BUILTIN`
+
+```c
+// CPython: Python/ceval.c:2560 LOAD_GLOBAL_BUILTIN
+inst(LOAD_GLOBAL_BUILTIN, (-- null_or_self, res)) {
+    _PyLoadGlobalCache *cache = (_PyLoadGlobalCache *)next_instr;
+    /* Check both module dict (must not shadow builtin) and builtin dict */
+    PyDictObject *mdict = (PyDictObject *)GLOBALS();
+    PyDictObject *bdict = (PyDictObject *)BUILTINS();
+    DEOPT_IF(mdict->ma_version_tag != cache->module_version);
+    DEOPT_IF(bdict->ma_version_tag != cache->builtin_version);
+    PyDictUnicodeEntry *entries = DK_UNICODE_ENTRIES(bdict->ma_keys);
+    res = Py_NewRef(entries[cache->index].me_value);
+}
+```
+
+`LOAD_GLOBAL_BUILTIN` caches the builtin entry directly, but also checks the module dict version — if the module defines a local `len`, the specialization deoptimizes to avoid returning the builtin.
+
+### `STORE_GLOBAL`
+
+```c
+// CPython: Python/ceval.c:2620 STORE_GLOBAL
+inst(STORE_GLOBAL, (v --)) {
+    PyObject *name = GETITEM(FRAME_CO_NAMES, oparg);
+    int err = PyDict_SetItem(GLOBALS(), name, v);
+    Py_DECREF(v);
+    ERROR_IF(err != 0, error);
+}
+```
+
+`global x; x = 1` compiles to `LOAD_CONST 1`, `STORE_GLOBAL x`. `PyDict_SetItem` on the module dict makes the assignment visible to all code in the module.
+
+### `DELETE_GLOBAL`
+
+```c
+// CPython: Python/ceval.c:2650 DELETE_GLOBAL
+inst(DELETE_GLOBAL, (--)) {
+    PyObject *name = GETITEM(FRAME_CO_NAMES, oparg);
+    int err = PyDict_DelItem(GLOBALS(), name);
+    if (err != 0) {
+        if (_PyErr_ExceptionMatches(tstate, PyExc_KeyError)) {
+            _PyErr_SetString(tstate, PyExc_NameError, ...);
+        }
+        goto error;
+    }
+}
+```
+
+`del x` at module level compiles to `DELETE_GLOBAL`. If the name doesn't exist, `KeyError` from `PyDict_DelItem` is converted to `NameError`.
+
+## gopy notes
+
+`LOAD_GLOBAL` is in `vm/eval_simple.go`. It calls `objects.DictGetItem(globals, name)` then falls back to `objects.DictGetItem(builtins, name)`. `LOAD_GLOBAL_MODULE`/`LOAD_GLOBAL_BUILTIN` use inline cache structs in `vm/specialize.go`. `STORE_GLOBAL` calls `objects.DictSetItem`.

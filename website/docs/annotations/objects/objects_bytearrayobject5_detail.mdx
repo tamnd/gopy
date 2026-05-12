@@ -1,0 +1,125 @@
+---
+title: Objects/bytearrayobject.c (part 5)
+description: "bytearrayobject.c part 5: bytearray.extend, bytearray.insert, bytearray.pop, buffer protocol."
+cpython_path: Objects/bytearrayobject.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Objects/bytearrayobject.c" />
+
+This annotation covers mutable byte array mutation and the buffer protocol. See `objects_bytearray4_detail` for `bytearray.__new__`, `bytearray.append`, `bytearray.join`, and `bytearray.decode`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `bytearray.extend` | Append all bytes from an iterable |
+| 81-160 | `bytearray.insert` | Insert a byte at a given index |
+| 161-240 | `bytearray.pop` | Remove and return a byte by index |
+| 241-360 | `bytearray.remove` | Remove the first occurrence of a value |
+| 361-500 | Buffer protocol | `PyBUF_WRITABLE` implementation |
+
+## Reading
+
+### `bytearray.extend`
+
+```c
+// CPython: Objects/bytearrayobject.c:820 bytearray_extend
+static PyObject *
+bytearray_extend(PyByteArrayObject *self, PyObject *iterable)
+{
+    if (PyBytes_Check(iterable) || PyByteArray_Check(iterable)) {
+        /* Fast path: known contiguous buffer */
+        Py_ssize_t n = ...; /* length */
+        bytearray_setslice_linear(self, Py_SIZE(self), Py_SIZE(self),
+                                  buf, n);
+        Py_RETURN_NONE;
+    }
+    /* General: iterate and append one by one */
+    PyObject *it = PyObject_GetIter(iterable);
+    ...
+}
+```
+
+`extend` with a `bytes`/`bytearray` argument uses `memcpy` after a single `realloc`. The general iterator path calls `append` in a loop. `extend` is used by `+=` for bytearrays.
+
+### `bytearray.insert`
+
+```c
+// CPython: Objects/bytearrayobject.c:880 bytearray_insert
+static PyObject *
+bytearray_insert(PyByteArrayObject *self, PyObject *args)
+{
+    int item;
+    Py_ssize_t where;
+    PyArg_ParseTuple(args, "ni:insert", &where, &item);
+    if (where < 0) {
+        where += Py_SIZE(self);
+        if (where < 0) where = 0;
+    }
+    if (where > Py_SIZE(self)) where = Py_SIZE(self);
+    /* Grow by 1 */
+    if (PyByteArray_Resize((PyObject *)self, Py_SIZE(self) + 1) < 0)
+        return NULL;
+    char *buf = PyByteArray_AS_STRING(self);
+    memmove(buf + where + 1, buf + where, Py_SIZE(self) - where - 1);
+    buf[where] = item;
+    Py_RETURN_NONE;
+}
+```
+
+`insert(0, b)` shifts all bytes right by one (O(n)) before placing the new byte. Negative indices count from the end. The byte value must be in `[0, 255]`.
+
+### `bytearray.pop`
+
+```c
+// CPython: Objects/bytearrayobject.c:940 bytearray_pop
+static PyObject *
+bytearray_pop(PyByteArrayObject *self, PyObject *args)
+{
+    Py_ssize_t where = -1;
+    PyArg_ParseTuple(args, "|n:pop", &where);
+    if (Py_SIZE(self) == 0) {
+        PyErr_SetString(PyExc_IndexError, "pop from empty bytearray");
+        return NULL;
+    }
+    if (where < 0) where += Py_SIZE(self);
+    int value = self->ob_bytes[where];
+    /* Remove by shifting left */
+    memmove(buf + where, buf + where + 1, Py_SIZE(self) - where - 1);
+    PyByteArray_Resize((PyObject *)self, Py_SIZE(self) - 1);
+    return PyLong_FromLong(value);
+}
+```
+
+`bytearray.pop()` removes the last byte (O(1)). `bytearray.pop(0)` removes the first byte (O(n) due to memmove). Returns the byte value as an `int`.
+
+### Buffer protocol
+
+```c
+// CPython: Objects/bytearrayobject.c:220 bytearray_getbuffer
+static int
+bytearray_getbuffer(PyByteArrayObject *self, Py_buffer *view, int flags)
+{
+    if (view == NULL) {
+        self->ob_exports++;
+        return 0;
+    }
+    if ((flags & PyBUF_WRITABLE) == PyBUF_WRITABLE && self->ob_exports > 0) {
+        /* Buffer exported: can't resize */
+    }
+    return PyBuffer_FillInfo(view, (PyObject *)self,
+                             PyByteArray_AS_STRING(self),
+                             Py_SIZE(self), 0, flags);
+}
+```
+
+`bytearray` supports `PyBUF_WRITABLE` — it exports a pointer to its internal buffer. While a buffer view is live (`ob_exports > 0`), the bytearray cannot be resized (appends and pops raise `BufferError`).
+
+## gopy notes
+
+`bytearray.extend` is `objects.ByteArrayExtend` in `objects/bytearray.go`. `insert` uses `copy` to shift the Go slice. `pop` returns `objects.Int` wrapping the byte value. The buffer protocol is implemented via `objects.ByteArray.GetBuffer` returning a `[]byte` slice pointer.
