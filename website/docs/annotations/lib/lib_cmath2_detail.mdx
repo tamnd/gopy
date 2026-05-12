@@ -1,0 +1,91 @@
+---
+title: Modules/cmathmodule.c (part 2)
+description: "Modules/cmathmodule.c part 2: cmath.exp, cmath.log, cmath.sqrt, cmath.phase, cmath.polar, cmath.rect."
+cpython_path: Modules/cmathmodule.c
+cpython_version: "3.14"
+lines: 400
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/cmathmodule.c" />
+
+This annotation covers complex transcendental functions. See `lib_cmath_detail` for `cmath.sin`/`cos`/`tan`, `cmath.isinf`/`isnan`/`isfinite`, and branch cuts.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `cmath.exp` | Complex exponential `e^(a+bj)` |
+| 81-180 | `cmath.log` | Complex logarithm with optional base |
+| 181-280 | `cmath.sqrt` | Complex square root (principal branch) |
+| 281-400 | `cmath.polar` / `cmath.rect` | Polar form conversion |
+
+## Reading
+
+### `cmath.exp`
+
+```c
+// CPython: Modules/cmathmodule.c:280 cmath_exp_impl
+static Py_complex
+c_exp(Py_complex z)
+{
+    /* e^(a+bj) = e^a * (cos(b) + j*sin(b)) */
+    double r = exp(z.real);
+    /* Handle infinities specially */
+    if (isinf(z.real) && !isfinite(z.imag)) {
+        /* Return (inf, nan) -- IEEE 754 exception */
+        return (Py_complex){r, Py_NAN};
+    }
+    return (Py_complex){r * cos(z.imag), r * sin(z.imag)};
+}
+```
+
+`cmath.exp(1j * math.pi)` ≈ `(-1 + 0j)` (Euler's formula). The infinity handling matches IEEE 754 Annex G.
+
+### `cmath.sqrt`
+
+```c
+// CPython: Modules/cmathmodule.c:480 c_sqrt
+static Py_complex
+c_sqrt(Py_complex z)
+{
+    /* Principal square root: result has non-negative real part.
+       sqrt(a+bj) = sqrt((|z|+a)/2) + j*sign(b)*sqrt((|z|-a)/2) */
+    double ax = fabs(z.real), ay = fabs(z.imag);
+    double s;
+    if (ax < ay) {
+        double t = ax / ay;
+        s = sqrt(ay) * sqrt((hypot(t, 1.0) + t) / 2.0);
+    } else if (ax > 0.0) {
+        double t = ay / ax;
+        s = sqrt(ax) * sqrt((hypot(1.0, t) + 1.0) / 2.0);
+    } else {
+        return (Py_complex){0.0, 0.0};
+    }
+    ...
+}
+```
+
+`cmath.sqrt(-1+0j)` returns `1j`. The implementation avoids the naive `sqrt(|z|)` * `exp(j*arg(z)/2)` because it loses precision for small imaginary parts.
+
+### `cmath.polar`
+
+```c
+// CPython: Modules/cmathmodule.c:620 cmath_polar_impl
+static PyObject *
+cmath_polar_impl(PyObject *module, Py_complex z)
+{
+    /* Return (r, phi) where r = |z|, phi = arg(z) */
+    double r = hypot(z.real, z.imag);
+    double phi = atan2(z.imag, z.real);
+    return Py_BuildValue("(dd)", r, phi);
+}
+```
+
+`cmath.polar(1+1j)` returns `(1.4142..., 0.7853...)` (radius and angle in radians). `cmath.rect(r, phi)` is the inverse: `r * exp(j*phi)`.
+
+## gopy notes
+
+`cmath.exp` is `module/cmath.Exp` in `module/cmath/module.go`. It uses Go's `cmplx.Exp`. `cmath.sqrt` uses `cmplx.Sqrt`. `cmath.polar` uses `cmplx.Abs` and `cmplx.Phase`. `cmath.rect` uses `cmplx.Rect`.

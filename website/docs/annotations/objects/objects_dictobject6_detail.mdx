@@ -1,0 +1,95 @@
+---
+title: Objects/dictobject.c (part 6)
+description: "Objects/dictobject.c part 6: dict.popitem, dict.__reversed__, dict.keys/values/items views, view iteration."
+cpython_path: Objects/dictobject.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Objects/dictobject.c" />
+
+This annotation covers dict view objects and LIFO operations. See `objects_dictobject5_detail` for `dict.update`, `dict.__or__`, `dict.setdefault`, and dict merging.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `dict.popitem` | Remove and return the last inserted `(key, value)` pair |
+| 81-180 | `dict.__reversed__` | Iterate keys in LIFO order |
+| 181-300 | `dict.keys` / `dict.values` / `dict.items` | Return view objects |
+| 301-420 | View iteration | `dictitemsiter`, `dictkeysiter`, `dictvaluesiter` |
+| 421-500 | View set operations | `keys_view & other_set`, `keys_view - other` |
+
+## Reading
+
+### `dict.popitem`
+
+```c
+// CPython: Objects/dictobject.c:3280 dict_popitem
+static PyObject *
+dict_popitem(PyDictObject *mp, PyObject *Py_UNUSED(ignored))
+{
+    /* LIFO: remove the last inserted item. */
+    if (mp->ma_used == 0) {
+        PyErr_SetString(PyExc_KeyError, "popitem(): dictionary is empty");
+        return NULL;
+    }
+    /* Find the last non-empty slot in dk_entries */
+    Py_ssize_t i = mp->ma_keys->dk_nentries - 1;
+    PyDictKeyEntry *ep = &DK_ENTRIES(mp->ma_keys)[i];
+    while (ep->me_value == NULL) { i--; ep--; }
+    PyObject *res = PyTuple_New(2);
+    PyTuple_SET_ITEM(res, 0, ep->me_key);
+    PyTuple_SET_ITEM(res, 1, ep->me_value);
+    /* Delete the entry */
+    _PyDict_NotifyEvent(mp, PyDict_EVENT_DELETED, ep->me_key, NULL);
+    ep->me_value = NULL;
+    ep->me_key = NULL;
+    mp->ma_used--;
+    return res;
+}
+```
+
+`dict.popitem()` is O(1) because it always removes the most recently inserted item (last in `dk_entries`). This is guaranteed since Python 3.7. Used for destructively iterating a dict.
+
+### `dict.__reversed__`
+
+```c
+// CPython: Objects/dictobject.c:3480 dict_reversed
+static PyObject *
+dict_reversed(PyDictObject *mp, PyObject *Py_UNUSED(ignored))
+{
+    /* Return a reverse iterator over keys (LIFO order). */
+    dictreversekeysobject *di;
+    di = PyObject_New(dictreversekeysobject, &PyDictRevIterKey_Type);
+    di->dv_dict = Py_NewRef(mp);
+    di->di_pos = mp->ma_keys->dk_nentries;
+    return (PyObject *)di;
+}
+```
+
+`reversed(d)` (Python 3.8+) iterates keys from last-inserted to first. Used for stack-like patterns: insert multiple items, then process in reverse order.
+
+### View set operations
+
+```c
+// CPython: Objects/dictobject.c:3680 dictviews_and
+static PyObject *
+dictviews_and(PyObject *self, PyObject *other)
+{
+    /* dict.keys() & set or dict.keys() & dict.keys()
+       Returns the intersection as a new set. */
+    PyObject *result = PySet_New(self);
+    PyObject_CallMethodOneArg(result, &_Py_ID(intersection_update), other);
+    return result;
+}
+```
+
+`d.keys() & s` returns a `set` of keys in both `d` and `s`. `d.keys() - s` returns keys in `d` but not `s`. These operations make `dict.keys()` behave like a frozen set for membership testing.
+
+## gopy notes
+
+`dict.popitem` is `objects.DictPopItem` in `objects/dict.go`. It scans backward through the entries array. `dict.__reversed__` returns `objects.DictReverseKeysIterator`. View objects (`dict_keys`, `dict_values`, `dict_items`) are `objects.DictKeysView`, etc. View set operations use `objects.SetNew` and `objects.SetIntersectionUpdate`.

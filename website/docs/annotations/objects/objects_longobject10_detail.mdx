@@ -1,0 +1,90 @@
+---
+title: Objects/longobject.c (part 10)
+description: "Objects/longobject.c part 10: int.bit_count, int.bit_length, int.to_bytes, int.from_bytes, PyLong_AsNativeBytes."
+cpython_path: Objects/longobject.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Objects/longobject.c" />
+
+This annotation covers integer byte and bit operations. See `objects_longobject9_detail` for `int.__pow__`, `int.__mod__`, integer division, and compact int representation.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `int.bit_length` | Number of bits in the absolute value |
+| 81-180 | `int.bit_count` | Population count (number of set bits) |
+| 181-300 | `int.to_bytes` | Serialize to big/little-endian `bytes` |
+| 301-420 | `int.from_bytes` | Deserialize from `bytes` |
+| 421-500 | `PyLong_AsNativeBytes` | Export integer as C-native bytes (PEP 757) |
+
+## Reading
+
+### `int.bit_length`
+
+```c
+// CPython: Objects/longobject.c:3480 long_bit_length
+static PyObject *
+long_bit_length(PyObject *self, PyObject *Py_UNUSED(ignored))
+{
+    /* Number of bits needed to represent |self| in binary, excluding sign. */
+    PyLongObject *z = (PyLongObject *)self;
+    Py_ssize_t ndigits = _PyLong_DigitCount(z);
+    if (ndigits == 0) return PyLong_FromLong(0);
+    /* Most significant digit determines the bit count */
+    digit msd = z->long_value.ob_digit[ndigits - 1];
+    int msd_bits = _Py_bit_length(msd);
+    return PyLong_FromSsize_t((ndigits - 1) * PyLong_SHIFT + msd_bits);
+}
+```
+
+`(1024).bit_length()` returns `11`. `(0).bit_length()` returns `0`. The most significant digit determines the final bit count; other digits contribute `PyLong_SHIFT` (30) bits each.
+
+### `int.bit_count`
+
+```c
+// CPython: Objects/longobject.c:3560 long_bit_count
+static PyObject *
+long_bit_count(PyObject *self, PyObject *Py_UNUSED(ignored))
+{
+    /* Population count: number of 1-bits in |self| */
+    PyLongObject *z = (PyLongObject *)self;
+    Py_ssize_t ndigits = _PyLong_DigitCount(z);
+    Py_ssize_t count = 0;
+    for (Py_ssize_t i = 0; i < ndigits; i++) {
+        count += _Py_popcount(z->long_value.ob_digit[i]);
+    }
+    return PyLong_FromSsize_t(count);
+}
+```
+
+`(255).bit_count()` returns `8`. Uses `_Py_popcount` which maps to the hardware `POPCNT` instruction on x86-64.
+
+### `int.to_bytes`
+
+```c
+// CPython: Objects/longobject.c:3680 long_to_bytes
+static PyObject *
+long_to_bytes_impl(PyObject *self, Py_ssize_t length, PyObject *byteorder_obj,
+                   int signed_)
+{
+    /* Convert integer to exactly 'length' bytes in the specified byte order.
+       Raises OverflowError if the integer doesn't fit. */
+    int little_endian = (byteorder == "little");
+    PyObject *bytes = PyBytes_FromStringAndSize(NULL, length);
+    _PyLong_AsByteArray((PyLongObject *)self, (unsigned char *)buf,
+                        length, little_endian, signed_);
+    return bytes;
+}
+```
+
+`(256).to_bytes(2, 'big')` returns `b'\x01\x00'`. `(256).to_bytes(1, 'big')` raises `OverflowError`. `signed=True` uses two's complement representation.
+
+## gopy notes
+
+`int.bit_length` is `objects.LongBitLength` in `objects/long.go`. It uses `bits.Len` on the most significant word. `int.bit_count` uses `bits.OnesCount`. `int.to_bytes` converts via `big.Int.Bytes()` then reverses for little-endian. `int.from_bytes` uses `big.Int.SetBytes()`.

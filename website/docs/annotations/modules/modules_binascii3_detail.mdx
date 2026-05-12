@@ -1,0 +1,84 @@
+---
+title: Modules/binascii.c (part 3)
+description: "Modules/binascii.c part 3: binascii.b2a_uu, binascii.a2b_uu, binascii.crc_hqx, binascii.crc32, binascii.hexlify."
+cpython_path: Modules/binascii.c
+cpython_version: "3.14"
+lines: 400
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/binascii.c" />
+
+This annotation covers CRC and legacy encoding functions. See `modules_binascii2_detail` for `base64` encoding, `a2b_base64`, `b2a_base64`, and the lookup table approach.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `binascii.hexlify` / `unhexlify` | Convert bytes to/from hex string |
+| 81-180 | `binascii.b2a_uu` / `a2b_uu` | Unix-to-Unix encoding (uuencode format) |
+| 181-280 | `binascii.crc_hqx` | CRC-CCITT used by BinHex |
+| 281-400 | `binascii.crc32` | PKZIP/zlib CRC-32 |
+
+## Reading
+
+### `binascii.hexlify`
+
+```c
+// CPython: Modules/binascii.c:480 binascii_hexlify_impl
+static PyObject *
+binascii_hexlify_impl(PyObject *module, Py_buffer *data,
+                      PyObject *sep, int bytes_per_sep)
+{
+    /* Convert each byte to two hex chars.
+       Same implementation as bytes.hex() — delegates to _Py_strhex_with_sep. */
+    return _Py_strhex_with_sep((const char *)data->buf, data->len,
+                               sep, bytes_per_sep);
+}
+```
+
+`binascii.hexlify(b'\xde\xad')` returns `b'dead'` (bytes, not str). `binascii.unhexlify('deadbeef')` is the inverse. Note that `bytes.hex()` returns a `str`; `hexlify` returns `bytes`.
+
+### `binascii.crc32`
+
+```c
+// CPython: Modules/binascii.c:880 binascii_crc32_impl
+static PyObject *
+binascii_crc32_impl(PyObject *module, Py_buffer *data, unsigned int crc)
+{
+    /* Compute CRC-32 checksum.
+       Same polynomial as PKZIP, gzip, and zlib.crc32.
+       The result is unsigned in Python (masked to 32 bits). */
+    unsigned int result = crc32(crc ^ 0xFFFFFFFF,
+                                (const Bytef *)data->buf, data->len);
+    result ^= 0xFFFFFFFF;
+    return PyLong_FromUnsignedLong(result);
+}
+```
+
+`binascii.crc32(b'hello')` returns `907060870`. The initial XOR with `0xFFFFFFFF` implements the standard CRC-32 computation (pre/post complement). `zlib.crc32` uses the same algorithm.
+
+### `binascii.crc_hqx`
+
+```c
+// CPython: Modules/binascii.c:820 binascii_crc_hqx_impl
+static PyObject *
+binascii_crc_hqx_impl(PyObject *module, Py_buffer *data, unsigned int crc)
+{
+    /* CRC-CCITT: polynomial 0x1021, used by the BinHex 4.0 format.
+       Table-driven: 256-entry lookup table precomputed at module init. */
+    unsigned char *bin_data = data->buf;
+    for (Py_ssize_t len = data->len; len-- > 0; ) {
+        crc = ((crc << 8) & 0xFF00) ^ crctab_hqx[(crc >> 8) ^ *bin_data++];
+    }
+    return PyLong_FromUnsignedLong(crc);
+}
+```
+
+`crc_hqx` is used by `binhex.binhex()` and `binhex.hexbin()`. The BinHex format was used for Macintosh file transfers before the internet became ubiquitous.
+
+## gopy notes
+
+`binascii.hexlify` is `module/binascii.Hexlify` in `module/binascii/module.go`. It uses `hex.EncodeToString`. `binascii.crc32` uses Go's `hash/crc32.ChecksumIEEE`. `binascii.crc_hqx` uses a precomputed 256-element table. `a2b_uu`/`b2a_uu` implement the UU encoding algorithm.

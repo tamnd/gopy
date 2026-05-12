@@ -1,0 +1,94 @@
+---
+title: Lib/random.py (part 2)
+description: "Lib/random.py part 2: random.sample, random.choices, random.shuffle, random.gauss, SystemRandom."
+cpython_path: Lib/random.py
+cpython_version: "3.14"
+lines: 600
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/random.py" />
+
+This annotation covers sampling and distribution methods. See `lib_random_detail` for `Random.__init__`, `Mersenne Twister`, `random()`, `randint`, `seed`, and `getstate`/`setstate`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-100 | `random.sample` | Sample k unique elements from a population |
+| 101-220 | `random.choices` | Sample with replacement, optional weights |
+| 221-360 | `random.shuffle` | Shuffle a list in place (Fisher-Yates) |
+| 361-480 | `random.gauss` | Gaussian distribution via the Marsaglia-Bray algorithm |
+| 481-600 | `SystemRandom` | OS-provided randomness via `os.urandom` |
+
+## Reading
+
+### `random.sample`
+
+```python
+# CPython: Lib/random.py:380 sample
+def sample(self, population, k, *, counts=None):
+    """Return k unique elements from population (no replacement)."""
+    if counts is not None:
+        population = list(_chain.from_iterable(_repeat(v, c) for v, c in zip(population, counts)))
+    n = len(population)
+    if not 0 <= k <= n:
+        raise ValueError("Sample larger than population or is negative")
+    # Small k: pick and exclude selected indices
+    result = [None] * k
+    setsize = 21  # Cutoff between two algorithms
+    if k > 5:
+        setsize += 4 ** ceil(log(k * 3, 4))
+    pool = list(population)
+    for i in range(k):
+        j = int(self.random() * (n - i))
+        result[i] = pool[j]
+        pool[j] = pool[n - i - 1]  # Partial Fisher-Yates
+    return result
+```
+
+`random.sample` uses a partial Fisher-Yates shuffle when `k` is small relative to `n`. For larger `k`, it uses a set to track selected indices. The `counts` parameter allows sampling from a population with repetitions.
+
+### `random.choices`
+
+```python
+# CPython: Lib/random.py:480 choices
+def choices(self, population, weights=None, *, cum_weights=None, k=1):
+    """Return k elements with replacement; weights adjust probability."""
+    if cum_weights is None:
+        if weights is None:
+            n = len(population)
+            return [population[int(self.random() * n)] for _ in _repeat(None, k)]
+        cum_weights = list(_accumulate(weights))
+    total = cum_weights[-1]
+    bisect = _bisect
+    return [population[bisect(cum_weights, self.random() * total)]
+            for _ in _repeat(None, k)]
+```
+
+Weighted sampling uses cumulative weights and binary search (`bisect.bisect`). `choices(['a','b','c'], weights=[1,2,3])` samples `'c'` ~50% of the time.
+
+### `random.gauss`
+
+```python
+# CPython: Lib/random.py:580 gauss
+def gauss(self, mu=0.0, sigma=1.0):
+    """Gaussian distribution. Uses the Marsaglia polar method.
+       Faster than normalvariate; not thread-safe due to gauss_next caching."""
+    z = self.gauss_next
+    self.gauss_next = None
+    if z is None:
+        x2pi = self.random() * TWOPI
+        g2rad = _sqrt(-2.0 * _log(1.0 - self.random()))
+        z = _cos(x2pi) * g2rad
+        self.gauss_next = _sin(x2pi) * g2rad
+    return mu + z * sigma
+```
+
+The polar method generates two Gaussian values per call and caches the second (`gauss_next`). This is why `gauss()` is not thread-safe: two threads sharing a `Random` instance may both read and write `gauss_next`.
+
+## gopy notes
+
+`random.sample` is `module/random.Sample` in `module/random/module.go`. It wraps Go's `math/rand` for the partial Fisher-Yates shuffle. `random.choices` uses `sort.Search` on cumulative weights. `random.gauss` caches the second value in `module/random.Random.gaussNext`. `SystemRandom` uses `crypto/rand`.

@@ -1,0 +1,95 @@
+---
+title: Python/symtable.c (part 4)
+description: "Python/symtable.c part 4: type alias, PEP 695 generic functions, PEP 695 type parameter scope, type_params."
+cpython_path: Python/symtable.c
+cpython_version: "3.14"
+lines: 400
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Python/symtable.c" />
+
+This annotation covers PEP 695 type parameter syntax (Python 3.12+). See `python_symtable3_detail` for comprehension scoping, lambda, class body, and `analyze_name`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-100 | `symtable_visit_typealias` | `type X = ...` — TypeAlias statement scope |
+| 101-220 | `symtable_visit_typeparam` | `[T: int]` — TypeVar, ParamSpec, TypeVarTuple scope |
+| 221-360 | Generic function/class scope | `def f[T](): ...` — type param block |
+| 361-400 | `__type_params__` | Attribute set on generic functions and classes |
+
+## Reading
+
+### `symtable_visit_typealias`
+
+```c
+// CPython: Python/symtable.c:1720 symtable_visit_stmt (TypeAlias_kind)
+case TypeAlias_kind:
+    /* 'type X = int | str' creates a TypeAliasType.
+       The name X is defined in the enclosing scope.
+       The value is evaluated lazily in a new TypeParamScope. */
+    VISIT(st, expr, e->v.TypeAlias.name);
+    symtable_enter_block(st, e->v.TypeAlias.name, TypeParamBlock, ...);
+    VISIT(st, expr, e->v.TypeAlias.value);
+    symtable_exit_block(st);
+    break;
+```
+
+`type Point = tuple[int, int]` (PEP 695) creates a `TypeAliasType` object. The alias value is evaluated lazily in a dedicated scope to support forward references. `Point.__value__` triggers evaluation.
+
+### Type parameter scope
+
+```c
+// CPython: Python/symtable.c:1780 symtable_visit_typeparam
+static int
+symtable_visit_typeparam(struct symtable *st, typeparam_ty tp)
+{
+    /* Enter a TypeParamBlock for the constraint/bound if present.
+       The TypeVar name is defined in the enclosing generic scope. */
+    switch (tp->kind) {
+    case TypeVar_kind:
+        /* T or T: int or T: (int, str) */
+        if (!symtable_add_def(st, tp->v.TypeVar.name, DEF_LOCAL, LOCATION(tp)))
+            return 0;
+        if (tp->v.TypeVar.bound) VISIT(st, expr, tp->v.TypeVar.bound);
+        break;
+    case ParamSpec_kind:
+        /* **P */
+        if (!symtable_add_def(st, tp->v.ParamSpec.name, DEF_LOCAL, LOCATION(tp)))
+            return 0;
+        break;
+    case TypeVarTuple_kind:
+        /* *Ts */
+        if (!symtable_add_def(st, tp->v.TypeVarTuple.name, DEF_LOCAL, LOCATION(tp)))
+            return 0;
+        break;
+    }
+    return 1;
+}
+```
+
+Each type parameter (`T`, `*Ts`, `**P`) is a local variable in the generic scope. Constraints and bounds are evaluated in the generic scope so they can reference earlier type params.
+
+### Generic function scope
+
+```c
+// CPython: Python/symtable.c:1840 symtable_visit_stmt (FunctionDef_kind with type_params)
+/* def f[T](x: T) -> T: ...
+   Compiles as:
+   1. Enter TypeParamBlock
+   2. Visit each type_param
+   3. Enter FunctionBlock for f
+   4. Visit annotations (which reference T)
+   5. Exit FunctionBlock
+   6. Exit TypeParamBlock */
+```
+
+Generic functions have two nested scopes: the type parameter scope (outer) and the function body (inner). The type parameter scope lets the function's annotations reference `T` without it being a free variable.
+
+## gopy notes
+
+`symtable_visit_typealias` is `compile.SymtableVisitTypeAlias` in `compile/symtable.go`. The `TypeParamBlock` creates its own `SymbolTableEntry`. Generic function/class compilation is `compile.CompileGenericFunction`, which emits type param creation opcodes before the function definition.

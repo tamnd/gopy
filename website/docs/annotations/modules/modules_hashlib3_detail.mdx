@@ -1,0 +1,92 @@
+---
+title: Modules/_hashopenssl.c (part 3)
+description: "Modules/_hashopenssl.c part 3: hashlib.shake_128, hashlib.shake_256, hashlib.file_digest, HMAC, hashlib.new."
+cpython_path: Modules/_hashopenssl.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/_hashopenssl.c" />
+
+This annotation covers XOF (extendable output) functions and convenience utilities. See `modules_hashlib2_detail` for `hashlib.sha256`, `hashlib.blake2b`, and `HASH.update`/`digest`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `hashlib.shake_128` / `shake_256` | XOF: variable-length digest |
+| 81-180 | `shake.digest(length)` | Extract exactly `length` bytes from XOF |
+| 181-300 | `hashlib.file_digest` | Hash a file object using a hash constructor |
+| 301-420 | `hmac.new` / `HMAC.update` | Keyed-hash message authentication |
+| 421-500 | `hashlib.new` | Factory: look up any registered digest |
+
+## Reading
+
+### `shake.digest`
+
+```c
+// CPython: Modules/_hashopenssl.c:820 _hashlib_HASHXOF_digest_impl
+static PyObject *
+_hashlib_HASHXOF_digest_impl(HASHobject *self, Py_ssize_t length)
+{
+    /* XOF: output exactly 'length' bytes.
+       Unlike SHA-2, SHAKE can produce any length of output. */
+    if (length < 0) {
+        PyErr_SetString(PyExc_ValueError, "length must be non-negative");
+        return NULL;
+    }
+    PyObject *digest = PyBytes_FromStringAndSize(NULL, length);
+    EVP_DigestFinalXOF(self->ctx, (unsigned char *)PyBytes_AS_STRING(digest), length);
+    return digest;
+}
+```
+
+`hashlib.shake_128(data).digest(32)` produces 32 bytes. `hashlib.shake_256(data).digest(64)` produces 64 bytes. The same data with different lengths produces outputs that share a prefix (XOF property).
+
+### `hashlib.file_digest`
+
+```c
+// CPython: Modules/_hashlib.c:1180 _hashlib_file_digest_impl
+static PyObject *
+_hashlib_file_digest_impl(PyObject *module, PyObject *fileobj,
+                           PyObject *digest)
+{
+    /* Hash a file object in chunks using the given digest constructor. */
+    PyObject *h = PyObject_CallNoArgs(digest);  /* e.g., hashlib.sha256() */
+    while (True) {
+        PyObject *buf = PyObject_CallMethod(fileobj, "read", "n", 65536);
+        if (PyBytes_GET_SIZE(buf) == 0) { Py_DECREF(buf); break; }
+        PyObject_CallMethod(h, "update", "O", buf);
+        Py_DECREF(buf);
+    }
+    return PyObject_CallMethod(h, "digest", "");
+}
+```
+
+`hashlib.file_digest(f, 'sha256')` is more efficient than reading the file manually: it uses a larger buffer and avoids the Python-level loop overhead in pure CPython (the C loop is tighter). The `digest` argument can be a string name or a callable.
+
+### `hmac.new`
+
+```c
+// CPython: Modules/_hmacmodule.c:180 hmac_new
+static PyObject *
+hmac_new_impl(PyObject *module, Py_buffer *key, PyObject *msg,
+              PyObject *digestmod)
+{
+    /* HMAC = hash(key XOR opad || hash(key XOR ipad || msg)) */
+    HMAC_CTX *ctx = HMAC_CTX_new();
+    const EVP_MD *evp = get_digest(digestmod);
+    HMAC_Init_ex(ctx, key->buf, key->len, evp, NULL);
+    if (msg) HMAC_Update(ctx, msg->buf, msg->len);
+    return HMACobject_new(ctx, digestmod);
+}
+```
+
+`hmac.new(key, msg, 'sha256').digest()` is a one-shot HMAC. For streaming: create with `hmac.new(key, digestmod='sha256')`, then call `.update(chunk)` repeatedly. HMAC is used for API authentication (e.g., HMAC-SHA256 in AWS SigV4).
+
+## gopy notes
+
+`shake_128`/`shake_256` are `module/hashlib.Shake128`/`Shake256` in `module/hashlib/module.go`. `shake.digest(n)` calls `sha3.ShakeHash.Read(buf[:n])`. `hashlib.file_digest` reads in 64 KB chunks. HMAC uses Go's `crypto/hmac` package. `hashlib.new` dispatches via a Go map from algorithm name to constructor.

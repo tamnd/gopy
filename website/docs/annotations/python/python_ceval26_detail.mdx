@@ -1,0 +1,91 @@
+---
+title: Python/ceval.c (part 26)
+description: "Python/ceval.c part 26: CALL_FUNCTION_EX, KW_NAMES, CALL_INTRINSIC_1, MAKE_FUNCTION, SET_FUNCTION_ATTRIBUTE."
+cpython_path: Python/ceval.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Python/ceval.c" />
+
+This annotation covers function construction and dynamic call opcodes. See `python_ceval25_detail` for unpacking and f-string opcodes.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `CALL_FUNCTION_EX` | `f(*args, **kwargs)` — unpack iterables and mappings |
+| 81-180 | `KW_NAMES` | Annotate the next CALL with keyword argument names |
+| 181-280 | `MAKE_FUNCTION` | Create a `function` object from a code object |
+| 281-380 | `SET_FUNCTION_ATTRIBUTE` | Attach defaults, annotations, closure to function |
+| 381-500 | `CALL_INTRINSIC_1` | Built-in intrinsic operations (import star, list-to-tuple, etc.) |
+
+## Reading
+
+### `CALL_FUNCTION_EX`
+
+```c
+// CPython: Python/ceval.c:5020 CALL_FUNCTION_EX
+inst(CALL_FUNCTION_EX, (func, unused, callargs, kwargs --  result)) {
+    /* f(*args, **kwargs): unpack callargs and kwargs */
+    if (!PyTuple_CheckExact(callargs)) {
+        PyObject *tmp = PySequence_Tuple(callargs);
+        Py_DECREF(callargs);
+        callargs = tmp;
+    }
+    if (kwargs) {
+        if (!PyDict_CheckExact(kwargs)) {
+            PyObject *tmp = PyDict_Copy(kwargs);
+            Py_DECREF(kwargs);
+            kwargs = tmp;
+        }
+    }
+    result = PyObject_Call(func, callargs, kwargs);
+}
+```
+
+`f(*args, **kwargs)` compiles to `CALL_FUNCTION_EX`. If `args` is not a tuple (e.g., a generator), it is materialized first. `kwargs` must be a dict. Both copies are made to avoid aliasing issues if the function modifies them.
+
+### `MAKE_FUNCTION`
+
+```c
+// CPython: Python/ceval.c:5180 MAKE_FUNCTION
+inst(MAKE_FUNCTION, (codeobj -- func)) {
+    PyFunctionObject *function = (PyFunctionObject *)PyFunction_New(codeobj, GLOBALS());
+    function->func_name = codeobj->co_name;
+    /* func_qualname is set by SET_FUNCTION_ATTRIBUTE */
+    func = (PyObject *)function;
+}
+```
+
+`def f(): ...` at module level emits `LOAD_CONST <code>`, `MAKE_FUNCTION`. The function object is created here; defaults and annotations are set by subsequent `SET_FUNCTION_ATTRIBUTE` opcodes. This separation allows the compiler to emit defaults before `MAKE_FUNCTION`.
+
+### `SET_FUNCTION_ATTRIBUTE`
+
+```c
+// CPython: Python/ceval.c:5220 SET_FUNCTION_ATTRIBUTE
+inst(SET_FUNCTION_ATTRIBUTE, (attr, func -- func)) {
+    /* oparg: which attribute to set
+       0x01 = __defaults__    (positional defaults tuple)
+       0x02 = __kwdefaults__  (keyword-only defaults dict)
+       0x04 = __annotations__
+       0x08 = __closure__
+       0x10 = __qualname__    */
+    switch (oparg) {
+    case 0x01: ((PyFunctionObject *)func)->func_defaults = Py_NewRef(attr); break;
+    case 0x02: ((PyFunctionObject *)func)->func_kwdefaults = Py_NewRef(attr); break;
+    case 0x04: ((PyFunctionObject *)func)->func_annotations = Py_NewRef(attr); break;
+    case 0x08: ((PyFunctionObject *)func)->func_closure = Py_NewRef(attr); break;
+    case 0x10: ((PyFunctionObject *)func)->func_qualname = Py_NewRef(attr); break;
+    }
+}
+```
+
+Multiple `SET_FUNCTION_ATTRIBUTE` opcodes may follow a single `MAKE_FUNCTION`. Each one pops the attribute value and sets the corresponding slot. Unused attributes are not emitted, keeping the bytecode compact.
+
+## gopy notes
+
+`CALL_FUNCTION_EX` is `vm.CallFunctionEx` in `vm/eval_call.go`. `MAKE_FUNCTION` is `vm.MakeFunction`, creating `objects.FunctionObject`. `SET_FUNCTION_ATTRIBUTE` is `vm.SetFunctionAttribute`. `CALL_INTRINSIC_1` dispatches via `vm.Intrinsic1Table`.

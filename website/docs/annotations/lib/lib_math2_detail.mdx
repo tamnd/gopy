@@ -1,0 +1,106 @@
+---
+title: Modules/mathmodule.c (part 2)
+description: "Modules/mathmodule.c part 2: math.isclose, math.prod, math.comb, math.perm, math.dist, math.log with base."
+cpython_path: Modules/mathmodule.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/mathmodule.c" />
+
+This annotation covers combinatorics and precision-aware comparisons. See `lib_math_detail` for `math.floor`, `math.ceil`, `math.sqrt`, `math.sin`/`cos`/`tan`, and `math.gcd`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `math.isclose` | Approximate equality for floats |
+| 81-180 | `math.prod` | Product of an iterable (like `sum` but multiply) |
+| 181-300 | `math.comb` / `math.perm` | Binomial coefficient and permutations |
+| 301-420 | `math.dist` | Euclidean distance between two points |
+| 421-500 | `math.log` with base | `log(x, base)` = `log(x) / log(base)` |
+
+## Reading
+
+### `math.isclose`
+
+```c
+// CPython: Modules/mathmodule.c:2980 math_isclose_impl
+static PyObject *
+math_isclose_impl(PyObject *module, double a, double b,
+                  double rel_tol, double abs_tol)
+{
+    /* PEP 485: |a-b| <= max(rel_tol * max(|a|, |b|), abs_tol) */
+    if (rel_tol < 0.0 || abs_tol < 0.0) {
+        PyErr_SetString(PyExc_ValueError, "tolerances must be non-negative");
+        return NULL;
+    }
+    if (a == b) Py_RETURN_TRUE;
+    if (isinf(a) || isinf(b)) Py_RETURN_FALSE;
+    double diff = fabs(b - a);
+    return PyBool_FromLong(
+        (diff <= fabs(rel_tol * b)) ||
+        (diff <= fabs(rel_tol * a)) ||
+        (diff <= abs_tol));
+}
+```
+
+`math.isclose(a, b, rel_tol=1e-9, abs_tol=0.0)` handles the case where both `a` and `b` are small (use `abs_tol`) or both are large (use `rel_tol`). The symmetric formulation avoids `isclose(a,b) != isclose(b,a)`.
+
+### `math.comb`
+
+```c
+// CPython: Modules/mathmodule.c:3180 math_comb_impl
+static PyObject *
+math_comb_impl(PyObject *module, PyObject *n, PyObject *k)
+{
+    /* C(n, k) = n! / (k! * (n-k)!) using the recurrence:
+       C(n, k) = C(n-1, k-1) * n / k */
+    /* Validate n >= k >= 0 */
+    ...
+    /* Use integer arithmetic to avoid floating-point errors */
+    PyObject *result = PyLong_FromLong(1);
+    for (Py_ssize_t i = 0; i < ki; i++) {
+        result = PyNumber_Multiply(result, PyLong_FromSsize_t(ni - i));
+        result = PyNumber_FloorDivide(result, PyLong_FromSsize_t(i + 1));
+    }
+    return result;
+}
+```
+
+`math.comb(10, 3)` returns `120`. Integer arithmetic avoids floating-point overflow and round-off. The divide at each step keeps intermediate values small.
+
+### `math.dist`
+
+```c
+// CPython: Modules/mathmodule.c:3380 math_dist_impl
+static PyObject *
+math_dist_impl(PyObject *module, PyObject *p, PyObject *q)
+{
+    /* sqrt(sum((px - qx)^2 for px, qx in zip(p, q))) */
+    /* Uses hypot-style algorithm to avoid overflow */
+    Py_ssize_t n = PySequence_Length(p);
+    double max = 0.0;
+    /* First pass: find max coordinate difference */
+    for (int i = 0; i < n; i++) {
+        double d = fabs(PyFloat_AS_DOUBLE(p_i) - PyFloat_AS_DOUBLE(q_i));
+        if (d > max) max = d;
+    }
+    /* Second pass: sum normalized squares */
+    double sum = 0.0;
+    for (int i = 0; i < n; i++) {
+        double d = (PyFloat_AS_DOUBLE(p_i) - PyFloat_AS_DOUBLE(q_i)) / max;
+        sum += d * d;
+    }
+    return PyFloat_FromDouble(max * sqrt(sum));
+}
+```
+
+`math.dist([0,0], [3,4])` returns `5.0`. The two-pass normalization prevents overflow when coordinates are large (e.g., `dist([1e200, 0], [0, 0])`).
+
+## gopy notes
+
+`math.isclose` is `module/math.IsClose` in `module/math/module.go`. `math.comb` uses `math/big.Int` for exact integer arithmetic. `math.dist` uses a two-pass loop. `math.prod` uses Go's `math/big` for integer inputs and `float64` multiplication otherwise.
