@@ -1,0 +1,108 @@
+---
+title: Python/compile.c (part 4)
+description: "Python/compile.c part 4: exception table construction, jump target resolution, basic block layout, co_exceptiontable encoding."
+cpython_path: Python/compile.c
+cpython_version: "3.14"
+lines: 7200
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Python/compile.c" />
+
+This annotation covers the backend of the CPython compiler: how basic blocks are assembled into bytecode, how jump targets are resolved, and how the exception table (`co_exceptiontable`) is encoded.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-300 | `basicblock`, `cfg_builder` | Basic block and control-flow graph types |
+| 301-600 | `assemble_jump_offsets` | First pass: assign PC offsets to basic blocks |
+| 601-900 | `assemble_instructions` | Second pass: emit instruction bytes |
+| 901-1200 | `build_exception_table` | Construct `co_exceptiontable` from block annotations |
+| 1201-1500 | `optimize_basic_block`, `remove_redundant_jumps` | Peephole optimizations |
+| 1501-1800 | `write_location_entry` | Encode `co_linetable` entries |
+
+## Reading
+
+### Basic block structure
+
+```c
+// CPython: Python/compile.c:188 basicblock
+typedef struct basicblock_ {
+    struct basicblock_ *b_list;  /* linked list of all blocks */
+    struct basicblock_ *b_next;  /* fall-through successor */
+    struct cfg_instr *b_instr;   /* instruction array */
+    int b_iused;                 /* instructions used */
+    int b_ialloc;                /* instructions allocated */
+    int b_label;                 /* target label (if any) */
+    int b_offset;                /* bytecode offset (assigned in pass 1) */
+    unsigned b_startdepth;       /* stack depth at block entry */
+    unsigned b_reachable;        /* 1 if reachable from the entry block */
+} basicblock;
+```
+
+### Jump offset resolution
+
+```c
+// CPython: Python/compile.c:480 assemble_jump_offsets
+static int
+assemble_jump_offsets(struct assembler *a, struct compiler *c)
+{
+    /* Assign a byte offset to each basic block.
+       Iterate until stable (jumps may expand due to wide encoding). */
+    int again = 1;
+    while (again) {
+        again = 0;
+        int offset = 0;
+        for each block b:
+            b->b_offset = offset;
+            for each instr in b:
+                offset += instr_size(instr);
+        /* Recheck: a jump whose target moved now needs a wider encoding */
+        for each block b:
+            for each jump instr in b:
+                if target_offset(instr) != old_target(instr):
+                    again = 1;
+    }
+}
+```
+
+CPython uses `EXTENDED_ARG` prefixes to encode jump targets larger than 255. The iterative approach handles rare cases where expanding one jump causes another to cross the 255 threshold.
+
+### Exception table encoding
+
+```c
+// CPython: Python/compile.c:940 build_exception_table
+static int
+build_exception_table(struct assembler *a, struct compiler *c)
+{
+    /* For each (start, end, handler, stack_depth, lasti) interval: */
+    for each except_block:
+        write_varint(start_offset);
+        write_varint(size);              /* end - start */
+        write_varint(handler_offset);
+        write_varint(stack_depth);
+        write_bool(lasti);               /* should push lasti onto stack? */
+}
+```
+
+The exception table replaces the old `SETUP_FINALLY`/`POP_BLOCK` opcode pairs (removed in 3.11). When an exception is raised, the interpreter does a binary search over `co_exceptiontable` to find the handler.
+
+### Peephole: `LOAD_CONST + RETURN_VALUE`
+
+```c
+// CPython: Python/compile.c:1240 optimize_basic_block
+/* Fold: LOAD_CONST x; RETURN_VALUE -> RETURN_CONST x */
+if (instr->i_opcode == RETURN_VALUE &&
+    prev->i_opcode == LOAD_CONST) {
+    prev->i_opcode = NOP;
+    instr->i_opcode = RETURN_CONST;
+    instr->i_oparg = prev->i_oparg;
+}
+```
+
+## gopy notes
+
+The Go compiler in `compile/flowgraph.go` and `compile/flowgraph_jumps.go` performs the same two-pass assembly. Jump offset resolution is in `compile/flowgraph_jumps.go`. The exception table is constructed in `compile/flowgraph_except.go`. The encoding format is identical to CPython 3.11+ so that `.pyc` files produced by gopy are compatible.

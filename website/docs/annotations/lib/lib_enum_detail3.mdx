@@ -1,0 +1,104 @@
+---
+title: Lib/enum.py (part 3)
+description: "enum part 3: StrEnum, IntFlag, Flag bit operations, _generate_next_value_, auto(), _missing_, EnumMeta.__new__ internals."
+cpython_path: Lib/enum.py
+cpython_version: "3.14"
+lines: 2800
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/enum.py" />
+
+This annotation covers the `Flag`, `IntFlag`, `StrEnum` variants and the internal `EnumMeta.__new__` class-creation machinery. See `lib_enum_detail2` for `Enum`, `IntEnum`, and basic usage.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-200 | `_generate_next_value_`, `auto` | Automatic value assignment |
+| 201-500 | `EnumMeta.__new__` internals | Class body namespace, member creation |
+| 501-800 | `Flag` | Non-integer flag with `|`, `&`, `~` operators |
+| 801-1100 | `IntFlag` | Integer-based flag (inherits from `int`) |
+| 1101-1300 | `StrEnum` | String enum where members are also `str` |
+| 1301-1600 | `_missing_` hook | Custom lookup for missing values |
+
+## Reading
+
+### `auto` and `_generate_next_value_`
+
+```python
+# CPython: Lib/enum.py:290 auto
+class auto:
+    value = _auto_null
+
+    def __new__(cls):
+        obj = object.__new__(cls)
+        obj.value = _auto_null
+        return obj
+
+# Used as:
+class Color(Enum):
+    RED = auto()   # calls Color._generate_next_value_('RED', 1, 0, [])
+```
+
+`_generate_next_value_` defaults to returning `max(last_values) + 1` for `IntEnum` and the member name (lowercase) for `StrEnum`.
+
+### `EnumMeta.__new__` member collection
+
+```python
+# CPython: Lib/enum.py:412 EnumMeta.__new__ (abridged)
+def __new__(metacls, cls, bases, classdict, **kwds):
+    # classdict is an _EnumDict that intercepts assignments
+    members = {k: v for k, v in classdict.items()
+               if not k.startswith('_') and k not in classdict._ignore}
+    ...
+    enum_class = super().__new__(metacls, cls, bases, classdict, **kwds)
+    for member_name, value in members.items():
+        if isinstance(value, auto):
+            value = enum_class._generate_next_value_(member_name, ...)
+        member = object.__new__(enum_class)
+        member._name_ = member_name
+        member._value_ = value
+        enum_class._value2member_map_[value] = member
+        setattr(enum_class, member_name, member)
+    return enum_class
+```
+
+### `Flag` composition
+
+```python
+# CPython: Lib/enum.py:820 Flag.__or__
+def __or__(self, other):
+    if isinstance(other, self.__class__):
+        return self.__class__(self._value_ | other._value_)
+    return NotImplemented
+```
+
+`Flag` members created by `|` are "pseudo-members" (composites) that may not be in `_value2member_map_`. The `_decompose` helper breaks them back into named members.
+
+### `_missing_` hook
+
+```python
+# CPython: Lib/enum.py:680 EnumMeta.__call__
+def __call__(cls, value, names=None, ...):
+    if names is None:
+        # Value lookup
+        try:
+            return cls._value2member_map_[value]
+        except KeyError:
+            pass
+        # Try _missing_
+        if cls._missing_ is not None:
+            result = cls._missing_(value)
+            if isinstance(result, cls):
+                return result
+        raise ValueError(f"{value!r} is not a valid {cls.__name__}")
+```
+
+`_missing_` lets enum classes handle values not in the map (e.g., return a sentinel or raise a custom error).
+
+## gopy notes
+
+`enum` is needed for `http.HTTPStatus`, `socket` constants, `re.RegexFlag`, and many stdlib modules. `EnumMeta.__new__` requires a working metaclass system and `_EnumDict` (a custom `dict` subclass). `Flag` bit operations require `__or__`, `__and__`, `__xor__`, and `__invert__` on the enum class.

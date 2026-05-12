@@ -315,6 +315,7 @@ const sidebars = {
         'annotations/python/python_thread_detail',
         'annotations/python/python_import_detail',
         'annotations/python/python_ceval5_detail',
+        'annotations/python/python_compile4_detail',
       ],
     },
     {
@@ -931,6 +932,7 @@ const sidebars = {
         'annotations/modules/modules_heapq_detail',
         'annotations/modules/modules_bisect_detail',
         'annotations/modules/modules_posixmodule_detail',
+        'annotations/modules/modules_codecs_detail',
       ],
     },
     {
@@ -1431,6 +1433,7 @@ const sidebars = {
         'annotations/lib/lib_os_path_detail',
         'annotations/lib/lib_contextlib_detail3',
         'annotations/lib/lib_asyncio_detail',
+        'annotations/lib/lib_enum_detail3',
       ],
     },
   ],

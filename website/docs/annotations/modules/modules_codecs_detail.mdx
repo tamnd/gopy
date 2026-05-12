@@ -1,0 +1,63 @@
+---
+title: Modules/_codecsmodule.c
+description: "_codecs module: encode/decode entry points, lookup, register, codec_search_function, IncrementalEncoder/Decoder, StreamReader/Writer."
+cpython_path: Modules/_codecsmodule.c
+cpython_version: "3.14"
+lines: 800
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/_codecsmodule.c" />
+
+`_codecs` is the low-level C module for the codec registry. `codecs` (in `Lib/codecs.py`) provides the Python-facing API. The actual encoding/decoding is in `Objects/unicodeobject.c` for built-in codecs and in C extension modules for others.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-100 | `_codecs_lookup_impl` | Look up a codec by name |
+| 101-250 | `_codecs_encode_impl`, `_codecs_decode_impl` | Encode/decode a string |
+| 251-450 | `_codecs_register_impl` | Register a search function |
+| 451-700 | `charmap_encode`, `charmap_decode` | Charmap codec entry |
+| 701-800 | Error handler registry | `register_error`, `lookup_error` |
+
+## Reading
+
+### Codec lookup
+
+```c
+// CPython: Modules/_codecsmodule.c:42 _codecs_lookup_impl
+static PyObject *
+_codecs_lookup_impl(PyObject *module, const char *encoding)
+{
+    PyObject *codec = _PyCodec_Lookup(encoding);
+    return codec;
+}
+```
+
+`_PyCodec_Lookup` normalizes the encoding name (lowercase, replace `-`/` ` with `_`) and searches the codec registry. Built-in codecs like `utf-8`, `latin-1`, and `ascii` are found immediately; others invoke registered search functions.
+
+### Error handlers
+
+```c
+// CPython: Modules/_codecsmodule.c:320 _codecs_register_error_impl
+static PyObject *
+_codecs_register_error_impl(PyObject *module, const char *errors,
+                             PyObject *handler)
+{
+    /* Register a callable for 'errors' mode */
+    return PyCodec_RegisterError(errors, handler);
+}
+```
+
+The standard error handlers are: `strict` (raise), `ignore`, `replace`, `xmlcharrefreplace`, `backslashreplace`, `surrogateescape`, `surrogatepass`. Custom handlers are registered here.
+
+### `surrogatepass`
+
+The `surrogatepass` error handler allows encoding lone surrogate characters (U+D800–U+DFFF) that appear in Python strings (via `sys.stdin.buffer.read().decode('utf-8', 'surrogatepass')`). This is the only safe way to round-trip arbitrary bytes through a `str`.
+
+## gopy notes
+
+`codecs` is used by `io.TextIOWrapper` for all text encoding/decoding. In gopy the codec registry is in `module/codecs/`. Built-in codecs (`utf-8`, `ascii`, `latin-1`, `utf-16`, `utf-32`) wrap Go's `unicode/utf8` and `golang.org/x/text/encoding`. The `surrogatepass` and `surrogateescape` error handlers are needed for correct `sys.stdin`/`sys.stdout` behavior.
