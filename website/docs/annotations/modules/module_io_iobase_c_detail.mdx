@@ -1,0 +1,72 @@
+---
+title: Modules/_io/iobase.c
+description: "IOBase and RawIOBase abstract base classes: the flush/close/seek/tell/readable/writable/seekable protocol, the __del__ finalizer, and the __iter__/readline default implementations."
+cpython_path: Modules/_io/iobase.c
+cpython_version: "3.14"
+lines: 700
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/_io/iobase.c" />
+
+`Modules/_io/iobase.c` defines `IOBase` and `RawIOBase`, the two abstract base classes at the root of the `io` class hierarchy. `IOBase` provides the default implementations of `flush`, `close`, `__del__`, `readline`, and `__iter__`. `RawIOBase` adds `read`, `readall`, and `write` abstract methods.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `iobase` struct | Object layout; `dict`, `weakreflist`, `finalizing` flag |
+| 81-200 | `iobase_flush`, `iobase_close` | Default flush (no-op); close calls flush then sets closed flag |
+| 201-350 | `iobase_readline` | Default readline via single-char `read(1)` loop |
+| 351-450 | `iobase_iter`, `iobase_iternext` | `__iter__` returns self; `__next__` calls readline |
+| 451-600 | `iobase_finalize`, `iobase_unsupported` | `__del__` hook; raises `UnsupportedOperation` |
+| 601-700 | `rawiobase_*`, type wiring | RawIOBase abstract read/write; type slot setup |
+
+## Reading
+
+### close() and the finalizer
+
+`iobase_close` calls `flush()` and then sets the `__IOBase_closed` attribute. The `__del__` method calls `close()` if the object is not already closed, issuing a `ResourceWarning` if the file was left open by user code.
+
+```c
+// Modules/_io/iobase.c:81 iobase_close
+static PyObject *
+iobase_close(PyObject *self, PyObject *args)
+{
+    if (IS_CLOSED(self)) Py_RETURN_NONE;
+    PyObject *res = PyObject_CallMethodNoArgs(self, _PyIO_str_flush);
+    iobase_set_closed(self);
+    return res;
+}
+```
+
+### Default readline
+
+The default `readline()` reads one byte at a time until a newline or EOF. Subclasses override this with a buffered implementation; the default exists so any `IOBase` subclass that implements only `read(1)` can still be used as a line iterator.
+
+```c
+// Modules/_io/iobase.c:201 iobase_readline
+static PyObject *
+iobase_readline(PyObject *self, PyObject *args)
+{
+    PyObject *buffer = PyByteArray_FromStringAndSize(NULL, 0);
+    while (1) {
+        PyObject *b = _PyObject_CallMethodId(self, &PyId_read, "i", 1);
+        if (b == NULL || PyBytes_GET_SIZE(b) == 0) { Py_DECREF(b); break; }
+        PyByteArray_Concat(&buffer, b);
+        if (((char *)PyBytes_AS_STRING(b))[0] == '\n') { Py_DECREF(b); break; }
+        Py_DECREF(b);
+    }
+    return PyBytes_FromObject(buffer);
+}
+```
+
+### UnsupportedOperation
+
+`iobase_unsupported` raises `io.UnsupportedOperation`, which is a subclass of both `OSError` and `ValueError`. Abstract methods like `read()` and `write()` on `IOBase` call this to produce a clear error message when a subclass forgets to implement them.
+
+## gopy notes
+
+Not yet ported. The planned package path is `module/_io/`. The Go equivalent uses interface types (`io.Reader`, `io.Writer`, `io.Closer`, `io.Seeker`) rather than an inheritance hierarchy; an idiomatic port would expose the same Python-facing protocol while delegating to Go interfaces internally.

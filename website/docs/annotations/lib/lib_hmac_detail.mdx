@@ -1,0 +1,68 @@
+---
+title: Lib/hmac.py
+description: "HMAC: keyed-hash message authentication using any hashlib digest, with constant-time compare_digest to prevent timing attacks."
+cpython_path: Lib/hmac.py
+cpython_version: "3.14"
+lines: 200
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/hmac.py" />
+
+`Lib/hmac.py` implements HMAC (Hash-based Message Authentication Code) per RFC 2104. It works with any `hashlib` digest and exposes `hmac.new()`, `hmac.digest()` (fast single-call variant), and `hmac.compare_digest()` for constant-time comparison.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-30 | imports, constants | `IPAD`, `OPAD` (0x36, 0x5c) |
+| 31-130 | `HMAC` | Class with `update`, `digest`, `hexdigest`, `copy` |
+| 131-160 | `new` | Factory function |
+| 161-200 | `digest`, `compare_digest` | Fast one-shot HMAC; constant-time comparison |
+
+## Reading
+
+### HMAC construction
+
+`HMAC.__init__` pads or hashes the key to the block size, then XORs with `IPAD` and `OPAD` to produce the inner and outer key pads. The inner hash is started with the inner pad; `update()` appends data to it.
+
+```python
+# CPython: Lib/hmac.py:31 HMAC.__init__
+class HMAC:
+    def __init__(self, key, msg=None, digestmod=''):
+        blocksize = self._hmac.block_size if hasattr(self, '_hmac') else 64
+        if len(key) > blocksize:
+            key = digestmod(key).digest()
+        key = key + b'\x00' * (blocksize - len(key))
+        self._inner = digestmod(bytes(x ^ 0x36 for x in key))
+        self._outer = digestmod(bytes(x ^ 0x5c for x in key))
+        if msg is not None:
+            self.update(msg)
+```
+
+### digest() finalization
+
+`digest()` copies the inner hash, finalizes it, then feeds the result into the outer hash (with the outer key pad already pre-seeded) to produce the final MAC.
+
+```python
+# CPython: Lib/hmac.py:90 HMAC.digest
+def digest(self):
+    h = self._inner.copy()
+    return self._outer.copy().update(h.digest()).digest()
+```
+
+### compare_digest: timing safety
+
+`hmac.compare_digest(a, b)` delegates to `_hashlib.compare_digest` (C implementation) which compares in constant time regardless of where the strings differ. This prevents timing side-channel attacks where an attacker measures response time to guess a MAC byte by byte.
+
+```python
+# CPython: Lib/hmac.py:161 compare_digest
+def compare_digest(a, b):
+    return _hashlib.compare_digest(a, b)
+```
+
+## gopy notes
+
+Not yet ported. The planned package path is `module/hmac/`. Go's `crypto/hmac` package implements the same RFC 2104 construction; the port would wrap it and expose `new()`, `digest()`, and `compare_digest()` as Python callables.

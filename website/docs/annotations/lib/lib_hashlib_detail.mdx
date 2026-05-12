@@ -1,0 +1,73 @@
+---
+title: Lib/hashlib.py
+description: "hashlib public API: new(), md5(), sha256(), and the algorithm discovery mechanism that selects between OpenSSL EVP and pure-Python fallbacks."
+cpython_path: Lib/hashlib.py
+cpython_version: "3.14"
+lines: 350
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/hashlib.py" />
+
+`Lib/hashlib.py` is the public API for Python's hash functions. It provides `hashlib.new(name)` and convenience functions like `hashlib.md5()`, `hashlib.sha256()`, and `hashlib.sha3_256()`. The module detects available backends at import time and routes each algorithm to the fastest available implementation.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-60 | imports, `__always_supported`, `__builtin_constructor_cache` | Algorithm lists; constructor cache |
+| 61-130 | `__get_builtin_constructor` | Fallback to `_sha2`, `_md5`, `_sha3`, etc. |
+| 131-200 | `__get_openssl_constructor` | Try `_hashlib.new(name)` first |
+| 201-260 | `new` | Public entry point; tries OpenSSL then built-in |
+| 261-350 | Algorithm aliases | `md5`, `sha1`, `sha224`, `sha256`, `sha384`, `sha512`, `sha3_*`, `blake2b`, `blake2s` |
+
+## Reading
+
+### Algorithm discovery
+
+At import time `hashlib` probes `_hashlib` (the OpenSSL binding) for each algorithm in `__always_supported`. If `_hashlib` provides it, the constructor is cached. If not (OpenSSL missing or algorithm not compiled in), the pure-Python or `_sha2`/`_md5` C extension is used as a fallback.
+
+```python
+# CPython: Lib/hashlib.py:131 __get_openssl_constructor
+def __get_openssl_constructor(name):
+    try:
+        f = getattr(_hashlib, 'openssl_' + name)
+        f()       # test it; raises if unavailable
+        return f
+    except (AttributeError, ValueError):
+        return __get_builtin_constructor(name)
+```
+
+### hashlib.new
+
+`new(name, data=b'', **kwargs)` is the universal entry point. It looks up the cached constructor and calls it. The `usedforsecurity` keyword (3.9+) passes a flag to OpenSSL that allows non-FIPS-approved algorithms in FIPS mode for non-security uses (e.g., checksums).
+
+```python
+# CPython: Lib/hashlib.py:201 new
+def new(name, data=b'', **kwargs):
+    name = name.lower()
+    try:
+        return __builtin_constructor_cache[name](data, **kwargs)
+    except KeyError:
+        pass
+    return __get_openssl_constructor(name)(data, **kwargs)
+```
+
+### Convenience functions
+
+Each `hashlib.sha256()` etc. is a module-level variable set to the cached constructor at import time, making repeated calls faster than going through `new()` every time.
+
+```python
+# CPython: Lib/hashlib.py:261 convenience aliases
+md5    = __get_hash('md5')
+sha1   = __get_hash('sha1')
+sha256 = __get_hash('sha256')
+sha3_256 = __get_hash('sha3_256')
+blake2b  = __get_hash('blake2b')
+```
+
+## gopy notes
+
+Not yet ported. The planned package path is `module/hashlib/`. Go's `crypto/md5`, `crypto/sha256`, and `golang.org/x/crypto` packages provide the underlying implementations. The port would wrap them behind a `Hash` interface matching Python's `hashlib.HASH` protocol (`update`, `digest`, `hexdigest`, `copy`).

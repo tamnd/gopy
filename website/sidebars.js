@@ -278,6 +278,7 @@ const sidebars = {
         'annotations/python/python_ast_c_detail',
         'annotations/python/python_symtable_c_detail',
         'annotations/python/python_python_ast_c_detail',
+        'annotations/python/python_ceval_c_detail',
       ],
     },
     {
@@ -415,6 +416,7 @@ const sidebars = {
         'annotations/objects/memoryobject_c_detail',
         'annotations/objects/enumobject_c_detail',
         'annotations/objects/filterobject_c_detail',
+        'annotations/objects/objects_weakrefobject_c_detail',
       ],
     },
     {
@@ -617,6 +619,7 @@ const sidebars = {
         'annotations/include/include_pycore_call_h_detail',
         'annotations/include/include_cpython_dictobject_h_detail',
         'annotations/include/include_pycore_runtime_h_detail',
+        'annotations/include/include_cpython_unicodeobject_h_detail',
       ],
     },
     {
@@ -798,6 +801,7 @@ const sidebars = {
         'annotations/modules/io_bufferedio_c_detail',
         'annotations/modules/io_textio_c_detail',
         'annotations/modules/io_fileio_c_detail',
+        'annotations/modules/module_io_iobase_c_detail',
       ],
     },
     {
@@ -1197,6 +1201,8 @@ const sidebars = {
         'annotations/lib/email_mime_multipart_detail',
         'annotations/lib/email_mime_base_detail',
         'annotations/lib/urllib_error_detail',
+        'annotations/lib/lib_hashlib_detail',
+        'annotations/lib/lib_hmac_detail',
       ],
     },
   ],

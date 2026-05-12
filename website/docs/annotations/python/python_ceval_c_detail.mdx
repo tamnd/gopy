@@ -1,0 +1,94 @@
+---
+title: Python/ceval.c
+description: "Evaluation loop entry points and the _PyEval_EvalFrameDefault dispatch function: the outer call stack management, tracing hooks, and the main opcode fetch-decode-execute loop."
+cpython_path: Python/ceval.c
+cpython_version: "3.14"
+lines: 7000
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Python/ceval.c" />
+
+`Python/ceval.c` is the main evaluation loop. It contains `_PyEval_EvalFrameDefault`, the C function that interprets bytecode by fetching opcodes and dispatching to handler code. The file also manages the eval breaker mechanism, profiling/tracing hooks, and the frame call stack.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-200 | includes, macros | `DISPATCH`, `JUMPBY`, `TARGET`, `STACK_*` macros |
+| 201-500 | `_PyEval_EvalCode`, `_PyEval_Vector` | Frame setup; entry from C callers |
+| 501-800 | `_Py_HandlePending` | Eval breaker: signals, async exceptions, GIL switch |
+| 801-1200 | `call_trace`, `call_trace_protected` | Profiling and tracing hook dispatch |
+| 1201-6500 | `_PyEval_EvalFrameDefault` | Main opcode dispatch loop |
+| 6501-7000 | `_PyEval_EvalFrameDefault` exception handlers | Error unwind, `try/except`, `try/finally` |
+
+## Reading
+
+### Opcode dispatch
+
+`_PyEval_EvalFrameDefault` uses computed gotos (on GCC/Clang) or a switch statement for opcode dispatch. The `DISPATCH()` macro fetches the next instruction and jumps to its handler.
+
+```c
+// Python/ceval.c:1201 _PyEval_EvalFrameDefault dispatch loop
+for (;;) {
+    assert(STACK_LEVEL() >= 0);
+    assert(_Py_CHECK_EMSCRIPTEN_SIGNALS_PERIODICALLY());
+    DISPATCH();
+
+    TARGET(LOAD_FAST) {
+        PyObject *value = GETLOCAL(oparg);
+        assert(value != NULL);
+        Py_INCREF(value);
+        STACK_GROW(1);
+        SETITEM(STACK_POINTER(), value, -1, value);
+        DISPATCH();
+    }
+    ...
+}
+```
+
+### Eval breaker
+
+`_Py_HandlePending` is called when the eval breaker flag is set. It checks for pending signals (`signal.raise_signal`), async exceptions (`thread.interrupt_main`), and GIL switch requests. The flag is set atomically by other threads or signal handlers; the check happens at the top of every backward jump and function call.
+
+```c
+// Python/ceval.c:501 _Py_HandlePending
+int
+_Py_HandlePending(PyThreadState *tstate)
+{
+    if (_PyRuntime.ceval.signals_pending) {
+        if (handle_signals(tstate) != 0) return -1;
+    }
+    if (tstate->async_exc != NULL) {
+        return _PyEval_SetAsyncExc(tstate, tstate->async_exc);
+    }
+    if (_PyEval_GILDropRequest(tstate)) {
+        /* release and re-acquire the GIL */
+    }
+    return 0;
+}
+```
+
+### Tracing hooks
+
+When `tstate->tracing` is set, the loop calls `call_trace` before each `call`, `return`, `exception`, and `line` event. `call_trace` invokes the registered `sys.settrace` function. The `tstate->tracing` flag is incremented while inside a trace call to prevent recursive tracing.
+
+```c
+// Python/ceval.c:801 call_trace
+static int
+call_trace(Py_tracefunc func, PyObject *obj,
+           PyThreadState *tstate, _PyInterpreterFrame *frame,
+           int what, PyObject *arg)
+{
+    tstate->tracing++;
+    int result = func(obj, _PyFrame_GetFrameObject(frame), what, arg);
+    tstate->tracing--;
+    return result;
+}
+```
+
+## gopy notes
+
+The gopy equivalent is `vm/eval_gen.go`, which contains the main opcode dispatch loop generated from the CPython bytecode specification. The eval breaker maps to `vm/eval_simple.go`'s periodic check for Go channel signals. Tracing hooks are not yet ported.
