@@ -1,9 +1,8 @@
 // Port of io.open via the pure-Python reference in Lib/_pyio.py:75
 // def open. CPython's C entry point is Modules/_io/_iomodule.c io_open;
 // both share the same shape: validate the mode string, open the file
-// descriptor, then layer the buffered / text adapters on top. gopy's
-// File type already collapses those adapters, so this function is the
-// argument validator + os.OpenFile wrapper.
+// descriptor, then layer the buffered / text adapters on top. This file
+// delegates to _io.Open which is the canonical implementation.
 //
 // CPython: Lib/_pyio.py:75 open (reference Python implementation)
 // CPython: Modules/_io/_iomodule.c:177 io_open
@@ -15,19 +14,27 @@ import (
 	"fmt"
 	"os"
 
+	_io "github.com/tamnd/gopy/module/io"
 	"github.com/tamnd/gopy/objects"
 )
 
-// Open implements the open() builtin. It accepts the file path
-// (str / bytes), a mode string, and the optional buffering / encoding
-// / errors / newline / closefd / opener arguments. The returned object
-// is a File: in binary mode it satisfies the BufferedReader /
-// BufferedWriter contract (read/write trades in bytes); in text mode it
-// satisfies TextIOWrapper (read/write trades in str).
+// Open implements the open() builtin by delegating to _io.Open. This
+// keeps a single canonical implementation in the _io module and makes
+// builtins.open() behave identically to io.open(), matching CPython
+// where both names point at the same C function.
 //
 // CPython: Lib/_pyio.py:193 open body
 // CPython: Modules/_io/_iomodule.c:177 io_open
 func Open(args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error) {
+	return _io.Open(args, kwargs)
+}
+
+// openLegacy is the previous builtins.open implementation retained for
+// tests that rely on *objects.File return type. It is no longer exposed
+// via builtins; use Open (which delegates to _io.Open) instead.
+//
+// CPython: Lib/_pyio.py:193 open body
+func openLegacy(args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error) {
 	a, err := bindOpenArgs(args, kwargs)
 	if err != nil {
 		return nil, err
