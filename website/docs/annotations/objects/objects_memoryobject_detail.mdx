@@ -1,0 +1,85 @@
+---
+title: Objects/memoryobject.c
+description: "Objects/memoryobject.c: memoryview — buffer protocol view, shape/strides/format, slicing, cast, tobytes, tolist."
+cpython_path: Objects/memoryobject.c
+cpython_version: "3.14"
+lines: 2000
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Objects/memoryobject.c" />
+
+`memoryview` exposes the buffer protocol as a Python object. It allows zero-copy access to the underlying memory of bytes, bytearray, array.array, and any object implementing `tp_as_buffer`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-200 | `PyMemoryViewObject`, `Py_buffer` | Object layout and buffer info struct |
+| 201-500 | `memoryview_new`, `PyMemoryView_FromObject` | Creation |
+| 501-800 | `memory_getitem`, `memory_setitem` | Indexed access with format unpacking |
+| 801-1100 | `memory_subscript` | Slicing (returns a new memoryview) |
+| 1101-1400 | `memory_cast` | Change format/shape interpretation |
+| 1401-2000 | `tobytes`, `tolist`, `toreadonly` | Conversion helpers |
+
+## Reading
+
+### Buffer info
+
+```c
+// CPython: Objects/memoryobject.c:42 Py_buffer
+typedef struct bufferinfo {
+    void *buf;             /* pointer to raw memory */
+    PyObject *obj;         /* owner of the buffer */
+    Py_ssize_t len;        /* total byte count */
+    Py_ssize_t itemsize;   /* size of one element */
+    int readonly;
+    int ndim;              /* number of dimensions */
+    char *format;          /* struct format string (e.g. "B", "d") */
+    Py_ssize_t *shape;     /* elements per dimension */
+    Py_ssize_t *strides;   /* byte step per dimension */
+    Py_ssize_t *suboffsets; /* for indirect arrays */
+} Py_buffer;
+```
+
+### `memory_cast`
+
+```c
+// CPython: Objects/memoryobject.c:1360 memory_cast
+static PyObject *
+memory_cast(PyMemoryViewObject *self, PyObject *args, PyObject *kwds)
+{
+    /* Change format and shape, keeping the same underlying memory */
+    PyObject *format;
+    PyObject *shape = NULL;
+    if (!PyArg_ParseTuple(args, "O|O:cast", &format, &shape))
+        return NULL;
+    /* Validate: total bytes must stay the same */
+    ...
+    return PyMemoryView_FromBuffer(&newinfo);
+}
+```
+
+`mv.cast('d')` reinterprets the bytes as `double` values. The total byte count must remain unchanged.
+
+### `tobytes`
+
+```c
+// CPython: Objects/memoryobject.c:1650 memory_tobytes
+static PyObject *
+memory_tobytes(PyMemoryViewObject *self, PyObject *args, PyObject *kwds)
+{
+    /* If contiguous C-order, copy directly */
+    if (MV_C_CONTIGUOUS(self->flags)) {
+        return PyBytes_FromStringAndSize(self->view.buf, self->view.len);
+    }
+    /* Otherwise, iterate with strides */
+    ...
+}
+```
+
+## gopy notes
+
+`memoryview` is needed for `struct.pack_into`, `bytes.fromhex`, and zero-copy I/O. In gopy `memoryview` wraps a Go `[]byte` slice (or a pointer+length pair for C-origin buffers). The `cast` and `shape` operations are implemented in `objects/memory.go`. `tobytes` returns a Python `bytes` object by copying the buffer.

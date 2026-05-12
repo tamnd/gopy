@@ -1,0 +1,106 @@
+---
+title: Modules/posixmodule.c (part 2)
+description: "posixmodule.c part 2: os.fork, os.execve, os.waitpid, os.pipe, os.dup2, os.read/write, os.stat, os.scandir — process and file descriptor operations."
+cpython_path: Modules/posixmodule.c
+cpython_version: "3.14"
+lines: 12000
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/posixmodule.c" />
+
+This annotation covers the process management and low-level file descriptor APIs. See `modules_posix_detail` for the file path and stat functions.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-300 | `os.fork`, `os.fork1` | Process creation |
+| 301-600 | `os.execve`, `os.execl`, `os.execvpe` | Replace current process |
+| 601-900 | `os.waitpid`, `os.wait`, `os.waitstatus_to_exitcode` | Wait for child process |
+| 901-1200 | `os.pipe`, `os.pipe2`, `os.dup`, `os.dup2` | File descriptor operations |
+| 1201-1500 | `os.read`, `os.write`, `os.close` | Low-level I/O |
+| 1501-1800 | `os.open`, `os.lseek`, `os.fstat` | File descriptor access |
+| 1801-2200 | `os.scandir`, `DirEntry` | Directory traversal with stat caching |
+
+## Reading
+
+### `os.fork`
+
+```c
+// CPython: Modules/posixmodule.c:3820 os_fork_impl
+static PyObject *
+os_fork_impl(PyObject *module)
+{
+    pid_t pid;
+    PyOS_BeforeFork();
+    pid = fork();
+    if (pid == 0) {
+        /* Child: reset state */
+        PyOS_AfterFork_Child();
+    } else {
+        PyOS_AfterFork_Parent();
+    }
+    ...
+    return PyLong_FromPid(pid);
+}
+```
+
+`PyOS_BeforeFork` acquires the import lock and other locks to prevent deadlock in the child. `PyOS_AfterFork_Child` resets the GIL, reinitializes random state, and flushes file buffers.
+
+### `os.execve`
+
+```c
+// CPython: Modules/posixmodule.c:3920 os_execve_impl
+static PyObject *
+os_execve_impl(PyObject *module, path_t path, PyObject *argv, PyObject *env)
+{
+    char **argvlist = parse_argv(argv);
+    char **envlist = parse_envlist(env);
+    ...
+    execve(path.narrow, argvlist, envlist);
+    /* If we get here, execve failed */
+    PyErr_SetFromErrnoWithFilenameObject(PyExc_OSError, path.object);
+    return NULL;
+}
+```
+
+`execve` replaces the current process image. On success it never returns.
+
+### `os.scandir`
+
+```c
+// CPython: Modules/posixmodule.c:10800 ScandirIterator
+typedef struct {
+    PyObject_HEAD
+    path_t path;
+    DIR *dirp;
+    PyObject *stat_cache;   /* DirEntry stat cache */
+} ScandirIterator;
+```
+
+`os.scandir()` returns a `ScandirIterator` that yields `DirEntry` objects. Each `DirEntry` caches the `d_type` from `dirent` to allow `is_file()`/`is_dir()` without a `stat()` call on most filesystems.
+
+### `DirEntry.stat`
+
+```c
+// CPython: Modules/posixmodule.c:10620 DirEntry_stat
+static PyObject *
+DirEntry_stat(DirEntry *self, PyObject *args, PyObject *kwargs)
+{
+    if (!self->stat) {
+        /* Call os.stat on the path */
+        self->stat = _PyObject_CallMethod(module, &_Py_ID(stat), "Os",
+                                          self->path, "follow_symlinks", follow_symlinks);
+    }
+    return Py_NewRef(self->stat);
+}
+```
+
+`stat` is cached on the `DirEntry` object. The first call does a system call; subsequent calls return the cached result.
+
+## gopy notes
+
+Process operations (`fork`, `execve`, `waitpid`) are needed for `subprocess`. In gopy these map to `syscall.Fork`, `syscall.Exec`, `syscall.Wait4`. `os.pipe` maps to `syscall.Pipe`. `os.scandir` wraps Go's `os.ReadDir` with a `DirEntry` type that caches `FileInfo`. `os.dup2` is needed for subprocess pipe setup.

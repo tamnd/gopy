@@ -492,6 +492,7 @@ const sidebars = {
         'annotations/objects/objects_weakrefobject_detail',
         'annotations/objects/objects_genericaliasobject_detail',
         'annotations/objects/objects_classobject_detail',
+        'annotations/objects/objects_memoryobject_detail',
       ],
     },
     {
@@ -929,6 +930,7 @@ const sidebars = {
         'annotations/modules/modules_abc_detail',
         'annotations/modules/modules_heapq_detail',
         'annotations/modules/modules_bisect_detail',
+        'annotations/modules/modules_posixmodule_detail',
       ],
     },
     {
@@ -1428,6 +1430,7 @@ const sidebars = {
         'annotations/lib/lib_functools_detail2',
         'annotations/lib/lib_os_path_detail',
         'annotations/lib/lib_contextlib_detail3',
+        'annotations/lib/lib_asyncio_detail',
       ],
     },
   ],
