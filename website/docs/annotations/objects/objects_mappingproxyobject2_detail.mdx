@@ -1,0 +1,70 @@
+---
+title: Objects/descrobject.c — mappingproxyobject (part 2)
+description: "Objects/descrobject.c part 2 (mappingproxy): mappingproxy.__getitem__, __contains__, keys/values/items, __or__, __ror__."
+cpython_path: Objects/descrobject.c
+cpython_version: "3.14"
+lines: 400
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Objects/descrobject.c" />
+
+This annotation covers `mappingproxy` read operations and merge. See `objects_mapping_proxy_detail` for `mappingproxy.__new__`, `__setattr__` restriction, and `type.__dict__` wiring.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `mappingproxy.__getitem__` | Delegate `proxy[key]` to the underlying mapping |
+| 81-180 | `keys` / `values` / `items` | Forward to the wrapped dict |
+| 181-280 | `__contains__` / `get` | Presence check and default retrieval |
+| 281-400 | `__or__` / `__ror__` | Merge: `proxy | d` returns a new dict |
+
+## Reading
+
+### `mappingproxy.__getitem__`
+
+```c
+// CPython: Objects/descrobject.c:1120 mappingproxy_getitem
+static PyObject *
+mappingproxy_getitem(mappingproxyobject *pp, PyObject *key)
+{
+    return PyObject_GetItem(pp->dict, key);
+}
+```
+
+`type.__dict__['method']` dispatches through `mappingproxy.__getitem__`. The proxy wraps any mapping, not just dicts: `types.MappingProxyType({'a': 1})` works with any `Mapping`.
+
+### `keys` / `values` / `items`
+
+```c
+// CPython: Objects/descrobject.c:1180 mappingproxy_keys
+static PyObject *
+mappingproxy_keys(mappingproxyobject *pp, PyObject *Py_UNUSED(ignored))
+{
+    return PyMapping_Keys(pp->dict);
+}
+```
+
+`type.__dict__.keys()` returns the underlying dict's keys view. The proxy forwards all read methods to `pp->dict`. Because `tp_as_mapping->mp_subscript` is set but `mp_ass_subscript` is NULL, `proxy[key] = value` raises `TypeError: 'mappingproxy' object does not support item assignment`.
+
+### `__or__`
+
+```c
+// CPython: Objects/descrobject.c:1260 mappingproxy_or
+static PyObject *
+mappingproxy_or(PyObject *self, PyObject *other)
+{
+    mappingproxyobject *pp = (mappingproxyobject *)self;
+    /* proxy | other: create a new dict by merging */
+    return PyNumber_Or(pp->dict, other);
+}
+```
+
+`type.__dict__ | {'extra': 1}` returns a plain `dict`. The `|` operator is read-only: it creates a new dict rather than modifying the proxy. `|=` is not supported.
+
+## gopy notes
+
+`mappingproxy.__getitem__` is `objects.MappingProxyGetItem` in `objects/mapping_proxy.go`. `keys`/`values`/`items` delegate to `objects.DictKeys`, `objects.DictValues`, `objects.DictItems`. `__or__` calls `objects.DictOr` to merge into a new dict.

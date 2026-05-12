@@ -1,0 +1,101 @@
+---
+title: Modules/_csv.c (part 2)
+description: "Modules/_csv.c part 2: csv.writer, csv.DictWriter, csv.DictReader, Dialect validation, quoting modes."
+cpython_path: Modules/_csv.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/_csv.c" />
+
+This annotation covers CSV writing and the DictReader/DictWriter wrappers. See `modules_csv_detail` for `csv.reader`, `Dialect`, field parsing, and `csv.register_dialect`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-100 | `csv.writer` | Write rows as CSV to a file-like object |
+| 101-220 | `Writer.writerow` | Quote and join one row |
+| 221-340 | `csv.DictWriter` | Write dicts as rows; validate fieldnames |
+| 341-500 | Quoting modes | QUOTE_ALL, QUOTE_MINIMAL, QUOTE_NONNUMERIC, QUOTE_NONE |
+
+## Reading
+
+### `csv.writer`
+
+```c
+// CPython: Modules/_csv.c:920 Writer_new
+static PyObject *
+Writer_new(PyTypeObject *type, PyObject *args, PyObject *kwds)
+{
+    WriterObj *self = (WriterObj *)type->tp_alloc(type, 0);
+    PyObject *output_file;
+    PyObject *dialect = NULL;
+    if (!_PyArg_ParseTupleAndKeywordsFast(args, kwds,
+                                          "O|O", wr_kwlist,
+                                          &output_file, &dialect)) {
+        return NULL;
+    }
+    self->writeline = PyObject_GetAttr(output_file, _csvstate_global->write_str);
+    ...
+    return (PyObject *)self;
+}
+```
+
+`csv.writer(f)` stores `f.write` in `self->writeline`. `writerow` builds the output string and calls `writeline` once per row. Any file-like object with a `.write` method works.
+
+### `Writer.writerow`
+
+```c
+// CPython: Modules/_csv.c:980 Writer_writerow
+static PyObject *
+Writer_writerow(WriterObj *self, PyObject *seq)
+{
+    /* For each field: apply quoting rules, escape special chars,
+       join with delimiter, append line terminator. */
+    for (Py_ssize_t i = 0; i < seqlen; i++) {
+        PyObject *field = PySequence_GetItem(seq, i);
+        /* Convert to string, then quote if needed */
+        if (csv_join_append(self, field, i == seqlen - 1) < 0) {
+            return NULL;
+        }
+    }
+    /* Write the completed line */
+    PyObject *line = PyUnicode_Join(Py_None, self->rec);
+    PyObject *result = PyObject_CallOneArg(self->writeline, line);
+    ...
+}
+```
+
+Quoting is determined by the dialect: `QUOTE_MINIMAL` only quotes fields containing the delimiter, quotechar, or line terminator. `QUOTE_ALL` always quotes. `QUOTE_NONNUMERIC` quotes non-numeric fields and converts all numeric fields to `float` on read.
+
+### `DictWriter`
+
+```python
+# CPython: Lib/csv.py:145 DictWriter
+class DictWriter:
+    def __init__(self, f, fieldnames, restval='', extrasaction='raise', dialect='excel', **fmtparams):
+        self.fieldnames = fieldnames
+        self.restval = restval
+        if extrasaction.lower() not in ('raise', 'ignore'):
+            raise ValueError(...)
+        self.extrasaction = extrasaction
+        self.writer = writer(f, dialect, **fmtparams)
+
+    def writerow(self, rowdict):
+        if self.extrasaction == 'raise':
+            wrong_fields = set(rowdict) - set(self.fieldnames)
+            if wrong_fields:
+                raise ValueError(f"dict contains fields not in fieldnames: {wrong_fields!r}")
+        row = [rowdict.get(key, self.restval) for key in self.fieldnames]
+        return self.writer.writerow(row)
+```
+
+`DictWriter` converts dicts to ordered lists using `self.fieldnames` as the key order. `restval` fills in missing keys. `extrasaction='raise'` (default) rejects dicts with extra keys.
+
+## gopy notes
+
+`csv.writer` is `module/csv.Writer` in `module/csv/module.go`. `writerow` builds the CSV line as a Go string using `strings.Builder`, then calls the Python file's `.write` method via `objects.CallMethod`. `DictWriter` is implemented in pure Go following the same logic as the CPython Python-level wrapper.

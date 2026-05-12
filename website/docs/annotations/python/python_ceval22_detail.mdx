@@ -1,0 +1,88 @@
+---
+title: Python/ceval.c (part 22)
+description: "Python/ceval.c part 22: LOAD_ATTR specializations (MODULE, CLASS, WITH_DICT_OFFSET), STORE_ATTR_SLOT."
+cpython_path: Python/ceval.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Python/ceval.c" />
+
+This annotation covers attribute access specializations. See `python_ceval21_detail` for iterator and generator opcodes.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `LOAD_ATTR_MODULE` | `module.attr` — bypass `tp_getattro`, look in `module.__dict__` |
+| 81-160 | `LOAD_ATTR_WITH_DICT_OFFSET` | Instance attr via `tp_dictoffset` (general case) |
+| 161-260 | `LOAD_ATTR_SLOT` | Slot attribute: read from fixed C-struct offset |
+| 261-380 | `LOAD_ATTR_CLASS` | Class attribute via cached type version |
+| 381-500 | `STORE_ATTR_SLOT` / `STORE_ATTR_WITH_DICT_OFFSET` | Write attribute fast paths |
+
+## Reading
+
+### `LOAD_ATTR_MODULE`
+
+```c
+// CPython: Python/ceval.c:3480 LOAD_ATTR_MODULE
+inst(LOAD_ATTR_MODULE, (owner -- attr)) {
+    DEOPT_IF(!PyModule_CheckExact(owner), LOAD_ATTR);
+    PyObject *dict = ((PyModuleObject *)owner)->md_dict;
+    DEOPT_IF(dict == NULL, LOAD_ATTR);
+    /* Validate module dict version matches cache */
+    DEOPT_IF(((PyDictObject *)dict)->ma_version_tag != cache->dict_version, LOAD_ATTR);
+    PyObject *res = cache->result;
+    DEOPT_IF(res == NULL, LOAD_ATTR);
+    Py_INCREF(res);
+    attr = res;
+}
+```
+
+`math.pi` in a tight loop caches the dict version and the result pointer. On subsequent accesses, if the module dict hasn't changed, the cached pointer is returned directly without a hash lookup. The `ma_version_tag` invalidates the cache when any module attribute is added or removed.
+
+### `LOAD_ATTR_SLOT`
+
+```c
+// CPython: Python/ceval.c:3620 LOAD_ATTR_SLOT
+inst(LOAD_ATTR_SLOT, (owner -- attr)) {
+    /* For types with __slots__, the attribute lives at a fixed offset
+       in the object struct (a C-level member or PyObject* slot). */
+    DEOPT_IF(!PyObject_TypeCheck(owner, cache->type), LOAD_ATTR);
+    char *addr = (char *)owner + cache->offset;
+    attr = *(PyObject **)addr;
+    if (attr == NULL) {
+        /* Slot not set: raise AttributeError */
+        _PyObject_RaiseAttributeError(owner, name);
+        ERROR_IF(true, error);
+    }
+    Py_INCREF(attr);
+}
+```
+
+`point.x` on a `Point` class with `__slots__ = ['x', 'y']` reads from `(char*)point + offset` without any dict lookup. The type version tag ensures the cache is still valid if `Point` is subclassed or modified.
+
+### `STORE_ATTR_WITH_DICT_OFFSET`
+
+```c
+// CPython: Python/ceval.c:3720 STORE_ATTR_WITH_DICT_OFFSET
+inst(STORE_ATTR_WITH_DICT_OFFSET, (owner, value --)) {
+    DEOPT_IF(!PyObject_TypeCheck(owner, cache->type), STORE_ATTR);
+    /* Get or create instance __dict__ at tp_dictoffset */
+    PyObject **dictptr = (PyObject **)((char *)owner + cache->dictoffset);
+    if (*dictptr == NULL) {
+        *dictptr = PyDict_New();
+    }
+    int res = PyDict_SetItem(*dictptr, cache->name, value);
+    ERROR_IF(res < 0, error);
+}
+```
+
+`obj.x = 1` for a regular class (with `__dict__`) writes to the instance's `__dict__`. The dict is lazily created on first assignment. The offset is fixed per type and cached in the inline cache alongside the type's version tag.
+
+## gopy notes
+
+`LOAD_ATTR_MODULE` is `vm.LoadAttrModule` in `vm/eval_specialize.go`. Module dict version is `objects.ModuleDict.Version`. `LOAD_ATTR_SLOT` reads at `uintptr(owner) + cache.Offset`. `STORE_ATTR_WITH_DICT_OFFSET` calls `objects.DictSetItem` on the lazily-created instance dict.

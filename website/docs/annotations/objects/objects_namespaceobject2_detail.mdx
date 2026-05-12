@@ -1,0 +1,92 @@
+---
+title: Objects/namespaceobject.c (part 2)
+description: "Objects/namespaceobject.c part 2: SimpleNamespace.__repr__, __eq__, __reduce__, attribute iteration, and update."
+cpython_path: Objects/namespaceobject.c
+cpython_version: "3.14"
+lines: 350
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Objects/namespaceobject.c" />
+
+This annotation covers `SimpleNamespace` comparison and serialization. See `objects_namespaceobject_detail` for `__new__`, `__init__`, `__setattr__`, `__getattr__`, and the internal `__dict__`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `SimpleNamespace.__repr__` | `namespace(x=1, y=2)` representation |
+| 81-180 | `SimpleNamespace.__eq__` | Equality by `__dict__` comparison |
+| 181-280 | `SimpleNamespace.__reduce__` | Pickle support |
+| 281-350 | `__iter__` / `__len__` | Iterate attribute names (via `__dict__`) |
+
+## Reading
+
+### `SimpleNamespace.__repr__`
+
+```c
+// CPython: Objects/namespaceobject.c:120 namespace_repr
+static PyObject *
+namespace_repr(PyObject *ns)
+{
+    /* Produce "namespace(key=value, ...)" sorted by key */
+    PyObject *d = ((PyNamespaceObject *)ns)->ns_dict;
+    PyObject *keys = PyDict_Keys(d);
+    PyList_Sort(keys);
+    PyObject *pieces = PyList_New(PyList_GET_SIZE(keys));
+    for (int i = 0; i < PyList_GET_SIZE(keys); i++) {
+        PyObject *k = PyList_GET_ITEM(keys, i);
+        PyObject *v = PyDict_GetItem(d, k);
+        PyList_SET_ITEM(pieces, i, PyUnicode_FromFormat("%S=%R", k, v));
+    }
+    PyObject *joined = PyUnicode_Join(_comma_space, pieces);
+    return PyUnicode_FromFormat("namespace(%S)", joined);
+}
+```
+
+Keys are sorted for stable repr output. `types.SimpleNamespace(b=2, a=1)` prints as `namespace(a=1, b=2)`.
+
+### `SimpleNamespace.__eq__`
+
+```c
+// CPython: Objects/namespaceobject.c:200 namespace_richcompare
+static PyObject *
+namespace_richcompare(PyObject *self, PyObject *other, int op)
+{
+    if (op != Py_EQ && op != Py_NE) {
+        Py_RETURN_NOTIMPLEMENTED;
+    }
+    if (!PyObject_TypeCheck(other, &PyNamespace_Type)) {
+        Py_RETURN_NOTIMPLEMENTED;
+    }
+    PyObject *d_self  = ((PyNamespaceObject *)self)->ns_dict;
+    PyObject *d_other = ((PyNamespaceObject *)other)->ns_dict;
+    return PyObject_RichCompare(d_self, d_other, op);
+}
+```
+
+Two `SimpleNamespace` objects are equal iff their `__dict__`s are equal. Only `==` and `!=` are supported; `<`, `<=`, `>`, `>=` return `NotImplemented`.
+
+### `SimpleNamespace.__reduce__`
+
+```c
+// CPython: Objects/namespaceobject.c:260 namespace_reduce
+static PyObject *
+namespace_reduce(PyObject *self, PyObject *Py_UNUSED(ignored))
+{
+    /* Return (type, (), state) where state = __dict__ */
+    PyObject *ns_dict = ((PyNamespaceObject *)self)->ns_dict;
+    return PyTuple_Pack(3,
+        Py_TYPE(self),
+        PyTuple_New(0),
+        PyDict_Copy(ns_dict));
+}
+```
+
+`pickle.dumps(types.SimpleNamespace(x=1))` works because `__reduce__` returns the type plus the dict. On unpickling, `__init__(**state)` restores the attributes.
+
+## gopy notes
+
+`SimpleNamespace.__repr__` is `objects.NamespaceRepr` in `objects/namespace.go`. Key sorting uses Go's `sort.Strings`. `__eq__` delegates to `objects.DictEqual`. `__reduce__` returns a 3-tuple matching the pickle protocol. `__iter__` delegates to `objects.DictKeys`.

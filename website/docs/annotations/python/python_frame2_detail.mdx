@@ -1,0 +1,107 @@
+---
+title: Python/frame.c (part 2)
+description: "Python/frame.c part 2: _PyFrame_New, _PyFrame_Copy, frame locals, _PyFrame_FastToLocals, _PyFrame_LocalsToFast."
+cpython_path: Python/frame.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Python/frame.c" />
+
+This annotation covers frame locals synchronization. See `python_frame_detail` for `_PyFrame_New`, frame header layout, `f_back`, and frame object lifecycle.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-100 | `_PyFrame_FastToLocals` | Copy fast locals array to `frame.f_locals` dict |
+| 101-220 | `_PyFrame_LocalsToFast` | Copy `frame.f_locals` dict back to fast locals array |
+| 221-340 | Cell variable handling | Sync cell contents with `f_locals` for closures |
+| 341-500 | `frame.f_locals` property | Build the locals dict on demand |
+
+## Reading
+
+### `_PyFrame_FastToLocals`
+
+```c
+// CPython: Python/frame.c:180 _PyFrame_FastToLocals
+void
+_PyFrame_FastToLocals(PyFrameObject *f, int clear)
+{
+    /* Copy LOAD_FAST variables (the fast locals array) into f_locals dict.
+       Called by frame.f_locals getter, sys._getframe(), pdb, etc. */
+    PyCodeObject *co = f->f_frame->f_code;
+    PyObject **fastlocals = f->f_frame->localsplus;
+    PyObject *locals = f->f_locals;
+    if (locals == NULL) {
+        locals = f->f_locals = PyDict_New();
+    }
+    int j = co->co_nlocalsplus;
+    for (int i = 0; i < j; i++) {
+        _PyLocals_Kind kind = _PyLocals_GetKind(co->co_localspluskinds, i);
+        PyObject *name = PyTuple_GET_ITEM(co->co_localsplusnames, i);
+        PyObject *value = fastlocals[i];
+        if (kind & CO_FAST_CELL) value = PyCell_GET(value);
+        if (value == NULL) {
+            if (!clear) PyDict_SetItem(locals, name, Py_None);
+            else PyObject_DelItem(locals, name);
+        } else {
+            PyDict_SetItem(locals, name, value);
+        }
+    }
+}
+```
+
+`frame.f_locals` is not a live dict; it is a snapshot. Changes to `f_locals` after reading do not affect the running frame unless `_PyFrame_LocalsToFast` is called. Debuggers use this round-trip to modify local variables.
+
+### `_PyFrame_LocalsToFast`
+
+```c
+// CPython: Python/frame.c:260 _PyFrame_LocalsToFast
+void
+_PyFrame_LocalsToFast(PyFrameObject *f, int clear)
+{
+    /* Write f_locals dict back into the fast locals array.
+       Used by debuggers and exec() with a locals dict. */
+    PyCodeObject *co = f->f_frame->f_code;
+    PyObject *locals = f->f_locals;
+    for (int i = 0; i < co->co_nlocalsplus; i++) {
+        PyObject *name = PyTuple_GET_ITEM(co->co_localsplusnames, i);
+        PyObject *value = PyDict_GetItem(locals, name);
+        _PyLocals_Kind kind = _PyLocals_GetKind(co->co_localspluskinds, i);
+        if (kind & CO_FAST_CELL) {
+            PyCell_SET(fastlocals[i], value);
+        } else {
+            Py_XDECREF(fastlocals[i]);
+            fastlocals[i] = Py_XNewRef(value);
+        }
+    }
+}
+```
+
+`_PyFrame_LocalsToFast` is called by `exec()` when a `locals` dict is passed. The `ctypes` module uses it to implement `frame.f_locals['x'] = new_value` in C extensions.
+
+### `frame.f_locals` property
+
+```c
+// CPython: Python/frame.c:340 frame_getlocals
+static PyObject *
+frame_getlocals(PyFrameObject *f, void *Py_UNUSED(ignored))
+{
+    if (PyFrame_FastToLocalsWithError(f) < 0) return NULL;
+    PyObject *locals = f->f_locals;
+    if (locals == NULL) {
+        locals = f->f_locals = PyDict_New();
+    }
+    return Py_NewRef(locals);
+}
+```
+
+Each access to `frame.f_locals` calls `FastToLocals` to refresh the dict. This is why modifying `frame.f_locals` directly (without `LocalsToFast`) has no effect on the running frame.
+
+## gopy notes
+
+`_PyFrame_FastToLocals` is `vm.FrameFastToLocals` in `vm/frame.go`. The fast locals array is `vm.Frame.Locals []objects.Object`. `f_locals` is lazily built as a `objects.Dict`. `_PyFrame_LocalsToFast` is `vm.FrameLocalsToFast`, used by the `exec` builtin and `pdb`.

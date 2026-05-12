@@ -363,6 +363,8 @@ const sidebars = {
         'annotations/python/python_marshal3_detail',
         'annotations/python/python_ceval21_detail',
         'annotations/python/python_ast3_detail',
+        'annotations/python/python_ceval22_detail',
+        'annotations/python/python_frame2_detail',
       ],
     },
     {
@@ -596,6 +598,8 @@ const sidebars = {
         'annotations/objects/objects_weakrefobject3_detail',
         'annotations/objects/objects_genericalias2_detail',
         'annotations/objects/objects_uniontype2_detail',
+        'annotations/objects/objects_namespaceobject2_detail',
+        'annotations/objects/objects_mappingproxyobject2_detail',
       ],
     },
     {
@@ -1119,6 +1123,8 @@ const sidebars = {
         'annotations/modules/modules_ctypes2_detail',
         'annotations/modules/modules_signal2_detail',
         'annotations/modules/modules_itertools2_detail',
+        'annotations/modules/modules_json2_detail',
+        'annotations/modules/modules_csv2_detail',
       ],
     },
     {
@@ -1683,6 +1689,8 @@ const sidebars = {
         'annotations/lib/lib_urllib2_detail',
         'annotations/lib/lib_xml2_detail',
         'annotations/lib/lib_operator2_detail',
+        'annotations/lib/lib_typing2_detail',
+        'annotations/lib/lib_abc2_detail',
       ],
     },
   ],

@@ -1,0 +1,101 @@
+---
+title: Lib/abc.py (part 2)
+description: "Lib/abc.py part 2: ABCMeta.__subclasshook__, ABC.register, ABCMeta._abc_caches_clear, virtual subclassing, abc.get_cache_token."
+cpython_path: Lib/abc.py
+cpython_version: "3.14"
+lines: 400
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/abc.py" />
+
+This annotation covers virtual subclassing and cache invalidation. See `lib_abc_detail` for `ABCMeta.__new__`, `abstractmethod`, `@property`/`@classmethod`/`@staticmethod` abstract variants.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `ABC.register` | Register a class as a virtual subclass |
+| 81-180 | `ABCMeta.__instancecheck__` | `isinstance(x, MyABC)` — check virtual subclasses |
+| 181-280 | `__subclasshook__` | Custom hook for `issubclass` without `register` |
+| 281-400 | Cache invalidation | `_abc_caches_clear`, `get_cache_token` |
+
+## Reading
+
+### `ABC.register`
+
+```python
+# CPython: Lib/_py_abc.py:86 ABCMeta.register
+def register(cls, subclass):
+    """Register a virtual subclass of an ABC."""
+    if not isinstance(subclass, type):
+        raise TypeError("Can only register classes")
+    if issubclass(subclass, cls):
+        return subclass  # Already a subclass
+    cls._abc_registry.add(subclass)
+    ABCMeta._abc_invalidation_counter += 1  # Invalidate caches
+    return subclass
+```
+
+`Sequence.register(tuple)` makes `issubclass(tuple, Sequence)` return `True` even though `tuple` doesn't inherit from `Sequence`. Used extensively in `collections.abc` to register built-in types.
+
+### `__instancecheck__`
+
+```python
+# CPython: Lib/_py_abc.py:164 ABCMeta.__instancecheck__
+def __instancecheck__(cls, instance):
+    """Override for isinstance(instance, cls)."""
+    subclass = instance.__class__
+    if subclass in cls._abc_cache:
+        return True
+    subtype = type(instance)
+    if subtype is subclass:
+        if (cls._abc_negative_cache_version ==
+                ABCMeta._abc_invalidation_counter and
+                subclass in cls._abc_negative_cache):
+            return False
+        return cls.__subclasscheck__(subclass)
+    return any(cls.__subclasscheck__(c) for c in {subclass, subtype})
+```
+
+The `_abc_cache` is a set of known-good subclasses. `_abc_negative_cache` caches known-bad subclasses, but only while the invalidation counter hasn't changed (i.e., no new `register` calls). This makes `isinstance` O(1) after the first check.
+
+### `__subclasshook__`
+
+```python
+# CPython: Lib/_py_abc.py:120 ABCMeta.__subclasscheck__
+def __subclasscheck__(cls, subclass):
+    """Override for issubclass(subclass, cls)."""
+    # Check the hook first
+    ok = cls.__subclasshook__(subclass)
+    if ok is not NotImplemented:
+        ...
+        return ok
+    # Fall back to registry and normal MRO check
+    if subclass in cls._abc_registry:
+        return True
+    for scls in cls.__subclasses__():
+        if issubclass(subclass, scls):
+            return True
+    return False
+```
+
+`__subclasshook__` allows duck-typing: `Iterable.__subclasshook__` checks for `__iter__` without requiring explicit `register`. Return `NotImplemented` to fall through to the normal check.
+
+### `get_cache_token`
+
+```python
+# CPython: Lib/abc.py:24 get_cache_token
+def get_cache_token():
+    """Return the current ABC cache invalidation token (monotonic int).
+       Incremented each time register() is called."""
+    return ABCMeta._abc_invalidation_counter
+```
+
+`get_cache_token()` is used by code that caches `isinstance` results externally: compare against a saved token to know when to recheck. `functools.singledispatch` uses this to invalidate its dispatch cache.
+
+## gopy notes
+
+`ABCMeta` is `objects.ABCMeta` in `objects/abc.go`. `register` adds to a Go set stored on the type. `__instancecheck__` uses `objects.IsInstance` with a cache map. `__subclasshook__` is looked up via `objects.TypeLookup`. `get_cache_token` returns `objects.ABCInvalidationCounter`.

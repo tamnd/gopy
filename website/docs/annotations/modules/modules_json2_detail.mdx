@@ -1,0 +1,105 @@
+---
+title: Modules/_json.c (part 2)
+description: "Modules/_json.c part 2: json.encoder (encode_string, encode_float, encode_int), JSONDecoder.raw_decode, scanner."
+cpython_path: Modules/_json.c
+cpython_version: "3.14"
+lines: 600
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/_json.c" />
+
+This annotation covers JSON encoding and decoding internals. See `modules_json_detail` for `json.dumps`, `json.loads`, `JSONEncoder.__init__`, and `JSONDecoder.__init__`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-100 | `encode_string` | Escape a Python `str` to a JSON string literal |
+| 101-220 | `encode_float` | Handle `NaN`/`Infinity` and repr precision |
+| 221-360 | `JSONEncoder._iterencode` | Recursively encode Python objects to JSON |
+| 361-500 | `Scanner.scan_once` | Parse one JSON value from the input string |
+| 501-600 | `raw_decode` | Decode and return `(object, end_index)` |
+
+## Reading
+
+### `encode_string`
+
+```c
+// CPython: Modules/_json.c:280 encoder_encode_string
+static PyObject *
+encoder_encode_string(PyEncoderObject *s, PyObject *dct)
+{
+    /* Scan the string for characters that must be escaped.
+       Fast path: ASCII with no special chars -> just wrap in quotes. */
+    const char *buf = PyUnicode_AsUTF8(dct);
+    Py_ssize_t len = strlen(buf);
+    /* Check for chars requiring escaping: ", \, control chars < 0x20 */
+    for (Py_ssize_t i = 0; i < len; i++) {
+        unsigned char c = buf[i];
+        if (c == '"' || c == '\\' || c < 0x20 || (!s->allow_nan && ...)) {
+            goto slow_path;
+        }
+    }
+    /* Fast: no escaping needed */
+    return PyUnicode_FromFormat("\"%s\"", buf);
+slow_path:
+    /* Build escaped string */
+    ...
+}
+```
+
+The C accelerator's `encode_string` is much faster than the pure Python fallback because it can scan the raw UTF-8 bytes without Python object overhead. The `ensure_ascii` flag causes non-ASCII chars to be escaped as `\uXXXX`.
+
+### `encode_float`
+
+```c
+// CPython: Modules/_json.c:380 encoder_encode_float
+static PyObject *
+encoder_encode_float(PyEncoderObject *s, PyObject *obj)
+{
+    double i = PyFloat_AS_DOUBLE(obj);
+    if (!Py_IS_FINITE(i)) {
+        if (!s->allow_nan) {
+            PyErr_SetString(PyExc_ValueError,
+                "Out of range float values are not JSON compliant");
+            return NULL;
+        }
+        if (i > 0) return PyUnicode_FromString("Infinity");
+        if (i < 0) return PyUnicode_FromString("-Infinity");
+        return PyUnicode_FromString("NaN");
+    }
+    return PyFloat_Type.tp_repr(obj);
+}
+```
+
+JSON does not define `NaN` or `Infinity`. `json.dumps(float('inf'))` raises `ValueError` by default. `json.dumps(float('inf'), allow_nan=True)` produces `Infinity`, which is JavaScript-compatible but not valid JSON.
+
+### `Scanner.scan_once`
+
+```c
+// CPython: Modules/_json.c:680 scanner_iternext
+static PyObject *
+scanner_iternext(PyScannerObject *s)
+{
+    /* Parse one JSON value: string, number, object, array, true, false, null */
+    Py_UCS4 c = PyUnicode_READ(kind, data, idx);
+    switch (c) {
+    case '"': return scanstring_unicode(pystr, idx + 1, s->strict, &next_idx);
+    case '{': return _parse_object_unicode(s, pystr, idx + 1, &next_idx);
+    case '[': return _parse_array_unicode(s, pystr, idx + 1, &next_idx);
+    case 'n': /* null */ ...
+    case 't': /* true */ ...
+    case 'f': /* false */ ...
+    default:  return _match_number_unicode(s, pystr, idx, &next_idx);
+    }
+}
+```
+
+The scanner dispatches on the first character of the value. Numbers use `_match_number_unicode` which calls `PyLong_FromUnicodeObject` or `PyFloat_FromString` depending on whether a `.` or `e` is present.
+
+## gopy notes
+
+`encode_string` is `module/json.EncodeString` in `module/json/encoder.go`. It scans the Go `[]rune` for special characters. `encode_float` uses `strconv.FormatFloat`. The scanner is `module/json.Scanner` backed by Go's `encoding/json` tokenizer, wrapped in the Python interface.

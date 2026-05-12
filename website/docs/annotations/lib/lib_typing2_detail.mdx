@@ -1,0 +1,107 @@
+---
+title: Lib/typing.py (part 2)
+description: "Lib/typing.py part 2: TypeVar, ParamSpec, TypeVarTuple, Generic.__class_getitem__, get_type_hints, overload."
+cpython_path: Lib/typing.py
+cpython_version: "3.14"
+lines: 700
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/typing.py" />
+
+This annotation covers type variable creation and generic class machinery. See `lib_typing_detail` for `Union`, `Optional`, `Literal`, `Annotated`, `TypedDict`, and `Protocol`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-100 | `TypeVar` | Declare a type variable with optional constraints or bound |
+| 101-220 | `ParamSpec` / `TypeVarTuple` | PEP 612/646: parameter spec and variadic type variables |
+| 221-360 | `Generic.__class_getitem__` | `list[int]` syntax for user-defined generics |
+| 361-500 | `get_type_hints` | Resolve string annotations and `__future__` annotations |
+| 501-700 | `overload` | Multiple signatures; `get_overloads` registry |
+
+## Reading
+
+### `TypeVar`
+
+```python
+# CPython: Lib/typing.py:880 TypeVar.__init__
+class TypeVar(_SpecialForm):
+    """Type variable. Usage: T = TypeVar('T', bound=int)"""
+    def __init__(self, name, *constraints, bound=None, covariant=False,
+                 contravariant=False, infer_variance=False, default=...):
+        if constraints and bound is not None:
+            raise TypeError("Constraints cannot be combined with bound=")
+        self.__name__ = name
+        self.__bound__ = bound
+        self.__constraints__ = tuple(constraints)
+        self.__covariant__ = bool(covariant)
+        self.__contravariant__ = bool(contravariant)
+        self.__infer_variance__ = bool(infer_variance)
+```
+
+`T = TypeVar('T', int, str)` restricts `T` to `int` or `str`. `T = TypeVar('T', bound=Comparable)` means `T` must be a subtype of `Comparable`. The name string must match the variable name for tools to work correctly (enforced by mypy, not CPython).
+
+### `Generic.__class_getitem__`
+
+```python
+# CPython: Lib/typing.py:1120 Generic.__class_getitem__
+class Generic:
+    @_SpecialGenericAlias
+    def __class_getitem__(cls, params):
+        """Support class[T] syntax for user generics."""
+        if not isinstance(params, tuple):
+            params = (params,)
+        params = tuple(_type_check(p, ...) for p in params)
+        if cls is Generic:
+            ...
+        return _GenericAlias(cls, params)
+```
+
+`class Stack(Generic[T]):` makes `Stack[int]` return a `_GenericAlias`. At runtime this is mostly informational; static type checkers use `__orig_bases__` to track the type parameters.
+
+### `get_type_hints`
+
+```python
+# CPython: Lib/typing.py:2240 get_type_hints
+def get_type_hints(obj, globalns=None, localns=None, include_extras=False):
+    """Return type hints for a function, method, module, or class.
+       Evaluates string annotations and resolves forward references."""
+    if isinstance(obj, type):
+        hints = {}
+        for base in reversed(obj.__mro__):
+            base_globals = getattr(sys.modules.get(base.__module__, None), '__dict__', {})
+            ann = base.__dict__.get('__annotations__', {})
+            for name, value in ann.items():
+                if isinstance(value, str):
+                    value = ForwardRef(value)
+                hints[name] = _eval_type(value, base_globals, localns)
+        return hints
+    ...
+```
+
+`get_type_hints` evaluates string annotations (from `from __future__ import annotations` or manually quoted). It resolves `ForwardRef` by calling `eval()` in the module's global namespace.
+
+### `overload`
+
+```python
+# CPython: Lib/typing.py:2400 overload
+_overload_registry = {}
+
+def overload(func):
+    """Decorator for overloaded functions. Records the overload."""
+    return _overload_dummy
+
+def get_overloads(func):
+    """Return overloads registered for func."""
+    return _overload_registry.get(func.__qualname__, {}).get(func.__module__, [])
+```
+
+`@overload` is erased at runtime: the decorated function is replaced by `_overload_dummy`. Only the last non-`@overload` definition is actually called. `get_overloads` lets tools introspect the declared signatures.
+
+## gopy notes
+
+`TypeVar` is `objects.TypeVar` in `objects/typevar.go`. `Generic.__class_getitem__` returns `objects.GenericAlias`. `get_type_hints` is `module/typing.GetTypeHints` in `module/typing/module.go`; string annotations are evaluated using `compile.EvalExpr`. `overload` is a no-op decorator stored in `module/typing.OverloadRegistry`.
