@@ -1,0 +1,86 @@
+---
+title: Modules/_ctypes/_ctypes.c (part 8)
+description: "_ctypes/_ctypes.c part 8: ctypes.Structure, Structure._fields_, _pack_, _anonymous_, struct layout."
+cpython_path: Modules/_ctypes/_ctypes.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/_ctypes/_ctypes.c" />
+
+This annotation covers `ctypes.Structure` layout computation. See `modules_ctypes7_detail` for `CDLL`, `CFUNCTYPE`, `byref`, and pointer types.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `Structure_set_fields` | Process `_fields_` list and compute offsets |
+| 81-180 | Field offset calculation | Alignment padding and `_pack_` override |
+| 181-260 | `_anonymous_` handling | Flatten nested struct fields |
+| 261-360 | `Structure.__getattr__` | Read a field value from the buffer |
+| 361-500 | `Structure.__setattr__` | Write a field value into the buffer |
+
+## Reading
+
+### `Structure_set_fields`
+
+```c
+// CPython: Modules/_ctypes/_ctypes.c:3680 PyCStructType_set_fields
+static int
+PyCStructType_set_fields(PyObject *self, PyObject *value, void *Py_UNUSED(ignored))
+{
+    StgInfo *stginfo = PyStgInfo_GET(self);
+    /* value is a list of (name, type) or (name, type, bitwidth) tuples */
+    stginfo->fldnames = PyTuple_New(n);
+    stginfo->fldtypes = PyTuple_New(n);
+    for (int i = 0; i < n; i++) {
+        /* Compute offset with alignment */
+        Py_ssize_t size = type_stginfo->size;
+        Py_ssize_t align = stginfo->align;
+        /* align: pad to alignment boundary */
+        offset = (total + align - 1) & ~(align - 1);
+        total = offset + size;
+    }
+    stginfo->size = (total + max_align - 1) & ~(max_align - 1);
+}
+```
+
+`_fields_` is processed once at class creation time. Each field's offset is computed by rounding up `total` to the field type's alignment requirement. The struct's total size is padded to its own alignment.
+
+### `_pack_` override
+
+```c
+// CPython: Modules/_ctypes/_ctypes.c:3620 PyCStructType_new
+/* If _pack_ is defined:
+     align = min(type_align, _pack_)
+   This matches MSVC's __pragma(pack(n)) and GCC's __attribute__((packed)). */
+if (stginfo->pack && stginfo->pack < align)
+    align = stginfo->pack;
+```
+
+`_pack_ = 1` creates a packed struct with no padding, matching `__attribute__((packed))` in C. This is needed for binary protocol structs that don't follow natural alignment.
+
+### `Structure.__getattr__`
+
+```c
+// CPython: Modules/_ctypes/_ctypes.c:4080 Structure_getattro
+static PyObject *
+Structure_getattro(PyObject *self, PyObject *name)
+{
+    CDataObject *self_ = (CDataObject *)self;
+    StgFieldInfo *fi = lookup_field(self_, name);
+    if (fi == NULL) return PyObject_GenericGetAttr(self, name);
+    /* Read bytes at offset from self->b_ptr */
+    char *ptr = self_->b_ptr + fi->offset;
+    return fi->proto->getfunc(ptr, fi->size);
+}
+```
+
+Each field has a `getfunc` that converts raw bytes at the field's offset to a Python object. For `c_int`, `getfunc` reads 4 bytes and returns a Python `int`.
+
+## gopy notes
+
+`Structure_set_fields` is `module/ctypes.StructureSetFields` in `module/ctypes/structure.go`. Field offsets are computed with Go's `unsafe.Alignof`-style arithmetic. `Structure.__getattr__` reads from the buffer using field descriptors. `_pack_` overrides the computed alignment.

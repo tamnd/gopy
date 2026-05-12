@@ -1,0 +1,110 @@
+---
+title: Lib/_pyio.py (part 10)
+description: "_pyio.py part 10: TextIOWrapper.__init__, read, readline, write, newline handling."
+cpython_path: Lib/_pyio.py
+cpython_version: "3.14"
+lines: 600
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/_pyio.py" />
+
+This annotation covers `TextIOWrapper`, the Python-level text layer. See `modules_io10_detail` for the C-level `BufferedReader`/`BufferedWriter`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `TextIOWrapper.__init__` | Attach to a buffered stream; set encoding/errors/newline |
+| 81-180 | `TextIOWrapper.read` | Read and decode a specified number of characters |
+| 181-280 | `TextIOWrapper.readline` | Read up to and including a newline |
+| 281-380 | `TextIOWrapper.write` | Encode and write a string |
+| 381-600 | Newline translation | `\n`, `\r`, `\r\n` normalization on read and write |
+
+## Reading
+
+### `TextIOWrapper.__init__`
+
+```python
+# CPython: Lib/_pyio.py:1880 TextIOWrapper.__init__
+def __init__(self, buffer, encoding=None, errors=None, newline=None,
+             line_buffering=False, write_through=False):
+    self._buffer = buffer
+    self._encoding = io.text_encoding(encoding)
+    self._errors = errors or 'strict'
+    if newline not in (None, '', '\n', '\r', '\r\n'):
+        raise ValueError(f"invalid newline: {newline!r}")
+    self._readnl = newline
+    self._writenl = os.linesep if newline is None else newline or '\n'
+    self._decoder = None  # created lazily
+    self._encoder = None
+    self._line_buffering = line_buffering
+    self._write_through = write_through
+```
+
+`newline=None` enables universal newlines on read (all `\r`, `\r\n`, `\n` become `\n`) and uses `os.linesep` on write. `newline=''` disables translation.
+
+### `TextIOWrapper.read`
+
+```python
+# CPython: Lib/_pyio.py:2020 TextIOWrapper.read
+def read(self, size=None):
+    self._checkReadable()
+    if size is None or size == -1:
+        # Read all
+        result = (self._get_decoded_chars() +
+                  self._decoder.decode(self._buffer.read(), final=True))
+        self._snapshot = None
+        return result
+    # Read exactly size characters
+    while len(self._decoded_chars) - self._decoded_chars_used < size:
+        if not self._read_chunk():
+            break
+    return self._get_decoded_chars(size)
+```
+
+`TextIOWrapper.read(n)` reads characters, not bytes. The decoder may need multiple read calls to produce `n` characters (multibyte encodings like UTF-8 may split a character across chunk boundaries).
+
+### `TextIOWrapper.readline`
+
+```python
+# CPython: Lib/_pyio.py:2080 TextIOWrapper.readline
+def readline(self, size=-1):
+    # Use the decoder's line-finding via _buffer.read1
+    while True:
+        readnl = self._readnl
+        buf = self._get_decoded_chars()
+        if readnl:
+            pos = buf.find(readnl, self._decoded_chars_used)
+        else:
+            # universal: find any of \n, \r\n, \r
+            pos = self._find_line_ending(buf, ...)
+        if pos >= 0:
+            return self._get_decoded_chars(pos - self._decoded_chars_used + 1)
+        if not self._read_chunk():
+            return self._get_decoded_chars()  # EOF
+```
+
+`readline` uses `_buffer.read1` (a single raw read per call) to avoid buffering more than needed. For `\r\n` detection it uses `_find_line_ending` which handles the case where `\r` is at the end of a chunk.
+
+### Newline translation
+
+```python
+# CPython: Lib/_pyio.py:1940 TextIOWrapper.write
+def write(self, s):
+    if self._writenl != '\n':
+        s = s.replace('\n', self._writenl)
+    b = s.encode(self._encoding, self._errors)
+    self._buffer.write(b)
+    if self._line_buffering and '\n' in s:
+        self._buffer.flush()
+    return len(s)
+```
+
+On write, `\n` is replaced with `self._writenl` (which is `\r\n` on Windows when `newline=None`). `line_buffering=True` flushes after any line that contains a newline, useful for interactive output.
+
+## gopy notes
+
+`TextIOWrapper` is `objects.TextIOWrapper` in `objects/textio.go`. `read` uses an `encoding/unicode` decoder. `readline` calls `BufferedReader.Read1` for chunk-by-chunk reads. Newline translation is done with `strings.ReplaceAll`.

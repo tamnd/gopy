@@ -1,0 +1,106 @@
+---
+title: Objects/longobject.c (part 18)
+description: "Objects/longobject.c part 18: long_divrem, long_mod, long_floordiv, PyLong_AsDouble."
+cpython_path: Objects/longobject.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Objects/longobject.c" />
+
+This annotation covers integer division and float conversion. See `objects_longobject17_detail` for `long_add`, `long_mul`, `long_lshift`, and the digit array representation.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `long_divrem` | Compute quotient and remainder together |
+| 81-160 | `long_mod` / `long_floordiv` | Python `//'` and `%` for integers |
+| 161-240 | `PyLong_AsDouble` | Convert a bignum to a `double` |
+| 241-340 | `long_true_divide` | Python `/` for two integers (returns float) |
+| 341-500 | `x_divrem` | Multi-precision long division algorithm |
+
+## Reading
+
+### `long_divrem`
+
+```c
+// CPython: Objects/longobject.c:2480 long_divrem
+static int
+long_divrem(PyLongObject *a, PyLongObject *b,
+            PyLongObject **pdiv, PyLongObject **prem)
+{
+    Py_ssize_t size_a = Py_ABS(Py_SIZE(a));
+    Py_ssize_t size_b = Py_ABS(Py_SIZE(b));
+    if (size_b == 0) {
+        PyErr_SetString(PyExc_ZeroDivisionError, "integer division or modulo by zero");
+        return -1;
+    }
+    if (size_a < size_b || (size_a == size_b &&
+        a->ob_digit[size_a-1] < b->ob_digit[size_b-1])) {
+        /* |a| < |b|: quotient is 0, remainder is a */
+        *pdiv = (PyLongObject *)PyLong_FromLong(0);
+        *prem = (PyLongObject *)Py_NewRef(a);
+        return 0;
+    }
+    if (size_b == 1)
+        *prem = divrem1(a, b->ob_digit[0], pdiv);
+    else
+        x_divrem(a, b, pdiv, prem);
+    /* Adjust signs for Python floor division semantics */
+    ...
+}
+```
+
+`long_divrem` delegates to `divrem1` (fast path for single-digit divisors) or `x_divrem` (Knuth Algorithm D for multi-digit).
+
+### `PyLong_AsDouble`
+
+```c
+// CPython: Objects/longobject.c:2780 PyLong_AsDouble
+double
+PyLong_AsDouble(PyObject *vv)
+{
+    PyLongObject *v = (PyLongObject *)vv;
+    Py_ssize_t i = Py_ABS(Py_SIZE(v));
+    double x = 0.0;
+    /* Accumulate digits from most significant to least */
+    while (--i >= 0) {
+        x = x * (double)PyLong_BASE + v->ob_digit[i];
+    }
+    if (Py_SIZE(v) < 0) x = -x;
+    if (Py_IS_INFINITY(x)) {
+        PyErr_SetString(PyExc_OverflowError,
+            "int too large to convert to float");
+        return -1.0;
+    }
+    return x;
+}
+```
+
+The conversion accumulates from the most significant digit. `PyLong_BASE` is 2^30, so this is essentially Horner's method for base-2^30. Overflow is detected after the fact by checking `isinf`.
+
+### `long_true_divide`
+
+```c
+// CPython: Objects/longobject.c:2860 long_true_divide
+static PyObject *
+long_true_divide(PyObject *a, PyObject *b)
+{
+    /* a / b as float.
+       Strategy: compute a/b to 54 bits of precision, then round to double. */
+    ...
+    /* Shift both to align significant bits */
+    /* Divide the top 57 bits of a by the top 57 bits of b */
+    /* Reconstruct the double with the correct exponent */
+}
+```
+
+`long_true_divide` implements IEEE 754 correctly-rounded division for arbitrarily large integers. It extracts 57 significant bits (53 for the mantissa plus guard bits) and applies round-to-nearest.
+
+## gopy notes
+
+`long_divrem` is `objects.IntDivRem` in `objects/int.go` using Go's `big.Int.DivMod`. `PyLong_AsDouble` is `objects.IntToFloat64`. `long_true_divide` is `objects.IntTrueDiv`, which uses `new(big.Float).SetInt` and converts to `float64`.

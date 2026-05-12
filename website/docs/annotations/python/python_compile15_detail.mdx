@@ -1,0 +1,120 @@
+---
+title: Python/compile.c (part 15)
+description: "Python/compile.c part 15: compiler_comprehension, compiler_genexp, compiler_listcomp, compiler_dictcomp."
+cpython_path: Python/compile.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Python/compile.c" />
+
+This annotation covers comprehension compilation. See `compile14_detail` for `compiler_try_except`, `compiler_with`, and `compiler_assert`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `compiler_comprehension` | Shared logic for all comprehension forms |
+| 81-180 | `compiler_listcomp` | `[x for x in it if cond]` |
+| 181-260 | `compiler_setcomp` | `{x for x in it}` |
+| 261-340 | `compiler_dictcomp` | `{k: v for k, v in it}` |
+| 341-500 | `compiler_genexp` | `(x for x in it)` — returns a generator |
+
+## Reading
+
+### `compiler_comprehension`
+
+```c
+// CPython: Python/compile.c:4120 compiler_comprehension
+static int
+compiler_comprehension(struct compiler *c, expr_ty e, int type,
+                       Py_ssize_t generators, PyObject *qualname)
+{
+    /* Each comprehension compiles to a nested function:
+         def <listcomp>(it):
+             result = []
+             for x in it:
+                 if cond:
+                     result.append(x)
+             return result
+       The outer scope passes the first iterator as the argument.
+    */
+    compiler_enter_scope(c, qualname, COMPILER_SCOPE_COMPREHENSION, ...);
+    /* First generator uses the .0 argument (the iterator) */
+    ADDOP_I(c, COPY_FREE_VARS, num_free);
+    /* Emit the loop body */
+    compiler_comprehension_generator(c, generators, 0, ...);
+    compiler_exit_scope(c);
+    /* In outer scope: make the iterator and call the nested function */
+    VISIT(c, expr, outermost.iter);
+    ADDOP(c, GET_ITER);
+    ADDOP_I(c, CALL, 1);
+}
+```
+
+Comprehensions are desugared into immediately-called nested functions. This ensures that loop variables don't leak into the enclosing scope. The first iterator is passed as the `.0` argument to avoid re-evaluating it inside the function.
+
+### `compiler_listcomp`
+
+```c
+// CPython: Python/compile.c:4200 compiler_listcomp
+static int
+compiler_listcomp(struct compiler *c, expr_ty e)
+{
+    /* Inside the comprehension function:
+         BUILD_LIST 0
+         <for loop body: LIST_APPEND>
+         RETURN_VALUE
+    */
+    ADDOP_I(c, BUILD_LIST, 0);
+    compiler_comprehension(c, e, COMP_LISTCOMP, ...);
+    ADDOP(c, RETURN_VALUE);
+}
+```
+
+The accumulator is a new list object built at the start of the function body. `LIST_APPEND` adds each element.
+
+### `compiler_dictcomp`
+
+```c
+// CPython: Python/compile.c:4260 compiler_dictcomp
+static int
+compiler_dictcomp(struct compiler *c, expr_ty e)
+{
+    /* Inside:
+         BUILD_MAP 0
+         <for loop body: MAP_ADD>
+         RETURN_VALUE
+    */
+    ADDOP_I(c, BUILD_MAP, 0);
+    compiler_comprehension(c, e, COMP_DICTCOMP, ...);
+    ADDOP(c, RETURN_VALUE);
+}
+```
+
+`MAP_ADD i` stores a `(key, value)` pair into the dict at `STACK[-i]`. For `{k: v for k, v in d.items()}`, `k` and `v` are pushed before `MAP_ADD 1`.
+
+### `compiler_genexp`
+
+```c
+// CPython: Python/compile.c:4300 compiler_genexp
+static int
+compiler_genexp(struct compiler *c, expr_ty e)
+{
+    /* Unlike listcomp, the inner function uses YIELD_VALUE instead of LIST_APPEND.
+       The outer scope wraps the call in RETURN_GENERATOR. */
+    compiler_comprehension(c, e, COMP_GENEXP, ...);
+    /* The nested function is a generator: it yields values */
+    ADDOP_I(c, YIELD_VALUE, 0);
+    ADDOP(c, RESUME, 0);
+}
+```
+
+A generator expression is a comprehension function where each matching element is yielded rather than appended. The call site gets a generator object that lazily produces values.
+
+## gopy notes
+
+`compiler_comprehension` is `compile.compilerComprehension` in `compile/codegen_stmt_funclike.go`. It uses `compile.enterScope(COMPREHENSION)`. `compiler_listcomp` emits `BUILD_LIST 0` then `LIST_APPEND`. `compiler_genexp` emits `YIELD_VALUE` and returns a generator via `RETURN_GENERATOR`.
