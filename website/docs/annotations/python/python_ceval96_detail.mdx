@@ -1,0 +1,104 @@
+---
+title: Python/ceval.c (part 96)
+description: "Python/ceval.c part 96: CALL specializations, CALL_PY_EXACT_ARGS, CALL_BUILTIN_CLASS, CALL_NO_KW_TYPE_1."
+cpython_path: Python/ceval.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Python/ceval.c" />
+
+This annotation covers call specializations. See `python_ceval95_detail` for `LOAD_SUPER_ATTR`, `LOAD_ATTR` inline cache, and `STORE_ATTR_SLOT`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `CALL` generic | Unspecialized call with inline cache |
+| 81-200 | `CALL_PY_EXACT_ARGS` | Fast path for Python functions with exact arg count |
+| 201-300 | `CALL_BUILTIN_CLASS` | Fast path for type calls (`int(x)`, `list(x)`) |
+| 301-400 | `CALL_NO_KW_TYPE_1` | `type(x)` single-arg fast path |
+| 401-500 | `CALL_INTRINSIC_1` | Intrinsic function dispatch |
+
+## Reading
+
+### `CALL` generic
+
+```c
+// CPython: Python/ceval.c:4180 CALL
+inst(CALL, (callable, self_or_null, args[oparg] -- result)) {
+    _PyCallCache *cache = (_PyCallCache *)next_instr;
+    if (ADAPTIVE_COUNTER_TRIGGERS(cache->counter)) {
+        _Py_Specialize_Call(callable, next_instr, oparg);
+        DISPATCH_SAME_OPARG();
+    }
+    /* Generic call path */
+    result = _PyObject_Vectorcall(callable, args - (self_or_null != NULL),
+                                   oparg + (self_or_null != NULL), NULL);
+    ERROR_IF(result == NULL, error);
+    Py_DECREF(callable);
+    for (int i = 0; i < oparg + 1; i++) Py_DECREF(args[i - 1]);
+}
+```
+
+`CALL` uses `_PyObject_Vectorcall` which passes arguments as a C array (no tuple allocation). After warmup, `_Py_Specialize_Call` rewrites the instruction to a specialized variant based on the callable type.
+
+### `CALL_PY_EXACT_ARGS`
+
+```c
+// CPython: Python/ceval.c:4260 CALL_PY_EXACT_ARGS
+inst(CALL_PY_EXACT_ARGS, (callable, self_or_null, args[oparg] -- result)) {
+    _PyCallCache *cache = (_PyCallCache *)next_instr;
+    /* Validate: same function version as when specialized */
+    DEOPT_IF(((PyFunctionObject *)callable)->func_version != cache->func_version,
+             CALL);
+    PyCodeObject *code = (PyCodeObject *)((PyFunctionObject *)callable)->func_code;
+    DEOPT_IF(code->co_argcount != oparg + (self_or_null != NULL), CALL);
+    /* Push frame directly — no argument tuple */
+    _PyInterpreterFrame *new_frame = _PyFrame_PushUnchecked(tstate, callable, oparg);
+    JUMPBY(INLINE_CACHE_ENTRIES_CALL);
+    DISPATCH_INLINED(new_frame);
+}
+```
+
+`CALL_PY_EXACT_ARGS` is the fastest call path: it pushes a new frame directly without going through `_PyObject_Vectorcall`. Guards: (1) function version matches (detects replacement via `func.__code__ =`), (2) argument count is exact (no defaults, no `*args`).
+
+### `CALL_BUILTIN_CLASS`
+
+```c
+// CPython: Python/ceval.c:4380 CALL_BUILTIN_CLASS
+inst(CALL_BUILTIN_CLASS, (callable, self_or_null, args[oparg] -- result)) {
+    /* Fast path for type objects with tp_vectorcall */
+    DEOPT_IF(!PyType_Check(callable), CALL);
+    PyTypeObject *tp = (PyTypeObject *)callable;
+    DEOPT_IF(tp->tp_vectorcall == NULL, CALL);
+    result = tp->tp_vectorcall((PyObject *)tp, args, oparg, NULL);
+    ERROR_IF(result == NULL, error);
+}
+```
+
+`list([1, 2, 3])` — `list` has `tp_vectorcall` set to `list_vectorcall`. This specialization avoids the full `type.__call__` dispatch: no `tp_new` + `tp_init` separation, just one direct call.
+
+### `CALL_NO_KW_TYPE_1`
+
+```c
+// CPython: Python/ceval.c:4340 CALL_NO_KW_TYPE_1
+inst(CALL_NO_KW_TYPE_1, (callable, null, arg --  result)) {
+    /* type(x) with exactly 1 arg — return type(x) */
+    DEOPT_IF(null != NULL, CALL);
+    DEOPT_IF(callable != (PyObject *)&PyType_Type, CALL);
+    result = (PyObject *)Py_TYPE(arg);
+    Py_INCREF(result);
+    Py_DECREF(arg);
+    Py_DECREF(callable);
+}
+```
+
+`type(x)` with a single argument is the most common built-in call in Python code. This specialization reduces it to a single `Py_TYPE` access — no allocation, no dispatch. The result is the type object, which has a reference count bump.
+
+## gopy notes
+
+`CALL` generic is in `vm/eval_call.go`. `CALL_PY_EXACT_ARGS` is `vm.CallPyExactArgs`; pushes a `vm.Frame` directly. `CALL_BUILTIN_CLASS` calls `objects.TypeVectorcall`. `CALL_NO_KW_TYPE_1` reads `objects.Object.Type()` directly. `CALL_INTRINSIC_1` dispatches to a Go function table indexed by `oparg`.

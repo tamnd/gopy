@@ -1,0 +1,149 @@
+---
+title: Modules/mathmodule.c (part 9)
+description: "mathmodule.c part 9: math.comb, math.perm, math.nextafter, math.ulp, math.fsum."
+cpython_path: Modules/mathmodule.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/mathmodule.c" />
+
+This annotation covers combinatorics, IEEE 754 utilities, and exact float summation. See `modules_math8_detail` for `math.isclose`, `math.prod`, `math.lcm`, and `math.hypot`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `math.comb` | Binomial coefficient C(n, k) |
+| 81-160 | `math.perm` | Permutations P(n, k) |
+| 161-240 | `math.nextafter` | Next float in direction of y |
+| 241-320 | `math.ulp` | Unit in the last place |
+| 321-500 | `math.fsum` | Exact floating-point sum |
+
+## Reading
+
+### `math.comb`
+
+```c
+// CPython: Modules/mathmodule.c:2600 math_comb_impl
+static PyObject *
+math_comb_impl(PyObject *module, PyObject *n, PyObject *k)
+{
+    /* C(n, k) = n! / (k! * (n-k)!) for 0 <= k <= n */
+    /* Ensure k <= n - k for efficiency */
+    PyObject *result = PyLong_FromLong(1);
+    for (Py_ssize_t i = 0; i < k_small; i++) {
+        PyObject *factor = PyLong_FromSsize_t(n_small - i);
+        result = PyNumber_Multiply(result, factor);
+        PyObject *divisor = PyLong_FromSsize_t(i + 1);
+        result = PyNumber_FloorDivide(result, divisor);
+    }
+    return result;
+}
+```
+
+`math.comb(10, 3)` returns `120`. The iterative computation multiplies `(n-i)` and divides by `(i+1)` for `i` in `[0, k)`. Each intermediate result is always an integer (divisibility is guaranteed by properties of binomial coefficients). `k` is swapped with `n-k` if `k > n/2` to minimize iterations.
+
+### `math.perm`
+
+```c
+// CPython: Modules/mathmodule.c:2660 math_perm_impl
+static PyObject *
+math_perm_impl(PyObject *module, PyObject *n, PyObject *k)
+{
+    /* P(n, k) = n * (n-1) * ... * (n-k+1) */
+    if (k_long > n_long) return PyLong_FromLong(0);
+    PyObject *result = PyLong_FromLong(1);
+    for (Py_ssize_t i = 0; i < k_small; i++) {
+        PyObject *factor = PyLong_FromSsize_t(n_small - i);
+        result = PyNumber_Multiply(result, factor);
+    }
+    return result;
+}
+```
+
+`math.perm(5, 2)` returns `20` (5 * 4). Unlike `comb`, no division is needed. `math.perm(n)` with one argument returns `n!`.
+
+### `math.nextafter`
+
+```c
+// CPython: Modules/mathmodule.c:2720 math_nextafter_impl
+static PyObject *
+math_nextafter_impl(PyObject *module, double x, double y)
+{
+    /* Return the next floating-point value after x towards y */
+#ifdef HAVE_NEXTAFTER
+    double result = nextafter(x, y);
+#else
+    /* Fallback using bit manipulation */
+    ...
+#endif
+    return PyFloat_FromDouble(result);
+}
+```
+
+`math.nextafter(1.0, 2.0)` returns `1.0000000000000002` — the smallest representable float greater than 1.0. `math.nextafter(1.0, 0.0)` returns `0.9999999999999998`. Used for epsilon-based comparisons and interval arithmetic.
+
+### `math.ulp`
+
+```c
+// CPython: Modules/mathmodule.c:2760 math_ulp_impl
+static PyObject *
+math_ulp_impl(PyObject *module, double x)
+{
+    /* ULP = distance to the next float */
+    if (Py_IS_NAN(x)) return PyFloat_FromDouble(x);
+    x = fabs(x);
+    if (Py_IS_INFINITY(x)) return PyFloat_FromDouble(x);
+    double plus_one = nextafter(x, INFINITY);
+    if (Py_IS_INFINITY(plus_one)) {
+        /* x is the largest finite float */
+        plus_one = nextafter(x, -INFINITY);
+        return PyFloat_FromDouble(x - plus_one);
+    }
+    return PyFloat_FromDouble(plus_one - x);
+}
+```
+
+`math.ulp(1.0)` returns `2.220446049250313e-16` (= machine epsilon). `math.ulp(0.0)` returns the smallest positive subnormal float. Used with `math.isclose` to specify tolerances in terms of floating-point precision.
+
+### `math.fsum`
+
+```c
+// CPython: Modules/mathmodule.c:1380 math_fsum_impl
+static PyObject *
+math_fsum_impl(PyObject *module, PyObject *seq)
+{
+    /* Exact sum using Shewchuk's algorithm: maintains a list of partial sums */
+    double *p = NULL;  /* partials array */
+    Py_ssize_t n = 0, m = NUM_PARTIALS;
+    double x, y;
+    /* For each item: add to partials using error-free transformation */
+    while ((item = PyIter_Next(iter)) != NULL) {
+        x = PyFloat_AsDouble(item);
+        Py_ssize_t i = 0;
+        for (Py_ssize_t j = 0; j < n; j++) {
+            y = p[j];
+            if (fabs(x) < fabs(y)) { double t = x; x = y; y = t; }
+            /* Two-sum: (hi, lo) = TwoSum(x, y) */
+            double hi = x + y;
+            double lo = y - (hi - x);
+            if (lo != 0.0) p[i++] = lo;
+            x = hi;
+        }
+        p[i++] = x;
+        n = i;
+    }
+    /* Sum partials from largest to smallest */
+    ...
+}
+```
+
+`math.fsum([0.1, 0.1, 0.1, ..., 0.1])` (10 times) returns exactly `1.0` — not `0.9999999999999999`. Shewchuk's algorithm maintains a running list of exact partial sums (error terms) using the two-sum algorithm. The final result is rounded only once.
+
+## gopy notes
+
+`math.comb` is `module/math.Comb` in `module/math/module.go`; uses `objects.IntMul` and `objects.IntFloorDiv`. `math.perm` is `module/math.Perm`. `math.nextafter` wraps Go's `math.Nextafter`. `math.ulp` is `module/math.Ulp`. `math.fsum` ports Shewchuk's algorithm using a Go `[]float64` partials slice.

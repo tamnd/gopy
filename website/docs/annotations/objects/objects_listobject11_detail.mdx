@@ -1,0 +1,128 @@
+---
+title: Objects/listobject.c (part 11)
+description: "Objects/listobject.c part 11: list.sort (timsort), list_merge, gallop_right, gallop_left."
+cpython_path: Objects/listobject.c
+cpython_version: "3.14"
+lines: 600
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Objects/listobject.c" />
+
+This annotation covers Python's list sort implementation. See `objects_listobject10_detail` for `list.append`, `list.extend`, and `list.pop`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `list.sort` entry | Set up `MergeState`, call `listsort` |
+| 81-200 | `count_run` | Find and normalize natural runs |
+| 201-320 | `merge_lo` / `merge_hi` | Merge two adjacent runs |
+| 321-440 | `gallop_right` / `gallop_left` | Exponential search in a run |
+| 441-600 | `merge_compute_minrun` | Compute minimum run length |
+
+## Reading
+
+### Timsort overview
+
+```c
+// CPython: Objects/listobject.c:2280 listsort
+static int
+listsort(PyListObject *self, PyObject *keyfunc, int reverse)
+{
+    MergeState ms;
+    merge_init(&ms, nelem, keys != NULL, &compare);
+
+    while (lo < hi) {
+        Py_ssize_t n = count_run(&ms, lo, hi, &descending);
+        if (descending) reverse_slice(lo, lo + n);
+        /* Push run onto stack */
+        merge_push_run(&ms, lo, n);
+        /* Merge if the stack invariant is violated */
+        if (merge_collapse(&ms) < 0) goto fail;
+        lo += n;
+    }
+    merge_force_collapse(&ms);
+}
+```
+
+Python's sort is Timsort: a hybrid of merge sort and insertion sort. Natural runs are detected (and reversed if descending), then merged using a stack that maintains the invariant `len[i-2] > len[i-1] + len[i]` and `len[i-1] > len[i]`. This ensures O(n log n) worst case and O(n) best case on already-sorted data.
+
+### `count_run`
+
+```c
+// CPython: Objects/listobject.c:2100 count_run
+static Py_ssize_t
+count_run(MergeState *ms, PyObject **lo, PyObject **hi, int *descending)
+{
+    Py_ssize_t k;
+    *descending = 0;
+    if (lo + 1 == hi) return 1;
+    k = ISLT(*lo, *(lo + 1), compare);  /* compare first two */
+    if (k) {
+        /* Descending run */
+        *descending = 1;
+        for (lo += 2; lo < hi && ISLT(*lo, *(lo-1), compare); ++lo) {}
+    } else {
+        /* Non-descending run */
+        for (lo += 2; lo < hi && !ISLT(*lo, *(lo-1), compare); ++lo) {}
+    }
+    return lo - *lo_save;  /* length of run */
+}
+```
+
+A natural run is a maximal sequence that is already sorted (ascending or strictly descending). Descending runs are reversed in-place to make them ascending. This is the key to Timsort's O(n) performance on sorted and reverse-sorted input.
+
+### `gallop_right`
+
+```c
+// CPython: Objects/listobject.c:1940 gallop_right
+static Py_ssize_t
+gallop_right(MergeState *ms, PyObject *key, PyObject **a, Py_ssize_t n,
+             Py_ssize_t hint)
+{
+    /* Find rightmost position to insert key in sorted a[0:n].
+       hint: index to start from (recent inserts tend to cluster). */
+    Py_ssize_t ofs = 1, lastofs = 0;
+    /* Exponential search: 1, 3, 7, 15, ... */
+    while (ofs < n && ISLT(a[hint + ofs], key, compare)) {
+        lastofs = ofs;
+        ofs = (ofs << 1) + 1;
+    }
+    /* Binary search in [lastofs, min(ofs, n)] */
+    while (lastofs < ofs) {
+        Py_ssize_t m = lastofs + ((ofs - lastofs) >> 1);
+        if (ISLT(a[hint + m], key, compare)) lastofs = m + 1;
+        else ofs = m;
+    }
+    return hint + ofs;
+}
+```
+
+Galloping mode is activated when one run consistently "wins" the merge. An exponential probe doubles the search interval until the key is bounded, then binary search finds the exact position. This amortizes to O(log k) comparisons per element when one run dominates.
+
+### `merge_compute_minrun`
+
+```c
+// CPython: Objects/listobject.c:2060 merge_compute_minrun
+static Py_ssize_t
+merge_compute_minrun(Py_ssize_t n)
+{
+    /* Return k such that n/k is close to but not greater than 2^(MERGE_BASE_BITS).
+       k is in [MIN_MERGE/2, MIN_MERGE]. */
+    Py_ssize_t r = 0;
+    while (n >= MIN_MERGE) {
+        r |= n & 1;
+        n >>= 1;
+    }
+    return n + r;
+}
+```
+
+`minrun` is chosen so that `n / minrun` is close to a power of 2, keeping the merge stack balanced. For small `n` (< 64), `minrun == n` and the list is sorted by insertion sort alone.
+
+## gopy notes
+
+`list.sort` is `objects.ListSort` in `objects/listobject.go`. The timsort implementation is a Go port with `MergeState` as a Go struct. `count_run` uses `objects.RichCompareBool` for `ISLT`. `gallop_right` and `gallop_left` are `objects.GallopRight` and `objects.GallopLeft`. The key function is wrapped in a Go closure.

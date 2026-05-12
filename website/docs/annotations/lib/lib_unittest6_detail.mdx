@@ -1,0 +1,130 @@
+---
+title: Lib/unittest/case.py (part 6)
+description: "Lib/unittest/case.py part 6: TestCase.assertRaises, assertWarns, subTest, _callTestMethod."
+cpython_path: Lib/unittest/case.py
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/unittest/case.py" />
+
+This annotation covers exception assertion helpers and test execution. See `lib_unittest5_detail` for `assertEqual`, `assertTrue`, and `addCleanup`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `TestCase.assertRaises` | Assert that a callable raises |
+| 81-180 | `_AssertRaisesContext` | Context manager for `assertRaises` |
+| 181-280 | `TestCase.assertWarns` | Assert that a callable issues a warning |
+| 281-380 | `TestCase.subTest` | Mark sub-test for granular failure reporting |
+| 381-500 | `TestCase._callTestMethod` | Run the test with `setUp`/`tearDown` |
+
+## Reading
+
+### `TestCase.assertRaises`
+
+```python
+# CPython: Lib/unittest/case.py:742 assertRaises
+def assertRaises(self, expected_exception, *args, **kwargs):
+    context = _AssertRaisesContext(expected_exception, self)
+    try:
+        return context.handle('assertRaises', args, kwargs)
+    except self.failureException:
+        raise
+
+def handle(self, callable_obj, args, kwargs):
+    if callable_obj is None:
+        return self  # use as context manager
+    with self:
+        callable_obj(*args, **kwargs)
+```
+
+`assertRaises(ValueError, int, 'bad')` calls `int('bad')` and asserts it raises `ValueError`. When used as a context manager (`with self.assertRaises(ValueError):`), the `_AssertRaisesContext.__exit__` checks the exception.
+
+### `_AssertRaisesContext`
+
+```python
+# CPython: Lib/unittest/case.py:200 _AssertRaisesContext
+class _AssertRaisesContext(_AssertRaisesBaseContext):
+    def __exit__(self, exc_type, exc_value, tb):
+        if exc_type is None:
+            # No exception raised
+            try:
+                exc_name = self.expected.__name__
+            except AttributeError:
+                exc_name = str(self.expected)
+            raise self.test_case.failureException(
+                f"{exc_name} not raised")
+        if not issubclass(exc_type, self.expected):
+            return False  # re-raise unexpected exception
+        if self.expected_regex is not None:
+            if not self.expected_regex.search(str(exc_value)):
+                raise self.test_case.failureException(...)
+        self.exception = exc_value.with_traceback(None)
+        return True  # suppress the expected exception
+```
+
+`__exit__` returns `True` to suppress the exception (marking the `with` block as having handled it). Returning `False` re-raises unexpected exceptions. The matched exception is stored in `context.exception` for further inspection.
+
+### `TestCase.assertWarns`
+
+```python
+# CPython: Lib/unittest/case.py:800 assertWarns
+def assertWarns(self, expected_warning, *args, **kwargs):
+    context = _AssertWarnsContext(expected_warning, self)
+    return context.handle('assertWarns', args, kwargs)
+
+class _AssertWarnsContext(_AssertRaisesBaseContext):
+    def __enter__(self):
+        self.warnings_manager = warnings.catch_warnings(record=True)
+        self.warnings = self.warnings_manager.__enter__()
+        warnings.simplefilter("always", self.expected)
+        return self
+
+    def __exit__(self, exc_type, exc_value, tb):
+        self.warnings_manager.__exit__(exc_type, exc_value, tb)
+        if exc_type is not None: return
+        try:
+            exc_name = self.expected.__name__
+        except AttributeError:
+            exc_name = str(self.expected)
+        first_matching = next((w for w in self.warnings
+                               if issubclass(w.category, self.expected)), None)
+        if first_matching is None:
+            raise self.test_case.failureException(f"{exc_name} not triggered")
+        self.warning = first_matching
+```
+
+`assertWarns` uses `warnings.catch_warnings(record=True)` to capture all warnings issued within the `with` block. After exit, it scans for at least one warning of the expected category.
+
+### `TestCase.subTest`
+
+```python
+# CPython: Lib/unittest/case.py:880 subTest
+@contextmanager
+def subTest(self, msg=_subtest_msg_sentinel, **params):
+    if not self._outcome.result_supports_subtests:
+        yield  # no-op if runner does not support
+        return
+    parent = self._subtest
+    if parent is None:
+        params_map = _OrderedChainMap(params)
+    else:
+        params_map = parent.params.new_child(params)
+    self._subtest = _SubTest(self, msg, params_map)
+    try:
+        with self._outcome.testPartExecutor(self._subtest):
+            yield
+    finally:
+        self._subtest = parent
+```
+
+`subTest` allows multiple related assertions in one test method. Each `with self.subTest(i=i):` creates a child context; failures within are reported individually without stopping the outer test. The `_OrderedChainMap` allows nested `subTest` calls to accumulate parameters.
+
+## gopy notes
+
+`unittest` is a pure-Python module; gopy runs it directly. `assertRaises` and `assertWarns` use context managers that rely on `__exit__` protocol. `subTest` uses `@contextmanager` from `contextlib`. `_callTestMethod` calls `setUp`, the test method, and `tearDown` via the standard Python call mechanism.
