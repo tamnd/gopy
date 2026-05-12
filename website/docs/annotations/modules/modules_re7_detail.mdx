@@ -1,0 +1,117 @@
+---
+title: Modules/_sre.c (part 7)
+description: "_sre.c part 7: SRE_match backtracking engine, MIN_REPEAT, MAX_REPEAT, SUBPATTERN."
+cpython_path: Modules/_sre.c
+cpython_version: "3.14"
+lines: 600
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/_sre.c" />
+
+This annotation covers the backtracking core of the SRE regex engine. See `modules_re6_detail` for `re.compile`, pattern opcodes, character class matching, and `Match` object methods.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `SRE_match` entry | Initialize state, call `SRE_MATCH` |
+| 81-180 | `MAX_REPEAT` (greedy) | Greedy quantifier: match as many as possible |
+| 181-280 | `MIN_REPEAT` (lazy) | Lazy quantifier: match as few as possible |
+| 281-380 | `SUBPATTERN` / groups | Capture group saving |
+| 381-600 | Backtrack stack | Mark/unmark, backjump |
+
+## Reading
+
+### `SRE_match`
+
+```c
+// CPython: Modules/_sre.c:820 SRE_match
+static Py_ssize_t
+SRE_match(SRE_STATE *state, const SRE_CODE *pattern)
+{
+    state->ptr = state->start;
+    do {
+        state->repeat = NULL;
+        Py_ssize_t res = SRE_MATCH(state, pattern);
+        if (res >= 0 || res == SRE_ERROR_FAILURE) break;
+        /* SRE_ERROR_RETRY: try next position */
+        state->start++;
+    } while (...);
+    return res;
+}
+```
+
+`SRE_match` drives the inner `SRE_MATCH` loop. When the pattern doesn't match at the current position, it increments `start` and retries. `re.search` relies on this retry loop; `re.match` only tries position 0.
+
+### `MAX_REPEAT` (greedy)
+
+```c
+// CPython: Modules/_sre.c:1040 MAX_REPEAT
+case SRE_OP_MAX_REPEAT: {
+    SRE_REPEAT *rep = ...;
+    rep->count = 0;
+    /* Greedy: match as many times as possible, then try rest */
+    while (rep->count < max) {
+        Py_ssize_t res = SRE_MATCH(state, pattern);
+        if (res < 0) break;
+        rep->count++;
+        state->ptr = state->ptr_after_match;
+    }
+    /* Now try the rest of the pattern; backtrack count if needed */
+    while (rep->count >= min) {
+        Py_ssize_t res = SRE_MATCH(state, next_pattern);
+        if (res >= 0) return res;
+        rep->count--;
+        state->ptr = ...;  /* step back one match */
+    }
+    return SRE_ERROR_FAILURE;
+}
+```
+
+`a*b` with `aaab` first matches `aaa` greedily, then tries `b`. If `b` fails, it backs off to `aa` and retries `ab`, then `a` then `b`, etc. This is the classic NFA backtracking algorithm.
+
+### `MIN_REPEAT` (lazy)
+
+```c
+// CPython: Modules/_sre.c:1120 MIN_REPEAT
+case SRE_OP_MIN_REPEAT: {
+    SRE_REPEAT *rep = ...;
+    rep->count = 0;
+    /* Lazy: match minimum first, then try rest */
+    while (rep->count < min) {
+        SRE_MATCH(state, pattern);
+        rep->count++;
+    }
+    /* Try rest at min count; if fail, extend by one */
+    while (1) {
+        Py_ssize_t res = SRE_MATCH(state, next_pattern);
+        if (res >= 0) return res;
+        if (rep->count >= max) return SRE_ERROR_FAILURE;
+        SRE_MATCH(state, pattern);
+        rep->count++;
+    }
+}
+```
+
+`a*?b` with `aaab` first tries to match `b` immediately (0 `a`s). Failing that, matches one `a` and tries `b` again. Continues until `b` matches or max repetitions are exhausted.
+
+### `SUBPATTERN` (capture groups)
+
+```c
+// CPython: Modules/_sre.c:920 SUBPATTERN
+case SRE_OP_MARK: {
+    /* Save current position as group start/end */
+    int group_id = *pattern++;
+    state->mark[group_id] = state->ptr;
+    DISPATCH;
+}
+```
+
+`MARK` opcodes surround each group's pattern. Two `MARK` opcodes per group (start and end). On backtracking, the mark positions are restored from the backtrack stack, so groups correctly reflect what the successful match captured.
+
+## gopy notes
+
+The SRE engine is in `module/re/sre.go` in gopy. `SRE_MATCH` is `sre.match`. `MAX_REPEAT` is compiled to a Go loop with a deferred backtrack stack entry. Groups are stored in `state.marks []int`. `MIN_REPEAT` uses the same stack but tries the continuation first.

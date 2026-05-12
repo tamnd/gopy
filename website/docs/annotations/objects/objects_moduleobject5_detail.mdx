@@ -1,0 +1,111 @@
+---
+title: Objects/moduleobject.c (part 5)
+description: "moduleobject.c part 5: module.__init__, module.__repr__, module.__getattr__, module spec."
+cpython_path: Objects/moduleobject.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Objects/moduleobject.c" />
+
+This annotation covers module initialization and attribute access. See `objects_moduleobject4_detail` for `PyModule_New`, `PyModule_AddObject`, and multi-phase extension module init.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `module.__init_subclass__` | Hook for module subclasses |
+| 81-160 | `module.__repr__` | `<module 'name' from 'path'>` |
+| 161-240 | `module.__getattr__` | Lazy attribute loading via `__getattr__` |
+| 241-360 | `module.__spec__` | `ModuleSpec` object attached at import |
+| 361-500 | `module.__dir__` | Return `list(__dict__.keys())` |
+
+## Reading
+
+### `module.__repr__`
+
+```c
+// CPython: Objects/moduleobject.c:180 module_repr
+static PyObject *
+module_repr(PyObject *self)
+{
+    PyInterpreterState *interp = _PyInterpreterState_GET();
+    PyObject *spec = PyObject_GetAttrString(self, "__spec__");
+    if (spec != NULL) {
+        PyObject *repr = PyObject_CallMethod(spec, "_repr_", "O", self);
+        if (repr != NULL) return repr;
+        PyErr_Clear();
+    }
+    PyObject *name = PyObject_GetAttrString(self, "__name__");
+    PyObject *filename = PyObject_GetAttrString(self, "__file__");
+    if (filename != NULL)
+        return PyUnicode_FromFormat("<module %R from %R>", name, filename);
+    return PyUnicode_FromFormat("<module %R (built-in)>", name);
+}
+```
+
+`repr(os)` produces `<module 'os' from '/usr/lib/python3.14/os.py'>`. The repr delegates to `__spec__._repr_()` if available, so the import system can customize it.
+
+### `module.__getattr__`
+
+```c
+// CPython: Objects/moduleobject.c:240 module_getattro
+static PyObject *
+module_getattro(PyObject *m, PyObject *name)
+{
+    PyObject *attr = _PyObject_GenericGetAttrWithDict(m, name, NULL, 0);
+    if (attr != NULL) return attr;
+    if (!PyErr_ExceptionMatches(PyExc_AttributeError)) return NULL;
+    /* Check for __getattr__ in the module dict */
+    PyObject *getattr = PyObject_GetAttrString(m, "__getattr__");
+    if (getattr != NULL) {
+        attr = PyObject_CallOneArg(getattr, name);
+        Py_DECREF(getattr);
+        return attr;
+    }
+    ...
+}
+```
+
+If a module defines `__getattr__`, it is called when a normal attribute lookup fails. This enables lazy imports: `math.__getattr__` could import `math.tau` on demand from a sub-module.
+
+### `module.__spec__`
+
+```python
+# CPython: Objects/moduleobject.c:60 module dict keys set by import system
+# __name__     — dotted module name (e.g., 'os.path')
+# __spec__     — ModuleSpec: contains name, loader, origin, submodule_search_locations
+# __loader__   — the loader that created this module
+# __package__  — parent package name, or '' for top-level
+# __file__     — filesystem path to the source or .pyc
+# __cached__   — path to .pyc cache file
+```
+
+`__spec__` is a `ModuleSpec` populated by the import machinery (`importlib._bootstrap`). It carries all the metadata needed to reload the module. `importlib.reload(m)` uses `m.__spec__` to re-run the loader.
+
+### `module.__dir__`
+
+```c
+// CPython: Objects/moduleobject.c:320 module_dir
+static PyObject *
+module_dir(PyObject *self, PyObject *args)
+{
+    PyObject *result = NULL;
+    PyObject *dict = PyObject_GetAttrString(self, "__dict__");
+    if (dict != NULL) {
+        if (PyDict_Check(dict))
+            result = PyDict_Keys(dict);
+        Py_DECREF(dict);
+    }
+    return result;
+}
+```
+
+`dir(os)` returns the list of keys in the module's `__dict__`. If the module defines `__dir__`, that is called instead (via `module_getattro`'s fallback).
+
+## gopy notes
+
+`module.__repr__` is `objects.Module.Repr` in `objects/module.go`. It reads `objects.Module.Name` and `objects.Module.File`. `module.__getattr__` calls `objects.Module.Dict.Get(name)` then falls back to the `__getattr__` attribute if present. `module.__dir__` returns `objects.DictKeys(module.Dict)`.
