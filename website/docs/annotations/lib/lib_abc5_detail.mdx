@@ -1,0 +1,91 @@
+---
+title: Lib/abc.py (part 5)
+description: "abc.py part 5: ABCMeta.__new__, ABCMeta.register, ABC.__subclasshook__, abstractmethod."
+cpython_path: Lib/abc.py
+cpython_version: "3.14"
+lines: 300
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/abc.py" />
+
+This annotation covers the abstract base class mechanism. See `objects_typeobject12_detail` for `isinstance`/`issubclass` which integrates with ABCs.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-60 | `ABCMeta.__new__` | Create a new abstract class |
+| 61-120 | `ABCMeta.register` | Register a virtual subclass |
+| 121-200 | `ABCMeta.__subclasscheck__` | Override `issubclass` for virtual subclassing |
+| 201-300 | `abstractmethod` | Decorator marking a method as abstract |
+
+## Reading
+
+### `ABCMeta.__new__`
+
+```python
+# CPython: Lib/abc.py:85 ABCMeta.__new__
+class ABCMeta(type):
+    def __new__(mcls, name, bases, namespace, /, **kwargs):
+        cls = super().__new__(mcls, name, bases, namespace, **kwargs)
+        _abc_init(cls)
+        return cls
+```
+
+`_abc_init` is implemented in C (`_abc` module) and initializes the `_abc_data` structure. It collects the set of abstract method names from the class and all bases.
+
+### `ABCMeta.register`
+
+```python
+# CPython: Lib/abc.py:100 ABCMeta.register
+def register(cls, subclass):
+    if not isinstance(subclass, type):
+        raise TypeError("Can only register classes")
+    if issubclass(subclass, cls):
+        return subclass   # already a subclass
+    cls._abc_registry.add(subclass)
+    ABCMeta._abc_invalidation_counter += 1
+    return subclass
+```
+
+`Iterable.register(MyClass)` makes `isinstance(MyClass(), Iterable)` return `True` even though `MyClass` doesn't inherit from `Iterable`. This is "virtual subclassing".
+
+### `ABCMeta.__subclasscheck__`
+
+```python
+# CPython: Lib/_py_abc.py:90 __subclasscheck__
+def __subclasscheck__(cls, subclass):
+    # Check subclass hook first
+    ok = cls.__subclasshook__(subclass)
+    if ok is not NotImplemented:
+        return ok
+    # Check registered virtual subclasses
+    if subclass in cls._abc_cache:
+        return True
+    # Walk the MRO of subclass
+    for scls in subclass.__mro__:
+        if scls in cls._abc_registry:
+            cls._abc_cache.add(subclass)
+            return True
+    return False
+```
+
+`__subclasshook__` is tried first, allowing ABCs like `Iterable` to accept any class with an `__iter__` method. The result is cached in `_abc_cache` for performance.
+
+### `abstractmethod`
+
+```python
+# CPython: Lib/abc.py:7 abstractmethod
+def abstractmethod(funcobj):
+    funcobj.__isabstractmethod__ = True
+    return funcobj
+```
+
+`@abstractmethod` sets `__isabstractmethod__ = True` on the function. `ABCMeta.__new__` collects all names with this attribute into `__abstractmethods__`. Instantiating a class with non-empty `__abstractmethods__` raises `TypeError`.
+
+## gopy notes
+
+`ABCMeta` is `objects.ABCMeta` in `objects/type.go`. `register` adds to `objects.ABCData.Registry`. `__subclasscheck__` checks the cache and registry. `abstractmethod` sets the `IsAbstract` flag on `objects.Function`.

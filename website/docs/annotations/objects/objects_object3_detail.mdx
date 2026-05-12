@@ -1,0 +1,119 @@
+---
+title: Objects/object.c (part 3)
+description: "Objects/object.c part 3: PyObject_RichCompare, PyObject_Hash, PyObject_IsTrue, PyObject_Not."
+cpython_path: Objects/object.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Objects/object.c" />
+
+This annotation covers comparison and truth-testing. See `objects_object2_detail` for `PyObject_Repr`, `PyObject_Str`, `PyObject_Format`, and `PyObject_Bytes`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `PyObject_RichCompare` | Compare two objects with a relational operator |
+| 81-160 | `PyObject_RichCompareBool` | Compare and return C int |
+| 161-240 | `PyObject_Hash` | Compute or retrieve the hash of an object |
+| 241-320 | `PyObject_IsTrue` | Test truth value (calls `__bool__` or `__len__`) |
+| 321-500 | `PyObject_Not` | Negate truth value; used by `not` operator |
+
+## Reading
+
+### `PyObject_RichCompare`
+
+```c
+// CPython: Objects/object.c:680 PyObject_RichCompare
+PyObject *
+PyObject_RichCompare(PyObject *v, PyObject *w, int op)
+{
+    PyObject *res = do_richcompare(v, w, op);
+    if (res == Py_NotImplemented) {
+        /* Swap and try the reflected operation */
+        Py_DECREF(res);
+        res = do_richcompare(w, v, _Py_SwappedOp[op]);
+    }
+    return res;
+}
+
+static PyObject *
+do_richcompare(PyObject *v, PyObject *w, int op)
+{
+    /* If types differ and w's type is a subtype, give w priority */
+    if (!Py_IS_TYPE(v, Py_TYPE(w)) &&
+        PyType_IsSubtype(Py_TYPE(w), Py_TYPE(v)) &&
+        Py_TYPE(w)->tp_richcompare != NULL) {
+        res = Py_TYPE(w)->tp_richcompare(w, v, _Py_SwappedOp[op]);
+        if (res != Py_NotImplemented) return res;
+        Py_DECREF(res);
+    }
+    if (Py_TYPE(v)->tp_richcompare != NULL) {
+        res = Py_TYPE(v)->tp_richcompare(v, w, op);
+        if (res != Py_NotImplemented) return res;
+        Py_DECREF(res);
+    }
+    /* Final fallback: identity comparison for == and != */
+    ...
+}
+```
+
+Subtypes are tried first. The reflected operation is tried if the left side returns `NotImplemented`. This is why `MyInt() > 5` can work even if only `MyInt.__lt__` is defined.
+
+### `PyObject_Hash`
+
+```c
+// CPython: Objects/object.c:780 PyObject_Hash
+Py_hash_t
+PyObject_Hash(PyObject *v)
+{
+    if (Py_TYPE(v)->tp_hash != NULL)
+        return (*Py_TYPE(v)->tp_hash)(v);
+    if (Py_TYPE(v)->tp_richcompare != NULL) {
+        /* Has __eq__ but no __hash__: unhashable */
+        PyErr_Format(PyExc_TypeError, "unhashable type: '%.200s'",
+                     Py_TYPE(v)->tp_name);
+        return -1;
+    }
+    /* No __eq__ either: use identity hash */
+    return _Py_HashPointer(v);
+}
+```
+
+If a type defines `__eq__` without `__hash__`, it is unhashable by default. This prevents `dict` from silently using identity-based hashing for types that define equality by value.
+
+### `PyObject_IsTrue`
+
+```c
+// CPython: Objects/object.c:1440 PyObject_IsTrue
+int
+PyObject_IsTrue(PyObject *v)
+{
+    Py_ssize_t res;
+    if (v == Py_True) return 1;
+    if (v == Py_False) return 0;
+    if (v == Py_None) return 0;
+    else if (Py_TYPE(v)->tp_as_number != NULL &&
+             Py_TYPE(v)->tp_as_number->nb_bool != NULL)
+        res = (*Py_TYPE(v)->tp_as_number->nb_bool)(v);
+    else if (Py_TYPE(v)->tp_as_mapping != NULL &&
+             Py_TYPE(v)->tp_as_mapping->mp_length != NULL)
+        res = (*Py_TYPE(v)->tp_as_mapping->mp_length)(v);
+    else if (Py_TYPE(v)->tp_as_sequence != NULL &&
+             Py_TYPE(v)->tp_as_sequence->sq_length != NULL)
+        res = (*Py_TYPE(v)->tp_as_sequence->sq_length)(v);
+    else
+        return 1;  /* everything else is True */
+    return (res > 0) ? 1 : (res == 0) ? 0 : -1;
+}
+```
+
+Truth testing priority: `__bool__` > `__len__` > always-true. An empty list is false because `len([]) == 0`. A custom class without `__bool__` or `__len__` is always truthy.
+
+## gopy notes
+
+`PyObject_RichCompare` is `objects.RichCompare` in `objects/object.go`. The reflected-op table is `objects.SwappedOp`. `PyObject_Hash` calls `objects.Hash`. `PyObject_IsTrue` is `objects.IsTrue`, checking `objects.BoolHook`, `objects.LenHook` in order.

@@ -1,0 +1,101 @@
+---
+title: Modules/socketmodule.c (part 4)
+description: "socketmodule.c part 4: socket.connect, socket.accept, socket.sendall, socket.recv_into."
+cpython_path: Modules/socketmodule.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/socketmodule.c" />
+
+This annotation covers the core socket I/O methods. See `modules_socket3_detail` for `socket.socket.__init__`, `bind`, `listen`, `getsockname`, and timeout handling.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `socket.connect` | Connect to a remote address |
+| 81-160 | `socket.accept` | Accept an incoming connection |
+| 161-240 | `socket.sendall` | Send all data, retrying on partial sends |
+| 241-340 | `socket.recv` / `socket.recv_into` | Receive data |
+| 341-500 | Timeout handling | Non-blocking mode and `settimeout` |
+
+## Reading
+
+### `socket.connect`
+
+```c
+// CPython: Modules/socketmodule.c:3240 sock_connect
+static PyObject *
+sock_connect(PySocketSockObject *s, PyObject *addro)
+{
+    sock_addr_t addrbuf;
+    int addrlen;
+    if (!getsockaddrarg(s, addro, &addrbuf, &addrlen)) return NULL;
+    int res;
+    Py_BEGIN_ALLOW_THREADS
+    res = connect(s->sock_fd, (struct sockaddr *)&addrbuf, addrlen);
+    Py_END_ALLOW_THREADS
+    if (res != 0) return s->errorhandler();
+    Py_RETURN_NONE;
+}
+```
+
+`connect` releases the GIL during the syscall. For non-blocking sockets, `connect` returns `EINPROGRESS`; the caller must use `select`/`epoll` to wait for the connection to complete.
+
+### `socket.accept`
+
+```c
+// CPython: Modules/socketmodule.c:3320 sock_accept
+static PyObject *
+sock_accept(PySocketSockObject *s, PyObject *Py_UNUSED(ignored))
+{
+    sock_addr_t addrbuf;
+    socklen_t addrlen = sizeof addrbuf;
+    SOCKET_T newfd;
+    Py_BEGIN_ALLOW_THREADS
+    newfd = accept(s->sock_fd, (struct sockaddr *)&addrbuf, &addrlen);
+    Py_END_ALLOW_THREADS
+    if (newfd == INVALID_SOCKET) return s->errorhandler();
+    /* Wrap newfd in a new socket object */
+    PyObject *sock = PySocket_FromFd(newfd, s->sock_family, s->sock_type, ...);
+    PyObject *addr = makesockaddr(s->sock_fd, &addrbuf, addrlen, s->sock_proto);
+    return Py_BuildValue("NN", sock, addr);
+}
+```
+
+`accept` returns `(socket, address)`. The new socket inherits the type and protocol from the listening socket.
+
+### `socket.sendall`
+
+```c
+// CPython: Modules/socketmodule.c:3560 sock_sendall
+static PyObject *
+sock_sendall(PySocketSockObject *s, PyObject *args)
+{
+    Py_buffer pbuf;
+    char *buf; Py_ssize_t len;
+    Py_ssize_t n = -1;
+    while (len > 0) {
+        Py_BEGIN_ALLOW_THREADS
+        n = send(s->sock_fd, buf, len, flags);
+        Py_END_ALLOW_THREADS
+        if (n < 0) {
+            if (errno == EINTR) continue;
+            return s->errorhandler();
+        }
+        buf += n;
+        len -= n;
+    }
+    Py_RETURN_NONE;
+}
+```
+
+`sendall` loops until all bytes are sent. `send` may return a short count on non-blocking sockets or when the kernel buffer is full. `EINTR` (signal interrupt) causes a retry.
+
+## gopy notes
+
+`socket.connect` is `module/socket.Connect` in `module/socket/module.go` using `net.Dial`. `accept` returns a new `net.Conn`. `sendall` calls `conn.Write` in a loop. `recv`/`recv_into` call `conn.Read` with a buffer.

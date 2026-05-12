@@ -1,0 +1,95 @@
+---
+title: Python/ceval.c (part 92)
+description: "Python/ceval.c part 92: SUBSCR, STORE_SUBSCR, DELETE_SUBSCR, BINARY_SLICE, STORE_SLICE."
+cpython_path: Python/ceval.c
+cpython_version: "3.14"
+lines: 400
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Python/ceval.c" />
+
+This annotation covers subscript and slice opcodes. See `python_ceval91_detail` for binary arithmetic specializations.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `BINARY_SUBSCR` | `obj[key]` — generic subscript |
+| 81-160 | `BINARY_SUBSCR_LIST_INT` | Specialization for `list[int]` |
+| 161-240 | `BINARY_SUBSCR_DICT` | Specialization for `dict[key]` |
+| 241-320 | `STORE_SUBSCR` | `obj[key] = value` |
+| 321-400 | `BINARY_SLICE` / `STORE_SLICE` | Slice read and write |
+
+## Reading
+
+### `BINARY_SUBSCR`
+
+```c
+// CPython: Python/ceval.c:5620 BINARY_SUBSCR
+inst(BINARY_SUBSCR, (container, sub -- res)) {
+    res = PyObject_GetItem(container, sub);
+    ERROR_IF(res == NULL, error);
+    Py_DECREF(container);
+    Py_DECREF(sub);
+}
+```
+
+`BINARY_SUBSCR` calls `PyObject_GetItem` which dispatches through `tp_as_mapping->mp_subscript` or `tp_as_sequence->sq_item`.
+
+### `BINARY_SUBSCR_LIST_INT`
+
+```c
+// CPython: Python/ceval.c:5660 BINARY_SUBSCR_LIST_INT
+inst(BINARY_SUBSCR_LIST_INT, (list, sub -- res)) {
+    DEOPT_IF(!PyList_CheckExact(list), BINARY_SUBSCR);
+    DEOPT_IF(!PyLong_CheckExact(sub), BINARY_SUBSCR);
+    Py_ssize_t index = _PyLong_IsCompact((PyLongObject*)sub) ?
+        _PyLong_CompactValue((PyLongObject*)sub) :
+        PyLong_AsSsize_t(sub);
+    DEOPT_IF(index < 0, BINARY_SUBSCR);
+    DEOPT_IF(index >= PyList_GET_SIZE(list), BINARY_SUBSCR);
+    res = Py_NewRef(PyList_GET_ITEM(list, index));
+    Py_DECREF(list);
+    Py_DECREF(sub);
+}
+```
+
+Reads directly from `ob_item[index]` without bounds check overhead (after the deopt guards). Negative indices fall through to the generic path.
+
+### `BINARY_SLICE`
+
+```c
+// CPython: Python/ceval.c:5780 BINARY_SLICE
+inst(BINARY_SLICE, (container, start, stop -- res)) {
+    PyObject *slice = _PyBuildSlice_ConsumeRefs(start, stop);
+    res = PyObject_GetItem(container, slice);
+    Py_DECREF(slice);
+    ERROR_IF(res == NULL, error);
+    Py_DECREF(container);
+}
+```
+
+`BINARY_SLICE` builds a `slice` object from `start` and `stop` (both on the stack). The `step` is always `None` for simple slice notation `a[1:3]`.
+
+### `STORE_SLICE`
+
+```c
+// CPython: Python/ceval.c:5820 STORE_SLICE
+inst(STORE_SLICE, (v, container, start, stop --)) {
+    PyObject *slice = _PyBuildSlice_ConsumeRefs(start, stop);
+    int err = PyObject_SetItem(container, slice, v);
+    Py_DECREF(slice);
+    Py_DECREF(v);
+    Py_DECREF(container);
+    ERROR_IF(err, error);
+}
+```
+
+`a[1:3] = [10, 20]` compiles to push `[10, 20]`, push `a`, push `1`, push `3`, `STORE_SLICE`.
+
+## gopy notes
+
+`BINARY_SUBSCR` is in `vm/eval_simple.go` and calls `objects.GetItem`. `BINARY_SUBSCR_LIST_INT` reads `objects.List.Items[index]` directly. `BINARY_SLICE` calls `objects.BuildSlice` then `objects.GetItem`. `STORE_SLICE` calls `objects.SetItem`.
