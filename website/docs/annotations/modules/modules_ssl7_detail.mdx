@@ -1,0 +1,118 @@
+---
+title: Modules/_ssl.c (part 7)
+description: "_ssl.c part 7: SSLContext.wrap_socket, SSLSocket.do_handshake, read, write."
+cpython_path: Modules/_ssl.c
+cpython_version: "3.14"
+lines: 600
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/_ssl.c" />
+
+This annotation covers the TLS socket wrapping and I/O. See `modules_ssl6_detail` for `SSLContext.__new__`, certificate loading, and `verify_mode`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `SSLContext.wrap_socket` | Wrap a socket in TLS |
+| 81-180 | `SSLSocket.do_handshake` | Perform the TLS handshake |
+| 181-280 | `SSLSocket.read` | Decrypt and return data |
+| 281-380 | `SSLSocket.write` | Encrypt and send data |
+| 381-600 | `SSLSocket.getpeercert` | Extract the peer's certificate |
+
+## Reading
+
+### `SSLContext.wrap_socket`
+
+```c
+// CPython: Modules/_ssl.c:1440 _ssl__SSLContext_wrap_socket_impl
+static PyObject *
+_ssl__SSLContext_wrap_socket_impl(PySSLContext *self, PyObject *sock,
+                                   int server_side, PyObject *hostname_obj, ...)
+{
+    SSL *ssl = SSL_new(self->ctx);
+    SSL_set_fd(ssl, PyObject_AsFileDescriptor(sock));
+    if (hostname) SSL_set_tlsext_host_name(ssl, hostname);
+    ...
+    return newPySSLSocket(self, sock, server_side, hostname_obj, ssl);
+}
+```
+
+`context.wrap_socket(sock, server_hostname='example.com')` creates a new `SSLSocket` backed by the raw socket. `SSL_set_tlsext_host_name` sets SNI, which is required for virtual hosting on HTTPS servers.
+
+### `SSLSocket.do_handshake`
+
+```c
+// CPython: Modules/_ssl.c:1640 _ssl__SSLObject_do_handshake_impl
+static PyObject *
+_ssl__SSLObject_do_handshake_impl(PySSLSocket *self)
+{
+    int ret;
+    do {
+        Py_BEGIN_ALLOW_THREADS
+        ret = SSL_do_handshake(self->ssl);
+        Py_END_ALLOW_THREADS
+        if (ret <= 0) {
+            int err = SSL_get_error(self->ssl, ret);
+            if (err == SSL_ERROR_WANT_READ || err == SSL_ERROR_WANT_WRITE) {
+                if (self->socket_timeout == 0.0) {
+                    PyErr_SetNone(PyExc_SSLWantReadError);
+                    return NULL;
+                }
+                /* Blocking mode: wait and retry */
+            } else break;
+        }
+    } while (ret <= 0);
+    ...
+}
+```
+
+`do_handshake` loops because TLS requires multiple round trips. The GIL is released during the actual I/O. In non-blocking mode, `SSL_ERROR_WANT_READ`/`SSL_ERROR_WANT_WRITE` raise `SSLWantReadError`/`SSLWantWriteError`, which the caller handles with `select`.
+
+### `SSLSocket.read`
+
+```c
+// CPython: Modules/_ssl.c:1720 _ssl__SSLObject_read_impl
+static PyObject *
+_ssl__SSLObject_read_impl(PySSLSocket *self, Py_ssize_t len, int group_right_1,
+                           Py_buffer *buffer)
+{
+    PyObject *dest = buffer ? NULL : PyBytes_FromStringAndSize(NULL, len);
+    int count;
+    do {
+        Py_BEGIN_ALLOW_THREADS
+        count = SSL_read(self->ssl, dest_buf, len);
+        Py_END_ALLOW_THREADS
+    } while (count == SSL_ERROR_WANT_READ);
+    ...
+}
+```
+
+`ssl_sock.read(4096)` calls `SSL_read` which decrypts buffered data from the TLS record layer. `SSL_read` may return less than requested if only part of a record has arrived.
+
+### `SSLSocket.getpeercert`
+
+```c
+// CPython: Modules/_ssl.c:1860 _ssl__SSLObject_getpeercert_impl
+static PyObject *
+_ssl__SSLObject_getpeercert_impl(PySSLSocket *self, int binary_form)
+{
+    X509 *cert = SSL_get_peer_certificate(self->ssl);
+    if (cert == NULL) Py_RETURN_NONE;
+    if (binary_form) {
+        /* Return DER-encoded bytes */
+        return _get_DER_cert(cert);
+    }
+    /* Return decoded dict: subject, issuer, notBefore, notAfter, subjectAltName */
+    return _decode_certificate(cert);
+}
+```
+
+`ssl_sock.getpeercert()` returns a dict with the server's certificate fields. `binary_form=True` returns the raw DER bytes. The dict includes `subjectAltName` for certificate validation.
+
+## gopy notes
+
+`SSLContext.wrap_socket` is `module/ssl.WrapSocket` in `module/ssl/module.go`. It creates a `tls.Conn` wrapping the net.Conn. `do_handshake` calls `tls.Conn.Handshake()`. `read`/`write` call `tls.Conn.Read`/`Write`. `getpeercert` reads `tls.Conn.ConnectionState().PeerCertificates[0]`.

@@ -1,0 +1,140 @@
+---
+title: Lib/collections/__init__.py (part 4)
+description: "collections part 4: Counter arithmetic, Counter.most_common, Counter.update, ChainMap."
+cpython_path: Lib/collections/__init__.py
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/collections/__init__.py" />
+
+This annotation covers `Counter` operations and `ChainMap`. See `lib_collections3_detail` for `OrderedDict`, `defaultdict`, and `namedtuple`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `Counter.update` | Add counts from an iterable or mapping |
+| 81-160 | `Counter.most_common` | Return the n most common elements |
+| 161-240 | `Counter` arithmetic | `+`, `-`, `&`, `|` on counters |
+| 241-360 | `ChainMap.__init__` | Proxy a sequence of mappings |
+| 361-500 | `ChainMap.new_child` / `parents` | Create a child scope |
+
+## Reading
+
+### `Counter.update`
+
+```python
+# CPython: Lib/collections/__init__.py:620 Counter.update
+def update(self, iterable=None, /, **kwds):
+    if iterable is not None:
+        if isinstance(iterable, Counter):
+            for elem, count in iterable.items():
+                self[elem] = self.get(elem, 0) + count
+        elif hasattr(iterable, 'keys'):
+            for elem in iterable:
+                self[elem] = self.get(elem, 0) + iterable[elem]
+        else:
+            # Treat as an iterable of elements
+            _count_elements(self, iterable)
+    if kwds:
+        self.update(kwds)
+```
+
+`_count_elements` is a C implementation (in `_collectionsmodule.c`) that counts each element and is faster than a Python loop. `Counter.update` adds counts; `Counter.subtract` subtracts them (allowing negative counts).
+
+### `Counter.most_common`
+
+```python
+# CPython: Lib/collections/__init__.py:660 Counter.most_common
+def most_common(self, n=None):
+    if n is None:
+        return sorted(self.items(), key=_itemgetter(1), reverse=True)
+    return heapq.nlargest(n, self.items(), key=_itemgetter(1))
+```
+
+`most_common(10)` uses `heapq.nlargest` which is O(N log k) for k=10, faster than full sort. `most_common()` (no arg) returns all items sorted by count descending.
+
+### `Counter` arithmetic
+
+```python
+# CPython: Lib/collections/__init__.py:700 Counter.__add__
+def __add__(self, other):
+    if not isinstance(other, Counter):
+        return NotImplemented
+    result = Counter()
+    for elem, count in self.items():
+        newcount = count + other[elem]
+        if newcount > 0:
+            result[elem] = newcount
+    for elem, count in other.items():
+        if elem not in self and count > 0:
+            result[elem] = count
+    return result
+
+def __sub__(self, other):
+    ...
+    # result includes only positive differences
+
+def __and__(self, other):
+    # Intersection: min of counts (only positive)
+    ...
+def __or__(self, other):
+    # Union: max of counts
+    ...
+```
+
+`Counter('aab') + Counter('bbc')` → `Counter({'b': 3, 'a': 2, 'c': 1})`. Elements with zero or negative counts are dropped from the result. `&` gives min counts; `|` gives max counts.
+
+### `ChainMap.__init__`
+
+```python
+# CPython: Lib/collections/__init__.py:940 ChainMap
+class ChainMap(MutableMapping):
+    def __init__(self, *maps):
+        self.maps = list(maps) or [{}]
+
+    def __getitem__(self, key):
+        for mapping in self.maps:
+            try:
+                return mapping[key]
+            except KeyError:
+                pass
+        raise KeyError(key)
+
+    def __setitem__(self, key, value):
+        self.maps[0][key] = value  # write to first map only
+
+    def __delitem__(self, key):
+        try:
+            del self.maps[0][key]
+        except KeyError:
+            raise KeyError(f'Key not found in the first mapping: {key!r}')
+```
+
+`ChainMap` searches maps in order (first wins). Writes always go to `maps[0]`. Deletion only works on `maps[0]`, even if the key exists in a deeper map.
+
+### `ChainMap.new_child`
+
+```python
+# CPython: Lib/collections/__init__.py:1000 new_child / parents
+def new_child(self, m=None, /, **kwargs):
+    if m is None:
+        m = kwargs
+    elif kwargs:
+        m.update(kwargs)
+    return self.__class__(m, *self.maps)
+
+@property
+def parents(self):
+    return self.__class__(*self.maps[1:])
+```
+
+`new_child()` creates a new `ChainMap` with an empty dict prepended. Used to implement nested scopes: `child = scope.new_child()` creates a local scope that shadows but doesn't modify the parent. `parents` returns the chain without the first map.
+
+## gopy notes
+
+`Counter.update` is `module/collections.CounterUpdate` in `module/collections/module.go`. `_count_elements` is `module/collections.countElements` using a Go map. `Counter.most_common` uses `container/heap`. `ChainMap` is `module/collections.ChainMap` with a `[]objects.Dict` slice.

@@ -1,0 +1,104 @@
+---
+title: Objects/unicodeobject.c (part 9)
+description: "unicodeobject.c part 9: str.encode, str.format_map, str.maketrans, str.translate."
+cpython_path: Objects/unicodeobject.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Objects/unicodeobject.c" />
+
+This annotation covers string encoding and translation. See `objects_unicodeobject8_detail` for `str.__new__`, internal representation (Latin-1/UCS-2/UCS-4), and `str.__hash__`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `str.encode` | Encode string to bytes using a codec |
+| 81-160 | `str.format_map` | `'{key}'.format_map(mapping)` |
+| 161-240 | `str.maketrans` | Build a translation table |
+| 241-360 | `str.translate` | Apply a translation table |
+| 361-500 | `str.expandtabs` | Replace tabs with spaces |
+
+## Reading
+
+### `str.encode`
+
+```c
+// CPython: Objects/unicodeobject.c:11240 unicode_encode_impl
+static PyObject *
+unicode_encode_impl(PyObject *self, const char *encoding, const char *errors)
+{
+    return PyUnicode_AsEncodedString(self, encoding, errors);
+}
+```
+
+`'hello'.encode('utf-8')` calls `PyUnicode_AsEncodedString` which looks up the codec by name in `encodings.__dict__`, calls its `encode` function, and returns `bytes`. `errors` defaults to `'strict'`; other values: `'replace'`, `'ignore'`, `'xmlcharrefreplace'`.
+
+### `str.format_map`
+
+```c
+// CPython: Objects/unicodeobject.c:14780 unicode_format_map_impl
+static PyObject *
+unicode_format_map_impl(PyObject *self, PyObject *map)
+{
+    return PyObject_Format(self, map);
+}
+```
+
+`'{name}'.format_map({'name': 'Alice'})` is like `.format(**d)` but uses the mapping directly without expanding `**`. Useful for custom mapping objects (e.g., `collections.defaultdict`) where `**d` would fail.
+
+### `str.maketrans`
+
+```c
+// CPython: Objects/unicodeobject.c:12880 unicode_maketrans_impl
+static PyObject *
+unicode_maketrans_impl(PyObject *x, PyObject *y, PyObject *z)
+{
+    /* Two-arg form: x is a string to translate from, y is a string to translate to */
+    /* One-arg form: x is a dict {int|str|None: int|str|None} */
+    PyObject *res = PyDict_New();
+    if (PyUnicode_Check(x)) {
+        /* Map each char of x to corresponding char of y */
+        for (Py_ssize_t i = 0; i < PyUnicode_GET_LENGTH(x); i++) {
+            PyDict_SetItem(res, PyLong_FromLong(PyUnicode_READ_CHAR(x, i)),
+                           PyLong_FromLong(PyUnicode_READ_CHAR(y, i)));
+        }
+    }
+    /* If z: map each char to None (delete) */
+    ...
+    return res;
+}
+```
+
+`str.maketrans('abc', 'xyz')` returns `{97: 120, 98: 121, 99: 122}` (ord-to-ord mapping). `str.maketrans({'a': 'x', 'b': None})` maps `'a'` to `'x'` and deletes `'b'`.
+
+### `str.translate`
+
+```c
+// CPython: Objects/unicodeobject.c:12960 unicode_translate_impl
+static PyObject *
+unicode_translate(PyObject *self, PyObject *table)
+{
+    _PyUnicodeWriter writer;
+    _PyUnicodeWriter_Init(&writer);
+    Py_ssize_t len = PyUnicode_GET_LENGTH(self);
+    for (Py_ssize_t i = 0; i < len; i++) {
+        Py_UCS4 ch = PyUnicode_READ_CHAR(self, i);
+        PyObject *res = PyObject_GetItem(table, PyLong_FromLong(ch));
+        if (res == Py_None) continue;  /* delete */
+        else if (PyUnicode_Check(res)) _PyUnicodeWriter_WriteStr(&writer, res);
+        else _PyUnicodeWriter_WriteChar(&writer, PyLong_AsLong(res));
+    }
+    return _PyUnicodeWriter_Finish(&writer);
+}
+```
+
+`s.translate(table)` maps each character's ordinal through `table`. `None` values delete the character. The table is any object supporting `__getitem__` with integer keys.
+
+## gopy notes
+
+`str.encode` is `objects.Str.Encode` in `objects/str.go`. It calls the codec from `module/codecs`. `str.format_map` calls `objects.StrFormatMap`. `str.maketrans` builds a `*objects.Dict` with `int` keys. `str.translate` iterates runes and looks up each in the table dict.

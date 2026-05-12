@@ -1,0 +1,128 @@
+---
+title: Python/import.c (part 10)
+description: "Python/import.c part 10: importlib bootstrap, _find_and_load, _load_unlocked, module spec."
+cpython_path: Python/import.c
+cpython_version: "3.14"
+lines: 600
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Python/import.c" />
+
+This annotation covers the importlib bootstrap path. See `modules_import9_detail` for `PyImport_ImportModule`, `sys.modules` lookup, and built-in vs frozen modules.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `_find_and_load` | Core importlib entry point |
+| 81-180 | `_find_spec` | Search finders for a module spec |
+| 181-280 | `_load_unlocked` | Execute the loader |
+| 281-380 | `ModuleSpec` | Describes a module's location and loader |
+| 381-600 | Bootstrap finders | `BuiltinImporter`, `FrozenImporter`, `PathFinder` |
+
+## Reading
+
+### `_find_and_load`
+
+```python
+# CPython: Lib/importlib/_bootstrap.py:1200 _find_and_load
+def _find_and_load(name, import_):
+    module = sys.modules.get(name, _NEEDS_LOADING)
+    if module is _NEEDS_LOADING:
+        return _find_and_load_unlocked(name, import_)
+    if module is None:
+        # Previously failed import
+        raise ModuleNotFoundError(f'import of {name!r} halted; '
+                                  f'use importlib.reload() to try again',
+                                  name=name)
+    _lock_unlock_module(name)
+    return module
+```
+
+`_find_and_load` checks `sys.modules` first. A `None` entry means a previous import failed; the error is reraised. A non-`None` entry is returned directly (the import cache hit).
+
+### `_find_spec`
+
+```python
+# CPython: Lib/importlib/_bootstrap.py:1080 _find_spec
+def _find_spec(name, path, target=None):
+    meta_path = sys.meta_path
+    for finder in meta_path:
+        with _ImportLockContext():
+            try:
+                find_spec = finder.find_spec
+            except AttributeError:
+                spec = finder.find_module(name, path)
+                ...
+            else:
+                spec = find_spec(name, path, target)
+        if spec is not None:
+            return spec
+    return None
+```
+
+`sys.meta_path` is searched in order: `BuiltinImporter` → `FrozenImporter` → `PathFinder`. The first finder that returns a non-`None` spec wins.
+
+### `_load_unlocked`
+
+```python
+# CPython: Lib/importlib/_bootstrap.py:880 _load_unlocked
+def _load_unlocked(spec):
+    module = module_from_spec(spec)
+    # Add to sys.modules before exec to handle circular imports
+    sys.modules[spec.name] = module
+    try:
+        spec.loader.exec_module(module)
+    except:
+        try:
+            del sys.modules[spec.name]
+        except KeyError:
+            pass
+        raise
+    return sys.modules[spec.name]  # may have been replaced by exec_module
+```
+
+The module is added to `sys.modules` before `exec_module` runs. This makes the module visible during circular imports (the partial module is returned). If `exec_module` raises, the module is removed.
+
+### `ModuleSpec`
+
+```python
+# CPython: Lib/importlib/_bootstrap.py:440 ModuleSpec
+class ModuleSpec:
+    def __init__(self, name, loader, *, origin=None,
+                 loader_state=None, is_package=None):
+        self.name = name
+        self.loader = loader
+        self.origin = origin        # filesystem path or None for builtins
+        self.loader_state = loader_state
+        self.submodule_search_locations = [] if is_package else None
+        self._set_fileattr = False
+        self._cached = None
+```
+
+`ModuleSpec` decouples discovery (finding the spec) from loading (executing the module). The spec is created by a finder; the loader in the spec does the actual work.
+
+### Bootstrap finders
+
+```python
+# CPython: Lib/importlib/_bootstrap.py:180 BuiltinImporter
+class BuiltinImporter:
+    @classmethod
+    def find_spec(cls, fullname, path=None, target=None):
+        if path is not None: return None  # not a top-level import
+        if _imp.is_builtin(fullname):
+            return spec_from_loader(fullname, cls, origin='built-in')
+        return None
+    @classmethod
+    def exec_module(cls, module):
+        _imp.init_builtin(module.__spec__.name)  # calls the C init function
+```
+
+`BuiltinImporter` handles C extension modules compiled into the interpreter (like `_io`, `_sre`). `FrozenImporter` handles frozen bytecode (like `importlib._bootstrap` itself). `PathFinder` handles everything else via `sys.path`.
+
+## gopy notes
+
+`_find_and_load` is Go function `vm.findAndLoad` in `vm/eval_import.go`. `sys.modules` is `objects.Sys.Modules`, a `*objects.Dict`. `_find_spec` iterates `sys.meta_path`. `BuiltinImporter.exec_module` calls `module.Init()` on the registered Go module. `PathFinder` uses `os.Open` to find `.py` or `.pyc` files.
