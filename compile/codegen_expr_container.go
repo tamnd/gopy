@@ -8,6 +8,7 @@ import (
 	"fmt"
 
 	"github.com/tamnd/gopy/ast"
+	"github.com/tamnd/gopy/symtable"
 )
 
 // visitList emits a list literal in load context. Stores are routed
@@ -204,17 +205,23 @@ func (c *Compiler) visitAttribute(e *ast.Attribute) error {
 	if err := c.visitExpr(e.Value); err != nil {
 		return err
 	}
+	// Mangle private attribute names against the enclosing class. A
+	// reference like `self.__x` inside a method of class Tokenizer is
+	// rewritten to `self._Tokenizer__x` before reaching LOAD_ATTR.
+	//
+	// CPython: Python/codegen.c codegen_visit_expr (Attribute_kind, mangle branch)
+	attr := symtable.Mangle(c.unit().Private, e.Attr)
 	pool := poolNames
 	switch e.Ctx {
 	case ast.Load:
 		// LOAD_ATTR oparg low bit is the "push self" hint used by
 		// LOAD_METHOD; codegen leaves it clear and the flowgraph
 		// optimizes it.
-		c.addOpName(LOAD_ATTR, &pool, e.Attr, loc(e))
+		c.addOpName(LOAD_ATTR, &pool, attr, loc(e))
 	case ast.Store:
-		c.addOpName(STORE_ATTR, &pool, e.Attr, loc(e))
+		c.addOpName(STORE_ATTR, &pool, attr, loc(e))
 	case ast.Del:
-		c.addOpName(DELETE_ATTR, &pool, e.Attr, loc(e))
+		c.addOpName(DELETE_ATTR, &pool, attr, loc(e))
 	default:
 		return fmt.Errorf("compile: Attribute with unknown context %v", e.Ctx)
 	}

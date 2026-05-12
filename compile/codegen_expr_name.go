@@ -49,7 +49,13 @@ const (
 //
 // CPython: Python/codegen.c:L3186 codegen_nameop
 func (c *Compiler) nameOp(name string, mode nameMode, l ast.Pos) error {
-	mangled := symtable.MaybeMangle(c.scope.Name, c.scope, name)
+	// Mangle against the enclosing class name carried on the active
+	// unit. Inside a method, the symtable already records names like
+	// `__x` as `_ClassName__x`, so the codegen lookup must mangle
+	// with the same private to find the symbol.
+	//
+	// CPython: Python/codegen.c codegen_nameop (compiler_mangle)
+	mangled := symtable.MaybeMangle(c.unit().Private, c.scope, name)
 	scope := c.scope.GetScope(mangled)
 	inFunc := c.scope.Type == symtable.FunctionBlock
 
