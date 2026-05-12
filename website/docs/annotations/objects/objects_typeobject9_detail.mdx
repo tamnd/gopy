@@ -1,0 +1,86 @@
+---
+title: Objects/typeobject.c (part 9)
+description: "Objects/typeobject.c part 9: type.__prepare__, type.__init_subclass__, type.__set_name__, class creation pipeline."
+cpython_path: Objects/typeobject.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Objects/typeobject.c" />
+
+This annotation covers the class creation pipeline. See `objects_typeobject8_detail` for `__subclasshook__`, `__instancecheck__`, and `type.__or__`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `type.__prepare__` | Create the class namespace before executing the body |
+| 81-160 | `type.__init_subclass__` | Hook called after a subclass is created |
+| 161-260 | `type.__set_name__` | Hook called on descriptors when defined in a class |
+| 261-360 | `type_new_impl` | The full class creation path |
+| 361-500 | `type_ready` | Inherit slots, fill in defaults |
+
+## Reading
+
+### `type.__prepare__`
+
+```c
+// CPython: Objects/typeobject.c:5080 type_prepare
+static PyObject *
+type_prepare(PyObject *self, PyObject *const *args, Py_ssize_t nargs,
+             PyObject *kwnames)
+{
+    /* Return the namespace dict for the class body.
+       Called before the class body is executed.
+       Metaclass.prepare(name, bases, **kwargs) */
+    return PyDict_New();
+}
+```
+
+`type.__prepare__` returns a plain dict. `ABCMeta.__prepare__` and `OrderedMeta.__prepare__` can return custom mappings (like `OrderedDict`) that preserve insertion order or track method definitions.
+
+### `type.__init_subclass__`
+
+```c
+// CPython: Objects/typeobject.c:5140 type_init_subclass
+static PyObject *
+type_init_subclass(PyTypeObject *cls, PyObject *kwds)
+{
+    /* Called on the base class when a new subclass is created.
+       class Sub(Base, kwarg=val): ...
+       → Base.__init_subclass__(kwarg=val) is called */
+    return PyObject_CallMethodObjArgs(
+        (PyObject *)cls, str___init_subclass__, kwds, NULL);
+}
+```
+
+`__init_subclass__` runs after the subclass body is executed and the type is created. Plugins use it: `class MyPlugin(Plugin, category='foo')` calls `Plugin.__init_subclass__(category='foo')` which can register the plugin.
+
+### `type.__set_name__`
+
+```c
+// CPython: Objects/typeobject.c:5200 type_set_name_in_class
+static int
+type_set_name_in_class(PyObject *cls, PyObject *name, PyObject *value)
+{
+    /* If value has __set_name__, call it: value.__set_name__(cls, name) */
+    PyObject *set_name = PyObject_GetAttr(value, str___set_name__);
+    if (set_name == NULL) {
+        if (PyErr_ExceptionMatches(PyExc_AttributeError)) {
+            PyErr_Clear();
+            return 0;
+        }
+        return -1;
+    }
+    return PyObject_CallFunctionObjArgs(set_name, cls, name, NULL) ? 0 : -1;
+}
+```
+
+`__set_name__` is called for every name-value pair in the class body. Descriptors use it to record the attribute name they were assigned to: `class MyDesc: def __set_name__(self, owner, name): self.name = name`.
+
+## gopy notes
+
+`type.__prepare__` is `objects.TypePrepare` in `objects/type.go`. For plain `type`, it returns `objects.NewDict()`. `__init_subclass__` is called in `objects.TypeNew` after the class body executes. `__set_name__` is called in a loop over the namespace by `objects.TypeNew`.

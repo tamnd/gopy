@@ -1,0 +1,83 @@
+---
+title: Python/ceval.c (part 55)
+description: "Python/ceval.c part 55: CALL_INTRINSIC_1, CALL_INTRINSIC_2, FORMAT_VALUE, BUILD_STRING."
+cpython_path: Python/ceval.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Python/ceval.c" />
+
+This annotation covers intrinsic calls and f-string compilation. See `python_ceval54_detail` for `STORE_ATTR` specializations.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `CALL_INTRINSIC_1` | Single-arg intrinsic: `print_expr`, `import_star`, etc. |
+| 81-160 | `CALL_INTRINSIC_2` | Two-arg intrinsic: `prep_reraise_star`, `typevar_with_bound` |
+| 161-240 | `FORMAT_VALUE` | Apply `!r`/`!s`/`!a` and format spec to f-string part |
+| 241-320 | `BUILD_STRING` | Concatenate N top-of-stack strings |
+| 321-500 | `FORMAT_SIMPLE` / `CONVERT_VALUE` | Fast path for simple f-string fields |
+
+## Reading
+
+### `CALL_INTRINSIC_1`
+
+```c
+// CPython: Python/ceval.c:5380 CALL_INTRINSIC_1
+inst(CALL_INTRINSIC_1, (value -- res)) {
+    assert(oparg <= MAX_INTRINSIC_1);
+    res = _PyIntrinsics_UnaryFunctions[oparg](tstate, value);
+    ERROR_IF(res == NULL, error);
+    DECREF_INPUTS();
+    DISPATCH();
+}
+```
+
+Intrinsics are internal C functions exposed as opcodes for operations that don't fit the standard slot system: `print_expr` (interactive mode), `import_star` (`from m import *`), `stopiteration_error` (extracting `StopIteration.value`).
+
+### `FORMAT_VALUE`
+
+```c
+// CPython: Python/ceval.c:5460 FORMAT_VALUE
+inst(FORMAT_VALUE, (value, fmt_spec if (oparg & FVS_MASK) -- res)) {
+    int which_conversion = oparg & FVC_MASK;
+    /* Apply conversion: !r, !s, !a */
+    if (which_conversion == FVC_REPR)  value = PyObject_Repr(value);
+    else if (which_conversion == FVC_STR)   value = PyObject_Str(value);
+    else if (which_conversion == FVC_ASCII) value = PyObject_ASCII(value);
+    /* Apply format spec */
+    if (oparg & FVS_HAVE_SPEC) {
+        res = PyObject_Format(value, fmt_spec);
+    } else {
+        res = PyObject_Format(value, NULL);  /* default __format__ */
+    }
+    DECREF_INPUTS();
+    ERROR_IF(res == NULL, error);
+    DISPATCH();
+}
+```
+
+`f'{x!r:.10}'` compiles to `LOAD x`, `FORMAT_VALUE (FVC_REPR | FVS_HAVE_SPEC)` with the spec string `'.10'` below `x`. The result is a formatted string fragment.
+
+### `BUILD_STRING`
+
+```c
+// CPython: Python/ceval.c:5520 BUILD_STRING
+inst(BUILD_STRING, (pieces[oparg] -- str)) {
+    str = _PyUnicode_JoinArray(&_Py_STR(empty), pieces, oparg);
+    DECREF_INPUTS();
+    ERROR_IF(str == NULL, error);
+    DISPATCH();
+}
+```
+
+`f'hello {name}!'` compiles to `LOAD_CONST 'hello '`, `LOAD name`, `FORMAT_VALUE`, `LOAD_CONST '!'`, `BUILD_STRING 3`. `_PyUnicode_JoinArray` joins `oparg` pieces with an empty separator in one allocation.
+
+## gopy notes
+
+`CALL_INTRINSIC_1` is in `vm/eval_simple.go`, dispatching on `oparg` to a table of Go functions in `vm/intrinsics.go`. `FORMAT_VALUE` calls `objects.Repr`, `objects.Str`, or `objects.ASCII` for the conversion, then `objects.Format`. `BUILD_STRING` calls `objects.UnicodeJoinSlice`.

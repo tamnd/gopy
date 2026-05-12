@@ -1,0 +1,92 @@
+---
+title: Lib/_pyio.py (part 6)
+description: "_pyio.py part 6: RawIOBase, FileIO.read, FileIO.write, FileIO.seek, FileIO.readinto."
+cpython_path: Lib/_pyio.py
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/_pyio.py" />
+
+This annotation covers the raw file I/O layer. See `modules_io7_detail` for `TextIOWrapper.readline`, `seek`, and `reconfigure`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `RawIOBase` | ABC for raw binary I/O |
+| 81-160 | `FileIO.__init__` | Open a file by path or fd |
+| 161-260 | `FileIO.read` | Read up to n bytes |
+| 261-360 | `FileIO.readinto` | Read into an existing buffer |
+| 361-500 | `FileIO.write` / `seek` / `tell` | Write, position control |
+
+## Reading
+
+### `FileIO.__init__`
+
+```python
+# CPython: Lib/_pyio.py:1280 FileIO.__init__
+def __init__(self, file, mode='r', closefd=True, opener=None):
+    """Open a file."""
+    if isinstance(file, (str, bytes, PathLike)):
+        if not closefd:
+            raise ValueError('Cannot use closefd=False with file name')
+        if opener is None:
+            fd = os.open(file, flags, 0o666)
+        else:
+            fd = opener(file, flags)
+    elif isinstance(file, int):
+        fd = file
+    ...
+    self._fd = fd
+    self._closefd = closefd
+```
+
+`FileIO` accepts a path (opens the OS file) or an integer fd (wraps an existing open fd). `closefd=False` prevents `close()` from closing an externally-owned fd.
+
+### `FileIO.readinto`
+
+```python
+# CPython: Lib/_pyio.py:1380 readinto
+def readinto(self, b):
+    """Read up to len(b) bytes into b.
+    Returns number of bytes read (0 for EOF, -1 if non-blocking and no data)."""
+    self._checkClosed()
+    self._checkReadable()
+    length = len(b)
+    buf = (ctypes.c_char * length).from_buffer(b)
+    n = os.readinto(self._fd, buf)  # or use os.read and copy
+    return n
+```
+
+`readinto` avoids an extra copy: the OS writes directly into the provided buffer (a `bytearray` or `memoryview`). The C implementation in `Modules/_io/fileio.c` calls `read(fd, buf, len)` directly.
+
+### `RawIOBase.read`
+
+```python
+# CPython: Lib/_pyio.py:480 RawIOBase.read
+class RawIOBase(IOBase):
+    def read(self, size=-1):
+        """Read and return up to size bytes, where size is an int.
+        Returns an empty bytes object at EOF, or None if the object is
+        set not to block and has no data to read."""
+        if size is None:
+            size = -1
+        if size < 0:
+            return self.readall()
+        b = bytearray(size.__index__())
+        n = self.readinto(b)
+        if n is None:
+            return None
+        del b[n:]
+        return bytes(b)
+```
+
+`RawIOBase.read` is implemented in terms of `readinto` for concrete subclasses that only implement `readinto`. This is the ABC mixin pattern: implement one method, get the other for free.
+
+## gopy notes
+
+`FileIO` is `module/io.FileIO` in `module/io/module.go`. It wraps `os.File`. `readinto` calls `file.Read(buf)` where `buf` is a Go slice derived from `objects.BufferProtocol`. `RawIOBase.read` delegates to `readinto` via the method resolution order.

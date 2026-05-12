@@ -1,0 +1,91 @@
+---
+title: Modules/posixmodule.c (part 5)
+description: "posixmodule.c part 5: os.fork, os.exec*, os.waitpid, os.pipe, os.dup2."
+cpython_path: Modules/posixmodule.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/posixmodule.c" />
+
+This annotation covers process management system calls. See the earlier posix parts for `os.open`, `os.read`, `os.stat`, and `os.scandir`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `os.fork` | Create a child process |
+| 81-160 | `os.execve` | Replace process image |
+| 161-260 | `os.waitpid` | Wait for a child process |
+| 261-360 | `os.pipe` | Create a pipe pair |
+| 361-500 | `os.dup2` | Duplicate a file descriptor |
+
+## Reading
+
+### `os.fork`
+
+```c
+// CPython: Modules/posixmodule.c:4280 posix_fork
+static PyObject *
+posix_fork(PyObject *self, PyObject *noargs)
+{
+    pid_t pid;
+    PyOS_BeforeFork();
+    pid = fork();
+    if (pid == 0) {
+        /* Child */
+        PyOS_AfterFork_Child();
+    } else {
+        /* Parent */
+        PyOS_AfterFork_Parent();
+    }
+    return PyLong_FromPid(pid);
+}
+```
+
+`PyOS_BeforeFork` acquires all GIL-level locks (import lock, etc.) before forking, preventing the child from inheriting a deadlocked state. `PyOS_AfterFork_Child` reinitializes the GIL, threading structures, and random seed.
+
+### `os.execve`
+
+```c
+// CPython: Modules/posixmodule.c:4480 posix_execve
+static PyObject *
+posix_execve(PyObject *self, PyObject *args)
+{
+    /* execve(path, args, env) — replace this process with a new program */
+    const char *path;
+    char **argvlist, **envlist;
+    /* Build C argv and envp arrays from Python lists/dicts */
+    ...
+    execve(path, argvlist, envlist);
+    /* execve only returns on error */
+    PyErr_SetFromErrnoWithFilenameObject(PyExc_OSError, opath);
+    return NULL;
+}
+```
+
+`os.execve` converts the Python `args` list and `env` dict to C string arrays, then calls `execve`. On success, this process is replaced and Python never resumes. `os.execv` omits the environment.
+
+### `os.pipe`
+
+```c
+// CPython: Modules/posixmodule.c:4680 posix_pipe
+static PyObject *
+posix_pipe(PyObject *self, PyObject *noargs)
+{
+    int fds[2];
+    if (pipe(fds) != 0) {
+        return PyErr_SetFromErrno(PyExc_OSError);
+    }
+    return Py_BuildValue("(ii)", fds[0], fds[1]);
+}
+```
+
+`r, w = os.pipe()` creates a unidirectional pipe. Data written to `w` can be read from `r`. Used by `subprocess.Popen` to connect stdin/stdout/stderr between parent and child processes.
+
+## gopy notes
+
+`os.fork` is `module/os.Fork` in `module/os/module.go`. It calls `syscall.Fork()`. Go's goroutine scheduler requires careful handling: `runtime.LockOSThread` is called before fork, and after fork in the child, the goroutine runtime is re-initialized. `os.execve` calls `syscall.Exec`. `os.pipe` calls `os.Pipe()`.
