@@ -84,6 +84,13 @@ func NewUserTypeMeta(name string, bases []*Type, ns *Dict, kwargs map[string]Obj
 		// Inherit strType.TpNew so instances are *Unicode (tagged with
 		// the subclass), not *Instance.
 		t.TpNew = strType.TpNew
+	case IsSubtype(t, IntType):
+		t.Getattro = intSubclassGetAttr
+		t.Setattro = intSubclassSetAttr
+		// Inherit IntType.TpNew so instances are *Int (tagged with the
+		// subclass), not *Instance. The cls-aware intTpNew handles the
+		// subclass re-tag.
+		t.TpNew = IntType.TpNew
 	default:
 		t.Getattro = instanceGetAttr
 		t.Setattro = instanceSetAttr
@@ -310,6 +317,22 @@ func fixupSlotDispatchers(t *Type) {
 	fixupRichCmpAndBool(t)
 	fixupSubscriptSlots(t)
 	fixupDescriptorSlots(t)
+	fixupTpNew(t)
+}
+
+// fixupTpNew installs slotTpNew when the class body defines its own
+// __new__. Without this, typeCallViaTpNew would call the inherited
+// C-level tp_new (e.g. int's intTpNew) directly and skip the user's
+// Python __new__, so super().__new__(cls, value) shapes are never
+// reached.
+//
+// CPython: Objects/typeobject.c:9874 fixup_slot_dispatchers
+//
+//	(slotdefs entry for tp_new)
+func fixupTpNew(t *Type) {
+	if lookupTypeMember(t, "__new__") != nil {
+		t.TpNew = slotTpNew
+	}
 }
 
 // fixupCallReprStr wires tp_call, tp_repr, and tp_str.
@@ -801,6 +824,34 @@ func slotSqSetItem(o Object, idx int, value Object) error {
 		return slotMpSubscriptDel(o, key)
 	}
 	return slotMpSubscriptSet(o, key, value)
+}
+
+// slotTpNew dispatches tp_new for Python-defined classes. Looks up
+// __new__ via MRO, unwraps the implicit staticmethod, prepends cls to
+// the positional args, and calls the underlying function. Mirrors
+// CPython's slot_tp_new: the dispatcher is installed by
+// fixup_slot_dispatchers whenever a class body defines __new__.
+//
+// CPython: Objects/typeobject.c:9395 slot_tp_new
+func slotTpNew(cls *Type, args []Object, kwargs map[string]Object) (Object, error) {
+	newFn, _ := LookupDescriptor(cls, "__new__")
+	if newFn == nil {
+		return nil, fmt.Errorf("TypeError: object.__new__: cannot find __new__ for '%s'", cls.Name)
+	}
+	if sm, ok := newFn.(*StaticMethod); ok {
+		newFn = sm.smCallable
+	}
+	posArgs := make([]Object, 0, len(args)+1)
+	posArgs = append(posArgs, cls)
+	posArgs = append(posArgs, args...)
+	var kwDict *Dict
+	if len(kwargs) > 0 {
+		kwDict = NewDict()
+		for k, v := range kwargs {
+			_ = kwDict.SetItem(NewStr(k), v)
+		}
+	}
+	return Call(newFn, NewTuple(posArgs), kwDict)
 }
 
 // slotTpDescrGet dispatches __get__(self, obj, type). obj is None when

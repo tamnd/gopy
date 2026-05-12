@@ -199,7 +199,8 @@ func wireTypeCalls() {
 	wireOnce.Do(func() {
 		objects.SetStrTpNewBase(StrOf)
 		bindCtorDescr(objects.StrType(), StrOf)
-		bindCtor(objects.IntType, IntCtor)
+		objects.SetIntTpNewBase(IntCtor)
+		bindCtorDescr(objects.IntType, IntCtor)
 		bindCtor(objects.FloatType, FloatCtor)
 		bindCtor(objects.BoolType, BoolCtor)
 		bindCtor(objects.ListType, ListCtor)
