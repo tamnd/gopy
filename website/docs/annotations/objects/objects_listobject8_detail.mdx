@@ -1,0 +1,75 @@
+---
+title: Objects/listobject.c (part 8)
+description: "Objects/listobject.c part 8: list.sort timsort, run detection, merge, galloping mode."
+cpython_path: Objects/listobject.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Objects/listobject.c" />
+
+This annotation covers the Timsort implementation. See `objects_listobject7_detail` for `list.append`, `list.extend`, `list.insert`, and `list.pop`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `list_sort` entry | Top-level sort dispatch |
+| 81-180 | Run detection | Find ascending/descending runs |
+| 181-280 | Insertion sort | Sort small runs |
+| 281-380 | Merge | Merge two adjacent sorted runs |
+| 381-500 | Galloping mode | Accelerate merge when one run dominates |
+
+## Reading
+
+### Run detection
+
+```c
+// CPython: Objects/listobject.c:1120 count_run
+static Py_ssize_t
+count_run(MergeState *ms, PyObject **lo, PyObject **hi, int *descending)
+{
+    /* Find the longest initial run, either ascending or descending.
+       Reverse descending runs to make them ascending. */
+    *descending = 0;
+    if (lo + 1 == hi) return 1;  /* Single element is a run */
+    if (ISLT(*lo + 1, *lo, compare)) {
+        *descending = 1;
+        while (++lo + 1 < hi && ISLT(*lo + 1, *lo, compare)) ;
+        reverse_slice(lo0, lo);
+    } else {
+        while (++lo + 1 < hi && !ISLT(*lo + 1, *lo, compare)) ;
+    }
+    return lo - lo0;
+}
+```
+
+Timsort exploits existing order in the input. Descending runs are reversed in-place. The minimum run length `minrun` is chosen so that the total number of runs is close to a power of 2.
+
+### Galloping mode
+
+```c
+// CPython: Objects/listobject.c:1280 gallop_left
+static Py_ssize_t
+gallop_left(MergeState *ms, PyObject *key, PyObject **a, Py_ssize_t n, Py_ssize_t hint)
+{
+    /* Find the position where key would be inserted in a[0:n].
+       hint is an initial guess for the position.
+       Uses exponential search then binary search. */
+    Py_ssize_t ofs = 1;
+    while (ofs < n && ISLT(a[hint + ofs], key, ms->compare)) {
+        ofs <<= 1;  /* Double the step */
+    }
+    /* Binary search in a[hint + ofs/2 : hint + ofs] */
+    return bisect_left(ms, key, a + (hint + ofs/2), n - hint - ofs/2);
+}
+```
+
+Galloping mode activates when one run consistently provides more than `MIN_GALLOP` consecutive winners. It switches from O(n) linear comparisons to O(log n) comparisons for each winner. When the advantage ends, it switches back to linear merge.
+
+## gopy notes
+
+`list.sort` is `objects.ListSort` in `objects/list.go`. Go's `sort.SliceStable` is used for the general case; for pure-Python objects the comparison function wraps `objects.RichCompare`. The full Timsort implementation is not replicated: Go's stable sort provides the same stability guarantee.

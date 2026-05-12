@@ -1,0 +1,101 @@
+---
+title: Modules/_io/textio.c (part 7)
+description: "_io textio.c part 7: TextIOWrapper.readline, writelines, seek, tell, reconfigure."
+cpython_path: Modules/_io/textio.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/_io/textio.c" />
+
+This annotation covers TextIOWrapper line operations and seeking. See `module_io6_detail` for `BufferedWriter.write`, `flush`, and `BufferedRandom`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `TextIOWrapper.readline` | Read one line with encoding |
+| 81-160 | `TextIOWrapper.writelines` | Write an iterable of strings |
+| 161-260 | `TextIOWrapper.seek` | Move to a position (text mode seeks are opaque) |
+| 261-360 | `TextIOWrapper.tell` | Return current position as an opaque cookie |
+| 361-500 | `TextIOWrapper.reconfigure` | Change encoding/errors/newline without closing |
+
+## Reading
+
+### `TextIOWrapper.readline`
+
+```c
+// CPython: Modules/_io/textio.c:1280 _io_TextIOWrapper_readline_impl
+static PyObject *
+_io_TextIOWrapper_readline_impl(textio *self, Py_ssize_t limit)
+{
+    /* Decode chunks from the underlying buffer until '\n' is found */
+    while (1) {
+        /* Check the decoded chars buffer first */
+        if (self->decoded_chars) {
+            pos = find_newline(self->decoded_chars, self->decoded_chars_used);
+            if (pos >= 0) break;
+        }
+        /* Need more data: fill the buffer */
+        if (_textiowrapper_read_chunk(self, limit) < 0) return NULL;
+    }
+    return _textiowrapper_get_decoded_chars(self, pos + 1);
+}
+```
+
+`readline` accumulates decoded characters chunk by chunk, searching for a newline. Universal newlines mode (`\r\n`, `\r`, `\n`) translates all line endings to `\n` during decoding.
+
+### `TextIOWrapper.seek`
+
+```c
+// CPython: Modules/_io/textio.c:1480 _io_TextIOWrapper_seek_impl
+static PyObject *
+_io_TextIOWrapper_seek_impl(textio *self, PyObject *cookieObj, int whence)
+{
+    /* Text-mode seek is only defined for:
+       seek(0, 0) — rewind to start
+       seek(0, 2) — go to end
+       seek(tell_result, 0) — go to a position returned by tell()
+    */
+    if (whence == 2) {
+        /* Seek to end: flush, then seek raw to end */
+        ...
+    }
+    /* Decode the cookie (an opaque integer encoding raw position + codec state) */
+    Py_off_t raw_offset;
+    int dec_flags;
+    int bytes_to_feed;
+    ...
+    PyObject_CallMethodOneArg(self->buffer, _PyIO_str_seek, cookie_bytes);
+}
+```
+
+Text seek is limited because multi-byte encodings can't seek to arbitrary byte offsets. The "cookie" from `tell()` encodes the raw position AND the codec state at that position, so `seek(tell())` can reconstruct the exact decoder state.
+
+### `TextIOWrapper.reconfigure`
+
+```c
+// CPython: Modules/_io/textio.c:1680 _io_TextIOWrapper_reconfigure_impl
+static PyObject *
+_io_TextIOWrapper_reconfigure_impl(textio *self, PyObject *encoding,
+                                    PyObject *errors, PyObject *newline,
+                                    int line_buffering, int write_through)
+{
+    /* Can only reconfigure if at position 0 or in write mode */
+    if (self->encodefunc != NULL && _textiowrapper_writeflush(self) < 0)
+        return NULL;
+    /* Re-initialize the codec */
+    self->encoding = ...;
+    self->codec_info = PyCodec_Lookup(encoding);
+    ...
+}
+```
+
+`f.reconfigure(encoding='utf-8')` changes the encoding in place without closing the file. Useful when a file starts with a BOM that reveals its encoding.
+
+## gopy notes
+
+`TextIOWrapper.readline` is `module/io.TextIOWrapperReadline` in `module/io/module.go`. It uses `bufio.Scanner` internally for line detection. `seek` and `tell` store a `textSeekCookie` struct encoding raw offset and remaining decoder bytes. `reconfigure` reinitializes the codec lookup in `module/codecs`.

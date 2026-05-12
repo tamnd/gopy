@@ -1,0 +1,112 @@
+---
+title: Python/compile.c (part 11)
+description: "Python/compile.c part 11: compiler_with, compiler_async_with, compiler_try_except, compiler_try_finally."
+cpython_path: Python/compile.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Python/compile.c" />
+
+This annotation covers exception handling and context manager compilation. See `python_compile10_detail` for comprehension compilation.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `compiler_with` | `with stmt as var:` |
+| 81-160 | `compiler_async_with` | `async with stmt as var:` |
+| 161-280 | `compiler_try_except` | `try/except/else` block |
+| 281-380 | `compiler_try_finally` | `try/finally` block |
+| 381-500 | Exception table generation | Map bytecode ranges to handlers |
+
+## Reading
+
+### `compiler_with`
+
+```c
+// CPython: Python/compile.c:5680 compiler_with
+static int
+compiler_with(struct compiler *c, stmt_ty s, int pos)
+{
+    /* with ctxmgr as var: body
+    =>
+        cm = ctxmgr
+        val = cm.__enter__()
+        try:
+            var = val
+            body
+        except:
+            if not cm.__exit__(*sys.exc_info()):
+                raise
+        else:
+            cm.__exit__(None, None, None)
+    */
+    VISIT(c, expr, s->v.With.context_expr);
+    ADDOP(c, BEFORE_WITH);  /* Call __enter__, push __exit__ */
+    /* Store val in var, or discard if 'with cm:' (no 'as') */
+    if (s->v.With.optional_vars) {
+        VISIT(c, expr, s->v.With.optional_vars);
+    } else {
+        ADDOP(c, POP_TOP);
+    }
+    /* Compile body in a try block */
+    ...
+    ADDOP(c, WITH_EXCEPT_START);  /* Call __exit__(*exc_info) */
+    ...
+}
+```
+
+`BEFORE_WITH` calls `__enter__()` and pushes the `__exit__` method. On exception, `WITH_EXCEPT_START` calls `__exit__(exc_type, exc_val, exc_tb)`. If `__exit__` returns truthy, the exception is suppressed.
+
+### `compiler_try_except`
+
+```c
+// CPython: Python/compile.c:5780 compiler_try_except
+static int
+compiler_try_except(struct compiler *c, stmt_ty s)
+{
+    /* try: body
+       except ExcType as var: handler
+       else: else_body
+       
+       Compiles to:
+         body
+         JUMP to else_body (no exception)
+       [exception table maps body range -> first except handler]
+         for each handler:
+           CHECK_EXC_MATCH ExcType
+           JUMP to next handler if no match
+           handler body
+    */
+    ...
+}
+```
+
+`try/except` in Python 3.11+ uses an exception table instead of `SETUP_FINALLY` blocks. The bytecode is linear; the exception table is a separate structure mapping instruction ranges to handler addresses.
+
+### Exception table generation
+
+```c
+// CPython: Python/compile.c:6100 compiler_add_exception_table_entry
+static int
+compiler_add_exception_table_entry(struct compiler *c,
+                                    Py_ssize_t start, Py_ssize_t end,
+                                    Py_ssize_t target, int depth,
+                                    int lasti)
+{
+    /* Record: instructions [start, end) jump to target if an exception occurs.
+       depth: stack depth at the handler entry point.
+       lasti: whether to push the last instruction address on the handler entry. */
+    ...
+}
+```
+
+The exception table is emitted at the end of each code object. At runtime, when an exception occurs, `_PyCode_InitAddressRange` binary-searches the table to find the handler.
+
+## gopy notes
+
+`compiler_with` is `compile.compileWith` in `compile/codegen_stmt.go`. It emits `BEFORE_WITH` and sets up an exception table entry covering the body. `compiler_try_except` is `compile.compileTryExcept`. Exception table entries are stored in `compile.ExceptionTable` and serialized to `co_exceptiontable` bytes.
