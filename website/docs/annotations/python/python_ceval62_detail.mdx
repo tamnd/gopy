@@ -1,0 +1,97 @@
+---
+title: Python/ceval.c (part 62)
+description: "Python/ceval.c part 62: LOAD_ATTR specialization, LOAD_ATTR_INSTANCE_VALUE, LOAD_ATTR_MODULE, LOAD_ATTR_WITH_HINT."
+cpython_path: Python/ceval.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Python/ceval.c" />
+
+This annotation covers `LOAD_ATTR` specialization. See `python_ceval61_detail` for `FORMAT_VALUE`, `BUILD_STRING`, and `SEND`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `LOAD_ATTR` baseline | Generic attribute lookup via `tp_getattro` |
+| 81-160 | `LOAD_ATTR_INSTANCE_VALUE` | Fast path: load `__dict__` slot by index |
+| 161-240 | `LOAD_ATTR_MODULE` | Fast path: module attribute by dict version |
+| 241-340 | `LOAD_ATTR_WITH_HINT` | Semi-fast path: dict key hint |
+| 341-500 | `_Py_Specialize_LoadAttr` | Specialization logic |
+
+## Reading
+
+### `LOAD_ATTR_INSTANCE_VALUE`
+
+```c
+// CPython: Python/ceval.c:2860 LOAD_ATTR_INSTANCE_VALUE
+inst(LOAD_ATTR_INSTANCE_VALUE, (unused/1, owner -- attr, null if (oparg & 1))) {
+    /* Cached: index into instance __dict__ values array */
+    uint16_t index = read_u16(&next_instr[-1].cache);
+    PyDictObject *dict = _PyObject_GetManagedDict(owner);
+    DEOPT_IF(dict == NULL, LOAD_ATTR);
+    DEOPT_IF(!_PyDictKeys_IsUnicode(dict->ma_keys), LOAD_ATTR);
+    uint64_t ep_version = read_u32(&next_instr[-3].cache);
+    DEOPT_IF(dict->ma_version_tag != ep_version, LOAD_ATTR);
+    attr = dict->ma_values->values[index];
+    DEOPT_IF(attr == NULL, LOAD_ATTR);
+    Py_INCREF(attr);
+    Py_DECREF(owner);
+}
+```
+
+`LOAD_ATTR_INSTANCE_VALUE` caches the index into the instance's `__dict__` values array. The `dict->ma_version_tag` check ensures the layout hasn't changed. On deopt, falls back to `LOAD_ATTR`.
+
+### `LOAD_ATTR_MODULE`
+
+```c
+// CPython: Python/ceval.c:2920 LOAD_ATTR_MODULE
+inst(LOAD_ATTR_MODULE, (unused/1, owner -- attr, null if (oparg & 1))) {
+    /* owner is a module: look up by dict version */
+    uint32_t dict_version = read_u32(&next_instr[-2].cache);
+    uint16_t index = read_u16(&next_instr[-1].cache);
+    PyObject *dict = ((PyModuleObject *)owner)->md_dict;
+    DEOPT_IF(!PyDict_CheckExact(dict), LOAD_ATTR);
+    DEOPT_IF(((PyDictObject *)dict)->ma_version_tag != dict_version, LOAD_ATTR);
+    attr = _PyDict_GetItemByIndex((PyDictObject *)dict, index);
+    DEOPT_IF(attr == NULL, LOAD_ATTR);
+    Py_INCREF(attr);
+    Py_DECREF(owner);
+}
+```
+
+Module attributes are accessed by index into the module dict. The version tag invalidates the cache whenever the module dict changes (e.g., `import foo; foo.x = 42`). This makes `from os import path` equivalent to a direct index lookup after specialization.
+
+### `_Py_Specialize_LoadAttr`
+
+```c
+// CPython: Python/specialize.c:840 _Py_Specialize_LoadAttr
+void
+_Py_Specialize_LoadAttr(PyObject *owner, _Py_CODEUNIT *instr, PyObject *name)
+{
+    PyTypeObject *tp = Py_TYPE(owner);
+    if (PyModule_CheckExact(owner)) {
+        /* Specialize to LOAD_ATTR_MODULE */
+        ...
+        _Py_SET_OPCODE(*instr, LOAD_ATTR_MODULE);
+        return;
+    }
+    if (_PyType_HasFeature(tp, Py_TPFLAGS_MANAGED_DICT)) {
+        /* Try to specialize to LOAD_ATTR_INSTANCE_VALUE */
+        ...
+        _Py_SET_OPCODE(*instr, LOAD_ATTR_INSTANCE_VALUE);
+        return;
+    }
+    /* Fall back to LOAD_ATTR_WITH_HINT or stay generic */
+}
+```
+
+On the first few executions, `LOAD_ATTR` calls `_Py_Specialize_LoadAttr`. It examines the owner type and current object to select the best specialization. The cache slots in the instruction stream store type version, dict version, and slot index.
+
+## gopy notes
+
+`LOAD_ATTR` and its specializations are in `vm/eval_simple.go`. `LOAD_ATTR_INSTANCE_VALUE` checks `objects.Type.DictVersion` and reads from `objects.Instance.Values[index]`. `LOAD_ATTR_MODULE` checks `objects.Module.DictVersion`. Specialization logic is in `vm/specialize.go`.

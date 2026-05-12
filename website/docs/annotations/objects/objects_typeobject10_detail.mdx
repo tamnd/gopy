@@ -1,0 +1,111 @@
+---
+title: Objects/typeobject.c (part 10)
+description: "Objects/typeobject.c part 10: type.__init_subclass__, type.__class_getitem__, type.mro, MRO linearization (C3)."
+cpython_path: Objects/typeobject.c
+cpython_version: "3.14"
+lines: 600
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Objects/typeobject.c" />
+
+This annotation covers MRO computation and subclass hooks. See `objects_typeobject9_detail` for `type.__new__`, `type.__init__`, and the type creation path.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `type.mro` | Return `type.__mro__` as a tuple |
+| 81-200 | `mro_internal` | Compute C3 linearization |
+| 201-320 | `pmerge` | C3 merge step |
+| 321-420 | `type.__init_subclass__` | Hook called when a class is subclassed |
+| 421-600 | `type.__class_getitem__` | `list[int]` syntax via `__class_getitem__` |
+
+## Reading
+
+### C3 linearization
+
+```c
+// CPython: Objects/typeobject.c:2140 mro_internal
+static PyObject *
+mro_internal(PyTypeObject *type, PyObject **p_old_mro)
+{
+    /* C3: result = [type] + merge(bases[0].mro, bases[1].mro, ..., [bases]) */
+    PyObject *bases = type->tp_bases;
+    Py_ssize_t n = PyTuple_GET_SIZE(bases);
+
+    PyObject **to_merge = PyMem_New(PyObject *, n + 1);
+    for (int i = 0; i < n; i++) {
+        PyTypeObject *base = (PyTypeObject *)PyTuple_GET_ITEM(bases, i);
+        to_merge[i] = PySequence_List(base->tp_mro);
+    }
+    to_merge[n] = PySequence_List(bases);  /* append bases list */
+    PyObject *result = PyList_New(1);
+    PyList_SET_ITEM(result, 0, (PyObject *)type);
+    if (pmerge(result, to_merge, n + 1) < 0) { ... }
+    return PyList_AsTuple(result);
+}
+```
+
+The C3 algorithm builds an MRO that satisfies: (1) each class appears before its bases, (2) the local precedence order from `__bases__` is preserved, (3) the monotonicity constraint. `pmerge` implements the "take good head" rule.
+
+### `pmerge`
+
+```c
+// CPython: Objects/typeobject.c:2080 pmerge
+static int
+pmerge(PyObject *acc, PyObject **to_merge, Py_ssize_t to_merge_size)
+{
+    for (;;) {
+        int empty_cnt = 0;
+        for (int i = 0; i < to_merge_size; i++) {
+            PyObject *candidate = PyList_GET_ITEM(to_merge[i], 0);
+            /* Candidate is good if it doesn't appear in the tail of any list */
+            int is_in_tail = 0;
+            for (int j = 0; j < to_merge_size; j++) {
+                if (tail_contains(to_merge[j], candidate)) {
+                    is_in_tail = 1; break;
+                }
+            }
+            if (!is_in_tail) {
+                PyList_Append(acc, candidate);
+                /* Remove candidate from all list heads */
+                for (int j = 0; j < to_merge_size; j++)
+                    if (head_equals(to_merge[j], candidate))
+                        remove_head(to_merge[j]);
+                goto restart;
+            }
+        }
+        if (empty_cnt == to_merge_size) break;
+        PyErr_SetString(PyExc_TypeError, "Cannot create a consistent method resolution order...");
+        return -1;
+    restart:;
+    }
+    return 0;
+}
+```
+
+`pmerge` takes the first element of the first list whose value doesn't appear in the tail of any list. This element is appended to the result and removed from all list heads. If no such element exists, the MRO is inconsistent (raises `TypeError`).
+
+### `type.__init_subclass__`
+
+```c
+// CPython: Objects/typeobject.c:7840 type_init_subclass
+static PyObject *
+type_init_subclass(PyObject *cls, PyObject *args, PyObject *kwds)
+{
+    /* Called by type.__init__ after a new class is created:
+       walk bases and call their __init_subclass__ */
+    PyObject *super = PyObject_CallOneArg((PyObject *)&PySuper_Type, cls);
+    PyObject *func = PyObject_GetAttr(super, &_Py_ID(__init_subclass__));
+    return PyObject_Call(func, args, kwds);
+}
+```
+
+`class Foo(Base, keyword=value)` calls `Base.__init_subclass__(keyword=value)` after `Foo` is created. This is the primary mechanism for class decorators that need to run at class definition time.
+
+## gopy notes
+
+`mro_internal` is `objects.TypeComputeMRO` in `objects/type.go`. It calls `pmerge` implemented as a Go function with `[][]objects.Object` slices. `type.__init_subclass__` calls `objects.CallMethod` on the super object. `type.__class_getitem__` returns a `objects.GenericAlias`.

@@ -1,0 +1,104 @@
+---
+title: Lib/copy.py (part 3)
+description: "copy.py part 3: deepcopy dispatch, deepcopy for dict/list/tuple, memo dict, cycle detection."
+cpython_path: Lib/copy.py
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/copy.py" />
+
+This annotation covers `deepcopy` internals. See `lib_copy2_detail` for `copy`, `copy.__copy__`, and the shallow copy dispatch table.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `deepcopy` entry | Check memo, dispatch by type |
+| 81-160 | `_deepcopy_atomic` | Immutables: return same object |
+| 161-240 | `_deepcopy_list` | Deep copy a list with cycle detection |
+| 241-320 | `_deepcopy_dict` | Deep copy a dict |
+| 321-500 | `_reconstruct` | Restore via `__reduce_ex__` for arbitrary objects |
+
+## Reading
+
+### `deepcopy` entry
+
+```python
+# CPython: Lib/copy.py:130 deepcopy
+def deepcopy(x, memo=None, _nil=[]):
+    if memo is None:
+        memo = {}
+    d = id(x)
+    y = memo.get(d, _nil)
+    if y is not _nil:
+        return y  # Already copied — break cycle
+    cls = type(x)
+    copier = _deepcopy_dispatch.get(cls)
+    if copier is not None:
+        y = copier(x, memo)
+    elif hasattr(x, '__deepcopy__'):
+        y = x.__deepcopy__(memo)
+    elif issubclass(cls, type):
+        y = _deepcopy_atomic(x, memo)
+    else:
+        reductor = getattr(x, '__reduce_ex__', None)
+        rv = reductor(4)
+        y = _reconstruct(x, memo, *rv)
+    memo[d] = y
+    _keep_alive(x, memo)
+    return y
+```
+
+`memo` maps `id(original)` to the copy. The memo check at the top breaks reference cycles: if `x` was already copied, return the cached copy immediately. `_keep_alive` stores a reference to `x` in `memo` to prevent `id` reuse during the copy.
+
+### `_deepcopy_list`
+
+```python
+# CPython: Lib/copy.py:220 _deepcopy_list
+def _deepcopy_list(x, memo):
+    y = []
+    memo[id(x)] = y  # Register BEFORE recursing to break cycles
+    append = y.append
+    for a in x:
+        append(deepcopy(a, memo))
+    return y
+```
+
+The list is registered in `memo` before its elements are copied. This correctly handles `lst = []; lst.append(lst)` (a self-referential list): the inner `deepcopy(lst, memo)` hits the memo and returns the partially-constructed `y`.
+
+### `_deepcopy_dict`
+
+```python
+# CPython: Lib/copy.py:232 _deepcopy_dict
+def _deepcopy_dict(x, memo):
+    y = {}
+    memo[id(x)] = y  # Register before recursing
+    for key, value in x.items():
+        y[deepcopy(key, memo)] = deepcopy(value, memo)
+    return y
+```
+
+Both keys and values are deep-copied. `memo[id(x)] = y` before any recursion handles cycles in dict values. Keys that are mutable (rare but possible with custom types) are also deep-copied.
+
+### `_deepcopy_atomic`
+
+```python
+# CPython: Lib/copy.py:180 _deepcopy_atomic
+def _deepcopy_atomic(x, memo):
+    return x
+
+for t in (type(None), int, float, bool, complex, str, tuple, bytes,
+          type, range, slice, frozenset, type(Ellipsis), type(NotImplemented),
+          types.BuiltinFunctionType, types.FunctionType):
+    _deepcopy_dispatch[t] = _deepcopy_atomic
+```
+
+Atomic types are returned as-is. Tuples of atomics are also atomic. Note that tuples of non-atomics (e.g., `([1, 2], [3, 4])`) use a separate `_deepcopy_tuple` that checks if any element was actually copied.
+
+## gopy notes
+
+`deepcopy` is `module/copy.Deepcopy` in `module/copy/module.go`. `memo` is a Go `map[uintptr]objects.Object` keyed by pointer identity. `_deepcopy_list` and `_deepcopy_dict` register in the memo before recursing. `_reconstruct` calls `__reduce_ex__` via `objects.CallMethod`.

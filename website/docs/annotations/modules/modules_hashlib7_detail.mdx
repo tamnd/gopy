@@ -1,0 +1,113 @@
+---
+title: Modules/_hashopenssl.c (part 7)
+description: "_hashopenssl.c part 7: EVPobject.update, digest, hexdigest, copy, BLAKE2, SHAKE variable-length output."
+cpython_path: Modules/_hashopenssl.c
+cpython_version: "3.14"
+lines: 600
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/_hashopenssl.c" />
+
+This annotation covers hash object methods. See `modules_hashlib6_detail` for `hashlib.new`, OpenSSL EVP initialization, and the hash registry.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `EVP.update` | Feed data into the hash context |
+| 81-160 | `EVP.digest` | Finalize and return binary digest |
+| 161-240 | `EVP.hexdigest` | Finalize and return hex-encoded digest |
+| 241-320 | `EVP.copy` | Duplicate hash state mid-computation |
+| 321-600 | SHAKE / BLAKE2 | Variable-length output and keyed hashing |
+
+## Reading
+
+### `EVP.update`
+
+```c
+// CPython: Modules/_hashopenssl.c:480 EVP_update
+static PyObject *
+EVP_update(EVPobject *self, PyObject *args)
+{
+    Py_buffer view;
+    PyArg_ParseTuple(args, "y*:update", &view);
+    Py_BEGIN_ALLOW_THREADS
+    if (!EVP_DigestUpdate(self->ctx, view.buf, view.len)) {
+        Py_END_ALLOW_THREADS
+        _setException(PyExc_ValueError, "EVP_DigestUpdate failed");
+        return NULL;
+    }
+    Py_END_ALLOW_THREADS
+    PyBuffer_Release(&view);
+    Py_RETURN_NONE;
+}
+```
+
+`EVP_DigestUpdate` appends data to the running hash state. Multiple calls to `update` are equivalent to one call with the concatenation. The GIL is released so other threads can run during hashing of large data.
+
+### `EVP.digest`
+
+```c
+// CPython: Modules/_hashopenssl.c:540 EVP_digest
+static PyObject *
+EVP_digest(EVPobject *self, PyObject *unused)
+{
+    unsigned char digest[EVP_MAX_MD_SIZE];
+    unsigned int digest_size;
+    /* Copy the context to avoid mutating self */
+    EVP_MD_CTX *temp_ctx = EVP_MD_CTX_new();
+    EVP_MD_CTX_copy_ex(temp_ctx, self->ctx);
+    Py_BEGIN_ALLOW_THREADS
+    EVP_DigestFinal_ex(temp_ctx, digest, &digest_size);
+    Py_END_ALLOW_THREADS
+    EVP_MD_CTX_free(temp_ctx);
+    return PyBytes_FromStringAndSize((const char *)digest, digest_size);
+}
+```
+
+`digest()` is non-destructive: it copies the context, finalizes the copy, and returns the result. The original `self` can continue receiving `update` calls. `EVP_MAX_MD_SIZE` is 64 bytes (SHA-512 length).
+
+### `EVP.copy`
+
+```c
+// CPython: Modules/_hashopenssl.c:580 EVP_copy
+static PyObject *
+EVP_copy(EVPobject *self, PyObject *unused)
+{
+    EVPobject *newobj = newEVPobject(self->name);
+    if (EVP_MD_CTX_copy(newobj->ctx, self->ctx) == 0) {
+        PyErr_SetString(PyExc_ValueError, "cannot copy hash");
+        Py_DECREF(newobj);
+        return NULL;
+    }
+    return (PyObject *)newobj;
+}
+```
+
+`h.copy()` creates a new hash object with the same state. Used for computing the digest of a prefix while continuing to hash the suffix: `prefix_hash = h.copy(); h.update(suffix)`.
+
+### SHAKE variable-length output
+
+```c
+// CPython: Modules/_hashopenssl.c:640 SHAKE_digest
+static PyObject *
+SHAKE_digest(EVPobject *self, PyObject *length)
+{
+    Py_ssize_t digestlen = PyLong_AsSsize_t(length);
+    unsigned char *digest = PyMem_Malloc(digestlen);
+    EVP_MD_CTX *temp_ctx = EVP_MD_CTX_new();
+    EVP_MD_CTX_copy_ex(temp_ctx, self->ctx);
+    EVP_DigestFinalXOF(temp_ctx, digest, digestlen);
+    EVP_MD_CTX_free(temp_ctx);
+    return PyBytes_FromStringAndSize((char *)digest, digestlen);
+}
+```
+
+SHAKE128/SHAKE256 are XOF (extendable output functions): `digest(n)` returns exactly `n` bytes. `EVP_DigestFinalXOF` is OpenSSL's API for variable-length output. Used in post-quantum key derivation and NIST standards.
+
+## gopy notes
+
+`EVP.update` is `module/hashlib.EVPUpdate` in `module/hashlib/module.go` using Go's `hash.Hash.Write`. `EVP.digest` calls `Sum(nil)` on a copy of the hash state. `EVP.copy` uses Go's `encoding.BinaryMarshaler`/`BinaryUnmarshaler` to snapshot state. SHAKE uses `golang.org/x/crypto/sha3`.
