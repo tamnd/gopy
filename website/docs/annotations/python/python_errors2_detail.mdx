@@ -1,0 +1,135 @@
+---
+title: Python/errors.c (part 2)
+description: "Python/errors.c part 2: exception chaining (__cause__, __context__, __suppress_context__), exception normalization, _PyErr_NormalizeException, do_raise."
+cpython_path: Python/errors.c
+cpython_version: "3.14"
+lines: 800
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Python/errors.c" />
+
+This annotation covers exception chaining (implicit and explicit) and the normalization step that converts `(type, value, traceback)` triples into exception instances. See `python_errors_detail` for `PyErr_Set*`, `PyErr_Occurred`, and `PyErr_Clear`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-100 | `do_raise` | Core of `RAISE_VARARGS` — normalize, chain, set |
+| 101-250 | `_PyErr_NormalizeException` | Convert `(type, value, tb)` triple to an instance |
+| 251-400 | `_PyException_SetContext` | Set `__context__` (implicit chaining) |
+| 401-550 | `_PyException_SetCause` | Set `__cause__` and `__suppress_context__` (explicit `raise X from Y`) |
+| 551-700 | `PyErr_SetImportErrorWithNameFrom` | Specialized `ImportError` constructor |
+| 701-800 | `_PyErr_Display` | Print exception to stderr (called by `sys.excepthook`) |
+
+## Reading
+
+### `do_raise`
+
+```c
+// CPython: Python/errors.c:65 do_raise
+static int
+do_raise(PyThreadState *tstate, PyObject *exc, PyObject *cause)
+{
+    if (exc == NULL) {
+        /* Bare raise: re-raise the active exception */
+        PyObject *active_exc = tstate->exc_info->exc_value;
+        if (active_exc == NULL || active_exc == Py_None) {
+            PyErr_SetString(PyExc_RuntimeError, "No active exception to re-raise");
+            return 0;
+        }
+        _PyErr_SetRaisedException(tstate, Py_NewRef(active_exc));
+        return 1;
+    }
+    /* Normalize: accept a class or an instance */
+    if (PyExceptionClass_Check(exc)) {
+        value = _PyObject_CallNoArgs(exc);  /* instantiate with no args */
+        type = exc;
+    } else if (PyExceptionInstance_Check(exc)) {
+        value = exc;
+        type = PyExceptionInstance_Class(exc);
+    } else {
+        PyErr_SetString(PyExc_TypeError, "exceptions must derive from BaseException");
+        return 0;
+    }
+    /* Set __context__ (implicit chain) */
+    PyObject *context = tstate->exc_info->exc_value;
+    if (context && context != Py_None && context != value)
+        PyException_SetContext(value, Py_NewRef(context));
+    /* Set __cause__ (explicit chain: raise X from Y) */
+    if (cause) {
+        PyException_SetCause(value, Py_NewRef(cause));
+        ((PyBaseExceptionObject *)value)->suppress_context = 1;
+    }
+    _PyErr_SetRaisedException(tstate, value);
+    return 1;
+}
+```
+
+### `_PyErr_NormalizeException`
+
+```c
+// CPython: Python/errors.c:160 _PyErr_NormalizeException
+void
+_PyErr_NormalizeException(PyThreadState *tstate, PyObject **exc,
+                           PyObject **val, PyObject **tb)
+{
+    /* If type is a class, instantiate it with val as arg */
+    if (PyExceptionClass_Check(*exc)) {
+        PyObject *type = *exc;
+        if (*val == NULL || *val == Py_None) {
+            *val = _PyObject_CallNoArgs(type);
+        } else if (!PyExceptionInstance_Check(*val)) {
+            /* val is not an instance: call type(val) */
+            *val = PyObject_CallOneArg(type, *val);
+        }
+        /* Attach traceback */
+        if (*tb != NULL && *tb != Py_None)
+            PyException_SetTraceback(*val, *tb);
+    }
+}
+```
+
+Normalization ensures `sys.exc_info()` always returns a proper instance, never a raw class.
+
+### Implicit vs explicit chaining
+
+```python
+# CPython: Python/errors.c:310 example
+try:
+    ...
+except ValueError:
+    raise TypeError("something")
+# TypeError.__context__ = <the ValueError instance>  (implicit, set by do_raise)
+# TypeError.__suppress_context__ = False
+# Displayed as: "During handling of the above exception, another exception occurred:"
+
+raise TypeError("something") from ValueError("root cause")
+# TypeError.__cause__ = <the ValueError instance>    (explicit, set by do_raise)
+# TypeError.__suppress_context__ = True
+# Displayed as: "The above exception was the direct cause of the following exception:"
+```
+
+### `_PyErr_Display`
+
+```c
+// CPython: Python/errors.c:740 _PyErr_Display
+void
+_PyErr_Display(PyObject *file, PyObject *exception)
+{
+    /* Print traceback then exception class and message */
+    PyObject *tb = PyException_GetTraceback(exception);
+    if (tb && tb != Py_None)
+        PyTraceBack_Print(tb, file);
+    /* "ExceptionType: message\n" */
+    ...
+}
+```
+
+Called by the default `sys.excepthook`. Can be redirected by replacing `sys.excepthook`.
+
+## gopy notes
+
+`do_raise` is in `vm/eval_unwind.go` as `vm.RaiseException`. Implicit chaining sets `exc.__context__` to the current active exception via `objects.SetContext`. Explicit chaining (`from Y`) calls `objects.SetCause` and sets `suppress_context=True`. `_PyErr_NormalizeException` maps to `objects.NormalizeException` which handles the class-vs-instance distinction.

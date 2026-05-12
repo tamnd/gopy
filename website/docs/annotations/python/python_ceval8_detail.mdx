@@ -1,0 +1,135 @@
+---
+title: Python/ceval.c (part 8)
+description: "ceval.c part 8: exception handling opcodes (PUSH_EXC_INFO, POP_EXCEPT, RERAISE, WITH_EXCEPT_START), CLEANUP_THROW, BEFORE_WITH, context managers."
+cpython_path: Python/ceval.c
+cpython_version: "3.14"
+lines: 7000
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Python/ceval.c" />
+
+This annotation covers exception handling opcodes and context manager protocol opcodes. See parts 1-7 for the main dispatch loop, calls, attribute access, closures, and generators.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-200 | `PUSH_EXC_INFO` | Push current exception onto the exception stack |
+| 201-400 | `POP_EXCEPT` | Restore previous exception on `except:` exit |
+| 401-600 | `RERAISE` | Re-raise the current or saved exception |
+| 601-800 | `WITH_EXCEPT_START` | Call `__exit__` with the active exception |
+| 801-1000 | `BEFORE_WITH` | Call `__enter__`, push `__exit__` |
+| 1001-1200 | `CLEANUP_THROW` | Clean up after `generator.throw()` |
+| 1201-1500 | `RAISE_VARARGS` | `raise`, `raise X`, `raise X from Y` |
+| 1501-1800 | `jump_to_except_handler` | Route exception to nearest handler |
+
+## Reading
+
+### Exception stack model
+
+CPython 3.11+ uses an explicit exception stack per frame. Each `try` block pushes a handler address; exceptions unwind to the nearest handler.
+
+### `PUSH_EXC_INFO`
+
+```c
+// CPython: Python/ceval.c:145 PUSH_EXC_INFO
+inst(PUSH_EXC_INFO, (new_exc -- prev_exc, new_exc)) {
+    _PyErr_StackItem *exc_info = tstate->exc_info;
+    /* Save previous exception */
+    if (exc_info->previous_item == NULL) {
+        STACK_PUSH(Py_NewRef(Py_None));
+    } else {
+        STACK_PUSH(Py_NewRef(exc_info->previous_item->exc_value));
+    }
+    STACK_PUSH(Py_NewRef(new_exc));
+    exc_info->exc_value = Py_NewRef(new_exc);
+}
+```
+
+Each `except` clause entry pushes the previous exception state so it can be restored on exit.
+
+### `POP_EXCEPT`
+
+```c
+// CPython: Python/ceval.c:265 POP_EXCEPT
+inst(POP_EXCEPT, (exc_value --)) {
+    _PyErr_StackItem *exc_info = tstate->exc_info;
+    PyObject *value = exc_info->exc_value;
+    exc_info->exc_value = Py_NewRef(exc_value);  /* restore previous */
+    Py_DECREF(value);
+}
+```
+
+### `RERAISE`
+
+```c
+// CPython: Python/ceval.c:440 RERAISE
+inst(RERAISE, (values[oparg], exc -- values[oparg])) {
+    /* oparg=1: re-raise exc (bare 'raise' in except block) */
+    /* oparg=0: re-raise with lasti adjustment */
+    assert(PyExceptionInstance_Check(exc));
+    PyObject *typ = PyExceptionInstance_Class(exc);
+    PyObject *tb  = PyException_GetTraceback(exc);
+    Py_XDECREF(tb);
+    _PyErr_SetRaisedException(tstate, Py_NewRef(exc));
+    goto exception_unwind;
+}
+```
+
+Bare `raise` inside an `except` block emits `RERAISE 1`.
+
+### `BEFORE_WITH`
+
+```c
+// CPython: Python/ceval.c:860 BEFORE_WITH
+inst(BEFORE_WITH, (mgr -- exit, res)) {
+    PyObject *enter = _PyObject_LookupSpecial(mgr, &_Py_ID(__enter__));
+    PyObject *exit  = _PyObject_LookupSpecial(mgr, &_Py_ID(__exit__));
+    res = PyObject_CallNoArgs(enter);  /* call __enter__ */
+    STACK_PUSH(exit);
+    STACK_PUSH(res);
+}
+```
+
+After `BEFORE_WITH`, the stack has `(__exit__, enter_result)`. `WITH_EXCEPT_START` calls `__exit__` on exception.
+
+### `WITH_EXCEPT_START`
+
+```c
+// CPython: Python/ceval.c:680 WITH_EXCEPT_START
+inst(WITH_EXCEPT_START, (exit_func, lasti, unused, exc -- exit_func, lasti, unused, exc, res)) {
+    /* Call exit_func(type(exc), exc, exc.__traceback__) */
+    PyObject *tp = PyExceptionInstance_Class(exc);
+    PyObject *tb = PyException_GetTraceback(exc);
+    res = PyObject_CallFunctionObjArgs(exit_func, tp, exc, tb, NULL);
+    Py_XDECREF(tb);
+}
+```
+
+If `__exit__` returns a truthy value, the exception is suppressed.
+
+### `RAISE_VARARGS`
+
+```c
+// CPython: Python/ceval.c:1320 RAISE_VARARGS
+inst(RAISE_VARARGS, (args[oparg] --)) {
+    PyObject *cause = NULL, *exc = NULL;
+    switch (oparg) {
+    case 2: cause = args[1]; /* fall through */
+    case 1: exc   = args[0]; break;
+    case 0: break;  /* bare raise */
+    }
+    if (do_raise(tstate, exc, cause)) goto exception_unwind;
+    Py_XDECREF(exc); Py_XDECREF(cause);
+    goto error;
+}
+```
+
+`oparg=0`: bare `raise`. `oparg=1`: `raise X`. `oparg=2`: `raise X from Y`.
+
+## gopy notes
+
+Exception handling opcodes are in `vm/eval_unwind.go`. The exception stack uses Go slices. `PUSH_EXC_INFO`/`POP_EXCEPT` manipulate `vm.Frame.excStack`. `RERAISE` calls `vm.RaiseException`. `BEFORE_WITH`/`WITH_EXCEPT_START` call `objects.LookupSpecial("__enter__"/"__exit__")`.

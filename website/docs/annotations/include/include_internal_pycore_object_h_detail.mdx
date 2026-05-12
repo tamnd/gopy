@@ -1,0 +1,110 @@
+---
+title: "Include/internal/pycore_object.h"
+description: "pycore_object.h: object internals — _PyObject_Init, _Py_NewReference, Py_DECREF fast path, immortal objects, reference count debugging macros."
+cpython_path: Include/internal/pycore_object.h
+cpython_version: "3.14"
+lines: 250
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Include/internal/pycore_object.h" />
+
+`pycore_object.h` provides the internal macros and inline functions for reference counting and object initialization that are not part of the stable ABI.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-50 | `_PyObject_Init` | Initialize `ob_refcnt` and `ob_type` for a new object |
+| 51-100 | `_Py_NewReference` | Track new objects in debug builds |
+| 101-150 | `_Py_DECREF_SPECIALIZED` | Specialized DECREF for known types (avoids virtual dispatch) |
+| 151-180 | Immortal objects | `_Py_IsImmortal`, immortality threshold |
+| 181-220 | `_PyObject_IS_GC` | Check if a type participates in cyclic GC |
+| 221-250 | Debug-mode extras | `_Py_INC_REFTOTAL`, `_Py_DEC_REFTOTAL` |
+
+## Reading
+
+### `_PyObject_Init`
+
+```c
+// CPython: Include/internal/pycore_object.h:28 _PyObject_Init
+static inline void
+_PyObject_Init(PyObject *op, PyTypeObject *typeobj)
+{
+    Py_SET_REFCNT(op, 1);
+    Py_SET_TYPE(op, typeobj);
+    if (_PyType_HasFeature(typeobj, Py_TPFLAGS_HEAPTYPE)) {
+        Py_INCREF(typeobj);
+    }
+    _Py_NewReference(op);
+}
+```
+
+All allocations call `_PyObject_Init` (or the `_PyObject_VAR_Init` variant for variable-size objects).
+
+### `_Py_NewReference`
+
+```c
+// CPython: Include/internal/pycore_object.h:62 _Py_NewReference
+static inline void
+_Py_NewReference(PyObject *op)
+{
+#ifdef Py_REF_DEBUG
+    _Py_INC_REFTOTAL();
+    /* Add to linked list of all objects (for sys.getobjects()) */
+    _Py_AddToAllObjects(op);
+#endif
+}
+```
+
+Only active in debug builds (`Py_REF_DEBUG`). Production builds compile this away.
+
+### Immortal objects (3.12+)
+
+```c
+// CPython: Include/internal/pycore_object.h:158 _Py_IsImmortal
+#define _Py_IMMORTAL_REFCNT  (UINT_MAX >> 2)
+
+static inline int
+_Py_IsImmortal(PyObject *op)
+{
+    return (op->ob_refcnt >= _Py_IMMORTAL_REFCNT);
+}
+```
+
+Immortal objects (`None`, `True`, `False`, small integers, interned strings) have a reference count at the saturating maximum. `Py_DECREF` on an immortal object is a no-op, avoiding cache-line contention in multi-threaded code.
+
+### `Py_DECREF` fast path
+
+```c
+// CPython: Include/internal/pycore_object.h:105 Py_DECREF
+static inline void
+Py_DECREF(PyObject *op)
+{
+    if (_Py_IsImmortal(op)) return;  /* immortal: skip */
+    if (--op->ob_refcnt != 0) return;  /* still referenced */
+    _Py_Dealloc(op);  /* refcount hit 0: deallocate */
+}
+```
+
+`_Py_Dealloc` calls `tp_finalize` (if present) then `tp_free` (usually `PyObject_Free`).
+
+### `_PyObject_IS_GC`
+
+```c
+// CPython: Include/internal/pycore_object.h:200 _PyObject_IS_GC
+static inline int
+_PyObject_IS_GC(PyObject *obj)
+{
+    return _PyType_IS_GC(Py_TYPE(obj));
+}
+#define _PyType_IS_GC(t) _PyType_HasFeature((t), Py_TPFLAGS_HAVE_GC)
+```
+
+`list`, `dict`, `tuple`, function objects, class objects have `Py_TPFLAGS_HAVE_GC`. `int`, `str`, `float` do not — they cannot form reference cycles.
+
+## gopy notes
+
+In gopy, Go's GC manages memory; there is no reference counting. However, the reference-counting API is emulated for C extension compatibility. `_Py_IsImmortal` maps to a `isImmortal bool` flag on `objects.Object`. `Py_DECREF` calls `runtime.KeepAlive` to prevent premature GC of objects still referenced by C code. `Py_TPFLAGS_HAVE_GC` tracks which types can form cycles.

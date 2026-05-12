@@ -1,0 +1,158 @@
+---
+title: Objects/unicodeobject.c (part 3)
+description: "unicodeobject.c part 3: str.split/rsplit/splitlines, str.join, str.strip/lstrip/rstrip, str.center/ljust/rjust, str.zfill, str.translate."
+cpython_path: Objects/unicodeobject.c
+cpython_version: "3.14"
+lines: 15000
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Objects/unicodeobject.c" />
+
+This annotation covers string manipulation methods. See parts 1-2 for encoding/decoding, internal representation (compact ASCII / latin1 / UCS2 / UCS4), and `find`/`index`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-300 | `unicode_split`, `unicode_rsplit` | Split on whitespace or substring |
+| 301-500 | `unicode_splitlines` | Split on line boundaries (`\n`, `\r\n`, `\r`, etc.) |
+| 501-700 | `unicode_join` | `sep.join(iterable)` — collect and concatenate |
+| 701-900 | `unicode_strip`, `unicode_lstrip`, `unicode_rstrip` | Strip whitespace or characters |
+| 901-1100 | `unicode_center`, `unicode_ljust`, `unicode_rjust` | Pad to width with fill character |
+| 1101-1200 | `unicode_zfill` | Pad with leading zeros, preserve sign |
+| 1201-1400 | `unicode_translate` | `str.translate(table)` — character-by-character substitution |
+| 1401-1600 | `unicode_maketrans` | Build translation table for `translate()` |
+
+## Reading
+
+### `split`
+
+```c
+// CPython: Objects/unicodeobject.c:88 unicode_split
+static PyObject *
+unicode_split(PyObject *self, PyObject *args, PyObject *kwds)
+{
+    if (substring == Py_None) {
+        /* Split on any whitespace, collapsing runs */
+        return split_whitespace(self, maxsplit);
+    }
+    /* Split on specific separator (no collapsing) */
+    return split(self, substring, maxsplit);
+}
+```
+
+`'  a  b  '.split()` → `['a', 'b']` (whitespace collapsed). `'a,,b'.split(',')` → `['a', '', 'b']` (separator kept).
+
+### `join`
+
+```c
+// CPython: Objects/unicodeobject.c:550 unicode_join
+static PyObject *
+unicode_join(PyObject *self, PyObject *iterable)
+{
+    PyObject *seq = PySequence_Fast(iterable, "can only join an iterable");
+    Py_ssize_t seqlen = PySequence_Fast_GET_SIZE(seq);
+    if (seqlen == 0) return PyUnicode_New(0, 0);
+    if (seqlen == 1) {
+        item = PySequence_Fast_GET_ITEM(seq, 0);
+        return PyUnicode_FromObject(item);
+    }
+    /* Two passes: measure total length, then fill */
+    ...
+    Py_ssize_t sz = 0;
+    for (i = 0; i < seqlen; i++) {
+        item = PySequence_Fast_GET_ITEM(seq, i);
+        sz += PyUnicode_GET_LENGTH(item);
+        if (i < seqlen - 1) sz += seplen;
+    }
+    res = PyUnicode_New(sz, maxchar);
+    /* Fill res with items interleaved with sep */
+    ...
+    return res;
+}
+```
+
+Two-pass approach: first scan to compute total length and maximum character (determines internal kind), then fill.
+
+### `strip`
+
+```c
+// CPython: Objects/unicodeobject.c:740 unicode_strip
+static PyObject *
+unicode_strip(PyObject *self, PyObject *args)
+{
+    if (chars == Py_None || chars == NULL) {
+        /* Strip Unicode whitespace */
+        return _PyUnicode_XStrip(self, BOTHSTRIP, NULL);
+    }
+    return _PyUnicode_XStrip(self, BOTHSTRIP, chars);
+}
+
+static PyObject *
+_PyUnicode_XStrip(PyObject *self, int striptype, PyObject *sepobj)
+{
+    Py_UCS4 *buf = PyUnicode_AsUCS4Copy(self);
+    Py_ssize_t lpos = 0, rpos = len;
+    /* Scan from left */
+    if (striptype != RIGHTSTRIP) {
+        while (lpos < rpos && Py_UNICODE_ISSPACE(buf[lpos])) lpos++;
+    }
+    /* Scan from right */
+    if (striptype != LEFTSTRIP) {
+        while (rpos > lpos && Py_UNICODE_ISSPACE(buf[rpos-1])) rpos--;
+    }
+    ...
+}
+```
+
+### `translate`
+
+```c
+// CPython: Objects/unicodeobject.c:1260 unicode_translate
+static PyObject *
+unicode_translate(PyObject *self, PyObject *table)
+{
+    /* For each code point, look up table[cp]:
+     *   None → delete the character
+     *   int  → replace with that code point
+     *   str  → replace with that string
+     *   KeyError → keep original character
+     */
+    ...
+}
+```
+
+`str.translate` is used for fast character-by-character rewriting. `str.maketrans` builds the dict mapping `ord()` keys.
+
+### `zfill`
+
+```c
+// CPython: Objects/unicodeobject.c:1160 unicode_zfill
+static PyObject *
+unicode_zfill(PyObject *self, PyObject *args)
+{
+    /* Pad with '0', but preserve leading '+' or '-' sign */
+    Py_ssize_t fill = width - len;
+    if (fill <= 0) return Py_NewRef(self);
+    PyObject *u = PyUnicode_New(width, maxchar);
+    if (sign == '+' || sign == '-') {
+        /* Insert sign first, then zeros */
+        PyUnicode_WRITE(kind, data, 0, sign);
+        PyUnicode_FILL(kind, data + kind, '0', fill);
+        PyUnicode_CopyCharacters(u, 1 + fill, self, 1, len - 1);
+    } else {
+        PyUnicode_FILL(kind, data, '0', fill);
+        PyUnicode_CopyCharacters(u, fill, self, 0, len);
+    }
+    return u;
+}
+```
+
+`'-5'.zfill(4)` → `'-005'` (sign preserved before zeros).
+
+## gopy notes
+
+All string methods are in `objects/str.go`. `split` uses Go's `strings.SplitN`. `join` uses `strings.Builder` with a two-pass length calculation. `strip` uses `strings.TrimFunc` with Unicode whitespace check. `translate` iterates runes with a map lookup. `zfill` inserts zeros after the optional sign character.

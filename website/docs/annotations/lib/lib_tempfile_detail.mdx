@@ -1,0 +1,129 @@
+---
+title: Lib/tempfile.py
+description: "Lib/tempfile.py: TemporaryFile, NamedTemporaryFile, SpooledTemporaryFile, TemporaryDirectory, mkstemp, mkdtemp — secure temporary file and directory creation."
+cpython_path: Lib/tempfile.py
+cpython_version: "3.14"
+lines: 800
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/tempfile.py" />
+
+`tempfile` creates temporary files and directories that are automatically removed when closed or when a context manager exits.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `_get_candidate_names` | Generate random suffixes for temp names |
+| 81-200 | `mkstemp`, `mkdtemp` | Low-level: create and return (fd, path) or path |
+| 201-350 | `TemporaryFile` | Anonymous file (unlinked immediately on POSIX) |
+| 351-500 | `NamedTemporaryFile` | Visible file with `delete=True` by default |
+| 501-620 | `SpooledTemporaryFile` | In-memory until `max_size` bytes, then spills to disk |
+| 621-800 | `TemporaryDirectory` | Directory removed on `__exit__` or `cleanup()` |
+
+## Reading
+
+### Secure name generation
+
+```python
+# CPython: Lib/tempfile.py:75 _get_candidate_names
+class _RandomNameSequence:
+    """An instance of _RandomNameSequence generates an endless
+    sequence of unpredictable strings which can safely be incorporated
+    into file names.  Each string is eight characters long."""
+    characters = "abcdefghijklmnopqrstuvwxyz0123456789_"
+    @property
+    def rng(self):
+        cur_pid = os.getpid()
+        if cur_pid != getattr(self, '_rng_pid', None):
+            self._rng = Random()
+            self._rng_pid = cur_pid
+        return self._rng
+    def __iter__(self):
+        c = self.characters
+        choose = self.rng.choice
+        letters = [choose(c) for _ in range(8)]
+        yield ''.join(letters)
+```
+
+A fresh `Random()` is seeded from OS entropy. The PID check ensures correctness after `os.fork()`.
+
+### `mkstemp`
+
+```python
+# CPython: Lib/tempfile.py:155 mkstemp
+def mkstemp(suffix=None, prefix=None, dir=None, text=False):
+    """Create and return a unique temporary file.
+    The return value is a pair (fd, name).
+    fd — an OS-level file descriptor (int), suitable for os.fdopen()
+    name — the absolute path
+    The file is not deleted automatically.
+    """
+    prefix, suffix, dir, output_type = _sanitize_params(prefix, suffix, dir)
+    file, name = _mkstemp_inner(dir, prefix, suffix, flags, output_type)
+    return file, name
+```
+
+`mkstemp` is the low-level function; callers are responsible for deletion. `NamedTemporaryFile` wraps it with auto-delete.
+
+### `TemporaryFile`
+
+```python
+# CPython: Lib/tempfile.py:240 TemporaryFile
+def TemporaryFile(mode='w+b', buffering=-1, encoding=None,
+                  newline=None, suffix=None, prefix=None, dir=None, *,
+                  errors=None):
+    """On POSIX, the file is created and immediately unlinked so it has
+    no directory entry and is invisible to other processes."""
+    (fd, name) = _mkstemp_inner(dir, prefix, suffix, flags, output_type)
+    try:
+        os.unlink(name)   # POSIX: remove directory entry immediately
+        return io.open(fd, mode, buffering, encoding, newline, errors=errors)
+    except:
+        os.close(fd)
+        raise
+```
+
+On POSIX, `unlink` after `open` means the file exists until the last fd is closed. On Windows, a `DELETE_ON_CLOSE` flag achieves the same effect.
+
+### `SpooledTemporaryFile`
+
+```python
+# CPython: Lib/tempfile.py:530 SpooledTemporaryFile
+class SpooledTemporaryFile:
+    """A file-like object that starts as an in-memory BytesIO/StringIO
+    and spills to a real TemporaryFile once it exceeds max_size bytes."""
+    def write(self, s):
+        if self._rolled:
+            return self._file.write(s)
+        buf = self._file
+        rv = buf.write(s)
+        if self._max_size and buf.tell() > self._max_size:
+            self.rollover()  # spill to disk
+        return rv
+```
+
+### `TemporaryDirectory`
+
+```python
+# CPython: Lib/tempfile.py:680 TemporaryDirectory
+class TemporaryDirectory:
+    def __init__(self, suffix=None, prefix=None, dir=None,
+                 ignore_cleanup_errors=False, *, delete=True):
+        self.name = mkdtemp(suffix, prefix, dir)
+        self._delete = delete
+
+    def cleanup(self):
+        if self._delete and os.path.exists(self.name):
+            shutil.rmtree(self.name)
+
+    def __exit__(self, exc, value, tb):
+        self.cleanup()
+```
+
+## gopy notes
+
+`tempfile` is pure Python and importable in gopy when `os`, `io`, `shutil`, and `random` work. `mkstemp` calls `os.open` with `O_CREAT|O_EXCL`. `TemporaryFile` relies on `os.unlink` while the fd is still open — POSIX semantics that gopy passes through to the OS via `syscall.Unlink`.

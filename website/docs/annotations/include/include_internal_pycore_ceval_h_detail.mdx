@@ -1,0 +1,87 @@
+---
+title: "Include/internal/pycore_ceval.h"
+description: "pycore_ceval.h: eval loop internals — _PyEval_EvalFrameDefault declaration, eval breaker flags, pending calls, _Py_HandlePending."
+cpython_path: Include/internal/pycore_ceval.h
+cpython_version: "3.14"
+lines: 200
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Include/internal/pycore_ceval.h" />
+
+`pycore_ceval.h` declares the internal interface to the bytecode evaluation loop. It is included by the interpreter, GIL code, and signal handling.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-40 | `_PyEval_EvalFrameDefault` | The eval loop entry point |
+| 41-80 | `_Py_eval_breaker` | Atomic flag: signals pending work between opcodes |
+| 81-130 | `_PY_EVAL_*` bit flags | `_PY_EVAL_EXPLICIT_MERGE`, `_PY_GIL_DROP_REQUEST`, `_PY_SIGNALS_PENDING` |
+| 131-160 | `_PyEval_SignalAsyncExc` | Request an async exception in a thread |
+| 161-200 | `_Py_HandlePending` | Process eval breaker: signals, async exceptions, GIL |
+
+## Reading
+
+### Eval loop entry
+
+```c
+// CPython: Include/internal/pycore_ceval.h:18 _PyEval_EvalFrameDefault
+PyObject *
+_PyEval_EvalFrameDefault(PyThreadState *tstate, _PyInterpreterFrame *f, int throwflag);
+```
+
+`throwflag` is 1 when the frame is being entered via `generator.throw()`.
+
+### The eval breaker
+
+```c
+// CPython: Include/internal/pycore_ceval.h:55 _Py_eval_breaker
+/* Bits set in tstate->eval_breaker to request out-of-band actions */
+#define _PY_GIL_DROP_REQUEST          (1U << 0)
+#define _PY_SIGNALS_PENDING           (1U << 1)
+#define _PY_CALLS_TO_DO               (1U << 2)
+#define _PY_ASYNC_EXCEPTION           (1U << 3)
+#define _PY_EVAL_EXPLICIT_MERGE       (1U << 4)
+```
+
+The eval breaker is checked at every `RESUME` opcode. If any bit is set, `_Py_HandlePending` is called before the next opcode executes.
+
+### `_Py_HandlePending`
+
+```c
+// CPython: Include/internal/pycore_ceval.h:175 _Py_HandlePending
+int _Py_HandlePending(PyThreadState *tstate);
+/* Returns 0 on success, -1 if an exception was raised */
+/*
+ * Handles:
+ *   _PY_GIL_DROP_REQUEST   → drop and re-acquire the GIL (cooperative multitasking)
+ *   _PY_SIGNALS_PENDING    → call signal handlers registered via signal.signal()
+ *   _PY_CALLS_TO_DO        → run pending calls from call_soon() (asyncio)
+ *   _PY_ASYNC_EXCEPTION    → raise KeyboardInterrupt or thread exception
+ */
+```
+
+### `_PyEval_SignalAsyncExc`
+
+```c
+// CPython: Include/internal/pycore_ceval.h:152 _PyEval_SignalAsyncExc
+void _PyEval_SignalAsyncExc(PyInterpreterState *interp);
+/* Sets _PY_ASYNC_EXCEPTION in the eval breaker of the target thread */
+/* Used by Thread.raise_in_thread() and SIGINT → KeyboardInterrupt */
+```
+
+### Pending calls
+
+```c
+// CPython: Include/internal/pycore_ceval.h:110 _PyEval_AddPendingCall
+int _PyEval_AddPendingCall(PyInterpreterState *interp,
+                            _Py_pending_call_func func, void *arg, int mainthreadonly);
+/* Used by asyncio event loop to schedule callbacks from C threads */
+```
+
+## gopy notes
+
+The eval breaker maps to `vm.evalBreaker` in gopy — a `uint64` atomic checked at every `RESUME`. Signal handling calls `vm.HandlePending()` which processes pending `signal.signal()` handlers. GIL drop/reacquire translates to releasing and reacquiring Go's per-goroutine Python lock at regular intervals. Async exceptions are stored in `vm.Frame.asyncExc` and raised on the next `_Py_HandlePending` call.

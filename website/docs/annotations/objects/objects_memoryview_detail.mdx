@@ -1,0 +1,130 @@
+---
+title: Objects/memoryobject.c
+description: "Objects/memoryobject.c: memoryview — zero-copy view over buffer-protocol objects. Shape/strides/ndim, slicing, cast, tobytes, tolist."
+cpython_path: Objects/memoryobject.c
+cpython_version: "3.14"
+lines: 3200
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Objects/memoryobject.c" />
+
+`memoryview` exposes the buffer protocol as a Python object. It enables zero-copy slicing of bytes, bytearray, and any object implementing `bf_getbuffer`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-150 | `memoryview_new` | Acquire buffer, initialize view metadata |
+| 151-350 | `memory_getitem`, `memory_setitem` | Index/slice with strides support |
+| 351-600 | `memory_subscript` | Multi-dimensional indexing `mv[i, j]` |
+| 601-800 | `memory_cast` | `mv.cast('B')` — reinterpret format |
+| 801-1000 | `memory_tobytes` | Copy to `bytes` (respects strides/shape) |
+| 1001-1200 | `memory_tolist` | Convert to nested Python lists |
+| 1201-1400 | `memory_release` | Release buffer export, decrement `ob_exports` |
+| 1401-1600 | Buffer protocol | `memoryview` itself exposes a buffer |
+| 1601-2000 | Comparisons | Element-by-element compare |
+| 2001-3200 | Contiguity checks | C-contiguous, Fortran-contiguous, suboffset handling |
+
+## Reading
+
+### Buffer acquisition
+
+```c
+// CPython: Objects/memoryobject.c:88 memoryview_new
+static PyObject *
+memoryview_new(PyTypeObject *subtype, PyObject *args, PyObject *kwds)
+{
+    PyObject *master;
+    PyArg_ParseTuple(args, "O:memoryview", &master);
+    PyMemoryViewObject *mview = (PyMemoryViewObject *)
+        PyObject_GC_New(PyMemoryViewObject, subtype);
+    /* Acquire the buffer from master */
+    if (PyObject_GetBuffer(master, &mview->view, PyBUF_FULL_RO) < 0) {
+        ...
+    }
+    mview->master.obj = Py_NewRef(master);
+    return (PyObject *)mview;
+}
+```
+
+`memoryview(b'hello')` acquires a read-only buffer. `memoryview(bytearray(...))` is writable.
+
+### Slicing with strides
+
+```c
+// CPython: Objects/memoryobject.c:220 memory_getslice
+static PyObject *
+memory_getslice(PyMemoryViewObject *self, Py_ssize_t start, Py_ssize_t stop, Py_ssize_t step)
+{
+    /* Compute new view: same buffer, adjusted buf + offset, new shape/strides */
+    PyMemoryViewObject *sliced = (PyMemoryViewObject *)
+        PyObject_GC_New(PyMemoryViewObject, &PyMemoryView_Type);
+    sliced->view = self->view;  /* shallow copy */
+    sliced->view.buf = (char *)self->view.buf + start * self->view.strides[0];
+    sliced->view.shape[0] = (stop - start + step - 1) / step;
+    sliced->view.strides[0] = self->view.strides[0] * step;
+    return (PyObject *)sliced;
+}
+```
+
+No data is copied. The slice has a new `buf` pointer and `strides`.
+
+### `cast`
+
+```c
+// CPython: Objects/memoryobject.c:650 memory_cast
+static PyObject *
+memory_cast(PyMemoryViewObject *self, PyObject *args, PyObject *kwds)
+{
+    /* Reinterpret the bytes using a new format string */
+    /* e.g. mv.cast('I') on a bytes memoryview → view of unsigned ints */
+    ...
+    if (ndim == 1) {
+        new_itemsize = get_itemsize_from_format(format);
+        newview->view.len    = self->view.len;
+        newview->view.itemsize = new_itemsize;
+        newview->view.shape[0] = self->view.len / new_itemsize;
+    }
+    ...
+}
+```
+
+`memoryview(b'\x01\x00\x02\x00').cast('H')` gives a view of two `uint16` values `[1, 2]`.
+
+### `tobytes`
+
+```c
+// CPython: Objects/memoryobject.c:840 memory_tobytes
+static PyObject *
+memory_tobytes(PyMemoryViewObject *self, PyObject *args)
+{
+    /* For C-contiguous views: single memcpy */
+    if (PyBuffer_IsContiguous(&self->view, 'C')) {
+        return PyBytes_FromStringAndSize(self->view.buf, self->view.len);
+    }
+    /* Non-contiguous: gather each element via strides */
+    ...
+}
+```
+
+### `release`
+
+```c
+// CPython: Objects/memoryobject.c:1240 memory_release
+static PyObject *
+memory_release(PyMemoryViewObject *self, PyObject *Py_UNUSED(ignored))
+{
+    PyBuffer_Release(&self->view);  /* decrements ob_exports on the master */
+    self->master.obj = NULL;        /* no longer referencing master */
+    Py_RETURN_NONE;
+}
+```
+
+Releasing a `memoryview` allows the master object (e.g., `bytearray`) to be resized again.
+
+## gopy notes
+
+`memoryview` is in `objects/memoryview.go`. The view holds a pointer into the original object's backing `[]byte`. Slicing adjusts the pointer and length without copying. `cast` changes the `itemsize` and recomputes `shape`. `tobytes` uses `copy` for contiguous views; non-contiguous views iterate with stride arithmetic. `release` decrements the master's export count.

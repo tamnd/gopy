@@ -1,0 +1,133 @@
+---
+title: Modules/arraymodule.c
+description: "arraymodule.c: array.array — typed homogeneous arrays. Type codes (b/B/h/H/i/I/l/L/q/Q/f/d), append/extend, frombytes/tobytes, buffer protocol."
+cpython_path: Modules/arraymodule.c
+cpython_version: "3.14"
+lines: 2500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/arraymodule.c" />
+
+`array.array` provides a typed, compact array of C primitives. It is more memory-efficient than a `list` of ints/floats and supports the buffer protocol for zero-copy I/O.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-100 | Type descriptor table | Maps type code (`'i'`, `'d'`, etc.) to C type info |
+| 101-300 | `array_new` | Construction from type code + optional initializer |
+| 301-500 | `array_getitem`, `array_setitem` | Index/slice access |
+| 501-700 | `array_append`, `array_extend` | Appending elements |
+| 701-900 | `array_frombytes`, `array_tobytes` | Binary import/export |
+| 901-1100 | `array_fromfile`, `array_tofile` | Read/write from a file object |
+| 1101-1300 | `array_byteswap` | Reverse byte order in place |
+| 1301-1500 | Arithmetic | `+` (concat), `*` (repeat) |
+| 1501-2000 | Buffer protocol | `bf_getbuffer` — expose raw C array |
+| 2001-2500 | Type descriptors | `arraydescr` for each of 13 type codes |
+
+## Reading
+
+### Type descriptor
+
+```c
+// CPython: Modules/arraymodule.c:72 arraydescr
+struct arraydescr {
+    char typecode;        /* 'i', 'd', etc. */
+    int itemsize;         /* bytes per element */
+    PyObject *(*getitem)(arrayobject *, Py_ssize_t);
+    int (*setitem)(arrayobject *, Py_ssize_t, PyObject *);
+    int (*compareitems)(const void *, const void *, Py_ssize_t);
+    const char *formats;  /* struct format string */
+    int is_integer_type;
+    int is_signed;
+};
+```
+
+The 13 supported type codes: `b`/`B` (signed/unsigned char), `h`/`H` (short), `i`/`I` (int), `l`/`L` (long), `q`/`Q` (long long), `f` (float), `d` (double). `u` (Unicode) was removed in 3.13.
+
+### `array_new`
+
+```c
+// CPython: Modules/arraymodule.c:165 array_new
+static PyObject *
+array_new(PyTypeObject *type, PyObject *args, PyObject *kwds)
+{
+    char typecode;
+    PyArg_ParseTuple(args, "C|O:array", &typecode, &initial);
+    /* Find descriptor for typecode */
+    const struct arraydescr *descr = NULL;
+    for (int i = 0; i < NUM_TYPECODES; i++) {
+        if (descriptors[i].typecode == typecode) { descr = &descriptors[i]; break; }
+    }
+    arrayobject *a = (arrayobject *)type->tp_alloc(type, 0);
+    a->ob_descr = descr;
+    a->ob_item = NULL;
+    a->allocated = 0;
+    /* Initialize from iterable, bytes, or existing array */
+    ...
+}
+```
+
+### `array_append`
+
+```c
+// CPython: Modules/arraymodule.c:528 array_append
+static PyObject *
+array_append(arrayobject *self, PyObject *v)
+{
+    /* Resize if needed (amortized growth) */
+    Py_ssize_t n = Py_SIZE(self);
+    if (array_resize(self, n + 1) == -1) return NULL;
+    /* Store via type-specific setitem */
+    return (self->ob_descr->setitem)(self, n, v) == -1 ? NULL : Py_NewRef(Py_None);
+}
+```
+
+### `frombytes` / `tobytes`
+
+```c
+// CPython: Modules/arraymodule.c:748 array_frombytes
+static PyObject *
+array_frombytes(arrayobject *self, PyObject *buffer_obj)
+{
+    Py_buffer buffer;
+    PyObject_GetBuffer(buffer_obj, &buffer, PyBUF_SIMPLE);
+    Py_ssize_t n = buffer.len / self->ob_descr->itemsize;
+    if (buffer.len % self->ob_descr->itemsize != 0) {
+        PyErr_SetString(PyExc_ValueError, "bytes length not a multiple of item size");
+        return NULL;
+    }
+    Py_ssize_t old_n = Py_SIZE(self);
+    array_resize(self, old_n + n);
+    memcpy(self->ob_item + old_n * self->ob_descr->itemsize,
+           buffer.buf, buffer.len);
+    PyBuffer_Release(&buffer);
+    Py_RETURN_NONE;
+}
+```
+
+`frombytes` and `tobytes` do direct memory copies — no element-by-element conversion.
+
+### Buffer protocol
+
+```c
+// CPython: Modules/arraymodule.c:1640 array_buffer_getbuf
+static int
+array_buffer_getbuf(arrayobject *self, Py_buffer *view, int flags)
+{
+    return PyBuffer_FillInfo(view, (PyObject *)self,
+                             self->ob_item,
+                             Py_SIZE(self) * self->ob_descr->itemsize,
+                             0 /* writable */,
+                             flags);
+}
+```
+
+Passing an `array.array('d', [...])` to `numpy.frombuffer()` is zero-copy.
+
+## gopy notes
+
+`array` module is in `module/array/`. The backing store is a Go `[]byte` with the `itemsize` from the descriptor. Type conversion uses Go's `binary.Read`/`binary.Write` with native byte order. The buffer protocol exposes the `[]byte` slice directly.
