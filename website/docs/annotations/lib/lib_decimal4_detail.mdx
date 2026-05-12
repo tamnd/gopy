@@ -1,0 +1,115 @@
+---
+title: Lib/_pydecimal.py (part 4)
+description: "_pydecimal.py part 4: Decimal arithmetic, context, rounding modes, signal traps."
+cpython_path: Lib/_pydecimal.py
+cpython_version: "3.14"
+lines: 600
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/_pydecimal.py" />
+
+This annotation covers arithmetic operations and context management. See `lib_decimal3_detail` for `Decimal.__new__`, `Decimal.__str__`, string parsing, and `__hash__`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-100 | `Context` | Precision, rounding mode, and signal traps |
+| 101-220 | `Decimal.__add__` / `__mul__` | Arithmetic with context |
+| 221-340 | Rounding modes | `ROUND_HALF_UP`, `ROUND_FLOOR`, etc. |
+| 341-440 | Signal traps | `InvalidOperation`, `DivisionByZero`, `Overflow` |
+| 441-600 | `Decimal.quantize` | Round to a given exponent |
+
+## Reading
+
+### `Context`
+
+```python
+# CPython: Lib/_pydecimal.py:3480 Context
+class Context:
+    def __init__(self, prec=None, rounding=None, Emin=None, Emax=None,
+                 capitals=None, clamp=None, flags=None, traps=None):
+        self.prec = prec or getcontext().prec   # default: 28
+        self.rounding = rounding or ROUND_HALF_EVEN
+        self.Emin = Emin if Emin is not None else -999999
+        self.Emax = Emax if Emax is not None else 999999
+        self.capitals = capitals if capitals is not None else 1
+        self.clamp = clamp if clamp is not None else 0
+        self.flags = flags or {}
+        self.traps = traps or {DivisionByZero: 1, InvalidOperation: 1, Overflow: 1}
+```
+
+`Context` stores the precision (number of significant digits), rounding mode, exponent limits, and signal flags. The thread-local `getcontext()` returns the current context. `localcontext()` is a context manager that temporarily changes it.
+
+### `Decimal.__add__`
+
+```python
+# CPython: Lib/_pydecimal.py:1420 Decimal.__add__
+def __add__(self, other, context=None):
+    other = _convert_other(other)
+    if other is NotImplemented: return other
+    if context is None: context = getcontext()
+    ans = self._check_nans(other, context)
+    if ans: return ans
+    # Align exponents
+    op1 = _WorkRep(self)
+    op2 = _WorkRep(other)
+    if op1.exp >= op2.exp:
+        op1.int *= 10 ** (op1.exp - op2.exp)
+        op1.exp = op2.exp
+    else:
+        op2.int *= 10 ** (op2.exp - op1.exp)
+    result_sign, result_coef = _add_aligned(op1, op2)
+    # Round to context precision
+    return _decimal_new(result_sign, result_coef, op2.exp, context)
+```
+
+Decimal addition aligns the two operands to the same exponent before adding. The result is rounded to `context.prec` significant digits. NaN and infinity handling happens before alignment.
+
+### Rounding modes
+
+```python
+# CPython: Lib/_pydecimal.py:2840 _round
+def _round(self, places, rounding):
+    # places: number of decimal places to keep
+    # rounding: ROUND_HALF_UP, ROUND_DOWN, etc.
+    if rounding == ROUND_HALF_EVEN:
+        # Round to nearest, ties to even (banker's rounding)
+        ...
+    elif rounding == ROUND_HALF_UP:
+        # Round to nearest, ties away from zero
+        ...
+    elif rounding == ROUND_DOWN:
+        # Truncate (towards zero)
+        ...
+    elif rounding == ROUND_FLOOR:
+        # Round towards negative infinity
+        ...
+```
+
+`ROUND_HALF_EVEN` (default) avoids statistical bias in accumulated rounding: `0.5` rounds to `0`, `1.5` rounds to `2`. `ROUND_HALF_UP` is the "school" rounding. `ROUND_05UP` rounds up only if the digit before the round position is 0 or 5.
+
+### `Decimal.quantize`
+
+```python
+# CPython: Lib/_pydecimal.py:2140 Decimal.quantize
+def quantize(self, exp, rounding=None, context=None):
+    """Round self to the same exponent as exp."""
+    exp = _convert_other(exp, raiseit=True)
+    if context is None: context = getcontext()
+    if rounding is None: rounding = context.rounding
+    # Check for NaN/Inf
+    ans = self._check_nans(exp, context)
+    if ans: return ans
+    # Align to exp's exponent
+    return self._rescale(exp._exp, rounding, context)
+```
+
+`Decimal('1.41421356').quantize(Decimal('0.01'))` rounds to 2 decimal places, giving `Decimal('1.41')`. `quantize` is the primary tool for currency arithmetic: `amount.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)`.
+
+## gopy notes
+
+`Decimal` arithmetic is `module/decimal` in `module/decimal/module.go`, using `math/big.Float` with a fixed number of decimal digits. `Context` is a goroutine-local struct. Rounding modes map to `big.Float` rounding modes. `quantize` calls `big.Float.SetPrec` and rounds.

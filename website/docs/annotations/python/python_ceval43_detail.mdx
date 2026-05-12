@@ -1,0 +1,85 @@
+---
+title: Python/ceval.c (part 43)
+description: "Python/ceval.c part 43: LOAD_ATTR specializations, LOAD_ATTR_MODULE, LOAD_ATTR_SLOT, LOAD_ATTR_INSTANCE_VALUE."
+cpython_path: Python/ceval.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Python/ceval.c" />
+
+This annotation covers attribute load specializations. See `python_ceval42_detail` for CALL specializations.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `LOAD_ATTR` base | Generic attribute load with inline cache |
+| 81-180 | `LOAD_ATTR_MODULE` | Load from a module's `__dict__` |
+| 181-280 | `LOAD_ATTR_SLOT` | Load from a fixed `__slots__` offset |
+| 281-380 | `LOAD_ATTR_INSTANCE_VALUE` | Load from `__dict__` at known offset |
+| 381-500 | `LOAD_ATTR_CLASS` | Load a class attribute (data descriptor) |
+
+## Reading
+
+### `LOAD_ATTR_MODULE`
+
+```c
+// CPython: Python/ceval.c:5240 LOAD_ATTR_MODULE
+inst(LOAD_ATTR_MODULE, (unused/2, owner -- unused/2, res)) {
+    /* Specialized for: import foo; foo.bar */
+    PyDictObject *dict = (PyDictObject *)((PyModuleObject *)owner)->md_dict;
+    DEOPT_IF(dict == NULL, LOAD_ATTR);
+    PyDictKeysObject *keys = dict->ma_keys;
+    DEOPT_IF(keys->dk_version != cache->dict_version, LOAD_ATTR);
+    /* Cache hit: get value at known index */
+    PyObject *res2 = dict->ma_values->values[cache->index];
+    DEOPT_IF(res2 == NULL, LOAD_ATTR);
+    res = Py_NewRef(res2);
+    Py_DECREF(owner);
+}
+```
+
+After the first `foo.bar` access, the cache stores the dict version and the value's index. Subsequent accesses check only that the dict version hasn't changed (O(1)). Module dicts are stable (rarely modified after import), so this cache almost always hits.
+
+### `LOAD_ATTR_SLOT`
+
+```c
+// CPython: Python/ceval.c:5300 LOAD_ATTR_SLOT
+inst(LOAD_ATTR_SLOT, (unused/2, owner -- unused/2, res)) {
+    /* Specialized for __slots__: direct pointer offset */
+    Py_ssize_t index = cache->index;
+    PyObject **slot = (PyObject **)((char *)owner + index);
+    DEOPT_IF(*slot == NULL, LOAD_ATTR);
+    res = Py_NewRef(*slot);
+    Py_DECREF(owner);
+}
+```
+
+For `__slots__`, the attribute is stored at a fixed byte offset in the object. `LOAD_ATTR_SLOT` accesses it with a single pointer dereference after verifying the type. No dict lookup, no hash computation.
+
+### `LOAD_ATTR_INSTANCE_VALUE`
+
+```c
+// CPython: Python/ceval.c:5360 LOAD_ATTR_INSTANCE_VALUE
+inst(LOAD_ATTR_INSTANCE_VALUE, (unused/2, owner -- unused/2, res)) {
+    /* Specialized for instance __dict__ at known key index */
+    PyDictObject *dict = (PyDictObject *)((PyObject **)owner)[0]; /* tp_basicsize offset */
+    DEOPT_IF(dict == NULL, LOAD_ATTR);
+    DEOPT_IF(dict->ma_values == NULL, LOAD_ATTR);  /* split dict */
+    Py_ssize_t index = cache->index;
+    PyObject *res2 = dict->ma_values->values[index];
+    DEOPT_IF(res2 == NULL, LOAD_ATTR);
+    res = Py_NewRef(res2);
+    Py_DECREF(owner);
+}
+```
+
+For instance attributes in "split dict" layout (all instances of the same class share a key table), the value is stored at a known index in a per-instance values array. This is the fastest path for `self.x` in hot loops.
+
+## gopy notes
+
+`LOAD_ATTR_MODULE` is in `vm/eval_simple.go`; it checks `objects.Module.DictVersion`. `LOAD_ATTR_SLOT` accesses `objects.Instance.Slots[index]`. `LOAD_ATTR_INSTANCE_VALUE` accesses the split-dict values array at `objects.Instance.DictValues[index]`. Cache invalidation uses `objects.Type.Version`.

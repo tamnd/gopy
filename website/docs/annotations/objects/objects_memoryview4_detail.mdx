@@ -1,0 +1,100 @@
+---
+title: Objects/memoryview.c (part 4)
+description: "Objects/memoryview.c part 4: memoryview slicing, tolist, tobytes, cast, contiguous check."
+cpython_path: Objects/memoryview.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Objects/memoryview.c" />
+
+This annotation covers slicing and conversion. See `lib_memoryview3_detail` for `memoryview.__new__`, shape/strides, `__getitem__`, and the buffer protocol.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `memoryview.__getitem__` with slice | Sub-view without copy |
+| 81-160 | `memoryview.tobytes` | Copy buffer contents to bytes |
+| 161-240 | `memoryview.tolist` | Convert to nested Python lists |
+| 241-340 | `memoryview.cast` | Reinterpret the format |
+| 341-500 | Contiguity check | C-contiguous vs Fortran-contiguous |
+
+## Reading
+
+### Slice as sub-view
+
+```c
+// CPython: Objects/memoryview.c:1240 memory_subscript
+static PyObject *
+memory_subscript(PyMemoryViewObject *self, PyObject *key)
+{
+    Py_buffer *view = &self->view;
+    if (PyIndex_Check(key)) {
+        /* Integer index: return a scalar */
+        Py_ssize_t index = PyNumber_AsSsize_t(key, PyExc_IndexError);
+        return memory_item(self, index);
+    }
+    if (PySlice_Check(key)) {
+        /* Slice: return a new memoryview sharing the same buffer */
+        Py_ssize_t start, stop, step, slen;
+        PySlice_GetIndicesEx(key, view->shape[0], &start, &stop, &step, &slen);
+        return memory_slice(self, start, stop, step);
+    }
+}
+```
+
+`mv[1:5]` returns a new `memoryview` pointing into the same buffer. No data is copied. The new view's `shape`, `strides`, and `buf` pointer are adjusted. Only 1D slices produce a proper sub-view; multi-dimensional slices return a scalar for the first dimension.
+
+### `memoryview.tobytes`
+
+```c
+// CPython: Objects/memoryview.c:1420 memory_tobytes
+static PyObject *
+memory_tobytes(PyMemoryViewObject *self, PyObject *args)
+{
+    char *order = "C";
+    PyArg_ParseTuple(args, "|s:tobytes", &order);
+    if (MV_C_CONTIGUOUS(self->flags) && *order == 'C') {
+        /* Fast path: already contiguous, just memcpy */
+        return PyBytes_FromStringAndSize(self->view.buf, self->view.len);
+    }
+    /* Copy with strides */
+    PyObject *result = PyBytes_FromStringAndSize(NULL, self->view.len);
+    copy_buffer(result, self);
+    return result;
+}
+```
+
+`mv.tobytes()` copies the buffer contents to a new `bytes` object. C-contiguous views use a direct `memcpy`. Non-contiguous views (e.g., from a slice with step != 1, or Fortran-order arrays) require element-by-element copying with strides.
+
+### `memoryview.cast`
+
+```c
+// CPython: Objects/memoryview.c:1540 memory_cast
+static PyObject *
+memory_cast(PyMemoryViewObject *self, PyObject *args, PyObject *kwds)
+{
+    const char *fmt;
+    PyObject *shape = NULL;
+    PyArg_ParseTupleAndKeywords(args, kwds, "s|O:cast", kwlist, &fmt, &shape);
+    /* Reinterpret the underlying bytes with a new format */
+    /* E.g., b'B' -> 'H' reinterprets bytes as unsigned shorts */
+    PyMemoryViewObject *mv = (PyMemoryViewObject *)PyMemoryView_FromObject((PyObject *)self);
+    mv->view.format = (char *)fmt;
+    mv->view.itemsize = get_itemsize(fmt);
+    mv->view.len = self->view.len;
+    mv->view.ndim = shape ? PySequence_Length(shape) : 1;
+    ...
+    return (PyObject *)mv;
+}
+```
+
+`mv.cast('H')` reinterprets the same bytes as `unsigned short` without copying. `memoryview(b'\x01\x00\x02\x00').cast('H')` gives a view of 2 unsigned shorts. Useful for zero-copy binary protocol parsing.
+
+## gopy notes
+
+`memoryview.__getitem__` slice returns a new `objects.MemoryView` sharing `buf`. `tobytes` is `objects.MemoryViewToBytes` using `copy`. `cast` is `objects.MemoryViewCast` which resets `format` and `itemsize`. Strides are `[]int` on the Go struct.

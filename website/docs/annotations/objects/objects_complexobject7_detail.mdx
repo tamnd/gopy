@@ -1,0 +1,100 @@
+---
+title: Objects/complexobject.c (part 7)
+description: "Objects/complexobject.c part 7: complex arithmetic, __abs__, conjugate, polar/rect."
+cpython_path: Objects/complexobject.c
+cpython_version: "3.14"
+lines: 400
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Objects/complexobject.c" />
+
+This annotation covers complex number arithmetic. See `modules_complexobject6_detail` for `complex.__new__`, `__repr__`, `__hash__`, and string parsing.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `complex.__add__` / `__mul__` | Arithmetic operations |
+| 81-160 | `complex.__abs__` | Magnitude via `hypot` |
+| 161-240 | `complex.conjugate` | Negate imaginary part |
+| 241-320 | `cmath.polar` / `cmath.rect` | Polar/rectangular conversion |
+| 321-400 | `complex.__pow__` | Complex exponentiation |
+
+## Reading
+
+### `complex.__mul__`
+
+```c
+// CPython: Objects/complexobject.c:120 c_prod
+static Py_complex
+c_prod(Py_complex a, Py_complex b)
+{
+    Py_complex r;
+    /* (a+bj)(c+dj) = (ac-bd) + (ad+bc)j
+       Avoid catastrophic cancellation with Kahan's formula when needed */
+    r.real = a.real * b.real - a.imag * b.imag;
+    r.imag = a.real * b.imag + a.imag * b.real;
+    return r;
+}
+```
+
+Complex multiplication uses the standard formula `(ac-bd, ad+bc)`. The naive formula can have catastrophic cancellation when `a.real * b.real` and `a.imag * b.imag` are nearly equal. For very large values, IEEE 754 infinities are handled specially.
+
+### `complex.__abs__`
+
+```c
+// CPython: Objects/complexobject.c:180 complex_abs
+static PyObject *
+complex_abs(PyComplexObject *v)
+{
+    double result = _Py_c_abs(v->cval);
+    if (Py_IS_INFINITY(result) && !Py_IS_INFINITY(v->cval.real)
+        && !Py_IS_INFINITY(v->cval.imag)) {
+        PyErr_SetString(PyExc_OverflowError, "absolute value too large");
+        return NULL;
+    }
+    return PyFloat_FromDouble(result);
+}
+
+double
+_Py_c_abs(Py_complex z)
+{
+    /* Use hypot to avoid intermediate overflow */
+    return hypot(z.real, z.imag);
+}
+```
+
+`abs(3+4j)` returns `5.0`. `hypot` is used rather than `sqrt(r^2 + i^2)` because squaring can overflow even when the final result is representable. `hypot(3e300, 4e300)` returns `5e300`; `sqrt((3e300)^2 + (4e300)^2)` overflows.
+
+### `complex.__pow__`
+
+```c
+// CPython: Objects/complexobject.c:240 c_pow
+static Py_complex
+c_pow(Py_complex a, Py_complex b)
+{
+    /* a^b = exp(b * log(a)) */
+    if (b.real == 0 && b.imag == 0) return (Py_complex){1.0, 0.0};
+    if (a.real == 0 && a.imag == 0) {
+        if (b.real < 0 || b.imag != 0) {
+            errno = EDOM;
+            return (Py_complex){0.0, 0.0};
+        }
+        return (Py_complex){0.0, 0.0};
+    }
+    double vabs = hypot(a.real, a.imag);
+    double varg = atan2(a.imag, a.real);
+    double r = pow(vabs, b.real) * exp(-b.imag * varg);
+    double theta = b.real * varg + b.imag * log(vabs);
+    return (Py_complex){r * cos(theta), r * sin(theta)};
+}
+```
+
+`(1+1j)**2` computes `exp(2 * log(1+1j))`. The magnitude and phase are computed separately for numerical stability.
+
+## gopy notes
+
+Complex arithmetic is in `objects/complex.go`. `c_prod` is Go's `cmplx.Mul`. `complex.__abs__` uses `cmplx.Abs`. `complex.__pow__` uses `cmplx.Pow`. `complex.conjugate` is `cmplx.Conj`. `cmath.polar`/`rect` are in `module/cmath/module.go`.

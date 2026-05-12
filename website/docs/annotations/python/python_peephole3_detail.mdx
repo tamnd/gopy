@@ -1,0 +1,107 @@
+---
+title: Python/flowgraph.c (part 3)
+description: "Python/flowgraph.c part 3: peephole optimizer, constant folding, dead code elimination, jump threading."
+cpython_path: Python/flowgraph.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Python/flowgraph.c" />
+
+This annotation covers the compile-time optimizer. See `python_compile9_detail` for exception table compilation and `compile_try_finally`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | Constant folding | Evaluate pure operations at compile time |
+| 81-180 | Dead code elimination | Remove unreachable instructions |
+| 181-280 | Jump threading | `JUMP_FORWARD` to `JUMP_FORWARD` chains |
+| 281-380 | `LOAD_CONST` + `POP_TOP` | Eliminate unused constants |
+| 381-500 | Nop removal | Strip no-ops after optimization passes |
+
+## Reading
+
+### Constant folding
+
+```c
+// CPython: Python/flowgraph.c:1480 fold_binop
+static int
+fold_binop(cfg_instr *inst, PyObject **stack, int stack_height)
+{
+    /* Evaluate binary operations on constants at compile time */
+    if (stack_height < 2) return 0;
+    PyObject *right = stack[stack_height - 1];
+    PyObject *left = stack[stack_height - 2];
+    if (!PyUnicode_CheckExact(left) && !PyLong_CheckExact(left) &&
+        !PyFloat_CheckExact(left) && !PyTuple_CheckExact(left)) return 0;
+    PyObject *result = NULL;
+    switch (inst->i_opcode) {
+        case BINARY_OP:
+            if (inst->i_oparg == NB_ADD)
+                result = PyNumber_Add(left, right);
+            ...
+    }
+    if (result == NULL) { PyErr_Clear(); return 0; }
+    /* Replace with LOAD_CONST result */
+    ...
+}
+```
+
+`1 + 2` compiles to `LOAD_CONST 3` (not `LOAD_CONST 1`, `LOAD_CONST 2`, `BINARY_OP +`). String concatenation (`'a' + 'b'` → `LOAD_CONST 'ab'`), tuple building (`(1, 2, 3)` as a literal), and membership tests (`x in (1, 2, 3)` → `x in frozenset({1, 2, 3})`) are all constant-folded.
+
+### Dead code elimination
+
+```c
+// CPython: Python/flowgraph.c:1620 mark_reachable
+static void
+mark_reachable(cfg_builder *g)
+{
+    /* BFS from entry block; unmarked blocks are unreachable */
+    basicblock **stack = ...;
+    basicblock *b = g->g_entryblock;
+    b->b_visited = 1;
+    while (b != NULL) {
+        for (int i = 0; i < b->b_iused; i++) {
+            cfg_instr *instr = &b->b_instr[i];
+            if (IS_JUMP(instr)) {
+                basicblock *target = instr->i_target;
+                if (!target->b_visited) {
+                    target->b_visited = 1;
+                    *++stack = target;
+                }
+            }
+        }
+        b = *stack--;
+    }
+}
+```
+
+After `mark_reachable`, any block with `b_visited == 0` is unreachable. `if False: ...` compiles the body but the optimizer removes it. After `RETURN_VALUE`, any following instructions in the same block are dead.
+
+### Jump threading
+
+```c
+// CPython: Python/flowgraph.c:1720 jump_thread
+static int
+jump_thread(cfg_instr *inst, cfg_instr *target)
+{
+    /* If inst jumps to a block whose only instruction is another jump,
+       update inst to jump directly to the final target */
+    if (inst->i_opcode == JUMP_FORWARD &&
+        target->i_opcode == JUMP_FORWARD) {
+        inst->i_target = target->i_target;
+        return 1;
+    }
+    return 0;
+}
+```
+
+Chains like `JUMP_FORWARD L1; L1: JUMP_FORWARD L2` are simplified to `JUMP_FORWARD L2`. This commonly arises from `if/elif` chains and `try/except` blocks.
+
+## gopy notes
+
+The peephole optimizer is `compile/flowgraph_passes.go` in gopy. Constant folding uses `objects.BinaryOp` on `objects.Const` values. Dead code elimination is `flowgraph.MarkReachable`. Jump threading is `flowgraph.ThreadJumps`. The optimizer runs after the initial flowgraph is built, before instruction encoding.

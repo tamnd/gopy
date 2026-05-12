@@ -1,0 +1,98 @@
+---
+title: Lib/fractions.py (part 4)
+description: "fractions.py part 4: Fraction arithmetic, GCD normalization, limit_denominator."
+cpython_path: Lib/fractions.py
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/fractions.py" />
+
+This annotation covers arithmetic operations. See `lib_fractions3_detail` for `Fraction.__new__`, string parsing, `__float__`, and `__str__`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `Fraction.__add__` / `__sub__` | Rational arithmetic |
+| 81-160 | `Fraction.__mul__` / `__truediv__` | Multiplication and division |
+| 161-240 | GCD normalization | Keep fractions in lowest terms |
+| 241-360 | `Fraction.limit_denominator` | Best rational approximation |
+| 361-500 | Comparison operators | Mixed Fraction/float/int comparisons |
+
+## Reading
+
+### `Fraction.__add__`
+
+```python
+# CPython: Lib/fractions.py:480 _add
+def _add(a, b):
+    """a + b"""
+    na, da = a.numerator, a.denominator
+    nb, db = b.numerator, b.denominator
+    g = math.gcd(da, db)
+    if g == 1:
+        return Fraction(na * db + da * nb, da * db, _normalize=False)
+    s = da // g
+    t = na * (db // g) + nb * s
+    g2 = math.gcd(t, g)
+    return Fraction(t // g2, s * (db // g2), _normalize=False)
+```
+
+The optimized addition avoids computing `da * db` when possible. When `gcd(da, db) == 1`, the denominator is `da * db`. Otherwise, intermediate GCDs reduce the intermediate values, preventing integer blowup for iterated sums.
+
+### `Fraction.limit_denominator`
+
+```python
+# CPython: Lib/fractions.py:180 limit_denominator
+def limit_denominator(self, max_denominator=10**6):
+    """Find the closest Fraction with denominator at most max_denominator."""
+    if max_denominator < 1:
+        raise ValueError("max_denominator should be at least 1")
+    if self.denominator <= max_denominator:
+        return Fraction(self)
+    p0, q0, p1, q1 = 0, 1, 1, 0
+    n, d = self.numerator, self.denominator
+    while True:
+        a = n // d
+        q2 = q0 + a * q1
+        if q2 > max_denominator:
+            break
+        p0, q0, p1, q1 = p1, q1, p0 + a * p1, q2
+        n, d = d, n - a * d
+    k = (max_denominator - q0) // q1
+    bound1 = Fraction(p0 + k * p1, q0 + k * q1)
+    bound2 = Fraction(p1, q1)
+    if abs(bound2 - self) <= abs(bound1 - self):
+        return bound2
+    else:
+        return bound1
+```
+
+`Fraction(3.141592653589793).limit_denominator(100)` returns `Fraction(311, 99)` (a good rational approximation of pi). The continued fraction algorithm finds the best approximation in O(log(denominator)) steps.
+
+### Mixed comparisons
+
+```python
+# CPython: Lib/fractions.py:660 _richcmp
+def _richcmp(self, other, op):
+    if isinstance(other, int):
+        return op(self.numerator, self.denominator * other)
+    if isinstance(other, Fraction):
+        return op(self.numerator * other.denominator,
+                  other.numerator * self.denominator)
+    if isinstance(other, float):
+        if math.isnan(other) or math.isinf(other):
+            return op(0.0, other)
+        return op(self, self.from_float(other))
+    return NotImplemented
+```
+
+Fraction/int comparison avoids float conversion (exact). Fraction/float comparison converts the float to a `Fraction` first (via `as_integer_ratio`), then compares exactly. This avoids the `0.1 == Fraction(1, 10)` → `False` surprise that would arise from converting the fraction to float.
+
+## gopy notes
+
+`Fraction` arithmetic is `module/fractions` in `module/fractions/module.go`. `_add` uses `math/big.Int` for numerator/denominator. `limit_denominator` implements the continued fraction algorithm directly. GCD uses `big.Int.GCD`. Mixed comparisons use `objects.RichCompare`.

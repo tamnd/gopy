@@ -1,0 +1,95 @@
+---
+title: Modules/cmathmodule.c (part 2)
+description: "cmathmodule part 2: cmath.sqrt, cmath.exp, cmath.log, cmath.phase, cmath.polar."
+cpython_path: Modules/cmathmodule.c
+cpython_version: "3.14"
+lines: 400
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/cmathmodule.c" />
+
+This annotation covers complex transcendental functions. See `objects_complexobject7_detail` for `complex.__abs__`, `conjugate`, and `__pow__`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `cmath.sqrt` | Complex square root |
+| 81-160 | `cmath.exp` | Complex exponential |
+| 161-240 | `cmath.log` | Complex natural logarithm |
+| 241-320 | `cmath.phase` / `cmath.polar` | Argument and polar form |
+| 321-400 | `cmath.rect` | Polar to rectangular |
+
+## Reading
+
+### `cmath.sqrt`
+
+```c
+// CPython: Modules/cmathmodule.c:280 cmath_sqrt_impl
+static Py_complex
+c_sqrt(Py_complex z)
+{
+    /* Numerically stable: avoid cancellation in sqrt((r+|z|)/2 +/- ...) */
+    double ax = fabs(z.real), ay = fabs(z.imag);
+    double s, d;
+    if (ax < ay) {
+        s = sqrt(ax/ay * 0.5 + 0.5) * sqrt(ay);
+    } else if (ay < ax) {
+        s = sqrt(ay/ax * 0.5 + 0.5) * sqrt(ax);
+    } else {
+        s = sqrt(ax) * M_SQRT1_2;
+    }
+    if (z.real >= 0) {
+        return (Py_complex){ s, z.imag / (2 * s) };
+    } else {
+        return (Py_complex){ ay / (2 * s), copysign(s, z.imag) };
+    }
+}
+```
+
+The naive formula `sqrt((r+|z|)/2)` has catastrophic cancellation when `z.real < 0` and `z.imag` is small. The numerically stable version avoids this by computing `s` from the dominant component.
+
+### `cmath.phase` / `cmath.polar`
+
+```c
+// CPython: Modules/cmathmodule.c:480 cmath_phase_impl
+static PyObject *
+cmath_phase_impl(PyObject *module, Py_complex z)
+{
+    double phi = atan2(z.imag, z.real);
+    return PyFloat_FromDouble(phi);
+}
+
+static PyObject *
+cmath_polar_impl(PyObject *module, Py_complex z)
+{
+    double r = hypot(z.real, z.imag);
+    double phi = atan2(z.imag, z.real);
+    return PyTuple_Pack(2, PyFloat_FromDouble(r), PyFloat_FromDouble(phi));
+}
+```
+
+`cmath.phase(complex(-1, 0))` returns `math.pi` (π radians). `cmath.polar(1+1j)` returns `(sqrt(2), pi/4)`. These are the building blocks for complex exponentiation via Euler's formula: `r * exp(i*phi)`.
+
+### `cmath.rect`
+
+```c
+// CPython: Modules/cmathmodule.c:520 cmath_rect_impl
+static PyObject *
+cmath_rect_impl(PyObject *module, double r, double phi)
+{
+    /* Convert polar (r, phi) to rectangular: r * (cos(phi) + i*sin(phi)) */
+    double real = r * cos(phi);
+    double imag = r * sin(phi);
+    return PyComplex_FromDoubles(real, imag);
+}
+```
+
+`cmath.rect(1, math.pi/2)` returns approximately `(0+1j)`. The small floating-point error is unavoidable: `cos(pi/2)` is not exactly `0` in IEEE 754.
+
+## gopy notes
+
+`cmath` functions are in `module/cmath/module.go` using Go's `cmplx` package: `cmath.sqrt` uses `cmplx.Sqrt`, `cmath.exp` uses `cmplx.Exp`, `cmath.log` uses `cmplx.Log`, `cmath.phase` uses `cmplx.Phase`, `cmath.polar` uses `cmplx.Polar`, `cmath.rect` uses `cmplx.Rect`.

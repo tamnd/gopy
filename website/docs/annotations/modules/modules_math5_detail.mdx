@@ -1,0 +1,125 @@
+---
+title: Modules/mathmodule.c (part 5)
+description: "mathmodule part 5: math.isclose, math.prod, math.perm, math.comb, math.dist."
+cpython_path: Modules/mathmodule.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/mathmodule.c" />
+
+This annotation covers combinatorics and precision utilities. See `modules_math4_detail` for `math.log`, `math.ceil`/`floor`, `math.gcd`, and trigonometric functions.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `math.isclose` | Compare floats with relative/absolute tolerance |
+| 81-160 | `math.prod` | Product of an iterable |
+| 161-260 | `math.perm` / `math.comb` | Permutations and combinations |
+| 261-360 | `math.dist` | Euclidean distance |
+| 361-500 | `math.fsum` | Exact floating-point sum |
+
+## Reading
+
+### `math.isclose`
+
+```c
+// CPython: Modules/mathmodule.c:2480 math_isclose_impl
+static PyObject *
+math_isclose_impl(PyObject *module, double a, double b,
+                  double rel_tol, double abs_tol)
+{
+    /* |a - b| <= max(rel_tol * max(|a|, |b|), abs_tol) */
+    if (a == b) return Py_True;
+    if (Py_IS_INFINITY(a) || Py_IS_INFINITY(b)) return Py_False;
+    double diff = fabs(a - b);
+    int result = (diff <= fabs(rel_tol * b) ||
+                  diff <= fabs(rel_tol * a) ||
+                  diff <= abs_tol);
+    return PyBool_FromLong(result);
+}
+```
+
+`math.isclose(a, b, rel_tol=1e-9, abs_tol=0.0)` handles the `a == b` fast path first (works for `inf == inf`). Two infinities with different signs are not close. The relative tolerance is computed against both `a` and `b` (the larger side), avoiding asymmetry.
+
+### `math.prod`
+
+```c
+// CPython: Modules/mathmodule.c:2620 math_prod_impl
+static PyObject *
+math_prod_impl(PyObject *module, PyObject *iterable, PyObject *start)
+{
+    PyObject *result = start ? Py_NewRef(start) : PyLong_FromLong(1);
+    PyObject *iter = PyObject_GetIter(iterable);
+    PyObject *item;
+    while ((item = PyIter_Next(iter)) != NULL) {
+        PyObject *newresult = PyNumber_Multiply(result, item);
+        Py_DECREF(item);
+        Py_DECREF(result);
+        result = newresult;
+        if (result == NULL) break;
+    }
+    Py_DECREF(iter);
+    return result;
+}
+```
+
+`math.prod([1, 2, 3, 4])` returns `24`. With `start=10` it returns `240`. Uses `PyNumber_Multiply` so it works with any numeric type including `Decimal` and `Fraction`. Added in Python 3.8.
+
+### `math.perm` / `math.comb`
+
+```c
+// CPython: Modules/mathmodule.c:2760 math_perm_impl
+static PyObject *
+math_perm_impl(PyObject *module, PyObject *n, PyObject *k)
+{
+    /* P(n,k) = n! / (n-k)! = n * (n-1) * ... * (n-k+1) */
+    /* Use exact integer arithmetic to avoid overflow */
+    PyObject *result = PyLong_FromLong(1);
+    for (long i = 0; i < k_val; i++) {
+        PyObject *factor = PyLong_FromLong(n_val - i);
+        result = PyNumber_Multiply(result, factor);
+    }
+    return result;
+}
+```
+
+`math.perm(5, 2)` returns `20` (5 * 4). `math.comb(5, 2)` returns `10` (20 // 2!). Both use exact integer arithmetic. Large values like `math.comb(100, 50)` work correctly without overflow.
+
+### `math.fsum`
+
+```c
+// CPython: Modules/mathmodule.c:1380 math_fsum_impl
+static PyObject *
+math_fsum_impl(PyObject *module, PyObject *seq)
+{
+    /* Exact floating-point sum using Shewchuk's algorithm.
+       Maintains a list of partial sums that together represent
+       the exact result without rounding error accumulation. */
+    double x, y, t;
+    double *p = partials;
+    Py_ssize_t n = 0;
+    while (...) {
+        /* Two-sum: compute x + y exactly as (hi, lo) */
+        for (Py_ssize_t i = n; i > 0; ) {
+            y = p[--i];
+            t = x + y;
+            y = y - (t - x);
+            x = t;
+            if (y) p[n++] = y;
+        }
+        p[n++] = x;
+    }
+    ...
+}
+```
+
+`math.fsum([0.1] * 10)` returns exactly `1.0` (not `0.9999999999999999`). Shewchuk's algorithm accumulates a list of partial sums, each representing an exact correction. The final result is the sum of all partials.
+
+## gopy notes
+
+`math.isclose` is `module/math.IsClose`. `math.prod` uses `objects.NumberMultiply` in a loop. `math.perm`/`comb` use `math/big.Int` for exact arithmetic. `math.fsum` implements Shewchuk's algorithm using `[]float64` partials.

@@ -1,0 +1,121 @@
+---
+title: Lib/random.py (part 3)
+description: "random.py part 3: Random.choice, Random.shuffle, Random.sample, SystemRandom, seed."
+cpython_path: Lib/random.py
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/random.py" />
+
+This annotation covers sampling and shuffling. See `lib_random2_detail` for the Mersenne Twister core, `randint`, `uniform`, and the Gaussian distribution.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `Random.seed` | Initialize the Mersenne Twister state |
+| 81-160 | `Random.choice` | Select one item from a sequence |
+| 161-240 | `Random.shuffle` | In-place Fisher-Yates shuffle |
+| 241-340 | `Random.sample` | Sample k items without replacement |
+| 341-500 | `SystemRandom` | Use `os.urandom` instead of Mersenne Twister |
+
+## Reading
+
+### `Random.seed`
+
+```python
+# CPython: Lib/random.py:120 Random.seed
+def seed(self, a=None, version=2):
+    if version == 1:
+        if isinstance(a, (str, bytes, bytearray)):
+            a = int.from_bytes(a, 'big') if isinstance(a, (bytes, bytearray)) else \
+                int.from_bytes(a.encode(), 'big')
+        super().seed(a)
+        return
+    if a is None:
+        a = int.from_bytes(_urandom(32))
+    elif isinstance(a, (str, bytes, bytearray)):
+        a = int.from_bytes(_sha512(a).digest())
+    elif isinstance(a, int):
+        a = int(a)
+    super().seed(a)
+```
+
+Version 2 (default since Python 3.2) hashes string/bytes seeds with SHA-512 before passing to the Twister. This avoids identical seeds for closely related strings. `seed(None)` seeds from `os.urandom`.
+
+### `Random.shuffle`
+
+```python
+# CPython: Lib/random.py:340 Random.shuffle
+def shuffle(self, x):
+    """Shuffle list x in place, and return None."""
+    randbelow = self._randbelow
+    for i in reversed(range(1, len(x))):
+        j = randbelow(i + 1)
+        x[i], x[j] = x[j], x[i]
+```
+
+Fisher-Yates shuffle: for each position `i` from the end, swap with a random position `j <= i`. This produces a uniformly random permutation in `O(n)`. `_randbelow` avoids bias from `randrange % n` when `n` is not a power of 2.
+
+### `Random.sample`
+
+```python
+# CPython: Lib/random.py:400 Random.sample
+def sample(self, population, k, *, counts=None):
+    n = len(population)
+    if k > n:
+        raise ValueError("Sample larger than population or is negative")
+    result = [None] * k
+    setsize = 21   # threshold for set-based vs array-based
+    if k > 5:
+        setsize += 4 ** math.ceil(math.log(k * 3, 4))
+    if n <= setsize:
+        # Small n: copy and shuffle prefix
+        pool = list(population)
+        for i in range(k):
+            j = int(random() * (n - i))
+            result[i] = pool[j]
+            pool[j] = pool[n - i - 1]
+    else:
+        # Large n: use a set to track selected indices
+        selected = set()
+        for i in range(k):
+            j = int(random() * n)
+            while j in selected:
+                j = int(random() * n)
+            selected.add(j)
+            result[i] = population[j]
+    return result
+```
+
+`sample` switches algorithms based on `n` and `k`. For small populations, it uses a partial Fisher-Yates shuffle (avoiding extra memory). For large populations, it uses a set of selected indices. The `counts` argument (Python 3.9+) allows weighted sampling with replacement.
+
+### `SystemRandom`
+
+```python
+# CPython: Lib/random.py:760 SystemRandom
+class SystemRandom(Random):
+    """Cryptographic random number generator using os.urandom."""
+    def random(self):
+        return (int.from_bytes(_urandom(7)) >> 3) * RECIP_BPF
+
+    def getrandbits(self, k):
+        if k <= 0:
+            raise ValueError('number of bits (n) must be greater than zero')
+        numbytes = (k + 7) // 8
+        x = int.from_bytes(_urandom(numbytes))
+        return x >> (numbytes * 8 - k)
+
+    def seed(self, *args, **kwds):
+        return None  # Cannot seed a CSPRNG
+```
+
+`SystemRandom` uses `os.urandom` (kernel entropy) and cannot be seeded. `random()` generates 56 bits of entropy and scales to `[0, 1)`. Use for cryptographic applications; not reproducible.
+
+## gopy notes
+
+`Random` is `module/random.Random` in `module/random/module.go`, wrapping Go's `math/rand` (Mersenne Twister-equivalent). `seed` calls `rand.New(rand.NewSource(seed))`. `SystemRandom` wraps `crypto/rand`. `shuffle` and `sample` are implemented directly using the same algorithms.
