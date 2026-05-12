@@ -1,6 +1,13 @@
 // @ts-check
 const { themes } = require('prism-react-renderer');
 
+// Deploy targets:
+//   Cloudflare Pages: https://gopy.tamnd.com (default, canonical)
+//   GitHub Pages: https://tamnd.github.io/gopy/ (set DOCUSAURUS_URL and
+//                 DOCUSAURUS_BASE_URL in the workflow)
+const SITE_URL = process.env.DOCUSAURUS_URL || 'https://gopy.tamnd.com';
+const SITE_BASE_URL = process.env.DOCUSAURUS_BASE_URL || '/';
+
 /** @type {import('@docusaurus/types').Config} */
 const config = {
   title: 'gopy',
@@ -8,8 +15,8 @@ const config = {
     'A from-scratch CPython 3.14, written in Go. Same bytecode, same objects, same error messages.',
   favicon: 'img/favicon.png',
 
-  url: 'https://tamnd.github.io',
-  baseUrl: '/gopy/',
+  url: SITE_URL,
+  baseUrl: SITE_BASE_URL,
 
   organizationName: 'tamnd',
   projectName: 'gopy',
