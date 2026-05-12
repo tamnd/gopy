@@ -1,0 +1,104 @@
+---
+title: Modules/_ssl.c (part 5)
+description: "_ssl.c part 5: SSLContext.wrap_socket, SSLObject.do_handshake, read, write, unwrap."
+cpython_path: Modules/_ssl.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/_ssl.c" />
+
+This annotation covers the TLS handshake and data transfer. See `modules_ssl4_detail` for `SSLContext.__init__`, certificate loading, and socket creation.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `SSLContext.wrap_socket` | Wrap a plain socket in TLS |
+| 81-160 | `SSLObject.do_handshake` | Perform TLS handshake |
+| 161-260 | `SSLObject.read` | Decrypt and read data |
+| 261-360 | `SSLObject.write` | Encrypt and write data |
+| 361-500 | `SSLObject.unwrap` | Shutdown TLS, return plain socket |
+
+## Reading
+
+### `SSLObject.do_handshake`
+
+```c
+// CPython: Modules/_ssl.c:1820 _ssl__SSLObject_do_handshake_impl
+static PyObject *
+_ssl__SSLObject_do_handshake_impl(PySSLObject *self)
+{
+    int ret;
+    int sockstate;
+    _PySSL_ERRTYPE err;
+    do {
+        PySSL_BEGIN_ALLOW_THREADS
+        ret = SSL_do_handshake(self->ssl);
+        err = _PySSL_errno(ret <= 0, self->ssl, ret);
+        PySSL_END_ALLOW_THREADS
+        sockstate = _PySSL_update_handshake_state(self, err);
+    } while (sockstate == HANDSHAKE_IN_PROGRESS);
+    if (ret <= 0) {
+        _setSSLError(get_state_obj(self), NULL, 0, __FILE__, __LINE__);
+        return NULL;
+    }
+    Py_RETURN_NONE;
+}
+```
+
+`SSL_do_handshake` may return `SSL_ERROR_WANT_READ` or `SSL_ERROR_WANT_WRITE` requiring the loop to wait for socket I/O. The `PySSL_BEGIN/END_ALLOW_THREADS` macros release the GIL during blocking I/O.
+
+### `SSLObject.read`
+
+```c
+// CPython: Modules/_ssl.c:1940 _ssl__SSLObject_read_impl
+static PyObject *
+_ssl__SSLObject_read_impl(PySSLObject *self, Py_ssize_t len, int group_right_1,
+                          Py_buffer *buffer)
+{
+    /* Allocate output buffer if not provided */
+    PyObject *dest = NULL;
+    if (!group_right_1) {
+        dest = PyBytes_FromStringAndSize(NULL, len);
+        mem = PyBytes_AS_STRING(dest);
+    }
+    do {
+        PySSL_BEGIN_ALLOW_THREADS
+        count = SSL_read(self->ssl, mem, (int)len);
+        err = _PySSL_errno(count <= 0, self->ssl, count);
+        PySSL_END_ALLOW_THREADS
+    } while (err.ssl == SSL_ERROR_WANT_READ || err.ssl == SSL_ERROR_WANT_WRITE);
+    ...
+}
+```
+
+`SSL_read` decrypts data from the BIO into the output buffer. The loop handles non-blocking sockets where `WANT_READ`/`WANT_WRITE` indicate the socket is not ready.
+
+### `SSLObject.unwrap`
+
+```c
+// CPython: Modules/_ssl.c:2060 _ssl__SSLObject_unwrap_impl
+static PyObject *
+_ssl__SSLObject_unwrap_impl(PySSLObject *self)
+{
+    /* Send a TLS close_notify alert and return the underlying socket */
+    int ret;
+    do {
+        PySSL_BEGIN_ALLOW_THREADS
+        ret = SSL_shutdown(self->ssl);
+        PySSL_END_ALLOW_THREADS
+    } while (ret == 0);  /* 0 means close_notify sent but not received */
+    if (ret < 0) { ... }
+    return self->Socket;  /* Return the underlying socket object */
+}
+```
+
+`unwrap()` performs a bidirectional TLS shutdown. After both sides send `close_notify`, the underlying socket can be used for other protocols (e.g., HTTP upgrade).
+
+## gopy notes
+
+`SSLObject.do_handshake` is `module/ssl.ObjectDoHandshake` in `module/ssl/module.go`. It calls `tls.Conn.Handshake()`. `SSLObject.read` calls `tls.Conn.Read`. `SSLObject.write` calls `tls.Conn.Write`. `unwrap` calls `tls.Conn.CloseWrite()` then returns the underlying `net.Conn`.

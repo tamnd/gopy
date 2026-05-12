@@ -1,0 +1,92 @@
+---
+title: Python/ceval.c (part 48)
+description: "Python/ceval.c part 48: CALL specializations — CALL_PY_EXACT_ARGS, CALL_PY_WITH_DEFAULTS, CALL_BOUND_METHOD_EXACT_ARGS."
+cpython_path: Python/ceval.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Python/ceval.c" />
+
+This annotation covers `CALL` specializations for Python functions. See `python_ceval47_detail` for `LOAD_ATTR` specializations.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `CALL_PY_EXACT_ARGS` | Python function, nargs matches argcount exactly |
+| 81-160 | `CALL_PY_WITH_DEFAULTS` | Python function with default arguments |
+| 161-260 | `CALL_BOUND_METHOD_EXACT_ARGS` | Bound method, exact arg count |
+| 261-360 | `CALL_BUILTIN_FAST` | C function with vectorcall |
+| 361-500 | `CALL_BUILTIN_CLASS` | `type(x)`, `int(x)`, etc. |
+
+## Reading
+
+### `CALL_PY_EXACT_ARGS`
+
+```c
+// CPython: Python/ceval.c:3580 CALL_PY_EXACT_ARGS
+inst(CALL_PY_EXACT_ARGS, (unused/2, callable, self_or_null, args[oparg] -- unused)) {
+    DEOPT_IF(tstate->interp->eval_breaker);
+    PyFunctionObject *func = (PyFunctionObject *)callable;
+    DEOPT_IF(!PyFunction_ExactCheck(callable));
+    PyCodeObject *code = (PyCodeObject *)func->func_code;
+    DEOPT_IF(code->co_argcount != oparg + (self_or_null != NULL));
+    DEOPT_IF(code->co_flags & (CO_VARARGS | CO_VARKEYWORDS));
+    /* Push a new frame directly without going through _PyFunction_Vectorcall */
+    _PyInterpreterFrame *new_frame = _PyFrame_PushUnchecked(tstate, func, oparg);
+    ...
+    DISPATCH_INLINED(new_frame);
+}
+```
+
+The most common call pattern: `f(a, b, c)` where `f` is a `def` with exactly 3 positional parameters. The specialization skips argument packing entirely and creates the frame inline.
+
+### `CALL_PY_WITH_DEFAULTS`
+
+```c
+// CPython: Python/ceval.c:3640 CALL_PY_WITH_DEFAULTS
+inst(CALL_PY_WITH_DEFAULTS, (unused/2, callable, self_or_null, args[oparg] -- unused)) {
+    DEOPT_IF(!PyFunction_ExactCheck(callable));
+    PyFunctionObject *func = (PyFunctionObject *)callable;
+    PyCodeObject *code = (PyCodeObject *)func->func_code;
+    int nargs = oparg + (self_or_null != NULL);
+    DEOPT_IF(nargs > code->co_argcount);
+    int defcount = func->func_defaults ? (int)PyTuple_GET_SIZE(func->func_defaults) : 0;
+    DEOPT_IF(nargs + defcount < code->co_argcount);
+    /* Fill remaining args from defaults */
+    int firstdef = code->co_argcount - defcount;
+    for (int i = nargs; i < code->co_argcount; i++) {
+        args[i] = Py_NewRef(PyTuple_GET_ITEM(func->func_defaults, i - firstdef));
+    }
+    ...
+}
+```
+
+When fewer arguments are provided than the function expects, the specialization fills in defaults from `func->func_defaults` directly. No keyword argument dict is needed.
+
+### `CALL_BOUND_METHOD_EXACT_ARGS`
+
+```c
+// CPython: Python/ceval.c:3700 CALL_BOUND_METHOD_EXACT_ARGS
+inst(CALL_BOUND_METHOD_EXACT_ARGS, (unused/2, callable, null, args[oparg] -- unused)) {
+    DEOPT_IF(null != NULL);
+    DEOPT_IF(Py_TYPE(callable) != &PyMethod_Type);
+    PyObject *self = ((PyMethodObject *)callable)->im_self;
+    PyObject *func = ((PyMethodObject *)callable)->im_func;
+    /* Replace callable with func and push self as first arg */
+    args[-1] = self;
+    callable = func;
+    /* Now fall through to CALL_PY_EXACT_ARGS logic */
+    ...
+}
+```
+
+`obj.method(a, b)` is a bound method call. The specialization extracts `self` and `func` from the method object and prepends `self` to the argument list, then inlines the function call.
+
+## gopy notes
+
+`CALL_PY_EXACT_ARGS` is in `vm/eval_call.go` and creates a new `vm.Frame` directly from the `objects.Function`'s code object. `CALL_PY_WITH_DEFAULTS` fills defaults from `function.Defaults`. `CALL_BOUND_METHOD_EXACT_ARGS` unwraps `objects.BoundMethod` and prepends the receiver.
