@@ -200,4 +200,11 @@ import (
 	// stdout/stderr via fd pairs, and return the child PID.
 	// CPython: Modules/_posixsubprocess.c:1333 _posixsubprocessmodule
 	_ "github.com/tamnd/gopy/module/_posixsubprocess"
+
+	// Built-in module: _hashlib. Registers itself via
+	// module/_hashlib/module.go init(). Backs Lib/hashlib.py with the
+	// HASH object type and openssl_* convenience constructors using
+	// Go's standard library crypto packages.
+	// CPython: Modules/_hashopenssl.c:2374 _hashlibmodule
+	_ "github.com/tamnd/gopy/module/_hashlib"
 )
