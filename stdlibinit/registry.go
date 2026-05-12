@@ -119,12 +119,30 @@ import (
 	// Go-backed Python modules: not in CPython's config.c.in (those
 	// are pure-Python in Lib/), but until the corresponding Lib/*.py
 	// vendoring lands the import system needs something to satisfy
-	// `import traceback` and friends pulled in by unittest.
+	// `import <name>` pulled in by unittest.
 	// Built-in module: _sre. Registers itself via module/_sre/module.go
 	// init(). Backs Lib/re/ with the compiled pattern engine. Go's
 	// regexp/RE2 backend.
 	// CPython: Modules/_sre/sre.c:1 (module init)
 	_ "github.com/tamnd/gopy/module/_sre"
+
+	// Built-in module: _heapq. Registers itself via
+	// module/_heapq/module.go init(). Ports Modules/_heapqmodule.c:
+	// heappush, heappop, heappushpop, heapreplace, heapify, nlargest, nsmallest.
+	// CPython: Modules/_heapqmodule.c:540 heapq_exec
+	_ "github.com/tamnd/gopy/module/_heapq"
+
+	// Built-in module: _bisect. Registers itself via
+	// module/_bisect/module.go init(). Ports Modules/_bisectmodule.c:
+	// bisect_left, bisect_right, insort_left, insort_right and their aliases.
+	// CPython: Modules/_bisectmodule.c:260 bisect_exec
+	_ "github.com/tamnd/gopy/module/_bisect"
+
+	// Built-in module: _stat. Registers itself via
+	// module/_stat/module.go init(). Ports Modules/_stat.c:
+	// mode-type masks, permission bits, UF_/SF_ flags, S_IS* helpers, filemode.
+	// CPython: Modules/_stat.c:290 stat_exec
+	_ "github.com/tamnd/gopy/module/_stat"
 
 	_ "github.com/tamnd/gopy/module/argparse"
 	_ "github.com/tamnd/gopy/module/contextlib"
@@ -133,6 +151,5 @@ import (
 	_ "github.com/tamnd/gopy/module/functools"
 	_ "github.com/tamnd/gopy/module/os"
 	_ "github.com/tamnd/gopy/module/signal"
-	_ "github.com/tamnd/gopy/module/traceback"
 	_ "github.com/tamnd/gopy/module/weakref"
 )
