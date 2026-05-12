@@ -1,0 +1,127 @@
+---
+title: Modules/_hashopenssl.c (part 5)
+description: "_hashopenssl.c part 5: HMAC, hashlib.new, EVP digest list, blake2 integration."
+cpython_path: Modules/_hashopenssl.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/_hashopenssl.c" />
+
+This annotation covers HMAC and the algorithm registry. See `modules_hashlib4_detail` for `hashlib.md5`/`sha256`, the `EVPobject`, and `digest`/`hexdigest`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `hashlib.new` | Construct a hash object by name |
+| 81-180 | Algorithm registry | Map string names to OpenSSL `EVP_MD` pointers |
+| 181-280 | HMAC | `hmac.new` using `HMAC_CTX` |
+| 281-380 | BLAKE2 | `hashlib.blake2b` / `hashlib.blake2s` |
+| 381-500 | `hashlib.pbkdf2_hmac` | PKCS#5 key derivation |
+
+## Reading
+
+### `hashlib.new`
+
+```c
+// CPython: Modules/_hashopenssl.c:880 _hashlib_new_impl
+static PyObject *
+_hashlib_new_impl(PyObject *module, const char *name, PyObject *data_obj,
+                  int usedforsecurity)
+{
+    const EVP_MD *digest = py_digest_by_name(module, name, usedforsecurity);
+    if (digest == NULL) return NULL;
+    PyObject *ret = EVPnew(module, digest);
+    if (data_obj != NULL && data_obj != Py_None) {
+        Py_buffer view;
+        PyObject_GetBuffer(data_obj, &view, PyBUF_SIMPLE);
+        EVP_DigestUpdate(((EVPobject *)ret)->ctx, view.buf, view.len);
+        PyBuffer_Release(&view);
+    }
+    return ret;
+}
+```
+
+`hashlib.new('sha3_256', b'data')` looks up `'sha3_256'` in OpenSSL's registry. `usedforsecurity=False` allows MD5/SHA1 on FIPS systems (for checksums, not cryptographic use). The initial data is hashed immediately after construction.
+
+### Algorithm registry
+
+```c
+// CPython: Modules/_hashopenssl.c:320 py_digest_by_name
+static const EVP_MD *
+py_digest_by_name(PyObject *module, const char *name, int usedforsecurity)
+{
+    /* Normalize name: 'SHA256' -> 'sha256', 'sha2-256' -> 'sha256' */
+    char normalized[64];
+    _hashlib_norm_name(name, normalized);
+    const EVP_MD *digest = EVP_get_digestbyname(normalized);
+    if (digest == NULL) {
+        /* Try alias table: 'sha256' -> 'SHA2-256' */
+        const char *alias = _Py_hashlib_get_alias(normalized);
+        if (alias) digest = EVP_get_digestbyname(alias);
+    }
+    if (digest == NULL) {
+        PyErr_Format(PyExc_ValueError, "unsupported hash type %s", name);
+    }
+    return digest;
+}
+```
+
+Name normalization handles case and separator variants (`SHA-256`, `sha256`, `SHA_256` all work). The alias table maps Python names to OpenSSL names where they differ.
+
+### HMAC
+
+```c
+// CPython: Modules/_hashopenssl.c:1060 _hashlib_hmac_new_impl
+static PyObject *
+_hashlib_hmac_new_impl(PyObject *module, Py_buffer *key, PyObject *msg_obj,
+                       const char *digestmod)
+{
+    const EVP_MD *digest = py_digest_by_name(module, digestmod, 1);
+    HMAC_CTX *ctx = HMAC_CTX_new();
+    HMAC_Init_ex(ctx, key->buf, (int)key->len, digest, NULL);
+    if (msg_obj != NULL && msg_obj != Py_None) {
+        Py_buffer msg;
+        PyObject_GetBuffer(msg_obj, &msg, PyBUF_SIMPLE);
+        HMAC_Update(ctx, msg.buf, msg.len);
+        PyBuffer_Release(&msg);
+    }
+    return HMACobject_new(module, ctx);
+}
+```
+
+`hmac.new(key, msg, digestmod='sha256')` creates an `HMAC_CTX` backed by OpenSSL. The `HMAC_CTX` is copied on `copy()` to allow independent digests from the same key/state.
+
+### `hashlib.pbkdf2_hmac`
+
+```c
+// CPython: Modules/_hashopenssl.c:1360 _hashlib_pbkdf2_hmac_impl
+static PyObject *
+_hashlib_pbkdf2_hmac_impl(PyObject *module, const char *hash_name,
+                           Py_buffer *password, Py_buffer *salt,
+                           long iterations, PyObject *dklen_obj)
+{
+    const EVP_MD *digest = py_digest_by_name(module, hash_name, 1);
+    Py_ssize_t dklen = digest_len;
+    PyObject *key = PyBytes_FromStringAndSize(NULL, dklen);
+    Py_BEGIN_ALLOW_THREADS
+    int r = PKCS5_PBKDF2_HMAC(
+        password->buf, (int)password->len,
+        salt->buf, (int)salt->len,
+        iterations, digest, (int)dklen,
+        (unsigned char *)PyBytes_AS_STRING(key));
+    Py_END_ALLOW_THREADS
+    if (!r) { Py_DECREF(key); return _setException(PyExc_ValueError, ...); }
+    return key;
+}
+```
+
+`hashlib.pbkdf2_hmac('sha256', password, salt, 100000)` releases the GIL during the CPU-intensive key derivation. The output length defaults to the digest size but can be overridden with `dklen`.
+
+## gopy notes
+
+`hashlib.new` is `module/hashlib.New` in `module/hashlib/module.go`. The algorithm registry uses Go's `crypto` standard library; `sha256`, `sha512`, `md5`, `sha1` are natively available. HMAC is `crypto/hmac`. `pbkdf2_hmac` uses `golang.org/x/crypto/pbkdf2`. BLAKE2 uses `golang.org/x/crypto/blake2b` and `blake2s`.

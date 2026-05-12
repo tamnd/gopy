@@ -1,0 +1,114 @@
+---
+title: Modules/zlibmodule.c (part 5)
+description: "zlibmodule.c part 5: zlib.compress, zlib.decompress, Compress/Decompress objects, wbits."
+cpython_path: Modules/zlibmodule.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/zlibmodule.c" />
+
+This annotation covers the stateful streaming API. See `modules_zlib4_detail` for `zlib.crc32`, `zlib.adler32`, and the one-shot compress/decompress functions.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `wbits` parameter | Control format (zlib/gzip/raw) and window size |
+| 81-180 | `zlib.compressobj` | Create a stateful `Compress` object |
+| 181-280 | `Compress.compress` | Feed data and get partial compressed output |
+| 281-380 | `Compress.flush` | Flush remaining data (Z_SYNC_FLUSH / Z_FINISH) |
+| 381-500 | `zlib.decompressobj` | Stateful decompression with partial input support |
+
+## Reading
+
+### `wbits` parameter
+
+```c
+// CPython: Modules/zlibmodule.c:120 wbits encoding
+/* wbits controls both the window size and the format:
+   +8 to +15: zlib format (deflate with zlib header)
+   -8 to -15: raw deflate (no header/trailer)
+   +24 to +31 (16 + 8..15): gzip format
+   +40 to +47 (32 + 8..15): auto-detect zlib or gzip
+   Absolute value is window size bits (8-15; 15 = 32KB window) */
+```
+
+`wbits=15` (default) produces zlib-wrapped output. `wbits=-15` produces raw deflate (used inside ZIP files). `wbits=31` produces gzip format. `wbits=47` auto-detects on decompress. The window size determines compression ratio vs. memory usage.
+
+### `zlib.compressobj`
+
+```c
+// CPython: Modules/zlibmodule.c:540 zlib_compressobj_impl
+static PyObject *
+zlib_compressobj_impl(PyObject *module, int level, int method, int wbits,
+                      int memLevel, int strategy, Py_buffer *zdict)
+{
+    compobject *self = PyObject_New(compobject, &Comptype);
+    self->zst.zalloc = Z_NULL;
+    self->zst.zfree  = Z_NULL;
+    int err = deflateInit2(&self->zst, level, method, wbits, memLevel, strategy);
+    if (err != Z_OK) {
+        zlib_error(self->zst, err, "while creating compression object");
+        return NULL;
+    }
+    if (zdict->buf != NULL)
+        deflateSetDictionary(&self->zst, zdict->buf, (uInt)zdict->len);
+    return (PyObject *)self;
+}
+```
+
+`compressobj(level=6, wbits=15)` initializes a `z_stream`. `level` ranges from 0 (no compression) to 9 (maximum). `strategy` hints at the data type: `Z_DEFAULT_STRATEGY`, `Z_FILTERED` (for filtered/delta data), or `Z_HUFFMAN_ONLY`.
+
+### `Compress.compress`
+
+```c
+// CPython: Modules/zlibmodule.c:620 zlib_Compress_compress_impl
+static PyObject *
+zlib_Compress_compress_impl(compobject *self, Py_buffer *data)
+{
+    PyObject *result = PyBytes_FromStringAndSize(NULL, data->len + data->len / 1000 + 12);
+    self->zst.next_in  = (Bytef *)data->buf;
+    self->zst.avail_in = (uInt)data->len;
+    self->zst.next_out = (Bytef *)PyBytes_AS_STRING(result);
+    self->zst.avail_out = (uInt)PyBytes_GET_SIZE(result);
+    Py_BEGIN_ALLOW_THREADS
+    int err = deflate(&self->zst, Z_NO_FLUSH);
+    Py_END_ALLOW_THREADS
+    if (self->zst.avail_in != 0) { /* need more output space */ ... }
+    _PyBytes_Resize(&result, PyBytes_GET_SIZE(result) - self->zst.avail_out);
+    return result;
+}
+```
+
+`compress(data)` may return an empty bytes object if the internal buffer is not full. Output is only guaranteed complete after `flush(Z_FINISH)`. The GIL is released during the CPU-intensive `deflate` call.
+
+### `Compress.flush`
+
+```c
+// CPython: Modules/zlibmodule.c:680 zlib_Compress_flush_impl
+static PyObject *
+zlib_Compress_flush_impl(compobject *self, int mode)
+{
+    /* mode: Z_SYNC_FLUSH (output complete blocks), Z_FINISH (end stream) */
+    PyObject *result;
+    do {
+        self->zst.avail_out = DEFAULTALLOC;
+        self->zst.next_out = (Bytef *)PyBytes_AS_STRING(result) + result_size;
+        Py_BEGIN_ALLOW_THREADS
+        int err = deflate(&self->zst, mode);
+        Py_END_ALLOW_THREADS
+        result_size += DEFAULTALLOC - self->zst.avail_out;
+    } while (self->zst.avail_out == 0);
+    return result;
+}
+```
+
+`flush(Z_FINISH)` produces the final compressed bytes and appends the zlib checksum trailer. After `Z_FINISH`, the `Compress` object cannot be used again. `Z_SYNC_FLUSH` flushes to a byte boundary without ending the stream.
+
+## gopy notes
+
+`zlib.compressobj` is `module/zlib.CompressObj` in `module/zlib/module.go`. It wraps the `compress/zlib` and `compress/flate` standard library packages. `wbits` determines which Go writer is used: `zlib.NewWriter` for wbits 8-15, `gzip.NewWriter` for wbits 24-31. The GIL release maps to running the compression in a goroutine with a mutex guard.

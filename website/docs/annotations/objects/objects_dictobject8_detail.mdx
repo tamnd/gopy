@@ -1,0 +1,144 @@
+---
+title: Objects/dictobject.c (part 8)
+description: "Objects/dictobject.c part 8: dict views, dict.update, dict.pop, dict.setdefault, dict merge."
+cpython_path: Objects/dictobject.c
+cpython_version: "3.14"
+lines: 600
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Objects/dictobject.c" />
+
+This annotation covers mutation and view methods. See `objects_dictobject7_detail` for `dict.__getitem__`, `dict.__setitem__`, the compact hash table layout, and `dict.__iter__`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `dict.update` | Merge another dict or keyword arguments |
+| 81-160 | `dict.setdefault` | Get or insert with a default value |
+| 161-240 | `dict.pop` | Remove and return a value |
+| 241-360 | `dict.keys` / `dict.values` / `dict.items` | View objects |
+| 361-600 | `dict.__or__` / `dict.__ior__` | PEP 584 merge operators |
+
+## Reading
+
+### `dict.update`
+
+```c
+// CPython: Objects/dictobject.c:2820 dict_update_common
+static int
+dict_update_common(PyObject *self, PyObject *args, PyObject *kwds)
+{
+    PyObject *arg = NULL;
+    if (args != NULL && PyArg_UnpackTuple(args, "update", 0, 1, &arg)) {
+        if (arg != NULL) {
+            if (PyDict_CheckExact(arg)) {
+                return PyDict_Merge(self, arg, 1);  /* overwrite */
+            } else if (_PyObject_HasAttrId(arg, &PyId_keys)) {
+                return PyDict_Merge(self, arg, 1);
+            } else {
+                return PyDict_MergeFromSeq2(self, arg, 1);
+            }
+        }
+    }
+    if (kwds != NULL && PyDict_Size(kwds))
+        return PyDict_Merge(self, kwds, 1);
+    return 0;
+}
+```
+
+`dict.update` accepts a dict, any object with a `keys()` method (mapping protocol), or an iterable of `(key, value)` pairs. The `1` flag means "overwrite existing keys". `dict.update(d, x=1)` merges `d` first then applies keyword arguments.
+
+### `dict.setdefault`
+
+```c
+// CPython: Objects/dictobject.c:2940 dict_setdefault
+static PyObject *
+dict_setdefault(PyDictObject *mp, PyObject *args)
+{
+    PyObject *key, *failobj = Py_None;
+    PyArg_UnpackTuple(args, "setdefault", 1, 2, &key, &failobj);
+    PyObject *val = PyDict_GetItemWithError((PyObject *)mp, key);
+    if (val == NULL) {
+        if (PyErr_Occurred()) return NULL;
+        if (PyDict_SetItem((PyObject *)mp, key, failobj) < 0) return NULL;
+        val = failobj;
+    }
+    return Py_NewRef(val);
+}
+```
+
+`d.setdefault(key, default)` is an atomic get-or-insert: if `key` is absent, it inserts `default` and returns it. This avoids the two-step `if key not in d: d[key] = default` pattern which performs two hash lookups.
+
+### `dict.pop`
+
+```c
+// CPython: Objects/dictobject.c:2980 dict_pop
+static PyObject *
+dict_pop(PyDictObject *mp, PyObject *args)
+{
+    PyObject *key, *defobj = NULL;
+    PyArg_UnpackTuple(args, "pop", 1, 2, &key, &defobj);
+    PyObject *result = _PyDict_Pop_KnownHash(mp, key,
+                           PyObject_Hash(key), defobj);
+    if (result == NULL && defobj == NULL && !PyErr_Occurred())
+        PyErr_SetObject(PyExc_KeyError, key);
+    return result;
+}
+```
+
+`dict.pop(key)` raises `KeyError` if missing; `dict.pop(key, default)` returns `default` instead. `_PyDict_Pop_KnownHash` avoids rehashing by taking a pre-computed hash, then calls the compact-array removal logic.
+
+### Dict views
+
+```c
+// CPython: Objects/dictobject.c:3120 dictkeys_new
+static PyObject *
+dictkeys_new(PyObject *self, PyObject *Py_UNUSED(ignored))
+{
+    return _PyDictView_New(self, &PyDictKeys_Type);
+}
+
+// CPython: Objects/dictobject.c:3160 dictview_richcompare
+static PyObject *
+dictview_richcompare(PyObject *self, PyObject *other, int op)
+{
+    /* Keys and items views support set operations: ==, !=, <, <=, >, >=, &, |, - */
+    ...
+}
+```
+
+`dict.keys()`, `dict.values()`, `dict.items()` return lightweight view objects that hold a reference to the dict. Views support set-like comparisons and operations (`d.keys() & other.keys()`). Iterating a view while modifying the dict raises `RuntimeError`.
+
+### `dict.__or__`
+
+```c
+// CPython: Objects/dictobject.c:3380 dict_or
+static PyObject *
+dict_or(PyObject *self, PyObject *other)
+{
+    /* d1 | d2  ->  new dict with d2 overwriting d1 */
+    if (!PyDict_Check(self) || !PyDict_Check(other))
+        Py_RETURN_NOTIMPLEMENTED;
+    PyObject *new = PyDict_Copy(self);
+    if (PyDict_Update(new, other) < 0) { Py_DECREF(new); return NULL; }
+    return new;
+}
+
+static PyObject *
+dict_ior(PyObject *self, PyObject *other)
+{
+    /* d |= other  ->  in-place merge */
+    if (PyDict_Update(self, other) < 0) return NULL;
+    return Py_NewRef(self);
+}
+```
+
+PEP 584 (Python 3.9): `{1: 'a'} | {2: 'b'}` creates a new merged dict. `d |= other` updates `d` in place. Both raise `TypeError` for non-dict operands.
+
+## gopy notes
+
+`dict.update` is `objects.DictUpdate` in `objects/dict_mutate.go`. `setdefault` calls `DictGetItemWithError` then `DictSetItem` if missing. `dict.pop` uses `DictPopKnownHash`. Views are `objects.DictKeysView`, `DictValuesView`, `DictItemsView` in `objects/dict_iter.go`. `dict.__or__` is `DictOr`.

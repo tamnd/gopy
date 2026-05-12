@@ -1,0 +1,118 @@
+---
+title: Lib/typing.py (part 4)
+description: "Lib/typing.py part 4: Protocol, runtime_checkable, TypedDict, NamedTuple, dataclass_transform."
+cpython_path: Lib/typing.py
+cpython_version: "3.14"
+lines: 600
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/typing.py" />
+
+This annotation covers structural subtyping and typed container constructors. See `lib_typing3_detail` for `Generic`, `TypeVar`, `Union`, `Optional`, and `Literal`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-100 | `Protocol` | Structural subtyping base class |
+| 101-200 | `runtime_checkable` | Enable `isinstance` for Protocol classes |
+| 201-320 | `TypedDict` | Dict subclass with per-key type annotations |
+| 321-440 | `NamedTuple` | Named tuple with type annotations |
+| 441-600 | `dataclass_transform` | PEP 681 metadata for dataclass-like decorators |
+
+## Reading
+
+### `Protocol`
+
+```python
+# CPython: Lib/typing.py:1820 Protocol
+class Protocol(metaclass=_ProtocolMeta):
+    """Base class for protocol classes."""
+    __slots__ = ()
+    _is_protocol = True
+    _is_runtime_protocol = False
+
+    def __init_subclass__(cls, *args, **kwargs):
+        super().__init_subclass__(*args, **kwargs)
+        cls.__protocol_attrs__ = _get_protocol_attrs(cls)
+```
+
+A `Protocol` class defines a structural interface: any class that has the required attributes/methods satisfies the protocol, without explicitly inheriting from it. `__protocol_attrs__` is computed at class creation time from all non-dunder annotations.
+
+### `runtime_checkable`
+
+```python
+# CPython: Lib/typing.py:1900 runtime_checkable
+def runtime_checkable(cls):
+    """Mark a protocol class as a runtime protocol (supports isinstance)."""
+    if not (isinstance(cls, _ProtocolMeta) and cls._is_protocol):
+        raise TypeError('@runtime_checkable can be only applied to protocol classes')
+    cls._is_runtime_protocol = True
+    return cls
+```
+
+By default `isinstance(obj, SomeProtocol)` raises `TypeError`. `@runtime_checkable` enables it, but only checks for attribute presence (not types). `isinstance([], Sized)` is True because `list` has `__len__`; the type of `__len__` is not checked.
+
+### `TypedDict`
+
+```python
+# CPython: Lib/typing.py:2480 TypedDict
+def TypedDict(typename, fields=None, *, total=True, **kwargs):
+    """A simple typed namespace."""
+    if fields is None:
+        fields = kwargs
+    ns = {'__annotations__': dict(fields), '__total__': total}
+    tp = type(typename, (dict,), ns)
+    tp.__qualname__ = typename
+    return tp
+```
+
+`TypedDict('Point', {'x': int, 'y': int})` creates a `dict` subclass with `__annotations__`. Static type checkers treat it as a typed dict, but at runtime it is just a plain `dict`. `total=False` marks all keys as `NotRequired`.
+
+### `NamedTuple`
+
+```python
+# CPython: Lib/typing.py:2620 NamedTuple
+def NamedTuple(typename, fields=None, **kwargs):
+    """Typed version of collections.namedtuple."""
+    if fields is None:
+        fields = kwargs
+    types = [t for _, t in fields]
+    return collections.namedtuple(typename, [n for n, _ in fields],
+                                  defaults=[...])
+```
+
+`class Point(NamedTuple): x: int; y: int` at class level uses `NamedTupleMeta` to call `collections.namedtuple` with the annotated field names and types. Defaults come from class-level assignments (`x: int = 0`).
+
+### `dataclass_transform`
+
+```python
+# CPython: Lib/typing.py:3020 dataclass_transform
+def dataclass_transform(
+    *,
+    eq_default: bool = True,
+    order_default: bool = False,
+    kw_only_default: bool = False,
+    frozen_default: bool = False,
+    field_specifiers: tuple[type | Callable[..., Any], ...] = (),
+    **kwargs: Any,
+) -> Callable[[T], T]:
+    """Decorator to mark a class or function as a dataclass-like transformer."""
+    def decorator(cls_or_fn):
+        cls_or_fn.__dataclass_transform__ = {
+            "eq_default": eq_default,
+            ...
+            "field_specifiers": field_specifiers,
+        }
+        return cls_or_fn
+    return decorator
+```
+
+PEP 681: `@dataclass_transform` annotates library decorators (like `attrs`, `SQLAlchemy`) so type checkers can infer field types. At runtime it only attaches `__dataclass_transform__` metadata; the actual transformation is done by the decorated class/function.
+
+## gopy notes
+
+`Protocol` is `module/typing.Protocol` in `module/types/module.go`. `runtime_checkable` sets a flag that `objects.IsInstance` checks during structural subtype tests. `TypedDict` creates a subclass of `objects.Dict` with an annotations dict. `NamedTuple` delegates to `collections.namedtuple`. `dataclass_transform` attaches metadata only.

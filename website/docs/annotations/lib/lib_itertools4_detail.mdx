@@ -1,0 +1,142 @@
+---
+title: Lib/itertools.py / Modules/itertoolsmodule.c (part 4)
+description: "itertools part 4: accumulate, groupby, pairwise, batched, takewhile, dropwhile."
+cpython_path: Modules/itertoolsmodule.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/itertoolsmodule.c" />
+
+This annotation covers stateful iterators. See `modules_itertools3_detail` for `chain`, `islice`, `zip_longest`, `product`, and `permutations`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `accumulate` | Running totals with optional initial and function |
+| 81-160 | `groupby` | Consecutive-key grouping |
+| 161-240 | `pairwise` | Overlapping pairs from an iterable |
+| 241-320 | `batched` | Non-overlapping chunks of size n |
+| 321-500 | `takewhile` / `dropwhile` | Prefix/suffix filtering by predicate |
+
+## Reading
+
+### `accumulate`
+
+```c
+// CPython: Modules/itertoolsmodule.c:2840 accumulate_next
+static PyObject *
+accumulate_next(accumulateobject *lz)
+{
+    PyObject *val = (*Py_TYPE(lz->it)->tp_iternext)(lz->it);
+    if (val == NULL) return NULL;
+    if (lz->total == NULL) {
+        /* First element: initial value or first item */
+        lz->total = lz->initial ? lz->initial : val;
+        return Py_NewRef(lz->total);
+    }
+    PyObject *newtotal;
+    if (lz->func == Py_None || lz->func == NULL)
+        newtotal = PyNumber_Add(lz->total, val);
+    else
+        newtotal = PyObject_CallFunctionObjArgs(lz->func, lz->total, val, NULL);
+    Py_DECREF(lz->total);
+    lz->total = newtotal;
+    Py_DECREF(val);
+    return Py_NewRef(lz->total);
+}
+```
+
+`accumulate([1, 2, 3, 4])` yields `1, 3, 6, 10`. With `func=operator.mul` it gives running products. With `initial=100` the first yielded value is `100`. The `total` field holds the running state.
+
+### `groupby`
+
+```c
+// CPython: Modules/itertoolsmodule.c:3120 groupby_next
+static PyObject *
+groupby_next(groupbyobject *gbo)
+{
+    /* Advance past the previous group */
+    while (gbo->currkey == NULL ||
+           (gbo->tgtkey != NULL &&
+            PyObject_RichCompareBool(gbo->tgtkey, gbo->currkey, Py_EQ))) {
+        PyObject *newval = groupby_step(gbo);
+        if (newval == NULL) return NULL;
+    }
+    gbo->tgtkey = Py_NewRef(gbo->currkey);
+    grouper_object *grouper = (grouper_object *)grouper_new(gbo);
+    return PyTuple_Pack(2, gbo->currkey, grouper);
+}
+```
+
+`groupby` yields `(key, group_iterator)` pairs. The key comparison uses `==`, not `is`. Crucially, the previous group is exhausted before the next key is returned: iterating the outer `groupby` without consuming each group discards it.
+
+### `pairwise`
+
+```c
+// CPython: Modules/itertoolsmodule.c:4020 pairwise_next
+static PyObject *
+pairwise_next(pairwiseobject *po)
+{
+    PyObject *a = po->old;
+    if (a == NULL) return NULL;
+    PyObject *b = (*Py_TYPE(po->it)->tp_iternext)(po->it);
+    if (b == NULL) { po->old = NULL; return NULL; }
+    po->old = Py_NewRef(b);
+    Py_DECREF(a);  /* release reference to old 'a' */
+    return PyTuple_Pack(2, a, b);
+}
+```
+
+`pairwise('ABCD')` yields `('A','B'), ('B','C'), ('C','D')`. The previous element is stored in `po->old`; each call advances one step. The overlap means `n-1` tuples for `n` elements.
+
+### `batched`
+
+```c
+// CPython: Modules/itertoolsmodule.c:4180 batched_next
+static PyObject *
+batched_next(batchedobject *bo)
+{
+    Py_ssize_t n = bo->batch_size;
+    PyObject *result = PyTuple_New(n);
+    Py_ssize_t i = 0;
+    for (; i < n; i++) {
+        PyObject *item = (*Py_TYPE(bo->it)->tp_iternext)(bo->it);
+        if (item == NULL) break;
+        PyTuple_SET_ITEM(result, i, item);
+    }
+    if (i == 0) { Py_DECREF(result); return NULL; }
+    if (i < n) _PyTuple_Resize(&result, i);
+    return result;
+}
+```
+
+`batched('ABCDEF', 2)` yields `('A','B'), ('C','D'), ('E','F')`. The last batch may be shorter than `n`. Added in Python 3.12; replaces the common `zip(*[iter(it)]*n)` idiom.
+
+### `takewhile` / `dropwhile`
+
+```c
+// CPython: Modules/itertoolsmodule.c:3480 takewhile_next
+static PyObject *
+takewhile_next(takewhileobject *lz)
+{
+    if (lz->stop) return NULL;
+    PyObject *item = (*Py_TYPE(lz->it)->tp_iternext)(lz->it);
+    if (item == NULL) return NULL;
+    int ok = PyObject_IsTrue(PyObject_CallOneArg(lz->func, item));
+    if (ok > 0) return item;
+    lz->stop = 1;
+    Py_DECREF(item);
+    return NULL;
+}
+```
+
+`takewhile(pred, it)` yields items while `pred(item)` is true; once false, iteration stops permanently. `dropwhile(pred, it)` is the complement: it skips items until the predicate is false, then yields all remaining items.
+
+## gopy notes
+
+`accumulate` is `module/itertools.Accumulate` in `module/itertools/module.go`. `groupby` stores the current key and a reference to the inner grouper. `pairwise` and `batched` are added in their respective Python 3.10/3.12 versions. `takewhile`/`dropwhile` call the predicate via `objects.CallOneArg`.

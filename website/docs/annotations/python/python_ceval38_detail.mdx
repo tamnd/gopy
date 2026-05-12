@@ -1,0 +1,122 @@
+---
+title: Python/ceval.c (part 38)
+description: "Python/ceval.c part 38: FORMAT_VALUE, BUILD_STRING, BUILD_SLICE, MAKE_FUNCTION, SET_FUNCTION_ATTRIBUTE."
+cpython_path: Python/ceval.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Python/ceval.c" />
+
+This annotation covers f-string building and function construction opcodes. See `python_ceval37_detail` for unpacking and collection-building opcodes.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `FORMAT_VALUE` | Apply `!r`, `!s`, `!a`, and format spec to a value |
+| 81-160 | `BUILD_STRING` | Concatenate N strings from the stack |
+| 161-240 | `BUILD_SLICE` | Build a `slice` object from 2 or 3 stack items |
+| 241-360 | `MAKE_FUNCTION` | Create a `function` object from a code object |
+| 361-500 | `SET_FUNCTION_ATTRIBUTE` | Attach defaults, annotations, closure to a function |
+
+## Reading
+
+### `FORMAT_VALUE`
+
+```c
+// CPython: Python/ceval.c:3810 FORMAT_VALUE
+inst(FORMAT_VALUE, (value, fmt_spec -- result)) {
+    /* flags: FVC_NONE=0, FVC_STR=1, FVC_REPR=2, FVC_ASCII=3
+       FVS_HAVE_SPEC=4 means fmt_spec is on the stack */
+    int which_conversion = oparg & FVC_MASK;
+    int have_fmt_spec = (oparg & FVS_MASK) == FVS_HAVE_SPEC;
+    PyObject *conv;
+    switch (which_conversion) {
+        case FVC_STR:   conv = PyObject_Str(value); break;
+        case FVC_REPR:  conv = PyObject_Repr(value); break;
+        case FVC_ASCII: conv = PyObject_ASCII(value); break;
+        default:        conv = Py_NewRef(value); break;
+    }
+    if (have_fmt_spec) {
+        result = PyObject_Format(conv, fmt_spec);
+        Py_DECREF(fmt_spec);
+    } else {
+        result = conv;
+    }
+    Py_DECREF(value);
+}
+```
+
+`f"{x!r:.10}"` compiles to `LOAD_NAME x`, `FORMAT_VALUE FVC_REPR|FVS_HAVE_SPEC`. The conversion (`!r`, `!s`, `!a`) is applied before the format spec. The result is always a string.
+
+### `BUILD_STRING`
+
+```c
+// CPython: Python/ceval.c:3870 BUILD_STRING
+inst(BUILD_STRING, (pieces[oparg] -- str)) {
+    str = _PyUnicode_JoinArray(&_Py_STR(empty), pieces, oparg);
+    for (int i = 0; i < oparg; i++) Py_DECREF(pieces[i]);
+    ERROR_IF(str == NULL, error);
+}
+```
+
+`f"hello {name}"` compiles to `LOAD_CONST "hello "`, `LOAD_NAME name`, `FORMAT_VALUE`, `BUILD_STRING 2`. `_PyUnicodeJoinArray` concatenates an array of strings into one, sharing the internal buffer when only one piece is already the result.
+
+### `BUILD_SLICE`
+
+```c
+// CPython: Python/ceval.c:3920 BUILD_SLICE
+inst(BUILD_SLICE, (start, stop, step if (oparg == 3) -- slice)) {
+    slice = PySlice_New(start, stop, oparg == 3 ? step : NULL);
+    Py_DECREF(start);
+    Py_DECREF(stop);
+    if (oparg == 3) Py_DECREF(step);
+    ERROR_IF(slice == NULL, error);
+}
+```
+
+`a[1:10:2]` uses `BUILD_SLICE 3`. `a[1:10]` uses `BUILD_SLICE 2` with `step=NULL`. `slice` objects are not interned; each `__getitem__` call creates a new one.
+
+### `MAKE_FUNCTION`
+
+```c
+// CPython: Python/ceval.c:3970 MAKE_FUNCTION
+inst(MAKE_FUNCTION, (codeobj -- func)) {
+    PyFunctionObject *f = (PyFunctionObject *)PyFunction_New(codeobj, GLOBALS());
+    Py_DECREF(codeobj);
+    ERROR_IF(f == NULL, error);
+    func = (PyObject *)f;
+}
+```
+
+`def f(): ...` at module level compiles to `LOAD_CONST <code>`, `MAKE_FUNCTION`. The function object is created with the current globals dict and no defaults yet. Defaults and annotations are attached by subsequent `SET_FUNCTION_ATTRIBUTE` instructions.
+
+### `SET_FUNCTION_ATTRIBUTE`
+
+```c
+// CPython: Python/ceval.c:4010 SET_FUNCTION_ATTRIBUTE
+inst(SET_FUNCTION_ATTRIBUTE, (attr, func -- func)) {
+    PyFunctionObject *f = (PyFunctionObject *)func;
+    switch (oparg) {
+        case MAKE_FUNCTION_CLOSURE:
+            f->func_closure = Py_NewRef(attr); break;
+        case MAKE_FUNCTION_ANNOTATIONS:
+            f->func_annotations = Py_NewRef(attr); break;
+        case MAKE_FUNCTION_KWDEFAULTS:
+            f->func_kwdefaults = Py_NewRef(attr); break;
+        case MAKE_FUNCTION_DEFAULTS:
+            f->func_defaults = Py_NewRef(attr); break;
+    }
+    Py_DECREF(attr);
+}
+```
+
+`def f(x=1, *, y=2) -> int: ...` emits `LOAD_CONST (1,)` (positional defaults), `LOAD_CONST {"y": 2}` (kw-only defaults), `LOAD_CONST {"return": int}` (annotations), then three `SET_FUNCTION_ATTRIBUTE` calls before `MAKE_FUNCTION`.
+
+## gopy notes
+
+`FORMAT_VALUE` is in `vm/eval_simple.go`; conversion calls `objects.Str`, `objects.Repr`, or `objects.ASCII`. `BUILD_STRING` calls `objects.UnicodeJoin`. `BUILD_SLICE` calls `objects.NewSlice`. `MAKE_FUNCTION` calls `objects.NewFunction`. `SET_FUNCTION_ATTRIBUTE` sets fields on `objects.Function` directly.

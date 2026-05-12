@@ -1,0 +1,112 @@
+---
+title: Modules/_csv.c (part 3)
+description: "_csv.c part 3: csv.writer, csv.DictWriter, dialect registry, quoting modes."
+cpython_path: Modules/_csv.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/_csv.c" />
+
+This annotation covers the writer side. See `modules_csv2_detail` for `csv.reader`, `csv.DictReader`, and the dialect object.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `csv.writer` | Create a writer that formats rows |
+| 81-180 | `Writer.writerow` | Format and write one row |
+| 181-260 | `Writer.writerows` | Write multiple rows |
+| 261-360 | Quoting modes | `QUOTE_ALL`, `QUOTE_MINIMAL`, `QUOTE_NONNUMERIC`, `QUOTE_NONE` |
+| 361-500 | Dialect registry | `csv.register_dialect`, `csv.get_dialect` |
+
+## Reading
+
+### `csv.writer`
+
+```c
+// CPython: Modules/_csv.c:980 csv_writer
+static PyObject *
+csv_writer(PyObject *module, PyObject *args, PyObject *keyword_args)
+{
+    WriterObj *self = PyObject_GC_New(WriterObj, &Writer_Type);
+    self->writeline = NULL;
+    PyObject *output_file;
+    PyArg_UnpackTuple(args, "writer", 1, 1, &output_file);
+    self->writeline = PyObject_GetAttrString(output_file, "write");
+    self->dialect = (DialectObj *)_call_dialect(dialect_inst, keyword_args);
+    return (PyObject *)self;
+}
+```
+
+`csv.writer(f)` stores `f.write` for later calls. The output file only needs a `write(str)` method; it need not be an actual file. `StringIO` works: `csv.writer(io.StringIO())` captures CSV output into a string.
+
+### `Writer.writerow`
+
+```c
+// CPython: Modules/_csv.c:1040 Writer_writerow
+static PyObject *
+Writer_writerow(WriterObj *self, PyObject *seq)
+{
+    DialectObj *dialect = self->dialect;
+    Py_ssize_t len = PySequence_Length(seq);
+    for (Py_ssize_t i = 0; i < len; i++) {
+        PyObject *field = PySequence_GetItem(seq, i);
+        /* Convert to string */
+        PyObject *str_field = PyObject_Str(field);
+        /* Apply quoting based on dialect.quoting */
+        join_append(self, str_field, i == len - 1);
+        Py_DECREF(str_field);
+        Py_DECREF(field);
+    }
+    PyObject *line = join_finalize(self);
+    /* Append line terminator and write */
+    PyObject *written = PyObject_CallOneArg(self->writeline, line);
+    Py_DECREF(line);
+    return written;
+}
+```
+
+Each field is converted to a string via `str()`. Numeric fields with `QUOTE_NONNUMERIC` are quoted. The dialect's `delimiter`, `quotechar`, `lineterminator` govern formatting. `join_append` handles escaping of embedded quotes and delimiters.
+
+### Quoting modes
+
+```c
+// CPython: Modules/_csv.c:680 quoting modes
+/* QUOTE_MINIMAL (0): quote only if field contains delimiter, quotechar, or lineterminator */
+/* QUOTE_ALL (1): always quote every field */
+/* QUOTE_NONNUMERIC (2): quote non-numeric fields; reader converts unquoted to float */
+/* QUOTE_NONE (3): never quote; use escapechar for special chars */
+/* QUOTE_NOTNULL (4): like QUOTE_MINIMAL but skip None/empty */
+/* QUOTE_STRINGS (5): quote all string (non-numeric) fields */
+```
+
+`QUOTE_NONNUMERIC` is useful for CSV interchange with tools that auto-detect types: unquoted fields will be parsed as floats by `csv.reader`. `QUOTE_NONE` requires an `escapechar` to be set, otherwise special characters cause `Error`.
+
+### Dialect registry
+
+```c
+// CPython: Modules/_csv.c:1220 csv_register_dialect
+static PyObject *
+csv_register_dialect(PyObject *module, PyObject *args, PyObject *kwargs)
+{
+    PyObject *name_obj;
+    PyArg_UnpackTuple(args, "register_dialect", 1, 2, &name_obj, ...);
+    if (!PyUnicode_Check(name_obj)) {
+        PyErr_SetString(PyExc_TypeError, "dialect name must be a string");
+        return NULL;
+    }
+    DialectObj *dialect = (DialectObj *)_call_dialect(dialect_inst, kwargs);
+    PyDict_SetItem(module_state->dialects, name_obj, (PyObject *)dialect);
+    Py_RETURN_NONE;
+}
+```
+
+`csv.register_dialect('pipes', delimiter='|')` stores a dialect by name. The built-in names are `'excel'` (default), `'excel-tab'`, and `'unix'`. `csv.get_dialect(name)` retrieves a registered dialect; `csv.list_dialects()` returns all registered names.
+
+## gopy notes
+
+`csv.writer` is `module/csv.Writer` in `module/csv/module.go` (not yet ported; `csv` module uses the pure-Python fallback). The dialect registry is a Go `map[string]*Dialect`. `Writer.writerow` builds the output string using `strings.Builder` and calls the file's `write` method via `objects.CallMethod`.

@@ -1,0 +1,128 @@
+---
+title: Modules/_ssl.c (part 4)
+description: "_ssl.c part 4: SSLContext.wrap_socket, do_handshake, read/write, SNI callbacks."
+cpython_path: Modules/_ssl.c
+cpython_version: "3.14"
+lines: 600
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/_ssl.c" />
+
+This annotation covers the SSL socket lifecycle. See `modules_ssl3_detail` for `SSLContext` creation, certificate loading, and cipher configuration.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-100 | `SSLContext.wrap_socket` | Create an `SSLSocket` from a raw socket |
+| 101-200 | `_ssl._SSLObject.do_handshake` | Perform TLS handshake (blocking or non-blocking) |
+| 201-320 | `_ssl._SSLObject.read` | Decrypt and return data |
+| 321-440 | `_ssl._SSLObject.write` | Encrypt and send data |
+| 441-600 | SNI callbacks | `set_servername_callback` for virtual hosting |
+
+## Reading
+
+### `wrap_socket`
+
+```c
+// CPython: Modules/_ssl.c:820 _ssl__SSLObject_impl
+static PyObject *
+_ssl__SSLObject_impl(PyTypeObject *type, PyObject *ctx_obj,
+                     PyObject *sock, int server_side, PyObject *server_hostname)
+{
+    PySSLObject *self = (PySSLObject *)type->tp_alloc(type, 0);
+    self->ssl = SSL_new(((PySSLContext *)ctx_obj)->ctx);
+    SSL_set_fd(self->ssl, PyObject_AsFileDescriptor(sock));
+    if (server_hostname && server_hostname != Py_None) {
+        SSL_set_tlsext_host_name(self->ssl,
+            PyBytes_AS_STRING(server_hostname_idna));
+    }
+    if (server_side)
+        SSL_set_accept_state(self->ssl);
+    else
+        SSL_set_connect_state(self->ssl);
+    return (PyObject *)self;
+}
+```
+
+`ssl.wrap_socket(sock, server_hostname='example.com')` creates the OpenSSL `SSL*` object and sets it to client mode. Setting `server_hostname` enables SNI; the hostname must be ASCII (IDNA-encoded). The handshake is deferred until `do_handshake`.
+
+### `do_handshake`
+
+```c
+// CPython: Modules/_ssl.c:1060 _ssl__SSLObject_do_handshake_impl
+static PyObject *
+_ssl__SSLObject_do_handshake_impl(PySSLObject *self)
+{
+    int ret, err;
+retry:
+    Py_BEGIN_ALLOW_THREADS
+    ret = SSL_do_handshake(self->ssl);
+    Py_END_ALLOW_THREADS
+    err = SSL_get_error(self->ssl, ret);
+    if (err == SSL_ERROR_WANT_READ || err == SSL_ERROR_WANT_WRITE) {
+        /* non-blocking: wait and retry */
+        if (_ssl_select(self, err == SSL_ERROR_WANT_WRITE, timeout) > 0)
+            goto retry;
+    }
+    if (ret <= 0) return PySSL_SetError(self, ret, __FILE__, __LINE__);
+    Py_RETURN_NONE;
+}
+```
+
+`do_handshake` releases the GIL during the blocking OpenSSL call. On non-blocking sockets, `SSL_ERROR_WANT_READ`/`WRITE` triggers a `select`-based wait loop. Certificate verification errors surface here as `ssl.SSLCertVerificationError`.
+
+### `read`
+
+```c
+// CPython: Modules/_ssl.c:1180 _ssl__SSLObject_read_impl
+static PyObject *
+_ssl__SSLObject_read_impl(PySSLObject *self, Py_ssize_t len, int group_right_1,
+                          Py_buffer *buffer)
+{
+    /* read(len) -> bytes, or read(len, buffer) -> int */
+    char *mem = malloc(len);
+    int count;
+retry:
+    Py_BEGIN_ALLOW_THREADS
+    count = SSL_read(self->ssl, mem, (int)len);
+    Py_END_ALLOW_THREADS
+    err = SSL_get_error(self->ssl, count);
+    if (err == SSL_ERROR_WANT_READ) goto retry;
+    if (count <= 0) { free(mem); return PySSL_SetError(self, count, ...); }
+    PyObject *result = PyBytes_FromStringAndSize(mem, count);
+    free(mem);
+    return result;
+}
+```
+
+`SSL_read` may return fewer bytes than requested (TLS record boundaries). The caller must loop if the full amount is needed. The zero-copy path (passing a `buffer` argument) writes directly into a pre-allocated `bytearray`.
+
+### SNI callback
+
+```c
+// CPython: Modules/_ssl.c:1880 _ssl__SSLContext_set_servername_callback_impl
+static PyObject *
+_ssl__SSLContext_set_servername_callback_impl(PySSLContext *self,
+                                               PyObject *callback)
+{
+    Py_XDECREF(self->set_sni_cb);
+    self->set_sni_cb = Py_XNewRef(callback);
+    if (callback == Py_None) {
+        SSL_CTX_set_tlsext_servername_callback(self->ctx, NULL);
+    } else {
+        SSL_CTX_set_tlsext_servername_callback(self->ctx, _servername_callback);
+        SSL_CTX_set_tlsext_servername_arg(self->ctx, self);
+    }
+    Py_RETURN_NONE;
+}
+```
+
+The SNI callback receives the `SSLSocket`, the server name, and the `SSLContext`. It can switch to a different context (different certificate) based on the hostname, enabling virtual hosting over TLS on a single IP.
+
+## gopy notes
+
+`SSLContext.wrap_socket` is `module/ssl.WrapSocket` in `module/ssl/module.go`. `do_handshake` calls OpenSSL via cgo. `read`/`write` use `SSL_read`/`SSL_write` with GIL-equivalent goroutine scheduling. SNI callback is registered via `SSL_CTX_set_tlsext_servername_callback`.

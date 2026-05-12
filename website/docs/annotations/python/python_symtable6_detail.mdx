@@ -1,0 +1,128 @@
+---
+title: Python/symtable.c (part 6)
+description: "Python/symtable.c part 6: comprehension scoping, walrus operator, type alias, PEP 695 type parameters."
+cpython_path: Python/symtable.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Python/symtable.c" />
+
+This annotation covers comprehension and type parameter scoping. See `python_symtable5_detail` for function and class scoping, free variables, and cell variable analysis.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | Comprehension scope | Why list comps get their own scope |
+| 81-180 | Walrus operator (`:=`) | `NAMED_EXPR_TARGET` handling |
+| 181-280 | Comprehension iteration var | Why the iter var leaks in `for` but not list comp |
+| 281-380 | `TypeAlias` / `TypeVar` | PEP 695 type parameter scoping |
+| 381-500 | `symtable_exit_block` | Finalizing a scope: propagating free vars upward |
+
+## Reading
+
+### Comprehension scope
+
+```c
+// CPython: Python/symtable.c:1120 symtable_visit_comp
+static int
+symtable_visit_comp(struct symtable *st, expr_ty e)
+{
+    /* Each comprehension creates a new block (scope).
+       The outermost iterator is evaluated in the enclosing scope;
+       all other expressions are evaluated in the new scope. */
+    comprehension_ty outermost = asdl_seq_GET(e->v.ListComp.generators, 0);
+    VISIT(st, expr, outermost->iter);   /* in outer scope */
+    _Py_BLOCK_BEGIN(st, e, ComprehensionBlock, ...);
+    ADDDEF(st, outermost->target, DEF_COMP_ITER);
+    ...
+    _Py_BLOCK_END(st);
+}
+```
+
+List comprehensions have their own scope since Python 3.0. The outer iterator is evaluated before entering the scope (so `[x for x in range(x)]` is an error if the outer `x` is undefined). The iteration variable does not leak into the enclosing scope.
+
+### Walrus operator
+
+```c
+// CPython: Python/symtable.c:1220 symtable_visit_namedexpr
+static int
+symtable_visit_namedexpr(struct symtable *st, expr_ty e)
+{
+    /* name := value inside a comprehension
+       The binding target is added to the ENCLOSING function scope,
+       not the comprehension scope. */
+    if (st->st_cur->ste_comp_iter_target) {
+        PyErr_SetString(PyExc_SyntaxError,
+            "assignment expression cannot be used in a comprehension iterable expression");
+        return 0;
+    }
+    _Py_SET_53BIT(st->st_cur->ste_symbols, e->v.NamedExpr.target->v.Name.id,
+                  DEF_NONLOCAL);
+    VISIT(st, expr, e->v.NamedExpr.value);
+    ...
+}
+```
+
+`[y := f(x) for x in range(10)]` binds `y` in the enclosing function, not inside the comprehension. The symtable marks the name as `DEF_NONLOCAL` in the comprehension scope, causing code generation to emit `STORE_DEREF` rather than `STORE_FAST`.
+
+### PEP 695 type parameters
+
+```c
+// CPython: Python/symtable.c:1380 symtable_visit_typeparam
+static int
+symtable_visit_typeparam(struct symtable *st, typeparam_ty tp)
+{
+    /* type Alias[T] = list[T]
+       T is a TypeVar in its own scope (the type parameter scope).
+       Its __name__ is set but it does not leak into outer scopes. */
+    switch (tp->kind) {
+        case TypeVar_kind:
+            ADDDEF(st, tp->v.TypeVar.name, DEF_TYPE_PARAM);
+            if (tp->v.TypeVar.bound)
+                VISIT(st, expr, tp->v.TypeVar.bound);
+            break;
+        case TypeVarTuple_kind:
+            ADDDEF(st, tp->v.TypeVarTuple.name, DEF_TYPE_PARAM);
+            break;
+        case ParamSpec_kind:
+            ADDDEF(st, tp->v.ParamSpec.name, DEF_TYPE_PARAM);
+            break;
+    }
+    return 1;
+}
+```
+
+PEP 695 (`type Alias[T] = ...`, `def f[T](x: T) -> T: ...`) introduces a type parameter scope that wraps the default values and bounds. Type parameters are `DEF_TYPE_PARAM` and are not visible in the function body itself.
+
+### `symtable_exit_block`
+
+```c
+// CPython: Python/symtable.c:460 symtable_exit_block
+static int
+symtable_exit_block(struct symtable *st)
+{
+    /* Pop the current scope and propagate free variables upward */
+    PySTEntryObject *ste = st->st_cur;
+    Py_ssize_t pos = 0;
+    PyObject *name, *v;
+    while (PyDict_Next(ste->ste_symbols, &pos, &name, &v)) {
+        long flags = PyLong_AS_LONG(v);
+        if (flags & DEF_FREE) {
+            _Py_set_flag_upward(st, name, DEF_FREE);
+        }
+    }
+    st->st_cur = (PySTEntryObject *)PyList_GET_ITEM(st->st_stack, ...);
+    return 1;
+}
+```
+
+When a scope is exited, any name marked `DEF_FREE` (used but not defined locally) is propagated to the parent scope. This is how closures are discovered: `inner` references `x`, marks it free, and `symtable_exit_block` tells `outer` that `x` must be a cell variable.
+
+## gopy notes
+
+Comprehension scoping is handled in `compile/compiler.go` at `compileListComp`. Walrus operator target propagation is in `compile/codegen_expr_name.go`. PEP 695 type parameters produce a `TYPE_PARAMS_SCOPE` block in `compile/flowgraph.go`. `symtable_exit_block` corresponds to `compiler.leaveScope` which calls `propagateFreeVars`.

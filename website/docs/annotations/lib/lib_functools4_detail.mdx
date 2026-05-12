@@ -1,0 +1,139 @@
+---
+title: Lib/functools.py (part 4)
+description: "Lib/functools.py part 4: singledispatch, singledispatchmethod, cached_property, total_ordering."
+cpython_path: Lib/functools.py
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/functools.py" />
+
+This annotation covers dispatch and descriptor utilities. See `lib_functools3_detail` for `lru_cache`, `cache`, `partial`, and `reduce`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-100 | `total_ordering` | Fill in comparison methods from `__eq__` and one other |
+| 101-220 | `singledispatch` | Dispatch a function based on the type of the first argument |
+| 221-320 | `singledispatchmethod` | `singledispatch` for instance/class methods |
+| 321-420 | `cached_property` | Descriptor that computes once and caches per-instance |
+| 421-500 | `_find_impl` | MRO-aware cache lookup for singledispatch |
+
+## Reading
+
+### `total_ordering`
+
+```python
+# CPython: Lib/functools.py:185 total_ordering
+_convert = {
+    '__lt__': [...],
+    '__le__': [...],
+    '__gt__': [...],
+    '__ge__': [...],
+}
+
+def total_ordering(cls):
+    """Class decorator that fills in missing ordering methods."""
+    roots = {op for op in _convert if getattr(cls, op, None) is not getattr(object, op, None)}
+    if not roots:
+        raise ValueError('must have at least one ordering operation defined')
+    root = max(roots)
+    for opname, opfunc in _convert[root]:
+        if opname not in roots:
+            opfunc.__name__ = opname
+            setattr(cls, opname, opfunc)
+    return cls
+```
+
+`@total_ordering` requires `__eq__` and one of `__lt__`, `__le__`, `__gt__`, `__ge__`. It derives the remaining three. The derived methods call the root operation to implement themselves (e.g., `a >= b` becomes `not (a < b) or a == b`).
+
+### `singledispatch`
+
+```python
+# CPython: Lib/functools.py:840 singledispatch
+def singledispatch(func):
+    """Single-dispatch generic function decorator."""
+    registry = {}
+    dispatch_cache = WeakValueDictionary()
+
+    def dispatch(cls):
+        if cls in registry:
+            return registry[cls]
+        try:
+            impl = dispatch_cache[cls]
+        except KeyError:
+            impl = _find_impl(cls, registry)
+            dispatch_cache[cls] = impl
+        return impl
+
+    def register(cls, func=None):
+        ...
+        registry[cls] = func
+        dispatch_cache.clear()
+        return func
+
+    def wrapper(*args, **kw):
+        return dispatch(type(args[0]))(*args, **kw)
+
+    wrapper.register = register
+    wrapper.dispatch = dispatch
+    wrapper.registry = MappingProxyType(registry)
+    return wrapper
+```
+
+`@singledispatch` dispatches on `type(args[0])`. Registered types are looked up in `registry`; unregistered types walk the MRO via `_find_impl`. The `dispatch_cache` (a `WeakValueDictionary`) stores MRO-resolved results so the walk only happens once per type.
+
+### `cached_property`
+
+```python
+# CPython: Lib/functools.py:996 cached_property
+class cached_property:
+    """Non-data descriptor: compute once and store in instance __dict__."""
+    def __init__(self, func):
+        self.func = func
+        self.attrname = None
+        self.__doc__ = func.__doc__
+
+    def __set_name__(self, owner, name):
+        self.attrname = name
+
+    def __get__(self, instance, owner=None):
+        if instance is None:
+            return self
+        val = self.func(instance)
+        instance.__dict__[self.attrname] = val
+        return val
+```
+
+`cached_property` is a non-data descriptor: it has no `__set__`, so once `instance.__dict__[name]` is set, Python's attribute lookup finds it there (dict wins over non-data descriptor). The function is called exactly once per instance. Thread safety is not guaranteed by default.
+
+### `_find_impl`
+
+```python
+# CPython: Lib/functools.py:780 _find_impl
+def _find_impl(cls, registry):
+    """Walk the MRO and virtual superclasses to find a registered implementation."""
+    mro = _compose_mro(cls, registry.keys())
+    match = None
+    for t in mro:
+        if match is not None and t in registry:
+            if t in cls.__mro__:
+                break
+            if match not in cls.__mro__:
+                if issubclass(t, match):
+                    match = t
+                continue
+        if t in registry:
+            match = t
+    return registry.get(match, registry[object])
+```
+
+`_compose_mro` merges the class MRO with the ABCs in `registry.keys()` to ensure virtual superclasses (like `Sequence`) are considered. The fallback is the `object` handler.
+
+## gopy notes
+
+`total_ordering` is `module/functools.TotalOrdering` in `module/functools/module.go`. `singledispatch` uses a Go `map[objects.Type]objects.Object` registry with a per-type MRO walk cache. `cached_property` is implemented as a non-data descriptor in `objects/descr.go`. `_find_impl` uses `objects.Type.MRO`.

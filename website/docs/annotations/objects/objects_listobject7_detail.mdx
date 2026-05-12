@@ -1,0 +1,131 @@
+---
+title: Objects/listobject.c (part 7)
+description: "Objects/listobject.c part 7: list.sort Timsort — merge, gallop, run detection."
+cpython_path: Objects/listobject.c
+cpython_version: "3.14"
+lines: 600
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Objects/listobject.c" />
+
+This annotation covers the Timsort implementation. See `objects_listobject6_detail` for `list.__new__`, `list.append`/`pop`, `list.extend`, and `list.reverse`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `count_run` | Detect a natural run (ascending or descending) |
+| 81-180 | `binarysort` | Insertion sort for short runs |
+| 181-300 | `merge_lo` / `merge_hi` | Merge two adjacent runs into one |
+| 301-420 | Galloping mode | Skip ahead when one run dominates |
+| 421-600 | `merge_collapse` | Maintain stack invariant; trigger merges |
+
+## Reading
+
+### `count_run`
+
+```c
+// CPython: Objects/listobject.c:1120 count_run
+static Py_ssize_t
+count_run(PyObject **lo, PyObject **hi, PyObject **descending)
+{
+    Py_ssize_t n = 1;
+    if (lo == hi) return n;
+    int k = ISLT(*lo, *(lo + 1));
+    if (k < 0) return -1;
+    if (!k) {
+        /* descending run: count and reverse */
+        *descending = 1;
+        for (lo++; lo < hi && !ISLT(*lo, *(lo - 1)); lo++, n++);
+    } else {
+        /* ascending run */
+        for (lo++; lo < hi && !ISLT(*lo, *(lo - 1) + 1); lo++, n++);
+    }
+    return n;
+}
+```
+
+Timsort first finds existing sorted runs in the data. A descending run is reversed in place. Runs shorter than `MIN_MERGE` (32-64 elements) are extended to that length using `binarysort`.
+
+### `binarysort`
+
+```c
+// CPython: Objects/listobject.c:1180 binarysort
+static int
+binarysort(PyObject **lo, PyObject **hi, PyObject **start)
+{
+    /* Sort lo..hi using binary insertion sort.
+       start is the first unsorted element. */
+    for (PyObject **l = start; l < hi; l++) {
+        PyObject *pivot = *l;
+        /* Binary search for insertion point */
+        PyObject **left = lo, **right = l;
+        while (left < right) {
+            PyObject **mid = left + ((right - left) >> 1);
+            if (ISLT(pivot, *mid)) right = mid;
+            else left = mid + 1;
+        }
+        /* Shift right and insert */
+        memmove(left + 1, left, (l - left) * sizeof(PyObject *));
+        *left = pivot;
+    }
+    return 0;
+}
+```
+
+Binary insertion sort is used for short sequences (fewer than `MIN_MERGE` elements). Binary search finds the insertion point in `O(log n)` comparisons, but the shift is still `O(n)`. This is cache-friendly and fast for small `n`.
+
+### `merge_lo`
+
+```c
+// CPython: Objects/listobject.c:1380 merge_lo
+static Py_ssize_t
+merge_lo(MergeState *ms, PyObject **pa, Py_ssize_t na,
+                         PyObject **pb, Py_ssize_t nb)
+{
+    /* Merge two adjacent runs. pa[0..na-1] and pb[0..nb-1].
+       na <= nb; pa is copied to a temporary array. */
+    PyObject **dest = pa;
+    PyObject **basea = ms->a;
+    memcpy(basea, pa, na * sizeof(PyObject *));
+    PyObject **pa_end = basea + na;
+    ...
+    /* Gallop mode: if one side wins many consecutive comparisons,
+       skip ahead using binary search. */
+}
+```
+
+`merge_lo` copies the smaller run into a temp buffer and merges back. Galloping mode kicks in when one side wins `MIN_GALLOP` (7) consecutive comparisons: it uses binary search to find the crossover point, skipping many comparisons.
+
+### `merge_collapse`
+
+```c
+// CPython: Objects/listobject.c:1620 merge_collapse
+static int
+merge_collapse(MergeState *ms)
+{
+    /* Maintain invariant: for any three top runs A, B, C on the stack:
+       |A| > |B| + |C|  and  |B| > |C|
+       This keeps the stack depth O(log n) and ensures merges are nearly equal size. */
+    struct s_slice *p = ms->pending;
+    while (ms->n > 1) {
+        Py_ssize_t n = ms->n - 2;
+        if (n > 0 && p[n-1].len <= p[n].len + p[n+1].len) {
+            if (p[n-1].len < p[n+1].len) n--;
+            if (merge_at(ms, n) < 0) return -1;
+        } else if (p[n].len <= p[n+1].len) {
+            if (merge_at(ms, n) < 0) return -1;
+        } else break;
+    }
+    return 0;
+}
+```
+
+The stack invariant ensures Timsort merges runs of similar size, achieving `O(n log n)` in the worst case. Natural sorted data (already ascending or descending runs) is handled in `O(n)`.
+
+## gopy notes
+
+`list.sort` is `objects.ListSort` in `objects/list.go`. The Timsort implementation reuses Go's `sort.Slice` for the final merge step while the run-detection and galloping logic is ported from CPython. `MIN_MERGE` is 32. The comparison function uses the Python `__lt__` protocol via `objects.RichCompareBool`.

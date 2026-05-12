@@ -1,0 +1,123 @@
+---
+title: Python/compile.c (part 9)
+description: "Python/compile.c part 9: exception table, try/except/finally compilation, ExceptionGroup."
+cpython_path: Python/compile.c
+cpython_version: "3.14"
+lines: 600
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Python/compile.c" />
+
+This annotation covers exception handling compilation. See `python_compile8_detail` for match/case, walrus operator, and comprehension compilation.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-100 | Exception table format | Compact encoding for try/except regions |
+| 101-220 | `compile_try_except` | Emit `SETUP_CLEANUP` and handler dispatch |
+| 221-340 | `compile_try_finally` | Interplay between except and finally blocks |
+| 341-440 | `compile_with` | `async with` and `with` statement lowering |
+| 441-600 | `ExceptionGroup` / `except*` | PEP 654 exception group compilation |
+
+## Reading
+
+### Exception table format
+
+```c
+// CPython: Python/compile.c:7240 assemble_exception_table
+/* Exception table entry (varint-encoded):
+   start: first instruction offset covered
+   length: number of instructions covered
+   target: handler block offset
+   depth: stack depth at handler entry
+   lasti: whether to push the offending instruction offset
+   
+   Stored as a sequence of variable-length integers in co_exceptiontable.
+   The eval loop performs a binary search on this table when an exception occurs.
+*/
+```
+
+Since Python 3.11, `try`/`except` uses a side table instead of `SETUP_FINALLY`/`POP_BLOCK` instructions. The eval loop binary-searches `co_exceptiontable` on exception to find the handler. This makes the happy path (no exception) zero-cost.
+
+### `compile_try_except`
+
+```c
+// CPython: Python/compile.c:2860 compiler_try_except
+static int
+compiler_try_except(struct compiler *c, stmt_ty s)
+{
+    basicblock *body = compiler_new_block(c);
+    basicblock *except = compiler_new_block(c);
+    basicblock *orelse = compiler_new_block(c);
+    basicblock *end = compiler_new_block(c);
+    /* Register body as an exception-table region with target=except */
+    compiler_push_fblock(c, TRY_EXCEPT, body, except, NULL);
+    VISIT_SEQ(c, stmt, s->v.Try.body);
+    compiler_pop_fblock(c, TRY_EXCEPT, body);
+    ADDOP(c, JUMP_FORWARD, orelse);
+    /* except handler: PUSH_EXC_INFO, match type, reraise if no match */
+    compiler_use_next_block(c, except);
+    for (Py_ssize_t i = 0; i < asdl_seq_LEN(s->v.Try.handlers); i++) {
+        excepthandler_ty handler = asdl_seq_GET(s->v.Try.handlers, i);
+        compiler_try_except_handler(c, handler, ...);
+    }
+    ...
+}
+```
+
+Each `except` clause generates a type check (`CHECK_EXC_MATCH`) followed by the handler body. If the type does not match, the next `except` clause is tried. If none match, the exception is reraised with `RERAISE`.
+
+### `compile_try_finally`
+
+```c
+// CPython: Python/compile.c:2940 compiler_try_finally
+static int
+compiler_try_finally(struct compiler *c, stmt_ty s)
+{
+    /* try: body finally: final_body
+       Both normal exit and exception-exit must reach final_body.
+       On exception: PUSH_EXC_INFO (saves exc), run final_body, RERAISE 1.
+       On normal exit: run final_body, continue. */
+    compiler_push_fblock(c, FINALLY_TRY, body, final, NULL);
+    VISIT_SEQ(c, stmt, s->v.Try.body);
+    compiler_pop_fblock(c, FINALLY_TRY, body);
+    ADDOP(c, JUMP_FORWARD, final);  /* normal path: skip exception cleanup */
+    ...
+}
+```
+
+`finally` blocks are compiled twice: once on the normal path and once as an exception handler. The exception path uses `PUSH_EXC_INFO` to save the active exception, runs the `finally` body, then `RERAISE 1` to re-raise the saved exception.
+
+### `except*` (ExceptionGroup)
+
+```c
+// CPython: Python/compile.c:3180 compiler_try_star_except
+static int
+compiler_try_star_except(struct compiler *c, stmt_ty s)
+{
+    /* except* E as eg:
+       Uses PREP_RERAISE_STAR / CHECK_EG_MATCH opcodes.
+       The exception is split into matched and unmatched parts. */
+    basicblock *except_star = compiler_new_block(c);
+    compiler_push_fblock(c, TRY_EXCEPT, body, except_star, NULL);
+    VISIT_SEQ(c, stmt, s->v.Try.body);
+    compiler_pop_fblock(c, TRY_EXCEPT, body);
+    /* handler: CHECK_EG_MATCH extracts matching sub-exceptions */
+    compiler_use_next_block(c, except_star);
+    ADDOP(c, PREP_RERAISE_STAR);
+    for (...) {
+        ADDOP_I(c, CHECK_EG_MATCH, oparg);
+        ...
+    }
+}
+```
+
+PEP 654 `except*` splits an `ExceptionGroup` into matched and unmatched parts. `CHECK_EG_MATCH` checks if any sub-exception matches the type. `PREP_RERAISE_STAR` collects the unmatched sub-exceptions for re-raising after all handlers run.
+
+## gopy notes
+
+The exception table is built in `compile/flowgraph_except.go`. `compiler_try_except` corresponds to `compiler.compileExcept` in `compile/codegen_stmt_control.go`. `compiler_try_finally` is `compiler.compileFinally`. `except*` uses `objects.ExceptionGroup` and the `CHECK_EG_MATCH` opcode is handled in `vm/eval_unwind.go`.

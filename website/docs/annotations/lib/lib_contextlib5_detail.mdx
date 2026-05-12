@@ -1,0 +1,132 @@
+---
+title: Lib/contextlib.py (part 5)
+description: "Lib/contextlib.py part 5: AbstractContextManager, AbstractAsyncContextManager, nullcontext, chdir."
+cpython_path: Lib/contextlib.py
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/contextlib.py" />
+
+This annotation covers abstract base classes and utility context managers. See `lib_contextlib4_detail` for `contextmanager`, `asynccontextmanager`, `suppress`, and `redirect_stdout`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `AbstractContextManager` | ABC with default `__enter__`/`__exit__` |
+| 81-160 | `AbstractAsyncContextManager` | Async counterpart |
+| 161-240 | `nullcontext` | No-op context manager for optional wrapping |
+| 241-340 | `chdir` | Context manager that temporarily changes directory |
+| 341-500 | `closing` / `aclosing` | Ensure `close()` is called on exit |
+
+## Reading
+
+### `AbstractContextManager`
+
+```python
+# CPython: Lib/contextlib.py:85 AbstractContextManager
+class AbstractContextManager(ABC):
+    """An abstract base class for context managers."""
+
+    __class_getitem__ = classmethod(GenericAlias)
+
+    @abstractmethod
+    def __enter__(self):
+        """Return `self` upon entering the runtime context."""
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        """Raise any exception triggered within the runtime context."""
+        return None
+```
+
+`AbstractContextManager` provides a default `__enter__` that returns `self` and a non-suppressing `__exit__`. Subclasses must override at least `__enter__`. The `__class_getitem__` enables `AbstractContextManager[int]` for type annotations.
+
+### `nullcontext`
+
+```python
+# CPython: Lib/contextlib.py:687 nullcontext
+class nullcontext(AbstractContextManager, AbstractAsyncContextManager):
+    """Context manager that does no additional processing.
+
+    Used as a stand-in for an optional context manager.
+    """
+    def __init__(self, enter_result=None):
+        self.enter_result = enter_result
+
+    def __enter__(self):
+        return self.enter_result
+
+    def __exit__(self, *excinfo):
+        pass
+
+    async def __aenter__(self):
+        return self.enter_result
+
+    async def __aexit__(self, *excinfo):
+        pass
+```
+
+`nullcontext` is useful when a context manager is optional: `cm = lock if threaded else nullcontext()`. With `enter_result`, `with nullcontext(value) as v:` binds `v = value`, useful for testing code that expects a context variable.
+
+### `chdir`
+
+```python
+# CPython: Lib/contextlib.py:760 chdir
+class chdir(AbstractContextManager):
+    """Non-reentrant context manager to change the current working directory."""
+
+    def __init__(self, path):
+        self.path = path
+        self._old_cwd = []
+
+    def __enter__(self):
+        self._old_cwd.append(os.getcwd())
+        os.chdir(self.path)
+
+    def __exit__(self, *excinfo):
+        os.chdir(self._old_cwd.pop())
+```
+
+`chdir` saves and restores the process CWD. It is non-reentrant by design (the `_old_cwd` list is for clarity, not nesting support). Used heavily in test suites that need to operate in a specific directory.
+
+### `closing`
+
+```python
+# CPython: Lib/contextlib.py:316 closing
+class closing(AbstractContextManager):
+    """Context manager to automatically close something at the end of a block."""
+    def __init__(self, thing):
+        self.thing = thing
+    def __enter__(self):
+        return self.thing
+    def __exit__(self, *exc_info):
+        self.thing.close()
+```
+
+`with closing(urllib.request.urlopen(url)) as page:` ensures `page.close()` is always called, even if the object does not implement the context manager protocol. `aclosing` is the async counterpart for async generators and async iterables.
+
+### `AbstractAsyncContextManager`
+
+```python
+# CPython: Lib/contextlib.py:168 AbstractAsyncContextManager
+class AbstractAsyncContextManager(ABC):
+    __class_getitem__ = classmethod(GenericAlias)
+
+    @abstractmethod
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc_value, traceback):
+        return None
+```
+
+Parallel to `AbstractContextManager` but for `async with`. Subclasses implement `__aenter__` and `__aexit__` as coroutines. The ABC registers `asynccontextmanager`-decorated functions as virtual subclasses.
+
+## gopy notes
+
+`AbstractContextManager` and `AbstractAsyncContextManager` are in `module/contextlib/module.go`. `nullcontext` is `contextlib.NullContext`. `chdir` calls `os.Chdir` and saves the old CWD in a stack on the Go struct. `closing` calls the object's `close` method via `objects.CallMethod`.

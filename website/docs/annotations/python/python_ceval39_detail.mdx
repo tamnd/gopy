@@ -1,0 +1,132 @@
+---
+title: Python/ceval.c (part 39)
+description: "Python/ceval.c part 39: IMPORT_NAME, IMPORT_FROM, IMPORT_STAR, LOAD_BUILD_CLASS, LOAD_SUPER_ATTR."
+cpython_path: Python/ceval.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Python/ceval.c" />
+
+This annotation covers import machinery and class-building opcodes. See `python_ceval38_detail` for f-string, function construction, and `BUILD_SLICE` opcodes.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `IMPORT_NAME` | Invoke `__import__` and push the module |
+| 81-160 | `IMPORT_FROM` | Push `module.attr` |
+| 161-240 | `IMPORT_STAR` | `from module import *` |
+| 241-340 | `LOAD_BUILD_CLASS` | Push `builtins.__build_class__` |
+| 341-500 | `LOAD_SUPER_ATTR` | Optimized `super().method` |
+
+## Reading
+
+### `IMPORT_NAME`
+
+```c
+// CPython: Python/ceval.c:4080 IMPORT_NAME
+inst(IMPORT_NAME, (fromlist, level -- module)) {
+    /* import foo.bar: name is the dotted module name from co_names */
+    PyObject *name = GETITEM(NAMES(), oparg);
+    module = import_name(tstate, frame, name, fromlist, level);
+    Py_DECREF(fromlist);
+    Py_DECREF(level);
+    ERROR_IF(module == NULL, error);
+}
+
+static PyObject *
+import_name(PyThreadState *tstate, _PyInterpreterFrame *frame,
+            PyObject *name, PyObject *fromlist, PyObject *level)
+{
+    PyObject *import_func = _PyDict_GetItemIdWithError(frame->f_builtins, &PyId___import__);
+    return PyObject_CallFunctionObjArgs(import_func, name, GLOBALS(), LOCALS(),
+                                       fromlist, level, NULL);
+}
+```
+
+`import foo` calls `builtins.__import__('foo', globals(), locals(), [], 0)`. The `level` argument (from `from .. import x`) controls relative imports: `level=0` is absolute, `level=2` means go up two packages. `IMPORT_NAME` pops `fromlist` and `level` from the stack.
+
+### `IMPORT_FROM`
+
+```c
+// CPython: Python/ceval.c:4140 IMPORT_FROM
+inst(IMPORT_FROM, (from -- from, res)) {
+    /* from foo import bar  ->  getattr(foo, 'bar') */
+    PyObject *name = GETITEM(NAMES(), oparg);
+    res = import_from(tstate, from, name);
+    ERROR_IF(res == NULL, error);
+}
+
+static PyObject *
+import_from(PyThreadState *tstate, PyObject *v, PyObject *name)
+{
+    PyObject *x = PyObject_GetAttr(v, name);
+    if (x == NULL && PyErr_ExceptionMatches(PyExc_AttributeError)) {
+        /* module may define __all__ but not have the attr */
+        PyErr_Format(PyExc_ImportError, "cannot import name %R from %R ...", name, ...);
+    }
+    return x;
+}
+```
+
+`from foo import bar, baz` emits `IMPORT_NAME`, then `IMPORT_FROM bar`, `STORE_NAME bar`, `IMPORT_FROM baz`, `STORE_NAME baz`, `POP_TOP`. The module stays on the stack during all `IMPORT_FROM` calls and is discarded by `POP_TOP`.
+
+### `IMPORT_STAR`
+
+```c
+// CPython: Python/ceval.c:4180 IMPORT_STAR
+inst(IMPORT_STAR, (from --)) {
+    /* from foo import *  ->  copy all public names to locals */
+    PyObject *locals = LOCALS();
+    if (locals == NULL) {
+        PyErr_SetString(PyExc_SystemError, "no locals found during 'import *'");
+        Py_DECREF(from);
+        ERROR_IF(true, error);
+    }
+    int err = import_all_from(tstate, locals, from);
+    Py_DECREF(from);
+    ERROR_IF(err != 0, error);
+}
+```
+
+`from foo import *` copies all names from `__all__` (if defined) or all non-underscore names into the current namespace. It is only allowed at module level; at function level the compiler raises `SyntaxError`.
+
+### `LOAD_BUILD_CLASS`
+
+```c
+// CPython: Python/ceval.c:4220 LOAD_BUILD_CLASS
+inst(LOAD_BUILD_CLASS, (-- bc)) {
+    bc = _PyObject_GetAttrId(_PyInterpreterState_GET()->builtins,
+                             &PyId___build_class__);
+    ERROR_IF(bc == NULL, error);
+}
+```
+
+`class Foo(Base): ...` compiles to `LOAD_BUILD_CLASS`, `LOAD_CONST <code>`, `LOAD_CONST 'Foo'`, `LOAD_NAME Base`, `CALL 2`. `__build_class__` executes the class body code object in a new namespace and calls the metaclass.
+
+### `LOAD_SUPER_ATTR`
+
+```c
+// CPython: Python/ceval.c:4260 LOAD_SUPER_ATTR
+inst(LOAD_SUPER_ATTR, (global_super, class, self -- attr)) {
+    /* Optimized form: super().method instead of super().__getattribute__('method') */
+    int load_method = oparg & 1;
+    PyObject *name = GETITEM(NAMES(), oparg >> 2);
+    attr = _PySuper_Lookup((PyTypeObject *)class, self, name,
+                           load_method ? &meth_found : NULL);
+    Py_DECREF(global_super);
+    Py_DECREF(class);
+    Py_DECREF(self);
+    ERROR_IF(attr == NULL, error);
+}
+```
+
+`super().method()` in CPython 3.12+ uses `LOAD_SUPER_ATTR` instead of constructing a `super` object. `_PySuper_Lookup` walks the MRO starting after the current class to find the method. This avoids allocating a `super()` instance for the common case.
+
+## gopy notes
+
+`IMPORT_NAME` is in `vm/eval_import.go`; it calls the `__import__` builtin through `objects.CallBuiltin`. `IMPORT_FROM` calls `objects.GetAttr`. `IMPORT_STAR` copies from `__all__` or filters by leading underscore. `LOAD_BUILD_CLASS` pushes `objects.BuildClass`. `LOAD_SUPER_ATTR` is in `vm/eval_simple.go` and uses `objects.SuperLookup`.

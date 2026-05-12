@@ -1,9 +1,9 @@
 ---
 title: Objects/bytesobject.c (part 5)
-description: "Objects/bytesobject.c part 5: bytes.split, bytes.join, bytes.replace, bytes.decode, bytes.hex."
+description: "Objects/bytesobject.c part 5: bytes.join, bytes.split, bytes.replace, bytes.find, bytes free list."
 cpython_path: Objects/bytesobject.c
 cpython_version: "3.14"
-lines: 600
+lines: 500
 status: annotated
 ---
 
@@ -11,101 +11,136 @@ import {Cpy, CpyLink} from '@site/src/components/Cpy';
 
 Source: <CpyLink path="Objects/bytesobject.c" />
 
-This annotation covers string-like methods on `bytes`. See `objects_bytesobject4_detail` for `bytes.__new__`, `bytes.__add__`, `bytes.find`/`index`, and `objects_bytesobject3_detail` for the internal structure.
+This annotation covers search and manipulation methods. See `objects_bytesobject4_detail` for `bytes.__new__`, `bytes.__repr__`, and comparison.
 
 ## Map
 
 | Lines | Symbol | Role |
 |-------|--------|------|
-| 1-100 | `bytes.split` | Split on separator (or whitespace) into a list |
-| 101-220 | `bytes.join` | Join an iterable of bytes objects with a separator |
-| 221-360 | `bytes.replace` | Replace occurrences of a subsequence |
-| 361-480 | `bytes.decode` | Decode to `str` using a codec |
-| 481-600 | `bytes.hex` | Hex representation; `bytes.fromhex` inverse |
+| 1-80 | Bytes free list | Reuse single-byte `PyBytesObject` instances |
+| 81-180 | `bytes.find` / `bytes.index` | Substring search using Boyer-Moore-Horspool |
+| 181-280 | `bytes.split` / `bytes.rsplit` | Split on separator or whitespace |
+| 281-380 | `bytes.join` | Concatenate iterable with separator |
+| 381-500 | `bytes.replace` | Replace all occurrences |
 
 ## Reading
+
+### Bytes free list
+
+```c
+// CPython: Objects/bytesobject.c:28 characters
+static PyBytesObject *characters[256];
+static PyBytesObject *nullstring;
+
+PyObject *
+PyBytes_FromStringAndSize(const char *str, Py_ssize_t size)
+{
+    if (size == 0 && nullstring != NULL) {
+        return Py_NewRef(nullstring);
+    }
+    if (size == 1 && str != NULL) {
+        unsigned char c = (unsigned char)str[0];
+        if (characters[c] != NULL) {
+            return Py_NewRef(characters[c]);
+        }
+    }
+    /* allocate new bytes object */
+    ...
+}
+```
+
+Single-byte and empty bytes objects are singletons. `b'\x41'` always returns the same object; `is` comparisons on single-byte values are always `True`. This is the bytes counterpart of the small-integer free list.
+
+### `bytes.find`
+
+```c
+// CPython: Objects/bytesobject.c:1620 bytes_find_internal
+static Py_ssize_t
+bytes_find_internal(PyBytesObject *self, PyObject *args, int dir)
+{
+    Py_buffer subbuf;
+    Py_ssize_t start = 0, end = PY_SSIZE_T_MAX;
+    PyArg_ParseTuple(args, "y*|nn:find", &subbuf, &start, &end);
+    Py_ssize_t result = _Py_FindObjectEx(
+        (const char *)PyBytes_AS_STRING(self), PyBytes_GET_SIZE(self),
+        (const char *)subbuf.buf, subbuf.len, start, end, dir);
+    PyBuffer_Release(&subbuf);
+    return result;
+}
+```
+
+`bytes.find` delegates to `_Py_FindObjectEx` which dispatches to a fast SIMD path for single-character needles and Boyer-Moore-Horspool for longer ones. `bytes.index` calls the same function but raises `ValueError` on `-1`.
 
 ### `bytes.split`
 
 ```c
-// CPython: Objects/bytesobject.c:1980 bytes_split
+// CPython: Objects/bytesobject.c:1820 bytes_split
 static PyObject *
-bytes_split_impl(PyBytesObject *self, PyObject *sep, Py_ssize_t maxsplit)
+bytes_split(PyBytesObject *self, PyObject *args)
 {
     Py_ssize_t len = PyBytes_GET_SIZE(self);
-    const char *s = PyBytes_AS_STRING(self);
-    if (sep == Py_None) {
-        /* Split on whitespace */
-        return split_whitespace(s, len, maxsplit);
+    PyObject *subobj = Py_None;
+    int maxsplit = -1;
+    PyArg_ParseTuple(args, "|On:split", &subobj, &maxsplit);
+    if (subobj == Py_None) {
+        return split_whitespace((const char *)PyBytes_AS_STRING(self), len, maxsplit);
     }
-    /* Split on explicit separator */
-    Py_ssize_t n = PyBytes_GET_SIZE(sep);
-    const char *sub = PyBytes_AS_STRING(sep);
-    return split_char(s, len, sub[0], maxsplit);  /* fast path for 1-byte sep */
+    Py_buffer vsub;
+    PyObject_GetBuffer(subobj, &vsub, PyBUF_SIMPLE);
+    PyObject *list = split_char_or_str(
+        PyBytes_AS_STRING(self), len, vsub.buf, vsub.len, maxsplit);
+    PyBuffer_Release(&vsub);
+    return list;
 }
 ```
 
-`b'a  b  c'.split()` strips leading/trailing whitespace and splits on runs. `b'a,b,c'.split(b',', 1)` returns `[b'a', b'b,c']`. The fast path for a single-byte separator avoids a Boyer-Moore search.
+`b'a  b'.split()` splits on any whitespace and strips leading/trailing spaces (the `None` path). `b'a:b'.split(b':')` uses the buffer path. The `maxsplit` parameter limits the number of splits from the left.
 
 ### `bytes.join`
 
 ```c
-// CPython: Objects/bytesobject.c:2100 bytes_join
+// CPython: Objects/bytesobject.c:1940 bytes_join
 static PyObject *
-bytes_join(PyBytesObject *self, PyObject *iterable_of_bytes)
+bytes_join(PyBytesObject *self, PyObject *iterable)
 {
-    /* Two-pass: first compute total length, then allocate and fill. */
-    PyObject *seq = PySequence_Fast(iterable_of_bytes, "...");
-    Py_ssize_t seqlen = PySequence_Fast_GET_SIZE(seq);
     Py_ssize_t seplen = PyBytes_GET_SIZE(self);
-    /* Compute total */
-    Py_ssize_t sz = seplen * (seqlen - 1);
-    for (Py_ssize_t i = 0; i < seqlen; i++) sz += PyBytes_GET_SIZE(item[i]);
-    PyObject *res = PyBytes_FromStringAndSize(NULL, sz);
-    /* Fill */
-    char *p = PyBytes_AS_STRING(res);
+    PyObject *seq = PySequence_Fast(iterable, "can only join an iterable");
+    Py_ssize_t seqlen = PySequence_Fast_GET_SIZE(seq);
+    Py_ssize_t total = seplen * (seqlen - 1);
     for (Py_ssize_t i = 0; i < seqlen; i++) {
-        if (i) { memcpy(p, sep, seplen); p += seplen; }
-        memcpy(p, PyBytes_AS_STRING(item[i]), itemlen);
-        p += itemlen;
+        total += PyBytes_GET_SIZE(PySequence_Fast_GET_ITEM(seq, i));
     }
+    PyObject *res = PyBytes_FromStringAndSize(NULL, total);
+    /* second pass: copy */
+    ...
     return res;
 }
 ```
 
-`b','.join([b'a', b'b', b'c'])` produces `b'a,b,c'`. The two-pass strategy avoids reallocating as items are accumulated.
+`bytes.join` performs a two-pass algorithm: first compute the total length, then allocate once and copy. This avoids quadratic behavior from repeated concatenation.
 
-### `bytes.decode`
+### `bytes.replace`
 
 ```c
-// CPython: Objects/bytesobject.c:2340 bytes_decode
+// CPython: Objects/bytesobject.c:2080 bytes_replace
 static PyObject *
-bytes_decode_impl(PyBytesObject *self, const char *encoding,
-                  const char *errors)
+bytes_replace(PyBytesObject *self, PyObject *args)
 {
-    return PyUnicode_FromEncodedObject((PyObject *)self, encoding, errors);
+    Py_buffer from_buf, to_buf;
+    int count = -1;
+    PyArg_ParseTuple(args, "y*y*|n:replace", &from_buf, &to_buf, &count);
+    PyObject *result = stringlib_replace(
+        PyBytes_AS_STRING(self), PyBytes_GET_SIZE(self),
+        from_buf.buf, from_buf.len,
+        to_buf.buf, to_buf.len, count);
+    PyBuffer_Release(&from_buf);
+    PyBuffer_Release(&to_buf);
+    return result;
 }
 ```
 
-`b'\xc3\xa9'.decode('utf-8')` returns `'\xe9'`. The actual decoding is delegated to the codec registry via `PyUnicode_FromEncodedObject`. The `errors` parameter controls behavior on invalid sequences: `strict`, `replace`, `ignore`, `backslashreplace`.
-
-### `bytes.hex`
-
-```c
-// CPython: Objects/bytesobject.c:2420 bytes_hex_impl
-static PyObject *
-bytes_hex_impl(PyBytesObject *self, PyObject *sep, int bytes_per_sep)
-{
-    /* Convert each byte to two hex digits. Optional sep inserted every
-       bytes_per_sep bytes (positive = from right, negative = from left). */
-    const char *buf = PyBytes_AS_STRING(self);
-    Py_ssize_t len = PyBytes_GET_SIZE(self);
-    return _Py_strhex_with_sep(buf, len, sep, bytes_per_sep);
-}
-```
-
-`b'\xde\xad\xbe\xef'.hex(':')` returns `'de:ad:be:ef'`. The `bytes_per_sep` argument (default 1) controls grouping. `bytes.fromhex('deadbeef')` is the inverse, implemented in `bytes_fromhex`.
+`b'aaa'.replace(b'a', b'bb')` calls `stringlib_replace` which handles replacements that are longer, shorter, or the same length. When `count=-1` all occurrences are replaced.
 
 ## gopy notes
 
-`bytes.split` is `objects.BytesSplit` in `objects/bytes.go`. The whitespace split uses `strings.Fields` semantics on the raw bytes. `bytes.join` pre-computes total length then uses a single `make([]byte, n)` allocation. `bytes.decode` calls into the codec registry at `module/codecs`. `bytes.hex` uses `hex.EncodeToString` from Go's standard library.
+The single-byte free list is `objects.BytesSingletons` in `objects/bytes.go`, a 256-element array initialized at startup. `bytes.find` uses `bytes.Index`. `bytes.split` dispatches to `bytes.Fields` for whitespace or `bytes.SplitN`. `bytes.join` uses `bytes.Join`. `bytes.replace` uses `bytes.Replace`.
