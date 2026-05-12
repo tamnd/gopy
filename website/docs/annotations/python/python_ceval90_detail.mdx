@@ -1,0 +1,97 @@
+---
+title: Python/ceval.c (part 90)
+description: "Python/ceval.c part 90: LOAD_GLOBAL, LOAD_GLOBAL_MODULE, LOAD_GLOBAL_BUILTIN, STORE_GLOBAL."
+cpython_path: Python/ceval.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Python/ceval.c" />
+
+This annotation covers global variable access. See `python_ceval89_detail` for f-string opcodes.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `LOAD_GLOBAL` | Look up a name in globals then builtins |
+| 81-180 | `LOAD_GLOBAL_MODULE` | Specialization: name is in the module dict |
+| 181-260 | `LOAD_GLOBAL_BUILTIN` | Specialization: name is in builtins |
+| 261-340 | `STORE_GLOBAL` | Write a value to the module's globals dict |
+| 341-500 | Inline cache format | How the cache stores dict version + index |
+
+## Reading
+
+### `LOAD_GLOBAL`
+
+```c
+// CPython: Python/ceval.c:5240 LOAD_GLOBAL
+inst(LOAD_GLOBAL, (unused/1, unused/2, unused/3, unused/4 -- null_or_self, v)) {
+    PyObject *name = GETITEM(names, oparg >> 1);
+    if (PyDict_CheckExact(GLOBALS())) {
+        v = _PyDict_LoadGlobal((PyDictObject *)GLOBALS(),
+                               (PyDictObject *)BUILTINS(), name);
+    } else {
+        v = PyObject_GetItem(GLOBALS(), name);
+        if (v == NULL && _PyErr_ExceptionMatches(tstate, PyExc_KeyError)) {
+            _PyErr_Clear(tstate);
+            v = PyObject_GetItem(BUILTINS(), name);
+        }
+    }
+    if (v == NULL) {
+        _PyErr_Format(tstate, PyExc_NameError, NAME_ERROR_MSG, name);
+        ERROR_IF(true, error);
+    }
+    if (oparg & 1) PUSH(NULL);  /* push NULL for CALL optimization */
+}
+```
+
+`LOAD_GLOBAL` checks the module's `__dict__` first, then `builtins`. For exact dicts (the common case), `_PyDict_LoadGlobal` uses a combined lookup that avoids two separate hash table searches.
+
+### `LOAD_GLOBAL_MODULE`
+
+```c
+// CPython: Python/ceval.c:5300 LOAD_GLOBAL_MODULE
+inst(LOAD_GLOBAL_MODULE, (unused/1, unused/2, unused/3, unused/4 -- null_or_self, v)) {
+    /* Inline cache: [version, index] */
+    uint32_t version = read_u32(next_instr[-4].cache);
+    uint16_t index   = read_u16(next_instr[-2].cache);
+    PyDictObject *dict = (PyDictObject *)GLOBALS();
+    DEOPT_IF(dict->ma_version_tag != version, LOAD_GLOBAL);
+    PyDictUnicodeEntry *ep = DK_UNICODE_ENTRIES(dict->ma_keys) + index;
+    v = ep->me_value;
+    DEOPT_IF(v == NULL, LOAD_GLOBAL);
+    Py_INCREF(v);
+    if (oparg & 1) PUSH(NULL);
+}
+```
+
+The specialization caches the dict version tag and the index of the key. If the version matches, it reads the value directly without hashing. On dict modification, the version tag changes and the specialization deoptimizes.
+
+### `LOAD_GLOBAL_BUILTIN`
+
+```c
+// CPython: Python/ceval.c:5360 LOAD_GLOBAL_BUILTIN
+inst(LOAD_GLOBAL_BUILTIN, (unused/1, unused/2, unused/3, unused/4 -- null_or_self, v)) {
+    /* Similar to MODULE but checks both globals version (name not there)
+       and builtins version (name is there). */
+    uint32_t globals_version = read_u32(next_instr[-4].cache);
+    uint32_t builtins_version = read_u32(next_instr[-2].cache);
+    DEOPT_IF(((PyDictObject *)GLOBALS())->ma_version_tag != globals_version, LOAD_GLOBAL);
+    DEOPT_IF(((PyDictObject *)BUILTINS())->ma_version_tag != builtins_version, LOAD_GLOBAL);
+    /* index in builtins dict */
+    uint16_t index = read_u16(next_instr[-6].cache);
+    PyDictUnicodeEntry *ep = DK_UNICODE_ENTRIES(((PyDictObject *)BUILTINS())->ma_keys) + index;
+    v = ep->me_value;
+    ...
+}
+```
+
+`LOAD_GLOBAL_BUILTIN` validates both dict versions: the globals dict must not shadow the builtin name, and the builtins dict must still have the name at the cached index.
+
+## gopy notes
+
+`LOAD_GLOBAL` is in `vm/eval_simple.go` and calls `vm.LoadGlobal` which searches `frame.Globals` then `frame.Builtins`. Specializations are not yet implemented; the generic path is used. `STORE_GLOBAL` calls `objects.DictSetItem(frame.Globals, name, value)`.

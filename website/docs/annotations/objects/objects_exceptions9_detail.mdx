@@ -1,0 +1,101 @@
+---
+title: Objects/exceptions.c (part 9)
+description: "Objects/exceptions.c part 9: ExceptionGroup, BaseExceptionGroup.__new__, split, subgroup, derive."
+cpython_path: Objects/exceptions.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Objects/exceptions.c" />
+
+This annotation covers exception groups (PEP 654, Python 3.11+). See `objects_exceptions8_detail` for standard exception hierarchy and `BaseException.__init__`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `BaseExceptionGroup.__new__` | Construct a group from a message and exceptions tuple |
+| 81-160 | `ExceptionGroup` | Subtype that requires all exceptions to be non-base |
+| 161-260 | `BaseExceptionGroup.split` | Partition into matching / non-matching subgroups |
+| 261-360 | `BaseExceptionGroup.subgroup` | Return only the matching subset |
+| 361-500 | `BaseExceptionGroup.derive` | Construct a new group with the same type |
+
+## Reading
+
+### `BaseExceptionGroup.__new__`
+
+```c
+// CPython: Objects/exceptions.c:3480 BaseExceptionGroup_new
+static PyObject *
+BaseExceptionGroup_new(PyTypeObject *type, PyObject *args, PyObject *kwds)
+{
+    PyObject *message, *excs;
+    if (!PyArg_ParseTuple(args, "UO:BaseExceptionGroup", &message, &excs))
+        return NULL;
+    if (!PySequence_Check(excs) || PySequence_Length(excs) == 0) {
+        PyErr_SetString(PyExc_TypeError,
+            "second argument (exceptions) must be a non-empty sequence");
+        return NULL;
+    }
+    /* All must be instances of BaseException */
+    for each exc in excs:
+        if (!PyExceptionInstance_Check(exc)) raise TypeError;
+    PyObject *self = PyBaseObject_Type.tp_new(type, args, kwds);
+    ...
+}
+```
+
+`ExceptionGroup("msg", [ValueError(1), TypeError(2)])` requires all exceptions to be non-base (no `BaseException` directly). `BaseExceptionGroup` allows any `BaseException` subclass.
+
+### `BaseExceptionGroup.split`
+
+```c
+// CPython: Objects/exceptions.c:3620 BaseExceptionGroup_split
+static PyObject *
+BaseExceptionGroup_split(PyObject *self, PyObject *matcher_value)
+{
+    /* Returns (match, rest) where both may be None.
+       match: a new group of exceptions that match.
+       rest:  a new group of exceptions that don't match. */
+    PyObject *excs = PyObject_GetAttr(self, &_Py_ID(exceptions));
+    PyObject *match_list = PyList_New(0);
+    PyObject *rest_list  = PyList_New(0);
+    for each exc in excs:
+        /* If exc is a group, recursively split */
+        if (PyObject_IsInstance(exc, &_PyExc_BaseExceptionGroup))
+            _split_rec(exc, matcher_value, match_list, rest_list);
+        else if (_matches(exc, matcher_value))
+            PyList_Append(match_list, exc);
+        else
+            PyList_Append(rest_list, exc);
+    /* Derive sub-groups or return None if empty */
+    match = PyList_GET_SIZE(match_list) ? self->derive(match_list) : Py_None;
+    rest  = PyList_GET_SIZE(rest_list)  ? self->derive(rest_list)  : Py_None;
+    return PyTuple_Pack(2, match, rest);
+}
+```
+
+`split(ValueError)` partitions the group recursively. Nested groups are split too; if a nested group is entirely in one partition, it is kept whole; if split, two sub-groups are created.
+
+### `BaseExceptionGroup.derive`
+
+```c
+// CPython: Objects/exceptions.c:3700 BaseExceptionGroup_derive
+static PyObject *
+BaseExceptionGroup_derive(PyObject *self, PyObject *excs)
+{
+    /* Create a new group of the same concrete type with the same message.
+       Used by split/subgroup to preserve the type (e.g. a custom subclass). */
+    return PyObject_CallMethod((PyObject *)Py_TYPE(self), "__new__",
+                               "OOO", Py_TYPE(self), self->message, excs);
+}
+```
+
+`derive` preserves the concrete type. If the user defined `class MyGroup(ExceptionGroup): pass`, `split` returns `MyGroup` instances, not bare `ExceptionGroup`.
+
+## gopy notes
+
+`BaseExceptionGroup` is `objects.BaseExceptionGroup` in `objects/exceptions.go`. `split` is `objects.ExceptionGroupSplit`, which recurses through nested groups. `derive` calls `objects.TypeCall` with the original type. `except*` handling in the VM is in `vm/eval_unwind.go`.

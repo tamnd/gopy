@@ -1,0 +1,93 @@
+---
+title: Lib/inspect.py (part 5)
+description: "inspect.py part 5: getmembers, getmodule, getsource, getsourcelines, getsourcefile."
+cpython_path: Lib/inspect.py
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/inspect.py" />
+
+This annotation covers source code retrieval. See `lib_inspect4_detail` for `signature`, `Parameter`, `BoundArguments`, and `getfullargspec`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `inspect.getmembers` | Return `(name, value)` pairs for an object |
+| 81-160 | `inspect.getmodule` | Identify which module an object came from |
+| 161-240 | `inspect.getsourcefile` | Find the `.py` file for an object |
+| 241-360 | `inspect.getsourcelines` | Return source lines and starting line number |
+| 361-500 | `inspect.getsource` | Return the full source text |
+
+## Reading
+
+### `inspect.getmembers`
+
+```python
+# CPython: Lib/inspect.py:580 getmembers
+def getmembers(object, predicate=None):
+    mro = ()
+    names = dir(object)
+    # handle class with __slots__
+    processed = set()
+    for key in names:
+        try:
+            value = getattr(object, key)
+            if not predicate or predicate(value):
+                results.append((key, value))
+        except AttributeError:
+            ...
+    results.sort(key=lambda pair: pair[0])
+    return results
+```
+
+`getmembers` calls `dir()` to enumerate names then `getattr` for each. Exceptions from descriptors (e.g., `AttributeError` from a `@property` that raises) are caught and the member is skipped.
+
+### `inspect.getsourcefile`
+
+```python
+# CPython: Lib/inspect.py:780 getsourcefile
+def getsourcefile(object):
+    filename = getfile(object)
+    if filename.endswith('.py'):
+        return filename
+    # Check for .pyc
+    if filename.endswith(('.pyc', '.pyo')):
+        py = filename[:-1]
+        if os.path.exists(py):
+            return py
+    return None
+```
+
+`getsourcefile` returns `None` for built-in and C extension objects since they have no `.py` source file.
+
+### `inspect.getsourcelines`
+
+```python
+# CPython: Lib/inspect.py:1040 getsourcelines
+def getsourcelines(object):
+    object = unwrap(object)
+    lines, lnum = findsource(object)
+    return getblock(lines[lnum:]), lnum + 1
+```
+
+`findsource` reads the source file via `linecache` and finds the `def`/`class` line. `getblock` extracts the indented block using a `tokenize` pass to handle multi-line strings correctly.
+
+### `inspect.getsource`
+
+```python
+# CPython: Lib/inspect.py:1060 getsource
+def getsource(object):
+    lines, lnum = getsourcelines(object)
+    return ''.join(lines)
+```
+
+`getsource(func)` returns the source code of `func` as a single string. It uses `linecache` so it works for source loaded via `importlib.resources` or stored in `.zip` files.
+
+## gopy notes
+
+`getmembers` is `module/inspect.GetMembers` in `module/inspect/module.go`. `getsourcefile` checks the module's `__file__` attribute. `getsourcelines` reads via `module/linecache.GetLines` and uses a block extractor. `getsource` joins the lines.
