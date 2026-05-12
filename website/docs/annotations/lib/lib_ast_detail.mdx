@@ -1,0 +1,84 @@
+---
+title: Lib/ast.py
+description: "ast module Python layer: parse(), compile(), literal_eval(), NodeVisitor, NodeTransformer, fix_missing_locations, dump(), and the AST node class hierarchy."
+cpython_path: Lib/ast.py
+cpython_version: "3.14"
+lines: 950
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Lib/ast.py`
+
+<CpyLink path="Lib/ast.py" />
+
+`Lib/ast.py` re-exports the AST node classes from `_ast` (C extension) and adds
+`parse()`, `literal_eval()`, `NodeVisitor`, `NodeTransformer`, `fix_missing_locations`,
+and `dump()`.
+
+## Map
+
+| Lines | Symbol | Role |
+| ----- | ------ | ---- |
+| 1-80 | Re-exports from `_ast` | All AST node classes |
+| 81-160 | `parse` | Compile source to an AST with mode/type_comments options |
+| 161-280 | `literal_eval` | Safe eval of literal expressions |
+| 281-480 | `NodeVisitor`, `NodeTransformer` | Visitor pattern for AST traversal and rewriting |
+| 481-600 | `fix_missing_locations` | Propagate line/col from parent to child nodes |
+| 601-950 | `dump`, `unparse` | AST to string conversion |
+
+## Reading
+
+### `parse`
+
+`ast.parse(source, mode='exec')` calls `compile(source, filename, mode, ast.PyCF_ONLY_AST)`
+which returns a parsed AST node without compiling to bytecode.
+
+```python
+# CPython: Lib/ast.py:42 parse
+def parse(source, filename="<unknown>", mode="exec", *,
+          type_comments=False, feature_version=None, optimize=-1):
+    ...
+    return compile(source, filename, mode, flags,
+                   dont_inherit=True, optimize=optimize)
+```
+
+### `literal_eval`
+
+`literal_eval(node_or_string)` evaluates a string containing only Python literals
+(strings, bytes, numbers, tuples, lists, dicts, sets, booleans, None). It raises
+`ValueError` for any expression that is not a literal. This is safe against code injection
+because it never evaluates arbitrary expressions.
+
+```python
+# CPython: Lib/ast.py:175 literal_eval
+def literal_eval(node_or_string):
+    ...
+    def _convert(node):
+        if isinstance(node, Constant):
+            return node.value
+        elif isinstance(node, Tuple):
+            return tuple(map(_convert, node.elts))
+        ...
+        raise ValueError('malformed node or string: ' + repr(node))
+    return _convert(node)
+```
+
+### `NodeVisitor`
+
+`NodeVisitor.visit(node)` dispatches to `visit_ClassName` if defined, or `generic_visit`
+otherwise. `generic_visit` calls `visit` on all child nodes. This is the standard way to
+traverse an AST without recursion boilerplate.
+
+### `unparse`
+
+`ast.unparse(node)` reconstructs Python source from an AST. It is a `NodeVisitor` that
+builds a string buffer, writing parentheses where needed for operator precedence.
+
+## gopy notes
+
+`compile/` uses the AST from `parser/pegen`. `ast.parse()` is available via
+`pythonrun.RunString` with `Py_file_input`. `literal_eval` is not yet ported.
+`NodeVisitor` requires the AST node classes to be Python-visible objects, which is handled
+through `module/ast/`.

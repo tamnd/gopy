@@ -1,0 +1,74 @@
+---
+title: Lib/importlib/__init__.py
+description: "importlib public API: import_module(), find_spec(), invalidate_caches(), reload(), and the machinery overview. The bootstrap loaders live in _bootstrap.py and _bootstrap_external.py."
+cpython_path: Lib/importlib/__init__.py
+cpython_version: "3.14"
+lines: 180
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Lib/importlib/__init__.py`
+
+<CpyLink path="Lib/importlib/__init__.py" />
+
+`Lib/importlib/__init__.py` is the public entry point of the import system. The heavy
+lifting lives in `_bootstrap.py` (frozen, handles built-in and frozen modules) and
+`_bootstrap_external.py` (handles file-based imports). This file exposes `import_module`,
+`reload`, and `find_spec`.
+
+## Map
+
+| Lines | Symbol | Role |
+| ----- | ------ | ---- |
+| 1-50 | Bootstrap import | Import `_bootstrap` and `_bootstrap_external` from frozen modules |
+| 51-100 | `import_module` | Import a module by name with optional `package` anchor |
+| 101-150 | `find_spec`, `invalidate_caches` | Finder machinery helpers |
+| 151-180 | `reload` | Re-execute a module's code in its existing namespace |
+
+## Reading
+
+### `import_module`
+
+`import_module(name, package=None)` supports relative imports: `import_module('.sub', 'pkg')`
+is equivalent to `from pkg import sub`. It resolves the absolute name and calls
+`_bootstrap._gcd_import`.
+
+```python
+# CPython: Lib/importlib/__init__.py:62 import_module
+def import_module(name, package=None):
+    level = 0
+    if name.startswith('.'):
+        if not package:
+            raise TypeError(...)
+        for character in name:
+            if character != '.':
+                break
+            level += 1
+    return _bootstrap._gcd_import(name[level:], package, level)
+```
+
+### `reload`
+
+`reload(module)` re-executes the module's code in the existing module namespace. This
+is different from deleting and reimporting: the old module object remains in `sys.modules`
+and any existing references to objects in it are preserved.
+
+### `find_spec`
+
+`find_spec(name, package=None)` searches `sys.meta_path` finders and returns the
+`ModuleSpec` for the named module without importing it. Returns `None` if not found.
+
+### The bootstrap layers
+
+`_bootstrap.py` handles the first phase of import (built-ins, frozen modules, and the
+meta path machinery). `_bootstrap_external.py` adds file finders, path hooks, and the
+`.pyc` cache. Both are frozen into the interpreter binary so they can be imported without
+any filesystem access.
+
+## gopy notes
+
+`vm/eval_import.go` handles `IMPORT_NAME` / `IMPORT_FROM` opcodes. The gopy equivalent of
+`_bootstrap._gcd_import` looks up modules in the stdlibinit registry. `importlib.reload`
+is not yet implemented.

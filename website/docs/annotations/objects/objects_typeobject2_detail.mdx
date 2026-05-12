@@ -1,0 +1,83 @@
+---
+title: Objects/typeobject.c (part 2)
+description: "typeobject part 2: MRO C3 linearisation, type_new for user-defined classes, __init_subclass__ dispatch, __set_name__ protocol, slot inheritance update_one_slot, and __subclasshook__."
+cpython_path: Objects/typeobject.c
+cpython_version: "3.14"
+lines: 9000
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Objects/typeobject.c` (part 2)
+
+<CpyLink path="Objects/typeobject.c" />
+
+This annotation covers class creation mechanics in `Objects/typeobject.c`. For the slot
+lookup protocol, `type.__call__`, and the descriptor protocol see the `python_typeobject_c`
+annotation.
+
+## Map
+
+| Lines | Symbol | Role |
+| ----- | ------ | ---- |
+| 1-600 | `mro_implementation`, `calculate_metaclass` | C3 MRO computation |
+| 601-1200 | `type_new_impl` | `type.__new__` for user-defined classes |
+| 1201-1600 | `__init_subclass__` dispatch | Called after each subclass is created |
+| 1601-1900 | `__set_name__` protocol | Called on descriptors after class creation |
+| 1901-2600 | `update_one_slot` | Propagate inherited C slots to subclass |
+| 2601-9000 | Misc type methods | `type_repr`, `type_getattro`, `type_setattro`, etc. |
+
+## Reading
+
+### C3 MRO linearisation
+
+`mro_implementation` implements the C3 algorithm. It builds a merge list of the MROs of
+all bases plus the bases list itself, then repeatedly takes the head of the first list
+that does not appear in the tail of any other list.
+
+```c
+// CPython: Objects/typeobject.c:2180 mro_implementation
+static PyObject *
+mro_implementation(PyTypeObject *type)
+{
+    /* Merge = [mro(B) for B in bases] + [bases] */
+    ...
+    while (1) {
+        /* find good head */
+        good = NULL;
+        for (i = 0; i < to_merge_size; i++) {
+            PyObject *candidate = PyList_GET_ITEM(...);
+            if (!tail_contains(to_merge, i, candidate))
+                good = candidate;
+        }
+        if (good == NULL) break;
+        ...
+    }
+}
+```
+
+### `type_new_impl` class creation
+
+`type.__new__(mcs, name, bases, namespace)` validates the bases, computes the MRO, copies
+slots and descriptors, then calls `__init_subclass__` on each base and `__set_name__` on
+each descriptor in the new class's namespace.
+
+### `update_one_slot`
+
+When a method is overridden in a subclass, `update_one_slot` propagates the C-level slot
+pointer (`tp_richcompare`, `nb_add`, etc.) from the defining class through all subclasses.
+This ensures that C code can call through the C slot pointer without checking the Python
+method resolution order on every call.
+
+### `__set_name__` protocol
+
+After class creation, `type_new_impl` iterates all values in the namespace. For each value
+that has a `__set_name__` method, it calls `value.__set_name__(owner, name)`. This allows
+descriptors to know the attribute name they were assigned to.
+
+## gopy notes
+
+`objects/type.go` implements `type.__new__`. MRO computation is in `objects/type.go:computeMRO`.
+`__init_subclass__` is called from `objects/usertype.go`. `update_one_slot` is not needed
+in gopy since slot dispatch goes through the Python MRO rather than C slot pointers.

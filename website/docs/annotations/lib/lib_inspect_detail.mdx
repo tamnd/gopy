@@ -1,0 +1,67 @@
+---
+title: Lib/inspect.py
+description: "inspect module: getmembers, getfullargspec, signature/Parameter/BoundArguments, getsource/getsourcelines, getfile, isfunction/isclass/isgenerator predicates, and stack/currentframe."
+cpython_path: Lib/inspect.py
+cpython_version: "3.14"
+lines: 3400
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Lib/inspect.py`
+
+<CpyLink path="Lib/inspect.py" />
+
+`Lib/inspect.py` provides runtime introspection of live objects and source code. It is
+used by `help()`, `pydoc`, `dataclasses`, `functools.wraps`, and many test frameworks.
+
+## Map
+
+| Lines | Symbol | Role |
+| ----- | ------ | ---- |
+| 1-300 | Type predicates | `isfunction`, `ismethod`, `isgenerator`, `iscoroutine`, `isclass`, etc. |
+| 301-700 | `getmembers`, `getmro`, `classify_class_attrs` | Class introspection |
+| 701-1200 | `Signature`, `Parameter`, `BoundArguments` | Callable signature reflection |
+| 1201-1600 | `getsource`, `getsourcelines`, `getsourcefile`, `getfile` | Source code retrieval |
+| 1601-2100 | `stack`, `currentframe`, `getframeinfo` | Call stack introspection |
+| 2101-3400 | `getfullargspec`, `getargvalues`, `formatargspec` | Legacy argument introspection |
+
+## Reading
+
+### `Signature` and `Parameter`
+
+`inspect.signature(callable)` returns a `Signature` object that describes all parameters.
+Each `Parameter` has `name`, `kind` (POSITIONAL_ONLY, POSITIONAL_OR_KEYWORD, VAR_POSITIONAL,
+KEYWORD_ONLY, VAR_KEYWORD), `default`, and `annotation`.
+
+```python
+# CPython: Lib/inspect.py:1420 signature
+def signature(obj, *, follow_wrapped=True, globals=None, locals=None, eval_str=False):
+    ...
+    return Signature.from_callable(obj, follow_wrapped=follow_wrapped, ...)
+```
+
+### `getsource` implementation
+
+`getsource` calls `getsourcelines`, which uses `linecache.getlines` to fetch the file.
+`findsource` scans backward from the reported line number for the `def`/`class` keyword to
+find the start of the definition. This heuristic can fail for dynamically generated code.
+
+### `stack` and frame walking
+
+`stack(context=1)` calls `currentframe()` (which is `sys._getframe(1)`) and follows the
+`f_back` chain. Each frame is wrapped in a `FrameInfo` named tuple with the filename, line
+number, function name, and surrounding source lines.
+
+### Type predicates
+
+`isfunction(obj)` checks `isinstance(obj, types.FunctionType)`. `isbuiltin` checks
+`isinstance(obj, types.BuiltinFunctionType)`. `isgeneratorfunction` checks
+`CO_GENERATOR` in `obj.__code__.co_flags`. `iscoroutinefunction` checks `CO_COROUTINE`.
+
+## gopy notes
+
+Not yet ported. `inspect` requires frame introspection (`sys._getframe`), which depends
+on the frame object being accessible from Python code. `Signature` and `Parameter` are
+pure Python and can be ported to `module/inspect/` independently of frame access.

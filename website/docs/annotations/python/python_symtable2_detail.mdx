@@ -1,0 +1,73 @@
+---
+title: Python/symtable.c (part 2)
+description: "symtable part 2: comprehension scope isolation, annotation scope (PEP 563/649), global/nonlocal declaration propagation, free variable discovery, and the PySTEntry Python-visible type."
+cpython_path: Python/symtable.c
+cpython_version: "3.14"
+lines: 2100
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Python/symtable.c` (part 2)
+
+<CpyLink path="Python/symtable.c" />
+
+This annotation covers comprehension scoping, free variable discovery, and the
+Python-visible `symtable` module in `Python/symtable.c`. For the basic scope entry
+creation and the `global`/`nonlocal` walk see the `python_symtable_c` annotation.
+
+## Map
+
+| Lines | Symbol | Role |
+| ----- | ------ | ---- |
+| 1-400 | Comprehension scope | Nested scope creation for list/set/dict comprehensions |
+| 401-700 | Annotation scope (PEP 649) | `__annotate__` function scope handling |
+| 701-1100 | `analyze_name` | Classify each name: local, free, cell, global |
+| 1101-1500 | `analyze_block` | Free variable propagation across scope boundaries |
+| 1501-2100 | `PySTEntry` Python type | `symtable` module visible type |
+
+## Reading
+
+### Comprehension scope isolation
+
+Each comprehension (list/set/dict/generator) gets its own `_Py_COMPREHENSION_SCOPE` entry
+in the symbol table. The outermost iterable is injected as a synthetic `.0` argument;
+subsequent iterables are evaluated in the comprehension scope.
+
+```c
+// CPython: Python/symtable.c:1142 symtable_visit_comprehension
+static int
+symtable_visit_comprehension(struct symtable *st, comprehension_ty lc)
+{
+    ...
+    VISIT(st, expr, lc->iter);
+    VISIT(st, expr, lc->target);
+    VISIT_SEQ(st, expr, lc->ifs);
+    ...
+}
+```
+
+### Free variable discovery
+
+`analyze_block` performs a two-pass analysis: the first pass collects all names in the
+block; the second propagates `DEF_FREE` upward through enclosing scopes. A name is a
+free variable in scope S if it is used in S but defined in an enclosing scope.
+
+### `PySTEntry` Python type
+
+The `symtable` module exposes `PySTEntry` objects with properties: `id`, `name`, `symbols`,
+`children`, `type` (function/class/module), `lineno`. The `symbols` dict maps each name to
+an integer bitmask of `DEF_*` / `USE_*` flags.
+
+### PEP 649 annotation scope
+
+Python 3.14 implements PEP 649 (deferred annotations). Each function with annotations
+gets a synthetic `__annotate__` nested function that contains the annotation expressions.
+The symbol table creates a separate scope for this function.
+
+## gopy notes
+
+`compile/flowgraph.go` consumes the symbol table from `parser/pegen`. The free variable
+discovery maps to the cell/free variable infrastructure in `compile/codegen_stmt_funclike.go`.
+PEP 649 annotation scopes are not yet handled in gopy.
