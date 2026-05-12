@@ -1,0 +1,110 @@
+---
+title: Modules/_json.c (part 3)
+description: "_json.c part 3: JSONDecoder, scanstring, parse_number, object/array parsing."
+cpython_path: Modules/_json.c
+cpython_version: "3.14"
+lines: 600
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/_json.c" />
+
+This annotation covers JSON decoding. See `modules_json2_detail` for `JSONEncoder`, `encode_float`, and the chunked string encoder.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `JSONDecoder.__init__` | Set up object/array hooks and number parsers |
+| 81-200 | `scanstring` | Decode a JSON string with escape sequences |
+| 201-320 | `parse_number` | Parse integer, float, or `Inf`/`NaN` |
+| 321-440 | `JSONObject` | Parse `{"key": value, ...}` into a dict |
+| 441-600 | `JSONArray` | Parse `[value, ...]` into a list |
+
+## Reading
+
+### `scanstring`
+
+```c
+// CPython: Modules/_json.c:280 scanstring_unicode
+static PyObject *
+scanstring_unicode(PyObject *pystr, Py_ssize_t end, int strict, Py_ssize_t *next_end_ptr)
+{
+    /* Scan a JSON string starting after the opening '"'.
+       Handle: \", \\, \/, \b, \f, \n, \r, \t, \uXXXX, \uXXXX\uXXXX (surrogate pairs) */
+    const Py_UCS1 *buf = (Py_UCS1 *)PyUnicode_DATA(pystr);
+    Py_ssize_t len = PyUnicode_GET_LENGTH(pystr);
+    _PyUnicodeWriter writer;
+    _PyUnicodeWriter_Init(&writer);
+    while (end < len) {
+        Py_UCS4 c = buf[end];
+        if (c == '"') break;
+        if (c == '\\') {
+            /* Handle escape */
+            ...
+        }
+        if (strict && c < 0x20) {
+            /* Control character in strict mode */
+            raise_errmsg("Invalid control character at", pystr, end);
+            return NULL;
+        }
+        end++;
+    }
+    return _PyUnicodeWriter_Finish(&writer);
+}
+```
+
+`_PyUnicodeWriter` builds the result string without knowing the final length upfront. Surrogate pairs (`𐀀`) are decoded to a single Unicode code point using the high/low surrogate formula.
+
+### `parse_number`
+
+```c
+// CPython: Modules/_json.c:480 parse_number
+static PyObject *
+parse_number(PyObject *pystr, Py_ssize_t start, Py_ssize_t end)
+{
+    /* Try integer first; fall back to float */
+    const char *numstr = ...; /* substring */
+    PyObject *rval = PyLong_FromString(numstr, NULL, 10);
+    if (rval != NULL) return rval;
+    /* Not an integer: try float */
+    PyErr_Clear();
+    rval = PyFloat_FromString(pystr_sub);
+    return rval;
+}
+```
+
+JSON numbers are parsed as `int` if they have no decimal point or exponent, otherwise as `float`. `parse_constant` handles `Infinity`, `-Infinity`, and `NaN` when `parse_constant` is set in the decoder.
+
+### `JSONObject`
+
+```c
+// CPython: Modules/_json.c:560 JSONObject
+static PyObject *
+JSONObject(PyObject *s_and_end, PyObject *encoding,
+           int strict, PyObject *scan_once, PyObject *object_hook,
+           PyObject *object_pairs_hook, PyObject *memo)
+{
+    /* Parse {"key": value, ...}
+       If object_pairs_hook is set: return [(key, val), ...]
+       Otherwise: return dict {key: val} or apply object_hook */
+    PyObject *dct = object_pairs_hook ? PyList_New(0) : PyDict_New();
+    while (...)  {
+        PyObject *key = scanstring(...);
+        /* expect ':' */
+        PyObject *val = scan_once(context, s, idx);
+        if (object_pairs_hook) PyList_Append(dct, PyTuple_Pack(2, key, val));
+        else PyDict_SetItem(dct, key, val);
+    }
+    if (object_hook) dct = PyObject_CallOneArg(object_hook, dct);
+    return dct;
+}
+```
+
+`object_pairs_hook` receives `[(key, val), ...]` in the order the pairs appeared (preserving duplicates). `object_hook` receives the completed dict. `json.loads(s, object_pairs_hook=OrderedDict)` was the idiom before `dict` became ordered in Python 3.7.
+
+## gopy notes
+
+`JSONDecoder` is `module/json.Decoder` in `module/json/module.go`. `scanstring` uses `strings.Builder` with rune-by-rune processing. `parse_number` tries `strconv.ParseInt` then `strconv.ParseFloat`. `JSONObject` builds a `map[objects.Object]objects.Object` or a list of pairs. `object_hook` is called via `objects.CallOneArg`.

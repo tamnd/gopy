@@ -1,0 +1,115 @@
+---
+title: Objects/longobject.c (part 12)
+description: "Objects/longobject.c part 12: int.as_integer_ratio, int.__index__, PyLong_AsLong, PyLong_AsDouble."
+cpython_path: Objects/longobject.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Objects/longobject.c" />
+
+This annotation covers conversion and the numeric protocol. See `objects_longobject11_detail` for `bit_length`, `bit_count`, `to_bytes`, `from_bytes`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `int.as_integer_ratio` | Return `(self, 1)` for use in float-like operations |
+| 81-160 | `int.__index__` | Return `self` for use as sequence index or slice |
+| 161-260 | `PyLong_AsLong` | Extract a C `long`; raise `OverflowError` on out-of-range |
+| 261-380 | `PyLong_AsDouble` | Extract a C `double`; raise `OverflowError` for large ints |
+| 381-500 | `PyLong_AsUnsignedLong` / `_AsSize_t` | Unsigned conversions |
+
+## Reading
+
+### `int.as_integer_ratio`
+
+```c
+// CPython: Objects/longobject.c:4220 long_as_integer_ratio
+static PyObject *
+long_as_integer_ratio(PyObject *self, PyObject *Py_UNUSED(ignored))
+{
+    /* Integers are exact rationals: n/1 */
+    return PyTuple_Pack(2, self, _PyLong_GetOne());
+}
+```
+
+`int.as_integer_ratio()` returns `(self, 1)`. This matches `float.as_integer_ratio()` signature and allows code like `Fraction(x)` to work uniformly for both `int` and `float` inputs. `Fraction(3)` calls `as_integer_ratio()` and gets `(3, 1)`.
+
+### `int.__index__`
+
+```c
+// CPython: Objects/longobject.c:4280 long___index___impl
+static PyObject *
+long___index___impl(PyObject *self)
+{
+    /* __index__ is required for use as a sequence index.
+       For plain int, just return self (already an int).
+       For int subclasses, convert to plain int. */
+    if (PyLong_CheckExact(self)) {
+        return Py_NewRef(self);
+    }
+    return _PyLong_Copy((PyLongObject *)self);
+}
+```
+
+`__index__` is called by `list.__getitem__`, `range`, `struct.pack`, etc. when they require an integer index. `numpy.int64.__index__` makes NumPy integers usable as list indices.
+
+### `PyLong_AsLong`
+
+```c
+// CPython: Objects/longobject.c:760 PyLong_AsLong
+long
+PyLong_AsLong(PyObject *vv)
+{
+    PyLongObject *v = (PyLongObject *)vv;
+    /* Check for compact representation first */
+    if (_PyLong_IsCompact(v)) {
+        stwodigits x = _PyLong_CompactValue(v);
+        if ((long)x == x) return (long)x;
+        /* Compact but too large for C long: fall through */
+    }
+    /* Multi-digit path */
+    ...
+    if (overflow) {
+        PyErr_SetString(PyExc_OverflowError,
+            "Python int too large to convert to C long");
+        return -1;
+    }
+    return result;
+}
+```
+
+`PyLong_AsLong` is the most common C API function. The compact fast path handles small integers in one branch. `PyLong_AsLong(PyLong_FromLong(42))` should be essentially free.
+
+### `PyLong_AsDouble`
+
+```c
+// CPython: Objects/longobject.c:880 PyLong_AsDouble
+double
+PyLong_AsDouble(PyObject *vv)
+{
+    if (_PyLong_IsCompact((PyLongObject *)vv)) {
+        return (double)_PyLong_CompactValue((PyLongObject *)vv);
+    }
+    /* Multi-digit: use _PyLong_Frexp to get (mantissa, exponent) */
+    double x;
+    int e;
+    x = _PyLong_Frexp((PyLongObject *)vv, &e);
+    if (e > DBL_MAX_EXP) {
+        PyErr_SetString(PyExc_OverflowError,
+            "int too large to convert to float");
+        return -1.0;
+    }
+    return ldexp(x, e);
+}
+```
+
+`PyLong_AsDouble` raises `OverflowError` for integers larger than `DBL_MAX` (~1.8e308). For integers near `DBL_MAX`, `ldexp(mantissa, exponent)` computes the `double` value with correct rounding.
+
+## gopy notes
+
+`int.as_integer_ratio` is `objects.LongAsIntegerRatio` in `objects/long.go`. `int.__index__` returns `self` for `LongObject` or copies for subclasses. `PyLong_AsLong` is `objects.LongAsLong` using `big.Int.Int64` with overflow check. `PyLong_AsDouble` uses `big.Float.Float64`.

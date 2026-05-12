@@ -1,0 +1,121 @@
+---
+title: Python/marshal.c (part 4)
+description: "Python/marshal.c part 4: marshal.load, code object deserialization, flag bits, version 4 format."
+cpython_path: Python/marshal.c
+cpython_version: "3.14"
+lines: 600
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Python/marshal.c" />
+
+This annotation covers the deserialization (read) path. See `python_marshal3_detail` for `marshal.dump`, code object serialization, and the type byte encoding.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `marshal.load` entry | Read from a file object |
+| 81-180 | `r_object` | Core dispatcher: read type byte, dispatch |
+| 181-300 | `r_PyObject` / `r_short_ascii` | Read common types |
+| 301-420 | `r_codeobject` | Reconstruct a `PyCodeObject` |
+| 421-600 | Reference table | Object sharing for deduplication |
+
+## Reading
+
+### `r_object`
+
+```c
+// CPython: Python/marshal.c:1080 r_object
+static PyObject *
+r_object(RFILE *p)
+{
+    int type = r_byte(p);
+    int flag = type & FLAG_REF;
+    type &= ~FLAG_REF;
+    switch (type) {
+        case TYPE_NULL:     return NULL;
+        case TYPE_NONE:     Py_RETURN_NONE;
+        case TYPE_TRUE:     Py_RETURN_TRUE;
+        case TYPE_FALSE:    Py_RETURN_FALSE;
+        case TYPE_INT:      return r_long(p);
+        case TYPE_FLOAT:    return r_float_str(p);
+        case TYPE_BINARY_FLOAT: return r_float_bin(p);
+        case TYPE_STRING:   /* short string < 256 bytes */ ...
+        case TYPE_UNICODE:  ...
+        case TYPE_SMALL_TUPLE: return r_small_tuple(p, type, flag);
+        case TYPE_TUPLE:    return r_tuple(p, flag);
+        case TYPE_LIST:     return r_list(p);
+        case TYPE_DICT:     return r_dict(p);
+        case TYPE_CODE:     return r_codeobject(p, flag);
+        case TYPE_REF:      return r_ref(p);
+        ...
+    }
+}
+```
+
+`FLAG_REF` (the high bit of the type byte) means: after reading this object, register it in the reference table. `TYPE_REF` reads an index into the reference table to return a previously seen object. This deduplication is critical for code objects: the same string constant appears in many places.
+
+### `r_codeobject`
+
+```c
+// CPython: Python/marshal.c:1380 r_codeobject
+static PyObject *
+r_codeobject(RFILE *p, int flag)
+{
+    /* Read all code object fields in order */
+    int argcount = r_long(p);
+    int posonlyargcount = r_long(p);
+    int kwonlyargcount = r_long(p);
+    int stacksize = r_long(p);
+    int flags = r_long(p);
+    PyObject *code = r_object(p);       /* co_code bytes */
+    PyObject *consts = r_object(p);     /* co_consts tuple */
+    PyObject *names = r_object(p);      /* co_names tuple */
+    PyObject *localsplusnames = r_object(p);
+    PyObject *localspluskinds = r_object(p);
+    PyObject *filename = r_object(p);
+    PyObject *name = r_object(p);
+    PyObject *qualname = r_object(p);
+    int firstlineno = r_long(p);
+    PyObject *linetable = r_object(p);
+    PyObject *exceptiontable = r_object(p);
+    return _PyCode_New(&uops);
+}
+```
+
+Code objects are written/read with all fields in a fixed order. The format changed in Python 3.11 to include `localsplusnames`/`localspluskinds` (replacing `co_varnames`/`co_cellvars`/`co_freevars`) and `exceptiontable`.
+
+### Reference table
+
+```c
+// CPython: Python/marshal.c:1020 r_ref_reserve / r_ref_insert
+static Py_ssize_t
+r_ref_reserve(int flag, RFILE *p)
+{
+    if (flag) {
+        /* Reserve a slot in the ref table; fill it after the object is read */
+        Py_ssize_t idx = PyList_GET_SIZE(p->refs);
+        PyList_Append(p->refs, Py_None);  /* placeholder */
+        return idx;
+    }
+    return 0;
+}
+
+static PyObject *
+r_ref_insert(PyObject *o, Py_ssize_t idx, int flag, RFILE *p)
+{
+    if (flag) {
+        PyList_SET_ITEM(p->refs, idx, Py_NewRef(o));
+    }
+    return o;
+}
+```
+
+Circular references (which occur in code object nesting) require two-pass handling: first reserve a slot, then fill it after the object is fully constructed. `PyList_SET_ITEM` replaces the `Py_None` placeholder with the actual object.
+
+## gopy notes
+
+`marshal.load` is `objects.MarshalLoad` in `objects/marshal.go`. `r_object` dispatches on the type byte. `r_codeobject` reads fields and calls `objects.NewCodeObject`. The reference table is a Go `[]objects.Object` slice. `FLAG_REF` is checked per-object and the slot is filled after construction.

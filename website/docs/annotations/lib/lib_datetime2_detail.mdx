@@ -1,0 +1,123 @@
+---
+title: Lib/datetime.py (part 2)
+description: "datetime.py part 2: datetime.now, datetime.fromtimestamp, datetime.strptime, timedelta arithmetic, timezone."
+cpython_path: Lib/datetime.py
+cpython_version: "3.14"
+lines: 600
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/datetime.py" />
+
+This annotation covers datetime construction and time zone support. See `lib_datetime_detail` for `date.__new__`, `time.__new__`, and the `timedelta` internal representation.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `datetime.now` | Current datetime with optional timezone |
+| 81-180 | `datetime.fromtimestamp` | Construct from a POSIX timestamp |
+| 181-280 | `datetime.strptime` | Parse a string using a format |
+| 281-380 | `timedelta` arithmetic | Add/subtract/multiply `timedelta` objects |
+| 381-600 | `timezone` / `ZoneInfo` | Fixed-offset and IANA timezone support |
+
+## Reading
+
+### `datetime.now`
+
+```python
+# CPython: Lib/datetime.py:1680 datetime.now
+@classmethod
+def now(cls, tz=None):
+    """Return the current local date and time."""
+    t = _time.time()
+    return cls.fromtimestamp(t, tz)
+```
+
+`datetime.now(tz=timezone.utc)` returns a timezone-aware datetime. `datetime.now()` returns a naive (no timezone) local datetime. The distinction matters for comparison: naive and aware datetimes cannot be subtracted.
+
+### `datetime.fromtimestamp`
+
+```python
+# CPython: Lib/datetime.py:1720 datetime.fromtimestamp
+@classmethod
+def fromtimestamp(cls, t, tz=None):
+    """Construct datetime from a POSIX timestamp."""
+    frac, t = _math.modf(t)
+    us = round(frac * 1e6)
+    if us >= 1000000:
+        t += 1; us -= 1000000
+    elif us < 0:
+        t -= 1; us += 1000000
+    converter = _time.localtime if tz is None else _time.gmtime
+    y, m, d, hh, mm, ss, weekday, jday, dst = converter(t)
+    ss = min(ss, 59)  # Clamp leap seconds
+    result = cls(y, m, d, hh, mm, ss, us, tz)
+    if tz is not None:
+        result = tz.fromutc(result)
+    return result
+```
+
+The `modf` trick extracts the microseconds from the fractional part of the timestamp. Leap seconds are clamped to 59 since `datetime` doesn't support second 60.
+
+### `datetime.strptime`
+
+```python
+# CPython: Lib/datetime.py:1780 datetime.strptime
+@classmethod
+def strptime(cls, date_string, format):
+    """Parse date_string according to format."""
+    import _strptime
+    return _strptime._strptime_datetime(cls, date_string, format)
+```
+
+`strptime` delegates to `_strptime` module which parses format directives (`%Y`, `%m`, `%d`, etc.) using regex. The `_strptime` module caches compiled regexes per format string. First call is O(n) for regex compilation; subsequent calls are O(n) for matching.
+
+### `timedelta` arithmetic
+
+```python
+# CPython: Lib/datetime.py:460 timedelta.__add__
+def __add__(self, other):
+    if isinstance(other, timedelta):
+        return timedelta(self._days + other._days,
+                         self._seconds + other._seconds,
+                         self._microseconds + other._microseconds)
+    return NotImplemented
+
+def __mul__(self, other):
+    if isinstance(other, int):
+        usec = self._to_microseconds()
+        return timedelta(0, 0, usec * other)
+    if isinstance(other, float):
+        usec = self._to_microseconds()
+        a, b = other.as_integer_ratio()
+        return timedelta(0, 0, _divide_and_round(usec * a, b))
+    return NotImplemented
+```
+
+`timedelta` stores days, seconds, and microseconds normalized so that `0 <= microseconds < 1e6` and `0 <= seconds < 86400`. Addition just adds all three components; the result is renormalized.
+
+### `timezone`
+
+```python
+# CPython: Lib/datetime.py:2240 timezone.__new__
+class timezone(tzinfo):
+    def __new__(cls, offset, name=None):
+        if not isinstance(offset, timedelta):
+            raise TypeError("offset must be a timedelta")
+        if not (-timedelta(hours=24) < offset < timedelta(hours=24)):
+            raise ValueError("offset must be strictly between -timedelta(hours=24) and timedelta(hours=24)")
+        ...
+    def utcoffset(self, dt):
+        return self._offset
+    def tzname(self, dt):
+        return self._name if self._name else self._name_from_offset(self._offset)
+```
+
+`timezone(timedelta(hours=5, minutes=30))` creates the IST timezone. `timezone.utc` is `timezone(timedelta(0))`. Fixed-offset timezones don't handle DST; use `zoneinfo.ZoneInfo('America/New_York')` for DST-aware zones.
+
+## gopy notes
+
+`datetime.now` is `module/datetime.DatetimeNow` in `module/datetime/module.go` using `time.Now()`. `datetime.fromtimestamp` uses `time.Unix`. `datetime.strptime` delegates to `module/strptime.Strptime`. `timedelta` arithmetic uses Go integer arithmetic on the normalized representation. `timezone` is `module/datetime.Timezone` backed by `time.FixedZone`.

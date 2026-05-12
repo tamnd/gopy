@@ -1,0 +1,108 @@
+---
+title: Lib/time.py — time module (part 2)
+description: "time module part 2: time.sleep, time.perf_counter, time.process_time, time.monotonic, struct_time."
+cpython_path: Modules/timemodule.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/timemodule.c" />
+
+This annotation covers precision timing and sleep. See `lib_time_detail` for `time.time`, `time.gmtime`, `time.localtime`, and `time.mktime`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `time.sleep` | Sleep for fractional seconds; interruptible |
+| 81-160 | `time.perf_counter` | Highest resolution monotonic wall-clock timer |
+| 161-240 | `time.monotonic` | Monotonic clock (never goes backward) |
+| 241-320 | `time.process_time` | CPU time consumed by the current process |
+| 321-500 | `time.get_clock_info` | Query clock resolution and adjustability |
+
+## Reading
+
+### `time.sleep`
+
+```c
+// CPython: Modules/timemodule.c:420 time_sleep_impl
+static PyObject *
+time_sleep_impl(PyObject *module, double secs)
+{
+    if (secs < 0) {
+        PyErr_SetString(PyExc_ValueError, "sleep length must be non-negative");
+        return NULL;
+    }
+    if (pysleep(secs) != 0)
+        return NULL;
+    Py_RETURN_NONE;
+}
+
+static int
+pysleep(_PyTime_t timeout)
+{
+    /* Use select() or nanosleep() depending on the platform.
+       The GIL is released during the sleep. */
+    Py_BEGIN_ALLOW_THREADS
+    select(0, NULL, NULL, NULL, &tv);
+    Py_END_ALLOW_THREADS
+    if (PyErr_CheckSignals()) return -1;  /* EINTR or signal */
+    return 0;
+}
+```
+
+`time.sleep(0)` yields the GIL to other threads. `EINTR` (signal interruption) is handled transparently: if a signal handler doesn't raise, sleep resumes for the remaining duration.
+
+### `time.perf_counter`
+
+```c
+// CPython: Modules/timemodule.c:560 time_perf_counter_impl
+static PyObject *
+time_perf_counter_impl(PyObject *module)
+{
+    /* Use clock_gettime(CLOCK_REALTIME) on Linux,
+       mach_absolute_time() on macOS,
+       QueryPerformanceCounter on Windows. */
+    _PyTime_t t;
+    if (_PyTime_GetPerfCounter(&t) < 0) return NULL;
+    return _PyFloat_FromPyTime(t);
+}
+```
+
+`time.perf_counter()` returns a `float` in seconds with nanosecond resolution on modern platforms. The reference point is arbitrary (usually boot time). Use `time.perf_counter_ns()` for integer nanoseconds to avoid float precision loss.
+
+### `time.monotonic`
+
+```c
+// CPython: Modules/timemodule.c:600 time_monotonic_impl
+/* Uses CLOCK_MONOTONIC on Linux/macOS.
+   Guaranteed to never decrease or jump backward (unlike time.time()).
+   May count while the system is suspended (unlike CLOCK_MONOTONIC_RAW). */
+```
+
+`time.monotonic()` is suitable for measuring elapsed time. `time.time()` can jump backward (NTP adjustment) or forward (DST); `monotonic()` is immune. `time.perf_counter()` is similar but may have higher resolution on some platforms.
+
+### `time.process_time`
+
+```c
+// CPython: Modules/timemodule.c:640 time_process_time_impl
+static PyObject *
+time_process_time_impl(PyObject *module)
+{
+    /* Returns the sum of user and system CPU time.
+       clock_gettime(CLOCK_PROCESS_CPUTIME_ID) on POSIX.
+       Does not include sleep time. */
+    _PyTime_t t;
+    _PyTime_GetProcessTime(&t);
+    return _PyFloat_FromPyTime(t);
+}
+```
+
+`time.process_time()` measures actual CPU work, not wall-clock time. A sleeping process has `process_time` frozen but `monotonic` advancing. Use it to profile CPU-intensive code independent of load.
+
+## gopy notes
+
+`time.sleep` is `module/time.Sleep` in `module/time/module.go` using `time.Sleep` with `runtime.Gosched()` for `sleep(0)`. `time.perf_counter` uses `time.Now().UnixNano()`. `time.monotonic` uses `time.Now()` with monotonic clock reading. `time.process_time` uses `syscall.Times` or `runtime.ReadMemStats`.

@@ -1,0 +1,120 @@
+---
+title: Python/ceval.c (part 37)
+description: "Python/ceval.c part 37: UNPACK_SEQUENCE, UNPACK_EX, LIST_TO_TUPLE, LIST_EXTEND, DICT_MERGE."
+cpython_path: Python/ceval.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Python/ceval.c" />
+
+This annotation covers unpacking and collection building opcodes. See `python_ceval36_detail` for comparison specializations.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `UNPACK_SEQUENCE` | Unpack exactly N items from an iterable |
+| 81-160 | `UNPACK_EX` | `a, *b, c = iterable` — variable-length unpack |
+| 161-240 | `LIST_TO_TUPLE` | Convert the top-of-stack list to a tuple |
+| 241-320 | `LIST_EXTEND` | Extend a list with an iterable |
+| 321-500 | `DICT_MERGE` / `DICT_UPDATE` | Merge into a dict; used for `**kwargs` and `{**d1, **d2}` |
+
+## Reading
+
+### `UNPACK_SEQUENCE`
+
+```c
+// CPython: Python/ceval.c:3480 UNPACK_SEQUENCE
+inst(UNPACK_SEQUENCE, (seq -- values[oparg])) {
+    /* a, b, c = seq   -- oparg=3 */
+    PyObject **top = stack_pointer;
+    int totalerrors = 0;
+    if (PyTuple_CheckExact(seq) && PyTuple_GET_SIZE(seq) == oparg) {
+        /* Fast path: unpack a tuple directly */
+        for (int i = oparg - 1; i >= 0; i--) {
+            *--top = Py_NewRef(PyTuple_GET_ITEM(seq, i));
+        }
+    } else if (PyList_CheckExact(seq) && PyList_GET_SIZE(seq) == oparg) {
+        for (int i = oparg - 1; i >= 0; i--) {
+            *--top = Py_NewRef(PyList_GET_ITEM(seq, i));
+        }
+    } else {
+        if (unpack_iterable(tstate, seq, oparg, -1, top) < 0) {
+            ERROR_IF(true, error);
+        }
+    }
+    Py_DECREF(seq);
+}
+```
+
+`a, b, c = t` for a 3-tuple uses the fast path: direct `ob_item` access. The values are pushed in reverse order so the first value is at the top after all pushes.
+
+### `UNPACK_EX`
+
+```c
+// CPython: Python/ceval.c:3560 UNPACK_EX
+inst(UNPACK_EX, (seq -- values[oparg & 0xFF + (oparg >> 8) + 1])) {
+    /* a, *b, c = seq
+       oparg = (count_after << 8) | count_before
+       The star variable receives a list. */
+    int totalafter = (oparg >> 8);
+    int totalbefore = oparg & 0xFF;
+    int total = totalbefore + totalafter + 1;  /* +1 for the list */
+    if (unpack_iterable(tstate, seq, totalbefore, totalafter,
+                        stack_pointer + total - 1) < 0)
+        ERROR_IF(true, error);
+    Py_DECREF(seq);
+}
+```
+
+`a, *b, c = [1, 2, 3, 4, 5]` gives `a=1, b=[2, 3, 4], c=5`. The star variable always receives a list (not a tuple). `unpack_iterable` materializes the iterable and distributes elements.
+
+### `LIST_EXTEND`
+
+```c
+// CPython: Python/ceval.c:3640 LIST_EXTEND
+inst(LIST_EXTEND, (list, iterable --)) {
+    /* oparg: index of list from stack top (for BUILD_LIST + multiple * exprs) */
+    PyObject *none_val = _PyList_Extend((PyListObject *)list, iterable);
+    if (none_val == NULL) {
+        if (_PyErr_ExceptionMatches(tstate, PyExc_TypeError) &&
+            Py_TYPE(iterable)->tp_iter == NULL &&
+            !PySequence_Check(iterable)) {
+            _PyErr_Format(..., "cannot unpack non-iterable %s object",
+                          Py_TYPE(iterable)->tp_name);
+        }
+        ERROR_IF(true, error);
+    }
+    Py_DECREF(none_val);
+    Py_DECREF(iterable);
+}
+```
+
+`[1, *other, 2]` compiles to `BUILD_LIST 0`, `LOAD_CONST 1`, `LIST_APPEND`, `LOAD_NAME other`, `LIST_EXTEND 1`, etc. `LIST_EXTEND` is also used for `[*a, *b]` expressions.
+
+### `DICT_MERGE`
+
+```c
+// CPython: Python/ceval.c:3720 DICT_MERGE
+inst(DICT_MERGE, (update --)) {
+    /* Used for **kwargs merging: {'a': 1, **d, 'b': 2}
+       oparg: index into stack for the target dict */
+    PyObject *dict = PEEK(oparg + 1);
+    if (_PyDict_MergeEx(dict, update, 2) < 0) {
+        /* merge_ex with conflict: raise TypeError for duplicate keys */
+        format_kwargs_error(tstate, PEEK(2 + oparg), update);
+        ERROR_IF(true, error);
+    }
+    Py_DECREF(update);
+}
+```
+
+`{**d1, **d2}` compiles to `BUILD_MAP 0`, `LOAD_NAME d1`, `DICT_MERGE`, `LOAD_NAME d2`, `DICT_MERGE`. `DICT_MERGE` raises `TypeError` for duplicate keys in function `**kwargs`. `DICT_UPDATE` is the non-error version used for `{**d}` expressions.
+
+## gopy notes
+
+`UNPACK_SEQUENCE` is in `vm/eval_simple.go`; the tuple fast path reads `objects.Tuple.Items` directly. `UNPACK_EX` calls `vm.unpackIterable`. `LIST_EXTEND` calls `objects.ListExtend`. `DICT_MERGE` calls `objects.DictMergeEx` which raises on key conflicts. `DICT_UPDATE` calls `objects.DictMerge`.

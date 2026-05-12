@@ -1,0 +1,112 @@
+---
+title: Objects/floatobject.c (part 5)
+description: "Objects/floatobject.c part 5: float.as_integer_ratio, float.is_integer, float.hex, float.fromhex, float free list."
+cpython_path: Objects/floatobject.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Objects/floatobject.c" />
+
+This annotation covers float utility methods and memory management. See `objects_floatobject4_detail` for `float.__new__`, `float.__repr__`, arithmetic, and `__hash__`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | Float free list | Reuse `PyFloatObject` allocations |
+| 81-160 | `float.as_integer_ratio` | Exact rational representation as `(m, n)` |
+| 161-240 | `float.is_integer` | True if the float has no fractional part |
+| 241-360 | `float.hex` | Hex representation: `0x1.8p+1` format |
+| 361-500 | `float.fromhex` | Parse hex float string |
+
+## Reading
+
+### Float free list
+
+```c
+// CPython: Objects/floatobject.c:40 float free list
+#define PyFloat_MAXFREELIST 256
+
+static PyFloatObject *free_list[PyFloat_MAXFREELIST];
+static int numfree = 0;
+
+static void
+float_dealloc(PyFloatObject *op)
+{
+    if (numfree < PyFloat_MAXFREELIST) {
+        /* Reuse: store next pointer in ob_fval space */
+        *(PyFloatObject **)op = free_list[0];
+        free_list[0] = op;
+        numfree++;
+        return;
+    }
+    PyObject_Free(op);
+}
+```
+
+The float free list avoids `malloc`/`free` for the very common case of floating-point arithmetic in loops. `1.0 + 2.0` creates one float result and discards the operands; the old floats go back to the free list for the next operation.
+
+### `float.as_integer_ratio`
+
+```c
+// CPython: Objects/floatobject.c:820 float_as_integer_ratio
+static PyObject *
+float_as_integer_ratio(PyObject *self, PyObject *Py_UNUSED(ignored))
+{
+    double self_double = PyFloat_AS_DOUBLE(self);
+    /* Decompose: self = mantissa * 2^exponent
+       Then: self = (mantissa * 2^max(exponent, 0)) / 2^max(-exponent, 0) */
+    int exponent;
+    double mantissa = frexp(self_double, &exponent);
+    /* Scale mantissa to integer: mantissa * 2^53 */
+    for (int i = 0; i < 300 && mantissa != floor(mantissa); i++) {
+        mantissa *= 2.0;
+        exponent--;
+    }
+    ...
+}
+```
+
+`(1.5).as_integer_ratio()` returns `(3, 2)`. `frexp` decomposes the double into mantissa and exponent; scaling mantissa by `2^53` produces exact integers. `float.fromhex` is the inverse operation for lossless float round-trips.
+
+### `float.is_integer`
+
+```c
+// CPython: Objects/floatobject.c:880 float_is_integer
+static PyObject *
+float_is_integer(PyObject *self, PyObject *Py_UNUSED(ignored))
+{
+    double x = PyFloat_AS_DOUBLE(self);
+    if (!Py_IS_FINITE(x)) return PyBool_FromLong(0);
+    return PyBool_FromLong(x == floor(x));
+}
+```
+
+`(3.0).is_integer()` returns `True`; `(3.5).is_integer()` returns `False`. `inf.is_integer()` returns `False`. This is equivalent to `x == int(x)` but faster (no allocation).
+
+### `float.hex`
+
+```c
+// CPython: Objects/floatobject.c:920 float_hex
+static PyObject *
+float_hex(PyObject *self, PyObject *Py_UNUSED(ignored))
+{
+    /* Exact IEEE 754 representation:
+       0x1.1999999999ap+3 for 8.8
+       Format: [sign] '0x' hex_mantissa ['p' [sign] decimal_exponent]
+    */
+    double x = PyFloat_AS_DOUBLE(self);
+    ...
+    return PyUnicode_FromString(buf);
+}
+```
+
+`(8.8).hex()` returns `'0x1.199999999999ap+3'`. The hex format is lossless: `float.fromhex(x.hex()) == x` always holds. Useful for serializing floats without precision loss.
+
+## gopy notes
+
+The float free list is `objects.FloatFreeList` in `objects/float.go`. `float.as_integer_ratio` uses `math.Frexp` and `big.Int` arithmetic. `float.is_integer` uses `math.Trunc`. `float.hex` formats using `strconv.FormatFloat` with `'x'` verb. `float.fromhex` uses `strconv.ParseFloat`.

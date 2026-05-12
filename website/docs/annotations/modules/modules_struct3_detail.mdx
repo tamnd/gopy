@@ -1,0 +1,126 @@
+---
+title: Modules/_struct.c (part 3)
+description: "_struct.c part 3: Struct.pack_into, Struct.unpack_from, Struct.iter_unpack, calcsize, native format."
+cpython_path: Modules/_struct.c
+cpython_version: "3.14"
+lines: 600
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/_struct.c" />
+
+This annotation covers in-place and iterative struct operations. See `modules_struct2_detail` for `Struct.pack`, `Struct.unpack`, format string parsing, and the type code table.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `Struct.pack_into` | Pack directly into a writable buffer at an offset |
+| 81-180 | `Struct.unpack_from` | Unpack from a buffer at an offset without slicing |
+| 181-280 | `Struct.iter_unpack` | Iterator yielding successive records |
+| 281-380 | `struct.calcsize` | Return the byte size of a format string |
+| 381-600 | Native format (`@`) | Use host alignment and byte order |
+
+## Reading
+
+### `Struct.pack_into`
+
+```c
+// CPython: Modules/_struct.c:1420 s_pack_into
+static PyObject *
+s_pack_into(PyObject *self, PyObject *const *args, Py_ssize_t nargs)
+{
+    /* pack_into(buffer, offset, *values) */
+    PyStructObject *soself = (PyStructObject *)self;
+    Py_buffer buffer;
+    PyObject_GetBuffer(args[0], &buffer, PyBUF_WRITABLE);
+    Py_ssize_t offset = PyLong_AsSsize_t(args[1]);
+    if (offset < 0) offset += buffer.len;
+    char *buf = (char *)buffer.buf + offset;
+    /* Check bounds */
+    if (offset + soself->s_size > buffer.len) {
+        PyErr_Format(PyExc_struct.error, "pack_into requires a buffer of at least %zd bytes for packing %zd bytes at offset %zd",
+                     offset + soself->s_size, soself->s_size, offset);
+        return NULL;
+    }
+    struct_pack_into_internal(soself, buf, args + 2, nargs - 2);
+    PyBuffer_Release(&buffer);
+    Py_RETURN_NONE;
+}
+```
+
+`Struct.pack_into(buf, offset, *values)` writes directly into a `bytearray` or `ctypes` array at a given offset. Negative offsets count from the end. No new bytes object is allocated — this is the zero-copy path for binary protocols.
+
+### `Struct.unpack_from`
+
+```c
+// CPython: Modules/_struct.c:1480 s_unpack_from
+static PyObject *
+s_unpack_from(PyObject *self, PyObject *const *args, Py_ssize_t nargs,
+              PyObject *kwnames)
+{
+    /* unpack_from(buffer, offset=0) */
+    Py_buffer buffer;
+    PyObject_GetBuffer(args[0], &buffer, PyBUF_SIMPLE);
+    Py_ssize_t offset = nargs > 1 ? PyLong_AsSsize_t(args[1]) : 0;
+    if (offset < 0) offset += buffer.len;
+    const char *buf = (const char *)buffer.buf + offset;
+    PyObject *result = s_unpack_internal((PyStructObject *)self, buf);
+    PyBuffer_Release(&buffer);
+    return result;
+}
+```
+
+`Struct.unpack_from(data, 4)` reads a struct starting at byte 4, without making a copy of `data[4:4+size]`. Works with any buffer protocol object: `bytes`, `bytearray`, `memoryview`, `array.array`.
+
+### `Struct.iter_unpack`
+
+```c
+// CPython: Modules/_struct.c:1560 s_iter_unpack
+static PyObject *
+s_iter_unpack(PyObject *self, PyObject *buffer)
+{
+    /* Return an iterator that yields successive struct records */
+    PyStructObject *soself = (PyStructObject *)self;
+    if (soself->s_size == 0) {
+        PyErr_SetString(PyExc_struct.error, "cannot iter_unpack with a 0-sized struct");
+        return NULL;
+    }
+    return unpackiter_new(soself, buffer);
+}
+
+static PyObject *
+unpackiter_next(unpackiterobject *self)
+{
+    if (self->index >= self->length) return NULL;  /* StopIteration */
+    const char *buf = (const char *)self->buf.buf + self->index * self->so->s_size;
+    self->index++;
+    return s_unpack_internal(self->so, buf);
+}
+```
+
+`Struct.iter_unpack(data)` returns an iterator that yields one tuple per record. For a stream of fixed-size records (e.g., a binary file of 16-byte entries), this is more efficient than slicing and calling `unpack` in a loop.
+
+### Native format
+
+```c
+// CPython: Modules/_struct.c:680 native format '@'
+/* Format string prefix:
+   '@' = native byte order + native size + native alignment (default)
+   '=' = native byte order + standard size + no alignment
+   '<' = little-endian + standard size
+   '>' = big-endian + standard size
+   '!' = network (big-endian) + standard size
+   
+   Native alignment means padding bytes are inserted to match C struct alignment.
+   '@i' on x86-64 = 4 bytes; '=i' = 4 bytes; but '@c@i' may be 8 bytes (3 pad bytes).
+*/
+```
+
+`'@'` is the default. It inserts padding to match the C compiler's struct layout. Use `'='` or explicit endian prefixes for portable binary formats (network protocols, file formats).
+
+## gopy notes
+
+`Struct.pack_into` is `objects.StructPackInto` in `objects/struct.go`. It uses `unsafe.Pointer` arithmetic to write to the buffer. `Struct.unpack_from` is `objects.StructUnpackFrom`. `Struct.iter_unpack` returns `objects.StructIterUnpack`. Native alignment is computed using `unsafe.Alignof` on the corresponding Go types.
