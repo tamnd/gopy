@@ -210,6 +210,12 @@ import (
 	// CPython: Modules/_hashopenssl.c:2374 _hashlibmodule
 	_ "github.com/tamnd/gopy/module/_hashlib"
 
+	// Built-in module: _uuid. Registers itself via module/_uuid/module.go
+	// init(). Backs Lib/uuid.py with thread-safe UUID byte generation via
+	// crypto/rand.
+	// CPython: Modules/_uuidmodule.c:52 _uuid_generate_time_safe_impl
+	_ "github.com/tamnd/gopy/module/_uuid"
+
 	// Built-in module: _datetime. Registers itself via
 	// module/_datetime/module.go init(). Ports Modules/_datetimemodule.c:
 	// date, time, datetime, timedelta, timezone types.
