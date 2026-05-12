@@ -193,4 +193,11 @@ import (
 	// Built-in module: math. Registers itself via module/math/module.go init().
 	// CPython: Modules/mathmodule.c:1 (module init)
 	_ "github.com/tamnd/gopy/module/math"
+
+	// Built-in module: _posixsubprocess. Registers itself via
+	// module/_posixsubprocess/module.go init(). Backs subprocess.py with
+	// the low-level fork+exec primitive: spawn a child process, wire stdin/
+	// stdout/stderr via fd pairs, and return the child PID.
+	// CPython: Modules/_posixsubprocess.c:1333 _posixsubprocessmodule
+	_ "github.com/tamnd/gopy/module/_posixsubprocess"
 )
