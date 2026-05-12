@@ -1,0 +1,105 @@
+---
+title: Lib/contextlib.py (part 6)
+description: "contextlib.py part 6: AsyncExitStack, asynccontextmanager, AsyncContextDecorator."
+cpython_path: Lib/contextlib.py
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/contextlib.py" />
+
+This annotation covers the async context manager utilities. See `lib_contextlib5_detail` for `contextmanager`, `ExitStack`, `suppress`, and `redirect_stdout`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `asynccontextmanager` | Decorator to make `async with` from an async generator |
+| 81-160 | `AsyncContextDecorator` | Mixin enabling `async with` objects as decorators |
+| 161-260 | `AsyncExitStack.__aenter__` / `__aexit__` | Async version of `ExitStack` |
+| 261-360 | `AsyncExitStack.enter_async_context` | Push an async context manager |
+| 361-500 | `AsyncExitStack.push_async_callback` | Register an async cleanup callback |
+
+## Reading
+
+### `asynccontextmanager`
+
+```python
+# CPython: Lib/contextlib.py:240 asynccontextmanager
+def asynccontextmanager(func):
+    @wraps(func)
+    def helper(*args, **kwds):
+        return _AsyncGeneratorContextManager(func, args, kwds)
+    return helper
+
+class _AsyncGeneratorContextManager(AbstractAsyncContextManager):
+    async def __aenter__(self):
+        try:
+            return await anext(self.gen)
+        except StopAsyncIteration:
+            raise RuntimeError("generator didn't yield") from None
+
+    async def __aexit__(self, typ, value, traceback):
+        if typ is None:
+            try:
+                await anext(self.gen)
+            except StopAsyncIteration:
+                return False
+            raise RuntimeError("generator didn't stop")
+        else:
+            try:
+                await self.gen.athrow(typ, value, traceback)
+            except StopAsyncIteration as exc:
+                return exc is not value
+            ...
+```
+
+`@asynccontextmanager` is the async analogue of `@contextmanager`. The decorated function must be an async generator with exactly one `yield`. `__aenter__` drives the generator to the yield; `__aexit__` resumes or throws the exception into it.
+
+### `AsyncExitStack`
+
+```python
+# CPython: Lib/contextlib.py:520 AsyncExitStack
+class AsyncExitStack(_BaseExitStack, AbstractAsyncContextManager):
+    async def enter_async_context(self, cm):
+        _cm_type = type(cm)
+        _exit = _cm_type.__aexit__
+        result = await _cm_type.__aenter__(cm)
+        self._push_async_cm_exit(cm, _exit)
+        return result
+
+    async def __aexit__(self, *exc_details):
+        pending_raise = False
+        while self._exit_callbacks:
+            is_sync, cb = self._exit_callbacks.pop()
+            try:
+                if is_sync:
+                    cb_suppress = cb(*exc_details)
+                else:
+                    cb_suppress = await cb(*exc_details)
+                ...
+            except:
+                ...
+```
+
+`AsyncExitStack` handles a mix of sync and async context managers. `enter_async_context` registers `__aexit__` for async cleanup; `enter_context` (inherited) handles sync ones. During `__aexit__`, sync callbacks are called directly, async callbacks are awaited.
+
+### `push_async_callback`
+
+```python
+# CPython: Lib/contextlib.py:560 push_async_callback
+def push_async_callback(self, callback, /, *args, **kwds):
+    async def _exit_wrapper(exc_type, exc, tb):
+        await callback(*args, **kwds)
+    self._exit_callbacks.append((False, _exit_wrapper))  # False = async
+    return callback
+```
+
+`push_async_callback(some_async_fn, arg)` registers an async callable that runs during `__aexit__` regardless of exceptions. Unlike `push_async_context_manager`, it doesn't need `__aenter__`/`__aexit__` — it's just a coroutine function.
+
+## gopy notes
+
+`asynccontextmanager` is `module/contextlib.AsyncContextManager` in `module/contextlib/module.go`. `_AsyncGeneratorContextManager.__aenter__` calls `objects.GeneratorSend(nil)` on the async generator. `AsyncExitStack` is `module/contextlib.AsyncExitStack` with a `[]exitCallback` that tracks sync/async flag.

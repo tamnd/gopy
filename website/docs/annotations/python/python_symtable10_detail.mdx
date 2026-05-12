@@ -1,0 +1,126 @@
+---
+title: Python/symtable.c (part 10)
+description: "Python/symtable.c part 10: scope analysis, FREE vs CELL classification, walrus operator."
+cpython_path: Python/symtable.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Python/symtable.c" />
+
+This annotation covers scope classification in the second pass. See `python_symtable9_detail` for the first pass (name collection), `analyze_block`, and free variable propagation.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `analyze_name` | Classify a name as LOCAL, FREE, CELL, GLOBAL |
+| 81-180 | `CELL` vs `FREE` distinction | When to emit a cell vs a free-var slot |
+| 181-280 | `analyze_block` second pass | Propagate free vars upward |
+| 281-380 | Walrus operator (`:=`) | Scope leakage into enclosing function |
+| 381-500 | `_Py_Mangle` | Name mangling for `__private` attributes |
+
+## Reading
+
+### `analyze_name`
+
+```c
+// CPython: Python/symtable.c:780 analyze_name
+static int
+analyze_name(struct symtable *st, PyObject *scopes, PyObject *name,
+             long flags, PyObject *bound, PyObject *local,
+             PyObject *free, PyObject *global)
+{
+    if (flags & DEF_GLOBAL) {
+        SET_SCOPE(scopes, name, GLOBAL_EXPLICIT);
+    } else if (flags & DEF_NONLOCAL) {
+        SET_SCOPE(scopes, name, FREE);
+        PySet_Add(free, name);
+    } else if (flags & DEF_BOUND) {
+        SET_SCOPE(scopes, name, LOCAL);
+        PySet_Add(local, name);
+    } else if (bound && PySet_Contains(bound, name)) {
+        SET_SCOPE(scopes, name, FREE);
+        PySet_Add(free, name);
+    } else {
+        SET_SCOPE(scopes, name, GLOBAL_IMPLICIT);
+    }
+}
+```
+
+`analyze_name` maps each name in a scope to one of: `LOCAL` (assigned here), `FREE` (used here, assigned in enclosing scope), `CELL` (assigned here, used in a nested scope), `GLOBAL_EXPLICIT` (`global` statement), or `GLOBAL_IMPLICIT` (not defined anywhere locally).
+
+### `CELL` vs `FREE`
+
+```c
+// CPython: Python/symtable.c:840 CELL promotion
+/* After initial classification: any LOCAL name that appears in a
+   nested scope's FREE set must be promoted to CELL */
+while ((name = PyIter_Next(free_iter)) != NULL) {
+    if (PySet_Contains(local, name)) {
+        /* local in this scope + free in child = CELL */
+        SET_SCOPE(scopes, name, CELL);
+    } else if (PySet_Contains(bound, name)) {
+        /* not local but bound in ancestor = FREE (pass up) */
+        PySet_Add(newfree, name);
+    }
+}
+```
+
+A name is a `CELL` variable in the scope where it is assigned if it is also referenced as `FREE` in any nested scope. The cell object persists even after the function returns, keeping the captured value alive for closures.
+
+### `analyze_block` second pass
+
+```c
+// CPython: Python/symtable.c:900 analyze_block (second pass)
+/* After processing all children: walk back up from innermost to outermost,
+   collecting names that need to pass through intermediate scopes */
+PyObject *child_free = PySet_New(NULL);
+for each child scope:
+    analyze_block(child, newbound, child_free, newglobal);
+/* child_free now contains names the child needs from above */
+for (name in child_free):
+    if not in local and not in global:
+        PySet_Add(free, name);  /* pass upward */
+```
+
+Free variables must "tunnel" through intermediate function scopes. If `f` closes over `x` from `g`, but `g` is nested in `h` which also doesn't define `x`, then `h` also needs a cell for `x` to pass it to `g`.
+
+### Walrus operator (`:=`)
+
+```c
+// CPython: Python/symtable.c:960 walrus scope leakage
+/* In a comprehension: walrus target leaks to the nearest enclosing
+   non-comprehension scope */
+if (flags & DEF_COMP_ITER && SYMTABLE_ENTRY(st)->ste_comprehension) {
+    PySTEntryObject *outer = find_enclosing_function(st);
+    PyDict_SetItem(outer->ste_symbols, name, DEF_LOCAL | USE);
+}
+```
+
+`[y := f(x) for x in data]` assigns `y` in the enclosing function, not inside the comprehension. The symbol table walks up to the nearest non-comprehension scope and marks the name there. This is why walrus in comprehensions prevents inlining.
+
+### `_Py_Mangle`
+
+```c
+// CPython: Python/symtable.c:1060 _Py_Mangle
+PyObject *
+_Py_Mangle(PyObject *privateobj, PyObject *ident)
+{
+    /* __name → _ClassName__name */
+    const char *p = PyUnicode_AsUTF8(ident);
+    if (p[0] != '_' || p[1] != '_') return Py_NewRef(ident);
+    /* strip trailing underscores */
+    ...
+    return PyUnicode_FromFormat("_%s%s", class_name, p);
+}
+```
+
+`__attr` inside a class body is rewritten to `_ClassName__attr` at compile time. This prevents accidental overriding in subclasses without using the `__attr` spelling.
+
+## gopy notes
+
+`analyze_name` is `compile/symtable.analyzeName` in `compile/symtable.go`. `CELL` promotion is in `analyzeCellsAndFree`. Walrus scope leakage is handled in `analyzeComprehension` — it searches for the enclosing function entry and adds the target. `_Py_Mangle` is `compile.Mangle`.

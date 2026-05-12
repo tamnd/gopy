@@ -1,0 +1,122 @@
+---
+title: Objects/longobject.c (part 17)
+description: "longobject.c part 17: int.bit_length, int.bit_count, int.to_bytes, int.from_bytes."
+cpython_path: Objects/longobject.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Objects/longobject.c" />
+
+This annotation covers `int` bit manipulation and byte conversion methods. See `objects_longobject16_detail` for `int.__new__`, digit representation, and arithmetic.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `int.bit_length` | Number of bits needed to represent the value |
+| 81-160 | `int.bit_count` | Count of set bits (popcount) |
+| 161-240 | `int.to_bytes` | Serialize to big-endian or little-endian bytes |
+| 241-360 | `int.from_bytes` | Deserialize from bytes |
+| 361-500 | `int.as_integer_ratio` | Return `(self, 1)` |
+
+## Reading
+
+### `int.bit_length`
+
+```c
+// CPython: Objects/longobject.c:2820 long_bit_length
+static PyObject *
+long_bit_length(PyObject *self, PyObject *Py_UNUSED(ignored))
+{
+    PyLongObject *z = (PyLongObject *)self;
+    Py_ssize_t ndigits = _PyLong_DigitCount(z);
+    if (ndigits == 0) return PyLong_FromLong(0);
+    /* Most significant digit: use bit_length of last digit */
+    digit msd = _PyLong_GetDigit(z, ndigits - 1);
+    int msd_bits = _Py_bit_length(msd);
+    return PyLong_FromSsize_t((ndigits - 1) * PyLong_SHIFT + msd_bits);
+}
+```
+
+`(255).bit_length()` returns 8. `(256).bit_length()` returns 9. The calculation is: `(n_digits - 1) * 30 + bit_length_of_most_significant_digit`. `0.bit_length()` returns 0.
+
+### `int.bit_count`
+
+```c
+// CPython: Objects/longobject.c:2870 long_bit_count
+static PyObject *
+long_bit_count(PyObject *self, PyObject *Py_UNUSED(ignored))
+{
+    PyLongObject *z = (PyLongObject *)self;
+    Py_ssize_t ndigits = _PyLong_DigitCount(z);
+    Py_ssize_t count = 0;
+    for (Py_ssize_t i = 0; i < ndigits; i++) {
+        count += _Py_popcount32(_PyLong_GetDigit(z, i));
+    }
+    return PyLong_FromSsize_t(count);
+}
+```
+
+`(7).bit_count()` returns 3 (binary `111`). `(-7).bit_count()` also returns 3 (counts bits of absolute value). Added in Python 3.10. Uses hardware popcount via `__builtin_popcount` on GCC.
+
+### `int.to_bytes`
+
+```c
+// CPython: Objects/longobject.c:2940 long_to_bytes
+static PyObject *
+long_to_bytes(PyObject *self, PyObject *const *args, Py_ssize_t nargs,
+              PyObject *kwnames)
+{
+    Py_ssize_t length;
+    int is_little_endian, is_signed;
+    /* ... parse length, byteorder, signed */
+    PyObject *bytes = PyBytes_FromStringAndSize(NULL, length);
+    int res = _PyLong_AsByteArray((PyLongObject *)self,
+                                   (unsigned char *)PyBytes_AS_STRING(bytes),
+                                   length, is_little_endian, is_signed);
+    if (res < 0) { Py_DECREF(bytes); return NULL; }
+    return bytes;
+}
+```
+
+`(1024).to_bytes(2, 'big')` returns `b'\x04\x00'`. `OverflowError` if the value doesn't fit in `length` bytes. `signed=True` uses two's complement for negative numbers.
+
+### `int.from_bytes`
+
+```c
+// CPython: Objects/longobject.c:3020 long_from_bytes
+static PyObject *
+long_from_bytes(PyTypeObject *type, PyObject *const *args, Py_ssize_t nargs,
+                PyObject *kwnames)
+{
+    Py_buffer view;
+    PyObject_GetBuffer(args[0], &view, PyBUF_SIMPLE);
+    int is_little_endian = ...;
+    int is_signed = ...;
+    PyObject *result = _PyLong_FromByteArray(
+        (unsigned char *)view.buf, view.len,
+        is_little_endian, is_signed);
+    PyBuffer_Release(&view);
+    return result;
+}
+```
+
+`int.from_bytes(b'\x04\x00', 'big')` returns `1024`. Works with any buffer object. `signed=True` interprets the most significant bit as a sign bit (two's complement).
+
+### `int.as_integer_ratio`
+
+```python
+# CPython: Objects/longobject.c:3080 long_as_integer_ratio
+def as_integer_ratio(self):
+    return (self, 1)
+```
+
+`(42).as_integer_ratio()` returns `(42, 1)`. This mirrors `float.as_integer_ratio` for the `numbers.Rational` interface. `Fraction(n)` uses this internally.
+
+## gopy notes
+
+`int.bit_length` is `objects.Int.BitLength` in `objects/int.go`. It uses `big.Int.BitLen`. `int.bit_count` uses `bits.OnesCount` from Go's `math/bits`. `to_bytes` calls `big.Int.FillBytes` with endian correction. `from_bytes` calls `new(big.Int).SetBytes`.

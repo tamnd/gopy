@@ -1,0 +1,114 @@
+---
+title: Modules/selectmodule.c (part 7)
+description: "selectmodule.c part 7: select.select, select.poll, select.epoll, select.kqueue."
+cpython_path: Modules/selectmodule.c
+cpython_version: "3.14"
+lines: 600
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/selectmodule.c" />
+
+This annotation covers I/O multiplexing syscalls. See `modules_select6_detail` for `select.select` basic usage, fd set construction, and result parsing.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `select.select` internals | `fd_set` construction, `select(2)` call |
+| 81-180 | `select.poll` | Level-triggered polling on Linux |
+| 181-280 | `select.epoll` | Edge/level-triggered with `epoll_create`/`epoll_wait` |
+| 281-380 | `select.kqueue` / `kevent` | BSD event notification |
+| 381-600 | `select.devpoll` | `/dev/poll` on Solaris |
+
+## Reading
+
+### `select.select`
+
+```c
+// CPython: Modules/selectmodule.c:380 select_select_impl
+static PyObject *
+select_select_impl(PyObject *module, PyObject *rlist, PyObject *wlist,
+                   PyObject *xlist, PyObject *timeout_obj)
+{
+    fd_set ifdset, ofdset, efdset;
+    FD_ZERO(&ifdset); FD_ZERO(&ofdset); FD_ZERO(&efdset);
+    int maxfd = seq2set(rlist, &ifdset, ...) - 1;
+    ...
+    Py_BEGIN_ALLOW_THREADS
+    n = select(maxfd + 1, &ifdset, &ofdset, &efdset, timeout);
+    Py_END_ALLOW_THREADS
+    return set2list(&ifdset, rlist), set2list(&ofdset, wlist), ...
+}
+```
+
+`select.select` is limited to file descriptors < 1024 on most platforms (the `fd_set` bitmap size). For higher-numbered FDs or large sets, `poll` or `epoll` is required.
+
+### `select.poll`
+
+```c
+// CPython: Modules/selectmodule.c:580 poll_poll
+static PyObject *
+poll_poll(pollObject *self, PyObject *args)
+{
+    struct pollfd *ufds = PyMem_New(struct pollfd, self->nfds);
+    /* fill ufds from self->dict of {fd: events} */
+    Py_BEGIN_ALLOW_THREADS
+    retval = poll(ufds, self->nfds, timeout);
+    Py_END_ALLOW_THREADS
+    /* Convert results: list of (fd, revents) tuples */
+    for (Py_ssize_t i = 0; i < self->nfds; i++) {
+        if (ufds[i].revents) {
+            PyList_Append(result, Py_BuildValue("(ii)", ufds[i].fd, ufds[i].revents));
+        }
+    }
+    return result;
+}
+```
+
+`poll` accepts any fd number and a set of event flags (`POLLIN`, `POLLOUT`, `POLLERR`). Returns `(fd, events)` tuples for ready fds. No fd limit, but O(n) per call for n registered fds.
+
+### `select.epoll`
+
+```c
+// CPython: Modules/selectmodule.c:820 pyepoll_poll
+static PyObject *
+pyepoll_poll(pyEpoll_Object *self, PyObject *args, PyObject *kwds)
+{
+    struct epoll_event *evs = PyMem_New(struct epoll_event, maxevents);
+    Py_BEGIN_ALLOW_THREADS
+    nfds = epoll_wait(self->epfd, evs, maxevents, timeout_ms);
+    Py_END_ALLOW_THREADS
+    for (int i = 0; i < nfds; i++) {
+        PyList_Append(elist, Py_BuildValue("(iI)", evs[i].data.fd, evs[i].events));
+    }
+    PyMem_Free(evs);
+    return elist;
+}
+```
+
+`epoll` is O(1) for the wait call regardless of how many fds are registered. `epoll_wait` returns only the fds that are ready, not all registered fds. `EPOLLET` flag enables edge-triggered mode (only notifies on transitions).
+
+### `select.kqueue`
+
+```c
+// CPython: Modules/selectmodule.c:1080 kqueue_queue_control
+static PyObject *
+kqueue_queue_control(kqueue_queue_Object *self, PyObject *args)
+{
+    struct kevent *changelist = ..., *eventlist = ...;
+    Py_BEGIN_ALLOW_THREADS
+    gotevents = kevent(self->kqfd, changelist, nchanges,
+                       eventlist, maxevents, ptimeout);
+    Py_END_ALLOW_THREADS
+    ...
+}
+```
+
+BSD `kqueue` can monitor file descriptors, sockets, files, processes, and signals with a single syscall. `kevent` both registers changes and waits for events. Available on macOS, FreeBSD; not on Linux.
+
+## gopy notes
+
+`select.select` is `module/select.Select` in `module/select/module.go`. It calls `syscall.Select`. `poll` calls `syscall.Poll`. `epoll` uses `golang.org/x/sys/unix.EpollCreate1` / `EpollWait`. `kqueue` uses `syscall.Kqueue` / `syscall.Kevent` on Darwin.
