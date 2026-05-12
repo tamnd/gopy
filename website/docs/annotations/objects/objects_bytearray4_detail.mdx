@@ -1,0 +1,128 @@
+---
+title: Objects/bytearrayobject.c (part 4)
+description: "Objects/bytearrayobject.c part 4: bytearray.extend, bytearray.insert, bytearray.pop, bytearray.remove, resize logic."
+cpython_path: Objects/bytearrayobject.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Objects/bytearrayobject.c" />
+
+This annotation covers mutation methods. See `objects_bytearray3_detail` for `bytearray.__new__`, `__setitem__`, `append`, and the buffer protocol.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `bytearray.extend` | Append multiple bytes from an iterable |
+| 81-160 | `bytearray.insert` | Insert a single byte at an index |
+| 161-240 | `bytearray.pop` | Remove and return the byte at an index |
+| 241-320 | `bytearray.remove` | Remove first occurrence of a value |
+| 321-500 | Resize logic | `_PyByteArray_Resize`, over-allocation strategy |
+
+## Reading
+
+### `bytearray.extend`
+
+```c
+// CPython: Objects/bytearrayobject.c:780 bytearray_extend
+static PyObject *
+bytearray_extend(PyByteArrayObject *self, PyObject *iterable_of_ints)
+{
+    /* Fast path: bytes or bytearray */
+    if (PyBytes_Check(iterable_of_ints)) {
+        return bytearray_extend_from_bytes(self, iterable_of_ints);
+    }
+    Py_ssize_t buf_size = 0;
+    PyObject *it = PyObject_GetIter(iterable_of_ints);
+    PyObject *item;
+    while ((item = PyIter_Next(it)) != NULL) {
+        int value = PyLong_AsLong(item);
+        /* range check 0-255 */
+        if (_PyByteArray_Resize((PyObject *)self,
+                                Py_SIZE(self) + 1) < 0) return NULL;
+        ((PyByteArrayObject *)self)->ob_val[Py_SIZE(self) - 1] = value;
+    }
+    return Py_None;
+}
+```
+
+The fast path for `bytes` avoids iteration overhead. The generic path iterates and validates each value is in `[0, 255]`. `_PyByteArray_Resize` uses over-allocation to amortize the cost.
+
+### `bytearray.insert`
+
+```c
+// CPython: Objects/bytearrayobject.c:840 bytearray_insert
+static PyObject *
+bytearray_insert(PyByteArrayObject *self, PyObject *args)
+{
+    int value;
+    Py_ssize_t where, n = Py_SIZE(self);
+    if (!PyArg_ParseTuple(args, "ni:insert", &where, &value)) return NULL;
+    if (where < 0) {
+        where += n;
+        if (where < 0) where = 0;
+    } else if (where > n) where = n;
+
+    if (_PyByteArray_Resize((PyObject *)self, n + 1) < 0) return NULL;
+    char *buf = self->ob_val;
+    memmove(buf + where + 1, buf + where, n - where);
+    buf[where] = value;
+    Py_RETURN_NONE;
+}
+```
+
+`memmove` shifts existing bytes right to open a slot. Negative indices are normalized. Inserting past the end appends.
+
+### `bytearray.pop`
+
+```c
+// CPython: Objects/bytearrayobject.c:900 bytearray_pop
+static PyObject *
+bytearray_pop(PyByteArrayObject *self, PyObject *args)
+{
+    int value;
+    Py_ssize_t where = -1, n = Py_SIZE(self);
+    if (!PyArg_ParseTuple(args, "|n:pop", &where)) return NULL;
+    if (n == 0) {
+        PyErr_SetString(PyExc_IndexError, "pop from empty bytearray");
+        return NULL;
+    }
+    if (where < 0) where += n;
+    value = self->ob_val[where];
+    memmove(self->ob_val + where, self->ob_val + where + 1, n - where - 1);
+    if (_PyByteArray_Resize((PyObject *)self, n - 1) < 0) return NULL;
+    return PyLong_FromLong(value);
+}
+```
+
+Returns the removed byte as an `int`. The default index is `-1` (last byte). `memmove` closes the gap after removal. Shrinking a bytearray with `_PyByteArray_Resize` never reallocates immediately; the buffer stays over-allocated until the next growth.
+
+### `_PyByteArray_Resize` over-allocation
+
+```c
+// CPython: Objects/bytearrayobject.c:120 _PyByteArray_Resize
+int
+_PyByteArray_Resize(PyObject *self, Py_ssize_t size)
+{
+    Py_ssize_t alloc = ((PyByteArrayObject *)self)->ob_alloc;
+    if (size < alloc && size >= alloc >> 1) {
+        /* Within the hysteresis zone: don't reallocate */
+        Py_SIZE(self) = size;
+        ((PyByteArrayObject *)self)->ob_val[size] = '\0';
+        return 0;
+    }
+    Py_ssize_t newalloc = size + (size >> 3) + (size < 9 ? 3 : 6);
+    /* realloc to newalloc */
+    ...
+}
+```
+
+The over-allocation formula is `size + size/8 + (3 or 6)`, matching CPython's list growth strategy. The hysteresis zone (`[alloc/2, alloc)`) avoids reallocating on every shrink-by-one operation.
+
+## gopy notes
+
+`bytearray.extend` is `objects.ByteArrayExtend` in `objects/bytearray.go`. `insert` and `pop` use `copy` (Go built-in) for the memmove equivalent. `_PyByteArray_Resize` is `objects.ByteArray.resize` using `append` with pre-allocation.

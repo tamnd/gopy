@@ -1,0 +1,110 @@
+---
+title: Lib/logging/__init__.py (part 3)
+description: "logging/__init__.py part 3: Handler.emit, StreamHandler, FileHandler, Formatter, LogRecord formatting."
+cpython_path: Lib/logging/__init__.py
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/logging/__init__.py" />
+
+This annotation covers the handler and formatter layer. See `lib_logging2_detail` for `Logger`, `Manager`, `getLogger`, and the level hierarchy.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `Handler.emit` | Abstract; subclasses override to write a log record |
+| 81-160 | `StreamHandler` | Write to `sys.stderr` or any stream |
+| 161-240 | `FileHandler` | Write to a file, with optional delay-open |
+| 241-340 | `Formatter` | Convert `LogRecord` to a string |
+| 341-500 | `LogRecord` | Data class holding all log event fields |
+
+## Reading
+
+### `Handler.emit`
+
+```python
+# CPython: Lib/logging/__init__.py:1000 Handler.emit
+def emit(self, record):
+    """
+    Do whatever it takes to actually log the specified logging record.
+    This version is intended to be implemented by subclasses and so
+    raises a NotImplementedError.
+    """
+    raise NotImplementedError('emit must be implemented '
+                              'by Handler subclasses')
+```
+
+`Handler.handle` calls `acquire`, `emit`, `release`. The lock ensures thread safety. Subclasses implement only `emit`; they should call `self.format(record)` to get the formatted string.
+
+### `StreamHandler`
+
+```python
+# CPython: Lib/logging/__init__.py:1100 StreamHandler.emit
+def emit(self, record):
+    try:
+        msg = self.format(record)
+        stream = self.stream
+        stream.write(msg + self.terminator)
+        self.flush()
+    except RecursionError:
+        raise
+    except Exception:
+        self.handleError(record)
+```
+
+`terminator` defaults to `'\n'`. `handleError` writes a traceback to `sys.stderr` if `raiseExceptions` is true (default in development). The `RecursionError` is re-raised to avoid masking infinite recursion in formatters.
+
+### `Formatter`
+
+```python
+# CPython: Lib/logging/__init__.py:560 Formatter.format
+def format(self, record):
+    record.message = record.getMessage()
+    if self.usesTime():
+        record.asctime = self.formatTime(record, self.datefmt)
+    s = self.formatMessage(record)
+    if record.exc_info:
+        if not record.exc_text:
+            record.exc_text = self.formatException(record.exc_info)
+    if record.exc_text:
+        s = s + '\n' + record.exc_text
+    if record.stack_info:
+        s = s + '\n' + self.formatStack(record.stack_info)
+    return s
+```
+
+`format` builds the final string in layers: message, timestamp, format string substitution, exception text, stack info. `datefmt` is passed to `time.strftime`. Exception text is cached in `record.exc_text` so it is only formatted once even if the record is handled by multiple handlers.
+
+### `LogRecord`
+
+```python
+# CPython: Lib/logging/__init__.py:290 LogRecord.__init__
+class LogRecord:
+    def __init__(self, name, level, pathname, lineno, msg, args, exc_info,
+                 func=None, sinfo=None):
+        self.name = name
+        self.msg = msg
+        self.args = args
+        self.levelname = getLevelName(level)
+        self.levelno = level
+        self.pathname = pathname
+        self.filename = os.path.basename(pathname)
+        self.module = os.path.splitext(self.filename)[0]
+        self.funcName = func
+        self.lineno = lineno
+        self.created = time.time()
+        self.msecs = (self.created - int(self.created)) * 1000
+        self.thread = threading.get_ident()
+        self.process = os.getpid()
+```
+
+`LogRecord` captures all context at the point of the `logger.info()` call. `getMessage()` does `str(self.msg) % self.args` — lazy formatting so the interpolation cost is skipped if the record is filtered before reaching any handler.
+
+## gopy notes
+
+`Handler` and `StreamHandler` are in `module/logging/module.go`. `emit` is a Go interface method. `Formatter.format` uses `fmt.Sprintf` for `%`-style substitution. `LogRecord` is a Go struct with all fields mirroring CPython's.

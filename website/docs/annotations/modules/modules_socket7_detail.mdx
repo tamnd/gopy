@@ -1,0 +1,135 @@
+---
+title: Modules/socketmodule.c (part 7)
+description: "socketmodule.c part 7: socket.recv, socket.send, socket.sendall, socket.recvfrom, non-blocking behavior."
+cpython_path: Modules/socketmodule.c
+cpython_version: "3.14"
+lines: 600
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/socketmodule.c" />
+
+This annotation covers data transfer methods. See `modules_socket6_detail` for `socket.connect`, `bind`, `listen`, `accept`, and address resolution.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-100 | `socket.recv` | Receive up to `bufsize` bytes |
+| 101-200 | `socket.recvfrom` | Receive with sender address (UDP) |
+| 201-320 | `socket.send` | Send data; may send less than requested |
+| 321-440 | `socket.sendall` | Send all bytes, retrying on partial sends |
+| 441-600 | Non-blocking / timeout | `setblocking`, `settimeout`, retry loop |
+
+## Reading
+
+### `socket.recv`
+
+```c
+// CPython: Modules/socketmodule.c:3480 sock_recv
+static PyObject *
+sock_recv(PySocketSockObject *s, PyObject *args)
+{
+    Py_ssize_t recvlen, outlen;
+    int flags = 0;
+    if (!PyArg_ParseTuple(args, "n|i:recv", &recvlen, &flags)) return NULL;
+    PyObject *buf = PyBytes_FromStringAndSize((char *)0, recvlen);
+    Py_BEGIN_ALLOW_THREADS
+    outlen = recv(s->sock_fd, PyBytes_AS_STRING(buf), recvlen, flags);
+    Py_END_ALLOW_THREADS
+    if (outlen < 0) {
+        Py_DECREF(buf);
+        return s->errorhandler();
+    }
+    if (outlen != recvlen && _PyBytes_Resize(&buf, outlen) < 0) return NULL;
+    return buf;
+}
+```
+
+`recv` pre-allocates `recvlen` bytes, calls the OS `recv` syscall with the GIL released, then resizes the bytes object to the actual amount received. The resize is done with `_PyBytes_Resize` which reallocs in place when possible.
+
+### `socket.sendall`
+
+```c
+// CPython: Modules/socketmodule.c:3620 sock_sendall
+static PyObject *
+sock_sendall(PySocketSockObject *s, PyObject *args)
+{
+    Py_buffer pbuf;
+    PyArg_ParseTuple(args, "y*|i:sendall", &pbuf, &flags);
+    char *buf = pbuf.buf;
+    Py_ssize_t len = pbuf.len;
+    Py_ssize_t n;
+    do {
+        Py_BEGIN_ALLOW_THREADS
+        n = send(s->sock_fd, buf, len, flags);
+        Py_END_ALLOW_THREADS
+        if (n < 0) {
+            if (errno == EINTR) continue;
+            PyBuffer_Release(&pbuf);
+            return s->errorhandler();
+        }
+        buf += n;
+        len -= n;
+    } while (len > 0);
+    PyBuffer_Release(&pbuf);
+    Py_RETURN_NONE;
+}
+```
+
+`sendall` loops until all bytes are sent. Each `send` call releases the GIL. `EINTR` (signal interrupted) is retried automatically. This is the safe high-level API; `send` returns immediately after any partial send.
+
+### Non-blocking and timeout
+
+```c
+// CPython: Modules/socketmodule.c:640 internal_select
+static int
+internal_select(PySocketSockObject *s, int writing, _PyTime_t interval)
+{
+    /* Use select() to wait up to `interval` for the socket to be ready */
+    fd_set fds;
+    FD_ZERO(&fds);
+    FD_SET(s->sock_fd, &fds);
+    struct timeval tv = _PyTime_AsTimeval(interval, _PyTime_ROUND_CEILING);
+    int n;
+    Py_BEGIN_ALLOW_THREADS
+    if (writing)
+        n = select(s->sock_fd + 1, NULL, &fds, NULL, &tv);
+    else
+        n = select(s->sock_fd + 1, &fds, NULL, NULL, &tv);
+    Py_END_ALLOW_THREADS
+    if (n == 0) {
+        PyErr_SetString(PyExc_TimeoutError, "timed out");
+        return 1;
+    }
+    return n < 0 ? -1 : 0;
+}
+```
+
+When a timeout is set (`s->sock_timeout > 0`), `internal_select` is called before each blocking syscall. On timeout, `TimeoutError` is raised. `setblocking(False)` sets `sock_timeout = 0` and sets `O_NONBLOCK` on the fd.
+
+### `socket.recvfrom`
+
+```c
+// CPython: Modules/socketmodule.c:3530 sock_recvfrom
+static PyObject *
+sock_recvfrom(PySocketSockObject *s, PyObject *args)
+{
+    /* Returns (data_bytes, address_tuple) */
+    ...
+    outlen = recvfrom(s->sock_fd, buf, recvlen, flags,
+                      SAS2SA(&addrbuf), &addrlen);
+    ...
+    PyObject *addr = makesockaddr(s->sock_fd, SAS2SA(&addrbuf),
+                                  addrlen, s->sock_proto);
+    return Py_BuildValue("Ny", addr, buf, outlen);
+}
+```
+
+`recvfrom` is the standard UDP receive: returns the data and the sender's address. `makesockaddr` converts the C `sockaddr` struct to a Python `(host, port)` tuple (IPv4) or `(host, port, flowinfo, scope_id)` (IPv6).
+
+## gopy notes
+
+`socket.recv` is `module/socket.Recv` in `module/socket/module.go`. It uses Go's `syscall.Read`. `sendall` loops with `syscall.Write`. `internal_select` is implemented with `net.Conn` timeouts via `SetDeadline`. `recvfrom` uses `syscall.Recvfrom`.

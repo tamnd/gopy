@@ -1,0 +1,120 @@
+---
+title: Python/ceval.c (part 60)
+description: "Python/ceval.c part 60: COPY_FREE_VARS, MAKE_CELL, LOAD_DEREF, STORE_DEREF, LOAD_CLASSDEREF."
+cpython_path: Python/ceval.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Python/ceval.c" />
+
+This annotation covers closure and cell variable opcodes. See `python_ceval59_detail` for `WITH_EXCEPT_START`, `PUSH_EXC_INFO`, and exception context opcodes.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `COPY_FREE_VARS` | Copy free variables from closure tuple into frame |
+| 81-160 | `MAKE_CELL` | Initialize a cell object for a variable that is closed over |
+| 161-260 | `LOAD_DEREF` | Load from a cell or free variable |
+| 261-340 | `STORE_DEREF` | Store into a cell variable |
+| 341-500 | `LOAD_CLASSDEREF` | Load class-scope variable, with `__class__` cell special case |
+
+## Reading
+
+### `COPY_FREE_VARS`
+
+```c
+// CPython: Python/ceval.c:4020 COPY_FREE_VARS
+inst(COPY_FREE_VARS, (--)) {
+    /* oparg = number of free variables to copy from __closure__ */
+    PyObject *closure = FRAME_GETLOCAL(frame, frame->f_code->co_nlocals
+                                               + frame->f_code->co_ncellvars);
+    /* Actually from the function object's __closure__ */
+    PyFunctionObject *func = (PyFunctionObject *)frame->f_funcobj;
+    PyObject *closure_obj = func->func_closure;
+    int offset = frame->f_code->co_nlocalsplus
+                 - frame->f_code->co_nfreevars;
+    for (int i = 0; i < oparg; ++i) {
+        PyObject *cell = PyTuple_GET_ITEM(closure_obj, i);
+        FRAME_SETLOCAL(frame, offset + i, Py_NewRef(cell));
+    }
+}
+```
+
+`COPY_FREE_VARS` runs once at function entry to install the enclosing scope's cell objects into the fast locals array. After this, `LOAD_DEREF` and `STORE_DEREF` can read/write through those cells.
+
+### `MAKE_CELL`
+
+```c
+// CPython: Python/ceval.c:4060 MAKE_CELL
+inst(MAKE_CELL, (--)) {
+    /* oparg: index into localsplusnames of the variable to cellify */
+    PyObject *oldval = GETLOCAL(oparg);
+    PyObject *cell = PyCell_New(oldval);
+    Py_XDECREF(oldval);
+    SETLOCAL(oparg, cell);
+}
+```
+
+`MAKE_CELL` wraps the initial value of a local variable in a `PyCellObject`. After `MAKE_CELL`, the local slot holds a cell; both the outer function and any inner functions that close over it share this same cell object.
+
+### `LOAD_DEREF`
+
+```c
+// CPython: Python/ceval.c:4100 LOAD_DEREF
+inst(LOAD_DEREF, (-- value)) {
+    PyObject *cell = GETLOCAL(oparg);
+    value = PyCell_GET(cell);
+    if (value == NULL) {
+        _PyEval_FormatExcUnboundLocal(tstate, frame->f_code, oparg);
+        ERROR_IF(true, error);
+    }
+    Py_INCREF(value);
+}
+```
+
+`PyCell_GET` is a direct field access: `((PyCellObject *)cell)->ob_ref`. If the cell is empty (variable deleted or not yet assigned), `UnboundLocalError` is raised naming the variable.
+
+### `STORE_DEREF`
+
+```c
+// CPython: Python/ceval.c:4130 STORE_DEREF
+inst(STORE_DEREF, (v --)) {
+    PyObject *cell = GETLOCAL(oparg);
+    PyObject *oldobj = PyCell_GET(cell);
+    PyCell_SET(cell, v);  /* Steals reference */
+    Py_XDECREF(oldobj);
+}
+```
+
+`STORE_DEREF` writes into the shared cell. Any other function that holds a reference to the same cell immediately sees the new value on its next `LOAD_DEREF`.
+
+### `LOAD_CLASSDEREF`
+
+```c
+// CPython: Python/ceval.c:4160 LOAD_CLASSDEREF
+inst(LOAD_CLASSDEREF, (-- value)) {
+    /* Special case: in a class body, check __class__ cell or locals first */
+    PyObject *cell = GETLOCAL(oparg);
+    value = PyCell_GET(cell);
+    if (value == NULL) {
+        /* Fall back to class namespace */
+        PyObject *locals = LOCALS();
+        int idx = _PyCode_GetFreeName(frame->f_code, oparg);
+        value = PyObject_GetItem(locals, idx_name);
+        ERROR_IF(value == NULL, error);
+    } else {
+        Py_INCREF(value);
+    }
+}
+```
+
+In a class body, free variables can come from the enclosing scope's cell or from the class namespace dict. `LOAD_CLASSDEREF` checks the cell first, then falls back to `locals()`. This supports `__class__` in method bodies (`super()` uses it implicitly).
+
+## gopy notes
+
+`COPY_FREE_VARS` is in `vm/eval_call.go`; it copies from `objects.Function.Closure`. `MAKE_CELL` creates an `objects.Cell` wrapping the initial local value. `LOAD_DEREF` and `STORE_DEREF` are in `vm/eval_simple.go`. `LOAD_CLASSDEREF` checks the cell then calls `objects.GetItem` on the class locals dict.
