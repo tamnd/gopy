@@ -299,6 +299,79 @@ func DictCtor(args []objects.Object, kwargs map[string]objects.Object) (objects.
 	return out, nil
 }
 
+// bindDictCtor wires dict's constructor as separate TpNew (allocate) and
+// __init__ (populate). bindCtor would conflate them, breaking dict subclasses
+// whose __init__ calls super().__init__() with extra args.
+//
+// CPython: Objects/dictobject.c:4023 PyDict_Type (tp_new = dict_new, tp_init = dict_init)
+func bindDictCtor(t *objects.Type) {
+	// TpNew is already set in objects/dict.go to allocate a bare *Dict.
+	// __init__ populates it from an optional mapping/iterable + kwargs.
+	objects.SetTypeDescr(t, "__init__", objects.NewMethodDescr(t, "__init__", func(args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error) {
+		if len(args) < 1 || len(args) > 2 {
+			return nil, fmt.Errorf("TypeError: dict expected at most 1 argument, got %d", len(args)-1)
+		}
+		d := args[0].(*objects.Dict)
+		if len(args) == 2 {
+			if src, ok := args[1].(*objects.Dict); ok {
+				if err := mergeDict(d, src); err != nil {
+					return nil, err
+				}
+			} else if hasKeys, err := dictHasKeys(args[1]); err == nil && hasKeys {
+				if err := mergeMappingInto(d, args[1]); err != nil {
+					return nil, err
+				}
+			} else {
+				if err := mergeFromPairs(d, args[1]); err != nil {
+					return nil, err
+				}
+			}
+		}
+		for k, v := range kwargs {
+			if err := d.SetItem(objects.NewStr(k), v); err != nil {
+				return nil, err
+			}
+		}
+		return objects.None(), nil
+	}))
+}
+
+func dictHasKeys(o objects.Object) (bool, error) {
+	_, err := objects.GetAttr(o, objects.NewStr("keys"))
+	return err == nil, nil
+}
+
+func mergeMappingInto(dst *objects.Dict, m objects.Object) error {
+	keysAttr, err := objects.GetAttr(m, objects.NewStr("keys"))
+	if err != nil {
+		return err
+	}
+	keysObj, err := objects.Call(keysAttr, objects.NewTuple(nil), nil)
+	if err != nil {
+		return err
+	}
+	it, err := abstract.Iter(keysObj)
+	if err != nil {
+		return err
+	}
+	for {
+		k, err := abstract.IterNext(it)
+		if errors.Is(err, objects.ErrStopIteration) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		v, err := objects.GetItem(m, k)
+		if err != nil {
+			return err
+		}
+		if err := dst.SetItem(k, v); err != nil {
+			return err
+		}
+	}
+}
+
 func drainIterable(o objects.Object) ([]objects.Object, error) {
 	it, err := abstract.Iter(o)
 	if err != nil {
@@ -331,6 +404,62 @@ func mergeDict(dst, src *objects.Dict) error {
 	return nil
 }
 
+// BytesCtor ports bytes_new.
+// bytes()              -> b""
+// bytes(int)           -> zero-filled bytes of that length
+// bytes(iterable)      -> bytes from ints in iterable
+// bytes(bytes/bytearray) -> copy
+// bytes(str, encoding) -> not yet ported; raises TypeError
+//
+// CPython: Objects/bytesobject.c bytes_new_impl
+func BytesCtor(args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error) {
+	if len(args) == 0 {
+		return objects.NewBytes(nil), nil
+	}
+	switch v := args[0].(type) {
+	case *objects.Bytes:
+		return objects.NewBytes(v.Bytes()), nil
+	case *objects.ByteArray:
+		return objects.NewBytes(v.Bytes()), nil
+	case *objects.Int:
+		n, ok := v.Int64()
+		if !ok || n < 0 {
+			return nil, fmt.Errorf("ValueError: bytes(): negative count")
+		}
+		return objects.NewBytes(make([]byte, n)), nil
+	}
+	// iterable of ints
+	items, err := drainIterable(args[0])
+	if err != nil {
+		return nil, fmt.Errorf("TypeError: cannot convert '%s' object to bytes", args[0].Type().Name)
+	}
+	buf := make([]byte, len(items))
+	for i, item := range items {
+		iv, ok := item.(*objects.Int)
+		if !ok {
+			return nil, fmt.Errorf("TypeError: bytes must be integers, not '%s'", item.Type().Name)
+		}
+		n, fits := iv.Int64()
+		if !fits || n < 0 || n > 255 {
+			return nil, fmt.Errorf("ValueError: bytes must be in range(0, 256)")
+		}
+		buf[i] = byte(n)
+	}
+	return objects.NewBytes(buf), nil
+}
+
+// ByteArrayCtor ports bytearray_new.
+// Same construction shapes as bytes, but returns a mutable bytearray.
+//
+// CPython: Objects/bytearrayobject.c bytearray_new_impl
+func ByteArrayCtor(args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error) {
+	b, err := BytesCtor(args, kwargs)
+	if err != nil {
+		return nil, err
+	}
+	return objects.NewByteArray(b.(*objects.Bytes).Bytes()), nil
+}
+
 func mergeFromPairs(dst *objects.Dict, iterable objects.Object) error {
 	it, err := abstract.Iter(iterable)
 	if err != nil {
@@ -357,4 +486,15 @@ func mergeFromPairs(dst *objects.Dict, iterable objects.Object) error {
 		}
 		i++
 	}
+}
+
+// memoryViewCtor ports memoryview(). Accepts a single bytes-like object
+// and returns a MemoryView wrapping it.
+//
+// CPython: Objects/memoryobject.c:930 memoryview_new_impl
+func memoryViewCtor(args []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
+	if len(args) != 1 {
+		return nil, fmt.Errorf("TypeError: memoryview() takes exactly one argument (%d given)", len(args))
+	}
+	return objects.NewMemoryView(args[0])
 }

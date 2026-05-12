@@ -72,6 +72,63 @@ var frameType = NewType("frame", []*Type{objectType})
 func init() {
 	frameType.Repr = frameRepr
 	frameType.TpTraverse = frameTraverse
+	frameType.Getattro = frameGetAttr
+}
+
+// frameGetAttr exposes the standard frame attributes f_locals, f_globals,
+// f_code, f_back, f_lineno, f_lasti, f_trace.
+//
+// CPython: Objects/frameobject.c:790 frame_getattro / per-attribute getsets
+func frameGetAttr(o Object, name Object) (Object, error) {
+	f, ok := o.(*Frame)
+	if !ok {
+		return GenericGetAttr(o, name)
+	}
+	n, ok2 := name.(*Unicode)
+	if !ok2 {
+		return nil, fmt.Errorf("TypeError: attribute name must be string, not '%s'", name.Type().Name)
+	}
+	switch n.v {
+	case "f_locals":
+		d, err := FrameFastToLocals(f)
+		if err != nil {
+			return nil, err
+		}
+		return d, nil
+	case "f_globals":
+		if g := f.Globals(); g != nil {
+			return g, nil
+		}
+		return NewDict(), nil
+	case "f_code":
+		if f.interp != nil {
+			if c := f.interp.FrameCode(); c != nil {
+				return c, nil
+			}
+		}
+		return None(), nil
+	case "f_back":
+		b := f.Back()
+		if b == nil {
+			return None(), nil
+		}
+		return b, nil
+	case "f_lineno":
+		return NewInt(int64(f.Lineno())), nil
+	case "f_lasti":
+		return NewInt(int64(f.Lasti())), nil
+	case "f_trace":
+		if f.trace != nil {
+			return f.trace, nil
+		}
+		return None(), nil
+	case "f_builtins":
+		if b := f.Builtins(); b != nil {
+			return b, nil
+		}
+		return NewDict(), nil
+	}
+	return GenericGetAttr(o, name)
 }
 
 // frameTraverse walks every Object reachable from the frame: f_trace

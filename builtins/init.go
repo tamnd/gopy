@@ -172,6 +172,15 @@ func typeSingletons() []struct {
 		{"classmethod", objects.ClassMethodType},
 		{"staticmethod", objects.StaticMethodType},
 		{"super", objects.SuperType},
+		// Iteration types: CPython exposes these as classes, not functions.
+		// CPython: Python/bltinmodule.c:3461 SETBUILTIN block
+		{"range", objects.RangeType},
+		{"zip", ZipType},
+		{"map", objects.MapType},
+		{"filter", objects.FilterType},
+		{"enumerate", objects.EnumerateType},
+		{"reversed", objects.ReversedType},
+		{"memoryview", objects.MemoryViewType},
 	}
 }
 
@@ -193,9 +202,18 @@ func wireTypeCalls() {
 		bindCtor(objects.BoolType, BoolCtor)
 		bindCtor(objects.ListType, ListCtor)
 		bindCtor(objects.TupleType, TupleCtor)
-		bindCtor(objects.DictType, DictCtor)
+		bindDictCtor(objects.DictType)
 		bindCtor(objects.SetType, SetCtor)
 		bindCtor(objects.FrozensetType, FrozensetCtor)
+		bindCtor(objects.BytesType, BytesCtor)
+		bindCtor(objects.ByteArrayType, ByteArrayCtor)
+		bindCtor(objects.RangeType, Range)
+		bindCtor(ZipType, Zip)
+		bindCtor(objects.MapType, Map)
+		bindCtor(objects.FilterType, Filter)
+		bindCtor(objects.EnumerateType, Enumerate)
+		bindCtor(objects.ReversedType, Reversed)
+		bindCtor(objects.MemoryViewType, memoryViewCtor)
 	})
 }
 
@@ -438,12 +456,6 @@ func iterationPanel() []struct {
 		{"len", Len},
 		{"iter", Iter},
 		{"next", Next},
-		{"reversed", Reversed},
-		{"enumerate", Enumerate},
-		{"zip", Zip},
-		{"range", Range},
-		{"map", Map},
-		{"filter", Filter},
 	}
 }
 

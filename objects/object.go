@@ -89,6 +89,41 @@ func init() {
 			}
 			return None(), nil
 		}))
+	// object comparison methods. __eq__ uses identity; __ne__ negates
+	// __eq__; ordering ops return NotImplemented so subclasses can
+	// define their own. Mirrors object_richcompare in CPython.
+	//
+	// CPython: Objects/typeobject.c:5161 object_richcompare
+	SetTypeDescr(objectType, "__eq__", NewMethodDescr(objectType, "__eq__",
+		func(args []Object, _ map[string]Object) (Object, error) {
+			if len(args) != 2 {
+				return NotImplemented(), nil
+			}
+			return NewBool(args[0] == args[1]), nil
+		}))
+	SetTypeDescr(objectType, "__ne__", NewMethodDescr(objectType, "__ne__",
+		func(args []Object, _ map[string]Object) (Object, error) {
+			if len(args) != 2 {
+				return NotImplemented(), nil
+			}
+			return NewBool(args[0] != args[1]), nil
+		}))
+	SetTypeDescr(objectType, "__lt__", NewMethodDescr(objectType, "__lt__",
+		func(args []Object, _ map[string]Object) (Object, error) {
+			return NotImplemented(), nil
+		}))
+	SetTypeDescr(objectType, "__le__", NewMethodDescr(objectType, "__le__",
+		func(args []Object, _ map[string]Object) (Object, error) {
+			return NotImplemented(), nil
+		}))
+	SetTypeDescr(objectType, "__gt__", NewMethodDescr(objectType, "__gt__",
+		func(args []Object, _ map[string]Object) (Object, error) {
+			return NotImplemented(), nil
+		}))
+	SetTypeDescr(objectType, "__ge__", NewMethodDescr(objectType, "__ge__",
+		func(args []Object, _ map[string]Object) (Object, error) {
+			return NotImplemented(), nil
+		}))
 	// object.__init_subclass__ is the PEP 487 hook every subclass walks
 	// up to via super(). The base implementation accepts no extra args
 	// and returns None; subclasses that override it can opt-in to

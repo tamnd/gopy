@@ -172,11 +172,15 @@ type zipIter struct {
 	done   bool
 }
 
-var zipType = objects.NewType("zip", []*objects.Type{objects.TypeType()})
+// ZipType is the type singleton for zip, exported so init.go can
+// expose it as a builtin name.
+//
+// CPython: Objects/enumobject.c:1142 PyZip_Type
+var ZipType = objects.NewType("zip", []*objects.Type{objects.ObjectType()})
 
 func init() {
-	zipType.Iter = func(o objects.Object) (objects.Object, error) { return o, nil }
-	zipType.IterNext = func(o objects.Object) (objects.Object, error) {
+	ZipType.Iter = func(o objects.Object) (objects.Object, error) { return o, nil }
+	ZipType.IterNext = func(o objects.Object) (objects.Object, error) {
 		z := o.(*zipIter)
 		if z.done || len(z.iters) == 0 {
 			return nil, objects.ErrStopIteration
@@ -204,7 +208,7 @@ func init() {
 
 func newZip(iters []objects.Object, strict bool) *zipIter {
 	z := &zipIter{iters: iters, strict: strict}
-	z.Init(zipType)
+	z.Init(ZipType)
 	return z
 }
 

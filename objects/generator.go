@@ -65,6 +65,61 @@ func init() {
 	GeneratorType.Str = genRepr
 	GeneratorType.Iter = func(o Object) (Object, error) { return o, nil }
 	GeneratorType.IterNext = genIterNext
+	GeneratorType.Getattro = GenericGetAttr
+	for name, fn := range map[string]func([]Object, map[string]Object) (Object, error){
+		"send":  genSendMethod,
+		"throw": genThrowMethod,
+		"close": genCloseMethod,
+	} {
+		SetTypeDescr(GeneratorType, name, NewMethodDescr(GeneratorType, name, fn))
+	}
+}
+
+func genSendMethod(args []Object, _ map[string]Object) (Object, error) {
+	if len(args) < 2 {
+		return nil, fmt.Errorf("TypeError: send() takes exactly one argument")
+	}
+	g, ok := args[0].(*Generator)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: descriptor 'send' requires a 'generator' object")
+	}
+	return g.Send(args[1])
+}
+
+// GenThrowHook converts a Python exception object to a Go error for
+// generator.throw(). Installed by the vm package to break the import cycle.
+var GenThrowHook func(Object) (error, error)
+
+func genThrowMethod(args []Object, _ map[string]Object) (Object, error) {
+	if len(args) < 2 {
+		return nil, fmt.Errorf("TypeError: throw() requires an exception")
+	}
+	g, ok := args[0].(*Generator)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: descriptor 'throw' requires a 'generator' object")
+	}
+	if GenThrowHook == nil {
+		return nil, fmt.Errorf("RuntimeError: generator.throw not available")
+	}
+	exc, err := GenThrowHook(args[1])
+	if err != nil {
+		return nil, err
+	}
+	return g.Throw(exc)
+}
+
+func genCloseMethod(args []Object, _ map[string]Object) (Object, error) {
+	if len(args) < 1 {
+		return nil, fmt.Errorf("TypeError: close() missing self argument")
+	}
+	g, ok := args[0].(*Generator)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: descriptor 'close' requires a 'generator' object")
+	}
+	if err := g.Close(); err != nil {
+		return nil, err
+	}
+	return None(), nil
 }
 
 // NewGenerator creates a generator with the given name. The caller

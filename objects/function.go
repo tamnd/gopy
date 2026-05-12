@@ -67,7 +67,8 @@ func init() {
 	//
 	// CPython: Objects/funcobject.c:1057 func_descr_get
 	FunctionType.DescrGet = functionDescrGet
-	FunctionType.Getattro = GenericGetAttr
+	FunctionType.Getattro = funcGetAttr
+	FunctionType.Setattro = funcSetAttr
 	registerFunctionGetSets()
 	// FunctionType.Call is wired by the vm package on init since the
 	// call needs to push a frame and drive Eval; doing that from
@@ -176,7 +177,130 @@ func registerFunctionGetSets() {
 			}
 			return t, nil
 		},
-		nil))
+		func(o Object, v Object) error {
+			f := o.(*Function)
+			if v == nil {
+				f.Typeparams = nil
+				return nil
+			}
+			t, ok := v.(*Tuple)
+			if !ok {
+				return fmt.Errorf("TypeError: __type_params__ must be a tuple, not '%s'", v.Type().Name)
+			}
+			f.Typeparams = t
+			return nil
+		}))
+	// __isabstractmethod__ stores in __dict__ so decorators like
+	// abstractmethod can stamp it without a dedicated struct field.
+	//
+	// CPython: Objects/funcobject.c:805 func_get_isabstractmethod /
+	// CPython: Objects/funcobject.c:823 func_set_isabstractmethod
+	SetTypeDescr(FunctionType, "__isabstractmethod__", NewGetSetDescr("__isabstractmethod__",
+		func(o Object) (Object, error) {
+			f := o.(*Function)
+			if f.Dict == nil {
+				return False(), nil
+			}
+			v, err := f.Dict.GetItem(NewStr("__isabstractmethod__"))
+			if err != nil || v == nil {
+				return False(), nil
+			}
+			return v, nil
+		},
+		func(o Object, v Object) error {
+			f := o.(*Function)
+			if v == nil {
+				if f.Dict == nil {
+					return nil
+				}
+				return f.Dict.DelItem(NewStr("__isabstractmethod__"))
+			}
+			if f.Dict == nil {
+				f.Dict = NewDict()
+			}
+			return f.Dict.SetItem(NewStr("__isabstractmethod__"), v)
+		}))
+	// __dict__ exposes the function's attribute namespace directly.
+	//
+	// CPython: Objects/funcobject.c:755 func_get_dict / func_set_dict
+	SetTypeDescr(FunctionType, "__dict__", NewGetSetDescr("__dict__",
+		func(o Object) (Object, error) {
+			f := o.(*Function)
+			if f.Dict == nil {
+				f.Dict = NewDict()
+			}
+			return f.Dict, nil
+		},
+		func(o Object, v Object) error {
+			f := o.(*Function)
+			if v == nil {
+				f.Dict = nil
+				return nil
+			}
+			d, ok := v.(*Dict)
+			if !ok {
+				return fmt.Errorf("TypeError: __dict__ must be set to a dict object")
+			}
+			f.Dict = d
+			return nil
+		}))
+}
+
+// funcGetAttr is FunctionType.Getattro. It resolves getset descriptors
+// first, then reads from the function's __dict__ for arbitrary
+// per-function attributes set by decorators.
+//
+// CPython: Objects/funcobject.c:687 func_getattro
+func funcGetAttr(o Object, name Object) (Object, error) {
+	if name == nil || name.Type() != strType {
+		return nil, fmt.Errorf("TypeError: attribute name must be string, not '%s'", typeNameOf(name))
+	}
+	tp := o.Type()
+	descr, _ := LookupDescriptor(tp, attrNameStr(name))
+	if descr != nil {
+		dt := descr.Type()
+		if dt.DescrGet != nil {
+			return dt.DescrGet(descr, o, tp)
+		}
+		return descr, nil
+	}
+	fn := o.(*Function)
+	if fn.Dict != nil {
+		v, err := fn.Dict.GetItem(name)
+		if err == nil && v != nil {
+			return v, nil
+		}
+	}
+	return nil, fmt.Errorf("AttributeError: 'function' object has no attribute '%s'", attrNameStr(name))
+}
+
+// funcSetAttr is FunctionType.Setattro. It dispatches to getset
+// descriptor setters first, then falls back to the function's __dict__
+// for arbitrary decorator-assigned attributes.
+//
+// CPython: Objects/funcobject.c:714 func_setattro
+func funcSetAttr(o Object, name Object, value Object) error {
+	if name == nil || name.Type() != strType {
+		return fmt.Errorf("TypeError: attribute name must be string, not '%s'", typeNameOf(name))
+	}
+	tp := o.Type()
+	descr, _ := LookupDescriptor(tp, attrNameStr(name))
+	if descr != nil {
+		if dset := descr.Type().DescrSet; dset != nil {
+			return dset(descr, o, value)
+		}
+	}
+	fn := o.(*Function)
+	if value == nil {
+		if fn.Dict == nil {
+			return fmt.Errorf("AttributeError: 'function' object has no attribute '%s'", attrNameStr(name))
+		}
+		return fn.Dict.DelItem(name)
+	}
+	if fn.Dict == nil {
+		fn.Dict = NewDict()
+	}
+	return fn.Dict.SetItem(name, value)
 }
 
 // functionDescrGet implements the function descriptor protocol:

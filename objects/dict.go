@@ -35,6 +35,10 @@ type Dict struct {
 	fill       int         // active entries + dummies; only resets on resize
 	kind       dictKind    // DictKeysKind: gates the four lookup variants
 	sharedKeys *SharedKeys // non-nil while in split-keys mode (1680-D)
+	// attrs holds instance attributes for dict subclass objects. Nil for
+	// plain dict instances; allocated by dictSubclassSetAttr when first
+	// written. Mirrors CPython's tp_dictoffset on dict subclasses.
+	attrs *Dict
 	// keysVersion is the dk_version stamped into inline caches by the
 	// adaptive specializer. 0 means "not yet allocated or invalidated";
 	// GetKeysVersion lazily allocates a fresh value from the global
@@ -74,11 +78,32 @@ func init() {
 	}
 	DictType.TpTraverse = dictTraverse
 	DictType.Getattro = GenericGetAttr
+	// TpNew creates a *Dict even for subclasses, so dict methods work
+	// on subclass instances without type-asserting to *Instance.
+	//
+	// CPython: Objects/dictobject.c:4023 PyDict_Type (tp_new = dict_new)
+	DictType.TpNew = func(cls *Type, args []Object, kwargs map[string]Object) (Object, error) {
+		d := NewDict()
+		d.init(cls)
+		return d, nil
+	}
 	SetTypeDescr(DictType, "keys", NewMethodDescr(DictType, "keys", dictKeysMethod))
 	SetTypeDescr(DictType, "values", NewMethodDescr(DictType, "values", dictValuesMethod))
 	SetTypeDescr(DictType, "items", NewMethodDescr(DictType, "items", dictItemsMethod))
 	SetTypeDescr(DictType, "get", NewMethodDescr(DictType, "get", dictGetMethod))
 	SetTypeDescr(DictType, "__contains__", NewMethodDescr(DictType, "__contains__", dictContainsMethod))
+	SetTypeDescr(DictType, "__getitem__", NewMethodDescr(DictType, "__getitem__", dictGetItemMethod))
+	SetTypeDescr(DictType, "__setitem__", NewMethodDescr(DictType, "__setitem__", dictSetItemMethod))
+	SetTypeDescr(DictType, "__delitem__", NewMethodDescr(DictType, "__delitem__", dictDelItemMethod))
+	SetTypeDescr(DictType, "__len__", NewMethodDescr(DictType, "__len__", dictLenMethod))
+	SetTypeDescr(DictType, "__eq__", NewMethodDescr(DictType, "__eq__", dictEqMethod))
+	SetTypeDescr(DictType, "clear", NewMethodDescr(DictType, "clear", dictClearMethod))
+	SetTypeDescr(DictType, "pop", NewMethodDescr(DictType, "pop", dictPopMethod))
+	SetTypeDescr(DictType, "update", NewMethodDescr(DictType, "update", dictUpdateMethod))
+	SetTypeDescr(DictType, "copy", NewMethodDescr(DictType, "copy", dictCopyMethod))
+	SetTypeDescr(DictType, "setdefault", NewMethodDescr(DictType, "setdefault", dictSetDefaultMethod))
+	SetTypeDescr(DictType, "fromkeys", NewClassMethod(NewBuiltinFunction("fromkeys", dictFromKeysMethod)))
+	SetTypeDescr(DictType, "popitem", NewMethodDescr(DictType, "popitem", dictPopItemMethod))
 }
 
 func dictKeysMethod(args []Object, _ map[string]Object) (Object, error) {
@@ -266,6 +291,326 @@ func dictMappingGet(o, key Object) (Object, error) {
 func dictMappingSet(o, key, value Object) error { return o.(*Dict).SetItem(key, value) }
 
 func dictMappingDel(o, key Object) error { return o.(*Dict).DelItem(key) }
+
+// dictSubclassGetAttr is the tp_getattro slot for user-defined dict
+// subclasses. The instance is a *Dict (not *Instance), so we look in
+// d.attrs for per-instance attributes before walking the type MRO.
+//
+// CPython: Objects/typeobject.c:5165 slot_tp_getattr_hook (dict path)
+func dictSubclassGetAttr(o Object, name Object) (Object, error) {
+	d, ok := o.(*Dict)
+	if !ok {
+		return GenericGetAttr(o, name)
+	}
+	tp := d.Type()
+	// Type-level data descriptors win over instance attrs.
+	descr, _ := LookupDescriptor(tp, attrNameStr(name))
+	if descr != nil {
+		if dget := descr.Type().DescrGet; dget != nil {
+			if descr.Type().DescrSet != nil {
+				// data descriptor
+				return dget(descr, o, tp)
+			}
+		}
+	}
+	// Instance attrs from d.attrs.
+	if d.attrs != nil {
+		if v, err := d.attrs.GetItem(name); err == nil {
+			return v, nil
+		}
+	}
+	// Non-data descriptors and class attrs.
+	if descr != nil {
+		if dget := descr.Type().DescrGet; dget != nil {
+			return dget(descr, o, tp)
+		}
+		return descr, nil
+	}
+	if descr != nil {
+		return descr, nil
+	}
+	return nil, fmt.Errorf("AttributeError: '%s' object has no attribute '%s'", tp.Name, attrNameStr(name))
+}
+
+// dictSubclassSetAttr is the tp_setattro slot for user-defined dict
+// subclasses. Instance attributes land in d.attrs.
+//
+// CPython: Objects/object.c:2040 PyObject_GenericSetAttr (dict-subclass path)
+func dictSubclassSetAttr(o Object, name Object, value Object) error {
+	d, ok := o.(*Dict)
+	if !ok {
+		return GenericSetAttr(o, name, value)
+	}
+	tp := d.Type()
+	nameStr := attrNameStr(name)
+	// Type-level data descriptors take priority.
+	descr, _ := LookupDescriptor(tp, nameStr)
+	if descr != nil {
+		if dset := descr.Type().DescrSet; dset != nil {
+			return dset(descr, o, value)
+		}
+	}
+	// Store in instance attrs.
+	if d.attrs == nil {
+		d.attrs = NewDict()
+	}
+	if value == nil {
+		if _, err := d.attrs.GetItem(name); err != nil {
+			return fmt.Errorf("AttributeError: '%s' object has no attribute '%s'", tp.Name, nameStr)
+		}
+		return d.attrs.DelItem(name)
+	}
+	return d.attrs.SetItem(name, value)
+}
+
+// dictGetItemMethod backs dict.__getitem__.
+//
+// CPython: Objects/dictobject.c:2229 dict_subscript
+func dictGetItemMethod(args []Object, _ map[string]Object) (Object, error) {
+	if len(args) != 2 {
+		return nil, fmt.Errorf("TypeError: __getitem__() takes exactly one argument (%d given)", len(args)-1)
+	}
+	return dictMappingGet(args[0], args[1])
+}
+
+// dictSetItemMethod backs dict.__setitem__.
+//
+// CPython: Objects/dictobject.c:2266 dict_ass_sub (set branch)
+func dictSetItemMethod(args []Object, _ map[string]Object) (Object, error) {
+	if len(args) != 3 {
+		return nil, fmt.Errorf("TypeError: __setitem__() takes exactly 2 arguments (%d given)", len(args)-1)
+	}
+	return None(), args[0].(*Dict).SetItem(args[1], args[2])
+}
+
+// dictDelItemMethod backs dict.__delitem__.
+//
+// CPython: Objects/dictobject.c:2266 dict_ass_sub (del branch)
+func dictDelItemMethod(args []Object, _ map[string]Object) (Object, error) {
+	if len(args) != 2 {
+		return nil, fmt.Errorf("TypeError: __delitem__() takes exactly one argument (%d given)", len(args)-1)
+	}
+	d := args[0].(*Dict)
+	if err := d.DelItem(args[1]); err != nil {
+		return nil, fmt.Errorf("KeyError: %v", args[1])
+	}
+	return None(), nil
+}
+
+// dictLenMethod backs dict.__len__.
+//
+// CPython: Objects/dictobject.c:3127 dict_length
+func dictLenMethod(args []Object, _ map[string]Object) (Object, error) {
+	if len(args) != 1 {
+		return nil, fmt.Errorf("TypeError: __len__() takes no arguments (%d given)", len(args)-1)
+	}
+	return NewInt(int64(args[0].(*Dict).Len())), nil
+}
+
+// dictEqMethod backs dict.__eq__.
+//
+// CPython: Objects/dictobject.c:3554 dict_richcompare (Py_EQ branch)
+func dictEqMethod(args []Object, _ map[string]Object) (Object, error) {
+	if len(args) != 2 {
+		return nil, fmt.Errorf("TypeError: __eq__() takes exactly one argument (%d given)", len(args)-1)
+	}
+	a, ok := args[0].(*Dict)
+	if !ok {
+		return NotImplemented(), nil
+	}
+	b, ok := args[1].(*Dict)
+	if !ok {
+		return NotImplemented(), nil
+	}
+	if a.Len() != b.Len() {
+		return False(), nil
+	}
+	for _, k := range a.Keys() {
+		av, err := a.GetItem(k)
+		if err != nil {
+			return nil, err
+		}
+		bv, err := b.GetItem(k)
+		if err != nil {
+			if errors.Is(err, errKeyNotFound) {
+				return False(), nil
+			}
+			return nil, err
+		}
+		eq, err := RichCmp(av, bv, CompareEQ)
+		if err != nil {
+			return nil, err
+		}
+		t, err := IsTruthy(eq)
+		if err != nil {
+			return nil, err
+		}
+		if !t {
+			return False(), nil
+		}
+	}
+	return True(), nil
+}
+
+// dictClearMethod backs dict.clear().
+//
+// CPython: Objects/dictobject.c:3783 dict_clear
+func dictClearMethod(args []Object, _ map[string]Object) (Object, error) {
+	if len(args) != 1 {
+		return nil, fmt.Errorf("TypeError: clear() takes no arguments (%d given)", len(args)-1)
+	}
+	d := args[0].(*Dict)
+	for _, k := range d.Keys() {
+		_ = d.DelItem(k)
+	}
+	return None(), nil
+}
+
+// dictPopMethod backs dict.pop(key[, default]).
+//
+// CPython: Objects/dictobject.c:3821 dict_pop_impl
+func dictPopMethod(args []Object, _ map[string]Object) (Object, error) {
+	if len(args) < 2 || len(args) > 3 {
+		return nil, fmt.Errorf("TypeError: pop expected 1 to 2 arguments, got %d", len(args)-1)
+	}
+	d := args[0].(*Dict)
+	v, err := d.GetItem(args[1])
+	if err != nil {
+		if errors.Is(err, errKeyNotFound) {
+			if len(args) == 3 {
+				return args[2], nil
+			}
+			repr, _ := Repr(args[1])
+			return nil, fmt.Errorf("KeyError: %s", repr)
+		}
+		return nil, err
+	}
+	_ = d.DelItem(args[1])
+	return v, nil
+}
+
+// dictUpdateMethod backs dict.update(). Accepts a mapping or iterable of
+// pairs, plus keyword arguments.
+//
+// CPython: Objects/dictobject.c:3795 dict_update_common
+func dictUpdateMethod(args []Object, kwargs map[string]Object) (Object, error) {
+	if len(args) < 1 || len(args) > 2 {
+		return nil, fmt.Errorf("TypeError: update expected at most 1 argument, got %d", len(args)-1)
+	}
+	d := args[0].(*Dict)
+	if len(args) == 2 {
+		if src, ok := args[1].(*Dict); ok {
+			for _, k := range src.Keys() {
+				v, _ := src.GetItem(k)
+				if err := d.SetItem(k, v); err != nil {
+					return nil, err
+				}
+			}
+		}
+	}
+	for k, v := range kwargs {
+		if err := d.SetItem(NewStr(k), v); err != nil {
+			return nil, err
+		}
+	}
+	return None(), nil
+}
+
+// dictCopyMethod backs dict.copy().
+//
+// CPython: Objects/dictobject.c:3820 dict_copy
+func dictCopyMethod(args []Object, _ map[string]Object) (Object, error) {
+	if len(args) != 1 {
+		return nil, fmt.Errorf("TypeError: copy() takes no arguments (%d given)", len(args)-1)
+	}
+	src := args[0].(*Dict)
+	dst := NewDict()
+	for _, k := range src.Keys() {
+		v, _ := src.GetItem(k)
+		if err := dst.SetItem(k, v); err != nil {
+			return nil, err
+		}
+	}
+	return dst, nil
+}
+
+// dictSetDefaultMethod backs dict.setdefault(key[, default]).
+//
+// CPython: Objects/dictobject.c:3863 dict_setdefault_impl
+func dictSetDefaultMethod(args []Object, _ map[string]Object) (Object, error) {
+	if len(args) < 2 || len(args) > 3 {
+		return nil, fmt.Errorf("TypeError: setdefault expected 1 to 2 arguments, got %d", len(args)-1)
+	}
+	d := args[0].(*Dict)
+	v, err := d.GetItem(args[1])
+	if err == nil {
+		return v, nil
+	}
+	if !errors.Is(err, errKeyNotFound) {
+		return nil, err
+	}
+	var dflt Object
+	if len(args) == 3 {
+		dflt = args[2]
+	} else {
+		dflt = None()
+	}
+	if err := d.SetItem(args[1], dflt); err != nil {
+		return nil, err
+	}
+	return dflt, nil
+}
+
+// dictFromKeysMethod backs dict.fromkeys(iterable[, value]).
+// This is a classmethod: args[0] is the class (dict or subclass).
+//
+// CPython: Objects/dictobject.c:3869 dict_fromkeys_impl
+func dictFromKeysMethod(args []Object, _ map[string]Object) (Object, error) {
+	if len(args) < 2 || len(args) > 3 {
+		return nil, fmt.Errorf("TypeError: fromkeys expected 1 to 2 arguments, got %d", len(args)-1)
+	}
+	var value Object
+	if len(args) == 3 {
+		value = args[2]
+	} else {
+		value = None()
+	}
+	out := NewDict()
+	it, err := Iter(args[1])
+	if err != nil {
+		return nil, err
+	}
+	for {
+		k, err := IterNext(it)
+		if errors.Is(err, ErrStopIteration) {
+			break
+		}
+		if err != nil {
+			return nil, err
+		}
+		if err := out.SetItem(k, value); err != nil {
+			return nil, err
+		}
+	}
+	return out, nil
+}
+
+// dictPopItemMethod backs dict.popitem().
+//
+// CPython: Objects/dictobject.c:3898 dict_popitem_impl
+func dictPopItemMethod(args []Object, _ map[string]Object) (Object, error) {
+	if len(args) != 1 {
+		return nil, fmt.Errorf("TypeError: popitem() takes no arguments (%d given)", len(args)-1)
+	}
+	d := args[0].(*Dict)
+	if d.Len() == 0 {
+		return nil, fmt.Errorf("KeyError: 'popitem(): dictionary is empty'")
+	}
+	lastSlot := d.order[len(d.order)-1]
+	e := d.entries[lastSlot]
+	_ = d.DelItem(e.key)
+	return NewTuple([]Object{e.key, e.value}), nil
+}
 
 func dictRepr(o Object) (string, error) {
 	d := o.(*Dict)
