@@ -1,0 +1,94 @@
+---
+title: Objects/moduleobject.c (part 3)
+description: "Objects/moduleobject.c part 3: module.__init_subclass__, ModuleType, module.__spec__, module repr."
+cpython_path: Objects/moduleobject.c
+cpython_version: "3.14"
+lines: 400
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Objects/moduleobject.c" />
+
+This annotation covers module object creation and repr. See `objects_module_detail` (part 1) for `module.__dict__`, `PyModule_New`, and `module.__getattr__`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `PyModule_NewObject` | Create a module with a name |
+| 81-160 | `module.__repr__` | `<module 'name' from 'path'>` |
+| 161-240 | `module.__spec__` | Import spec attached after loading |
+| 241-320 | Multi-phase init | `PyModuleDef_Init` for C extension modules |
+| 321-400 | `module.__dir__` | List module attributes |
+
+## Reading
+
+### `PyModule_NewObject`
+
+```c
+// CPython: Objects/moduleobject.c:80 PyModule_NewObject
+PyObject *
+PyModule_NewObject(PyObject *name)
+{
+    PyModuleObject *m = PyObject_GC_New(PyModuleObject, &PyModule_Type);
+    m->md_dict = PyDict_New();
+    m->md_state = NULL;
+    m->md_weaklist = NULL;
+    m->md_def = NULL;
+    /* Set __name__, __loader__, __package__, __spec__ to None */
+    PyDict_SetItemString(m->md_dict, "__name__", name);
+    PyDict_SetItemString(m->md_dict, "__loader__", Py_None);
+    PyDict_SetItemString(m->md_dict, "__package__", Py_None);
+    PyDict_SetItemString(m->md_dict, "__spec__", Py_None);
+    return (PyObject *)m;
+}
+```
+
+All module attributes are stored in `md_dict`. `__spec__` starts as `None` and is set by the import machinery after loading. `md_state` holds C extension module state (from multi-phase init); it is `NULL` for Python modules.
+
+### `module.__repr__`
+
+```c
+// CPython: Objects/moduleobject.c:180 module_repr
+static PyObject *
+module_repr(PyModuleObject *m)
+{
+    /* <module 'name' from 'file'> or <module 'name' (built-in)> */
+    PyObject *spec = PyDict_GetItemString(m->md_dict, "__spec__");
+    if (spec != NULL && spec != Py_None) {
+        return PyObject_CallMethod(spec, "__repr__", NULL);
+    }
+    PyObject *name = PyDict_GetItemString(m->md_dict, "__name__");
+    PyObject *file = PyDict_GetItemString(m->md_dict, "__file__");
+    if (file != NULL && file != Py_None) {
+        return PyUnicode_FromFormat("<module '%U' from '%U'>", name, file);
+    }
+    return PyUnicode_FromFormat("<module '%U'>", name);
+}
+```
+
+`repr(module)` delegates to `__spec__.__repr__()` if a spec is present, giving `<module 'foo' from '/path/to/foo.py'>`. For built-ins and frozen modules, it falls back to `<module 'sys' (built-in)>`.
+
+### Multi-phase init
+
+```c
+// CPython: Objects/moduleobject.c:280 PyModuleDef_Init
+PyObject *
+PyModuleDef_Init(struct PyModuleDef *def)
+{
+    /* Register a module definition for multi-phase initialization.
+       Phase 1: PyInit_foo() returns the PyModuleDef (not a module object).
+       Phase 2: importlib calls Py_mod_exec slots on the module. */
+    if (PyType_Ready(&PyModuleDef_Type) < 0) return NULL;
+    Py_INCREF(def);
+    return (PyObject *)def;
+}
+```
+
+Multi-phase init (PEP 451) allows a C extension's `PyInit_foo` to return a `PyModuleDef` instead of a module object. The import machinery calls `Py_mod_create` then `Py_mod_exec` slots. This enables sub-interpreter isolation and module state per-interpreter.
+
+## gopy notes
+
+`PyModule_NewObject` is `objects.NewModule` in `objects/module.go`. Module attributes live in `Module.Dict`. `module.__repr__` is `objects.ModuleRepr`. Multi-phase init is not yet supported; gopy C extensions use the single-phase path.

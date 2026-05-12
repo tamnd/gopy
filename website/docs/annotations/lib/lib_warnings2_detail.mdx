@@ -1,0 +1,107 @@
+---
+title: Lib/warnings.py (part 2)
+description: "warnings.py part 2: warn(), filters, simplefilter, catch_warnings, showwarning."
+cpython_path: Lib/warnings.py
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/warnings.py" />
+
+This annotation covers the warning dispatch mechanism. See `lib_warnings_detail` (part 1) for warning categories, `filterwarnings`, and the `__warningregistry__` cache.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `warnings.warn` | Issue a warning with registry dedup |
+| 81-180 | Filter matching | Walk the filter list to find action |
+| 181-260 | `warnings.simplefilter` | Set a single action for all warnings |
+| 261-360 | `warnings.catch_warnings` | Context manager to save/restore filters |
+| 361-500 | `warnings.showwarning` | Default: print to stderr |
+
+## Reading
+
+### `warnings.warn`
+
+```python
+# CPython: Lib/warnings.py:240 warn
+def warn(message, category=UserWarning, stacklevel=1, source=None):
+    """Issue a warning, or maybe ignore it or raise an exception."""
+    # Get the caller's frame
+    try:
+        caller = sys._getframe(stacklevel)
+    except ValueError:
+        globals = sys.__dict__
+        lineno = 1
+    else:
+        globals = caller.f_globals
+        lineno = caller.f_lineno
+    module = globals.get('__name__') or '__main__'
+    filename = globals.get('__file__', module)
+    registry = globals.setdefault('__warningregistry__', {})
+    warn_explicit(message, category, filename, lineno, module, registry, globals, source)
+```
+
+`warn` gets the calling frame via `sys._getframe(stacklevel)` and stores the `__warningregistry__` dict in the caller's module globals. The registry deduplicates warnings: the same warning at the same location is shown only once (per category).
+
+### Filter matching
+
+```python
+# CPython: Lib/warnings.py:180 warn_explicit (filter loop)
+def warn_explicit(message, category, filename, lineno, module=None, registry=None, ...):
+    key = (text, category, lineno)
+    if registry.get(key):
+        return  # already shown
+    for item in filters:
+        action, msg, cat, mod, ln = item
+        if ((msg is None or msg.match(text)) and
+            issubclass(category, cat) and
+            (mod is None or mod.match(module)) and
+            (ln == 0 or lineno == ln)):
+            break
+    else:
+        action = defaultaction
+    ...
+    if action == 'error':
+        raise category(message)
+    elif action == 'ignore':
+        return
+    elif action == 'always':
+        pass  # show even if in registry
+    ...
+    registry[key] = 1
+    showwarning(message, category, filename, lineno)
+```
+
+The filter list is searched linearly. Each filter is a 5-tuple `(action, message_regex, category, module_regex, lineno)`. `'once'` shows the warning once per location; `'always'` shows it every time; `'error'` converts it to an exception.
+
+### `catch_warnings`
+
+```python
+# CPython: Lib/warnings.py:440 catch_warnings
+class catch_warnings:
+    def __enter__(self):
+        self._module = sys.modules['warnings']
+        self._filters = self._module.filters
+        self._module.filters = self._filters[:]  # copy
+        if self._record:
+            log = []
+            self._module._filters_mutated()
+            self._module.showwarning = log.append
+            return log
+        return None
+
+    def __exit__(self, *exc_info):
+        self._module.filters = self._filters  # restore
+        self._module.showwarning = self._showwarning_orig
+```
+
+`with catch_warnings(record=True) as w:` captures warnings into `w` without displaying them. Restores the original filter list and `showwarning` on exit. Used extensively in test suites to assert that specific warnings are raised.
+
+## gopy notes
+
+`warnings.warn` is `module/warnings.Warn` in `module/warnings/module.go`. `__warningregistry__` is stored on the module object. Filter matching iterates `module/warnings.Filters`. `catch_warnings` saves/restores `module/warnings.Filters` and `module/warnings.ShowWarning`.

@@ -1,0 +1,97 @@
+---
+title: Python/ceval.c (part 45)
+description: "Python/ceval.c part 45: BINARY_SUBSCR specializations, STORE_SUBSCR specializations."
+cpython_path: Python/ceval.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Python/ceval.c" />
+
+This annotation covers subscript specializations. See `python_ceval44_detail` for `STORE_ATTR` specializations.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `BINARY_SUBSCR_LIST_INT` | `list[int]` fast path |
+| 81-160 | `BINARY_SUBSCR_TUPLE_INT` | `tuple[int]` fast path |
+| 161-240 | `BINARY_SUBSCR_DICT` | Dict subscript with cached hash |
+| 241-320 | `STORE_SUBSCR_LIST_INT` | `list[int] = value` fast path |
+| 321-500 | `STORE_SUBSCR_DICT` | Dict assignment |
+
+## Reading
+
+### `BINARY_SUBSCR_LIST_INT`
+
+```c
+// CPython: Python/ceval.c:5740 BINARY_SUBSCR_LIST_INT
+inst(BINARY_SUBSCR_LIST_INT, (list, sub -- res)) {
+    DEOPT_IF(!PyList_CheckExact(list), BINARY_SUBSCR);
+    DEOPT_IF(!PyLong_CheckExact(sub), BINARY_SUBSCR);
+    Py_ssize_t index = _PyLong_IsCompact((PyLongObject *)sub) ?
+                       _PyLong_CompactValue((PyLongObject *)sub) : -1;
+    DEOPT_IF(index < 0, BINARY_SUBSCR);
+    DEOPT_IF(index >= PyList_GET_SIZE(list), BINARY_SUBSCR);
+    res = Py_NewRef(PyList_GET_ITEM(list, index));
+    Py_DECREF(list);
+    Py_DECREF(sub);
+}
+```
+
+`my_list[0]` avoids the generic `__getitem__` dispatch. The type check (`PyList_CheckExact`), range check, and item access are all in a handful of instructions. Compact integer check ensures `index` fits in a machine word.
+
+### `BINARY_SUBSCR_DICT`
+
+```c
+// CPython: Python/ceval.c:5820 BINARY_SUBSCR_DICT
+inst(BINARY_SUBSCR_DICT, (dict, sub -- res)) {
+    DEOPT_IF(!PyDict_CheckExact(dict), BINARY_SUBSCR);
+    /* Use precomputed hash from cache if available */
+    Py_hash_t hash;
+    if (PyUnicode_CheckExact(sub)) {
+        hash = unicode_get_hash(sub);
+        if (hash == -1) hash = PyObject_Hash(sub);
+    } else {
+        hash = PyObject_Hash(sub);
+    }
+    res = _PyDict_GetItem_KnownHash(dict, sub, hash);
+    if (res == NULL) {
+        if (!PyErr_Occurred())
+            _PyErr_SetKeyError(sub);
+        goto error;
+    }
+    res = Py_NewRef(res);
+    Py_DECREF(dict);
+    Py_DECREF(sub);
+}
+```
+
+`my_dict['key']` specializes with `BINARY_SUBSCR_DICT`. For string keys with a cached hash (`_PyASCIIObject.hash`), the hash lookup avoids recomputation on repeated access. This is significant for hot loops like `config['key']`.
+
+### `STORE_SUBSCR_LIST_INT`
+
+```c
+// CPython: Python/ceval.c:5880 STORE_SUBSCR_LIST_INT
+inst(STORE_SUBSCR_LIST_INT, (value, list, sub --)) {
+    /* list[int] = value */
+    DEOPT_IF(!PyList_CheckExact(list), STORE_SUBSCR);
+    DEOPT_IF(!PyLong_CheckExact(sub), STORE_SUBSCR);
+    Py_ssize_t index = ...;
+    DEOPT_IF(index < 0 || index >= PyList_GET_SIZE(list), STORE_SUBSCR);
+    PyObject *old = PyList_GET_ITEM(list, index);
+    PyList_SET_ITEM(list, index, Py_NewRef(value));
+    Py_DECREF(old);
+    Py_DECREF(list);
+    Py_DECREF(sub);
+}
+```
+
+`my_list[i] = v` with a known-integer index directly updates `ob_item[i]`. The old value is decremented, the new value is increfed and stored. No bounds check expansion (the deopt guard handles it).
+
+## gopy notes
+
+`BINARY_SUBSCR_LIST_INT` is in `vm/eval_simple.go`; it accesses `objects.List.Items[index]` directly. `BINARY_SUBSCR_DICT` calls `objects.DictGetKnownHash`. `STORE_SUBSCR_LIST_INT` sets `objects.List.Items[index]`. `STORE_SUBSCR_DICT` calls `objects.DictSetItem`.

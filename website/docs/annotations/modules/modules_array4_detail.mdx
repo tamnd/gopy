@@ -1,0 +1,112 @@
+---
+title: Modules/arraymodule.c (part 4)
+description: "arraymodule part 4: array.fromfile, array.tofile, array.frombytes, array.tobytes."
+cpython_path: Modules/arraymodule.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/arraymodule.c" />
+
+This annotation covers file I/O and binary conversion. See `lib_array3_detail` for `array.__new__`, type codes, `array.append`, and `array.extend`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `array.tobytes` | Convert to raw bytes |
+| 81-160 | `array.frombytes` | Load from raw bytes |
+| 161-240 | `array.tofile` | Write binary data to a file |
+| 241-340 | `array.fromfile` | Read binary data from a file |
+| 341-500 | `array.byteswap` | Reverse byte order for endian conversion |
+
+## Reading
+
+### `array.tobytes`
+
+```c
+// CPython: Modules/arraymodule.c:1080 array_tobytes_impl
+static PyObject *
+array_tobytes_impl(arrayobject *self)
+{
+    /* Return a bytes copy of the array's memory */
+    return PyBytes_FromStringAndSize(self->ob_item,
+                                     Py_SIZE(self) * self->ob_descr->itemsize);
+}
+```
+
+`array.array('i', [1, 2, 3]).tobytes()` returns a 12-byte bytes object (4 bytes per `int`). The bytes are in the host byte order. Use `array.byteswap()` before `tobytes()` to get big-endian output on little-endian systems.
+
+### `array.frombytes`
+
+```c
+// CPython: Modules/arraymodule.c:1120 array_frombytes_impl
+static PyObject *
+array_frombytes_impl(arrayobject *self, Py_buffer *buffer)
+{
+    Py_ssize_t itemsize = self->ob_descr->itemsize;
+    if (buffer->len % itemsize != 0) {
+        PyErr_SetString(PyExc_ValueError,
+                        "bytes length not a multiple of item size");
+        return NULL;
+    }
+    Py_ssize_t n = buffer->len / itemsize;
+    array_resize(self, Py_SIZE(self) + n);
+    memcpy(self->ob_item + Py_SIZE(self) * itemsize - buffer->len,
+           buffer->buf, buffer->len);
+    return Py_None;
+}
+```
+
+`arr.frombytes(data)` extends the array with the raw bytes. The byte count must be a multiple of the item size. The bytes are appended without copying to a temporary array.
+
+### `array.fromfile`
+
+```c
+// CPython: Modules/arraymodule.c:1180 array_fromfile_impl
+static PyObject *
+array_fromfile_impl(arrayobject *self, PyObject *f, Py_ssize_t n)
+{
+    /* Read n items from a file object */
+    Py_ssize_t nbytes = n * self->ob_descr->itemsize;
+    PyObject *b = PyObject_CallMethodOneArg(f, &_Py_ID(read),
+                                             PyLong_FromSsize_t(nbytes));
+    Py_ssize_t nread = PyBytes_GET_SIZE(b);
+    if (nread < nbytes) {
+        PyErr_SetString(PyExc_EOFError,
+                        "not enough items in file. Expected ..., got ...");
+    }
+    array_frombytes_impl(self, ...);
+    return Py_None;
+}
+```
+
+`arr.fromfile(f, 1000)` reads exactly 1000 items. It calls `f.read(nbytes)` then `frombytes`. `EOFError` is raised if fewer items are available.
+
+### `array.byteswap`
+
+```c
+// CPython: Modules/arraymodule.c:1280 array_byteswap_impl
+static PyObject *
+array_byteswap_impl(arrayobject *self)
+{
+    /* Reverse the byte order of each item in-place */
+    Py_ssize_t itemsize = self->ob_descr->itemsize;
+    char *p = self->ob_item;
+    for (Py_ssize_t i = 0; i < Py_SIZE(self); i++, p += itemsize) {
+        for (int lo = 0, hi = itemsize - 1; lo < hi; lo++, hi--) {
+            char tmp = p[lo]; p[lo] = p[hi]; p[hi] = tmp;
+        }
+    }
+    return Py_None;
+}
+```
+
+`arr.byteswap()` converts between little-endian and big-endian in-place. Works for itemsizes 1, 2, 4, 8. Used for reading binary files from platforms with different byte order.
+
+## gopy notes
+
+`array.tobytes` is `objects.ArrayToBytes` in `objects/array.go`, returning a byte slice copy. `array.frombytes` appends to the underlying `[]T` slice. `array.fromfile` calls the file's `read` method. `array.byteswap` reverses bytes with `encoding/binary.ByteOrder` conversion.

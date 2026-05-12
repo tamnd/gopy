@@ -1,0 +1,80 @@
+---
+title: Lib/copyreg.py (part 2)
+description: "copyreg part 2: dispatch_table, reduce_ex, __reduce__, pickle extension registry."
+cpython_path: Lib/copyreg.py
+cpython_version: "3.14"
+lines: 400
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/copyreg.py" />
+
+This annotation covers the pickle extension registry. See `lib_copyreg_detail` (part 1) for `copyreg.pickle`, `copyreg.constructor`, and `dispatch_table`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-60 | `dispatch_table` | Per-class reduce functions for pickle |
+| 61-140 | `_reconstructor` | Reconstruct objects with a different class |
+| 141-240 | Extension registry | Integer codes for compact pickling |
+| 241-400 | `__reduce_ex__` protocol | How pickle calls into the reduce machinery |
+
+## Reading
+
+### `dispatch_table`
+
+```python
+# CPython: Lib/copyreg.py:28 dispatch_table
+dispatch_table = {}
+
+def pickle(ob_type, reduce_func, constructor=None):
+    if constructor is not None:
+        constructor_check(constructor)
+    if not callable(reduce_func):
+        raise TypeError("reduce_func must be callable")
+    dispatch_table[ob_type] = reduce_func
+```
+
+`copyreg.pickle(SomeClass, reduce_func)` registers a global reduce function. The `pickle` module checks `copyreg.dispatch_table` before calling `obj.__reduce_ex__`. This allows pickling classes you don't control.
+
+### `_reconstructor`
+
+```python
+# CPython: Lib/copyreg.py:92 _reconstructor
+def _reconstructor(cls, base, state):
+    if base is object:
+        obj = object.__new__(cls)
+    else:
+        obj = base.__new__(cls, state)
+    if base.__init__ != object.__init__:
+        base.__init__(obj, state)
+    return obj
+```
+
+`_reconstructor` is the default reducer for new-style classes with `__reduce_ex__`. It creates the object using `base.__new__(cls, state)` where `base` is the first non-object base that implements `__new__`. This handles classes that inherit from C types.
+
+### Extension registry
+
+```python
+# CPython: Lib/copyreg.py:140 add_extension
+_extension_registry = {}   # (module, name) -> code
+_inverted_registry = {}    # code -> (module, name)
+_extension_cache = {}      # code -> object
+
+def add_extension(module, name, code):
+    """Register an object as an extension type."""
+    if not 1 <= code <= 0x7fffffff:
+        raise ValueError("code out of range")
+    key = (module, name)
+    _extension_registry[key] = code
+    _inverted_registry[code] = key
+```
+
+Extension codes (1-255: 1-byte; 256-65535: 2-byte; up to `MAXINT`: 4-byte) allow frequently pickled objects to be encoded as small integers instead of full module/name strings. `pickle` protocol 2+ uses `EXT1`/`EXT2`/`EXT4` opcodes for these.
+
+## gopy notes
+
+`copyreg.dispatch_table` is `module/copyreg.DispatchTable` in `module/copyreg/module.go`. `_reconstructor` is called during unpickling via `module/pickle.Reconstructor`. The extension registry maps are `module/copyreg.ExtensionRegistry` and `InvertedRegistry`.

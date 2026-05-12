@@ -1,0 +1,74 @@
+---
+title: Modules/_bisectmodule.c (part 2)
+description: "_bisectmodule part 2: bisect_left, bisect_right, insort_left, insort_right."
+cpython_path: Modules/_bisectmodule.c
+cpython_version: "3.14"
+lines: 300
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/_bisectmodule.c" />
+
+This annotation covers the binary search implementation. See `lib_bisect3_detail` for the pure-Python fallback and the `key` argument added in Python 3.10.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `bisect_right` | Find insertion point after equal elements |
+| 81-160 | `bisect_left` | Find insertion point before equal elements |
+| 161-220 | `insort_right` / `insort_left` | Insert maintaining sorted order |
+| 221-300 | `key` argument | Apply key function before comparison |
+
+## Reading
+
+### `bisect_right`
+
+```c
+// CPython: Modules/_bisectmodule.c:40 internal_bisect_right
+static Py_ssize_t
+internal_bisect_right(PyObject *list, PyObject *item, Py_ssize_t lo, Py_ssize_t hi,
+                      PyObject *key)
+{
+    while (lo < hi) {
+        Py_ssize_t mid = ((unsigned)(lo + hi)) >> 1;  /* avoid overflow */
+        PyObject *litem = PySequence_GetItem(list, mid);
+        if (key != Py_None) {
+            PyObject *k = PyObject_CallOneArg(key, litem);
+            Py_DECREF(litem);
+            litem = k;
+        }
+        int cmp = PyObject_RichCompareBool(item, litem, Py_LT);
+        Py_DECREF(litem);
+        if (cmp < 0) return -1;  /* error */
+        if (cmp) hi = mid;
+        else lo = mid + 1;
+    }
+    return lo;
+}
+```
+
+`bisect_right([1, 2, 2, 3], 2)` returns `3`: the insertion point after existing `2`s. The binary search uses `item < litem` to find the rightmost valid position. The `((lo + hi) >> 1)` avoids integer overflow for large indices.
+
+### `insort_right`
+
+```c
+// CPython: Modules/_bisectmodule.c:140 bisect_insort_right
+static PyObject *
+bisect_insort_right(PyObject *module, PyObject *const *args, Py_ssize_t nargs,
+                    PyObject *kwnames)
+{
+    Py_ssize_t index = internal_bisect_right(list, item, lo, hi, key);
+    if (index < 0) return NULL;
+    return PyObject_CallMethodOneArg(list, &_Py_ID(insert),
+                                     PyLong_FromSsize_t(index), item);
+}
+```
+
+`insort_right(sorted_list, x)` finds the insertion point with `bisect_right`, then calls `list.insert(index, x)`. The insert is `O(n)` due to shifting; the binary search is `O(log n)`. Total: `O(n)` dominated by the insert.
+
+## gopy notes
+
+`bisect_left`/`bisect_right` are `module/bisect.BisectLeft`/`BisectRight` in `module/bisect/module.go`. They call `objects.RichCompareBool` for the comparison. `insort` calls `objects.ListInsert`. The `key` argument applies `objects.CallOneArg` to each element before comparison.

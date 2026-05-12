@@ -1,0 +1,94 @@
+---
+title: Objects/descrobject.c (part 8)
+description: "Objects/descrobject.c part 8: classmethod_descriptor, staticmethod, wrapper_descriptor."
+cpython_path: Objects/descrobject.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Objects/descrobject.c" />
+
+This annotation covers class and static method descriptors. See `objects_descrobject7_detail` for `method_descriptor`, `slot_wrapper`, `property`, and `getset_descriptor`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `classmethod` | Descriptor that passes the class, not the instance |
+| 81-160 | `staticmethod` | Descriptor that returns the function unchanged |
+| 161-260 | `wrapper_descriptor` | C-implemented slot methods exposed to Python |
+| 261-360 | `method_wrapper` | Bound version of a `wrapper_descriptor` |
+| 361-500 | `classmethod_descriptor` | C-level `__new__`/`__init_subclass__` etc. |
+
+## Reading
+
+### `classmethod`
+
+```c
+// CPython: Objects/descrobject.c:1280 cm_descr_get
+static PyObject *
+cm_descr_get(PyObject *self, PyObject *obj, PyObject *type)
+{
+    classmethod *cm = (classmethod *)self;
+    if (type == NULL) {
+        if (obj == NULL) { ... return Py_NewRef(self); }
+        type = (PyObject *)Py_TYPE(obj);
+    }
+    if (Py_TYPE(cm->cm_callable)->tp_descr_get != NULL) {
+        return Py_TYPE(cm->cm_callable)->tp_descr_get(
+            cm->cm_callable, type, (PyObject *)Py_TYPE(type));
+    }
+    return PyMethod_New(cm->cm_callable, type);
+}
+```
+
+`@classmethod` wraps a function so that `__get__` binds the class (not the instance) as the first argument. `Foo.method()` and `Foo().method()` both pass `Foo` as `cls`. If the wrapped callable is itself a descriptor (e.g., another classmethod), its `__get__` is called recursively.
+
+### `staticmethod`
+
+```c
+// CPython: Objects/descrobject.c:1380 sm_descr_get
+static PyObject *
+sm_descr_get(PyObject *self, PyObject *obj, PyObject *type)
+{
+    staticmethod *sm = (staticmethod *)self;
+    if (sm->sm_callable == NULL) {
+        PyErr_SetString(PyExc_RuntimeError, "uninitialized staticmethod object");
+        return NULL;
+    }
+    /* Return the underlying callable unchanged */
+    if (Py_TYPE(sm->sm_callable)->tp_descr_get != NULL) {
+        return Py_TYPE(sm->sm_callable)->tp_descr_get(
+            sm->sm_callable, NULL, type);
+    }
+    return Py_NewRef(sm->sm_callable);
+}
+```
+
+`@staticmethod` returns the wrapped function unchanged from `__get__`. No `self` or `cls` is prepended. `Foo.method()` is identical to calling the function directly. `staticmethod` objects expose `__wrapped__` in Python 3.10+.
+
+### `wrapper_descriptor`
+
+```c
+// CPython: Objects/descrobject.c:560 wrapperdescr_get
+static PyObject *
+wrapperdescr_get(PyWrapperDescrObject *descr, PyObject *obj, PyObject *type)
+{
+    /* Called when accessing a slot method like int.__add__ from an instance */
+    if (obj == NULL || obj == Py_None) return Py_NewRef(descr);
+    if (!PyObject_TypeCheck(obj, descr->d_base->wrapper_base)) {
+        PyErr_Format(PyExc_TypeError, ...);
+        return NULL;
+    }
+    return PyWrapper_New((PyObject *)descr, obj);
+}
+```
+
+`wrapper_descriptor` is the type of C-slot methods like `int.__add__`. Accessing `(5).__add__` returns a `method_wrapper` (bound version). `int.__add__` itself is a `wrapper_descriptor`. The type check ensures that `int.__add__.__get__(str_obj, str)` raises `TypeError`.
+
+## gopy notes
+
+`classmethod` is `objects.ClassMethod` in `objects/descr.go`. `__get__` binds the class type. `staticmethod` is `objects.StaticMethod`; its `__get__` returns the wrapped function directly. `wrapper_descriptor` wraps Go methods exposed as Python slots via the `MethodDef` table.

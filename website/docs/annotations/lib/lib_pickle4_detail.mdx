@@ -1,0 +1,106 @@
+---
+title: Lib/pickle.py (part 4)
+description: "pickle part 4: Unpickler.load, persistent_load, memo, REDUCE opcode."
+cpython_path: Lib/pickle.py
+cpython_version: "3.14"
+lines: 600
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/pickle.py" />
+
+This annotation covers the unpickling engine. See `lib_pickle3_detail` for `Pickler.dump`, `Pickler.save`, and the protocol-level opcodes.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-100 | `Unpickler.load` | Main dispatch loop |
+| 101-200 | Memo table | Object deduplication during unpickling |
+| 201-300 | `REDUCE` opcode | Reconstruct an object by calling a callable |
+| 301-400 | `BUILD` opcode | Restore `__dict__` or call `__setstate__` |
+| 401-600 | `persistent_load` | Hook for out-of-band object references |
+
+## Reading
+
+### `Unpickler.load`
+
+```python
+# CPython: Lib/pickle.py:1380 Unpickler.load
+def load(self):
+    """Read a pickled object representation from the open file."""
+    dispatch = self.dispatch
+    try:
+        while True:
+            key = read(1)
+            dispatch[key[0]](self)
+    except _Stop as stopinst:
+        return stopinst.value
+```
+
+`Unpickler.load` is an opcode dispatch loop. Each opcode is a single byte. `_Stop` is raised when the `STOP` opcode is encountered; its `value` is the top of the stack (the reconstructed object).
+
+### Memo table
+
+```python
+# CPython: Lib/pickle.py:1680 load_memo
+def load_memo(self):
+    # Opcode: m (MEMO) or q (BINPUT)
+    # Store the top of stack in memo[index]
+    i = self.read(4)  # LONG_BINPUT: 4-byte index
+    self.memo[i] = self.stack[-1]
+
+def load_get(self):
+    # Opcode: g (GET) or h (BINGET)
+    # Push memo[index] onto the stack
+    i = int(self.readline()[:-1])
+    self.stack.append(self.memo[i])
+```
+
+The memo maps integer indices to objects. `PUT` records an object; `GET` retrieves it. This handles shared objects: two variables referring to the same list will both point to the same deserialized list.
+
+### `REDUCE` opcode
+
+```python
+# CPython: Lib/pickle.py:1740 load_reduce
+def load_reduce(self):
+    # Stack: callable, args -> reconstructed object
+    stack = self.stack
+    args = stack.pop()
+    func = stack[-1]
+    stack[-1] = func(*args)
+```
+
+`REDUCE` pops `(callable, args_tuple)` from the stack and calls `callable(*args)`. For class instances, `callable` is the class or `_reconstructor`. The result (the new object) replaces the callable on the stack.
+
+### `BUILD` opcode
+
+```python
+# CPython: Lib/pickle.py:1780 load_build
+def load_build(self):
+    # Stack: obj, state -> obj (with state applied)
+    stack = self.stack
+    state = stack.pop()
+    inst = stack[-1]
+    setstate = getattr(inst, '__setstate__', MISSING)
+    if setstate is not MISSING:
+        setstate(state)
+        return
+    slotstate = None
+    if isinstance(state, tuple) and len(state) == 2:
+        state, slotstate = state
+    if state:
+        inst_dict = inst.__dict__
+        inst_dict.update(state)
+    if slotstate:
+        for k, v in slotstate.items():
+            setattr(inst, k, v)
+```
+
+`BUILD` applies state to an already-created object. If `__setstate__` is defined, it is called. Otherwise, `__dict__` is updated directly. The two-tuple form `(dict_state, slots_state)` handles objects with both `__dict__` and `__slots__`.
+
+## gopy notes
+
+`Unpickler.load` is `module/pickle.UnpicklerLoad` in `module/pickle/module.go`. The dispatch table maps opcodes to Go functions. The memo is a `map[int]objects.Object`. `REDUCE` calls `objects.Call`. `BUILD` calls `objects.SetState` or updates `objects.Instance.Dict` directly.
