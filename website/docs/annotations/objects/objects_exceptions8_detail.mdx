@@ -1,0 +1,116 @@
+---
+title: Objects/exceptions.c (part 8)
+description: "exceptions.c part 8: ExceptionGroup, BaseExceptionGroup, split, subgroup, derive."
+cpython_path: Objects/exceptions.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Objects/exceptions.c" />
+
+This annotation covers `ExceptionGroup` (PEP 654). See `objects_exceptions7_detail` for `BaseException.__new__`, `__traceback__`, `__cause__`, and exception chaining.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `BaseExceptionGroup.__new__` | Validate message + exceptions list |
+| 81-160 | `ExceptionGroup` vs `BaseExceptionGroup` | Which type to use |
+| 161-240 | `BaseExceptionGroup.split` | Partition into matching/non-matching groups |
+| 241-360 | `BaseExceptionGroup.subgroup` | Filter to only matching exceptions |
+| 361-500 | `BaseExceptionGroup.derive` | Create a new group with the same message |
+
+## Reading
+
+### `BaseExceptionGroup.__new__`
+
+```c
+// CPython: Objects/exceptions.c:3280 BaseExceptionGroup_new
+static PyObject *
+BaseExceptionGroup_new(PyTypeObject *type, PyObject *args, PyObject *kwds)
+{
+    PyObject *message, *excs;
+    PyArg_ParseTuple(args, "UO:BaseExceptionGroup", &message, &excs);
+    excs = PySequence_Tuple(excs);  /* normalize to tuple */
+    /* Validate: each exception must be a BaseException */
+    for (Py_ssize_t i = 0; i < PyTuple_GET_SIZE(excs); i++) {
+        if (!PyExceptionInstance_Check(PyTuple_GET_ITEM(excs, i))) {
+            PyErr_Format(PyExc_TypeError,
+                "second argument ... must contain BaseExceptions");
+            return NULL;
+        }
+    }
+    ...
+}
+```
+
+`ExceptionGroup("errors", [ValueError(1), TypeError(2)])` creates a group. The exceptions must be instances, not classes. The message is stored in `args[0]` (the standard `BaseException.args` convention).
+
+### `ExceptionGroup` vs `BaseExceptionGroup`
+
+```python
+# CPython: Objects/exceptions.c:3320 type selection
+# If all contained exceptions are Exception (not BaseException) subclasses:
+#   → type is ExceptionGroup (subclass of Exception + BaseExceptionGroup)
+# If any is a BaseException (like KeyboardInterrupt, SystemExit):
+#   → type is BaseExceptionGroup (not a subclass of Exception)
+
+# This matters for except* clauses:
+# except* Exception: catches ExceptionGroup
+# Does NOT catch BaseExceptionGroup containing SystemExit
+```
+
+The constructor selects the concrete type automatically. If `ValueError` and `KeyboardInterrupt` are mixed, the result is a `BaseExceptionGroup` (since `KeyboardInterrupt` is not an `Exception`).
+
+### `BaseExceptionGroup.split`
+
+```python
+# CPython: Objects/exceptions.c:3440 BaseExceptionGroup_split
+def split(self, condition):
+    # condition: a type, or a callable(exc) -> bool
+    match = []
+    rest = []
+    for exc in self.exceptions:
+        if isinstance(exc, BaseExceptionGroup):
+            m, r = exc.split(condition)
+            if m: match.append(m)
+            if r: rest.append(r)
+        elif _matches(exc, condition):
+            match.append(exc)
+        else:
+            rest.append(exc)
+    match_group = self.derive(match) if match else None
+    rest_group = self.derive(rest) if rest else None
+    return match_group, rest_group
+```
+
+`split` recursively partitions nested groups. `except* ValueError as eg:` uses `split` to extract matching exceptions and re-raise the rest. Both halves are new `ExceptionGroup` objects.
+
+### `BaseExceptionGroup.subgroup`
+
+```python
+# CPython: Objects/exceptions.c:3500 BaseExceptionGroup_subgroup
+def subgroup(self, condition):
+    match, _ = self.split(condition)
+    return match
+```
+
+`subgroup` is split without the "rest" half. Useful for filtering: `eg.subgroup(ValueError)` returns only the `ValueError` instances (recursively).
+
+### `BaseExceptionGroup.derive`
+
+```python
+# CPython: Objects/exceptions.c:3380 BaseExceptionGroup_derive
+def derive(self, excs):
+    # Create a new group of the same type with the same message
+    return type(self)(self.args[0], excs)
+```
+
+`derive` is the factory method for creating a new group with the same message string. It uses `type(self)` so subclasses of `ExceptionGroup` produce the same subclass type.
+
+## gopy notes
+
+`BaseExceptionGroup.__new__` is `objects.NewExceptionGroup` in `objects/exceptions.go`. `split` is a recursive Go method on `objects.ExceptionGroup`. `subgroup` calls `split` and discards the second return. `derive` calls `objects.NewExceptionGroup(msg, excs)`.

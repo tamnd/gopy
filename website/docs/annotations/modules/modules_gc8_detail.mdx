@@ -1,0 +1,121 @@
+---
+title: Modules/gcmodule.c (part 8)
+description: "gcmodule.c part 8: gc.collect, generational collection, finalization order, gc.callbacks."
+cpython_path: Modules/gcmodule.c
+cpython_version: "3.14"
+lines: 600
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/gcmodule.c" />
+
+This annotation covers the collection trigger and generational promotion. See `modules_gc7_detail` for `gc.enable`/`disable`, the GC threshold, `gc.get_referrers`, and container tracking.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `gc.collect` | Trigger a full or generational collection |
+| 81-180 | Generational algorithm | Three-generation promotion |
+| 181-280 | `move_unreachable` | Find cycles |
+| 281-380 | Finalization order | `__del__` and `tp_finalize` |
+| 381-600 | `gc.callbacks` | Pre/post collection hooks |
+
+## Reading
+
+### `gc.collect`
+
+```c
+// CPython: Modules/gcmodule.c:1680 gc_collect_impl
+static Py_ssize_t
+gc_collect_impl(PyObject *module, int generation)
+{
+    GCState *gcstate = get_gc_state();
+    if (gcstate->collecting) return 0;  /* re-entrancy guard */
+    gcstate->collecting = 1;
+    Py_ssize_t n = collect_with_callback(tstate, generation);
+    gcstate->collecting = 0;
+    return n;
+}
+```
+
+`gc.collect()` collects generation 2 (all objects). `gc.collect(0)` collects only the youngest generation. The re-entrancy guard prevents collection during collection (e.g., if a finalizer calls `gc.collect`).
+
+### Generational algorithm
+
+```c
+// CPython: Modules/gcmodule.c:1280 collect
+static Py_ssize_t
+collect(PyThreadState *tstate, int generation, ...)
+{
+    /* Merge generations 0..generation into a single "young" list */
+    PyGC_Head young;
+    for (int i = 0; i <= generation; i++)
+        gc_list_merge(&gcstate->generations[i].head, &young);
+    /* Move objects surviving this collection to the next generation */
+    PyGC_Head survivors;
+    move_unreachable(&young, &unreachable);  /* classify */
+    move_legacy_finalizers(&unreachable, &finalizers);
+    handle_weakrefs(&unreachable, old);
+    finalize_garbage(tstate, &finalizers);
+    collect_garbage(tstate, &unreachable, n_collected, generation);
+    ...
+}
+```
+
+Generation 0 is collected most often. Objects that survive a collection are moved to generation 1; survivors of gen 1 go to gen 2. Cycles in gen 2 that include finalizers go to the `gc.garbage` list.
+
+### `move_unreachable`
+
+```c
+// CPython: Modules/gcmodule.c:960 move_unreachable
+static void
+move_unreachable(PyGC_Head *young, PyGC_Head *unreachable)
+{
+    /* Two-pass: 
+       1. Set ob_refcnt to gc_refs = actual refcount
+       2. Subtract refs from objects reachable within the generation
+       3. Objects with gc_refs == 0 after step 2 are unreachable */
+    PyGC_Head *gc;
+    gc_list_init(unreachable);
+    /* Step 1: copy refcounts to gc_refs */
+    for (gc = GC_NEXT(young); gc != young; gc = GC_NEXT(gc))
+        gc->_gc_prev = (Py_ssize_t)Py_REFCNT(FROM_GC(gc));
+    /* Step 2: decrement for internal refs */
+    for (gc = GC_NEXT(young); gc != young; gc = GC_NEXT(gc))
+        Py_TYPE(FROM_GC(gc))->tp_traverse(FROM_GC(gc), visit_decref, NULL);
+    /* Step 3: move gc_refs==0 to unreachable */
+    ...
+}
+```
+
+The cycle detector works by "pretending" to remove each object from its generation and counting how many references are still satisfied from outside the generation. Objects with no external references are unreachable cycles.
+
+### Finalization order
+
+```c
+// CPython: Modules/gcmodule.c:1080 finalize_garbage
+static void
+finalize_garbage(PyThreadState *tstate, PyGC_Head *collectable)
+{
+    destructor finalize;
+    PyGC_Head seen;
+    gc_list_init(&seen);
+    while (!gc_list_is_empty(collectable)) {
+        PyObject *op = FROM_GC(GC_NEXT(collectable));
+        finalize = Py_TYPE(op)->tp_finalize;
+        gc_list_move(GC_NEXT(collectable), &seen);
+        if (finalize != NULL) {
+            finalize(op);  /* may resurrect op */
+        }
+    }
+}
+```
+
+`tp_finalize` (for `__del__` methods and C-level finalizers) is called before the object is freed. If finalization resurrects the object (by storing it somewhere), CPython detects this and the object is not freed. Resurrected objects are moved to generation 2.
+
+## gopy notes
+
+`gc.collect` is `module/gc.Collect` in `module/gc/module.go`. gopy uses Go's own GC for memory; `gc.collect` calls `runtime.GC()`. Generational tracking is not implemented separately — Go's GC handles it. `gc.callbacks` are called via `module/gc.runCallbacks` before and after each `runtime.GC()`.

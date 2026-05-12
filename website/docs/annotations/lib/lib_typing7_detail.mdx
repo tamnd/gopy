@@ -1,0 +1,121 @@
+---
+title: Lib/typing.py (part 7)
+description: "typing.py part 7: TypeVar, TypeVarTuple, ParamSpec, TypeAlias, type statement."
+cpython_path: Lib/typing.py
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/typing.py" />
+
+This annotation covers type parameter forms. See `lib_typing6_detail` for `Generic`, `Protocol`, `Union`, and `Optional`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `TypeVar` | Type parameter with optional constraints and bounds |
+| 81-160 | `TypeVarTuple` | Variadic type parameter (3.11+) |
+| 161-240 | `ParamSpec` | Callable parameter specification (3.10+) |
+| 241-360 | `TypeAlias` | Explicit type alias annotation (3.10+) |
+| 361-500 | `type` statement / `TypeAliasType` | PEP 695 type alias (3.12+) |
+
+## Reading
+
+### `TypeVar`
+
+```python
+# CPython: Lib/typing.py:860 TypeVar.__init__
+class TypeVar:
+    def __init__(self, name, *constraints, bound=None,
+                 covariant=False, contravariant=False, infer_variance=False):
+        if constraints and bound is not None:
+            raise TypeError("Constraints cannot be combined with bound=")
+        if len(constraints) == 1:
+            raise TypeError("A single constraint is not allowed")
+        self.__name__ = name
+        self.__bound__ = bound
+        self.__constraints__ = constraints
+        self.__covariant__ = covariant
+        self.__contravariant__ = contravariant
+```
+
+`T = TypeVar('T', bound=int)` means T can only be `int` or a subtype. `T = TypeVar('T', int, str)` means T must be exactly `int` or `str`. Constraints and bound are mutually exclusive.
+
+### `TypeVarTuple`
+
+```python
+# CPython: Lib/typing.py:1060 TypeVarTuple
+class TypeVarTuple:
+    def __init__(self, name):
+        self.__name__ = name
+
+    def __iter__(self):
+        yield Unpack[self]
+
+# Usage:
+Ts = TypeVarTuple('Ts')
+def f(*args: *Ts) -> tuple[*Ts]: ...
+```
+
+`TypeVarTuple` captures a variadic sequence of types. `*Ts` unpacks it in annotations. `tuple[*Ts]` is a tuple whose element types match the `Ts` bound at the call site. Added for variadic generics like `numpy.ndarray[*Shape, DType]`.
+
+### `ParamSpec`
+
+```python
+# CPython: Lib/typing.py:1000 ParamSpec
+class ParamSpec:
+    def __init__(self, name, *, bound=None, covariant=False, contravariant=False):
+        self.__name__ = name
+        self.args = ParamSpecArgs(self)
+        self.kwargs = ParamSpecKwargs(self)
+
+# Usage:
+P = ParamSpec('P')
+def decorator(f: Callable[P, T]) -> Callable[P, T]:
+    def wrapper(*args: P.args, **kwargs: P.kwargs) -> T:
+        return f(*args, **kwargs)
+    return wrapper
+```
+
+`ParamSpec` captures the parameter types and keyword types of a callable. `P.args` and `P.kwargs` annotate the `*args`/`**kwargs` of a wrapper that preserves the wrapped function's signature.
+
+### `TypeAlias`
+
+```python
+# CPython: Lib/typing.py:1980 TypeAlias
+# TypeAlias is a sentinel value, not a class
+TypeAlias: Final = typing.TypeAlias  # same as just using the annotation
+
+# Usage:
+Vector: TypeAlias = list[float]
+```
+
+`TypeAlias` (added in 3.10) is an explicit annotation marker. Without it, type checkers can't distinguish `Vector = list[float]` (a variable assigned a type) from `Vector: TypeAlias = list[float]` (an alias).
+
+### `TypeAliasType` (PEP 695)
+
+```python
+# CPython: Lib/typing.py:2100 TypeAliasType
+class TypeAliasType:
+    def __init__(self, name, value, *, type_params=()):
+        self.__name__ = name
+        self.__value__ = value
+        self.__type_params__ = type_params
+
+    def __repr__(self):
+        return self.__name__
+
+# PEP 695 syntax:
+# type Vector[T] = list[T]
+# Desugars to: Vector = TypeAliasType('Vector', list[T], type_params=(T,))
+```
+
+The `type` statement (3.12+) creates `TypeAliasType` objects. Unlike simple assignments, `TypeAliasType` is lazy: `__value__` is a lambda that is only evaluated when accessed. This enables recursive type aliases.
+
+## gopy notes
+
+`TypeVar` is `module/typing.TypeVar` in `module/typing/module.go`. `TypeVarTuple` is `module/typing.TypeVarTuple`. `ParamSpec` is `module/typing.ParamSpec`. `TypeAliasType.__value__` is a `func() objects.Object` that is called on first access (lazy evaluation).

@@ -1,0 +1,117 @@
+---
+title: Python/ceval.c (part 79)
+description: "Python/ceval.c part 79: BUILD_MAP, BUILD_CONST_KEY_MAP, MAP_ADD, BUILD_SET."
+cpython_path: Python/ceval.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Python/ceval.c" />
+
+This annotation covers collection building opcodes. See `python_ceval78_detail` for `RESUME`, `YIELD_VALUE`, and `AWAIT`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `BUILD_MAP` | `{k1: v1, k2: v2}` from stack |
+| 81-160 | `BUILD_CONST_KEY_MAP` | `{k: v, ...}` where keys are a constant tuple |
+| 161-240 | `MAP_ADD` | Append a key-value pair to a dict under construction |
+| 241-360 | `BUILD_SET` | `{a, b, c}` set literal |
+| 361-500 | `BUILD_SLICE` | `a:b:c` slice object construction |
+
+## Reading
+
+### `BUILD_MAP`
+
+```c
+// CPython: Python/ceval.c:3740 BUILD_MAP
+inst(BUILD_MAP, (values[oparg*2] -- map)) {
+    map = _PyDict_FromItems(
+        &PyTuple_GET_ITEM(values_tuple, 0),  /* keys at even indices */
+        2,
+        &PyTuple_GET_ITEM(values_tuple, 1),  /* values at odd indices */
+        2,
+        oparg);
+    ERROR_IF(map == NULL, error);
+}
+```
+
+`{'a': 1, 'b': 2}` pushes `'a'`, `1`, `'b'`, `2`, then `BUILD_MAP 2`. The stack layout is `[k0, v0, k1, v1, ...]`. `_PyDict_FromItems` reads keys and values at stride 2.
+
+### `BUILD_CONST_KEY_MAP`
+
+```c
+// CPython: Python/ceval.c:3800 BUILD_CONST_KEY_MAP
+inst(BUILD_CONST_KEY_MAP, (values[oparg], keys -- map)) {
+    /* keys: constant tuple loaded by LOAD_CONST */
+    assert(PyTuple_CheckExact(keys));
+    assert(PyTuple_GET_SIZE(keys) == oparg);
+    map = _PyDict_NewPresized(oparg);
+    for (int i = 0; i < oparg; i++) {
+        PyDict_SetItem(map, PyTuple_GET_ITEM(keys, i), values[i]);
+    }
+    Py_DECREF(keys);
+}
+```
+
+When all keys are compile-time constants, `BUILD_CONST_KEY_MAP` is used instead of `BUILD_MAP`. The keys tuple is a single `LOAD_CONST`; only values are on the stack. This saves N key pushes.
+
+### `MAP_ADD`
+
+```c
+// CPython: Python/ceval.c:3860 MAP_ADD
+inst(MAP_ADD, (key, value --)) {
+    /* oparg: distance to the dict from TOS */
+    PyObject *map = PEEK(oparg + 2);
+    assert(PyDict_CheckExact(map));
+    int err = PyDict_SetItem(map, key, value);
+    Py_DECREF(value);
+    Py_DECREF(key);
+    ERROR_IF(err != 0, error);
+}
+```
+
+`{k: v for k, v in items}` compiles to `BUILD_MAP 0`, loop body, `MAP_ADD`. `MAP_ADD` pops key and value and inserts them into the dict at position `oparg+2` in the stack. Similar to `LIST_APPEND` and `SET_ADD`.
+
+### `BUILD_SET`
+
+```c
+// CPython: Python/ceval.c:3900 BUILD_SET
+inst(BUILD_SET, (values[oparg] -- set)) {
+    set = PySet_New(NULL);
+    ERROR_IF(set == NULL, error);
+    for (int i = oparg; i > 0; i--) {
+        int err = PySet_Add(set, values[i - 1]);
+        if (err != 0) { Py_DECREF(set); goto error; }
+    }
+}
+```
+
+`{1, 2, 3}` compiles to `LOAD_CONST 1`, `LOAD_CONST 2`, `LOAD_CONST 3`, `BUILD_SET 3`. Items are inserted from bottom of the pushed group upward (right-to-left on the stack). Duplicates are silently ignored.
+
+### `BUILD_SLICE`
+
+```c
+// CPython: Python/ceval.c:3960 BUILD_SLICE
+inst(BUILD_SLICE, (start, stop, step -- slice)) {
+    /* oparg: 2 (no step) or 3 (with step) */
+    if (oparg == 3)
+        slice = PySlice_New(start, stop, step);
+    else
+        slice = PySlice_New(start, stop, Py_None);
+    Py_DECREF(start);
+    Py_DECREF(stop);
+    if (oparg == 3) Py_DECREF(step);
+    ERROR_IF(slice == NULL, error);
+}
+```
+
+`a[1:10:2]` compiles `1`, `10`, `2`, `BUILD_SLICE 3`. `a[1:10]` compiles `1`, `10`, `BUILD_SLICE 2` (step is `None`).
+
+## gopy notes
+
+`BUILD_MAP` is in `vm/eval_simple.go`. It calls `objects.NewDictFromItems`. `BUILD_CONST_KEY_MAP` calls `objects.NewDictWithKeys`. `MAP_ADD` calls `objects.DictSetItem`. `BUILD_SET` calls `objects.NewSet` then `objects.SetAdd`. `BUILD_SLICE` calls `objects.NewSlice`.
