@@ -1,0 +1,110 @@
+---
+title: Lib/contextlib.py (part 7)
+description: "contextlib.py part 7: AbstractContextManager, contextmanager, asynccontextmanager, nullcontext, ExitStack."
+cpython_path: Lib/contextlib.py
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/contextlib.py" />
+
+This annotation covers the full contextlib module. See `lib_contextlib6_detail` for `closing`, `suppress`, `redirect_stdout`, and `AbstractContextManager`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `@contextmanager` | Turn a generator function into a context manager |
+| 81-160 | `@asynccontextmanager` | Async variant |
+| 161-240 | `nullcontext` | No-op context manager |
+| 241-360 | `ExitStack.__enter__` / `__exit__` | Compose multiple context managers |
+| 361-500 | `ExitStack.callback` / `push` / `enter_context` | Build dynamic exit stacks |
+
+## Reading
+
+### `@contextmanager`
+
+```python
+# CPython: Lib/contextlib.py:130 contextmanager
+def contextmanager(func):
+    @wraps(func)
+    def helper(*args, **kwds):
+        return _GeneratorContextManager(func, args, kwds)
+    return helper
+
+class _GeneratorContextManager(AbstractContextManager):
+    def __enter__(self):
+        try:
+            return next(self.gen)
+        except StopIteration:
+            raise RuntimeError("generator didn't yield")
+    def __exit__(self, typ, value, traceback):
+        if typ is None:
+            try:
+                next(self.gen)
+            except StopIteration:
+                return False
+            raise RuntimeError("generator didn't stop")
+        else:
+            if value is None:
+                value = typ()
+            try:
+                self.gen.throw(value)
+            except StopIteration as exc:
+                return exc is not value
+            ...
+```
+
+`@contextmanager` wraps a generator function. `yield` splits `__enter__` (before yield) from `__exit__` (after yield). The exception handling forwards exceptions to `gen.throw()`.
+
+### `ExitStack`
+
+```python
+# CPython: Lib/contextlib.py:520 ExitStack.__exit__
+def __exit__(self, *exc_details):
+    # LIFO: call exit callbacks in reverse order
+    suppressed_exc = False
+    pending_raise = False
+    with self._exit_callbacks as callbacks:
+        while callbacks:
+            cb = callbacks.pop()
+            try:
+                if cb(*exc_details):
+                    suppressed_exc = True
+                    pending_raise = False
+                    exc_details = (None, None, None)
+            except:
+                new_exc_details = sys.exc_info()
+                ...
+                exc_details = new_exc_details
+                pending_raise = True
+    return suppressed_exc
+```
+
+`ExitStack` calls each registered callback in LIFO order. If any callback suppresses the exception (returns True), subsequent callbacks see `(None, None, None)`. If a callback raises, the new exception propagates.
+
+### `nullcontext`
+
+```python
+# CPython: Lib/contextlib.py:700 nullcontext
+class nullcontext(AbstractContextManager, AbstractAsyncContextManager):
+    def __init__(self, enter_result=None):
+        self.enter_result = enter_result
+    def __enter__(self):
+        return self.enter_result
+    def __exit__(self, *excinfo):
+        pass
+    async def __aenter__(self):
+        return self.enter_result
+    async def __aexit__(self, *excinfo):
+        pass
+```
+
+`nullcontext(value)` is useful when a function needs to optionally use a context manager: `with (cm if condition else nullcontext()):`.
+
+## gopy notes
+
+`@contextmanager` is `module/contextlib.ContextManager` in `module/contextlib/module.go`. It creates a `_GeneratorContextManager` backed by a `vm.Generator`. `ExitStack` is `objects.ExitStack` with a `[]ExitCallback` slice. `nullcontext` is a trivial struct implementing the context manager protocol.

@@ -1,0 +1,82 @@
+---
+title: Python/ceval.c (part 94)
+description: "Python/ceval.c part 94: BEFORE_WITH, WITH_EXCEPT_START, CLEANUP_THROW — context manager execution."
+cpython_path: Python/ceval.c
+cpython_version: "3.14"
+lines: 400
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Python/ceval.c" />
+
+This annotation covers context manager opcodes. See `python_ceval93_detail` for `MAKE_FUNCTION` and `SET_FUNCTION_ATTRIBUTE`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `BEFORE_WITH` | Call `__enter__`, push `__exit__` on stack |
+| 81-160 | `WITH_EXCEPT_START` | On exception: call `__exit__` with exc info |
+| 161-240 | `CLEANUP_THROW` | Clean up when `throw()` enters a with block |
+| 241-340 | `POP_BLOCK` | Pop the exception table block after the with body |
+| 341-400 | Stack layout during `with` | What's on the stack at each point |
+
+## Reading
+
+### `BEFORE_WITH`
+
+```c
+// CPython: Python/ceval.c:6040 BEFORE_WITH
+inst(BEFORE_WITH, (mgr -- exit, value)) {
+    /* Call __enter__ on the context manager */
+    PyObject *enter = _PyObject_LookupSpecial(mgr, &_Py_ID(__enter__));
+    PyObject *exit  = _PyObject_LookupSpecial(mgr, &_Py_ID(__exit__));
+    if (enter == NULL || exit == NULL) ERROR_IF(true, error);
+    value = PyObject_CallNoArgs(enter);
+    if (value == NULL) ERROR_IF(true, error);
+    Py_DECREF(enter);
+    Py_DECREF(mgr);
+    /* Stack: exit, value (as bound by 'as') */
+}
+```
+
+`BEFORE_WITH` looks up both `__enter__` and `__exit__` before calling `__enter__`. Keeping `__exit__` on the stack ensures it is available in the exception handler even after the `with` variable is overwritten.
+
+### `WITH_EXCEPT_START`
+
+```c
+// CPython: Python/ceval.c:6080 WITH_EXCEPT_START
+inst(WITH_EXCEPT_START, (exit_func, lasti, exc --  exit_func, lasti, exc, res)) {
+    /* Call exit_func(type(exc), exc, exc.__traceback__) */
+    PyObject *tp = PyExceptionInstance_Class(exc);
+    PyObject *tb = PyException_GetTraceback(exc);
+    res = PyObject_CallFunctionObjArgs(exit_func, tp, exc, tb, NULL);
+    Py_XDECREF(tb);
+    ERROR_IF(res == NULL, error);
+}
+```
+
+`WITH_EXCEPT_START` calls `__exit__(exc_type, exc_value, traceback)`. If `__exit__` returns a truthy value, the exception is suppressed (the `PUSH_EXC_INFO`/`POP_EXCEPT` mechanism undoes it).
+
+### Stack layout
+
+```
+# At BEFORE_WITH:
+#   Stack: [..., mgr]
+# After BEFORE_WITH:
+#   Stack: [..., exit_func, value]
+# After 'as x = value' assignment (STORE_NAME):
+#   Stack: [..., exit_func]
+# Inside with body (exception handler entry):
+#   Stack: [..., exit_func, lasti, exc]  (PUSH_EXC_INFO adds lasti, exc)
+# After WITH_EXCEPT_START:
+#   Stack: [..., exit_func, lasti, exc, res]
+```
+
+The `exit_func` stays below the body's stack throughout, so it survives arbitrary code in the `with` body.
+
+## gopy notes
+
+`BEFORE_WITH` is in `vm/eval_simple.go` and calls `objects.LookupSpecial(__enter__)` and `objects.LookupSpecial(__exit__)`. `WITH_EXCEPT_START` calls `objects.CallFunctionObjArgs(exitFunc, excType, exc, tb)`. `CLEANUP_THROW` handles `throw()` through a with block in generators.

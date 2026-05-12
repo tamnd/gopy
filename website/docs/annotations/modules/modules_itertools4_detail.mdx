@@ -1,0 +1,143 @@
+---
+title: Modules/_itertoolsmodule.c (part 4)
+description: "_itertoolsmodule.c part 4: itertools.chain, itertools.islice, itertools.product, itertools.groupby."
+cpython_path: Modules/_itertoolsmodule.c
+cpython_version: "3.14"
+lines: 600
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/_itertoolsmodule.c" />
+
+This annotation covers combinatorial and slicing iterators. See `modules_itertools3_detail` for `accumulate`, `dropwhile`, `takewhile`, and `compress`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-100 | `chain` / `chain.from_iterable` | Concatenate multiple iterables |
+| 101-220 | `islice` | Iterator slicing with start/stop/step |
+| 221-360 | `product` | Cartesian product of iterables |
+| 361-600 | `groupby` | Group consecutive elements by key |
+
+## Reading
+
+### `chain`
+
+```c
+// CPython: Modules/_itertoolsmodule.c:180 chain_next
+static PyObject *
+chain_next(chainobject *lz)
+{
+    PyObject *item;
+    while (lz->source != NULL) {
+        item = PyIter_Next(lz->source);
+        if (item != NULL) return item;
+        if (PyErr_Occurred()) return NULL;
+        /* Exhausted: advance to next source */
+        Py_CLEAR(lz->source);
+        lz->source = PyIter_Next(lz->source_iterables);
+    }
+    return NULL;  /* StopIteration */
+}
+```
+
+`chain('ab', 'cd')` yields `a b c d`. The object holds an iterator over the source iterables (`source_iterables`) and the current active iterator (`source`). When `source` is exhausted, the next iterable is fetched. `chain.from_iterable(['ab', 'cd'])` lazily unpacks the outer iterable, avoiding materializing all sources upfront.
+
+### `islice`
+
+```c
+// CPython: Modules/_itertoolsmodule.c:1220 islice_next
+static PyObject *
+islice_next(isliceobject *lz)
+{
+    Py_ssize_t stop = lz->stop;
+    PyObject *item;
+    while (lz->cnt < lz->next) {
+        item = PyIter_Next(lz->it);
+        if (item == NULL) return NULL;
+        Py_DECREF(item);
+        lz->cnt++;
+    }
+    if (stop != -1 && lz->cnt >= stop) return NULL;
+    item = PyIter_Next(lz->it);
+    if (item == NULL) return NULL;
+    lz->cnt++;
+    lz->next += lz->step;
+    return item;
+}
+```
+
+`islice(it, start, stop, step)` skips elements by consuming and discarding them — there is no random access to iterators. `lz->next` is the index of the next element to yield; elements between yields are discarded. `islice(range(100), 0, 10, 2)` yields `0 2 4 6 8`.
+
+### `product`
+
+```c
+// CPython: Modules/_itertoolsmodule.c:2680 product_next
+static PyObject *
+product_next(productobject *lz)
+{
+    PyObject **pools = lz->pools;  /* array of tuples */
+    Py_ssize_t *indices = lz->indices;
+    int n = lz->npools;
+
+    /* Build result from current indices */
+    PyObject *result = PyTuple_New(n);
+    for (int i = 0; i < n; i++)
+        PyTuple_SET_ITEM(result, i, Py_NewRef(
+            PyTuple_GET_ITEM(pools[i], indices[i])));
+
+    /* Advance: increment rightmost index that hasn't wrapped */
+    for (int i = n - 1; i >= 0; i--) {
+        indices[i]++;
+        if (indices[i] < PyTuple_GET_SIZE(pools[i])) break;
+        indices[i] = 0;
+        if (i == 0) { lz->stopped = 1; break; }
+    }
+    return result;
+}
+```
+
+`product('AB', range(3))` yields `('A',0) ('A',1) ('A',2) ('B',0) ('B',1) ('B',2)`. All input iterables are materialized into tuples upfront (`pools`). The index array works like an odometer: the rightmost index increments first, carrying over when it wraps. When the leftmost index wraps, iteration is done.
+
+### `groupby`
+
+```c
+// CPython: Modules/_itertoolsmodule.c:3040 groupby_next
+static PyObject *
+groupby_next(groupbyobject *lz)
+{
+    PyObject *newvalue, *newkey, *r;
+
+    /* Consume the current group if not already done */
+    if (lz->currgroup) {
+        groupby_step(lz);
+        /* currvalue now holds the lookahead element */
+    }
+
+    /* Advance until key changes */
+    while (1) {
+        if (lz->tgtkey == NULL) break;  /* first element */
+        newkey = PyObject_CallOneArg(lz->keyfunc, lz->currvalue);
+        r = PyObject_RichCompare(newkey, lz->tgtkey, Py_EQ);
+        int eq = PyObject_IsTrue(r);
+        Py_DECREF(r);
+        if (!eq) break;
+        Py_DECREF(newkey);
+        /* Same key: keep advancing */
+        groupby_step(lz);
+    }
+    /* New group */
+    Py_XDECREF(lz->tgtkey);
+    lz->tgtkey = newkey;
+    return PyTuple_Pack(2, newkey, lz->currgroup);
+}
+```
+
+`groupby` does a single pass: the inner group iterator and the outer iterator share the same underlying iterator. Advancing the outer iterator invalidates the current group. `groupby([1,1,2,2,1], key=None)` yields `(1, <grp>) (2, <grp>) (1, <grp>)` — equal values must be contiguous for grouping to work as expected.
+
+## gopy notes
+
+`chain` is `objects.ChainIter` in `objects/itertools.go`. `chain.from_iterable` uses lazy outer iteration. `islice` is `objects.ISlice`; the discard loop calls `vm.IterNext`. `product` materializes pools as `[]objects.Tuple` and uses an int slice for indices. `groupby` is `objects.GroupByIter`; the inner group object holds a back-reference to the parent iterator.

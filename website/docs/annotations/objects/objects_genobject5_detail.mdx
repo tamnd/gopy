@@ -1,0 +1,155 @@
+---
+title: Objects/genobject.c (part 5)
+description: "Objects/genobject.c part 5: generator.send, generator.throw, generator.close, finalization."
+cpython_path: Objects/genobject.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Objects/genobject.c" />
+
+This annotation covers the generator execution and lifecycle API. See `objects_genobject4_detail` for generator creation and `__next__`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-100 | `gen_send_ex2` | Core send/throw dispatcher |
+| 101-200 | `generator.send` | Resume with a value |
+| 201-300 | `generator.throw` | Inject an exception |
+| 301-400 | `generator.close` | Finalize by throwing `GeneratorExit` |
+| 401-500 | `gen_dealloc` / finalizer | GC and `tp_finalize` |
+
+## Reading
+
+### `gen_send_ex2`
+
+```c
+// CPython: Objects/genobject.c:180 gen_send_ex2
+static PyObject *
+gen_send_ex2(PyGenObject *gen, PyObject *arg, PyObject *exc, int closing)
+{
+    PyThreadState *tstate = _PyThreadState_GET();
+    if (gen->gi_frame_state == FRAME_CREATED && arg != NULL && arg != Py_None) {
+        PyErr_SetString(PyExc_TypeError,
+            "can't send non-None value to a just-started generator");
+        return NULL;
+    }
+    if (gen->gi_frame_state >= FRAME_COMPLETED) {
+        if (!closing)
+            PyErr_SetNone(exc == NULL ? PyExc_StopIteration : PyExc_RuntimeError);
+        return NULL;
+    }
+    /* Resume the frame */
+    gen->gi_frame_state = FRAME_EXECUTING;
+    PyObject *result = _PyEval_EvalFrameDefault(tstate, frame, exc != NULL);
+    if (result == NULL) {
+        /* Generator raised StopIteration or another exception */
+        if (PyCoro_CheckExact(gen)) ...
+    }
+    return result;
+}
+```
+
+`gen_send_ex2` is the single entry point for all generator/coroutine resumption. `arg` is the value sent in (becomes the result of the `yield` expression). `exc` is non-`NULL` for `throw`. The `FRAME_CREATED` guard prevents `send(non_None)` on a fresh generator per the language spec.
+
+### `generator.send`
+
+```c
+// CPython: Objects/genobject.c:260 gen_send
+static PyObject *
+gen_send(PyGenObject *gen, PyObject *arg)
+{
+    return gen_send_ex2(gen, arg, NULL, 0);
+}
+```
+
+`g.send(value)` resumes the generator and delivers `value` as the result of the `yield`. The first call must use `send(None)` or `next()`. Equivalent to `next(g)` when `value` is `None`.
+
+### `generator.throw`
+
+```c
+// CPython: Objects/genobject.c:290 gen_throw
+static PyObject *
+gen_throw(PyGenObject *gen, PyObject *const *args, Py_ssize_t nargs)
+{
+    /* throw(type[, value[, tb]]) or throw(exc_instance) */
+    PyObject *typ, *val = NULL, *tb = NULL;
+    if (nargs == 1 && PyExceptionInstance_Check(args[0])) {
+        val = args[0];
+        typ = PyExceptionInstance_Class(val);
+    } else {
+        typ = args[0];
+        if (nargs >= 2) val = args[1];
+        if (nargs >= 3) tb = args[2];
+    }
+    PyErr_Restore(typ, val, tb);  /* set the exception state */
+    return gen_send_ex2(gen, NULL, val, 0);
+}
+```
+
+`g.throw(ValueError("bad"))` injects an exception at the `yield` point. Inside the generator, a `try/except` can catch it and continue yielding. If not caught, the exception propagates to the caller.
+
+### `generator.close`
+
+```c
+// CPython: Objects/genobject.c:360 gen_close
+static PyObject *
+gen_close(PyGenObject *gen, PyObject *args)
+{
+    PyObject *retval;
+    PyObject *yf = _PyGen_yf(gen);  /* yielded-from (for yield from) */
+    int err = 0;
+    if (yf) {
+        /* Close the inner generator first */
+        gen->gi_frame_state = FRAME_EXECUTING;
+        err = gen_close_iter(yf);
+        gen->gi_frame_state = FRAME_SUSPENDED;
+        Py_DECREF(yf);
+    }
+    if (err == 0)
+        PyErr_SetNone(PyExc_GeneratorExit);
+    retval = gen_send_ex2(gen, Py_None, NULL, 1);
+    if (retval) {
+        /* Generator yielded a value after GeneratorExit — error */
+        Py_DECREF(retval);
+        PyErr_SetString(PyExc_RuntimeError, "generator ignored GeneratorExit");
+        return NULL;
+    }
+    if (PyErr_ExceptionMatches(PyExc_StopIteration) ||
+        PyErr_ExceptionMatches(PyExc_GeneratorExit)) {
+        PyErr_Clear();
+        Py_RETURN_NONE;
+    }
+    return NULL;
+}
+```
+
+`g.close()` throws `GeneratorExit` into the generator. The generator should either catch it and `return` (suppressed as `StopIteration`) or let it propagate. If the generator yields a value after seeing `GeneratorExit`, that is a `RuntimeError`. `close()` is called automatically by `gen_dealloc` via `tp_finalize`.
+
+### `gen_dealloc`
+
+```c
+// CPython: Objects/genobject.c:100 gen_dealloc
+static void
+gen_dealloc(PyGenObject *gen)
+{
+    if (gen->gi_frame_state != FRAME_COMPLETED) {
+        /* Still suspended: finalize via gen_close */
+        _PyObject_GC_UNTRACK(gen);
+        Py_INCREF(gen);  /* revive during finalization */
+        gen_close_iter(gen);
+        Py_DECREF(gen);
+    }
+    PyObject_GC_Del(gen);
+}
+```
+
+`tp_finalize` is set to call `gen_close` so that a generator deleted without being exhausted still has its `finally` blocks run. The `Py_INCREF`/`Py_DECREF` pair around `gen_close_iter` prevents the object from being freed while the frame is still running.
+
+## gopy notes
+
+`gen_send_ex2` maps to `vm.GenSendEx` in `vm/eval_gen.go`. `generator.send` is `objects.GeneratorSend`. `generator.throw` is `objects.GeneratorThrow`; it calls `vm.SetException` before resuming. `generator.close` is `objects.GeneratorClose`; it checks for `objects.GeneratorExit` and calls `vm.GenClose` on nested `yield from`. `gen_dealloc` corresponds to the `Finalize` method on `objects.Generator`.
