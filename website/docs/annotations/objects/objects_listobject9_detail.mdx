@@ -1,0 +1,94 @@
+---
+title: Objects/listobject.c (part 9)
+description: "Objects/listobject.c part 9: list.__contains__, list.index, list.count, list.copy, list.clear."
+cpython_path: Objects/listobject.c
+cpython_version: "3.14"
+lines: 400
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Objects/listobject.c" />
+
+This annotation covers list search and copy operations. See `objects_listobject8_detail` for Timsort.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `list.__contains__` | Linear search with `__eq__` |
+| 81-160 | `list.index` | Return first index of value |
+| 161-240 | `list.count` | Count occurrences |
+| 241-320 | `list.copy` | Shallow copy |
+| 321-400 | `list.clear` | Remove all elements |
+
+## Reading
+
+### `list.__contains__`
+
+```c
+// CPython: Objects/listobject.c:440 list_contains
+static int
+list_contains(PyListObject *a, PyObject *el)
+{
+    for (Py_ssize_t i = 0; i < Py_SIZE(a); i++) {
+        PyObject *item = a->ob_item[i];
+        if (item == el) return 1;  /* Identity fast path */
+        int cmp = PyObject_RichCompareBool(item, el, Py_EQ);
+        if (cmp > 0) return 1;
+        if (cmp < 0) return -1;  /* Error */
+    }
+    return 0;
+}
+```
+
+Identity check first (`item == el`): if `el` is interned or the same object, no comparison is needed. `__eq__` is called for the general case. Short-circuits on the first match.
+
+### `list.index`
+
+```c
+// CPython: Objects/listobject.c:480 list_index_impl
+static PyObject *
+list_index_impl(PyListObject *self, PyObject *value, Py_ssize_t start,
+                Py_ssize_t stop)
+{
+    for (Py_ssize_t i = start; i < stop; i++) {
+        int cmp = PyObject_RichCompareBool(self->ob_item[i], value, Py_EQ);
+        if (cmp > 0) return PyLong_FromSsize_t(i);
+        if (cmp < 0) return NULL;
+    }
+    PyErr_Format(PyExc_ValueError, "%R is not in list", value);
+    return NULL;
+}
+```
+
+`list.index(x, start, stop)` limits the search to `[start, stop)`. Raises `ValueError` if not found.
+
+### `list.copy`
+
+```c
+// CPython: Objects/listobject.c:560 list_copy_impl
+static PyObject *
+list_copy_impl(PyListObject *self)
+{
+    /* Equivalent to self[:] */
+    return list_slice(self, 0, Py_SIZE(self));
+}
+
+static PyObject *
+list_slice(PyListObject *a, Py_ssize_t ilow, Py_ssize_t ihigh)
+{
+    PyListObject *np = (PyListObject *)PyList_New(ihigh - ilow);
+    for (Py_ssize_t i = 0; i < n; i++) {
+        np->ob_item[i] = Py_NewRef(a->ob_item[ilow + i]);
+    }
+    return (PyObject *)np;
+}
+```
+
+`list.copy()` is a shallow copy: a new list with `Py_NewRef` on each element. Equivalent to `lst[:]`. For a deep copy, use `copy.deepcopy`.
+
+## gopy notes
+
+`list.__contains__` is `objects.ListContains` in `objects/list.go`. It checks pointer equality first, then calls `objects.RichCompareBool(item, el, EQ)`. `list.copy` calls `objects.ListSlice(lst, 0, len(lst.Items))`. `list.clear` sets `lst.Items = lst.Items[:0]`.

@@ -1,0 +1,95 @@
+---
+title: Python/ceval.c (part 57)
+description: "Python/ceval.c part 57: IMPORT_NAME, IMPORT_FROM, IMPORT_STAR, relative import resolution."
+cpython_path: Python/ceval.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Python/ceval.c" />
+
+This annotation covers import opcodes. See `python_import8_detail` for the import machinery internals.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `IMPORT_NAME` | Execute `import foo` or `from foo import ...` |
+| 81-160 | `IMPORT_FROM` | Extract an attribute after `IMPORT_NAME` |
+| 161-240 | `IMPORT_STAR` | `from module import *` |
+| 241-360 | Relative import | `from . import foo`, `from .. import bar` |
+| 361-500 | `LOAD_FROM_DICT_OR_GLOBALS` | Conditional name lookup for class scope |
+
+## Reading
+
+### `IMPORT_NAME`
+
+```c
+// CPython: Python/ceval.c:5820 IMPORT_NAME
+inst(IMPORT_NAME, (level, fromlist -- res)) {
+    PyObject *name = GETITEM(FRAME_CO_NAMES, oparg);
+    res = import_name(tstate, frame, name, fromlist, level);
+    DECREF_INPUTS();
+    ERROR_IF(res == NULL, error);
+    DISPATCH();
+}
+
+static PyObject *
+import_name(PyThreadState *tstate, _PyInterpreterFrame *frame,
+            PyObject *name, PyObject *fromlist, PyObject *level)
+{
+    /* Call __import__(name, globals, locals, fromlist, level) */
+    PyObject *import_func = _PyObject_GetAttrId(builtins, &PyId___import__);
+    return PyObject_CallFunctionObjArgs(import_func, name, globals, locals,
+                                        fromlist, level, NULL);
+}
+```
+
+`import foo.bar` compiles to `LOAD_CONST 0` (level 0), `LOAD_CONST None` (fromlist), `IMPORT_NAME 'foo.bar'`. The level encodes relative imports: 1 = current package, 2 = parent package.
+
+### `IMPORT_FROM`
+
+```c
+// CPython: Python/ceval.c:5880 IMPORT_FROM
+inst(IMPORT_FROM, (from -- from, res)) {
+    PyObject *name = GETITEM(FRAME_CO_NAMES, oparg);
+    res = import_from(tstate, from, name);
+    ERROR_IF(res == NULL, error);
+    DISPATCH();
+}
+
+static PyObject *
+import_from(PyThreadState *tstate, PyObject *v, PyObject *name)
+{
+    /* Try getattr first, then look in __all__/__dict__ for star import */
+    PyObject *x = PyObject_GetAttr(v, name);
+    if (x != NULL) return x;
+    ...
+}
+```
+
+`from foo import bar` compiles to `IMPORT_NAME 'foo'`, `IMPORT_FROM 'bar'`, `STORE_NAME 'bar'`, `POP_TOP`. `IMPORT_FROM` leaves the module on the stack so multiple names can be imported from it.
+
+### `IMPORT_STAR`
+
+```c
+// CPython: Python/ceval.c:5940 IMPORT_STAR
+inst(IMPORT_STAR, (from --)) {
+    /* Copy names from module into the current namespace.
+       Uses __all__ if defined, else all names not starting with '_'. */
+    PyObject *locals = LOCALS();
+    int err = import_all_from(tstate, locals, from);
+    Py_DECREF(from);
+    ERROR_IF(err != 0, error);
+    DISPATCH();
+}
+```
+
+`from module import *` is discouraged because it pollutes the namespace and makes it hard to trace where names come from. In a function scope, `IMPORT_STAR` is a `SyntaxError` because local variable analysis needs to know names at compile time.
+
+## gopy notes
+
+`IMPORT_NAME` is in `vm/eval_import.go`. It calls `vm.ImportName` which goes through the `__import__` hook. `IMPORT_FROM` calls `objects.GetAttr`. `IMPORT_STAR` calls `vm.ImportStar` which iterates `module.__all__` or the module dict's keys.
