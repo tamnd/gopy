@@ -1,0 +1,143 @@
+---
+title: Python/compile.c (part 16)
+description: "Python/compile.c part 16: compile_match, pattern_subpattern, MATCH_CLASS, MATCH_MAPPING."
+cpython_path: Python/compile.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Python/compile.c" />
+
+This annotation covers structural pattern matching compilation. See `python_compile15_detail` for comprehension and lambda compilation.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `compiler_match` | Compile `match` statement |
+| 81-180 | `compiler_pattern` | Dispatch on pattern type |
+| 181-280 | `compiler_pattern_class` | Compile class patterns |
+| 281-380 | `compiler_pattern_mapping` | Compile mapping patterns |
+| 381-500 | `compiler_pattern_or` | Compile OR patterns |
+
+## Reading
+
+### `compiler_match`
+
+```c
+// CPython: Python/compile.c:5820 compiler_match
+static int
+compiler_match(struct compiler *c, stmt_ty s)
+{
+    /* match subject:
+         case pattern1 [if guard1]: body1
+         case pattern2: body2
+    */
+    VISIT(c, expr, s->v.Match.subject);
+    /* Subject on stack */
+    Py_ssize_t cases = asdl_seq_LEN(s->v.Match.cases);
+    for (Py_ssize_t i = 0; i < cases; i++) {
+        match_case_ty m = asdl_seq_GET(s->v.Match.cases, i);
+        NEW_JUMP_TARGET_LABEL(c, next_case);
+        compiler_pattern(c, m->pattern, next_case);
+        if (m->guard) {
+            VISIT(c, expr, m->guard);
+            EMIT_JUMP_IF_FALSE(c, next_case);
+        }
+        VISIT_SEQ(c, stmt, m->body);
+        NEW_JUMP_TARGET_LABEL(c, end);
+        ADDOP_JUMP(c, JUMP_FORWARD, end);
+        USE_LABEL(c, next_case);
+    }
+}
+```
+
+Each `case` compiles to a pattern-match check, an optional guard, and the body. Failing a pattern or guard jumps to `next_case`. The subject remains on the stack between cases and is consumed when a pattern succeeds.
+
+### `compiler_pattern_class`
+
+```c
+// CPython: Python/compile.c:5980 compiler_pattern_class
+static int
+compiler_pattern_class(struct compiler *c, pattern_ty p, jump_to_block fail)
+{
+    /* case Point(x=0, y=1): */
+    PyObject *kwd_attrs = p->v.MatchClass.kwd_attrs;
+    PyObject *kwd_patterns = p->v.MatchClass.kwd_patterns;
+    /* Push class, keyword attribute names tuple */
+    VISIT(c, expr, p->v.MatchClass.cls);
+    ADDOP_LOAD_CONST(c, kwd_attrs);
+    ADDOP_I(c, MATCH_CLASS, asdl_seq_LEN(p->v.MatchClass.patterns));
+    /* TOS: (matched_tuple or None), SECOND: subject */
+    ADDOP_JUMP(c, JUMP_IF_NONE, fail);  /* no match */
+    /* Unpack positional sub-patterns */
+    for (each positional pattern) {
+        ADDOP_I(c, BINARY_SUBSCR, ...);
+        compiler_pattern(c, sub, fail);
+    }
+}
+```
+
+`MATCH_CLASS` calls `type.__instancecheck__` and extracts attributes listed in `__match_args__` (positional) and the keyword attribute name tuple. It returns a tuple of extracted values on success or `None` on failure.
+
+### `compiler_pattern_mapping`
+
+```c
+// CPython: Python/compile.c:5920 compiler_pattern_mapping
+static int
+compiler_pattern_mapping(struct compiler *c, pattern_ty p, jump_to_block fail)
+{
+    /* case {'x': px, 'y': py, **rest}: */
+    PyObject *keys = ...;
+    ADDOP_LOAD_CONST(c, keys);  /* tuple of keys to match */
+    ADDOP(c, MATCH_MAPPING);    /* TOS: dict of matched k/v or None */
+    ADDOP_JUMP(c, JUMP_IF_NONE, fail);
+    if (star_pattern) {
+        ADDOP(c, COPY_DICT_WITHOUT_KEYS);  /* remaining keys into star var */
+    }
+    /* Sub-patterns for each value */
+    for (each key/pattern pair) {
+        ADDOP_SUBSCR(c, key);
+        compiler_pattern(c, value_pattern, fail);
+    }
+}
+```
+
+`MATCH_MAPPING` checks that the subject has `Py_TPFLAGS_MAPPING` set and extracts the specified keys. `COPY_DICT_WITHOUT_KEYS` produces a copy of the subject dict minus the matched keys for the `**rest` capture.
+
+### `compiler_pattern_or`
+
+```c
+// CPython: Python/compile.c:6080 compiler_pattern_or
+static int
+compiler_pattern_or(struct compiler *c, pattern_ty p, jump_to_block fail)
+{
+    /* case A() | B(): */
+    Py_ssize_t n = asdl_seq_LEN(p->v.MatchOr.patterns);
+    NEW_JUMP_TARGET_LABEL(c, end);
+    for (Py_ssize_t i = 0; i < n - 1; i++) {
+        /* Duplicate subject for each alternative */
+        ADDOP_I(c, COPY, 1);
+        NEW_JUMP_TARGET_LABEL(c, next_alt);
+        compiler_pattern(c, alt, next_alt);
+        /* This alternative matched: discard duplicate, jump to end */
+        ADDOP(c, POP_TOP);
+        ADDOP_JUMP(c, JUMP_FORWARD, end);
+        USE_LABEL(c, next_alt);
+        ADDOP(c, POP_TOP);  /* discard duplicate from failed attempt */
+    }
+    /* Last alternative: no duplication needed */
+    compiler_pattern(c, last_alt, fail);
+    USE_LABEL(c, end);
+    return 1;
+}
+```
+
+OR patterns duplicate the subject for each alternative because each sub-pattern may consume it. If the first alternative fails, the copy is popped and the next alternative tries the original. All alternatives must bind the same names.
+
+## gopy notes
+
+`compiler_match` is `compile.CompileMatch` in `compile/codegen_stmt.go`. `compiler_pattern` dispatches by `pattern.Kind`. `MATCH_CLASS` is emitted as `compile.OpMatchClass`; the runtime checks `objects.TypeFlags` for `Py_TPFLAGS_SEQUENCE` / `Py_TPFLAGS_MAPPING`. `compiler_pattern_or` is `compile.CompilePatternOr` with `COPY` to duplicate the stack top.

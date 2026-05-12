@@ -1,0 +1,131 @@
+---
+title: Lib/http/client.py (part 3)
+description: "Lib/http/client.py part 3: HTTPConnection.request, _send_request, HTTPResponse.read, chunked transfer."
+cpython_path: Lib/http/client.py
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/http/client.py" />
+
+This annotation covers request sending and response reading. See `lib_http2_detail` for `HTTPConnection.__init__`, `connect`, and header parsing.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `HTTPConnection.request` | High-level request API |
+| 81-180 | `HTTPConnection._send_request` | Build and send headers + body |
+| 181-280 | `HTTPResponse.read` | Read the response body |
+| 281-380 | `HTTPResponse._read_chunked` | Read chunked transfer-encoding |
+| 381-500 | `HTTPConnection.getresponse` | Parse status line and headers |
+
+## Reading
+
+### `HTTPConnection.request`
+
+```python
+# CPython: Lib/http/client.py:1280 request
+def request(self, method, url, body=None, headers={}, *, encode_chunked=False):
+    self._send_request(method, url, body, headers, encode_chunked)
+
+def _send_request(self, method, url, body, headers, encode_chunked=False):
+    header_names = frozenset(k.lower() for k in headers)
+    skips = {}
+    if 'host' in header_names:
+        skips['skip_host'] = 1
+    if 'accept-encoding' in header_names:
+        skips['skip_accept_encoding'] = 1
+    self.putrequest(method, url, **skips)
+    if body is not None and ('content-length' not in header_names
+                              and 'transfer-encoding' not in header_names):
+        self._set_content_length(body, method)
+    for hdr, value in headers.items():
+        self.putheader(hdr, value)
+    if isinstance(body, str):
+        body = body.encode('iso-8859-1')
+    self.endheaders(body, encode_chunked=encode_chunked)
+```
+
+`_send_request` calls `putrequest` (which writes `METHOD /url HTTP/1.1\r\n`), auto-adds `Content-Length` if the body length is known, and calls `endheaders` which flushes the request line + headers + body in one `send` call.
+
+### `HTTPResponse.read`
+
+```python
+# CPython: Lib/http/client.py:480 read
+def read(self, amt=None):
+    if self.fp is None:
+        return b""
+    if self._method == "HEAD":
+        self._close_conn()
+        return b""
+    if self.chunked:
+        return self._read_chunked(amt)
+    if amt is not None:
+        ...
+        return self.fp.read(amt)
+    # Read entire body
+    try:
+        data = self.fp.read()
+    except IncompleteRead:
+        raise
+    finally:
+        self._close_conn()
+    return data
+```
+
+`response.read()` dispatches based on `Transfer-Encoding: chunked` vs. `Content-Length`. For `HEAD` responses, no body is present regardless of `Content-Length`. Chunked encoding is handled by `_read_chunked`.
+
+### `HTTPResponse._read_chunked`
+
+```python
+# CPython: Lib/http/client.py:560 _read_chunked
+def _read_chunked(self, amt=None):
+    assert self.chunked != _UNKNOWN
+    value = []
+    try:
+        while True:
+            line = self.fp.readline(_MAXLINE + 1)
+            chunk_left = int(line.split(b";", 1)[0], 16)  # hex size
+            if chunk_left == 0:
+                # Trailing headers and final CRLF
+                self._read_and_discard_trailer()
+                self._close_conn()
+                break
+            value.append(self._safe_read(chunk_left))
+            self.fp.read(2)  # consume CRLF after chunk data
+    except IncompleteRead:
+        raise
+    return b"".join(value)
+```
+
+HTTP/1.1 chunked encoding sends `<hex-size>\r\n<data>\r\n` for each chunk and `0\r\n\r\n` to terminate. The chunk size line may include extensions after `;`. The trailing headers (`Trailer:` fields) are read and discarded.
+
+### `HTTPConnection.getresponse`
+
+```python
+# CPython: Lib/http/client.py:1380 getresponse
+def getresponse(self):
+    response = HTTPResponse(self.sock, method=self._method)
+    try:
+        response.begin()
+    except ConnectionError:
+        self.close()
+        raise
+    assert response.will_close != _UNKNOWN
+    self.__state = _CS_IDLE
+    if response.will_close:
+        self.close()
+    else:
+        self.__response = response
+    return response
+```
+
+`getresponse` creates an `HTTPResponse` and calls `begin()` which parses the status line (`HTTP/1.1 200 OK`) and response headers. `will_close` is set to `True` if `Connection: close` is present or the HTTP version is 1.0, indicating the connection cannot be reused.
+
+## gopy notes
+
+`http.client` is a pure-Python module; gopy runs it directly via the stdlib. `HTTPConnection._send_request` uses `socket.makefile` to wrap the raw socket. `_read_chunked` uses `fp.readline` which routes to `objects.FileReadline`. `getresponse` parses headers using `http.client.parse_headers` which calls `email.parser.FeedParser`.

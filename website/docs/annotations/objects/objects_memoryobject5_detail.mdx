@@ -1,0 +1,128 @@
+---
+title: Objects/memoryobject.c (part 5)
+description: "Objects/memoryobject.c part 5: memoryview slicing, cast, tobytes, tolist."
+cpython_path: Objects/memoryobject.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Objects/memoryobject.c" />
+
+This annotation covers slicing, reinterpretation, and conversion. See `objects_memoryobject4_detail` for `memoryview.__new__`, `PyBUF_*` flags, and the buffer protocol.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `memoryview.__getitem__` | Element access and slicing |
+| 81-180 | `memoryview.cast` | Reinterpret format/shape |
+| 181-280 | `memoryview.tobytes` | Copy to bytes |
+| 281-380 | `memoryview.tolist` | Convert to nested Python list |
+| 381-500 | `memoryview.release` | Release underlying buffer |
+
+## Reading
+
+### `memoryview.__getitem__`
+
+```c
+// CPython: Objects/memoryobject.c:1820 memory_subscript
+static PyObject *
+memory_subscript(PyMemoryViewObject *self, PyObject *key)
+{
+    Py_buffer *view = &self->view;
+    if (PyIndex_Check(key)) {
+        Py_ssize_t index = PyNumber_AsSsize_t(key, PyExc_IndexError);
+        if (view->ndim == 1) {
+            /* Return scalar element */
+            return unpack_single(self, view->buf + index * view->strides[0],
+                                 view->format);
+        }
+        /* Multi-dimensional: return sub-view */
+        return memory_slice(self, key);
+    }
+    if (PySlice_Check(key)) {
+        return memory_slice(self, key);
+    }
+    ...
+}
+```
+
+For 1-D contiguous views, `mv[i]` unpacks the element at byte offset `i * strides[0]` using the format string (e.g., `'B'` for `uint8`, `'i'` for `int32`). For slices, a new `memoryview` is returned that shares the same underlying buffer with adjusted `buf`, `len`, `strides`.
+
+### `memoryview.cast`
+
+```c
+// CPython: Objects/memoryobject.c:1600 memory_cast
+static PyObject *
+memory_cast(PyMemoryViewObject *self, PyObject *args, PyObject *kwds)
+{
+    /* cast(format[, shape]) — reinterpret the bytes */
+    const char *fmt;
+    PyObject *shape = NULL;
+    if (!PyArg_ParseTupleAndKeywords(args, kwds, "s|O:cast", ...)) return NULL;
+    /* Validate: same total byte size */
+    Py_ssize_t itemsize = get_native_itemsize(fmt);
+    if (self->view.len % itemsize != 0) {
+        PyErr_SetString(PyExc_TypeError, "memoryview: length is not a multiple of itemsize");
+        return NULL;
+    }
+    return mbuf_copy(self->mbuf, &self->view, fmt, shape, ...);
+}
+```
+
+`mv.cast('H')` reinterprets a byte buffer as 16-bit unsigned shorts. The total byte length must be divisible by the new item size. The resulting view shares the same memory — no data is copied. Used to read raw binary data in a typed way.
+
+### `memoryview.tobytes`
+
+```c
+// CPython: Objects/memoryobject.c:1660 memory_tobytes
+static PyObject *
+memory_tobytes(PyMemoryViewObject *self, PyObject *args, PyObject *kwds)
+{
+    /* order: 'C' (row-major), 'F' (column-major), 'A' (as-is) */
+    char *order = "C";
+    if (!PyArg_ParseTupleAndKeywords(args, kwds, "|s:tobytes", ...)) return NULL;
+    if (MV_C_CONTIGUOUS(self->flags) && order[0] == 'C') {
+        return PyBytes_FromStringAndSize(self->view.buf, self->view.len);
+    }
+    /* Non-contiguous: pack into new bytes object */
+    return pack_single(self, order);
+}
+```
+
+`mv.tobytes()` copies the buffer data into a new `bytes` object. For contiguous C-order views, this is a single `memcpy`. For non-contiguous views (with strides), elements are gathered in order. The `order` parameter controls Fortran vs. C ordering for multi-dimensional arrays.
+
+### `memoryview.tolist`
+
+```c
+// CPython: Objects/memoryobject.c:1720 memory_tolist
+static PyObject *
+memory_tolist(PyMemoryViewObject *self, PyObject *noargs)
+{
+    /* Convert to nested list of Python scalars */
+    return tolist_rec(self->view.buf, &self->view, 0);
+}
+
+static PyObject *
+tolist_rec(const char *ptr, Py_buffer *view, Py_ssize_t dim)
+{
+    PyObject *lst = PyList_New(view->shape[dim]);
+    for (Py_ssize_t i = 0; i < view->shape[dim]; i++) {
+        PyObject *item = (dim == view->ndim - 1)
+            ? unpack_single(NULL, ptr, view->format)
+            : tolist_rec(ptr, view, dim + 1);
+        PyList_SET_ITEM(lst, i, item);
+        ptr += view->strides[dim];
+    }
+    return lst;
+}
+```
+
+`mv.tolist()` returns a (possibly nested) list of Python scalar objects. Each element is unpacked according to the format string. For a 2-D view, the result is a list of lists. This is the only way to inspect a typed `memoryview` as Python objects without unpacking with `struct`.
+
+## gopy notes
+
+`memoryview.__getitem__` is `objects.MemoryViewGetItem` in `objects/memoryobject.go`. `cast` creates a new `objects.MemoryView` with updated `Format` and `Shape`. `tobytes` calls `objects.NewBytesFromSlice`. `tolist` recursively builds `objects.List` using `objects.UnpackFormat` for each element.

@@ -1,0 +1,119 @@
+---
+title: Modules/_ssl.c (part 9)
+description: "_ssl.c part 9: SSLObject.read, SSLObject.write, SSLContext.wrap_socket, do_handshake."
+cpython_path: Modules/_ssl.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/_ssl.c" />
+
+This annotation covers SSLObject I/O and context wrapping. See `modules_ssl8_detail` for `SSLContext` creation, certificate loading, and cipher configuration.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `SSLContext.wrap_socket` | Create an `SSLSocket` from a plain socket |
+| 81-180 | `SSLObject.do_handshake` | TLS handshake |
+| 181-280 | `SSLObject.read` | Decrypt and return bytes |
+| 281-380 | `SSLObject.write` | Encrypt and send bytes |
+| 381-500 | Non-blocking I/O | `SSL_ERROR_WANT_READ/WRITE` handling |
+
+## Reading
+
+### `SSLContext.wrap_socket`
+
+```c
+// CPython: Modules/_ssl.c:3140 _ssl__SSLContext_wrap_socket_impl
+static PyObject *
+_ssl__SSLContext_wrap_socket_impl(PySSLContext *self, PyObject *sock,
+                                   int server_side, PyObject *hostname_obj)
+{
+    PySSLSocket *sslsock = newPySSLSocket(self, (PySocketSockObject *)sock,
+                                          server_side, hostname, ...);
+    return (PyObject *)sslsock;
+}
+
+static PySSLSocket *
+newPySSLSocket(PySSLContext *ctx, PySocketSockObject *sock, ...)
+{
+    SSL *ssl = SSL_new(ctx->ctx);
+    SSL_set_fd(ssl, sock->sock_fd);
+    if (hostname)
+        SSL_set_tlsext_host_name(ssl, hostname);  /* SNI */
+    return sslsock;
+}
+```
+
+`context.wrap_socket(sock)` creates an OpenSSL `SSL*` object bound to the socket's file descriptor. `SSL_set_tlsext_host_name` sets the SNI hostname for TLS 1.2+ connections, allowing virtual hosting on HTTPS servers.
+
+### `SSLObject.do_handshake`
+
+```c
+// CPython: Modules/_ssl.c:2180 _ssl__SSLObject_do_handshake_impl
+static PyObject *
+_ssl__SSLObject_do_handshake_impl(PySSLObject *self)
+{
+    int ret, err;
+    do {
+        PySSL_BEGIN_ALLOW_THREADS
+        ret = SSL_do_handshake(self->ssl);
+        PySSL_END_ALLOW_THREADS
+        err = SSL_get_error(self->ssl, ret);
+    } while (err == SSL_ERROR_WANT_READ || err == SSL_ERROR_WANT_WRITE);
+    if (ret <= 0) return PySSL_SetError(self, ret, __FILE__, __LINE__);
+    Py_RETURN_NONE;
+}
+```
+
+`do_handshake` calls `SSL_do_handshake` in a loop, releasing the GIL during I/O waits. `SSL_ERROR_WANT_READ/WRITE` indicates the handshake needs more data; the loop retries. This blocking loop is avoided in async code — `asyncio.SSLProtocol` drives the handshake non-blockingly.
+
+### `SSLObject.read`
+
+```c
+// CPython: Modules/_ssl.c:2280 _ssl__SSLObject_read_impl
+static PyObject *
+_ssl__SSLObject_read_impl(PySSLObject *self, int len, Py_buffer *buffer)
+{
+    char *mem = PyBytes_AS_STRING(dest);  /* pre-allocated buffer */
+    int count;
+    do {
+        PySSL_BEGIN_ALLOW_THREADS
+        count = SSL_read(self->ssl, mem, len);
+        PySSL_END_ALLOW_THREADS
+        err = SSL_get_error(self->ssl, count);
+        if (err == SSL_ERROR_WANT_READ || err == SSL_ERROR_WANT_WRITE)
+            continue;
+        break;
+    } while (1);
+    if (count <= 0) return PySSL_SetError(self, count, __FILE__, __LINE__);
+    return PyBytes_FromStringAndSize(mem, count);
+}
+```
+
+`SSL_read` decrypts buffered TLS records. The GIL is released during the call. If the underlying socket has pending data but the TLS record is incomplete, `SSL_ERROR_WANT_READ` triggers a retry. The return value may be less than `len` even if the socket has more data.
+
+### Non-blocking I/O
+
+```c
+// CPython: Modules/_ssl.c:2240 (error handling in SSL I/O)
+/* Non-blocking: raise ssl.SSLWantReadError / ssl.SSLWantWriteError */
+if (err == SSL_ERROR_WANT_READ) {
+    PyErr_SetNone(PySSLWantReadErrorObject);
+    return NULL;
+}
+if (err == SSL_ERROR_WANT_WRITE) {
+    PyErr_SetNone(PySSLWantWriteErrorObject);
+    return NULL;
+}
+```
+
+For non-blocking sockets (`sock.setblocking(False)`), `SSL_read`/`SSL_write` raise `ssl.SSLWantReadError` or `ssl.SSLWantWriteError` instead of blocking. `asyncio` catches these and registers the socket with the event loop selector.
+
+## gopy notes
+
+`SSLContext.wrap_socket` is `module/ssl.WrapSocket` in `module/ssl/module.go`; uses Go's `crypto/tls.Client` or `tls.Server`. `do_handshake` calls `tls.Conn.Handshake()`. `SSLObject.read` is `module/ssl.Read`; reads from `tls.Conn`. Non-blocking mode raises `objects.SSLWantReadError` mirroring CPython's exception hierarchy.
