@@ -1,0 +1,107 @@
+---
+title: Python/ceval.c (part 19)
+description: "Python/ceval.c part 19: BINARY_OP specializations (ADD_INT, ADD_FLOAT, MULTIPLY_INT, MULTIPLY_FLOAT, SUBSCR_STR_INT)."
+cpython_path: Python/ceval.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Python/ceval.c" />
+
+This annotation covers binary operator specializations. See `python_ceval18_detail` for subscript specializations and `python_ceval17_detail` for call opcodes.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `BINARY_OP_ADD_INT` | `int + int` without `tp_as_number` dispatch |
+| 81-160 | `BINARY_OP_ADD_FLOAT` | `float + float` directly on `ob_fval` |
+| 161-260 | `BINARY_OP_MULTIPLY_INT` | `int * int` compact fast path |
+| 261-380 | `BINARY_OP_MULTIPLY_FLOAT` | `float * float` direct fmul |
+| 381-500 | `BINARY_OP_INPLACE_ADD_UNICODE` | `str += str` resize-in-place optimization |
+
+## Reading
+
+### `BINARY_OP_ADD_INT`
+
+```c
+// CPython: Python/ceval.c:2380 BINARY_OP_ADD_INT
+inst(BINARY_OP_ADD_INT, (left, right -- res)) {
+    DEOPT_IF(!PyLong_CheckExact(left), BINARY_OP);
+    DEOPT_IF(!PyLong_CheckExact(right), BINARY_OP);
+    DEOPT_IF(!_PyLong_IsCompact((PyLongObject *)left), BINARY_OP);
+    DEOPT_IF(!_PyLong_IsCompact((PyLongObject *)right), BINARY_OP);
+    /* Both are compact (fit in one digit): use direct addition */
+    Py_ssize_t lv = _PyLong_CompactValue((PyLongObject *)left);
+    Py_ssize_t rv = _PyLong_CompactValue((PyLongObject *)right);
+    /* Check for overflow */
+    res = _PyLong_FromSTwoDigits(lv + rv);
+    DECREMENT_ADAPTIVE_COUNTER(this_instr[-1].cache);
+}
+```
+
+Compact integers (CPython 3.12+) store the value directly in the `PyLongObject.long_value.ob_digit[0]` when it fits in `Py_ssize_t`. The specialization bypasses `long_add` and avoids digit array arithmetic entirely. Most loop counters and small integer arithmetic hits this path.
+
+### `BINARY_OP_ADD_FLOAT`
+
+```c
+// CPython: Python/ceval.c:2440 BINARY_OP_ADD_FLOAT
+inst(BINARY_OP_ADD_FLOAT, (left, right -- res)) {
+    DEOPT_IF(!PyFloat_CheckExact(left), BINARY_OP);
+    DEOPT_IF(!PyFloat_CheckExact(right), BINARY_OP);
+    double dv = ((PyFloatObject *)left)->ob_fval +
+                ((PyFloatObject *)right)->ob_fval;
+    /* Attempt to reuse right object if refcount == 1 */
+    DECREF_SPECIALIZED(right, _PyFloat_ExactDealloc);
+    res = _PyFloat_FromDoubleConsume(left, dv);
+}
+```
+
+`_PyFloat_FromDoubleConsume` reuses the left float object if its reference count is 1, avoiding an allocation. This matters in tight arithmetic loops where temporaries are immediately discarded.
+
+### `BINARY_OP_MULTIPLY_INT`
+
+```c
+// CPython: Python/ceval.c:2500 BINARY_OP_MULTIPLY_INT
+inst(BINARY_OP_MULTIPLY_INT, (left, right -- res)) {
+    DEOPT_IF(!PyLong_CheckExact(left), BINARY_OP);
+    DEOPT_IF(!PyLong_CheckExact(right), BINARY_OP);
+    DEOPT_IF(!_PyLong_IsCompact((PyLongObject *)left), BINARY_OP);
+    DEOPT_IF(!_PyLong_IsCompact((PyLongObject *)right), BINARY_OP);
+    Py_ssize_t lv = _PyLong_CompactValue((PyLongObject *)left);
+    Py_ssize_t rv = _PyLong_CompactValue((PyLongObject *)right);
+    /* __int128 or overflow-checked multiplication */
+    res = _PyLong_FromLongLong((__int128)lv * rv);
+    DECREMENT_ADAPTIVE_COUNTER(this_instr[-1].cache);
+}
+```
+
+On platforms with `__int128`, the product is computed without overflow by widening to 128 bits and then checking if the result fits back into compact range. If it overflows, the result is a multi-digit long but still correct.
+
+### `BINARY_OP_INPLACE_ADD_UNICODE`
+
+```c
+// CPython: Python/ceval.c:2600 BINARY_OP_INPLACE_ADD_UNICODE
+inst(BINARY_OP_INPLACE_ADD_UNICODE, (left, right -- res)) {
+    DEOPT_IF(!PyUnicode_CheckExact(left), BINARY_OP);
+    DEOPT_IF(!PyUnicode_CheckExact(right), BINARY_OP);
+    /* If left has refcount == 1 and is the accumulator variable,
+       resize in place to avoid copying the prefix each iteration */
+    if (Py_REFCNT(left) == 1) {
+        if (PyUnicode_Append(&left, right) < 0) ERROR_IF(true, error);
+        res = left;
+    } else {
+        res = PyUnicode_Concat(left, right);
+    }
+    STACK_SHRINK(1);
+}
+```
+
+`s += chunk` in a loop uses `PyUnicode_Append` which can resize the string object in place when it is the sole reference. This transforms an O(n^2) concatenation loop into an amortized O(n) operation, matching the behavior of `str.join` for the common accumulation pattern.
+
+## gopy notes
+
+`BINARY_OP_ADD_INT` is `vm.BinaryOpAddInt` in `vm/eval_specialize.go`. The compact integer fast path checks `objects.LongIsCompact`. `BINARY_OP_ADD_FLOAT` reuse is implemented by checking the refcount before calling `objects.FloatFromDouble`. `BINARY_OP_INPLACE_ADD_UNICODE` calls `objects.UnicodeAppend` which uses `append([]rune, ...)` and re-wraps in an interned string.

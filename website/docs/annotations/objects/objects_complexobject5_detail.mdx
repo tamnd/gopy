@@ -1,0 +1,124 @@
+---
+title: Objects/complexobject.c (part 5)
+description: "Objects/complexobject.c part 5: complex.__new__, complex arithmetic, complex.conjugate, complex.__abs__, PyComplex_AsCComplex."
+cpython_path: Objects/complexobject.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Objects/complexobject.c" />
+
+This annotation covers complex number creation and arithmetic. See `objects_complexobject4_detail` for `__repr__`, `__format__`, `complex.real`/`complex.imag`, and the `Py_complex` C struct.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `PyComplex_AsCComplex` | Extract a C `Py_complex` from any Python object |
+| 81-200 | `complex.__new__` | Parse real/imag arguments; handle string forms |
+| 201-340 | Arithmetic | `+`, `-`, `*`, `/` on `Py_complex` structs |
+| 341-430 | `complex.conjugate` | Return complex conjugate (negate imaginary part) |
+| 431-500 | `complex.__abs__` | Return modulus via `hypot(real, imag)` |
+
+## Reading
+
+### `PyComplex_AsCComplex`
+
+```c
+// CPython: Objects/complexobject.c:278 PyComplex_AsCComplex
+Py_complex
+PyComplex_AsCComplex(PyObject *op)
+{
+    if (PyComplex_CheckExact(op)) {
+        return ((PyComplexObject *)op)->cval;
+    }
+    /* Try __complex__ protocol */
+    PyObject *newop = PyObject_CallMethodNoArgs(op, &_Py_ID(__complex__));
+    if (newop) {
+        Py_complex r = ((PyComplexObject *)newop)->cval;
+        Py_DECREF(newop);
+        return r;
+    }
+    /* Fall back to real */
+    double real = PyFloat_AsDouble(op);
+    return (Py_complex){real, 0.0};
+}
+```
+
+Objects that implement `__complex__` can be used wherever a complex number is expected. NumPy scalars rely on this path. If `__complex__` is absent, CPython tries `__float__` and treats the result as purely real.
+
+### `complex.__new__`
+
+```c
+// CPython: Objects/complexobject.c:1200 complex_new_impl
+static PyObject *
+complex_new_impl(PyTypeObject *type, PyObject *r, PyObject *i)
+{
+    /* complex('1+2j') or complex(real=1, imag=2) */
+    Py_complex cr, ci = {0.0, 0.0};
+    if (PyUnicode_Check(r)) {
+        /* Parse "1+2j" string — imaginary only allowed in string form */
+        return complex_from_string(r);
+    }
+    cr = PyComplex_AsCComplex(r);
+    if (i != Py_None) ci = PyComplex_AsCComplex(i);
+    /* Combine: (a+bj) + (c+dj)*j = (a-d) + (b+c)j */
+    return PyComplex_FromCComplex((Py_complex){
+        cr.real - ci.imag,
+        cr.imag + ci.real
+    });
+}
+```
+
+`complex(1, 2)` is straightforward. `complex(1+2j, 3+4j)` produces `(1-4) + (2+3)j = -3+5j` because the second argument is multiplied by `j`. This matches the mathematical convention.
+
+### Complex division
+
+```c
+// CPython: Objects/complexobject.c:180 c_quot
+static Py_complex
+c_quot(Py_complex a, Py_complex b)
+{
+    /* (a+bj)/(c+dj) = ((ac+bd) + (bc-ad)j) / (c^2 + d^2)
+       Uses Smith's method to avoid overflow for large |b|/|d|. */
+    double abs_breal = fabs(b.real), abs_bimag = fabs(b.imag);
+    if (abs_breal >= abs_bimag) {
+        double ratio = b.imag / b.real;
+        double denom = b.real + ratio * b.imag;
+        return (Py_complex){
+            (a.real + a.imag * ratio) / denom,
+            (a.imag - a.real * ratio) / denom
+        };
+    } else {
+        double ratio = b.real / b.imag;
+        double denom = b.imag + ratio * b.real;
+        return (Py_complex){
+            (a.real * ratio + a.imag) / denom,
+            (a.imag * ratio - a.real) / denom
+        };
+    }
+}
+```
+
+Smith's method chooses the larger of `|real|` or `|imag|` as the divisor to minimize floating-point cancellation. Without this, dividing by a number like `1e-300 + 1j` could underflow.
+
+### `complex.__abs__`
+
+```c
+// CPython: Objects/complexobject.c:1060 complex_abs
+static PyObject *
+complex_abs(PyComplexObject *v)
+{
+    double result = hypot(v->cval.real, v->cval.imag);
+    return PyFloat_FromDouble(result);
+}
+```
+
+`abs(3+4j)` returns `5.0`. `hypot` is used instead of `sqrt(a*a + b*b)` to avoid intermediate overflow when `a` or `b` is very large.
+
+## gopy notes
+
+`PyComplex_AsCComplex` is `objects.ComplexAsCComplex` in `objects/complex.go`. Complex arithmetic uses Go's `cmplx` package from `math/cmplx`. `complex.__new__` string parsing uses a hand-written scanner matching CPython's `complex_from_string`. `complex.__abs__` calls `cmplx.Abs`.

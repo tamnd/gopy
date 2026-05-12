@@ -1,0 +1,101 @@
+---
+title: Modules/_ssl.c (part 2)
+description: "Modules/_ssl.c part 2: SSLSocket.read, SSLSocket.write, SSL handshake, certificate verification, ssl.wrap_socket."
+cpython_path: Modules/_ssl.c
+cpython_version: "3.14"
+lines: 700
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/_ssl.c" />
+
+This annotation covers SSL socket I/O and handshake. See `modules_ssl_detail` for `SSLContext`, cipher suites, certificate loading, and `ssl.create_default_context`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-100 | `SSLSocket.read` | Decrypt and return bytes from the SSL stream |
+| 101-220 | `SSLSocket.write` | Encrypt bytes and send |
+| 221-380 | `_ssl__SSLObject_do_handshake` | TLS handshake, certificate verification |
+| 381-520 | `_ssl_nid2obj` / cert info | Extract subject/issuer from `X509` certificate |
+| 521-700 | `ssl.wrap_socket` | Deprecated convenience wrapper over `SSLContext` |
+
+## Reading
+
+### `SSLSocket.read`
+
+```c
+// CPython: Modules/_ssl.c:1880 _ssl__SSLObject_read_impl
+static PyObject *
+_ssl__SSLObject_read_impl(PySSLObject *self, int len, int group_right_1,
+                          Py_buffer *buffer)
+{
+    /* SSL_read may return < len on partial records.
+       Retry on SSL_ERROR_WANT_READ (non-blocking socket). */
+    do {
+        count = SSL_read(self->ssl, mem, len);
+        err = _PySSL_errno(count <= 0, self->ssl, count);
+    } while (err.ssl == SSL_ERROR_WANT_READ && self->ctx->timeout > 0);
+    if (count <= 0) {
+        /* Distinguish EOF (SSL_ERROR_ZERO_RETURN) from error */
+        ...
+    }
+    return PyBytes_FromStringAndSize(mem, count);
+}
+```
+
+`SSL_read` may return fewer bytes than requested even if more are available (TLS record boundary). Callers should loop until the desired amount is read or EOF. `SSL_ERROR_WANT_READ` on a non-blocking socket means the OS buffer is empty; the caller must `select()` before retrying.
+
+### `do_handshake`
+
+```c
+// CPython: Modules/_ssl.c:1620 _ssl__SSLObject_do_handshake_impl
+static PyObject *
+_ssl__SSLObject_do_handshake_impl(PySSLObject *self)
+{
+    /* Performs TLS negotiation: ClientHello, ServerHello, Certificate,
+       CertificateVerify, Finished. */
+    do {
+        ret = SSL_do_handshake(self->ssl);
+        err = _PySSL_errno(ret < 1, self->ssl, ret);
+        /* Release GIL during blocking I/O */
+        Py_BEGIN_ALLOW_THREADS
+        ...
+        Py_END_ALLOW_THREADS
+    } while (err.ssl == SSL_ERROR_WANT_READ || err.ssl == SSL_ERROR_WANT_WRITE);
+    if (ret < 1) {
+        _setSSLError(get_state_sock(self), NULL, 0, __FILE__, __LINE__);
+        return NULL;
+    }
+    Py_RETURN_NONE;
+}
+```
+
+The GIL is released during the blocking `SSL_do_handshake` call so other Python threads can run. Certificate verification happens inside OpenSSL: the `SSLContext`'s `verify_mode` and `verify_flags` are consulted. `ssl.SSLCertVerificationError` is raised if the chain is untrusted.
+
+### Certificate extraction
+
+```c
+// CPython: Modules/_ssl.c:840 _decode_certificate
+static PyObject *
+_decode_certificate(X509 *certificate)
+{
+    /* Build a dict with subject, issuer, notBefore, notAfter,
+       subjectAltName, serialNumber, version. */
+    PyObject *retval = PyDict_New();
+    /* Subject: list of ((OID, value), ...) tuples */
+    X509_NAME *subject = X509_get_subject_name(certificate);
+    _create_tuple_for_X509_NAME(subject, &retval);
+    ...
+    return retval;
+}
+```
+
+`ssl.SSLSocket.getpeercert()` calls `_decode_certificate` on the peer's `X509` struct. The result is a Python dict mapping field names to values. `subjectAltName` is a list of `(type, value)` pairs like `('DNS', 'example.com')`.
+
+## gopy notes
+
+`SSLSocket.read` and `SSLSocket.write` are in `module/ssl/socket.go` and delegate to Go's `crypto/tls` package. `do_handshake` is `module/ssl.SSLSocket.Handshake`. Certificate decoding uses `x509.Certificate` from Go's standard library. `ssl.wrap_socket` is a thin wrapper that creates an `SSLContext` and calls `SSLContext.wrap_socket`.

@@ -1,0 +1,107 @@
+---
+title: Modules/_sqlite/ (part 2)
+description: "Modules/_sqlite/ part 2: sqlite3.Cursor.execute, fetchone/fetchmany/fetchall, parameter binding, sqlite3.Row."
+cpython_path: Modules/_sqlite/cursor.c
+cpython_version: "3.14"
+lines: 700
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/_sqlite/cursor.c" />
+
+This annotation covers query execution and result fetching. See `modules_sqlite_detail` for `sqlite3.connect`, `Connection.__init__`, transaction management, and `row_factory`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-120 | `Cursor.execute` | Prepare and step a statement; bind parameters |
+| 121-260 | `_pysqlite_query_execute` | Core execute loop: step, fetch columns, call row_factory |
+| 261-380 | `Cursor.fetchone` / `fetchmany` | Pull rows from the result set |
+| 381-500 | Parameter binding | Map Python objects to `sqlite3_bind_*` calls |
+| 501-700 | `sqlite3.Row` | Dict-like row wrapper with column name access |
+
+## Reading
+
+### `Cursor.execute`
+
+```c
+// CPython: Modules/_sqlite/cursor.c:380 pysqlite_cursor_execute
+static PyObject *
+pysqlite_cursor_execute(pysqlite_Cursor *self, PyObject *args)
+{
+    PyObject *sql, *parameters = NULL;
+    if (!PyArg_ParseTuple(args, "O|O", &sql, &parameters)) return NULL;
+    return _pysqlite_query_execute(self, 0, sql, parameters);
+}
+```
+
+`cursor.execute("SELECT ? + ?", (1, 2))` calls `_pysqlite_query_execute` with `multiple=0`. `executemany` calls it with `multiple=1` and iterates over the parameter sequence.
+
+### `_pysqlite_query_execute`
+
+```c
+// CPython: Modules/_sqlite/cursor.c:420 _pysqlite_query_execute
+static PyObject *
+_pysqlite_query_execute(pysqlite_Cursor *self, int multiple,
+                        PyObject *operation, PyObject *seq_of_params)
+{
+    /* Prepare statement (or reuse from cache) */
+    if (!pysqlite_build_row_cast_map(self)) return NULL;
+    stmt = pysqlite_get_statement(self->db, operation);
+    /* Bind parameters and step */
+    pysqlite_step(stmt, db);
+    /* Collect column descriptions */
+    numcols = sqlite3_column_count(stmt->st);
+    for (int i = 0; i < numcols; i++) {
+        name = sqlite3_column_name(stmt->st, i);
+        /* Build cursor.description: (name, type_code, ...) 7-tuple */
+    }
+    return self;
+}
+```
+
+Statement caching avoids re-parsing repeated queries. `cursor.description` is built from `sqlite3_column_name` after the first `sqlite3_step`. Rows are not materialized until `fetchone`/`fetchall` is called; the cursor is lazy.
+
+### Parameter binding
+
+```c
+// CPython: Modules/_sqlite/cursor.c:560 pysqlite_microprotocols_adapt
+/* Map Python types to sqlite3_bind_* calls:
+   None      -> sqlite3_bind_null
+   int       -> sqlite3_bind_int64
+   float     -> sqlite3_bind_double
+   str       -> sqlite3_bind_text (UTF-8)
+   bytes     -> sqlite3_bind_blob
+   custom    -> __conform__(sqlite3.PrepareProtocol) */
+```
+
+Custom types implement `__conform__` to return a SQLite-compatible value. The `detect_types` connection parameter enables automatic conversion in the reverse direction using column type names or affinity.
+
+### `sqlite3.Row`
+
+```c
+// CPython: Modules/_sqlite/row.c:120 pysqlite_row_subscript
+static PyObject *
+pysqlite_row_subscript(pysqlite_Row *self, PyObject *idx)
+{
+    if (PyUnicode_Check(idx)) {
+        /* Case-insensitive column name lookup */
+        for (int i = 0; i < PyTuple_GET_SIZE(self->description); i++) {
+            PyObject *col = PyTuple_GET_ITEM(PyTuple_GET_ITEM(self->description, i), 0);
+            if (PyUnicode_CompareWithASCIIString(col, name) == 0) {
+                return Py_NewRef(PyTuple_GET_ITEM(self->data, i));
+            }
+        }
+    }
+    return PySequence_GetItem(self->data, idx);
+}
+```
+
+`row['name']` and `row[0]` both work. `sqlite3.Row` wraps a tuple of column values and a description tuple, providing both index and key access. `keys()` returns the column names for dict-like iteration.
+
+## gopy notes
+
+`Cursor.execute` is `module/sqlite3.Cursor.Execute` in `module/sqlite3/cursor.go`. It uses Go's `database/sql` with the `mattn/go-sqlite3` driver. Parameter binding converts Python objects to `driver.Value` via a switch on Go type assertions. `sqlite3.Row` is `module/sqlite3.Row`, a struct holding column names and values.

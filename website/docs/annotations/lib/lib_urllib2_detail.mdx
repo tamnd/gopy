@@ -1,0 +1,105 @@
+---
+title: Lib/urllib/ (part 2)
+description: "Lib/urllib/ part 2: urllib.parse.urlparse, urlencode, quote/unquote, urllib.request.urlopen, HTTPBasicAuthHandler."
+cpython_path: Lib/urllib/parse.py
+cpython_version: "3.14"
+lines: 700
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/urllib/parse.py" />
+
+This annotation covers URL parsing and encoding. See `lib_urllib_detail` for `urllib.request`, `Request`, `OpenerDirector`, and `build_opener`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-100 | `urlparse` | Split a URL into scheme, netloc, path, params, query, fragment |
+| 101-220 | `urlsplit` | Like urlparse but without params; used internally |
+| 221-360 | `urlencode` | Encode a mapping or sequence as `application/x-www-form-urlencoded` |
+| 361-500 | `quote` / `unquote` | Percent-encode and decode URL components |
+| 501-700 | `urljoin` | Resolve a relative URL against a base |
+
+## Reading
+
+### `urlparse`
+
+```python
+# CPython: Lib/urllib/parse.py:395 urlparse
+def urlparse(urlstring, scheme='', allow_fragments=True):
+    """Parse a URL into 6 components: scheme://netloc/path;params?query#fragment"""
+    url, scheme, _coerce_result = _coerce_args(urlstring, scheme)
+    splitresult = urlsplit(url, scheme, allow_fragments)
+    scheme, netloc, url, query, fragment = splitresult
+    if scheme in uses_params and ';' in url:
+        url, params = _splitparams(url)
+    else:
+        params = ''
+    return ParseResult(scheme, netloc, url, params, query, fragment)
+```
+
+`urlparse` returns a named tuple with `.scheme`, `.netloc`, `.path`, `.params`, `.query`, `.fragment`. The `params` component (after `;`) is rarely used in practice; `urlsplit` is preferred for most applications.
+
+### `urlencode`
+
+```python
+# CPython: Lib/urllib/parse.py:910 urlencode
+def urlencode(query, doseq=False, safe='', encoding=None, errors=None,
+              quote_via=quote_plus):
+    """Encode a dict or sequence of two-element tuples as a query string."""
+    if hasattr(query, "items"):
+        query = query.items()
+    ...
+    l = []
+    for k, v in query:
+        if isinstance(v, str):
+            l.append(quote_via(k, safe) + '=' + quote_via(v, safe))
+        elif doseq:
+            for elt in v:
+                l.append(quote_via(k, safe) + '=' + quote_via(elt, safe))
+    return '&'.join(l)
+```
+
+`urlencode({'a': 1, 'b': [2, 3]}, doseq=True)` produces `a=1&b=2&b=3`. The `quote_via` parameter lets callers use `quote` (space as `%20`) instead of the default `quote_plus` (space as `+`).
+
+### `quote`
+
+```python
+# CPython: Lib/urllib/parse.py:835 quote
+def quote(string, safe='/', encoding=None, errors=None):
+    """Percent-encode string, leaving safe characters unencoded."""
+    if isinstance(string, str):
+        string = string.encode(encoding or 'utf-8', errors or 'strict')
+    return _ALWAYS_SAFE_BYTES.translate(_QUOTER_TABLE, string)
+```
+
+`quote('/path/to file', safe='/')` produces `/path/to%20file`. The `safe` parameter defaults to `/` so that path components are not double-encoded. `quote_plus` also encodes `/` and replaces spaces with `+`.
+
+### `urljoin`
+
+```python
+# CPython: Lib/urllib/parse.py:467 urljoin
+def urljoin(base, url, allow_fragments=True):
+    """Resolve url relative to base (RFC 3986 Section 5.2)."""
+    if not base:
+        return url
+    if not url:
+        return base
+    bscheme, bnetloc, bpath, bparams, bquery, bfragment = urlparse(base, ...)
+    scheme, netloc, path, params, query, fragment = urlparse(url, bscheme, ...)
+    if scheme != bscheme or scheme not in uses_relative:
+        return _coerce_result(urlunparse((scheme, netloc, path, params, query, fragment)))
+    if netloc:
+        path = _remove_dot_segments(path)
+        return _coerce_result(urlunparse((scheme, netloc, path, params, query, fragment)))
+    ...
+```
+
+`urljoin('http://example.com/a/b', '../c')` returns `http://example.com/c`. The `_remove_dot_segments` helper implements RFC 3986 path normalization.
+
+## gopy notes
+
+`urlparse` is `module/urllib/parse.URLParse` in `module/urllib/parse/module.go`. The result is `objects.ParseResult`, a named tuple subclass. `urlencode` iterates over Go map entries or a slice of pairs. `quote` uses a precomputed byte translation table matching CPython's `_QUOTER_TABLE`.
