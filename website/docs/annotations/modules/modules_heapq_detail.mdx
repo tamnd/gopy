@@ -1,0 +1,92 @@
+---
+title: Modules/_heapq module
+description: "_heapq C extension: heappush, heappop, heapify, heapreplace, heappushpop, nlargest, nsmallest — min-heap on a list."
+cpython_path: Modules/_heapqmodule.c
+cpython_version: "3.14"
+lines: 600
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/_heapqmodule.c" />
+
+`_heapq` is the C acceleration for `heapq`. The pure-Python fallback is in `Lib/heapq.py`. All heap operations maintain the min-heap invariant: `heap[k] <= heap[2*k+1]` and `heap[k] <= heap[2*k+2]`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-100 | `_siftdown`, `_siftup` | Core heap maintenance |
+| 101-250 | `heappush`, `heappop` | Push and pop |
+| 251-380 | `heapify` | Convert list in-place to heap |
+| 381-500 | `heapreplace`, `heappushpop` | Atomic replace and push-pop |
+| 501-600 | `nlargest`, `nsmallest` | Partial-sort using heaps |
+
+## Reading
+
+### `_siftup` (restore after pop)
+
+```c
+// CPython: Modules/_heapqmodule.c:55 _siftup
+static int
+_siftup(PyListObject *heap, Py_ssize_t pos)
+{
+    Py_ssize_t endpos = PyList_GET_SIZE(heap);
+    Py_ssize_t startpos = pos;
+    /* Bubble the item at pos down to the leaf */
+    while (1) {
+        Py_ssize_t childpos = 2*pos + 1;   /* left child */
+        if (childpos >= endpos) break;
+        Py_ssize_t rightpos = childpos + 1;
+        /* Pick the smaller child */
+        if (rightpos < endpos &&
+            PyObject_RichCompareBool(heap->ob_item[childpos],
+                                     heap->ob_item[rightpos], Py_LT) <= 0)
+            childpos = rightpos;
+        heap->ob_item[pos] = heap->ob_item[childpos];
+        pos = childpos;
+    }
+    heap->ob_item[pos] = heap->ob_item[startpos];
+    return _siftdown(heap, startpos, pos);
+}
+```
+
+### `heappop`
+
+```c
+// CPython: Modules/_heapqmodule.c:180 heappop_impl
+static PyObject *
+heappop_impl(PyObject *module, PyObject *heap)
+{
+    Py_ssize_t n = PyList_GET_SIZE(heap);
+    if (n == 0) {
+        PyErr_SetString(PyExc_IndexError, "index out of range");
+        return NULL;
+    }
+    PyObject *returnitem = PyList_GET_ITEM(heap, 0);
+    /* Move the last item to the root and sift it down */
+    PyObject *lastelt = PyList_GET_ITEM(heap, n-1);
+    PyList_SET_ITEM(heap, 0, Py_NewRef(lastelt));
+    if (PyList_SetSlice(heap, n-1, n, NULL) < 0)  /* truncate */
+        return NULL;
+    _siftup((PyListObject *)heap, 0);
+    return returnitem;
+}
+```
+
+`heappop` is O(log n). The last element replaces the root, then `_siftup` restores the heap property.
+
+### `nlargest`
+
+```c
+// CPython: Modules/_heapqmodule.c:530 nlargest_impl
+/* For small n relative to total: use a min-heap of size n.
+   For large n: sort descending and slice. */
+```
+
+`nlargest(n, iterable)` uses a min-heap of the n largest seen so far. Each new element replaces the current minimum if larger.
+
+## gopy notes
+
+`heapq` is used by `collections.Counter.most_common`, `asyncio`, and `concurrent.futures`. In gopy it is implemented in `module/heapq/` (backed by Go slice operations). The comparison uses Python's `<` operator via `objects.Lt`, so custom `__lt__` implementations work correctly.

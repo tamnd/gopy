@@ -1,0 +1,89 @@
+---
+title: Include/internal/pycore_interp.h
+description: "pycore_interp.h: PyInterpreterState layout — modules dict, import state, GC state, eval breaker, codec registry, type cache."
+cpython_path: Include/internal/pycore_interp.h
+cpython_version: "3.14"
+lines: 400
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Include/internal/pycore_interp.h" />
+
+`PyInterpreterState` is the per-sub-interpreter state object. Most global state that used to live in static variables was moved here to support sub-interpreters (PEP 684). Each interpreter has its own `sys.modules`, GC state, type cache, and import lock.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-100 | Core fields | `modules`, `builtins`, `sysdict`, `importlib` |
+| 101-200 | `import_state` | Import lock, frozen modules, `sys.path_hooks` |
+| 201-280 | GC state | Generation heads, thresholds, collection stats |
+| 281-350 | Type/method cache | `tp_version_tag` counter, inline caches |
+| 351-400 | Codec registry, eval breaker | String codec lookup, pending calls |
+
+## Reading
+
+### Core fields
+
+```c
+// CPython: Include/internal/pycore_interp.h:48 PyInterpreterState (selected fields)
+struct _is {
+    PyInterpreterState *next;       /* linked list of all interpreters */
+    struct _ceval_state ceval;      /* eval loop state (GIL, pending calls) */
+    struct _gc_runtime_state gc;    /* GC generations and state */
+    PyObject *modules;              /* sys.modules dict */
+    PyObject *modules_by_index;     /* list for fast index-based lookup */
+    PyObject *sysdict;              /* sys.__dict__ */
+    PyObject *builtins;             /* builtins.__dict__ */
+    PyObject *importlib;            /* importlib module */
+    struct _import_state imports;   /* import lock, path hooks */
+    ...
+    struct _py_func_cache func_version_cache[...]; /* inline function caches */
+    struct _Py_ident_cache id_cache; /* small int and interned string cache */
+};
+```
+
+### Eval breaker
+
+```c
+// CPython: Include/internal/pycore_interp.h:95 _ceval_state
+struct _ceval_state {
+    _Py_atomic_int eval_breaker;   /* set to 1 to interrupt the eval loop */
+    _Py_atomic_int gil_drop_request;
+    _Py_atomic_int signals_pending;
+    struct _pending_calls pending;  /* queue of C-level callbacks */
+};
+```
+
+The `eval_breaker` is checked by `RESUME` (and some other opcodes). When it is non-zero, `_Py_HandlePending` is called to process signals, drop the GIL, or call pending callbacks.
+
+### GC state
+
+```c
+// CPython: Include/internal/pycore_interp.h:220 _gc_runtime_state (abridged)
+struct _gc_runtime_state {
+    PyGC_Head generations[NUM_GENERATIONS];  /* 3 generation lists */
+    Py_ssize_t generation0_threshold;        /* collection threshold */
+    Py_ssize_t generation1_threshold;
+    Py_ssize_t generation2_threshold;
+    Py_ssize_t long_lived_pending;
+    int enabled;
+    int debug;
+    PyGC_Head permanent_generation;         /* gc.freeze() moves here */
+};
+```
+
+### Type version tag
+
+```c
+// CPython: Include/internal/pycore_interp.h:300 type_version_counter
+unsigned int next_version_tag;
+```
+
+Each type gets a unique `tp_version_tag`. When a type is modified (attribute added/removed), its tag is invalidated by setting it to 0. Inline caches in the eval loop check the tag; a mismatch causes a cache miss.
+
+## gopy notes
+
+`vm.Interpreter` in gopy holds `Modules` (map of module name to `*objects.Module`), `Builtins` (the builtins dict), `SysDict`, and an import lock (`sync.Mutex`). The GC state is replaced by Go's GC. The type version cache is not yet implemented; attribute lookup always goes through the full MRO walk.

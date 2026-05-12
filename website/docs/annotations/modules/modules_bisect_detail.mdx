@@ -1,0 +1,83 @@
+---
+title: Modules/_bisect module
+description: "_bisect C extension: bisect_left, bisect_right, insort_left, insort_right — binary search on sorted lists."
+cpython_path: Modules/_bisectmodule.c
+cpython_version: "3.14"
+lines: 300
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/_bisectmodule.c" />
+
+`_bisect` is the C acceleration for `Lib/bisect.py`. It provides O(log n) binary search and sorted-insert operations on Python lists.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `bisect_right_impl` | Find rightmost insertion point |
+| 81-160 | `bisect_left_impl` | Find leftmost insertion point |
+| 161-250 | `insort_right_impl`, `insort_left_impl` | Binary search + insert |
+| 251-300 | Module init, `key` parameter support | 3.10+ key function |
+
+## Reading
+
+### `bisect_right`
+
+```c
+// CPython: Modules/_bisectmodule.c:38 bisect_right_impl
+static Py_ssize_t
+bisect_right_impl(PyObject *module, PyObject *list,
+                  PyObject *item, Py_ssize_t lo, Py_ssize_t hi, PyObject *key)
+{
+    while (lo < hi) {
+        Py_ssize_t mid = ((unsigned)(lo + hi)) >> 1;
+        PyObject *litem = PyList_GET_ITEM(list, mid);
+        if (key != Py_None)
+            litem = PyObject_CallOneArg(key, litem);
+        int cmp = PyObject_RichCompareBool(item, litem, Py_LT);
+        if (cmp < 0) return -1;  /* error */
+        if (cmp)
+            hi = mid;
+        else
+            lo = mid + 1;
+    }
+    return lo;
+}
+```
+
+`bisect_right` finds the index after any existing entries equal to `item`. `bisect_left` finds the index before them. The difference matters when inserting duplicates.
+
+### Key function (3.10+)
+
+```python
+# CPython: Modules/_bisectmodule.c (Python usage)
+import bisect
+data = [('a', 1), ('b', 2), ('c', 3)]
+pos = bisect.bisect_left(data, 'b', key=lambda x: x[0])
+# pos == 1
+```
+
+The `key` parameter was added in Python 3.10. When provided, it is called on each list element before comparison. The `item` argument is compared directly (not through `key`).
+
+### `insort`
+
+```c
+// CPython: Modules/_bisectmodule.c:200 insort_right_impl
+static PyObject *
+insort_right_impl(PyObject *module, PyObject *list,
+                  PyObject *item, Py_ssize_t lo, Py_ssize_t hi, PyObject *key)
+{
+    Py_ssize_t index = bisect_right_impl(module, list, item, lo, hi, key);
+    if (index < 0) return NULL;
+    return PyList_Insert(list, index, item);
+}
+```
+
+`insort` calls `bisect` then `list.insert`. The insert is O(n) due to shifting; the binary search is only O(log n).
+
+## gopy notes
+
+`bisect` is used by `heapq.nlargest`/`nsmallest` (indirectly) and by any code doing sorted-list operations. In gopy it is implemented in `module/bisect/` using Go's `sort.Search`. The `key` parameter requires calling back into Python for each comparison element.

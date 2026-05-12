@@ -1,0 +1,106 @@
+---
+title: Include/internal/pycore_tstate.h
+description: "pycore_tstate.h: PyThreadState layout — current frame, exception info, recursion depth, tracing, GIL, c_tracefunc."
+cpython_path: Include/internal/pycore_tstate.h
+cpython_version: "3.14"
+lines: 300
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Include/internal/pycore_tstate.h" />
+
+`PyThreadState` (tstate) is the per-thread state object. Every thread has exactly one. The eval loop reads from it on every opcode: current frame, exception, recursion depth, and trace hooks.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | Identity and interpreter link | `thread_id`, `interp`, `next`/`prev` |
+| 81-160 | Execution state | `current_frame`, `recursion_depth`, `recursion_limit` |
+| 161-220 | Exception state | `exc_info`, `current_exception` |
+| 221-300 | Tracing | `c_tracefunc`, `c_profilefunc`, `tracing`, `use_tracing` |
+
+## Reading
+
+### Identity fields
+
+```c
+// CPython: Include/internal/pycore_tstate.h:24 PyThreadState (abridged)
+struct _ts {
+    PyThreadState *prev, *next;
+    PyInterpreterState *interp;
+
+    /* Execution */
+    struct _PyInterpreterFrame *current_frame;
+    int recursion_depth;
+    int recursion_headroom;
+    int stackcheck_depth;
+    int recursion_limit;
+
+    /* Exceptions */
+    _PyErr_StackItem exc_state;        /* innermost except block's exception */
+    _PyErr_StackItem *exc_info;        /* pointer to innermost exc_state */
+    PyObject *current_exception;       /* currently set exception value */
+
+    /* Tracing */
+    Py_tracefunc c_tracefunc;
+    Py_tracefunc c_profilefunc;
+    PyObject *c_traceobj;
+    PyObject *c_profileobj;
+    int tracing;
+    int tracing_what;
+    int use_tracing;                   /* fast flag: is any tracing active? */
+
+    /* Thread identity */
+    unsigned long thread_id;
+    uint64_t native_thread_id;
+};
+```
+
+### Recursion limit
+
+```c
+// CPython: Include/internal/pycore_tstate.h:140 recursion check
+static inline int
+_Py_EnterRecursiveCallTstate(PyThreadState *tstate, const char *where)
+{
+    return (tstate->recursion_depth++ >= tstate->recursion_limit)
+        ? _Py_CheckRecursiveCall(tstate, where) : 0;
+}
+```
+
+`recursion_limit` defaults to 1000. `_Py_CheckRecursiveCall` raises `RecursionError` when exceeded.
+
+### Exception info stack
+
+```c
+// CPython: Include/internal/pycore_tstate.h:165 exc_info chain
+/*
+ * exc_info points to the innermost _PyErr_StackItem.
+ * Each except block pushes a new item via PUSH_EXC_INFO;
+ * POP_EXCEPT restores the previous pointer.
+ */
+```
+
+The exception stack supports re-entrant exception handling: entering a nested `except` block saves the current exception and sets the new one.
+
+### Tracing
+
+```c
+// CPython: Include/internal/pycore_tstate.h:220 c_tracefunc
+/*
+ * c_tracefunc is called by the eval loop for:
+ * - PyTrace_CALL (function entry)
+ * - PyTrace_LINE (each source line)
+ * - PyTrace_RETURN (function exit)
+ * - PyTrace_EXCEPTION (unhandled exception at a line)
+ */
+```
+
+`use_tracing` is a combined flag: it is 1 if either `c_tracefunc` or `c_profilefunc` is set. The eval loop checks `use_tracing` (not the individual pointers) for speed.
+
+## gopy notes
+
+`vm.Frame` in gopy holds `RecursionDepth` and checks against the interpreter's `RecursionLimit`. The exception state (`exc_info`) is a linked list of `ExcInfo` structs on `vm.Frame`. Tracing (`c_tracefunc`) is set by `sys.settrace` and drives `pdb`. gopy's trace hook is a Go interface field on `vm.Frame`.

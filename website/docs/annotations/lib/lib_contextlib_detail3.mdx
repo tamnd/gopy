@@ -1,0 +1,105 @@
+---
+title: Lib/contextlib.py (part 3)
+description: "contextlib part 3: asynccontextmanager, AsyncExitStack, aclosing, asyncnullcontext, AbstractAsyncContextManager."
+cpython_path: Lib/contextlib.py
+cpython_version: "3.14"
+lines: 900
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/contextlib.py" />
+
+This annotation covers the async variants of the `contextlib` primitives. See `lib_contextlib_detail2` for the synchronous versions (`contextmanager`, `ExitStack`, `suppress`).
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `AbstractAsyncContextManager` | ABC for `async with` |
+| 81-200 | `asynccontextmanager` | Decorator for async generator context managers |
+| 201-400 | `AsyncExitStack` | Async version of `ExitStack` |
+| 401-500 | `aclosing` | `async with aclosing(aiter)` |
+| 501-600 | `asyncnullcontext` | No-op async context manager |
+
+## Reading
+
+### `asynccontextmanager`
+
+```python
+# CPython: Lib/contextlib.py:240 asynccontextmanager
+def asynccontextmanager(func):
+    @wraps(func)
+    def helper(*args, **kwds):
+        return _AsyncGeneratorContextManager(func, args, kwds)
+    return helper
+
+class _AsyncGeneratorContextManager(AbstractAsyncContextManager):
+    async def __aenter__(self):
+        try:
+            return await self.gen.__anext__()
+        except StopAsyncIteration:
+            raise RuntimeError("generator didn't yield") from None
+
+    async def __aexit__(self, typ, value, traceback):
+        if typ is None:
+            try:
+                await self.gen.__anext__()
+            except StopAsyncIteration:
+                return False
+            raise RuntimeError("generator didn't stop")
+        else:
+            try:
+                await self.gen.athrow(typ, value, traceback)
+            except StopAsyncIteration as exc:
+                return exc is not value
+            except RuntimeError as exc:
+                ...
+```
+
+The async version follows the same pattern as `_GeneratorContextManager` but uses `__anext__` and `athrow` instead of `__next__` and `throw`.
+
+### `AsyncExitStack`
+
+```python
+# CPython: Lib/contextlib.py:550 AsyncExitStack
+class AsyncExitStack(_BaseExitStack, AbstractAsyncContextManager):
+    async def enter_async_context(self, cm):
+        _cm_type = type(cm)
+        _exit = _cm_type.__aexit__
+        result = await _cm_type.__aenter__(cm)
+        self._push_async_cm_exit(cm, _exit)
+        return result
+
+    async def __aexit__(self, *exc_details):
+        ...
+        while self._exit_callbacks:
+            is_sync, cb = self._exit_callbacks.pop()
+            if is_sync:
+                cb_suppress = cb(*exc_details)
+            else:
+                cb_suppress = await cb(*exc_details)
+            ...
+```
+
+`AsyncExitStack` can hold both synchronous and asynchronous context managers. Synchronous callbacks are called directly; async ones are awaited.
+
+### `aclosing`
+
+```python
+# CPython: Lib/contextlib.py:810 aclosing
+class aclosing(AbstractAsyncContextManager):
+    def __init__(self, thing):
+        self.thing = thing
+    async def __aenter__(self):
+        return self.thing
+    async def __aexit__(self, *exc_info):
+        await self.thing.aclose()
+```
+
+`async with aclosing(async_gen_obj)` ensures `aclose()` is called on the async generator even if the loop exits early.
+
+## gopy notes
+
+Async context managers require `__aenter__` and `__aexit__` support in `objects/type.go` and the `async with` opcode implementation (`BEFORE_ASYNC_WITH` in `vm/eval_gen.go`). `AsyncExitStack` is used by `asyncio` and any framework code building composable cleanup chains.

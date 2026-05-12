@@ -715,6 +715,8 @@ const sidebars = {
         'annotations/include/include_code_h_detail',
         'annotations/include/include_frameobject_h_detail',
         'annotations/include/include_internal_pycore_frame_h_detail',
+        'annotations/include/include_internal_pycore_interp_h_detail',
+        'annotations/include/include_internal_pycore_tstate_h_detail',
       ],
     },
     {
@@ -925,6 +927,8 @@ const sidebars = {
         'annotations/modules/modules_time_detail',
         'annotations/modules/modules_collections_detail',
         'annotations/modules/modules_abc_detail',
+        'annotations/modules/modules_heapq_detail',
+        'annotations/modules/modules_bisect_detail',
       ],
     },
     {
@@ -1423,6 +1427,7 @@ const sidebars = {
         'annotations/lib/lib_linecache_detail',
         'annotations/lib/lib_functools_detail2',
         'annotations/lib/lib_os_path_detail',
+        'annotations/lib/lib_contextlib_detail3',
       ],
     },
   ],
