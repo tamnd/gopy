@@ -477,6 +477,8 @@ dispatcher block in `objects/usertype.go`.
 |------|------|-------------------|
 | `objects/usertype.go` slot dispatchers | route every `__dunder__` lookup through `lookupMethodOnSelf` instead of `GetAttr` | `GetAttr(cls, name)` returns the descriptor unbound when the receiver is a class, so `hash(C)` for a class with a user metaclass tried to call `object.__hash__()` with no arguments |
 | `objects/object.go` `objectHashDescr` | computes identity hash directly, no longer routes through `Hash()` | the inherited `object.__hash__` is the same descriptor reached by `slotTpHash`; the old wrapper recursed back through `Hash` and exploded the stack |
+| `builtins/init.go` `bindCtor` | also installs the `__new__` wrapper as a descriptor on the type's own `__dict__` | enum's `_find_data_type_` uses `'__new__' in base.__dict__` to decide which mixin supplies storage; without it `IntEnum(int, ReprEnum)` falls through to the `ReprEnum subclasses must be mixed with a data type` guard |
+| `objects/errors.go` `errKeyNotFound` | message prefixed with `KeyError:` so the vm unwind table promotes it to a real `PyExc_KeyError` | bare `errKeyNotFound` reached the synthesizer with no prefix and surfaced as a plain `Exception("KeyError")`; downstream `except KeyError:` clauses never caught it |
 
 ## Out of scope
 
