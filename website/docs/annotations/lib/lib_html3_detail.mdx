@@ -1,0 +1,105 @@
+---
+title: Lib/html/parser.py (part 3)
+description: "Lib/html/parser.py part 3: HTMLParser.feed, handle_starttag, handle_data, goahead."
+cpython_path: Lib/html/parser.py
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/html/parser.py" />
+
+This annotation covers the incremental HTML parsing loop. See `lib_html2_detail` for `HTMLParser.__init__`, entity reference handling, and the `convert_charrefs` option.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `HTMLParser.feed` | Incrementally feed data to the parser |
+| 81-180 | `HTMLParser.goahead` | Main parsing loop |
+| 181-280 | `handle_starttag` / `handle_endtag` | Override-able tag callbacks |
+| 281-380 | `handle_data` | Character data callback |
+| 381-500 | Attribute parsing | `handle_starttag_attrs` regex |
+
+## Reading
+
+### `HTMLParser.feed`
+
+```python
+# CPython: Lib/html/parser.py:108 feed
+def feed(self, data):
+    self.rawdata = self.rawdata + data
+    self.goahead(0)
+```
+
+`feed` appends new data to `self.rawdata` (a buffer for incomplete tokens) and calls `goahead`. The `0` argument means "don't force end-of-file handling". Incremental feeds allow parsing HTML as it streams in.
+
+### `HTMLParser.goahead`
+
+```python
+# CPython: Lib/html/parser.py:130 goahead
+def goahead(self, end):
+    rawdata = self.rawdata
+    i = 0
+    n = len(rawdata)
+    while i < n:
+        if self.convert_charrefs and not self.cdata_content_elements:
+            j = rawdata.find('<', i)
+            if j < 0: j = n
+        else:
+            match = self.interesting.search(rawdata, i)  # '<' or '&'
+            j = match.start() if match else n
+        if i < j:
+            self.handle_data(rawdata[i:j])
+        i = self.updatepos(i, j)
+        if i == n: break
+        startswith = rawdata.startswith
+        if startswith('<', i):
+            if starttagopen.match(rawdata, i):
+                k = self.handle_starttag(i)
+            elif startswith("</", i):
+                k = self.handle_endtag_stuff(rawdata, i)
+            elif startswith("<!--", i):
+                k = self.handle_comment(rawdata, i)
+            ...
+        elif startswith('&', i):
+            k = self.handle_entityref(rawdata, i)
+        if k < 0:
+            break  # incomplete token: wait for more data
+        i = self.updatepos(i, k)
+    self.rawdata = rawdata[i:]  # save unconsumed remainder
+```
+
+`goahead` scans for `<` and `&` characters. Each recognized token calls the appropriate handler. If a token is incomplete (e.g., `<` without a matching `>`), `k < 0` and the remainder is preserved for the next `feed` call.
+
+### Attribute parsing
+
+```python
+# CPython: Lib/html/parser.py:260 handle_starttag (attr parsing excerpt)
+attrfind_tolerant = re.compile(
+    r'((?<=[\'"\s/])[^\s/>][^\s/=>]*)(\s*=+\s*'
+    r'(\'[^\']*\'|"[^"]*"|(?![\'"])[^>\s]*))?(?:\s|/(?!>))*',
+    re.ASCII)
+```
+
+HTML attributes are parsed by `attrfind_tolerant` which handles quoted values (`'val'`, `"val"`), unquoted values (`<img width=100>`), and boolean attributes (`<input disabled>`). The regex is "tolerant" — it does not reject malformed attributes, mirroring browser behavior.
+
+### Callback model
+
+```python
+# CPython: Lib/html/parser.py:320 handle_* stubs
+def handle_starttag(self, tag, attrs): pass
+def handle_endtag(self, tag): pass
+def handle_data(self, data): pass
+def handle_comment(self, data): pass
+def handle_entityref(self, name): pass
+def handle_charref(self, name): pass
+```
+
+`HTMLParser` uses the callback pattern: subclasses override `handle_*` methods. `HTMLParser.feed('<p>Hello</p>')` calls `handle_starttag('p', [])`, `handle_data('Hello')`, then `handle_endtag('p')`. Attributes are passed as a list of `(name, value)` tuples.
+
+## gopy notes
+
+`html.parser` is a pure-Python module; gopy runs it directly. `goahead` uses `re.compile` and `str.find`, routing through `module/re` and `objects.StrFind`. The callback methods are virtual — subclasses override them as regular Python methods, invoked via the standard `__call__` dispatch.

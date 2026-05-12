@@ -1,0 +1,119 @@
+---
+title: Objects/typeobject.c (part 13)
+description: "Objects/typeobject.c part 13: type.__init_subclass__, type.__set_name__, type.__class_getitem__."
+cpython_path: Objects/typeobject.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Objects/typeobject.c" />
+
+This annotation covers class creation hooks. See `objects_typeobject12_detail` for `type.__new__`, `type_ready`, and slot inheritance.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `type.__init_subclass__` | Hook called after a class is created |
+| 81-180 | `type_new_set_names` | Call `__set_name__` on descriptor values |
+| 181-280 | `type_new_init_subclass` | Dispatch `__init_subclass__` to each base |
+| 281-380 | `type.__class_getitem__` | Generic alias support (`list[int]`) |
+| 381-500 | `type.__or__` | Union type: `int | str` syntax |
+
+## Reading
+
+### `type.__init_subclass__`
+
+```c
+// CPython: Objects/typeobject.c:7480 type_init_subclass
+static PyObject *
+type_init_subclass(PyTypeObject *type, PyObject *kwds)
+{
+    /* Called on each base class when a subclass is defined.
+       Default implementation does nothing. */
+    Py_RETURN_NONE;
+}
+```
+
+When `class Foo(Base):` is executed, CPython calls `Base.__init_subclass__(cls=Foo, **kwargs)` (where `**kwargs` comes from the class definition `class Foo(Base, keyword=value):`). Subclasses can override this to perform registration or validation.
+
+### `type_new_set_names`
+
+```c
+// CPython: Objects/typeobject.c:3280 type_new_set_names
+static int
+type_new_set_names(PyTypeObject *type)
+{
+    /* Call __set_name__(owner, name) on each value in the class namespace
+       that defines __set_name__ */
+    PyObject *dict = type->tp_dict;
+    PyObject *key, *value;
+    Py_ssize_t i = 0;
+    while (PyDict_Next(dict, &i, &key, &value)) {
+        PyObject *set_name = _PyObject_LookupSpecial(value, &_Py_ID(__set_name__));
+        if (set_name != NULL) {
+            PyObject *res = PyObject_CallFunctionObjArgs(set_name, type, key, NULL);
+            Py_DECREF(set_name);
+            if (res == NULL) return -1;
+            Py_DECREF(res);
+        }
+    }
+    return 0;
+}
+```
+
+`__set_name__` is called after the class is created but before `__init_subclass__`. This allows descriptor objects to know their name in the class: `class Foo: x = MyDescriptor()` causes `MyDescriptor.__set_name__(Foo, 'x')` to be called.
+
+### `type_new_init_subclass`
+
+```c
+// CPython: Objects/typeobject.c:3320 type_new_init_subclass
+static int
+type_new_init_subclass(PyTypeObject *type, PyObject *kwds)
+{
+    /* Call __init_subclass__ on each base (excluding the class itself) */
+    PyObject *super = PyObject_CallFunctionObjArgs(
+        (PyObject *)&PySuper_Type, type, type, NULL);
+    PyObject *func = PyObject_GetAttr(super, &_Py_ID(__init_subclass__));
+    PyObject *result = PyObject_Call(func, _PyTuple_EMPTY, kwds);
+    Py_DECREF(super); Py_DECREF(func);
+    return result == NULL ? -1 : 0;
+}
+```
+
+`type_new_init_subclass` calls `super().__init_subclass__(**kwds)` where `super()` starts the MRO search from the newly created type's parent. If any base's `__init_subclass__` returns an error, class creation fails.
+
+### `type.__class_getitem__`
+
+```c
+// CPython: Objects/typeobject.c:7560 type_class_getitem
+static PyObject *
+type_class_getitem(PyObject *cls, PyObject *args)
+{
+    /* list[int] → GenericAlias(list, int) */
+    return Py_GenericAlias(cls, args);
+}
+```
+
+`list[int]` calls `list.__class_getitem__(int)` which returns a `types.GenericAlias`. This is used for type hints: `def f(x: list[int])`. `Py_GenericAlias` stores `(cls, args)` and renders as `list[int]` in `repr`.
+
+### `type.__or__`
+
+```c
+// CPython: Objects/typeobject.c:7590 type_or
+static PyObject *
+type_or(PyObject *self, PyObject *other)
+{
+    /* int | str → UnionType(int, str) */
+    return _Py_union_type_or(self, other);
+}
+```
+
+`int | str` (PEP 604) creates a `types.UnionType`. Both `type.__or__` and `type.__ror__` are needed so that `None | int` and `int | None` both work (since `None` is not a type, it participates via `type.__ror__`).
+
+## gopy notes
+
+`type.__init_subclass__` is `objects.TypeInitSubclass` in `objects/typeobject.go`. `type_new_set_names` calls `objects.LookupSpecial` for `__set_name__`. `type_new_init_subclass` uses `objects.Super` to start MRO resolution. `type.__class_getitem__` creates `objects.GenericAlias`. `type.__or__` creates `objects.UnionType`.

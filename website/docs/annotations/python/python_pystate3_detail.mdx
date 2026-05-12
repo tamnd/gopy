@@ -1,0 +1,109 @@
+---
+title: Python/pystate.c (part 3)
+description: "Python/pystate.c part 3: _PyThreadState_New, tstate interp link, _PyThreadState_DeleteCurrent."
+cpython_path: Python/pystate.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Python/pystate.c" />
+
+This annotation covers thread state lifecycle. See `python_pystate2_detail` for interpreter state, `_Py_EnsureTstateNotNULL`, and GIL state.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `_PyThreadState_New` | Allocate and link a new `PyThreadState` |
+| 81-180 | `_PyThreadState_Bind` | Associate tstate with the current OS thread |
+| 181-280 | `_PyThreadState_DeleteCurrent` | Detach and free the current thread state |
+| 281-380 | `_PyThreadState_GET` | Fast inline tstate access |
+| 381-500 | Thread-local storage | `_Py_tss_*` wrappers |
+
+## Reading
+
+### `_PyThreadState_New`
+
+```c
+// CPython: Python/pystate.c:1020 _PyThreadState_New
+PyThreadState *
+_PyThreadState_New(PyInterpreterState *interp, int whence)
+{
+    PyThreadState *tstate = alloc_threadstate();
+    if (tstate == NULL) return NULL;
+    tstate->interp = interp;
+    tstate->py_recursion_remaining = interp->ceval.recursion_limit;
+    tstate->exc_info = &tstate->exc_state;
+    tstate->c_stack_hard_limit = ...;
+    /* Link into interpreter's thread list */
+    HEAD_LOCK(interp->runtime);
+    tstate->next = interp->threads.head;
+    interp->threads.head = tstate;
+    HEAD_UNLOCK(interp->runtime);
+    return tstate;
+}
+```
+
+`_PyThreadState_New` allocates a `PyThreadState` and links it into the interpreter's doubly-linked thread list under the `HEAD_LOCK`. The recursion limit is copied from the interpreter so it can be overridden per-thread.
+
+### `_PyThreadState_Bind`
+
+```c
+// CPython: Python/pystate.c:1120 _PyThreadState_Bind
+void
+_PyThreadState_Bind(PyThreadState *tstate)
+{
+    /* Store in thread-local storage */
+    _Py_tss_set(&_Py_tss_tstate, (void *)tstate);
+    tstate->thread_id = PyThread_get_thread_ident();
+    tstate->native_thread_id = PyThread_get_thread_ident_ex();
+    /* Set as current tstate for the OS thread */
+    _PyRuntimeState *runtime = tstate->interp->runtime;
+    _PyEval_ReleaseLock(tstate->interp, NULL, 1);
+}
+```
+
+`_PyThreadState_Bind` stores `tstate` in thread-local storage (TLS), making `PyThreadState_GET()` a simple TLS read. The thread ID is recorded for debugging. `_PyEval_ReleaseLock` releases the GIL — the new thread starts without holding it.
+
+### `_PyThreadState_DeleteCurrent`
+
+```c
+// CPython: Python/pystate.c:1180 _PyThreadState_DeleteCurrent
+void
+_PyThreadState_DeleteCurrent(PyThreadState *tstate)
+{
+    _Py_tss_set(&_Py_tss_tstate, NULL);  /* clear TLS */
+    /* Unlink from interpreter thread list */
+    HEAD_LOCK(tstate->interp->runtime);
+    tstate->prev->next = tstate->next;
+    if (tstate->next) tstate->next->prev = tstate->prev;
+    HEAD_UNLOCK(tstate->interp->runtime);
+    free_threadstate(tstate);
+}
+```
+
+`_PyThreadState_DeleteCurrent` is called when a thread exits. It clears the TLS pointer, unlinks the tstate from the interpreter list, and frees the memory. After this call, `PyThreadState_GET()` on the same thread returns `NULL`.
+
+### `_PyThreadState_GET`
+
+```c
+// CPython: Include/cpython/pystate.h:80 _PyThreadState_GET
+static inline PyThreadState *
+_PyThreadState_GET(void)
+{
+#ifdef HAVE_THREAD_LOCAL
+    return _Py_tss_get(&_Py_tss_tstate);
+#else
+    return PyThread_tss_get(&_Py_tss_tstate);
+#endif
+}
+```
+
+`_PyThreadState_GET` is the hot path for every bytecode instruction that needs `tstate`. On platforms with `__thread` or `_Thread_local`, this compiles to a single memory load from the thread-local segment — no function call overhead.
+
+## gopy notes
+
+`_PyThreadState_New` maps to `vm.NewThreadState` in `vm/pystate.go`. Go goroutines handle OS thread scheduling; gopy maintains a `ThreadState` struct per goroutine using `goroutine-local` storage (via a `sync.Map` keyed by goroutine ID). `_PyThreadState_DeleteCurrent` is `vm.DeleteCurrentThreadState`. The GIL is a `sync.Mutex` in `vm/gilstate.go`.

@@ -1,0 +1,118 @@
+---
+title: Modules/arraymodule.c (part 3)
+description: "arraymodule.c part 3: array.fromfile, array.tofile, array.frombytes, array.tobytes."
+cpython_path: Modules/arraymodule.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/arraymodule.c" />
+
+This annotation covers binary I/O for array objects. See `modules_array2_detail` for `array.__new__`, `array.append`, and format codes.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `array.frombytes` | Append items from a bytes object |
+| 81-160 | `array.tobytes` | Serialize all items to bytes |
+| 161-280 | `array.fromfile` | Read N items from a binary file |
+| 281-380 | `array.tofile` | Write all items to a binary file |
+| 381-500 | `array.byteswap` | Swap byte order of all items in-place |
+
+## Reading
+
+### `array.frombytes`
+
+```c
+// CPython: Modules/arraymodule.c:1020 array_frombytes_impl
+static PyObject *
+array_frombytes_impl(arrayobject *self, Py_buffer *buffer)
+{
+    if (buffer->len % self->ob_descr->itemsize != 0) {
+        PyErr_SetString(PyExc_ValueError,
+                        "bytes length not a multiple of item size");
+        return NULL;
+    }
+    Py_ssize_t n = buffer->len / self->ob_descr->itemsize;
+    if (array_resize(self, Py_SIZE(self) + n) == -1) return NULL;
+    memcpy(self->ob_item + Py_SIZE(self) * self->ob_descr->itemsize - buffer->len,
+           buffer->buf, buffer->len);
+    Py_RETURN_NONE;
+}
+```
+
+`a.frombytes(b'\x01\x00\x02\x00')` for `array('H')` appends two `uint16` values (1 and 2). The bytes must be an exact multiple of the item size. The data is copied with `memcpy` — no format conversion. This is the fastest way to populate an array from raw binary data.
+
+### `array.tobytes`
+
+```c
+// CPython: Modules/arraymodule.c:1060 array_tobytes_impl
+static PyObject *
+array_tobytes_impl(arrayobject *self)
+{
+    return PyBytes_FromStringAndSize(self->ob_item,
+                                     Py_SIZE(self) * self->ob_descr->itemsize);
+}
+```
+
+`a.tobytes()` returns a `bytes` object containing the raw memory of the array. For `array('i', [1, 2, 3])` on a little-endian system, the result is `b'\x01\x00\x00\x00\x02\x00\x00\x00\x03\x00\x00\x00'`. The byte order is the native host byte order.
+
+### `array.fromfile`
+
+```c
+// CPython: Modules/arraymodule.c:1100 array_fromfile_impl
+static PyObject *
+array_fromfile_impl(arrayobject *self, PyObject *f, Py_ssize_t n)
+{
+    /* Read n items from a binary file object */
+    Py_ssize_t itemsize = self->ob_descr->itemsize;
+    Py_ssize_t nbytes = n * itemsize;
+    PyObject *b = PyObject_CallMethodOneArg(f, &_Py_ID(read),
+                                            PyLong_FromSsize_t(nbytes));
+    if (Py_SIZE(b) != nbytes) {
+        PyErr_SetString(PyExc_EOFError,
+                        "not enough items in file");
+        Py_DECREF(b);
+        return NULL;
+    }
+    /* frombytes the result */
+    return array_frombytes_impl(self, &buffer);
+}
+```
+
+`a.fromfile(f, 100)` reads exactly 100 items (100 * itemsize bytes) from a binary file. If the file is shorter, `EOFError` is raised. This is more efficient than a Python loop because only one `read` syscall is made.
+
+### `array.byteswap`
+
+```c
+// CPython: Modules/arraymodule.c:1180 array_byteswap_impl
+static PyObject *
+array_byteswap_impl(arrayobject *self)
+{
+    char *p = self->ob_item;
+    Py_ssize_t itemsize = self->ob_descr->itemsize;
+    for (Py_ssize_t i = 0; i < Py_SIZE(self); i++, p += itemsize) {
+        switch (itemsize) {
+        case 2: *(uint16_t *)p = _Py_bswap16(*(uint16_t *)p); break;
+        case 4: *(uint32_t *)p = _Py_bswap32(*(uint32_t *)p); break;
+        case 8: *(uint64_t *)p = _Py_bswap64(*(uint64_t *)p); break;
+        default:
+            /* Reverse bytes manually */
+            for (Py_ssize_t j = 0; j < itemsize / 2; j++) {
+                char t = p[j]; p[j] = p[itemsize - j - 1]; p[itemsize - j - 1] = t;
+            }
+        }
+    }
+    Py_RETURN_NONE;
+}
+```
+
+`a.byteswap()` converts between big-endian and little-endian in-place. Used after `fromfile` when reading binary data whose byte order differs from the host. `_Py_bswap16/32/64` compile to single `bswap` instructions on x86.
+
+## gopy notes
+
+`array.frombytes` is `objects.ArrayFromBytes` in `objects/arrayobject.go`; uses `copy` into the backing `[]byte`. `array.tobytes` is `objects.ArrayToBytes`; returns `objects.NewBytesFromSlice`. `array.fromfile` calls `objects.FileRead` for the raw bytes. `array.byteswap` is `objects.ArrayByteswap`; uses `binary.BigEndian` / `binary.LittleEndian` conversions.
