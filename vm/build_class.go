@@ -111,18 +111,14 @@ func buildClass(args []objects.Object, kwargs map[string]objects.Object) (object
 		ns = objects.NewDict()
 	}
 
-	// The class body always begins with LOAD_NAME __name__ → STORE_NAME
-	// __module__. Stamp __name__ and __qualname__ into the namespace before
-	// executing the body so the lookup hits the class dict rather than
-	// falling through to module globals (which may not carry __name__).
+	// The class body opens with LOAD_NAME __name__ → STORE_NAME
+	// __module__. That LOAD_NAME must reach the enclosing module's
+	// __name__ via globals, so do not pre-stamp __name__ into the
+	// class namespace (doing so would clobber __module__ with the
+	// class name). __qualname__ is stamped by the body's own
+	// STORE_NAME emitted by the compiler.
 	//
 	// CPython: Python/bltinmodule.c:131 builtin___build_class__
-	//   `PyDict_SetItemString(ns, "__name__", name)`
-	if nsDict, ok := ns.(*objects.Dict); ok {
-		_ = nsDict.SetItem(objects.NewStr("__name__"), nameObj)
-		qualname := objects.NewStr(fn.Code.Qualname)
-		_ = nsDict.SetItem(objects.NewStr("__qualname__"), qualname)
-	}
 
 	if err := runClassBody(fn, ns); err != nil {
 		return nil, err

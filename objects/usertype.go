@@ -121,14 +121,78 @@ func NewUserType(name string, bases []*Type, ns *Dict) *Type {
 					v = NewClassMethod(v)
 				}
 			}
+			// type_new copies tp_dict["__module__"] into the slot
+			// type_module reads from. gopy stores it both as a
+			// descriptor (so __module__ is visible to introspection)
+			// and on t.Module (so type_repr can render qualified
+			// names without a dict lookup).
+			//
+			// CPython: Objects/typeobject.c:4419 type_new_set_attrs
+			if s.v == "__module__" {
+				if u, ok := v.(*Unicode); ok {
+					t.Module = u.v
+				}
+			}
 			SetTypeDescr(t, s.v, v)
 		}
 	}
 	fixupSlotDispatchers(t)
+	// PEP 487: after the class is built, walk the namespace and call
+	// __set_name__ on every value that defines it. enum._proto_member
+	// uses this hook to turn each placeholder into a real enum member
+	// during class creation, so skipping it leaves _member_map_ empty.
+	//
+	// CPython: Objects/typeobject.c:4549 type_new_set_names
+	if err := typeSetNames(t, ns); err != nil {
+		panic(err)
+	}
 	if err := typeInitSubclass(t); err != nil {
 		panic(err)
 	}
 	return t
+}
+
+// typeSetNames invokes __set_name__(cls, name) on every namespace
+// value that defines it. Mirrors CPython's __set_name__ pass; this
+// is what gives PEP 487 descriptors (and enum's _proto_member) a
+// chance to rewrite themselves once the owning class is known.
+//
+// CPython: Objects/typeobject.c:4549 type_new_set_names
+func typeSetNames(t *Type, ns *Dict) error {
+	if ns == nil {
+		return nil
+	}
+	for _, k := range ns.Keys() {
+		s, ok := k.(*Unicode)
+		if !ok {
+			continue
+		}
+		v, err := ns.GetItem(k)
+		if err != nil {
+			continue
+		}
+		// Look up __set_name__ on the type, not the instance, because
+		// it's a descriptor protocol method like __init__.
+		setName, _ := LookupDescriptor(v.Type(), "__set_name__")
+		if setName == nil {
+			continue
+		}
+		dt := setName.Type()
+		var callable Object
+		if dt.DescrGet != nil {
+			bound, err := dt.DescrGet(setName, v, v.Type())
+			if err != nil {
+				return err
+			}
+			callable = bound
+		} else {
+			callable = setName
+		}
+		if _, err := Call(callable, NewTuple([]Object{t, s}), nil); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // typeInitSubclass invokes the parent's __init_subclass__ hook on the

@@ -142,6 +142,13 @@ func TestAbcAbstractMethodEnforced(t *testing.T) {
 	if err != nil {
 		t.Fatalf("builtins.Init: %v", err)
 	}
+	// Class body opens with LOAD_NAME __name__ to populate __module__.
+	// Real entry points (pythonrun.RunSimpleString / runfile) stamp this
+	// onto globals; the bare RunString shim does not, so the test sets
+	// it explicitly to keep the class body resolvable.
+	if err := g.SetItem(objects.NewStr("__name__"), objects.NewStr("__main__")); err != nil {
+		t.Fatalf("set __name__: %v", err)
+	}
 	ts := state.NewThread()
 
 	src := `import abc

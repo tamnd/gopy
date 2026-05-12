@@ -23,6 +23,12 @@ func init() {
 	BuiltinFunctionType.Str = builtinFunctionRepr
 	BuiltinFunctionType.Call = builtinFunctionCall
 	BuiltinFunctionType.Vectorcall = builtinFunctionVectorcall
+	// Identity hash so builtin functions are usable as set/dict keys.
+	// CPython inherits tp_hash from object for cfunction objects.
+	//
+	// CPython: Objects/methodobject.c:357 PyCFunction_Type (tp_hash slot
+	// inherited from object_hash)
+	BuiltinFunctionType.Hash = identityHash
 }
 
 // NewBuiltinFunction wraps fn under name.

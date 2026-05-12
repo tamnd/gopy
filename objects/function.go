@@ -69,6 +69,12 @@ func init() {
 	FunctionType.DescrGet = functionDescrGet
 	FunctionType.Getattro = funcGetAttr
 	FunctionType.Setattro = funcSetAttr
+	// Identity hash. Functions inherit tp_hash from object in CPython
+	// and are routinely stuffed into sets (e.g. enum's _find_new_).
+	//
+	// CPython: Objects/funcobject.c:1232 PyFunction_Type (no tp_hash
+	// override, so object_hash is inherited)
+	FunctionType.Hash = identityHash
 	registerFunctionGetSets()
 	// FunctionType.Call is wired by the vm package on init since the
 	// call needs to push a frame and drive Eval; doing that from

@@ -1653,12 +1653,13 @@ func storeIn(scope objects.Object, key, value objects.Object) error {
 	if scope == nil {
 		return fmt.Errorf("vm: cannot store name: scope is nil")
 	}
-	if d, ok := scope.(*objects.Dict); ok {
-		return d.SetItem(key, value)
-	}
-	// Non-Dict scope: use the mapping protocol.
+	// Exact-dict fast path. A dict subclass (e.g. enum.EnumDict) must go
+	// through the mapping protocol so its overridden __setitem__ fires.
 	//
 	// CPython: Python/ceval.c STORE_NAME uses PyObject_SetItem on locals
+	if d, ok := scope.(*objects.Dict); ok && scope.Type() == objects.DictType {
+		return d.SetItem(key, value)
+	}
 	return objects.SetItem(scope, key, value)
 }
 
