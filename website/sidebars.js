@@ -377,6 +377,8 @@ const sidebars = {
         'annotations/python/python_compile6_detail',
         'annotations/python/python_ceval28_detail',
         'annotations/python/python_import5_detail',
+        'annotations/python/python_ceval29_detail',
+        'annotations/python/python_errors7_detail',
       ],
     },
     {
@@ -624,6 +626,7 @@ const sidebars = {
         'annotations/objects/objects_descrobject6_detail',
         'annotations/objects/objects_setobject4_detail',
         'annotations/objects/objects_tupleobject5_detail',
+        'annotations/objects/objects_bytearrayobject4_detail',
       ],
     },
     {
@@ -1159,6 +1162,7 @@ const sidebars = {
         'annotations/modules/modules_binascii3_detail',
         'annotations/modules/modules_asyncio2_detail',
         'annotations/modules/modules_concurrent2_detail',
+        'annotations/modules/modules_subprocess2_detail',
       ],
     },
     {
@@ -1738,6 +1742,7 @@ const sidebars = {
         'annotations/lib/lib_decimal3_detail',
         'annotations/lib/lib_fractions3_detail',
         'annotations/lib/lib_numbers2_detail',
+        'annotations/lib/lib_html2_detail',
       ],
     },
   ],

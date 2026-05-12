@@ -1,0 +1,124 @@
+---
+title: Python/errors.c (part 7)
+description: "Python/errors.c part 7: _PyErr_FormatV, PyErr_FormatUnraisable, _PyErr_WriteUnraisableMsg, chained exception display."
+cpython_path: Python/errors.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Python/errors.c" />
+
+This annotation covers error formatting and unraisable exception handling. See `python_errors6_detail` for `PyErr_SetObject`, `PyErr_Occurred`, `_PyErr_StackItem`, and exception chaining.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `_PyErr_FormatV` | `vprintf`-style error message construction |
+| 81-180 | `PyErr_Format` | Varargs wrapper around `_PyErr_FormatV` |
+| 181-300 | `PyErr_FormatUnraisable` | Format and print an unraisable exception |
+| 301-420 | `_PyErr_WriteUnraisableMsg` | Low-level unraisable writer, calls `sys.unraisablehook` |
+| 421-500 | `_PyBaseExceptionObject_fetch_traceback` | Extract traceback for chained display |
+
+## Reading
+
+### `_PyErr_FormatV`
+
+```c
+// CPython: Python/errors.c:1020 _PyErr_FormatV
+PyObject *
+_PyErr_FormatV(PyThreadState *tstate, PyObject *exception,
+               const char *format, va_list vargs)
+{
+    PyObject *string = PyUnicode_FromFormatV(format, vargs);
+    _PyErr_SetObject(tstate, exception, string);
+    Py_XDECREF(string);
+    return NULL;
+}
+```
+
+`_PyErr_FormatV` always returns `NULL` so callers can write `return PyErr_Format(exc, "...")`. The format string uses `%S` for `PyObject *` (calls `str()`), `%R` for `repr()`, `%A` for `ascii()`, `%T` for `type(obj).__name__`.
+
+### `PyErr_Format`
+
+```c
+// CPython: Python/errors.c:1045 PyErr_Format
+PyObject *
+PyErr_Format(PyObject *exception, const char *format, ...)
+{
+    va_list vargs;
+    va_start(vargs, format);
+    _PyErr_FormatV(tstate, exception, format, vargs);
+    va_end(vargs);
+    return NULL;
+}
+```
+
+`PyErr_Format` is the most common way to raise exceptions in C extensions. The `%T` specifier (type name) was added in CPython 3.12; older code used `Py_TYPE(obj)->tp_name`.
+
+### `PyErr_FormatUnraisable`
+
+```c
+// CPython: Python/errors.c:1120 PyErr_FormatUnraisable
+void
+PyErr_FormatUnraisable(const char *format, ...)
+{
+    /* Build an object string from format args, then call
+       _PyErr_WriteUnraisableMsg with the current exception. */
+    va_list vargs;
+    va_start(vargs, format);
+    PyObject *msg = PyUnicode_FromFormatV(format, vargs);
+    va_end(vargs);
+    _PyErr_WriteUnraisableMsg(PyUnicode_AsUTF8(msg), NULL);
+    Py_XDECREF(msg);
+}
+```
+
+`PyErr_FormatUnraisable` is used in finalizers (`__del__`, `__exit__` called during GC) where raising would be lost. The message is printed to `sys.stderr` via `sys.unraisablehook`.
+
+### `_PyErr_WriteUnraisableMsg`
+
+```c
+// CPython: Python/errors.c:1180 _PyErr_WriteUnraisableMsg
+void
+_PyErr_WriteUnraisableMsg(const char *err_msg, PyObject *obj)
+{
+    PyObject *exc = PyErr_GetRaisedException();
+    if (exc == NULL) return;
+    /* Build an UnraisableHookArgs namedtuple and call sys.unraisablehook */
+    PyObject *hook_args = make_unraisable_hook_args(exc, obj, err_msg);
+    PyObject *hook = PySys_GetObject("unraisablehook");
+    if (hook != NULL) {
+        PyObject *res = PyObject_CallOneArg(hook, hook_args);
+        Py_XDECREF(res);
+    }
+    /* Fallback: write directly to sys.stderr */
+    if (_PyErr_Occurred(tstate)) {
+        _PyErr_Clear(tstate);
+        PyObject_CallMethodObjArgs(sys_stderr, &_Py_ID(write), ...);
+    }
+    Py_DECREF(exc);
+}
+```
+
+`sys.unraisablehook` (added in 3.8) receives an `UnraisableHookArgs(exc_type, exc_value, exc_traceback, err_msg, object)`. The default hook writes to `sys.stderr`. Override it to route unraisable exceptions to a logging system.
+
+### Chained exception display
+
+```c
+// CPython: Python/errors.c:1320 _PyBaseExceptionObject_fetch_traceback
+/* When printing a traceback, check:
+   __cause__     -> "The above exception was the direct cause of..."
+   __context__   -> "During handling of the above exception, another..."
+   __suppress_context__ -> set by "raise X from None"
+*/
+```
+
+The `__cause__` / `__context__` chain is walked recursively in `traceback.py`; this C function just exposes `__traceback__` for the C traceback printer used at interpreter shutdown.
+
+## gopy notes
+
+`_PyErr_FormatV` is `errors.FormatV` in `objects/errors.go`. `PyErr_FormatUnraisable` is `errors.FormatUnraisable`. `_PyErr_WriteUnraisableMsg` calls `vm.CallUnraisableHook` in `vm/eval_unwind.go`. The `UnraisableHookArgs` namedtuple is `objects.UnraisableHookArgs`.

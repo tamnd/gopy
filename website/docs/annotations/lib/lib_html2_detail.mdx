@@ -1,0 +1,108 @@
+---
+title: Lib/html/ (part 2)
+description: "Lib/html/ part 2: html.parser — HTMLParser.feed, handle_starttag, handle_data, goahead, unescape."
+cpython_path: Lib/html/parser.py
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/html/parser.py" />
+
+This annotation covers the push-parser internals. See `lib_html_detail` for `html.escape`, entity tables, and `HTMLParser.__init__`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `HTMLParser.feed` | Append data to the buffer and call `goahead` |
+| 81-200 | `goahead` | Main dispatch loop: tags, data, comments, declarations |
+| 201-320 | `handle_starttag` / `handle_endtag` | Default no-op hooks for subclassing |
+| 321-420 | `unescape` | Convert `&amp;`, `&#160;`, `&#x2019;` to Unicode |
+| 421-500 | `handle_data` / `handle_comment` | Default hooks; `handle_entityref` removed in 3.4 |
+
+## Reading
+
+### `HTMLParser.feed`
+
+```python
+# CPython: Lib/html/parser.py:108 HTMLParser.feed
+def feed(self, data):
+    """Feed some text to the parser.
+
+    Call this as many times as you want, with new text each time.
+    """
+    self.rawdata = self.rawdata + data
+    self.goahead(0)
+```
+
+`feed` is idempotent: partial tags are left in `self.rawdata` and re-processed on the next call. `close()` calls `goahead(1)` (end=1) which treats leftover data as a final tag.
+
+### `goahead`
+
+```python
+# CPython: Lib/html/parser.py:130 HTMLParser.goahead
+def goahead(self, end):
+    rawdata = self.rawdata
+    i = 0
+    n = len(rawdata)
+    while i < n:
+        if self.convert_charrefs and not self.cdata_content_elements:
+            j = rawdata.find('<', i)
+            if j < 0:
+                if end:
+                    self.handle_data(rawdata[i:n])
+                    i = n
+                break
+            if i < j:
+                self.handle_data(rawdata[i:j])
+            i = self.__starttag_text = j
+        match = self.interesting.search(rawdata, i)
+        if not match:
+            ...
+            break
+        j = match.start()
+        if i < j:
+            self.handle_data(rawdata[i:j])
+        i = j
+        startswith = rawdata.startswith
+        if startswith('<', i):
+            if starttagopen.match(rawdata, i):
+                k = self.handle_starttag_or_decl(rawdata, i)
+            ...
+```
+
+`goahead` is the hot path. `self.interesting` is a precompiled regex that skips past plain text, stopping at `<` or `&`. The `convert_charrefs` fast path (added in 3.4) batches character reference conversion over whole text runs.
+
+### `unescape`
+
+```python
+# CPython: Lib/html/parser.py:431 HTMLParser.unescape
+@staticmethod
+def unescape(s):
+    """Deprecated — use html.unescape() instead."""
+    import warnings
+    warnings.warn(...)
+    return html.unescape(s)
+```
+
+`html.unescape` in `Lib/html/__init__.py` uses `re.sub` with a callback that calls `html.entities.html5` for named references and `chr(int(...))` for numeric ones. `&#x2019;` → `’` (right single quotation mark).
+
+### `handle_starttag` attrs parsing
+
+```python
+# CPython: Lib/html/parser.py:210 handle_starttag
+def handle_starttag(self, tag, attrs):
+    """Overrideable hook called for <tag attr="val" ...>.
+    attrs is a list of (name, value) pairs; value is None for bare attrs.
+    """
+    pass
+```
+
+Attribute parsing happens in `handle_starttag_or_decl` which calls `_HTMLParser__starttag_text` and `attr_pattern`. Values are unescaped before being passed to the hook.
+
+## gopy notes
+
+`HTMLParser` is `module/html/parser.HTMLParser` in `module/html/parser/module.go`. `feed` appends to a `strings.Builder`. `goahead` uses Go's `strings.Index` and a compiled `regexp.Regexp` for `interesting`. `unescape` delegates to `module/html.Unescape`.

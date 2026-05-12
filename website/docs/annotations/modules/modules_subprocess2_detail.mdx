@@ -1,0 +1,149 @@
+---
+title: Modules/_posixsubprocess.c (part 2)
+description: "_posixsubprocess part 2: child_exec fork path, fd closing, exec error pipe, vfork guard."
+cpython_path: Modules/_posixsubprocess.c
+cpython_version: "3.14"
+lines: 600
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/_posixsubprocess.c" />
+
+This annotation covers what happens inside the forked child before `execve`. See `modules_subprocess_detail` for `subprocess_fork_exec`, argument preparation, and the Python `subprocess.Popen` interface.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-100 | `child_exec` entry | Set up error pipe; call `chdir`, `setsid`, set controlling tty |
+| 101-220 | fd closing loop | Close all fds above `errpipe_write` except the ones to keep |
+| 221-360 | `preexec_fn` call | Run Python callback in the child before exec |
+| 361-480 | `execve` / `execvpe` | Exec the child binary; write errno to error pipe on failure |
+| 481-600 | vfork guard | Conditions under which `vfork` is safe vs `fork` |
+
+## Reading
+
+### `child_exec` entry
+
+```c
+// CPython: Modules/_posixsubprocess.c:410 child_exec
+static void
+child_exec(char *const exec_array[],
+           char *const argv[],
+           char *const envp[],
+           const char *cwd,
+           int p2cread, int p2cwrite, ...)
+{
+    int error_pipe[2];  /* child writes errno here on exec failure */
+    /* Make error pipe close-on-exec */
+    if (cwd) {
+        if (chdir(cwd) == -1) { ERREXIT(errno); }
+    }
+    if (child_umask >= 0) {
+        umask((mode_t)child_umask);
+    }
+    ...
+}
+```
+
+The error pipe is a POSIX pipe with `O_CLOEXEC` set. If `execve` succeeds the pipe closes automatically; the parent reads 0 bytes (success). If `execve` fails the child writes `errno` through the pipe before calling `_exit`.
+
+### fd closing loop
+
+```c
+// CPython: Modules/_posixsubprocess.c:480 fd_sequence_contains
+/* After fork: close all fds from 3 up to sysconf(_SC_OPEN_MAX)
+   except those in the keep list (pass_fds).
+   On Linux: use /proc/self/fd for efficiency.
+   On other platforms: iterate 3..OPEN_MAX. */
+static int
+_close_open_fds_safe(int start_fd, PyObject* py_fds_to_keep)
+{
+    DIR *proc_fd_dir = opendir("/proc/self/fd");
+    if (proc_fd_dir) {
+        /* Fast path: only iterate actual open fds */
+        while ((dir_entry = readdir(proc_fd_dir))) {
+            int fd = atoi(dir_entry->d_name);
+            if (fd >= start_fd && !_is_fd_in_sorted_fd_sequence(fd, py_fds_to_keep))
+                close(fd);
+        }
+    } else {
+        for (int i = start_fd; i < max_fd; i++)
+            if (!_is_fd_in_sorted_fd_sequence(i, py_fds_to_keep))
+                close(i);
+    }
+}
+```
+
+The `/proc/self/fd` optimization makes fd closing O(open fds) rather than O(OPEN_MAX). On macOS and BSDs the fallback loop iterates up to `sysconf(_SC_OPEN_MAX)` (often 10240 or more).
+
+### `preexec_fn`
+
+```c
+// CPython: Modules/_posixsubprocess.c:560 call_preexec_fn
+/* If preexec_fn is not None, call it in the child.
+   Must happen after fd manipulation but before exec.
+   Errors are sent through the error pipe. */
+if (preexec_fn != Py_None) {
+    PyObject *result = PyObject_CallObject(preexec_fn, NULL);
+    if (result == NULL) {
+        /* Encode the exception into the error pipe */
+        ...
+        ERREXIT(SUBPROCESS_PREEXEC_ERROR);
+    }
+    Py_DECREF(result);
+}
+```
+
+`preexec_fn` runs in the child process after `fork` but before `exec`. Raising an exception in `preexec_fn` causes the child to write a special sentinel to the error pipe; the parent raises `SubprocessError` with the pickled exception.
+
+### `execve` and error pipe
+
+```c
+// CPython: Modules/_posixsubprocess.c:620 exec_child
+/* Try each entry in exec_array (e.g. ["/usr/bin/python3", "python3"]).
+   The last entry is always NULL-terminated. */
+for (i = 0; exec_array[i] != NULL; ++i) {
+    const char *executable = exec_array[i];
+    if (envp) {
+        execve(executable, argv, envp);
+    } else {
+        execv(executable, argv);
+    }
+    if (errno != ENOENT && errno != ENOTDIR) break;
+}
+/* If we get here, all execs failed */
+saved_errno = errno;
+write(errpipe_write, &saved_errno, sizeof(saved_errno));
+_exit(255);
+```
+
+`exec_array` holds the absolute path plus the `PATH`-searched name as a fallback. The error pipe write is guaranteed to succeed because it is 4 bytes and the pipe buffer is at least `PIPE_BUF` (512 bytes on POSIX).
+
+### vfork guard
+
+```c
+// CPython: Modules/_posixsubprocess.c:380 is_safe_to_use_vfork
+/* vfork is faster (no copy-on-write page table clone) but unsafe if:
+   - preexec_fn is set
+   - stdin/stdout/stderr are not being redirected from pipes
+   - close_fds is True (cannot call closefrom safely in vfork child)
+   - cwd is set (chdir not safe in vfork child on some platforms)
+*/
+static int
+is_safe_to_use_vfork(...)
+{
+    if (preexec_fn != Py_None) return 0;
+    if (close_fds) return 0;
+    if (cwd != NULL) return 0;
+    return 1;
+}
+```
+
+`vfork` shares the address space with the parent until `exec`. Only async-signal-safe operations are permitted in the child; `closefrom` is safe on Linux 5.9+ (`close_range` syscall) but not on older kernels.
+
+## gopy notes
+
+`child_exec` maps to `module/subprocess.childExec` in `module/subprocess/module.go`. The fd closing loop uses `os.ReadDir("/proc/self/fd")` on Linux and a range loop on Darwin. `preexec_fn` is called via `objects.CallObject`. The error pipe is a Go `os.Pipe`; the parent reads with `io.ReadFull`.

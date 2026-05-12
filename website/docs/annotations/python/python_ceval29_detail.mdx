@@ -1,0 +1,118 @@
+---
+title: Python/ceval.c (part 29)
+description: "Python/ceval.c part 29: FORMAT_VALUE, BUILD_STRING, MATCH_CLASS, MATCH_MAPPING, MATCH_SEQUENCE opcodes."
+cpython_path: Python/ceval.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Python/ceval.c" />
+
+This annotation covers f-string formatting and structural pattern matching opcodes. See `python_ceval28_detail` for `COPY_FREE_VARS`, `MAKE_CELL`, and closure opcodes.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `FORMAT_VALUE` | Apply `!r`, `!s`, `!a` conversions and `__format__` |
+| 81-160 | `BUILD_STRING` | Concatenate the top N stack items into one `str` |
+| 161-280 | `MATCH_CLASS` | Match a subject against a class pattern |
+| 281-380 | `MATCH_MAPPING` | Match a subject against a mapping pattern |
+| 381-500 | `MATCH_SEQUENCE` | Match a subject against a sequence pattern |
+
+## Reading
+
+### `FORMAT_VALUE`
+
+```c
+// CPython: Python/ceval.c:3820 FORMAT_VALUE
+inst(FORMAT_VALUE, (value, fmt_spec -- result)) {
+    /* flags encode the conversion:
+       FVC_STR=1  -> str(value)
+       FVC_REPR=2 -> repr(value)
+       FVC_ASCII=3 -> ascii(value)
+       FVC_NONE=0 -> no conversion */
+    int which_conversion = oparg & FVC_MASK;
+    switch (which_conversion) {
+        case FVC_STR:  value = PyObject_Str(value); break;
+        case FVC_REPR: value = PyObject_Repr(value); break;
+        case FVC_ASCII:value = PyObject_ASCII(value); break;
+    }
+    if (fmt_spec != NULL) {
+        result = PyObject_Format(value, fmt_spec);
+    } else {
+        result = PyObject_Format(value, NULL);
+    }
+}
+```
+
+`f"{x!r:>10}"` compiles to: push `x`, push `">10"`, `FORMAT_VALUE` with `FVC_REPR`. The conversion is applied first, then `__format__` is called with the format spec.
+
+### `BUILD_STRING`
+
+```c
+// CPython: Python/ceval.c:3870 BUILD_STRING
+inst(BUILD_STRING, (pieces[oparg] -- str)) {
+    str = _PyUnicode_JoinArray(&_Py_ID(empty), pieces, oparg);
+    for (int i = 0; i < oparg; i++) {
+        Py_DECREF(pieces[i]);
+    }
+}
+```
+
+`f"hello {name}, age {age}"` compiles to three string fragments pushed on the stack, then `BUILD_STRING 3`. `_PyUnicode_JoinArray` calls `PyUnicode_Join` with an empty separator, which allocates one output string and copies all fragments.
+
+### `MATCH_CLASS`
+
+```c
+// CPython: Python/ceval.c:3920 MATCH_CLASS
+inst(MATCH_CLASS, (subject, type, names -- attrs, matched)) {
+    /* match subject:
+           case Point(x=0, y=0): ... */
+    attrs = _PyMatchCase_MatchClass(tstate, subject, type,
+                                    oparg, names);
+    /* attrs is a tuple of matched attribute values, or NULL on mismatch */
+    matched = attrs != NULL ? Py_True : Py_False;
+    if (!matched) {
+        attrs = Py_None;
+    }
+}
+```
+
+`_PyMatchCase_MatchClass` checks `isinstance(subject, type)`, then extracts positional patterns via `__match_args__` and keyword patterns by `getattr`. If any attribute is missing, the match fails.
+
+### `MATCH_MAPPING`
+
+```c
+// CPython: Python/ceval.c:3980 MATCH_MAPPING
+inst(MATCH_MAPPING, (subject -- subject, matched)) {
+    /* A subject matches a mapping pattern if it has Py_TPFLAGS_MAPPING set */
+    int match = PyType_HasFeature(Py_TYPE(subject), Py_TPFLAGS_MAPPING);
+    matched = match ? Py_True : Py_False;
+    Py_INCREF(subject);  /* subject stays on stack */
+}
+```
+
+`Py_TPFLAGS_MAPPING` is set on `dict` and any class that registers as a `Mapping`. Custom classes set this flag by inheriting from `collections.abc.Mapping` or by setting `tp_flags` directly. `MATCH_MAPPING` only checks the flag; `MATCH_KEYS` extracts the actual values.
+
+### `MATCH_SEQUENCE`
+
+```c
+// CPython: Python/ceval.c:4010 MATCH_SEQUENCE
+inst(MATCH_SEQUENCE, (subject -- subject, matched)) {
+    /* Matches if Py_TPFLAGS_SEQUENCE is set.
+       str, bytes, bytearray explicitly excluded. */
+    int match = PyType_HasFeature(Py_TYPE(subject), Py_TPFLAGS_SEQUENCE);
+    matched = match ? Py_True : Py_False;
+    Py_INCREF(subject);
+}
+```
+
+`str` and `bytes` have `Py_TPFLAGS_SEQUENCE` cleared so that `case [x, y]:` does not match strings (a common footgun). `list`, `tuple`, and `array.array` do match. After `MATCH_SEQUENCE`, `GET_LEN` and `BINARY_SUBSCR` extract individual elements.
+
+## gopy notes
+
+`FORMAT_VALUE` is in `vm/eval_gen.go`; the conversion flags call `objects.Str`, `objects.Repr`, `objects.ASCII`. `BUILD_STRING` calls `objects.UnicodeJoin`. `MATCH_CLASS` calls `vm.matchClass` in `vm/eval_match.go`. `MATCH_MAPPING` and `MATCH_SEQUENCE` check `objects.TypeFlags` for the mapping/sequence bits.

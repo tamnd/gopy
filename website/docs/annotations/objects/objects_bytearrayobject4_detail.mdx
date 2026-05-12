@@ -1,0 +1,140 @@
+---
+title: Objects/bytearrayobject.c (part 4)
+description: "Objects/bytearrayobject.c part 4: bytearray.extend, bytearray.join, bytearray.split, bytearray.replace, bytearray.decode."
+cpython_path: Objects/bytearrayobject.c
+cpython_version: "3.14"
+lines: 600
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Objects/bytearrayobject.c" />
+
+This annotation covers bulk operations. See `objects_bytearrayobject3_detail` for `bytearray.__init__`, `resize`, and in-place mutation methods.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `bytearray.extend` | Append every byte from an iterable |
+| 81-180 | `bytearray.join` | Join iterable of bytes-like objects with a separator |
+| 181-300 | `bytearray.split` / `bytearray.rsplit` | Split on whitespace or separator bytes |
+| 301-440 | `bytearray.replace` | Replace occurrences of a sub-sequence |
+| 441-600 | `bytearray.decode` | Decode to `str` using a codec |
+
+## Reading
+
+### `bytearray.extend`
+
+```c
+// CPython: Objects/bytearrayobject.c:868 bytearray_extend
+static PyObject *
+bytearray_extend(PyByteArrayObject *self, PyObject *iterable_of_ints)
+{
+    /* Fast path for bytes/bytearray: use PySequence_Fast */
+    if (PyBytes_CheckExact(iterable_of_ints)) {
+        return bytearray_iconcat(self, iterable_of_ints);
+    }
+    /* Generic: iterate, check each int is 0-255 */
+    PyObject *it = PyObject_GetIter(iterable_of_ints);
+    while ((item = PyIter_Next(it)) != NULL) {
+        int value = PyNumber_AsInt(item, ...);
+        if (value < 0 || value > 255) { PyErr_SetString(...); return NULL; }
+        if (_PyByteArray_Resize(self, old_size + 1) < 0) return NULL;
+        self->ob_bytes[old_size] = (char)value;
+    }
+    ...
+}
+```
+
+`ba.extend(bytes_obj)` is O(n) with a single `realloc`; the iterator path resizes one byte at a time. For large extends, converting to `bytes` first gives better amortization.
+
+### `bytearray.join`
+
+```c
+// CPython: Objects/bytearrayobject.c:960 bytearray_join
+static PyObject *
+bytearray_join(PyByteArrayObject *self, PyObject *iterable)
+{
+    /* Collect all items; compute total length; allocate once; copy. */
+    PyObject *seq = PySequence_Fast(iterable, "...");
+    Py_ssize_t n = PySequence_Fast_GET_SIZE(seq);
+    Py_ssize_t total = (n - 1) * Py_SIZE(self);
+    for (Py_ssize_t i = 0; i < n; i++) {
+        PyObject *item = PySequence_Fast_GET_ITEM(seq, i);
+        if (!PyBytes_Check(item) && !PyByteArray_Check(item)) {
+            PyErr_Format(..., "sequence item %d: expected a bytes-like object", i);
+            goto error;
+        }
+        total += PyBytes_GET_SIZE(item);  /* or bytearray */
+    }
+    result = PyByteArray_FromStringAndSize(NULL, total);
+    /* Copy sep + item + sep + ... */
+    ...
+}
+```
+
+`bytearray.join` eagerly materializes all items via `PySequence_Fast` to get the total length upfront, then allocates a single buffer. This matches the `bytes.join` strategy.
+
+### `bytearray.split`
+
+```c
+// CPython: Objects/bytearrayobject.c:1080 bytearray_split
+/* Delegate to the shared _Py_bytes_split helper which handles:
+   - sep=None: split on any whitespace run (stripping leading/trailing)
+   - sep=bytes: split on exact match
+   - maxsplit: stop after this many splits
+   Returns a list of bytearray objects. */
+static PyObject *
+bytearray_split(PyByteArrayObject *self, PyObject *args, PyObject *kwds)
+{
+    ...
+    return _Py_bytes_split(buf, len, sep_buf, sep_len, maxsplit,
+                           /*return_bytearray=*/1);
+}
+```
+
+`_Py_bytes_split` is shared with `bytes.split`. When `return_bytearray=1`, items are wrapped with `PyByteArray_FromStringAndSize` instead of `PyBytes_FromStringAndSize`.
+
+### `bytearray.replace`
+
+```c
+// CPython: Objects/bytearrayobject.c:1200 bytearray_replace
+static PyObject *
+bytearray_replace(PyByteArrayObject *self, PyObject *args)
+{
+    /* Use _Py_bytes_replace:
+       1. Count occurrences of 'old' in 'self'
+       2. Compute new length = len(self) + count*(len(new)-len(old))
+       3. Allocate result and copy with substitutions
+    */
+    ...
+    result = _Py_bytes_replace(buf, len, old_buf, old_len,
+                               new_buf, new_len, count,
+                               /*return_bytearray=*/1);
+    return result;
+}
+```
+
+`bytearray.replace` returns a new `bytearray`, never mutating in place. Use `[:]` assignment for in-place replacement: `ba[:] = ba.replace(old, new)`.
+
+### `bytearray.decode`
+
+```c
+// CPython: Objects/bytearrayobject.c:1380 bytearray_decode
+static PyObject *
+bytearray_decode(PyByteArrayObject *self, PyObject *args, PyObject *kwds)
+{
+    const char *encoding = "utf-8";
+    const char *errors = "strict";
+    PyArg_ParseTupleAndKeywords(args, kwds, "|ss:decode", ...);
+    return PyUnicode_FromEncodedObject((PyObject *)self, encoding, errors);
+}
+```
+
+`ba.decode()` calls `PyUnicode_FromEncodedObject` which looks up the codec by name in `Modules/_codecsmodule.c`. The buffer is read-only during decoding; the `bytearray` is not copied unless the codec requires it.
+
+## gopy notes
+
+`bytearray.extend` is `objects.ByteArrayExtend` in `objects/bytearray.go`. `bytearray.join` uses `bytes.Join` with a separator slice. `bytearray.split` and `bytearray.replace` delegate to shared helpers in `objects/bytes_common.go`. `bytearray.decode` calls `objects.DecodeBytes` with the codec registry.
