@@ -1,0 +1,99 @@
+---
+title: Python/flowgraph.c (part 4)
+description: "Python/flowgraph.c part 4: constant folding, dead code elimination, JUMP optimization, NOP removal."
+cpython_path: Python/flowgraph.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Python/flowgraph.c" />
+
+This annotation covers the bytecode optimizer passes. See `python_peephole3_detail` for the earlier peephole optimizations.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | Constant folding | Fold `LOAD_CONST + LOAD_CONST + BINARY_OP` at compile time |
+| 81-180 | Dead code elimination | Remove code after unconditional jumps |
+| 181-280 | Jump threading | Replace `JUMP_TO_JUMP` with a direct jump |
+| 281-360 | NOP removal | Compact the instruction array after optimization |
+| 361-500 | `_PyCompile_OptimizeCfg` | Top-level optimizer entry point |
+
+## Reading
+
+### Constant folding
+
+```c
+// CPython: Python/flowgraph.c:1480 fold_binops_on_constants
+static int
+fold_binops_on_constants(PyObject *consts, cfg_instr *inst)
+{
+    /* Replace LOAD_CONST(a), LOAD_CONST(b), BINARY_OP with LOAD_CONST(a op b) */
+    PyObject *left = consts_get(consts, inst[-2].i_oparg);
+    PyObject *right = consts_get(consts, inst[-1].i_oparg);
+    PyObject *newval = NULL;
+    switch (inst->i_opcode) {
+        case BINARY_OP: {
+            int op = inst->i_oparg;
+            if (op == NB_ADD)       newval = PyNumber_Add(left, right);
+            else if (op == NB_MULTIPLY) newval = PyNumber_Multiply(left, right);
+            /* ... other ops ... */
+        }
+    }
+    if (newval == NULL) { PyErr_Clear(); return 0; }
+    /* Replace the 3-instruction sequence with LOAD_CONST(newval) */
+    inst[-2].i_opcode = NOP;
+    inst[-1].i_opcode = NOP;
+    inst->i_opcode = LOAD_CONST;
+    inst->i_oparg = add_const(consts, newval);
+    return 1;
+}
+```
+
+`x = 2 + 3` compiles and immediately folds to `x = 5`. String concatenation, tuple building, and boolean operations are also folded.
+
+### Jump threading
+
+```c
+// CPython: Python/flowgraph.c:1620 optimize_jumps
+static int
+optimize_jumps(cfg_builder *g)
+{
+    /* If a JUMP_FORWARD lands on another JUMP_FORWARD, skip the intermediate jump */
+    for each basic block b:
+        if b ends with JUMP and target also starts with JUMP:
+            b.jump_target = target.jump_target
+}
+```
+
+`if a: if b: ...` compiles to two conditional jumps. Jump threading replaces `JUMP_IF_FALSE → JUMP_IF_FALSE` with a direct jump to the final target.
+
+### `_PyCompile_OptimizeCfg`
+
+```c
+// CPython: Python/flowgraph.c:1780 _PyCompile_OptimizeCfg
+int
+_PyCompile_OptimizeCfg(cfg_builder *g, PyObject *consts, int optimize)
+{
+    /* Multiple passes: run until stable */
+    int changed = 1;
+    while (changed) {
+        changed = 0;
+        changed |= fold_binops_on_constants(g, consts);
+        changed |= optimize_jumps(g);
+        changed |= eliminate_dead_code(g);
+        changed |= remove_nops(g);
+    }
+    return 0;
+}
+```
+
+The optimizer runs passes repeatedly until no changes occur (fixpoint). Most programs converge in 1-2 passes. The `optimize` level controls which passes run: 0 disables all, 1 enables basic folding, 2 enables assertions removal.
+
+## gopy notes
+
+`_PyCompile_OptimizeCfg` is `compile.OptimizeCFG` in `compile/flowgraph_passes.go`. Constant folding calls `objects.NumberAdd` etc. on `objects.Const` values. Jump threading iterates `flowgraph.BasicBlock.Successors`. NOP removal compacts `[]flowgraph.Instr` slices in place.

@@ -1,0 +1,85 @@
+---
+title: Objects/codeobject.c (part 5)
+description: "Objects/codeobject.c part 5: co_linetable encoding, co_exceptiontable, code object equality, code_replace."
+cpython_path: Objects/codeobject.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Objects/codeobject.c" />
+
+This annotation covers code object metadata encoding. See `objects_codeobject4_detail` for `PyCodeObject` fields, `code.__new__`, and `co_qualname`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `co_linetable` encoding | Map instruction offset to source line |
+| 81-180 | `co_exceptiontable` encoding | Map instruction range to exception handler |
+| 181-280 | `code.__eq__` / `__hash__` | Code object equality |
+| 281-360 | `code.replace` | Create a modified copy of a code object |
+| 361-500 | `_PyCode_GetVarnames` | Extract variable name sets |
+
+## Reading
+
+### `co_linetable` encoding
+
+```c
+// CPython: Objects/codeobject.c:380 scan_varint
+/* co_linetable is a variable-length encoding:
+   Each entry encodes:
+   - number of bytecode words covered (1-8 words)
+   - line number delta (0 = same line, 1-12 = delta, 13 = next entry is absolute)
+   - column offset and end column for precise source locations (Python 3.11+)
+   
+   Format: [start_line_delta | (code_unit_count - 1) << 3] [col_delta] ...
+*/
+```
+
+The linetable is a compact byte sequence, not a simple array. Python 3.11 extended it to include column offsets, enabling precise error caret display (`^^^^^`). `dis.findlinestarts()` decodes it.
+
+### `co_exceptiontable` encoding
+
+```c
+// CPython: Objects/codeobject.c:480 _PyCode_InitAddressRange
+void
+_PyCode_InitAddressRange(PyCodeObject *co, PyCodeAddressRange *bounds)
+{
+    /* Initialize a cursor for scanning the exception table.
+       Each entry: [start_offset, end_offset, handler_offset, depth, lasti_flag]
+       All values are delta-encoded relative to the previous entry.
+    */
+    bounds->opaque.lo_next = (const char *)PyBytes_AS_STRING(co->co_exceptiontable);
+    bounds->opaque.limit = bounds->opaque.lo_next +
+                           PyBytes_GET_SIZE(co->co_exceptiontable);
+}
+```
+
+The exception table replaces the old `SETUP_FINALLY` opcode. At runtime, when an exception occurs, the table is binary-searched to find the handler. This makes the normal (no-exception) path faster.
+
+### `code.replace`
+
+```c
+// CPython: Objects/codeobject.c:680 code_replace_impl
+static PyObject *
+code_replace_impl(PyCodeObject *self, int co_argcount, ...)
+{
+    /* Create a new code object identical to self but with some fields changed.
+       Used by functools.wraps-like utilities and by the test suite. */
+    return _PyCode_New(
+        co_argcount != -1 ? co_argcount : self->co_argcount,
+        ...
+        self->co_code_adaptive,  /* bytecode cannot be replaced */
+        ...
+    );
+}
+```
+
+`code.replace(co_name='new_name')` creates a modified copy. The bytecode itself (`co_code`) cannot be replaced via `code.replace` (it would invalidate the inline caches).
+
+## gopy notes
+
+`co_linetable` is stored as `objects.CodeObject.LineTable []byte` in `objects/code.go`. The decoder is `objects.LineTableIterator`. `co_exceptiontable` is `objects.CodeObject.ExceptionTable []byte`, decoded by `objects.ExceptionTableLookup`. `code.replace` is `objects.CodeReplace`.

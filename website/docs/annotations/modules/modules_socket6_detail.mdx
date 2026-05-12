@@ -1,0 +1,105 @@
+---
+title: Modules/socketmodule.c (part 6)
+description: "socketmodule.c part 6: socket.recv, socket.send, socket.sendfile, socket.makefile, socket timeout."
+cpython_path: Modules/socketmodule.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/socketmodule.c" />
+
+This annotation covers socket data transfer. See the earlier socket parts for `socket.socket`, `bind`, `connect`, `accept`, and `setsockopt`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `socket.recv` | Receive data from a connected socket |
+| 81-160 | `socket.send` / `socket.sendall` | Send data |
+| 161-260 | `socket.sendfile` | Zero-copy file transfer via `sendfile(2)` |
+| 261-360 | `socket.makefile` | Wrap socket in a file-like object |
+| 361-500 | Timeout handling | Non-blocking sockets with `select`-based timeout |
+
+## Reading
+
+### `socket.recv`
+
+```c
+// CPython: Modules/socketmodule.c:2480 sock_recv_impl
+static int
+sock_recv_impl(PySocketSockObject *s, void *data)
+{
+    struct sock_recv *ctx = (struct sock_recv *)data;
+    ctx->result = recv(s->sock_fd, ctx->buf, ctx->len, ctx->flags);
+    return (ctx->result >= 0);
+}
+
+static PyObject *
+sock_recv(PySocketSockObject *s, PyObject *args)
+{
+    Py_ssize_t recvlen;
+    PyObject *buf = PyBytes_FromStringAndSize(NULL, recvlen);
+    ...
+    sock_call(s, 0, sock_recv_impl, &ctx, ...);  /* handles timeout retry */
+    if (ctx.result != recvlen) PyBytes_Resize(buf, ctx.result);
+    return buf;
+}
+```
+
+`sock_call` handles the retry loop for `EINTR` and timeout. On a timeout, it uses `select` to wait up to `timeout` seconds before trying again. The GIL is released during `recv`.
+
+### `socket.sendfile`
+
+```c
+// CPython: Modules/socketmodule.c:2680 sock_sendfile
+static PyObject *
+sock_sendfile(PySocketSockObject *s, PyObject *args, PyObject *kwds)
+{
+    /* Use os.sendfile if available (Linux, macOS), else fallback to read+send */
+#ifdef HAVE_SENDFILE
+    off_t offset = file_offset;
+    do {
+        Py_BEGIN_ALLOW_THREADS
+        ret = sendfile(out_fd, in_fd, &offset, count);
+        Py_END_ALLOW_THREADS
+        total_sent += ret;
+    } while (ret > 0 && (count == 0 || total_sent < count));
+#else
+    /* Fallback: read chunks and send */
+    ...
+#endif
+    return PyLong_FromSsize_t(total_sent);
+}
+```
+
+`socket.sendfile(file)` uses the `sendfile(2)` syscall which transfers data directly from a file descriptor to a socket without copying into userspace (zero-copy). Falls back to `read+send` on platforms without `sendfile`.
+
+### Timeout handling
+
+```c
+// CPython: Modules/socketmodule.c:680 sock_call_ex
+static int
+sock_call_ex(PySocketSockObject *s, int writing, int (*func)(PySocketSockObject *, void *),
+             void *data, int connect, int *timeout_result, _PyTime_t deadline)
+{
+    /* Retry the operation until success, timeout, or non-recoverable error */
+    while (1) {
+        int result = (*func)(s, data);
+        if (result) return 0;  /* Success */
+        if (errno == EINTR) continue;  /* Interrupted by signal: retry */
+        if (errno != EWOULDBLOCK && errno != EAGAIN) return -1;  /* Error */
+        /* Wait for socket to become ready */
+        if (sock_select(s, writing ? EVENT_WRITE : EVENT_READ, &deadline) != 0)
+            return -1;  /* Timeout or error */
+    }
+}
+```
+
+The timeout is implemented by setting the socket to non-blocking mode, then using `select`/`poll` to wait up to the deadline. Each `EWOULDBLOCK` causes a wait; the total elapsed time is tracked against the deadline.
+
+## gopy notes
+
+`socket.recv` is `module/socket.SocketRecv` in `module/socket/module.go`. It calls `net.Conn.Read` with a deadline set via `conn.SetReadDeadline`. `socket.sendfile` uses `net.(*TCPConn).ReadFrom` which triggers the OS `sendfile` syscall on Linux. `makefile` wraps the connection in a `bufio.ReadWriter`.
