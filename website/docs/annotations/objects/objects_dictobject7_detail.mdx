@@ -1,0 +1,155 @@
+---
+title: Objects/dictobject.c (part 7)
+description: "Objects/dictobject.c part 7: dict.update, dict.__or__, dict.__ior__, dict.copy, dict.setdefault internals."
+cpython_path: Objects/dictobject.c
+cpython_version: "3.14"
+lines: 600
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Objects/dictobject.c" />
+
+This annotation covers merge operations. See `objects_dictobject6_detail` for `dict.__getitem__`, `__setitem__`, `__delitem__`, and the compact hash table layout.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `dict.update` | Merge keys/values from another dict or iterable of pairs |
+| 81-180 | `PyDict_Merge` | C-level merge with optional override flag |
+| 181-280 | `dict.__or__` / `dict.__ior__` | `d1 | d2` and `d1 |= d2` (PEP 584) |
+| 281-380 | `dict.copy` | Shallow copy using `_PyDict_FromKeys` fast path |
+| 381-600 | `dict.setdefault` | Return existing value or insert and return default |
+
+## Reading
+
+### `dict.update`
+
+```c
+// CPython: Objects/dictobject.c:2820 dict_update_impl
+static int
+dict_update_impl(PyObject *self, PyObject *args, PyObject *kwds)
+{
+    /* Accept: dict.update(other_dict)
+               dict.update(key=val, ...)
+               dict.update([(k,v), ...]) */
+    if (arg != NULL) {
+        if (PyDict_CheckExact(arg)) {
+            return PyDict_Merge(self, arg, 1);
+        }
+        if (PyDict_Check(arg)) {
+            return PyDict_Merge(self, arg, 1);
+        }
+        /* Iterable of (key, value) pairs */
+        return PyDict_MergeFromSeq2(self, arg, 1);
+    }
+    if (kwds != NULL && PyDict_GET_SIZE(kwds)) {
+        return PyDict_Merge(self, kwds, 1);
+    }
+    return 0;
+}
+```
+
+`dict.update` accepts three calling conventions. The fast path for dict-to-dict uses `PyDict_Merge` which copies the internal array directly for same-version dicts, avoiding per-key hash lookups.
+
+### `PyDict_Merge`
+
+```c
+// CPython: Objects/dictobject.c:2920 PyDict_Merge
+int
+PyDict_Merge(PyObject *a, PyObject *b, int override)
+{
+    /* override=1: b's values win; override=0: keep a's values */
+    PyDictObject *mp = (PyDictObject *)a;
+    if (PyDict_CheckExact(b) && Py_TYPE(b)->tp_iter == (iternewfunc)dict_iter) {
+        /* Fast path: iterate b's entries directly */
+        PyDictObject *other = (PyDictObject *)b;
+        for (Py_ssize_t i = 0; i < other->ma_used; ...) {
+            PyDictKeysObject *keys = other->ma_keys;
+            PyDictKeyEntry *ep = ...;
+            if (override || !_PyDict_Contains_KnownHash(mp, ep->me_key, ep->me_hash)) {
+                insertdict(mp, ep->me_key, ep->me_hash, ep->me_value);
+            }
+        }
+    }
+    ...
+}
+```
+
+`override=0` makes `PyDict_Merge` behave like `setdefault` in bulk: only insert keys not already present. Used by `**kwargs` merging in function calls.
+
+### `dict.__or__`
+
+```c
+// CPython: Objects/dictobject.c:3120 dict_or
+static PyObject *
+dict_or(PyObject *self, PyObject *other)
+{
+    if (!PyDict_Check(self) || !PyDict_Check(other)) {
+        Py_RETURN_NOTIMPLEMENTED;
+    }
+    PyObject *new = PyDict_Copy(self);
+    if (new == NULL) return NULL;
+    if (PyDict_Update(new, other)) {
+        Py_DECREF(new);
+        return NULL;
+    }
+    return new;
+}
+```
+
+`d1 | d2` (PEP 584, Python 3.9+) returns a new dict: copy of `d1` with `d2`'s values overwriting shared keys. `d1 |= d2` is `dict_ior` which calls `PyDict_Update(d1, d2)` in place.
+
+### `dict.copy`
+
+```c
+// CPython: Objects/dictobject.c:3180 dict_copy_impl
+static PyObject *
+dict_copy_impl(PyDictObject *self)
+{
+    return PyDict_Copy((PyObject *)self);
+}
+
+PyObject *
+PyDict_Copy(PyObject *o)
+{
+    /* For split tables: share the keys object, copy values only */
+    if (_PyDict_HasSplitTable(mp)) {
+        PyDictObject *copy = ...;
+        copy->ma_keys = mp->ma_keys;
+        /* copy values array */
+        ...
+        return (PyObject *)copy;
+    }
+    /* Combined table: full copy */
+    return PyDict_New() + PyDict_Merge(new, mp, 1);
+}
+```
+
+`dict.copy()` for split-table dicts (instance `__dict__`) shares the keys object and copies only the values array, making it O(n) but with a small constant. Combined-table dicts copy the full hash table.
+
+### `dict.setdefault`
+
+```c
+// CPython: Objects/dictobject.c:2760 dict_setdefault_impl
+static PyObject *
+dict_setdefault_impl(PyDictObject *self, PyObject *key, PyObject *default_value)
+{
+    Py_hash_t hash = PyObject_Hash(key);
+    PyObject *val = _PyDict_GetItem_KnownHash((PyObject *)self, key, hash);
+    if (val != NULL) {
+        return Py_NewRef(val);  /* Key exists: return existing */
+    }
+    /* Insert the default */
+    if (insertdict(self, key, hash, default_value) < 0) return NULL;
+    return Py_NewRef(default_value);
+}
+```
+
+`dict.setdefault(key, default)` is a single-lookup atomic operation: it hashes `key` once and either returns the existing value or inserts `default`. Equivalent to `d[key] = d.get(key, default); return d[key]` but faster and race-free.
+
+## gopy notes
+
+`dict.update` is `objects.DictUpdate` in `objects/dict.go`. `PyDict_Merge` is `objects.DictMerge`. `dict.__or__` calls `objects.DictCopy` then `objects.DictMerge`. `dict.copy` handles split tables via `objects.DictCopySplit`. `dict.setdefault` is `objects.DictSetDefault` using a single `objects.DictLookup` call.

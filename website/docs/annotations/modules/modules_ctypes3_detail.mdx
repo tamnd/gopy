@@ -1,0 +1,111 @@
+---
+title: Modules/_ctypes/ (part 3)
+description: "_ctypes part 3: ctypes.Structure, ctypes.Union, _fields_ processing, bit fields, memory layout."
+cpython_path: Modules/_ctypes/stgdict.c
+cpython_version: "3.14"
+lines: 600
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/_ctypes/stgdict.c" />
+
+This annotation covers `Structure` and `Union` type creation. See `modules_ctypes2_detail` for simple types, function pointers, and `ctypes.cast`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-100 | `StgInfo` / `StgDict` | Per-type metadata: size, alignment, shape, fields |
+| 101-220 | `PyCStructType_Type` | Metaclass for `ctypes.Structure` |
+| 221-360 | `StructUnionType_setattro` | Process `_fields_` assignment |
+| 361-480 | `_fields_set` | Compute offsets, create field descriptors |
+| 481-600 | Bit-field packing | Pack multiple bit fields into a single storage unit |
+
+## Reading
+
+### `StgInfo` layout
+
+```c
+// CPython: Modules/_ctypes/stgdict.c:40 StgInfo
+typedef struct {
+    Py_ssize_t size;        /* total byte size of the type */
+    Py_ssize_t align;       /* alignment requirement (bytes) */
+    Py_ssize_t length;      /* number of items for arrays */
+    ffi_type   *ffi_type_pointer;  /* libffi type descriptor */
+    Py_ssize_t *argtypes;   /* for function pointers */
+    ...
+} StgInfo;
+```
+
+`StgInfo` is stored in the type's `tp_dict` under the key `_stginfo_`. It is computed once when `_fields_` is assigned and cached. All memory layout decisions are made at type creation time, not per instance.
+
+### `StructUnionType_setattro`
+
+```c
+// CPython: Modules/_ctypes/stgdict.c:380 StructUnionType_setattro
+static int
+StructUnionType_setattro(PyObject *self, PyObject *key, PyObject *value)
+{
+    int res = PyType_Type.tp_setattro(self, key, value);
+    if (res == -1) return -1;
+    /* Only process _fields_ assignment */
+    if (!_PyUnicode_EqualToASCIIString(key, "_fields_")) return 0;
+    return PyCStructUnionType_update_stginfo(self, value, 1);
+}
+```
+
+`_fields_` can be set after class creation but before any instances are created. Setting it a second time raises `AttributeError: _fields_ is final`. The `1` argument means "is a struct" (vs. `0` for union).
+
+### `_fields_set` offset computation
+
+```c
+// CPython: Modules/_ctypes/stgdict.c:480 PyCStructUnionType_update_stginfo
+static int
+PyCStructUnionType_update_stginfo(PyObject *self, PyObject *fields, int isStruct)
+{
+    Py_ssize_t offset = 0, size = 0, align = 1;
+    for (Py_ssize_t i = 0; i < PySequence_Length(fields); i++) {
+        PyObject *item = PySequence_GetItem(fields, i);
+        /* item is (name, type) or (name, type, bit_width) */
+        const char *fname = ...; PyObject *ftype = ...; int bits = 0;
+        StgInfo *finfo = PyObject_GetAttrString(ftype, "_stginfo_");
+        /* Align offset */
+        if (isStruct) {
+            offset = (offset + finfo->align - 1) & ~(finfo->align - 1);
+            /* Create CField descriptor at this offset */
+            CFieldObject *cf = make_cfield(fname, ftype, finfo->size, offset, bits);
+            PyDict_SetItem(((PyTypeObject *)self)->tp_dict, fname, cf);
+            offset += finfo->size;
+        } else {
+            /* Union: all fields at offset 0, take max size */
+            size = MAX(size, finfo->size);
+        }
+        align = MAX(align, finfo->align);
+    }
+    /* Pad to alignment */
+    size = (isStruct ? offset : size);
+    size = (size + align - 1) & ~(align - 1);
+    ...
+}
+```
+
+Field offsets are computed at class creation, matching C compiler layout rules (with padding for alignment). `ctypes.Structure._pack_` overrides the alignment to match packed structs (`#pragma pack`).
+
+### Bit-field packing
+
+```c
+// CPython: Modules/_ctypes/stgdict.c:600 make_cfield for bit fields
+/* Bit fields are packed into storage units of the field's base type size.
+   e.g. c_uint32 bit fields are packed into 4-byte units.
+   Storage offset = byte offset of the storage unit.
+   Bit offset = offset within the storage unit (LSB first on little-endian).
+   The CField descriptor encodes (storage_offset, bit_offset, bit_width). */
+```
+
+`('flags', ctypes.c_uint32, 3)` creates a 3-bit field. Access reads the 4-byte word at `storage_offset`, then masks and shifts. Bit fields do not span storage unit boundaries.
+
+## gopy notes
+
+`StgInfo` is `objects.CTypesStgInfo` in `objects/ctypes_stg.go`. `StructUnionType_setattro` is the `__setattr__` of `objects.CTypesStructMeta`. `_fields_set` is `objects.StructSetFields` which computes offsets using `unsafe.Alignof` rules. Bit-field access uses bit masking in `objects.CFieldGet`/`Set`.

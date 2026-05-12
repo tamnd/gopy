@@ -1,0 +1,152 @@
+---
+title: Objects/setobject.c (part 5)
+description: "Objects/setobject.c part 5: set.union, set.intersection, set.difference, set.symmetric_difference, set operations with non-set iterables."
+cpython_path: Objects/setobject.c
+cpython_version: "3.14"
+lines: 600
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Objects/setobject.c" />
+
+This annotation covers bulk set algebra. See `objects_setobject4_detail` for `set.__new__`, `set.add`, `set.discard`, and the hash table structure.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `set.union` / `set.__or__` | New set containing all elements from any operand |
+| 81-180 | `set.intersection` / `set.__and__` | Elements present in all operands |
+| 181-280 | `set.difference` / `set.__sub__` | Elements in `self` but not in `other` |
+| 281-380 | `set.symmetric_difference` / `set.__xor__` | Elements in exactly one of the two sets |
+| 381-600 | In-place variants | `__ior__`, `__iand__`, `__isub__`, `__ixor__` |
+
+## Reading
+
+### `set.union`
+
+```c
+// CPython: Objects/setobject.c:1380 set_union
+static PyObject *
+set_union(PySetObject *so, PyObject *args)
+{
+    /* Start with a copy of self, then add all elements from each arg */
+    PyObject *result = make_new_set(&PySet_Type, (PyObject *)so);
+    for (Py_ssize_t i = 0; i < PyTuple_GET_SIZE(args); i++) {
+        PyObject *other = PyTuple_GET_ITEM(args, i);
+        if (PySet_Check(other)) {
+            set_merge(result, other);
+        } else {
+            set_update_internal((PySetObject *)result, other);
+        }
+    }
+    return result;
+}
+```
+
+`a | b | c` compiles to two `__or__` calls. `a.union(b, c, d)` is the multi-argument form that processes all operands in one call. `set_merge` is fast for set-to-set; `set_update_internal` uses the iterator protocol for arbitrary iterables.
+
+### `set.intersection`
+
+```c
+// CPython: Objects/setobject.c:1450 set_intersection
+static PyObject *
+set_intersection(PySetObject *so, PyObject *other)
+{
+    /* Iterate the smaller set; check membership in the larger */
+    PySetObject *a, *b;
+    if (PySet_GET_SIZE(so) > PySet_GET_SIZE(other)) {
+        /* Iterate other, check in so */
+        a = (PySetObject *)other_as_set;
+        b = so;
+    } else {
+        a = so;
+        b = (PySetObject *)other_as_set;
+    }
+    PyObject *result = make_new_set_basetype(Py_TYPE(so), NULL);
+    while (_PySet_NextEntry(a, &pos, &key, &hash)) {
+        if (set_contains_entry(b, key, hash)) {
+            set_add_entry((PySetObject *)result, key, hash);
+        }
+    }
+    return result;
+}
+```
+
+Iterating the smaller set and probing the larger is O(min(|a|, |b|)). This is why `small_set & large_set` is fast regardless of operand order.
+
+### `set.difference`
+
+```c
+// CPython: Objects/setobject.c:1520 set_difference
+static PyObject *
+set_difference(PySetObject *so, PyObject *other)
+{
+    PyObject *result = make_new_set_basetype(Py_TYPE(so), (PyObject *)so);
+    /* Remove from result all elements found in other */
+    if (PySet_Check(other) || PyFrozenSet_Check(other)) {
+        PySetObject *otherset = (PySetObject *)other;
+        Py_ssize_t pos = 0;
+        PyObject *key; Py_hash_t hash;
+        while (_PySet_NextEntry(otherset, &pos, &key, &hash)) {
+            if (set_discard_entry((PySetObject *)result, key, hash) < 0)
+                return NULL;
+        }
+    } else {
+        /* Iterate other, remove each from result */
+        ...
+    }
+    return result;
+}
+```
+
+`set.difference` copies `self` first, then removes. For large `self` and small `other`, iterating `other` and removing from the copy is O(|other|). For the reverse case, iterating `self` and checking membership in `other` would be O(|self|).
+
+### `set.symmetric_difference`
+
+```c
+// CPython: Objects/setobject.c:1600 set_symmetric_difference
+static PyObject *
+set_symmetric_difference(PySetObject *so, PyObject *other)
+{
+    /* (a - b) | (b - a)
+       Implemented as: copy a, then for each element of b:
+         if in copy -> discard it
+         else       -> add it
+    */
+    PyObject *result = make_new_set_basetype(Py_TYPE(so), (PyObject *)so);
+    PyObject *it = PyObject_GetIter(other);
+    while ((key = PyIter_Next(it)) != NULL) {
+        Py_hash_t hash = PyObject_Hash(key);
+        if (set_contains_entry((PySetObject *)result, key, hash)) {
+            set_discard_entry((PySetObject *)result, key, hash);
+        } else {
+            set_add_entry((PySetObject *)result, key, hash);
+        }
+    }
+    return result;
+}
+```
+
+The single-pass algorithm processes `other` in one loop: toggling membership in the result. This is more cache-friendly than computing `(a-b)` and `(b-a)` separately.
+
+### In-place `set.__ior__`
+
+```c
+// CPython: Objects/setobject.c:1680 set_ior
+static PyObject *
+set_ior(PySetObject *so, PyObject *other)
+{
+    if (set_update_internal(so, other) < 0) return NULL;
+    Py_INCREF(so);
+    return (PyObject *)so;
+}
+```
+
+`s |= other` calls `set_update_internal` which handles both sets and arbitrary iterables. The in-place variants avoid allocating a new set, returning `so` with an incremented reference count.
+
+## gopy notes
+
+`set.union` is `objects.SetUnion` in `objects/set.go`. `set.intersection` uses the "iterate smaller" heuristic with `objects.SetContainsEntry`. `set.difference` copies then removes. `set.symmetric_difference` is a single-pass toggle loop. In-place variants modify `objects.Set.table` directly.

@@ -1,0 +1,169 @@
+---
+title: Modules/itertoolsmodule.c (part 3)
+description: "itertoolsmodule.c part 3: groupby, zip_longest, accumulate, pairwise, batched."
+cpython_path: Modules/itertoolsmodule.c
+cpython_version: "3.14"
+lines: 600
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/itertoolsmodule.c" />
+
+This annotation covers grouping and windowing itertools. See `modules_itertools2_detail` for `chain`, `product`, `combinations`, `permutations`, and `islice`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `groupby` | Consecutive-key grouping iterator |
+| 81-180 | `zip_longest` | Zip with a fillvalue for shorter iterables |
+| 181-280 | `accumulate` | Running total / prefix scan |
+| 281-380 | `pairwise` | Sliding window of size 2 (Python 3.10+) |
+| 381-600 | `batched` | Fixed-size batches as tuples (Python 3.12+) |
+
+## Reading
+
+### `groupby`
+
+```c
+// CPython: Modules/itertoolsmodule.c:2180 groupby_next
+static PyObject *
+groupby_next(groupbyobject *lz)
+{
+    /* Advance past the current group, then yield (key, group_iterator) */
+    if (lz->currvalue != NULL) {
+        /* Consume the rest of the current group */
+        while (1) {
+            PyObject *newval = PyIter_Next(lz->it);
+            if (newval == NULL) { return NULL; }
+            PyObject *newkey = PyObject_CallOneArg(lz->keyfunc, newval);
+            if (_PyObject_RichCompareBool(newkey, lz->tgtkey, Py_EQ)) {
+                Py_DECREF(newkey); Py_DECREF(newval);
+            } else {
+                lz->currvalue = newval;
+                lz->currkey = newkey;
+                break;
+            }
+        }
+    }
+    /* Save the new target key */
+    Py_XDECREF(lz->tgtkey);
+    lz->tgtkey = Py_NewRef(lz->currkey);
+    PyObject *grouper = _grouper_create(lz, lz->tgtkey);
+    return PyTuple_Pack(2, lz->currkey, grouper);
+}
+```
+
+`groupby` is stateful: the group iterator shares state with the outer `groupby`. Advancing the outer iterator consumes the inner iterator's remaining items. `groupby(sorted_data, key=func)` groups consecutive equal keys; it does NOT group non-consecutive equal keys.
+
+### `zip_longest`
+
+```c
+// CPython: Modules/itertoolsmodule.c:2380 zip_longest_next
+static PyObject *
+zip_longest_next(ziplongestobject *lz)
+{
+    Py_ssize_t tuplesize = PyTuple_GET_SIZE(lz->ittuple);
+    PyObject *result = PyTuple_New(tuplesize);
+    int numactive = lz->numactive;
+    for (Py_ssize_t i = 0; i < tuplesize; i++) {
+        PyObject *it = PyTuple_GET_ITEM(lz->ittuple, i);
+        PyObject *item = it == Py_None ? Py_NewRef(lz->fillvalue)
+                                       : PyIter_Next(it);
+        if (item == NULL) {
+            if (!PyErr_Occurred()) {
+                /* Exhausted: replace iterator with None, use fillvalue */
+                PyTuple_SET_ITEM(lz->ittuple, i, Py_NewRef(Py_None));
+                item = Py_NewRef(lz->fillvalue);
+                if (--lz->numactive == 0) { Py_DECREF(result); return NULL; }
+            }
+        }
+        PyTuple_SET_ITEM(result, i, item);
+    }
+    return result;
+}
+```
+
+Exhausted iterators are replaced with `Py_None` as a sentinel; the `fillvalue` is used for their positions. When all iterators are exhausted (`numactive == 0`), `StopIteration` is raised.
+
+### `accumulate`
+
+```c
+// CPython: Modules/itertoolsmodule.c:2480 accumulate_next
+static PyObject *
+accumulate_next(accumulateobject *lz)
+{
+    PyObject *val = PyIter_Next(lz->it);
+    if (val == NULL) return NULL;  /* StopIteration */
+    if (lz->total == NULL) {
+        lz->total = val;
+        return Py_NewRef(val);
+    }
+    PyObject *newtotal;
+    if (lz->binop == Py_None) {
+        newtotal = PyNumber_Add(lz->total, val);
+    } else {
+        newtotal = PyObject_CallFunctionObjArgs(lz->binop, lz->total, val, NULL);
+    }
+    Py_SETREF(lz->total, newtotal);
+    Py_DECREF(val);
+    return Py_NewRef(lz->total);
+}
+```
+
+`accumulate([1,2,3,4])` yields `1, 3, 6, 10`. `accumulate(data, func, initial=0)` (Python 3.8+) seeds the accumulator; the initial value is the first yielded item. `accumulate(data, max)` computes the running maximum.
+
+### `pairwise`
+
+```c
+// CPython: Modules/itertoolsmodule.c:2620 pairwise_next
+static PyObject *
+pairwise_next(pairwiseobject *lz)
+{
+    PyObject *old = lz->old;
+    if (old == NULL) {
+        old = PyIter_Next(lz->it);
+        if (old == NULL) return NULL;
+    }
+    PyObject *new = PyIter_Next(lz->it);
+    if (new == NULL) { Py_DECREF(old); lz->old = NULL; return NULL; }
+    lz->old = Py_NewRef(new);
+    return PyTuple_Pack(2, old, new);
+}
+```
+
+`pairwise('ABCDEF')` yields `('A','B'), ('B','C'), ('C','D'), ...`. The previous item is cached in `lz->old`. Added in Python 3.10 (PEP 618).
+
+### `batched`
+
+```c
+// CPython: Modules/itertoolsmodule.c:2700 batched_next
+static PyObject *
+batched_next(batchedobject *lz)
+{
+    /* Collect up to 'n' items into a tuple */
+    PyObject *batch = PyList_New(0);
+    for (Py_ssize_t i = 0; i < lz->batch_size; i++) {
+        PyObject *item = PyIter_Next(lz->it);
+        if (item == NULL) {
+            if (!PyErr_Occurred() && PyList_GET_SIZE(batch) == 0) {
+                Py_DECREF(batch); return NULL;  /* exhausted */
+            }
+            break;
+        }
+        PyList_Append(batch, item);
+        Py_DECREF(item);
+    }
+    PyObject *result = PyList_AsTuple(batch);
+    Py_DECREF(batch);
+    return result;
+}
+```
+
+`batched('ABCDEFG', 3)` yields `('A','B','C'), ('D','E','F'), ('G',)`. Added in Python 3.12 (PEP 681). The last batch may be shorter than `n`; `strict=True` (Python 3.13+) raises `ValueError` if the last batch is shorter.
+
+## gopy notes
+
+`groupby` is `module/itertools.Groupby` in `module/itertools/module.go`. `zip_longest` is `module/itertools.ZipLongest`. `accumulate` uses a Go closure for the binary op. `pairwise` caches `lz.old` as a field. `batched` collects into a `[]objects.Object` then converts to a tuple.

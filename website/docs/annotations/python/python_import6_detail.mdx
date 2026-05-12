@@ -1,0 +1,127 @@
+---
+title: Python/import.c (part 6)
+description: "Python/import.c part 6: importlib._bootstrap_external — FileFinder, SourceFileLoader, _compile_bytecode, .pyc validation."
+cpython_path: Lib/importlib/_bootstrap_external.py
+cpython_version: "3.14"
+lines: 600
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/importlib/_bootstrap_external.py" />
+
+This annotation covers the file system-based import machinery. See `python_import5_detail` for `_bootstrap._find_and_load`, `sys.meta_path`, and `importlib.import_module`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `FileFinder.find_spec` | Locate a module in the filesystem |
+| 81-180 | `SourceFileLoader.get_code` | Read `.py`, check `.pyc`, compile if needed |
+| 181-300 | `_compile_bytecode` | Validate and load a `.pyc` magic number + timestamp/hash |
+| 301-420 | `SourcelessFileLoader` | Load pre-compiled `.pyc` without a source file |
+| 421-600 | `_get_supported_file_loaders` | Register loader/extension pairs in `FileFinder` |
+
+## Reading
+
+### `FileFinder.find_spec`
+
+```python
+# CPython: Lib/importlib/_bootstrap_external.py:1540 FileFinder.find_spec
+def find_spec(self, name, target=None):
+    """Try to find a spec for the specified module."""
+    tail_module = name.rpartition('.')[2]
+    # Check the cache (directory listing)
+    if self._path_mtime != _path_stat(self.path):
+        self._fill_cache()
+    # Try each loader in order
+    for suffix, loader_class in self._loaders:
+        full_path = _path_join(self.path, tail_module + suffix)
+        if _path_isfile(full_path):
+            return self._get_spec(loader_class, name, full_path, [self.path], target)
+    # Check for package (directory with __init__)
+    init_filename = '__init__'
+    full_path = _path_join(self.path, tail_module)
+    if _path_isdir(full_path):
+        for suffix, loader_class in self._loaders:
+            init_path = _path_join(full_path, init_filename + suffix)
+            if _path_isfile(init_path):
+                return self._get_spec(loader_class, name, init_path, [full_path], target)
+    return None
+```
+
+`FileFinder` caches the directory listing and only re-stat's on mtime change. The `_loaders` list is ordered: `.py` before `.pyc` before `.so`. Namespace packages (directories without `__init__`) are detected last.
+
+### `SourceFileLoader.get_code`
+
+```python
+# CPython: Lib/importlib/_bootstrap_external.py:1020 SourceFileLoader.get_code
+def get_code(self, fullname):
+    source_path = self.get_filename(fullname)
+    source_mtime = None
+    try:
+        bytecode_path = cache_from_source(source_path)
+        source_mtime = _path_stat(source_path).st_mtime
+    except OSError:
+        bytecode_path = None
+    if bytecode_path is not None:
+        try:
+            data = self.get_data(bytecode_path)
+            code = _compile_bytecode(data, name=fullname,
+                                     bytecode_path=bytecode_path,
+                                     source_path=source_path)
+            if code is not None:
+                return code
+        except (ImportError, EOFError):
+            pass
+    # Fall back to compiling the source
+    source_bytes = self.get_data(source_path)
+    code = self.source_to_code(source_bytes, source_path)
+    # Write the .pyc
+    ...
+    return code
+```
+
+The `.pyc` path is in `__pycache__/module.cpython-314.pyc`. If the `.pyc` exists and is valid, it is used directly. Otherwise the `.py` is compiled and the `.pyc` is written (silently ignored if the directory is read-only).
+
+### `_compile_bytecode`
+
+```python
+# CPython: Lib/importlib/_bootstrap_external.py:720 _compile_bytecode
+def _compile_bytecode(data, name=None, bytecode_path=None, source_path=None):
+    """Validate a .pyc file and return the code object."""
+    magic = data[:4]
+    if magic != MAGIC_NUMBER:
+        raise ImportError(f'bad magic number in {name!r}: {magic!r}')
+    flags = _unpack_uint32(data[4:8])
+    if flags == 0:
+        # Timestamp-based validation
+        source_mtime = _unpack_uint32(data[8:12])
+        source_size  = _unpack_uint32(data[12:16])
+        ...
+    elif flags & 0b11 == 0b01:
+        # Hash-based validation (PEP 552)
+        source_hash = data[8:16]
+        ...
+    return marshal.loads(data[16:])
+```
+
+The `.pyc` header is 16 bytes: 4 (magic) + 4 (flags) + 8 (timestamp+size or hash). `MAGIC_NUMBER` encodes the CPython version and changes with every bytecode-incompatible release. `marshal.loads` deserializes the code object.
+
+### `_get_supported_file_loaders`
+
+```python
+# CPython: Lib/importlib/_bootstrap_external.py:1720 _get_supported_file_loaders
+def _get_supported_file_loaders():
+    extensions = ExtensionFileLoader, _imp.extension_suffixes()
+    source = SourceFileLoader, SOURCE_SUFFIXES       # ['.py']
+    bytecode = SourcelessFileLoader, BYTECODE_SUFFIXES  # ['.pyc']
+    return [extensions, source, bytecode]
+```
+
+The order determines which loader wins for a given filename. `.so`/`.pyd` extension modules are tried first, then `.py` source, then `.pyc` bytecode-only. This is why `foo.so` shadows `foo.py` in the same directory.
+
+## gopy notes
+
+`FileFinder.find_spec` is `module/importlib.FileFinder.FindSpec` in `module/importlib/module.go`. The directory cache is a `map[string]os.FileInfo`. `SourceFileLoader.get_code` calls `vm.CompileFile`. `_compile_bytecode` validates the magic bytes and calls `objects.MarshalLoad`. The `.pyc` path computation uses `module/importlib.CacheFromSource`.
