@@ -1,0 +1,125 @@
+---
+title: Objects/dictobject.c (part 5)
+description: "Objects/dictobject.c part 5: dict.update, dict.setdefault, dict.__or__, dict.__ior__, dict.copy, dict comprehension BUILD_MAP."
+cpython_path: Objects/dictobject.c
+cpython_version: "3.14"
+lines: 800
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Objects/dictobject.c" />
+
+This annotation covers bulk mutation and merge operations. See `objects_dictobject4_detail` for `dict.__getitem__`, `__setitem__`, `__delitem__`, and `objects_dictobject3_detail` for the hash table layout and compact dict structure.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-100 | `dict.update` | Merge another dict or keyword arguments into self |
+| 101-220 | `dict.setdefault` | Return existing value or insert default |
+| 221-360 | `dict.__or__` / `__ior__` | `d1 | d2` and `d1 |= d2` (PEP 584, Python 3.9+) |
+| 361-500 | `dict.copy` | Shallow copy |
+| 501-650 | `PyDict_Merge` | C-level merge used by `**kwargs` unpacking |
+| 651-800 | `dict.fromkeys` | Class method: create dict from keys with a default value |
+
+## Reading
+
+### `dict.update`
+
+```c
+// CPython: Objects/dictobject.c:2180 dict_update_common
+static int
+dict_update_common(PyObject *self, PyObject *args, PyObject *kwds)
+{
+    PyObject *arg = NULL;
+    int result = 0;
+    if (args != NULL && PyArg_UnpackTuple(args, "update", 0, 1, &arg)) {
+        if (arg != NULL) {
+            if (PyDict_CheckExact(arg))
+                result = PyDict_Merge(self, arg, 1);  /* 1 = override */
+            else if (_PyObject_HasAttrId(arg, &PyId_keys))
+                result = PyDict_Merge(self, arg, 1);
+            else
+                result = PyDict_MergeFromSeq2(self, arg, 1);
+        }
+    }
+    if (result == 0 && kwds != NULL)
+        result = PyDict_Merge(self, kwds, 1);
+    return result;
+}
+```
+
+`d.update(other)` tries `other.keys()` first (mapping protocol), then falls back to iterating over `(key, value)` pairs.
+
+### `dict.setdefault`
+
+```c
+// CPython: Objects/dictobject.c:2320 dict_setdefault_impl
+static PyObject *
+dict_setdefault_impl(PyDictObject *self, PyObject *key, PyObject *default_value)
+{
+    PyObject *val;
+    Py_hash_t hash;
+    if (!PyUnicode_CheckExact(key) ||
+        (hash = ((PyASCIIObject *)key)->hash) == -1) {
+        hash = PyObject_Hash(key);
+    }
+    /* Look up: if present return existing value; if absent insert default */
+    val = (PyObject *)_PyDict_GetItem_KnownHash(self, key, hash);
+    if (val == NULL) {
+        if (PyErr_Occurred()) return NULL;
+        if (PyDict_SetItem((PyObject *)self, key, default_value) < 0) return NULL;
+        val = default_value;
+    }
+    return Py_NewRef(val);
+}
+```
+
+`d.setdefault('key', [])` is an atomic get-or-insert. The return value is always the value now associated with the key (either pre-existing or the newly inserted default).
+
+### `dict.__or__`
+
+```c
+// CPython: Objects/dictobject.c:2420 dict_or
+static PyObject *
+dict_or(PyObject *self, PyObject *other)
+{
+    /* new = self.copy(); new.update(other); return new */
+    if (!PyDict_Check(self) || !PyDict_Check(other)) {
+        Py_RETURN_NOTIMPLEMENTED;
+    }
+    PyObject *new = PyDict_Copy(self);
+    if (new == NULL) return NULL;
+    if (dict_update_arg(new, other) < 0) { Py_DECREF(new); return NULL; }
+    return new;
+}
+```
+
+`{1: 'a'} | {2: 'b'}` creates a new dict. Keys from `other` overwrite keys from `self` when there are duplicates. `|=` (`__ior__`) updates `self` in place.
+
+### `dict.fromkeys`
+
+```c
+// CPython: Objects/dictobject.c:2580 dict_fromkeys_impl
+static PyObject *
+dict_fromkeys_impl(PyTypeObject *type, PyObject *iterable, PyObject *value)
+{
+    PyObject *d = type->tp_new(type, NULL, NULL);
+    PyObject *it = PyObject_GetIter(iterable);
+    PyObject *key;
+    while ((key = PyIter_Next(it)) != NULL) {
+        PyDict_SetItem(d, key, value);
+        Py_DECREF(key);
+    }
+    Py_DECREF(it);
+    return d;
+}
+```
+
+`dict.fromkeys(['a', 'b'], 0)` returns `{'a': 0, 'b': 0}`. The same `value` object is shared by all keys — a common gotcha when the value is mutable (e.g., `dict.fromkeys(keys, [])` makes all keys share the same list).
+
+## gopy notes
+
+`dict.update` is `objects.DictUpdate` in `objects/dict_mutate.go`. `dict.setdefault` is `objects.DictSetDefault`. `dict.__or__`/`__ior__` are `objects.DictOr`/`DictIOr`. `dict.fromkeys` is `objects.DictFromKeys`. `PyDict_Merge` is used by the `**kwargs` unpack in `vm/eval_call.go`.

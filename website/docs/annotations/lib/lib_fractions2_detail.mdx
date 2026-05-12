@@ -1,0 +1,145 @@
+---
+title: Lib/fractions.py (part 2)
+description: "Lib/fractions.py part 2: Fraction arithmetic (add, mul, div, pow), __floor__, __ceil__, __round__, limit_denominator."
+cpython_path: Lib/fractions.py
+cpython_version: "3.14"
+lines: 700
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/fractions.py" />
+
+This annotation covers arithmetic operations and rounding. See `lib_fractions_detail` for `Fraction.__new__`, `from_float`, `from_decimal`, `__str__`, `__repr__`, and the `numbers.Rational` interface.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-100 | `_operator_fallbacks` | Decorator generating `__add__`/`__radd__` pairs with type dispatch |
+| 101-240 | `Fraction.__add__` / `__sub__` | Add/subtract two fractions with GCD reduction |
+| 241-360 | `Fraction.__mul__` / `__truediv__` | Multiply/divide with cross-GCD optimization |
+| 361-480 | `Fraction.__pow__` | Integer and rational exponentiation |
+| 481-580 | `__floor__` / `__ceil__` / `__round__` | Rounding to integers |
+| 581-700 | `limit_denominator` | Find the best rational approximation with bounded denominator |
+
+## Reading
+
+### `_operator_fallbacks`
+
+```python
+# CPython: Lib/fractions.py:280 _operator_fallbacks
+def _operator_fallbacks(monomorphic_operator, fallback_operator):
+    """Generate forward/reverse operator methods with type dispatch.
+
+    Handles: Fraction op Fraction (direct), Fraction op int,
+             Fraction op float (convert to Fraction first),
+             Fraction op Decimal (TypeError).
+    """
+    def forward(a, b):
+        if isinstance(b, (int, Fraction)):
+            return monomorphic_operator(a, b)
+        elif isinstance(b, float):
+            return fallback_operator(float(a), b)
+        elif isinstance(b, Decimal):
+            return fallback_operator(a, b)
+        return NotImplemented
+    forward.__name__ = '__' + fallback_operator.__name__ + '__'
+
+    def reverse(b, a):
+        if isinstance(a, numbers.Rational):
+            return monomorphic_operator(a, b)
+        elif isinstance(a, numbers.Real):
+            return fallback_operator(float(a), float(b))
+        return NotImplemented
+    reverse.__name__ = '__r' + fallback_operator.__name__ + '__'
+
+    return forward, reverse
+```
+
+This decorator generates both `__add__` and `__radd__` from a single function that operates on two `Fraction` objects. The type dispatch follows the numeric tower in `numbers`.
+
+### `Fraction.__add__`
+
+```python
+# CPython: Lib/fractions.py:340 _add
+def _add(a, b):
+    """a + b"""
+    da, db = a.denominator, b.denominator
+    # Cross-GCD optimization: reduce before multiplying
+    g = math.gcd(da, db)
+    if g == 1:
+        return Fraction(a.numerator * db + b.numerator * da, da * db,
+                        _normalize=False)
+    s = da // g
+    t = a.numerator * (db // g) + b.numerator * s
+    g2 = math.gcd(t, g)
+    return Fraction(t // g2, s * (db // g2), _normalize=False)
+
+Fraction.__add__, Fraction.__radd__ = _operator_fallbacks(_add, operator.add)
+```
+
+The cross-GCD optimization avoids computing GCD on the full product by reducing denominators before multiplying. This keeps intermediate integers smaller.
+
+### `limit_denominator`
+
+```python
+# CPython: Lib/fractions.py:620 limit_denominator
+def limit_denominator(self, max_denominator=10**6):
+    """Find the closest Fraction with denominator <= max_denominator.
+
+    Uses the Stern-Brocot tree / continued fraction algorithm.
+    """
+    if max_denominator < 1:
+        raise ValueError("max_denominator should be at least 1")
+    if self.denominator <= max_denominator:
+        return Fraction(self)
+    p0, q0, p1, q1 = 0, 1, 1, 0
+    n, d = self.numerator, self.denominator
+    while True:
+        a = n // d
+        q2 = q0 + a * q1
+        if q2 > max_denominator:
+            break
+        p0, q0, p1, q1 = p1, q1, p0 + a * p1, q2
+        n, d = d, n - a * d
+    k = (max_denominator - q0) // q1
+    bound1 = Fraction(p0 + k * p1, q0 + k * q1)
+    bound2 = Fraction(p1, q1)
+    if abs(bound2 - self) <= abs(bound1 - self):
+        return bound2
+    return bound1
+```
+
+`Fraction(math.pi).limit_denominator(1000)` returns `Fraction(355, 113)` — the famous Zu Chongzhi approximation accurate to 6 decimal places. The continued fraction algorithm is O(log(denominator)) steps.
+
+### `__round__`
+
+```python
+# CPython: Lib/fractions.py:560 __round__
+def __round__(self, ndigits=None):
+    if ndigits is None:
+        # Round to nearest integer, ties to even
+        floor, remainder = divmod(self.numerator, self.denominator)
+        if remainder * 2 < self.denominator:
+            return floor
+        elif remainder * 2 > self.denominator:
+            return floor + 1
+        elif floor % 2 == 0:   # tie: round to even
+            return floor
+        else:
+            return floor + 1
+    else:
+        shift = Fraction(10 ** abs(ndigits))
+        if ndigits > 0:
+            return Fraction(round(self * shift), shift)
+        else:
+            return round(self / shift) * shift
+```
+
+`round(Fraction(1, 2))` returns 0 (banker's rounding: 0 is even). `round(Fraction(3, 2))` returns 2.
+
+## gopy notes
+
+`Fraction` is in `module/fractions/module.go`. `_add`/`_mul` use `math/big.Int` arithmetic. `limit_denominator` is a direct port of the Stern-Brocot algorithm. `_operator_fallbacks` is replicated as a Go pattern that generates both the forward and reverse operators.

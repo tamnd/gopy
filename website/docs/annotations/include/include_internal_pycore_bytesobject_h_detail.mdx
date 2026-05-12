@@ -1,0 +1,83 @@
+---
+title: Include/internal/pycore_bytesobject.h
+description: "Include/internal/pycore_bytesobject.h: PyBytesObject layout, ob_shash cache, _PyBytes_Join, _PyBytesWriter."
+cpython_path: Include/internal/pycore_bytesobject.h
+cpython_version: "3.14"
+lines: 120
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Include/internal/pycore_bytesobject.h" />
+
+`pycore_bytesobject.h` exposes the `PyBytesObject` struct layout and the `_PyBytesWriter` incremental builder used by `bytes.join` and format operations.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-40 | `PyBytesObject` | Struct layout with `ob_shash` cache and flexible array |
+| 41-80 | `_PyBytesWriter` | Stack-allocated buffer for incremental byte construction |
+| 81-120 | `_PyBytes_Join` | Join a sequence of bytes-like objects with a separator |
+
+## Reading
+
+### `PyBytesObject`
+
+```c
+// CPython: Include/internal/pycore_bytesobject.h:18 PyBytesObject
+struct PyBytesObject {
+    PyObject_VAR_HEAD
+    Py_hash_t ob_shash;      /* cached hash, -1 if uncached */
+    char ob_sval[1];         /* flexible array of char data + NUL terminator */
+};
+/* ob_sval[ob_size] == '\0' always (NUL-terminated for C interop) */
+```
+
+`PyBytesObject` stores its data inline after the header (`ob_sval` is a flexible array member). Bytes up to 255 bytes are interned in the small bytes cache (`_Py_bytes_characters[256]`) for identity comparisons.
+
+### `_PyBytesWriter`
+
+```c
+// CPython: Include/internal/pycore_bytesobject.h:50 _PyBytesWriter
+typedef struct {
+    PyObject *buffer;       /* PyBytesObject or PyByteArrayObject being built */
+    Py_ssize_t allocated;   /* total allocated bytes */
+    Py_ssize_t min_size;    /* minimum required size */
+    int overallocate;       /* 1 = grow by 25% to amortize realloc */
+    int use_bytearray;      /* 1 = build into a bytearray instead */
+    char stack_buffer[512]; /* small-buffer optimization */
+} _PyBytesWriter;
+```
+
+`_PyBytesWriter` avoids heap allocation for small results. If the total output fits in 512 bytes, it stays on the stack; only on overflow does it allocate a `PyBytesObject`. Used by `bytes % args`, `b''.join(...)`, and the UTF-8 encoder.
+
+### `_PyBytes_Join`
+
+```c
+// CPython: Include/internal/pycore_bytesobject.h:90 _PyBytes_Join
+PyObject *
+_PyBytes_Join(PyObject *sep, PyObject *iterable)
+{
+    /* sep.join(iterable) */
+    /* Phase 1: collect all items + compute total length */
+    /* Phase 2: allocate result + copy with separators */
+    Py_ssize_t seplen = PyBytes_GET_SIZE(sep);
+    PyObject *res = PyBytes_FromStringAndSize(NULL, total);
+    char *p = PyBytes_AS_STRING(res);
+    for each item: {
+        if (i > 0) { memcpy(p, sep, seplen); p += seplen; }
+        Py_ssize_t n = PyBytes_GET_SIZE(item);
+        memcpy(p, PyBytes_AS_STRING(item), n);
+        p += n;
+    }
+    return res;
+}
+```
+
+`b' '.join([b'hello', b'world'])` makes two passes: first to measure total length, then to copy. This avoids reallocation and is O(n) in the total output size.
+
+## gopy notes
+
+`objects.Bytes` in `objects/bytes.go` stores content as a Go `[]byte`. `ob_shash` caching maps to a `hash int64` field initialized to `-1`. `_PyBytesWriter` is not exposed in gopy; `objects.BytesJoin` uses a single `bytes.Join` call. The NUL terminator is maintained for C string compatibility via `objects.Bytes.CStr()`.

@@ -1,0 +1,124 @@
+---
+title: Objects/setobject.c (part 3)
+description: "Objects/setobject.c part 3: set.update, set.intersection_update, set.difference_update, set.symmetric_difference_update, set operations returning new sets."
+cpython_path: Objects/setobject.c
+cpython_version: "3.14"
+lines: 900
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Objects/setobject.c" />
+
+This annotation covers in-place and new-set operations. See `objects_setobject_detail` for `PySet_New`, `set_add`, `set_discard`, and the hash table layout, and `objects_setobject2_detail` for `set_contains`, `set_pop`, and `set_clear`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `set.update` | Add all elements from one or more iterables |
+| 81-180 | `set.intersection_update` (`&=`) | Keep only elements in common |
+| 181-280 | `set.difference_update` (`-=`) | Remove elements present in another set |
+| 281-380 | `set.symmetric_difference_update` (`^=`) | Toggle membership of elements in another set |
+| 381-560 | `set.union` (`|`) | Return a new set with all elements from both |
+| 561-700 | `set.intersection` (`&`) | Return a new set with elements common to both |
+| 701-900 | `set.difference` (`-`) / `set.symmetric_difference` (`^`) | Return new sets |
+
+## Reading
+
+### `set.update`
+
+```c
+// CPython: Objects/setobject.c:1480 set_update_internal
+static int
+set_update_internal(PySetObject *so, PyObject *other)
+{
+    /* Fast paths for set and frozenset */
+    if (PyAnySet_Check(other)) {
+        PySetObject *otherset = (PySetObject *)other;
+        Py_ssize_t n = otherset->fill;
+        /* Grow if needed to avoid excessive rehashing */
+        if ((so->fill + n) * 5 >= so->mask * 3) {
+            if (set_table_resize(so, (so->used + n) * 2) < 0) return -1;
+        }
+        for each entry in otherset: set_add_entry(so, entry);
+        return 0;
+    }
+    /* General: iterate */
+    PyObject *it = PyObject_GetIter(other);
+    PyObject *key;
+    while ((key = PyIter_Next(it)) != NULL) {
+        if (set_add_key(so, key) < 0) { Py_DECREF(key); ... }
+        Py_DECREF(key);
+    }
+    ...
+}
+```
+
+`set.update(s1, s2, ...)` is equivalent to `set |= s1 | s2 | ...`. The fast path bulk-copies hash entries from another set without re-hashing.
+
+### `set.intersection_update`
+
+```c
+// CPython: Objects/setobject.c:1580 set_intersection_update
+static PyObject *
+set_intersection_update(PySetObject *so, PyObject *args)
+{
+    /* so &= other1 & other2 & ... */
+    PyObject *tmp, *result = (PyObject *)so;
+    for each arg in args:
+        tmp = set_intersection(so, arg);
+        /* tmp is a new frozenset; update so from it */
+        set_clear(so);
+        set_update_internal(so, tmp);
+        Py_DECREF(tmp);
+    Py_RETURN_NONE;
+}
+```
+
+`intersection_update` creates a temporary set and swaps in its contents. This is simpler than in-place deletion of non-matching elements.
+
+### `set.difference_update`
+
+```c
+// CPython: Objects/setobject.c:1650 set_difference_update
+static PyObject *
+set_difference_update(PySetObject *so, PyObject *args)
+{
+    /* so -= other1 | other2 | ... */
+    for each arg in args:
+        if PyAnySet_Check(arg):
+            /* Fast path: scan so's table, discard entries in arg */
+            for each entry in so:
+                if set_contains_entry(arg, entry):
+                    set_discard_entry(so, entry);
+        else:
+            /* Iterate arg, discard from so */
+            while key = PyIter_Next(arg):
+                set_discard_key(so, key);
+    Py_RETURN_NONE;
+}
+```
+
+### `set.union` / `set.intersection`
+
+```c
+// CPython: Objects/setobject.c:1720 set_union
+static PyObject *
+set_union(PySetObject *so, PyObject *args)
+{
+    /* Return a new set with all elements from so and all args. */
+    PyObject *result = make_new_set(Py_TYPE(so), (PyObject *)so);
+    for each arg in args:
+        if set_update_internal((PySetObject *)result, arg) < 0:
+            Py_DECREF(result); return NULL;
+    return result;
+}
+```
+
+`{1, 2} | {2, 3}` creates a new set, copies all of `{1, 2}`, then updates with `{2, 3}`. The duplicate `2` is silently ignored during the second update.
+
+## gopy notes
+
+`set.update` is `objects.SetUpdate` in `objects/set.go`. `set.intersection_update` is `objects.SetIntersectionUpdate`. `set.difference` returns a new `objects.Set` using `objects.SetDifference`. All operations preserve the set's type (`set` vs `frozenset`) by using `Py_TYPE(so)`.

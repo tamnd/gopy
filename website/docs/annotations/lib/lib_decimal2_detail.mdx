@@ -1,0 +1,125 @@
+---
+title: Lib/_pydecimal.py / Modules/_decimal/ (part 2)
+description: "decimal part 2: Decimal arithmetic (add, mul, div, pow), Context, signals, rounding modes, localcontext."
+cpython_path: Modules/_decimal/libmpdec/mpdecimal.c
+cpython_version: "3.14"
+lines: 1400
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/_decimal/libmpdec/mpdecimal.c" />
+
+This annotation covers arithmetic operations and context management. See `lib_decimal_detail` for `Decimal.__new__`, `__str__`, `__repr__`, `from_float`, and the digit storage layout.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-120 | `Decimal.__add__` / `__sub__` | Aligned addition and subtraction |
+| 121-280 | `Decimal.__mul__` | Schoolbook and Karatsuba multiplication |
+| 281-440 | `Decimal.__truediv__` / `__floordiv__` | Long division with rounding |
+| 441-620 | `Decimal.__pow__` | Exponentiation with arbitrary precision |
+| 621-800 | `Context` | precision, rounding, Emax, Emin, clamp, traps |
+| 801-1000 | `localcontext` | Thread-local context manager |
+| 1001-1400 | Signals and traps | `Inexact`, `Overflow`, `DivisionByZero`, `InvalidOperation` |
+
+## Reading
+
+### `Decimal.__add__`
+
+```c
+// CPython: Modules/_decimal/libmpdec/mpdecimal.c:4820 mpd_qadd
+void
+mpd_qadd(mpd_t *result, const mpd_t *a, const mpd_t *b,
+         const mpd_context_t *ctx, uint32_t *status)
+{
+    /* Align a and b to the same exponent by shifting the smaller one.
+       Then add coefficient arrays digit by digit. */
+    mpd_t aligned;
+    if (mpd_adjexp(a) < mpd_adjexp(b)) {
+        _mpd_align(a, b, &aligned, ctx, status);
+        _mpd_qbaseadd(result, &aligned, b, ctx, status);
+    } else {
+        _mpd_align(b, a, &aligned, ctx, status);
+        _mpd_qbaseadd(result, a, &aligned, ctx, status);
+    }
+    mpd_qfinalize(result, ctx, status);  /* apply rounding */
+}
+```
+
+Decimal addition aligns operands by adjusting their exponents, adds coefficient arrays, then rounds to the current context precision.
+
+### `Context`
+
+```python
+# CPython: Lib/_pydecimal.py:380 Context
+class Context:
+    """Decimal arithmetic context.
+
+    Attributes:
+      prec        -- precision (default 28)
+      rounding    -- rounding mode (default ROUND_HALF_EVEN)
+      Emax        -- maximum exponent (default 999999999)
+      Emin        -- minimum exponent (default -999999999)
+      capitals    -- 1 = use E notation, 0 = use e
+      clamp       -- 0 = do not clamp
+      traps       -- dict mapping signal -> bool (raise vs. set flag)
+      flags       -- dict mapping signal -> bool (accumulated signals)
+    """
+```
+
+`getcontext()` returns the thread-local context. `setcontext(ctx)` installs a new one. `decimal.ROUND_HALF_EVEN` (banker's rounding) is the default.
+
+### `localcontext`
+
+```python
+# CPython: Lib/_pydecimal.py:580 localcontext
+class localcontext:
+    """Context manager for a temporary decimal context."""
+    def __init__(self, ctx=None, **kwargs):
+        if ctx is None:
+            self.saved_context = getcontext()
+        else:
+            self.saved_context = ctx
+        self.new_context = self.saved_context.copy()
+        for k, v in kwargs.items():
+            setattr(self.new_context, k, v)
+
+    def __enter__(self):
+        setcontext(self.new_context)
+        return self.new_context
+
+    def __exit__(self, *args):
+        setcontext(self.saved_context)
+```
+
+```python
+with decimal.localcontext() as ctx:
+    ctx.prec = 50
+    result = Decimal(1) / Decimal(3)
+```
+
+The context is restored even if an exception is raised.
+
+### Signals and traps
+
+```python
+# CPython: Lib/_pydecimal.py:120 signals
+class DecimalException(ArithmeticError): ...
+class Clamped(DecimalException): ...
+class InvalidOperation(DecimalException): ...
+class DivisionByZero(DecimalException, ZeroDivisionError): ...
+class Inexact(DecimalException): ...
+class Overflow(Inexact, OverflowError): ...
+class Underflow(Inexact): ...
+class Subnormal(DecimalException): ...
+class FloatOperation(DecimalException, TypeError): ...
+```
+
+Each signal has both a `flag` (set when the signal occurs) and a `trap` (raise an exception vs. record silently). `ctx.traps[Overflow] = True` causes overflow to raise `Overflow` immediately.
+
+## gopy notes
+
+`decimal` uses `libmpdec` via `Modules/_decimal`. gopy's implementation is in `module/decimal/module.go` wrapping Go's `github.com/shopspring/decimal` or a custom `mpd`-based implementation. `localcontext` stores the context in `contextvars.ContextVar`. Signals map to gopy error codes in `module/decimal/signals.go`.

@@ -1,0 +1,122 @@
+---
+title: Python/ceval.c (part 15)
+description: "Python/ceval.c part 15: exception handling opcodes — PUSH_EXC_INFO, POP_EXCEPT, RAISE_VARARGS, RERAISE, CHECK_EXC_MATCH."
+cpython_path: Python/ceval.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Python/ceval.c" />
+
+This annotation covers exception-handling opcodes. See `python_ceval14_detail` for pattern matching opcodes, and `vm_eval_unwind` for frame unwinding.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `PUSH_EXC_INFO` | Save current exception; install new one from stack |
+| 81-160 | `POP_EXCEPT` | Restore previous exception from the exc_info stack |
+| 161-260 | `RAISE_VARARGS` | Raise or re-raise an exception |
+| 261-360 | `RERAISE` | Re-raise the exception currently being handled |
+| 361-500 | `CHECK_EXC_MATCH` | Test `isinstance(exc, cls)` for `except cls:` |
+
+## Reading
+
+### `PUSH_EXC_INFO`
+
+```c
+// CPython: Python/ceval.c:3680 PUSH_EXC_INFO
+inst(PUSH_EXC_INFO, (new_exc -- prev_exc, new_exc)) {
+    /* Save the current exception so POP_EXCEPT can restore it.
+       Install new_exc as the active exception. */
+    _PyErr_StackItem *exc_info = tstate->exc_info;
+    PyObject *prev = exc_info->exc_value;
+    exc_info->exc_value = Py_NewRef(new_exc);
+    /* Push prev_exc onto the stack for POP_EXCEPT */
+}
+```
+
+`PUSH_EXC_INFO` is emitted at the start of every `except` block. It chains exception state so nested `except` handlers each have their own active exception.
+
+### `POP_EXCEPT`
+
+```c
+// CPython: Python/ceval.c:3720 POP_EXCEPT
+inst(POP_EXCEPT, (exc_value --)) {
+    /* Restore the exception that was active before this except block. */
+    _PyErr_StackItem *exc_info = tstate->exc_info;
+    PyObject *value = exc_info->exc_value;
+    exc_info->exc_value = exc_value;  /* pop the saved value */
+    Py_XDECREF(value);
+}
+```
+
+`POP_EXCEPT` is emitted at the end of every `except` block (including `except*`). It restores the exception that was active when the `except` block was entered.
+
+### `RAISE_VARARGS`
+
+```c
+// CPython: Python/ceval.c:3760 RAISE_VARARGS
+inst(RAISE_VARARGS, (args[oparg] -- )) {
+    PyObject *cause = NULL, *exc = NULL;
+    switch (oparg) {
+    case 2: cause = args[1]; /* raise exc from cause */
+            /* fall through */
+    case 1: exc = args[0];   /* raise exc */
+            break;
+    case 0: break;           /* bare raise: re-raise current exception */
+    }
+    if (do_raise(tstate, exc, cause)) {
+        goto exception_unwind;
+    }
+    ERROR_IF(true, error);
+}
+```
+
+`raise ValueError("msg")` compiles to `LOAD...`, `CALL...`, `RAISE_VARARGS 1`. `raise ValueError("msg") from None` uses `RAISE_VARARGS 2` with `None` as the cause. Bare `raise` uses `RAISE_VARARGS 0`.
+
+### `RERAISE`
+
+```c
+// CPython: Python/ceval.c:3820 RERAISE
+inst(RERAISE, (values[oparg], exc -- values[oparg])) {
+    /* Re-raise the exception from the except block.
+       oparg=1: also restore lasti (for accurate tracebacks). */
+    assert(oparg < 3);
+    PyObject *val = exc;
+    assert(PyExceptionInstance_Check(val));
+    PyObject *tb = PyException_GetTraceback(val);
+    _PyErr_SetRaisedException(tstate, Py_NewRef(val));
+    goto exception_unwind;
+}
+```
+
+`RERAISE` is used inside `except` blocks when the exception is re-raised implicitly (e.g., at the end of a `with` block's `__exit__` that returns a falsy value).
+
+### `CHECK_EXC_MATCH`
+
+```c
+// CPython: Python/ceval.c:3860 CHECK_EXC_MATCH
+inst(CHECK_EXC_MATCH, (left, right -- left, b)) {
+    /* b = isinstance(left, right) — used by except clause.
+       Also handles tuples: except (TypeError, ValueError): */
+    assert(PyExceptionInstance_Check(left));
+    if (!PyExceptionClass_Check(right)) {
+        _PyErr_SetString(tstate, PyExc_TypeError,
+            CANNOT_CATCH_MSG);
+        ERROR_IF(true, error);
+    }
+    int res = PyErr_GivenExceptionMatches(left, right);
+    b = res ? Py_True : Py_False;
+    Py_INCREF(b);
+}
+```
+
+`except (TypeError, ValueError):` passes a tuple as `right`; `PyErr_GivenExceptionMatches` handles tuples by checking each element.
+
+## gopy notes
+
+`PUSH_EXC_INFO` and `POP_EXCEPT` are in `vm/eval_gen.go`. `RAISE_VARARGS` calls `vm.DoRaise` in `vm/eval_unwind.go`. `RERAISE` is `vm.DoReraise`. `CHECK_EXC_MATCH` uses `objects.ExceptionMatches`.

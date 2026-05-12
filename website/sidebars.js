@@ -351,6 +351,7 @@ const sidebars = {
         'annotations/python/python_gc3_detail',
         'annotations/python/python_peephole2_detail',
         'annotations/python/python_ceval14_detail',
+        'annotations/python/python_ceval15_detail',
       ],
     },
     {
@@ -570,6 +571,8 @@ const sidebars = {
         'annotations/objects/objects_descrobject5_detail',
         'annotations/objects/objects_typeobject3_detail',
         'annotations/objects/objects_longobject8_detail',
+        'annotations/objects/objects_setobject3_detail',
+        'annotations/objects/objects_dictobject5_detail',
       ],
     },
     {
@@ -822,6 +825,7 @@ const sidebars = {
         'annotations/include/include_internal_pycore_traceback_h_detail',
         'annotations/include/include_internal_pycore_hamt_h_detail2',
         'annotations/include/include_internal_pycore_unicodeobject_h_detail',
+        'annotations/include/include_internal_pycore_bytesobject_h_detail',
       ],
     },
     {
@@ -1079,6 +1083,7 @@ const sidebars = {
         'annotations/modules/modules_sqlite_detail',
         'annotations/modules/modules_zlib2_detail',
         'annotations/modules/modules_subprocess_detail',
+        'annotations/modules/modules_binascii2_detail',
       ],
     },
     {
@@ -1632,6 +1637,8 @@ const sidebars = {
         'annotations/lib/lib_imaplib2_detail',
         'annotations/lib/lib_http2_detail',
         'annotations/lib/lib_asyncio2_detail',
+        'annotations/lib/lib_decimal2_detail',
+        'annotations/lib/lib_fractions2_detail',
       ],
     },
   ],

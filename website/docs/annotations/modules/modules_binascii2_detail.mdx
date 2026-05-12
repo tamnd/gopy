@@ -1,0 +1,109 @@
+---
+title: Modules/binascii.c (part 2)
+description: "Modules/binascii.c part 2: binascii.b2a_hex, a2b_hex, b2a_uu, a2b_uu, b2a_qp, a2b_qp — hex and quoted-printable encoding."
+cpython_path: Modules/binascii.c
+cpython_version: "3.14"
+lines: 800
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/binascii.c" />
+
+This annotation covers hex encoding and quoted-printable. See `modules_binascii_detail` for `b2a_base64`, `a2b_base64`, `crc32`, `crc_hqx`, and the `Error` exception.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `b2a_hex` / `hexlify` | Convert bytes to hex ASCII |
+| 81-180 | `a2b_hex` / `unhexlify` | Decode hex ASCII back to bytes |
+| 181-320 | `b2a_uu` | UU-encode a line (legacy Unix-to-Unix encoding) |
+| 321-460 | `a2b_uu` | Decode a UU-encoded line |
+| 461-620 | `b2a_qp` | Encode bytes as quoted-printable (email) |
+| 621-800 | `a2b_qp` | Decode quoted-printable back to bytes |
+
+## Reading
+
+### `b2a_hex`
+
+```c
+// CPython: Modules/binascii.c:680 binascii_b2a_hex_impl
+static PyObject *
+binascii_b2a_hex_impl(PyObject *module, Py_buffer *data, PyObject *sep,
+                      int bytes_per_sep)
+{
+    /* Convert each byte to two hex characters. */
+    const unsigned char *pin = data->buf;
+    PyObject *rv = PyBytes_FromStringAndSize(NULL, data->len * 2);
+    unsigned char *pout = (unsigned char *)PyBytes_AS_STRING(rv);
+    for (Py_ssize_t i = 0; i < data->len; i++) {
+        unsigned char c = pin[i];
+        pout[i*2]   = Py_hexdigits[c >> 4];
+        pout[i*2+1] = Py_hexdigits[c & 0x0f];
+    }
+    return rv;
+}
+```
+
+`binascii.hexlify(b'\xde\xad')` returns `b'dead'`. The optional `sep` parameter (Python 3.8+) inserts a separator every `bytes_per_sep` bytes: `hexlify(b'\xde\xad', sep='-')` returns `b'de-ad'`.
+
+### `a2b_hex`
+
+```c
+// CPython: Modules/binascii.c:740 binascii_a2b_hex_impl
+static PyObject *
+binascii_a2b_hex_impl(PyObject *module, Py_buffer *hexstr)
+{
+    const unsigned char *argbuf = hexstr->buf;
+    Py_ssize_t arglen = hexstr->len;
+    if (arglen % 2 != 0) {
+        PyErr_SetString(Error, "Odd-length string");
+        return NULL;
+    }
+    PyObject *rv = PyBytes_FromStringAndSize(NULL, arglen / 2);
+    unsigned char *p = (unsigned char *)PyBytes_AS_STRING(rv);
+    for (Py_ssize_t i = 0; i < arglen; i += 2) {
+        int top = _PyLong_DigitValue[argbuf[i]];
+        int bot = _PyLong_DigitValue[argbuf[i+1]];
+        if (top >= 16 || bot >= 16) {
+            PyErr_SetString(Error, "Non-hexadecimal digit found");
+            ...
+        }
+        *p++ = (top << 4) + bot;
+    }
+    return rv;
+}
+```
+
+`binascii.unhexlify('dead')` returns `b'\xde\xad'`. `_PyLong_DigitValue` is a 256-entry lookup table mapping ASCII characters to their digit values (255 for non-hex characters).
+
+### `b2a_qp`
+
+```c
+// CPython: Modules/binascii.c:1020 binascii_b2a_qp_impl
+/* Quoted-Printable encoding (RFC 2045):
+   - Non-printable bytes and '=' are encoded as =XX (uppercase hex)
+   - Lines are wrapped at 76 characters with '=\r\n' soft line breaks
+   - Tabs and spaces at end of line are encoded
+   - istext=True: treat '\r\n' and '\n' as line endings (not encoded)
+*/
+```
+
+Quoted-Printable is used for email bodies. It preserves ASCII text readably while encoding binary data as `=XX` sequences. `quotetabs=True` also encodes horizontal whitespace.
+
+### `a2b_qp`
+
+```c
+// CPython: Modules/binascii.c:1120 binascii_a2b_qp_impl
+/* Decode quoted-printable:
+   - '=XX' -> single byte with value 0xXX
+   - '=\n' or '=\r\n' -> soft line break (deleted)
+   - Everything else passes through unchanged
+*/
+```
+
+## gopy notes
+
+`binascii.hexlify`/`unhexlify` are in `module/binascii/module.go`. `b2a_hex` uses `fmt.Sprintf` or a lookup table. `a2b_hex` uses `hex.DecodeString`. `b2a_qp`/`a2b_qp` are Go ports of the RFC 2045 state machines.
