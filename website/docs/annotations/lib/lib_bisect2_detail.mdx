@@ -1,0 +1,115 @@
+---
+title: Lib/bisect.py (part 2)
+description: "Lib/bisect.py part 2: bisect_left, bisect_right, insort_left, insort_right, C accelerator _bisect."
+cpython_path: Lib/bisect.py
+cpython_version: "3.14"
+lines: 300
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/bisect.py" />
+
+This annotation covers the binary search algorithm variants. See `lib_bisect_detail` for the overall module structure and key/lo/hi parameter handling.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `bisect_left` | Leftmost insertion point (before any existing equal element) |
+| 81-160 | `bisect_right` | Rightmost insertion point (after any existing equal element) |
+| 161-220 | `insort_left` / `insort_right` | Binary search then insert to maintain sorted order |
+| 221-300 | C accelerator | `_bisect` module replaces the Python implementations |
+
+## Reading
+
+### `bisect_left`
+
+```python
+# CPython: Lib/bisect.py:18 bisect_left
+def bisect_left(a, x, lo=0, hi=None, *, key=None):
+    """Return leftmost i such that a[lo:hi] is sorted and a[i-1] < x <= a[i]."""
+    if lo < 0:
+        raise ValueError('lo must be non-negative')
+    if hi is None:
+        hi = len(a)
+    if key is None:
+        while lo < hi:
+            mid = (lo + hi) // 2
+            if a[mid] < x:
+                lo = mid + 1
+            else:
+                hi = mid
+    else:
+        while lo < hi:
+            mid = (lo + hi) // 2
+            if key(a[mid]) < x:
+                lo = mid + 1
+            else:
+                hi = mid
+    return lo
+```
+
+`bisect_left` finds where to insert `x` such that elements to the left are strictly less than `x`. For duplicates: `bisect_left([1,2,2,3], 2)` returns `1` (before the first `2`).
+
+### `bisect_right`
+
+```python
+# CPython: Lib/bisect.py:46 bisect_right
+def bisect_right(a, x, lo=0, hi=None, *, key=None):
+    """Return rightmost i such that a[lo:hi] is sorted and a[i-1] <= x < a[i]."""
+    ...
+    while lo < hi:
+        mid = (lo + hi) // 2
+        if x < (key(a[mid]) if key else a[mid]):
+            hi = mid
+        else:
+            lo = mid + 1
+    return lo
+```
+
+`bisect_right([1,2,2,3], 2)` returns `3` (after the last `2`). The condition is reversed: `x < a[mid]` instead of `a[mid] < x`.
+
+### `insort_left`
+
+```python
+# CPython: Lib/bisect.py:80 insort_left
+def insort_left(a, x, lo=0, hi=None, *, key=None):
+    """Insert x in sorted list a, keeping it sorted. If x is present,
+       insert it before (to the left of) any existing entries of x."""
+    lo = bisect_left(a, x, lo, hi, key=key)
+    if key is None:
+        a.insert(lo, x)
+    else:
+        a.insert(lo, x)
+```
+
+`insort_left` is O(log n) for the search and O(n) for the insertion (due to list shifting). For large sorted lists, a sorted container (like `sortedcontainers.SortedList`) is more efficient.
+
+### C accelerator
+
+```c
+// CPython: Modules/_bisectmodule.c:40 internal_bisect_right
+static Py_ssize_t
+internal_bisect_right(PyObject *list, PyObject *item, Py_ssize_t lo, Py_ssize_t hi,
+                      PyObject *key)
+{
+    while (lo < hi) {
+        Py_ssize_t mid = ((size_t)lo + hi) / 2;
+        PyObject *litem = PyList_GET_ITEM(list, mid);
+        if (key != NULL) litem = PyObject_CallOneArg(key, litem);
+        int cmp = PyObject_RichCompareBool(item, litem, Py_LT);
+        if (cmp < 0) return -1;
+        if (cmp) hi = mid;
+        else lo = mid + 1;
+    }
+    return lo;
+}
+```
+
+The C accelerator uses `PyList_GET_ITEM` instead of `PyObject_GetItem`, avoiding bounds checking and the Python sequence protocol. It's ~4x faster than the pure Python version for lists.
+
+## gopy notes
+
+`bisect_left` and `bisect_right` are `module/bisect.BisectLeft`/`BisectRight` in `module/bisect/module.go`. The `key` function, if present, is called via `objects.CallOneArg`. The C accelerator optimization is implemented by directly indexing the slice when the input is a `objects.List`.

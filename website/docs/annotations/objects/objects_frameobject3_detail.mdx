@@ -1,0 +1,88 @@
+---
+title: Objects/frameobject.c (part 3)
+description: "Objects/frameobject.c part 3: frame.f_trace, frame.f_trace_lines, frame.f_trace_opcodes, PyFrame_SetLineno, trace events."
+cpython_path: Objects/frameobject.c
+cpython_version: "3.14"
+lines: 400
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Objects/frameobject.c" />
+
+This annotation covers tracing and debugging hooks on frames. See `objects_frameobject2_detail` for `frame.f_locals`, `frame.f_globals`, and `python_frame2_detail` for `FastToLocals`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `frame.f_trace` | Per-frame trace function (None = disabled) |
+| 81-180 | `frame.f_trace_lines` | Enable/disable `line` trace events for this frame |
+| 181-280 | `frame.f_trace_opcodes` | Enable opcode-level tracing |
+| 281-400 | `PyFrame_SetLineno` | Jump to a specific line number (used by debuggers) |
+
+## Reading
+
+### `frame.f_trace`
+
+```c
+// CPython: Objects/frameobject.c:280 frame_settrace
+static int
+frame_settrace(PyFrameObject *f, PyObject *v, void *Py_UNUSED(ignored))
+{
+    if (v == Py_None) v = NULL;
+    Py_XINCREF(v);
+    Py_XDECREF(f->f_trace);
+    f->f_trace = v;
+    /* If a trace function is set, enable tracing for this frame */
+    if (v) {
+        f->f_frame->f_trace_lines = 1;
+        PyThreadState_GET()->c_tracefunc = sys_settrace_trampoline;
+    }
+    return 0;
+}
+```
+
+Setting `frame.f_trace = my_func` installs a per-frame trace function. `sys.settrace` sets a global trace function; per-frame traces override it for that frame. This is how pdb places breakpoints: it sets `f_trace` on the target frame.
+
+### `frame.f_trace_opcodes`
+
+```c
+// CPython: Objects/frameobject.c:340 frame_gettrace_opcodes
+/* When True, the trace function is called for every opcode execution.
+   This is used by coverage.py and other tools that need instruction-level
+   granularity. Enabling it substantially slows execution. */
+```
+
+`frame.f_trace_opcodes = True` causes the eval loop to call the trace function before every instruction. Combined with `sys.settrace`, this enables line-level or opcode-level coverage.
+
+### `PyFrame_SetLineno`
+
+```c
+// CPython: Objects/frameobject.c:380 PyFrame_SetLineno
+int
+PyFrame_SetLineno(PyFrameObject *f, int lineno)
+{
+    /* Validate lineno is within the code object's range */
+    if (lineno < f->f_frame->f_code->co_firstlineno) {
+        PyErr_SetString(PyExc_ValueError,
+            "line number is out of range for this code object");
+        return -1;
+    }
+    /* Find the bytecode offset for this line number and set f_lasti */
+    Py_ssize_t new_lasti = _PyCode_FindFirstLineno(f->f_frame->f_code, lineno);
+    if (new_lasti < 0) {
+        PyErr_SetString(PyExc_ValueError, "no bytecodes for this line");
+        return -1;
+    }
+    f->f_frame->prev_instr = _PyCode_CODE(f->f_frame->f_code) + new_lasti - 1;
+    return 0;
+}
+```
+
+Debuggers use `frame.f_lineno = N` to jump to a different line. `PyFrame_SetLineno` finds the first bytecode for that line and adjusts `prev_instr`. This only works if the stack depth is compatible; jumping into the middle of a `try` block may corrupt the stack.
+
+## gopy notes
+
+`frame.f_trace` is a field on `vm.Frame` in `vm/frame.go`. `frame.f_trace_lines` is checked by the eval loop in `vm/eval_gen.go` before each instruction dispatch. `PyFrame_SetLineno` is `vm.FrameSetLineno`, which looks up the target offset using `objects.CodeFindFirstLineno`.

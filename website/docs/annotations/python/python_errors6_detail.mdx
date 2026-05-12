@@ -1,0 +1,113 @@
+---
+title: Python/errors.c (part 6)
+description: "Python/errors.c part 6: PyErr_SetString, PyErr_Format, PyErr_WriteUnraisable, _PyErr_ChainExceptions, exception normalization."
+cpython_path: Python/errors.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Python/errors.c" />
+
+This annotation covers exception setting and chaining utilities. See `python_errors5_detail` for `PyErr_Occurred`, `PyErr_Clear`, `PyErr_Fetch`/`Restore`, and `PyErr_NormalizeException`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `PyErr_SetString` | Set a simple exception with a message |
+| 81-180 | `PyErr_Format` | Set exception with a printf-style message |
+| 181-300 | `PyErr_WriteUnraisable` | Print unraisable exception to stderr |
+| 301-420 | `_PyErr_ChainExceptions` | Link `__context__` for implicit chaining |
+| 421-500 | `PyErr_SetImportErrorWithNameFrom` | Import error with module name and path |
+
+## Reading
+
+### `PyErr_SetString`
+
+```c
+// CPython: Python/errors.c:80 PyErr_SetString
+void
+PyErr_SetString(PyObject *exception, const char *string)
+{
+    PyObject *value = PyUnicode_FromString(string);
+    PyErr_SetObject(exception, value);
+    Py_XDECREF(value);
+}
+
+void
+PyErr_SetObject(PyObject *exception, PyObject *value)
+{
+    PyThreadState *tstate = _PyThreadState_GET();
+    PyObject *exc_value = _PyErr_CreateException(exception, value);
+    _PyErr_SetRaisedException(tstate, exc_value);
+}
+```
+
+`PyErr_SetString(PyExc_ValueError, "bad value")` creates a `ValueError("bad value")` and stores it as the current exception. The previous exception (if any) is stored in `exc_value->__context__` by `_PyErr_SetRaisedException`.
+
+### `PyErr_Format`
+
+```c
+// CPython: Python/errors.c:180 PyErr_Format
+PyObject *
+PyErr_Format(PyObject *exception, const char *format, ...)
+{
+    va_list vargs;
+    va_start(vargs, format);
+    PyObject *string = PyUnicode_FromFormatV(format, vargs);
+    va_end(vargs);
+    PyErr_SetObject(exception, string);
+    Py_XDECREF(string);
+    return NULL;
+}
+```
+
+`PyErr_Format(PyExc_TypeError, "expected %s, got %s", "int", "str")` builds the message string using `PyUnicode_FromFormatV`. Returns `NULL` (always) so callers can write `return PyErr_Format(...)`.
+
+### `PyErr_WriteUnraisable`
+
+```c
+// CPython: Python/errors.c:620 PyErr_WriteUnraisable
+void
+PyErr_WriteUnraisable(PyObject *obj)
+{
+    /* Print "Exception ignored in: {obj}" to sys.stderr.
+       Called for exceptions in __del__, callbacks, etc. that cannot
+       be propagated. */
+    PyObject *exc = _PyErr_GetRaisedException(tstate);
+    if (exc == NULL) return;
+    _PyErr_WriteUnraisableMsg("in", obj);
+    Py_DECREF(exc);
+}
+```
+
+`PyErr_WriteUnraisable` is called when an exception occurs in a context where it cannot be propagated: `__del__`, signal callbacks, thread finalization. It prints to `sys.unraisablehook` (default: `sys.stderr`).
+
+### `_PyErr_ChainExceptions`
+
+```c
+// CPython: Python/errors.c:480 _PyErr_ChainExceptions
+void
+_PyErr_ChainExceptions(PyObject *exc, PyObject *tb)
+{
+    /* Set current exception's __context__ to exc (the previously active exc).
+       Called by exception handlers to set up implicit chaining. */
+    PyObject *current = _PyErr_GetRaisedException(tstate);
+    if (current != NULL && current != Py_None) {
+        /* Don't chain if __cause__ is already set (explicit chain) */
+        if (!((PyBaseExceptionObject *)current)->suppress_context) {
+            Py_XDECREF(((PyBaseExceptionObject *)current)->context);
+            ((PyBaseExceptionObject *)current)->context = Py_NewRef(exc);
+        }
+    }
+}
+```
+
+Implicit chaining: when an exception is raised inside an `except` block, the original exception becomes `__context__`. `_PyErr_ChainExceptions` wires this up. Explicit chaining (`raise X from Y`) sets `__cause__` and `__suppress_context__`.
+
+## gopy notes
+
+`PyErr_SetString` is `vm.ErrSetString` in `vm/errors.go`. `PyErr_Format` uses Go's `fmt.Sprintf`. `PyErr_WriteUnraisable` calls the `sys.unraisablehook` Python function. `_PyErr_ChainExceptions` is `vm.ErrChainExceptions`, which sets `objects.BaseException.Context`.

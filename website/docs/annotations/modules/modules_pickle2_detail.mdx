@@ -1,0 +1,103 @@
+---
+title: Modules/_pickle.c (part 2)
+description: "Modules/_pickle.c part 2: Pickler.dump, reduce_override, load_reduce, memo table, protocol 5 out-of-band buffers."
+cpython_path: Modules/_pickle.c
+cpython_version: "3.14"
+lines: 700
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/_pickle.c" />
+
+This annotation covers the pickle serialization protocol. See `modules_pickle_detail` for `Unpickler`, `load`, `load_build`, `find_class`, and the `Unpickler.dispatch` table.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-100 | `Pickler.dump` | Entry point; dispatch to `save` based on type |
+| 101-220 | `save_reduce` | Serialize objects via `__reduce__`/`__reduce_ex__` |
+| 221-360 | `save_pers` | Persistent ID hook for custom object identity |
+| 361-500 | Memo table | De-duplicate shared references with `BINPUT`/`BINGET` |
+| 501-700 | Protocol 5 buffers | Out-of-band `PickleBuffer` for zero-copy |
+
+## Reading
+
+### `Pickler.dump`
+
+```c
+// CPython: Modules/_pickle.c:2180 Pickler_dump
+static PyObject *
+Pickler_dump(PicklerObject *self, PyObject *args)
+{
+    PyObject *obj;
+    if (!PyArg_ParseTuple(args, "O:dump", &obj)) return NULL;
+    if (self->proto >= 2) {
+        /* Emit protocol opcode */
+        char header[2] = {PROTO, (char)self->proto};
+        write_bytes(self->write, header, 2);
+    }
+    if (dump(self, obj) < 0) return NULL;
+    /* Emit STOP */
+    char stop = STOP;
+    write_bytes(self->write, &stop, 1);
+    Py_RETURN_NONE;
+}
+```
+
+`pickle.dump(obj, file)` emits a `PROTO` opcode (protocol 2+) followed by the serialized object and a terminal `STOP` opcode. Protocol 5 adds out-of-band buffer support for large NumPy arrays.
+
+### Memo table
+
+```c
+// CPython: Modules/_pickle.c:1380 memo_put
+static int
+memo_put(PicklerObject *self, PyObject *obj)
+{
+    /* The memo is a dict mapping id(obj) -> (memo_index, obj).
+       If obj is already memoized, emit BINGET to reference it.
+       Otherwise emit BINPUT to store it. */
+    PyObject *id = PyLong_FromSsize_t((Py_ssize_t)obj);
+    if (PyDict_Contains(self->memo, id)) {
+        /* Already seen: emit reference */
+        Py_ssize_t idx = ...;
+        WRITE_BYTES_OPCODE(BINGET, idx);
+    } else {
+        Py_ssize_t idx = PyDict_GET_SIZE(self->memo);
+        PyDict_SetItem(self->memo, id, PyLong_FromSsize_t(idx));
+        WRITE_BYTES_OPCODE(BINPUT, idx);
+    }
+}
+```
+
+The memo table enables cyclic structures and shared references. `pickle.dumps([obj, obj])` emits `obj` once and a back-reference for the second occurrence. `pickle.loads` reconstructs the same sharing.
+
+### Protocol 5 `PickleBuffer`
+
+```c
+// CPython: Modules/_pickle.c:2480 save_picklebuffer
+static int
+save_picklebuffer(PicklerObject *self, PyObject *obj)
+{
+    /* Protocol 5: emit NEXT_BUFFER opcode and pass the buffer to
+       self->buffer_callback(obj) out-of-band. */
+    if (self->buffer_callback != NULL) {
+        PyObject *ret = PyObject_CallOneArg(self->buffer_callback, obj);
+        if (ret == NULL) return -1;
+        Py_DECREF(ret);
+        WRITE_BYTES_OPCODE(NEXT_BUFFER, 0);
+    } else {
+        /* Fall back to in-band */
+        save_bytes(self, PyPickleBuffer_GetBuffer(obj));
+    }
+    return 0;
+}
+```
+
+Protocol 5 allows large buffers (NumPy arrays, `memoryview`) to be transferred out-of-band. `multiprocessing` uses this to share memory between processes via shared memory segments instead of serializing and deserializing.
+
+## gopy notes
+
+`Pickler.dump` is `module/pickle.Pickler.Dump` in `module/pickle/module.go`. The memo table is a Go map from `uintptr` (object address) to index. `save_reduce` calls `objects.ReduceEx` on the object. Protocol 5 `PickleBuffer` support requires the `buffer_callback` to be set by the transport layer.

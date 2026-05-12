@@ -1,0 +1,102 @@
+---
+title: Lib/array.py — array module (part 2)
+description: "array module part 2: array.fromlist, array.tolist, array.frombytes, array.tobytes, array.byteswap, typecodes."
+cpython_path: Modules/arraymodule.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/arraymodule.c" />
+
+This annotation covers `array` conversion and byte operations. See `lib_array_detail` for `array.__new__`, `array.append`, `array.__getitem__`, and the typecode table.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `array.fromlist` | Extend an array from a Python list |
+| 81-180 | `array.tolist` | Convert array to a Python list of scalars |
+| 181-300 | `array.frombytes` / `array.tobytes` | Raw binary import/export |
+| 301-420 | `array.byteswap` | Reverse byte order of each element (endian swap) |
+| 421-500 | Typecodes | `b`, `h`, `i`, `l`, `f`, `d`, etc. |
+
+## Reading
+
+### `array.fromlist`
+
+```c
+// CPython: Modules/arraymodule.c:1420 array_fromlist
+static PyObject *
+array_fromlist(arrayobject *self, PyObject *list)
+{
+    Py_ssize_t n = PyList_GET_SIZE(list);
+    /* Resize the array to hold n more elements */
+    if (array_do_extend(self, n) < 0) return NULL;
+    /* Convert each Python object to the C type and store */
+    for (Py_ssize_t i = 0; i < n; i++) {
+        PyObject *v = PyList_GET_ITEM(list, i);
+        if (self->ob_descr->setitem(self, self->ob_size - n + i, v) < 0) {
+            /* Roll back on error */
+            array_del_slice(self, self->ob_size - n, self->ob_size);
+            return NULL;
+        }
+    }
+    Py_RETURN_NONE;
+}
+```
+
+`arr.fromlist([1, 2, 3])` pre-allocates then fills. On error, the partial extension is rolled back atomically. The `setitem` function is type-specific (e.g., for `'i'`, it calls `PyArg_Parse(v, "i", &x)`).
+
+### `array.frombytes`
+
+```c
+// CPython: Modules/arraymodule.c:1520 array_frombytes
+static PyObject *
+array_frombytes(arrayobject *self, PyObject *args)
+{
+    Py_buffer buffer;
+    PyArg_Parse(args, "y*:frombytes", &buffer);
+    if (buffer.len % self->ob_descr->itemsize != 0) {
+        PyErr_SetString(PyExc_ValueError,
+            "bytes length not a multiple of item size");
+        PyBuffer_Release(&buffer);
+        return NULL;
+    }
+    /* Direct memcpy into the array's buffer */
+    Py_ssize_t n = buffer.len / self->ob_descr->itemsize;
+    array_resize(self, Py_SIZE(self) + n);
+    memcpy(self->ob_item + Py_SIZE(self) - n, buffer.buf, buffer.len);
+    PyBuffer_Release(&buffer);
+    Py_RETURN_NONE;
+}
+```
+
+`arr.frombytes(b'\x01\x00\x02\x00')` for an `'h'` (short) array adds two elements. The raw bytes are copied directly without per-element conversion. This is the fastest way to populate an array from binary data.
+
+### Typecodes
+
+```c
+// CPython: Modules/arraymodule.c:80 descriptors
+/* typecode: itemsize, getitem, setitem, ... */
+static struct arraydescr descriptors[] = {
+    {'b', 1, b_getitem, b_setitem, "b"},  /* signed char */
+    {'B', 1, BB_getitem, BB_setitem, "B"},/* unsigned char */
+    {'h', 2, h_getitem, h_setitem, "h"},  /* signed short */
+    {'H', 2, HH_getitem, HH_setitem, "H"},/* unsigned short */
+    {'i', 4, i_getitem, i_setitem, "i"},  /* signed int */
+    {'I', 4, II_getitem, II_setitem, "I"},/* unsigned int */
+    {'l', 8, l_getitem, l_setitem, "l"},  /* signed long (platform) */
+    {'f', 4, f_getitem, f_setitem, "f"},  /* float */
+    {'d', 8, d_getitem, d_setitem, "d"},  /* double */
+    ...
+};
+```
+
+Typecodes map to C types. `'l'` is 4 or 8 bytes depending on the platform (32/64-bit). `struct` format codes and array typecodes are mostly compatible, but not identical (`'q'` exists in `struct` but not `array`).
+
+## gopy notes
+
+`array.fromlist` is `module/array.Array.Fromlist` in `module/array/module.go`. The typecode dispatch uses a Go switch statement over the typecode rune. `array.frombytes` uses `copy(arr.buf[len:], data)`. `array.byteswap` reverses bytes in-place using Go's `binary.BigEndian`/`LittleEndian`.

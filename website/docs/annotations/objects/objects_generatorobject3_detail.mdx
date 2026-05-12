@@ -1,0 +1,94 @@
+---
+title: Objects/genobject.c (part 3)
+description: "Objects/genobject.c part 3: generator.throw, generator.close, async generator, aclose, athrow."
+cpython_path: Objects/genobject.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Objects/genobject.c" />
+
+This annotation covers generator exception injection and async generators. See `objects_genobject2_detail` for `generator.send`, `generator.__next__`, and frame lifecycle.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-100 | `generator.throw` | Inject an exception at the yield point |
+| 101-220 | `generator.close` | Throw `GeneratorExit`; finalize the generator |
+| 221-360 | `async_generator.__anext__` | Advance an async generator |
+| 361-500 | `async_generator.aclose` / `athrow` | Async equivalents of close/throw |
+
+## Reading
+
+### `generator.throw`
+
+```c
+// CPython: Objects/genobject.c:480 gen_throw
+static PyObject *
+gen_throw(PyGenObject *gen, PyObject *const *args, Py_ssize_t nargs)
+{
+    PyObject *typ, *val = Py_None, *tb = Py_None;
+    /* Normalize: throw(TypeError) or throw(TypeError("msg")) */
+    ...
+    /* Set the exception in the thread state, then resume the generator */
+    PyErr_Restore(typ, val, tb);
+    return gen_send_ex(gen, Py_None, 1 /*exc*/, 0);
+}
+```
+
+`gen.throw(ValueError, "bad value")` resumes the generator at its last `yield` but with an exception active. The generator's `try`/`except` block can catch it. If uncaught, `throw` propagates the exception to the caller.
+
+### `generator.close`
+
+```c
+// CPython: Objects/genobject.c:560 gen_close
+static PyObject *
+gen_close(PyGenObject *gen, PyObject *args)
+{
+    /* Throw GeneratorExit into the generator.
+       If the generator raises GeneratorExit or StopIteration, that's fine.
+       If the generator yields a value, raise RuntimeError. */
+    PyObject *retval = gen_throw(gen, _PyTuple_EMPTY_ARGS, 0);
+    if (retval) {
+        const char *msg = "generator ignored GeneratorExit";
+        Py_DECREF(retval);
+        PyErr_SetString(PyExc_RuntimeError, msg);
+        return NULL;
+    }
+    if (PyErr_ExceptionMatches(PyExc_StopIteration) ||
+        PyErr_ExceptionMatches(PyExc_GeneratorExit)) {
+        PyErr_Clear();
+        Py_RETURN_NONE;
+    }
+    return NULL;
+}
+```
+
+`gen.close()` is called by the GC when a generator is garbage-collected while suspended. Generators with `try`/`finally` blocks use this to run cleanup code. Yielding from `close()` is a `RuntimeError`.
+
+### `async_generator.__anext__`
+
+```c
+// CPython: Objects/genobject.c:720 async_gen_anext
+static PyObject *
+async_gen_anext(PyAsyncGenObject *o)
+{
+    /* Return an awaitable (PyAsyncGenASend object) that,
+       when awaited, advances the async generator one step. */
+    if (o->ag_closed) {
+        PyErr_SetNone(PyExc_StopAsyncIteration);
+        return NULL;
+    }
+    return async_gen_asend_new(o, Py_None);
+}
+```
+
+`async for item in agen:` calls `agen.__anext__()` which returns a coroutine-like object. The `await` on that object advances the async generator to the next `yield` or `StopAsyncIteration`.
+
+## gopy notes
+
+`generator.throw` is `objects.GeneratorThrow` in `objects/generator.go`. It sets the exception and calls `vm.GenSendEx`. `generator.close` is `objects.GeneratorClose`. `async_generator.__anext__` returns a `objects.AsyncGenANextAwaitable`. `aclose` throws `GeneratorExit` asynchronously.

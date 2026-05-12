@@ -1,0 +1,92 @@
+---
+title: Python/ceval.c (part 25)
+description: "Python/ceval.c part 25: UNPACK_SEQUENCE specializations, UNPACK_EX, FORMAT_VALUE, BUILD_STRING."
+cpython_path: Python/ceval.c
+cpython_version: "3.14"
+lines: 400
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Python/ceval.c" />
+
+This annotation covers unpacking and f-string opcodes. See `python_ceval24_detail` for collection construction opcodes.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `UNPACK_SEQUENCE_TWO_TUPLE` | Unpack exactly 2-element tuple fast path |
+| 81-160 | `UNPACK_SEQUENCE_TUPLE` | Unpack a tuple of known length |
+| 161-260 | `UNPACK_EX` | `a, *b, c = iterable` — left/right counts |
+| 261-360 | `FORMAT_VALUE` | `f'{x!r:.2f}'` — apply conversion and format spec |
+| 361-400 | `BUILD_STRING` | Concatenate string parts for f-string result |
+
+## Reading
+
+### `UNPACK_SEQUENCE_TWO_TUPLE`
+
+```c
+// CPython: Python/ceval.c:4620 UNPACK_SEQUENCE_TWO_TUPLE
+inst(UNPACK_SEQUENCE_TWO_TUPLE, (seq -- val1, val0)) {
+    DEOPT_IF(!PyTuple_CheckExact(seq), UNPACK_SEQUENCE);
+    DEOPT_IF(PyTuple_GET_SIZE(seq) != 2, UNPACK_SEQUENCE);
+    val0 = Py_NewRef(PyTuple_GET_ITEM(seq, 0));
+    val1 = Py_NewRef(PyTuple_GET_ITEM(seq, 1));
+    DECREF_SPECIALIZED(seq, _PyTuple_MaybeUntrack);
+}
+```
+
+`a, b = some_two_tuple` avoids the generic unpacking loop. This specialization is critical for functions returning `(result, error)` pairs and for `enumerate` unpacking.
+
+### `UNPACK_EX`
+
+```c
+// CPython: Python/ceval.c:4720 UNPACK_EX
+inst(UNPACK_EX, (seq -- lefts[oparg & 0xFF], seq2, rights[oparg >> 8])) {
+    int totalargs = 1 + (oparg & 0xFF) + (oparg >> 8);
+    PyObject **top = stack_pointer + totalargs - 1;
+    /* Unpack left elements (before *), collect middle into list, unpack right */
+    int res = _PySequence_IterSearch(seq, (oparg & 0xFF), (oparg >> 8), top);
+    ERROR_IF(res < 0, error);
+}
+```
+
+`a, b, *c, d = iterable` encodes left count (2) and right count (1) in `oparg`. The star target `c` collects everything in the middle as a list. The right elements are consumed from the end of the sequence.
+
+### `FORMAT_VALUE`
+
+```c
+// CPython: Python/ceval.c:4820 FORMAT_VALUE
+inst(FORMAT_VALUE, (value -- result)) {
+    /* oparg: conversion (none/!s/!r/!a) and format_spec flag */
+    int which_conversion = oparg & FVC_MASK;
+    int have_fmt_spec = (oparg & FVS_MASK) == FVS_HAVE_SPEC;
+    PyObject *fmt_spec = have_fmt_spec ? POP() : NULL;
+    /* Apply conversion */
+    if (which_conversion == FVC_STR)  value = PyObject_Str(value);
+    else if (which_conversion == FVC_REPR) value = PyObject_Repr(value);
+    else if (which_conversion == FVC_ASCII) value = PyObject_ASCII(value);
+    /* Apply format spec */
+    result = PyObject_Format(value, fmt_spec);
+}
+```
+
+`f'{x!r:.3f}'` pushes the format spec `'.3f'`, then `FORMAT_VALUE` with `FVC_REPR | FVS_HAVE_SPEC`. `PyObject_Format` calls `x.__format__(fmt_spec)`.
+
+### `BUILD_STRING`
+
+```c
+// CPython: Python/ceval.c:4900 BUILD_STRING
+inst(BUILD_STRING, (pieces[oparg] -- str)) {
+    str = _PyUnicode_JoinArray(&_Py_STR(empty), pieces, oparg);
+    ERROR_IF(str == NULL, error);
+}
+```
+
+`f'hello {name}!'` compiles to `LOAD_CONST 'hello '`, `FORMAT_VALUE name`, `LOAD_CONST '!'`, `BUILD_STRING 3`. `_PyUnicode_JoinArray` concatenates the pieces efficiently using one allocation.
+
+## gopy notes
+
+`UNPACK_SEQUENCE_TWO_TUPLE` is `vm.UnpackSequenceTwoTuple` in `vm/eval_specialize.go`. `UNPACK_EX` is `vm.UnpackEx` using `objects.IterSearch`. `FORMAT_VALUE` calls `objects.ObjectStr`/`Repr`/`ASCII` then `objects.ObjectFormat`. `BUILD_STRING` uses `strings.Join` on the pieces.

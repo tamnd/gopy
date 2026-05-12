@@ -1,0 +1,88 @@
+---
+title: Modules/_struct.c (part 2)
+description: "Modules/_struct.c part 2: struct.pack_into, struct.iter_unpack, Struct object, native vs standard sizes, alignment."
+cpython_path: Modules/_struct.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/_struct.c" />
+
+This annotation covers bulk struct operations and format compilation. See `modules_struct_detail` for `struct.pack`, `struct.unpack`, format string parsing, and type codes.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-100 | `struct.pack_into` | Pack directly into a writable buffer at an offset |
+| 101-220 | `struct.iter_unpack` | Iterate over a buffer in fixed-size chunks |
+| 221-360 | `Struct` object | Pre-compiled format; `Struct.pack`/`unpack` |
+| 361-480 | Byte order prefixes | `@` (native), `=` (native, no align), `<`, `>`, `!` |
+| 481-500 | Alignment padding | `x` bytes, struct natural alignment with `@` |
+
+## Reading
+
+### `struct.pack_into`
+
+```c
+// CPython: Modules/_struct.c:1280 s_pack_into
+static PyObject *
+s_pack_into(PyObject *self, PyObject *const *args, Py_ssize_t nargs)
+{
+    /* Write packed bytes directly into buffer at offset, avoiding allocation. */
+    PyObject *buffer = args[0];
+    Py_ssize_t offset = PyNumber_AsSsize_t(args[1], PyExc_OverflowError);
+    Py_buffer buf;
+    PyObject_GetBuffer(buffer, &buf, PyBUF_WRITABLE);
+    /* Check offset and size */
+    if (offset < 0) offset += buf.len;
+    if (offset + s_object->size > buf.len) {
+        PyErr_SetString(PyExc_struct.error, "pack_into requires buffer of ...");
+        return NULL;
+    }
+    s_pack_core((char *)buf.buf + offset, args + 2, nargs - 2);
+    PyBuffer_Release(&buf);
+    Py_RETURN_NONE;
+}
+```
+
+`struct.pack_into(fmt, buffer, offset, *values)` is the zero-copy variant. It writes directly into a `bytearray` or `ctypes` array at the given offset, avoiding a `bytes` allocation.
+
+### `struct.iter_unpack`
+
+```c
+// CPython: Modules/_struct.c:1380 s_iter_unpack
+static PyObject *
+s_iter_unpack(PyObject *self, PyObject *buffer)
+{
+    /* Return an iterator yielding one tuple per struct-size chunk. */
+    unpackiterobject *it = PyObject_New(unpackiterobject, &unpackiter_type);
+    it->so = Py_NewRef(self);
+    PyObject_GetBuffer(buffer, &it->buf, PyBUF_SIMPLE);
+    it->index = 0;
+    return (PyObject *)it;
+}
+```
+
+`struct.iter_unpack('>HH', data)` is efficient for parsing binary protocols with many repeated records. It avoids the overhead of slicing `data` into chunks manually.
+
+### Byte order and size
+
+```c
+// CPython: Modules/_struct.c:140 formatcode prefixes
+/* Prefix    Byte order    Size        Alignment
+   @         native         native      native (default)
+   =         native         standard    none
+   <         little-endian  standard    none
+   >         big-endian     standard    none
+   !         network (=big) standard    none  */
+```
+
+`@` uses the platform's native `sizeof` and alignment. `<` and `>` use the "standard" sizes defined by the C standard (e.g., `'i'` is always 4 bytes). This matters for cross-platform binary protocols.
+
+## gopy notes
+
+`struct.pack_into` is `module/struct.PackInto` in `module/struct/module.go`. It writes into the buffer's `[]byte` slice at the offset. `struct.iter_unpack` returns a `module/struct.UnpackIterator`. Byte order is handled by `binary.LittleEndian`/`binary.BigEndian` from Go's `encoding/binary`.
