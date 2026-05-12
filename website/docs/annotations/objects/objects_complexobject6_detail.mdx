@@ -1,0 +1,130 @@
+---
+title: Objects/complexobject.c (part 6)
+description: "Objects/complexobject.c part 6: complex.__new__, PyComplex_AsCComplex, complex arithmetic, complex.conjugate, complex.__abs__."
+cpython_path: Objects/complexobject.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Objects/complexobject.c" />
+
+This annotation covers construction and arithmetic. See `objects_complexobject5_detail` for the `Py_complex` C struct, `__format__`, `__hash__`, and repr.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `complex.__new__` | Parse real/imag arguments; call `__complex__` if available |
+| 81-180 | `PyComplex_AsCComplex` | Extract the C-level `Py_complex` struct from a Python object |
+| 181-300 | `c_sum` / `c_prod` / `c_quot` | Low-level Py_complex arithmetic with overflow checks |
+| 301-400 | `complex.__abs__` | `hypot(real, imag)` avoiding overflow |
+| 401-500 | `complex.conjugate` | Return `real - imag*j` |
+
+## Reading
+
+### `complex.__new__`
+
+```c
+// CPython: Objects/complexobject.c:1010 complex_new_impl
+static PyObject *
+complex_new_impl(PyTypeObject *type, PyObject *r, PyObject *i)
+{
+    /* If r has __complex__, use it */
+    if (!PyComplex_CheckExact(r)) {
+        PyObject *tmp = try_complex_special_method(r);
+        if (tmp) { r = tmp; }
+        else if (PyErr_Occurred()) return NULL;
+    }
+    double real = PyComplex_RealAsDouble(r);
+    double imag  = (i == Py_None) ? 0.0 : PyComplex_ImagAsDouble(i);
+    /* If r was itself complex, add its imaginary part to imag */
+    if (PyComplex_Check(r)) imag += ((PyComplexObject *)r)->cval.imag;
+    return PyComplex_FromDoubles(real, imag);
+}
+```
+
+`complex("3+4j")` routes through `PyComplex_FromString`. `complex(r, i)` accepts any numeric type for both arguments. If `r` is complex, its imaginary part is added to `i`: `complex(1+2j, 3)` gives `(1+5j)`.
+
+### `PyComplex_AsCComplex`
+
+```c
+// CPython: Objects/complexobject.c:280 PyComplex_AsCComplex
+Py_complex
+PyComplex_AsCComplex(PyObject *op)
+{
+    /* 1. If it is already a complex, return cval directly */
+    if (PyComplex_Check(op))
+        return ((PyComplexObject *)op)->cval;
+    /* 2. Try __complex__ */
+    PyObject *cv = try_complex_special_method(op);
+    if (cv) {
+        Py_complex z = ((PyComplexObject *)cv)->cval;
+        Py_DECREF(cv);
+        return z;
+    }
+    /* 3. Fall back to __float__ (imag=0) */
+    double x = PyFloat_AsDouble(op);
+    Py_complex z = {x, 0.0};
+    return z;
+}
+```
+
+`PyComplex_AsCComplex` is the C API entry point for numeric tower coercion. Libraries like `cmath` call this to extract the C double pair before dispatching to `_Py_c_abs` etc.
+
+### `c_prod` with Kahan guard
+
+```c
+// CPython: Objects/complexobject.c:480 c_prod
+static Py_complex
+c_prod(Py_complex a, Py_complex b)
+{
+    Py_complex r;
+    r.real = a.real * b.real - a.imag * b.imag;
+    r.imag = a.real * b.imag + a.imag * b.real;
+    /* Check for NaN result from inf*0 — apply the C99 annex G recovery */
+    if (isnan(r.real) && isnan(r.imag)) {
+        ...  /* try to recover a finite result */
+    }
+    return r;
+}
+```
+
+The C99 Annex G recovery attempts to produce `inf + nanj` rather than `nan + nanj` when one input has an infinite component. This matters for `(inf+0j) * (0+1j)` which should give `infj`, not `nan`.
+
+### `complex.__abs__`
+
+```c
+// CPython: Objects/complexobject.c:800 complex_abs
+static PyObject *
+complex_abs(PyComplexObject *v)
+{
+    double result = _Py_c_abs(v->cval);
+    if (isinf(result) && !isinf(v->cval.real) && !isinf(v->cval.imag))
+        PyErr_SetString(PyExc_OverflowError, "absolute value too large");
+    return PyFloat_FromDouble(result);
+}
+```
+
+`_Py_c_abs` calls `hypot(real, imag)` which avoids intermediate overflow. `abs(3e300 + 4e300j)` works correctly; direct `sqrt(real**2 + imag**2)` would overflow to `inf`.
+
+### `complex.conjugate`
+
+```c
+// CPython: Objects/complexobject.c:860 complex_conjugate
+static PyObject *
+complex_conjugate(PyObject *self, PyObject *Py_UNUSED(ignored))
+{
+    Py_complex c = ((PyComplexObject *)self)->cval;
+    c.imag = -c.imag;
+    return PyComplex_FromCComplex(c);
+}
+```
+
+`(3+4j).conjugate()` returns `(3-4j)`. Used in Hermitian transpose operations and inverse FFT formulas.
+
+## gopy notes
+
+`complex.__new__` is `objects.ComplexNew` in `objects/complex.go`. `PyComplex_AsCComplex` maps to `objects.ComplexFromObject`. Arithmetic uses Go's `complex128` built-in. `complex.__abs__` calls `math.Hypot`. `complex.conjugate` is `objects.ComplexConjugate`.

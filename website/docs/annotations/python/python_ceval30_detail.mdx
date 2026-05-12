@@ -1,0 +1,142 @@
+---
+title: Python/ceval.c (part 30)
+description: "Python/ceval.c part 30: SEND, YIELD_VALUE, RESUME, RETURN_GENERATOR — generator and coroutine frame entry/exit."
+cpython_path: Python/ceval.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Python/ceval.c" />
+
+This annotation covers generator and coroutine opcodes. See `python_ceval29_detail` for pattern matching opcodes and f-string formatting.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `RETURN_GENERATOR` | Convert the current frame into a generator object |
+| 81-180 | `RESUME` | Guard point — re-entry from `send`/`throw`/`close` |
+| 181-300 | `YIELD_VALUE` | Suspend execution; push the yielded value to the caller |
+| 301-420 | `SEND` | Resume a sub-generator (`yield from` / `await`) |
+| 421-500 | `CLEANUP_THROW` | Handle `generator.throw()` in a `yield from` chain |
+
+## Reading
+
+### `RETURN_GENERATOR`
+
+```c
+// CPython: Python/ceval.c:1180 RETURN_GENERATOR
+inst(RETURN_GENERATOR, (--)) {
+    /* Called at the start of a generator function's first invocation.
+       Stash the current frame into a new PyGenObject and return it
+       to the caller immediately. */
+    PyFrameObject *frame = _PyFrame_GetFrameObject(frame_obj);
+    PyGenObject *gen = (PyGenObject *)_Py_MakeCoro(tstate, frame);
+    _PyFrame_SetStackPointer(frame_obj, stack_pointer);
+    /* Return the generator; the frame is now owned by the gen */
+    DISPATCH_GOTO();  /* effectively returns gen to caller */
+}
+```
+
+`RETURN_GENERATOR` is the first opcode in every `def f(): ... yield ...` function. The frame is detached from the call stack and attached to the generator. The caller receives the generator object; the function body has not executed yet.
+
+### `RESUME`
+
+```c
+// CPython: Python/ceval.c:1220 RESUME
+inst(RESUME, (--)) {
+    /* oparg encodes the entry point:
+       0 = initial call
+       1 = yield from / await (SEND)
+       2 = throw()
+       3 = close() / GeneratorExit
+    */
+    if (oparg == 0 && tstate->tracing) {
+        /* Fire 'call' trace event on first entry */
+        ...
+    }
+    if (oparg != 0) {
+        /* Check for generator.throw() delivering an exception */
+        if (tstate->current_exception != NULL) {
+            goto resume_with_error;
+        }
+    }
+    DISPATCH();
+}
+```
+
+Every `yield` and `await` point has a corresponding `RESUME` in the bytecode. The `oparg` tells the interpreter how execution resumed, which affects tracing and `throw` delivery.
+
+### `YIELD_VALUE`
+
+```c
+// CPython: Python/ceval.c:1280 YIELD_VALUE
+inst(YIELD_VALUE, (retval -- retval)) {
+    /* Save stack state into the frame */
+    _PyFrame_SetStackPointer(frame_obj, stack_pointer - 1);
+    assert(EMPTY());
+    /* Mark the generator as suspended */
+    gen->gi_frame_state = FRAME_SUSPENDED;
+    /* Return retval to whoever called next()/send() */
+    _Py_LeaveRecursiveCallTstate(tstate);
+    return retval;
+}
+```
+
+After `YIELD_VALUE` the frame's `stack_pointer` points to just below the yielded value. On the next `send(value)`, the value is pushed as the result of the yield expression and execution resumes at the next `RESUME`.
+
+### `SEND`
+
+```c
+// CPython: Python/ceval.c:1340 SEND
+inst(SEND, (receiver, v -- receiver, retval)) {
+    /* Implements "yield from" and "await":
+       1. If receiver is a generator/coroutine, call its send method
+       2. If send returns normally -> retval is the yielded value; keep receiver
+       3. If StopIteration -> retval is the final value; pop receiver
+    */
+    assert(googIdx == oparg - 1);
+    PyObject *retval;
+    if (tstate->c_tracefunc == NULL) {
+        retval = ((PyGenObject *)receiver)->gi_iternext(...);
+    } else {
+        retval = _PyEval_EvalFrameDefault(tstate, ...);
+    }
+    if (retval == NULL) {
+        if (_PyErr_ExceptionMatches(tstate, PyExc_StopIteration)) {
+            retval = _PyErr_FetchStopIterationValue();
+            /* sub-generator exhausted: jump past the SEND */
+            JUMPBY(oparg);
+        }
+    }
+}
+```
+
+`SEND` is the compiled form of `yield from subgen` and `await coro`. When the sub-generator raises `StopIteration`, `SEND` extracts the `value` attribute and jumps to the `RESUME` after the `yield from`.
+
+### `CLEANUP_THROW`
+
+```c
+// CPython: Python/ceval.c:1420 CLEANUP_THROW
+inst(CLEANUP_THROW, (del_item, val_or_exc -- del_item, retval)) {
+    /* Called after SEND raises StopIteration from a throw().
+       Propagate the exception upward or turn it into a return value. */
+    assert(PyExceptionInstance_Check(val_or_exc) ||
+           val_or_exc == Py_None);
+    if (PyErr_GivenExceptionMatches(val_or_exc, PyExc_StopIteration)) {
+        retval = ((PyStopIterationObject *)val_or_exc)->value;
+    } else {
+        _PyErr_SetRaisedException(tstate, Py_NewRef(val_or_exc));
+        goto error;
+    }
+}
+```
+
+`CLEANUP_THROW` handles `generator.throw(StopIteration(value))` by treating it as a return value rather than an error, matching the `yield from` protocol defined in PEP 380.
+
+## gopy notes
+
+`RETURN_GENERATOR` is in `vm/eval_gen.go` and calls `objects.MakeGenerator`. `RESUME` checks `vm.currentException`. `YIELD_VALUE` saves the frame via `objects.Frame.Suspend()` and returns to the caller. `SEND` calls `objects.GeneratorSend`. `CLEANUP_THROW` is in `vm/eval_unwind.go`.

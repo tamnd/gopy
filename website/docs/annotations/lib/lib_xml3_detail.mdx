@@ -1,0 +1,133 @@
+---
+title: Lib/xml/ (part 3)
+description: "Lib/xml/ part 3: xml.etree.ElementTree — Element, SubElement, parse, iterparse, tostring, indent."
+cpython_path: Lib/xml/etree/ElementTree.py
+cpython_version: "3.14"
+lines: 600
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/xml/etree/ElementTree.py" />
+
+This annotation covers the ElementTree API. See `lib_xml2_detail` for SAX and minidom, and `lib_xml_detail` for expat bindings and the C accelerator.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `Element.__init__` | Core element node: tag, attrib, text, tail, children |
+| 81-180 | `Element.iter` / `Element.find` | Depth-first traversal and XPath-lite search |
+| 181-300 | `parse` / `ElementTree.parse` | Build a tree from a file using `XMLParser` |
+| 301-420 | `iterparse` | Event-driven incremental parsing with element reuse |
+| 421-520 | `tostring` / `indent` | Serialize a tree to bytes or in-place indentation |
+| 521-600 | `register_namespace` | Map URI prefixes for serialization |
+
+## Reading
+
+### `Element.__init__`
+
+```python
+# CPython: Lib/xml/etree/ElementTree.py:120 Element.__init__
+class Element:
+    tag = None      # str: element name (or callable for factory elements)
+    attrib = None   # dict: XML attributes
+    text = None     # str: text before first child or None
+    tail = None     # str: text after closing tag or None
+    def __init__(self, tag, attrib={}, **extra):
+        if isinstance(attrib, Element):
+            raise TypeError(...)
+        attrib = {**attrib, **extra}
+        self.tag = tag
+        self.attrib = attrib
+        self._children = []
+```
+
+`text` holds the text between the opening tag and the first child (or the closing tag). `tail` holds text between the closing tag and the next sibling's opening tag. Both are `None` if absent, not `""`.
+
+### `Element.iter`
+
+```python
+# CPython: Lib/xml/etree/ElementTree.py:208 Element.iter
+def iter(self, tag=None):
+    """Create a tree iterator over this element and all subelements.
+    The iterator yields elements in document order.
+    """
+    if tag == "*":
+        tag = None
+    if tag is None or self.tag == tag:
+        yield self
+    for e in self._children:
+        yield from e.iter(tag)
+```
+
+`elem.iter()` is a DFS generator. `elem.iter('ns:tag')` filters by tag. The C accelerator (`_elementtree`) implements this as a stack-based loop to avoid Python generator overhead.
+
+### `iterparse`
+
+```python
+# CPython: Lib/xml/etree/ElementTree.py:980 iterparse
+def iterparse(source, events=None, parser=None):
+    """Incrementally parse XML, yielding (event, elem) pairs.
+    events: subset of ('start', 'end', 'start-ns', 'end-ns', 'comment', 'pi')
+    """
+    ...
+    pullparser = XMLPullParser(events=events, _parser=parser)
+    while True:
+        data = source.read(65536)
+        if not data:
+            break
+        pullparser.feed(data)
+        yield from pullparser.read_events()
+    pullparser.close()
+    yield from pullparser.read_events()
+```
+
+`iterparse` is memory-efficient for large files: process and discard elements as they are yielded. The pattern `for event, elem in iterparse(f, events=['end']): elem.clear()` keeps memory flat regardless of document size.
+
+### `tostring`
+
+```python
+# CPython: Lib/xml/etree/ElementTree.py:1120 tostring
+def tostring(element, encoding='us-ascii', method='xml',
+             *, xml_declaration=None, default_namespace=None,
+             short_empty_elements=True):
+    stream = io.BytesIO()
+    ElementTree(element).write(stream, encoding, xml_declaration=xml_declaration,
+                               default_namespace=default_namespace,
+                               method=method,
+                               short_empty_elements=short_empty_elements)
+    return stream.getvalue()
+```
+
+`tostring(elem, encoding='unicode')` returns `str` instead of `bytes`. `method='html'` uses HTML void elements (`<br>` not `<br/>`). `method='c14n'` uses Canonical XML (all attributes sorted, namespace declarations explicit).
+
+### `indent`
+
+```python
+# CPython: Lib/xml/etree/ElementTree.py:1200 indent
+def indent(tree, space='  ', level=0):
+    """Append whitespace to the subtree to indent the tree visually."""
+    i = '\n' + level * space
+    j = '\n' + (level - 1) * space
+    if len(tree):
+        if not tree.text or not tree.text.strip():
+            tree.text = i + space
+        if not tree.tail or not tree.tail.strip():
+            tree.tail = i
+        for subtree in tree:
+            indent(subtree, space, level + 1)
+        if not subtree.tail or not subtree.tail.strip():
+            subtree.tail = j
+    else:
+        if level and (not tree.tail or not tree.tail.strip()):
+            tree.tail = j
+    ...
+```
+
+`indent` mutates `text` and `tail` in place. It preserves existing significant whitespace (strips non-significant before replacing). Added in Python 3.9.
+
+## gopy notes
+
+`Element` is `objects.XMLElement` in `objects/xml_element.go`. `iterparse` uses Go's `encoding/xml` tokenizer and yields via a channel or iterator. `tostring` calls `objects.XMLTreeWrite` which writes to a `bytes.Buffer`. `indent` is implemented as a recursive Go function.

@@ -1,0 +1,114 @@
+---
+title: Lib/csv.py (part 2)
+description: "Lib/csv.py part 2: csv.DictReader, csv.DictWriter, csv.Sniffer — dialect detection and dict-based row I/O."
+cpython_path: Lib/csv.py
+cpython_version: "3.14"
+lines: 400
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/csv.py" />
+
+This annotation covers the high-level dict interfaces and the sniffer. See `modules_csv_detail` for the C-level `reader`/`writer` and `Dialect` class.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `DictReader.__init__` | Wrap a `reader`; accept or detect fieldnames |
+| 81-160 | `DictReader.__next__` | Yield `dict` rows; handle short/long rows |
+| 161-240 | `DictWriter.writerow` | Map a dict through fieldnames, call `writer.writerow` |
+| 241-340 | `Sniffer.sniff` | Detect delimiter and quotechar from a sample |
+| 341-400 | `Sniffer._guess_quote_and_delimiter` | Inner heuristic for quoting style |
+
+## Reading
+
+### `DictReader.__next__`
+
+```python
+# CPython: Lib/csv.py:112 DictReader.__next__
+def __next__(self):
+    if self.line_num == 0:
+        self.fieldnames  # trigger fieldnames population
+    row = next(self.reader)
+    self.line_num = self.reader.line_num
+    while row == []:
+        row = next(self.reader)
+    d = dict(zip(self.fieldnames, row))
+    lf = len(self.fieldnames)
+    lr = len(row)
+    if lf < lr:
+        d[self.restkey] = row[lf:]    # extra fields -> restkey
+    elif lf > lr:
+        for key in self.fieldnames[lr:]:
+            d[key] = self.restval     # missing fields -> restval
+    return d
+```
+
+`restkey` defaults to `None`; extra columns are stored as a list under that key. `restval` (also `None`) fills missing columns. This allows handling ragged CSV files without raising exceptions.
+
+### `DictWriter.writerow`
+
+```python
+# CPython: Lib/csv.py:164 DictWriter.writerow
+def writerow(self, rowdict):
+    return self.writer.writerow(self._dict_to_list(rowdict))
+
+def _dict_to_list(self, rowdict):
+    if self.extrasaction == 'raise':
+        wrong_fields = rowdict.keys() - self.fieldnames
+        if wrong_fields:
+            raise ValueError("dict contains fields not in fieldnames: " +
+                             ', '.join(repr(x) for x in wrong_fields))
+    return [rowdict.get(key, self.restval) for key in self.fieldnames]
+```
+
+`extrasaction='ignore'` silently drops keys not in `fieldnames`. The list comprehension ensures column ordering matches `fieldnames` regardless of dict insertion order.
+
+### `Sniffer.sniff`
+
+```python
+# CPython: Lib/csv.py:241 Sniffer.sniff
+def sniff(self, sample, delimiters=None):
+    """Deduce the format of a CSV file from a sample string."""
+    quotechar, doublequote, delimiter, skipinitialspace = \
+        self._guess_quote_and_delimiter(sample, delimiters)
+    if not delimiter:
+        delimiter, skipinitialspace = self._guess_delimiter(sample, delimiters)
+    if not delimiter:
+        raise Error("Could not determine delimiter")
+    class dialect(Dialect):
+        _name = 'sniffed'
+        lineterminator = '\r\n'
+        quoting = QUOTE_MINIMAL
+        # set attrs from detection
+    dialect.delimiter = delimiter
+    dialect.quotechar = quotechar or '"'
+    dialect.doublequote = doublequote
+    dialect.skipinitialspace = skipinitialspace
+    return dialect
+```
+
+`sniff` returns a `Dialect` subclass (not an instance) which can be passed directly to `reader`/`writer`. `_guess_quote_and_delimiter` uses regex to find quoted fields; `_guess_delimiter` counts frequency of candidate characters.
+
+### `Sniffer._guess_quote_and_delimiter`
+
+```python
+# CPython: Lib/csv.py:270 Sniffer._guess_quote_and_delimiter
+def _guess_quote_and_delimiter(self, data, delimiters):
+    """Search for patterns like: delimiter + quote + non-quote* + quote """
+    regexp = re.compile(
+        r'(?P<delim>[^\w\n"\'])(?P<space> ?)(?P<quote>["\']).*?(?P=quote)(?P=delim)',
+        re.DOTALL | re.MULTILINE
+    )
+    matches = regexp.findall(data)
+    ...
+```
+
+The regex matches `delim + optional_space + quote + ... + quote + delim` which is the canonical quoted-field pattern. Character frequency among the `delim` capture group identifies the most likely delimiter.
+
+## gopy notes
+
+`DictReader` is `module/csv.DictReader` in `module/csv/module.go`. `DictWriter` is `module/csv.DictWriter`. `Sniffer` is `module/csv.Sniffer`; the detection heuristics use Go's `regexp` package with the same patterns.

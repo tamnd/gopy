@@ -1,0 +1,139 @@
+---
+title: Python/compile.c (part 7)
+description: "Python/compile.c part 7: comprehension compilation, generator expression scoping, walrus operator (:=) in comprehensions."
+cpython_path: Python/compile.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Python/compile.c" />
+
+This annotation covers comprehension and generator expression compilation. See `python_compile6_detail` for `match` statement compilation and `python_compile5_detail` for exception handling and `try`/`with` blocks.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `compiler_listcomp` | Entry point for `[x for x in ...]` |
+| 81-180 | `compiler_genexp` | Entry point for `(x for x in ...)` |
+| 181-300 | `compiler_comprehension` | Shared: build inner function, handle async, push `.0` arg |
+| 301-400 | `compiler_comprehension_body` | Emit `for`/`if` clauses and the accumulator call |
+| 401-500 | `compiler_namedexpr` | Compile `:=`; assign in enclosing scope |
+
+## Reading
+
+### `compiler_listcomp`
+
+```c
+// CPython: Python/compile.c:5820 compiler_listcomp
+static int
+compiler_listcomp(struct compiler *c, expr_ty e)
+{
+    return compiler_comprehension(c, e, COMP_LISTCOMP,
+                                  &_Py_ID(<listcomp>),
+                                  e->v.ListComp.generators,
+                                  e->v.ListComp.elt);
+}
+```
+
+`[x*2 for x in range(10) if x % 2 == 0]` compiles to a nested function `<listcomp>` that is immediately called with the outermost iterable as argument `.0`. The function builds a list via `LIST_APPEND` and returns it.
+
+### `compiler_comprehension`
+
+```c
+// CPython: Python/compile.c:5710 compiler_comprehension
+static int
+compiler_comprehension(struct compiler *c, expr_ty e, int type,
+                       PyObject *name, asdl_comprehension_seq *generators,
+                       expr_ty elt, expr_ty val)
+{
+    /* Create a new code object scope for the comprehension */
+    if (compiler_enter_scope(c, name, COMPILER_SCOPE_COMPREHENSION,
+                             (void *)e, e->lineno, ...) < 0)
+        return 0;
+    /* Load .0 (the first iterator) from the hidden first argument */
+    ADDOP_I(c, loc, COPY_FREE_VARS, free_var_count);
+    ADDOP(c, loc, RESUME, 0);
+    /* Initialize accumulator */
+    switch (type) {
+        case COMP_LISTCOMP:  ADDOP_I(c, loc, BUILD_LIST, 0); break;
+        case COMP_SETCOMP:   ADDOP_I(c, loc, BUILD_SET, 0); break;
+        case COMP_DICTCOMP:  ADDOP_I(c, loc, BUILD_MAP, 0); break;
+        case COMP_GENEXP:    /* no accumulator */ break;
+    }
+    ...
+}
+```
+
+The comprehension scope sees the enclosing scope's free variables via `COPY_FREE_VARS`. The outermost iterable is evaluated in the enclosing scope and passed as argument `.0`; all inner iterables are evaluated inside the comprehension scope.
+
+### `compiler_comprehension_body`
+
+```c
+// CPython: Python/compile.c:5760 compiler_comprehension_body
+static int
+compiler_comprehension_body(struct compiler *c, location loc,
+                            asdl_comprehension_seq *generators,
+                            int gen_index, expr_ty elt, expr_ty val, int type)
+{
+    comprehension_ty gen = asdl_seq_GET(generators, gen_index);
+    /* Load the iterator for this level */
+    if (gen_index == 0) {
+        ADDOP_I(c, loc, LOAD_FAST, 0);  /* .0 arg */
+    } else {
+        VISIT(c, expr, gen->iter);
+        ADDOP(c, loc, GET_ITER);
+    }
+    /* FOR_ITER loop */
+    NEW_JUMP_TARGET_LABEL(c, start);
+    USE_LABEL(c, start);
+    ADDOP_JUMP(c, loc, FOR_ITER, cleanup);
+    /* Assign loop variable */
+    VISIT(c, expr, gen->target);  /* store via assignment target */
+    /* Apply if-filters */
+    for (int i = 0; i < asdl_seq_LEN(gen->ifs); i++) {
+        VISIT(c, expr, asdl_seq_GET(gen->ifs, i));
+        ADDOP_JUMP(c, loc, POP_JUMP_IF_FALSE, start);
+    }
+    /* Recurse for nested for-clauses, or emit the element */
+    if (gen_index < asdl_seq_LEN(generators) - 1) {
+        compiler_comprehension_body(c, loc, generators, gen_index+1, elt, val, type);
+    } else {
+        /* Innermost: compute elt/val, append/add/store */
+        ...
+    }
+}
+```
+
+Each `for` clause compiles to a `FOR_ITER` loop. The nesting is handled recursively at compile time, not at runtime. This means a 3-level comprehension emits 3 nested `FOR_ITER` loops in a single flat bytecode sequence.
+
+### `compiler_namedexpr`
+
+```c
+// CPython: Python/compile.c:6010 compiler_namedexpr
+static int
+compiler_namedexpr(struct compiler *c, expr_ty e)
+{
+    /* x := expr  — evaluate expr, dup on stack, store to x in enclosing scope */
+    VISIT(c, expr, e->v.NamedExpr.value);
+    ADDOP_I(c, loc, COPY, 1);  /* keep value on stack as expression result */
+    /* Find the scope that owns the target */
+    PyObject *target_name = e->v.NamedExpr.target->v.Name.id;
+    int scope = _PyST_GetScope(c->u->u_ste, target_name);
+    if (scope == CELL || scope == FREE) {
+        ADDOP_NAME(c, loc, STORE_DEREF, target_name, ...);
+    } else {
+        ADDOP_NAME(c, loc, STORE_NAME, target_name, ...);
+    }
+    return 1;
+}
+```
+
+`(x := expr)` emits `COPY 1` to leave a copy of the value on the stack as the expression's result, then `STORE_FAST`/`STORE_DEREF` to assign to the target in the scope where the walrus target was declared. PEP 572 rules require the target to be in the nearest enclosing non-comprehension scope.
+
+## gopy notes
+
+`compiler_listcomp` and `compiler_genexp` are in `compile/codegen_expr.go`. `compiler_comprehension` calls `compile.enterComprehensionScope`. The `for`/`if` body is `compile.comprehensionBody`. `compiler_namedexpr` emits `COPY` then `STORE_FAST` or `STORE_DEREF` depending on the resolved scope.

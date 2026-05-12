@@ -1,0 +1,144 @@
+---
+title: Modules/_ssl.c (part 3)
+description: "_ssl.c part 3: SSLContext.wrap_socket, handshake, SSLSocket.read/write, SNI callback, ALPN negotiation."
+cpython_path: Modules/_ssl.c
+cpython_version: "3.14"
+lines: 700
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/_ssl.c" />
+
+This annotation covers socket wrapping and I/O. See `modules_ssl2_detail` for `SSLContext.__new__`, certificate loading, and context options, and `modules_ssl_detail` for the OpenSSL initialization and `_ssl_wrap_socket`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-100 | `SSLContext.wrap_socket` | Create an `SSLSocket` or `SSLObject` from a plain socket |
+| 101-220 | `_ssl__SSLObject_do_handshake` | Perform the TLS handshake; handle `WANT_READ`/`WANT_WRITE` |
+| 221-360 | `_ssl__SSLObject_read` | TLS read; retry on `SSL_ERROR_WANT_READ` |
+| 361-500 | `_ssl__SSLObject_write` | TLS write; handle partial writes |
+| 501-600 | SNI callback | Server Name Indication: select context per hostname |
+| 601-700 | ALPN negotiation | Select application protocol (h2, http/1.1) |
+
+## Reading
+
+### `SSLContext.wrap_socket`
+
+```c
+// CPython: Modules/_ssl.c:3820 _ssl__SSLContext_wrap_socket_impl
+static PyObject *
+_ssl__SSLContext_wrap_socket_impl(PySSLContext *self, PyObject *sock,
+                                  int server_side, ...)
+{
+    /* Create SSL* object and attach it to the socket fd */
+    SSL *ssl = SSL_new(self->ctx);
+    if (ssl == NULL) { _setSSLError(...); return NULL; }
+    int fd = PyObject_AsFileDescriptor(sock);
+    SSL_set_fd(ssl, fd);
+    if (!server_side && hostname != NULL) {
+        SSL_set_tlsext_host_name(ssl, hostname);  /* SNI */
+        X509_VERIFY_PARAM_set1_host(SSL_get0_param(ssl), hostname, 0);
+    }
+    return newPySSLObject(self, ssl, server_side, sock, ...);
+}
+```
+
+`wrap_socket` is non-blocking by default; the handshake is deferred to the first `do_handshake()` call (or `do_handshake_on_connect=True` triggers it immediately). The `SSL*` object is linked to the raw socket fd, not the Python socket object.
+
+### `do_handshake`
+
+```c
+// CPython: Modules/_ssl.c:2180 _ssl__SSLObject_do_handshake_impl
+static PyObject *
+_ssl__SSLObject_do_handshake_impl(PySSLObject *self)
+{
+    int ret, err;
+    do {
+        Py_BEGIN_ALLOW_THREADS
+        ret = SSL_do_handshake(self->ssl);
+        err = SSL_get_error(self->ssl, ret);
+        Py_END_ALLOW_THREADS
+        if (PyErr_CheckSignals()) return NULL;
+    } while (err == SSL_ERROR_WANT_READ || err == SSL_ERROR_WANT_WRITE);
+    if (ret <= 0) {
+        return _setSSLError(tstate, NULL, 0, __FILE__, __LINE__);
+    }
+    Py_RETURN_NONE;
+}
+```
+
+The `Py_BEGIN_ALLOW_THREADS` / `Py_END_ALLOW_THREADS` bracket releases the GIL during the OpenSSL call, allowing other Python threads to run while waiting for network I/O. Non-blocking sockets require the caller to poll and retry on `ssl.SSLWantReadError`.
+
+### `SSLObject.read`
+
+```c
+// CPython: Modules/_ssl.c:2280 _ssl__SSLObject_read_impl
+static PyObject *
+_ssl__SSLObject_read_impl(PySSLObject *self, Py_ssize_t len, ...)
+{
+    char buf[65536];
+    int count;
+    Py_BEGIN_ALLOW_THREADS
+    count = SSL_read(self->ssl, buf, (int)Py_MIN(len, sizeof(buf)));
+    Py_END_ALLOW_THREADS
+    int err = SSL_get_error(self->ssl, count);
+    if (err == SSL_ERROR_WANT_READ) {
+        /* Would block — raise SSLWantReadError */
+        PyErr_SetString(PyExc_ssl_SSLWantReadError, ...);
+        return NULL;
+    }
+    return PyBytes_FromStringAndSize(buf, count);
+}
+```
+
+`SSL_read` may return less than requested even on a blocking socket (TLS record boundaries). The 64 KiB stack buffer matches the maximum TLS record size (2^14 bytes). Larger reads require multiple calls.
+
+### SNI callback
+
+```c
+// CPython: Modules/_ssl.c:3620 _ssl_sni_callback
+static int
+_ssl_sni_callback(SSL *ssl, int *al, void *arg)
+{
+    /* Called by OpenSSL when the ClientHello is received.
+       'arg' is the SSLContext that set this callback. */
+    const char *servername = SSL_get_servername(ssl, TLSEXT_NAMETYPE_host_name);
+    PyObject *result = PyObject_CallFunction(sni_cb, "OOs", sslobj, ctx, servername);
+    if (result == NULL) {
+        *al = SSL_AD_INTERNAL_ERROR;
+        return SSL_TLSEXT_ERR_ALERT_FATAL;
+    }
+    ...
+}
+```
+
+`ctx.set_servername_callback(fn)` sets a Python function that is called during the TLS handshake with the server name from the client. The callback can call `ssl.context = new_ctx` to switch to a different certificate for virtual hosting.
+
+### ALPN negotiation
+
+```c
+// CPython: Modules/_ssl.c:3720 _ssl_alpn_select_callback
+/* Server-side: select the application protocol from the client's offer list.
+   ctx.set_alpn_protocols(['h2', 'http/1.1']) registers the preference list.
+   OpenSSL calls this callback; we pick the first match. */
+static int
+_ssl_alpn_select_callback(SSL *ssl, const unsigned char **out,
+                          unsigned char *outlen,
+                          const unsigned char *in, unsigned int inlen, void *arg)
+{
+    SSL_select_next_proto((unsigned char **)out, outlen,
+                          ctx->alpn_protocols, ctx->alpn_protocols_len,
+                          in, inlen);
+    return SSL_TLSEXT_ERR_OK;
+}
+```
+
+`SSL_select_next_proto` implements the NPN/ALPN wire format: length-prefixed byte strings. `h2` selection enables HTTP/2; the Python `ssl` module exposes the result via `SSLSocket.selected_alpn_protocol()`.
+
+## gopy notes
+
+`SSLContext.wrap_socket` is `module/ssl.SSLContextWrapSocket` in `module/ssl/module.go`. The handshake loop uses Go's `crypto/tls` `Handshake()` method. `SSLObject.read` wraps `tls.Conn.Read`. The SNI callback is registered via `tls.Config.GetConfigForClient`. ALPN is set via `tls.Config.NextProtos`.

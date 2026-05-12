@@ -1,0 +1,134 @@
+---
+title: Objects/memoryobject.c (part 3)
+description: "Objects/memoryobject.c part 3: memoryview.__setitem__, memoryview.release, memoryview.__enter__/__exit__, buffer export count."
+cpython_path: Objects/memoryobject.c
+cpython_version: "3.14"
+lines: 600
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Objects/memoryobject.c" />
+
+This annotation covers mutation and lifetime management. See `objects_memoryview2_detail` for `memoryview.cast`, `tolist`, `tobytes`, and `__getitem__`, and `objects_memoryobject_detail` for `__new__` and `Py_buffer` layout.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-100 | `memoryview.__setitem__` | Write a scalar or slice into the underlying buffer |
+| 101-220 | `pack_single` | Convert a Python object to bytes using the format string |
+| 221-340 | `memoryview.release` | Release the `Py_buffer` and decrement the export count |
+| 341-460 | `memoryview.__enter__` / `__exit__` | Context manager — `__exit__` calls `release` |
+| 461-600 | Export count guard | Prevent mutation while the view is exported |
+
+## Reading
+
+### `memoryview.__setitem__`
+
+```c
+// CPython: Objects/memoryobject.c:2010 memoryview_ass_subscript
+static int
+memoryview_ass_subscript(PyMemoryViewObject *mv, PyObject *key, PyObject *value)
+{
+    Py_buffer *view = &mv->view;
+    if (view->readonly) {
+        PyErr_SetString(PyExc_TypeError, "cannot modify read-only memory");
+        return -1;
+    }
+    if (view->ndim != 1) {
+        PyErr_SetString(PyExc_NotImplementedError, "multi-dim setitem");
+        return -1;
+    }
+    if (PyIndex_Check(key)) {
+        Py_ssize_t index = PyNumber_AsSsize_t(key, PyExc_IndexError);
+        if (index < 0) index += view->shape[0];
+        return pack_single(view->buf + index * view->strides[0],
+                           value, view->format);
+    }
+    /* Slice assignment: value must be another buffer of same format */
+    ...
+}
+```
+
+Slice assignment to a `memoryview` requires the source to have the same item format and matching length. `mv[2:4] = other_mv[0:2]` copies two elements; `mv[2:4] = b'\x00\x00'` works for byte views.
+
+### `pack_single`
+
+```c
+// CPython: Objects/memoryobject.c:1820 pack_single
+static int
+pack_single(char *ptr, PyObject *item, const char *fmt)
+{
+    /* Reverse of unpack_single: convert Python object to bytes at ptr */
+    switch (fmt[0]) {
+        case 'B': {
+            unsigned long v = PyLong_AsUnsignedLong(item);
+            if (v > 0xff) { PyErr_SetString(...); return -1; }
+            *(unsigned char *)ptr = (unsigned char)v;
+            return 0;
+        }
+        case 'H': {
+            unsigned long v = PyLong_AsUnsignedLong(item);
+            *(unsigned short *)ptr = (unsigned short)v;
+            return 0;
+        }
+        case 'f': {
+            double v = PyFloat_AsDouble(item);
+            *(float *)ptr = (float)v;
+            return 0;
+        }
+        ...
+    }
+}
+```
+
+`pack_single` mirrors `unpack_single` (used by `__getitem__`). The format character maps to a C type; endianness is determined by a leading `<`, `>`, or `=` prefix in the full format string.
+
+### `memoryview.release`
+
+```c
+// CPython: Objects/memoryobject.c:2120 memoryview_release_impl
+static PyObject *
+memoryview_release_impl(PyMemoryViewObject *self)
+{
+    if (self->flags & _Py_MEMORYVIEW_RELEASED) {
+        PyErr_SetString(PyExc_ValueError,
+            "memoryview is already released");
+        return NULL;
+    }
+    _PyMemoryView_Release(self);
+    Py_RETURN_NONE;
+}
+
+static void
+_PyMemoryView_Release(PyMemoryViewObject *self)
+{
+    self->flags |= _Py_MEMORYVIEW_RELEASED;
+    PyBuffer_Release(&self->view);  /* decrements bf_exporter's export count */
+}
+```
+
+After `release()`, any access raises `ValueError: memoryview has been released`. The context manager (`with memoryview(b) as m`) calls `release` on `__exit__` even if an exception occurred.
+
+### Export count guard
+
+```c
+// CPython: Objects/memoryobject.c:680 memoryview_check_released
+/* If another memoryview was created from this one (mv.cast, slicing),
+   the export count is > 1.  Releasing with a non-zero count means the
+   underlying object still has live views — PyBuffer_Release only calls
+   bf_releasebuffer when the count drops to zero. */
+#define CHECK_RELEASED(mv) \
+    if ((mv)->flags & _Py_MEMORYVIEW_RELEASED) { \
+        PyErr_SetString(PyExc_ValueError, "memoryview has been released"); \
+        return NULL; \
+    }
+```
+
+The export count is tracked on the underlying object (e.g., `bytearray`). A `bytearray` cannot be resized while it has any exported views: `bytearray.append` calls `PyByteArray_Resize` which calls `_checkbuffer` and raises `BufferError` if `ob_exports > 0`.
+
+## gopy notes
+
+`memoryview.__setitem__` is `objects.MemoryViewSetItem` in `objects/memoryview.go`. `pack_single` encodes using `binary.Write` with the appropriate type. `memoryview.release` decrements `objects.MemoryView.exportCount` and calls `objects.BufferRelease`. The context manager is handled by the `__enter__`/`__exit__` methods returning and releasing `self`.

@@ -1,0 +1,116 @@
+---
+title: Modules/_hashopenssl.c (part 4)
+description: "_hashopenssl.c part 4: HMAC, BLAKE2, hashlib.scrypt, hashlib.pbkdf2_hmac — keyed and password-based hashing."
+cpython_path: Modules/_hashopenssl.c
+cpython_version: "3.14"
+lines: 600
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/_hashopenssl.c" />
+
+This annotation covers keyed digests and KDFs. See `modules_hashlib3_detail` for `hashlib.new`, SHA-2 family, `EVP_MD_CTX`, and `copy/update/digest/hexdigest`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-100 | `hashlib.hmac` / `_hashlib.hmac_new` | HMAC construction wrapping `HMAC_CTX` |
+| 101-220 | `HMAC.update` / `HMAC.digest` | Feed data; extract MAC tag |
+| 221-340 | `_hashlib.openssl_blake2b` | BLAKE2b via OpenSSL EVP interface |
+| 341-460 | `hashlib.pbkdf2_hmac` | PBKDF2-HMAC with iteration count |
+| 461-600 | `hashlib.scrypt` | Memory-hard KDF; check OpenSSL version |
+
+## Reading
+
+### `_hashlib.hmac_new`
+
+```c
+// CPython: Modules/_hashopenssl.c:1820 _hashlib_hmac_new_impl
+static PyObject *
+_hashlib_hmac_new_impl(PyObject *module, Py_buffer *key,
+                       PyObject *msg_obj, const char *digestmod)
+{
+    const EVP_MD *digest = py_digest_by_name(module, digestmod, ...);
+    HMAC_CTX *ctx = HMAC_CTX_new();
+    HMAC_Init_ex(ctx, key->buf, (int)key->len, digest, NULL);
+    if (msg_obj != NULL) {
+        /* Feed initial data */
+        HMAC_Update(ctx, msg_obj_buf, msg_obj_len);
+    }
+    return newHMACobject(module, ctx, ...);
+}
+```
+
+`hashlib.new('hmac', key=..., digestmod='sha256')` routes here. HMAC wraps any hash algorithm; the key is padded/hashed to the block size by `HMAC_Init_ex`. `hmac.new(key, msg, digestmod)` in the pure-Python fallback (`Lib/hmac.py`) uses this same structure.
+
+### `HMAC.digest`
+
+```c
+// CPython: Modules/_hashopenssl.c:1920 _hashlib_HMAC_digest_impl
+static PyObject *
+_hashlib_HMAC_digest_impl(HMACobject *self)
+{
+    unsigned char digest[EVP_MAX_MD_SIZE];
+    unsigned int digest_size;
+    /* Copy context so update() can continue after digest() */
+    HMAC_CTX *ctx_copy = HMAC_CTX_new();
+    HMAC_CTX_copy(ctx_copy, self->ctx);
+    HMAC_Final(ctx_copy, digest, &digest_size);
+    HMAC_CTX_free(ctx_copy);
+    return PyBytes_FromStringAndSize((char *)digest, digest_size);
+}
+```
+
+`HMAC_CTX_copy` allows calling `digest()` multiple times without consuming the context, matching the `hashlib` convention that `digest()` is non-destructive.
+
+### `hashlib.pbkdf2_hmac`
+
+```c
+// CPython: Modules/_hashopenssl.c:2120 _hashlib_pbkdf2_hmac_impl
+static PyObject *
+_hashlib_pbkdf2_hmac_impl(PyObject *module, const char *hash_name,
+                          Py_buffer *password, Py_buffer *salt,
+                          long iterations, long dklen)
+{
+    const EVP_MD *digest = py_digest_by_name(module, hash_name, ...);
+    unsigned char *key = PyMem_Malloc(dklen);
+    Py_BEGIN_ALLOW_THREADS
+    int r = PKCS5_PBKDF2_HMAC(password->buf, password->len,
+                               salt->buf, salt->len,
+                               iterations, digest, dklen, key);
+    Py_END_ALLOW_THREADS
+    return PyBytes_FromStringAndSize((char *)key, dklen);
+}
+```
+
+`PKCS5_PBKDF2_HMAC` is the OpenSSL implementation of RFC 2898. The GIL is released during the (potentially expensive) iteration loop. For password storage, `iterations` should be at least 600,000 for SHA-256 (OWASP 2023 recommendation).
+
+### `hashlib.scrypt`
+
+```c
+// CPython: Modules/_hashopenssl.c:2240 _hashlib_scrypt_impl
+static PyObject *
+_hashlib_scrypt_impl(PyObject *module, Py_buffer *password, Py_buffer *salt,
+                     PyObject *n_obj, PyObject *r_obj, PyObject *p_obj,
+                     long dklen)
+{
+    /* n: CPU/memory cost (must be power of 2)
+       r: block size factor
+       p: parallelization factor
+       Memory usage: 128 * n * r bytes */
+    if (EVP_PBE_scrypt(password->buf, password->len,
+                       salt->buf, salt->len,
+                       n, r, p, maxmem, key, dklen) != 1)
+        { _setSSLError(...); return NULL; }
+    ...
+}
+```
+
+`EVP_PBE_scrypt` is available only in OpenSSL 1.1+. `hashlib.scrypt` raises `ValueError` at import time if the OpenSSL version is too old. Typical parameters: `n=2**14, r=8, p=1` (interactive login); `n=2**20, r=8, p=1` (file encryption).
+
+## gopy notes
+
+`_hashlib.hmac_new` is `module/hashlib.HMACNew` in `module/hashlib/module.go` using Go's `crypto/hmac`. `pbkdf2_hmac` uses `golang.org/x/crypto/pbkdf2`. `scrypt` uses `golang.org/x/crypto/scrypt`. BLAKE2b uses `golang.org/x/crypto/blake2b`.
