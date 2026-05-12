@@ -1,0 +1,115 @@
+---
+title: Objects/typeobject.c (part 11)
+description: "typeobject.c part 11: type.__subclasses__, type.mro, type.__init_subclass__, type.__set_name__."
+cpython_path: Objects/typeobject.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Objects/typeobject.c" />
+
+This annotation covers type introspection and class hooks. See `objects_typeobject10_detail` for `type.__new__`, `type.__call__`, `tp_dict` population, and `__slots__`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `type.__subclasses__` | Return list of direct subclasses |
+| 81-160 | `type.mro` / `type.__mro__` | C3 MRO computation |
+| 161-240 | `type.__init_subclass__` | Hook called when a subclass is created |
+| 241-360 | `type.__set_name__` | Called for descriptors at class creation |
+| 361-500 | `type.__class_getitem__` | `list[int]`, `dict[str, int]` parameterization |
+
+## Reading
+
+### `type.__subclasses__`
+
+```c
+// CPython: Objects/typeobject.c:6680 type_subclasses
+static PyObject *
+type_subclasses(PyObject *self, PyObject *Py_UNUSED(ignored))
+{
+    PyObject *list = PyList_New(0);
+    PyTypeObject *tp = (PyTypeObject *)self;
+    /* tp_subclasses is a weak-ref dict: {id(subclass): weakref(subclass)} */
+    PyObject *subclasses = tp->tp_subclasses;
+    if (subclasses != NULL) {
+        PyObject *ref;
+        while ((ref = PyIter_Next(PyDict_Values(subclasses))) != NULL) {
+            PyObject *subclass = PyWeakref_GET_OBJECT(ref);
+            if (subclass != Py_None)
+                PyList_Append(list, subclass);
+        }
+    }
+    return list;
+}
+```
+
+`int.__subclasses__()` returns `[bool]` (and any other registered subclasses). Subclasses are stored as weak references so GC'd subclasses disappear automatically. The result is a list of live subclasses.
+
+### `type.mro`
+
+```c
+// CPython: Objects/typeobject.c:2420 mro_internal
+static PyObject *
+mro_internal(PyTypeObject *type, PyObject **p_old_mro)
+{
+    /* Call type.mro() if overridden, else compute C3 */
+    PyObject *mro = type->tp_mro;
+    PyObject *(*meth)(PyObject *) = ...; /* type.mro if overridden */
+    if (meth)
+        return (*meth)((PyObject *)type);
+    return mro_implementation(type);
+}
+```
+
+`type.__mro__` is a tuple computed at class creation by the C3 linearization algorithm. `type.mro()` (method) can be overridden by metaclasses. `mro_implementation` is the standard C3 algorithm.
+
+### `type.__init_subclass__`
+
+```python
+# CPython: Objects/typeobject.c:7040 type_init_subclass (called from type.__new__)
+# Default implementation:
+@classmethod
+def __init_subclass__(cls, /, **kwargs):
+    super().__init_subclass__(**kwargs)
+
+# Usage in Python:
+class Plugin:
+    registry = []
+    def __init_subclass__(cls, **kwargs):
+        super().__init_subclass__(**kwargs)
+        Plugin.registry.append(cls)
+
+class MyPlugin(Plugin): pass  # → Plugin.registry.append(MyPlugin) called here
+```
+
+`__init_subclass__` is called on the **parent** class whenever a new subclass is created. The default propagates to `object`. This is the idiomatic way to auto-register subclasses without metaclasses.
+
+### `type.__set_name__`
+
+```c
+// CPython: Objects/typeobject.c:3100 type_new_set_names
+static int
+type_new_set_names(PyTypeObject *type)
+{
+    /* For each descriptor in __dict__: call __set_name__(owner, name) */
+    PyObject *key, *value;
+    Py_ssize_t i = 0;
+    while (PyDict_Next(type->tp_dict, &i, &key, &value)) {
+        PyObject *set_name = PyObject_GetAttrString(value, "__set_name__");
+        if (set_name) {
+            PyObject_CallFunctionObjArgs(set_name, type, key, NULL);
+        }
+    }
+}
+```
+
+`__set_name__` lets descriptors know their attribute name at class creation. `class C: x = MyDescriptor()` calls `MyDescriptor.__set_name__(C, 'x')`. This is how `dataclasses.Field` and `SQLAlchemy Column` discover their column names.
+
+## gopy notes
+
+`type.__subclasses__` is `objects.TypeSubclasses` in `objects/type.go`. `type.mro()` calls `objects.ComputeC3MRO`. `__init_subclass__` is called from `objects.TypeNew` after the new type is created. `__set_name__` is called in `objects.TypeNew` after `__init_subclass__`.

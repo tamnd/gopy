@@ -1,0 +1,117 @@
+---
+title: Modules/_sqlite/connection.c (part 7)
+description: "sqlite3 part 7: connection.execute, executemany, executescript, row_factory."
+cpython_path: Modules/_sqlite/connection.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/_sqlite/connection.c" />
+
+This annotation covers shortcut execution methods. See `modules_sqlite6_detail` for `sqlite3.connect`, `Connection.cursor`, `Cursor.execute`, and parameter binding.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `Connection.execute` | Shortcut: create cursor and execute |
+| 81-160 | `Connection.executemany` | Execute with multiple parameter sets |
+| 161-240 | `Connection.executescript` | Execute a SQL script (semicolon-separated) |
+| 241-360 | `row_factory` | Customize how rows are returned |
+| 361-500 | `text_factory` | Customize how TEXT columns are decoded |
+
+## Reading
+
+### `Connection.execute`
+
+```c
+// CPython: Modules/_sqlite/connection.c:1140 pysqlite_connection_execute
+static PyObject *
+pysqlite_connection_execute(pysqlite_Connection *self, PyObject *args)
+{
+    PyObject *cursor = _PyObject_CallMethodIdObjArgs(
+        (PyObject *)self, &PyId_cursor, NULL);
+    PyObject *result = _PyObject_CallMethodIdObjArgs(
+        cursor, &PyId_execute, args, NULL);
+    Py_DECREF(cursor);
+    return result;
+}
+```
+
+`conn.execute("SELECT 1")` creates a cursor, calls `cursor.execute(sql)`, and returns the cursor. This is a convenience method. For repeated queries, create the cursor explicitly to avoid per-call overhead.
+
+### `Connection.executemany`
+
+```c
+// CPython: Modules/_sqlite/connection.c:1160 pysqlite_connection_executemany
+static PyObject *
+pysqlite_connection_executemany(pysqlite_Connection *self, PyObject *args)
+{
+    PyObject *cursor = _PyObject_CallMethodIdObjArgs(
+        (PyObject *)self, &PyId_cursor, NULL);
+    return _PyObject_CallMethodIdObjArgs(cursor, &PyId_executemany, args, NULL);
+}
+```
+
+`conn.executemany("INSERT INTO t VALUES (?)", [(1,), (2,), (3,)])` inserts three rows. The underlying `Cursor.executemany` compiles the statement once and executes it for each parameter set.
+
+### `Connection.executescript`
+
+```c
+// CPython: Modules/_sqlite/connection.c:1180 pysqlite_connection_executescript
+static PyObject *
+pysqlite_connection_executescript(pysqlite_Connection *self, PyObject *args)
+{
+    /* executescript commits any pending transaction first */
+    if (self->begin_statement) {
+        sqlite3_exec(self->db, "COMMIT", 0, 0, 0);
+        PyMem_Free(self->begin_statement);
+        self->begin_statement = NULL;
+    }
+    /* Execute each statement in the script */
+    sqlite3_exec(self->db, script_cstr, 0, 0, &errmsg);
+    ...
+}
+```
+
+`executescript` is not parameterizable — it passes SQL directly to `sqlite3_exec`. It implicitly commits any open transaction first. Useful for schema migrations and seeding.
+
+### `row_factory`
+
+```python
+# CPython: Modules/_sqlite/cursor.c:380 cursor fetch loop
+for each row from sqlite3_step:
+    if conn.row_factory is not None:
+        row = conn.row_factory(cursor, raw_row)
+    else:
+        row = raw_row  # tuple
+
+# Built-in: sqlite3.Row
+# sqlite3.Row supports column access by name: row['name']
+# Setting conn.row_factory = sqlite3.Row makes all queries return Row objects
+```
+
+`conn.row_factory = sqlite3.Row` makes every fetched row a `sqlite3.Row` object instead of a plain tuple. `sqlite3.Row` supports both index and name-based access and is sequence-compatible.
+
+### `text_factory`
+
+```c
+// CPython: Modules/_sqlite/cursor.c:280 microprotocol_adapt TEXT column
+if (column_type == SQLITE_TEXT) {
+    if (self->connection->text_factory == PyUnicode_Type) {
+        val = PyUnicode_FromStringAndSize(text, nbytes);
+    } else {
+        val = PyObject_CallFunction(self->connection->text_factory,
+                                    "y#", text, nbytes);
+    }
+}
+```
+
+`conn.text_factory = bytes` returns TEXT columns as `bytes` instead of `str`. `conn.text_factory = lambda x: x.decode('latin-1')` enables custom decoding. Default is `str` (UTF-8).
+
+## gopy notes
+
+`Connection.execute` is `module/sqlite3.ConnExecute` in `module/sqlite3/module.go`. `executemany` calls `CursorExecuteMany`. `executescript` calls `sqlite3.Exec` via cgo. `row_factory` is applied in `CursorFetch`. `text_factory` is applied in `adaptSQLiteText`.

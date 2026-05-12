@@ -1,0 +1,142 @@
+---
+title: Lib/numbers.py (part 3)
+description: "numbers.py part 3: Number, Complex, Real, Rational, Integral ABC hierarchy."
+cpython_path: Lib/numbers.py
+cpython_version: "3.14"
+lines: 400
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/numbers.py" />
+
+This annotation covers the numeric tower. See `lib_numbers2_detail` for `__subclasshook__` and how built-in types register with the tower.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-60 | `Number` | Root ABC; accepts any numeric type |
+| 61-120 | `Complex` | Adds `real`, `imag`, `conjugate`, `__abs__` |
+| 121-200 | `Real` | Adds `__float__`, `__trunc__`, `__floor__`, `__round__` |
+| 201-280 | `Rational` | Adds `numerator`, `denominator` as properties |
+| 281-400 | `Integral` | Adds `__int__`, `__index__`, bit ops |
+
+## Reading
+
+### `Number`
+
+```python
+# CPython: Lib/numbers.py:30 Number
+class Number(metaclass=ABCMeta):
+    """All numbers inherit from this class."""
+    __slots__ = ()
+    __hash__ = None  # subclasses must define __hash__
+```
+
+`Number` is the root of the numeric tower. `isinstance(x, numbers.Number)` is true for `int`, `float`, `complex`, `Decimal`, `Fraction`, etc. No operations are defined; it is purely a marker.
+
+### `Complex`
+
+```python
+# CPython: Lib/numbers.py:60 Complex
+class Complex(Number):
+    @abstractmethod
+    def __complex__(self): ...
+    @abstractmethod
+    def real(self): ...
+    @abstractmethod
+    def imag(self): ...
+    @abstractmethod
+    def conjugate(self): ...
+    def __abs__(self):
+        return (self.real**2 + self.imag**2) ** 0.5
+    def __ne__(self, other):
+        return not (self == other)
+    def __pos__(self):
+        return +self
+```
+
+`Complex` provides default implementations of `__abs__`, `__ne__`, and `__pos__` in terms of abstract methods. Subclasses only need to implement the abstract methods.
+
+### `Real`
+
+```python
+# CPython: Lib/numbers.py:120 Real
+class Real(Complex):
+    @abstractmethod
+    def __float__(self): ...
+    @abstractmethod
+    def __trunc__(self): ...  # truncate toward zero
+    @abstractmethod
+    def __floor__(self): ...
+    @abstractmethod
+    def __ceil__(self): ...
+    @abstractmethod
+    def __round__(self, ndigits=None): ...
+    @abstractmethod
+    def __divmod__(self, other): ...
+    @abstractmethod
+    def __floordiv__(self, other): ...
+    @abstractmethod
+    def __mod__(self, other): ...
+    def __complex__(self):
+        return complex(float(self))
+    @property
+    def real(self):
+        return +self
+    @property
+    def imag(self):
+        return 0
+```
+
+`Real` implements `Complex.real` and `Complex.imag` (a real number has `imag=0`). `Complex.__complex__` is implemented via `float(self)`.
+
+### `Rational`
+
+```python
+# CPython: Lib/numbers.py:200 Rational
+class Rational(Real):
+    @abstractproperty
+    def numerator(self): ...
+    @abstractproperty
+    def denominator(self): ...
+    def __float__(self):
+        return self.numerator / self.denominator
+```
+
+`Rational` adds `numerator` and `denominator` and provides `__float__` in terms of them. `fractions.Fraction` and `int` (with `denominator == 1`) are `Rational`.
+
+### `Integral`
+
+```python
+# CPython: Lib/numbers.py:280 Integral
+class Integral(Rational):
+    @abstractmethod
+    def __int__(self): ...
+    @abstractmethod
+    def __index__(self): ...  # used for sequence indexing
+    @abstractmethod
+    def __pow__(self, exponent, modulus=None): ...
+    @abstractmethod
+    def __lshift__(self, other): ...
+    @abstractmethod
+    def __rshift__(self, other): ...
+    @abstractmethod
+    def __and__(self, other): ...
+    @abstractmethod
+    def __or__(self, other): ...
+    @abstractmethod
+    def __xor__(self, other): ...
+    def numerator(self):
+        return int(self)
+    def denominator(self):
+        return 1
+```
+
+`Integral` adds bitwise operations and `__index__` (which enables use as a sequence index). `int` and `bool` are `Integral`.
+
+## gopy notes
+
+The numeric tower ABCs are `module/numbers.Number`, `module/numbers.Complex`, etc. in `module/numbers/module.go`. Registration is done by `objects.IntType.Register(numbers.Integral)`, etc. `__subclasshook__` checks for `__int__`/`__float__`/`__complex__` duck-type methods.

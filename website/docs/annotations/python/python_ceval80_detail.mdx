@@ -1,0 +1,125 @@
+---
+title: Python/ceval.c (part 80)
+description: "Python/ceval.c part 80: IMPORT_NAME, IMPORT_FROM, IMPORT_STAR, __import__ hook."
+cpython_path: Python/ceval.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Python/ceval.c" />
+
+This annotation covers import opcodes. See `python_ceval79_detail` for `BUILD_MAP`, `BUILD_SET`, and `MAP_ADD`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `IMPORT_NAME` | Call `__import__` for a module |
+| 81-160 | `IMPORT_FROM` | Load an attribute from an imported module |
+| 161-240 | `IMPORT_STAR` | `from mod import *` |
+| 241-360 | `__import__` hook | How `IMPORT_NAME` dispatches |
+| 361-500 | `LOAD_FROM_DICT_OR_GLOBALS` | Used for `from x import y` in class scope |
+
+## Reading
+
+### `IMPORT_NAME`
+
+```c
+// CPython: Python/ceval.c:2840 IMPORT_NAME
+inst(IMPORT_NAME, (level, fromlist -- module)) {
+    PyObject *name = GETITEM(FRAME_CO_NAMES, oparg);
+    module = import_name(tstate, frame, name, fromlist, level);
+    ERROR_IF(module == NULL, error);
+    Py_DECREF(level);
+    Py_DECREF(fromlist);
+}
+
+static PyObject *
+import_name(PyThreadState *tstate, _PyInterpreterFrame *frame,
+            PyObject *name, PyObject *fromlist, PyObject *level)
+{
+    /* Call builtins.__import__(name, globals, locals, fromlist, level) */
+    PyObject *import_func = _PyDict_GetItemWithError(f_builtins, &_Py_ID(__import__));
+    return PyObject_Call(import_func, args, NULL);
+}
+```
+
+`import os` compiles to `LOAD_CONST 0` (level=0), `LOAD_CONST None` (fromlist=None), `IMPORT_NAME os`. The actual work is done by `builtins.__import__`, which can be replaced to intercept all imports.
+
+### `IMPORT_FROM`
+
+```c
+// CPython: Python/ceval.c:2900 IMPORT_FROM
+inst(IMPORT_FROM, (from -- from, res)) {
+    PyObject *name = GETITEM(FRAME_CO_NAMES, oparg);
+    res = PyObject_GetAttr(from, name);
+    ERROR_IF(res == NULL, error);
+    /* from stays on stack for subsequent IMPORT_FROM or POP_TOP */
+}
+```
+
+`from os import path, getcwd` compiles to `IMPORT_NAME os`, then `IMPORT_FROM path`, `STORE_NAME path`, `IMPORT_FROM getcwd`, `STORE_NAME getcwd`, `POP_TOP`. `IMPORT_FROM` calls `getattr(module, name)`.
+
+### `IMPORT_STAR`
+
+```c
+// CPython: Python/ceval.c:2940 IMPORT_STAR
+inst(IMPORT_STAR, (from --)) {
+    PyObject *locals = LOCALS();
+    PyObject *all = PyObject_GetAttrString(from, "__all__");
+    if (all == NULL) {
+        PyErr_Clear();
+        /* No __all__: import all names not starting with _ */
+        all = PyObject_Dir(from);
+        ...
+    }
+    for each name in all:
+        if (name[0] != '_') {
+            PyObject *value = PyObject_GetAttr(from, name);
+            PyObject_SetItem(locals, name, value);
+        }
+    Py_DECREF(from);
+}
+```
+
+`from os import *` uses `__all__` if defined; otherwise imports all public names (not starting with `_`). `import *` is prohibited in function bodies (where `locals` is not a real dict).
+
+### `__import__` hook
+
+```python
+# The actual __import__ in builtins delegates to importlib
+# CPython: Python/bltinmodule.c:230 builtin___import__
+def __import__(name, globals=None, locals=None, fromlist=(), level=0):
+    return _bootstrap._find_and_load(name, __import__)
+```
+
+Replacing `builtins.__import__` intercepts all module imports. Import hooks via `sys.meta_path` and `sys.path_hooks` are the recommended approach, but `__import__` replacement is possible for more radical changes.
+
+### `LOAD_FROM_DICT_OR_GLOBALS`
+
+```c
+// CPython: Python/ceval.c:2980 LOAD_FROM_DICT_OR_GLOBALS
+inst(LOAD_FROM_DICT_OR_GLOBALS, (mod_or_class_dict -- mod_or_class_dict, res)) {
+    /* Used in class body after from-import: look in class dict first,
+       then globals, then builtins */
+    PyObject *name = GETITEM(FRAME_CO_NAMES, oparg);
+    res = PyDict_GetItemWithError(mod_or_class_dict, name);
+    if (res == NULL) {
+        res = PyDict_GetItemWithError(GLOBALS(), name);
+        if (res == NULL) {
+            res = PyDict_GetItemWithError(BUILTINS(), name);
+        }
+    }
+    ERROR_IF(res == NULL, error);
+    Py_INCREF(res);
+}
+```
+
+Inside a class body, `from module import name` uses `LOAD_FROM_DICT_OR_GLOBALS` to resolve the name in the class's local dict, then the global/builtin scope. This is distinct from `LOAD_GLOBAL` which skips the class dict.
+
+## gopy notes
+
+`IMPORT_NAME` is in `vm/eval_import.go`. It calls `vm.importName(name, fromlist, level)` which calls `builtins.__import__`. `IMPORT_FROM` calls `objects.GetAttr`. `IMPORT_STAR` calls `objects.DirList` then `objects.SetItem` for each name. `LOAD_FROM_DICT_OR_GLOBALS` searches three dicts in order.
