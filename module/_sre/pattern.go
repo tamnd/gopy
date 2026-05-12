@@ -272,6 +272,8 @@ func makeMatch(cp *compiledPattern, st *state, src objects.Object, patInst objec
 		srcStr = string(b.Bytes())
 	}
 	matchStore[inst] = &matchData{locs: locs, s: srcStr}
+	_ = d.SetItem(objects.NewStr("regs"), buildRegs(locs))
+	_ = d.SetItem(objects.NewStr("lastgroup"), computeLastgroup(patInst, st.lastindex))
 	return inst
 }
 
