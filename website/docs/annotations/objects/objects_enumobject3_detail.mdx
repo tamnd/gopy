@@ -1,0 +1,114 @@
+---
+title: Objects/enumobject.c (part 3)
+description: "Objects/enumobject.c part 3: enumerate.__new__, enumerate.__next__, reversed.__new__, reversed.__next__, reversed for sequences."
+cpython_path: Objects/enumobject.c
+cpython_version: "3.14"
+lines: 400
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Objects/enumobject.c" />
+
+This annotation covers `enumerate` and `reversed` internals. See `objects_enumobject2_detail` for `zip`, `map`, `filter` iterator objects.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `enumerate.__new__` | Wrap an iterable; store start index |
+| 81-180 | `enumerate.__next__` | Return `(index, value)` and advance |
+| 181-280 | `reversed.__new__` | Wrap a sequence or object with `__reversed__` |
+| 281-400 | `reversed.__next__` | Step backward through the sequence |
+
+## Reading
+
+### `enumerate.__new__`
+
+```c
+// CPython: Objects/enumobject.c:50 enum_new
+static PyObject *
+enum_new(PyTypeObject *type, PyObject *args, PyObject *kwds)
+{
+    enumobject *en;
+    PyObject *seq, *start = NULL;
+    PyArg_ParseTupleAndKeywords(args, kwds, "O|O:enumerate", kwlist, &seq, &start);
+    en = (enumobject *)type->tp_alloc(type, 0);
+    en->en_index = start ? PyLong_AsLong(start) : 0;
+    en->en_sit = PyObject_GetIter(seq);
+    return (PyObject *)en;
+}
+```
+
+`enumerate(iterable, start=0)` stores the iterator and the current index. The `start` parameter lets you begin from any integer, including negative values.
+
+### `enumerate.__next__`
+
+```c
+// CPython: Objects/enumobject.c:120 enum_next
+static PyObject *
+enum_next(enumobject *en)
+{
+    PyObject *next_item = (*Py_TYPE(en->en_sit)->tp_iternext)(en->en_sit);
+    if (next_item == NULL) return NULL;
+    PyObject *result = PyTuple_New(2);
+    PyTuple_SET_ITEM(result, 0, PyLong_FromSsize_t(en->en_index++));
+    PyTuple_SET_ITEM(result, 1, next_item);
+    return result;
+}
+```
+
+The result tuple is freshly allocated each call. CPython 3.12+ optimizes the common case by reusing the tuple if its refcount is 1 (the loop variable is immediately unpacked).
+
+### `reversed.__new__`
+
+```c
+// CPython: Objects/enumobject.c:240 reversed_new
+static PyObject *
+reversed_new(PyTypeObject *type, PyObject *args, PyObject *kwds)
+{
+    PyObject *seq;
+    PyArg_UnpackTuple(args, "reversed", 1, 1, &seq);
+    /* Check for __reversed__ */
+    PyObject *reversed = _PyObject_LookupSpecial(seq, &_Py_ID(__reversed__));
+    if (reversed != NULL) {
+        return PyObject_CallNoArgs(reversed);
+    }
+    /* Fall back: must have __len__ and __getitem__ */
+    Py_ssize_t n = PySequence_Size(seq);
+    if (n < 0) { PyErr_SetString(...); return NULL; }
+    reversedobject *ro = (reversedobject *)type->tp_alloc(type, 0);
+    ro->index = n - 1;
+    ro->seq = Py_NewRef(seq);
+    return (PyObject *)ro;
+}
+```
+
+`reversed()` first tries `__reversed__` (used by `dict`, `deque`, custom types). If absent, it requires `__len__` and `__getitem__` for the index-based fallback.
+
+### `reversed.__next__`
+
+```c
+// CPython: Objects/enumobject.c:320 reversed_next
+static PyObject *
+reversed_next(reversedobject *ro)
+{
+    if (ro->index < 0) return NULL;  /* Exhausted */
+    PyObject *item = PySequence_GetItem(ro->seq, ro->index--);
+    if (item == NULL) {
+        if (PyErr_ExceptionMatches(PyExc_IndexError)) {
+            PyErr_Clear();
+            ro->index = -1;
+        }
+        return NULL;
+    }
+    return item;
+}
+```
+
+The `IndexError` on `GetItem` signals early exhaustion (list was shortened during iteration). The iterator marks itself exhausted to avoid confusing subsequent calls.
+
+## gopy notes
+
+`enumerate.__new__` is `objects.EnumerateNew` in `objects/enumerate.go`. `enumerate.__next__` allocates a new 2-tuple per call. `reversed.__new__` checks `__reversed__` via `objects.LookupSpecial`. `reversed.__next__` calls `objects.SequenceGetItem` with the decremented index.

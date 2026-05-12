@@ -1,0 +1,96 @@
+---
+title: Python/ceval.c (part 24)
+description: "Python/ceval.c part 24: BUILD_MAP, BUILD_SET, DICT_MERGE, SET_UPDATE, LIST_EXTEND, DICT_UPDATE."
+cpython_path: Python/ceval.c
+cpython_version: "3.14"
+lines: 400
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Python/ceval.c" />
+
+This annotation covers collection construction opcodes. See `python_ceval23_detail` for exception and context manager opcodes.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `BUILD_MAP` | Create a dict from key-value pairs on the stack |
+| 81-160 | `BUILD_SET` | Create a set from items on the stack |
+| 161-260 | `DICT_MERGE` | `{**a, **b}` — merge two dicts into a new one |
+| 261-360 | `LIST_EXTEND` | `[*a, *b]` — extend a list with an iterable |
+| 361-400 | `SET_UPDATE` | `{*a, *b}` — update a set with an iterable |
+
+## Reading
+
+### `BUILD_MAP`
+
+```c
+// CPython: Python/ceval.c:4280 BUILD_MAP
+inst(BUILD_MAP, (values[oparg*2] -- map)) {
+    map = _PyDict_FromItems(
+        &values[0], 2,
+        &values[1], 2,
+        oparg);
+    if (map == NULL) ERROR_IF(true, error);
+}
+```
+
+`{'a': 1, 'b': 2}` pushes keys and values alternately, then `BUILD_MAP 2` pops them into a dict. `_PyDict_FromItems` takes strided pointers: `keys[0], keys[2], ...` and `values[1], values[3], ...`. Duplicate keys are silently overwritten (last one wins).
+
+### `DICT_MERGE`
+
+```c
+// CPython: Python/ceval.c:4380 DICT_MERGE
+inst(DICT_MERGE, (update -- )) {
+    /* TOS is the dict to merge into (a `BUILD_MAP` result).
+       oparg points to the function name for error messages. */
+    PyObject *dict = PEEK(2);
+    if (_PyDict_MergeEx(dict, update, 2) < 0) {
+        /* _PyDict_MergeEx with flag=2 raises TypeError on duplicate keys */
+        format_kwargs_error(tstate, PEEK(3 + oparg), update);
+        ERROR_IF(true, error);
+    }
+}
+```
+
+`{**a, **b}` compiles to `BUILD_MAP 0`, then `DICT_MERGE a`, `DICT_MERGE b`. `_PyDict_MergeEx(..., 2)` raises `TypeError` if both dicts share a key (unlike `dict.update` which silently overwrites).
+
+### `LIST_EXTEND`
+
+```c
+// CPython: Python/ceval.c:4460 LIST_EXTEND
+inst(LIST_EXTEND, (iterable --)) {
+    PyObject *list = PEEK(1 + oparg);
+    int err = _PyList_Extend((PyListObject *)list, iterable);
+    if (err < 0) {
+        /* Check for non-iterable to give better error message */
+        if (PyErr_ExceptionMatches(PyExc_TypeError) &&
+            !(Py_TYPE(iterable)->tp_iter || PySequence_Check(iterable))) {
+            ...
+        }
+        ERROR_IF(true, error);
+    }
+}
+```
+
+`[1, *a, 2, *b]` compiles to `BUILD_LIST 1` (for the `1`), then `LIST_EXTEND` for `a`, `LOAD_CONST 2`, `LIST_APPEND`, `LIST_EXTEND` for `b`. `_PyList_Extend` calls `PySequence_Fast` to get items in bulk.
+
+### `SET_UPDATE`
+
+```c
+// CPython: Python/ceval.c:4520 SET_UPDATE
+inst(SET_UPDATE, (iterable --)) {
+    PyObject *set = PEEK(1 + oparg);
+    int err = PySet_Update(set, iterable);
+    ERROR_IF(err < 0, error);
+}
+```
+
+`{1, *a, 2, *b}` builds a set and extends it with each splat. `PySet_Update` adds all elements of the iterable; duplicates are silently ignored.
+
+## gopy notes
+
+`BUILD_MAP` is `vm.BuildMap` in `vm/eval_gen.go`. It calls `objects.DictFromItems`. `DICT_MERGE` calls `objects.DictMergeEx(..., 2)` which raises on duplicate keys. `LIST_EXTEND` calls `objects.ListExtend`. `SET_UPDATE` calls `objects.SetUpdate`.

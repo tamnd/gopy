@@ -1,0 +1,98 @@
+---
+title: Modules/zlibmodule.c (part 3)
+description: "Modules/zlibmodule.c part 3: zlib.Decompress.decompress, zlib.decompressobj, wbits parameter, streaming decompression."
+cpython_path: Modules/zlibmodule.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/zlibmodule.c" />
+
+This annotation covers streaming decompression. See `modules_zlib2_detail` for `zlib.compress`, `zlib.compressobj`, `zlib.Compress.compress`, and `zlib.Compress.flush`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-100 | `zlib.decompress` | One-shot decompression of a `bytes` object |
+| 101-240 | `zlib.decompressobj` | Create a stateful `Decompress` object |
+| 241-380 | `Decompress.decompress` | Feed data; return decompressed bytes |
+| 381-500 | `wbits` parameter | Control zlib/gzip/raw deflate format |
+
+## Reading
+
+### `zlib.decompress`
+
+```c
+// CPython: Modules/zlibmodule.c:380 zlib_decompress_impl
+static PyObject *
+zlib_decompress_impl(PyObject *module, Py_buffer *data,
+                     int wbits, Py_ssize_t bufsize)
+{
+    /* One-shot: inflateInit2 + inflate(Z_FINISH) + inflateEnd */
+    z_stream zst;
+    inflateInit2(&zst, wbits);
+    zst.avail_in = data->len;
+    zst.next_in = data->buf;
+    /* Grow output buffer as needed */
+    do {
+        zst.avail_out = bufsize;
+        zst.next_out = output + offset;
+        err = inflate(&zst, Z_FINISH);
+        if (err == Z_BUF_ERROR && zst.avail_out == 0) {
+            bufsize *= 2;
+            output = PyBytes_Resize(output, ...);
+        }
+    } while (err == Z_BUF_ERROR);
+    inflateEnd(&zst);
+    return output;
+}
+```
+
+`zlib.decompress` doubles the output buffer on `Z_BUF_ERROR` (output buffer full). For large data this is efficient; for pathological inputs it could reach 2x the final size. The `bufsize` hint avoids excessive doubling.
+
+### `wbits` parameter
+
+```c
+// CPython: Modules/zlibmodule.c:120 wbits documentation
+/* wbits controls the window size and format:
+   8..15   : zlib format (RFC 1950) — includes zlib header and Adler-32 checksum
+   -8..-15 : raw deflate (RFC 1951) — no header, no checksum
+   24..31  : gzip format (RFC 1952) — gzip header and CRC-32 checksum
+   40..47  : automatically detect zlib or gzip format */
+```
+
+`zlib.decompress(data, wbits=47)` auto-detects zlib vs gzip. `wbits=-15` is used for the `zipfile` module which stores raw deflate. The window size (bits 0-4) affects memory usage and compression ratio.
+
+### `Decompress.decompress`
+
+```c
+// CPython: Modules/zlibmodule.c:580 Decompress_decompress_impl
+static PyObject *
+Decompress_decompress_impl(compobject *self, Py_buffer *ibuf,
+                            Py_ssize_t max_length)
+{
+    /* Feed ibuf to the stream; return however many bytes are available.
+       max_length limits output; unconsumed input stored in self->unconsumed_tail. */
+    self->zst.avail_in = ibuf->len;
+    self->zst.next_in = ibuf->buf;
+    do {
+        Py_ssize_t avail = (max_length > 0) ? max_length - (self->zst.total_out - start_total_out) : bufsize;
+        err = inflate(&self->zst, Z_SYNC_FLUSH);
+        ...
+    } while (err == Z_OK && self->zst.avail_in > 0);
+    /* Store remaining input */
+    self->unconsumed_tail = PyBytes_FromStringAndSize(
+        self->zst.next_in, self->zst.avail_in);
+    return output;
+}
+```
+
+Streaming decompression allows processing gzip files chunk by chunk without loading the entire file. `unconsumed_tail` holds input that didn't fit in the current call; feed it back with the next chunk.
+
+## gopy notes
+
+`zlib.decompress` is `module/zlib.Decompress` in `module/zlib/module.go`. It uses Go's `compress/zlib`, `compress/gzip`, and `compress/flate` packages for the three formats. `Decompress.decompress` is `module/zlib.DecompressObj.Decompress`. The `wbits` value is mapped to the appropriate Go decompressor.

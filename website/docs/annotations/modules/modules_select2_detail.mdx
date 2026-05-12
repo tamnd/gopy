@@ -1,0 +1,102 @@
+---
+title: Modules/selectmodule.c (part 2)
+description: "Modules/selectmodule.c part 2: select.poll, select.epoll, select.kqueue, selectors module integration."
+cpython_path: Modules/selectmodule.c
+cpython_version: "3.14"
+lines: 600
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/selectmodule.c" />
+
+This annotation covers platform-specific I/O multiplexing. See `modules_select_detail` for `select.select`, file descriptor validation, and timeout handling.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-100 | `select.poll` | Linux/BSD: register fds and poll for events |
+| 101-240 | `select.epoll` | Linux: edge/level-triggered event notification |
+| 241-380 | `select.kqueue` | macOS/BSD: kernel event queue |
+| 381-500 | `selectors.DefaultSelector` | High-level wrapper that chooses the best backend |
+| 501-600 | Event constants | `POLLIN`, `POLLOUT`, `EPOLLIN`, `EPOLLET`, etc. |
+
+## Reading
+
+### `select.poll`
+
+```c
+// CPython: Modules/selectmodule.c:640 poll_register
+static PyObject *
+poll_register(pollObject *self, PyObject *args)
+{
+    PyObject *o;
+    int fd, events = POLLIN | POLLPRI | POLLOUT;
+    if (!PyArg_ParseTuple(args, "O|i:register", &o, &events)) return NULL;
+    fd = PyObject_AsFileDescriptor(o);
+    if (fd < 0) return NULL;
+    /* Store (fd, events) in self->dict */
+    PyDict_SetItem(self->dict, PyLong_FromLong(fd), PyLong_FromLong(events));
+    Py_RETURN_NONE;
+}
+
+static PyObject *
+poll_poll(pollObject *self, PyObject *args)
+{
+    /* Build pollfd[] array, call poll(2), return list of (fd, events) */
+    Py_ssize_t num_fds = PyDict_GET_SIZE(self->dict);
+    struct pollfd *ufds = calloc(num_fds, sizeof(struct pollfd));
+    ...
+    Py_BEGIN_ALLOW_THREADS
+    int retval = poll(ufds, num_fds, timeout);
+    Py_END_ALLOW_THREADS
+    ...
+}
+```
+
+`poll()` releases the GIL during the blocking call. The `dict` stores registered fds; `poll.poll(timeout_ms)` returns only the fds that are ready, as `(fd, event)` pairs.
+
+### `select.epoll`
+
+```c
+// CPython: Modules/selectmodule.c:1040 pyepoll_register
+static PyObject *
+pyepoll_register(pyEpoll_Object *self, PyObject *args, PyObject *kwds)
+{
+    int fd, events = EPOLLIN | EPOLLOUT | EPOLLPRI;
+    PyArg_ParseTupleAndKeywords(args, kwds, "O|i:register", kwlist, &fdobj, &events);
+    fd = PyObject_AsFileDescriptor(fdobj);
+    struct epoll_event ev = {.events = events, .data.fd = fd};
+    if (epoll_ctl(self->epfd, EPOLL_CTL_ADD, fd, &ev) < 0) {
+        PyErr_SetFromErrno(PyExc_OSError);
+        return NULL;
+    }
+    Py_RETURN_NONE;
+}
+```
+
+`epoll` is O(1) for event detection regardless of the number of registered fds, making it suitable for servers with thousands of connections. Edge-triggered (`EPOLLET`) mode requires draining the fd completely before waiting again.
+
+### `selectors.DefaultSelector`
+
+```python
+# CPython: Lib/selectors.py:580 DefaultSelector
+if 'EpollSelector' in globals():
+    DefaultSelector = EpollSelector    # Linux
+elif 'KqueueSelector' in globals():
+    DefaultSelector = KqueueSelector   # macOS/BSD
+elif 'DevpollSelector' in globals():
+    DefaultSelector = DevpollSelector  # Solaris
+elif 'PollSelector' in globals():
+    DefaultSelector = PollSelector
+else:
+    DefaultSelector = SelectSelector   # Windows fallback
+```
+
+`selectors.DefaultSelector` automatically picks the most efficient backend. `asyncio` uses it internally for non-blocking I/O. The `SelectorEventLoop` wraps `DefaultSelector` for the event loop.
+
+## gopy notes
+
+`select.poll` is `module/select.Poll` in `module/select/module.go`. On Linux, it calls `syscall.Poll`. `select.epoll` uses `golang.org/x/sys/unix.EpollCreate1` and `EpollCtl`. `selectors.DefaultSelector` dispatches to the appropriate backend at init time based on OS constants.

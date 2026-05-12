@@ -1,0 +1,117 @@
+---
+title: Lib/tempfile.py (part 2)
+description: "Lib/tempfile.py part 2: TemporaryFile, NamedTemporaryFile, SpooledTemporaryFile, TemporaryDirectory, mkstemp."
+cpython_path: Lib/tempfile.py
+cpython_version: "3.14"
+lines: 600
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/tempfile.py" />
+
+This annotation covers temporary file and directory creation. See `lib_tempfile_detail` for `_get_candidate_names`, `_sanitize_params`, `gettempdir`, and the `_TemporaryFileCloser` finalizer.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-100 | `mkstemp` | Create a unique file; return `(fd, name)` |
+| 101-220 | `TemporaryFile` | Unnamed temporary file; auto-deleted on close |
+| 221-360 | `NamedTemporaryFile` | Named temp file; `delete=True` removes on close |
+| 361-480 | `SpooledTemporaryFile` | In-memory until `max_size` exceeded, then spills to disk |
+| 481-600 | `TemporaryDirectory` | Context manager that creates and removes a temp dir |
+
+## Reading
+
+### `mkstemp`
+
+```python
+# CPython: Lib/tempfile.py:480 mkstemp
+def mkstemp(suffix=None, prefix=None, dir=None, text=False):
+    """Create a temporary file in the most secure manner possible.
+       Returns (fd, name). Caller is responsible for closing fd."""
+    prefix, suffix, dir, output_type = _sanitize_params(prefix, suffix, dir)
+    file, name = _mkstemp_inner(dir, prefix, suffix, flags, output_type)
+    return file, name
+
+def _mkstemp_inner(dir, pre, suf, flags, output_type):
+    names = _get_candidate_names()
+    for seq in range(TMP_MAX):
+        name = _os.path.join(dir, pre + next(names) + suf)
+        try:
+            fd = _os.open(name, flags, 0o600)
+            return (fd, _os.fspath(name))
+        except FileExistsError:
+            continue
+    raise FileExistsError(errno.EEXIST, ...)
+```
+
+`mkstemp` retries up to `TMP_MAX` (10,000) times with different random names. Flags include `O_EXCL` which makes the create atomic: if another process creates the same name first, `FileExistsError` is raised and we retry.
+
+### `NamedTemporaryFile`
+
+```python
+# CPython: Lib/tempfile.py:560 NamedTemporaryFile
+class NamedTemporaryFile:
+    def __init__(self, mode='w+b', buffering=-1, encoding=None,
+                 newline=None, suffix=None, prefix=None, dir=None,
+                 delete=True, *, errors=None, delete_on_close=True):
+        (fd, name) = mkstemp(suffix, prefix, dir)
+        self._closer = _TemporaryFileCloser(name, delete, delete_on_close)
+        self.file = _io.open(fd, mode, buffering, encoding, errors, newline)
+```
+
+`NamedTemporaryFile` is a file wrapper with a finalizer. On Windows, `delete=True` with `delete_on_close=False` delays deletion until the file is closed, because Windows cannot delete open files.
+
+### `SpooledTemporaryFile`
+
+```python
+# CPython: Lib/tempfile.py:680 SpooledTemporaryFile.write
+def write(self, s):
+    if self._rolled:
+        return self._file.write(s)
+    # Check if we've exceeded max_size
+    mem_file = self._file
+    size = mem_file.seek(0, 2)  # Seek to end
+    if size + len(s) > self._max_size:
+        self.rollover()
+        return self._file.write(s)
+    return mem_file.write(s)
+
+def rollover(self):
+    """Spill to a real file."""
+    if self._rolled: return
+    tmp = self._file
+    self._file = TemporaryFile(**self._TemporaryFileArgs)
+    self._file.write(tmp.getvalue())
+    self._rolled = True
+```
+
+`SpooledTemporaryFile` starts as a `BytesIO`/`StringIO` in memory. When the cumulative write size exceeds `max_size`, it rolls over to a real temporary file. This is efficient for small payloads that rarely grow large.
+
+### `TemporaryDirectory`
+
+```python
+# CPython: Lib/tempfile.py:840 TemporaryDirectory
+class TemporaryDirectory:
+    def __init__(self, suffix=None, prefix=None, dir=None,
+                 ignore_cleanup_errors=False, *, delete=True):
+        self.name = mkdtemp(suffix, prefix, dir)
+        self._delete = delete
+        self._ignore_cleanup_errors = ignore_cleanup_errors
+        self._finalizer = _weakref.finalize(
+            self, self._cleanup, self.name,
+            warn_message=..., delete=self._delete)
+
+    def cleanup(self):
+        if self._finalizer.detach() or _os.path.exists(self.name):
+            self._rmtree(self.name)
+```
+
+`weakref.finalize` ensures cleanup even if `__exit__` is never called (e.g., the context manager is used without `with`). `_rmtree` uses `shutil.rmtree` with a custom error handler for `ignore_cleanup_errors=True`.
+
+## gopy notes
+
+`mkstemp` is `module/tempfile.Mkstemp` in `module/tempfile/module.go`. It uses `os.CreateTemp`. `NamedTemporaryFile` wraps Go's `os.File`. `SpooledTemporaryFile` uses `bytes.Buffer` for the in-memory phase. `TemporaryDirectory` uses `os.MkdirTemp` and `os.RemoveAll`.

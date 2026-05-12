@@ -1,0 +1,96 @@
+---
+title: Python/typeobject.c (part 4)
+description: "Python/typeobject.c part 4: type.__init_subclass__, type.__set_name__, dataclass-style descriptor protocol, __slots__ processing."
+cpython_path: Python/typeobject.c
+cpython_version: "3.14"
+lines: 600
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Python/typeobject.c" />
+
+This annotation covers type creation hooks. See `objects_typeobject3_detail` for `type.__call__`, `tp_new`, `tp_init`, and `type.__new__`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-100 | `type.__init_subclass__` | Hook called when a class is subclassed |
+| 101-220 | `type.__set_name__` | Notify descriptors of their name in the owning class |
+| 221-360 | `__slots__` processing | Allocate member descriptors; set `tp_basicsize` |
+| 361-500 | `__init_subclass__` dispatch | Call in MRO order; pass keyword arguments |
+| 501-600 | `type.__subclasses__` | Return direct subclasses |
+
+## Reading
+
+### `type.__init_subclass__`
+
+```c
+// CPython: Python/typeobject.c:7480 type_init_subclass
+static int
+type_init_subclass(PyTypeObject *type, PyObject *kwds)
+{
+    /* Call type.__init_subclass__ on each base in MRO.
+       PEP 487: called after the class body has been executed. */
+    PyObject *super = PyObject_CallOneArg((PyObject *)&PySuper_Type,
+                                           (PyObject *)type);
+    PyObject *func = PyObject_GetAttr(super, &_Py_ID(__init_subclass__));
+    return PyObject_Call(func, _PyTuple_EMPTY, kwds) != NULL ? 0 : -1;
+}
+```
+
+`class Foo(Base, metaclass=Meta, keyword=value):` passes `keyword=value` to `Base.__init_subclass__`. This is how `dataclasses` receives `eq=True` and `order=False` and `abc.ABCMeta` registers abstract methods.
+
+### `type.__set_name__`
+
+```c
+// CPython: Python/typeobject.c:7380 set_names
+static int
+set_names(PyTypeObject *type)
+{
+    /* For each attribute in the class dict that implements __set_name__,
+       call descriptor.__set_name__(owner_type, attr_name). */
+    PyObject *key, *value;
+    Py_ssize_t i = 0;
+    while (PyDict_Next(type->tp_dict, &i, &key, &value)) {
+        PyObject *set_name = _PyObject_LookupSpecial(value, &_Py_ID(__set_name__));
+        if (set_name != NULL) {
+            PyObject *res = PyObject_CallFunctionObjArgs(set_name, type, key, NULL);
+            if (res == NULL) return -1;
+            Py_DECREF(res);
+        }
+    }
+    return 0;
+}
+```
+
+`__set_name__` allows descriptors to know which attribute name they were assigned to. `dataclasses.field()` uses this to record the field name without requiring explicit `name=` argument. Called during class creation, before `__init_subclass__`.
+
+### `__slots__` processing
+
+```c
+// CPython: Python/typeobject.c:2880 type_new_slots
+static int
+type_new_slots(PyTypeObject *type, PyObject *slots)
+{
+    /* For each name in __slots__:
+       1. Check it's a valid identifier and not a duplicate
+       2. Create a PyMemberDef at offset (basicsize + i * sizeof(PyObject*))
+       3. Add a member_descriptor to tp_dict */
+    Py_ssize_t nslot = PyTuple_GET_SIZE(slots);
+    type->tp_basicsize += nslot * sizeof(PyObject *);
+    for (int i = 0; i < nslot; i++) {
+        PyObject *name = PyTuple_GET_ITEM(slots, i);
+        ...
+        type->tp_members[i] = ...;
+    }
+}
+```
+
+`__slots__` prevents `__dict__` creation per instance, saving ~200 bytes per instance. Each slot becomes a C-level member at a fixed offset in the object struct. Inheritance with `__slots__` in parent but not child still creates `__dict__` in the child.
+
+## gopy notes
+
+`type.__init_subclass__` is `objects.TypeInitSubclass` in `objects/type.go`. It calls `super().__init_subclass__(**kwargs)`. `__set_name__` dispatch is `objects.TypeSetNames`. `__slots__` processing creates `objects.MemberDescriptor` objects and adjusts `objects.Type.BasicSize`.

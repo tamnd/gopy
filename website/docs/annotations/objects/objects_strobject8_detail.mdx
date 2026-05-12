@@ -1,0 +1,114 @@
+---
+title: Objects/unicodeobject.c (part 8)
+description: "Objects/unicodeobject.c part 8: str.encode, str.format_map, str.maketrans, str.translate, str.expandtabs."
+cpython_path: Objects/unicodeobject.c
+cpython_version: "3.14"
+lines: 600
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Objects/unicodeobject.c" />
+
+This annotation covers encoding and table-driven operations. See `objects_strobject7_detail` for `str.split`/`join`/`replace`/`strip`, and earlier parts for `str.__new__` and repr.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-100 | `str.encode` | Encode to `bytes` via the codec registry |
+| 101-220 | `str.format_map` | Like `str.format` but with a mapping argument |
+| 221-360 | `str.maketrans` | Build a translation table for `str.translate` |
+| 361-480 | `str.translate` | Character-by-character replacement using a table |
+| 481-600 | `str.expandtabs` | Replace `\t` with spaces aligned to tab stops |
+
+## Reading
+
+### `str.encode`
+
+```c
+// CPython: Objects/unicodeobject.c:3480 unicode_encode_impl
+static PyObject *
+unicode_encode_impl(PyObject *self, const char *encoding, const char *errors)
+{
+    /* Default encoding is UTF-8 if encoding is NULL */
+    if (encoding == NULL) {
+        return _PyUnicode_AsUTF8String(self, errors);
+    }
+    return PyUnicode_AsEncodedString(self, encoding, errors);
+}
+```
+
+`'hello'.encode('latin-1')` calls into the codec registry. The fast path for UTF-8 uses `_PyUnicode_AsUTF8String` which avoids registry lookup. The `errors` argument controls behavior on unencodable characters: `strict` (default), `replace`, `ignore`, `xmlcharrefreplace`, `backslashreplace`.
+
+### `str.maketrans`
+
+```c
+// CPython: Objects/unicodeobject.c:2980 unicode_maketrans_impl
+static PyObject *
+unicode_maketrans_impl(PyObject *x, PyObject *y, PyObject *z)
+{
+    PyObject *new = PyDict_New();
+    if (PyUnicode_Check(x)) {
+        /* Two-argument form: str.maketrans('abc', 'xyz') */
+        /* Map each char in x to the corresponding char in y */
+        for (int i = 0; i < PyUnicode_GET_LENGTH(x); i++) {
+            Py_UCS4 c = PyUnicode_READ_CHAR(x, i);
+            Py_UCS4 d = PyUnicode_READ_CHAR(y, i);
+            PyDict_SetItem(new, PyLong_FromLong(c), PyLong_FromLong(d));
+        }
+    } else {
+        /* One-argument form: str.maketrans({'a': 'x', 'b': None}) */
+        ...
+    }
+    /* z = chars to delete: map to None */
+    ...
+    return new;
+}
+```
+
+`str.maketrans('abc', 'ABC', 'xyz')` creates a dict mapping `ord('a') -> ord('A')`, etc., and `ord('x') -> None` (delete). The dict is keyed by Unicode code points (integers), not characters.
+
+### `str.translate`
+
+```c
+// CPython: Objects/unicodeobject.c:3080 unicode_translate
+static PyObject *
+unicode_translate(PyObject *self, PyObject *table)
+{
+    /* Walk through self, looking up each code point in table.
+       None -> delete, int -> replacement code point, str -> insert string. */
+    return _PyUnicode_TranslateCharmap(self, table, "ignore");
+}
+```
+
+`'hello world'.translate(str.maketrans('aeiou', '12345'))` produces ``'h2ll4 w4rld'`. Translating large strings is O(n) in the string length times the table lookup cost.
+
+### `str.expandtabs`
+
+```c
+// CPython: Objects/unicodeobject.c:3280 unicode_expandtabs_impl
+static PyObject *
+unicode_expandtabs_impl(PyObject *self, int tabsize)
+{
+    /* Replace each \t with spaces to reach the next tab stop.
+       Tab stops are at positions 0, tabsize, 2*tabsize, ... */
+    Py_ssize_t col = 0;
+    for each char c in self:
+        if (c == '\t') {
+            Py_ssize_t spaces = tabsize - (col % tabsize);
+            /* append 'spaces' space chars */
+            col += spaces;
+        } else {
+            col = (c == '\n' || c == '\r') ? 0 : col + 1;
+            /* append c */
+        }
+}
+```
+
+`'\thello\tworld'.expandtabs(8)` produces `'hello   world'` with tab stops every 8 characters. `\n` and `\r` reset the column counter.
+
+## gopy notes
+
+`str.encode` is `objects.UnicodeEncode` in `objects/str.go`. It calls `module/codecs.Encode`. `str.maketrans` builds a Go map from `rune` to `rune` or `nil` (delete). `str.translate` walks the `[]rune` and applies the map. `str.expandtabs` uses a `strings.Builder` and tracks column position.
