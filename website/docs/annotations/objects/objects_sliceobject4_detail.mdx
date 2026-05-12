@@ -1,0 +1,108 @@
+---
+title: Objects/sliceobject.c (part 4)
+description: "sliceobject.c part 4: slice.__new__, slice.indices, slice.__repr__, Ellipsis object."
+cpython_path: Objects/sliceobject.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Objects/sliceobject.c" />
+
+This annotation covers slice object construction and index computation. See `objects_sliceobject3_detail` for the slice cache and basic slot methods.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `slice.__new__` | Create `slice(stop)` or `slice(start, stop[, step])` |
+| 81-160 | `slice.indices` | Compute concrete start/stop/step for a sequence |
+| 161-240 | `slice.__repr__` | `slice(1, 10, 2)` string |
+| 241-340 | `Ellipsis` (`...`) | Singleton sentinel object |
+| 341-500 | Slice cache | Reuse common slices |
+
+## Reading
+
+### `slice.__new__`
+
+```c
+// CPython: Objects/sliceobject.c:68 slice_new_impl
+static PyObject *
+slice_new_impl(PyTypeObject *type, PyObject *args)
+{
+    PyObject *start = Py_None, *stop = Py_None, *step = Py_None;
+    if (PyTuple_GET_SIZE(args) == 1) {
+        stop = PyTuple_GET_ITEM(args, 0);
+    } else {
+        PyArg_UnpackTuple(args, "slice", 2, 3, &start, &stop, &step);
+    }
+    return PySlice_New(start, stop, step);
+}
+```
+
+`slice(10)` is `slice(None, 10, None)`. `slice(1, 10)` sets start and stop. All three attributes (`start`, `stop`, `step`) default to `None` when omitted. `None` is interpreted as the sequence boundary by `__getitem__`.
+
+### `slice.indices`
+
+```c
+// CPython: Objects/sliceobject.c:240 PySlice_GetIndicesEx
+int
+PySlice_Unpack(PyObject *_r, Py_ssize_t *start, Py_ssize_t *stop, Py_ssize_t *step)
+{
+    PySliceObject *r = (PySliceObject *)_r;
+    /* Default step = 1 */
+    if (r->step == Py_None) *step = 1;
+    else { *step = PyLong_AsSsize_t(r->step); }
+    /* Default start/stop based on step direction */
+    if (r->start == Py_None)
+        *start = (*step < 0) ? PY_SSIZE_T_MAX : 0;
+    else { *start = PyLong_AsSsize_t(r->start); }
+    ...
+}
+
+int
+PySlice_AdjustIndices(Py_ssize_t length, Py_ssize_t *start, Py_ssize_t *stop, Py_ssize_t step)
+{
+    /* Clamp and adjust negative indices */
+    if (*start < 0) { *start += length; if (*start < 0) *start = (step < 0) ? -1 : 0; }
+    ...
+    return (*stop - *start + step - (step > 0 ? 1 : -1)) / step;  /* length */
+}
+```
+
+`slice(1, 10, 2).indices(5)` returns `(1, 5, 2)` — the actual start/stop clamped to `[0, 5)`. Used by `__getitem__` on custom types. `PySlice_Unpack` + `PySlice_AdjustIndices` replaced the older `PySlice_GetIndicesEx`.
+
+### `slice.__repr__`
+
+```c
+// CPython: Objects/sliceobject.c:180 slice_repr
+static PyObject *
+slice_repr(PySliceObject *v)
+{
+    return PyUnicode_FromFormat("slice(%R, %R, %R)", v->start, v->stop, v->step);
+}
+```
+
+`repr(slice(1, 10, 2))` returns `"slice(1, 10, 2)"`. `repr(slice(None, 5))` returns `"slice(None, 5, None)"`.
+
+### `Ellipsis`
+
+```c
+// CPython: Objects/sliceobject.c:380 Py_Ellipsis
+/* The ... singleton */
+PyObject _Py_EllipsisObject = {_PyObject_EXTRA_INIT 1, &PyEllipsis_Type};
+
+static PyObject *
+ellipsis_repr(PyObject *op)
+{
+    return PyUnicode_FromString("Ellipsis");
+}
+```
+
+`...` is a singleton like `None`. It is used in `numpy` for multi-dimensional slicing (`a[..., 0]`). In type hints, `Tuple[int, ...]` uses it to mean "homogeneous tuple of any length". `type(...)` is `<class 'ellipsis'>`.
+
+## gopy notes
+
+`slice.__new__` is `objects.NewSlice` in `objects/slice.go`. `slice.indices` is `objects.Slice.Indices(length int)` returning `(start, stop, step int)`. `Ellipsis` is `objects.Ellipsis`, a package-level singleton of type `objects.EllipsisType`.

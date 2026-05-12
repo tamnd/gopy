@@ -1,0 +1,114 @@
+---
+title: Lib/dataclasses.py (part 4)
+description: "dataclasses.py part 4: __post_init__, KW_ONLY, InitVar, ClassVar, slots=True."
+cpython_path: Lib/dataclasses.py
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/dataclasses.py" />
+
+This annotation covers advanced dataclass features. See `lib_dataclasses3_detail` for `@dataclass`, `field()`, `__init__` generation, and `__repr__`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `__post_init__` | Called after `__init__`; used for validation |
+| 81-160 | `InitVar` | Parameters that appear in `__init__` but are not fields |
+| 161-240 | `ClassVar` | Class-level annotations excluded from dataclass |
+| 241-360 | `KW_ONLY` sentinel | Force all following fields to be keyword-only |
+| 361-500 | `slots=True` | Generate `__slots__` to save memory |
+
+## Reading
+
+### `__post_init__`
+
+```python
+# CPython: Lib/dataclasses.py:540 _init_fn (post_init call injection)
+def _init_fn(fields, frozen, has_post_init, self_name, globals):
+    body_lines = []
+    for f in fields:
+        ...  # assign each field
+    if has_post_init:
+        body_lines += [f'{self_name}.{_POST_INIT_NAME}({",".join(seen_default)})']
+    return _create_fn('__init__', ...)
+```
+
+If the class defines `__post_init__`, the generated `__init__` calls it at the end, passing any `InitVar` values. This is where cross-field validation belongs: `if self.end < self.start: raise ValueError(...)`.
+
+### `InitVar`
+
+```python
+# CPython: Lib/dataclasses.py:280 InitVar
+class InitVar:
+    __slots__ = ('type',)
+    def __init__(self, type):
+        self.type = type
+    def __class_getitem__(cls, type):
+        return cls(type)
+
+# Usage:
+@dataclass
+class C:
+    x: int
+    y: InitVar[int]
+    def __post_init__(self, y):
+        self.x = self.x + y
+```
+
+`InitVar` fields appear as parameters in `__init__` (and in `__post_init__`) but are not stored as attributes. `y: InitVar[int]` means `__init__` accepts `y`, passes it to `__post_init__`, and then discards it.
+
+### `ClassVar`
+
+```python
+# CPython: Lib/dataclasses.py:240 _is_classvar
+def _is_classvar(a_type, typing):
+    return (a_type is typing.ClassVar
+            or (type(a_type) is typing._GenericAlias
+                and a_type.__origin__ is typing.ClassVar))
+```
+
+`x: ClassVar[int] = 0` is excluded from `__init__`, `__repr__`, and `__eq__`. The dataclass machinery calls `_is_classvar` to filter it out. `typing.get_type_hints` would include it, but `fields()` does not.
+
+### `KW_ONLY`
+
+```python
+# CPython: Lib/dataclasses.py:320 KW_ONLY sentinel
+KW_ONLY = KW_ONLY()
+
+@dataclass
+class C:
+    x: int
+    _: KW_ONLY
+    y: int     # keyword-only from here on
+    z: int = 0  # also keyword-only
+```
+
+A field annotated with type `KW_ONLY` acts as a marker: all fields declared after it are keyword-only in `__init__`. This is a sentinel instance, not a type; the dataclass metaclass detects it by identity.
+
+### `slots=True`
+
+```python
+# CPython: Lib/dataclasses.py:1020 _add_slots
+def _add_slots(cls, is_frozen, hasdict, weakref_slot):
+    # Create a new class with __slots__ set to the field names
+    cls_dict = {}
+    for key, value in cls.__dict__.items():
+        if key not in ('__dict__', '__weakref__'):
+            cls_dict[key] = value
+    cls_dict['__slots__'] = tuple(f.name for f in fields(cls))
+    qualname = cls.__qualname__
+    cls = type(cls)(cls.__name__, cls.__bases__, cls_dict)
+    cls.__qualname__ = qualname
+    return cls
+```
+
+`@dataclass(slots=True)` creates a new class (because `__slots__` must be set at class creation time, not patched afterward). The original class is discarded and a new one with `__slots__` is returned.
+
+## gopy notes
+
+`__post_init__` is called at the end of `module/dataclasses.genInit` in `module/dataclasses/module.go`. `InitVar` fields are detected by `_isInitVar` and included in the `__init__` signature but omitted from `objects.Instance` fields. `KW_ONLY` sets the `kwonly` flag on subsequent `Field` structs. `slots=True` generates a type with `__slots__` that maps to Go struct fields.

@@ -1,0 +1,133 @@
+---
+title: Modules/mathmodule.c (part 8)
+description: "mathmodule.c part 8: math.isclose, math.prod, math.lcm, math.dist, math.hypot variadic."
+cpython_path: Modules/mathmodule.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/mathmodule.c" />
+
+This annotation covers Python 3.8-3.10 additions to `math`. See `modules_math7_detail` for `math.floor`, `math.ceil`, `math.gcd`, `math.log`, and `math.pow`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `math.isclose` | Approximate floating-point equality |
+| 81-160 | `math.prod` | Product of an iterable (3.8+) |
+| 161-240 | `math.lcm` | Least common multiple of multiple ints (3.9+) |
+| 241-360 | `math.dist` | Euclidean distance between two points (3.8+) |
+| 361-500 | `math.hypot` variadic | Multi-dimensional hypotenuse (3.8+) |
+
+## Reading
+
+### `math.isclose`
+
+```c
+// CPython: Modules/mathmodule.c:2380 math_isclose_impl
+static int
+math_isclose_impl(PyObject *module, double a, double b,
+                  double rel_tol, double abs_tol)
+{
+    if (a == b) return 1;
+    if (isinf(a) || isinf(b)) return 0;
+    double diff = fabs(a - b);
+    return (diff <= fabs(rel_tol * b) ||
+            diff <= fabs(rel_tol * a) ||
+            diff <= abs_tol);
+}
+```
+
+`math.isclose(a, b, rel_tol=1e-9, abs_tol=0.0)` returns `True` if `|a - b| <= max(rel_tol * max(|a|, |b|), abs_tol)`. `inf == inf` by exact equality. Two infinities with different signs are not close.
+
+### `math.prod`
+
+```c
+// CPython: Modules/mathmodule.c:2480 math_prod_impl
+static PyObject *
+math_prod_impl(PyObject *module, PyObject *iterable, PyObject *start)
+{
+    PyObject *result = start ? Py_NewRef(start) : PyLong_FromLong(1);
+    PyObject *it = PyObject_GetIter(iterable);
+    PyObject *item;
+    while ((item = PyIter_Next(it)) != NULL) {
+        PyObject *new = PyNumber_Multiply(result, item);
+        Py_DECREF(result);
+        Py_DECREF(item);
+        result = new;
+    }
+    Py_DECREF(it);
+    return result;
+}
+```
+
+`math.prod([2, 3, 4])` returns `24`. Unlike `sum`, there is no built-in short-circuit for zero (because the type is unknown). `start` defaults to `1` (integer) so float products require `start=1.0`.
+
+### `math.lcm`
+
+```c
+// CPython: Modules/mathmodule.c:2540 math_lcm_impl
+static PyObject *
+math_lcm_impl(PyObject *module, PyObject *args)
+{
+    /* lcm(a, b) = |a * b| / gcd(a, b) */
+    PyObject *res = PyLong_FromLong(0);  /* lcm() == 0 */
+    for each arg:
+        PyObject *g = _PyLong_GCD(res, arg);
+        PyObject *m = PyNumber_Multiply(res, arg);
+        res = PyNumber_FloorDivide(m, g);
+        res = PyNumber_Absolute(res);
+    return res;
+}
+```
+
+`math.lcm(4, 6)` returns `12`. `math.lcm()` (no args) returns `0`. `math.lcm(a, b, c)` computes `lcm(lcm(a, b), c)` iteratively.
+
+### `math.dist`
+
+```c
+// CPython: Modules/mathmodule.c:2600 math_dist_impl
+static PyObject *
+math_dist_impl(PyObject *module, PyObject *p, PyObject *q)
+{
+    /* Euclidean distance: sqrt(sum((pi - qi)^2)) */
+    double *diffs = ...; /* array of (pi - qi) */
+    double result = vector_norm(diffs, n, max_abs_val);
+    return PyFloat_FromDouble(result);
+}
+```
+
+`math.dist([1, 2, 3], [4, 6, 8])` computes `sqrt(9 + 16 + 25) = sqrt(50)`. Uses `vector_norm` (the same as `math.hypot`) to avoid intermediate overflow.
+
+### `math.hypot` variadic
+
+```c
+// CPython: Modules/mathmodule.c:2440 math_hypot
+static PyObject *
+math_hypot(PyObject *module, PyObject *const *args, Py_ssize_t nargs)
+{
+    /* hypot(x, y, z, ...) = sqrt(x^2 + y^2 + z^2 + ...) */
+    /* Two-pass: find max, then sum (xi/max)^2, multiply by max */
+    double max = 0.0;
+    for (int i = 0; i < nargs; i++) {
+        double x = fabs(PyFloat_AsDouble(args[i]));
+        if (x > max) max = x;
+    }
+    double sum = 0.0;
+    for (int i = 0; i < nargs; i++) {
+        double x = PyFloat_AsDouble(args[i]) / max;
+        sum += x * x;
+    }
+    return PyFloat_FromDouble(max * sqrt(sum));
+}
+```
+
+The two-pass algorithm avoids overflow for large values and underflow for small ones. `hypot(1e300, 1e300)` returns `1.4142...e300` correctly; naive `sqrt(a*a + b*b)` would overflow.
+
+## gopy notes
+
+`math.isclose` is `module/math.IsClose` in `module/math/module.go`. `math.prod` iterates and multiplies using `objects.NumericMultiply`. `math.lcm` calls `objects.IntGCD` then divides. `math.hypot` uses Go's two-pass `math.Hypot` extended to n-dimensional via a loop.

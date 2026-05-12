@@ -1,0 +1,116 @@
+---
+title: Python/ceval.c (part 78)
+description: "Python/ceval.c part 78: RESUME, YIELD_VALUE, RESUME specializations, frame suspension."
+cpython_path: Python/ceval.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Python/ceval.c" />
+
+This annotation covers generator resumption and yield opcodes. See `python_ceval77_detail` for `CALL`, `CALL_PY_EXACT_ARGS`, and `CALL_BUILTIN_FAST`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `RESUME` | Frame resumption point after suspension |
+| 81-160 | `YIELD_VALUE` | Yield a value and suspend the frame |
+| 161-240 | `RESUME` specializations | `RESUME_CHECK` and profiling hooks |
+| 241-360 | Frame suspension mechanics | How the frame state is saved |
+| 361-500 | `AWAIT` | `await expr` — enter a coroutine |
+
+## Reading
+
+### `RESUME`
+
+```c
+// CPython: Python/ceval.c:1220 RESUME
+inst(RESUME, (--)) {
+    /* Check for pending signals/calls at function entry and after suspension */
+    uintptr_t v = _Py_atomic_load_uintptr_relaxed(&tstate->eval_breaker);
+    if (v & _Py_EVAL_EVENTS_MASK) {
+        int err = _Py_HandlePending(tstate);
+        ERROR_IF(err != 0, error);
+    }
+    /* For generators: after a SEND, oparg tells why we're resuming:
+       0 = entering function, 1 = yield, 2 = yield from / await */
+}
+```
+
+`RESUME` is the first opcode in every function and the resumption point after every `yield`/`await`. It checks `eval_breaker` for pending signals, profiling events, or GIL release requests. For generators, `oparg` distinguishes first entry from resume.
+
+### `YIELD_VALUE`
+
+```c
+// CPython: Python/ceval.c:4480 YIELD_VALUE
+inst(YIELD_VALUE, (retval --)) {
+    assert(oparg == frame->f_code->co_nlocalsplus);
+    /* Save the frame's stack pointer so we can resume later */
+    frame->f_lasti = INSTR_OFFSET() - 1;
+    _PyFrame_SetStackPointer(frame, stack_pointer);
+    /* Suspend the frame */
+    assert(frame->owner == FRAME_OWNED_BY_GENERATOR);
+    PyGenObject *gen = _PyFrame_GetGenerator(frame);
+    gen->gi_frame_state = FRAME_SUSPENDED;
+    /* Return the yielded value to the caller */
+    _PyInterpreterFrame *prev_frame = frame->previous;
+    tstate->current_frame = prev_frame;
+    return retval;
+}
+```
+
+`YIELD_VALUE` saves the current instruction pointer (`f_lasti`) and stack pointer, marks the generator frame as `FRAME_SUSPENDED`, and returns the yielded value to the caller. The frame is not freed — it stays alive until the generator is GC'd or exhausted.
+
+### Frame suspension mechanics
+
+```c
+// CPython: Python/ceval.c:4520 frame state after YIELD_VALUE
+/* frame->f_lasti: points to YIELD_VALUE itself (to resume at RESUME after it) */
+/* frame->localsplus: holds all local variables and the value stack */
+/* gen->gi_frame_state = FRAME_SUSPENDED: marks it as resumable */
+/* tstate->current_frame: reverts to the caller's frame */
+```
+
+A suspended generator frame is a complete snapshot of the function's execution state. Locals, cells, and the value stack are all preserved in `frame->localsplus`. Only the program counter needs to be restored on resume.
+
+### `AWAIT`
+
+```c
+// CPython: Python/ceval.c:4560 AWAIT
+inst(AWAIT, (iterable -- iter)) {
+    /* oparg: 0 for first await, 1 for subsequent */
+    unaryfunc getter = Py_TYPE(iterable)->tp_as_async->am_await;
+    if (getter == NULL) {
+        /* Non-coroutine awaitable (has __await__) */
+        iter = PyObject_GetIter(iterable);
+    } else {
+        iter = (*getter)(iterable);
+    }
+    ERROR_IF(iter == NULL, error);
+    Py_DECREF(iterable);
+}
+```
+
+`await expr` compiles to `GET_AWAITABLE` (which calls `__await__` or `am_await`) followed by `SEND`/`RESUME` pairs that drive the coroutine. `AWAIT` is the `GET_AWAITABLE` call site for non-top-level awaits.
+
+### `RESUME` specializations
+
+```c
+// CPython: Python/ceval.c:1260 RESUME_CHECK
+inst(RESUME_CHECK, (--)) {
+    /* Specialized RESUME: only check tracing/profiling, skip signal check */
+    if (tstate->tracing) {
+        _PyEval_SetTrace(tstate, ...);
+    }
+}
+```
+
+`RESUME_CHECK` is the specialization of `RESUME` used when profiling or tracing is active. It calls the profiling hooks without the signal-check overhead of the generic `RESUME`.
+
+## gopy notes
+
+`RESUME` is in `vm/eval_gen.go` as `evalResume`. `YIELD_VALUE` calls `vm.yieldValue` which saves the frame state into `objects.Generator.Frame` and returns to the caller. `AWAIT` calls `objects.GetAwaitable`. Frame suspension is implemented via Go's goroutines in gopy's async model.
