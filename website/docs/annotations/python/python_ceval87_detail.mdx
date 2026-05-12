@@ -1,0 +1,98 @@
+---
+title: Python/ceval.c (part 87)
+description: "Python/ceval.c part 87: PUSH_EXC_INFO, POP_EXCEPT, RERAISE, CLEANUP_THROW, exception handling dispatch."
+cpython_path: Python/ceval.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Python/ceval.c" />
+
+This annotation covers the exception handling opcodes. See `python_ceval86_detail` for call specializations.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `PUSH_EXC_INFO` | Push the current exception onto the stack |
+| 81-160 | `POP_EXCEPT` | Restore the previous active exception |
+| 161-240 | `RERAISE` | Re-raise the current or a saved exception |
+| 241-340 | `CLEANUP_THROW` | Clean up after a `throw()` into a generator |
+| 341-500 | Exception dispatch | How the eval loop finds the handler |
+
+## Reading
+
+### `PUSH_EXC_INFO`
+
+```c
+// CPython: Python/ceval.c:4780 PUSH_EXC_INFO
+inst(PUSH_EXC_INFO, (new_exc -- prev_exc, new_exc)) {
+    /* Save the currently active exception and set new_exc as active */
+    _PyErr_StackItem *exc_info = tstate->exc_info;
+    prev_exc = exc_info->exc_value;          /* push old one */
+    exc_info->exc_value = Py_NewRef(new_exc); /* set new active */
+}
+```
+
+CPython maintains a per-thread exception stack (`exc_info`). `PUSH_EXC_INFO` saves the old active exception (which will be restored by `POP_EXCEPT` when the handler block exits) and installs the new exception as the active one. This enables `except` clauses to call `sys.exc_info()` and get the correct exception.
+
+### `POP_EXCEPT`
+
+```c
+// CPython: Python/ceval.c:4820 POP_EXCEPT
+inst(POP_EXCEPT, (exc_value --)) {
+    _PyErr_StackItem *exc_info = tstate->exc_info;
+    PyObject *value = exc_info->exc_value;
+    exc_info->exc_value = exc_value;  /* restore saved exception */
+    Py_XDECREF(value);                /* drop the one that just handled */
+}
+```
+
+`POP_EXCEPT` is emitted at the end of every `except` block. It swaps back the previously saved exception, undoing what `PUSH_EXC_INFO` did.
+
+### `RERAISE`
+
+```c
+// CPython: Python/ceval.c:4860 RERAISE
+inst(RERAISE, (values[oparg], exc --)) {
+    /* oparg == 1: restore lasti from saved frame info */
+    if (oparg) {
+        /* re-raise original from 'raise' without args inside except */
+        PyObject *lasti = values[0];
+        frame->f_lasti = PyLong_AsLong(lasti);
+    }
+    assert(PyExceptionInstance_Check(exc));
+    _PyErr_SetRaisedException(tstate, Py_NewRef(exc));
+    goto exception_unwind;
+}
+```
+
+`raise` without arguments inside an `except` clause compiles to `RERAISE 1`. `RERAISE 0` is used in `finally` blocks to propagate an active exception through the block.
+
+### Exception dispatch
+
+```c
+// CPython: Python/ceval.c:5100 exception_unwind
+exception_unwind:
+{
+    /* Walk the exception table to find a handler */
+    _PyInterpreterFrame *frame = tstate->current_frame;
+    int handler = _PyCode_FindHandlerTarget(frame);
+    if (handler < 0) {
+        /* No handler in this frame: unwind and return */
+        ...
+        goto exit_unwind;
+    }
+    /* Jump to the handler */
+    JUMPBY(handler - (int)(frame->instr_ptr - _PyCode_CODE(frame->f_code)));
+}
+```
+
+When an exception occurs, the eval loop jumps to `exception_unwind`. It consults the `co_exceptiontable` (a compact binary table) to find the handler offset. If no handler exists in the current frame, it unwinds to the caller.
+
+## gopy notes
+
+`PUSH_EXC_INFO` and `POP_EXCEPT` are in `vm/eval_unwind.go`. The exception stack is `vm.Thread.ExcInfo`. `RERAISE` calls `vm.SetException`. Exception dispatch reads `objects.CodeObject.ExceptionTable` using `vm.FindHandlerTarget`.

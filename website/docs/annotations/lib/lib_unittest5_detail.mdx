@@ -1,0 +1,105 @@
+---
+title: Lib/unittest/case.py (part 5)
+description: "unittest/case.py part 5: TestCase.assertRaises, assertWarns, assertLogs, assertRaisesRegex."
+cpython_path: Lib/unittest/case.py
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/unittest/case.py" />
+
+This annotation covers exception and warning assertion context managers. See `lib_unittest4_detail` for `assertEqual`, `assertIn`, `subTest`, and `addCleanup`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `assertRaises` | Assert that a callable raises an exception |
+| 81-160 | `_AssertRaisesContext` | Context manager backing `assertRaises` |
+| 161-240 | `assertRaisesRegex` | Assert exception message matches a pattern |
+| 241-340 | `assertWarns` | Assert that a warning is issued |
+| 341-500 | `assertLogs` | Capture and assert log output |
+
+## Reading
+
+### `assertRaises`
+
+```python
+# CPython: Lib/unittest/case.py:740 TestCase.assertRaises
+def assertRaises(self, expected_exception, *args, **kwargs):
+    context = _AssertRaisesContext(expected_exception, self)
+    try:
+        return context.handle('assertRaises', args, kwargs)
+    except self.failureException:
+        raise
+```
+
+`assertRaises` can be used as a context manager (`with self.assertRaises(ValueError):`) or as a direct call (`self.assertRaises(ValueError, func, arg)`). In direct-call mode, `handle` calls `func(*args, **kwargs)` inside the context.
+
+### `_AssertRaisesContext`
+
+```python
+# CPython: Lib/unittest/case.py:180 _AssertRaisesContext
+class _AssertRaisesContext(_AssertRaisesBaseContext):
+    def __exit__(self, exc_type, exc_value, tb):
+        if exc_type is None:
+            # No exception raised
+            try:
+                exc_name = self.expected.__name__
+            except AttributeError:
+                exc_name = str(self.expected)
+            raise self.test_case.failureException(
+                f"{exc_name} not raised")
+        if not issubclass(exc_type, self.expected):
+            return False  # re-raise unexpected exceptions
+        self.exception = exc_value.with_traceback(None)
+        return True  # suppress expected exception
+```
+
+Returning `True` from `__exit__` suppresses the exception. `exc_value.with_traceback(None)` stores the exception without the traceback to avoid reference cycles.
+
+### `assertRaisesRegex`
+
+```python
+# CPython: Lib/unittest/case.py:790 TestCase.assertRaisesRegex
+def assertRaisesRegex(self, expected_exception, expected_regex, *args, **kwargs):
+    context = _AssertRaisesContext(expected_exception, self, expected_regex)
+    return context.handle('assertRaisesRegex', args, kwargs)
+
+# CPython: Lib/unittest/case.py:200 _AssertRaisesContext.__exit__ (regex check)
+if self.expected_regex is not None:
+    expected_regex = self.expected_regex
+    if not expected_regex.search(str(exc_value)):
+        raise self.test_case.failureException(
+            f'"{expected_regex.pattern}" does not match "{exc_value}"')
+```
+
+`assertRaisesRegex` adds a regex check on the exception message after verifying the exception type.
+
+### `assertLogs`
+
+```python
+# CPython: Lib/unittest/case.py:880 TestCase.assertLogs
+def assertLogs(self, logger=None, level=None):
+    return _AssertLogsContext(self, logger_name=logger, level=level, no_logs=False)
+
+# CPython: Lib/unittest/case.py:280 _AssertLogsContext.__exit__
+def __exit__(self, exc_type, exc_value, tb):
+    self.logger.handlers = self.old_handlers
+    self.logger.propagate = self.old_propagate
+    self.logger.setLevel(self.old_level)
+    if exc_type is not None:
+        return False
+    if len(self.watcher.records) == 0:
+        raise AssertionError(f"no logs of level {self.level_name} or above "
+                             f"triggered on {self.logger.name}")
+```
+
+`with self.assertLogs('mymodule', level='WARNING') as cm:` installs a capturing handler on the named logger. After the block, `cm.output` is a list of `"LEVEL:logger:message"` strings.
+
+## gopy notes
+
+`assertRaises` is `module/unittest.AssertRaises` in `module/unittest/case.go`. `_AssertRaisesContext.__exit__` checks `objects.IsInstance` for the expected type. `assertLogs` uses `module/logging.CapturingHandler` to intercept log records.

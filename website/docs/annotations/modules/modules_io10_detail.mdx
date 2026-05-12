@@ -1,0 +1,118 @@
+---
+title: Modules/_io/bufferedio.c (part 10)
+description: "_io/bufferedio.c part 10: BufferedReader.read1, peek, raw_read, BufferedWriter.write, flush."
+cpython_path: Modules/_io/bufferedio.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/_io/bufferedio.c" />
+
+This annotation covers the buffered I/O core. See `modules_io9_detail` for `BufferedReader.__init__`, `read`, and the read-ahead algorithm.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `BufferedReader.read1` | Read up to `n` bytes without internal looping |
+| 81-160 | `BufferedReader.peek` | Look ahead without consuming from the buffer |
+| 161-260 | `_buffered_raw_read` | Internal: call `raw.readinto` and refill buffer |
+| 261-380 | `BufferedWriter.write` | Append to buffer, flush if full |
+| 381-500 | `BufferedWriter.flush` | Write all buffered bytes to the raw stream |
+
+## Reading
+
+### `BufferedReader.read1`
+
+```c
+// CPython: Modules/_io/bufferedio.c:1020 _io_BufferedReader_read1_impl
+static PyObject *
+_io_BufferedReader_read1_impl(buffered *self, Py_ssize_t size)
+{
+    /* Return up to size bytes from the buffer.
+       If the buffer is empty, do one raw read. Never loop. */
+    if (READAHEAD(self) == 0) {
+        if (_bufferedreader_raw_read(self, self->buffer, self->buffer_size) == -1)
+            return NULL;
+    }
+    Py_ssize_t n = Py_MIN(READAHEAD(self), size);
+    return _bufferedreader_read_generic(self, n);
+}
+```
+
+`read1` is useful when the caller wants to process data in chunks without blocking longer than one raw read. Unlike `read(n)`, it will not loop to fill exactly `n` bytes.
+
+### `BufferedReader.peek`
+
+```c
+// CPython: Modules/_io/bufferedio.c:1060 _io_BufferedReader_peek_impl
+static PyObject *
+_io_BufferedReader_peek_impl(buffered *self, Py_ssize_t size)
+{
+    /* Return buffered bytes without advancing the read position.
+       If buffer is empty, refill first. */
+    if (READAHEAD(self) == 0)
+        _bufferedreader_raw_read(self, self->buffer, self->buffer_size);
+    Py_ssize_t n = Py_MIN(READAHEAD(self), size);
+    return PyBytes_FromStringAndSize(self->buffer + self->pos, n);
+}
+```
+
+`peek(n)` may return fewer or more than `n` bytes. It returns whatever is in the buffer after one raw read if needed, without consuming it.
+
+### `BufferedWriter.write`
+
+```c
+// CPython: Modules/_io/bufferedio.c:1680 _io_BufferedWriter_write_impl
+static PyObject *
+_io_BufferedWriter_write_impl(buffered *self, Py_buffer *buffer)
+{
+    Py_ssize_t written = 0;
+    Py_ssize_t n = buffer->len;
+    /* If the data fits in the remaining buffer space, copy and return */
+    if (AVAILABLE_SPACE(self) >= n) {
+        memcpy(self->buffer + self->write_pos, buffer->buf, n);
+        self->write_pos += n;
+        return PyLong_FromSsize_t(n);
+    }
+    /* Flush existing buffer first, then write the new data */
+    if (_bufferedwriter_flush_unlocked(self) < 0) return NULL;
+    /* If still too large for the buffer, write directly */
+    if (n > self->buffer_size) {
+        return _bufferedwriter_write_raw(self, buffer->buf, n);
+    }
+    memcpy(self->buffer, buffer->buf, n);
+    self->write_pos = n;
+    return PyLong_FromSsize_t(n);
+}
+```
+
+When the data is larger than the entire buffer, `BufferedWriter` bypasses buffering and writes directly to the raw stream. This avoids a double-copy for large writes.
+
+### `BufferedWriter.flush`
+
+```c
+// CPython: Modules/_io/bufferedio.c:1760 _bufferedwriter_flush_unlocked
+static int
+_bufferedwriter_flush_unlocked(buffered *self)
+{
+    Py_ssize_t written = 0;
+    while (self->write_pos > written) {
+        Py_ssize_t n = self->raw->tp_as_io->write(
+            self->raw, self->buffer + written, self->write_pos - written);
+        if (n == -1) return -1;
+        written += n;
+    }
+    self->write_pos = 0;
+    return 0;
+}
+```
+
+`flush` loops until all buffered bytes are handed to the raw stream. The raw stream may accept fewer bytes than requested on a non-blocking socket, hence the loop.
+
+## gopy notes
+
+`BufferedReader.read1` is `objects.BufferedReaderRead1` in `objects/bufferedio.go`. `peek` returns a slice of the internal buffer without copying. `BufferedWriter.write` uses `copy()` into the buffer slice. `flush` loops over `raw.Write()` until all bytes are sent.

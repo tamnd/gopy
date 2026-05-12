@@ -1,0 +1,112 @@
+---
+title: Objects/iterobject.c (part 3)
+description: "Objects/iterobject.c part 3: PySeqIter_New, PyCallIter_New, seqiter_next, calliter_next."
+cpython_path: Objects/iterobject.c
+cpython_version: "3.14"
+lines: 300
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Objects/iterobject.c" />
+
+This annotation covers the two fallback iterator types. See `objects_iterobject2_detail` for the iterator protocol overview and `tp_iter` hook.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `PySeqIter_New` | Iterator over objects that support `__getitem__` |
+| 81-160 | `seqiter_next` | Advance the sequence iterator |
+| 161-240 | `PyCallIter_New` | Iterator that calls a callable until a sentinel |
+| 241-300 | `calliter_next` | Advance the callable iterator |
+
+## Reading
+
+### `PySeqIter_New`
+
+```c
+// CPython: Objects/iterobject.c:20 PySeqIter_New
+PyObject *
+PySeqIter_New(PyObject *seq)
+{
+    seqiterobject *it = PyObject_GC_New(seqiterobject, &PySeqIter_Type);
+    it->it_index = 0;
+    it->it_seq = Py_NewRef(seq);
+    _PyObject_GC_TRACK(it);
+    return (PyObject *)it;
+}
+```
+
+`PySeqIter_New` is the fallback when `PyObject_GetIter` is called on an object that has `__getitem__` but no `__iter__`. This supports old-style sequences like custom classes with only `__getitem__`.
+
+### `seqiter_next`
+
+```c
+// CPython: Objects/iterobject.c:60 seqiter_next
+static PyObject *
+seqiter_next(seqiterobject *it)
+{
+    if (it->it_seq == NULL)
+        return NULL;  /* exhausted */
+    PyObject *result = PySequence_GetItem(it->it_seq, it->it_index);
+    if (result != NULL) {
+        ++it->it_index;
+        return result;
+    }
+    if (PyErr_ExceptionMatches(PyExc_IndexError) ||
+        PyErr_ExceptionMatches(PyExc_StopIteration)) {
+        PyErr_Clear();
+        it->it_seq = NULL;  /* mark exhausted */
+    }
+    return NULL;
+}
+```
+
+`IndexError` from `__getitem__` signals exhaustion: it is converted to `StopIteration`. Any other exception propagates normally. The `it_seq` reference is cleared after exhaustion to allow GC to collect the sequence.
+
+### `PyCallIter_New`
+
+```c
+// CPython: Objects/iterobject.c:180 PyCallIter_New
+PyObject *
+PyCallIter_New(PyObject *callable, PyObject *sentinel)
+{
+    calliterobject *it = PyObject_GC_New(calliterobject, &PyCallIter_Type);
+    it->it_callable = Py_NewRef(callable);
+    it->it_sentinel = Py_NewRef(sentinel);
+    _PyObject_GC_TRACK(it);
+    return (PyObject *)it;
+}
+```
+
+`iter(callable, sentinel)` (the two-argument form of `iter`) creates a `calliterobject`. Each `next()` call invokes `callable()` and stops when the result equals `sentinel`.
+
+### `calliter_next`
+
+```c
+// CPython: Objects/iterobject.c:220 calliter_next
+static PyObject *
+calliter_next(calliterobject *it)
+{
+    if (it->it_callable == NULL) return NULL;
+    PyObject *result = PyObject_CallNoArgs(it->it_callable);
+    if (result == NULL) return NULL;
+    int ok = PyObject_RichCompareBool(it->it_sentinel, result, Py_EQ);
+    if (ok > 0) {
+        Py_CLEAR(it->it_callable);
+        Py_CLEAR(it->it_sentinel);
+        Py_DECREF(result);
+        return NULL;  /* sentinel matched: stop */
+    }
+    if (ok < 0) { Py_DECREF(result); return NULL; }
+    return result;
+}
+```
+
+`iter(f.read, b'')` reads chunks until `read` returns an empty bytes object. `PyObject_RichCompareBool` with `Py_EQ` handles sentinel comparison.
+
+## gopy notes
+
+`PySeqIter_New` is `objects.NewSeqIter` in `objects/iter.go`. `seqiter_next` calls `objects.SequenceGetItem` and converts `IndexError` to exhaustion. `PyCallIter_New` is `objects.NewCallIter`. `calliter_next` calls `objects.CallNoArgs` and uses `objects.RichCompareBool(Eq)`.
