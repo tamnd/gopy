@@ -116,6 +116,11 @@ import (
 	// CPython: Modules/_threadmodule.c:1 (module init)
 	_ "github.com/tamnd/gopy/module/_thread"
 
+	// Built-in module: _random. Registers itself via module/_random/module.go
+	// init(). Backs Lib/random.py with the Mersenne Twister PRNG.
+	// CPython: Modules/_randommodule.c:1 (module init)
+	_ "github.com/tamnd/gopy/module/_random"
+
 	// Go-backed Python modules: not in CPython's config.c.in (those
 	// are pure-Python in Lib/), but until the corresponding Lib/*.py
 	// vendoring lands the import system needs something to satisfy
