@@ -1,0 +1,101 @@
+---
+title: Include/internal/pycore_opcode_metadata.h
+description: "pycore_opcode_metadata.h: opcode names, stack effects, STACK_EFFECT macro, opcode flags (HAS_ARG, HAS_JUMP, etc.), RESUME oparg."
+cpython_path: Include/internal/pycore_opcode_metadata.h
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Include/internal/pycore_opcode_metadata.h" />
+
+`pycore_opcode_metadata.h` is machine-generated from `Python/bytecodes.c` by `Tools/cases_generator/`. It provides the definitive table of all opcodes with their properties.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `_PyOpcode_Caches[]` | Number of cache entries per opcode |
+| 81-200 | `_PyOpcode_Deopt[]` | Specialized opcode to base opcode mapping |
+| 201-350 | `_PyOpcode_metadata[]` | Per-opcode: name, flags, stack effect |
+| 351-500 | `STACK_EFFECT` macro | Compute stack depth change for one instruction |
+
+## Reading
+
+### Opcode metadata entry
+
+```c
+// CPython: Include/internal/pycore_opcode_metadata.h:212 _PyOpcode_metadata
+struct {
+    const char *name;
+    int flags;
+} _PyOpcode_metadata[256] = {
+    ...
+    [LOAD_FAST] = {
+        .name = "LOAD_FAST",
+        .flags = HAS_ARG | HAS_LOCAL_FLAG | HAS_PURE_FLAG
+    },
+    [CALL] = {
+        .name = "CALL",
+        .flags = HAS_ARG | HAS_EVAL_BREAK_FLAG | HAS_CALL_FLAG
+    },
+    ...
+};
+```
+
+### Opcode flags
+
+```c
+// CPython: Include/internal/pycore_opcode_metadata.h:15 flags
+#define HAS_ARG         (1 << 0)   /* uses oparg */
+#define HAS_CONST       (1 << 1)   /* oparg is index into co_consts */
+#define HAS_NAME        (1 << 2)   /* oparg is index into co_names */
+#define HAS_JUMP        (1 << 3)   /* oparg is a jump offset */
+#define HAS_FREE        (1 << 4)   /* oparg is index into free/cell vars */
+#define HAS_LOCAL_FLAG  (1 << 5)   /* oparg is index into localsplus */
+#define HAS_EVAL_BREAK_FLAG (1 << 6)  /* may trigger eval breaker */
+#define HAS_CALL_FLAG   (1 << 7)   /* is a CALL-family opcode */
+```
+
+These flags are used by the peephole optimizer, the disassembler (`dis` module), and the `STACK_EFFECT` macro.
+
+### `STACK_EFFECT`
+
+```c
+// CPython: Include/internal/pycore_opcode_metadata.h:400 STACK_EFFECT
+static inline int
+_PyOpcode_stack_effect(int opcode, int oparg, int jump)
+{
+    switch (opcode) {
+    case LOAD_FAST: return 1;
+    case POP_TOP:   return -1;
+    case BINARY_OP: return -1;  /* pops 2, pushes 1 */
+    case CALL:      return -(oparg + 1);  /* pops callable + oparg args, pushes result */
+    ...
+    }
+}
+```
+
+The compiler uses `STACK_EFFECT` to compute `co_stacksize` (the maximum stack depth at any point in the bytecode).
+
+### Cache slots
+
+```c
+// CPython: Include/internal/pycore_opcode_metadata.h:62 _PyOpcode_Caches
+const uint8_t _PyOpcode_Caches[256] = {
+    [LOAD_ATTR]     = 4,   /* 4 × 2-byte cache slots */
+    [LOAD_GLOBAL]   = 4,
+    [CALL]          = 4,
+    [BINARY_OP]     = 1,
+    [COMPARE_OP]    = 1,
+    ...
+};
+```
+
+Cache slots follow each instruction in the bytecode stream. Specialized opcodes (`LOAD_ATTR_MODULE`, `CALL_PY_EXACT_ARGS`) use these slots to store type version tags and pointer caches.
+
+## gopy notes
+
+The opcode metadata table is generated from `compile/opcodes.go` in gopy. `STACK_EFFECT` is replicated in `compile/flowgraph_stackdepth.go` for computing `co_stacksize`. The cache slot layout is not yet implemented in gopy (all ops are unspecialized), but the cache count table is needed to correctly parse bytecode produced by CPython.

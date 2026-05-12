@@ -494,6 +494,8 @@ const sidebars = {
         'annotations/objects/objects_genericaliasobject_detail',
         'annotations/objects/objects_classobject_detail',
         'annotations/objects/objects_memoryobject_detail',
+        'annotations/objects/objects_namespaceobject_detail',
+        'annotations/objects/objects_unionobject_detail',
       ],
     },
     {
@@ -719,6 +721,7 @@ const sidebars = {
         'annotations/include/include_internal_pycore_frame_h_detail',
         'annotations/include/include_internal_pycore_interp_h_detail',
         'annotations/include/include_internal_pycore_tstate_h_detail',
+        'annotations/include/include_internal_pycore_opcode_h_detail',
       ],
     },
     {

@@ -1,0 +1,80 @@
+---
+title: Objects/unionobject.c
+description: "Objects/unionobject.c: X | Y union type syntax (PEP 604) — Py_Union, __args__, __instancecheck__, __subclasscheck__."
+cpython_path: Objects/unionobject.c
+cpython_version: "3.14"
+lines: 400
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Objects/unionobject.c" />
+
+`unionobject.c` implements the `X | Y` union type syntax introduced in Python 3.10 (PEP 604). `int | str` creates a `types.UnionType` object that can be used in `isinstance` checks and type annotations.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `PyUnionObject` struct | `__args__` tuple, hash |
+| 81-200 | `Py_Union` | Entry point called by `type.__or__` |
+| 201-320 | `union_instancecheck` | `isinstance(x, int | str)` |
+| 321-400 | `union_repr`, `union_richcompare` | Display and equality |
+
+## Reading
+
+### Creating a union
+
+```c
+// CPython: Objects/unionobject.c:90 Py_Union
+PyObject *
+Py_Union(PyObject *a, PyObject *b)
+{
+    /* Flatten nested unions: (int | str) | bytes -> (int, str, bytes) */
+    PyObject *args = make_union_args(a, b);
+    /* Deduplicate args */
+    args = dedup_and_flatten(args);
+    ...
+    PyUnionObject *u = PyObject_New(PyUnionObject, &_PyUnion_Type);
+    u->args = args;
+    u->hashvalue = -1;
+    return (PyObject *)u;
+}
+```
+
+`int | str | int` becomes `int | str` (deduplicated). `(int | str) | bytes` flattens to `int | str | bytes`.
+
+### `isinstance` check
+
+```c
+// CPython: Objects/unionobject.c:215 union_instancecheck
+static PyObject *
+union_instancecheck(PyObject *self, PyObject *instance)
+{
+    PyUnionObject *alias = (PyUnionObject *)self;
+    for (Py_ssize_t i = 0; i < PyTuple_GET_SIZE(alias->args); i++) {
+        PyObject *arg = PyTuple_GET_ITEM(alias->args, i);
+        int r = PyObject_IsInstance(instance, arg);
+        if (r > 0) Py_RETURN_TRUE;
+        if (r < 0) return NULL;
+    }
+    Py_RETURN_FALSE;
+}
+```
+
+`isinstance(x, int | str)` is O(n) over the flattened args.
+
+### `None` handling
+
+```python
+# CPython: Objects/unionobject.c (Python usage)
+# int | None  is equivalent to Optional[int]
+# Py_Union(int, NoneType) -- note: None is converted to type(None)
+```
+
+In `X | None`, `None` is converted to `type(None)` before being stored in `args`.
+
+## gopy notes
+
+`types.UnionType` is in `objects/union_type.go`. The `|` operator on type objects is routed through `type.__or__` which calls `Py_Union`. `isinstance(x, int | str)` must work for code that uses PEP 604 syntax. The `__args__` attribute is needed for `typing.get_args(int | str)`.

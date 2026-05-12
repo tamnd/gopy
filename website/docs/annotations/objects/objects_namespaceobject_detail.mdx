@@ -1,0 +1,81 @@
+---
+title: Objects/namespaceobject.c
+description: "Objects/namespaceobject.c: SimpleNamespace — simple attribute container, __init__, __repr__, __eq__, __reduce__."
+cpython_path: Objects/namespaceobject.c
+cpython_version: "3.14"
+lines: 300
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Objects/namespaceobject.c" />
+
+`types.SimpleNamespace` (also accessible as `namespace` in `_testinternalcapi`) is the simplest custom object: a `__dict__`-backed namespace with keyword-argument construction and a nice `repr`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `namespace_new`, `namespace_init` | Construction: `SimpleNamespace(a=1, b=2)` |
+| 81-160 | `namespace_repr` | `namespace(a=1, b=2)` format |
+| 161-220 | `namespace_richcompare` | Equality by comparing `__dict__` |
+| 221-300 | `namespace_reduce` | Pickle support |
+
+## Reading
+
+### `namespace_init`
+
+```c
+// CPython: Objects/namespaceobject.c:42 namespace_init
+static int
+namespace_init(PyObject *self, PyObject *args, PyObject *kwds)
+{
+    if (PyTuple_GET_SIZE(args) != 0) {
+        PyErr_SetString(PyExc_TypeError,
+                        "no positional arguments expected");
+        return -1;
+    }
+    if (kwds != NULL && PyDict_Merge(self->ns_dict, kwds, 1) != 0)
+        return -1;
+    return 0;
+}
+```
+
+`SimpleNamespace` takes only keyword arguments. Each keyword becomes an attribute.
+
+### `namespace_repr`
+
+```c
+// CPython: Objects/namespaceobject.c:98 namespace_repr
+static PyObject *
+namespace_repr(PyObject *ns)
+{
+    /* Format: namespace(key=val, ...) in sorted key order */
+    ...
+    for i, (key, val) in enumerate(sorted(items)):
+        ...
+        PyUnicode_AppendAndDel(&text,
+            PyUnicode_FromFormat("%U=%R", key, val));
+    ...
+    return PyUnicode_FromFormat("namespace(%U)", text);
+}
+```
+
+### `namespace_reduce` (pickle)
+
+```c
+// CPython: Objects/namespaceobject.c:245 namespace_reduce
+static PyObject *
+namespace_reduce(PyObject *ns, PyObject *Py_UNUSED(ignored))
+{
+    /* Return (type, (), dict) so pickle can reconstruct */
+    return Py_BuildValue("(O()O)", Py_TYPE(ns), ns->ns_dict);
+}
+```
+
+`pickle.dumps(SimpleNamespace(x=1))` uses this to produce a reconstructable representation.
+
+## gopy notes
+
+`SimpleNamespace` is in `objects/namespace.go`. It is used by `argparse` for parsed argument results, `json.loads` with `object_hook=vars`, and `dataclasses` internally. The implementation only needs `__dict__` access, `__repr__`, `__eq__`, and `__reduce__`.
