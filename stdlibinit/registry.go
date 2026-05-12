@@ -209,4 +209,10 @@ import (
 	// Go's standard library crypto packages.
 	// CPython: Modules/_hashopenssl.c:2374 _hashlibmodule
 	_ "github.com/tamnd/gopy/module/_hashlib"
+
+	// Built-in module: _datetime. Registers itself via
+	// module/_datetime/module.go init(). Ports Modules/_datetimemodule.c:
+	// date, time, datetime, timedelta, timezone types.
+	// CPython: Modules/_datetimemodule.c:7078 datetime_exec
+	_ "github.com/tamnd/gopy/module/_datetime"
 )
