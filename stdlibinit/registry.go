@@ -133,6 +133,19 @@ import (
 	// CPython: Modules/config.c.in:53 {"_json", PyInit__json}
 	_ "github.com/tamnd/gopy/module/_json"
 
+	// Built-in module: _codecs. Registers itself via
+	// module/_codecs/module.go init(). Exposes Python's codec lookup
+	// infrastructure: lookup, encode, decode, and per-codec helpers for
+	// UTF-8, ASCII, and Latin-1.
+	// CPython: Modules/_codecsmodule.c:507 _codecs_exec
+	_ "github.com/tamnd/gopy/module/_codecs"
+
+	// Built-in module: _csv. Registers itself via
+	// module/_csv/module.go init(). Backs Lib/csv.py with the reader,
+	// writer, Dialect, and quoting constants.
+	// CPython: Modules/_csv.c:1423 _csv_exec
+	_ "github.com/tamnd/gopy/module/_csv"
+
 	// Go-backed Python modules: not in CPython's config.c.in (those
 	// are pure-Python in Lib/), but until the corresponding Lib/*.py
 	// vendoring lands the import system needs something to satisfy
