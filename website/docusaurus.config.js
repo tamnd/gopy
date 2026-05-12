@@ -18,6 +18,10 @@ const config = {
   onBrokenLinks: 'warn',
   onBrokenMarkdownLinks: 'warn',
 
+  markdown: {
+    format: 'detect',
+  },
+
   i18n: {
     defaultLocale: 'en',
     locales: ['en'],
@@ -114,6 +118,18 @@ const config = {
             sidebarId: 'modulesSidebar',
             position: 'left',
             label: 'Modules',
+          },
+          {
+            type: 'docSidebar',
+            sidebarId: 'specsSidebar',
+            position: 'left',
+            label: 'Specs',
+          },
+          {
+            type: 'docSidebar',
+            sidebarId: 'changelogSidebar',
+            position: 'left',
+            label: 'Changelog',
           },
           {
             href: 'https://github.com/tamnd/gopy',
