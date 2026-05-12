@@ -1,0 +1,84 @@
+---
+title: Python/ceval.c (part 65)
+description: "Python/ceval.c part 65: STORE_ATTR specializations, STORE_ATTR_INSTANCE_VALUE, STORE_ATTR_SLOT, type version invalidation."
+cpython_path: Python/ceval.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Python/ceval.c" />
+
+This annotation covers `STORE_ATTR` specialization. See `python_ceval64_detail` for `CALL` specializations.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `STORE_ATTR` baseline | Generic attribute set via `tp_setattro` |
+| 81-160 | `STORE_ATTR_INSTANCE_VALUE` | Fast path: write `__dict__` slot by index |
+| 161-240 | `STORE_ATTR_SLOT` | Write a `__slots__` slot directly |
+| 241-340 | `STORE_ATTR_WITH_HINT` | Dict write with cached key index |
+| 341-500 | Type version invalidation | When `STORE_ATTR` deoptimizes |
+
+## Reading
+
+### `STORE_ATTR_INSTANCE_VALUE`
+
+```c
+// CPython: Python/ceval.c:2960 STORE_ATTR_INSTANCE_VALUE
+inst(STORE_ATTR_INSTANCE_VALUE, (unused/4, owner, value --)) {
+    uint16_t index = read_u16(&next_instr[-1].cache);
+    uint32_t ep_version = read_u32(&next_instr[-3].cache);
+    PyDictObject *dict = _PyObject_GetManagedDict(owner);
+    DEOPT_IF(dict == NULL, STORE_ATTR);
+    DEOPT_IF(dict->ma_version_tag != ep_version, STORE_ATTR);
+    PyObject *old_value = dict->ma_values->values[index];
+    dict->ma_values->values[index] = value;
+    Py_XDECREF(old_value);
+    _PyDict_NotifyEvent(tstate->interp, PyDict_EVENT_MODIFIED, dict, ...);
+    Py_DECREF(owner);
+}
+```
+
+`STORE_ATTR_INSTANCE_VALUE` writes to a known slot in the instance's split dict values array. The version tag check ensures the dict layout hasn't changed. On deopt, updates the type's inline cache and falls back to `STORE_ATTR`.
+
+### `STORE_ATTR_SLOT`
+
+```c
+// CPython: Python/ceval.c:3020 STORE_ATTR_SLOT
+inst(STORE_ATTR_SLOT, (unused/4, owner, value --)) {
+    uint16_t index = read_u16(&next_instr[-1].cache);
+    char *addr = (char *)owner + index;
+    PyObject *old_value = *(PyObject **)addr;
+    *(PyObject **)addr = value;
+    Py_XDECREF(old_value);
+    Py_DECREF(owner);
+}
+```
+
+For `__slots__` classes, attributes are stored at fixed offsets in the object's memory, not in a dict. `STORE_ATTR_SLOT` writes directly to `(char *)owner + index`. This is as fast as C struct field access.
+
+### Type version invalidation
+
+```c
+// CPython: Objects/typeobject.c:460 type_modified_unlocked
+void
+type_modified_unlocked(PyTypeObject *type)
+{
+    /* Increment the type's version tag */
+    if (type->tp_version_tag == 0) return;
+    type->tp_version_tag = 0;  /* 0 means "invalid" */
+    /* Invalidate all caches for this type and its subclasses */
+    for each subtype in type->tp_subclasses:
+        type_modified_unlocked(subtype);
+}
+```
+
+Any attribute assignment to a type (adding a method, changing a class variable) calls `type_modified_unlocked`. This invalidates the `tp_version_tag` used by all `LOAD_ATTR_*` and `STORE_ATTR_*` specializations for that type. All specialized instructions for the type deopt on their next execution.
+
+## gopy notes
+
+`STORE_ATTR_INSTANCE_VALUE` is in `vm/eval_simple.go`. It writes to `objects.Instance.Values[index]`. `STORE_ATTR_SLOT` writes to the slot offset in the Go struct via `unsafe.Pointer`. Type version tags are invalidated in `objects/type.go` when `__setattr__` modifies a type.

@@ -1,0 +1,110 @@
+---
+title: Modules/selectmodule.c (part 6)
+description: "selectmodule.c part 6: select.poll, epoll, kqueue, devpoll — platform-specific I/O multiplexing."
+cpython_path: Modules/selectmodule.c
+cpython_version: "3.14"
+lines: 600
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/selectmodule.c" />
+
+This annotation covers the platform-specific I/O event interfaces. See `modules_select5_detail` for `select.select`, `select.error`, and the `FD_SET` mechanics.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `select.poll` (POSIX) | `poll()` syscall: no fd-count limit |
+| 81-180 | `select.epoll` (Linux) | Edge/level-triggered event notification |
+| 181-280 | `select.kqueue` (macOS/BSD) | Kernel queue event notification |
+| 281-380 | `epoll.register` / `epoll.modify` | Add/change fd interest |
+| 381-600 | `epoll.poll` | Wait for events with timeout |
+
+## Reading
+
+### `select.poll`
+
+```c
+// CPython: Modules/selectmodule.c:680 poll_poll
+static PyObject *
+poll_poll(pollObject *self, PyObject *args)
+{
+    double timeout_d = -1.0;
+    int timeout;
+    if (timeout_d < 0) timeout = -1;
+    else timeout = (int)(timeout_d * 1000.0);  /* ms */
+
+    Py_BEGIN_ALLOW_THREADS
+    poll_result = poll(self->ufds, self->ufd_len, timeout);
+    Py_END_ALLOW_THREADS
+
+    PyObject *result_list = PyList_New(0);
+    for (int i = 0; i < self->ufd_len; i++) {
+        if (self->ufds[i].revents != 0) {
+            PyList_Append(result_list,
+                          Py_BuildValue("(ii)", self->ufds[i].fd,
+                                        self->ufds[i].revents));
+        }
+    }
+    return result_list;
+}
+```
+
+`poll()` uses a flat array of `pollfd` structs instead of three separate bitmasks. It handles more than 1024 file descriptors (the `FD_SETSIZE` limit of `select`). The `timeout` is in milliseconds; `-1` means block indefinitely.
+
+### `select.epoll`
+
+```c
+// CPython: Modules/selectmodule.c:1040 pyepoll_poll
+static PyObject *
+pyepoll_poll(pyEpoll_Object *self, PyObject *args, PyObject *kwds)
+{
+    int maxevents = -1;
+    double dtimeout = -1.0;
+    ...
+    struct epoll_event *evs = PyMem_New(struct epoll_event, maxevents);
+    int nfds;
+    Py_BEGIN_ALLOW_THREADS
+    nfds = epoll_wait(self->epfd, evs, maxevents, timeout_ms);
+    Py_END_ALLOW_THREADS
+
+    PyObject *result = PyList_New(nfds);
+    for (int i = 0; i < nfds; i++) {
+        PyList_SET_ITEM(result, i,
+            Py_BuildValue("(iI)", evs[i].data.fd, evs[i].events));
+    }
+    return result;
+}
+```
+
+`epoll.poll(timeout, maxevents)` calls `epoll_wait`. `maxevents` limits the kernel's result list. `epoll` is O(1) for both register and poll operations, unlike `select`/`poll` which are O(n) in the number of watched fds.
+
+### `epoll.register`
+
+```c
+// CPython: Modules/selectmodule.c:960 pyepoll_register
+static PyObject *
+pyepoll_register(pyEpoll_Object *self, PyObject *args, PyObject *kwds)
+{
+    int fd;
+    unsigned int events = EPOLLIN | EPOLLOUT;
+    struct epoll_event ev;
+    ev.events = events;
+    ev.data.fd = fd;
+    int result;
+    Py_BEGIN_ALLOW_THREADS
+    result = epoll_ctl(self->epfd, EPOLL_CTL_ADD, fd, &ev);
+    Py_END_ALLOW_THREADS
+    if (result == -1) return PyErr_SetFromErrno(PyExc_OSError);
+    Py_RETURN_NONE;
+}
+```
+
+`EPOLLIN | EPOLLOUT` means "notify when readable or writable". `EPOLLET` adds edge-triggered mode: the event fires only on state transitions, not while the fd remains readable. Edge-triggered mode requires non-blocking fds.
+
+## gopy notes
+
+`select.poll` is `module/select.Poll` in `module/select/module.go` using `syscall.Poll`. `select.epoll` uses `syscall.EpollCreate1`, `EpollCtl`, `EpollWait`. `select.kqueue` uses `syscall.Kqueue`, `Kevent`. On non-Linux platforms, `epoll` is not available and `kqueue` is used instead.

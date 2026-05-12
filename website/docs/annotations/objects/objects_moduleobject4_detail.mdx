@@ -1,0 +1,92 @@
+---
+title: Objects/moduleobject.c (part 4)
+description: "Objects/moduleobject.c part 4: module __spec__, __loader__, __path__, __package__, module repr, PyModuleDef."
+cpython_path: Objects/moduleobject.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Objects/moduleobject.c" />
+
+This annotation covers module metadata and multi-phase initialization. See `objects_moduleobject3_detail` for `module.__init__`, `__getattr__`, `__dir__`, and `module.__dict__`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `module.__repr__` | `<module 'name' from 'path'>` |
+| 81-160 | `PyModuleDef` | C struct for multi-phase init |
+| 161-240 | Multi-phase init | `Py_mod_exec` slot in `PyModuleDef` |
+| 241-320 | Module `__spec__` / `__loader__` | Import system metadata attributes |
+| 321-500 | `sys.modules` lifecycle | How modules are installed and unloaded |
+
+## Reading
+
+### `module.__repr__`
+
+```c
+// CPython: Objects/moduleobject.c:640 module_repr
+static PyObject *
+module_repr(PyModuleObject *m)
+{
+    PyObject *name = PyObject_GetAttrString((PyObject *)m, "__name__");
+    PyObject *filename = PyObject_GetAttrString((PyObject *)m, "__file__");
+    if (filename != NULL) {
+        return PyUnicode_FromFormat("<module %R from %R>", name, filename);
+    }
+    PyErr_Clear();
+    PyObject *spec = PyObject_GetAttrString((PyObject *)m, "__spec__");
+    if (spec != NULL) {
+        return PyObject_CallMethodOneArg(spec, &_Py_ID(_repr_), (PyObject *)m);
+    }
+    return PyUnicode_FromFormat("<module %R (built-in)>", name);
+}
+```
+
+The repr prefers `__file__` (file-based modules). Without a file, it delegates to `__spec__._repr_(m)` which knows the module's origin (frozen, namespace, etc.). Built-in modules show `(built-in)`.
+
+### `PyModuleDef` multi-phase init
+
+```c
+// CPython: Objects/moduleobject.c:120 PyModule_FromDefAndSpec2
+PyObject *
+PyModule_FromDefAndSpec2(PyModuleDef *def, PyObject *spec, int module_api_version)
+{
+    /* Phase 1: create the module object */
+    PyObject *mod = PyModule_NewObject(name);
+    mod->md_def = def;
+    /* Run Py_mod_create slot if present */
+    if (def->m_slots) {
+        for (PyModuleDef_Slot *slot = def->m_slots; slot->slot; slot++) {
+            if (slot->slot == Py_mod_create)
+                mod = ((create_fn)slot->value)(spec, def);
+        }
+    }
+    return mod;
+}
+```
+
+Multi-phase init (PEP 451) separates module creation (`Py_mod_create`) from module execution (`Py_mod_exec`). This allows the module object to be installed in `sys.modules` before its code runs, enabling circular imports between C extensions and Python modules.
+
+### `__spec__` attributes
+
+```python
+# CPython: Lib/importlib/_bootstrap.py:560 ModuleSpec
+class ModuleSpec:
+    def __init__(self, name, loader, *, origin=None, loader_state=None,
+                 is_package=None):
+        self.name = name
+        self.loader = loader
+        self.origin = origin     # Typically __file__
+        self.submodule_search_locations = [] if is_package else None
+        # __path__ = submodule_search_locations for packages
+```
+
+`module.__spec__` is a `ModuleSpec` set by the import system. It contains `name`, `loader`, `origin` (file path), and `submodule_search_locations` (`__path__` for packages). After import, the module's `__file__`, `__loader__`, `__package__`, and `__path__` are derived from `__spec__`.
+
+## gopy notes
+
+`module.__repr__` is `objects.ModuleRepr` in `objects/module.go`. Multi-phase init is not yet implemented in gopy. `ModuleSpec` is `objects.ModuleSpec`. Module metadata (`__spec__`, `__loader__`, `__file__`) are set in `vm/eval_import.go` after `exec_module` completes.
