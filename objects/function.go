@@ -69,6 +69,14 @@ func init() {
 	FunctionType.DescrGet = functionDescrGet
 	FunctionType.Getattro = funcGetAttr
 	FunctionType.Setattro = funcSetAttr
+	// func_traverse visits every reachable Object slot so the cycle
+	// collector can walk the function's reference graph. CPython
+	// visits the PyObject form of every PyFunctionObject slot; we
+	// skip Name and Qualname here because gopy stores them as Go
+	// strings, not PyUnicode.
+	//
+	// CPython: Objects/funcobject.c:1093 func_traverse
+	FunctionType.TpTraverse = functionTraverse
 	// Identity hash. Functions inherit tp_hash from object in CPython
 	// and are routinely stuffed into sets (e.g. enum's _find_new_).
 	//
@@ -79,6 +87,61 @@ func init() {
 	// FunctionType.Call is wired by the vm package on init since the
 	// call needs to push a frame and drive Eval; doing that from
 	// objects would be a circular import.
+}
+
+// functionTraverse mirrors func_traverse. Visit order matches CPython
+// so any future GC consumer sees the same reachability profile.
+//
+// CPython: Objects/funcobject.c:1093 func_traverse
+func functionTraverse(o Object, visit Visitor) error {
+	f := o.(*Function)
+	visits := [...]Object{
+		codeAsObject(f.Code),
+		f.Globals,
+		f.Module,
+		tupleAsObject(f.Defaults),
+		dictAsObject(f.KwDefaults),
+		f.Doc,
+		dictAsObject(f.Dict),
+		tupleAsObject(f.Closure),
+		dictAsObject(f.Annotations),
+		f.Annotate,
+		tupleAsObject(f.Typeparams),
+		f.Builtins,
+	}
+	for _, v := range visits {
+		if v == nil {
+			continue
+		}
+		if err := visit(v); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// codeAsObject promotes *Code to Object only when non-nil; the visit
+// loop relies on a nil result to skip missing slots without growing a
+// per-field guard.
+func codeAsObject(c *Code) Object {
+	if c == nil {
+		return nil
+	}
+	return c
+}
+
+func tupleAsObject(t *Tuple) Object {
+	if t == nil {
+		return nil
+	}
+	return t
+}
+
+func dictAsObject(d *Dict) Object {
+	if d == nil {
+		return nil
+	}
+	return d
 }
 
 // registerFunctionGetSets exposes the introspection attributes
@@ -357,9 +420,19 @@ func functionDescrGet(descr Object, owner Object, _ *Type) (Object, error) {
 	return NewBoundMethod(descr, owner), nil
 }
 
+// functionRepr matches CPython's `<function QUALNAME at 0xPTR>`. The
+// pointer suffix is what `inspect.getsource` and traceback formatting
+// key off when two functions share a qualname (lambdas, dynamically
+// generated wrappers).
+//
+// CPython: Objects/funcobject.c:920 func_repr
 func functionRepr(o Object) (string, error) {
 	f := o.(*Function)
-	return "<function " + f.Name + ">", nil
+	name := f.Qualname
+	if name == "" {
+		name = f.Name
+	}
+	return fmt.Sprintf("<function %s at %p>", name, f), nil
 }
 
 // NewFunction is the no-qualname form of NewFunctionWithQualName.

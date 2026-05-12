@@ -42,7 +42,7 @@ otherwise. Final gate closes #544.
 | 1 | A `object.c` | `object_methods` + `object_getsets` + `object_*` impls | - | done |
 | 2 | D `funcobject.c` | PyClassMethod_Type (all `cm_*` functions) | - | done |
 | 3 | D `funcobject.c` | PyStaticMethod_Type (all `sm_*` functions) | - | done |
-| 4 | D `funcobject.c` | PyFunction_Type (all `func_*` functions) | - | partial |
+| 4 | D `funcobject.c` | PyFunction_Type (all `func_*` functions) | - | done |
 | 5 | C `classobject.c` | PyMethod_Type (all `method_*` functions) | - | partial |
 | 6 | B `typeobject.c` | `type_new` pipeline (`type_new_*` functions) | 1,2,3,4,5 | partial |
 | 7 | B `typeobject.c` | `inherit_slots` (every slot edge) | 6 | partial |
@@ -208,22 +208,22 @@ implementations earlier in the file. Every row must land.
 | `func_get_kwdefaults` / `func_set_kwdefaults` | `__kwdefaults__` getset | done |
 | `func_get_annotations` / `func_set_annotations` | `__annotations__` getset | done |
 | `func_get_dict` / `func_set_dict` | `__dict__` getset | done |
-| `func_get_module` / `func_set_module` | `__module__` getset | partial (verify) |
-| `func_repr` | `<function name at 0x...>` | partial (verify exact format) |
+| `func_get_module` / `func_set_module` | `__module__` getset | done |
+| `func_repr` | `<function QUALNAME at 0xPTR>` | done |
 | `func_call` / `func_vectorcall` | function call | done |
 | `func_descr_get` | `__get__` returns BoundMethod | done |
-| `func_traverse` | GC visit globals, defaults, etc. | partial |
-| `function_memberlist` | `__globals__`, `__closure__`, `__builtins__` | partial |
+| `func_traverse` | GC visit code, globals, defaults, etc. | done |
+| `function_memberlist` | `__globals__`, `__closure__`, `__builtins__` | done (via getset) |
 | `function___get_signature__` | (CPython internal) | n/a |
 | `func_iternext` | (none) | n/a |
 
 ### Gates
 
-| Gate | Command | Expected |
-|------|---------|----------|
-| 4.1 | `gopy -c 'def f(): pass\nprint(f.__globals__ is globals())'` | `True` |
-| 4.2 | `gopy -c 'def f(): pass\nprint(f.__module__)'` | `__main__` |
-| 4.3 | `gopy -c 'def f(): pass\nprint(repr(f).startswith("<function f at"))'` | `True` |
+| Gate | Command | Expected | Status |
+|------|---------|----------|--------|
+| 4.1 | `gopy -c 'def f(): pass\nprint(f.__globals__ is globals())'` | `True` | pass |
+| 4.2 | `gopy -c 'def f(): pass\nprint(f.__module__)'` | `__main__` | pass |
+| 4.3 | `gopy -c 'def f(): pass\nprint(repr(f).startswith("<function f at"))'` | `True` | pass |
 
 ### CPython citations
 
@@ -233,7 +233,8 @@ implementations earlier in the file. Every row must land.
 | 2 | `Objects/funcobject.c:760` `func_getsetlist` |
 | 3 | `Objects/funcobject.c:810` `func_memberlist` |
 | 4 | `Objects/funcobject.c:920` `func_repr` |
-| 5 | `Objects/funcobject.c:1232` `PyFunction_Type` |
+| 5 | `Objects/funcobject.c:1093` `func_traverse` |
+| 6 | `Objects/funcobject.c:1232` `PyFunction_Type` |
 
 ## Phase 5 - `Objects/classobject.c` PyMethod_Type full port
 

@@ -1,6 +1,10 @@
 package objects
 
-import "testing"
+import (
+	"fmt"
+	"strings"
+	"testing"
+)
 
 func TestNewFunctionInheritsName(t *testing.T) {
 	code := NewCode()
@@ -235,7 +239,81 @@ func TestFunctionRepr(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got != "<function speak>" {
-		t.Errorf("Repr = %q", got)
+	want := fmt.Sprintf("<function speak at %p>", fn)
+	if got != want {
+		t.Errorf("Repr = %q, want %q", got, want)
+	}
+}
+
+// gate 4.3: repr starts with `<function NAME at` regardless of the
+// pointer suffix. Pinning the prefix in a test catches accidental
+// format regressions without binding to the address.
+//
+// CPython: Objects/funcobject.c:920 func_repr
+func TestFunctionReprPrefix(t *testing.T) {
+	fn := NewFunction("speak", NewCode(), NewDict())
+	got, err := Repr(fn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(got, "<function speak at ") {
+		t.Errorf("Repr = %q, want prefix %q", got, "<function speak at ")
+	}
+}
+
+// func_traverse must visit every Object-bearing slot. CPython's
+// cycle collector walks code, globals, module, defaults, kwdefaults,
+// doc, dict, closure, annotations, annotate, typeparams, builtins.
+// Anything else we add to *Function later should land here too.
+//
+// CPython: Objects/funcobject.c:1093 func_traverse
+func TestFunctionTraverseVisitsEverySlot(t *testing.T) {
+	code := NewCode()
+	code.Name = "f"
+	g := NewDict()
+	fn := NewFunction("f", code, g)
+	fn.Module = NewStr("mymod")
+	fn.Defaults = NewTuple([]Object{NewInt(1)})
+	fn.KwDefaults = NewDict()
+	fn.Doc = NewStr("doc")
+	fn.Dict = NewDict()
+	fn.Closure = NewTuple([]Object{NewCell(nil)})
+	fn.Annotations = NewDict()
+	fn.Annotate = NewBuiltinFunction("annotate", func(_ []Object, _ map[string]Object) (Object, error) {
+		return NewDict(), nil
+	})
+	fn.Typeparams = NewTuple([]Object{NewStr("T")})
+	fn.Builtins = NewDict()
+
+	got, err := collectVisited(fn)
+	if err != nil {
+		t.Fatalf("traverse: %v", err)
+	}
+	want := []Object{
+		code, g, fn.Module, fn.Defaults, fn.KwDefaults, fn.Doc, fn.Dict,
+		fn.Closure, fn.Annotations, fn.Annotate, fn.Typeparams, fn.Builtins,
+	}
+	if len(got) != len(want) {
+		t.Fatalf("traverse = %v (%d), want %d entries", got, len(got), len(want))
+	}
+	for i, w := range want {
+		if got[i] != w {
+			t.Errorf("traverse[%d] = %v, want %v", i, got[i], w)
+		}
+	}
+}
+
+func TestFunctionTraverseSkipsNilSlots(t *testing.T) {
+	fn := NewFunction("f", NewCode(), NewDict())
+	got, err := collectVisited(fn)
+	if err != nil {
+		t.Fatalf("traverse: %v", err)
+	}
+	// Default state: Code + Globals + Doc(=None). Module is nil here
+	// because the globals dict has no __name__ entry.
+	for _, v := range got {
+		if v == nil {
+			t.Fatalf("traverse yielded nil entry: %v", got)
+		}
 	}
 }
