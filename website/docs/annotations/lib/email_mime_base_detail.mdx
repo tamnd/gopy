@@ -1,0 +1,62 @@
+---
+title: Lib/email/mime/base.py
+description: "MIMEBase and MIMENonMultipart: the base classes for all MIME message types, providing Content-Type header setup and an attach() guard."
+cpython_path: Lib/email/mime/base.py
+cpython_version: "3.14"
+lines: 40
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/email/mime/base.py" />
+
+`Lib/email/mime/base.py` defines `MIMEBase`, the root of the MIME class hierarchy, and `MIMENonMultipart`, a guard subclass that prevents attaching sub-parts to leaf message types. All concrete MIME classes (`MIMEText`, `MIMEImage`, `MIMEApplication`, etc.) ultimately inherit from `MIMEBase`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-10 | imports | `message.Message`, `errors` |
+| 12-35 | `MIMEBase` | Sets Content-Type header; wraps `add_header` |
+| 37-40 | `MIMENonMultipart` | Raises `MultipartConversionError` on `attach()` |
+
+## Reading
+
+### MIMEBase constructor
+
+`MIMEBase.__init__` calls `Message.__init__` and then adds the `Content-Type` header using the `_maintype` and `_subtype` arguments. Additional keyword arguments are passed to `Message.add_header` as MIME parameters.
+
+```python
+# CPython: Lib/email/mime/base.py:12 MIMEBase.__init__
+class MIMEBase(message.Message):
+    def __init__(self, _maintype, _subtype, *, policy=None, **_params):
+        if policy is None:
+            from email.policy import compat32
+            policy = compat32
+        message.Message.__init__(self, policy=policy)
+        ctype = '%s/%s' % (_maintype, _subtype)
+        self.add_header('Content-Type', ctype, **_params)
+        if 'MIME-Version' not in self:
+            self.add_header('MIME-Version', '1.0')
+```
+
+### MIMENonMultipart attach guard
+
+`MIMENonMultipart` is a mixin that raises `MultipartConversionError` if code tries to call `attach()` on a non-multipart part. This makes programming errors explicit rather than silently producing malformed messages.
+
+```python
+# CPython: Lib/email/mime/base.py:37 MIMENonMultipart.attach
+class MIMENonMultipart(MIMEBase):
+    def attach(self, payload):
+        raise errors.MultipartConversionError(
+            'Cannot attach additional subparts to non-multipart/*')
+```
+
+### Content-Type parameter encoding
+
+`Message.add_header` (called from `MIMEBase.__init__`) handles RFC 2231 parameter encoding for non-ASCII values in MIME parameters like `name` or `filename`. Parameters are passed as keyword arguments with underscores replaced by hyphens.
+
+## gopy notes
+
+Not yet ported. The planned package path is `module/email/mime/`. In Go the hierarchy maps to a struct embedding chain; `MIMEBase` functionality maps to methods on the base `Message` struct that set the Content-Type header on construction.

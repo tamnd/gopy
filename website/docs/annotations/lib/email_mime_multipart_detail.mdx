@@ -1,0 +1,66 @@
+---
+title: Lib/email/mime/multipart.py
+description: "MIMEMultipart: constructs multipart/* MIME messages, seeding the sub-part list and delegating boundary generation to the generator layer."
+cpython_path: Lib/email/mime/multipart.py
+cpython_version: "3.14"
+lines: 100
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/email/mime/multipart.py" />
+
+`Lib/email/mime/multipart.py` defines `MIMEMultipart`, the class for constructing `multipart/*` MIME messages. It subclasses `MIMEBase` and provides `attach()` to add sub-parts. Boundary generation is deferred to the `Generator` layer at serialization time unless the caller supplies one explicitly.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-10 | imports | `MIMEBase` |
+| 12-100 | `MIMEMultipart` | Constructor with subtype, boundary, subparts, and params |
+
+## Reading
+
+### Constructor
+
+`MIMEMultipart.__init__` accepts `_subtype` (default `mixed`), an optional `boundary` string, an optional `_subparts` iterable, and keyword `**_params` for additional Content-Type parameters. It passes `multipart` and `_subtype` up to `MIMEBase.__init__` which sets the Content-Type header.
+
+```python
+# CPython: Lib/email/mime/multipart.py:12 MIMEMultipart.__init__
+class MIMEMultipart(MIMEBase):
+    def __init__(self, _subtype='mixed', boundary=None, _subparts=None,
+                 *, policy=None, **_params):
+        MIMEBase.__init__(self, 'multipart', _subtype,
+                          policy=policy, **_params)
+        if boundary is not None:
+            self.set_boundary(boundary)
+        if _subparts is not None:
+            for p in _subparts:
+                self.attach(p)
+```
+
+### Attaching sub-parts
+
+`attach()` (inherited from `Message`) appends a part to `self._payload`. The payload starts as `None` for non-multipart messages; the first call to `attach()` on a `MIMEMultipart` converts it to a list.
+
+```python
+# CPython: Lib/email/message.py:160 Message.attach
+def attach(self, payload):
+    if self._payload is None:
+        self._payload = [payload]
+    else:
+        self._payload.append(payload)
+```
+
+### Boundary generation
+
+If no `boundary` is passed to the constructor, `set_boundary` is never called, so `self.get_boundary()` returns `None`. The `Generator` layer calls `_make_boundary()` at write time to generate a unique boundary string based on `time.time()` and a random component. This avoids needing a boundary until the message is actually serialized.
+
+### Common subtypes
+
+`multipart/mixed` is the default for attaching unrelated parts (e.g., a text body and a file attachment). `multipart/alternative` signals that all parts are representations of the same content, with the preferred one last. `multipart/related` is used for HTML with embedded images.
+
+## gopy notes
+
+Not yet ported. The planned package path is `module/email/mime/`. The Go type would hold a `[]*Message` payload slice and generate the boundary lazily in a `WriteTo` method.

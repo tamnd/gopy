@@ -1,0 +1,93 @@
+---
+title: Objects/enumobject.c
+description: "enumerate and reversed built-in iterators: EnumObject yields index/value tuples, reversed wraps sequences with __reversed__ or uses __len__ plus __getitem__ countdown."
+cpython_path: Objects/enumobject.c
+cpython_version: "3.14"
+lines: 350
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Objects/enumobject.c" />
+
+`Objects/enumobject.c` implements the `enumerate` and `reversed` built-in iterators. `enumerate` wraps any iterator and yields `(index, value)` tuples, while `reversed` iterates a sequence backwards using either a `__reversed__` method or the `__len__` plus `__getitem__` protocol.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `EnumObject` struct, `enum_new` | Constructor; stores `en_index` and underlying iterator |
+| 81-160 | `enum_next` | Yield next `(index, item)` tuple |
+| 161-220 | `enum_reduce` | Pickle support |
+| 221-280 | `reversedobject`, `reversed_new` | Constructor; checks `__reversed__` or `__len__`+`__getitem__` |
+| 281-350 | `reversed_next`, `reversed_reduce` | Countdown iteration and pickle |
+
+## Reading
+
+### EnumObject layout and construction
+
+`EnumObject` stores three fields: `en_index` (a `PyLongObject`), `en_sit` (the wrapped iterator), and `en_result` (a pre-allocated 2-tuple reused across iterations for performance).
+
+```c
+// Objects/enumobject.c:1 EnumObject
+typedef struct {
+    PyObject_HEAD
+    Py_ssize_t en_index;
+    PyObject  *en_sit;
+    PyObject  *en_result;
+    PyObject  *en_longindex;
+} enumobject;
+```
+
+The `start` parameter seeds `en_index`. When `start` is larger than `PY_SSIZE_T_MAX`, the overflow path stores the index in `en_longindex` as a full `PyLong`.
+
+### enum_next: tuple reuse
+
+`enum_next` calls `next(en_sit)`. If the pre-allocated result tuple has a reference count of 1, it reuses it (stealing refs to the old contents), avoiding allocation on the hot path.
+
+```c
+// Objects/enumobject.c:81 enum_next
+static PyObject *
+enum_next(enumobject *en)
+{
+    PyObject *next_item = (*Py_TYPE(en->en_sit)->tp_iternext)(en->en_sit);
+    if (next_item == NULL) return NULL;
+    PyObject *result = en->en_result;
+    if (Py_REFCNT(result) == 1) {
+        Py_INCREF(result);
+        Py_DECREF(PyTuple_GET_ITEM(result, 0));
+        Py_DECREF(PyTuple_GET_ITEM(result, 1));
+    } else {
+        result = PyTuple_New(2);
+    }
+    PyObject *index = PyLong_FromSsize_t(en->en_index++);
+    PyTuple_SET_ITEM(result, 0, index);
+    PyTuple_SET_ITEM(result, 1, next_item);
+    return result;
+}
+```
+
+### reversed_new: protocol selection
+
+`reversed_new` first checks for `__reversed__`. If absent, it requires the object to provide both `__len__` and `__getitem__`, computing the starting index as `len(seq) - 1`.
+
+```c
+// Objects/enumobject.c:221 reversed_new
+static PyObject *
+reversed_new_impl(PyTypeObject *type, PyObject *seq)
+{
+    if (PyObject_HasAttr(seq, &_Py_ID(__reversed__)))
+        return PyObject_CallMethodNoArgs(seq, &_Py_ID(__reversed__));
+    if (!PySequence_Check(seq)) { /* raise TypeError */ }
+    Py_ssize_t n = PySequence_Size(seq);
+    reversedobject *ro = PyObject_GC_New(reversedobject, type);
+    ro->index = n - 1;
+    ro->seq   = Py_NewRef(seq);
+    return (PyObject *)ro;
+}
+```
+
+## gopy notes
+
+Not yet ported. The planned package path is `objects/enumerate.go`. The Go version would hold an `int64` index and an iterator interface; the tuple-reuse optimization is less relevant in Go since heap allocation is cheap relative to GC pressure.

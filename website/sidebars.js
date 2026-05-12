@@ -410,6 +410,8 @@ const sidebars = {
         'annotations/objects/floatobject_c_detail',
         'annotations/objects/boolobject_c_detail',
         'annotations/objects/memoryobject_c_detail',
+        'annotations/objects/enumobject_c_detail',
+        'annotations/objects/filterobject_c_detail',
       ],
     },
     {
@@ -788,6 +790,7 @@ const sidebars = {
         'annotations/modules/module_ctypes_stgdict_c_detail',
         'annotations/modules/module_pickle_c_detail',
         'annotations/modules/module_struct_c_detail',
+        'annotations/modules/module_array_c_detail',
       ],
     },
     {
@@ -1183,6 +1186,9 @@ const sidebars = {
         'annotations/lib/email_parser_detail',
         'annotations/lib/email_feedparser_detail',
         'annotations/lib/email_generator_detail',
+        'annotations/lib/email_mime_text_detail',
+        'annotations/lib/email_mime_multipart_detail',
+        'annotations/lib/email_mime_base_detail',
       ],
     },
   ],
