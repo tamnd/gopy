@@ -1,0 +1,132 @@
+---
+title: Lib/heapq.py (part 2)
+description: "Lib/heapq.py part 2: heapreplace, heappushpop, merge (k-way), nlargest/nsmallest, _siftup/_siftdown internals."
+cpython_path: Lib/heapq.py
+cpython_version: "3.14"
+lines: 550
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/heapq.py" />
+
+This annotation covers the advanced heap operations and k-way merge. See `lib_heapq_detail` for `heappush`, `heappop`, `heapify`, and the heap invariant.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-60 | `heapreplace` | Pop minimum, push new item (more efficient than pop+push) |
+| 61-120 | `heappushpop` | Push then pop minimum (more efficient than push+pop) |
+| 121-250 | `merge` | K-way sorted merge using a heap of (value, order, iterator) |
+| 251-400 | `nlargest` / `nsmallest` | Return N largest/smallest elements efficiently |
+| 401-550 | `_siftup` / `_siftdown` | Heap repair after modification |
+
+## Reading
+
+### `heapreplace`
+
+```python
+# CPython: Lib/heapq.py:178 heapreplace
+def heapreplace(heap, item):
+    """Pop and return smallest, push item. heap must not be empty."""
+    returnitem = heap[0]    # raises IndexError if empty
+    heap[0] = item
+    _siftup(heap, 0)        # restore heap invariant downward
+    return returnitem
+```
+
+`heapreplace` is faster than `heappop` + `heappush` because it avoids a sift-down followed by sift-up; it only needs one sift-up from position 0.
+
+### `heappushpop`
+
+```python
+# CPython: Lib/heapq.py:200 heappushpop
+def heappushpop(heap, item):
+    """Push item, then pop and return smallest."""
+    if heap and heap[0] < item:
+        item, heap[0] = heap[0], item
+        _siftup(heap, 0)
+    return item
+```
+
+If the new item is larger than the current minimum, swap and sift; otherwise return the new item directly. Used in `nlargest`.
+
+### `merge`
+
+```python
+# CPython: Lib/heapq.py:230 merge
+def merge(*iterables, key=None, reverse=False):
+    """Merge sorted iterables into a single sorted sequence."""
+    h = []
+    h_append = h.append
+    if reverse:
+        _heapify, _heappop, _heapreplace = _heapify_max, _heappop_max, _heapreplace_max
+        direction = -1
+    else:
+        _heapify, _heappop, _heapreplace = heapify, heappop, heapreplace
+        direction = 1
+
+    for order, it in enumerate(map(iter, iterables)):
+        try:
+            nxt = next(it)
+            if key is None:
+                h_append([nxt, order * direction, it])
+            else:
+                h_append([key(nxt), order * direction, nxt, it])
+        except StopIteration:
+            pass
+    _heapify(h)
+    # ...yield from heap until exhausted
+```
+
+The `order` tiebreaker preserves stability across iterables. Each heap entry is `[value, order, iterator]` so the iterator is advanced when its value is popped.
+
+### `nlargest`
+
+```python
+# CPython: Lib/heapq.py:310 nlargest
+def nlargest(n, iterable, key=None):
+    if n < 0: return []
+    it = iter(iterable)
+    if n == 1:
+        sentinel = object()
+        result = max(it, default=sentinel, key=key)
+        return [] if result is sentinel else [result]
+    if n >= size // 2:
+        # Small n relative to total size: sort + slice
+        ...
+    # Large iterable, small n: use a min-heap of size n
+    result = _nlargest(n, iterable)
+    return sorted(result, key=key, reverse=True)
+```
+
+For small `n` relative to the iterable length, a heap of size `n` is more efficient than a full sort.
+
+### `_siftup`
+
+```python
+# CPython: Lib/heapq.py:490 _siftup
+def _siftup(heap, pos):
+    endpos = len(heap)
+    startpos = pos
+    newitem = heap[pos]
+    # Bubble the hole down to a leaf
+    childpos = 2 * pos + 1
+    while childpos < endpos:
+        rightpos = childpos + 1
+        if rightpos < endpos and not heap[childpos] < heap[rightpos]:
+            childpos = rightpos
+        heap[pos] = heap[childpos]
+        pos = childpos
+        childpos = 2 * pos + 1
+    heap[pos] = newitem
+    _siftdown(heap, startpos, pos)
+```
+
+`_siftup` is called after replacing `heap[0]`. It sifts a hole down to a leaf, then calls `_siftdown` to place the new item.
+
+## gopy notes
+
+`heapq` is pure Python. `_siftup` and `_siftdown` are accelerated by `_heapq` C module (`Modules/_heapqmodule.c`); gopy provides a Go implementation in `module/_heapq/module.go`. `merge` is a pure-Python generator and works with any gopy iterable.

@@ -1,0 +1,92 @@
+---
+title: Include/internal/pycore_lock.h
+description: "Include/internal/pycore_lock.h: _PyMutex, _PyRawMutex, _PyEvent, _PyOnceFlag — low-level locking primitives for interpreter internals."
+cpython_path: Include/internal/pycore_lock.h
+cpython_version: "3.14"
+lines: 250
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Include/internal/pycore_lock.h" />
+
+`pycore_lock.h` defines the internal locking primitives introduced for free-threaded Python (PEP 703). These are lighter-weight than `PyThread_type_lock` and use futex-based waiting where available.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-60 | `_PyMutex` | Slim mutex: one byte, futex on Linux, `os_unfair_lock` on macOS |
+| 61-120 | `_PyRawMutex` | Like `_PyMutex` but no-GIL-drop on contention |
+| 121-180 | `_PyEvent` | One-shot event (signal/wait) |
+| 181-220 | `_PyOnceFlag` | Run initialization code exactly once (like `sync.Once` in Go) |
+| 221-250 | Accessor macros | `_PyMutex_Lock`, `_PyMutex_Unlock`, `_PyEvent_Notify` |
+
+## Reading
+
+### `_PyMutex`
+
+```c
+// CPython: Include/internal/pycore_lock.h:28 _PyMutex
+typedef struct {
+    uint8_t v;   /* 0=unlocked, 1=locked, 2=locked+waiters */
+} _PyMutex;
+
+/* Lock, releasing the GIL if blocked (for free-threaded build) */
+static inline void _PyMutex_Lock(_PyMutex *m);
+static inline void _PyMutex_Unlock(_PyMutex *m);
+static inline int  _PyMutex_TryLock(_PyMutex *m);
+```
+
+The single byte encodes three states. When a thread finds `v == 1`, it sets `v = 2` (signaling waiters are present) and calls `futex_wait`. The unlock path only calls `futex_wake` when `v == 2`.
+
+### `_PyRawMutex`
+
+```c
+// CPython: Include/internal/pycore_lock.h:75 _PyRawMutex
+/* Like _PyMutex but does not drop the GIL on contention.
+   Used where the GIL is not held or dropping it would be unsafe. */
+typedef struct {
+    uintptr_t v;
+} _PyRawMutex;
+```
+
+`_PyRawMutex` is used for internal structures that must be protected even in the no-GIL build without allowing re-entry.
+
+### `_PyEvent`
+
+```c
+// CPython: Include/internal/pycore_lock.h:130 _PyEvent
+typedef struct {
+    uint8_t v;   /* 0=not set, 1=set */
+} _PyEvent;
+
+/* Signal the event (idempotent) */
+static inline void _PyEvent_Notify(_PyEvent *evt);
+/* Block until the event is set; releases GIL while waiting */
+void _PyEvent_Wait(_PyEvent *evt);
+/* Non-blocking check */
+static inline int _PyEvent_IsSet(_PyEvent *evt);
+```
+
+`_PyEvent` is a one-shot: once set it stays set. Used to signal thread startup completion.
+
+### `_PyOnceFlag`
+
+```c
+// CPython: Include/internal/pycore_lock.h:195 _PyOnceFlag
+typedef struct {
+    uint8_t v;
+} _PyOnceFlag;
+
+/* Run func(arg) exactly once across all threads.
+   Returns 0 on success, -1 if func raised an exception. */
+int _PyOnceFlag_CallOnce(_PyOnceFlag *flag, _Py_once_fn_t *func, void *arg);
+```
+
+Analogous to `pthread_once` and Go's `sync.Once`. Used for lazy initialization of per-interpreter caches.
+
+## gopy notes
+
+gopy does not have a GIL, so `_PyMutex` maps to `sync.Mutex` in Go. `_PyEvent` maps to a `chan struct{}` (closed on notify, blocking on wait). `_PyOnceFlag` maps directly to `sync.Once`. These types appear in `vm/lock.go`.

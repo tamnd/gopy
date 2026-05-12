@@ -1,0 +1,116 @@
+---
+title: Lib/argparse.py (part 2)
+description: "Lib/argparse.py part 2: subparsers, argument groups, mutually exclusive groups, type converters, metavar, formatter classes."
+cpython_path: Lib/argparse.py
+cpython_version: "3.14"
+lines: 2800
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/argparse.py" />
+
+This annotation covers subcommand dispatch, argument grouping, and help formatting. See `lib_argparse_detail` for `ArgumentParser.parse_args`, `add_argument`, and `Namespace`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-100 | `_SubParsersAction` | `add_subparsers()` — dispatch to sub-parsers by name |
+| 101-250 | `_ArgumentGroup` | Visual grouping for help text; same namespace |
+| 251-400 | `_MutuallyExclusiveGroup` | Error if more than one argument in the group is given |
+| 401-550 | Type converters | `FileType`, `BooleanOptionalAction` |
+| 551-700 | Metavar | Format displayed in usage/help: `{N}` for choices, `FILE` for files |
+| 701-900 | `HelpFormatter` | Build the usage/help string |
+| 901-1100 | `RawDescriptionHelpFormatter` | Preserve description whitespace |
+| 1101-1300 | `ArgumentDefaultsHelpFormatter` | Append `(default: X)` to each argument |
+
+## Reading
+
+### `add_subparsers`
+
+```python
+# CPython: Lib/argparse.py:1160 _SubParsersAction
+class _SubParsersAction(Action):
+    def __init__(self, option_strings, prog, parser_class, ...):
+        self._name_parser_map = {}
+        self._choices_actions = []
+
+    def add_parser(self, name, **kwargs):
+        parser = self._parser_class(prog='%s %s' % (self._prog_prefix, name),
+                                    **kwargs)
+        self._name_parser_map[name] = parser
+        return parser
+
+    def __call__(self, parser, namespace, values, option_string=None):
+        parser_name = values[0]
+        if parser_name not in self._name_parser_map:
+            parser.error(f'argument {self.dest}: invalid choice: {parser_name!r}')
+        subnamespace, arg_strings = None, values[1:]
+        subparser = self._name_parser_map[parser_name]
+        subparser.parse_args(arg_strings, subnamespace)
+        ...
+```
+
+### `_MutuallyExclusiveGroup`
+
+```python
+# CPython: Lib/argparse.py:1500 _MutuallyExclusiveGroup
+class _MutuallyExclusiveGroup(_ArgumentGroup):
+    def _group_usage(self):
+        """Format: (--foo | --bar)"""
+        ...
+    # Raises error in _parse_known_args if >1 option from the group appears
+```
+
+### `FileType`
+
+```python
+# CPython: Lib/argparse.py:1620 FileType
+class FileType:
+    """Type converter that opens a file.
+    Usage: parser.add_argument('--out', type=FileType('w'))
+    """
+    def __init__(self, mode='r', bufsize=-1, encoding=None, errors=None):
+        self._mode    = mode
+        self._bufsize = bufsize
+        self._encoding = encoding
+        self._errors   = errors
+
+    def __call__(self, string):
+        if string == '-':
+            if 'r' in self._mode:  return sys.stdin
+            if 'w' in self._mode:  return sys.stdout
+        try:
+            return open(string, self._mode, self._bufsize, self._encoding,
+                        self._errors)
+        except OSError as e:
+            raise ArgumentTypeError(f"can't open '{string}': {e}")
+```
+
+### `HelpFormatter`
+
+```python
+# CPython: Lib/argparse.py:1750 HelpFormatter
+class HelpFormatter:
+    def format_usage(self):
+        prefix = 'usage: '
+        ...
+
+    def _format_action(self, action):
+        help_text = self._expand_help(action)
+        return '%*s%s\n' % (self._current_indent, '', help_text)
+
+    def _expand_help(self, action):
+        params = dict(vars(action), prog=self._prog)
+        if params.get('default') is not None:
+            params['default'] = str(params['default'])
+        return self._get_help_string(action) % params
+```
+
+`%(default)s` in a help string is expanded by `_expand_help` using the action's attributes.
+
+## gopy notes
+
+`argparse` is pure Python. `FileType.__call__` uses `open()` backed by gopy's file object. `BooleanOptionalAction` (3.9+) uses `add_argument` with a `--flag`/`--no-flag` pair.

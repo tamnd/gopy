@@ -1,0 +1,115 @@
+---
+title: Objects/codeobject.c (part 2)
+description: "Objects/codeobject.c part 2: co_positions, co_linetable encoding, adaptive instruction specialization slots, _PyCode_Quicken."
+cpython_path: Objects/codeobject.c
+cpython_version: "3.14"
+lines: 1000
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Objects/codeobject.c" />
+
+This annotation covers the 3.11+ column-tracking (`co_positions`), the new location table encoding, and adaptive specialization plumbing. See `objects_codeobject_detail` for the basic `PyCodeObject` layout and creation.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-100 | Location table encoding | `co_linetable` stores (line, col, end_col) per instruction |
+| 101-250 | `_PyCode_InitAddressRange` | Iterator for the location table |
+| 251-400 | `co_positions()` | Return iterator of `(line, end_line, col, end_col)` per instruction |
+| 401-550 | `_PyCode_Quicken` | Replace instructions with adaptive variants for specialization |
+| 551-700 | `_PyCode_GetVarnames` | Build `co_varnames` tuple from the localsplus array |
+| 701-1000 | `_PyCode_New` | Internal constructor used by the compiler |
+
+## Reading
+
+### Location table encoding
+
+```c
+// CPython: Objects/codeobject.c:48 co_linetable
+/* co_linetable is a compact encoding of (line, end_line, col, end_col)
+   for every instruction in the code object.
+   Format (per entry):
+     - 1 or more bytes encoding the instruction span and position delta
+     - Uses a variable-length code with a 3-bit opcode in the high bits
+   This replaced the old lnotab in 3.11. */
+```
+
+The new format is more compact than `lnotab` and stores column information needed for `SyntaxError` caret highlighting and `co_positions()`.
+
+### `_PyCode_InitAddressRange`
+
+```c
+// CPython: Objects/codeobject.c:130 _PyCode_InitAddressRange
+void
+_PyCode_InitAddressRange(PyCodeObject *co, PyCodeAddressRange *bounds)
+{
+    bounds->opaque.lo_next   = (const char *)co->co_linetable->ob_val;
+    bounds->opaque.limit     = bounds->opaque.lo_next + Py_SIZE(co->co_linetable);
+    bounds->ar_start         = -1;
+    bounds->ar_end           = 0;
+    bounds->opaque.computed_line = co->co_firstlineno;
+    bounds->ar_line          = -1;
+}
+```
+
+### `co_positions()`
+
+```c
+// CPython: Objects/codeobject.c:310 code_co_positions
+static PyObject *
+code_co_positions(PyObject *self, PyObject *noargs)
+{
+    /* Returns an iterator yielding (line, end_line, col_offset, end_col_offset)
+       for each instruction. Used by dis.findlinestarts and traceback. */
+    return new_linesiterator((PyCodeObject *)self);
+}
+```
+
+`inspect.getsource()` and `traceback` use `co_positions()` to pinpoint the exact expression that raised an error.
+
+### `_PyCode_Quicken`
+
+```c
+// CPython: Objects/codeobject.c:480 _PyCode_Quicken
+void
+_PyCode_Quicken(PyCodeObject *code)
+{
+    /* Replace each non-adaptive instruction with its ADAPTIVE_ variant.
+       E.g. LOAD_ATTR → LOAD_ATTR_ADAPTIVE
+       The adaptive variant collects type feedback on the first few calls
+       then specializes to LOAD_ATTR_MODULE, LOAD_ATTR_SLOT, etc. */
+    _Py_CODEUNIT *instructions = _PyCode_CODE(code);
+    Py_ssize_t n = Py_SIZE(code);
+    for (int i = 0; i < n; i++) {
+        uint8_t opcode = _Py_OPCODE(instructions[i]);
+        if (_PyOpcode_Caches[opcode]) {
+            instructions[i + 1].cache = adaptive_counter_warmup();
+        }
+    }
+}
+```
+
+`_PyCode_Quicken` is called the first time a code object is executed. Each specializable opcode gets a warmup counter in its inline cache slot.
+
+### `_PyCode_GetVarnames`
+
+```c
+// CPython: Objects/codeobject.c:620 _PyCode_GetVarnames
+/* co_varnames: tuple of names for local variables
+   (first co_nlocals entries of localsplus, in slot order) */
+static PyObject *
+_PyCode_GetVarnames(PyCodeObject *co)
+{
+    return _PyCode_GetLocalVariables(co, CO_FAST_LOCAL);
+}
+```
+
+`co_varnames` only includes `CO_FAST_LOCAL` slots; free variables and cell variables are reported separately via `co_freevars` and `co_cellvars`.
+
+## gopy notes
+
+The location table encoder is in `compile/codegen_stmt_misc.go`. `_PyCode_Quicken` has a gopy equivalent in `vm/specialize.go:QuickenCode`. `co_positions()` returns a Go iterator backed by the same encoded table. `_PyCode_InitAddressRange` is `vm.NewAddressRange` in `vm/address_range.go`.

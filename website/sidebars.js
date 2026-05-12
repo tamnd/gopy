@@ -532,6 +532,8 @@ const sidebars = {
         'annotations/objects/objects_tupleobject3_detail',
         'annotations/objects/objects_setobject2_detail',
         'annotations/objects/objects_dictobject3_detail',
+        'annotations/objects/objects_codeobject2_detail',
+        'annotations/objects/objects_moduleobject2_detail',
       ],
     },
     {
@@ -773,6 +775,8 @@ const sidebars = {
         'annotations/include/include_internal_pycore_warnings_h_detail',
         'annotations/include/include_internal_pycore_frame_h_detail2',
         'annotations/include/include_internal_pycore_atexit_h_detail',
+        'annotations/include/include_internal_pycore_lock_h_detail',
+        'annotations/include/include_internal_pycore_crossinterp_h_detail',
       ],
     },
     {
@@ -1014,6 +1018,7 @@ const sidebars = {
         'annotations/modules/modules_resource_detail',
         'annotations/modules/modules_unicodedata_detail',
         'annotations/modules/modules_posixpath_detail',
+        'annotations/modules/modules_readline_detail',
       ],
     },
     {
@@ -1540,6 +1545,9 @@ const sidebars = {
         'annotations/lib/lib_enum2_detail',
         'annotations/lib/lib_contextlib2_detail',
         'annotations/lib/lib_unittest2_detail',
+        'annotations/lib/lib_heapq2_detail',
+        'annotations/lib/lib_argparse2_detail',
+        'annotations/lib/lib_configparser2_detail',
       ],
     },
   ],

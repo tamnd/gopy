@@ -1,0 +1,118 @@
+---
+title: Lib/configparser.py (part 2)
+description: "Lib/configparser.py part 2: interpolation (BasicInterpolation, ExtendedInterpolation), write(), DEFAULT section, converters."
+cpython_path: Lib/configparser.py
+cpython_version: "3.14"
+lines: 1400
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/configparser.py" />
+
+This annotation covers value interpolation, file writing, and the `DEFAULT` section fallback. See `lib_configparser_detail` for `read()`, `get()`, `set()`, and section management.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `Interpolation` base | `before_get` hook called by `get()` |
+| 81-200 | `BasicInterpolation` | `%(key)s` substitution within the same section |
+| 201-350 | `ExtendedInterpolation` | `${section:key}` cross-section substitution |
+| 351-500 | `write()` | Serialize the config back to a file |
+| 501-650 | `DEFAULT` section | Fallback values for all sections |
+| 651-800 | Converters | `getint`, `getfloat`, `getboolean`, custom converters |
+| 801-1400 | `RawConfigParser._read` | Parser state machine for the INI format |
+
+## Reading
+
+### `BasicInterpolation`
+
+```python
+# CPython: Lib/configparser.py:390 BasicInterpolation
+class BasicInterpolation(Interpolation):
+    """%(key)s substitution within the current section (+ DEFAULT)."""
+    def before_get(self, parser, section, option, value, vars):
+        L = []
+        self._interpolate_some(parser, option, L, value, section, vars, 1)
+        return ''.join(L)
+
+    def _interpolate_some(self, parser, option, accum, rest, section, map, depth):
+        if depth > MAX_INTERPOLATION_DEPTH:
+            raise InterpolationDepthError(option, section, rest)
+        while rest:
+            p = rest.find('%')
+            if p < 0:
+                accum.append(rest); return
+            accum.append(rest[:p])
+            rest = rest[p:]
+            if rest[1:2] == '(':
+                m = self._KEYCRE.match(rest)
+                var = parser.get(section, m.group(1), raw=True, vars=map)
+                self._interpolate_some(parser, option, accum, var,
+                                       section, map, depth + 1)
+                rest = rest[m.end():]
+```
+
+### `ExtendedInterpolation`
+
+```python
+# CPython: Lib/configparser.py:470 ExtendedInterpolation
+class ExtendedInterpolation(Interpolation):
+    """${section:key} substitution across sections."""
+    _KEYCRE = re.compile(r'\$\{([^}]+)\}')
+
+    def before_get(self, parser, section, option, value, vars):
+        L = []
+        self._interpolate_some(parser, option, L, value, section, vars, 1)
+        return ''.join(L)
+
+    def _interpolate_some(self, parser, option, accum, rest, section, map, depth):
+        ...
+        # ${section:option} → parser.get(section, option)
+        # ${option} → parser.get(section, option)  (same section)
+```
+
+### `write()`
+
+```python
+# CPython: Lib/configparser.py:560 RawConfigParser.write
+def write(self, fp, space_around_delimiters=True):
+    """Write the configuration to a file-like object."""
+    if space_around_delimiters:
+        d = ' {} '.format(self._delimiters[0])
+    else:
+        d = self._delimiters[0]
+    if self._defaults:
+        self._write_section(fp, self.default_section,
+                            self._defaults.items(), d)
+    for section in self._sections:
+        self._write_section(fp, section,
+                            self._sections[section].items(), d)
+```
+
+### `DEFAULT` section fallback
+
+```python
+# CPython: Lib/configparser.py:700 SectionProxy.__getitem__
+# get() merges DEFAULT values into the section's own values:
+# vars: explicit overrides
+# section values
+# DEFAULT fallback
+# If key not found in any: raise NoOptionError
+```
+
+`DEFAULT` (case-insensitive) is special: its keys are available in all sections as fallback values but do not appear in `sections()`.
+
+### Custom converters
+
+```python
+# CPython: Lib/configparser.py:780 converters
+# RawConfigParser(converters={'list': lambda v: v.split(',')})
+# Automatically creates parser.getlist(section, option)
+```
+
+## gopy notes
+
+`configparser` is pure Python. `BasicInterpolation` is the default; `ExtendedInterpolation` must be passed explicitly. `write()` uses `print()` which uses `sys.stdout`'s `write()` method, backed by gopy's file object.

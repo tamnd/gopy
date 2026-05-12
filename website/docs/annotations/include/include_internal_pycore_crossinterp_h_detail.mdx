@@ -1,0 +1,106 @@
+---
+title: Include/internal/pycore_crossinterp.h
+description: "Include/internal/pycore_crossinterp.h: cross-interpreter object sharing, _PyXIData, _PyInterpreterID — PEP 734 sub-interpreter data passing."
+cpython_path: Include/internal/pycore_crossinterp.h
+cpython_version: "3.14"
+lines: 300
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Include/internal/pycore_crossinterp.h" />
+
+`pycore_crossinterp.h` provides the infrastructure for passing data between sub-interpreters (PEP 734). It defines `_PyXIData` — a serialized snapshot of a Python object that can be recreated in another interpreter.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-60 | `_PyXIData` | Portable data container: value + type tag + free function |
+| 61-120 | `_PyInterpreterID` | Opaque interpreter identifier used across interpreter boundaries |
+| 121-200 | `_PyObject_GetXIData` | Serialize a Python object into `_PyXIData` |
+| 201-260 | `_PyXIData_NewObject` | Deserialize `_PyXIData` into a Python object in the current interpreter |
+| 261-300 | Supported types | `int`, `float`, `str`, `bytes`, `bool`, `None`, `tuple` of the above |
+
+## Reading
+
+### `_PyXIData`
+
+```c
+// CPython: Include/internal/pycore_crossinterp.h:38 _PyXIData
+typedef struct _PyXIData {
+    /* The serialized value (type-dependent) */
+    union {
+        long long  i;   /* int */
+        double     d;   /* float */
+        struct { char *buf; Py_ssize_t len; int kind; } str;  /* str/bytes */
+        int        b;   /* bool */
+    } data;
+    /* Type tag */
+    int tag;
+    /* Free function called when this XIData is no longer needed */
+    void (*free)(_PyXIData *);
+} _PyXIData;
+```
+
+`_PyXIData` is allocated in shared memory (not tied to any interpreter's heap). `free` is called after the receiving interpreter has consumed the data.
+
+### `_PyObject_GetXIData`
+
+```c
+// CPython: Include/internal/pycore_crossinterp.h:160 _PyObject_GetXIData
+int
+_PyObject_GetXIData(PyThreadState *tstate, PyObject *obj, _PyXIData *data)
+{
+    /* Serialize obj into data.
+       Supported: None, bool, int (fits in long long), float, str, bytes.
+       Returns 0 on success, -1 on error (sets TypeError for unsupported types). */
+    if (obj == Py_None) { data->tag = XI_NONE; return 0; }
+    if (PyBool_Check(obj)) { data->tag = XI_BOOL; data->data.b = obj == Py_True; return 0; }
+    if (PyLong_Check(obj)) {
+        int overflow;
+        data->data.i = PyLong_AsLongLongAndOverflow(obj, &overflow);
+        if (overflow) { PyErr_SetString(PyExc_OverflowError, ...); return -1; }
+        data->tag = XI_INT;
+        return 0;
+    }
+    ...
+}
+```
+
+### `_PyXIData_NewObject`
+
+```c
+// CPython: Include/internal/pycore_crossinterp.h:220 _PyXIData_NewObject
+PyObject *
+_PyXIData_NewObject(_PyXIData *data)
+{
+    /* Deserialize data into a new Python object in the current interpreter */
+    switch (data->tag) {
+    case XI_NONE:  return Py_NewRef(Py_None);
+    case XI_BOOL:  return PyBool_FromLong(data->data.b);
+    case XI_INT:   return PyLong_FromLongLong(data->data.i);
+    case XI_FLOAT: return PyFloat_FromDouble(data->data.d);
+    case XI_STR:   return PyUnicode_FromKindAndData(data->data.str.kind,
+                                                    data->data.str.buf,
+                                                    data->data.str.len);
+    ...
+    }
+}
+```
+
+### `_PyInterpreterID`
+
+```c
+// CPython: Include/internal/pycore_crossinterp.h:80 _PyInterpreterID
+/* An opaque handle to an interpreter.
+   Created by interpreters.create(); passed to run_string()/run_func(). */
+typedef struct {
+    int64_t id;
+} _PyInterpreterID;
+```
+
+## gopy notes
+
+gopy has no sub-interpreter isolation (all goroutines share one interpreter). `_PyXIData` is declared in `objects/xidata.go` for C extension compatibility but inter-interpreter data passing is not yet fully implemented. `_PyInterpreterID` maps to `vm.InterpreterID` (an `int64`).

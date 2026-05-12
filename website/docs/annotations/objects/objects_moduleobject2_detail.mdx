@@ -1,0 +1,115 @@
+---
+title: Objects/moduleobject.c (part 2)
+description: "Objects/moduleobject.c part 2: multi-phase init (PyModuleDef_Init), module exec functions, PyModule_FromDefAndSpec, __spec__ integration."
+cpython_path: Objects/moduleobject.c
+cpython_version: "3.14"
+lines: 700
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Objects/moduleobject.c" />
+
+This annotation covers multi-phase module initialization (PEP 489, Python 3.5+). See `objects_moduleobject_detail` for single-phase `PyModule_Create`, `PyModule_AddObject`, and `__dict__` layout.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `PyModuleDef_Init` | Register a `PyModuleDef` with the import machinery |
+| 81-200 | `PyModule_FromDefAndSpec` | Create a module object from def + `ModuleSpec` |
+| 201-350 | `PyModule_ExecDef` | Run `Py_mod_exec` slots in order |
+| 351-500 | `_PyModuleDef_IS_INITIALIZED` | Check if multi-phase init has run |
+| 501-700 | `__spec__` | Set/get `module.__spec__` and `module.__loader__` |
+
+## Reading
+
+### Multi-phase init overview
+
+```c
+// CPython: Objects/moduleobject.c:28 multi-phase comment
+/* Multi-phase init (PEP 489):
+   Phase 1 — PyModuleDef_Init: validate def, register with the runtime.
+   Phase 2 — PyModule_FromDefAndSpec: allocate the module object,
+              run Py_mod_create slot if present (or use PyModule_New).
+   Phase 3 — PyModule_ExecDef: run Py_mod_exec slots to populate __dict__.
+   This split allows sub-interpreters to share the module definition
+   while each gets its own module object. */
+```
+
+### `PyModuleDef_Init`
+
+```c
+// CPython: Objects/moduleobject.c:62 PyModuleDef_Init
+PyObject *
+PyModuleDef_Init(struct PyModuleDef *def)
+{
+    if (def->m_base.m_index == 0) {
+        /* First call: assign a unique module index */
+        max_module_number++;
+        def->m_base.m_index = max_module_number;
+    }
+    return (PyObject *)def;
+}
+```
+
+The `m_index` is used to cache per-interpreter module state. It is assigned once per process, not per interpreter.
+
+### `PyModule_FromDefAndSpec`
+
+```c
+// CPython: Objects/moduleobject.c:120 PyModule_FromDefAndSpec
+PyObject *
+PyModule_FromDefAndSpec(struct PyModuleDef *def, PyObject *spec)
+{
+    PyObject *mod;
+    /* Run Py_mod_create slot if the module wants a custom type */
+    if (def->m_slots) {
+        for (PyModuleDef_Slot *cur_slot = def->m_slots;
+             cur_slot->slot; cur_slot++) {
+            if (cur_slot->slot == Py_mod_create) {
+                mod = ((PyObject *(*)(PyObject *, PyModuleSpec *))
+                       cur_slot->value)(NULL, (PyModuleSpec *)spec);
+                goto have_mod;
+            }
+        }
+    }
+    mod = PyModule_NewObject(PyObject_GetAttrString(spec, "name"));
+have_mod:
+    /* Attach __spec__ to the module */
+    PyObject_SetAttrString(mod, "__spec__", spec);
+    return mod;
+}
+```
+
+### `PyModule_ExecDef`
+
+```c
+// CPython: Objects/moduleobject.c:230 PyModule_ExecDef
+int
+PyModule_ExecDef(PyObject *module, struct PyModuleDef *def)
+{
+    if (def->m_slots == NULL) return 0;
+    for (PyModuleDef_Slot *cur_slot = def->m_slots;
+         cur_slot->slot; cur_slot++) {
+        if (cur_slot->slot == Py_mod_exec) {
+            int ret = ((int (*)(PyObject *))cur_slot->value)(module);
+            if (ret != 0) {
+                if (!PyErr_Occurred())
+                    PyErr_Format(PyExc_SystemError,
+                        "execution of module %s failed without setting an exception",
+                        PyModule_GetName(module));
+                return -1;
+            }
+        }
+    }
+    return 0;
+}
+```
+
+Multiple `Py_mod_exec` slots can be registered; they are called in order. Each can add attributes to the module's `__dict__`.
+
+## gopy notes
+
+gopy uses single-phase init for built-in modules (`objects/module.go`). Multi-phase init is supported for C extensions loaded via `dlopen`; `PyModuleDef_Init` and `PyModule_ExecDef` are in `objects/module_multiphase.go`. `__spec__` is set by the import machinery in `vm/eval_import.go`.

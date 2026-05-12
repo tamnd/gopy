@@ -1,0 +1,121 @@
+---
+title: Modules/readline.c
+description: "Modules/readline.c: readline — GNU Readline / libedit binding, completion, history, set_completer, parse_and_bind."
+cpython_path: Modules/readline.c
+cpython_version: "3.14"
+lines: 1100
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/readline.c" />
+
+`readline` binds GNU Readline (or libedit on macOS) to provide line editing, history, and tab completion in the interactive REPL.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | Module init | Detect GNU Readline vs libedit; set `_USING_LIBEDIT` |
+| 81-200 | `parse_and_bind` | Pass a Readline init string (e.g. `"tab: complete"`) |
+| 201-350 | `set_completer` / `get_completer` | Register a Python callable as the tab-completion function |
+| 351-500 | `on_completion` | C callback glue: calls Python completer, manages string memory |
+| 501-650 | History API | `add_history`, `get_history_length`, `read_history_file` |
+| 651-800 | `set_startup_hook` / `set_pre_input_hook` | Hooks run at REPL prompt |
+| 801-1100 | `PyOS_Readline` hook | Override for interactive input used by the parser |
+
+## Reading
+
+### `parse_and_bind`
+
+```c
+// CPython: Modules/readline.c:190 readline_parse_and_bind_impl
+static PyObject *
+readline_parse_and_bind_impl(PyObject *module, const char *string)
+{
+    /* Pass a Readline key binding or variable setting.
+       Examples:
+         "tab: complete"        — bind Tab to completion
+         "set editing-mode vi"  — vim key bindings
+    */
+    char *copy = strdup(string);
+    if (!copy) return PyErr_NoMemory();
+    rl_parse_and_bind(copy);
+    free(copy);
+    Py_RETURN_NONE;
+}
+```
+
+### Completion callback
+
+```c
+// CPython: Modules/readline.c:380 on_completion
+static char *
+on_completion(const char *text, int state)
+{
+    /* Called by Readline for each successive completion.
+       state=0: first call; state>0: subsequent calls. */
+    if (state == 0) {
+        Py_XDECREF(readlinestate_global->completion_cache);
+        /* Call the Python completer: completer(text, state) */
+        PyObject *r = PyObject_CallFunction(
+            readlinestate_global->completer, "si", text, state);
+        readlinestate_global->completion_cache = r;
+    }
+    if (readlinestate_global->completion_cache == NULL ||
+        readlinestate_global->completion_cache == Py_None)
+        return NULL;
+    return strdup(PyUnicode_AsUTF8(readlinestate_global->completion_cache));
+}
+```
+
+The Python completer protocol: `f(text, 0)` returns the first completion, `f(text, 1)` returns the second, etc. Returning `None` signals end of completions. `rlcompleter.Completer` implements this protocol.
+
+### History API
+
+```c
+// CPython: Modules/readline.c:540 readline_add_history_impl
+static PyObject *
+readline_add_history_impl(PyObject *module, const char *line)
+{
+    add_history(line);   /* GNU Readline history API */
+    Py_RETURN_NONE;
+}
+
+// CPython: Modules/readline.c:610 readline_read_history_file_impl
+static PyObject *
+readline_read_history_file_impl(PyObject *module, PyObject *filename)
+{
+    if (read_history(PyUnicode_AsUTF8(filename)) != 0) {
+        PyErr_SetFromErrnoWithFilenameObject(PyExc_OSError, filename);
+        return NULL;
+    }
+    Py_RETURN_NONE;
+}
+```
+
+`readline.read_history_file('~/.python_history')` loads the session history.
+
+### `PyOS_Readline` integration
+
+```c
+// CPython: Modules/readline.c:880 call_readline
+/* readline installs this as PyOS_ReadlineFunctionPointer so the interactive
+   REPL uses Readline for input instead of fgets(). */
+static char *
+call_readline(FILE *sys_stdin, FILE *sys_stdout, const char *prompt)
+{
+    rl_outstream = sys_stdout;
+    char *p = readline(prompt);  /* blocks until user presses Enter */
+    if (p) {
+        add_history(p);
+        ...
+    }
+    return p;
+}
+```
+
+## gopy notes
+
+gopy does not ship `readline` by default. The interactive REPL uses `os.Stdin` directly for input. When readline is needed, users can `import readline` which loads this module via `dlopen` of the system `libreadline`. The `PyOS_ReadlineFunctionPointer` hook is `vm.ReadlineFn` in `vm/readline.go`.
