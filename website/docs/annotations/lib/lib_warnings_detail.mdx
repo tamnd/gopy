@@ -1,0 +1,75 @@
+---
+title: Lib/warnings.py
+description: "warnings module: warn() with stacklevel, filter chain (defaultaction, _filters_mutated), showwarning default output, simplefilter/filterwarnings, catch_warnings context manager."
+cpython_path: Lib/warnings.py
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Lib/warnings.py`
+
+<CpyLink path="Lib/warnings.py" />
+
+`Lib/warnings.py` is the Python-level implementation of the warnings system. A C
+accelerated version (`_warnings.c`) is used when available. This file serves as the
+pure-Python fallback and the definitive specification for filter matching.
+
+## Map
+
+| Lines | Symbol | Role |
+| ----- | ------ | ---- |
+| 1-80 | `filters` list, `_filters_mutated`, `defaultaction` | Global filter state |
+| 81-200 | `warn`, `warn_explicit` | Emit a warning through the filter chain |
+| 201-320 | `filterwarnings`, `simplefilter`, `resetwarnings` | Modify the filter list |
+| 321-420 | `showwarning`, `formatwarning` | Default output formatting |
+| 421-500 | `catch_warnings` | Context manager that saves and restores filter state |
+
+## Reading
+
+### Filter chain
+
+`filters` is a list of 5-tuples `(action, message, category, module, lineno)`. `warn_explicit`
+walks the list and applies the first matching filter. The `action` string selects the
+behaviour: `"default"`, `"always"`, `"ignore"`, `"error"`, `"once"`, or `"module"`.
+
+```python
+# CPython: Lib/warnings.py:136 warn_explicit (abbreviated)
+def warn_explicit(message, category, filename, lineno, ...):
+    ...
+    for item in filters:
+        action, msg, cat, mod, ln = item
+        if ((msg is None or msg.match(text)) and
+                issubclass(category, cat) and
+                (mod is None or mod.match(module)) and
+                (ln == 0 or lineno == ln)):
+            break
+    else:
+        action = defaultaction
+    ...
+```
+
+### `stacklevel`
+
+`warn(msg, stacklevel=1)` walks `stacklevel` frames up from the `warn` call to attribute
+the warning to the caller's location. `stacklevel=2` is the standard for functions that
+wrap `warn`.
+
+### `_filters_mutated`
+
+`_filters_mutated()` notifies the C accelerator that the filter list changed. The C version
+caches the filter chain in a compact form; the notification invalidates that cache.
+
+### `catch_warnings`
+
+`catch_warnings(record=False)` saves `warnings.filters` and `warnings.showwarning` on
+entry and restores them on exit. With `record=True` it replaces `showwarning` with a
+function that appends to the returned list.
+
+## gopy notes
+
+Not yet ported. The `warn` function is called by many stdlib modules. Planned path:
+`module/warnings/`. The filter chain and `stacklevel` frame walk both require frame
+introspection support.

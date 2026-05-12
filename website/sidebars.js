@@ -292,6 +292,8 @@ const sidebars = {
         'annotations/python/python_traceback_c_detail',
         'annotations/python/python_ceval2_detail',
         'annotations/python/python_frozen_c_detail',
+        'annotations/python/python_initconfig_c_detail',
+        'annotations/python/python_pythonrun_c_detail',
       ],
     },
     {
@@ -445,6 +447,8 @@ const sidebars = {
         'annotations/objects/objects_exceptions_detail',
         'annotations/objects/objects_codeobject_detail',
         'annotations/objects/objects_frameobject_detail',
+        'annotations/objects/objects_genobject_detail',
+        'annotations/objects/objects_cellobject_detail',
       ],
     },
     {
@@ -843,6 +847,8 @@ const sidebars = {
         'annotations/modules/module_math_c_detail',
         'annotations/modules/module_cmath_c_detail',
         'annotations/modules/module_statistics_detail',
+        'annotations/modules/module_re_detail',
+        'annotations/modules/module_signal_detail',
       ],
     },
     {
@@ -1266,6 +1272,9 @@ const sidebars = {
         'annotations/lib/lib_logging_detail',
         'annotations/lib/lib_unittest_detail',
         'annotations/lib/lib_io_detail',
+        'annotations/lib/lib_struct_detail',
+        'annotations/lib/lib_warnings_detail',
+        'annotations/lib/lib_weakref_detail',
       ],
     },
   ],

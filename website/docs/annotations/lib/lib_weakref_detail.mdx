@@ -1,0 +1,74 @@
+---
+title: Lib/weakref.py
+description: "weakref module: ref() callback, WeakValueDictionary/WeakKeyDictionary with dead-key cleanup on GC, WeakSet, finalize() deathwatch, and the proxy object protocol."
+cpython_path: Lib/weakref.py
+cpython_version: "3.14"
+lines: 620
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Lib/weakref.py`
+
+<CpyLink path="Lib/weakref.py" />
+
+`Lib/weakref.py` builds the higher-level weak reference types on top of `_weakref` (a C
+extension). The C module provides raw `ref()` and `proxy()`; this file adds
+`WeakValueDictionary`, `WeakKeyDictionary`, `WeakSet`, and `finalize`.
+
+## Map
+
+| Lines | Symbol | Role |
+| ----- | ------ | ---- |
+| 1-50 | Re-exports from `_weakref` | `ref`, `proxy`, `getweakrefcount`, `getweakrefs` |
+| 51-300 | `WeakValueDictionary` | Dict with weak values; callback removes dead entries |
+| 301-450 | `WeakKeyDictionary` | Dict with weak keys; callback removes dead entries |
+| 451-540 | `WeakSet` | Set with weak members |
+| 541-620 | `finalize` | Run a callback when an object is GC'd |
+
+## Reading
+
+### `WeakValueDictionary` dead-entry removal
+
+Each value is stored as `ref(value, callback)` where `callback` removes the key from the
+dict. Because the callback fires during GC, it must be careful not to acquire locks that
+might be held by the main thread; `WeakValueDictionary` uses a `KeyedRef` subclass that
+stores the key alongside the ref so the callback can find and remove it.
+
+```python
+# CPython: Lib/weakref.py:135 WeakValueDictionary.__init__
+def __init__(self, other=(), /, **kw):
+    def remove(wr, selfref=ref(self), _atomic_removal=_remove_dead_weakref):
+        self = selfref()
+        if self is not None:
+            ...
+            _atomic_removal(d, wr.key)
+    self._remove = remove
+```
+
+### `finalize`
+
+`finalize(obj, func, *args, **kwargs)` registers a `func(*args, **kwargs)` callback to
+be called when `obj` is garbage collected. Unlike `__del__`, `finalize` works on any
+object and can be cancelled via `finalize.detach()`.
+
+```python
+# CPython: Lib/weakref.py:550 finalize.__call__
+def __call__(self, _=None):
+    info = self._registry.pop(self._key, None)
+    if info is not None:
+        return info.func(*info.args, **info.kwargs)
+```
+
+### Thread safety in `WeakKeyDictionary`
+
+`WeakKeyDictionary` uses `_IterationGuard` as a context manager around iteration to prevent
+the callback from modifying the underlying dict while it is being iterated. Pending
+removals are deferred until the iteration is done.
+
+## gopy notes
+
+`module/weakref/module.go` provides basic `ref()` support. `WeakValueDictionary`,
+`WeakKeyDictionary`, and `finalize` are not yet ported. In Go, weak references will
+use `runtime.SetFinalizer` as the underlying primitive.

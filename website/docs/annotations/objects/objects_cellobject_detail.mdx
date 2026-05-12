@@ -1,0 +1,68 @@
+---
+title: Objects/cellobject.c
+description: "PyCellObject: the shared mutable box that makes closures work. ob_ref field, cell_get_contents, cell_set_contents, and the MAKE_CELL / LOAD_DEREF / STORE_DEREF opcode contract."
+cpython_path: Objects/cellobject.c
+cpython_version: "3.14"
+lines: 160
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Objects/cellobject.c`
+
+<CpyLink path="Objects/cellobject.c" />
+
+`Objects/cellobject.c` defines `PyCellObject`, a one-slot mutable container used to share
+a variable between a function and its inner closures. Every free variable and cell variable
+is boxed in a `PyCellObject` so that all closures referencing the same name see the same
+value after mutation.
+
+## Map
+
+| Lines | Symbol | Role |
+| ----- | ------ | ---- |
+| 1-40 | `PyCellObject` struct, `PyCell_New` | One-field box |
+| 41-100 | `PyCell_Get`, `PyCell_Set` | Accessor and mutator |
+| 101-160 | `cell_repr`, `cell_richcompare`, type definition | Python-visible API |
+
+## Reading
+
+### `PyCellObject` layout
+
+```c
+// CPython: Objects/cellobject.c:16 PyCellObject
+typedef struct {
+    PyObject_HEAD
+    PyObject *ob_ref;  /* Content of the cell or NULL when empty */
+} PyCellObject;
+```
+
+When `ob_ref` is NULL the cell is empty (the variable has not yet been assigned). Reading
+an empty cell raises `NameError` (`LOAD_DEREF` checks for NULL).
+
+### MAKE_CELL, LOAD_DEREF, STORE_DEREF
+
+- `MAKE_CELL i`: allocates a new `PyCellObject` and stores a pointer in
+  `frame->localsplus[i]`.
+- `LOAD_DEREF i`: reads `ob_ref` from the cell at `localsplus[i]`; raises `NameError` if
+  NULL.
+- `STORE_DEREF i`: writes to `ob_ref` in the cell at `localsplus[i]`, replacing any
+  previous value.
+
+Multiple closures that close over the same variable all hold a reference to the *same*
+`PyCellObject`, so `STORE_DEREF` in one closure is immediately visible to all others.
+
+### Cell vs free variables
+
+The compiler assigns a variable to `co_cellvars` (in the defining function) or
+`co_freevars` (in the inner function) depending on the perspective. Both end up as
+`PyCellObject*` in `frame->localsplus`; the difference is only in how the frame is
+populated at call time.
+
+## gopy notes
+
+`vm/eval_call.go` and `compile/codegen_stmt_funclike.go` implement the MAKE_CELL and
+LOAD_DEREF/STORE_DEREF opcode contract. The Go equivalent of `PyCellObject` is the
+`*Cell` struct in `objects/`. The closure tuple is built from free variables during
+`MAKE_FUNCTION`.

@@ -1,0 +1,75 @@
+---
+title: Modules/_sre.c
+description: "_sre C extension: NFA-based regex engine, SRE_STATE machine with backtracking, SRE_Pattern compile cache, match object with group()/groups()/groupdict(), and finditer/findall."
+cpython_path: Modules/_sre.c
+cpython_version: "3.14"
+lines: 2800
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Modules/_sre.c`
+
+<CpyLink path="Modules/_sre.c" />
+
+`Modules/_sre.c` is the C engine behind `re`. `Lib/re/` compiles Python regex syntax to
+`sre` bytecode; this file executes that bytecode against a string using a backtracking NFA.
+
+## Map
+
+| Lines | Symbol | Role |
+| ----- | ------ | ---- |
+| 1-400 | `SRE_STATE`, `sre_match` | Backtracking NFA runner |
+| 401-800 | `SRE_Pattern_match`, `SRE_Pattern_search` | Anchored vs unanchored match |
+| 801-1200 | `SRE_Pattern_findall`, `SRE_Pattern_finditer` | All-matches iteration |
+| 1201-1800 | `SRE_Match` object | `group`, `groups`, `groupdict`, `span`, `start`, `end` |
+| 1801-2800 | `SRE_Pattern_sub`, `SRE_Pattern_split` | Substitution and splitting |
+
+## Reading
+
+### `sre_match` backtracking
+
+The engine uses an explicit mark stack (`state->mark`) to store group capture positions.
+Repetition operators (`*`, `+`, `?`, `{m,n}`) push save points; failed matches pop them.
+There is no separate NFA construction; the bytecode is a compiled NFA directly.
+
+```c
+// CPython: Modules/_sre.c:198 sre_match (inner loop excerpt)
+retry:
+    switch (GET_OP) {
+    case SRE_OP_LITERAL:
+        if (ptr >= end || *ptr != GET_ARG) goto failure;
+        ptr++;
+        break;
+    case SRE_OP_ANY:
+        if (ptr >= end || SRE_IS_LINEBREAK(*ptr)) goto failure;
+        ptr++;
+        break;
+    ...
+    }
+```
+
+### Named groups and `groupdict`
+
+Named groups are stored in `pattern.groupindex`, a dict mapping name to group number.
+`SRE_Match.groupdict()` iterates the dict and retrieves each group by number from the
+mark array.
+
+### `SRE_Pattern_sub` with a callable
+
+When the replacement argument to `sub()` is callable, the engine calls it for each match
+with the match object as the argument and uses the return value as the replacement string.
+
+### Unicode vs bytes
+
+The engine has two instantiations: one for `str` (UCS-1/2/4 via `PyUnicode_READ`) and one
+for `bytes`. The compile-time `SRE_CHAR` macro selects the character type. Both are
+compiled from the same source via `#include "sre_lib.h"`.
+
+## gopy notes
+
+`module/fnmatch/` provides glob matching. Full `re` support requires a port of both
+`Lib/re/` (regex syntax compiler) and `Modules/_sre.c` (engine). Planned path:
+`module/re/`. An alternative is to compile the regex syntax to Go's `regexp` package, but
+that would produce different matching semantics for lookbehind and possessive quantifiers.
