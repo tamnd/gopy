@@ -1,0 +1,101 @@
+---
+title: Python/ceval.c (part 44)
+description: "Python/ceval.c part 44: STORE_ATTR specializations, STORE_ATTR_SLOT, STORE_ATTR_INSTANCE_VALUE."
+cpython_path: Python/ceval.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Python/ceval.c" />
+
+This annotation covers attribute store specializations. See `python_ceval43_detail` for `LOAD_ATTR` specializations.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `STORE_ATTR` base | Generic attribute store with inline cache |
+| 81-160 | `STORE_ATTR_SLOT` | Store to a `__slots__` offset |
+| 161-240 | `STORE_ATTR_INSTANCE_VALUE` | Store to instance `__dict__` at known offset |
+| 241-340 | `STORE_ATTR_WITH_HINT` | Store using a cached dict key index hint |
+| 341-500 | Cache invalidation | How type version changes trigger deopt |
+
+## Reading
+
+### `STORE_ATTR_SLOT`
+
+```c
+// CPython: Python/ceval.c:5480 STORE_ATTR_SLOT
+inst(STORE_ATTR_SLOT, (unused/2, owner, v --)) {
+    /* self.x = v where x is a __slots__ member */
+    Py_ssize_t index = cache->index;
+    DEOPT_IF(!PyObject_TypeCheck(owner, cache->type), STORE_ATTR);
+    PyObject **slot = (PyObject **)((char *)owner + index);
+    PyObject *old = *slot;
+    *slot = v;   /* store new value */
+    Py_XDECREF(old);
+    Py_DECREF(owner);
+}
+```
+
+`STORE_ATTR_SLOT` writes directly to a fixed byte offset in the object's memory. This is the fastest possible attribute store: no dict lookup, no hash, just a pointer store with a type check.
+
+### `STORE_ATTR_INSTANCE_VALUE`
+
+```c
+// CPython: Python/ceval.c:5540 STORE_ATTR_INSTANCE_VALUE
+inst(STORE_ATTR_INSTANCE_VALUE, (unused/2, owner, value --)) {
+    /* self.x = value for instances with split __dict__ */
+    DEOPT_IF(!PyObject_TypeCheck(owner, cache->type), STORE_ATTR);
+    PyDictObject *dict = (PyDictObject *)(((PyObject **)owner)[0]);
+    DEOPT_IF(dict == NULL, STORE_ATTR);
+    DEOPT_IF(dict->ma_keys->dk_version != cache->keys_version, STORE_ATTR);
+    PyObject **values = dict->ma_values->values;
+    Py_ssize_t index = cache->index;
+    PyObject *old = values[index];
+    values[index] = value;  /* store directly into split-dict values */
+    Py_XDECREF(old);
+    Py_DECREF(owner);
+}
+```
+
+For split-dict instances (all instances of the same class share a key table), `self.x = v` stores `v` at a known index in the per-instance values array. The key version check ensures the dict layout hasn't changed (e.g., due to `del self.x`).
+
+### `STORE_ATTR_WITH_HINT`
+
+```c
+// CPython: Python/ceval.c:5600 STORE_ATTR_WITH_HINT
+inst(STORE_ATTR_WITH_HINT, (unused/2, owner, value --)) {
+    /* Use a hint to find the key in the dict faster than full hash lookup */
+    PyDictObject *dict = ...;
+    Py_ssize_t hint = cache->index;
+    PyObject *res = NULL;
+    if (_PyDict_SetItem_KnownHash_LockHeld(dict, name, value, hash) < 0) {
+        ...
+    }
+}
+```
+
+The hint is a cached index that avoids a full hash table probe when the key has been seen before. If the hint is stale, it falls back to a full lookup and updates the hint.
+
+### Cache invalidation
+
+```c
+// CPython: Python/ceval.c:5660 DEOPT_IF logic
+/* DEOPT_IF(cond, opname) checks a condition and if true:
+   1. Resets the opcode to the generic form (e.g., STORE_ATTR)
+   2. Jumps to the specialization entry to re-specialize
+   
+   Type version in the cache: incremented whenever the type is modified
+   (attribute added/deleted, method replaced). A mismatch means
+   specialization is stale and must be discarded. */
+```
+
+The inline cache stores the `tp_version_tag` of the type at specialization time. On every `STORE_ATTR_SLOT` execution, the type version is checked. If it changed (e.g., `Foo.x = property(...)` was called), the cache is stale and `DEOPT_IF` falls back to the generic `STORE_ATTR`.
+
+## gopy notes
+
+`STORE_ATTR_SLOT` is in `vm/eval_simple.go`; it writes to `objects.Instance.Slots[index]`. `STORE_ATTR_INSTANCE_VALUE` writes to `objects.Instance.DictValues[index]`. Cache invalidation uses `objects.Type.Version` which is incremented on every `type.__setattr__` call.

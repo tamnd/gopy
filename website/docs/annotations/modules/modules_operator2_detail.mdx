@@ -1,0 +1,109 @@
+---
+title: Modules/_operator.c (part 2)
+description: "_operator.c part 2: operator.attrgetter, operator.itemgetter, operator.methodcaller."
+cpython_path: Modules/_operator.c
+cpython_version: "3.14"
+lines: 400
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/_operator.c" />
+
+This annotation covers the higher-order operator functions. See `modules_operator_detail` (part 1) for the arithmetic, comparison, and bitwise operators.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `operator.attrgetter` | Callable that retrieves attributes |
+| 81-180 | `operator.itemgetter` | Callable that retrieves items |
+| 181-280 | `operator.methodcaller` | Callable that calls a named method |
+| 281-400 | Performance comparison | Why these beat `lambda` in sort keys |
+
+## Reading
+
+### `operator.attrgetter`
+
+```c
+// CPython: Modules/_operator.c:480 attrgetter_call
+static PyObject *
+attrgetter_call(attrgetterobject *self, PyObject *args, PyObject *kw)
+{
+    PyObject *obj;
+    PyArg_UnpackTuple(args, "attrgetter", 1, 1, &obj);
+    if (self->nattrs == 1) {
+        /* Single attribute */
+        return PyObject_GetAttr(obj, self->attr);
+    }
+    /* Multiple attributes: return a tuple */
+    PyObject *result = PyTuple_New(self->nattrs);
+    for (Py_ssize_t i = 0; i < self->nattrs; i++) {
+        PyObject *attr = PyObject_GetAttr(obj, self->attrs[i]);
+        PyTuple_SET_ITEM(result, i, attr);
+    }
+    return result;
+}
+```
+
+`attrgetter('x.y.z')(obj)` handles dotted names: it splits on `.` and chains `getattr` calls. `attrgetter('a', 'b')(obj)` returns `(obj.a, obj.b)`. The C implementation is faster than `lambda obj: obj.attr` because it avoids function call overhead.
+
+### `operator.itemgetter`
+
+```c
+// CPython: Modules/_operator.c:560 itemgetter_call
+static PyObject *
+itemgetter_call(itemgetterobject *self, PyObject *args, PyObject *kw)
+{
+    PyObject *obj;
+    PyArg_UnpackTuple(args, "itemgetter", 1, 1, &obj);
+    if (self->nitems == 1) {
+        return PyObject_GetItem(obj, self->item);
+    }
+    PyObject *result = PyTuple_New(self->nitems);
+    for (Py_ssize_t i = 0; i < self->nitems; i++) {
+        PyTuple_SET_ITEM(result, i, PyObject_GetItem(obj, self->items[i]));
+    }
+    return result;
+}
+```
+
+`itemgetter(1)(seq)` returns `seq[1]`. `itemgetter(0, 2)(seq)` returns `(seq[0], seq[2])`. Used as sort keys: `sorted(data, key=itemgetter('name'))`.
+
+### `operator.methodcaller`
+
+```c
+// CPython: Modules/_operator.c:640 methodcaller_call
+static PyObject *
+methodcaller_call(methodcallerobject *self, PyObject *args, PyObject *kw)
+{
+    PyObject *obj;
+    PyArg_UnpackTuple(args, "methodcaller", 1, 1, &obj);
+    PyObject *method = PyObject_GetAttr(obj, self->name);
+    if (method == NULL) return NULL;
+    PyObject *result = PyObject_Call(method, self->args, self->kw);
+    Py_DECREF(method);
+    return result;
+}
+```
+
+`methodcaller('lower')(s)` calls `s.lower()`. `methodcaller('replace', 'a', 'b')` calls `s.replace('a', 'b')`. The method name and arguments are stored at construction time. Useful as a key function: `sorted(words, key=methodcaller('lower'))`.
+
+### Performance vs lambda
+
+```python
+# attrgetter('x') vs lambda obj: obj.x
+# itemgetter(0) vs lambda seq: seq[0]
+# methodcaller('lower') vs lambda s: s.lower()
+#
+# The operator versions are faster because:
+# 1. No MAKE_FUNCTION overhead (pre-compiled)
+# 2. No CALL overhead (C function, METH_O path)
+# 3. No name lookup for 'obj', 'seq', 's' (LOAD_DEREF/FAST)
+# Typical speedup: 10-40% on sort-key-heavy workloads
+```
+
+## gopy notes
+
+`attrgetter` is `module/operator.AttrGetter` in `module/operator/module.go`. `itemgetter` is `module/operator.ItemGetter`. `methodcaller` is `module/operator.MethodCaller`. All use `objects.GetAttr`/`objects.GetItem`/`objects.CallMethod` internally.

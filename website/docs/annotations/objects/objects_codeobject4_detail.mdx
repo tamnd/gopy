@@ -1,0 +1,85 @@
+---
+title: Objects/codeobject.c (part 4)
+description: "Objects/codeobject.c part 4: PyCode_NewWithPosOnlyArgs, localspluskinds, co_positions, co_qualname."
+cpython_path: Objects/codeobject.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Objects/codeobject.c" />
+
+This annotation covers code object construction. See `objects_codeobject3_detail` for `PyCodeObject` field layout, `co_code`, `co_consts`, and `co_linetable`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `localspluskinds` | Classify locals: fast, cell, free, hidden |
+| 81-180 | `co_positions` | Per-instruction (line, col, end_line, end_col) |
+| 181-280 | `co_qualname` | Qualified name for nested functions/classes |
+| 281-380 | `PyCode_NewWithPosOnlyArgs` | Constructor with positional-only argument count |
+| 381-500 | `code.replace` | Create a modified copy of a code object |
+
+## Reading
+
+### `localspluskinds`
+
+```c
+// CPython: Objects/codeobject.c:180 localspluskinds encoding
+/* co_localspluskinds: bytes, one per localsplusname entry.
+   Each byte is a bitfield:
+   CO_FAST_LOCAL    = 0x20: regular local variable
+   CO_FAST_CELL     = 0x40: cell variable (referenced by inner function)
+   CO_FAST_FREE     = 0x80: free variable (from enclosing function)
+   CO_FAST_HIDDEN   = 0x10: hidden local (implicit, e.g. .type_params) */
+```
+
+`localspluskinds` replaces the separate `co_varnames`/`co_cellvars`/`co_freevars` tuples from Python 3.10. A single array with kind bits allows the eval loop to handle all variable types with one slot lookup.
+
+### `co_positions`
+
+```c
+// CPython: Objects/codeobject.c:380 _PyCode_InitAddressRange
+/* co_positions() returns an iterator of (line, end_line, col, end_col) tuples,
+   one per instruction. Used by tracebacks and coverage tools.
+   Encoded as a delta-compressed byte stream in co_exceptiontable (shared). */
+```
+
+`co.co_positions()` returns fine-grained source location for each instruction. This enables precise error highlighting: the `^` in `SyntaxError` points to the exact expression, not just the line. The encoding is space-efficient using varint deltas.
+
+### `co_qualname`
+
+```c
+// CPython: Objects/codeobject.c:240 qualname
+/* co_qualname: the dotted name including enclosing class/function names.
+   'Foo.bar' for a method, 'Foo.<locals>.inner' for a nested function.
+   co_name: just the simple name ('bar', 'inner').
+   Used by repr(), __qualname__ attribute on functions/classes. */
+```
+
+`co_qualname` was added in Python 3.3. A lambda inside a function has `co_qualname` like `f.<locals>.<lambda>`. This allows `repr(f)` to show `<function Foo.method at 0x...>` instead of just `<function method at 0x...>`.
+
+### `code.replace`
+
+```c
+// CPython: Objects/codeobject.c:680 code_replace_impl
+static PyObject *
+code_replace_impl(PyCodeObject *self, ...)
+{
+    /* Return a copy of the code object with specified fields replaced.
+       Used by functools.wraps, dataclasses, and testing. */
+    return PyCode_NewWithPosOnlyArgs(
+        co_argcount, co_posonlyargcount, co_kwonlyargcount,
+        co_nlocals, co_stacksize, co_flags,
+        co_code, co_consts, co_names, ...);
+}
+```
+
+`code.replace(co_name='new_name')` creates a new code object with all fields copied except those specified. Used by `functools.wraps` to fix `__wrapped__.__code__.co_name` and by testing frameworks to inject instrumentation.
+
+## gopy notes
+
+`localspluskinds` is `objects.Code.LocalsplusKinds` (a `[]byte`) in `objects/function.go`. `co_positions` is encoded in `objects.Code.Positions`. `co_qualname` is `objects.Code.QualName`. `code.replace` is `objects.CodeReplace` which returns a new `*objects.Code` with fields overridden.

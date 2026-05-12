@@ -1,0 +1,93 @@
+---
+title: Python/symtable.c (part 7)
+description: "Python/symtable.c part 7: class body scoping, __class__ cell, super() zero-arg magic."
+cpython_path: Python/symtable.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Python/symtable.c" />
+
+This annotation covers class scoping and the implicit `__class__` cell. See `python_symtable6_detail` for comprehension scoping, walrus operator, and type parameters.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | Class scope rules | Why methods can't see class variables |
+| 81-180 | `__class__` cell | Implicit cell for zero-arg `super()` |
+| 181-280 | `__classdict__` | Class `__dict__` access inside methods |
+| 281-380 | Nested class scoping | Class inside function, function inside class |
+| 381-500 | `__cell_contents__` | Reading the `__class__` cell directly |
+
+## Reading
+
+### Class scope rules
+
+```c
+// CPython: Python/symtable.c:1480 symtable_visit_class
+static int
+symtable_visit_class(struct symtable *st, stmt_ty s)
+{
+    /* Class bodies do NOT inherit the enclosing scope.
+       class Foo:
+           x = 1
+           def method(self):
+               print(x)  # NameError: 'x' is not defined
+       'x' in the method refers to the global scope, not the class body. */
+    _Py_BLOCK_BEGIN(st, s, ClassBlock, ...);
+    ...
+    _Py_BLOCK_END(st);
+}
+```
+
+Class bodies have their own scope, but methods defined inside a class do NOT inherit names from the class body. Only the global scope and the local (method) scope are visible. This is a well-known Python gotcha: `x` inside a method refers to global `x`, not the class-level `x = 1`.
+
+### `__class__` cell
+
+```c
+// CPython: Python/symtable.c:1560 implicitly_defined_names_in_class
+/* When a method uses 'super()' (zero-arg) or '__class__',
+   an implicit cell '__class__' is added to the class body.
+   This cell holds the class being defined, allowing:
+       def method(self):
+           return super().__init__()  # No args needed
+   The cell is created by __build_class__ after the class is created. */
+static int
+check_for_implicit_class_ref(struct symtable *st, PySTEntryObject *ste)
+{
+    /* If any method in the class uses __class__ or super(),
+       add __class__ as a free variable of the class scope */
+    ...
+}
+```
+
+Zero-arg `super()` is magic: the compiler detects its use and creates an implicit `__class__` cell variable. `__build_class__` fills this cell after the class is created. Inside the method, `__class__` refers to the class being defined, not to `type`.
+
+### Nested class scoping
+
+```c
+// CPython: Python/symtable.c:1620 nested_class_free_vars
+/* class Outer:
+       x = 1
+       class Inner:
+           def method(self):
+               return Outer.x  # must use 'Outer', not 'x'
+   
+   But:
+   def f():
+       x = 1
+       class Foo:
+           def method(self):
+               return x  # OK: x is free var from f(), not from Foo
+*/
+```
+
+A method can see variables from enclosing FUNCTION scopes (free variables), but not from enclosing CLASS scopes. The symtable handles this by stopping the free-variable propagation at class boundaries.
+
+## gopy notes
+
+Class scope is a separate `ClassBlock` in `compile/compiler.go`. The `__class__` cell is created in `compile/codegen_stmt_funclike.go` via `implicitClassCell`. `__build_class__` fills the cell via `objects.CellSet` after `type.__new__` returns. Zero-arg `super()` is detected in `compile/codegen_expr_name.go`.

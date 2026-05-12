@@ -1,0 +1,97 @@
+---
+title: Lib/dis.py (part 2)
+description: "dis.py part 2: dis.dis, dis.Bytecode, dis.get_instructions, opcode metadata."
+cpython_path: Lib/dis.py
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/dis.py" />
+
+This annotation covers the disassembler. See `lib_dis_detail` (part 1) for opcode tables, `dis.findlinestarts`, and the bytecode format.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `dis.dis` | Disassemble a function, method, or code object |
+| 81-160 | `dis.Bytecode` | Iterator of `Instruction` namedtuples |
+| 161-260 | `dis.get_instructions` | Low-level instruction iterator |
+| 261-360 | `Instruction` | Namedtuple with opname, opcode, arg, argval |
+| 361-500 | Inline cache entries | Skip cache words in the instruction stream |
+
+## Reading
+
+### `dis.dis`
+
+```python
+# CPython: Lib/dis.py:120 dis
+def dis(x=None, *, file=None, depth=None, show_caches=False, adaptive=False):
+    """Disassemble classes, methods, functions, or code."""
+    if x is None:
+        import sys
+        frame = sys._getframe(1)
+        x = frame.f_code
+    if hasattr(x, '__func__'):
+        x = x.__func__
+    if hasattr(x, '__code__'):
+        x = x.__code__
+    if isinstance(x, type):
+        for name in sorted(x.__dict__):
+            val = x.__dict__[name]
+            if hasattr(val, '__code__'):
+                print(f"Disassembly of {name}:", file=file)
+                _disassemble_recursive(val.__code__, file=file, depth=depth)
+        return
+    _disassemble_recursive(x, file=file, depth=depth, show_caches=show_caches)
+```
+
+`dis.dis(f)` accepts many types: functions (reads `__code__`), bound methods (reads `__func__.__code__`), classes (disassembles all methods), strings (compiles first). With no argument, it disassembles the caller's frame.
+
+### `dis.Bytecode`
+
+```python
+# CPython: Lib/dis.py:340 Bytecode
+class Bytecode:
+    """The bytecode operations of a piece of code."""
+    def __init__(self, x, *, first_line=None, show_caches=False, adaptive=False):
+        self.codeobj = co = _get_code_object(x)
+        self.first_line = first_line or co.co_firstlineno
+        self._line_offset = self.first_line - co.co_firstlineno
+        self.exception_entries = _parse_exception_table(co)
+        self.show_caches = show_caches
+        self.adaptive = adaptive
+
+    def __iter__(self):
+        co = self.codeobj
+        return _get_instructions_bytes(co.co_code, ..., show_caches=self.show_caches)
+```
+
+`dis.Bytecode(f)` is iterable: `for instr in dis.Bytecode(f): print(instr.opname)`. It parses the exception table on construction for annotating each instruction with its exception handling context.
+
+### Inline cache entries
+
+```python
+# CPython: Lib/dis.py:480 _get_instructions_bytes
+def _get_instructions_bytes(code, varnames, names, constants, ...):
+    labels = set(findlabels(code))
+    starts_line = False
+    for offset, op, arg in _unpack_opargs(code):
+        if op == CACHE:
+            if show_caches:
+                yield Instruction('CACHE', CACHE, 0, 0, '', offset, ...)
+            continue  # skip cache entries by default
+        ...
+        n = _inline_cache_entries.get(op, 0)
+        for _ in range(n):
+            next(it)  # consume cache words
+```
+
+Python 3.11+ embeds inline cache words after specializable instructions. By default `dis` hides them; `show_caches=True` shows `CACHE` pseudo-instructions. `LOAD_ATTR` has 4 cache words; `CALL` has 3.
+
+## gopy notes
+
+`dis.dis` is pure Python via `stdlib/dis.py`. `dis.Bytecode` iterates the `co_code` bytes directly. In gopy, `co_code` is the serialized instruction stream in `objects.Code.Code`. `_inline_cache_entries` maps opcode to cache word count, defined in `Lib/opcode.py`.

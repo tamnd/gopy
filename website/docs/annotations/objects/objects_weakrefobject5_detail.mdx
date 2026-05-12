@@ -1,0 +1,104 @@
+---
+title: Objects/weakrefobject.c (part 5)
+description: "Objects/weakrefobject.c part 5: WeakSet, WeakValueDictionary, weak proxy, callback."
+cpython_path: Objects/weakrefobject.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Objects/weakrefobject.c" />
+
+This annotation covers the weakref high-level API. See `objects_weakrefobject4_detail` for `weakref.ref`, `tp_weaklistoffset`, and the `wr_object` / `wr_callback` layout.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `weakref.proxy` | Transparent proxy that forwards attribute access |
+| 81-180 | Callback mechanics | When and how callbacks are called |
+| 181-280 | `WeakSet` | Set that does not prevent GC |
+| 281-380 | `WeakValueDictionary` | Dict whose values are weakly referenced |
+| 381-500 | `WeakKeyDictionary` | Dict whose keys are weakly referenced |
+
+## Reading
+
+### `weakref.proxy`
+
+```c
+// CPython: Objects/weakrefobject.c:580 proxy_getattr
+static PyObject *
+proxy_getattr(PyWeakReference *proxy, PyObject *name)
+{
+    PyObject *ref = PyWeakref_GET_OBJECT(proxy);
+    if (ref == Py_None) {
+        PyErr_SetString(PyExc_ReferenceError,
+                        "weakly-referenced object no longer exists");
+        return NULL;
+    }
+    return PyObject_GetAttr(ref, name);
+}
+```
+
+`weakref.proxy(obj)` creates an object that forwards all attribute access, arithmetic, and comparisons to `obj`. If `obj` is collected, any access raises `ReferenceError`. Proxies are transparent: `isinstance(proxy(x), type(x))` is `True`. Proxies cannot be used as dict keys.
+
+### Callback mechanics
+
+```c
+// CPython: Objects/weakrefobject.c:280 handle_callback
+static void
+handle_callback(PyWeakReference *ref, PyObject *callback)
+{
+    /* Called when the referent is about to be deallocated */
+    PyObject *cbresult = PyObject_CallOneArg(callback, (PyObject *)ref);
+    if (cbresult == NULL)
+        PyErr_WriteUnraisable(callback);
+    Py_XDECREF(cbresult);
+}
+```
+
+Callbacks are called with the `weakref.ref` object (not the dead referent) as the argument. At callback time, `ref()` returns `None`. Callbacks from multiple weakrefs to the same object are called in reverse creation order.
+
+### `WeakValueDictionary`
+
+```python
+# CPython: Lib/weakref.py:180 WeakValueDictionary
+class WeakValueDictionary(MutableMapping):
+    def __getitem__(self, key):
+        o = self.data[key]()
+        if o is None:
+            raise KeyError(key)
+        return o
+
+    def __setitem__(self, key, value):
+        def remove(wr, selfref=ref(self)):
+            self = selfref()
+            if self is not None:
+                try:
+                    del self.data[key]
+                except KeyError:
+                    pass
+        self.data[key] = KeyedRef(value, self._pending_removals, key)
+```
+
+`WeakValueDictionary` stores `weakref.ref(value)` objects. On access, the ref is dereferenced; if the value was collected, `KeyError` is raised. The callback `remove` cleans up the stale entry when the value is collected.
+
+### `WeakKeyDictionary`
+
+```python
+# CPython: Lib/weakref.py:380 WeakKeyDictionary
+class WeakKeyDictionary(MutableMapping):
+    def __setitem__(self, key, value):
+        self.data[ref(key, self._remove)] = value
+
+    def __getitem__(self, key):
+        return self.data[ref(key)]
+```
+
+`WeakKeyDictionary` uses `weakref.ref(key)` as the dict key. The dict's own `__hash__` and `__eq__` delegate to the referent. When the key object is collected, its callback removes the entry. Used for per-object memoization without preventing GC.
+
+## gopy notes
+
+`weakref.proxy` is `objects.WeakProxy` in `objects/object.go`. Attribute forwarding uses `objects.GetAttr` on the dereferenced target. `WeakValueDictionary` and `WeakKeyDictionary` are in `module/weakref/module.go`. The Go `runtime.SetFinalizer` mechanism provides the callback trigger.

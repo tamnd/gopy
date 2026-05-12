@@ -1,0 +1,84 @@
+---
+title: Modules/_io/_iomodule.c (part 5)
+description: "_io part 5: open() dispatch, FileIO C implementation, BytesIO C implementation."
+cpython_path: Modules/_io/_iomodule.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/_io/_iomodule.c" />
+
+This annotation covers the C acceleration layer. See `lib_io4_detail` for the Python `_pyio.py` implementations of `FileIO`, `BufferedWriter`, and `TextIOWrapper`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `io.open` | Top-level dispatcher |
+| 81-180 | `FileIO` C implementation | Thin wrapper over POSIX `read`/`write`/`lseek` |
+| 181-280 | `BytesIO` C implementation | In-memory byte buffer |
+| 281-380 | `BufferedReader` C implementation | Read buffer with lookahead |
+| 381-500 | `TextIOWrapper` C implementation | Encoding/decoding layer |
+
+## Reading
+
+### `io.open`
+
+```c
+// CPython: Modules/_io/_iomodule.c:280 _io_open_impl
+static PyObject *
+_io_open_impl(PyObject *module, PyObject *file, const char *mode,
+              int buffering, const char *encoding, ...)
+{
+    /* Dispatch based on mode string */
+    int creating = 0, reading = 0, writing = 0, appending = 0, binary = 0;
+    /* Parse mode string */
+    for (const char *s = mode; *s; s++) {
+        switch (*s) {
+            case 'r': reading = 1; break;
+            case 'w': writing = 1; break;
+            ...
+            case 'b': binary = 1; break;
+        }
+    }
+    PyObject *raw = PyObject_CallFunctionObjArgs(FileIO_class, file, mode_obj, NULL);
+    if (buffering < 0) buffering = DEFAULT_BUFFER_SIZE;
+    if (binary) {
+        if (writing) return PyObject_CallFunctionObjArgs(BufferedWriter_class, raw, ...);
+        return PyObject_CallFunctionObjArgs(BufferedReader_class, raw, ...);
+    }
+    PyObject *buf = PyObject_CallFunctionObjArgs(BufferedReader_class, raw, ...);
+    return PyObject_CallFunctionObjArgs(TextIOWrapper_class, buf, encoding_obj, ...);
+}
+```
+
+`open(f, 'r')` creates a `FileIO(f, 'rb')` wrapped in `BufferedReader` wrapped in `TextIOWrapper`. `open(f, 'rb')` creates `FileIO(f, 'rb')` wrapped in `BufferedReader`. `open(f, 'w')` uses `BufferedWriter`.
+
+### `BytesIO` C implementation
+
+```c
+// CPython: Modules/_io/bytesio.c:380 bytesio_read
+static PyObject *
+bytesio_read(bytesio *self, PyObject *args)
+{
+    Py_ssize_t size = -1;
+    PyArg_ParseTuple(args, "|n:read", &size);
+    if (self->pos >= self->string_size)
+        return PyBytes_FromStringAndSize(NULL, 0);  /* EOF */
+    Py_ssize_t n = self->string_size - self->pos;
+    if (size >= 0 && size < n) n = size;
+    PyObject *output = PyBytes_FromStringAndSize(
+        PyBytes_AS_STRING(self->exports) + self->pos, n);
+    self->pos += n;
+    return output;
+}
+```
+
+`BytesIO` stores data in a `PyBytesObject`. Reading advances `self->pos`. `write` may need to extend the buffer; if `getbuffer` was called on the BytesIO (making it exportable), writes are blocked.
+
+## gopy notes
+
+`io.open` is `module/io.Open` in `module/io/module.go`. It creates the appropriate wrapper chain. `FileIO` wraps `os.File`. `BytesIO` uses `bytes.Buffer`. `BufferedReader` wraps an `io.Reader` with a Go `bufio.Reader`. `TextIOWrapper` uses `transform.Reader` from `golang.org/x/text`.
