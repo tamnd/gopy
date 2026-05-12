@@ -284,12 +284,16 @@ func objectStrDescr(args []Object, _ map[string]Object) (Object, error) {
 	return NewStr(s), nil
 }
 
-// objectHashDescr is the slot wrapper for tp_hash.
+// objectHashDescr is the slot wrapper for tp_hash. Goes straight to
+// the identity hash so the descriptor cannot loop back through Hash()
+// when it is installed as the inherited __hash__ on a user metaclass.
+//
+// CPython: Objects/typeobject.c:6986 object___hash__
 func objectHashDescr(args []Object, _ map[string]Object) (Object, error) {
 	if len(args) != 1 {
 		return nil, fmt.Errorf("TypeError: expected 1 argument, got %d", len(args))
 	}
-	h, err := Hash(args[0])
+	h, err := identityHash(args[0])
 	if err != nil {
 		return nil, err
 	}

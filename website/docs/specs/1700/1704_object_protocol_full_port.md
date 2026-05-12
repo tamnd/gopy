@@ -456,14 +456,27 @@ and asserting on stdout).
 
 ## Final gate
 
-| # | Command | Expected |
-|---|---------|----------|
-| F.1 | `gopy -c 'import enum; print(enum.FlagBoundary.STRICT)'` | `FlagBoundary.STRICT` |
-| F.2 | `gopy -c 'import enum; print(list(enum.FlagBoundary))'` | `[STRICT, CONFORM, EJECT, KEEP]` (or members in spec order) |
-| F.3 | `gopy -c 'import re; print(re.match(r"(\d+)-(\d+)", "12-34").groups())'` | `('12', '34')` |
-| F.4 | `gopy -c 'import fnmatch; print(fnmatch.fnmatch("foo.py", "*.py"))'` | `True` |
-| F.5 | spec 1703 phase 7 row | flips to `done` |
-| F.6 | spec 1702 `enum` row | flips to `done` |
+| # | Command | Expected | Status |
+|---|---------|----------|--------|
+| F.0a | `hash(C)` where `C` has a user metaclass terminates | runs, returns int | done (pinned: `stdlibinit/slot_method_lookup_test.go`) |
+| F.0b | `hash(C)` is stable across calls | `True` | done (pinned: `stdlibinit/slot_method_lookup_test.go`) |
+| F.1 | `gopy -c 'import enum; print(enum.FlagBoundary.STRICT)'` | `FlagBoundary.STRICT` | pending |
+| F.2 | `gopy -c 'import enum; print(list(enum.FlagBoundary))'` | `[STRICT, CONFORM, EJECT, KEEP]` (or members in spec order) | pending |
+| F.3 | `gopy -c 'import re; print(re.match(r"(\d+)-(\d+)", "12-34").groups())'` | `('12', '34')` | pending |
+| F.4 | `gopy -c 'import fnmatch; print(fnmatch.fnmatch("foo.py", "*.py"))'` | `True` | pending |
+| F.5 | spec 1703 phase 7 row | flips to `done` | pending |
+| F.6 | spec 1702 `enum` row | flips to `done` | pending |
+
+### Side fixes shipped while debugging enum import
+
+These were uncovered while bisecting `import enum`. They are slot
+mechanics, not enum specifics, so they live alongside the slot
+dispatcher block in `objects/usertype.go`.
+
+| Hunk | What | Why it broke enum |
+|------|------|-------------------|
+| `objects/usertype.go` slot dispatchers | route every `__dunder__` lookup through `lookupMethodOnSelf` instead of `GetAttr` | `GetAttr(cls, name)` returns the descriptor unbound when the receiver is a class, so `hash(C)` for a class with a user metaclass tried to call `object.__hash__()` with no arguments |
+| `objects/object.go` `objectHashDescr` | computes identity hash directly, no longer routes through `Hash()` | the inherited `object.__hash__` is the same descriptor reached by `slotTpHash`; the old wrapper recursed back through `Hash` and exploded the stack |
 
 ## Out of scope
 

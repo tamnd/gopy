@@ -503,12 +503,33 @@ func lookupDunderCallable(t *Type, name string) bool {
 	return true
 }
 
+// lookupMethodOnSelf finds name on type(o)'s MRO and applies descr_get
+// with o as the bound instance. Mirrors CPython's lookup_maybe_method:
+// slot dispatchers must look up via the *type* of self (not via self's
+// own attribute path) so that, for example, hash(C) on a class C finds
+// the metaclass's __hash__ entry rather than treating C as if it were
+// an instance of itself. GetAttr returns the descriptor unbound when
+// the receiver is a class, which breaks the no-arg call shape every
+// slot dispatcher relies on.
+//
+// CPython: Objects/typeobject.c:2255 lookup_maybe_method
+func lookupMethodOnSelf(o Object, name string) (Object, error) {
+	descr, _ := LookupDescriptor(o.Type(), name)
+	if descr == nil {
+		return nil, fmt.Errorf("AttributeError: '%s' object has no attribute '%s'", o.Type().Name, name)
+	}
+	if dg := descr.Type().DescrGet; dg != nil {
+		return dg(descr, o, o.Type())
+	}
+	return descr, nil
+}
+
 // slotTpCall is the generic tp_call dispatcher: look up __call__ via
 // the descriptor protocol (so the instance is bound) and call it.
 //
 // CPython: Objects/typeobject.c:8174 slot_tp_call
 func slotTpCall(callable Object, args []Object, kwargs map[string]Object) (Object, error) {
-	fn, err := GetAttr(callable, NewStr("__call__"))
+	fn, err := lookupMethodOnSelf(callable, "__call__")
 	if err != nil {
 		return nil, err
 	}
@@ -528,7 +549,7 @@ func slotTpCall(callable Object, args []Object, kwargs map[string]Object) (Objec
 //
 // CPython: Objects/typeobject.c:8235 slot_tp_repr
 func slotTpRepr(o Object) (string, error) {
-	fn, err := GetAttr(o, NewStr("__repr__"))
+	fn, err := lookupMethodOnSelf(o, "__repr__")
 	if err != nil {
 		return "", err
 	}
@@ -547,7 +568,7 @@ func slotTpRepr(o Object) (string, error) {
 //
 // CPython: Objects/typeobject.c:8252 slot_tp_str
 func slotTpStr(o Object) (string, error) {
-	fn, err := GetAttr(o, NewStr("__str__"))
+	fn, err := lookupMethodOnSelf(o, "__str__")
 	if err != nil {
 		return "", err
 	}
@@ -567,7 +588,7 @@ func slotTpStr(o Object) (string, error) {
 //
 // CPython: Objects/typeobject.c:8266 slot_tp_hash
 func slotTpHash(o Object) (int64, error) {
-	fn, err := GetAttr(o, NewStr("__hash__"))
+	fn, err := lookupMethodOnSelf(o, "__hash__")
 	if err != nil {
 		return 0, err
 	}
@@ -587,7 +608,7 @@ func slotTpHash(o Object) (int64, error) {
 //
 // CPython: Objects/typeobject.c:8400 slot_tp_iter
 func slotTpIter(o Object) (Object, error) {
-	fn, err := GetAttr(o, NewStr("__iter__"))
+	fn, err := lookupMethodOnSelf(o, "__iter__")
 	if err != nil {
 		return nil, err
 	}
@@ -598,7 +619,7 @@ func slotTpIter(o Object) (Object, error) {
 //
 // CPython: Objects/typeobject.c:8421 slot_tp_iternext
 func slotTpIterNext(o Object) (Object, error) {
-	fn, err := GetAttr(o, NewStr("__next__"))
+	fn, err := lookupMethodOnSelf(o, "__next__")
 	if err != nil {
 		return nil, err
 	}
@@ -612,11 +633,10 @@ func slotTpIterNext(o Object) (Object, error) {
 // CPython: Objects/typeobject.c:8347 slot_tp_richcompare
 func slotTpRichCompare(a, b Object, op CompareOp) (Object, error) {
 	name := richCompareDunderName(op)
-	d, _ := LookupDescriptor(a.Type(), name)
-	if d == nil {
+	if d, _ := LookupDescriptor(a.Type(), name); d == nil {
 		return notImplemented(), nil
 	}
-	fn, err := GetAttr(a, NewStr(name))
+	fn, err := lookupMethodOnSelf(a, name)
 	if err != nil {
 		return nil, err
 	}
@@ -646,7 +666,7 @@ func richCompareDunderName(op CompareOp) string {
 //
 // CPython: Objects/typeobject.c:7869 slot_nb_bool
 func slotNbBool(o Object) (bool, error) {
-	fn, err := GetAttr(o, NewStr("__bool__"))
+	fn, err := lookupMethodOnSelf(o, "__bool__")
 	if err != nil {
 		return false, err
 	}
@@ -678,7 +698,7 @@ func slotNbBoolFromLen(o Object) (bool, error) {
 //
 // CPython: Objects/typeobject.c:7948 slot_mp_length / slot_sq_length
 func slotMpLength(o Object) (int, error) {
-	fn, err := GetAttr(o, NewStr("__len__"))
+	fn, err := lookupMethodOnSelf(o, "__len__")
 	if err != nil {
 		return 0, err
 	}
@@ -701,7 +721,7 @@ func slotMpLength(o Object) (int, error) {
 //
 // CPython: Objects/typeobject.c:7989 slot_mp_subscript
 func slotMpSubscript(o Object, key Object) (Object, error) {
-	fn, err := GetAttr(o, NewStr("__getitem__"))
+	fn, err := lookupMethodOnSelf(o, "__getitem__")
 	if err != nil {
 		return nil, err
 	}
@@ -714,7 +734,7 @@ func slotMpSubscript(o Object, key Object) (Object, error) {
 //
 // CPython: Objects/typeobject.c:7964 slot_sq_item
 func slotSqGetItem(o Object, idx int) (Object, error) {
-	fn, err := GetAttr(o, NewStr("__getitem__"))
+	fn, err := lookupMethodOnSelf(o, "__getitem__")
 	if err != nil {
 		return nil, err
 	}
@@ -725,7 +745,7 @@ func slotSqGetItem(o Object, idx int) (Object, error) {
 //
 // CPython: Objects/typeobject.c:8004 slot_mp_ass_subscript (set branch)
 func slotMpSubscriptSet(o, key, value Object) error {
-	fn, err := GetAttr(o, NewStr("__setitem__"))
+	fn, err := lookupMethodOnSelf(o, "__setitem__")
 	if err != nil {
 		return err
 	}
@@ -737,7 +757,7 @@ func slotMpSubscriptSet(o, key, value Object) error {
 //
 // CPython: Objects/typeobject.c:8004 slot_mp_ass_subscript (del branch)
 func slotMpSubscriptDel(o, key Object) error {
-	fn, err := GetAttr(o, NewStr("__delitem__"))
+	fn, err := lookupMethodOnSelf(o, "__delitem__")
 	if err != nil {
 		return err
 	}
@@ -762,7 +782,7 @@ func slotSqSetItem(o Object, idx int, value Object) error {
 //
 // CPython: Objects/typeobject.c:8444 slot_tp_descr_get
 func slotTpDescrGet(descr Object, obj Object, tp *Type) (Object, error) {
-	fn, err := GetAttr(descr, NewStr("__get__"))
+	fn, err := lookupMethodOnSelf(descr, "__get__")
 	if err != nil {
 		return nil, err
 	}
@@ -790,13 +810,13 @@ func slotTpDescrSet(descr Object, obj Object, value Object) error {
 	var args []Object
 	var err error
 	if value == nil {
-		fn, err = GetAttr(descr, NewStr("__delete__"))
+		fn, err = lookupMethodOnSelf(descr, "__delete__")
 		if err != nil {
 			return err
 		}
 		args = []Object{obj}
 	} else {
-		fn, err = GetAttr(descr, NewStr("__set__"))
+		fn, err = lookupMethodOnSelf(descr, "__set__")
 		if err != nil {
 			return err
 		}
@@ -810,7 +830,7 @@ func slotTpDescrSet(descr Object, obj Object, value Object) error {
 //
 // CPython: Objects/typeobject.c:8064 slot_sq_contains
 func slotSqContains(o Object, key Object) (bool, error) {
-	fn, err := GetAttr(o, NewStr("__contains__"))
+	fn, err := lookupMethodOnSelf(o, "__contains__")
 	if err != nil {
 		return false, err
 	}
