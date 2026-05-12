@@ -1,0 +1,114 @@
+---
+title: Python/ceval.c (part 95)
+description: "Python/ceval.c part 95: LOAD_SUPER_ATTR, LOAD_ATTR specialization, STORE_ATTR fast path."
+cpython_path: Python/ceval.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Python/ceval.c" />
+
+This annotation covers attribute access specializations. See `python_ceval94_detail` for `BEFORE_WITH`, `WITH_EXCEPT_START`, and `CLEANUP_THROW`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `LOAD_SUPER_ATTR` | `super().method` fast path |
+| 81-200 | `LOAD_ATTR` | Generic attribute load + inline cache |
+| 201-320 | `LOAD_ATTR_MODULE` | Specialization for module attributes |
+| 321-420 | `STORE_ATTR` | Generic attribute store |
+| 421-500 | `STORE_ATTR_SLOT` | Specialization for fixed-offset slots |
+
+## Reading
+
+### `LOAD_SUPER_ATTR`
+
+```c
+// CPython: Python/ceval.c:3820 LOAD_SUPER_ATTR
+inst(LOAD_SUPER_ATTR, (global_super, class, self -- attr)) {
+    /* super().method — oparg & 1 means load method */
+    if (global_super == (PyObject *)&PySuper_Type) {
+        /* Fast path: bypass super.__new__ */
+        PyObject *mro = ((PyTypeObject *)class)->tp_mro;
+        Py_ssize_t i;
+        for (i = 0; i < PyTuple_GET_SIZE(mro); i++) {
+            if (PyTuple_GET_ITEM(mro, i) == class) break;
+        }
+        /* Search MRO starting after class */
+        attr = _PyType_Lookup_MRO(mro, i + 1, name);
+    } else {
+        /* Slow path: call super() normally */
+        PyObject *super = PyObject_CallFunctionObjArgs(global_super, class, self, NULL);
+        attr = PyObject_GetAttr(super, name);
+    }
+}
+```
+
+`super().method` avoids constructing a full `super` proxy object in the common case where `super` has not been overridden. The MRO is searched starting from the position after the current class. `oparg & 1` selects `LOAD_METHOD`-style loading (no extra self push).
+
+### `LOAD_ATTR` inline cache
+
+```c
+// CPython: Python/ceval.c:3900 LOAD_ATTR
+inst(LOAD_ATTR, (owner -- attr)) {
+    _PyAttrCache *cache = (_PyAttrCache *)next_instr;
+    if (ADAPTIVE_COUNTER_TRIGGERS(cache->counter)) {
+        _Py_Specialize_LoadAttr(owner, next_instr, name);
+        DISPATCH_SAME_OPARG();
+    }
+    /* Generic: PyObject_GetAttr */
+    attr = PyObject_GetAttr(owner, name);
+    ERROR_IF(attr == NULL, error);
+    Py_DECREF(owner);
+}
+```
+
+`LOAD_ATTR` carries a two-entry inline cache (`_PyAttrCache`). After a warmup period, `_Py_Specialize_LoadAttr` rewrites the instruction to a specialized variant (`LOAD_ATTR_SLOT`, `LOAD_ATTR_MODULE`, etc.). The counter is decremented each execution; when it triggers, specialization is attempted.
+
+### `LOAD_ATTR_MODULE`
+
+```c
+// CPython: Python/ceval.c:3960 LOAD_ATTR_MODULE
+inst(LOAD_ATTR_MODULE, (owner -- attr)) {
+    _PyAttrCache *cache = (_PyAttrCache *)next_instr;
+    PyDictObject *dict = (PyDictObject *)((PyModuleObject *)owner)->md_dict;
+    /* Validate: dict version must match cached version */
+    if (dict->ma_version_tag != cache->version) {
+        DEOPT_IF(true, LOAD_ATTR);
+    }
+    PyObject *res = dict->ma_values->values[cache->index];
+    Py_INCREF(res);
+    Py_DECREF(owner);
+    attr = res;
+}
+```
+
+Module attribute lookup is the most common `LOAD_ATTR` target. The inline cache stores the `dict->ma_version_tag` and the index into `ma_values`. If the version tag matches, the attribute is fetched in O(1) with no hashing. Any dict mutation increments `ma_version_tag` and causes a deopt.
+
+### `STORE_ATTR_SLOT`
+
+```c
+// CPython: Python/ceval.c:4080 STORE_ATTR_SLOT
+inst(STORE_ATTR_SLOT, (v, owner --)) {
+    _PyAttrCache *cache = (_PyAttrCache *)next_instr;
+    if (Py_TYPE(owner)->tp_version_tag != cache->version) {
+        DEOPT_IF(true, STORE_ATTR);
+    }
+    /* Write directly to the slot at offset */
+    PyObject **addr = (PyObject **)((char *)owner + cache->index);
+    PyObject *old = *addr;
+    *addr = v;
+    Py_XDECREF(old);
+    Py_DECREF(owner);
+}
+```
+
+`STORE_ATTR_SLOT` writes to a `__slots__` attribute at a fixed byte offset from the object pointer. The type version tag guards against class modification. No dict lookup — the write is a single pointer store.
+
+## gopy notes
+
+`LOAD_SUPER_ATTR` is in `vm/eval_simple.go`; the fast path calls `objects.TypeLookupMRO` starting after the current class. `LOAD_ATTR` inline caches are tracked in `vm/eval_gen.go` via `objects.AttrCache`. `LOAD_ATTR_MODULE` reads from `objects.ModuleDict` directly. `STORE_ATTR_SLOT` writes to a `objects.SlotOffset` field.

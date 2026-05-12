@@ -1,0 +1,139 @@
+---
+title: Lib/shutil.py (part 4)
+description: "Lib/shutil.py part 4: shutil.copytree, shutil.rmtree, shutil.move, shutil.disk_usage."
+cpython_path: Lib/shutil.py
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/shutil.py" />
+
+This annotation covers directory-level operations. See `lib_shutil3_detail` for `shutil.copy`, `shutil.copy2`, `copyfileobj`, and `copystat`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `copytree` | Recursively copy a directory tree |
+| 81-180 | `rmtree` | Recursively delete a directory tree |
+| 181-280 | `move` | Move/rename a file or directory |
+| 281-360 | `disk_usage` | Get disk usage statistics |
+| 361-500 | `_rmtree_safe_fd` | POSIX fd-based safe rmtree |
+
+## Reading
+
+### `copytree`
+
+```python
+# CPython: Lib/shutil.py:558 copytree
+def copytree(src, dst, symlinks=False, ignore=None, copy_function=copy2,
+             ignore_dangling_symlinks=False, dirs_exist_ok=False):
+    with os.scandir(src) as itr:
+        entries = list(itr)
+    return _copytree(entries=entries, src=src, dst=dst, symlinks=symlinks,
+                     ignore=ignore, copy_function=copy_function,
+                     ignore_dangling_symlinks=ignore_dangling_symlinks,
+                     dirs_exist_ok=dirs_exist_ok)
+
+def _copytree(entries, src, dst, symlinks, ignore, copy_function,
+              ignore_dangling_symlinks, dirs_exist_ok=False):
+    os.makedirs(dst, exist_ok=dirs_exist_ok)
+    ignored_names = ignore(os.fspath(src), [x.name for x in entries]) if ignore else set()
+    for srcentry in entries:
+        if srcentry.name in ignored_names:
+            continue
+        srcname = os.path.join(src, srcentry.name)
+        dstname = os.path.join(dst, srcentry.name)
+        if srcentry.is_symlink():
+            if symlinks:
+                os.symlink(os.readlink(srcname), dstname)
+            elif not ignore_dangling_symlinks:
+                copy_function(srcname, dstname)
+        elif srcentry.is_dir():
+            _copytree(list(os.scandir(srcname)), srcname, dstname, ...)
+        else:
+            copy_function(srcname, dstname)
+    copystat(src, dst)
+    return dst
+```
+
+`copytree` uses `os.scandir` (not `os.listdir`) to avoid a second `stat` call per entry. The `ignore` callable receives the directory path and the list of names; it returns the subset to skip. `dirs_exist_ok=True` (added in 3.8) allows copying into an existing destination directory.
+
+### `rmtree`
+
+```python
+# CPython: Lib/shutil.py:740 rmtree
+def rmtree(path, ignore_errors=False, onerror=None, *, onexc=None, dir_fd=None):
+    if ignore_errors:
+        def onexc(*args): pass
+    elif onerror is not None:
+        ...  # compatibility shim
+    if _use_fd_functions:
+        # POSIX: safe against symlink attacks
+        _rmtree_safe_fd(stackpath, path, onexc)
+    else:
+        _rmtree_unsafe(path, onexc)
+```
+
+`rmtree` has two implementations. On POSIX with `os.open`/`os.fstat` support, `_rmtree_safe_fd` traverses using file descriptors to prevent TOCTOU symlink attacks (an attacker replacing a directory with a symlink between `readdir` and `rmdir`). On Windows or unsupported platforms, `_rmtree_unsafe` uses path strings.
+
+### `_rmtree_safe_fd`
+
+```python
+# CPython: Lib/shutil.py:640 _rmtree_safe_fd
+def _rmtree_safe_fd(topfd, path, onexc):
+    with os.scandir(topfd) as scandir_it:
+        entries = list(scandir_it)
+    for entry in entries:
+        is_dir = entry.is_dir(follow_symlinks=False)
+        if is_dir:
+            try:
+                dirfd = os.open(entry.name, os.O_RDONLY, dir_fd=topfd)
+            except Exception as err:
+                onexc(os.lstat, os.path.join(path, entry.name), err)
+                continue
+            try:
+                _rmtree_safe_fd(dirfd, os.path.join(path, entry.name), onexc)
+                os.rmdir(entry.name, dir_fd=topfd)
+            finally:
+                os.close(dirfd)
+        else:
+            os.unlink(entry.name, dir_fd=topfd)
+```
+
+All file operations use `dir_fd` to operate relative to an open directory file descriptor. Even if a path component is replaced by a symlink after scanning, the fd-relative operations still address the original inode.
+
+### `move`
+
+```python
+# CPython: Lib/shutil.py:860 move
+def move(src, dst, copy_function=copy2):
+    real_dst = dst
+    if os.path.isdir(dst):
+        real_dst = os.path.join(dst, os.path.basename(src))
+    try:
+        os.rename(src, real_dst)
+    except OSError:
+        if os.path.islink(src):
+            linkto = os.readlink(src)
+            os.symlink(linkto, real_dst)
+            os.unlink(src)
+        elif os.path.isdir(src):
+            if _destinsrc(src, real_dst):
+                raise Error("Cannot move a directory into itself")
+            copytree(src, real_dst, symlinks=True)
+            rmtree(src)
+        else:
+            copy_function(src, real_dst)
+            os.unlink(src)
+    return real_dst
+```
+
+`shutil.move` first tries `os.rename` (atomic on same filesystem). If that fails (e.g., cross-device move), it falls back to copy-then-delete. For directories, `_destinsrc` checks that the destination is not inside the source to prevent infinite recursion.
+
+## gopy notes
+
+`shutil` is a pure-Python module that gopy runs directly via the stdlib. `os.scandir`, `os.rename`, `os.unlink`, and `os.makedirs` are routed through `module/os`. `copytree` recursion uses the normal Python call stack. `_rmtree_safe_fd` requires `os.open` with `dir_fd` support, which maps to `syscall.Openat` on Linux/macOS.

@@ -1,0 +1,117 @@
+---
+title: Objects/complexobject.c (part 12)
+description: "Objects/complexobject.c part 12: complex.__pow__, complex.__abs__, complex conjugate, __hash__."
+cpython_path: Objects/complexobject.c
+cpython_version: "3.14"
+lines: 400
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Objects/complexobject.c" />
+
+This annotation covers power, absolute value, and hash for complex numbers. See `objects_complexobject11_detail` for arithmetic and comparison operations.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `complex.__pow__` | Complex exponentiation |
+| 81-160 | `complex.__abs__` | Modulus (magnitude) |
+| 161-240 | `complex.conjugate` | Return the complex conjugate |
+| 241-400 | `complex.__hash__` | Hash consistent with `float.__hash__` |
+
+## Reading
+
+### `complex.__pow__`
+
+```c
+// CPython: Objects/complexobject.c:380 complex_pow
+static PyObject *
+complex_pow(PyObject *v, PyObject *w, PyObject *z)
+{
+    Py_complex a, b, p;
+    TO_COMPLEX(v, a);
+    TO_COMPLEX(w, b);
+
+    if (b.real == 0.0 && b.imag == 0.0)
+        return PyComplex_FromCComplex((Py_complex){1.0, 0.0});
+    if (a.real == 0.0 && a.imag == 0.0) {
+        if (b.real < 0.0)
+            PyErr_SetString(PyExc_ZeroDivisionError, "0.0 to a negative power");
+        return PyComplex_FromCComplex((Py_complex){0.0, 0.0});
+    }
+    /* General: a**b = exp(b * log(a)) */
+    Py_complex log_a = c_log(a);
+    Py_complex b_log_a = {b.real * log_a.real - b.imag * log_a.imag,
+                           b.real * log_a.imag + b.imag * log_a.real};
+    p = c_exp(b_log_a);
+    return PyComplex_FromCComplex(p);
+}
+```
+
+Complex power uses the identity `a**b = exp(b * log(a))`. Special cases handle `b == 0` (returns `1+0j`) and `a == 0` with negative real exponent (raises `ZeroDivisionError`). The three-argument form `pow(a, b, mod)` is not supported for complex numbers.
+
+### `complex.__abs__`
+
+```c
+// CPython: Objects/complexobject.c:440 complex_abs
+static PyObject *
+complex_abs(PyObject *v)
+{
+    double result;
+    Py_complex c;
+    TO_COMPLEX(v, c);
+    PyFPE_START_PROTECT("complex_abs", return 0);
+    result = c_abs(c);  /* hypot(real, imag) */
+    PyFPE_END_PROTECT(result);
+    return PyFloat_FromDouble(result);
+}
+```
+
+`abs(3+4j)` returns `5.0`. `c_abs` calls `hypot(real, imag)` which avoids overflow for large values. The result is always a `float`, never a `complex`.
+
+### `complex.conjugate`
+
+```c
+// CPython: Objects/complexobject.c:462 complex_conjugate
+static PyObject *
+complex_conjugate(PyObject *self, PyObject *Py_UNUSED(ignored))
+{
+    Py_complex c;
+    TO_COMPLEX(self, c);
+    c.imag = -c.imag;
+    return PyComplex_FromCComplex(c);
+}
+```
+
+`(3+4j).conjugate()` returns `(3-4j)`. The real part is unchanged; only the imaginary part is negated. Used in inner products and Fourier transforms.
+
+### `complex.__hash__`
+
+```c
+// CPython: Objects/complexobject.c:510 complex_hash
+static Py_hash_t
+complex_hash(PyObject *v)
+{
+    Py_uhash_t hashreal, hashimag, combined;
+    Py_complex c;
+    TO_COMPLEX(v, c);
+    /* Hash real part as float */
+    hashreal = (Py_uhash_t)_Py_HashDouble((PyObject *)v, c.real);
+    if (hashreal == (Py_uhash_t)-1) return -1;
+    /* Hash imaginary part; if zero, hash of 0j == hash of 0 */
+    hashimag = (Py_uhash_t)_Py_HashDouble((PyObject *)v, c.imag);
+    if (hashimag == (Py_uhash_t)-1) return -1;
+    combined = hashreal + _PyHASH_IMAG * hashimag;
+    if (combined == (Py_uhash_t)-1) combined = (Py_uhash_t)-2;
+    return (Py_hash_t)combined;
+}
+```
+
+`hash(3+0j) == hash(3) == hash(3.0)` — the numeric hash invariant requires that equal numbers have equal hashes across all numeric types. `_PyHASH_IMAG` is a fixed constant mixing the imaginary contribution. If the imaginary part is `0.0`, `hashimag` is `0` and `combined == hashreal`.
+
+## gopy notes
+
+`complex.__pow__` is `objects.ComplexPow` in `objects/complexobject.go`; uses `cmplx.Log` and `cmplx.Exp` from Go's `math/cmplx`. `complex.__abs__` calls `cmplx.Abs`. `conjugate` is `objects.ComplexConjugate`. `complex.__hash__` mirrors CPython's numeric hash invariant using `objects.HashFloat` for each component.

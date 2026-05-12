@@ -1,0 +1,170 @@
+---
+title: Modules/_csv.c (part 8)
+description: "_csv.c part 8: csv.reader field parsing, csv.writer quoting, dialect validation."
+cpython_path: Modules/_csv.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/_csv.c" />
+
+This annotation covers the core read/write state machines. See `modules_csv7_detail` for `Dialect` and `csv.register_dialect`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `Reader` state machine | Parse fields from a CSV row |
+| 81-200 | `parse_process_char` | Per-character transitions |
+| 201-300 | `Writer.writerow` | Format and write one row |
+| 301-400 | `join_append` | Append a field with quoting |
+| 401-500 | Dialect validation | Check delimiter, quotechar, lineterminator |
+
+## Reading
+
+### Reader state machine
+
+```c
+// CPython: Modules/_csv.c:480 Reader_iternext
+static PyObject *
+Reader_iternext(ReaderObj *self)
+{
+    PyObject *fields = NULL;
+    Py_UCS4 c;
+    int pos, linelen;
+    unsigned int kind;
+    const void *data;
+    PyObject *lineobj;
+
+    lineobj = PyIter_Next(self->input_iter);
+    if (lineobj == NULL) return NULL;
+
+    /* Process each character */
+    pos = 0;
+    linelen = PyUnicode_GET_LENGTH(lineobj);
+    while (pos <= linelen) {
+        if (pos < linelen)
+            c = PyUnicode_READ(kind, data, pos);
+        else
+            c = 0;  /* end-of-line sentinel */
+        if (parse_process_char(self, module_state, c) < 0) {
+            Py_DECREF(lineobj);
+            return NULL;
+        }
+        pos++;
+    }
+    fields = self->fields;
+    self->fields = NULL;
+    return fields;
+}
+```
+
+`csv.reader` wraps any line iterator. Each call to `__next__` fetches one line and processes it character by character through `parse_process_char`. The state machine handles quoted fields, escaped characters, and multi-character line terminators.
+
+### `parse_process_char`
+
+```c
+// CPython: Modules/_csv.c:380 parse_process_char
+static int
+parse_process_char(ReaderObj *self, module_state *module_state, Py_UCS4 c)
+{
+    switch (self->state) {
+    case START_FIELD:
+        if (c == '\n' || c == '\r' || c == 0) {
+            parse_save_field(self);
+            self->state = START_RECORD;
+        } else if (c == self->dialect->quotechar) {
+            self->state = IN_QUOTED_FIELD;
+        } else if (c == self->dialect->delimiter) {
+            parse_save_field(self);
+        } else {
+            parse_add_char(self, c);
+            self->state = IN_FIELD;
+        }
+        break;
+    case IN_QUOTED_FIELD:
+        if (c == self->dialect->quotechar) {
+            if (self->dialect->doublequote)
+                self->state = QUOTE_IN_FIELD;
+            else
+                self->state = IN_FIELD;
+        } else {
+            parse_add_char(self, c);
+        }
+        break;
+    /* ... other states ... */
+    }
+    return 0;
+}
+```
+
+The states are `START_RECORD`, `START_FIELD`, `IN_FIELD`, `IN_QUOTED_FIELD`, `QUOTE_IN_FIELD`, `ESCAPED_CHAR`, `AFTER_ESCAPED_CRNL`. Quoting and escaping are dialect-controlled. `QUOTE_IN_FIELD` handles `""` inside a quoted field (RFC 4180 double-quoting).
+
+### `Writer.writerow`
+
+```c
+// CPython: Modules/_csv.c:740 csv_writerow
+static PyObject *
+csv_writerow(WriterObj *self, PyObject *seq)
+{
+    DialectObj *dialect = self->dialect;
+    PyObject *iter = PyObject_GetIter(seq);
+    PyObject *field;
+    int rec_len = 0;
+
+    while ((field = PyIter_Next(iter)) != NULL) {
+        if (rec_len > 0) {
+            if (join_append_data(self, dialect->delimiter, 0, 0, &rec_len) < 0)
+                return NULL;
+        }
+        if (join_append(self, field, rec_len == 0) < 0) return NULL;
+        rec_len++;
+        Py_DECREF(field);
+    }
+    /* Append line terminator */
+    join_append_lineterminator(self);
+    return PyObject_CallMethodOneArg(self->writeline, &_Py_ID(write), self->rec);
+}
+```
+
+`writer.writerow(['a', 'b,c', 'd'])` writes `a,"b,c",d\r\n`. Each field is passed through `join_append` which decides quoting. The final record string is passed to the underlying `write` callable.
+
+### `join_append` quoting
+
+```c
+// CPython: Modules/_csv.c:680 join_append
+static int
+join_append(WriterObj *self, PyObject *field, int quoted)
+{
+    Py_ssize_t field_len = (field == Py_None) ? 0 : PyUnicode_GET_LENGTH(field);
+    switch (self->dialect->quoting) {
+    case QUOTE_NONNUMERIC:
+        /* Quote if not a number */
+        quoted = !PyNumber_Check(field);
+        break;
+    case QUOTE_ALL:
+        quoted = 1;
+        break;
+    case QUOTE_MINIMAL:
+        /* Quote only if contains delimiter, quotechar, or lineterminator */
+        quoted = field_needs_quoting(self->dialect, field);
+        break;
+    case QUOTE_NONE:
+        if (field_needs_quoting(self->dialect, field)) {
+            PyErr_SetString(module_state->error_obj, "...need to escape");
+            return -1;
+        }
+        break;
+    }
+    return join_append_data(self, field, quoted, 1, &self->rec_len);
+}
+```
+
+`QUOTE_MINIMAL` (the default) only adds quotes when necessary. `field_needs_quoting` scans the field for the delimiter, quotechar, or any lineterminator character. `QUOTE_NONNUMERIC` is useful for spreadsheet compatibility where all text fields must be quoted.
+
+## gopy notes
+
+`csv.reader` is `module/csv.Reader` in `module/csv/module.go`. The state machine is a Go `switch` over a `parseState` int. `csv.writer` is `module/csv.Writer`. `join_append` applies quoting logic before writing to a `strings.Builder`. Dialect validation checks are in `module/csv.validateDialect`.
