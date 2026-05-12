@@ -1,0 +1,115 @@
+---
+title: Lib/enum.py (part 3)
+description: "Lib/enum.py part 3: EnumMeta.__new__, member lookup, Flag, IntFlag, StrEnum."
+cpython_path: Lib/enum.py
+cpython_version: "3.14"
+lines: 600
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/enum.py" />
+
+This annotation covers the metaclass and flag types. See `lib_enum2_detail` for `Enum.__new__`, `Enum._missing_`, `auto()`, and `__members__`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-120 | `EnumMeta.__new__` | Build the enum class: assign values and names |
+| 121-240 | Member lookup | `__getitem__`, `__call__`, `_value2member_map_` |
+| 241-360 | `Flag` | Bitwise combination of members |
+| 361-480 | `IntFlag` | Flag that is also an `int` |
+| 481-600 | `StrEnum` / `ReprEnum` | Enum mixed with str/int for display |
+
+## Reading
+
+### `EnumMeta.__new__`
+
+```python
+# CPython: Lib/enum.py:520 EnumMeta.__new__
+class EnumMeta(type):
+    def __new__(metacls, cls, bases, classdict, *, boundary=None, _generate_next_value_=None, **kwds):
+        # Separate enum members from non-members
+        enum_members = {k: classdict[k] for k in classdict._member_names}
+        # Call __new__ and __init__ for each member
+        for key, value in enum_members.items():
+            if isinstance(value, auto):
+                value = _generate_next_value_(key, 1, len(enum_members), ...)
+            member = enum_class.__new__(enum_class, value)
+            member._name_ = key
+            member._value_ = value
+            enum_class._value2member_map_[value] = member
+            setattr(enum_class, key, member)
+        return enum_class
+```
+
+Each member is a singleton instance of the enum class. The `_value2member_map_` dict enables fast lookup by value: `Color(1)` looks up `1` in this map rather than iterating. Aliases (two names for the same value) are not added to `_member_map_` but are still accessible as attributes.
+
+### Member lookup
+
+```python
+# CPython: Lib/enum.py:720 EnumMeta.__call__
+def __call__(cls, value, names=None, ...):
+    if names is None:
+        # Value lookup
+        try:
+            return cls._value2member_map_[value]
+        except KeyError:
+            pass
+        try:
+            return cls._missing_(value)
+        except Exception:
+            pass
+        raise ValueError(f'{value!r} is not a valid {cls.__qualname__}')
+```
+
+`Color(1)` calls `EnumMeta.__call__`. First it checks `_value2member_map_`; on miss it tries `_missing_`. `_missing_` can be overridden to handle out-of-range values, create pseudo-members, or raise a custom error.
+
+### `Flag`
+
+```python
+# CPython: Lib/enum.py:1020 Flag.__or__
+class Flag(Enum, boundary=EJECT):
+    def __or__(self, other):
+        if isinstance(other, self.__class__):
+            return self.__class__(self._value_ | other._value_)
+        return NotImplemented
+
+    def __and__(self, other):
+        if isinstance(other, self.__class__):
+            return self.__class__(self._value_ & other._value_)
+        return NotImplemented
+
+    def __contains__(self, other):
+        if not isinstance(other, self.__class__):
+            raise TypeError(...)
+        return other._value_ & self._value_ == other._value_
+```
+
+`Permission.READ | Permission.WRITE` returns a new `Permission` member with the combined value. Composite values (not single bits) are pseudo-members stored in `_value2member_map_` if needed. `CONFORM` boundary keeps only defined bits; `EJECT` returns an int if no single member matches.
+
+### `StrEnum`
+
+```python
+# CPython: Lib/enum.py:1280 StrEnum
+class StrEnum(str, ReprEnum):
+    """Enum where members are also (and must be) strings."""
+    def __new__(cls, *values):
+        if len(values) > 3:
+            raise TypeError(...)
+        try:
+            value = str(*values)
+        except (TypeError, ValueError) as e:
+            raise ValueError(...) from e
+        member = str.__new__(cls, value)
+        member._value_ = value
+        return member
+```
+
+`StrEnum` members are actual `str` instances. `class Color(StrEnum): RED = 'red'` gives `Color.RED == 'red'` and `isinstance(Color.RED, str)`. Useful for APIs that accept strings but benefit from enum validation.
+
+## gopy notes
+
+`EnumMeta` is in `module/enum/module.go`. Member creation calls `objects.TypeCall` for the member type. `_value2member_map_` is a Go `map[objects.Object]objects.Object`. `Flag.__or__` calls `objects.BitwiseOr` on the underlying value. `StrEnum` members are `objects.Str` instances with an additional `_name_` attribute.

@@ -1,0 +1,119 @@
+---
+title: Python/ceval.c (part 40)
+description: "Python/ceval.c part 40: COPY_FREE_VARS, MAKE_CELL, LOAD_CLOSURE, generator/coroutine opcodes."
+cpython_path: Python/ceval.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Python/ceval.c" />
+
+This annotation covers closure and generator opcodes. See `python_ceval39_detail` for import, class-building, and `LOAD_SUPER_ATTR` opcodes.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `COPY_FREE_VARS` | Copy free variables into the frame on entry |
+| 81-160 | `MAKE_CELL` | Convert a local variable to a cell at function entry |
+| 161-240 | `LOAD_CLOSURE` | Push a cell reference onto the stack |
+| 241-340 | `RETURN_GENERATOR` | Create a generator/coroutine object from the current frame |
+| 341-500 | `SEND` / `YIELD_VALUE` | Generator send/yield protocol |
+
+## Reading
+
+### `COPY_FREE_VARS`
+
+```c
+// CPython: Python/ceval.c:4340 COPY_FREE_VARS
+inst(COPY_FREE_VARS, (--)) {
+    /* oparg = number of free variables to copy */
+    PyCodeObject *co = frame->f_code;
+    PyObject *closure = ((PyFunctionObject *)frame->f_funcobj)->func_closure;
+    int offset = co->co_nlocalsplus - oparg;
+    for (int i = 0; i < oparg; i++) {
+        PyObject *cell = PyTuple_GET_ITEM(closure, i);
+        frame->localsplus[offset + i] = Py_NewRef(cell);
+    }
+}
+```
+
+When a closure is called, `COPY_FREE_VARS` copies cell references from `func_closure` into the frame's `localsplus` array. This makes free variables accessible as `LOAD_DEREF`/`STORE_DEREF` targets. `oparg` is the count of free variables.
+
+### `MAKE_CELL`
+
+```c
+// CPython: Python/ceval.c:4380 MAKE_CELL
+inst(MAKE_CELL, (--)) {
+    /* oparg = index into localsplus
+       Convert the value already stored there to a cell */
+    PyObject *val = frame->localsplus[oparg];
+    PyObject *cell = PyCell_New(val);
+    Py_XDECREF(val);
+    frame->localsplus[oparg] = cell;
+}
+```
+
+`MAKE_CELL` runs at function entry for each variable that is captured by an inner function. The current value (e.g., a parameter) is wrapped in a `PyCell` in place. All future reads/writes go through the cell so inner functions see updates.
+
+### `RETURN_GENERATOR`
+
+```c
+// CPython: Python/ceval.c:4440 RETURN_GENERATOR
+inst(RETURN_GENERATOR, (--)) {
+    /* Create a generator object that will resume at the next instruction */
+    PyGenObject *gen = _PyGen_NewWithQualName(frame, ...);
+    frame = cframe.current_frame = gen->gi_frame_state == FRAME_SUSPENDED ?
+        gen->gi_iframe : ...;
+    /* The caller gets the generator object, not the return value */
+    DISPATCH();
+}
+```
+
+`def f(): yield 1` compiles with `RETURN_GENERATOR` as its first opcode. On the first call, a generator object is created and returned immediately. The frame is suspended with a reference count owned by the generator. `next(gen)` resumes from the suspended frame.
+
+### `YIELD_VALUE`
+
+```c
+// CPython: Python/ceval.c:4500 YIELD_VALUE
+inst(YIELD_VALUE, (retval --)) {
+    /* Suspend the frame and return retval to the caller */
+    assert(frame->f_code->co_flags & CO_GENERATOR);
+    PyGenObject *gen = _PyFrame_GetGenerator(frame);
+    gen->gi_frame_state = FRAME_SUSPENDED;
+    _PyFrame_SetStackPointer(frame, stack_pointer);
+    DECREF_INPUTS();
+    return retval;
+}
+```
+
+`yield expr` pushes the value and then `YIELD_VALUE` pops it and returns to the caller. The frame's `stack_pointer` is saved so the generator can resume. `frame->f_lasti` records the instruction offset for `send()` to resume from.
+
+### `SEND`
+
+```c
+// CPython: Python/ceval.c:4560 SEND
+inst(SEND, (receiver, v -- receiver, retval)) {
+    /* generator.send(value) or await expr */
+    if (tstate->c_tracefunc == NULL) {
+        retval = PyIter_Send(receiver, v);
+    } else {
+        retval = _PyEval_EvalFrameDefault(tstate, ...);
+    }
+    if (retval == NULL) {
+        /* StopIteration: extract its value */
+        retval = _PyGen_FetchStopIterationValue();
+        JUMPBY(oparg);  /* jump past the yield */
+    }
+    Py_DECREF(v);
+}
+```
+
+`SEND` drives the `yield from` and `await` protocols. It calls `PyIter_Send` which dispatches to `tp_iternext` (for regular iterators) or `am_send` (for generators/coroutines). When `StopIteration` is raised, the result value is extracted and execution continues past the `yield from`.
+
+## gopy notes
+
+`COPY_FREE_VARS` is in `vm/eval_simple.go`; it copies cell pointers from the function's `Closure` tuple into `frame.Locals`. `MAKE_CELL` wraps the existing local in a `objects.Cell`. `RETURN_GENERATOR` creates an `objects.Generator` in `vm/eval_call.go`. `YIELD_VALUE` suspends the frame via `frame.Suspend()`. `SEND` calls `objects.IterSend`.

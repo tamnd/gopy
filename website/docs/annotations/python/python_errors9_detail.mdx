@@ -1,0 +1,125 @@
+---
+title: Python/errors.c (part 9)
+description: "Python/errors.c part 9: _PyErr_FormatFromCause, exception normalization, sys.exc_info, _PyErr_ChainExceptions."
+cpython_path: Python/errors.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Python/errors.c" />
+
+This annotation covers exception chaining and retrieval APIs. See `python_errors8_detail` for `PyErr_SetObject`, `PyErr_Fetch`/`Restore`, and the `PyErr_Format` family.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `_PyErr_FormatFromCause` | Raise an exception chained to the current one |
+| 81-160 | Exception normalization | Convert (type, value, tb) to a proper exception instance |
+| 161-240 | `sys.exc_info` | Return the active exception |
+| 241-360 | `_PyErr_ChainExceptions1` | Set `__context__` on a new exception |
+| 361-500 | `_PyErr_WriteUnraisable` | Log exceptions that cannot be propagated |
+
+## Reading
+
+### `_PyErr_FormatFromCause`
+
+```c
+// CPython: Python/errors.c:1120 _PyErr_FormatFromCause
+PyObject *
+_PyErr_FormatFromCause(PyObject *exception, const char *format, ...)
+{
+    /* Raise 'exception' with __cause__ = current exception */
+    PyObject *exc = _PyErr_GetRaisedException(tstate);
+    assert(exc != NULL);  /* must have a current exception */
+    va_list vargs;
+    va_start(vargs, format);
+    _PyErr_FormatV(tstate, exception, format, vargs);
+    va_end(vargs);
+    PyObject *new_exc = _PyErr_GetRaisedException(tstate);
+    PyException_SetCause(new_exc, exc);  /* explicit chain: raise X from Y */
+    PyException_SetContext(new_exc, Py_NewRef(exc));
+    _PyErr_SetRaisedException(tstate, new_exc);
+    return NULL;
+}
+```
+
+`_PyErr_FormatFromCause` is the C equivalent of `raise NewError(...) from original`. It sets both `__cause__` (explicit chain, shown as "The above exception was the direct cause") and `__context__` (implicit chain). The original exception's reference count is transferred to `__cause__`.
+
+### Exception normalization
+
+```c
+// CPython: Python/errors.c:380 _PyErr_NormalizeException
+void
+_PyErr_NormalizeException(PyThreadState *tstate, PyObject **exc, PyObject **val, PyObject **tb)
+{
+    /* Ensure *val is an instance of *exc.
+       If *val is already an instance, leave it. Otherwise call *exc(*val). */
+    PyObject *type = *exc;
+    PyObject *value = *val;
+    if (!PyExceptionInstance_Check(value)) {
+        /* value is the arg tuple or a single arg; instantiate */
+        if (value == NULL || value == Py_None)
+            value = PyObject_CallNoArgs(type);
+        else if (PyTuple_Check(value))
+            value = PyObject_Call(type, value, NULL);
+        else
+            value = PyObject_CallOneArg(type, value);
+    }
+    *val = value;
+    *exc = Py_NewRef(PyExceptionInstance_Class(value));
+    *tb = PyException_GetTraceback(value);
+}
+```
+
+Before Python 3.12, exceptions were stored as `(type, value, traceback)` triples. Normalization ensures `value` is an instance. This is called lazily; many paths skip it. In Python 3.12+, `_PyErr_SetRaisedException` always stores a normalized instance.
+
+### `sys.exc_info`
+
+```c
+// CPython: Python/errors.c:820 sys_exc_info
+static PyObject *
+sys_exc_info(PyObject *module, PyObject *Py_UNUSED(ignored))
+{
+    _PyErr_StackItem *err_info = _PyErr_GetTopmostException(tstate);
+    if (err_info->exc_value == NULL || err_info->exc_value == Py_None) {
+        return PyTuple_Pack(3, Py_None, Py_None, Py_None);
+    }
+    PyObject *exc = err_info->exc_value;
+    return PyTuple_Pack(3,
+        PyExceptionInstance_Class(exc),
+        exc,
+        PyException_GetTraceback(exc));
+}
+```
+
+`sys.exc_info()` returns the exception currently being handled in the nearest `except` block on the call stack. It searches the `_PyErr_StackItem` chain (one item per `except` nesting level). Outside any `except` block it returns `(None, None, None)`.
+
+### `_PyErr_WriteUnraisable`
+
+```c
+// CPython: Python/errors.c:1380 _PyErr_WriteUnraisable
+void
+_PyErr_WriteUnraisable(PyThreadState *tstate, PyObject *obj)
+{
+    /* Called when an exception occurs in a destructor or background thread
+       where there is no other way to handle it. */
+    PyObject *exc = _PyErr_GetRaisedException(tstate);
+    /* Write to sys.unraisablehook if set, otherwise sys.stderr */
+    if (sys_unraisablehook != NULL) {
+        _PyObject_CallMethodIdOneArg(sys_unraisablehook, ...);
+    } else {
+        _PyObject_WriteUnraisableDefaultHook(...);
+    }
+    Py_DECREF(exc);
+}
+```
+
+`_PyErr_WriteUnraisable` handles exceptions from `__del__`, finalizers, and thread-level errors. Python 3.8+ routes these to `sys.unraisablehook` (default: print to `sys.stderr`). This avoids swallowing exceptions silently while not crashing the process.
+
+## gopy notes
+
+`_PyErr_FormatFromCause` is `errors.RaiseFromCause` in `vm/eval_unwind.go`. Exception normalization happens in `objects.NormalizeException`. `sys.exc_info` is `module/sys.ExcInfo` which reads from the goroutine-local exception stack. `_PyErr_WriteUnraisable` calls `sys.unraisablehook` via `objects.CallMethod`.

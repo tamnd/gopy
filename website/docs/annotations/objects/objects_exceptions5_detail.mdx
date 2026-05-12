@@ -1,0 +1,131 @@
+---
+title: Objects/exceptions.c (part 5)
+description: "Objects/exceptions.c part 5: ExceptionGroup, BaseExceptionGroup, exception notes, add_note."
+cpython_path: Objects/exceptions.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Objects/exceptions.c" />
+
+This annotation covers PEP 654 exception groups and PEP 678 exception notes. See `objects_exceptions4_detail` for `BaseException.__init__`, chaining (`__cause__`, `__context__`), and `OSError`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `BaseExceptionGroup.__new__` | Validate and create a group |
+| 81-180 | `ExceptionGroup` | Subtype requiring all exceptions to be `Exception` |
+| 181-280 | `BaseExceptionGroup.split` | Partition a group by predicate |
+| 281-380 | `BaseExceptionGroup.subgroup` | Filter a group, keeping structure |
+| 381-500 | `BaseException.add_note` | PEP 678 — attach a string note to any exception |
+
+## Reading
+
+### `BaseExceptionGroup.__new__`
+
+```c
+// CPython: Objects/exceptions.c:3240 BaseExceptionGroup_new
+static PyObject *
+BaseExceptionGroup_new(PyTypeObject *type, PyObject *args, PyObject *kwds)
+{
+    PyObject *message, *excs;
+    PyArg_ParseTuple(args, "UO:BaseExceptionGroup", &message, &excs);
+    excs = PySequence_Tuple(excs);
+    if (PyTuple_GET_SIZE(excs) == 0) {
+        PyErr_SetString(PyExc_TypeError, "second argument (exceptions) must be a non-empty sequence");
+        return NULL;
+    }
+    /* Check all items are BaseException instances */
+    for (Py_ssize_t i = 0; i < PyTuple_GET_SIZE(excs); i++) {
+        if (!PyExceptionInstance_Check(PyTuple_GET_ITEM(excs, i))) {
+            PyErr_SetString(PyExc_TypeError, "Item ...");
+            return NULL;
+        }
+    }
+    /* If all are Exception (not BaseException), return ExceptionGroup */
+    ...
+}
+```
+
+`BaseExceptionGroup('msg', [exc1, exc2])` creates a group. If all exceptions are `Exception` instances (not just `BaseException`), the result is automatically an `ExceptionGroup` even if `BaseExceptionGroup` was requested. This preserves the invariant that `ExceptionGroup` only holds `Exception` instances.
+
+### `BaseExceptionGroup.split`
+
+```c
+// CPython: Objects/exceptions.c:3380 BaseExceptionGroup_split
+static PyObject *
+BaseExceptionGroup_split(PyObject *self, PyObject *matcher_value)
+{
+    /* Returns (matched, rest) where matched and rest are groups or None */
+    PyObject *match_excs = PyList_New(0);
+    PyObject *rest_excs = PyList_New(0);
+    for (Py_ssize_t i = 0; i < n; i++) {
+        PyObject *exc = PyTuple_GET_ITEM(excs, i);
+        if (PyExceptionGroup_Check(exc)) {
+            /* Recursive split */
+            PyObject *pair = BaseExceptionGroup_split(exc, matcher_value);
+            ...
+        } else {
+            int is_match = PyObject_IsInstance(exc, matcher_value);
+            if (is_match) PyList_Append(match_excs, exc);
+            else PyList_Append(rest_excs, exc);
+        }
+    }
+    PyObject *match_group = PyList_GET_SIZE(match_excs) ? _PyExcGroup_New(msg, match_excs) : Py_None;
+    PyObject *rest_group = PyList_GET_SIZE(rest_excs) ? _PyExcGroup_New(msg, rest_excs) : Py_None;
+    return PyTuple_Pack(2, match_group, rest_group);
+}
+```
+
+`eg.split(ValueError)` returns `(matched_group_or_none, rest_group_or_none)`. Nested groups are split recursively. If a subgroup becomes empty after splitting, it is dropped. Used by `except*` to dispatch matching exceptions to the right handler.
+
+### `BaseExceptionGroup.subgroup`
+
+```c
+// CPython: Objects/exceptions.c:3460 BaseExceptionGroup_subgroup
+static PyObject *
+BaseExceptionGroup_subgroup(PyObject *self, PyObject *matcher_value)
+{
+    /* Returns a new group with only matching exceptions, or None */
+    PyObject *match, *rest;
+    PyObject *pair = BaseExceptionGroup_split(self, matcher_value);
+    match = PyTuple_GET_ITEM(pair, 0);
+    Py_INCREF(match);
+    Py_DECREF(pair);
+    return match;
+}
+```
+
+`eg.subgroup(ValueError)` is `eg.split(ValueError)[0]`. It keeps only the matching branch of the group tree.
+
+### `BaseException.add_note`
+
+```c
+// CPython: Objects/exceptions.c:680 BaseException_add_note
+static PyObject *
+BaseException_add_note(PyObject *self, PyObject *note)
+{
+    if (!PyUnicode_Check(note)) {
+        PyErr_Format(PyExc_TypeError,
+                     "note must be a str, not '%s'", Py_TYPE(note)->tp_name);
+        return NULL;
+    }
+    PyObject *notes = PyObject_GetAttrString(self, "__notes__");
+    if (notes == NULL) {
+        notes = PyList_New(0);
+        PyObject_SetAttrString(self, "__notes__", notes);
+    }
+    PyList_Append(notes, note);
+    Py_RETURN_NONE;
+}
+```
+
+PEP 678 (Python 3.11): `exc.add_note('additional context')` appends a string to `exc.__notes__`. The `traceback` module prints notes after the exception message. Notes survive exception chaining and are included in `str(exc)` output.
+
+## gopy notes
+
+`BaseExceptionGroup` is `objects.BaseExceptionGroup` in `objects/instance.go`. `split` recursively partitions the group tree. `add_note` is `BaseException.AddNote` which appends to the `__notes__` list attribute. `ExceptionGroup` inherits from both `BaseExceptionGroup` and `Exception`.

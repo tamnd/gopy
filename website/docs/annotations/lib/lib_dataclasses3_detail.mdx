@@ -1,0 +1,118 @@
+---
+title: Lib/dataclasses.py (part 3)
+description: "Lib/dataclasses.py part 3: __init__ generation, __repr__, __eq__, frozen dataclasses, slots."
+cpython_path: Lib/dataclasses.py
+cpython_version: "3.14"
+lines: 600
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/dataclasses.py" />
+
+This annotation covers method generation and advanced features. See `lib_dataclasses2_detail` for the `@dataclass` decorator, `field()`, and `__post_init__`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-100 | `_init_fn` | Generate `__init__` source and `exec` it |
+| 101-200 | `_repr_fn` | Generate `__repr__` |
+| 201-300 | `_eq_fn` / `_hash_fn` | Equality and hash generation |
+| 301-400 | Frozen dataclasses | Raise `FrozenInstanceError` on mutation |
+| 401-600 | `slots=True` | Re-create the class with `__slots__` |
+
+## Reading
+
+### `_init_fn`
+
+```python
+# CPython: Lib/dataclasses.py:480 _init_fn
+def _init_fn(fields, frozen, has_post_init, self_name, globals):
+    seen_default = False
+    body_lines = []
+    for f in fields:
+        if not f.init:
+            continue
+        if f.default is MISSING and f.default_factory is MISSING:
+            if seen_default:
+                raise TypeError(f'non-default argument {f.name!r} follows default argument')
+        else:
+            seen_default = True
+        body_lines += _field_init(f, frozen, has_post_init, self_name)
+    if has_post_init:
+        body_lines.append(f'  {self_name}.{_POST_INIT_NAME}({_POST_INIT_PARAMS})')
+    return _create_fn('__init__',
+                      [self_name] + [_init_param(f) for f in fields if f.init],
+                      body_lines, globals=globals, locals=None,
+                      return_type=None)
+```
+
+`_init_fn` builds Python source code as a string and calls `exec` on it. The generated `__init__` has the correct default values as closures in `globals`. This approach allows correct `repr` of the generated code in tracebacks.
+
+### `_create_fn`
+
+```python
+# CPython: Lib/dataclasses.py:420 _create_fn
+def _create_fn(name, args, body, *, globals=None, locals=None,
+               return_type=MISSING):
+    if locals is None:
+        locals = {}
+    if return_type is not MISSING:
+        locals['_return_type'] = return_type
+        return_annotation = '->_return_type'
+    else:
+        return_annotation = ''
+    args = ','.join(args)
+    body = '\n'.join(f'  {b}' for b in body)
+    txt = f' def {name}({args}){return_annotation}:\n{body}'
+    ns = {}
+    exec(txt, globals, ns)
+    return ns[name]
+```
+
+`exec` in a controlled namespace is the core mechanism. The generated function has access to defaults, factory functions, and type annotations via `globals`. This is why dataclass-generated `__init__` shows correct source in `inspect.getsource`-like contexts.
+
+### Frozen dataclasses
+
+```python
+# CPython: Lib/dataclasses.py:620 _frozen_setattr
+def _frozen_setattr(self, name, value):
+    if type(self) is cls or type(self) in cls.__subclasses__():
+        raise FrozenInstanceError('cannot assign to field %r' % name)
+    object.__setattr__(self, name, value)
+
+def _frozen_delattr(self, name):
+    if type(self) is cls or type(self) in cls.__subclasses__():
+        raise FrozenInstanceError('cannot delete field %r' % name)
+    object.__delattr__(self, name)
+```
+
+`@dataclass(frozen=True)` installs `__setattr__` and `__delattr__` that raise `FrozenInstanceError`. The `__init__` uses `object.__setattr__` directly to bypass this check during initialization. Frozen dataclasses are hashable by default.
+
+### `slots=True`
+
+```python
+# CPython: Lib/dataclasses.py:980 _process_class with slots
+def _add_slots(cls, is_frozen, has_weakref_slot):
+    # Need to create a new class with __slots__ since slots must be defined at class creation time
+    cls_dict = {}
+    for key, value in cls.__dict__.items():
+        if key not in ('__dict__', '__weakref__'):
+            cls_dict[key] = value
+    slots = [f.name for f in fields(cls)]
+    if has_weakref_slot:
+        slots.append('__weakref__')
+    cls_dict['__slots__'] = tuple(slots)
+    qualname = cls.__qualname__
+    new_cls = type(cls)(cls.__name__, cls.__bases__, cls_dict)
+    new_cls.__qualname__ = qualname
+    return new_cls
+```
+
+`slots=True` (Python 3.10+) requires re-creating the class because `__slots__` must be specified at class creation. The original class dict is copied to a new class with `__slots__` added. This eliminates the per-instance `__dict__`, reducing memory and improving attribute access speed.
+
+## gopy notes
+
+`_init_fn` generates code as a string and execs it. In gopy, `dataclasses` uses the pure-Python implementation from stdlib (shipped via `stdlib/dataclasses.py`). The `exec`-based method generation works through gopy's `exec` support in `vm/eval_import.go`. `FrozenInstanceError` is a subclass of `AttributeError`.

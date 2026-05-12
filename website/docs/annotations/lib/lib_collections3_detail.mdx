@@ -1,0 +1,130 @@
+---
+title: Lib/collections/__init__.py (part 3)
+description: "collections part 3: ChainMap, Counter, UserDict, UserList, UserString."
+cpython_path: Lib/collections/__init__.py
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/collections/__init__.py" />
+
+This annotation covers the remaining collection types. See `lib_collections2_detail` for `OrderedDict`, `defaultdict`, `deque`, and `namedtuple`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-100 | `ChainMap` | Read-through view over multiple dicts |
+| 101-220 | `Counter` | Multiset with arithmetic operations |
+| 221-320 | `UserDict` | Wraps a dict for easy subclassing |
+| 321-420 | `UserList` | Wraps a list for easy subclassing |
+| 421-500 | `UserString` | Wraps a str for easy subclassing |
+
+## Reading
+
+### `ChainMap`
+
+```python
+# CPython: Lib/collections/__init__.py:980 ChainMap
+class ChainMap(MutableMapping):
+    """A ChainMap groups multiple dicts (or other mappings) together
+    to create a single, updateable view."""
+
+    def __getitem__(self, key):
+        for mapping in self.maps:
+            try:
+                return mapping[key]
+            except KeyError:
+                pass
+        raise KeyError(key)
+
+    def __setitem__(self, key, value):
+        self.maps[0][key] = value
+
+    def new_child(self, m=None, **kwargs):
+        if m is None:
+            m = {}
+        m.update(kwargs)
+        return self.__class__(m, *self.maps)
+```
+
+`ChainMap` searches maps in order; the first hit wins. Writes go to `maps[0]` (the first map). `new_child()` creates a new `ChainMap` with a fresh empty map prepended, useful for scope chaining. `parents` removes the first map.
+
+### `Counter`
+
+```python
+# CPython: Lib/collections/__init__.py:1180 Counter
+class Counter(dict):
+    def __missing__(self, key):
+        return 0
+
+    def most_common(self, n=None):
+        if n is None:
+            return sorted(self.items(), key=_itemgetter(1), reverse=True)
+        return _heapq.nlargest(n, self.items(), key=_itemgetter(1))
+
+    def __add__(self, other):
+        result = Counter()
+        for elem, count in self.items():
+            newcount = count + other[elem]
+            if newcount > 0:
+                result[elem] = newcount
+        for elem, count in other.items():
+            if elem not in self and count > 0:
+                result[elem] = count
+        return result
+```
+
+`Counter('aab')` gives `{'a': 2, 'b': 1}`. Missing keys return `0` via `__missing__`. `Counter + Counter` keeps only positive counts. `Counter - Counter` keeps only positive differences. `Counter & Counter` is element-wise minimum; `|` is element-wise maximum.
+
+### `UserDict`
+
+```python
+# CPython: Lib/collections/__init__.py:1380 UserDict
+class UserDict(MutableMapping):
+    def __init__(self, dict=None, /, **kwargs):
+        self.data = {}
+        if dict is not None:
+            self.update(dict)
+        if kwargs:
+            self.update(kwargs)
+
+    def __getitem__(self, key):
+        if key in self.data:
+            return self.data[key]
+        if hasattr(self.__class__, '__missing__'):
+            return self.__class__.__missing__(self, key)
+        raise KeyError(key)
+
+    def __setitem__(self, key, item):
+        self.data[key] = item
+```
+
+`UserDict` stores data in `self.data` (a plain `dict`). Subclassing `UserDict` is easier than subclassing `dict` because all methods go through `__getitem__`/`__setitem__` rather than bypassing them. `defaultdict` is implemented in C and doesn't use `UserDict`.
+
+### `Counter.update`
+
+```python
+# CPython: Lib/collections/__init__.py:1240 Counter.update
+def update(self, iterable=None, /, **kwds):
+    if iterable is not None:
+        if isinstance(iterable, Counter):
+            for elem, count in iterable.items():
+                self[elem] = self.get(elem, 0) + count
+        elif hasattr(iterable, 'keys'):
+            for elem in iterable:
+                self[elem] = self.get(elem, 0) + iterable[elem]
+        else:
+            _count_elements(self, iterable)  # fast C path
+    if kwds:
+        self.update(kwds)
+```
+
+`_count_elements` is a C helper in `_collectionsmodule.c` that iterates the input and increments counts. It is faster than the Python loop for large iterables. `Counter.update` adds counts (unlike `dict.update` which overwrites).
+
+## gopy notes
+
+`ChainMap` is in `module/collections/module.go`. `Counter` subclasses `objects.Dict` with a `__missing__` that returns `0`. `Counter.most_common` uses `container/heap`. `UserDict`, `UserList`, `UserString` delegate to `objects.Dict`, `objects.List`, `objects.Str` respectively. `_count_elements` is `module/collections.CountElements`.

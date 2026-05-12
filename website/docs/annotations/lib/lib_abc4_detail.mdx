@@ -1,0 +1,120 @@
+---
+title: Lib/abc.py (part 4)
+description: "Lib/abc.py part 4: ABCMeta.__subclasscheck__, virtual subclass registration, ABC helper."
+cpython_path: Lib/abc.py
+cpython_version: "3.14"
+lines: 400
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/abc.py" />
+
+This annotation covers the `ABCMeta` metaclass implementation. See `lib_abc3_detail` for `abstractmethod`, `abstractproperty`, and the `@abstractmethod` interaction with inheritance.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `ABCMeta.__new__` | Set up abstract method tracking |
+| 81-160 | `ABCMeta.register` | Register a virtual subclass |
+| 161-240 | `ABCMeta.__subclasscheck__` | `issubclass` override |
+| 241-400 | `ABC` helper class | Convenience base using `ABCMeta` |
+
+## Reading
+
+### `ABCMeta.__new__`
+
+```python
+# CPython: Lib/abc.py:22 ABCMeta.__new__
+class ABCMeta(type):
+    def __new__(mcls, name, bases, namespace, /, **kwargs):
+        cls = super().__new__(mcls, name, bases, namespace, **kwargs)
+        # Compute set of abstract methods
+        abstracts = {name
+                     for name, value in namespace.items()
+                     if getattr(value, "__isabstractmethod__", False)}
+        for base in bases:
+            for name in getattr(base, "__abstractmethods__", set()):
+                value = getattr(cls, name, None)
+                if getattr(value, "__isabstractmethod__", False):
+                    abstracts.add(name)
+        cls.__abstractmethods__ = frozenset(abstracts)
+        cls._abc_registry = WeakSet()
+        cls._abc_cache = WeakSet()
+        cls._abc_negative_cache = WeakSet()
+        cls._abc_negative_cache_version = ABCMeta._abc_invalidation_counter
+        return cls
+```
+
+`__abstractmethods__` is a frozenset of names. If non-empty, `type.__call__` raises `TypeError` when instantiating. Inherited abstract methods that are overridden by concrete implementations are removed from the set.
+
+### `ABCMeta.register`
+
+```python
+# CPython: Lib/abc.py:95 ABCMeta.register
+def register(cls, subclass):
+    """Register a virtual subclass of an ABC."""
+    if not isinstance(subclass, type):
+        raise TypeError("Can only register classes")
+    if issubclass(subclass, cls):
+        return subclass  # already a subclass
+    cls._abc_registry.add(subclass)
+    ABCMeta._abc_invalidation_counter += 1  # invalidate negative cache
+    return subclass
+```
+
+`Sequence.register(list)` makes `issubclass(list, Sequence)` return `True` without `list` inheriting from `Sequence`. The negative cache is invalidated on every registration so `isinstance` checks re-evaluate.
+
+### `ABCMeta.__subclasscheck__`
+
+```python
+# CPython: Lib/abc.py:120 ABCMeta.__subclasscheck__
+def __subclasscheck__(cls, subclass):
+    """Override issubclass() for ABCs."""
+    # Check cache
+    if subclass in cls._abc_cache:
+        return True
+    # Check negative cache
+    if (cls._abc_negative_cache_version == ABCMeta._abc_invalidation_counter
+            and subclass in cls._abc_negative_cache):
+        return False
+    # Check the subclass hook
+    ok = cls.__subclasshook__(subclass)
+    if ok is not NotImplemented:
+        if ok:
+            cls._abc_cache.add(subclass)
+        else:
+            cls._abc_negative_cache.add(subclass)
+        return ok
+    # Check registry
+    if cls in getattr(subclass, '__mro__', ()) or subclass in cls._abc_registry:
+        cls._abc_cache.add(subclass)
+        return True
+    # Walk the MRO of subclass
+    for scls in subclass.__mro__:
+        if scls in cls._abc_registry:
+            cls._abc_cache.add(subclass)
+            return True
+    cls._abc_negative_cache.add(subclass)
+    return False
+```
+
+`__subclasshook__` is the extension point: `Sized.__subclasshook__` checks for `__len__`. If it returns `NotImplemented`, the registry and MRO walk are used. Both `_abc_cache` and `_abc_negative_cache` use `WeakSet` to avoid holding strong references to subclasses.
+
+### `ABC` helper
+
+```python
+# CPython: Lib/abc.py:185 ABC
+class ABC(metaclass=ABCMeta):
+    """Helper class that provides a standard way to create an ABC using
+    inheritance, if desired."""
+    __slots__ = ()
+```
+
+`class MyABC(ABC): ...` is equivalent to `class MyABC(metaclass=ABCMeta): ...` but reads more naturally. `ABC` itself has no abstract methods; it merely carries the metaclass.
+
+## gopy notes
+
+`ABCMeta` is `objects.ABCMeta` in `objects/type.go`. `__abstractmethods__` is stored on `objects.Type` and checked in `objects.TypeCall`. The `_abc_registry` is a Go weak-reference set. `__subclasscheck__` is `objects.ABCSubclassCheck` which uses the same three-cache pattern.

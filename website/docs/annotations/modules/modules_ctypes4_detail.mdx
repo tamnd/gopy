@@ -1,0 +1,128 @@
+---
+title: Modules/_ctypes/ctypes.h (part 4)
+description: "_ctypes part 4: Structure layout, bit fields, union, Array, Pointer arithmetic."
+cpython_path: Modules/_ctypes/ctypes.h
+cpython_version: "3.14"
+lines: 600
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/_ctypes/ctypes.h" />
+
+This annotation covers aggregate types. See `modules_ctypes3_detail` for `CDLL`, `cdll`, function prototypes, and simple type (`c_int`, `c_char_p`) implementation.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-100 | `Structure._fields_` | Compute offsets and sizes for struct fields |
+| 101-200 | Bit field support | Packing bits into an integer field |
+| 201-300 | `Union` | Overlapping fields sharing the same memory |
+| 301-400 | `Array` | Fixed-length array type and subscript access |
+| 401-600 | `Pointer` | Pointer dereference and pointer arithmetic |
+
+## Reading
+
+### `Structure._fields_`
+
+```c
+// CPython: Modules/_ctypes/stgdict.c:480 PyCStructUnionType_update_stgdict
+static int
+PyCStructUnionType_update_stgdict(PyObject *type, PyObject *fields, int isStruct)
+{
+    /* Compute field offsets according to C alignment rules */
+    Py_ssize_t offset = 0, size = 0, align = 0;
+    for (Py_ssize_t i = 0; i < PySequence_Length(fields); i++) {
+        PyObject *item = PySequence_GetItem(fields, i);
+        /* (name, type) or (name, type, bits) */
+        StgDictObject *dict = PyType_stgdict(field_type);
+        if (isStruct) {
+            offset = ALIGN(offset, dict->align);  /* add padding */
+            field_offset = offset;
+            offset += dict->size;
+        } else {
+            /* union: all at offset 0, size = max */
+            field_offset = 0;
+            size = Py_MAX(size, dict->size);
+        }
+        align = Py_MAX(align, dict->align);
+    }
+    stgdict->size = ALIGN(isStruct ? offset : size, align);
+    stgdict->align = align;
+}
+```
+
+`Structure._fields_` is processed by `PyCStructUnionType_update_stgdict`. Fields are aligned according to `StgDict.align` (which matches the C compiler's alignment for the type). Padding bytes are inserted between fields. The struct's total size is rounded up to its alignment.
+
+### Bit fields
+
+```c
+// CPython: Modules/_ctypes/stgdict.c:560 bitfield handling
+/* (name, c_uint, 3) = 3-bit field within a c_uint */
+if (bits) {
+    /* Pack into the current integer storage unit */
+    if (bit_offset + bits > dict->size * 8) {
+        /* Start a new storage unit */
+        offset += dict->size;
+        bit_offset = 0;
+    }
+    field->offset = offset;
+    field->bit_offset = bit_offset;
+    field->bit_size = bits;
+    bit_offset += bits;
+}
+```
+
+`('flags', c_uint, 3)` declares a 3-bit field. ctypes packs consecutive bit fields into the same storage unit if they fit. The bit offset within the storage unit is tracked separately. Bit field access uses shifts and masks.
+
+### `Array`
+
+```c
+// CPython: Modules/_ctypes/array.c:120 Array_subscript
+static PyObject *
+Array_subscript(PyObject *_self, PyObject *item)
+{
+    CDataObject *self = (CDataObject *)_self;
+    if (PyIndex_Check(item)) {
+        Py_ssize_t i = PyNumber_AsSsize_t(item, PyExc_IndexError);
+        if (i < 0) i += self->b_length;
+        if (i < 0 || i >= self->b_length) {
+            PyErr_SetString(PyExc_IndexError, "invalid index");
+            return NULL;
+        }
+        StgDictObject *stgdict = PyObject_stgdict((PyObject *)self);
+        return stgdict->getfunc(self->b_ptr + i * stgdict->length, stgdict->length);
+    }
+    /* slice support */
+    ...
+}
+```
+
+`(c_int * 3)(1, 2, 3)[1]` returns the element at index 1. The pointer arithmetic `b_ptr + i * stgdict->length` computes the element address. `getfunc` converts the raw bytes to a Python object (an `int` for `c_int`).
+
+### `Pointer` dereference
+
+```c
+// CPython: Modules/_ctypes/pointer.c:180 Pointer_item
+static PyObject *
+Pointer_item(PyObject *_self, Py_ssize_t index)
+{
+    CDataObject *self = (CDataObject *)_self;
+    void **ptr = (void **)self->b_ptr;
+    if (*ptr == NULL) {
+        PyErr_SetString(PyExc_ValueError, "NULL pointer access");
+        return NULL;
+    }
+    StgDictObject *stgdict = PyObject_stgdict((PyObject *)self);
+    char *addr = (char *)(*ptr) + index * stgdict->proto_stgdict->size;
+    return stgdict->proto_stgdict->getfunc(addr, stgdict->proto_stgdict->size);
+}
+```
+
+`byref(x)[0]` dereferences the pointer. A NULL check prevents segfaults. `pointer[n]` computes `base + n * sizeof(pointee)`, which is standard C pointer arithmetic.
+
+## gopy notes
+
+`Structure._fields_` processing is in `module/ctypes/stgdict.go`. Alignment uses `unsafe.Alignof` for the corresponding Go types. `Array` subscript is `module/ctypes.ArrayGetItem`. `Pointer` dereference uses `unsafe.Pointer` arithmetic. Bit fields use bit-manipulation helpers in `module/ctypes/bitfield.go`.

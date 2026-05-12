@@ -1,0 +1,115 @@
+---
+title: Modules/_sqlite/connection.c (part 4)
+description: "_sqlite/connection.c part 4: Connection.execute, cursor management, text_factory, isolation_level."
+cpython_path: Modules/_sqlite/connection.c
+cpython_version: "3.14"
+lines: 600
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/_sqlite/connection.c" />
+
+This annotation covers the high-level connection interface. See `modules_sqlite3_detail` for `sqlite3.connect`, `Connection.__init__`, row factories, and `Connection.close`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-100 | `Connection.execute` | Shortcut: create cursor and execute in one call |
+| 101-200 | `Connection.executemany` | Execute a statement with multiple parameter sequences |
+| 201-300 | `text_factory` | Control how `TEXT` columns are decoded |
+| 301-400 | `isolation_level` | Autocommit vs. deferred transaction mode |
+| 401-600 | `Connection.create_function` | Register a Python callable as a SQL function |
+
+## Reading
+
+### `Connection.execute`
+
+```c
+// CPython: Modules/_sqlite/connection.c:480 pysqlite_connection_execute
+static PyObject *
+pysqlite_connection_execute(pysqlite_Connection *self, PyObject *args)
+{
+    /* Shortcut: conn.execute(sql, params) == conn.cursor().execute(sql, params) */
+    PyObject *cursor = pysqlite_connection_cursor(self, NULL);
+    if (cursor == NULL) return NULL;
+    PyObject *result = pysqlite_cursor_execute((pysqlite_Cursor *)cursor, args);
+    if (result == NULL) { Py_DECREF(cursor); return NULL; }
+    Py_DECREF(result);
+    return cursor;
+}
+```
+
+`conn.execute(sql)` is a convenience wrapper. It creates a temporary cursor, executes the SQL, and returns the cursor (not the result). The cursor is suitable for iteration: `for row in conn.execute('SELECT ...')`.
+
+### `text_factory`
+
+```c
+// CPython: Modules/_sqlite/connection.c:680 pysqlite_connection_set_text_factory
+static int
+pysqlite_connection_set_text_factory(pysqlite_Connection *self, PyObject *factory)
+{
+    if (!PyCallable_Check(factory)) {
+        PyErr_SetString(PyExc_TypeError, "text_factory must be a callable");
+        return -1;
+    }
+    Py_XDECREF(self->text_factory);
+    self->text_factory = Py_NewRef(factory);
+    return 0;
+}
+```
+
+`conn.text_factory = bytes` returns raw bytes for TEXT columns instead of `str`. `conn.text_factory = lambda x: x.decode('latin-1')` applies custom decoding. The default is `str`. Used when the database contains binary data stored as TEXT.
+
+### `isolation_level`
+
+```c
+// CPython: Modules/_sqlite/connection.c:740 pysqlite_connection_set_isolation_level
+static int
+pysqlite_connection_set_isolation_level(pysqlite_Connection *self, PyObject *isolation_level)
+{
+    if (isolation_level == Py_None) {
+        /* autocommit mode */
+        Py_XDECREF(self->isolation_level);
+        self->isolation_level = NULL;
+        pysqlite_connection_commit(self, NULL);
+    } else {
+        /* "DEFERRED", "IMMEDIATE", or "EXCLUSIVE" */
+        const char *level = PyUnicode_AsUTF8(isolation_level);
+        ...
+        self->isolation_level = Py_NewRef(isolation_level);
+    }
+    return 0;
+}
+```
+
+`isolation_level=None` enables autocommit (each statement commits immediately). The default `""` uses `BEGIN DEFERRED` before DML statements. Setting `isolation_level='EXCLUSIVE'` uses `BEGIN EXCLUSIVE` for write-ahead-log optimization.
+
+### `Connection.create_function`
+
+```c
+// CPython: Modules/_sqlite/connection.c:820 pysqlite_connection_create_function
+static PyObject *
+pysqlite_connection_create_function(pysqlite_Connection *self, PyObject *args,
+                                     PyObject *kwargs)
+{
+    const char *name;
+    int narg, deterministic = 0;
+    PyObject *func;
+    /* Register func as a SQL scalar function named 'name' with 'narg' args */
+    sqlite3_create_function_v2(
+        self->db, name, narg,
+        SQLITE_UTF8 | (deterministic ? SQLITE_DETERMINISTIC : 0),
+        func, _pysqlite_func_callback, NULL, NULL,
+        _destructor);
+    Py_RETURN_NONE;
+}
+```
+
+`conn.create_function('md5', 1, hashlib.md5)` registers `hashlib.md5` as a SQL function: `SELECT md5(col) FROM t`. `deterministic=True` hints to SQLite that the function always returns the same value for the same inputs, enabling query optimization.
+
+## gopy notes
+
+`Connection.execute` is `module/sqlite3.ConnectionExecute` in `module/sqlite3/module.go`. `text_factory` is stored as `objects.Object` and called via `objects.CallOneArg` when decoding TEXT columns. `isolation_level` controls whether `BEGIN` is issued before DML. `create_function` registers a Go closure as a cgo `sqlite3_create_function` callback.
