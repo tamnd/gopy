@@ -1,0 +1,85 @@
+---
+title: Python/gc.c (part 6)
+description: "Python/gc.c part 6: incremental GC, gc.freeze, gc.is_tracked, generational collection thresholds."
+cpython_path: Python/gc.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Python/gc.c" />
+
+This annotation covers incremental and generational GC tuning. See `python_gc5_detail` for `gc.collect`, cycle detection, unreachable object finalization, and `tp_finalize`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | Generational thresholds | When to trigger each generation |
+| 81-160 | `gc.collect(generation)` | Collect a specific generation |
+| 161-260 | Incremental GC (3.13+) | Interleaved collection steps |
+| 261-360 | `gc.freeze` | Move all current objects to the permanent generation |
+| 361-500 | `gc.is_tracked` / `gc.is_finalized` | Object state inspection |
+
+## Reading
+
+### Generational thresholds
+
+```c
+// CPython: Python/gc.c:180 gc_collect_main
+/* Generation 0: collected after threshold0 (default 700) allocations */
+/* Generation 1: collected after threshold1 (default 10) gen-0 collections */
+/* Generation 2: collected after threshold2 (default 10) gen-1 collections */
+/*
+ * gc.get_threshold() -> (700, 10, 10)
+ * gc.set_threshold(1000, 15, 15) to tune for long-running servers
+ */
+```
+
+Each allocation increments a counter. When it exceeds `threshold0`, gen-0 is collected. Gen-0 promotion to gen-1 happens on every gen-0 collection; after `threshold1` gen-1 promotions, gen-1 is collected; and so on.
+
+### Incremental GC
+
+```c
+// CPython: Python/gc.c:1280 gc_collect_incremental
+static void
+gc_collect_incremental(PyThreadState *tstate, int reason)
+{
+    /* Collect a small slice of gen-0 objects per increment.
+       Avoids long pauses in latency-sensitive applications.
+       Enabled by gc.set_incremental(True) or Python 3.14 default. */
+    PyGC_Head *work = get_work_list(tstate->interp);
+    Py_ssize_t n = MIN(work->gc.gc_next != work ? INCREMENTAL_BATCH : 0, ...);
+    for (Py_ssize_t i = 0; i < n; i++) {
+        gc_collect_one_step(tstate, work);
+    }
+}
+```
+
+Incremental GC (new in Python 3.13) breaks collection into small steps interleaved with normal execution. This trades overall throughput for reduced worst-case pause times.
+
+### `gc.freeze`
+
+```c
+// CPython: Python/gc.c:1480 gc_freeze_impl
+static PyObject *
+gc_freeze_impl(PyObject *module)
+{
+    /* Move all tracked objects to the "permanent" (generation 3) list.
+       Frozen objects are never collected. Used after module import is
+       complete in a server process before forking workers. */
+    GCState *gcstate = get_gc_state();
+    gc_list_merge(&gcstate->generations[0].head, &gcstate->permanent_generation.head);
+    gc_list_merge(&gcstate->generations[1].head, &gcstate->permanent_generation.head);
+    gc_list_merge(&gcstate->generations[2].head, &gcstate->permanent_generation.head);
+    Py_RETURN_NONE;
+}
+```
+
+`gc.freeze()` is used by pre-forking servers (uWSGI, gunicorn) after all imports are done. By freezing the import state, child processes inherit a clean GC with no objects to collect.
+
+## gopy notes
+
+Generational GC thresholds are `gc.gen0Threshold` etc. in `vm/gc.go`. Go uses its own GC so Python's generational GC is simulated with reference counting plus a cycle detector. `gc.freeze` moves all tracked objects to a `permanentList` that the cycle detector skips. `gc.is_tracked` checks the `GC_TRACKED` flag on `objects.Object`.

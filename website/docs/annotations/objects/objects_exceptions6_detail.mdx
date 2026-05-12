@@ -1,0 +1,89 @@
+---
+title: Objects/exceptions.c (part 6)
+description: "Objects/exceptions.c part 6: BaseExceptionGroup, ExceptionGroup, split, subgroup, derive."
+cpython_path: Objects/exceptions.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Objects/exceptions.c" />
+
+This annotation covers exception groups, added in Python 3.11. See `objects_exceptions5_detail` for `BaseException`, `Exception`, `ValueError`, and the exception hierarchy.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `BaseExceptionGroup.__new__` | Validate and store exceptions list |
+| 81-160 | `ExceptionGroup` | Subclass requiring non-bare exceptions |
+| 161-260 | `BaseExceptionGroup.split` | Split into matching/non-matching sub-groups |
+| 261-360 | `BaseExceptionGroup.subgroup` | Filter to matching exceptions |
+| 361-500 | `BaseExceptionGroup.derive` | Create a new group with the same type |
+
+## Reading
+
+### `BaseExceptionGroup.__new__`
+
+```c
+// CPython: Objects/exceptions.c:2820 BaseExceptionGroup_new
+static PyObject *
+BaseExceptionGroup_new(PyTypeObject *type, PyObject *args, PyObject *kwds)
+{
+    PyObject *message, *exceptions;
+    PyArg_ParseTuple(args, "UO", &message, &exceptions);
+    /* exceptions must be a non-empty sequence of BaseException instances */
+    PyObject *excs = PySequence_Tuple(exceptions);
+    Py_ssize_t n = PyTuple_GET_SIZE(excs);
+    if (n == 0) {
+        PyErr_SetString(PyExc_TypeError,
+            "second argument (exceptions) must be a non-empty sequence");
+        return NULL;
+    }
+    /* If all exceptions are Exception subclasses, create ExceptionGroup */
+    int all_exceptions = 1;
+    for (Py_ssize_t i = 0; i < n; i++) {
+        if (!PyObject_IsInstance(PyTuple_GET_ITEM(excs, i), PyExc_Exception))
+            all_exceptions = 0;
+    }
+    if (type == &_PyExc_BaseExceptionGroup && all_exceptions) {
+        type = (PyTypeObject *)PyExc_ExceptionGroup;
+    }
+    ...
+}
+```
+
+`BaseExceptionGroup("msg", [ValueError(), TypeError()])` automatically upgrades to `ExceptionGroup` if all exceptions are `Exception` subclasses. This ensures `except* Exception` works correctly.
+
+### `split`
+
+```c
+// CPython: Objects/exceptions.c:2960 BaseExceptionGroup_split
+static PyObject *
+BaseExceptionGroup_split(PyObject *self, PyObject *matcher_value)
+{
+    /* Returns (match, rest) where each is a group or None */
+    PyObject *match_list = PyList_New(0);
+    PyObject *rest_list  = PyList_New(0);
+    PyObject *excs = PyObject_GetAttr(self, str_exceptions);
+    for (Py_ssize_t i = 0; i < PySequence_Fast_GET_SIZE(excs); i++) {
+        PyObject *exc = PySequence_Fast_GET_ITEM(excs, i);
+        if (exc_matches(exc, matcher_value)) {
+            PyList_Append(match_list, exc);
+        } else {
+            PyList_Append(rest_list, exc);
+        }
+    }
+    PyObject *match = PyList_GET_SIZE(match_list) ? derive(self, match_list) : Py_None;
+    PyObject *rest  = PyList_GET_SIZE(rest_list)  ? derive(self, rest_list)  : Py_None;
+    return PyTuple_Pack(2, match, rest);
+}
+```
+
+`except* ValueError as eg:` compiles to `split(ValueError)` and catches the match group. The rest group is re-raised. Nested `ExceptionGroup`s are recursively split.
+
+## gopy notes
+
+`BaseExceptionGroup` is `objects.BaseExceptionGroup` in `objects/exception_group.go`. The `__new__` type-upgrade logic is in `objects.ExceptionGroupNew`. `split` is `objects.ExceptionGroupSplit` which calls `objects.IsInstance` to match exceptions. `derive` calls `type(self)(message, matched_list)` via `objects.CallType`.

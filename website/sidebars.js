@@ -419,6 +419,7 @@ const sidebars = {
         'annotations/python/python_symtable8_detail',
         'annotations/python/python_ceval49_detail',
         'annotations/python/python_ceval50_detail',
+        'annotations/python/python_gc6_detail',
       ],
     },
     {
@@ -705,6 +706,7 @@ const sidebars = {
         'annotations/objects/objects_rangeobject3_detail',
         'annotations/objects/objects_memoryview5_detail',
         'annotations/objects/objects_unicodeobject7_detail',
+        'annotations/objects/objects_exceptions6_detail',
       ],
     },
     {
@@ -1284,6 +1286,7 @@ const sidebars = {
         'annotations/modules/modules_zlib6_detail',
         'annotations/modules/modules_io6_detail',
         'annotations/modules/modules_select5_detail',
+        'annotations/modules/modules_signal5_detail',
       ],
     },
     {

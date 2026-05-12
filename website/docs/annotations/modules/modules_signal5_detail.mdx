@@ -1,0 +1,99 @@
+---
+title: Modules/signalmodule.c (part 5)
+description: "signalmodule.c part 5: signal.signal, wakeup fd, signal.raise_signal, signal.sigwait."
+cpython_path: Modules/signalmodule.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/signalmodule.c" />
+
+This annotation covers signal registration and the wakeup fd mechanism. See `modules_signal4_detail` for `signal.getsignal`, `signal.alarm`, `signal.pause`, and the GIL interaction.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `signal.signal` | Register a Python signal handler |
+| 81-160 | `signal.set_wakeup_fd` | Wake up `select`/`poll` on signal receipt |
+| 161-260 | `signal.raise_signal` | Send a signal to the calling process |
+| 261-360 | `signal.sigwait` | Block until one of a set of signals arrives |
+| 361-500 | Signal delivery in the eval loop | How `eval_breaker` delivers signals |
+
+## Reading
+
+### `signal.signal`
+
+```c
+// CPython: Modules/signalmodule.c:480 signal_signal_impl
+static PyObject *
+signal_signal_impl(PyObject *module, int signalnum, PyObject *handler)
+{
+    /* Install handler: SIG_IGN, SIG_DFL, or a Python callable */
+    PyObject *old_handler = Handlers[signalnum].func;
+    if (PyCallable_Check(handler)) {
+        struct sigaction sa;
+        sa.sa_handler = signal_handler;  /* C-level trampoline */
+        sa.sa_flags = SA_RESTART;
+        sigemptyset(&sa.sa_mask);
+        sigaction(signalnum, &sa, NULL);
+        Handlers[signalnum].func = Py_NewRef(handler);
+    } else if (handler == SIG_IGN_OBJ) {
+        signal(signalnum, SIG_IGN);
+        Handlers[signalnum].func = Py_NewRef(SIG_IGN_OBJ);
+    }
+    ...
+    return old_handler;
+}
+```
+
+`signal.signal(SIGTERM, handler)` installs `signal_handler` as the C-level handler. `signal_handler` sets a flag in `Handlers` and writes to the wakeup fd. The Python handler is called later in the eval loop, not in the C signal handler (which runs in an async-signal-unsafe context).
+
+### `signal.set_wakeup_fd`
+
+```c
+// CPython: Modules/signalmodule.c:560 signal_set_wakeup_fd
+static PyObject *
+signal_set_wakeup_fd(PyObject *self, PyObject *args, PyObject *kwds)
+{
+    /* Write a byte to this fd when a signal arrives, waking a
+       blocked select/poll/epoll call. */
+    int fd = PyLong_AsLong(...);
+    int old_fd = wakeup.fd;
+    wakeup.fd = fd;
+    wakeup.warn_on_full_buffer = warn_on_full_buffer;
+    return PyLong_FromLong(old_fd);
+}
+```
+
+`signal.set_wakeup_fd(r)` where `r` is the read end of a pipe: the main loop selects on both `r` and network fds. On signal, a byte is written to the write end, unblocking the select.
+
+### Signal delivery in eval loop
+
+```c
+// CPython: Python/ceval.c:480 handle_signals
+static int
+handle_signals(PyThreadState *tstate)
+{
+    /* Called when eval_breaker is set */
+    for (int i = 1; i < NSIG; i++) {
+        if (Handlers[i].tripped) {
+            Handlers[i].tripped = 0;
+            PyObject *handler = Handlers[i].func;
+            PyObject *args = Py_BuildValue("(iO)", i, tstate->frame);
+            PyObject *result = PyObject_Call(handler, args, NULL);
+            ...
+        }
+    }
+    return 0;
+}
+```
+
+Signal handlers are not called in the C signal handler. The C handler sets `Handlers[i].tripped = 1` and sets `eval_breaker`. On the next opcode dispatch, `handle_signals` is called and invokes the Python handler with `(signum, frame)`.
+
+## gopy notes
+
+`signal.signal` is `module/signal.Signal` in `module/signal/module.go`. Go's `os/signal.Notify` is used to register a channel-based handler. `set_wakeup_fd` writes to the `vm.WakeupFd`. Signal delivery calls the Python handler via `vm.CallFunction` at a safe point in the eval loop.
