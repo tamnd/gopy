@@ -197,7 +197,8 @@ func typeSingletons() []struct {
 // CPython: Objects/longobject.c:6438 PyLong_Type (tp_new = long_new, tp_call NULL)
 func wireTypeCalls() {
 	wireOnce.Do(func() {
-		bindCtor(objects.StrType(), StrOf)
+		objects.SetStrTpNewBase(StrOf)
+		bindCtorDescr(objects.StrType(), StrOf)
 		bindCtor(objects.IntType, IntCtor)
 		bindCtor(objects.FloatType, FloatCtor)
 		bindCtor(objects.BoolType, BoolCtor)
@@ -229,14 +230,25 @@ func bindCtor(t *objects.Type, fn func(args []objects.Object, kwargs map[string]
 	t.TpNew = func(_ *objects.Type, args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error) {
 		return fn(args, kwargs)
 	}
+	bindCtorDescr(t, fn)
+}
+
+// bindCtorDescr installs the __new__ descriptor without touching
+// TpNew. Used when a type already wired a subtype-aware TpNew (e.g.
+// str via SetStrTpNewBase) and only the descriptor exposure is left.
+func bindCtorDescr(t *objects.Type, fn func(args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error)) {
 	wrapperName := t.Name + ".__new__"
 	objects.SetTypeDescr(t, "__new__", objects.NewBuiltinFunction(wrapperName,
 		func(args []objects.Object, kwargs map[string]objects.Object) (objects.Object, error) {
 			if len(args) < 1 {
 				return nil, fmt.Errorf("TypeError: %s(): not enough arguments", wrapperName)
 			}
-			if _, ok := args[0].(*objects.Type); !ok {
+			cls, ok := args[0].(*objects.Type)
+			if !ok {
 				return nil, fmt.Errorf("TypeError: %s(X): X is not a type object", wrapperName)
+			}
+			if tn := t.TpNew; tn != nil {
+				return tn(cls, args[1:], kwargs)
 			}
 			return fn(args[1:], kwargs)
 		}))

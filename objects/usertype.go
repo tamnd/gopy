@@ -58,6 +58,12 @@ func NewUserTypeKwargs(name string, bases []*Type, ns *Dict, kwargs map[string]O
 		// Inherit DictType.TpNew so instances are *Dict, not *Instance.
 		// CPython: Objects/typeobject.c:7521 inherit_slots (tp_new slot)
 		t.TpNew = DictType.TpNew
+	case IsSubtype(t, strType):
+		t.Getattro = strSubclassGetAttr
+		t.Setattro = strSubclassSetAttr
+		// Inherit strType.TpNew so instances are *Unicode (tagged with
+		// the subclass), not *Instance.
+		t.TpNew = strType.TpNew
 	default:
 		t.Getattro = instanceGetAttr
 		t.Setattro = instanceSetAttr
