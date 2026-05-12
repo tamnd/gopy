@@ -1,0 +1,90 @@
+---
+title: Modules/posixmodule.c (part 6)
+description: "posixmodule.c part 6: os.stat, os.scandir, DirEntry, os.listdir, stat_result."
+cpython_path: Modules/posixmodule.c
+cpython_version: "3.14"
+lines: 600
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/posixmodule.c" />
+
+This annotation covers filesystem metadata and directory listing. See `modules_posix5_detail` for `os.open`, `os.read`, `os.write`, `os.close`, and file descriptor management.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `os.stat` / `os.lstat` | Get file metadata; follow/don't follow symlinks |
+| 81-180 | `stat_result` | Named tuple wrapping `struct stat` fields |
+| 181-280 | `os.scandir` | Iterator yielding `DirEntry` objects |
+| 281-380 | `DirEntry` | File metadata with lazy `stat()` |
+| 381-600 | `os.listdir` | Return list of filenames in a directory |
+
+## Reading
+
+### `os.stat`
+
+```c
+// CPython: Modules/posixmodule.c:4240 os_stat_impl
+static PyObject *
+os_stat_impl(PyObject *module, path_t *path, int dir_fd, int follow_symlinks)
+{
+    struct stat st;
+    int res;
+    Py_BEGIN_ALLOW_THREADS
+    if (follow_symlinks) {
+        res = STAT(path->narrow, &st);
+    } else {
+        res = LSTAT(path->narrow, &st);
+    }
+    Py_END_ALLOW_THREADS
+    if (res != 0) return path_error(path);
+    return _pystat_fromstructstat(module, &st);
+}
+```
+
+`os.stat` calls `stat(2)` (follows symlinks) or `lstat(2)` (doesn't follow). The GIL is released for the syscall. `_pystat_fromstructstat` converts the C `struct stat` to a Python `stat_result` named tuple.
+
+### `stat_result`
+
+```c
+// CPython: Modules/posixmodule.c:1940 stat_result fields
+/* stat_result fields:
+   st_mode, st_ino, st_dev, st_nlink, st_uid, st_gid,
+   st_size, st_atime, st_mtime, st_ctime,
+   Plus platform extensions: st_blocks, st_blksize, st_rdev, st_flags */
+```
+
+`os.stat(path).st_size` returns the file size in bytes. `st_mode` is the mode bits (use `stat.S_ISREG(st.st_mode)` to check if it's a regular file). `st_atime`, `st_mtime`, `st_ctime` are floating-point POSIX timestamps.
+
+### `os.scandir`
+
+```c
+// CPython: Modules/posixmodule.c:12240 ScandirIterator_iternext
+static PyObject *
+ScandirIterator_iternext(ScandirIterator *self)
+{
+    struct dirent *direntp = NULL;
+    Py_BEGIN_ALLOW_THREADS
+    errno = 0;
+    direntp = readdir(self->dirp);
+    Py_END_ALLOW_THREADS
+    if (!direntp) {
+        if (errno == 0) return NULL;  /* StopIteration */
+        return path_error(&self->path);
+    }
+    if (direntp->d_name[0] == '.' && (direntp->d_name[1] == '\0' ||
+        (direntp->d_name[1] == '.' && direntp->d_name[2] == '\0')))
+        return ScandirIterator_iternext(self);  /* Skip . and .. */
+    return DirEntry_from_posix_info(self->module, self->path.narrow, direntp, ...);
+}
+```
+
+`scandir` calls `readdir` one entry at a time. `.` and `..` are skipped. Each `DirEntry` caches the dirent info so that `entry.is_file()` can often be answered without an extra `stat` call (on Linux, `d_type` is available; on other platforms, a `stat` is needed).
+
+## gopy notes
+
+`os.stat` is `module/os.Stat` in `module/os/module.go`. It calls `syscall.Stat` or `syscall.Lstat`. `stat_result` is a Go struct that implements the named-tuple protocol. `os.scandir` returns a Go channel-backed iterator using `os.ReadDir`. `DirEntry.stat()` calls `os.Lstat` lazily.

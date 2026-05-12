@@ -1,0 +1,91 @@
+---
+title: Objects/funcobject.c (part 3)
+description: "Objects/funcobject.c part 3: PyFunctionObject layout, func_version, __annotations__, __kwdefaults__, __wrapped__."
+cpython_path: Objects/funcobject.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Objects/funcobject.c" />
+
+This annotation covers the function object's attributes. See `objects_function2_detail` for `PyFunction_New`, `func_call`, `__defaults__`, and closure variables.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `PyFunctionObject` fields | `func_code`, `func_globals`, `func_defaults`, etc. |
+| 81-160 | `func_version` | Cache invalidation tag for `CALL` specialization |
+| 161-240 | `func.__annotations__` | PEP 3107 parameter and return annotations |
+| 241-320 | `func.__kwdefaults__` | Default values for keyword-only parameters |
+| 321-500 | `func.__wrapped__` | Reference to the wrapped function (for `functools.wraps`) |
+
+## Reading
+
+### `PyFunctionObject` fields
+
+```c
+// CPython: Objects/funcobject.c:20 PyFunctionObject
+struct PyFunctionObject {
+    PyObject_HEAD
+    PyObject *func_code;       /* PyCodeObject */
+    PyObject *func_globals;    /* module __dict__ */
+    PyObject *func_defaults;   /* tuple of positional defaults or NULL */
+    PyObject *func_kwdefaults; /* dict of keyword-only defaults or NULL */
+    PyObject *func_closure;    /* tuple of cells or NULL */
+    PyObject *func_doc;        /* __doc__ */
+    PyObject *func_name;       /* __name__ */
+    PyObject *func_dict;       /* __dict__ */
+    PyObject *func_weakreflist;
+    PyObject *func_module;     /* __module__ */
+    PyObject *func_annotations;/* __annotations__: dict or NULL */
+    PyObject *func_typeparams; /* PEP 695 type params */
+    vectorcallfunc vectorcall;
+    uint32_t func_version;
+};
+```
+
+`func_globals` is the module's `__dict__` at definition time. Global variable lookups in the function use this dict. `func_closure` contains the cells shared with enclosing scopes.
+
+### `func_version`
+
+```c
+// CPython: Objects/funcobject.c:180 _PyFunction_SetVersion
+void
+_PyFunction_SetVersion(PyFunctionObject *func, uint32_t version)
+{
+    func->func_version = version;
+    /* Cache version in the first instruction's cache */
+    _Py_SET_OPCODE_CACHE((_Py_CODEUNIT *)PyBytes_AS_STRING(func->func_code->co_code),
+                         version);
+}
+```
+
+`func_version` is set when a function is created and invalidated when `__defaults__`, `__code__`, or other cached attributes change. `CALL_PY_EXACT_ARGS` checks the version to ensure its cached `co_argcount` is still valid.
+
+### `func.__annotations__`
+
+```c
+// CPython: Objects/funcobject.c:580 func_get_annotations
+static PyObject *
+func_get_annotations(PyFunctionObject *op, void *Py_UNUSED(ignored))
+{
+    if (op->func_annotations == NULL) {
+        op->func_annotations = PyDict_New();
+    }
+    if (PyTuple_Check(op->func_annotations)) {
+        /* 3.14+ lazy annotation evaluation */
+        return _PyFunction_GetAnnotationsDict(op);
+    }
+    return Py_NewRef(op->func_annotations);
+}
+```
+
+In 3.14+, `from __future__ import annotations` stores annotations as a tuple of `(name, value_expr)` pairs for lazy evaluation. `__annotations__` getter evaluates them on demand. Before 3.14, they were always eagerly evaluated.
+
+## gopy notes
+
+`PyFunctionObject` fields map to `objects.Function` struct in `objects/function.go`. `func_version` is `objects.Function.Version`, incremented on modification. `func.__annotations__` returns `objects.Function.Annotations`, lazily evaluated from the code object's annotation table.

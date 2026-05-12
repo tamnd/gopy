@@ -1,0 +1,97 @@
+---
+title: Lib/heapq.py (part 3)
+description: "heapq.py part 3: heapq.merge, heapq.nlargest, heapq.nsmallest, heapreplace, heappushpop."
+cpython_path: Lib/heapq.py
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/heapq.py" />
+
+This annotation covers heap utilities beyond basic push/pop. See `lib_heapq2_detail` for `heappush`, `heappop`, `heapify`, and the min-heap invariant.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `heapreplace` | Pop the smallest, push new item in one O(log n) step |
+| 81-160 | `heappushpop` | Push then pop (or pop then push) for efficiency |
+| 161-260 | `heapq.merge` | Lazy k-way merge of sorted iterables |
+| 261-360 | `heapq.nlargest` | Return n largest elements |
+| 361-500 | `heapq.nsmallest` | Return n smallest elements |
+
+## Reading
+
+### `heapreplace`
+
+```python
+# CPython: Lib/heapq.py:210 heapreplace
+def heapreplace(heap, item):
+    returnvalue = heap[0]
+    heap[0] = item
+    _siftup(heap, 0)
+    return returnvalue
+```
+
+`heapreplace` is faster than `heappop` followed by `heappush` because it avoids the `_siftdown` that `heappush` requires. The root is replaced and sifted down. Used in `nlargest` and `merge` to efficiently advance through sorted iterables.
+
+### `heapq.merge`
+
+```python
+# CPython: Lib/heapq.py:320 merge
+def merge(*iterables, key=None, reverse=False):
+    # Initialize: (value, order, iter) for each iterable
+    h = []
+    h_append = h.append
+    for order, it in enumerate(map(iter, iterables)):
+        try:
+            next_val = next(it)
+            if key is None:
+                h_append([next_val, order, it])
+            else:
+                h_append([key(next_val), next_val, order, it])
+        except StopIteration:
+            pass
+    heapify(h)
+    if key is None:
+        while h:
+            val, order, it = h[0]
+            yield val
+            try:
+                h[0][0] = next(it)
+                _siftup(h, 0)
+            except StopIteration:
+                heappop(h)
+```
+
+`merge` uses a heap of `[current_value, tiebreaker, iterator]` triples. `heapreplace` (implemented inline as `h[0] = ...; _siftup`) advances the winner to its next element. The `order` tiebreaker ensures a stable merge when values are equal.
+
+### `heapq.nlargest`
+
+```python
+# CPython: Lib/heapq.py:540 nlargest
+def nlargest(n, iterable, key=None):
+    if n < 0: return []
+    it = iter(iterable)
+    result = _nlargest(n, it)  # heapify the first n elements
+    if key is None:
+        for elem in it:
+            if elem > result[0]:
+                heapreplace(result, elem)
+    else:
+        for elem in it:
+            k = key(elem)
+            if k > result[0][0]:
+                heapreplace(result, (k, elem))
+    result.sort(reverse=True)
+    return [r[-1] for r in result] if key else result
+```
+
+`nlargest(n, it)` maintains a min-heap of the `n` largest seen. When a new element exceeds the current minimum, it replaces it via `heapreplace`. Final sort produces descending order.
+
+## gopy notes
+
+`heapreplace` is `module/heapq.HeapReplace` in `module/heapq/module.go`. `merge` uses a Go heap (`container/heap`) of `(value, iterator)` pairs. `nlargest` and `nsmallest` use a fixed-size heap that grows to `n` then uses `heapreplace`.

@@ -1,0 +1,88 @@
+---
+title: Python/ceval.c (part 68)
+description: "Python/ceval.c part 68: SUBSCR specializations, BINARY_SUBSCR_LIST_INT, BINARY_SUBSCR_TUPLE_INT, BINARY_SUBSCR_DICT."
+cpython_path: Python/ceval.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Python/ceval.c" />
+
+This annotation covers `BINARY_SUBSCR` specializations. See `python_ceval67_detail` for `COMPARE_OP` specializations.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `BINARY_SUBSCR` baseline | Generic `obj[key]` via `mp_subscript` |
+| 81-160 | `BINARY_SUBSCR_LIST_INT` | Fast path: `list[integer_index]` |
+| 161-240 | `BINARY_SUBSCR_TUPLE_INT` | Fast path: `tuple[integer_index]` |
+| 241-320 | `BINARY_SUBSCR_DICT` | Fast path: dict lookup |
+| 321-500 | `STORE_SUBSCR_LIST_INT` | Fast path: `list[i] = val` |
+
+## Reading
+
+### `BINARY_SUBSCR_LIST_INT`
+
+```c
+// CPython: Python/ceval.c:2640 BINARY_SUBSCR_LIST_INT
+inst(BINARY_SUBSCR_LIST_INT, (list, sub -- res)) {
+    DEOPT_IF(!PyList_CheckExact(list), BINARY_SUBSCR);
+    DEOPT_IF(!_PyLong_IsCompact((PyLongObject *)sub), BINARY_SUBSCR);
+    Py_ssize_t index = _PyLong_CompactValue((PyLongObject *)sub);
+    if (index < 0) index += PyList_GET_SIZE(list);
+    DEOPT_IF((size_t)index >= (size_t)PyList_GET_SIZE(list), BINARY_SUBSCR);
+    res = PyList_GET_ITEM(list, index);
+    Py_INCREF(res);
+    Py_DECREF(list); Py_DECREF(sub);
+}
+```
+
+`lst[i]` for a compact integer index directly accesses `ob_item[index]` without range-check overhead (range is checked via an unsigned comparison which handles negatives too). `PyList_GET_ITEM` is a direct array dereference.
+
+### `BINARY_SUBSCR_DICT`
+
+```c
+// CPython: Python/ceval.c:2720 BINARY_SUBSCR_DICT
+inst(BINARY_SUBSCR_DICT, (dict, sub -- res)) {
+    DEOPT_IF(!PyDict_CheckExact(dict), BINARY_SUBSCR);
+    res = PyDict_GetItemWithError(dict, sub);
+    if (res == NULL) {
+        if (!_PyErr_Occurred(tstate)) {
+            _PyErr_SetKeyError(sub);
+        }
+        Py_DECREF(dict); Py_DECREF(sub);
+        ERROR_IF(true, error);
+    }
+    Py_INCREF(res);
+    Py_DECREF(dict); Py_DECREF(sub);
+}
+```
+
+`d[key]` for a dict goes through `PyDict_GetItemWithError` (raises `KeyError` unlike `PyDict_GetItem`). The specialization checks `PyDict_CheckExact` to exclude `defaultdict` and other subclasses which may override `__getitem__`.
+
+### `STORE_SUBSCR_LIST_INT`
+
+```c
+// CPython: Python/ceval.c:2780 STORE_SUBSCR_LIST_INT
+inst(STORE_SUBSCR_LIST_INT, (value, list, sub --)) {
+    DEOPT_IF(!PyList_CheckExact(list), STORE_SUBSCR);
+    DEOPT_IF(!_PyLong_IsCompact((PyLongObject *)sub), STORE_SUBSCR);
+    Py_ssize_t index = _PyLong_CompactValue((PyLongObject *)sub);
+    if (index < 0) index += PyList_GET_SIZE(list);
+    DEOPT_IF((size_t)index >= (size_t)PyList_GET_SIZE(list), STORE_SUBSCR);
+    PyObject *old = PyList_GET_ITEM(list, index);
+    PyList_SET_ITEM(list, index, value);
+    Py_DECREF(old);
+    Py_DECREF(list); Py_DECREF(sub);
+}
+```
+
+`lst[i] = v` directly sets `ob_item[index]` and decrefs the old value. No bounds-check overhead beyond the deopt condition.
+
+## gopy notes
+
+`BINARY_SUBSCR_LIST_INT` is in `vm/eval_simple.go`. It reads `objects.List.Items[index]`. `BINARY_SUBSCR_DICT` calls `objects.DictGetWithError`. `STORE_SUBSCR_LIST_INT` replaces `objects.List.Items[index]`. All deopts fall through to the generic `BINARY_SUBSCR` handler.
