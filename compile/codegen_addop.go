@@ -155,6 +155,8 @@ func constCacheKey(value any) any {
 		return tagged{"float32", math.Float32bits(x)}
 	case complex128:
 		return tagged{"complex128", [2]uint64{math.Float64bits(real(x)), math.Float64bits(imag(x))}}
+	case []byte:
+		return tagged{"bytes", string(x)}
 	}
 	// Fall back to a type-tagged pair for everything else; Go == on
 	// the struct uses == on both fields, which gives the same

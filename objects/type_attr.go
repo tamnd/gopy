@@ -30,6 +30,21 @@ func typeGetAttr(o Object, name Object) (Object, error) {
 	metatype := tp.Type()
 	nameStr := attrNameStr(name)
 
+	// type.__dict__ returns a view of the type's own descriptor table.
+	// CPython: Objects/typeobject.c:5091 type_getattro (__dict__ special-case via
+	// tp_dict / PyObject_GenericGetDict)
+	if nameStr == "__dict__" {
+		d := NewDict()
+		if descrs, ok2 := typeDescrTable[tp]; ok2 {
+			for k, v := range descrs {
+				if err := d.SetItem(NewStr(k), v); err != nil {
+					return nil, err
+				}
+			}
+		}
+		return d, nil
+	}
+
 	metaAttr, _ := LookupDescriptor(metatype, nameStr)
 	if metaAttr != nil {
 		mt := metaAttr.Type()

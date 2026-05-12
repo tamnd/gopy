@@ -1,6 +1,8 @@
 // Coverage for the open() builtin. Argument validation and mode
-// parsing live in this package; the round-trip through the File type
-// (read what was written) is exercised end-to-end via vm/open_test.go.
+// parsing now live in module/io; builtins.Open delegates there.
+// Tests use the attribute-dispatch helpers to stay type-agnostic
+// since open() now returns *io.TextIOWrapper or *io.FileIO instead
+// of *objects.File.
 
 package builtins
 
@@ -10,8 +12,42 @@ import (
 	"strings"
 	"testing"
 
+	_io "github.com/tamnd/gopy/module/io"
 	"github.com/tamnd/gopy/objects"
 )
+
+// callMethod invokes a named method on obj (via getattr) with args.
+func callMethod(t *testing.T, obj objects.Object, method string, args ...objects.Object) objects.Object {
+	t.Helper()
+	attr, err := obj.Type().Getattro(obj, objects.NewStr(method))
+	if err != nil {
+		t.Fatalf("getattr(%q): %v", method, err)
+	}
+	fn, ok := attr.(*objects.BuiltinFunction)
+	if !ok {
+		t.Fatalf("attr %q is %T, want *BuiltinFunction", method, attr)
+	}
+	result, err := fn.Fn(args, nil)
+	if err != nil {
+		t.Fatalf("%s(): %v", method, err)
+	}
+	return result
+}
+
+func closeObj(t *testing.T, obj objects.Object) {
+	t.Helper()
+	callMethod(t, obj, "close")
+}
+
+func readAll(t *testing.T, obj objects.Object) objects.Object {
+	t.Helper()
+	return callMethod(t, obj, "read", objects.NewInt(-1))
+}
+
+func writeStr(t *testing.T, obj objects.Object, s string) {
+	t.Helper()
+	callMethod(t, obj, "write", objects.NewStr(s))
+}
 
 func TestOpenReadsExistingFile(t *testing.T) {
 	dir := t.TempDir()
@@ -25,15 +61,8 @@ func TestOpenReadsExistingFile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open(): %v", err)
 	}
-	fi, ok := out.(*objects.File)
-	if !ok {
-		t.Fatalf("open returned %T, want *File", out)
-	}
-	defer fi.Close()
-	got, err := fi.Read(-1)
-	if err != nil {
-		t.Fatalf("Read: %v", err)
-	}
+	defer closeObj(t, out)
+	got := readAll(t, out)
 	if got.(*objects.Unicode).Value() != "hello" {
 		t.Fatalf("Read = %q", got.(*objects.Unicode).Value())
 	}
@@ -49,13 +78,8 @@ func TestOpenWritesAndCreates(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open(w): %v", err)
 	}
-	fi := out.(*objects.File)
-	if _, err := fi.Write(objects.NewStr("written")); err != nil {
-		t.Fatalf("Write: %v", err)
-	}
-	if err := fi.Close(); err != nil {
-		t.Fatalf("Close: %v", err)
-	}
+	writeStr(t, out, "written")
+	closeObj(t, out)
 	disk, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatalf("ReadFile: %v", err)
@@ -78,12 +102,8 @@ func TestOpenBinaryReturnsBytes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open(rb): %v", err)
 	}
-	fi := out.(*objects.File)
-	defer fi.Close()
-	got, err := fi.Read(-1)
-	if err != nil {
-		t.Fatalf("Read: %v", err)
-	}
+	defer closeObj(t, out)
+	got := readAll(t, out)
 	b, ok := got.(*objects.Bytes)
 	if !ok {
 		t.Fatalf("binary read returned %T, want *Bytes", got)
@@ -180,13 +200,8 @@ func TestOpenAppendCreatesAndAppends(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open(a): %v", err)
 	}
-	fi := out.(*objects.File)
-	if _, err := fi.Write(objects.NewStr("second\n")); err != nil {
-		t.Fatalf("Write: %v", err)
-	}
-	if err := fi.Close(); err != nil {
-		t.Fatalf("Close: %v", err)
-	}
+	writeStr(t, out, "second\n")
+	closeObj(t, out)
 	disk, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatalf("ReadFile: %v", err)
@@ -224,13 +239,38 @@ func TestOpenUpdateModeReadable(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open(r+): %v", err)
 	}
-	fi := out.(*objects.File)
-	defer fi.Close()
-	got, err := fi.Read(-1)
-	if err != nil {
-		t.Fatalf("Read: %v", err)
-	}
+	defer closeObj(t, out)
+	got := readAll(t, out)
 	if got.(*objects.Unicode).Value() != "zzz" {
 		t.Fatalf("Read after r+ = %q, want zzz", got.(*objects.Unicode).Value())
 	}
+}
+
+// TestIOOpenReturnTypes verifies that _io.Open returns the right concrete types.
+func TestIOOpenReturnTypes(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "f.txt")
+	if err := os.WriteFile(path, []byte("hi"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// text mode -> TextIOWrapper
+	out, err := _io.Open([]objects.Object{objects.NewStr(path)}, nil)
+	if err != nil {
+		t.Fatalf("open text: %v", err)
+	}
+	if _, ok := out.(*_io.TextIOWrapper); !ok {
+		t.Fatalf("text open returned %T, want *_io.TextIOWrapper", out)
+	}
+	closeObj(t, out)
+
+	// binary mode -> FileIO
+	out2, err := _io.Open([]objects.Object{objects.NewStr(path), objects.NewStr("rb")}, nil)
+	if err != nil {
+		t.Fatalf("open binary: %v", err)
+	}
+	if _, ok := out2.(*_io.FileIO); !ok {
+		t.Fatalf("binary open returned %T, want *_io.FileIO", out2)
+	}
+	closeObj(t, out2)
 }

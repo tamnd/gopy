@@ -100,11 +100,14 @@ func (e *evalState) handleException(err error) bool {
 	}
 	pyerrors.Clear(e.ts)
 
-	// Unwind the value stack to the saved depth recorded in the
-	// exception table entry.
-	if entry.depth < e.f.StackTop {
-		e.f.StackTop = entry.depth
-	}
+	// Unconditionally restore the stack depth to the value recorded in
+	// the exception table entry. CPython always sets the stack pointer
+	// here; only reducing it was a bug (StackTop could be below
+	// entry.depth if the exception fired before any pushes in the try
+	// body).
+	//
+	// CPython: Python/ceval.c exception_unwind `_PyFrame_SetStackPointer`
+	e.f.StackTop = entry.depth
 
 	// For SETUP_WITH / SETUP_CLEANUP regions, push the bytecode lasti
 	// in code-units. The with-statement teardown reads it to resume at

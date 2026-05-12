@@ -52,6 +52,15 @@ func init() {
 	bind("format_map", strFormatMapMethod)
 	bind("__contains__", strContainsMethod)
 	bind("__len__", strLenMethod)
+	bind("translate", strTranslateMethod)
+	bind("zfill", strZfillMethod)
+	bind("center", strCenterMethod)
+	bind("ljust", strLjustMethod)
+	bind("rjust", strRjustMethod)
+	bind("expandtabs", strExpandTabsMethod)
+	bind("removeprefix", strRemovePrefixMethod)
+	bind("removesuffix", strRemoveSuffixMethod)
+	SetTypeDescr(strType, "maketrans", NewStaticMethod(NewBuiltinFunction("maketrans", strMakeTrans)))
 }
 
 func selfStr(args []Object, name string) (string, error) {
@@ -631,6 +640,332 @@ func strFormatMapMethod(args []Object, _ map[string]Object) (Object, error) {
 		return nil, ferr
 	}
 	return NewStr(out), nil
+}
+
+// strTranslateMethod backs str.translate(table).
+// table is a dict mapping ordinals to ordinals, strings, or None.
+//
+// CPython: Objects/unicodeobject.c:11231 unicode_translate_impl
+func strTranslateMethod(args []Object, _ map[string]Object) (Object, error) {
+	s, err := selfStr(args, "translate")
+	if err != nil {
+		return nil, err
+	}
+	if len(args) < 2 {
+		return nil, fmt.Errorf("TypeError: translate() takes exactly one argument")
+	}
+	table, ok := args[1].(*Dict)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: translate() argument must be a dict")
+	}
+	var out []rune
+	for _, r := range s {
+		key := NewInt(int64(r))
+		v, err := table.GetItem(key)
+		if err != nil {
+			out = append(out, r)
+			continue
+		}
+		if IsNone(v) {
+			continue
+		}
+		switch tv := v.(type) {
+		case *Int:
+			n, _ := tv.Int64()
+			out = append(out, rune(n))
+		case *Unicode:
+			out = append(out, []rune(tv.Value())...)
+		default:
+			return nil, fmt.Errorf("TypeError: character mapping must return integer, None or str, not '%s'", v.Type().Name)
+		}
+	}
+	return NewStr(string(out)), nil
+}
+
+// strMakeTrans backs str.maketrans(x[, y[, z]]).
+//
+// CPython: Objects/unicodeobject.c:13476 unicode_maketrans_impl
+func strMakeTrans(args []Object, _ map[string]Object) (Object, error) {
+	if len(args) == 0 || len(args) > 3 {
+		return nil, fmt.Errorf("TypeError: maketrans() takes 1 to 3 arguments (%d given)", len(args))
+	}
+	if len(args) == 1 {
+		return makeTransFromDict(args[0])
+	}
+	return makeTransFromStrings(args)
+}
+
+// makeTransFromDict builds the translation table from the one-arg
+// dict form. Each key must be an int or a length-1 string.
+func makeTransFromDict(arg Object) (Object, error) {
+	mp, ok := arg.(*Dict)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: maketrans() argument 1 must be a dict")
+	}
+	out := NewDict()
+	for _, k := range mp.Keys() {
+		v, _ := mp.GetItem(k)
+		intKey, err := makeTransKey(k)
+		if err != nil {
+			return nil, err
+		}
+		if err := out.SetItem(intKey, v); err != nil {
+			return nil, err
+		}
+	}
+	return out, nil
+}
+
+func makeTransKey(k Object) (Object, error) {
+	switch kt := k.(type) {
+	case *Int:
+		return kt, nil
+	case *Unicode:
+		rs := []rune(kt.Value())
+		if len(rs) != 1 {
+			return nil, fmt.Errorf("TypeError: string keys in translate table must be of length 1")
+		}
+		return NewInt(int64(rs[0])), nil
+	}
+	return nil, fmt.Errorf("TypeError: maketrans() argument 1 has bad key type")
+}
+
+// makeTransFromStrings builds the table from the (from, to[, delete])
+// string form. Pairs each rune in `from` with the matching rune in
+// `to`, then maps every rune in `delete` to None.
+func makeTransFromStrings(args []Object) (Object, error) {
+	fromStr, ok1 := args[0].(*Unicode)
+	toStr, ok2 := args[1].(*Unicode)
+	if !ok1 || !ok2 {
+		return nil, fmt.Errorf("TypeError: maketrans() argument 1 must be str")
+	}
+	fromR := []rune(fromStr.Value())
+	toR := []rune(toStr.Value())
+	if len(fromR) != len(toR) {
+		return nil, fmt.Errorf("ValueError: the first two maketrans arguments must have equal length")
+	}
+	out := NewDict()
+	for i, r := range fromR {
+		if err := out.SetItem(NewInt(int64(r)), NewInt(int64(toR[i]))); err != nil {
+			return nil, err
+		}
+	}
+	if len(args) == 3 {
+		delStr, ok := args[2].(*Unicode)
+		if !ok {
+			return nil, fmt.Errorf("TypeError: maketrans() argument 3 must be str")
+		}
+		for _, r := range delStr.Value() {
+			if err := out.SetItem(NewInt(int64(r)), None()); err != nil {
+				return nil, err
+			}
+		}
+	}
+	return out, nil
+}
+
+// strZfillMethod backs str.zfill(width).
+//
+// CPython: Objects/unicodeobject.c:12994 unicode_zfill_impl
+func strZfillMethod(args []Object, _ map[string]Object) (Object, error) {
+	s, err := selfStr(args, "zfill")
+	if err != nil {
+		return nil, err
+	}
+	if len(args) < 2 {
+		return nil, fmt.Errorf("TypeError: zfill() takes exactly one argument")
+	}
+	w, ok := args[1].(*Int)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: zfill() argument must be int")
+	}
+	width, _ := w.Int64()
+	rs := []rune(s)
+	n := int(width) - len(rs)
+	if n <= 0 {
+		return NewStr(s), nil
+	}
+	pad := strings.Repeat("0", n)
+	if len(rs) > 0 && (rs[0] == '+' || rs[0] == '-') {
+		return NewStr(string(rs[0]) + pad + string(rs[1:])), nil
+	}
+	return NewStr(pad + s), nil
+}
+
+// strCenterMethod backs str.center(width[, fillchar]).
+//
+// CPython: Objects/unicodeobject.c:10769 unicode_center_impl
+func strCenterMethod(args []Object, _ map[string]Object) (Object, error) {
+	s, err := selfStr(args, "center")
+	if err != nil {
+		return nil, err
+	}
+	if len(args) < 2 {
+		return nil, fmt.Errorf("TypeError: center() takes at least one argument")
+	}
+	w, ok := args[1].(*Int)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: center() argument 1 must be int")
+	}
+	width, _ := w.Int64()
+	fill := " "
+	if len(args) >= 3 {
+		fc, fok := args[2].(*Unicode)
+		if !fok {
+			return nil, fmt.Errorf("TypeError: center() argument 2 must be str")
+		}
+		fill = fc.Value()
+	}
+	rs := []rune(s)
+	marg := int(width) - len(rs)
+	if marg <= 0 {
+		return NewStr(s), nil
+	}
+	left := marg / 2
+	right := marg - left
+	return NewStr(strings.Repeat(fill, left) + s + strings.Repeat(fill, right)), nil
+}
+
+// strLjustMethod backs str.ljust(width[, fillchar]).
+//
+// CPython: Objects/unicodeobject.c:10800 unicode_ljust_impl
+func strLjustMethod(args []Object, _ map[string]Object) (Object, error) {
+	s, err := selfStr(args, "ljust")
+	if err != nil {
+		return nil, err
+	}
+	if len(args) < 2 {
+		return nil, fmt.Errorf("TypeError: ljust() takes at least one argument")
+	}
+	w, ok := args[1].(*Int)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: ljust() argument 1 must be int")
+	}
+	width, _ := w.Int64()
+	fill := " "
+	if len(args) >= 3 {
+		fc, fok := args[2].(*Unicode)
+		if !fok {
+			return nil, fmt.Errorf("TypeError: ljust() argument 2 must be str")
+		}
+		fill = fc.Value()
+	}
+	rs := []rune(s)
+	n := int(width) - len(rs)
+	if n <= 0 {
+		return NewStr(s), nil
+	}
+	return NewStr(s + strings.Repeat(fill, n)), nil
+}
+
+// strRjustMethod backs str.rjust(width[, fillchar]).
+//
+// CPython: Objects/unicodeobject.c:10821 unicode_rjust_impl
+func strRjustMethod(args []Object, _ map[string]Object) (Object, error) {
+	s, err := selfStr(args, "rjust")
+	if err != nil {
+		return nil, err
+	}
+	if len(args) < 2 {
+		return nil, fmt.Errorf("TypeError: rjust() takes at least one argument")
+	}
+	w, ok := args[1].(*Int)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: rjust() argument 1 must be int")
+	}
+	width, _ := w.Int64()
+	fill := " "
+	if len(args) >= 3 {
+		fc, fok := args[2].(*Unicode)
+		if !fok {
+			return nil, fmt.Errorf("TypeError: rjust() argument 2 must be str")
+		}
+		fill = fc.Value()
+	}
+	rs := []rune(s)
+	n := int(width) - len(rs)
+	if n <= 0 {
+		return NewStr(s), nil
+	}
+	return NewStr(strings.Repeat(fill, n) + s), nil
+}
+
+// strExpandTabsMethod backs str.expandtabs([tabsize=8]).
+//
+// CPython: Objects/unicodeobject.c:11157 unicode_expandtabs_impl
+func strExpandTabsMethod(args []Object, _ map[string]Object) (Object, error) {
+	s, err := selfStr(args, "expandtabs")
+	if err != nil {
+		return nil, err
+	}
+	tabsize := 8
+	if len(args) >= 2 {
+		if i, ok := args[1].(*Int); ok {
+			n, _ := i.Int64()
+			tabsize = int(n)
+		}
+	}
+	var b strings.Builder
+	col := 0
+	for _, r := range s {
+		switch r {
+		case '\t':
+			if tabsize > 0 {
+				spaces := tabsize - (col % tabsize)
+				b.WriteString(strings.Repeat(" ", spaces))
+				col += spaces
+			}
+		case '\n', '\r':
+			b.WriteRune(r)
+			col = 0
+		default:
+			b.WriteRune(r)
+			col++
+		}
+	}
+	return NewStr(b.String()), nil
+}
+
+// strRemovePrefixMethod backs str.removeprefix(prefix).
+//
+// CPython: Objects/unicodeobject.c:12958 unicode_removeprefix_impl
+func strRemovePrefixMethod(args []Object, _ map[string]Object) (Object, error) {
+	s, err := selfStr(args, "removeprefix")
+	if err != nil {
+		return nil, err
+	}
+	if len(args) < 2 {
+		return nil, fmt.Errorf("TypeError: removeprefix() takes exactly one argument")
+	}
+	prefix, perr := strNeedle(args[1])
+	if perr != nil {
+		return nil, perr
+	}
+	if strings.HasPrefix(s, prefix) {
+		return NewStr(s[len(prefix):]), nil
+	}
+	return NewStr(s), nil
+}
+
+// strRemoveSuffixMethod backs str.removesuffix(suffix).
+//
+// CPython: Objects/unicodeobject.c:12976 unicode_removesuffix_impl
+func strRemoveSuffixMethod(args []Object, _ map[string]Object) (Object, error) {
+	s, err := selfStr(args, "removesuffix")
+	if err != nil {
+		return nil, err
+	}
+	if len(args) < 2 {
+		return nil, fmt.Errorf("TypeError: removesuffix() takes exactly one argument")
+	}
+	suffix, serr := strNeedle(args[1])
+	if serr != nil {
+		return nil, serr
+	}
+	if strings.HasSuffix(s, suffix) {
+		return NewStr(s[:len(s)-len(suffix)]), nil
+	}
+	return NewStr(s), nil
 }
 
 func tupleSlice(t *Tuple) []Object {

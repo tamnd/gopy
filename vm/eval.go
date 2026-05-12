@@ -12,6 +12,7 @@ package vm
 
 import (
 	"errors"
+	"fmt"
 
 	"github.com/tamnd/gopy/compile"
 	"github.com/tamnd/gopy/frame"
@@ -112,7 +113,11 @@ func (e *evalState) run() (objects.Object, error) {
 		}
 		op, oparg, ok := e.fetch()
 		if !ok {
-			return nil, errors.New("vm: instruction pointer past end of code")
+			name := "<unknown>"
+			if e.f != nil && e.f.Code != nil {
+				name = e.f.Code.Name
+			}
+			return nil, fmt.Errorf("vm: instruction pointer past end of code in %q (ip=%d, len=%d)", name, e.f.InstrPtr, len(e.f.Code.Code))
 		}
 		next, retVal, retErr, retDone, err := e.dispatch(op, oparg)
 		if retDone {
@@ -144,9 +149,20 @@ func (e *evalState) fetch() (op compile.Opcode, oparg uint32, ok bool) {
 		raw := compile.Opcode(co.Code[pc])
 		arg := uint32(co.Code[pc+1])
 		if raw != compile.EXTENDED_ARG {
+			// Point InstrPtr at the actual instruction so advance() and
+			// jumpBy() compute correct offsets past any EXTENDED_ARG prefix.
+			//
+			// CPython: Python/ceval_macros.h NEXTOPARG — next_instr is
+			// always left pointing at the real opcode, not the prefix.
+			e.f.InstrPtr = pc
 			return raw, oparg<<8 | arg, true
 		}
-		oparg = (oparg | arg) << 8
+		// CPython: each EXTENDED_ARG shifts the accumulated value left by 8
+		// and ORs in the new byte. The old formula (oparg | arg) << 8 was
+		// wrong: it shifted one position too many.
+		//
+		// CPython: Python/ceval.c TARGET(EXTENDED_ARG) oparg <<= 8; oparg |= arg
+		oparg = (oparg << 8) | arg
 		pc += 2
 	}
 }

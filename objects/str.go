@@ -60,11 +60,13 @@ func init() {
 	// Sequence.Repeat: 'ab' * 3 == 'ababab'.
 	//
 	// CPython: Objects/unicodeobject.c:11556 unicode_repeat
+	strType.Iter = strIter
 	strType.Sequence = &SequenceMethods{
 		Length: func(o Object) (int, error) {
 			s := o.(*Unicode)
 			return s.length, nil
 		},
+		GetItem: unicodeGetItem,
 		Repeat: func(o Object, n int) (Object, error) {
 			s := o.(*Unicode)
 			if n <= 0 {
@@ -85,6 +87,41 @@ func init() {
 			return NewStr(sa.v + sb.v), nil
 		},
 	}
+}
+
+// strIterator is the iterator returned by iter(str).
+//
+// CPython: Objects/unicodeobject.c:15126 unicodeiter_new
+type strIterator struct {
+	Header
+	src   *Unicode
+	runes []rune
+	pos   int
+}
+
+var strIterType = NewType("str_iterator", []*Type{objectType})
+
+func init() {
+	strIterType.Iter = func(o Object) (Object, error) { return o, nil }
+	strIterType.IterNext = func(o Object) (Object, error) {
+		it := o.(*strIterator)
+		if it.pos >= len(it.runes) {
+			return nil, ErrStopIteration
+		}
+		r := it.runes[it.pos]
+		it.pos++
+		return NewStr(string(r)), nil
+	}
+}
+
+// strIter returns an iterator over the code points of a string.
+//
+// CPython: Objects/unicodeobject.c:15126 unicodeiter_new
+func strIter(o Object) (Object, error) {
+	s := o.(*Unicode)
+	it := &strIterator{src: s, runes: []rune(s.v)}
+	it.init(strIterType)
+	return it, nil
 }
 
 // NewStr wraps s in a Unicode object. The constructor walks the
@@ -211,3 +248,25 @@ func unicodeRichCmp(a, b Object, op CompareOp) (Object, error) {
 //
 // CPython: Objects/unicodeobject.c:L15188 PyUnicode_Type
 func StrType() *Type { return strType }
+
+// unicodeGetItem returns the Nth code point of a string as a single-char
+// string. Supports negative indexing.
+//
+// CPython: Objects/unicodeobject.c:1848 unicode_getitem
+func unicodeGetItem(o Object, i int) (Object, error) {
+	s := o.(*Unicode)
+	if i < 0 {
+		i += s.length
+	}
+	if i < 0 || i >= s.length {
+		return nil, fmt.Errorf("IndexError: string index out of range")
+	}
+	n := 0
+	for _, r := range s.v {
+		if n == i {
+			return NewStr(string(r)), nil
+		}
+		n++
+	}
+	return nil, fmt.Errorf("IndexError: string index out of range")
+}

@@ -156,7 +156,30 @@ func (e *evalState) execReturnGenerator() (genResult, error) {
 	e.f.Owner = frame.OwnedByGenerator
 	savedTS := e.ts
 
-	gen := objects.NewGenerator(name)
+	// Determine the object type from the code flags.
+	//
+	// CPython: Python/bytecodes.c:4982 RETURN_GENERATOR (CO_GENERATOR /
+	// CO_COROUTINE / CO_ASYNC_GENERATOR dispatch)
+	flags := uint32(e.f.Code.Flags)
+	var (
+		yieldCh chan objects.GenMsg
+		sendCh  chan objects.GenMsg
+		retVal  objects.Object
+	)
+	switch {
+	case flags&compile.CoCoroutine != 0:
+		c := objects.NewCoroutine(name)
+		yieldCh, sendCh = c.YieldCh, c.SendCh
+		retVal = c
+	case flags&compile.CoAsyncGenerator != 0:
+		ag := objects.NewAsyncGenerator(name)
+		yieldCh, sendCh = ag.YieldCh, ag.SendCh
+		retVal = ag
+	default:
+		g := objects.NewGenerator(name)
+		yieldCh, sendCh = g.YieldCh, g.SendCh
+		retVal = g
+	}
 
 	go func() {
 		// Register the generator's goroutine with the active-thread map
@@ -170,10 +193,10 @@ func (e *evalState) execReturnGenerator() (genResult, error) {
 		// None (enforced by Generator.Send); we discard it here because
 		// the generator body begins from the frame's IP, not a yield
 		// point, so there is no stack slot waiting for the sent value.
-		msg := <-gen.SendCh
+		msg := <-sendCh
 		if msg.Err != nil {
 			// close() before first next(): just signal StopIteration.
-			gen.YieldCh <- objects.GenMsg{Err: objects.ErrStopIteration}
+			yieldCh <- objects.GenMsg{Err: objects.ErrStopIteration}
 			return
 		}
 		// Run the generator body. yieldCh/sendCh are threaded through
@@ -182,19 +205,19 @@ func (e *evalState) execReturnGenerator() (genResult, error) {
 			ts:       savedTS,
 			f:        savedFrame,
 			breaker:  breakerFor(savedTS),
-			genYield: gen.YieldCh,
-			genSend:  gen.SendCh,
+			genYield: yieldCh,
+			genSend:  sendCh,
 		}
 		_, runErr := ge.run()
 		if runErr != nil && !errors.Is(runErr, objects.ErrStopIteration) {
-			gen.YieldCh <- objects.GenMsg{Err: runErr}
+			yieldCh <- objects.GenMsg{Err: runErr}
 		} else {
-			gen.YieldCh <- objects.GenMsg{Err: objects.ErrStopIteration}
+			yieldCh <- objects.GenMsg{Err: objects.ErrStopIteration}
 		}
 	}()
 
-	// Return the generator to the caller as a terminal return.
-	return genResult{retVal: gen, retDone: true, ok: true}, nil
+	// Return the generator/coroutine/async-generator to the caller.
+	return genResult{retVal: retVal, retDone: true, ok: true}, nil
 }
 
 // execYieldValue ports YIELD_VALUE: pops the value to yield, sends it

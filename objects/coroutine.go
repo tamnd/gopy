@@ -43,6 +43,13 @@ func init() {
 	CoroutineType = NewType("coroutine", []*Type{objectType})
 	CoroutineType.Repr = coroRepr
 	CoroutineType.Str = coroRepr
+	CoroutineType.Getattro = GenericGetAttr
+	for name, fn := range map[string]func([]Object, map[string]Object) (Object, error){
+		"send":  coroSendMethod,
+		"close": coroCloseMethod,
+	} {
+		SetTypeDescr(CoroutineType, name, NewMethodDescr(CoroutineType, name, fn))
+	}
 
 	CoroAwaitType = NewType("coroutine_wrapper", []*Type{objectType})
 	CoroAwaitType.Iter = func(o Object) (Object, error) { return o, nil }
@@ -145,6 +152,31 @@ func (c *Coroutine) Close() error {
 		return nil
 	}
 	return msg.Err
+}
+
+func coroSendMethod(args []Object, _ map[string]Object) (Object, error) {
+	if len(args) < 2 {
+		return nil, fmt.Errorf("TypeError: send() takes exactly one argument")
+	}
+	c, ok := args[0].(*Coroutine)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: descriptor 'send' requires a 'coroutine' object")
+	}
+	return c.Send(args[1])
+}
+
+func coroCloseMethod(args []Object, _ map[string]Object) (Object, error) {
+	if len(args) < 1 {
+		return nil, fmt.Errorf("TypeError: close() missing self argument")
+	}
+	c, ok := args[0].(*Coroutine)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: descriptor 'close' requires a 'coroutine' object")
+	}
+	if err := c.Close(); err != nil {
+		return nil, err
+	}
+	return None(), nil
 }
 
 // Await returns the iterator that drives this coroutine. CPython

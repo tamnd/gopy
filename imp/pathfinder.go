@@ -77,7 +77,16 @@ func (p *PathFinder) FindModule(exec Executor, name string) (*objects.Module, er
 	if parent != "" {
 		parentMod, ok := GetModule(parent)
 		if !ok {
-			return nil, fmt.Errorf("%w: parent package %q is not in sys.modules", errFinderMiss, parent)
+			// Parent package not yet loaded; import it first, mirroring
+			// CPython's _find_and_load which calls _find_and_load_unlocked
+			// on the parent before loading the child.
+			//
+			// CPython: Lib/importlib/_bootstrap.py:1227 _find_and_load
+			pm, err := ImportModuleLevel(exec, parent, "", 0)
+			if err != nil {
+				return nil, fmt.Errorf("%w: parent package %q: %w", errFinderMiss, parent, err)
+			}
+			parentMod = pm
 		}
 		paths, err := readPackagePath(parentMod)
 		if err != nil {

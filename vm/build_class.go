@@ -72,28 +72,59 @@ func buildClass(args []objects.Object, kwargs map[string]objects.Object) (object
 		delete(kwargs, "metaclass")
 	}
 	if meta == nil {
-		// Default metaclass: type of the first base, or `type` for a
-		// bareword `class C: ...`. The PEP 3115 "winner" computation
-		// (find a metaclass that is a subtype of every base's
-		// metaclass) lands with the broader 1672 typeobject port.
 		if len(bases) > 0 {
 			meta = bases[0].Type()
-		}
-		if meta == nil {
+		} else {
 			meta = objects.TypeType()
 		}
 	}
-
-	ns := objects.NewDict()
-	if err := runClassBody(fn, ns); err != nil {
+	// PEP 3115 metaclass winner: walk bases and pick the most-derived
+	// metaclass. CPython: Python/bltinmodule.c:131 builtin___build_class__
+	// (_Py_CalculateMetaclass call).
+	winner, err := calculateMetaclass(meta, bases)
+	if err != nil {
 		return nil, err
 	}
+	meta = winner
 
+	// Call meta.__prepare__(name, bases, **kwds) to get the class
+	// namespace. If __prepare__ is not defined, fall back to a plain
+	// dict as CPython does.
+	//
+	// CPython: Python/bltinmodule.c:131 builtin___build_class__
+	// (_PyObject_CallMethodIdObjArgs(meta, &PyId___prepare__, ...))
 	basesObjs := make([]objects.Object, len(bases))
 	for i, b := range bases {
 		basesObjs[i] = b
 	}
-	callArgs := []objects.Object{nameObj, objects.NewTuple(basesObjs), ns}
+	basesTuple := objects.NewTuple(basesObjs)
+	var ns objects.Object
+	prep, prepErr := objects.GetAttr(meta, objects.NewStr("__prepare__"))
+	if prepErr == nil && prep != nil {
+		prepArgsTuple := objects.NewTuple([]objects.Object{nameObj, basesTuple})
+		kwargsDict := kwargsToDict(kwargs)
+		ns, err = objects.Call(prep, prepArgsTuple, kwargsDict)
+		if err != nil {
+			return nil, fmt.Errorf("__prepare__: %w", err)
+		}
+	} else {
+		ns = objects.NewDict()
+	}
+
+	// The class body opens with LOAD_NAME __name__ → STORE_NAME
+	// __module__. That LOAD_NAME must reach the enclosing module's
+	// __name__ via globals, so do not pre-stamp __name__ into the
+	// class namespace (doing so would clobber __module__ with the
+	// class name). __qualname__ is stamped by the body's own
+	// STORE_NAME emitted by the compiler.
+	//
+	// CPython: Python/bltinmodule.c:131 builtin___build_class__
+
+	if err := runClassBody(fn, ns); err != nil {
+		return nil, err
+	}
+
+	callArgs := []objects.Object{nameObj, basesTuple, ns}
 	return objects.Call(meta, objects.NewTuple(callArgs), kwargsToDict(kwargs))
 }
 
@@ -103,7 +134,7 @@ func buildClass(args []objects.Object, kwargs map[string]objects.Object) (object
 //
 // CPython: Python/bltinmodule.c builtin___build_class__ (the
 // PyObject_Call(func, ()) call after LOCALS = PyObject_Call(prep, ...))
-func runClassBody(fn *objects.Function, ns *objects.Dict) error {
+func runClassBody(fn *objects.Function, ns objects.Object) error {
 	co := fn.Code
 	if co == nil {
 		return fmt.Errorf("TypeError: __build_class__: function has no code")
@@ -131,6 +162,26 @@ func runClassBody(fn *objects.Function, ns *objects.Dict) error {
 
 	_, err := Eval(ts, f)
 	return err
+}
+
+// calculateMetaclass ports _Py_CalculateMetaclass: for each base, if
+// the base's metatype is more derived than the current winner, promote
+// it; if neither is a subtype of the other, raise TypeError.
+//
+// CPython: Objects/typeobject.c:3136 _Py_CalculateMetaclass
+func calculateMetaclass(winner *objects.Type, bases []*objects.Type) (*objects.Type, error) {
+	for _, base := range bases {
+		baseMeta := base.Type()
+		if objects.IsSubtype(winner, baseMeta) {
+			continue
+		}
+		if objects.IsSubtype(baseMeta, winner) {
+			winner = baseMeta
+			continue
+		}
+		return nil, fmt.Errorf("TypeError: metaclass conflict: the metaclass of a derived class must be a (non-strict) subclass of the metaclasses of all its bases")
+	}
+	return winner, nil
 }
 
 func kwargsToDict(kwargs map[string]objects.Object) *objects.Dict {

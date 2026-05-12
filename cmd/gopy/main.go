@@ -240,20 +240,19 @@ func gopyCompile(src, filename string) (*objects.Code, error) {
 
 // runSource is the gopy -c entry. It dispatches to
 // pythonrun.RunSimpleString, the port of CPython's
-// PyRun_SimpleStringFlags. The globals dict comes from builtins.Init
-// for now; once 1623 lands the import system, lifecycle.Main will
-// build __main__ and pythonrun will read the dict from there.
+// PyRun_SimpleStringFlags.
 //
 // CPython: Modules/main.c:289 pymain_run_command
 func runSource(src string, stdout, stderr *os.File) int {
-	g, err := builtins.Init(stdout)
+	g, err := bootstrapBuiltins(stdout)
 	if err != nil {
 		fmt.Fprintln(stderr, "builtins:", err)
 		return 1
 	}
 	installPathFinder("")
+	mainGlobals := newMainGlobals(g)
 	ts := state.NewThread()
-	return pythonrun.RunSimpleString(ts, src, g, stderr)
+	return pythonrun.RunSimpleString(ts, src, mainGlobals, stderr)
 }
 
 // runFile is the gopy <script.py> entry. Mirrors pymain_run_file in
@@ -261,14 +260,15 @@ func runSource(src string, stdout, stderr *os.File) int {
 //
 // CPython: Modules/main.c:373 pymain_run_file
 func runFile(path string, stdout, stderr *os.File) int {
-	g, err := builtins.Init(stdout)
+	g, err := bootstrapBuiltins(stdout)
 	if err != nil {
 		fmt.Fprintln(stderr, "builtins:", err)
 		return 1
 	}
 	installPathFinder(path)
+	mainGlobals := newMainGlobals(g)
 	ts := state.NewThread()
-	return pythonrun.RunAnyFile(ts, path, g, stderr)
+	return pythonrun.RunAnyFile(ts, path, mainGlobals, stderr)
 }
 
 // runInteractive is the gopy bare-invocation entry: print the banner
@@ -278,15 +278,56 @@ func runFile(path string, stdout, stderr *os.File) int {
 // CPython: Modules/main.c:469 pymain_run_stdin
 func runInteractive(stdout, stderr *os.File) int {
 	fmt.Fprintln(stdout, build.VersionString())
-	g, err := builtins.Init(stdout)
+	g, err := bootstrapBuiltins(stdout)
 	if err != nil {
 		fmt.Fprintln(stderr, "builtins:", err)
 		return 1
 	}
 	installPathFinder("")
+	mainGlobals := newMainGlobals(g)
 	ts := state.NewThread()
-	if pythonrun.InteractiveLoop(ts, os.Stdin, stdout, stderr, g) != 0 {
+	if pythonrun.InteractiveLoop(ts, os.Stdin, stdout, stderr, mainGlobals) != 0 {
 		return 1
 	}
 	return 0
+}
+
+// bootstrapBuiltins initializes the builtins dict and registers it as
+// the builtins module so `import builtins` and frame.Builtins both
+// resolve to the same dict.
+func bootstrapBuiltins(stdout *os.File) (*objects.Dict, error) {
+	g, err := builtins.Init(stdout)
+	if err != nil {
+		return nil, err
+	}
+	registerBuiltinsModule(g)
+	return g, nil
+}
+
+// newMainGlobals builds the dict the script runs against. It is
+// separate from the builtins dict so __name__ on globals reads as
+// "__main__" (not "builtins"), matching CPython's pymain_run_command
+// which executes -c against PyImport_AddModule("__main__").__dict__.
+//
+// CPython: Modules/main.c:289 pymain_run_command (PyImport_AddModule)
+// CPython: Python/pylifecycle.c init_interp_main (sets __main__)
+func newMainGlobals(builtinsDict *objects.Dict) *objects.Dict {
+	mainDict := objects.NewDict()
+	_ = mainDict.SetItem(objects.NewStr("__name__"), objects.NewStr("__main__"))
+	_ = mainDict.SetItem(objects.NewStr("__builtins__"), builtinsDict)
+	if _, ok := imp.GetModule("__main__"); !ok {
+		imp.AddModule("__main__", objects.NewModuleWithDict("__main__", mainDict))
+	}
+	return mainDict
+}
+
+// registerBuiltinsModule registers the builtins module in sys.modules
+// so `import builtins` resolves to the same dict that frames use as
+// their __builtins__. Mirrors CPython's Py_InitializeConfig which
+// places builtins in interp->modules at startup.
+//
+// CPython: Python/pylifecycle.c:1413 init_interp_main (builtins registration)
+func registerBuiltinsModule(d *objects.Dict) {
+	m := objects.NewModuleWithDict("builtins", d)
+	imp.AddModule("builtins", m)
 }

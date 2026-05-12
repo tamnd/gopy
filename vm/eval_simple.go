@@ -14,6 +14,7 @@ import (
 	"math/big"
 	"strings"
 
+	"github.com/tamnd/gopy/ast"
 	"github.com/tamnd/gopy/compile"
 	pyerrors "github.com/tamnd/gopy/errors"
 	"github.com/tamnd/gopy/frame"
@@ -82,6 +83,12 @@ func wrapConst(v any) (objects.Object, error) {
 		return objects.NewTuple(items), nil
 	case *compile.Code:
 		return liftNestedCode(x), nil
+	case []byte:
+		return objects.NewBytes(x), nil
+	case complex128:
+		return objects.NewComplex(real(x), imag(x)), nil
+	case ast.EllipsisType:
+		return objects.Ellipsis(), nil
 	case objects.Object:
 		return x, nil
 	}
@@ -125,6 +132,9 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, retVal
 		// duplicate the top.
 		if oparg < 1 {
 			return 0, nil, nil, false, true, errors.New("vm: COPY oparg must be >= 1")
+		}
+		if e.f.StackTop < int(oparg) {
+			panic(fmt.Sprintf("vm: COPY %d: stack underflow (StackTop=%d, ip=%d, code=%s)", oparg, e.f.StackTop, e.f.InstrPtr, e.f.Code.Name))
 		}
 		ref := e.peek(int(oparg) - 1)
 		e.push(ref.Dup())
@@ -963,15 +973,9 @@ func (e *evalState) trySimple(op compile.Opcode, oparg uint32) (next int, retVal
 		// Frames built without an explicit Builtins dict (the v0.7
 		// pattern that uses globals as both) fall through to globals.
 		key := objects.NewStr("__build_class__")
-		bc, ok, err := lookupIn(e.f.Builtins, key)
-		if err != nil {
-			return 0, nil, nil, false, true, err
-		}
+		bc, ok := lookupIn(e.f.Builtins, key)
 		if !ok {
-			bc, ok, err = lookupIn(e.f.Globals, key)
-			if err != nil {
-				return 0, nil, nil, false, true, err
-			}
+			bc, ok = lookupIn(e.f.Globals, key)
 		}
 		if !ok {
 			return 0, nil, nil, false, true, fmt.Errorf("NameError: __build_class__ not found")
@@ -1403,9 +1407,7 @@ func (e *evalState) execNameOp(op compile.Opcode, oparg uint32) (objects.Object,
 
 	switch op {
 	case compile.LOAD_NAME:
-		if v, ok, err := lookupIn(e.f.Locals, keyObj); err != nil {
-			return nil, err
-		} else if ok {
+		if v, ok := lookupIn(e.f.Locals, keyObj); ok {
 			e.pushObject(v)
 			return v, nil
 		}
@@ -1414,15 +1416,11 @@ func (e *evalState) execNameOp(op compile.Opcode, oparg uint32) (objects.Object,
 		if pushNull {
 			e.push(stackref.Null)
 		}
-		if v, ok, err := lookupIn(e.f.Globals, keyObj); err != nil {
-			return nil, err
-		} else if ok {
+		if v, ok := lookupIn(e.f.Globals, keyObj); ok {
 			e.pushObject(v)
 			return v, nil
 		}
-		if v, ok, err := lookupIn(e.f.Builtins, keyObj); err != nil {
-			return nil, err
-		} else if ok {
+		if v, ok := lookupIn(e.f.Builtins, keyObj); ok {
 			e.pushObject(v)
 			return v, nil
 		}
@@ -1616,29 +1614,41 @@ func mroNumberSlot(o objects.Object, pick func(*objects.NumberMethods) func(a, b
 	return nil
 }
 
-func lookupIn(scope objects.Object, key objects.Object) (objects.Object, bool, error) {
+func lookupIn(scope objects.Object, key objects.Object) (objects.Object, bool) {
 	if scope == nil {
-		return nil, false, nil
+		return nil, false
 	}
 	if d, ok := scope.(*objects.Dict); ok {
 		v, err := d.GetItem(key)
 		if err != nil {
-			//nolint:nilerr // a missing key is the not-found signal for name lookup
-			return nil, false, nil
+			// Missing key is the not-found signal for name lookup.
+			return nil, false
 		}
-		return v, true, nil
+		return v, true
 	}
-	return nil, false, fmt.Errorf("vm: name lookup against unsupported scope type %T", scope)
+	// Non-Dict scope (e.g. EnumDict, a user subclass of dict). Use the
+	// mapping protocol: __getitem__, treating KeyError as a miss.
+	//
+	// CPython: Python/ceval.c LOAD_NAME uses PyObject_GetItem on locals
+	v, err := objects.GetItem(scope, key)
+	if err != nil {
+		return nil, false
+	}
+	return v, true
 }
 
 func storeIn(scope objects.Object, key, value objects.Object) error {
 	if scope == nil {
 		return fmt.Errorf("vm: cannot store name: scope is nil")
 	}
-	if d, ok := scope.(*objects.Dict); ok {
+	// Exact-dict fast path. A dict subclass (e.g. enum.EnumDict) must go
+	// through the mapping protocol so its overridden __setitem__ fires.
+	//
+	// CPython: Python/ceval.c STORE_NAME uses PyObject_SetItem on locals
+	if d, ok := scope.(*objects.Dict); ok && scope.Type() == objects.DictType {
 		return d.SetItem(key, value)
 	}
-	return fmt.Errorf("vm: store against unsupported scope type %T", scope)
+	return objects.SetItem(scope, key, value)
 }
 
 // unpackSeq unpacks seq into exactly n items, mirroring CPython's

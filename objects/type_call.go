@@ -12,10 +12,18 @@
 
 package objects
 
-import "fmt"
+import (
+	"fmt"
+	"strings"
+)
 
 func init() {
 	typeType.Call = typeCall
+	// Register type.__new__ so super().__new__() inside a metaclass
+	// __new__ body can resolve it through the MRO.
+	//
+	// CPython: Objects/typeobject.c:4153 type_new
+	SetTypeDescr(typeType, "__new__", NewBuiltinFunction("type.__new__", typeNewBuiltin))
 }
 
 // typeCall is the tp_call slot for `type` itself (and, by inheritance,
@@ -46,12 +54,16 @@ func typeCall(callable Object, args []Object, kwargs map[string]Object) (Object,
 		return typeMetaCall(args, kwargs)
 	}
 
-	// Built-in types that publish a tp_new constructor (int, list,
-	// super, ...) get dispatched through that slot. Mirrors the way
-	// CPython's PyType_Type tp_call calls type->tp_new(type, args, kwds)
-	// before tp_init.
+	// Types that publish a tp_new slot: allocate via TpNew, then call
+	// __init__ if the type has one registered as a descriptor. For most
+	// built-in types TpNew handles everything itself and there is no
+	// __init__ descriptor, so the check is a no-op.  For dict (and
+	// user-defined subclasses of built-ins) TpNew is allocation-only and
+	// __init__ does the population/initialisation work.
+	//
+	// CPython: Objects/typeobject.c:1748 type_call
 	if cls.TpNew != nil {
-		return cls.TpNew(cls, args, kwargs)
+		return typeCallViaTpNew(cls, args, kwargs)
 	}
 	// Some built-ins still expose construction through Call (super
 	// landed before TpNew did); honor it as a fallback. Skip the
@@ -66,6 +78,19 @@ func typeCall(callable Object, args []Object, kwargs map[string]Object) (Object,
 		return nil, fmt.Errorf("TypeError: cannot create '%s' instances directly", cls.Name)
 	}
 
+	// If cls is a subtype of type (a metaclass), dispatch through __new__
+	// to build a new *Type. This covers user-defined metaclasses like
+	// ABCMeta that override type.__new__ to customize class creation.
+	//
+	// CPython: Objects/typeobject.c:1748 type_call (tp_new/tp_init path)
+	if IsSubtype(cls, typeType) {
+		return typeMetaclassCall(cls, args, kwargs)
+	}
+
+	if err := checkNotAbstract(cls); err != nil {
+		return nil, err
+	}
+
 	inst := NewInstance(cls)
 	if init, _ := LookupDescriptor(cls, "__init__"); init != nil {
 		bound := bindDescr(init, inst, cls)
@@ -74,6 +99,149 @@ func typeCall(callable Object, args []Object, kwargs map[string]Object) (Object,
 		}
 	}
 	return inst, nil
+}
+
+// typeCallViaTpNew allocates through the type's tp_new slot, then
+// runs __init__ when the type has one registered as a descriptor.
+//
+// CPython: Objects/typeobject.c:1748 type_call (tp_new + tp_init path)
+func typeCallViaTpNew(cls *Type, args []Object, kwargs map[string]Object) (Object, error) {
+	inst, err := cls.TpNew(cls, args, kwargs)
+	if err != nil {
+		return nil, err
+	}
+	if init, _ := LookupDescriptor(cls, "__init__"); init != nil {
+		bound := bindDescr(init, inst, cls)
+		if _, err := callBound(bound, args, kwargs); err != nil {
+			return nil, err
+		}
+	}
+	return inst, nil
+}
+
+// checkNotAbstract refuses to instantiate a class whose
+// __abstractmethods__ frozenset is non-empty. Mirrors the
+// Py_TPFLAGS_IS_ABSTRACT branch of object_new.
+//
+// CPython: Objects/typeobject.c:3550 object_new
+func checkNotAbstract(cls *Type) error {
+	abs, _ := LookupDescriptor(cls, "__abstractmethods__")
+	if abs == nil {
+		return nil
+	}
+	s, ok := abs.(*Set)
+	if !ok || s.Len() == 0 {
+		return nil
+	}
+	names := make([]string, 0, s.Len())
+	for _, o := range s.Items() {
+		if u, ok := o.(*Unicode); ok {
+			names = append(names, u.Value())
+		}
+	}
+	word := "method"
+	if len(names) != 1 {
+		word = "methods"
+	}
+	return fmt.Errorf("TypeError: Can't instantiate abstract class %s without an implementation for abstract %s '%s'",
+		cls.Name, word, strings.Join(names, ", "))
+}
+
+// typeMetaclassCall handles calling a user-defined metaclass (a subclass
+// of type). It dispatches through the metaclass's __new__ to produce a
+// new *Type, then calls __init__ on the result.
+//
+// CPython: Objects/typeobject.c:1748 type_call
+func typeMetaclassCall(cls *Type, args []Object, kwargs map[string]Object) (Object, error) {
+	// Prepend cls as the first arg for __new__(mcls, name, bases, ns).
+	newArgs := make([]Object, len(args)+1)
+	newArgs[0] = cls
+	copy(newArgs[1:], args)
+
+	var result Object
+	newDescr, _ := LookupDescriptor(cls, "__new__")
+	// Skip type.__new__ itself: we handle that path directly.
+	if typeNewDescr, _ := LookupDescriptor(typeType, "__new__"); newDescr == typeNewDescr {
+		newDescr = nil
+	}
+	if newDescr != nil {
+		// __new__ is implicitly static: call it directly with (cls, *args)
+		// rather than through the descriptor protocol (which would bind cls
+		// as self and produce a double-prepend).
+		//
+		// CPython: Objects/typeobject.c:1748 type_call (tp_new call)
+		var err error
+		result, err = callBound(newDescr, newArgs, kwargs)
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		// No __new__ override: use type.__new__ directly.
+		var err error
+		result, err = typeNewBuiltin(newArgs, kwargs)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	// Call __init__ only when the result is an instance of cls.
+	// Mirrors CPython's Py_TYPE(self) is type check in type_call.
+	//
+	// CPython: Objects/typeobject.c:1800 type_call (__init__ guard)
+	if resultType, ok := result.(*Type); ok && IsSubtype(resultType.Type(), cls) {
+		if init, _ := LookupDescriptor(cls, "__init__"); init != nil {
+			initArgs := make([]Object, len(args)+1)
+			initArgs[0] = result
+			copy(initArgs[1:], args)
+			bound := bindDescr(init, result, cls)
+			if _, err := callBound(bound, initArgs, kwargs); err != nil {
+				return nil, err
+			}
+		}
+	}
+	return result, nil
+}
+
+// typeNewBuiltin implements type.__new__(mcls, name, bases, ns). Called
+// when a metaclass __new__ body executes super().__new__(mcls, ...) and
+// the super lookup resolves to type.__new__ in typeType's descriptor
+// table. Creates a new user type with mcls as the metaclass.
+//
+// CPython: Objects/typeobject.c:4153 type_new
+func typeNewBuiltin(args []Object, kwargs map[string]Object) (Object, error) {
+	if len(args) < 4 {
+		return nil, fmt.Errorf("TypeError: type.__new__() takes exactly 4 arguments (%d given)", len(args))
+	}
+	meta, ok := args[0].(*Type)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: type.__new__() argument 1 must be a type, not %s", typeNameOf(args[0]))
+	}
+	nameObj, ok := args[1].(*Unicode)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: type.__new__() argument 2 must be str, not %s", typeNameOf(args[1]))
+	}
+	basesT, ok := args[2].(*Tuple)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: type.__new__() argument 3 must be tuple, not %s", typeNameOf(args[2]))
+	}
+	ns, ok := args[3].(*Dict)
+	if !ok {
+		return nil, fmt.Errorf("TypeError: type.__new__() argument 4 must be dict, not %s", typeNameOf(args[3]))
+	}
+	bases := make([]*Type, 0, basesT.Len())
+	for i := 0; i < basesT.Len(); i++ {
+		t, ok := basesT.Item(i).(*Type)
+		if !ok {
+			return nil, fmt.Errorf("TypeError: bases must contain types, got %s", typeNameOf(basesT.Item(i)))
+		}
+		bases = append(bases, t)
+	}
+	t := NewUserType(nameObj.v, bases, ns)
+	// Stamp the metaclass: the new class's type is mcls, not the
+	// default typeType. This mirrors CPython's PyType_Ready setting
+	// Py_TYPE(type) to metatype.
+	t.Init(meta)
+	return t, nil
 }
 
 // typeMetaCall handles the two `type(...)` forms.

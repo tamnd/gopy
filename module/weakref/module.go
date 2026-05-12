@@ -15,8 +15,10 @@ import (
 )
 
 func init() {
+	// _weakref is owned by module/_weakref (the real port of
+	// Modules/_weakref.c). This package only provides the Lib/weakref.py
+	// shim and the _weakrefset surface.
 	_ = imp.AppendInittab("weakref", buildModule)
-	_ = imp.AppendInittab("_weakref", buildModule)
 	_ = imp.AppendInittab("_weakrefset", buildModule)
 }
 

@@ -25,16 +25,34 @@ import "fmt"
 // list explicitly includes "__dict__".
 //
 // CPython: Objects/typeobject.c:4153 type_new
-//
-//nolint:gocognit // mirrors CPython's type_new body
 func NewUserType(name string, bases []*Type, ns *Dict) *Type {
 	if len(bases) == 0 {
 		bases = []*Type{objectType}
 	}
 	t := NewType(name, bases)
 	t.IsUser = true
-	t.Getattro = instanceGetAttr
-	t.Setattro = instanceSetAttr
+	// Metaclasses (subtypes of type) must use typeGetAttr/typeSetAttr so
+	// that attribute access on their instances (which are *Type objects
+	// like `class Foo(metaclass=ABCMeta)`) goes through the correct path.
+	// Dict subclasses use dict-specific attr slots since their instances
+	// are *Dict objects (from DictType.TpNew), not *Instance objects.
+	// Regular user classes use the instance-level slots.
+	//
+	// CPython: Objects/typeobject.c inherit_slots (type_getattro inheritance)
+	switch {
+	case IsSubtype(t, typeType):
+		t.Getattro = typeGetAttr
+		t.Setattro = typeSetAttr
+	case IsSubtype(t, DictType):
+		t.Getattro = dictSubclassGetAttr
+		t.Setattro = dictSubclassSetAttr
+		// Inherit DictType.TpNew so instances are *Dict, not *Instance.
+		// CPython: Objects/typeobject.c:7521 inherit_slots (tp_new slot)
+		t.TpNew = DictType.TpNew
+	default:
+		t.Getattro = instanceGetAttr
+		t.Setattro = instanceSetAttr
+	}
 	// Inherit a per-instance __dict__ from any base that has one, then
 	// let __slots__ processing override it (e.g. the base contributes
 	// dict, but the subclass's __slots__ also adds nothing new — still
@@ -79,37 +97,96 @@ func NewUserType(name string, bases []*Type, ns *Dict) *Type {
 			// has no error channel yet, so panic with the same text.
 			panic(err)
 		}
-		for _, k := range ns.Keys() {
-			s, ok := k.(*Unicode)
-			if !ok {
-				continue
-			}
-			if s.v == "__slots__" {
-				continue
-			}
-			v, err := ns.GetItem(k)
-			if err != nil {
-				continue
-			}
-			// __init_subclass__ and __class_getitem__ defined in the
-			// class body are implicitly classmethods. CPython does this
-			// during type_new_set_attrs so user code can write a plain
-			// def and still receive the class as the first argument.
-			//
-			// CPython: Objects/typeobject.c:4419 type_new_set_attrs
-			if s.v == "__init_subclass__" || s.v == "__class_getitem__" {
-				if _, isCM := v.(*ClassMethod); !isCM {
-					v = NewClassMethod(v)
-				}
-			}
-			SetTypeDescr(t, s.v, v)
-		}
+		copyNamespaceToType(t, ns)
 	}
 	fixupSlotDispatchers(t)
+	// PEP 487: after the class is built, walk the namespace and call
+	// __set_name__ on every value that defines it. enum._proto_member
+	// uses this hook to turn each placeholder into a real enum member
+	// during class creation, so skipping it leaves _member_map_ empty.
+	//
+	// CPython: Objects/typeobject.c:4549 type_new_set_names
+	if err := typeSetNames(t, ns); err != nil {
+		panic(err)
+	}
 	if err := typeInitSubclass(t); err != nil {
 		panic(err)
 	}
 	return t
+}
+
+// copyNamespaceToType walks ns and installs each entry as a type
+// descriptor on t, with the same special-casing CPython performs in
+// type_new_set_attrs: __init_subclass__, __class_getitem__, and
+// __prepare__ become classmethods, and __module__ propagates onto
+// t.Module so type_repr can render qualified names.
+//
+// CPython: Objects/typeobject.c:4419 type_new_set_attrs
+func copyNamespaceToType(t *Type, ns *Dict) {
+	for _, k := range ns.Keys() {
+		s, ok := k.(*Unicode)
+		if !ok || s.v == "__slots__" {
+			continue
+		}
+		v, err := ns.GetItem(k)
+		if err != nil {
+			continue
+		}
+		switch s.v {
+		case "__init_subclass__", "__class_getitem__", "__prepare__":
+			if _, isCM := v.(*ClassMethod); !isCM {
+				v = NewClassMethod(v)
+			}
+		case "__module__":
+			if u, ok := v.(*Unicode); ok {
+				t.Module = u.v
+			}
+		}
+		SetTypeDescr(t, s.v, v)
+	}
+}
+
+// typeSetNames invokes __set_name__(cls, name) on every namespace
+// value that defines it. Mirrors CPython's __set_name__ pass; this
+// is what gives PEP 487 descriptors (and enum's _proto_member) a
+// chance to rewrite themselves once the owning class is known.
+//
+// CPython: Objects/typeobject.c:4549 type_new_set_names
+func typeSetNames(t *Type, ns *Dict) error {
+	if ns == nil {
+		return nil
+	}
+	for _, k := range ns.Keys() {
+		s, ok := k.(*Unicode)
+		if !ok {
+			continue
+		}
+		v, err := ns.GetItem(k)
+		if err != nil {
+			continue
+		}
+		// Look up __set_name__ on the type, not the instance, because
+		// it's a descriptor protocol method like __init__.
+		setName, _ := LookupDescriptor(v.Type(), "__set_name__")
+		if setName == nil {
+			continue
+		}
+		dt := setName.Type()
+		var callable Object
+		if dt.DescrGet != nil {
+			bound, err := dt.DescrGet(setName, v, v.Type())
+			if err != nil {
+				return err
+			}
+			callable = bound
+		} else {
+			callable = setName
+		}
+		if _, err := Call(callable, NewTuple([]Object{t, s}), nil); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // typeInitSubclass invokes the parent's __init_subclass__ hook on the
@@ -167,6 +244,16 @@ func lookupOnType(t *Type, name string) (Object, bool) {
 //
 // CPython: Objects/typeobject.c:9874 fixup_slot_dispatchers
 func fixupSlotDispatchers(t *Type) {
+	fixupCallReprStr(t)
+	inheritSlotsFromBases(t)
+	fixupHashAndIter(t)
+	fixupRichCmpAndBool(t)
+	fixupSubscriptSlots(t)
+	fixupDescriptorSlots(t)
+}
+
+// fixupCallReprStr wires tp_call, tp_repr, and tp_str.
+func fixupCallReprStr(t *Type) {
 	if lookupDunderCallable(t, "__call__") {
 		t.Call = slotTpCall
 		t.Vectorcall = nil
@@ -179,6 +266,33 @@ func fixupSlotDispatchers(t *Type) {
 	} else if t.Repr != nil && t.Str == nil {
 		t.Str = t.Repr
 	}
+}
+
+// inheritSlotsFromBases pulls C-level slots from base types when they
+// are not overridden by a Python-level dunder. Matters for metaclass
+// hierarchies where `class ABCMeta(type)` should inherit type.Repr,
+// type.Call, etc.
+//
+// CPython: Objects/typeobject.c:9770 inherit_slots
+func inheritSlotsFromBases(t *Type) {
+	for _, base := range t.Bases {
+		if t.Repr == nil && base.Repr != nil {
+			t.Repr = base.Repr
+		}
+		if t.Str == nil && base.Str != nil {
+			t.Str = base.Str
+		}
+		if t.Call == nil && base.Call != nil {
+			t.Call = base.Call
+		}
+		if t.Hash == nil && base.Hash != nil {
+			t.Hash = base.Hash
+		}
+	}
+}
+
+// fixupHashAndIter wires tp_hash, tp_iter, and tp_iternext.
+func fixupHashAndIter(t *Type) {
 	if lookupDunderCallable(t, "__hash__") {
 		t.Hash = slotTpHash
 	} else if t.Hash == nil {
@@ -190,6 +304,10 @@ func fixupSlotDispatchers(t *Type) {
 	if lookupDunderCallable(t, "__next__") {
 		t.IterNext = slotTpIterNext
 	}
+}
+
+// fixupRichCmpAndBool wires tp_richcompare and nb_bool.
+func fixupRichCmpAndBool(t *Type) {
 	if hasAnyDunder(t, "__eq__", "__ne__", "__lt__", "__le__", "__gt__", "__ge__") {
 		t.RichCmp = slotTpRichCompare
 	}
@@ -198,11 +316,14 @@ func fixupSlotDispatchers(t *Type) {
 	} else if lookupDunderCallable(t, "__len__") {
 		ensureNumberMethods(t).Bool = slotNbBoolFromLen
 	}
+}
+
+// fixupSubscriptSlots wires the mapping/sequence subscription slots
+// (length, getitem, setitem, delitem, contains).
+func fixupSubscriptSlots(t *Type) {
 	if lookupDunderCallable(t, "__len__") {
-		m := ensureMappingMethods(t)
-		m.Length = slotMpLength
-		s := ensureSequenceMethods(t)
-		s.Length = slotMpLength
+		ensureMappingMethods(t).Length = slotMpLength
+		ensureSequenceMethods(t).Length = slotMpLength
 	}
 	if lookupDunderCallable(t, "__getitem__") {
 		ensureMappingMethods(t).GetItem = slotMpSubscript
@@ -217,6 +338,21 @@ func fixupSlotDispatchers(t *Type) {
 	}
 	if lookupDunderCallable(t, "__contains__") {
 		ensureSequenceMethods(t).Contains = slotSqContains
+	}
+}
+
+// fixupDescriptorSlots wires DescrGet when __get__ exists, DescrSet
+// when __set__ or __delete__ exists.
+//
+// CPython: Objects/typeobject.c:9874 fixup_slot_dispatchers
+//
+//	(slotdefs entries for tp_descr_get / tp_descr_set)
+func fixupDescriptorSlots(t *Type) {
+	if lookupDunderCallable(t, "__get__") {
+		t.DescrGet = slotTpDescrGet
+	}
+	if lookupDunderCallable(t, "__set__") || lookupDunderCallable(t, "__delete__") {
+		t.DescrSet = slotTpDescrSet
 	}
 }
 
@@ -526,6 +662,55 @@ func slotSqSetItem(o Object, idx int, value Object) error {
 		return slotMpSubscriptDel(o, key)
 	}
 	return slotMpSubscriptSet(o, key, value)
+}
+
+// slotTpDescrGet dispatches __get__(self, obj, type). obj is None when
+// the descriptor is accessed through the class rather than an instance.
+//
+// CPython: Objects/typeobject.c:8444 slot_tp_descr_get
+func slotTpDescrGet(descr Object, obj Object, tp *Type) (Object, error) {
+	fn, err := GetAttr(descr, NewStr("__get__"))
+	if err != nil {
+		return nil, err
+	}
+	var objArg Object
+	if obj == nil {
+		objArg = None()
+	} else {
+		objArg = obj
+	}
+	var typeArg Object
+	if tp == nil {
+		typeArg = None()
+	} else {
+		typeArg = tp
+	}
+	return Call(fn, NewTuple([]Object{objArg, typeArg}), nil)
+}
+
+// slotTpDescrSet dispatches __set__(self, obj, value) or
+// __delete__(self, obj) when value is nil.
+//
+// CPython: Objects/typeobject.c:8456 slot_tp_descr_set
+func slotTpDescrSet(descr Object, obj Object, value Object) error {
+	var fn Object
+	var args []Object
+	var err error
+	if value == nil {
+		fn, err = GetAttr(descr, NewStr("__delete__"))
+		if err != nil {
+			return err
+		}
+		args = []Object{obj}
+	} else {
+		fn, err = GetAttr(descr, NewStr("__set__"))
+		if err != nil {
+			return err
+		}
+		args = []Object{obj, value}
+	}
+	_, err = Call(fn, NewTuple(args), nil)
+	return err
 }
 
 // slotSqContains dispatches __contains__.

@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/tamnd/gopy/builtins"
+	_io "github.com/tamnd/gopy/module/io"
 	"github.com/tamnd/gopy/objects"
 )
 
@@ -34,8 +35,8 @@ func TestOpenBuiltinRoundTripsThroughVM(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open(w): %v", err)
 	}
-	wfile := out.(*objects.File)
-	if _, err := wfile.Write(objects.NewStr("vm round-trip\n")); err != nil {
+	wfile := out.(*_io.TextIOWrapper)
+	if _, err := wfile.Write("vm round-trip\n"); err != nil {
 		t.Fatalf("Write: %v", err)
 	}
 	if err := wfile.Close(); err != nil {
@@ -48,14 +49,14 @@ func TestOpenBuiltinRoundTripsThroughVM(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open(r): %v", err)
 	}
-	rfile := out.(*objects.File)
+	rfile := out.(*_io.TextIOWrapper)
 	defer rfile.Close()
 	got, err := rfile.Read(-1)
 	if err != nil {
 		t.Fatalf("Read: %v", err)
 	}
-	if got.(*objects.Unicode).Value() != "vm round-trip\n" {
-		t.Fatalf("read back %q", got.(*objects.Unicode).Value())
+	if got != "vm round-trip\n" {
+		t.Fatalf("read back %q", got)
 	}
 
 	if _, err := os.Stat(path); err != nil {

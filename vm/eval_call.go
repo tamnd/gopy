@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"sync"
 
+	sys "github.com/tamnd/gopy/module/sys"
 	"github.com/tamnd/gopy/objects"
 	"github.com/tamnd/gopy/stackref"
 	"github.com/tamnd/gopy/state"
@@ -94,6 +95,10 @@ func init() {
 	//
 	// CPython: pycore_frame.h _PyThreadState_GetFrame is the same shape.
 	objects.CurrentFrameHook = currentInterpreterFrame
+	// Expose the same hook to module/sys for sys._getframe().
+	//
+	// CPython: Python/sysmodule.c:1180 sys__getframe_impl
+	sys.CurrentInterpreterFrameHook = currentInterpreterFrame
 }
 
 // currentInterpreterFrame returns the top of the active thread's frame

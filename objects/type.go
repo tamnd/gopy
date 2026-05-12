@@ -164,6 +164,19 @@ type Type struct {
 	// CPython: Include/cpython/typeobject.h tp_dictoffset
 	HasDict bool
 
+	// subclasses tracks the direct subclasses of this type in
+	// registration order. CPython stores a dict of weak references in
+	// tp_subclasses so the cycle collector can drop dead entries; gopy
+	// uses plain pointers because the Go GC keeps these alive as long
+	// as the parent type does, which matches the static lifetime of
+	// almost every gopy type (built-ins are package-globals and user
+	// classes outlive their use sites). Adding weakref support here
+	// would trigger an initialization cycle through the NewType /
+	// NewWeakref path.
+	//
+	// CPython: Include/cpython/typeobject.h tp_subclasses
+	subclasses []*Type
+
 	// versionTag is the tp_version_tag the adaptive specializer
 	// stamps into LOAD_ATTR / STORE_ATTR / CALL inline caches and
 	// the dispatch loop checks on every hit. 0 means "not yet
@@ -199,8 +212,12 @@ var typeType = &Type{Name: "type"}
 func init() {
 	typeType.typ = typeType
 	typeType.refcnt.Store(1)
-	typeType.Bases = []*Type{}
-	typeType.MRO = []*Type{typeType}
+	// type inherits from object. CPython: Objects/typeobject.c:6361
+	// PyType_Type sets tp_base = &PyBaseObject_Type, which puts object
+	// in type's MRO so metatype lookup of __class__ / __dict__ finds
+	// the getset descriptors object owns.
+	typeType.Bases = []*Type{objectType}
+	typeType.MRO = []*Type{typeType, objectType}
 	typeType.Hash = identityHash
 }
 
@@ -230,5 +247,43 @@ func NewType(name string, bases []*Type) *Type {
 	t := &Type{Name: name, Bases: bases}
 	t.init(typeType)
 	t.MRO = c3Linearize(t)
+	for _, b := range bases {
+		if b == nil {
+			continue
+		}
+		b.addSubclass(t)
+	}
 	return t
+}
+
+// addSubclass appends sub to t.subclasses via a weak reference. CPython
+// stores a dict keyed by id(sub); gopy uses a slice because lookups are
+// rare (only abc and __subclasses__) and Subclasses() filters dead
+// entries on the fly.
+//
+// CPython: Objects/typeobject.c:5853 add_subclass
+func (t *Type) addSubclass(sub *Type) {
+	t.subclasses = append(t.subclasses, sub)
+}
+
+// Subclasses returns the direct subclasses of t in registration order.
+// Mirrors type.__subclasses__().
+//
+// CPython: Objects/typeobject.c:5915 type___subclasses___impl
+func (t *Type) Subclasses() []*Type {
+	out := make([]*Type, len(t.subclasses))
+	copy(out, t.subclasses)
+	return out
+}
+
+// SetFlagsRecursive ORs add into t.TpFlags after clearing the bits in
+// mask, then propagates the same edit to every transitive subclass.
+// Mirrors _PyType_SetFlagsRecursive.
+//
+// CPython: Objects/typeobject.c:1340 _PyType_SetFlagsRecursive
+func SetFlagsRecursive(t *Type, mask, add uint64) {
+	t.TpFlags = (t.TpFlags &^ mask) | add
+	for _, sub := range t.Subclasses() {
+		SetFlagsRecursive(sub, mask, add)
+	}
 }

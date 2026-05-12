@@ -67,7 +67,14 @@ func init() {
 	//
 	// CPython: Objects/funcobject.c:1057 func_descr_get
 	FunctionType.DescrGet = functionDescrGet
-	FunctionType.Getattro = GenericGetAttr
+	FunctionType.Getattro = funcGetAttr
+	FunctionType.Setattro = funcSetAttr
+	// Identity hash. Functions inherit tp_hash from object in CPython
+	// and are routinely stuffed into sets (e.g. enum's _find_new_).
+	//
+	// CPython: Objects/funcobject.c:1232 PyFunction_Type (no tp_hash
+	// override, so object_hash is inherited)
+	FunctionType.Hash = identityHash
 	registerFunctionGetSets()
 	// FunctionType.Call is wired by the vm package on init since the
 	// call needs to push a frame and drive Eval; doing that from
@@ -82,12 +89,24 @@ func init() {
 //
 // CPython: Objects/funcobject.c:806 func_getsetlist
 func registerFunctionGetSets() {
-	noneIfNil := func(o Object) Object {
-		if o == nil {
-			return None()
-		}
-		return o
+	registerFunctionIdentityGetSets()
+	registerFunctionReadOnlyGetSets()
+	registerFunctionTypeParamsGetSet()
+	registerFunctionDictGetSets()
+}
+
+// noneIfNil returns None when o is nil, otherwise o. Used by the
+// function getters that map an absent Go field to Python's None.
+func noneIfNil(o Object) Object {
+	if o == nil {
+		return None()
 	}
+	return o
+}
+
+// registerFunctionIdentityGetSets installs __doc__, __name__,
+// __qualname__, __module__: the small mutable identity surface.
+func registerFunctionIdentityGetSets() {
 	SetTypeDescr(FunctionType, "__doc__", NewGetSetDescr("__doc__",
 		func(o Object) (Object, error) { return noneIfNil(o.(*Function).Doc), nil },
 		func(o Object, v Object) error { o.(*Function).Doc = v; return nil }))
@@ -114,6 +133,12 @@ func registerFunctionGetSets() {
 	SetTypeDescr(FunctionType, "__module__", NewGetSetDescr("__module__",
 		func(o Object) (Object, error) { return noneIfNil(o.(*Function).Module), nil },
 		func(o Object, v Object) error { o.(*Function).Module = v; return nil }))
+}
+
+// registerFunctionReadOnlyGetSets installs the read-only attribute
+// surface: defaults, kwdefaults, closure, code, globals, builtins,
+// annotations.
+func registerFunctionReadOnlyGetSets() {
 	SetTypeDescr(FunctionType, "__defaults__", NewGetSetDescr("__defaults__",
 		func(o Object) (Object, error) {
 			f := o.(*Function)
@@ -168,6 +193,12 @@ func registerFunctionGetSets() {
 			return d, nil
 		},
 		nil))
+}
+
+// registerFunctionTypeParamsGetSet installs __type_params__, which is
+// the only field with a typed setter (must be tuple) that did not fit
+// the identity bucket.
+func registerFunctionTypeParamsGetSet() {
 	SetTypeDescr(FunctionType, "__type_params__", NewGetSetDescr("__type_params__",
 		func(o Object) (Object, error) {
 			t := o.(*Function).Typeparams
@@ -176,7 +207,141 @@ func registerFunctionGetSets() {
 			}
 			return t, nil
 		},
-		nil))
+		func(o Object, v Object) error {
+			f := o.(*Function)
+			if v == nil {
+				f.Typeparams = nil
+				return nil
+			}
+			t, ok := v.(*Tuple)
+			if !ok {
+				return fmt.Errorf("TypeError: __type_params__ must be a tuple, not '%s'", v.Type().Name)
+			}
+			f.Typeparams = t
+			return nil
+		}))
+}
+
+// registerFunctionDictGetSets installs __isabstractmethod__ and
+// __dict__, both of which read through f.Dict so decorators like
+// abstractmethod can stamp attributes without a dedicated field.
+//
+// CPython: Objects/funcobject.c:755 func_get_dict / func_set_dict
+// CPython: Objects/funcobject.c:805 func_get_isabstractmethod
+// CPython: Objects/funcobject.c:823 func_set_isabstractmethod
+func registerFunctionDictGetSets() {
+	SetTypeDescr(FunctionType, "__isabstractmethod__", NewGetSetDescr("__isabstractmethod__",
+		funcGetIsAbstractMethod,
+		funcSetIsAbstractMethod))
+	SetTypeDescr(FunctionType, "__dict__", NewGetSetDescr("__dict__",
+		funcGetDict,
+		funcSetDict))
+}
+
+func funcGetIsAbstractMethod(o Object) (Object, error) {
+	f := o.(*Function)
+	if f.Dict == nil {
+		return False(), nil
+	}
+	v, err := f.Dict.GetItem(NewStr("__isabstractmethod__"))
+	if err != nil || v == nil {
+		//nolint:nilerr // missing key reads as False, per func_get_isabstractmethod
+		return False(), nil
+	}
+	return v, nil
+}
+
+func funcSetIsAbstractMethod(o Object, v Object) error {
+	f := o.(*Function)
+	if v == nil {
+		if f.Dict == nil {
+			return nil
+		}
+		return f.Dict.DelItem(NewStr("__isabstractmethod__"))
+	}
+	if f.Dict == nil {
+		f.Dict = NewDict()
+	}
+	return f.Dict.SetItem(NewStr("__isabstractmethod__"), v)
+}
+
+func funcGetDict(o Object) (Object, error) {
+	f := o.(*Function)
+	if f.Dict == nil {
+		f.Dict = NewDict()
+	}
+	return f.Dict, nil
+}
+
+func funcSetDict(o Object, v Object) error {
+	f := o.(*Function)
+	if v == nil {
+		f.Dict = nil
+		return nil
+	}
+	d, ok := v.(*Dict)
+	if !ok {
+		return fmt.Errorf("TypeError: __dict__ must be set to a dict object")
+	}
+	f.Dict = d
+	return nil
+}
+
+// funcGetAttr is FunctionType.Getattro. It resolves getset descriptors
+// first, then reads from the function's __dict__ for arbitrary
+// per-function attributes set by decorators.
+//
+// CPython: Objects/funcobject.c:687 func_getattro
+func funcGetAttr(o Object, name Object) (Object, error) {
+	if name == nil || name.Type() != strType {
+		return nil, fmt.Errorf("TypeError: attribute name must be string, not '%s'", typeNameOf(name))
+	}
+	tp := o.Type()
+	descr, _ := LookupDescriptor(tp, attrNameStr(name))
+	if descr != nil {
+		dt := descr.Type()
+		if dt.DescrGet != nil {
+			return dt.DescrGet(descr, o, tp)
+		}
+		return descr, nil
+	}
+	fn := o.(*Function)
+	if fn.Dict != nil {
+		v, err := fn.Dict.GetItem(name)
+		if err == nil && v != nil {
+			return v, nil
+		}
+	}
+	return nil, fmt.Errorf("AttributeError: 'function' object has no attribute '%s'", attrNameStr(name))
+}
+
+// funcSetAttr is FunctionType.Setattro. It dispatches to getset
+// descriptor setters first, then falls back to the function's __dict__
+// for arbitrary decorator-assigned attributes.
+//
+// CPython: Objects/funcobject.c:714 func_setattro
+func funcSetAttr(o Object, name Object, value Object) error {
+	if name == nil || name.Type() != strType {
+		return fmt.Errorf("TypeError: attribute name must be string, not '%s'", typeNameOf(name))
+	}
+	tp := o.Type()
+	descr, _ := LookupDescriptor(tp, attrNameStr(name))
+	if descr != nil {
+		if dset := descr.Type().DescrSet; dset != nil {
+			return dset(descr, o, value)
+		}
+	}
+	fn := o.(*Function)
+	if value == nil {
+		if fn.Dict == nil {
+			return fmt.Errorf("AttributeError: 'function' object has no attribute '%s'", attrNameStr(name))
+		}
+		return fn.Dict.DelItem(name)
+	}
+	if fn.Dict == nil {
+		fn.Dict = NewDict()
+	}
+	return fn.Dict.SetItem(name, value)
 }
 
 // functionDescrGet implements the function descriptor protocol:
