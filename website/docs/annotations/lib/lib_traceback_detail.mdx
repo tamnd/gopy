@@ -1,0 +1,65 @@
+---
+title: Lib/traceback.py
+description: "traceback module Python layer: TracebackException with chained cause/context, format_tb, print_tb, format_exception, extract_stack, StackSummary, and FrameSummary."
+cpython_path: Lib/traceback.py
+cpython_version: "3.14"
+lines: 820
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Lib/traceback.py`
+
+<CpyLink path="Lib/traceback.py" />
+
+`Lib/traceback.py` provides the Python API for formatting and printing tracebacks. The
+low-level C traceback printer (`Python/traceback.c`) handles `sys.stderr` output during
+exception propagation; this module provides programmatic access to the same information.
+
+## Map
+
+| Lines | Symbol | Role |
+| ----- | ------ | ---- |
+| 1-100 | `print_tb`, `print_exception`, `format_tb`, `format_exception` | Function-level API |
+| 101-300 | `StackSummary`, `FrameSummary` | Stack capture and formatting |
+| 301-600 | `TracebackException` | Rich exception object with `format()` method |
+| 601-820 | `extract_tb`, `extract_stack` | Legacy extraction functions |
+
+## Reading
+
+### `TracebackException`
+
+`TracebackException.from_exception(exc)` captures the exception's type, value, and
+traceback, plus `__cause__` and `__context__` chains, into a structured object. `format()`
+yields formatted lines suitable for `sys.stderr.write`.
+
+```python
+# CPython: Lib/traceback.py:320 TracebackException.from_exception
+@classmethod
+def from_exception(cls, exc, *, limit=None, lookup_lines=True, capture_locals=False):
+    ...
+    te = cls(type(exc), exc, exc.__traceback__, limit=limit, ...)
+    return te
+```
+
+### `FrameSummary`
+
+`FrameSummary` captures the filename, line number, function name, and optionally the
+source line text. Line text is fetched lazily from `linecache.getline`.
+
+### `format_exception_only`
+
+`format_exception_only(exc)` formats the exception type and value without the traceback.
+For `SyntaxError`, it also formats the filename, line number, and caret marker.
+
+### `StackSummary.extract`
+
+`StackSummary.extract(frame_gen, limit=None, lookup_lines=True)` iterates a sequence of
+`(frame, lineno)` pairs (typically from `walk_stack` or `walk_tb`) and returns a
+`StackSummary` list of `FrameSummary` objects.
+
+## gopy notes
+
+Not yet ported. `traceback` depends on `linecache` for source line fetching. The
+`TracebackException` class is pure Python. Planned path: `module/traceback/`.

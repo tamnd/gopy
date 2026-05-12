@@ -1,0 +1,72 @@
+---
+title: Objects/dictobject.c (part 2)
+description: "dictobject part 2: dict views (dict_keys, dict_values, dict_items), view set-algebra operations on keys, dict.update/merge/copy, dict comprehension construction, and the compact dict versioning."
+cpython_path: Objects/dictobject.c
+cpython_version: "3.14"
+lines: 5600
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Objects/dictobject.c` (part 2)
+
+<CpyLink path="Objects/dictobject.c" />
+
+This annotation covers dict views, `update`/`merge`, and compact dict version tracking in
+`Objects/dictobject.c`. For the hash table internals, insertion, and lookup see the
+`objects_dictobject` annotation.
+
+## Map
+
+| Lines | Symbol | Role |
+| ----- | ------ | ---- |
+| 1-400 | `dict_keys_iter`, `dict_values_iter`, `dict_items_iter` | View iterators |
+| 401-800 | `dictkeys_type`, `dictvalues_type`, `dictitems_type` | View objects with len/contains/iter |
+| 801-1200 | `dict_keys` set algebra | `__and__`, `__or__`, `__sub__`, `__xor__` on keys view |
+| 1201-1600 | `dict_merge`, `dict_update_common` | Merge a mapping or iterable of pairs |
+| 1601-2000 | `dict_copy`, `dict_fromkeys` | Shallow copy and class method constructor |
+| 2001-5600 | Version tracking, shared keys | `ma_version_tag`, split/combined table |
+
+## Reading
+
+### Dict views
+
+`dict.keys()`, `dict.values()`, `dict.items()` return view objects that reflect the
+current contents of the dict. Views support `len()`, iteration, and `in` membership.
+The `keys()` view additionally supports set operations since dict keys are guaranteed
+to be unique.
+
+```c
+// CPython: Objects/dictobject.c:3820 dictkeys_contains
+static int
+dictkeys_contains(dictkeysviewobject *dkv, PyObject *obj)
+{
+    return PyDict_Contains(dkv->dv_dict, obj);
+}
+```
+
+### `ma_version_tag`
+
+Every dict mutation increments `ma_version_tag`, a 64-bit monotonic counter. This allows
+code that caches the dict state to detect changes without comparing the dict contents.
+The specialization machinery uses this to invalidate type attribute caches.
+
+### Split and combined dicts
+
+Class instance dicts share a `PyDictKeysObject` (the key table) among all instances of
+the same class. The first modification splits the shared keys, creating a private copy.
+This "split-combined" optimisation reduces memory use for objects with consistent attribute
+sets.
+
+### `dict_merge`
+
+`dict_merge(a, b, override)` handles both `Mapping` objects (by calling `keys()` + `__getitem__`)
+and sequences of 2-tuples. The `override` flag controls whether existing keys in `a` are
+overwritten.
+
+## gopy notes
+
+`objects/dict.go` implements the core dict. Dict views (`dict_keys`, `dict_values`,
+`dict_items`) are in `objects/dict_iter.go`. `ma_version_tag` is not yet tracked; the
+split/combined optimisation is not implemented.

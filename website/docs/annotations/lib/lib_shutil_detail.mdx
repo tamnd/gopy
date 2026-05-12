@@ -1,0 +1,73 @@
+---
+title: Lib/shutil.py
+description: "shutil module: copy/copy2/copyfile/copyfileobj, copytree/rmtree, move, disk_usage, make_archive/unpack_archive, and which() for executable discovery."
+cpython_path: Lib/shutil.py
+cpython_version: "3.14"
+lines: 1400
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Lib/shutil.py`
+
+<CpyLink path="Lib/shutil.py" />
+
+`Lib/shutil.py` provides high-level file and directory operations. It builds on `os` and
+`os.path` for the portable parts, and uses `sendfile` or `copyfileobj` for the actual data
+transfer.
+
+## Map
+
+| Lines | Symbol | Role |
+| ----- | ------ | ---- |
+| 1-200 | `copyfileobj`, `copyfile`, `copy`, `copy2` | Single-file copy with various metadata options |
+| 201-450 | `copytree`, `rmtree` | Recursive directory copy and delete |
+| 451-650 | `move` | Cross-device-safe atomic move |
+| 651-800 | `disk_usage`, `chown`, `which` | Utility functions |
+| 801-1200 | `make_archive`, `unpack_archive` | Zip/tar archive creation and extraction |
+| 1201-1400 | `get_terminal_size` | Terminal size via `os.get_terminal_size` |
+
+## Reading
+
+### `copyfile` and `sendfile`
+
+`copyfile(src, dst)` opens both files and copies via `copyfileobj` using a 1MB buffer.
+On Linux with `sendfile` support (Python 3.8+), it uses `os.sendfile` for a zero-copy
+kernel-to-kernel transfer.
+
+```python
+# CPython: Lib/shutil.py:215 _copyfileobj_readinto
+def _copyfileobj_readinto(fsrc, fdst, length=16*1024):
+    with memoryview(bytearray(length)) as mv:
+        while True:
+            n = fsrc.readinto(mv)
+            if not n:
+                break
+            elif n < length:
+                fdst.write(mv[:n])
+            else:
+                fdst.write(mv)
+```
+
+### `rmtree` error handling
+
+`rmtree(path, onexterror=None)` attempts `os.unlink` and `os.rmdir` on all contents.
+When `ignore_errors=False`, any error is passed to `onerror(func, path, excinfo)`. The
+default raises the exception.
+
+### `move` cross-device
+
+`move(src, dst)` tries `os.rename` first. If `dst` is on a different filesystem,
+`rename` raises `OSError(EXDEV)` and `move` falls back to `copytree` (for directories)
+or `copy2` + `os.unlink` (for files).
+
+### `which`
+
+`which(name)` searches `PATH` for an executable named `name`. On Windows it also checks
+`PATHEXT` for executable extensions.
+
+## gopy notes
+
+Not yet ported. `shutil` requires `os` module support. The copy path is straightforward
+to port using Go's `io.Copy`. `copytree` requires `os.walk`. Planned path: `module/shutil/`.

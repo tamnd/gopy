@@ -463,6 +463,7 @@ const sidebars = {
         'annotations/objects/objects_typeobject2_detail',
         'annotations/objects/objects_descrobject2_detail',
         'annotations/objects/objects_typevarobject_detail',
+        'annotations/objects/objects_dictobject2_detail',
       ],
     },
     {
@@ -1311,6 +1312,9 @@ const sidebars = {
         'annotations/lib/lib_pdb_detail',
         'annotations/lib/lib_functools2_detail',
         'annotations/lib/lib_codecs_detail',
+        'annotations/lib/lib_shutil_detail',
+        'annotations/lib/lib_glob_detail',
+        'annotations/lib/lib_traceback_detail',
       ],
     },
   ],
