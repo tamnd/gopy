@@ -1,0 +1,83 @@
+---
+title: Lib/base64.py
+description: "base64: b64encode/b64decode, urlsafe variants, b32/b16/b85 encodings, encodebytes/decodebytes. Wraps binascii C extension for core encoding."
+cpython_path: Lib/base64.py
+cpython_version: "3.14"
+lines: 360
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/base64.py" />
+
+`base64` provides RFC 4648 encoding/decoding functions. The core encoding uses the `binascii` C extension; the Python layer adds alphabet variants, line-length wrapping, padding handling, and the URL-safe alphabet.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-40 | `b64encode`, `b64decode` | Standard Base64 with optional altchars |
+| 41-80 | `urlsafe_b64encode`, `urlsafe_b64decode` | URL-safe alphabet (`+/` replaced by `-_`) |
+| 81-140 | `b32encode`, `b32decode`, `b32hexencode`, `b32hexdecode` | Base32 (RFC 4648 §6 and §7) |
+| 141-180 | `b16encode`, `b16decode` | Hexadecimal encoding |
+| 181-240 | `b85encode`, `b85decode`, `a85encode`, `a85decode` | Base85 and Ascii85 |
+| 241-300 | `encodebytes`, `decodebytes` | Line-wrapped encoding for MIME |
+| 301-360 | Command-line interface | `encode`/`decode` subcommands |
+
+## Reading
+
+### `b64encode`
+
+```python
+# CPython: Lib/base64.py:54 b64encode
+def b64encode(s, altchars=None):
+    encoded = binascii.b2a_base64(s, newline=False)
+    if altchars is not None:
+        assert len(altchars) == 2, repr(altchars)
+        return encoded.translate(bytes.maketrans(b'+/', altchars))
+    return encoded
+```
+
+`binascii.b2a_base64` does the actual encoding in C. The `altchars` parameter replaces `+` and `/` with two custom characters.
+
+### `b64decode`
+
+```python
+# CPython: Lib/base64.py:72 b64decode
+def b64decode(s, altchars=None, validate=False):
+    s = _bytes_from_decode_data(s)
+    if altchars is not None:
+        altchars = _bytes_from_decode_data(altchars)
+        assert len(altchars) == 2, repr(altchars)
+        s = s.translate(bytes.maketrans(altchars, b'+/'))
+    if validate and not re.fullmatch(b'[A-Za-z0-9+/]*={0,2}', s):
+        raise binascii.Error('Non-base64 digit found')
+    return binascii.a2b_base64(s)
+```
+
+`validate=True` checks that the input contains only valid Base64 characters before decoding.
+
+### `b85encode`
+
+Base85 encodes every 4 bytes as 5 printable ASCII characters, giving a 25% overhead (vs 33% for Base64). Used by `git` for binary diffs and by Python's `marshal` for bytecode.
+
+```python
+# CPython: Lib/base64.py:205 b85encode
+_b85alphabet = (b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+                b"abcdefghijklmnopqrstuvwxyz!#$%&()*+-;<=>?@^_`{|}~")
+
+def b85encode(b, pad=False):
+    ...
+    for i in range(0, len(b), 4):
+        chunk = b[i:i+4]
+        ...
+        acc = int.from_bytes(chunk, 'big')
+        for j in range(4, -1, -1):
+            chars[j] = _b85alphabet[acc % 85]
+            acc //= 85
+```
+
+## gopy notes
+
+Status: not yet ported. Go's `encoding/base64` covers standard, URL-safe, and raw variants. `b32encode`/`b32decode` map to `encoding/base32`. Base85 requires a pure Go implementation (available as `encoding/ascii85` in the standard library, though the byte mapping differs from Python's `b85`).

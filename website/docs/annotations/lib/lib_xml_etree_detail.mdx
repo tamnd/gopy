@@ -1,0 +1,85 @@
+---
+title: Lib/xml/etree/ElementTree.py
+description: "xml.etree.ElementTree: Element, ElementTree, parse, fromstring, tostring, SubElement, xpath subsets, iterparse. C-accelerated via _elementtree."
+cpython_path: Lib/xml/etree/ElementTree.py
+cpython_version: "3.14"
+lines: 1670
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/xml/etree/ElementTree.py" />
+
+`xml.etree.ElementTree` is the standard XML processing API. `Element` represents an XML node with a tag, attribute dict, text, tail, and a list of child elements. The pure-Python implementation is replaced at import time by `_elementtree` (a C extension) for performance.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-100 | `Element` class | Tree node: tag, attrib, text, tail, children |
+| 101-250 | `ElementTree` | Document wrapper with `parse`, `write`, `find*`, `iter` |
+| 251-450 | `XMLParser`, `TreeBuilder` | SAX-based incremental parser |
+| 451-650 | `parse`, `fromstring`, `fromstringlist`, `tostring`, `tostringlist` | High-level I/O |
+| 651-850 | `SubElement`, `Comment`, `ProcessingInstruction` | Constructors |
+| 851-1050 | XPath: `findall`, `find`, `findtext`, `iterfind` | Subset XPath 1.0 |
+| 1051-1670 | `indent`, `iterparse`, `register_namespace`, `QName` | Utilities |
+
+## Reading
+
+### `Element` storage
+
+```python
+# CPython: Lib/xml/etree/ElementTree.py:112 Element.__init__
+def __init__(self, tag, attrib={}, **extra):
+    self.tag = tag
+    self.attrib = {**attrib, **extra}
+    self.text = None
+    self.tail = None
+    self._children = []
+```
+
+`text` is the text before the first child (or the whole text content for leaf nodes). `tail` is the text after the closing tag, inside the parent.
+
+### `parse` and `XMLParser`
+
+```python
+# CPython: Lib/xml/etree/ElementTree.py:580 parse
+def parse(source, parser=None):
+    tree = ElementTree()
+    tree.parse(source, parser)
+    return tree
+```
+
+Internally uses `xml.parsers.expat` (or the C `_elementtree` accelerator). The `XMLParser` object drives expat's SAX events and builds the `Element` tree via `TreeBuilder`.
+
+### Subset XPath
+
+`find`, `findall`, and `iterfind` support a subset of XPath 1.0: `/` for children, `//` for descendants, `[@attr]` for attribute tests, `[tag]` for child element tests, `[position]` for index.
+
+```python
+# CPython: Lib/xml/etree/ElementTree.py:852 Element.findall
+def findall(self, path, namespaces=None):
+    return list(self.iterfind(path, namespaces))
+```
+
+### `tostring`
+
+```python
+# CPython: Lib/xml/etree/ElementTree.py:1032 tostring
+def tostring(element, encoding='us-ascii', method='xml',
+             *, xml_declaration=None, default_namespace=None, short_empty_elements=True):
+    stream = io.BytesIO()
+    ElementTree(element).write(stream, encoding, xml_declaration,
+                               default_namespace, method=method,
+                               short_empty_elements=short_empty_elements)
+    return stream.getvalue()
+```
+
+### `iterparse`
+
+Yields `(event, element)` pairs as the XML is parsed, allowing O(1) memory use for large files by discarding already-processed sub-trees.
+
+## gopy notes
+
+Status: not yet ported. Go's `encoding/xml` handles basic XML marshaling. A faithful `ElementTree` port needs an `Element` struct with `tag`, `attrib`, `text`, `tail`, and `[]Element` children, plus the expat-based incremental parser. The C `_elementtree` extension is not needed if Go implements the whole thing natively.

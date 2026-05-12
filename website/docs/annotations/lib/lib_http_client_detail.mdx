@@ -1,0 +1,73 @@
+---
+title: Lib/http/client.py
+description: "http.client: HTTPConnection, HTTPSConnection, HTTPResponse. Send requests over raw sockets; read chunked and non-chunked responses. Low-level HTTP/1.1."
+cpython_path: Lib/http/client.py
+cpython_version: "3.14"
+lines: 1900
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/http/client.py" />
+
+`http.client` (formerly `httplib`) is the low-level HTTP/1.1 client. It does not follow redirects or manage cookies; that is left to `urllib.request`. It is used directly by `xmlrpc.client`, `smtplib`, and other stdlib modules.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-100 | Constants: `HTTP_PORT`, `HTTPS_PORT`, status codes | `HTTPStatus` enum |
+| 101-300 | `HTTPResponse` | Parse the response status line, headers, and body |
+| 301-600 | `HTTPConnection` | Manage the socket; send request headers and body |
+| 601-800 | `HTTPConnection.request`, `_send_request` | Build and send an HTTP request |
+| 801-1000 | Chunked encoding: `_read_chunked`, `_send_output` | Transfer-Encoding: chunked support |
+| 1001-1200 | `HTTPSConnection` | TLS wrapper using `ssl.wrap_socket` |
+| 1201-1900 | `HTTPException` hierarchy, `UnknownProtocol`, `CannotSendHeader`, etc. | Exception classes |
+
+## Reading
+
+### `HTTPConnection.request`
+
+```python
+# CPython: Lib/http/client.py:1063 HTTPConnection.request
+def request(self, method, url, body=None, headers={}, *, encode_chunked=False):
+    self._send_request(method, url, body, headers, encode_chunked)
+```
+
+`_send_request` formats the request line and headers, determines content-length or chunked encoding, then calls `endheaders(body)` which flushes the write buffer to the socket.
+
+### `HTTPResponse.read`
+
+```python
+# CPython: Lib/http/client.py:465 HTTPResponse.read
+def read(self, amt=None):
+    ...
+    if self.chunked:
+        return self._read_chunked(amt)
+    ...
+    s = self.fp.read(amt)
+    ...
+    return s
+```
+
+The response body can be chunked (Transfer-Encoding: chunked) or length-delimited (Content-Length) or connection-close. `_read_chunked` parses the `<size>\r\n<data>\r\n` format.
+
+### `HTTPSConnection`
+
+```python
+# CPython: Lib/http/client.py:1457 HTTPSConnection.connect
+def connect(self):
+    self.sock = self._context.wrap_socket(
+        sock, server_hostname=self._server_hostname)
+```
+
+`HTTPSConnection` is a subclass that wraps the raw socket in an SSL context after connecting. The `context` parameter is an `ssl.SSLContext`.
+
+### Persistent connections
+
+`HTTPConnection` reuses the socket across multiple requests (HTTP/1.1 persistent connections) via the `keep-alive` header. A new socket is created only on `connect()` or when the previous socket is closed.
+
+## gopy notes
+
+Status: not yet ported. Go's `net/http` client covers most use cases at a higher level. A faithful `http.client` port would need `net.Conn`, `bufio.ReadWriter`, and an HTTP/1.1 request/response parser. The most useful immediate port is `HTTPSConnection.getresponse()` for `urllib.request` compatibility.

@@ -1,0 +1,80 @@
+---
+title: Lib/ipaddress.py
+description: "ipaddress: IPv4Address, IPv6Address, IPv4Network, IPv6Network, IPv4Interface, IPv6Interface. Parse, validate, compare, and subnet IP addresses."
+cpython_path: Lib/ipaddress.py
+cpython_version: "3.14"
+lines: 2300
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/ipaddress.py" />
+
+`ipaddress` (PEP 3144) provides immutable types for IPv4 and IPv6 addresses, networks, and interfaces. All parsing is pure Python with no C extension.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-100 | `ip_address`, `ip_network`, `ip_interface` | Factory functions; auto-detect v4/v6 |
+| 101-400 | `_BaseAddress`, `_BaseNetwork` | Shared base classes; comparison, `__contains__` |
+| 401-750 | `IPv4Address` | 32-bit packed int; `packed`, `exploded`, `is_private`, `is_loopback` |
+| 751-1000 | `IPv4Network` | CIDR network; `network_address`, `broadcast_address`, `hosts()`, `subnets()` |
+| 1001-1300 | `IPv4Interface` | Address + network; `ip`, `network`, `with_prefixlen` |
+| 1301-1700 | `IPv6Address` | 128-bit packed int; `ipv4_mapped`, `sixtofour`, `teredo`, `is_link_local` |
+| 1701-2100 | `IPv6Network` | IPv6 CIDR; `subnets()`, `supernet()`, `subnet_of()` |
+| 2101-2300 | `IPv6Interface`, `_get_mixed_type_key`, `collapse_addresses`, `summarize_address_range` | Utilities |
+
+## Reading
+
+### Address storage
+
+Both `IPv4Address` and `IPv6Address` store the address as a Python `int` in `self._ip`. String parsing converts to the packed int representation.
+
+```python
+# CPython: Lib/ipaddress.py:1158 IPv4Address.__init__
+def __init__(self, address):
+    if isinstance(address, int):
+        self._check_int(address, 32)
+        self._ip = address
+    elif isinstance(address, bytes):
+        ...
+        self._ip = int.from_bytes(address, 'big')
+    else:
+        addr_str = str(address)
+        ...
+        self._ip = struct.unpack('!I', socket.inet_aton(addr_str))[0]
+```
+
+### Network operations
+
+`IPv4Network` stores the network address and prefix length. `__contains__` checks if an address falls within the network using bitmask arithmetic.
+
+```python
+# CPython: Lib/ipaddress.py:1430 IPv4Network.__contains__
+def __contains__(self, other):
+    ...
+    return (int(other) & int(self.netmask)) == int(self.network_address)
+```
+
+### `hosts()` generator
+
+```python
+# CPython: Lib/ipaddress.py:1500 IPv4Network.hosts
+def hosts(self):
+    network = int(self.network_address)
+    broadcast = int(self.broadcast_address)
+    for x in range(network + 1, broadcast):
+        yield self._address_class(x)
+```
+
+For a /32 it yields the single host address; for a /31 (point-to-point) it yields both addresses.
+
+### `collapse_addresses`
+
+Merges a list of networks into the minimal set of non-overlapping CIDR blocks, using a sorted merge of adjacent prefixes.
+
+## gopy notes
+
+Status: not yet ported. Pure Python, no C dependencies. The Go standard library `net/netip` (Go 1.18+) provides `Addr`, `Prefix`, and `AddrRange` with similar semantics. A gopy port would wrap `net/netip` types as Python-visible objects.

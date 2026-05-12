@@ -1,0 +1,86 @@
+---
+title: Lib/zipfile/__init__.py
+description: "zipfile: ZipFile, ZipInfo, ZipPath. Read/write ZIP archives. Compression methods (stored, deflate, bz2, lzma, zstd). Password-protected archives. zipimport."
+cpython_path: Lib/zipfile/__init__.py
+cpython_version: "3.14"
+lines: 2400
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/zipfile/__init__.py" />
+
+`zipfile` reads and writes ZIP archives. `ZipFile` is the main class; `ZipInfo` holds per-entry metadata; `ZipPath` (Python 3.8+) provides a `pathlib`-compatible interface to ZIP contents. The module handles stored (no compression), deflate, bzip2, lzma, and (Python 3.14) zstandard compression.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-100 | Constants, compression methods | `ZIP_STORED`, `ZIP_DEFLATED`, `ZIP_BZIP2`, `ZIP_LZMA`, `ZIP_ZSTANDARD` |
+| 101-400 | `ZipInfo` | Per-entry metadata: filename, dates, CRC, compress size, flags |
+| 401-800 | `ZipFile.__init__`, `_RealGetContents` | Open and parse the central directory |
+| 801-1200 | `ZipFile.open`, `_open_to_write` | Extract and compress entry streams |
+| 1201-1600 | `ZipFile.read`, `ZipFile.write`, `ZipFile.writestr` | High-level read/write |
+| 1601-1900 | `ZipFile.extractall`, `ZipFile.extract` | Extract to filesystem |
+| 1901-2100 | `ZipFile.close`, `_write_end_record` | Write the central directory on close |
+| 2101-2400 | `ZipPath`, `Path` | pathlib-compatible ZIP browsing |
+
+## Reading
+
+### Central directory parsing
+
+ZIP archives have a central directory at the end of the file (to allow appending). `_RealGetContents` reads backward from the end to find the end-of-central-directory record (EOCD), then reads the central directory headers to populate `self.filelist` and `self.NameToInfo`.
+
+```python
+# CPython: Lib/zipfile/__init__.py:1398 ZipFile._RealGetContents
+def _RealGetContents(self):
+    ...
+    # Find the EOCD signature
+    size = os.path.getsize(self.filename)
+    fp.seek(-22, 2)  # EOCD is at most 22 bytes from end (ignoring comment)
+    data = fp.read()
+    start = data.rfind(stringEndArchive)
+    ...
+```
+
+### `open` for reading: decompression pipeline
+
+```python
+# CPython: Lib/zipfile/__init__.py:1695 ZipFile.open
+def open(self, name, mode='r', pwd=None, *, force_zip64=False):
+    ...
+    zinfo = self.getinfo(name)
+    ...
+    zef_file = _SharedFile(self.fp, zinfo.header_offset, ...)
+    ...
+    if zinfo.compress_type == ZIP_DEFLATED:
+        zd = zlib.decompressobj(-15)
+        fileobj = _ZipWriteFile(zef_file, ...)
+    ...
+```
+
+Each entry is decompressed through a streaming decompressor. The `Zlib`, `BZ2`, or `LZMA` decompressor wraps a `_SharedFile` file-like object.
+
+### Encryption
+
+Password-protected ZIPs use the legacy ZIP crypto (a stream cipher based on three 32-bit keys updated with CRC32). Python 3.9+ also supports AES encryption via `zipfile-aes` or the `pyzipper` library.
+
+### `ZipPath`
+
+```python
+# CPython: Lib/zipfile/__init__.py:2180 ZipPath.__truediv__
+class ZipPath:
+    def __init__(self, root, at=''):
+        self._root = root if isinstance(root, ZipFile) else ZipFile(root)
+        self.at = at
+
+    def __truediv__(self, add):
+        return self.__class__(self._root, self.at + add)
+```
+
+Wraps a `ZipFile` and a path string to expose `iterdir()`, `open()`, `read_text()`, `read_bytes()`, etc.
+
+## gopy notes
+
+Status: not yet ported. Go's `archive/zip` covers reading and writing ZIP archives. A gopy port would need `ZipInfo` as a Python-visible struct, a streaming decompressor pipeline, and the central directory reader/writer. `ZipPath` can be built on top of those primitives.

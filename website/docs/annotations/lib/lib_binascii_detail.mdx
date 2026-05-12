@@ -1,0 +1,80 @@
+---
+title: Lib/binascii.py
+description: "binascii C extension: b2a_base64, a2b_base64, b2a_hex/a2b_hex, b2a_uu/a2b_uu, crc32, crc_hqx. Low-level binary-to-ASCII codec primitives."
+cpython_path: Lib/binascii.py
+cpython_version: "3.14"
+lines: 1
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/binascii.c" />
+
+`binascii` is implemented entirely in C (`Modules/binascii.c`). There is no `Lib/binascii.py`. It provides the low-level binary-to-ASCII conversion primitives used by `base64`, `uu`, `quopri`, and `email.base64mime`.
+
+## Map
+
+| Symbol | Role |
+|--------|------|
+| `b2a_base64(data)` | Encode bytes to Base64 with a trailing newline |
+| `a2b_base64(ascii)` | Decode Base64 bytes |
+| `b2a_hex(data)` / `hexlify` | Encode to hex string |
+| `a2b_hex(ascii)` / `unhexlify` | Decode from hex string |
+| `b2a_uu(data)` | UUencode a 45-byte chunk |
+| `a2b_uu(ascii)` | Decode a UUencoded line |
+| `b2a_qp(data)` | Quoted-Printable encode |
+| `a2b_qp(ascii)` | Quoted-Printable decode |
+| `crc32(data, value=0)` | CRC-32 checksum |
+| `crc_hqx(data, value)` | CRC-CCITT (binhex) checksum |
+
+## Reading
+
+### `b2a_base64`
+
+```c
+// CPython: Modules/binascii.c binascii_b2a_base64_impl
+static PyObject *
+binascii_b2a_base64_impl(PyObject *module, Py_buffer *data, int newline)
+{
+    ...
+    /* 3 bytes -> 4 base64 chars, rounded up, plus optional newline */
+    ...
+    while (p < e) {
+        *q++ = table_b2a_base64[(*p >> 2) & 0x3f];
+        *q++ = table_b2a_base64[((*p << 4) | ((p[1] >> 4) & 0xf)) & 0x3f];
+        *q++ = table_b2a_base64[((p[1] << 2) | ((p[2] >> 6) & 3)) & 0x3f];
+        *q++ = table_b2a_base64[p[2] & 0x3f];
+        p += 3;
+    }
+    ...
+}
+```
+
+Uses a 64-entry lookup table `table_b2a_base64` for the encoding step.
+
+### `crc32`
+
+Computes the CRC-32 checksum using the standard polynomial 0xEDB88320. The `value` parameter is the running CRC; successive calls can chain over multiple buffers.
+
+```c
+// CPython: Modules/binascii.c binascii_crc32_impl
+static PyObject *
+binascii_crc32_impl(PyObject *module, Py_buffer *data, unsigned int value)
+{
+    ...
+    unsigned int crc = value ^ 0xFFFFFFFF;
+    for (Py_ssize_t i = 0; i < data->len; i++) {
+        crc = crc_table[(crc ^ buf[i]) & 0xff] ^ (crc >> 8);
+    }
+    return PyLong_FromUnsignedLong((crc ^ 0xFFFFFFFF) & 0xffffffff);
+}
+```
+
+### `hexlify` / `unhexlify`
+
+`hexlify(data)` returns a `bytes` object with each byte encoded as two lowercase hex digits. `unhexlify(hex)` decodes it. Both are O(n) single-pass operations.
+
+## gopy notes
+
+Status: partially covered. `crc32` maps to `hash/crc32.ChecksumIEEE`. `hexlify`/`unhexlify` map to `encoding/hex.EncodeToString`/`DecodeString`. `b2a_base64` / `a2b_base64` are internal details of `base64`; the gopy `base64` module would call Go's `encoding/base64` directly rather than going through a `binascii` layer.

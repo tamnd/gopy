@@ -1,0 +1,85 @@
+---
+title: Lib/uuid.py
+description: "uuid: UUID type, uuid1/uuid3/uuid4/uuid5 generators. 128-bit UUID stored as int. RFC 4122 variants and versions. getnode for MAC address."
+cpython_path: Lib/uuid.py
+cpython_version: "3.14"
+lines: 660
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/uuid.py" />
+
+`uuid` provides RFC 4122 Universally Unique Identifiers. The `UUID` class stores the 128-bit value as a Python `int`. Generator functions produce version 1 (time-based), 3 (MD5-based), 4 (random), and 5 (SHA-1-based) UUIDs.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `NAMESPACE_*`, `RESERVED_*` | RFC 4122 predefined namespaces and variant constants |
+| 81-320 | `UUID` class | Construction from hex/bytes/int/fields; properties for each component |
+| 321-420 | `uuid1` | Time-based UUID with MAC address node |
+| 421-480 | `uuid3`, `uuid5` | Namespace-based UUIDs using MD5 / SHA-1 |
+| 481-520 | `uuid4` | Random UUID |
+| 521-660 | `getnode`, `_getnode_*` | MAC address detection for version 1 |
+
+## Reading
+
+### `UUID` storage and properties
+
+```python
+# CPython: Lib/uuid.py:210 UUID.__init__
+def __init__(self, hex=None, bytes=None, bytes_le=None, fields=None, int=None,
+             version=None, *, is_safe=SafeUUID.unknown):
+    ...
+    if int is not None:
+        ...
+        self.__dict__['int'] = int
+    ...
+```
+
+The UUID is stored as `self.int` (a 128-bit Python integer). Properties derive the RFC 4122 fields via bit shifting:
+
+```python
+# CPython: Lib/uuid.py:310 UUID.time_low
+@property
+def time_low(self):
+    return self.int >> 96
+
+@property
+def node(self):
+    return self.int & 0xffffffffffff
+```
+
+### `uuid4`
+
+```python
+# CPython: Lib/uuid.py:519 uuid4
+def uuid4():
+    """Generate a random UUID."""
+    return UUID(bytes=os.urandom(16), version=4)
+```
+
+Uses `os.urandom` (which reads from `/dev/urandom` or the OS CSPRNG). The version bits are set to 4 and the variant bits to RFC 4122 in `UUID.__init__` when `version=4` is specified.
+
+### `uuid1` and `getnode`
+
+`uuid1` uses the current time (100-nanosecond intervals since October 15, 1582) and the host's MAC address as the node. `getnode` tries multiple methods to discover the MAC: `_ipconfig_getnode` (Windows), `_ifconfig_getnode` (via `ifconfig` subprocess), `_ip_getnode` (via `ip link`), and finally `_random_getnode` (a random 48-bit number with the multicast bit set).
+
+### `uuid3` and `uuid5`
+
+Produce deterministic UUIDs by hashing a namespace UUID and a name:
+
+```python
+# CPython: Lib/uuid.py:466 uuid5
+def uuid5(namespace, name):
+    if isinstance(name, str):
+        name = name.encode()
+    hash = sha1(namespace.bytes + name, usedforsecurity=False).digest()
+    return UUID(bytes=hash[:16], version=5)
+```
+
+## gopy notes
+
+Status: not yet ported. Go's `github.com/google/uuid` provides equivalent functionality. A gopy port would wrap that package's `UUID` type as a Python `uuid.UUID` object.

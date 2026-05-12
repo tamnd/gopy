@@ -1,0 +1,78 @@
+---
+title: Lib/tarfile.py
+description: "tarfile: TarFile, TarInfo. Read/write POSIX ustar, GNU tar, and PAX format archives. Compression via gzip, bzip2, lzma. Streaming and seekable modes."
+cpython_path: Lib/tarfile.py
+cpython_version: "3.14"
+lines: 2900
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/tarfile.py" />
+
+`tarfile` reads and writes POSIX and GNU tar archives with optional compression. Unlike `zipfile`, the tar format is a sequential stream of headers and data blocks; seeking requires reading from the start. PAX format (IEEE 1003.1-2001) allows arbitrary Unicode filenames and extended attributes.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-100 | Constants, `ENCODING`, `BLOCKSIZE` | Format constants (512-byte blocks) |
+| 101-400 | `TarInfo` | Per-entry metadata: name, size, mtime, mode, uid, gid, type |
+| 401-700 | `ExFileObject` | File-like object for reading a member |
+| 701-1100 | `TarFile.__init__`, `open`, `_proc_*` | Archive open; header dispatch |
+| 1101-1500 | `TarFile.getmembers`, `getmember`, `getnames` | List contents |
+| 1501-1800 | `TarFile.extractall`, `extract`, `extractfile` | Extraction |
+| 1801-2200 | `TarFile.addfile`, `add`, `gettarinfo` | Writing entries |
+| 2201-2900 | `TarFile.close`, `_create_gnu_long_header`, `_create_pax_generic_header` | Close, GNU/PAX long-name extensions |
+
+## Reading
+
+### 512-byte block structure
+
+Each tar entry consists of a 512-byte header block followed by the file data padded to a multiple of 512 bytes. The header contains a fixed-layout C struct with name, mode, uid, gid, size, mtime, checksum, type, and link fields.
+
+### `TarInfo.frombuf`
+
+Parses a 512-byte header buffer:
+
+```python
+# CPython: Lib/tarfile.py:1143 TarInfo.frombuf
+@classmethod
+def frombuf(cls, buf, encoding, errors):
+    tarinfo = cls()
+    tarinfo.name = nts(buf[0:100], encoding, errors)
+    tarinfo.mode = nti(buf[100:108])
+    tarinfo.uid  = nti(buf[108:116])
+    tarinfo.gid  = nti(buf[116:124])
+    tarinfo.size = nti(buf[124:136])
+    tarinfo.mtime = nti(buf[136:148])
+    ...
+```
+
+`nts` converts null-terminated bytes to a string; `nti` converts octal ASCII bytes to an integer.
+
+### PAX format
+
+PAX adds variable-length extended header records for fields that overflow the fixed-size ustar fields (long filenames, large sizes, high-resolution timestamps). Extended headers are themselves tar entries with type `'x'` (local) or `'g'` (global).
+
+### Compression detection
+
+`TarFile.open(mode='r:*')` auto-detects the compression by reading the magic bytes and selecting the appropriate decompressor.
+
+```python
+# CPython: Lib/tarfile.py:1620 TarFile.open
+@classmethod
+def open(cls, name=None, mode='r', fileobj=None, bufsize=RECORDSIZE, **kwargs):
+    ...
+    if ':' in mode:
+        filemode, comptype = mode.split(':', 1)
+        ...
+        if comptype == 'gz': fileobj = gzip.GzipFile(...)
+        elif comptype == 'bz2': fileobj = bz2.BZ2File(...)
+        elif comptype == 'xz': fileobj = lzma.LZMAFile(...)
+```
+
+## gopy notes
+
+Status: not yet ported. Go's `archive/tar` provides a compatible reader/writer for the ustar format. GNU and PAX extensions require additional header-dispatch logic. A gopy `tarfile` port would wrap `archive/tar` with a Python-compatible `TarInfo` struct.

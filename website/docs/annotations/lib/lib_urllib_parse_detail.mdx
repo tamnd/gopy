@@ -1,0 +1,88 @@
+---
+title: Lib/urllib/parse.py
+description: "urllib.parse: urlparse, urlsplit, urljoin, urlunparse, urlencode, quote, unquote, parse_qs, parse_qsl. Pure-Python URL manipulation."
+cpython_path: Lib/urllib/parse.py
+cpython_version: "3.14"
+lines: 1100
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/urllib/parse.py" />
+
+`urllib.parse` provides RFC 3986 URL parsing and manipulation. It is pure Python with no C extension. The module is widely used for constructing and decomposing HTTP URLs.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | Scheme classification dicts | `uses_netloc`, `uses_query`, `uses_fragment` |
+| 81-200 | `urlparse`, `urlsplit` | Parse a URL into components |
+| 201-320 | `ParseResult`, `SplitResult` | Named tuple classes with `geturl()` method |
+| 321-450 | `urlunsplit`, `urlunparse`, `urljoin` | Reconstruct and resolve URLs |
+| 451-600 | `quote`, `quote_plus`, `unquote`, `unquote_plus` | Percent-encoding |
+| 601-700 | `urlencode` | Dict to query string |
+| 701-850 | `parse_qs`, `parse_qsl` | Query string parsing |
+| 851-1100 | `splittype`, `splithost`, etc. | Legacy split functions (deprecated) |
+
+## Reading
+
+### `urlsplit`
+
+```python
+# CPython: Lib/urllib/parse.py:452 urlsplit
+def urlsplit(url, scheme='', allow_fragments=True):
+    ...
+    netloc = query = fragment = ''
+    i = url.find(':')
+    if i > 0 and url[0].isalpha() and all(c in scheme_chars for c in url[1:i]):
+        ...
+        scheme, url = url[:i].lower(), url[i+1:]
+    if url[:2] == '//':
+        netloc, url = _splitnetloc(url, 2)
+    if allow_fragments and '#' in url:
+        url, fragment = url.split('#', 1)
+    if '?' in url:
+        url, query = url.split('?', 1)
+    ...
+    return SplitResult(scheme, netloc, url, query, fragment)
+```
+
+Results are cached with `functools.lru_cache` for repeated calls with the same URL.
+
+### `urljoin`
+
+Resolves a relative URL against a base URL per RFC 3986. The `allow_fragments` parameter controls whether fragment identifiers are preserved.
+
+```python
+# CPython: Lib/urllib/parse.py:530 urljoin
+def urljoin(base, url, allow_fragments=True):
+    ...
+    bscheme, bnetloc, bpath, bparams, bquery, bfragment = urlparse(base, ...)
+    scheme, netloc, path, params, query, fragment = urlparse(url, ...)
+    if scheme != bscheme or scheme not in uses_relative:
+        ...
+    if not path and not params:
+        path = bpath
+        ...
+    elif path[:1] == '/':
+        ...
+    else:
+        # Merge: replace last component of base path
+        ...
+```
+
+### `quote` and `unquote`
+
+`quote(string, safe='/', encoding=None, errors=None)` percent-encodes all characters not in `safe` or the unreserved set. Uses a fast path for ASCII bytes and a slow path for Unicode.
+
+`unquote(string, encoding='utf-8', errors='replace')` decodes `%XX` sequences. Since Python 3.1 it handles multi-byte UTF-8 sequences encoded as multiple `%XX` triples.
+
+### `parse_qs` and `parse_qsl`
+
+`parse_qsl` returns a list of `(key, value)` pairs. `parse_qs` returns a dict mapping each key to a list of all its values (multiple `key=val` pairs with the same key accumulate).
+
+## gopy notes
+
+Status: not yet ported. Go's `net/url` package covers `urlparse`/`urljoin`. `url.Values.Encode()` replaces `urlencode`. `url.ParseQuery` replaces `parse_qs`. The main gap is `quote`/`unquote` with custom `safe` sets; Go's `url.QueryEscape` uses a fixed safe set.
