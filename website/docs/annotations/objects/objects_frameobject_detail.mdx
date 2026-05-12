@@ -1,0 +1,74 @@
+---
+title: Objects/frameobject.c
+description: "PyFrameObject: frame construction via _PyFrame_New_NoTrack, f_locals materialisation, f_lineno computation from the position table, PyFrame_LocalsToFast/FastToLocals, and the frame lifecycle during generator yield."
+cpython_path: Objects/frameobject.c
+cpython_version: "3.14"
+lines: 1100
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Objects/frameobject.c`
+
+<CpyLink path="Objects/frameobject.c" />
+
+`Objects/frameobject.c` defines `PyFrameObject` and the helpers that the eval loop uses to
+manage execution state. In Python 3.11+ the frame was split: an internal `_PyInterpreterFrame`
+holds the hot execution state on the C stack, while `PyFrameObject` is a lazily-allocated
+Python-visible wrapper.
+
+## Map
+
+| Lines | Symbol | Role |
+| ----- | ------ | ---- |
+| 1-200 | `PyFrameObject` struct, `_PyFrame_New_NoTrack` | Frame allocation and initialization |
+| 201-450 | `PyFrame_LocalsToFast`, `PyFrame_FastToLocals` | Sync between fast locals array and `f_locals` dict |
+| 451-650 | `frame_getlineno`, `PyFrame_GetLineNumber` | Line number from position table |
+| 651-900 | `frame_getlocals`, `frame_getglobals` | Property accessors |
+| 901-1100 | Generator frame lifecycle | `_PyFrameObject_GetGenerator`, frame suspension |
+
+## Reading
+
+### Lazy `PyFrameObject` allocation
+
+The hot `_PyInterpreterFrame` lives on the C stack or in the object's frame array. A
+`PyFrameObject` Python wrapper is only allocated on first access via `sys._getframe()`,
+`traceback`, or `inspect`. This avoids allocating a heap object for every function call.
+
+```c
+// CPython: Objects/frameobject.c:44 _PyFrame_MakeAndSetFrameObject
+PyFrameObject *
+_PyFrame_MakeAndSetFrameObject(_PyInterpreterFrame *frame)
+{
+    PyFrameObject *f = _PyObject_GC_New(&PyFrame_Type);
+    ...
+    f->f_frame = frame;
+    frame->frame_obj = f;
+    return f;
+}
+```
+
+### `PyFrame_FastToLocals`
+
+`f_locals` starts as NULL. When accessed, `PyFrame_FastToLocals` copies the fast-locals
+array (`LOAD_FAST`/`STORE_FAST` slots) into a `dict`. Edits to the dict are reflected back
+via `PyFrame_LocalsToFast`, which is called before certain `LOAD_DEREF` paths.
+
+### Line number computation
+
+`PyFrame_GetLineNumber` calls `_PyCode_InitAddressRange` and scans the position table
+forward from the start of the code object to the current `f_lasti` offset. The result is
+the 1-based source line number for tracebacks.
+
+### Generator frame suspension
+
+When a `YIELD_VALUE` instruction fires, the `_PyInterpreterFrame` is not freed; it is
+owned by the generator object (`PyGenObject.gi_iframe`). On the next `__next__` call the
+frame is re-entered at `f_lasti + 1`.
+
+## gopy notes
+
+`vm/eval_gen.go` manages generator frame suspension. The lazy `PyFrameObject` allocation
+pattern is not yet needed in gopy since `sys._getframe` is not yet implemented. Frame
+introspection for tracebacks is in `vm/eval_unwind.go`.

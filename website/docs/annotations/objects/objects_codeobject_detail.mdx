@@ -1,0 +1,75 @@
+---
+title: Objects/codeobject.c
+description: "PyCodeObject: construction via _PyCode_New, co_linetable position table encoding, co_qualname for nested classes, _PyCode_GetFreevars, and the adaptive specialization counter fields."
+cpython_path: Objects/codeobject.c
+cpython_version: "3.14"
+lines: 1600
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Objects/codeobject.c`
+
+<CpyLink path="Objects/codeobject.c" />
+
+`Objects/codeobject.c` defines `PyCodeObject`, the compiled representation of a Python
+function or module. It owns the bytecode array, constant pool, name tables, and position
+table. The adaptive specialization machinery in Python 3.12+ added per-instruction counter
+fields that live alongside the bytecode.
+
+## Map
+
+| Lines | Symbol | Role |
+| ----- | ------ | ---- |
+| 1-300 | `_PyCode_New`, `PyCode_NewWithPosOnlyArgs` | Code object construction and validation |
+| 301-600 | Position table (`co_linetable`) encoding | Compact source-location encoding |
+| 601-900 | `co_qualname`, `co_firstlineno` | Qualified name and source location |
+| 901-1200 | `_PyCode_GetFreevars`, cell/free var tables | Closure variable access |
+| 1201-1600 | Adaptive counters, `_PyCode_Quicken` | Specialization counter allocation |
+
+## Reading
+
+### `co_linetable` encoding
+
+Instead of a separate `co_lnotab` per-instruction array, Python 3.10+ uses a compact
+`co_linetable` that encodes (offset, line, end_line, col, end_col) tuples for each
+instruction span. The `_PyCode_InitAddressRange` iterator decodes this table.
+
+```c
+// CPython: Objects/codeobject.c:342 scan_varint
+static unsigned int
+scan_varint(const uint8_t *ptr)
+{
+    unsigned int read = *ptr++;
+    unsigned int val = read & 63;
+    unsigned int shift = 0;
+    while (read & 64) {
+        read = *ptr++;
+        shift += 6;
+        val |= (read & 63) << shift;
+    }
+    return val;
+}
+```
+
+### Adaptive specialization counters
+
+In Python 3.12+ each instruction word has an associated `_Py_BackoffCounter`. When the
+counter saturates, the specializer replaces the generic opcode with a type-specific variant
+(e.g. `LOAD_ATTR` becomes `LOAD_ATTR_SLOT`). `_PyCode_Quicken` initializes these counters
+to their starting values.
+
+### `co_qualname`
+
+`co_qualname` is the dotted name used in `__qualname__`, for example
+`OuterClass.inner_method` or `<locals>.helper`. It is stored separately from `co_name` to
+allow the two to diverge (a lambda has `co_name = '<lambda>'` but a meaningful
+`co_qualname`).
+
+## gopy notes
+
+The gopy code object is defined across `compile/compiler.go` and used by `vm/`. The
+position table (`co_linetable`) is implemented in `compile/flowgraph.go`. Adaptive
+specialization counters are not yet implemented; gopy's dispatch loop uses static opcode
+dispatch.

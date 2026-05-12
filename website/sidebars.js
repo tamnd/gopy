@@ -290,6 +290,8 @@ const sidebars = {
         'annotations/python/python_gc_c_detail',
         'annotations/python/python_thread_c_detail',
         'annotations/python/python_traceback_c_detail',
+        'annotations/python/python_ceval2_detail',
+        'annotations/python/python_frozen_c_detail',
       ],
     },
     {
@@ -441,6 +443,8 @@ const sidebars = {
         'annotations/objects/objects_setobject_detail',
         'annotations/objects/objects_memoryobject2_detail',
         'annotations/objects/objects_exceptions_detail',
+        'annotations/objects/objects_codeobject_detail',
+        'annotations/objects/objects_frameobject_detail',
       ],
     },
     {
@@ -1259,6 +1263,9 @@ const sidebars = {
         'annotations/lib/lib_enum_detail',
         'annotations/lib/lib_pathlib2_detail',
         'annotations/lib/lib_argparse_detail',
+        'annotations/lib/lib_logging_detail',
+        'annotations/lib/lib_unittest_detail',
+        'annotations/lib/lib_io_detail',
       ],
     },
   ],

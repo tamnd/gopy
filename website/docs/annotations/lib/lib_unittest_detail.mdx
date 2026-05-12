@@ -1,0 +1,76 @@
+---
+title: Lib/unittest/__init__.py
+description: "unittest package: TestCase assert helpers, TestSuite aggregation, TestLoader discovery, TestRunner with TextTestResult, and the @skip/@expectedFailure decorators."
+cpython_path: Lib/unittest/__init__.py
+cpython_version: "3.14"
+lines: 2800
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+# `Lib/unittest/__init__.py`
+
+<CpyLink path="Lib/unittest/__init__.py" />
+
+`Lib/unittest/__init__.py` re-exports the key symbols from the `unittest` sub-package.
+The implementation is spread across several submodules; this annotation covers the overall
+architecture.
+
+## Map
+
+| Lines | Symbol | Role |
+| ----- | ------ | ---- |
+| 1-50 | Re-exports | `TestCase`, `TestSuite`, `TestLoader`, `TestResult`, `TestRunner` |
+| unittest/case.py | `TestCase` | Assert methods, setUp/tearDown lifecycle, subTest |
+| unittest/suite.py | `TestSuite` | Ordered collection of tests, recursive run |
+| unittest/loader.py | `TestLoader` | Class/module/file discovery via `loadTestsFrom*` |
+| unittest/runner.py | `TextTestRunner` | Runs a suite and prints results to a stream |
+| unittest/result.py | `TestResult` | Accumulates pass/fail/error/skip counts |
+
+## Reading
+
+### `TestCase.assertEqual` and the comparison dispatch
+
+`assertEqual` first tries `type(first)` against `_type_equality_funcs` (a dict mapping
+types to specialized comparers such as `assertListEqual`, `assertDictEqual`) before falling
+back to `==`. This produces richer diffs for collections.
+
+```python
+# CPython: Lib/unittest/case.py:870 assertEqual
+def assertEqual(self, first, second, msg=None):
+    if not first == second:
+        firstclass = first.__class__
+        secondclass = second.__class__
+        if firstclass is secondclass:
+            assertion_func = self._type_equality_funcs.get(firstclass)
+            if assertion_func is not None:
+                assertion_func(first, second, msg=msg)
+                return
+        ...
+        raise self.failureException(...)
+```
+
+### `subTest` context manager
+
+`subTest(msg, **params)` temporarily overrides the test's description so that failures
+inside the block report the subtest parameters. A failure inside `subTest` does not abort
+the test method; subsequent `subTest` blocks continue executing.
+
+### `TestLoader.discover`
+
+`discover(start_dir, pattern='test*.py')` walks the directory tree with `os.walk`,
+imports matching files, and calls `loadTestsFromModule` on each. Files whose import raises
+an exception produce an error test rather than crashing the discovery.
+
+### `@skip` and `@expectedFailure`
+
+`@skip(reason)` wraps the test method to raise `SkipTest` immediately. `@expectedFailure`
+wraps the method and inverts the result: a failure is counted as a pass, and a pass is
+counted as an unexpected success (which is reported as a failure).
+
+## gopy notes
+
+Not yet ported. The `unittest` dependency is needed for the v0.12.1 e2e test gate
+(`feat/v0.12.1-test-e2e`). Planned path: `module/unittest/`. The assert methods are
+independent of the VM; `TestLoader.discover` requires `os.walk` and `importlib`.
