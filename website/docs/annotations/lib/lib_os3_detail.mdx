@@ -1,0 +1,120 @@
+---
+title: Lib/os.py (part 3)
+description: "Lib/os.py part 3: os.walk, os.scandir, DirEntry, os.makedirs, os.removedirs."
+cpython_path: Lib/os.py
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/os.py" />
+
+This annotation covers directory traversal and `DirEntry`. See `lib_os2_detail` for `os.open`/`close`/`read`/`write`, `os.path`, and `os.environ`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `os.scandir` | Return an iterator of `DirEntry` objects |
+| 81-160 | `DirEntry` | File metadata without a separate `stat` call |
+| 161-260 | `os.walk` | Recursive directory traversal generator |
+| 261-360 | `os.makedirs` | Create directory tree; analog of `mkdir -p` |
+| 361-500 | `os.removedirs` | Remove empty directory tree from the bottom up |
+
+## Reading
+
+### `os.scandir`
+
+```c
+// CPython: Modules/posixmodule.c:11820 os_scandir_impl
+/* scandir() calls opendir()/readdir() (POSIX) or FindFirstFile/FindNextFile (Windows).
+   DirEntry objects are lazily populated: stat() is called only if requested. */
+```
+
+`os.scandir` returns an iterator, not a list. Each iteration yields one `DirEntry`. As a context manager: `with os.scandir(path) as it:` ensures `closedir()` is called. `os.listdir` returns only names; `scandir` returns `DirEntry` objects with cached metadata.
+
+### `DirEntry`
+
+```python
+# CPython: Modules/posixmodule.c (DirEntry is C-level)
+# DirEntry fields:
+#   .name  — file name (not full path)
+#   .path  — full path (parent_path / name)
+#   .is_file(follow_symlinks=True)   — cached from d_type if available
+#   .is_dir(follow_symlinks=True)    — cached from d_type
+#   .is_symlink()                    — cached from d_type
+#   .stat(follow_symlinks=True)      — calls stat() / lstat()
+```
+
+On Linux, `d_type` in `struct dirent` avoids a `stat` call for `is_file`/`is_dir`/`is_symlink`. On filesystems that don't support `d_type` (some NFS, XFS), `d_type == DT_UNKNOWN` and a stat is required. Windows uses `FindFirstFile` attributes.
+
+### `os.walk`
+
+```python
+# CPython: Lib/os.py:408 os.walk
+def walk(top, topdown=True, onerror=None, followlinks=False):
+    """Directory tree generator yielding (dirpath, dirnames, filenames)."""
+    sys.audit('os.walk', top, topdown, onerror, followlinks)
+    return _walk(fspath(top), topdown, onerror, followlinks)
+
+def _walk(top, topdown, onerror, followlinks):
+    dirs = []
+    nondirs = []
+    walk_dirs = []
+    try:
+        scandir_it = scandir(top)
+    except OSError as e:
+        if onerror is not None:
+            onerror(e)
+        return
+    with scandir_it:
+        for entry in scandir_it:
+            try:
+                is_dir = entry.is_dir()
+            except OSError:
+                is_dir = False
+            if is_dir:
+                dirs.append(entry.name)
+                walk_dirs.append(entry.path)
+            else:
+                nondirs.append(entry.name)
+    if topdown:
+        yield top, dirs, nondirs
+        for new_path in walk_dirs:
+            yield from _walk(new_path, topdown, onerror, followlinks)
+    else:
+        for new_path in walk_dirs:
+            yield from _walk(new_path, topdown, onerror, followlinks)
+        yield top, dirs, nondirs
+```
+
+`os.walk` uses `os.scandir` for directory listing. Modifying `dirs` in-place during `topdown=True` iteration prunes the subtree. `followlinks=True` follows symlinks but may loop.
+
+### `os.makedirs`
+
+```python
+# CPython: Lib/os.py:213 makedirs
+def makedirs(name, mode=0o777, exist_ok=False):
+    """makedirs(name [, mode=0o777][, exist_ok=False])"""
+    head, tail = path.split(name)
+    if not tail:
+        head, tail = path.split(head)
+    if head and tail and not path.exists(head):
+        try:
+            makedirs(head, mode, exist_ok)
+        except FileExistsError:
+            pass
+    try:
+        mkdir(name, mode)
+    except OSError as e:
+        if not exist_ok or e.errno != errno.EEXIST or not path.isdir(name):
+            raise
+```
+
+`os.makedirs` is recursive: it creates the entire path. `exist_ok=True` (Python 3.2+) suppresses `FileExistsError` if the target directory already exists.
+
+## gopy notes
+
+`os.scandir` is `module/os.Scandir` in `module/os/module.go` using `os.ReadDir`. `DirEntry` is `module/os.DirEntry` backed by `os.DirEntry`. `os.walk` uses `filepath.WalkDir`. `os.makedirs` calls `os.MkdirAll`. `os.removedirs` iterates `os.Remove` from deepest to shallowest.

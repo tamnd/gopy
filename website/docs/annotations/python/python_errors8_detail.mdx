@@ -1,0 +1,105 @@
+---
+title: Python/errors.c (part 8)
+description: "Python/errors.c part 8: PyErr_GetRaisedException, PyErr_SetRaisedException, _PyErr_StackItem, exception normalization."
+cpython_path: Python/errors.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Python/errors.c" />
+
+This annotation covers the exception state API added in Python 3.12. See `python_errors7_detail` for `PyErr_FormatUnraisable` and `_PyErr_WriteUnraisableMsg`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `PyErr_GetRaisedException` | Fetch the current exception as a single object |
+| 81-160 | `PyErr_SetRaisedException` | Set the current exception from a single object |
+| 161-280 | `_PyErr_StackItem` | Per-frame exception state for `except` blocks |
+| 281-380 | Exception normalization | Ensure `type(exc)` matches `exc.__class__` |
+| 381-500 | `PyErr_GetExcInfo` / `PyErr_SetExcInfo` | Thread-level `sys.exc_info()` state |
+
+## Reading
+
+### `PyErr_GetRaisedException`
+
+```c
+// CPython: Python/errors.c:280 PyErr_GetRaisedException
+PyObject *
+PyErr_GetRaisedException(void)
+{
+    /* In CPython 3.12+, an exception is stored as a single object
+       (the exception instance), not a (type, value, traceback) triple. */
+    PyThreadState *tstate = _PyThreadState_GET();
+    PyObject *exc = tstate->current_exception;
+    tstate->current_exception = NULL;
+    return exc;
+}
+```
+
+Python 3.12 unified the exception representation: the current exception is a single `PyObject *` (the exception instance), not the old `(type, value, traceback)` triple. `exc.__traceback__` holds the traceback. This simplified exception handling significantly.
+
+### `PyErr_SetRaisedException`
+
+```c
+// CPython: Python/errors.c:300 PyErr_SetRaisedException
+void
+PyErr_SetRaisedException(PyObject *exc)
+{
+    PyThreadState *tstate = _PyThreadState_GET();
+    PyObject *old_exc = tstate->current_exception;
+    tstate->current_exception = exc;
+    Py_XDECREF(old_exc);
+}
+```
+
+`PyErr_SetRaisedException` replaces the current exception. The old exception is decremented. This is used to re-raise an exception (store it, do cleanup, set it back) or to replace it with a chained exception.
+
+### `_PyErr_StackItem`
+
+```c
+// CPython: Python/errors.c:180 _PyErr_StackItem
+/* Each frame has a 'previous_item' for the exception state:
+   - The "active exception" for except blocks
+   - Cleared when the except block exits (CLEANUP_THROW or END_CLEANUP)
+   - Used by sys.exc_info() to return the innermost handled exception
+*/
+typedef struct _err_stackitem {
+    PyObject *exc_value;          /* The handled exception */
+    struct _err_stackitem *previous_item;
+} _PyErr_StackItem;
+```
+
+`sys.exc_info()` returns the exception currently being handled in the innermost `except` block. This is distinct from `tstate->current_exception` (the exception being propagated). `_PyErr_StackItem` maintains this stack alongside the call stack.
+
+### Exception normalization
+
+```c
+// CPython: Python/errors.c:420 _PyErr_NormalizeException
+void
+_PyErr_NormalizeException(PyThreadState *tstate, PyObject **exc,
+                           PyObject **val, PyObject **tb)
+{
+    /* Legacy function for the old (type, value, traceback) API.
+       In 3.12+ this is mostly a no-op since exceptions are always instances.
+       Still needed for C code using the old API. */
+    if (*exc == NULL) return;
+    if (!PyExceptionInstance_Check(*val)) {
+        /* val is not an instance: call type(*val) to create one */
+        PyObject *instance = _PyObject_CallOneArg(*exc, *val);
+        Py_DECREF(*val);
+        *val = instance;
+    }
+    ...
+}
+```
+
+`raise ValueError` (raising a class, not an instance) is normalized by the interpreter before propagation: `ValueError` becomes `ValueError()`. Normalization only happens at the point of raise, not when storing the exception.
+
+## gopy notes
+
+`PyErr_GetRaisedException` is `vm.GetRaisedException` in `vm/eval_unwind.go`. `tstate->current_exception` is `vm.ThreadState.CurrentException`. `_PyErr_StackItem` is `vm.ExcStackItem` forming a linked list on the frame stack. `_PyErr_NormalizeException` is `errors.Normalize` in `objects/errors.go`.

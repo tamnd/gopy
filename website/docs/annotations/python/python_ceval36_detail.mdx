@@ -1,0 +1,118 @@
+---
+title: Python/ceval.c (part 36)
+description: "Python/ceval.c part 36: COMPARE_OP specializations — COMPARE_OP_INT, COMPARE_OP_FLOAT, COMPARE_OP_STR."
+cpython_path: Python/ceval.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Python/ceval.c" />
+
+This annotation covers comparison specializations. See `python_ceval35_detail` for arithmetic specializations.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `COMPARE_OP` (generic) | General comparison using `PyObject_RichCompare` |
+| 81-160 | `COMPARE_OP_INT` | `int` comparison using compact value |
+| 161-240 | `COMPARE_OP_FLOAT` | `float` comparison using `ob_fval` directly |
+| 241-320 | `COMPARE_OP_STR` | `str` comparison: pointer equality first |
+| 321-500 | `IS_OP` / `CONTAINS_OP` | Identity test and membership test |
+
+## Reading
+
+### `COMPARE_OP_INT`
+
+```c
+// CPython: Python/ceval.c:3120 COMPARE_OP_INT
+inst(COMPARE_OP_INT, (left, right -- res)) {
+    DEOPT_IF(!PyLong_CheckExact(left), COMPARE_OP);
+    DEOPT_IF(!PyLong_CheckExact(right), COMPARE_OP);
+    DEOPT_IF(!_PyLong_BothAreCompact((PyLongObject *)left,
+                                     (PyLongObject *)right), COMPARE_OP);
+    stwodigits lv = _PyLong_CompactValue((PyLongObject *)left);
+    stwodigits rv = _PyLong_CompactValue((PyLongObject *)right);
+    int sign = (lv > rv) - (lv < rv);  /* -1, 0, +1 */
+    res = _PyCompare_FromSign(sign, oparg);  /* maps sign + op to bool */
+    Py_DECREF(left); Py_DECREF(right);
+}
+```
+
+`a < b` for small integers does a single integer comparison and maps the sign to `True`/`False`. `_PyCompare_FromSign` uses the `oparg` (which encodes `<`, `<=`, `==`, `!=`, `>`, `>=`) to produce the result without calling `PyObject_RichCompareBool`.
+
+### `COMPARE_OP_FLOAT`
+
+```c
+// CPython: Python/ceval.c:3180 COMPARE_OP_FLOAT
+inst(COMPARE_OP_FLOAT, (left, right -- res)) {
+    DEOPT_IF(!PyFloat_CheckExact(left), COMPARE_OP);
+    DEOPT_IF(!PyFloat_CheckExact(right), COMPARE_OP);
+    double dleft = PyFloat_AS_DOUBLE(left);
+    double dright = PyFloat_AS_DOUBLE(right);
+    int sign = (dleft > dright) - (dleft < dright);
+    res = _PyCompare_FromSign(sign, oparg);
+    Py_DECREF(left); Py_DECREF(right);
+}
+```
+
+Note: NaN comparisons always return `False` (except `!=`). `double sign = (dleft > dright) - (dleft < dright)` correctly returns `0` for `nan != nan` only when `oparg` is `!=`.
+
+### `COMPARE_OP_STR`
+
+```c
+// CPython: Python/ceval.c:3240 COMPARE_OP_STR
+inst(COMPARE_OP_STR, (left, right -- res)) {
+    DEOPT_IF(!PyUnicode_CheckExact(left), COMPARE_OP);
+    DEOPT_IF(!PyUnicode_CheckExact(right), COMPARE_OP);
+    /* Fast path: interned strings are equal iff they are the same object */
+    if (left == right) {
+        res = oparg == Py_EQ ? Py_True : Py_False;
+        Py_DECREF(left); Py_DECREF(right);
+    } else {
+        int cmp = PyUnicode_CompareWithASCIIString(left,
+                       PyUnicode_AsUTF8(right));
+        res = _PyCompare_FromSign(cmp, oparg);
+    }
+}
+```
+
+String literal comparisons often involve interned strings: `s == "hello"` where both are interned reduces to a pointer comparison. The full comparison uses `PyUnicode_Compare` which handles different encodings.
+
+### `IS_OP`
+
+```c
+// CPython: Python/ceval.c:3320 IS_OP
+inst(IS_OP, (left, right -- res)) {
+    /* oparg=0: left is right
+       oparg=1: left is not right */
+    int b = Py_Is(left, right) ^ oparg;
+    res = b ? Py_True : Py_False;
+    Py_DECREF(left); Py_DECREF(right);
+}
+```
+
+`x is y` compiles to `IS_OP 0`; `x is not y` compiles to `IS_OP 1`. `Py_Is` is a macro that compares pointers directly. No virtual dispatch, no hash lookup.
+
+### `CONTAINS_OP`
+
+```c
+// CPython: Python/ceval.c:3360 CONTAINS_OP
+inst(CONTAINS_OP, (left, right -- res)) {
+    /* oparg=0: left in right
+       oparg=1: left not in right */
+    int b = PySequence_Contains(right, left);
+    if (b < 0) ERROR_IF(true, error);
+    res = (b ^ oparg) ? Py_True : Py_False;
+    Py_DECREF(left); Py_DECREF(right);
+}
+```
+
+`PySequence_Contains` calls `__contains__` if available, otherwise iterates. `x in set_obj` calls `set.__contains__` which is O(1); `x in list_obj` is O(n).
+
+## gopy notes
+
+`COMPARE_OP_INT` is in `vm/eval_gen.go` comparing Go `int64` values. `COMPARE_OP_FLOAT` uses Go `float64`. `COMPARE_OP_STR` checks pointer equality then calls `objects.UnicodeCompare`. `IS_OP` compares `objects.Object` interface values. `CONTAINS_OP` calls `objects.SequenceContains`.

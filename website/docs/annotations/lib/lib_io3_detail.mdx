@@ -1,0 +1,98 @@
+---
+title: Lib/io.py (part 3)
+description: "Lib/io.py part 3: StringIO, BytesIO, open() defaults, io.DEFAULT_BUFFER_SIZE, text_encoding."
+cpython_path: Lib/io.py
+cpython_version: "3.14"
+lines: 400
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/io.py" />
+
+This annotation covers in-memory streams and the `open()` function defaults. See `modules_io2_detail` for `BufferedReader`, `BufferedWriter`, and `TextIOWrapper`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-60 | `io.open` / `builtins.open` | Factory for all file-like objects |
+| 61-160 | `BytesIO` | In-memory `bytes` stream |
+| 161-280 | `StringIO` | In-memory `str` stream |
+| 281-360 | `io.DEFAULT_BUFFER_SIZE` | 8192 bytes — default for `BufferedReader`/`Writer` |
+| 361-400 | `io.text_encoding` | Resolve `None` encoding to `'utf-8'` or `'locale'` |
+
+## Reading
+
+### `BytesIO`
+
+```python
+# CPython: Modules/_io/bytesio.c (C implementation)
+# BytesIO wraps a bytes buffer:
+#   buf: bytearray growing on write
+#   pos: current position (int)
+#   exports: number of active memoryview exports
+#
+# write(b): extend buf at pos; advance pos
+# read(n):  return buf[pos:pos+n]; advance pos
+# seek(pos, whence): absolute/relative/from-end positioning
+# getvalue(): return bytes(buf)
+# getbuffer(): return memoryview of buf (prevents resize while exported)
+```
+
+`BytesIO` is implemented in C (`_io.BytesIO`). The pure-Python module `io` imports from `_io`. `BytesIO.getbuffer()` returns a writable `memoryview`; while it is alive, `write()` raises `BufferError` because resizing would invalidate the view.
+
+### `StringIO`
+
+```python
+# CPython: Modules/_io/stringio.c (C implementation)
+# StringIO wraps a list of str chunks + a merged string:
+#   readnl: universal newlines translation
+#   pos: int (character position, not byte offset)
+#
+# write(s): append to chunk list
+# read(n):  merge chunks on first read; return substr
+# getvalue(): merge all chunks; return the full string
+```
+
+`StringIO` defers merging chunks until `read`/`getvalue`, making multiple `write` calls efficient. `StringIO(initial_value)` starts with a preloaded string. `getvalue()` ignores the current position and returns the full content.
+
+### `io.text_encoding`
+
+```python
+# CPython: Lib/io.py:88 text_encoding
+def text_encoding(encoding, stacklevel=2, /):
+    """Return the default text encoding.
+
+    If encoding is None:
+      - If PYTHONWARNDEFAULTENCODING is set, warn and return 'locale'
+      - Otherwise return 'utf-8'
+    Otherwise return encoding unchanged.
+    """
+    if encoding is None:
+        if sys.flags.warn_default_encoding:
+            import warnings
+            warnings.warn(
+                "'encoding' argument not specified",
+                EncodingWarning, stacklevel + 1)
+        if sys.flags.utf8_mode:
+            return 'utf-8'
+        return 'locale'
+    return encoding
+```
+
+`text_encoding` (Python 3.10+) is a migration aid. Default `encoding=None` currently uses the locale encoding; in a future version it will default to UTF-8. `PYTHONWARNDEFAULTENCODING=1` triggers warnings to help migrate code.
+
+### `io.DEFAULT_BUFFER_SIZE`
+
+```python
+# CPython: Lib/io.py:34 DEFAULT_BUFFER_SIZE
+DEFAULT_BUFFER_SIZE = 8 * 1024  # 8192 bytes
+```
+
+All `BufferedReader`/`BufferedWriter` use this as the default buffer size. 8 KiB matches the typical OS page size and filesystem block size. Override with `open(f, buffering=65536)` for large sequential reads.
+
+## gopy notes
+
+`BytesIO` is `objects.BytesIO` in `objects/bytesio.go`. `StringIO` is `objects.StringIO` backed by a `strings.Builder`. `io.text_encoding` is `module/io.TextEncoding`. `DEFAULT_BUFFER_SIZE` is a constant in `module/io/module.go`. `open()` is `vm.BuiltinOpen` in `vm/eval_simple.go`.

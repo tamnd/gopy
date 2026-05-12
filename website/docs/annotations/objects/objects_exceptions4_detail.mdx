@@ -1,0 +1,131 @@
+---
+title: Objects/exceptions.c (part 4)
+description: "Objects/exceptions.c part 4: BaseExceptionGroup, ExceptionGroup, OSError subclasses, StopIteration.value."
+cpython_path: Objects/exceptions.c
+cpython_version: "3.14"
+lines: 600
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Objects/exceptions.c" />
+
+This annotation covers modern exception types. See `objects_exceptions3_detail` for `BaseException.__new__`, traceback, `__context__`/`__cause__`, and the exception hierarchy.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `BaseExceptionGroup.__new__` | Validate message and exceptions tuple |
+| 81-200 | `BaseExceptionGroup.split` | Split into two groups by predicate |
+| 201-320 | `BaseExceptionGroup.subgroup` | Return subset matching a predicate |
+| 321-440 | `OSError` subclass mapping | `errno` to exception class routing |
+| 441-600 | `StopIteration.value` | Store the return value from a generator |
+
+## Reading
+
+### `BaseExceptionGroup.__new__`
+
+```c
+// CPython: Objects/exceptions.c:3120 BaseExceptionGroup_new
+static PyObject *
+BaseExceptionGroup_new(PyTypeObject *type, PyObject *args, PyObject *kwds)
+{
+    /* ExceptionGroup(message, exceptions)
+       - message must be a str
+       - exceptions must be a non-empty sequence of exceptions
+       - if all are BaseException (not Exception): BaseExceptionGroup
+       - if all are Exception: ExceptionGroup
+       - mixed: ExceptionGroup, preserving non-Exception via __context__ */
+    PyObject *message, *excs;
+    PyArg_ParseTuple(args, "UO", &message, &excs);
+    PyObject *seq = PySequence_Tuple(excs);
+    for (Py_ssize_t i = 0; i < PyTuple_GET_SIZE(seq); i++) {
+        PyObject *exc = PyTuple_GET_ITEM(seq, i);
+        if (!PyExceptionInstance_Check(exc)) {
+            PyErr_Format(PyExc_TypeError, "Item %zd is not an exception", i);
+            return NULL;
+        }
+    }
+    ...
+}
+```
+
+`ExceptionGroup("errors", [ValueError(1), KeyError(2)])` wraps multiple exceptions into one. PEP 654 added this for concurrency scenarios where multiple tasks fail independently.
+
+### `BaseExceptionGroup.split`
+
+```python
+# CPython: Objects/exceptions.c:3220 BaseExceptionGroup_split (Python API)
+def split(self, condition):
+    """Split into (matching, non-matching) based on condition.
+    Returns a pair (match_group, rest_group); either may be None."""
+    matching = []
+    not_matching = []
+    for exc in self.exceptions:
+        if isinstance(exc, BaseExceptionGroup):
+            m, n = exc.split(condition)
+            if m: matching.append(m)
+            if n: not_matching.append(n)
+        elif condition(exc):
+            matching.append(exc)
+        else:
+            not_matching.append(exc)
+    match_group = type(self)(self.message, matching) if matching else None
+    rest_group = type(self)(self.message, not_matching) if not_matching else None
+    return match_group, rest_group
+```
+
+`except*` syntax desugars to `split` calls: the handler receives the matching subgroup, and the non-matching part propagates. `eg.split(ValueError)` is shorthand for `eg.split(lambda e: isinstance(e, ValueError))`.
+
+### OSError subclass mapping
+
+```c
+// CPython: Objects/exceptions.c:880 OSError_new
+static PyObject *
+OSError_new(PyTypeObject *type, PyObject *args, PyObject *kwds)
+{
+    /* If errno is given, route to the appropriate subclass:
+       ENOENT -> FileNotFoundError
+       EACCES -> PermissionError
+       EEXIST -> FileExistsError
+       EISDIR -> IsADirectoryError
+       ENOTDIR -> NotADirectoryError
+       EINTR  -> InterruptedError
+       etc. */
+    if (PyTuple_GET_SIZE(args) >= 3) {
+        PyObject *myerrno = PyTuple_GET_ITEM(args, 0);
+        int errno_value = (int)PyLong_AsLong(myerrno);
+        PyTypeObject *subtype = errnomap[errno_value];
+        if (subtype != NULL) type = subtype;
+    }
+    ...
+}
+```
+
+`OSError(errno.ENOENT, "No such file", "/tmp/x")` returns a `FileNotFoundError` instance. This routing happens in `OSError.__new__`. `OSError` is the base; `IOError` and `EnvironmentError` are aliases.
+
+### `StopIteration.value`
+
+```c
+// CPython: Objects/exceptions.c:2880 StopIteration_init
+static int
+StopIteration_init(PyStopIterationObject *self, PyObject *args, PyObject *kwds)
+{
+    Py_ssize_t size = PyTuple_GET_SIZE(args);
+    Py_XDECREF(self->value);
+    if (size > 0) {
+        self->value = Py_NewRef(PyTuple_GET_ITEM(args, 0));
+    } else {
+        self->value = Py_NewRef(Py_None);
+    }
+    return BaseException_init((PyBaseExceptionObject *)self, args, kwds);
+}
+```
+
+`return value` in a generator compiles to `RETURN_VALUE` which raises `StopIteration(value)`. The `value` attribute is extracted by `SEND` (for `yield from`) and by `next()` callers that catch `StopIteration`. `coroutine.send(None)` raises `StopIteration` with the coroutine's return value.
+
+## gopy notes
+
+`BaseExceptionGroup` is `objects.BaseExceptionGroup` in `objects/exceptions.go`. `split` and `subgroup` are implemented as Python-like Go methods. `OSError` subclass routing uses a `map[syscall.Errno]objects.Type`. `StopIteration.value` is `objects.StopIteration.Value`.

@@ -1,0 +1,92 @@
+---
+title: Lib/re/ (part 3)
+description: "Lib/re/ part 3: re.sub, re.subn, re.split, re.findall, re.finditer — replacement and splitting."
+cpython_path: Lib/re/__init__.py
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/re/__init__.py" />
+
+This annotation covers the replacement and splitting functions. See `lib_re2_detail` for `re.compile`, `Pattern.match`/`search`/`fullmatch`, and the `_sre` C module.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `re.sub` | Replace matches with a string or function |
+| 81-160 | `re.subn` | Like `sub` but also returns the replacement count |
+| 161-260 | `re.split` | Split string on pattern matches |
+| 261-380 | `re.findall` | Return all non-overlapping matches as a list |
+| 381-500 | `re.finditer` | Iterator of `Match` objects |
+
+## Reading
+
+### `re.sub`
+
+```python
+# CPython: Lib/re/__init__.py:210 sub
+def sub(pattern, repl, string, count=0, flags=0):
+    """Return the string obtained by replacing the leftmost non-overlapping
+    occurrences of pattern in string by the replacement repl."""
+    return _compile(pattern, flags).sub(repl, string, count)
+```
+
+`re.sub(r'\d+', '#', 'a1b2c3')` returns `'a#b#c#'`. When `repl` is a function, it receives each `Match` object and its return value is used as the replacement.
+
+### `Pattern.sub` implementation
+
+```python
+# CPython: Lib/re/_compiler.py:280 (effective logic in _sre C module)
+# Pattern.sub calls the C-level _sre.SRE_Pattern.sub:
+# 1. Use finditer to iterate matches
+# 2. Collect interleaved non-match spans and substitutions
+# 3. join into a single string
+#
+# For function repls:
+#    result = repl(match)  # call for each match
+# For string repls:
+#    result = match.expand(repl)  # handles \1, \g<name>, etc.
+```
+
+`match.expand(template)` substitutes group references: `\1` or `\g<1>` for the first group, `\g<name>` for named groups. The C implementation in `_sre` does this substitution during the `sub` call.
+
+### `re.split`
+
+```python
+# CPython: Lib/re/__init__.py:260 split
+def split(pattern, string, maxsplit=0, flags=0):
+    """Split the source string by the occurrences of the pattern."""
+    return _compile(pattern, flags).split(string, maxsplit)
+```
+
+`re.split(r'\s+', 'a  b  c')` returns `['a', 'b', 'c']`. If the pattern has groups, the matched text is also included: `re.split(r'(\s+)', 'a  b')` returns `['a', '  ', 'b']`. `maxsplit` limits the number of splits.
+
+### `re.findall`
+
+```python
+# CPython: Lib/re/__init__.py:240 findall
+def findall(pattern, string, flags=0):
+    """Return a list of all non-overlapping matches in the string."""
+    return _compile(pattern, flags).findall(string)
+```
+
+`re.findall(r'\d+', 'a1b22c333')` returns `['1', '22', '333']`. With groups: `re.findall(r'(\d+)-(\d+)', 'a1-2b3-4')` returns `[('1', '2'), ('3', '4')]`. Single group: returns list of strings, not list of 1-tuples.
+
+### `re.finditer`
+
+```python
+# CPython: Lib/re/__init__.py:248 finditer
+def finditer(pattern, string, flags=0):
+    """Return an iterator yielding Match objects over all non-overlapping matches."""
+    return _compile(pattern, flags).finditer(string)
+```
+
+`finditer` is memory-efficient: it yields `Match` objects one at a time. `for m in re.finditer(r'\w+', text): process(m)` avoids building the full list. Each `Match` object holds the matched string and group information.
+
+## gopy notes
+
+`re.sub` is `module/re.Sub` in `module/re/module.go`. The replacement template expansion (`\1`, `\g<name>`) is `module/re.ExpandTemplate`. `re.split` is `module/re.Split`. `re.findall` collects all match results. `re.finditer` returns `module/re.MatchIterator` which wraps Go's `regexp.FindAllStringSubmatchIndex`.

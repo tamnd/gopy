@@ -1,0 +1,110 @@
+---
+title: Objects/weakrefobject.c (part 4)
+description: "Objects/weakrefobject.c part 4: weakref proxy, proxy method calls, finalization ordering, _PyWeakref_ClearRef."
+cpython_path: Objects/weakrefobject.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Objects/weakrefobject.c" />
+
+This annotation covers the proxy object and weakref lifecycle. See `objects_weakrefobject3_detail` for `PyWeakref_NewRef`, the weakref list, and callback invocation.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `weakref.proxy` | Create a transparent proxy to the referent |
+| 81-200 | Proxy slot forwarding | `nb_add`, `tp_getattro`, `tp_call`, etc. forwarded through the proxy |
+| 201-300 | `proxy.__repr__` | Show type and id; dead proxy shows `<weakproxy at ... ; dead>` |
+| 301-400 | `_PyWeakref_ClearRef` | Zero `wr_object` when the referent dies |
+| 401-500 | Finalization ordering | GC clears weakrefs before calling `tp_dealloc` |
+
+## Reading
+
+### `weakref.proxy`
+
+```c
+// CPython: Objects/weakrefobject.c:780 PyWeakref_NewProxy
+PyObject *
+PyWeakref_NewProxy(PyObject *ob, PyObject *callback)
+{
+    /* Unlike a regular weakref, a proxy forwards attribute access
+       and method calls to the referent transparently.
+       Accessing a dead proxy raises ReferenceError. */
+    if (!_PyType_SUPPORTS_WEAKREFS(Py_TYPE(ob))) {
+        PyErr_Format(PyExc_TypeError,
+            "cannot create weak reference to '%s' object",
+            Py_TYPE(ob)->tp_name);
+        return NULL;
+    }
+    return (PyObject *)_PyWeakref_GetWeakrefCount(ob) == 0 ?
+        new_weakref(ob, callback) :  /* or find existing proxy */
+        ...;
+}
+```
+
+`weakref.proxy(obj)` returns an object that behaves like `obj` but doesn't keep it alive. Unlike `weakref.ref(obj)()`, you don't have to call it — `proxy.attr` directly accesses `obj.attr`. Dead proxies raise `ReferenceError` on any access.
+
+### Proxy slot forwarding
+
+```c
+// CPython: Objects/weakrefobject.c:620 proxy_getattr
+static PyObject *
+proxy_getattr(PyWeakReference *proxy, PyObject *name)
+{
+    UNWRAP_I(proxy);  /* Raises ReferenceError if dead */
+    return PyObject_GetAttr(PyWeakref_GET_OBJECT(proxy), name);
+}
+
+/* Similarly for all numeric/sequence/mapping slots: */
+#define WRAP_UNARY(method, generic)  \
+    static PyObject *method(PyWeakReference *proxy) { \
+        UNWRAP(proxy); return generic(PyWeakref_GET_OBJECT(proxy)); }
+```
+
+Every `tp_as_number`, `tp_as_sequence`, and `tp_as_mapping` slot is a thin wrapper that calls `UNWRAP` to check liveness and then delegates to the referent. `len(proxy)` calls `proxy->ob_type->tp_as_sequence->sq_length(proxy)` which unwraps and calls `len(referent)`.
+
+### `_PyWeakref_ClearRef`
+
+```c
+// CPython: Objects/weakrefobject.c:180 _PyWeakref_ClearRef
+void
+_PyWeakref_ClearRef(PyWeakReference *self)
+{
+    self->wr_object = Py_None;  /* Dead sentinel — not NULL to avoid crashes */
+    Py_DECREF(self->wr_object); /* Release the reference to Py_None? No... */
+    /* Actually: remove from the referent's list, set to Py_None */
+    PyObject *callback = self->wr_callback;
+    self->wr_callback = NULL;
+    if (callback != NULL) {
+        /* Invoke callback: callback(weakref) */
+        PyObject *res = PyObject_CallOneArg(callback, (PyObject *)self);
+        Py_XDECREF(res);
+        Py_DECREF(callback);
+    }
+}
+```
+
+`_PyWeakref_ClearRef` is called from `handle_weakrefs` during GC. It sets `wr_object` to `Py_None` (not `NULL`), calls the callback, and removes the weakref from the referent's list. After clearing, `PyWeakref_GET_OBJECT` returns `Py_None`.
+
+### Finalization ordering
+
+```c
+// CPython: Objects/weakrefobject.c:820 note on ordering
+/* GC ordering for an object with both weakrefs and a finalizer:
+   1. handle_weakrefs: clear all weakrefs, call callbacks
+   2. finalize_garbage: call tp_finalize (__del__)
+   3. delete_garbage: call tp_dealloc
+   This ensures that __del__ can still call weakrefs (they're cleared
+   but not yet dead — the object is still alive at step 2). */
+```
+
+Weakref callbacks fire BEFORE `__del__`. This allows containers that use weakrefs to clean up their entries before the object's finalizer runs. After step 1, any `weakref.ref(obj)()` returns `None` (the ref is dead) but `obj` is still in memory until step 3.
+
+## gopy notes
+
+`weakref.proxy` is `objects.WeakProxy` in `objects/weakref.go`. The proxy forwards all operations via `objects.GetAttr`, `objects.Call`, and arithmetic protocol functions on the live referent. `_PyWeakref_ClearRef` is called by Go finalizers set on the referent via `runtime.SetFinalizer`. The GC ordering is approximated by Go's finalizer system.
