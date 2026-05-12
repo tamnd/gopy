@@ -1,0 +1,87 @@
+---
+title: Python/import.c (part 11)
+description: "Python/import.c part 11: _PyImport_FindExtensionObject, _PyImport_LoadDynamicModuleWithSpec, dlopen."
+cpython_path: Python/import.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Python/import.c" />
+
+This annotation covers C extension module loading. See `modules_import10_detail` for `importlib._bootstrap`, `_find_and_load`, and the importer protocol.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `_PyImport_FindExtensionObject` | Look up a cached extension module |
+| 81-180 | `_PyImport_LoadDynamicModuleWithSpec` | Load a `.so`/`.pyd` file |
+| 181-280 | `_PyImport_InitModuleWithDef` | Multi-phase init vs single-phase |
+| 281-380 | Extension module cache | `extensions` dict in `sys.modules` |
+| 381-500 | `dlopen` / `LoadLibrary` | Platform-specific shared library loading |
+
+## Reading
+
+### `_PyImport_FindExtensionObject`
+
+```c
+// CPython: Python/import.c:1480 _PyImport_FindExtensionObject
+PyObject *
+_PyImport_FindExtensionObject(PyObject *name, PyObject *path)
+{
+    /* Extensions are cached in _PyRuntime.imports.extensions by (name, path) */
+    PyObject *key = PyTuple_Pack(2, name, path);
+    PyObject *mod = PyDict_GetItemWithError(extensions, key);
+    if (mod != NULL && mod != Py_None) {
+        /* Found: re-init if needed */
+        PyModuleDef *def = PyModule_GetDef(mod);
+        if (def != NULL && def->m_init != NULL) {
+            return def->m_init();  /* re-run init to get a fresh module */
+        }
+        return Py_NewRef(mod);
+    }
+    return NULL;
+}
+```
+
+Loaded extension modules are cached by `(name, path)`. On a second import, the cache is checked first. Single-phase init modules return the cached object; multi-phase init modules re-run `m_init`.
+
+### `_PyImport_LoadDynamicModuleWithSpec`
+
+```c
+// CPython: Python/import.c:1560 _PyImport_LoadDynamicModuleWithSpec
+PyObject *
+_PyImport_LoadDynamicModuleWithSpec(PyObject *spec, FILE *fp)
+{
+    const char *path = PyBytes_AS_STRING(PyUnicode_AsEncodedString(spec_path, ...));
+    void *handle = _PyImport_FindSharedFuncptr("PyInit_", modname, path, fp);
+    if (handle == NULL) { PyErr_Format(PyExc_ImportError, ...); return NULL; }
+    PyObject *(*p0)(void) = (PyObject *(*)(void))handle;
+    PyObject *mod = (*p0)();
+    if (mod == NULL) return NULL;
+    _PyImport_InitModuleWithDef(mod, spec);
+    return mod;
+}
+```
+
+`FindSharedFuncptr` calls `dlopen(path)` then `dlsym(handle, "PyInit_modname")`. The init function is called; it returns either a `PyModuleDef *` (multi-phase) or a `PyObject *` module (single-phase).
+
+### Multi-phase vs single-phase init
+
+```c
+// CPython: Python/import.c:1620 (comment)
+/* Single-phase init (legacy):
+     PyObject *PyInit_mymod(void) { return PyModule_Create(&def); }
+   Multi-phase init (3.5+):
+     PyObject *PyInit_mymod(void) { return PyModuleDef_Init(&def); }
+   Multi-phase allows the module to be re-initialized for subinterpreters. */
+```
+
+Multi-phase init decouples module creation from module execution. The `Py_mod_create` and `Py_mod_exec` slots are called separately, allowing the module object to exist before exec slots run.
+
+## gopy notes
+
+`_PyImport_LoadDynamicModuleWithSpec` is not applicable to gopy (no C extensions). `_PyImport_FindExtensionObject` maps to `vm.FindCachedModule`. Extension module loading is replaced by the Go module registry in `stdlibinit/registry.go`.

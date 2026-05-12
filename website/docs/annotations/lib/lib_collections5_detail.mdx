@@ -1,0 +1,101 @@
+---
+title: Lib/collections/__init__.py (part 5)
+description: "collections/__init__.py part 5: deque, deque.appendleft, deque.popleft, deque.rotate, deque maxlen."
+cpython_path: Lib/collections/__init__.py
+cpython_version: "3.14"
+lines: 400
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/collections/__init__.py" />
+
+This annotation covers the `deque` type (implemented in C; this annotation covers its Python-visible interface). See `lib_collections4_detail` for `OrderedDict`, `Counter`, and `defaultdict`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-60 | `deque.__init__` | Initialize from an iterable with optional maxlen |
+| 61-140 | `deque.append` / `deque.appendleft` | O(1) adds to either end |
+| 141-220 | `deque.pop` / `deque.popleft` | O(1) removes from either end |
+| 221-300 | `deque.rotate` | Rotate n steps to the right |
+| 301-400 | `maxlen` semantics | Bounded deque — evict on append |
+
+## Reading
+
+### `deque` internal structure
+
+```c
+// CPython: Modules/_collectionsmodule.c:60 (deque internals)
+/* deque is implemented as a doubly-linked list of fixed-size blocks.
+   BLOCKLEN = 64 items per block.
+   leftblock / leftindex: left end
+   rightblock / rightindex: right end
+   Each block is a C array; when a block is full, a new one is allocated. */
+typedef struct BLOCK {
+    struct BLOCK *leftlink;
+    PyObject *data[BLOCKLEN];
+    struct BLOCK *rightlink;
+} Block;
+```
+
+The block-based structure gives O(1) amortized append/pop at both ends with good cache behavior. Random access is O(n) since there's no index mapping.
+
+### `deque.append`
+
+```c
+// CPython: Modules/_collectionsmodule.c:280 deque_append
+static PyObject *
+deque_append(dequeobject *deque, PyObject *item)
+{
+    if (deque->rightindex == BLOCKLEN - 1) {
+        /* Right block is full: allocate a new one */
+        Block *b = newblock();
+        b->leftlink = deque->rightblock;
+        deque->rightblock->rightlink = b;
+        deque->rightblock = b;
+        deque->rightindex = -1;
+    }
+    Py_INCREF(item);
+    deque->rightblock->data[++deque->rightindex] = item;
+    deque->len++;
+    if (deque->maxlen >= 0 && deque->len > deque->maxlen)
+        deque_popleft(deque, NULL);
+    Py_RETURN_NONE;
+}
+```
+
+When `maxlen` is set, appending to a full deque automatically pops from the opposite end. `appendleft`/`popleft` mirror this logic on the left side.
+
+### `deque.rotate`
+
+```c
+// CPython: Modules/_collectionsmodule.c:520 deque_rotate
+static PyObject *
+deque_rotate(dequeobject *deque, PyObject *const *args, Py_ssize_t nargs)
+{
+    Py_ssize_t n = 1;
+    if (nargs && !_PyArg_ParseStack(args, nargs, "n:rotate", &n)) return NULL;
+    if (Py_SIZE(deque) == 0 || n == 0) Py_RETURN_NONE;
+    if (n > 0) {
+        /* Move n items from right to left */
+        for (Py_ssize_t i = 0; i < n; i++) {
+            PyObject *item = deque_pop(deque, NULL);
+            deque_appendleft(deque, item);
+            Py_DECREF(item);
+        }
+    } else {
+        /* Move |n| items from left to right */
+        ...
+    }
+    Py_RETURN_NONE;
+}
+```
+
+`deque.rotate(1)` moves the rightmost element to the front. `rotate(-1)` is the reverse. Used to implement circular buffers.
+
+## gopy notes
+
+`deque` is `objects.Deque` in `objects/deque.go` backed by a Go doubly-linked list of fixed-size arrays (`BLOCKLEN = 64`). `append`/`appendleft` allocate new blocks when full. `maxlen` enforcement evicts from the opposite end. `rotate` moves elements by calling pop/appendleft.

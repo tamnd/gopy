@@ -1,0 +1,90 @@
+---
+title: Lib/email/message.py (part 4)
+description: "email/message.py part 4: Message.__setitem__, get_payload, set_payload, get_content_type, walk."
+cpython_path: Lib/email/message.py
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/email/message.py" />
+
+This annotation covers the `Message` object API. See `modules_email3_detail` for parsing, header decoding, and MIME types.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `Message.__setitem__` | Add or replace a header |
+| 81-160 | `Message.get_payload` | Get the message body or sub-parts |
+| 161-240 | `Message.set_payload` | Set the message body |
+| 241-320 | `Message.get_content_type` | Parse `Content-Type` header |
+| 321-500 | `Message.walk` | Depth-first traversal of MIME parts |
+
+## Reading
+
+### `Message.__setitem__`
+
+```python
+# CPython: Lib/email/message.py:380 Message.__setitem__
+def __setitem__(self, name, val):
+    # Headers are stored as a list of (name, value) pairs
+    # Multiple headers with the same name are allowed (e.g., Received:)
+    max_count = self.policy.header_max_count(name)
+    if max_count:
+        if len(self) + 1 > max_count:
+            del self[name]  # remove existing if at limit
+    self._headers.append(
+        self.policy.header_store_parse(name, val))
+```
+
+Headers are stored as an ordered list, not a dict. This preserves ordering and allows multiple values for the same header name. `policy.header_max_count` enforces RFC limits (e.g., `Subject` should appear at most once).
+
+### `Message.get_payload`
+
+```python
+# CPython: Lib/email/message.py:460 Message.get_payload
+def get_payload(self, i=None, decode=False):
+    if self.is_multipart():
+        if decode:
+            return None
+        if i is None:
+            return self._payload  # list of sub-messages
+        return self._payload[i]
+    # Non-multipart
+    if decode:
+        # Decode Content-Transfer-Encoding
+        cte = str(self.get('content-transfer-encoding', '')).lower()
+        if cte == 'quoted-printable':
+            return quopri.decodestring(self._payload.encode())
+        elif cte == 'base64':
+            return base64.decodebytes(self._payload.encode())
+    return self._payload
+```
+
+`decode=True` applies Content-Transfer-Encoding decoding (base64 or quoted-printable). For multipart messages, `i` selects a specific part by index.
+
+### `Message.walk`
+
+```python
+# CPython: Lib/email/message.py:620 Message.walk
+def walk(self):
+    yield self
+    if self.is_multipart():
+        for subpart in self.get_payload():
+            yield from subpart.walk()
+```
+
+`walk()` yields each `Message` object in the tree depth-first. Useful for processing all attachments:
+
+```python
+for part in msg.walk():
+    if part.get_content_maintype() == 'multipart': continue
+    filename = part.get_filename()
+```
+
+## gopy notes
+
+`Message.__setitem__` is `module/email.MessageSetItem` in `module/email/module.go`. Headers are stored as a `[]HeaderPair` slice. `get_payload` returns the body string or sub-messages slice. `walk` is a recursive iterator over the MIME tree.

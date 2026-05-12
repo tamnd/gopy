@@ -1,0 +1,88 @@
+---
+title: Objects/rangeobject.c (part 6)
+description: "Objects/rangeobject.c part 6: range.__contains__, range.index, range.count, range.__reversed__."
+cpython_path: Objects/rangeobject.c
+cpython_version: "3.14"
+lines: 400
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Objects/rangeobject.c" />
+
+This annotation covers `range` membership and searching. See `objects_rangeobject5_detail` for `range.__new__`, `range.__iter__`, `range.__len__`, and arithmetic.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `range.__contains__` | O(1) membership test |
+| 81-160 | `range.index` | Find the index of a value in the range |
+| 161-240 | `range.count` | Count occurrences (always 0 or 1) |
+| 241-320 | `range.__reversed__` | Return a reversed range iterator |
+| 321-400 | `range.__getitem__` | Integer and slice subscript |
+
+## Reading
+
+### `range.__contains__`
+
+```c
+// CPython: Objects/rangeobject.c:680 range_contains
+static int
+range_contains_long(rangeobject *r, PyObject *ob)
+{
+    /* Check: start <= ob < stop and (ob - start) % step == 0 */
+    if (r->step > 0) {
+        if (ob < r->start || ob >= r->stop) return 0;
+    } else {
+        if (ob > r->start || ob <= r->stop) return 0;
+    }
+    return ((ob - r->start) % r->step) == 0;
+}
+```
+
+`x in range(1000000)` is O(1) for integers. For non-integer types, the check falls back to the generic iteration. This is why `range` is preferred over a list for membership testing of large integer ranges.
+
+### `range.index`
+
+```c
+// CPython: Objects/rangeobject.c:720 range_index
+static PyObject *
+range_index(rangeobject *r, PyObject *ob)
+{
+    if (!range_contains_long(r, ob)) {
+        PyErr_Format(PyExc_ValueError, "%R is not in range", ob);
+        return NULL;
+    }
+    /* index = (ob - start) / step */
+    PyObject *diff = PyNumber_Subtract(ob, r->start);
+    PyObject *idx = PyNumber_FloorDivide(diff, r->step);
+    Py_DECREF(diff);
+    return idx;
+}
+```
+
+`range(2, 20, 3).index(11)` returns `3` (since `2+3*3 = 11`). This is O(1) arithmetic rather than O(n) linear search.
+
+### `range.__reversed__`
+
+```c
+// CPython: Objects/rangeobject.c:780 range_reverse
+static PyObject *
+range_reverse(rangeobject *r, PyObject *Py_UNUSED(ignored))
+{
+    /* Return a longrangeiterator or rangeiterator for the reversed range */
+    /* reversed_start = r->start + (r->len - 1) * r->step */
+    /* reversed_step = -r->step */
+    PyObject *reversed_start = compute_range_item(r, r->length - 1);
+    PyObject *reversed_step = PyNumber_Negative(r->step);
+    return rangeiter_new(reversed_start, r->length, reversed_step);
+}
+```
+
+`reversed(range(1, 10, 2))` returns an iterator over `9, 7, 5, 3, 1`. The reverse is computed algebraically without materializing the range.
+
+## gopy notes
+
+`range.__contains__` is `objects.RangeContains` in `objects/range.go`. The O(1) check uses `big.Int` arithmetic for bignum ranges. `range.index` calls `objects.RangeContains` first. `range.__reversed__` creates a new range iterator with negated step.
