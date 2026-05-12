@@ -90,22 +90,6 @@ import (
 	// CPython: Modules/config.c.in:46 {"itertools", PyInit_itertools}
 	_ "github.com/tamnd/gopy/module/_itertools"
 
-	// Go-backed Python modules: not in CPython's config.c.in (those
-	// are pure-Python in Lib/), but until the corresponding Lib/*.py
-	// vendoring lands the import system needs something to satisfy
-	// `import traceback` and friends pulled in by unittest.
-	_ "github.com/tamnd/gopy/module/argparse"
-	_ "github.com/tamnd/gopy/module/collections"
-	_ "github.com/tamnd/gopy/module/contextlib"
-	_ "github.com/tamnd/gopy/module/dataclasses"
-	_ "github.com/tamnd/gopy/module/fnmatch"
-	_ "github.com/tamnd/gopy/module/functools"
-	_ "github.com/tamnd/gopy/module/os"
-	_ "github.com/tamnd/gopy/module/re"
-	_ "github.com/tamnd/gopy/module/signal"
-	_ "github.com/tamnd/gopy/module/traceback"
-	_ "github.com/tamnd/gopy/module/weakref"
-
 	// Built-in module: _weakref. Registers itself via
 	// module/_weakref/module.go init(). Ports Modules/_weakref.c,
 	// publishing ref / ProxyType / CallableProxyType plus the four
@@ -118,4 +102,26 @@ import (
 	// init(). Ports Modules/_abc.c: ABC machinery backing Lib/abc.py.
 	// CPython: Modules/config.c.in:44 {"_abc", PyInit__abc}
 	_ "github.com/tamnd/gopy/module/_abc"
+
+	// Built-in module: _collections. Registers itself via
+	// module/_collections/module.go init(). Ports
+	// Modules/_collectionsmodule.c: deque, defaultdict, _tuplegetter,
+	// _deque_iterator, _deque_reverse_iterator, _count_elements.
+	// CPython: Modules/config.c.in:46 {"_collections", PyInit__collections}
+	_ "github.com/tamnd/gopy/module/_collections"
+
+	// Go-backed Python modules: not in CPython's config.c.in (those
+	// are pure-Python in Lib/), but until the corresponding Lib/*.py
+	// vendoring lands the import system needs something to satisfy
+	// `import traceback` and friends pulled in by unittest.
+	_ "github.com/tamnd/gopy/module/argparse"
+	_ "github.com/tamnd/gopy/module/contextlib"
+	_ "github.com/tamnd/gopy/module/dataclasses"
+	_ "github.com/tamnd/gopy/module/fnmatch"
+	_ "github.com/tamnd/gopy/module/functools"
+	_ "github.com/tamnd/gopy/module/os"
+	_ "github.com/tamnd/gopy/module/re"
+	_ "github.com/tamnd/gopy/module/signal"
+	_ "github.com/tamnd/gopy/module/traceback"
+	_ "github.com/tamnd/gopy/module/weakref"
 )
