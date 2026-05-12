@@ -1,0 +1,110 @@
+---
+title: Lib/pprint.py (part 4)
+description: "pprint.py part 4: PrettyPrinter._pprint_dict, _pprint_list, _pprint_tuple, compact mode."
+cpython_path: Lib/pprint.py
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/pprint.py" />
+
+This annotation covers the per-type formatting methods. See `lib_pprint3_detail` for `PrettyPrinter.__init__`, `pprint`, `pformat`, and cycle detection.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `_pprint_dict` | Format `{'key': value, ...}` with indentation |
+| 81-160 | `_pprint_list` | Format `[item, ...]` with indentation |
+| 161-240 | `_pprint_tuple` | Format `(item, ...)` — trailing comma for singletons |
+| 241-360 | `compact` mode | Pack multiple items on one line if they fit |
+| 361-500 | `_pprint_dataclass` | Dataclass-aware formatting |
+
+## Reading
+
+### `_pprint_dict`
+
+```python
+# CPython: Lib/pprint.py:220 _pprint_dict
+def _pprint_dict(self, object, stream, indent, allowance, context, level):
+    write = stream.write
+    indent += self._indent_per_level
+    items = sorted(object.items(), key=_safe_tuple) if self._sort_dicts else object.items()
+    self._format_dict_items(items, stream, indent, allowance, context, level)
+
+def _format_dict_items(self, items, stream, indent, allowance, context, level):
+    write = stream.write
+    indent += self._indent_per_level
+    delimnl = ',\n' + ' ' * indent
+    last_index = len(items) - 1
+    for i, (key, ent) in enumerate(items):
+        write(repr(key) + ': ')
+        self._format(ent, stream, indent + len(repr(key)) + 2, ...)
+        if i != last_index:
+            write(delimnl)
+```
+
+`sort_dicts=True` (the default before 3.8) sorts keys. Each value is formatted recursively with increased indentation. The `allowance` parameter is how many more characters can fit on the last line.
+
+### `_pprint_list`
+
+```python
+# CPython: Lib/pprint.py:250 _pprint_list
+def _pprint_list(self, object, stream, indent, allowance, context, level):
+    stream.write('[')
+    self._format_items(object, stream, indent + 1, allowance + 1, context, level)
+    stream.write(']')
+
+def _format_items(self, items, stream, indent, allowance, context, level):
+    write = stream.write
+    indent += self._indent_per_level - 1
+    delimnl = ',\n' + ' ' * indent
+    for i, ent in enumerate(items):
+        if i:
+            write(delimnl)
+        self._format(ent, stream, indent, ...)
+```
+
+Each item is formatted on its own line when the list doesn't fit on one line. The `indent + 1` for `'['` accounts for the bracket character itself.
+
+### `compact` mode
+
+```python
+# CPython: Lib/pprint.py:300 _format_items with compact
+def _format_items(self, items, stream, indent, allowance, context, level):
+    if self._compact:
+        # Try to pack multiple items on a line
+        max_width = self._width - indent + 1
+        words = []
+        for item in items:
+            word = self._repr(item, context, level)
+            if len(word) > max_width:
+                break
+            words.append(word)
+        ...
+```
+
+`pprint(data, compact=True)` packs multiple short items on the same line. Items that don't fit on the current line start a new line. Items longer than `max_width` break out of compact mode.
+
+### `_pprint_dataclass`
+
+```python
+# CPython: Lib/pprint.py:380 _pprint_dataclass (3.10+)
+def _pprint_dataclass(self, object, stream, indent, allowance, context, level):
+    cls_name = type(object).__name__
+    stream.write(cls_name + '(')
+    items = [(f.name, getattr(object, f.name))
+             for f in dataclasses.fields(object)
+             if f.repr]
+    self._format_dict_items(items, stream, indent + len(cls_name) + 1, ...)
+    stream.write(')')
+```
+
+Dataclasses are formatted as `ClassName(field=value, ...)`. Only fields with `repr=True` (the default) are shown. Nested dataclasses are formatted recursively.
+
+## gopy notes
+
+`_pprint_dict` is `module/pprint.PrettyPrinter.pprintDict` in `module/pprint/module.go`. Items are sorted via `objects.DictKeys` then `sort.Slice`. `compact` mode checks `strings.Builder` length vs `width`. `_pprint_dataclass` calls `module/dataclasses.Fields` to get the field list.

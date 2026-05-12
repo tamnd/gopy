@@ -1,0 +1,140 @@
+---
+title: Python/ceval.c (part 82)
+description: "Python/ceval.c part 82: COMPARE_OP, COMPARE_OP_INT, COMPARE_OP_FLOAT, COMPARE_OP_STR."
+cpython_path: Python/ceval.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Python/ceval.c" />
+
+This annotation covers comparison specializations. See `python_ceval81_detail` for `BINARY_OP`, `BINARY_OP_ADD_INT`, and `BINARY_OP_ADD_FLOAT`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `COMPARE_OP` | Generic comparison: `<`, `<=`, `==`, `!=`, `>=`, `>` |
+| 81-160 | `COMPARE_OP_INT` | Specialization: int vs int |
+| 161-240 | `COMPARE_OP_FLOAT` | Specialization: float vs float |
+| 241-360 | `COMPARE_OP_STR` | Specialization: str equality |
+| 361-500 | `IS_OP` / `CONTAINS_OP` | Identity and membership tests |
+
+## Reading
+
+### `COMPARE_OP`
+
+```c
+// CPython: Python/ceval.c:3420 COMPARE_OP
+inst(COMPARE_OP, (lhs, rhs -- res)) {
+    assert(oparg <= Py_GE);
+    res = PyObject_RichCompare(lhs, rhs, oparg & 0xf);
+    Py_DECREF(lhs);
+    Py_DECREF(rhs);
+    ERROR_IF(res == NULL, error);
+    if (oparg & 16) {
+        /* Convert to bool */
+        int b = PyObject_IsTrue(res);
+        Py_DECREF(res);
+        ERROR_IF(b < 0, error);
+        res = b ? Py_True : Py_False;
+        Py_INCREF(res);
+    }
+}
+```
+
+`oparg & 0xf` is the comparison operator (`Py_EQ`, `Py_NE`, etc.). `oparg & 16` indicates a "jump-to-bool" optimization: when the result is used in a conditional, converting to bool avoids a separate `UNARY_NOT` or `POP_JUMP_IF_FALSE`.
+
+### `COMPARE_OP_INT`
+
+```c
+// CPython: Python/ceval.c:3480 COMPARE_OP_INT
+inst(COMPARE_OP_INT, (lhs, rhs -- res)) {
+    DEOPT_IF(!PyLong_CheckExact(lhs));
+    DEOPT_IF(!PyLong_CheckExact(rhs));
+    DEOPT_IF(!_PyLong_IsCompact((PyLongObject *)lhs));
+    DEOPT_IF(!_PyLong_IsCompact((PyLongObject *)rhs));
+    Py_ssize_t lval = _PyLong_CompactValue((PyLongObject *)lhs);
+    Py_ssize_t rval = _PyLong_CompactValue((PyLongObject *)rhs);
+    /* Comparison is a C integer comparison */
+    int sign = (lval > rval) - (lval < rval);
+    bool b = _PyCompare_Op[oparg & 0xf](sign);
+    Py_DECREF(lhs);
+    Py_DECREF(rhs);
+    res = b ? Py_True : Py_False;
+    Py_INCREF(res);
+}
+```
+
+For compact ints, the comparison is a C-level `<`/`>`/`==`. `_PyCompare_Op` maps the oparg to the correct comparison given the sign of `lval - rval`.
+
+### `COMPARE_OP_FLOAT`
+
+```c
+// CPython: Python/ceval.c:3540 COMPARE_OP_FLOAT
+inst(COMPARE_OP_FLOAT, (lhs, rhs -- res)) {
+    DEOPT_IF(!PyFloat_CheckExact(lhs));
+    DEOPT_IF(!PyFloat_CheckExact(rhs));
+    double lval = PyFloat_AS_DOUBLE(lhs);
+    double rval = PyFloat_AS_DOUBLE(rhs);
+    /* Direct IEEE 754 comparison */
+    int b;
+    switch (oparg & 0xf) {
+        case Py_EQ: b = lval == rval; break;
+        case Py_LT: b = lval < rval; break;
+        ...
+    }
+    Py_DECREF(lhs);
+    Py_DECREF(rhs);
+    res = b ? Py_True : Py_False;
+    Py_INCREF(res);
+}
+```
+
+Float comparison via IEEE 754 C comparison. `NaN != NaN` by IEEE rules; `COMPARE_OP_FLOAT` preserves this.
+
+### `COMPARE_OP_STR`
+
+```c
+// CPython: Python/ceval.c:3600 COMPARE_OP_STR
+inst(COMPARE_OP_STR, (lhs, rhs -- res)) {
+    DEOPT_IF(!PyUnicode_CheckExact(lhs));
+    DEOPT_IF(!PyUnicode_CheckExact(rhs));
+    DEOPT_IF((oparg & 0xf) != Py_EQ && (oparg & 0xf) != Py_NE);
+    /* Intern check first: same object = equal */
+    int eq = (lhs == rhs);
+    if (!eq) eq = PyUnicode_Compare(lhs, rhs) == 0;
+    bool b = (oparg & 0xf) == Py_EQ ? eq : !eq;
+    Py_DECREF(lhs);
+    Py_DECREF(rhs);
+    res = b ? Py_True : Py_False;
+    Py_INCREF(res);
+}
+```
+
+`s == t` for two strings: pointer comparison first (interned strings hit immediately), then `PyUnicode_Compare`. Only `==` and `!=` specialize; `<`/`>` remain generic.
+
+### `IS_OP` / `CONTAINS_OP`
+
+```c
+// CPython: Python/ceval.c:3660 IS_OP
+inst(IS_OP, (lhs, rhs -- b)) {
+    int res = Py_Is(lhs, rhs) ^ oparg;  /* oparg=1 for "is not" */
+    ...
+}
+
+// CPython: Python/ceval.c:3690 CONTAINS_OP
+inst(CONTAINS_OP, (lhs, rhs -- b)) {
+    int res = PySequence_Contains(rhs, lhs) ^ oparg;  /* oparg=1 for "not in" */
+    ...
+}
+```
+
+`is` / `is not` is pointer identity: `Py_Is(a, b)` == `(a == b)` in C. `in` / `not in` calls `__contains__` via `PySequence_Contains`. The `oparg` bit flips the result for `is not` / `not in`.
+
+## gopy notes
+
+`COMPARE_OP` is in `vm/eval_simple.go`. It calls `objects.RichCompare`. `COMPARE_OP_INT` compares `objects.Int.CompactVal` with C integer comparison. `COMPARE_OP_FLOAT` compares `objects.Float.Val`. `COMPARE_OP_STR` calls `objects.StrEqual`. `IS_OP` compares pointers. `CONTAINS_OP` calls `objects.Contains`.

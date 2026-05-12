@@ -1,0 +1,137 @@
+---
+title: Objects/object.c (part 2)
+description: "object.c part 2: PyObject_Repr, PyObject_Str, PyObject_ASCII, PyObject_Bytes."
+cpython_path: Objects/object.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Objects/object.c" />
+
+This annotation covers string conversion of objects. See `objects_object_detail` for `Py_INCREF`/`Py_DECREF`, reference counting, `PyObject_RichCompare`, and `PyObject_Hash`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `PyObject_Repr` | `repr(obj)` — calls `__repr__` |
+| 81-160 | `PyObject_Str` | `str(obj)` — calls `__str__` |
+| 161-240 | `PyObject_ASCII` | `ascii(obj)` — repr with non-ASCII escaped |
+| 241-360 | `PyObject_Bytes` | `bytes(obj)` — calls `__bytes__` |
+| 361-500 | `PyObject_Format` | `format(obj, fmt_spec)` |
+
+## Reading
+
+### `PyObject_Repr`
+
+```c
+// CPython: Objects/object.c:480 PyObject_Repr
+PyObject *
+PyObject_Repr(PyObject *v)
+{
+    if (v == NULL) return PyUnicode_FromString("<NULL>");
+    if (Py_TYPE(v)->tp_repr == NULL)
+        return PyUnicode_FromFormat("<%s object at %p>",
+                                    Py_TYPE(v)->tp_name, v);
+    res = (*Py_TYPE(v)->tp_repr)(v);
+    if (res == NULL) return NULL;
+    if (!PyUnicode_Check(res)) {
+        PyErr_Format(PyExc_TypeError,
+                     "__repr__ returned non-string (type %.200s)",
+                     Py_TYPE(res)->tp_name);
+        Py_DECREF(res);
+        return NULL;
+    }
+    return res;
+}
+```
+
+`repr(obj)` calls `tp_repr`. If `tp_repr` is NULL, the fallback gives `<ClassName object at 0x...>`. The result must be a `str`; returning a non-string from `__repr__` raises `TypeError`.
+
+### `PyObject_Str`
+
+```c
+// CPython: Objects/object.c:540 PyObject_Str
+PyObject *
+PyObject_Str(PyObject *v)
+{
+    if (v == NULL) return PyUnicode_FromString("<NULL>");
+    if (PyErr_CheckSignals()) return NULL;
+    if (PyUnicode_CheckExact(v)) {
+        Py_INCREF(v);
+        return v;  /* Fast path: str(s) == s */
+    }
+    if (Py_TYPE(v)->tp_str == NULL)
+        return PyObject_Repr(v);  /* Default: use repr */
+    res = (*Py_TYPE(v)->tp_str)(v);
+    ...
+}
+```
+
+`str(s)` where `s` is already a `str` is a no-op (returns the same object). If `tp_str` is not defined, `tp_repr` is used as the fallback.
+
+### `PyObject_ASCII`
+
+```c
+// CPython: Objects/object.c:600 PyObject_ASCII
+PyObject *
+PyObject_ASCII(PyObject *v)
+{
+    PyObject *repr = PyObject_Repr(v);
+    /* Escape all non-ASCII characters */
+    return _PyUnicode_TransformDecimalAndSpaceToASCII(repr);
+}
+```
+
+`ascii(obj)` calls `repr(obj)` then escapes any non-ASCII code points as `\xNN`, `\uNNNN`, or `\UNNNNNNNN`. Useful for producing output safe for ASCII-only terminals.
+
+### `PyObject_Bytes`
+
+```c
+// CPython: Objects/object.c:640 PyObject_Bytes
+PyObject *
+PyObject_Bytes(PyObject *v)
+{
+    if (v == NULL) return PyBytes_FromString("");
+    if (PyBytes_CheckExact(v)) {
+        Py_INCREF(v);
+        return v;
+    }
+    /* Look for __bytes__ */
+    PyObject *func = _PyObject_LookupSpecial(v, &_Py_ID(__bytes__));
+    if (func != NULL) {
+        PyObject *res = PyObject_CallNoArgs(func);
+        Py_DECREF(func);
+        return res;
+    }
+    /* Fall back to __index__ for integers */
+    ...
+}
+```
+
+`bytes(n)` where `n` is an integer creates a zero-filled bytes object of length `n`. `bytes(obj)` where `obj` has `__bytes__` calls it. `bytes([1,2,3])` creates `b'\x01\x02\x03'`.
+
+### `PyObject_Format`
+
+```c
+// CPython: Objects/object.c:680 PyObject_Format
+PyObject *
+PyObject_Format(PyObject *obj, PyObject *format_spec)
+{
+    PyObject *func = _PyObject_LookupSpecial(obj, &_Py_ID(__format__));
+    if (func == NULL) {
+        /* Default: use str(obj) and check format_spec is empty */
+        ...
+    }
+    return PyObject_CallOneArg(func, format_spec);
+}
+```
+
+`format(value, '>10')` calls `value.__format__('>10')`. The default `object.__format__` converts to string and raises if `format_spec` is non-empty for types without custom formatting.
+
+## gopy notes
+
+`PyObject_Repr` is `objects.Repr` in `objects/object.go`. `PyObject_Str` is `objects.Str`. `PyObject_ASCII` calls `objects.Repr` then escapes via `strconv.QuoteToASCII`. `PyObject_Bytes` calls `__bytes__` via `objects.LookupSpecial`. `PyObject_Format` calls `__format__`.

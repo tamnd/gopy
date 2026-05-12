@@ -1,0 +1,137 @@
+---
+title: Modules/_threadmodule.c (part 7)
+description: "_threadmodule.c part 7: threading.Lock, RLock, Semaphore, Condition wait/notify."
+cpython_path: Modules/_threadmodule.c
+cpython_version: "3.14"
+lines: 600
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/_threadmodule.c" />
+
+This annotation covers threading synchronization primitives. See `modules_threading6_detail` for `threading.Thread.start`, `join`, `daemon` threads, and thread-local storage.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `Lock.acquire` / `Lock.release` | Mutual exclusion lock |
+| 81-180 | `RLock` | Reentrant lock |
+| 181-280 | `Semaphore` | Counting semaphore |
+| 281-380 | `Condition.wait` | Wait on condition with optional timeout |
+| 381-600 | `Condition.notify` / `notify_all` | Wake waiting threads |
+
+## Reading
+
+### `Lock.acquire`
+
+```c
+// CPython: Modules/_threadmodule.c:140 lock_PyThread_acquire_lock
+static PyObject *
+lock_PyThread_acquire_lock(lockobject *self, PyObject *args, PyObject *kwargs)
+{
+    int blocking = 1;
+    double timeout = -1;
+    ...
+    Py_BEGIN_ALLOW_THREADS
+    if (timeout > 0) {
+        r = PyThread_acquire_lock_timed(self->lock_lock,
+                                        (long long)(timeout * 1e6), 1);
+    } else {
+        r = PyThread_acquire_lock(self->lock_lock, blocking);
+    }
+    Py_END_ALLOW_THREADS
+    return PyBool_FromLong(!r);
+}
+```
+
+`lock.acquire()` releases the GIL before blocking on the OS mutex, so other Python threads can run. With `timeout=0`, it returns immediately (`False` if not acquired). `Py_BEGIN_ALLOW_THREADS`/`Py_END_ALLOW_THREADS` is the GIL release/reacquire pair.
+
+### `RLock`
+
+```python
+# CPython: Lib/threading.py:130 RLock
+class RLock:
+    def __init__(self):
+        self._block = Lock()
+        self._owner = None
+        self._count = 0
+
+    def acquire(self, blocking=True, timeout=-1):
+        me = get_ident()
+        if self._owner == me:
+            self._count += 1
+            return True
+        rc = self._block.acquire(blocking, timeout)
+        if rc:
+            self._owner = me
+            self._count = 1
+        return rc
+
+    def release(self):
+        if self._owner != get_ident():
+            raise RuntimeError("release unlocked lock")
+        self._count -= 1
+        if not self._count:
+            self._owner = None
+            self._block.release()
+```
+
+`RLock` allows the same thread to acquire it multiple times. Each `acquire` increments `_count`; each `release` decrements it. The underlying `Lock` is only released when `_count` reaches zero.
+
+### `Semaphore`
+
+```python
+# CPython: Lib/threading.py:480 Semaphore
+class Semaphore:
+    def __init__(self, value=1):
+        self._cond = Condition(Lock())
+        self._value = value
+
+    def acquire(self, blocking=True, timeout=None):
+        with self._cond:
+            while self._value == 0:
+                if not blocking:
+                    return False
+                if not self._cond.wait(timeout):
+                    return False
+            self._value -= 1
+            return True
+
+    def release(self, n=1):
+        with self._cond:
+            self._value += n
+            for _ in range(n):
+                self._cond.notify()
+```
+
+`Semaphore(5)` allows up to 5 concurrent acquisitions. `release(n=1)` can release multiple units at once (added in 3.9).
+
+### `Condition.wait`
+
+```python
+# CPython: Lib/threading.py:320 Condition.wait
+def wait(self, timeout=None):
+    if not self._is_owned():
+        raise RuntimeError("cannot wait on un-acquired lock")
+    waiter = Lock()
+    waiter.acquire()
+    self._waiters.append(waiter)
+    saved_state = self._release_save()  # release the condition's lock
+    try:
+        if timeout is None:
+            waiter.acquire()  # block until notified
+            return True
+        else:
+            return waiter.acquire(True, timeout)
+    finally:
+        self._acquire_restore(saved_state)  # re-acquire the condition's lock
+```
+
+`cond.wait()` releases the condition's underlying lock and blocks on a per-waiter `Lock`. `notify()` releases one waiter's lock, allowing it to reacquire the condition.
+
+## gopy notes
+
+`Lock.acquire` is `module/threading.LockAcquire` in `module/threading/module.go`. It uses `sync.Mutex`. `RLock` uses `sync.Mutex` + `owner goroutine ID` + count. `Semaphore` uses `chan struct{}` of buffered capacity. `Condition.wait` uses `sync.Cond.Wait`.
