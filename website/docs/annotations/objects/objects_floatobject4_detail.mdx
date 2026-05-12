@@ -1,0 +1,116 @@
+---
+title: Objects/floatobject.c (part 4)
+description: "Objects/floatobject.c part 4: float.__round__, float.as_integer_ratio, float.fromhex, float.__format__, PyFloat_Pack."
+cpython_path: Objects/floatobject.c
+cpython_version: "3.14"
+lines: 600
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Objects/floatobject.c" />
+
+This annotation covers float conversion and formatting methods. See `objects_floatobject3_detail` for `float.__new__`, arithmetic, `__repr__`, and `PyFloat_AsDouble`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-100 | `float.__round__` | Round to n decimal places using banker's rounding |
+| 101-220 | `float.as_integer_ratio` | Exact rational representation as `(int, int)` |
+| 221-360 | `float.fromhex` | Parse IEEE 754 hex floating-point literal |
+| 361-480 | `float.__format__` | `format(x, '.2f')` — delegate to `_Py_dg_dtoa` |
+| 481-600 | `PyFloat_Pack` / `PyFloat_Unpack` | Pack/unpack into bytes (struct module backend) |
+
+## Reading
+
+### `float.__round__`
+
+```c
+// CPython: Objects/floatobject.c:880 float___round___impl
+static PyObject *
+float___round___impl(PyObject *self, PyObject *o_ndigits)
+{
+    double x = PyFloat_AS_DOUBLE(self);
+    if (o_ndigits == Py_None) {
+        /* Round to nearest int, ties to even (banker's rounding) */
+        double rounded = round(x);
+        if (fabs(x - rounded) == 0.5) {
+            rounded = 2.0 * round(x / 2.0);
+        }
+        return PyLong_FromDouble(rounded);
+    }
+    /* round(x, n): use pow(10, n) scaling */
+    ...
+}
+```
+
+`round(2.5)` returns `2` (not `3`); `round(3.5)` returns `4`. This is IEEE 754 round-half-to-even, matching the `decimal` module's `ROUND_HALF_EVEN`. `round(1.555, 2)` may not give `1.56` due to binary floating-point representation.
+
+### `float.as_integer_ratio`
+
+```c
+// CPython: Objects/floatobject.c:1020 float_as_integer_ratio
+static PyObject *
+float_as_integer_ratio(PyObject *v, PyObject *Py_UNUSED(ignored))
+{
+    double self = PyFloat_AS_DOUBLE(v);
+    /* Decompose into mantissa * 2^exponent using frexp */
+    double float_part;
+    int exponent;
+    float_part = frexp(self, &exponent);
+    /* Scale mantissa to integer: multiply by 2^53 */
+    for (int i = 0; i < 300 && float_part != floor(float_part); i++, exponent--) {
+        float_part *= 2.0;
+    }
+    /* numerator = float_part, denominator = 2^(-exponent) if exponent < 0 */
+    ...
+}
+```
+
+`(0.1).as_integer_ratio()` returns `(3602879701896397, 36028797018963968)`, revealing that `0.1` is not exactly representable in binary. Useful for exact arithmetic: `fractions.Fraction(*x.as_integer_ratio())` gives the exact value.
+
+### `float.fromhex`
+
+```c
+// CPython: Objects/floatobject.c:1120 float_fromhex
+static PyObject *
+float_fromhex(PyTypeObject *type, PyObject *string)
+{
+    /* Parse "0x1.8p+1" (sign, hex mantissa, optional binary exponent).
+       Defined in C99 and Python as an exact IEEE 754 representation. */
+    const char *s = PyUnicode_AsUTF8(string);
+    double x = _Py_parse_inf_or_nan(s, &end);
+    if (end == s) x = _PyFloat_Unpack_fromhex(s, &end);
+    return PyFloat_FromDouble(x);
+}
+```
+
+`float.fromhex('0x1.8p+1')` returns `3.0`. Hex floats allow exact round-trip: `float.hex(x)` then `float.fromhex(...)` recovers the same bit pattern. This is how `pickle` stores floats in protocol 2+.
+
+### `PyFloat_Pack`
+
+```c
+// CPython: Objects/floatobject.c:1480 PyFloat_Pack8
+int
+PyFloat_Pack8(double x, char *p, int le)
+{
+    /* Pack x as IEEE 754 double into 8 bytes.
+       le=1: little-endian, le=0: big-endian. */
+    unsigned char buf[8];
+    memcpy(buf, &x, 8);
+    if (le) {
+        /* On big-endian hosts, reverse bytes */
+        ...
+    }
+    memcpy(p, buf, 8);
+    return 0;
+}
+```
+
+`PyFloat_Pack8` is used by the `struct` module for `'d'` format codes. `PyFloat_Pack4` packs as 32-bit single precision. Both respect the host byte order and the `le` flag independently.
+
+## gopy notes
+
+`float.__round__` is `objects.FloatRound` in `objects/float.go`. It uses Go's `math.Round` and checks for the half-integer case. `float.as_integer_ratio` uses `math.Frexp`. `float.fromhex` parses the `0x` hex float syntax. `PyFloat_Pack8`/`PyFloat_Unpack8` are `objects.FloatPack8`/`objects.FloatUnpack8`, used by the struct module in `module/struct/module.go`.

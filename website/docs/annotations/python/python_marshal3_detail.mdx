@@ -1,0 +1,106 @@
+---
+title: Python/marshal.c (part 3)
+description: "Python/marshal.c part 3: marshal.loads, r_object dispatch, reading int/float/complex/bytes/str, marshal version flags."
+cpython_path: Python/marshal.c
+cpython_version: "3.14"
+lines: 600
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Python/marshal.c" />
+
+This annotation covers deserialization. See `python_marshal2_detail` for `marshal.dumps`/`w_object`, and `python_marshal_detail` for the file format and `RFILE` struct.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `marshal.loads` entry | Parse bytes into Python objects |
+| 81-200 | `r_object` dispatch | Read type byte, delegate to type-specific reader |
+| 201-320 | Scalar readers | `r_long`, `r_float`, `r_complex`, `r_string` |
+| 321-440 | Container readers | `r_tuple`, `r_list`, `r_dict`, `r_set` |
+| 441-600 | Code object reader | `r_code` — reconstruct a `PyCodeObject` |
+
+## Reading
+
+### `marshal.loads` entry
+
+```c
+// CPython: Python/marshal.c:1280 marshal_loads_impl
+static PyObject *
+marshal_loads_impl(PyObject *module, Py_buffer *bytes)
+{
+    RFILE rf;
+    rf.fp = NULL;
+    rf.readable = NULL;
+    rf.ptr = (char *)bytes->buf;
+    rf.end = rf.ptr + bytes->len;
+    rf.depth = 0;
+    rf.refs = PyList_New(0);
+    PyObject *result = r_object(&rf);
+    Py_DECREF(rf.refs);
+    return result;
+}
+```
+
+`marshal.loads(data)` sets up an in-memory `RFILE` pointing into the buffer. The `refs` list implements back-references: objects with the `FLAG_REF` bit set are stored and later re-used by `r_ref_reserve`/`r_ref_insert`, enabling shared tuple interning in `.pyc` files.
+
+### `r_object` dispatch
+
+```c
+// CPython: Python/marshal.c:860 r_object
+static PyObject *
+r_object(RFILE *p)
+{
+    int type = r_byte(p) & ~FLAG_REF;
+    switch (type) {
+    case TYPE_NULL:       return NULL;
+    case TYPE_NONE:       Py_RETURN_NONE;
+    case TYPE_TRUE:       Py_RETURN_TRUE;
+    case TYPE_FALSE:      Py_RETURN_FALSE;
+    case TYPE_INT:        return r_long(p);
+    case TYPE_FLOAT:      return r_float(p);
+    case TYPE_COMPLEX:    return r_complex(p);
+    case TYPE_STRING:     return r_string(p);
+    case TYPE_UNICODE:    return r_unicode(p);
+    case TYPE_TUPLE:      return r_tuple(p);
+    case TYPE_LIST:       return r_list(p);
+    case TYPE_DICT:       return r_dict(p);
+    case TYPE_CODE:       return r_code(p);
+    case TYPE_REF:        return r_ref(p);
+    ...
+    }
+}
+```
+
+The type byte encodes both the object kind and the `FLAG_REF` bit. `r_ref_reserve` pre-allocates a slot in `p->refs` before reading the object content, so forward references in the stream can be resolved.
+
+### `r_code` — code object reader
+
+```c
+// CPython: Python/marshal.c:1060 r_code
+static PyObject *
+r_code(RFILE *p)
+{
+    /* Read all fields in the exact order w_code wrote them:
+       argcount, posonlyargcount, kwonlyargcount, stacksize, flags,
+       code (bytes), consts (tuple), names, ..., linetable, ... */
+    int argcount      = (int)r_long(p);
+    int posonlyargcount = (int)r_long(p);
+    ...
+    PyObject *code    = r_object(p);  /* bytecode bytes */
+    PyObject *consts  = r_object(p);  /* tuple of constants */
+    PyObject *names   = r_object(p);
+    ...
+    return (PyObject *)PyCode_NewWithPosOnlyArgs(
+        argcount, posonlyargcount, ..., code, consts, names, ...);
+}
+```
+
+`r_code` reconstructs a `PyCodeObject` from the `.pyc` stream. The order of fields is part of the marshal format and cannot change without bumping `MARSHAL_VERSION`. The current version is 4 (Python 3.4+).
+
+## gopy notes
+
+`marshal.loads` is `module/marshal.Loads` in `module/marshal/module.go`. `r_object` is a Go switch on the type byte. `r_code` calls `objects.NewCodeObject` with all fields. The `refs` list uses a Go slice. Marshal version is checked against `objects.MarshalVersion` constant.

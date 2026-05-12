@@ -1,0 +1,103 @@
+---
+title: Lib/xml/ (part 2)
+description: "Lib/xml/ part 2: xml.etree.ElementTree.parse, Element.find/findall, ElementTree.write, iterparse, xml.dom.minidom."
+cpython_path: Lib/xml/etree/ElementTree.py
+cpython_version: "3.14"
+lines: 700
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/xml/etree/ElementTree.py" />
+
+This annotation covers tree traversal and serialization. See `lib_xml_detail` for `ElementTree.__init__`, `Element.__init__`, the C accelerator `_elementtree`, and namespace handling.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-100 | `ElementTree.parse` | Parse XML into an Element tree |
+| 101-220 | `Element.find` / `findall` | XPath subset queries on the tree |
+| 221-360 | `ElementTree.write` | Serialize tree to XML bytes or string |
+| 361-500 | `iterparse` | Stream-parse large XML documents event by event |
+| 501-700 | `xml.dom.minidom` | DOM Level 2 `parseString`, `toprettyxml` |
+
+## Reading
+
+### `ElementTree.parse`
+
+```python
+# CPython: Lib/xml/etree/ElementTree.py:580 ElementTree.parse
+def parse(self, source, parser=None):
+    """Load an external XML document into this element tree."""
+    close_source = False
+    if not hasattr(source, "read"):
+        source = open(source, "rb")
+        close_source = True
+    try:
+        if parser is None:
+            parser = XMLParser()
+        while True:
+            data = source.read(65536)
+            if not data:
+                break
+            parser.feed(data)
+        self._root = parser.close()
+        return self._root
+    finally:
+        if close_source:
+            source.close()
+```
+
+`ET.parse('file.xml')` reads in 64 KB chunks, feeding each to `XMLParser` (backed by `expat`). The root `Element` is returned and stored as `self._root`. For large documents, `iterparse` is preferred as it does not build the full tree.
+
+### `Element.findall`
+
+```python
+# CPython: Lib/xml/etree/ElementTree.py:420 Element.findall
+def findall(self, path, namespaces=None):
+    """Find all subelements matching the XPath path."""
+    return ElementPath.findall(self, path, namespaces)
+```
+
+`root.findall('.//{http://ns}tag')` uses `ElementPath`, a minimal XPath subset supporting `tag`, `*`, `.`, `..`, `[@attr]`, `[tag]`, `[position]`. Full XPath is not supported; use `lxml` for that.
+
+### `ElementTree.write`
+
+```python
+# CPython: Lib/xml/etree/ElementTree.py:660 ElementTree.write
+def write(self, file_or_filename, encoding=None, xml_declaration=None,
+          default_namespace=None, method="xml", short_empty_elements=True):
+    """Write the element tree to a file."""
+    ...
+    serialize = _serialize[method]  # 'xml', 'html', 'text', 'c14n'
+    serialize(write, self._root, qnames, namespaces, short_empty_elements)
+```
+
+`tree.write('out.xml', encoding='unicode')` returns a string. `encoding='unicode'` means write to a `str` file object; any other encoding writes bytes. `short_empty_elements=True` produces `<br />` instead of `<br></br>`.
+
+### `iterparse`
+
+```python
+# CPython: Lib/xml/etree/ElementTree.py:1020 iterparse
+def iterparse(source, events=None, parser=None):
+    """Incrementally parse XML. Yields (event, elem) pairs."""
+    # events: 'start', 'end', 'start-ns', 'end-ns', 'comment', 'pi'
+    close_source = not hasattr(source, "read")
+    ...
+    pullparser = XMLPullParser(events=events, _parser=parser)
+    while True:
+        data = source.read(16384)
+        if not data:
+            break
+        pullparser.feed(data)
+        yield from pullparser.read_events()
+    pullparser.close()
+```
+
+`iterparse` is memory-efficient for large files. The common pattern is to `clear()` elements after processing to free memory: `for event, elem in ET.iterparse(f): ... elem.clear()`.
+
+## gopy notes
+
+`ElementTree.parse` is `module/xml/etree.ElementTree.Parse` in `module/xml/etree/module.go`. It uses Go's `encoding/xml` tokenizer under the hood. `Element.findall` implements the `ElementPath` mini-XPath evaluator in `module/xml/etree/path.go`. `ElementTree.write` serializes using a recursive visitor. `iterparse` is a Go channel-based iterator.

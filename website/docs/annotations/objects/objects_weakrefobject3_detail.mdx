@@ -1,0 +1,106 @@
+---
+title: Objects/weakrefobject.c (part 3)
+description: "Objects/weakrefobject.c part 3: weakref callback invocation, PyObject_ClearWeakRefs, weakref.finalize, weakref list management."
+cpython_path: Objects/weakrefobject.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Objects/weakrefobject.c" />
+
+This annotation covers callback handling and deregistration. See `objects_weakrefobject2_detail` for `weakref.__new__`, `weakref.__call__`, and the `tp_weaklistoffset` mechanism.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-100 | `PyObject_ClearWeakRefs` | Called by `tp_dealloc` to nullify all weak refs to a dying object |
+| 101-220 | Callback invocation | Call user callback with the dead weakref as argument |
+| 221-360 | `weakref.finalize` | High-level finalizer: call a function when object is collected |
+| 361-500 | Weakref list management | Doubly-linked list of refs per object; insert and remove |
+
+## Reading
+
+### `PyObject_ClearWeakRefs`
+
+```c
+// CPython: Objects/weakrefobject.c:880 PyObject_ClearWeakRefs
+void
+PyObject_ClearWeakRefs(PyObject *object)
+{
+    /* Called by tp_dealloc. Traverse the weakref list and:
+       1. Set each ref->wr_object to Py_None
+       2. Queue any callbacks for invocation after dealloc completes */
+    PyWeakReference **list = GET_WEAKREFS_LISTPTR(object);
+    while (*list != NULL) {
+        PyWeakReference *ref = *list;
+        PyWeakReference_SET_OBJECT(ref, Py_None);
+        if (ref->wr_callback != NULL) {
+            /* Schedule callback: append to pending list */
+            _PyRuntime.gc.callbacks = ...;
+        }
+        *list = ref->wr_nextref;
+    }
+}
+```
+
+`PyObject_ClearWeakRefs` is called near the start of `tp_dealloc`, before the object's memory is freed. Callbacks are not invoked synchronously here; they are queued and called by `handle_weakrefs` in the GC. This ensures the callback runs after the object is fully deallocated.
+
+### Callback invocation
+
+```c
+// CPython: Objects/weakrefobject.c:960 handle_callback
+static void
+handle_callback(PyWeakReference *ref, PyObject *callback)
+{
+    /* The callback receives the weakref object (not the dead referent). */
+    PyObject *cbresult = PyObject_CallOneArg(callback, (PyObject *)ref);
+    if (cbresult == NULL) {
+        /* Swallow exception — callbacks must not propagate */
+        PyErr_WriteUnraisable(callback);
+    }
+    Py_XDECREF(cbresult);
+}
+```
+
+Weak reference callbacks must not raise exceptions that propagate. If a callback raises, the exception is printed to stderr via `PyErr_WriteUnraisable` and execution continues. This matches the finalizer contract.
+
+### `weakref.finalize`
+
+```python
+# CPython: Lib/weakref.py:525 finalize
+class finalize:
+    """Weak reference based finalizer.
+       Calls func(*args, **kwargs) when obj is garbage collected."""
+    def __init__(self, obj, func, /, *args, **kwargs):
+        self._key = self._index = next(self._registry._index)
+        self._weakref = ref(obj, self._callback)
+        self._func = func
+        self._args = args
+        self._kwargs = kwargs
+        finalize._registry[self._key] = self
+```
+
+`weakref.finalize(obj, cleanup, resource)` ensures `cleanup(resource)` is called when `obj` is collected. Unlike `__del__`, finalizers are safe to use on classes that participate in reference cycles (the GC invokes them correctly).
+
+### Weakref list structure
+
+```c
+// CPython: Objects/weakrefobject.c:120 weakref list layout
+/* Each object with tp_weaklistoffset != 0 has a pointer to the head
+   of a doubly-linked list of PyWeakReference objects.
+   wr_object  -> the referent (or Py_None if dead)
+   wr_prevref -> previous in list (NULL if head)
+   wr_nextref -> next in list
+   wr_callback -> Python callable or NULL
+   New refs are inserted at the head; no-callback refs before callback refs. */
+```
+
+The no-callback refs are placed first so that `PyWeakref_GET_OBJECT` (which only checks the head) works without scanning the list when there are no callbacks.
+
+## gopy notes
+
+`PyObject_ClearWeakRefs` is `objects.ClearWeakRefs` in `objects/weakref.go`. It traverses the weakref linked list stored at the object's `weaklist` pointer. Callbacks are queued in a Go slice and invoked by the GC sweep phase in `objects/gc.go`. `weakref.finalize` is `module/weakref.Finalize` in `module/weakref/module.go`.
