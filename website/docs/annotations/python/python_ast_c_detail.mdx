@@ -1,0 +1,205 @@
+---
+title: Python/ast.c
+description: "AST validation, constant folding, and Python name-mangling for __dunder identifiers"
+cpython_path: Python/ast.c
+cpython_version: "3.14"
+lines: 1500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Python/ast.c" />
+
+`Python/ast.c` runs immediately after the parser returns an AST and before the symbol table
+or compiler walk it. It has two distinct responsibilities. The first is structural validation
+(`_PyAST_Validate`): it checks invariants the ASDL grammar cannot express, such as
+non-negative line numbers, consistent Load/Store/Del contexts, and the absence of
+meaningless node combinations. The second is optimization (`_PyAST_Optimize`): it performs
+a source-level constant-folding pass that collapses binary operations on literals, folds
+comparison chains, and merges adjacent string constants. The file also contains `_Py_Mangle`,
+the implementation of Python's name-mangling rule for `__name` identifiers inside class
+bodies.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-40 | includes, forward declarations | `pycore_ast.h`, `pycore_compile.h`, static prototypes |
+| 41-80 | `_PyAST_Validate` | Public entry point; sets up the recursion-depth counter |
+| 81-140 | `validate_mod` | Dispatch over `Module`, `Interactive`, `Expression`, `FunctionType` |
+| 141-420 | `validate_stmt` | Recursive validator for all statement node kinds |
+| 421-720 | `validate_expr` | Recursive validator for all expression node kinds |
+| 721-780 | `validate_arguments` | Checks on function argument lists (duplicate names, etc.) |
+| 781-850 | `validate_pattern` | Structural-pattern node validator (3.10+) |
+| 851-950 | `_Py_Mangle` | Name-mangling for `__name` identifiers in class bodies |
+| 951-1050 | `fold_binop` | Constant-folds `BinOp` nodes whose both sides are literals |
+| 1051-1150 | `fold_compare` | Constant-folds `Compare` nodes with literal operands |
+| 1151-1230 | `fold_tuple` | Converts `Tuple(Load)` of constants to a single `Constant` |
+| 1231-1380 | `_PyAST_ExprConstantValue` | Check if an expression reduces to a constant |
+| 1381-1500 | `_PyAST_Optimize` | Top-level constant-folding driver; walks the full AST |
+
+## Reading
+
+### Validation entry point and recursion guard
+
+`_PyAST_Validate` is the sole public entry point for the validation pass. CPython calls it
+from `Python/pythonrun.c` right after `PyParser_ASTFromStringObject` returns, and also from
+the `compile()` built-in when it receives a pre-built AST object. The recursion counter
+mirrors the one in `ceval.c` and prevents deeply nested AST nodes from exhausting the C
+stack before they reach Python's recursion limit.
+
+```c
+// CPython: Python/ast.c:41 _PyAST_Validate
+int
+_PyAST_Validate(mod_ty mod)
+{
+    int res = -1;
+    PyThreadState *tstate = _PyThreadState_GET();
+    int recursion_limit = C_RECURSION_LIMIT;
+    int starting_recursion_depth;
+    if (_Py_EnterRecursiveCallTstate(tstate, " validating AST")) {
+        return -1;
+    }
+    starting_recursion_depth = tstate->c_recursion_remaining;
+    res = validate_mod(mod);
+    tstate->c_recursion_remaining = starting_recursion_depth;
+    _Py_LeaveRecursiveCallTstate(tstate);
+    return res;
+}
+```
+
+The counter is decremented on every recursive `validate_expr` and `validate_stmt` call. If
+it hits zero, the function raises `RecursionError` and returns -1. This guard is separate
+from the Python-level recursion guard because AST nodes are a C-level structure.
+
+### validate_stmt: structural vs. semantic errors
+
+`validate_stmt` distinguishes two error classes. Pure structural violations (wrong node kind
+in a position, a missing required field) raise `SystemError` because they indicate a bug in
+the parser or in external code that built AST nodes programmatically. Semantic violations
+(augmented assignment to a non-store target, `return` with a value in a generator with
+`yield from`) raise `SyntaxError` with a proper filename and line number attached. The
+`context` argument (Load / Store / Del) threads through all `validate_expr` calls to reject
+constructs like `(a + b) = c` without a separate tree walk.
+
+```c
+// CPython: Python/ast.c:141 validate_stmt
+static int
+validate_stmt(struct validator *state, stmt_ty stmt)
+{
+    int ret = -1;
+    if (!_Py_EnterRecursiveCall(" validating AST")) {
+        return -1;
+    }
+    switch (stmt->kind) {
+    case AugAssign_kind:
+        ret = validate_expr(state, stmt->v.AugAssign.target, Store)
+              && validate_expr(state, stmt->v.AugAssign.value, Load);
+        break;
+    case Return_kind:
+        ret = !stmt->v.Return.value
+              || validate_expr(state, stmt->v.Return.value, Load);
+        break;
+    /* ... */
+    default:
+        PyErr_SetString(PyExc_SystemError, "unexpected statement");
+        ret = -1;
+    }
+    _Py_LeaveRecursiveCall();
+    return ret;
+}
+```
+
+### _Py_Mangle: name-mangling for class bodies
+
+Python's reference manual specifies that any identifier of the form `__spam` (at least two
+leading underscores, at most one trailing underscore) that appears inside a class body is
+textually transformed to `_classname__spam`. This transformation happens at the AST level,
+not at parse time, so that tools that build ASTs programmatically also benefit from it.
+`_Py_Mangle` is called from the compiler (not from the validator) for every name that passes
+through a class scope.
+
+```c
+// CPython: Python/ast.c:851 _Py_Mangle
+PyObject *
+_Py_Mangle(PyObject *privateobj, PyObject *ident)
+{
+    /* privateobj is the class name; ident is the raw identifier. */
+    if (privateobj == NULL || !PyUnicode_Check(privateobj)) {
+        return Py_NewRef(ident);
+    }
+    const char *name = PyUnicode_AsUTF8(ident);
+    if (name == NULL || name[0] != '_' || name[1] != '_') {
+        return Py_NewRef(ident);
+    }
+    /* strip leading underscores from the class name */
+    /* build "_classname__ident" */
+    /* ... */
+}
+```
+
+The strip of leading underscores from the class name is intentional: `___Foo` becomes `Foo`
+for the purpose of mangling, so `__bar` in `___Foo` still mangles to `_Foo__bar`. At most
+one trailing underscore is preserved in the identifier.
+
+### Constant folding: fold_binop and fold_tuple
+
+`_PyAST_Optimize` is the top-level driver for the constant-folding pass. It calls
+`astfold_expr` on every expression node, which in turn calls the specialized folders. The
+folding happens at the AST level so that the resulting simplified AST is what the compiler
+and the symbol table both see.
+
+`fold_binop` checks whether both operands of a `BinOp` node are `Constant` nodes and whether
+the operator is one of the foldable set (Add, Sub, Mult, Div, Mod, Pow, FloorDiv, BitAnd,
+BitOr, BitXor, LShift, RShift, MatMult). If so, it evaluates the operation at compile time
+and replaces the `BinOp` with a new `Constant` node.
+
+```c
+// CPython: Python/ast.c:951 fold_binop
+static int
+fold_binop(expr_ty node, PyArena *arena, _PyOptimizerObject *optimizer)
+{
+    expr_ty lhs = node->v.BinOp.left;
+    expr_ty rhs = node->v.BinOp.right;
+    if (lhs->kind != Constant_kind || rhs->kind != Constant_kind) {
+        return 1; /* nothing to fold */
+    }
+    PyObject *lv = lhs->v.Constant.value;
+    PyObject *rv = rhs->v.Constant.value;
+    PyObject *result = binary_ops[node->v.BinOp.op](lv, rv);
+    if (result == NULL) {
+        /* overflow or type error: clear and leave node untouched */
+        PyErr_Clear();
+        return 1;
+    }
+    COPY_NODE(node, _PyAST_Constant(result, NULL, node->lineno,
+                                    node->col_offset, node->end_lineno,
+                                    node->end_col_offset, arena));
+    Py_DECREF(result);
+    return 1;
+}
+```
+
+`fold_tuple` handles the common case where a `Tuple` node in Load context contains only
+`Constant` children. It converts the whole tuple to a single `Constant` holding a Python
+tuple, which avoids runtime allocation for literal tuple expressions like `(1, 2, 3)`.
+
+`fold_compare` folds `Compare` nodes such as `1 < 2` or `"a" == "a"` where all operands are
+constants and all operators are equality or ordering comparisons.
+
+## gopy notes
+
+`_PyAST_Validate` is not yet ported in gopy. The planned home is `compile/astvalidate`. The
+Go equivalent will be `Validate(mod ast.Mod) error`, using a `validator` struct with a
+`depth int` field for the recursion guard.
+
+`_PyAST_Optimize` maps to a future `compile/astopt` package. The constant-folding logic for
+`fold_binop` and `fold_tuple` can reuse Go's `math/big` for integer overflow detection.
+`fold_compare` is straightforward for numeric types; string comparisons need care around
+interning.
+
+`_Py_Mangle` is partially replicated in `compile/compiler.go` via the `mangle` helper. The
+Go version should be reconciled against the CPython definition to ensure it handles the
+edge cases (leading underscores stripped from the class name, single trailing underscore
+preserved).

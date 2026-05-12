@@ -1,0 +1,85 @@
+---
+title: Modules/_io/textio.c
+description: "TextIOWrapper: decodes bytes from a buffered binary stream using an incremental codec, handles line endings, implements a position cookie for seek/tell, and supports line buffering."
+cpython_path: Modules/_io/textio.c
+cpython_version: "3.14"
+lines: 3500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/_io/textio.c" />
+
+`Modules/_io/textio.c` implements `TextIOWrapper`, the layer that decodes bytes from an underlying binary stream into Python `str` objects. It manages an incremental codec, translates line endings, and implements `tell()`/`seek()` using a position cookie that encodes both the byte position and the decoder state.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-200 | `textio` struct | Object layout; decoded buffer, codec, line-ending state |
+| 201-600 | `_textiowrapper_decode` | Call incremental decoder; handle `errors` parameter |
+| 601-1000 | `_io_TextIOWrapper_read_impl` | Read n chars; decode from binary buffer in chunks |
+| 1001-1400 | `_io_TextIOWrapper_readline_impl` | Line-oriented read; newlines tracking |
+| 1401-1800 | `_io_TextIOWrapper_write_impl` | Encode str to bytes; line-buffer flush trigger |
+| 1801-2200 | `_io_TextIOWrapper_tell_impl` | Encode position cookie |
+| 2201-2600 | `_io_TextIOWrapper_seek_impl` | Decode position cookie and restore decoder state |
+| 2601-3500 | Type slot wiring | `PyTextIOWrapper_Type`, property accessors |
+
+## Reading
+
+### Incremental decoding
+
+`_textiowrapper_decode` calls the codec's `decode(data, final)` method. The `pending_bytes` buffer accumulates raw bytes until a full decode chunk is available. The decoded text is appended to `self->decoded_chars`, and the read cursor (`decoded_chars_used`) advances as characters are consumed.
+
+```c
+// Modules/_io/textio.c:201 _textiowrapper_decode
+static PyObject *
+_textiowrapper_decode(textio *self, PyObject *input, int final_decode)
+{
+    PyObject *decoded = PyObject_CallMethodObjArgs(
+        self->decoder, _PyIO_str_decode, input,
+        final_decode ? Py_True : Py_False, NULL);
+    ...
+    return decoded;
+}
+```
+
+### readline and newlines tracking
+
+`readline` accumulates characters until a line terminator is found. The `newlines` property records which terminators (`\n`, `\r`, `\r\n`) were encountered. When `universal_newlines=True`, all three are normalized to `\n` in the output.
+
+```c
+// Modules/_io/textio.c:1001 _io_TextIOWrapper_readline_impl
+static PyObject *
+_io_TextIOWrapper_readline_impl(textio *self, Py_ssize_t limit)
+{
+    /* scan decoded_chars for newline; refill from binary stream if needed */
+    while (!has_newline && !eof) {
+        _textiowrapper_read_chunk(self, limit);
+    }
+    return _textiowrapper_get_decoded_chars(self, end_pos);
+}
+```
+
+### tell()/seek() position cookie
+
+`tell()` cannot simply return the underlying binary stream position because one byte offset does not correspond to one character offset for multi-byte encodings. Instead it encodes a cookie containing the byte offset, the number of bytes to skip from the decoded chunk, and the decoder state (a pickled bytes object for stateful codecs).
+
+```c
+// Modules/_io/textio.c:1801 _io_TextIOWrapper_tell_impl
+static PyObject *
+_io_TextIOWrapper_tell_impl(textio *self)
+{
+    /* snapshot = (dec_flags, next_input) from decoder.getstate() */
+    /* cookie = position | (dec_flags << 64) | (chars_to_skip << ...) */
+    return pack_cookie(raw_tell, dec_flags, bytes_to_feed,
+                       chars_to_skip, need_eof);
+}
+```
+
+`seek()` decodes the cookie, seeks the binary stream to the byte position, re-feeds the saved bytes into the decoder, and discards the right number of decoded characters.
+
+## gopy notes
+
+Not yet ported. The planned package path is `module/_io/`. The Go equivalent uses `bufio.Reader` plus `transform.Reader` from `golang.org/x/text/transform` for codec handling. The position cookie mechanism has no direct Go analogue and would require a custom seek implementation.

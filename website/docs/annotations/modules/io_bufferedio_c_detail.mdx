@@ -1,0 +1,217 @@
+---
+title: Modules/_io/bufferedio.c
+description: "Buffered binary I/O layer: BufferedReader, BufferedWriter, BufferedRandom, and BufferedRWPair."
+cpython_path: Modules/_io/bufferedio.c
+cpython_version: "3.14"
+lines: 2172
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/_io/bufferedio.c" />
+
+## Map
+
+The file implements four concrete buffered-I/O classes that sit between raw streams and the
+Python application. All four share a single C struct (`buffered`) and a large set of common
+methods; only a handful of entry points differ per class.
+
+| Symbol | Line | Purpose |
+|---|---|---|
+| `buffered` struct | 746 | Shared state: buffer array, `pos`, `raw_pos`, `lock`, read/write lengths |
+| `buffered_flush_and_rewind_unlocked` | 993 | Flush pending write data and reset the read cursor |
+| `_io__Buffered_peek_impl` | 1015 | Return bytes from the buffer without advancing `pos` |
+| `_io__Buffered_read_impl` | 1030 | Public `read()` entry point |
+| `_io__Buffered_readinto1_impl` | 1155 | `readinto1()`: fill caller buffer with at most one raw call |
+| `_bufferedreader_raw_read` | 1261 | Call the underlying raw stream's `read()` |
+| `_io_BufferedWriter_write_impl` | 1545 | Append bytes to write buffer, flush when full |
+| `bufferedreader_spec` | 1928 | `BufferedReader` type spec |
+| `bufferedwriter_spec` | 2015 | `BufferedWriter` type spec |
+| `bufferedrwpair_spec` | 2098 | `BufferedRWPair` type spec |
+| `bufferedrandom_spec` | 2162 | `BufferedRandom` type spec |
+
+## Reading
+
+### The shared buffer struct and the lock field
+
+Every buffered object stores its bytes in a plain `char[]` buffer allocated at construction
+time. Two cursors track state: `pos` is the current logical read position inside the buffer,
+and `raw_pos` is how far the buffer has been filled from the raw stream. A `PyThread_type_lock`
+protects all mutations when the GIL is released during raw I/O.
+
+```c
+// CPython: Modules/_io/bufferedio.c:746 buffered (struct)
+typedef struct {
+    PyObject_HEAD
+    PyObject *raw;
+    int ok;
+    int detached;
+
+    Py_off_t abs_pos;
+
+    /* Shared buffer */
+    char *buffer;
+    Py_off_t pos, raw_pos;
+    Py_off_t read_end, write_pos, write_end;
+    Py_ssize_t buffer_size, buffer_mask;
+
+    PyObject *dict;
+    PyObject *weakreflist;
+    PyThread_type_lock lock;
+    volatile unsigned long owner;
+} buffered;
+```
+
+The lock is acquired before any operation that mutates `pos`, `read_end`, or `write_end`, and
+released after the raw call returns. This lets CPython drop the GIL during `read(2)` while
+still protecting the Python-level buffer metadata.
+
+### _bufferedreader_raw_read: the raw I/O call
+
+`_bufferedreader_raw_read` is the single site that calls the underlying raw stream. It asks
+the raw object for `n` bytes by calling `raw.read(n)` through the C-level `readinto` slot,
+then copies the result into the buffer at `self->raw_pos`.
+
+```c
+// CPython: Modules/_io/bufferedio.c:1261 _bufferedreader_raw_read
+static Py_ssize_t
+_bufferedreader_raw_read(buffered *self, char *start, Py_ssize_t len)
+{
+    Py_buffer data;
+    PyObject *res;
+    Py_ssize_t n;
+    PyObject *memobj = PyMemoryView_FromMemory(start, len, PyBUF_WRITE);
+    if (memobj == NULL)
+        return -1;
+    res = PyObject_CallMethodOneArg(self->raw, &_Py_ID(readinto), memobj);
+    Py_DECREF(memobj);
+    if (res == NULL)
+        return -1;
+    if (res == Py_None) {
+        /* Non-blocking raw stream */
+        Py_DECREF(res);
+        return -2;
+    }
+    n = PyLong_AsSsize_t(res);
+    Py_DECREF(res);
+    if (n < 0 || n > len) {
+        PyErr_SetString(PyExc_ValueError,
+                        "raw readinto() returned invalid length");
+        return -1;
+    }
+    if (n > 0 && self->abs_pos != -1)
+        self->abs_pos += n;
+    return n;
+}
+```
+
+A return value of `-2` signals that the raw stream is non-blocking and would block; the
+buffered layer propagates this as `BlockingIOError`.
+
+### _io__Buffered_read_impl, peek, and readinto1
+
+`_io__Buffered_read_impl` (the public `read()` method) checks whether the requested bytes are
+already in the buffer. If they are, it slices directly from `self->buffer + self->pos` and
+advances `pos`. If not, it calls `_bufferedreader_raw_read` to refill.
+
+`peek()` returns bytes starting at `pos` without moving it. The count returned may be less
+than or more than the caller requested because the entire unflushed buffer region is returned
+as-is.
+
+```c
+// CPython: Modules/_io/bufferedio.c:1015 _io__Buffered_peek_impl
+static PyObject *
+_io__Buffered_peek_impl(buffered *self, Py_ssize_t size)
+{
+    PyObject *res = NULL;
+    PyObject *data;
+    Py_ssize_t have;
+
+    CHECK_INITIALIZED(self)
+    if (size <= 0)
+        size = self->buffer_size;
+    if (!ENTER_BUFFERED(self))
+        return NULL;
+
+    have = Py_SAFE_DOWNCAST(READAHEAD(self), Py_off_t, Py_ssize_t);
+    if (have > 0) {
+        res = PyBytes_FromStringAndSize(self->buffer + self->pos, have);
+        goto end;
+    }
+    /* Buffer exhausted: do one raw read */
+    res = _bufferedreader_read_generic(self, size);
+end:
+    LEAVE_BUFFERED(self)
+    return res;
+}
+```
+
+`readinto1()` (`_io__Buffered_readinto1_impl`, line 1155) fills an external buffer object
+with exactly one call to `_bufferedreader_raw_read`. It is the zero-copy path used by
+`socket.makefile()` and similar callers that own their own receive buffer.
+
+### bufferedwriter_write and flush
+
+`_io_BufferedWriter_write_impl` appends bytes to `self->buffer` starting at `self->write_pos`.
+When `write_pos` would exceed `buffer_size`, it first calls
+`buffered_flush_and_rewind_unlocked` to drain the buffer to the raw stream, then writes any
+bytes that still do not fit directly to raw without buffering.
+
+```c
+// CPython: Modules/_io/bufferedio.c:1545 _io_BufferedWriter_write_impl
+static PyObject *
+_io_BufferedWriter_write_impl(buffered *self, Py_buffer *buffer)
+{
+    PyObject *res = NULL;
+    Py_ssize_t written, avail, remaining;
+    Py_off_t offset;
+
+    CHECK_INITIALIZED(self)
+    if (!ENTER_BUFFERED(self))
+        return NULL;
+
+    /* Fast path: enough room in the buffer */
+    avail = Py_SAFE_DOWNCAST(self->buffer_size - self->write_pos,
+                             Py_off_t, Py_ssize_t);
+    if (buffer->len <= avail) {
+        memcpy(self->buffer + self->write_pos,
+               buffer->buf, buffer->len);
+        if (self->write_end == -1 || self->write_end < self->write_pos)
+            self->write_end = self->write_pos;
+        self->write_pos += buffer->len;
+        self->write_end += buffer->len;
+        written = buffer->len;
+        goto end;
+    }
+    /* Flush first, then handle remainder ... */
+    // (see buffered_flush_and_rewind_unlocked at line 993)
+end:
+    LEAVE_BUFFERED(self)
+    if (res == NULL)
+        return NULL;
+    return PyLong_FromSsize_t(written);
+}
+```
+
+`buffered_flush_and_rewind_unlocked` (line 993) loops over `_bufferedwriter_raw_write` until
+every buffered byte is handed to the raw stream, then resets `write_pos` and `write_end` to
+zero so the buffer is logically empty. It also rewinds the read cursor so that a subsequent
+`read()` on a `BufferedRandom` object sees the correct position.
+
+## gopy notes
+
+- The four buffered types share one struct and one method table; the gopy port should use a
+  single `Buffered` Go struct with a `kind` discriminant or four thin wrapper types embedding
+  a common base.
+- The `lock` field maps to `sync.Mutex` in Go. The ENTER/LEAVE macros become `Lock()`/
+  `Unlock()` calls around raw I/O. Go's goroutine scheduler makes this simpler than CPython's
+  OS-thread locking, but the mutex is still needed to protect shared buffer state between
+  goroutines.
+- `_bufferedreader_raw_read` translates directly to a method on the raw stream interface.
+  Return `-2` (would-block) becomes a typed sentinel error, e.g. `io.ErrNoProgress` or a
+  local `ErrWouldBlock`.
+- `readinto1` is a zero-copy path that maps naturally onto Go's `io.ReaderAt` or `io.Reader`
+  with a caller-supplied slice.
+- The `abs_pos` accumulator used for `tell()` acceleration must be invalidated whenever the
+  raw stream is seeked externally; the port must preserve this invariant.

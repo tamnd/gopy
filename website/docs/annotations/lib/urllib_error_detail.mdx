@@ -1,0 +1,64 @@
+---
+title: Lib/urllib/error.py
+description: "URLError, HTTPError, and ContentTooShortError: the exception hierarchy for urllib.request failures."
+cpython_path: Lib/urllib/error.py
+cpython_version: "3.14"
+lines: 80
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/urllib/error.py" />
+
+`Lib/urllib/error.py` defines the three exception classes raised by `urllib.request`. `URLError` is the base for all urllib failures. `HTTPError` is both an exception and a file-like response object. `ContentTooShortError` signals truncated downloads from `urlretrieve`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-10 | imports | `urllib.response.addinfourl` |
+| 12-30 | `URLError` | Base exception wrapping a reason string or OSError |
+| 32-65 | `HTTPError` | HTTP error code exception that also acts as a response |
+| 67-80 | `ContentTooShortError` | Truncated download exception |
+
+## Reading
+
+### URLError
+
+`URLError` wraps any failure that prevents the URL from being opened. The `reason` attribute is either a string (for protocol-level errors) or an `OSError` instance (for network-level errors like `ECONNREFUSED`).
+
+```python
+# CPython: Lib/urllib/error.py:12 URLError
+class URLError(OSError):
+    def __init__(self, reason, filename=None):
+        self.reason = reason
+        super().__init__(reason)
+        if filename is not None:
+            self.filename = filename
+```
+
+### HTTPError: exception and response
+
+`HTTPError` subclasses both `URLError` and `urllib.response.addinfourl`. This dual inheritance means it can be raised as an exception while also providing a file-like `read()` interface, so callers can read the error body if they catch the exception.
+
+```python
+# CPython: Lib/urllib/error.py:32 HTTPError
+class HTTPError(URLError, addinfourl):
+    def __init__(self, url, code, msg, hdrs, fp):
+        self.code = code
+        self.msg = msg
+        self.hdrs = hdrs
+        self.fp = fp
+        super().__init__(msg, url)
+```
+
+The `code` attribute is the HTTP status code (e.g., 404), and `hdrs` is the response headers. `HTTPDefaultErrorHandler` in `urllib.request` raises `HTTPError` for any 4xx or 5xx response.
+
+### ContentTooShortError
+
+`ContentTooShortError` is raised by `urlretrieve` when the downloaded file is shorter than the `Content-Length` header indicates. It stores the partial content in the `content` attribute.
+
+## gopy notes
+
+Not yet ported. The planned package path is `module/urllib/`. Go's `net/http` raises errors through the standard `error` interface; an idiomatic port would define `URLError` and `HTTPError` as Go structs implementing `error`.

@@ -1,0 +1,86 @@
+---
+title: Python/symtable.c
+description: "Symbol table builder: walks the AST to determine scope and binding for every name, producing local/free/cell/global classifications used by the compiler to emit LOAD_FAST vs LOAD_DEREF vs LOAD_GLOBAL."
+cpython_path: Python/symtable.c
+cpython_version: "3.14"
+lines: 2000
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Python/symtable.c" />
+
+`Python/symtable.c` builds the symbol table that the compiler consults to choose the correct load/store bytecodes for each name. It walks the AST and populates a `PySTEntryObject` for every scope (module, class, function, comprehension), recording whether each name is local, free (captured from an enclosing scope), a cell (captured by a nested scope), or global.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-150 | `PySTEntryObject`, `struct symtable` | Scope entry and per-compilation symbol table state |
+| 151-350 | `_PySymtable_Build` | Entry point; walks AST, calls `analyze_block` |
+| 351-600 | `analyze_block`, `analyze_name` | Resolve free/cell/global/local per scope |
+| 601-900 | `symtable_visit_stmt` | AST statement dispatcher |
+| 901-1400 | `symtable_visit_expr` | AST expression dispatcher; handles comprehensions |
+| 1401-1700 | `symtable_add_def`, `symtable_record_directive` | Name registration; `global`/`nonlocal` directives |
+| 1701-2000 | `symtable_exit_block`, scope finalization | Propagate free variables up to enclosing scopes |
+
+## Reading
+
+### _PySymtable_Build entry point
+
+`_PySymtable_Build` creates a `struct symtable`, enters the module scope, then calls `symtable_visit_stmt` on each statement in the module body. After the walk it calls `_PySymtable_Analyze` which runs `analyze_block` bottom-up from the innermost scopes outward.
+
+```c
+// Python/symtable.c:151 _PySymtable_Build
+struct symtable *
+_PySymtable_Build(mod_ty mod, PyObject *filename, _Py_block_ty starting_block)
+{
+    struct symtable *st = symtable_new();
+    if (symtable_enter_block(st, filename, ModuleBlock, (void *)mod, ...) < 0)
+        goto error;
+    switch (mod->kind) {
+    case Module_kind: VISIT_SEQ(st, stmt, mod->v.Module.body); break;
+    ...
+    }
+    if (!_PySymtable_Analyze(st)) goto error;
+    return st;
+}
+```
+
+### analyze_block: free and cell resolution
+
+`analyze_block` computes which names in a scope are cells (referenced from nested scopes) and which are free (referenced from this scope but defined in an enclosing one). It walks the children first, then propagates free-variable sets upward.
+
+```c
+// Python/symtable.c:351 analyze_block
+static int
+analyze_block(PySTEntryObject *entry, PyObject *bound, PyObject *free,
+              PyObject *global, PyObject *type_params)
+{
+    /* for each name in entry->ste_symbols:
+       - if referenced in a child and locally assigned: mark CELL
+       - if referenced here but bound in a parent: mark FREE and add to parent's cells */
+    ...
+}
+```
+
+### global and nonlocal directives
+
+`symtable_add_def` handles `global` and `nonlocal` declarations. A `global x` marks `x` with `DEF_GLOBAL` and removes it from the local binding set. A `nonlocal x` marks `x` with `DEF_NONLOCAL`, which triggers the free-variable walk to find the nearest enclosing function that binds `x`.
+
+```c
+// Python/symtable.c:1401 symtable_add_def
+static int
+symtable_add_def(struct symtable *st, PyObject *name, int flag, ...)
+{
+    PyObject *o = PyDict_GetItemWithError(st->st_cur->ste_symbols, name);
+    long val = o ? PyLong_AS_LONG(o) : 0;
+    val |= flag;
+    return PyDict_SetItem(st->st_cur->ste_symbols, name, PyLong_FromLong(val));
+}
+```
+
+## gopy notes
+
+Not yet ported. gopy's compiler in `compile/` performs its own name-scope analysis in `compile/codegen_expr_name.go` and `compile/compiler.go`. A direct port of `symtable.c` would be the `compile/symtable.go` file; the existing code handles the same logic inline during code generation rather than in a separate pre-pass.

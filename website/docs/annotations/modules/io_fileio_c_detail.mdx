@@ -1,0 +1,92 @@
+---
+title: Modules/_io/fileio.c
+description: "FileIO: raw unbuffered file I/O using POSIX read/write/lseek, with closefd ownership semantics, O_CLOEXEC on Linux, and a readable/writable/seekable interface."
+cpython_path: Modules/_io/fileio.c
+cpython_version: "3.14"
+lines: 900
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/_io/fileio.c" />
+
+`Modules/_io/fileio.c` implements `FileIO`, the raw unbuffered layer at the bottom of the `io` stack. It wraps a file descriptor and calls POSIX `read(2)`, `write(2)`, and `lseek(2)` directly. `BufferedReader`/`BufferedWriter` sit on top and add buffering.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-100 | `fileio` struct | Object layout; fd, flags, mode string, closefd |
+| 101-300 | `fileio_init` | `open(2)` with mode-string-to-flag translation; `O_CLOEXEC` |
+| 301-450 | `fileio_read`, `fileio_readall` | Unbuffered read; `readall` grows a buffer |
+| 451-550 | `fileio_write` | Unbuffered write; handles partial writes |
+| 551-650 | `fileio_seek`, `fileio_tell` | `lseek(2)` wrappers |
+| 651-900 | `fileio_truncate`, `fileio_close`, type wiring | Truncate, close, `PyFileIO_Type` |
+
+## Reading
+
+### Opening and O_CLOEXEC
+
+`fileio_init` translates the mode string (`r`, `rb`, `w+b`, etc.) to `O_RDONLY`, `O_WRONLY`, `O_RDWR`, `O_CREAT`, and `O_TRUNC` flags. On Linux and macOS it always adds `O_CLOEXEC` so the file descriptor is not inherited across `exec()`.
+
+```c
+// Modules/_io/fileio.c:101 fileio_init
+static int
+fileio_init(PyObject *oself, PyObject *args, PyObject *kwds)
+{
+    ...
+    flags = O_RDONLY;
+    if (writable)  flags = O_WRONLY | O_CREAT;
+    if (readable && writable) flags = O_RDWR | O_CREAT;
+#ifdef O_CLOEXEC
+    flags |= O_CLOEXEC;
+#endif
+    self->fd = open(name, flags, 0666);
+    ...
+}
+```
+
+### closefd ownership
+
+The `closefd` parameter controls whether `FileIO` closes the file descriptor on `close()`. When `closefd=False`, the `FileIO` object is a non-owning view of an externally managed fd. This is used internally by `socket.makefile()` and by callers that want to wrap a pre-opened fd.
+
+```c
+// Modules/_io/fileio.c:651 fileio_close_impl
+static PyObject *
+fileio_close_impl(fileio *self)
+{
+    if (self->closefd) {
+        self->fd = -1;
+        return _PyObject_CallMethodIdNoArgs((PyObject *)self,
+                                            &PyId_flush);
+    }
+    Py_RETURN_NONE;
+}
+```
+
+### readall: growing buffer
+
+`fileio_readall` allocates a buffer and keeps calling `read(2)`, doubling the buffer when it fills. This handles files whose size is not known in advance (e.g., `/proc` files on Linux that report `st_size = 0`).
+
+```c
+// Modules/_io/fileio.c:390 fileio_readall
+static PyObject *
+fileio_readall(fileio *self)
+{
+    Py_ssize_t bufsize = SMALLCHUNK;
+    PyObject *result = PyBytes_FromStringAndSize(NULL, bufsize);
+    Py_ssize_t total = 0;
+    while (1) {
+        Py_ssize_t n = read(self->fd, buf + total, bufsize - total);
+        if (n == 0) break;
+        total += n;
+        if (total == bufsize) { /* double and realloc */ }
+    }
+    return _PyBytes_Resize(&result, total);
+}
+```
+
+## gopy notes
+
+Not yet ported. The planned package path is `module/_io/`. The Go equivalent wraps an `*os.File`, delegating to its `Read`, `Write`, and `Seek` methods. The `closefd=False` pattern maps to not calling `f.Close()` in the wrapper's finalizer.
