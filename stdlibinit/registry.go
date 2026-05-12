@@ -110,6 +110,12 @@ import (
 	// CPython: Modules/config.c.in:46 {"_collections", PyInit__collections}
 	_ "github.com/tamnd/gopy/module/_collections"
 
+	// Built-in module: _thread. Registers itself via module/_thread/module.go
+	// init(). Exposes goroutine identity, lock allocation, and new-thread
+	// creation backing Lib/threading.py and reprlib.py.
+	// CPython: Modules/_threadmodule.c:1 (module init)
+	_ "github.com/tamnd/gopy/module/_thread"
+
 	// Go-backed Python modules: not in CPython's config.c.in (those
 	// are pure-Python in Lib/), but until the corresponding Lib/*.py
 	// vendoring lands the import system needs something to satisfy
