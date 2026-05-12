@@ -1,0 +1,120 @@
+---
+title: Python/compile.c (part 8)
+description: "Python/compile.c part 8: class body compilation, __qualname__, __module__, __classcell__, super() cell injection."
+cpython_path: Python/compile.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Python/compile.c" />
+
+This annotation covers class definition compilation. See `python_compile7_detail` for comprehension and walrus operator compilation.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `compiler_class` | Entry: compile `class Foo(Base): ...` |
+| 81-180 | Class body scope | `__module__`, `__qualname__` setup inside the body |
+| 181-300 | `__classcell__` return | Return the `__class__` cell to `type.__new__` |
+| 301-420 | Decorator application | Apply decorators after class creation |
+| 421-500 | `LOAD_SUPER_ATTR` setup | Emit `__class__` free variable for `super()` |
+
+## Reading
+
+### `compiler_class`
+
+```c
+// CPython: Python/compile.c:3120 compiler_class
+static int
+compiler_class(struct compiler *c, stmt_ty s)
+{
+    /* 1. Push base classes and keyword args for type() call */
+    VISIT_SEQ(c, expr, s->v.ClassDef.bases);
+    /* 2. Create the class body as a nested code object */
+    if (compiler_enter_scope(c, s->v.ClassDef.name,
+                             COMPILER_SCOPE_CLASS, (void *)s, s->lineno, ...) < 0)
+        return 0;
+    /* 3. Emit __module__ and __qualname__ assignments */
+    ADDOP_LOAD_CONST(c, loc, c->c_filename);
+    ADDOP_NAME(c, loc, STORE_NAME, &_Py_ID(__module__), names);
+    ...
+    /* 4. Emit the class body */
+    VISIT_SEQ(c, stmt, s->v.ClassDef.body);
+    /* 5. Return __classcell__ if needed */
+    if (c->u->u_ste->ste_needs_class_closure) {
+        ADDOP_NAME(c, loc, LOAD_CLOSURE, &_Py_ID(__class__), freevars);
+        ...
+        ADDOP(c, loc, RETURN_VALUE);
+    }
+    compiler_exit_scope(c);
+    /* 6. Call BUILD_CLASS / LOAD_BUILD_CLASS */
+    ADDOP(c, loc, LOAD_BUILD_CLASS);
+    /* push class function, name, bases... */
+    ADDOP_I(c, loc, CALL, num_args);
+    /* 7. Apply decorators */
+    ...
+}
+```
+
+The class body compiles to a nested function that is called by `__build_class__`. This function sets up the class namespace and returns it (plus `__classcell__` if `super()` is used inside).
+
+### `__qualname__` assignment
+
+```c
+// CPython: Python/compile.c:3180 compiler_class body setup
+/* Inside the class body code object, the first instructions are:
+   RESUME 0
+   LOAD_CONST 'module_name'
+   STORE_NAME '__module__'
+   LOAD_CONST 'Outer.Inner'  (qualified name)
+   STORE_NAME '__qualname__'
+*/
+```
+
+`__qualname__` is the dotted path from the module level: `Outer.Inner` for a class `Inner` defined inside `Outer`. This is what `repr(cls)` shows and what pickle uses for dotted import paths.
+
+### `__classcell__`
+
+```c
+// CPython: Python/compile.c:3210 __classcell__ return
+/* If any method uses super() or references __class__:
+   - The class body creates a cell for __class__
+   - The cell is returned as __classcell__ via LOAD_CLOSURE + RETURN_VALUE
+   - type.__new__ fills the cell with the newly created class object
+   This lets super() in a method refer to its defining class. */
+if (c->u->u_ste->ste_needs_class_closure) {
+    ADDOP_NAME(c, loc, LOAD_CLOSURE, &_Py_ID(__class__), freevars);
+    ADDOP_I(c, loc, COPY, 1);
+    ADDOP_NAME(c, loc, STORE_NAME, &_Py_ID(__classcell__), names);
+    ADDOP(c, loc, RETURN_VALUE);
+}
+```
+
+`__classcell__` is the mechanism that makes implicit `super()` (PEP 3135) work. The cell is empty when the class body runs; `type.__new__` fills it after the class is created, so that any method that was already compiled with `LOAD_DEREF __class__` can access the class.
+
+### Decorator application
+
+```c
+// CPython: Python/compile.c:3080 apply_decorators
+static int
+apply_decorators(struct compiler *c, location loc,
+                 asdl_expr_seq *decorators)
+{
+    /* Decorators are pushed FIFO, applied LIFO (innermost first).
+       @deco1 @deco2 class Foo: ...
+       compiles to: deco1(deco2(class_obj)) */
+    for (Py_ssize_t i = asdl_seq_LEN(decorators) - 1; i >= 0; i--) {
+        ADDOP_I(c, loc, CALL, 1);
+    }
+}
+```
+
+Decorators are evaluated before the class body (they're pushed onto the stack first), then applied in reverse order after the class is created. This matches the evaluation order specified in PEP 318.
+
+## gopy notes
+
+`compiler_class` is in `compile/codegen_stmt.go`. The class body scope is opened with `compile.enterClassScope`. `__classcell__` is handled in `compile.classBodyReturn`. Decorator application is `compile.applyDecorators`. `LOAD_BUILD_CLASS` pushes `objects.BuildClass` from `vm/eval_simple.go`.

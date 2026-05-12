@@ -1,0 +1,144 @@
+---
+title: Modules/gcmodule.c (part 3)
+description: "gcmodule.c part 3: generational collection, gc.collect, move_unreachable, finalize_garbage, handle_weakrefs."
+cpython_path: Modules/gcmodule.c
+cpython_version: "3.14"
+lines: 700
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/gcmodule.c" />
+
+This annotation covers the generational collection algorithm. See `modules_gc2_detail` for `gc.enable`/`disable`, generation thresholds, and the `tp_traverse` protocol.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `gc.collect` entry | Trigger a collection of the given generation |
+| 81-200 | `collect` body | Merge generations, call `move_unreachable` |
+| 201-340 | `move_unreachable` | Mark objects with `gc_refs == 0` as unreachable |
+| 341-480 | `finalize_garbage` | Call `tp_finalize` on unreachable objects with finalizers |
+| 481-600 | `handle_weakrefs` | Clear weakrefs before deleting unreachable objects |
+| 601-700 | `delete_garbage` | Call `tp_dealloc` on confirmed garbage |
+
+## Reading
+
+### `collect` body
+
+```c
+// CPython: Modules/gcmodule.c:1080 collect
+static Py_ssize_t
+collect(PyGC_Head *young, PyGC_Head *old, struct gc_generation_stats *stats,
+        int collect_generations)
+{
+    /* 1. Subtract internal references: set gc_refs = ob_refcnt - internal */
+    subtract_refs(young);
+    /* 2. Objects with gc_refs > 0 are reachable from outside — move to 'old' */
+    move_legacy_finalizers(young, old);
+    /* 3. Remaining objects with gc_refs == 0 are unreachable */
+    move_unreachable(young, &unreachable);
+    /* 4. Resurrect any objects reachable from __del__ */
+    finalize_garbage(tstate, &unreachable);
+    /* 5. Clear weakrefs pointing to garbage */
+    handle_weakrefs(&unreachable, old);
+    /* 6. Delete the rest */
+    delete_garbage(tstate, gcstate, &unreachable, old);
+    ...
+}
+```
+
+The generational collector only traces `young` (the generation being collected). Objects that survive long enough get promoted to `old`. `subtract_refs` uses `tp_traverse` to walk all outgoing references and decrement `gc_refs` for each target.
+
+### `move_unreachable`
+
+```c
+// CPython: Modules/gcmodule.c:680 move_unreachable
+static void
+move_unreachable(PyGC_Head *young, PyGC_Head *unreachable)
+{
+    /* Walk 'young'. Objects with gc_refs > 0 are reachable:
+       traverse their outgoing edges and increment gc_refs of targets.
+       Objects that end up with gc_refs == 0 after all reachable objects
+       have been traced are truly unreachable. */
+    PyGC_Head *gc = GC_NEXT(young);
+    while (gc != young) {
+        PyGC_Head *next = GC_NEXT(gc);
+        if (gc_get_refs(gc) != 0) {
+            /* Reachable: trace its children */
+            traverseproc traverse = Py_TYPE(FROM_GC(gc))->tp_traverse;
+            (void) traverse(FROM_GC(gc), visit_reachable, (void *)young);
+            gc_set_refs(gc, 1);  /* Mark as reachable */
+        }
+        gc = next;
+    }
+    /* Remaining objects with gc_refs == 0 are unreachable */
+    move_legacy_finalizers(young, unreachable);
+}
+```
+
+The two-pass algorithm: pass 1 (`subtract_refs`) sets `gc_refs = ob_refcnt - internal_refs`; pass 2 (`move_unreachable`) propagates reachability through the object graph. Objects not reached in pass 2 are garbage.
+
+### `finalize_garbage`
+
+```c
+// CPython: Modules/gcmodule.c:840 finalize_garbage
+static void
+finalize_garbage(PyThreadState *tstate, PyGC_Head *collectable)
+{
+    /* Call tp_finalize (which calls __del__) for objects that have one.
+       After __del__, the object may have been resurrected (re-referenced).
+       Re-run the unreachable check for resurrected objects. */
+    while (!gc_list_is_empty(collectable)) {
+        PyObject *op = FROM_GC(GC_NEXT(collectable));
+        destructor finalize = Py_TYPE(op)->tp_finalize;
+        if (finalize) {
+            gc_list_remove(GC_AS_GC(op));
+            Py_INCREF(op);  /* Prevent deallocation during finalize */
+            finalize(op);
+            if (gc_is_finalized(GC_AS_GC(op))) {
+                /* Object not resurrected */
+            } else {
+                /* Resurrected: move back to live objects */
+            }
+        }
+    }
+}
+```
+
+`tp_finalize` is called before deallocation. If the finalizer stores a reference to `op` somewhere (resurrection), `op` survives this collection. On the next collection where `op` is again unreachable, it is freed without calling `tp_finalize` again.
+
+### `handle_weakrefs`
+
+```c
+// CPython: Modules/gcmodule.c:920 handle_weakrefs
+static int
+handle_weakrefs(PyGC_Head *unreachable, PyGC_Head *old)
+{
+    /* For each unreachable object that has weakrefs:
+       1. Call the weakref callbacks
+       2. Clear the weakref (set wr_object to NULL)
+    */
+    for each op in unreachable with weakrefs:
+        wr = GET_WEAKREFS_LISTPTR(op);
+        while (wr != NULL) {
+            PyObject *callback = wr->wr_callback;
+            if (callback != NULL) {
+                /* Queue callback for later, or call immediately */
+                PyObject *cbresult = PyObject_CallOneArg(callback, (PyObject *)wr);
+                ...
+            }
+            wr->wr_object = Py_NewRef(Py_None);  /* Clear the weakref */
+            wr = wr->wr_next;
+        }
+    return 0;
+}
+```
+
+Weakref callbacks are called before the referent is deleted. This allows weak-value dicts to remove entries proactively. After `handle_weakrefs`, `delete_garbage` calls `tp_dealloc` on the remaining unreachable objects.
+
+## gopy notes
+
+gopy uses Go's GC for memory management, so `gcmodule.c` has no direct counterpart. The `gc` module's Python API (`gc.collect`, `gc.enable`, `gc.get_count`) is implemented in `module/gc/module.go` as a thin wrapper that triggers `runtime.GC()`. Weakrefs are handled by `objects/weakref.go` using Go finalizers.

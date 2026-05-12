@@ -1,0 +1,114 @@
+---
+title: Lib/typing.py (part 3)
+description: "Lib/typing.py part 3: Protocol, runtime_checkable, TypeVar constraints, ParamSpec, TypeVarTuple."
+cpython_path: Lib/typing.py
+cpython_version: "3.14"
+lines: 600
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/typing.py" />
+
+This annotation covers structural subtyping and variance. See `lib_typing2_detail` for `Generic`, `Union`, `Optional`, `Annotated`, and `get_type_hints`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `Protocol` metaclass | Structural subtyping base class |
+| 81-180 | `runtime_checkable` | Allow `isinstance` checks against a Protocol |
+| 181-280 | `TypeVar` constraints and bounds | `TypeVar('T', int, str)` vs `TypeVar('T', bound=Number)` |
+| 281-380 | `ParamSpec` | Capture callable parameter signatures |
+| 381-600 | `TypeVarTuple` | Variadic generics (`*Ts`) |
+
+## Reading
+
+### `Protocol` metaclass
+
+```python
+# CPython: Lib/typing.py:1680 _ProtocolMeta
+class _ProtocolMeta(ABCMeta):
+    def __instancecheck__(cls, instance):
+        if (not getattr(cls, '_is_protocol', False) or
+                cls.__dict__.get('__instancecheck__', None) is not None):
+            return super().__instancecheck__(instance)
+        if not cls.__is_runtime_checkable__:
+            raise TypeError(
+                "Protocols with non-method members don't support issubclass()")
+        return _is_protocol_instance(instance, cls)
+```
+
+`Protocol` uses `ABCMeta` as its metaclass. Protocol classes are identified by `_is_protocol = True` in their class dict. `__instancecheck__` and `__subclasscheck__` are overridden to perform structural checks.
+
+### `runtime_checkable`
+
+```python
+# CPython: Lib/typing.py:1720 runtime_checkable
+def runtime_checkable(cls):
+    """Mark a protocol as available for isinstance() checks at runtime."""
+    if not (isinstance(cls, _ProtocolMeta) and cls._is_protocol):
+        raise TypeError('@runtime_checkable can only be used on Protocol classes')
+    cls.__is_runtime_checkable__ = True
+    return cls
+```
+
+`@runtime_checkable` only checks protocol members that are methods (not attributes). Checking for attribute presence at runtime requires the method to be present at class level. `isinstance(x, Sized)` is valid because `Sized` only requires `__len__`.
+
+### `TypeVar` constraints
+
+```python
+# CPython: Lib/typing.py:860 TypeVar.__init_subclass__
+class TypeVar:
+    def __init__(self, name, *constraints, bound=None, covariant=False,
+                 contravariant=False, infer_variance=False):
+        if constraints and bound is not None:
+            raise TypeError("Constraints cannot be combined with bound=...")
+        if len(constraints) == 1:
+            raise TypeError("A single constraint is not allowed")
+        self.__constraints__ = tuple(constraints)
+        self.__bound__ = bound
+        self.__covariant__ = covariant
+        self.__contravariant__ = contravariant
+```
+
+`TypeVar('T', int, str)` means T can only be `int` or `str` (not their subclasses). `TypeVar('T', bound=int)` means T must be a subtype of `int`. The two forms are mutually exclusive.
+
+### `ParamSpec`
+
+```python
+# CPython: Lib/typing.py:1080 ParamSpec
+class ParamSpec(_PickleUsingNameMixin, _BoundVarianceMixin,
+                _TypeVarLikeMixin, _Final):
+    """Parameter specification variable for generic higher-order functions."""
+    @property
+    def args(self):
+        return ParamSpecArgs(self)
+
+    @property
+    def kwargs(self):
+        return ParamSpecKwargs(self)
+```
+
+`ParamSpec('P')` captures the full parameter list of a callable. `Callable[P, T]` describes a callable with parameters `P` returning `T`. `P.args` and `P.kwargs` are used inside the wrapped function to forward arguments.
+
+### `TypeVarTuple`
+
+```python
+# CPython: Lib/typing.py:1140 TypeVarTuple
+class TypeVarTuple(_PickleUsingNameMixin, _TypeVarLikeMixin, _Final):
+    """Variadic type variable for variadic generics (PEP 646)."""
+    def __iter__(self):
+        yield self.__unpacked__
+
+    @property
+    def __unpacked__(self):
+        return Unpack[self]
+```
+
+`TypeVarTuple('Ts')` enables `tuple[*Ts]` for variadic generics. `*Ts` is spelled `Unpack[Ts]` in older Python versions. A `Shape` `TypeVarTuple` enables `Array[*Shape]` for array libraries to express arbitrary-dimensional types.
+
+## gopy notes
+
+`Protocol` is `objects.ProtocolType` in `objects/protocol.go`. `runtime_checkable` sets a flag checked by `objects.IsInstance`. `TypeVar` is `objects.TypeVar` in `objects/typevar.go`. `ParamSpec` and `TypeVarTuple` are `objects.ParamSpec` and `objects.TypeVarTuple`; they are used by the type checker and not enforced at runtime.

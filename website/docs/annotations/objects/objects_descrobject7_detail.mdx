@@ -1,0 +1,110 @@
+---
+title: Objects/descrobject.c (part 7)
+description: "Objects/descrobject.c part 7: classmethod_descriptor, staticmethod_descriptor, member_descriptor, getset_descriptor."
+cpython_path: Objects/descrobject.c
+cpython_version: "3.14"
+lines: 600
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Objects/descrobject.c" />
+
+This annotation covers the built-in descriptor types. See `objects_descrobject6_detail` for `property`, `slot_wrapper`, `method_wrapper`, and the descriptor protocol dispatch.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `classmethod_descriptor` | Wrap a C function as a classmethod |
+| 81-180 | `staticmethod_descriptor` | Wrap a C function as a staticmethod |
+| 181-300 | `member_descriptor` | Read/write a C struct member by offset |
+| 301-440 | `getset_descriptor` | Getter/setter pair for C struct fields |
+| 441-600 | `wrapper_descriptor` | Wrap a `slotwrapper` as a descriptor (e.g. `int.__add__`) |
+
+## Reading
+
+### `classmethod_descriptor`
+
+```c
+// CPython: Objects/descrobject.c:1420 classmethod_get
+static PyObject *
+classmethod_get(PyObject *self, PyObject *obj, PyObject *cls)
+{
+    PyMethodDescrObject *descr = (PyMethodDescrObject *)self;
+    if (cls == NULL) {
+        if (obj != NULL)
+            cls = (PyObject *)Py_TYPE(obj);
+        else {
+            Py_INCREF(descr);
+            return (PyObject *)descr;
+        }
+    }
+    return PyCFunction_NewEx(descr->d_method, cls, NULL);
+}
+```
+
+`classmethod_descriptor.__get__(obj, cls)` binds the C function to the class, not the instance. `dict.fromkeys` is a `classmethod_descriptor`: `dict.fromkeys` is unbound, `my_dict.fromkeys` is bound to `dict` (not `my_dict`).
+
+### `member_descriptor`
+
+```c
+// CPython: Objects/descrobject.c:1680 member_get
+static PyObject *
+member_get(PyMemberDescrObject *descr, PyObject *obj, PyObject *type)
+{
+    if (obj == NULL) {
+        Py_INCREF(descr);
+        return (PyObject *)descr;
+    }
+    PyMemberDef *member = descr->d_member;
+    /* Use PyMember_GetOne to extract the field at member->offset
+       from the object's C struct */
+    return PyMember_GetOne((char *)obj, member);
+}
+```
+
+`PyMember_GetOne` reads a C struct member at `obj + offset` and converts it to a Python object based on `member->type` (`T_INT`, `T_DOUBLE`, `T_OBJECT_EX`, etc.). Used by `list.ob_size` (internal), `complex.real`, `complex.imag`, and many C extension types.
+
+### `getset_descriptor`
+
+```c
+// CPython: Objects/descrobject.c:1820 getset_get
+static PyObject *
+getset_get(PyGetSetDescrObject *descr, PyObject *obj, PyObject *type)
+{
+    if (obj == NULL) {
+        Py_INCREF(descr);
+        return (PyObject *)descr;
+    }
+    if (descr->d_getset->get == NULL) {
+        PyErr_Format(PyExc_AttributeError, "unreadable attribute");
+        return NULL;
+    }
+    return descr->d_getset->get(obj, descr->d_getset->closure);
+}
+```
+
+`PyGetSetDef` has `get`, `set`, and `closure` fields. The `closure` pointer is passed to `get`/`set`, allowing the same C function to serve multiple attributes with different parameters. `dict.keys`, `list.__doc__`, and `int.real` are all `getset_descriptor` instances.
+
+### `wrapper_descriptor`
+
+```c
+// CPython: Objects/descrobject.c:2020 wrapperdescr_get
+static PyObject *
+wrapperdescr_get(PyWrapperDescrObject *descr, PyObject *obj, PyObject *type)
+{
+    if (obj == NULL || (PyObject *)Py_TYPE(obj) != type) {
+        Py_INCREF(descr);
+        return (PyObject *)descr;
+    }
+    return PyWrapper_New((PyObject *)descr, obj);
+}
+```
+
+`int.__add__` is a `wrapper_descriptor`. `(3).__add__` returns a `method-wrapper` (an instance of `PyWrapperObject`) binding the `__add__` slot to `3`. Calling it (`(3).__add__(4)`) invokes `PyNumber_Add(3, 4)` via the slot.
+
+## gopy notes
+
+`classmethod_descriptor` is `objects.ClassMethodDescriptor` in `objects/descr.go`. `member_descriptor` reads fields via `unsafe.Pointer` arithmetic. `getset_descriptor` stores Go `func(obj objects.Object) objects.Object` pairs. `wrapper_descriptor` is `objects.SlotWrapper` binding a method table entry.

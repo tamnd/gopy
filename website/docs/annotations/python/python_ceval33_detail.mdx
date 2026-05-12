@@ -1,0 +1,118 @@
+---
+title: Python/ceval.c (part 33)
+description: "Python/ceval.c part 33: STORE_ATTR specializations — STORE_ATTR_SLOT, STORE_ATTR_WITH_HINT, STORE_ATTR_INSTANCE_VALUE."
+cpython_path: Python/ceval.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Python/ceval.c" />
+
+This annotation covers attribute write specializations. See `python_ceval32_detail` for `LOAD_SUPER_ATTR` and `LOAD_ATTR` specializations.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `STORE_ATTR` (generic) | Write an attribute, looking up via the descriptor protocol |
+| 81-180 | `STORE_ATTR_INSTANCE_VALUE` | Write to an instance's `__dict__` at a cached index |
+| 181-280 | `STORE_ATTR_WITH_HINT` | Write to instance dict using an offset hint |
+| 281-380 | `STORE_ATTR_SLOT` | Write to a `__slots__` slot at a cached offset |
+| 381-500 | Cache population | How `STORE_ATTR` specializes on first observed pattern |
+
+## Reading
+
+### `STORE_ATTR_INSTANCE_VALUE`
+
+```c
+// CPython: Python/ceval.c:2620 STORE_ATTR_INSTANCE_VALUE
+inst(STORE_ATTR_INSTANCE_VALUE, (owner, value --)) {
+    /* Cache: tp_version + index into the split-table values array */
+    DEOPT_IF(Py_TYPE(owner)->tp_version_tag != cache->tp_version, STORE_ATTR);
+    PyDictObject *dict = (PyDictObject *)*_PyObject_GetDictPtr(owner);
+    /* If the instance dict has not yet been allocated, allocate it */
+    if (dict == NULL) {
+        dict = (PyDictObject *)PyObject_GenericGetDict(owner, NULL);
+        DEOPT_IF(dict == NULL, STORE_ATTR);
+    }
+    /* Write directly to the values array */
+    PyObject *old = dict->ma_values->values[cache->index];
+    dict->ma_values->values[cache->index] = value;
+    dict->ma_version_tag++;  /* Invalidate LOAD_ATTR caches */
+    Py_XDECREF(old);
+    Py_DECREF(owner);
+}
+```
+
+For classes with a consistent `__dict__` layout (same keys across instances — the "split table" optimization), attribute writes go directly to the values array at a cached index. No hash lookup needed.
+
+### `STORE_ATTR_WITH_HINT`
+
+```c
+// CPython: Python/ceval.c:2680 STORE_ATTR_WITH_HINT
+inst(STORE_ATTR_WITH_HINT, (owner, value --)) {
+    /* Like LOAD_ATTR_WITH_HINT but for writes.
+       Cache: tp_version + dict_version + index hint */
+    PyObject *dict = *_PyObject_GetDictPtr(owner);
+    DEOPT_IF(dict == NULL, STORE_ATTR);
+    DEOPT_IF(((PyDictObject *)dict)->ma_version_tag != cache->dict_version,
+             STORE_ATTR);
+    PyDictObject *dobj = (PyDictObject *)dict;
+    Py_SETREF(dobj->ma_values->values[cache->index], value);
+    dobj->ma_version_tag++;
+    Py_DECREF(owner);
+}
+```
+
+`obj.x = value` after specialization is a direct array write. The `dict_version` check guards against dict modifications (adding new keys changes the layout and invalidates the hint).
+
+### `STORE_ATTR_SLOT`
+
+```c
+// CPython: Python/ceval.c:2740 STORE_ATTR_SLOT
+inst(STORE_ATTR_SLOT, (owner, value --)) {
+    /* Cache: tp_version + byte offset */
+    DEOPT_IF(Py_TYPE(owner)->tp_version_tag != cache->tp_version, STORE_ATTR);
+    char *addr = (char *)owner + cache->offset;
+    Py_SETREF(*(PyObject **)addr, value);
+    Py_DECREF(owner);
+}
+```
+
+`__slots__` attributes have fixed offsets in the object layout. `STORE_ATTR_SLOT` writes to `obj + offset` directly, matching C struct member write performance. `Py_SETREF` atomically decrements the old value and stores the new one.
+
+### Cache population
+
+```c
+// CPython: Python/ceval.c:2560 _Py_Specialize_StoreAttr
+void
+_Py_Specialize_StoreAttr(PyObject *owner, _Py_CODEUNIT *instr, PyObject *name)
+{
+    PyTypeObject *type = Py_TYPE(owner);
+    /* Check for __slots__ */
+    PyObject *descr = _PyType_Lookup(type, name);
+    if (descr != NULL && PyObject_TypeCheck(descr, &PyMemberDescr_Type)) {
+        /* Slot: use STORE_ATTR_SLOT */
+        cache->offset = ((PyMemberDescrObject *)descr)->d_member->offset;
+        instr->op.code = STORE_ATTR_SLOT;
+        return;
+    }
+    /* Check for split table instance dict */
+    if (type->tp_dictoffset > 0 && !_PyType_HasFeature(type, Py_TPFLAGS_MANAGED_DICT)) {
+        ...
+        instr->op.code = STORE_ATTR_INSTANCE_VALUE;
+        return;
+    }
+    /* Use hint-based store */
+    instr->op.code = STORE_ATTR_WITH_HINT;
+}
+```
+
+Specialization is triggered after `STORE_ATTR` is executed a few times. The adaptive interpreter profiles the actual types seen and picks the most efficient variant.
+
+## gopy notes
+
+`STORE_ATTR_INSTANCE_VALUE` is in `vm/eval_specialize.go` and calls `objects.DictSetItemIndex`. `STORE_ATTR_WITH_HINT` uses `objects.DictSetItemHint`. `STORE_ATTR_SLOT` writes via `unsafe.Pointer`. `_Py_Specialize_StoreAttr` is `vm.specializeStoreAttr` which sets the opcode in the inline cache.

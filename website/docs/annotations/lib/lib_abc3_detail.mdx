@@ -1,0 +1,106 @@
+---
+title: Lib/abc.py (part 3)
+description: "Lib/abc.py part 3: ABCMeta.__subclasshook__, ABC.register, virtual subclass caching, __subclasses__ invalidation."
+cpython_path: Lib/abc.py
+cpython_version: "3.14"
+lines: 400
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/abc.py" />
+
+This annotation covers virtual subclass registration and the `__subclasshook__` mechanism. See `lib_abc2_detail` for `ABCMeta.__new__`, `@abstractmethod`, and the `_abc_data` C struct, and `lib_abc_detail` for `ABC`, `abstractmethod`, and `abstractproperty`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `ABCMeta.register` | Register a class as a virtual subclass |
+| 81-180 | `ABCMeta.__subclasscheck__` | `issubclass(X, ABC)` dispatch |
+| 181-280 | `__subclasshook__` | Structural check hook for custom logic |
+| 281-400 | Cache invalidation | Clear `_abc_negative_cache` when `register` is called |
+
+## Reading
+
+### `ABCMeta.register`
+
+```python
+# CPython: Lib/abc.py:88 ABCMeta.register
+def register(cls, subclass):
+    """Register a virtual subclass of an ABC."""
+    if not isinstance(subclass, type):
+        raise TypeError("Can only register classes")
+    if issubclass(subclass, cls):
+        return subclass  # already a subclass
+    # Subtle: test for cycles *after* testing for "already a subclass".
+    if issubclass(cls, subclass):
+        raise RuntimeError("Refusing to create an inheritance cycle")
+    cls._abc_registry.add(subclass)
+    ABCMeta._abc_invalidation_counter += 1
+    return subclass
+```
+
+`Iterable.register(MyClass)` makes `issubclass(MyClass, Iterable)` return `True` without `MyClass` inheriting from `Iterable`. The global `_abc_invalidation_counter` increments to invalidate all ABC caches.
+
+### `ABCMeta.__subclasscheck__`
+
+```python
+# CPython: Lib/abc.py:100 ABCMeta.__subclasscheck__
+def __subclasscheck__(cls, subclass):
+    """Override for issubclass(subclass, cls)."""
+    # Check the subclass hook first (for structural checks)
+    ok = cls.__subclasshook__(subclass)
+    if ok is not NotImplemented:
+        return ok
+    # Check the negative cache
+    if subclass in cls._abc_negative_cache:
+        return False
+    # Check the positive cache / registered set
+    if subclass in cls._abc_cache:
+        return True
+    # Walk the MRO of subclass for a real match
+    for scls in subclass.__mro__:
+        if scls in cls._abc_registry:
+            cls._abc_cache.add(subclass)
+            return True
+    # Recurse into registered subclasses of cls
+    for rcls in cls._abc_registry:
+        if issubclass(subclass, rcls):
+            cls._abc_cache.add(subclass)
+            return True
+    cls._abc_negative_cache.add(subclass)
+    return False
+```
+
+The two-level cache (positive set `_abc_cache` and negative set `_abc_negative_cache`) makes repeated `isinstance` / `issubclass` calls O(1) after the first. Both caches are `WeakSet` so they don't prevent GC.
+
+### `__subclasshook__`
+
+```python
+# CPython: Lib/abc.py:180 __subclasshook__ in Sized
+@classmethod
+def __subclasshook__(cls, C):
+    if cls is Sized:
+        return _check_methods(C, "__len__")
+    return NotImplemented
+```
+
+`__subclasshook__` is a classmethod that returns `True`, `False`, or `NotImplemented`. `NotImplemented` falls through to the registry / MRO check. `_check_methods(C, '__len__')` checks whether any class in `C.__mro__` defines `__len__` (not just inherits it from `object`).
+
+### Cache invalidation
+
+```python
+# CPython: Lib/abc.py:96 _abc_invalidation_counter
+# In _abc.c (C implementation), the cache is stored as a set on each ABCMeta.
+# The global invalidation counter is checked on each __subclasscheck__ call.
+# If the counter has changed since the cache was built, the cache is cleared.
+# This avoids a global lock for cache invalidation.
+```
+
+The invalidation counter is a global integer. Each `ABCMeta` stores the counter value at cache-build time. A mismatch causes cache eviction. The C implementation (`Modules/_abc.c`) uses the same mechanism with C-level sets for speed.
+
+## gopy notes
+
+`ABCMeta.register` is `objects.ABCRegister` in `objects/abc.go`. The registry is a `map[objects.Type]struct{}`. `__subclasscheck__` is `objects.ABCSubclassCheck`. The cache uses `sync.Map` for concurrent access. `__subclasshook__` is called via `objects.CallClassmethod`.

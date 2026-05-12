@@ -1,0 +1,119 @@
+---
+title: Python/typeobject.c (part 6)
+description: "Python/typeobject.c part 6: slot inheritance, tp_base filling, update_one_slot, type version tags."
+cpython_path: Python/typeobject.c
+cpython_version: "3.14"
+lines: 600
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Python/typeobject.c" />
+
+This annotation covers slot propagation and the version tag system. See `python_typeobject5_detail` for `__init_subclass__`, `__set_name__`, and metaclass resolution.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `inherit_slots` | Copy slot pointers from base to derived type |
+| 81-180 | `update_one_slot` | Recompute a single slot from the MRO |
+| 181-300 | `type_modified_unlocked` | Invalidate the type's version tag |
+| 301-420 | `PyType_Ready` | Finalize a statically defined type |
+| 421-600 | Version tag usage | Inline cache validation for `LOAD_ATTR` specializations |
+
+## Reading
+
+### `inherit_slots`
+
+```c
+// CPython: Python/typeobject.c:5820 inherit_slots
+static void
+inherit_slots(PyTypeObject *type, PyTypeObject *base)
+{
+#define SLOTDEFINED(SLOT) \
+    (base->SLOT != 0 && \
+     (base->SLOT != base->SLOT /* not a base-inherited slot */))
+#define COPYSLOT(SLOT) \
+    if (!type->SLOT && SLOTDEFINED(SLOT)) type->SLOT = base->SLOT
+    COPYSLOT(tp_hash);
+    COPYSLOT(tp_as_number->nb_add);
+    COPYSLOT(tp_as_number->nb_subtract);
+    ...
+}
+```
+
+`inherit_slots` copies slot pointers from `base` to `type` for any slot not already set in `type`. This is separate from the MRO: slot inheritance is a one-time copy at type creation; MRO lookup happens at every attribute access. C extension types that don't set `tp_hash` inherit `object.__hash__`.
+
+### `update_one_slot`
+
+```c
+// CPython: Python/typeobject.c:6080 update_one_slot
+static slotdef *
+update_one_slot(PyTypeObject *type, slotdef *p)
+{
+    /* Walk the MRO for the slot described by 'p'.
+       If any class in the MRO has a Python-level override (via tp_dict),
+       install a "slot wrapper" that calls the Python method.
+       Otherwise, use the C-level slot from the first class that has one. */
+    for each cls in type->tp_mro:
+        descr = _PyType_Lookup(cls, p->name_strobj);
+        if (descr is a wrapper_descriptor with the right slot):
+            use the base's C slot
+        else if (descr is a Python function):
+            install slot_tp_xxx wrapper
+        ...
+}
+```
+
+`update_one_slot` is called when a class's `__dict__` is modified (adding or removing a dunder method). It keeps the C slot table synchronized with the Python-level `__dunder__` definitions. This is why `obj.__add__ = lambda self, other: ...` works — `update_one_slot` installs a trampoline into `tp_as_number->nb_add`.
+
+### `type_modified_unlocked`
+
+```c
+// CPython: Python/typeobject.c:380 type_modified_unlocked
+void
+type_modified_unlocked(PyTypeObject *type)
+{
+    /* Increment the type's version tag — inline caches that depend
+       on this type's layout are now stale. */
+    if (type->tp_version_tag == 0) {
+        /* Not yet assigned */
+        return;
+    }
+    type->tp_version_tag = 0;  /* Marks as "modified" */
+    /* Propagate to all subclasses */
+    PyObject *subclasses = type->tp_subclasses;
+    ...
+    for each subclass:
+        type_modified_unlocked(subclass);
+}
+```
+
+Setting `tp_version_tag = 0` is the signal that the type has changed. The next `LOAD_ATTR_WITH_HINT` or `CALL_METHOD` cache check will see `tp_version_tag != cached_version` and deoptimize. The tag is reassigned lazily on the next `PyType_Lookup`.
+
+### `PyType_Ready`
+
+```c
+// CPython: Python/typeobject.c:6820 PyType_Ready
+int
+PyType_Ready(PyTypeObject *type)
+{
+    /* 1. Set tp_base to &PyBaseObject_Type if not set */
+    /* 2. Initialize tp_bases tuple */
+    /* 3. Inherit tp_dict from base */
+    /* 4. Call inherit_slots for all bases */
+    /* 5. Add default methods (__hash__, __repr__, etc.) */
+    /* 6. Build tp_mro via mro_internal() */
+    /* 7. Call update_one_slot for all slot definitions */
+    /* 8. Set tp_flags |= Py_TPFLAGS_READY */
+    ...
+}
+```
+
+`PyType_Ready` is called once per C-defined type, typically at module import time. It is idempotent (checks `Py_TPFLAGS_READY`). Python-defined types have `PyType_Ready` called implicitly by `type.__new__`.
+
+## gopy notes
+
+`inherit_slots` is `objects.TypeInheritSlots` in `objects/type.go`. `update_one_slot` is `objects.TypeUpdateOneSlot` which sets Go function pointers in the `objects.TypeSlots` struct. `type_modified_unlocked` increments `objects.Type.VersionTag`. `PyType_Ready` is `objects.TypeReady` called by all Go-defined type constructors.
