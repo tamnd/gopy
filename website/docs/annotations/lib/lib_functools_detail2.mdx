@@ -1,0 +1,129 @@
+---
+title: Lib/functools.py (part 2)
+description: "functools part 2: reduce, total_ordering, singledispatch, cached_property, update_wrapper, WRAPPER_ASSIGNMENTS."
+cpython_path: Lib/functools.py
+cpython_version: "3.14"
+lines: 1000
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/functools.py" />
+
+This annotation covers the pure-Python parts of `functools` not implemented in C. See `module/functools/` for the C-accelerated `lru_cache`, `partial`, and `reduce`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `update_wrapper`, `wraps` | Copy attributes from wrapped to wrapper |
+| 81-200 | `total_ordering` | Generate missing comparison methods |
+| 201-380 | `reduce` | Left-fold (C-accelerated in `_functools`) |
+| 381-600 | `singledispatch` | Single-dispatch generic function |
+| 601-750 | `singledispatchmethod` | Descriptor for class-based dispatch |
+| 751-1000 | `cached_property` | Non-data descriptor with per-instance caching |
+
+## Reading
+
+### `update_wrapper`
+
+```python
+# CPython: Lib/functools.py:36 update_wrapper
+WRAPPER_ASSIGNMENTS = ('__module__', '__name__', '__qualname__',
+                       '__annotations__', '__doc__')
+WRAPPER_UPDATES = ('__dict__',)
+
+def update_wrapper(wrapper, wrapped, assigned=WRAPPER_ASSIGNMENTS,
+                   updated=WRAPPER_UPDATES):
+    for attr in assigned:
+        try:
+            value = getattr(wrapped, attr)
+        except AttributeError:
+            pass
+        else:
+            setattr(wrapper, attr, value)
+    for attr in updated:
+        getattr(wrapper, attr).update(getattr(wrapped, attr, {}))
+    wrapper.__wrapped__ = wrapped
+    return wrapper
+```
+
+`@wraps(f)` is `update_wrapper(wrapper, f)` as a decorator.
+
+### `total_ordering`
+
+```python
+# CPython: Lib/functools.py:125 total_ordering
+def total_ordering(cls):
+    roots = {op for op in _convert if getattr(cls, op, None) is not getattr(object, op, None)}
+    if not roots:
+        raise ValueError('must have at least one ordering operation defined')
+    root = max(roots)
+    for opname, opfunc in _convert[root]:
+        if opname not in roots:
+            opfunc.__name__ = opname
+            setattr(cls, opname, opfunc)
+    return cls
+```
+
+`_convert` maps each defined comparison to the set of missing ones that can be derived from it (e.g., given `__lt__`, derive `__le__`, `__gt__`, `__ge__`).
+
+### `singledispatch`
+
+```python
+# CPython: Lib/functools.py:430 singledispatch
+def singledispatch(func):
+    registry = {}
+    dispatch_cache = WeakValueDictionary()
+    def dispatch(cls):
+        # Check registry, then MRO
+        if cls in registry:
+            return registry[cls]
+        mro = cls.__mro__
+        for t in mro:
+            if t in registry:
+                dispatch_cache[cls] = registry[t]
+                return registry[t]
+        return registry[object]
+    def register(cls, func=None):
+        ...
+    wrapper.register = register
+    wrapper.dispatch = dispatch
+    return wrapper
+```
+
+The `WeakValueDictionary` cache avoids memory leaks when temporary classes are created and garbage-collected.
+
+### `cached_property`
+
+```python
+# CPython: Lib/functools.py:970 cached_property
+class cached_property:
+    def __init__(self, func):
+        self.func = func
+        self.attrname = None
+        self.__doc__ = func.__doc__
+        self.lock = RLock()
+
+    def __set_name__(self, owner, name):
+        self.attrname = name
+
+    def __get__(self, instance, owner=None):
+        if instance is None:
+            return self
+        val = instance.__dict__.get(self.attrname, _NOT_FOUND)
+        if val is _NOT_FOUND:
+            with self.lock:
+                val = instance.__dict__.get(self.attrname, _NOT_FOUND)
+                if val is _NOT_FOUND:
+                    val = self.func(instance)
+                    instance.__dict__[self.attrname] = val
+        return val
+```
+
+`cached_property` is a non-data descriptor (no `__set__`). The first access stores the result in `instance.__dict__`, which shadows the descriptor on subsequent accesses. Thread safety is provided by the double-checked locking pattern.
+
+## gopy notes
+
+`singledispatch` depends on `WeakValueDictionary` (from `weakref`) and MRO traversal. `cached_property` requires `__set_name__` support on descriptors and per-instance `__dict__`. Both are used by stdlib modules like `dataclasses` and `pathlib`.

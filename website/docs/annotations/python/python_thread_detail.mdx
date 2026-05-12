@@ -1,0 +1,90 @@
+---
+title: Python/thread.c
+description: "Python/thread.c: _thread module backend — start_new_thread, allocate_lock, acquire/release, get_ident, exit_thread, stack_size."
+cpython_path: Python/thread.c
+cpython_version: "3.14"
+lines: 800
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Python/thread.c" />
+
+`Python/thread.c` is the platform-independent dispatcher for the low-level thread API. The actual OS calls are in `Python/thread_pthread.h` (POSIX) or `Python/thread_nt.h` (Windows).
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-100 | `PyThread_start_new_thread` | Launch a new OS thread |
+| 101-250 | `PyThread_allocate_lock`, `acquire_timed`, `release` | Mutex operations |
+| 251-400 | `PyThread_get_ident`, `PyThread_get_thread_native_id` | Thread identity |
+| 401-600 | `PyThread_exit_thread`, `PyThread_daemon_threads_allowed` | Lifecycle |
+| 601-800 | `PyThread_tss_*` | Thread-specific storage (PEP 539) |
+
+## Reading
+
+### Starting a thread
+
+```c
+// CPython: Python/thread.c:58 PyThread_start_new_thread
+unsigned long
+PyThread_start_new_thread(void (*func)(void *), void *arg)
+{
+    /* Delegates to thread_pthread.h: pthread_create */
+    pthread_t th;
+    pthread_attr_t attrs;
+    pthread_attr_init(&attrs);
+    if (tls_key != 0)
+        pthread_attr_setstacksize(&attrs, ...);
+    int status = pthread_create(&th, &attrs, (void *(*)(void *))func, arg);
+    ...
+    return (unsigned long)th;
+}
+```
+
+`func` is a C wrapper that calls the Python-level target after acquiring the GIL.
+
+### Lock acquisition with timeout
+
+```c
+// CPython: Python/thread.c:180 acquire_timed
+static PyLockStatus
+acquire_timed(sem_t *lock, _PyTime_t timeout)
+{
+    /* Loop until acquired or timed out */
+    while (1) {
+        int r;
+        if (timeout > 0) {
+            struct timespec ts = ...;
+            r = sem_timedwait(lock, &ts);
+        } else {
+            r = sem_wait(lock);
+        }
+        if (r == 0)
+            return PY_LOCK_ACQUIRED;
+        if (errno == EINTR)
+            continue;   /* retry on signal */
+        if (errno == ETIMEDOUT)
+            return PY_LOCK_FAILURE;
+    }
+}
+```
+
+### Thread-specific storage (PEP 539)
+
+```c
+// CPython: Python/thread.c:680 PyThread_tss_set
+int
+PyThread_tss_set(Py_tss_t *key, void *value)
+{
+    return pthread_setspecific(*key, value) ? -1 : 0;
+}
+```
+
+`Py_tss_t` wraps `pthread_key_t`. It replaced the older `PyThread_set_key_value` API in Python 3.7. Used internally by the `decimal` module and `ctypes`.
+
+## gopy notes
+
+gopy maps Python threads to goroutines. `PyThread_start_new_thread` calls `go func()`. `PyThread_allocate_lock` returns a `sync.Mutex` wrapper. `PyThread_get_ident` returns a goroutine ID (obtained via `runtime` stack introspection or an atomic counter). Thread-specific storage maps to goroutine-local context via `sync.Map`.

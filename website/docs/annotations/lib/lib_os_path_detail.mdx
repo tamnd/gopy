@@ -1,0 +1,120 @@
+---
+title: Lib/posixpath.py
+description: "posixpath.py (os.path on POSIX): join, split, splitext, abspath, realpath, exists, isfile, isdir, expanduser, expandvars."
+cpython_path: Lib/posixpath.py
+cpython_version: "3.14"
+lines: 550
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/posixpath.py" />
+
+`posixpath` implements `os.path` on POSIX systems. On Windows, `ntpath` provides the same interface. The module operates on byte strings and Unicode strings interchangeably.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `join`, `split`, `splitext` | Path decomposition |
+| 81-160 | `abspath`, `realpath` | Absolute path resolution |
+| 161-260 | `exists`, `lexists`, `isfile`, `isdir`, `islink` | Stat-based checks |
+| 261-380 | `expanduser`, `expandvars` | Shell-style expansion |
+| 381-550 | `commonpath`, `commonprefix`, `relpath` | Path relationships |
+
+## Reading
+
+### `join`
+
+```python
+# CPython: Lib/posixpath.py:76 join
+def join(a, *p):
+    sep = _get_sep(a)
+    path = a
+    for b in p:
+        if b.startswith(sep):
+            path = b    # absolute component resets the path
+        elif not path or path.endswith(sep):
+            path += b
+        else:
+            path += sep + b
+    return path
+```
+
+An absolute component in any position resets the accumulated path, matching POSIX shell behavior.
+
+### `realpath`
+
+```python
+# CPython: Lib/posixpath.py:196 realpath
+def realpath(filename, *, strict=False):
+    filename = os.fspath(filename)
+    path, ok = _joinrealpath(filename[:0], filename, strict, {})
+    return abspath(path)
+
+def _joinrealpath(path, rest, strict, seen):
+    # Resolve symlinks iteratively, tracking visited paths to detect cycles
+    while rest:
+        name, _, rest = rest.partition(sep)
+        newpath = join(path, name)
+        try:
+            target = os.readlink(newpath)
+        except OSError:
+            path = newpath
+            continue
+        if target in seen:
+            if seen[target] is None:   # cycle
+                if strict: raise OSError(...)
+                path = newpath
+                continue
+            path = seen[target]
+            continue
+        seen[target] = None
+        path, ok = _joinrealpath(path, target, strict, seen)
+        seen[target] = path
+    return path, True
+```
+
+The `seen` dict prevents infinite loops from symlink cycles.
+
+### `expanduser`
+
+```python
+# CPython: Lib/posixpath.py:295 expanduser
+def expanduser(path):
+    if not path.startswith('~'):
+        return path
+    i = path.find('/', 1)
+    if i < 0:
+        i = len(path)
+    if i == 1:
+        # '~' alone: use HOME env or pwd entry
+        userhome = os.environ.get('HOME') or pwd.getpwuid(os.getuid()).pw_dir
+    else:
+        # '~username': look up in pwd
+        pwent = pwd.getpwnam(path[1:i])
+        userhome = pwent.pw_dir
+    return userhome + path[i:]
+```
+
+### `commonpath`
+
+```python
+# CPython: Lib/posixpath.py:490 commonpath
+def commonpath(paths):
+    split_paths = [path.split(sep) for path in paths]
+    try:
+        common = split_paths[0]
+        for s in split_paths[1:]:
+            common = [c for c, x in zip(common, s) if c == x]
+    except (TypeError, AttributeError):
+        ...
+    return sep.join(common)
+```
+
+Differs from `commonprefix` (which works character-by-character): `commonpath` works component-by-component.
+
+## gopy notes
+
+`os.path` is used everywhere. `posixpath.join`, `split`, `splitext`, `abspath`, and `exists`/`isfile`/`isdir` are the critical functions. In gopy these delegate to Go's `path/filepath` package. `expanduser` requires `os.getuid()` and `pwd` module access. `realpath` requires `os.readlink`.

@@ -1,0 +1,106 @@
+---
+title: Python/import.c
+description: "Python/import.c: import machinery — _PyImport_ImportModuleLevelObject, sys.modules cache, finder/loader protocol, frozen modules, _imp builtins."
+cpython_path: Python/import.c
+cpython_version: "3.14"
+lines: 2800
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Python/import.c" />
+
+`Python/import.c` implements the C-level import machinery. The high-level policy (finders, loaders, path hooks) lives in `importlib`; this file handles the C entry points, `sys.modules` caching, and frozen-module loading.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-300 | `_PyImport_ImportModuleLevelObject` | `__import__` implementation |
+| 301-600 | `import_find_and_load` | sys.modules check + call importlib |
+| 601-900 | `_PyImport_GetModuleAttr`, locking | Module dict access, import lock |
+| 901-1200 | `_PyImport_FixupExtensionObject` | Post-load fixup for C extensions |
+| 1201-1600 | `_imp` module | `create_dynamic`, `exec_dynamic`, `is_frozen`, `get_frozen_object` |
+| 1601-2800 | Frozen module table | `_PyImport_FrozenModules[]` |
+
+## Reading
+
+### Import entry point
+
+```c
+// CPython: Python/import.c:1560 _PyImport_ImportModuleLevelObject
+PyObject *
+_PyImport_ImportModuleLevelObject(PyObject *name, PyObject *globals,
+                                   PyObject *locals, PyObject *fromlist,
+                                   int level)
+{
+    /* Resolve relative imports */
+    PyObject *abs_name = resolve_name(name, globals, level);
+    ...
+    /* Fast path: already in sys.modules */
+    PyObject *mod = PyDict_GetItemWithError(tstate->interp->modules, abs_name);
+    if (mod != NULL) {
+        Py_INCREF(mod);
+        return mod;
+    }
+    /* Slow path: find and load */
+    return import_find_and_load(tstate, abs_name);
+}
+```
+
+### Import lock
+
+```c
+// CPython: Python/import.c:730 _PyImport_AcquireLock
+void
+_PyImport_AcquireLock(PyInterpreterState *interp)
+{
+    /* Recursive lock: same thread can re-acquire */
+    if (interp->import_state.lock_thread_id == PyThread_get_ident())
+        interp->import_state.lock_level++;
+    else {
+        PyThread_acquire_lock(interp->import_state.lock, 1);
+        interp->import_state.lock_thread_id = PyThread_get_ident();
+        interp->import_state.lock_level = 1;
+    }
+}
+```
+
+The import lock prevents concurrent imports of the same module from multiple threads, which could cause double-initialization.
+
+### Frozen modules
+
+```c
+// CPython: Python/import.c:870 _PyImport_FindFrozenModule
+static struct _frozen *
+_PyImport_FindFrozenModule(PyInterpreterState *interp, PyObject *name)
+{
+    struct _frozen *p = _PyImport_FrozenModules;
+    for (; p->name != NULL; p++) {
+        if (strcmp(p->name, namestr) == 0)
+            return p;
+    }
+    return NULL;
+}
+```
+
+Frozen modules are compiled-in bytecode arrays (`_PyImport_FrozenModules[]`). They are loaded before the file system is available, making `importlib` itself loadable.
+
+### `_imp.create_dynamic`
+
+```c
+// CPython: Python/import.c:1680 _imp_create_dynamic_impl
+static PyObject *
+_imp_create_dynamic_impl(PyObject *module, PyObject *spec, PyObject *file)
+{
+    /* dlopen the .so file, call PyInit_<name>() */
+    dl_funcptr exportfunc = _PyImport_FindSharedFuncptr(...);
+    PyModInitFunction p0 = (PyModInitFunction)exportfunc;
+    return (*p0)();
+}
+```
+
+## gopy notes
+
+The import machinery is in `vm/eval_import.go`. `sys.modules` is a Python dict on the interpreter state. Frozen modules map to gopy's `stdlibinit/registry.go` which holds pre-compiled bytecode. The import lock is a `sync.Mutex` on the `vm.Interpreter` struct. C extension loading (`create_dynamic`) is not needed in gopy.

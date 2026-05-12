@@ -312,6 +312,8 @@ const sidebars = {
         'annotations/python/python_errors_detail',
         'annotations/python/python_marshal_detail',
         'annotations/python/python_gc_detail',
+        'annotations/python/python_thread_detail',
+        'annotations/python/python_import_detail',
       ],
     },
     {
@@ -1416,6 +1418,8 @@ const sidebars = {
         'annotations/lib/lib_itertools_detail2',
         'annotations/lib/lib_tracemalloc_detail',
         'annotations/lib/lib_linecache_detail',
+        'annotations/lib/lib_functools_detail2',
+        'annotations/lib/lib_os_path_detail',
       ],
     },
   ],
