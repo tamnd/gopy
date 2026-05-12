@@ -1,0 +1,125 @@
+---
+title: Python/ceval.c (part 72)
+description: "Python/ceval.c part 72: MAKE_FUNCTION, SET_FUNCTION_ATTRIBUTE, COPY_FREE_VARS, RETURN_GENERATOR."
+cpython_path: Python/ceval.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Python/ceval.c" />
+
+This annotation covers function and generator object creation opcodes. See `python_ceval71_detail` for `BINARY_SUBSCR`, `STORE_SUBSCR`, and `DELETE_SUBSCR`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `MAKE_FUNCTION` | Build a function object from a code object |
+| 81-160 | `SET_FUNCTION_ATTRIBUTE` | Attach defaults, annotations, kwdefaults to a function |
+| 161-240 | `COPY_FREE_VARS` | Copy free variables from enclosing scope into closure |
+| 241-360 | `RETURN_GENERATOR` | Create a generator/coroutine frame without running it |
+| 361-500 | `SEND` / `YIELD_VALUE` | Resume a generator and yield a value |
+
+## Reading
+
+### `MAKE_FUNCTION`
+
+```c
+// CPython: Python/ceval.c:4120 MAKE_FUNCTION
+inst(MAKE_FUNCTION, (codeobj -- func)) {
+    PyFunctionObject *func_obj = (PyFunctionObject *)
+        PyFunction_New(codeobj, GLOBALS());
+    Py_DECREF(codeobj);
+    ERROR_IF(func_obj == NULL, error);
+    func_obj->func_version = _PyFunction_GetVersionForCurrentState(func_obj);
+    func = (PyObject *)func_obj;
+}
+```
+
+`def f(): pass` at module level compiles to `LOAD_CONST <code>`, `MAKE_FUNCTION`. `PyFunction_New` captures `__globals__` at definition time; the `__closure__` is filled by `COPY_FREE_VARS` if the function has free variables.
+
+### `SET_FUNCTION_ATTRIBUTE`
+
+```c
+// CPython: Python/ceval.c:4160 SET_FUNCTION_ATTRIBUTE
+inst(SET_FUNCTION_ATTRIBUTE, (attr, func -- func)) {
+    assert(PyFunction_Check(func));
+    PyFunctionObject *func_obj = (PyFunctionObject *)func;
+    switch(oparg) {
+        case MAKE_FUNCTION_DEFAULTS:
+            func_obj->func_defaults = Py_NewRef(attr); break;
+        case MAKE_FUNCTION_KWDEFAULTS:
+            func_obj->func_kwdefaults = Py_NewRef(attr); break;
+        case MAKE_FUNCTION_ANNOTATIONS:
+            func_obj->func_annotations = Py_NewRef(attr); break;
+        case MAKE_FUNCTION_CLOSURE:
+            func_obj->func_closure = Py_NewRef(attr); break;
+    }
+    Py_DECREF(attr);
+}
+```
+
+Default arguments are pushed as a tuple before `MAKE_FUNCTION`, then attached via `SET_FUNCTION_ATTRIBUTE`. In Python 3.12+, the oparg encodes which attribute to set rather than using separate opcodes. This replaces the old `MAKE_FUNCTION` flags word.
+
+### `COPY_FREE_VARS`
+
+```c
+// CPython: Python/ceval.c:4200 COPY_FREE_VARS
+inst(COPY_FREE_VARS, (--)) {
+    /* Copy free variables from enclosing frame's cells into this frame */
+    PyCodeObject *co = frame->f_code;
+    PyObject *closure = frame->f_func->func_closure;
+    int offset = co->co_nlocalsplus - oparg;  /* oparg = nfreevars */
+    for (int i = 0; i < oparg; ++i) {
+        PyObject *o = PyTuple_GET_ITEM(closure, i);
+        frame->localsplus[offset + i] = Py_NewRef(o);
+    }
+}
+```
+
+`COPY_FREE_VARS` runs once at function entry. It copies cell objects from `func.__closure__` into the frame's `localsplus` array at the free-variable slots. The slot offset is `nlocals + ncellvars`; `oparg` is `nfreevars`.
+
+### `RETURN_GENERATOR`
+
+```c
+// CPython: Python/ceval.c:4260 RETURN_GENERATOR
+inst(RETURN_GENERATOR, (--)) {
+    /* Create a generator object wrapping the current frame */
+    PyObject *gen = _Py_MakeGenerator(tstate, frame);
+    ERROR_IF(gen == NULL, error);
+    _PyFrame_SetStackPointer(frame, stack_pointer);
+    /* Suspend the frame: return the generator without executing the body */
+    frame->owner = FRAME_OWNED_BY_GENERATOR;
+    _PyInterpreterFrame *prev = frame->previous;
+    DISPATCH_INLINED(prev);
+    return gen;
+}
+```
+
+`def f(): yield 1` compiles with `RETURN_GENERATOR` as the first opcode. Calling `f()` runs up to `RETURN_GENERATOR`, creates the generator object, suspends the frame, and returns to the caller without executing any body code. The generator is resumed by `next()` or `send()`.
+
+### `SEND`
+
+```c
+// CPython: Python/ceval.c:4320 SEND
+inst(SEND, (receiver, v -- receiver, retval)) {
+    /* gen.send(v) or next(gen) */
+    assert(oparg >= 0);
+    PyObject *retval;
+    if (PyGen_CheckExact(receiver) || PyCoro_CheckExact(receiver)) {
+        retval = _PyGen_Send((PyGenObject *)receiver, v);
+    } else {
+        retval = PyObject_CallMethodOneArg(receiver, &_Py_ID(send), v);
+    }
+    ...
+}
+```
+
+`SEND` is used inside `for` loops over generators and in `yield from`. For generators/coroutines, it calls `_PyGen_Send` directly; for other iterables with a `send` method, it calls it generically.
+
+## gopy notes
+
+`MAKE_FUNCTION` is in `vm/eval_simple.go`, calling `objects.NewFunction`. `SET_FUNCTION_ATTRIBUTE` sets fields on `objects.Function`. `COPY_FREE_VARS` copies from `func.Closure` into `frame.Locals`. `RETURN_GENERATOR` calls `objects.NewGenerator`. `SEND` calls `objects.GeneratorSend`.

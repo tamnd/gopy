@@ -1,0 +1,124 @@
+---
+title: Modules/_posixsubprocess.c (part 6)
+description: "_posixsubprocess.c part 6: subprocess_fork_exec, file descriptor handling, close_fds, pass_fds."
+cpython_path: Modules/_posixsubprocess.c
+cpython_version: "3.14"
+lines: 600
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/_posixsubprocess.c" />
+
+This annotation covers the fork-exec path. See `modules_subprocess5_detail` for `Popen.__init__`, pipe creation, and the Windows `CreateProcess` path.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `subprocess_fork_exec` entry | Arguments, pre-checks |
+| 81-180 | `child_exec` | The code that runs after `fork()` |
+| 181-280 | File descriptor close | `close_fds`, `/proc/fd`, `closefrom` |
+| 281-380 | `pass_fds` | Whitelist of FDs to keep open |
+| 381-600 | Error pipe | Report exec failure back to parent |
+
+## Reading
+
+### `subprocess_fork_exec`
+
+```c
+// CPython: Modules/_posixsubprocess.c:680 subprocess_fork_exec
+static PyObject *
+subprocess_fork_exec(PyObject *self, PyObject *args)
+{
+    /* args: (process_args, executable_list, close_fds, pass_fds,
+              cwd, env, p2cread, p2cwrite, ..., errpipe_read, errpipe_write,
+              restore_signals, start_new_session, gid, gids, uid, ...) */
+    pid_t pid;
+    int exec_failed_errno = 0;
+    ...
+    pid = fork();
+    if (pid == 0) {
+        /* child */
+        child_exec(exec_array, argv, envp, cwd, p2cread, ...);
+        /* If we get here, exec failed */
+        WRITE_INT(errpipe_write, errno);
+        _exit(255);
+    }
+    /* parent: close child-side FDs, read error pipe */
+    ...
+}
+```
+
+The error pipe (`errpipe_read`/`errpipe_write`) lets the parent detect `execve` failure. If the child process successfully execs, the write end is closed and the parent reads nothing. If `execve` fails, the child writes `errno` before `_exit`.
+
+### `child_exec`
+
+```c
+// CPython: Modules/_posixsubprocess.c:380 child_exec
+static void
+child_exec(char *const exec_array[], char *const argv[],
+           char *const envp[], const char *cwd, ...)
+{
+    if (cwd) {
+        if (chdir(cwd) == -1) { WRITE_INT(errpipe_write, errno); return; }
+    }
+    if (restore_signals) {
+        /* Reset all signal handlers to SIG_DFL */
+        for (int i = 1; i < NSIG; i++) signal(i, SIG_DFL);
+    }
+    for (int i = 0; exec_array[i] != NULL; i++) {
+        execve(exec_array[i], argv, envp);
+    }
+}
+```
+
+`child_exec` runs entirely in the child after `fork`. It changes directory, resets signals, then tries each path in `exec_array` with `execve`. If all attempts fail, control returns to the caller which writes `errno` to the error pipe.
+
+### `close_fds`
+
+```c
+// CPython: Modules/_posixsubprocess.c:200 _close_open_fds
+static void
+_close_open_fds(int start_fd, PyObject *py_fds_to_keep)
+{
+#ifdef HAVE_CLOSEFROM
+    /* Fast path: single syscall (Solaris, FreeBSD 14+, glibc 2.34+) */
+    closefrom(start_fd);
+    /* Re-open kept FDs from py_fds_to_keep */
+#else
+    /* Walk /proc/self/fd or iterate up to sysconf(SC_OPEN_MAX) */
+    DIR *proc_fd_dir = opendir("/proc/self/fd");
+    ...
+#endif
+}
+```
+
+`close_fds=True` (the default) closes all file descriptors >= 3 in the child, except those in `pass_fds`. The fast path uses `closefrom` (Linux 5.9+ / glibc 2.34). The fallback walks `/proc/self/fd` to avoid iterating `OPEN_MAX` (often 1048576) FDs.
+
+### `pass_fds`
+
+```c
+// CPython: Modules/_posixsubprocess.c:140 _is_fd_in_sorted_fd_sequence
+static int
+_is_fd_in_sorted_fd_sequence(int fd, PyObject *fd_sequence)
+{
+    /* Binary search in the sorted tuple of FDs to keep */
+    Py_ssize_t lo = 0, hi = PyTuple_GET_SIZE(fd_sequence);
+    while (lo < hi) {
+        Py_ssize_t mid = (lo + hi) / 2;
+        int seq_fd = PyLong_AsLong(PyTuple_GET_ITEM(fd_sequence, mid));
+        if (seq_fd == fd) return 1;
+        if (seq_fd < fd) lo = mid + 1;
+        else hi = mid;
+    }
+    return 0;
+}
+```
+
+`pass_fds` is a sorted tuple of FD numbers the child should inherit. Binary search makes the per-FD check O(log n). The FDs in `pass_fds` are preserved by skipping them in `_close_open_fds`.
+
+## gopy notes
+
+`subprocess_fork_exec` is `module/subprocess.ForkExec` in `module/subprocess/module.go`. It uses `syscall.ForkExec` on POSIX. `close_fds` iterates over `/proc/self/fd` via `os.ReadDir`. `pass_fds` is checked with `sort.SearchInts`. The error pipe uses `os.Pipe`.

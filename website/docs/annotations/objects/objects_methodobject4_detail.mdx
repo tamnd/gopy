@@ -1,0 +1,121 @@
+---
+title: Objects/methodobject.c (part 4)
+description: "methodobject.c part 4: PyCFunction call paths, METH_FASTCALL, METH_VARARGS, method repr."
+cpython_path: Objects/methodobject.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Objects/methodobject.c" />
+
+This annotation covers how C-implemented methods are called. See `objects_methodobject3_detail` for `PyCFunction_NewEx`, method slots, and `METH_CLASS`/`METH_STATIC`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `PyCFunction_Call` | Dispatch entry point for all C method calls |
+| 81-160 | `METH_VARARGS` path | `f(self, PyObject *args)` |
+| 161-240 | `METH_FASTCALL` path | `f(self, PyObject *const *, nargs)` |
+| 241-360 | `METH_FASTCALL_WITH_KEYWORDS` | Add `kwnames` tuple to fast call |
+| 361-500 | `method_repr` | `<built-in method name of type object>` |
+
+## Reading
+
+### `PyCFunction_Call`
+
+```c
+// CPython: Objects/methodobject.c:88 PyCFunction_Call
+PyObject *
+PyCFunction_Call(PyObject *func, PyObject *args, PyObject *kwargs)
+{
+    PyCFunctionObject *f = (PyCFunctionObject *)func;
+    int flags = f->m_ml->ml_flags & ~(METH_CLASS | METH_STATIC | METH_COEXIST);
+    switch (flags) {
+        case METH_VARARGS:
+            return (*f->m_ml->ml_meth)(f->m_self, args);
+        case METH_VARARGS | METH_KEYWORDS:
+            return (*(PyCFunctionWithKeywords)f->m_ml->ml_meth)(f->m_self, args, kwargs);
+        case METH_FASTCALL:
+            return _PyMethodDef_RawFastCallDict(f->m_ml, f->m_self,
+                                                 &PyTuple_GET_ITEM(args, 0),
+                                                 PyTuple_GET_SIZE(args), kwargs);
+        ...
+    }
+}
+```
+
+`PyCFunction_Call` is the legacy entry when args come in as a tuple. For `METH_FASTCALL`, it bridges the tuple into the C array calling convention. Modern call sites use `_PyCFunction_Vectorcall` directly.
+
+### `METH_VARARGS`
+
+```c
+// CPython: Objects/methodobject.c:140 meth_varargs_call
+typedef PyObject *(*PyCFunction)(PyObject *self, PyObject *args);
+
+/* Signature: f(self, args_tuple) */
+/* No keyword arguments allowed unless METH_KEYWORDS is also set */
+```
+
+`METH_VARARGS` is the oldest calling convention. The `args` tuple is pre-built by the caller. `METH_VARARGS | METH_KEYWORDS` adds a `kwargs` dict. Both are fully general but allocate a tuple per call.
+
+### `METH_FASTCALL`
+
+```c
+// CPython: Objects/methodobject.c:180 _PyCFunction_Vectorcall
+PyObject *
+_PyCFunction_Vectorcall(PyObject *func, PyObject *const *stack,
+                        size_t nargsf, PyObject *kwnames)
+{
+    PyCFunctionObject *f = (PyCFunctionObject *)func;
+    Py_ssize_t nargs = PyVectorcall_NARGS(nargsf);
+    int flags = f->m_ml->ml_flags;
+    switch (flags & ~(METH_CLASS | METH_STATIC | METH_COEXIST)) {
+        case METH_FASTCALL: {
+            if (kwnames != NULL) { ... raise TypeError ... }
+            return ((_PyCFunctionFast)f->m_ml->ml_meth)(f->m_self, stack, nargs);
+        }
+        ...
+    }
+}
+```
+
+`METH_FASTCALL` passes arguments as `PyObject *const *` (a slice of the call stack) with no allocation. This is the preferred convention for new C methods. `PyArg_ParseStack` unpacks the stack array without a tuple.
+
+### `METH_FASTCALL_WITH_KEYWORDS`
+
+```c
+// CPython: Objects/methodobject.c:220 fastcall_keywords
+case METH_FASTCALL | METH_KEYWORDS: {
+    return ((_PyCFunctionFastWithKeywords)f->m_ml->ml_meth)(
+        f->m_self, stack, nargs, kwnames);
+}
+```
+
+`kwnames` is a tuple of keyword argument names; keyword values follow positional values in `stack`. The callee uses `PyArg_ParseStackAndKeywords` to unpack both.
+
+### `method_repr`
+
+```c
+// CPython: Objects/methodobject.c:340 meth_repr
+static PyObject *
+meth_repr(PyCFunctionObject *v)
+{
+    if (v->m_self == NULL || PyModule_Check(v->m_self))
+        return PyUnicode_FromFormat("<built-in function %s>",
+                                    v->m_ml->ml_name);
+    return PyUnicode_FromFormat("<built-in method %s of %s object at %p>",
+                                v->m_ml->ml_name,
+                                Py_TYPE(v->m_self)->tp_name,
+                                v->m_self);
+}
+```
+
+Module-level functions display as `<built-in function len>`. Bound methods display as `<built-in method append of list object at 0x...>`.
+
+## gopy notes
+
+`PyCFunction_Call` dispatch is in `objects/builtin_function.go`. `METH_VARARGS` methods are wrapped as Go `func(self Object, args Tuple) Object`. `METH_FASTCALL` methods are `func(self Object, args []Object) Object`. `method_repr` is `objects.BuiltinFunction.Repr`.
