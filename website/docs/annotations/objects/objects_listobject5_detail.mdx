@@ -19,7 +19,7 @@ This annotation covers the Timsort implementation. See `objects_listobject4_deta
 |-------|--------|------|
 | 1-120 | `listsort` | Entry point: build run stack, merge runs |
 | 121-300 | `count_run` | Detect a natural ascending or descending run |
-| 301-450 | `binarysort` | Insertion sort for short runs (len <= MIN_MERGE=32) |
+| 301-450 | `binarysort` | Insertion sort for short runs (len &lt;= MIN_MERGE=32) |
 | 451-700 | `gallop_left` / `gallop_right` | Exponential search for merge boundary |
 | 701-1100 | `merge_lo` / `merge_hi` | In-place merge of two adjacent runs |
 | 1101-1400 | `merge_collapse` | Maintain the run stack invariant |

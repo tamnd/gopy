@@ -48,10 +48,10 @@ time from the maximum code point:
 
 | Max code point | Kind | Bytes per character | Struct type |
 |---------------|------|---------------------|-------------|
-| <= 127 | ASCII compact | 1 | `PyASCIIObject` |
-| <= 255 | Latin-1 compact | 1 | `PyCompactUnicodeObject` |
-| <= 65535 | UCS-2 compact | 2 | `PyCompactUnicodeObject` |
-| <= 1114111 | UCS-4 compact | 4 | `PyCompactUnicodeObject` |
+| &lt;= 127 | ASCII compact | 1 | `PyASCIIObject` |
+| &lt;= 255 | Latin-1 compact | 1 | `PyCompactUnicodeObject` |
+| &lt;= 65535 | UCS-2 compact | 2 | `PyCompactUnicodeObject` |
+| &lt;= 1114111 | UCS-4 compact | 4 | `PyCompactUnicodeObject` |
 
 The "compact" flag means the character buffer is allocated immediately after the
 header in one block, so a single `free()` releases both. Non-compact objects
