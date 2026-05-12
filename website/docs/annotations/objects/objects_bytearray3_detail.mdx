@@ -1,0 +1,91 @@
+---
+title: Objects/bytearrayobject.c (part 3)
+description: "Objects/bytearrayobject.c part 3: bytearray.append, extend, insert, pop, remove, reverse."
+cpython_path: Objects/bytearrayobject.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Objects/bytearrayobject.c" />
+
+This annotation covers mutable bytearray operations. See `objects_bytesobject5_detail` for bytes immutable operations and the free list.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `bytearray.append` | Append one byte |
+| 81-160 | `bytearray.extend` | Extend with an iterable or buffer |
+| 161-240 | `bytearray.insert` | Insert at a position |
+| 241-320 | `bytearray.pop` | Remove and return last (or indexed) byte |
+| 321-500 | `bytearray.remove` / `reverse` / `clear` | In-place mutations |
+
+## Reading
+
+### `bytearray.append`
+
+```c
+// CPython: Objects/bytearrayobject.c:480 bytearray_append_impl
+static PyObject *
+bytearray_append_impl(PyByteArrayObject *self, int item)
+{
+    Py_ssize_t n = Py_SIZE(self);
+    if (PyByteArray_Resize((PyObject *)self, n + 1) < 0)
+        return NULL;
+    PyByteArray_AS_STRING(self)[n] = item;
+    Py_RETURN_NONE;
+}
+```
+
+`bytearray.append(x)` accepts an integer 0-255. `PyByteArray_Resize` grows the buffer using a growth factor (like list) to amortize allocations. The implementation is analogous to `list.append`.
+
+### `bytearray.extend`
+
+```c
+// CPython: Objects/bytearrayobject.c:520 bytearray_extend
+static PyObject *
+bytearray_extend(PyByteArrayObject *self, PyObject *iterable_of_ints)
+{
+    Py_buffer vbuf;
+    if (PyObject_GetBuffer(iterable_of_ints, &vbuf, PyBUF_SIMPLE) == 0) {
+        /* Fast path for buffer protocol (bytes, bytearray, memoryview) */
+        Py_ssize_t n = Py_SIZE(self);
+        PyByteArray_Resize((PyObject *)self, n + vbuf.len);
+        memcpy(PyByteArray_AS_STRING(self) + n, vbuf.buf, vbuf.len);
+        PyBuffer_Release(&vbuf);
+        Py_RETURN_NONE;
+    }
+    /* Slow path: iterate integers one by one */
+    ...
+}
+```
+
+`bytearray.extend(b'hello')` uses a single `memcpy` via the buffer protocol. Extending from an integer iterable uses the slow path.
+
+### `bytearray.insert`
+
+```c
+// CPython: Objects/bytearrayobject.c:580 bytearray_insert_impl
+static PyObject *
+bytearray_insert_impl(PyByteArrayObject *self, Py_ssize_t index, int item)
+{
+    /* Shift elements up, then write item */
+    Py_ssize_t n = Py_SIZE(self);
+    if (index < 0) index = MAX(0, n + index);
+    else if (index > n) index = n;
+    PyByteArray_Resize((PyObject *)self, n + 1);
+    char *buf = PyByteArray_AS_STRING(self);
+    memmove(buf + index + 1, buf + index, n - index);
+    buf[index] = item;
+    Py_RETURN_NONE;
+}
+```
+
+`bytearray.insert(0, 65)` inserts byte `65` at the front. `memmove` handles the overlapping copy. This is O(n) due to the shift.
+
+## gopy notes
+
+`bytearray.append` is `objects.ByteArrayAppend` in `objects/bytearray.go`. It calls `append(ba.Data, byte(item))`. `bytearray.extend` checks for `objects.BufferProtocol` first, then falls back to iterating integers. `bytearray.insert` uses `copy` with reslicing.

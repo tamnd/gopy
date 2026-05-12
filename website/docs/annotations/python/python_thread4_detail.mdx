@@ -1,0 +1,85 @@
+---
+title: Python/thread.c (part 4)
+description: "Python/thread.c part 4: PyThread_acquire_lock_timed, thread local storage, PyThread_tss_key."
+cpython_path: Python/thread.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Python/thread.c" />
+
+This annotation covers timed lock acquisition and thread-local storage. See `module_threading4_detail` for `threading.Thread`, `Lock`, `RLock`, `Condition`, and `Semaphore`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `PyThread_acquire_lock_timed` | Try to acquire a lock with a timeout |
+| 81-180 | `PyThread_tss_key_t` | Thread-specific storage key (TSS) |
+| 181-280 | `PyThread_tss_create` / `tss_set` / `tss_get` | Manage per-thread values |
+| 281-380 | `PyThread_get_thread_native_id` | Retrieve OS thread ID |
+| 381-500 | GIL as a lock | How the GIL uses these primitives |
+
+## Reading
+
+### `PyThread_acquire_lock_timed`
+
+```c
+// CPython: Python/thread_pthread.h:320 PyThread_acquire_lock_timed
+PyLockStatus
+PyThread_acquire_lock_timed(PyThread_type_lock lock, long long microseconds,
+                             int intr_flag)
+{
+    /* microseconds == -1: wait forever
+       microseconds == 0:  non-blocking try
+       microseconds > 0:   timed wait */
+    sem_t *thelock = (sem_t *)lock;
+    if (microseconds == 0) {
+        int status = sem_trywait(thelock);
+        return status ? PY_LOCK_FAILURE : PY_LOCK_ACQUIRED;
+    }
+    if (microseconds > 0) {
+        struct timespec timeout;
+        MICROSECONDS_TO_TIMESPEC(microseconds, timeout);
+        int status = sem_timedwait(thelock, &timeout);
+        if (status == ETIMEDOUT) return PY_LOCK_FAILURE;
+        return PY_LOCK_ACQUIRED;
+    }
+    sem_wait(thelock);
+    return PY_LOCK_ACQUIRED;
+}
+```
+
+`threading.Lock.acquire(timeout=1.0)` calls `PyThread_acquire_lock_timed(lock, 1000000, 1)`. `intr_flag=1` means `EINTR` returns `PY_LOCK_INTR` so the caller can handle `KeyboardInterrupt`.
+
+### Thread-specific storage
+
+```c
+// CPython: Python/thread_pthread.h:480 PyThread_tss_create
+int
+PyThread_tss_create(Py_tss_t *key)
+{
+    return pthread_key_create(&key->_key, NULL);
+}
+
+void *
+PyThread_tss_get(Py_tss_t *key)
+{
+    return pthread_getspecific(key->_key);
+}
+
+int
+PyThread_tss_set(Py_tss_t *key, void *value)
+{
+    return pthread_setspecific(key->_key, value);
+}
+```
+
+TSS is used for `PyThreadState` (the per-thread interpreter state). Each thread that interacts with the Python C API needs a `PyThreadState`; it is stored in a TSS slot and retrieved with `PyThreadState_Get()`.
+
+## gopy notes
+
+`PyThread_acquire_lock_timed` is backed by Go's `sync.Mutex` with `time.After` for timeouts. TSS keys are `goroutine-local` storage implemented via `sync.Map[goroutineID]interface{}`. `PyThread_get_thread_native_id` returns the current goroutine's OS thread ID via `runtime.LockOSThread` + a syscall.

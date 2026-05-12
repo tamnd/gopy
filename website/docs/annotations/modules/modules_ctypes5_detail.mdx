@@ -1,0 +1,102 @@
+---
+title: Modules/_ctypes/callproc.c (part 5)
+description: "_ctypes callproc.c part 5: ctypes function calling convention, restype handling, argtypes coercion."
+cpython_path: Modules/_ctypes/callproc.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/_ctypes/callproc.c" />
+
+This annotation covers the foreign function call path. See `modules_ctypes4_detail` for `ctypes.Structure`, `ctypes.CDLL`, `ctypes.cast`, and pointer types.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `_CallProc` | Assemble and execute a foreign function call |
+| 81-180 | `argtypes` coercion | Convert Python args to C via `from_param` |
+| 181-280 | `restype` handling | Convert C return value to Python |
+| 281-360 | `errcheck` callback | Post-process the return value |
+| 361-500 | `cdecl` vs `stdcall` | Windows calling convention selection |
+
+## Reading
+
+### `_CallProc`
+
+```c
+// CPython: Modules/_ctypes/callproc.c:880 _CallProc
+static PyObject *
+_CallProc(PPROC pProc, PyObject *argtuple, int flags,
+          PyObject *argtypes, PyObject *restype, PyObject *checker)
+{
+    /* 1. Allocate space for arguments on the C stack
+       2. Convert Python objects to C via from_param or stgdict
+       3. Call via libffi
+       4. Convert return value via restype
+       5. Call errcheck if set */
+    Py_ssize_t nargs = PyTuple_GET_SIZE(argtuple);
+    struct argument *args = alloca(nargs * sizeof(struct argument));
+    ffi_cif cif;
+    ffi_type **atypes = alloca(nargs * sizeof(ffi_type *));
+    ...
+    ffi_call(&cif, FFI_FN(pProc), &result, avalues);
+    return GetResult(restype, &result, checker);
+}
+```
+
+`ctypes` uses `libffi` to make foreign function calls at runtime. `libffi` handles architecture-specific calling conventions (register allocation, stack alignment) so ctypes is portable.
+
+### `argtypes` coercion
+
+```c
+// CPython: Modules/_ctypes/callproc.c:620 ConvertSimpleParams
+static int
+ConvertSimpleParams(PyObject *argtypes, PyObject *argtuple, struct argument *args)
+{
+    for (Py_ssize_t i = 0; i < nargs; i++) {
+        PyObject *converter = argtypes ? PyTuple_GET_ITEM(argtypes, i) : NULL;
+        PyObject *obj = PyTuple_GET_ITEM(argtuple, i);
+        if (converter) {
+            /* Call converter.from_param(obj) */
+            PyObject *arg = PyObject_CallMethodObjArgs(converter, str_from_param, obj, NULL);
+            ...
+        }
+        /* Pack the C value into args[i] */
+        ...
+    }
+    return 0;
+}
+```
+
+`func.argtypes = [c_int, c_char_p]` sets converters. Each argument is passed through `from_param` which returns a ctypes instance. `from_param` on `c_int` accepts Python ints and bytearray values via the `__index__` protocol.
+
+### `errcheck`
+
+```c
+// CPython: Modules/_ctypes/callproc.c:960 GetResult
+static PyObject *
+GetResult(PyObject *restype, void *result, PyObject *checker)
+{
+    PyObject *retval;
+    if (restype == NULL || restype == Py_None) {
+        retval = Py_NewRef(Py_None);
+    } else {
+        retval = PyObject_CallFunction(restype, "...", result);
+    }
+    if (checker) {
+        /* errcheck(retval, func, args) can raise OSError */
+        retval = PyObject_CallFunction(checker, "OOO", retval, func, argtuple);
+    }
+    return retval;
+}
+```
+
+`func.errcheck = lambda rv, fn, args: rv or raise_error()` is a common pattern for checking `NULL` return values from POSIX APIs. `errcheck` receives the converted return value and can raise exceptions.
+
+## gopy notes
+
+`_CallProc` is `module/ctypes.CallProc` in `module/ctypes/module.go`. It uses `unsafe.Pointer` and Go's `syscall` package to call foreign functions by address. `argtypes` coercion calls `objects.CallMethod(converter, "from_param", arg)`. `errcheck` is called via `objects.CallFunction` after the C function returns.

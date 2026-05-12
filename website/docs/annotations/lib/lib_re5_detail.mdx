@@ -1,0 +1,74 @@
+---
+title: Lib/re/__init__.py (part 5)
+description: "re part 5: re.fullmatch, re.sub, re.subn, re.escape, compiled pattern flags."
+cpython_path: Lib/re/__init__.py
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/re/__init__.py" />
+
+This annotation covers substitution and the regex flag system. See `module_re4_detail` for `re.compile`, `re.match`, `re.search`, `re.findall`, and `Pattern` objects.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `re.fullmatch` | Match pattern against entire string |
+| 81-160 | `re.sub` / `re.subn` | Replace matches with a string or callable |
+| 161-240 | `re.escape` | Escape special regex characters |
+| 241-360 | Regex flags | `re.IGNORECASE`, `re.MULTILINE`, `re.DOTALL`, etc. |
+| 361-500 | `re.error` | Regex compilation and match errors |
+
+## Reading
+
+### `re.sub`
+
+```python
+# CPython: Lib/re/__init__.py:220 sub
+def sub(pattern, repl, string, count=0, flags=0):
+    """Return the string obtained by replacing the leftmost non-overlapping
+    occurrences of pattern in string by the replacement repl."""
+    return _compile(pattern, flags).sub(repl, string, count)
+```
+
+`re.sub(r'\d+', 'N', 'a1b22c')` returns `'aNbNc'`. When `repl` is a callable, it receives the `Match` object and returns the replacement string. Backreferences like `\1` in `repl` are expanded.
+
+### `re.escape`
+
+```python
+# CPython: Lib/re/__init__.py:320 escape
+def escape(pattern):
+    """Escape special characters in pattern."""
+    # ASCII letters, digits, and '_' are not escaped
+    _special_chars_map = {
+        ord(c): '\\' + c
+        for c in r'\.^$*+?{}[]|()'}
+    return pattern.translate(_special_chars_map)
+```
+
+`re.escape('1+1=2')` returns `'1\\+1\\=2'`. Used when you want to match a literal string that may contain regex metacharacters: `re.compile(re.escape(user_input))`.
+
+### Regex flags
+
+```python
+# CPython: Lib/re/__init__.py:60 flags
+class RegexFlag(enum.IntFlag):
+    A = ASCII     = 256    # a  — ASCII-only matching
+    I = IGNORECASE = 2     # i  — case-insensitive
+    L = LOCALE    = 4      # l  — locale-dependent
+    M = MULTILINE = 8      # m  — ^ and $ match line boundaries
+    S = DOTALL    = 16     # s  — . matches newline
+    U = UNICODE   = 32     # u  — Unicode matching (default)
+    X = VERBOSE   = 64     # x  — allow whitespace and comments
+    N = NOFLAG    = 0
+```
+
+`re.compile(r'(?i)hello')` is equivalent to `re.compile('hello', re.IGNORECASE)`. Inline flags `(?imsx)` apply only to the part of the pattern after them (or the whole pattern if at the start).
+
+## gopy notes
+
+`re.sub` is `module/re.Sub` in `module/re/module.go`. It calls `pattern.ReplaceAllStringFunc` (Go `regexp`) when `repl` is a callable, or `pattern.ReplaceAllString` for string replacements. `re.escape` uses `regexp.QuoteMeta`. Flags are stored as a `uint32` bitmask and translated to Go `regexp` options.
