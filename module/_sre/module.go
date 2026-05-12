@@ -215,42 +215,6 @@ func init() {
 }
 
 // ---------------------------------------------------------------------------
-// Higher-level Pattern methods (findall / finditer / sub / subn / split)
-// are the Phase 6 work in spec 1703. Phase 4 leaves these as typed
-// errors so callers see a clear "not yet implemented" instead of the
-// previous RE2-backed answers, which would silently miscompile
-// CPython-specific syntax now that the bytecode path is the only
-// truth.
-//
-// CPython references for these methods are pinned in spec 1703 §
-// Phase 6 and the implementations land in pattern_methods.go in
-// a follow-up commit.
-
-func notYetImplemented(name string) (objects.Object, error) {
-	return nil, fmt.Errorf("NotImplementedError: SRE_Pattern.%s is part of spec 1703 phase 6", name)
-}
-
-func patternFindall(_ []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
-	return notYetImplemented("findall")
-}
-
-func patternFinditer(_ []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
-	return notYetImplemented("finditer")
-}
-
-func patternSub(_ []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
-	return notYetImplemented("sub")
-}
-
-func patternSubn(_ []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
-	return notYetImplemented("subn")
-}
-
-func patternSplit(_ []objects.Object, _ map[string]objects.Object) (objects.Object, error) {
-	return notYetImplemented("split")
-}
-
-// ---------------------------------------------------------------------------
 // Utilities.
 
 // intArg extracts an int64 from args[idx].
