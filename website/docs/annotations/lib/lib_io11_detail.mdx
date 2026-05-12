@@ -1,0 +1,124 @@
+---
+title: Lib/_pyio.py (part 11)
+description: "Lib/_pyio.py part 11: BufferedWriter.write, BufferedReader.read1, FileIO.readinto, TextIOWrapper.reconfigure."
+cpython_path: Lib/_pyio.py
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/_pyio.py" />
+
+This annotation covers buffered I/O write paths and raw I/O. See `lib_io10_detail` for `BufferedReader.read`, `TextIOWrapper.readline`, and codec wrapping.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `BufferedWriter.write` | Buffer write, flush when full |
+| 81-160 | `BufferedWriter.flush` | Flush all buffered data to raw |
+| 161-240 | `BufferedReader.read1` | Read up to one buffer's worth |
+| 281-380 | `FileIO.readinto` | Raw read into a buffer |
+| 381-500 | `TextIOWrapper.reconfigure` | Change encoding, newline, or line buffering |
+
+## Reading
+
+### `BufferedWriter.write`
+
+```python
+# CPython: Lib/_pyio.py:1820 write
+def write(self, b):
+    if not isinstance(b, (bytes, bytearray, memoryview)):
+        raise TypeError(...)
+    with self._write_lock:
+        if self._write_buf:
+            avail = self.buffer_size - len(self._write_buf)
+            if len(b) <= avail:
+                self._write_buf += b
+                return len(b)
+        self._flush_unlocked()
+        overage = len(b) - self.buffer_size
+        if overage > 0:
+            # Large write: bypass the buffer
+            self.raw.write(b[:overage])
+            b = b[overage:]
+        self._write_buf = bytearray(b)
+        return original_len
+```
+
+`BufferedWriter.write` appends small writes to `_write_buf`. When the buffer would overflow, it flushes first, then writes any large remainder directly to the raw stream (bypassing the buffer). This avoids double-buffering for large writes.
+
+### `BufferedWriter.flush`
+
+```python
+# CPython: Lib/_pyio.py:1860 flush
+def flush(self):
+    with self._write_lock:
+        self._flush_unlocked()
+    self.raw.flush()
+
+def _flush_unlocked(self):
+    if self.closed:
+        raise ValueError("flush of closed file")
+    while self._write_buf:
+        try:
+            n = self.raw.write(self._write_buf)
+        except BlockingIOError as e:
+            n = e.characters_written
+        del self._write_buf[:n]
+```
+
+`_flush_unlocked` handles short writes: if `raw.write` writes fewer bytes than provided (e.g., on a non-blocking socket), the loop continues with the remainder. `self.raw.flush()` propagates the flush to the underlying OS file descriptor.
+
+### `BufferedReader.read1`
+
+```python
+# CPython: Lib/_pyio.py:1700 read1
+def read1(self, size=-1):
+    """Read up to one buffer's worth of data without blocking further."""
+    with self._read_lock:
+        return self._read1_unlocked(size)
+
+def _read1_unlocked(self, n=-1):
+    avail = len(self._read_buf) - self._read_pos
+    if n <= 0 or n > avail:
+        n = max(avail, self.buffer_size)
+    if avail == 0:
+        self._fill_buffer()
+        avail = len(self._read_buf) - self._read_pos
+    return self._read_buf[self._read_pos:self._read_pos + min(n, avail)]
+```
+
+`read1` reads at most one raw read's worth of data. Unlike `read`, it does not loop to fill `n` bytes — it returns whatever is in the buffer plus at most one raw read. Useful for network streams where you want to process data as soon as it arrives.
+
+### `TextIOWrapper.reconfigure`
+
+```python
+# CPython: Lib/_pyio.py:3040 reconfigure
+def reconfigure(self, *, encoding=None, errors=None, newline=sentinel,
+                line_buffering=None, write_through=None):
+    if self._decoded_chars:
+        raise UnsupportedOperation("not supported between reads")
+    if encoding is not None:
+        self._encoding = encoding
+        self._decoder = None  # force recreate
+    if errors is not None:
+        self._errors = errors
+    if newline is not sentinel:
+        self._translate = newline != ''
+        self._readnl = newline
+    if line_buffering is not None:
+        self._line_buffering = line_buffering
+    if write_through is not None:
+        self._write_through = write_through
+    self._set_decoded_chars('')
+    return self
+```
+
+`f.reconfigure(encoding='utf-8', errors='replace')` changes the encoding mid-stream. This is only safe when the read buffer is empty (`_decoded_chars == ''`). Used after detecting a BOM or charset declaration in the first bytes of a file.
+
+## gopy notes
+
+`BufferedWriter.write` is `objects.BufferedWriterWrite` in `objects/io.go`. The buffer is a Go `[]byte`; `_flush_unlocked` loops over `raw.write` until the buffer is empty. `BufferedReader.read1` is `objects.BufferedReaderRead1`; calls `objects.RawRead` once if the buffer is empty. `TextIOWrapper.reconfigure` resets `objects.TextIOWrapperDecoder`.

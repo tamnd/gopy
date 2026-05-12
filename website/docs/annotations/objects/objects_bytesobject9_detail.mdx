@@ -1,0 +1,124 @@
+---
+title: Objects/bytesobject.c (part 9)
+description: "Objects/bytesobject.c part 9: bytes.split, bytes.join, bytes.decode, bytes.translate."
+cpython_path: Objects/bytesobject.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Objects/bytesobject.c" />
+
+This annotation covers splitting, joining, and encoding operations. See `objects_bytesobject8_detail` for `bytes.find`, `bytes.count`, and `bytes.replace`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `bytes.split` | Split on separator or whitespace |
+| 81-180 | `bytes.join` | Join an iterable of bytes |
+| 181-280 | `bytes.decode` | Decode to `str` using a codec |
+| 281-380 | `bytes.translate` | Apply a byte translation table |
+| 381-500 | `bytes.__mod__` | `%`-formatting for bytes |
+
+## Reading
+
+### `bytes.split`
+
+```c
+// CPython: Objects/bytesobject.c:1680 bytes_split
+static PyObject *
+bytes_split(PyBytesObject *self, PyObject *const *args, Py_ssize_t nargs)
+{
+    Py_ssize_t maxsplit = -1;
+    PyObject *subobj = Py_None;
+    if (subobj == Py_None) {
+        /* Split on whitespace */
+        return stringlib_split_whitespace((PyObject *)self,
+            PyBytes_AS_STRING(self), PyBytes_GET_SIZE(self), maxsplit);
+    }
+    return stringlib_split((PyObject *)self,
+        PyBytes_AS_STRING(self), PyBytes_GET_SIZE(self),
+        sep, seplen, maxsplit);
+}
+```
+
+`b'a b  c'.split()` strips leading/trailing whitespace and splits on any run of whitespace. `b'a:b:c'.split(b':', 1)` splits at most once on `b':'`. The `stringlib` implementation is shared with `str.split`.
+
+### `bytes.join`
+
+```c
+// CPython: Objects/bytesobject.c:1780 bytes_join
+static PyObject *
+bytes_join(PyObject *self, PyObject *iterable)
+{
+    PyObject *seq = PySequence_Fast(iterable, "");
+    Py_ssize_t n = PySequence_Fast_GET_SIZE(seq);
+    if (n == 0) return PyBytes_FromStringAndSize(NULL, 0);
+    /* Compute total length */
+    Py_ssize_t totallen = (n - 1) * PyBytes_GET_SIZE(self);
+    for (Py_ssize_t i = 0; i < n; i++)
+        totallen += PyBytes_GET_SIZE(PySequence_Fast_GET_ITEM(seq, i));
+    PyObject *res = PyBytes_FromStringAndSize(NULL, totallen);
+    char *p = PyBytes_AS_STRING(res);
+    for (Py_ssize_t i = 0; i < n; i++) {
+        if (i > 0) { memcpy(p, sep, seplen); p += seplen; }
+        Py_ssize_t itemlen = PyBytes_GET_SIZE(item);
+        memcpy(p, PyBytes_AS_STRING(item), itemlen);
+        p += itemlen;
+    }
+    return res;
+}
+```
+
+`b' '.join([b'a', b'b', b'c'])` returns `b'a b c'`. The total length is computed first so only one allocation is needed. `PySequence_Fast` materializes the iterable into a tuple if it is not already a list or tuple.
+
+### `bytes.decode`
+
+```c
+// CPython: Objects/bytesobject.c:1860 bytes_decode
+static PyObject *
+bytes_decode(PyObject *self, PyObject *const *args, Py_ssize_t nargs,
+             PyObject *kwnames)
+{
+    const char *encoding = "utf-8";
+    const char *errors = "strict";
+    /* ... parse args ... */
+    return PyUnicode_FromEncodedObject(self, encoding, errors);
+}
+```
+
+`b'\xe2\x80\x99'.decode('utf-8')` calls `PyUnicode_FromEncodedObject` which dispatches to the codec registry. The default encoding is `'utf-8'` (not `'ascii'` as in Python 2). `errors='ignore'` silently drops undecodable bytes; `'replace'` uses the Unicode replacement character.
+
+### `bytes.translate`
+
+```c
+// CPython: Objects/bytesobject.c:1940 bytes_translate
+static PyObject *
+bytes_translate(PyObject *self, PyObject *const *args, Py_ssize_t nargs)
+{
+    /* table: 256-byte lookup table or None */
+    /* delete: bytes of characters to remove */
+    PyObject *table_obj, *deletechars = NULL;
+    /* ... parse args ... */
+    const char *table = NULL;
+    if (table_obj != Py_None)
+        table = PyBytes_AS_STRING(table_obj);
+    char *res_buf = PyMem_Malloc(inlen);
+    Py_ssize_t res_pos = 0;
+    for (Py_ssize_t i = 0; i < inlen; i++) {
+        unsigned char c = input[i];
+        if (deltable[c]) continue;  /* delete */
+        res_buf[res_pos++] = table ? table[c] : c;
+    }
+    return PyBytes_FromStringAndSize(res_buf, res_pos);
+}
+```
+
+`b'hello'.translate(None, b'aeiou')` removes all vowels. `bytes.maketrans(b'abc', b'xyz')` creates the 256-byte lookup table. Unlike `str.translate`, `bytes.translate` uses a flat 256-byte array (not a dict) for O(1) per-byte translation.
+
+## gopy notes
+
+`bytes.split` is `objects.BytesSplit` in `objects/bytesobject.go`; shares `objects.SplitWhitespace` with `str.split`. `bytes.join` is `objects.BytesJoin`; uses `bytes.Join` from Go's standard library. `bytes.decode` calls `module/codec.Decode`. `bytes.translate` is `objects.BytesTranslate`; uses a Go `[256]byte` table.

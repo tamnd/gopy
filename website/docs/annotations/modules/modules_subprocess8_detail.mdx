@@ -1,0 +1,107 @@
+---
+title: Modules/posixmodule.c — subprocess (part 8)
+description: "subprocess part 8: Popen._execute_child (POSIX), _posixsubprocess.fork_exec, vfork path."
+cpython_path: Modules/_posixsubprocess.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/_posixsubprocess.c" />
+
+This annotation covers the POSIX subprocess execution path. See `modules_subprocess7_detail` for `Popen.__init__`, pipe setup, and the Windows `CreateProcess` path.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `subprocess_fork_exec` | Python entry point: validate args, call C |
+| 81-200 | `child_exec` | Post-fork: set up fds, exec |
+| 201-320 | `_Py_set_inheritable` | Mark fds as non-inheritable |
+| 321-420 | `vfork` path | Use `vfork` for performance on Linux |
+| 421-500 | Error pipe | Report `exec` failures back to parent |
+
+## Reading
+
+### `child_exec`
+
+```c
+// CPython: Modules/_posixsubprocess.c:420 child_exec
+static void
+child_exec(char *const exec_array[], char *const argv[], char *const envp[],
+           const char *cwd, int p2cread, int p2cwrite, int c2pread, int c2pwrite,
+           int errread, int errwrite, int errpipe_read, int errpipe_write,
+           int close_fds, int restore_signals, int call_setsid,
+           ...)
+{
+    /* All code here runs after fork — no Python API calls allowed */
+    if (cwd) {
+        if (chdir(cwd) == -1) goto error;
+    }
+    /* Dup2 standard fds */
+    if (p2cread != -1) dup2(p2cread, 0);
+    if (c2pwrite != -1) dup2(c2pwrite, 1);
+    if (errwrite != -1) dup2(errwrite, 2);
+    /* Close all other fds if close_fds=True */
+    if (close_fds) {
+        /* Use /proc/self/fd or iterate from 3 to MAXFD */
+        ...
+    }
+    /* Execute */
+    for (int i = 0; exec_array[i] != NULL; i++) {
+        execve(exec_array[i], argv, envp);
+    }
+error:
+    /* Report error via error pipe */
+    write(errpipe_write, &errno, sizeof(errno));
+    _exit(255);
+}
+```
+
+`child_exec` runs in the child process after `fork`. No Python API can be called (the interpreter state is in an undefined state after `fork` in a multi-threaded process). Errors are communicated back to the parent by writing `errno` to `errpipe_write`.
+
+### `vfork` path
+
+```c
+// CPython: Modules/_posixsubprocess.c:680 subprocess_fork_exec
+/* On Linux with vfork available and no close_fds: use vfork for performance */
+if (use_vfork) {
+    pid = vfork();
+    if (pid == 0) {
+        child_exec(...);
+        _exit(255);  /* never reached */
+    }
+} else {
+    pid = fork();
+    if (pid == 0) {
+        child_exec(...);
+        _exit(255);
+    }
+}
+```
+
+`vfork` is faster than `fork` on Linux because it does not copy the parent's page tables — the child shares the parent's address space until `exec` or `_exit`. The parent is suspended until the child calls `exec` or `_exit`. `vfork` is only used when `close_fds=False` (no fd iteration in child) and no preexec function.
+
+### Error pipe
+
+```c
+// CPython: Modules/_posixsubprocess.c:780 (parent side)
+/* Read from errpipe_read to check for child exec failure */
+char data[4];
+ssize_t n = read(errpipe_read, data, sizeof(data));
+if (n > 0) {
+    /* Child failed: decode errno and raise */
+    int child_errno;
+    memcpy(&child_errno, data, sizeof(child_errno));
+    errno = child_errno;
+    PyErr_SetFromErrnoWithFilenameObject(PyExc_OSError, executable);
+}
+```
+
+The error pipe is a pair of file descriptors: the child writes to `errpipe_write` if `exec` fails, the parent reads from `errpipe_read` after `waitpid`. If the pipe has data, the `exec` failed and `SubprocessError` is raised. On success, the pipe is empty (`EOF`).
+
+## gopy notes
+
+`_posixsubprocess.fork_exec` is `module/subprocess.ForkExec` in `module/subprocess/module.go`; uses `syscall.ForkExec` on POSIX. `child_exec` logic is implemented directly by Go's `os/exec` package via `cmd.Start()`. The error pipe uses a Go `os.Pipe()`. `vfork` is not used — Go's `os/exec` always uses `fork`.
