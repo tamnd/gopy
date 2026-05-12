@@ -1,0 +1,87 @@
+---
+title: Python/ceval.c (part 64)
+description: "Python/ceval.c part 64: CALL specializations, CALL_PY_EXACT_ARGS, CALL_BUILTIN_CLASS, CALL_NO_KW_TYPE_1."
+cpython_path: Python/ceval.c
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Python/ceval.c" />
+
+This annotation covers `CALL` specializations. See `python_ceval63_detail` for `GET_ITER`, `FOR_ITER`, `GET_AITER`, and `GET_ANEXT`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `CALL` baseline | Generic call dispatch |
+| 81-160 | `CALL_PY_EXACT_ARGS` | Fast path for Python function with exact arg count |
+| 161-240 | `CALL_PY_WITH_DEFAULTS` | Python function with defaults |
+| 241-320 | `CALL_BUILTIN_CLASS` | `list(iter)`, `dict()`, `type(x)` |
+| 321-500 | `CALL_NO_KW_TYPE_1` | `type(x)` single-argument fast path |
+
+## Reading
+
+### `CALL_PY_EXACT_ARGS`
+
+```c
+// CPython: Python/ceval.c:3060 CALL_PY_EXACT_ARGS
+inst(CALL_PY_EXACT_ARGS, (unused/1, unused/2, callable, self_or_null, args[oparg] -- unused)) {
+    DEOPT_IF(!PyFunction_Check(callable), CALL);
+    PyFunctionObject *func = (PyFunctionObject *)callable;
+    DEOPT_IF(func->func_version != read_u32(next_instr[-2].cache), CALL);
+    PyCodeObject *code = (PyCodeObject *)func->func_code;
+    DEOPT_IF(code->co_argcount != oparg + (self_or_null != NULL), CALL);
+    DEOPT_IF(!_PyThreadState_HasStackSpace(tstate, code->co_framesize), CALL);
+    /* Push frame and dispatch */
+    _PyInterpreterFrame *new_frame = _PyFrame_PushUnchecked(tstate, func, oparg + (self_or_null != NULL));
+    ...
+    DISPATCH_INLINED(new_frame);
+}
+```
+
+`CALL_PY_EXACT_ARGS` handles `f(a, b, c)` where `f` is a Python function expecting exactly `oparg` args. The `func_version` check ensures the function hasn't been modified. `DISPATCH_INLINED` enters the new frame directly without going through the main dispatch loop.
+
+### `CALL_PY_WITH_DEFAULTS`
+
+```c
+// CPython: Python/ceval.c:3120 CALL_PY_WITH_DEFAULTS
+inst(CALL_PY_WITH_DEFAULTS, (unused/1, unused/2, callable, self_or_null, args[oparg] -- unused)) {
+    DEOPT_IF(!PyFunction_Check(callable), CALL);
+    PyFunctionObject *func = (PyFunctionObject *)callable;
+    DEOPT_IF(func->func_version != read_u32(next_instr[-2].cache), CALL);
+    PyCodeObject *code = (PyCodeObject *)func->func_code;
+    int argcount = oparg + (self_or_null != NULL);
+    DEOPT_IF(argcount > code->co_argcount, CALL);
+    int defcount = func->func_defaults == NULL ? 0 : (int)PyTuple_GET_SIZE(func->func_defaults);
+    DEOPT_IF(argcount < code->co_argcount - defcount, CALL);
+    /* Fill in defaults */
+    ...
+    DISPATCH_INLINED(new_frame);
+}
+```
+
+`CALL_PY_WITH_DEFAULTS` handles calls where some positional arguments use defaults from `func.__defaults__`. The specialization verifies the argument count is in range `[co_argcount - defcount, co_argcount]`.
+
+### `CALL_NO_KW_TYPE_1`
+
+```c
+// CPython: Python/ceval.c:3220 CALL_NO_KW_TYPE_1
+inst(CALL_NO_KW_TYPE_1, (unused/1, unused/2, callable, null, arg -- res)) {
+    DEOPT_IF(null != NULL, CALL);
+    DEOPT_IF(callable != (PyObject *)&PyType_Type, CALL);
+    DEOPT_IF(Py_TYPE(arg)->tp_doc == NULL, CALL);
+    res = Py_NewRef(Py_TYPE(arg));
+    Py_DECREF(arg);
+    Py_DECREF(callable);
+}
+```
+
+`type(x)` with a single argument returns `x`'s type. This specialization avoids the full `type.__call__` machinery by directly returning `Py_TYPE(arg)`. The check `tp_doc == NULL` guards against pathological types with unusual `tp_type` behavior.
+
+## gopy notes
+
+`CALL_PY_EXACT_ARGS` is in `vm/eval_call.go`. It creates a new `vm.Frame` directly and enters it via `evalInlined`. `CALL_PY_WITH_DEFAULTS` fills missing args from `objects.Function.Defaults`. `CALL_NO_KW_TYPE_1` returns `objects.TypeOf(arg)` directly.

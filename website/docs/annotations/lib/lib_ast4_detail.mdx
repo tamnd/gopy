@@ -1,0 +1,100 @@
+---
+title: Lib/ast.py (part 4)
+description: "ast.py part 4: ast.NodeTransformer, ast.fix_missing_locations, ast.unparse, ast.increment_lineno."
+cpython_path: Lib/ast.py
+cpython_version: "3.14"
+lines: 500
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Lib/ast.py" />
+
+This annotation covers AST transformation and unparsing. See `lib_ast3_detail` (or the initial annotation) for `ast.parse`, `ast.NodeVisitor`, `ast.walk`, and `ast.literal_eval`.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `NodeTransformer` | In-place AST transformation via visitor pattern |
+| 81-160 | `fix_missing_locations` | Set `lineno`/`col_offset` for generated nodes |
+| 161-240 | `increment_lineno` | Shift all line numbers by a delta |
+| 241-340 | `ast.unparse` | Reconstruct source code from an AST |
+| 341-500 | `_Unparser` | Internal: generate Python source from AST nodes |
+
+## Reading
+
+### `NodeTransformer`
+
+```python
+# CPython: Lib/ast.py:620 NodeTransformer.generic_visit
+class NodeTransformer(NodeVisitor):
+    def generic_visit(self, node):
+        for field, old_value in ast.iter_fields(node):
+            if isinstance(old_value, list):
+                new_values = []
+                for old_node in old_value:
+                    if isinstance(old_node, AST):
+                        value = self.visit(old_node)
+                        if value is None:
+                            continue  # Delete node
+                        elif not isinstance(value, AST):
+                            new_values.extend(value)  # Splice list
+                            continue
+                    new_values.append(value)
+                old_value[:] = new_values
+            elif isinstance(old_value, AST):
+                new_value = self.visit(old_value)
+                if new_value is None:
+                    delattr(node, field)
+                else:
+                    setattr(node, field, new_value)
+        return node
+```
+
+`NodeTransformer.visit_X` can return `None` (delete the node), a new node (replace it), or a list of nodes (splice into the parent's list). This enables source-to-source transformations, macro expansion, and instrumentation.
+
+### `fix_missing_locations`
+
+```python
+# CPython: Lib/ast.py:660 fix_missing_locations
+def fix_missing_locations(node):
+    def _fix(node, lineno, col_offset, end_lineno, end_col_offset):
+        if 'lineno' in node._attributes:
+            if not hasattr(node, 'lineno'):
+                node.lineno = lineno
+            else:
+                lineno = node.lineno
+            ...
+        for child in ast.iter_child_nodes(node):
+            _fix(child, lineno, col_offset, end_lineno, end_col_offset)
+        return node
+    _fix(node, 1, 0, 1, 0)
+    return node
+```
+
+When building AST nodes programmatically, `lineno` may be missing. `fix_missing_locations` propagates the parent's location to children that lack one, ensuring `compile(node, ...)` doesn't raise `ValueError: required field "lineno" missing`.
+
+### `ast.unparse`
+
+```python
+# CPython: Lib/ast.py:840 unparse
+def unparse(ast_obj):
+    unparser = _Unparser()
+    return unparser.visit(ast_obj)
+
+class _Unparser(NodeVisitor):
+    def visit_BinOp(self, node):
+        self.set_precedence(_Precedence.BIT_OR, node.left, node.right)
+        with self.buffered() as buffer:
+            self.traverse(node.left)
+            self.write(f" {self.binop[type(node.op)]} ")
+            self.traverse(node.right)
+```
+
+`ast.unparse` reconstructs Python source that is semantically equivalent to the AST. It doesn't preserve comments, whitespace, or exact formatting. `_Unparser` tracks operator precedence to insert parentheses only when needed.
+
+## gopy notes
+
+`NodeTransformer` is `module/ast.NodeTransformer` in `module/ast/module.go`. `generic_visit` recursively visits child nodes and applies the transformation. `fix_missing_locations` sets `lineno=1` for nodes without locations. `ast.unparse` calls `_Unparser.visit` which dispatches to `visit_X` methods.

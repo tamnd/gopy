@@ -1,0 +1,100 @@
+---
+title: Modules/_ctypes/ (part 6)
+description: "_ctypes part 6: ctypes.cast, byref, addressof, CDLL.__getattr__, function type calling convention."
+cpython_path: Modules/_ctypes/_ctypes.c
+cpython_version: "3.14"
+lines: 600
+status: annotated
+---
+
+import {Cpy, CpyLink} from '@site/src/components/Cpy';
+
+Source: <CpyLink path="Modules/_ctypes/_ctypes.c" />
+
+This annotation covers ctypes utility functions and function calling. See `modules_ctypes5_detail` for `ctypes.Structure`, `Union`, `Array`, and pointer types.
+
+## Map
+
+| Lines | Symbol | Role |
+|-------|--------|------|
+| 1-80 | `ctypes.cast` | Reinterpret a ctypes instance as another type |
+| 81-160 | `ctypes.byref` | Lightweight pointer (cannot outlive referent) |
+| 161-240 | `ctypes.addressof` | Get address of ctypes instance as integer |
+| 241-340 | `CDLL.__getattr__` | Lazy function lookup by name |
+| 341-600 | `FuncPtr.__call__` | Build argument list, invoke FFI function |
+
+## Reading
+
+### `ctypes.cast`
+
+```c
+// CPython: Modules/_ctypes/_ctypes.c:4240 cast_impl
+static PyObject *
+cast_impl(PyObject *module, PyObject *obj, PyObject *type)
+{
+    /* Cast obj to type: reinterpret the memory as type */
+    StgInfo *info = PyStgInfo_FromType(module_state, (PyObject *)Py_TYPE(type));
+    Py_buffer buffer;
+    if (PyCArg_CheckExact(obj)) {
+        /* byref object */
+        ...
+    }
+    if (!CDataObject_Check(module_state, obj)) {
+        PyErr_SetString(PyExc_TypeError, "argument 1 must be a ctypes instance");
+        return NULL;
+    }
+    /* Create new instance at same address */
+    CDataObject *result = (CDataObject *)type->tp_alloc((PyTypeObject *)type, 0);
+    result->b_ptr = ((CDataObject *)obj)->b_ptr;
+    result->b_needsfree = 0;
+    return (PyObject *)result;
+}
+```
+
+`cast(ptr, POINTER(c_int))` creates a new ctypes instance pointing to the same memory as `ptr` but interpreted as a `POINTER(c_int)`. No data is copied. The new instance does not own the memory.
+
+### `ctypes.byref`
+
+```c
+// CPython: Modules/_ctypes/_ctypes.c:4160 byref_impl
+static PyObject *
+byref_impl(PyObject *module, CDataObject *obj, Py_ssize_t offset)
+{
+    /* Create a lightweight pointer to obj's memory + offset */
+    PyCArgObject *arg = PyCArgObject_new(module_state);
+    arg->tag = 'P';
+    arg->pffi_type = &ffi_type_pointer;
+    arg->obj = Py_NewRef(obj);
+    arg->value.p = (char *)obj->b_ptr + offset;
+    return (PyObject *)arg;
+}
+```
+
+`byref(x)` is equivalent to `pointer(x)` for function arguments but doesn't create a real ctypes pointer object. It holds a reference to `x` to keep the memory alive. Used for passing `c_int` by reference: `func(byref(result))`.
+
+### `FuncPtr.__call__`
+
+```c
+// CPython: Modules/_ctypes/_ctypes.c:3860 PyCFuncPtr_call
+static PyObject *
+PyCFuncPtr_call(PyCFuncPtrObject *self, PyObject *inargs, PyObject *kwds)
+{
+    /* Convert Python args to ctypes args */
+    PyObject *argtypes = self->argtypes;
+    for (int i = 0; i < nargs; i++) {
+        PyObject *arg = inargs[i];
+        if (argtypes) arg = convertor(argtypes[i], arg);
+        /* Store in ffi_args array */
+    }
+    /* Set up libffi cif */
+    ffi_call(&self->cif, self->b_ptr, &result, ffi_args);
+    /* Convert result back to Python object */
+    return GetResult(restype, &result, ...);
+}
+```
+
+`CDLL.func(1, 2)` converts Python objects to C types using `argtypes`, calls `ffi_call` via libffi, then converts the result using `restype`. `ffi_call` handles the ABI details (calling convention, stack frame, register passing) for each platform.
+
+## gopy notes
+
+`ctypes.cast` is `module/ctypes.Cast` in `module/ctypes/module.go`. It creates a new `objects.CData` sharing the same `unsafe.Pointer`. `byref` creates a `objects.CArgRef`. `FuncPtr.__call__` uses Go's `syscall.Syscall` or CGo for the actual FFI invocation.
